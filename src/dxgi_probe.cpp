@@ -20,6 +20,9 @@
 using Microsoft::WRL::ComPtr;
 namespace fs=std::filesystem;
 using PresentFn=HRESULT (WINAPI*)(IDXGISwapChain*,UINT,UINT);
+using ViewportsFn=void (WINAPI*)(ID3D11DeviceContext*,UINT,const D3D11_VIEWPORT*);
+using TargetsFn=void (WINAPI*)(ID3D11DeviceContext*,UINT,ID3D11RenderTargetView* const*,ID3D11DepthStencilView*);
+using TargetsUavFn=void (WINAPI*)(ID3D11DeviceContext*,UINT,ID3D11RenderTargetView* const*,ID3D11DepthStencilView*,UINT,UINT,ID3D11UnorderedAccessView* const*,const UINT*);
 static HMODULE module{};
 static PresentFn original_present{};
 static void* hook_target{};
@@ -34,6 +37,10 @@ static std::ofstream csv;
 static fs::path output_directory;
 static bool stereo_requested=false;
 static bool single_eye_requested=false,left_captured=false,right_phase=false;
+static bool paired_requested=false,paired_left_ready=false;
+alignas(8) static std::array<std::byte,120> paired_metadata{};
+static ComPtr<ID3D11Texture2D> paired_backbuffer,paired_left;
+static UINT paired_buffer_binds=0,paired_capture_binds=0;
 alignas(8) static std::array<std::byte,80> left_metadata{},right_metadata{};
 static constexpr char metadata_end[]="D2VR diagnostic end";
 static void* diagnostic_mode_pointer{};
@@ -51,6 +58,97 @@ static ULONGLONG stereo_start_tick{};
 static std::optional<d2vr::GameCameraPose> baseline_pose;
 static bool camera_moved=false;
 static bool stereo_ever_enabled=false;
+static bool gpu_trace_requested=false,gpu_baseline_started=false,gpu_stereo_started=false;
+static ViewportsFn original_viewports{};
+static TargetsFn original_targets{};
+static TargetsUavFn original_targets_uav{};
+static std::array<void*,3> gpu_hook_targets{};
+static std::array<std::array<std::byte,16>,3> gpu_original_bytes{};
+static std::array<bool,3> gpu_hooks_enabled{};
+static std::atomic<UINT> gpu_phase{0},gpu_traced_frames{0},gpu_events{0},gpu_dropped{0};
+static std::mutex gpu_mutex;
+static std::ofstream gpu_csv;
+
+bool is_paired_backbuffer(ID3D11RenderTargetView* target) {
+    if(!target || !paired_backbuffer) return false;
+    ComPtr<ID3D11Resource> resource;target->GetResource(&resource);
+    return resource.Get()==paired_backbuffer.Get();
+}
+
+void observe_paired_target_change(ID3D11DeviceContext* context,UINT count,ID3D11RenderTargetView* const* targets) {
+    if(!paired_requested || !capturing.load() || !stereo_active.load() || count>D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT) return;
+    std::lock_guard<std::mutex> lock(gpu_mutex);
+    if(!capturing.load() || !stereo_active.load() || !paired_backbuffer || !paired_left) return;
+    const bool next_is_backbuffer=count && targets && is_paired_backbuffer(targets[0]);
+    ComPtr<ID3D11RenderTargetView> previous;
+    context->OMGetRenderTargets(1,&previous,nullptr);
+    const bool was_backbuffer=is_paired_backbuffer(previous.Get());
+    if(was_backbuffer && !next_is_backbuffer && paired_buffer_binds==1 && !paired_left_ready) {
+        // GPU copy precedes the next eye's commands. The source is only this
+        // game's backbuffer; no desktop or unrelated application is captured.
+        context->CopyResource(paired_left.Get(),paired_backbuffer.Get());
+        paired_left_ready=true;
+    }
+    if(next_is_backbuffer && !was_backbuffer) ++paired_buffer_binds;
+}
+
+void WINAPI viewports_hook(ID3D11DeviceContext* context,UINT count,const D3D11_VIEWPORT* viewports) {
+    original_viewports(context,count,viewports);
+    if(!gpu_phase.load()) return;
+    try {
+        std::lock_guard<std::mutex> lock(gpu_mutex);
+        auto phase=gpu_phase.load();
+        if(!phase) return;
+        if(count>D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE) {callback_failed=true;return;}
+        for(UINT i=0;i<count;++i) {
+            if(gpu_events>=2000) {++gpu_dropped;continue;}
+            ++gpu_events;
+            const auto& v=viewports[i];
+            gpu_csv << phase << ",viewport," << GetCurrentThreadId() << ',' << reinterpret_cast<std::uintptr_t>(context)
+                    << ',' << i << ',' << v.TopLeftX << ',' << v.TopLeftY << ',' << v.Width << ',' << v.Height
+                    << ',' << v.MinDepth << ',' << v.MaxDepth << ",0,0,0,0\n";
+        }
+    } catch(...) {callback_failed=true;gpu_phase=0;}
+}
+
+void WINAPI targets_hook(ID3D11DeviceContext* context,UINT count,ID3D11RenderTargetView* const* targets,ID3D11DepthStencilView* depth) {
+    try {observe_paired_target_change(context,count,targets);} catch(...) {callback_failed=true;}
+    original_targets(context,count,targets,depth);
+    if(!gpu_phase.load()) return;
+    try {
+        std::lock_guard<std::mutex> lock(gpu_mutex);
+        auto phase=gpu_phase.load();
+        if(!phase) return;
+        if(count>D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT) {callback_failed=true;return;}
+        for(UINT i=0;i<count;++i) {
+            if(gpu_events>=2000) {++gpu_dropped;continue;}
+            ++gpu_events;
+            ComPtr<ID3D11Resource> resource;ComPtr<ID3D11Texture2D> texture;D3D11_TEXTURE2D_DESC desc{};
+            if(targets && targets[i]) {
+                targets[i]->GetResource(&resource);
+                if(SUCCEEDED(resource.As(&texture))) texture->GetDesc(&desc);
+            }
+            gpu_csv << phase << ",target," << GetCurrentThreadId() << ',' << reinterpret_cast<std::uintptr_t>(context)
+                    << ',' << i << ",0,0,0,0,0,0," << reinterpret_cast<std::uintptr_t>(resource.Get())
+                    << ',' << desc.Width << ',' << desc.Height << ',' << desc.Format << '\n';
+        }
+    } catch(...) {callback_failed=true;gpu_phase=0;}
+}
+
+void WINAPI targets_uav_hook(ID3D11DeviceContext* context,UINT count,ID3D11RenderTargetView* const* targets,ID3D11DepthStencilView* depth,UINT start,UINT uav_count,ID3D11UnorderedAccessView* const* uavs,const UINT* initial) {
+    try {observe_paired_target_change(context,count,targets);} catch(...) {callback_failed=true;}
+    original_targets_uav(context,count,targets,depth,start,uav_count,uavs,initial);
+}
+
+bool disable_gpu_hooks() noexcept {
+    gpu_phase=0;
+    bool disabled=true;
+    for(std::size_t i=0;i<gpu_hook_targets.size();++i) {
+        if(gpu_hooks_enabled[i]) gpu_hooks_enabled[i]=MH_DisableHook(gpu_hook_targets[i])!=MH_OK;
+        disabled=disabled && !gpu_hooks_enabled[i];
+    }
+    return disabled;
+}
 
 bool read_self(std::uintptr_t address,void* data,std::size_t size) {
     SIZE_T count{};
@@ -87,6 +185,14 @@ void prepare_stereo() {
     if(!read_self(image_base+d2vr::side_by_side_mode_rva,metadata.data(),metadata.size()) ||
        !d2vr::valid_stereo_metadata(metadata,image_base)) throw std::runtime_error("Stereo metadata differs from supported profile");
     diagnostic_mode_pointer=reinterpret_cast<void*>(image_base+d2vr::side_by_side_mode_rva);
+    if(paired_requested) {
+        paired_metadata={};std::memcpy(paired_metadata.data(),metadata.data(),80);
+        const std::array<float,4> viewport{0,0,1,1};
+        for(int eye=0;eye<2;++eye) std::memcpy(paired_metadata.data()+eye*40+12,viewport.data(),16);
+        auto end=reinterpret_cast<std::uintptr_t>(metadata_end);
+        std::memcpy(paired_metadata.data()+80,&end,8);
+        diagnostic_mode_pointer=paired_metadata.data();
+    }
     if(single_eye_requested) {
         // Clone one validated eye descriptor with a full viewport. The next
         // record's nonempty label terminates the engine's descriptor loop.
@@ -140,16 +246,14 @@ void restore_stereo() noexcept {
     stereo_active=false;
 }
 
-bool capture_frame(IDXGISwapChain* chain,const wchar_t* filename) {
-    ComPtr<ID3D11Texture2D> buffer,staging;
-    ComPtr<ID3D11Device> device;ComPtr<ID3D11DeviceContext> context;
-    if(FAILED(chain->GetBuffer(0,IID_PPV_ARGS(&buffer))) || FAILED(chain->GetDevice(IID_PPV_ARGS(&device)))) return false;
+bool capture_texture(ID3D11Texture2D* buffer,ID3D11Device* device,const wchar_t* filename) {
+    ComPtr<ID3D11Texture2D> staging;ComPtr<ID3D11DeviceContext> context;
     D3D11_TEXTURE2D_DESC desc{};buffer->GetDesc(&desc);
     if(desc.Width>4096 || desc.Height>4096 || desc.SampleDesc.Count!=1 ||
        (desc.Format!=DXGI_FORMAT_R8G8B8A8_UNORM && desc.Format!=DXGI_FORMAT_R8G8B8A8_UNORM_SRGB)) return false;
     desc.Usage=D3D11_USAGE_STAGING;desc.BindFlags=0;desc.CPUAccessFlags=D3D11_CPU_ACCESS_READ;desc.MiscFlags=0;
     if(FAILED(device->CreateTexture2D(&desc,nullptr,&staging))) return false;
-    device->GetImmediateContext(&context);context->CopyResource(staging.Get(),buffer.Get());
+    device->GetImmediateContext(&context);context->CopyResource(staging.Get(),buffer);
     D3D11_MAPPED_SUBRESOURCE mapped{};
     if(FAILED(context->Map(staging.Get(),0,D3D11_MAP_READ,0,&mapped))) return false;
     bool success=false;
@@ -161,6 +265,12 @@ bool capture_frame(IDXGISwapChain* chain,const wchar_t* filename) {
     } catch(...) {context->Unmap(staging.Get(),0);throw;}
     context->Unmap(staging.Get(),0);
     return success;
+}
+
+bool capture_frame(IDXGISwapChain* chain,const wchar_t* filename) {
+    ComPtr<ID3D11Texture2D> buffer;ComPtr<ID3D11Device> device;
+    if(FAILED(chain->GetBuffer(0,IID_PPV_ARGS(&buffer))) || FAILED(chain->GetDevice(IID_PPV_ARGS(&device)))) return false;
+    return capture_texture(buffer.Get(),device.Get(),filename);
 }
 
 void log_pose(UINT64 number,UINT eye,const DXGI_SWAP_CHAIN_DESC& desc,const d2vr::GameCameraPose& pose) {
@@ -238,6 +348,14 @@ void sample_stereo(IDXGISwapChain* chain,UINT64 number,const DXGI_SWAP_CHAIN_DES
         if(distance>0.001f && distance<0.2f) {
             ++distinct_view_frames;
             if(!stereo_captured && number>stereo_start_frame+10 && GetTickCount64()-stereo_start_tick>=2000) {
+                if(paired_requested) {
+                    std::lock_guard<std::mutex> gpu_lock(gpu_mutex);
+                    if(!paired_left_ready || paired_buffer_binds!=2) return;
+                    ComPtr<ID3D11Device> device;chain->GetDevice(IID_PPV_ARGS(&device));
+                    if(!device) return;
+                    left_captured=capture_texture(paired_left.Get(),device.Get(),L"dxgi-left.rgba");
+                    paired_capture_binds=paired_buffer_binds;
+                }
                 stereo_captured=capture_frame(chain,L"dxgi-stereo.rgba");
                 log_view_snapshot(L"dxgi-stereo-views.json",views);
             }
@@ -306,12 +424,34 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
     if(capturing.load() && !(flags&DXGI_PRESENT_TEST)) {
         DXGI_SWAP_CHAIN_DESC desc{};
         if(SUCCEEDED(chain->GetDesc(&desc)) && desc.BufferDesc.Width>64 && desc.BufferDesc.Height>64) {
+            if(gpu_trace_requested && gpu_phase.exchange(0)) ++gpu_traced_frames;
             auto number=++frames;
             width=desc.BufferDesc.Width; height=desc.BufferDesc.Height; format=desc.BufferDesc.Format;
             ComPtr<ID3D11Device> device;
             if(SUCCEEDED(chain->GetDevice(IID_PPV_ARGS(&device)))) feature=device->GetFeatureLevel();
             if(stereo_requested) {
                 sample_stereo(chain,number,desc);
+                if(gpu_trace_requested) {
+                    if(!device) throw std::runtime_error("Cannot query game graphics device for pipeline trace");
+                    ComPtr<ID3D11DeviceContext> context;device->GetImmediateContext(&context);
+                    auto vtable=*reinterpret_cast<void***>(context.Get());
+                    if(vtable[33]!=gpu_hook_targets[1] || vtable[34]!=gpu_hook_targets[2] || vtable[44]!=gpu_hook_targets[0])
+                        throw std::runtime_error("Game immediate context differs from diagnostic hook targets");
+                    if(paired_requested) {
+                        std::lock_guard<std::mutex> gpu_lock(gpu_mutex);
+                        if(!paired_backbuffer) {
+                            if(FAILED(chain->GetBuffer(0,IID_PPV_ARGS(&paired_backbuffer)))) throw std::runtime_error("Cannot retain paired backbuffer");
+                            D3D11_TEXTURE2D_DESC texture{};paired_backbuffer->GetDesc(&texture);
+                            if(texture.SampleDesc.Count!=1 || (texture.Format!=DXGI_FORMAT_R8G8B8A8_UNORM && texture.Format!=DXGI_FORMAT_R8G8B8A8_UNORM_SRGB))
+                                throw std::runtime_error("Unsupported paired backbuffer format");
+                            texture.Usage=D3D11_USAGE_DEFAULT;texture.BindFlags=0;texture.CPUAccessFlags=0;texture.MiscFlags=0;
+                            if(FAILED(device->CreateTexture2D(&texture,nullptr,&paired_left))) throw std::runtime_error("Cannot allocate paired eye texture");
+                        }
+                        paired_buffer_binds=0;paired_left_ready=false;
+                    }
+                    if(!gpu_baseline_started) {gpu_baseline_started=true;gpu_phase=1;}
+                    else if(stereo_captured && !gpu_stereo_started) {gpu_stereo_started=true;gpu_phase=2;}
+                }
             } else {
             std::array<std::byte,d2vr::camera_read_size> bytes{};
             SIZE_T read{};
@@ -352,7 +492,15 @@ void* find_present() {
     HRESULT result=D3D11CreateDeviceAndSwapChain(nullptr,D3D_DRIVER_TYPE_HARDWARE,nullptr,0,nullptr,0,
                     D3D11_SDK_VERSION,&desc,&chain,&device,nullptr,&context);
     void* target=nullptr;
-    if(SUCCEEDED(result)) target=(*reinterpret_cast<void***>(chain.Get()))[8];
+    if(SUCCEEDED(result)) {
+        target=(*reinterpret_cast<void***>(chain.Get()))[8];
+        if(gpu_trace_requested) {
+            auto vtable=*reinterpret_cast<void***>(context.Get());
+            const std::array<void*,3> addresses{vtable[44],vtable[33],vtable[34]};
+            if(original_viewports && addresses!=gpu_hook_targets) {target=nullptr;}
+            else gpu_hook_targets=addresses;
+        }
+    }
     chain.Reset(); context.Reset(); device.Reset(); DestroyWindow(window); UnregisterClassW(name,module);
     if(!target) throw std::runtime_error("Cannot create diagnostic D3D11 swapchain");
     return target;
@@ -377,8 +525,15 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
         if(!(config>>expected_pid>>camera_address) || expected_pid!=GetCurrentProcessId())
             throw std::runtime_error("Missing or mismatched process/camera configuration");
         int stereo_flag=0;config>>stereo_flag;
-        if(stereo_flag<0 || stereo_flag>2) throw std::runtime_error("Unknown diagnostic mode");
-        stereo_requested=stereo_flag!=0;single_eye_requested=stereo_flag==2;
+        if(stereo_flag<0 || stereo_flag>3) throw std::runtime_error("Unknown diagnostic mode");
+        stereo_requested=stereo_flag!=0;single_eye_requested=stereo_flag==2;paired_requested=stereo_flag==3;
+        int trace_flag=0;config>>trace_flag;
+        if(trace_flag<0 || trace_flag>1 || (trace_flag && (!stereo_requested || single_eye_requested)))
+            throw std::runtime_error("Unknown GPU diagnostic mode");
+        gpu_trace_requested=trace_flag==1;
+        if(paired_requested && !gpu_trace_requested) throw std::runtime_error("Paired rendering requires its target hooks");
+        paired_buffer_binds=0;paired_capture_binds=0;paired_left_ready=false;
+        gpu_phase=0;gpu_traced_frames=0;gpu_events=0;gpu_dropped=0;gpu_baseline_started=false;gpu_stereo_started=false;
         frames=0;valid_poses=0;stereo_frames=0;distinct_view_frames=0;measured_separation=0;
         callback_failed=false;stereo_active=false;mono_captured=false;stereo_captured=false;
         mode_restored=true;values_restored=true;baseline_pose.reset();camera_moved=false;
@@ -415,6 +570,34 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
             if(target!=hook_target || !read_self(reinterpret_cast<std::uintptr_t>(target),current.data(),current.size()) || current!=disabled_target_bytes)
                 throw std::runtime_error("Present code changed since the prior diagnostic; restart the game");
         }
+        if(gpu_trace_requested) {
+            gpu_csv.open(output/L"dxgi-gpu-trace.csv",std::ios::trunc);
+            if(!gpu_csv) throw std::runtime_error("Cannot open GPU trace");
+            gpu_csv << "phase,event,thread,context,slot,x,y,width,height,min_depth,max_depth,texture,texture_width,texture_height,format\n";
+            for(std::size_t i=0;i<gpu_hook_targets.size();++i) {
+                std::array<std::byte,16> bytes{};
+                if(!read_self(reinterpret_cast<std::uintptr_t>(gpu_hook_targets[i]),bytes.data(),bytes.size()))
+                    throw std::runtime_error("Cannot verify GPU method code");
+                if(!original_viewports || !original_targets) gpu_original_bytes[i]=bytes;
+                else if(bytes!=gpu_original_bytes[i]) throw std::runtime_error("GPU method changed since prior trace; restart game");
+            }
+            if(!original_viewports) {
+                status=MH_CreateHook(gpu_hook_targets[0],reinterpret_cast<void*>(&viewports_hook),reinterpret_cast<void**>(&original_viewports));
+                if(status!=MH_OK) throw std::runtime_error("Cannot create viewport hook");
+            }
+            if(!original_targets) {
+                status=MH_CreateHook(gpu_hook_targets[1],reinterpret_cast<void*>(&targets_hook),reinterpret_cast<void**>(&original_targets));
+                if(status!=MH_OK) throw std::runtime_error("Cannot create render-target hook");
+            }
+            if(!original_targets_uav) {
+                status=MH_CreateHook(gpu_hook_targets[2],reinterpret_cast<void*>(&targets_uav_hook),reinterpret_cast<void**>(&original_targets_uav));
+                if(status!=MH_OK) throw std::runtime_error("Cannot create combined render-target hook");
+            }
+            for(std::size_t i=0;i<gpu_hook_targets.size();++i) {
+                if(MH_EnableHook(gpu_hook_targets[i])!=MH_OK) throw std::runtime_error("Cannot enable GPU trace hook");
+                gpu_hooks_enabled[i]=true;
+            }
+        }
         capturing=true;
         status=MH_EnableHook(target);
         if(status!=MH_OK) {capturing=false; throw std::runtime_error(std::string("Present hook enable failed: ")+MH_StatusToString(status));}
@@ -422,6 +605,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
         ULONGLONG end=GetTickCount64()+10'000;
         while(GetTickCount64()<end) Sleep(20);
         capturing=false;
+        auto gpu_disabled=disable_gpu_hooks();
         auto disabled=MH_DisableHook(target);
         enabled=disabled!=MH_OK;
         // Keep the inert DLL and trampoline allocated until normal game exit:
@@ -429,6 +613,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
         std::lock_guard<std::mutex> lock(log_mutex);
         restore_stereo();
         csv.close();
+        {std::lock_guard<std::mutex> gpu_lock(gpu_mutex);gpu_csv.close();paired_left.Reset();paired_backbuffer.Reset();}
         std::ofstream result(output/L"dxgi-probe-result.json",std::ios::trunc);
         result << "{\"presents\":" << frames.load() << ",\"valid_camera_poses\":" << valid_poses.load()
                << ",\"width\":" << width.load() << ",\"height\":" << height.load() << ",\"format\":" << format.load()
@@ -442,26 +627,35 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
                << ",\"camera_moved_before_stereo\":" << (camera_moved?"true":"false")
                << ",\"single_eye_requested\":" << (single_eye_requested?"true":"false") << ",\"left_captured\":" << (left_captured?"true":"false")
                << ",\"backend_hook_disabled\":true"
+               << ",\"gpu_trace_requested\":" << (gpu_trace_requested?"true":"false")
+               << ",\"gpu_traced_frames\":" << gpu_traced_frames.load() << ",\"gpu_events\":" << gpu_events.load()
+               << ",\"gpu_dropped_events\":" << gpu_dropped.load() << ",\"gpu_hooks_disabled\":" << (gpu_disabled?"true":"false")
+               << ",\"paired_requested\":" << (paired_requested?"true":"false") << ",\"paired_capture_buffer_binds\":" << paired_capture_binds
                << ",\"camera_object_writes\":false,\"native_stereo_settings_written\":" << (stereo_ever_enabled?"true":"false")
                << ",\"vr_rendering\":false,\"dll_retained_until_game_exit\":true}\n";
-        bool stereo_success=!stereo_requested || (stereo_captured && (single_eye_requested?left_captured:distinct_view_frames.load()>0) && mode_restored && values_restored);
-        if(disabled==MH_OK && mode_restored && values_restored) started=false;
-        return disabled==MH_OK && !callback_failed.load() && frames.load()>0 && valid_poses.load()>0 && stereo_success ? 0 : 4;
+        bool stereo_success=!stereo_requested || (stereo_captured && (single_eye_requested || paired_requested?left_captured:distinct_view_frames.load()>0) && mode_restored && values_restored);
+        bool gpu_success=!gpu_trace_requested || (gpu_traced_frames.load()==2 && gpu_events.load()>0 && gpu_dropped.load()==0);
+        if(disabled==MH_OK && gpu_disabled && mode_restored && values_restored) started=false;
+        return disabled==MH_OK && gpu_disabled && !callback_failed.load() && frames.load()>0 && valid_poses.load()>0 && stereo_success && gpu_success ? 0 : 4;
     } catch(const std::exception& error) {
         capturing=false;
+        auto gpu_disabled=disable_gpu_hooks();
         if(enabled) enabled=MH_DisableHook(target)!=MH_OK;
         try {
             std::lock_guard<std::mutex> lock(log_mutex);
             restore_stereo();
             csv.close();
+            {std::lock_guard<std::mutex> gpu_lock(gpu_mutex);gpu_csv.close();paired_left.Reset();paired_backbuffer.Reset();}
             if(!output.empty()) {std::ofstream log(output/L"dxgi-probe-failure.txt",std::ios::trunc); log << error.what() << '\n';}
         } catch(...) {}
-        if(!enabled && mode_restored && values_restored) started=false;
+        if(!enabled && gpu_disabled && mode_restored && values_restored) started=false;
         return 1;
     } catch(...) {
         capturing=false;
+        disable_gpu_hooks();
         if(enabled) MH_DisableHook(target);
         try {std::lock_guard<std::mutex> lock(log_mutex);restore_stereo();} catch(...) {}
+        try {std::lock_guard<std::mutex> lock(gpu_mutex);gpu_csv.close();paired_left.Reset();paired_backbuffer.Reset();} catch(...) {}
         return 1;
     }
 }

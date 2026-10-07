@@ -125,6 +125,7 @@ int sample_tracking(PFN_xrGetInstanceProcAddr get, XrInstance instance, XrSystem
             }
         }
         if (format==DXGI_FORMAT_UNKNOWN) throw std::runtime_error("No supported probe colour format");
+        std::cout << "Diagnostic swapchain format: " << format << '\n';
         for (int eye=0; eye<2; ++eye) {
             XrSwapchainCreateInfo swapchain_info{};
             swapchain_info.type=XR_TYPE_SWAPCHAIN_CREATE_INFO;
@@ -145,8 +146,15 @@ int sample_tracking(PFN_xrGetInstanceProcAddr get, XrInstance instance, XrSystem
                   reinterpret_cast<XrSwapchainImageBaseHeader*>(images[eye].data())), "Get eye images");
             targets[eye].resize(count);
             for (uint32_t i=0; i<count; ++i) {
-                if (FAILED(device->CreateRenderTargetView(images[eye][i].texture, nullptr, &targets[eye][i])))
-                    throw std::runtime_error("Cannot create eye render target");
+                D3D11_TEXTURE2D_DESC texture{};
+                images[eye][i].texture->GetDesc(&texture);
+                D3D11_RENDER_TARGET_VIEW_DESC view{};
+                view.Format=format;
+                view.ViewDimension=D3D11_RTV_DIMENSION_TEXTURE2D;
+                auto result=device->CreateRenderTargetView(images[eye][i].texture, &view, &targets[eye][i]);
+                if (FAILED(result))
+                    throw std::runtime_error("Cannot create eye render target: HRESULT="+std::to_string(result)+
+                        ", texture format="+std::to_string(texture.Format)+", bind flags="+std::to_string(texture.BindFlags));
             }
         }
         XrActionSetCreateInfo set_info{};
@@ -203,7 +211,7 @@ int sample_tracking(PFN_xrGetInstanceProcAddr get, XrInstance instance, XrSystem
         sync.countActiveActionSets=1;
         sync.activeActionSets=&active;
         bool running=false, finished=false;
-        uint32_t frames=0, head_valid=0, hand_valid[2]{0,0};
+        uint32_t frames=0, head_valid=0, hand_valid[2]{0,0}, submitted_layers=0;
         auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(10);
         auto sampling_end=deadline;
         auto sampling_start=std::chrono::steady_clock::now();
@@ -329,6 +337,7 @@ int sample_tracking(PFN_xrGetInstanceProcAddr get, XrInstance instance, XrSystem
                 end.layers=&layer;
             }
             check(xrEndFrame(session, &end), "Submit tracking diagnostic frame");
+            submitted_layers+=end.layerCount;
             ++frames;
             int second=static_cast<int>(std::chrono::duration_cast<std::chrono::seconds>(
                             std::chrono::steady_clock::now()-sampling_start).count());
@@ -340,9 +349,10 @@ int sample_tracking(PFN_xrGetInstanceProcAddr get, XrInstance instance, XrSystem
             }
         }
         std::cout << "Sampled frames=" << frames << ", valid head/stereo=" << head_valid
-                  << ", valid grips=" << hand_valid[0] << '/' << hand_valid[1] << '\n';
+                  << ", valid grips=" << hand_valid[0] << '/' << hand_valid[1]
+                  << ", submitted stereo layers=" << submitted_layers << '\n';
         cleanup();
-        if (head_valid && hand_valid[0] && hand_valid[1]) {
+        if (head_valid && hand_valid[0] && hand_valid[1] && submitted_layers) {
             std::cout << "PASS: live head/stereo poses and both Quest grip action poses\n"
                          "Only solid-colour eye textures were submitted; no game scene or arms/body.\n";
             return 0;

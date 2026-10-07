@@ -26,11 +26,17 @@ def main():
     parser.add_argument("--stereo", action="store_true", help="Temporary native side-by-side stereo and frame capture")
     parser.add_argument("--single-eye", action="store_true", help="Compare full-viewport left/right native projections over successive frames")
     parser.add_argument("--candidate", action="store_true", help="Use the separately built candidate after checking the previous diagnostic restored cleanly")
+    parser.add_argument("--pipeline", action="store_true", help="Use the separately built pipeline diagnostic to trace D3D11 viewports and render targets")
+    parser.add_argument("--paired", action="store_true", help="Use full-viewport native stereo and capture both completed eyes before one Present")
     parser.add_argument("--wait-for-game", action="store_true", help="Wait up to five minutes outside the game for focused movement before starting")
     args = parser.parse_args()
-    if args.stereo and args.single_eye:
+    if sum((args.stereo,args.single_eye,args.paired))>1:
         parser.error("Choose one native rendering diagnostic")
-    native_rendering = args.stereo or args.single_eye
+    if args.paired and (args.pipeline or args.candidate):
+        parser.error("Paired rendering uses its own DLL output")
+    if args.pipeline and (args.candidate or not args.stereo):
+        parser.error("Pipeline tracing requires --stereo and its own DLL output")
+    native_rendering = args.stereo or args.single_eye or args.paired
     if os.name != "nt" or c.sizeof(c.c_void_p) != 8 or args.pid <= 0:
         parser.error("Use x64 Python on Windows and a positive game PID")
     if args.wait_for_game:
@@ -50,7 +56,8 @@ def main():
                 parser.error("No focused movement detected; diagnostic not started")
             time.sleep(.05)
     root = Path(__file__).resolve().parents[1]
-    dll = root / "build" / ("d2vr_render_probe_candidate.dll" if args.candidate else "d2vr_render_probe.dll")
+    variant = "-paired" if args.paired else "-pipeline" if args.pipeline else "-candidate" if args.candidate else ""
+    dll = root / "build" / ("d2vr_render_probe"+variant.replace("-","_")+".dll")
     pe = PE(dll.read_bytes())
     if pe.machine != 0x8664:
         parser.error("The diagnostic must be x64")
@@ -132,19 +139,21 @@ def main():
         if hashlib.file_digest(stream, "sha256").hexdigest() != GAME_HASH:
             parser.error("Unsupported executable hash; no DLL loaded")
     prior = [m for m in loaded if m["path"].name.lower() == dll.name.lower()]
-    identity_file = root / "artifacts" / ("loaded-render-probe-candidate.json" if args.candidate else "loaded-render-probe.json")
+    identity_file = root / "artifacts" / ("loaded-render-probe"+variant+".json")
     dll_hash = hashlib.sha256(dll.read_bytes()).hexdigest()
     if prior:
         identity = json.loads(identity_file.read_text()) if identity_file.exists() else {}
         if (len(prior)!=1 or prior[0]["path"]!=dll or prior[0]["size"]!=pe.image_size or
                 identity.get("pid")!=args.pid or identity.get("base")!=prior[0]["base"] or identity.get("sha256")!=dll_hash):
             parser.error("Loaded diagnostic identity differs; restart the game before testing a rebuilt DLL")
-    if args.candidate and not prior and any(m["path"].name.lower()=="d2vr_render_probe.dll" for m in loaded):
+    if variant and not prior and any(m["path"].name.lower()=="d2vr_render_probe.dll" for m in loaded):
         old_identity = json.loads((root/"artifacts"/"loaded-render-probe.json").read_text())
         restored = json.loads((root/"artifacts"/"dxgi-probe-result.json").read_text())
         if old_identity.get("pid") != args.pid or not all(restored.get(key) is True for key in
                 ("hook_disabled","backend_hook_disabled","mode_restored","values_restored")):
             parser.error("Previous diagnostic has not confirmed clean restoration; restart the game")
+        if restored.get("gpu_trace_requested") and restored.get("gpu_hooks_disabled") is not True:
+            parser.error("Previous GPU trace hooks have not confirmed clean restoration; restart the game")
     # Resolve forwarded LoadLibraryW by its actual owning local module, then
     # use that module's base in the target. Never treat a DWORD exit as HMODULE.
     # Steam hooks kernel32's forwarding thunk in this process. Resolve the same
@@ -190,9 +199,11 @@ def main():
             if (struct.unpack_from("<Q", camera, 0)[0] != game["base"]+0x1c72218 or
                     struct.unpack_from("<Q", camera, 0x20)[0] != game["base"]+0x1c722f8):
                 raise ValueError("Player camera is stale; capture it again")
-        (root / "build" / "dxgi-probe.cfg").write_text(f"{args.pid} {camera_address} {2 if args.single_eye else int(args.stereo)}\n", encoding="ascii")
+        mode = 3 if args.paired else 2 if args.single_eye else int(args.stereo)
+        (root / "build" / "dxgi-probe.cfg").write_text(f"{args.pid} {camera_address} {mode} {int(args.pipeline or args.paired)}\n", encoding="ascii")
         (root / "artifacts").mkdir(exist_ok=True)
         for name in ("dxgi-probe-result.json", "dxgi-probe-failure.txt", "dxgi-camera-probe.csv",
+                     "dxgi-gpu-trace.csv",
                      "dxgi-mono.rgba", "dxgi-left.rgba", "dxgi-stereo.rgba",
                      "dxgi-mono.png", "dxgi-left.png", "dxgi-stereo.png",
                      "dxgi-mono-views.json", "dxgi-left-views.json", "dxgi-right-views.json", "dxgi-stereo-views.json"):

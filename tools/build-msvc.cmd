@@ -24,5 +24,7 @@ build\hook_check.exe
 if errorlevel 1 exit /b 1
 set D2VR_DIAGNOSTIC_OUTPUT=build\d2vr_render_probe.dll
 if "%~1"=="candidate" set D2VR_DIAGNOSTIC_OUTPUT=build\d2vr_render_probe_candidate.dll
+if "%~1"=="pipeline" set D2VR_DIAGNOSTIC_OUTPUT=build\d2vr_render_probe_pipeline.dll
+if "%~1"=="paired" set D2VR_DIAGNOSTIC_OUTPUT=build\d2vr_render_probe_paired.dll
 cl /nologo /std:c++17 /EHsc /W4 /WX /O2 /MT /LD /Ithird_party\minhook\include src\dxgi_probe.cpp build\buffer.obj build\hook.obj build\trampoline.obj build\hde64.obj /Fo:build\dxgi_probe.obj /Fe:%D2VR_DIAGNOSTIC_OUTPUT% /link d3d11.lib dxgi.lib bcrypt.lib user32.lib
 exit /b %errorlevel%

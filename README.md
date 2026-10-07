@@ -52,14 +52,16 @@ Build outputs and diagnostic reports stay in this workspace.
 | Engine type information | One typed player camera and eight typed render views found in live memory; primary/secondary vtables agree. |
 | Connected runtime | VirtualDesktopXR `1.0.10` detects Meta Quest 3; recommended eye size `2496x2688`; D3D11 device created on RX 9070 XT. |
 | Initial live tracking | 46 frames returned valid head/eye poses. Session stayed synchronized/unfocused; no valid grip actions. This does not establish responsive head or hand tracking. |
-| Visible diagnostic layer | Code builds, but the headset was unavailable before the revised test could enter a session. Layer submission remains unverified. |
+| Focused Quest 3 tracking | Reconnected VDXR session reached focused state. Five-second test recorded 435 valid head/eye samples, 434 valid samples from each grip action, and 434 submitted stereo diagnostic layers. Head positions changed across logged samples. Eye RTV creation required an explicit typed format; the corrected build passed live. Only dark textures were submitted, with no game scene, arms or body. |
 | Active gameplay camera | 100 focused samples, 90 with movement keys active: player-camera XYZ and orthonormal basis changed in all 100 samples. FoV at `0xcc/0xd0`, XYZ at `0xd8`, basis at `0xfc`. Game units, basis convention, and safe writes remain unverified. The Ansel global stayed zero. |
 | In-game renderer diagnostic | 3,949 Present calls at 1920x1080, D3D11 feature level 11.1, 3,949 valid camera reads; hook disabled with no callback error and game remained responsive. Camera was stationary during that ten-second capture. This is a desktop frame observation, not stereo rendering. |
 | Initial native stereo diagnostic | 4,142 frames had two prepared views 0.0640008 game units apart; mode and cvar values restored, hook disabled, game responsive. Captured pixels were covered by the pause menu. Distinct world images during gameplay have not been verified. |
 | Gameplay stereo capture | External sample confirmed 65 focused frames and 48 movement-key frames. The in-game test observed 3,075 frames with two moving views, 0.0639975 game units apart. Both native settings and Present restored cleanly. The captured left half is corrupted; two usable eye images have **not** been established. |
 | Backend-mode hypothesis | The gameplay test recorded 4,731 Present calls and 4,721 distinct two-view frames. The candidate query hook received zero calls and the captured world remained corrupted. Both hooks and native settings restored cleanly. The unused query hook has been removed from the candidate source. |
 | Full-viewport single-eye diagnostic | The candidate recorded 5,424 valid camera samples and captured clean full-screen game images using left and right native offsets in successive phases. Both projection matrices were finite and both viewports covered 1920x1080. Present and native settings restored cleanly; game responsive. The user moved between phases, so this is not a synchronized stereo pair or a parallax/eye-order calibration. |
-| Player visibility research | Read-only inspection resolved the native visibility command to the live `idGameLocal` and `arkPlayer` objects, with matching image RTTI and show/hide virtual methods. No methods were invoked and no player fields were changed. Mesh visibility, animation rig binding and tracked arms/body remain unverified. |
+| Player visibility and model research | Read-only inspection resolved the native visibility command to live `idGameLocal`/`arkPlayer` objects. Player fields `0xf0` and `0x360` point to the same typed `arkSkinnedRenderModel`. The body component's primary/secondary vtables were identified in the executable; no direct pointer to that component was found in the player's first 8 KiB. No methods were invoked or player fields changed. Mesh visibility, bone binding and tracked arms/body remain unverified. |
+| GPU pipeline comparison | Two traced frames produced 387 viewport/target events with no dropped events. Normal mode bound the backbuffer once; stereo bound it twice and selected the expected half-width viewports, but also ran full-width passes. A warmed gameplay capture remained corrupted. All three hooks/settings restored cleanly and game responsive. The exact defective pass is unverified. |
+| Full-viewport paired candidate | A separately built candidate clones two native eye descriptors with full viewports and copies the first completed backbuffer before the second eye replaces it. Build checks pass. Its launcher timed out waiting for focused movement before loading the DLL; paired world images remain unverified. |
 
 Reports are under `artifacts/`, which is ignored by Git. No playable conversion,
 game stereo rendering, native body rig, or in-headset quality claim has been validated.
@@ -168,6 +170,37 @@ A successful diagnostic exit means the requested observations/captures completed
 and changes restored; it does not evaluate image quality or certify a working
 stereo conversion. These successive captures do not implement headset submission
 or two eyes rendered from the same game update.
+
+The pipeline diagnostic records one normal and one warmed stereo frame's D3D11
+viewport and render-target changes (at most 2,000 events). It observes graphics
+state without changing it; the existing native stereo override is still temporary.
+Build this separate DLL only while it is not loaded:
+
+```powershell
+.\tools\build.ps1 -Pipeline
+python .\tools\inject_probe.py --pid $gameProcess.Id --pipeline --stereo --wait-for-game
+```
+
+`artifacts/dxgi-gpu-trace.csv` identifies phase 1 as normal and phase 2 as stereo.
+Result JSON records trace frames, dropped events, and restoration of all GPU
+hooks in addition to Present/native settings. The DLL remains inert until normal
+game exit after a clean test; a separately loaded diagnostic is checked against
+the previous restoration report before starting.
+
+The paired candidate tests a different compositor path: both native views use
+the full viewport, and the first completed eye is copied on the GPU when its
+backbuffer is unbound. Capturing requires two backbuffer passes before the same
+Present, two distinct prepared poses, and restoration of all hooks/settings:
+
+```powershell
+.\tools\build.ps1 -Paired # Only while this DLL is not loaded.
+python .\tools\inject_probe.py --pid $gameProcess.Id --paired --wait-for-game
+python .\tools\view_captures.py
+```
+
+`dxgi-left.png` and `dxgi-stereo.png` are the candidate pair in this mode.
+Their image quality and association with the prepared eye poses must be checked
+before any stereo claim. This path has no headset submission or tracking writes.
 
 If the signature does not match the installed build, the sampler refuses to run.
 This tool needs a real running game; no live sampling was established by the
