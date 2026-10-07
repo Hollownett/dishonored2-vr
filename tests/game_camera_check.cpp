@@ -18,6 +18,12 @@ int main() {
         std::memcpy(data.data()+0xfc,basis.data(),36);
         auto pose=d2vr::decode_game_camera(data,base);
         require(pose.has_value() && pose->position==position,"Valid camera rejected");
+        std::array<std::byte,d2vr::camera_read_size> render_view{};
+        std::memcpy(render_view.data(),data.data()+0x30,data.size()-0x30);
+        auto native=d2vr::decode_render_view(render_view);
+        require(native && native->position==pose->position && native->basis==pose->basis &&
+                native->horizontal_fov==pose->horizontal_fov,"Native render view layout differs");
+        require(!d2vr::decode_view_fields(data,0x31),"Out-of-bounds layout accepted");
         require(!d2vr::decode_game_camera(data,base+1),"Mismatched image accepted");
         auto invalid=data; float bad=std::numeric_limits<float>::quiet_NaN();
         std::memcpy(invalid.data()+0xd8,&bad,4);

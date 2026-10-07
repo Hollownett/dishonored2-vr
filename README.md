@@ -22,6 +22,11 @@ solver. This repository does not yet contain a playable VR mod.**
 * `src/arm_ik.hpp`: calibrated two-bone joint-position solver, with reach limits,
   selectable elbow side, and singularity handling. It has no game rig binding or
   bone rotations yet. It cannot make arms visible in Dishonored 2 by itself.
+* `src/tracked_pose.hpp`: OpenXR head/eye/grip pose conversion into the game's
+  forward/left/up frame, with yaw-only recentering, explicit world scale and
+  independent wrist orientation. It rejects tilted character frames and invalid
+  tracking data. This math is tested but is not yet connected to game camera,
+  aiming or bone writes.
 * `tools/sample_camera.py`: samples a unique historical camera candidate in a
   running copy using read-only process rights, after checking the executable
   hash, module identity, and loaded instruction signature. Its output remains
@@ -62,6 +67,8 @@ Build outputs and diagnostic reports stay in this workspace.
 | Player visibility and model research | Read-only inspection resolved the native visibility command to live `idGameLocal`/`arkPlayer` objects. Player fields `0xf0` and `0x360` point to the same typed `arkSkinnedRenderModel`. The body component's primary/secondary vtables were identified in the executable; no direct pointer to that component was found in the player's first 8 KiB. No methods were invoked or player fields changed. Mesh visibility, bone binding and tracked arms/body remain unverified. |
 | GPU pipeline comparison | Two traced frames produced 387 viewport/target events with no dropped events. Normal mode bound the backbuffer once; stereo bound it twice and selected the expected half-width viewports, but also ran full-width passes. A warmed gameplay capture remained corrupted. All three hooks/settings restored cleanly and game responsive. The exact defective pass is unverified. |
 | Full-viewport paired candidate | A separately built candidate clones two native eye descriptors with full viewports and copies the first completed backbuffer before the second eye replaces it. Build checks pass. Its launcher timed out waiting for focused movement before loading the DLL; paired world images remain unverified. |
+| Native camera setup hook | The public headtracking mod's PE fingerprint matches all three fields of the installed executable. A read-only observer at `idRenderView::Setup` (`0x374e40`) recorded 5,051 calls and 84 sampled input/render pose pairs; all 84 matched. Present and Setup restored, no callback errors, game responsive. Camera was stationary, so this verifies the ABI/copy layout, not tracked gameplay. |
+| Tracked coordinate conversion | Native checks cover XR axis signs, yaw recentering, independent wrist aiming, nonzero character heading, scale, 360 rotations and rejected invalid poses. No in-game tracking writes or interaction claims follow from these checks. |
 
 Reports are under `artifacts/`, which is ignored by Git. No playable conversion,
 game stereo rendering, native body rig, or in-headset quality claim has been validated.
@@ -206,6 +213,20 @@ If the signature does not match the installed build, the sampler refuses to run.
 This tool needs a real running game; no live sampling was established by the
 offline synthetic-file checks.
 
+The native camera observer reads the input view before Setup and the render copy
+after it, without changing either camera, projection or stereo settings:
+
+```powershell
+.\tools\build.ps1 -ViewSetup # Only while this separate DLL is not loaded.
+python .\tools\inject_probe.py --pid $gameProcess.Id --view-setup
+```
+
+Its entry instructions must match the exact executable. `native-view-setup.csv`
+records sampled source/render pairs; result JSON records their match count and
+hook restoration. The first live evidence is preserved in
+`artifacts/native-view-setup-first.csv` and
+`artifacts/native-view-setup-first-result.json`. No headset submission occurs.
+
 Game probe exit codes: `0` binary research available, `3` installation/executable
 not ready, `1` invalid executable or failed probe. Runtime probe exit codes:
 `0` device/configuration available, `3` headset unavailable, `4` required D3D11
@@ -246,6 +267,28 @@ These are dependent engineering milestones, not a claim that a complete conversi
 can be produced or validated in one session. The largest unknowns are the stereo
 frame path and safe access to the player skeleton.
 
+## Interaction target
+
+The requested quality target includes connected arms and a visible body, with
+hands driving gameplay rather than merely following mouse aim. Planned checks:
+
+* Left-hand Blink/Far Reach and other aimed powers; right-hand sword, pistol and
+  crossbow aim independent of the headset.
+* Sword swings and blocks from tracked motion, with native damage/target rules;
+  physical reload and item-use actions where each weapon supports them.
+* Reach, grab, carry and throw supported objects and bodies with controller
+  motion, including native collision and release behavior.
+* Hand-driven stealth grabs/chokes and takedowns, with animation takeover and
+  return that does not leave hands or body detached.
+* Physical crouching/leaning and supported climbing/mantling, bounded by level
+  collision; comfortable turning and seated/standing calibration.
+* Wrist/world menus, usable journal and weapon/power selection, and controller
+  haptics for confirmed contacts and actions.
+
+These are acceptance targets, not implemented features. The original game has
+limited object/animation rules; extending those rules needs additional gameplay
+hooks. Rendering stereo and binding the player skeleton remain prerequisites.
+
 ## Relevant existing work
 
 * [CircuitLord's Titanfall 2 conversion](https://github.com/CircuitLord/CircuitLordVRModInstaller)
@@ -268,6 +311,34 @@ frame path and safe access to the player skeleton.
 * [Historical Dishonored 2 cvar dump](https://gist.github.com/fakuivan/8910a208fc88f831f06b047d0955e4fe)
   includes `stereoRender_*`, player-camera, and render-view names. Strings may
   survive without a working stereo implementation; live rendering must be proven.
+* [itsloopyo's Dishonored 2 headtracking source](https://github.com/itsloopyo/dishonored-2-headtracking/tree/0dc9036a9b5e9ce3161c38d7f89ffeac34a20e47)
+  is MIT licensed and targets the installed PE fingerprint. Its native camera
+  setup, game-state gating, camera collision, reticle and marker work are useful
+  integration references. It is flat headtracking, without VR stereo or hands.
+  The ABI/copy layout is now independently verified in our running game; its
+  reported metric world scale still needs a local measurement.
+* [Void Explorer](https://www.nexusmods.com/dishonored2/mods/30?tab=description)
+  supports D2/Death of the Outsider resources, model/skeleton previews and FBX
+  import/export. It is a useful rig-inspection tool, not a VR runtime. Its author
+  restricts modification/redistribution; no tool code or assets are incorporated.
+* [Helix Mod's Dishonored 2 stereo fix](https://helixmod.blogspot.com/2018/03/dishonored-2-dx11.html)
+  supplies geo-11/3Dmigoto stereo rendering and shader fixes. It provides a
+  comparison for graphics defects, without tracked hand/body interactions.
+  The downloaded personal-use archive has a restrictive license; no fix code is
+  adapted or installed. Downloads remain in ignored research artifacts.
+* [Luma Framework's D2 renderer source](https://github.com/Filoppi/Luma-Framework/blob/5d7ee5470d8f09e27dfe529a386af46d8c6f8e33/Source/Games/Dishonored%202/main.cpp)
+  documents per-view shader constants, separate first-person weapon projection,
+  temporal history and graphics hooks. Its [maintainer wiki](https://github.com/Filoppi/Luma-Framework/wiki)
+  lists the D2/Death of the Outsider mod as work in progress. This is a graphics
+  mod, not a motion-control conversion. Source inspected only; its custom MIT
+  license includes attribution and commercial-use conditions.
+* [WolfSDK](https://github.com/LopeKinz/wolfenstein-modloader)
+  covers Wolfenstein's id Tech 5/6 archive/decl and asset workflows. That related
+  engine research does not establish compatibility with Void or provide D2 VR.
+* [The supplied video, at 4:12](https://www.youtube.com/watch?v=rRQzrQLZRWM&t=252s)
+  describes compile-and-compare matching decompilation. Its transcript is a
+  workflow reference, not a D2 SDK or a demonstration that arbitrary engine
+  source and polished interactions can be recovered automatically.
 
 The arm test covers 20,000 deterministic random poses plus reach boundaries,
 degenerate pole/target cases, mirrored elbow selection, and invalid calibration.

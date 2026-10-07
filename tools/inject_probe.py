@@ -28,8 +28,11 @@ def main():
     parser.add_argument("--candidate", action="store_true", help="Use the separately built candidate after checking the previous diagnostic restored cleanly")
     parser.add_argument("--pipeline", action="store_true", help="Use the separately built pipeline diagnostic to trace D3D11 viewports and render targets")
     parser.add_argument("--paired", action="store_true", help="Use full-viewport native stereo and capture both completed eyes before one Present")
+    parser.add_argument("--view-setup", action="store_true", help="Observe native idRenderView::Setup without writing camera or stereo fields")
     parser.add_argument("--wait-for-game", action="store_true", help="Wait up to five minutes outside the game for focused movement before starting")
     args = parser.parse_args()
+    if args.view_setup and any((args.stereo,args.single_eye,args.paired,args.pipeline,args.candidate,args.camera_report)):
+        parser.error("View setup observation uses its own DLL and no other diagnostic mode")
     if sum((args.stereo,args.single_eye,args.paired))>1:
         parser.error("Choose one native rendering diagnostic")
     if args.paired and (args.pipeline or args.candidate):
@@ -56,14 +59,14 @@ def main():
                 parser.error("No focused movement detected; diagnostic not started")
             time.sleep(.05)
     root = Path(__file__).resolve().parents[1]
-    variant = "-paired" if args.paired else "-pipeline" if args.pipeline else "-candidate" if args.candidate else ""
+    variant = "-view-setup" if args.view_setup else "-paired" if args.paired else "-pipeline" if args.pipeline else "-candidate" if args.candidate else ""
     dll = root / "build" / ("d2vr_render_probe"+variant.replace("-","_")+".dll")
     pe = PE(dll.read_bytes())
     if pe.machine != 0x8664:
         parser.error("The diagnostic must be x64")
     entry_rva = pe.code_export("StartProbe")
     camera_address = 0
-    if not native_rendering:
+    if not native_rendering and not args.view_setup:
         if not args.camera_report:
             parser.error("Camera mode requires --camera-report; native stereo mode uses --stereo")
         camera_report = json.loads(args.camera_report.read_text(encoding="utf-8-sig"))
@@ -154,6 +157,8 @@ def main():
             parser.error("Previous diagnostic has not confirmed clean restoration; restart the game")
         if restored.get("gpu_trace_requested") and restored.get("gpu_hooks_disabled") is not True:
             parser.error("Previous GPU trace hooks have not confirmed clean restoration; restart the game")
+        if restored.get("view_setup_requested") and restored.get("view_setup_hook_disabled") is not True:
+            parser.error("Previous native view observer has not confirmed clean restoration; restart the game")
     # Resolve forwarded LoadLibraryW by its actual owning local module, then
     # use that module's base in the target. Never treat a DWORD exit as HMODULE.
     # Steam hooks kernel32's forwarding thunk in this process. Resolve the same
@@ -188,7 +193,11 @@ def main():
         if remote_bytes != local_bytes:
             raise ValueError(f"Remote loader instructions differ: module={owners[0]['path'].name} "
                              f"RVA={loader-owners[0]['base']:#x} local={local_bytes.hex()} remote={remote_bytes.hex()}")
-        if native_rendering:
+        if args.view_setup:
+            game_pe = PE(game["path"].read_bytes())
+            if read(game["base"]+0x374e40,32) != game_pe.bytes(game_pe.offset(0x374e40,32),32):
+                raise ValueError("Live native view setup entry differs from supported executable")
+        elif native_rendering:
             game_pe = PE(game["path"].read_bytes())
             if read(game["base"]+0x5bf00,16) != game_pe.bytes(game_pe.offset(0x5bf00,16),16):
                 raise ValueError("Live stereo construction code differs from the supported executable")
@@ -199,11 +208,11 @@ def main():
             if (struct.unpack_from("<Q", camera, 0)[0] != game["base"]+0x1c72218 or
                     struct.unpack_from("<Q", camera, 0x20)[0] != game["base"]+0x1c722f8):
                 raise ValueError("Player camera is stale; capture it again")
-        mode = 3 if args.paired else 2 if args.single_eye else int(args.stereo)
+        mode = 4 if args.view_setup else 3 if args.paired else 2 if args.single_eye else int(args.stereo)
         (root / "build" / "dxgi-probe.cfg").write_text(f"{args.pid} {camera_address} {mode} {int(args.pipeline or args.paired)}\n", encoding="ascii")
         (root / "artifacts").mkdir(exist_ok=True)
         for name in ("dxgi-probe-result.json", "dxgi-probe-failure.txt", "dxgi-camera-probe.csv",
-                     "dxgi-gpu-trace.csv",
+                     "dxgi-gpu-trace.csv", "native-view-setup.csv",
                      "dxgi-mono.rgba", "dxgi-left.rgba", "dxgi-stereo.rgba",
                      "dxgi-mono.png", "dxgi-left.png", "dxgi-stereo.png",
                      "dxgi-mono-views.json", "dxgi-left-views.json", "dxgi-right-views.json", "dxgi-stereo-views.json"):

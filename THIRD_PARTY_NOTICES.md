@@ -45,3 +45,34 @@ tag `v1.3.4`, commit `c3fcafdc10146beb5919319d0683e44e3c30d537`.
 Original notices and the full BSD license are retained in
 `third_party/minhook/LICENSE.txt` and the source files. `source.json` records
 each downloaded file's SHA-256. Only the x64 implementation is included.
+
+## Dishonored 2 headtracking camera research
+
+The native `idRenderView::Setup` ABI, source/render-copy offsets and basis row
+interpretation were corroborated against [itsloopyo/dishonored-2-headtracking](https://github.com/itsloopyo/dishonored-2-headtracking/tree/0dc9036a9b5e9ce3161c38d7f89ffeac34a20e47),
+commit `0dc9036a9b5e9ce3161c38d7f89ffeac34a20e47`. The installed PE fingerprint
+matches its Steam profile; the hook entry bytes are checked independently.
+The new observer is read-only. No OpenTrack protocol, collision or camera-write
+implementation from that project has been incorporated. Retained license:
+
+MIT License
+
+Copyright (c) 2026 itsloopyo
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.

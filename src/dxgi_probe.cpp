@@ -35,6 +35,63 @@ static std::uintptr_t camera_address{},image_base{};
 static std::mutex log_mutex;
 static std::ofstream csv;
 static fs::path output_directory;
+using ViewSetupFn=void (__fastcall*)(void*,int*,int*);
+static std::atomic<ViewSetupFn> original_setup{nullptr};
+static bool setup_requested=false,setup_enabled=false;
+static void* setup_target{};
+static std::array<std::byte,32> setup_original_bytes{};
+static std::atomic<UINT64> setup_calls{0},setup_valid_pairs{0},setup_matching_pairs{0};
+static std::ofstream setup_csv;
+static constexpr std::uintptr_t setup_rva=0x374e40;
+static constexpr std::size_t render_copy_offset=0x39d0;
+// Exact installed executable, independently checked against the MIT headtracking
+// profile. Refuse an already modified entry instead of chaining an unknown hook.
+static constexpr std::array<std::byte,32> setup_expected_bytes={
+    std::byte{0x48},std::byte{0x8b},std::byte{0xc4},std::byte{0x4c},std::byte{0x89},std::byte{0x40},std::byte{0x18},std::byte{0x55},
+    std::byte{0x53},std::byte{0x56},std::byte{0x57},std::byte{0x41},std::byte{0x54},std::byte{0x41},std::byte{0x56},std::byte{0x41},
+    std::byte{0x57},std::byte{0x48},std::byte{0x8d},std::byte{0x68},std::byte{0xa1},std::byte{0x48},std::byte{0x81},std::byte{0xec},
+    std::byte{0xe0},std::byte{0x00},std::byte{0x00},std::byte{0x00},std::byte{0x44},std::byte{0x0f},std::byte{0x29},std::byte{0x48}};
+
+void __fastcall setup_hook(void* view,int* window_rect,int* render_rect) {
+    const auto original=original_setup.load(std::memory_order_acquire);
+    const UINT64 call=++setup_calls;
+    // Read-only observation. Never hold a diagnostic lock while calling engine
+    // code, and never alter its source view or render copy, even on nested calls.
+    const bool sample=capturing.load(std::memory_order_acquire) && view && call%60==1;
+    std::array<std::byte,d2vr::camera_read_size> input{},rendered{};
+    SIZE_T count{};
+    bool input_read=sample && ReadProcessMemory(GetCurrentProcess(),view,input.data(),input.size(),&count) && count==input.size();
+    original(view,window_rect,render_rect);
+    if(!input_read || !capturing.load()) return;
+    auto address=reinterpret_cast<std::uintptr_t>(view);
+    if(!ReadProcessMemory(GetCurrentProcess(),reinterpret_cast<void*>(address+render_copy_offset),rendered.data(),rendered.size(),&count) || count!=rendered.size()) return;
+    try {
+        auto before=d2vr::decode_render_view(input),after=d2vr::decode_render_view(rendered);
+        if(!before || !after) return;
+        const bool matched=before->position==after->position && before->basis==after->basis &&
+            before->horizontal_fov==after->horizontal_fov && before->vertical_fov==after->vertical_fov;
+        std::lock_guard<std::mutex> lock(log_mutex);
+        if(!capturing.load()) return;
+        ++setup_valid_pairs;++valid_poses;if(matched) ++setup_matching_pairs;
+        for(UINT side=0;side<2;++side) {
+            const auto& pose=side?*after:*before;
+            setup_csv << call << ',' << GetCurrentThreadId() << ',' << address << ',' << side << ','
+                      << pose.horizontal_fov << ',' << pose.vertical_fov;
+            for(float value:pose.position) setup_csv << ',' << value;
+            for(float value:pose.basis) setup_csv << ',' << value;
+            setup_csv << ',' << (matched?1:0) << '\n';
+        }
+    } catch(...) {callback_failed=true;}
+}
+
+bool disable_setup_hook() {
+    if(!setup_enabled) return true;
+    if(MH_DisableHook(setup_target)!=MH_OK) return false;
+    setup_enabled=false;
+    std::array<std::byte,32> restored{};SIZE_T count{};
+    return ReadProcessMemory(GetCurrentProcess(),setup_target,restored.data(),restored.size(),&count) &&
+        count==restored.size() && restored==setup_original_bytes;
+}
 static bool stereo_requested=false;
 static bool single_eye_requested=false,left_captured=false,right_phase=false;
 static bool paired_requested=false,paired_left_ready=false;
@@ -452,7 +509,7 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                     if(!gpu_baseline_started) {gpu_baseline_started=true;gpu_phase=1;}
                     else if(stereo_captured && !gpu_stereo_started) {gpu_stereo_started=true;gpu_phase=2;}
                 }
-            } else {
+            } else if(!setup_requested) {
             std::array<std::byte,d2vr::camera_read_size> bytes{};
             SIZE_T read{};
             if(ReadProcessMemory(GetCurrentProcess(),reinterpret_cast<void*>(camera_address),bytes.data(),bytes.size(),&read) && read==bytes.size()) {
@@ -525,8 +582,9 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
         if(!(config>>expected_pid>>camera_address) || expected_pid!=GetCurrentProcessId())
             throw std::runtime_error("Missing or mismatched process/camera configuration");
         int stereo_flag=0;config>>stereo_flag;
-        if(stereo_flag<0 || stereo_flag>3) throw std::runtime_error("Unknown diagnostic mode");
-        stereo_requested=stereo_flag!=0;single_eye_requested=stereo_flag==2;paired_requested=stereo_flag==3;
+        if(stereo_flag<0 || stereo_flag>4) throw std::runtime_error("Unknown diagnostic mode");
+        setup_requested=stereo_flag==4;
+        stereo_requested=stereo_flag>0 && stereo_flag<4;single_eye_requested=stereo_flag==2;paired_requested=stereo_flag==3;
         int trace_flag=0;config>>trace_flag;
         if(trace_flag<0 || trace_flag>1 || (trace_flag && (!stereo_requested || single_eye_requested)))
             throw std::runtime_error("Unknown GPU diagnostic mode");
@@ -539,9 +597,10 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
         mode_restored=true;values_restored=true;baseline_pose.reset();camera_moved=false;
         stereo_ever_enabled=false;left_captured=false;right_phase=false;
         image_base=reinterpret_cast<std::uintptr_t>(GetModuleHandleW(nullptr));
+        setup_calls=0;setup_valid_pairs=0;setup_matching_pairs=0;
         if(stereo_requested) {
             prepare_stereo();
-        } else {
+        } else if(!setup_requested) {
         std::array<std::byte,d2vr::camera_read_size> bytes{}; SIZE_T count{};
         if(!ReadProcessMemory(GetCurrentProcess(),reinterpret_cast<void*>(camera_address),bytes.data(),bytes.size(),&count) ||
            count!=bytes.size() || !d2vr::decode_game_camera(bytes,image_base))
@@ -569,6 +628,22 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
             std::array<std::byte,16> current{};
             if(target!=hook_target || !read_self(reinterpret_cast<std::uintptr_t>(target),current.data(),current.size()) || current!=disabled_target_bytes)
                 throw std::runtime_error("Present code changed since the prior diagnostic; restart the game");
+        }
+        if(setup_requested) {
+            setup_target=reinterpret_cast<void*>(image_base+setup_rva);
+            if(!read_self(image_base+setup_rva,setup_original_bytes.data(),setup_original_bytes.size()) || setup_original_bytes!=setup_expected_bytes)
+                throw std::runtime_error("Native view setup entry differs from supported executable");
+            setup_csv.open(output/L"native-view-setup.csv",std::ios::trunc);
+            if(!setup_csv) throw std::runtime_error("Cannot open native view setup log");
+            setup_csv << std::setprecision(9) << "call,thread,view,copy,hfov,vfov,x,y,z,b00,b01,b02,b10,b11,b12,b20,b21,b22,matched\n";
+            if(!original_setup.load()) {
+                ViewSetupFn trampoline{};
+                if(MH_CreateHook(setup_target,reinterpret_cast<void*>(&setup_hook),reinterpret_cast<void**>(&trampoline))!=MH_OK)
+                    throw std::runtime_error("Cannot create native view setup observer");
+                original_setup.store(trampoline,std::memory_order_release);
+            }
+            if(MH_EnableHook(setup_target)!=MH_OK) throw std::runtime_error("Cannot enable native view setup observer");
+            setup_enabled=true;
         }
         if(gpu_trace_requested) {
             gpu_csv.open(output/L"dxgi-gpu-trace.csv",std::ios::trunc);
@@ -605,6 +680,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
         ULONGLONG end=GetTickCount64()+10'000;
         while(GetTickCount64()<end) Sleep(20);
         capturing=false;
+        const bool setup_disabled=disable_setup_hook();
         auto gpu_disabled=disable_gpu_hooks();
         auto disabled=MH_DisableHook(target);
         enabled=disabled!=MH_OK;
@@ -613,6 +689,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
         std::lock_guard<std::mutex> lock(log_mutex);
         restore_stereo();
         csv.close();
+        setup_csv.close();
         {std::lock_guard<std::mutex> gpu_lock(gpu_mutex);gpu_csv.close();paired_left.Reset();paired_backbuffer.Reset();}
         std::ofstream result(output/L"dxgi-probe-result.json",std::ios::trunc);
         result << "{\"presents\":" << frames.load() << ",\"valid_camera_poses\":" << valid_poses.load()
@@ -627,6 +704,9 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
                << ",\"camera_moved_before_stereo\":" << (camera_moved?"true":"false")
                << ",\"single_eye_requested\":" << (single_eye_requested?"true":"false") << ",\"left_captured\":" << (left_captured?"true":"false")
                << ",\"backend_hook_disabled\":true"
+               << ",\"view_setup_requested\":" << (setup_requested?"true":"false") << ",\"view_setup_hook_disabled\":" << (setup_disabled?"true":"false")
+               << ",\"view_setup_calls\":" << setup_calls.load() << ",\"view_setup_valid_pairs\":" << setup_valid_pairs.load()
+               << ",\"view_setup_matching_pairs\":" << setup_matching_pairs.load()
                << ",\"gpu_trace_requested\":" << (gpu_trace_requested?"true":"false")
                << ",\"gpu_traced_frames\":" << gpu_traced_frames.load() << ",\"gpu_events\":" << gpu_events.load()
                << ",\"gpu_dropped_events\":" << gpu_dropped.load() << ",\"gpu_hooks_disabled\":" << (gpu_disabled?"true":"false")
@@ -635,23 +715,27 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
                << ",\"vr_rendering\":false,\"dll_retained_until_game_exit\":true}\n";
         bool stereo_success=!stereo_requested || (stereo_captured && (single_eye_requested || paired_requested?left_captured:distinct_view_frames.load()>0) && mode_restored && values_restored);
         bool gpu_success=!gpu_trace_requested || (gpu_traced_frames.load()==2 && gpu_events.load()>0 && gpu_dropped.load()==0);
-        if(disabled==MH_OK && gpu_disabled && mode_restored && values_restored) started=false;
-        return disabled==MH_OK && gpu_disabled && !callback_failed.load() && frames.load()>0 && valid_poses.load()>0 && stereo_success && gpu_success ? 0 : 4;
+        const bool setup_success=!setup_requested || (setup_valid_pairs.load()>0 && setup_matching_pairs.load()==setup_valid_pairs.load());
+        if(disabled==MH_OK && gpu_disabled && setup_disabled && mode_restored && values_restored) started=false;
+        return disabled==MH_OK && gpu_disabled && setup_disabled && setup_success && !callback_failed.load() && frames.load()>0 && valid_poses.load()>0 && stereo_success && gpu_success ? 0 : 4;
     } catch(const std::exception& error) {
         capturing=false;
+        const bool setup_disabled=disable_setup_hook();
         auto gpu_disabled=disable_gpu_hooks();
         if(enabled) enabled=MH_DisableHook(target)!=MH_OK;
         try {
             std::lock_guard<std::mutex> lock(log_mutex);
             restore_stereo();
             csv.close();
+            setup_csv.close();
             {std::lock_guard<std::mutex> gpu_lock(gpu_mutex);gpu_csv.close();paired_left.Reset();paired_backbuffer.Reset();}
             if(!output.empty()) {std::ofstream log(output/L"dxgi-probe-failure.txt",std::ios::trunc); log << error.what() << '\n';}
         } catch(...) {}
-        if(!enabled && gpu_disabled && mode_restored && values_restored) started=false;
+        if(!enabled && gpu_disabled && setup_disabled && mode_restored && values_restored) started=false;
         return 1;
     } catch(...) {
         capturing=false;
+        disable_setup_hook();
         disable_gpu_hooks();
         if(enabled) MH_DisableHook(target);
         try {std::lock_guard<std::mutex> lock(log_mutex);restore_stereo();} catch(...) {}

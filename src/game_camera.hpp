@@ -21,12 +21,13 @@ struct GameCameraPose {
 };
 
 inline std::optional<GameCameraPose> decode_view_fields(
-        const std::array<std::byte,camera_read_size>& bytes) {
+        const std::array<std::byte,camera_read_size>& bytes, std::size_t prefix=0x30) {
+    if(prefix>0x30) return std::nullopt;
     GameCameraPose pose;
-    std::memcpy(&pose.horizontal_fov,bytes.data()+0xcc,4);
-    std::memcpy(&pose.vertical_fov,bytes.data()+0xd0,4);
-    std::memcpy(pose.position.data(),bytes.data()+0xd8,12);
-    std::memcpy(pose.basis.data(),bytes.data()+0xfc,36);
+    std::memcpy(&pose.horizontal_fov,bytes.data()+prefix+0x9c,4);
+    std::memcpy(&pose.vertical_fov,bytes.data()+prefix+0xa0,4);
+    std::memcpy(pose.position.data(),bytes.data()+prefix+0xa8,12);
+    std::memcpy(pose.basis.data(),bytes.data()+prefix+0xcc,36);
     if (!(pose.horizontal_fov>0.05f && pose.horizontal_fov<3.13f &&
           pose.vertical_fov>0.05f && pose.vertical_fov<3.13f)) return std::nullopt;
     for (float value : pose.position)
@@ -41,6 +42,14 @@ inline std::optional<GameCameraPose> decode_view_fields(
     float det=b[0]*(b[4]*b[8]-b[5]*b[7])-b[1]*(b[3]*b[8]-b[5]*b[6])+b[2]*(b[3]*b[7]-b[4]*b[6]);
     if (std::abs(det-1.0f)>0.02f) return std::nullopt;
     return pose;
+}
+
+// Native renderView_t has no component/descriptor prefix. Its basis rows are
+// forward, left, up; idRenderView::Setup copies this to the render side at +0x39d0.
+// Independently corroborated by itsloopyo's MIT Steam profile (see notices).
+inline std::optional<GameCameraPose> decode_render_view(
+        const std::array<std::byte,camera_read_size>& bytes) {
+    return decode_view_fields(bytes,0);
 }
 
 inline std::optional<GameCameraPose> decode_game_camera(
