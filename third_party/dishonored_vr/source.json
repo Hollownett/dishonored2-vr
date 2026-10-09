@@ -1,0 +1,16 @@
+{
+  "repository": "https://github.com/VR-Stereo-Hub/Dishonored-VR",
+  "commit": "b15e4d32a720bd4cfdb5ce4d600f3f8fba8d2cec",
+  "license": "zlib/libpng",
+  "files": [
+    {
+      "path": "grab_pose.h",
+      "sha256": "e19d23191d30a97ecc6e03407a28c985b6a3e22d8671f21f5baaa5858d5d749e"
+    },
+    {
+      "path": "LICENSE",
+      "sha256": "d14df03b44519f7db94ffec20e32fb1816b542cefc96e5569a4e57dfc61f930e"
+    }
+  ],
+  "modifications": "grab_pose.h and LICENSE copied verbatim; snap detector is an explicitly marked portable adaptation in src/vr_turning.hpp; 150 ms menu-tap pulse is an explicitly marked altered adaptation of src/core/input/controller_emulation.h in src/menu_tap.hpp"
+}

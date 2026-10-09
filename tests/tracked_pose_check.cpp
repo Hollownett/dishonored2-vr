@@ -14,12 +14,29 @@ int main() {
     GameCameraPose anchor;anchor.position={10,20,30};anchor.basis={1,0,0,0,1,0,0,0,1};
     TrackedPose origin{{0,1.7,0},{}};
     auto head=to_game_pose(origin,origin,anchor,1);
+    auto tilted=anchor;tilted.basis={0,0,1,0,1,0,-1,0,0};
+    auto level=level_heading(tilted);
+    close({level.basis[0],level.basis[1],level.basis[2]},{1,0,0});
+    for(double pitch:{1.55,1.5707963267948966,1.59,-1.55,-1.5707963267948966,-1.59}) {
+        for(unsigned turn=0;turn<360;++turn) {
+            const auto yaw=turn*3.141592653589793/180;
+            GameCameraPose native=anchor;
+            native.basis={static_cast<float>(std::cos(yaw)*std::cos(pitch)),static_cast<float>(std::sin(yaw)*std::cos(pitch)),static_cast<float>(std::sin(pitch)),
+                          static_cast<float>(-std::sin(yaw)),static_cast<float>(std::cos(yaw)),0,
+                          static_cast<float>(-std::cos(yaw)*std::sin(pitch)),static_cast<float>(-std::sin(yaw)*std::sin(pitch)),static_cast<float>(std::cos(pitch))};
+            const auto horizontal=level_heading(native);
+            close({horizontal.basis[0],horizontal.basis[1],horizontal.basis[2]},{std::cos(yaw),std::sin(yaw),0});
+        }
+    }
     close(head.position,{10,20,30});close(head.basis[0],{1,0,0});
     close(to_game_pose({{.1,1.9,-.3},{}},origin,anchor,2).position,{10.6,19.8,30.4});
     // A controller below/right of the head must remain there when head yaw
     // changes. The same origin/character frame, never the current head, is used.
     TrackedPose wrist{{.3,1.2,-.4},{}};
     close(to_game_pose(wrist,origin,anchor,1).position,{10.4,19.7,29.5});
+    const auto leaned=origin.position+d2vr::Vec3{.4,.15,-.2};
+    const auto moved_controller=TrackedPose{wrist.position+d2vr::Vec3{.4,.15,-.2},wrist.orientation};
+    close(camera_relative_controller(moved_controller,leaned,origin.position).position,wrist.position);
     double s=std::sqrt(.5);
     auto turned=to_game_pose({origin.position,{0,s,0,s}},origin,anchor,1);
     close(turned.basis[0],{0,1,0});

@@ -1,4 +1,4 @@
-"""Read-only live sampling of an unverified camera candidate. Never writes memory."""
+"""Read-only camera/rig sampling. Native field decoding never writes memory or calls engine functions."""
 import argparse
 import ctypes as c
 from ctypes import wintypes as w
@@ -12,6 +12,9 @@ import time
 
 from probe_game import SIGNATURES
 from camera_fields import camera_field_candidates, changed_words
+from rig_fields import GAME_HASH, RIG_TYPES, animation_snapshot, body_snapshot, player_components, player_model, pose_layout_snapshot
+from player_camera_fields import player_camera_snapshot
+from native_menu_fields import native_menu_snapshot
 
 
 def main():
@@ -20,6 +23,13 @@ def main():
     parser.add_argument("--pid", type=int, required=True, help="Running Dishonored 2 process ID")
     parser.add_argument("--samples", type=int, default=30, help="1 to 100 samples, 100 ms apart")
     parser.add_argument("--find-objects", action="store_true", help="Bounded read-only search for camera/render-view vtables")
+    parser.add_argument("--find-rig", action="store_true", help="Bounded exact-build read-only animation/body search, correlate animation ownership and read joint transforms")
+    parser.add_argument("--player-components", action="store_true", help="Read the verified player's native component list and arm rigs, without a heap scan")
+    parser.add_argument("--player-camera", action="store_true", help="Sample the owned native camera/controller aim, pitch/roll and velocities; requires --player-components; no writes")
+    parser.add_argument("--native-menu", action="store_true", help="Read owned Iggy input callback, active file wrappers and cached cursor; no input or writes")
+    parser.add_argument("--pose-state", type=int, choices=range(4), default=0, help="Native rig pose map: 0 intermediate, 3 renderer upload source; no writes")
+    parser.add_argument("--skeleton-layout", action="store_true", help="Read bounded owned body/arm skeleton prefixes and method identities; requires --player-components, no engine calls")
+    parser.add_argument("--settings-layout", action="store_true", help="Inspect bounded pinned graphics/comfort variable headers; read-only, no engine calls")
     parser.add_argument("--object-report", type=Path, help="Sample camera objects from a prior scan of this same process")
     parser.add_argument("--discover-fields", action="store_true", help="Find plausible FoV/XYZ/orthogonal-basis layouts inside verified objects")
     parser.add_argument("--diff-objects", action="store_true", help="Record changing words in each candidate's bounded render-view prefix")
@@ -28,6 +38,12 @@ def main():
                         help="Continue a bounded object scan at a previous report's next_scan_address")
     parser.add_argument("--output", type=Path, required=True, help="JSON report inside project workspace")
     args = parser.parse_args()
+    if args.player_components:
+        args.find_rig = True
+    if args.skeleton_layout and not args.player_components:
+        parser.error('Skeleton layout inspection requires the verified player component list')
+    if args.player_camera and not args.player_components:
+        parser.error('Owned camera inspection requires the verified player component list')
     if os.name != "nt" or c.sizeof(c.c_void_p) != 8:
         parser.error("Use 64-bit Python on Windows")
     if not 1 <= args.samples <= 100 or args.pid <= 0:
@@ -56,6 +72,8 @@ def main():
         digest = hashlib.file_digest(stream, "sha256").hexdigest()
     if digest != executable["sha256"]:
         parser.error("Executable hash changed; rerun the game probe")
+    if args.find_rig and (digest != GAME_HASH or args.object_report or args.discover_fields or args.diff_objects):
+        parser.error("Rig search requires the pinned build, a fresh binary report, and no camera-object sampling options")
 
     kernel = c.WinDLL("kernel32", use_last_error=True)
     user = c.WinDLL("user32", use_last_error=True)
@@ -155,12 +173,63 @@ def main():
         live_target = code_rva + 8 + struct.unpack_from("<i", live_code, 4)[0]
         if live_target != target_rva:
             parser.error("Loaded camera reference differs from probed executable")
+        settings_layout = {}
+        if args.settings_layout:
+            native_variables = dict(ark_playerBobAmount=0x398e200,view_skipShakes=0x39a41a0,
+                                    r_textureDetailsPreset=0x3982f70,r_modelsQualityPreset=0x3982df0,
+                                    r_shadowQualityPreset=0x3982cf0,r_AntiAliasingPreset=0x3982ef0)
+            for variable,rva in native_variables.items():
+                try:
+                    raw=read(base+rva,128)
+                    strings={}
+                    for offset in (0x10,0x30,0x38):
+                        pointer=struct.unpack_from('<Q',raw,offset)[0]
+                        if 0x10000<=pointer<0x0000800000000000:
+                            try:
+                                value=read(pointer,min(128,0x1000-(pointer&0xfff))).split(b'\0',1)[0].decode('ascii')
+                                if value and all(32<=ord(character)<127 for character in value): strings[str(offset)]=value
+                            except (OSError,UnicodeError): pass
+                    if variable not in strings.values(): raise ValueError('Native variable name identity did not match')
+                    cached_integer=struct.unpack_from('<i',raw,0x28)[0]
+                    cached_float=struct.unpack_from('<f',raw,0x2c)[0]
+                    flags=struct.unpack_from('<I',raw,0x48)[0]
+                    expected_type=4 if variable=='ark_playerBobAmount' else 1 if variable=='view_skipShakes' else 2
+                    if flags&7!=expected_type or not math.isfinite(cached_float) or cached_integer!=int(cached_float):
+                        raise ValueError('Native variable cached type/value differs from the verified parser layout')
+                    maximum=32 if variable=='ark_playerBobAmount' else 1 if variable=='view_skipShakes' else 3 if variable=='r_AntiAliasingPreset' else 5
+                    if not 0<=cached_float<=maximum: raise ValueError('Native setting value exceeds its verified range')
+                    if read(base+rva,0x50)!=raw[:0x50]: raise ValueError('Native setting changed during reading')
+                    settings_layout[variable]=dict(rva=hex(rva),header_hex=raw.hex(),string_fields=strings,
+                                                   cached_integer=cached_integer,cached_float=cached_float,type_flags=flags,
+                                                   field_meanings_verified=True,read_consistent=True,game_memory_writes=False,
+                                                   layout_source='Native parser 0x102cb0 and UI reader 0x502970, no calls made')
+                except (OSError,ValueError,struct.error) as error:
+                    settings_layout[variable]=dict(rva=hex(rva),error=str(error),game_memory_writes=False)
         object_search = None
-        if args.find_objects:
-            # A pointer occurrence can be allocator/type metadata. Require both
-            # primary and secondary RTTI vtables at their published subobject offsets.
-            types = {name: executable.get("engine_type_candidates", {}).get(name, [])
-                     for name in ("arkCpntPlayerCamera", "arkCpntRenderView")}
+        rig_samples = []
+        body_samples = []
+        rig_owner = None
+        renderer_size_getters = None
+        if args.find_objects or args.find_rig:
+            # A pointer occurrence can be allocator/type metadata. Check every
+            # available RTTI vtable, then separately verify rig ownership/state.
+            names = RIG_TYPES if args.find_rig else ("arkCpntPlayerCamera", "arkCpntRenderView")
+            if args.player_camera:names=(*names,"arkCpntPlayerCamera")
+            types = {name: executable.get("engine_type_candidates", {}).get(name, []) for name in names}
+            if args.find_rig and any(not tables for tables in types.values()):
+                parser.error("Binary report lacks the current rig RTTI profiles; rerun probe_game.py")
+            if args.find_rig:
+                renderer = struct.unpack("<Q", read(base+0x22fcd70, 8))[0]
+                renderer_table = struct.unpack("<Q", read(renderer, 8))[0]
+                getters = [struct.unpack("<Q", read(renderer_table+slot, 8))[0] for slot in (0x218,0x220)]
+                if all(base <= getter < base+executable["image_size"] for getter in getters):
+                    renderer_size_getters = dict(renderer=renderer, vtable_rva=renderer_table-base,
+                                                 method_rvas=[getter-base for getter in getters])
+                try:
+                    player, model = player_model(read, base, types)
+                    rig_owner = dict(player=player, model=model, verified_player_model=True)
+                except (OSError, ValueError, struct.error) as error:
+                    rig_owner = dict(verified_player_model=False, error=str(error))
             patterns = [(name, struct.pack("<Q", base+t["vtable_rva"]), t)
                         for name, tables in types.items() for t in tables
                         if t["subobject_offset"] == 0]
@@ -168,12 +237,13 @@ def main():
             address = args.scan_start
             next_address = address
             scanned = 0
-            scan_limit = 512 * 1024 * 1024
+            scan_limit = 0 if args.player_components else 512 * 1024 * 1024
             deadline = time.monotonic() + 10
             objects = []
             seen = set()
             read_failures = 0
             pointer_hits = {name: 0 for name in types}
+            counts = {name: 0 for name in types}
             exhausted = False
             while address < 0x0000800000000000 and scanned < scan_limit and time.monotonic() < deadline:
                 size = kernel.VirtualQueryEx(process, address, c.byref(info), c.sizeof(info))
@@ -204,23 +274,25 @@ def main():
                         next_address = chunk_start + chunk_size
                         for type_name, pointer, table in patterns:
                             at = block.find(pointer)
-                            while at >= 0 and len(objects) < 32:
+                            while at >= 0 and (counts[type_name] < 64 if args.find_rig else len(objects) < 32):
                                 pointer_hits[type_name] += 1
                                 object_address = chunk_start + at
                                 identity = (type_name, object_address)
                                 if object_address % 8 == 0 and identity not in seen:
                                     secondary = [t for t in types[type_name] if t["subobject_offset"] > 0]
                                     try:
-                                        consistent = bool(secondary) and all(
+                                        consistent = (bool(secondary) or args.find_rig) and all(
                                             read(object_address+t["subobject_offset"], 8) ==
                                             struct.pack("<Q", base+t["vtable_rva"]) for t in secondary)
                                     except OSError:
                                         consistent = False
                                     if consistent:
                                         seen.add(identity)
+                                        counts[type_name] += 1
                                         objects.append(dict(type=type_name, address=object_address,
                                             primary_vtable_rva=table["vtable_rva"],
-                                            both_vtables_consistent=True, active_gameplay_role_verified=False))
+                                            all_available_vtables_consistent=True, active_gameplay_role_verified=False,
+                                            **({} if args.find_rig else {"both_vtables_consistent": True})))
                                 at = block.find(pointer, at+1)
                         # Seven-byte overlap covers pointers crossing a chunk boundary.
                         chunk_start += max(1, chunk_size-7) if chunk_start+chunk_size < region_end else chunk_size
@@ -234,6 +306,27 @@ def main():
                                  scan_start=args.scan_start, next_scan_address=next_address,
                                  primary_pointer_hits=pointer_hits,
                                  candidates=objects, live_roles_verified=False)
+            if args.find_rig:
+                if args.player_components:
+                    objects.extend(player_components(read, base, types))
+                    object_search['source'] = 'verified_player_component_list'
+                # CF_STARTED == 2 at verified native call sites. Read the mask
+                # constants used by 0x7e7390, rather than inventing state flags.
+                ready_masks = struct.unpack("<II", read(base+0x1c70e88+2*8, 8))
+                for target in objects:
+                    if target['type'] == 'arkCpntPlayerBody':
+                        try:
+                            body_samples.append(body_snapshot(read, target['address'], base, types, ready_masks, args.pose_state,args.skeleton_layout))
+                        except (OSError, ValueError, struct.error) as error:
+                            body_samples.append(dict(body=target['address'], read_consistent=False, error=str(error)))
+                    if target["type"] != "arkCpntAnimEvolved":
+                        continue
+                    try:
+                        pose=animation_snapshot(read, target["address"], base, types, ready_masks, args.pose_state)
+                        if args.skeleton_layout: pose_layout_snapshot(read,pose,base)
+                        rig_samples.append(pose)
+                    except (OSError, ValueError, struct.error) as error:
+                        rig_samples.append(dict(animation=target["address"], read_consistent=False, error=str(error)))
         targets = []
         if args.object_report:
             previous = json.loads(args.object_report.read_text(encoding="utf-8-sig"))
@@ -253,6 +346,12 @@ def main():
                     # render-view prefix as 0x25150 bytes. No arbitrary heap dumps.
                     target["field_offsets"] = camera_field_candidates(read(target["address"], 0x25150))
         object_samples = []
+        rig_pose_samples = []
+        body_pose_samples = []
+        player_camera_samples=[]
+        native_menu_samples=[]
+        rig_targets = [snapshot["animation"] for snapshot in rig_samples if snapshot.get("sampled_joints")]
+        body_targets = [snapshot['body'] for snapshot in body_samples if 'arms' in snapshot]
         if args.wait_for_input:
             wait_deadline = time.monotonic()+60
             print("Waiting up to 60 seconds for Dishonored 2 focus and a movement key...", flush=True)
@@ -310,6 +409,21 @@ def main():
         samples = []
         begin = time.monotonic()
         for index in range(args.samples):
+            if args.native_menu:
+                try:
+                    native_menu_samples.append(dict(elapsed_seconds=round(time.monotonic()-begin,4),state=native_menu_snapshot(read,base)))
+                except (OSError,ValueError,struct.error) as error:
+                    native_menu_samples.append(dict(error=str(error),game_memory_writes=False))
+            if args.player_camera:
+                try:
+                    owner=player_model(read,base,types)
+                    cameras=[entry for entry in player_components(read,base,types) if entry['type']=='arkCpntPlayerCamera']
+                    if len(cameras)!=1:raise ValueError('Expected one owned camera component')
+                    state=player_camera_snapshot(read,base,owner[0],camera=cameras[0]['address'])
+                    if player_model(read,base,types)!=owner:raise ValueError('Player owner changed during camera sampling')
+                    player_camera_samples.append(dict(elapsed_seconds=round(time.monotonic()-begin,4),state=state))
+                except (OSError,ValueError,struct.error) as error:
+                    player_camera_samples.append(dict(elapsed_seconds=round(time.monotonic()-begin,4),error=str(error),game_memory_writes=False))
             values = struct.unpack("<8f", read(base + target_rva, 32))
             valid = all(math.isfinite(value) for value in values)
             samples.append(dict(elapsed_seconds=round(time.monotonic()-begin, 4),
@@ -320,6 +434,22 @@ def main():
             if targets:
                 object_samples.append(dict(elapsed_seconds=round(time.monotonic()-begin, 4),
                                            objects=[sample_object(target) for target in targets]))
+            if rig_targets:
+                poses = []
+                for address in rig_targets:
+                    try:
+                        poses.append(animation_snapshot(read, address, base, types, ready_masks, args.pose_state))
+                    except (OSError, ValueError, struct.error) as error:
+                        poses.append(dict(animation=address, read_consistent=False, error=str(error)))
+                rig_pose_samples.append(dict(elapsed_seconds=round(time.monotonic()-begin, 4), poses=poses))
+            if body_targets:
+                poses = []
+                for address in body_targets:
+                    try:
+                        poses.append(body_snapshot(read, address, base, types, ready_masks, args.pose_state))
+                    except (OSError, ValueError, struct.error) as error:
+                        poses.append(dict(body=address, read_consistent=False, error=str(error)))
+                body_pose_samples.append(dict(elapsed_seconds=round(time.monotonic()-begin, 4), poses=poses))
             if index < args.samples-1:
                 time.sleep(0.1)
         changed = len({tuple(s["position"] or []) + tuple(s["quaternion_xyzw"] or [])
@@ -361,6 +491,15 @@ def main():
                       loaded_modules=[dict(name=m["name"], size=m["size"]) for m in modules],
                       object_search=object_search, object_samples=object_samples,
                       object_summaries=object_summaries, discovered_object_fields=targets, samples=samples)
+        result["rig_samples"] = rig_samples
+        result["body_samples"] = body_samples
+        result["body_pose_samples"] = body_pose_samples
+        result["player_camera_samples"] = player_camera_samples
+        result["native_menu_samples"] = native_menu_samples
+        result["rig_owner"] = rig_owner
+        result["renderer_size_getters"] = renderer_size_getters
+        result["native_settings_layout"] = settings_layout
+        result["rig_pose_samples"] = rig_pose_samples
         result["object_diffs"] = object_diffs
         result["focused_samples"] = sum(sample["input_context"]["game_focused"] for sample in samples)
         result["movement_key_samples"] = sum(sample["input_context"]["movement_key_down"] for sample in samples)
@@ -370,7 +509,9 @@ def main():
     output.write_text(json.dumps(result, indent=2, allow_nan=False)+"\n", encoding="utf-8")
     print(f"Sampled {len(samples)} poses; candidate changed: {changed}; no game memory writes.")
     if object_search:
-        print(f"Bounded camera/render object search: {len(object_search['candidates'])} candidates; roles unverified.")
+        print(f"Bounded {'rig' if args.find_rig else 'camera/render'} object search: {len(object_search['candidates'])} candidates; roles unverified.")
+    if rig_pose_samples:
+        print(f"Read {len(rig_pose_samples)} player-associated rig snapshots; no writes or frame synchronisation.")
     print(f"Report: {output}")
 
 

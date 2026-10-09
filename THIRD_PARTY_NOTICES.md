@@ -1,5 +1,33 @@
 # Third-party notices
 
+## Dishonored-VR grab mathematics, snap-turn and menu-tap policy
+
+`third_party/dishonored_vr/grab_pose.h` is copied verbatim from
+[Dishonored-VR](https://github.com/VR-Stereo-Hub/Dishonored-VR/blob/b15e4d32a720bd4cfdb5ce4d600f3f8fba8d2cec/src/game/dishonored/hands/grab_pose.h),
+commit `b15e4d32a720bd4cfdb5ce4d600f3f8fba8d2cec`. The complete original
+zlib/libpng license, including the VR modifications copyright, is retained in
+`third_party/dishonored_vr/LICENSE`; `source.json` records the source hashes.
+`src/finger_pose.hpp` adapts the upstream pure screw interpolation to the
+verified native joint packing and parent-relative chain reconstruction.
+
+`src/vr_turning.hpp` is an explicitly marked altered, portable adaptation of
+the same repository's `src/game/dishonored/snap_turn.cpp` (VR-219). It retains
+the threshold/rearm and stale-step policy, uses radians rather than UE units,
+owns the queue atomically through a mutex, and cancels queued steps on input
+scope/focus changes. It is not the upstream engine writer. The policy and
+finger adapter are tested offline. The snap policy now feeds the independently
+guarded native physics adapter. Finger interpolation can use live grip input
+only with compatible captured native empty-hand references and verified empty
+occupancy; otherwise it preserves the authored native pose. No accepted closed
+references are installed yet. The former guessed geometric fist was rejected.
+The dynamic-body velocity
+motor in `src/physical_grab.hpp` and its Dishonored 2 adapter are original code.
+
+`src/menu_tap.hpp` is an explicitly marked altered adaptation of the same
+commit's `src/core/input/controller_emulation.h`. It retains the 150 ms Start
+pulse after releasing the physical menu button, excludes upstream modifier,
+chord and journal bindings, and cancels held gesture tails after focus loss.
+
 ## Khronos OpenXR SDK headers
 
 Only the generated headers and licenses are included. Source: KhronosGroup/OpenXR-SDK,
@@ -48,12 +76,14 @@ each downloaded file's SHA-256. Only the x64 implementation is included.
 
 ## Dishonored 2 headtracking camera research
 
-The native `idRenderView::Setup` ABI, source/render-copy offsets and basis row
-interpretation were corroborated against [itsloopyo/dishonored-2-headtracking](https://github.com/itsloopyo/dishonored-2-headtracking/tree/0dc9036a9b5e9ce3161c38d7f89ffeac34a20e47),
+The native `idRenderView::Setup` ABI, source/render-copy offsets, basis row
+interpretation and game-logic manager profile used by the pose hook/state reader
+were corroborated against [itsloopyo/dishonored-2-headtracking](https://github.com/itsloopyo/dishonored-2-headtracking/tree/0dc9036a9b5e9ce3161c38d7f89ffeac34a20e47),
 commit `0dc9036a9b5e9ce3161c38d7f89ffeac34a20e47`. The installed PE fingerprint
 matches its Steam profile; the hook entry bytes are checked independently.
-The new observer is read-only. No OpenTrack protocol, collision or camera-write
-implementation from that project has been incorporated. Retained license:
+The observer mode is read-only; the new XR pose mode temporarily overrides native
+view inputs with this repository's tracked-pose conversion. No OpenTrack protocol
+or collision implementation is incorporated. Retained license:
 
 MIT License
 
@@ -76,3 +106,7 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+## SMAA
+
+The shader and lookup textures are from [iryoku/smaa](https://github.com/iryoku/smaa), commit `71c806a838bdd7d517df19192a20f0c61b3ca29d`. The original MIT license and copyright notices are retained in `third_party/smaa/LICENSE.txt` and the source files. `source.json` pins each file hash. `tools/embed_smaa.py` verifies the source and embeds the shader for runtime compilation. The integration uses SMAA 1x Ultra colour-edge detection and linear-space neighborhood blending independently for each eye, without sharpening or temporal reprojection.

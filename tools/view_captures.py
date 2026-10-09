@@ -1,9 +1,10 @@
 """Convert bounded native D3D11 RGBA diagnostic frames to PNG (Pillow required)."""
 import argparse
+import hashlib
 import json
 from pathlib import Path
 
-from PIL import Image
+from PIL import Image, ImageStat
 
 
 def main():
@@ -30,6 +31,27 @@ def main():
         destination = source.with_suffix(".png")
         image.save(destination)
         print(destination)
+    for side in ('left','right'):
+        metadata_path = result_path.parent/('xr-transfer-'+side+'.json')
+        if not metadata_path.is_file():
+            continue
+        metadata = json.loads(metadata_path.read_text())
+        width, height = metadata.get('width'), metadata.get('height')
+        if type(width) is not int or type(height) is not int or not 1 <= width <= 4096 or not 1 <= height <= 4096:
+            parser.error('Invalid actual XR transfer capture size')
+        hashes = []
+        for kind in ('source','destination'):
+            source = result_path.parent/f'xr-{kind}-{side}.rgba'
+            if metadata.get(kind+'_format') not in (27,28,29) or source.stat().st_size != width*height*4:
+                parser.error('Actual XR image format or byte count differs')
+            pixels = source.read_bytes()
+            hashes.append(hashlib.sha256(pixels).hexdigest())
+            view = Image.frombytes('RGBA',(width,height),pixels).convert('RGB')
+            destination = source.with_suffix('.png');view.save(destination)
+            print(json.dumps({'image':str(destination),'rgb_mean':ImageStat.Stat(view).mean}))
+        if hashes[0] != hashes[1] or metadata.get('pixels_equal') is not True:
+            parser.error('Actual XR destination pixels differ from the game source')
+        print(side+': actual game/XR pixels match; headset scene visibility still needs visual verification')
 
 
 if __name__ == "__main__":

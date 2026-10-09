@@ -10,6 +10,27 @@ struct WorldTrackedPose {
     Vec3 position;
     std::array<Vec3,3> basis; // forward, left, up. Wrist rotation stays independent.
 };
+// Until collision-aware roomscale is connected, rendering holds the head at
+// the native camera origin. Hands and interaction rays must use that same
+// translation policy or leaning makes them drift away from the visible head.
+inline TrackedPose camera_relative_controller(TrackedPose controller,Vec3 current_head,Vec3 calibrated_head) {
+    if(!finite(current_head) || !finite(calibrated_head) || !finite(controller.position))
+        throw std::invalid_argument("Invalid camera-relative controller position");
+    controller.position=controller.position-current_head+calibrated_head;
+    return controller;
+}
+inline GameCameraPose level_heading(GameCameraPose camera) {
+    // The camera's lateral axis retains yaw at vertical native pitch. Using
+    // tiny forward X/Y near that pole amplified crouch/animation perturbations
+    // and could flip heading when pitch crossed 90 degrees.
+    double x=camera.basis[4],y=-camera.basis[3],n=std::hypot(x,y);
+    if(n<1e-6) {x=camera.basis[0];y=camera.basis[1];n=std::hypot(x,y);}
+    if(!std::isfinite(n) || n<1e-6) throw std::invalid_argument("Cannot find level game heading");
+    x/=n;y/=n;
+    camera.basis={static_cast<float>(x),static_cast<float>(y),0,
+                  static_cast<float>(-y),static_cast<float>(x),0,0,0,1};
+    return camera;
+}
 inline Vec3 cross(Vec3 a,Vec3 b) {
     return {a.y*b.z-a.z*b.y,a.z*b.x-a.x*b.z,a.x*b.y-a.y*b.x};
 }

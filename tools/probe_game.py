@@ -29,7 +29,8 @@ RESEARCH_STRINGS = (
 
 RESEARCH_TYPES = ("arkCpntPlayerCamera", "arkCpntRenderView", "arkCpntPlayerCameraFactory",
                   "arkCpntRenderViewFactory", "endJoint@arkFabrIK_Toolkit",
-                  "transformsBridge@arkFabrIK")
+                  "transformsBridge@arkFabrIK", "arkPlayer", "arkSkinnedRenderModel",
+                  "arkCpntAnimEvolved", "arkCpntPlayerBody", "arkCpntEquipment")
 
 
 def vdf(text: str) -> dict:
