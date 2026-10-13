@@ -8,7 +8,7 @@ namespace d2vr {
 // third of a second). summon() lets the user re-place it where they look right now.
 class MenuPanel {
     // 1.15 m: close enough to fill the view with the menu and read its text (was 1.6 m).
-    static constexpr double distance_m=1.15;
+    double distance_m=1.15;
     TrackedPose pose_{};
     bool placed_{},following_{};
     static Vec3 level_forward(const Quaternion& head) {
@@ -17,6 +17,7 @@ class MenuPanel {
         return n<1e-6?Vec3{0,0,-1}:Vec3{f.x/n,0,f.z/n};
     }
 public:
+    explicit MenuPanel(double distance=1.15) noexcept : distance_m(distance) {}
     void reset() noexcept {placed_=false;following_=false;}
     void summon() noexcept {following_=true;}
     const TrackedPose& place(const TrackedPose& head) {

@@ -12,12 +12,20 @@ public:
     enum Reason : unsigned {okay=0,absent=1,ineligible=2,source_changed=3,model_changed=4,
         binding_changed=5,tracking_changed=6,duplicate=7,missing_consumer=8,solve_failed=9,
         equipment_absent=10,equipment_changed=11,equipment_link_mismatch=12};
+    // SIMD palette alignment deliberately pads this owned value type.
+#ifdef _MSC_VER
+#pragma warning(push)
+#pragma warning(disable:4324)
+#endif
     struct Lease {
         UINT64 token{},receipt{},epoch{};NativeAttachmentCandidate candidate{};
         NativeWeaponSourceContent source{};NativeWeaponModelBase model{};rig::ArmTrackingSnapshot tracking{};
         std::shared_ptr<const rig::NativeArmBindingSnapshot> rig;alignas(16) rig::PosedArm posed{};UINT64 posed_digest{};
         std::shared_ptr<const NativeEquipmentOwnership> equipment;
     };
+#ifdef _MSC_VER
+#pragma warning(pop)
+#endif
     static_assert(sizeof(rig::Transform)==64 && sizeof(rig::PosedArm::joints)==69*64 && alignof(Lease)>=16);
     struct Result {UINT64 token{},receipt{},revision{},posed_digest{};std::uint32_t frame{};unsigned side{},site{},reason{absent};
         bool accepted{},strict_revision{},after_primary{},complete{},secondary_observed{};rig::Transform predicted_socket{};

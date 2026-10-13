@@ -57,6 +57,20 @@ inline std::optional<std::array<float,16>> eye_projection(const std::array<float
     return out;
 }
 
+// The engine's TAA jitter (0x3742b0, exact build): the D3D 8x pattern in 1/16 px (table RVA 0x1b35f10),
+// indexed by frame counter & 7. It shifts the frustum window by +j (UV of the render size), so the
+// projection gets [2]+=2jx, [6]+=2jy, and stores j at view+0x7850. Setup copies +0x7850 to +0x7858
+// (0x375a98) before; cb_jittervectors=(cur,prev) and cb_jitterrelativetopreviousframe=2(prev-cur)
+// (0x3586a0) dejitter TAA and motion vectors. A forced projection (+0x140) skips the write, so
+// forced views must add the jitter with this sign and store it themselves.
+struct TaaJitter {float x,y;}; // UV units, engine sign
+inline constexpr std::array<std::array<float,2>,8> engine_taa_pattern{{{1,-3},{-1,3},{5,1},{-3,-5},{-5,5},{-7,1},{3,7},{7,-7}}};
+inline TaaJitter engine_taa_jitter(std::uint32_t counter,float width,float height) {
+    const auto& p=engine_taa_pattern[counter%8];
+    return {p[0]/16/width,p[1]/16/height};
+}
+inline void apply_taa_jitter(std::array<float,16>& projection,TaaJitter j) {projection[2]+=2*j.x;projection[6]+=2*j.y;}
+
 inline bool valid_stereo_metadata(const std::array<std::byte,80>& bytes,std::uintptr_t base) {
     for(int eye=0;eye<2;++eye) {
         auto data=bytes.data()+eye*40;

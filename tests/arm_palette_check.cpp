@@ -24,6 +24,26 @@ int main(int argc,char** argv) {
     assert(std::abs(d2vr::length(r::position(posed.joints[4])-r::position(posed.joints[3]))-.3)<1e-6);
     assert(d2vr::length(r::position(posed.joints[5])-r::position(posed.joints[4])-d2vr::Vec3{0,.1,0})<1e-6);
     assert(posed.joints[5].f[0]==0 && posed.joints[5].f[1]==1);
+    auto hand=r::pose_hand(native,hierarchy,{2,3,4},target);
+    r::hide_arm(hand,hierarchy,4);
+    // A native block animation may move the complete rig; its wrist transform
+    // must never compete with the controller or change the local finger pose.
+    auto animated=native;
+    const auto animated_wrist=r::turn_root(native.joints[4],{0,0,std::sin(.5),std::cos(.5)},{8,3,2});
+    for(unsigned joint=0;joint<69;++joint)
+        animated.joints[joint]=r::rigid_retarget(native.joints[joint],native.joints[4],animated_wrist);
+    auto blocked_hand=r::pose_hand(animated,hierarchy,{2,3,4},target);
+    r::hide_arm(blocked_hand,hierarchy,4);
+    for(unsigned joint=0;joint<69;++joint) {
+        assert(d2vr::length(r::position(hand.joints[joint])-r::position(blocked_hand.joints[joint]))<1e-5);
+        for(unsigned axis=0;axis<3;++axis)
+            assert(d2vr::length(r::column(hand.joints[joint],axis)-r::column(blocked_hand.joints[joint],axis))<1e-5);
+        if(r::in_subtree(hierarchy,joint,4)) assert(r::valid(hand.joints[joint]));
+        else {
+            assert(d2vr::length(r::position(hand.joints[joint])-r::position(target))<1e-6);
+            assert(std::abs(d2vr::length(r::column(hand.joints[joint],0))-.02)<1e-6);
+        }
+    }
     assert(posed.joints[0].f==native.joints[0].f && posed.joints[1].f==native.joints[1].f);
     assert(std::abs(d2vr::length(r::position(posed.joints[64])-r::position(posed.joints[3]))-.1)<1e-6);
     assert(std::abs(d2vr::length(r::position(posed.joints[68])-r::position(posed.joints[2]))-.1)<1e-6);
@@ -44,7 +64,7 @@ int main(int argc,char** argv) {
     bool rejected=false;hierarchy[3]=1;
     try {r::pose_arm(native,hierarchy,{2,3,4},target,{0,-1,0});} catch(const std::invalid_argument&) {rejected=true;}
     assert(rejected);
-    std::cout << "PASS: connected arm IK, wrist orientation, finger and forearm helper subtrees, reach clamp and invalid chain rejection\n";
+    std::cout << "PASS: hands-only hides both arm segments, ignores native block motion, preserves fingers; connected arm IK, reach clamp and invalid chain rejection\n";
     if(argc==2) {
         std::ifstream input(argv[1],std::ios::binary);char magic[8]{};input.read(magic,8);
         if(!input || std::memcmp(magic,"D2VRAF01",8)) throw std::runtime_error("Invalid offline arm fixture");

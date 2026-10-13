@@ -1,5 +1,7 @@
 #pragma once
+#include "tracked_pose_lifetime.hpp"
 #include "arm_palette.hpp"
+#include "arm_body.hpp"
 #include "hand_bind.hpp"
 #include "finger_pose.hpp"
 #include "native_hand_reference.hpp"
@@ -20,7 +22,7 @@ struct NativeBodyBind {
 };
 inline bool operator==(const NativeBodyBind& a,const NativeBodyBind& b) {
     return a.model==b.model && a.animation==b.animation && a.descriptor==b.descriptor && a.skeleton==b.skeleton &&
-        a.names==b.names && a.inverse==b.inverse && a.animation_identity==b.animation_identity &&
+        a.names==b.names && a.inverse==b.inverse && a.animation_identity.generation==b.animation_identity.generation &&
         a.ids==b.ids && a.labels==b.labels && a.inverse_rows==b.inverse_rows;
 }
 struct ArmBinding {
@@ -37,13 +39,19 @@ template<class Read> std::optional<std::string> joint_name(Read& read,std::uintp
     if(!entries || id>=entries->packed_count) return {};
     const auto text=value<std::uintptr_t>(read,entries->data+id*0x48+0x10);
     if(!text || *text<0x10000 || *text>=0x0000800000000000-128) return {};
+    // One read per page-bounded chunk (was one read per byte: millions of calls per minute).
     std::string result;
-    for(unsigned i=0;i<128;++i) {
-        const auto c=value<unsigned char>(read,*text+i);
-        if(!c) return {};
-        if(!*c) return result.empty()?std::nullopt:std::optional<std::string>(result);
-        if(*c<32 || *c>126) return {};
-        result.push_back(static_cast<char>(*c));
+    for(std::uintptr_t at=*text,end=*text+128;at<end;) {
+        std::array<unsigned char,128> chunk{};
+        const auto size=static_cast<std::size_t>(std::min<std::uintptr_t>(end-at,0x1000-(at&0xfff)));
+        if(!read(at,chunk.data(),size)) return {};
+        for(std::size_t i=0;i<size;++i) {
+            const auto c=chunk[i];
+            if(!c) return result.empty()?std::nullopt:std::optional<std::string>(result);
+            if(c<32 || c>126) return {};
+            result.push_back(static_cast<char>(c));
+        }
+        at+=size;
     }
     return {};
 }
@@ -180,6 +188,7 @@ inline NativeAvatarMeasurements native_avatar_measurements(const std::array<ArmB
     return result;
 }
 struct ArmTrackingFrame {
+    std::uint64_t source_tick{}; // XR sample clock; tick below is native-world publication clock.
     std::uint64_t tick{},epoch{};
     unsigned hands{};
     std::array<WorldTrackedPose,2> grips{};
@@ -199,8 +208,8 @@ struct ArmTrackingFrame {
     // Only then do empty_hands/native_hands apply; false keeps legacy behaviour.
     // Declared here to reuse existing padding, so this frame's layout is stable.
     bool has_hand_state{};
-    // Arm model origin of the game frame the grips were sampled for. The arm
-    // uploads later, after the body has moved; that motion is carried over.
+    // Producer origin retained for diagnostics only; grips are world poses and
+    // each side's current native upload supplies its own conversion frame.
     Vec3 model_origin{};
     bool has_model_origin{};
 };
@@ -214,6 +223,7 @@ struct ArmTrackingSnapshot {
     std::uint64_t mapping_revision{};
     std::array<Vec3,2> elbow_poles{};
     unsigned elbow_pole_hands{};
+    double chest_yaw{};bool has_chest{}; // Smoothed chest heading (world yaw), see ChestYaw.
 };
 struct ArmTrackingStamp {
     std::uint64_t revision{},tick{},epoch{},reference_epoch{};
@@ -221,7 +231,6 @@ struct ArmTrackingStamp {
     std::uint64_t mapping_revision{};
 };
 class ArmTracking {
-    static constexpr float collapsed_scale=.02f; // Non-zero keeps skinned normals finite.
     std::mutex mutex_;
     ArmTrackingFrame frame_{};
     std::array<std::optional<NativeHandReference>,2> references_{};
@@ -230,6 +239,7 @@ class ArmTracking {
     std::uint64_t mapping_revision_{};
     std::array<Vec3,2> elbow_poles_{};
     unsigned elbow_pole_hands_{};
+    ChestYaw chest_{};std::uint64_t chest_tick_{},chest_epoch_{};
     void advance_revision() {
         if(revision_==UINT64_MAX) throw std::overflow_error("Tracked publication revision exhausted");
         ++revision_;
@@ -237,7 +247,7 @@ class ArmTracking {
 public:
     ArmTrackingSnapshot snapshot() {
         std::lock_guard<std::mutex> lock(mutex_);
-        return {revision_,frame_,references_,calibration_,mapping_revision_,elbow_poles_,elbow_pole_hands_};
+        return {revision_,frame_,references_,calibration_,mapping_revision_,elbow_poles_,elbow_pole_hands_,chest_.yaw,chest_.valid};
     }
     ArmTrackingStamp stamp() {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -248,7 +258,9 @@ public:
             !std::isfinite(calibration.shoulder_span_metres) || calibration.shoulder_span_metres<.1 || calibration.shoulder_span_metres>.95 ||
             !std::isfinite(calibration.eye_to_shoulder_metres) || calibration.eye_to_shoulder_metres<.05 || calibration.eye_to_shoulder_metres>.4)
             throw std::invalid_argument("Invalid measured arm calibration");
-        std::lock_guard<std::mutex> lock(mutex_);advance_revision();++mapping_revision_;elbow_pole_hands_=0;calibration_=calibration;
+        std::lock_guard<std::mutex> lock(mutex_);
+        if(calibration_ && same_avatar_calibration(*calibration_,calibration)) return;
+        advance_revision();++mapping_revision_;elbow_pole_hands_=0;calibration_=calibration;
     }
     void clear_calibration() {std::lock_guard<std::mutex> lock(mutex_);advance_revision();++mapping_revision_;elbow_pole_hands_=0;calibration_.reset();}
     void install_reference(unsigned side,NativeHandReference reference) {
@@ -259,7 +271,7 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);advance_revision();++mapping_revision_;elbow_pole_hands_=0;references_[side]=std::move(reference);
     }
     void clear_references() {std::lock_guard<std::mutex> lock(mutex_);advance_revision();++mapping_revision_;elbow_pole_hands_=0;references_={};}
-    void publish(ArmTrackingFrame frame) {
+    ArmTrackingStamp publish(ArmTrackingFrame frame) {
         if(frame.hands>3 || frame.empty_hands>3 || frame.native_hands>3 || (frame.hands && !frame.epoch)) throw std::invalid_argument("Invalid tracked arm publication");
         for(auto curl:frame.curls) if(!std::isfinite(curl) || curl<0 || curl>1) throw std::invalid_argument("Invalid tracked finger curl");
         for(auto curl:frame.index_curls) if(!std::isfinite(curl) || curl<0 || curl>1) throw std::invalid_argument("Invalid tracked index curl");
@@ -281,33 +293,59 @@ public:
         advance_revision();
         unsigned poles{};
         if(frame.has_head_anchor) {
+            // Chest heading: dead-zone follow of the head plus hand pull; reset on a new space or a gap.
+            const bool continuous=chest_.valid && chest_epoch_==frame.reference_epoch && frame_.has_head_anchor &&
+                frame.tick>=chest_tick_ && frame.tick-chest_tick_<1000;
+            if(!continuous) chest_.valid=false;
+            const double dt=continuous?(frame.tick-chest_tick_)/1000.:0.;
+            double hand{};const bool hands=frame.hands==3 && both_hands_yaw(frame.head_anchor.position,frame.grips[0].position,
+                frame.grips[1].position,frame.head_anchor.basis[0],frame.units_per_metre,hand);
+            chest_.step(yaw_of(frame.head_anchor.basis[0]),hands?&hand:nullptr,dt);
+            chest_tick_=frame.tick;chest_epoch_=frame.reference_epoch;
             for(unsigned side=0;side<2;++side) if(frame.hands&(1u<<side)) {
-                const auto shoulder=shoulder_world(frame,calibration_,side);
+                const auto shoulder=hand_shoulder(frame,calibration_,side,&chest_.yaw);
                 const auto reach=frame.grips[side].position-shoulder;
                 if(length(reach)<1e-6) continue;
-                Vec3 carried{};const Vec3* previous=nullptr;
-                if((elbow_pole_hands_&(1u<<side)) && frame_.epoch==frame.epoch &&
-                    frame_.reference_epoch==frame.reference_epoch && frame_.has_head_anchor) {
-                    for(unsigned axis=0;axis<3;++axis) carried=carried+frame.head_anchor.basis[axis]*dot(elbow_poles_[side],frame_.head_anchor.basis[axis]);
-                    previous=&carried;
-                }
-                elbow_poles_[side]=anatomical_elbow_pole(reach,frame.head_anchor.basis[0],
-                    frame.head_anchor.basis[1]*(side?-1.:1.),frame.head_anchor.basis[2],previous);
+                const Vec3* previous=(elbow_pole_hands_&(1u<<side)) && continuous && frame_.epoch==frame.epoch?&elbow_poles_[side]:nullptr;
+                elbow_poles_[side]=elbow_pole(frame,calibration_,side,chest_.yaw,reach,previous,dt);
                 poles|=1u<<side;
             }
-        }
+        } else chest_.valid=false;
         elbow_pole_hands_=poles;
         frame_=frame;
+        return {revision_,frame_.tick,frame_.epoch,frame_.reference_epoch,frame_.hands,frame_.has_head_anchor,calibration_.has_value(),mapping_revision_};
     }
     void clear() {publish({});}
     // Measured fit when it belongs to this reference space, otherwise typical
-    // adult proportions. The shoulder is never rendered (see pose_frozen); it
-    // only steers the forearm direction, so defaults are safe before calibration.
-    static Vec3 shoulder_world(const ArmTrackingFrame& frame,const std::optional<AvatarCalibrationResult>& calibration,unsigned side) {
-        const bool fitted=calibration && calibration->reference_epoch==frame.reference_epoch;
-        const double span=fitted?calibration->shoulder_span_metres:.36,drop=fitted?calibration->eye_to_shoulder_metres:.2;
+    // adult proportions. It anchors the rendered upper arm (full arms) and steers
+    // the forearm; defaults are reasonable before calibration.
+    // chest_yaw (smoothed, see ChestYaw) places the shoulders on the chest frame
+    // instead of the head: neck below the head along gravity, shoulders across the chest.
+    static bool fitted(const ArmTrackingFrame& frame,const std::optional<AvatarCalibrationResult>& c) {return c && c->reference_epoch==frame.reference_epoch;}
+    static double arm_scale(const ArmTrackingFrame& frame,const std::optional<AvatarCalibrationResult>& c) {return fitted(frame,c)?c->arm_scale:1.;}
+    // Shoulder-to-palm reach in metres: measured from the T pose, typical adult otherwise.
+    static double arm_length_metres(const ArmTrackingFrame& frame,const std::optional<AvatarCalibrationResult>& c) {
+        return fitted(frame,c)?std::max(.3,(c->palm_span_metres-c->shoulder_span_metres)*.5):.62;
+    }
+    static Vec3 shoulder_world(const ArmTrackingFrame& frame,const std::optional<AvatarCalibrationResult>& calibration,unsigned side,const double* chest_yaw=nullptr) {
+        const bool fit=fitted(frame,calibration);
+        const double span=fit?calibration->shoulder_span_metres:.36,drop=fit?calibration->eye_to_shoulder_metres:.2;
         const auto& anchor=frame.head_anchor;const auto u=frame.units_per_metre;
-        return anchor.position+anchor.basis[1]*((side?-.5:.5)*span*u)-anchor.basis[2]*(drop*u)-anchor.basis[0]*(.06*u);
+        const Vec3 forward=chest_yaw?yaw_forward(*chest_yaw):anchor.basis[0],left=chest_yaw?yaw_left(*chest_yaw):anchor.basis[1];
+        // Native bind depth (world units) when the caller qualified it, scaled to the user; otherwise 6 cm behind.
+        const double back=frame.has_native_shoulder_forward?std::clamp(frame.native_shoulder_forward[side&1]*arm_scale(frame,calibration),-.2*u,.05*u):-.06*u;
+        return anchor.position+left*((side?-.5:.5)*span*u)-anchor.basis[2]*(drop*u)+forward*back;
+    }
+    // Shoulder after bounded clavicle elevation/protraction toward the hand.
+    static Vec3 hand_shoulder(const ArmTrackingFrame& frame,const std::optional<AvatarCalibrationResult>& c,unsigned side,const double* chest_yaw) {
+        const auto base=shoulder_world(frame,c,side,chest_yaw);const auto len=arm_length_metres(frame,c)*frame.units_per_metre;
+        return base+shoulder_reach_offset(frame.grips[side].position-base,len,.08*len);
+    }
+    static Vec3 elbow_pole(const ArmTrackingFrame& frame,const std::optional<AvatarCalibrationResult>& c,unsigned side,double chest_yaw,
+                           Vec3 reach,const Vec3* previous,double dt) {
+        const auto& up=frame.head_anchor.basis[2];
+        return boneworks_elbow_pole(reach,yaw_forward(chest_yaw),yaw_left(chest_yaw)*(side?-1.:1.),up,
+            arm_length_metres(frame,c)*frame.units_per_metre,dot(frame.grips[side].basis[0],up),previous,dt);
     }
     std::optional<PosedArm> pose(const Upload& native,const ArmBinding& binding,unsigned side,std::uint64_t tick) {
         return pose_frozen(native,binding,side,tick,snapshot());
@@ -316,6 +354,7 @@ public:
     // Each hand caches its OWN closed native grip (right: sword, left: pistol/crossbow)
     // and closes into it when empty. Mirroring one hand onto the other splayed the fingers.
     inline static std::atomic<bool> game_grip_fists{true};
+    inline static std::atomic<bool> full_arms{false};
     inline static std::mutex grip_mutex_;
     inline static std::array<std::optional<FingerGrip>,2> native_grips_{};
     // Index and middle fingertips pulled in toward the wrist: a held grip, not an open hand.
@@ -332,17 +371,23 @@ public:
     }
     static std::optional<PosedArm> pose_frozen(const Upload& native,const ArmBinding& binding,unsigned side,std::uint64_t tick,
         const ArmTrackingSnapshot& frozen) {
+        return pose_frozen_with_arm_mode(native,binding,side,tick,frozen,false);
+    }
+    static std::optional<PosedArm> pose_frozen_with_arm_mode(const Upload& native,const ArmBinding& binding,unsigned side,std::uint64_t tick,
+        const ArmTrackingSnapshot& frozen,bool force_full_arms) {
         const auto& frame=frozen.frame;
         if(side>=2) return {};
         const auto& chain=binding.chain;
         if(chain.upper>=69 || chain.elbow>=69 || chain.wrist>=69) throw std::invalid_argument("Invalid tracked arm chain bounds");
-        if(!(frame.hands&(1u<<side)) || !frame.epoch || !frame.has_head_anchor || tick<frame.tick || tick-frame.tick>250) return {};
+        const bool render_arms=force_full_arms || full_arms.load();
+        if((frame.source_tick && (tick<frame.source_tick || tick-frame.source_tick>tracked_pose_freshness_ms)) || !(frame.hands&(1u<<side)) || !frame.epoch || (render_arms && !frame.has_head_anchor) || tick<frame.tick || tick-frame.tick>tracked_pose_freshness_ms) return {};
         // A scripted animation (takedown, finisher, mantle) owns this arm: the
         // caller submits the native palette.
         if(frame.has_hand_state && (frame.native_hands&(1u<<side))) return {};
         const ModelFrame model(native.model_frame);
-        const Vec3 shift=frame.has_model_origin?model.origin-frame.model_origin:Vec3{};
-        auto world=frame.grips[side];world.position=world.position+shift;
+        // Published grips already occupy world space. Each upload converts
+        // through its own model frame; model motion must not move the target.
+        const auto world=frame.grips[side];
         Transform grip{};
         const auto point=model.model_point(world.position);
         grip.f[12]=static_cast<float>(point.x);grip.f[13]=static_cast<float>(point.y);grip.f[14]=static_cast<float>(point.z);
@@ -352,22 +397,27 @@ public:
         }
         if(!valid(grip)) throw std::invalid_argument("Invalid tracked grip frame");
         const auto wrist=rigid_retarget(binding.bind_wrist,binding.bind_grip,grip);
-        // Pull the (never rendered) shoulder toward the hand rather than ever
-        // stretching the visible forearm or clamping the hand off the controller.
-        const auto upper_length=length(position(native.joints[chain.elbow])-position(native.joints[chain.upper]));
-        const auto lower_length=length(position(native.joints[chain.wrist])-position(native.joints[chain.elbow]));
-        const auto shoulder_world_point=shoulder_world(frame,frozen.calibration,side)+shift;
-        auto shoulder=model.model_point(shoulder_world_point);
-        const auto reach=position(wrist)-shoulder;const auto total=upper_length+lower_length;
-        if(length(reach)<1e-6 || total<1e-6) return {};
-        const auto distance=std::clamp(length(reach),.35*total,.97*total);
-        shoulder=position(wrist)-unit(reach)*distance;
-        const auto source=calibrated_arm_source(native,binding.parents,chain,shoulder,1.0);
-        const auto previous=(frozen.elbow_pole_hands&(1u<<side))?&frozen.elbow_poles[side]:nullptr;
-        const auto& anchor=frame.head_anchor;
-        const auto pole=model.model_direction(anatomical_elbow_pole(world.position-shoulder_world_point,anchor.basis[0],
-            anchor.basis[1]*(side?-1.:1.),anchor.basis[2],previous));
-        auto posed=pose_arm(source,binding.parents,chain,wrist,pole,&binding.helpers,true,3);
+        const auto posed_result=render_arms?[&]() -> std::optional<PosedArm> {
+            // Legacy standalone arm mode keeps its anatomical shoulder anchor.
+            // The live integrated body uses the shared BodySolver instead.
+            const auto upper_length=length(position(native.joints[chain.elbow])-position(native.joints[chain.upper]));
+            const auto lower_length=length(position(native.joints[chain.wrist])-position(native.joints[chain.elbow]));
+            const double scale=arm_scale(frame,frozen.calibration);
+            const double* chest=frozen.has_chest?&frozen.chest_yaw:nullptr;
+            const auto shoulder_world_point=hand_shoulder(frame,frozen.calibration,side,chest);
+            auto shoulder=model.model_point(shoulder_world_point);
+            const auto reach=position(wrist)-shoulder;const auto total=(upper_length+lower_length)*scale;
+            if(length(reach)<1e-6 || total<1e-6) return {};
+            if(length(reach)>1.06*total) return {};
+            const auto source=calibrated_arm_source(native,binding.parents,chain,shoulder,scale);
+            const auto previous=(frozen.elbow_pole_hands&(1u<<side))?&frozen.elbow_poles[side]:nullptr;
+            // The published pole is already continuity-limited; recompute (unlimited) only without one.
+            const auto pole=model.model_direction(previous?*previous:
+                elbow_pole(frame,frozen.calibration,side,chest?*chest:yaw_of(frame.head_anchor.basis[0]),world.position-shoulder_world_point,nullptr,0));
+            return pose_arm(source,binding.parents,chain,wrist,pole,&binding.helpers,true,1.06);
+        }():std::optional<PosedArm>(pose_hand(native,binding.parents,chain,wrist));
+        if(!posed_result) return {};
+        auto posed=*posed_result;
         const auto recovered=rigid_retarget(binding.bind_grip,binding.bind_wrist,posed.joints[chain.wrist]);
         if(length(position(recovered)-position(grip))>.001)
             throw std::invalid_argument("Tracked native palm missed the controller grip");
@@ -392,18 +442,34 @@ public:
             else posed.joints=procedural_curl(posed.joints,binding.parents,binding.finger_chains,binding.palm,chain.wrist,
                 {squeeze,index,squeeze,squeeze,squeeze});
         }
-        // Hands-and-forearms presentation: the shoulder and upper-arm bones
-        // collapse into the elbow, so no sleeve stump or shoulder cut is ever
-        // visible while the user looks around freely.
-        const auto elbow=position(posed.joints[chain.elbow]);
-        for(unsigned joint=0;joint<69;++joint) {
-            const bool upper=in_subtree(binding.parents,joint,chain.upper) && !in_subtree(binding.parents,joint,chain.elbow);
-            const bool clavicle=binding.parents[chain.upper]==static_cast<int>(joint) && binding.parents[joint]>=0;
-            if(!upper && !clavicle) continue;
-            auto& t=posed.joints[joint];
-            for(unsigned i=0;i<3;++i) for(unsigned j=0;j<3;++j) t.f[i*4+j]*=collapsed_scale;
-            t.f[12]=static_cast<float>(elbow.x);t.f[13]=static_cast<float>(elbow.y);t.f[14]=static_cast<float>(elbow.z);
+        if(render_arms) {
+            // Experimental full arms: the clavicle and its
+            // other children (shoulder helpers) move rigidly with the shoulder joint so the sleeve
+            // stays attached instead of stretching back to the native clavicle.
+            const int clavicle=binding.parents[chain.upper];
+            unsigned clavicle_joints=0,upper_joints=0;
+            if(clavicle>=0) for(unsigned joint=0;joint<69;++joint) {
+                if(in_subtree(binding.parents,joint,static_cast<unsigned>(clavicle))) ++clavicle_joints;
+                if(in_subtree(binding.parents,joint,chain.upper)) ++upper_joints;
+            }
+            // Only a true clavicle (a few helpers besides the arm), never a spine that also carries the other arm.
+            if(clavicle>=0 && binding.parents[static_cast<unsigned>(clavicle)]>=0 && clavicle_joints<=upper_joints+6) {
+                // Rotate the clavicle toward the new shoulder (bounded); translate only the residual.
+                const auto pivot=position(native.joints[static_cast<unsigned>(clavicle)]);
+                const auto native_upper=position(native.joints[chain.upper]),new_upper=position(posed.joints[chain.upper]);
+                const auto swing=clavicle_swing(pivot,native_upper,new_upper);
+                const auto residual=new_upper-(pivot+rotated(swing,native_upper-pivot));
+                posed.clavicle=swing;
+                for(unsigned joint=0;joint<69;++joint) {
+                    if(in_subtree(binding.parents,joint,chain.upper)) continue;
+                    if(joint!=static_cast<unsigned>(clavicle) && !in_subtree(binding.parents,joint,static_cast<unsigned>(clavicle))) continue;
+                    const auto at=pivot+rotated(swing,position(native.joints[joint])-pivot)+residual;
+                    posed.joints[joint]=turn_root(native.joints[joint],swing,at);
+                }
+            }
+            return posed;
         }
+        hide_arm(posed,binding.parents,chain.wrist);
         return posed;
     }
 };

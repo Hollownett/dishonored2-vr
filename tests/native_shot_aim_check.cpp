@@ -6,10 +6,12 @@
 
 static constexpr std::uintptr_t base=0x140000000;
 static unsigned hook_calls=0;
+static bool created=false;
 static bool bad_call{};
 static void fake_original() {}
 extern "C" MH_STATUS WINAPI MH_CreateHook(LPVOID,LPVOID,LPVOID* out) {
-    ++hook_calls;*out=reinterpret_cast<void*>(&fake_original);return MH_OK;
+    ++hook_calls;if(created) return MH_ERROR_ALREADY_CREATED;
+    created=true;*out=reinterpret_cast<void*>(&fake_original);return MH_OK;
 }
 extern "C" MH_STATUS WINAPI MH_EnableHook(LPVOID) {++hook_calls;return MH_OK;}
 extern "C" MH_STATUS WINAPI MH_DisableHook(LPVOID) {++hook_calls;return MH_OK;}
@@ -91,7 +93,13 @@ int main() {
     router.install(base,install_read,logic,L"build/native-shot-aim-test.csv",true);
     check(router.routing() && router.hooks()==1 && hook_calls==2,"routed install after the verified prologue");
     check(router.disable() && router.hooks()==0 && !router.routing(),"clean disable restores the prologue");
-    if(!failures) std::cout<<"PASS: hook surface, prepatch rejection, routed install and clean disable\n";
+    router.install(base,install_read,logic,L"build/native-shot-aim-test.csv",true);
+    check(router.routing() && router.hooks()==1 && hook_calls==4,"second install reuses owned disabled trampoline");
+    check(router.disable() && hook_calls==5,"second session disables cleanly");
+    rejected=false;
+    try {router.install(base+0x10000,install_read,logic,L"unused.csv",true);} catch(const std::runtime_error&) {rejected=true;}
+    check(rejected && hook_calls==5 && !router.routing(),"retained hook cannot move to a different image base");
+    if(!failures) std::cout<<"PASS: hook surface, prepatch rejection, two-session reuse and changed-image rejection\n";
     if(failures) {std::cout<<"FAILURES: "<<failures<<'\n';return 1;}
     std::cout<<"PASS: native shot aim\n";
     return 0;

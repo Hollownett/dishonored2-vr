@@ -1,0 +1,104 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>DishonoredVRLauncher</AssemblyName>
+    <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <SelfContained>true</SelfContained>
+    <!-- One exe. The runtime's own native code is statically linked into the single-file host; the only other natives in the
+         Windows Desktop runtime are WPF's (removed below), so nothing is unpacked to %TEMP%\.net at start-up. -->
+    <PublishSingleFile>true</PublishSingleFile>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+    <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
+    <DebugType>embedded</DebugType>
+    <PublishDir>dist\</PublishDir>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+    <BaseOutputPath>obj\bin\</BaseOutputPath>
+    <RepoRoot>$([System.IO.Path]::GetFullPath('$(MSBuildProjectDirectory)\..'))</RepoRoot>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Remove="dist\**;obj\**" />
+  </ItemGroup>
+
+  <!-- Payload written to the per-user mod home (%LOCALAPPDATA%\DishonoredVR) at start-up: resource name "home/<relative path>". -->
+  <ItemGroup>
+    <EmbeddedResource Include="$(RepoRoot)\third_party\fsr4\bin\amd_fidelityfx_upscaler_dx12.dll" LogicalName="home/third_party/fsr4/bin/amd_fidelityfx_upscaler_dx12.dll" WithCulture="false" />
+    <EmbeddedResource Include="$(RepoRoot)\third_party\fsr4\bin\amd_fidelityfx_loader_dx12.dll" LogicalName="home/third_party/fsr4/bin/amd_fidelityfx_loader_dx12.dll" WithCulture="false" />
+    <EmbeddedResource Include="$(RepoRoot)\third_party\fsr4\licenses\license.md" LogicalName="home/third_party/fsr4/licenses/license.md" WithCulture="false" />
+    <EmbeddedResource Include="$(RepoRoot)\third_party\fsr4\licenses\3rdpartynotice.md" LogicalName="home/third_party/fsr4/licenses/3rdpartynotice.md" WithCulture="false" />
+    <EmbeddedResource Include="$(RepoRoot)\third_party\openxr\bin\openxr_loader.dll" LogicalName="home/third_party/openxr/bin/openxr_loader.dll" WithCulture="false" />
+    <EmbeddedResource Include="$(RepoRoot)\third_party\openxr\bin\LICENSE" LogicalName="home/third_party/openxr/bin/LICENSE" WithCulture="false" />
+    <EmbeddedResource Include="$(RepoRoot)\third_party\openxr\bin\source.json" LogicalName="home/third_party/openxr/bin/source.json" WithCulture="false" />
+    <EmbeddedResource Include="$(RepoRoot)\third_party\minhook\LICENSE.txt" LogicalName="home/third_party/minhook/LICENSE.txt" WithCulture="false" />
+    <EmbeddedResource Include="$(RepoRoot)\third_party\smaa\LICENSE.txt" LogicalName="home/third_party/smaa/LICENSE.txt" WithCulture="false" />
+    <EmbeddedResource Include="$(RepoRoot)\third_party\fidelityfx\LICENSE.txt" LogicalName="home/third_party/fidelityfx/LICENSE.txt" WithCulture="false" />
+    <EmbeddedResource Include="$(RepoRoot)\third_party\dishonored_vr\LICENSE" LogicalName="home/third_party/dishonored_vr/LICENSE" WithCulture="false" />
+    <EmbeddedResource Include="$(RepoRoot)\THIRD_PARTY_NOTICES.md" LogicalName="home/THIRD_PARTY_NOTICES.md" WithCulture="false" />
+  </ItemGroup>
+
+  <!-- The newest artifacts\repair-vNNN-test-candidate.json that is not launch_blocked and whose build\<dll> exists (as Core.cs
+       picks it), with run_demo.ps1's name and hash checks. Its DLL, manifest and build-source pointer are embedded. -->
+  <UsingTask TaskName="PickModCandidate" TaskFactory="RoslynCodeTaskFactory" AssemblyFile="$(MSBuildToolsPath)\Microsoft.Build.Tasks.Core.dll">
+    <ParameterGroup>
+      <Root ParameterType="System.String" Required="true" />
+      <Dll ParameterType="System.String" Output="true" />
+      <Manifest ParameterType="System.String" Output="true" />
+      <Provenance ParameterType="System.String" Output="true" />
+    </ParameterGroup>
+    <Task>
+      <Using Namespace="System.IO" />
+      <Using Namespace="System.Linq" />
+      <Using Namespace="System.Security.Cryptography" />
+      <Using Namespace="System.Text.RegularExpressions" />
+      <Code Type="Fragment" Language="cs"><![CDATA[
+        var art = Path.Combine(Root, "artifacts");
+        var manifests = (Directory.Exists(art) ? Directory.GetFiles(art, "repair-v*-test-candidate.json") : new string[0])
+            .Select(f => new { f, m = Regex.Match(Path.GetFileName(f), @"^repair-v(\d+)-test-candidate\.json$") })
+            .Where(x => x.m.Success).OrderByDescending(x => int.Parse(x.m.Groups[1].Value)).Select(x => x.f);
+        foreach (var f in manifests)
+        {
+            var text = File.ReadAllText(f);  // machine-written JSON; top-level keys only
+            if (Regex.IsMatch(text, "\"launch_blocked\"\\s*:\\s*true")) continue;
+            var name = Regex.Match(text, "\"dll_name\"\\s*:\\s*\"([^\"]*)\"").Groups[1].Value;
+            var path = Path.Combine(Root, "build", name);
+            if (!File.Exists(path)) continue;
+            if (!Regex.IsMatch(name, @"^d2vr_render_probe_arm_v[0-9]+\.dll$")) { Log.LogError("Invalid candidate filename in " + f); return false; }
+            var want = Regex.Match(text, "\"sha256\"\\s*:\\s*\"([0-9a-f]{64})\"").Groups[1].Value;
+            string have;
+            using (var s = File.OpenRead(path)) using (var h = SHA256.Create()) have = string.Concat(h.ComputeHash(s).Select(b => b.ToString("x2")));
+            if (have != want) { Log.LogError(name + " changed since validation (" + Path.GetFileName(f) + "). Build and validate a fresh version before updating the candidate."); return false; }
+            Dll = path; Manifest = f;
+            Provenance = File.Exists(path + ".source.json") ? path + ".source.json" : "";
+            Log.LogMessage(MessageImportance.High, "Embedding " + name + " from " + Path.GetFileName(f));
+            return true;
+        }
+        Log.LogError("No unblocked artifacts\\repair-vNNN-test-candidate.json with its DLL in build\\ under " + Root);
+      ]]></Code>
+    </Task>
+  </UsingTask>
+  <Target Name="EmbedModCandidate" BeforeTargets="BeforeBuild">
+    <PickModCandidate Root="$(RepoRoot)">
+      <Output TaskParameter="Dll" PropertyName="ModDll" />
+      <Output TaskParameter="Manifest" PropertyName="ModManifest" />
+      <Output TaskParameter="Provenance" PropertyName="ModProvenance" />
+    </PickModCandidate>
+    <ItemGroup>
+      <EmbeddedResource Include="$(ModDll)" LogicalName="home/build/$([System.IO.Path]::GetFileName('$(ModDll)'))" WithCulture="false" />
+      <EmbeddedResource Include="$(ModManifest)" LogicalName="home/artifacts/$([System.IO.Path]::GetFileName('$(ModManifest)'))" WithCulture="false" />
+      <EmbeddedResource Include="$(ModProvenance)" LogicalName="home/build/$([System.IO.Path]::GetFileName('$(ModProvenance)'))" WithCulture="false" Condition="'$(ModProvenance)' != ''" />
+    </ItemGroup>
+  </Target>
+
+  <!-- WPF's native libraries come with the Windows Desktop runtime pack but WinForms never loads them; dropping them leaves
+       no native file that would have to be extracted at start-up. -->
+  <Target Name="DropWpfNatives" AfterTargets="ComputeResolvedFilesToPublishList">
+    <ItemGroup>
+      <ResolvedFileToPublish Remove="@(ResolvedFileToPublish)" Condition="'%(Filename)' == 'D3DCompiler_47_cor3' or '%(Filename)' == 'PenImc_cor3' or '%(Filename)' == 'PresentationNative_cor3' or '%(Filename)' == 'vcruntime140_cor3' or '%(Filename)' == 'wpfgfx_cor3' or '%(Filename)' == 'Microsoft.DiaSymReader.Native.amd64'" />
+    </ItemGroup>
+  </Target>
+</Project>

@@ -14,6 +14,7 @@ typedef enum MH_STATUS {
 extern "C" MH_STATUS WINAPI MH_CreateHook(LPVOID,LPVOID,LPVOID*);
 extern "C" MH_STATUS WINAPI MH_EnableHook(LPVOID);
 extern "C" MH_STATUS WINAPI MH_DisableHook(LPVOID);
+extern "C" MH_STATUS WINAPI MH_RemoveHook(LPVOID);
 #endif
 #include <intrin.h>
 #include "native_player_camera.hpp"
@@ -452,6 +453,15 @@ public:
             log_.close();camera_.store(0);
         } catch(...) {return false;}
         return restored;
+    }
+    // Transfer our retained, disabled launch site to the production router.
+    // All observer callbacks drain before its trampoline is removed.
+    bool release_shot_hook() noexcept {
+        constexpr unsigned index=1;
+        if(!created_[index]) return true;
+        if(!disable() || depth_) return false;
+        if(MH_RemoveHook(reinterpret_cast<void*>(base_+fire_seam_rvas[index]))!=MH_OK)return false;
+        original_output_=nullptr;created_[index]=enabled_[index]=false;return true;
     }
     UINT64 calls() const {return calls_.load();}
     UINT64 samples() const {return samples_.load();}

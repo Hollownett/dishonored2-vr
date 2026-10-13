@@ -4,18 +4,18 @@
 
 namespace d2vr::rig {
 struct ArmChain {unsigned upper{},elbow{},wrist{};};
-struct PosedArm {std::array<Transform,69> joints;bool reach_clamped{};};
+struct PosedArm {std::array<Transform,69> joints;bool reach_clamped{};Quaternion clavicle{0,0,0,1};};
 using ForearmHelpers=std::array<unsigned,4>;
 // An elbow hint is a body-space direction, independent of the native weapon
 // animation. Carry the previous bend through a pole singularity instead of
 // switching between arbitrary Cartesian axes on adjacent tracking frames.
-inline Vec3 anatomical_elbow_pole(Vec3 reach,Vec3 forward,Vec3 outward,Vec3 up,
-                                  const Vec3* previous=nullptr) {
-    if(!finite(reach) || !finite(forward) || !finite(outward) || !finite(up) || length(reach)<1e-6)
+// hint is the desired (unprojected) elbow direction; Boneworks-style policy lives in arm_body.hpp.
+inline Vec3 elbow_pole_from_hint(Vec3 reach,Vec3 hint,Vec3 forward,Vec3 outward,const Vec3* previous=nullptr) {
+    if(!finite(reach) || !finite(hint) || !finite(forward) || !finite(outward) || length(reach)<1e-6 || length(hint)<1e-9)
         throw std::invalid_argument("Invalid anatomical elbow frame");
     const auto direction=unit(reach);
     const auto project=[&](Vec3 v) {return v-direction*dot(v,direction);};
-    const auto desired=unit(outward-forward-up);
+    const auto desired=unit(hint);
     auto bend=project(desired);
     const auto magnitude=length(bend);
     if(previous && finite(*previous)) {
@@ -36,6 +36,11 @@ inline Vec3 anatomical_elbow_pole(Vec3 reach,Vec3 forward,Vec3 outward,Vec3 up,
     }
     if(!finite(bend) || length(bend)<1e-6) throw std::invalid_argument("Degenerate anatomical elbow frame");
     return unit(bend);
+}
+inline Vec3 anatomical_elbow_pole(Vec3 reach,Vec3 forward,Vec3 outward,Vec3 up,
+                                  const Vec3* previous=nullptr) {
+    if(!finite(up)) throw std::invalid_argument("Invalid anatomical elbow frame");
+    return elbow_pole_from_hint(reach,outward-forward-up,forward,outward,previous);
 }
 inline Quaternion align_direction(Vec3 from,Vec3 to) {
     const auto a_length=length(from),b_length=length(to);
@@ -85,6 +90,29 @@ inline bool in_subtree(const ArmHierarchy& parents,unsigned joint,unsigned ances
         joint=static_cast<unsigned>(parent);
     }
     return false;
+}
+// Keep the native hand rigid on the tracked wrist without solving an elbow.
+// Leave all joints rigid until finger posing finishes, then suppress the arm.
+inline PosedArm pose_hand(const Upload& native,const ArmHierarchy& parents,ArmChain chain,Transform tracked_wrist) {
+    if(!valid_hierarchy(parents) || chain.upper>=69 || chain.elbow>=69 || chain.wrist>=69 ||
+       parents[chain.elbow]!=static_cast<int>(chain.upper) || parents[chain.wrist]!=static_cast<int>(chain.elbow) ||
+       !valid(tracked_wrist)) throw std::invalid_argument("Invalid hand chain or wrist target");
+    PosedArm result{native.joints,false};
+    for(unsigned joint=0;joint<69;++joint) {
+        if(!valid(native.joints[joint])) throw std::invalid_argument("Invalid native hand palette");
+        result.joints[joint]=rigid_retarget(native.joints[joint],native.joints[chain.wrist],tracked_wrist);
+    }
+    return result;
+}
+inline void hide_arm(PosedArm& posed,const ArmHierarchy& parents,unsigned wrist) {
+    if(!valid_hierarchy(parents) || wrist>=69 || !valid(posed.joints[wrist]))
+        throw std::invalid_argument("Invalid hands-only wrist cut");
+    for(unsigned joint=0;joint<69;++joint) if(!in_subtree(parents,joint,wrist)) {
+        // A nonzero basis keeps skinning normals finite at the wrist cut.
+        auto hidden=posed.joints[wrist];
+        for(unsigned axis=0;axis<3;++axis) for(unsigned row=0;row<3;++row) hidden.f[axis*4+row]*=.02f;
+        posed.joints[joint]=hidden;
+    }
 }
 inline Upload calibrated_arm_source(const Upload& native,const ArmHierarchy& parents,ArmChain chain,Vec3 shoulder,double limb_scale) {
     if(!valid_hierarchy(parents) || chain.upper>=69 || chain.wrist>=69 || !finite(shoulder) ||

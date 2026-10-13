@@ -63,5 +63,11 @@ int main() {
     put(component+0x18,rig::Identity{7,10});unsigned reads{};
     auto recycling=[&](std::uintptr_t at,void* out,std::size_t size) {const bool ok=read(at,out,size);if(at==component+0x18 && ++reads==1) put(component+0x18,rig::Identity{8,10});return ok;};
     assert(!native_rigid_body(recycling,base,entity));
-    std::cout<<"PASS: native dynamic-body registry/component/handle ownership; static/keyframed/compound/attached/recycled exclusion\n";
+    {   // a native carryable (Pickable_Simple beside the body) is left to the game's own Use
+        const std::uintptr_t list2=0x7000000,pickable=0x7100000;
+        put(entity+0x268,rig::List{list2,2,2<<8});put(list2,component);put(list2+8,pickable);put(pickable,base+0x1c5a3b8);
+        assert(!native_rigid_body(read,base,entity));
+        put(entity+0x268,rig::List{entries,1,1<<8});
+    }
+    std::cout<<"PASS: native dynamic-body registry/component/handle ownership; static/keyframed/compound/attached/recycled/native-carryable exclusion\n";
 }

@@ -58,7 +58,7 @@ inline std::vector<std::uint8_t> controls_hint_image(unsigned width=512,unsigned
     const wchar_t* left_lines[]={L"Stick - move (click: sprint)",L"X hold - weapon wheel",L"Y + right stick - lean",
         L"Trigger - power / weapon",L"Grip - grab, interact, fist",L"Menu - pause (hold: journal)"};
     const wchar_t* right_lines[]={L"Stick - turn (down: crouch, click: zoom)",L"A - jump / mantle",L"B - holster weapons",
-        L"Swing - sword attack",L"Grip - grab, interact, block",L"Point a hand at things to use them"};
+        L"Swing - sword attack",L"Grip - grab, interact, block",L"Trigger or sword sideways - block"};
     int body=py(90);
     for(int i=0;i<6;++i) {
         const int used=std::max(paragraph(left_lines[i],24,body,250,18,white),paragraph(right_lines[i],262,body,488,18,white));

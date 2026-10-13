@@ -32,10 +32,10 @@ def compile_script(path,root,seconds):
     if not isinstance(data,dict) or set(data)!={'segments'} or not isinstance(data['segments'],list) or not 1<=len(data['segments'])<=128:
         raise ValueError('Script requires only segments, with1..128 entries')
     POSES=('head_offset','left_hand_offset','right_hand_offset')
-    version=3 if any(isinstance(s,dict) and set(POSES)&set(s) for s in data['segments']) else 2 if any(isinstance(s,dict) and 'head_pitch_degrees' in s for s in data['segments']) else 1
+    version=4 if any(isinstance(s,dict) and 'hand_pitch_degrees' in s for s in data['segments']) else 3 if any(isinstance(s,dict) and set(POSES)&set(s) for s in data['segments']) else 2 if any(isinstance(s,dict) and 'head_pitch_degrees' in s for s in data['segments']) else 1
     duration=seconds*1000;lines=[f'D2VR_GAMEPLAY_SCRIPT {version} {duration} {len(data["segments"])}'];previous=0
     for segment in data['segments']:
-        if not isinstance(segment,dict) or not {'start_ms','end_ms','input'}<=set(segment) or set(segment)-{'start_ms','end_ms','input','head_pitch_degrees','head_offset','left_hand_offset','right_hand_offset'}:
+        if not isinstance(segment,dict) or not {'start_ms','end_ms','input'}<=set(segment) or set(segment)-{'start_ms','end_ms','input','head_pitch_degrees','head_offset','left_hand_offset','right_hand_offset','hand_pitch_degrees'}:
             raise ValueError('Each segment requires start_ms, end_ms, input and optional head_pitch_degrees')
         pitch=segment.get('head_pitch_degrees',0)
         if type(pitch) not in (int,float) or not -80<=pitch<=80 or not math.isfinite(pitch):
@@ -52,11 +52,16 @@ def compile_script(path,root,seconds):
                 raise ValueError('Analog fields require finite stick[-1,1] or trigger/grip[0,1]')
         fields=[start,end]+[values.get(name,0) for name in AXES]+[int(values.get(name,False)) for name in BUTTONS]
         if version>=2:fields.append(pitch)
-        if version==3:
+        if version>=3:
             for name in POSES:
                 offset=segment.get(name,[0,0,0])
                 if not isinstance(offset,list) or len(offset)!=3 or any(type(v) not in (int,float) or not math.isfinite(v) or abs(v)>2 for v in offset):
                     raise ValueError(name+' requires three finite metres within 2')
                 fields.extend(offset)
+        if version==4:  # both hands pitched about their right axis (negative points down), degrees
+            hand_pitch=segment.get('hand_pitch_degrees',0)
+            if type(hand_pitch) not in (int,float) or not -89<=hand_pitch<=89 or not math.isfinite(hand_pitch):
+                raise ValueError('Hand pitch requires finite degrees in[-89,89]')
+            fields.append(hand_pitch)
         lines.append(' '.join(map(str,fields)));previous=end
     return text,'\n'.join(lines)+'\n'

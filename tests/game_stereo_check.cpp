@@ -62,6 +62,13 @@ int main() {
     if(!require(kept && std::abs((*kept)[2]-(*projection)[2]-.0004f)<1e-6f && std::abs((*kept)[6]-(*projection)[6]+.0003f)<1e-6f)) return 1;
     jittered[2]=.2f; // an off-centre frustum, not jitter
     if(!require(d2vr::eye_projection(jittered,optical)->at(2)==(*projection)[2])) return 1;
+    // Injected TAA jitter must move the image the way the native TAA dejitters it: content shifts by
+    // -j*(1,-1) in UV (y down), so its sample at uv - cb_jittervectors.xy*(1,-1) lands on the pixel.
+    const auto j=d2vr::engine_taa_jitter(13,2496,2688); // counter%8 == 5: (-7,1)/16 px
+    if(!require(std::abs(j.x+7.f/16/2496)<1e-9f && std::abs(j.y-1.f/16/2688)<1e-9f)) return 1;
+    auto taa_projection=*symmetric_projection;d2vr::apply_taa_jitter(taa_projection,j);
+    const float centre_u=.5f-taa_projection[2]*.5f,centre_v=.5f+taa_projection[6]*.5f; // view ray (0,0,-1)
+    if(!require(std::abs((centre_u-.5f)+j.x)<2e-7f && std::abs((centre_v-.5f)-j.y)<2e-7f)) return 1;
     native_projection[14]=1;
     if(!require(!d2vr::eye_projection(native_projection,optical))) return 1;
     wrong=data;std::uint32_t split_screen=1;std::memcpy(wrong.data()+48,&split_screen,4);

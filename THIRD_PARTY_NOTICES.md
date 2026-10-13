@@ -34,8 +34,15 @@ Only the generated headers and licenses are included. Source: KhronosGroup/OpenX
 tag `release-1.1.63`, commit `f2448a8797c85814aa892efc1ab8707900fbcc78`.
 The original copyright/SPDX notices are retained in each header; license texts
 are in `third_party/openxr/LICENSES/`. `source.json` records each downloaded file's SHA-256.
-No replacement runtime or loader is installed or distributed. The diagnostic
-uses the OpenXR loader already installed with SteamVR.
+No OpenXR runtime is installed or distributed.
+
+## Khronos OpenXR loader (binary)
+
+`third_party/openxr/bin/openxr_loader.dll` is the unmodified x64 release build of the Khronos OpenXR loader 1.1.63
+(`openxr_loader_windows-1.1.63.zip` from KhronosGroup/OpenXR-SDK-Source releases; PGP signature verified, see
+`third_party/openxr/bin/source.json`), Apache License 2.0 (`third_party/openxr/bin/LICENSE`). The mod loads it so any
+active OpenXR runtime (Virtual Desktop, Oculus, SteamVR) works without SteamVR installed; SteamVR's copy is a fallback.
+The launcher installs it beside the mod.
 
 ## IGCS Dishonored 2 research
 
@@ -110,3 +117,42 @@ SOFTWARE.
 ## SMAA
 
 The shader and lookup textures are from [iryoku/smaa](https://github.com/iryoku/smaa), commit `71c806a838bdd7d517df19192a20f0c61b3ca29d`. The original MIT license and copyright notices are retained in `third_party/smaa/LICENSE.txt` and the source files. `source.json` pins each file hash. `tools/embed_smaa.py` verifies the source and embeds the shader for runtime compilation. The integration uses SMAA 1x Ultra colour-edge detection and linear-space neighborhood blending independently for each eye, without sharpening or temporal reprojection.
+
+## AMD FidelityFX SDK (FSR 3 upscaler, DX11 backend)
+
+Headers and prebuilt release x64 static libraries (`ffx_backend_dx11`, `ffx_fsr3`, `ffx_fsr3upscaler`, `ffx_frameinterpolation`, `ffx_opticalflow`) are copied from the [Luma Framework](https://github.com/Filoppi/Luma-Framework) clone's `Source/External/FidelityFX` (SDK 1.0.1 headers, AMD copyright 2023-2024, MIT). The MIT license text is retained in `third_party/fidelityfx/LICENSE.txt`. The libraries are built with `/MD` by the third party and were not rebuilt here. Used by `src/fsr3_eye_upscaler.hpp` for the DX11 path and fallback.
+
+## AMD FSR SDK 2.3 (optional FSR 4.1.1 upscaler)
+
+The optional DX12 bridge uses unmodified public API headers and AMD-signed
+loader/upscaler DLLs from the official [FSR SDK v2.3.0 release](https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK/releases/tag/v2.3.0),
+commit `60f4ea81909200d8542eca14dccb2628b763a9a3`. Source URLs, file hashes
+and signature evidence are retained in `third_party/fsr4/manifest.json`.
+The complete AMD license and third-party notices are retained in
+`third_party/fsr4/licenses/license.md`; copyright notices remain in the headers.
+The DLLs have not been modified or rebuilt. Local compatibility headers forward
+to the vendor's original directory structure. No frame generation is integrated.
+
+## bcdec (BC7 partition tables in the launcher)
+
+`launcher/ArtImport.cs` decodes BC7 game textures with partition tables taken from
+[iOrange/bcdec](https://github.com/iOrange/bcdec) `bcdec.h` v0.985 (Copyright (c) 2022 Sergii Kudlai),
+available under the MIT License or the Unlicense; used here under the MIT License:
+
+> Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated
+> documentation files (the "Software"), to deal in the Software without restriction, including without limitation the
+> rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit
+> persons to whom the Software is furnished to do so, subject to the following conditions: The above copyright notice
+> and this permission notice shall be included in all copies or substantial portions of the Software.
+> THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED.
+
+The rest of the decoder (BC7 modes, BC1 colour, BC3/BC4 alpha) follows the public D3D11 BC7 format specification and
+reproduces Pillow's BC1/BC3 integer rounding.
+
+## Launcher bundle
+
+`launcher/dist/DishonoredVRLauncher.exe` is a self-contained .NET 8 application (the .NET runtime is MIT licensed). It
+embeds the mod DLL (which statically links MinHook, SMAA and the FidelityFX FSR 3 libraries above), the AMD FSR 4
+loader/upscaler DLLs, this file and the license files listed above (`third_party/*/LICENSE*`, `third_party/fsr4/licenses/*`),
+and writes them to the user's mod home (`%LOCALAPPDATA%\DishonoredVR`). It contains no Dishonored 2 assets: game art is
+read from the user's own install at runtime.

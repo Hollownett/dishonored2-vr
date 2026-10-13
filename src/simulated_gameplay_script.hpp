@@ -8,12 +8,12 @@
 namespace d2vr {
 // Developer commands only. Native pad composition still applies its release gates.
 class SimulatedGameplayScript {
-    struct Segment {UINT64 start{},end{};ControllerInput input{};float head_pitch_degrees{};std::array<float,9> offsets{};};
+    struct Segment {UINT64 start{},end{};ControllerInput input{};float head_pitch_degrees{},hand_pitch_degrees{};std::array<float,9> offsets{};};
     std::vector<Segment> segments_;
 public:
     void load(std::istream& source,unsigned seconds) {
         std::string magic;unsigned version{},duration{},count{};
-        if(!(source>>magic>>version>>duration>>count) || magic!="D2VR_GAMEPLAY_SCRIPT" || (version<1 || version>3) ||
+        if(!(source>>magic>>version>>duration>>count) || magic!="D2VR_GAMEPLAY_SCRIPT" || (version<1 || version>4) ||
            seconds<10 || seconds>120 || duration!=seconds*1000 || count==0 || count>128)
             throw std::invalid_argument("Invalid gameplay script header");
         std::vector<Segment> parsed;UINT64 previous{};
@@ -31,8 +31,11 @@ public:
             if(version>=2 && (!(source>>s.head_pitch_degrees) || !std::isfinite(s.head_pitch_degrees) ||
                 s.head_pitch_degrees<-80 || s.head_pitch_degrees>80)) throw std::invalid_argument("Invalid gameplay script head pitch");
             // Version 3: head, left hand, right hand offsets in metres (XR local space).
-            if(version==3) for(auto& value:s.offsets)
+            if(version>=3) for(auto& value:s.offsets)
                 if(!(source>>value) || !std::isfinite(value) || std::abs(value)>2) throw std::invalid_argument("Invalid gameplay script pose offset");
+            // Version 4: both hands pitched (degrees, negative points down) so tests can aim at the floor.
+            if(version==4 && (!(source>>s.hand_pitch_degrees) || !std::isfinite(s.hand_pitch_degrees) || std::abs(s.hand_pitch_degrees)>89))
+                throw std::invalid_argument("Invalid gameplay script hand pitch");
             parsed.push_back(s);previous=s.end;
         }
         std::string extra;if(source>>extra) throw std::invalid_argument("Trailing gameplay script data");
@@ -56,6 +59,10 @@ public:
     std::array<float,9> offsets(UINT64 elapsed) const noexcept {
         for(const auto& s:segments_) if(elapsed>=s.start && elapsed<s.end) return s.offsets;
         return {};
+    }
+    float hand_pitch(UINT64 elapsed) const noexcept {
+        for(const auto& s:segments_) if(elapsed>=s.start && elapsed<s.end) return s.hand_pitch_degrees;
+        return 0;
     }
     std::size_t size() const noexcept {return segments_.size();}
     // OpenXR -Z forward: negative rotation about +X looks down, as scripted_pitch does.

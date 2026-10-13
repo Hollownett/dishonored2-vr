@@ -1,0 +1,390 @@
+{
+  "native_weapon_dry_lease_check": {
+    "suites": [
+      "fast"
+    ],
+    "source": "tests/native_weapon_dry_lease_check.cpp"
+  },
+  "native_art_movie_patch_check": {
+    "suites": [
+      "fast"
+    ],
+    "source": "tests/native_art_movie_patch_check.cpp"
+  },
+  "native_menu_patch_check": {
+    "suites": [
+      "fast"
+    ],
+    "source": "tests/native_menu_patch_check.py"
+  },
+  "synchronized_observer_check": {
+    "suites": [
+      "fast"
+    ],
+    "source": "tests/synchronized_observer_check.cpp"
+  },
+  "live_session_tools_check": {
+    "suites": [
+      "fast"
+    ],
+    "source": "tests/live_session_tools_check.py"
+  },
+  "wheel_avatar_check": {
+    "suites": [
+      "fast"
+    ],
+    "source": "tests/wheel_avatar_check.cpp"
+  },
+  "native_action_camera_check": {
+    "suites": [
+      "fast"
+    ],
+    "source": "tests/native_action_camera_check.cpp"
+  },
+  "native_use_order_check": {
+    "suites": [
+      "fast"
+    ],
+    "source": "tests/native_use_order_check.cpp"
+  },
+  "native_hand_volume_check": {
+    "suites": [
+      "fast"
+    ],
+    "source": "tests/native_hand_volume_check.cpp"
+  },
+  "body_anchor_check": {
+    "suites": [
+      "fast"
+    ],
+    "source": "tests/body_anchor_check.cpp"
+  },
+  "arm_tracking_check": {
+    "suites": [
+      "fast"
+    ],
+    "source": "tests/arm_tracking_check.cpp"
+  },
+  "native_art_bounds_check": {
+    "suites": [
+      "fast"
+    ],
+    "source": "tests/native_art_bounds_check.cpp"
+  },
+  "native_marker_child_binding_check": {
+    "suites": [
+      "fast"
+    ],
+    "source": "tests/native_marker_child_binding_check.cpp"
+  },
+  "native_wrist_art_publisher_check": {
+    "suites": [
+      "fast"
+    ],
+    "source": "tests/native_wrist_art_publisher_check.cpp"
+  },
+  "wrist_hud_image_check": {
+    "suites": [
+      "fast"
+    ],
+    "source": "tests/wrist_hud_image_check.cpp"
+  },
+  "hud_window_check": {
+    "suites": [
+      "fast"
+    ],
+    "source": "tests/hud_window_check.cpp"
+  },
+  "native_hud_child_draw_check": {
+    "suites": [
+      "fast"
+    ],
+    "source": "tests/native_hud_child_draw_check.cpp"
+  },
+  "native_interaction_two_hand_check": {
+    "suites": [
+      "fast"
+    ],
+    "source": "tests/native_interaction_two_hand_check.cpp"
+  },
+  "native_takedown_check": {
+    "suites": [
+      "fast"
+    ],
+    "source": "tests/native_takedown_check.cpp"
+  },
+  "native_shot_aim_check": {
+    "suites": [
+      "fast"
+    ],
+    "source": "tests/native_shot_aim_check.cpp"
+  },
+  "head_locomotion_check": {
+    "suites": [
+      "fast"
+    ],
+    "source": "tests/head_locomotion_check.cpp"
+  },
+  "turn_control_check": {
+    "suites": [
+      "fast"
+    ],
+    "source": "tests/turn_control_check.cpp"
+  },
+  "native_menu_entry_lifecycle_check": {
+    "suites": [
+      "fast"
+    ],
+    "source": "tests/native_menu_entry_lifecycle_check.cpp"
+  },
+  "game_xr_simulation_check": {
+    "suites": [
+      "gpu"
+    ],
+    "source": "tests/game_xr_simulation_check.cpp"
+  },
+  "native_hud_child_capture_check": {
+    "suites": [
+      "gpu"
+    ],
+    "source": "tests/native_hud_child_capture_check.cpp"
+  },
+  "world_ui_capture_check": {
+    "suites": [
+      "gpu"
+    ],
+    "source": "tests/world_ui_capture_check.cpp"
+  },
+  "render_size_check": {
+    "suites": [
+      "gpu"
+    ],
+    "source": "tests/render_size_check.cpp"
+  },
+  "render_scale_transaction_check": {
+    "suites": [
+      "gpu"
+    ],
+    "source": "tests/render_scale_transaction_check.cpp"
+  },
+  "desktop_mirror_check": {
+    "suites": [
+      "gpu"
+    ],
+    "source": "tests/desktop_mirror_check.cpp"
+  },
+  "eye_sharpen_check": {
+    "suites": [
+      "gpu"
+    ],
+    "source": "tests/eye_sharpen_check.cpp"
+  },
+  "body_ik_check": {
+    "suites": [
+      "replay"
+    ],
+    "source": "tests/body_ik_check.cpp"
+  },
+  "game_xr_wrist_recovery_check": {
+    "suites": [
+      "gpu"
+    ],
+    "source": "tests/game_xr_wrist_recovery_check.cpp"
+  },
+  "native_ui_layout_check": {
+    "suites": [
+      "fast"
+    ],
+    "source": "tests/native_ui_layout_check.cpp"
+  },
+  "full_body_driver_check": {
+    "suites": [
+      "fast"
+    ],
+    "source": "tests/full_body_driver_check.cpp"
+  },
+  "body_renderer_check": {
+    "suites": [
+      "fast"
+    ],
+    "source": "tests/body_renderer_check.cpp"
+  },
+  "avatar_calibration_check": {
+    "suites": [
+      "fast"
+    ],
+    "source": "tests/avatar_calibration_check.cpp"
+  },
+  "native_interaction_range_check": {
+    "suites": [
+      "fast"
+    ],
+    "source": "tests/native_interaction_range_check.cpp"
+  },
+  "native_attachment_pose_check": {
+    "suites": [
+      "fast"
+    ],
+    "source": "tests/native_attachment_pose_check.cpp"
+  },
+  "native_lean_query_trace_check": {
+    "suites": [
+      "fast"
+    ],
+    "source": "tests/native_lean_query_trace_check.cpp"
+  },
+  "native_interaction_range_abi_check": {
+    "suites": [
+      "fast"
+    ],
+    "source": "tests/native_interaction_range_abi_check.py"
+  },
+  "native_hud_fallback_check": {
+    "suites": [
+      "gpu"
+    ],
+    "source": "tests/native_hud_fallback_check.cpp"
+  },
+  "native_fire_seam_trace_check": {
+    "suites": [
+      "fast"
+    ],
+    "source": "tests/native_fire_seam_trace_check.cpp"
+  },
+  "test_playground_capture": {
+    "source": "tests/test_playground_capture.py",
+    "suites": [
+      "fast"
+    ]
+  },
+  "game_rig_check": {
+    "source": "tests/game_rig_check.cpp",
+    "suites": [
+      "fast"
+    ]
+  },
+  "native_arm_binding_snapshot_check": {
+    "source": "tests/native_arm_binding_snapshot_check.cpp",
+    "suites": [
+      "fast"
+    ]
+  },
+  "native_readable_range_check": {
+    "suites": [
+      "fast"
+    ],
+    "source": "tests/native_readable_range_check.cpp"
+  },
+  "native_pose_pipeline_check": {
+    "suites": [
+      "fast"
+    ],
+    "source": "tests/native_pose_pipeline_check.cpp"
+  },
+  "physical_grab_check": {
+    "suites": [
+      "fast"
+    ],
+    "source": "tests/physical_grab_check.cpp"
+  },
+  "vr_settings_check": {
+    "suites": [
+      "fast"
+    ],
+    "source": "tests/vr_settings_check.cpp"
+  },
+  "avatar_fit_reuse_check": {
+    "suites": [
+      "fast"
+    ],
+    "source": "tests/avatar_fit_reuse_check.cpp"
+  },
+  "avatar_geometry_fit_check": {
+    "suites": ["fast"],
+    "source": "tests/avatar_geometry_fit_check.cpp"
+  },
+  "native_torso_fit_check": {
+    "suites": ["fast"],
+    "source": "tests/native_torso_fit_check.cpp"
+  },
+  "xr_floor_datum_check": {
+    "suites": ["fast"],
+    "source": "tests/xr_floor_datum_check.cpp"
+  },
+  "frame_timing_check": {
+    "suites": ["fast"],
+    "source": "tests/frame_timing_check.py"
+  },
+  "native_grab_compile": {
+    "suites": ["fast"],
+    "source": "tests/native_grab_compile.cpp"
+  },
+  "glyph_swap_async_check": {
+    "suites": ["fast"],
+    "source": "tests/glyph_swap_async_check.cpp"
+  },
+  "glyph_swap_gpu_check": {
+    "suites": ["gpu"],
+    "source": "tests/glyph_swap_gpu_check.cpp"
+  },
+  "avatar_death_reload_wizard_check": {
+    "suites": ["gpu"],
+    "source": "tests/avatar_death_reload_wizard_check.cpp"
+  },
+  "avatar_identity_prompt_check": {
+    "suites": ["gpu"],
+    "source": "tests/avatar_identity_prompt_check.cpp"
+  },
+  "frame_timing_queue_check": {
+    "suites": ["fast"],
+    "source": "tests/frame_timing_queue_check.cpp"
+  },
+  "native_grab_sequence_check": {
+    "suites": ["fast"],
+    "source": "tests/native_grab_sequence_check.cpp"
+  },
+  "native_grab_obstruction_check": {
+    "suites": ["fast"],
+    "source": "tests/native_grab_obstruction_check.cpp"
+  },
+  "motion_sword_check": {
+    "suites": ["fast"],
+    "source": "tests/motion_sword_check.cpp"
+  },
+  "native_use_los_anchor_check": {
+    "suites": ["fast"],
+    "source": "tests/native_use_los_anchor_check.cpp"
+  },
+  "native_use_fetch_completion_check": {
+    "suites": ["fast"],
+    "source": "tests/native_use_fetch_completion_check.cpp"
+  },
+  "calibrated_body_anchor_check": {
+    "suites": ["fast"],
+    "source": "tests/calibrated_body_anchor_check.cpp"
+  },
+  "native_interaction_install_order_check": {
+    "suites": ["fast"],
+    "source": "tests/native_interaction_install_order_check.cpp"
+  },
+  "vr_controls_check": {
+    "suites": ["fast"],
+    "source": "tests/vr_controls_check.cpp"
+  },
+  "play_controls_check": {
+    "suites": ["fast"],
+    "source": "tests/play_controls_check.cpp"
+  },
+  "native_grab_lifetime_check": {
+    "suites": ["fast"],
+    "source": "tests/native_grab_lifetime_check.cpp"
+  },
+  "game_xr_motion_check": {
+    "suites": ["gpu"],
+    "source": "tests/game_xr_motion_check.cpp"
+  },
+  "live_performance_check": {
+    "suites": ["fast"],
+    "source": "tests/live_performance_check.py"
+  }
+}

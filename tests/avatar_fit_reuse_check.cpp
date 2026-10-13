@@ -14,11 +14,16 @@ int main() {
         arm.mesh={0x10000+side*0x100,0x20000+side*0x100,{{0x30000+side*0x100,1,100,50}}};
         for(unsigned joint=0;joint<69;++joint) {arm.labels[joint]=(side?"right":"left")+std::to_string(joint);arm.inverse[joint]={1,0,0,0,0,1,0,0,0,0,1,0};}
     }
-    const AvatarCalibrationResult fit{7,1.6,.32,.22,1.6/1.5,{}};
+    const AvatarCalibrationResult fit{7,1.6,.3,.22,1.6/1.5,{}};
     AvatarFitReuse gate;
     assert(gate.recalibration_required() && !gate.poses_allowed());
     assert(!gate.verify(key,7) && !gate.active_fit());
     assert(gate.accept(key,fit,7) && gate.active_fit());
+    auto inferred_shoulders=fit;inferred_shoulders.shoulder_span_metres=.32;
+    assert(!gate.accept(key,inferred_shoulders,7));
+    inferred_shoulders.shoulder_span_measured=true;
+    assert(gate.accept(key,inferred_shoulders,7));
+    assert(gate.accept(key,fit,7));
     gate.suspend(7);assert(gate.has_accepted_fit() && !gate.active_fit());
     assert(!gate.poses_allowed());
     assert(!gate.verify({},7) && gate.has_accepted_fit() && !gate.active_fit());
@@ -53,6 +58,46 @@ int main() {
     assert(!gate.accept(key,wrong_dimensions,7));
     assert(gate.accept(key,fit,7));auto invalid=fit;invalid.arm_scale=std::numeric_limits<double>::quiet_NaN();
     assert(!gate.accept(key,invalid,7));assert(gate.active_fit());
+    {
+        auto independent=fit;independent.shoulder_span_metres=.44;independent.shoulder_span_measured=true;
+        independent.torso_width_metres=.47;independent.torso_width_measured=true;
+        independent.arm_reach_metres={.53,.63};independent.arm_lengths_measured=true;
+        assert(same_avatar_calibration(independent,independent));
+        auto different=independent;different.arm_reach_metres[0]=.54;assert(!same_avatar_calibration(independent,different));
+        different=independent;different.torso_width_metres=.48;assert(!same_avatar_calibration(independent,different));
+        different=independent;different.torso_width_measured=false;assert(!same_avatar_calibration(independent,different));
+        different=independent;different.arm_lengths_measured=false;assert(!same_avatar_calibration(independent,different));
+        different=independent;different.standing_eye_height_metres=1.7;assert(!same_avatar_calibration(independent,different));
+        assert(gate.accept(key,independent,7));
+        const auto preserves=[&](const AvatarCalibrationResult& candidate) {
+            assert(!gate.accept(key,candidate,7));
+            const auto retained=gate.active_fit();assert(retained && gate.poses_allowed());
+            assert(same_avatar_calibration(*retained,independent));
+            assert(gate.verify(key,7));
+        };
+        for(const double bad:{std::numeric_limits<double>::quiet_NaN(),std::numeric_limits<double>::infinity(),.149,.801}) {
+            auto candidate=independent;candidate.torso_width_metres=bad;preserves(candidate);
+        }
+        for(unsigned side=0;side<2;++side)for(const double bad:{std::numeric_limits<double>::quiet_NaN(),-.5,.249,1.001}) {
+            auto candidate=independent;candidate.arm_reach_metres[side]=bad;preserves(candidate);
+        }
+        auto candidate=independent;candidate.torso_width_measured=false;preserves(candidate);
+        candidate=independent;candidate.torso_width_metres.reset();preserves(candidate);
+        candidate=independent;candidate.arm_lengths_measured=false;preserves(candidate);
+        candidate=independent;candidate.arm_reach_metres[1].reset();preserves(candidate);
+        candidate=independent;candidate.arm_reach_metres={};preserves(candidate);
+        candidate=independent;candidate.shoulder_span_metres=.149;preserves(candidate);
+        candidate=independent;candidate.shoulder_span_metres=.651;preserves(candidate);
+        // Partial supplied measurements are supported without pretending that
+        // both arms have been measured. All boundary values remain inclusive.
+        candidate=independent;candidate.arm_reach_metres[1].reset();candidate.arm_lengths_measured=false;
+        assert(gate.accept(key,candidate,7));assert(gate.active_fit()->arm_reach_metres[0]==.53 && !gate.active_fit()->arm_reach_metres[1]);
+        for(const double width:{.15,.8}) {
+            candidate=independent;candidate.torso_width_metres=width;assert(gate.accept(key,candidate,7));
+        }
+        candidate=independent;candidate.arm_reach_metres={.25,1.};assert(gate.accept(key,candidate,7));
+        assert(gate.accept(key,fit,7)); // legacy T-pose-only metadata remains supported
+    }
     gate.clear();assert(!gate.has_accepted_fit() && !gate.active_fit());
     assert(gate.recalibration_required() && !gate.poses_allowed());
     // Same-space retry cancellation retains accepted fit, while reference

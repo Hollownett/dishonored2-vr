@@ -5,6 +5,14 @@
 #include <optional>
 
 namespace d2vr {
+struct NativeInteractionTargetIdentity {
+    std::uintptr_t object{};int generation{-1};unsigned side{2};std::uint64_t epoch{},revision{};
+    explicit operator bool() const noexcept{return object && generation>=0 && side<2 && epoch && revision;}
+};
+inline bool operator==(const NativeInteractionTargetIdentity& a,const NativeInteractionTargetIdentity& b) noexcept {
+    return a.object==b.object && a.generation==b.generation && a.side==b.side && a.epoch==b.epoch && a.revision==b.revision;
+}
+inline bool operator!=(const NativeInteractionTargetIdentity& a,const NativeInteractionTargetIdentity& b) noexcept{return !(a==b);}
 // Native BVH and queued-query ray. 0x08ffb0 copies all 48 bytes before queuing.
 struct InteractionRay {std::array<float,12> f;};
 static_assert(sizeof(InteractionRay)==48);
@@ -29,6 +37,7 @@ inline std::optional<InteractionRay> controller_interaction_ray(const Interactio
     const auto vector=hand.basis[0]*extent;
     InteractionRay result=native;
     result.f[0]=static_cast<float>(at.x);result.f[1]=static_cast<float>(at.y);result.f[2]=static_cast<float>(at.z);
+    for(unsigned axis=0;axis<3;++axis)if(!std::isfinite(result.f[axis]))return {};
     result.f[4]=static_cast<float>(vector.x);result.f[5]=static_cast<float>(vector.y);result.f[6]=static_cast<float>(vector.z);
     flags=0x3f000000;
     for(unsigned axis=0;axis<3;++axis) {

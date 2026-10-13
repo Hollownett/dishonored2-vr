@@ -193,15 +193,28 @@ public:
         if(!(*candidate==*accepted_template_)) {discard_fit();return false;}
         return ready_=true;
     }
-    bool accept(const AvatarFitTemplate& key,const AvatarCalibrationResult& fit,std::uint64_t epoch) {
+    static bool can_accept(const AvatarFitTemplate& key,const AvatarCalibrationResult& fit,std::uint64_t epoch) {
+        const auto valid_dimension=[](const std::optional<double>& value,double low,double high) {
+            return !value || (std::isfinite(*value) && *value>=low && *value<=high);
+        };
         if(!complete_avatar_fit_template(key) || !epoch || fit.reference_epoch!=epoch ||
            !std::isfinite(fit.palm_span_metres) || fit.palm_span_metres<.9 || fit.palm_span_metres>2.4 ||
            !std::isfinite(fit.arm_scale) || fit.arm_scale<.7 || fit.arm_scale>1.45 ||
            !std::isfinite(fit.shoulder_span_metres) || fit.shoulder_span_metres<.1 || fit.shoulder_span_metres>.95 ||
            !std::isfinite(fit.eye_to_shoulder_metres) || fit.eye_to_shoulder_metres<.05 || fit.eye_to_shoulder_metres>.4 ||
            (fit.standing_eye_height_metres && (!std::isfinite(*fit.standing_eye_height_metres) || *fit.standing_eye_height_metres<.9 || *fit.standing_eye_height_metres>2.2)) ||
+           !valid_dimension(fit.torso_width_metres,.15,.8) || fit.torso_width_measured!=fit.torso_width_metres.has_value() ||
+           !valid_dimension(fit.arm_reach_metres[0],.25,1.) || !valid_dimension(fit.arm_reach_metres[1],.25,1.) ||
+           fit.arm_lengths_measured!=(fit.arm_reach_metres[0].has_value() && fit.arm_reach_metres[1].has_value()) ||
+           (fit.shoulder_span_measured && (fit.shoulder_span_metres<.15 || fit.shoulder_span_metres>.65)) ||
+           // arm_scale remains the total-span ratio; independently measured
+           // reaches need not be equal or scale in that same ratio.
            std::abs(fit.palm_span_metres-key.measurements.palm_span_metres*fit.arm_scale)>1e-9 ||
-           std::abs(fit.shoulder_span_metres-key.measurements.shoulder_span_metres*fit.arm_scale)>1e-9) return false;
+           (!fit.shoulder_span_measured && std::abs(fit.shoulder_span_metres-key.measurements.shoulder_span_metres)>1e-9)) return false;
+        return true;
+    }
+    bool accept(const AvatarFitTemplate& key,const AvatarCalibrationResult& fit,std::uint64_t epoch) {
+        if(!can_accept(key,fit,epoch))return false;
         accepted_template_=key;accepted_fit_=fit;ready_=true;return true;
     }
     bool has_accepted_fit() const {return accepted_fit_.has_value();}

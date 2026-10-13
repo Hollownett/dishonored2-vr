@@ -176,7 +176,8 @@ public:
     // Clears intent only; the game thread restores the launch frame it owns.
     void clear() {std::lock_guard<std::mutex> lock(mutex_);hand_={};}
     void install(std::uintptr_t base,Read read,Logic logic,const std::filesystem::path& file,bool route=false) {
-        if(!base || !read || !logic || active_ || (instance_ && instance_!=this))
+        if(!base || !read || !logic || active_ || enabled_[0] || depth_ ||
+           (original_ && base!=base_) || (instance_ && instance_!=this))
             throw std::runtime_error("Invalid native shot aim ownership");
         base_=base;read_=read;logic_=logic;
         std::array<std::byte,32> code{};
@@ -196,7 +197,7 @@ public:
             "hand_origin0,hand_origin1,hand_origin2,hand_forward0,hand_forward1,hand_forward2\n";
         clear();calls_=routed_=rejected_=overlap_=rows_=0;failed_=false;route_=route;instance_=this;
         const auto target=reinterpret_cast<void*>(base_+shot_aim_rva);
-        if(MH_CreateHook(target,reinterpret_cast<void*>(&launch),reinterpret_cast<void**>(&original_))!=MH_OK)
+        if(!original_ && MH_CreateHook(target,reinterpret_cast<void*>(&launch),reinterpret_cast<void**>(&original_))!=MH_OK)
             throw std::runtime_error("Cannot create native shot launch hook; retire the fire seam trace first");
         if(MH_EnableHook(target)!=MH_OK) throw std::runtime_error("Cannot enable native shot launch hook");
         enabled_[0]=true;active_=true;

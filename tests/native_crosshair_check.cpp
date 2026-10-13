@@ -27,9 +27,9 @@ static unsigned setter_calls{};
 static void* set_object{};
 static std::array<void*,4> set_members{};
 static std::array<float,4> set_values{};
-static void __fastcall fake_setter(void* object,const float* value,void* member) {
+static std::uint64_t __fastcall fake_setter(void* object,const float* value,void* member) {
     if(setter_calls<set_members.size()) {set_members[setter_calls]=member;set_values[setter_calls]=value?*value:0.0f;}
-    set_object=object;++setter_calls;
+    set_object=object;++setter_calls;return 1;
 }
 static void __fastcall original(void*) {}
 extern "C" MH_STATUS WINAPI MH_CreateHook(LPVOID,LPVOID hook,LPVOID* out) {
@@ -142,11 +142,11 @@ int main() {
         setter_calls=0;set_object=nullptr;set_latch(element,std::byte{1});
         crosshair.publish(0.5f,-0.25f,1,GetTickCount64(),true);
         call(element.bytes.data());
-        require(setter_calls==2 && crosshair.applied()==1 && crosshair.latch_clears()==1,"Hand NDC reaches the engine setter");
-        require(set_object==reinterpret_cast<void*>(element.bytes.data()),"The cached AS3 object is the setter receiver");
+        require(setter_calls==2 && crosshair.applied()==1 && crosshair.latch_clears()==0,"Hand NDC reaches the engine setter");
+        require(set_object==reinterpret_cast<void*>(element.bytes.data()+object_offset),"The cached AS3 object FIELD ADDRESS is the pinned setter receiver");
         require(set_members[0]==element.bytes.data()+x_member_offset && std::abs(set_values[0]-480.0f)<1e-3f,"x uses member +0x660");
         require(set_members[1]==element.bytes.data()+y_member_offset && std::abs(set_values[1]-135.0f)<1e-3f,"y uses member +0x670");
-        require(latch(element)==std::byte{0},"The centred latch is cleared for the handback");
+        require(latch(element)==std::byte{1},"The active correction does not change the native centred latch");
 
         setter_calls=0;set_latch(element,std::byte{1});
         crosshair.publish(0.5f,-0.25f,1,GetTickCount64()-1000,true);
@@ -156,7 +156,7 @@ int main() {
         crosshair.publish(0.5f,-0.25f,0,GetTickCount64(),true);
         call(element.bytes.data());
         require(setter_calls==0 && crosshair.skipped()==3,"Stale, inactive and unepoched publications write nothing");
-        require(latch(element)==std::byte{1},"A non-owning frame leaves the engine's latch alone");
+        require(latch(element)==std::byte{0} && crosshair.latch_clears()==1,"First stale frame clears the latch exactly once for native handback");
 
         set_stage(1000.0f,2000.0f);setter_calls=0;
         crosshair.publish(1.0f,0.0f,2,GetTickCount64(),true);
@@ -181,7 +181,7 @@ int main() {
         const auto clears_before=crosshair.latch_clears();
         crosshair.publish(0.0f,0.0f,6,GetTickCount64(),true);
         call(element.bytes.data());
-        require(setter_calls==0 && crosshair.latch_clears()==clears_before+1 && latch(element)==std::byte{0},"A released AS3 object is never written through");
+        require(setter_calls==0 && crosshair.latch_clears()==clears_before && latch(element)==std::byte{1},"A released AS3 object is never written through");
         const std::uintptr_t object=reinterpret_cast<std::uintptr_t>(element.bytes.data());
         std::memcpy(element.bytes.data()+object_offset,&object,8);
         std::memcpy(element.bytes.data()+movie_offset,&zero,8);set_latch(element,std::byte{1});setter_calls=0;
@@ -194,8 +194,11 @@ int main() {
         bad_write=true;set_latch(element,std::byte{1});setter_calls=0;
         crosshair.publish(0.25f,0.5f,8,GetTickCount64(),true);
         call(element.bytes.data());
-        require(setter_calls==2 && crosshair.latch_failures()==1,"A latch failure is counted, not fatal");
-        bad_write=false;
+        require(setter_calls==2 && crosshair.latch_failures()==0,"An active correction needs no latch write");
+        crosshair.clear();call(element.bytes.data());
+        require(crosshair.latch_failures()==1 && latch(element)==std::byte{1},"A failed handback retains restoration intent");
+        bad_write=false;const auto retried=crosshair.latch_clears();call(element.bytes.data());
+        require(crosshair.latch_clears()==retried+1 && latch(element)==std::byte{0},"Handback retries on next native owned update");
 
         require(crosshair.disable() && disables==2 && !crosshair.routing(),"Clean routed disable");
         setter_calls=0;const auto final_clears=crosshair.latch_clears();

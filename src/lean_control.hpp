@@ -41,10 +41,13 @@ public:
         if(wheel_blocked_) out.left_grip=0;
         const bool fresh_y=raw.y && !previous_y_;previous_y_=raw.y;
         if(!usable) {
-            out.lean_suspended=gameplay && (!known || observed->active);
+            out.lean_suspended=gameplay && observed && (!known || observed->active);
             if(out.lean_suspended) out.move_x=out.move_y=out.turn_x=out.turn_y=0;
             return out; // Menu and journal remain untouched. No synthetic edge.
         }
+        // No lean state at all (e.g. swimming): lean is unavailable, movement is not - blocking here and in the
+        // release phase below kept the stick at zero in water. A readable mouse-mode active lean still blocks.
+        if(!observed) return out;
         if(!known) {
             out.lean_suspended=true;out.move_x=out.move_y=out.turn_x=out.turn_y=0;
             return out;
@@ -72,7 +75,7 @@ public:
         if(phase_==Phase::rearm && !raw.y && centered(raw.move_x,raw.move_y) && centered(raw.turn_x,raw.turn_y)) phase_=Phase::ready;
         out.y=phase_==Phase::enter || phase_==Phase::hold || phase_==Phase::pulse;
         out.lean_modifier=phase_==Phase::hold;
-        out.lean_suspended=phase_!=Phase::ready || active;
+        out.lean_suspended=active || (phase_!=Phase::ready && phase_!=Phase::release) || (phase_==Phase::release && raw.y);
         if(out.lean_suspended && !out.lean_modifier) {
             out.move_x=out.move_y=out.turn_x=out.turn_y=0;
             out.left_trigger=out.right_trigger=out.left_grip=out.right_grip=0;

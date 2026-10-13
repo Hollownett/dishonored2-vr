@@ -1,0 +1,10 @@
+{
+ "component": "Khronos OpenXR loader (x64, release build)",
+ "license": "Apache-2.0 (bin/LICENSE)",
+ "url": "https://github.com/KhronosGroup/OpenXR-SDK-Source/releases/download/release-1.1.63/openxr_loader_windows-1.1.63.zip",
+ "zip_sha256": "01c631aeabbfe0879540f77ef833416c532a20746285b494630160c23588b771",
+ "zip_member": "x64/bin/openxr_loader.dll",
+ "dll_sha256": "66946ea6e9cc2649e299ec412521c5eafe56c635d05055097fe4db81e11932df",
+ "pgp": "Good signature on the release zip (.asc) from Rylie Pavlik <rylie.pavlik@collabora.com>, subkey 2C997188CFF4CDF0852CDF1F99B518912112B518",
+ "why": "The mod loads this loader instead of SteamVR's copy, so any active OpenXR runtime (Virtual Desktop, Oculus, SteamVR) works without SteamVR installed."
+}

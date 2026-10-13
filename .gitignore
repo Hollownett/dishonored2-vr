@@ -2,3 +2,11 @@
 /artifacts/
 __pycache__/
 *.pyc
+
+# Build outputs and third-party binaries (fetched or built locally, never committed)
+vc140.pdb
+*.pdb
+third_party/**/*.dll
+third_party/**/*.lib
+# Decoded from the game's own animation files: game data stays on the user's machine
+tests/player_clip_fixture.hpp

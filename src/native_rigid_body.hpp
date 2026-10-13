@@ -22,7 +22,7 @@ template<class Read> std::optional<NativeRigidBody> native_rigid_body(Read& read
     const auto game=value<std::uintptr_t>(read,base+0x39a5290);
     // Exact pinned RTTI: base idEntity can own a standalone dynamic prop too.
     if(!game || !typed(read,base,*game,0x1c940a8) ||
-       !(typed(read,base,entity,0x1c886a8) || typed(read,base,entity,0x1c87d58)) || value<std::uintptr_t>(read,*game+0x3130b0)==entity) return {};
+       !(typed(read,base,entity,0x1c886a8) || typed(read,base,entity,0x1c87d58) || typed(read,base,entity,0x1c5de18)) || value<std::uintptr_t>(read,*game+0x3130b0)==entity) return {}; // 0x1c5de18 arkMovable
     const auto id=value<std::uint32_t>(read,entity+0xa8);
     if(!id || *id==0x3fff0010 || (*id>>16)>=0x3fff || value<std::uintptr_t>(read,*game+0x3130b0+(*id>>16)*8)!=entity) return {};
     const auto model=value<std::uintptr_t>(read,entity+0xf0);
@@ -32,6 +32,10 @@ template<class Read> std::optional<NativeRigidBody> native_rigid_body(Read& read
     std::uintptr_t component{};
     for(unsigned i=0;i<entries->packed_count;++i) {
         const auto at=value<std::uintptr_t>(read,entries->data+i*8);
+        // Native carryables (bottles, glasses: arkCpntPickable_Simple 0x1c5a3b8) belong to the game's own Use (HoldObject), which
+        // the mod puts in the tracked hand (native_held_object.hpp). Grabbed physically they fought the native carry, floated or
+        // were lost (sim 2026-10-13: picked, moved 75 frames, ownership lost).
+        if(at && typed(read,base,*at,0x1c5a3b8)) return {};
         if(at && (typed(read,base,*at,0x1c745c8) || typed(read,base,*at,0x1b64b68))) {
             if(component) return {};component=*at;
         }

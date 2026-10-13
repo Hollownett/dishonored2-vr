@@ -12,6 +12,7 @@ Push-Location -LiteralPath $taskProject
 try {
     $taskBuildMode = if ($ViewSetup) {'view_setup'} elseif ($Paired) {'paired'} elseif ($Pipeline) {'pipeline'} elseif ($Candidate) {'candidate'} else {'standard'}
     $taskDiagnosticName = if ($OutputName) { $OutputName } else { switch ($taskBuildMode) { 'view_setup' {'d2vr_render_probe_view_setup.dll'} 'paired' {'d2vr_render_probe_paired.dll'} 'pipeline' {'d2vr_render_probe_pipeline.dll'} 'candidate' {'d2vr_render_probe_candidate.dll'} default {'d2vr_render_probe.dll'} } }
+    if ($taskDiagnosticName -cmatch '_v[0-9]+\.dll$' -and (Test-Path -LiteralPath (Join-Path $taskProject "build\$taskDiagnosticName"))) { throw 'Numbered candidates are preserved. Choose a fresh version; no build was started.' }
     $taskPython = (Get-Command python -ErrorAction Stop).Source
     $taskScriptArgs = @('tools/build.ps1')
     if ($Candidate) { $taskScriptArgs += '-Candidate' }

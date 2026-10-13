@@ -1,18 +1,26 @@
 # Dishonored 2 VR development
 
-## Current build (v118, 9 October 2026)
-How to play: [docs/PLAYING.md](docs/PLAYING.md). Launch with `.\tools\run_demo.ps1`.
+## Current test build (v205, 10 October 2026)
+How to play: [docs/PLAYING.md](docs/PLAYING.md). One click: run `launcher\dist\DishonoredVRLauncher.exe` (a single self-contained
+file: it installs the mod, the Khronos OpenXR loader and art from your own Dishonored 2 install into `%LOCALAPPDATA%\DishonoredVR`,
+then LAUNCH VR starts the game and the mod; see [docs/LAUNCHER.md](docs/LAUNCHER.md)). Developers can still use `.\tools\run_demo.ps1 -Launch`.
 
-Changes since v103:
-- **Hands:** hands with forearms. The shoulder and upper arm collapse into the elbow, so no stump is visible. Fingers curl procedurally from grip and trigger. Hands work without calibration; calibration only refines shoulder placement.
-- **Controls:** grips close the hand and grab with either hand, even while holding the sword. The right grip blocks when there is nothing to grab. The Quick Access Wheel moved from the left grip to an R3 hold.
-- **Hand aiming:** the left hand aims powers and left-hand weapons, the right hand points interactions, and a fast right-hand swing attacks.
-- **Head tracking:** full 6DoF, clamped to 45 cm horizontally and −70/+30 cm vertically.
-- **Image:** per-eye TAA history ([docs/image-quality-research.md](docs/image-quality-research.md)). TAA, no motion blur or DOF, and no dynamic resolution are session-only settings.
-- **Stability:** a fault in the frame path or a runtime exit recreates the XR session instead of ending VR. A turning or menu-adapter mismatch no longer ends the session.
+- **Combat hands:** controller tracking remains active during ordinary attacks and blocks. Verified authored full-body actions retain native ownership. Arms and forearms are hidden; calibration is deferred.
+- **Interaction:** either hand can grab with a weapon equipped. Per-hand native selection has fresh-query and grip ownership gates and stable native range-slot routing. Custom ink lines and circles are removed. Reusing native interaction prompts beside objects in the game scene remains pending.
+- **Settings:** choose Pause > VR Settings. Settings are composed into the native menu image and use its pointer, without a separate settings XR panel.
+- **World UI:** the Quick Access Wheel and journal/notes use isolated native art on panels placed in front of the head. X opens the wheel; a Menu hold opens the journal. Objective markers still need individual native-art rendering at their game-world targets.
+- **Rendering:** separate-eye FSR Native/Quality/Balanced, deferred execution and restoration checks pass. Native scale-cache ownership now permits reduced-resolution FSR input; a prior v201 native-game run verified Balanced upscaling from 853x507 to 1273x756 per eye. Saved user settings are preserved. `tools/run_demo.ps1 -Fsr4` requests the new experimental AMD FSR 4.1.1 DX12 bridge, with genuine provider queries, stereo GPU checks and FSR 3.1 fallback. FSR 3.1 remains the default.
 
-Verified against the actual game with simulated VR. Headset visual and comfort acceptance is pending.
-Research behind the controls: [docs/vr-controls-research.md](docs/vr-controls-research.md).
+The v205 full build and GPU checks pass, with a verified source record from an
+isolated compiler tree. It fixes the observed focus reset from a 2496x2688 native
+viewport to the desktop's 841x485 cache: live focus-return testing recorded one
+automatic recovery, matching full-size dimensions and no deferred corrections.
+Headset visual acceptance remains pending. Live v204 verified genuine FSR 4 in
+both eyes without fallback, but its Quality cadence was about 14 ms per frame;
+90 Hz performance and stable grabbing remain unfinished.
+See [the current build report](artifacts/feedback-v205-build-validation.json)
+and [FSR 4 compatibility assessment](docs/fsr4-compatibility.md).
+v204 is retained as the previous test candidate; v203, v200, v199 and v193 are also retained.
 
 The history below is the earlier development record.
 

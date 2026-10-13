@@ -15,7 +15,9 @@ inline double tracked_yaw(Quaternion orientation,Quaternion origin) {
     return std::atan2(-forward.x,-forward.z);
 }
 inline void head_directed_stick(float& x,float& y,double relative_yaw) {
-    if(!std::isfinite(relative_yaw)) {x=y=0;return;}
+    // No fresh body heading (e.g. swimming: the physics step that feeds it does not run) -> the stick passes
+    // through unrotated; the native camera already follows the head. Zeroing it froze swimming.
+    if(!std::isfinite(relative_yaw)) return;
     const auto c=std::cos(relative_yaw),s=std::sin(relative_yaw);
     const auto right=x*c-y*s,forward=y*c+x*s;
     x=static_cast<float>(right);y=static_cast<float>(forward);

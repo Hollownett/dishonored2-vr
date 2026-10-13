@@ -11,6 +11,17 @@ int main() {
     try {
         using namespace d2vr;
         {
+            VrSettings backend;
+            backend.initialize(1,true,{},MirrorMode::both_eyes,.5,6);
+            backend.upscaler_generation(4);
+            require(std::wstring(backend.temporal_aa_text())==L"Anti-aliasing: FSR 4 Quality (77%)","FSR4 backend label wrong");
+            require(backend.temporal_aa()==6,"Runtime backend changed saved quality mode");
+            backend.upscaler_generation(3);
+            require(std::wstring(backend.temporal_aa_text())==L"Anti-aliasing: FSR 4 Quality (unavailable, FSR 3)","FSR4 fallback label wrong");
+            VrSettings fsr3;fsr3.initialize(1,true,{},MirrorMode::both_eyes,.5,4);fsr3.upscaler_generation(3);
+            require(std::wstring(fsr3.temporal_aa_text())==L"Anti-aliasing: FSR 3 Balanced (67%)","FSR3 label wrong");
+        }
+        {
             VrSettings setup;ControllerInput neutral{};neutral.active=true;
             setup.calibration_runtime(AvatarFitRuntimeStatus::recalibration_required);
             require(!setup.update(neutral,true,true).consume,"Calibration interrupted gameplay");
@@ -19,8 +30,9 @@ int main() {
             require(setup.update(neutral,false,true).opened && setup.calibration_page(),"First pause did not show required calibration");
             neutral.a=true;require(setup.update(neutral,false,true).calibrate,"Setup A did not start capture");
             neutral.a=false;setup.update(neutral,false,true);
-            neutral.y=true;setup.update(neutral,false,true);require(!setup.open(),"Setup Y did not close page");
-            neutral.y=false;require(!setup.update(neutral,false,true).opened,"Cancelled setup reopened every frame");
+            neutral.b=true;setup.update(neutral,false,true);require(setup.open() && !setup.calibration_page(),"Setup B did not leave capture page");
+            neutral.b=false;setup.update(neutral,false,true);neutral.b=true;setup.update(neutral,false,true);neutral.b=false;
+            require(!setup.open() && !setup.update(neutral,false,true).opened,"Cancelled setup reopened every frame");
             setup.suspend();setup.update(neutral,false,true);
             require(!setup.update(neutral,false,true).opened,"Same required fit reopened after focus suspension");
             setup.calibration_runtime(AvatarFitRuntimeStatus::active);
@@ -49,42 +61,50 @@ int main() {
         require(increase.consume && increase.resolution && std::abs(*increase.resolution-1.3)<1e-6,"Right stick navigation did not increase scale once");
         require(!menu.update(in,false,true).resolution,"Held stick repeatedly increased scale");
         in.move_x=0;menu.update(in,false,true);in.right_trigger=1;
-        const auto decrease=menu.update(in,false,true,PanelPointer{.15,.25});
+        const auto decrease=menu.update(in,false,true,PanelPointer{.15,.143});
         require(decrease.resolution && std::abs(*decrease.resolution-1.2)<1e-6,"Pointer minus click failed");
-        require(!menu.update(in,false,true,PanelPointer{.15,.25}).resolution,"Held trigger repeated click");
+        require(!menu.update(in,false,true,PanelPointer{.15,.143}).resolution,"Held trigger repeated click");
+        {   // Back row: left half requests the test unlock and keeps the menu open; right half closes.
+            VrSettings unlock;ControllerInput c{};c.active=true;unlock.update(c,false,true);c.y=true;unlock.update(c,false,true);c.y=false;unlock.update(c,false,true);
+            c.right_trigger=1;const auto request=unlock.update(c,false,true,PanelPointer{.25,(64+36*9+16)/560.});
+            require(request.test_unlock && unlock.open(),"Test unlock click did not request the unlock");
+            c.right_trigger=0;unlock.update(c,false,true);c.right_trigger=1;
+            const auto close=unlock.update(c,false,true,PanelPointer{.75,(64+36*9+16)/560.});
+            require(!close.test_unlock && !unlock.open(),"Back half did not close settings");
+        }
         in.right_trigger=0;menu.update(in,false,true);in.right_trigger=1;
-        const auto taa_toggle=menu.update(in,false,true,PanelPointer{.5,.32});
+        const auto taa_toggle=menu.update(in,false,true,PanelPointer{.5,.207});
         require(taa_toggle.temporal_aa && *taa_toggle.temporal_aa && menu.temporal_aa(),"Pointer did not toggle temporal AA");
-        require(!menu.update(in,false,true,PanelPointer{.5,.32}).temporal_aa,"Held trigger changed temporal AA repeatedly");
+        require(!menu.update(in,false,true,PanelPointer{.5,.207}).temporal_aa,"Held trigger changed temporal AA repeatedly");
         in.right_trigger=0;menu.update(in,false,true);in.right_trigger=1;
-        const auto toggle=menu.update(in,false,true,PanelPointer{.5,.38});
+        const auto toggle=menu.update(in,false,true,PanelPointer{.5,.271});
         require(toggle.antialiasing && !*toggle.antialiasing,"Pointer did not toggle AA");
         in.right_trigger=0;menu.update(in,false,true);in.right_trigger=1;
-        const auto mirror_click=menu.update(in,false,true,PanelPointer{.5,.45});
+        const auto mirror_click=menu.update(in,false,true,PanelPointer{.5,.336});
         require(mirror_click.mirror && *mirror_click.mirror==MirrorMode::right_eye && menu.mirror()==MirrorMode::right_eye,"Pointer did not cycle monitor view");
-        require(!menu.update(in,false,true,PanelPointer{.5,.45}).mirror,"Held trigger changed monitor view repeatedly");
+        require(!menu.update(in,false,true,PanelPointer{.5,.336}).mirror,"Held trigger changed monitor view repeatedly");
         in.right_trigger=0;menu.update(in,false,true);in.right_trigger=1;
-        const auto sharp_click=menu.update(in,false,true,PanelPointer{.5,.51});
+        const auto sharp_click=menu.update(in,false,true,PanelPointer{.5,.4});
         require(sharp_click.sharpness && *sharp_click.sharpness==.75 && menu.sharpness()==.75,"Pointer did not cycle sharpening");
-        require(!menu.update(in,false,true,PanelPointer{.5,.51}).sharpness,"Held trigger changed sharpening repeatedly");
+        require(!menu.update(in,false,true,PanelPointer{.5,.4}).sharpness,"Held trigger changed sharpening repeatedly");
         in.right_trigger=0;menu.update(in,false,true);in.right_trigger=1;
-        const auto reticle_click=menu.update(in,false,true,PanelPointer{.5,.58});
-        require(reticle_click.aim_reticle && !*reticle_click.aim_reticle && !menu.aim_reticle(),"Pointer did not toggle the aim reticle");
-        require(!menu.update(in,false,true,PanelPointer{.5,.58}).aim_reticle,"Held trigger changed the aim reticle repeatedly");
+        const auto reticle_click=menu.update(in,false,true,PanelPointer{.5,.464});
+        require(reticle_click.hud_percent && *reticle_click.hud_percent==75 && menu.hud_percent()==75,"Pointer did not cycle the HUD size");
+        require(!menu.update(in,false,true,PanelPointer{.5,.464}).hud_percent,"Held trigger changed the HUD size repeatedly");
         in.right_trigger=0;menu.update(in,false,true);in.right_trigger=1;
-        const auto hint_click=menu.update(in,false,true,PanelPointer{.5,.64});
+        const auto hint_click=menu.update(in,false,true,PanelPointer{.5,.529});
         require(hint_click.controls_hint && !*hint_click.controls_hint && !menu.controls_hint(),"Pointer did not toggle the controls hint");
-        require(!menu.update(in,false,true,PanelPointer{.5,.64}).controls_hint,"Held trigger changed the controls hint repeatedly");
+        require(!menu.update(in,false,true,PanelPointer{.5,.529}).controls_hint,"Held trigger changed the controls hint repeatedly");
         in.right_trigger=0;menu.update(in,false,true);in.right_trigger=1;
-        const auto turn=menu.update(in,false,true,PanelPointer{.5,.71});
+        const auto turn=menu.update(in,false,true,PanelPointer{.5,.593});
         require(turn.turning && turn.turning->mode==TurnControl::Mode::snap && turn.turning->snap_degrees==90,"Turning preset did not advance");
-        require(!menu.update(in,false,true,PanelPointer{.5,.71}).turning,"Held trigger changed turning repeatedly");
+        require(!menu.update(in,false,true,PanelPointer{.5,.593}).turning,"Held trigger changed turning repeatedly");
         in.right_trigger=0;menu.update(in,false,true);in.right_trigger=1;
-        require(menu.update(in,false,true,PanelPointer{.5,.76}).recenter,"Recenter action did not fire");
-        require(!menu.update(in,false,true,PanelPointer{.5,.76}).recenter,"Held trigger repeatedly recentered");
+        require(menu.update(in,false,true,PanelPointer{.5,.657}).recenter,"Recenter action did not fire");
+        require(!menu.update(in,false,true,PanelPointer{.5,.657}).recenter,"Held trigger repeatedly recentered");
         in.right_trigger=0;menu.update(in,false,true);in.right_trigger=1;
-        require(menu.update(in,false,true,PanelPointer{.25,.76}).calibrate && menu.calibration_page(),"Avatar calibration page did not open");
-        require(!menu.update(in,false,true,PanelPointer{.25,.76}).calibrate,"Held trigger restarted calibration");
+        require(menu.update(in,false,true,PanelPointer{.25,.657}).calibrate && menu.calibration_page(),"Avatar calibration page did not open");
+        require(!menu.update(in,false,true,PanelPointer{.25,.657}).calibrate,"Held trigger restarted calibration");
         menu.calibration_status(AvatarCalibrationState::hold_pose);in.a=true;
         require(!menu.update(in,false,true).calibrate,"Stable pose capture restarted from A");in.a=false;menu.update(in,false,true);
         menu.calibration_status(AvatarCalibrationState::hold_pose,.5);
@@ -97,6 +117,22 @@ int main() {
         menu.calibration_status(AvatarCalibrationState::grips_released);
         const auto released_hold=settings_panel_image(menu,1.2,3722,3850,{});
         require(menu.calibration_progress()==0 && pixel(released_hold,100,350,0)==38,"Released grip retained visible progress");
+        menu.calibration_environment(AvatarCalibrationStage::t_pose,false);
+        menu.calibration_status(AvatarCalibrationState::release_grips);
+        require(std::wstring(menu.calibration_status_text()).find(L"release grips")!=std::wstring::npos,"Shoulder transition did not instruct release");
+        const auto release_required=settings_panel_image(menu,1.2,3722,3850,{});
+        menu.calibration_status(AvatarCalibrationState::grips_released);
+        require(std::wstring(menu.calibration_status_text()).find(L"Hold both grips")!=std::wstring::npos,"Released transition did not instruct next hold");
+        const auto next_hold=settings_panel_image(menu,1.2,3722,3850,{});
+        require(release_required!=next_hold,"Rendered capture status did not distinguish release from next hold");
+        AvatarPlayerMeasurements entered;entered.standing_eye_height_metres=1.61;
+        VrSettings provenance;provenance.initialize(1,false,{},MirrorMode::both_eyes,.5,2,65,true,entered);
+        provenance.calibration_environment(AvatarCalibrationStage::t_pose,true);
+        require(std::wstring(provenance.calibration_height_text()).find(L"entered measurement")!=std::wstring::npos,"Manual height incorrectly labelled runtime floor");
+        provenance.initialize(1,false);provenance.calibration_environment(AvatarCalibrationStage::t_pose,true);
+        require(std::wstring(provenance.calibration_height_text()).find(L"runtime floor")!=std::wstring::npos,"Runtime floor height provenance missing");
+        provenance.calibration_environment(AvatarCalibrationStage::t_pose,false);
+        require(std::wstring(provenance.calibration_height_text()).find(L"No runtime floor")!=std::wstring::npos,"Unavailable floor claimed measured height");
         menu.calibration_status(AvatarCalibrationState::pose_invalid);in.a=true;
         require(menu.update(in,false,true).calibrate,"Invalid-pose A did not explicitly retry");
         in.a=false;menu.update(in,false,true);
@@ -144,20 +180,63 @@ int main() {
             require(sharp_stick.sharpness && *sharp_stick.sharpness==.75 && rows.sharpness()==.75,"Stick did not cycle sharpening");
             press(0,-1);
             const auto reticle_stick=press(1,0);
-            require(reticle_stick.aim_reticle && !*reticle_stick.aim_reticle && !rows.aim_reticle(),"Stick did not toggle the aim reticle");
+            require(reticle_stick.hud_percent && *reticle_stick.hud_percent==75 && rows.hud_percent()==75,"Stick did not cycle the HUD size");
             press(0,-1);
             const auto hint_stick=press(1,0);
             require(hint_stick.controls_hint && !*hint_stick.controls_hint && !rows.controls_hint(),"Stick did not toggle the controls hint");
             const auto rows_image=settings_panel_image(rows,1.2,3722,3850,{});
-            require(pixel(rows_image,30,76,0)==38,"The resolution row fell outside the panel bitmap");
-            for(unsigned row=1;row<10;++row) {
-                const auto shade=pixel(rows_image,30,128+36*row+4,0);
-                require(shade==36 || shade==38,"A settings row fell outside the panel bitmap");
+            for(unsigned row=0;row<10;++row) {   // every row bar sits inside the bitmap and is drawn dark or as the pale highlight
+                const auto shade=pixel(rows_image,24,64+36*row+16,0);
+                require(shade<60 || shade>150,"A settings row fell outside the panel bitmap");
             }
             // Wrapping upwards from the controls hint row reaches the last, whose A closes.
             press(0,1);press(0,1);press(0,1);press(0,1);press(0,1);press(0,1);press(0,1);
             stick.a=true;const auto back=rows.update(stick,false,true);stick.a=false;
             require(back.consume && !rows.open(),"Wrapped vertical navigation did not reach the back row");
+        }
+        {
+            VrSettings measured;ControllerInput controls{};controls.active=true;
+            measured.calibration_runtime(AvatarFitRuntimeStatus::recalibration_required);
+            measured.update(controls,false,true);measured.update(controls,false,true);
+            controls.y=true;measured.update(controls,false,true);controls.y=false;measured.update(controls,false,true);
+            require(measured.measurements_page() && measured.calibration_page(),"Y did not open measured dimensions");
+            const auto move=[&](float x,float y) {
+                controls.move_x=x;controls.move_y=y;const auto change=measured.update(controls,false,true);
+                controls.move_x=controls.move_y=0;measured.update(controls,false,true);return change;
+            };
+            require(move(1,0).player_measurements && measured.measurement_value(0)==1.65,"Blank height did not become explicit measured entry");
+            require(move(1,0).player_measurements && measured.measurement_value(0)==1.66,"Stick did not adjust height by one centimetre");
+            controls.move_x=1;measured.update(controls,false,true);const auto held=measured.measurement_value(0);
+            require(!measured.update(controls,false,true).player_measurements && measured.measurement_value(0)==held,"Held stick repeatedly edited measurement");
+            controls.move_x=0;measured.update(controls,false,true);
+            for(unsigned row=0;row<5;++row) {
+                controls.right_trigger=1;measured.update(controls,false,true,PanelPointer{.5,(110+56*row+24)/560.});
+                require(measured.measurement_selected()==row,"640x560 measurement row hitbox differs");
+                controls.right_trigger=0;measured.update(controls,false,true);
+                require(move(1,0).player_measurements && measured.measurement_value(row),"Measurement row did not edit its own optional value");
+            }
+            controls.right_trigger=1;measured.update(controls,false,true,PanelPointer{.5,160/560.});
+            require(measured.measurement_selected()==4,"Measurement row gap selected a different field");
+            controls.right_trigger=0;measured.update(controls,false,true);
+            controls.x=true;require(measured.update(controls,false,true).player_measurements && !measured.measurement_value(4),"X did not clear the selected optional measurement");
+            require(!measured.update(controls,false,true).player_measurements,"Held X repeated clear");controls.x=false;measured.update(controls,false,true);
+            const auto measurements=settings_panel_image(measured,1,3200,3200,{});require(measurements.size()==640*560*4,"Measurement bitmap size differs");
+            std::ofstream preview("artifacts/player-measurements-preview.rgba",std::ios::binary);
+            preview.write(reinterpret_cast<const char*>(measurements.data()),static_cast<std::streamsize>(measurements.size()));require(static_cast<bool>(preview),"Measurement preview write failed");
+            controls.y=true;measured.update(controls,false,true);require(!measured.measurements_page() && measured.calibration_page(),"Y did not return to capture");
+            controls.y=false;measured.update(controls,false,true);controls.y=true;measured.update(controls,false,true);
+            controls.y=false;measured.update(controls,false,true);controls.a=true;
+            require(measured.update(controls,false,true).calibrate && !measured.measurements_page(),"A did not start capture from measured fields");
+            controls.a=false;measured.update(controls,false,true);
+            measured.calibration_environment(AvatarCalibrationStage::shoulders,false);measured.calibration_status(AvatarCalibrationState::hold_pose,.5);
+            const auto shoulders=settings_panel_image(measured,1,3200,3200,{});
+            measured.calibration_environment(AvatarCalibrationStage::t_pose,false);const auto reaches=settings_panel_image(measured,1,3200,3200,{});
+            require(shoulders!=reaches,"Shoulder and reach stages render the same guidance");
+            for(const auto& image:{std::pair<const char*,const std::vector<unsigned char>*>{"shoulders",&shoulders},{"reach",&reaches}}) {
+                std::ofstream stage(std::string("artifacts/calibration-stage-")+image.first+".rgba",std::ios::binary);
+                stage.write(reinterpret_cast<const char*>(image.second->data()),static_cast<std::streamsize>(image.second->size()));require(static_cast<bool>(stage),"Stage preview write failed");
+            }
+            controls.b=true;measured.update(controls,false,true);require(!measured.calibration_page(),"B failed to cancel stage UI");
         }
         for(unsigned close=0;close<4;++close) {
             VrSettings wizard;ControllerInput controls{};controls.active=true;
@@ -165,13 +244,13 @@ int main() {
             const std::array<TrackedPose,2> hands{{{{-.8,1.48,0},{}},{{.8,1.48,0},{}}}};
             wizard.update(controls,false,true);controls.y=true;wizard.update(controls,false,true);
             controls.y=false;wizard.update(controls,false,true);controls.right_trigger=1;
-            require(wizard.update(controls,false,true,PanelPointer{.25,.75}).calibrate,"Lifecycle test did not enter wizard");
+            require(wizard.update(controls,false,true,PanelPointer{.25,.657}).calibrate,"Lifecycle test did not enter wizard");
             capture.begin(1,{1.5,.3});
             for(unsigned i=0;i<10;++i) capture.observe(head,hands,3,true,true,i*25,1);
             wizard.calibration_status(capture.state());controls.right_trigger=0;
             controls.b=close==0;controls.y=close==1;
             wizard.update(controls,close==2,close!=3);
-            const auto status=capture.synchronize(1,wizard.open() && wizard.calibration_page());
+            const auto status=capture.synchronize(1,wizard.open() && wizard.calibration_page() && !wizard.measurements_page());
             wizard.calibration_status(status);
             require(status==AvatarCalibrationState::cancelled && !capture.result(1),"B/Y/gameplay/focus exit retained incomplete capture");
             for(unsigned i=0;i<=40;++i) capture.observe(head,hands,3,true,true,1000+i*25,1);
@@ -204,14 +283,14 @@ int main() {
         std::ofstream output("artifacts/vr-settings-preview.rgba",std::ios::binary);
         output.write(reinterpret_cast<const char*>(pixels.data()),static_cast<std::streamsize>(pixels.size()));
         require(static_cast<bool>(output),"Cannot save settings preview");
-        {VrPreferences d;require(d.antialiasing && !d.temporal_aa && d.aim_reticle && d.controls_hint && d.sharpness==.5 && d.mirror==MirrorMode::both_eyes,"VrPreferences defaults differ");}
+        {VrPreferences d;require(d.antialiasing && d.temporal_aa==2 && d.hud_percent==65 && d.controls_hint && d.sharpness==.5 && d.mirror==MirrorMode::both_eyes,"VrPreferences defaults differ");}
         const auto preference_file=std::filesystem::path("build/vr-settings-test.cfg");
-        save_preferences(preference_file,{1.3,true,{TurnControl::Mode::smooth,45,120},MirrorMode::left_eye,.75,false,false,true});
-        {std::ifstream raw(preference_file);int version{};raw>>version;require(version==4,"Saved preferences are not version 4");}
+        save_preferences(preference_file,{1.3,true,{TurnControl::Mode::smooth,45,120},MirrorMode::left_eye,.75,0,65,true});
+        {std::ifstream raw(preference_file);int version{};raw>>version;require(version==7,"Saved preferences are not version 7");}
         const auto saved=load_preferences(preference_file);
         require(saved && saved->resolution==1.3 && saved->antialiasing && saved->turning.mode==TurnControl::Mode::smooth &&
             saved->turning.smooth_degrees_per_second==120 && saved->mirror==MirrorMode::left_eye && saved->sharpness==.75 && !saved->temporal_aa &&
-            !saved->aim_reticle && saved->controls_hint,
+            saved->hud_percent==65 && saved->controls_hint,
             "Version 4 preference round trip differs");
         bool rejected=false;try {save_preferences(preference_file,{.1,false,{}});} catch(const std::invalid_argument&) {rejected=true;}
         require(rejected && load_preferences(preference_file)->resolution==1.3,"Invalid save changed working preferences");
@@ -219,21 +298,51 @@ int main() {
         require(rejected,"Out-of-range sharpness was saved");
         rejected=false;try {save_preferences(preference_file,{1.3,false,{},static_cast<MirrorMode>(7),.5});} catch(const std::invalid_argument&) {rejected=true;}
         require(rejected,"Out-of-range monitor view was saved");
+        {
+            VrPreferences measured=*saved;measured.player_measurements={1.72,.43,.47,{.55,.62}};
+            {auto fsr4=measured;fsr4.temporal_aa=5;save_preferences(preference_file,fsr4); // FSR 4 saved from the menu loads back
+             require(load_preferences(preference_file)->temporal_aa==5,"FSR 4 preference did not round trip");}
+            save_preferences(preference_file,measured);const auto roundtrip=load_preferences(preference_file);require(roundtrip.has_value(),"Measured preference round trip missing");
+            const auto& m=roundtrip->player_measurements;
+            require(m.standing_eye_height_metres==1.72 && m.shoulder_span_metres==.43 && m.torso_width_metres==.47 &&
+                m.arm_reach_metres[0]==.55 && m.arm_reach_metres[1]==.62,"Five independent dimensions did not persist");
+            const auto bytes=[&] {std::ifstream file(preference_file,std::ios::binary);return std::string(std::istreambuf_iterator<char>(file),{});};
+            const auto preserved=bytes();
+            for(unsigned field=0;field<5;++field) {
+                auto bad=measured;
+                auto& value=field==0?bad.player_measurements.standing_eye_height_metres:field==1?bad.player_measurements.shoulder_span_metres:
+                    field==2?bad.player_measurements.torso_width_metres:bad.player_measurements.arm_reach_metres[field-3];
+                value=std::numeric_limits<double>::quiet_NaN();rejected=false;
+                try {save_preferences(preference_file,bad);}catch(const std::invalid_argument&) {rejected=true;}
+                require(rejected && bytes()==preserved,"Invalid measured save altered the working file");
+            }
+            {std::ofstream version6(preference_file);version6<<"6 1.3 1 2 45 120 1 0.25 2 65 1\n";}
+            const auto migrated6=load_preferences(preference_file);require(migrated6.has_value(),"Version6 failed migration");
+            const auto& blank=migrated6->player_measurements;
+            require(!blank.standing_eye_height_metres && !blank.shoulder_span_metres && !blank.torso_width_metres &&
+                !blank.arm_reach_metres[0] && !blank.arm_reach_metres[1],"Version6 invented measured dimensions");
+            {std::ofstream zeros(preference_file);zeros<<"7 1.3 1 2 45 120 1 0.25 2 65 1 0 0 0 0 0\n";}
+            require(!load_preferences(preference_file)->player_measurements.torso_width_metres,"Zero sentinel became a measured width");
+            {std::ofstream bad(preference_file);bad<<"7 1.3 1 2 45 120 1 0.25 2 65 1 1.7 .4 4 .55 .62\n";}
+            const auto invalid_bytes=bytes();rejected=false;
+            try {load_preferences(preference_file);}catch(const std::exception&) {rejected=true;}
+            require(rejected && bytes()==invalid_bytes,"Invalid measured load was accepted or changed saved file");
+        }
         {std::ofstream legacy(preference_file);legacy<<"1 1.4 1 2 45 120\n";}
         const auto migrated=load_preferences(preference_file);
         require(migrated && migrated->resolution==1.4 && migrated->antialiasing && migrated->turning.mode==TurnControl::Mode::smooth &&
-            migrated->turning.smooth_degrees_per_second==120 && migrated->mirror==MirrorMode::both_eyes && migrated->sharpness==.5 && !migrated->temporal_aa &&
-            migrated->aim_reticle && migrated->controls_hint,
+            migrated->turning.smooth_degrees_per_second==120 && migrated->mirror==MirrorMode::both_eyes && migrated->sharpness==.5 && migrated->temporal_aa==2 &&
+            migrated->hud_percent==65 && migrated->controls_hint,
             "Version 1 migration differs");
         {std::ofstream version2(preference_file);version2<<"2 1.3 1 2 45 120 1 0.25\n";}
         const auto older=load_preferences(preference_file);
-        require(older && older->antialiasing && older->mirror==MirrorMode::left_eye && older->sharpness==.25 && !older->temporal_aa &&
-            older->aim_reticle && older->controls_hint,
+        require(older && older->antialiasing && older->mirror==MirrorMode::left_eye && older->sharpness==.25 && older->temporal_aa==2 &&
+            older->hud_percent==65 && older->controls_hint,
             "Version 2 migration differs");
         {std::ofstream version3(preference_file);version3<<"3 1.3 1 2 45 120 1 0.25 1\n";}
         const auto third=load_preferences(preference_file);
         require(third && third->antialiasing && third->temporal_aa && third->mirror==MirrorMode::left_eye && third->sharpness==.25 &&
-            third->aim_reticle && third->controls_hint,
+            third->hud_percent==65 && third->controls_hint,
             "Version 3 migration differs");
         {std::ofstream invalid(preference_file);invalid<<"4 1.3 1 2 45 120 0 0.5 1 2 1";}
         rejected=false;try {load_preferences(preference_file);} catch(const std::runtime_error&) {rejected=true;}
@@ -265,7 +374,7 @@ int main() {
         {std::ofstream invalid(preference_file);invalid<<"1 1.3 1 0 45 90 extra";}
         rejected=false;try {load_preferences(preference_file);} catch(const std::runtime_error&) {rejected=true;}
         require(rejected,"Unexpected preference fields accepted");std::filesystem::remove(preference_file);
-        std::cout<<"PASS: panel ray, debounced settings, temporal AA/SMAA/monitor view/sharpening/aim reticle/controls hint rows, calibration exit cancellation/retry reasons, focus release, bitmap and atomic v4/v3/v2/v1 preference persistence\n";
+        std::cout<<"PASS: panel ray, debounced settings and measured dimensions, staged guidance/cancellation, focus release, bitmap and atomic v7 persistence with v6/v4/v3/v2/v1 migration\n";
         return 0;
     } catch(const std::exception& error) {std::cerr<<error.what()<<'\n';return 1;}
 }

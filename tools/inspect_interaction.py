@@ -5,6 +5,7 @@ from ctypes import wintypes as w
 from datetime import datetime,timezone
 import hashlib
 import json
+import struct
 from pathlib import Path
 from interaction_fields import interaction_snapshot
 from rig_fields import GAME_HASH
@@ -51,6 +52,7 @@ def main():
                 raise OSError(c.get_last_error(),'Interaction read failed')
             return b.raw
         result=interaction_snapshot(read,base)
+        result['native_cached_output_size'] = list(struct.unpack('<II', read(base+0x32faf80, 8)))
         if args.nearby_bodies: result['nearby_physics'] = nearby_bodies(read,base)
         result.update(pid=args.pid,base=hex(base),executable_sha256=GAME_HASH,time_utc=datetime.now(timezone.utc).isoformat(),logic_mask=game_logic_mask(read,base))
     finally:k.CloseHandle(handle)

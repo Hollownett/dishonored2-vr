@@ -29,11 +29,18 @@ int main(){
     for(unsigned i=0;i<24;++i){Sleep(50);frame(false,true);}
     assert(!xr.avatar_calibration() && xr.avatar_calibration_state()==d2vr::AvatarCalibrationState::pose_invalid);
     assert(xr.avatar_runtime_status()==d2vr::AvatarFitRuntimeStatus::recalibration_required);
-    // Correct T pose plus explicit retry still works after initial unavailable pages.
+    // A narrow grip span is still not a T/A pose; an explicit retry with arms out succeeds directly.
     sim::control.head={{0,0,0,1},{0,1.65f,0}};
-    sim::control.grips={{{{0,0,0,1},{-.8f,1.45f,0}},{{0,0,0,1},{.8f,1.45f,0}}}};
+    sim::control.grips={{{{0,0,0,1},{-.22f,1.45f,0}},{{0,0,0,1},{.22f,1.45f,0}}}};
     sim::control.input.a=true;frame(false,true);sim::control.input.a=false;
+    for(unsigned i=0;i<4;++i){Sleep(50);frame(false,true);}
+    assert(!xr.avatar_calibration() && xr.avatar_calibration_state()==d2vr::AvatarCalibrationState::pose_invalid);
+    sim::control.grips={{{{0,0,0,1},{-.8f,1.45f,0}},{{0,0,0,1},{.8f,1.45f,0}}}};
     for(unsigned i=0;i<24;++i){Sleep(50);frame(false,true);}
     assert(xr.avatar_calibration() && xr.avatar_calibration_state()==d2vr::AvatarCalibrationState::ready);
-    std::cout<<"PASS: actual GameXr Death/Loading to new rig preserves first Pause prompt; no T pose gives no fit, explicit measured retry succeeds\n";
+    const auto fit=xr.avatar_calibration();
+    assert(fit->arm_lengths_measured && !fit->shoulder_span_measured && std::abs(fit->shoulder_span_metres-.38)<.001);
+    assert(std::abs(*fit->arm_reach_metres[0]-.5)<.2 && std::abs(*fit->arm_reach_metres[0]-*fit->arm_reach_metres[1])<.001);
+    assert(!fit->torso_width_measured && !fit->torso_width_metres && !fit->standing_eye_height_metres);
+    std::cout<<"PASS: actual GameXr Death/Loading to new rig preserves first Pause prompt; invalid capture gives no fit, explicit single-pose retry succeeds\n";
 }

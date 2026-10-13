@@ -10,12 +10,13 @@
 #include <sstream>
 #include <string>
 
-static unsigned hook_calls=0;static MH_STATUS hook_status=MH_ERROR_NOT_INITIALIZED;
+static unsigned hook_calls=0,remove_calls=0;static MH_STATUS hook_status=MH_ERROR_NOT_INITIALIZED;
 extern "C" MH_STATUS WINAPI MH_CreateHook(LPVOID,LPVOID target,LPVOID* original) {
     ++hook_calls;if(hook_status==MH_OK && original) *original=target;return hook_status;
 }
 extern "C" MH_STATUS WINAPI MH_EnableHook(LPVOID) {return hook_status;}
 extern "C" MH_STATUS WINAPI MH_DisableHook(LPVOID) {return hook_status==MH_OK?MH_OK:MH_ERROR_DISABLED;}
+extern "C" MH_STATUS WINAPI MH_RemoveHook(LPVOID) {++remove_calls;return hook_status;}
 static bool no_read(std::uintptr_t,void*,std::size_t) {return false;}
 static constexpr std::uintptr_t fake_base=0x140000000;
 static const std::array<unsigned char,32> fake_garbage{};
@@ -130,6 +131,17 @@ int main() {
     check(has(csv,"#skip 0x632f70 prologue_mismatch") && has(csv,"#skip 0x88e140 prologue_mismatch") &&
           has(csv,"#skip 0x62b560 prologue_mismatch") && !has(csv,"#skip 0x867330"),"csv notes the retired hooks");
     check(has(trace.summary(),"\"hooks\":0") && trace.calls()==0 && trace.samples()==0,"idle after disable");
+    // Repeated sessions can transfer the retained observer launch hook to the
+    // production router. Its next observer installation must create a new one.
+    fake_match=1;
+    trace.install(fake_base,fake_read,L"build\\fire-seam-transfer.csv");
+    check(trace.installed(0x639970),"observer owns shot site");
+    check(trace.disable() && trace.release_shot_hook() && remove_calls==1,"disabled observer releases retained shot trampoline");
+    check(trace.release_shot_hook() && remove_calls==1,"second transfer is no-op");
+    const auto before_recreate=hook_calls;
+    trace.install(fake_base,fake_read,L"build\\fire-seam-transfer-again.csv");
+    check(hook_calls==before_recreate+1 && trace.installed(0x639970),"retired site is recreated on next observer run");
+    check(trace.disable(),"recreated observer drains");
     // Every prologue matched but MinHook refuses: the probe must not pretend.
     hook_status=MH_ERROR_NOT_CREATED;fake_match=6;
     rejected=false;

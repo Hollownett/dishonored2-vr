@@ -1,0 +1,215 @@
+{
+  "release": "v2.3.0",
+  "commit": "60f4ea81909200d8542eca14dccb2628b763a9a3",
+  "repository": "https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK",
+  "release_url": "https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK/releases/tag/v2.3.0",
+  "retrieved_utc": "2026-10-10T13:13:21.1334736Z",
+  "download_method": "Pinned individual official GitHub Kits files; full SDK archive not downloaded",
+  "dlls_executed": false,
+  "files": [
+    {
+      "path": "API_GUIDE.md",
+      "size": 16062,
+      "sha256": "9f00b353614bd6176a676e9121bc9cc8521f042001f880d642fd2d38bde627b8",
+      "source_path": "Kits/FidelityFX/docs/getting-started/ffx-api.md",
+      "source_url": "https://raw.githubusercontent.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK/60f4ea81909200d8542eca14dccb2628b763a9a3/Kits/FidelityFX/docs/getting-started/ffx-api.md",
+      "kind": "official_pinned_file"
+    },
+    {
+      "path": "FSR4_GUIDE.md",
+      "size": 33757,
+      "sha256": "9c761f10d1a0a6aba02cde98adef10229f4800500e36b58f0bcb5424778f2d02",
+      "source_path": "Kits/FidelityFX/docs/techniques/super-resolution-ml.md",
+      "source_url": "https://raw.githubusercontent.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK/60f4ea81909200d8542eca14dccb2628b763a9a3/Kits/FidelityFX/docs/techniques/super-resolution-ml.md",
+      "kind": "official_pinned_file"
+    },
+    {
+      "path": "UPSCALER_GUIDE.md",
+      "size": 41113,
+      "sha256": "402a62efb47c96f4cbd47b639fa126051584f4981e9b1d446865d87508c73f2c",
+      "source_path": "Kits/FidelityFX/docs/techniques/super-resolution-upscaler.md",
+      "source_url": "https://raw.githubusercontent.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK/60f4ea81909200d8542eca14dccb2628b763a9a3/Kits/FidelityFX/docs/techniques/super-resolution-upscaler.md",
+      "kind": "official_pinned_file"
+    },
+    {
+      "path": "api/include/ffx_api_loader.h",
+      "size": 2977,
+      "sha256": "18d1901dbbc881e8131b91c65ad44bb3b4a1de6c31435d5b75236f16727ba80e",
+      "source_path": "Kits/FidelityFX/api/include/ffx_api_loader.h",
+      "source_url": "https://raw.githubusercontent.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK/60f4ea81909200d8542eca14dccb2628b763a9a3/Kits/FidelityFX/api/include/ffx_api_loader.h",
+      "kind": "official_pinned_file"
+    },
+    {
+      "path": "api/include/ffx_api_types.h",
+      "size": 13636,
+      "sha256": "cc0adc0ffc804dd7cd03c39c15581b575e416383177ffe95060201d52cc0fc49",
+      "source_path": "Kits/FidelityFX/api/include/ffx_api_types.h",
+      "source_url": "https://raw.githubusercontent.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK/60f4ea81909200d8542eca14dccb2628b763a9a3/Kits/FidelityFX/api/include/ffx_api_types.h",
+      "kind": "official_pinned_file"
+    },
+    {
+      "path": "api/include/ffx_api.h",
+      "size": 10726,
+      "sha256": "e1a9d1b559eaf75f4cb401f1c43a66e2f3dc9621abfeb58b9c6fac56443177fd",
+      "source_path": "Kits/FidelityFX/api/include/ffx_api.h",
+      "source_url": "https://raw.githubusercontent.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK/60f4ea81909200d8542eca14dccb2628b763a9a3/Kits/FidelityFX/api/include/ffx_api.h",
+      "kind": "official_pinned_file"
+    },
+    {
+      "path": "api/include/ffx_api.hpp",
+      "size": 5884,
+      "sha256": "e1fab07fa9ab489db74813e6b754fc91dad6ded68870ab558002e92b6a32566a",
+      "source_path": "Kits/FidelityFX/api/include/ffx_api.hpp",
+      "source_url": "https://raw.githubusercontent.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK/60f4ea81909200d8542eca14dccb2628b763a9a3/Kits/FidelityFX/api/include/ffx_api.hpp",
+      "kind": "official_pinned_file"
+    },
+    {
+      "path": "api/include/dx12/ffx_api_dx12.h",
+      "size": 11323,
+      "sha256": "c9afbc3c4c673723e9e5369a666f0ff54560543b5a93537f8ff453bf1c3bf530",
+      "source_path": "Kits/FidelityFX/api/include/dx12/ffx_api_dx12.h",
+      "source_url": "https://raw.githubusercontent.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK/60f4ea81909200d8542eca14dccb2628b763a9a3/Kits/FidelityFX/api/include/dx12/ffx_api_dx12.h",
+      "kind": "official_pinned_file"
+    },
+    {
+      "path": "api/include/dx12/ffx_api_dx12.hpp",
+      "size": 1859,
+      "sha256": "31972deed9c5b94243eb72c97e24c1b4e1a0171ae0d0109f7fe842b6efdeddc7",
+      "source_path": "Kits/FidelityFX/api/include/dx12/ffx_api_dx12.hpp",
+      "source_url": "https://raw.githubusercontent.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK/60f4ea81909200d8542eca14dccb2628b763a9a3/Kits/FidelityFX/api/include/dx12/ffx_api_dx12.hpp",
+      "kind": "official_pinned_file"
+    },
+    {
+      "path": "bin/amd_fidelityfx_loader_dx12.dll",
+      "size": 26376,
+      "sha256": "e2d85aa05a9bd9ed8b38935fdf5199372cca6f74c12015143bb6f945ee1608aa",
+      "source_path": "Kits/FidelityFX/signedbin/amd_fidelityfx_loader_dx12.dll",
+      "source_url": "https://raw.githubusercontent.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK/60f4ea81909200d8542eca14dccb2628b763a9a3/Kits/FidelityFX/signedbin/amd_fidelityfx_loader_dx12.dll",
+      "kind": "official_pinned_file",
+      "authenticode": {
+        "status": "Valid",
+        "publisher": "CN=Advanced Micro Devices, O=Advanced Micro Devices, S=California, C=US",
+        "thumbprint": "33D35682079E201671B738B7209B4586103BC271",
+        "issuer": "CN=Sectigo Public Code Signing CA R36, O=Sectigo Limited, C=GB",
+        "timestamp_publisher": "CN=DigiCert SHA256 RSA4096 Timestamp Responder 2025 1, O=\"DigiCert, Inc.\", C=US",
+        "file_version": "2.3.0.2740",
+        "product_version": "2.3.0.0",
+        "executed": false
+      }
+    },
+    {
+      "path": "bin/amd_fidelityfx_upscaler_dx12.dll",
+      "size": 28761864,
+      "sha256": "d0dcccc74a43c44ba435b7a369b456e0970d8a4464e4bd683119b374f2c9fb46",
+      "source_path": "Kits/FidelityFX/signedbin/amd_fidelityfx_upscaler_dx12.dll",
+      "source_url": "https://raw.githubusercontent.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK/60f4ea81909200d8542eca14dccb2628b763a9a3/Kits/FidelityFX/signedbin/amd_fidelityfx_upscaler_dx12.dll",
+      "kind": "official_pinned_file",
+      "authenticode": {
+        "status": "Valid",
+        "publisher": "CN=Advanced Micro Devices, O=Advanced Micro Devices, S=California, C=US",
+        "thumbprint": "33D35682079E201671B738B7209B4586103BC271",
+        "issuer": "CN=Sectigo Public Code Signing CA R36, O=Sectigo Limited, C=GB",
+        "timestamp_publisher": "CN=DigiCert SHA256 RSA4096 Timestamp Responder 2025 1, O=\"DigiCert, Inc.\", C=US",
+        "file_version": "4.1.1.2740",
+        "product_version": "4.1.1.0",
+        "executed": false
+      }
+    },
+    {
+      "path": "include/ffx_api_loader.h",
+      "size": 58,
+      "sha256": "1163cf3b635078bef2d0b12e72b41c475d69037f0f92be22a551928348a6b50d",
+      "source_path": null,
+      "source_url": null,
+      "kind": "local_compatibility_forwarder"
+    },
+    {
+      "path": "include/ffx_api_types.h",
+      "size": 57,
+      "sha256": "d722e1391ae8a1bcf7fe75a0c9a1fb6c0588e99d9e7042f3c290a24fa9ec796b",
+      "source_path": null,
+      "source_url": null,
+      "kind": "local_compatibility_forwarder"
+    },
+    {
+      "path": "include/ffx_api.h",
+      "size": 51,
+      "sha256": "efcc6459c3cdef2c975eb1f165c9314e5fb6ca4d99215c818552fc0aeefa3989",
+      "source_path": null,
+      "source_url": null,
+      "kind": "local_compatibility_forwarder"
+    },
+    {
+      "path": "include/ffx_api.hpp",
+      "size": 53,
+      "sha256": "0b1bbb528fcb43f1a0308dd8112597ec814208cb8897fd35f88d6f92947f2d24",
+      "source_path": null,
+      "source_url": null,
+      "kind": "local_compatibility_forwarder"
+    },
+    {
+      "path": "include/ffx_upscale.h",
+      "size": 61,
+      "sha256": "d6dc888f57dc7e331c9b2c8fc0ac013851670ccf4bcf0717820eff4273ec2fb8",
+      "source_path": null,
+      "source_url": null,
+      "kind": "local_compatibility_forwarder"
+    },
+    {
+      "path": "include/ffx_upscale.hpp",
+      "size": 63,
+      "sha256": "388132604e79440d1f8937fee4ddf05fbf9276ca0287977ad8689dc710ba3fa3",
+      "source_path": null,
+      "source_url": null,
+      "kind": "local_compatibility_forwarder"
+    },
+    {
+      "path": "include/dx12/ffx_api_dx12.h",
+      "size": 64,
+      "sha256": "d68bd568b346b3762deb4334f69339f4f175cd0883fde8dc432d2c68a5d71d73",
+      "source_path": null,
+      "source_url": null,
+      "kind": "local_compatibility_forwarder"
+    },
+    {
+      "path": "include/dx12/ffx_api_dx12.hpp",
+      "size": 66,
+      "sha256": "214d9819a4b445e5c636e63dc5a495995535fd43654dd42578633ee66306c02c",
+      "source_path": null,
+      "source_url": null,
+      "kind": "local_compatibility_forwarder"
+    },
+    {
+      "path": "licenses/3rdpartynotice.md",
+      "size": 2441,
+      "sha256": "94401a90486d1b53b528bb7f845a7b8daf7227b60eb7c0fc3b8c5571ba202a27",
+      "source_path": "3rdpartynotice.md",
+      "source_url": "https://raw.githubusercontent.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK/60f4ea81909200d8542eca14dccb2628b763a9a3/3rdpartynotice.md",
+      "kind": "official_pinned_file"
+    },
+    {
+      "path": "licenses/license.md",
+      "size": 60891,
+      "sha256": "6757f2fec461238da6f84f83536ec195e8c036b1773a06f6f34301b9ed8c0963",
+      "source_path": "docs/license.md",
+      "source_url": "https://raw.githubusercontent.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK/60f4ea81909200d8542eca14dccb2628b763a9a3/docs/license.md",
+      "kind": "official_pinned_file"
+    },
+    {
+      "path": "upscalers/include/ffx_upscale.h",
+      "size": 19313,
+      "sha256": "65be36d5653eb71c10379e0204f7bb7cd6a8aeec96e6f8cffc5f59ffeb1f89bf",
+      "source_path": "Kits/FidelityFX/upscalers/include/ffx_upscale.h",
+      "source_url": "https://raw.githubusercontent.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK/60f4ea81909200d8542eca14dccb2628b763a9a3/Kits/FidelityFX/upscalers/include/ffx_upscale.h",
+      "kind": "official_pinned_file"
+    },
+    {
+      "path": "upscalers/include/ffx_upscale.hpp",
+      "size": 4580,
+      "sha256": "52066379fd629080ed5c9a2821627cd7a3b972e6592565c7f3fa54a95404bac0",
+      "source_path": "Kits/FidelityFX/upscalers/include/ffx_upscale.hpp",
+      "source_url": "https://raw.githubusercontent.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK/60f4ea81909200d8542eca14dccb2628b763a9a3/Kits/FidelityFX/upscalers/include/ffx_upscale.hpp",
+      "kind": "official_pinned_file"
+    }
+  ]
+}

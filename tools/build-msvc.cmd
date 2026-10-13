@@ -2,6 +2,27 @@
 call "%D2VR_VS_ROOT%\VC\Auxiliary\Build\vcvars64.bat" >nul
 if not "%errorlevel%"=="0" exit /b 1
 if not exist build mkdir build
+if not exist artifacts\research\glyphs mkdir artifacts\research\glyphs
+for %%T in (vr_settings_native_check game_art_check held_release_check native_takedown_range_check native_slash_speed_check native_use_los_anchor_check calibrated_body_anchor_check body_ik_check native_use_fetch_completion_check native_interaction_install_order_check motion_sword_check game_xr_motion_check native_grab_lifetime_check frame_timing_queue_check native_grab_sequence_check native_grab_obstruction_check glyph_swap_async_check glyph_swap_gpu_check avatar_fit_reuse_check xr_floor_datum_check native_torso_fit_check avatar_geometry_fit_check native_pose_pipeline_check native_readable_range_check native_art_movie_patch_check synchronized_observer_check wheel_avatar_check native_action_camera_check native_use_order_check native_hand_volume_check body_renderer_check native_hud_art_probe_check native_hud_child_draw_check native_hud_child_capture_check native_wrist_art_publisher_check native_marker_child_binding_check native_art_bounds_check native_ui_layout_check full_body_driver_check native_interaction_range_check native_attachment_pose_check native_fire_seam_trace_check native_hud_fallback_check game_xr_wrist_recovery_check) do (
+    cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT /Ithird_party\minhook\include /Ithird_party\openxr\include tests\%%T.cpp /Fo:build\%%T.obj /Fe:build\%%T.exe /link user32.lib gdi32.lib Xinput9_1_0.lib d3d11.lib dxgi.lib d3dcompiler.lib
+    if errorlevel 1 exit /b 1
+    build\%%T.exe
+    if errorlevel 1 exit /b 1
+)
+python tests\native_interaction_range_abi_check.py
+if errorlevel 1 exit /b 1
+python tests\test_playground.py
+if errorlevel 1 exit /b 1
+python tests\test_playground_capture.py
+if errorlevel 1 exit /b 1
+python tests\live_session_tools_check.py
+if errorlevel 1 exit /b 1
+python tests\native_menu_patch_check.py
+if errorlevel 1 exit /b 1
+python tests\frame_timing_check.py
+if errorlevel 1 exit /b 1
+python tests\live_performance_check.py
+if errorlevel 1 exit /b 1
 cl /nologo /std:c++17 /EHsc /W4 /WX /O2 /MT tests\native_lean_snapshot_check.cpp /Fo:build\native_lean_snapshot_check.obj /Fe:build\native_lean_snapshot_check.exe /link Xinput9_1_0.lib user32.lib
 if not "%errorlevel%"=="0" exit /b 1
 build\native_lean_snapshot_check.exe
@@ -85,6 +106,8 @@ if not "%errorlevel%"=="0" exit /b 1
 python tests\native_hand_export_check.py
 if not "%errorlevel%"=="0" exit /b 1
 python tests\frame_timing_check.py
+if not "%errorlevel%"=="0" exit /b 1
+python tests\live_performance_check.py
 if not "%errorlevel%"=="0" exit /b 1
 cl /nologo /std:c++17 /EHsc /W4 /WX /O2 /MT tests\physical_grab_check.cpp /Fo:build\physical_grab_check.obj /Fe:build\physical_grab_check.exe
 if not "%errorlevel%"=="0" exit /b 1
@@ -206,6 +229,42 @@ cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT tests\vr_controls_check.cpp /
 if not "%errorlevel%"=="0" exit /b 1
 cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT tests\play_controls_check.cpp /Fo:build\play_controls_check.obj /Fe:build\play_controls_check.exe
 if not "%errorlevel%"=="0" exit /b 1
+cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT tests\arm_body_check.cpp /Fo:build\arm_body_check.obj /Fe:build\arm_body_check.exe
+if not "%errorlevel%"=="0" exit /b 1
+build\arm_body_check.exe
+if not "%errorlevel%"=="0" exit /b 1
+cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT tests\native_takedown_check.cpp /Fo:build\native_takedown_check.obj /Fe:build\native_takedown_check.exe
+if not "%errorlevel%"=="0" exit /b 1
+build\native_takedown_check.exe
+if not "%errorlevel%"=="0" exit /b 1
+cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT tests\vr_gestures_check.cpp /Fo:build\vr_gestures_check.obj /Fe:build\vr_gestures_check.exe
+if not "%errorlevel%"=="0" exit /b 1
+build\vr_gestures_check.exe
+if not "%errorlevel%"=="0" exit /b 1
+cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT tests\grab_beam_check.cpp /Fo:build\grab_beam_check.obj /Fe:build\grab_beam_check.exe
+if not "%errorlevel%"=="0" exit /b 1
+cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT tests\native_hud_census_check.cpp /Fo:build\native_hud_census_check.obj /Fe:build\native_hud_census_check.exe
+if not "%errorlevel%"=="0" exit /b 1
+build\native_hud_census_check.exe
+if not "%errorlevel%"=="0" exit /b 1
+cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT tests\native_marker_probe_check.cpp /Fo:build\native_marker_probe_check.obj /Fe:build\native_marker_probe_check.exe
+if not "%errorlevel%"=="0" exit /b 1
+build\native_marker_probe_check.exe
+if not "%errorlevel%"=="0" exit /b 1
+build\grab_beam_check.exe
+if not "%errorlevel%"=="0" exit /b 1
+cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT tests\controller_glyph_atlas_check.cpp /Fo:build\controller_glyph_atlas_check.obj /Fe:build\controller_glyph_atlas_check.exe /link gdi32.lib user32.lib
+if not "%errorlevel%"=="0" exit /b 1
+build\controller_glyph_atlas_check.exe
+if not "%errorlevel%"=="0" exit /b 1
+cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT tests\bc7_encode_check.cpp /Fo:build\bc7_encode_check.obj /Fe:build\bc7_encode_check.exe /link d3d11.lib dxgi.lib d3dcompiler.lib
+if not "%errorlevel%"=="0" exit /b 1
+build\bc7_encode_check.exe
+if not "%errorlevel%"=="0" exit /b 1
+cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT tests\native_interaction_two_hand_check.cpp /Fo:build\native_interaction_two_hand_check.obj /Fe:build\native_interaction_two_hand_check.exe
+if not "%errorlevel%"=="0" exit /b 1
+build\native_interaction_two_hand_check.exe
+if not "%errorlevel%"=="0" exit /b 1
 build\play_controls_check.exe
 if not "%errorlevel%"=="0" exit /b 1
 cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT tests\controls_hint_image_check.cpp /Fo:build\controls_hint_image_check.obj /Fe:build\controls_hint_image_check.exe /link gdi32.lib user32.lib
@@ -235,6 +294,38 @@ if not "%errorlevel%"=="0" exit /b 1
 cl /nologo /std:c++17 /EHsc /W4 /WX /O2 /MT tests\render_size_check.cpp /Fo:build\render_size_check.obj /Fe:build\render_size_check.exe /link d3d11.lib dxgi.lib user32.lib
 if not "%errorlevel%"=="0" exit /b 1
 build\render_size_check.exe
+if not "%errorlevel%"=="0" exit /b 1
+cl /nologo /std:c++17 /EHsc /W4 /WX /O2 /MT tests\native_world_ui_check.cpp /Fo:build\native_world_ui_check.obj /Fe:build\native_world_ui_check.exe
+if not "%errorlevel%"=="0" exit /b 1
+build\native_world_ui_check.exe
+if not "%errorlevel%"=="0" exit /b 1
+cl /nologo /std:c++17 /EHsc /W4 /WX /O2 /MT tests\world_ui_capture_check.cpp /Fo:build\world_ui_capture_check.obj /Fe:build\world_ui_capture_check.exe /link d3d11.lib d3dcompiler.lib dxgi.lib
+if not "%errorlevel%"=="0" exit /b 1
+build\world_ui_capture_check.exe
+if not "%errorlevel%"=="0" exit /b 1
+cl /nologo /std:c++17 /EHsc /W4 /WX /O2 /MT tests\world_ui_completion_check.cpp /Fo:build\world_ui_completion_check.obj /Fe:build\world_ui_completion_check.exe
+if not "%errorlevel%"=="0" exit /b 1
+build\world_ui_completion_check.exe
+if not "%errorlevel%"=="0" exit /b 1
+cl /nologo /std:c++17 /EHsc /W4 /WX /O2 /MT /Ithird_party\minhook\include tests\native_menu_entry_lifecycle_check.cpp /Fo:build\native_menu_entry_lifecycle_check.obj /Fe:build\native_menu_entry_lifecycle_check.exe
+if not "%errorlevel%"=="0" exit /b 1
+build\native_menu_entry_lifecycle_check.exe
+if not "%errorlevel%"=="0" exit /b 1
+cl /nologo /std:c++17 /EHsc /W4 /WX /O2 /MT /Ithird_party\minhook\include tests\native_grab_compile.cpp /Fo:build\native_grab_compile.obj /Fe:build\native_grab_compile.exe
+if not "%errorlevel%"=="0" exit /b 1
+build\native_grab_compile.exe
+if not "%errorlevel%"=="0" exit /b 1
+cl /nologo /std:c++17 /EHsc /W4 /WX /O2 /MT /Ithird_party\minhook\include tests\native_shot_aim_check.cpp /Fo:build\native_shot_aim_check.obj /Fe:build\native_shot_aim_check.exe
+if not "%errorlevel%"=="0" exit /b 1
+build\native_shot_aim_check.exe
+if not "%errorlevel%"=="0" exit /b 1
+cl /nologo /std:c++17 /EHsc /W4 /WX /O2 /MD /Ithird_party\fidelityfx tests\fsr3_deferred_check.cpp /Fo:build\fsr3_deferred_check.obj /Fe:build\fsr3_deferred_check.exe /link d3d11.lib dxgi.lib third_party\fidelityfx\libs\ffx_backend_dx11_x64.lib third_party\fidelityfx\libs\ffx_fsr3_x64.lib third_party\fidelityfx\libs\ffx_fsr3upscaler_x64.lib third_party\fidelityfx\libs\ffx_frameinterpolation_x64.lib third_party\fidelityfx\libs\ffx_opticalflow_x64.lib
+if not "%errorlevel%"=="0" exit /b 1
+build\fsr3_deferred_check.exe
+if not "%errorlevel%"=="0" exit /b 1
+cl /nologo /std:c++17 /EHsc /W4 /WX /O2 /MT tests\settings_menu_layout_check.cpp /Fo:build\settings_menu_layout_check.obj /Fe:build\settings_menu_layout_check.exe /link Xinput9_1_0.lib user32.lib
+if not "%errorlevel%"=="0" exit /b 1
+build\settings_menu_layout_check.exe
 if not "%errorlevel%"=="0" exit /b 1
 cl /nologo /std:c++17 /EHsc /W4 /WX /O2 /MT tests\menu_panel_check.cpp /Fo:build\menu_panel_check.obj /Fe:build\menu_panel_check.exe
 if not "%errorlevel%"=="0" exit /b 1
@@ -326,6 +417,90 @@ cl /nologo /std:c++17 /DNOMINMAX /EHsc /W4 /WX /O2 /MT /Ithird_party\minhook\inc
 if not "%errorlevel%"=="0" exit /b 1
 build\native_gameplay_aim_install_check.exe
 if not "%errorlevel%"=="0" exit /b 1
+cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT tests\world_ui_pose_check.cpp /Fo:build\world_ui_pose_check.obj /Fe:build\world_ui_pose_check.exe
+if not "%errorlevel%"=="0" exit /b 1
+build\world_ui_pose_check.exe
+if not "%errorlevel%"=="0" exit /b 1
+cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT /Ithird_party\minhook\include tests\taa_mv_dejitter_check.cpp /Fo:build\taa_mv_dejitter_check.obj /Fe:build\taa_mv_dejitter_check.exe /link d3d11.lib d3dcompiler.lib
+if not "%errorlevel%"=="0" exit /b 1
+build\taa_mv_dejitter_check.exe
+if not "%errorlevel%"=="0" exit /b 1
+cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT tests\canted_fov_check.cpp /Fo:build\canted_fov_check.obj /Fe:build\canted_fov_check.exe
+if not "%errorlevel%"=="0" exit /b 1
+build\canted_fov_check.exe
+if not "%errorlevel%"=="0" exit /b 1
+cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT /Ithird_party\minhook\include tests\sampler_lod_bias_check.cpp build\buffer.obj build\hook.obj build\trampoline.obj build\hde64.obj /Fo:build\sampler_lod_bias_check.obj /Fe:build\sampler_lod_bias_check.exe /link d3d11.lib
+if not "%errorlevel%"=="0" exit /b 1
+build\sampler_lod_bias_check.exe
+if not "%errorlevel%"=="0" exit /b 1
+cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT /Isrc tests\vr_combat_check.cpp /Fo:build\vr_combat_check.obj /Fe:build\vr_combat_check.exe
+if not "%errorlevel%"=="0" exit /b 1
+build\vr_combat_check.exe
+if not "%errorlevel%"=="0" exit /b 1
+cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT /Isrc tests\vr_perf_governor_check.cpp /Fo:build\vr_perf_governor_check.obj /Fe:build\vr_perf_governor_check.exe
+if not "%errorlevel%"=="0" exit /b 1
+build\vr_perf_governor_check.exe
+if not "%errorlevel%"=="0" exit /b 1
+cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT /Isrc /Ithird_party\minhook\include tests\weapon_collision_check.cpp /Fo:build\weapon_collision_check.obj /Fe:build\weapon_collision_check.exe
+if not "%errorlevel%"=="0" exit /b 1
+build\weapon_collision_check.exe
+if not "%errorlevel%"=="0" exit /b 1
+cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT /Isrc /Ithird_party\minhook\include tests\native_world_trace_check.cpp /Fo:build\native_world_trace_check.obj /Fe:build\native_world_trace_check.exe
+if not "%errorlevel%"=="0" exit /b 1
+build\native_world_trace_check.exe
+if not "%errorlevel%"=="0" exit /b 1
+cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT /Isrc /Ithird_party\minhook\include tests\native_console_check.cpp /Fo:build\native_console_check.obj /Fe:build\native_console_check.exe
+if not "%errorlevel%"=="0" exit /b 1
+build\native_console_check.exe
+if not "%errorlevel%"=="0" exit /b 1
+cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT tests\grab_indicator_check.cpp /Fo:build\grab_indicator_check.obj /Fe:build\grab_indicator_check.exe
+if not "%errorlevel%"=="0" exit /b 1
+build\grab_indicator_check.exe
+if not "%errorlevel%"=="0" exit /b 1
+cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT tests\wrist_hud_image_check.cpp /Fo:build\wrist_hud_image_check.obj /Fe:build\wrist_hud_image_check.exe /link gdi32.lib user32.lib
+if not "%errorlevel%"=="0" exit /b 1
+build\wrist_hud_image_check.exe
+if not "%errorlevel%"=="0" exit /b 1
+cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT tests\native_wrist_hud_check.cpp /Fo:build\native_wrist_hud_check.obj /Fe:build\native_wrist_hud_check.exe
+if not "%errorlevel%"=="0" exit /b 1
+build\native_wrist_hud_check.exe
+if not "%errorlevel%"=="0" exit /b 1
+cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT tests\native_hud_rect_check.cpp /Fo:build\native_hud_rect_check.obj /Fe:build\native_hud_rect_check.exe
+if not "%errorlevel%"=="0" exit /b 1
+build\native_hud_rect_check.exe
+if not "%errorlevel%"=="0" exit /b 1
+cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT tests\render_scale_transaction_check.cpp /Fo:build\render_scale_transaction_check.obj /Fe:build\render_scale_transaction_check.exe
+if not "%errorlevel%"=="0" exit /b 1
+build\render_scale_transaction_check.exe
+if not "%errorlevel%"=="0" exit /b 1
+cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT tests\xr_present_pacing_check.cpp /Fo:build\xr_present_pacing_check.obj /Fe:build\xr_present_pacing_check.exe
+if not "%errorlevel%"=="0" exit /b 1
+build\xr_present_pacing_check.exe
+if not "%errorlevel%"=="0" exit /b 1
+cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT tests\gpu_pass_timer_check.cpp /Fo:build\gpu_pass_timer_check.obj /Fe:build\gpu_pass_timer_check.exe /link d3d11.lib dxgi.lib
+if not "%errorlevel%"=="0" exit /b 1
+build\gpu_pass_timer_check.exe
+if not "%errorlevel%"=="0" exit /b 1
+cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MD /Ithird_party\minhook\include /Ithird_party\fidelityfx tests\fsr_taa_gpu_check.cpp /Fo:build\fsr_taa_gpu_check.obj /Fe:build\fsr_taa_gpu_check.exe /link d3d11.lib dxgi.lib d3dcompiler.lib third_party\fidelityfx\libs\ffx_backend_dx11_x64.lib third_party\fidelityfx\libs\ffx_fsr3_x64.lib third_party\fidelityfx\libs\ffx_fsr3upscaler_x64.lib third_party\fidelityfx\libs\ffx_frameinterpolation_x64.lib third_party\fidelityfx\libs\ffx_opticalflow_x64.lib
+if not "%errorlevel%"=="0" exit /b 1
+build\fsr_taa_gpu_check.exe
+if not "%errorlevel%"=="0" exit /b 1
+build\fsr_taa_gpu_check.exe --fsr4
+if not "%errorlevel%"=="0" exit /b 1
+build\fsr_taa_gpu_check.exe --fsr4-missing
+if not "%errorlevel%"=="0" exit /b 1
+cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MD /Ithird_party\fidelityfx tests\fsr4_eye_upscaler_check.cpp /Fo:build\fsr4_eye_upscaler_check.obj /Fe:build\fsr4_eye_upscaler_check.exe /link d3d11.lib dxgi.lib
+if not "%errorlevel%"=="0" exit /b 1
+build\fsr4_eye_upscaler_check.exe
+if not "%errorlevel%"=="0" exit /b 1
+cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT tests\native_interaction_prompt_check.cpp /Fo:build\native_interaction_prompt_check.obj /Fe:build\native_interaction_prompt_check.exe
+if not "%errorlevel%"=="0" exit /b 1
+build\native_interaction_prompt_check.exe
+if not "%errorlevel%"=="0" exit /b 1
+cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT tests\native_list_gpu_timer_check.cpp /Fo:build\native_list_gpu_timer_check.obj /Fe:build\native_list_gpu_timer_check.exe /link d3d11.lib dxgi.lib
+if not "%errorlevel%"=="0" exit /b 1
+build\native_list_gpu_timer_check.exe
+if not "%errorlevel%"=="0" exit /b 1
 set D2VR_DIAGNOSTIC_OUTPUT=build\d2vr_render_probe.dll
 cl /nologo /std:c++17 /EHsc /W4 /WX /O2 /MT tests\native_graphics_owner_check.cpp /Fo:build\native_graphics_owner_check.obj /Fe:build\native_graphics_owner_check.exe /link d3d11.lib dxgi.lib user32.lib
 if not "%errorlevel%"=="0" exit /b 1
@@ -340,5 +515,8 @@ if "%~1"=="pipeline" set D2VR_DIAGNOSTIC_OUTPUT=build\d2vr_render_probe_pipeline
 if "%~1"=="paired" set D2VR_DIAGNOSTIC_OUTPUT=build\d2vr_render_probe_paired.dll
 if "%~1"=="view_setup" set D2VR_DIAGNOSTIC_OUTPUT=build\d2vr_render_probe_view_setup.dll
 if not "%~2"=="" set D2VR_DIAGNOSTIC_OUTPUT=build\%~2
-cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT /LD /Ithird_party\minhook\include /Ithird_party\openxr\include src\dxgi_probe.cpp build\buffer.obj build\hook.obj build\trampoline.obj build\hde64.obj /Fo:build\dxgi_probe.obj /Fe:%D2VR_DIAGNOSTIC_OUTPUT% /link d3d11.lib dxgi.lib bcrypt.lib user32.lib d3dcompiler.lib gdi32.lib
+if not exist build\md mkdir build\md
+cl /nologo /c /TC /W3 /O2 /MD /Ithird_party\minhook\include third_party\minhook\src\buffer.c third_party\minhook\src\hook.c third_party\minhook\src\trampoline.c third_party\minhook\src\hde\hde64.c /Fo:build\md\
+if not "%errorlevel%"=="0" exit /b 1
+cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MD /LD /Ithird_party\minhook\include /Ithird_party\openxr\include /Ithird_party\fidelityfx src\dxgi_probe.cpp build\md\buffer.obj build\md\hook.obj build\md\trampoline.obj build\md\hde64.obj /Fo:build\dxgi_probe.obj /Fe:%D2VR_DIAGNOSTIC_OUTPUT% /link d3d11.lib dxgi.lib bcrypt.lib user32.lib d3dcompiler.lib gdi32.lib third_party\fidelityfx\libs\ffx_backend_dx11_x64.lib third_party\fidelityfx\libs\ffx_fsr3_x64.lib third_party\fidelityfx\libs\ffx_fsr3upscaler_x64.lib third_party\fidelityfx\libs\ffx_frameinterpolation_x64.lib third_party\fidelityfx\libs\ffx_opticalflow_x64.lib
 exit /b %errorlevel%

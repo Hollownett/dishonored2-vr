@@ -32,12 +32,14 @@ private:
     std::array<std::array<Binding,capacity>,Methods> bindings_{};
     Targets active_{};
     Api api_;
+    bool simultaneous_targets_{};
     std::atomic<bool> poisoned_{false};
     const char* reason_="unbound";
     unsigned rebinds_{},reuses_{},created_{};
     bool fail(const char* reason) noexcept {reason_=reason;poisoned_=true;return false;}
 public:
-    explicit GpuDispatchBindings(Api api=Api{}) :api_(api) {}
+    explicit GpuDispatchBindings(Api api=Api{},bool simultaneous_targets=false)
+        :api_(api),simultaneous_targets_(simultaneous_targets) {}
     bool poisoned() const noexcept {return poisoned_.load(std::memory_order_acquire);}
     const char* reason() const noexcept {return reason_;}
     const Targets& active() const noexcept {return active_;}
@@ -72,10 +74,13 @@ public:
             selected[method]=found==capacity?free:found;
             if(selected[method]==capacity) return fail("four-target graphics binding budget exhausted");
         }
-        bool all_enabled=targets==active_;
+        // The immediate and native HUD deferred contexts remain live together.
+        // Once qualified, alternating between them must not repatch code and
+        // suspend every process thread on each HUD/Present callback.
+        bool all_enabled=simultaneous_targets_ || targets==active_;
         for(std::size_t method=0;method<Methods;++method)
             all_enabled=all_enabled && bindings_[method][selected[method]].enabled;
-        if(all_enabled) {reason_="unchanged";return true;}
+        if(all_enabled) {active_=targets;reason_="unchanged";return true;}
         const bool changed=active_[0] && targets!=active_;
         for(std::size_t method=0;method<Methods;++method) {
             auto& b=bindings_[method][selected[method]];
@@ -93,16 +98,19 @@ public:
         if(!snapshot(current) || current!=targets) return fail("context dispatch changed while preparing hooks");
         for(std::size_t method=0;method<Methods;++method) for(std::size_t i=0;i<capacity;++i) {
             auto& b=bindings_[method][i];if(!b.created) continue;
+            if(simultaneous_targets_ && b.enabled) continue;
             const auto status=i==selected[method]?api_.enable(b.target):api_.disable(b.target);
             if(status!=MH_OK) return fail("graphics hook queue failed");
         }
         if(api_.apply()!=MH_OK) return fail("graphics hook batch apply failed");
         for(std::size_t method=0;method<Methods;++method) for(std::size_t i=0;i<capacity;++i) {
             auto& b=bindings_[method][i];if(!b.created) continue;
-            b.enabled=i==selected[method];
+            const bool kept_enabled=b.enabled && (simultaneous_targets_ || i==selected[method]);
+            b.enabled=i==selected[method] || (simultaneous_targets_ && b.enabled);
             Bytes bytes{};
             if(!read(b.target,bytes.data(),bytes.size())) return fail("cannot verify applied graphics hook");
-            if(b.enabled) b.patched=bytes;
+            if(kept_enabled && bytes!=b.patched) return fail("retained graphics target changed during batch");
+            if(b.enabled) {if(!kept_enabled)b.patched=bytes;}
             else if(bytes!=b.before) return fail("disabled graphics hook bytes not restored");
         }
         active_=targets;if(changed) ++rebinds_;reason_=changed?"accepted dispatch transition":"accepted binding";

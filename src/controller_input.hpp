@@ -30,6 +30,7 @@ class PadComposer {
     bool previous_gameplay_=false,previous_active_=false,previous_modifier_=false,previous_directional_=false,previous_lean_=false;
     WORD blocked_buttons_{};
     unsigned blocked_analog_{};
+    std::array<bool,2> shoulder_held_{},shoulder_tap_{};std::array<std::uint64_t,2> shoulder_since_{};
     static SHORT stick(float value) {
         return std::isfinite(value)?static_cast<SHORT>(std::lround(std::clamp(value,-1.f,1.f)*32767.f)):0;
     }
@@ -37,10 +38,11 @@ class PadComposer {
         return std::isfinite(value)?static_cast<BYTE>(std::lround(std::clamp(value,0.f,1.f)*255.f)):0;
     }
 public:
+    inline static constexpr std::uint64_t menu_shoulder_tap_ms=120; // well under the menus' 225 ms repeat delay
     XINPUT_GAMEPAD compose(const ControllerInput& in,bool gameplay,std::uint64_t now=GetTickCount64()) {
         const bool pause=menu_tap_.update(in.menu,in.active && !in.suppress_pause,now);
         if(!in.active) {
-            previous_active_=previous_modifier_=previous_directional_=previous_lean_=false;blocked_buttons_=0;blocked_analog_=0;
+            previous_active_=previous_modifier_=previous_directional_=previous_lean_=false;blocked_buttons_=0;blocked_analog_=0;shoulder_held_={};
             return {};
         }
         WORD buttons=0;
@@ -73,8 +75,17 @@ public:
         previous_lean_=(in.lean_controlled?in.lean_modifier:in.y) && gameplay;
         blocked_buttons_&=buttons;blocked_analog_&=analog;
         buttons&=static_cast<WORD>(~blocked_buttons_);
-        if(!in.menu_modifier && (analog&4) && !(blocked_analog_&4)) buttons|=XINPUT_GAMEPAD_LEFT_SHOULDER;
-        if(!in.menu_modifier && (analog&8) && !(blocked_analog_&8)) buttons|=XINPUT_GAMEPAD_RIGHT_SHOULDER;
+        // A grip squeezed in a menu is one LB/RB tap: the game's menus repeat a held shoulder after 225 ms every 75 ms
+        // (lib_options Input.DELAY_BEFORE_REPEAT/REPEAT_INTERVAL), so a held grip cycled tabs a random number of times
+        // (sim v395). A squeeze begun in gameplay keeps holding (LB opens the power wheel only while held).
+        for(unsigned side=0;side<2;++side) {
+            const unsigned bit=side?8u:4u;
+            const bool held=!in.menu_modifier && (analog&bit) && !(blocked_analog_&bit);
+            if(held && !shoulder_held_[side]) {shoulder_since_[side]=now;shoulder_tap_[side]=!gameplay;}
+            shoulder_held_[side]=held;
+            if(held && (!shoulder_tap_[side] || now-shoulder_since_[side]<menu_shoulder_tap_ms))
+                buttons|=side?XINPUT_GAMEPAD_RIGHT_SHOULDER:XINPUT_GAMEPAD_LEFT_SHOULDER;
+        }
         // Raw held modifiers can reserve RX before reaching this composer.
         // If focus guards blocked their actual native buttons, neither axis
         // may escape as ordinary LOOK until the modifier is released.

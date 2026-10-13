@@ -1,0 +1,318 @@
+DISHONORED 2 VR — NEXT DEVELOPMENT SESSION HANDOFF
+
+Continue the actual implementation and debugging work in:
+C:\Users\hollo\Documents\ChatGPT\VR mods
+
+The objective is a polished, feature-complete first VR iteration with correctly aligned hands and a visible full body, reliable interactions, native-looking world-space UI, and usable performance. Do not stop at another roadmap or a diagnostic-only build. Use evidence to fix the problems, extend the existing headless playground, build a protected new candidate, and prepare a short real-headset acceptance session. Where a cause remains unknown, add the smallest useful observer, collect controlled evidence, and then repair the confirmed failure.
+
+Read AGENTS.md and applicable skills. The user permits focused helper agents, bounded by the runtime concurrency limit. Prefer GPT-6.1 at low/medium reasoning for focused work; routine checks may use a lighter appropriate model. Assign non-overlapping files. One coordinator owns any live game. Do not spawn user-facing chats merely to delegate implementation.
+
+1. STARTING STATE AND EVIDENCE
+
+This is a heavily modified, partly untracked working tree containing Claude's original work and subsequent repairs. Inspect git status first. Do not reset, clean, overwrite, or discard those changes. Check the current tree before assuming this handoff is still the newest state.
+
+The latest headset-tested repair candidate was v220, and the user rejected it. Its offline checks passed, but calibration/body placement, UI, interactions, and sustained performance failed live acceptance. Treat it as an experimental baseline to diagnose, not a release.
+
+Read these paths relative to the workspace root, in this order:
+
+- artifacts/live-v220-review/20261010T211523Z/test-assessment.json
+- artifacts/live-v220-review/20261010T211523Z/feedback.jsonl
+- artifacts/live-v220-review/20261010T211523Z/findings.json
+- artifacts/live-v220-review/20261010T211523Z/interaction-telemetry-correction.json
+- artifacts/live-v220-review/20261010T211523Z/post-calibration-diagnostic.json
+- artifacts/live-v220-review/20261010T211523Z/severe-slowdown.json
+- artifacts/live-v220-review/20261010T211523Z/capture-references.json
+- artifacts/live-v220-review/20261010T211523Z/performance-checkpoint.json
+- artifacts/live-v220-review/20261010T211523Z/coin-success-performance.json
+- artifacts/runs/20261010T213747.038079Z-pid38936-arm-v220/dxgi-probe-result.json
+- artifacts/runs/20261010T213747.038079Z-pid38936-arm-v220/xr-frame-timing.csv
+- artifacts/runs/20261010T213747.038079Z-pid38936-arm-v220/avatar-fit-events.csv
+- docs/VR_REPAIR_TEST.md
+- docs/PLAYGROUND.md
+
+The review folder also contains:
+- recording-20261010-232241: 967 status samples and nine stereo projection pairs.
+- performance-20261010-233100: rolling analysis and history.
+- final-* and late-test-* diagnostic snapshots.
+
+Those helper processes were explicitly stopped at the end of testing; their state is stopped_by_owner. They are not still monitoring. Preserve all recorded evidence. Do not treat helper metadata PIDs as current identities.
+
+v220 identity:
+- DLL: build/d2vr_render_probe_arm_v220.dll
+- DLL SHA256: 88c1e7ae6e8acce527408318fd2c5d68e488939fcd9693cc2624d637ee2c9d0b
+- Candidate manifest: artifacts/repair-v220-test-candidate.json
+- Source pointer: build/d2vr_render_probe_arm_v220.dll.source.json
+- Source archive: artifacts/build-source/20261010T205002.153618Z-d41f9641/source.zip
+- Source manifest: artifacts/build-source/20261010T205002.153618Z-d41f9641/source-manifest.json
+- Full build log: artifacts/playground/build-v220-final.log
+
+The build was compiled from the working tree with archived sources verified unchanged during compilation. Do not describe it as compiled directly from an immutable extracted snapshot.
+
+Pinned installed game:
+C:\Program Files (x86)\Steam\steamapps\common\Dishonored2\Dishonored2.exe
+SHA256: b671f8249422862bf557d00aab2f4bb671ed4515cc10ad8a8a9decad84516180
+PE timestamp: 67a50cde; image size: 41cb000.
+
+Earlier Claude baseline: v217, with its failures preserved at:
+artifacts/runs/20261010T193544.566528Z-pid19288-arm-v217
+Earlier user feedback: artifacts/claude-v217-headset-test/live-review/
+Actual Claude session UUID: a40bcf65-2bcd-4ec2-bd53-38e73b198501.
+The user's initial command omitted its last character. Local Claude logs are under:
+C:\Users\hollo\.claude\projects\C--Users-hollo-Documents-ChatGPT-VR-mods\
+Consult those logs when needed for exact history, tools, and practices; current source and runtime evidence take precedence over old summaries.
+
+2. PRESERVE ACCEPTED BEHAVIOR AND THE USER'S PC
+
+Preserve the accepted perspective, locomotion, movement, turning, and ordinary VR entry/exit behavior. The user liked the general combat/animation behavior and the visual appearance of FSR4 Quality in the earlier session. Do not replace the requested full body with floating hands to simplify the problem.
+
+Keep the accepted wheel contract: hold X, select with stick, release X to equip; R3 is zoom only. The hand cursor plus a fresh trigger press is an alternate single-commit path. Prevent X/trigger leakage, double equips, and calibration grips opening selectors.
+
+The user wants to keep using the PC while development runs. Default to headless/private-desktop fixtures, low-priority bounded work, and sequential GPU work. Do not steal desktop focus, send global input, use shared saves as a test shortcut, or simultaneously control the game from multiple agents. Do not use F5/F9; an earlier Claude session overwrote a save.
+
+Preserve existing working DLLs, numbered candidates, source archives, normal demo selection, user settings, and saves. Do not promote an experimental candidate based on unit tests or runtime counters. Research primary references and verify native ownership, calling conventions, and lifetimes before changing engine hooks. Avoid downloads or new external tools when installed tools suffice.
+
+Preserve the resource/state safeguards already added in v220: cached compatible typed wrist render targets, nonblocking OpenXR acquisition/wait ownership, containment of optional HUD failures, GPU retirement before runtime-image destruction, correct immediate/deferred D3D state restoration, target-specific native UI fallback/presentation acknowledgement, and deferred owned body restoration. Re-check these as integration regression cases instead of removing them to make performance counters look better. FSR constant-input caching exists, but no matched game speedup was established.
+
+3. USER-OBSERVED FAILURES TO REPAIR
+
+A. Embodiment and calibration
+- Calibration completes but breaks the avatar's placement relative to the user's body.
+- Wrists, joints, and hands are misaligned; the full body is not convincingly placed.
+- The aiming hand sometimes disappears entirely while both controllers remain tracked.
+- Legs visibly trail the torso. This was reported even before calibration, so do not attribute every gait problem to accepting the fit.
+- The user explicitly deferred precise controller-versus-hand comparison to an improved diagnostic build. Do not ask for prolonged testing of the broken v220 embodiment.
+
+B. Performance and stability
+- User reported approximately 5–7 FPS with poor responsiveness.
+- Earlier v217 had repeated blackouts/VR dropouts; those remain regression cases.
+- v220 still has severe sustained slow periods, even though its archived log shows no later wrist-triggered XR recovery.
+- Do not assume FSR is responsible without a matched comparison.
+
+C. Interaction and guardians/guards
+- Item registration does not reliably reflect which object the player intends to take.
+- Required pickup/loot prompts are missing, large, flat, or attached to the wrong point.
+- One coin example showed a large default 2D interface and a directional circle associated with the 2D HUD rather than the object in the world.
+- Two coins were successfully collected. Record that positive without treating the whole pickup system as accepted; the exact input method and native selection frames were not recorded.
+- The user previously had to approach objects and guards uncomfortably closely.
+- Alert markers above characters can appear, but pickup, choke, and kill prompts must also appear near the appropriate character.
+- Carrying a guard previously fully obscured the RIGHT eye. This is a separate high-priority stereo defect, still unaccepted in v220.
+- Guard/object markers intermittently drift away from their targets.
+
+D. HUD, controls, and menu appearance
+- Health/mana must remain visible and inside both eyes' usable view.
+- Health appeared around the right hand or another uncertain position; correct attachment must be verified visually.
+- The user requests health and ammunition UI approximately HALF its current size. Apply this to the intended VR element without accidentally shrinking unrelated menus or applying scale twice.
+- The pistol reticle is too large and should be noticeably smaller.
+- Objectives can appear both in-world and on the default flat HUD; remove the duplicate while keeping the intended information readable.
+- The weapon wheel shows keyboard glyphs rather than the correct VR controls.
+- The blue pointer inside the flat interface is redundant with the native mouse cursor. Avoid drawing two cursors; preserve necessary hand/controller selection behavior.
+- VR Settings must use the actual game's assets, typography, widgets, and menu style. A procedural imitation is not accepted. Current settings_panel_image.hpp uses GDI drawing and system fonts; identify and reuse owned native menu resources/rendering rather than repainting another approximation.
+- Heavy damage exposed hard red screen borders in the earlier session. Keep damage-vignette isolation/depth/FOV in the repair and acceptance list.
+
+4. VERIFIED FINDINGS, CORRECTIONS, AND OPEN HYPOTHESES
+
+Calibration:
+- One fit was accepted: arm_scale 1.06811, eye_to_shoulder 0.148397 m.
+- Native palm span 1.46747 m; native shoulder span 0.311208 m.
+- Acceptance rebuilds the full-body solver, modifies chest/neck geometry, and rebuilds hand mapping.
+- No recenter/reference-space reset was logged around this acceptance; epochs remained 1.
+- Fit was held in memory, not saved as a separate avatar-calibration file.
+- The live wizard did not provide measured floor/standing-eye height; the solver fell back to native bind/camera information.
+- These facts identify the transition to investigate. They do not prove the exact geometric cause.
+
+Gait:
+- Normal walking uses procedural legs; authored/airborne states can transfer ownership back to native animation.
+- Torso follows the head immediately; feet persist as world-space planted targets.
+- Step thresholds are about 10–16 cm or 35 degrees; swing duration is about 200–340 ms, with approximately 150 ms velocity smoothing.
+- full_body_driver.hpp clamps solve elapsed time to 1/30 s. At 10 FPS this advances gait at only about one third of wall time. Fix time handling with a bounded, tested approach rather than simply feeding unsafe huge dt values.
+- Torso and legs share a 20-joint body upload; no separate leg upload latency was established.
+- Arm callbacks can use the previous body solution when they arrive first; no adequate pose-age/revision check was identified there.
+
+Performance/materials:
+- Initial tracked gameplay had CPU Present intervals around median 11.10 ms and p95 12.75 ms. That was native resolution with temporal AA 0 and FSR dispatches inactive.
+- A later severe slowdown had median about 90.316 ms and p95 94.777 ms, with no capture readbacks in that measured window, before the periodic recorder started.
+- Later Quality configuration used temporal AA 3, render_fraction 0.77, and active FSR dispatches. These configurations are not matched A/B evidence.
+- A later clean rolling sample was around median 88.145 ms and approximately 11.2 submission/bridge calls per second. This is NOT measured headset FPS.
+- Final full_body.material_failures = 14,591; solver_failures = 0.
+- A material failure means a failed visibility/material transaction or restoration inspection, not automatically a GPU/device/IK failure.
+- Same-owner material/visibility mismatch can call native material/bounds refresh on every body upload with no backoff. Other rejection branches only read/validate. Existing counters cannot distinguish the expensive branch.
+- Candidate/rig validation and physics-object discovery can also repeat considerable scanning. Profile the real cost before changing ownership safeguards.
+- All 21 archived XR recovery records were initial headset-unavailable retries. There was no later wrist-triggered recovery recorded; optional wrist failures were zero. This is encouraging but not proof all recovery cases are fixed.
+
+Interaction telemetry corrections — do not repeat the earlier mistaken inference:
+- object_cue_layers = 0 is OBSOLETE telemetry after custom cue layers were removed; that counter is never incremented. It cannot prove native prompts were absent.
+- ranked_results = 0 means no qualified MULTI-HIT sort was counted. It cannot distinguish zero overlaps, a single result, or rejected ownership/revision/shape checks.
+- Native hand-volume requests were active, with tens of thousands of routed requests and no request rejection reported.
+- Physical acquisitions were logged for left and right hands, including distances about 0.0968 m and 0.3834 m. Do not conclude grabbing never happened.
+- Physics hover/acquisition and accepted native Use prompt use different identity records. A physics candidate can be acquired without satisfying the separate native prompt target gate.
+- A read-only snapshot found no native selected target at that instant: artifacts/native-interaction-38936-readonly.json. This does not explain all attempts.
+- Pinned queue job type, borrowed shape field, and fetch return conventions matched disassembly. No ABI mismatch was established. Do not guess different offsets, job types, or return conventions.
+- focus_body can scan up to 0x3fff registry entries synchronously and is called for hover/grip arbitration. Incremental discovery is a concrete design direction, but exact native body validation must remain intact.
+
+5. IMPLEMENT THE MISSING DIAGNOSTICS FIRST, THEN USE THEM
+
+Add an opt-in, bounded, low-overhead synchronized observer in the actual owned rendering/arm/body paths. It must record enough to explain and reproduce the failure, not another collection of success counters.
+
+Capture together:
+- Raw VDXR/OpenXR head, grip, and aim position/orientation, valid/tracked flags, reference-space type, prediction time.
+- Pose epoch, reference epoch, tracking revision, native frame, callback order, and timestamps.
+- Calibration inputs/accepted dimensions, floor datum if genuinely available, applied scale, yaw/recenter transform, camera anchor, model/world transform, and native owner identities.
+- Final palette actually passed to the native consumer, with reconstructed final palm/wrist, pelvis, and foot positions/orientations.
+- Target-versus-final palm residuals in a common coordinate frame. Account for the intended grip-to-palm offset; do not subtract unrelated raw coordinates.
+- Gait phase, foot plant/swing targets, actual wall-clock dt, consumed/substep dt, solver-output age, and ownership transitions.
+- Missing-hand causes: stale solution, ownership gate, visibility/material rejection, culling, palette/mapping rejection, or position outside the view.
+- Material transaction rejection reason, native refresh count/duration, validation/scan cost, and body/arm hook duration.
+- Interaction queue/fetch gates: empty/single/multiple hits, current owner/epoch/revision, shape/request identity, rejection reason, selected candidate, native permission/LOS outcome, acquisition target, prompt target, and presentation acknowledgement.
+
+Use bounded buffers/rate limits, atomic publication or an equivalent consistent snapshot, dropped-record counters, and explicit source/frame identities. Flush work away from critical rendering paths where practical. Avoid per-frame heavy file writes, registry walks, GPU waits, or bitmap regeneration introduced by diagnostics.
+
+An independent standalone OpenXR probe cannot compare the game's actual final palms with the runtime's same-frame controller poses. A desktop mirror also cannot establish lens visibility. Use the running mod's real pose/consumer path.
+
+6. REPAIR TRACKS AND SOURCE MAP
+
+Track A — body and calibration:
+src/avatar_calibration.hpp, src/avatar_fit_reuse.hpp, src/avatar_fit_events.hpp,
+src/tracked_pose.hpp, src/body_anchor.hpp, src/arm_tracking.hpp,
+src/arm_palette.hpp, src/full_body_driver.hpp, src/body_ik.hpp,
+src/body_renderer.hpp, src/player_rig_data.hpp, and owned upload integration in src/dxgi_probe.cpp.
+
+Verify units, handedness, quaternion/basis conventions, model-local versus world coordinates, inverse-bind/palette reconstruction, controller-to-palm mapping, and camera/floor anchors. Detect double-applied scale/translation and stale output. Fix the calibrated geometry transaction and gait wall-time behavior. Preserve native ownership during carry/drop, takedown, climb, and authored moves. Check both Corvo and Emily and tracking/recenter/load/pause transitions.
+
+Track B — performance:
+Measure material retry and scan costs, including which branch actually executes native refresh. Cache only data with a valid owner/resource/epoch lifetime and correct invalidation. Remove redundant repeated discovery/refresh work without suppressing necessary restoration or hiding failures. Use matched scenes/configurations and report CPU spans, native GPU list coverage, FSR wrapper measurements, and submission cadence separately. Preserve the accepted FSR Quality appearance.
+
+Track C — selection and world UI:
+src/native_grab.hpp, src/physical_grab.hpp, src/native_interaction_aim.hpp,
+src/native_hand_volume.hpp, src/selection_policy.hpp, src/interaction_ray.hpp,
+src/native_interaction_prompt.hpp, src/native_hud_child_capture.hpp,
+src/native_hud_child_draw.hpp, src/native_hud_fallback.hpp,
+src/native_marker_child_binding.hpp, src/native_world_ui.hpp,
+src/world_ui_capture.hpp, src/world_ui_completion.hpp, src/world_ui_pose.hpp,
+src/native_wrist_hud.hpp, src/native_crosshair.hpp, src/glyph_swap.hpp,
+src/controller_glyph_atlas.hpp, src/game_xr.hpp, and integration in src/dxgi_probe.cpp.
+
+Create a consistent, qualified target record shared by hover/intent, actual acquisition, and prompt presentation. Preserve native eligibility, LOS, object lifetime, and authored actions. Include static loot, movable objects, and guards as distinct native semantics. Avoid selecting through barriers or turning a guard action into a generic physics grab.
+
+Keep full native prompt artwork and the requested action near the correct world target. Requalify anchors against the same frame/reference space and target identity. Suppress the original flat element only when its replacement is actually presented; the normal fallback must not become a permanent duplicate. Keep unrelated full-screen damage effects outside HUD scaling. Capture wrist and other quad layers separately when needed, since projection images omit them.
+
+Track D — menu assets and UI sizing:
+src/settings_panel_image.hpp, src/settings_menu_layout.hpp, src/vr_settings.hpp,
+src/native_menu_entry.hpp, src/menu_patches.hpp, and native menu ownership research.
+Discover the actual native page/widget/font/art resources and their lifetimes. Reuse them safely, including hit-testing and navigation. Do not solve this by recoloring GDI-generated fake game menus.
+
+7. DISHONORED 1 VR REFERENCE — ADOPT ITS BEHAVIOR, NOT ITS ABI
+
+The user explicitly requests the D1 VR approach or a substantial improvement with equivalent reliable behavior.
+Primary repository: https://github.com/VR-Stereo-Hub/Dishonored-VR
+Previously inspected revision: b15e4d32a720bd4cfdb5ce4d600f3f8fba8d2cec
+Read relevant pinned files, and inspect newer changes when useful:
+- src/game/dishonored/physical_pickup.cpp
+- src/game/dishonored/interact_aim.cpp
+- src/game/dishonored/throw_aim.cpp
+- src/core/gfx/hud_layout.cpp
+- src/game/dishonored/menu_immersion.cpp
+- Relevant tracked-hand/grab and ownership code.
+
+D1 uses bounded incremental candidate discovery, nearby candidate lists, per-hand reach, a stable gameplay-camera anchor, native focused-target acceptance, and grip arbitration. These are useful design references. D2 uses Void rather than D1's Unreal engine: UE GObjects offsets, x86 assembly bridges, class layouts, calling conventions, and physics assumptions are not transplantable.
+
+Use existing pinned native research under artifacts/re-toolchain/ and docs/native-hand-volume-20261010.md, docs/native-use-ranking-20261010.md, docs/native-interaction-prompt-research.md, docs/native-hud-child-capture.md, docs/native-marker-child-binding-20261010.md, docs/world-ui-native-ownership.md, and docs/full-body-research.md. Verify any new engine seam against the exact pinned PE before mutating it.
+
+8. EXTEND THE EXISTING HEADLESS PLAYGROUND
+
+Reuse, do not rebuild an unrelated framework:
+python tools/playground.py --list
+python tools/playground.py --suite fast
+python tools/playground.py --suite gpu
+python tools/playground.py --suite replay --render
+python tools/playground.py --suite all
+python tools/playground.py --test <reviewed-name> --isolated-desktop
+
+Run targeted meaningful checks first, then required integrated checks. Add deterministic replay of the captured pose/owner/calibration sequence through production code, with Corvo/Emily native asset fixtures. Include acceptance of calibration, cancellation/retry, pre/post-calibration movement, 90/30/10/5 FPS and long gaps, arm-before-body ordering, disappear/reappear transitions, stale epochs, native carry/drop ownership, and pause/stop restoration.
+
+Interaction checks must distinguish empty, single, and multiple query results; target lifetime and epoch changes; adjacent loot/container intent; barriers and failed LOS; either hand; native permission refusal; and agreement between selected, acquired, and displayed targets. UI checks should cover world anchoring, both-eye replacement acknowledgement, fallback/duplicate behavior, health/ammo sizing, reticle sizing, cursor ownership, and controller glyphs.
+
+Use recordings to reproduce real failures, not fixtures that merely repeat the implementation. Test durations, capacities, and rejection cases. Keep assertions enabled. Do not equate rendered fixture images with headset acceptance.
+
+tools/playground_native.py is a GUARDED STARTUP lane only. Its validated copied-game run used a private non-active desktop, windowed 640x480, private saves, disabled native platform backend, and unchanged shared files/saves. It did not load a save, inject a VR DLL, drive native gameplay, or prove offscreen gameplay rendering. Do not silently add shared-save loading, desktop input, normal Steam launching, or live injection to that lane. Expand it only after independently proving the necessary ownership/isolation.
+
+9. BUILD AND TOOLING REQUIREMENTS
+
+Inspect the highest existing candidate version. Use a fresh numbered DLL, likely v221 if no newer candidate exists. Never overwrite the preserved v220/v217 DLLs or pretend an older DLL contains new source.
+
+Existing paired build entry point:
+.\tools\build.ps1 -Paired -OutputName d2vr_render_probe_arm_v221.dll
+
+Run the full required checks from the real build pipeline once focused fixes pass. Prevent overlapping source edits during the final build. Preserve the resulting build/source pointer, archive, source manifest, DLL hash, toolchain/arguments, and check logs. A successful partial compile is not a successful integrated DLL build.
+
+IMPORTANT VERSION PITFALLS:
+- tools/run_repair_test.ps1 is hardcoded to v220 and its v220 manifest. It will not test v221 just because v221 was built.
+- tools/record_live_session.py and tools/analyze_live_performance.py currently validate the v220 DLL and loaded-render-probe-arm-v220.json.
+- Add explicit candidate-manifest/build selection for the new tooling, or a separately verified new-version wrapper. Preserve exact PID/path/hash checks; do not remove validation to make the command run.
+- tools/run_demo.ps1 accepts -CandidateManifest for a separately verified experimental manifest; keep the normal demo selection separate.
+
+Document actual working commands and update the reviewed playground manifest for new safe fixtures. Add an owned stop request and graceful final snapshot to background tools; this session had to stop its verified helper PIDs and finalize the metadata externally. Keep helpers low-priority, hidden, bounded in memory/disk/work, and isolated from live input. A recorder/analyzer must stop when its selected session/build ends, not keep copying stale same-PID status after VR stops.
+
+Current reusable tools:
+- tools/analyze_frame_timing.py: matched configuration/mode timing summaries.
+- tools/analyze_live_performance.py: rolling analysis, currently v220-pinned.
+- tools/record_live_session.py: status/diagnostics and bounded periodic projection snapshots, currently v220-pinned.
+- tools/request_vr_capture.py: nonce-based fresh same-pair source/destination projection capture.
+- tools/inspect_interaction.py: pinned read-only native interaction inspection.
+
+Review tools/sample_threads.py before considering it for live profiling: it suspends game threads and the inspected version does not guarantee resume through an exception/interrupt. Repair and verify guaranteed resume/handle cleanup and correct Win64 API prototypes before live use, or use a suitable installed passive profiler. Do not confuse profiler-induced stalls with the original game slowdown.
+
+Capture example, only when the appropriate live session is ready:
+python tools/request_vr_capture.py --request <label> --wait 30
+
+Current recording is periodic images plus telemetry, NOT continuous stereo video, a complete serialized 3D scene, raw controller/final-palm replay, or headset-compositor capture. Do not claim any of those until implemented and demonstrated. Projection captures omit wrist/other XR quad layers and lens/compositor effects. Capture readbacks can perturb timing; exclude capture and adjacent samples from matched benchmarks.
+
+10. LIVE SESSION AND RESTORATION BOUNDARIES
+
+Headset: Quest through Virtual Desktop/VDXR. Last runtime path:
+C:\Program Files\Virtual Desktop Streamer\OpenXR\virtualdesktop-openxr.json
+Last projection size: 2496x2688 per eye; predicted period 11.111111 ms (90 Hz).
+
+The user previously confirmed the headset was ready and asked to start VR directly. Do not misdiagnose a standalone preflight failure as a Virtual Desktop bug. The last launch used -Launch -Direct; VDXR initially returned headset unavailable, then the existing mod automatically connected once the headset was available. Verify fresh current readiness rather than assuming the ended session is still connected.
+
+Last real game PID was 38936. It was still present when this handoff was prepared; re-discover and verify it rather than reusing a historical PID. v220's DLL intentionally remains loaded until process exit.
+
+The completed stop restored camera/display/input state but reported:
+body_material_restored = false
+body_restore_deferred = true
+arm_hook_retained_for_restore = true
+
+This is NOT proof of full clean restoration. The retained original-pass arm hook waits for a later owned gameplay draw to restore materials. New start is blocked while restoration remains pending. Revalidate current state: if the same process remains, resume owned native gameplay or coordinate a normal game exit before another candidate. Do not force-free the DLL, destroy borrowed resources, kill unrelated processes, bypass the gate, or call an old archived result proof that restoration later completed.
+
+No foreground game control during ordinary headless development. Prepare concrete source/build/test results before asking the user for a headset test. When the user is ready, coordinate a short controlled test with the exact new DLL, game identity, settings, arguments, source provenance, and archive. Use one live-game owner. Preserve saves.
+
+11. REAL-HEADSET ACCEPTANCE SESSION
+
+Use the same familiar location/save where practical. Validate one subsystem at a time, announce capture phases, and correlate observations with recorded frame/pose identities.
+
+Stage 1: Short stationary and walking performance baseline with current visual preferences. Separate menus, captures, loading, and authored cameras. Compare FSR/native settings only with matched scenes and explicit recorded configuration. Report submission cadence separately from actual headset/compositor performance. If severe sustained slowdowns recur, stop the wider pass and preserve the event.
+
+Stage 2: Intentional calibration with both grips, natural hand sway, visible progress/reset reasons. Compare same-frame controller/palm data. Check both hands, wrist rotations, cross-body reaches, arms overhead, chest/legs looking down, standing, walking, turning, and crouching. Verify no disappearing geometry or delayed feet. User visual acceptance is required.
+
+Stage 3: Coins, loot near containers, ordinary movable objects, doors/usables as supported, either hand, and blocked targets. The cue must identify the intended eligible item, and the item acquired must match it. No persistent flat duplicate or generic substitute disconnected from native target semantics.
+
+Stage 4: Guard pickup, carrying, turning, dropping, choking, and killing. Distinguish alert/awareness markers from actionable prompts. Check LEFT and RIGHT eye independently, especially the earlier complete right-eye obstruction while carrying. Preserve acceptable authored combat animation.
+
+Stage 5: Health/mana/ammo attachment, half-size health/ammo, smaller pistol reticle, world-space objectives, VR glyphs, one effective cursor, native-asset settings menus, heavy-damage vignette, pause/load/focus changes, and stop/resume/start restoration.
+
+Abort broad acceptance on a reproduced blocking defect rather than making the user repeat a broken experience. Save the exact event and repair it. A full-body solve count, submitted layers, passed smoke test, or successful coin alone is not acceptance.
+
+12. DELIVERABLES AND REPORTING
+
+Deliver implemented fixes, meaningful regression/replay checks, protected numbered build/source provenance, working headless and live-diagnostic commands, a concise staged headset guide, and an evidence-backed issue ledger.
+
+For every major issue, distinguish:
+- user observation;
+- measured/source-confirmed behavior;
+- hypothesis;
+- actual change;
+- offline/native validation;
+- remaining real-headset acceptance.
+
+Do not declare the entire mod fixed, native gameplay headless-proven, comfort accepted, or a performance speedup established without the corresponding evidence. Keep telemetry semantics accurate and replace misleading obsolete counters. Report limitations candidly while continuing all useful authorized development.
+
+Begin now by reading the evidence and current code, confirming native restoration/process state without disrupting the user's desktop, assigning bounded independent repair tracks, and implementing the missing synchronized diagnostics plus the first evidence-supported repairs. The user wants a better playable build, not another collection of promises.

@@ -9,6 +9,7 @@
 #include <mutex>
 #include <stdexcept>
 #include <vector>
+#include "taa_dispatch.hpp"
 
 // Per-eye temporal-AA history for native two-view stereo.
 //
@@ -219,8 +220,12 @@ public:
     void (*after_pass)(void* ctx,int eye)=nullptr;
 private:
     unsigned long long run(void* ctx,const taa_history::PassPlan& plan) {
-        taa_history::apply_plan(plan);
-        __try {return original_(ctx);} __finally {taa_history::restore_plan(plan);}
+        taa_history::apply_plan(plan);TaaDispatchHook::pass_eye=plan.eye;TaaDispatchHook::post_taa=false;TaaDispatchHook::pass_context=nullptr;
+        __try {return original_(ctx);}
+        __finally {
+            TaaDispatchHook::pass_eye=-1;taa_history::restore_plan(plan);
+            if(const auto end=TaaDispatchHook::pass_end.load()) end(plan.eye,TaaDispatchHook::pass_context);
+        }
     }
     unsigned long long invoke(void* ctx) {
         ++passes_;

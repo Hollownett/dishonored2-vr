@@ -44,6 +44,7 @@ struct Summary {
     XrStructureType layer_type{};
     std::array<XrCompositionLayerProjectionView,2> eyes{};
     XrCompositionLayerQuad quad{};
+    std::vector<XrCompositionLayerQuad> overlays;
     std::array<ComPtr<ID3D11Texture2D>,2> images;
 };
 inline Control control;
@@ -94,10 +95,16 @@ inline XrResult XRAPI_CALL system_properties(XrInstance,XrSystemId,XrSystemPrope
     strcpy_s(out->systemName,"D2VR development simulator (no headset)");
     out->graphicsProperties={4096,4096,16};out->trackingProperties={XR_TRUE,XR_TRUE};return XR_SUCCESS;
 }
+// Development load testing: build/sim-eye-size ("2496 2688" = Quest 3 recommended) sets the
+// simulated runtime's recommended eye size; default 640 x 640.
+inline uint32_t recommended_size[2]={640,640};
+// build/sim-fov "left right up down" (radians, right eye; the left eye mirrors x) sets the simulated optical
+// frustum, e.g. Quest 3 via Virtual Desktop: -0.698132 0.942478 0.767945 -0.959931. Default symmetric 0.8.
+inline float optical_fov[4]={-.8f,.8f,.8f,-.8f};
 inline XrResult XRAPI_CALL configuration_views(XrInstance,XrSystemId,XrViewConfigurationType type,uint32_t capacity,uint32_t* count,XrViewConfigurationView* out) {
     if(type!=XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO) return XR_ERROR_VIEW_CONFIGURATION_TYPE_UNSUPPORTED;
     *count=2;if(!capacity) return XR_SUCCESS;if(capacity<2) return XR_ERROR_SIZE_INSUFFICIENT;
-    for(unsigned i=0;i<2;++i) {out[i].recommendedImageRectWidth=640;out[i].recommendedImageRectHeight=640;
+    for(unsigned i=0;i<2;++i) {out[i].recommendedImageRectWidth=recommended_size[0];out[i].recommendedImageRectHeight=recommended_size[1];
         out[i].maxImageRectWidth=4096;out[i].maxImageRectHeight=4096;out[i].recommendedSwapchainSampleCount=out[i].maxSwapchainSampleCount=1;}
     return XR_SUCCESS;
 }
@@ -153,7 +160,7 @@ inline XrResult XRAPI_CALL locate_views(XrSession,const XrViewLocateInfo*,XrView
         views[side].pose.position.x+=(1-2*(q.y*q.y+q.z*q.z))*x;
         views[side].pose.position.y+=2*(q.x*q.y+q.z*q.w)*x;
         views[side].pose.position.z+=2*(q.x*q.z-q.y*q.w)*x;
-        views[side].fov={-.8f,.8f,.8f,-.8f};
+        views[side].fov=side?XrFovf{optical_fov[0],optical_fov[1],optical_fov[2],optical_fov[3]}:XrFovf{-optical_fov[1],-optical_fov[0],optical_fov[2],optical_fov[3]};
     }
     return XR_SUCCESS;
 }
@@ -201,12 +208,13 @@ inline bool image(const XrSwapchainSubImage& sub,unsigned side) {
     const auto& c=*at->second;const auto& r=sub.imageRect;
     if(r.offset.x<0 || r.offset.y<0 || r.extent.width<=0 || r.extent.height<=0 ||
        r.offset.x+r.extent.width>static_cast<int>(c.info.width) || r.offset.y+r.extent.height>static_cast<int>(c.info.height)) return false;
-    summary.images[side]=c.textures[c.current];return true;
+    if(side<2) summary.images[side]=c.textures[c.current];return true;
 }
 inline XrResult XRAPI_CALL end_frame(XrSession,const XrFrameEndInfo* info) {
     if(!begun || info->displayTime!=display_time) return invalid();
-    for(const auto& pair:chains) if(pair.second->acquired) return invalid();
-    summary.images={};summary.layer_type=XR_TYPE_UNKNOWN;summary.display_time=info->displayTime;
+    // An acquired, not-yet-ready OPTIONAL surface may remain pending across
+    // frames. Only submitted layers must reference a released image.
+    summary.images={};summary.overlays.clear();summary.layer_type=XR_TYPE_UNKNOWN;summary.display_time=info->displayTime;
     for(unsigned i=0;i<info->layerCount;++i) {
         const auto* layer=info->layers[i];
         if(layer->type==XR_TYPE_COMPOSITION_LAYER_PROJECTION) {
@@ -216,6 +224,7 @@ inline XrResult XRAPI_CALL end_frame(XrSession,const XrFrameEndInfo* info) {
         } else if(layer->type==XR_TYPE_COMPOSITION_LAYER_QUAD) {
             const auto* p=reinterpret_cast<const XrCompositionLayerQuad*>(layer);
             if(i==0) {if(!image(p->subImage,0)) return invalid();summary.quad=*p;}
+            else {if(!image(p->subImage,2)) return invalid();summary.overlays.push_back(*p);}
         } else return XR_ERROR_LAYER_INVALID;
         if(i==0) summary.layer_type=layer->type;
     }

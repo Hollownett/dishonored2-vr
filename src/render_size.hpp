@@ -148,6 +148,28 @@ class CachedOutputSize {
     volatile LONG64* target_{};
     LONG64 original_{},requested_{};
 public:
+    enum class RefreshStatus {unchanged,reapplied,deferred};
+    // Focus/window changes can put back the captured native pair. Reconcile
+    // only that exact pair in one atomic operation; a mixed or foreign pair
+    // belongs to an in-flight native writer and is preserved for a later frame.
+    RefreshStatus refresh(EyeSize native_window={}) noexcept {
+        if(!target_) return RefreshStatus::deferred;
+        const auto observed=InterlockedCompareExchange64(target_,requested_,original_);
+        if(observed==requested_) return RefreshStatus::unchanged;
+        if(observed==original_) return RefreshStatus::reapplied;
+        // Real resizing can replace the original desktop pair. The caller
+        // obtains this size from the owned swapchain's actual client window.
+        // Accept only its exact complete pair; preserve mixed/foreign writes.
+        if(native_window.width && native_window.height &&
+           native_window.width<=D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION &&
+           native_window.height<=D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION) {
+            const auto native=static_cast<LONG64>((static_cast<UINT64>(native_window.height)<<32)|native_window.width);
+            if(observed==native && InterlockedCompareExchange64(target_,requested_,native)==native) {
+                original_=native;return RefreshStatus::reapplied;
+            }
+        }
+        return RefreshStatus::deferred;
+    }
     void apply(volatile LONG64* target,EyeSize size) {
         if(target_ || !target || reinterpret_cast<std::uintptr_t>(target)%8 || !size.width || !size.height ||
            size.width>D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION || size.height>D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION)

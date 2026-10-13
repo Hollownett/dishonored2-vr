@@ -7,7 +7,7 @@
 static constexpr std::uintptr_t fixture_base=0x140000000,fixture_game=0x200000,fixture_player=0x300000,fixture_machine=0x400000,fixture_sensor=0x500000,fixture_decl=0x600000,fixture_shape=0x700000,fixture_world=0x800000;
 static std::map<std::uintptr_t,std::byte> memory;
 static bool race{},queue_in_stage{};static unsigned native_stages{},native_queues{};
-static std::array<void*,6> detours{};
+static std::array<void*,10> detours{};
 static alignas(16) std::array<std::byte,112> request;
 static alignas(16) d2vr::InteractionRay axes{};
 static int issued_id=-1;
@@ -16,9 +16,12 @@ template<class T> static void put(std::uintptr_t at,T value) {
 }
 static void fill(std::uintptr_t at,std::size_t size) {for(std::size_t i=0;i<size;++i)memory[at+i]=std::byte{};}
 static bool read(std::uintptr_t at,void* out,std::size_t size) {
-    constexpr std::array<std::uintptr_t,6> signature_rvas{0x3b8430,0x3b8d60,0x3b9650,0x6c6760,0x95280,0x95550};
-    constexpr std::array<const char*,6> signatures{"488bc4555356574154415541564157488da898feffff4881ec2802000048c745","488bc455488da838ffffff4881ecc0010000807938000f847603000048895818","488bc45556488da838ffffff4881ecb801000080793800488bf10f8428040000","48895c24185556574881ecb0000000803900498bf9498bf0488bea488bd97507","48895c241855415641574883ec404883b990010000004d8bf14d8bf8488bda48","48895c241855415641574883ec404883b990010000004d8bf14d8bf8488bda48"};
-    if(size==32)for(unsigned i=0;i<6;++i)if(at==fixture_base+signature_rvas[i]) {
+    if(at==fixture_base+0x417820 && size==8){const unsigned char code[]{0x48,0x8d,0x81,0xd8,0,0,0,0xc3};std::memcpy(out,code,8);return true;}
+    if(at==fixture_base+0x3b80a0 && size==32){const unsigned char code[]{0x48,0x8b,0xc4,0x48,0x89,0x78,0x20,0x41,0x54,0x41,0x56,0x41,0x57,0x48,0x81,0xec,0xa0,0,0,0,0x4d,0x8b,0xe1,0x4d,0x8b,0xf0,0x48,0x8b,0xfa,0x4c,0x8b,0xf9};std::memcpy(out,code,32);return true;}
+    if(at==fixture_base+0x3b81d3 && size==5){const unsigned char code[]{0xe8,0x48,0xf6,0x05,0};std::memcpy(out,code,5);return true;}
+    constexpr std::array<std::uintptr_t,9> signature_rvas{0x3b8430,0x3b8d60,0x3b9650,0x6c6760,0x95280,0x95550,0x92630,0x3a37f0,0x3b7b90};
+    constexpr std::array<const char*,9> signatures{"488bc4555356574154415541564157488da898feffff4881ec2802000048c745","488bc455488da838ffffff4881ecc0010000807938000f847603000048895818","488bc45556488da838ffffff4881ecb801000080793800488bf10f8428040000","48895c24185556574881ecb0000000803900498bf9498bf0488bea488bd97507","48895c241855415641574883ec404883b990010000004d8bf14d8bf8488bda48","48895c241855415641574883ec404883b990010000004d8bf14d8bf8488bda48","488954241048894c240857415541564883ec508b024c8db180820000498bf844","44884c242044894424188954241048894c2408535556574881ec880000004863","488bc4554154415541564157488da8f8faffff4881ece005000048c745e0feff"};
+    if(size==32)for(unsigned i=0;i<9;++i)if(at==fixture_base+signature_rvas[i]) {
         auto* bytes=static_cast<unsigned char*>(out);for(unsigned j=0;j<32;++j) {char part[]{signatures[i][j*2],signatures[i][j*2+1],0};bytes[j]=static_cast<unsigned char>(std::strtoul(part,nullptr,16));}return true;
     }
     if(at==reinterpret_cast<std::uintptr_t>(request.data()) && size==112) {std::memcpy(out,request.data(),size);return true;}
@@ -39,10 +42,16 @@ static void* __fastcall queue_original(void* manager,void* id,void* filter,const
     assert(reinterpret_cast<std::uintptr_t>(manager)==fixture_game+0x60280 && id==&issued_id && filter==request.data() && frame==&axes && mask==0x802b && flags==0x40);
     ++native_queues;issued_id=17;return id;
 }
+static unsigned native_fetches{},native_sorts{},native_occlusions{};
+static std::uintptr_t __fastcall occlusion_original(void*,void*,const void*,const void*,const void*,unsigned,unsigned char* output) {++native_occlusions;*output=0;return 0x123401;}
+static std::uintptr_t __fastcall fetch_original(void*,void*,void*) {++native_fetches;return 0x123400;}
+static void __fastcall sort_original(void*,unsigned,int,unsigned char) {++native_sorts;}
+static const float* __fastcall range_origin_original(void* node){return reinterpret_cast<const float*>(reinterpret_cast<std::uintptr_t>(node)+0xd8);}
 extern "C" MH_STATUS WINAPI MH_CreateHook(LPVOID at,LPVOID detour,LPVOID* original) {
-    constexpr std::array<std::uintptr_t,6> rvas{0x3b8430,0x3b8d60,0x3b9650,0x6c6760,0x95280,0x95550};
-    for(unsigned i=0;i<6;++i)if(reinterpret_cast<std::uintptr_t>(at)==fixture_base+rvas[i]) {
-        detours[i]=detour;*original=i<3?reinterpret_cast<void*>(&stage_original):i==3?reinterpret_cast<void*>(&direct_original):reinterpret_cast<void*>(&queue_original);return MH_OK;
+    if(reinterpret_cast<std::uintptr_t>(at)==fixture_base+0x417820){detours[9]=detour;*original=reinterpret_cast<void*>(&range_origin_original);return MH_OK;}
+    constexpr std::array<std::uintptr_t,9> rvas{0x3b8430,0x3b8d60,0x3b9650,0x6c6760,0x95280,0x95550,0x92630,0x3a37f0,0x3b7b90};
+    for(unsigned i=0;i<9;++i)if(reinterpret_cast<std::uintptr_t>(at)==fixture_base+rvas[i]) {
+        detours[i]=detour;*original=i<3?reinterpret_cast<void*>(&stage_original):i==3?reinterpret_cast<void*>(&direct_original):i<6?reinterpret_cast<void*>(&queue_original):i==6?reinterpret_cast<void*>(&fetch_original):i==7?reinterpret_cast<void*>(&sort_original):reinterpret_cast<void*>(&occlusion_original);return MH_OK;
     }
     assert(false);return MH_ERROR_NOT_EXECUTABLE;
 }
@@ -108,6 +117,11 @@ int main() {
     // Actual hook-stage default/opt-in checks use pinned instruction fixtures below.
     d2vr::NativeInteractionAim observer;
     observer.install(fixture_base,read,logic,true,L"build/hands-lean-interaction-check.csv");
+    assert(reinterpret_cast<std::uintptr_t(__fastcall*)(void*,void*,void*)>(detours[6])(nullptr,nullptr,nullptr)==0x123400);
+    reinterpret_cast<void(__fastcall*)(void*,unsigned,int,unsigned char)>(detours[7])(nullptr,0,0,0);
+    unsigned char obstruction_flag=9;
+    assert(reinterpret_cast<std::uintptr_t(__fastcall*)(void*,void*,const void*,const void*,const void*,unsigned,unsigned char*)>(detours[8])(nullptr,nullptr,nullptr,nullptr,nullptr,0,&obstruction_flag)==0x123401);
+    assert(native_fetches==1 && native_sorts==1 && native_occlusions==1 && obstruction_flag==0 && observer.ranked_results()==0 && !observer.target_side(GetTickCount64()));
     reinterpret_cast<void(__fastcall*)(void*)>(detours[2])(reinterpret_cast<void*>(fixture_sensor));
     assert(native_stages==1 && observer.lean_rows()==0 && observer.routed()==0 && observer.disable());
     observer.install(fixture_base,read,logic,true,L"build/hands-lean-interaction-check.csv",true);queue_in_stage=true;

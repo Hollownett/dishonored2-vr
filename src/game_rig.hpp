@@ -44,7 +44,8 @@ struct Arm {
 };
 inline bool operator==(const Arm& a,const Arm& b) {
     return a.player==b.player && a.body==b.body && a.animation==b.animation && a.model==b.model &&
-        a.skeleton==b.skeleton && a.side==b.side && a.body_identity==b.body_identity && a.animation_identity==b.animation_identity;
+        a.skeleton==b.skeleton && a.side==b.side && a.body_identity.generation==b.body_identity.generation &&
+        a.animation_identity.generation==b.animation_identity.generation; // state flags change with crouch/mantle/combat
 }
 template<class Read> std::optional<std::array<Arm,2>> player_arms(Read& read,std::uintptr_t base) {
     auto game=value<std::uintptr_t>(read,base+0x39a5290);

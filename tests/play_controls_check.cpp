@@ -183,6 +183,55 @@ int main() {
         require(!out[1],"the .35 trigger threshold releases the latch");
         require(g.swing_blocked(1,120),"the grip survives its release hysteresis band");
     }
+    {   // Physical crouch: edge-triggered, never fights the stick, retries a refused pulse.
+        d2vr::PhysicalCrouch p;
+        require(!p.update(.1,false,false,true,0),"standing does nothing");
+        require(p.update(.4,false,false,true,10),"sitting down pulses crouch");
+        require(p.update(.4,false,false,true,100),"the pulse lasts 120 ms");
+        require(!p.update(.4,false,false,true,140),"the pulse ends");
+        require(!p.update(.4,true,false,true,200),"crouched now: no more pulses");
+        require(p.compensate(true),"physically low and crouched lifts the camera");
+        require(!p.update(.3,true,false,true,300),"hysteresis band holds the crouch");
+        require(p.update(.1,true,false,true,400),"standing up pulses stand");
+        require(!p.update(.1,true,false,true,600),"no spam while the state changes");
+        require(p.update(.1,true,false,true,1500),"a refused stand retries after a second");
+        require(!p.update(.1,false,false,true,2000) && !p.compensate(false),"stood up: done");
+        d2vr::PhysicalCrouch q;
+        require(!q.update(.1,true,false,true,0),"a stick crouch while standing is left alone");
+        require(!q.update(.1,true,false,true,5000),"still left alone later");
+        require(!q.update(.4,true,false,true,6000),"sitting while already crouched needs no pulse");
+        require(q.update(.1,true,false,true,7000),"standing up from it stands");
+        d2vr::PhysicalCrouch r;
+        require(!r.update(.4,false,false,false,0),"disallowed (menu) never pulses");
+        require(r.update(.4,false,false,true,10),"allowed again: the edge is still seen");
+        d2vr::PhysicalCrouch f;
+        f.update(.4,false,false,true,0);f.update(.4,true,true,true,200);
+        require(!f.update(.1,true,true,true,400),"a forced crouch (low ceiling) is not stood up");
+    }
+    {   // Crouch lift follows the native animation, freezes, and ramps back on standing.
+        d2vr::CrouchLift l;
+        require(l.update(false,1.6,0)==0,"standing: no lift");
+        require(std::abs(l.update(true,1.6,10))<1e-9,"crouch flips: still at the standing height");
+        require(std::abs(l.update(true,1.35,200)-.25)<1e-9,"follows the camera drop mid-animation");
+        require(std::abs(l.update(true,1.1,500)-.5)<1e-9,"full drop");
+        require(std::abs(l.update(true,1.1,700)-.5)<1e-9,"frozen after 600 ms");
+        require(std::abs(l.update(true,.9,900)-.5)<1e-9,"stairs while crouched do not leak in");
+        require(std::abs(l.update(false,.9,1000)-.5)<1e-9,"standing flips: lift held at first");
+        require(std::abs(l.update(false,1.15,1200)-.25)<1e-9,"ramps down as the game raises the camera");
+        require(l.update(false,1.4,1700)==0,"back to zero");
+    }
+    {   // Wheel hand dial: frozen frame at open, dead zone, direction-only, pose loss keeps the last direction.
+        d2vr::WheelDial d;float x{},y{};
+        const std::array<double,3> right{1,0,0};
+        require(!d.update(false,true,{0,1,0},right,x,y),"closed wheel: nothing");
+        require(!d.update(true,true,{0,1,0},right,x,y),"opening frame freezes the origin");
+        require(!d.update(true,true,{.02,1,0},right,x,y),"inside the dead zone: nothing");
+        require(d.update(true,true,{.06,1,0},right,x,y) && x>.99f && std::abs(y)<.01f,"hand right selects right");
+        require(d.update(true,true,{0,1.06,0},right,x,y) && y>.99f,"hand up selects up");
+        require(d.update(true,false,{9,9,9},right,x,y) && y>.99f,"lost pose keeps the last direction");
+        require(!d.update(false,true,{0,1,0},right,x,y) && !d.update(true,true,{.5,1,0},right,x,y),"reopening re-freezes at the new hand position");
+        require(d.update(true,true,{.5,.9,0},right,x,y) && y<-.99f,"down from the new origin");
+    }
     if(failures) {std::printf("%d requirement(s) failed\n",failures);return 1;}
     std::printf("PASS: crouch flick once-per-flick/120 ms pulse/-0.3 re-arm/disallowed-held and lost-allowed no late pulse, "
         "holster fresh-press start/1000 ms tap-target-trigger-allowed cancel/B-release re-arm/custom window, "

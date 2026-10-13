@@ -1,8 +1,38 @@
 #pragma once
 #include <array>
+#include <algorithm>
+#include <cmath>
 #include <cstdint>
+#include "tracked_pose_lifetime.hpp"
 
 namespace d2vr {
+// One attack per slow-to-fast motion. Interrupted motion must settle before
+// returning gameplay can arm another pulse.
+class MotionSwordSwing {
+    bool armed_{};
+    std::uint64_t epoch_{},source_{},now_{},until_{},ready_{};
+public:
+    struct Result {bool active{},started{};std::uint64_t until{};};
+    Result update(float speed,bool velocity_valid,bool allowed,std::uint64_t epoch,
+                  std::uint64_t source,std::uint64_t now) noexcept {
+        const bool continuous=epoch && epoch==epoch_ && now>=now_ && source>=source_;
+        if(!continuous) {armed_=false;until_=ready_=0;source_=0;}
+        epoch_=epoch;now_=now;
+        const bool valid=epoch && velocity_valid && std::isfinite(speed) && speed>=0 && source &&
+            now>=source && now-source<=tracked_pose_freshness_ms;
+        if(!valid || !allowed) {armed_=false;until_=0;source_=source;return {};}
+        bool started=false;
+        if(source!=source_) {
+            source_=source;
+            if(speed<=.75f) armed_=true;
+            else if(speed>2.f && armed_) {
+                armed_=false;
+                if(now>=ready_) {until_=now+250;ready_=now+300;started=true;}
+            }
+        }
+        return {until_ && now<until_,started,until_};
+    }
+};
 // Right-stick push down owns one native crouch pulse. Crouch is a native toggle,
 // so a flick must fire exactly once per push: the pulse runs 120 ms and then
 // stays spent until the stick returns past -0.3. A flick that began while the
@@ -80,4 +110,87 @@ public:
         return grip_down_[s] && (grabbed_[s] || (now>=grip_since_[s] && now-grip_since_[s]<=400));
     }
 };
-} // namespace d2vr
+// Physical crouch: sitting or crouching in real life crouches the character. Edge-triggered so the
+// stick crouch is never fought: dropping the head below `down` metres under the calibrated standing
+// height pulses the native crouch toggle (B) when the game is not already crouched; rising above
+// `up` stands up again only if this crouch was physical. A refused pulse (mid-air, ceiling) retries
+// every second, at most three times. compensate() is true while the camera should be lifted back
+// by the game's own crouch drop (physically low and natively crouched), so the view keeps the real
+// head height.
+class PhysicalCrouch {
+    bool low_{},ours_{};std::uint64_t until_{},retry_{};unsigned tries_{};
+    bool pulse(std::uint64_t now) noexcept {until_=now+120;retry_=now+1000;++tries_;return true;}
+public:
+    bool update(double drop,bool crouched,bool forced,bool allowed,std::uint64_t now,double down=.35,double up=.22) noexcept {
+        if(now<until_) return allowed;
+        if(!allowed) return false;
+        const bool was=low_;
+        if(!low_ && drop>down) low_=true;else if(low_ && drop<up) low_=false;
+        if(low_ && !was) {tries_=0;ours_=true;if(!crouched) return pulse(now);return false;}
+        if(!low_ && was) {tries_=0;if(ours_ && crouched && !forced) return pulse(now);ours_=false;return false;}
+        if(low_ && ours_ && !crouched && now>=retry_ && tries_<3) return pulse(now);
+        if(!low_ && ours_) {
+            if(!crouched) ours_=false;
+            else if(!forced && now>=retry_ && tries_<3) return pulse(now);
+        }
+        return false;
+    }
+    bool low() const noexcept {return low_;}
+    bool compensate(bool crouched) const noexcept {return low_ && crouched;}
+    void reset() noexcept {low_=ours_=false;until_=retry_=0;tries_=0;}
+};
+// Lift for the camera while physically crouched (PhysicalCrouch::compensate): follows the game's own
+// crouch animation through a 600 ms window after the crouch state flips, measured on the native camera
+// height along world up, then freezes at the measured drop (so stairs while crouch-walking do not leak
+// into it). Standing up ramps it back to zero the same way.
+class CrouchLift {
+    bool active_{};double ref_{},drop_{.5},lift_{};std::uint64_t since_{};bool ramping_{};
+public:
+    double update(bool compensate,double camera_up,std::uint64_t now) noexcept {
+        if(compensate!=active_) {
+            active_=compensate;since_=now;ramping_=true;
+            ref_=camera_up; // the standing height, or the crouched height when standing up
+        }
+        if(ramping_) {
+            const double moved=compensate?ref_-camera_up:camera_up-ref_;
+            if(compensate) lift_=std::clamp(moved,0.,.9);
+            else lift_=std::clamp(drop_-moved,0.,drop_);
+            if(now-since_>=600) {
+                ramping_=false;
+                if(compensate) {if(lift_>.15) drop_=lift_;lift_=drop_;} else lift_=0;
+            }
+        }
+        return lift_;
+    }
+    double lift() const noexcept {return lift_;}
+};
+// Hand dial for the native quick-access wheel (after the Dishonored 1 VR weapon dial): while the wheel
+// is open, the hand that holds it selects by moving toward a wedge. The panel frame (head right and
+// world up) and the hand position are frozen when the wheel opens; beyond `dead` metres the direction
+// is fed to the native wheel as a full stick deflection. A deliberate right-stick input wins, and a lost
+// hand pose keeps the last direction instead of inventing one.
+class WheelDial {
+    bool open_{};std::array<double,3> origin_{},right_{};std::array<float,2> last_{};bool has_last_{};
+public:
+    // hand/head_right: tracked positions/vectors (y up); returns true and fills x,y while the dial points.
+    bool update(bool wheel_open,bool tracked,const std::array<double,3>& hand,const std::array<double,3>& head_right,
+                float& x,float& y,double dead=.035) noexcept {
+        if(!wheel_open) {open_=false;has_last_=false;return false;}
+        if(!open_) {
+            if(!tracked) return false;
+            open_=true;origin_=hand;
+            const double h=std::sqrt(head_right[0]*head_right[0]+head_right[2]*head_right[2]);
+            right_=h>1e-6?std::array<double,3>{head_right[0]/h,0,head_right[2]/h}:std::array<double,3>{1,0,0};
+            return false;
+        }
+        if(tracked) {
+            const double dx=hand[0]-origin_[0],dy=hand[1]-origin_[1],dz=hand[2]-origin_[2];
+            const double u=dx*right_[0]+dz*right_[2],v=dy,len=std::sqrt(u*u+v*v);
+            if(len<dead) {has_last_=false;return false;}
+            last_={static_cast<float>(u/len),static_cast<float>(v/len)};has_last_=true;
+        }
+        if(!has_last_) return false;
+        x=last_[0];y=last_[1];return true;
+    }
+};
+}

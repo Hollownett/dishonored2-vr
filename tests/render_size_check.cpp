@@ -73,6 +73,41 @@ int main() {
         require(update_rejected && static_cast<UINT>(cached)==1280,"Concurrent output update was overwritten");
         require(!cache.restore() && static_cast<UINT>(cached)==1280,"Concurrent native resize was overwritten");
         cached=(static_cast<LONG64>(2688)<<32)|2496;require(cache.restore(),"Cannot restore owned cache value");
+        using Refresh=d2vr::CachedOutputSize::RefreshStatus;
+        require(cache.refresh()==Refresh::deferred,"Unowned cache refresh must defer");
+        const auto desktop_pair=(static_cast<LONG64>(485)<<32)|841;
+        const auto vr_pair=(static_cast<LONG64>(2688)<<32)|2496;
+        cached=desktop_pair;cache.apply(&cached,recommended);
+        require(cache.refresh()==Refresh::unchanged && cached==vr_pair,"Owned cache refresh changed the current VR pair");
+        InterlockedExchange64(&cached,desktop_pair); // Native focus return restores its original output cache.
+        require(cache.refresh()==Refresh::reapplied && cached==vr_pair,"Focus-reset viewport was not atomically reapplied");
+        for(const auto mixed:{(static_cast<LONG64>(2688)<<32)|841,(static_cast<LONG64>(485)<<32)|2496,
+                              (static_cast<LONG64>(720)<<32)|1280}) {
+            InterlockedExchange64(&cached,mixed);
+            require(cache.refresh()==Refresh::deferred && cached==mixed,"Mixed/foreign native pair was overwritten by refresh");
+        }
+        require(!cache.restore(),"Refresh lost foreign-pair restoration protection");
+        InterlockedExchange64(&cached,desktop_pair);
+        require(cache.refresh()==Refresh::reapplied && cache.restore() && cached==desktop_pair,
+                "Refresh changed the original restoration value");
+        cache.apply(&cached,recommended);cache.update(density);InterlockedExchange64(&cached,desktop_pair);
+        require(cache.refresh()==Refresh::reapplied && static_cast<UINT>(cached)==3102 &&
+                static_cast<UINT64>(cached)>>32==3208 && cache.restore() && cached==desktop_pair,
+                "Refresh reapplied an obsolete requested size after settings update");
+        cache.apply(&cached,recommended);
+        const auto resized_pair=(static_cast<LONG64>(756)<<32)|1273;
+        InterlockedExchange64(&cached,resized_pair);
+        require(cache.refresh({1273,717})==Refresh::deferred && cached==resized_pair,
+                "Unmatched client height was accepted as a native resize");
+        require(cache.refresh({1273,756})==Refresh::reapplied && cached==vr_pair,
+                "Legitimate resized desktop window did not recover VR output");
+        require(cache.restore() && cached==resized_pair,"Recovery did not restore the latest real client pair");
+        cache.apply(&cached,recommended);
+        const auto mixed_resize=(static_cast<LONG64>(2688)<<32)|1273;
+        InterlockedExchange64(&cached,mixed_resize);
+        require(cache.refresh({1273,756})==Refresh::deferred && cached==mixed_resize,
+                "Mixed resized native pair was overwritten");
+        InterlockedExchange64(&cached,vr_pair);require(cache.restore(),"Cannot restore resized cache fixture");
         d2vr::NativeOutputSize output;output.request(game.handle,recommended);
         UINT width=640,height=360;
         require(!output.apply(other.context,&width,&height) && width==640 && height==360,"Foreign window's size was overridden");

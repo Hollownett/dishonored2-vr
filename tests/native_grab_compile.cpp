@@ -3,8 +3,24 @@
 #include "../src/native_grab.hpp"
 #include <cassert>
 #include <iostream>
+namespace d2vr {struct NativeGrabCheck {static void active(NativeGrab& grab) {grab.active_=true;}};}
 int main() {
-    // An occupied lane (native weapon/power/carried body) must hand the raw
+    d2vr::NativeGrabDiscovery discovery;
+    unsigned lookups=0,validations=0;
+    bool alive=true;
+    d2vr::NativeRigidBody cached{};cached.entity=1;cached.entity_id=0x10001;cached.pose.position={.2,0,0};
+    const auto lookup=[&](unsigned index)->std::optional<d2vr::NativeRigidBody> {++lookups;return index==1 && alive?std::optional<d2vr::NativeRigidBody>{cached}:std::nullopt;};
+    const auto validate=[&](const auto&)->std::optional<d2vr::NativeRigidBody> {++validations;return alive?std::optional<d2vr::NativeRigidBody>{cached}:std::nullopt;};
+    assert(discovery.advance({},100,lookup,validate).size()==1 && lookups==1024 && validations==0);
+    discovery.advance({},100,lookup,validate);assert(lookups==1024 && validations==0); // One slice per pose publication.
+    assert(discovery.advance({},101,lookup,validate).size()==1 && lookups==2048 && validations==1);
+    ++cached.entity_id;assert(discovery.advance({},102,lookup,validate).empty()); // Reused entity lifetime is not the cached body.
+    discovery.reset();lookups=0;assert(discovery.advance({},103,lookup,validate).size()==1);
+    alive=false;assert(discovery.advance({},104,lookup,validate).empty());
+    for(unsigned tick=105;tick<170;++tick)discovery.advance({},tick,lookup,validate);
+    assert(discovery.cursor()>0 && discovery.cursor()<d2vr::NativeGrabDiscovery::registry_size);
+    assert(lookups==67*1024); // Registry wrap stays bounded, no full-registry fallback.
+    // A lane occupied by native carrying/action state must hand the raw
     // squeeze back without touching the native read ABI, which is not installed
     // in this process: any read here would fault.
     d2vr::NativeGrab grab;d2vr::NativePlayerCamera owner{};
@@ -14,7 +30,91 @@ int main() {
     assert(grab.filter_native_grip(0,.4f,1,101,true,true,false)==.4f);
     assert(grab.filter_native_grip(0,.9f,1,102,false,false,true)==.9f); // Raw even unfocused or while Use is held.
     assert(!grab.holding(0));
+    const auto occupied_diagnostic=grab.diagnostics(110);assert(occupied_diagnostic);
+    assert((*occupied_diagnostic)[0].gate==d2vr::NativeGrab::Gate::occupied);
+    assert((*occupied_diagnostic)[0].raw_grip==.9f && (*occupied_diagnostic)[0].source_age_ms==10);
+    assert((*occupied_diagnostic)[0].source_age_valid && !(*occupied_diagnostic)[0].released_armed);
     grab.publish(1,owner,hand,.7f,1,100,true,false); // Defaulted occupied=false still compiles.
     assert(!grab.holding(1));
-    std::cout<<"PASS: native_grab.hpp compiles under /W4 /WX and an occupied lane passes the raw native squeeze without acquiring\n";
+    // Uninstalled native reader: pending decisions must return before attempting
+    // any native owner query, and may resume only after caller clears deferral.
+    for(unsigned tick=101;tick<350;++tick) {
+        assert(grab.filter_native_grip(1,.9f,1,tick,true,true,false,true)==0);
+        grab.publish(1,owner,hand,.9f,1,tick,true,false);
+        assert(grab.waiting_native_query(1)); // Render pose updates must preserve pending ownership.
+        const auto pending=grab.diagnostics(tick);assert(pending);
+        assert((*pending)[1].gate==d2vr::NativeGrab::Gate::deferred && (*pending)[1].raw_grip==.9f);
+        assert((*pending)[1].decision_tick==tick && (*pending)[1].source_age_ms==0);
+    }
+    assert(!grab.holding(1));
+    // Native occupancy continues to win even while a query decision is deferred.
+    assert(grab.filter_native_grip(0,.9f,1,350,true,true,false,true)==.9f);
+    // Combined owner model: pending keeps the release-armed role untouched;
+    // resolution can still reserve physics on the SAME squeeze, without release.
+    d2vr::RightGripOwner pending_owner;
+    assert(pending_owner.filter(0,true,false)==0);
+    for(unsigned tick=100;tick<160;++tick) assert(pending_owner.role()==d2vr::RightGripOwner::Role::ready);
+    assert(pending_owner.filter(.9f,true,true)==0 && pending_owner.physical());
+    // A second hand resolving native Use cannot revoke this independent owner.
+    d2vr::RightGripOwner use_owner;use_owner.filter(0,true,false);
+    assert(use_owner.filter(.9f,true,false)==.9f && pending_owner.physical());
+    assert(!grab.focus_point(0,100) && !grab.focus_point(1,100) && !grab.focus_point(2,100));
+    // The hover and grip share this selector. AABB surface distance wins over
+    // body-origin distance, and the other hand's held entity is excluded.
+    d2vr::NativeRigidBody small_body{},wide_body{},distant_body{};
+    small_body.entity=1;small_body.pose.position={.2,0,0};
+    wide_body.entity=2;wide_body.pose.position={.7,0,0};wide_body.bounds=d2vr::NativeGrabBounds{{.1,-.1,-.1},{.8,.1,.1}};
+    distant_body.entity=3;distant_body.pose.position={1,0,0};
+    const std::vector<d2vr::NativeRigidBody> candidates{small_body,wide_body,distant_body};
+    const auto focused=d2vr::grab_focus_candidate(candidates,{0,0,0},0);
+    assert(focused && focused->entity==2 && focused->contact({0,0,0}).x==.1);
+    const auto excluded=d2vr::grab_focus_candidate(candidates,{0,0,0},2);
+    assert(excluded && excluded->entity==1);
+    assert(!d2vr::grab_focus_candidate({distant_body},{0,0,0},0));
+    assert(!d2vr::grab_focus_candidate({small_body},{0,0,0},1));
+    assert(!d2vr::grab_focus_candidate(candidates,{0,0,0},0,true)); // Native Use owns this press even with an eligible prop.
+    assert(!grab.focus_point(0,100,true));
+    d2vr::NativeRigidBody old_target{},challenger{};old_target.entity=4;challenger.entity=5;
+    old_target.pose.position={.50,0,0};challenger.pose.position={.43,0,0};
+    assert(!d2vr::grab_focus_candidate({old_target},{0,0,0},0)); // Outside new-acquisition radius.
+    assert(d2vr::grab_focus_candidate({old_target,challenger},{0,0,0},0,false,4)->entity==4);
+    challenger.pose.position={.35,0,0};
+    assert(d2vr::grab_focus_candidate({old_target,challenger},{0,0,0},0,false,4)->entity==5);
+    old_target.pose.position={.56,0,0};
+    assert(!d2vr::grab_focus_candidate({old_target},{0,0,0},0,false,4)); // Beyond retention margin.
+    // An inactive/unusable lane needs no owner memory query; diagnostics still
+    // distinguish future/missing source age from a real zero-age publication.
+    grab.publish(1,owner,hand,.2f,1,400,false,false);
+    assert(grab.filter_native_grip(1,.2f,1,399,true,true,false)==.2f);
+    const auto inactive=grab.diagnostics(399);assert(inactive);
+    assert((*inactive)[1].gate==d2vr::NativeGrab::Gate::inactive && !(*inactive)[1].source_age_valid);
+    assert((*inactive)[1].role==d2vr::RightGripOwner::Role::ready && (*inactive)[1].released_armed);
+    assert((*inactive)[1].candidates==0);
+    d2vr::NativeGrabCheck::active(grab);
+    grab.publish(1,owner,hand,.2f,1,1000,true,false,749);
+    assert(grab.filter_native_grip(1,.2f,1,1000,true,true,false)==.2f); // Must reject before uninstalled native reader.
+
+    const auto stale_xr=grab.diagnostics(1000);assert(stale_xr);
+    assert((*stale_xr)[1].publication_tick==1000 && (*stale_xr)[1].source_tick==749);
+    assert((*stale_xr)[1].source_age_ms==251 && (*stale_xr)[1].source_age_valid);
+    assert((*stale_xr)[1].gate==d2vr::NativeGrab::Gate::source_stale);
+    grab.publish(1,owner,hand,.2f,1,1000,true,false,1001);
+    assert(grab.filter_native_grip(1,.2f,1,1000,true,true,false)==.2f);
+    const auto future_xr=grab.diagnostics(1000);assert(future_xr);
+    assert((*future_xr)[1].gate==d2vr::NativeGrab::Gate::source_future && !(*future_xr)[1].source_age_valid);
+    // Press/release transitions shorter than observer cadence remain available.
+    d2vr::NativeGrab decisions;decisions.publish(0,owner,hand,0,1,1000,true,true);
+    assert(decisions.filter_native_grip(0,0,1,1000,true,true,false)==0);
+    assert(decisions.filter_native_grip(0,.9f,1,1010,true,true,false)==.9f);
+    assert(decisions.filter_native_grip(0,0,1,1020,true,true,false)==0);
+    const auto released=decisions.pop_decision(),pressed=decisions.pop_decision(),released_again=decisions.pop_decision();
+    assert(released && pressed && released_again && !decisions.pop_decision());
+    assert(released->raw_grip==0 && pressed->raw_grip==.9f && released_again->raw_grip==0);
+    assert(pressed->gate==d2vr::NativeGrab::Gate::occupied && pressed->source_tick==1000 && pressed->source_age_ms==10);
+    decisions.filter_native_grip(0,0,1,1021,true,true,false);assert(!decisions.pop_decision());
+    decisions.filter_native_grip(0,0,1,1120,true,true,false);assert(decisions.pop_decision()); // Bounded steady cadence.
+    for(unsigned frame=0;frame<300;++frame) decisions.filter_native_grip(0,frame%2?0:.9f,1,1200+frame,true,true,false);
+    assert(decisions.decision_dropped()==44);
+    unsigned drained=0;while(decisions.pop_decision()) ++drained;assert(drained==256);
+    std::cout<<"PASS: native carrying/Use priority, shared surface selector, .45 acquisition/.55 retention, .10 switch margin and other-hand exclusion\n";
 }

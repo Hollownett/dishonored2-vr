@@ -6,7 +6,7 @@ int main() {
     constexpr double pi=3.141592653589793;
     float x=0,y=1;head_directed_stick(x,y,pi/2);assert(std::abs(x+1)<1e-6 && std::abs(y)<1e-6);
     x=.4f;y=.7f;const auto speed=std::hypot(x,y);head_directed_stick(x,y,-2.3);assert(std::abs(std::hypot(x,y)-speed)<1e-6);
-    x=y=1;head_directed_stick(x,y,NAN);assert(x==0 && y==0);
+    x=y=1;head_directed_stick(x,y,NAN);assert(x==1 && y==1); // no heading: unrotated pass-through
     HeadFollowing follow;follow.publish(pi/2,100,1,10,20,2,true);
     for(unsigned i=0;i<30;++i) follow.commit(follow.delta(.01,true,100+i));
     assert(std::abs(follow.compensation(1)-pi/2)<1e-6 && std::abs(follow.relative_yaw(130))<1e-6);

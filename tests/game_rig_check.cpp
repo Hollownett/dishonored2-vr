@@ -53,6 +53,9 @@ int main() {
         for(unsigned finger=0;finger<4;++finger) {
             if(joint==metacarpals[finger]) {
                 name="left_"+fingers[finger]+"_01_jnt";
+                // Metacarpal roots lead to distinct MCP knuckles (_02).
+                // Named palm fitting requires real width and finger direction.
+                inverse[3]=-.075f;inverse[11]=-.03f+.02f*finger;
                 memory.put(hierarchy_blob+0x42+(89-joint)*4,std::uint16_t{0x8004});
             }
             if(joint>metacarpals[finger] && joint<=metacarpals[finger]+3) {
@@ -61,6 +64,7 @@ int main() {
             }
         }
         memory.put(inverse_at+joint*48,inverse);
+        for(std::size_t i=0;i<128;++i) memory.put(text+i,static_cast<unsigned char>(0));
         for(std::size_t i=0;i<=name.size();++i) memory.put(text+i,static_cast<unsigned char>(name[i]));
     }
     auto binding=r::arm_binding(memory,base_address,arm);assert(binding && binding->chain.upper==2 && binding->chain.wrist==4);
@@ -70,6 +74,7 @@ int main() {
     memory.put(inverse_at+16*48,std::numeric_limits<float>::quiet_NaN());assert(!r::arm_binding(memory,base_address,arm));
     memory.put(inverse_at+16*48,1.f);
     memory.put(name_ids+2,std::uint16_t{2});memory.put(name_ids+4,std::uint16_t{3});memory.put(name_ids+6,std::uint16_t{4});memory.put(name_ids+8,std::uint16_t{1});
+    memory.put(inverse_at+3*48+3*4,-.02f); // The newly named wrist has its own bind origin.
     for(auto joint:metacarpals) memory.put(hierarchy_blob+0x42+(89-joint)*4,std::uint16_t{0x8003});
     for(unsigned joint=64;joint<=67;++joint) memory.put(hierarchy_blob+0x42+(89-joint)*4,std::uint16_t{0x8002});
     // Moving the named wrist must also move the thumb root; an old-wrist
@@ -77,6 +82,7 @@ int main() {
     assert(!r::arm_binding(memory,base_address,arm));
     memory.put(hierarchy_blob+0x42+(89-5)*4,std::uint16_t{0x8003});
     binding=r::arm_binding(memory,base_address,arm);assert(binding && binding->chain.upper==1 && binding->chain.elbow==2 && binding->chain.wrist==3);
+    assert(std::abs(r::position(binding->bind_wrist).x-.02)<1e-6 && r::valid(binding->bind_grip));
     memory.put(name_ids+8,std::uint16_t{4});assert(!r::arm_binding(memory,base_address,arm));
     memory.put(hierarchy_blob+0x42+88*4,std::uint16_t{0x8002});assert(!r::arm_hierarchy(memory,base_address,arm));
     memory.put(hierarchy_blob+0x42+88*4,std::uint16_t{0x8000});

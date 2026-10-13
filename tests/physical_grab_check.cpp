@@ -1,6 +1,7 @@
 #include "../src/physical_grab.hpp"
 #include <cassert>
 #include <iostream>
+#include <limits>
 int main() {
     using namespace d2vr;
     WorldTrackedPose hand{{0,0,0},{{{1,0,0},{0,1,0},{0,0,1}}}},object=hand;object.position={.1,0,0};
@@ -10,11 +11,11 @@ int main() {
     grab.sample(hand,0,true,1,120);grab.sample(hand,.9f,true,1,130);assert(grab.bind(object));
     assert(length(grab.target().position-object.position)<1e-9); // No pickup teleport.
     hand.position.x=.2;grab.sample(hand,.9f,true,1,180);const auto moving=grab.motor(object,true);
-    assert(moving && moving->linear.x>0 && length(moving->linear)<=3.000001);
+    assert(moving && moving->linear.x>0 && length(moving->linear)<=10.000001);
     hand.basis={{{0,1,0},{-1,0,0},{0,0,1}}};grab.sample(hand,.9f,true,1,190);
     const auto turned=grab.target();assert(length(turned.position-Vec3{.2,.1,0})<1e-9);
     assert(grab.motor(object,true)->angular.z>0);
-    grab.sample(hand,0,true,1,200);const auto thrown=grab.motor(object,true);assert(thrown && thrown->release && thrown->linear.x>0 && length(thrown->linear)<=6);
+    grab.sample(hand,0,true,1,200);const auto thrown=grab.motor(object,true);assert(thrown && thrown->release && thrown->linear.x>0 && length(thrown->linear)<=12.000001);
     assert(!grab.held());object=hand;grab.sample(hand,.9f,true,1,210);assert(grab.bind(object));
     assert(!grab.sample(hand,.9f,true,2,220));assert(grab.motor(object,false)->release);assert(!grab.pressed());
     grab.sample(hand,0,true,2,230);grab.sample(hand,.9f,true,2,240);object.position=hand.position+Vec3{.4,0,0};assert(!grab.bind(object));
@@ -23,6 +24,62 @@ int main() {
     object.position.x-=2;assert(grab.motor(object,true)->release); // Blocked carry releases.
     grab.sample(hand,0,true,2,270);grab.sample(hand,.9f,true,2,280);object=hand;assert(grab.bind(object));
     assert(!grab.sample(hand,.9f,true,2,600));assert(grab.motor(object,false)->linear.x==0);
+    // Low submission cadence must not drop a continuously tracked physical hold.
+    for(const unsigned interval:{11u,33u,100u,200u}) {
+        PhysicalGrab rate;WorldTrackedPose stable{{},{{{1,0,0},{0,1,0},{0,0,1}}}};
+        rate.sample(stable,0,true,1,1000);rate.sample(stable,0,true,1,1000+interval);
+        rate.sample(stable,1,true,1,1000+2*interval);assert(rate.bind(stable));
+        for(unsigned frame=3;frame<9;++frame) {
+            assert(rate.sample(stable,1,true,1,1000+frame*interval));
+            const auto held=rate.motor(stable,true);assert(held && !held->release);
+        }
+        rate.sample(stable,0,true,1,1000+9*interval);assert(rate.motor(stable,true)->release);
+        rate.sample(stable,1,true,1,1000+10*interval);assert(rate.bind(stable));
+        assert(!rate.sample(stable,1,false,1,1001+10*interval));assert(rate.motor(stable,false)->release);
+    }
+    // Reproduce fast movement followed by stationary 110-250ms samples;
+    // slow valid samples must decay the existing throw estimate before release.
+    for(const unsigned interval:{110u,200u,250u}) {
+        PhysicalGrab rate;WorldTrackedPose stable{{},{{{1,0,0},{0,1,0},{0,0,1}}}};
+        rate.sample(stable,0,true,1,1000);rate.sample(stable,0,true,1,1010);
+        rate.sample(stable,1,true,1,1020);assert(rate.bind(stable));
+        stable.position.x=.12;assert(rate.sample(stable,1,true,1,1040));
+        assert(rate.velocity().x>2);
+        auto slow_object=stable; // Object caught up to hand, isolating throw velocity.
+        assert(rate.sample(stable,1,true,1,1040+interval));
+        assert(length(rate.velocity())<.2);
+        assert(rate.motor(slow_object,true) && !rate.motor(slow_object,true)->release);
+        assert(rate.sample(stable,0,true,1,1040+2*interval));
+        const auto release=rate.motor(slow_object,true);
+        assert(release && release->release && length(release->linear)<.01);
+        // Fresh rearm followed by a slow-interval teleport on the release frame
+        // must release without throwing even if caller still says usable.
+        rate.sample(stable,1,true,1,1050+2*interval);assert(rate.bind(slow_object));
+        stable.position.x+=.6;
+        assert(!rate.sample(stable,0,true,1,1050+3*interval));
+        const auto teleport=rate.motor(slow_object,true);
+        assert(teleport && teleport->release && length(teleport->linear)==0);
+    }
+    {
+        PhysicalGrab duplicate;WorldTrackedPose stable{{},{{{1,0,0},{0,1,0},{0,0,1}}}};
+        duplicate.sample(stable,0,true,1,1000);duplicate.sample(stable,0,true,1,1010);
+        duplicate.sample(stable,1,true,1,1020);assert(duplicate.bind(stable));
+        auto stationary_object=stable;stable.position.x=.6;
+        assert(!duplicate.sample(stable,0,true,1,1020));
+        const auto release=duplicate.motor(stationary_object,true);
+        assert(release && release->release && length(release->linear)==0);
+    }
+    // Native pending-release lane samples the release publication before throwing.
+    for(const unsigned interval:{110u,200u,250u}) {
+        PhysicalGrab pending;WorldTrackedPose stable{{},{{{1,0,0},{0,1,0},{0,0,1}}}};
+        pending.sample(stable,0,true,1,1000);pending.sample(stable,0,true,1,1010);
+        pending.sample(stable,1,true,1,1020);assert(pending.bind(stable));
+        stable.position.x=.12;pending.sample(stable,1,true,1,1040);assert(pending.velocity().x>2);
+        const auto released=pending.release_sample(stable,0,true,1,1040+interval,true);
+        assert(released.release && !pending.held() && length(released.linear)<.2);
+        pending.sample(stable,1,true,1,1050+interval);assert(pending.bind(stable));stable.position.x+=.6;
+        assert(length(pending.release_sample(stable,0,true,1,1050+2*interval,true).linear)==0);
+    }
     const WorldTrackedPose identity{{},{{{1,0,0},{0,1,0},{0,0,1}}}};
     auto rotated=identity;
     for(unsigned axis=0;axis<3;++axis) {
@@ -39,6 +96,17 @@ int main() {
         assert(length(grab_rotation_error(rotated,identity)+Vec3{0,0,angle})<1e-8);
     }
     assert(length(grab_rotation_error(identity,identity))==0);
+    // Explicit forgiving acquisition preserves the native object's pose. The
+    // ordinary default remains .3; callers cannot request arbitrary remote grabs.
+    PhysicalGrab forgiving;
+    forgiving.sample(identity,0,true,1,100);forgiving.sample(identity,0,true,1,110);
+    forgiving.sample(identity,.9f,true,1,120);object=identity;object.position={.4,0,0};
+    assert(!forgiving.bind(object));
+    assert(!forgiving.bind(object,object.position,.6));
+    assert(!forgiving.bind(object,object.position,std::numeric_limits<double>::quiet_NaN()));
+    assert(forgiving.bind(object,object.position,.45));
+    assert(length(forgiving.target().position-object.position)<1e-9);
+    assert(length(forgiving.motor(object,true)->linear)<1e-9);
     // An occupied native hand (weapon/power/carried body) leaves the lane
     // unusable: the squeeze never acquires and a held prop is released.
     PhysicalGrab occupied;

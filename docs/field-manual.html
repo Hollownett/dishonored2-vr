@@ -1,0 +1,687 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"></head><body>
+<title>Dishonored 2 VR Field Manual</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IM+Fell+English+SC&family=Alegreya+Sans:ital,wght@0,400;0,500;0,700;1,400&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: an Academy-of-Natural-Philosophy plate book. Each feature is a numbered plate: an ink diagram beside its specification. */
+:root {
+  --paper: #e3e7e6;      /* pale slate plate paper */
+  --panel: #eef1f0;
+  --ink: #1b2326;        /* engraving ink */
+  --muted: #56636a;
+  --rule: #b9c3c4;
+  --oil: #24697a;        /* whale-oil teal: built features */
+  --brass: #8a6a2c;      /* brass: planned features */
+  --blood: #8e2f2a;      /* damage, force */
+  --figure: #f4f6f5;     /* fill inside drawn bodies */
+  --display: "IM Fell English SC", "Iowan Old Style", Georgia, serif;
+  --body: "Alegreya Sans", "Segoe UI", system-ui, sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --paper: #12181b; --panel: #172024; --ink: #d8dedd; --muted: #93a2a6; --rule: #2d3a3f;
+    --oil: #5fb2c1; --brass: #c9a35a; --blood: #d26a61; --figure: #1d272b; color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --paper: #12181b; --panel: #172024; --ink: #d8dedd; --muted: #93a2a6; --rule: #2d3a3f;
+  --oil: #5fb2c1; --brass: #c9a35a; --blood: #d26a61; --figure: #1d272b; color-scheme: dark;
+}
+* { box-sizing: border-box; }
+body { background: var(--paper); color: var(--ink); font-family: var(--body); font-size: 17px; line-height: 1.55; }
+.wrap { max-width: 1080px; margin: 0 auto; padding-inline: 20px; padding-block: 36px 64px; }
+header.cover { display: grid; gap: 14px; padding-bottom: 28px; border-bottom: 1.5px solid var(--ink); }
+.eyebrow { font-family: var(--mono); font-size: 12px; letter-spacing: .12em; text-transform: uppercase; color: var(--muted); }
+h1 { font-family: var(--display); font-weight: 400; font-size: clamp(36px, 6vw, 62px); line-height: 1.02; margin: 0; text-wrap: balance; }
+.lede { max-width: 68ch; font-size: 19px; margin: 0; }
+.legend { display: flex; flex-wrap: wrap; gap: 10px 22px; font-size: 15px; color: var(--muted); }
+.chip { display: inline-flex; align-items: center; gap: 7px; font-family: var(--mono); font-size: 12px; letter-spacing: .06em; text-transform: uppercase; padding: 3px 9px; border: 1.2px solid currentColor; border-radius: 3px; white-space: nowrap; }
+.chip.built { color: var(--oil); }
+.chip.planned { color: var(--brass); }
+.chip.found { color: var(--muted); }
+nav.toc { display: flex; flex-wrap: wrap; gap: 8px 18px; font-size: 15px; }
+nav.toc a { color: var(--ink); text-decoration: none; border-bottom: 1px solid var(--rule); }
+nav.toc a:hover, nav.toc a:focus-visible { border-color: var(--oil); color: var(--oil); outline: none; }
+section.part { padding-top: 44px; }
+.part > h2 { font-family: var(--display); font-weight: 400; font-size: clamp(28px, 4vw, 38px); margin: 0 0 4px; text-wrap: balance; }
+.part > .intro { max-width: 70ch; color: var(--muted); margin: 0 0 18px; }
+.plate { display: grid; grid-template-columns: minmax(0, 1.05fr) minmax(0, 1fr); gap: 26px; padding: 24px 0; border-top: 1px solid var(--rule); align-items: start; }
+.plate figure { margin: 0; background: var(--panel); border: 1px solid var(--rule); padding: 10px; }
+.plate figure svg { width: 100%; height: auto; display: block; }
+.plate figcaption { font-family: var(--mono); font-size: 12px; color: var(--muted); padding: 8px 4px 2px; letter-spacing: .02em; }
+.plate .text { min-width: 0; display: grid; gap: 10px; align-content: start; }
+.plate h3 { font-family: var(--display); font-weight: 400; font-size: 26px; margin: 0; line-height: 1.15; text-wrap: balance; }
+.plate .num { font-family: var(--mono); font-size: 12px; color: var(--muted); letter-spacing: .1em; }
+.plate p { margin: 0; max-width: 62ch; }
+dl.spec { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 4px 14px; margin: 4px 0 0; font-size: 15px; }
+dl.spec dt { font-family: var(--mono); font-size: 12.5px; color: var(--muted); padding-top: 2px; }
+dl.spec dd { margin: 0; min-width: 0; }
+.how { font-size: 15px; color: var(--muted); border-left: 2px solid var(--rule); padding-left: 12px; }
+.how b { color: var(--ink); font-weight: 500; }
+.flow { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-size: 14.5px; }
+.flow span.step { border: 1px solid var(--rule); background: var(--panel); padding: 4px 9px; border-radius: 3px; }
+.flow span.arrow { color: var(--muted); font-family: var(--mono); }
+table { border-collapse: collapse; width: 100%; font-size: 15px; }
+.tablewrap { overflow-x: auto; border-top: 1px solid var(--rule); }
+th, td { text-align: left; padding: 9px 10px 9px 0; border-bottom: 1px solid var(--rule); vertical-align: top; }
+th { font-family: var(--mono); font-size: 12px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); font-weight: 500; }
+td.mono, .mono { font-family: var(--mono); font-size: 13px; }
+.roadmap { display: grid; gap: 0; counter-reset: phase; }
+.roadmap li { list-style: none; display: grid; grid-template-columns: 52px minmax(0, 1fr) auto; gap: 14px; padding: 14px 0; border-top: 1px solid var(--rule); align-items: baseline; }
+.roadmap li::before { counter-increment: phase; content: "Phase " counter(phase); font-family: var(--mono); font-size: 12px; color: var(--muted); grid-column: 1; }
+.roadmap li > div { min-width: 0; }
+.roadmap b { font-weight: 500; }
+.roadmap ol, .roadmap { padding: 0; margin: 0; }
+footer { margin-top: 48px; padding-top: 16px; border-top: 1.5px solid var(--ink); font-size: 14px; color: var(--muted); display: grid; gap: 6px; }
+/* SVG drawing roles */
+svg .ink { stroke: var(--ink); fill: none; }
+svg .bodyout { stroke: var(--ink); stroke-linecap: round; fill: none; }
+svg .bodyin { stroke: var(--figure); stroke-linecap: round; fill: none; }
+svg .headin { fill: var(--figure); stroke: var(--ink); }
+svg .hand { fill: var(--panel); stroke: var(--oil); stroke-width: 2; }
+svg .oil { stroke: var(--oil); fill: none; }
+svg .oilfill { fill: var(--oil); }
+svg .brass { stroke: var(--brass); fill: none; }
+svg .brassfill { fill: var(--brass); }
+svg .blood { stroke: var(--blood); fill: none; }
+svg .bloodfill { fill: var(--blood); }
+svg .muted { stroke: var(--muted); fill: none; }
+svg .floor { stroke: var(--rule); stroke-width: 2; }
+svg text { fill: var(--ink); font-family: var(--mono); font-size: 11px; }
+svg text.label { fill: var(--muted); }
+svg text.big { font-family: var(--display); font-size: 15px; fill: var(--ink); }
+svg text.oilt { fill: var(--oil); }
+svg text.brasst { fill: var(--brass); }
+svg text.bloodt { fill: var(--blood); }
+svg .metal { fill: var(--rule); stroke: var(--ink); stroke-width: 1.4; }
+@media (max-width: 760px) {
+  .plate { grid-template-columns: minmax(0, 1fr); }
+  .roadmap li { grid-template-columns: minmax(0, 1fr); gap: 6px; }
+  .roadmap li::before { grid-column: auto; }
+}
+@media (prefers-reduced-motion: no-preference) {
+  .pulse { animation: pulse 2.4s ease-in-out infinite; }
+  @keyframes pulse { 0%, 100% { opacity: .35; } 50% { opacity: 1; } }
+}
+</style>
+
+<div class="wrap">
+<header class="cover">
+  <div class="eyebrow">Field manual · mod build v399 · October 2026</div>
+  <h1>Dishonored 2 VR Field Manual</h1>
+  <p class="lede">How combat, the body and the interface work in the Dishonored 2 VR mod today, and how the planned physical features would look: dropping and throwing your weapons, and dragging bodies by a limb.</p>
+  <div class="legend">
+    <span><span class="chip built">Built</span> in v399, checked in the simulator, waiting for your headset test</span>
+    <span><span class="chip planned">Planned</span> researched, not built yet</span>
+    <span><span class="chip found">Found</span> measured in the running game</span>
+  </div>
+  <nav class="toc" aria-label="Contents">
+    <a href="#combat">Combat</a><a href="#body">Body and objects</a><a href="#interface">Interface</a><a href="#physical">Physical interaction (planned)</a><a href="#roadmap">Build order</a><a href="#status">Test status</a>
+  </nav>
+</header>
+
+<section class="part" id="combat">
+  <h2>Combat</h2>
+  <p class="intro">You fight with your hands, and the game resolves every hit itself: the mod detects contact and calls the game's own damage function, so damage, bleeding, alarms and kills behave as they do on a gamepad.</p>
+
+  <div class="plate">
+    <figure><svg id="fig-swing" viewBox="0 0 460 300" role="img" aria-label="A sword swung through a guard; the blade's path is drawn as an arc and the contact point is marked"></svg>
+      <figcaption>Plate I · The blade's path is swept every frame; contact with a body is a hit</figcaption></figure>
+    <div class="text">
+      <div class="num">PLATE I <span class="chip built">Built</span></div>
+      <h3>Sword swings</h3>
+      <p>Swing the sword in your right hand. When the blade passes through a guard fast enough, the guard takes the same damage as a gamepad slash, with blood and sound.</p>
+      <dl class="spec">
+        <dt>Hit speed</dt><dd>Blade tip at 1.5 m/s or faster</dd>
+        <dt>Reach</dt><dd>Blade length plus 35 cm past the tip, so near-misses count</dd>
+        <dt>Per guard</dt><dd>One hit every 450 ms, so one swing never counts twice</dd>
+        <dt>Small creatures</dt><dd>Wasps and rats count within 15 cm of the blade</dd>
+        <dt>Walls and props</dt><dd>The blade stops at walls with sparks and dust; loose props get pushed</dd>
+      </dl>
+      <p class="how"><b>How it works:</b> a sphere sweep along the blade each frame, then the game's own damage call on the game thread. Fast swings also trigger the native slash, with presses spaced so the game never drops one.</p>
+    </div>
+  </div>
+
+  <div class="plate">
+    <figure><svg id="fig-block" viewBox="0 0 460 300" role="img" aria-label="The player's sword held across the body forms a block zone in front; a crossed-out version shows that blocking is off while the pistol is drawn"></svg>
+      <figcaption>Plate II · Sword in front blocks. With the pistol drawn, it does not</figcaption></figure>
+    <div class="text">
+      <div class="num">PLATE II <span class="chip built">Built</span></div>
+      <h3>Blocking and reverse grip</h3>
+      <p>Hold the sword anywhere in front of you, still or moving, and you block. Only an attack press releases the block. Click the right grip to flip the blade into a reverse grip; click again to flip it back.</p>
+      <dl class="spec">
+        <dt>Block</dt><dd>Sword in front of the chest, any angle (your choice from the headset sessions)</dd>
+        <dt>Reverse grip</dt><dd>Each grip click toggles it; holding the grip through a choke does not flip it</dd>
+        <dt>New in v398</dt><dd>While the pistol or crossbow is drawn, the sword does not block. The game puts the gun away to block, which made the pistol unusable. Put the gun away to block again.</dd>
+      </dl>
+    </div>
+  </div>
+
+  <div class="plate">
+    <figure><svg id="fig-takedown" viewBox="0 0 460 300" role="img" aria-label="Seen from behind an unaware guard: a sideways slash at neck height is a lethal takedown; holding the grip or trigger chokes"></svg>
+      <figcaption>Plate III · Behind an unaware guard: slash at the neck to kill, hold to choke</figcaption></figure>
+    <div class="text">
+      <div class="num">PLATE III <span class="chip built">Built</span></div>
+      <h3>Stealth takedowns</h3>
+      <p>Come up behind a guard who has not seen you. A quick sideways slash of the right hand near his neck is a lethal takedown, played by the game's own assassination. Hold the right grip or trigger instead to choke him unconscious.</p>
+      <dl class="spec">
+        <dt>Kill</dt><dd>Sideways slash near neck height (a normal swing also works)</dd>
+        <dt>Choke</dt><dd>Right grip or trigger held</dd>
+        <dt>Indicator</dt><dd>One small mark near the guard, sized by the HUD size setting</dd>
+        <dt>Forgiving</dt><dd>Wider takedown distance (x1.5) and a 1 s hold through sensor flicker</dd>
+      </dl>
+    </div>
+  </div>
+
+  <div class="plate">
+    <figure><svg id="fig-pistol" viewBox="0 0 460 300" role="img" aria-label="The pistol's barrel axis extends to the crosshair; the old crosshair, which followed the controller ray, sat elsewhere"></svg>
+      <figcaption>Plate IV · The crosshair now sits on the drawn gun's barrel line</figcaption></figure>
+    <div class="text">
+      <div class="num">PLATE IV <span class="chip built">Built</span></div>
+      <h3>Pistol and crossbow</h3>
+      <p>Draw the pistol or crossbow into your left hand from the wheel and aim by pointing the gun. The crosshair and the shots follow the gun's own barrel, read from the drawn model every frame, so the crosshair sits where the muzzle points on any controller.</p>
+      <dl class="spec">
+        <dt>Fire</dt><dd>Left trigger</dd>
+        <dt>Aim source</dt><dd>The gun model's barrel axis (v397). Before, the crosshair followed the controller ray and drifted from the muzzle</dd>
+        <dt>Fine trim</dt><dd class="mono">%LOCALAPPDATA%\DishonoredVR\build\aim-offset → "yaw pitch" in degrees, default 0 0</dd>
+        <dt>Powers</dt><dd>Same left-hand crosshair, along the hand when no gun is drawn</dd>
+      </dl>
+    </div>
+  </div>
+</section>
+
+<section class="part" id="body">
+  <h2>Body and objects</h2>
+  <p class="intro">Your hands are tracked into Corvo's or Emily's own arms, measured to your body, and either hand can pick things up.</p>
+
+  <div class="plate">
+    <figure><svg id="fig-hold" viewBox="0 0 460 300" role="img" aria-label="A bottle held in the hand, then thrown along the hand's motion; a slow release drops it instead"></svg>
+      <figcaption>Plate V · Release fast to throw, slowly to drop</figcaption></figure>
+    <div class="text">
+      <div class="num">PLATE V <span class="chip built">Built</span></div>
+      <h3>Holding and throwing objects</h3>
+      <p>Squeeze a grip near a bottle, glass, severed arm or loose prop and it sits in that hand. Swing and let go to throw it with your hand's speed; let go gently to drop it. A bottle hitting a guard uses the game's own stun.</p>
+      <dl class="spec">
+        <dt>Throw or drop</dt><dd>Hand speed at release: 1.2 m/s or faster throws, slower drops</dd>
+        <dt>Loose props</dt><dd>Crates, chairs and the like follow your hand physically and keep their weight</dd>
+        <dt>Reach</dt><dd>Grab within 45 cm, held up to 55 cm</dd>
+      </dl>
+    </div>
+  </div>
+
+  <div class="plate">
+    <figure><svg id="fig-holster" viewBox="0 0 460 300" role="img" aria-label="Reaching over the right shoulder and squeezing the grip sheathes or draws the sword; the journal opens at the left temple"></svg>
+      <figcaption>Plate VI · Body gestures: sword over the shoulder, journal at the temple, watch on the wrist</figcaption></figure>
+    <div class="text">
+      <div class="num">PLATE VI <span class="chip built">Built</span></div>
+      <h3>Body gestures and calibration</h3>
+      <p>Reach over your right shoulder and squeeze the grip to sheathe or draw the sword. Touch your left temple and squeeze to open the journal. Turn the back of a wrist toward your face to read health and mana on a small watch.</p>
+      <dl class="spec">
+        <dt>Calibrate avatar</dt><dd>VR Settings → Calibrate avatar: hold your hands at your shoulders, then arms straight out, copying the masked Corvo shown</dd>
+        <dt>Arms</dt><dd>Both arms stay visible, including the left arm lowered to your waist</dd>
+      </dl>
+    </div>
+  </div>
+</section>
+
+<section class="part" id="interface">
+  <h2>Interface</h2>
+  <p class="intro">Menus are the game's own screens, shown as panels about a metre in front of you; nothing is a look-alike.</p>
+
+  <div class="plate">
+    <figure><svg id="fig-menu" viewBox="0 0 460 300" role="img" aria-label="A menu panel with tabs; each squeeze of the right grip moves one tab right, the left grip one tab left"></svg>
+      <figcaption>Plate VII · One grip squeeze, one tab</figcaption></figure>
+    <div class="text">
+      <div class="num">PLATE VII <span class="chip built">Built</span></div>
+      <h3>Menus and VR Settings</h3>
+      <p>VR Settings is a page in the game's own pause menu, with the game's sliders and toggles. Tabbed screens (Options › Controls, Visuals, Gameplay, and the Black Market's categories) change one tab per grip squeeze: right grip forward, left grip back.</p>
+      <dl class="spec">
+        <dt>VR Settings rows</dt><dd>Resolution, anti-aliasing, edge smoothing, monitor view, sharpening, HUD size, controls hint, turning, calibrate avatar, recenter view</dd>
+        <dt>Why one per squeeze</dt><dd>The game repeats a held shoulder button after 225 ms, every 75 ms; a natural squeeze used to skip tabs. Since v396 a squeeze in a menu is one tap</dd>
+        <dt>Move a menu</dt><dd>Squeeze the left grip to bring it to where you look</dd>
+        <dt>Black Market</dt><dd>Shown as a full-height world panel, with the purchase and back rows visible</dd>
+        <dt>Launcher</dt><dd>One file, DishonoredVRLauncher.exe: checks, launch, settings, tools</dd>
+      </dl>
+    </div>
+  </div>
+</section>
+
+<section class="part" id="physical">
+  <h2>Physical interaction <span class="chip planned">Planned</span></h2>
+  <p class="intro">The goal is Bonelab-style immersion: weapons you can drop, pick up and throw, and bodies you can drag by a wrist or an ankle. The research found that the game's own Havok physics already has most of the parts.</p>
+
+  <div class="plate">
+    <figure><svg id="fig-anatomy" viewBox="0 0 460 470" role="img" aria-label="A guard drawn as 17 numbered physics bodies, from pelvis to feet"></svg>
+      <figcaption>Plate VIII · The 17 physics bodies inside every guard, read from the running game</figcaption></figure>
+    <div class="text">
+      <div class="num">PLATE VIII <span class="chip found">Found</span></div>
+      <h3>Anatomy of a guard</h3>
+      <p>Every guard carries a ragdoll of 17 physics bodies, one per body part. While he is alive they follow his animation. On a corpse they are loose physics bodies lying on the floor, the same kind of body the mod already grabs and throws as a prop.</p>
+      <dl class="spec">
+        <dt>Alive</dt><dd>Bodies follow the animation</dd>
+        <dt>Corpse</dt><dd>Bodies are loose and simulated</dd>
+        <dt>Grab points</dt><dd>Hands 7 and 10 (wrists), feet 13 and 16 (ankles), chest 2 and neck 3 (collar)</dd>
+        <dt>Engine</dt><dd>Havok physics; each guard keeps the list of its 17 bodies in its physics component</dd>
+      </dl>
+    </div>
+  </div>
+
+  <div class="plate">
+    <figure><svg id="fig-drag" viewBox="0 0 520 300" role="img" aria-label="A corpse dragged by the wrist: the player's hand holds body 10 and the rest of the ragdoll trails along the floor"></svg>
+      <figcaption>Plate IX · Grip a wrist and walk: the ragdoll's own joints pull the rest of the body</figcaption></figure>
+    <div class="text">
+      <div class="num">PLATE IX <span class="chip planned">Planned · Phase 2</span></div>
+      <h3>Dragging bodies</h3>
+      <p>Squeeze a grip at a corpse's or unconscious guard's wrist, ankle or collar and walk away. Your hand pulls that one body part, and the ragdoll's joints drag the rest along the floor. Let go to drop it, or swing and let go to fling a light body.</p>
+      <dl class="spec">
+        <dt>Pull</dt><dd>The prop-grab motor: speed toward your hand, capped, so a heavy body lags and slides</dd>
+        <dt>Fallback</dt><dd>A strength-limited joint between your hand and the limb, as in the Skyrim VR mod HIGGS</dd>
+        <dt>Carry instead</dt><dd>The game's shoulder carry stays available, as today</dd>
+      </dl>
+    </div>
+  </div>
+
+  <div class="plate">
+    <figure><svg id="fig-drop" viewBox="0 0 520 260" role="img" aria-label="Three steps: open the hand and the sword falls, the sword lies on the floor, grip it to wield it again"></svg>
+      <figcaption>Plate X · Drop, lie, pick up</figcaption></figure>
+    <div class="text">
+      <div class="num">PLATE X <span class="chip planned">Planned · Phase 3</span></div>
+      <h3>Dropping and picking up weapons</h3>
+      <p>Open your hand and the sword or pistol falls with your hand's motion. Reach down, squeeze, and it is back in your hand. The game has no "drop weapon" action, so the mod drops a physical copy of the weapon and quietly holsters the real one until you pick the copy up.</p>
+      <dl class="spec">
+        <dt>Safety</dt><dd>A dropped weapon returns to the holster after a while or on loading a save, so it can never be lost</dd>
+        <dt>Same as</dt><dd>HIGGS for Skyrim VR and ROCK for Fallout 4 VR: drop as a world object, pick up to re-equip</dd>
+      </dl>
+    </div>
+  </div>
+
+  <div class="plate">
+    <figure><svg id="fig-throw" viewBox="0 0 520 300" role="img" aria-label="A sword thrown in an arc, flying point first, hits a guard"></svg>
+      <figcaption>Plate XI · A thrown blade flies point first and hits like a heavy swing</figcaption></figure>
+    <div class="text">
+      <div class="num">PLATE XI <span class="chip planned">Planned · Phase 4</span></div>
+      <h3>Throwing weapons at guards</h3>
+      <p>Swing and release to throw the sword or the pistol. A blade flies point first. When it strikes a guard, the game's damage function is called with the thrown weapon as the cause, scaled by speed and weight, and the game's own physics reaction can knock him down.</p>
+      <dl class="spec">
+        <dt>Release speed</dt><dd>The peak of your hand's recent speed plus your walking speed, as HIGGS does</dd>
+        <dt>Hit test</dt><dd>The same sweep the sword uses, along the flying weapon</dd>
+        <dt>Damage</dt><dd>Speed × weight × a thrown factor, once per guard per throw</dd>
+      </dl>
+    </div>
+  </div>
+
+  <div class="plate">
+    <figure><svg id="fig-live" viewBox="0 0 520 300" role="img" aria-label="Grabbing a living guard's arm switches him into the game's own ragdoll; when released he gets up"></svg>
+      <figcaption>Plate XII · A grabbed guard goes limp in the game's own ragdoll, then gets up</figcaption></figure>
+    <div class="text">
+      <div class="num">PLATE XII <span class="chip planned">Planned · Phase 6</span></div>
+      <h3>Grabbing living guards</h3>
+      <p>Grab a living guard by the arm or collar and he stumbles into the game's own ragdoll, the one Windblast uses, so you can shove or haul him. When you let go, the game stands him back up.</p>
+      <div class="flow" aria-label="Sequence">
+        <span class="step">Guard alive</span><span class="arrow">→</span><span class="step">Grip a limb</span><span class="arrow">→</span><span class="step">Game ragdoll</span><span class="arrow">→</span><span class="step">Release</span><span class="arrow">→</span><span class="step">He gets up</span>
+      </div>
+      <dl class="spec">
+        <dt>Stealth rule</dt><dd>Grabbing an unaware guard from behind starts a choke instead, so stealth stays fair (needs your decision)</dd>
+        <dt>Alert guards</dt><dd>Break free after a moment and fight back</dd>
+      </dl>
+    </div>
+  </div>
+
+  <div class="plate">
+    <figure><svg id="fig-fingers" viewBox="0 0 460 266" role="img" aria-label="Fingers curl until each fingertip touches the held object's shape"></svg>
+      <figcaption>Plate XIII · Each finger stops where it meets the object</figcaption></figure>
+    <div class="text">
+      <div class="num">PLATE XIII <span class="chip planned">Planned · Phase 5</span></div>
+      <h3>Hands that close on things</h3>
+      <p>Fingers curl until each fingertip meets the held object's shape, so a bottle, a sword hilt and a guard's wrist are each held differently. Your hands also get simple physics bodies, so they can push props and doors.</p>
+      <dl class="spec">
+        <dt>Fingers</dt><dd>Per-finger curl stopped by the object's collision box (HIGGS method)</dd>
+        <dt>Hands</dt><dd>Push loose objects; the hand appears on the held object and lets go past about 0.7 m of drift</dd>
+      </dl>
+    </div>
+  </div>
+</section>
+
+<section class="part" id="roadmap">
+  <h2>Build order</h2>
+  <p class="intro">Each phase gets a simulator scenario first, then your headset check.</p>
+  <ol class="roadmap">
+    <li><div><b>Map a guard's ragdoll.</b> List the 17 bodies, their handles and bone order in the running game, without changing anything.</div><span class="chip found">Done</span></li>
+    <li><div><b>Drag bodies</b> by wrist, ankle or collar with the existing prop-grab motor.</div><span class="chip planned">Next</span></li>
+    <li><div><b>Drop and pick up</b> the sword and pistol, with a safe return to the holster.</div><span class="chip planned">Planned</span></li>
+    <li><div><b>Throw weapons and props</b> at guards for damage.</div><span class="chip planned">Planned</span></li>
+    <li><div><b>Finger posing and hand bodies</b> that push things.</div><span class="chip planned">Planned</span></li>
+    <li><div><b>Grab living guards</b>, after a decision on the stealth rule.</div><span class="chip planned">Planned</span></li>
+  </ol>
+</section>
+
+<section class="part" id="status">
+  <h2>Test status</h2>
+  <p class="intro">Everything marked Built passed the simulator. None of it counts as done until you try it in the headset.</p>
+  <div class="tablewrap"><table>
+    <thead><tr><th>Feature</th><th>Simulator</th><th>Headset</th></tr></thead>
+    <tbody>
+      <tr><td>Pistol aiming and shooting along the barrel</td><td>Crosshair and shots follow the drawn gun</td><td>Waiting for your test</td></tr>
+      <tr><td>Sword block, with and without the pistol</td><td>Gun stays drawn; block works without it</td><td>Waiting for your test</td></tr>
+      <tr><td>Bottle in the hand</td><td>Drawn in the fist, throws with hand speed</td><td>Waiting for your test</td></tr>
+      <tr><td>Left arm at the waist</td><td>Never hidden</td><td>Waiting for your test</td></tr>
+      <tr><td>Black Market screen</td><td>Full panel, categories one per squeeze</td><td>Waiting for your test</td></tr>
+      <tr><td>Guard and wasp fights</td><td>Guard 30 → 0; 51 wasp kills, no crash</td><td>Waiting for your test</td></tr>
+      <tr><td>Grip tab switching in menus</td><td>One tab per squeeze in Controls and Gameplay</td><td>Waiting for your test</td></tr>
+      <tr><td>Crash when VR stops (AMD driver)</td><td>Not reproduced; a crash dump is now saved if it happens</td><td>Report it if you see it</td></tr>
+    </tbody>
+  </table></div>
+</section>
+
+<footer>
+  <div>The diagrams are schematic drawings made for this manual. The game's own art is never copied off your machine.</div>
+  <div>Sources: docs/PLAYING.md and docs/research-physical-interaction.md in the mod's repository.</div>
+</footer>
+</div>
+
+<script>
+(function () {
+  const NS = 'http://www.w3.org/2000/svg';
+  function el(svg, tag, attrs, text) {
+    const e = document.createElementNS(NS, tag);
+    for (const k in attrs) e.setAttribute(k, attrs[k]);
+    if (text != null) e.textContent = text;
+    svg.appendChild(e); return e;
+  }
+  function line(svg, a, b, cls, w, extra) { return el(svg, 'line', Object.assign({ x1: a[0], y1: a[1], x2: b[0], y2: b[1], class: cls, 'stroke-width': w }, extra || {})); }
+  function path(svg, d, cls, w, extra) { return el(svg, 'path', Object.assign({ d, class: cls, 'stroke-width': w, fill: 'none' }, extra || {})); }
+  function text(svg, x, y, s, cls, extra) { return el(svg, 'text', Object.assign({ x, y, class: cls || '' }, extra || {}), s); }
+  function arrow(svg, a, b, cls, w) {
+    line(svg, a, b, cls, w);
+    const ang = Math.atan2(b[1] - a[1], b[0] - a[0]), L = 9;
+    const p1 = [b[0] - L * Math.cos(ang - 0.45), b[1] - L * Math.sin(ang - 0.45)], p2 = [b[0] - L * Math.cos(ang + 0.45), b[1] - L * Math.sin(ang + 0.45)];
+    path(svg, `M${p1} L${b} L${p2}`, cls, w);
+  }
+  // A body drawn as 17 capsules (the guard's real ragdoll segmentation), each an outlined thick stroke.
+  const SEG = [
+    ['pelvisA', 'pelvisB', 40], ['spineA', 'spineB', 30], ['chestA', 'chestB', 44], ['neckA', 'neckB', 14], ['head', null, 19],
+    ['lSh', 'lEl', 14], ['lEl', 'lWr', 12], ['lWr', 'lHa', 12], ['rSh', 'rEl', 14], ['rEl', 'rWr', 12], ['rWr', 'rHa', 12],
+    ['lHip', 'lKn', 18], ['lKn', 'lAn', 14], ['lAn', 'lToe', 11], ['rHip', 'rKn', 18], ['rKn', 'rAn', 14], ['rAn', 'rToe', 11]];
+  function figure(svg, P, opts) {
+    opts = opts || {}; const s = opts.scale || 1, ox = opts.x || 0, oy = opts.y || 0;
+    const T = p => [ox + p[0] * s, oy + p[1] * s];
+    const order = [14, 15, 16, 11, 12, 13, 0, 1, 2, 8, 9, 10, 3, 4, 5, 6, 7];
+    for (const i of order) {
+      const [a, b, w] = SEG[i];
+      const hi = opts.highlight && opts.highlight.includes(i);
+      if (b === null) {
+        el(svg, 'circle', { cx: T(P[a])[0], cy: T(P[a])[1], r: w * s, class: 'headin', 'stroke-width': hi ? 2.6 : 1.6, style: hi ? 'stroke: var(--oil)' : '' });
+      } else {
+        line(svg, T(P[a]), T(P[b]), 'bodyout', w * s + 3.2, hi ? { style: 'stroke: var(--oil)' } : {});
+        line(svg, T(P[a]), T(P[b]), 'bodyin', w * s);
+      }
+    }
+    return T;
+  }
+  const STAND = {
+    head: [150, 58], neckA: [150, 82], neckB: [150, 96], chestA: [150, 112], chestB: [150, 160], spineA: [150, 172], spineB: [150, 192], pelvisA: [150, 204], pelvisB: [150, 222],
+    lSh: [180, 112], lEl: [196, 176], lWr: [204, 236], lHa: [207, 262], rSh: [120, 112], rEl: [104, 176], rWr: [96, 236], rHa: [93, 262],
+    lHip: [164, 226], lKn: [168, 306], lAn: [171, 378], lToe: [186, 394], rHip: [136, 226], rKn: [132, 306], rAn: [129, 378], rToe: [114, 394] };
+  function hand(svg, x, y, s, rot) {
+    const g = el(svg, 'g', { transform: `translate(${x} ${y}) rotate(${rot || 0}) scale(${s || 1})` });
+    el(g, 'rect', { x: -13, y: -10, width: 26, height: 22, rx: 7, class: 'hand' });
+    for (let k = 0; k < 4; k++) el(g, 'rect', { x: -12 + k * 6.6, y: -21, width: 5.4, height: 13, rx: 2.7, class: 'hand' });
+    el(g, 'rect', { x: 11, y: -4, width: 11, height: 5.4, rx: 2.7, class: 'hand' });
+    return g;
+  }
+  function sword(svg, a, b) { // blade from a (hilt) to b (tip)
+    const ang = Math.atan2(b[1] - a[1], b[0] - a[0]), n = [-Math.sin(ang), Math.cos(ang)];
+    line(svg, a, b, 'ink', 4.2, { 'stroke-linecap': 'round' });
+    line(svg, a, b, 'bodyin', 1.6);
+    const g1 = [a[0] + n[0] * 13, a[1] + n[1] * 13], g2 = [a[0] - n[0] * 13, a[1] - n[1] * 13];
+    line(svg, g1, g2, 'ink', 3, { 'stroke-linecap': 'round' });
+    const back = [a[0] - Math.cos(ang) * 22, a[1] - Math.sin(ang) * 22];
+    line(svg, a, back, 'ink', 6, { 'stroke-linecap': 'round' });
+  }
+  function floor(svg, y, x1, x2) { line(svg, [x1, y], [x2, y], 'floor', 2); for (let x = x1 + 6; x < x2; x += 18) line(svg, [x, y], [x - 8, y + 8], 'muted', 1, { opacity: .5 }); }
+  const $ = id => document.getElementById(id);
+
+  // Plate I: swing
+  (function () {
+    const s = $('fig-swing'); floor(s, 286, 10, 450);
+    figure(s, STAND, { x: 222, y: 2, scale: .72, highlight: [2] });
+    path(s, 'M70 84 Q 200 40 312 100', 'oil', 2.2, { 'stroke-dasharray': '6 6' });
+    sword(s, [92, 96], [168, 120]); hand(s, 80, 98, 1, 20);
+    const ch = [306, 102];
+    el(s, 'circle', { cx: ch[0], cy: ch[1], r: 11, class: 'blood', 'stroke-width': 2.2 });
+    for (let k = 0; k < 8; k++) { const a = k * Math.PI / 4; line(s, [ch[0] + Math.cos(a) * 14, ch[1] + Math.sin(a) * 14], [ch[0] + Math.cos(a) * 22, ch[1] + Math.sin(a) * 22], 'blood', 2); }
+    text(s, 24, 34, 'tip ≥ 1.5 m/s', 'oilt'); text(s, 24, 50, 'sweep every frame', 'label');
+    text(s, 24, 270, 'contact → the game’s own damage', 'bloodt');
+  })();
+
+  // Plate II: block
+  (function () {
+    const s = $('fig-block');
+    // left: block zone
+    el(s, 'rect', { x: 30, y: 60, width: 160, height: 150, rx: 6, class: 'oil', 'stroke-width': 1.6, 'stroke-dasharray': '5 5', fill: 'none' });
+    text(s, 40, 52, 'block zone: anywhere in front', 'oilt');
+    sword(s, [70, 150], [175, 112]); hand(s, 62, 150, 1, -10);
+    text(s, 40, 236, 'sword in front = block', 'big');
+    text(s, 40, 254, 'moving or still, any angle', 'label');
+    // right: gun drawn, no block
+    el(s, 'rect', { x: 260, y: 60, width: 170, height: 150, rx: 6, class: 'muted', 'stroke-width': 1.4, 'stroke-dasharray': '5 5', fill: 'none', opacity: .7 });
+    sword(s, [300, 150], [405, 112]); hand(s, 292, 150, 1, -10);
+    // pistol in the other hand
+    const g = el(s, 'g', { transform: 'translate(318 92) rotate(-8)' });
+    el(g, 'rect', { x: 0, y: 0, width: 58, height: 12, rx: 3, class: 'metal' });
+    el(g, 'rect', { x: 2, y: 10, width: 14, height: 24, rx: 3, class: 'metal' });
+    hand(s, 320, 120, .9, -8);
+    line(s, [270, 70], [420, 200], 'blood', 3); line(s, [420, 70], [270, 200], 'blood', 3);
+    text(s, 270, 236, 'gun drawn: no block', 'big');
+    text(s, 270, 254, 'game holsters the gun', 'label');
+  })();
+
+  // Plate III: takedown (from behind)
+  (function () {
+    const s = $('fig-takedown'); floor(s, 290, 10, 450);
+    figure(s, STAND, { x: 152, y: 6, scale: .72 });
+    // neck height band (neck at y 65..75)
+    el(s, 'rect', { x: 226, y: 58, width: 68, height: 24, class: 'oil', 'stroke-width': 1.2, fill: 'none', 'stroke-dasharray': '4 4' });
+    text(s, 300, 74, 'neck height', 'oilt');
+    arrow(s, [98, 76], [222, 70], 'oil', 2.4);
+    hand(s, 84, 82, 1, 80);
+    text(s, 22, 124, 'quick sideways slash', 'oilt');
+    text(s, 22, 140, '= lethal takedown', 'label');
+    // indicator
+    el(s, 'circle', { cx: 300, cy: 30, r: 6, class: 'oilfill pulse' });
+    text(s, 312, 34, 'one small indicator', 'label');
+    text(s, 22, 250, 'hold grip or trigger', 'big');
+    text(s, 22, 268, '= choke unconscious', 'label');
+  })();
+
+  // Plate IV: pistol along barrel
+  (function () {
+    const s = $('fig-pistol');
+    const g = el(s, 'g', { transform: 'translate(70 170) rotate(-14)' });
+    el(g, 'rect', { x: 0, y: -8, width: 92, height: 16, rx: 4, class: 'metal' });
+    el(g, 'rect', { x: 6, y: 6, width: 18, height: 36, rx: 4, class: 'metal', transform: 'rotate(12 15 6)' });
+    hand(s, 84, 196, 1.05, -14);
+    // barrel axis -> crosshair
+    const a = [162, 147], dir = [Math.cos(-14 * Math.PI / 180), Math.sin(-14 * Math.PI / 180)];
+    const b = [a[0] + dir[0] * 250, a[1] + dir[1] * 250];
+    line(s, a, b, 'oil', 2, { 'stroke-dasharray': '7 6' });
+    el(s, 'circle', { cx: b[0], cy: b[1], r: 13, class: 'oil', 'stroke-width': 2.4 });
+    line(s, [b[0] - 20, b[1]], [b[0] - 6, b[1]], 'oil', 2.4); line(s, [b[0] + 6, b[1]], [b[0] + 20, b[1]], 'oil', 2.4);
+    line(s, [b[0], b[1] - 20], [b[0], b[1] - 6], 'oil', 2.4); line(s, [b[0], b[1] + 6], [b[0], b[1] + 20], 'oil', 2.4);
+    text(s, b[0] - 70, b[1] - 30, 'crosshair = barrel line', 'oilt');
+    // old controller ray
+    const r0 = [120, 200], r1 = [400, 230];
+    line(s, r0, r1, 'muted', 1.4, { 'stroke-dasharray': '3 6', opacity: .8 });
+    el(s, 'circle', { cx: r1[0], cy: r1[1], r: 10, class: 'muted', 'stroke-width': 1.6, opacity: .8 });
+    text(s, 300, 262, 'before: controller ray', 'label');
+    text(s, 30, 40, 'aim by pointing the gun', 'big');
+    text(s, 30, 58, 'shots fly along the same line', 'label');
+  })();
+
+  // Plate V: hold and throw a bottle
+  (function () {
+    const s = $('fig-hold'); floor(s, 280, 10, 450);
+    function bottle(x, y, r) {
+      const g = el(s, 'g', { transform: `translate(${x} ${y}) rotate(${r})` });
+      el(g, 'rect', { x: -8, y: -6, width: 16, height: 30, rx: 5, class: 'metal' });
+      el(g, 'rect', { x: -3, y: -16, width: 6, height: 12, rx: 2, class: 'metal' });
+    }
+    bottle(70, 150, 0); hand(s, 70, 168, 1.05, 0);
+    path(s, 'M90 140 Q 250 20 410 200', 'oil', 2, { 'stroke-dasharray': '6 6' });
+    bottle(250, 82, 60); bottle(400, 196, 130);
+    text(s, 120, 52, 'release at ≥ 1.2 m/s: throw', 'oilt');
+    path(s, 'M70 190 L 70 262', 'muted', 1.6, { 'stroke-dasharray': '4 5' });
+    bottle(70, 262, 90);
+    text(s, 86, 250, 'gentle release: drop', 'label');
+  })();
+
+  // Plate VI: gestures
+  (function () {
+    const s = $('fig-holster');
+    figure(s, STAND, { x: 120, y: 10, scale: .7, highlight: [3, 4] });
+    // sword over the right shoulder (front view: the guard's right is the viewer's left)
+    sword(s, [203, 72], [169, 12]);
+    hand(s, 207, 80, .9, 200);
+    arrow(s, [140, 168], [195, 94], 'oil', 2);
+    text(s, 14, 182, 'over the shoulder + grip', 'oilt'); text(s, 14, 198, 'sheathe or draw', 'label');
+    // left temple (viewer's right of the head)
+    el(s, 'circle', { cx: 240, cy: 45, r: 6, class: 'oilfill pulse' });
+    text(s, 290, 34, 'left temple + grip', 'oilt'); text(s, 290, 50, 'opens the journal', 'label');
+    line(s, [286, 34], [249, 45], 'oil', 1.4);
+    // wrist watch on the left wrist (204,236 scaled)
+    el(s, 'rect', { x: 255, y: 168, width: 16, height: 14, rx: 3, class: 'oil', 'stroke-width': 2, fill: 'none' });
+    text(s, 290, 172, 'back of wrist to face', 'oilt'); text(s, 290, 188, 'health and mana watch', 'label');
+    line(s, [286, 176], [275, 176], 'oil', 1.4);
+  })();
+
+  // Plate VII: menu tabs and grips
+  (function () {
+    const s = $('fig-menu');
+    el(s, 'rect', { x: 84, y: 40, width: 292, height: 210, rx: 4, class: 'ink', 'stroke-width': 1.6, fill: 'none' });
+    const tabs = ['Gamepad', 'Keyboard', 'Mouse'];
+    tabs.forEach((t, i) => {
+      el(s, 'rect', { x: 120 + i * 78, y: 56, width: 72, height: 26, rx: 3, class: i === 1 ? 'oil' : 'muted', 'stroke-width': i === 1 ? 2.2 : 1.2, fill: 'none' });
+      text(s, 127 + i * 78, 73, t, i === 1 ? 'oilt' : 'label');
+    });
+    text(s, 96, 73, 'LB', 'label'); text(s, 354, 73, 'RB', 'label');
+    for (let r = 0; r < 5; r++) {
+      el(s, 'rect', { x: 104, y: 100 + r * 28, width: 252, height: 20, rx: 2, class: r === 0 ? 'oil' : 'muted', 'stroke-width': r === 0 ? 1.8 : 1, fill: 'none', opacity: r === 0 ? 1 : .6 });
+    }
+    hand(s, 34, 150, 1, -90); hand(s, 428, 150, 1, 90);
+    text(s, 8, 196, 'left grip', 'label'); text(s, 8, 212, '1 tab back', 'oilt');
+    text(s, 392, 196, 'right grip', 'label'); text(s, 392, 212, '1 tab on', 'oilt');
+    arrow(s, [150, 280 - 10], [110, 280 - 10], 'oil', 2); arrow(s, [310, 270], [350, 270], 'oil', 2);
+    text(s, 166, 274, 'one squeeze = one tab', 'big');
+  })();
+
+  // Plate VIII: anatomy with 17 numbered bodies
+  (function () {
+    const s = $('fig-anatomy');
+    const T = figure(s, STAND, { x: 80, y: 10, scale: 1.0 });
+    const names = ['pelvis', 'spine', 'chest', 'neck', 'head', 'L upper arm', 'L forearm', 'L hand', 'R upper arm', 'R forearm', 'R hand', 'L thigh', 'L calf', 'L foot', 'R thigh', 'R calf', 'R foot'];
+    const mid = i => { const [a, b] = SEG[i]; if (b === null) return T(STAND[a]); const p = T(STAND[a]), q = T(STAND[b]); return [(p[0] + q[0]) / 2, (p[1] + q[1]) / 2]; };
+    // guard's left is the viewer's right (front view): L labels on the right column, R on the left
+    const right = [0, 1, 2, 3, 4, 5, 6, 7, 11, 12, 13], left = [8, 9, 10, 14, 15, 16];
+    const grab = [7, 10, 13, 16, 2, 3];
+    function lab(i, x, y, side) {
+      const m = mid(i);
+      line(s, m, [x + (side > 0 ? -4 : 4), y - 4], grab.includes(i) ? 'oil' : 'muted', grab.includes(i) ? 1.4 : .8, { opacity: grab.includes(i) ? 1 : .7 });
+      el(s, 'circle', { cx: m[0], cy: m[1], r: 3.2, class: grab.includes(i) ? 'oilfill' : 'brassfill' });
+      text(s, x, y, `${i}  ${names[i]}`, grab.includes(i) ? 'oilt' : 'label', side < 0 ? { 'text-anchor': 'end' } : {});
+    }
+    right.forEach((i, k) => lab(i, 330, 40 + k * 32, 1));
+    left.forEach((i, k) => lab(i, 128 - 8, 150 + k * 40, -1));
+    text(s, 20, 440, '● grab points: wrists, ankles, collar', 'oilt');
+    text(s, 20, 458, 'alive: follow the animation · corpse: loose', 'label');
+  })();
+
+  // Plate IX: drag a corpse by the wrist
+  (function () {
+    const s = $('fig-drag'); floor(s, 236, 10, 510);
+    const LIE = {
+      head: [338, 206], neckA: [312, 210], neckB: [298, 211], chestA: [284, 212], chestB: [238, 214], spineA: [228, 215], spineB: [208, 216], pelvisA: [198, 216], pelvisB: [176, 217],
+      rSh: [284, 202], rEl: [334, 168], rWr: [386, 140], rHa: [406, 130], lSh: [284, 222], lEl: [248, 230], lWr: [214, 230], lHa: [196, 229],
+      lHip: [176, 224], lKn: [118, 228], lAn: [62, 228], lToe: [48, 216], rHip: [176, 208], rKn: [116, 204], rAn: [60, 210], rToe: [46, 198] };
+    figure(s, LIE, { highlight: [10] });
+    hand(s, 418, 118, 1.1, -60);
+    arrow(s, [432, 110], [496, 82], 'blood', 2.6);
+    text(s, 410, 70, 'pull', 'bloodt');
+    for (let k = 0; k < 4; k++) line(s, [18 + k * 8, 196 + k * 9], [38 + k * 8, 196 + k * 9], 'muted', 1.4, { opacity: .7 });
+    text(s, 20, 260, 'the ragdoll’s own joints drag the rest along the floor', 'label');
+    text(s, 330, 40, 'grip body 10, the right hand', 'oilt');
+    line(s, [380, 46], [404, 122], 'oil', 1.2);
+  })();
+
+  // Plate X: drop and pick up, three panels
+  (function () {
+    const s = $('fig-drop');
+    for (let k = 0; k < 3; k++) { el(s, 'rect', { x: 10 + k * 170, y: 16, width: 160, height: 220, rx: 4, class: 'muted', 'stroke-width': 1, fill: 'none', opacity: .7 }); floor(s, 206, 18 + k * 170, 162 + k * 170); }
+    // 1: open hand, sword falling
+    hand(s, 70, 60, 1, 0); sword(s, [80, 96], [128, 160]);
+    arrow(s, [40, 90], [40, 170], 'oil', 2);
+    text(s, 22, 230, '1  open the hand', 'oilt');
+    // 2: on the floor; real sword holstered (ghost at the hip)
+    sword(s, [214, 198], [300, 198]);
+    el(s, 'rect', { x: 284, y: 48, width: 30, height: 70, rx: 6, class: 'brass', 'stroke-width': 1.4, 'stroke-dasharray': '4 4', fill: 'none' });
+    text(s, 262, 40, 'real sword', 'brasst'); text(s, 262, 132, 'holstered', 'brasst');
+    text(s, 192, 230, '2  copy on the floor', 'label');
+    // 3: grip it again
+    hand(s, 412, 170, 1, 0); sword(s, [420, 150], [468, 92]);
+    arrow(s, [380, 196], [404, 176], 'oil', 2);
+    text(s, 362, 230, '3  grip = back in hand', 'oilt');
+  })();
+
+  // Plate XI: throw the sword
+  (function () {
+    const s = $('fig-throw'); floor(s, 286, 10, 510);
+    hand(s, 52, 160, 1, -30);
+    path(s, 'M64 140 Q 240 10 412 98', 'oil', 2, { 'stroke-dasharray': '6 6' });
+    const pts = [[169, 82, -20], [256, 63, -3], [343, 72, 14]];
+    for (const [x, y, r] of pts) { const a = r * Math.PI / 180; sword(s, [x - Math.cos(a) * 26, y - Math.sin(a) * 26], [x + Math.cos(a) * 26, y + Math.sin(a) * 26]); }
+    figure(s, STAND, { x: 332, y: 2, scale: .72 });
+    const hit = [424, 100];
+    for (let k = 0; k < 8; k++) { const a = k * Math.PI / 4; line(s, [hit[0] + Math.cos(a) * 12, hit[1] + Math.sin(a) * 12], [hit[0] + Math.cos(a) * 22, hit[1] + Math.sin(a) * 22], 'blood', 2); }
+    text(s, 120, 26, 'point first', 'oilt');
+    text(s, 20, 230, 'damage = speed × weight × thrown factor', 'bloodt');
+    text(s, 20, 248, 'the same hit test as a sword swing', 'label');
+  })();
+
+  // Plate XII: living guard grabbed -> ragdoll -> recovers
+  (function () {
+    const s = $('fig-live'); floor(s, 270, 10, 510);
+    figure(s, STAND, { x: 7, y: 26, scale: .62, highlight: [9] });
+    hand(s, 52, 156, .95, 170);
+    text(s, 18, 30, 'grip the forearm', 'oilt');
+    arrow(s, [150, 160], [200, 160], 'muted', 2);
+    // limp ragdoll mid-fall
+    const FALL = { head: [292, 196], neckA: [276, 204], neckB: [268, 208], chestA: [258, 214], chestB: [232, 236], spineA: [226, 242], spineB: [218, 252], pelvisA: [212, 256], pelvisB: [204, 262],
+      lSh: [262, 226], lEl: [286, 252], lWr: [312, 262], lHa: [324, 262], rSh: [250, 206], rEl: [232, 180], rWr: [218, 156], rHa: [212, 144],
+      lHip: [208, 262], lKn: [178, 250], lAn: [148, 262], lToe: [140, 254], rHip: [200, 258], rKn: [172, 236], rAn: [150, 246], rToe: [140, 238] };
+    figure(s, FALL, {});
+    text(s, 188, 120, 'the game’s ragdoll', 'brasst');
+    arrow(s, [338, 200], [388, 200], 'muted', 2);
+    figure(s, STAND, { x: 347, y: 26, scale: .62 });
+    text(s, 410, 40, 'he gets up', 'label');
+  })();
+
+  // Plate XIII: fingers conform
+  (function () {
+    const s = $('fig-fingers');
+    // cylinder (bottle / hilt)
+    el(s, 'rect', { x: 196, y: 40, width: 62, height: 190, rx: 30, class: 'metal' });
+    // four fingers wrap: segments stop at the surface
+    for (let k = 0; k < 4; k++) {
+      const y = 90 + k * 26;
+      path(s, `M120 ${y} L 176 ${y} Q 196 ${y - 2} 200 ${y + 4}`, 'oil', 9, { 'stroke-linecap': 'round', opacity: .9 });
+      el(s, 'circle', { cx: 201, cy: y + 5, r: 3, class: 'bloodfill' });
+    }
+    el(s, 'rect', { x: 70, y: 76, width: 56, height: 104, rx: 14, class: 'hand' });
+    text(s, 272, 98, '● fingertip meets the shape', 'bloodt');
+    text(s, 272, 116, 'curl stops there', 'label');
+    text(s, 40, 252, 'bottle, hilt and wrist each held differently', 'label');
+  })();
+})();
+</script>
+</body></html>

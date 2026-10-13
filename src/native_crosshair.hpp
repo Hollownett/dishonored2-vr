@@ -1,4 +1,5 @@
 #pragma once
+#include "native_readable_range.hpp"
 #include <windows.h>
 // Relative so a bare `cl tests\..._check.cpp` with no /I still resolves; the
 // repository build passes third_party\minhook\include as well.
@@ -57,7 +58,7 @@ inline std::optional<std::array<float,2>> project_to_ndc(const float view_projec
 // the original is enough to own the frame: when the component is centred and the
 // latch is set the engine's tail does nothing at all, and when it is clear the
 // centre helper runs inside the original, i.e. before this write. The latch is
-// still cleared on every frame written here, because that is the handback: the
+// cleared once on the first unowned update, with retry after a failed write: the
 // next engine update re-parks the reticle at centre the moment this publication
 // goes stale, the route is switched off, or the hook is disabled and unhooked -
 // without the clear the last position written here would stay on screen for the
@@ -81,6 +82,9 @@ class NativeCrosshair {
     inline static NativeCrosshair* instance_{};
     inline static constexpr std::uintptr_t update_rva=0x672f70,setter_rva=0x2a2c0,setter_call_rva=0x67318f;
     inline static constexpr std::uintptr_t stage_x_rva=0x3989eac,stage_y_rva=0x3989f2c;
+public:
+    std::atomic<float> ndc_limit{1.f};
+private:
     inline static constexpr std::uintptr_t movie_offset=0x98,object_offset=0x3a8;
     inline static constexpr std::uintptr_t x_member_offset=0x660,y_member_offset=0x670,centred_latch_offset=0x94;
     inline static constexpr std::uint64_t freshness_ms=150;
@@ -103,9 +107,7 @@ class NativeCrosshair {
     inline static const std::byte zero_byte{};
 
     static bool executable(std::uintptr_t at) {
-        MEMORY_BASIC_INFORMATION info{};
-        if(!at || VirtualQuery(reinterpret_cast<const void*>(at),&info,sizeof info)!=sizeof info) return false;
-        return info.State==MEM_COMMIT && (info.Protect&(PAGE_EXECUTE|PAGE_EXECUTE_READ|PAGE_EXECUTE_READWRITE|PAGE_EXECUTE_WRITECOPY))!=0;
+        return native_executable_cached(at);
     }
 
     // Runs on the thread that owns the element: the same call that is updating
@@ -113,7 +115,7 @@ class NativeCrosshair {
     void place(void* element) noexcept {
         if(!element) return;
         try {
-            const auto at=reinterpret_cast<std::uintptr_t>(element);
+            const auto at=reinterpret_cast<std::uintptr_t>(element);element_.store(at,std::memory_order_relaxed);
             Publication publication;{std::lock_guard<std::mutex> lock(mutex_);publication=publication_;}
             const auto now=GetTickCount64();
             std::uintptr_t movie{};
@@ -124,7 +126,7 @@ class NativeCrosshair {
                 publication.epoch && now>=publication.tick && now-publication.tick<=freshness_ms;
             if(!owns) {
                 // Hand the reticle back once: clear the centred latch so the engine re-places its own.
-                if(placed_.exchange(false)) {if(write_(at+centred_latch_offset,&zero_byte,1)) ++latch_clears_;else ++latch_failures_;}
+                if(placed_.load()) {if(write_(at+centred_latch_offset,&zero_byte,1)) {placed_=false;++latch_clears_;}else ++latch_failures_;}
                 ++skipped_;return;
             }
             std::uintptr_t object{};
@@ -136,8 +138,11 @@ class NativeCrosshair {
                std::isfinite(publication.x) && std::isfinite(publication.y)) {
                 // A hand aimed off the screen edge parks the reticle on the edge
                 // rather than dropping the whole correction for that frame.
-                const auto stage=crosshair_stage_position(std::clamp(publication.x,-1.0f,1.0f),
-                    std::clamp(publication.y,-1.0f,1.0f),stage_x,stage_y);
+                // ndc_limit>1 when the HUD is drawn shrunk about the centre (native_hud_rect.hpp):
+                // the caller pre-divides the aim point so the drawn reticle still lands on it.
+                const float limit=ndc_limit.load(std::memory_order_relaxed);
+                const auto stage=crosshair_stage_position(std::clamp(publication.x,-limit,limit),
+                    std::clamp(publication.y,-limit,limit),stage_x,stage_y);
                 // The setter takes the ADDRESS of the cached object field and of the member handle fields.
                 setter_(at+object_offset,&stage[0],reinterpret_cast<void*>(at+x_member_offset));
                 setter_(at+object_offset,&stage[1],reinterpret_cast<void*>(at+y_member_offset));
@@ -159,6 +164,9 @@ class NativeCrosshair {
         __finally {--self.depth_;}
     }
 public:
+    // Last crosshair element seen by the engine's update; its AS3 object is at element+object_offset.
+    std::atomic<std::uintptr_t> element_{};
+    static constexpr std::uintptr_t object_field=object_offset;
     // Render thread, once per published frame: the hand aim point projected into
     // the rendered (left) eye view, in normalised device coordinates. active
     // false, a zero epoch or a publication older than 150 ms hands the reticle

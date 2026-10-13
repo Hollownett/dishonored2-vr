@@ -187,5 +187,15 @@ int main() {
     assert(bridge.reads()==1 && bridge.virtual_reads()==0 && bridge.nonzero_reads()==0);
     assert(bridge.disable() && *reinterpret_cast<void**>(base+rva)==original);
     DestroyWindow(window);UnregisterClassW(window_class.lpszClassName,window_class.hInstance);
-    std::cout << "PASS: VR pad mapping, native window connection probe through patched XInput, menu/focus/stale release and import restoration\n";
+    {   // A grip squeezed in a menu is one shoulder tap (menus repeat a held shoulder after 225 ms); one begun in gameplay holds.
+        d2vr::PadComposer taps;d2vr::ControllerInput g{};g.active=true;taps.compose(g,false,1000);
+        const auto rb=[&](bool play,std::uint64_t t) {return (taps.compose(g,play,t).wButtons&XINPUT_GAMEPAD_RIGHT_SHOULDER)!=0;};
+        const auto lb=[&](bool play,std::uint64_t t) {return (taps.compose(g,play,t).wButtons&XINPUT_GAMEPAD_LEFT_SHOULDER)!=0;};
+        g.right_grip=1;
+        assert(rb(false,1000) && rb(false,1000+d2vr::PadComposer::menu_shoulder_tap_ms-1) && !rb(false,1225) && !rb(false,2000));
+        g.right_grip=0;taps.compose(g,false,2100);g.right_grip=1;assert(rb(false,2200));   // the next squeeze taps again
+        g.right_grip=0;taps.compose(g,true,2900);g.left_grip=1;
+        assert(lb(true,3000) && lb(false,4000));   // held from gameplay into the power wheel (not gameplay): still LB
+    }
+    std::cout << "PASS: VR pad mapping, native window connection probe through patched XInput, menu/focus/stale release and import restoration, menu grip taps\n";
 }

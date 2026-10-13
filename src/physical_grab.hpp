@@ -1,10 +1,12 @@
 #pragma once
 #include "tracked_pose.hpp"
+#include "tracked_pose_lifetime.hpp"
 #include <algorithm>
 #include <cstdint>
 #include <optional>
 
 namespace d2vr {
+inline constexpr std::uint64_t grab_pose_freshness_ms=tracked_pose_freshness_ms;
 inline bool grab_pose_valid(const WorldTrackedPose& pose) {
     if(!finite(pose.position)) return false;
     for(unsigned i=0;i<3;++i) {
@@ -50,7 +52,7 @@ struct GrabMotor {Vec3 linear{},angular{};bool release{};};
 // A velocity motor keeps the native body dynamic, so collision/gravity remain
 // native and tracking loss cannot leave a body in a changed motion mode.
 class PhysicalGrab {
-    bool armed_=false,pressed_=false,held_=false;
+    bool armed_=false,pressed_=false,held_=false,valid_sample_=false;
     std::uint64_t epoch_{},tick_{};
     WorldTrackedPose previous_{},relative_{};
     Vec3 velocity_{};
@@ -59,25 +61,31 @@ public:
     bool held() const {return held_;}
     const Vec3& velocity() const {return velocity_;}
     bool sample(const WorldTrackedPose& hand,float grip,bool usable,std::uint64_t epoch,std::uint64_t tick) {
-        if(!usable || !epoch || !tick || !grab_pose_valid(hand) || !std::isfinite(grip) || grip<0 || grip>1 ||
-           epoch!=epoch_ || tick<tick_ || (tick_ && tick-tick_>250)) {
-            armed_=pressed_=false;velocity_={};epoch_=epoch;tick_=tick;previous_=hand;return false;
+        const bool valid_input=usable && epoch && tick && grab_pose_valid(hand) && std::isfinite(grip) && grip>=0 && grip<=1;
+        if(!valid_input || epoch!=epoch_ || tick<tick_ || (tick_ && tick-tick_>grab_pose_freshness_ms)) {
+            // A fresh released sample is sufficient to rearm at a new epoch;
+            // held grips and unusable/reset samples never acquire on return.
+            armed_=valid_input && epoch!=epoch_ && grip<.35f && (!tick_ || tick>=tick_);
+            valid_sample_=false;pressed_=false;velocity_={};epoch_=epoch;tick_=tick;previous_=hand;return false;
         }
         const auto dt=double(tick-tick_)*.001;
-        if(dt>=.001 && dt<=.1) {
-            const auto displacement=hand.position-previous_.position;
-            if(length(displacement)>.5) {armed_=pressed_=false;velocity_={};tick_=tick;previous_=hand;return false;}
+        const auto displacement=hand.position-previous_.position;
+        // Check discontinuities even at duplicate or slow accepted timestamps,
+        // before a released grip can convert old movement into a throw.
+        if(length(displacement)>.5) {valid_sample_=false;armed_=pressed_=false;velocity_={};tick_=tick;previous_=hand;return false;}
+        if(dt>=.001) {
             const double weight=1-std::exp(-dt/.035);
-            velocity_=velocity_*(1-weight)+grab_limit(displacement*(1/dt),6)*weight;
+            velocity_=velocity_*(1-weight)+grab_limit(displacement*(1/dt),12)*weight;
         }
         if(grip<.35f) {armed_=true;pressed_=false;}
         else if(armed_ && grip>.65f) pressed_=true;
-        tick_=tick;previous_=hand;return true;
+        valid_sample_=true;tick_=tick;previous_=hand;return true;
     }
     bool bind(const WorldTrackedPose& object) {return bind(object,object.position);}
-    bool bind(const WorldTrackedPose& object,Vec3 contact) {
-        if(!pressed_ || held_ || !grab_pose_valid(object) || !finite(contact) ||
-           length(contact-previous_.position)>.3 || length(contact-object.position)>3) return false;
+    bool bind(const WorldTrackedPose& object,Vec3 contact,double maximum_contact=.3) {
+        if(!valid_sample_ || !pressed_ || held_ || !grab_pose_valid(object) || !finite(contact) ||
+           !std::isfinite(maximum_contact) || maximum_contact<0 || maximum_contact>.55 ||
+           length(contact-previous_.position)>maximum_contact || length(contact-object.position)>3) return false;
         relative_.position=grab_local(previous_,object.position-previous_.position);
         for(unsigned i=0;i<3;++i) relative_.basis[i]=grab_local(previous_,object.basis[i]);
         held_=true;return true;
@@ -88,15 +96,20 @@ public:
         return result;
     }
     GrabMotor release(bool throw_velocity) {
-        held_=false;return {throw_velocity?velocity_:Vec3{}, {},true};
+        held_=false;return {throw_velocity && valid_sample_?velocity_:Vec3{}, {},true};
+    }
+    GrabMotor release_sample(const WorldTrackedPose& hand,float grip,bool usable,std::uint64_t epoch,std::uint64_t tick,bool throw_velocity) {
+        // Native grip release can arrive before the next motor callback.
+        const bool accepted=sample(hand,grip,usable,epoch,tick);
+        return release(throw_velocity && accepted);
     }
     std::optional<GrabMotor> motor(const WorldTrackedPose& object,bool usable) {
         if(!held_) return {};
-        if(!usable || !pressed_ || !grab_pose_valid(object)) return release(usable && !pressed_);
+        if(!usable || !valid_sample_ || !pressed_ || !grab_pose_valid(object)) return release(usable && valid_sample_ && !pressed_);
         const auto goal=target();const auto error=goal.position-object.position;
-        if(length(error)>1) return release(false); // Wall blockage or an ownership discontinuity.
+        if(length(error)>1.5) return release(valid_sample_ && pressed_); // fast swing outran the motor: throw, do not dead-drop // Wall blockage or an ownership discontinuity.
         const auto spin=grab_rotation_error(object,goal);
-        return GrabMotor{grab_limit(error*18+velocity_,3),grab_limit(spin*12,5),false};
+        return GrabMotor{grab_limit(error*18+velocity_,10),grab_limit(spin*12,5),false};
     }
 };
 } // namespace d2vr

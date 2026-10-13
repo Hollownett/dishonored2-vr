@@ -14,13 +14,14 @@
 
 namespace d2vr {
 // Logs CBPerViewGlobals (0x320 bytes) as bound at CS slot 1 right after the
-// native TAA pass was recorded. The CopyResource joins the caller's deferred
+// native TAA pass was recorded (slot 2: the TAA pass's PerInstanceCB, whose viewport and
+// texture sizes convert motion vectors to pixels and place the history fetch). The CopyResource joins the caller's deferred
 // command list, so a staging copy is only meaningful once the game executed
 // that list: drain waits three frames and maps without blocking (DO_NOT_WAIT)
 // and only ever maps staging buffers, never a game resource.
 class TaaConstantsCapture {
     template<class T> using Ptr=Microsoft::WRL::ComPtr<T>;
-    static constexpr unsigned ring_size=8,field_count=9;
+    static constexpr unsigned ring_size=8,field_count=9,instance_field_count=6;
 public:
     static constexpr unsigned block_bytes=0x320;
     static constexpr const char* header="frame,eye,field,cb,ctx_type,f00,f01,f02,f03,f04,f05,f06,f07,f08,f09,f10,f11,f12,f13,f14,f15";
@@ -33,6 +34,11 @@ private:
         {"viewprojection",0x020,16},{"view",0x060,16},{"projection",0x0b0,16},
         {"previous_viewprojection",0x0f0,16},{"previous_view",0x130,16},{"previous_projection",0x170,16},
         {"jittervectors",0x1d0,4},{"globalviewinfos",0x2a0,4},{"framenumber",0x318,1}};
+    // PerInstanceCB of the native TAA shader (offsets from its source in base/shaderCache/ShaderCache_PC.ucd).
+    static constexpr Field instance_fields[instance_field_count]{
+        {"positiontoviewtexture",0x00,4},{"viewport",0x10,4},{"taatexsize",0x20,4},{"taaditherandviewportsize",0x30,4},
+        {"exposureindex_prevresolutionscale",0xa0,4},{"whitelevel_maxluminance_taaamount_evbias",0xb0,4}};
+    const Field* fields_=fields;unsigned fields_count_=field_count;UINT slot_=1,min_bytes_=block_bytes;
     struct Slot {
         Ptr<ID3D11Buffer> staging;
         std::atomic<unsigned> state{0}; // 0 free, 1 copying, 2 recorded
@@ -74,11 +80,12 @@ private:
         for(const auto& slot:ring_) if(slot.state.load(std::memory_order_relaxed)==2 && slot.frame==frame) return;
         if(completed_.insert(frame).second && completed_.size()>=max_frames_) complete_.store(true,std::memory_order_release);
     }
-    static void write_rows(const Entry& entry,const void* data,std::ostream& csv) {
+    void write_rows(const Entry& entry,const void* data,std::ostream& csv) const {
         const auto* bytes=static_cast<const unsigned char*>(data);
         const auto flags=csv.flags();const auto precision=csv.precision();
         csv<<std::setprecision(9);
-        for(const auto& field:fields) {
+        for(unsigned f=0;f<fields_count_;++f) {
+            const auto& field=fields_[f];
             csv<<entry.frame<<','<<entry.eye<<','<<field.name<<",0x"<<std::hex
                <<static_cast<unsigned long long>(entry.cb)<<std::dec<<','<<static_cast<int>(entry.ctx_type);
             for(unsigned i=0;i<16;++i) {
@@ -91,17 +98,19 @@ private:
         csv.flags(flags);csv.precision(precision);
     }
 public:
-    explicit TaaConstantsCapture(unsigned max_frames=64):max_frames_(max_frames?max_frames:1) {}
+    explicit TaaConstantsCapture(unsigned max_frames=64,UINT slot=1):max_frames_(max_frames?max_frames:1) {
+        if(slot==2) {fields_=instance_fields;fields_count_=instance_field_count;slot_=2;min_bytes_=0xc0;}
+    }
 
     // Called on the job thread that owns this deferred context. The copy is
     // part of that context's command list, which is why it is issued here and
     // never on another thread's context.
     void record(ID3D11DeviceContext* context,int eye,unsigned long long frame) noexcept {
         if(!context || complete_.load(std::memory_order_acquire) || (eye!=0 && eye!=1)) return;
-        Ptr<ID3D11Buffer> cb;context->CSGetConstantBuffers(1,1,cb.GetAddressOf());
+        Ptr<ID3D11Buffer> cb;context->CSGetConstantBuffers(slot_,1,cb.GetAddressOf());
         if(!cb) {++misses;return;}
         D3D11_BUFFER_DESC desc{};cb->GetDesc(&desc);
-        if(desc.ByteWidth<block_bytes || !(desc.BindFlags&D3D11_BIND_CONSTANT_BUFFER)) {++misses;return;}
+        if(desc.ByteWidth<min_bytes_ || !(desc.BindFlags&D3D11_BIND_CONSTANT_BUFFER)) {++misses;return;}
         const Entry entry{frame,eye,reinterpret_cast<std::uintptr_t>(cb.Get()),context->GetType()};
         unsigned index=ring_size;
         try {
@@ -150,7 +159,7 @@ public:
             }
             write_rows(entry,mapped.pData,csv);immediate->Unmap(staging,0);
             std::lock_guard<std::mutex> lock(mutex_);
-            written_rows+=field_count;ring_[i].state.store(0,std::memory_order_release);settle(entry.frame);
+            written_rows+=fields_count_;ring_[i].state.store(0,std::memory_order_release);settle(entry.frame);
         }
     }
     bool complete() const {return complete_.load(std::memory_order_acquire);}

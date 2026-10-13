@@ -1,10 +1,13 @@
 #pragma once
+#include <cstring>
 #include <windows.h>
+#include <dbghelp.h>
 #include <atomic>
 #include <array>
 #include <cstdio>
 #include <cstdint>
 #include <stdexcept>
+#include <string>
 
 namespace d2vr {
 // Tags do not catch an exception or change its disposition. The first-chance
@@ -24,6 +27,21 @@ class CrashObserver {
     std::atomic<unsigned> records_{0};
     std::atomic<bool> native_faults_{false};
     std::uintptr_t module_begin_{},module_end_{};
+    std::wstring dump_path_;inline static std::atomic<bool> dumped_{false};
+    // One minidump per process when code runs from an address no loaded module owns (always fatal: sessions stopping crashed
+    // in amdxx64 calling unmapped code, v369/v397). Unloaded-module and referenced-memory streams show what that address was.
+    static void write_dump(const CrashObserver& self,EXCEPTION_POINTERS* exception) noexcept {
+        using Write=BOOL (WINAPI*)(HANDLE,DWORD,HANDLE,MINIDUMP_TYPE,PMINIDUMP_EXCEPTION_INFORMATION,PMINIDUMP_USER_STREAM_INFORMATION,PMINIDUMP_CALLBACK_INFORMATION);
+        const auto library=LoadLibraryW(L"dbghelp.dll");if(!library) return;
+        const auto write=reinterpret_cast<Write>(reinterpret_cast<void*>(GetProcAddress(library,"MiniDumpWriteDump")));
+        const auto file=CreateFileW(self.dump_path_.c_str(),GENERIC_WRITE,0,nullptr,CREATE_ALWAYS,FILE_ATTRIBUTE_NORMAL,nullptr);
+        if(write && file!=INVALID_HANDLE_VALUE) {
+            MINIDUMP_EXCEPTION_INFORMATION info{GetCurrentThreadId(),exception,FALSE};
+            write(GetCurrentProcess(),GetCurrentProcessId(),file,static_cast<MINIDUMP_TYPE>(MiniDumpWithIndirectlyReferencedMemory|
+                MiniDumpWithUnloadedModules|MiniDumpWithThreadInfo|MiniDumpScanMemory),&info,nullptr,nullptr);
+        }
+        if(file!=INVALID_HANDLE_VALUE) CloseHandle(file);
+    }
     static LONG CALLBACK observe(EXCEPTION_POINTERS* exception) noexcept {
         struct Depth {
             Depth() {callback_depth_.fetch_add(1,std::memory_order_acq_rel);}
@@ -59,15 +77,38 @@ class CrashObserver {
             if(length>0 && static_cast<std::size_t>(length)<sizeof(line)) {
                 DWORD written{};WriteFile(self->file_,line,static_cast<DWORD>(length),&written,nullptr);
                 // ReadProcessMemory fails cleanly on an unreadable stack.
-                std::array<ULONG64,16> stack{};SIZE_T got{};
+                std::array<ULONG64,48> stack{};SIZE_T got{};
                 if(ReadProcessMemory(GetCurrentProcess(),reinterpret_cast<const void*>(c.Rsp),stack.data(),sizeof(stack),&got) && got==sizeof(stack)) {
                     for(unsigned i=0;i<stack.size();++i) {
+                        // Name code addresses so an external-runtime fault shows which caller led there.
+                        HMODULE slot_module{};char slot_name[MAX_PATH]{};
+                        if(GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS|GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                               reinterpret_cast<LPCSTR>(stack[i]),&slot_module) && slot_module) {
+                            GetModuleFileNameA(slot_module,slot_name,MAX_PATH);
+                            const char* base_name=std::strrchr(slot_name,'\\');base_name=base_name?base_name+1:slot_name;
+                            const auto m=std::snprintf(line,sizeof(line),"record=%u stack_slot=%u value=0x%llx module=%s rva=0x%llx\r\n",number,i,stack[i],base_name,
+                                static_cast<unsigned long long>(stack[i]-reinterpret_cast<std::uintptr_t>(slot_module)));
+                            if(m>0 && static_cast<std::size_t>(m)<sizeof(line)) WriteFile(self->file_,line,static_cast<DWORD>(m),&written,nullptr);
+                            continue;
+                        }
                         const auto n=std::snprintf(line,sizeof(line),"record=%u stack_slot=%u value=0x%llx\r\n",number,i,stack[i]);
                         if(n>0 && static_cast<std::size_t>(n)<sizeof(line)) WriteFile(self->file_,line,static_cast<DWORD>(n),&written,nullptr);
                     }
                 }
+                {   // Real call chain through the exception dispatch (callers of the faulting code).
+                    void* frames[62]{};const auto n=RtlCaptureStackBackTrace(0,62,frames,nullptr);
+                    for(USHORT i=0;i<n;++i) {
+                        HMODULE m{};char frame_path[MAX_PATH]{};const char* base_name="?";
+                        if(GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS|GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                               static_cast<LPCSTR>(frames[i]),&m) && m) {GetModuleFileNameA(m,frame_path,MAX_PATH);const char* b=std::strrchr(frame_path,'\\');base_name=b?b+1:frame_path;}
+                        const auto k=std::snprintf(line,sizeof(line),"record=%u frame=%u module=%s rva=0x%llx\r\n",number,static_cast<unsigned>(i),base_name,
+                            static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(frames[i])-reinterpret_cast<std::uintptr_t>(m)));
+                        if(k>0 && static_cast<std::size_t>(k)<sizeof(line)) WriteFile(self->file_,line,static_cast<DWORD>(k),&written,nullptr);
+                    }
+                }
                 FlushFileBuffers(self->file_);
             }
+            if(!owner && !self->dump_path_.empty() && !dumped_.exchange(true)) write_dump(*self,exception);
         }
         return EXCEPTION_CONTINUE_SEARCH;
     }
@@ -79,6 +120,7 @@ public:
         file_=CreateFileW(path,GENERIC_WRITE,FILE_SHARE_READ,nullptr,CREATE_ALWAYS,FILE_ATTRIBUTE_NORMAL,nullptr);
         if(file_==INVALID_HANDLE_VALUE) throw std::runtime_error("Cannot open diagnostic exception record");
         module_begin_=module_begin;module_end_=module_begin+module_size;records_=0;native_faults_=false;
+        dump_path_=path;if(const auto dot=dump_path_.rfind(L'.');dot!=std::wstring::npos) dump_path_.resize(dot);dump_path_+=L".dmp";
         CrashObserver* empty=nullptr;
         if(!current_.compare_exchange_strong(empty,this)) {CloseHandle(file_);file_=INVALID_HANDLE_VALUE;throw std::runtime_error("Crash observer already active");}
         handler_=AddVectoredExceptionHandler(1,&observe);
