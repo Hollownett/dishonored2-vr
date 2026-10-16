@@ -83,7 +83,19 @@ void live_beats_corpse() {
     assert(pick_contact_victim(0,false,0,0)==0);
 }
 
+// NPC at origin facing +x (reference-frame row 0 = -x, the live-tested convention); thrust threshold of the swing detector is 1.7 m/s.
+void deliberate_strike_from_behind() {
+    const float row0[3]{-1,0,0},npc[3]{0,0,0},behind[3]{-.9f,.1f,0},front[3]{.9f,0,0},side[3]{0,.9f,0};
+    assert(attacker_behind(row0,npc,behind) && !attacker_behind(row0,npc,front) && !attacker_behind(row0,npc,side));
+    const float unknown[3]{0,0,0};assert(!attacker_behind(unknown,npc,behind));
+    assert(stealth_strike(4.0,true,true,1.7));            // fast strike from behind on the sensor's target: held -> native / kill
+    assert(!stealth_strike(.6,true,true,1.7));            // slow brush from behind: ordinary path, never a kill
+    assert(!stealth_strike(4.0,false,true,1.7));          // fast strike from the front on an unaware guard: ordinary hit
+    assert(!stealth_strike(4.0,true,false,1.7));          // not an NPC the game offers a takedown on (civilian / non-hostile): ordinary hit
+}
+
 int main() {
+    deliberate_strike_from_behind();
     recorded_contacts_before_native_assassination();
     window_and_terminal_cases();
     stroke_gate();

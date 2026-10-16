@@ -497,7 +497,7 @@ class NativeInteractionAim {
                        final_now<contact.hit.tick || final_now-contact.hit.tick>100 || !melee_batch_current(melee_revision)) {++sword_contact_rejected_;continue;}
                     // A guard the engine calls unaware is not hit: the native Slash may still make this the Assassination, or the
                     // contact becomes the stealth kill below (sword_contact_policy.hpp). Anything else is the ordinary hit.
-                    if(stealth_enabled_.load(std::memory_order_relaxed) && NativeMelee::damageable(self->base_,self->read_,contact.hit.victim) &&
+                    if(contact.stealth_strike && stealth_enabled_.load(std::memory_order_relaxed) && NativeMelee::damageable(self->base_,self->read_,contact.hit.victim) &&
                        NativeMelee::unaware(self->base_,self->read_,contact.hit.victim) &&
                        stealth_hold_.hold(contact,contact.victim_spawn,final_now,contact.native_offer)) {++stealth_counts_[0];continue;}
                     NativeMelee::DamageResultObservation observation{};

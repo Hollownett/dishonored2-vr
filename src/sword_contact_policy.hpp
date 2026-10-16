@@ -7,6 +7,7 @@
 //  - SwordHitGate: one hit per NPC per stroke instead of a flat 450 ms per NPC (a quick second stroke was dropped).
 //  - pick_contact_victim: a live NPC on the blade beats the corpse the cast happened to meet first (swinging into a pile of bodies
 //    chopped the dead and never damaged the living).
+#include <cmath>
 #include <cstdint>
 #include <optional>
 
@@ -14,6 +15,16 @@ namespace d2vr {
 enum class StealthAct {wait,drop,hit,kill};
 // native_offer: the engine's kill sensor targets this victim right now, so its own Assassination is expected from the next Slash press.
 inline constexpr std::uint64_t stealth_window_ms(bool native_offer) noexcept {return native_offer?700:120;}
+// A stealth strike is deliberate (tip speed at least the attack threshold of the swing detector), from behind the victim (NPC forward is
+// minus row 0 of its reference frame, entity +0x30c; attacker in the rear half-space), and on a target the game's own kill sensor offers.
+// Anything else keeps the ordinary hit: a brush, a frontal strike or a non-offered NPC is never a silent kill.
+inline bool attacker_behind(const float row0[3],const float npc[3],const float attacker[3]) noexcept {
+    const float fx=-row0[0],fy=-row0[1],dx=attacker[0]-npc[0],dy=attacker[1]-npc[1];
+    const float f=fx*fx+fy*fy,d=dx*dx+dy*dy;
+    if(!(f>.01f) || !(d>1e-6f)) return false;
+    return (fx*dx+fy*dy)/std::sqrt(f*d)<-.2f;
+}
+inline bool stealth_strike(double tip_speed,bool behind,bool native_offer,double attack_speed) noexcept {return behind && native_offer && tip_speed>=attack_speed;}
 template<class Payload> class StealthHold {
     std::optional<Payload> held_;std::uint32_t victim_{};std::uint64_t tick_{},window_{};
 public:

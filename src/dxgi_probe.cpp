@@ -4143,9 +4143,15 @@ void prepare_head_view(void* view) noexcept {
                                 auto owned_contact=contact_machine?d2vr::capture_sword_contact(contact_reader,image_base,*contact_machine,hit,contact_hand->epoch,now):std::nullopt;
                                 if(!owned_contact)++d2vr::NativeInteractionAim::sword_capture_rejected_;
                                 else owned_contact->native_offer=kill_sensor_spawn.load()==owned_contact->victim_spawn && now>=kill_sensor_tick.load() && now-kill_sensor_tick.load()<=250;
+                                if(owned_contact) {
+                                    std::array<float,3> row0{},npc_at{},player_at{};
+                                    const bool behind=read_self(contact->entity+0x30c,row0.data(),12) && read_self(contact->entity+0x300,npc_at.data(),12) &&
+                                        read_self(body->player+0x300,player_at.data(),12) && d2vr::attacker_behind(row0.data(),npc_at.data(),player_at.data());
+                                    owned_contact->stealth_strike=d2vr::stealth_strike(speed,behind,owned_contact->native_offer,vr_combat.tuning().thrust_speed);
+                                }
                                 if(owned_contact && d2vr::NativeInteractionAim::request_sword_contact(*owned_contact)) {
                                     sword_hit_gate.commit(contact->entity,now);++contact_gates[7];
-                                    if(owned_contact->native_offer) contact_attack_tick=now;
+                                    if(owned_contact->stealth_strike) contact_attack_tick=now;
                                     std::uint8_t f1{},f7{};read_self(contact->entity+0xd1,&f1,1);read_self(contact->entity+0xd7,&f7,1);
                                     combat_log("contact_hit",contact->entity,speed,(f1<<8)|f7);
                                 }
