@@ -43,6 +43,7 @@ extern "C" MH_STATUS WINAPI MH_DisableHook(LPVOID);
 #include "native_offered_choke.hpp"
 #include "native_talk_offer.hpp"
 #include "native_character_gaze.hpp"
+#include "sword_contact_policy.hpp"
 #include <vector>
 #include <string>
 #include <vector>
@@ -483,7 +484,7 @@ class NativeInteractionAim {
                     if(k==0) ++impact_played_;else if(k==1) ++impact_skipped_;else {++melee_faults_;impact_enabled_=false;break;}}
                 else impact_skipped_+=fx.size();
              } catch(...) {}
-             if(!contacts.empty() && melee_enabled_) try {
+             if((!contacts.empty() || stealth_hold_.pending()) && melee_enabled_) try {
                 static const bool verified=NativeMelee::verify(self->base_,self->read_);
                 for(const auto& contact:contacts) {
                     const auto now=GetTickCount64();const auto hand=sword_hand_.current(now);
@@ -494,6 +495,11 @@ class NativeInteractionAim {
                     const auto final_now=GetTickCount64();const auto final_hand=sword_hand_.current(final_now);
                     if(!final_hand || final_hand->epoch!=contact.pose_epoch || final_hand->epoch!=sword_pose_epoch_.load(std::memory_order_acquire) ||
                        final_now<contact.hit.tick || final_now-contact.hit.tick>100 || !melee_batch_current(melee_revision)) {++sword_contact_rejected_;continue;}
+                    // A guard the engine calls unaware is not hit: the native Slash may still make this the Assassination, or the
+                    // contact becomes the stealth kill below (sword_contact_policy.hpp). Anything else is the ordinary hit.
+                    if(contact.stealth_strike && stealth_enabled_.load(std::memory_order_relaxed) && NativeMelee::damageable(self->base_,self->read_,contact.hit.victim) &&
+                       NativeMelee::unaware(self->base_,self->read_,contact.hit.victim) &&
+                       stealth_hold_.hold(contact,contact.victim_spawn,final_now,contact.native_offer)) {++stealth_counts_[0];continue;}
                     NativeMelee::DamageResultObservation observation{};
                     const auto outcome=NativeMelee::apply(self->base_,self->read_,contact.equipment.sword,contact.hit,&observation);
                     ++sword_contact_invoked_;if(observation.returned_buffer)++sword_damage_results_;
@@ -503,6 +509,25 @@ class NativeInteractionAim {
                     if(outcome==0)++melee_applied_;
                     else if(outcome==1)++sword_contact_rejected_;
                     else {++melee_faults_;melee_enabled_=false;break;}
+                }
+                if(const auto* held=stealth_hold_.payload()) {
+                    const auto now=GetTickCount64();const auto& c=*held;
+                    const auto camera=native_player_camera(self->read_,self->base_,scope->camera.camera);
+                    const bool owned=verified && self->active_ && self->logic_()==2 && camera && camera->player==c.owner.player && sword_contact_owned(self->read_,c);
+                    const bool alive=owned && NativeMelee::damageable(self->base_,self->read_,c.hit.victim);
+                    const bool native=owned && (camera->authored_view() || native_player_state_active(self->read_,c.owner,native_state_assassination,native_state_assassination_vtable));
+                    const bool choking=nonlethal_grip_reserved_.load(std::memory_order_acquire) || (owned && native_player_state_active(self->read_,c.owner,native_state_choke,native_state_choke_vtable));
+                    const bool unaware=alive && NativeMelee::unaware(self->base_,self->read_,c.hit.victim);
+                    const auto sword=c.equipment.sword;const auto hit=c.hit;
+                    const auto act=stealth_hold_.service(now,unaware,alive,native,choking,owned);
+                    if(act==StealthAct::drop) ++stealth_counts_[native?1:4];
+                    else if(act==StealthAct::hit || act==StealthAct::kill) {
+                        auto strike=sword;if(act==StealthAct::kill) strike.unaware_amount=1000.f;
+                        NativeMelee::DamageResultObservation observation{};
+                        const auto outcome=NativeMelee::apply(self->base_,self->read_,strike,hit,&observation);
+                        ++stealth_counts_[act==StealthAct::kill?2:3];++sword_contact_invoked_;if(observation.returned_buffer)++sword_damage_results_;
+                        if(outcome==0)++melee_applied_;else if(outcome==1)++sword_contact_rejected_;else {++melee_faults_;melee_enabled_=false;}
+                    }
                 }
              } catch(...) {++sword_contact_rejected_;}}
             // Engine console line ("console" test command): appended on this game-thread scope; the engine runs it
@@ -611,6 +636,7 @@ public:
         output<<"{\"enqueued\":"<<sword_contact_enqueued_.load()<<",\"capture_rejected\":"<<sword_capture_rejected_.load()
             <<",\"queue_full\":"<<sword_queue_full_.load()<<",\"nonlethal_rejected\":"<<sword_nonlethal_rejected_.load()
             <<",\"epoch_rejected\":"<<sword_epoch_rejected_.load()<<",\"consumer_rejected\":"<<sword_contact_rejected_.load()
+            <<",\"stealth\":["<<stealth_counts_[0].load()<<','<<stealth_counts_[1].load()<<','<<stealth_counts_[2].load()<<','<<stealth_counts_[3].load()<<','<<stealth_counts_[4].load()<<']'
             <<",\"invoked\":"<<sword_contact_invoked_.load()<<",\"native_returned\":"<<sword_damage_results_.load()<<",\"last\":";
         if(!observation.valid)output<<"null";
         else {
@@ -637,6 +663,9 @@ public:
         if(contact.pose_epoch!=sword_pose_epoch_.load(std::memory_order_acquire)) {++sword_epoch_rejected_;return false;}
         sword_contacts_.push_back(contact);++sword_contact_enqueued_;return true;
     }
+    inline static StealthHold<OwnedSwordContact> stealth_hold_; // game thread only
+    inline static std::atomic<bool> stealth_enabled_{true};
+    inline static std::array<std::atomic<std::uint64_t>,5> stealth_counts_{}; // held, native took it, stealth kill, noticed (ordinary hit), dropped (dead/choke/owner lost)
     inline static std::atomic<std::uint64_t> melee_applied_{},melee_rejected_{},melee_faults_{};
     inline static std::array<std::atomic<std::uint64_t>,3> melee_why_{}; // rejected: code bytes differ, no sword/scope, victim not damageable (dead/unconscious/not NPC)
     inline static std::atomic<bool> melee_enabled_{true},impact_enabled_{true};inline static std::atomic<std::uint64_t> impact_played_{},impact_skipped_{};

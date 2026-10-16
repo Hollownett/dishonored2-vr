@@ -86,6 +86,8 @@ struct OwnedSwordContact {
     std::uint32_t victim_spawn{};
     std::uintptr_t pool{};
     std::uint64_t pose_epoch{};
+    bool stealth_strike{}; // deliberate, from behind, on the kill sensor's target (sword_contact_policy.hpp)
+    bool native_offer{}; // the native kill sensor targeted this victim when the blade touched him (render thread)
 };
 template<class Read> bool native_contact_victim(Read& read,const NativePlayerStateLease& owner,std::uintptr_t victim,std::uint32_t spawn) {
     if(!spawn || spawn==NativeMelee::invalid_id || (spawn>>16)>=0x3fff || victim==owner.player)return false;
@@ -110,5 +112,22 @@ template<class Read> bool sword_contact_current(Read& read,const OwnedSwordConta
     if(contact.pose_epoch!=pose_epoch)return false;
     const auto current=capture_sword_contact(read,contact.owner.base,contact.owner.machine,contact.hit,pose_epoch,now);
     return current && current->owner==contact.owner && current->equipment==contact.equipment && current->victim_spawn==contact.victim_spawn && current->pool==contact.pool;
+}
+// Player FSM state `index` (vtable `vtable`) of the leased machine is running (pool +0x10 + index*8, +0x20 active byte).
+template<class Read> bool native_player_state_active(Read& read,const NativePlayerStateLease& owner,unsigned index,std::uintptr_t vtable) {
+    using namespace rig;
+    const auto pool=value<std::uintptr_t>(read,owner.machine+0x90);if(!pool || !pointer(*pool))return false;
+    const auto state=value<std::uintptr_t>(read,*pool+0x10+index*8ull);
+    return state && typed(read,owner.base,*state,vtable) && value<std::uint32_t>(read,*state+8)==index &&
+        value<std::uintptr_t>(read,*state+0x10)==owner.machine && value<std::uint8_t>(read,*state+0x20)==1;
+}
+inline constexpr unsigned native_state_assassination=13,native_state_choke=41;
+inline constexpr std::uintptr_t native_state_assassination_vtable=0x1c83468,native_state_choke_vtable=0x1c77c18;
+// A held contact (older than the 100 ms capture window) still belongs to the same player, sword and victim.
+template<class Read> bool sword_contact_owned(Read& read,const OwnedSwordContact& contact) {
+    const auto owner=native_player_state_lease(read,contact.owner.base,contact.owner.machine);
+    if(!owner || !(*owner==contact.owner))return false;
+    const auto equipment=native_contact_equipment(read,*owner);
+    return equipment && *equipment==contact.equipment && native_contact_victim(read,*owner,contact.hit.victim,contact.victim_spawn);
 }
 }

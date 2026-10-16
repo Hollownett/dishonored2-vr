@@ -198,8 +198,15 @@ void stealth_dispatch_boundaries() {
     CHECK(spacing.now>=first_press+340 && spacing.decision.attacks.dispatched==2);
 }
 
+void contact_presses_attack() {
+    // blade touching the kill-sensor target without a readable arc: one attack press; nothing without the sensor target
+    Sim hit;hit.run(40);hit.f.kill=true;hit.f.contact_attack=true;hit.run(1);hit.f.contact_attack=false;hit.run(20);
+    CHECK(hit.swing==SwingKind::slash && hit.any_rt && hit.c.update(hit.f).attacks.recognized==1);
+    Sim blind;blind.run(40);blind.f.contact_attack=true;blind.run(21);CHECK(!blind.any_rt && blind.swing==SwingKind::none);
+}
+
 int main() {
-    explicit_block_swing();explicit_block_gates();
+    contact_presses_attack();explicit_block_swing();explicit_block_gates();
     stealth_timeout_and_resume();stealth_target_cancellation();stealth_deadline_and_lifecycle();stealth_dispatch_boundaries();
     { Sim s;s.run(40);CHECK(!s.any_rt && s.swing==SwingKind::none); }                    // idle
     { Sim s;s.f.equipped=false;s.run(20);s.run(10,{4,0,0});s.run(8);CHECK(!s.any_rt && s.swing==SwingKind::none); }

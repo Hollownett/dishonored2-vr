@@ -60,6 +60,7 @@ struct CombatFrame {
     bool explicit_block{};
     CombatTarget current_target{},remembered_target{};
     bool kill{},choke{},drop{};             // native sensors qualified this frame (TakedownState)
+    bool contact_attack{};                  // the blade touched the NPC the native kill sensor targets: press the attack once, swing or not
     bool ev_hit{},ev_block{},ev_kill{};     // optional one-frame game events for haptics
     std::uint64_t now_ms{};
 };
@@ -154,6 +155,12 @@ public:
                 prev_s_=rel_speed;
             }
             tip_=tip;hand_prev_=f.pos;prev_head_=f.head_pos;prev_fwd_=f.head_fwd;last_ms_=now;
+        }
+
+        // A contact on the sensor's own target presses the attack even when the arc was too small to read as a swing: the native Slash
+        // then arbitrates the Assassination before the contact's ordinary damage could alert him (headset v559: sometimes it never came).
+        if(kind==SwingKind::none && f.contact_attack && f.kill && now>=cool_until_ && pending_==Pending::none) {
+            kind=SwingKind::slash;in_seg_=false;armed_=false;cool_until_=now+static_cast<std::uint64_t>(t_.cooldown_ms);
         }
 
         // --- attack (RT) ---
