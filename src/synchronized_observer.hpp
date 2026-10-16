@@ -163,7 +163,10 @@ inline void write_synchronized(std::ostream& out,const SynchronizedConsumer& v,s
         out<<",\"grip_flags\":"<<v.raw.grip_flags[i]<<",\"aim_flags\":"<<v.raw.aim_flags[i]<<",\"grip_value\":"<<DiagnosticNumber{v.raw.grip_value[i]}
            <<",\"trigger_value\":"<<DiagnosticNumber{v.raw.trigger_value[i]}<<",\"world_grip\":";diagnostic_xf(out,v.solver.tracking.grip[i]);
         out<<",\"target_attachment\":";diagnostic_xf(out,v.solver.target_attachment[i]);out<<",\"grip_to_attachment\":";diagnostic_xf(out,v.solver.grip_to_attachment[i]);
-        out<<",\"solver_palm\":";diagnostic_xf(out,v.solver.palm[i]);out<<",\"solver_wrist\":";diagnostic_xf(out,v.solver.wrist[i]);
+        // Only once this hand's arm was exported for the current publication: otherwise palm/wrist are the previous solve's and pair
+        // with a newer world_grip (v558 run: 10-50 cm "jumps" that were one or two frames of locomotion, not the drawn hand).
+        out<<",\"solver_palm\":";if(v.solver.arm_valid[i])diagnostic_xf(out,v.solver.palm[i]);else out<<"null";
+        out<<",\"solver_wrist\":";if(v.solver.arm_valid[i])diagnostic_xf(out,v.solver.wrist[i]);else out<<"null";
         out<<",\"palm_residual_metres\":";if(v.consistent && v.solver.arm_valid[i])out<<DiagnosticNumber{v.solver.palm_residual[i]};else out<<"null";
         out<<",\"arm_gate\":"<<static_cast<unsigned>(v.solver.arm_gate[i])<<",\"owned\":"<<DiagnosticNumber{v.solver.owned[i+2]}<<'}';}
     out<<"],\"model\":"<<v.model<<",\"animation\":"<<v.animation<<",\"skeleton\":"<<v.skeleton<<",\"player\":"<<v.player
