@@ -9,13 +9,13 @@ int main() {
         for(auto& grip:grips) {
             WorldTrackedPose pose{{},{{{1,0,0},{0,1,0},{0,0,1}}}};
             assert(!grip.sample(pose,0,true,1,1000));
-            assert(grip.sample(pose,std::nextafter(.55f,0.f),true,1,1010));assert(!grip.pressed());
-            assert(grip.sample(pose,.55f,true,1,1020));assert(grip.pressed() && grip.bind(pose));
+            assert(grip.sample(pose,std::nextafter(.45f,0.f),true,1,1010));assert(!grip.pressed());
+            assert(grip.sample(pose,.45f,true,1,1020));assert(grip.pressed() && grip.bind(pose));
             pose.position.x=.02;assert(grip.sample(pose,.35f,true,1,1030));assert(grip.pressed());
             const auto retained=grip.motor(pose,true);assert(retained && !retained->release);
             pose.position.x=.04;assert(grip.sample(pose,std::nextafter(.35f,0.f),true,1,1040));assert(!grip.pressed());
             const auto released=grip.motor(pose,true);assert(released && released->release && released->linear.x>0 && !grip.held());
-            assert(grip.sample(pose,.55f,true,1,1050));assert(grip.bind(pose));
+            assert(grip.sample(pose,.45f,true,1,1050));assert(grip.bind(pose));
         }
     }
     WorldTrackedPose hand{{0,0,0},{{{1,0,0},{0,1,0},{0,0,1}}}},object=hand;object.position={.1,0,0};

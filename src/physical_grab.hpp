@@ -81,7 +81,7 @@ public:
             velocity_=velocity_*(1-weight)+grab_limit(displacement*(1/dt),12)*weight;
         }
         if(grip<.35f) {armed_=true;pressed_=false;}
-        else if(armed_ && grip>=.55f) pressed_=true;
+        else if(armed_ && grip>=.45f) pressed_=true;
         valid_sample_=true;tick_=tick;previous_=hand;return true;
     }
     // While the press waits for its owner (a native interactable's query, e.g. a corpse's carry, plus the obstruction check:

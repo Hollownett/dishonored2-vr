@@ -49,8 +49,8 @@ headset listening validation is still required. See [audio evidence and checks](
 | B held | Holster weapons (the game's own sheathe) |
 | Right stick down (flick) | Crouch / stand |
 | Sit or crouch down in real life | The character crouches; stand up to stand. The view keeps your real head height |
-| Grip alone | Use offered doors, keyholes, ammo, loot and levers, or the offered body carry. In the v548 test candidate, an actual native choke hint gives the right grip a nonlethal choke hold instead; being behind an NPC alone does not |
-| Full fist (grip + trigger) | Grab physically: a body by a limb, a bottle, a glass, an ashtray, any loose prop. The fingers wrap whatever the hand holds. Once held, the grip alone keeps it |
+| Grip alone (about 45% squeeze, v620 candidate) | Use offered doors, keyholes, ammo, loot and levers, or the offered body carry; it fires about 55 ms sooner when the trigger finger stays off the trigger and the game is asked for the target while you squeeze. In the v548 test candidate, an actual native choke hint gives the right grip a nonlethal choke hold instead; being behind an NPC alone does not |
+| Full fist (grip + trigger, grip about 45%) | Grab physically: a body by a limb, a bottle, a glass, an ashtray, any loose prop. The fingers wrap whatever the hand holds. Once held, the grip alone keeps it |
 | Right grip over your right shoulder | Draw the sword. It stays in your hand only while you keep squeezing (see *Weapons in your hands*) |
 | Left grip at your left hip | Draw the pistol or crossbow. It stays in your hand only while you keep squeezing |
 | Y on an offered Talk prompt (v553 test candidate) | Talk to that exact NPC or open the shop; the prompt shows Y. Grip no longer commits that Talk offer. In gameplay Y has no other action |

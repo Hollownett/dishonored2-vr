@@ -177,8 +177,8 @@ int main() {
             assert(!intent.update(std::nextafter(.45f,0.f),0,1000,true).use);
             assert(intent.kind()==d2vr::GripIntent::Kind::none);
             auto output=intent.update(.45f,0,1010,true);assert(!output.use && !output.fist);
-            output=intent.update(.45f,0,1109,true);assert(!output.use);
-            output=intent.update(.45f,0,1110,true);assert(output.use && output.use_started && !output.fist);
+            output=intent.update(.45f,0,1049,true);assert(!output.use && output.pending_use);
+            output=intent.update(.45f,0,1050,true);assert(output.use && output.use_started && !output.fist && !output.pending_use);
             output=intent.update(.35f,0,1120,true);assert(output.use && !output.use_started);
             output=intent.update(std::nextafter(.35f,0.f),0,1130,true);assert(!output.use);
             output=intent.update(.45f,std::nextafter(.55f,0.f),1140,true);assert(!output.fist);
@@ -193,10 +193,10 @@ int main() {
         reserved.update(.45f,0,1220,true);
         assert(reserved.update(.45f,0,1320,true).use_started);
     }
-    {   // GripIntent: grip alone = Use after 100 ms, grip + trigger = fist, trigger first is held back, taps survive
+    {   // GripIntent: grip alone = Use after 40 ms (trigger finger off the trigger; else 100 ms), grip + trigger = fist, trigger first is held back, taps survive
         using K=d2vr::GripIntent::Kind;
         d2vr::GripIntent a;auto o=a.update(1,0,1000,true);assert(!o.use && !o.fist && a.kind()==K::deciding);
-        o=a.update(1,0,1050,true);assert(!o.use);o=a.update(1,0,1100,true);assert(o.use && o.use_started && o.pass_trigger==false);
+        o=a.update(1,0,1030,true);assert(!o.use && o.pending_use);o=a.update(1,0,1040,true);assert(o.use && o.use_started && o.pass_trigger==false);
         o=a.update(1,1,1200,true);assert(o.use && !o.fist && !o.pass_trigger); // a trigger during a Use is not a fist or a cast
         o=a.update(0,1,1300,true);assert(!o.use && !o.pass_trigger && a.kind()==K::drain);o=a.update(0,0,1400,true);assert(a.kind()==K::none && o.pass_trigger);
         d2vr::GripIntent b;o=b.update(1,0,0,true);o=b.update(1,1,40,true);assert(o.fist && o.fist_started && !o.use && !o.pass_trigger);
@@ -211,6 +211,10 @@ int main() {
         o=l.update(1,1,300,true,100,true);assert(o.fist && o.fist_started && !o.use);
         d2vr::GripIntent m;o=m.update(1,0,0,true);o=m.update(1,0,100,true);o=m.update(1,1,300,true,100,false);assert(o.use && !o.fist);
         d2vr::GripIntent n;o=n.update(1,0,0,true,100,true);o=n.update(1,0,100,true,100,true);o=n.update(1,1,600,true,100,true);assert(o.use && !o.fist);
+        // A finger already on the trigger (>= .05) keeps the full 100 ms window; the quick commit never beats the window for a fist.
+        d2vr::GripIntent q;o=q.update(1,.1f,0,true);o=q.update(1,.1f,60,true);assert(!o.use && q.kind()==K::deciding);o=q.update(1,.1f,100,true);assert(o.use_started);
+        d2vr::GripIntent r;o=r.update(1,0,0,true);o=r.update(1,.04f,39,true);assert(!o.use);o=r.update(1,0,40,true);assert(o.use_started);
+        d2vr::GripIntent f;o=f.update(1,0,0,true);o=f.update(1,.6f,30,true);assert(o.fist && !o.use);
         d2vr::GripIntent w;o=w.update(1,1,0,false);assert(!o.fist && !o.use && o.pass_trigger);o=w.update(1,1,10,true);assert(!o.fist && w.kind()==K::drain); // weapon hand
     }
     {

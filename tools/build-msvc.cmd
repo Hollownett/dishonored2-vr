@@ -487,6 +487,8 @@ cl /nologo /std:c++17 /EHsc /W4 /WX /O2 /MT tests\controller_input_check.cpp /Fo
 if not "%errorlevel%"=="0" exit /b 1
 cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT tests\vr_controls_check.cpp /Fo:build\vr_controls_check.obj /Fe:build\vr_controls_check.exe
 if not "%errorlevel%"=="0" exit /b 1
+cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT tests\grip_latency_replay_check.cpp /Fo:build\grip_latency_replay_check.obj /Fe:build\grip_latency_replay_check.exe
+if not "%errorlevel%"=="0" exit /b 1
 cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT tests\play_controls_check.cpp /Fo:build\play_controls_check.obj /Fe:build\play_controls_check.exe
 if not "%errorlevel%"=="0" exit /b 1
 cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT tests\arm_body_check.cpp /Fo:build\arm_body_check.obj /Fe:build\arm_body_check.exe
@@ -603,6 +605,8 @@ if not "%errorlevel%"=="0" exit /b 1
 build\taa_constants_capture_check.exe
 if not "%errorlevel%"=="0" exit /b 1
 build\vr_controls_check.exe
+if not "%errorlevel%"=="0" exit /b 1
+build\grip_latency_replay_check.exe
 if not "%errorlevel%"=="0" exit /b 1
 build\controller_input_check.exe
 if not "%errorlevel%"=="0" exit /b 1

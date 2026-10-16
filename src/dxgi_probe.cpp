@@ -36,6 +36,8 @@
 #include "native_camera_trace.hpp"
 #include "native_gameplay_aim_trace.hpp"
 #include "native_gameplay_aim.hpp"
+#include "weapon_pose_stabilizer.hpp"
+#include <chrono>
 #include "native_turning.hpp"
 #include "native_menu.hpp"
 #include "native_pad_focus.hpp"
@@ -3965,6 +3967,11 @@ void prepare_head_view(void* view) noexcept {
                 auto left=d2vr::to_game_pose(d2vr::camera_relative_controller(
                     {{p.position.x,p.position.y,p.position.z},{p.orientation.x,p.orientation.y,p.orientation.z,p.orientation.w}},hand_centre,head_origin.position),head_origin,anchor,1.0);
                 barrel_aim(left);aim_offset(left);
+                {   // Very slight (<= 0.1 deg, 6 ms) micro-jitter filter on the one aim that shots, powers and the crosshair all read.
+                    static d2vr::WeaponPoseStabilizer aim_filter;
+                    const auto us=static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
+                    if(const auto steady=aim_filter.sample(left,{1,game_xr->pose_epoch(),game_xr->reference_epoch(),1,0},us,true)) left=*steady;
+                }
                 if(native_left_aim_requested) native_left_aim.publish(*body,left,game_xr->pose_epoch(),GetTickCount64(),true);
                 if(native_shot_aim_installed) native_shot_aim.publish(left,game_xr->pose_epoch(),GetTickCount64(),true);
                 else native_gameplay_aim_trace.publish(*body,left,game_xr->pose_epoch(),GetTickCount64(),true);
@@ -6524,7 +6531,11 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                     const auto gazing=[&](unsigned h) {return gaze_ray_side.load()==static_cast<int>(h) && controls_now<gaze_ray_until.load();};
                                     auto query_input=use_input;
                                     if(hip_draw_reserved)query_input[0]=1.f;
-                                    const auto claims=[&](unsigned h) {return (query_input[h]>.55f || gazing(h)) && !(physical_grab_requested && native_grab.holding(h)) &&
+                                    // A grip that is still deciding (alone so far) already takes its hand's query: the round trip overlaps the
+                                    // intent window instead of following it (headset traces: grip -> lock 94 ms, lock -> Use press 47 ms).
+                                    const std::array<bool,2> pending_claim{grip_intent_out[0].pending_use && !gun_owns && !hip_draw_reserved && !talk_targets[0],
+                                        grip_intent_out[1].pending_use && !sword_owns && !talk_targets[1] && !choke_route.consume_use};
+                                    const auto claims=[&](unsigned h) {return (query_input[h]>.55f || gazing(h) || pending_claim[h]) && !(physical_grab_requested && native_grab.holding(h)) &&
                                         controller_aim_requested;};
                                     std::array<bool,2> claimants{claims(0),claims(1)};
                                     const bool occupied=[]{std::lock_guard<std::mutex> hand_lock(hand_state_mutex);
