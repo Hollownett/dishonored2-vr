@@ -7,6 +7,7 @@
 #include <stdexcept>
 #include <future>
 #include <thread>
+#include <vector>
 
 namespace d2vr {
 struct NativeHeldObjectCheck {
@@ -270,6 +271,34 @@ int main() {
     {
         Fixture state;
         for(unsigned frame=0;frame<20;++frame) {state.target.pos[0]=1.f+frame*.01f;Held::publish(state.target);state.place();assert(state.driven_right());}
+    }
+    {   // locomotion between the publication and the bind tick: the target rides the master (the player) by exactly that motion
+        Fixture state;auto t=state.target;const std::array<float,3> then{1,1,1};const std::array<float,9> identity{1,0,0,0,1,0,0,0,1};
+        std::memcpy(t.master_pos,then.data(),12);std::memcpy(t.master_axis,identity.data(),36);t.master_valid=true;
+        Held::publish(t);put(master+0x300,std::array<float,3>{1.5f,1,1});state.place();
+        assert(output_position[0]==1.5f && output_position[1]==2.f && output_position[2]==3.f && state.driven_right());
+        assert((get<std::array<float,3>>(rf+0x3d4)==std::array<float,3>{0,1,2})); // the local bind is the published one
+        const std::array<float,9> yaw{0,1,0,-1,0,0,0,0,1};put(master+0x30c,yaw);put(master+0x300,then);Held::publish(t);state.place();
+        assert(std::abs(output_position[0])<1e-6f && std::abs(output_position[1]-1.f)<1e-6f && std::abs(output_position[2]-3.f)<1e-6f);
+        assert(output_axis[0]==0.f && output_axis[1]==1.f && output_axis[3]==-1.f);
+        std::printf("root carry: master moved 0.5 m -> target moved 0.5 m, local bind unchanged; master yawed 90 deg -> target turned with it\n");
+    }
+    {   // a RIGID_BODY-layer throwable (the tank) takes the DEBRIS layer for the hold and gets its own back at the end; a DEBRIS one (bottle) is left alone
+        Fixture state;auto reader=read_memory;
+        constexpr std::uintptr_t component=0x240000000,world=0x241000000,pool=0x242000000;constexpr std::uint32_t handle=0x1000002;
+        put(entity+0x268,r::List{held_components,2,2u<<8});memory.put(held_components+8,component);
+        memory.put(component,base_address+0x1b64b68);memory.put(component+0x10,entity);memory.put(component+0xf8,handle);
+        memory.put(game_address+0x60410,world);memory.put(world+0x28,pool);memory.put(world+0x30,std::uint32_t{3});
+        memory.put(pool+2*0xb0+0x6c,std::uint32_t{(0x20u<<5)|3u});
+        static std::vector<std::array<std::uint32_t,2>> written;written.clear();
+        Held::filter_seam_=[](std::uintptr_t game,std::uint32_t h,std::uint32_t f) {assert(game==game_address);written.push_back({h,f});return true;};
+        assert(Held::debris_layer(base_address,reader,entity) && Held::debris_layer(base_address,reader,entity));
+        assert(written.size()==1 && written[0][0]==handle && written[0][1]==((0x20u<<5)|4u));
+        assert(Held::restore_layer(base_address,reader) && written.size()==2 && written[1][1]==((0x20u<<5)|3u) && !Held::restore_layer(base_address,reader));
+        memory.put(pool+2*0xb0+0x6c,std::uint32_t{(0x20u<<5)|4u});
+        assert(!Held::debris_layer(base_address,reader,entity) && written.size()==2);
+        std::printf("held layer: tank filter 0x%x -> 0x%x for the hold, restored; bottle (DEBRIS) untouched\n",written[1][1],written[0][1]);
+        Held::filter_seam_=nullptr;
     }
     {
         Fixture state;d2vr::NativeHeldObjectCheck::near_exhaustion();Held::publish(state.target);

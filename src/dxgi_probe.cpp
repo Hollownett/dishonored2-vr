@@ -2549,11 +2549,9 @@ static void note_drawn_palms(const d2vr::rig::ArmTrackingFrame& hands,const d2vr
 static d2vr::WorldTrackedPose drawn_palm_frame(unsigned side,const d2vr::WorldTrackedPose& grip) {
     return drawn_palm_residual[side&1u].frame(grip,GetTickCount64());
 }
-// The frame a held object is seated in: the controller grip plus the build/held-offset knob (hand axes). Not the drawn palm: the arm
-// solver's palm departs from the grip by 10-50 cm and snaps back within a frame (headset v558, 10% of tracked frames jumped >5 cm),
-// and a carried tank seated on it jittered against the hand; a bottle held close, where the arm reaches, never showed it.
-static d2vr::WorldTrackedPose held_palm_frame(unsigned,const d2vr::WorldTrackedPose& grip) {
-    auto palm=grip;const auto& h=grip.basis;
+// The frame a held object is seated in: the drawn palm plus the build/held-offset knob (hand axes).
+static d2vr::WorldTrackedPose held_palm_frame(unsigned side,const d2vr::WorldTrackedPose& grip) {
+    auto palm=drawn_palm_frame(side,grip);const auto& h=grip.basis;
     palm.position=palm.position+h[0]*held_offset[0]+h[1]*held_offset[1]+h[2]*held_offset[2];
     return palm;
 }
@@ -2884,6 +2882,9 @@ static void publish_held_object(unsigned side,const d2vr::WorldTrackedPose& grip
     published=origin;published_pose={origin,{X,Y,Z}};held_snap.published=origin;held_snap.centre=centre;
     d2vr::NativeHeldObject::Target t{*rf,*e,{float(origin.x),float(origin.y),float(origin.z)},
         {float(X.x),float(X.y),float(X.z),float(Y.x),float(Y.y),float(Y.z),float(Z.x),float(Z.y),float(Z.z)},GetTickCount64()};
+    if(const auto m=value<std::uintptr_t>(read,*rf+0x3c8);m && pointer(*m) && read_self(*m+0x300,t.master_pos,12) && read_self(*m+0x30c,t.master_axis,36)) {
+        t.master_valid=true;for(float f:t.master_pos) t.master_valid=t.master_valid && std::isfinite(f);for(float f:t.master_axis) t.master_valid=t.master_valid && std::isfinite(f);
+    }
     std::optional<d2vr::rig::NativeCarrySnapshot> carry;
     {std::lock_guard<std::mutex> lock(hand_state_mutex);carry=hand_carry_snapshot;}
     auto& placement=d2vr::NativeHeldPlacement::process_owner();

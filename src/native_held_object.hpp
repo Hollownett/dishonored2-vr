@@ -26,6 +26,8 @@
 #include <cstdint>
 #include <cstring>
 #include <limits>
+#include <optional>
+#include <utility>
 
 namespace d2vr {
 class NativeHeldObject {
@@ -40,7 +42,11 @@ public:
     inline static constexpr std::array<unsigned char,11> arm_show_code{0x40,0x53,0x48,0x83,0xec,0x20,0x8b,0x09,0x0f,0xb6,0xda};
     // World target of the held object's origin (game metres, Z up) and its axis rows (idMat3, as entity+0x30c).
     struct Target {std::uintptr_t rf{},entity{};float pos[3]{},axis[9]{};std::uint64_t tick{};
-        std::uint64_t placement_serial{},pose_epoch{};unsigned source_side{2};};
+        std::uint64_t placement_serial{},pose_epoch{};unsigned source_side{2};
+        // The master's (player entity) origin/axis rows when the target was published: the bind tick re-bases the target on the
+        // master's pose then, so locomotion and turns between the two (16-31 ms, headset v560/v561 receipts) do not trail it
+        // behind the hand, which the arm upload already carries (full_body_driver.hpp anchored).
+        float master_pos[3]{},master_axis[9]{};bool master_valid{};};
     using BindObserver=void (*)(unsigned,std::uintptr_t,int,std::uintptr_t,const float*,const float*,const float*,const float*,float) noexcept;
     inline static std::atomic<BindObserver> bind_observer{};
     static bool diagnostic_target(Target& out) noexcept {
@@ -62,6 +68,7 @@ public:
         } __finally {ReleaseSRWLockExclusive(&publication_lock_);}
     }
     static void clear() noexcept {
+        layer_restore_.store(true,std::memory_order_release);
         NativeHeldPlacement::process_owner().clear();
         AcquireSRWLockExclusive(&publication_lock_);
         __try {
@@ -129,9 +136,36 @@ public:
         if(!verified || !entity) return false;
         const auto game=rig::value<std::uintptr_t>(read,base+0x39a5290);const auto id=rig::value<std::uint32_t>(read,entity+0xa8);
         if(!game || !id || *id==0x3fff0010 || (*id>>16)>=0x3fff || rig::value<std::uintptr_t>(read,*game+0x3130b0+(*id>>16)*8ull)!=entity) return false;
+        debris_layer(base,read,entity);
         const auto scale=rig::value<float>(read,entity+0xc8);if(!scale || *scale==0.f) return true;
         __try {reinterpret_cast<void (__fastcall*)(std::uintptr_t,float)>(base+render_scale_rva)(entity,0.f);} __except(EXCEPTION_EXECUTE_HANDLER) {return false;}
         ++world_renders;return true;
+    }
+    // Game thread. Natively the hold keeps the object 1.05 m ahead of the eye; in the hand it sits by the player's capsule, and a throwable
+    // on the RIGID_BODY layer (whale-oil tank: its decl inherits throwable_small's all-false block flags but overrides the layer; bottles
+    // stay DEBRIS) collides with it there. For the hold it takes the DEBRIS layer, written the way 808310 (m_collideWithSword) writes
+    // the body's filter word (pool record +0x6c, layer in the low 5 bits): 97600(game+0x60280, handle, filter, 1, 8a7820(game)).
+    // Layers: the enum table 0x19f0c60 counts RIGID_BODY 3, DEBRIS 4, MOVER 5 (doors, live), PLAYER 6.
+    inline static constexpr std::uintptr_t filter_rva=0x97600,physics_busy_rva=0x8a7820;
+    inline static constexpr std::array<unsigned char,13> filter_code{0x48,0x83,0xec,0x48,0x80,0x7c,0x24,0x70,0x00,0x41,0x0f,0xb6,0xc1};
+    inline static constexpr std::array<unsigned char,9> busy_code{0x80,0xb9,0x21,0x71,0x33,0x00,0x00,0x75,0x1c};
+    inline static constexpr std::uint32_t layer_rigid_body=3,layer_debris=4;
+    inline static bool (*filter_seam_)(std::uintptr_t,std::uint32_t,std::uint32_t){}; // checks only: stands in for the engine call
+    inline static std::atomic<std::uint64_t> layers_swapped{},layers_restored{};
+    inline static std::atomic<bool> layer_restore_{};
+    template<class Read> static bool debris_layer(std::uintptr_t base,Read& read,std::uintptr_t entity) {
+        if(layer_entity_ && layer_entity_!=entity) restore_layer(base,read);
+        if(layer_entity_==entity) return true;
+        const auto body=throwable_body(base,read,entity);
+        if(!body || (body->second&0x1f)!=layer_rigid_body || !set_filter(base,read,body->first,(body->second&~0x1fu)|layer_debris)) return false;
+        layer_entity_=entity;layer_handle_=body->first;layer_filter_=body->second;++layers_swapped;return true;
+    }
+    // Game thread: the hold ended (clear() asks); the body gets its own layer back while it is still the same body.
+    template<class Read> static bool restore_layer(std::uintptr_t base,Read& read) {
+        if(!layer_entity_) return false;
+        const auto body=throwable_body(base,read,layer_entity_);
+        const bool ok=body && body->first==layer_handle_ && set_filter(base,read,layer_handle_,layer_filter_);
+        layer_entity_=0;if(ok) ++layers_restored;return ok;
     }
     // Render/any thread: is this arm entity currently hidden by the engine? (bit0 left, bit1 right)
     template<class Read> static unsigned hidden_arms(std::uintptr_t base,Read& read,std::uintptr_t body) {
@@ -165,6 +199,38 @@ private:
     inline static Target data_{};
     inline static std::atomic<std::uintptr_t> rf_{},throw_entity_{};inline static std::atomic<std::uint64_t> throw_tick_{};
     inline static float throw_v_[3]{};
+    inline static std::uintptr_t layer_entity_{};inline static std::uint32_t layer_handle_{},layer_filter_{}; // game thread
+    // The throwable rigid body of a held entity: its physics handle and the filter word of its pool record.
+    template<class Read> static std::optional<std::pair<std::uint32_t,std::uint32_t>> throwable_body(std::uintptr_t base,Read& read,std::uintptr_t entity) {
+        using namespace rig;
+        const auto game=value<std::uintptr_t>(read,base+0x39a5290);const auto entries=entity?list(read,entity+0x268,256):std::nullopt;
+        if(!game || !pointer(*game) || !entries) return {};
+        std::uintptr_t component{};
+        for(unsigned i=0;i<entries->packed_count;++i) {
+            const auto at=value<std::uintptr_t>(read,entries->data+i*8);
+            if(at && (typed(read,base,*at,0x1c745c8) || typed(read,base,*at,0x1b64b68))) {if(component) return {};component=*at;}
+        }
+        const auto handle=component?value<std::uint32_t>(read,component+0xf8):std::nullopt;const auto world=value<std::uintptr_t>(read,*game+0x60410);
+        if(!handle || !*handle || !world || !pointer(*world) || value<std::uintptr_t>(read,component+0x10)!=entity) return {};
+        const auto pool=value<std::uintptr_t>(read,*world+0x28);const auto count=value<std::uint32_t>(read,*world+0x30);const auto index=*handle&0xffffff;
+        if(!pool || !pointer(*pool) || !count || *count>0x100000 || index==0xffffff || index>=*count) return {};
+        const auto filter=value<std::uint32_t>(read,*pool+index*0xb0+0x6c);if(!filter) return {};
+        return std::pair<std::uint32_t,std::uint32_t>{*handle,*filter};
+    }
+    template<class Read> static bool set_filter(std::uintptr_t base,Read& read,std::uint32_t handle,std::uint32_t filter) {
+        const auto game=rig::value<std::uintptr_t>(read,base+0x39a5290);if(!game || !rig::pointer(*game)) return false;
+        if(filter_seam_) return filter_seam_(*game,handle,filter);
+        static const bool verified=code(base+filter_rva,filter_code) && code(base+physics_busy_rva,busy_code);
+        if(!verified) return false;
+        return call_filter(base,*game,handle,filter);
+    }
+    static bool call_filter(std::uintptr_t base,std::uintptr_t game,std::uint32_t handle,std::uint32_t filter) noexcept {
+        __try {
+            const char busy=reinterpret_cast<char (__fastcall*)(std::uintptr_t)>(base+physics_busy_rva)(game);
+            reinterpret_cast<void (__fastcall*)(std::uintptr_t,std::uint32_t,std::uint32_t,char,char)>(base+filter_rva)(game+0x60280,handle,filter,1,busy);
+            return true;
+        } __except(EXCEPTION_EXECUTE_HANDLER) {return false;}
+    }
 
     template<std::size_t N> static bool code(std::uintptr_t at,const std::array<unsigned char,N>& expect) noexcept {
         std::array<unsigned char,N> got{};SIZE_T n{};
@@ -219,12 +285,14 @@ private:
                 t.source_side,t.entity,t.rf,t.pose_epoch,GetTickCount64());
         } __except(EXCEPTION_EXECUTE_HANDLER) {}
     }
-    static unsigned commit(const Target& t,std::uint64_t revision,float* pos,float* axis,float* lin,float* ang,float dt) {
+    static unsigned commit(const Target& published,std::uint64_t revision,float* pos,float* axis,float* lin,float* ang,float dt) {
         AcquireSRWLockExclusive(&publication_lock_);
         __try {
-            if(publication_exhausted_ || revision!=publication_revision_ || !t.rf ||
-               rf_.load(std::memory_order_acquire)!=t.rf || GetTickCount64()-t.tick>150)return 0;
-            if(*reinterpret_cast<const std::uintptr_t*>(t.rf+0x10)!=t.entity)return 0;
+            if(publication_exhausted_ || revision!=publication_revision_ || !published.rf ||
+               rf_.load(std::memory_order_acquire)!=published.rf || GetTickCount64()-published.tick>150)return 0;
+            if(*reinterpret_cast<const std::uintptr_t*>(published.rf+0x10)!=published.entity)return 0;
+            Target t=published;
+            if(t.master_valid) if(const auto m=*reinterpret_cast<const std::uintptr_t*>(t.rf+0x3c8)) carry(t,m);
             float cp[3],ca[9];std::memcpy(cp,reinterpret_cast<const void*>(t.entity+0x300),12);std::memcpy(ca,reinterpret_cast<const void*>(t.entity+0x30c),36);
             std::memcpy(pos,t.pos,12);std::memcpy(axis,t.axis,36);
             bool anchored_here{};
@@ -240,6 +308,19 @@ private:
             ++placed;
             return anchored_here?2u:1u;
         } __finally {ReleaseSRWLockExclusive(&publication_lock_);}
+    }
+    // Move the target by the master's motion since publication: local = inverse(master then) x target, target = master now x local.
+    static void carry(Target& t,std::uintptr_t m) {
+        float mo[3],ma[9],off[3],l[9];std::memcpy(mo,reinterpret_cast<const void*>(m+0x300),12);std::memcpy(ma,reinterpret_cast<const void*>(m+0x30c),36);
+        const auto& po=t.master_pos;const auto& pa=t.master_axis;
+        for(unsigned i=0;i<3;++i) {
+            off[i]=(t.pos[0]-po[0])*pa[i*3]+(t.pos[1]-po[1])*pa[i*3+1]+(t.pos[2]-po[2])*pa[i*3+2];
+            for(unsigned j=0;j<3;++j) l[i*3+j]=t.axis[i*3]*pa[j*3]+t.axis[i*3+1]*pa[j*3+1]+t.axis[i*3+2]*pa[j*3+2];
+        }
+        for(unsigned i=0;i<3;++i) {
+            t.pos[i]=mo[i]+off[0]*ma[i]+off[1]*ma[3+i]+off[2]*ma[6+i];
+            for(unsigned j=0;j<3;++j) t.axis[i*3+j]=l[i*3]*ma[j]+l[i*3+1]*ma[3+j]+l[i*3+2]*ma[6+j];
+        }
     }
     // The drawn model follows the bind, not the physics body: HoldObject binds to the player's camera joint ("camera_tag"),
     // pinning the object by the eye. Rebind to the master itself (joint -1: origin = master+0x300 + offset x master axis rows,
