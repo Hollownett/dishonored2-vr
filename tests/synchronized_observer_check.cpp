@@ -147,6 +147,10 @@ int main() {
         assert(text.find(kind?"\"valid\":true,\"reached\":true":"\"valid\":false,\"reached\":false",raw_start)!=std::string::npos);
         first->consistent=false;std::ostringstream rejected;write_synchronized(rejected,*first,123,0);
         assert(rejected.str().find("\"palm_residual_metres\":null")!=std::string::npos);first->consistent=true;
+        assert(text.find("\"solver_palm\":null")==std::string::npos);
+        first->solver.arm_valid[1]=false;std::ostringstream stale;write_synchronized(stale,*first,123,0); // the right arm not yet exported for this publication
+        assert(stale.str().find("\"solver_palm\":null,\"solver_wrist\":null")!=std::string::npos && stale.str().find("\"solver_palm\":{")!=std::string::npos);
+        first->solver.arm_valid[1]=true;
     }
     first->anatomical_shadow.admission_epoch=91;first->anatomical_shadow.revision=92;
     first->anatomical_shadow.tracking_revision=93;first->anatomical_shadow.frame=94;
