@@ -564,6 +564,7 @@ private:
     bool dragged_[2]{};
     // Stable item-hold local (attachment relative to wrist): follows the native local only once it has been steady.
     Vec3 palm_attach_[2]{};
+    Vec3 fist_parent_[2]{}; // the fist centre (hand_bind.hpp's interior palm centre) in the attachment's parent frame, bind units
     // Fingers: [side][thumb,index,medium,ring,pinky][01..04]; axes are in each joint's local frame.
     int finger_[2][5][4]{};Vec3 finger_axis_[2][5][4]{};
 
@@ -575,6 +576,8 @@ private:
         const auto at=[&](int j) {return a.bind[j].p;};
         const Vec3 across=at(finger_[i][2][1]);
         palm_attach_[i]=unit(rotated(conj(a.bind[attach_[i]].q),palm));
+        {Vec3 knuckles{};for(int f=1;f<5;++f) knuckles=knuckles+at(finger_[i][f][1])*.25;
+         const auto& parent=a.bind[a.parent[attach_[i]]];fist_parent_[i]=rotated(conj(parent.q),(at(wrist_[i])+knuckles)*.5-parent.p);}
         for(int f=0;f<5;++f) for(int k=0;k<4;++k) {
             const int j=finger_[i][f][k];if(j<0) continue;
             int child=-1;for(size_t c=0;c<a.parent.size();++c) if(a.parent[c]==j && a.names[c].find("helper")==std::string::npos) {child=static_cast<int>(c);break;}
@@ -862,7 +865,10 @@ private:
         const auto hand_local=[&](int j) {
             if(j==attach_[i] && native_socket) {
                 auto h=state.hold;
-                if(in.reverse_grip[i]) h.q=mul(h.q,axis_angle(palm_attach_[i],kPi));
+                if(in.reverse_grip[i]) { // half a turn about the palm normal through the fist centre: the same point of the handle stays in the fist
+                    const auto n=palm_attach_[i],c=rotated(conj(h.q),fist_parent_[i]*scale_-h.p),across=c-n*dot(c,n);
+                    h.p=h.p+rotated(h.q,across*2.);h.q=mul(h.q,axis_angle(n,kPi));
+                }
                 return h;
             }
             if(procedural) return finger_local(i,j,in.grip[i],in.trigger[i],state,in.has_finger[i]?in.finger_turn[i]:nullptr,in.has_finger[i] && in.has_finger_axis[i]?in.finger_axis[i]:nullptr);
