@@ -40,7 +40,11 @@ public:
     inline static constexpr std::array<unsigned char,11> arm_show_code{0x40,0x53,0x48,0x83,0xec,0x20,0x8b,0x09,0x0f,0xb6,0xda};
     // World target of the held object's origin (game metres, Z up) and its axis rows (idMat3, as entity+0x30c).
     struct Target {std::uintptr_t rf{},entity{};float pos[3]{},axis[9]{};std::uint64_t tick{};
-        std::uint64_t placement_serial{},pose_epoch{};unsigned source_side{2};};
+        std::uint64_t placement_serial{},pose_epoch{};unsigned source_side{2};
+        // The master's (player entity) origin/axis rows when the target was published: the bind tick re-bases the target on the
+        // master's pose then, so locomotion and turns between the two (16-31 ms, headset v560/v561 receipts) do not trail it
+        // behind the hand, which the arm upload already carries (full_body_driver.hpp anchored).
+        float master_pos[3]{},master_axis[9]{};bool master_valid{};};
     using BindObserver=void (*)(unsigned,std::uintptr_t,int,std::uintptr_t,const float*,const float*,const float*,const float*,float) noexcept;
     inline static std::atomic<BindObserver> bind_observer{};
     static bool diagnostic_target(Target& out) noexcept {
@@ -219,12 +223,14 @@ private:
                 t.source_side,t.entity,t.rf,t.pose_epoch,GetTickCount64());
         } __except(EXCEPTION_EXECUTE_HANDLER) {}
     }
-    static unsigned commit(const Target& t,std::uint64_t revision,float* pos,float* axis,float* lin,float* ang,float dt) {
+    static unsigned commit(const Target& published,std::uint64_t revision,float* pos,float* axis,float* lin,float* ang,float dt) {
         AcquireSRWLockExclusive(&publication_lock_);
         __try {
-            if(publication_exhausted_ || revision!=publication_revision_ || !t.rf ||
-               rf_.load(std::memory_order_acquire)!=t.rf || GetTickCount64()-t.tick>150)return 0;
-            if(*reinterpret_cast<const std::uintptr_t*>(t.rf+0x10)!=t.entity)return 0;
+            if(publication_exhausted_ || revision!=publication_revision_ || !published.rf ||
+               rf_.load(std::memory_order_acquire)!=published.rf || GetTickCount64()-published.tick>150)return 0;
+            if(*reinterpret_cast<const std::uintptr_t*>(published.rf+0x10)!=published.entity)return 0;
+            Target t=published;
+            if(t.master_valid) if(const auto m=*reinterpret_cast<const std::uintptr_t*>(t.rf+0x3c8)) carry(t,m);
             float cp[3],ca[9];std::memcpy(cp,reinterpret_cast<const void*>(t.entity+0x300),12);std::memcpy(ca,reinterpret_cast<const void*>(t.entity+0x30c),36);
             std::memcpy(pos,t.pos,12);std::memcpy(axis,t.axis,36);
             bool anchored_here{};
@@ -240,6 +246,19 @@ private:
             ++placed;
             return anchored_here?2u:1u;
         } __finally {ReleaseSRWLockExclusive(&publication_lock_);}
+    }
+    // Move the target by the master's motion since publication: local = inverse(master then) x target, target = master now x local.
+    static void carry(Target& t,std::uintptr_t m) {
+        float mo[3],ma[9],off[3],l[9];std::memcpy(mo,reinterpret_cast<const void*>(m+0x300),12);std::memcpy(ma,reinterpret_cast<const void*>(m+0x30c),36);
+        const auto& po=t.master_pos;const auto& pa=t.master_axis;
+        for(unsigned i=0;i<3;++i) {
+            off[i]=(t.pos[0]-po[0])*pa[i*3]+(t.pos[1]-po[1])*pa[i*3+1]+(t.pos[2]-po[2])*pa[i*3+2];
+            for(unsigned j=0;j<3;++j) l[i*3+j]=t.axis[i*3]*pa[j*3]+t.axis[i*3+1]*pa[j*3+1]+t.axis[i*3+2]*pa[j*3+2];
+        }
+        for(unsigned i=0;i<3;++i) {
+            t.pos[i]=mo[i]+off[0]*ma[i]+off[1]*ma[3+i]+off[2]*ma[6+i];
+            for(unsigned j=0;j<3;++j) t.axis[i*3+j]=l[i*3]*ma[j]+l[i*3+1]*ma[3+j]+l[i*3+2]*ma[6+j];
+        }
     }
     // The drawn model follows the bind, not the physics body: HoldObject binds to the player's camera joint ("camera_tag"),
     // pinning the object by the eye. Rebind to the master itself (joint -1: origin = master+0x300 + offset x master axis rows,

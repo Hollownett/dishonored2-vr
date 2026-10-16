@@ -271,6 +271,17 @@ int main() {
         Fixture state;
         for(unsigned frame=0;frame<20;++frame) {state.target.pos[0]=1.f+frame*.01f;Held::publish(state.target);state.place();assert(state.driven_right());}
     }
+    {   // locomotion between the publication and the bind tick: the target rides the master (the player) by exactly that motion
+        Fixture state;auto t=state.target;const std::array<float,3> then{1,1,1};const std::array<float,9> identity{1,0,0,0,1,0,0,0,1};
+        std::memcpy(t.master_pos,then.data(),12);std::memcpy(t.master_axis,identity.data(),36);t.master_valid=true;
+        Held::publish(t);put(master+0x300,std::array<float,3>{1.5f,1,1});state.place();
+        assert(output_position[0]==1.5f && output_position[1]==2.f && output_position[2]==3.f && state.driven_right());
+        assert((get<std::array<float,3>>(rf+0x3d4)==std::array<float,3>{0,1,2})); // the local bind is the published one
+        const std::array<float,9> yaw{0,1,0,-1,0,0,0,0,1};put(master+0x30c,yaw);put(master+0x300,then);Held::publish(t);state.place();
+        assert(std::abs(output_position[0])<1e-6f && std::abs(output_position[1]-1.f)<1e-6f && std::abs(output_position[2]-3.f)<1e-6f);
+        assert(output_axis[0]==0.f && output_axis[1]==1.f && output_axis[3]==-1.f);
+        std::printf("root carry: master moved 0.5 m -> target moved 0.5 m, local bind unchanged; master yawed 90 deg -> target turned with it\n");
+    }
     {
         Fixture state;d2vr::NativeHeldObjectCheck::near_exhaustion();Held::publish(state.target);
         Held::Target captured{};std::uint64_t revision{};assert(d2vr::NativeHeldObjectCheck::snapshot(captured,revision));
