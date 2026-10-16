@@ -181,6 +181,7 @@ been accepted. See [the verification report](feedback-2026-10-10.md).
 - `no-vr-glyphs`: keep the Xbox button pictures in prompts instead of the Quest control labels.
 - `slash-speed` containing 1-2 (default 1.7): play rate of the game's own sword attack. `no-slash-speed`: the game's speed.
 - `no-takedown-range`: the game's choke takedown range (VR default: distance, height and angle x1.5).
+- `no-stealth-contact`: a sword contact on a guard the engine calls unaware is no longer held for the native Assassination / stealth kill (it is the ordinary hit again).
 - `gun-shape` containing `up back length radius` in metres (pistol default `0.06 0.06 0.36 0.035`): collision shape of the left-hand weapon.
 - `no-contact-damage`: sword damage only from the game's own attack animation. `no-impact-fx`: no surface sparks/sound from the weapons. `no-weapon-collision`: weapons pass through walls.
 - `hud-census`, `marker-probe`: diagnostics only, they write CSV logs to the output folder.
