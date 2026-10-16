@@ -186,7 +186,8 @@ print('PASS full-hand production routing guard; source-only, not native executio
 
 hip_claim = section(source, 'auto query_input=use_input;', 'std::array<bool,2> claimants')
 assert 'if(hip_draw_reserved)query_input[0]=1.f;' in hip_claim
-assert '(query_input[h]>.55f || gazing(h))' in hip_claim
+assert '(query_input[h]>.55f || gazing(h) || pending_claim[h])' in hip_claim
+assert 'grip_intent_out[0].pending_use && !gun_owns && !hip_draw_reserved && !talk_targets[0]' in hip_claim
 assert '!(physical_grab_requested && native_grab.holding(h))' in hip_claim
 assert 'controller_aim_requested' in hip_claim
 assert 'gun_owns || hip_draw_reserved || talk_targets[0]' in ordinary
