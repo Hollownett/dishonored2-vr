@@ -37,9 +37,12 @@ DIAGNOSTICS = (
     'avatar-fit-events.csv', 'native-arm-upload.csv', 'native-arm-palettes.bin',
     'native-grab-acquisition.csv', 'native-gameplay-aim.csv', 'native-left-aim.csv',
     'probe-launch-config.json', 'stereo-geometry.json',
-    'synchronized-diagnostics.jsonl', 'native-grab-decisions.jsonl',
+    'synchronized-diagnostics.jsonl', 'native-grab-decisions.jsonl', 'native-combat.csv',
+    'render-perf-cpu.csv', 'render-perf-gpu.csv',
+    'left-weapon-bind-receipts.jsonl', 'left-weapon-bind-summary.json',
+    'native-assassination-receipts.jsonl',
 )
-CONFIGS = ('dxgi-probe.cfg', 'vr-settings.cfg', 'full-body', 'fsr4')
+CONFIGS = ('dxgi-probe.cfg', 'vr-settings.cfg', 'full-body', 'fsr4', 'render-perf', 'native-gpu-timing', 'fsr4-compute-timing', 'assassination-receipts')
 
 
 def utc() -> str:
@@ -232,8 +235,8 @@ class Recorder:
         self.next_projection = 0.0
         self.pending: tuple[str, float] | None = None
         self.pending_timeout_reported = False
-        self.rotation_signature = None
-        self.rotations = 0
+        self.rotation_signatures = {}
+        self.rotations = {}
         self.manifest = dict(schema_version=1, pid=pid, game_image=self.process.image,
                              loaded_identity=self.identity, candidate_manifest=str(self.candidate.manifest_path), started_utc=utc(), state='recording',
                              requested_seconds=seconds, projection_interval_seconds=projection_interval,
@@ -259,7 +262,7 @@ class Recorder:
     def save_manifest(self):
         self.manifest.update(samples=self.samples, archive_bytes=self.archive_bytes,
                              capture_raw_bytes=self.capture_bytes, status_bytes=self.status_bytes,
-                             capture_attempts=self.capture_attempts,
+                             capture_attempts=self.capture_attempts, rotation_counts=dict(self.rotations),
                              pending_capture_id=self.pending[0] if self.pending else None,
                              updated_utc=utc())
         temp = self.output / '.manifest.tmp'
@@ -301,18 +304,25 @@ class Recorder:
             self.copy_file(ROOT / 'build' / filename, self.output / name / 'build' / filename)
 
     def preserve_rotation(self):
-        path = ARTIFACTS / 'xr-frame-timing-previous.csv'
-        try:
-            stat = path.stat()
-            with path.open('rb') as stream:
-                prefix = stream.read(4096)
-            signature = (stat.st_size, stat.st_mtime_ns, hashlib.sha256(prefix).hexdigest())
-            if signature != self.rotation_signature:
-                self.rotation_signature = signature
-                self.rotations += 1
-                self.copy_file(path, self.output / 'timing-rotations' / f'{self.rotations:04d}.csv')
-        except FileNotFoundError:
-            pass
+        for filename, folder in [('xr-frame-timing-previous.csv', 'timing-rotations'),
+                                 ('present-boundaries-previous.csv', 'boundary-rotations')]:
+            path = ARTIFACTS / filename
+            try:
+                stat = path.stat()
+                with path.open('rb') as stream:
+                    prefix = stream.read(4096)
+                signature = (stat.st_size, stat.st_mtime_ns, hashlib.sha256(prefix).hexdigest())
+                if signature != self.rotation_signatures.get(filename):
+                    counter = self.rotations.get(filename, 0) + 1
+                    destination = self.output / folder / f'{counter:04d}.csv'
+                    while destination.exists():
+                        counter += 1
+                        destination = self.output / folder / f'{counter:04d}.csv'
+                    if self.copy_file(path, destination):
+                        self.rotation_signatures[filename] = signature
+                        self.rotations[filename] = counter
+            except FileNotFoundError:
+                pass
 
     def projections(self, status: dict | None, elapsed: float):
         if self.pending:

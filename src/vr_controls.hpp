@@ -193,7 +193,7 @@ public:
     // An unready hand's fresh press waits, consumed, for its locked query and
     // 60 ms settling time. After 250 ms it falls back to native input.
     Result update(const std::array<float,2>& trigger,int active_hand,bool target_valid,bool wheel_open,bool allowed,
-            std::uint64_t now_ms=0,bool query_ready=true) noexcept {
+            std::uint64_t now_ms=0,bool query_ready=true,bool wait_for_target=false) noexcept {
         Result out{};
         for(unsigned side=0;side<2;++side) {
             const float value=trigger[side];
@@ -203,14 +203,14 @@ public:
                     down_[side]=true;since_[side]=now_ms;
                     role_[side]=wheel_open?Role::wheel
                         :(mine && query_ready && target_valid && allowed?Role::interact
-                        :((!mine || !query_ready) && allowed && now_ms?Role::pending:Role::native));
+                        :((!mine || !query_ready || wait_for_target) && allowed && now_ms?Role::pending:Role::native));
                 }
             } else if(value<=.35f) {down_[side]=false;role_[side]=Role::none;}
             if(role_[side]==Role::pending) {
                 const auto waited=now_ms>=since_[side]?now_ms-since_[side]:0;
                 if(!allowed) role_[side]=Role::drain;
-                else if(mine && query_ready && waited>=60) role_[side]=target_valid?Role::interact:Role::native;
-                else if(waited>=250) role_[side]=Role::native;
+                else if(mine && query_ready && waited>=60 && (target_valid || !wait_for_target)) role_[side]=target_valid?Role::interact:Role::native;
+                else if(waited>=250 && !wait_for_target) role_[side]=Role::native;
             }
             if(role_[side]==Role::interact && !allowed) role_[side]=Role::drain;
             out.interact|=role_[side]==Role::interact;
@@ -220,6 +220,105 @@ public:
         return out;
     }
     void reset() noexcept {role_={Role::drain,Role::drain};down_={true,true};}
+};
+// One free hand, two intents (user, headset 2026-10-14): the grip alone does what the game proposes (Use: doors, keyholes,
+// loot, talk, carry, choke); a full fist (grip + trigger) grabs physically (props, bottles, ashtrays, corpses, a yank). A grip
+// press waits `window` ms for the trigger; a trigger pulled first waits as long for the grip and is held back meanwhile, so a
+// fist never casts or fires. The decision lasts until both are let go. A lone tap shorter than the window still happens: a grip
+// tap as a 250 ms Use, a trigger tap as a 60 ms pull. A hand holding a weapon (free=false) passes its trigger untouched.
+inline bool released_gaze_yields(int locked_hand,int gaze_hand,bool gaze_live,
+    const std::array<float,2>& grips,const std::array<float,2>& uses,const std::array<bool,2>& fresh_use,
+    const std::array<bool,2>& claimants,bool occupied) noexcept {
+    if(locked_hand<0 || locked_hand>1 || gaze_hand!=locked_hand || !gaze_live || occupied) return false;
+    const auto previous=static_cast<unsigned>(locked_hand),next=previous^1u;
+    return grips[previous]<=.35f && uses[previous]<=.35f && grips[next]>=.45f && fresh_use[next] && claimants[next];
+}
+class OfferedChokeGrip {
+    enum class Role {ready,other,choke,drain};
+    Role role_=Role::drain;
+    std::uint32_t victim_{};
+    std::uint64_t epoch_{};
+public:
+    struct Result {bool consume_use{},rb{};};
+    std::uint32_t victim() const noexcept {return role_==Role::choke?victim_:0;}
+    void cancel() noexcept {role_=Role::drain;victim_=0;}
+    Result update(bool use,bool started,bool held,bool allowed,std::uint64_t epoch,
+        std::uint32_t offered_victim,std::uint32_t active_victim,bool occupied,bool trigger_held=false) noexcept {
+        if(epoch_!=epoch || !allowed || !epoch) {role_=Role::drain;victim_=0;}
+        epoch_=epoch;
+        if(!use && !held && !trigger_held) {role_=Role::ready;victim_=0;return {};}
+        if(role_==Role::ready && use && started) {
+            if(allowed && epoch && held && !occupied && offered_victim) {role_=Role::choke;victim_=offered_victim;}
+            else role_=Role::other;
+        }
+        if(role_!=Role::choke) return {role_==Role::drain,false};
+        if(!held || !use || occupied || (offered_victim!=victim_ && active_victim!=victim_)) {
+            role_=Role::drain;victim_=0;return {true,false};
+        }
+        return {true,true};
+    }
+};
+class TalkYOwner {
+public:
+    struct Target {
+        std::uintptr_t component{};int generation{-1};std::uint32_t spawn{};std::uintptr_t owner{};
+        bool operator==(const Target& other) const noexcept {
+            return component==other.component && generation==other.generation && spawn==other.spawn && owner==other.owner;
+        }
+        explicit operator bool() const noexcept {return component && generation!=-1 && spawn;}
+    };
+    struct Result {bool consume_y{},interact{},owned{};};
+private:
+    bool down_=true,claimed_{},cancelled_{};
+    Target target_{};std::uint64_t epoch_{},until_{};
+public:
+    bool owns(Target target) const noexcept {return claimed_ && !cancelled_ && target==target_;}
+    void cancel() noexcept {cancelled_=true;until_=0;}
+    Result update(bool pressed,bool allowed,std::uint64_t epoch,std::uint64_t now,Target target) noexcept {
+        if(epoch_!=epoch || !allowed || !epoch) {cancelled_=true;until_=0;}
+        epoch_=epoch;
+        if(!pressed && now>=until_) {down_=claimed_=cancelled_=false;target_={};return {};}
+        if(pressed && !down_) {
+            down_=true;
+            if(!cancelled_ && allowed && epoch && target) {claimed_=true;target_=target;until_=now+160;}
+        }
+        if(claimed_ && (!(target==target_) || !allowed || !epoch)) {cancelled_=true;until_=0;}
+        return {claimed_ || cancelled_,claimed_ && !cancelled_ && allowed && now<until_,claimed_};
+    }
+};
+class GripIntent {
+public:
+    enum class Kind {none,deciding,use,fist,trigger,drain};
+    struct Out {bool use{},fist{},pass_trigger{true},tap_trigger{},use_started{},fist_started{};};
+private:
+    Kind kind_{Kind::none};bool g_{},t_{},grip_first_{};std::uint64_t since_{},use_until_{},tap_until_{};
+public:
+    Kind kind() const noexcept {return kind_;}
+    // use_idle: the Use has nothing to act on (no game target for this hand). A trigger then joining within `late` ms after the
+    // window still makes the fist (user's headset log 2026-10-14: 12 of 96 fists had the trigger more than 200 ms after the grip).
+    Out update(float grip,float trigger,std::uint64_t now,bool free,std::uint64_t window=100,bool use_idle=false,std::uint64_t late=400) noexcept {
+        const bool g=grip>=(g_?.35f:.45f),t=trigger>=(t_?.35f:.55f),edge=(g && !g_) || (t && !t_);
+        g_=g;t_=t;Out out{};
+        if(!free) {kind_=g || t?Kind::drain:Kind::none;use_until_=tap_until_=0;return out;}
+        if(kind_==Kind::none && edge) {kind_=Kind::deciding;since_=now;grip_first_=g;}
+        if(kind_==Kind::deciding) {
+            if(g && t) {kind_=Kind::fist;out.fist_started=true;}
+            else if(!g && !t) { // tapped and let go inside the window
+                kind_=Kind::none;
+                if(grip_first_) {use_until_=now+250;out.use_started=true;} else tap_until_=now+60;
+            }
+            else if(now-since_>=window) {kind_=g?Kind::use:Kind::trigger;out.use_started=g;}
+        }
+        else if(kind_!=Kind::none && !g && !t) kind_=Kind::none;
+        else if(kind_==Kind::use && g && t && use_idle && now-since_<window+late) {kind_=Kind::fist;out.fist_started=true;}
+        else if(kind_==Kind::use && !g) kind_=Kind::drain;      // a trigger still held after the Use is not a cast
+        else if(kind_==Kind::trigger && !t) kind_=Kind::drain;  // nor a grip still held after a cast a Use
+        out.use=kind_==Kind::use || now<use_until_;
+        out.fist=kind_==Kind::fist;
+        out.tap_trigger=now<tap_until_;
+        out.pass_trigger=kind_==Kind::trigger || kind_==Kind::none || out.tap_trigger;
+        return out;
+    }
 };
 // Face buttons while the native wheel is open: A/B/Y reach the pad (native quick actions) but only for presses
 // that began after the wheel opened; anything held at open or at close stays masked until released, so a jump
@@ -255,7 +354,7 @@ class TempleReach {
     bool in_[2]{},latched_[2]{},down_[2]{};std::uint64_t until_{};
 public:
     explicit TempleReach(double left=.09,double up=.02,double forward=0,double radius=.13,unsigned mask=3) noexcept : l_(left),u_(up),f_(forward),r_(radius),mask_(mask) {}
-    struct Out {bool journal{},held{};int entered{-1};std::array<bool,2> consume{};};
+    struct Out {bool journal{},held{};int entered{-1};std::array<bool,2> consume{},in{};};
     // head: eye centre; forward/up: head axes (any length).
     Out update(const V& head,const V& forward,const V& up,const std::array<std::optional<V>,2>& hands,const std::array<float,2>& grip,bool gameplay,std::uint64_t now) noexcept {
         Out out{};
@@ -268,7 +367,7 @@ public:
             if(gameplay && hands[i] && (mask_>>i&1u)) {const V d{(*hands[i])[0]-temple[0],(*hands[i])[1]-temple[1],(*hands[i])[2]-temple[2]};
                 in=std::sqrt(d[0]*d[0]+d[1]*d[1]+d[2]*d[2])<(in_[i]?r_+.03:r_);}
             if(in && !in_[i]) out.entered=i;
-            in_[i]=in;
+            in_[i]=in;out.in[i]=in;
             const bool pressed=grip[i]>=(down_[i]?.4f:.6f);
             if(in && pressed && !down_[i]) {latched_[i]=true;until_=now+150;}
             if(!pressed) latched_[i]=false;
@@ -277,6 +376,95 @@ public:
         out.journal=now<until_;
         return out;
     }
+};
+// Full-grip sword (user 2026-10-13, Bonelab style): the sword is in the right hand only while the grip is squeezed.
+// Squeeze at the shoulder holster: draw it (or call back a dropped one). Release there: sheathe. Release anywhere else: drop
+// it as a physical sword; squeeze at the dropped sword: pick it up. How the hand takes the hilt decides normal or reverse
+// grip (no button): fist pointing down at the shoulder, or against the lying blade, is reverse. A sword the game draws by
+// itself (after a mantle, a carried object) without the grip is put away again; one drawn while its copy lies in the world
+// calls the copy back.
+class SwordGrip {
+public:
+    enum class Action {none,draw,sheathe,drop,pickup,recall,stow};
+    struct In {
+        float grip{};bool gameplay{},zone{},drawn{},busy{};
+        bool copy{},copy_reach{};double copy_age_s{},copy_distance{};
+        double draw_dot{},pickup_dot{}; // hand forward . up (at the shoulder), hand forward . the lying blade
+        std::uint64_t now{};
+    };
+    struct Out {Action action{};bool reversed{},owns{};};
+    Out update(const In& in) noexcept {
+        Out out{};
+        const bool pressed=in.grip>=(down_?.4f:.6f),edge=pressed && !down_,released=!pressed && down_;down_=pressed;
+        if(pending_ && (in.drawn || in.now-pending_>1500)) pending_=0;
+        if(!in.drawn) {drawn_since_=0;sheathe_sent_=0;dropped_=0;} else if(!drawn_since_) drawn_since_=in.now;
+        if(in.copy && !in.drawn) settled_=true;else if(!in.copy) settled_=false;
+        if(!in.gameplay) {if(!pressed) held_=false;out.reversed=reversed_;return out;} // a menu or the wheel never drops it
+        if(edge && !in.busy) {
+            if(in.copy && (in.zone || in.copy_reach)) {out.action=Action::pickup;reversed_=in.zone?in.draw_dot<-.2:in.pickup_dot<0;held_=true;pending_=in.now;}
+            else if(in.zone && !in.drawn) {out.action=Action::draw;reversed_=in.draw_dot<-.2;held_=true;pending_=in.now;}
+        } else if(released && held_) {
+            held_=false;
+            if(in.drawn || pending_) {out.action=in.zone?Action::sheathe:Action::drop;pending_=0;sheathe_sent_=in.now;if(!in.zone) dropped_=in.now;} // leaving the hand
+        }
+        // The game cancels an instant unequip that meets a running equip clip (sim v406): stow again until the hand is empty.
+        if(out.action==Action::none && dropped_ && in.drawn && !held_ && !pressed && in.now-dropped_>=300 && in.now-stow_sent_>=300) {
+            if(in.now-dropped_>3000) dropped_=0;else {out.action=Action::stow;stow_sent_=in.now;}}
+        if(pressed && in.drawn && !in.busy && out.action==Action::none) held_=true; // the hand closed on a sword in it
+        if(out.action==Action::none && !pending_ && in.now-recall_sent_>1000) {
+            // ponytail: 30 s / 12 m return to the holster; tune in the headset
+            if(in.copy && ((settled_ && in.drawn) || in.copy_age_s>30 || in.copy_distance>12)) {out.action=Action::recall;recall_sent_=in.now;}
+        }
+        if(out.action==Action::none && in.drawn && !held_ && !pending_ && !in.busy && in.now-drawn_since_>600 &&
+           (!sheathe_sent_ || in.now-sheathe_sent_>1500)) {out.action=Action::sheathe;sheathe_sent_=in.now;}
+        out.reversed=reversed_;out.owns=held_ || pending_ || in.drawn || in.zone || (in.copy && in.copy_reach);
+        return out;
+    }
+    bool held() const noexcept {return held_;}
+private:
+    bool down_{},held_{},reversed_{},settled_{};std::uint64_t pending_{},drawn_since_{},sheathe_sent_{},recall_sent_{},dropped_{},stow_sent_{};
+};
+// Full-grip pistol/crossbow (user 2026-10-13): the left hand holds the gun only while its grip is squeezed. Let go anywhere
+// and it goes back to the left hip (no physical pistol prop exists to drop). Squeeze at the hip with the left hand empty:
+// draw the gun the hip holds (the last gun drawn). A gun the wheel or the game puts in the hand stays until the grip has
+// held it once.
+class GunGrip {
+public:
+    enum class Action {none,draw,holster};
+    struct In {float grip{},trigger{};bool gameplay{},zone{},drawn{},empty{},loaded{},busy{},object_claim{},draw_authorized{};std::uint64_t now{},release_owner{};};
+    struct Out {Action action{};bool owns{},reserved{};};
+    void reject_draw() noexcept {held_=false;pending_=0;candidate_=false;rejected_=down_;release_pending_=false;held_owner_=0;}
+    Out update(const In& in) noexcept {
+        Out out{};
+        const bool pressed=in.grip>=(down_?.4f:.6f),edge=pressed && !down_,released=!pressed && down_;down_=pressed;
+        if(pending_) {
+            if(in.drawn) pending_=0;
+            else if(in.now>=pending_ && in.now-pending_>1500) reject_draw();
+        }
+        if(!pressed) rejected_=false;
+        if(!in.gameplay) {candidate_=false;if(!pressed && held_) {release_pending_=true;held_=false;}return out;}
+        if(release_pending_) {
+            if(pressed || (!in.drawn && !pending_)) {release_pending_=false;held_owner_=0;}
+            else if(!in.busy) {
+                if(held_owner_ && in.release_owner==held_owner_ && !in.object_claim)out.action=Action::holster;
+                release_pending_=false;held_owner_=0;pending_=0;out.owns=in.drawn;return out;
+            }
+        }
+        if(released && held_ && in.busy) {release_pending_=true;held_=false;}
+        if(edge) {candidate_=!in.busy && !in.object_claim && in.trigger<=.35f && in.zone && in.empty && in.loaded;candidate_since_=in.now;}
+        if(!pressed || in.busy || in.object_claim || in.trigger>.35f || !in.zone || !in.empty || !in.loaded) candidate_=false;
+        if(candidate_ && in.draw_authorized && in.now>=candidate_since_ && in.now-candidate_since_>=100) {
+            out.action=Action::draw;held_=true;pending_=in.now;candidate_=false;
+        }
+        else if(released && held_) {held_=false;held_owner_=0;if(in.drawn || pending_) {out.action=Action::holster;pending_=0;}}
+        if(pressed && in.drawn && !in.busy && !rejected_ && out.action==Action::none) {if(!held_)held_owner_=0;held_=true;}
+        if(held_ && pressed && in.drawn && in.release_owner)held_owner_=in.release_owner;
+        out.owns=held_ || pending_ || in.drawn;out.reserved=candidate_;
+        return out;
+    }
+    bool held() const noexcept {return held_;}
+private:
+    bool down_{},held_{},candidate_{},rejected_{},release_pending_{};std::uint64_t pending_{},candidate_since_{},held_owner_{};
 };
 class WheelFaceButtons {
     unsigned blocked_{};bool wheel_{};

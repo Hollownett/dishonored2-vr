@@ -12,11 +12,22 @@ from rig_fields import native_list, component_ready
 import math
 from rig_fields import GAME_HASH, pointer
 
+HISTORICAL_ENTITY_IDS={88998248,88932711}
+OPENABLE_VTABLE_RVA='0x1c569c8'
+
+
+def filter_actors(actors,nearby_openables_only=False):
+    if nearby_openables_only:
+        return [actor for actor in actors if any(component.get('vtable_rva')==OPENABLE_VTABLE_RVA
+            for component in actor.get('components',()))]
+    return [actor for actor in actors if actor.get('entity_id') in HISTORICAL_ENTITY_IDS]
+
 
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--pid',type=int,required=True)
     parser.add_argument('--output',type=Path,help='Unique read-only snapshot output path')
+    parser.add_argument('--nearby-openables-only',action='store_true',help='Inspect every nearby typed openable; omit unrelated hand/carry inspection')
     args=parser.parse_args()
     if c.sizeof(c.c_void_p)!=8 or args.pid<=0: parser.error('Require x64 Python and positive PID')
     k=c.WinDLL('kernel32',use_last_error=True)
@@ -102,7 +113,7 @@ def main():
                 except (ValueError,OSError):result['rejected']+=1
         if pointer(read,game+0x3130b0)!=player:raise ValueError('Player changed')
         result['actors'].sort(key=lambda x:x['distance_native_units'])
-        result['actors']=[a for a in result['actors'] if a['entity_id'] in (88998248,88932711)]
+        result['actors']=filter_actors(result['actors'],args.nearby_openables_only)
         from interaction_fields import interaction_snapshot
         result['interaction']=interaction_snapshot(read,base)
         for actor in result['actors']:
@@ -133,8 +144,12 @@ def main():
         result['verified_interact_states']=states
         from player_camera_fields import player_camera_snapshot
         result['camera_snapshot']=player_camera_snapshot(read,base,player,camera=result['interaction']['camera'])
-        from inspect_native_hands import hand_state
-        result['hand_state']=hand_state(read,base)
+        if args.nearby_openables_only:
+            result['hand_state']=None
+            result['hand_state_not_requested']=True
+        else:
+            from inspect_native_hands import hand_state
+            result['hand_state']=hand_state(read,base)
         result.update(pid=args.pid,executable_sha256=GAME_HASH,time_utc=datetime.now(timezone.utc).isoformat(),game_memory_writes=False,engine_calls=False)
     finally: k.CloseHandle(process)
     output=args.output or Path(__file__).resolve().parents[1]/'artifacts'/f'native-grab-bounds-{args.pid}-readonly.json'

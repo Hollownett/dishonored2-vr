@@ -10,7 +10,7 @@ def identity(read, at):
 
 
 def carry_current(read,base,old):
-    if len(old.get('states',[]))!=2:raise ValueError('Require both typed carry states')
+    if len(old.get('states',[]))!=3:raise ValueError('Require all three typed carry states')
     def root():
         if (pointer(read,base+0x39a5290)!=old['game'] or pointer(read,old['game'])!=base+0x1c940a8 or
             pointer(read,old['game']+0x3130b0)!=old['player'] or pointer(read,old['player'])!=base+0x1c5e428 or
@@ -23,7 +23,7 @@ def carry_current(read,base,old):
     result=dict(old);first=None
     for _ in range(2):
         root();active=[]
-        for item,index,vt,declvt in zip(old['states'],(49,45),(0x1c7a998,0x1c77748),(0x1c7a868,0x1c77618)):
+        for item,index,vt,declvt in zip(old['states'],(49,45,50),(0x1c7a998,0x1c77748,0x1c7a998),(0x1c7a868,0x1c77618,0x1c7a868)):
             at,decl=item['state'],item['declaration'];value=read(at+0x20,1)[0]
             if (pointer(read,old['pool']+0x10+index*8)!=at or pointer(read,at)!=base+vt or
                 struct.unpack('<i',read(at+8,4))[0]!=index or pointer(read,at+0x10)!=old['machine'] or
@@ -32,7 +32,10 @@ def carry_current(read,base,old):
             active.append(bool(value))
         if first is not None and first!=active:raise ValueError('Carry activation changed during snapshot')
         first=active
+    if first[0] and first[2]:raise ValueError('Ambiguous simultaneous hold modes')
     root();result['active']=first;result['carrying']=any(first);result['typed_owner_verified']=True
+    result['hold_object']=first[0] or first[2]
+    result['hold_state']=old['states'][0 if first[0] else 2]['state'] if result['hold_object'] else 0
     return result
 
 
@@ -47,7 +50,7 @@ def carry_snapshot(read,base,game,player,body):
     if len(machines)!=1:raise ValueError('Ambiguous carry FSM owner')
     machine,slot=machines[0];pool=pointer(read,machine+0x90)
     states=[]
-    for index in (49,45):
+    for index in (49,45,50):
         at=pointer(read,pool+0x10+index*8);states.append(dict(index=index,state=at,declaration=pointer(read,at+0x18)))
     old=dict(game=game,player=player,body=body,machine=machine,pool=pool,component_slot=slot,
              components_raw=components_raw.hex(),body_identity=identity(read,body),machine_identity=identity(read,machine),states=states)

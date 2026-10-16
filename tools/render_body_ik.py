@@ -15,6 +15,7 @@ The game install is never touched.
 import argparse
 import json
 import math
+import os
 import time
 from pathlib import Path
 
@@ -115,12 +116,12 @@ def load_texture(path, max_size=1024):
     return _TEX_CACHE[key]
 
 
-def load_character(char):
+def load_character(char, parts=PARTS):
     char = str(char).lower()
     if char not in ('emily', 'corvo'):
         raise ValueError('character must be emily or corvo, got %r' % char)
     assets = {}
-    for part in PARTS:
+    for part in parts:
         sk = json.loads((PACK / ('skeleton_%s.json' % part)).read_text())
         z = np.load(PACK / char / ('%s.npz' % part))
         data = {k: z[k] for k in z.files}
@@ -162,10 +163,10 @@ def skin(part_asset, joint_mats):
 
 
 def pose_frame(frame, assets):
-    """Skin every part of one frame into world space."""
+    """Skin every loaded part of one frame into world space."""
     posed = {}
     for part in PARTS:
-        if part not in frame or frame[part] is None:
+        if part not in assets or part not in frame or frame[part] is None:
             continue
         mats = np.stack([mat4(f) for f in np.asarray(frame[part], np.float32).reshape(-1, 16)])
         if len(mats) != PART_JOINTS[part]:
@@ -186,9 +187,15 @@ def pose_frame(frame, assets):
 
 
 # ---------------------------------------------------------------------- camera
-def _unit(v):
+def _unit(v, fallback=None):
+    """v / |v|; a zero or non-finite v takes `fallback` (itself normalised) or is an error, never a NaN that reaches the rasteriser."""
     v = np.asarray(v, np.float32)
-    return v / np.linalg.norm(v)
+    n = float(np.linalg.norm(v))
+    if np.isfinite(n) and n > 1e-6:
+        return v / n
+    if fallback is not None:
+        return _unit(fallback)
+    raise ValueError('cannot normalise a zero or non-finite vector %s' % (v,))
 
 
 class View:
@@ -204,6 +211,7 @@ class View:
         self.span = float(span)
         self.scale = self.h / self.span
         self.f = 0.5 * self.w / math.tan(0.5 * hfov)
+        self.light = LIGHT
         self.gx = np.arange(self.w, dtype=np.float32) + 0.5
         self.gy = np.arange(self.h, dtype=np.float32) + 0.5
 
@@ -248,8 +256,11 @@ def build_views(center, span, eye):
 
 
 # ------------------------------------------------------------------ rasteriser
-def fill_triangle(color, depth, view, tex, p, uvs, nrms):
-    """z-buffered, textured, Lambert-lit triangle; p is (3,3) screen x,y,depth."""
+def fill_triangle(color, depth, view, tex, p, uvs, nrms, tint=None):
+    """z-buffered, textured, Lambert-lit triangle; p is (3,3) screen x,y,depth.
+    tint=(rgb, alpha): blend a flat colour over the pixels in front of the depth buffer, without writing depth."""
+    if not np.isfinite(p).all():             # a vertex that skinned or projected to NaN/inf draws nothing
+        return
     x, y, z = p[:, 0], p[:, 1], p[:, 2]
     xlo = int(max(float(x.min()), 0.0))
     xhi = int(min(float(x.max()) + 1.0, view.w))
@@ -274,11 +285,16 @@ def fill_triangle(color, depth, view, tex, p, uvs, nrms):
     hit = inside & (zz < sub)
     if not hit.any():
         return
-    sub[hit] = zz[hit]
+    if tint is None:
+        sub[hit] = zz[hit]
     h0, h1, h2 = l0[hit][:, None], l1[hit][:, None], l2[hit][:, None]
     n = h0 * nrms[0] + h1 * nrms[1] + h2 * nrms[2]
     n /= np.maximum(np.linalg.norm(n, axis=1, keepdims=True), 1e-9)
-    shade = (AMBIENT + (1.0 - AMBIENT) * np.abs(n @ LIGHT))[:, None]
+    shade = (AMBIENT + (1.0 - AMBIENT) * np.abs(n @ view.light))[:, None]
+    if tint is not None:
+        old = color[ylo:yhi, xlo:xhi][hit]
+        color[ylo:yhi, xlo:xhi][hit] = old * (1.0 - tint[1]) + np.asarray(tint[0], np.float32) * shade * tint[1]
+        return
     if tex is None:
         rgb = np.broadcast_to(GREY * shade, (len(shade), 3))
     else:
@@ -570,6 +586,318 @@ def selfcheck(character, out_dir=None, limit=1e-5):
     return worst
 
 
+# ------------------------------------------------------------- hand close-ups
+# Eight lit cameras around the right hand (frame['hand'] from tools/hand_pose_lab.cpp), the solver's held shape drawn
+# translucent over the depth buffer, and the finger joint chains as coloured overlay (dim where the skin hides them).
+HAND_PARTS = ('right_arm',)
+HAND_DIST, HAND_HFOV, HAND_TILE, HAND_CROP = 0.35, math.radians(50.0), 480, 0.42
+FINGER_NAMES = ('thumb', 'index', 'medium', 'ring', 'pinky')
+FINGER_COLOURS = np.array([[1.00, 0.30, 0.25], [0.30, 1.00, 0.40], [0.35, 0.65, 1.00],
+                           [1.00, 0.90, 0.20], [1.00, 0.40, 0.90]], np.float32)
+
+
+def hand_views(hand):
+    """Cameras 0.35 m out along a side vector of the hand frame: fingers f, palm-in n, pinky->index t (thumb side)."""
+    f, n, t = _unit(hand['fingers']), _unit(hand['normal']), _unit(hand['thumb'])
+    z = np.array([0.0, 0.0, 1.0], np.float32)
+    sides = [('fingers (front)', f), ('back of hand', -n), ('thumb side', t), ('little-finger side', -t),
+             ('above', z), ('below', -z), ('front-thumb-45 (palm+thumb)', _unit(n + t, n)), ('front-below-45 (palm-thumb)', _unit(n - t, n))]
+    center, views = np.asarray(hand['center'], np.float32), []
+    for name, side in sides:
+        side = _unit(side)
+        look = -side
+        # (a look along the world up, or along f - a hand pointing straight down seen from its fingers - takes the next reference that is not parallel)
+        ref = next((c for c in (z, f, t, n) if abs(float(look @ _unit(c))) < 0.9), z)
+        right = _unit(np.cross(look, ref), np.cross(look, np.array([1.0, 0.0, 0.0], np.float32)))
+        up = np.cross(right, look)
+        view = View(name, HAND_TILE, HAND_TILE, center + side * HAND_DIST, look, right, up, True, hfov=HAND_HFOV)
+        view.light = _unit(look * 0.8 + up * 0.5 - right * 0.3)   # camera-side key light: every angle is lit
+        views.append(view)
+    return views
+
+
+def crop_part(part, center, radius):
+    """Keep the triangles with a vertex within radius of center (the rest never reach a close-up)."""
+    near = np.linalg.norm(part['verts'] - center, axis=1) < radius
+    kept, surfaces, start = [], [], 0
+    for s0, count, tex in part['surfaces']:
+        tri = part['index'][s0:s0 + count]
+        tri = tri[near[tri].any(axis=1)]
+        kept.append(tri)
+        surfaces.append((start, len(tri), tex))
+        start += len(tri)
+    return dict(part, index=np.concatenate(kept) if kept else part['index'][:0], surfaces=surfaces)
+
+
+def shape_mesh(shape):
+    """Capsule or box from the lab JSON -> (verts, normals, triangles)."""
+    c = np.asarray(shape['center'], np.float32)
+    if shape['kind'] == 'box':
+        axes = [_unit(a) for a in shape['axes']]
+        half = np.asarray(shape['half'], np.float32)
+        verts, norms, tris = [], [], []
+        for i in range(3):
+            j, k = (i + 1) % 3, (i + 2) % 3
+            for sign in (-1.0, 1.0):
+                base = len(verts)
+                for a, b in ((-1, -1), (1, -1), (1, 1), (-1, 1)):
+                    verts.append(c + axes[i] * sign * half[i] + axes[j] * a * half[j] + axes[k] * b * half[k])
+                    norms.append(axes[i] * sign)
+                tris += [(base, base + 1, base + 2), (base, base + 2, base + 3)]
+        return np.array(verts, np.float32), np.array(norms, np.float32), np.array(tris, np.intp)
+    if shape['kind'] == 'cylinder':  # flat-ended: a wall and two caps (the rim's rounding is a few millimetres: not drawn)
+        a = _unit(shape['axis'])
+        u = _unit(np.cross(a, [1.0, 0.0, 0.0] if abs(float(a[0])) < 0.9 else [0.0, 1.0, 0.0]))
+        w = np.cross(a, u)
+        half, rad, seg = float(shape['half']), float(shape['radius']), 40
+        verts, norms, tris = [], [], []
+        angles = np.linspace(0.0, 2 * math.pi, seg, endpoint=False)
+        radial = [u * math.cos(p) + w * math.sin(p) for p in angles]
+        for offset in (-half, half):            # the wall: two rings of radial normals
+            for n in radial:
+                verts.append(c + a * offset + n * rad)
+                norms.append(n)
+        for p in range(seg):
+            q = (p + 1) % seg
+            tris += [(p, seg + p, q), (q, seg + p, seg + q)]
+        for sign in (-1.0, 1.0):                 # the caps: a fan from the centre
+            base = len(verts)
+            verts.append(c + a * sign * half)
+            norms.append(a * sign)
+            for n in radial:
+                verts.append(c + a * sign * half + n * rad)
+                norms.append(a * sign)
+            for p in range(seg):
+                tris.append((base, base + 1 + p, base + 1 + (p + 1) % seg))
+        return np.array(verts, np.float32), np.array(norms, np.float32), np.array(tris, np.intp)
+    if shape['kind'] != 'capsule':
+        raise ValueError('unknown shape kind %r' % shape['kind'])
+    a = _unit(shape['axis'])
+    u = _unit(np.cross(a, [1.0, 0.0, 0.0] if abs(float(a[0])) < 0.9 else [0.0, 1.0, 0.0]))
+    w = np.cross(a, u)
+    half, rad, seg, ring = float(shape['half']), float(shape['radius']), 28, 10
+    rad_end = float(shape.get('radius_end', rad))  # a round cone (a profiled shaft's piece): the radius at +axis; `radius` is the one at -axis
+    rows = [(t, half, rad_end) for t in np.linspace(0.0, math.pi / 2, ring)] + \
+           [(t, -half, rad) for t in np.linspace(math.pi / 2, math.pi, ring)]
+    verts, norms = [], []
+    for theta, offset, radius in rows:
+        for phi in np.linspace(0.0, 2 * math.pi, seg, endpoint=False):
+            n = (u * math.cos(phi) + w * math.sin(phi)) * math.sin(theta) + a * math.cos(theta)
+            verts.append(c + a * offset + n * radius)
+            norms.append(n)
+    tris = []
+    for r in range(len(rows) - 1):
+        for p in range(seg):
+            q = (p + 1) % seg
+            a0, a1, b0, b1 = r * seg + p, r * seg + q, (r + 1) * seg + p, (r + 1) * seg + q
+            tris += [(a0, b0, a1), (a1, b0, b1)]
+    return np.array(verts, np.float32), np.array(norms, np.float32), np.array(tris, np.intp)
+
+
+def draw_shapes(color, depth, view, shapes):
+    """Translucent shapes over the opaque depth buffer; convex, so back faces then front faces blend correctly."""
+    for shape in shapes or []:
+        verts, norms, tris = shape_mesh(shape)
+        x, y, z = view.project(verts)
+        pt = np.stack((x, y, z), axis=1).astype(np.float32)
+        away = np.einsum('tj,tj->t', norms[tris].mean(axis=1), verts[tris].mean(axis=1) - view.origin) > 0.0
+        tint = (shape.get('color', [1.0, 1.0, 1.0]), shape.get('alpha', 0.30))
+        for facing in (True, False):
+            for t in np.nonzero(away == facing)[0]:
+                if (pt[tris[t], 2] <= NEAR).any():
+                    continue
+                fill_triangle(color, depth, view, None, pt[tris[t]], None, norms[tris[t]], tint=tint)
+
+
+def finger_points(frame, assets):
+    """World joint positions per finger: metacarpal (fingers) .. last joint .. end."""
+    names = assets['right_arm']['joint_names']
+    mats = np.asarray(frame['right_arm'], np.float32).reshape(-1, 16)
+    base = mat4(frame['right_arm_frame'])
+    out = []
+    for i, finger in enumerate(FINGER_NAMES):
+        wanted = ['right_%s_0%d_jnt' % (finger, k) for k in ((1, 2, 3) if i == 0 else (1, 2, 3, 4))]
+        wanted.append('right_%s_end_jnt' % finger)
+        out.append(np.array([(base @ mat4(mats[names.index(n)]))[:3, 3] for n in wanted], np.float32))
+    return out
+
+
+def draw_overlay(color, depth, view, chains):
+    h, w = color.shape[:2]
+    for i, pts in enumerate(chains):
+        samples = np.concatenate([a + (b - a) * np.linspace(0.0, 1.0, 16, dtype=np.float32)[:, None]
+                                  for a, b in zip(pts[:-1], pts[1:])])
+        for cloud, size in ((samples, 1), (pts, 3)):
+            sx, sy, sz = view.project(cloud)
+            for x, y, z in zip(sx, sy, sz):
+                xi, yi = int(round(float(x))), int(round(float(y)))
+                if not (size <= xi < w - size and size <= yi < h - size) or z <= NEAR:
+                    continue
+                shown = z <= depth[yi, xi] + 0.008
+                patch = color[yi - size + 1:yi + size, xi - size + 1:xi + size]
+                patch[...] = FINGER_COLOURS[i] if shown else patch * 0.6 + FINGER_COLOURS[i] * 0.4
+
+
+def render_hand_tile(frame, posed, view, chains):
+    color = np.full((view.h, view.w, 3), BACKGROUND, np.float32)
+    color[..., 2] += np.linspace(0.0, 0.06, view.h, dtype=np.float32)[:, None]
+    depth = np.full((view.h, view.w), np.inf, np.float32)
+    for part in posed.values():
+        draw_mesh(color, depth, view, part)
+    seen = float(np.isfinite(depth).mean())
+    draw_shapes(color, depth, view, frame.get('shapes'))
+    draw_overlay(color, depth, view, chains)
+    tile = label_tile(np.clip(color * 255.0, 0, 255).astype(np.uint8), str(frame.get('label', 'frame')), view.name)
+    return tile, seen
+
+
+def profile_image(frame, posed, chains, size=560):
+    """Two flat diagrams of the posed finger chains (colour) against the solver's planned chains (white) and the held shape:
+    looking along the hinge axis (fingers right, palm side up: every curl is a true angle) and onto the palm (sideways drift)."""
+    hand = frame['hand']
+    f, n, t = (_unit(hand[k]) for k in ('fingers', 'normal', 'thumb'))
+    c = np.asarray(hand['center'], np.float32)
+    verts = np.concatenate([p['verts'] for p in posed.values()])
+    verts = verts[np.linalg.norm(verts - c, axis=1) < 0.30]
+    planned = [np.asarray(p, np.float32) for p in frame.get('planned', [])]
+    scale = size / 0.30
+    panels = []
+    for title, up in (('profile (along the hinge axis): fingers right, palm side up', n),
+                      ('palm view (along the palm normal): fingers right, thumb side up', t)):
+        im = Image.new('RGB', (size, size), (24, 24, 30))
+        d = ImageDraw.Draw(im)
+
+        def px(p, up=up):
+            p = np.asarray(p, np.float32) - c
+            return np.stack(((p @ f) * scale + size * 0.42, size * 0.5 - (p @ up) * scale), axis=-1)
+        for x, y in px(verts):
+            d.point((float(x), float(y)), fill=(120, 105, 98))
+        for shape in frame.get('shapes') or []:
+            colour = tuple(int(v * 255) for v in shape.get('color', [1, 1, 1]))
+            if shape['kind'] in ('capsule', 'cylinder'):
+                a = _unit(shape['axis'])
+                radii = [float(shape['radius']) * scale, float(shape.get('radius_end', shape['radius'])) * scale]  # -axis end, +axis end
+                ends = px(np.array([np.asarray(shape['center']) + a * s * float(shape['half']) for s in (-1, 1)]))
+                side = ends[1] - ends[0]
+                side = np.array([-side[1], side[0]]) / max(float(np.linalg.norm(side)), 1e-6)
+                for e, r in zip(ends, radii):
+                    d.ellipse((e[0] - r, e[1] - r, e[0] + r, e[1] + r), outline=colour, width=2)
+                for s in (-1, 1):
+                    d.line([tuple(ends[0] + s * side * radii[0]), tuple(ends[1] + s * side * radii[1])], fill=colour, width=2)
+            else:
+                ax, hf = [_unit(v) for v in shape['axes']], np.asarray(shape['half'], np.float32)
+                cs = np.array([np.asarray(shape['center']) + ax[0] * i * hf[0] + ax[1] * j * hf[1] + ax[2] * k * hf[2]
+                               for i in (-1, 1) for j in (-1, 1) for k in (-1, 1)])
+                q = px(cs)
+                for a_, b_ in ((0, 1), (2, 3), (4, 5), (6, 7), (0, 2), (1, 3), (4, 6), (5, 7), (0, 4), (1, 5), (2, 6), (3, 7)):
+                    d.line([tuple(q[a_]), tuple(q[b_])], fill=colour, width=2)
+        for i, pts in enumerate(planned):
+            q = px(pts)
+            d.line([tuple(p) for p in q], fill=(235, 235, 235), width=1)
+            for p in q:
+                d.rectangle((p[0] - 3, p[1] - 3, p[0] + 3, p[1] + 3), outline=(235, 235, 235))
+        for i, pts in enumerate(chains):
+            colour = tuple(int(v * 255) for v in FINGER_COLOURS[i])
+            q = px(pts)
+            d.line([tuple(p) for p in q], fill=colour, width=3)
+            for p in q:
+                d.ellipse((p[0] - 4, p[1] - 4, p[0] + 4, p[1] + 4), fill=colour)
+        d.text((8, 6), title, fill=(255, 255, 255), font=_font(16))
+        d.text((8, size - 24), 'colour = posed joints (metacarpal .. tip), white squares = solver plan, outline = held shape',
+               fill=(200, 200, 200), font=_font(13))
+        panels.append(np.asarray(im))
+    return np.hstack((panels[0], np.full((size, GAP, 3), 90, np.uint8), panels[1]))
+
+
+_HAND = {}
+
+
+def _hand_init(frames_path, character):
+    doc = json.loads(Path(frames_path).read_text(encoding='utf-8-sig'))
+    _HAND.update(frames=doc['frames'], assets=load_character(character, HAND_PARTS), cache={})
+
+
+def _hand_tile(task):
+    index, view_index = task
+    cache = _HAND['cache']
+    if index not in cache:
+        frame = _HAND['frames'][index]
+        center = np.asarray(frame['hand']['center'], np.float32)
+        posed = {k: crop_part(p, center, HAND_CROP) for k, p in pose_frame(frame, _HAND['assets']).items()}
+        cache[index] = (posed, hand_views(frame['hand']), finger_points(frame, _HAND['assets']))
+    posed, views, chains = cache[index]
+    if view_index == len(views):                       # one extra task per frame: the flat profile diagram
+        return task, profile_image(_HAND['frames'][index], posed, chains)
+    return task, render_hand_tile(_HAND['frames'][index], posed, views[view_index], chains)
+
+
+def hand_montage(frame, tiles):
+    tiles = [t[0] for t in tiles]
+    gap = np.full((HAND_TILE, GAP, 3), 90, np.uint8)
+    rows = []
+    for r in (tiles[:4], tiles[4:]):
+        row = r[0]
+        for tile in r[1:]:
+            row = np.hstack((row, gap, tile))
+        rows.append(row)
+    sheet = np.vstack((rows[0], np.full((GAP, rows[0].shape[1], 3), 90, np.uint8), rows[1]))
+    head = Image.new('RGB', (sheet.shape[1], 34), (28, 28, 32))
+    draw = ImageDraw.Draw(head)
+    draw.text((8, 6), str(frame.get('title', frame.get('label', ''))), fill=(255, 255, 255), font=_font(18))
+    x = sheet.shape[1] - 5 * 92 - 8
+    for name, c in zip(FINGER_NAMES, FINGER_COLOURS):
+        draw.rectangle((x, 11, x + 12, 23), fill=tuple(int(v * 255) for v in c))
+        draw.text((x + 17, 8), name, fill=(220, 220, 220), font=_font(15))
+        x += 92
+    return np.vstack((np.asarray(head), sheet))
+
+
+def write_index(path, tag, frames, indices):
+    import html
+    parts = ['<!doctype html><meta charset="utf-8"><title>hand lab %s</title>' % html.escape(tag),
+             '<style>body{background:#161618;color:#ddd;font:14px/1.4 system-ui;margin:16px}'
+             'img{max-width:100%;display:block;margin:6px 0}pre{background:#0e0e10;padding:8px;overflow:auto}</style>',
+             '<h1>hand lab: %s</h1>' % html.escape(tag),
+             '<p>Eight views per case, 0.35 m from the right hand. Top row: fingers front, back of hand, thumb side, '
+             'little-finger side. Bottom row: above, below, front-thumb-45 (palm side and thumb side: the sim orbit view of that name), '
+             'front-below-45 (palm side and the little-finger side). Joint chains: thumb red, index green, '
+             "middle blue, ring yellow, pinky magenta (dim where the skin hides them). The held shape is the solver's capsule "
+             '(or slab), translucent.</p>']
+    for i in indices:
+        f = frames[i]
+        name = safe_name(f['label'])
+        parts.append('<h2>%s</h2><a href="%s-views.png"><img src="%s-views.png"></a>'
+                     '<a href="%s-profile.png"><img src="%s-profile.png"></a><pre>%s</pre>'
+                     % (html.escape(str(f.get('title', f['label']))), name, name, name, name,
+                        html.escape('\n'.join(f.get('report', [])))))
+    Path(path).write_text('\n'.join(parts), encoding='utf-8')
+
+
+def render_hand_views(frames_path, indices, out_dir, workers):
+    from concurrent.futures import ProcessPoolExecutor
+    doc = json.loads(Path(frames_path).read_text(encoding='utf-8-sig'))
+    frames, out_dir = doc['frames'], Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    tasks = [(i, v) for i in indices for v in range(9)]     # 8 camera views + the profile diagram
+    start = time.perf_counter()
+    if workers > 1:
+        with ProcessPoolExecutor(min(workers, len(tasks)), initializer=_hand_init,
+                                 initargs=(str(frames_path), doc['character'])) as pool:
+            done = dict(pool.map(_hand_tile, tasks))
+    else:
+        _hand_init(str(frames_path), doc['character'])
+        done = dict(map(_hand_tile, tasks))
+    for i in indices:
+        tiles = [done[(i, v)] for v in range(8)]
+        for v, (_, seen) in enumerate(tiles):
+            if seen < 0.004:
+                print('warning: %s view %d shows almost no hand (%.2f%% of pixels)' % (frames[i]['label'], v, seen * 100))
+        Image.fromarray(hand_montage(frames[i], tiles)).save(out_dir / ('%s-views.png' % safe_name(frames[i]['label'])))
+        Image.fromarray(done[(i, 8)]).save(out_dir / ('%s-profile.png' % safe_name(frames[i]['label'])))
+    write_index(out_dir / 'index.html', out_dir.name, frames, indices)
+    print('wrote %d montage(s) + index.html to %s in %.1f s' % (len(indices), out_dir, time.perf_counter() - start))
+
+
 # -------------------------------------------------------------------------- main
 def parse_indices(text, count):
     if not text:
@@ -589,6 +917,9 @@ def main(argv=None):
     parser.add_argument('frames_json', nargs='?', type=Path, help='solver output JSON')
     parser.add_argument('out_dir', nargs='?', type=Path, help='output directory')
     parser.add_argument('--frames', help='comma-separated frame indices, e.g. 0,3,5')
+    parser.add_argument('--hand-views', action='store_true',
+                        help='right-hand close-ups: 8 lit views per frame (needs the hand_pose_lab JSON), plus index.html')
+    parser.add_argument('--workers', type=int, default=min(8, os.cpu_count() or 1), help='--hand-views processes')
     parser.add_argument('--selfcheck', metavar='CHARACTER',
                         help='verify bind-pose skinning for emily|corvo and render it')
     parser.add_argument('--out-dir', dest='out_dir_flag', type=Path,
@@ -608,6 +939,9 @@ def main(argv=None):
         raise SystemExit('frames JSON has no frames')
     indices = parse_indices(args.frames, len(frames))
     out_dir = args.out_dir_flag or args.out_dir
+    if args.hand_views:
+        render_hand_views(source, indices, out_dir, args.workers)
+        return 0
     print('rendering %s: %d of %d frame(s) -> %s'
           % (doc.get('character', '?'), len(indices), len(frames), out_dir))
     render_frames(frames, indices, out_dir, doc['character'])

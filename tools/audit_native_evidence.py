@@ -16,7 +16,7 @@ import statistics
 
 MAX_FILE = 128 * 1024 * 1024
 MAX_LINE = 128 * 1024
-MAX_ROWS = 20000
+MAX_ROWS = 200000
 
 
 def reject_constant(value):
@@ -130,7 +130,17 @@ def audit(run):
     palm_states = {1: {}, 2: {}}
     ticks, presents, ticks_by_kind = [], [], {i: [] for i in range(3)}
     for row in read_rows(trace, counts):
-        if row.get("pid") != pid or row.get("schema_version") != 1 or row.get("source") != "owned_native_palette":
+        if row.get("pid") != pid or row.get("schema_version") != 1:
+            raise ValueError("Trace PID/schema/source mismatch")
+        if row.get("source") in ("attachment_socket_reader", "arm_socket_terminal"):
+            expected_kinds = (3, 4) if row["source"] == "attachment_socket_reader" else (1,)
+            if type(row.get("source_kind")) is not int or row["source_kind"] not in expected_kinds or type(row.get("tick")) is not int or row["tick"] < 0:
+                raise ValueError("Invalid compact socket observation")
+            if row.get("observation_only") is not True or row.get("consumer_frame_verified") is not False:
+                raise ValueError("Attachment reader cannot establish visual acceptance")
+            counts[row["source"] + "_records"] += 1
+            continue
+        if row.get("source") != "owned_native_palette":
             raise ValueError("Trace PID/schema/source mismatch")
         kind, tick = row.get("source_kind"), row.get("tick")
         if type(kind) is not int or kind not in kinds or type(tick) is not int or tick < 0:

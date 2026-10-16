@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <string>
 #include <vector>
+#include <optional>
 
 namespace d2vr::body {
 using rig::kPi;
@@ -131,6 +132,14 @@ struct Inputs {
     double grip[2]{},trigger[2]{}; // controller analog values 0..1 drive the fingers
     // Empty hand: fingers curl from grip/trigger instead of copying the native (flat) pose.
     bool hand_empty[2]{};
+    std::uint64_t native_socket_token[2]{};
+    // Per-joint finger hinge turns (rad over the bind pose; finger_ik.hpp finger_turns): thumb 01-03, other fingers 02-04. An empty hand
+    // with them closes by contact and by what it holds instead of grip/trigger; the metacarpals stay on the bind pose (the contact
+    // planned the fingers from it: a metacarpal that moved would move their knuckles and hinges).
+    float finger_turn[2][5][3]{};bool has_finger[2]{};
+    // The hinge each of those joints turns about, unit, in the arm-model space of the bind pose (finger_ik.hpp hinge_axes: the axes the
+    // contact was tested with, so the bones bend exactly as tested, never sideways). Without them the solver's own bind-pose axes apply.
+    float finger_axis[2][5][3][3]{};bool has_finger_axis[2]{};
     // Held item: rotate the stable socket local 180 degrees about the palm normal (blade points the other way).
     bool reverse_grip[2]{};
     // Optional native animated arm pose (69 joints, arm-model space, unscaled). When present the
@@ -140,6 +149,8 @@ struct Inputs {
     const NativePose* native{};
     Ownership own{};
     double dt=1/90.;
+    Xf raw_hand[2]{};
+    bool raw_hand_valid[2]{};
 };
 struct Output {
     std::vector<Xf> body,arm[2];Xf arm_frame[2];
@@ -147,10 +158,44 @@ struct Output {
     double owned[4]{}; // eased native weights: legs, torso, left arm, right arm
     double phase[2]{};Vec3 swing_from[2]{},swing_to[2]{};
     bool dragged[2]{}; // planted foot was beyond reach and dragged with the leg this frame
+    // How each hand's fingers were posed this solve: 0 not posed, 1 the contact turns (finger_ik.hpp), 2 grip and trigger alone, 3 the game's own
+    // fingers (a hand that holds an authored item: a sword, a pistol).
+    int finger_mode[2]{};
+    double thumb_applied[2][3]{}; // degrees each thumb joint was turned by this solve (what finger_local applied of the contact's turn)
+    std::vector<Xf> raw_arm[2];
+    bool raw_hand_reached[2]{};
 };
 
 class BodySolver {
+    struct ArmState {
+        Vec3 pole{};
+        double roll{},hold_steady{},thumb_applied[3]{};
+        Xf hold{},hold_prev{};
+        std::uint64_t socket_token{};
+        bool has_pole{},has_roll{},has_hold{};
+        int finger_mode{};
+    };
 public:
+    class FrozenArm {
+        friend class BodySolver;
+        ArmState state_{};
+        Inputs inputs_{};
+        Xf chest_{};
+        unsigned side_{};
+    };
+    std::optional<FrozenArm> freeze_arm(unsigned side,const Inputs& inputs,const Xf& chest) const {
+        if(side>1 || !inputs.hand_valid[side] || !inputs.hand_empty[side] || inputs.own.arm[side]!=0 || !valid_pose(chest))return {};
+        FrozenArm result;result.side_=side;result.state_=arm_state_[side];result.inputs_=inputs;result.chest_=chest;
+        result.inputs_.native=nullptr;
+        result.inputs_.native_arm[0]=result.inputs_.native_arm[1]=nullptr;
+        return result;
+    }
+    std::vector<Xf> rearm(const FrozenArm& frozen,const Xf& attachment,bool& reached) const {
+        if(frozen.side_>1 || !valid_pose(attachment))throw std::invalid_argument("Invalid frozen arm target");
+        auto state=frozen.state_;auto inputs=frozen.inputs_;inputs.hand[frozen.side_]=attachment;
+        const auto delta=mul(frozen.chest_.q,conj(sk_[0].bind[spine_[2]].q));
+        return pose_arm(static_cast<int>(frozen.side_),frozen.chest_,delta,inputs,0,reached,state);
+    }
     BodySolver(Skeleton body,Skeleton left,Skeleton right,Calibration calibration):cal_(calibration) {
         if(!std::isfinite(cal_.eye_height) || cal_.eye_height<=0 || cal_.eye_height>3 ||
            !std::isfinite(cal_.hand_span) || cal_.hand_span<0 || cal_.hand_span>3 ||
@@ -258,10 +303,10 @@ public:
 
     // Call on reference-space epoch, native owner replacement or teleport.
     // Old planted feet and native blend sources cannot cross those boundaries.
-    void reset_hold(int i) {has_hold_[i]=false;}
+    void reset_hold(int i) {arm_state_[i].has_hold=false;}
     void reset() {
         chest_={};feet_valid_=false;has_eye_=false;walk_=0;walk_on_=false;velocity_={};last_native_={};
-        for(int i=0;i<2;++i) {foot_[i]={};has_pole_[i]=false;has_roll_[i]=false;dragged_[i]=false;has_hold_[i]=false;}
+        for(int i=0;i<2;++i) {foot_[i]={};arm_state_[i].has_pole=false;arm_state_[i].has_roll=false;dragged_[i]=false;arm_state_[i].has_hold=false;arm_state_[i].socket_token=0;}
         for(auto& p:progress_) p=0;
         for(auto& p:path_) p.clear();
     }
@@ -280,6 +325,11 @@ public:
                !std::isfinite(in.trigger[i]) || !std::isfinite(in.own.arm[i]) ||
                (in.native_arm[i] && !palette_valid(*in.native_arm[i],sk_[1+i].local.size())))
                 throw std::invalid_argument("Invalid body hand input");
+            if(in.has_finger[i]) for(const auto& f:in.finger_turn[i]) for(float t:f) if(!std::isfinite(t) || t<-1.6f || t>3.2f) throw std::invalid_argument("Invalid body finger turn");
+            if(in.has_finger[i] && in.has_finger_axis[i]) for(const auto& f:in.finger_axis[i]) for(const auto& a:f) {
+                const double n=std::sqrt(static_cast<double>(a[0])*a[0]+static_cast<double>(a[1])*a[1]+static_cast<double>(a[2])*a[2]);
+                if(!std::isfinite(n) || std::abs(n-1)>.05) throw std::invalid_argument("Invalid body finger axis");
+            }
         }
         if(in.native && (!valid_pose(in.native->model) || !palette_valid(in.native->body,sk_[0].local.size()) ||
            (!in.native->arm[0].empty() && !palette_valid(in.native->arm[0],sk_[1].local.size())) ||
@@ -469,7 +519,9 @@ public:
         const auto chest_delta=mul(chest.q,conj(b.bind[spine_[2]].q));
         for(int i=0;i<2;++i) {
             out.arm_frame[i]=chest;
-            out.arm[i]=pose_arm(i,chest,chest_delta,in,dt,out.hand_reached[i]);
+            auto candidate_state=arm_state_[i];
+            out.arm[i]=pose_arm(i,chest,chest_delta,in,dt,out.hand_reached[i],arm_state_[i]);
+            out.finger_mode[i]=arm_state_[i].finger_mode;for(int s2=0;s2<3;++s2) out.thumb_applied[i][s2]=arm_state_[i].thumb_applied[s2];
             const auto& na=native && source->arm[i].size()==out.arm[i].size()?source->arm[i]:std::vector<Xf>{};
             if(!na.empty() && (weight(2+i)>0 || weight(4+i)>0)) {
                 const auto& a=sk_[1+i];
@@ -485,6 +537,11 @@ public:
                 }
                 out.hand_reached[i]=out.hand_reached[i] && wa<1e-6 && weight(4+i)<1e-6;
             }
+            if(in.raw_hand_valid[i] && in.hand_valid[i] && in.hand_empty[i] && !in.native_socket_token[i] && valid_pose(in.raw_hand[i]) &&
+               in.own.arm[i]==0 && weight(2+i)==0 && weight(4+i)==0)try {
+                auto candidate=in;candidate.hand[i]=in.raw_hand[i];
+                out.raw_arm[i]=pose_arm(i,chest,chest_delta,candidate,dt,out.raw_hand_reached[i],candidate_state);
+            } catch(...) {out.raw_arm[i].clear();out.raw_hand_reached[i]=false;}
             out.phase[i]=foot_[i].t;out.swing_from[i]=foot_[i].from;out.swing_to[i]=foot_[i].to;
             out.feet[i]=foot_[i].at;out.stepping[i]=foot_[i].stepping;out.dragged[i]=dragged_[i];
         }
@@ -503,10 +560,10 @@ private:
     rig::ChestYaw chest_;
     Foot foot_[2];bool feet_valid_{};
     Vec3 velocity_{},last_eye_{};bool has_eye_{};
-    Vec3 pole_[2]{};bool has_pole_[2]{};
-    double roll_[2]{};bool has_roll_[2]{};bool dragged_[2]{};
+    ArmState arm_state_[2]{};
+    bool dragged_[2]{};
     // Stable item-hold local (attachment relative to wrist): follows the native local only once it has been steady.
-    Xf hold_[2],hold_prev_[2];double hold_steady_[2]{};bool has_hold_[2]{};Vec3 palm_attach_[2]{};
+    Vec3 palm_attach_[2]{};
     // Fingers: [side][thumb,index,medium,ring,pinky][01..04]; axes are in each joint's local frame.
     int finger_[2][5][4]{};Vec3 finger_axis_[2][5][4]{};
 
@@ -529,14 +586,18 @@ private:
         }
     }
     // Degrees per joint (01 metacarpal, 02 MCP, 03 PIP, 04 DIP) for relaxed and closed hands.
-    Xf finger_local(int i,int j,double grip,double trigger) const {
+    Xf finger_local(int i,int j,double grip,double trigger,ArmState& state,const float (*turn)[3]=nullptr,const float (*axes)[3][3]=nullptr) const {
         const auto& a=sk_[1+i];
         static constexpr double relaxed[5][4]={{8,10,12,0},{0,12,18,8},{0,18,24,12},{2,22,28,14},{4,26,32,16}};
         static constexpr double closed[5][4]={{25,30,45,0},{0,80,95,55},{0,85,100,60},{6,88,100,60},{12,90,100,62}};
         for(int f=0;f<5;++f) for(int k=0;k<4;++k) if(finger_[i][f][k]==j) {
             const double amount=std::clamp(f==1?trigger*.85:f==0?std::max(grip,trigger)*.8:grip,0.,1.);
-            const double degrees=relaxed[f][k]+(closed[f][k]-relaxed[f][k])*amount;
-            const auto& axis=finger_axis_[i][f][k];
+            const int s=f?k-1:k; // chain joint of finger_turns (fingers 02-04, thumb 01-03); a finger's metacarpal has none
+            if(turn && s<0) return a.local[j]; // a metacarpal under contact turns: on the pose the contact planned from
+            const double degrees=turn && s>=0?turn[f][s]*180/kPi:relaxed[f][k]+(closed[f][k]-relaxed[f][k])*amount;
+            if(f==0 && s>=0 && s<3) state.thumb_applied[s]=turn?degrees:0;
+            auto axis=finger_axis_[i][f][k];
+            if(turn && axes && s>=0 && s<3) axis=rotated(conj(a.bind[j].q),unit({axes[f][s][0],axes[f][s][1],axes[f][s][2]})); // the tested hinge
             if(length(axis)<.5) return a.local[j];
             return {mul(a.local[j].q,axis_angle(axis,degrees*kPi/180)),a.local[j].p};
         }
@@ -760,7 +821,7 @@ private:
             foot_[i].at={solved.wrist.x,solved.wrist.y,foot_[i].at.z};dragged_[i]=true;
         }
     }
-    std::vector<Xf> pose_arm(int i,const Xf& chest,Quaternion chest_delta,const Inputs& in,double dt,bool& reached) {
+    std::vector<Xf> pose_arm(int i,const Xf& chest,Quaternion chest_delta,const Inputs& in,double dt,bool& reached,ArmState& state) const {
         const auto& s=sk_[1+i];
         std::vector<Xf> w(s.local.size());
         // Bind joints in world, carried by the chest.
@@ -777,9 +838,12 @@ private:
         }
         const auto* native=in.native_arm[i] && in.native_arm[i]->size()==s.local.size()?in.native_arm[i]:nullptr;
         const bool procedural=!native || in.hand_empty[i];
+        if(state.socket_token!=in.native_socket_token[i]) {state.has_hold=false;state.socket_token=in.native_socket_token[i];}
+        const bool native_socket=native && (!procedural || in.native_socket_token[i]);
+        state.finger_mode=procedural?(in.has_finger[i]?1:2):3;
         // Held item: the native attachment local is rotated by authored attack/block/equip clips, so
         // the socket keeps the last steady value (<20 deg/s, <5 cm/s for 0.25 s) and the player owns the grip.
-        if(procedural) has_hold_[i]=false;
+        if(!native_socket) state.has_hold=false;
         else {
             auto n=mul(inverse((*native)[s.parent[attach_[i]]]),(*native)[attach_[i]]);n.p=n.p*scale_;
             // Sneak stance holds the sword reversed: attachment Y along -wrist Z in every sword sneak clip,
@@ -787,21 +851,21 @@ private:
             // the standing clips' socket (sword_idle T -.0148 -.0916 .0262 vs sneak .0305 -.0654 .025, native units;
             // keeping the sneak offset put the fist on the blade above the handle, headset v346).
             if(i==1 && rotated(n.q,{0,1,0}).z<-.5) {n.q=mul(n.q,axis_angle({0,0,1},kPi));n.p=n.p+Vec3{-.0453,-.0262,.0012}*scale_;}
-            if(!has_hold_[i]) {hold_[i]=hold_prev_[i]=n;hold_steady_[i]=0;has_hold_[i]=true;}
+            if(!state.has_hold) {state.hold=state.hold_prev=n;state.hold_steady=0;state.has_hold=true;}
             else if(dt>0) {
-                const double ang=2*std::acos(std::min(1.,std::abs(n.q.x*hold_prev_[i].q.x+n.q.y*hold_prev_[i].q.y+n.q.z*hold_prev_[i].q.z+n.q.w*hold_prev_[i].q.w)));
-                const bool calm=ang/dt<20*kPi/180 && length(n.p-hold_prev_[i].p)/dt<.05;
-                hold_steady_[i]=calm?hold_steady_[i]+dt:0;hold_prev_[i]=n;
-                if(hold_steady_[i]>=.25) {const double k=std::min(1.,dt*8);hold_[i]={nlerp(hold_[i].q,n.q,k),hold_[i].p+(n.p-hold_[i].p)*k};}
+                const double ang=2*std::acos(std::min(1.,std::abs(n.q.x*state.hold_prev.q.x+n.q.y*state.hold_prev.q.y+n.q.z*state.hold_prev.q.z+n.q.w*state.hold_prev.q.w)));
+                const bool calm=ang/dt<20*kPi/180 && length(n.p-state.hold_prev.p)/dt<.05;
+                state.hold_steady=calm?state.hold_steady+dt:0;state.hold_prev=n;
+                if(state.hold_steady>=.25) {const double k=std::min(1.,dt*8);state.hold={nlerp(state.hold.q,n.q,k),state.hold.p+(n.p-state.hold.p)*k};}
             }
         }
         const auto hand_local=[&](int j) {
-            if(procedural) return finger_local(i,j,in.grip[i],in.trigger[i]);
-            if(j==attach_[i]) {
-                auto h=hold_[i];
+            if(j==attach_[i] && native_socket) {
+                auto h=state.hold;
                 if(in.reverse_grip[i]) h.q=mul(h.q,axis_angle(palm_attach_[i],kPi));
                 return h;
             }
+            if(procedural) return finger_local(i,j,in.grip[i],in.trigger[i],state,in.has_finger[i]?in.finger_turn[i]:nullptr,in.has_finger[i] && in.has_finger_axis[i]?in.finger_axis[i]:nullptr);
             auto l=mul(inverse((*native)[s.parent[j]]),(*native)[j]);
             l.p=l.p*scale_;
             return l;
@@ -834,8 +898,8 @@ private:
         const auto palm=rotated(mul(wrist_target.q,conj(carried[wrist_[i]].q)),rotated(chest_delta,{0,0,-1}));
         const auto reach=wrist_target.p-shoulder;
         Vec3 pole=rig::boneworks_elbow_pole(length(reach)>1e-4?reach:fwd,fwd,outward,up,la+lb,dot(palm,up),
-                                            has_pole_[i]?&pole_[i]:nullptr,dt);
-        pole_[i]=pole;has_pole_[i]=true;
+                                            state.has_pole?&state.pole:nullptr,dt);
+        state.pole=pole;state.has_pole=true;
         // Soft IK: near full reach the elbow straightens along an exponential instead of popping
         // (2-bone IK has infinite d(elbow)/d(reach) at L); the hand stays exact through a small
         // bone stretch, at most 6%, beyond which the hand stops short.
@@ -869,8 +933,8 @@ private:
         const auto axis=unit(solved.wrist-solved.elbow);
         // Unwrap against the previous frame so the roll never jumps across +-180 degrees.
         double raw=twist_angle(mul(wrist_target.q,conj(wrist_carried)),axis);
-        if(has_roll_[i]) raw=roll_[i]+wrap_pi(raw-roll_[i]);
-        roll_[i]=raw;has_roll_[i]=true;
+        if(state.has_roll) raw=state.roll+wrap_pi(raw-state.roll);
+        state.roll=raw;state.has_roll=true;
         const double roll=std::clamp(raw,-2.3,2.3);
         for(size_t j=0;j<s.local.size();++j) if(s.parent[j]==elbow_[i] && static_cast<int>(j)!=wrist_[i]) {
             const double along=std::clamp(dot(w[j].p-be.p,bw.p-be.p)/dot(bw.p-be.p,bw.p-be.p),0.,1.);

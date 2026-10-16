@@ -25,7 +25,7 @@ namespace d2vr {
 class GlyphSwap {
     friend struct GlyphSwapAsyncCheck;
     template<class T> using Ptr=Microsoft::WRL::ComPtr<T>;
-    struct Entry {Ptr<ID3D11ShaderResourceView> source,replacement,wheel;bool pending{};};
+    struct Entry {Ptr<ID3D11ShaderResourceView> source,replacement,wheel,talk;bool pending{};};
     struct Job {Ptr<ID3D11ShaderResourceView> view;Ptr<ID3D11Texture2D> staging;D3D11_TEXTURE2D_DESC desc{};};
     using SetFn=void (STDMETHODCALLTYPE*)(ID3D11DeviceContext*,UINT,UINT,ID3D11ShaderResourceView* const*);
     inline static std::array<SetFn,2> original_{};inline static std::array<void*,2> target_{};
@@ -62,7 +62,10 @@ class GlyphSwap {
             if(it!=map_.end()) {
                 if(native_labels.load(std::memory_order_relaxed)) return {}; // menus/notes: buttons are not remapped, keep the game's glyph
                 if(it->second.pending) return transparent_; // being read back (1-2 frames): no raw Xbox glyph flashing in first
-                return wheel_open.load(std::memory_order_relaxed) && it->second.wheel?it->second.wheel:it->second.replacement;
+                if(wheel_open.load(std::memory_order_relaxed))return it->second.wheel?it->second.wheel:it->second.replacement;
+                const auto talk_context=talk_prompt_context.load(std::memory_order_acquire);
+                if(talk_context && talk_context() && it->second.talk)return it->second.talk;
+                return it->second.replacement;
             }
         }
         bool candidate=false;
@@ -79,7 +82,7 @@ class GlyphSwap {
         {std::scoped_lock lock(map_mutex_,pending_mutex_);
             if(!enabled.load() || map_.find(view)!=map_.end()) return {};
             if(candidate && pending_count_==pending_.size()) return {}; // Retry the bind after capacity opens.
-            if(candidate) {map_.emplace(view,Entry{{},{},{},true});pending_[pending_count_++]=std::move(owned);++pending_readbacks;}
+            if(candidate) {map_.emplace(view,Entry{{},{},{},{},true});pending_[pending_count_++]=std::move(owned);++pending_readbacks;}
             else map_.emplace(view,Entry{});
         }
         return {};
@@ -107,6 +110,8 @@ public:
     inline static std::atomic<bool> enabled{false};
     inline static std::atomic<bool> native_labels{false}; // outside gameplay and the wheel: A/B/X/Y act as themselves
     inline static std::atomic<bool> wheel_open{false}; // Quick Access Wheel held: bind wheel_glyph_label art
+    using TalkPromptContext=bool (*)() noexcept;
+    inline static std::atomic<TalkPromptContext> talk_prompt_context{};
     // Optional observer of every PS view bind (FSR upscale bookkeeping); called before the swap.
     inline static std::atomic<void (*)(ID3D11DeviceContext*,UINT,UINT,ID3D11ShaderResourceView* const*)> observer{};
     inline static std::atomic<std::uint64_t> swaps{},identified{},checked{},deferred{},failed{},completed{};
@@ -142,7 +147,7 @@ public:
         {std::unique_lock<std::shared_mutex> lock(map_mutex_);
             if(map_.size()>16384) for(auto it=map_.begin();it!=map_.end();) {
                 const auto& entry=it->second;
-                it=entry.pending || entry.replacement || entry.source?std::next(it):map_.erase(it);
+                it=entry.pending || entry.replacement || entry.wheel || entry.talk || entry.source?std::next(it):map_.erase(it);
             }
         }
         for(auto& job:jobs_) {
@@ -168,7 +173,7 @@ public:
                 const auto result=c->Map(job.staging.Get(),0,D3D11_MAP_READ,D3D11_MAP_FLAG_DO_NOT_WAIT,&mapped);
                 if(result==DXGI_ERROR_WAS_STILL_DRAWING) {++deferred;continue;}
                 if(SUCCEEDED(result)) {
-                    Ptr<ID3D11ShaderResourceView> replacement,wheel;bool completion_failed=false;
+                    Ptr<ID3D11ShaderResourceView> replacement,wheel,talk;bool completion_failed=false;
                     const UINT row=((job.desc.Width+3)/4)*16,bh=(job.desc.Height+3)/4;
                     try {
                         if(!mapped.pData || mapped.RowPitch<row)throw std::runtime_error("Invalid glyph readback row");
@@ -191,13 +196,20 @@ public:
                                 if(FAILED(device->CreateTexture2D(&d,&wheel_init,&wheel_painted)) ||
                                    FAILED(device->CreateShaderResourceView(wheel_painted.Get(),&sd,&wheel)))throw std::runtime_error("Cannot create wheel glyph");
                             }
+                            if(std::strcmp(glyph->name,"X_XBOX")==0 || std::strcmp(glyph->name,"X_XBOX_s")==0) {
+                                paint_quest_glyphs(rgba.data(),job.desc.Width,job.desc.Height,"Y");
+                                const auto talk_blocks=encode_bc7_mode6(rgba.data(),job.desc.Width,job.desc.Height);
+                                D3D11_SUBRESOURCE_DATA talk_init{talk_blocks.data(),row,0};Ptr<ID3D11Texture2D> talk_painted;
+                                if(SUCCEEDED(device->CreateTexture2D(&d,&talk_init,&talk_painted)))
+                                    device->CreateShaderResourceView(talk_painted.Get(),&sd,&talk);
+                            }
                             identified_mask|=1u<<static_cast<unsigned>(glyph-kXboxGlyphs);++identified;
                         }
                     } catch(...) {completion_failed=true;++failed;}
                     c->Unmap(job.staging.Get(),0);
                     {std::unique_lock<std::shared_mutex> lock(map_mutex_);
                         if(completion_failed) map_.erase(job.view.Get());
-                        else {auto& entry=map_[job.view.Get()];entry.pending=false;entry.replacement=std::move(replacement);entry.wheel=std::move(wheel);
+                        else {auto& entry=map_[job.view.Get()];entry.pending=false;entry.replacement=std::move(replacement);entry.wheel=std::move(wheel);entry.talk=std::move(talk);
                             if(entry.replacement)entry.source=job.view;}
 
                     }

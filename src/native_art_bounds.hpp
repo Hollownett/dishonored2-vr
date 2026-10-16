@@ -14,6 +14,11 @@ namespace d2vr {
 class NativeArtBounds {
     template<class T> using Ptr=Microsoft::WRL::ComPtr<T>;
 public:
+    struct Observer {
+        void* user{};
+        std::uint64_t (*begin)(void*,ID3D11DeviceContext*,unsigned,int,std::uint64_t) noexcept{};
+        void (*end)(void*,ID3D11DeviceContext*,std::uint64_t) noexcept{};
+    } observer{};
     struct Metadata {std::uintptr_t owner{},file{},iggy{};UINT64 epoch{},tick{},serial{};};
     struct Result {
         Ptr<ID3D11Texture2D> texture;D3D11_BOX crop{};Metadata metadata{};bool empty{};
@@ -24,6 +29,11 @@ public:
     };
     using Lease=std::shared_ptr<const Result>;
 private:
+    struct Observation {
+        Observer observer;ID3D11DeviceContext* context{};std::uint64_t ticket{};
+        void finish() noexcept {const auto ended=ticket;ticket=0;if(ended && observer.end)observer.end(observer.user,context,ended);}
+        ~Observation(){finish();}
+    };
     struct Slot {
         Ptr<ID3D11Texture2D> texture;Ptr<ID3D11ShaderResourceView> srv;
         Ptr<ID3D11Buffer> bounds,staging;Ptr<ID3D11UnorderedAccessView> uav;Ptr<ID3D11Query> event;
@@ -94,6 +104,9 @@ groupshared uint x0,y0,x1,y1;
         Ptr<ID3D11ComputeShader> old_shader;Ptr<ID3D11ShaderResourceView> old_srv;Ptr<ID3D11UnorderedAccessView> old_uav;
         std::array<ID3D11ClassInstance*,256> instances{};UINT count=static_cast<UINT>(instances.size());
         context_->CSGetShader(&old_shader,instances.data(),&count);context_->CSGetShaderResources(0,1,&old_srv);context_->CSGetUnorderedAccessViews(0,1,&old_uav);
+        Observation observed{observer,context_.Get()};
+        if(observed.observer.begin && observed.observer.end)
+            observed.ticket=observed.observer.begin(observed.observer.user,context_.Get(),0,-1,metadata.serial);
         context_->CopyResource(slot.texture.Get(),source);
         // Raw-buffer UAV clears repeat component zero, not a uint4 tuple.
         // Upload the four distinct reduction seeds without any GPU readback.
@@ -104,6 +117,7 @@ groupshared uint x0,y0,x1,y1;
         ID3D11ShaderResourceView* no_srv{};ID3D11UnorderedAccessView* no_uav{};
         context_->CSSetShaderResources(0,1,&no_srv);context_->CSSetUnorderedAccessViews(0,1,&no_uav,nullptr);
         context_->CopyResource(slot.staging.Get(),slot.bounds.Get());context_->End(slot.event.Get());
+        observed.finish();
         srv=old_srv.Get();uav=old_uav.Get();context_->CSSetShader(old_shader.Get(),instances.data(),count);
         context_->CSSetShaderResources(0,1,&srv);context_->CSSetUnorderedAccessViews(0,1,&uav,nullptr);
         for(unsigned i=0;i<count;++i)if(instances[i])instances[i]->Release();

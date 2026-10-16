@@ -104,6 +104,7 @@ void scenario_basic() {
     st = t.poll(m, base, 1002);
     require(!st.choke && st.kill && !st.drop, "A: valid kill id, +0x48==0 -> kill only");
     require(st.spawn == 0x2000u, "A: kill spawn id exposed");
+    require(st.kill_spawn==0x2000u && st.drop_spawn==0, "A: separate kill target");
 
     m.put<std::uint8_t>(ass + 0x48, 1);
     st = t.poll(m, base, 1003);
@@ -116,6 +117,23 @@ void scenario_basic() {
     m.put<std::uint32_t>(drop + 0x78, 1);
     st = t.poll(m, base, 1004);
     require(!st.choke && !st.kill && st.drop, "A: drop count 1 valid id -> drop only");
+    require(st.kill_spawn==0 && st.drop_spawn==0x3000u, "A: separate drop target");
+    m.put<std::uint32_t>(choke+0x50,0x1234u);
+    unsigned choke_reads{},kill_reads{},drop_reads{};
+    auto once=[&](uptr address,void* output,std::size_t size) {
+        if(address==choke+0x50 && ++choke_reads>1)return false;
+        if(address==ass+0x40 && ++kill_reads>1)return false;
+        if(address==ids && ++drop_reads>1)return false;
+        return m.read(address,output,size);
+    };
+    st=t.poll(once,base,1004);
+    require(st.choke && st.drop && st.spawn==0x1234u && st.drop_spawn==0x3000u && !st.kill_spawn, "A: choke precedence cannot replace drop target");
+    require(choke_reads==1 && kill_reads==1 && drop_reads==1, "A: each native target captured once");
+    m.put<std::uint32_t>(ass+0x40,0x2000u);choke_reads=kill_reads=drop_reads=0;
+    st=t.poll(once,base,1004);
+    require(st.kill && st.spawn==0x2000u && st.kill_spawn==0x2000u && st.drop_spawn==0x3000u, "A: legacy kill precedence with independent drop");
+    require(choke_reads==1 && kill_reads==1 && drop_reads==1, "A: qualified target never dereferenced twice");
+    m.put<std::uint32_t>(choke+0x50,none);m.put<std::uint32_t>(ass+0x40,none);
 
     m.put<std::uint32_t>(drop + 0x78, 0);
     st = t.poll(m, base, 1005);

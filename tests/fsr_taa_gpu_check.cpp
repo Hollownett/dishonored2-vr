@@ -11,6 +11,8 @@
 #include <cstdio>
 #include <stdexcept>
 #include <filesystem>
+#include <chrono>
+#include <fstream>
 
 template<class T> using Ptr=Microsoft::WRL::ComPtr<T>;
 static void check(bool ok,const char* message) {if(!ok) throw std::runtime_error(message);}
@@ -29,12 +31,14 @@ static void settle(d2vr::GpuPassTimer& timer,ID3D11DeviceContext* context,std::u
     check(timer.stats().samples+timer.stats().disjoint>=count,"GPU query completion timed out");
 }
 static void run(ID3D11Device* device,ID3D11DeviceContext* context,float fraction,const std::wstring& provider={},bool expect_fsr4=false,
-    DXGI_FORMAT native_colour=DXGI_FORMAT_R8G8B8A8_UNORM,UINT native_mips=1) {
-    constexpr UINT w=2496,h=2688;
+    DXGI_FORMAT native_colour=DXGI_FORMAT_R8G8B8A8_UNORM,UINT native_mips=1,bool actual100=false,const std::string& output_path={},
+    DXGI_FORMAT output_format=DXGI_FORMAT_R8G8B8A8_UNORM) {
+    const UINT w=actual100?2112:2496,h=actual100?2304:2688;
     std::vector<DirectX::PackedVector::HALF> hdr(size_t(w)*h*4),motion(size_t(w)*h*2,0);
     std::vector<unsigned char> ldr(size_t(w)*h*4);
     for(size_t i=0;i<size_t(w)*h;++i) for(unsigned c=0;c<4;++c) {
-        const float v=c==3?1.f:c==0?.5f:c==1?.25f:.1f;
+        float v=c==3?1.f:c==0?.5f:c==1?.25f:.1f;
+        if(actual100 && c<3) v+=.04f*static_cast<float>((i%w/47+i/w/53+c)%3)-.04f;
         hdr[i*4+c]=DirectX::PackedVector::XMConvertFloatToHalf(v);ldr[i*4+c]=static_cast<unsigned char>(std::lround(v*255.f));
     }
     auto colour=texture(device,w,h,DXGI_FORMAT_R16G16B16A16_FLOAT,D3D11_BIND_SHADER_RESOURCE,hdr.data(),8);
@@ -42,12 +46,14 @@ static void run(ID3D11Device* device,ID3D11DeviceContext* context,float fraction
     auto history=texture(device,w,h,DXGI_FORMAT_R16G16B16A16_FLOAT,D3D11_BIND_SHADER_RESOURCE|D3D11_BIND_UNORDERED_ACCESS);
     auto result=texture(device,w,h,DXGI_FORMAT_R16G16B16A16_FLOAT,D3D11_BIND_UNORDERED_ACCESS|D3D11_BIND_SHADER_RESOURCE);
     auto tonemapped=texture(device,w,h,native_colour,D3D11_BIND_SHADER_RESOURCE,ldr.data(),4,native_mips);
-    auto eye=texture(device,w,h,DXGI_FORMAT_R8G8B8A8_UNORM,D3D11_BIND_RENDER_TARGET);
+    auto eye=texture(device,w,h,output_format,D3D11_BIND_RENDER_TARGET);
     auto depth=texture(device,w,h,DXGI_FORMAT_R32_TYPELESS,D3D11_BIND_DEPTH_STENCIL|D3D11_BIND_SHADER_RESOURCE);
     Ptr<ID3D11DepthStencilView> dsv;D3D11_DEPTH_STENCIL_VIEW_DESC dv{};dv.Format=DXGI_FORMAT_D32_FLOAT;dv.ViewDimension=D3D11_DSV_DIMENSION_TEXTURE2D;
     check(SUCCEEDED(device->CreateDepthStencilView(depth.Get(),&dv,&dsv)),"depth view");
     Ptr<ID3D11RenderTargetView> eye_rtv;Ptr<ID3D11ShaderResourceView> tone_srv;
-    check(SUCCEEDED(device->CreateRenderTargetView(eye.Get(),nullptr,&eye_rtv)),"eye view");
+    D3D11_RENDER_TARGET_VIEW_DESC eye_view{};eye_view.ViewDimension=D3D11_RTV_DIMENSION_TEXTURE2D;
+    eye_view.Format=output_format==DXGI_FORMAT_R8G8B8A8_TYPELESS?DXGI_FORMAT_R8G8B8A8_UNORM:output_format;
+    check(SUCCEEDED(device->CreateRenderTargetView(eye.Get(),&eye_view,&eye_rtv)),"eye view");
     D3D11_SHADER_RESOURCE_VIEW_DESC tone_desc{};tone_desc.Format=native_colour==DXGI_FORMAT_R8G8B8A8_TYPELESS?DXGI_FORMAT_R8G8B8A8_UNORM:native_colour;
     tone_desc.ViewDimension=D3D11_SRV_DIMENSION_TEXTURE2D;tone_desc.Texture2D.MipLevels=1;
     check(SUCCEEDED(device->CreateShaderResourceView(tonemapped.Get(),&tone_desc,&tone_srv)),"tonemap view");
@@ -62,6 +68,9 @@ static void run(ID3D11Device* device,ID3D11DeviceContext* context,float fraction
     D3D11_BUFFER_DESC cb{};cb.ByteWidth=800;cb.BindFlags=D3D11_BIND_CONSTANT_BUFFER;check(SUCCEEDED(device->CreateBuffer(&cb,nullptr,&b.cb[0])),"per-view constants");
     Ptr<ID3D11DeviceContext> deferred;check(SUCCEEDED(device->CreateDeferredContext(0,&deferred)),"deferred context");
     auto fsr=std::make_unique<d2vr::FsrTaa>();fsr->enabled=true;fsr->fraction=fraction;
+#if defined(D2VR_FSR4_COMPUTE_TIMING) && !defined(D2VR_FSR_BASELINE)
+    fsr->fsr4_compute_timing_enabled=true;
+#endif
 #ifndef D2VR_FSR_BASELINE
     fsr->fsr4_provider_path=provider;
 #else
@@ -96,26 +105,56 @@ static void run(ID3D11Device* device,ID3D11DeviceContext* context,float fraction
             check(context->GetData(completed.Get(),nullptr,0,D3D11_ASYNC_GETDATA_DONOTFLUSH)==S_OK,"Diagnostic GPU completion timeout");}
     };
     for(unsigned i=0;i<8;++i) {pair(i);settle_pair();if(!i) std::puts("first eye pair executed");}
-    constexpr unsigned samples=32;
+#if defined(D2VR_FSR4_COMPUTE_TIMING) && !defined(D2VR_FSR_BASELINE)
+    fsr->poll_fsr4_gpu_timing();
+    std::array<std::uint64_t,2> compute_start_samples{};std::array<double,2> compute_start_ms{};
+    for(unsigned side=0;side<2;++side) {
+        compute_start_samples[side]=fsr->eye_fsr4_compute_gpu_samples[side].load();
+        compute_start_ms[side]=fsr->eye_fsr4_compute_gpu_total_ms[side].load();
+    }
+#endif
+    const unsigned samples=actual100?128:32;
+    double cpu_total_ms=0;
+    std::array<double,2> cpu_record_ms{},cpu_handoff_ms{};
     for(unsigned i=0;i<samples;++i) {
-        const int ticket=timer.begin(context);check(ticket>=0,"reserve performance sample");pair(i+8);timer.end(context,ticket);settle_pair();
+        const int ticket=timer.begin(context);check(ticket>=0,"reserve performance sample");
+        const auto cpu_start=std::chrono::steady_clock::now();pair(i+8);
+        cpu_total_ms+=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-cpu_start).count();
+#ifndef D2VR_FSR_BASELINE
+        if(actual100) for(unsigned side=0;side<2;++side) {
+            cpu_record_ms[side]+=fsr->eye_fsr4_record_ms[side].load();
+            cpu_handoff_ms[side]+=fsr->eye_fsr4_handoff_ms[side].load();
+        }
+#endif
+        timer.end(context,ticket);settle_pair();
         if(i%4==3) settle(timer,context,i+1);
     }
     settle(timer,context,samples);const auto measured=timer.stats();
-    check(measured.samples==samples && measured.disjoint==0 && fsr->failures==0 && fsr->create_failures==0 && fsr->replaced==80,"successful measured eye dispatches");
+#if defined(D2VR_FSR4_COMPUTE_TIMING) && !defined(D2VR_FSR_BASELINE)
+    fsr->poll_fsr4_gpu_timing();
+    if(actual100 && expect_fsr4) for(unsigned side=0;side<2;++side) {
+        const auto count=fsr->eye_fsr4_compute_gpu_samples[side].load()-compute_start_samples[side];
+        const double total=fsr->eye_fsr4_compute_gpu_total_ms[side].load()-compute_start_ms[side];
+        check(count==samples,"All measured FSR4 compute-only GPU samples must complete");
+        std::printf("FSR4_compute_eye=%u completed_samples=%llu total_ms=%.6f mean_ms=%.6f includes_warmup=0\n",
+            side,static_cast<unsigned long long>(count),total,total/static_cast<double>(count));
+    }
+#endif
+    const auto dispatches=2ull*(8+samples);
+    check(measured.samples==samples && measured.disjoint==0 && fsr->failures==0 && fsr->create_failures==0 && fsr->replaced==dispatches,"successful measured eye dispatches");
 #ifndef D2VR_FSR_BASELINE
     if(expect_fsr4) {
-        check(fsr->fsr4_create_failures==0 && fsr->fsr4_fallbacks==0 && fsr->fsr4_dispatches==80,"All per-eye jobs must use the genuine FSR4 provider");
+        check(fsr->fsr4_create_failures==0 && fsr->fsr4_fallbacks==0 && fsr->fsr4_dispatches==dispatches,"All per-eye jobs must use the genuine FSR4 provider");
         check(fsr->eye_upscaler_generation[0]==4 && fsr->eye_upscaler_generation[1]==4 && fsr->eye_fsr4_version[0] && fsr->eye_fsr4_version[1],"Both eyes must report actual FSR4 provider identities");
         std::printf("FSR4 per-eye dispatches=%llu provider_ids=[%llu,%llu]\n",static_cast<unsigned long long>(fsr->fsr4_dispatches.load()),static_cast<unsigned long long>(fsr->eye_fsr4_version[0].load()),static_cast<unsigned long long>(fsr->eye_fsr4_version[1].load()));
     } else if(!provider.empty()) {
-        check(fsr->fsr4_create_failures==2 && fsr->fsr4_dispatches==0 && fsr->fsr4_fallbacks==80,"Unavailable FSR4 must retain the FSR3 route");
+        check(fsr->fsr4_create_failures==2 && fsr->fsr4_dispatches==0 && fsr->fsr4_fallbacks==dispatches,"Unavailable FSR4 must retain the FSR3 route");
         check(fsr->eye_upscaler_generation[0]==3 && fsr->eye_upscaler_generation[1]==3 && !fsr->eye_fsr4_version[0] && !fsr->eye_fsr4_version[1],"Fallback must not report an FSR4 provider");
         std::puts("PASS: missing FSR4 provider preserves FSR3 for both eyes");
     }
 #endif
 #ifndef D2VR_FSR_BASELINE
-    if(fraction<.999f) {
+    if(fraction<.999f && !actual100) {
         // Governor steps: a smaller (then the original) fraction reuses the contexts, a larger one rebuilds once.
         const auto builds=fsr->context_builds.load(),replaced=fsr->replaced.load(),ml_before=fsr->fsr4_dispatches.load();
         for(const float f:{fraction-.07f,fraction}) {fsr->fraction=f;fsr->prepare(device);check(fsr->ready,"resized FSR ready");pair(40);settle_pair();pair(41);settle_pair();}
@@ -132,9 +171,25 @@ static void run(ID3D11Device* device,ID3D11DeviceContext* context,float fraction
     Ptr<ID3D11Texture2D> readback;check(SUCCEEDED(device->CreateTexture2D(&od,nullptr,&readback)),"output readback");context->CopyResource(readback.Get(),output);
     D3D11_MAPPED_SUBRESOURCE mapped{};check(SUCCEEDED(context->Map(readback.Get(),0,D3D11_MAP_READ,0,&mapped)),"map result");
     const auto* middle=static_cast<const unsigned char*>(mapped.pData)+(h/2)*mapped.RowPitch+(w/2)*(fraction<.999f?4:8);
-    const float red=fraction<.999f?middle[0]/255.f:DirectX::PackedVector::XMConvertHalfToFloat(reinterpret_cast<const DirectX::PackedVector::HALF*>(middle)[0]);context->Unmap(readback.Get(),0);
+    const float red=fraction<.999f?middle[0]/255.f:DirectX::PackedVector::XMConvertHalfToFloat(reinterpret_cast<const DirectX::PackedVector::HALF*>(middle)[0]);
+    std::uint64_t pixel_hash=14695981039346656037ull;
+    if(actual100) {
+        std::ofstream pixels;
+        if(!output_path.empty()) {pixels.open(output_path,std::ios::binary);check(pixels.is_open(),"open output pixel dump");}
+        for(UINT y=0;y<h;++y) {
+            const auto* row=static_cast<const unsigned char*>(mapped.pData)+size_t(y)*mapped.RowPitch;
+            for(UINT x=0;x<w*4;++x) {pixel_hash^=row[x];pixel_hash*=1099511628211ull;}
+            if(pixels.is_open()) pixels.write(reinterpret_cast<const char*>(row),static_cast<std::streamsize>(w)*4);
+        }
+        if(pixels.is_open()) {pixels.close();check(!pixels.fail(),"write output pixel dump");}
+    }
+    context->Unmap(readback.Get(),0);
     check(std::isfinite(red) && red>.4f && red<.6f,"FSR colour result valid");
     std::printf("fraction=%.2f render=%ux%u display=%ux%u samples=%llu GPU_pair_mean_ms=%.6f max_ms=%.6f output_red=%.4f\n",fraction,static_cast<UINT>(std::lround(w*fraction)),static_cast<UINT>(std::lround(h*fraction)),w,h,static_cast<unsigned long long>(measured.samples),measured.total_ms/static_cast<double>(measured.samples),measured.max_ms,red);
+    if(actual100) std::printf("GPU_pair_total_ms=%.6f CPU_pair_submit_total_ms=%.6f CPU_pair_submit_mean_ms=%.6f pixel_fnv1a64=%016llx pixel_bytes=%llu\n",
+        measured.total_ms,cpu_total_ms,cpu_total_ms/samples,static_cast<unsigned long long>(pixel_hash),static_cast<unsigned long long>(w)*h*4);
+    if(actual100) std::printf("output_format=%u CPU_FSR4_record_eye_mean_ms=[%.6f,%.6f] CPU_FSR4_handoff_eye_mean_ms=[%.6f,%.6f]\n",
+        static_cast<unsigned>(output_format),cpu_record_ms[0]/samples,cpu_record_ms[1]/samples,cpu_handoff_ms[0]/samples,cpu_handoff_ms[1]/samples);
     fsr->clear();
 }
 int main(int argc,char** argv) {
@@ -142,16 +197,40 @@ int main(int argc,char** argv) {
     try {
         Ptr<ID3D11Device> device;Ptr<ID3D11DeviceContext> context;D3D_FEATURE_LEVEL wanted=D3D_FEATURE_LEVEL_11_1;
         check(SUCCEEDED(D3D11CreateDevice(nullptr,D3D_DRIVER_TYPE_HARDWARE,nullptr,0,&wanted,1,D3D11_SDK_VERSION,&device,nullptr,&context)),"hardware FL11.1 device");
+        Ptr<IDXGIDevice> dxgi;Ptr<IDXGIAdapter> adapter;DXGI_ADAPTER_DESC adapter_desc{};
+        check(SUCCEEDED(device.As(&dxgi)) && SUCCEEDED(dxgi->GetAdapter(&adapter)) && SUCCEEDED(adapter->GetDesc(&adapter_desc)),"hardware adapter identity");
+        std::printf("adapter=%ls vendor=%04x device=%04x LUID=%08x:%08x dedicated_vram_bytes=%llu\n",
+            adapter_desc.Description,adapter_desc.VendorId,adapter_desc.DeviceId,static_cast<unsigned>(adapter_desc.AdapterLuid.HighPart),
+            static_cast<unsigned>(adapter_desc.AdapterLuid.LowPart),static_cast<unsigned long long>(adapter_desc.DedicatedVideoMemory));
 #ifdef D2VR_FSR_BASELINE
         std::puts("FSR wrapper baseline: padded/full-size input copy and depth work");
 #else
         std::puts("FSR wrapper candidate: cropped input copy and active-size depth work");
 #endif
         std::wstring provider;
-        const bool ml=argc>1 && std::string(argv[1])=="--fsr4";
+        bool ml=false,missing=false,actual100=false;std::string output_path;
+        DXGI_FORMAT output_format=DXGI_FORMAT_R8G8B8A8_UNORM;
+        for(int i=1;i<argc;++i) {
+            const std::string arg=argv[i];
+            if(arg=="--fsr4") ml=true;
+            else if(arg=="--fsr4-missing") missing=true;
+            else if(arg=="--100-percent") actual100=true;
+            else if(arg=="--output-srgb" || arg=="--output-typeless") {
+                check(output_format==DXGI_FORMAT_R8G8B8A8_UNORM,"Select one output format");
+                output_format=arg=="--output-srgb"?DXGI_FORMAT_R8G8B8A8_UNORM_SRGB:DXGI_FORMAT_R8G8B8A8_TYPELESS;
+            }
+            else if(arg=="--output" && i+1<argc) output_path=argv[++i];
+            else check(false,"Unknown GPU check argument");
+        }
+        check(!(ml && missing),"Select one FSR provider");
+        check(output_path.empty() || actual100,"Pixel dump requires --100-percent");
+        check(output_format==DXGI_FORMAT_R8G8B8A8_UNORM || actual100,"Output format requires --100-percent");
         if(ml) provider=std::filesystem::absolute(L"third_party/fsr4/bin/amd_fidelityfx_upscaler_dx12.dll").wstring();
-        else if(argc>1 && std::string(argv[1])=="--fsr4-missing") provider=std::filesystem::absolute(L"third_party/fsr4/missing/amd_fidelityfx_upscaler_dx12.dll").wstring();
-        else check(argc==1,"Unknown GPU check argument");
+        else if(missing) provider=std::filesystem::absolute(L"third_party/fsr4/missing/amd_fidelityfx_upscaler_dx12.dll").wstring();
+        if(actual100) {
+            run(device.Get(),context.Get(),.77f,provider,ml,DXGI_FORMAT_R8G8B8A8_UNORM,1,true,output_path,output_format);
+            std::puts("PASS: actual100 output geometry, patterned synthetic scene; not game-frame performance");return 0;
+        }
         run(device.Get(),context.Get(),1.f,provider,ml);run(device.Get(),context.Get(),.77f,provider,ml);run(device.Get(),context.Get(),.67f,provider,ml);
         if(ml) for(const auto format:{DXGI_FORMAT_R8G8B8A8_UNORM_SRGB,DXGI_FORMAT_R8G8B8A8_TYPELESS}) {
             run(device.Get(),context.Get(),.77f,provider,true,format,2);

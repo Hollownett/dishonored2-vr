@@ -10,6 +10,9 @@ inline constexpr std::uintptr_t side_by_side_mode_rva=0x1aca220;
 inline constexpr std::uintptr_t separation_value_rva=0x2be694c;
 inline constexpr std::uintptr_t screen_separation_value_rva=0x2be69cc;
 inline constexpr std::size_t prepared_view_stride=0x3ab0;
+inline bool native_stereo_preparation_allowed(bool xr,std::size_t views) noexcept {
+    return views==1 || (xr && views==0);
+}
 
 // The matched native begin-view calls delimit complete eyes independently of
 // how many compositor/GUI passes bind the backbuffer. Reset at every Present.

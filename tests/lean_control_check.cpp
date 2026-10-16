@@ -8,8 +8,9 @@ int main() {
     LeanControl r;auto tick=[&](unsigned t){return r.update(raw,s,true,true,1,t);};
     assert(!tick(1).y);raw.y=true;auto o=tick(10);assert(o.y&&o.lean_suspended&&!o.lean_modifier);
     s.active=true;raw.turn_x=.8f;raw.move_y=.8f;o=tick(20);assert(o.y&&o.lean_modifier);
+    o.lean_controlled=o.lean_modifier=o.lean_suspended=false;
     PadComposer p;ControllerInput blank{};blank.active=true;p.compose(blank,true,1);
-    auto pad=p.compose(o,true,20);assert(pad.sThumbLX>20000&&pad.sThumbLY==0&&pad.sThumbRX==0&&pad.sThumbRY==0);
+    auto pad=p.compose(o,true,20);assert(!(pad.wButtons&XINPUT_GAMEPAD_Y)&&pad.sThumbLX==0&&pad.sThumbLY>20000&&pad.sThumbRX>20000&&pad.sThumbRY==0);
     raw.y=false;o=tick(30);assert(!o.y&&o.lean_suspended&&o.turn_x==0);
     assert(!tick(129).y);assert(tick(130).y);assert(tick(279).y);assert(!tick(280).y);
     s.active=false;assert(tick(290).lean_suspended);raw.move_y=raw.turn_x=0;assert(!tick(300).lean_suspended);
@@ -46,10 +47,9 @@ int main() {
     raw.y=true;external.update(raw,s,true,true,1,10);s.active=true;external.update(raw,s,true,true,1,20);
     s.active=false;raw.turn_x=.9f;o=external.update(raw,s,true,true,1,30);
     assert(!o.y && !o.lean_modifier && o.lean_suspended && o.turn_x==0);
-    // Pad pulses reserve both axes even when no directional modifier is acknowledged.
-    o={};o.active=true;o.lean_controlled=true;o.lean_suspended=true;o.y=true;o.move_y=.8f;o.turn_x=.8f;
+    o={};o.active=true;o.y=true;o.move_y=.8f;o.turn_x=.8f;
     PadComposer pulse;pulse.compose(blank,true,1);pad=pulse.compose(o,true,10);
-    assert(pad.wButtons&XINPUT_GAMEPAD_Y);assert(pad.sThumbLX==0&&pad.sThumbLY==0&&pad.sThumbRX==0&&pad.sThumbRY==0);
+    assert(!(pad.wButtons&XINPUT_GAMEPAD_Y));assert(pad.sThumbLY>25000&&pad.sThumbRX>25000);
     LeanControl stalled;raw={};raw.active=true;s.active=false;stalled.update(raw,s,true,true,1,1);
     raw.y=true;stalled.update(raw,s,true,true,1,10);s.active=true;stalled.update(raw,s,true,true,1,20);
     raw.y=false;stalled.update(raw,s,true,true,1,30);assert(stalled.update(raw,s,true,true,1,130).y);

@@ -176,7 +176,38 @@ static int run(int argc,char** argv) {
         in.hand[0]={hand_rot(0,frame(yaw,unit({1,0,-.35})),frame(yaw,{0,-1,0})),eye+frame(yaw,l)};
         in.hand[1]={hand_rot(1,frame(yaw,unit({1,0,-.35})),frame(yaw,{0,1,0})),eye+frame(yaw,r)};
         for(int i=0;i<2;++i) {in.grip[i]=.45;in.trigger[i]=.25;}
-    };    if(native[1].size()==69) {  // empty hand curls; held socket is stable, player-reversible
+    };
+    {
+        BodySolver socket_solver(body,left,right,{eye_height,span});
+        Inputs socket_input;socket_input.eye={eye_rotation(0,0),{0,0,eye_height}};
+        hold(socket_input,0,socket_input.eye.p,{.35,.2,-.35},{.35,-.2,-.35});
+        auto native_left=left.bind;const auto attachment=left.find("left_hand_attachment_jnt");
+        const auto parent=left.parent[attachment],finger=left.find("left_index_02_jnt");
+        auto native_local=mul(inverse(native_left[parent]),native_left[attachment]);
+        native_local.q=mul(native_local.q,axis_angle({0,0,1},35*deg));
+        native_left[attachment]=mul(native_left[parent],native_local);socket_input.native_arm[0]=&native_left;
+        socket_input.native_socket_token[0]=100;socket_input.grip[0]=socket_input.trigger[0]=1;
+        const auto normal=socket_solver.solve(socket_input);
+        const auto normal_socket=mul(inverse(normal.arm[0][parent]),normal.arm[0][attachment]);
+        socket_input.hand_empty[0]=true;
+        const auto procedural=socket_solver.solve(socket_input);
+        const auto retained=mul(inverse(procedural.arm[0][parent]),procedural.arm[0][attachment]);
+        expect(angle_between(retained.q,normal_socket.q)<1e-6,"qualified left socket survives procedural finger transition");
+        expect(angle_between(procedural.arm[0][finger].q,normal.arm[0][finger].q)>.1,"qualified socket does not freeze procedural fingers");
+        socket_input.native_socket_token[0]=0;
+        const auto unqualified=socket_solver.solve(socket_input);
+        const auto bind_socket=mul(inverse(unqualified.arm[0][parent]),unqualified.arm[0][attachment]);
+        expect(angle_between(bind_socket.q,normal_socket.q)>30*deg,"unqualified procedural path reproduces native-to-bind gun socket discrepancy");
+        native_local.q=mul(native_local.q,axis_angle({0,0,1},40*deg));
+        native_left[attachment]=mul(native_left[parent],native_local);socket_input.native_socket_token[0]=101;
+        const auto replaced=socket_solver.solve(socket_input);
+        const auto replacement=mul(inverse(replaced.arm[0][parent]),replaced.arm[0][attachment]);
+        expect(angle_between(replacement.q,native_local.q)<1e-6,"new socket token initializes current native local rather than old cached weapon");
+        socket_solver.reset();socket_input.native_socket_token[0]=101;
+        const auto reset=socket_solver.solve(socket_input);
+        expect(angle_between(mul(inverse(reset.arm[0][parent]),reset.arm[0][attachment]).q,native_local.q)<1e-6,"solver reset clears socket lifetime state");
+    }
+    if(native[1].size()==69) {  // empty hand curls; held socket is stable, player-reversible
         BodySolver sol(body,left,right,{eye_height,span});
         const int wr=right.find("right_wrist_jnt"),at=right.find("right_hand_attachment_jnt"),ix=right.find("right_index_02_jnt");
         Inputs in;in.eye={eye_rotation(0,0),{0,0,eye_height}};hold(in,0,in.eye.p,{.35,.2,-.35},{.35,-.2,-.35});in.dt=1/90.;
@@ -216,6 +247,70 @@ static int run(int argc,char** argv) {
         expect(angle_between(sock(0,false,true,ix).q,held.q)>.3,"empty hand curls with grip");
         expect(angle_between(sock(0,false,false,ix).q,held.q)<1e-6,"held hand keeps native fingers");
         (void)curled;
+        {   // Contact turns (finger_ik.hpp): the empty hand bends each joint by its own turn, whatever grip/trigger say (grip alone
+            // used to leave the index at the relaxed curl, and no held shape ever reached the fingers).
+            const int i2=right.find("right_index_02_jnt"),i3=right.find("right_index_03_jnt");
+            const auto bend=[&](bool has,float turn) {
+                const auto n=swung(0);in.native_arm[1]=&n;in.hand_empty[1]=true;in.grip[1]=1;in.trigger[1]=0;
+                in.has_finger[1]=has;for(auto& f:in.finger_turn[1]) for(auto& t:f) t=turn;
+                Xf last;for(int k=0;k<5;++k) {const auto out=sol.solve(in);last=mul(inverse(out.arm[1][i2]),out.arm[1][i3]);}
+                return angle_between(last.q,right.local[i3].q);
+            };
+            expect(std::abs(bend(false,0)-18*deg)<1*deg,"index without trigger keeps the relaxed curl");
+            expect(std::abs(bend(true,1.2f)-1.2)<.02,"finger turn closes the joint by exactly its angle");
+            expect(std::abs(bend(true,0.f))<.02,"zero turn leaves the bind pose");
+            {   // How the fingers were posed is reported per hand (the status JSON's finger route): contact turns, grip alone, the game's fingers.
+                const auto n=swung(0);in.native_arm[1]=&n;in.grip[1]=1;in.trigger[1]=0;
+                in.hand_empty[1]=true;in.has_finger[1]=true;for(auto& f:in.finger_turn[1]) for(auto& t:f) t=.3f;
+                expect(sol.solve(in).finger_mode[1]==1,"an empty hand given contact turns is posed by them");
+                in.has_finger[1]=false;
+                expect(sol.solve(in).finger_mode[1]==2,"an empty hand without turns is posed by grip and trigger");
+                in.hand_empty[1]=false;in.has_finger[1]=true;
+                expect(sol.solve(in).finger_mode[1]==3,"a hand the game says is not empty keeps the game's fingers, turns or not");
+            }
+            in.has_finger[1]=true;in.finger_turn[1][1][1]=std::nanf("");
+            bool rejected=false;try {(void)sol.solve(in);} catch(const std::invalid_argument&) {rejected=true;}
+            expect(rejected,"non-finite finger turn rejected");
+            in.has_finger[1]=false;in.hand_empty[1]=false;
+            // The hinge the finger turns about comes from the contact when it is given (finger_ik.hpp hinge_axes): the bones bend about the axis
+            // that was tested, not the solver's own; the metacarpals stay on the bind pose the contact planned from.
+            {
+                const auto n=swung(0);in.native_arm[1]=&n;in.hand_empty[1]=true;in.grip[1]=1;in.trigger[1]=1;
+                in.has_finger[1]=true;for(auto& f:in.finger_turn[1]) for(auto& t:f) t=0;in.finger_turn[1][1][1]=1.f;
+                for(auto& f:in.finger_axis[1]) for(auto& ax:f) {ax[0]=0;ax[1]=0;ax[2]=1;}
+                in.has_finger_axis[1]=true;
+                Xf last;for(int k=0;k<5;++k) {const auto out=sol.solve(in);last=mul(inverse(out.arm[1][i2]),out.arm[1][i3]);}
+                const auto q=mul(conj(right.local[i3].q),last.q);
+                const double sine=std::sqrt(q.x*q.x+q.y*q.y+q.z*q.z);
+                const Vec3 axis_world=rotated(right.bind[i3].q,Vec3{q.x/sine,q.y/sine,q.z/sine});
+                expect(std::abs(2*std::atan2(sine,std::abs(q.w))-1.)<.02,"supplied hinge: the joint turns by its angle");
+                expect(std::abs(std::abs(axis_world.z)-1)<.01,"supplied hinge: about the axis that was tested");
+                const int m1=right.find("right_index_01_jnt");const auto out=sol.solve(in);
+                const auto meta=mul(inverse(out.arm[1][right.parent[m1]]),out.arm[1][m1]);
+                expect(angle_between(meta.q,right.local[m1].q)<1e-6,"metacarpal stays on the bind pose under contact turns");
+                in.finger_axis[1][1][1][2]=3.f;
+                bool rejected_axis=false;try {(void)sol.solve(in);} catch(const std::invalid_argument&) {rejected_axis=true;}
+                expect(rejected_axis,"non-unit finger axis rejected");
+                in.has_finger_axis[1]=false;in.has_finger[1]=false;in.hand_empty[1]=false;
+            }
+            // The thumb opens past its bind pose (finger_ik.hpp finger_open_degrees): a negative turn bends the joint the other way; a turn
+            // beyond what a thumb can open is refused.
+            {
+                const int t1=right.find("right_thumb_01_jnt"),t2=right.find("right_thumb_02_jnt");
+                const auto thumb=[&](float turn) {
+                    const auto n=swung(0);in.native_arm[1]=&n;in.hand_empty[1]=true;in.grip[1]=0;in.trigger[1]=0;
+                    in.has_finger[1]=true;for(auto& f:in.finger_turn[1]) for(auto& t:f) t=0;in.finger_turn[1][0][1]=turn; // thumb_02 is chain joint 1
+                    Xf last;for(int k=0;k<5;++k) {const auto out=sol.solve(in);last=mul(inverse(out.arm[1][t1]),out.arm[1][t2]);}
+                    return last;
+                };
+                const auto closed=thumb(.5f),opened=thumb(-.5f),plain=thumb(0.f);
+                expect(std::abs(angle_between(closed.q,plain.q)-.5)<.02 && std::abs(angle_between(opened.q,plain.q)-.5)<.02,"thumb turns by its angle either way");
+                expect(angle_between(opened.q,closed.q)>.9,"a negative thumb turn bends the other way");
+                bool refused=false;try {(void)thumb(-2.f);} catch(const std::invalid_argument&) {refused=true;}
+                expect(refused,"a thumb turn past its open limit is refused");
+                in.has_finger[1]=false;in.hand_empty[1]=false;
+            }
+        }
     }
 
     const Vec3 rest_l{.28,.2,-.62},rest_r{.28,-.2,-.62};

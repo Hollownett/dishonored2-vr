@@ -14,6 +14,11 @@ int main() {
         std::memcpy(at+32,&side,4);at[28]=at[29]=std::byte{1};
     }
     auto require=[](bool result) {if(!result) {std::cerr << "Stereo metadata guard failed\n";return false;}return true;};
+    if(!require(d2vr::native_stereo_preparation_allowed(true,0))) return 1;
+    if(!require(d2vr::native_stereo_preparation_allowed(true,1))) return 1;
+    if(!require(!d2vr::native_stereo_preparation_allowed(true,2))) return 1;
+    if(!require(!d2vr::native_stereo_preparation_allowed(false,0))) return 1;
+    if(!require(d2vr::native_stereo_preparation_allowed(false,1))) return 1;
     d2vr::NativeEyePair pair;
     if(!require(!pair.begin(-1) && !pair.begin(0) && !pair.complete() && pair.begin(1) && pair.complete())) return 1;
     if(!require(!pair.begin(-1) && pair.complete())) return 1;

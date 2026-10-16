@@ -10,6 +10,10 @@ inline constexpr double grab_switch_margin=.10;
 // Hand "beam": a palm-wide cylinder along the hand's forward axis. Items it touches outrank items that
 // are merely near the palm; among them the one nearest the axis wins, with a small range penalty.
 inline constexpr double grab_beam_radius=.06,grab_beam_range_weight=.25;
+// Loot (pickups, carryables) within a palm width of the nearest hit wins: coins on a cash machine were ranked behind the
+// machine's surface under the palm, which the grip then used (sim v467).
+inline constexpr double use_loot_bonus=grab_beam_radius;
+struct NoLoot {bool operator()(std::uintptr_t) const noexcept {return false;}};
 struct NativeUseVolumeCandidate {
     std::uintptr_t owner{};
     Vec3 minimum{},maximum{};
@@ -52,8 +56,8 @@ inline NativeUseQueryOutcome native_use_query_outcome(std::uintptr_t result,std:
     return count==0?NativeUseQueryOutcome::empty:count==1?NativeUseQueryOutcome::single:NativeUseQueryOutcome::multiple;
 }
 using NativeUseHit=std::array<std::byte,112>;
-template<class Owner>
-bool order_native_use_hits(NativeUseHit* hits,unsigned count,Vec3 hand,std::uintptr_t preferred,Owner owner,Vec3 axis={}) {
+template<class Owner,class Loot=NoLoot>
+bool order_native_use_hits(NativeUseHit* hits,unsigned count,Vec3 hand,std::uintptr_t preferred,Owner owner,Vec3 axis={},Loot loot={}) {
     if(!hits || count>64 || !finite(hand)) return false;
     const double axis_length=finite(axis)?length(axis):0;const bool beam=axis_length>1e-6;
     if(beam) axis=axis*(1/axis_length);
@@ -67,6 +71,7 @@ bool order_native_use_hits(NativeUseHit* hits,unsigned count,Vec3 hand,std::uint
             distance[i]=along>=-.05 && across<=grab_beam_radius?across+grab_beam_range_weight*std::max(0.,along):distance[i]+1;
         }
         if(preferred && owner(hits[i])==preferred) distance[i]=std::max(0.,distance[i]-.02);
+        if(loot(owner(hits[i]))) distance[i]-=use_loot_bonus;
         order[i]=i;
     }
     std::stable_sort(order.begin(),order.begin()+count,[&](unsigned a,unsigned b){return distance[a]<distance[b];});

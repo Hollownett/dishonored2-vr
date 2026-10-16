@@ -1,9 +1,10 @@
 #include "../src/simulated_gameplay_script.hpp"
 #include "../src/right_grip_owner.hpp"
 #include <sstream>
+#include <string>
 #include <cassert>
 #include <iostream>
-static bool rejects(const char* text) {
+static bool rejects(const std::string& text) {
     d2vr::SimulatedGameplayScript script;std::istringstream source(text);
     try {script.load(source,10);return false;} catch(const std::invalid_argument&) {return true;}
 }
@@ -79,5 +80,33 @@ int main() {
     assert(rejects("D2VR_GAMEPLAY_SCRIPT 1 10000 1 1 2 0 0 0 0 0 0 0 0 2 0 0 0 0 0 0"));
     assert(rejects("D2VR_GAMEPLAY_SCRIPT 1 10000 2 1000 2000 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 1500 2500"));
     assert(rejects("D2VR_GAMEPLAY_SCRIPT 1 10000 1 1 2 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 extra"));
+    // Version 5: absolute poses (head + right grip) lerp toward the next back-to-back segment, hold across a gap, and stay optional per segment.
+    std::string zeros;for(int i=0;i<26;++i) zeros+=" 0"; // 8 analog, 7 buttons, head pitch, 9 offsets, hand pitch
+    const std::string v5="D2VR_GAMEPLAY_SCRIPT 5 10000 4\n"
+        "1000 2000"+zeros+" 5 0 1.65 0 0 0 0 1 1 0 0 0 0 0 1\n"
+        "2000 3000"+zeros+" 5 1 1.65 0 0 -.7071068 0 -.7071068 3 0 0 0 0 0 1\n" // negated quaternion: same rotation, shortest arc
+        "4000 5000"+zeros+" 1 9 1.65 0 0 0 0 1\n"
+        "5000 6000"+zeros+" 0\n";
+    d2vr::SimulatedGameplayScript absolute;std::istringstream v5_source(v5);absolute.load(v5_source,10);assert(absolute.size()==4);
+    auto poses=absolute.poses(1000);assert(poses.mask==5 && poses.pose[0][0]==0 && poses.pose[0][1]==1.65f && poses.pose[2][0]==1);
+    poses=absolute.poses(1500);assert(std::abs(poses.pose[0][0]-.5f)<1e-5f && std::abs(poses.pose[2][0]-2)<1e-5f && poses.mask==5);
+    assert(std::abs(poses.pose[0][4]-.3826834f)<1e-4f && std::abs(poses.pose[0][6]-.9238795f)<1e-4f); // 45 degrees: half-way to the sign-flipped 90, unit length
+    poses=absolute.poses(2500);assert(poses.pose[0][0]==1 && poses.pose[2][0]==3); // gap after 3000: hold, never lerp across it
+    assert(std::abs(poses.pose[0][4]+.7071068f)<1e-5f && std::abs(poses.pose[0][6]+.7071068f)<1e-5f); // the held pose is the loaded quaternion, unit
+    assert(absolute.poses(3500).mask==0 && absolute.poses(4500).mask==1 && absolute.poses(5500).mask==0);
+    assert(absolute.poses(4500).pose[0][0]==9);
+    poses=script.poses(1000);assert(poses.mask==0); // legacy scripts carry no poses
+    assert(absolute.sample(1000,true,true).active && absolute.offsets(1500)[0]==0);
+    assert(rejects("D2VR_GAMEPLAY_SCRIPT 5 10000 1\n1000 2000"+zeros+" 8")); // unknown mask bit
+    assert(rejects("D2VR_GAMEPLAY_SCRIPT 5 10000 1\n1000 2000"+zeros+" 1 0 1.65 0 0 0 0 2")); // not a unit quaternion
+    assert(rejects("D2VR_GAMEPLAY_SCRIPT 5 10000 1\n1000 2000"+zeros+" 1 0 1.65 0 0 0 0 nan"));
+    assert(rejects("D2VR_GAMEPLAY_SCRIPT 5 10000 1\n1000 2000"+zeros+" 1 11 1.65 0 0 0 0 1")); // more than 10 m away
+    assert(rejects("D2VR_GAMEPLAY_SCRIPT 5 10000 1\n1000 2000"+zeros+" 1 0 1.65 0 0 0")); // truncated pose
+    assert(rejects("D2VR_GAMEPLAY_SCRIPT 5 10000 1\n1000 2000"+zeros)); // no mask
+    assert(rejects("D2VR_GAMEPLAY_SCRIPT 5 10000 4097"));
+    assert(rejects("D2VR_GAMEPLAY_SCRIPT 6 10000 1"));
+    {d2vr::SimulatedGameplayScript many;std::string text="D2VR_GAMEPLAY_SCRIPT 5 10000 1000\n";
+     for(int i=0;i<1000;++i) text+=std::to_string(i*10)+" "+std::to_string(i*10+10)+zeros+" 0\n";
+     std::istringstream many_source(text);many.load(many_source,10);assert(many.size()==1000);} // more than 128 segments only from version 5
     std::cout<<"PASS: finite script validation, interval boundaries, neutral release, native/physical arbitration and actual pad composition\n";
 }

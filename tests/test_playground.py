@@ -5,7 +5,7 @@ from pathlib import Path
 import tempfile
 import struct
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 spec = importlib.util.spec_from_file_location('playground', Path(__file__).resolve().parents[1] / 'tools/playground.py')
 playground = importlib.util.module_from_spec(spec)
@@ -15,6 +15,40 @@ import playground_native
 
 
 class PlaygroundCheck(unittest.TestCase):
+    def test_native_module_retries_loader_snapshot_change(self):
+        reader = object.__new__(playground_native.NativeReader)
+        reader.snapshot = Mock(side_effect=[playground_native.c.c_void_p(-1).value, 1])
+        reader.mfirst = Mock(return_value=True)
+        reader.close = Mock()
+        with patch.object(playground_native.c, 'get_last_error', return_value=24, create=True), patch.object(playground_native.time, 'sleep') as pause:
+            self.assertIsNotNone(reader.module(123))
+        self.assertEqual(reader.snapshot.call_count, 2)
+        reader.close.assert_called_once_with(1)
+        pause.assert_called_once_with(.01)
+        self.assertEqual(reader.module_error, 0)
+
+    def test_native_module_does_not_retry_other_errors(self):
+        reader = object.__new__(playground_native.NativeReader)
+        reader.snapshot = Mock(return_value=playground_native.c.c_void_p(-1).value)
+        reader.close = Mock()
+        with patch.object(playground_native.c, 'get_last_error', return_value=5, create=True), patch.object(playground_native.time, 'sleep') as pause:
+            self.assertIsNone(reader.module(123))
+        reader.snapshot.assert_called_once_with(24, 123)
+        reader.close.assert_not_called()
+        pause.assert_not_called()
+        self.assertEqual(reader.module_error, 5)
+
+    def test_native_module_loader_retry_is_bounded(self):
+        reader = object.__new__(playground_native.NativeReader)
+        reader.snapshot = Mock(return_value=playground_native.c.c_void_p(-1).value)
+        reader.close = Mock()
+        with patch.object(playground_native.c, 'get_last_error', return_value=24, create=True), patch.object(playground_native.time, 'sleep') as pause:
+            self.assertIsNone(reader.module(123))
+        self.assertEqual(reader.snapshot.call_count, 10)
+        self.assertEqual(pause.call_count, 9)
+        reader.close.assert_not_called()
+        self.assertEqual(reader.module_error, 24)
+
     def test_native_mode_index_flattens_past_earlier_monitor_counts(self):
         values={'r_mode':2,'renderer_diagnostics':{'selected_monitor_index':-1,'monitors':[
             {'monitor_index':0,'modes':[{'array_index':0,'width':640,'height':480}]},

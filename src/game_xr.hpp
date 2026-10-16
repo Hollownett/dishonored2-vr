@@ -190,25 +190,27 @@ private:
             {l.orientation.x,l.orientation.y,l.orientation.z,l.orientation.w}});
     }
     const TrackedPose& native_menu_pose() {return panel_pose(menu_panel_);}
-    // Wheel .8 m (fixed in front), notes .45 m (held in the left hand), journal 1 m.
+    // Wheel .8 m (fixed in front), notes and black market .45 m (held in the left hand), journal 1 m.
     // VR settings "HUD size" scales every UI element alike (65% = 1): world UI, prompts, markers, wrist, HUD screen.
 public:
+    // Notes, and the black market (the only full-height journal-kind panel: logic 1024) while the left hand is tracked, are held in
+    // that hand like a page (headset 2026-10-14: "render the Black Market on the left arm like notes"). Untracked, the shop stays 1 m ahead.
+    bool world_ui_in_hand() const noexcept {return (world_ui_kind_==2 || (world_ui_kind_==3 && world_ui_full_)) && (grip_tracked_hands&1u);}
     std::array<unsigned,2> world_ui_size() const {if(!world_ui_source_) return {};D3D11_TEXTURE2D_DESC d{};world_ui_source_->GetDesc(&d);return {d.Width,d.Height};}
     float hud_scale() const noexcept {return static_cast<float>(settings_.hud_percent())/65.f;}
     // Rows of the world UI image shown: the whole image (wheel, black market) or the centred 16:9 band.
     std::int32_t world_ui_rows(const D3D11_TEXTURE2D_DESC& d) const noexcept {
         return world_ui_full_?static_cast<std::int32_t>(d.Height):static_cast<std::int32_t>(std::clamp(std::lround(d.Width*menu_band),1l,static_cast<long>(d.Height)));
     }
-    float world_ui_width() const noexcept {return (world_ui_kind_==1?.8f:world_ui_kind_==2?.45f:1.f)*std::min(hud_scale(),100.f/65.f);} // panels stop at the 100% size
+    float world_ui_width() const noexcept {return (world_ui_kind_==1?.8f:world_ui_kind_==2 || world_ui_in_hand()?.45f:1.f)*std::min(hud_scale(),100.f/65.f);} // panels stop at the 100% size
 private:
     const TrackedPose& world_ui_pose() {
         const auto& l=views_[0].pose;const auto& r=views_[1].pose;
         const TrackedPose head{{(l.position.x+r.position.x)*.5,(l.position.y+r.position.y)*.5,(l.position.z+r.position.z)*.5},
             {l.orientation.x,l.orientation.y,l.orientation.z,l.orientation.w}};
-        constexpr XrSpaceLocationFlags held=XR_SPACE_LOCATION_ORIENTATION_VALID_BIT|XR_SPACE_LOCATION_POSITION_VALID_BIT;
-        if(world_ui_kind_==2 && (grip_locations[0].locationFlags&held)==held) { // notes follow the left hand every frame
-            const auto& g=grip_locations[0].pose.position;
-            world_ui_pose_=world_ui_hand_pose(head.position,{g.x,g.y,g.z});world_ui_pose_valid_=false;return world_ui_pose_;
+        if(world_ui_in_hand()) { // notes and the black market follow the left hand every frame
+            const auto& g=grip_locations[0].pose.position; // the taller shop page rests its bottom edge on the hand, as a note does (.12 m)
+            world_ui_pose_=world_ui_hand_pose(head.position,{g.x,g.y,g.z},world_ui_kind_==2?.12:displayed_menu_view().height*.5);world_ui_pose_valid_=false;return world_ui_pose_;
         }
         if(world_ui_pose_valid_) return world_ui_pose_;
         world_ui_pose_=world_ui_front_pose(head,world_ui_kind_==1?.9:1.05);

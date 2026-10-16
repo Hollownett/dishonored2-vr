@@ -39,6 +39,12 @@ int main() {
         assert(order_native_use_hits(records.data(),3,{0,0,0},0,owner,{2,0,0}) && owner(records[0])==2 && owner(records[1])==1);
         records={at(.40f,.0f,1),at(.10f,.02f,2),at(.20f,.30f,3)}; // both on the beam: the nearer along it wins
         assert(order_native_use_hits(records.data(),3,{0,0,0},0,owner,{1,0,0}) && owner(records[0])==2);
+        // Loot within a palm width beats the usable surface under the palm (coins on a cash machine), not a clearly nearer one.
+        const auto coin=[](std::uintptr_t id){return id==2;};
+        records={at(.10f,.0f,1),at(.15f,.02f,2),at(.20f,.30f,3)};
+        assert(order_native_use_hits(records.data(),3,{0,0,0},0,owner,{1,0,0},coin) && owner(records[0])==2);
+        records={at(.05f,.0f,1),at(.60f,.05f,2),at(.20f,.30f,3)};
+        assert(order_native_use_hits(records.data(),3,{0,0,0},0,owner,{1,0,0},coin) && owner(records[0])==1);
     }
     records={hit(.2f,1),hit(NAN,2),hit(.1f,3)};const auto invalid=records;
     assert(!order_native_use_hits(records.data(),3,{0,0,0},0,owner) && records==invalid);

@@ -1,4 +1,4 @@
-"""Back up/apply a native VR graphics profile while Dishonored 2 is closed."""
+"""Preview a native VR graphics profile, or back up/apply it with the game closed."""
 import argparse
 import csv
 import hashlib
@@ -15,6 +15,11 @@ GAME_HASH = 'b671f8249422862bf557d00aab2f4bb671ed4515cc10ad8a8a9decad84516180'
 # overall preset Custom; explicit settings preserve the other user choices.
 SETTINGS = dict(r_textureDetailsPreset='3',r_modelsQualityPreset='3',r_shadowQualityPreset='3',
                 r_AntiAliasingPreset='2',ark_playerBobAmount='0',view_skipShakes='1')
+# The six detail enums explicitly name 2 as Medium in the pinned executable.
+# AA, comfort and VR preferences have separate owners; retain their current values.
+PROFILES = {'legacy-high': SETTINGS, 'vr-medium': dict(
+    r_textureDetailsPreset='2', r_modelsQualityPreset='2', r_shadowQualityPreset='2',
+    r_viewDistPreset='2', r_oceanQualityPreset='2', r_maxDynamicDecalsPreset='2')}
 
 
 def edit_settings(data, desired, expected=None):
@@ -57,26 +62,36 @@ def main():
     mode=parser.add_mutually_exclusive_group(required=True)
     mode.add_argument('--apply',action='store_true')
     mode.add_argument('--restore',action='store_true')
+    mode.add_argument('--preview',action='store_true',help='Print proposed edits without writing files or requiring game exit')
+    parser.add_argument('--profile',choices=PROFILES,default='legacy-high',
+                        help='vr-medium is a comparison candidate, not a headset-validated performance default')
     args=parser.parse_args()
+    if args.restore and args.profile!='legacy-high': parser.error('--profile applies only to --apply or --preview')
     if os.name!='nt': raise RuntimeError('Use the Windows game host')
     root=Path(__file__).resolve().parents[1]
     config=Path.home()/'Saved Games'/'Arkane Studios'/'dishonored2'/'base'/'dishonored2Config.cfg'
     game=Path(r'C:\Program Files (x86)\Steam\steamapps\common\Dishonored2\Dishonored2.exe')
     state_path=root/'artifacts'/'vr-graphics-profile.json'
     if digest(game.read_bytes())!=GAME_HASH: raise RuntimeError('Unsupported executable')
-    game_closed()
+    if not args.preview: game_closed()
     data=config.read_bytes()
     if len(data)>1024*1024: raise ValueError('Unexpected game configuration size')
     state=json.loads(state_path.read_text()) if state_path.exists() else None
+    if args.preview:
+        _,changes,skipped=edit_settings(data,PROFILES[args.profile])
+        print(json.dumps(dict(status='preview',profile=args.profile,changes=changes,skipped=skipped,
+                              config_sha256=digest(data),active_baseline=bool(state and state['status']=='applied'),
+                              runtime_values_verified=False)))
+        return
     if args.apply:
         if state and state['status']=='applied':
             raise RuntimeError('A VR graphics profile is already active; retain its baseline or restore it first')
-        changed,changes,skipped=edit_settings(data,SETTINGS)
+        changed,changes,skipped=edit_settings(data,PROFILES[args.profile])
         stamp=datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S.%fZ')
         backup=root/'artifacts'/'settings-backups'/stamp/'dishonored2Config.cfg'
         backup.parent.mkdir(parents=True,exist_ok=False)
         backup.write_bytes(data)
-        state=dict(status='applied',config=str(config),backup=str(backup),original_sha256=digest(data),
+        state=dict(status='applied',profile=args.profile,config=str(config),backup=str(backup),original_sha256=digest(data),
                    applied_sha256=digest(changed),changes=changes,skipped=skipped,runtime_values_verified=False)
     else:
         if not state or state['status']!='applied' or state['config']!=str(config):

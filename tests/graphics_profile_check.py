@@ -2,10 +2,29 @@ import sys
 import unittest
 from pathlib import Path
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'tools'))
-from vr_graphics_profile import edit_settings
+from vr_graphics_profile import PROFILES, SETTINGS, edit_settings
 
 
 class GraphicsProfileCheck(unittest.TestCase):
+    def test_medium_changes_only_detail_settings_and_restores(self):
+        source=(b'arkBind "PAD_RSTICK" "LOOK"\r\nr_textureDetailsPreset "5"\r\n'
+                b'r_modelsQualityPreset "2"\r\nr_AntiAliasingPreset "3"\r\n'
+                b'r_renderQualityPresets "2"\r\nark_playerBobAmount "0"\r\n')
+        result,changes,_=edit_settings(source,PROFILES['vr-medium'])
+        self.assertEqual(len(changes),6)
+        self.assertTrue(all(value=='2' for value in PROFILES['vr-medium'].values()))
+        self.assertIn(b'r_textureDetailsPreset "2"\r\n',result)
+        for line in source.splitlines(keepends=True):
+            if not line.startswith(b'r_textureDetailsPreset '): self.assertIn(line,result)
+        restored,_,skipped=edit_settings(result,{key:value['before'] for key,value in changes.items()},
+                                       {key:value['after'] for key,value in changes.items()})
+        self.assertEqual(restored,source)
+        self.assertFalse(skipped)
+
+    def test_legacy_profile_preserved(self):
+        self.assertEqual(PROFILES['legacy-high'],SETTINGS)
+        self.assertEqual(SETTINGS['r_textureDetailsPreset'],'3')
+
     def test_preserve_bindings_and_unrelated_bytes(self):
         source=b'// keep\r\narkBind "F" "INTERACT"\r\nr_textureDetailsPreset "0"\r\nother "untouched"\r\n'
         result,changes,_=edit_settings(source,dict(r_textureDetailsPreset='3',view_skipShakes='1'))

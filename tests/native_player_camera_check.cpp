@@ -46,5 +46,85 @@ int main() {
     m.put(camera+0x10,player+8);assert(!d2vr::native_player_camera(m,base,camera));m=baseline;
     m.put(camera+0x18,d2vr::rig::Identity{-1,10});assert(!d2vr::native_player_camera(m,base,camera));m=baseline;
     m.recycle_at=controller+0xd0;assert(!d2vr::native_player_camera(m,base,camera));
+    m=baseline;
+    constexpr std::uintptr_t machine=0x208000000,pool=0x209000000,mode=0x20a000000,shadow=0x20b000000;
+    m.put(camera+0x25200,7);m.put(camera+0x25204,7);
+    s=d2vr::native_player_camera(m,base,camera);assert(s && s->authored_view() && !s->tracked_shadow_walk());
+    m.put(controller+0x58,machine);m.put(controller+0x172,std::uint8_t{0});
+    m.put(machine,base+0x1c73d58);m.put(machine+0x10,player);m.put(machine+0x90,pool);
+    m.put(machine+0x18,d2vr::rig::Identity{12,10});
+    m.put(player+0x268,d2vr::rig::List{components,2,2<<8});m.put(components+8,machine);
+    m.put(pool+8,mode);m.put(mode,base+0x1c83ed8);m.put(mode+0x60,2u);
+    for(const auto& entry:d2vr::native_action_camera_states) m.put(pool+0x10+entry.index*8,std::uintptr_t{});
+    const auto shadow_state=[&](unsigned index) {
+        m.put(pool+0x10+index*8,shadow);m.put(shadow,base+0x1c7ed28);
+        m.put(shadow+8,index);m.put(shadow+0x10,machine);m.put(shadow+0x20,std::uint8_t{1});
+        m.put(shadow+0x18,shadow+0x1000);m.put(shadow+0x1000,base+0x1c7ebf8);m.put(shadow+0x1060,index);
+    };
+    shadow_state(0);
+    s=d2vr::native_player_camera(m,base,camera);assert(s && s->tracked_shadow_walk() && !s->authored_view());
+    const auto ground=m;
+    m.put(machine+0x18,d2vr::rig::Identity{-1,10});
+    s=d2vr::native_player_camera(m,base,camera);assert(s && s->authored_view());
+    m=ground;m.put(machine+0x18,d2vr::rig::Identity{12,0});
+    s=d2vr::native_player_camera(m,base,camera);assert(s && s->authored_view());
+    m=ground;m.put(components+8,controller);
+    s=d2vr::native_player_camera(m,base,camera);assert(s && s->authored_view());
+    m=ground;
+    constexpr std::uintptr_t assassin=0x20c000000;
+    m.put(pool+0x10+13*8,assassin);m.put(assassin,base+0x1c83468);
+    m.put(assassin+8,13u);m.put(assassin+0x10,machine);m.put(assassin+0x20,std::uint8_t{1});
+    s=d2vr::native_player_camera(m,base,camera);assert(s && s->authored_view());
+    m=ground;
+    m.put(pool+0x10,std::uintptr_t{});shadow_state(1);
+    s=d2vr::native_player_camera(m,base,camera);assert(s && s->tracked_shadow_walk() && !s->authored_view());
+    m=ground;m.put(controller+0x172,std::uint8_t{1});
+    s=d2vr::native_player_camera(m,base,camera);assert(s && s->authored_view());
+    m=ground;m.put(shadow,base+0x1c85628);
+    s=d2vr::native_player_camera(m,base,camera);assert(s && s->authored_view());
+    m=ground;m.put(shadow+0x10,player);
+    s=d2vr::native_player_camera(m,base,camera);assert(s && s->authored_view());
+    m=ground;m.put(shadow+8,1u);
+    s=d2vr::native_player_camera(m,base,camera);assert(s && s->authored_view());
+    m=ground;m.put(shadow+0x20,std::uint8_t{0});
+    s=d2vr::native_player_camera(m,base,camera);assert(s && s->authored_view());
+    m=ground;m.put(mode+0x60,0u);
+    s=d2vr::native_player_camera(m,base,camera);assert(s && s->authored_view());
+    m=ground;m.put(camera+0x25204,0);
+    s=d2vr::native_player_camera(m,base,camera);assert(s && s->authored_view());
+    m=ground;m.put(camera+0x251b9,std::uint8_t{1});
+    s=d2vr::native_player_camera(m,base,camera);assert(s && s->authored_view());
+    m=ground;m.put(camera+0x25260,std::uint8_t{1});
+    s=d2vr::native_player_camera(m,base,camera);assert(s && s->authored_view());
+    m=ground;
+    bool changed=false;
+    auto racing=[&](std::uintptr_t at,void* out,std::size_t size) {
+        const bool ok=m(at,out,size);
+        if(at==shadow+0x20 && !changed) {changed=true;m.put(controller+0x172,std::uint8_t{1});}
+        return ok;
+    };
+    s=d2vr::native_player_camera(racing,base,camera);assert(changed && s && s->authored_view());
+    for(unsigned mutation=0;mutation<8;++mutation) {
+        m=ground;changed=false;
+        auto changing_owner=[&](std::uintptr_t at,void* out,std::size_t size) {
+            const bool ok=m(at,out,size);
+            if(at==shadow+0x20 && !changed) {
+                changed=true;
+                switch(mutation) {
+                    case 0:m.put(machine+0x18,d2vr::rig::Identity{13,10});break;
+                    case 1:m.put(machine+0x90,pool+0x1000);break;
+                    case 2:m.put(components+8,controller);break;
+                    case 3:m.put(player+0x268,d2vr::rig::List{components,1,2<<8});break;
+                    case 4:m.put(camera+0x25158,controller+0x1000);break;
+                    case 5:m.put(camera+0x25200,0);break;
+                    case 6:m.put(camera+0x18,d2vr::rig::Identity{6,10});break;
+                    case 7:m.put(game+0x3130b0,player+0x1000);break;
+                }
+            }
+            return ok;
+        };
+        s=d2vr::native_player_camera(changing_owner,base,camera);
+        assert(changed && (!s || (s->authored_view() && !s->tracked_shadow_walk())));
+    }
     std::cout<<"PASS: native camera/physics/delegate ownership, finite radians, generation and lifetime rejection; no native writes\n";
 }

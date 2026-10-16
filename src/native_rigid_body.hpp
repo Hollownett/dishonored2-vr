@@ -14,10 +14,12 @@ struct NativeRigidBody {
     rig::Identity identity{};
     WorldTrackedPose pose{};
     std::optional<NativeGrabBounds> bounds{};
+    int bone=-1; // ragdoll bone of a guard's body (native_ragdoll_body), -1 for a standalone prop
     Vec3 contact(Vec3 hand) const {return bounds?bounds->closest(hand):pose.position;}
     double contact_distance(Vec3 hand) const {return length(contact(hand)-hand);}
 };
-template<class Read> std::optional<NativeRigidBody> native_rigid_body(Read& read,std::uintptr_t base,std::uintptr_t entity) {
+// carryable: also native carryables (bottles, glasses), for a hand that pushes them without grabbing (native_hand_contact.hpp).
+template<class Read> std::optional<NativeRigidBody> native_rigid_body(Read& read,std::uintptr_t base,std::uintptr_t entity,bool carryable=false) {
     using namespace rig;
     const auto game=value<std::uintptr_t>(read,base+0x39a5290);
     // Exact pinned RTTI: base idEntity can own a standalone dynamic prop too.
@@ -35,7 +37,7 @@ template<class Read> std::optional<NativeRigidBody> native_rigid_body(Read& read
         // Native carryables (bottles, glasses: arkCpntPickable_Simple 0x1c5a3b8) belong to the game's own Use (HoldObject), which
         // the mod puts in the tracked hand (native_held_object.hpp). Grabbed physically they fought the native carry, floated or
         // were lost (sim 2026-10-13: picked, moved 75 frames, ownership lost).
-        if(at && typed(read,base,*at,0x1c5a3b8)) return {};
+        if(!carryable && at && typed(read,base,*at,0x1c5a3b8)) return {};
         if(at && (typed(read,base,*at,0x1c745c8) || typed(read,base,*at,0x1b64b68))) {
             if(component) return {};component=*at;
         }
@@ -83,6 +85,80 @@ template<class Read> std::optional<NativeRigidBody> native_rigid_body(Read& read
        value<std::uint32_t>(read,entity+0xa8)!=id || value<std::uintptr_t>(read,entity+0xf0)!=model || value<std::uint32_t>(read,record+0x70)!=handle ||
        value<std::uintptr_t>(read,*game+0x3130b0+(*id>>16)*8)!=entity) return {};
     return result;
+}
+// Guard bodies (sim v399, read live): every arkNPC (0x1c5e108) owns 17 consecutive hknp ragdoll bodies. Their handles sit at
+// arkCpntPhysicsSystemEvolved (0x1c54008) +0x100 -> +0x120. Alive they are keyframed to the animation (flags&7 == 6); dead or
+// unconscious (entity+0xd1 bits 0x08/0x20) they are dynamic (flags&7 == 2), the motion type the grab motor already drives.
+// Bone order: 0 pelvis 1 spine 2 chest 3 neck 4 head | 5-7 left upper arm, forearm, hand | 8-10 right arm | 11-13 left thigh,
+// calf, foot | 14-16 right leg (mapped from a standing guard's bodies).
+inline constexpr std::array<double,17> ragdoll_bone_radius{.14,.13,.16,.07,.11,.06,.05,.06,.06,.05,.06,.08,.06,.06,.08,.06,.06};
+// The hands drag a body by a forearm, wrist, calf or ankle; the chest, collar and head are the game's own shoulder carry
+// (user, headset 2026-10-13: "torso = carry, limb = drag").
+inline constexpr bool ragdoll_grab_bone(int bone) {
+    return bone==6 || bone==7 || bone==9 || bone==10 || bone==12 || bone==13 || bone==15 || bone==16;
+}
+template<class Read> std::optional<NativeRigidBody> native_ragdoll_body(Read& read,std::uintptr_t base,std::uintptr_t entity,int bone) {
+    using namespace rig;
+    if(bone<0 || bone>=17) return {};
+    const auto game=value<std::uintptr_t>(read,base+0x39a5290);
+    if(!game || !typed(read,base,*game,0x1c940a8) || !typed(read,base,entity,0x1c5e108)) return {};
+    const auto id=value<std::uint32_t>(read,entity+0xa8);
+    if(!id || *id==0x3fff0010 || (*id>>16)>=0x3fff || value<std::uintptr_t>(read,*game+0x3130b0+(*id>>16)*8)!=entity) return {};
+    // A living guard's bodies follow his animation (keyframed: refused below) unless he is ragdolling (yanked, v425): then
+    // they are dynamic like a corpse's and the hand can hold one until he gets up.
+    const auto model=value<std::uintptr_t>(read,entity+0xf0);
+    const auto entries=list(read,entity+0x268,256);
+    if(!model || !*model || !entries) return {};
+    std::uintptr_t component{};
+    for(unsigned i=0;i<entries->packed_count && !component;++i) {
+        const auto at=value<std::uintptr_t>(read,entries->data+i*8);
+        if(at && typed(read,base,*at,0x1c54008)) component=*at;
+    }
+    if(!component) return {};
+    const auto identity=started(read,component);const auto handles=value<std::uintptr_t>(read,component+0x100);
+    if(!identity || !handles || !pointer(*handles)) return {};
+    // An idList of the 17 body handles: data +0x28, count +0x30. The data is often the inline buffer at +0x120, but a corpse
+    // woken again (and a yanked guard) can hold a heap array (sim v429): reading +0x120 inline gave garbage.
+    const auto data=value<std::uintptr_t>(read,*handles+0x28);
+    if(!data || !pointer(*data) || value<std::uint32_t>(read,*handles+0x30)!=17u) return {};
+    const auto handle=value<std::uint32_t>(read,*data+bone*4);
+    const auto world=value<std::uintptr_t>(read,*game+0x60410);
+    if(!handle || !*handle || !world || !pointer(*world)) return {};
+    const auto pool=value<std::uintptr_t>(read,*world+0x28);const auto count=value<std::uint32_t>(read,*world+0x30);
+    const auto index=*handle&0xffffff;
+    if(!pool || !pointer(*pool) || !count || *count>0x100000 || index==0xffffff || index>=*count) return {};
+    const auto record=*pool+index*0xb0;
+    const auto flags=value<std::uint32_t>(read,record+0x44),motion=value<std::uint32_t>(read,record+0x40);
+    const auto transform=value<Transform>(read,record);
+    if(!flags || (*flags&7)!=2 || !motion || !*motion || *motion>=0x100000 || !transform || !valid(*transform) ||
+       value<std::uint32_t>(read,record+0x70)!=handle || value<std::uint32_t>(read,record+0x74)!=handle) return {};
+    const auto& t=transform->f;
+    // The physics system's flag word changes while its ragdoll is pushed (sim v401 lost the held wrist one frame after binding):
+    // a ragdoll target is identified by the component's generation only.
+    const Identity stable{identity->generation,0};
+    NativeRigidBody result{entity,component,*world,record,*model,*id,*handle,*flags,stable,
+        {{t[12],t[13],t[14]},{{{t[0],t[1],t[2]},{t[4],t[5],t[6]},{t[8],t[9],t[10]}}}}};
+    const auto r=ragdoll_bone_radius[static_cast<std::size_t>(bone)];
+    result.bounds=NativeGrabBounds{result.pose.position-Vec3{r,r,r},result.pose.position+Vec3{r,r,r}};result.bone=bone;
+    const auto again=started(read,component);
+    if(!again || again->generation!=identity->generation || value<std::uintptr_t>(read,*handles+0x28)!=data || value<std::uint32_t>(read,*data+bone*4)!=handle ||
+       value<std::uint32_t>(read,record+0x70)!=handle || value<std::uintptr_t>(read,*game+0x3130b0+(*id>>16)*8)!=entity) return {};
+    return result;
+}
+// The grabbable limb of this body nearest the hand.
+template<class Read> std::optional<NativeRigidBody> nearest_ragdoll_body(Read& read,std::uintptr_t base,std::uintptr_t entity,Vec3 hand) {
+    std::optional<NativeRigidBody> best;
+    for(int bone=0;bone<17;++bone) {
+        if(!ragdoll_grab_bone(bone)) continue;
+        const auto body=native_ragdoll_body(read,base,entity,bone);
+        if(body && (!best || body->contact_distance(hand)<best->contact_distance(hand))) best=body;
+        if(!body && bone==3) break; // not a guard body the hands can drag: skip the remaining reads
+    }
+    return best;
+}
+// Re-read a grab target of either kind, keeping its bone.
+template<class Read> std::optional<NativeRigidBody> native_grab_body(Read& read,std::uintptr_t base,const NativeRigidBody& body) {
+    return body.bone<0?native_rigid_body(read,base,body.entity):native_ragdoll_body(read,base,body.entity,body.bone);
 }
 enum class GrabSearchScope { Normal,ControlledFixture };
 template<class Read> std::optional<NativeRigidBody> nearest_grab_body(Read& read,std::uintptr_t base,Vec3 point,double radius,

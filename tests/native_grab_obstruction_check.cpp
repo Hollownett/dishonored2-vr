@@ -104,7 +104,7 @@ int main() {
             // A clearance commits pure hold state before eye B replaces A.
             auto moved=fixture_hand;moved.position.x=.02;
             for(unsigned frame=0;frame<3;++frame) {
-                Sleep(11);const auto next=GetTickCount64();
+                Sleep(20);const auto next=GetTickCount64(); // > GetTickCount64's ~16 ms step, so each frame gets its own motor tick
                 grab.publish(0,fixture_owner,moved,.9f,1,next,true,false,next);
                 grab.filter_native_grip(0,.9f,1,next,true,true,false);
                 NativeGrabCheck::consume(grab,next);assert(grab.holding(0));

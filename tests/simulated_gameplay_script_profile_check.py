@@ -6,6 +6,7 @@ import tempfile
 import unittest
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'tools'))
 from simulated_gameplay_script import compile_script,validate_script_profile
+import trace_to_script
 from inject_probe import probe_config,preserve_probe_outputs
 from native_left_aim_profile_check import profile
 
@@ -61,6 +62,34 @@ class GameplayScriptProfileCheck(unittest.TestCase):
         for pitch in (-80.01,80.01,float('nan'),float('inf'),10**1000,True,None,'-60'):
             with self.subTest(pitch=str(pitch)[:30]),self.assertRaises(ValueError):
                 self.compile({'segments':[dict(segment,head_pitch_degrees=pitch)]})
+
+    def test_absolute_poses_v5_and_trace_conversion(self):
+        pose=[0,1.65,0,0,0,0,1]
+        seg=lambda i,**k:dict({'start_ms':i*10,'end_ms':i*10+10,'input':{'x':True},'head_pose':pose,'right_hand_pose':[1,2,3,0,0,0,1]},**k)
+        _,transport=self.compile({'segments':[seg(0)]})
+        rows=transport.splitlines();self.assertEqual(rows[0],'D2VR_GAMEPLAY_SCRIPT 5 10000 1')
+        fields=rows[1].split()  # 2 times, 8 analog, 7 buttons, head pitch, 9 offsets, hand pitch, mask, 2 poses
+        self.assertEqual((len(fields),fields[28]),(28+1+14,'5'))
+        _,transport=self.compile({'segments':[seg(0),dict(seg(1),head_pose=None)]})
+        self.assertEqual(transport.splitlines()[2].split()[28:],['4']+['1','2','3','0','0','0','1'])
+        self.compile({'segments':[seg(i) for i in range(1000)]})
+        with self.assertRaises(ValueError):  # more than 128 segments need the pose format
+            self.compile({'segments':[{'start_ms':i*10,'end_ms':i*10+10,'input':{'x':True}} for i in range(129)]})
+        for bad in ([0,0,0,0,0,0,2],[0,0,0,0,0,0],[0,0,0,0,0,0,0],[float('nan'),0,0,0,0,0,1],[11,0,0,0,0,0,1],[0,0,0,0,0,0,'1'],[0,0,0,0,0,0,True],'pose'):
+            with self.subTest(pose=str(bad)),self.assertRaises(ValueError):
+                self.compile({'segments':[seg(0,head_pose=bad)]})
+        # Real-trace conversion: recentring maths, then a converted slice is a valid script.
+        trace_to_script.selfcheck()
+        trace=[dict(tick=1000+33*i,logic=2,tracked_hands=3,buttons=1 if i==1 else 0,left_grip=0,right_grip=1.0 if i==1 else 0,left_trigger=0,right_trigger=0,
+                    move_x=0,move_y=-.5,turn_x=0,turn_y=0,**{p+c:v for p,pose in (('head_',[1,1.7,2,0,0,0,1]),('left_',[.8,1,1.6,0,0,0,1]),('right_',[1.2,1,1.6,0,0,0,1]))
+                    for c,v in zip(('x','y','z','qx','qy','qz','qw'),pose)}) for i in range(4)]
+        trace[3]['tick']+=5000  # a long pause is compressed
+        segments,yaw=trace_to_script.build_segments(trace,2000)
+        self.assertEqual(yaw,0);self.assertEqual([(s['start_ms'],s['end_ms']) for s in segments][:3],[(0,2000),(2000,2033),(2033,2066)])
+        self.assertEqual(segments[-1]['end_ms'],2000+33+33+trace_to_script.GAP_MS+33)
+        self.assertEqual(segments[1]['head_pose'],[0,1.65,0,0,0,0,1]);self.assertEqual(segments[1]['right_hand_pose'],[.2,.95,-.4,0,0,0,1])
+        self.assertEqual(segments[2]['input'],{'move_y':-.5,'right_grip':1.0,'a':True})
+        self.compile({'segments':segments})
 
     def test_profile_guards_and_default_off(self):
         validate_script_profile(script_profile())

@@ -1,6 +1,7 @@
 #pragma once
 #include "native_arm_binding_snapshot.hpp"
 namespace d2vr {
+enum class NativeAttachmentInventoryScope {all_slots,attached_slot};
 struct NativeAttachmentCandidate {
     rig::Arm arm{};
     rig::Identity binding_identity{},inventory_identity{};
@@ -22,7 +23,8 @@ inline bool same_attachment_candidate(const NativeAttachmentCandidate& a,const N
 }
 // Bounded pointer/identity checks only. No component enumeration or name walk.
 template<class Read> std::optional<NativeAttachmentCandidate> native_attachment_candidate(
-    Read& read,std::uintptr_t base,const rig::NativeArmBindingSnapshot& snapshot,std::uintptr_t binding,int stage) {
+    Read& read,std::uintptr_t base,const rig::NativeArmBindingSnapshot& snapshot,std::uintptr_t binding,int stage,
+    NativeAttachmentInventoryScope inventory_scope=NativeAttachmentInventoryScope::all_slots) {
     using namespace rig;
     if(stage!=3 || !typed(read,base,binding,0x1c573e8,0x1c574c0)) return {};
     const auto declaration=value<std::uintptr_t>(read,binding+8);
@@ -60,7 +62,12 @@ template<class Read> std::optional<NativeAttachmentCandidate> native_attachment_
     const auto entity_table=value<std::uintptr_t>(read,*entity),parent_table=value<std::uintptr_t>(read,*parent);
     const auto frame=value<std::uint32_t>(read,binding+0x84);
     std::array<std::uintptr_t,2> native_slots{};
-    if(!entity_table || !parent_table || !frame || !read(*inventory+0x68,native_slots.data(),sizeof(native_slots))) return {};
+    const auto read_slots=[&](std::array<std::uintptr_t,2>& output) {
+        if(inventory_scope==NativeAttachmentInventoryScope::all_slots)return read(*inventory+0x68,output.data(),sizeof(output));
+        if(inventory_scope!=NativeAttachmentInventoryScope::attached_slot)return false;
+        return read(*inventory+0x68+8*(1-side),&output[1-side],sizeof(std::uintptr_t));
+    };
+    if(!entity_table || !parent_table || !frame || !read_slots(native_slots)) return {};
     candidate.entity_table=*entity_table;candidate.parent_table=*parent_table;candidate.binding_cached_frame=*frame;
     candidate.slots={native_slots[1],native_slots[0]}; // Public left/right order, native enum right/left.
     for(unsigned i=0;i<2;++i) if(candidate.slots[i]) {
@@ -77,7 +84,7 @@ template<class Read> std::optional<NativeAttachmentCandidate> native_attachment_
        value<std::uintptr_t>(read,binding+0x10)!=entity || value<std::uintptr_t>(read,*entity+0x358)!=binding ||
        value<std::uintptr_t>(read,binding+0x3c8)!=parent || value<std::uintptr_t>(read,binding+0x400)!=animation ||
        value<std::int16_t>(read,binding+0x3d0)!=joint || value<std::uintptr_t>(read,arm.body+0x60)!=inventory ||
-       started(read,*inventory)!=inventory_id || !read(*inventory+0x68,again.data(),sizeof(again)) || again!=native_slots) return {};
+       started(read,*inventory)!=inventory_id || !read_slots(again) || again!=native_slots) return {};
     if(value<std::uintptr_t>(read,*entity)!=entity_table || value<std::uintptr_t>(read,*parent)!=parent_table ||
        value<std::uintptr_t>(read,*inventory+0x10)!=arm.player || !typed(read,base,*inventory,0x1b9a878)) return {};
     for(unsigned i=0;i<2;++i) if(candidate.slots[i] &&

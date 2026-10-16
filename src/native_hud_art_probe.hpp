@@ -60,7 +60,10 @@ public:
         const auto table=rig::value<std::uintptr_t>(read,object+0x18),identity=rig::value<std::uintptr_t>(read,object+8);
         const auto index=rig::value<std::uint32_t>(read,object+0x20);
         if(!table || !index || !identity || (iggy && *identity!=iggy) || !rig::pointer(*table) || !(*index&0xffffff) || (*index&0xffffff)>16)return 0;
-        std::uint32_t status{};const auto value=api.get(reinterpret_cast<const void*>(*table+((*index&0xffffff)-1)*0x28),0,nullptr,nullptr,"D2VR native display identity",&status);
+        // The getter uses the record's first field as its Iggy player and writes its call depth there: it must be this object's player.
+        const auto record=*table+((*index&0xffffff)-1)*0x28;
+        if(rig::value<std::uintptr_t>(read,record)!=*identity) return 0;
+        std::uint32_t status{};const auto value=api.get(reinterpret_cast<const void*>(record),0,nullptr,nullptr,"D2VR native display identity",&status);
         if(status || value==7 || (value&3)!=1 || !rig::pointer(value-1) || rig::value<unsigned char>(read,value-1)!=0x24)return 0;
         const auto node=rig::value<std::uintptr_t>(read,value+0x27);
         return node && in_tree(read,*identity,*node)?*node:0;

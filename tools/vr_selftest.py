@@ -51,7 +51,7 @@ SCENARIOS['powers'].insert(0, [0, 2000, NEUTRAL, None])
 SCENARIOS['grab'] = [[0, 1500, NEUTRAL, None]]
 for k, hand in enumerate([[0.1, -0.2, -0.3], [0.3, -0.3, -0.2], [-0.1, -0.4, -0.35], [0.2, 0.0, -0.45], [0.35, -0.5, 0.0], [0.0, -0.6, -0.3]]):
     t = 1500 + k * 2500
-    SCENARIOS['grab'] += [[t, t + 1000, NEUTRAL, hand], [t + 1000, t + 1800, {"right_grip": 1.0}, hand], [t + 1800, t + 2500, NEUTRAL, hand]]
+    SCENARIOS['grab'] += [[t, t + 1000, NEUTRAL, hand], [t + 1000, t + 1800, {"right_grip": 1.0}, hand], [t + 1800, t + 2500, NEUTRAL, hand]]  # Use = the grip alone (v449)
 # Sword swings: the right hand sweeps 0.8 m across in 300 ms (about 2.7 m/s), three times.
 SCENARIOS['swing'] = [[0, 2000, NEUTRAL, [-0.4, 0.0, -0.3]]]
 for k in range(3):
@@ -65,11 +65,21 @@ SCENARIOS['swim'] = [[0, 2000, NEUTRAL, None], [2000, 6000, {"move_y": 1.0}, Non
 SCENARIOS['pickup'] = [[0, 1500, NEUTRAL, None]]
 for k, hand in enumerate([[0.0, -0.85, -0.35], [0.1, -0.95, -0.45], [-0.1, -0.8, -0.55], [0.0, -1.0, -0.3]]):
     t = 1500 + k * 2600
-    SCENARIOS['pickup'] += [[t, t + 1100, NEUTRAL, hand], [t + 1100, t + 1900, {"right_grip": 1.0}, hand], [t + 1900, t + 2600, NEUTRAL, hand]]
+    SCENARIOS['pickup'] += [[t, t + 1100, NEUTRAL, hand], [t + 1100, t + 1900, {"right_grip": 1.0}, hand], [t + 1900, t + 2600, NEUTRAL, hand]]  # loot: the grip alone uses (v449)
+# The same reach while looking at the item (a player looks at what he takes): separates a camera-facing rule from the hand query.
+SCENARIOS['pickuplook'] = [[a, b, i, h, {"head_pitch_degrees": -62}] for a, b, i, h in SCENARIOS['pickup']]
 # Damage: idle while the engine hurts the player (--damage DECL): the damage vignette must blend into the view.
 SCENARIOS['damage'] = [[0, 12000, NEUTRAL, None]]
 # Aim: both hands pitched 20 degrees down (hand_pitch_degrees); the crosshair must follow the left hand in the eye.
 SCENARIOS['aim'] = [[0, 8000, NEUTRAL, None]]
+# Drag a corpse by the right wrist (use with --near corpse): stand 0.55 m past the wrist, reach down to it (the sim right grip
+# rests at 0.2 right, 0.35 below and 0.4 ahead of the eye), squeeze, then pull up and walk backwards, then let go.
+_REACH = [-0.2, -1.25, -0.15]
+_PULL = [-0.15, -0.95, 0.1]
+SCENARIOS['drag'] = [[0, 1500, NEUTRAL, _REACH, {"hand_pitch_degrees": -60}],
+                     [1500, 2500, {"right_grip": 1.0, "right_trigger": 1.0}, _REACH, {"hand_pitch_degrees": -60}],  # a full fist grabs (v449)
+                     [2500, 6000, {"right_grip": 1.0, "move_y": -0.8}, _PULL, {"hand_pitch_degrees": -40}],
+                     [6000, 8000, NEUTRAL, _PULL]]
 # Pistol: equip it from the wheel (the test save's wheel holds only Pistol Bullet; any sector), then hold it forward without
 # firing (LT fires and the hand returns to Empty) - for gun model / crosshair measurements.
 # The simulated aim pose equals the grip pose (real Touch controllers tilt them apart), so a level sim grip holds the tracked gun
@@ -107,16 +117,313 @@ for k in range(3):
     SCENARIOS['flick'] += [[t + i * 20, t + (i + 1) * 20, NEUTRAL, REST, {"hand_pitch_degrees": -7.5 * (i + 1)}] for i in range(6)]
     SCENARIOS['flick'] += [[t + 120, t + 2000, NEUTRAL, REST]]
 # Slow, natural reach to the item in front (use with --near item): no attack may fire on the way; then grip.
-SCENARIOS['reach'] = [[0, 1500, NEUTRAL, [0.25, -0.3, -0.25]]] + glide(1500, 3000, [0.25, -0.3, -0.25], [0.0, -0.85, -0.35], 30) +     [[3000, 3800, NEUTRAL, [0.0, -0.85, -0.35]], [3800, 4800, {"right_grip": 1.0}, [0.0, -0.85, -0.35]], [4800, 6000, NEUTRAL, [0.0, -0.85, -0.35]]]
+SCENARIOS['reach'] = [[0, 1500, NEUTRAL, [0.25, -0.3, -0.25]]] + glide(1500, 3000, [0.25, -0.3, -0.25], [0.0, -0.85, -0.35], 30) +     [[3000, 3800, NEUTRAL, [0.0, -0.85, -0.35]], [3800, 4800, {"right_trigger": 1.0}, [0.0, -0.85, -0.35]], [4800, 6000, NEUTRAL, [0.0, -0.85, -0.35]]]
 # Hold and throw a native carryable (bottle; use with --near bottle): squeeze at the bottle (native Use -> HoldObject), keep
 # squeezing while lifting to the chest (the bottle must follow the hand), then swing forward fast and let go (throw).
 _HA, _HC, _HD = [-0.2, -0.8, -0.2], [-0.1, -0.2, -0.2], [-0.1, 0.1, -0.75]
 _GRIP = {"right_grip": 1.0}
-SCENARIOS['hold'] = [[0, 1500, NEUTRAL, _HA], [1500, 2700, _GRIP, _HA]] + glide(2700, 3700, _HA, _HC, 20, _GRIP) +     [[3700, 5500, _GRIP, _HC]] + glide(5500, 5750, _HC, _HD, 8, _GRIP) + [[5750, 9000, NEUTRAL, _HD]]
+# The fist grabs the bottle; the grip alone then keeps it (a full squeeze is not needed while carrying it).
+SCENARIOS['hold'] = [[0, 1500, NEUTRAL, _HA], [1500, 2700, {"right_grip": 1.0, "right_trigger": 1.0}, _HA]] + glide(2700, 3700, _HA, _HC, 20, _GRIP) +     [[3700, 5500, _GRIP, _HC]] + glide(5500, 5750, _HC, _HD, 8, _GRIP) + [[5750, 9000, NEUTRAL, _HD]]
+# Showcase scenarios (screenshots of the grabbing fingers, 2026-10-14): the head looks AT the right hand (the simulated hand sits at a
+# fixed spot in XR space, so the head pitch that points at it follows from the offsets) and eye pairs are requested at the key moments.
+# PAIR_PLAN: scenario -> {script segment (scenario segment + 1): eye-pair label}; a pair is requested PAIR_DELAY s into the segment.
+PAIR_PLAN, PAIR_DELAY = {}, {}
+
+
+def glide_look(t0, t1, a, b, steps, inp, pitch0, pitch1, extra):
+    """glide() with the head pitch moving from pitch0 to pitch1 as well (keeps the head on the hand)."""
+    out = glide(t0, t1, a, b, steps, inp, extra)
+    for i, seg in enumerate(out):
+        seg[4]["head_pitch_degrees"] = round(pitch0 + (pitch1 - pitch0) * (i + 1) / steps, 1)
+    return out
+
+
+_SB = {"hand_pitch_degrees": -50, "head_offset": [0.0, 0.0, -0.3]}  # the hands point at the floor item; the head leans 30 cm forward over the hand
+_SBL = lambda p: dict(_SB, head_pitch_degrees=p)  # noqa: E731
+# (a) bottle: the head leans over the hand and looks 75 deg down at it (hand 1.15 m below the eye, 0.3 m ahead; upright at 0.6 m the avatar's
+# chest hid the hand, sim v470), full fist, lift to the chest, throw.
+SCENARIOS['showbottle'] = ([[0, 2000, NEUTRAL, _HA, _SBL(-75)], [2000, 3300, {"right_grip": 1.0, "right_trigger": 1.0}, _HA, _SBL(-75)],
+                            [3300, 4600, {"right_grip": 1.0, "right_trigger": 1.0}, _HA, _SBL(-75)]] +
+                           glide_look(4600, 5600, _HA, _HC, 20, _GRIP, -75, -61, _SB) + [[5600, 7600, _GRIP, _HC, _SBL(-61)]] +
+                           glide(7600, 7850, _HC, _HD, 8, _GRIP, _SBL(-61)) + [[7850, 10500, NEUTRAL, _HD, _SBL(-61)]])
+PAIR_PLAN['showbottle'] = {1: 'bottle-open-approach', 2: 'bottle-fist-closing', 3: 'bottle-fist-held-low', 24: 'bottle-held-chest'}  # scenario segments 0, 1, 2, 23
+# (b) corpse limb: the head 71 deg down at the wrist (hand 1.6 m below the eye, 0.55 m ahead), full fist, then pull and walk backwards. The pistol
+# hand is raised out of the picture. (A 20 cm lean over the hand put the avatar's coat front between the eye and the hand, sim v470.)
+_LEAN = {"left_hand_offset": [-0.2, 0.25, 0.0]}
+_DL, _DP = dict(_LEAN, hand_pitch_degrees=-60, head_pitch_degrees=-71), dict(_LEAN, hand_pitch_degrees=-40, head_pitch_degrees=-76)
+SCENARIOS['showdrag'] = [[0, 2000, NEUTRAL, _REACH, _DL], [2000, 3500, {"right_grip": 1.0, "right_trigger": 1.0}, _REACH, _DL],
+                         [3500, 5200, {"right_grip": 1.0, "move_y": -0.8}, _PULL, _DP], [5200, 7000, {"right_grip": 1.0, "move_y": -0.8}, _PULL, _DP],
+                         [7000, 9000, NEUTRAL, _PULL, dict(_LEAN, head_pitch_degrees=-76)]]
+PAIR_PLAN['showdrag'] = {1: 'limb-open-approach', 2: 'limb-fist-closed', 3: 'limb-dragging-early', 4: 'limb-dragging-late'}
+def glide_head(t0, t1, a, b, steps, inp, pitch0, pitch1, off0, off1, extra):
+    """glide() with the head pitch and the head offset moving as well."""
+    out = glide(t0, t1, a, b, steps, inp, extra)
+    for i, seg in enumerate(out):
+        k = (i + 1) / steps
+        seg[4]["head_pitch_degrees"] = round(pitch0 + (pitch1 - pitch0) * k, 1)
+        seg[4]["head_offset"] = [round(x + (y - x) * k, 3) for x, y in zip(off0, off1)]
+    return out
+
+
+# AFTER framing (lead, 2026-10-14). Bottle close-up: grab as showbottle, lift to the chest, then up to 36 cm in front of the eyes (hand
+# 1.5 m high, 0.33 m ahead of the head) with the head looking straight at the fist. Legacy script, runs on any DLL.
+_FACE = [-0.2, 0.2, 0.07]
+_SF = {"hand_pitch_degrees": -30}
+SCENARIOS['showbottleclose'] = ([[0, 2000, NEUTRAL, _HA, _SBL(-75)], [2000, 2600, {"right_grip": 1.0, "right_trigger": 1.0}, _HA, _SBL(-75)],
+                                 [2600, 3400, {"right_grip": 1.0, "right_trigger": 1.0}, _HA, _SBL(-75)]] +
+                                glide_look(3400, 4400, _HA, _HC, 20, _GRIP, -75, -61, _SB) +
+                                glide_head(4400, 5400, _HC, _FACE, 20, _GRIP, -61, -24, [0.0, 0.0, -0.3], [0.0, 0.0, 0.0], _SB) +
+                                [[5400, 6600, _GRIP, _FACE, dict(_SF, head_pitch_degrees=-24)], [6600, 7900, _GRIP, _FACE, dict(_SF, head_pitch_degrees=-24)],
+                                 [7900, 9500, NEUTRAL, _FACE, dict(_SF, head_pitch_degrees=-24)]])
+PAIR_PLAN['showbottleclose'] = {1: 'closeup-bottle-approach', 2: ('closeup-bottle-fist-0.1s', 0.0), 3: ('closeup-bottle-fist-0.7s', 0.0),
+                                44: 'closeup-bottle-face-a', 45: 'closeup-bottle-face-b'}  # scenario segments 0, 1, 2, 43, 44
+
+
+def look_pose(head, target):
+    """Script v5 head pose [x, y, z, qx, qy, qz, qw] (tracking space, OpenXR -Z forward) at `head` looking at `target`: yaw about +Y, then pitch about +X."""
+    import math
+    dx, dy, dz = (t - h for t, h in zip(target, head))
+    yaw, pitch = math.atan2(-dx, -dz), math.atan2(dy, math.hypot(dx, dz))
+    sy, cy, sx, cx = math.sin(yaw / 2), math.cos(yaw / 2), math.sin(pitch / 2), math.cos(pitch / 2)
+    return [round(v, 4) for v in (*head, cy * sx, sy * cx, -sy * sx, cy * cx)]
+
+
+def right_hand(off):
+    """Where the simulated right hand sits (tracking space) for an offset: (0.2, 1.3, -0.4) + off."""
+    return [0.2 + off[0], 1.3 + off[1], -0.4 + off[2]]
+
+
+# Corpse limb, AFTER framing: the head sits 30 cm right of and 10 cm ahead of the body line and turns toward the grabbing hand (script v5:
+# DLL v480+): pairs at the squeeze (~0.1 s) and ~0.7 s later, then while dragging.
+_LH = (0.3, 1.65, -0.1)
+_LL = lambda off, pitch: {"head_pose": look_pose(_LH, right_hand(off)), "hand_pitch_degrees": pitch, "left_hand_offset": [-0.2, 0.25, 0.0]}  # noqa: E731
+SCENARIOS['showlimb'] = [[0, 2000, NEUTRAL, _REACH, _LL(_REACH, -60)], [2000, 2600, {"right_grip": 1.0, "right_trigger": 1.0}, _REACH, _LL(_REACH, -60)],
+                         [2600, 3400, {"right_grip": 1.0, "right_trigger": 1.0}, _REACH, _LL(_REACH, -60)],
+                         [3400, 5000, {"right_grip": 1.0, "move_y": -0.8}, _PULL, _LL(_PULL, -40)], [5000, 7000, {"right_grip": 1.0, "move_y": -0.8}, _PULL, _LL(_PULL, -40)],
+                         [7000, 9000, NEUTRAL, _PULL, _LL(_PULL, -40)]]
+PAIR_PLAN['showlimb'] = {1: 'limb-approach', 2: ('limb-fist-0.1s', 0.0), 3: ('limb-fist-0.7s', 0.0), 4: 'limb-drag-early', 5: 'limb-drag-late'}
+PAIR_TIMES = {}  # scenario -> [(scenario ms, label)]: eye pairs by the script clock (works inside runs of short segments)
+
+
+def qmul(a, b):
+    x1, y1, z1, w1 = a
+    x2, y2, z2, w2 = b
+    return (w1 * x2 + x1 * w2 + y1 * z2 - z1 * y2, w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2, w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2, w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2)
+
+
+def hand_quat(pitch=0.0, roll=0.0):
+    """Right-hand grip orientation: roll about its own forward (-Z) axis first, then pitch about +X (negative = fingers down)."""
+    import math
+    p, r = math.radians(pitch) / 2, math.radians(roll) / 2
+    return qmul((math.sin(p), 0, 0, math.cos(p)), (0, 0, math.sin(r), math.cos(r)))
+
+
+def pose_glide(t0, t1, steps, inp, head0, head1, hand0, hand1, q0, q1, extra=None):
+    """Script v5 segments: the right hand moves hand0 -> hand1 (tracking space, metres) turning q0 -> q1, the head moves head0 -> head1
+    always looking at the hand (look_pose); the left hand stays raised out of the picture."""
+    import math
+    out = []
+    for i in range(steps):
+        k = (i + 1) / steps
+        lerp = lambda a, b: [x + (y - x) * k for x, y in zip(a, b)]  # noqa: E731
+        pos, head = lerp(hand0, hand1), lerp(head0, head1)
+        q = lerp(q0, q1)
+        n = math.sqrt(sum(v * v for v in q))
+        more = {"head_pose": look_pose(head, pos), "right_hand_pose": [round(v, 4) for v in pos] + [round(v / n, 5) for v in q], "left_hand_offset": [-0.2, 0.25, 0.0]}
+        more.update(extra or {})
+        out.append([round(t0 + (t1 - t0) * i / steps), round(t0 + (t1 - t0) * (i + 1) / steps), inp, None, more])
+    return out
+
+
+# Free hands (script v5, DLL v480+; --near bottle: the table beside the bottle). The head sits at the default spot, hand 40 cm ahead of the
+# eyes: open hand in the air, fist (full squeeze, nothing within reach), then the hand opens, goes palm-down over the table 25 cm right of
+# the bottle and is lowered 0.2 m/s onto it (the fingers should stop flat). Table top ~0.9 m below the eye (test save), set TABLE_Y if it moves.
+TABLE_Y = 0.80  # tracking-space height of the hand centre resting on the table (eye 1.65 here; world table top ~ eye_z - 0.85)
+_FIST = {"right_grip": 1.0, "right_trigger": 1.0}
+_AIR, _ABOVE, _ONTAB = [0.12, 1.50, -0.40], [0.28, TABLE_Y + 0.32, -0.45], [0.28, TABLE_Y - 0.03, -0.45]
+_HEAD0, _HEAD1 = [0.0, 1.65, 0.0], [0.1, 1.65, -0.15]
+_Q_AIR, _Q_DOWN = list(hand_quat(0, 0)), list(hand_quat(0, 90))  # roll +90 = palm down (-90 showed the palm up, sim v502)
+SCENARIOS['showhand'] = (pose_glide(0, 300, 3, NEUTRAL, _HEAD0, _HEAD0, _AIR, _AIR, _Q_AIR, _Q_AIR) + [[300, 2200, NEUTRAL, None, pose_glide(0, 1, 1, NEUTRAL, _HEAD0, _HEAD0, _AIR, _AIR, _Q_AIR, _Q_AIR)[0][4]]] +
+                         [[2200, 3600, _FIST, None, pose_glide(0, 1, 1, NEUTRAL, _HEAD0, _HEAD0, _AIR, _AIR, _Q_AIR, _Q_AIR)[0][4]]] +
+                         pose_glide(3600, 4800, 12, NEUTRAL, _HEAD0, _HEAD1, _AIR, _ABOVE, _Q_AIR, _Q_DOWN) +
+                         [[4800, 5400, NEUTRAL, None, pose_glide(0, 1, 1, NEUTRAL, _HEAD1, _HEAD1, _ABOVE, _ABOVE, _Q_DOWN, _Q_DOWN)[0][4]]] +
+                         pose_glide(5400, 7000, 32, NEUTRAL, _HEAD1, _HEAD1, _ABOVE, _ONTAB, _Q_DOWN, _Q_DOWN) +
+                         [[7000, 9500, NEUTRAL, None, pose_glide(0, 1, 1, NEUTRAL, _HEAD1, _HEAD1, _ONTAB, _ONTAB, _Q_DOWN, _Q_DOWN)[0][4]]])
+PAIR_TIMES['showhand'] = [(1500, 'hand-open-air'), (3000, 'fist-air'), (5100, 'hand-over-table'), (6500, 'hand-lowering'), (7600, 'hand-on-table-a'), (8800, 'hand-on-table-b')]
+# Corpse limb as a player does it: crouched (head 45 cm down, as 'carry'), the wrist 85 cm below the eye and 55 cm ahead (upright it is 1.7 m from the
+# eye, past what the avatar's arm reaches: the fist stopped short of the limb, sim v502). Script v5 (DLL v480+).
+_REACH_C, _PULL_C = [-0.2, -1.0, -0.15], [-0.15, -0.75, 0.1]
+_LH2 = (0.3, 1.2, -0.1)
+_LL2 = lambda off, pitch: {"head_pose": look_pose(_LH2, right_hand(off)), "hand_pitch_degrees": pitch, "left_hand_offset": [-0.2, 0.25, 0.0]}  # noqa: E731
+SCENARIOS['showlimbcrouch'] = [[0, 2500, NEUTRAL, _REACH_C, _LL2(_REACH_C, -60)], [2500, 3100, {"right_grip": 1.0, "right_trigger": 1.0}, _REACH_C, _LL2(_REACH_C, -60)],
+                               [3100, 3900, {"right_grip": 1.0, "right_trigger": 1.0}, _REACH_C, _LL2(_REACH_C, -60)],
+                               [3900, 5500, {"right_grip": 1.0, "move_y": -0.8}, _PULL_C, _LL2(_PULL_C, -40)], [5500, 7500, {"right_grip": 1.0, "move_y": -0.8}, _PULL_C, _LL2(_PULL_C, -40)],
+                               [7500, 9500, NEUTRAL, _PULL_C, _LL2(_PULL_C, -40)]]
+PAIR_PLAN['showlimbcrouch'] = {1: 'crouch-limb-approach', 2: ('crouch-limb-fist-0p1s', 0.0), 3: ('crouch-limb-fist-0p7s', 0.0), 4: 'crouch-limb-drag-early', 5: 'crouch-limb-drag-late'}
+# Table sweep (script v5, --near bottle): the open palm-down hand is lowered from 0.72 to 0.27 (tracking-space y; the eye is 14.53 here, so the hand
+# world z runs 13.60 -> 13.15, across the table top whichever its exact height) at 0.1 m/s, then held. finger_ik hit timeline tells where contact began.
+_T_HI, _T_LO = [0.28, 0.72, -0.45], [0.28, 0.27, -0.45]
+SCENARIOS['showtable'] = (pose_glide(0, 1500, 6, NEUTRAL, _HEAD0, _HEAD1, [0.2, 1.3, -0.4], _T_HI, _Q_AIR, _Q_DOWN) +
+                          pose_glide(1500, 6000, 45, NEUTRAL, _HEAD1, _HEAD1, _T_HI, _T_LO, _Q_DOWN, _Q_DOWN) +
+                          [[6000, 8500, NEUTRAL, None, pose_glide(0, 1, 1, NEUTRAL, _HEAD1, _HEAD1, _T_LO, _T_LO, _Q_DOWN, _Q_DOWN)[0][4]]])
+PAIR_TIMES['showtable'] = [(1700, 'table-hand-high'), (3200, 'table-lowering-a'), (4300, 'table-lowering-b'), (5200, 'table-lowering-c'), (6300, 'table-held-a'), (7800, 'table-held-b')]
+# Table sweep, crouched like 'carry' (head 45 cm down): upright the table top is 1.2 m below the eye, past the avatar's arm (the hand stopped following
+# the controller at the arm's reach and never got near the table, sim v502). The hand is lowered 0.95 -> 0.45 (tracking-space y) at 0.1 m/s, then held.
+_C0, _C1 = [0.0, 1.2, 0.0], [0.1, 1.2, -0.15]
+_U_HI, _U_LO = [0.28, 0.95, -0.45], [0.28, 0.45, -0.45]
+SCENARIOS['showtable2'] = (pose_glide(0, 1500, 6, NEUTRAL, _C0, _C1, [0.2, 1.3, -0.4], _U_HI, _Q_AIR, _Q_DOWN) +
+                           pose_glide(1500, 6500, 50, NEUTRAL, _C1, _C1, _U_HI, _U_LO, _Q_DOWN, _Q_DOWN) +
+                           [[6500, 9000, NEUTRAL, None, pose_glide(0, 1, 1, NEUTRAL, _C1, _C1, _U_LO, _U_LO, _Q_DOWN, _Q_DOWN)[0][4]]])
+PAIR_TIMES['showtable2'] = [(1700, 'table2-hand-high'), (3200, 'table2-lowering-a'), (4500, 'table2-lowering-b'), (5700, 'table2-lowering-c'), (6800, 'table2-held-a'), (8200, 'table2-held-b')]
+# Orbit around the hand holding the bottle (script v5, DLL v480+; --near bottle): take the bottle as in 'hold' (full fist, then grip alone), carry it to a fixed
+# showcase pose in front of the chest (palm left, thumb up, forearm forward), keep that pose, and put the head on a 0.40 m sphere around the hand, looking at it,
+# 1.5 s per view (pair 1.0 s in). 'orbitfist' keeps the trigger pressed as well (full fist) during the views.
+_OHAND = [0.10, 1.30, -0.35]
+_ORBIT = [('palm-side', (-1, 0, 0)), ('back-of-hand', (1, 0, 0)), ('thumb-above', (0, 1, 0.15)), ('little-finger-below', (0, -1, 0.15)),
+          ('forward', (0, 0, -1)), ('behind', (0, 0, 1)), ('front-thumb-45', (-1, 1, 0)), ('front-below-45', (-1, -1, 0))]
+
+
+def orbit_scenario(fist, ha_off=None, tag=''):
+    import math
+    qa, qid = list(hand_quat(-50, 0)), list(hand_quat(0, 0))
+    ha = right_hand(ha_off or _HA)
+    inp = _FIST if fist else _GRIP
+    segs = (pose_glide(0, 1500, 3, NEUTRAL, _HEAD0, _HEAD0, ha, ha, qa, qa) + pose_glide(1500, 2700, 4, _FIST, _HEAD0, _HEAD0, ha, ha, qa, qa) +
+            pose_glide(2700, 3700, 10, _GRIP, _HEAD0, _HEAD0, ha, _OHAND, qa, qid) + pose_glide(3700, 4700, 2, inp, _HEAD0, _HEAD0, _OHAND, _OHAND, qid, qid))
+    times = []
+    for k, (label, d) in enumerate(_ORBIT):
+        t = 4700 + 1500 * k
+        n = math.sqrt(sum(c * c for c in d))
+        head = [h + 0.40 * c / n for h, c in zip(_OHAND, d)]
+        segs += pose_glide(t, t + 1500, 1, inp, head, head, _OHAND, _OHAND, qid, qid)
+        times.append((t + 1000, ('orbitfist-' if fist else 'orbit-') + tag + label))
+    for sg in segs:  # the left (pistol) hand down at the hip: raised, its sleeve filled the palm-side and forward views (sim v510)
+        sg[4]['left_hand_offset'] = [0.1, -0.8, 0.6]
+    return segs, times
+
+
+SCENARIOS['orbit'], PAIR_TIMES['orbit'] = orbit_scenario(False)
+SCENARIOS['orbitfist'], PAIR_TIMES['orbitfist'] = orbit_scenario(True)
+# NECK grab variants (DLL 525): the press point climbs the bottle's axis, hand y -0.70 / -0.60 (-0.52: the 524 holdneck)
+# NECK grab (DLL 524+): the same pickup, but the hand reaches the bottle's neck (28 cm higher than the body grab: about 0.33 m above its base).
+_HAN = [-0.2, -0.52, -0.2]
+SCENARIOS['orbitneck'], PAIR_TIMES['orbitneck'] = orbit_scenario(False, _HAN, 'neck-')
+_NK = {"hand_pitch_degrees": -50, "head_pitch_degrees": -40}  # as 'hold' (write_scenario sets these by name)
+for _tag, _y in (('2', -0.70), ('3', -0.60)):
+    _h = [-0.2, _y, -0.2]
+    SCENARIOS['holdneck' + _tag] = ([[0, 1500, NEUTRAL, _h, {"hand_pitch_degrees": -50, "head_pitch_degrees": -40}], [1500, 2700, {"right_grip": 1.0, "right_trigger": 1.0}, _h, {"hand_pitch_degrees": -50, "head_pitch_degrees": -40}]] +
+                                    glide(2700, 3700, _h, _HC, 20, _GRIP, {"hand_pitch_degrees": -50, "head_pitch_degrees": -40}) + [[3700, 5500, _GRIP, _HC, {"hand_pitch_degrees": -50, "head_pitch_degrees": -40}]] +
+                                    glide(5500, 5750, _HC, _HD, 8, _GRIP, {"hand_pitch_degrees": -50, "head_pitch_degrees": -40}) + [[5750, 9000, NEUTRAL, _HD, {"hand_pitch_degrees": -50, "head_pitch_degrees": -40}]])
+SCENARIOS['holdneck'] = ([[0, 1500, NEUTRAL, _HAN, _NK], [1500, 2700, {"right_grip": 1.0, "right_trigger": 1.0}, _HAN, _NK]] + glide(2700, 3700, _HAN, _HC, 20, _GRIP, _NK) +
+                         [[3700, 5500, _GRIP, _HC, _NK]] + glide(5500, 5750, _HC, _HD, 8, _GRIP, _NK) + [[5750, 9000, NEUTRAL, _HD, _NK]])
+# Table press (DLL 530): showtable2's palm-down hand pressed 30 cm below the table top (tracking y 0.45 -> 0.18 at 0.1 m/s), held, then back up. The drawn hand must not sink.
+_U_DEEP = [0.28, 0.12, -0.45]
+SCENARIOS['tablepress'] = (pose_glide(0, 1500, 6, NEUTRAL, _C0, _C1, [0.2, 1.3, -0.4], _U_HI, _Q_AIR, _Q_DOWN) +
+                           pose_glide(1500, 6000, 45, NEUTRAL, _C1, _C1, _U_HI, _U_LO, _Q_DOWN, _Q_DOWN) +
+                           pose_glide(6000, 9500, 35, NEUTRAL, _C1, _C1, _U_LO, _U_DEEP, _Q_DOWN, _Q_DOWN) +
+                           [[9500, 11500, NEUTRAL, None, pose_glide(0, 1, 1, NEUTRAL, _C1, _C1, _U_DEEP, _U_DEEP, _Q_DOWN, _Q_DOWN)[0][4]]] +
+                           pose_glide(11500, 12500, 10, NEUTRAL, _C1, _C1, _U_DEEP, _U_HI, _Q_DOWN, _Q_DOWN))
+PAIR_TIMES['tablepress'] = [(4800, 'tablepress-at-table'), (7000, 'tablepress-press-a'), (9000, 'tablepress-press-b'), (10500, 'tablepress-deep-held'), (12300, 'tablepress-released')]
+# Death + "Restart From Last Checkpoint" (user crash 2026-10-14, v533, game rva 0x87bbfa): exercise what the player did (a bottle in the fist, a hand push,
+# the sword drawn at the shoulder and thrown, the pistol the save starts with in the left hand), then die (god off, `damage player1 bullet_regular_npc` every
+# second from script second DEATH_AT), pick "Restart From Last Checkpoint" with the virtual pad, wait for the load and watch the game for 40 s. Use --near bottle.
+DEATH_AT, DEATH_SECONDS = 12.5, 70
+BACK, _G = [-0.03, 0.20, 0.50], {"right_grip": 1.0}  # as defined again below (this block sits before them)
+_DR_WIND = [0.0, 0.15, 0.1]
+_DR_TAIL = (glide(0, 300, [0.0, 0.0, 0.0], BACK, 3) + [[300, 800, _G, BACK]] + glide(800, 1100, BACK, _DR_WIND, 2, _G) + [[1100, 1400, _G, _DR_WIND]] +
+            glide(1400, 1480, _DR_WIND, [0.0, 0.15, -0.4], 4, _G) + glide(1480, 1500, [0.0, 0.15, -0.4], [0.0, 0.14, -0.5], 2) + [[1500, 2300, NEUTRAL, [0.0, 0.14, -0.5]]])
+
+
+def _shift(segs, dt):
+    return [[a + dt, b + dt, *rest] for a, b, *rest in segs]
+
+
+# hold the bottle, throw it, draw the sword, throw it; then idle until the end
+SCENARIOS['deathreload'] = ([[0, 1500, NEUTRAL, _HA], [1500, 2700, {"right_grip": 1.0, "right_trigger": 1.0}, _HA]] + glide(2700, 3700, _HA, _HC, 20, _GRIP) +
+                            [[3700, 5500, _GRIP, _HC]] + glide(5500, 5750, _HC, _HD, 8, _GRIP) + [[5750, 7000, NEUTRAL, _HD]] +
+                            _shift(_DR_TAIL, 7000) + [[9300, DEATH_SECONDS * 1000, NEUTRAL, [0.0, 0.14, -0.5]]])
+# push the bottle with the open hand first (hand-push-short), close the fist behind it (hold), then as above
+_PS = [-0.17, -0.8, 0.1]
+SCENARIOS['deathreloadpush'] = ([[0, 1500, NEUTRAL, REST]] + glide(1500, 2700, REST, _PS, 12) + [[2700, 4200, NEUTRAL, _PS]] + glide(4200, 5700, _PS, [-0.17, -0.8, -0.1231], 25) +
+                                [[5700, 6200, NEUTRAL, [-0.17, -0.8, -0.1231]]] + glide(6200, 6700, [-0.17, -0.8, -0.1231], [-0.17, -0.8, -0.2], 5) +
+                                [[6700, 7700, {"right_grip": 1.0, "right_trigger": 1.0}, [-0.17, -0.8, -0.2]], [7700, 9000, _GRIP, [-0.17, -0.8, -0.2]]] +
+                                glide(9000, 9250, [-0.17, -0.8, -0.2], _HD, 5, _GRIP) + [[9250, 10500, NEUTRAL, _HD]] + _shift(_DR_TAIL, 10500) +
+                                [[12800, DEATH_SECONDS * 1000, NEUTRAL, [0.0, 0.14, -0.5]]])
 # Sword over the right shoulder: reach back (sheathes), return, reach back and squeeze grip (draws). Offsets are relative to
 # the default right hand (0.2,-0.3,-0.4 from the head); the scabbard point is right .17, down .10, back .10.
 BACK = [-0.03, 0.20, 0.50]
 SCENARIOS['sheathe'] = [[0, 2000, NEUTRAL, [0.0, 0.0, 0.0]]] + glide(2000, 3000, [0.0, 0.0, 0.0], BACK, 20) +     [[3000, 4000, NEUTRAL, BACK]] + glide(4000, 5000, BACK, [0.0, 0.0, 0.0], 20) + [[5000, 7000, NEUTRAL, [0.0, 0.0, 0.0]]] +     glide(7000, 8000, [0.0, 0.0, 0.0], BACK, 20) + [[8000, 9000, {"right_grip": 1.0}, BACK]] + glide(9000, 10000, BACK, [0.0, 0.0, 0.0], 20) +     [[10000, 12000, NEUTRAL, [0.0, 0.0, 0.0]]]
+# Full-grip sword (SwordGrip): squeeze at the shoulder (draw), carry it down by the floor, let go (drop), squeeze there again
+# (pick up), carry it back to the shoulder and let go (sheathe); then draw, let go in front (thrown), squeeze at the shoulder
+# (the thrown sword comes back), let go there (sheathe).
+_LOW, _FRONT, _G = [-0.1, -1.05, -0.1], [0.3, -0.2, 0.15], {"right_grip": 1.0}  # _FRONT: let go out to the right side (a forward throw hit the shopkeeper, who closed the shutter)
+SCENARIOS['swordgrip'] = ([[0, 2000, NEUTRAL, [0.0, 0.0, 0.0]]] + glide(2000, 3000, [0.0, 0.0, 0.0], BACK, 10) +
+                          [[3000, 3800, _G, BACK]] + glide(3800, 4800, BACK, _LOW, 10, _G) +
+                          [[4800, 6500, _G, _LOW], [6500, 8500, NEUTRAL, _LOW], [8500, 10500, _G, _LOW]] +
+                          glide(10500, 11500, _LOW, BACK, 10, _G) + [[11500, 12500, NEUTRAL, BACK]] +
+                          glide(12500, 13500, BACK, [0.0, 0.0, 0.0], 10) + glide(13500, 14500, [0.0, 0.0, 0.0], BACK, 10) +
+                          [[14500, 15300, _G, BACK]] + glide(15300, 16300, BACK, _FRONT, 5, _G) + [[16300, 18000, NEUTRAL, _FRONT]] +
+                          glide(18000, 19000, _FRONT, BACK, 10) + [[19000, 21000, _G, BACK], [21000, 23000, NEUTRAL, BACK]])
+# Throw the sword at a guard ~2.5 m ahead (use with --near npc-front): draw at the shoulder, wind up over the shoulder, then a
+# fast forward throw let go mid-motion (10 ms steps: the hand speed estimate needs one step per frame).
+_WIND, _MID, _OUT = [0.0, 0.15, 0.1], [0.0, 0.15, -0.4], [0.0, 0.14, -0.5]  # a flat dart throw from beside the head
+SCENARIOS['swordthrow'] = ([[0, 300, NEUTRAL, [0.0, 0.0, 0.0]]] + glide(300, 700, [0.0, 0.0, 0.0], BACK, 4) +
+                           [[700, 1300, _G, BACK]] + glide(1300, 1700, BACK, _WIND, 4, _G) + [[1700, 2000, _G, _WIND]] +
+                           glide(2000, 2080, _WIND, _MID, 8, _G) + glide(2080, 2100, _MID, _OUT, 2) + [[2100, 7000, NEUTRAL, _OUT]])
+# The same throw at a guard who has not noticed the player (use with --near npc --blind-ai): the sword is drawn 10 m behind him (its
+# sound alerted guards 3 m away), then the player stands 2.5 m behind him just before the throw. The engine's own stealth test
+# (isUnaware) must answer yes and the throw kill him.
+SCENARIOS['stealththrow'] = SCENARIOS['swordthrow']
+# Crash soak (headset crashes 2026-10-13): six cycles of draw at the shoulder, wind up, throw, call back at the shoulder, sheathe.
+_SOAK = []
+for _k in range(6):
+    _t = _k * 4200
+    _SOAK += (glide(_t, _t + 300, [0.0, 0.0, 0.0], BACK, 3) + [[_t + 300, _t + 800, _G, BACK]] + glide(_t + 800, _t + 1100, BACK, _WIND, 2, _G) +
+              [[_t + 1100, _t + 1400, _G, _WIND]] + glide(_t + 1400, _t + 1480, _WIND, _MID, 4, _G) + glide(_t + 1480, _t + 1500, _MID, _OUT, 2) +
+              [[_t + 1500, _t + 2300, NEUTRAL, _OUT]] + glide(_t + 2300, _t + 2700, _OUT, BACK, 3) + [[_t + 2700, _t + 3400, _G, BACK], [_t + 3400, _t + 4200, NEUTRAL, BACK]])
+SCENARIOS['soak'] = [[0, 1000, NEUTRAL, [0.0, 0.0, 0.0]]] + [[a + 1000, b + 1000, i, h, *m] for a, b, i, h, *m in _SOAK]
+# Carry a body (use with --near corpse): crouch as a player does (head 45 cm down: the physical crouch), look at the body, the right
+# hand at its chest, squeeze (the grip alone = the game's Use: the shoulder carry), hold, then stand and look ahead (right-eye captures).
+# Upright, a hand at the floor is 1.6 m from the eye, past the hand query's 1.5 m reach (sim v462: Use never answered).
+_TORSO = [-0.2, -0.95, -0.35]
+_CROUCH = {"head_pitch_degrees": -50, "head_offset": [0.0, -0.45, 0.0]}
+SCENARIOS['carry'] = ([[0, 1500, NEUTRAL, [0.0, 0.0, 0.0]]] + glide(1500, 2500, [0.0, 0.0, 0.0], _TORSO, 5, None, _CROUCH) +
+                      [[2500, 3200, _G, _TORSO, _CROUCH], [3200, 6000, NEUTRAL, [0.0, 0.0, 0.0], _CROUCH],
+                       [6000, 8000, NEUTRAL, [0.0, 0.0, 0.0], {"head_pitch_degrees": 0, "head_offset": [0.0, 0.0, 0.0]}]] +
+                      # Leaning with the body on the shoulder (an eye pair in each): right, forward, down and forward, left.
+                      [[8000 + 2000 * k, 10000 + 2000 * k, NEUTRAL, [0.0, 0.0, 0.0], {"head_pitch_degrees": 0, "head_offset": off}]
+                       for k, off in enumerate([[0.15, 0.0, 0.0], [0.0, 0.0, -0.2], [0.05, -0.2, -0.2], [-0.15, 0.0, 0.0]])])
+CARRY_PAIRS = range(len(SCENARIOS['carry']) - 4, len(SCENARIOS['carry']) + 1)  # script segments (scenario segment + 1) with an eye pair
+PAIR_PLAN['carry'] = {k: f'carry{k}' for k in CARRY_PAIRS}
+PAIR_DELAY['carry'] = 1.0
+# (c) showcase: the same carry with longer holds and pairs: hand on the torso, fist squeezed, carried crouched, carried standing.
+_UPRIGHT = {"head_pitch_degrees": 0, "head_offset": [0.0, 0.0, 0.0]}
+SCENARIOS['showcarry'] = ([[0, 1500, NEUTRAL, [0.0, 0.0, 0.0]]] + glide(1500, 2500, [0.0, 0.0, 0.0], _TORSO, 5, None, _CROUCH) +
+                          [[2500, 4300, NEUTRAL, _TORSO, _CROUCH], [4300, 5400, _G, _TORSO, _CROUCH], [5400, 8000, NEUTRAL, [0.0, 0.0, 0.0], _CROUCH],
+                           [8000, 10500, NEUTRAL, [0.0, 0.0, 0.0], _UPRIGHT]])
+PAIR_PLAN['showcarry'] = {7: 'carry-hand-on-torso', 8: 'carry-fist-squeezed', 9: 'carry-crouched', 10: 'carry-standing'}  # scenario segments 6-9
+# Grip with nothing under the hand uses what the head looks at (test save: the Black Market counter ahead): the shop opens.
+# The counter is below eye level. The left hand is raised in front: at its default pose it is in the hip holster zone, where the grip
+# draws a holstered pistol (sim v465: a loaded hip drained the grip, the shop never opened).
+_LOOK = {"head_pitch_degrees": -35, "left_hand_offset": [0.0, 0.2, -0.1]}
+# The right hand presses: the test save starts with the pistol drawn in the left hand, whose grip then holds (and holsters) the gun.
+SCENARIOS['lookuse'] = [[0, 3000, NEUTRAL, [0.0, 0.0, 0.0], _LOOK], [3000, 3600, {"right_grip": 1.0}, [0.0, 0.0, 0.0], _LOOK],  # use with --near shop
+                        [3600, 8000, NEUTRAL, [0.0, 0.0, 0.0], _LOOK]]
+# The shop held in the left hand like a note (use with --near shop; runs with the native menu pointer): open it as lookuse, then the right
+# hand 20 cm in front of the default left hand's page, aiming ahead, must point at the page centre (the old 1 m panel ahead reads u .3, v .77).
+SCENARIOS['shoparm'] = SCENARIOS['lookuse'][:2] + [[3600, 5000, NEUTRAL, [0.0, 0.0, 0.0], _LOOK], [5000, 12000, NEUTRAL, [-0.4, 0.16, 0.2], {"head_pitch_degrees": 0}]]
+SCENARIOS['sworddrop'] = SCENARIOS['swordgrip'][:23] + [[6500, 26000, NEUTRAL, _LOW]]  # the dropped sword lies 20 s (probe it live)
+# Full-grip gun (GunGrip): the wheel draws the pistol (kept until gripped), grip it, carry it to the left hip and let go
+# (holster); an empty hand's trigger must not draw it; squeeze at the hip (draw), fire it, let go in front (holster).
+_HIP, _LG = [0.0, -0.27, 0.38], {"left_grip": 1.0}
+SCENARIOS['pistolhip'] = ([[0, 2000, NEUTRAL, [0.0, 0.0, 0.0]], [2000, 3500, {"x": True, "turn_x": 1.0}, [0.0, 0.0, 0.0]],
+                           [3500, 5000, NEUTRAL, [0.0, 0.0, 0.0], _AIM_GUN], [5000, 5800, _LG, [0.0, 0.0, 0.0], _AIM_GUN]] +
+                          glide(5800, 6800, [0.0, 0.0, 0.0], _HIP, 10, _LG, _AIM_GUN) + [[6800, 7800, NEUTRAL, _HIP]] +
+                          glide(7800, 8800, _HIP, [0.0, 0.0, 0.0], 10) + [[8800, 9300, {"left_trigger": 1.0}, [0.0, 0.0, 0.0]], [9300, 9600, NEUTRAL, [0.0, 0.0, 0.0]]] +
+                          glide(9600, 10300, [0.0, 0.0, 0.0], _HIP, 10) + [[10300, 11300, _LG, _HIP]] +
+                          glide(11300, 12300, _HIP, [0.0, 0.0, 0.0], 10, _LG, _AIM_GUN) +
+                          [[12300, 13000, _LG, [0.0, 0.0, 0.0], _AIM_GUN], [13000, 13600, {"left_grip": 1.0, "left_trigger": 1.0}, [0.0, 0.0, 0.0], _AIM_GUN],
+                           [13600, 14300, _LG, [0.0, 0.0, 0.0], _AIM_GUN], [14300, 16500, NEUTRAL, [0.0, 0.0, 0.0], _AIM_GUN]])
 SCENARIOS['power'] = [[0, 2000, NEUTRAL, None], [2000, 3200, {"left_trigger": 1.0}, None], [3200, 7000, NEUTRAL, None]]
 # Overhead chops (use with --near npc-front/civ-front): the blade starts raised (pitch +70) outside the target and comes
 # down and forward through it in 250 ms, three times: a contact hit must land on the first entry.
@@ -152,6 +459,16 @@ for k in range(10):
     SCENARIOS['swarm'] += [[t + 300, t + 2500, NEUTRAL, [-0.4, y, -0.3]]]
 # Right hand aimed down at a shop counter in front (the black-market save) and held; press Use meanwhile ("pad x").
 SCENARIOS['shop'] = [[0, 25000, NEUTRAL, [-0.15, -0.15, -0.25], {"hand_pitch_degrees": -75}]]
+# The same aim, opened by the hand's trigger (v404: the trigger uses what the hand points at). Nothing is bought.
+_SHOP = ([-0.15, -0.15, -0.25], {"hand_pitch_degrees": -75})
+SCENARIOS['shoptrigger'] = [[0, 1500, NEUTRAL, None]]
+for k, pitch in enumerate([0, -20, -40, -60, -75]):  # sweep the right hand's aim down the counter, one trigger pull each
+    t = 1500 + k * 1800
+    SCENARIOS['shoptrigger'] += [[t, t + 1000, NEUTRAL, [-0.15, -0.15, -0.25], {"hand_pitch_degrees": pitch}],
+                                 [t + 1000, t + 1400, {"right_trigger": 1.0}, [-0.15, -0.15, -0.25], {"hand_pitch_degrees": pitch}],
+                                 [t + 1400, t + 1800, NEUTRAL, [-0.15, -0.15, -0.25], {"hand_pitch_degrees": pitch}]]
+# The same sweep with the grip (v438: one button per hand, the grip uses what its hand points at).
+SCENARIOS['shopgrip'] = [[a, b, {"right_grip": 1.0} if i.get("right_trigger") else i, *rest] for a, b, i, *rest in SCENARIOS['shoptrigger']]
 # Left hand lowered beside the hip and held, looking down (headset v361: the left arm vanished near the waist). The engine must
 # never hide it (status arm_hidden bit 0) and the mirror frames must show it.
 HIP = [-0.05, -0.4, 0.35]
@@ -162,14 +479,52 @@ SCENARIOS['waist'] = [[0, 1500, NEUTRAL, [0.0, 0.0, 0.0], {"head_pitch_degrees":
 SCENARIOS['contact'] = [[0, 8000, NEUTRAL, REST]]
 # Behind an unaware guard (--near npc): stand still; the takedown sensor must qualify and its prompt must not blink.
 SCENARIOS['takedown'] = [[0, 10000, NEUTRAL, REST]]
+SCENARIOS['shove'] = [[0, 20000, NEUTRAL, REST]]
+# Grab + yank a guard (use with --near npc-front): the left hand (the right grip is the choke when a takedown is offered).
+# Squeeze and let go once to send the save's drawn pistol to the hip, then hand on his chest, squeeze, pull back hard
+# (6 m/s), keep holding.
+_CHEST, _BACK, _LG2 = [0.15, 0.05, -0.45], [-0.1, 0.0, 0.25], {"left_grip": 1.0}
+SCENARIOS['yank'] = ([[0, 400, NEUTRAL, [0.0, 0.0, 0.0]], [400, 700, _LG2, [0.0, 0.0, 0.0]], [700, 1300, NEUTRAL, [0.0, 0.0, 0.0]]] +
+                     glide(1300, 1900, [0.0, 0.0, 0.0], _CHEST, 6) + [[1900, 2050, {"left_grip": 1.0, "left_trigger": 1.0}, _CHEST]] +
+                     glide(2050, 2150, _CHEST, _BACK, 10, {"left_grip": 1.0, "left_trigger": 1.0}) + [[2150, 5200, _LG2, _BACK], [5200, 9000, NEUTRAL, _BACK]])  # with --near npc: the "shove" test command tries each push decl on the guard
+# Push a closed door (use with --near door, which puts the right hand 18 cm before the middle of the leaf): slowly 0.4 m at
+# 0.2 m/s (the leaf must follow the hand, ~20 deg), hold, take the hand back (the door must stay ajar: it never closes by
+# itself), then a fast 0.7 m shove at 7 m/s (the native swing must open it fully: state Opened).
+_DOOR_IN, _DOOR_SHOVE = [0.0, 0.0, -0.40], [0.0, 0.0, -0.70]
+SCENARIOS['doorpush'] = ([[0, 1500, NEUTRAL, REST]] + glide(1500, 3500, REST, _DOOR_IN, 40) + [[3500, 6500, NEUTRAL, _DOOR_IN]] +
+                         glide(6500, 7500, _DOOR_IN, REST, 10) + [[7500, 9500, NEUTRAL, REST]] +
+                         glide(9500, 9600, REST, _DOOR_SHOVE, 10) + [[9600, 13000, NEUTRAL, _DOOR_SHOVE]])
+DOOR_HELD_SEGMENTS = range(43, 54)  # script segments (scenario segment + 1): the hand going back and resting
 SCENARIOS['all'] = [[0, 3000, NEUTRAL, None], [3000, 7000, {"move_y": 1.0}, None],
                     [7000, 10000, {"x": True}, [0.05, 0.2, -0.2]], [10000, 13000, {"x": True}, [-0.15, 0.25, -0.2]],
                     [13000, 16000, NEUTRAL, None]]
+# Jump by gesture (HandsUpJump): both hands thrown up from the rest pose to 0.3 m above the eyes in 200 ms, held up 0.6 s
+# (native A stays held: the mantle at a ledge), lowered, twice.
+_UP = [0.0, 0.65, -0.1]
+SCENARIOS['handsjump'] = [[0, 2000, NEUTRAL, REST, {"left_hand_offset": REST}]]
+for k in range(2):
+    t = 2000 + k * 3000
+    SCENARIOS['handsjump'] += [s + [{"left_hand_offset": s[3]}] for s in glide(t, t + 200, REST, _UP, 10) + [[t + 200, t + 800, NEUTRAL, _UP]] +
+                               glide(t + 800, t + 1100, _UP, REST, 10) + [[t + 1100, t + 3000, NEUTRAL, REST]]]
 # Player-FSM states (tools/player_states.py) a scenario must reach: the mechanic really ran in the engine.
+
+
+def held_sword(segments, draw_ms=2600):
+    """Full grip (v412): a sword attacks only while its grip is squeezed. Draw it over the shoulder first, then hold the
+    right grip through every segment of the original scenario (shifted by draw_ms)."""
+    first = segments[0][3] or [0.0, 0.0, 0.0]
+    pre = ([[0, 600, NEUTRAL, [0.0, 0.0, 0.0]]] + glide(600, 1200, [0.0, 0.0, 0.0], BACK, 6) + [[1200, 2000, _G, BACK]] +
+           glide(2000, draw_ms, BACK, first, 6, _G))
+    return pre + [[a + draw_ms, b + draw_ms, dict(inp, right_grip=1.0), hand or [0.0, 0.0, 0.0], *more] for a, b, inp, hand, *more in segments]
+
+
+for _name in ('swing', 'chop', 'duel', 'swarm', 'floor'):
+    SCENARIOS[_name] = held_sword(SCENARIOS[_name])
 FORBIDDEN_STATES = {'flick': ['Slash'], 'reach': ['Slash']}  # accidental attacks
-EXPECTED_STATES = {'chop': ['Slash'], 'pickup': ['LootObject', 'Interact', 'HoldObject'], 'reach': ['LootObject', 'Interact', 'HoldObject'], 'swing': ['Slash', 'Assassination'], 'duel': ['Slash'], 'grab': ['LootObject', 'HoldObject', 'Interact', 'CarryCorpse', 'ReadNote'], 'powers': ['UsePower', 'Blinking', 'UseWindblast', 'UsePhantasmalLink', 'InBendTime', 'StoneShroud', 'DoppelgangerSwap', 'UseHeart'], 'jump': ['Jumping', 'Falling'],  # Falling always follows a jump; the short Jumping state can fall between samples
+EXPECTED_STATES = {'pickuplook': ['LootObject', 'Interact', 'HoldObject'], 'carry': ['CarryCorpse', 'PickupCorpse', 'Interact'], 'chop': ['Slash'], 'pickup': ['LootObject', 'Interact', 'HoldObject'], 'reach': ['LootObject', 'Interact', 'HoldObject'], 'swing': ['Slash', 'Assassination'], 'duel': ['Slash'], 'grab': ['LootObject', 'HoldObject', 'Interact', 'CarryCorpse', 'ReadNote'], 'powers': ['UsePower', 'Blinking', 'UseWindblast', 'UsePhantasmalLink', 'InBendTime', 'StoneShroud', 'DoppelgangerSwap', 'UseHeart'], 'jump': ['Jumping', 'Falling'],  # Falling always follows a jump; the short Jumping state can fall between samples
                    'lean': ['Leaning'], 'power': ['UsePower', 'Blinking'], 'wheel': ['Powerwheel'],
-                   'walk': ['Running', 'Sneaking', 'Sprinting'], 'all': ['Powerwheel'], 'potion': ['Powerwheel'], 'hide': ['Powerwheel'], 'sheathe': ['Undraw']}
+                   'walk': ['Running', 'Sneaking', 'Sprinting'], 'all': ['Powerwheel'], 'potion': ['Powerwheel'], 'hide': ['Powerwheel'], 'sheathe': ['Undraw'], 'swordgrip': ['EquipChange'], 'pistolhip': ['EquipChange'], 'pistolfire': ['FireWeapon', 'ReloadWeapon']}
+EXPECTED_STATES['handsjump'] = ['Jumping', 'Falling']  # gesture jump: Falling always follows a jump
 SIM_FLAGS = ['--paired', '--native-eye-capture', '--vr-preview', '--head-tracking', '--controllers', '--symmetric-frustum',
              '--stable-camera', '--tracked-arms', '--physical-grab', '--native-left-aim-experiment', '--controller-aim',
              '--vr-turning', 'snap', '--simulated-vr', '--simulated-input']
@@ -227,7 +582,7 @@ def set_god(pid, on, buddha=False):
 
 
 def drive_to_gameplay(pid, timeout=LEAD_MS / 1000 - 3):
-    """With the mod injected: dismiss the load screen / pause menu through the mod's virtual pad (no focus)."""
+    """Drive main-menu, pause and game-over choices; only native InGame is success."""
     base, read = attach(pid)
     end = time.time() + timeout
     while time.time() < end:
@@ -238,7 +593,7 @@ def drive_to_gameplay(pid, timeout=LEAD_MS / 1000 - 3):
         if mask == 2:
             return True
         if mask == 64:
-            command('pad a 200')  # loading done: "press a button"
+            command('pad a 200')
         elif mask in (4, 1024):
             command('pad b 200')  # pause menu / black market: back to the game
         elif mask == 8192:
@@ -247,7 +602,10 @@ def drive_to_gameplay(pid, timeout=LEAD_MS / 1000 - 3):
     return False
 
 
-def npc_stand(pid, behind, civilian=False, beside=False, skip=()):
+SKIP_NAMES, NPC_INDEX = [], 0  # --skip-npc / --npc-index
+
+
+def npc_stand(pid, behind, civilian=False, beside=False, skip=(), dist=.9):
     """Eye position and yaw 0.9 m behind (or in front of) the nearest living guard (any floor), facing it.
     NPC facing = minus the first row of the arkCpntReferenceFrame 3x3 at +0x3c (live test 2026-10-12)."""
     import math
@@ -261,6 +619,7 @@ def npc_stand(pid, behind, civilian=False, beside=False, skip=()):
     time.sleep(.8)
     listing, npcs = live()
     npcs = [e for e in npcs if e['addr'] not in skip and (e.get('health') or {}).get('max', 0) >= 10]  # 1-hp scripted extras take no hits (sim v382)
+    npcs = [e for e in npcs if not any(n in (e.get('name') or '') for n in SKIP_NAMES)]
     feet = listing['player']['pos']
     before = {e['addr']: e['pos'] for e in first}
     # Patrolling guards walked past the player before the first swing: prefer NPCs standing still, guards first.
@@ -268,7 +627,9 @@ def npc_stand(pid, behind, civilian=False, beside=False, skip=()):
     npcs = sorted(still, key=lambda e: (bool(e.get('guard')) == civilian, e['dist'])) or npcs
     if not npcs:
         return None, None
-    npc = npcs[0]
+    print('npc candidates (name, pos, hp, dist, guard, still):', [(e.get('name', '')[-34:], [round(v, 1) for v in e['pos']], (e.get('health') or {}).get('cur'),
+                                                                    round(e['dist'], 1), bool(e.get('guard')), e in still) for e in npcs[:8]])
+    npc = npcs[min(NPC_INDEX, len(npcs) - 1)]
     base, read = attach(pid)
     fwd = None
     for comp, name in World(read, base).components(int(npc['addr'], 16)):
@@ -283,9 +644,159 @@ def npc_stand(pid, behind, civilian=False, beside=False, skip=()):
     if beside:  # at the NPC's right/left: neither a takedown from behind nor face to face
         fx, fy = -fy, fx
     side = 1 if behind else -1  # measured: standing at +row0 put the player BEHIND (the swing became an Assassination)
-    x, y = npc['pos'][0] + side * fx * .9, npc['pos'][1] + side * fy * .9
+    x, y = npc['pos'][0] + side * fx * dist, npc['pos'][1] + side * fy * dist
     yaw = math.degrees(math.atan2(npc['pos'][1] - y, npc['pos'][0] - x))
     return (x, y, npc['pos'][2] + 1.65, yaw), npc
+
+
+def door_frame(read, base, door):
+    """An arkDoor (vtable 0x1cb7c68): its arkCpntOpenable (door+0x370) state (+0x48, next +0x4c: 0 closed, 1 animated, 2 opened),
+    locked (+0x1e8), usable (+0x20), peeking (+0x1ea), broken (+0x1ed), NPC locker (door+0x378, 0x3fff0010 = free) and the
+    hinge frame of its animated part (entity id cpnt+0xdc): origin +0x300 = hinge, axis rows +0x30c (normal), +0x318."""
+    import struct
+    q = lambda at: struct.unpack('<Q', read(at, 8))[0]
+    u = lambda at: struct.unpack('<I', read(at, 4))[0]
+    cpnt = q(door + 0x370)
+    part_id = u(cpnt + 0xdc)
+    part = q(q(base + 0x39a5290) + 0x3130b0 + (part_id >> 16) * 8)
+    f = struct.unpack('<12f', read(part + 0x300, 48))
+    return dict(cpnt=cpnt, state=u(cpnt + 0x48), next=u(cpnt + 0x4c), locked=read(cpnt + 0x1e8, 1)[0], usable=read(cpnt + 0x20, 1)[0],
+                peek=read(cpnt + 0x1ea, 1)[0], broken=read(cpnt + 0x1ed, 1)[0], locker=u(door + 0x378), model=q(door + 0xf0),
+                hinge=f[0:3], x=f[3:6], y=f[6:9])
+
+
+def leaf_angle(read, door, fr, s):
+    """Opening angle (deg) of the leaf in the swing sense s: the centre of its drawn mesh's world box (+0x1840) around the hinge."""
+    import math
+    import struct
+    box = struct.unpack('<8f', read(fr['model'] + 0x1840, 32))
+    c = [(box[i] + box[i + 4]) / 2 - fr['hinge'][i] for i in range(3)]
+    dx, dy = sum(c[i] * fr['x'][i] for i in range(3)), sum(c[i] * fr['y'][i] for i in range(3))
+    return math.degrees(math.atan2(s * dx, -dy))
+
+
+def door_stand(pid):
+    """Eye position and yaw in front of the nearest closed, free, unlocked door on the player's floor, on the player's side,
+    so that the simulated right hand (0.4 m ahead, 0.2 m right, 0.35 m down) rests 18 cm before the middle of the leaf
+    (doors.edgeskl: the closed leaf runs from the hinge along the part's -Y, 0.75 m to its middle; +X is the normal)."""
+    import math
+    import struct
+    base, read = attach(pid)
+    game = struct.unpack('<Q', read(base + 0x39a5290, 8))[0]
+    registry = []
+    for at in range(0, 0x3fff, 0x200):  # in chunks: one 128 KB read fails when a page of it is not readable
+        n = min(0x200, 0x3fff - at)
+        try:
+            registry += struct.unpack('<%dQ' % n, read(game + 0x3130b0 + at * 8, n * 8))
+        except (OSError, ValueError):
+            registry += [0] * n
+    eye = player_position(read, base)
+    best = None
+    seen = []  # every arkDoor: (distance + 100 if scripted, addr, state, next, locked, broken, peek, locker, usable, floor dz)
+    for ent in registry[1:]:
+        if not 0x10000 <= ent < 0x7fff00000000:
+            continue
+        try:
+            if struct.unpack('<Q', read(ent, 8))[0] != base + 0x1cb7c68:
+                continue
+            fr = door_frame(read, base, ent)
+        except (OSError, ValueError):  # the reader raises ValueError('bad read') on an unmapped field
+            continue
+        h = fr['hinge']
+        d = math.hypot(h[0] - eye[0], h[1] - eye[1])
+        try:  # scripted doors (latches, story locks) after ordinary ones: the Black Market building door's latch took the hand (sim v464)
+            np_ = struct.unpack('<Q', read(ent + 0x20, 8))[0]
+            if read(np_, 7) == b'script_':
+                d += 100
+        except (OSError, ValueError):
+            pass
+        seen.append((round(d, 1), hex(ent), fr['state'], fr['next'], fr['locked'], fr['broken'], fr['peek'], hex(fr['locker']), fr['usable'], round(h[2] - (eye[2] - 1.65), 2)))
+        if (fr['state'], fr['next'], fr['locked'], fr['broken'], fr['peek'], fr['locker']) != (0, 0, 0, 0, 0, 0x3fff0010) or not fr['usable']                 or abs(h[2] - (eye[2] - 1.65)) > 1.0 or d > 130 or (best and d >= best[0]):
+            continue
+        best = (d, ent, fr)
+    print('doors (d, addr, state, next, locked, broken, peek, locker, usable, dz):', sorted(seen)[:12])
+    if not best:
+        return None, None
+    _, ent, fr = best
+    h, x, y = fr['hinge'], fr['x'], fr['y']
+    s = 1 if sum((h[i] - eye[i]) * x[i] for i in range(2)) >= 0 else -1  # the native Use's side rule: the player on -X opens CCW
+    stand = [h[i] - s * .58 * x[i] + (-.75 + s * .2) * y[i] for i in range(2)] + [h[2] + 1.65]
+    yaw = math.degrees(math.atan2(s * x[1], s * x[0]))
+    return (*stand, yaw), dict(addr=ent, s=s, **fr)
+
+
+def ragdoll(pid, entity):
+    """The 17 hknp ragdoll bodies of an arkNPC: [(position, flags)], or None. Handles at arkCpntPhysicsSystemEvolved
+    (vtable 0x1c54008) +0x100 -> idList (data +0x28, count +0x30 = 17; the data is often inline at +0x120); pool records
+    (stride 0xb0): transform +0, flags +0x44 (sim v399, v429)."""
+    import struct
+    from entities import World
+    base, read = attach(pid)
+    q = lambda at: struct.unpack('<Q', read(at, 8))[0]
+    physics = next((c for c, name in World(read, base).components(entity) if name.startswith('arkCpntPhysicsSystemEvolved')), None)
+    if not physics:
+        return None
+    try:  # a living guard has no ragdoll yet: its handle list is garbage (sim v418)
+        world = q(q(base + 0x39a5290) + 0x60410); pool = q(world + 0x28)
+        lst = q(physics + 0x100)
+        if struct.unpack('<I', read(lst + 0x30, 4))[0] != 17:
+            return None
+        handles = struct.unpack('<17I', read(q(lst + 0x28), 68))
+        out = []
+        for h in handles:
+            rec = pool + (h & 0xffffff) * 0xb0
+            out.append((struct.unpack('<3f', read(rec + 0x30, 12)), struct.unpack('<I', read(rec + 0x44, 4))[0]))
+        return out
+    except OSError:
+        return None
+
+
+def corpse_stand(pid):
+    """Eye position and yaw 0.55 m past the right wrist (ragdoll body 10) of the nearest corpse with dynamic ragdoll bodies,
+    facing the wrist, plus (corpse entity, pelvis position)."""
+    import math
+    out = json.loads(subprocess.run([sys.executable, os.path.join(ROOT, 'tools', 'entities.py'), '--pid', str(pid), '--kind', 'npc', '--health', '--json'],
+                                    capture_output=True, text=True).stdout)
+    dead = sorted([e for e in out['entities'] if (e.get('health') or {}).get('dead')], key=lambda e: e['dist'])
+    for e in dead[:12]:
+        bodies = ragdoll(pid, int(e['addr'], 16))
+        if not bodies or any(f & 7 != 2 for _, f in bodies):
+            continue
+        pelvis, wrist = bodies[0][0], bodies[10][0]
+        dx, dy = wrist[0] - pelvis[0], wrist[1] - pelvis[1]
+        d = math.hypot(dx, dy)
+        if d < .2:
+            continue
+        x, y = wrist[0] + dx / d * .55, wrist[1] + dy / d * .55
+        yaw = math.degrees(math.atan2(wrist[1] - y, wrist[0] - x))
+        return (x, y, wrist[2] + 1.6, yaw), (int(e['addr'], 16), pelvis)
+    return None, None
+
+
+def old_corpse_stand(pid):
+    """Eye position and yaw 0.6 m from the nearest dead body whose ragdoll is not live (settled corpses: static or not instanced),
+    facing it, plus (corpse entity, reference-frame position). The hand's squeeze must wake it (NativeWeaponHands::wake)."""
+    import math
+    import struct
+    from entities import World
+    out = json.loads(subprocess.run([sys.executable, os.path.join(ROOT, 'tools', 'entities.py'), '--pid', str(pid), '--kind', 'npc', '--health', '--json'],
+                                    capture_output=True, text=True).stdout)
+    feet = out['player']['pos']
+    dead = sorted([e for e in out['entities'] if (e.get('health') or {}).get('dead')], key=lambda e: e['dist'])
+    base, read = attach(pid)
+    for e in dead[:20]:
+        bodies = ragdoll(pid, int(e['addr'], 16))
+        if bodies and all(f & 7 == 2 for _, f in bodies):
+            continue  # live ragdoll: the ordinary drag test covers it
+        fr = next((c for c, nm in World(read, base).components(int(e['addr'], 16)) if nm.startswith('arkCpntReferenceFrame')), None)
+        if not fr:
+            continue
+        p = struct.unpack('<3f', read(fr + 0x30, 12))
+        dx, dy = feet[0] - p[0], feet[1] - p[1]
+        d = math.hypot(dx, dy) or 1
+        x, y = p[0] + dx / d * .6, p[1] + dy / d * .6
+        return (x, y, p[2] + 1.65, math.degrees(math.atan2(p[1] - y, p[0] - x))), (int(e['addr'], 16), p)
+    return None, None
 
 
 def target_hp(pid, npc):
@@ -329,13 +840,58 @@ def combat_latency(check, target=None):
     check('guard took damage', bool(drops) or hurt, f'{len(drops)} health drops, swings {len(swings)}, latencies ms {lat}, target hp {target}')
 
 
+def script_segment():
+    """The running gameplay script's segment (0 = the lead-in, k+1 = scenario segment k), from the mod's live command log;
+    -1 when unknown. The process clock runs ~2 s ahead of the script (injection), so timed actions use this."""
+    try:  # written to artifacts/ while the session runs (archived into the run folder at its end)
+        with open(os.path.join(ART, 'simulated-gameplay-commands.csv')) as f:
+            last = f.read().strip().splitlines()[-1].split(',')
+        return int(last[1])
+    except (OSError, ValueError, IndexError):
+        return -1
+
+
+_SE = [None, 0.0]  # (last logged script elapsed ms, wall clock when it changed)
+
+
+def script_ms():
+    """The running script's clock (ms, lead-in included): the last row of the mod's command log plus the wall time since it changed; None when unknown."""
+    try:
+        with open(os.path.join(ART, 'simulated-gameplay-commands.csv')) as f:
+            ms = int(f.read().strip().splitlines()[-1].split(',')[0])
+    except (OSError, ValueError, IndexError):
+        return None
+    if ms != _SE[0]:
+        _SE[0], _SE[1] = ms, time.time()
+    return ms + (time.time() - _SE[1]) * 1000
+
+
+def bottle_sampler(pid, addr, out, stop, rot=None):
+    """Thread: the entity's reference-frame position (+0x30) every 40 ms as (script ms - LEAD_MS, x, y, z)."""
+    import struct
+    from entities import World
+    pb, pr = attach(pid)
+    fr = next(c for c, nm in World(pr, pb).components(addr) if nm.startswith('arkCpntReferenceFrame'))
+    while not stop.is_set():
+        sm = script_ms()
+        if sm is not None:
+            try:
+                raw = struct.unpack('<12f', pr(fr + 0x30, 48))  # position (3) + the 3x3 rotation at +0x3c
+                out.append((round(sm - LEAD_MS), *raw[:3]))
+                if rot is not None:
+                    rot.append((round(sm - LEAD_MS), *raw[3:]))
+            except Exception:
+                pass
+        stop.wait(0.04)
+
+
 def write_scenario(name):
     segments = []
     for start, end, inp, hand, *more in SCENARIOS[name]:
         seg = {"start_ms": start + LEAD_MS, "end_ms": end + LEAD_MS, "head_pitch_degrees": -40 if name == 'pickup' else 0, "input": inp}
         if hand:
-            seg["left_hand_offset" if name in ('potion', 'hide', 'floorleft', 'waist') else "right_hand_offset"] = hand  # the wheel cursor belongs to the X (left) hand
-        if name in ('pickup', 'reach', 'hold'):
+            seg["left_hand_offset" if name in ('potion', 'hide', 'floorleft', 'waist', 'pistolhip', 'yank') else "right_hand_offset"] = hand  # the wheel cursor belongs to the X (left) hand
+        if name in ('pickup', 'pickuplook', 'reach', 'hold', 'deathreload', 'deathreloadpush'):
             seg["hand_pitch_degrees"] = -50  # point the hands at the floor item
             seg["head_pitch_degrees"] = -40
         if name == 'aim':
@@ -386,15 +942,27 @@ def main():
     ap.add_argument('--scenario', default='all', choices=sorted(SCENARIOS))
     ap.add_argument('--load-save', action='store_true', help='game is at the title screen: load the last save')
     ap.add_argument('--launch', action='store_true', help='start the game from Steam (background) and load the last save')
-    ap.add_argument('--near', choices=['item', 'bottle', 'npc', 'npc-front', 'npc-side', 'civ-front'],
+    ap.add_argument('--near', choices=['item', 'bottle', 'npc', 'npc-front', 'npc-side', 'civ-front', 'corpse', 'oldcorpse', 'shop', 'door'],
                     help='teleport next to the nearest pickable item / 0.9 m behind (npc) or in front of (npc-front) the nearest guard, facing it')
     ap.add_argument('--teleport', nargs=3, type=float, metavar=('X', 'Y', 'Z'), help='engine setviewpos (eye position) before the scenario')
     ap.add_argument('--damage', metavar='DECL', help='hurt the player every 3 s with this damage decl (engine `damage player1 DECL`, god off)')
     ap.add_argument('--inject-at-title', action='store_true',
                     help='with --launch: inject at the title screen, then load the save (UI movies loaded with the level get the owned-load patches, as the headset launcher does)')
     ap.add_argument('--blind-ai', action='store_true', help='NPC vision budget ark_vision_max_checks 0 during the scenario (restored to 150): guards do not spot or kill the test player (unverified live)')
+    ap.add_argument('--item', metavar='NAME', help='with --near item: the nearest pickup whose entity name contains NAME (e.g. coin)')
+    ap.add_argument('--script', metavar='FILE', help='play this gameplay script JSON as is (e.g. artifacts/claude/trace-replay-auto.json: a recorded human session) instead of a scenario; god mode + invulnerable')
+    ap.add_argument('--skip-npc', metavar='SUBSTR[,SUBSTR]', help='--near npc*: never pick an NPC whose entity name contains one of these (e.g. def_10939)')
+    ap.add_argument('--npc-index', type=int, default=0, help='--near npc*: take the Nth nearest candidate (default 0)')
+    ap.add_argument('--script-shift', nargs=3, type=float, metavar=('X', 'Y', 'Z'), help='--script of a scenario-relative file: added to every right_hand_offset (metres)')
+    ap.add_argument('--script-head-pitch', type=float, default=-53.0, help='--script of a scenario-relative file: head pitch where a segment sets none (default -53: looking at the bottle of --near bottle)')
+    ap.add_argument('--script-hand-pitch', type=float, default=0.0, help='--script of a scenario-relative file: hand pitch where a segment sets none')
+    ap.add_argument('--pairs-at', metavar='T,T,..', help='eye pairs at these scenario seconds (script clock)')
+    ap.add_argument('--bottle-name', metavar='REGEX', help='--near bottle: take the nearest carryable whose entity name matches this (e.g. glass|cup|mug|bottle_01); --npc-index picks the Nth; the eye stands 1.2 m above the item as for bottle_02')
     ap.add_argument('--every', metavar='CMD', help='send this mod test command every 3 s during the scenario (e.g. "pad x 200")')
     a = ap.parse_args()
+    SKIP_NAMES[:] = [n for n in (a.skip_npc or '').split(',') if n]
+    global NPC_INDEX
+    NPC_INDEX = a.npc_index
     if a.launch and not game_pid():
         subprocess.run([sys.executable, os.path.join(ROOT, 'tools', 'game_keys.py'), '--prepare-config'], check=True)
         os.startfile('steam://rungameid/403640')
@@ -413,22 +981,46 @@ def main():
     elif a.load_save:  # title -> Campaign -> Continue (posted to the window; the load screen is dismissed by the mod's pad)
         keys(0x0D, 0x0D, 0x0D)
         time.sleep(20)
-    script, seconds = write_scenario(a.scenario)
+    if a.script:  # the script's own lead-in (LEAD_MS) and length; the run is judged only by the generic checks (gameplay reached, no crash)
+        a.scenario = 'idle'
+        script = os.path.abspath(a.script)
+        segs = json.load(open(script))['segments']
+        if segs[0]['start_ms'] == 0 and segs[0]['end_ms'] < LEAD_MS:  # a scenario script without the lead-in: shift it and fill the pitches
+            shift = a.script_shift or [0.0, 0.0, 0.0]
+            fixed = [{"start_ms": 0, "end_ms": LEAD_MS, "head_pitch_degrees": 0, "input": NEUTRAL}]
+            for sg in segs:
+                sg = dict(sg, start_ms=sg['start_ms'] + LEAD_MS, end_ms=sg['end_ms'] + LEAD_MS)
+                sg.setdefault('head_pitch_degrees', a.script_head_pitch)
+                sg.setdefault('hand_pitch_degrees', a.script_hand_pitch)
+                if 'right_hand_offset' in sg:
+                    sg['right_hand_offset'] = [round(v + d, 4) for v, d in zip(sg['right_hand_offset'], shift)]
+                fixed.append(sg)
+            script = os.path.join(ART, 'claude', 'selftest-script.json')
+            json.dump({"segments": fixed}, open(script, 'w'))
+            segs = fixed
+        seconds = max(seg['end_ms'] for seg in segs) / 1000
+    else:
+        script, seconds = write_scenario(a.scenario)
     knob = os.path.join(ROOT, 'build', 'ui-dump')
     open(knob, 'w').close()
     # Combat scenarios: the player ignores damage (engine god/buddha are not honoured) so a fight can run to the end.
     invulnerable = os.path.join(ROOT, 'build', 'sim-invulnerable')
-    if a.scenario in ('duel', 'swarm'):
+    if a.script or a.scenario in ('duel', 'swarm', 'swordthrow', 'stealththrow', 'shove', 'yank', 'soak') or a.near in ('item', 'corpse', 'oldcorpse', 'door'):  # guards near teleport spots killed the player (sim v404)
         open(invulnerable, 'w').close()
     dump_dir = os.path.join(ART, 'ui-dump')
     for f in glob.glob(os.path.join(dump_dir, '*')):
         os.remove(f)
     for stale in ('npc-watch.csv', 'native-combat.csv'):
-        if os.path.exists(os.path.join(ART, stale)):
-            os.remove(os.path.join(ART, stale))
+        for _ in range(30):  # the previous run's npc_watch may still be finishing its last seconds
+            try:
+                if os.path.exists(os.path.join(ART, stale)):
+                    os.remove(os.path.join(ART, stale))
+                break
+            except PermissionError:
+                time.sleep(1)
     try:
         proc = subprocess.Popen([sys.executable, os.path.join(ROOT, 'tools', 'inject_probe.py'), '--pid', str(pid), '--dll-name', a.dll,
-                                 *SIM_FLAGS, '--simulated-gameplay-script', script, '--seconds', str(int(seconds + 12))],
+                                 *SIM_FLAGS, *(['--native-menu-pointer'] if a.scenario == 'shoparm' else []), '--simulated-gameplay-script', script, '--seconds', str(int(seconds + 12))],
                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
         proc_start = time.time()
         time.sleep(4)
@@ -445,31 +1037,59 @@ def main():
             except Exception:
                 home = None
         scenario_end = time.time() + seconds - 1
+        bottle_rot = []
+        bottle_addr, bottle_track, bottle_geom = None, [], {}  # the near-bottle item's entity, its world positions (script ms, x, y, z), stand geometry
+        sampler_stop = None
         if reached and a.near == 'bottle':  # a native carryable (HoldObject), on the floor or a low table
             import math, re
             listing = json.loads(subprocess.run([sys.executable, os.path.join(ROOT, 'tools', 'entities.py'), '--pid', str(pid), '--kind', 'all', '--json', '--limit', '400'],
                                                 capture_output=True, text=True).stdout)
             player = listing['player']['pos']
-            items = [e for e in listing['entities'] if e.get('cls') == 'arkMovable' and e.get('pickable') and re.search('bottle|glass|cup|mug', e['name'], re.I)
-                     and -0.2 < e['pos'][2] - player[2] < 1.0 and e['dist'] < 8]
+            items = [e for e in listing['entities'] if e.get('cls') == 'arkMovable' and e.get('pickable') and re.search(a.bottle_name or 'bottle|glass|cup|mug', e['name'], re.I)
+                     and ((-6 < e['pos'][2] - player[2] < 12 and e['dist'] < 16) if a.bottle_name else (-0.2 < e['pos'][2] - player[2] < 1.0 and e['dist'] < 8))]
             items.sort(key=lambda e: e['dist'])
+            if a.bottle_name:
+                print('bottle candidates (name, pos, dist):', [(e['name'][-40:], [round(v, 2) for v in e['pos']], round(e['dist'], 1)) for e in items[:10]])
+                items = items[NPC_INDEX:NPC_INDEX + 1]
             if items:
                 item = items[0]['pos']
                 dx, dy = item[0] - player[0], item[1] - player[1]
                 d = max(1e-6, math.hypot(dx, dy))
-                stand = (item[0] - dx / d * .6, item[1] - dy / d * .6, player[2] + 1.3)
+                stand = (item[0] - dx / d * .6, item[1] - dy / d * .6, (item[2] + .8) if a.bottle_name else (player[2] + 1.3))
                 yaw = math.degrees(math.atan2(dy, dx))
                 print('near bottle', items[0]['name'], item, 'stand', [round(v, 2) for v in stand])
                 set_god(pid, True)
                 command('console setviewpos %.2f %.2f %.2f %.1f' % (*stand, yaw))
                 time.sleep(2)
+                bottle_addr = int(items[0]['addr'], 16)
+                bottle_geom.update(yaw_deg=yaw, stand=list(stand), bottle0=list(items[0]['pos']))
+                import threading
+                sampler_stop = threading.Event()
+                threading.Thread(target=bottle_sampler, args=(pid, bottle_addr, bottle_track, sampler_stop, bottle_rot), daemon=True).start()
+                try:
+                    pb, pr = attach(pid)
+                    bottle_geom['eye'] = [float(v) for v in player_position(pr, pb)]
+                    print('eye after the teleport (camera origin):', [round(v, 3) for v in player_position(pr, pb)], 'bottle', items[0]['pos'])
+                except Exception as ex:
+                    print('eye read failed', ex)
         if reached and a.near == 'item':
             import math
-            listing = json.loads(subprocess.run([sys.executable, os.path.join(ROOT, 'tools', 'entities.py'), '--pid', str(pid), '--kind', 'item', '--json', '--limit', '40'],
+            listing = json.loads(subprocess.run([sys.executable, os.path.join(ROOT, 'tools', 'entities.py'), '--pid', str(pid), '--kind', 'all', '--json', '--limit', '600'],
                                                 capture_output=True, text=True).stdout)
             player = listing['player']['pos']
             # Same floor as the player (feet z within 0.5 m): a teleport beside a raised item can drop the player off a ledge.
-            items = [e for e in listing['entities'] if e.get('cls') == 'arkPickup' and e.get('pickable') and abs(e['pos'][2] - player[2]) < .5]
+            # On the player's floor or a table on it (up to 1.2 m above the feet): the eye goes 1.3 m above the item.
+            # Not the Black Market's display stock (its prefab's pickups are wares behind the counter: nothing to take, sim v465).
+            items = [e for e in listing['entities'] if e.get('cls') == 'arkPickup' and e.get('pickable') and -.5 < e['pos'][2] - player[2] < 1.2 and e['dist'] < 15
+                     and 'black_market' not in (e.get('model') or '') and not (e.get('name') or '').startswith('pickups_')]
+            usables = [e['pos'] for e in listing['entities'] if e.get('cls') == 'arkUsable']
+            # World loot, not an NPC's pocket (the shopkeeper's key moves), and alone: coins on a cash machine are ranked behind the
+            # machine, which the hand then uses (sim v467).
+            if a.item:
+                items = [e for e in items if a.item in (e.get('name') or '')]
+            placed = [e for e in items if (e.get('name') or '').startswith('env_') and (a.item or all(math.dist(e['pos'], u) > .6 for u in usables))]
+            npcs = [e['pos'] for e in listing['entities'] if e.get('cls') == 'arkNPC']
+            items = placed or [e for e in items if all(math.dist(e['pos'], u) > .6 for u in usables) and all(math.dist(e['pos'][:2], n[:2]) > 1.0 for n in npcs)]  # on the ground plane: a pocket hangs 1 m above the NPC's origin or items
             if items:
                 item = items[0]['pos']
                 dx, dy = item[0] - player[0], item[1] - player[1]
@@ -483,6 +1103,45 @@ def main():
         watcher = None
         npc = None
         next_melee = 0
+        corpse = None
+        door = None
+        door_samples = []  # doorpush: (script segment, door state, next, leaf angle deg, status doors)
+        door_errors = {}  # doorpush: the first failure of each sampling read
+        eye_pairs = []  # carry: capture-eye-pair request ids
+        pair_times = sorted(PAIR_TIMES.get(a.scenario, []) + [(int(float(t) * 1000), 'pair-%ss' % t) for t in (a.pairs_at or '').split(',') if t])
+        pair_done = set()
+        pair_actual = {}  # label -> scenario ms at the moment the request was posted
+        eye_pair_segments, seg_first = set(), {}
+        if reached and a.near == 'door':
+            stand, door = door_stand(pid)
+            if stand:
+                print('near door', hex(door['addr']), 'hinge', [round(v, 2) for v in door['hinge']], 'side', door['s'], 'stand', [round(v, 2) for v in stand])
+                set_god(pid, True)
+                command('console setviewpos %.2f %.2f %.2f %.1f' % stand)
+                time.sleep(2)
+            else:
+                print('no closed free door on this floor within 30 m')
+        if reached and a.near in ('corpse', 'oldcorpse'):
+            stand, corpse = corpse_stand(pid) if a.near == 'corpse' else old_corpse_stand(pid)
+            if stand:
+                print('near corpse', hex(corpse[0]), 'pelvis', [round(v, 2) for v in corpse[1]], 'stand', [round(v, 2) for v in stand])
+                set_god(pid, True)
+                command('console setviewpos %.2f %.2f %.2f %.1f' % stand)
+                time.sleep(2)
+            else:
+                print('no corpse with a dynamic ragdoll found')
+        if reached and a.near == 'shop':  # face the nearest living NPC (the Black Market keeper behind his window) from where the save stands
+            import math
+            out = json.loads(subprocess.run([sys.executable, os.path.join(ROOT, 'tools', 'entities.py'), '--pid', str(pid), '--kind', 'npc', '--health', '--json'],
+                                            capture_output=True, text=True).stdout)
+            eye = (37.88, 96.52, 14.52)  # the test save's spot in front of the Black Market (the live camera read drifted, sim v453)
+            alive = [e for e in out['entities'] if not (e.get('health') or {}).get('dead')]
+            if eye and alive:
+                keeper = min(alive, key=lambda e: math.hypot(e['pos'][0] - eye[0], e['pos'][1] - eye[1]))
+                yaw = math.degrees(math.atan2(keeper['pos'][1] - eye[1], keeper['pos'][0] - eye[0]))
+                print('near shop', keeper.get('name'), [round(v, 2) for v in keeper['pos']], 'yaw %.1f' % yaw)
+                command('console setviewpos %.2f %.2f %.2f %.1f' % (eye[0], eye[1], eye[2], yaw))
+                time.sleep(1.5)
         if reached and a.near in ('npc', 'npc-front', 'npc-side', 'civ-front'):
             # Arrive just before the scenario (script t ~ LEAD): a guard given 15 s kills the player even in god mode.
             time.sleep(max(0, proc_start + LEAD_MS / 1000 - 4 - time.time()))
@@ -490,13 +1149,15 @@ def main():
                 command('cvar ark_vision_max_checks 0')
             skip = set()
             for attempt in range(3):  # a spot on a ledge or table left the blade swinging over the guard (sim v382: 1 m above)
-                stand, npc = npc_stand(pid, a.near == 'npc', a.near == 'civ-front', a.near == 'npc-side', skip)
+                stand, npc = npc_stand(pid, a.near == 'npc', a.near == 'civ-front', a.near == 'npc-side', skip, {'swordthrow': 3.0, 'stealththrow': 10.0}.get(a.scenario, .9))
                 if not stand:
                     break
                 print('near npc', npc['name'], npc['pos'], 'stand', [round(v, 2) for v in stand])
                 if attempt == 0:
                     set_god(pid, True)
                     set_god(pid, True, buddha=True)
+                if a.scenario == 'stealththrow':  # only the choice: the wind-up re-aim brings the player (below)
+                    break
                 command('console setviewpos %.2f %.2f %.2f %.1f' % stand)
                 time.sleep(1.2)
                 try:
@@ -515,6 +1176,8 @@ def main():
             else:
                 print('near npc: no live guard')
         next_hit = time.time() + 3 if reached and (a.damage or a.every) else None
+        if reached and a.script:
+            set_god(pid, True)
         if reached and a.teleport:
             if a.scenario == 'swarm':  # bloodflies killed the god-mode player within 20 s: arrive 2 s before the first sweep
                 time.sleep(max(0, proc_start + LEAD_MS / 1000 + 2 - 2 - time.time()))
@@ -522,6 +1185,13 @@ def main():
             command('console setviewpos %.2f %.2f %.2f' % tuple(a.teleport))
             time.sleep(2)
         samples = []  # (logic, |published stick|) while the scenario runs
+        dr = dict(god_off=None, dead=None, pads=0, last_pad=0.0, last_hit=0.0, hits=0, left_gameover=None, loading=None, reloaded=None, mask=None, timeline=[])
+        fing_trace = []  # (scenario ms, finger_ik.route, bend, full_body.finger_modes, finger_inputs) whenever one changes (hold/orbit scenarios)
+        fik_trace = []  # (scenario ms, (hits, props, slabs)) whenever the finger contact counters change
+        interact_seen = []  # status "interact" [bits, presses] changes (shoptrigger)
+        shop_uv = []  # native menu pointer u, v while the shop is open (shoparm)
+        sword_trace = []  # status sword_grip + hand_weapon_bits changes (swordgrip)
+        shoves = []  # shove scenario: (decl, result, npc state, ragdoll body flags)
         arm_samples = []  # status arm_hidden bits while the scenario runs
         positions = []
         seen_states = set()
@@ -533,6 +1203,148 @@ def main():
         except Exception:
             machine = None
         while proc.poll() is None:
+            if a.scenario in ('swordthrow', 'stealththrow', 'yank') and npc and not getattr(main, 'aimed', False) and script_segment() >= 7:  # the throw's wind-up begins: a console teleport lands 0.3-0.5 s later (at the hold it landed after the throw, sim v470)
+                main.aimed = True  # the guard walked off since the arrival (sim v418, v431): face him again just before the throw / the grab
+                reach = {'swordthrow': 2.0, 'stealththrow': 2.5}.get(a.scenario, .9)  # 3 m: an alert guard ran out of the throw (sim v469)
+                try:
+                    import math
+                    import struct
+                    from entities import World
+                    pb, pr = attach(pid)
+                    fr = next(c for c, nm in World(pr, pb).components(int(npc['addr'], 16)) if nm.startswith('arkCpntReferenceFrame'))
+                    gx, gy, gz = struct.unpack('<3f', pr(fr + 0x30, 12))
+                    me = player_position(pr, pb)
+                    dx, dy = me[0] - gx, me[1] - gy
+                    if a.scenario == 'stealththrow':  # behind him: +row0 of his reference frame is his back (npc_stand)
+                        dx, dy = struct.unpack('<2f', pr(fr + 0x3c, 8))
+                    d = math.hypot(dx, dy) or 1
+                    sx, sy = gx + dx / d * reach, gy + dy / d * reach
+                    command('console setviewpos %.2f %.2f %.2f %.1f' % (sx, sy, gz + 1.65, math.degrees(math.atan2(gy - sy, gx - sx))))
+                    print('re-aimed at the guard', [round(gx, 2), round(gy, 2)], 'from', [round(sx, 2), round(sy, 2)])
+                except Exception as ex:
+                    print('re-aim failed', ex)
+            if a.scenario == 'yank' and npc and getattr(main, 'aimed', False) and script_segment() >= 11 and not shoves:  # the pull began
+                import struct
+                from entities import World
+                t0 = None  # the pull: when the status first counts a yank (the script clock runs behind proc_start)
+                for _ in range(30):
+                    try:
+                        if ((json.load(open(os.path.join(ART, 'xr-live-status.json'))).get('sword_grip') or {}).get('ragdolls') or [0] * 4)[3] >= 1:
+                            t0 = time.time()
+                            break
+                    except Exception:
+                        pass
+                    time.sleep(.1)
+                t0 = t0 or time.time()
+                for wait in (0, .5, 1, 1.5, 2.5, 4, 6):
+                    time.sleep(max(0, t0 + wait - time.time()))
+                    try:
+                        pb, pr = attach(pid)
+                        fr = next(c for c, nm in World(pr, pb).components(int(npc['addr'], 16)) if nm.startswith('arkCpntReferenceFrame'))
+                        pos = [round(v, 2) for v in struct.unpack('<3f', pr(fr + 0x30, 12))]
+                    except Exception:
+                        pos = None
+                    bodies = ragdoll(pid, int(npc['addr'], 16))
+                    shoves.append((wait, pos, None if not bodies else sorted({hex(f) for _, f in bodies})[:4], None if not bodies else [round(v, 2) for v in bodies[0][0]]))
+                    print('yank', shoves[-1])
+            if a.scenario == 'shove' and npc and time.time() > proc_start + LEAD_MS / 1000 + 1 and not shoves:
+                command('ragdoll %s 3' % npc['addr'])  # the game's START_RAGDOLL + a 3 m/s push; watch the bodies and the recovery
+                t0 = time.time()
+                for wait in (.3, 1, 2, 4, 6, 9):
+                    time.sleep(max(0, t0 + wait - time.time()))
+                    bodies = ragdoll(pid, int(npc['addr'], 16))
+                    state = None
+                    try:
+                        pb, pr = attach(pid)
+                        state = pr(int(npc['addr'], 16) + 0xd1, 1)[0]
+                    except Exception:
+                        pass
+                    st_ = json.load(open(os.path.join(ART, 'xr-live-status.json'))).get('sword_grip', {}) if os.path.exists(os.path.join(ART, 'xr-live-status.json')) else {}
+                    shoves.append((wait, st_.get('ragdolls'), hex(state) if state is not None else None,
+                                   None if not bodies else sorted({hex(f) for _, f in bodies}), None if not bodies else [round(v, 2) for v in bodies[0][0]]))
+                    print('ragdoll', shoves[-1])
+            ms_now = script_ms() if pair_times else None
+            if ms_now is not None:
+                for t_ms, label in pair_times:
+                    if (t_ms, label) not in pair_done and ms_now >= LEAD_MS + t_ms:
+                        pair_done.add((t_ms, label))
+                        from pathlib import Path
+                        sys.path.insert(0, os.path.join(ROOT, 'tools'))
+                        from request_vr_capture import request_capture
+                        safe = label.replace('.', 'p')
+                        try:
+                            eye_pairs.append((t_ms, safe, request_capture(Path(ART), safe)))
+                            pair_actual[safe] = round(ms_now - LEAD_MS)
+                        except OSError as e:
+                            print('eye pair request failed', e)
+            if a.scenario.startswith('deathreload') and reached:
+                now_t = time.time()
+                sm_dr = script_ms()
+                mask_dr = dr['mask']
+                tl_dr = round((sm_dr - LEAD_MS) / 1000, 1) if sm_dr else None
+                if sm_dr is not None and (sm_dr - LEAD_MS) / 1000 >= DEATH_AT and not dr['god_off']:
+                    dr['god_off'] = set_god(pid, False) or now_t
+                    dr['timeline'].append(('god off', tl_dr))
+                if dr['god_off'] and not dr['dead'] and now_t - dr['last_hit'] >= 1.0:
+                    command('console damage player1 bullet_regular_npc')
+                    dr['last_hit'] = now_t
+                    dr['hits'] += 1
+                if mask_dr == 8192 and not dr['dead']:
+                    dr['dead'] = now_t
+                    dr['timeline'].append(('game over screen after %d hits' % dr['hits'], tl_dr))
+                if dr['dead'] and mask_dr == 8192 and now_t - dr['last_pad'] >= 2.5 and now_t - dr['dead'] >= 1.5:
+                    command('pad a 200')  # first item: Restart From Last Checkpoint
+                    dr['last_pad'] = now_t
+                    dr['pads'] += 1
+                    dr['timeline'].append(('pad a (restart)', dr['pads']))
+                if dr['dead'] and mask_dr == 64:
+                    if now_t - dr['last_pad'] >= 2.0:
+                        command('pad a 200')
+                        dr['last_pad'] = now_t
+                    if not dr['loading']:
+                        dr['loading'] = now_t
+                        dr['timeline'].append(('main menu after game over', tl_dr))
+                if dr['dead'] and mask_dr not in (8192, None) and not dr['left_gameover']:
+                    dr['left_gameover'] = now_t
+                    dr['timeline'].append(('left game over, mask %s' % mask_dr, tl_dr))
+                if dr['left_gameover'] and mask_dr == 2 and not dr['reloaded']:
+                    dr['reloaded'] = now_t
+                    dr['timeline'].append(('gameplay again', tl_dr))
+                if int(now_t * 2) % 4 == 0:
+                    dr['alive_pid'] = game_pid()
+                    if dr['alive_pid'] is None and not dr.get('crashed'):
+                        dr['crashed'] = now_t
+                        dr['timeline'].append(('GAME PROCESS GONE', tl_dr))
+            plan = PAIR_PLAN.get(a.scenario)
+            seg_now = script_segment() if plan else -1
+            if seg_now in (plan or {}) and seg_now not in seg_first:
+                seg_first[seg_now] = time.time()
+            if seg_now in (plan or {}) and seg_now not in eye_pair_segments and time.time() - seg_first[seg_now] > (plan[seg_now][1] if isinstance(plan[seg_now], tuple) else PAIR_DELAY.get(a.scenario, .6)):  # an eye pair per pose
+                eye_pair_segments.add(seg_now)
+                from pathlib import Path
+                sys.path.insert(0, os.path.join(ROOT, 'tools'))
+                from request_vr_capture import request_capture
+                try:
+                    label = plan[seg_now][0] if isinstance(plan[seg_now], tuple) else plan[seg_now]
+                    eye_pairs.append((seg_now, label.replace('.', 'p'), request_capture(Path(ART), label.replace('.', 'p'))))
+                except OSError as e:
+                    print('eye pair request failed', e)
+            if a.scenario == 'doorpush' and door:
+                try:
+                    pb, pr = attach(pid)
+                    fr = door_frame(pr, pb, door['addr'])
+                    try:
+                        angle = round(leaf_angle(pr, door['addr'], fr, door['s']), 1)
+                    except Exception as e:  # keep the state samples; v460 lost every sample to one failing read
+                        angle = None
+                        door_errors.setdefault('angle', repr(e))
+                    try:
+                        doors_now = json.load(open(os.path.join(ART, 'xr-live-status.json'))).get('sword_grip', {}).get('doors')
+                    except (OSError, ValueError):  # the status file is rewritten while we read it
+                        doors_now = None
+                    door_samples.append((script_segment(), fr['state'], fr['next'], angle, doors_now))
+                except Exception as e:
+                    door_errors.setdefault('frame', repr(e))
             if a.scenario == 'contact' and npc and time.time() > next_melee and time.time() < scenario_end - 2:
                 command('melee ' + npc['addr'])
                 next_melee = time.time() + 2.5
@@ -563,6 +1375,28 @@ def main():
                 st = json.load(open(os.path.join(ART, 'xr-live-status.json')))
                 mv = st.get('published_move') or [0, 0]
                 samples.append((st.get('logic_mask'), (mv[0] ** 2 + mv[1] ** 2) ** .5))
+                dr['mask'] = st.get('logic_mask')
+                dr['status'] = {k: st.get(k) for k in ('hand_weapon_bits', 'left_equip', 'held_object', 'hand_contact')}
+                if a.scenario.startswith(('hold', 'orbit')) and len(fing_trace) < 300:
+                    fk2, fb2 = st.get('finger_ik') or {}, st.get('full_body') or {}
+                    cur = (fk2.get('route'), fk2.get('bend'), fb2.get('finger_modes'), fb2.get('finger_inputs'))
+                    if cur != (None, None, None, None) and (not fing_trace or fing_trace[-1][1:] != cur):
+                        sm2 = script_ms()
+                        fing_trace.append((round(sm2 - LEAD_MS) if sm2 else None, *cur))
+                fk = st.get('finger_ik')
+                if fk and len(fik_trace) < 400:
+                    key = (fk.get('hits'), fk.get('props'), fk.get('slabs'), tuple(fk.get('touch') or ()))
+                    if not fik_trace or fik_trace[-1][1] != key:
+                        sm = script_ms()
+                        fik_trace.append((round(sm - LEAD_MS) if sm else None, key))
+                if st.get('logic_mask') == 1024 and st.get('native_menu_pointer_active'):
+                    shop_uv.append(st.get('native_menu_pointer_uv'))
+                if a.scenario in ('shoptrigger', 'shopgrip') and (not interact_seen or interact_seen[-1][1] != st.get('interact')):
+                    interact_seen.append((round(scenario_end - time.time(), 1), st.get('interact')))
+                if a.scenario in ('swordgrip', 'pistolhip', 'swordthrow', 'stealththrow'):
+                    sg = (st.get('sword_grip'), st.get('hand_weapon_bits'), st.get('left_equip'))
+                    if not sword_trace or sword_trace[-1][1] != sg:
+                        sword_trace.append((round(scenario_end - time.time(), 1), sg))
                 if time.time() <= scenario_end:
                     arm_samples.append(st.get('arm_hidden', 0))
                 if a.scenario in ('potion', 'hide') and st.get('wheel_zone'):
@@ -571,7 +1405,7 @@ def main():
                         wheel_trace.append(wz)
             except Exception:
                 pass
-            time.sleep(.5)
+            time.sleep(.2 if a.scenario == 'doorpush' or a.scenario in PAIR_PLAN or pair_times else .5)
         out, _ = proc.communicate()
         run = subprocess.CompletedProcess(proc.args, proc.returncode, out or '', '')
     finally:
@@ -580,6 +1414,8 @@ def main():
             os.remove(invulnerable)
     runs = sorted(glob.glob(os.path.join(ART, 'runs', '*')), key=os.path.getmtime)
     run_dir = runs[-1] if runs else ART
+    if not os.path.exists(os.path.join(ART, 'xr-live-status.json')):
+        sys.exit('no VR session started; injector output: ' + (run.stdout or '')[-3000:])
     status = json.load(open(os.path.join(ART, 'xr-live-status.json')))
     frames = to_png(dump_dir, os.path.join(run_dir, 'ui-dump-png'))
     hud = [f for f in frames if f[0].startswith('hud')]
@@ -590,6 +1426,15 @@ def main():
         checks.append((name, bool(ok), detail))
 
     check('reached gameplay', reached, 'logic mask 2 before the scenario began')
+    if a.scenario.startswith('deathreload'):
+        print('deathreload timeline:', dr['timeline'])
+        print('deathreload last status before the end:', json.dumps(dr.get('status'))[:600])
+        end_alive = game_pid()
+        since = (time.time() - dr['reloaded']) if dr['reloaded'] else 0
+        check('player died (game over screen)', dr['dead'] is not None, f"{dr['hits']} damage commands")
+        check('Restart From Last Checkpoint chosen and the level reloaded', dr['reloaded'] is not None, f"pads {dr['pads']}, left game over {dr['left_gameover'] is not None}")
+        check('game process alive at the end', end_alive is not None and not dr.get('crashed'), f'pid {end_alive}')
+        check('survived 40 s after the reload', dr['reloaded'] is not None and end_alive is not None and since >= 40, f'{since:.0f} s after the reload')
     check('injection', run.returncode == 0, (run.stdout + run.stderr).strip().splitlines()[-1:] or '')
     check('hud screen shown', status.get('hud_window_layers', 0) > 0 and status.get('hud_panel_children', 0) > 0,
           f"window_layers={status.get('hud_window_layers')} panel_children={status.get('hud_panel_children')}")
@@ -636,7 +1481,145 @@ def main():
         check('takedown sensor qualified', status.get('takedown_flips', 0) > 0, f"takedown_flips={status.get('takedown_flips')}")
         check('guard prompt shown', shows > 0 and status.get('world_prompt_frames', 0) > 0, f"shows={shows} world_prompt_frames={status.get('world_prompt_frames')}")
         check('guard prompt steady', hides <= 1 and status.get('takedown_flips', 0) <= 2, f"hides={hides} sensor flips={status.get('takedown_flips')}")
-    if a.near in ('npc', 'npc-front', 'npc-side', 'civ-front'):
+    if a.scenario in ('lookuse', 'shoparm'):
+        check('shop opened by the grip (gaze use)', any(logic == 1024 for logic, _ in samples), f'logic masks seen {sorted({l for l, _ in samples})}; look_uses {(status.get("sword_grip") or {}).get("look_uses")}')
+    if a.scenario == 'shoparm':
+        check('shop page held in the left hand (pointer at its centre)', any(abs(u - .5) < .15 and abs(v - .5) < .2 for u, v in shop_uv), f'pointer u, v samples {shop_uv[-4:]}')
+    if a.scenario in ('shoptrigger', 'shopgrip'):
+        print('interact [bits, presses] by seconds before the scenario end:', interact_seen)
+        check('shop opened by the right trigger', any(logic == 1024 for logic, _ in samples), f'logic masks seen {sorted({l for l, _ in samples})}; interact {status.get("interact")}')
+    if a.scenario == 'swordgrip':
+        for t, sg in sword_trace:
+            print('sword', t, json.dumps(sg))
+        sg = status.get('sword_grip') or {}
+        acts = sg.get('actions') or [0] * 5  # draw, sheathe, drop, pickup, recall
+        nat = sg.get('native') or [0] * 4  # ops, failures, spawned, removed
+        check('sword drawn at the shoulder', acts[0] >= 2 and any(sg_[1] and sg_[1] & 2 for _, sg_ in sword_trace), f'actions {acts}')
+        check('sword dropped as a world sword', acts[2] >= 2 and nat[2] >= 1 and any((sg_[0] or {}).get('copy') for _, sg_ in sword_trace), f'actions {acts}, native {nat}')  # one copy per level, reused (v436)
+        check('dropped sword picked up / called back', acts[3] >= 2 and nat[3] >= 2, f'actions {acts}, native {nat}')
+        check('sheathed at the shoulder', acts[1] >= 2 and not (status.get('hand_weapon_bits', 0) & 2) and sg.get('copy') is None, f'actions {acts}, bits {status.get("hand_weapon_bits")}, copy {sg.get("copy")}')
+        check('native equip calls succeeded', nat[1] == 0 and nat[0] > 0, f'native {nat}')
+    if a.scenario in ('swordthrow', 'stealththrow'):
+        sg = status.get('sword_grip') or {}
+        print('sword trace:', [(t, (g[0] or {}).get('thrown'), (g[0] or {}).get('actions')) for t, g in sword_trace][:12])
+        traces = []
+        for _, g in sword_trace:
+            tr = ((g[0] or {}).get('copy') or {}).get('trace')
+            if tr and tr not in traces:
+                traces.append(tr)
+        print('flight traces:', traces)
+        print('copy:', json.dumps(sg.get('copy')))
+        thrown = sg.get('thrown') or [0, 0, 0]  # hits, flight frames, launch m/s, hand m/s at release, hand peak, services
+        check('sword thrown (flew fast)', thrown[2] >= 4, f'thrown {thrown}, actions {sg.get("actions")}')
+        check('thrown sword struck the guard', thrown[0] >= 1, f'thrown {thrown}')
+        props = sg.get('props_thrown') or [0, 0, 0]  # native throwables marked, prop hits, phys_damage decl resolved
+        check('thrown-prop damage decl resolves', props[2] == 1, f'props_thrown {props}')
+        if a.scenario == 'stealththrow':
+            st = sg.get('stealth') or [0, 0]  # isUnaware asked, answered yes
+            hp = target_hp(pid, npc) if npc else None
+            check('the engine judged the guard unaware', st[1] >= 1, f'stealth {st}')
+            check('one throw killed him', hp is not None and hp[1] is not None and hp[1] <= 0, f'target hp {hp}')
+    if a.scenario == 'yank':
+        rd = (status.get('sword_grip') or {}).get('ragdolls') or [0, 0, 0, 0]  # START_RAGDOLL posts, last result, yank requests, yanks applied
+        check('yank requested by the pulling hand', rd[2] >= 1, f'ragdolls {rd}')
+        moved = [_m.dist(shoves[0][1][:2], p[1][:2]) for p in shoves[1:] if shoves[0][1] and p[1]] if shoves else []
+        dynamic = any(p[2] and any(int(f, 16) & 7 == 2 for f in p[2]) for p in shoves)
+        check('guard yanked into ragdoll', rd[3] >= 1 and (dynamic or (moved and max(moved) > .8)), f'ragdolls {rd}, moved {moved}, samples {shoves}')
+        print('info: hand kept hold of him', len(rd) > 8 and rd[8] >= 1, '(only when the game exposes his ragdoll bodies)')
+        floor = shoves[-1][1][2] if shoves and shoves[-1][1] else None  # standing: the reference frame is back on the floor
+        down = [p[1][2] - floor for p in shoves if p[1] and floor is not None]
+        check('he goes down and gets up again', bool(down) and max(down) > .2 and abs(down[-1]) < .05, f'reference frame above the floor {[round(d, 2) for d in down]}')
+    if a.scenario == 'pistolhip':
+        for t, sg in sword_trace:
+            print('gun', t, json.dumps(sg))
+        gun = (status.get('sword_grip') or {}).get('gun') or [0, 0, 0, 0]  # draws, holsters, held, hip loaded
+        equips = [sg_[2] for _, sg_ in sword_trace]
+        # the empty-hand trigger (8.8-9.3 s) must not bring the gun back: between the first holster and the hip draw it stays away
+        check('wheel gun kept until gripped, then holstered by letting go', gun[1] >= 2 and 'Gun' in equips, f'gun {gun}, left equips {equips}')
+        check('gun drawn from the left hip', gun[0] >= 1, f'gun {gun}')
+        check('gripped gun fires', bool({'FireWeapon', 'ReloadWeapon'} & seen_states), f'states {sorted(seen_states)}')
+        check('gun back at the hip at the end', status.get('left_equip') != 'Gun' and not (status.get('hand_weapon_bits', 0) & 1), f"left {status.get('left_equip')}, bits {status.get('hand_weapon_bits')}")
+    if eye_pairs:
+        print('eye pairs (script segment or scenario ms, label, id):', eye_pairs)
+        json.dump(eye_pairs, open(os.path.join(ART, 'claude', 'pairs-%s.json' % (os.path.splitext(os.path.basename(a.script))[0] if a.script else a.scenario)), 'w'))
+    if fing_trace:
+        json.dump(fing_trace, open(os.path.join(ART, 'claude', 'finger-trace-%s.json' % a.scenario), 'w'))
+        print('finger trace entries:', len(fing_trace), '(artifacts/claude/finger-trace-%s.json: scenario ms, finger_ik.route, bend, full_body.finger_modes, finger_inputs)' % a.scenario)
+    if fik_trace:
+        print('finger_ik timeline (scenario ms, (hits, props, slabs, touch [along, roll_deg, measured, defaulted])), first 40:', fik_trace[:40])
+    for key in status:
+        if 'fault' in key.lower():
+            print('status %s: %s' % (key, json.dumps(status[key])[:300]))
+    print('status full_body finger_modes/finger_inputs:', json.dumps((status.get('full_body') or {}).get('finger_modes')), json.dumps((status.get('full_body') or {}).get('finger_inputs')))
+    for key in ('finger_ik', 'hand_contact'):
+        if key in status:
+            print('status %s: %s' % (key, json.dumps(status[key])))
+    if sampler_stop:
+        sampler_stop.set()
+    if bottle_track:
+        key = os.path.splitext(os.path.basename(a.script))[0] if a.script else a.scenario
+        json.dump(dict(bottle_geom, pairs=pair_actual, track=bottle_track, rot=bottle_rot, script=(script if a.script else None)), open(os.path.join(ART, 'claude', 'bottle-track-%s.json' % key), 'w'))
+        bottle_track = [t for t in bottle_track if 3000 <= t[0] <= 14000] or bottle_track
+        x0, y0, z0 = bottle_track[0][1:]
+        print('bottle track (scenario ms, dx, dy, dz from the first sample, m), one per ~0.5 s:')
+        last = -1e9
+        for t_ms, x, y, z in bottle_track:
+            if t_ms - last >= 250:
+                last = t_ms
+                print('  %6d  %+.3f %+.3f %+.3f  (horizontal %.3f)' % (t_ms, x - x0, y - y0, z - z0, ((x - x0) ** 2 + (y - y0) ** 2) ** .5))
+        print('bottle track max horizontal %.3f m, z range %+.3f..%+.3f' % (max(((x - x0) ** 2 + (y - y0) ** 2) ** .5 for _, x, y, _z in bottle_track),
+                                                                          min(z - z0 for *_, z in bottle_track), max(z - z0 for *_, z in bottle_track)))
+    try:
+        rows = open(os.path.join(run_dir, 'native-hand-contact.csv')).read().strip().splitlines()
+        print('native-hand-contact.csv: %d rows' % (len(rows) - 1))
+        for row in rows[:1] + rows[1:7]:
+            print('  ' + row[:240])
+    except OSError:
+        pass
+    if a.near in ('corpse', 'oldcorpse'):
+        moved = None
+        if corpse:
+            try:
+                import math
+                bodies = ragdoll(pid, corpse[0])
+                if bodies and any(abs(v) > 1e-3 for v in bodies[0][0]):  # an un-instanced ragdoll reads zeros
+                    moved = math.dist(bodies[0][0], corpse[1])
+                else:  # the ragdoll went unreadable after settling: the corpse's reference frame (it follows the pelvis)
+                    import struct
+                    from entities import World
+                    pb, pr = attach(pid)
+                    fr = next(c for c, nm in World(pr, pb).components(corpse[0]) if nm.startswith('arkCpntReferenceFrame'))
+                    moved = math.dist(struct.unpack('<3f', pr(fr + 0x30, 12))[:2], corpse[1][:2])
+            except Exception:
+                moved = None
+        check('corpse found', corpse is not None, hex(corpse[0]) if corpse else 'none')
+        check('body dragged', moved is not None and moved > .3, f'pelvis moved {moved:.2f} m' if moved is not None else 'no reading')
+    if a.scenario in ('hold', 'showbottle', 'holdneck', 'holdneck2', 'holdneck3'):  # the fist takes the bottle (physical grab, or the game's own HoldObject), the swing throws it
+        try:
+            result = json.load(open(os.path.join(run_dir, 'dxgi-probe-result.json')))
+        except (OSError, ValueError):
+            result = {}
+        held = status.get('held_object') or {}
+        props = (status.get('sword_grip') or {}).get('props_thrown') or [0, 0, 0]
+        check('bottle taken by the fist', (result.get('physical_grab_picked') or 0) >= 1 or held.get('placed', 0) > 0,
+              f"physical picked {result.get('physical_grab_picked')}, native hold placed {held.get('placed')}")
+        check('bottle thrown by the swing', props[0] >= 1 or held.get('throws', 0) >= 1,
+              f"props thrown {props}, native throws {held.get('throws')} drops {held.get('drops')}")
+    if a.scenario == 'doorpush':
+        print('door samples (segment, state, next, leaf deg, doors):', door_samples)
+        if door_errors:
+            print('door sampling errors:', door_errors)
+        doors = ((status.get('sword_grip') or {}).get('doors') or []) + [0] * 10
+        held = [smp for smp in door_samples if smp[0] in DOOR_HELD_SEGMENTS]
+        angles = [smp[3] for smp in held if smp[3] is not None]
+        pushing = [smp[3] for smp in door_samples if 2 <= smp[0] <= 42 and smp[3] is not None]
+        check('door found', door is not None, hex(door['addr']) if door else 'none')
+        check('slow push holds the door', doors[3] >= 1, f'doors [pushes, refusals, last refusal, holds, releases, last release, hold deg, leaf deg, hit deg, sync fails] = {doors[:10]}')
+        check('leaf follows the hand slowly', pushing and max(pushing) < 60 and max(pushing) > 5, f'leaf angle while pushing {pushing}')
+        check('door stays ajar, never closes by itself', held and angles and all(smp[1] == 1 for smp in held) and 8 <= min(angles) and max(angles) <= 75 and max(angles) - min(angles) <= 6,
+              f'held samples {held}')
+        check('fast push opens it fully', door_samples and door_samples[-1][1] == 2 and (door_samples[-1][3] or 0) >= 80, f'last sample {door_samples[-1:] }')
+    if a.near in ('npc', 'npc-front', 'npc-side', 'civ-front') and a.scenario not in ('yank', 'shove'):  # those do no damage by design
         combat_latency(check, target_hp(pid, npc) if npc else None)
     if a.scenario in ('potion', 'hide'):
         print('wheel zone trace:', wheel_trace[-8:])

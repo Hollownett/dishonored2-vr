@@ -96,6 +96,34 @@ int main() {
     auto recycled=*binding;++recycled.animation_identity.generation;
     assert(!override.restore_owned(memory,base_address,(*arms)[0],recycled,true,set_all,refresh));
     assert(setters==1);
+    memory.put(main_anim+0x18,recycled.animation_identity);
+    assert(!override.apply(memory,base_address,(*arms)[0],recycled,true,set_all,refresh));
+    assert(override.reason()==r::BodyMaterialOverride::Reason::owner_or_override && override.owns(*binding));
+    assert(setters==1 && refreshes==1);
+    memory.put(main_anim+0x18,binding->animation_identity);
+    auto state_changed=*binding;state_changed.animation_identity.flags^=4;
+    memory.put(main_anim+0x18,state_changed.animation_identity);
+    assert(override.apply(memory,base_address,(*arms)[0],state_changed,true,set_all,refresh));
+    memory.put(main_anim+0x18,binding->animation_identity);
+    text_at(body_name,"models/characters/player/emily/body.md6");
+    assert(!override.apply(memory,base_address,(*arms)[0],*binding,true,set_all,refresh));
+    text_at(body_name,"models/characters/player/corvo/body.md6");
+    text_at(material_name,"models/characters/female/emily/textures/emily_body.material");
+    assert(!override.apply(memory,base_address,(*arms)[0],*binding,true,set_all,refresh));
+    text_at(material_name,selected_name);
+    assert(setters==1 && refreshes==1);
+    unsigned legacy_reads=0,active_reads=0;
+    const auto counted_legacy=[&](std::uintptr_t at,void* out,std::size_t size) {++legacy_reads;return memory(at,out,size);};
+    assert(r::body_material_route(counted_legacy,base_address,(*arms)[0],*binding));
+    assert(r::body_material_candidate(counted_legacy,base_address,(*arms)[0],*binding)==body_material);
+    const auto counted_active=[&](std::uintptr_t at,void* out,std::size_t size) {++active_reads;return memory(at,out,size);};
+    assert(override.apply(counted_active,base_address,(*arms)[0],*binding,true,set_all,refresh));
+    assert(active_reads*4<legacy_reads*3 && setters==1 && refreshes==1);
+    std::cout<<"material validation reads: legacy route+candidate="<<legacy_reads<<", active apply="<<active_reads<<'\n';
+    // A rebuilt arm draw list cannot revoke the body's still-valid owned material.
+    memory.put(models[0]+0x1c00,std::uintptr_t{});
+    assert(override.apply(memory,base_address,(*arms)[0],*binding,true,set_all,refresh));
+    memory.put(models[0]+0x1c00,arm_records_list);
     // Native draw records may be rebuilt while our model-local override remains.
     memory.put(records,material);
     assert(override.apply(memory,base_address,(*arms)[0],*binding,true,set_all,refresh));

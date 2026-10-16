@@ -21,7 +21,7 @@ def fixture():
     put(base+0x39a5290,'<Q',game);put(game+0x3130b0,'<Q',player);put(player+0x268,'<QII',data,2,2<<8);put(data,'<QQ',body,machine)
     put(body+0x10,'<Q',player);put(body+0x18,'<iI',1,10);put(body+0x20,'<Q',base+0x1c5a9b0)
     put(machine+0x10,'<Q',player);put(machine+0x18,'<iI',52,10);put(machine+0x90,'<Q',pool);put(machine+0x300,'<Q',body)
-    for i,(index,vt,declvt) in enumerate(((49,0x1c7a998,0x1c7a868),(45,0x1c77748,0x1c77618))):
+    for i,(index,vt,declvt) in enumerate(((49,0x1c7a998,0x1c7a868),(45,0x1c77748,0x1c77618),(50,0x1c7a998,0x1c7a868))):
         state=0x800000+i*0x1000;decl=0x900000+i*0x1000
         put(pool+0x10+index*8,'<Q',state);put(state,'<Q',base+vt);put(state+8,'<i',index);put(state+0x10,'<QQ',machine,decl);put(state+0x20,'<B',0);put(decl,'<Q',base+declvt);put(decl+0x60,'<i',index)
     return read,put,base,game,player,body
@@ -35,8 +35,12 @@ def rejects(fn):
 
 def main():
     read,put,base,game,player,body=fixture();old=carry_snapshot(read,base,game,player,body);assert not old['carrying'] and old['typed_owner_verified']
-    for i in range(2):
-        at=old['states'][i]['state'];put(at+0x20,'<B',1);assert carry_current(read,base,old)['carrying'];put(at+0x20,'<B',0)
+    for i in range(3):
+        at=old['states'][i]['state'];put(at+0x20,'<B',1);current=carry_current(read,base,old)
+        assert current['carrying'] and current['hold_object']==(i!=1) and current['hold_state']==(at if i!=1 else 0)
+        put(at+0x20,'<B',0)
+    put(old['states'][0]['state']+0x20,'<B',1);put(old['states'][2]['state']+0x20,'<B',1)
+    rejects(lambda:carry_current(read,base,old));put(old['states'][0]['state']+0x20,'<B',0);put(old['states'][2]['state']+0x20,'<B',0)
     for at,fmt,bad in ((old['machine']+0x10,'<Q',player+8),(old['states'][0]['declaration']+0x60,'<i',45),(old['states'][1]['state']+0x20,'<B',2),(old['body']+0x20,'<Q',base)):
         original=read(at,struct.calcsize(fmt));put(at,fmt,bad);rejects(lambda:carry_current(read,base,old))
         for i,v in enumerate(original):put(at+i,'<B',v)
@@ -46,6 +50,16 @@ def main():
         if at==activeat:calls+=1;return bytes([calls>1])
         return read(at,n)
     rejects(lambda:carry_current(transition,base,old))
+    state,decl=old['states'][2]['state'],old['states'][2]['declaration']
+    for at,fmt,bad in ((state,'<Q',base+0x1c77748),(state+8,'<i',49),(state+0x10,'<Q',old['machine']+8),
+                       (decl,'<Q',base+0x1c77618),(decl+0x60,'<i',49),(state+0x20,'<B',2),(old['pool']+0x10+50*8,'<Q',state+8)):
+        original=read(at,struct.calcsize(fmt));put(at,fmt,bad);rejects(lambda:carry_current(read,base,old))
+        for i,value in enumerate(original):put(at+i,'<B',value)
+    def fault(at,size):
+        if at==state+0x20:raise ValueError('fixture read failure')
+        return read(at,size)
+    rejects(lambda:carry_current(fault,base,old))
+    calls=0;activeat=state+0x20;rejects(lambda:carry_current(transition,base,old))
     capture=dict(pid=1,executable_sha256=GAME_HASH,started_unix=10,ended_unix=12,samples=[dict(pose_report='p.json',state=dict(carry_consistent=True,native_carry=old))])
     config=dict(pid=1,executable_sha256=GAME_HASH,started_unix=9,ended_unix=13,tracked_arms_requested=False,arm_palette_copy_requested=False)
     diag=dict(pid=1,tracked_arms_requested=False,arm_palette_copy_requested=False,native_arm_pose_calls=[0,0],native_arm_copy_calls=[0,0],hook_disabled=True,first_chance_fault_records=0)

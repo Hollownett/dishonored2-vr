@@ -19,6 +19,9 @@ public:
         return role_==Role::native || role_==Role::ready?grip:0;
     }
     bool physical() const noexcept {return role_==Role::physical;}
+    // A squeeze the game took (nothing to grab at press) becomes physical when something to hold appears under it: a guard
+    // the hand just yanked into ragdoll, a body it woke (NativeWeaponHands).
+    void claim_physical() noexcept {if(role_==Role::native || role_==Role::release) role_=Role::physical;}
     Role role() const noexcept {return role_;}
 };
 } // namespace d2vr

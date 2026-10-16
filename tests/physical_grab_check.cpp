@@ -4,6 +4,20 @@
 #include <limits>
 int main() {
     using namespace d2vr;
+    {
+        std::array<PhysicalGrab,2> grips;
+        for(auto& grip:grips) {
+            WorldTrackedPose pose{{},{{{1,0,0},{0,1,0},{0,0,1}}}};
+            assert(!grip.sample(pose,0,true,1,1000));
+            assert(grip.sample(pose,std::nextafter(.55f,0.f),true,1,1010));assert(!grip.pressed());
+            assert(grip.sample(pose,.55f,true,1,1020));assert(grip.pressed() && grip.bind(pose));
+            pose.position.x=.02;assert(grip.sample(pose,.35f,true,1,1030));assert(grip.pressed());
+            const auto retained=grip.motor(pose,true);assert(retained && !retained->release);
+            pose.position.x=.04;assert(grip.sample(pose,std::nextafter(.35f,0.f),true,1,1040));assert(!grip.pressed());
+            const auto released=grip.motor(pose,true);assert(released && released->release && released->linear.x>0 && !grip.held());
+            assert(grip.sample(pose,.55f,true,1,1050));assert(grip.bind(pose));
+        }
+    }
     WorldTrackedPose hand{{0,0,0},{{{1,0,0},{0,1,0},{0,0,1}}}},object=hand;object.position={.1,0,0};
     PhysicalGrab grab;
     assert(!grab.sample(hand,.9f,true,1,100));assert(!grab.bind(object));
@@ -36,6 +50,14 @@ int main() {
         rate.sample(stable,0,true,1,1000+9*interval);assert(rate.motor(stable,true)->release);
         rate.sample(stable,1,true,1,1000+10*interval);assert(rate.bind(stable));
         assert(!rate.sample(stable,1,false,1,1001+10*interval));assert(rate.motor(stable,false)->release);
+    }
+    {   // A press that waits ~400 ms for its owner (a corpse's native carry query) still presses when kept fresh, not otherwise.
+        WorldTrackedPose still{{},{{{1,0,0},{0,1,0},{0,0,1}}}};
+        PhysicalGrab waited;waited.sample(still,0,true,1,1000);waited.sample(still,0,true,1,1010);
+        for(std::uint64_t t=1030;t<=1410;t+=20) waited.keep_fresh(still,1,t);
+        assert(waited.sample(still,1,true,1,1420) && waited.pressed() && waited.bind(still));
+        PhysicalGrab stale;stale.sample(still,0,true,1,1000);stale.sample(still,0,true,1,1010);
+        stale.sample(still,1,true,1,1420);assert(!stale.pressed()); // the gap reset the latch with the grip held
     }
     // Reproduce fast movement followed by stationary 110-250ms samples;
     // slow valid samples must decay the existing throw estimate before release.

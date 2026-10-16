@@ -17,7 +17,8 @@ inline GV3 norm(const GV3& a) noexcept {
 
 // One frame of already-resolved per-hand state. side 0 is the left (power/pistol)
 // hand, side 1 the right (sword) hand; `allowed` is the caller's gameplay gate
-// (no menu, wheel or cinematic) and target_valid marks a native highlighted grab.
+// (no menu, wheel or cinematic), target_valid marks a native highlighted grab and
+// hands_busy a held object or a carried body.
 struct GestureFrame {
     GV3 head_pos,head_fwd,head_right;
     GV3 pos[2],aim[2],up[2],vel[2];
@@ -27,6 +28,7 @@ struct GestureFrame {
     bool sword_equipped;
     bool target_valid[2];
     bool takedown_available;
+    bool hands_busy;
     std::uint64_t now_ms;
 };
 
@@ -239,15 +241,52 @@ public:
     }
 };
 
+// Both hands thrown up above the head = one native jump (user, headset 2026-10-14: "make
+// a two hands up gesture as a jump"). Each hand must go from below the chin (head - low)
+// to above the crown (head + high) inside window_ms, so the rise is fast (0.3 m in 300 ms
+// with the defaults) and both hands make it together, at least `apart` metres from each
+// other (a two-handed hilt or an overhead clap is closer). Heights are head-relative, so a
+// real jump or standing up never counts. No trigger may be pulled (cast or Blink aim,
+// sword block, a full-fist grab) and nothing may be held or carried. Native A then stays
+// held while both hands stay above the eyes (reach up and hold at a ledge: the mantle),
+// min_ms to max_ms. A rise seen while gated is spent: both hands must drop below the chin
+// again (the CrouchFlick rule).
+class HandsUpJump {
+    float low_,high_,apart_;
+    std::uint64_t window_,min_,max_,until_[2]{},since_{};
+    bool on_{};
+public:
+    explicit HandsUpJump(float low=.10f,float high=.20f,float apart=.25f,std::uint64_t window=300,
+            std::uint64_t min_ms=120,std::uint64_t max_ms=1000) noexcept
+        : low_(low),high_(high),apart_(apart),window_(window),min_(min_ms),max_(max_ms) {}
+    bool update(const GestureFrame& f) noexcept {
+        if(!f.allowed || !f.tracked[0] || !f.tracked[1] || f.hands_busy || f.trigger[0]>=.55f || f.trigger[1]>=.55f) {
+            until_[0]=until_[1]=0;on_=false;return false;
+        }
+        const float h[2]{f.pos[0].y-f.head_pos.y,f.pos[1].y-f.head_pos.y};
+        if(on_) {
+            const std::uint64_t held=f.now_ms-since_;
+            if(held<min_ || (held<max_ && h[0]>=0.f && h[1]>=0.f)) return true;
+            on_=false;
+        }
+        for(int i=0;i<2;++i) if(h[i]<=-low_) until_[i]=f.now_ms+window_;
+        if(h[0]>=high_ && h[1]>=high_ && f.now_ms<until_[0] && f.now_ms<until_[1] && len(sub(f.pos[0],f.pos[1]))>=apart_) {
+            until_[0]=until_[1]=0;on_=true;since_=f.now_ms;return true;
+        }
+        return false;
+    }
+};
+
 // Aggregate dispatcher: sword block on the right hand, throat-slash takedown on
-// the right hand, power gestures on the left. Pure policy, no side effects beyond
+// the right hand, power gestures on the left, the jump on both. Pure policy, no side effects beyond
 // its own latches, so the caller stays the only thing that talks to the game.
-struct GestureOut { bool block_held; bool takedown_pulse; PowerGesture power; };
+struct GestureOut { bool block_held; bool takedown_pulse; PowerGesture power; bool jump; };
 
 class GestureSet {
     SwordBlockPose block_;
     ThroatSlash takedown_;
     PowerGestures powers_;
+    HandsUpJump jump_;
 public:
     GestureOut update(const GestureFrame& f) noexcept {
         GestureOut o{};
@@ -256,6 +295,7 @@ public:
         o.takedown_pulse=takedown_.update(f.head_pos,f.head_fwd,f.head_right,
             f.pos[1],f.vel[1],f.takedown_available,f.allowed,f.tracked[1],f.now_ms);
         o.power=powers_.update(f);
+        o.jump=jump_.update(f);
         return o;
     }
 };

@@ -109,11 +109,11 @@ svg .metal { fill: var(--rule); stroke: var(--ink); stroke-width: 1.4; }
 
 <div class="wrap">
 <header class="cover">
-  <div class="eyebrow">Field manual · mod build v399 · October 2026</div>
+  <div class="eyebrow">Field manual · mod build v428 · October 2026</div>
   <h1>Dishonored 2 VR Field Manual</h1>
   <p class="lede">How combat, the body and the interface work in the Dishonored 2 VR mod today, and how the planned physical features would look: dropping and throwing your weapons, and dragging bodies by a limb.</p>
   <div class="legend">
-    <span><span class="chip built">Built</span> in v399, checked in the simulator, waiting for your headset test</span>
+    <span><span class="chip built">Built</span> in v428 or earlier, checked in the simulator, waiting for your headset test</span>
     <span><span class="chip planned">Planned</span> researched, not built yet</span>
     <span><span class="chip found">Found</span> measured in the running game</span>
   </div>
@@ -150,10 +150,10 @@ svg .metal { fill: var(--rule); stroke: var(--ink); stroke-width: 1.4; }
     <div class="text">
       <div class="num">PLATE II <span class="chip built">Built</span></div>
       <h3>Blocking and reverse grip</h3>
-      <p>Hold the sword anywhere in front of you, still or moving, and you block. Only an attack press releases the block. Click the right grip to flip the blade into a reverse grip; click again to flip it back.</p>
+      <p>Hold the sword anywhere in front of you, still or moving, and you block. Only an attack press releases the block. Normal or reverse grip is decided by how your hand takes the hilt, as in Boneworks: there is no button for it.</p>
       <dl class="spec">
         <dt>Block</dt><dd>Sword in front of the chest, any angle (your choice from the headset sessions)</dd>
-        <dt>Reverse grip</dt><dd>Each grip click toggles it; holding the grip through a choke does not flip it</dd>
+        <dt>Reverse grip</dt><dd>Fist pointing down when you draw over the shoulder, or a hand against the blade when you pick it up from the floor (v406)</dd>
         <dt>New in v398</dt><dd>While the pistol or crossbow is drawn, the sword does not block. The game puts the gun away to block, which made the pistol unusable. Put the gun away to block again.</dd>
       </dl>
     </div>
@@ -181,9 +181,10 @@ svg .metal { fill: var(--rule); stroke: var(--ink); stroke-width: 1.4; }
     <div class="text">
       <div class="num">PLATE IV <span class="chip built">Built</span></div>
       <h3>Pistol and crossbow</h3>
-      <p>Draw the pistol or crossbow into your left hand from the wheel and aim by pointing the gun. The crosshair and the shots follow the gun's own barrel, read from the drawn model every frame, so the crosshair sits where the muzzle points on any controller.</p>
+      <p>Draw the pistol or crossbow into your left hand from the wheel and aim by pointing the gun. The crosshair and the shots follow the gun's own barrel, read from the drawn model every frame, so the crosshair sits where the muzzle points on any controller. Once you grip it, the gun is held only while you squeeze the left grip; let go and it goes to your left hip. Squeeze at the left hip to draw it again.</p>
       <dl class="spec">
-        <dt>Fire</dt><dd>Left trigger</dd>
+        <dt>Fire</dt><dd>Left trigger, with the gun in the hand (a bare fist never fires)</dd>
+        <dt>Holster</dt><dd>Left hip. An empty left hand's trigger does not pull the gun out (the game would draw it, and the sword too)</dd>
         <dt>Aim source</dt><dd>The gun model's barrel axis (v397). Before, the crosshair followed the controller ray and drifted from the muzzle</dd>
         <dt>Fine trim</dt><dd class="mono">%LOCALAPPDATA%\DishonoredVR\build\aim-offset → "yaw pitch" in degrees, default 0 0</dd>
         <dt>Powers</dt><dd>Same left-hand crosshair, along the hand when no gun is drawn</dd>
@@ -217,7 +218,7 @@ svg .metal { fill: var(--rule); stroke: var(--ink); stroke-width: 1.4; }
     <div class="text">
       <div class="num">PLATE VI <span class="chip built">Built</span></div>
       <h3>Body gestures and calibration</h3>
-      <p>Reach over your right shoulder and squeeze the grip to sheathe or draw the sword. Touch your left temple and squeeze to open the journal. Turn the back of a wrist toward your face to read health and mana on a small watch.</p>
+      <p>Reach over your right shoulder and squeeze the grip to draw the sword; keep squeezing to hold it and let go over the shoulder to sheathe it. Touch your left temple and squeeze to open the journal. Turn the back of a wrist toward your face to read health and mana on a small watch.</p>
       <dl class="spec">
         <dt>Calibrate avatar</dt><dd>VR Settings → Calibrate avatar: hold your hands at your shoulders, then arms straight out, copying the masked Corvo shown</dd>
         <dt>Arms</dt><dd>Both arms stay visible, including the left arm lowered to your waist</dd>
@@ -241,7 +242,7 @@ svg .metal { fill: var(--rule); stroke: var(--ink); stroke-width: 1.4; }
         <dt>VR Settings rows</dt><dd>Resolution, anti-aliasing, edge smoothing, monitor view, sharpening, HUD size, controls hint, turning, calibrate avatar, recenter view</dd>
         <dt>Why one per squeeze</dt><dd>The game repeats a held shoulder button after 225 ms, every 75 ms; a natural squeeze used to skip tabs. Since v396 a squeeze in a menu is one tap</dd>
         <dt>Move a menu</dt><dd>Squeeze the left grip to bring it to where you look</dd>
-        <dt>Black Market</dt><dd>Shown as a full-height world panel, with the purchase and back rows visible</dd>
+        <dt>Black Market</dt><dd>Held in your left hand like a note (a metre ahead if that hand is not tracked), the whole page with the purchase and back rows; point with the right hand</dd>
         <dt>Launcher</dt><dd>One file, DishonoredVRLauncher.exe: checks, launch, settings, tools</dd>
       </dl>
     </div>
@@ -249,7 +250,7 @@ svg .metal { fill: var(--rule); stroke: var(--ink); stroke-width: 1.4; }
 </section>
 
 <section class="part" id="physical">
-  <h2>Physical interaction <span class="chip planned">Planned</span></h2>
+  <h2>Physical interaction <span class="chip built">Partly built</span></h2>
   <p class="intro">The goal is Bonelab-style immersion: weapons you can drop, pick up and throw, and bodies you can drag by a wrist or an ankle. The research found that the game's own Havok physics already has most of the parts.</p>
 
   <div class="plate">
@@ -272,11 +273,11 @@ svg .metal { fill: var(--rule); stroke: var(--ink); stroke-width: 1.4; }
     <figure><svg id="fig-drag" viewBox="0 0 520 300" role="img" aria-label="A corpse dragged by the wrist: the player's hand holds body 10 and the rest of the ragdoll trails along the floor"></svg>
       <figcaption>Plate IX · Grip a wrist and walk: the ragdoll's own joints pull the rest of the body</figcaption></figure>
     <div class="text">
-      <div class="num">PLATE IX <span class="chip planned">Planned · Phase 2</span></div>
+      <div class="num">PLATE IX <span class="chip built">Built · v404</span></div>
       <h3>Dragging bodies</h3>
       <p>Squeeze a grip at a corpse's or unconscious guard's wrist, ankle or collar and walk away. Your hand pulls that one body part, and the ragdoll's joints drag the rest along the floor. Let go to drop it, or swing and let go to fling a light body.</p>
       <dl class="spec">
-        <dt>Pull</dt><dd>The prop-grab motor: speed toward your hand, capped, so a heavy body lags and slides</dd>
+        <dt>Pull</dt><dd>The prop-grab motor on the gripped limb, plus a tow on the pelvis so the whole body follows (simulator: dragged 5.9 m)</dd>
         <dt>Fallback</dt><dd>A strength-limited joint between your hand and the limb, as in the Skyrim VR mod HIGGS</dd>
         <dt>Carry instead</dt><dd>The game's shoulder carry stays available, as today</dd>
       </dl>
@@ -287,11 +288,12 @@ svg .metal { fill: var(--rule); stroke: var(--ink); stroke-width: 1.4; }
     <figure><svg id="fig-drop" viewBox="0 0 520 260" role="img" aria-label="Three steps: open the hand and the sword falls, the sword lies on the floor, grip it to wield it again"></svg>
       <figcaption>Plate X · Drop, lie, pick up</figcaption></figure>
     <div class="text">
-      <div class="num">PLATE X <span class="chip planned">Planned · Phase 3</span></div>
+      <div class="num">PLATE X <span class="chip built">Built · v411</span></div>
       <h3>Dropping and picking up weapons</h3>
-      <p>Open your hand and the sword or pistol falls with your hand's motion. Reach down, squeeze, and it is back in your hand. The game has no "drop weapon" action, so the mod drops a physical copy of the weapon and quietly holsters the real one until you pick the copy up.</p>
+      <p>Open your hand and the sword falls with your hand's motion; open it during a swing and it flies. Reach down, squeeze, and it is back in your hand. The game has no "drop weapon" action, so the mod drops the game's own physical sword prop and instantly puts the real sword away until you pick the copy up. The pistol has no physical prop, so letting go of it sends it back to the hip.</p>
       <dl class="spec">
-        <dt>Safety</dt><dd>A dropped weapon returns to the holster after a while or on loading a save, so it can never be lost</dd>
+        <dt>Safety</dt><dd>Squeeze over the shoulder to call a dropped sword back at once. It also returns by itself after 30 s or 12 m. Nothing is locked, so a save never keeps the hand empty</dd>
+        <dt>Look</dt><dd>The dropped sword is the game's howler sword prop, not Corvo's own model</dd>
         <dt>Same as</dt><dd>HIGGS for Skyrim VR and ROCK for Fallout 4 VR: drop as a world object, pick up to re-equip</dd>
       </dl>
     </div>
@@ -301,13 +303,14 @@ svg .metal { fill: var(--rule); stroke: var(--ink); stroke-width: 1.4; }
     <figure><svg id="fig-throw" viewBox="0 0 520 300" role="img" aria-label="A sword thrown in an arc, flying point first, hits a guard"></svg>
       <figcaption>Plate XI · A thrown blade flies point first and hits like a heavy swing</figcaption></figure>
     <div class="text">
-      <div class="num">PLATE XI <span class="chip planned">Planned · Phase 4</span></div>
+      <div class="num">PLATE XI <span class="chip built">Built · v419 (sword)</span></div>
       <h3>Throwing weapons at guards</h3>
-      <p>Swing and release to throw the sword or the pistol. A blade flies point first. When it strikes a guard, the game's damage function is called with the thrown weapon as the cause, scaled by speed and weight, and the game's own physics reaction can knock him down.</p>
+      <p>Swing and let go to throw the sword. It tumbles end over end, glances off walls and lands flat. When it meets a guard, the game's own sword damage is applied, so he reacts and calls out, and the blade drops beside him. The pistol has no physical model, so letting go of it returns it to the hip.</p>
       <dl class="spec">
-        <dt>Release speed</dt><dd>The peak of your hand's recent speed plus your walking speed, as HIGGS does</dd>
-        <dt>Hit test</dt><dd>The same sweep the sword uses, along the flying weapon</dd>
-        <dt>Damage</dt><dd>Speed × weight × a thrown factor, once per guard per throw</dd>
+        <dt>Release speed</dt><dd>Your hand's movement over the last 60 ms, times 1.5. A snap turn or a teleport restarts the measurement</dd>
+        <dt>Flight</dt><dd>The mod flies the sword itself (gravity, spin, the game's own world sweep). A sword spawned at runtime is never simulated by the game's physics</dd>
+        <dt>Hit test</dt><dd>The flight path and the blade against a body-sized capsule around each guard, once per guard per throw</dd>
+        <dt>Damage</dt><dd>The player sword's own damage (one sword hit), from the direction of flight</dd>
       </dl>
     </div>
   </div>
@@ -316,15 +319,18 @@ svg .metal { fill: var(--rule); stroke: var(--ink); stroke-width: 1.4; }
     <figure><svg id="fig-live" viewBox="0 0 520 300" role="img" aria-label="Grabbing a living guard's arm switches him into the game's own ragdoll; when released he gets up"></svg>
       <figcaption>Plate XII · A grabbed guard goes limp in the game's own ragdoll, then gets up</figcaption></figure>
     <div class="text">
-      <div class="num">PLATE XII <span class="chip planned">Planned · Phase 6</span></div>
+      <div class="num">PLATE XII <span class="chip built">Built · v427</span></div>
       <h3>Grabbing living guards</h3>
-      <p>Grab a living guard by the arm or collar and he stumbles into the game's own ragdoll, the one Windblast uses, so you can shove or haul him. When you let go, the game stands him back up.</p>
+      <p>Grab a living guard by the chest, collar or arm and yank hard: he drops into the game's own ragdoll, the one Far Reach and dropped bodies use, falls toward your pull, and the game stands him back up a few seconds later. He knows who did it.</p>
       <div class="flow" aria-label="Sequence">
         <span class="step">Guard alive</span><span class="arrow">→</span><span class="step">Grip a limb</span><span class="arrow">→</span><span class="step">Game ragdoll</span><span class="arrow">→</span><span class="step">Release</span><span class="arrow">→</span><span class="step">He gets up</span>
       </div>
       <dl class="spec">
-        <dt>Stealth rule</dt><dd>Grabbing an unaware guard from behind starts a choke instead, so stealth stays fair (needs your decision)</dd>
-        <dt>Alert guards</dt><dd>Break free after a moment and fight back</dd>
+        <dt>Your choice</dt><dd>"Grab + yank to ragdoll" (2026-10-13)</dd>
+        <dt>How</dt><dd>A free hand squeezing at his upper body and pulling faster than 2.2 m/s. The game's shove reaction (no damage), then its START_RAGDOLL with your pull</dd>
+        <dt>Simulator</dt><dd>Pulled about 2 m, on the floor for about 2 s, standing again at 4 s and walking at 6 s</dd>
+        <dt>Stealth rule</dt><dd>Behind an unaware guard the right grip stays the choke. The left hand can still yank</dd>
+        <dt>Holding on</dt><dd>The squeezing hand keeps hold of a limb only when the game exposes his ragdoll bodies; otherwise he just falls</dd>
       </dl>
     </div>
   </div>
@@ -349,11 +355,12 @@ svg .metal { fill: var(--rule); stroke: var(--ink); stroke-width: 1.4; }
   <p class="intro">Each phase gets a simulator scenario first, then your headset check.</p>
   <ol class="roadmap">
     <li><div><b>Map a guard's ragdoll.</b> List the 17 bodies, their handles and bone order in the running game, without changing anything.</div><span class="chip found">Done</span></li>
-    <li><div><b>Drag bodies</b> by wrist, ankle or collar with the existing prop-grab motor.</div><span class="chip planned">Next</span></li>
-    <li><div><b>Drop and pick up</b> the sword and pistol, with a safe return to the holster.</div><span class="chip planned">Planned</span></li>
-    <li><div><b>Throw weapons and props</b> at guards for damage.</div><span class="chip planned">Planned</span></li>
-    <li><div><b>Finger posing and hand bodies</b> that push things.</div><span class="chip planned">Planned</span></li>
-    <li><div><b>Grab living guards</b>, after a decision on the stealth rule.</div><span class="chip planned">Planned</span></li>
+    <li><div><b>Drag bodies</b> by wrist, ankle or collar with the existing prop-grab motor.</div><span class="chip built">Built · sim</span></li>
+    <li><div><b>Hold to hold:</b> sword on the back, pistol on the left hip, drop and pick up the sword, grip decided by the hand.</div><span class="chip built">Built · sim</span></li>
+    <li><div><b>Throw the sword</b> at guards for damage: it tumbles, glances off walls, lands flat and wounds a guard it meets.</div><span class="chip built">Built · sim</span></li>
+    <li><div><b>Throw props</b> at guards: the game's own physics damage (big stagger, 2-8 hp by speed); bottles keep the game's own throw.</div><span class="chip built">Built · sim (decl verified)</span></li>
+    <li><div><b>Hands:</b> solid open hands swat props; a holding hand closes by the object's size (per-finger contact is still planned).</div><span class="chip built">Built · sim</span></li>
+    <li><div><b>Grab living guards:</b> yank one into the game's ragdoll; he gets up by himself.</div><span class="chip built">Built · sim</span></li>
   </ol>
 </section>
 
@@ -363,11 +370,16 @@ svg .metal { fill: var(--rule); stroke: var(--ink); stroke-width: 1.4; }
   <div class="tablewrap"><table>
     <thead><tr><th>Feature</th><th>Simulator</th><th>Headset</th></tr></thead>
     <tbody>
+      <tr><td>Sword held only while gripped: draw and sheathe over the shoulder, drop, pick up, call back</td><td>Draw, drop as a physical sword, pick up, call back and sheathe all pass</td><td>Waiting for your test</td></tr>
+      <tr><td>Pistol on the left hip, held only while gripped</td><td>Holstered by letting go, drawn at the hip, fires while gripped</td><td>Waiting for your test</td></tr>
+      <tr><td>Throwing the sword at a guard</td><td>Flew level at 8.4 m/s, struck a walking guard (30 → 20), dropped beside him</td><td>Waiting for your test</td></tr>
+      <tr><td>Yanking a living guard into ragdoll</td><td>Pulled about 2 m, down for about 2 s, back on his feet at 4 s</td><td>Waiting for your test</td></tr>
+      <tr><td>Dragging a body by a limb</td><td>Pelvis dragged 5.9 m</td><td>Waiting for your test</td></tr>
       <tr><td>Pistol aiming and shooting along the barrel</td><td>Crosshair and shots follow the drawn gun</td><td>Waiting for your test</td></tr>
       <tr><td>Sword block, with and without the pistol</td><td>Gun stays drawn; block works without it</td><td>Waiting for your test</td></tr>
       <tr><td>Bottle in the hand</td><td>Drawn in the fist, throws with hand speed</td><td>Waiting for your test</td></tr>
       <tr><td>Left arm at the waist</td><td>Never hidden</td><td>Waiting for your test</td></tr>
-      <tr><td>Black Market screen</td><td>Full panel, categories one per squeeze</td><td>Waiting for your test</td></tr>
+      <tr><td>Black Market screen</td><td>Held in the left hand, categories one per squeeze</td><td>Waiting for your test</td></tr>
       <tr><td>Guard and wasp fights</td><td>Guard 30 → 0; 51 wasp kills, no crash</td><td>Waiting for your test</td></tr>
       <tr><td>Grip tab switching in menus</td><td>One tab per squeeze in Controls and Gameplay</td><td>Waiting for your test</td></tr>
       <tr><td>Crash when VR stops (AMD driver)</td><td>Not reproduced; a crash dump is now saved if it happens</td><td>Report it if you see it</td></tr>

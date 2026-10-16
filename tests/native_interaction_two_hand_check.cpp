@@ -1,5 +1,6 @@
 #define D2VR_NATIVE_INTERACTION_PURE
 #include "../src/native_interaction_aim.hpp"
+#include "../src/vr_controls.hpp"
 #include <cassert>
 #include <iostream>
 #include <limits>
@@ -89,6 +90,69 @@ int main() {
         assert(probed);
         InteractionHandRouting search;assert(search.next(both,100,false,{false,false})==0);
         for(unsigned now=101;now<600;now+=7) assert(search.next(both,now,false,{false,true})==1); // the moving hand gets every query
+    }
+    {
+        for(bool target_claim:{false,true}) {
+            InteractionHandRouting hip_routing;
+            assert(hip_routing.next(both,1000,false,{false,true})==1);
+            GunGrip hip_grip;
+            GripIntent hip_intent;
+            GunGrip::In hip_input{};
+            hip_input.gameplay=hip_input.zone=hip_input.empty=hip_input.loaded=true;
+            hip_input.now=1000;
+            hip_grip.update(hip_input);
+            hip_input.grip=1;
+            hip_input.now=1010;
+            hip_intent.update(1,0,1010,true);
+            auto reserved=hip_grip.update(hip_input);
+            assert(reserved.reserved && !reserved.owns && reserved.action==GunGrip::Action::none);
+            for(std::uint64_t hip_tick=1020;hip_tick<2000;hip_tick+=20) {
+                assert(hip_routing.next(both,hip_tick,true,{false,false})==1);
+            }
+            const float native_use=reserved.owns || reserved.reserved?0.f:1.f;
+            assert(native_use==0);
+            const bool query_claim=native_use>.55f || reserved.reserved;
+            assert(query_claim);
+            if(query_claim)hip_routing.lock(0);
+            assert(hip_routing.next(both,2000,true,{false,false})==0);
+            const auto classified=hip_intent.update(1,0,2000,true);
+            hip_input.now=2000;
+            hip_input.object_claim=target_claim;
+            hip_input.draw_authorized=classified.use && !classified.fist && hip_routing.selected()==0;
+            const auto resolved=hip_grip.update(hip_input);
+            assert(resolved.action==(target_claim?GunGrip::Action::none:GunGrip::Action::draw));
+            if(!target_claim) {
+                hip_input.drawn=true;hip_input.empty=false;hip_input.now=2020;
+                assert(hip_grip.update(hip_input).owns);
+                hip_input.grip=0;hip_input.now=2040;
+                assert(hip_grip.update(hip_input).action==GunGrip::Action::holster);
+            }
+        }
+        assert(released_gaze_yields(1,1,true,{1.f,0.f},{1.f,0.f},{true,false},{true,false},false));
+        assert(!released_gaze_yields(1,1,true,{1.f,1.f},{1.f,1.f},{true,false},{true,true},false));
+        assert(!released_gaze_yields(1,1,true,{1.f,0.f},{1.f,0.f},{true,false},{true,false},true));
+        for(unsigned cancel_reason=0;cancel_reason<3;++cancel_reason) {
+            GunGrip cancelled_grip;
+            GunGrip::In cancel_input{};
+            cancel_input.gameplay=cancel_input.zone=cancel_input.empty=cancel_input.loaded=true;
+            cancel_input.now=1000;cancelled_grip.update(cancel_input);
+            cancel_input.grip=1;cancel_input.now=1010;
+            assert(cancelled_grip.update(cancel_input).reserved);
+            cancel_input.now=1060;
+            if(cancel_reason==0)cancel_input.grip=0;
+            const bool menu_modifier=cancel_reason==1;
+            cancel_input.gameplay=!menu_modifier;
+            if(cancel_reason==2)cancel_input.object_claim=true;
+            const auto cancelled=cancelled_grip.update(cancel_input);
+            assert(!cancelled.reserved && !cancelled.owns && cancelled.action==GunGrip::Action::none);
+            InteractionHandRouting cancelled_routing;
+            cancelled_routing.lock(0);
+            if(!cancelled.reserved)cancelled_routing.unlock();
+            assert(cancelled_routing.locked()==-1);
+            cancel_input.gameplay=true;cancel_input.object_claim=false;
+            cancel_input.now=2000;cancel_input.draw_authorized=true;
+            assert(cancelled_grip.update(cancel_input).action==GunGrip::Action::none);
+        }
     }
     stable.reset();stable.next(both,3000);
     stable.lock(0);assert(stable.next(both,2120,true)==0);stable.unlock();

@@ -10,7 +10,12 @@ struct NativeHudChildScope {
     NativeHudChildKind kind{};std::uintptr_t file{},iggy{},node{},owner{};UINT64 epoch{},tick{};
     std::array<float,6> matrix{};std::array<float,4> bounds{};bool matrix_valid{},bounds_valid{};
     NativeInteractionTargetIdentity target{};
+    bool talk_offer{},panel_prompt{};
 };
+inline bool native_hud_talk_glyph_context(const NativeHudChildScope* scope) noexcept {
+    return scope && (scope->kind==NativeHudChildKind::prompt ||
+        (scope->kind==NativeHudChildKind::panel && scope->panel_prompt)) && scope->target && scope->talk_offer;
+}
 inline bool native_hud_child_same_identity(const NativeHudChildScope& a,const NativeHudChildScope& b) noexcept {
     return a.kind!=NativeHudChildKind::none && a.kind==b.kind && a.file==b.file && a.iggy==b.iggy &&
         a.node==b.node && a.owner==b.owner && a.epoch && a.epoch==b.epoch &&
@@ -85,6 +90,8 @@ public:
     inline static std::atomic<Observer> observer{};
     inline static std::atomic<Begin> begin{};inline static std::atomic<End> end{};
     inline static std::atomic<Transform> transform{};
+    using CpuProfile=void (*)(unsigned stage,unsigned nesting) noexcept;
+    inline static std::atomic<CpuProfile> cpu_profile{};
     inline static std::atomic<UINT64> calls{},identified{},captures{},transforms{},publish_accepts{},publish_rejects{},suppressed{},master_entries{};
     inline static std::atomic<unsigned> panel_width{},panel_height{}; // HUD window capture texture, set by its producer
     inline static thread_local const NativeHudChildScope* current{};
@@ -143,7 +150,7 @@ private:
     inline static std::uintptr_t base_{};inline static Read read_{};inline static Draw original_{};
     inline static void* target_{};inline static std::atomic<bool> active_{};inline static std::atomic<unsigned> depth_{};
     inline static std::mutex mutex_;inline static std::array<NativeHudChildScope,40> bindings_{};
-    inline static NativeInteractionTargetIdentity prompt_target_{};inline static UINT64 prompt_target_tick_{};
+    inline static NativeInteractionTargetIdentity prompt_target_{};inline static UINT64 prompt_target_tick_{};inline static bool prompt_talk_{};
     // Sticky prompt display roots: any node ever published for a prompt stays identified as a prompt
     // subtree (no target/freshness needed) so it can never fall through to a flat draw.
     inline static std::array<NativeHudChildScope,4> prompt_roots_{};inline static unsigned prompt_root_next_{};
@@ -155,7 +162,7 @@ private:
         for(auto& binding:bindings_) if(binding.kind!=NativeHudChildKind::none && binding.iggy==reinterpret_cast<std::uintptr_t>(iggy) && binding.node==reinterpret_cast<std::uintptr_t>(node)) {
             const bool live_prompt=binding.kind==NativeHudChildKind::prompt && binding.target && binding.target==prompt_target_ &&
                 prompt_target_tick_ && now>=prompt_target_tick_ && now-prompt_target_tick_<=250;
-            if(live_prompt || (now>=binding.tick && now-binding.tick<=250)){out=binding;if(live_prompt)out.tick=now;break;}
+            if(live_prompt || (now>=binding.tick && now-binding.tick<=250)){out=binding;if(live_prompt)out.tick=now;out.talk_offer=live_prompt && prompt_talk_;break;}
         }
         if(out.kind==NativeHudChildKind::none)for(const auto& root:prompt_roots_)
             if(root.kind==NativeHudChildKind::prompt && root.iggy==reinterpret_cast<std::uintptr_t>(iggy) && root.node==reinterpret_cast<std::uintptr_t>(node)){out=root;out.target={};out.tick=now;break;}
@@ -275,6 +282,8 @@ private:
     }
     static std::uint32_t __fastcall hook(void* iggy,float* matrix,void* node,void* aux,void* p5,void* p6,std::uint32_t clip,float depth) {
         ++depth_;++calls;++nesting_;
+        const auto profile=cpu_profile.load(std::memory_order_relaxed);
+        if(profile)profile(0,nesting_);
         if(const auto observe=census.load(std::memory_order_relaxed)) observe(iggy,matrix,node,nesting_);
         // Full-screen overlays (DamageVignette) are laid out for the flat screen; in the eye they showed as a sharp-edged
         // square (headset). Not drawn: the game's own full-frame damage tint post-process remains.
@@ -317,7 +326,8 @@ private:
             const bool tutorial=scope.kind==NativeHudChildKind::tutorial;
             if(tutorial && scope.matrix_valid && scope.bounds_valid)
                 if(const float dx=native_hud_centre_shift(scope.matrix,scope.bounds);dx!=0.f) {laid=scope.matrix;laid[4]+=dx;relaid=true;}
-            if((scope.kind==NativeHudChildKind::prompt && !prompt_world.load(std::memory_order_relaxed)) || tutorial) scope.kind=NativeHudChildKind::panel;
+            if((scope.kind==NativeHudChildKind::prompt && !prompt_world.load(std::memory_order_relaxed)) || tutorial)
+                {scope.panel_prompt=scope.kind==NativeHudChildKind::prompt;scope.kind=NativeHudChildKind::panel;}
             else if(scope.kind==NativeHudChildKind::none && panel_generic.load(std::memory_order_relaxed)) {
                 holder_hit_=holder_hide_=holder_eye_hit_=false;scope=panel_child(iggy,node,matrix,sibling);hide_child=holder_hide_;holder_hide_=false;
                 if(holder_hit_){holder_saved=holder_level_;eye_saved=holder_eye_;holder_level_=nesting_;holder_eye_=holder_eye_hit_;holder_entered=true;}
@@ -348,8 +358,9 @@ private:
         if(hide)++holder_hidden;
         const bool suppress=hide || hide_overlay || ((scope.kind==NativeHudChildKind::prompt || scope.kind==NativeHudChildKind::panel) && !capture && start);
         if(suppress)++suppressed;
+        if(profile)profile(1,nesting_);
         __try {if(!suppress)result=original_(iggy,changed?copied.data():relaid?laid.data():matrix,node,aux,p5,p6,clip,depth);}
-        __finally {if(scope.kind!=NativeHudChildKind::none){if(capture)stop(scope);if(watch)watch(scope,false,result);current=previous;}if(entered_master)master_=false;if(holder_entered){holder_level_=holder_saved;holder_eye_=eye_saved;}--nesting_;--depth_;}
+        __finally {if(profile)profile(2,nesting_);if(scope.kind!=NativeHudChildKind::none){if(capture)stop(scope);if(watch)watch(scope,false,result);current=previous;}if(entered_master)master_=false;if(holder_entered){holder_level_=holder_saved;holder_eye_=eye_saved;}if(profile)profile(3,nesting_);--nesting_;--depth_;}
         return result;
     }
 public:
@@ -374,11 +385,11 @@ public:
         }
         if(!free)return reject();*free={kind,geometry.file,geometry.iggy,geometry.display_node,owner,epoch,tick};free->target=target;++publish_accepts;return true;
     }
-    static void clear() {std::lock_guard<std::mutex> lock(mutex_);bindings_={};prompt_roots_={};prompt_target_={};prompt_target_tick_=0;takedown_={};takedown_tick_=0;widget_nodes_={};widget_iggy_={};widget_count_=widget_next_=0;}
+    static void clear() {std::lock_guard<std::mutex> lock(mutex_);bindings_={};prompt_roots_={};prompt_target_={};prompt_target_tick_=0;prompt_talk_=false;takedown_={};takedown_tick_=0;widget_nodes_={};widget_iggy_={};widget_count_=widget_next_=0;}
     // Producer: the NPC the native takedown sensor qualified this frame (empty = none).
     static void set_takedown(NativeInteractionTargetIdentity target,UINT64 tick) {std::lock_guard<std::mutex> lock(mutex_);takedown_=target;takedown_tick_=target?tick:0;}
     inline static std::atomic<UINT64> takedown_hints{};
-    static void clear_kind(NativeHudChildKind kind) {std::lock_guard<std::mutex> lock(mutex_);for(auto& binding:bindings_)if(binding.kind==kind)binding={};if(kind==NativeHudChildKind::prompt){prompt_target_={};prompt_target_tick_=0;}}
+    static void clear_kind(NativeHudChildKind kind) {std::lock_guard<std::mutex> lock(mutex_);for(auto& binding:bindings_)if(binding.kind==kind)binding={};if(kind==NativeHudChildKind::prompt){prompt_target_={};prompt_target_tick_=0;prompt_talk_=false;}}
     // Stat changes are sparse. Refresh their already-owned child identities
     // only when that same native HUD movie is being drawn again.
     static void refresh_wrist(std::uintptr_t file,std::uintptr_t iggy,UINT64 epoch,UINT64 tick) {
@@ -390,10 +401,10 @@ public:
     }
     // Authorize only the current same target; the exact child Draw renews its
     // observed scope. A movie Draw alone does not prove fresh prompt artwork.
-    static void refresh_prompt(std::uintptr_t file,std::uintptr_t iggy,UINT64 epoch,UINT64 tick,NativeInteractionTargetIdentity target) {
+    static void refresh_prompt(std::uintptr_t file,std::uintptr_t iggy,UINT64 epoch,UINT64 tick,NativeInteractionTargetIdentity target,bool exact_talk_offer=false) {
         if(!epoch || !tick || !read_ || !wrist_hud_file_owned(read_,base_,file) || rig::value<std::uintptr_t>(read_,file+0x1608)!=iggy)return;
         std::lock_guard<std::mutex> lock(mutex_);
-        prompt_target_=target && target.epoch==epoch?target:NativeInteractionTargetIdentity{};prompt_target_tick_=tick;
+        prompt_target_=target && target.epoch==epoch?target:NativeInteractionTargetIdentity{};prompt_target_tick_=tick;prompt_talk_=static_cast<bool>(prompt_target_) && exact_talk_offer;
         for(auto& binding:bindings_) if(binding.kind==NativeHudChildKind::prompt &&
             (binding.file!=file || binding.iggy!=iggy || binding.epoch!=epoch || (binding.target && binding.target!=prompt_target_)))binding={};
     }
@@ -404,7 +415,7 @@ public:
         const auto status=MH_EnableHook(target_);active_=status==MH_OK || status==MH_ERROR_ENABLED;return active_.load();
     }
     static bool disable() noexcept {
-        active_=false;transform=nullptr;begin=nullptr;end=nullptr;observer=nullptr;hud_movie=nullptr;tutorial_movie=nullptr;panel_movie=nullptr;tutorial_epoch=0;hud_layout_node=nullptr;hud_scale=1.f;panel_active=false;panel_generic=false;hud_file=0;eye_node=0;prompt_world=false;
+        cpu_profile=nullptr;active_=false;transform=nullptr;begin=nullptr;end=nullptr;observer=nullptr;hud_movie=nullptr;tutorial_movie=nullptr;panel_movie=nullptr;tutorial_epoch=0;hud_layout_node=nullptr;hud_scale=1.f;panel_active=false;panel_generic=false;hud_file=0;eye_node=0;prompt_world=false;
         if(!target_)return true;const auto result=MH_DisableHook(target_);if(result!=MH_OK && result!=MH_ERROR_DISABLED)return false;
         const auto until=GetTickCount64()+2000;while(depth_ && GetTickCount64()<until)Sleep(1);if(depth_)return false;clear();return true;
     }

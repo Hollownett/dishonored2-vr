@@ -2,6 +2,7 @@
 #include "native_hud_child_draw.hpp"
 #include "world_ui_capture.hpp"
 #include "world_ui_completion.hpp"
+#include <cstdint>
 
 namespace d2vr {
 // Native child-render capture only. No scene/whole-HUD claiming rectangles,
@@ -9,6 +10,11 @@ namespace d2vr {
 class NativeHudChildCapture {
     template<class T>using Ptr=Microsoft::WRL::ComPtr<T>;
 public:
+    struct Observer {
+        void* user{};
+        std::uint64_t (*begin)(void*,ID3D11DeviceContext*,unsigned,int,std::uint64_t) noexcept{};
+        void (*end)(void*,ID3D11DeviceContext*,std::uint64_t) noexcept{};
+    } observer{};
     using Fallback=void (*)(ID3D11DeviceContext*,ID3D11RenderTargetView*,ID3D11RenderTargetView*,const NativeHudChildScope&);
     static constexpr unsigned slot_count=13; // prompt, vitals/equipment, bounded individual markers, tutorial (11), HUD window panel (12)
     struct Snapshot {
@@ -17,6 +23,11 @@ public:
     };
     std::atomic<UINT64> accepted{},rejected{},root_rebinds{},ended{};
 private:
+    struct Observation {
+        Observer observer;ID3D11DeviceContext* context{};std::uint64_t ticket{};
+        void finish() noexcept {const auto completed_ticket=ticket;ticket=0;if(completed_ticket && observer.end)observer.end(observer.user,context,completed_ticket);}
+        ~Observation(){finish();}
+    };
     std::array<WorldUiCapture,5> banks_;
     std::array<WorldUiCompletion,5> completion_;
     std::mutex mutex_;
@@ -26,6 +37,7 @@ private:
         NativeHudChildCapture* owner{};Ptr<ID3D11DeviceContext> context;
         Ptr<ID3D11RenderTargetView> original,capture;Ptr<ID3D11DepthStencilView> depth;
         unsigned slot{},eye{};UINT64 serial{};std::uintptr_t node{};
+        Observer observer{};std::uint64_t ticket{};
     };
     inline static thread_local Transaction transaction_;
 public:
@@ -42,6 +54,9 @@ public:
         std::array<Ptr<ID3D11RenderTargetView>,8> held;std::array<ID3D11RenderTargetView*,8> raw{};Ptr<ID3D11DepthStencilView> depth;
         context->OMGetRenderTargets(8,raw.data(),&depth);for(unsigned i=0;i<8;++i)held[i].Attach(raw[i]);
         if(held[0].Get()!=root)return reject();for(unsigned i=1;i<8;++i)if(held[i])return reject();
+        Observation observed{observer,context};
+        if(observed.observer.begin && observed.observer.end)
+            observed.ticket=observed.observer.begin(observed.observer.user,context,slot,static_cast<int>(eye),serial);
         auto capture=banks_[slot/3].redirect(context,root,slot%3,eye,serial);if(!capture)return reject();
         Transaction tx;tx.owner=this;tx.context=context;tx.original=held[0];tx.capture=capture;tx.depth=depth;
         tx.slot=slot;tx.eye=eye;tx.serial=serial;tx.node=child.node;
@@ -50,7 +65,9 @@ public:
         // Arm only after allocation-capable metadata/completion operations.
         // A declined/throwing Begin must never leave root rebind routing active.
         transaction_=std::move(tx);
-        auto* target=capture.Get();context->OMSetRenderTargets(1,&target,depth.Get());++accepted;return true;
+        auto* target=capture.Get();context->OMSetRenderTargets(1,&target,depth.Get());
+        transaction_.observer=observed.observer;transaction_.ticket=observed.ticket;observed.ticket=0;
+        ++accepted;return true;
     }
     // Wire the existing OMSetRenderTargets hook here. Internal native filter
     // targets pass through; only an exact rebind of this child's root routes.
@@ -64,11 +81,13 @@ public:
         if(transaction_.owner!=this || transaction_.node!=child.node){++rejected;return false;}
         // Disarm before restoring: the core OM hook must not recapture restore.
         auto tx=std::move(transaction_);transaction_={};auto* target=tx.original.Get();
+        Observation observed{tx.observer,tx.context.Get(),tx.ticket};
         tx.context->OMSetRenderTargets(1,&target,tx.depth.Get());
         // A producer can preserve the native flat draw until its exact captured
         // replacement is committed. Record this on the ORIGINAL context, so
         // deferred native work never jumps to the Present/immediate queue.
         if(fallback) fallback(tx.context.Get(),tx.original.Get(),tx.capture.Get(),child);
+        observed.finish();
         if(tx.context->GetType()==D3D11_DEVICE_CONTEXT_IMMEDIATE)completion_[tx.slot/3].immediate(tx.slot%3,tx.eye,tx.serial);
         ++ended;return true;
     }

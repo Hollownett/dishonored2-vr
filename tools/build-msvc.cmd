@@ -3,26 +3,274 @@ call "%D2VR_VS_ROOT%\VC\Auxiliary\Build\vcvars64.bat" >nul
 if not "%errorlevel%"=="0" exit /b 1
 if not exist build mkdir build
 if not exist artifacts\research\glyphs mkdir artifacts\research\glyphs
-for %%T in (vr_settings_native_check game_art_check held_release_check native_takedown_range_check native_slash_speed_check native_use_los_anchor_check calibrated_body_anchor_check body_ik_check native_use_fetch_completion_check native_interaction_install_order_check motion_sword_check game_xr_motion_check native_grab_lifetime_check frame_timing_queue_check native_grab_sequence_check native_grab_obstruction_check glyph_swap_async_check glyph_swap_gpu_check avatar_fit_reuse_check xr_floor_datum_check native_torso_fit_check avatar_geometry_fit_check native_pose_pipeline_check native_readable_range_check native_art_movie_patch_check synchronized_observer_check wheel_avatar_check native_action_camera_check native_use_order_check native_hand_volume_check body_renderer_check native_hud_art_probe_check native_hud_child_draw_check native_hud_child_capture_check native_wrist_art_publisher_check native_marker_child_binding_check native_art_bounds_check native_ui_layout_check full_body_driver_check native_interaction_range_check native_attachment_pose_check native_fire_seam_trace_check native_hud_fallback_check game_xr_wrist_recovery_check) do (
+if not exist build\md mkdir build\md
+cl /nologo /c /TC /W3 /O2 /MD /Ithird_party\minhook\include third_party\minhook\src\buffer.c third_party\minhook\src\hook.c third_party\minhook\src\trampoline.c third_party\minhook\src\hde\hde64.c /Fo:build\md\
+if not "%errorlevel%"=="0" exit /b 1
+cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MD tests\audio_listener_pose_check.cpp /Fo:build\audio_listener_pose_check.obj /Fe:build\audio_listener_pose_check.exe
+if errorlevel 1 goto build_failed
+if not errorlevel 0 goto build_failed
+build\audio_listener_pose_check.exe
+if errorlevel 1 goto build_failed
+if not errorlevel 0 goto build_failed
+cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MD tests\native_headphone_mode_check.cpp /Fo:build\native_headphone_mode_check.obj /Fe:build\native_headphone_mode_check.exe
+if errorlevel 1 goto build_failed
+if not errorlevel 0 goto build_failed
+build\native_headphone_mode_check.exe
+if errorlevel 1 goto build_failed
+if not errorlevel 0 goto build_failed
+cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MD tests\native_audio_listener_check.cpp build\md\buffer.obj build\md\hook.obj build\md\trampoline.obj build\md\hde64.obj /Fo:build\native_audio_listener_check.obj /Fe:build\native_audio_listener_check.exe
+if errorlevel 1 goto build_failed
+if not errorlevel 0 goto build_failed
+build\native_audio_listener_check.exe
+if errorlevel 1 goto build_failed
+if not errorlevel 0 goto build_failed
+cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT tests\native_kill_range_scope_check.cpp /Fo:build\native_kill_range_scope_check.obj /Fe:build\native_kill_range_scope_check.exe
+if errorlevel 1 goto build_failed
+if not errorlevel 0 goto build_failed
+build\native_kill_range_scope_check.exe
+if errorlevel 1 goto build_failed
+if not errorlevel 0 goto build_failed
+cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT /Ithird_party\minhook\include tests\native_choke_distance_scope_check.cpp /Fo:build\native_choke_distance_scope_check.obj /Fe:build\native_choke_distance_scope_check.exe
+if errorlevel 1 goto build_failed
+if not errorlevel 0 goto build_failed
+build\native_choke_distance_scope_check.exe
+if errorlevel 1 goto build_failed
+if not errorlevel 0 goto build_failed
+cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT tests\native_world_query_source_check.cpp /Fo:build\native_world_query_source_check.obj /Fe:build\native_world_query_source_check.exe
+if errorlevel 1 goto build_failed
+if not errorlevel 0 goto build_failed
+build\native_world_query_source_check.exe
+if errorlevel 1 goto build_failed
+if not errorlevel 0 goto build_failed
+cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT tests\native_initial_contact_check.cpp /Fo:build\native_initial_contact_check.obj /Fe:build\native_initial_contact_check.exe
+if errorlevel 1 goto build_failed
+if not errorlevel 0 goto build_failed
+build\native_initial_contact_check.exe
+if errorlevel 1 goto build_failed
+if not errorlevel 0 goto build_failed
+cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT tests\native_regular_contact_check.cpp /Fo:build\native_regular_contact_check.obj /Fe:build\native_regular_contact_check.exe
+if errorlevel 1 goto build_failed
+if not errorlevel 0 goto build_failed
+build\native_regular_contact_check.exe
+if errorlevel 1 goto build_failed
+if not errorlevel 0 goto build_failed
+cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT tests\native_door_owner_check.cpp /Fo:build\native_door_owner_check.obj /Fe:build\native_door_owner_check.exe
+if errorlevel 1 goto build_failed
+if not errorlevel 0 goto build_failed
+build\native_door_owner_check.exe
+if errorlevel 1 goto build_failed
+if not errorlevel 0 goto build_failed
+cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT /Ithird_party\minhook\include tests\native_door_request_check.cpp /Fo:build\native_door_request_check.obj /Fe:build\native_door_request_check.exe
+if errorlevel 1 goto build_failed
+if not errorlevel 0 goto build_failed
+build\native_door_request_check.exe
+if errorlevel 1 goto build_failed
+if not errorlevel 0 goto build_failed
+cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT /Ithird_party\minhook\include tests\native_door_progress_check.cpp /Fo:build\native_door_progress_check.obj /Fe:build\native_door_progress_check.exe
+if errorlevel 1 goto build_failed
+if not errorlevel 0 goto build_failed
+build\native_door_progress_check.exe
+if errorlevel 1 goto build_failed
+if not errorlevel 0 goto build_failed
+cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT /Ithird_party\minhook\include tests\native_door_empty_gate_check.cpp /Fo:build\native_door_empty_gate_check.obj /Fe:build\native_door_empty_gate_check.exe
+if errorlevel 1 goto build_failed
+if not errorlevel 0 goto build_failed
+build\native_door_empty_gate_check.exe
+if errorlevel 1 goto build_failed
+if not errorlevel 0 goto build_failed
+cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT /Ithird_party\minhook\include tests\native_door_ingress_check.cpp /Fo:build\native_door_ingress_check.obj /Fe:build\native_door_ingress_check.exe
+if errorlevel 1 goto build_failed
+if not errorlevel 0 goto build_failed
+build\native_door_ingress_check.exe
+if errorlevel 1 goto build_failed
+if not errorlevel 0 goto build_failed
+cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT /Ithird_party\minhook\include tests\native_door_interaction_check.cpp /Fo:build\native_door_interaction_check.obj /Fe:build\native_door_interaction_check.exe
+if errorlevel 1 goto build_failed
+if not errorlevel 0 goto build_failed
+build\native_door_interaction_check.exe
+if errorlevel 1 goto build_failed
+if not errorlevel 0 goto build_failed
+cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT tests\native_door_clip_content_check.cpp /Fo:build\native_door_clip_content_check.obj /Fe:build\native_door_clip_content_check.exe
+if errorlevel 1 goto build_failed
+if not errorlevel 0 goto build_failed
+build\native_door_clip_content_check.exe
+if errorlevel 1 goto build_failed
+if not errorlevel 0 goto build_failed
+cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT tests\native_door_skeleton_content_check.cpp /Fo:build\native_door_skeleton_content_check.obj /Fe:build\native_door_skeleton_content_check.exe
+if errorlevel 1 goto build_failed
+if not errorlevel 0 goto build_failed
+build\native_door_skeleton_content_check.exe
+if errorlevel 1 goto build_failed
+if not errorlevel 0 goto build_failed
+cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT tests\physical_door_control_check.cpp /Fo:build\physical_door_control_check.obj /Fe:build\physical_door_control_check.exe
+if errorlevel 1 goto build_failed
+if not errorlevel 0 goto build_failed
+build\physical_door_control_check.exe
+if errorlevel 1 goto build_failed
+if not errorlevel 0 goto build_failed
+cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT tests\native_door_contact_check.cpp /Fo:build\native_door_contact_check.obj /Fe:build\native_door_contact_check.exe
+if errorlevel 1 goto build_failed
+if not errorlevel 0 goto build_failed
+build\native_door_contact_check.exe
+if errorlevel 1 goto build_failed
+if not errorlevel 0 goto build_failed
+cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT tests\physical_door_geometry_check.cpp /Fo:build\physical_door_geometry_check.obj /Fe:build\physical_door_geometry_check.exe
+if errorlevel 1 goto build_failed
+if not errorlevel 0 goto build_failed
+build\physical_door_geometry_check.exe
+if errorlevel 1 goto build_failed
+if not errorlevel 0 goto build_failed
+cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT /Ithird_party\minhook\include tests\native_door_animation_check.cpp /Fo:build\native_door_animation_check.obj /Fe:build\native_door_animation_check.exe
+if errorlevel 1 goto build_failed
+if not errorlevel 0 goto build_failed
+build\native_door_animation_check.exe
+if errorlevel 1 goto build_failed
+if not errorlevel 0 goto build_failed
+cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT /Ithird_party\minhook\include tests\native_door_event_admission_check.cpp /Fo:build\native_door_event_admission_check.obj /Fe:build\native_door_event_admission_check.exe
+if errorlevel 1 goto build_failed
+if not errorlevel 0 goto build_failed
+build\native_door_event_admission_check.exe
+if errorlevel 1 goto build_failed
+if not errorlevel 0 goto build_failed
+cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT tests\anatomical_local_contact_check.cpp /Fo:build\anatomical_local_contact_check.obj /Fe:build\anatomical_local_contact_check.exe
+if errorlevel 1 goto build_failed
+if not errorlevel 0 goto build_failed
+build\anatomical_local_contact_check.exe
+if errorlevel 1 goto build_failed
+if not errorlevel 0 goto build_failed
+cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT tests\full_hand_contact_check.cpp /Fo:build\full_hand_contact_check.obj /Fe:build\full_hand_contact_check.exe
+if errorlevel 1 goto build_failed
+if not errorlevel 0 goto build_failed
+build\full_hand_contact_check.exe
+if errorlevel 1 goto build_failed
+if not errorlevel 0 goto build_failed
+cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT tests\full_hand_target_witness_check.cpp /Fo:build\full_hand_target_witness_check.obj /Fe:build\full_hand_target_witness_check.exe
+if errorlevel 1 goto build_failed
+if not errorlevel 0 goto build_failed
+build\full_hand_target_witness_check.exe
+if errorlevel 1 goto build_failed
+if not errorlevel 0 goto build_failed
+cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT tests\full_hand_query_transaction_check.cpp /Fo:build\full_hand_query_transaction_check.obj /Fe:build\full_hand_query_transaction_check.exe
+if errorlevel 1 goto build_failed
+if not errorlevel 0 goto build_failed
+build\full_hand_query_transaction_check.exe
+if errorlevel 1 goto build_failed
+if not errorlevel 0 goto build_failed
+cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT tests\full_body_contact_arm_check.cpp /Fo:build\full_body_contact_arm_check.obj /Fe:build\full_body_contact_arm_check.exe
+if errorlevel 1 goto build_failed
+if not errorlevel 0 goto build_failed
+build\full_body_contact_arm_check.exe
+if errorlevel 1 goto build_failed
+if not errorlevel 0 goto build_failed
+cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT tests\native_full_hand_contact_check.cpp /Fo:build\native_full_hand_contact_check.obj /Fe:build\native_full_hand_contact_check.exe
+if errorlevel 1 goto build_failed
+if not errorlevel 0 goto build_failed
+build\native_full_hand_contact_check.exe
+if errorlevel 1 goto build_failed
+if not errorlevel 0 goto build_failed
+cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT tests\anatomical_raw_pair_check.cpp /Fo:build\anatomical_raw_pair_check.obj /Fe:build\anatomical_raw_pair_check.exe
+if errorlevel 1 goto build_failed
+if not errorlevel 0 goto build_failed
+build\anatomical_raw_pair_check.exe
+if errorlevel 1 goto build_failed
+if not errorlevel 0 goto build_failed
+cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT /Ithird_party\minhook\include tests\native_anatomical_shadow_check.cpp /Fo:build\native_anatomical_shadow_check.obj /Fe:build\native_anatomical_shadow_check.exe /link user32.lib Xinput9_1_0.lib
+if errorlevel 1 goto build_failed
+if not errorlevel 0 goto build_failed
+build\native_anatomical_shadow_check.exe
+if errorlevel 1 goto build_failed
+if not errorlevel 0 goto build_failed
+cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT tests\native_world_contact_surface_check.cpp /Fo:build\native_world_contact_surface_check.obj /Fe:build\native_world_contact_surface_check.exe
+if errorlevel 1 goto build_failed
+if not errorlevel 0 goto build_failed
+build\native_world_contact_surface_check.exe
+if errorlevel 1 goto build_failed
+if not errorlevel 0 goto build_failed
+cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT tests\hand_palette_contact_check.cpp /Fo:build\hand_palette_contact_check.obj /Fe:build\hand_palette_contact_check.exe
+if errorlevel 1 goto build_failed
+if not errorlevel 0 goto build_failed
+build\hand_palette_contact_check.exe
+if errorlevel 1 goto build_failed
+if not errorlevel 0 goto build_failed
+cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT tests\full_body_frame_latch_check.cpp /Fo:build\full_body_frame_latch_check.obj /Fe:build\full_body_frame_latch_check.exe
+if errorlevel 1 goto build_failed
+if not errorlevel 0 goto build_failed
+build\full_body_frame_latch_check.exe
+if errorlevel 1 goto build_failed
+if not errorlevel 0 goto build_failed
+cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT tests\raw_hand_candidate_check.cpp /Fo:build\raw_hand_candidate_check.obj /Fe:build\raw_hand_candidate_check.exe
+if errorlevel 1 goto build_failed
+if not errorlevel 0 goto build_failed
+build\raw_hand_candidate_check.exe
+if errorlevel 1 goto build_failed
+if not errorlevel 0 goto build_failed
+for %%T in (finger_ik_check finger_snapshot_check prop_watch_check hand_contact_check anatomical_world_contact_check sword_flight_check vr_settings_native_check game_art_check held_release_check native_takedown_range_check native_slash_speed_check native_use_los_anchor_check calibrated_body_anchor_check body_ik_check native_use_fetch_completion_check native_interaction_install_order_check native_interaction_stop_check native_block_eligibility_check motion_sword_check game_xr_motion_check native_grab_lifetime_check frame_timing_queue_check native_grab_sequence_check native_grab_obstruction_check glyph_swap_async_check glyph_swap_gpu_check avatar_fit_reuse_check xr_floor_datum_check native_torso_fit_check avatar_geometry_fit_check native_pose_pipeline_check native_readable_range_check native_art_movie_patch_check synchronized_observer_check wheel_avatar_check native_action_camera_check native_use_order_check native_hand_volume_check body_renderer_check native_hud_art_probe_check native_hud_child_draw_check native_hud_child_capture_check native_wrist_art_publisher_check native_marker_child_binding_check native_art_bounds_check native_ui_layout_check full_body_driver_check native_interaction_range_check native_attachment_pose_check native_fire_seam_trace_check native_hud_fallback_check game_xr_wrist_recovery_check render_perf_cpu_check render_perf_gpu_check left_weapon_render_receipt_check native_hip_visibility_check native_character_gaze_check render_perf_gpu_loss_check) do (
     cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT /Ithird_party\minhook\include /Ithird_party\openxr\include tests\%%T.cpp /Fo:build\%%T.obj /Fe:build\%%T.exe /link user32.lib gdi32.lib Xinput9_1_0.lib d3d11.lib dxgi.lib d3dcompiler.lib
-    if errorlevel 1 exit /b 1
+    if errorlevel 1 goto build_failed
+    if not errorlevel 0 goto build_failed
     build\%%T.exe
-    if errorlevel 1 exit /b 1
+    if errorlevel 1 goto build_failed
+    if not errorlevel 0 goto build_failed
 )
 python tests\native_interaction_range_abi_check.py
-if errorlevel 1 exit /b 1
+if errorlevel 1 goto build_failed
+if not errorlevel 0 goto build_failed
+python tests\combat_live_status_routing_check.py
+if errorlevel 1 goto build_failed
+if not errorlevel 0 goto build_failed
+python tests\render_perf_gpu_source_check.py
+if errorlevel 1 goto build_failed
+if not errorlevel 0 goto build_failed
+python tests\render_perf_callback_check.py
+if errorlevel 1 goto build_failed
+if not errorlevel 0 goto build_failed
+python tests\render_perf_maintenance_check.py --source src\dxgi_probe.cpp --gpu-header src\render_perf_gpu.hpp
+if errorlevel 1 goto build_failed
+if not errorlevel 0 goto build_failed
+python tests\render_perf_readiness_check.py --header src\render_perf_gpu.hpp
+if errorlevel 1 goto build_failed
+if not errorlevel 0 goto build_failed
+for %%T in (drawn_palm_residual_check palm_old_new_driver_repro) do (
+    cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT /Ithird_party\minhook\include /Ithird_party\openxr\include tests\%%T.cpp /Fo:build\%%T.obj /Fe:build\%%T.exe /link user32.lib gdi32.lib Xinput9_1_0.lib d3d11.lib dxgi.lib d3dcompiler.lib
+    if errorlevel 1 goto build_failed
+    if not errorlevel 0 goto build_failed
+    build\%%T.exe
+    if errorlevel 1 goto build_failed
+    if not errorlevel 0 goto build_failed
+)
+python tests\fsr_diagnostic_drop_source_check.py
+if errorlevel 1 goto build_failed
+if not errorlevel 0 goto build_failed
+python tests\render_attribution_check.py
+if errorlevel 1 goto build_failed
+if not errorlevel 0 goto build_failed
+python tests\hud_profile_lifecycle_check.py
+if errorlevel 1 goto build_failed
+if not errorlevel 0 goto build_failed
+python tests\left_weapon_render_receipt_source_check.py
+if errorlevel 1 goto build_failed
+if not errorlevel 0 goto build_failed
 python tests\test_playground.py
-if errorlevel 1 exit /b 1
+if errorlevel 1 goto build_failed
+if not errorlevel 0 goto build_failed
+python tests\repair_private_menu_check.py
+if errorlevel 1 goto build_failed
+if not errorlevel 0 goto build_failed
 python tests\test_playground_capture.py
-if errorlevel 1 exit /b 1
+if errorlevel 1 goto build_failed
+if not errorlevel 0 goto build_failed
 python tests\live_session_tools_check.py
-if errorlevel 1 exit /b 1
+if errorlevel 1 goto build_failed
+if not errorlevel 0 goto build_failed
 python tests\native_menu_patch_check.py
-if errorlevel 1 exit /b 1
+if errorlevel 1 goto build_failed
+if not errorlevel 0 goto build_failed
 python tests\frame_timing_check.py
-if errorlevel 1 exit /b 1
+if errorlevel 1 goto build_failed
+if not errorlevel 0 goto build_failed
 python tests\live_performance_check.py
-if errorlevel 1 exit /b 1
+if errorlevel 1 goto build_failed
+if not errorlevel 0 goto build_failed
 cl /nologo /std:c++17 /EHsc /W4 /WX /O2 /MT tests\native_lean_snapshot_check.cpp /Fo:build\native_lean_snapshot_check.obj /Fe:build\native_lean_snapshot_check.exe /link Xinput9_1_0.lib user32.lib
 if not "%errorlevel%"=="0" exit /b 1
 build\native_lean_snapshot_check.exe
@@ -113,6 +361,18 @@ cl /nologo /std:c++17 /EHsc /W4 /WX /O2 /MT tests\physical_grab_check.cpp /Fo:bu
 if not "%errorlevel%"=="0" exit /b 1
 build\physical_grab_check.exe
 if not "%errorlevel%"=="0" exit /b 1
+cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT tests\held_placement_session_check.cpp /Fo:build\held_placement_session_check.obj /Fe:build\held_placement_session_check.exe
+if not "%errorlevel%"=="0" exit /b 1
+build\held_placement_session_check.exe
+if not "%errorlevel%"=="0" exit /b 1
+cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MD /Ithird_party\minhook\include tests\physical_carry_followup_check.cpp build\md\buffer.obj build\md\hook.obj build\md\trampoline.obj build\md\hde64.obj /Fo:build\physical_carry_followup_check.obj /Fe:build\physical_carry_followup_check.exe
+if errorlevel 1 goto build_failed
+if not errorlevel 0 goto build_failed
+for %%M in (geometry fresh stale source throw) do (
+    build\physical_carry_followup_check.exe %%M
+    if errorlevel 1 goto build_failed
+    if not errorlevel 0 goto build_failed
+)
 cl /nologo /std:c++17 /EHsc /W4 /WX /O2 /MT /Ithird_party\minhook\include tests\native_taa_history_check.cpp /Fo:build\native_taa_history_check.obj /Fe:build\native_taa_history_check.exe
 if not "%errorlevel%"=="0" exit /b 1
 build\native_taa_history_check.exe
@@ -237,6 +497,69 @@ cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT tests\native_takedown_check.c
 if not "%errorlevel%"=="0" exit /b 1
 build\native_takedown_check.exe
 if not "%errorlevel%"=="0" exit /b 1
+cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT /Ithird_party\minhook\include tests\native_offered_choke_check.cpp /Fo:build\native_offered_choke_check.obj /Fe:build\native_offered_choke_check.exe
+if not "%errorlevel%"=="0" exit /b 1
+build\native_offered_choke_check.exe
+if not "%errorlevel%"=="0" exit /b 1
+for %%T in (native_manual_equip_check native_manual_equip_hooks_check native_manual_equip_runtime_check weapon_pose_stabilizer_check native_assassination_receipt_check) do (
+    cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT /Ithird_party\minhook\include tests\%%T.cpp /Fo:build\%%T.obj /Fe:build\%%T.exe
+    if errorlevel 1 goto build_failed
+    if not errorlevel 0 goto build_failed
+    build\%%T.exe
+    if errorlevel 1 goto build_failed
+    if not errorlevel 0 goto build_failed
+)
+python tests\native_assassination_receipt_routing_check.py
+if errorlevel 1 goto build_failed
+if not errorlevel 0 goto build_failed
+python tests\manual_equip_routing_check.py
+if not "%errorlevel%"=="0" exit /b 1
+python tests\physical_grip_routing_check.py
+if not "%errorlevel%"=="0" exit /b 1
+python tests\combat_scheduler_routing_check.py
+if not "%errorlevel%"=="0" exit /b 1
+python tests\sword_combat_routing_check.py
+if not "%errorlevel%"=="0" exit /b 1
+python tests\native_sword_contact_routing_check.py
+if not "%errorlevel%"=="0" exit /b 1
+cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT /Isrc /Ithird_party\minhook\include tests\native_sword_contact_check.cpp /Fo:build\native_sword_contact_check.obj /Fe:build\native_sword_contact_check.exe
+if not "%errorlevel%"=="0" exit /b 1
+build\native_sword_contact_check.exe
+if not "%errorlevel%"=="0" exit /b 1
+python tests\left_weapon_socket_routing_check.py
+if not "%errorlevel%"=="0" exit /b 1
+python tests\left_socket_terminal_diagnostics_check.py
+if not "%errorlevel%"=="0" exit /b 1
+python tests\attachment_socket_audit_check.py
+if not "%errorlevel%"=="0" exit /b 1
+python tests\held_object_routing_check.py
+if not "%errorlevel%"=="0" exit /b 1
+python tests\full_hand_query_routing_check.py
+if not "%errorlevel%"=="0" exit /b 1
+python tests\full_hand_launch_check.py
+if not "%errorlevel%"=="0" exit /b 1
+python tests\build_exit_status_check.py
+if not "%errorlevel%"=="0" exit /b 1
+cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT tests\native_talk_offer_check.cpp /Fo:build\native_talk_offer_check.obj /Fe:build\native_talk_offer_check.exe
+if not "%errorlevel%"=="0" exit /b 1
+build\native_talk_offer_check.exe
+if not "%errorlevel%"=="0" exit /b 1
+cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT /Ithird_party\minhook\include tests\native_weapon_visibility_check.cpp /Fo:build\native_weapon_visibility_check.obj /Fe:build\native_weapon_visibility_check.exe
+if not "%errorlevel%"=="0" exit /b 1
+build\native_weapon_visibility_check.exe
+if not "%errorlevel%"=="0" exit /b 1
+cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT /Ithird_party\minhook\include tests\native_left_weapon_socket_check.cpp /Fo:build\native_left_weapon_socket_check.obj /Fe:build\native_left_weapon_socket_check.exe
+if not "%errorlevel%"=="0" exit /b 1
+build\native_left_weapon_socket_check.exe
+if not "%errorlevel%"=="0" exit /b 1
+for %%T in (combat_target_memory_check native_left_weapon_socket_owner_check native_held_placement_check native_held_object_check) do (
+    cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT /Ithird_party\minhook\include tests\%%T.cpp /Fo:build\%%T.obj /Fe:build\%%T.exe
+    if errorlevel 1 goto build_failed
+    if not errorlevel 0 goto build_failed
+    build\%%T.exe
+    if errorlevel 1 goto build_failed
+    if not errorlevel 0 goto build_failed
+)
 cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT tests\vr_gestures_check.cpp /Fo:build\vr_gestures_check.obj /Fe:build\vr_gestures_check.exe
 if not "%errorlevel%"=="0" exit /b 1
 build\vr_gestures_check.exe
@@ -397,6 +720,8 @@ python tests\native_weapon_attachment_abi_check.py
 if not "%errorlevel%"=="0" exit /b 1
 python tests\native_weapon_attachment_profile_check.py
 if not "%errorlevel%"=="0" exit /b 1
+python -m unittest discover -s tests -p native_left_aim_profile_check.py -k archive
+if not "%errorlevel%"=="0" exit /b 1
 cl /nologo /std:c++17 /EHsc /W4 /WX /O2 /MT /Ithird_party\minhook\include tests\gpu_dispatch_bindings_check.cpp build\buffer.obj build\hook.obj build\trampoline.obj build\hde64.obj /Fo:build\gpu_dispatch_bindings_check.obj /Fe:build\gpu_dispatch_bindings_check.exe
 if not "%errorlevel%"=="0" exit /b 1
 build\gpu_dispatch_bindings_check.exe
@@ -515,8 +840,7 @@ if "%~1"=="pipeline" set D2VR_DIAGNOSTIC_OUTPUT=build\d2vr_render_probe_pipeline
 if "%~1"=="paired" set D2VR_DIAGNOSTIC_OUTPUT=build\d2vr_render_probe_paired.dll
 if "%~1"=="view_setup" set D2VR_DIAGNOSTIC_OUTPUT=build\d2vr_render_probe_view_setup.dll
 if not "%~2"=="" set D2VR_DIAGNOSTIC_OUTPUT=build\%~2
-if not exist build\md mkdir build\md
-cl /nologo /c /TC /W3 /O2 /MD /Ithird_party\minhook\include third_party\minhook\src\buffer.c third_party\minhook\src\hook.c third_party\minhook\src\trampoline.c third_party\minhook\src\hde\hde64.c /Fo:build\md\
-if not "%errorlevel%"=="0" exit /b 1
-cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MD /LD /Ithird_party\minhook\include /Ithird_party\openxr\include /Ithird_party\fidelityfx src\dxgi_probe.cpp build\md\buffer.obj build\md\hook.obj build\md\trampoline.obj build\md\hde64.obj /Fo:build\dxgi_probe.obj /Fe:%D2VR_DIAGNOSTIC_OUTPUT% /link d3d11.lib dxgi.lib bcrypt.lib user32.lib d3dcompiler.lib gdi32.lib third_party\fidelityfx\libs\ffx_backend_dx11_x64.lib third_party\fidelityfx\libs\ffx_fsr3_x64.lib third_party\fidelityfx\libs\ffx_fsr3upscaler_x64.lib third_party\fidelityfx\libs\ffx_frameinterpolation_x64.lib third_party\fidelityfx\libs\ffx_opticalflow_x64.lib
+cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /bigobj /Zi /Fd:build\dxgi_probe.pdb /MD /LD /Ithird_party\minhook\include /Ithird_party\openxr\include /Ithird_party\fidelityfx src\dxgi_probe.cpp build\md\buffer.obj build\md\hook.obj build\md\trampoline.obj build\md\hde64.obj /Fo:build\dxgi_probe.obj /Fe:%D2VR_DIAGNOSTIC_OUTPUT% /link /DEBUG /OPT:REF /OPT:ICF d3d11.lib dxgi.lib bcrypt.lib user32.lib d3dcompiler.lib gdi32.lib third_party\fidelityfx\libs\ffx_backend_dx11_x64.lib third_party\fidelityfx\libs\ffx_fsr3_x64.lib third_party\fidelityfx\libs\ffx_fsr3upscaler_x64.lib third_party\fidelityfx\libs\ffx_frameinterpolation_x64.lib third_party\fidelityfx\libs\ffx_opticalflow_x64.lib
 exit /b %errorlevel%
+:build_failed
+exit /b 1

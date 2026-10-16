@@ -25,6 +25,23 @@ struct MeleeHitRequest {
 };
 class NativeMelee {
 public:
+    struct DamageResultObservation {
+        std::array<unsigned char,32> raw{};
+        float computed_damage{},resource_damage{};
+        std::uint32_t modifier_mask{};
+        std::uintptr_t modifier_payload{};
+        std::uint8_t flags{};
+        bool returned_buffer{};
+    };
+    static DamageResultObservation decode_damage_result(const void* bytes,bool returned_buffer) noexcept {
+        DamageResultObservation observation{};
+        std::memcpy(observation.raw.data(),bytes,observation.raw.size());
+        std::memcpy(&observation.computed_damage,observation.raw.data(),4);
+        std::memcpy(&observation.resource_damage,observation.raw.data()+4,4);
+        std::memcpy(&observation.modifier_mask,observation.raw.data()+8,4);
+        std::memcpy(&observation.modifier_payload,observation.raw.data()+0x10,8);
+        observation.flags=observation.raw[0x18];observation.returned_buffer=returned_buffer;return observation;
+    }
     using Read=bool (*)(std::uintptr_t,void*,std::size_t);
     inline static constexpr std::uintptr_t ctor_rva=0x780260,take_rva=0x879270,hitlist_rva=0x630540,npc_vtable_rva=0x1c5e108,
         inventory_vtable_rva=0x1b9a878,melee_vtable_rva=0x1b9d508,game_rva=0x39a5290,entities_offset=0x3130b0;
@@ -44,7 +61,9 @@ public:
         return code(ctor_rva,ctor_code) && (take_hooked.load() || code(take_rva,take_code)) && code(hitlist_rva,hitlist_code) &&
             read(base+npc_vtable_rva+0x140,&slot,8) && slot==base+take_rva;
     }
-    struct Sword {std::uintptr_t player{},entity{},weapon{},decl{};std::uint32_t player_id{},sword_id{};};
+    // weapon 0: no weapon hit list (a thrown prop); amount 0: the decl's own m_maxDamage. unaware_amount > 0 replaces the amount
+    // when the engine's own stealth test (unaware() below) says the victim has not noticed the player.
+    struct Sword {std::uintptr_t player{},entity{},weapon{},decl{};std::uint32_t player_id{},sword_id{};float amount{},unaware_amount{};};
     // The right-hand item of the player's inventory (arkCpntInventory +0x68, as native_sword_equipment_ownership)
     // -> its entity -> the arkCpntWeaponMeleePlayer component -> weapon decl +0x120 (damage/player_sword).
     static std::optional<Sword> sword(std::uintptr_t base,Read read) {
@@ -91,14 +110,44 @@ public:
         const auto flags=rig::value<std::uint8_t>(read,e+0xd0);
         return rig::typed(read,base,e,swarm_agent_vtable_rva) && flags && !(*flags&1);
     }
+    // Corpse chopping (static RE 2026-10-13). Damage on a dead NPC severs limbs only through arkCpntSeverable's dead-damage
+    // listener (event 0x1a6 -> 0x763780 -> 0x75fea0(severable, params)), and the engine unsubscribes it once
+    // m_deadSeveringCooldown (decl +0x9c, counted down at cpnt +0xb0 in 0x763673) runs out; a loaded save never re-subscribes
+    // it. So a blade on a corpse calls 0x75fea0 itself with generic_fatality params: BY_RANDOM_COUNT min 1, max 2 with the
+    // default chanceOfSeveringMore 0 (decl ctor 0x780490) = exactly one limb, the severable joint nearest params +0x24 (hit point),
+    // chanceOfDestroying 0 = it drops whole. 0x75fea0 itself checks params +0x88 bit 2 (decl has sever settings) and the dead flag.
+    inline static constexpr std::uintptr_t sever_rva=0x75fea0,sever_pin_rva=0x75ff0f,severable_vtable_rva=0x1c59038,damage_decl_type_rva=0x3990b60,damage_decl_info_rva=0x1c6f1e8,find_decl_rva=0x1e030;
+    inline static constexpr std::array<unsigned char,48> sever_code{0x49,0x8b,0x97,0x98,0x00,0x00,0x00,0x48,0x89,0x54,0x24,0x68,0x41,0xf6,0x85,0x88,0x00,0x00,0x00,0x02,0x0f,0x84,0xdb,0x05,0x00,0x00,0xf6,0x83,0xd1,0x00,0x00,0x00,0x08,0x0f,0x84,0xce,0x05,0x00,0x00,0x48,0x85,0xc0,0x0f,0x84,0xc5,0x05,0x00,0x00};
+    inline static std::atomic<std::uint64_t> chops{};
+    static bool corpse(std::uintptr_t base,Read read,std::uintptr_t victim) {
+        const auto flags=rig::value<std::uint8_t>(read,victim+0xd1);
+        return rig::typed(read,base,victim,npc_vtable_rva) && flags && (*flags&8);
+    }
     // 0 = applied, 1 = rejected (not damageable / no sword), 2 = engine fault (caller should disable the feature).
-    static int apply(std::uintptr_t base,Read read,const Sword& s,const MeleeHitRequest& hit) {
+    static int apply(std::uintptr_t base,Read read,const Sword& s,const MeleeHitRequest& hit,DamageResultObservation* observation=nullptr) {
         if(hit.victim && swarm_agent(base,read,hit.victim)) return kill_swarm_agent(base,read,s,hit);
+        if(hit.victim && hit.victim!=s.player && corpse(base,read,hit.victim)) return chop(base,read,s,hit);
         if(!hit.victim || hit.victim==s.player || !damageable(base,read,hit.victim)) return 1;
         const auto victim_id=rig::value<std::uint32_t>(read,hit.victim+0xa8);if(!victim_id || *victim_id==invalid_id) return 1;
-        return invoke(base,s,hit,*victim_id);
+        if(s.unaware_amount>0) {++unaware_asked;if(unaware(base,read,hit.victim)) {++unaware_yes;Sword k=s;k.amount=s.unaware_amount;return invoke(base,k,hit,*victim_id,observation);}}
+        return invoke(base,s,hit,*victim_id,observation);
+    }
+    // isUnaware(npc) 0x5bf560, the engine's own stealth test (static RE 2026-10-14, artifacts/claude/sword-stealth-kill): the one
+    // behind the assassination rules' assassination.target.isUnaware (0x3b09b0), the choke sensor (0x3a6980), the slash ->
+    // Assassination choice (0x86b050) and the unaware damage scaling (0x719d20). True when the NPC is not hostile to the player
+    // (relation matrix game+0x1f7bb8 <= 1), or alive, conscious and his AI brain flees/begs or is not alerted to the player
+    // (knowledge kind 0 level >= 4 = aware). Pure reads; game thread, before the damage (the hit itself alerts him).
+    inline static std::atomic<unsigned> unaware_asked{},unaware_yes{}; // thrown-sword hits that asked the stealth test / were unaware
+    inline static constexpr std::uintptr_t unaware_rva=0x5bf560;
+    inline static constexpr std::array<unsigned char,32> unaware_code{0x40,0x57,0x48,0x83,0xec,0x20,0x48,0x8b,0xf9,0x48,0x8b,0x0d,0x20,0x5d,0x3e,0x03,0xe8,0x2b,0x96,0x2e,0x00,0x48,0x85,0xc0,0x74,0x26,0x48,0x8b,0x0d,0x0f,0x5d,0x3e};
+    static bool unaware(std::uintptr_t base,Read read,std::uintptr_t npc) {
+        std::array<unsigned char,32> got{};
+        return read(base+unaware_rva,got.data(),got.size()) && got==unaware_code && ask_unaware(base,npc);
     }
 private:
+    static bool ask_unaware(std::uintptr_t base,std::uintptr_t npc) {
+        __try {return reinterpret_cast<bool (__fastcall*)(std::uintptr_t)>(base+unaware_rva)(npc);} __except(EXCEPTION_EXECUTE_HANDLER) {return false;}
+    }
     template<class R> static std::vector<std::uintptr_t> components(R read,std::uintptr_t entity) {
         std::vector<std::uintptr_t> out;
         const auto l=rig::list(read,entity+0x268,4096);if(!l || !l->packed_count) return out;
@@ -131,18 +180,49 @@ private:
         } __except(EXCEPTION_EXECUTE_HANDLER) {return 2;}
         return 0;
     }
-    static int invoke(std::uintptr_t base,const Sword& s,const MeleeHitRequest& hit,std::uint32_t victim_id) {
+    static int chop(std::uintptr_t base,Read read,const Sword& s,const MeleeHitRequest& hit) {
+        using namespace rig;
+        static const bool pinned=[&]{std::array<unsigned char,48> got{};return read(base+sever_pin_rva,got.data(),got.size()) && got==sever_code;}();
+        static const std::uintptr_t decl=[&]()->std::uintptr_t {
+            if(!pinned || value<std::uintptr_t>(read,base+damage_decl_type_rva)!=base+damage_decl_info_rva) return 0;
+            __try {return reinterpret_cast<std::uintptr_t>(reinterpret_cast<void* (__fastcall*)(std::uintptr_t,const char*,bool,bool)>(base+find_decl_rva)(
+                base+damage_decl_type_rva,"components/characters/player/base/damage/generic_fatality.damage",false,false));}
+            __except(EXCEPTION_EXECUTE_HANDLER) {return 0;}
+        }();
+        if(!decl) return 1;
+        std::uintptr_t severable{};
+        for(const auto at:components(read,hit.victim)) if(typed(read,base,at,severable_vtable_rva) && value<std::uintptr_t>(read,at+0x10)==hit.victim) {severable=at;break;}
+        if(!severable) return 1;
+        const int r=sever(base,s,hit,severable,decl);if(r==0) ++chops;
+        return r;
+    }
+    static int sever(std::uintptr_t base,const Sword& s,const MeleeHitRequest& hit,std::uintptr_t severable,std::uintptr_t decl) {
+        alignas(16) unsigned char params[0x90]{};
+        using Ctor=void (__fastcall*)(void*,std::uintptr_t);
+        using Sever=void (__fastcall*)(std::uintptr_t,void*);
+        __try {
+            reinterpret_cast<Ctor>(base+ctor_rva)(params,decl);
+            std::memcpy(params+0x24,hit.point.data(),12);std::memcpy(params+0x30,hit.to_attacker.data(),12);
+            std::memcpy(params+0x3c,hit.direction.data(),12);
+            std::memcpy(params+0x50,&s.sword_id,4);std::memcpy(params+0x54,&s.player_id,4);
+            reinterpret_cast<Sever>(base+sever_rva)(severable,params);
+        } __except(EXCEPTION_EXECUTE_HANDLER) {return 2;}
+        return 0;
+    }
+    static int invoke(std::uintptr_t base,const Sword& s,const MeleeHitRequest& hit,std::uint32_t victim_id,DamageResultObservation* observation) {
         alignas(16) unsigned char params[0x90]{};alignas(16) unsigned char result[0x20]{};
         using Ctor=void (__fastcall*)(void*,std::uintptr_t);
         using Take=void* (__fastcall*)(std::uintptr_t,void*,void*);
         using HitList=void (__fastcall*)(std::uintptr_t,std::uint32_t);
         __try {
             reinterpret_cast<Ctor>(base+ctor_rva)(params,s.decl);
+            if(s.amount>0) std::memcpy(params+0x08,&s.amount,4); // = 780a80(params, amount, no clamp)
             std::memcpy(params+0x24,hit.point.data(),12);std::memcpy(params+0x30,hit.to_attacker.data(),12);
             std::memcpy(params+0x3c,hit.direction.data(),12);
             std::memcpy(params+0x50,&s.sword_id,4);std::memcpy(params+0x54,&s.player_id,4);
-            reinterpret_cast<Take>(base+take_rva)(hit.victim,result,params);
-            reinterpret_cast<HitList>(base+hitlist_rva)(s.weapon,victim_id);
+            const auto returned=reinterpret_cast<Take>(base+take_rva)(hit.victim,result,params);
+            if(observation)*observation=decode_damage_result(result,returned==result);
+            if(s.weapon) reinterpret_cast<HitList>(base+hitlist_rva)(s.weapon,victim_id);
         } __except(EXCEPTION_EXECUTE_HANDLER) {return 2;}
         return 0;
     }

@@ -10,6 +10,7 @@ struct Fixture {
     Driver driver;
     body::Skeleton b=skeleton(data::kBody),a[2]{skeleton(data::kLeftArm),skeleton(data::kRightArm)};
     std::array<Transform,20> native_body{};
+    std::array<Transform,20> output_body{};
     std::array<Transform,69> native_arm[2]{};
     std::array<float,15> body_frame{},arm_frame[2]{};
     Tracking tracking{};
@@ -40,7 +41,9 @@ struct Fixture {
     }
     Vec3 step(body::Ownership ownership={}) {
         tracking.tick+=11;tracking.source_tick=tracking.tick;tracking.seconds=tracking.tick/1000.;driver.publish(tracking,ownership);
-        expect(driver.body(native_body,body_frame).has_value(),"body production solve missing");
+        const auto body_output=driver.body(native_body,body_frame);
+        expect(body_output.has_value(),"body production solve missing");
+        if(body_output)output_body=*body_output;
         Vec3 shoulders{};
         for(unsigned side=0;side<2;++side) {
             const auto output=driver.arm_frozen(side,native_arm[side],arm_frame[side],tracking.tick);
@@ -62,6 +65,29 @@ int main() {
     Fixture control(0,ground+measured_height);control.anchor("normal ground");
     Fixture rejected(0,4.100638675689697);rejected.anchor("v223 raised eye/native ground");
     Fixture rotated(.83,4.100638675689697);rotated.anchor("rotated body and independent arm frames");
+    for(const double yaw:{0.,body::kPi*.5}) {
+        Fixture heading(yaw,ground+measured_height);
+        for(unsigned frame=0;frame<90;++frame)heading.step();
+        const Vec3 forward{std::cos(yaw),std::sin(yaw),0},left{-std::sin(yaw),std::cos(yaw),0};
+        const auto check_heading=[&] {
+            const auto diagnostic=heading.driver.diagnostic();
+            const auto flatten=[](Vec3 axis) {axis.z=0;return unit(axis);};
+            expect(dot(flatten(diagnostic.pelvis_forward),forward)>.999,"pelvis forward does not follow body yaw");
+            expect(dot(flatten(diagnostic.pelvis_left),left)>.999,"pelvis left does not follow body yaw");
+            const auto pelvis=heading.b.find("center_root_jnt");
+            const auto output_position=rig::ModelFrame(heading.body_frame).world_point(rig::position(heading.output_body[pelvis]));
+            expect(length(diagnostic.pelvis.p-output_position)<1e-5,"pelvis diagnostic position differs from rendered output");
+        };
+        check_heading();
+        const body::Ownership fixed_body{1,1,{1,1},.15,.35};
+        for(unsigned frame=0;frame<180;++frame)heading.step(fixed_body);
+        check_heading();
+        for(const double head_turn:{body::kPi*.5,-body::kPi*.5}) {
+            heading.tracking.eye.q=body::rot_z(yaw+head_turn);
+            for(unsigned frame=0;frame<30;++frame)heading.step(fixed_body);
+            check_heading();
+        }
+    }
     // A pitched eye can move anatomical shoulders about the neck; floor mismatch must
     // not introduce an additional drop at the same pitch and local tracked hand pose.
     Fixture pitch_control(0,ground+measured_height),pitch_raised(0,4.100638675689697);

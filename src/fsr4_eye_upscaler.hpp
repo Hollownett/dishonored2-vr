@@ -27,13 +27,24 @@ namespace d2vr {
 // No CPU completion waits. The bounded registry retains retiring contexts until
 // their final D3D11 consumption signal completes, including across wrapper destruction.
 class Fsr4EyeUpscaler {
+public:
+    struct Id {std::uint64_t epoch{},frame{},dispatch{};int eye{};};
+    enum class Phase {inputs_begin,inputs_ready,output_ready,output_copied,cpu_flush,ffx_gpu,ffx_dropped,cpu_record,cpu_handoff,cpu_dispatch};
+    struct Diagnostics {
+        Id id{};
+        void (*callback)(void*,const Id&,Phase,ID3D11DeviceContext*,double) noexcept{};
+        void* user{};
+    };
+private:
     template<class T> using Ptr=Microsoft::WRL::ComPtr<T>;
     struct Shared {Ptr<ID3D12Resource> dx12;Ptr<ID3D11Texture2D> dx11;Ptr<ID3D11RenderTargetView> clear_view;};
     struct Slot {
         std::array<Shared,7> textures; // colour, depth, motion, reactive, output, unity exposure, zero composition
         Ptr<ID3D12CommandAllocator> allocator;Ptr<ID3D12GraphicsCommandList> list;
+        Ptr<ID3D12QueryHeap> timestamps;Ptr<ID3D12Resource> timestamp_readback;
         std::array<Ptr<ID3D11Resource>,5> caller;UINT64 done{};
-        bool constants_initialized{},reactive_zero{};
+        bool constants_initialized{},reactive_zero{},timestamp_pending{};
+        Diagnostics diagnostics{};
     };
     struct State {
         Ptr<ID3D11Device> device11;Ptr<ID3D11Device5> device5;Ptr<ID3D11DeviceContext4> context11;
@@ -43,6 +54,8 @@ class Fsr4EyeUpscaler {
         PfnFfxCreateContext create{};PfnFfxDestroyContext destroy{};PfnFfxQuery query{};PfnFfxDispatch dispatch{};
         Fsr3EyeUpscaler::Desc desc;DXGI_FORMAT colour{},output{};bool retired{},poisoned{},reset=true;
         UINT64 submitted{};std::uint64_t version{};std::string version_name;std::wstring provider;
+        bool timing_attempted{},timing_available{};UINT64 timestamp_frequency{},gpu_samples{},gpu_latest_done{};
+        double gpu_last_ms{},gpu_total_ms{};
         // The provider DLL goes last: members would otherwise release the D3D12 device, queue and lists after FreeLibrary,
         // while the driver may still hold work or callbacks that reference provider code.
         ~State() {
@@ -104,22 +117,64 @@ class Fsr4EyeUpscaler {
         if(format==DXGI_FORMAT_R8_UNORM) hr(s.device11->CreateRenderTargetView(result.dx11.Get(),nullptr,&result.clear_view),"Create FSR4 mask clear view");
         return result;
     }
-    static bool matches(State& s,ID3D11Resource* resource,UINT w,UINT h,DXGI_FORMAT format,bool exact,bool colour_source=false) {
+    static bool matches(State& s,ID3D11Resource* resource,UINT w,UINT h,DXGI_FORMAT format,bool exact,bool rgba8_copy=false) {
         if(!resource) return false;
         Ptr<ID3D11Device> owner;resource->GetDevice(&owner);if(owner.Get()!=s.device11.Get()) return false;
         Ptr<ID3D11Texture2D> texture;if(FAILED(resource->QueryInterface(IID_PPV_ARGS(&texture)))) return false;
         D3D11_TEXTURE2D_DESC d{};texture->GetDesc(&d);
-        // A cropped colour copy reads subresource zero. Native RGBA8 SRGB and
-        // typeless storage have the same copy layout as the shared UNORM input.
-        const bool rgba8=colour_source && format==DXGI_FORMAT_R8G8B8A8_UNORM &&
+        // Shared input/output copies preserve bytes across the RGBA8 type group;
+        // an sRGB view does not introduce a gamma conversion during CopyResource.
+        const bool rgba8=rgba8_copy && format==DXGI_FORMAT_R8G8B8A8_UNORM &&
             (d.Format==DXGI_FORMAT_R8G8B8A8_TYPELESS || d.Format==DXGI_FORMAT_R8G8B8A8_UNORM_SRGB);
         return (d.Format==format || rgba8) && d.Width>=w && d.Height>=h && (!exact || (d.Width==w && d.Height==h)) &&
-            d.ArraySize==1 && (colour_source?d.MipLevels>=1:d.MipLevels==1) && d.SampleDesc.Count==1;
+            d.ArraySize==1 && ((!exact && rgba8_copy)?d.MipLevels>=1:d.MipLevels==1) && d.SampleDesc.Count==1;
     }
     static D3D12_RESOURCE_BARRIER barrier(ID3D12Resource* resource,D3D12_RESOURCE_STATES before,D3D12_RESOURCE_STATES after) {
         D3D12_RESOURCE_BARRIER b{};b.Type=D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
         b.Transition.pResource=resource;b.Transition.Subresource=D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
         b.Transition.StateBefore=before;b.Transition.StateAfter=after;return b;
+    }
+    static void prepare_timing(State& s) {
+        if(s.timing_attempted) return;
+        s.timing_attempted=true;
+        if(FAILED(s.queue->GetTimestampFrequency(&s.timestamp_frequency)) || !s.timestamp_frequency) return;
+        D3D12_QUERY_HEAP_DESC query{};query.Type=D3D12_QUERY_HEAP_TYPE_TIMESTAMP;query.Count=2;
+        D3D12_HEAP_PROPERTIES heap{};heap.Type=D3D12_HEAP_TYPE_READBACK;heap.CreationNodeMask=heap.VisibleNodeMask=1;
+        D3D12_RESOURCE_DESC buffer{};buffer.Dimension=D3D12_RESOURCE_DIMENSION_BUFFER;buffer.Width=2*sizeof(UINT64);
+        buffer.Height=buffer.DepthOrArraySize=buffer.MipLevels=1;buffer.SampleDesc.Count=1;buffer.Layout=D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        for(auto& slot:s.slots) {
+            if(FAILED(s.device12->CreateQueryHeap(&query,IID_PPV_ARGS(&slot.timestamps))) ||
+               FAILED(s.device12->CreateCommittedResource(&heap,D3D12_HEAP_FLAG_NONE,&buffer,D3D12_RESOURCE_STATE_COPY_DEST,
+                   nullptr,IID_PPV_ARGS(&slot.timestamp_readback)))) return; // Diagnostics never disable rendering.
+        }
+        s.timing_available=true;
+    }
+    static void finish_diagnostics(Slot& slot,Phase phase,ID3D11DeviceContext* context,double duration=0) noexcept {
+        const auto diagnostic=slot.diagnostics;
+        slot.timestamp_pending=false;slot.diagnostics.callback=nullptr;
+        if(diagnostic.callback) diagnostic.callback(diagnostic.user,diagnostic.id,phase,context,duration);
+    }
+    static void drop_pending_diagnostics(State& state) noexcept {
+        for(auto& slot:state.slots) if(slot.timestamp_pending) finish_diagnostics(slot,Phase::ffx_dropped,state.context11.Get());
+    }
+    static void poll_timing(State& s) {
+        if(!s.timing_attempted) return;
+        const auto completed=s.fence12->GetCompletedValue();
+        for(auto& slot:s.slots) if(slot.timestamp_pending && slot.done<=completed) {
+            slot.timestamp_pending=false;
+            D3D12_RANGE range{0,2*sizeof(UINT64)};void* mapped{};
+            if(FAILED(slot.timestamp_readback->Map(0,&range,&mapped))) {
+                s.timing_available=false;finish_diagnostics(slot,Phase::ffx_dropped,s.context11.Get());continue;
+            }
+            UINT64 ticks[2]{};std::memcpy(ticks,mapped,sizeof ticks);
+            const D3D12_RANGE written{0,0};slot.timestamp_readback->Unmap(0,&written);
+            if(ticks[1]>=ticks[0]) {
+                const double elapsed=double(ticks[1]-ticks[0])*1000.0/double(s.timestamp_frequency);
+                if(slot.done>s.gpu_latest_done) {s.gpu_last_ms=elapsed;s.gpu_latest_done=slot.done;}
+                s.gpu_total_ms+=elapsed;++s.gpu_samples;
+                finish_diagnostics(slot,Phase::ffx_gpu,s.context11.Get(),elapsed);
+            } else finish_diagnostics(slot,Phase::ffx_dropped,s.context11.Get());
+        }
     }
 public:
     using Desc=Fsr3EyeUpscaler::Desc;using Inputs=Fsr3EyeUpscaler::Inputs;
@@ -133,12 +188,17 @@ public:
     // CPU ms of the last dispatch: ffx command recording, then D3D11 copies+Flush+queue handoff.
     float record_ms() const noexcept {return record_ms_;}
     float handoff_ms() const noexcept {return handoff_ms_;}
+    // Actual FFX GPU interval, excluding the surrounding interop waits/copies/barriers.
+    void poll_gpu_timing() {if(state_) poll_timing(*state_);}
+    double compute_gpu_ms() const noexcept {return state_?state_->gpu_last_ms:0;}
+    double compute_gpu_total_ms() const noexcept {return state_?state_->gpu_total_ms:0;}
+    UINT64 compute_gpu_samples() const noexcept {return state_?state_->gpu_samples:0;}
     unsigned failure_code() const noexcept {return failure_code_;} // 1 unavailable,2 owner,3 inputs,4 busy,5 handoff/SDK.
     UINT64 submitted_gpu_value() const {return state_?state_->submitted:0;}
     UINT64 completed_gpu_value() const {return state_ && state_->fence12?state_->fence12->GetCompletedValue():0;}
     void destroy() {
         std::lock_guard<std::mutex> lock(registry_mutex());
-        if(state_) {state_->retired=true;state_.reset();}collect();
+        if(state_) {drop_pending_diagnostics(*state_);state_->retired=true;state_.reset();}collect();
     }
     static void poll_retired() {std::lock_guard<std::mutex> lock(registry_mutex());collect();}
     // Explicit formats are required for the native R11G11B10/RGBA8 paths: no
@@ -228,11 +288,15 @@ public:
             *free=s;state_=std::move(s);return true;
         } catch(const std::exception& error) {error_=error.what();return false;}
     }
-    bool dispatch(ID3D11DeviceContext* context,const Inputs& in) {
-        if(!valid()) return fail("FSR4 context is unavailable");
+    bool dispatch(ID3D11DeviceContext* context,const Inputs& in,bool timing_enabled=false,const Diagnostics* diagnostics=nullptr) {
+        const auto rejected=[&](const char* reason,unsigned code=1) {
+            if(diagnostics && diagnostics->callback) diagnostics->callback(diagnostics->user,diagnostics->id,Phase::ffx_dropped,context,0);
+            return fail(reason,code);
+        };
+        if(!valid()) return rejected("FSR4 context is unavailable");
         auto& s=*state_;
         if(context!=static_cast<ID3D11DeviceContext*>(s.context11.Get()) || context->GetType()!=D3D11_DEVICE_CONTEXT_IMMEDIATE)
-            return fail("FSR4 dispatch requires its exact immediate owner",2);
+            return rejected("FSR4 dispatch requires its exact immediate owner",2);
         const UINT rw=in.render_w?in.render_w:s.desc.render_w,rh=in.render_h?in.render_h:s.desc.render_h;
         if(!rw || !rh || rw>s.desc.render_w || rh>s.desc.render_h || !std::isfinite(in.jitter_px_x) || !std::isfinite(in.jitter_px_y) ||
             !std::isfinite(in.mv_scale_x) || !std::isfinite(in.mv_scale_y) || !std::isfinite(in.frame_time_ms) || in.frame_time_ms<=0 ||
@@ -241,14 +305,19 @@ public:
             !std::isfinite(in.pre_exposure) || !std::isfinite(in.sharpness) || in.sharpness>1 ||
             !matches(s,in.colour,rw,rh,s.colour,false,true) ||
             !matches(s,in.depth,rw,rh,DXGI_FORMAT_R32_FLOAT,false) || !matches(s,in.motion,rw,rh,DXGI_FORMAT_R16G16_FLOAT,false) ||
-            !matches(s,in.output,s.desc.display_w,s.desc.display_h,s.output,true) ||
+            !matches(s,in.output,s.desc.display_w,s.desc.display_h,s.output,true,true) ||
             (in.reactive && !matches(s,in.reactive,rw,rh,DXGI_FORMAT_R8_UNORM,false))) {
-                s.reset=true;return fail("FSR4 input dimensions/format/device/parameters differ",3);
+                s.reset=true;return rejected("FSR4 input dimensions/format/device/parameters differ",3);
             }
+        poll_timing(s);
+        if(timing_enabled) prepare_timing(s);
         Slot* chosen=nullptr;const auto completed=s.fence12->GetCompletedValue();
         for(auto& slot:s.slots) if(slot.done<=completed) {chosen=&slot;break;}
-        if(!chosen) {s.reset=true;return fail("FSR4 bounded GPU slot ring is busy",4);}
-        auto& slot=*chosen;slot.caller={};
+        if(!chosen) {s.reset=true;return rejected("FSR4 bounded GPU slot ring is busy",4);}
+        auto& slot=*chosen;slot.caller={};slot.diagnostics=diagnostics?*diagnostics:Diagnostics{};
+        const auto observe=[&](Phase phase,double duration=0) noexcept {
+            if(slot.diagnostics.callback) slot.diagnostics.callback(slot.diagnostics.user,slot.diagnostics.id,phase,context,duration);
+        };
         bool queued_work=false;const auto t_record=std::chrono::steady_clock::now();
         try {
             hr(slot.allocator->Reset(),"Reset completed FSR4 allocator");hr(slot.list->Reset(slot.allocator.Get(),nullptr),"Reset completed FSR4 list");
@@ -275,11 +344,18 @@ public:
             dispatch_desc.cameraNear=s.desc.inverted_depth?in.cam_far:in.cam_near;dispatch_desc.cameraFar=s.desc.inverted_depth?in.cam_near:in.cam_far;
             dispatch_desc.cameraFovAngleVertical=in.vfov_rad;dispatch_desc.viewSpaceToMetersFactor=1;
             if(!s.desc.hdr) dispatch_desc.flags=FFX_UPSCALE_FLAG_NON_LINEAR_COLOR_SRGB;
+            const bool timed=timing_enabled && s.timing_available;
+            if(timed) slot.list->EndQuery(slot.timestamps.Get(),D3D12_QUERY_TYPE_TIMESTAMP,0);
             api(s.dispatch(&s.context,&dispatch_desc.header),"Record actual FSR4 dispatch");
+            if(timed) {
+                slot.list->EndQuery(slot.timestamps.Get(),D3D12_QUERY_TYPE_TIMESTAMP,1);
+                slot.list->ResolveQueryData(slot.timestamps.Get(),D3D12_QUERY_TYPE_TIMESTAMP,0,2,slot.timestamp_readback.Get(),0);
+            }
             slot.list->ResourceBarrier(static_cast<UINT>(after.size()),after.data());hr(slot.list->Close(),"Close actual FSR4 dispatch");
             record_ms_=ms_since(t_record);const auto t_handoff=std::chrono::steady_clock::now();
             const std::array<ID3D11Resource*,5> inputs{in.colour,in.depth,in.motion,in.reactive,in.output};
             const D3D11_BOX box{0,0,0,rw,rh,1};
+            observe(Phase::inputs_begin);
             queued_work=true; // the first D3D11 shared-input copy starts GPU ownership
             for(unsigned i=0;i<4;++i) if(inputs[i]) {slot.caller[i]=inputs[i];context->CopySubresourceRegion(slot.textures[i].dx11.Get(),0,0,0,0,inputs[i],0,&box);}
             const float zero[4]{};
@@ -294,21 +370,36 @@ public:
             }
             slot.caller[4]=in.output;
             const UINT64 produced=s.submitted+1,upscaled=produced+1,consumed=upscaled+1;
+            observe(Phase::inputs_ready);
             hr(s.context11->Signal(s.fence11.Get(),produced),"Signal FSR4 D3D11 inputs");
             // Required submission, not a GPU wait: without this the DX12 queue
             // could wait on an unsubmitted D3D11 signal until the game's Present.
+            LARGE_INTEGER flush_start{},flush_end{},flush_frequency{};
+            if(slot.diagnostics.callback) {QueryPerformanceFrequency(&flush_frequency);QueryPerformanceCounter(&flush_start);}
             context->Flush();s.submitted=produced;
+            if(slot.diagnostics.callback) {
+                QueryPerformanceCounter(&flush_end);
+                if(flush_frequency.QuadPart>0) observe(Phase::cpu_flush,
+                    double(flush_end.QuadPart-flush_start.QuadPart)*1000.0/double(flush_frequency.QuadPart));
+            }
             hr(s.queue->Wait(s.fence12.Get(),produced),"Wait for FSR4 inputs on GPU");
             ID3D12CommandList* lists[]{slot.list.Get()};s.queue->ExecuteCommandLists(1,lists);
             s.submitted=upscaled;hr(s.queue->Signal(s.fence12.Get(),upscaled),"Signal FSR4 output on GPU");
             hr(s.context11->Wait(s.fence11.Get(),upscaled),"Wait for FSR4 output on GPU");
+            observe(Phase::output_ready);
             context->CopyResource(in.output,slot.textures[4].dx11.Get());
+            observe(Phase::output_copied);
             hr(s.context11->Signal(s.fence11.Get(),consumed),"Signal FSR4 consumption on GPU");
             handoff_ms_=ms_since(t_handoff);
+            observe(Phase::cpu_record,record_ms_);
+            observe(Phase::cpu_handoff,handoff_ms_);
+            slot.timestamp_pending=timed;
+            if(!timed) finish_diagnostics(slot,Phase::ffx_dropped,context);
             slot.done=consumed;s.submitted=consumed;s.reset=false;error_.clear();failure_code_=0;return true;
         } catch(const std::exception& error) {
             // A failed handoff may have queued GPU work without a reliable final
             // signal. Preserve this bounded registry entry until process exit.
+            finish_diagnostics(slot,Phase::ffx_dropped,context);drop_pending_diagnostics(s);
             s.retired=true;s.poisoned=queued_work;error_=error.what();failure_code_=5;return false;
         }
     }

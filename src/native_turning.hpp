@@ -50,7 +50,7 @@ class NativeTurning {
     std::ofstream log_;
     static double angle_error(double a,double b) {return std::abs(std::remainder(a-b,6.283185307179586));}
     bool ready(const NativePlayerCamera& s) const {
-        return s.mode==0 && s.target_mode==0 && !s.blend_body_yaw && !s.code_lock &&
+        return !s.authored_view() &&
             std::abs(s.look[1])<.001f && std::abs(s.physics_yaw_velocity)<.001f && std::abs(s.physics_yaw_impulse)<.001f;
     }
     // A mismatched turn (death, teleport, scripted camera) cancels only that

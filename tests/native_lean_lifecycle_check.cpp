@@ -6,6 +6,34 @@
 #include <thread>
 #include <sstream>
 using namespace d2vr;
+namespace d2vr {
+struct NativeLeanLifecycleFixture {
+    static bool invoke_fault(NativeLeanLifecycle& trace,const NativeLeanQueryEvent& event) {
+        __try {trace.queue_call(&event,[] {RaiseException(0xe1370546,EXCEPTION_NONCONTINUABLE,0,nullptr);});}
+        __except(GetExceptionCode()==0xe1370546?EXCEPTION_EXECUTE_HANDLER:EXCEPTION_CONTINUE_SEARCH) {return true;}
+        return false;
+    }
+    static void check_queue_scope() {
+        NativeLeanLifecycle trace;trace.active_=true;NativeLeanQueryEvent event{};
+        NativeLeanLifecycle::Seed outer{&trace,&event};NativeLeanLifecycle::seed_=&outer;
+        unsigned calls{};
+        const auto result=trace.queue_call(&event,[&] {
+            ++calls;assert(NativeLeanLifecycle::seed_!=&outer && NativeLeanLifecycle::seed_->event==&event);
+            const auto* nested_parent=NativeLeanLifecycle::seed_;
+            trace.queue_call(nullptr,[] {assert(!NativeLeanLifecycle::seed_);});
+            assert(NativeLeanLifecycle::seed_==nested_parent);return std::uintptr_t{0x1234};
+        });
+        assert(result==0x1234 && calls==1 && NativeLeanLifecycle::seed_==&outer);
+        bool propagated{};
+        try {trace.queue_call(&event,[&] {if(trace.active_)throw 71;});}catch(int error) {propagated=error==71;}
+        assert(propagated && NativeLeanLifecycle::seed_==&outer);
+        assert(invoke_fault(trace,event) && NativeLeanLifecycle::seed_==&outer);
+        trace.active_=false;
+        trace.queue_call(&event,[] {assert(!NativeLeanLifecycle::seed_);});
+        assert(NativeLeanLifecycle::seed_==&outer);NativeLeanLifecycle::seed_=nullptr;
+    }
+};
+}
 static constexpr std::uintptr_t fixture_base=0x140000000,fixture_game=0x200000,fixture_player=0x300000,fixture_machine=0x400000,fixture_sensor=0x500000,fixture_decl=0x600000,fixture_shape=0x700000,fixture_world=0x800000;
 static std::map<std::uintptr_t,std::byte> memory;
 static std::array<void*,9> hooks{};static std::array<unsigned,9> calls{};
@@ -74,6 +102,7 @@ static void simulate_nested_original(){
     if(nested_throw)throw 13;
 }
 int main(){
+    NativeLeanLifecycleFixture::check_queue_scope();
     auto e=fixture();NativeLeanLifecycle trace;corrupt=true;bool rejected=false;try{trace.install(fixture_base,&read,L"build/lean-lifecycle-invalid.csv");}catch(...){rejected=true;}assert(rejected);assert(trace.disable());corrupt=false;
     trace.install(fixture_base,&read,L"build/lean-lifecycle-check.csv");
     // Installed callbacks preserve arguments, original count and the native return even when unregistered.

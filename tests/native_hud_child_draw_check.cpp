@@ -10,7 +10,7 @@ alignas(8) std::array<std::byte,0x100> fixture_iggy{};
 const char fixture_path[]="ui/hud.iggy";
 unsigned originals{},before{},after{},begins{},ends{};
 float* fixture_matrix{};bool changed{},capture_enabled{};float expect_x=-1.f;
-d2vr::NativeHudChildKind last_kind{};UINT64 last_epoch{},last_tick{};std::uintptr_t last_owner{};
+d2vr::NativeHudChildKind last_kind{};UINT64 last_epoch{},last_tick{};std::uintptr_t last_owner{};bool last_talk_offer{},last_talk_glyph{};
 bool read(std::uintptr_t at,void* out,std::size_t size){SIZE_T n{};return ReadProcessMemory(GetCurrentProcess(),reinterpret_cast<void*>(at),out,size,&n) && n==size;}
 std::uint32_t __fastcall original(void* iggy,float* matrix,void* node,void* aux,void* p5,void* p6,std::uint32_t clip,float depth){
     ++originals;assert(iggy==fixture_iggy.data() && node==fixture_node.data() && aux==reinterpret_cast<void*>(1) && p5==reinterpret_cast<void*>(2) && p6==reinterpret_cast<void*>(3) && clip==123 && depth==4.5f);
@@ -58,9 +58,10 @@ int main(){
     NativeHudChildDraw::clear();NativeHudChildDraw::observer=nullptr;assert(call()==456 && originals==4 && before==3 && after==3);
     NativeHudChildDraw::begin=nullptr;NativeHudChildDraw::end=nullptr;NativeHudChildDraw::transform=nullptr;
     NativeHudChildDraw::observer=+[](const NativeHudChildScope& scope,bool entering,std::uint32_t)noexcept{
-        if(entering){last_kind=scope.kind;last_epoch=scope.epoch;last_tick=scope.tick;last_owner=scope.owner;}
+        if(entering){last_kind=scope.kind;last_epoch=scope.epoch;last_tick=scope.tick;last_owner=scope.owner;last_talk_offer=scope.talk_offer;
+            last_talk_glyph=native_hud_talk_glyph_context(NativeHudChildDraw::current);}
     };
-    const auto observed=[&]{last_kind=NativeHudChildKind::none;assert(call()==456);return last_kind;};
+    const auto observed=[&]{last_kind=NativeHudChildKind::none;last_talk_glyph=false;assert(call()==456);return last_kind;};
     const auto fresh_tick=GetTickCount64();NativeWristHud::observe_draw(iggy,fresh_tick);
     assert(NativeHudChildDraw::publish(NativeHudChildKind::prompt,geometry,90,4,fresh_tick));
     assert(NativeHudChildDraw::publish(NativeHudChildKind::health,geometry,91,4,fresh_tick));
@@ -118,17 +119,42 @@ int main(){
     NativeWristHud::observe_draw(iggy,target_tick);
     assert(NativeHudChildDraw::publish(NativeHudChildKind::prompt,geometry,99,9,target_tick-1000,target));
     assert(observed()==NativeHudChildKind::prompt && last_owner==99); // sticky root, no flat gap before refresh
-    NativeHudChildDraw::refresh_prompt(file,iggy,9,target_tick,target);
-    assert(observed()==NativeHudChildKind::prompt && last_tick>=target_tick); // exact actual node draw renews
+    NativeHudChildDraw::refresh_prompt(file,iggy,9,target_tick-1000,target,true);
+    assert(observed()==NativeHudChildKind::prompt && !last_talk_offer); // stale offer timestamp never grants the scoped glyph
+    assert(!last_talk_glyph);
+    NativeHudChildDraw::refresh_prompt(file,iggy,9,GetTickCount64(),target,true);
+    assert(observed()==NativeHudChildKind::prompt && last_talk_offer); // exact current Talk offer follows this target scope
+    assert(last_talk_glyph);
+    NativeHudChildDraw::panel_active=true;
+    assert(observed()==NativeHudChildKind::panel && last_talk_glyph);
+    NativeHudChildDraw::refresh_prompt(file,iggy,9,target_tick-1000,target,true);
+    assert(observed()==NativeHudChildKind::panel && !last_talk_glyph);
+    NativeHudChildDraw::refresh_prompt(file,iggy,9,GetTickCount64(),target,false);
+    assert(observed()==NativeHudChildKind::panel && !last_talk_glyph);
+    NativeHudChildDraw::refresh_prompt(file,iggy,9,GetTickCount64(),target,true);
+    std::memcpy(fixture_node.data()+0x80,&cycle,8);
+    assert(observed()==NativeHudChildKind::none && !last_talk_glyph);
+    std::memcpy(fixture_node.data()+0x80,&root,8);
+    NativeHudChildDraw::panel_active=false;
+    assert(observed()==NativeHudChildKind::prompt && last_talk_glyph);
+    NativeHudChildScope unrelated{};unrelated.kind=NativeHudChildKind::panel;unrelated.target=target;unrelated.talk_offer=true;
+    assert(!native_hud_talk_glyph_context(&unrelated));
+    unrelated.panel_prompt=true;unrelated.target={};
+    assert(!native_hud_talk_glyph_context(&unrelated));
+    assert(!native_hud_talk_glyph_context(nullptr));
     assert(observed()==NativeHudChildKind::prompt); // held event-driven native prompt stays usable
     auto next=target;next.object+=8;
     NativeHudChildDraw::refresh_prompt(file,iggy,9,GetTickCount64(),next);
-    assert(observed()==NativeHudChildKind::prompt); // old target retired; sticky root keeps it prompt (never flat)
+    assert(observed()==NativeHudChildKind::prompt && !last_talk_offer); // old target retired; sticky root keeps it prompt (never flat)
+    assert(!last_talk_glyph);
+    NativeHudChildDraw::panel_active=true;
+    assert(observed()==NativeHudChildKind::panel && !last_talk_glyph);
+    NativeHudChildDraw::panel_active=false;
     assert(NativeHudChildDraw::publish(NativeHudChildKind::prompt,geometry,99,9,GetTickCount64(),next));
     assert(observed()==NativeHudChildKind::prompt);
     NativeHudChildDraw::clear_kind(NativeHudChildKind::prompt);assert(observed()==NativeHudChildKind::prompt); // native Remove keeps sticky root
     assert(NativeHudChildDraw::publish(NativeHudChildKind::prompt,geometry,99,9,GetTickCount64(),next));
-    NativeHudChildDraw::refresh_prompt(file,iggy,9,GetTickCount64(),{});assert(observed()==NativeHudChildKind::prompt);
+    NativeHudChildDraw::refresh_prompt(file,iggy,9,GetTickCount64(),{},true);assert(observed()==NativeHudChildKind::prompt && !last_talk_offer);
     // Suppression: identified prompt that is not captured is never passed to the native draw.
     NativeHudChildDraw::begin=+[](const NativeHudChildScope&)noexcept{return false;};NativeHudChildDraw::end=+[](const NativeHudChildScope&)noexcept{};
     const auto before_calls=originals;call();assert(originals==before_calls);
@@ -146,7 +172,8 @@ int main(){
     NativeHudChildDraw::clear();NativeHudChildDraw::panel_active=true;
     const auto panel_tick=GetTickCount64();NativeWristHud::observe_draw(iggy,panel_tick);
     assert(NativeHudChildDraw::publish(NativeHudChildKind::prompt,geometry,99,4,panel_tick));
-    assert(observed()==NativeHudChildKind::panel && NativeHudChildDraw::panel_children.load()==1);
+    const auto prior_panel_children=NativeHudChildDraw::panel_children.load();
+    assert(observed()==NativeHudChildKind::panel && NativeHudChildDraw::panel_children.load()==prior_panel_children+1);
     {const auto before_orig=originals;NativeHudChildDraw::begin=begin;NativeHudChildDraw::end=end;
      capture_enabled=false;assert(call()==0 && originals==before_orig); // capture refused: suppressed, not flat
      capture_enabled=true;assert(call()==456 && originals==before_orig+1);

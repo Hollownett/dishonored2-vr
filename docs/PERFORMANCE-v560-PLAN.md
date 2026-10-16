@@ -1,0 +1,31 @@
+# Performance repair, 15 October 2026
+
+The reported sub-60 FPS is unresolved. The retained v551 headset trace confirms slow application delivery before video capture: 54.435 adjacent submission calls/s, median 17.333 ms, p95 24.581 ms. These values do not measure compositor/headset FPS. Output was 2496 x 2688 per eye, FSR4 Quality at 0.77; the runtime prediction period was 13.889 ms. Full evidence and reproduction: `artifacts/performance-v551-audit-20261015/timing/report.md`.
+
+## Evidence and repair already implemented
+
+- The engine gap accounts for 92.04% of the clean pre-video interval. This includes native CPU work and possible GPU/driver backpressure. Native GPU timing was disabled, so CPU versus GPU attribution is still missing.
+- Body upload callbacks repeatedly performed complete skeleton and material inventories. `invoke_arm_upload` now shares one fully validated callback-local body source with observation counters, wheel hiding and body consumption. An active full-body upload with the exact same material owner skips restoration inventory that could neither retire nor restore that owner.
+- Active materials retain their verified replacement resource and validate its character instead of searching both arm draw lists again. The model-local draw/override route, ABI, generation, native visibility, retry and restoration checks remain. A generation-adopting workaround was removed because equality already ignores state flags; recycled generations must fail.
+- The material fixture measures 1,589 reads for the previous route plus candidate search versus 756 for complete active apply (52.4% fewer). This is a reader-call reduction, not an FPS claim. The current body preparation median is under 1 ms; this repair alone cannot explain or promise recovery of the entire frame budget.
+- The body preparation timer now includes validation previously performed outside it by the observer. Compare whole hook/frame costs across versions, not that nested timer alone.
+
+## Candidate isolation and build gate
+
+v560 is based on the exact archived v551 source, with only `src/body_renderer.hpp`, `src/dxgi_probe.cpp` (the two upload functions) and `tests/body_renderer_check.cpp` changed. Pending interaction, equipment, audio and other workspace repairs are excluded. The performance-only patch and complete input/fixture hashes are under `artifacts/performance-v551-audit-20261015/`. All 500 external build fixtures were copied and hashed from the retained v551 build lane. Full strict build/check results and source provenance must pass before publication.
+
+The native mutation ABIs are unchanged: the existing owned upload at RVA 0x25efe0, SetAll at 0x2367b0, Refresh at 0x235990 and verified model vtable slots +0x58/+0xb8/+0x78. Both before/after owner and upload mapping validation remain; there is no persistent palette cache. Public API guidance was checked against Microsoft's GetData/DONOTFLUSH documentation and AMD's FidelityFX integration manual; no new native hook or FSR synchronization change is introduced.
+
+## Remaining measurement and implementation gates
+
+1. Retain the running v551 session until a user-coordinated clean restart, as required by `docs/HEADSET-REPAIR-v552-PLAN.md`. Preserve settings, saves, accepted locomotion and turning. Do not replace a loaded DLL or install the unrelated pending repairs through this candidate.
+2. After approval, verify the exact loaded v560 hash. Use the existing `build/native-gpu-timing` diagnostic for a bounded run, preserving and restoring its prior bytes. It disables independent FSR disjoint brackets to avoid nesting GPU clocks. Do not enable video, screenshots, depth dumps or extra capture during the clean timing windows.
+3. Collect stationary and ordinary movement windows in the same scene, at the same game quality, output size, AA, render fraction, mirror mode and headset refresh as v551. Warm resources first; retain at least 30 uninterrupted seconds per comparison and worst contiguous 10/30-second windows. Verify actual per-eye native viewport sizes and changing completed GPU query sequences; zero counters are missing evidence.
+4. Separate native command-list GPU durations, elapsed queue gaps, CPU submission and engine simulation from FSR4 interop. The measured right-eye FSR wrapper median 6.911 ms includes copies and D3D11/D3D12 synchronization, not just shader execution. Optimize whichever cost the matched measurements establish; do not remove required GPU fences or guess cvars. Investigate the separate 511.668 ms housekeeping spike independently of steady frame cost.
+5. Confirm the improvement against the runtime's 13.889 ms frame budget and the headset/compositor FPS/drop/reprojection view. Report median/p95/p99 and sustained windows. Final acceptance requires stable delivered headset frames, acceptable image quality and comfort, with accepted controls intact. Offline tests and submission cadence cannot pass that gate.
+
+Current status: focused material checks and the isolated full v560 strict build pass (exit 0); source remained unchanged and all 500 external fixture hashes still match. The retained DLL SHA256 is `55bd94eaa6cafed11a35e0628df1543e9e74d7b7fe729dd61dd4eb9644f2cfc2`. It remains only in the isolated validation directory: no export or launch. Exact function/file hashes, review evidence and the build log are recorded in `artifacts/performance-v551-audit-20261015/frozen-performance-handoff.json`.
+
+Coordination update: the user finished v551 testing, and the main repair chat stopped VR and archived its final run. That chat owns further shared-source integration, game control, profiling flags and the single combined build. The two performance upload functions and material/test files are frozen for its review; no further shared-source edits or independent build/launch will be made by this performance task. No settings, game input, saves, DLL injection or session restart were performed here. Performance acceptance is pending.
+
+Primary public references: [Microsoft GetData](https://learn.microsoft.com/en-us/windows/win32/api/d3d11/nf-d3d11-id3d11devicecontext-getdata), [Microsoft DONOTFLUSH](https://learn.microsoft.com/en-us/windows/win32/api/d3d11/ne-d3d11-d3d11_async_getdata_flag), [AMD FidelityFX upscaler integration](https://gpuopen.com/manuals/fidelityfx_sdk/techniques/super-resolution-upscaler/).

@@ -121,13 +121,24 @@ class NativeReader:
             self.close(handle)
 
     def module(self, pid):
-        handle = self.snapshot(8 | 16, pid)
-        if handle == c.c_void_p(-1).value: return None
-        try:
-            item = ModuleEntry(); item.size = c.sizeof(item)
-            return (item.base, Path(item.path), item.image_size) if self.mfirst(handle, c.byref(item)) else None
-        finally:
-            self.close(handle)
+        self.module_error = 0
+        for attempt in range(10):
+            handle = self.snapshot(8 | 16, pid)
+            if handle == c.c_void_p(-1).value:
+                self.module_error = c.get_last_error()
+                if self.module_error == 24 and attempt < 9:
+                    time.sleep(.01)
+                    continue
+                return None
+            try:
+                item = ModuleEntry(); item.size = c.sizeof(item)
+                if not self.mfirst(handle, c.byref(item)):
+                    self.module_error = c.get_last_error()
+                    return None
+                self.module_error = 0
+                return item.base, Path(item.path), item.image_size
+            finally:
+                self.close(handle)
 
     def values(self, pid, base):
         handle = self.open(0x10 | 0x1000, False, pid)

@@ -5,12 +5,18 @@
 #include <vector>
 
 namespace d2vr {
+struct NativeCameraState {unsigned index;std::uintptr_t vtable;bool combat;};
+inline constexpr std::array<NativeCameraState,11> native_action_camera_states{{
+    {8,0x1c82f68,false},{9,0x1c86e18,false},{13,0x1c83468,false},
+    {33,0x1c3e568,false},{38,0x1c3d878,false},{41,0x1c77c18,false},
+    {42,0x1c78d68,false},{55,0x1c3c108,false},{83,0x1c3fc08,false},
+    {39,0x1c85d28,true},{44,0x1c81a68,true}}};
 // Exact pinned-build player FSM entries, independently read by player_states.py.
 // A nearby takedown candidate is not evidence that a finisher is running.
 struct NativeActionCamera {
     bool scripted{},combat{};
-    bool owns_camera(bool native_camera_mode) const noexcept {
-        return scripted || (native_camera_mode && !combat);
+    bool owns_camera(bool native_camera_mode,bool force_native=false) const noexcept {
+        return scripted || force_native || (native_camera_mode && !combat);
     }
 };
 class NativeActionCameraReader {
@@ -39,13 +45,8 @@ public:
         const auto machine=machine_;
         const auto pool=value<std::uintptr_t>(read,machine_+0x90);
         if(!pool || !pointer(*pool)) return out;
-        struct State {unsigned index;std::uintptr_t vtable;bool combat;};
-        constexpr std::array<State,11> states{{
-            {8,0x1c82f68,false},{9,0x1c86e18,false},{13,0x1c83468,false},
-            {33,0x1c3e568,false},{38,0x1c3d878,false},{41,0x1c77c18,false},
-            {42,0x1c78d68,false},{55,0x1c3c108,false},{83,0x1c3fc08,false},
-            {39,0x1c85d28,true},{44,0x1c81a68,true}}};
-        struct Receipt {State entry;std::uintptr_t state;std::uint8_t active;};
+        constexpr auto& states=native_action_camera_states;
+        struct Receipt {NativeCameraState entry;std::uintptr_t state;std::uint8_t active;};
         std::array<Receipt,states.size()> receipts{};std::size_t receipt_count{};
         for(const auto entry:states) {
             const auto state=value<std::uintptr_t>(read,*pool+0x10+entry.index*8);

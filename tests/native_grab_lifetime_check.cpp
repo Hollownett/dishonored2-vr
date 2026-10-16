@@ -1,6 +1,7 @@
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include "../src/native_grab.hpp"
+#include "../src/vr_controls.hpp"
 #include <cassert>
 #include <map>
 #include <iostream>
@@ -68,10 +69,85 @@ struct NativeGrabCheck {
     static void setup(NativeGrab& grab) {grab.active_=true;grab.base_=fixture_base;grab.read_=read;grab.logic_=logic;grab.original_=fixture_original;grab.velocity_=fixture_velocity;}
     static void dispatch(NativeGrab& grab) {grab.invoke(reinterpret_cast<void*>(fixture_dispatcher),nullptr);}
     static void consume(NativeGrab& grab,UINT64 now) {std::lock_guard<std::mutex> lock(grab.mutex_);grab.update_lane(0,fixture_world,now);}
+    static void retained_bone(NativeGrab& grab,int bone) {std::lock_guard<std::mutex> lock(grab.mutex_);assert(grab.lanes_[0].held);grab.lanes_[0].held->bone=bone;}
 };
+}
+namespace {
+void physical_routing(unsigned side,unsigned mode,unsigned transition=0) {
+    using namespace d2vr;
+    fixture();put(fixture_dispatcher+0x18,fixture_world);fixture_transition=0;fixture_originals=fixture_writes=0;
+    const auto owner=*native_player_camera(read,fixture_base,fixture_camera);
+    WorldTrackedPose hand{{},{{{1,0,0},{0,1,0},{0,0,1}}}};
+    NativeGrab grab;NativeGrabCheck::setup(grab);GripIntent intent;
+    auto now=GetTickCount64();
+    grab.publish(side,owner,hand,0,1,now,true,false,now);grab.filter_native_grip(side,0,1,now,true,true,false);
+    intent.update(0,0,now,true);
+    const bool sword=mode==2,menu=mode==3,temple=mode==4,scabbard=mode==5,choke=mode==6;
+    Sleep(1);now=GetTickCount64();
+    const auto gesture=intent.update(.9f,.9f,now,!sword);
+    assert(gesture.fist==!sword);
+    float physical_grip=.9f,composed_grip=.9f;
+    if(temple || scabbard)physical_grip=composed_grip=0;
+    composed_grip=0;
+    const bool selected=gesture.fist || grab.holding(side);
+    const float observed=selected?(mode==1?composed_grip:physical_grip):0.f;
+    const bool reserved=sword || menu || choke;
+    grab.publish(side,owner,hand,gesture.fist?.9f:0.f,1,now,true,false,now);
+    grab.filter_native_grip(side,observed,1,now,true,true,reserved);
+    NativeGrabCheck::dispatch(grab);
+    assert(grab.holding(side)==(mode==0) && !grab.holding(1-side));
+    assert(grab.picked()==(mode==0?1u:0u) && fixture_writes==0);
+    if(mode!=0) {
+        if(observed<.35f)return;
+        Sleep(1);now=GetTickCount64();
+        grab.publish(side,owner,hand,.9f,1,now,true,false,now);
+        grab.filter_native_grip(side,.9f,1,now,true,true,false);
+        NativeGrabCheck::dispatch(grab);assert(!grab.holding(side) && grab.picked()==0 && fixture_writes==0);
+        return;
+    }
+    Sleep(11);now=GetTickCount64();hand.position.x=.04;
+    const auto holding=intent.update(.9f,0,now,true);assert(holding.fist);
+    grab.publish(side,owner,hand,.9f,1,now,true,false,now);
+    grab.filter_native_grip(side,.9f,1,now,true,true,false);
+    fixture_transition=transition;NativeGrabCheck::dispatch(grab);
+    if(transition && transition!=4) {
+        assert(!grab.holding(side) && grab.picked()==1 && grab.lost()==1 && fixture_writes==0);
+        NativeGrabCheck::dispatch(grab);assert(!grab.holding(side) && fixture_writes==0);
+        return;
+    }
+    assert(grab.holding(side) && grab.picked()==1 && fixture_writes==1 && fixture_last_velocity[0]>0);
+    Sleep(11);now=GetTickCount64();assert(!intent.update(0,0,now,true).fist);
+    grab.publish(side,owner,hand,0,1,now,true,false,now);
+    grab.filter_native_grip(side,0,1,now,true,true,false);NativeGrabCheck::dispatch(grab);
+    assert(!grab.holding(side) && grab.picked()==1 && grab.dropped()==1 && grab.lost()==0 && fixture_writes==2);
+    NativeGrabCheck::dispatch(grab);assert(fixture_writes==2);
+}
 }
 int main() {
     using namespace d2vr;
+    for(unsigned side=0;side<2;++side)for(unsigned mode=0;mode<7;++mode)physical_routing(side,mode);
+    for(unsigned side=0;side<2;++side)for(unsigned transition=1;transition<5;++transition)physical_routing(side,0,transition);
+    {
+        fixture();put(fixture_dispatcher+0x18,fixture_world);fixture_transition=0;
+        put(fixture_model+0x1840,std::array<float,8>{.08f,-.02f,-.02f,0,.12f,.02f,.02f,0});
+        put(fixture_model+0x1860,std::array<float,3>{.1f,0,0});
+        const auto owner=*native_player_camera(read,fixture_base,fixture_camera);
+        const WorldTrackedPose hand{{},{{{1,0,0},{0,1,0},{0,0,1}}}};
+        NativeGrab grab;NativeGrabCheck::setup(grab);grab.require_contact_proxies(true);const auto now=GetTickCount64();
+        grab.publish(0,owner,hand,0,1,now,true,false,now);
+        assert(!grab.focus_point(0,now));
+        HandProxies proxies{};for(auto& sphere:proxies)sphere={{-.2,0,0},.02};
+        grab.contact_proxies(0,proxies,1,now);assert(!grab.focus_point(0,now)); // Inside the old 45cm bubble, clear of the hand.
+        proxies[hand_palm_spheres+3]={{.06,0,0},.02};
+        grab.contact_proxies(0,proxies,1,now);assert(grab.focus_entity(0,now)==fixture_entity); // Fingertip alone touches.
+        grab.contact_proxies(0,proxies,2,now);assert(!grab.focus_point(0,now));
+        grab.contact_proxies(0,proxies,1,now-33);assert(!grab.focus_point(0,now));
+        grab.contact_proxies(0,proxies,1,now);
+        grab.filter_native_grip(0,0,1,now,true,true,false);
+        grab.publish(0,owner,hand,.9f,1,now,true,false,now);grab.filter_native_grip(0,.9f,1,now,true,true,false);
+        NativeGrabCheck::dispatch(grab);assert(grab.holding(0));
+        grab.clear();grab.publish(0,owner,hand,0,1,now,true,false,now);assert(!grab.focus_point(0,now));
+    }
     for(unsigned transition=0;transition<5;++transition) {
         fixture();put(fixture_dispatcher+0x18,fixture_world);fixture_transition=0;fixture_originals=fixture_writes=0;fixture_last_velocity={};
         const auto owner=*native_player_camera(read,fixture_base,fixture_camera);
@@ -84,10 +160,13 @@ int main() {
         Sleep(11);const auto move=GetTickCount64();hand.position.x=.05;
         grab.publish(0,owner,hand,.9f,1,move,true,false,move);grab.filter_native_grip(0,.9f,1,move,true,true,false);
         fixture_transition=transition;NativeGrabCheck::dispatch(grab);
-        assert(fixture_originals==2 && grab.holding(0)==(transition==0));
+        // Transition 4 changes only the component's flag word (same generation): a held prop whose flags change as it moves
+        // stays held (headset v447: the ashtray was lost 30 ms after every grab).
+        const bool kept=transition==0 || transition==4;
+        assert(fixture_originals==2 && grab.holding(0)==kept);
         // All replacements are valid native bodies; retained hold identity alone rejects them.
         const auto current=native_rigid_body(read,fixture_base,fixture_entity);assert(current);
-        if(transition) {
+        if(!kept) {
             assert(fixture_writes==0 && grab.lost()==1);
             const auto d=grab.diagnostics();assert(d && (*d)[0].role==RightGripOwner::Role::release && !(*d)[0].focus && !(*d)[0].candidates);
             Sleep(11);const auto held=GetTickCount64();
@@ -107,6 +186,27 @@ int main() {
             assert(grab.holding(0)); // a new press can acquire after the existing 100ms attempt cadence
         } else assert(fixture_writes==1 && fixture_last_velocity[0]>0);
     }
-    std::cout<<"PASS: original native dispatcher completes before retained-body validation; entity ID reuse, world/pool recreation and started-identity replacement emit no motor/throw, require release before reacquisition\n";
+    for(const int retained_bone:{-1,0,5}) {
+        fixture();put(fixture_dispatcher+0x18,fixture_world);fixture_transition=0;fixture_originals=fixture_writes=0;
+        const auto owner=*native_player_camera(read,fixture_base,fixture_camera);
+        const WorldTrackedPose hand{{},{{{1,0,0},{0,1,0},{0,0,1}}}};
+        NativeGrab grab;NativeGrabCheck::setup(grab);const auto tick=GetTickCount64();
+        grab.publish(0,owner,hand,0,1,tick,true,false,tick);grab.filter_native_grip(0,0,1,tick,true,true,false);
+        Sleep(1);const auto press=GetTickCount64();
+        grab.publish(0,owner,hand,.9f,1,press,true,false,press);grab.filter_native_grip(0,.9f,1,press,true,true,false);
+        NativeGrabCheck::dispatch(grab);assert(grab.holding(0));
+        NativeGrabCheck::retained_bone(grab,retained_bone);
+        Sleep(11);const auto failure=GetTickCount64();fixture_transition=1;
+        grab.publish(0,owner,hand,.9f,1,failure,true,false,failure);grab.filter_native_grip(0,.9f,1,failure,true,true,false);
+        NativeGrabCheck::dispatch(grab);
+        assert(!grab.holding(0) && fixture_writes==0 && grab.lost()==(retained_bone<0?1u:0u));
+        const auto diagnostics=grab.diagnostics(failure);
+        assert(diagnostics && !(*diagnostics)[0].held && !(*diagnostics)[0].pending_release &&
+            (*diagnostics)[0].role==RightGripOwner::Role::release);
+        Sleep(11);const auto held=GetTickCount64();
+        grab.publish(0,owner,hand,.9f,1,held,true,false,held);grab.filter_native_grip(0,.9f,1,held,true,true,false);
+        NativeGrabCheck::dispatch(grab);assert(!grab.holding(0) && fixture_writes==0);
+    }
+    std::cout<<"PASS: original native dispatcher completes before retained-body validation; entity ID reuse, world/pool recreation and started-identity replacement emit no motor/throw, require release before reacquisition; retained prop/limb classification survives optional reset\n";
 }
 

@@ -3,6 +3,18 @@
 #include <cassert>
 #include <iostream>
 #include <limits>
+#include <memory>
+#include <cstdlib>
+std::atomic<std::uint64_t> fixture_allocations{};
+void* operator new(std::size_t size) {
+    if(auto* memory=std::malloc(size?size:1)) {fixture_allocations.fetch_add(1,std::memory_order_relaxed);return memory;}
+    throw std::bad_alloc();
+}
+void* operator new[](std::size_t size) {return ::operator new(size);}
+void operator delete(void* memory) noexcept {std::free(memory);}
+void operator delete[](void* memory) noexcept {std::free(memory);}
+void operator delete(void* memory,std::size_t) noexcept {std::free(memory);}
+void operator delete[](void* memory,std::size_t) noexcept {std::free(memory);}
 namespace {
 alignas(16) std::array<std::byte,0x300> fixture_animation{};
 alignas(16) std::array<std::byte,64> fixture_states{};
@@ -11,9 +23,90 @@ alignas(16) std::array<d2vr::rig::Transform,69> fixture_native{};
 std::array<short,69> fixture_remap{};
 bool read(std::uintptr_t address,void* out,std::size_t size){SIZE_T n{};return ReadProcessMemory(GetCurrentProcess(),reinterpret_cast<void*>(address),out,size,&n) && n==size;}
 template<class T>void put(std::byte* address,const T& value){std::memcpy(address,&value,sizeof(value));}
+constexpr DWORD fixture_exception=0xe0421826u;
+bool faulting_read(std::uintptr_t,void*,std::size_t) {RaiseException(fixture_exception,0,0,nullptr);return false;}
+bool catch_fixture_seh(void(*call)(void*),void* context) {
+    __try {call(context);}
+    __except(GetExceptionCode()==fixture_exception?EXCEPTION_EXECUTE_HANDLER:EXCEPTION_CONTINUE_SEARCH) {return true;}
+    return false;
+}
+struct CallOwnership {
+    unsigned* destroyed;
+    explicit CallOwnership(unsigned* value):destroyed(value) {}
+    ~CallOwnership(){++*destroyed;}
+};
 }
 namespace d2vr {
 struct NativeAttachmentPoseCheck {
+    inline static unsigned native_calls{},hook_mode{};
+    struct AdmissionContext {
+        NativeAttachmentPose* pose{};std::uint64_t receipt{41};bool valid{true};unsigned acquires{},releases{},active{};
+        HANDLE entered{},resume{};
+    };
+    inline static AdmissionContext* expected_admission{};
+    inline static unsigned socket_observations{},socket_stage{};
+    inline static bool socket_substituted{},socket_returned{};
+    static void observe_socket(const NativeAttachmentSource& source,std::uintptr_t animation,short joint,unsigned stage,
+            bool substituted,bool returned,const rig::Transform* local) noexcept {
+        assert(expected_admission && !expected_admission->active);
+        assert(expected_admission->pose->mutex_.try_lock());expected_admission->pose->mutex_.unlock();
+        assert(source.diagnostic_socket_token==41 && source.diagnostic_side==1 && joint==59);
+        assert(animation==reinterpret_cast<std::uintptr_t>(fixture_animation.data()));
+        assert(source.epoch && source.reference_epoch && source.mapping_revision && source.revision);
+        assert(substituted==(local!=nullptr));if(local)assert(local->f[12]==.4f);
+        ++socket_observations;socket_stage=stage;socket_substituted=substituted;socket_returned=returned;
+    }
+    inline static bool expect_admitted{};
+    inline static float expected_joint=.4f;
+    static bool acquire(void* raw,std::uint64_t receipt) noexcept {
+        auto& context=*static_cast<AdmissionContext*>(raw);++context.acquires;
+        assert(context.pose->mutex_.try_lock());context.pose->mutex_.unlock();
+        if(!context.valid || receipt!=context.receipt)return false;
+        ++context.active;
+        if(context.entered){assert(SetEvent(context.entered));assert(WaitForSingleObject(context.resume,5000)==WAIT_OBJECT_0);}
+        return true;
+    }
+    static void release(void* raw,std::uint64_t receipt) noexcept {
+        auto& context=*static_cast<AdmissionContext*>(raw);assert(receipt==context.receipt && context.active==1);
+        assert(fixture_native[59].f[12]==(hook_mode==3?.7f:0.f));
+        assert(context.pose->mutex_.try_lock());context.pose->mutex_.unlock();
+        --context.active;++context.releases;
+    }
+    static void check_admission(){if(expected_admission)assert(expected_admission->active==(expect_admitted?1u:0u));}
+    static std::uint64_t __fastcall query_original(std::uintptr_t anim,int state,short joint,void* a,void* b,void* c,void* d) {
+        ++native_calls;assert(anim==reinterpret_cast<std::uintptr_t>(fixture_animation.data()) && state==3 && joint==59);
+        assert(a==reinterpret_cast<void*>(1) && b==reinterpret_cast<void*>(2) && c==reinterpret_cast<void*>(3) && d==reinterpret_cast<void*>(4));
+        assert(fixture_native[59].f[12]==expected_joint);check_admission();
+        if(hook_mode==3)fixture_native[59].f[12]=.7f;
+        if(hook_mode==1 || hook_mode==3)RaiseException(fixture_exception,0,0,nullptr);
+        if(hook_mode==2)throw std::runtime_error("query failure");
+        return 71;
+    }
+    static std::uint64_t __fastcall reader_original(std::uintptr_t anim,int state,short joint,void* a,void* b) {
+        ++native_calls;assert(anim==reinterpret_cast<std::uintptr_t>(fixture_animation.data()) && state==3 && joint==59);
+        assert(a==reinterpret_cast<void*>(1) && b==reinterpret_cast<void*>(2));
+        assert(fixture_native[59].f[12]==expected_joint);check_admission();
+        if(hook_mode==1)RaiseException(fixture_exception,0,0,nullptr);
+        if(hook_mode==2)throw std::runtime_error("reader failure");
+        return 73;
+    }
+    static void invoke_query(void*) {
+        assert(NativeAttachmentPose::query_hook(reinterpret_cast<std::uintptr_t>(fixture_animation.data()),3,59,
+            reinterpret_cast<void*>(1),reinterpret_cast<void*>(2),reinterpret_cast<void*>(3),reinterpret_cast<void*>(4))==71);
+    }
+    static void invoke_reader(void*) {
+        assert(NativeAttachmentPose::reader_hook(reinterpret_cast<std::uintptr_t>(fixture_animation.data()),3,59,
+            reinterpret_cast<void*>(1),reinterpret_cast<void*>(2))==73);
+    }
+    struct ConcurrentCall {void(*invoke)(void*);};
+    static DWORD WINAPI invoke_concurrent(void* raw){static_cast<ConcurrentCall*>(raw)->invoke(nullptr);return 0;}
+    struct OwnedContext {NativeAttachmentPose* pose;unsigned* destroyed;bool bypass;};
+    static void invoke_owned(void* raw) {
+        auto& context=*static_cast<OwnedContext*>(raw);
+        auto ownership=std::make_shared<CallOwnership>(context.destroyed);
+        context.pose->around(reinterpret_cast<std::uintptr_t>(fixture_animation.data()),context.bypass?0:3,59,
+            [ownership=std::move(ownership)]()->std::uint64_t {RaiseException(fixture_exception,0,0,nullptr);return 0;});
+    }
     static void run(){
         NativeAttachmentPose pose;pose.read_=read;pose.active_=true;
         const auto animation=reinterpret_cast<std::uintptr_t>(fixture_animation.data());
@@ -37,13 +130,13 @@ struct NativeAttachmentPoseCheck {
         // After the state ends, the exact return blend is admitted for both.
         for(const float native_weight:{.25f,.75f,1.f}) {
             auto blended=tracked;blended[59].f[12]=.4f*(1-native_weight);
-            policy(native_attachment_allowed_mask(3,2,true,true,true,false));
+            policy(native_attachment_allowed_mask(3,2,true,true,true));
             assert(!pose.publish(1,animation,native,blended,source));
             assert(pose.around(animation,3,59,[&]{assert(fixture_native[59].f[12]==0);return UINT64{17};})==17);
         }
         for(const float native_weight:{.75f,.25f,0.f}) {
             auto blended=tracked;blended[59].f[12]=.4f*(1-native_weight);
-            policy(native_attachment_allowed_mask(3,0,true,true,true,false));
+            policy(native_attachment_allowed_mask(3,0,true,true,true));
             assert(pose.publish(1,animation,native,blended,source));
             assert(pose.around(animation,3,59,[&]{assert(fixture_native[59].f[12]==blended[59].f[12]);return UINT64{17};})==17);
             assert(fixture_native[59].f[12]==0); // Original authored slot restored.
@@ -51,7 +144,7 @@ struct NativeAttachmentPoseCheck {
         pose.set_allowed(0,0,0); // Preserve existing initial-policy rejection case.
         assert(!publish());assert(call(false)==17); // no policy yet
         policy();assert(publish());assert(call(true)==17 && fixture_native[59].f[12]==0);
-        policy(native_attachment_allowed_mask(3,0,true,true,true,true));publish();assert(call(false)==17);
+        policy(native_attachment_allowed_mask(3,3,true,true,true));publish();assert(call(false)==17); // DropCorpse: both arms native
         policy();assert(call(false)==17); // revoked palette does not revive
         publish();assert(call(true)==17);
         ++source.epoch;policy();assert(call(false)==17);publish();assert(call(true)==17);
@@ -122,14 +215,183 @@ struct NativeAttachmentPoseCheck {
         // Concurrent native authored writes retain ownership on restoration.
         assert(pose.around(animation,3,59,[&]{fixture_native[59].f[12]=.7f;return UINT64{19};})==19);
         assert(fixture_native[59].f[12]==.7f);fixture_native[59].f[12]=0;
+        source.tick=GetTickCount64();policy();assert(publish());
+        pose.query_=&query_original;pose.reader_=&reader_original;NativeAttachmentPose::instance_=&pose;
+        hook_mode=0;
+        const auto allocations_before=fixture_allocations.load(std::memory_order_relaxed);
+        const auto calls_before=native_calls;
+        for(unsigned iteration=0;iteration<256;++iteration) {invoke_query(nullptr);invoke_reader(nullptr);}
+        assert(native_calls==calls_before+512 && fixture_allocations.load(std::memory_order_relaxed)==allocations_before);
+        assert(pose.depth_==0 && fixture_native[59].f[12]==0);
+        for(const auto invoke:{&invoke_query,&invoke_reader}) {
+            for(const auto mode:{1u,2u,0u}) {
+                hook_mode=mode;const auto before=native_calls;
+                if(mode==1)assert(catch_fixture_seh(invoke,nullptr));
+                else if(mode==2) {
+                    bool caught=false;try {invoke(nullptr);}catch(const std::runtime_error&){caught=true;}assert(caught);
+                } else invoke(nullptr);
+                assert(native_calls==before+1 && pose.depth_==0 && fixture_native[59].f[12]==0);
+                assert(pose.mutex_.try_lock());pose.mutex_.unlock();
+                assert(publish());
+            }
+        }
+        hook_mode=3;const auto before=native_calls;
+        assert(catch_fixture_seh(&invoke_query,nullptr));
+        assert(native_calls==before+1 && pose.depth_==0 && fixture_native[59].f[12]==.7f);
+        assert(pose.mutex_.try_lock());pose.mutex_.unlock();fixture_native[59].f[12]=0;
+        unsigned destroyed{};
+        for(const bool bypass:{false,true}) {
+            OwnedContext context{&pose,&destroyed,bypass};const auto previous=destroyed;
+            assert(catch_fixture_seh(&invoke_owned,&context));assert(destroyed==previous+1);
+            assert(fixture_native[59].f[12]==0);assert(pose.mutex_.try_lock());pose.mutex_.unlock();
+        }
+        {
+            OwnedContext context{&pose,&destroyed,false};const auto previous=destroyed;
+            pose.read_=&faulting_read;
+            assert(catch_fixture_seh(&invoke_owned,&context));assert(destroyed==previous+1);
+            assert(fixture_native[59].f[12]==0);assert(pose.mutex_.try_lock());pose.mutex_.unlock();
+            pose.read_=&read;
+        }
+        {
+            auto ownership=std::make_shared<CallOwnership>(&destroyed);const auto previous=destroyed;
+            bool caught=false;
+            try {pose.around(animation,3,59,[ownership=std::move(ownership)]()->std::uint64_t {throw std::runtime_error("owned callback");});}
+            catch(const std::runtime_error&){caught=true;}
+            assert(caught && destroyed==previous+1 && fixture_native[59].f[12]==0);
+            assert(pose.mutex_.try_lock());pose.mutex_.unlock();
+        }
+        AdmissionContext admission{&pose};expected_admission=&admission;
+        source.admission={&admission,admission.receipt,&acquire,&release};
+        source.diagnostic_socket_token=41;source.diagnostic_side=1;source.observe_socket=&observe_socket;
+        hook_mode=0;
+        const auto contact_policy=[&]{source.tick=GetTickCount64();policy();};
+        for(const auto invoke:{&invoke_query,&invoke_reader}) {
+            contact_policy();assert(publish());expected_joint=.4f;expect_admitted=true;
+            const auto first_acquires=admission.acquires,first_releases=admission.releases,first_native=native_calls;
+            const auto before_allocations=fixture_allocations.load(std::memory_order_relaxed);
+            invoke(nullptr);
+            assert(native_calls==first_native+1 && admission.acquires==first_acquires+1 && admission.releases==first_releases+1 && !admission.active);
+            assert(socket_observations && socket_stage==6 && socket_substituted && socket_returned);
+            assert(fixture_allocations.load(std::memory_order_relaxed)==before_allocations);
+            admission.valid=false;expected_joint=0;expect_admitted=false;
+            const auto rejected_acquires=admission.acquires,rejected_releases=admission.releases,rejected_native=native_calls;
+            invoke(nullptr);
+            assert(native_calls==rejected_native+1 && admission.acquires==rejected_acquires+1 && admission.releases==rejected_releases && !admission.active);
+            assert(socket_stage==2 && !socket_substituted && socket_returned);
+            admission.valid=true;auto stale=source;stale.admission.receipt=admission.receipt+1;assert(pose.publish(1,animation,native,tracked,stale));
+            invoke(nullptr);assert(!admission.active && admission.releases==rejected_releases);
+            contact_policy();assert(publish());
+            auto contact_moved=source.model_frame;contact_moved[0]+=.25f;put(fixture_model.data()+0x1860,contact_moved);
+            const auto before_move=admission.acquires;invoke(nullptr);assert(admission.acquires==before_move && !pose.sides_[1].animation);
+            put(fixture_model.data()+0x1860,source.model_frame);invoke(nullptr);assert(admission.acquires==before_move);
+            for(unsigned partial=1;partial<15;++partial) {
+                auto malformed=source;malformed.admission={};
+                if(partial&1)malformed.admission.context=&admission;
+                if(partial&2)malformed.admission.receipt=admission.receipt;
+                if(partial&4)malformed.admission.acquire=&acquire;
+                if(partial&8)malformed.admission.release=&release;
+                assert(!pose.publish(1,animation,native,tracked,malformed));
+                const auto before_partial=native_calls;invoke(nullptr);assert(native_calls==before_partial+1 && !admission.active);
+            }
+            expected_joint=.4f;expect_admitted=true;
+            for(const auto mode:{1u,2u,0u}) {
+                contact_policy();assert(publish());hook_mode=mode;
+                const auto before_native=native_calls,before_acquire=admission.acquires,before_release=admission.releases;
+                if(mode==1)assert(catch_fixture_seh(invoke,nullptr));
+                else if(mode==2){bool caught=false;try{invoke(nullptr);}catch(const std::runtime_error&){caught=true;}assert(caught);}
+                else invoke(nullptr);
+                assert(native_calls==before_native+1 && admission.acquires==before_acquire+1 && admission.releases==before_release+1 && !admission.active);
+                assert(socket_stage==6 && socket_substituted && socket_returned==(mode==0));
+                assert(fixture_native[59].f[12]==0 && pose.depth_==0);
+            }
+            for(const bool change_model:{false,true}) {
+                contact_policy();assert(publish());expected_joint=0;expect_admitted=true;
+                admission.entered=CreateEventW(nullptr,TRUE,FALSE,nullptr);admission.resume=CreateEventW(nullptr,TRUE,FALSE,nullptr);
+                assert(admission.entered && admission.resume);ConcurrentCall concurrent{invoke};
+                const auto before_native=native_calls,before_acquire=admission.acquires,before_release=admission.releases;
+                const auto thread=CreateThread(nullptr,0,&invoke_concurrent,&concurrent,0,nullptr);assert(thread);
+                assert(WaitForSingleObject(admission.entered,5000)==WAIT_OBJECT_0);
+                if(change_model){auto concurrent_model=source.model_frame;concurrent_model[0]+=.5f;put(fixture_model.data()+0x1860,concurrent_model);}
+                else pose.clear(1);
+                assert(SetEvent(admission.resume));assert(WaitForSingleObject(thread,5000)==WAIT_OBJECT_0);
+                assert(native_calls==before_native+1 && admission.acquires==before_acquire+1 && admission.releases==before_release+1 && !admission.active);
+                assert(socket_stage==3 && !socket_substituted && socket_returned);
+                CloseHandle(thread);CloseHandle(admission.entered);CloseHandle(admission.resume);admission.entered=admission.resume=nullptr;
+                put(fixture_model.data()+0x1860,source.model_frame);
+            }
+            expected_joint=.4f;
+        }
+        source.receipt_frame_policy=NativeAttachmentReceiptFramePolicy::current_parent;
+        for(const auto invoke:{&invoke_query,&invoke_reader}) {
+            contact_policy();assert(publish());
+            const std::array<float,15> moved_parent{10,20,30,0,1,0,-1,0,0,0,0,1,1,1,1};
+            put(fixture_model.data()+0x1860,moved_parent);
+            expected_joint=.4f;expect_admitted=true;
+            const auto before_motion_native=native_calls,before_motion_acquire=admission.acquires,before_motion_release=admission.releases;
+            invoke(nullptr);
+            assert(native_calls==before_motion_native+1 && admission.acquires==before_motion_acquire+1 && admission.releases==before_motion_release+1);
+            assert(fixture_native[59].f[12]==0 && !admission.active && pose.sides_[1].animation==animation);
+            assert(!publish());
+            put(fixture_model.data()+0x1860,source.model_frame);
+            auto malformed=source;malformed.receipt_frame_policy=static_cast<NativeAttachmentReceiptFramePolicy>(99);
+            assert(!pose.publish(1,animation,native,tracked,malformed));
+            for(unsigned partial=0;partial<15;++partial) {
+                malformed=source;malformed.admission={};
+                if(partial&1)malformed.admission.context=&admission;
+                if(partial&2)malformed.admission.receipt=admission.receipt;
+                if(partial&4)malformed.admission.acquire=&acquire;
+                if(partial&8)malformed.admission.release=&release;
+                assert(!pose.publish(1,animation,native,tracked,malformed));
+            }
+            for(unsigned rejection=0;rejection<6;++rejection) {
+                contact_policy();assert(publish());expected_joint=0;expect_admitted=rejection==2;
+                if(rejection==0)put(fixture_animation.data()+0x38,std::uintptr_t{});
+                if(rejection==1)put(fixture_animation.data()+0x18,rig::Identity{identity.generation+1,identity.flags});
+                if(rejection==2)fixture_remap[59]=58;
+                if(rejection==3)pose.set_allowed(3,source.epoch+1,source.tick,source.revision,source.reference_epoch,source.mapping_revision);
+                if(rejection==4)pose.sides_[1].source.tick=GetTickCount64()-1000;
+                if(rejection==5)admission.valid=false;
+                const auto before_reject_native=native_calls;invoke(nullptr);
+                assert(native_calls==before_reject_native+1 && !admission.active && fixture_native[59].f[12]==0);
+                put(fixture_animation.data()+0x38,model);put(fixture_animation.data()+0x18,identity);
+                fixture_remap[59]=59;admission.valid=true;
+            }
+            for(unsigned changed=0;changed<3;++changed) {
+                contact_policy();assert(publish());expected_joint=changed==0?.4f:0.f;expect_admitted=true;
+                admission.entered=CreateEventW(nullptr,TRUE,FALSE,nullptr);admission.resume=CreateEventW(nullptr,TRUE,FALSE,nullptr);
+                assert(admission.entered && admission.resume);ConcurrentCall concurrent{invoke};
+                const auto before_race_native=native_calls,before_race_acquire=admission.acquires,before_race_release=admission.releases;
+                const auto thread=CreateThread(nullptr,0,&invoke_concurrent,&concurrent,0,nullptr);assert(thread);
+                assert(WaitForSingleObject(admission.entered,5000)==WAIT_OBJECT_0);
+                if(changed==0)put(fixture_model.data()+0x1860,moved_parent);
+                if(changed==1)put(fixture_animation.data()+0x38,std::uintptr_t{});
+                if(changed==2){std::lock_guard<std::mutex> lock(pose.mutex_);pose.sides_[1].source.receipt_frame_policy=NativeAttachmentReceiptFramePolicy::exact;}
+                assert(SetEvent(admission.resume));assert(WaitForSingleObject(thread,5000)==WAIT_OBJECT_0);
+                assert(native_calls==before_race_native+1 && admission.acquires==before_race_acquire+1 && admission.releases==before_race_release+1 && !admission.active);
+                assert(socket_substituted==(changed==0) && fixture_native[59].f[12]==0);
+                CloseHandle(thread);CloseHandle(admission.entered);CloseHandle(admission.resume);admission.entered=admission.resume=nullptr;
+                put(fixture_model.data()+0x1860,source.model_frame);put(fixture_animation.data()+0x38,model);
+            }
+        }
+        expected_joint=.4f;expect_admitted=true;
+        source.receipt_frame_policy=NativeAttachmentReceiptFramePolicy::exact;
+        contact_policy();assert(publish());hook_mode=3;
+        const auto before_contact_native=native_calls,before_contact_release=admission.releases;
+        assert(catch_fixture_seh(&invoke_query,nullptr));
+        assert(native_calls==before_contact_native+1 && admission.releases==before_contact_release+1 && !admission.active && fixture_native[59].f[12]==.7f);
+        fixture_native[59].f[12]=0;hook_mode=0;
+        source.observe_socket=nullptr;contact_policy();assert(publish());const auto observed_before_disabled=socket_observations;
+        expected_joint=.4f;expect_admitted=true;invoke_query(nullptr);assert(socket_observations==observed_before_disabled);
+        expected_admission=nullptr;source.admission={};
+        NativeAttachmentPose::instance_=nullptr;
         pose.clear(1);assert(call(false)==17);
-        assert(native_attachment_allowed_mask(3,2,true,true,true,false)==1);
-        assert(native_attachment_allowed_mask(3,0,true,false,true,false)==0);
-        assert(native_attachment_allowed_mask(3,0,true,true,false,false)==0);
-        assert(native_attachment_allowed_mask(3,3,true,true,true,false)==0);
+        assert(native_attachment_allowed_mask(3,2,true,true,true)==1); // CarryCorpse: the right arm is the game's, the left stays tracked
+        assert(native_attachment_allowed_mask(3,0,true,false,true)==0);
+        assert(native_attachment_allowed_mask(3,0,true,true,false)==0);
+        assert(native_attachment_allowed_mask(3,3,true,true,true)==0);
         assert(originals>20 && pose.substitutions()>10);
 
     }
 };
 }
-int main(){d2vr::NativeAttachmentPoseCheck::run();std::cout<<"PASS: immediate carry/authored/focus revocation, blocked publication, source revision/reference/mapping/model identity and slow-frame freshness, native-once and restored attachment slot\n";}
+int main(){d2vr::NativeAttachmentPoseCheck::run();std::cout<<"PASS: immediate carry/authored/focus revocation, blocked publication, source revision/reference/mapping/model identity and slow-frame freshness, native-once and restored attachment slot, C++/SEH query/reader/callable cleanup, 512 native-hook calls with zero allocations\n";}

@@ -58,6 +58,9 @@ class PhysicalGrab {
     Vec3 velocity_{};
 public:
     bool pressed() const {return pressed_;}
+    // A squeeze the game owned at its press, handed to the physics hand mid-press (a yanked or woken body under it): the
+    // grip already held latches on the next valid sample, as if pressed fresh.
+    void arm() noexcept {armed_=true;}
     bool held() const {return held_;}
     const Vec3& velocity() const {return velocity_;}
     bool sample(const WorldTrackedPose& hand,float grip,bool usable,std::uint64_t epoch,std::uint64_t tick) {
@@ -78,8 +81,16 @@ public:
             velocity_=velocity_*(1-weight)+grab_limit(displacement*(1/dt),12)*weight;
         }
         if(grip<.35f) {armed_=true;pressed_=false;}
-        else if(armed_ && grip>.65f) pressed_=true;
+        else if(armed_ && grip>=.55f) pressed_=true;
         valid_sample_=true;tick_=tick;previous_=hand;return true;
+    }
+    // While the press waits for its owner (a native interactable's query, e.g. a corpse's carry, plus the obstruction check:
+    // ~250 ms in sim v400), keep the sample fresh without touching the press latch. Otherwise the wait outlasts the freshness
+    // window, the next sample resets, and a grip already held can never press.
+    void keep_fresh(const WorldTrackedPose& hand,std::uint64_t epoch,std::uint64_t tick) {
+        if(!valid_sample_ || epoch!=epoch_ || tick<tick_ || tick-tick_>grab_pose_freshness_ms || !grab_pose_valid(hand) ||
+           length(hand.position-previous_.position)>.5) return;
+        tick_=tick;previous_=hand;
     }
     bool bind(const WorldTrackedPose& object) {return bind(object,object.position);}
     bool bind(const WorldTrackedPose& object,Vec3 contact,double maximum_contact=.3) {
@@ -103,13 +114,16 @@ public:
         const bool accepted=sample(hand,grip,usable,epoch,tick);
         return release(throw_velocity && accepted);
     }
-    std::optional<GrabMotor> motor(const WorldTrackedPose& object,bool usable) {
+    std::optional<GrabMotor> motor(const WorldTrackedPose& object,bool usable,std::uint64_t now=0,std::uint64_t source_tick=0) {
         if(!held_) return {};
         if(!usable || !valid_sample_ || !pressed_ || !grab_pose_valid(object)) return release(usable && valid_sample_ && !pressed_);
         const auto goal=target();const auto error=goal.position-object.position;
         if(length(error)>1.5) return release(valid_sample_ && pressed_); // fast swing outran the motor: throw, do not dead-drop // Wall blockage or an ownership discontinuity.
         const auto spin=grab_rotation_error(object,goal);
-        return GrabMotor{grab_limit(error*18+velocity_,10),grab_limit(spin*12,5),false};
+        const auto source=source_tick?std::min(source_tick,tick_):tick_;
+        const auto age=now>=source?now-source:0;
+        const auto feed=now?(now>=source?velocity_*std::exp(-double(age>32?age-32:0)*.001/.035):Vec3{}):velocity_;
+        return GrabMotor{grab_limit(error*18+feed,10),grab_limit(spin*12,5),false};
     }
 };
 } // namespace d2vr

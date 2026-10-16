@@ -15,6 +15,7 @@ namespace d2vr {
 // Common base: +0x10 owner (the player), +0x20 player state machine (vtable 0x1c73d58), +0x38 enabled.
 // Choke is a native BLOCK (RB) hold; lethal and drop kills are a MELEE (RT) press [inferred].
 struct TakedownState {bool choke{},kill{},drop{};std::uint32_t spawn{}; // target spawn id (kill, else choke, else first drop candidate); 0 = none
+    std::uint32_t kill_spawn{},drop_spawn{};
     bool any() const noexcept {return choke || kill || drop;}};
 // Finds the three sensors (a component walk, done rarely); poll() then reads only their fields.
 class NativeTakedowns {
@@ -58,15 +59,17 @@ public:
         auto valid_id=[](std::optional<std::uint32_t> id) {return id && *id!=none && *id!=0xffffffffu;};
         auto enabled=[&](std::uintptr_t c) {return value<std::uint8_t>(read,c+0x38).value_or(0)!=0;};
         std::uint32_t choke_id{},kill_id{},drop_id{};
-        if(const auto c=sensor_[0]; c && enabled(c)) {out.choke=valid_id(value<std::uint32_t>(read,c+0x50));if(out.choke)choke_id=*value<std::uint32_t>(read,c+0x50);}
-        if(const auto c=sensor_[1]; c && enabled(c)) {out.kill=valid_id(value<std::uint32_t>(read,c+0x40)) && value<std::uint8_t>(read,c+0x48).value_or(1)==0;if(out.kill)kill_id=*value<std::uint32_t>(read,c+0x40);}
+        if(const auto c=sensor_[0]; c && enabled(c)) {const auto target=value<std::uint32_t>(read,c+0x50);out.choke=valid_id(target);if(out.choke)choke_id=*target;}
+        if(const auto c=sensor_[1]; c && enabled(c)) {const auto target=value<std::uint32_t>(read,c+0x40);out.kill=valid_id(target) && value<std::uint8_t>(read,c+0x48).value_or(1)==0;if(out.kill)kill_id=*target;}
         if(const auto c=sensor_[2]; c && enabled(c)) {
             const auto count=value<std::uint32_t>(read,c+0x78).value_or(0)&0xffffff;
             const auto data=value<std::uintptr_t>(read,c+0x70);
-            out.drop=count>0 && data && pointer(*data) && valid_id(value<std::uint32_t>(read,*data));
-            if(out.drop)drop_id=*value<std::uint32_t>(read,*data);
+            const auto target=count>0 && data && pointer(*data)?value<std::uint32_t>(read,*data):std::nullopt;
+            out.drop=valid_id(target);
+            if(out.drop)drop_id=*target;
         }
         out.spawn=out.kill?kill_id:out.choke?choke_id:out.drop?drop_id:0;
+        out.kill_spawn=kill_id;out.drop_spawn=drop_id;
         return out;
     }
     unsigned sensors() const noexcept {return (sensor_[0]?1u:0u)|(sensor_[1]?2u:0u)|(sensor_[2]?4u:0u);}

@@ -9,8 +9,11 @@
 #include "hand_bind.hpp"
 #include "avatar_calibration.hpp"
 #include "tracked_pose_lifetime.hpp"
+#include "drawn_palm_residual.hpp"
 #include <chrono>
+#include <cstring>
 #include <mutex>
+#include <memory>
 
 namespace d2vr::fullbody {
 using body::Xf;
@@ -111,12 +114,18 @@ struct Tracking {
     bool grip_valid[2]{};
     double grip_value[2]{},trigger[2]{};
     bool hand_empty[2]{};     // hand holds nothing: fingers curl from grip/trigger
+    std::uint64_t native_socket_token[2]{};
     bool reverse_grip[2]{};   // held item: flip the socket 180 deg about the palm normal
+    float finger_turn[2][5][3]{};bool has_finger[2]{}; // per-joint finger turns (finger_ik.hpp), see body::Inputs
+    float finger_axis[2][5][3][3]{};bool has_finger_axis[2]{}; // the hinges they turn about (finger_ik.hpp hinge_axes), see body::Inputs
     std::uint64_t tick{},native_frame{},tracking_revision{}; // tick: monotonic milliseconds
     std::uint64_t epoch{};    // reference/pose epoch: a change resets the solver
     std::uint64_t pose_epoch{},reference_epoch{},mapping_revision{};
     std::uint64_t source_tick{}; // actual XR sample; tick remains the world publication time
     double seconds{};          // solver clock (steady seconds); publish() stamps it when 0
+    unsigned tracked_hands{};
+    Xf raw_grip[2]{};
+    unsigned raw_grip_hands{};
 };
 
 enum class ArmGate {ready,no_solution,stale_revision,stale_age};
@@ -125,20 +134,102 @@ struct ArmPose {
     Tracking tracking{};
     std::uint64_t revision{},fit_revision{};
     double owned{};
+    std::optional<std::array<Transform,69>> raw_joints;
+    bool raw_hand_reached{};
+    Xf world_from_solve{};
+    bool root_mapping_valid{};
 };
 struct Diagnostic {
+    DrawnPalmSource palm_source[2]{};
+    WorldTrackedPose current_root{};bool current_root_valid{};
     Tracking tracking{};
     std::uint64_t revision{},solved_revision{},fit_revision{},callback_serial{},body_callback{},arm_callback[2]{};
     double wall_dt{},consumed_dt{},substep_dt{},output_age_seconds{};
     unsigned substeps{};bool gap_reset{},body_valid{},arm_valid[2]{};
     Frame body_frame{},arm_frame[2]{};
     Xf pelvis{},feet[2]{},palm[2]{},wrist[2]{},target_attachment[2]{},grip_to_attachment[2]{};
+    Vec3 pelvis_forward{},pelvis_left{};
     Vec3 plant[2]{},swing_from[2]{},swing_to[2]{};double phase[2]{},owned[4]{},palm_residual[2]{};
     ArmGate arm_gate[2]{ArmGate::no_solution,ArmGate::no_solution};
     double scale=1,arm_scale=1,arm_scale_side[2]{1,1},torso_scale=1,configured_palm_span{};std::optional<AvatarCalibrationResult> fit;
 };
 class Driver {
 public:
+    struct ContactArm : ArmPose {bool reached{};};
+    class PreparedContactArm {
+        friend class Driver;
+        std::shared_ptr<const body::BodySolver> model_;
+        body::BodySolver::FrozenArm frozen_;
+        ArmPose original_;
+        std::array<float,15> frame_{};
+        Frame conversion_{};
+        Xf grip_to_attachment_{};
+        Vec3 width_left_{};
+        double width_factor_{1};
+        std::array<unsigned,2> width_joints_{};
+        unsigned side_{};
+        static bool fresh(const Tracking& t,std::uint64_t now) {
+            return t.tick && t.source_tick && now>=t.tick && now>=t.source_tick && now-t.tick<=32 && now-t.source_tick<=32;
+        }
+    public:
+        const ArmPose& original() const noexcept {return original_;}
+        const std::array<float,15>& model_frame() const noexcept {return frame_;}
+        unsigned side() const noexcept {return side_;}
+        std::optional<ContactArm> solve_world_grip(const Xf& target,std::uint64_t now) const {
+            if(!model_ || !body::valid_pose(target) || !fresh(original_.tracking,now))return {};
+            bool reached{};
+            const auto attachment=body::mul(body::mul(body::inverse(original_.world_from_solve),target),grip_to_attachment_);
+            const auto joints=model_->rearm(frozen_,attachment,reached);
+            if(joints.size()!=69)return {};
+            ContactArm result;static_cast<ArmPose&>(result)=original_;result.reached=reached;
+            for(unsigned j=0;j<69;++j)result.joints[j]=to_transform(to_model(conversion_,joints[j]));
+            if(width_factor_!=1)for(const auto j:width_joints_)
+                result.joints[j]=widen_transverse(result.joints[j],rig::position(result.joints[j]),width_left_,width_factor_);
+            return result;
+        }
+    };
+    std::optional<PreparedContactArm> prepare_contact_arm(unsigned side,const ArmPose& actual,const std::array<float,15>& frame,std::uint64_t now) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if(side>1 || !have_out_ || actual.revision!=solved_revision_ || actual.fit_revision!=fit_revision_ || actual.owned!=0 ||
+           !actual.raw_joints || !actual.raw_hand_reached || !actual.root_mapping_valid || !PreparedContactArm::fresh(actual.tracking,now) ||
+           !actual.tracking.hand_empty[side] || actual.tracking.native_socket_token[side] || actual.tracking.tracking_revision!=solved_track_.tracking_revision)return {};
+        const auto frozen=solver_.freeze_arm(side,solved_inputs_,out_.arm_frame[side]);if(!frozen)return {};
+        PreparedContactArm result;result.side_=side;result.original_=actual;result.frame_=frame;
+        result.conversion_=frame_of(frame);
+        result.conversion_.rigid=body::mul(body::inverse(actual.world_from_solve),result.conversion_.rigid);
+        if(!contact_model_ || contact_model_fit_!=fit_revision_) {contact_model_=std::make_shared<const body::BodySolver>(solver_);contact_model_fit_=fit_revision_;}
+        result.model_=contact_model_;result.frozen_=*frozen;result.grip_to_attachment_=grip_to_attachment_[side];
+        const auto& b=solver_.skeleton(0);const auto chest=b.find("center_spine03_jnt");
+        const auto heading=body::mul(out_.body[chest].q,body::conj(b.bind[chest].q));
+        result.width_left_=rotated(body::conj(frame_of(frame).rigid.q),rotated(heading,{0,1,0}));
+        result.width_factor_=1+(solver_.torso_scale()-1)*(1-out_.owned[1])*(1-out_.owned[2+side]);
+        const auto& a=solver_.skeleton(1+side);
+        result.width_joints_={static_cast<unsigned>(a.find("origin")),static_cast<unsigned>(a.find(side?"right_shoulder_jnt":"left_shoulder_jnt"))};
+        return result;
+    }
+    bool contact_arm_current(const PreparedContactArm& prepared,const ArmPose& actual,const std::array<float,15>& frame,std::uint64_t now) const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        const auto& expected=prepared.original_;const auto& a=actual.tracking;const auto& b=expected.tracking;
+        try {(void)frame_of(frame);}catch(...) {return false;}
+        const auto side=prepared.side_;
+        const auto world_raw=body::mul(actual.world_from_solve,a.raw_grip[side]);
+        const auto original_raw=body::mul(expected.world_from_solve,b.raw_grip[side]);
+        const auto alignment=std::abs(world_raw.q.x*original_raw.q.x+world_raw.q.y*original_raw.q.y+world_raw.q.z*original_raw.q.z+world_raw.q.w*original_raw.q.w);
+        return prepared.model_==contact_model_ && have_out_ && have_track_ && actual.fit_revision==expected.fit_revision &&
+            actual.fit_revision==fit_revision_ && actual.root_mapping_valid && actual.owned==0 && actual.tracking.hand_empty[side] &&
+            PreparedContactArm::fresh(a,now) && PreparedContactArm::fresh(b,now) && a.tick>=b.tick && a.source_tick>=b.source_tick && a.epoch==b.epoch &&
+            a.tracking_revision>=b.tracking_revision && a.pose_epoch==b.pose_epoch && a.reference_epoch==b.reference_epoch && a.mapping_revision==b.mapping_revision &&
+            a.has_finger[side]==b.has_finger[side] && a.has_finger_axis[side]==b.has_finger_axis[side] &&
+            a.grip_value[side]==b.grip_value[side] && a.trigger[side]==b.trigger[side] &&
+            std::memcmp(a.finger_turn[side],b.finger_turn[side],sizeof(a.finger_turn[side]))==0 &&
+            std::memcmp(a.finger_axis[side],b.finger_axis[side],sizeof(a.finger_axis[side]))==0 &&
+            actual.raw_joints && actual.raw_hand_reached &&
+            body::valid_pose(world_raw) && alignment>=std::cos(.15) && length(world_raw.p-original_raw.p)<=.06 &&
+            track_.hand_empty[side] && !track_.native_socket_token[side] && own_.arm[side]==0 && track_.has_finger[side]==b.has_finger[side] && track_.has_finger_axis[side]==b.has_finger_axis[side] &&
+            std::memcmp(track_.finger_turn[side],b.finger_turn[side],sizeof(b.finger_turn[side]))==0 &&
+            std::memcmp(track_.finger_axis[side],b.finger_axis[side],sizeof(b.finger_axis[side]))==0 &&
+            track_.pose_epoch==b.pose_epoch && track_.reference_epoch==b.reference_epoch && track_.mapping_revision==b.mapping_revision;
+    }
     Driver():solver_(skeleton(data::kBody),skeleton(data::kLeftArm),skeleton(data::kRightArm),{1.7,0}) {
         // The game world is avatar-scaled: calibrate eye height to the avatar's own camera_jnt.
         const auto b=skeleton(data::kBody),l=skeleton(data::kLeftArm),r=skeleton(data::kRightArm);
@@ -214,7 +305,7 @@ public:
         track_=t;own_=own;have_track_=true;++revision_;diag_.body_valid=false;diag_.arm_valid[0]=diag_.arm_valid[1]=false;published_=std::chrono::steady_clock::now();
         if(!(track_.seconds>0)) track_.seconds=std::chrono::duration<double>(published_.time_since_epoch()).count();
     }
-    void clear() {std::lock_guard<std::mutex> lock(mutex_);have_track_=have_out_=have_native_body_=false;have_root_last_=have_root_at_publish_=have_root_solved_=false;
+    void clear() {std::lock_guard<std::mutex> lock(mutex_);contact_model_.reset();have_track_=have_out_=have_native_body_=false;have_root_last_=have_root_at_publish_=have_root_solved_=false;
         have_native_arm_[0]=have_native_arm_[1]=false;native_={};last_={};solved_track_={};diag_={};solver_.reset();}
     void clear_calibration() {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -266,7 +357,11 @@ public:
         }
         diag_.body_frame=body_frame_;diag_.body_valid=true;
         const auto& sk=solver_.skeleton(0);
-        diag_.pelvis=to_world(conv,to_xf(out[sk.find("center_root_jnt")]));
+        const auto pelvis_index=sk.find("center_root_jnt");
+        diag_.pelvis=to_world(conv,to_xf(out[pelvis_index]));
+        const auto pelvis_heading=body::mul(diag_.pelvis.q,body::conj(sk.bind[pelvis_index].q));
+        diag_.pelvis_forward=rotated(pelvis_heading,{1,0,0});
+        diag_.pelvis_left=rotated(pelvis_heading,{0,1,0});
         for(unsigned i=0;i<2;++i) diag_.feet[i]=to_world(conv,to_xf(out[sk.find(i?"right_ankle_jnt":"left_ankle_jnt")]));
         return out;
     }
@@ -295,20 +390,8 @@ public:
         if(diag_.arm_gate[side]!=ArmGate::ready || out_.arm[side].size()!=69) return {};
         // The engine places the arm model at its own (native) chest; express our world joints there.
         const auto arm_frame=frame_of(frame);
-        std::array<Transform,69> out{};
         const auto conv=anchored(side,arm_frame);
-        for(unsigned j=0;j<69;++j) out[j]=to_transform(to_model(conv,out_.arm[side][j]));
-        if(solver_.torso_scale()!=1) {
-            const auto& b=solver_.skeleton(0);const auto index=b.find("center_spine03_jnt");
-            const auto heading=body::mul(out_.body[index].q,body::conj(b.bind[index].q));
-            const auto left=rotated(body::conj(arm_frame.rigid.q),rotated(heading,{0,1,0}));
-            const double factor=1+(solver_.torso_scale()-1)*(1-out_.owned[1])*(1-out_.owned[2+side]);
-            const auto& arm=solver_.skeleton(1+side);
-            // Cuff skin follows the same chest affine; the fitted joint centres
-            // already moved in the solver. Upper arm through wrist stays rigid.
-            for(const auto j:{arm.find("origin"),arm.find(side?"right_shoulder_jnt":"left_shoulder_jnt")})
-                out[j]=widen_transverse(out[j],rig::position(out[j]),left,factor);
-        }
+        const auto out=export_arm(side,out_.arm[side],conv,arm_frame);
         diag_.arm_frame[side]=arm_frame;diag_.arm_valid[side]=true;
         const auto& sk=solver_.skeleton(1+side);const std::string prefix=side?"right":"left";
         diag_.wrist[side]=to_world(conv,to_xf(out[sk.find(prefix+"_wrist_jnt")]));
@@ -316,10 +399,34 @@ public:
         for(unsigned j=0;j<4;++j) knuckles[j]=out[sk.find(prefix+"_"+fingers[j]+"_02_jnt")];
         diag_.palm[side]=to_world(conv,to_xf(rig::hand_bind_grip(out[sk.find(prefix+"_wrist_jnt")],knuckles)));
         diag_.palm_residual[side]=length(diag_.palm[side].p-solved_track_.grip[side].p);
-        return ArmPose{out,solved_track_,solved_revision_,fit_revision_,out_.owned[2+side]};
+
+        auto& palm_source=diag_.palm_source[side];palm_source={};
+        if(have_root_solved_ && have_root_last_ && frame_key && solved_track_.grip_valid[side] &&
+           (solved_track_.tracked_hands&(1u<<side)) && out_.owned[2+side]==0) {
+            const auto world_from_solve=body::mul(root_last_,body::inverse(root_solved_));
+            const auto world_pose=[](const Xf& value) {return WorldTrackedPose{value.p,
+                {rotated(value.q,{1,0,0}),rotated(value.q,{0,1,0}),rotated(value.q,{0,0,1})}};};
+            palm_source.context={solved_track_.pose_epoch,solved_track_.reference_epoch,solved_track_.mapping_revision,
+                fit_revision_,world_pose(root_last_),true};
+            palm_source.grip=world_pose(body::mul(world_from_solve,solved_track_.grip[side]));
+            palm_source.palm=world_pose(to_world(arm_frame,to_xf(rig::hand_bind_grip(out[sk.find(prefix+"_wrist_jnt")],knuckles))));
+            palm_source.tick=solved_track_.tick;palm_source.source_tick=solved_track_.source_tick;
+            palm_source.tracking_revision=solved_track_.tracking_revision;palm_source.frame=frame_key;
+            palm_source.callback=diag_.arm_callback[side];palm_source.valid=true;
+        }
+        ArmPose posed{out,solved_track_,solved_revision_,fit_revision_,out_.owned[2+side],{},false};
+        posed.root_mapping_valid=have_root_solved_ && have_root_last_;
+        if(posed.root_mapping_valid)posed.world_from_solve=body::mul(root_last_,body::inverse(root_solved_));
+        if(out_.raw_arm[side].size()==69) {
+            posed.raw_joints=export_arm(side,out_.raw_arm[side],conv,arm_frame);
+            posed.raw_hand_reached=out_.raw_hand_reached[side];
+        }
+        return posed;
     }
     Diagnostic diagnostic() const {
         std::lock_guard<std::mutex> lock(mutex_);auto d=diag_;
+        if(have_root_last_)d.current_root={root_last_.p,{rotated(root_last_.q,{1,0,0}),rotated(root_last_.q,{0,1,0}),rotated(root_last_.q,{0,0,1})}};
+        d.current_root_valid=have_root_last_;
         d.tracking=track_;d.revision=revision_;d.solved_revision=solved_revision_;d.fit_revision=fit_revision_;d.fit=fit_;
         d.output_age_seconds=have_out_?std::chrono::duration<double>(std::chrono::steady_clock::now()-last_).count():0;
         d.scale=solver_.scale();d.arm_scale=solver_.arm_scale();
@@ -331,14 +438,28 @@ public:
     double owned(unsigned k) const {std::lock_guard<std::mutex> lock(mutex_);return k<4?out_.owned[k]:0;}
     std::uint64_t solves() const {std::lock_guard<std::mutex> lock(mutex_);return solves_;}
     std::uint64_t failures() const {std::lock_guard<std::mutex> lock(mutex_);return failures_;}
+    // Per hand, how often each way of posing the fingers ran (body::Output::finger_mode: none, contact turns, grip alone, the game's), and how often
+    // the solve was given contact turns / an empty hand: where a finger pose is lost shows here (status JSON full_body.finger_modes / finger_inputs).
+    std::array<std::array<std::uint64_t,4>,2> finger_modes() const {std::lock_guard<std::mutex> lock(mutex_);return finger_modes_;}
+    std::array<std::array<std::uint64_t,2>,2> finger_inputs() const {std::lock_guard<std::mutex> lock(mutex_);return finger_inputs_;}
+    // Degrees the last solve turned each thumb joint by (CMC, MCP, IP), per hand.
+    std::array<std::array<double,3>,2> thumb_applied() const {
+        std::lock_guard<std::mutex> lock(mutex_);std::array<std::array<double,3>,2> out{};
+        for(unsigned i=0;i<2;++i) for(unsigned j=0;j<3;++j) out[i][j]=out_.thumb_applied[i][j];
+        return out;
+    }
 
 private:
     mutable std::mutex mutex_;
     body::BodySolver solver_;
+    body::Inputs solved_inputs_{};
+    std::shared_ptr<const body::BodySolver> contact_model_;
+    std::uint64_t contact_model_fit_{};
     Xf grip_to_attachment_[2]{};double configured_palm_span_{};
     std::optional<AvatarCalibrationResult> fit_;std::optional<double> native_torso_width_;
     Tracking track_{};body::Ownership own_{};bool have_track_{};
     std::uint64_t revision_{},solved_revision_{},solves_{},failures_{};
+    std::array<std::array<std::uint64_t,4>,2> finger_modes_{};std::array<std::array<std::uint64_t,2>,2> finger_inputs_{};
     body::NativePose native_{};bool have_native_body_{},have_native_arm_[2]{};
     Frame body_frame_{};
     double back_=.08,head_scale_=.02,eye_speed_{};
@@ -383,12 +504,26 @@ private:
     Xf hand_target(unsigned side,const Xf& grip) const {
         return body::mul(grip,grip_to_attachment_[side]);
     }
+    std::array<Transform,69> export_arm(unsigned side,const std::vector<Xf>& joints,const Frame& conv,const Frame& arm_frame) const {
+        std::array<Transform,69> out{};
+        for(unsigned index=0;index<69;++index)out[index]=to_transform(to_model(conv,joints[index]));
+        if(solver_.torso_scale()!=1) {
+            const auto& skeleton=solver_.skeleton(0);const auto index=skeleton.find("center_spine03_jnt");
+            const auto heading=body::mul(out_.body[index].q,body::conj(skeleton.bind[index].q));
+            const auto left=rotated(body::conj(arm_frame.rigid.q),rotated(heading,{0,1,0}));
+            const double factor=1+(solver_.torso_scale()-1)*(1-out_.owned[1])*(1-out_.owned[2+side]);
+            const auto& arm=solver_.skeleton(1+side);
+            for(const auto joint:{arm.find("origin"),arm.find(side?"right_shoulder_jnt":"left_shoulder_jnt")})
+                out[joint]=widen_transverse(out[joint],rig::position(out[joint]),left,factor);
+        }
+        return out;
+    }
     bool solve_locked(std::uint64_t frame_key=0) {
         if(!have_track_ || !have_native_body_) return false;
         if(frame_key && frame_key==latched_key_ && have_out_) return true;
         const auto now=std::chrono::steady_clock::now();
         if(std::chrono::duration<double>(now-published_).count()>tracked_pose_freshness_seconds) {have_out_=false;return false;}
-        if(revision_==solved_revision_ && have_out_) return true; // this frame is already solved
+        if(revision_==solved_revision_ && have_out_) {if(frame_key)latched_key_=frame_key;return true;}
         const bool previous=last_.time_since_epoch().count()!=0;
         // Not tick deltas: GetTickCount64 advances in 15.6 ms quanta, so frames read dt 0 (gait,
         // chest yaw and elbow limits frozen) or a doubled step while the eye moved uniformly.
@@ -407,8 +542,12 @@ private:
         for(unsigned i=0;i<2;++i) {
             in.hand_valid[i]=track_.grip_valid[i];
             in.hand[i]=track_.grip_valid[i]?hand_target(i,track_.grip[i]):Xf{};
+            in.raw_hand_valid[i]=track_.grip_valid[i] && (track_.raw_grip_hands & track_.tracked_hands & (1u<<i))!=0 && body::valid_pose(track_.raw_grip[i]);
+            if(in.raw_hand_valid[i])in.raw_hand[i]=hand_target(i,track_.raw_grip[i]);
             in.grip[i]=track_.grip_value[i];in.trigger[i]=track_.trigger[i];
-            in.hand_empty[i]=track_.hand_empty[i];in.reverse_grip[i]=track_.reverse_grip[i];
+            in.hand_empty[i]=track_.hand_empty[i];in.native_socket_token[i]=track_.native_socket_token[i];in.reverse_grip[i]=track_.reverse_grip[i];
+            in.has_finger[i]=track_.has_finger[i];std::memcpy(in.finger_turn[i],track_.finger_turn[i],sizeof(in.finger_turn[i]));
+            in.has_finger_axis[i]=track_.has_finger_axis[i];std::memcpy(in.finger_axis[i],track_.finger_axis[i],sizeof(in.finger_axis[i]));
             in.native_arm[i]=have_native_arm_[i]?&native_.arm[i]:nullptr;
         }
         const bool arms_ready=have_native_arm_[0] && have_native_arm_[1];
@@ -425,8 +564,11 @@ private:
                     for(unsigned i=0;i<2;++i) if(solved_track_.grip_valid[i] && track_.grip_valid[i])
                         in.hand[i]=interpolate(hand_target(i,solved_track_.grip[i]),target.hand[i],t);
                 }
-                out_=solver_.solve(in);
+                if(step!=diag_.substeps)in.raw_hand_valid[0]=in.raw_hand_valid[1]=false;
+                out_=solver_.solve(in);solved_inputs_=in;
             }
+            for(unsigned i=0;i<2;++i) {++finger_modes_[i][static_cast<unsigned>(std::clamp(out_.finger_mode[i],0,3))];
+                finger_inputs_[i][0]+=target.has_finger[i]?1u:0u;finger_inputs_[i][1]+=target.hand_empty[i]?1u:0u;}
             for(unsigned i=0;i<2;++i) {diag_.plant[i]=out_.feet[i];diag_.phase[i]=out_.phase[i];
                 diag_.swing_from[i]=out_.swing_from[i];diag_.swing_to[i]=out_.swing_to[i];}
             for(unsigned i=0;i<4;++i) diag_.owned[i]=out_.owned[i];
@@ -435,4 +577,6 @@ private:
         catch(...) {++failures_;have_out_=false;return false;}
     }
 };
+using PreparedContactArm=Driver::PreparedContactArm;
+using ContactArm=Driver::ContactArm;
 } // namespace d2vr::fullbody

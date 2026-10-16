@@ -189,6 +189,17 @@ int main() {
         // The black market shows the whole image (its controls sit outside the 16:9 band).
         xr.world_ui(left.Get(),3,true);frame(false,false,true,false);
         assert(sim::summary.overlays.front().subImage.imageRect.offset.y==0 && sim::summary.overlays.front().subImage.imageRect.extent.height==64);
+        // ...held in the left hand like a note: .45 m, its bottom edge on the hand; the right-hand ray still points into it.
+        const auto shop=sim::summary.overlays.front();const auto& hand=sim::control.grips[0].position;const auto head_aim=sim::control.aims[1];
+        assert(std::abs(shop.size.width-.45f)<1e-5f && std::abs(shop.pose.position.x-hand.x)<1e-5f && std::abs(shop.pose.position.z-hand.z)<1e-5f);
+        assert(std::abs(shop.pose.position.y-(hand.y+shop.size.height*.5f))<1e-5f);
+        const auto back=d2vr::rotated({shop.pose.orientation.x,shop.pose.orientation.y,shop.pose.orientation.z,shop.pose.orientation.w},{0,0,.2});
+        sim::control.aims[1]={shop.pose.orientation,{shop.pose.position.x+static_cast<float>(back.x),shop.pose.position.y+static_cast<float>(back.y),shop.pose.position.z+static_cast<float>(back.z)}};
+        frame(false,false,true,false);
+        assert(xr.native_menu_input.active && std::abs(xr.native_menu_input.u-.5)<.01 && std::abs(xr.native_menu_input.v-.5)<.01);
+        sim::control.hands=2;frame(false,false,true,false);frame(false,false,true,false); // left hand lost: the 1 m panel ahead
+        assert(std::abs(sim::summary.overlays.front().size.width-1.f)<1e-5f && std::abs(sim::summary.overlays.front().pose.position.y-sim::control.head.position.y)<1e-5f);
+        sim::control.hands=3;sim::control.aims[1]=head_aim;
         xr.world_ui(nullptr,0);frame();++scenarios;
         // Native non-pause pages keep Y and revoke an already open panel.
         sim::control.input={};sim::control.input.active=true;frame(false,false,true,false);
@@ -278,5 +289,5 @@ int main() {
     report << "{\"simulated_vr\":true,\"bridge\":\"production GameXr\",\"device\":\"D3D11 WARP\",\"scenarios\":" << scenarios
            << ",\"xr_frames\":" << sim::summary.ends << ",\"protocol_errors\":0,\"resource_cleanup_verified\":true,\"native_game_interaction_verified\":false,\"headset_acceptance\":false}\n";
     assert(report.good());
-    std::cout << "PASS: production XR bridge simulated stereo pixels, menu ray/trigger, three focus returns, authored camera, input, settings, resize, suppressed poses, reference changes, 1000-frame soak and resource cleanup\n";
+    std::cout << "PASS: production XR bridge simulated stereo pixels, menu ray/trigger, black market held in the left hand, three focus returns, authored camera, input, settings, resize, suppressed poses, reference changes, 1000-frame soak and resource cleanup\n";
 }

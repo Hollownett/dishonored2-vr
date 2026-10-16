@@ -6,6 +6,40 @@
 
 template<class T> using Ptr=Microsoft::WRL::ComPtr<T>;
 static void check(bool ok,const std::string& reason) {if(!ok) throw std::runtime_error(reason);}
+using Fsr4=d2vr::Fsr4EyeUpscaler;
+struct Ledger {
+    static_assert(static_cast<unsigned>(Fsr4::Phase::inputs_begin)==0 && static_cast<unsigned>(Fsr4::Phase::inputs_ready)==1 &&
+        static_cast<unsigned>(Fsr4::Phase::output_ready)==2 && static_cast<unsigned>(Fsr4::Phase::output_copied)==3 &&
+        static_cast<unsigned>(Fsr4::Phase::cpu_flush)==4 && static_cast<unsigned>(Fsr4::Phase::ffx_gpu)==5 &&
+        static_cast<unsigned>(Fsr4::Phase::ffx_dropped)==6 && static_cast<unsigned>(Fsr4::Phase::cpu_record)==7 &&
+        static_cast<unsigned>(Fsr4::Phase::cpu_handoff)==8 && static_cast<unsigned>(Fsr4::Phase::cpu_dispatch)==9);
+    struct Event {Fsr4::Id id{};Fsr4::Phase phase{};ID3D11DeviceContext* context{};double duration{};};
+    std::array<Event,64> events{};std::size_t count{};bool overflow{};
+    static void observe(void* user,const Fsr4::Id& id,Fsr4::Phase phase,ID3D11DeviceContext* context,double duration) noexcept {
+        auto& ledger=*static_cast<Ledger*>(user);
+        if(ledger.count==ledger.events.size()) {ledger.overflow=true;return;}
+        ledger.events[ledger.count++]={id,phase,context,duration};
+    }
+    void expect(const Fsr4::Id& id,ID3D11DeviceContext* context,bool submitted,bool dropped) const {
+        check(!overflow,"Diagnostic ledger capacity exceeded");
+        std::array<std::size_t,10> phases{};
+        for(std::size_t event_index=0;event_index<count;++event_index) {
+            const auto& event=events[event_index];
+            check(event.id.epoch==id.epoch && event.id.frame==id.frame && event.id.dispatch==id.dispatch && event.id.eye==id.eye,
+                "Diagnostic callback must preserve the selected identity");
+            check(event.context==context,"Diagnostic callback must preserve the context");
+            check(std::isfinite(event.duration) && event.duration>=0,"Diagnostic duration must be finite and nonnegative");
+            const auto phase=static_cast<std::size_t>(event.phase);
+            check(phase<phases.size(),"Unexpected diagnostic phase");++phases[phase];
+        }
+        for(const auto phase:{Fsr4::Phase::inputs_begin,Fsr4::Phase::inputs_ready,Fsr4::Phase::output_ready,
+                Fsr4::Phase::output_copied,Fsr4::Phase::cpu_flush,Fsr4::Phase::cpu_record,Fsr4::Phase::cpu_handoff})
+            check(phases[static_cast<std::size_t>(phase)]==(submitted?1u:0u),"Submitted diagnostics require exactly four GPU markers and CPU Flush/record/handoff samples");
+        check(phases[static_cast<std::size_t>(Fsr4::Phase::cpu_dispatch)]==0,"Direct FSR4 dispatch must not fabricate the enclosing FsrTaa CPU interval");
+        check(phases[static_cast<std::size_t>(Fsr4::Phase::ffx_gpu)]==(dropped?0u:1u),"Diagnostic GPU result must occur exactly once unless explicitly dropped");
+        check(phases[static_cast<std::size_t>(Fsr4::Phase::ffx_dropped)]==(dropped?1u:0u),"Diagnostic drop must occur exactly once without a GPU result");
+    }
+};
 static Ptr<ID3D11Texture2D> texture(ID3D11Device* device,UINT w,UINT h,DXGI_FORMAT format,const void* data,UINT pitch) {
     D3D11_TEXTURE2D_DESC desc{};desc.Width=w;desc.Height=h;desc.ArraySize=desc.MipLevels=1;
     desc.Format=format;desc.SampleDesc.Count=1;desc.BindFlags=D3D11_BIND_SHADER_RESOURCE|D3D11_BIND_UNORDERED_ACCESS;
@@ -28,6 +62,7 @@ int wmain(int argc,wchar_t** argv) {
         check(SUCCEEDED(D3D11CreateDevice(nullptr,D3D_DRIVER_TYPE_HARDWARE,nullptr,0,nullptr,0,D3D11_SDK_VERSION,
             &device,nullptr,&context)),"Create standalone hardware device");
         check(SUCCEEDED(device->CreateDeferredContext(0,&deferred)),"Create rejection context");
+        Ledger completed_ledger,rejected_ledger,retired_ledger;
         d2vr::Fsr4EyeUpscaler eye;
         d2vr::Fsr4EyeUpscaler::Desc desc{};desc.render_w=512;desc.render_h=384;desc.display_w=768;desc.display_h=576;
         desc.auto_exposure=false;
@@ -49,10 +84,18 @@ int wmain(int argc,wchar_t** argv) {
         d2vr::Fsr4EyeUpscaler::Inputs in{};in.colour=c.Get();in.depth=d.Get();in.motion=m.Get();in.reactive=r.Get();in.output=output.Get();
         in.render_w=desc.render_w;in.render_h=desc.render_h;in.mv_scale_x=static_cast<float>(desc.render_w);
         in.mv_scale_y=static_cast<float>(desc.render_h);in.reset=true;
-        check(!eye.dispatch(deferred.Get(),in),"Deferred dispatch must be rejected");
+        const Fsr4::Diagnostics rejected_trace{{11,22,31,1},&Ledger::observe,&rejected_ledger};
+        check(!eye.dispatch(deferred.Get(),in,true,&rejected_trace),"Deferred dispatch must be rejected");
+        rejected_ledger.expect(rejected_trace.id,deferred.Get(),false,true);
         auto invalid=in;invalid.render_w=desc.render_w+1;check(!eye.dispatch(context.Get(),invalid),"Mismatched dimensions rejected");
-        check(eye.dispatch(context.Get(),in),eye.last_error());
+        const Fsr4::Diagnostics completed_trace{{11,22,32,1},&Ledger::observe,&completed_ledger};
+        check(eye.dispatch(context.Get(),in,true,&completed_trace),eye.last_error());
         check(eye.record_ms()>=0 && eye.handoff_ms()>=0,"FSR4 phase timings");
+        for(std::size_t event_index=0;event_index<completed_ledger.count;++event_index) {
+            const auto& event=completed_ledger.events[event_index];
+            if(event.phase==Fsr4::Phase::cpu_record)check(event.duration==eye.record_ms(),"CPU record callback must report this dispatch's existing duration");
+            if(event.phase==Fsr4::Phase::cpu_handoff)check(event.duration==eye.handoff_ms(),"CPU handoff callback must report this dispatch's existing duration");
+        }
         context->Flush(); // Standalone validation only, sends final consumption signal.
         const auto deadline=GetTickCount64()+10000;
         while(eye.completed_gpu_value()<eye.submitted_gpu_value() && GetTickCount64()<deadline) Sleep(1);
@@ -66,6 +109,10 @@ int wmain(int argc,wchar_t** argv) {
             static_cast<std::size_t>(desc.display_h/2)*mapped.RowPitch)+desc.display_w/2*4;
         const std::array<float,3> measured{half(sample[0]),half(sample[1]),half(sample[2])};context->Unmap(staging.Get(),0);
         for(unsigned i=0;i<measured.size();++i) check(std::isfinite(measured[i]) && std::abs(measured[i]-(.25f+.25f*i))<.08f,"FSR4 output must preserve constant scene colour");
+        eye.poll_gpu_timing();
+        completed_ledger.expect(completed_trace.id,context.Get(),true,false);
+        eye.poll_gpu_timing();
+        completed_ledger.expect(completed_trace.id,context.Get(),true,false);
         std::fill(reactive.begin(),reactive.end(),static_cast<unsigned char>(255));
         context->UpdateSubresource(r.Get(),0,nullptr,reactive.data(),desc.render_w,0);
         for(unsigned iteration=0;iteration<6;++iteration) {
@@ -83,9 +130,11 @@ int wmain(int argc,wchar_t** argv) {
             bool same=true;for(unsigned i=0;i<3;++i)same=same && std::isfinite(half(pixel[i])) && std::abs(half(pixel[i])-measured[i])<.02f;
             context->Unmap(staging.Get(),0);check(same,"Cached constants preserve rendered content");
         }
-        in.reset=false;check(eye.dispatch(context.Get(),in),eye.last_error());
+        const Fsr4::Diagnostics retired_trace{{11,23,33,1},&Ledger::observe,&retired_ledger};
+        in.reset=false;check(eye.dispatch(context.Get(),in,true,&retired_trace),eye.last_error());
         // Destroy with work in flight: bounded registry owns queued resources.
         const auto name=eye.version_name();const auto id=eye.version_id();eye.destroy();context->Flush();
+        retired_ledger.expect(retired_trace.id,context.Get(),true,true);
         check(!eye.valid(),"Retired context unavailable for new dispatch");d2vr::Fsr4EyeUpscaler::poll_retired();
         for(const auto format:{DXGI_FORMAT_R8G8B8A8_UNORM,DXGI_FORMAT_R11G11B10_FLOAT}) {
             auto variant=desc;variant.hdr=format!=DXGI_FORMAT_R8G8B8A8_UNORM;

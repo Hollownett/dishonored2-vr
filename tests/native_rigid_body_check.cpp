@@ -69,5 +69,42 @@ int main() {
         assert(!native_rigid_body(read,base,entity));
         put(entity+0x268,rig::List{entries,1,1<<8});
     }
-    std::cout<<"PASS: native dynamic-body registry/component/handle ownership; static/keyframed/compound/attached/recycled/native-carryable exclusion\n";
+    {   // a guard's body: 17 ragdoll bodies listed by its physics system; only a dead or unconscious guard's limbs are grabbable
+        const std::uintptr_t npc=0x9000000,list3=0x9100000,physics=0x9200000,handles=0x9300000,npc_pool=0x9400000;
+        const std::uint32_t npc_id=0x20002;
+        put(game+0x3130b0+2*8,npc);put(npc,base+0x1c5e108);put(npc+0xa8,npc_id);put(npc+0xd1,static_cast<unsigned char>(0x88));
+        put(npc+0xf0,std::uintptr_t{0x8100000});put(npc+0x268,rig::List{list3,1,1<<8});put(list3,physics);
+        put(physics,base+0x1c54008);put(physics+0x18,rig::Identity{3,10});put(physics+0x100,handles);
+        put(world+0x28,npc_pool);put(world+0x30,std::uint32_t{20});
+        for(std::uint32_t b=0;b<17;++b) {
+            const std::uint32_t h=0x1000000+b;put(handles+0x120+b*4,h);put(handles+0x28,handles+0x120);put(handles+0x30,std::uint32_t{17});const auto rec=npc_pool+b*0xb0;
+            rig::Transform bt{};bt.f[0]=bt.f[5]=bt.f[10]=bt.f[15]=1;bt.f[12]=static_cast<float>(b);
+            put(rec,bt);put(rec+0x40,std::uint32_t{5+b});put(rec+0x44,std::uint32_t{0x82});put(rec+0x70,h);put(rec+0x74,h);
+        }
+        const auto wrist=native_ragdoll_body(read,base,npc,10);
+        assert(wrist && wrist->bone==10 && wrist->handle==0x100000a && wrist->pose.position.x==10 && wrist->bounds);
+        assert(!native_ragdoll_body(read,base,npc,17));
+        {   // the list's data may be a heap array (a woken corpse, sim v429), not the inline buffer
+            const std::uintptr_t heap=0x9500000;for(std::uint32_t b=0;b<17;++b) put(heap+b*4,std::uint32_t{0x1000000+b});
+            put(handles+0x28,heap);assert(native_ragdoll_body(read,base,npc,10) && native_ragdoll_body(read,base,npc,10)->handle==0x100000a);
+            put(handles+0x30,std::uint32_t{16});assert(!native_ragdoll_body(read,base,npc,10)); // not a 17-body ragdoll list
+            put(handles+0x30,std::uint32_t{17});put(handles+0x28,handles+0x120);
+        }
+        const auto nearest=nearest_ragdoll_body(read,base,npc,{12.9,0,0});
+        assert(nearest && nearest->bone==13); // the left foot, not the torso
+        assert(nearest_ragdoll_body(read,base,npc,{1,0,0})->bone==6); // near the pelvis only a limb is offered: the torso is the native carry
+        assert(native_grab_body(read,base,*wrist) && native_grab_body(read,base,*wrist)->bone==10);
+        put(physics+0x18,rig::Identity{3,0x4a}); // flags change while pushed (still a started component)
+        {const auto pushed=native_grab_body(read,base,*wrist);assert(pushed && pushed->identity==wrist->identity);}
+        put(physics+0x18,rig::Identity{4,10}); // recycled component
+        {const auto recycled=native_grab_body(read,base,*wrist);assert(recycled && recycled->identity!=wrist->identity);}
+        put(physics+0x18,rig::Identity{3,10});
+        put(npc+0xd1,static_cast<unsigned char>(0x80));assert(native_ragdoll_body(read,base,npc,10)); // alive but ragdolling (yanked): dynamic bodies
+        put(npc_pool+10*0xb0+0x44,std::uint32_t{0xce});assert(!native_ragdoll_body(read,base,npc,10)); // alive: bodies follow the animation (keyframed)
+        put(npc_pool+10*0xb0+0x44,std::uint32_t{0x82});
+        put(npc+0xd1,static_cast<unsigned char>(0xa0));assert(native_ragdoll_body(read,base,npc,10)); // unconscious
+        put(npc_pool+10*0xb0+0x44,std::uint32_t{0x8e});assert(!native_ragdoll_body(read,base,npc,10)); // keyframed body
+        put(npc_pool+10*0xb0+0x44,std::uint32_t{0x82});put(npc,base+0x1c886a8);assert(!native_ragdoll_body(read,base,npc,10)); // not a guard
+    }
+    std::cout<<"PASS: native dynamic-body registry/component/handle ownership; static/keyframed/compound/attached/recycled/native-carryable exclusion; guard ragdoll limbs\n";
 }

@@ -195,6 +195,8 @@ struct ArmTrackingFrame {
     std::array<float,2> curls{};
     std::array<float,2> index_curls{};
     bool independent_index{};
+    std::array<std::array<float,5>,2> finger_curls{}; // per finger (thumb..pinky) after finger contact IK (finger_ik.hpp)
+    bool has_finger_curls{};
     std::uint64_t reference_epoch{};
     WorldTrackedPose head_anchor{}; // Position and level body axes, world units.
     bool has_head_anchor{};
@@ -275,6 +277,7 @@ public:
         if(frame.hands>3 || frame.empty_hands>3 || frame.native_hands>3 || (frame.hands && !frame.epoch)) throw std::invalid_argument("Invalid tracked arm publication");
         for(auto curl:frame.curls) if(!std::isfinite(curl) || curl<0 || curl>1) throw std::invalid_argument("Invalid tracked finger curl");
         for(auto curl:frame.index_curls) if(!std::isfinite(curl) || curl<0 || curl>1) throw std::invalid_argument("Invalid tracked index curl");
+        for(const auto& hand:frame.finger_curls) for(auto curl:hand) if(!std::isfinite(curl) || curl<0 || curl>1) throw std::invalid_argument("Invalid finger contact curl");
         if(frame.has_head_anchor) {
             if(!frame.reference_epoch || !finite(frame.head_anchor.position) || !std::isfinite(frame.units_per_metre) ||
                 frame.units_per_metre<=0 || frame.units_per_metre>1000) throw std::invalid_argument("Invalid calibrated head anchor");
@@ -437,10 +440,11 @@ public:
         } else {
             std::optional<FingerGrip> fist;
             if(fists) {std::lock_guard<std::mutex> lock(grip_mutex_);fist=native_grips_[side];}
+            // Finger contact IK (render thread) already holds each finger at the held object's surface.
             if(fist && fist->valid) posed.joints=apply_finger_grip(posed.joints,binding.parents,*fist,
-                {std::max(squeeze,.5f*index),index,squeeze,squeeze,squeeze});
+                frame.has_finger_curls?frame.finger_curls[side]:std::array<float,5>{std::max(squeeze,.5f*index),index,squeeze,squeeze,squeeze});
             else posed.joints=procedural_curl(posed.joints,binding.parents,binding.finger_chains,binding.palm,chain.wrist,
-                {squeeze,index,squeeze,squeeze,squeeze});
+                frame.has_finger_curls?frame.finger_curls[side]:std::array<float,5>{squeeze,index,squeeze,squeeze,squeeze});
         }
         if(render_arms) {
             // Experimental full arms: the clavicle and its

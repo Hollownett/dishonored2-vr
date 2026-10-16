@@ -23,6 +23,7 @@ public:
         "48894c240855535657415441564157488bec4883ec4048c745f0feffffff488b"};
     struct Ticket {unsigned index{};std::uint64_t serial{};std::uint32_t token{},flags{};std::uintptr_t caller{};explicit operator bool()const noexcept{return serial!=0;}};
 private:
+    friend struct NativeLeanLifecycleFixture;
     using Pair=void(__fastcall*)(std::uintptr_t,std::uintptr_t);
     using Destroy=std::uintptr_t(__fastcall*)(std::uintptr_t,std::uint64_t);
     using Shutdown=void(__fastcall*)(std::uintptr_t);
@@ -124,13 +125,11 @@ public:
         ~GameShutdownScope(){shutdown_scope_=previous;}
         GameShutdownScope(const GameShutdownScope&)=delete;GameShutdownScope& operator=(const GameShutdownScope&)=delete;
     };
-    class QueueScope {
-        Seed seed;const Seed* previous;
-    public:
-        QueueScope(NativeLeanLifecycle& s,const NativeLeanQueryEvent* e):seed{&s,e},previous(seed_){seed_=e && s.active_?&seed:nullptr;}
-        ~QueueScope(){seed_=previous;}
-        QueueScope(const QueueScope&)=delete;QueueScope& operator=(const QueueScope&)=delete;
-    };
+    template<class Invoke> auto queue_call(const NativeLeanQueryEvent* event,Invoke&& invoke)->decltype(invoke()) {
+        Seed seed{this,event};const auto* previous=seed_;seed_=event && active_?&seed:nullptr;
+        __try {return invoke();}
+        __finally {seed_=previous;}
+    }
     // Public observation methods also permit isolated synthetic ABI tests.
     bool before_publish(const NativeLeanQueryEvent& e,std::uintptr_t pool,std::uintptr_t at,std::uintptr_t caller) {
         if(!active_ || caller!=base_+0x95600 || pool!=e.state.manager+0x200)return false;

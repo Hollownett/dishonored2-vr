@@ -43,6 +43,32 @@ int main() {
         const auto q=a.update(0,dt,anchor,{.5,0,0},d45,.9,wall); // tip at x=1.136: .136 inside
         CHECK(q.blade_dir && length(q.shift)==0 && std::abs(length(*q.blade_dir)-1)<1e-9);
         const Vec3 tip=Vec3{.5,0,0}+*q.blade_dir*.9;CHECK(std::abs(tip.x-.99)<1e-9 && tip.y>0);
+        for(const bool reverse:{false,true}) {
+            const double sign=reverse?-1.:1.;
+            WorldTrackedPose pose{{.5,0,0},{{d45*sign,Vec3{-d45.y,d45.x,0}*sign,{0,0,1}}}};
+            CHECK(align_weapon_blade(pose,*q.blade_dir,reverse));
+            CHECK(length(pose.basis[0]*sign-*q.blade_dir)<1e-9);
+            CHECK(length(pose.position-Vec3{.5,0,0})==0);
+            CHECK(dot(cross(pose.basis[0],pose.basis[1]),pose.basis[2])>1-1e-9);
+            const auto settled=pose;
+            CHECK(align_weapon_blade(pose,*q.blade_dir,reverse));
+            for(unsigned i=0;i<3;++i)CHECK(length(pose.basis[i]-settled.basis[i])<1e-12);
+            CHECK(align_weapon_blade(pose,*q.blade_dir*-1.,reverse));
+            CHECK(length(pose.basis[0]*sign+*q.blade_dir)<1e-9);
+            CHECK(dot(cross(pose.basis[0],pose.basis[1]),pose.basis[2])>1-1e-9);
+            for(const auto axis:pose.basis)CHECK(std::abs(length(axis)-1)<1e-9);
+            CHECK(!align_weapon_blade(pose,{NAN,0,0},reverse));
+            CHECK(!align_weapon_blade(pose,{},reverse));
+        }
+        WeaponCollision repeated;
+        for(const bool reverse:{false,true,false,true,false}) {
+            const double sign=reverse?-1.:1.;
+            WorldTrackedPose pose{{.5,0,0},{{d45*sign,Vec3{-d45.y,d45.x,0}*sign,{0,0,1}}}};
+            const auto contact=repeated.update(1,dt,anchor,pose.position,pose.basis[0]*sign,.9,wall);
+            CHECK(contact.blade_dir && align_weapon_blade(pose,*contact.blade_dir,reverse));
+            const auto visible_tip=pose.position+pose.basis[0]*(sign*.9);
+            CHECK(std::abs(visible_tip.x-.99)<1e-9 && visible_tip.y>0);
+        }
     }
     const auto h=bisect_segment({0,0,0},{2,0,0},[](Vec3,Vec3 b){return b.x>=1;},12);
     CHECK(h&&std::abs(h->point.x-1)<1e-3&&h->normal.x<0);

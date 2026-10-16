@@ -79,6 +79,62 @@ class LiveToolsCheck(unittest.TestCase):
                 self.assertTrue((recorder.output/'final/artifacts/xr-live-status.json').exists())
                 process.return_value.close.assert_called_once()
 
+    def test_independent_timing_and_boundary_rotations_preserve_every_copy(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            status = root / 'xr-live-status.json'; status.write_text(json.dumps(dict(pid=42, tick_ms=1)))
+            identity = root / 'identity.json'; identity.write_text(json.dumps(dict(pid=42, sha256='a'*64)))
+            manifest = root / 'candidate.json'; manifest.write_text('{}')
+            candidate = Mock(identity_path=identity, manifest_path=manifest, hash='a'*64)
+            candidate.verify.return_value = dict(pid=42, sha256='a'*64)
+            timing = root / 'xr-frame-timing-previous.csv'
+            boundary = root / 'present-boundaries-previous.csv'
+            timing.write_bytes(b'present,time\n1,100\n')
+            boundary.write_bytes(b'present,boundary\n1,200\n')
+            with patch.object(live, 'Process') as process, patch.object(live, 'Candidate', return_value=candidate), patch.object(live, 'ARTIFACTS', root):
+                process.return_value.image = 'Dishonored2.exe'
+                recorder = live.Recorder(42, root/'output', 3600, 0)
+                try:
+                    recorder.preserve_rotation()
+                    first_timing = recorder.output/'timing-rotations/0001.csv'
+                    first_boundary = recorder.output/'boundary-rotations/0001.csv'
+                    self.assertEqual(first_timing.read_bytes(), timing.read_bytes())
+                    self.assertEqual(first_boundary.read_bytes(), boundary.read_bytes())
+                    recorder.preserve_rotation()
+                    self.assertEqual(len(recorder.manifest['snapshots']), 2)
+                    timing.write_bytes(b'present,time\n2,300\n3,400\n')
+                    recorder.preserve_rotation()
+                    self.assertEqual(recorder.rotations, {timing.name: 2, boundary.name: 1})
+                    self.assertEqual(first_timing.read_bytes(), b'present,time\n1,100\n')
+                    self.assertEqual(first_boundary.read_bytes(), b'present,boundary\n1,200\n')
+                    boundary.write_bytes(b'present,boundary\n4,500\n5,600\n')
+                    recorder.preserve_rotation()
+                    self.assertEqual(recorder.rotations, {timing.name: 2, boundary.name: 2})
+                    self.assertEqual((recorder.output/'boundary-rotations/0002.csv').read_bytes(), boundary.read_bytes())
+                    self.assertEqual((recorder.output/'timing-rotations/0002.csv').read_bytes(), timing.read_bytes())
+                    recorder.preserve_rotation()
+                    self.assertEqual(len(recorder.manifest['snapshots']), 4)
+                    occupied = recorder.output/'boundary-rotations/0003.csv'; occupied.write_bytes(b'preserve me')
+                    boundary.write_bytes(b'present,boundary\n6,700\n')
+                    recorder.preserve_rotation()
+                    self.assertEqual(occupied.read_bytes(), b'preserve me')
+                    self.assertEqual((recorder.output/'boundary-rotations/0004.csv').read_bytes(), boundary.read_bytes())
+                    self.assertEqual(recorder.rotations, {timing.name: 2, boundary.name: 4})
+                    timing.write_bytes(b'present,time\n7,800\n')
+                    with patch.object(live, 'MAX_ARCHIVE_BYTES', recorder.archive_bytes):
+                        recorder.preserve_rotation()
+                    self.assertFalse((recorder.output/'timing-rotations/0003.csv').exists())
+                    self.assertEqual(recorder.rotations[timing.name], 2)
+                    recorder.preserve_rotation()
+                    self.assertEqual((recorder.output/'timing-rotations/0003.csv').read_bytes(), timing.read_bytes())
+                    recorder.save_manifest()
+                    saved = json.loads((recorder.output/'manifest.json').read_text())
+                    self.assertEqual(saved['rotation_counts'], recorder.rotations)
+                    self.assertEqual(saved['capture_attempts'], 0)
+                    candidate.verify.assert_called_once()
+                finally:
+                    recorder.process.close()
+
     def test_profiler_win64_prototypes_and_resume_on_failure(self):
         self.assertEqual(profiler.k32.CreateToolhelp32Snapshot.restype, ctypes.wintypes.HANDLE)
         self.assertEqual(profiler.k32.SuspendThread.argtypes, [ctypes.wintypes.HANDLE])

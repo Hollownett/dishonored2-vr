@@ -42,5 +42,13 @@ int main() {
     pose.position.x=.02;grab.sample(pose,.9f,true,1,140);
     assert(d2vr::length(grab.release(true).linear)>0);
     assert(d2vr::length(grab.release(false).linear)==0);
+    {   // a squeeze the game took becomes physical when a yanked/woken body appears under it; a released or ready grip does not
+        d2vr::RightGripOwner o;o.filter(0,true,false);assert(o.filter(1,true,false)==1 && o.role()==d2vr::RightGripOwner::Role::native);
+        o.claim_physical();assert(o.physical() && o.filter(1,true,false)==0);
+        d2vr::RightGripOwner r;r.filter(0,true,false);r.claim_physical();assert(!r.physical()); // ready: nothing to take over
+        d2vr::PhysicalGrab g;d2vr::WorldTrackedPose hp{{0,0,0},{{{1,0,0},{0,1,0},{0,0,1}}}};
+        g.sample(hp,.9f,false,1,100);g.sample(hp,.9f,true,1,110);assert(!g.pressed()); // squeezed while the game owned it
+        g.arm();g.sample(hp,.9f,true,1,120);assert(g.pressed() && g.bind(hp)); // handed over mid-press: latches and binds
+    }
     std::cout<<"PASS: pre-RB reservation, latched native/physical choice, contact change, menus/focus, occupied-hand revoke, fresh release and native pad mapping\n";
 }

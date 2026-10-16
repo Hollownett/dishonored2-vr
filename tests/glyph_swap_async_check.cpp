@@ -19,7 +19,9 @@ struct Mock {
 };
 std::vector<std::unique_ptr<Mock>> objects;
 unsigned copies{},maps{},unmaps{},busy{},creates{};HRESULT map_error=S_OK;bool reenter{};
+bool talk_scope{};
 Mock* reenter_view{};
+bool talk_context() noexcept {return talk_scope;}
 Mock* make(unsigned kind) {objects.push_back(std::make_unique<Mock>(kind));return objects.back().get();}
 ULONG STDMETHODCALLTYPE add(Mock* p) {return ++p->refs;}
 ULONG STDMETHODCALLTYPE release(Mock* p) {assert(p->refs);const auto refs=--p->refs;if(!refs && p->resource)release(p->resource);return refs;}
@@ -85,6 +87,7 @@ Mock* view(Mock* device,const d2vr::GlyphTexture& glyph,const std::vector<std::u
 }
 int main() {
     using namespace d2vr;
+    GlyphSwap::talk_prompt_context=talk_context;
     const auto& glyph=kXboxGlyphs[0];std::ifstream file(std::filesystem::path(__FILE__).parent_path().parent_path()/
         "artifacts/research/glyphs/extracted/ui_lib_controller_buttons.raw.iggytex",std::ios::binary);
     assert(file);file.seekg(glyph.offset);std::vector<std::uint8_t> native(glyph.bytes);file.read(reinterpret_cast<char*>(native.data()),native.size());assert(file && find_xbox_glyph(glyph.width,glyph.height,native.data(),native.size())==&glyph);
@@ -100,12 +103,27 @@ int main() {
     assert(GlyphSwap::checked==1 && GlyphSwap::identified==1 && GlyphSwap::completed==1 && GlyphSwap::pending_readbacks==0);
     std::vector<std::uint8_t> rgba(static_cast<std::size_t>(glyph.width)*glyph.height*4);paint_quest_glyphs(rgba.data(),glyph.width,glyph.height,glyph.label);
     auto* painted=reinterpret_cast<Mock*>(replacement.Get())->resource;assert(painted->blocks==encode_bc7_mode6(rgba.data(),glyph.width,glyph.height));
+    const auto& x_glyph=kXboxGlyphs[1];file.clear();file.seekg(x_glyph.offset);std::vector<std::uint8_t> x_native(x_glyph.bytes);
+    file.read(reinterpret_cast<char*>(x_native.data()),x_native.size());assert(file && find_xbox_glyph(x_glyph.width,x_glyph.height,x_native.data(),x_native.size())==&x_glyph);
+    auto* x_view=view(device,x_glyph,x_native);assert(!GlyphSwapAsyncCheck::lookup(x_view));GlyphSwapAsyncCheck::process(context);GlyphSwapAsyncCheck::process(context);
+    const auto grip=GlyphSwapAsyncCheck::lookup(x_view);assert(grip);
+    rgba.assign(static_cast<std::size_t>(x_glyph.width)*x_glyph.height*4,0);paint_quest_glyphs(rgba.data(),x_glyph.width,x_glyph.height,"Grip");
+    assert(reinterpret_cast<Mock*>(grip.Get())->resource->blocks==encode_bc7_mode6(rgba.data(),x_glyph.width,x_glyph.height));
+    talk_scope=true;const auto talk=GlyphSwapAsyncCheck::lookup(x_view);assert(talk && talk.Get()!=grip.Get());
+    rgba.assign(static_cast<std::size_t>(x_glyph.width)*x_glyph.height*4,0);paint_quest_glyphs(rgba.data(),x_glyph.width,x_glyph.height,"Y");
+    assert(reinterpret_cast<Mock*>(talk.Get())->resource->blocks==encode_bc7_mode6(rgba.data(),x_glyph.width,x_glyph.height));
+    GlyphSwap::wheel_open=true;const auto wheel=GlyphSwapAsyncCheck::lookup(x_view);assert(wheel && wheel.Get()!=talk.Get());
+    rgba.assign(static_cast<std::size_t>(x_glyph.width)*x_glyph.height*4,0);paint_quest_glyphs(rgba.data(),x_glyph.width,x_glyph.height,"A");
+    assert(reinterpret_cast<Mock*>(wheel.Get())->resource->blocks==encode_bc7_mode6(rgba.data(),x_glyph.width,x_glyph.height));
+    GlyphSwap::native_labels=true;assert(!GlyphSwapAsyncCheck::lookup(x_view));GlyphSwap::native_labels=false;
+    GlyphSwap::wheel_open=false;talk_scope=false;assert(GlyphSwapAsyncCheck::lookup(x_view).Get()==grip.Get());
+    GlyphSwap::talk_prompt_context=nullptr;
     auto* unknown=view(device,glyph,std::vector<std::uint8_t>(glyph.bytes));assert(!GlyphSwapAsyncCheck::lookup(unknown));GlyphSwapAsyncCheck::process(context);GlyphSwapAsyncCheck::process(context);
     const auto prior_copies=copies;assert(!GlyphSwapAsyncCheck::lookup(unknown));GlyphSwapAsyncCheck::process(context);assert(copies==prior_copies && unknown->refs==1);
     auto* queued=view(device,glyph,native);GlyphSwapAsyncCheck::lookup(queued);
     GlyphSwapAsyncCheck::fill_negatives();assert(GlyphSwapAsyncCheck::cache_size()>16384);
     GlyphSwapAsyncCheck::process(context);
-    assert(GlyphSwapAsyncCheck::cache_size()==2 && GlyphSwapAsyncCheck::pending(queued));
+    assert(GlyphSwapAsyncCheck::cache_size()==3 && GlyphSwapAsyncCheck::pending(queued));
     assert(GlyphSwapAsyncCheck::lookup(known).Get()==replacement.Get()); // Positive and pending entries survive pruning.
     GlyphSwapAsyncCheck::process(context);assert(!GlyphSwapAsyncCheck::pending(queued));
     auto* error=view(device,glyph,native);GlyphSwapAsyncCheck::lookup(error);GlyphSwapAsyncCheck::process(context);map_error=E_FAIL;GlyphSwapAsyncCheck::process(context);assert(error->refs==1 && GlyphSwap::pending_readbacks==0);map_error=S_OK;

@@ -205,8 +205,55 @@ int main() {
         ConvergeDiverge cd2(0.10f,0.8f,600);
         require(!cd2.update(0.09f,1.0f,false,0),"converge needs allowed");
     }
+    {
+        // Hands-up jump: both hands thrown from below the chin to above the head inside 300 ms = native A.
+        Rig r;std::uint64_t now=1000;
+        struct Run {int edges{},on{};bool last{};};
+        // Both hands (x -+apart/2, 0.4 m ahead) from head-relative height a to b over ms; left=false keeps the left at rest.
+        auto move=[&](HandsUpJump& j,Run& run,float a,float b,int ms,float apart=.4f,bool left=true) {
+            const int n=ms/11>0?ms/11:1;
+            for(int i=0;i<n;++i) {
+                const float y=r.f.head_pos.y+a+(b-a)*static_cast<float>(i+1)/static_cast<float>(n);
+                r.f.pos[0]=V(-apart/2,left?y:r.f.head_pos.y-.35f,-.4f);r.f.pos[1]=V(apart/2,y,-.4f);
+                now+=11;r.f.now_ms=now;
+                const bool out=j.update(r.f);
+                if(out && !run.last) ++run.edges;
+                if(out) ++run.on;
+                run.last=out;
+            }
+        };
+        HandsUpJump j;Run run;
+        move(j,run,-.35f,-.35f,200);
+        require(run.edges==0,"hands at rest never jump");
+        move(j,run,-.35f,.30f,200);
+        require(run.edges==1,"both hands thrown up above the head jump once");
+        move(j,run,.30f,.30f,400);
+        require(run.last && run.edges==1,"A stays held while both hands stay up, with no second jump");
+        move(j,run,.30f,.30f,600);
+        require(!run.last && run.edges==1,"A is let go after 1 s even with the hands still up");
+        move(j,run,.30f,-.35f,300);move(j,run,-.35f,-.35f,200);move(j,run,-.35f,.30f,200);
+        require(run.edges==2,"lowering both hands below the chin re-arms the jump");
+        HandsUpJump tap;Run t;
+        move(tap,t,-.35f,-.35f,100);move(tap,t,-.35f,.30f,200);t.on=0;move(tap,t,.30f,-.35f,33);move(tap,t,-.35f,-.35f,300);
+        require(t.edges==1 && t.on>=8 && t.on<=10 && !t.last,"hands dropped at once still hold A for 120 ms");
+        HandsUpJump slow;Run s;move(slow,s,-.35f,-.35f,100);move(slow,s,-.35f,.30f,1200);
+        require(s.edges==0,"a slow stretch overhead never jumps");
+        HandsUpJump one;Run o;move(one,o,-.35f,-.35f,100);move(one,o,-.35f,.30f,200,.4f,false);
+        require(o.edges==0,"one hand up (sword over the shoulder, a raised blade) never jumps");
+        HandsUpJump hilt;Run h;move(hilt,h,-.35f,-.35f,100);move(hilt,h,-.35f,.30f,200,.10f);
+        require(h.edges==0,"hands together (two-handed overhead chop, clap) never jump");
+        HandsUpJump cast;Run c;r.f.trigger[0]=.8f;move(cast,c,-.35f,-.35f,100);move(cast,c,-.35f,.30f,200);r.f.trigger[0]=0;
+        require(c.edges==0,"a pulled trigger (cast, Blink aim, block) never jumps");
+        HandsUpJump busy;Run b;r.f.hands_busy=true;move(busy,b,-.35f,-.35f,100);move(busy,b,-.35f,.30f,200);r.f.hands_busy=false;
+        require(b.edges==0,"holding an object or carrying a body never jumps");
+        HandsUpJump late;Run l;move(late,l,-.35f,-.35f,100);r.f.allowed=false;move(late,l,-.35f,.30f,200);r.f.allowed=true;
+        move(late,l,.30f,.30f,300);
+        require(l.edges==0,"a rise begun in a menu or the wheel never jumps late");
+        move(late,l,.30f,-.35f,200);move(late,l,-.35f,.30f,200);
+        require(l.edges==1,"after lowering the hands the next rise jumps");
+    }
     if(failures) {std::printf("%d requirement(s) failed\n",failures);return 1;}
     std::printf("PASS: block dwell/hysteresis/cancel, throat slash lateral/once/cooldown, "
-        "push, yoink, temple, clap, global cooldown, disallowed spend, primitives\n");
+        "push, yoink, temple, clap, global cooldown, disallowed spend, primitives, hands-up jump\n");
     return 0;
 }

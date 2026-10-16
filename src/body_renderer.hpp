@@ -196,19 +196,17 @@ public:
         const Arm& arm,const NativeBodyBind& owner,bool owned_render_scope,SetAll set_all,Refresh refresh,std::uint64_t tick=0) {
         reason_=Reason::ready;
         if(!owned_render_scope || !abi(read,base)) {reason_=Reason::scope_or_abi;return false;}
+        if(active_ && !(owner_==owner)) {reason_=Reason::owner_or_override;return false;}
         const auto route=body_material_route(read,base,arm,owner);
-        auto material=body_material_candidate(read,base,arm,owner);
+        auto material=active_?(still_body_material(read,replacement_,owner)?std::optional<std::uintptr_t>(replacement_):std::nullopt):
+            body_material_candidate(read,base,arm,owner);
         if(material) remembered_=*material;
-        else if(remembered_ && still_body_material(read,remembered_,owner)) material=remembered_;
+        else if(!active_ && remembered_ && still_body_material(read,remembered_,owner)) material=remembered_;
         if(!route || !material || route->draw_count!=1) {reason_=Reason::route_or_material;return false;}
         if(active_) {
             // A pending restore (e.g. avatar hidden while the weapon wheel is open) is cancelled by
             // re-applying: it used to latch and keep the body invisible for the rest of the session.
             restoring_=false;
-            // Same native body model, new started-identity flags (crouch/mantle/combat states change
-            // them): still our owner. Strict equality here failed 100% of uploads after a state change.
-            if(!(owner_==owner) && owner_.model==owner.model && owner_.animation==owner.animation &&
-               owner_.descriptor==owner.descriptor && owner_.skeleton==owner.skeleton) owner_=owner;
             if(!(owner_==owner) || *material!=replacement_ || route->override_count<1) {reason_=Reason::owner_or_override;return false;}
             if(!all_equal(route->override_materials,replacement_)) {
                 // The game reset the body to its shadow-only material (mantle/state changes): re-apply

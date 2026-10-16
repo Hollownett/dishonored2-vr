@@ -7,12 +7,17 @@ namespace d2vr::rig {
 struct NativeCarrySnapshot {
     std::uintptr_t game{},player{},body{},machine{},pool{},component_slot{};
     List components{};Identity machine_identity{},body_identity{};
-    std::array<std::uintptr_t,2> states{},declarations{};
-    std::array<bool,2> active{};
-    bool carrying()const noexcept{return active[0] || active[1];}
+    std::array<std::uintptr_t,3> states{},declarations{};
+    std::array<bool,3> active{};
+    bool hold_object()const noexcept{return active[0] || active[2];}
+    std::uintptr_t hold_state()const noexcept{return active[0]!=active[2]?(active[0]?states[0]:states[2]):0;}
+    bool carrying()const noexcept{return hold_object() || active[1];}
+    // Hands a carry takes: a held object both, a carried body the right (it lies on the right shoulder); the left stays the
+    // player's (user, headset 2026-10-14).
+    unsigned hands()const noexcept{return hold_object()?3u:active[1]?2u:0u;}
     bool valid_owner()const noexcept{return game && player && body && machine && pool && components.packed_count && components.packed_count<=4096 &&
         component_slot>=components.data && component_slot-components.data<static_cast<std::uintptr_t>(components.packed_count)*8 &&
-        (component_slot-components.data)%8==0 && states[0] && states[1] && declarations[0] && declarations[1];}
+        (component_slot-components.data)%8==0 && states[0] && states[1] && states[2] && declarations[0] && declarations[1] && declarations[2];}
 };
 inline bool operator==(const NativeCarrySnapshot& a,const NativeCarrySnapshot& b) {
     return a.game==b.game && a.player==b.player && a.body==b.body && a.machine==b.machine && a.pool==b.pool &&
@@ -35,12 +40,12 @@ template<class Read> std::optional<NativeCarrySnapshot> native_carry_current(Rea
             components && components->data==old.components.data && components->packed_count==old.components.packed_count &&
             components->packed_capacity==old.components.packed_capacity && value<std::uintptr_t>(read,old.component_slot)==old.machine;
     };
-    constexpr std::array<int,2> indices{49,45};
-    constexpr std::array<std::uintptr_t,2> state_tables{0x1c7a998,0x1c77748},decl_tables{0x1c7a868,0x1c77618};
-    auto result=old;std::array<bool,2> first{};
+    constexpr std::array<int,3> indices{49,45,50};
+    constexpr std::array<std::uintptr_t,3> state_tables{0x1c7a998,0x1c77748,0x1c7a998},decl_tables{0x1c7a868,0x1c77618,0x1c7a868};
+    auto result=old;std::array<bool,3> first{};
     for(unsigned pass=0;pass<2;++pass){
         if(!root())return {};
-        for(unsigned side=0;side<2;++side){const auto at=old.states[side],decl=old.declarations[side];
+        for(unsigned side=0;side<3;++side){const auto at=old.states[side],decl=old.declarations[side];
             const auto active=value<unsigned char>(read,at+0x20);
             if(value<std::uintptr_t>(read,old.pool+0x10+static_cast<unsigned>(indices[side])*8)!=at || !typed(read,base,at,state_tables[side]) ||
                value<int>(read,at+8)!=indices[side] || value<std::uintptr_t>(read,at+0x10)!=old.machine ||
@@ -49,7 +54,7 @@ template<class Read> std::optional<NativeCarrySnapshot> native_carry_current(Rea
             if(!pass)first[side]=*active!=0;else if(first[side]!=(*active!=0))return {};
         }
     }
-    if(!root())return {};result.active=first;return result;
+    if(!root() || (first[0] && first[2]))return {};result.active=first;return result;
 }
 // Discovery is allowed only when acquiring a new complete native hand snapshot.
 template<class Read> std::optional<NativeCarrySnapshot> native_carry_snapshot(Read& read,std::uintptr_t base,std::uintptr_t player,std::uintptr_t body) {
@@ -64,8 +69,8 @@ template<class Read> std::optional<NativeCarrySnapshot> native_carry_snapshot(Re
     }
     if(!result.machine)return {};const auto identity=started(read,result.machine);const auto pool=value<std::uintptr_t>(read,result.machine+0x90);
     if(!identity || !pool || !pointer(*pool))return {};result.machine_identity=*identity;result.pool=*pool;
-    constexpr std::array<unsigned,2> indices{49,45};
-    for(unsigned i=0;i<2;++i){const auto state=value<std::uintptr_t>(read,*pool+0x10+indices[i]*8);if(!state || !pointer(*state))return {};result.states[i]=*state;
+    constexpr std::array<unsigned,3> indices{49,45,50};
+    for(unsigned i=0;i<3;++i){const auto state=value<std::uintptr_t>(read,*pool+0x10+indices[i]*8);if(!state || !pointer(*state))return {};result.states[i]=*state;
         const auto decl=value<std::uintptr_t>(read,*state+0x18);if(!decl || !pointer(*decl))return {};result.declarations[i]=*decl;}
     const auto current=native_carry_current(read,base,result);if(!current)return {};
     std::vector<std::uintptr_t> again(entries.size());if(!read(components->data,again.data(),again.size()*8) || again!=entries)return {};

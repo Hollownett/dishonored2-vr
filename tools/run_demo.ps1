@@ -13,6 +13,9 @@ $taskRoot=Split-Path -Parent $PSScriptRoot
 $taskManifestPath=if($CandidateManifest){$CandidateManifest}else{Join-Path $taskRoot 'artifacts\demo-candidate.json'}
 $taskManifest=Get-Content -LiteralPath $taskManifestPath -Raw | ConvertFrom-Json
 if ($taskManifest.launch_blocked) { throw $taskManifest.launch_blocked_reason }
+if ($taskManifest.full_hand_response_enabled -and ($Simulated -or $NoArms -or -not (Test-Path -LiteralPath (Join-Path $taskRoot 'build\full-body')))) {
+    throw 'This full-hand candidate requires real tracked arms and the existing full-body configuration; no reduced hand mode was launched.'
+}
 if ($taskManifest.dll_name -cnotmatch '^d2vr_render_probe_arm_v[0-9]+\.dll$') { throw 'Invalid candidate filename.' }
 $taskDll=Join-Path $taskRoot ('build\'+$taskManifest.dll_name)
 if ((Get-FileHash -LiteralPath $taskDll -Algorithm SHA256).Hash.ToLowerInvariant() -ne $taskManifest.sha256) {
@@ -53,11 +56,16 @@ Push-Location -LiteralPath $taskRoot
 $taskFsr4Flag=Join-Path $taskRoot 'build\fsr4'
 $taskFsr4Existed=Test-Path -LiteralPath $taskFsr4Flag
 [byte[]]$taskFsr4Before=if($taskFsr4Existed){[IO.File]::ReadAllBytes($taskFsr4Flag)}else{$null}
+$taskHandFlag=Join-Path $taskRoot 'build\full-hand-query'
+$taskHandExisted=Test-Path -LiteralPath $taskHandFlag
+[byte[]]$taskHandBefore=if($taskHandExisted){[IO.File]::ReadAllBytes($taskHandFlag)}else{$null}
 try {
     if($Fsr4) {[IO.File]::WriteAllText($taskFsr4Flag,'on')}
+    if($taskManifest.full_hand_response_enabled) {[IO.File]::WriteAllText($taskHandFlag,'on')}
     & python (Join-Path $PSScriptRoot 'inject_probe.py') @taskArguments
     if ($LASTEXITCODE -ne 0) { throw "Demo diagnostic failed ($LASTEXITCODE); inspect the archived run." }
 } finally {
     if($Fsr4) {if($taskFsr4Existed){[IO.File]::WriteAllBytes($taskFsr4Flag,$taskFsr4Before)}else{Remove-Item -LiteralPath $taskFsr4Flag -ErrorAction SilentlyContinue}}
+    if($taskManifest.full_hand_response_enabled) {if($taskHandExisted){[IO.File]::WriteAllBytes($taskHandFlag,$taskHandBefore)}else{Remove-Item -LiteralPath $taskHandFlag -ErrorAction SilentlyContinue}}
     Pop-Location
 }

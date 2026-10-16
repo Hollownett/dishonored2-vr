@@ -7,7 +7,7 @@ def validate_inactive_carry(pose):
  state=pose.get('native_hand_state',{});before=pose.get('carry_before');after=pose.get('carry_after')
  if pose.get('sustained_owned_state_bits')!=3:raise ValueError('Not sustained dual hand owner')
  if pose.get('carry_consistent')is not True or before!=after or not isinstance(before,dict):raise ValueError('Unstable per-pose carry tuple')
- if before.get('typed_owner_verified')is not True or before.get('carrying')is not False or before.get('active')!=[False,False]or[s.get('index')for s in before.get('states',[])]!=[49,45]:raise ValueError('Unknown/active native carry')
+ if before.get('typed_owner_verified')is not True or before.get('carrying')is not False or before.get('active')!=[False,False,False]or[s.get('index')for s in before.get('states',[])]!=[49,45,50]:raise ValueError('Unknown/active native carry, including HoldObject50')
  if any(not s.get('state')or not s.get('declaration')for s in before.get('states',[])):raise ValueError('Missing typed carry state identity')
  if before.get('body_identity')!=state.get('body_identity'):raise ValueError('Carry body generation mismatch')
  if any(not before.get(k)for k in ('player','body','machine','pool'))or before['player']!=state.get('player')or before['body']!=state.get('body'):raise ValueError('Carry owner mismatch')

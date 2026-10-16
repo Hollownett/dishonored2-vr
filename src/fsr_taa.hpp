@@ -100,6 +100,19 @@ public:
     std::array<std::atomic<std::uint64_t>,2> eye_gpu_samples{},eye_gpu_disjoint{},eye_gpu_dropped{};
     std::array<std::atomic<UINT>,2> eye_render_width{},eye_render_height{},eye_display_width{},eye_display_height{};
     std::array<std::atomic<float>,2> eye_fsr4_record_ms{},eye_fsr4_handoff_ms{};
+    std::array<std::atomic<double>,2> eye_fsr4_compute_gpu_ms{},eye_fsr4_compute_gpu_total_ms{};
+    std::array<std::atomic<std::uint64_t>,2> eye_fsr4_compute_gpu_samples{};
+    std::atomic<bool> fsr4_compute_timing_enabled{false};
+    bool (*fsr4_diagnostics_observer)(void*,int,Fsr4EyeUpscaler::Diagnostics&) noexcept{};
+    void* fsr4_diagnostics_user{};
+    void (*diagnostic_finished_observer)(void*,ID3D11DeviceContext*,ID3D11CommandList*) noexcept{};
+    void* diagnostic_finished_user{};
+    void poll_fsr4_gpu_timing() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        for(std::size_t side=0;side<2;++side) {
+            auto& fsr4=(*eyes_)[side].fsr4;fsr4.poll_gpu_timing();publish_fsr4_gpu_timing(side,fsr4);
+        }
+    }
     std::array<std::atomic<UINT>,2> eye_fsr4_failure{},eye_colour_width{},eye_colour_height{},eye_colour_format{},eye_colour_mips{};
     // Post-tonemap pass, job thread: the game's upscale draw binds the tonemapped image and the eye target.
     // The pass holds one draw (measured: tonemapped R8G8B8A8 source -> sRGB eye target, full viewport);
@@ -134,6 +147,7 @@ public:
         if(!slot) {++failures;return;}
         ID3D11CommandList* prefix{};
         if(FAILED(TaaDispatchHook::finish_original(c,TRUE,&prefix)) || !prefix) {++failures;return;}
+        if(diagnostic_finished_observer) diagnostic_finished_observer(diagnostic_finished_user,c,prefix);
         job->prefix.adopt(prefix);
         if(slot->first==c && slot->second) { // both eyes in one list: chain the second split
             Job* last=slot->second.get();while(last->next) last=last->next.get();
@@ -245,6 +259,7 @@ public:
             }
             ready_w_=w;ready_h_=h;render_w_=rw;render_h_=rh;context_w_=cw;context_h_=ch;ready_fraction_=f;ready_native_format_=wanted_native_format_.load();
             for(std::size_t side=0;side<2;++side) {eye_gpu_ms[side]=0;eye_gpu_total_ms[side]=0;eye_gpu_samples[side]=0;eye_gpu_disjoint[side]=0;eye_gpu_dropped[side]=0;}
+            for(std::size_t side=0;side<2;++side) {eye_fsr4_compute_gpu_ms[side]=0;eye_fsr4_compute_gpu_total_ms[side]=0;eye_fsr4_compute_gpu_samples[side]=0;}
             ++reset_epoch_;
         } else {render_w_=rw;render_h_=rh;ready_fraction_=f;} // FSR takes a new render size per dispatch; history stays
         if(timing_enabled.load()) for(auto& e:*eyes_) if(!e.timer.prepare(device)) {++timing_create_failures;timing_enabled=false;break;}
@@ -296,6 +311,7 @@ public:
         if(!slot) {++failures;return false;}
         ID3D11CommandList* prefix{};
         if(FAILED(TaaDispatchHook::finish_original(c,TRUE,&prefix)) || !prefix) {++failures;return false;}
+        if(diagnostic_finished_observer) diagnostic_finished_observer(diagnostic_finished_user,c,prefix);
         job->prefix.adopt(prefix);
         slot->first=c;slot->second=std::move(job);
         return true;
@@ -323,6 +339,11 @@ public:
         return true;
     }
 private:
+    void publish_fsr4_gpu_timing(std::size_t side,const Fsr4EyeUpscaler& fsr4) {
+        eye_fsr4_compute_gpu_ms[side]=fsr4.compute_gpu_ms();
+        eye_fsr4_compute_gpu_total_ms[side]=fsr4.compute_gpu_total_ms();
+        eye_fsr4_compute_gpu_samples[side]=fsr4.compute_gpu_samples();
+    }
     struct Job {
         int eye{};float vfov{},jitter_x{},jitter_y{},fraction=1;bool upscale{};UINT width{},height{};std::uint64_t epoch{};
         Ref<ID3D11Resource> colour,motion,output;Ref<ID3D11CommandList> prefix,remainder;
@@ -410,7 +431,15 @@ private:
             }
         }
         in.reset=e.reset || previous_generation!=4;
-        const bool ml=fsr4_active.load(std::memory_order_relaxed) && e.fsr4.valid() && e.fsr4.dispatch(c,in);
+        // FSR4 copies its shared output directly to the native eye target. FSR3
+        // still needs its UAV-capable intermediate for targets without UAV binds.
+        if(job.upscale) in.output=job.output.p;
+        Fsr4EyeUpscaler::Diagnostics diagnostics{};
+        const bool observe_fsr4=fsr4_diagnostics_observer && fsr4_active.load(std::memory_order_relaxed) && e.fsr4.valid() &&
+            fsr4_diagnostics_observer(fsr4_diagnostics_user,job.eye,diagnostics);
+        const bool ml=fsr4_active.load(std::memory_order_relaxed) && e.fsr4.valid() &&
+            e.fsr4.dispatch(c,in,fsr4_compute_timing_enabled.load(),observe_fsr4?&diagnostics:nullptr);
+        publish_fsr4_gpu_timing(static_cast<std::size_t>(job.eye),e.fsr4);
         eye_fsr4_failure[static_cast<std::size_t>(job.eye)]=ml?0u:e.fsr4.failure_code();
         eye_fsr4_record_ms[static_cast<std::size_t>(job.eye)]=ml?e.fsr4.record_ms():0.f;eye_fsr4_handoff_ms[static_cast<std::size_t>(job.eye)]=ml?e.fsr4.handoff_ms():0.f;
         if(ml) ++fsr4_dispatches;
@@ -421,6 +450,7 @@ private:
             const D3D11_BOX active{0,0,0,render_w_,render_h_,1};
             c->CopySubresourceRegion(e.colour_in.p,0,0,0,0,job.colour.p,0,&active);
             in.colour=e.colour_in.p;
+            in.output=e.upscaled.p;
         }
         in.reset=e.reset || previous_generation!=3;
         const bool ok=ml || e.fsr.dispatch(c,in);
@@ -428,13 +458,16 @@ private:
         if(!ok) {e.timer.end(c,ticket);++failures;e.reset=true;fallback();return;}
         eye_upscaler_generation[static_cast<std::size_t>(job.eye)]=ml?4u:3u;
         eye_fsr4_version[static_cast<std::size_t>(job.eye)]=ml?e.fsr4.version_id():0;
-        if(job.upscale) {c->CopyResource(job.output.p,e.upscaled.p);++upscaled;} // over the game's bilinear upscale
+        if(job.upscale) {if(!ml) c->CopyResource(job.output.p,e.upscaled.p);++upscaled;} // over the game's bilinear upscale
         e.timer.end(c,ticket);
         const auto timing=e.timer.stats();const auto side=static_cast<std::size_t>(job.eye);
         eye_gpu_ms[side]=static_cast<float>(timing.last_ms);eye_gpu_samples[side]=timing.samples;
         eye_gpu_total_ms[side]=timing.total_ms;
         eye_gpu_disjoint[side]=timing.disjoint;eye_gpu_dropped[side]=timing.dropped;
-        QueryPerformanceCounter(&cpu_end);eye_cpu_ms[side]=static_cast<float>(double(cpu_end.QuadPart-cpu_start.QuadPart)*1000.0/double(cpu_freq.QuadPart));
+        QueryPerformanceCounter(&cpu_end);const double cpu_dispatch_ms=double(cpu_end.QuadPart-cpu_start.QuadPart)*1000.0/double(cpu_freq.QuadPart);
+        eye_cpu_ms[side]=static_cast<float>(cpu_dispatch_ms);
+        if(ml && observe_fsr4 && diagnostics.callback)
+            diagnostics.callback(diagnostics.user,diagnostics.id,Fsr4EyeUpscaler::Phase::cpu_dispatch,c,cpu_dispatch_ms);
         eye_render_width[side]=in.render_w;eye_render_height[side]=in.render_h;eye_display_width[side]=w;eye_display_height[side]=h;
         ++eye_dispatches[static_cast<std::size_t>(job.eye)];
         if(e.reset) ++eye_resets[static_cast<std::size_t>(job.eye)];

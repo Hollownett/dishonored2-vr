@@ -18,16 +18,17 @@ struct ControllerInput {
     float move_x{},move_y{},turn_x{},turn_y{},left_trigger{},right_trigger{},left_grip{},right_grip{};
     bool a{},b{},x{},y{},left_click{},right_click{},menu{};
     bool journal{},suppress_pause{},menu_modifier{};
+    bool native_y_quick_action{};
     bool lean_controlled{},lean_modifier{},lean_suspended{};
     std::array<bool,4> dpad{}; // right, up, left, down (native QUICK_0..3).
 };
 inline bool native_directional_stick(const ControllerInput& in) noexcept {
-    return !in.menu_modifier && (in.lean_suspended || in.lean_modifier || in.y || in.left_grip>.55f);
+    return !in.menu_modifier && (in.lean_suspended || in.lean_modifier || in.left_grip>.55f);
 }
 
 class PadComposer {
     MenuTap menu_tap_;
-    bool previous_gameplay_=false,previous_active_=false,previous_modifier_=false,previous_directional_=false,previous_lean_=false;
+    bool previous_gameplay_=false,previous_active_=false,previous_modifier_=false,previous_directional_=false;
     WORD blocked_buttons_{};
     unsigned blocked_analog_{};
     std::array<bool,2> shoulder_held_{},shoulder_tap_{};std::array<std::uint64_t,2> shoulder_since_{};
@@ -42,14 +43,14 @@ public:
     XINPUT_GAMEPAD compose(const ControllerInput& in,bool gameplay,std::uint64_t now=GetTickCount64()) {
         const bool pause=menu_tap_.update(in.menu,in.active && !in.suppress_pause,now);
         if(!in.active) {
-            previous_active_=previous_modifier_=previous_directional_=previous_lean_=false;blocked_buttons_=0;blocked_analog_=0;shoulder_held_={};
+            previous_active_=previous_modifier_=previous_directional_=false;blocked_buttons_=0;blocked_analog_=0;shoulder_held_={};
             return {};
         }
         WORD buttons=0;
         if(in.a) buttons|=XINPUT_GAMEPAD_A;
         if(in.b) buttons|=XINPUT_GAMEPAD_B;
         if(in.x) buttons|=XINPUT_GAMEPAD_X;
-        if(in.y) buttons|=XINPUT_GAMEPAD_Y;
+        if(in.y && (!gameplay || in.native_y_quick_action)) buttons|=XINPUT_GAMEPAD_Y;
         if(in.left_click) buttons|=XINPUT_GAMEPAD_LEFT_THUMB;
         if(in.right_click) buttons|=XINPUT_GAMEPAD_RIGHT_THUMB;
         if(pause) buttons|=XINPUT_GAMEPAD_START;
@@ -69,10 +70,8 @@ public:
         }
         if(previous_modifier_ && !in.menu_modifier) blocked_analog_|=analog;
         if(previous_directional_ && !native_directional_stick(in) && gameplay) blocked_analog_|=analog&32;
-        if(previous_lean_ && !(in.lean_controlled?in.lean_modifier:in.y) && gameplay) blocked_analog_|=analog&(16|32);
         previous_active_=true;previous_gameplay_=gameplay;previous_modifier_=in.menu_modifier;
         previous_directional_=native_directional_stick(in) && gameplay;
-        previous_lean_=(in.lean_controlled?in.lean_modifier:in.y) && gameplay;
         blocked_buttons_&=buttons;blocked_analog_&=analog;
         buttons&=static_cast<WORD>(~blocked_buttons_);
         // A grip squeezed in a menu is one LB/RB tap: the game's menus repeat a held shoulder after 225 ms every 75 ms
@@ -96,18 +95,10 @@ public:
             if(!(blocked_analog_&1)) pad.bLeftTrigger=trigger(in.left_trigger);
             if(!(blocked_analog_&2)) pad.bRightTrigger=trigger(in.right_trigger);
         }
-        // Xbox manual: Y + LEFT stick is native lean. Quest uses its right
-        // stick for this chord; never pass it as camera LOOK or raw movement.
-        const bool lean_requested=gameplay && (in.lean_controlled?in.lean_modifier:in.y);
-        const bool lean_neutral=gameplay && in.lean_suspended && !lean_requested;
-        if(!in.menu_modifier && !lean_neutral && lean_requested) {
-            if((buttons&XINPUT_GAMEPAD_Y) && !(blocked_analog_&32)) {
-                pad.sThumbLX=stick(in.turn_x);pad.sThumbLY=stick(in.turn_y);
-            }
-        } else if(!in.menu_modifier && !lean_neutral && !(blocked_analog_&16)) {
+        if(!in.menu_modifier && !(blocked_analog_&16)) {
             pad.sThumbLX=stick(in.move_x);pad.sThumbLY=stick(in.move_y);
         }
-        if(!in.menu_modifier && !lean_neutral && !lean_requested && !blocked_directional && !(blocked_analog_&32)) {
+        if(!in.menu_modifier && !blocked_directional && !(blocked_analog_&32)) {
             pad.sThumbRX=stick(in.turn_x);
             // Head pitch remains physical; right-stick Y navigates menus/wheels.
             if(!gameplay || (buttons&XINPUT_GAMEPAD_LEFT_SHOULDER)) pad.sThumbRY=stick(in.turn_y);

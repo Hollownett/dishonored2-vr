@@ -92,8 +92,18 @@ class NativeLeftAimProfileCheck(unittest.TestCase):
             (root/'artifacts').mkdir()
             source = root/'artifacts'/'native-left-aim.csv'
             source.write_text('applied\n0\n', encoding='ascii')
+            combat = root/'artifacts'/'native-combat.csv'
+            combat.write_text('1000,blade_npc,0x123,3.0,-1\n', encoding='ascii')
+            profiling = []
+            for name in ('render-perf-cpu.csv', 'render-perf-gpu.csv'):
+                path = root/'artifacts'/name
+                path.write_text('epoch,frame\n1,2\n', encoding='ascii')
+                profiling.append(path)
             archive = preserve_probe_outputs(root, 'test')
             self.assertEqual((archive/source.name).read_text(), source.read_text())
+            self.assertEqual((archive/combat.name).read_text(), combat.read_text())
+            for path in profiling:
+                self.assertEqual((archive/path.name).read_text(), path.read_text())
 
 
 if __name__ == '__main__':

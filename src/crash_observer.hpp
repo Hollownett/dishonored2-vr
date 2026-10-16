@@ -108,7 +108,11 @@ class CrashObserver {
                 }
                 FlushFileBuffers(self->file_);
             }
-            if(!owner && !self->dump_path_.empty() && !dumped_.exchange(true)) write_dump(*self,exception);
+            // Also the first access violation inside the game's own code on a thread the mod is not running in: both headset
+            // crashes of 2026-10-13 (audio update 0xc3e00, heap free 0x156880) died on a pointer holding float data, and no dump
+            // was written because the game module owned the address.
+            const bool game_av=record.ExceptionCode==0xc0000005 && owner==GetModuleHandleW(nullptr) && !crash_operation;
+            if((!owner || game_av) && !self->dump_path_.empty() && !dumped_.exchange(true)) write_dump(*self,exception);
         }
         return EXCEPTION_CONTINUE_SEARCH;
     }

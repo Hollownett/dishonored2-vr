@@ -22,7 +22,7 @@ KEEP = ('logic_mask', 'session_state', 'combat', 'contact_hits', 'npc_blade_cont
         'world_prompt_frames', 'prompt_shows_hides', 'takedown_flips', 'takedown_hints', 'overlay_hidden', 'left_equip',
         'hand_weapon_bits', 'weapon_collision', 'published_move', 'wheel_zone',
         'grip_tracked_hands', 'native_arm_pose_fallbacks', 'full_body', 'arm_hidden', 'arm_shows', 'arm_hides_skipped',
-        'held_object')  # arm drop: tracking loss vs native ownership vs solver
+        'held_object', 'sword_grip', 'interact', 'look_uses', 'hip_frames', 'ragdoll_tows', 'block', 'gesture_blocks')  # arm drop: tracking loss vs native ownership vs solver
 
 
 def game_window():
@@ -67,6 +67,12 @@ def grab(hwnd):
 
 
 def main():
+    # Per-monitor DPI awareness: without it Windows reports the 150%-scaled window size and PrintWindow captured only its
+    # top-left 594x422 (headset session 2026-10-13).
+    try:
+        user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4))
+    except (AttributeError, OSError):
+        pass
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument('--fps', type=float, default=10)
     ap.add_argument('--minutes', type=float, default=30)

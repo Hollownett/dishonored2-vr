@@ -1,4 +1,5 @@
 #include "../src/vr_controls.hpp"
+#include "../src/vr_combat.hpp"
 #include <cassert>
 #include <cstdio>
 
@@ -8,6 +9,210 @@ static void require(bool condition,const char* what) {
     ++failures;std::printf("FAIL: %s\n",what);
 }
 int main() {
+    {
+        for(int previous=0;previous<2;++previous) {
+            const auto next=static_cast<unsigned>(previous)^1u;
+            std::array<float,2> grips{},uses{};std::array<bool,2> fresh{},claims{true,true};
+            grips[next]=uses[next]=1;fresh[next]=true;
+            assert(d2vr::released_gaze_yields(previous,previous,true,grips,uses,fresh,claims,false));
+            grips[next]=std::nextafter(.45f,0.f);
+            assert(!d2vr::released_gaze_yields(previous,previous,true,grips,uses,fresh,claims,false));
+            grips[next]=.45f;grips[static_cast<unsigned>(previous)]=.35f;
+            assert(d2vr::released_gaze_yields(previous,previous,true,grips,uses,fresh,claims,false));
+            grips[static_cast<unsigned>(previous)]=std::nextafter(.35f,1.f);
+            assert(!d2vr::released_gaze_yields(previous,previous,true,grips,uses,fresh,claims,false));
+            grips[static_cast<unsigned>(previous)]=0;
+            assert(!d2vr::released_gaze_yields(previous,previous,true,grips,uses,fresh,claims,true));
+            assert(!d2vr::released_gaze_yields(previous,previous,false,grips,uses,fresh,claims,false));
+            assert(!d2vr::released_gaze_yields(previous,static_cast<int>(next),true,grips,uses,fresh,claims,false));
+            grips[static_cast<unsigned>(previous)]=1;
+            assert(!d2vr::released_gaze_yields(previous,previous,true,grips,uses,fresh,claims,false));
+            grips[static_cast<unsigned>(previous)]=0;uses[static_cast<unsigned>(previous)]=1;
+            assert(!d2vr::released_gaze_yields(previous,previous,true,grips,uses,fresh,claims,false));
+            uses[static_cast<unsigned>(previous)]=0;fresh[next]=false;
+            assert(!d2vr::released_gaze_yields(previous,previous,true,grips,uses,fresh,claims,false));
+            fresh[next]=true;claims[next]=false;
+            assert(!d2vr::released_gaze_yields(previous,previous,true,grips,uses,fresh,claims,false));
+            claims[next]=true;grips[next]=0;
+            assert(!d2vr::released_gaze_yields(previous,previous,true,grips,uses,fresh,claims,false));
+        }
+        for(unsigned side=0;side<2;++side) {
+            d2vr::InteractOwner grip;
+            std::array<float,2> values{};
+            grip.update(values,static_cast<int>(side),false,false,true,1000,false,true);
+            values[side]=1;
+            auto result=grip.update(values,static_cast<int>(side),false,false,true,1010,false,true);
+            assert(result.consume_trigger[side] && !result.interact);
+            result=grip.update(values,static_cast<int>(side),false,false,true,1700,false,true);
+            assert(result.consume_trigger[side] && !result.interact);
+            result=grip.update(values,static_cast<int>(side),false,false,true,1710,true,true);
+            assert(result.consume_trigger[side] && !result.interact);
+            result=grip.update(values,static_cast<int>(side),true,false,true,1800,true,true);
+            assert(result.consume_trigger[side] && result.interact);
+            grip.update(values,static_cast<int>(side),true,false,false,1810,true,true);
+            assert(!grip.update(values,static_cast<int>(side),true,false,true,1820,true,true).interact);
+            values[side]=0;
+            assert(!grip.update(values,static_cast<int>(side),true,false,true,1830,true,true).interact);
+            values[side]=1;
+            assert(grip.update(values,static_cast<int>(side),true,false,true,1840,true,true).interact);
+        }
+        d2vr::InteractOwner trigger;
+        trigger.update({0,0},0,false,false,true,1000,false);
+        trigger.update({1,0},0,false,false,true,1010,false);
+        const auto fallback=trigger.update({1,0},0,false,false,true,1260,false);
+        assert(!fallback.consume_trigger[0] && !fallback.interact);
+    }
+    {
+        d2vr::OfferedChokeGrip owner;d2vr::VrCombat combat;
+        owner.update(false,false,false,true,1,0,0,false);
+        auto route=owner.update(true,true,true,true,1,123,0,false);
+        d2vr::CombatFrame frame{};frame.tracked=frame.equipped=true;frame.kill=frame.drop=frame.choke=true;
+        frame.head_fwd={0,0,-1};frame.head_right={1,0,0};frame.aim={0,0,-1};frame.trigger=frame.grip=1;
+        for(unsigned step=0;step<20;++step) {
+            frame.allowed=!route.consume_use;frame.now_ms=1000+step*16;frame.pos={step*.1f,1,-.4f};frame.vel={6,0,0};
+            const auto decision=combat.update(frame);
+            assert(!decision.rt && !decision.choke && decision.swing==d2vr::SwingKind::none);
+            route=owner.update(true,false,true,true,1,0,123,false,true);
+        }
+        route=owner.update(false,false,false,true,1,0,123,false,true);
+        frame.allowed=!route.consume_use;frame.now_ms+=16;
+        assert(!combat.update(frame).rt);
+        owner.update(false,false,false,true,1,0,0,false);
+        frame.allowed=true;frame.now_ms+=16;frame.trigger=frame.grip=0;frame.kill=frame.drop=frame.choke=false;frame.vel={};
+        const auto released=combat.update(frame);
+        assert(!released.rt && !released.choke && released.swing==d2vr::SwingKind::none);
+    }
+    {
+        d2vr::TalkYOwner owner;
+        const d2vr::TalkYOwner::Target talk{0x10000,12,123},other{0x20000,12,456};
+        const auto update=[&](bool pressed,std::uint64_t now,d2vr::TalkYOwner::Target target,bool allowed=true,std::uint64_t epoch=1) {
+            return owner.update(pressed,allowed,epoch,now,target);
+        };
+        assert(!update(true,1000,talk).interact);
+        update(false,1001,{});
+        auto result=update(true,1010,talk);assert(result.consume_y && result.interact);
+        assert(owner.owns(talk) && !owner.owns(other));
+        auto changed_owner=talk;changed_owner.owner=0x30000;
+        assert(!owner.owns(changed_owner));
+        result=update(false,1030,talk);assert(result.consume_y && result.interact);
+        result=update(false,1170,talk);assert(!result.consume_y && !result.interact);
+        result=update(true,1200,{});assert(!result.consume_y && !result.interact);
+        result=update(true,1210,talk);assert(!result.consume_y && !result.interact);
+        update(false,1220,{});
+        assert(update(true,1230,talk).interact);
+        result=update(true,1240,other);assert(result.consume_y && !result.interact);
+        result=update(true,1250,talk);assert(result.consume_y && !result.interact);
+        update(false,1260,{});
+        assert(update(true,1270,talk).interact);
+        result=update(true,1280,talk,false);assert(result.consume_y && !result.interact && result.owned);
+        result=update(true,1290,talk);assert(result.consume_y && !result.interact);
+        update(false,1300,{});
+        assert(update(true,1310,talk).interact);
+        result=update(true,1320,talk,true,2);assert(result.consume_y && !result.interact);
+        update(false,1330,{},true,2);
+        assert(update(true,1340,talk,true,2).interact);
+        owner.cancel();assert(!owner.owns(talk));
+        result=update(true,1350,talk,true,2);assert(result.consume_y && !result.interact && result.owned);
+    }
+    {
+        d2vr::OfferedChokeGrip owner;
+        const auto update=[&](bool use,bool started,bool held,std::uint32_t offered,std::uint32_t active=0,bool occupied=false,
+            bool allowed=true,std::uint64_t epoch=1) {return owner.update(use,started,held,allowed,epoch,offered,active,occupied);};
+        assert(!update(true,true,true,123).rb);
+        update(false,false,false,0);
+        auto result=update(true,true,true,123);
+        assert(result.rb && result.consume_use);
+        assert(update(true,false,true,0,123).rb);
+        result=update(true,false,true,0);
+        assert(!result.rb && result.consume_use);
+        assert(!update(true,false,true,123).rb);
+        update(false,false,false,0);
+        assert(!update(true,true,true,0).rb);
+        result=update(true,false,true,123);
+        assert(!result.rb && !result.consume_use);
+        update(false,false,false,0);
+        assert(!update(true,true,true,123,0,true).rb);
+        update(false,false,false,0);
+        assert(update(true,true,true,123).rb);
+        assert(!update(true,false,true,456,456).rb);
+        update(false,false,false,0);
+        assert(!update(true,true,false,123).rb);
+        update(false,false,false,0);
+        assert(update(true,true,true,123).rb);
+        assert(!update(true,false,true,123,0,false,false).rb);
+        assert(!update(true,false,true,123).rb);
+        update(false,false,false,0);
+        assert(update(true,true,true,123).rb);
+        assert(!update(true,false,true,123,0,false,true,2).rb);
+        update(false,false,false,0,0,false,true,2);
+        assert(update(true,true,true,123,0,false,true,2).rb);
+        assert(owner.victim()==123);owner.cancel();assert(owner.victim()==0);
+        assert(!update(true,false,true,123,0,false,true,2).rb);
+    }
+    {
+        d2vr::GripIntent intent;
+        d2vr::OfferedChokeGrip owner;
+        owner.update(false,false,false,true,1,0,0,false);
+        auto grip=intent.update(1,0,1000,true,100,false);
+        assert(!owner.update(grip.use,grip.use_started,true,true,1,123,0,false).rb);
+        grip=intent.update(1,0,1100,true,100,false);
+        auto route=owner.update(grip.use,grip.use_started,true,true,1,123,0,false);
+        assert(route.rb && route.consume_use && !grip.pass_trigger);
+        grip=intent.update(1,1,1200,true,100,false);
+        route=owner.update(grip.use,grip.use_started,true,true,1,0,123,false,true);
+        assert(route.rb && route.consume_use && !grip.fist && !grip.pass_trigger);
+        grip=intent.update(0,1,1300,true,100,false);
+        route=owner.update(grip.use,grip.use_started,false,true,1,0,123,false,true);
+        assert(!route.rb && route.consume_use && !grip.pass_trigger);
+        intent.update(0,0,1400,true);
+        owner.update(false,false,false,true,1,0,0,false);
+        intent.update(1,1,1500,true);
+        grip=intent.update(1,1,1600,true);
+        route=owner.update(grip.use,grip.use_started,true,true,1,123,0,false);
+        assert(grip.fist && !grip.use && !route.rb && !route.consume_use);
+    }
+    {
+        std::array<d2vr::GripIntent,2> intents;
+        for(auto& intent:intents) {
+            assert(!intent.update(std::nextafter(.45f,0.f),0,1000,true).use);
+            assert(intent.kind()==d2vr::GripIntent::Kind::none);
+            auto output=intent.update(.45f,0,1010,true);assert(!output.use && !output.fist);
+            output=intent.update(.45f,0,1109,true);assert(!output.use);
+            output=intent.update(.45f,0,1110,true);assert(output.use && output.use_started && !output.fist);
+            output=intent.update(.35f,0,1120,true);assert(output.use && !output.use_started);
+            output=intent.update(std::nextafter(.35f,0.f),0,1130,true);assert(!output.use);
+            output=intent.update(.45f,std::nextafter(.55f,0.f),1140,true);assert(!output.fist);
+            output=intent.update(.45f,.55f,1150,true);assert(output.fist && output.fist_started && !output.pass_trigger);
+            output=intent.update(.35f,.35f,1160,true);assert(output.fist && !output.fist_started);
+            output=intent.update(std::nextafter(.35f,0.f),std::nextafter(.35f,0.f),1170,true);assert(!output.fist && !output.use);
+        }
+        d2vr::GripIntent reserved;
+        assert(!reserved.update(.45f,0,1000,false).use);
+        assert(!reserved.update(.8f,0,1200,true).use);
+        reserved.update(0,0,1210,true);
+        reserved.update(.45f,0,1220,true);
+        assert(reserved.update(.45f,0,1320,true).use_started);
+    }
+    {   // GripIntent: grip alone = Use after 100 ms, grip + trigger = fist, trigger first is held back, taps survive
+        using K=d2vr::GripIntent::Kind;
+        d2vr::GripIntent a;auto o=a.update(1,0,1000,true);assert(!o.use && !o.fist && a.kind()==K::deciding);
+        o=a.update(1,0,1050,true);assert(!o.use);o=a.update(1,0,1100,true);assert(o.use && o.use_started && o.pass_trigger==false);
+        o=a.update(1,1,1200,true);assert(o.use && !o.fist && !o.pass_trigger); // a trigger during a Use is not a fist or a cast
+        o=a.update(0,1,1300,true);assert(!o.use && !o.pass_trigger && a.kind()==K::drain);o=a.update(0,0,1400,true);assert(a.kind()==K::none && o.pass_trigger);
+        d2vr::GripIntent b;o=b.update(1,0,0,true);o=b.update(1,1,40,true);assert(o.fist && o.fist_started && !o.use && !o.pass_trigger);
+        o=b.update(1,0,500,true);assert(o.fist);o=b.update(0,0,600,true);assert(!o.fist && b.kind()==K::none); // relaxing the trigger keeps the fist
+        d2vr::GripIntent c;o=c.update(0,1,0,true);assert(!o.pass_trigger);o=c.update(1,1,60,true);assert(o.fist && !o.pass_trigger); // trigger first, grip joins
+        d2vr::GripIntent d;o=d.update(0,1,0,true);o=d.update(0,1,100,true);assert(o.pass_trigger && !o.use && d.kind()==K::trigger); // a cast after 100 ms
+        o=d.update(1,1,150,true);assert(!o.fist && o.pass_trigger); // a grip during a cast is nothing
+        d2vr::GripIntent e;o=e.update(0,1,0,true);o=e.update(0,0,30,true);assert(o.tap_trigger && o.pass_trigger);o=e.update(0,0,100,true);assert(!o.tap_trigger); // trigger tap
+        d2vr::GripIntent t;o=t.update(1,0,0,true);o=t.update(0,0,40,true);assert(o.use && o.use_started);o=t.update(0,0,200,true);assert(o.use);o=t.update(0,0,300,true);assert(!o.use); // grip tap = short Use
+        // A late trigger while the Use has nothing to act on becomes the fist; with a target, or too late, the Use stays.
+        d2vr::GripIntent l;o=l.update(1,0,0,true,100,true);o=l.update(1,0,100,true,100,true);assert(o.use);
+        o=l.update(1,1,300,true,100,true);assert(o.fist && o.fist_started && !o.use);
+        d2vr::GripIntent m;o=m.update(1,0,0,true);o=m.update(1,0,100,true);o=m.update(1,1,300,true,100,false);assert(o.use && !o.fist);
+        d2vr::GripIntent n;o=n.update(1,0,0,true,100,true);o=n.update(1,0,100,true,100,true);o=n.update(1,1,600,true,100,true);assert(o.use && !o.fist);
+        d2vr::GripIntent w;o=w.update(1,1,0,false);assert(!o.fist && !o.use && o.pass_trigger);o=w.update(1,1,10,true);assert(!o.fist && w.kind()==K::drain); // weapon hand
+    }
     {
         d2vr::XWheelOwner x;
         x.update(false,true);
@@ -268,6 +473,169 @@ std::printf("PASS: X wheel open/close/cancel/no-reopen/late-press, "
         assert(!r.update(head,fwd,up,front,{1.f,0.f},true,200).journal);
         assert(!r.update(head,fwd,up,front,{0.f,0.f},true,210).consume[0]);
         assert(!r.update(head,fwd,up,temple,{1.f,0.f},false,300).journal);            // not in gameplay
+    }
+    { // Full-grip sword: draw at the shoulder, hold, drop elsewhere, pick up, sheathe at the shoulder, auto-sheathe, recall.
+        using A=d2vr::SwordGrip::Action;d2vr::SwordGrip s;d2vr::SwordGrip::In in{};in.gameplay=true;
+        auto step=[&](std::uint64_t t){in.now=t;return s.update(in);};
+        assert(step(0).action==A::none);
+        in.zone=true;in.grip=1;in.draw_dot=.7;{const auto o=step(10);assert(o.action==A::draw && !o.reversed && o.owns);}
+        in.zone=false;assert(step(200).action==A::none && s.held());                     // drawing: still in the hand
+        in.drawn=true;assert(step(400).action==A::none);assert(step(2000).action==A::none); // held: never auto-sheathed
+        in.grip=0;assert(step(2100).action==A::drop && !s.held());                       // released away from the shoulder
+        in.copy=true;in.copy_distance=1;assert(step(2150).action==A::none);              // copy spawned, sword still leaving
+        assert(step(2400).action==A::stow && step(2500).action==A::none && step(2700).action==A::stow); // the game kept it: again
+        in.drawn=false;assert(step(2800).action==A::none);
+        in.copy_reach=true;in.pickup_dot=-.5;in.grip=1;{const auto o=step(3000);assert(o.action==A::pickup && o.reversed);} // against the blade
+        in.copy=in.copy_reach=false;in.drawn=true;assert(step(3400).action==A::none);
+        in.zone=true;in.grip=0;assert(step(3500).action==A::sheathe);                     // released at the shoulder
+        in.zone=false;in.drawn=false;assert(step(3600).action==A::none);
+        in.zone=true;in.grip=1;in.draw_dot=-.8;assert(step(4000).reversed);              // fist down at the shoulder: reverse
+        in.grip=0;assert(step(4050).action==A::sheathe);                                 // let go before it was out: put back
+        in.zone=false;in.drawn=true;assert(step(5000).action==A::none);                  // the game drew it, nobody holds it
+        assert(step(5700).action==A::sheathe && step(5800).action==A::none);             // put away once
+        in.drawn=false;in.copy=true;in.copy_age_s=1;assert(step(6000).action==A::none);
+        in.drawn=true;assert(step(6100).action==A::recall);                             // drawn again while its copy lies around
+        in.drawn=false;in.copy_age_s=31;assert(step(7200).action==A::recall);           // left lying too long
+        in.copy_age_s=1;in.grip=1;in.busy=true;assert(step(8000).action==A::none);       // carrying: the grip is not the sword
+        in.busy=false;in.gameplay=false;in.grip=0;assert(step(8100).action==A::none);
+        in.gameplay=true;in.copy=false;in.grip=1;in.drawn=true;assert(step(9000).action==A::none && s.held()); // gripping a drawn sword holds it
+        in.gameplay=false;assert(step(9100).action==A::none);in.gameplay=true;assert(step(10000).action==A::none && s.held()); // wheel opened and closed
+        in.gameplay=false;in.grip=0;assert(step(10100).action==A::none);in.gameplay=true;
+        {const auto o=step(10200);assert(o.action==A::sheathe && !s.held());}           // let go inside the wheel: put away, not thrown
+    }
+    { // Full-grip gun: the wheel's gun stays until gripped; let go anywhere: holster; squeeze at the hip: draw.
+        using A=d2vr::GunGrip::Action;d2vr::GunGrip g;d2vr::GunGrip::In in{};in.gameplay=true;
+        auto step=[&](std::uint64_t t){in.now=t;return g.update(in);};
+        in.drawn=true;in.loaded=true;assert(step(0).action==A::none && step(5000).action==A::none); // wheel draw: kept
+        in.grip=1;assert(step(5100).action==A::none && g.held());
+        in.grip=0;assert(step(5200).action==A::holster);                                   // let go in front: back to the hip
+        in.drawn=false;in.empty=true;assert(step(5600).action==A::none);
+        in.grip=1;assert(step(6000).action==A::none);in.grip=0;step(6100);                 // squeeze away from the hip: nothing
+        in.zone=true;in.grip=1;in.draw_authorized=true;
+        {const auto o=step(7000);assert(o.action==A::none && !o.owns && o.reserved);}
+        {const auto o=step(7099);assert(o.action==A::none && o.reserved);}
+        {const auto o=step(7100);assert(o.action==A::draw && o.owns && !o.reserved);}
+        in.zone=false;in.empty=false;in.drawn=true;assert(step(7400).action==A::none);
+        in.zone=true;in.grip=0;assert(step(8000).action==A::holster);
+        in.drawn=false;in.empty=true;in.loaded=false;in.grip=1;assert(step(9000).action==A::none); // the hip holds no gun
+        in.grip=0;in.empty=false;in.drawn=true;in.busy=true;in.grip=1;assert(step(9500).action==A::none);
+    }
+    {
+        using A=d2vr::GunGrip::Action;
+        for(unsigned variant=0;variant<5;++variant) {
+            d2vr::GunGrip gun;d2vr::GripIntent intent;
+            d2vr::GunGrip::In in{};in.gameplay=in.zone=in.empty=in.loaded=true;
+            const auto step=[&](std::uint64_t now,float grip,float trigger,bool object=false) {
+                const auto classified=intent.update(grip,trigger,now,!gun.held(),100,true);
+                in.now=now;in.grip=grip;in.trigger=trigger;in.object_claim=object;
+                in.draw_authorized=classified.use && !classified.fist;
+                return gun.update(in);
+            };
+            step(1000,0,0);
+            assert(step(1010,1,variant==0?1.f:0.f,variant==3).action==A::none);
+            if(variant==0 || variant==1) {
+                assert(step(1109,1,1).action==A::none);
+                assert(step(1110,1,1).action==A::none);
+                assert(intent.kind()==d2vr::GripIntent::Kind::fist);
+                assert(step(1200,1,0).action==A::none);
+            } else if(variant==2 || variant==3) {
+                assert(step(1109,1,0,true).action==A::none);
+                assert(step(1110,1,0).action==A::none);
+                assert(step(1500,1,0).action==A::none);
+            } else {
+                assert(step(1110,1,0).action==A::draw);
+                assert(step(1120,1,1).action==A::none);
+                assert(intent.kind()==d2vr::GripIntent::Kind::drain && gun.held());
+                in.drawn=true;
+                assert(step(1200,0,0).action==A::holster);
+            }
+        }
+        d2vr::GunGrip gun;d2vr::GunGrip::In in{};
+        in.gameplay=in.empty=in.loaded=true;in.grip=1;in.now=1000;in.draw_authorized=true;
+        assert(gun.update(in).action==A::none);
+        in.zone=true;in.now=1500;assert(gun.update(in).action==A::none);
+        in.grip=0;gun.update(in);in.grip=1;in.now=1600;in.draw_authorized=false;gun.update(in);
+        in.now=1700;assert(gun.update(in).action==A::none);
+        in.busy=true;gun.update(in);in.busy=false;in.draw_authorized=true;in.now=1800;
+        assert(gun.update(in).action==A::none);
+        in.grip=0;gun.update(in);in.grip=1;in.now=1900;gun.update(in);in.gameplay=false;gun.update(in);
+        in.gameplay=true;in.now=2100;assert(gun.update(in).action==A::none);
+    }
+    {
+        using A=d2vr::GunGrip::Action;
+        for(unsigned rejection=0;rejection<3;++rejection) {
+            d2vr::GunGrip gun;d2vr::GunGrip::In in{};
+            in.gameplay=in.zone=in.empty=in.loaded=in.draw_authorized=true;
+            const auto step=[&](std::uint64_t now,float grip) {in.now=now;in.grip=grip;return gun.update(in);};
+            assert(step(1000,0).action==A::none);
+            assert(step(1010,1).reserved);
+            assert(step(1110,1).action==A::draw && gun.held());
+            if(rejection==0) gun.reject_draw();
+            else if(rejection==1) {
+                assert(step(1400,1).action==A::none && gun.held());
+                gun.reject_draw();
+            } else {
+                assert(step(2610,1).action==A::none && gun.held());
+                assert(step(2611,1).action==A::none && !gun.held());
+            }
+            assert(!gun.held());
+            const auto rejected=step(3000,1);
+            assert(rejected.action==A::none && !rejected.owns && !rejected.reserved && !gun.held());
+            in.drawn=true;
+            assert(step(3100,1).action==A::none && !gun.held());
+            assert(step(3200,0).action==A::none && !gun.held());
+            in.drawn=false;
+            assert(step(3300,1).reserved);
+            assert(step(3400,1).action==A::draw && gun.held());
+            in.drawn=true;
+            assert(step(3500,1).action==A::none && gun.held());
+            assert(step(5200,1).action==A::none && gun.held());
+            assert(step(5300,0).action==A::holster && !gun.held());
+        }
+        d2vr::GunGrip candidate;d2vr::GunGrip::In in{};
+        in.gameplay=in.zone=in.empty=in.loaded=in.draw_authorized=true;in.grip=1;in.now=1000;
+        assert(candidate.update(in).reserved);
+        candidate.reject_draw();in.now=1200;
+        const auto cancelled=candidate.update(in);
+        assert(!cancelled.reserved && !cancelled.owns && cancelled.action==A::none);
+    }
+    {
+        using Action=d2vr::GunGrip::Action;
+        for(unsigned outcome=0;outcome<6;++outcome) {
+            d2vr::GunGrip gun;d2vr::GunGrip::In input{};
+            input.gameplay=input.drawn=true;input.release_owner=41;input.grip=1;input.now=1000;
+            assert(gun.update(input).owns && gun.held());
+            input.gameplay=false;input.now=1010;
+            assert(gun.update(input).action==Action::none);
+            input.grip=0;input.now=1020;
+            const auto invalid_release=gun.update(input);
+            assert(invalid_release.action==Action::none && !invalid_release.reserved && !gun.held());
+            input.now=1030;assert(gun.update(input).action==Action::none);
+            if(outcome==1)input.release_owner=42;
+            if(outcome==2)input.release_owner=0;
+            if(outcome==3)input.drawn=false;
+            if(outcome==4)input.object_claim=true;
+            if(outcome==5)gun.reject_draw();
+            input.gameplay=true;input.busy=true;input.now=1040;
+            assert(gun.update(input).action==Action::none);
+            input.busy=false;input.now=1050;
+            assert(gun.update(input).action==(outcome==0?Action::holster:Action::none));
+            input.now=1060;assert(gun.update(input).action==Action::none);
+        }
+        d2vr::GunGrip regripped;d2vr::GunGrip::In input{};
+        input.gameplay=input.drawn=true;input.release_owner=41;input.grip=1;input.now=2000;
+        assert(regripped.update(input).owns);
+        input.gameplay=false;input.grip=0;input.now=2010;regripped.update(input);
+        input.grip=1;input.now=2020;assert(regripped.update(input).action==Action::none);
+        input.gameplay=true;input.release_owner=42;input.now=2030;
+        assert(regripped.update(input).action==Action::none && regripped.held());
+        input.grip=0;input.now=2040;assert(regripped.update(input).action==Action::holster);
+        d2vr::GunGrip busy_release;input={};
+        input.gameplay=input.drawn=true;input.release_owner=51;input.grip=1;input.now=3000;
+        busy_release.update(input);input.busy=true;input.grip=0;input.now=3010;
+        assert(busy_release.update(input).action==Action::none);
+        input.now=3020;assert(busy_release.update(input).action==Action::none);
+        input.busy=false;input.now=3030;assert(busy_release.update(input).action==Action::holster);
     }
     { // Wheel art zones: measured capture (553x306 sim, 0.8 m quad) and a square headset capture (2496x2688).
         const double h=.8*306/553;

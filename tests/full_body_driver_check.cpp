@@ -57,6 +57,45 @@ int main() {
         assert(length(rig::position(palm)-rig::position(native_palm))<.005);
         for(unsigned axis=0;axis<3;++axis)assert(length(rig::column(palm,axis)-rig::column(native_palm,axis))<.01);
     }
+    {
+        Driver paired;paired.tune(0,1);
+        for(unsigned side=0;side<2;++side)(void)paired.arm(side,native_arm[side],identity);
+        paired.note_root(identity);
+        auto first=tracking;first.tick=1000;first.source_tick=990;first.seconds=1.;first.tracking_revision=1;
+        first.pose_epoch=1;first.reference_epoch=2;first.mapping_revision=3;first.tracked_hands=3;
+        paired.publish(first,{});assert(paired.body(native_body,identity,71));
+        assert(paired.arm_frozen(0,native_arm[0],identity,1000,71));
+        const auto first_diagnostic=paired.diagnostic();assert(first_diagnostic.palm_source[0].valid);
+        auto latest=first;latest.tick=1010;latest.source_tick=1000;latest.seconds=1.01;latest.tracking_revision=2;
+        latest.grip[0].p.x+=.3;latest.grip[1].p.x+=.3;paired.publish(latest,{});
+        assert(paired.arm_frozen(1,native_arm[1],identity,1010,71));
+        const auto split=paired.diagnostic();
+        assert(split.tracking.tracking_revision==2 && split.palm_source[1].tracking_revision==1);
+        assert(split.palm_source[0].callback==first_diagnostic.palm_source[0].callback);
+        assert(length(split.palm_source[1].grip.position-first.grip[1].p)<1e-9);
+
+        auto snapped=identity;snapped[0]=10;snapped[1]=20;snapped[3]=0;snapped[4]=1;snapped[6]=-1;snapped[7]=0;
+        paired.note_root(snapped);assert(paired.arm_frozen(0,native_arm[0],identity,1010,71));
+        const auto mapped=paired.diagnostic();const auto map=frame_of(snapped).rigid;
+        const auto expected=body::mul(map,first.grip[0]);
+        assert(length(mapped.palm_source[0].grip.position-expected.p)<1e-9);
+        const auto wanted_palm=body::mul(map,Xf{{},first_diagnostic.palm_source[0].palm.position}).p;
+        assert(length(mapped.palm_source[0].palm.position-wanted_palm)<1e-5);
+
+        auto scaled=identity;scaled[12]=scaled[13]=scaled[14]=1.2f;
+        const auto scaled_arm=paired.arm_frozen(0,native_arm[0],scaled,1010,71);assert(scaled_arm);
+        std::array<Transform,4> scaled_knuckles;const char* names[]={"index","medium","ring","pinky"};
+        for(unsigned index=0;index<4;++index)scaled_knuckles[index]=scaled_arm->joints[left.find(std::string("left_")+names[index]+"_02_jnt")];
+        const auto actual_palm=to_world(frame_of(scaled),to_xf(rig::hand_bind_grip(scaled_arm->joints[left.find("left_wrist_jnt")],scaled_knuckles)));
+        const auto scaled_diag=paired.diagnostic();
+        assert(length(scaled_diag.palm_source[0].palm.position-actual_palm.p)<1e-9);
+
+        DrawnPalmResidual cache;auto context=mapped.palm_source[0].context;
+        cache.note(mapped.palm_source[0],context,1010);
+        cache.note(mapped.palm_source[0],context,1480);
+        const auto grip=mapped.palm_source[0].grip;
+        assert(length(cache.frame(grip,1491).position-grip.position)==0);
+    }
     // Arm-first callbacks solve the newest publication from the retained native body.
     tracking.tick=1000;driver.publish(stamp(tracking),{});
     assert(driver.arm(0,native_arm[0],identity));
@@ -182,8 +221,10 @@ int main() {
     for(unsigned side=0;side<2;++side) {
         const auto& a=side?right:left;const std::string prefix=side?"right":"left";
         const auto wrist=static_cast<unsigned>(a.find(prefix+"_wrist_jnt")),index=static_cast<unsigned>(a.find(prefix+"_index_03_jnt"));
-        const auto local=[&](bool empty) {
+        const auto local=[&](bool empty,float turn=-1,bool axes=false) {
             Driver d;d.tune(0,1);auto tr=tracking;tr.tick=5000;tr.grip_value[side]=tr.trigger[side]=1;tr.hand_empty[side]=empty;
+            if(turn>=0) {tr.has_finger[side]=true;for(auto& f:tr.finger_turn[side]) for(auto& t:f) t=turn;}
+            if(axes) {tr.has_finger_axis[side]=true;for(auto& f:tr.finger_axis[side]) for(auto& ax:f) {ax[0]=0;ax[1]=0;ax[2]=1;}}
             for(unsigned k=0;k<2;++k)(void)d.arm(k,native_arm[k],identity);
             d.publish(stamp(tr),{});assert(d.body(native_body,identity));
             const auto r=d.arm(side,native_arm[side],identity);assert(r);
@@ -192,6 +233,11 @@ int main() {
         const auto empty=local(true),held=local(false);
         const auto flat=body::mul(body::inverse(a.bind[wrist]),a.bind[index]);
         assert(length(held.p-flat.p)<1e-3);assert(length(empty.p-flat.p)>.003);
+        // The finger contact turns reach the solver through the tracking publication.
+        assert(length(local(true,1.2f).p-local(true,0.f).p)>.01);
+        // ... and so do the hinge axes the contact tested them about: a different hinge puts the joint somewhere else.
+        assert(length(local(true,1.2f,true).p-local(true,1.2f).p)>.003);
+        assert(length(local(true,0.f,true).p-local(true,0.f).p)<1e-4); // (no turn, no difference)
     }
     {   // Stick locomotion at 5 m/s, engine order: a frame's animation uploads run before that frame's
         // render-thread publication, so uploads of frame n use the solution published at n-1. The
@@ -233,5 +279,28 @@ int main() {
     assert(std::abs(driver.diagnostic().configured_palm_span-fit.palm_span_metres)<.002);
     assert(!driver.diagnostic().fit->standing_eye_height_metres);
     driver.clear_calibration();assert(driver.fit_epoch()==0);
+    {
+        Driver socket_driver;socket_driver.tune(0,1);
+        auto current_native=native_arm[0];const auto attachment=left.find("left_hand_attachment_jnt");const auto parent=left.parent[attachment];
+        auto local=body::mul(body::inverse(to_xf(current_native[parent])),to_xf(current_native[attachment]));
+        local.q=body::mul(local.q,body::axis_angle({0,0,1},.6));current_native[attachment]=to_transform(body::mul(to_xf(current_native[parent]),local));
+        Tracking socket_tracking=tracking;socket_tracking.tick=10000;socket_tracking.epoch=91;
+        socket_tracking.hand_empty[0]=true;socket_tracking.native_socket_token[0]=77;
+        socket_tracking.raw_grip_hands=socket_tracking.tracked_hands=3;
+        socket_tracking.raw_grip[0]=socket_tracking.grip[0];socket_tracking.raw_grip[1]=socket_tracking.grip[1];
+        socket_driver.arm(0,current_native,identity);socket_driver.arm(1,native_arm[1],identity);
+        socket_driver.publish(stamp(socket_tracking),{});assert(socket_driver.body(native_body,identity));
+        const auto posed=socket_driver.arm_frozen(0,current_native,identity);assert(posed && posed->tracking.native_socket_token[0]==77 && !posed->raw_joints);
+        const auto retained=body::mul(body::inverse(to_xf(posed->joints[parent])),to_xf(posed->joints[attachment]));
+        const auto angle=[](Quaternion first,Quaternion second) {
+            return 2*std::acos(std::min(1.,std::abs(first.x*second.x+first.y*second.y+first.z*second.z+first.w*second.w)));
+        };
+        assert(angle(retained.q,local.q)<1e-5);
+        ++socket_tracking.tick;socket_tracking.native_socket_token[0]=0;
+        socket_driver.publish(stamp(socket_tracking),{});assert(socket_driver.body(native_body,identity));
+        const auto denied=socket_driver.arm_frozen(0,current_native,identity);assert(denied);
+        const auto bind=body::mul(body::inverse(to_xf(denied->joints[parent])),to_xf(denied->joints[attachment]));
+        assert(angle(bind.q,retained.q)>.5);
+    }
     std::cout<<"PASS: full-body verified palm mapping construction, accepted fit validation and native model/world roundtrip\n";
 }

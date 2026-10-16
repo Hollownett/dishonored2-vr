@@ -85,7 +85,7 @@ struct NativeAttachmentPoseCheck {
         };
         query(0,true);query(1,true); // 200ms tracking source supports arm and item together.
         const auto source=sources[0];
-        attachment.set_allowed(native_attachment_allowed_mask(3,1,true,true,true,false),source.epoch,source.tick,
+        attachment.set_allowed(native_attachment_allowed_mask(3,1,true,true,true),source.epoch,source.tick,
             source.revision,source.reference_epoch,source.mapping_revision);
         query(0,false);query(1,true);
         assert(!attachment.publish(0,reinterpret_cast<std::uintptr_t>(fixtures[0].animation.data()),

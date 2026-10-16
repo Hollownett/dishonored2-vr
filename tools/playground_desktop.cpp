@@ -15,7 +15,8 @@ static std::wstring quote(const wchar_t* value) {
     out.append(2*slashes,L'\\');return out+L'"';
 }
 int wmain(int argc,wchar_t** argv) {
-    const bool native=argc==4 && std::wstring(argv[1])==L"--native-fresh";
+    const bool private_slot=argc==5 && std::wstring(argv[4])==L"--load-slot-one";
+    const bool native=(argc==4 || private_slot) && std::wstring(argv[1])==L"--native-fresh";
     if(!native && (argc<2 || std::wstring(argv[1]).find(L"playground-owned-")!=0 ||
        std::wstring(argv[1]).find_first_of(L"/\\:")!=std::wstring::npos)) {
         std::cerr<<"Only a local playground-owned-* fixture executable is permitted\n";return 2;
@@ -51,6 +52,11 @@ int wmain(int argc,wchar_t** argv) {
         command=L"Dishonored2.exe +set net_usePlatformBackend 0 +set r_fullscreen 0 +set r_mode 0"
             L" +set r_windowWidth 640 +set r_windowHeight 480 +set fs_basepath "+quote(argv[2])+
             L" +set fs_savepath "+quote(save.c_str());
+        if(private_slot) {
+            std::ifstream checkpoint("fs-save/base/savegame/SLOT01/checkpoint.dat",std::ios::binary);
+            if(!checkpoint) {CloseHandle(job);CloseDesktop(desktop);return 8;}
+            command+=L" +loadgame 1";
+        }
     } else for(int i=1;i<argc;++i) {if(i>1)command+=L' ';command+=quote(argv[i]);}
     STARTUPINFOW startup{};startup.cb=sizeof(startup);startup.lpDesktop=const_cast<wchar_t*>(name.c_str());
     startup.dwFlags=STARTF_USESTDHANDLES;startup.hStdInput=GetStdHandle(STD_INPUT_HANDLE);

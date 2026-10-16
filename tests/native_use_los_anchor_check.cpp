@@ -63,7 +63,7 @@ bool anchor_read(std::uintptr_t at,void* output,std::size_t size) {
 namespace d2vr {
 struct NativeInteractionRangeFixture {
     static void run() {
-        for(unsigned mode=0;mode<22;++mode) {
+        for(unsigned mode=0;mode<24;++mode) {
             fixture();fixture_point={.2f,.3f,.4f};fixture_calls=0;fixture_mode=mode;
             put(fixture_sensor,fixture_base+0x1b403b8);put(fixture_sensor+0x18,rig::Identity{7,10});put(fixture_sensor+0x10,fixture_player);
             put(fixture_sensor+0x40,fixture_camera);put(fixture_sensor+0x38,static_cast<unsigned char>(1));
@@ -78,8 +78,15 @@ struct NativeInteractionRangeFixture {
             aim.base_=fixture_base;aim.read_=anchor_read;aim.logic_=logic;aim.route_=true;aim.active_=true;aim.occlusion_=native_los;
             const auto camera=*native_player_camera(anchor_read,fixture_base,fixture_camera);const auto now=GetTickCount64();
             WorldTrackedPose hand{{},{{{1,0,0},{0,1,0},{0,0,1}}}};aim.publish(camera,hand,1,now,true,0);
+            if(mode==22) {
+                auto grip=hand;grip.position={.04,.01,0};grip.basis={Vec3{0,1,0},Vec3{-1,0,0},Vec3{0,0,1}};
+                aim.publish_hands(camera,{hand,std::nullopt},1,now,{grip.position,std::nullopt},{},{grip,std::nullopt});
+                assert(aim.hands_[0].grip && aim.hands_[0].grip->position.x==.04 && aim.hands_[0].grip->basis[0].y==1);
+                assert(aim.hands_[0].hand.position.x==0 && aim.hands_[0].hand.basis[0].x==1);
+            }
             NativeInteractionAim::Context scope{camera,aim.hands_[0],0,0,fixture_sensor,aim.routing_.revision()};
             scope.sensor_identity={7,10};
+            if(mode==22 || mode==23) {aim.full_hand_enabled_=true;put(fixture_entity,fixture_base+0x1c5e258);scope.hand.reach=mode==23;}
             aim.queued_revision_[0]=scope.revision;NativeInteractionAim::context_=&scope;
             if(mode==6)scope.hand.tick=now-251;
             const auto caller=mode==7?fixture_base+0x3b8b47:fixture_base+(mode==12?0x3b8b05:0x3b87b5);
@@ -111,8 +118,8 @@ struct NativeInteractionRangeFixture {
                     aim.publish(camera,hand,1,now+251,true,0);
                     assert(!aim.qualified_target(now+251)); // publications do not refresh native selection/query age
                 }else assert(!qualified || !qualified->point);
-            }else if(mode==0 || mode==12) {
-                assert(point && std::abs(point->x-.2)<1e-6 && std::abs(point->y-.3)<1e-6);
+            }else if(mode==0 || mode==12 || mode==22 || mode==23) {
+                assert(point && std::abs(point->x-.2)<1e-6 && std::abs(point->y-.3)<1e-6 && std::abs(point->z-.4)<1e-6);
                 put(fixture_entity+0xa8,unsigned{0x10002});assert(!aim.target_point_locked(0,GetTickCount64()));
             }else if(mode==14)assert(point && point->x==1 && point->y==1 && point->z==1);
             else assert(!point);

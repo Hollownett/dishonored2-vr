@@ -20,6 +20,7 @@ int main() {
     memory.put(assassin+0x20,static_cast<unsigned char>(0));memory.put(block+0x20,static_cast<unsigned char>(1));
     action=reader.poll(memory,base_address,player_address,101);
     assert(!action.scripted && action.combat && !action.owns_camera(true));
+    assert(action.owns_camera(true,true));
     memory.put(block+0x20,static_cast<unsigned char>(0));memory.put(attack+0x20,static_cast<unsigned char>(1));
     action=reader.poll(memory,base_address,player_address,102);
     assert(!action.scripted && action.combat && !action.owns_camera(true));

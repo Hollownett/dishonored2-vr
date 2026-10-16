@@ -3,20 +3,98 @@
 // Physics allocation/ownership: 0x7fe310, 0x1b2290 and 0x694c20.
 #include "game_camera.hpp"
 #include "game_rig.hpp"
+#include "native_action_camera.hpp"
 
 namespace d2vr {
+template<class Read> bool native_shadow_walk_active(Read& read,std::uintptr_t base,
+        std::uintptr_t player,std::uintptr_t controller) {
+    using namespace rig;
+    if(!typed(read,base,controller,0x1c72918) ||
+       value<std::uint8_t>(read,controller+0x172)!=0) return false;
+    const auto machine=value<std::uintptr_t>(read,controller+0x58);
+    if(!machine || !typed(read,base,*machine,0x1c73d58) ||
+       value<std::uintptr_t>(read,*machine+0x10)!=player) return false;
+    const auto machine_id=started(read,*machine),controller_id=started(read,controller);
+    const auto components=list(read,player+0x268,4096);
+    if(!machine_id || !controller_id || !components) return false;
+    std::optional<std::uint32_t> member;
+    for(std::uint32_t i=0;i<components->packed_count;++i) {
+        const auto component=value<std::uintptr_t>(read,components->data+i*8);
+        if(!component) return false;
+        if(*component==*machine) {if(member) return false;member=i;}
+    }
+    if(!member) return false;
+    const auto pool=value<std::uintptr_t>(read,*machine+0x90);
+    if(!pool || !pointer(*pool)) return false;
+    const auto mode=value<std::uintptr_t>(read,*pool+8);
+    if(!mode || !typed(read,base,*mode,0x1c83ed8) || value<unsigned>(read,*mode+0x60)!=2u) return false;
+    std::array<std::uintptr_t,native_action_camera_states.size()> scripted{};
+    for(std::size_t i=0;i<scripted.size();++i) {
+        const auto& entry=native_action_camera_states[i];if(entry.combat) continue;
+        const auto state=value<std::uintptr_t>(read,*pool+0x10+entry.index*8);
+        if(!state) return false;
+        scripted[i]=*state;
+        if(*state && (!typed(read,base,*state,entry.vtable) ||
+           value<unsigned>(read,*state+8)!=entry.index || value<std::uintptr_t>(read,*state+0x10)!=machine ||
+           value<std::uint8_t>(read,*state+0x20)!=0)) return false;
+    }
+    for(unsigned index=0;index<2;++index) {
+        const auto at=*pool+0x10+index*8;
+        const auto state=value<std::uintptr_t>(read,at);
+        if(!state || !typed(read,base,*state,0x1c7ed28) ||
+           value<unsigned>(read,*state+8)!=index ||
+           value<std::uintptr_t>(read,*state+0x10)!=machine ||
+           value<std::uint8_t>(read,*state+0x20)!=1) continue;
+        const auto decl=value<std::uintptr_t>(read,*state+0x18);
+        if(!decl || !typed(read,base,*decl,0x1c7ebf8) || value<unsigned>(read,*decl+0x60)!=index) return false;
+        for(std::size_t i=0;i<scripted.size();++i) {
+            const auto& entry=native_action_camera_states[i];if(entry.combat) continue;
+            if(value<std::uintptr_t>(read,*pool+0x10+entry.index*8)!=scripted[i] ||
+               (scripted[i] && (!typed(read,base,scripted[i],entry.vtable) ||
+                value<unsigned>(read,scripted[i]+8)!=entry.index ||
+                value<std::uintptr_t>(read,scripted[i]+0x10)!=machine ||
+                value<std::uint8_t>(read,scripted[i]+0x20)!=0))) return false;
+        }
+        const auto after=list(read,player+0x268,4096);
+        return after && after->data==components->data && after->packed_count==components->packed_count &&
+            after->packed_capacity==components->packed_capacity &&
+            value<std::uintptr_t>(read,after->data+*member*8)==machine &&
+            typed(read,base,controller,0x1c72918) &&
+            value<std::uint8_t>(read,controller+0x172)==0 &&
+            value<std::uintptr_t>(read,controller+0x10)==player &&
+            value<std::uintptr_t>(read,controller+0x58)==machine &&
+            typed(read,base,*machine,0x1c73d58) &&
+            value<std::uintptr_t>(read,*machine+0x10)==player &&
+            value<std::uintptr_t>(read,*machine+0x90)==pool &&
+            value<std::uintptr_t>(read,*pool+8)==mode && typed(read,base,*mode,0x1c83ed8) && value<unsigned>(read,*mode+0x60)==2u &&
+            value<std::uintptr_t>(read,at)==state && typed(read,base,*state,0x1c7ed28) &&
+            value<unsigned>(read,*state+8)==index &&
+            value<std::uintptr_t>(read,*state+0x10)==machine &&
+            value<std::uintptr_t>(read,*state+0x18)==decl && typed(read,base,*decl,0x1c7ebf8) &&
+            value<unsigned>(read,*decl+0x60)==index &&
+            value<std::uint8_t>(read,*state+0x20)==1 &&
+            started(read,*machine)==machine_id && started(read,controller)==controller_id;
+    }
+    return false;
+}
+
 struct NativePlayerCamera {
     std::uintptr_t player{},camera{},body{},controller{},physics{},heading_delegate{};
     rig::Identity camera_identity{},physics_identity{};
     int mode{},target_mode{};
-    bool blend_body_yaw{},code_lock{};
+    bool blend_body_yaw{},code_lock{},shadow_walk{};
     float pitch{},yaw{},roll{},heading{},pitch_velocity{},yaw_velocity{},physics_yaw_velocity{},physics_yaw_impulse{};
     std::array<float,3> aim_origin{};
     std::array<float,9> aim_axis{};
     std::array<float,9> entity_axis{};
     std::array<float,2> look{};
     std::optional<GameCameraPose> view;
-    bool authored_view() const noexcept {return mode!=0 || target_mode!=0 || blend_body_yaw || code_lock;}
+    bool tracked_shadow_walk() const noexcept {
+        return shadow_walk && mode==7 && target_mode==7 && !blend_body_yaw && !code_lock;
+    }
+    bool authored_view() const noexcept {
+        return !tracked_shadow_walk() && (mode!=0 || target_mode!=0 || blend_body_yaw || code_lock);
+    }
 };
 
 template<class Read> std::optional<NativePlayerCamera> native_player_camera(
@@ -75,6 +153,16 @@ template<class Read> std::optional<NativePlayerCamera> native_player_camera(
        value<std::uintptr_t>(read,camera+0x25160)!=s.physics ||
        value<std::uintptr_t>(read,s.physics+0x48)!=delegate ||
        value<std::uintptr_t>(read,*game+0x3130b0)!=player) return {};
+    if(s.mode==7 && s.target_mode==7 && !s.blend_body_yaw && !s.code_lock) {
+        s.shadow_walk=native_shadow_walk_active(read,base,*player,s.controller);
+        if(s.shadow_walk && (value<std::array<int,2>>(read,camera+0x25200)!=std::array<int,2>{7,7} ||
+           value<std::uint8_t>(read,camera+0x251b9)!=0 || value<std::uint8_t>(read,camera+0x25260)!=0 ||
+           value<Identity>(read,camera+0x18)!=id || value<std::uintptr_t>(read,camera+0x10)!=player ||
+           value<std::uintptr_t>(read,camera+0x25158)!=s.controller ||
+           value<std::uintptr_t>(read,camera+0x25160)!=s.physics || value<Identity>(read,s.physics+0x18)!=physics_id ||
+           value<std::uintptr_t>(read,camera+0x25170)!=s.body || value<std::uintptr_t>(read,s.physics+0x48)!=delegate ||
+           value<std::uintptr_t>(read,base+0x39a5290)!=game || value<std::uintptr_t>(read,*game+0x3130b0)!=player)) return {};
+    }
     return s;
 }
 template<class Read> std::optional<NativePlayerCamera> find_native_player_camera(Read& read,std::uintptr_t base) {

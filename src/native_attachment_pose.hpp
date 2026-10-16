@@ -7,12 +7,17 @@
 #include <atomic>
 #include <cstring>
 #include <mutex>
+#include <new>
 #include <stdexcept>
+#include <type_traits>
+#include <utility>
 
 namespace d2vr {
+// native_hands: the arms the player state owns (body_ik native_ownership). A carried body owns only the right arm, so the
+// left keeps its tracked palette (was revoked for every carry: the left arm played the carry clip, headset 2026-10-14).
 inline unsigned native_attachment_allowed_mask(unsigned tracked_hands,unsigned native_hands,
-        bool gameplay,bool focused,bool owner_verified,bool carry_or_drop) noexcept {
-    return gameplay && focused && owner_verified && !carry_or_drop?(tracked_hands&~native_hands&3u):0u;
+        bool gameplay,bool focused,bool owner_verified) noexcept {
+    return gameplay && focused && owner_verified?(tracked_hands&~native_hands&3u):0u;
 }
 // Weapons, powers and hand effects follow the tracked hand.
 // 0x53d3f0 (7 args) and 0x53d6a0 (5 args) read ONE arm joint from the animation's
@@ -23,11 +28,24 @@ inline unsigned native_attachment_allowed_mask(unsigned tracked_hands,unsigned n
 // used the untracked animation, so the sword floated away from the hand.
 // While a fresh tracked palette exists for that animation, the joint's slot holds
 // the tracked transform for the duration of the original call, then is restored.
+struct NativeAttachmentAdmission {
+    void* context{};
+    std::uint64_t receipt{};
+    bool (*acquire)(void*,std::uint64_t) noexcept{};
+    void (*release)(void*,std::uint64_t) noexcept{};
+};
+static_assert(std::is_standard_layout_v<NativeAttachmentAdmission> && std::is_trivially_copyable_v<NativeAttachmentAdmission>);
+enum class NativeAttachmentReceiptFramePolicy {exact,current_parent};
 struct NativeAttachmentSource {
     std::uint64_t tick{},revision{},epoch{},reference_epoch{},mapping_revision{};
     std::uintptr_t model{};rig::Identity animation_identity{};
     std::array<float,15> model_frame{};
     std::uint64_t source_tick{};
+    NativeAttachmentAdmission admission{};
+    std::uint64_t diagnostic_socket_token{};
+    unsigned diagnostic_side{};
+    void (*observe_socket)(const NativeAttachmentSource&,std::uintptr_t,short,unsigned,bool,bool,const rig::Transform*) noexcept{};
+    NativeAttachmentReceiptFramePolicy receipt_frame_policy{NativeAttachmentReceiptFramePolicy::exact};
 };
 class NativeAttachmentPose {
     friend struct NativeAttachmentPoseCheck;
@@ -45,6 +63,25 @@ class NativeAttachmentPose {
     unsigned allowed_{};std::uint64_t policy_epoch_{},policy_tick_{},policy_revision_{},policy_reference_epoch_{},policy_mapping_revision_{};
     std::atomic<std::uint64_t> substitutions_{},calls_{};
     static constexpr std::uint64_t freshness_ms=tracked_pose_freshness_ms;
+    static bool admission_valid(const NativeAttachmentAdmission& value) noexcept {
+        return (!value.context && !value.receipt && !value.acquire && !value.release) ||
+            (value.context && value.receipt && value.acquire && value.release);
+    }
+    static bool same_source(const NativeAttachmentSource& first,const NativeAttachmentSource& second) noexcept {
+        return first.tick==second.tick && first.revision==second.revision && first.epoch==second.epoch &&
+            first.reference_epoch==second.reference_epoch && first.mapping_revision==second.mapping_revision &&
+            first.model==second.model && first.animation_identity==second.animation_identity && first.model_frame==second.model_frame &&
+            first.source_tick==second.source_tick && first.admission.context==second.admission.context &&
+            first.admission.receipt==second.admission.receipt && first.admission.acquire==second.admission.acquire && first.admission.release==second.admission.release &&
+            first.receipt_frame_policy==second.receipt_frame_policy;
+    }
+    static bool receipt_policy_valid(const NativeAttachmentSource& source) noexcept {
+        return source.receipt_frame_policy==NativeAttachmentReceiptFramePolicy::exact ||
+            (source.receipt_frame_policy==NativeAttachmentReceiptFramePolicy::current_parent && source.admission.receipt && admission_valid(source.admission));
+    }
+    static bool receipt_frame_exact(const NativeAttachmentSource& source) noexcept {
+        return source.admission.receipt && source.receipt_frame_policy==NativeAttachmentReceiptFramePolicy::exact;
+    }
     bool source_retained(const NativeAttachmentSource& source,std::uint64_t now) const {
         return source.tick && source.tick<=policy_tick_ && source.revision && source.revision<=policy_revision_ &&
             source.reference_epoch && rig::pointer(source.model) && source.epoch==policy_epoch_ &&
@@ -112,44 +149,103 @@ class NativeAttachmentPose {
     static void restore_slot(std::uintptr_t at,const void* tracked,const void* saved) noexcept {
         __try {if(!std::memcmp(reinterpret_cast<void*>(at),tracked,64)) std::memcpy(reinterpret_cast<void*>(at),saved,64);} __except(EXCEPTION_EXECUTE_HANDLER) {}
     }
-    template<class Call> std::uint64_t around(std::uintptr_t anim,int state,short joint,Call call) {
+    __declspec(noinline) static std::uint64_t invoke_cleanup(std::uint64_t(*invoke)(void*),void* frame,void(*cleanup)(void*) noexcept,bool* returned) {
+        std::uint64_t result{};
+        __try {result=invoke(frame);*returned=true;}
+        __finally {cleanup(frame);}
+        return result;
+    }
+    template<class Call> struct CallFrame {
+        NativeAttachmentPose* self;
+        std::uintptr_t animation;
+        int state;
+        short joint;
+        std::decay_t<Call> call;
+        std::uintptr_t at{};
+        rig::Transform tracked{};
+        std::array<unsigned char,64> saved{};
+        NativeAttachmentSource admitted_source{};
+        NativeAttachmentSource observed_source{};
+        unsigned observed_stage{};
+        bool returned{};
+        bool locked{},written{},admitted{};
+        CallFrame(NativeAttachmentPose* owner,std::uintptr_t anim,int pose_state,short index,Call&& action)
+            noexcept(std::is_nothrow_constructible_v<std::decay_t<Call>,Call&&>):
+            self(owner),animation(anim),state(pose_state),joint(index),call(std::forward<Call>(action)) {}
+        void unlock() noexcept {if(locked) {locked=false;self->mutex_.unlock();}}
+    };
+    template<class Frame> std::uint64_t around_frame(Frame& frame) {
+        const auto anim=frame.animation;const auto state=frame.state;const auto joint=frame.joint;
         ++calls_;
-        if(!active_.load(std::memory_order_acquire) || state!=3 || joint<0 || joint>=69) return call();
-        std::unique_lock<std::mutex> lock(mutex_);
+        if(!active_.load(std::memory_order_acquire) || state!=3 || joint<0 || joint>=69) return frame.call();
+        mutex_.lock();frame.locked=true;
         const auto now=GetTickCount64();
-        if(!policy_epoch_ || now<policy_tick_ || now-policy_tick_>freshness_ms) {sides_={};lock.unlock();return call();}
+        if(!policy_epoch_ || now<policy_tick_ || now-policy_tick_>freshness_ms) {sides_={};frame.unlock();return frame.call();}
         Side* side=nullptr;
         for(unsigned i=0;i<2;++i) {
             auto& s=sides_[i];
-            if(s.animation && (!source_retained(s.source,now) || !frame_current(s.animation,s.source,false))) s={};
+            if(s.animation && (!source_retained(s.source,now) || !frame_current(s.animation,s.source,receipt_frame_exact(s.source)))) s={};
             if((allowed_&(1u<<i)) && s.animation && s.animation==anim) side=&s;
         }
-        std::uintptr_t at{};
-        if(!side) {lock.unlock();return call();}
-        if(!slot(anim,state,joint,at) || at!=side->first_slot+static_cast<std::uintptr_t>(joint)*64) {
-            *side={};lock.unlock();return call(); // Changed state-3 mapping revokes the retained palette.
+        if(!side) {frame.unlock();return frame.call();}
+        frame.observed_source=side->source;frame.observed_stage=1;
+        if(side->source.admission.receipt) {
+            const auto side_index=static_cast<std::size_t>(side-sides_.data());frame.admitted_source=side->source;
+            frame.unlock();
+            const auto& admission=frame.admitted_source.admission;
+            if(!admission.acquire(admission.context,admission.receipt)) {frame.observed_stage=2;return frame.call();}
+            frame.admitted=true;mutex_.lock();frame.locked=true;side=&sides_[side_index];
+            if(!active_.load(std::memory_order_acquire) || !(allowed_&(1u<<side_index)) || side->animation!=anim ||
+               !same_source(side->source,frame.admitted_source) || !source_retained(side->source,GetTickCount64()) || !frame_current(anim,side->source,receipt_frame_exact(side->source))) {
+                frame.observed_stage=3;frame.unlock();return frame.call();
+            }
         }
-        const auto& tracked=side->joints[static_cast<unsigned>(joint)];
-        std::array<unsigned char,64> saved{};
-        if(!read_(at,saved.data(),64)) {lock.unlock();return call();}
-        const bool written=copy_slot(at,tracked.f.data());
-        if(written) ++substitutions_;
+        if(!slot(anim,state,joint,frame.at) || frame.at!=side->first_slot+static_cast<std::uintptr_t>(joint)*64) {
+            frame.observed_stage=4;*side={};frame.unlock();return frame.call(); // Changed state-3 mapping revokes the retained palette.
+        }
+        frame.tracked=side->joints[static_cast<unsigned>(joint)];
+        if(!read_(frame.at,frame.saved.data(),64)) {frame.observed_stage=5;frame.unlock();return frame.call();}
+        frame.written=copy_slot(frame.at,frame.tracked.f.data());
+        frame.observed_stage=frame.written?6u:7u;
+        if(frame.written) ++substitutions_;
         // Restore only if the slot still holds our value; a concurrent native
         // animation write of a new frame must win.
-        struct Restore {std::uintptr_t at;const rig::Transform* tracked;const std::array<unsigned char,64>* saved;bool written;
-            ~Restore() {if(written) restore_slot(at,tracked->f.data(),saved->data());}
-        } restore{at,&tracked,&saved,written};
-        return call();
+        return frame.call();
+    }
+    template<class Call> std::uint64_t around(std::uintptr_t anim,int state,short joint,Call&& call) {
+        using Frame=CallFrame<Call>;
+        static_assert(std::is_nothrow_constructible_v<std::decay_t<Call>,Call&&>);
+        alignas(Frame) unsigned char storage[sizeof(Frame)];
+        auto* frame=::new(static_cast<void*>(storage)) Frame(this,anim,state,joint,std::forward<Call>(call));
+        const auto invoke=[](void* raw)->std::uint64_t {
+            auto& value=*static_cast<Frame*>(raw);return value.self->around_frame(value);
+        };
+        const auto cleanup=[](void* raw) noexcept {
+            auto* value=static_cast<Frame*>(raw);
+            if(value->written)restore_slot(value->at,value->tracked.f.data(),value->saved.data());
+            value->unlock();
+            if(value->admitted) {
+                const auto& admission=value->admitted_source.admission;
+                admission.release(admission.context,admission.receipt);
+            }
+            if(value->observed_source.diagnostic_socket_token && value->observed_source.observe_socket)
+                value->observed_source.observe_socket(value->observed_source,value->animation,value->joint,value->observed_stage,
+                    value->written,value->returned,value->written?&value->tracked:nullptr);
+            value->~Frame();
+        };
+        return invoke_cleanup(invoke,frame,cleanup,&frame->returned);
     }
     static std::uint64_t __fastcall query_hook(std::uintptr_t anim,int state,short joint,void* a,void* b,void* c,void* d) {
         auto& self=*instance_;++self.depth_;
-        struct Depth {std::atomic<unsigned>& d;~Depth(){--d;}} guard{self.depth_};
-        return self.around(anim,state,joint,[&]{return self.query_(anim,state,joint,a,b,c,d);});
+        const auto original=self.query_;
+        __try {return self.around(anim,state,joint,[=]{return original(anim,state,joint,a,b,c,d);});}
+        __finally {--self.depth_;}
     }
     static std::uint64_t __fastcall reader_hook(std::uintptr_t anim,int state,short joint,void* a,void* b) {
         auto& self=*instance_;++self.depth_;
-        struct Depth {std::atomic<unsigned>& d;~Depth(){--d;}} guard{self.depth_};
-        return self.around(anim,state,joint,[&]{return self.reader_(anim,state,joint,a,b);});
+        const auto original=self.reader_;
+        __try {return self.around(anim,state,joint,[=]{return original(anim,state,joint,a,b);});}
+        __finally {--self.depth_;}
     }
 public:
     // Publish native ownership BEFORE blend weights ramp. Revocation clears old
@@ -172,7 +268,7 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);const auto now=GetTickCount64();
         sides_[side]={}; // Rejected/replaced uploads must never leave an older palette alive.
         if(!(allowed_&(1u<<side)) || !policy_epoch_ || now<policy_tick_ || now-policy_tick_>freshness_ms ||
-           !source_allowed(source,now) || !animation || !first_slot || !frame_current(animation,source,true) ||
+           !admission_valid(source.admission) || !receipt_policy_valid(source) || !source_allowed(source,now) || !animation || !first_slot || !frame_current(animation,source,true) ||
            !palette_slots_current(animation,first_slot)) return false;
         for(unsigned joint=0;joint<joints.size();++joint)
             if(joint<2?!valid_cuff_affine(joints[joint]):!rig::valid(joints[joint])) return false;

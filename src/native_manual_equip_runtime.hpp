@@ -1,0 +1,406 @@
+#pragma once
+#include "native_manual_equip.hpp"
+#include "native_manual_equip_hooks.hpp"
+#include "native_carry_snapshot.hpp"
+#include <limits>
+
+namespace d2vr {
+class NativeManualEquipRuntime {
+public:
+    using Policy=NativeManualEquip;
+    using Hooks=NativeManualEquipHooks;
+    using Read=Policy::Read;
+    using Token=std::uint64_t;
+    using Submit=void (*)(void*,std::uintptr_t,const Policy::Params*);
+    enum class HipReject {none,barrier,stale_action,context,idle_arm,unknown_occupancy,occupied,selected_missing,scope,policy_grant,accepted,count};
+    struct HipAttempt {
+        Token token{},current_generation{};
+        NativePlayerStateLease owner;
+        std::uint64_t owner_epoch{};
+        std::uintptr_t machine{},selected_item{},selected_ammo{};
+        bool selected_known{},occupancy_known{},occupied{};
+        HipReject reason{HipReject::none};
+    };
+    struct Publication {
+        std::optional<NativePlayerStateLease> owner;
+        std::uint64_t xr_epoch{};
+        std::optional<bool> physical_left_occupied;
+        bool focused{};
+    };
+    struct HipContext {
+        NativePlayerStateLease owner;
+        std::uint64_t xr_epoch{},generation{};
+        bool operator==(const HipContext& other)const noexcept {
+            return owner==other.owner && xr_epoch==other.xr_epoch && generation==other.generation;
+        }
+    };
+    struct Status {
+        bool installed{},hooks_enabled{},writer_enabled{},armed{},exhausted{},focused{};
+        std::uint64_t generation{},last_manual_generation{},xr_epoch{},hip_grants{},wheel_grants{},revocations{},vetoes{},owner_gaps{},occupancy_gaps{},wheel_rejections{};
+        unsigned in_flight{};
+        Policy::Observation observation;
+        bool holster_pending{},holster_poisoned{};
+        std::uint64_t holster_receipts{},holster_retirements{},holster_gaps{};
+        HipAttempt last_hip_attempt;
+        std::array<std::uint64_t,static_cast<std::size_t>(HipReject::count)> hip_rejections{};
+    };
+    explicit NativeManualEquipRuntime(Hooks& hooks=Hooks::process_owner()):hooks_(hooks){}
+    static NativeManualEquipRuntime& process_owner(){static auto* owner=new NativeManualEquipRuntime;return *owner;}
+    bool install(std::uintptr_t base,Read read) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if(installed_ || holster_.pending || !hooks_.ready_for_install() || (base_ && (base_!=base || read_!=read)) || !policy_.start_observer(base,read))return false;
+        base_=base;read_=read;armed_=false;
+        if(!hooks_.install(base,read,{this,&processor_host,&wheel_before,&wheel_after})){policy_.stop();return false;}
+        installed_=true;hooks_.enabled(true);return true;
+    }
+    bool disable(std::uint64_t timeout_ms=5000) {
+        {std::lock_guard<std::mutex> lock(mutex_);if(holster_.pending)poison_holster_locked();installed_=false;armed_=false;revoke_locked();policy_.stop();}
+        return hooks_.disable(timeout_ms);
+    }
+    void publish(const Publication& value) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        const bool lifetime_changed=!(publication_.owner==value.owner) || publication_.xr_epoch!=value.xr_epoch;
+        if(lifetime_changed && holster_.pending)poison_holster_locked();
+        if(lifetime_changed || publication_.focused!=value.focused){revoke_locked();armed_=false;}
+        if(value.physical_left_occupied.value_or(true) && !publication_.physical_left_occupied.value_or(true))revoke_locked();
+        publication_=value;
+    }
+    bool ordinary_intent(){std::lock_guard<std::mutex> lock(mutex_);return revoke_locked();}
+    Token holster(){std::lock_guard<std::mutex> lock(mutex_);return revoke_locked()?generation_:0;}
+    bool allow_holster(Token release_generation,const NativePlayerStateLease& expected_owner,std::uint64_t xr_epoch,std::uintptr_t machine)const {
+        std::lock_guard<std::mutex> lock(mutex_);Reader reader{read_};
+        return !holster_.pending && installed_ && hooks_.enabled() && publication_.focused && xr_epoch && xr_epoch==publication_.xr_epoch &&
+            publication_.owner && *publication_.owner==expected_owner && expected_owner.machine==machine &&
+            release_generation && release_generation<=generation_ && last_manual_generation_<=release_generation &&
+            native_player_state_lease(reader,base_,machine)==publication_.owner && state_locked(machine).has_value();
+    }
+    bool execute_holster(Token release_generation,const NativePlayerStateLease& expected_owner,std::uint64_t xr_epoch,std::uintptr_t machine,
+                         const Policy::Params& params,Submit submit,void* context) {
+        if(!submit || !admit_holster(release_generation,expected_owner,xr_epoch,machine,params))return false;
+        bool completed=false,accepted=false;
+        __try{submit(context,machine,&holster_.params);completed=true;}
+        __finally{accepted=finish_holster(completed);}
+        return accepted;
+    }
+    bool cancel(Token token){std::lock_guard<std::mutex> lock(mutex_);return token && action_.token==token && revoke_locked();}
+    Token reserve_hip(const NativePlayerStateLease& owner) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if(holster_.pending || exhausted_ || !context_locked(owner.machine) || !publication_.owner || !(owner==*publication_.owner))return 0;
+        const auto token=next_locked();if(!token)return 0;
+        action_={token,owner,publication_.xr_epoch,Policy::Source::hip,Phase::reserved};
+        if(!policy_.reserve_manual(owner,token,Policy::Source::hip)){revoke_locked();return 0;}
+        last_manual_generation_=token;
+        return token;
+    }
+    bool grant_hip(Token token,std::uintptr_t machine) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        HipAttempt attempt{};attempt.token=token;attempt.machine=machine;attempt.owner_epoch=publication_.xr_epoch;
+        if(publication_.owner)attempt.owner=*publication_.owner;
+        if(holster_.pending)return record_hip_locked(attempt,HipReject::barrier);
+        if(!token || action_.token!=token || action_.source!=Policy::Source::hip || action_.phase!=Phase::reserved ||
+           action_.epoch!=publication_.xr_epoch || !publication_.owner || !(action_.owner==*publication_.owner))return record_hip_locked(attempt,HipReject::stale_action);
+        if(!context_locked(machine))return record_hip_locked(attempt,HipReject::context);
+        if(!arm_locked(machine)){revoke_locked();return record_hip_locked(attempt,HipReject::idle_arm);}
+        const auto occupied=occupied_locked(machine);attempt.occupancy_known=occupied.has_value();attempt.occupied=occupied.value_or(false);
+        if(!occupied || *occupied){revoke_locked();return record_hip_locked(attempt,occupied?HipReject::occupied:HipReject::unknown_occupancy);}
+        const auto state=state_locked(machine);Reader reader{read_};
+        const auto controller=rig::value<std::uintptr_t>(reader,machine+0x2f8);
+        const auto item=controller?rig::value<std::uintptr_t>(reader,*controller+0x190):std::nullopt,
+            ammo=controller?rig::value<std::uintptr_t>(reader,*controller+0x198):std::nullopt;
+        attempt.selected_known=item.has_value() && ammo.has_value();attempt.selected_item=item.value_or(0);attempt.selected_ammo=ammo.value_or(0);
+        const auto scope=state && item && ammo?Policy::qualify(base_,read_,*state,*item,*ammo):std::nullopt;
+        if(!scope){revoke_locked();return record_hip_locked(attempt,!item || !ammo || !*item?HipReject::selected_missing:HipReject::scope);}
+        if(!policy_.grant(token,*scope)){revoke_locked();return record_hip_locked(attempt,HipReject::policy_grant);}
+        action_.phase=Phase::granted;++hip_grants_;return record_hip_locked(attempt,HipReject::accepted);
+    }
+    bool hip_item_current(Token token)const {
+        std::lock_guard<std::mutex> lock(mutex_);Reader reader{read_};
+        if(!installed_ || !hooks_.enabled() || !publication_.focused || !publication_.xr_epoch || !publication_.owner ||
+           !token || action_.token!=token || action_.source!=Policy::Source::hip || action_.phase!=Phase::granted ||
+           action_.epoch!=publication_.xr_epoch || !(action_.owner==*publication_.owner))return false;
+        const auto lease=policy_.lease();
+        if(lease.generation!=token || lease.source!=Policy::Source::hip || !(lease.scope.owner==action_.owner) ||
+           !(native_player_state_lease(reader,base_,action_.owner.machine)==publication_.owner) ||
+           rig::value<std::uintptr_t>(reader,lease.scope.inventory+0x70)!=lease.scope.item)return false;
+        const auto current=Policy::qualify(base_,read_,lease.scope.state,lease.scope.item,lease.scope.ammo);
+        return current && *current==lease.scope && rig::value<std::uintptr_t>(reader,lease.scope.inventory+0x70)==lease.scope.item &&
+            native_player_state_lease(reader,base_,action_.owner.machine)==publication_.owner;
+    }
+    std::optional<HipContext> hip_context()const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if(!installed_ || !hooks_.enabled() || !publication_.focused || !publication_.owner || !publication_.xr_epoch || !generation_)return {};
+        return HipContext{*publication_.owner,publication_.xr_epoch,generation_};
+    }
+    bool hip_empty_current(const HipContext& expected,Token after_generation=0) {
+        std::lock_guard<std::mutex> lock(mutex_);return hip_empty_current_locked(expected,after_generation);
+    }
+private:
+    bool hip_empty_current_locked(const HipContext& expected,Token after_generation,Token drawing_generation=0) {
+        Reader reader{read_};
+        const auto context_current=[&] {
+            const auto lease=policy_.lease();
+            const bool idle_action=action_.phase==Phase::none && !lease.generation && lease.source==Policy::Source::none;
+            const bool drawing_action=drawing_generation && action_.phase==Phase::granted && action_.source==Policy::Source::hip &&
+                action_.token==drawing_generation && expected.generation==drawing_generation &&
+                lease.generation==drawing_generation && lease.source==Policy::Source::hip;
+            return installed_ && hooks_.enabled() && publication_.focused && publication_.owner &&
+                *publication_.owner==expected.owner && publication_.xr_epoch==expected.xr_epoch && generation_==expected.generation &&
+                expected.generation>after_generation && !holster_.pending && !holster_.poisoned && !hooks_.in_flight() && !policy_.in_flight() &&
+                (idle_action || drawing_action) &&
+                native_player_state_lease(reader,base_,expected.owner.machine)==publication_.owner;
+        };
+        if(!context_current())return false;
+        const auto state=state_locked(expected.owner.machine);
+        const auto inventory=rig::value<std::uintptr_t>(reader,expected.owner.machine+0x328);
+        const auto body=rig::value<std::uintptr_t>(reader,expected.owner.machine+0x300);
+        const auto inventory_identity=inventory?rig::started(reader,*inventory):std::nullopt;
+        if(!state || !inventory || !body || !inventory_identity || !rig::typed(reader,base_,*inventory,0x1b9a878) ||
+           rig::value<std::uintptr_t>(reader,*inventory+0x10)!=expected.owner.player ||
+           rig::value<std::uintptr_t>(reader,*body+0x60)!=inventory)return false;
+        if(!publication_.physical_left_occupied || *publication_.physical_left_occupied)return false;
+        const auto carry=rig::native_carry_snapshot(reader,base_,expected.owner.player,*body);
+        if(!carry || carry->machine!=expected.owner.machine || carry->machine_identity!=expected.owner.identity || (carry->hands()&1u))return false;
+        const auto records=rig::list(reader,*state+0x30,4096),requests=rig::list(reader,expected.owner.machine+0x220,4096);
+        if(!records || records->packed_count || !requests)return false;
+        for(unsigned pass=0;pass<2;++pass) {
+            if(!context_current() || state_locked(expected.owner.machine)!=state ||
+               rig::value<std::uintptr_t>(reader,expected.owner.machine+0x328)!=inventory ||
+               rig::value<std::uintptr_t>(reader,expected.owner.machine+0x300)!=body || rig::started(reader,*inventory)!=inventory_identity ||
+               !rig::typed(reader,base_,*inventory,0x1b9a878) || rig::value<std::uintptr_t>(reader,*inventory+0x10)!=expected.owner.player ||
+               rig::value<std::uintptr_t>(reader,*body+0x60)!=inventory ||
+               rig::value<std::uintptr_t>(reader,*inventory+0x70)!=std::optional<std::uintptr_t>{0} ||
+               rig::value<unsigned char>(reader,*state+0x20)!=std::optional<unsigned char>{static_cast<unsigned char>(0)} ||
+               rig::value<unsigned char>(reader,*state+0x150)!=std::optional<unsigned char>{static_cast<unsigned char>(0)} ||
+               rig::value<std::uintptr_t>(reader,*state+0x108)!=std::optional<std::uintptr_t>{0} ||
+               rig::value<std::uintptr_t>(reader,*state+0x118)!=std::optional<std::uintptr_t>{0})return false;
+            const auto current_carry=rig::native_carry_current(reader,base_,*carry);
+            if(!current_carry || *current_carry!=*carry)return false;
+            const auto current_records=rig::list(reader,*state+0x30,4096),current_requests=rig::list(reader,expected.owner.machine+0x220,4096);
+            if(!current_records || !current_requests || std::memcmp(&*records,&*current_records,sizeof(rig::List)) ||
+               std::memcmp(&*requests,&*current_requests,sizeof(rig::List)))return false;
+            for(unsigned index=0;index<requests->packed_count;++index) {
+                const auto request=rig::value<QueueRecord>(reader,requests->data+index*sizeof(QueueRecord));
+                if(!request || request->state==64)return false;
+            }
+        }
+        return context_current();
+    }
+public:
+    bool hip_draw_current(Token token) {
+        std::lock_guard<std::mutex> lock(mutex_);Reader reader{read_};
+        if(!token || !publication_.owner)return false;
+        const HipContext context{*publication_.owner,publication_.xr_epoch,generation_};
+        if(!hip_empty_current_locked(context,0,token) || !(action_.owner==context.owner) || action_.epoch!=context.xr_epoch)return false;
+        const auto lease=policy_.lease();
+        if(lease.generation!=token || lease.source!=Policy::Source::hip || !(lease.scope.owner==context.owner) ||
+           rig::value<std::uintptr_t>(reader,lease.scope.controller+0x190)!=lease.scope.item ||
+           rig::value<std::uintptr_t>(reader,lease.scope.controller+0x198)!=lease.scope.ammo ||
+           rig::value<std::uintptr_t>(reader,lease.scope.inventory+0x70)!=std::optional<std::uintptr_t>{0})return false;
+        const auto current=Policy::qualify(base_,read_,lease.scope.state,lease.scope.item,lease.scope.ammo);
+        return current && *current==lease.scope && native_player_state_lease(reader,base_,context.owner.machine)==publication_.owner;
+    }
+    Token begin_wheel(const NativePlayerStateLease& owner) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if(holster_.pending || exhausted_ || !context_locked(owner.machine) || !publication_.owner || !(owner==*publication_.owner))return 0;
+        if(!revoke_locked())return 0;
+        action_={generation_,owner,publication_.xr_epoch,Policy::Source::wheel,Phase::open};last_manual_generation_=generation_;return generation_;
+    }
+    Token commit_wheel(Token open_token) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if(holster_.pending || !matches_locked(open_token,Policy::Source::wheel,Phase::open,action_.owner.machine))return 0;
+        const auto token=next_locked();if(!token)return 0;
+        action_.token=token;action_.phase=Phase::reserved;
+        if(!policy_.reserve_manual(action_.owner,token,Policy::Source::wheel)){revoke_locked();return 0;}
+        last_manual_generation_=token;
+        return token;
+    }
+    bool service_game_callback(std::uintptr_t machine) {
+        std::lock_guard<std::mutex> lock(mutex_);retire_holster_locked(machine);return arm_locked(machine);
+    }
+    Status status()const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return {installed_,hooks_.enabled(),policy_.writer_enabled(),armed_,exhausted_,publication_.focused,generation_,last_manual_generation_,publication_.xr_epoch,
+            hip_grants_,wheel_grants_,revocations_,vetoes_,owner_gaps_,occupancy_gaps_,wheel_rejections_,hooks_.in_flight(),policy_.observation(),
+            holster_.pending,holster_.poisoned,holster_receipts_,holster_retirements_,holster_gaps_,last_hip_attempt_,hip_rejections_};
+    }
+private:
+    friend struct NativeManualEquipRuntimeFixture;
+    enum class Phase {none,open,reserved,granted};
+    struct Action {Token token{};NativePlayerStateLease owner;std::uint64_t epoch{};Policy::Source source{Policy::Source::none};Phase phase{Phase::none};};
+    struct WheelCall {NativeManualEquipRuntime* runtime{};std::uintptr_t controller{},item{},ammo{};Token granted{};};
+    struct Holster {
+        bool pending{},submitting{},receipted{},poisoned{};
+        NativePlayerStateLease owner;std::uint64_t epoch{};std::uintptr_t pool{},state{};Policy::Params params;
+    };
+    struct QueueRecord {std::uint32_t kind{},state{},id{};};
+    static_assert(sizeof(QueueRecord)==12);
+    struct Reader {
+        Read read{};
+        static bool cpp(Read read,std::uintptr_t address,void* output,std::size_t size)noexcept {try{return read && read(address,output,size);}catch(...){return false;}}
+        bool operator()(std::uintptr_t address,void* output,std::size_t size)const noexcept {
+            __try{return cpp(read,address,output,size);}__except(EXCEPTION_EXECUTE_HANDLER){return false;}
+        }
+    };
+    void poison_holster_locked(){if(!holster_.poisoned){holster_.poisoned=true;++holster_gaps_;}}
+    bool record_hip_locked(HipAttempt attempt,HipReject reason) {
+        attempt.current_generation=generation_;attempt.reason=reason;last_hip_attempt_=attempt;
+        auto& count=hip_rejections_[static_cast<std::size_t>(reason)];if(count!=std::numeric_limits<std::uint64_t>::max())++count;
+        return reason==HipReject::accepted;
+    }
+    bool holster_context_locked()const {
+        Reader reader{read_};
+        return installed_ && hooks_.enabled() && publication_.owner && *publication_.owner==holster_.owner &&
+            publication_.xr_epoch==holster_.epoch && native_player_state_lease(reader,base_,holster_.owner.machine)==publication_.owner &&
+            rig::value<std::uintptr_t>(reader,holster_.owner.machine+0x90)==holster_.pool && state_locked(holster_.owner.machine)==holster_.state;
+    }
+    bool holster_records_locked(unsigned& copied,unsigned& queued)const {
+        Reader reader{read_};const auto machine=holster_.owner.machine;const auto id=holster_.params.get<std::uint32_t>(0);
+        const auto params=rig::value<rig::List>(reader,holster_.state+0x30),queue=rig::value<rig::List>(reader,machine+0x220);
+        const auto records=rig::list(reader,holster_.state+0x30,4096),requests=rig::list(reader,machine+0x220,4096);
+        if(!params || !queue || !records || !requests)return false;
+        copied=queued=0;
+        for(unsigned index=0;index<records->packed_count;++index){
+            Policy::Params value;if(!reader(records->data+index*0x30ull,&value,sizeof(value)))return false;
+            if(value.get<std::uint32_t>(0)==id){if(!(value==holster_.params) || ++copied>1)return false;}
+        }
+        for(unsigned index=0;index<requests->packed_count;++index){
+            const auto value=rig::value<QueueRecord>(reader,requests->data+index*12ull);if(!value)return false;
+            if(value->id==id){if(value->kind!=1 || value->state!=64 || ++queued>1)return false;}
+        }
+        const auto params_after=rig::value<rig::List>(reader,holster_.state+0x30),queue_after=rig::value<rig::List>(reader,machine+0x220);
+        return params_after && queue_after && std::memcmp(&*params,&*params_after,sizeof(rig::List))==0 &&
+            std::memcmp(&*queue,&*queue_after,sizeof(rig::List))==0 && holster_context_locked();
+    }
+    bool admit_holster(Token release_generation,const NativePlayerStateLease& expected_owner,std::uint64_t xr_epoch,std::uintptr_t machine,const Policy::Params& params) {
+        std::lock_guard<std::mutex> lock(mutex_);Reader reader{read_};
+        const auto state=state_locked(machine),pool=rig::value<std::uintptr_t>(reader,machine+0x90);
+        if(holster_.pending || !state || !pool || !installed_ || !hooks_.enabled() || !publication_.focused || !publication_.owner ||
+           !(*publication_.owner==expected_owner) || expected_owner.machine!=machine || !xr_epoch || publication_.xr_epoch!=xr_epoch ||
+           !release_generation || release_generation>generation_ || last_manual_generation_>release_generation ||
+           !(native_player_state_lease(reader,base_,machine)==publication_.owner) || !params.get<std::uint32_t>(0) || params.get<std::uint32_t>(0)>0x7fffffff ||
+           params.get<std::uint32_t>(4)!=0x5c || params.get<std::uintptr_t>(8) || params.get<std::uintptr_t>(16) || params.get<std::uint32_t>(24)!=0)return false;
+        holster_={true,true,false,false,expected_owner,xr_epoch,*pool,*state,params};
+        unsigned copied{},queued{};
+        if(!holster_records_locked(copied,queued) || copied || queued){holster_={};++holster_gaps_;return false;}
+        return true;
+    }
+    bool finish_holster(bool completed) {
+        std::lock_guard<std::mutex> lock(mutex_);holster_.submitting=false;unsigned copied{},queued{};
+        if(!completed || holster_.poisoned || !holster_records_locked(copied,queued) || copied!=1 || queued!=1){poison_holster_locked();return false;}
+        holster_.receipted=true;++holster_receipts_;return true;
+    }
+    void retire_holster_locked(std::uintptr_t machine) {
+        if(!holster_.pending || holster_.submitting || holster_.poisoned)return;
+        if(!holster_context_locked()){poison_holster_locked();return;}
+        if(!publication_.focused)return;
+        unsigned copied{},queued{};Reader reader{read_};
+        if(!holster_.receipted || machine!=holster_.owner.machine || !holster_records_locked(copied,queued)){poison_holster_locked();return;}
+        const auto active=rig::value<unsigned char>(reader,holster_.state+0x20),deferred=rig::value<unsigned char>(reader,holster_.state+0x150);
+        const auto equip_operation=rig::value<std::uintptr_t>(reader,holster_.state+0x108),unequip_operation=rig::value<std::uintptr_t>(reader,holster_.state+0x118);
+        if(!active || !deferred || !equip_operation || !unequip_operation){poison_holster_locked();return;}
+        if(copied || queued || hooks_.in_flight() || *active || *equip_operation || *unequip_operation || *deferred)return;
+        if(!holster_context_locked()){poison_holster_locked();return;}
+        holster_={};++holster_retirements_;
+    }
+    Token next_locked() {
+        if(exhausted_)return 0;
+        if(generation_>=std::numeric_limits<Token>::max()-1){
+            generation_=std::numeric_limits<Token>::max();exhausted_=true;action_={};policy_.revoke(generation_);++revocations_;return 0;
+        }
+        return ++generation_;
+    }
+    bool revoke_locked() {
+        const auto token=next_locked();action_={};
+        if(!token)return false;policy_.revoke(token);++revocations_;return true;
+    }
+    bool context_locked(std::uintptr_t machine) {
+        if(!installed_ || !hooks_.enabled() || !publication_.focused || !publication_.xr_epoch || !publication_.owner || publication_.owner->machine!=machine)return false;
+        Reader reader{read_};
+        if(native_player_state_lease(reader,base_,machine)==publication_.owner)return true;
+        ++owner_gaps_;revoke_locked();armed_=false;return false;
+    }
+    bool matches_locked(Token token,Policy::Source source,Phase phase,std::uintptr_t machine) {
+        return token && action_.token==token && action_.source==source && action_.phase==phase && action_.epoch==publication_.xr_epoch &&
+            publication_.owner && action_.owner==*publication_.owner && context_locked(machine);
+    }
+    std::optional<std::uintptr_t> state_locked(std::uintptr_t machine)const {
+        Reader reader{read_};const auto pool=rig::value<std::uintptr_t>(reader,machine+0x90);
+        const auto state=pool?rig::value<std::uintptr_t>(reader,*pool+0x10+64*8):std::nullopt;
+        if(!state || !rig::typed(reader,base_,*state,0x1c79cf8) || rig::value<int>(reader,*state+8)!=64 || rig::value<std::uintptr_t>(reader,*state+0x10)!=machine)return {};
+        return state;
+    }
+    std::optional<bool> occupied_locked(std::uintptr_t machine) {
+        if(!publication_.physical_left_occupied){++occupancy_gaps_;return {};}
+        Reader reader{read_};const auto body=rig::value<std::uintptr_t>(reader,machine+0x300);
+        const auto carry=body && publication_.owner?rig::native_carry_snapshot(reader,base_,publication_.owner->player,*body):std::nullopt;
+        if(!carry || carry->machine!=machine || carry->machine_identity!=publication_.owner->identity){++occupancy_gaps_;return {};}
+        return *publication_.physical_left_occupied || (carry->hands()&1u)!=0;
+    }
+    bool arm_locked(std::uintptr_t machine) {
+        if(!context_locked(machine))return false;
+        if(armed_)return true;
+        const auto state=state_locked(machine);if(!state || !occupied_locked(machine))return false;
+        armed_=policy_.enable_at_idle(*state);return armed_;
+    }
+    std::optional<Policy::Scope> wheel_scope_locked(std::uintptr_t controller,std::uintptr_t item_decl,std::uintptr_t ammo_decl) {
+        Reader reader{read_};const auto machine=rig::value<std::uintptr_t>(reader,controller+0x58);
+        if(!machine || !context_locked(*machine) || !rig::typed(reader,base_,controller,0x1c72918) ||
+           rig::value<std::uintptr_t>(reader,controller+0x10)!=publication_.owner->player || rig::value<std::uintptr_t>(reader,*machine+0x2f8)!=controller ||
+           rig::value<unsigned char>(reader,controller+0x171)!=1)return {};
+        const auto inventory=rig::value<std::uintptr_t>(reader,*machine+0x328),state=state_locked(*machine);
+        if(!inventory || !state || !rig::typed(reader,base_,*inventory,0x1b9a878) || rig::value<std::uintptr_t>(reader,*inventory+0x10)!=publication_.owner->player)return {};
+        const auto entries=rig::list(reader,*inventory+0x38,4096);if(!entries || !item_decl)return {};
+        std::uintptr_t item{},ammo{};
+        for(unsigned index=0;index<entries->packed_count;++index){
+            const auto record=entries->data+index*0x38ull;const auto declaration=rig::value<std::uintptr_t>(reader,record);if(!declaration)return {};
+            if(*declaration==item_decl){if(item)return {};item=record;}
+            if(ammo_decl && *declaration==ammo_decl){if(ammo)return {};ammo=record;}
+        }
+        if(!item || (ammo_decl && !ammo))return {};
+        return Policy::qualify(base_,read_,*state,item,ammo);
+    }
+    static bool processor_host(void* context,std::uintptr_t,std::uintptr_t state,Hooks::Params& params) {
+        auto& self=*static_cast<NativeManualEquipRuntime*>(context);std::lock_guard<std::mutex> lock(self.mutex_);
+        Reader reader{self.read_};const auto machine=rig::value<std::uintptr_t>(reader,state+0x10);
+        if(!machine || !self.context_locked(*machine) || self.state_locked(*machine)!=std::optional<std::uintptr_t>{state})return true;
+        if(!self.armed_ && !self.arm_locked(*machine))return true;
+        const auto occupied=self.occupied_locked(*machine);if(!occupied)self.revoke_locked();
+        Policy::Params owned{};owned.bytes=params.bytes;
+        if(!self.policy_.prepare(state,owned,occupied.value_or(true)))return false;
+        params.bytes=owned.bytes;const auto observation=self.policy_.observation();if(observation.changed)++self.vetoes_;
+        if(observation.holster_revoke)self.revoke_locked();return true;
+    }
+    static bool wheel_before(void* context,std::uintptr_t caller,std::uintptr_t controller,std::uintptr_t item,std::uintptr_t ammo) {
+        auto& self=*static_cast<NativeManualEquipRuntime*>(context);std::lock_guard<std::mutex> lock(self.mutex_);
+        if(wheel_depth_>=wheel_calls_.size()){++wheel_overflow_;self.revoke_locked();return false;}
+        auto& call=wheel_calls_[wheel_depth_++];call={&self,controller,item,ammo,0};
+        if(self.holster_.pending || !Policy::actual_wheel_origin(self.base_,caller) || !self.matches_locked(self.action_.token,Policy::Source::wheel,Phase::reserved,self.action_.owner.machine)){
+            ++self.wheel_rejections_;if(self.action_.source==Policy::Source::wheel && self.action_.phase==Phase::open)self.revoke_locked();return true;
+        }
+        const auto machine=self.action_.owner.machine;
+        const auto occupied=self.occupied_locked(machine);const auto scope=self.wheel_scope_locked(controller,item,ammo);
+        if(!occupied || *occupied || !scope || !self.arm_locked(machine) || !self.policy_.grant(self.action_.token,*scope)){++self.wheel_rejections_;self.revoke_locked();return true;}
+        call.granted=self.action_.token;self.action_.phase=Phase::granted;++self.wheel_grants_;return true;
+    }
+    static bool wheel_after(void* context,std::uintptr_t,std::uintptr_t controller,std::uintptr_t item,std::uintptr_t ammo,bool completed,bool current) {
+        auto& self=*static_cast<NativeManualEquipRuntime*>(context);std::lock_guard<std::mutex> lock(self.mutex_);
+        if(wheel_overflow_){--wheel_overflow_;return true;}
+        if(!wheel_depth_)return false;
+        const auto call=wheel_calls_[--wheel_depth_];wheel_calls_[wheel_depth_]={};
+        if(call.runtime!=&self || call.controller!=controller || call.item!=item || call.ammo!=ammo){self.revoke_locked();return false;}
+        if(call.granted && call.granted==self.action_.token && (!completed || !current || !self.context_locked(self.action_.owner.machine)))self.revoke_locked();
+        return true;
+    }
+    Hooks& hooks_;Policy policy_;mutable std::mutex mutex_;
+    std::uintptr_t base_{};Read read_{};Publication publication_;Action action_;Holster holster_;
+    bool installed_{},armed_{},exhausted_{};
+    Token generation_{},last_manual_generation_{};
+    std::uint64_t hip_grants_{},wheel_grants_{},revocations_{},vetoes_{},owner_gaps_{},occupancy_gaps_{},wheel_rejections_{};
+    std::uint64_t holster_receipts_{},holster_retirements_{},holster_gaps_{};
+    HipAttempt last_hip_attempt_;
+    std::array<std::uint64_t,static_cast<std::size_t>(HipReject::count)> hip_rejections_{};
+    inline static thread_local std::array<WheelCall,8> wheel_calls_{};
+    inline static thread_local unsigned wheel_depth_{};
+    inline static thread_local unsigned wheel_overflow_{};
+};
+}

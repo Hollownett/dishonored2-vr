@@ -5,6 +5,7 @@ from pathlib import Path
 
 AXES=('move_x','move_y','turn_x','turn_y','left_trigger','right_trigger','left_grip','right_grip')
 BUTTONS=('a','b','x','y','left_click','right_click','menu')
+POSE_KEYS=('head_pose','left_hand_pose','right_hand_pose')  # version 5: absolute [x,y,z,qx,qy,qz,qw] in tracking space (trace replay)
 
 
 def validate_script_profile(args):
@@ -19,8 +20,8 @@ def validate_script_profile(args):
 
 def compile_script(path,root,seconds):
     path=Path(path).resolve();root=Path(root).resolve()
-    if not path.is_relative_to(root) or path.suffix.lower()!='.json' or not path.is_file() or path.stat().st_size>65536:
-        raise ValueError('Gameplay script must be a workspace JSON file of at most64 KiB')
+    if not path.is_relative_to(root) or path.suffix.lower()!='.json' or not path.is_file() or path.stat().st_size>2<<20:
+        raise ValueError('Gameplay script must be a workspace JSON file of at most 64 KiB (2 MiB with absolute poses)')
     def unique(pairs):
         result={}
         for key,value in pairs:
@@ -29,13 +30,15 @@ def compile_script(path,root,seconds):
         return result
     text=path.read_text(encoding='utf-8-sig')
     data=json.loads(text,object_pairs_hook=unique)
-    if not isinstance(data,dict) or set(data)!={'segments'} or not isinstance(data['segments'],list) or not 1<=len(data['segments'])<=128:
-        raise ValueError('Script requires only segments, with1..128 entries')
+    if not isinstance(data,dict) or set(data)!={'segments'} or not isinstance(data['segments'],list) or not 1<=len(data['segments'])<=4096:
+        raise ValueError('Script requires only segments, with 1..128 entries (4096 with absolute poses)')
     POSES=('head_offset','left_hand_offset','right_hand_offset')
-    version=4 if any(isinstance(s,dict) and 'hand_pitch_degrees' in s for s in data['segments']) else 3 if any(isinstance(s,dict) and set(POSES)&set(s) for s in data['segments']) else 2 if any(isinstance(s,dict) and 'head_pitch_degrees' in s for s in data['segments']) else 1
+    version=5 if any(isinstance(s,dict) and set(POSE_KEYS)&set(s) for s in data['segments']) else 4 if any(isinstance(s,dict) and 'hand_pitch_degrees' in s for s in data['segments']) else 3 if any(isinstance(s,dict) and set(POSES)&set(s) for s in data['segments']) else 2 if any(isinstance(s,dict) and 'head_pitch_degrees' in s for s in data['segments']) else 1
+    if version<5 and (len(data['segments'])>128 or path.stat().st_size>65536):
+        raise ValueError('Scripts over 128 segments or 64 KiB need absolute poses')
     duration=seconds*1000;lines=[f'D2VR_GAMEPLAY_SCRIPT {version} {duration} {len(data["segments"])}'];previous=0
     for segment in data['segments']:
-        if not isinstance(segment,dict) or not {'start_ms','end_ms','input'}<=set(segment) or set(segment)-{'start_ms','end_ms','input','head_pitch_degrees','head_offset','left_hand_offset','right_hand_offset','hand_pitch_degrees'}:
+        if not isinstance(segment,dict) or not {'start_ms','end_ms','input'}<=set(segment) or set(segment)-{'start_ms','end_ms','input','head_pitch_degrees','head_offset','left_hand_offset','right_hand_offset','hand_pitch_degrees',*POSE_KEYS}:
             raise ValueError('Each segment requires start_ms, end_ms, input and optional head_pitch_degrees')
         pitch=segment.get('head_pitch_degrees',0)
         if type(pitch) not in (int,float) or not -80<=pitch<=80 or not math.isfinite(pitch):
@@ -58,10 +61,19 @@ def compile_script(path,root,seconds):
                 if not isinstance(offset,list) or len(offset)!=3 or any(type(v) not in (int,float) or not math.isfinite(v) or abs(v)>2 for v in offset):
                     raise ValueError(name+' requires three finite metres within 2')
                 fields.extend(offset)
-        if version==4:  # both hands pitched about their right axis (negative points down), degrees
+        if version>=4:  # both hands pitched about their right axis (negative points down), degrees
             hand_pitch=segment.get('hand_pitch_degrees',0)
             if type(hand_pitch) not in (int,float) or not -89<=hand_pitch<=89 or not math.isfinite(hand_pitch):
                 raise ValueError('Hand pitch requires finite degrees in[-89,89]')
             fields.append(hand_pitch)
+        if version==5:  # pose mask (1 head, 2 left, 4 right) then 7 numbers per masked part; a pose overrides that part's offset and pitch
+            mask=0;poses=[]
+            for bit,name in enumerate(POSE_KEYS):
+                pose=segment.get(name)
+                if pose is None:continue
+                if not isinstance(pose,list) or len(pose)!=7 or any(type(v) not in (int,float) or not math.isfinite(v) for v in pose) or any(abs(v)>10 for v in pose[:3]) or not .99<math.sqrt(sum(v*v for v in pose[3:]))<1.01:
+                    raise ValueError(name+' requires [x,y,z,qx,qy,qz,qw]: finite, position within 10 m, unit quaternion')
+                mask|=1<<bit;poses.extend(pose)
+            fields.append(mask);fields.extend(poses)
         lines.append(' '.join(map(str,fields)));previous=end
     return text,'\n'.join(lines)+'\n'

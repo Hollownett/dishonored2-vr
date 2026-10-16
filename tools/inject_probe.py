@@ -28,10 +28,13 @@ from archive_build_source import matching_provenance
 
 GAME_HASH = "b671f8249422862bf557d00aab2f4bb671ed4515cc10ad8a8a9decad84516180"
 PROBE_OUTPUTS = (
-    "synchronized-diagnostics.jsonl", "native-grab-decisions.jsonl",
+    "synchronized-diagnostics.jsonl", "native-grab-decisions.jsonl", "native-combat.csv",
+    "render-perf-cpu.csv", "render-perf-gpu.csv",
+    "left-weapon-bind-receipts.jsonl", "left-weapon-bind-summary.json",
+    "native-assassination-receipts.jsonl",
     "probe-launch-config.json", "dxgi-probe-result.json", "dxgi-probe-failure.txt", "dxgi-camera-probe.csv", "xr-live-status.json",
     "dxgi-gpu-trace.csv", "dxgi-native-hand-draw-candidates.csv", "native-view-setup.csv", "native-eye-boundary.csv", "native-gameplay-camera.csv", "native-turning-feedback.csv", "native-menu-input.csv", "paired-bind-counts.csv",
-    "rendered-head-anchor.csv", "xr-frame-timing.csv", "xr-frame-timing-previous.csv", "present-boundaries.csv", "present-boundaries-previous.csv", "xr-frame-timing.json", "native-interaction-rays.csv", "native-interaction-targets.csv", "native-physical-grab.csv", "native-physical-grab-loss.txt",
+    "rendered-head-anchor.csv", "controller-trace.csv", "xr-frame-timing.csv", "xr-frame-timing-previous.csv", "present-boundaries.csv", "present-boundaries-previous.csv", "xr-frame-timing.json", "native-interaction-rays.csv", "native-interaction-targets.csv", "native-physical-grab.csv", "native-physical-grab-loss.txt",
     "dxgi-mono.rgba", "dxgi-left.rgba", "dxgi-stereo.rgba", "dxgi-mono.png", "dxgi-left.png", "dxgi-stereo.png",
     "dxgi-mono-views.json", "dxgi-left-views.json", "dxgi-right-views.json", "dxgi-stereo-views.json",
     "xr-source-left.rgba", "xr-source-right.rgba", "xr-destination-left.rgba", "xr-destination-right.rgba",
@@ -94,7 +97,7 @@ def preserve_probe_outputs(root, label, identity=None, extra_files=()):
     if not sources:
         return None
     # Timed scripted eye captures and the session recovery log move with the run.
-    timed = sorted((root/'artifacts').glob('xr-t*-left.rgba'))
+    timed = sorted((root/'artifacts').glob('xr-t*-left.rgba')) + sorted((root/'artifacts').glob('xr-t*-right.rgba'))
     recoveries = root/'artifacts'/'xr-recoveries.log'
     sources += timed + ([recoveries] if recoveries.is_file() else [])
     stamp = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S.%fZ')
@@ -577,7 +580,10 @@ def main():
         (root / "artifacts").mkdir(exist_ok=True)
         preserve_probe_outputs(root, 'previous-artifacts')
         for name in PROBE_OUTPUTS:
-            (root / "artifacts" / name).unlink(missing_ok=True)
+            try:
+                (root / "artifacts" / name).unlink(missing_ok=True)
+            except PermissionError:  # still open in an earlier, stopped DLL of this game (v451 kept its controller trace open)
+                open(root / "artifacts" / name, 'w').close()
         if script_transport is not None:
             (root/'build'/'simulated-gameplay-script.cfg').write_text(script_transport,encoding='ascii')
             (root/'artifacts'/'simulated-gameplay-script.json').write_text(script_source,encoding='utf-8')
