@@ -231,6 +231,18 @@ static int run(int argc,char** argv) {
         const auto drifted=sock(60);
         expect(angle_between(drifted.q,base.q)>50*deg,"slow steady attachment change adopted");
         expect(angle_between(sock(60,true).q,drifted.q)>179*deg,"reverse grip flips the socket 180 degrees");
+        {   // the flip turns the sword about the fist (headset v559: flipped, the sword sat higher in the hand): the handle point in the fist is the same in both grips
+            const auto fist_in_socket=[&](bool reverse) {
+                const auto n=swung(60);in.native_arm[1]=&n;in.reverse_grip[1]=reverse;in.hand_empty[1]=false;
+                const auto out=sol.solve(in);const auto& a=out.arm[1];
+                Vec3 knuckles{};for(const char* f:{"index","medium","ring","pinky"}) knuckles=knuckles+a[right.find(std::string("right_")+f+"_02_jnt")].p*.25;
+                return rotated(conj(a[at].q),(a[wr].p+knuckles)*.5-a[at].p);
+            };
+            const auto fwd=fist_in_socket(false),rev=fist_in_socket(true);in.reverse_grip[1]=false;
+            std::printf("fist centre in the sword socket: forward (%.4f %.4f %.4f) reversed (%.4f %.4f %.4f), moved %.1f mm\n",
+                fwd.x,fwd.y,fwd.z,rev.x,rev.y,rev.z,length(rev-fwd)*1000);
+            expect(length(rev-fwd)<.002,"reverse grip keeps the same handle point in the fist");
+        }
         {   // native sneak stance = the idle attachment turned 180 deg about its own Z; the forward grip stays
             for(int n=0;n<120;++n) sock(0);
             const auto fwd=sock(0);

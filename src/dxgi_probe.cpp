@@ -2542,9 +2542,11 @@ static void note_drawn_palms(const d2vr::rig::ArmTrackingFrame& hands,const d2vr
 static d2vr::WorldTrackedPose drawn_palm_frame(unsigned side,const d2vr::WorldTrackedPose& grip) {
     return drawn_palm_residual[side&1u].frame(grip,GetTickCount64());
 }
-// The frame a held object is seated in: the drawn palm plus the build/held-offset knob (hand axes).
-static d2vr::WorldTrackedPose held_palm_frame(unsigned side,const d2vr::WorldTrackedPose& grip) {
-    auto palm=drawn_palm_frame(side,grip);const auto& h=grip.basis;
+// The frame a held object is seated in: the controller grip plus the build/held-offset knob (hand axes). Not the drawn palm: the arm
+// solver's palm departs from the grip by 10-50 cm and snaps back within a frame (headset v558, 10% of tracked frames jumped >5 cm),
+// and a carried tank seated on it jittered against the hand; a bottle held close, where the arm reaches, never showed it.
+static d2vr::WorldTrackedPose held_palm_frame(unsigned,const d2vr::WorldTrackedPose& grip) {
+    auto palm=grip;const auto& h=grip.basis;
     palm.position=palm.position+h[0]*held_offset[0]+h[1]*held_offset[1]+h[2]*held_offset[2];
     return palm;
 }
