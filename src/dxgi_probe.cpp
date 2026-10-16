@@ -996,7 +996,7 @@ using ViewSetupFn=void (__fastcall*)(void*,int*,int*);
 static std::atomic<ViewSetupFn> original_setup{nullptr};
 static bool head_requested=false,head_wrote=false,symmetric_frustum_requested=false;
 static bool cant_requested=false;
-static bool mip_bias_enabled=true;static float mip_bias_extra=-.5f; // texture LOD bias while FSR upscales (sampler_lod_bias.hpp); build/no-mip-bias, build/mip-bias "<extra>" // build/cant: canted symmetric eye frusta (canted_fov.hpp), sized via the optical-density path
+static bool mip_bias_enabled=true;static float mip_bias_extra=-.5f; // texture LOD bias while FSR upscales (sampler_lod_bias.hpp); build/no-mip-bias, build/mip-bias "<extra>" // canted symmetric eye frusta are the default (canted_fov.hpp, sized via the optical-density path); build/no-cant opts out
 static std::atomic<UINT> head_depth{0};
 static UINT64 head_setup_seen{},head_matched{},head_writes{},head_restores{};
 static UINT64 head_pose_epoch{};
@@ -7684,7 +7684,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
         d2vr::GlyphSwap::observer=&ps_bind_observer;
         d2vr::PostTonemapPass::pass_end=[](int eye,ID3D11DeviceContext* c) {try {fsr_taa.post_tonemap_end(eye,c);} catch(...) {}};
         {d2vr::FsrTaa::Config fc{};std::ifstream knob(root/L"build"/L"fsr");std::array<float*,3> fields{&fc.sharpness,&fc.mv_x,&fc.mv_y};for(auto* f:fields) {float v{};if(!(knob>>v)) break;*f=v;}fc.mv_full=fs::exists(root/L"build"/L"fsr-mv-full");fsr_taa.configure(fc);}
-        cant_requested=symmetric_frustum_requested && headset_size_requested && fs::exists(root/L"build"/L"cant");
+        cant_requested=symmetric_frustum_requested && headset_size_requested && !fs::exists(root/L"build"/L"no-cant");
         mip_bias_enabled=!fs::exists(root/L"build"/L"no-mip-bias");
         {std::ifstream knob(root/L"build"/L"mip-bias");float v{};mip_bias_extra=(knob>>v && std::isfinite(v) && v>=-2 && v<=1)?v:-.5f;}
         if(cant_requested) {optical_density_requested=true;optical_density_applied=false;}

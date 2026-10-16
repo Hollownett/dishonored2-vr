@@ -58,6 +58,13 @@ int main() {
         std::printf("%-17s turn %5.2f/%5.2f deg, pixels %.3f of enclosing symmetric, %ux%u for a 2000x2000 recommendation\n",
             p.name,c->yaw*57.29578f,c->pitch*57.29578f,canted/symmetric,size[0],size[1]);
     }
+    {   // Sized against the enclosing symmetric frustum (game_xr optical_output_size): fewer pixels than the uncanted eye at equal density.
+        const auto q=d2vr::canted_fov(-.698132f,.942478f,.767945f,-.959931f);REQUIRE(q);
+        const float hx=std::max(.698132f,.942478f),hy=std::max(.767945f,.959931f);
+        const auto size=d2vr::canted_size(2688,2880,-hx,hx,hy,-hy,*q);
+        REQUIRE(size[0]<2688 && size[1]<2880 && size[0]*size[1]<2688u*2880u*.8 && size[0]*size[1]>2688u*2880u*.75);
+        std::printf("Quest 3 canted eye at the symmetric density: %ux%u (%.3f of 2688x2880)\n",size[0],size[1],size[0]*size[1]/(2688.*2880.));
+    }
     auto s=d2vr::canted_fov(-.8f,.8f,.7f,-.7f);REQUIRE(s && s->yaw==0 && s->pitch==0 && std::abs(s->half_x-.8f)<1e-6f && std::abs(s->half_y-.7f)<1e-6f);
     REQUIRE(!d2vr::canted_fov(.1f,-.1f,.5f,-.5f) && !d2vr::canted_fov(-1.6f,.5f,.5f,-.5f));
     std::printf("PASS: canted frusta cover every optical frustum with no more pixels than the enclosing symmetric one\n");

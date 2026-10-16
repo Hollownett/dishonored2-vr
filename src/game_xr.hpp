@@ -928,11 +928,13 @@ public:
             const auto& f=views_[eye].fov;fovs[eye]={f.angleLeft,f.angleRight,f.angleUp,f.angleDown};
         }
         if(canted_views) {
+            // Density reference is the enclosing symmetric frustum at the recommended size (what the
+            // uncanted eye renders), so a canted eye keeps that quality with ~21% fewer pixels (Quest 3).
             std::array<EyeSize,2> canted{};
             for(UINT eye=0;eye<2;++eye) {
-                const auto& f=fovs[eye];const auto c=canted_fov(f.left,f.right,f.up,f.down);
-                if(!c) throw std::runtime_error("Invalid optical frustum for a canted eye");
-                const auto s=canted_size(sizes[eye].width,sizes[eye].height,f.left,f.right,f.up,f.down,*c);canted[eye]={s[0],s[1]};
+                const auto& f=fovs[eye];const auto c=canted_fov(f.left,f.right,f.up,f.down);const auto e=enclosing_symmetric_fov(f);
+                if(!c || !e) throw std::runtime_error("Invalid optical frustum for a canted eye");
+                const auto s=canted_size(sizes[eye].width,sizes[eye].height,e->left,e->right,e->up,e->down,*c);canted[eye]={s[0],s[1]};
             }
             return recommended_output(canted,maximum_eye_sizes_,system_maximum_);
         }
