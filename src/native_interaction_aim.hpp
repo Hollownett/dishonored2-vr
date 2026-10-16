@@ -522,6 +522,7 @@ class NativeInteractionAim {
             // Full-grip sword: equip requests from the input thread and the dropped copy (native_weapon_hands.hpp).
             if(self->logic_()==2) try {NativeWeaponHands::service(self->base_,self->read_);} catch(...) {}
             if(const auto held=held_world_.exchange(0)) {if(self->active_ && self->logic_()==2) try {NativeHeldObject::world_render(self->base_,self->read_,held);} catch(...) {}}
+            if(NativeHeldObject::layer_restore_.exchange(false)) {if(self->active_ && self->logic_()==2) try {NativeHeldObject::restore_layer(self->base_,self->read_);} catch(...) {}}
             double probe_distance{};{std::lock_guard<std::mutex> guard(trace_mutex_);probe_distance=trace_distance_;trace_distance_=0;}
             if(probe_distance!=0) { // negative: straight down (game Z up)
                 std::string out="trace: ";
