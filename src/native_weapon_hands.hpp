@@ -522,6 +522,7 @@ private:
         return game && rig::value<std::uintptr_t>(read,*game+0x3130b0+(id>>16)*8)==e && rig::value<std::uint32_t>(read,e+0xa8)==id;
     }
     template<class Read> static std::uintptr_t spawn_def(std::uintptr_t base,Read& read,const char* name,const float* pos,const float* axis) {
+        for(unsigned i=0;i<12;++i) if(!std::isfinite(i<3?pos[i]:axis[i-3])) {++failures;return 0;} // REA Q4: the engine does not check; pos[3], axis[9]
         const auto game=rig::value<std::uintptr_t>(read,base+0x39a5290);if(!game) return 0;
         void* decl=reinterpret_cast<void* (__fastcall*)(std::uintptr_t,const char*,bool,bool)>(base+0x1e030)(base+0x2434170,name,false,false);
         if(!decl) return 0;
