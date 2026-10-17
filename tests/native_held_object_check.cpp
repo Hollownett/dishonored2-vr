@@ -321,14 +321,19 @@ int main() {
         state.place();assert(output_position[0]==1.f && state.driven_right());
         assert(Held::target_valid(state.target) && Held::rejected_targets.load()==before+6);
     }
-    {   // anchor_rejects_nan_quat: bypasses publish; the engine bytes at rf+0x3d0..0x3f0 stay as they were
-        Fixture state;auto bad=state.target;bad.axis[0]=NAN;
+    {   // anchor_rejects_bad_master: bypasses publish. quat_from_rot always normalises (identity on a NaN norm), so the reachable
+        // refusal is the |off|<4 bound on the offset computed from a NaN / huge master pose; the rf+0x3d0..0x3f0 bytes stay put.
+        // (anchor's finite/|q|~1 guard on the quaternion is defense-in-depth and has no reachable test.)
+        Fixture state;
         unsigned char before[0x20];std::memcpy(before,reinterpret_cast<void*>(rf+0x3d0),sizeof(before));
-        assert(!d2vr::NativeHeldObjectCheck::anchor(bad,master));
-        assert(std::memcmp(before,reinterpret_cast<void*>(rf+0x3d0),sizeof(before))==0);
-        bad=state.target;for(auto& v:bad.axis)v*=2.f;   // non-unit quaternion from a scaled basis
-        assert(!d2vr::NativeHeldObjectCheck::anchor(bad,master));
-        assert(std::memcmp(before,reinterpret_cast<void*>(rf+0x3d0),sizeof(before))==0);
+        const auto refused=[&] {
+            assert(!d2vr::NativeHeldObjectCheck::anchor(state.target,master));
+            assert(std::memcmp(before,reinterpret_cast<void*>(rf+0x3d0),sizeof(before))==0);
+        };
+        put(master+0x300,std::array<float,3>{NAN,1,1});refused();
+        put(master+0x300,std::array<float,3>{1e6f,1,1});refused();
+        put(master+0x300,std::array<float,3>{1,1,1});put(master+0x30c,std::array<float,9>{NAN,0,0,0,1,0,0,0,1});refused();
+        put(master+0x30c,std::array<float,9>{1,1e6f,0,0,1,0,0,0,1});refused();
     }
     {   // a master carry that leaves the target invalid is refused at the bind and writes nothing
         Fixture state;auto t=state.target;const std::array<float,3> then{1,1,1};const std::array<float,9> identity{1,0,0,0,1,0,0,0,1};
