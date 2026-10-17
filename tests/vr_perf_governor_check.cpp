@@ -16,7 +16,9 @@ int main() {
       run(g,45*40,1.0,.10); CHECK(g.scale()==.6f && a>.6f); } // floor
     { PerfGovernor g; run(g,45*100,.5,0); CHECK(std::fabs(g.scale()-.95f)<1e-4f); } // calm -> up to cap
     { PerfGovernor g; run(g,45,1.0,.10); const float d=g.scale(); run(g,45*2,.5,0); CHECK(g.scale()==d); // cooldown
-      run(g,45*6,.5,0); CHECK(g.scale()>d); }
+      run(g,45*(60+8),.5,0); CHECK(g.scale()>d); }
+    { PerfGovernor g; run(g,45,1.0,.10); const float d=g.scale(); run(g,45*(60+8+1),.5,0); CHECK(g.scale()>d); } // recovers_after_lockout
+    { PerfGovernor g; for(int i=0;i<20;++i){run(g,45,1.0,.10);run(g,45*8,.5,0);} CHECK(g.changes<=3); } // no_oscillation
     { PerfGovernor g; run(g,45,1.0,.10); const float d=g.scale(); // one down step
       for(int i=0;i<30;++i) g.feed({P,P,true}); // the change's own stall/miss burst lands in the settle window
       run(g,45,.9,0); CHECK(g.scale()==d && g.changes==1); }
