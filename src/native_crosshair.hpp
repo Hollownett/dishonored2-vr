@@ -1,4 +1,5 @@
 #pragma once
+#include "native_guarded_call.hpp"
 #include "native_readable_range.hpp"
 #include <windows.h>
 // Relative so a bare `cl tests\..._check.cpp` with no /I still resolves; the
@@ -66,8 +67,8 @@ inline std::optional<std::array<float,2>> project_to_ndc(const float view_projec
 // that clears it, since it happens after the original returned.
 //
 // Default-off: install(...,route) must be true and a fresh (<=150 ms) active
-// publication must exist, or this writes nothing at all. A null movie or a
-// non-pointer AS3 object is never written through: the movie is the engine's own
+// publication must exist, or this writes nothing at all. A null movie or an
+// empty AS3 id list is never written through, and a faulting setter stops all writes until reinstall: the movie is the engine's own
 // teardown signal and the object is released as it clears. Writes are gated on
 // logic()==2, the gameplay state the other native hooks use, so a reticle in a
 // menu or a loading screen is the game's own.
@@ -86,6 +87,10 @@ public:
     std::atomic<float> ndc_limit{1.f};
 private:
     inline static constexpr std::uintptr_t movie_offset=0x98,object_offset=0x3a8;
+    // arkIggyAS3Object layout (REA): +0x18 idList data pointer, +0x20 count in the low 24 bits. The setter writes through
+    // entry[count-1], so an empty list (a cleared object) would write through data-0x28. The qword at +0 is the vtable, never null.
+    inline static constexpr std::uintptr_t as3_data_offset=0x18,as3_count_offset=0x20;
+    inline static constexpr std::uint32_t as3_count_mask=0xffffff;
     inline static constexpr std::uintptr_t x_member_offset=0x660,y_member_offset=0x670,centred_latch_offset=0x94;
     inline static constexpr std::uint64_t freshness_ms=150;
     // 0x672F70 from the pinned decompile: movie null check through the JZ that
@@ -103,7 +108,7 @@ private:
     std::atomic<UINT> depth_{};
     std::atomic<UINT64> calls_{},applied_{},rejected_{},skipped_{},latch_clears_{},latch_failures_{},samples_{};
     std::mutex mutex_;Publication publication_;std::ofstream log_;
-    std::atomic<bool> placed_{false};
+    std::atomic<bool> placed_{false},failed_{false};
     inline static const std::byte zero_byte{};
 
     static bool executable(std::uintptr_t at) {
@@ -122,17 +127,18 @@ private:
             // The engine's own guard, and its teardown signal: while the movie is
             // null the AS3 object has been released and the engine touches neither.
             if(!read_(at+movie_offset,&movie,sizeof movie) || !movie) return;
-            const auto owns=route_.load(std::memory_order_acquire) && logic_()==2 && publication.active &&
+            const auto owns=!failed_.load(std::memory_order_acquire) && route_.load(std::memory_order_acquire) && logic_()==2 && publication.active &&
                 publication.epoch && now>=publication.tick && now-publication.tick<=freshness_ms;
             if(!owns) {
                 // Hand the reticle back once: clear the centred latch so the engine re-places its own.
                 if(placed_.load()) {if(write_(at+centred_latch_offset,&zero_byte,1)) {placed_=false;++latch_clears_;}else ++latch_failures_;}
                 ++skipped_;return;
             }
-            std::uintptr_t object{};
+            std::uintptr_t list{};std::uint32_t count{};
             float stage_x{},stage_y{};
             bool applied=false;
-            if(read_(at+object_offset,&object,sizeof object) && object &&
+            if(read_(at+object_offset+as3_data_offset,&list,sizeof list) && list &&
+               read_(at+object_offset+as3_count_offset,&count,sizeof count) && (count&as3_count_mask) &&
                read_(base_+stage_x_rva,&stage_x,sizeof stage_x) && read_(base_+stage_y_rva,&stage_y,sizeof stage_y) &&
                std::isfinite(stage_x) && std::isfinite(stage_y) && stage_x>0 && stage_y>0 && stage_x<1e6f && stage_y<1e6f &&
                std::isfinite(publication.x) && std::isfinite(publication.y)) {
@@ -144,9 +150,13 @@ private:
                 const auto stage=crosshair_stage_position(std::clamp(publication.x,-limit,limit),
                     std::clamp(publication.y,-limit,limit),stage_x,stage_y);
                 // The setter takes the ADDRESS of the cached object field and of the member handle fields.
-                setter_(at+object_offset,&stage[0],reinterpret_cast<void*>(at+x_member_offset));
-                setter_(at+object_offset,&stage[1],reinterpret_cast<void*>(at+y_member_offset));
-                ++applied_;applied=true;placed_=true;
+                // SEH-guarded: the AS3 object can be torn down under the engine during load/death, and catch(...) does not see an AV.
+                auto write_both=[&]{
+                    setter_(at+object_offset,&stage[0],reinterpret_cast<void*>(at+x_member_offset));
+                    setter_(at+object_offset,&stage[1],reinterpret_cast<void*>(at+y_member_offset));
+                };
+                if(guarded_call(write_both)) {++applied_;applied=true;placed_=true;}
+                else {++rejected_;failed_.store(true,std::memory_order_release);} // stop writing until reinstall
             } else ++rejected_;
             if(samples_<4000) {
                 std::lock_guard<std::mutex> lock(mutex_);
@@ -198,7 +208,7 @@ public:
         if(!log_) throw std::runtime_error("Cannot open native crosshair log");
         log_<<std::setprecision(9)<<"tick_ms,thread,element,applied,ndc_x,ndc_y,epoch,age_ms,stage_x,stage_y\n";
         {std::lock_guard<std::mutex> lock(mutex_);publication_={};}
-        calls_=applied_=rejected_=skipped_=latch_clears_=latch_failures_=samples_=0;route_=route;instance_=this;
+        calls_=applied_=rejected_=skipped_=latch_clears_=latch_failures_=samples_=0;failed_=false;route_=route;instance_=this;
         const auto target=reinterpret_cast<void*>(base_+update_rva);
         if(!original_ && MH_CreateHook(target,reinterpret_cast<void*>(&update),reinterpret_cast<void**>(&original_))!=MH_OK)
             throw std::runtime_error("Cannot create native crosshair hook");

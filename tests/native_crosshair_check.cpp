@@ -14,7 +14,7 @@ static void require(bool passed,const char* message) {if(!passed) throw std::run
 // class's own layout constants.
 static constexpr std::uintptr_t update_rva=0x672f70,setter_call_rva=0x67318f,setter_rva=0x2a2c0;
 static constexpr std::uintptr_t stage_x_rva=0x3989eac,stage_y_rva=0x3989f2c;
-static constexpr std::uintptr_t movie_offset=0x98,object_offset=0x3a8,x_member_offset=0x660,y_member_offset=0x670,latch_offset=0x94;
+static constexpr std::uintptr_t movie_offset=0x98,object_offset=0x3a8,x_member_offset=0x660,y_member_offset=0x670,latch_offset=0x94,as3_data_offset=0x18,as3_count_offset=0x20;
 static constexpr std::size_t module_size=0x3990000;
 
 static std::uintptr_t base{};
@@ -24,12 +24,15 @@ static bool bad_read{},bad_write{};
 static UINT logic_value=2;
 
 static unsigned setter_calls{};
+static bool setter_faults{};
 static void* set_object{};
 static std::array<void*,4> set_members{};
 static std::array<float,4> set_values{};
 static std::uint64_t __fastcall fake_setter(void* object,const float* value,void* member) {
     if(setter_calls<set_members.size()) {set_members[setter_calls]=member;set_values[setter_calls]=value?*value:0.0f;}
-    set_object=object;++setter_calls;return 1;
+    set_object=object;++setter_calls;
+    if(setter_faults) *reinterpret_cast<volatile int*>(0x10)=1; // an access violation inside the engine setter
+    return 1;
 }
 static void __fastcall original(void*) {}
 extern "C" MH_STATUS WINAPI MH_CreateHook(LPVOID,LPVOID hook,LPVOID* out) {
@@ -66,7 +69,11 @@ struct Element {alignas(8) std::array<std::byte,0x700> bytes{};};
 static void make_element(Element& element) {
     const std::uintptr_t movie=0x1000,object=reinterpret_cast<std::uintptr_t>(element.bytes.data());
     std::memcpy(element.bytes.data()+movie_offset,&movie,8);
-    std::memcpy(element.bytes.data()+object_offset,&object,8);
+    // object_offset is an embedded arkIggyAS3Object: +0x00 vtable (never null), +0x18 idList data, +0x20 count (low 24 bits).
+    const std::uintptr_t vtable=0x2000,data=object+object_offset+0x28;const std::uint32_t count=1;
+    std::memcpy(element.bytes.data()+object_offset,&vtable,8);
+    std::memcpy(element.bytes.data()+object_offset+as3_data_offset,&data,8);
+    std::memcpy(element.bytes.data()+object_offset+as3_count_offset,&count,4);
     element.bytes[latch_offset]=std::byte{1};
 }
 static std::byte latch(const Element& element) {return element.bytes[latch_offset];}
@@ -177,13 +184,28 @@ int main() {
         logic_value=2;
 
         const std::uintptr_t zero=0;
-        std::memcpy(element.bytes.data()+object_offset,&zero,8);set_latch(element,std::byte{1});setter_calls=0;
-        const auto clears_before=crosshair.latch_clears();
+        // A cleared/destructed arkIggyAS3Object keeps its vtable but has an empty id list: the setter would write through
+        // data-0x28, so it must never be called.
+        const std::uint32_t count_zero=0,count_one=1;
+        auto* object_bytes=element.bytes.data()+object_offset;
+        std::memcpy(object_bytes+as3_count_offset,&count_zero,4);set_latch(element,std::byte{1});setter_calls=0;
+        const auto clears_before=crosshair.latch_clears();const auto rejected_zero=crosshair.rejected();
         crosshair.publish(0.0f,0.0f,6,GetTickCount64(),true);
         call(element.bytes.data());
-        require(setter_calls==0 && crosshair.latch_clears()==clears_before && latch(element)==std::byte{1},"A released AS3 object is never written through");
-        const std::uintptr_t object=reinterpret_cast<std::uintptr_t>(element.bytes.data());
-        std::memcpy(element.bytes.data()+object_offset,&object,8);
+        require(setter_calls==0 && crosshair.rejected()==rejected_zero+1 && crosshair.latch_clears()==clears_before && latch(element)==std::byte{1},"A zero-count AS3 object is never written through");
+        std::memcpy(object_bytes+as3_count_offset,&count_one,4);
+        const std::uint32_t count_high=0x01000000;std::memcpy(object_bytes+as3_count_offset,&count_high,4); // only the low 24 bits count
+        setter_calls=0;crosshair.publish(0.0f,0.0f,6,GetTickCount64(),true);call(element.bytes.data());
+        require(setter_calls==0,"A count whose low 24 bits are zero is empty");
+        std::memcpy(object_bytes+as3_count_offset,&count_one,4);
+        std::uintptr_t data_saved{};std::memcpy(&data_saved,object_bytes+as3_data_offset,8);
+        std::memcpy(object_bytes+as3_data_offset,&zero,8);setter_calls=0;
+        crosshair.publish(0.0f,0.0f,6,GetTickCount64(),true);call(element.bytes.data());
+        require(setter_calls==0,"A null id-list pointer is never written through");
+        std::memcpy(object_bytes+as3_data_offset,&data_saved,8);
+        setter_calls=0;crosshair.publish(0.0f,0.0f,6,GetTickCount64(),true);call(element.bytes.data());
+        require(setter_calls==2,"A populated AS3 object is written again");
+        set_latch(element,std::byte{1});
         std::memcpy(element.bytes.data()+movie_offset,&zero,8);set_latch(element,std::byte{1});setter_calls=0;
         const auto clear_mark=crosshair.latch_clears();
         crosshair.publish(0.0f,0.0f,7,GetTickCount64(),true);
@@ -199,6 +221,16 @@ int main() {
         require(crosshair.latch_failures()==1 && latch(element)==std::byte{1},"A failed handback retains restoration intent");
         bad_write=false;const auto retried=crosshair.latch_clears();call(element.bytes.data());
         require(crosshair.latch_clears()==retried+1 && latch(element)==std::byte{0},"Handback retries on next native owned update");
+
+        // A setter that raises an access violation is survived, counted as a rejection, and stops all further writes.
+        setter_faults=true;setter_calls=0;const auto applied_mark=crosshair.applied(),rejected_mark=crosshair.rejected();
+        crosshair.publish(0.25f,0.5f,10,GetTickCount64(),true);
+        call(element.bytes.data());
+        require(setter_calls==1 && crosshair.applied()==applied_mark && crosshair.rejected()==rejected_mark+1,"A faulting setter is survived and counted as rejected");
+        setter_faults=false;setter_calls=0;
+        crosshair.publish(0.25f,0.5f,11,GetTickCount64(),true);
+        call(element.bytes.data());
+        require(setter_calls==0 && crosshair.applied()==applied_mark,"No further writes after a setter fault until reinstall");
 
         require(crosshair.disable() && disables==2 && !crosshair.routing(),"Clean routed disable");
         setter_calls=0;const auto final_clears=crosshair.latch_clears();

@@ -1,4 +1,5 @@
 #pragma once
+#include "native_guarded_call.hpp"
 #include <windows.h>
 #include <MinHook.h>
 #include "native_rigid_body.hpp"
@@ -277,11 +278,29 @@ private:
         if(lane.obstruction && request_current(lane.obstruction->request,p,p.tick) && same_body(lane.obstruction->request.body,body)) return;
         lane.obstruction=Obstruction{{side,++obstruction_token_,p.epoch,p.tick,p.source_tick,p.owner,p.hand,body},{}};
     }
-    void write(Lane& lane,unsigned side,const NativeRigidBody& body,const GrabMotor& motor) {
+    enum class VelocityWrite {written,rejected,faulted};
+    // The native velocity setter validates nothing (a stale world or handle can fault, a NaN reaches the simulation), and /EHsc
+    // does not turn an access violation into a C++ exception, so the call runs under an SEH guard and non-finite input never
+    // reaches it. rejected is a fault-free refusal; faulted means the engine objects are gone.
+    VelocityWrite write_velocity(void* world,UINT handle,float* linear,float* angular) {
+        for(unsigned i=0;i<3;++i) if(!std::isfinite(linear[i]) || !std::isfinite(angular[i])) return VelocityWrite::rejected;
+        auto call=[&]{velocity_(world,handle,linear,angular,0);};
+        return guarded_call(call)?VelocityWrite::written:VelocityWrite::faulted;
+    }
+    // A velocity fault drops every held body and owner, the same recovery as a fault anywhere in update(). Caller holds mutex_.
+    void release_all_locked() {
+        for(auto& lane:lanes_) {lane.grab.release(false);lane.held.reset();lane.pending_release=false;revoke_owner_locked(lane);lane.candidates.clear();}
+        ++lost_;
+    }
+    void release_all() {std::lock_guard<std::mutex> lock(mutex_);release_all_locked();}
+    // Returns false when the setter faulted and every lane was released: the caller must not touch lane state further.
+    bool write(Lane& lane,unsigned side,const NativeRigidBody& body,const GrabMotor& motor) {
         alignas(16) std::array<float,4> linear{static_cast<float>(motor.linear.x),static_cast<float>(motor.linear.y),static_cast<float>(motor.linear.z),0};
         alignas(16) std::array<float,4> angular{static_cast<float>(motor.angular.x),static_cast<float>(motor.angular.y),static_cast<float>(motor.angular.z),0};
         CrashOperation operation("native physical grab velocity");
-        velocity_(reinterpret_cast<void*>(body.world),body.handle,linear.data(),angular.data(),0);
+        const auto result=write_velocity(reinterpret_cast<void*>(body.world),body.handle,linear.data(),angular.data());
+        if(result==VelocityWrite::faulted) {++contact_.faults;release_all_locked();return false;}
+        if(result==VelocityWrite::rejected) return true;
         if(motor.release) ++dropped_;else ++moved_;
         if(samples_<4000) {
             log_<<GetTickCount64()<<','<<side<<','<<body.entity_id<<','<<body.component<<','<<body.identity.generation<<','<<body.handle
@@ -290,6 +309,7 @@ private:
             for(unsigned i=0;i<3;++i) log_<<','<<linear[i];for(unsigned i=0;i<3;++i) log_<<','<<angular[i];log_<<'\n';++samples_;
             if(samples_%60==0 || motor.release) log_.flush();
         }
+        return true;
     }
     // A body dragged by a limb follows at the limb's reach: when the hand pulls the grabbed limb farther from the pelvis than at
     // the grab, the pelvis slides after it along the floor (sim v402: the wrist alone moved 0.86 m and dragged the pelvis 0.19 m).
@@ -302,7 +322,9 @@ private:
         alignas(16) std::array<float,4> linear{static_cast<float>(pull.x/reach*speed),static_cast<float>(pull.y/reach*speed),0,0};
         alignas(16) std::array<float,4> angular{};
         CrashOperation operation("native ragdoll tow velocity");
-        velocity_(reinterpret_cast<void*>(pelvis->world),pelvis->handle,linear.data(),angular.data(),0);++tows_;
+        const auto result=write_velocity(reinterpret_cast<void*>(pelvis->world),pelvis->handle,linear.data(),angular.data());
+        if(result==VelocityWrite::faulted) {++contact_.faults;release_all_locked();return;}
+        if(result==VelocityWrite::written) ++tows_;
     }
     void update_lane(unsigned side,std::uintptr_t world,UINT64 now) {
         auto& lane=lanes_[side];
@@ -340,7 +362,8 @@ private:
             const auto motor=lane.pending_release?std::optional<GrabMotor>{lane.grab.release_sample(p.hand,p.grip,usable && same_owner,p.epoch,p.tick,lane.release_throw)}:
                 lane.grab.motor(body->pose,physical_usable && sample && same_owner,now,p.source_tick);
             if(motor && (motor->release || now-lane.last_motor>=10)) {
-                write(lane,side,*body,*motor);lane.last_motor=now;
+                if(!write(lane,side,*body,*motor)) return;
+                lane.last_motor=now;
                 if(body->bone>0 && !motor->release) tow(lane,*body);
                 if(motor->release) {
                     if(body->bone<0 && length(motor->linear)>3) {std::lock_guard<std::mutex> g(thrown_mutex_);thrown_=Thrown{body->entity,body->component,body->entity_id,motor->linear,now};}
@@ -404,7 +427,9 @@ private:
         alignas(16) std::array<float,4> linear{static_cast<float>(p.velocity.x),static_cast<float>(p.velocity.y),static_cast<float>(p.velocity.z),0};
         alignas(16) std::array<float,4> angular{};
         CrashOperation operation("native blade poke velocity");
-        velocity_(reinterpret_cast<void*>(body->world),body->handle,linear.data(),angular.data(),0);++pokes_;
+        const auto result=write_velocity(reinterpret_cast<void*>(body->world),body->handle,linear.data(),angular.data());
+        if(result==VelocityWrite::faulted) {++contact_.faults;release_all();return;}
+        if(result==VelocityWrite::written) ++pokes_;
     }
     // Solid hands: loose props an open empty hand touches take its velocity (native_hand_contact.hpp). Here with the other velocity
     // writers; a prop a lane holds is its motor's.
@@ -419,7 +444,8 @@ private:
             alignas(16) std::array<float,4> linear{v[0],v[1],v[2],0};
             alignas(16) std::array<float,4> angular{spin[0],spin[1],spin[2],0};
             CrashOperation operation("native hand contact velocity");
-            velocity_(reinterpret_cast<void*>(w),handle,linear.data(),angular.data(),0);
+            const auto result=write_velocity(reinterpret_cast<void*>(w),handle,linear.data(),angular.data());
+            if(result==VelocityWrite::faulted) {++contact_.faults;release_all();}
         },[this] {return clock_.micros();});
     }
     void invoke(void* manager,void* command) {
@@ -427,9 +453,7 @@ private:
         try {apply_poke();} catch(...) {}
         try {apply_contact(reinterpret_cast<std::uintptr_t>(manager));} catch(...) {++contact_.faults;}
         try {update(reinterpret_cast<std::uintptr_t>(manager));} catch(...) {
-            std::lock_guard<std::mutex> lock(mutex_);
-            for(auto& lane:lanes_) {lane.grab.release(false);lane.held.reset();lane.pending_release=false;revoke_owner_locked(lane);lane.candidates.clear();}
-            ++lost_;
+            release_all();
         }
     }
     static void __fastcall dispatch(void* manager,void* command) {
