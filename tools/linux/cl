@@ -1,0 +1,19 @@
+#!/usr/bin/env python3
+"""`cl` stand-in for python checks that shell out to the MSVC compiler.
+
+run_build_cmd.py puts this on PATH (as build/linux-harness/bin/cl) while running
+python steps; it forwards the cl command line to clang-cl with the same
+translation the harness uses for tools/build-msvc.cmd.
+"""
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+import run_build_cmd as harness  # noqa: E402
+
+args = sys.argv[1:]
+if "/analyze" in args:
+    sys.stderr.write("cl shim: /analyze (MSVC static analysis) is not available with clang-cl\n")
+    sys.exit(2)
+argv, _ = harness.cl_to_clang(args)
+os.execv(argv[0], argv)
