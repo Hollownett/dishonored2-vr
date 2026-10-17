@@ -129,14 +129,17 @@ class NativeTurning {
                 feedback_.begin({owner(*before),*request,before->heading,expected,turn_dt,GetTickCount64()});
             }
         }
+        // Never hold the feedback lock across the game's physics step.
+        const bool relock=feedback_lock.owns_lock();
+        if(relock) feedback_lock.unlock();
         original_(delegate,dt_bits,body_id,a,b,c);
-        if(feedback_lock.owns_lock() && feedback_.pending()) {
+        if(relock) {feedback_lock.lock(); if(feedback_.pending()) {
             try {
                 const auto after=native_player_camera(read_,base_,before->camera);
                 if(after) acknowledge(*after,call);
                 else {feedback_.cancel();deferred_dt_=0;control_.suspend();++cancelled_;}
             } catch(...) {fail();}
-        }
+        }}
     }
     static void __fastcall step(void* delegate,std::uint32_t dt,std::uint32_t body,void* a,void* b,void* c) {
         auto& self=*instance_;self.depth_.fetch_add(1,std::memory_order_acq_rel);const auto call=++self.calls_;
