@@ -2,6 +2,7 @@
 #include "../src/native_held_object.hpp"
 #include "native_carry_fixture.hpp"
 #include <cassert>
+#include <cmath>
 #include <cstdio>
 #include <functional>
 #include <stdexcept>
@@ -306,6 +307,35 @@ int main() {
         assert(revision==(std::numeric_limits<std::uint64_t>::max)());Held::clear();Held::publish(state.target);
         assert(!Held::diagnostic_target(captured));
         assert(!d2vr::NativeHeldObjectCheck::commit(state.target,revision,output_position,output_axis));state.unchanged();
+    }
+    {   // nan_target_rejected / scaled_axis_rejected / reflection_rejected: invalid targets never replace the published one
+        Fixture state;const auto before=Held::rejected_targets.load();
+        auto bad=state.target;bad.pos[0]=7.f;bad.axis[4]=NAN;Held::publish(bad);
+        Held::Target kept{};assert(Held::diagnostic_target(kept) && kept.pos[0]==1.f && Held::rejected_targets.load()==before+1);
+        bad=state.target;bad.pos[1]=INFINITY;Held::publish(bad);assert(Held::rejected_targets.load()==before+2);
+        bad=state.target;bad.pos[2]=1e5f;Held::publish(bad);assert(Held::rejected_targets.load()==before+3);
+        bad=state.target;for(auto& v:bad.axis)v*=2.f;Held::publish(bad);assert(Held::rejected_targets.load()==before+4);
+        bad=state.target;bad.axis[1]=.1f;Held::publish(bad);assert(Held::rejected_targets.load()==before+5); // sheared
+        bad=state.target;bad.axis[8]=-1.f;Held::publish(bad);assert(Held::rejected_targets.load()==before+6); // reflection, det -1
+        assert(Held::diagnostic_target(kept) && kept.pos[0]==1.f && kept.axis[8]==1.f);
+        state.place();assert(output_position[0]==1.f && state.driven_right());
+        assert(Held::target_valid(state.target) && Held::rejected_targets.load()==before+6);
+    }
+    {   // anchor_rejects_nan_quat: bypasses publish; the engine bytes at rf+0x3d0..0x3f0 stay as they were
+        Fixture state;auto bad=state.target;bad.axis[0]=NAN;
+        unsigned char before[0x20];std::memcpy(before,reinterpret_cast<void*>(rf+0x3d0),sizeof(before));
+        assert(!d2vr::NativeHeldObjectCheck::anchor(bad,master));
+        assert(std::memcmp(before,reinterpret_cast<void*>(rf+0x3d0),sizeof(before))==0);
+        bad=state.target;for(auto& v:bad.axis)v*=2.f;   // non-unit quaternion from a scaled basis
+        assert(!d2vr::NativeHeldObjectCheck::anchor(bad,master));
+        assert(std::memcmp(before,reinterpret_cast<void*>(rf+0x3d0),sizeof(before))==0);
+    }
+    {   // a master carry that leaves the target invalid is refused at the bind and writes nothing
+        Fixture state;auto t=state.target;const std::array<float,3> then{1,1,1};const std::array<float,9> identity{1,0,0,0,1,0,0,0,1};
+        std::memcpy(t.master_pos,then.data(),12);std::memcpy(t.master_axis,identity.data(),36);t.master_valid=true;
+        Held::publish(t);put(master+0x30c,std::array<float,9>{2,0,0,0,2,0,0,0,2});
+        const auto before=Held::rejected_targets.load();state.place();state.unchanged();
+        assert(!state.driven_right() && Held::rejected_targets.load()==before+1);
     }
     Held::clear();Placement::process_owner().disable();
     std::puts("PASS actual held publish/place/anchor outputs and typed completion authority; owned buffers only, no engine/hook calls");

@@ -49,10 +49,14 @@ assert 'clear();'not in place
 assert '} __except(EXCEPTION_EXECUTE_HANDLER) {}'in place
 commit=held[held.index('static unsigned commit('):held.index('static bool anchor(')]
 assert commit.index('AcquireSRWLockExclusive(')<commit.index('__try')<commit.index('revision!=publication_revision_')<commit.index('std::memcpy(pos,t.pos,12)')<commit.index('anchor(t,m)')<commit.index('__finally {ReleaseSRWLockExclusive(')
-for condition in ('publication_exhausted_','rf_.load(std::memory_order_acquire)!=t.rf','GetTickCount64()-t.tick>150',
-                  'if(*reinterpret_cast<const std::uintptr_t*>(t.rf+0x10)!=t.entity)return 0;',
-                  'return anchored_here?2u:1u;'):
-    assert condition in commit
+# commit() validates the immutable published snapshot (published.*), then copies it to a local Target t, applies the master
+# carry to t, and re-validates t before any engine-buffer write.
+for condition in ('publication_exhausted_','rf_.load(std::memory_order_acquire)!=published.rf','GetTickCount64()-published.tick>150',
+                  'if(*reinterpret_cast<const std::uintptr_t*>(published.rf+0x10)!=published.entity)return 0;',
+                  'Targett=published;','return anchored_here?2u:1u;'):
+    assert compact(condition) in compact(commit)
+assert commit.index('carry(t,m)')<commit.index('if(!target_valid(t))')<commit.index('std::memcpy(pos,t.pos,12)')
+assert '++rejected_targets;return 0;' in commit
 assert 'NativeHeldPlacement'not in commit and 'bind_('not in commit and 'bind_observer'not in commit
 assert 'clear();'not in commit
 clear=held[held.index('static void clear() noexcept'):held.index('// Render thread: the next set-velocity')]
@@ -60,6 +64,8 @@ assert clear.count('NativeHeldPlacement::process_owner().clear()')==1
 assert clear.index('process_owner().clear()')<clear.index('AcquireSRWLockExclusive(')<clear.index('advance_publication_locked()')<clear.index('data_={};rf_.store(0,std::memory_order_release)')<clear.index('__finally {ReleaseSRWLockExclusive(')
 assert 'current('not in clear and 'completed('not in clear
 publish=held[held.index('static void publish('):held.index('static void clear() noexcept')]
+assert publish.index('if(!target_valid(t))')<publish.index('++rejected_targets')<publish.index('AcquireSRWLockExclusive(')
+assert 'static bool target_valid(const Target& t) noexcept'in held and 'std::isfinite'in held and 'det>0.f'in held
 assert publish.index('AcquireSRWLockExclusive(')<publish.index('advance_publication_locked()')<publish.index('data_=t')<publish.index('rf_.store(t.rf')<publish.index('__finally {ReleaseSRWLockExclusive(')
 snapshot=held[held.index('static bool snapshot('):held.index('static std::uintptr_t __fastcall bind_hook(')]
 assert snapshot.index('AcquireSRWLockShared(')<snapshot.index('out=data_')<snapshot.index('*revision=publication_revision_')<snapshot.index('__finally {ReleaseSRWLockShared(')
@@ -69,7 +75,8 @@ assert advance.index('publication_revision_==(std::numeric_limits<std::uint64_t>
 assert '__finally' in hook and hook.index('if(observe)observe(3,')<hook.index('--depth_;')
 anchor=held[held.index('static bool anchor('):held.index('static void __fastcall arm_part_hook(')]
 assert 'return false;'in anchor and '++anchored;return true;'in anchor
-assert anchor.index('std::memcpy(rf+0x3e0,xyzw,16)')<anchor.index('return true;')
+assert anchor.index('std::isfinite(c)')<anchor.index('c/=norm')<anchor.index('std::memcpy(rf+0x3e0,xyzw,16)')<anchor.index('return true;')
+assert anchor.index('std::abs(norm-1.f)<1e-3f')<anchor.index('*reinterpret_cast<std::int16_t*>(rf+0x3d0)=-1')
 assert 'if(carry.active[2])return false;'in socket
 assert 'NativeHeldPlacement::process_owner().current_driven_right('in socket
 assert 'availability.placement_serial,availability.epoch,carry,now' in compact(socket)

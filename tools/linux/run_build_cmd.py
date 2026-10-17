@@ -107,10 +107,6 @@ SKIPS = [
     (r"tools/embed_smaa\.py", "all",
      "rewrites the tracked third_party/smaa/shader_source.hpp (CRLF on Windows, LF here); "
      "the committed file is used as is"),
-    # -- genuine pre-existing failure on this branch
-    (r"tests/held_object_routing_check\.py", "all",
-     "pre-existing: commit() in src/native_held_object.hpp no longer contains the "
-     "strings the check requires (fails on any host; needs a source or test update)"),
     # -- Wine runtime limitations
     (r"tests/(sword_combat_routing|native_sword_contact_routing)_check\.py", "all",
      "the check compiles with cl and then executes the .exe directly (no Windows loader "

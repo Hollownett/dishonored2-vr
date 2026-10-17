@@ -59,8 +59,27 @@ public:
         return !depth_;
     }
 
+    // Counts targets refused by target_valid (publish, and commit after the master carry).
+    inline static std::atomic<std::uint64_t> rejected_targets{};
+    // The engine never normalizes the quaternion anchor() writes (ToMat3 0x111410 assumes unit length, NaN propagates into the
+    // drawn transform), so only a finite, bounded, right-handed orthonormal pose may reach engine memory.
+    static bool target_valid(const Target& t) noexcept {
+        for(const float v:t.pos) if(!(std::isfinite(v) && std::abs(v)<1e5f)) return false;
+        for(const float v:t.axis) if(!std::isfinite(v)) return false;
+        const float* a=t.axis;
+        for(unsigned i=0;i<3;++i) {
+            const float* r=a+i*3;
+            const float len=std::sqrt(r[0]*r[0]+r[1]*r[1]+r[2]*r[2]);
+            if(!(std::abs(len-1.f)<1e-2f)) return false;
+            const float* n=a+((i+1)%3)*3;
+            if(!(std::abs(r[0]*n[0]+r[1]*n[1]+r[2]*n[2])<1e-2f)) return false;
+        }
+        const float det=a[0]*(a[4]*a[8]-a[5]*a[7])-a[1]*(a[3]*a[8]-a[5]*a[6])+a[2]*(a[3]*a[7]-a[4]*a[6]);
+        return det>0.f;
+    }
     // Render thread (single writer).
     static void publish(const Target& t) noexcept {
+        if(!target_valid(t)) {++rejected_targets;return;}
         AcquireSRWLockExclusive(&publication_lock_);
         __try {
             if(!advance_publication_locked())return;
@@ -293,6 +312,7 @@ private:
             if(*reinterpret_cast<const std::uintptr_t*>(published.rf+0x10)!=published.entity)return 0;
             Target t=published;
             if(t.master_valid) if(const auto m=*reinterpret_cast<const std::uintptr_t*>(t.rf+0x3c8)) carry(t,m);
+            if(!target_valid(t)) {++rejected_targets;return 0;}
             float cp[3],ca[9];std::memcpy(cp,reinterpret_cast<const void*>(t.entity+0x300),12);std::memcpy(ca,reinterpret_cast<const void*>(t.entity+0x30c),36);
             std::memcpy(pos,t.pos,12);std::memcpy(axis,t.axis,36);
             bool anchored_here{};
@@ -332,7 +352,11 @@ private:
             for(unsigned j=0;j<3;++j) l[i*3+j]=t.axis[i*3]*ma[j*3]+t.axis[i*3+1]*ma[j*3+1]+t.axis[i*3+2]*ma[j*3+2]; // L x M = T
         }
         if(!(std::abs(off[0])<4.f && std::abs(off[1])<4.f && std::abs(off[2])<4.f)) return false;
-        const auto q=dvr::grab::quat_from_rot(l);const float xyzw[4]{q.x,q.y,q.z,q.w};
+        const auto q=dvr::grab::quat_from_rot(l);float xyzw[4]{q.x,q.y,q.z,q.w};
+        const float norm=std::sqrt(xyzw[0]*xyzw[0]+xyzw[1]*xyzw[1]+xyzw[2]*xyzw[2]+xyzw[3]*xyzw[3]);
+        for(const float c:xyzw) if(!std::isfinite(c)) return false;
+        if(!(std::abs(norm-1.f)<1e-3f)) return false;
+        for(float& c:xyzw) c/=norm;
         auto* rf=reinterpret_cast<char*>(t.rf);
         *reinterpret_cast<std::int16_t*>(rf+0x3d0)=-1;std::memcpy(rf+0x3d4,off,12);std::memcpy(rf+0x3e0,xyzw,16);
         ++anchored;return true;
