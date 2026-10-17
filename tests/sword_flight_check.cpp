@@ -65,6 +65,26 @@ int main() {
         double elapsed{};while(sword.step(.011,world) && elapsed<3) elapsed+=.011;
         assert(!sword.flying && std::abs(sword.pos.z-(SwordFlight::radius+.01))<1e-6);
     }
+    {   // flight_times_out: over an empty world the flight still ends after max_flight_s, at a finite position
+        SwordFlight f{};f.pos={0,0,1000};f.vel={5,0,0};f.axis={Vec3{1,0,0},Vec3{0,1,0},Vec3{0,0,1}};f.flying=true;
+        const auto empty=[](Vec3,Vec3)->std::optional<WorldTraceHit> {return {};};
+        unsigned steps=0;while(steps<400 && f.step(.02,empty)) ++steps;
+        assert(!f.flying && steps<=301 && f.age>=SwordFlight::max_flight_s && SwordFlight::finite(f));
+        assert(!f.step(.02,empty));
+    }
+    {   // nan_velocity_stops: a non-finite state ends the flight at once, position untouched
+        SwordFlight f{};f.pos={1,2,3};f.vel={std::nan(""),0,0};f.axis={Vec3{1,0,0},Vec3{0,1,0},Vec3{0,0,1}};f.flying=true;
+        assert(!SwordFlight::finite(f));
+        assert(!f.step(.02,[](Vec3,Vec3)->std::optional<WorldTraceHit> {return {};}));
+        assert(!f.flying && f.pos.x==1 && f.pos.y==2 && f.pos.z==3);
+    }
+    {   // request() rejects non-finite pos/vel/axis and still accepts a finite throw
+        NativeWeaponHands::Request r{};r.op=NativeWeaponHands::Op::drop;
+        assert(NativeWeaponHands::request(r));
+        auto bad=r;bad.pos[1]=INFINITY;assert(!NativeWeaponHands::request(bad));
+        bad=r;bad.vel[2]=std::nanf("");assert(!NativeWeaponHands::request(bad));
+        bad=r;bad.axis[8]=std::nanf("");assert(!NativeWeaponHands::request(bad));
+    }
     {   // the isUnaware pin is the pinned executable's own prologue, its RVA mapped through the file's section table
         std::ifstream in("artifacts/re-toolchain/direct-ghidra/Dishonored2-steam17576867.exe",std::ios::binary);
         if(!in) std::cout<<"note: pinned executable absent, isUnaware pin not checked\n";

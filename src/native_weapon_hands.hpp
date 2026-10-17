@@ -23,6 +23,7 @@
 #include "native_manual_equip_runtime.hpp"
 #include "crash_observer.hpp"
 #include <algorithm>
+#include <cmath>
 #include <array>
 #include <atomic>
 #include <cstdint>
@@ -37,10 +38,17 @@ namespace d2vr {
 // One step of a thrown or dropped rigid sword the mod moves itself (pure: the world is a callback). Game world, Z up.
 struct SwordFlight {
     Vec3 pos{},vel{},spin_axis{};std::array<Vec3,3> axis{};double spin{};unsigned bounces{};bool flying{};
-    static constexpr double gravity=9.81,radius=.04;
+    double age{}; // seconds since launch
+    static constexpr double gravity=9.81,radius=.04,max_flight_s=6.0; // a sword that never meets the world (off the map) stops here
+    static bool finite(const SwordFlight& f) noexcept {
+        const auto ok=[](const Vec3& v){return std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z);};
+        return ok(f.pos) && ok(f.vel) && ok(f.spin_axis) && ok(f.axis[0]) && ok(f.axis[1]) && ok(f.axis[2]) && std::isfinite(f.spin);
+    }
     // cast(from, to) -> the world hit, if any. Returns true while still flying.
     template<class Cast> bool step(double dt,Cast&& cast) {
         if(!flying) return false;
+        age+=dt;
+        if(age>=max_flight_s || !finite(*this)) {flying=false;vel={};return false;} // pos stays the last finite position
         vel.z-=gravity*dt;const auto next=pos+vel*dt;
         if(const std::optional<WorldTraceHit> hit=cast(pos,next)) {
             const auto n=hit->normal;
@@ -82,6 +90,8 @@ public:
     static constexpr const char* sword_copy_decl="models/campaign/dunwall/midnightassets/sword_player_midnight.def";
     // Any thread: queued for the next game-thread service.
     static bool request(const Request& r) {
+        const auto ok=[](const auto& a){return std::all_of(a.begin(),a.end(),[](float v){return std::isfinite(v);});};
+        if(!ok(r.pos) || !ok(r.vel) || !ok(r.axis) || !ok(r.spin)) return false; // NaN into Teleport/spawn reaches every physics body (REA Q4)
         std::lock_guard<std::mutex> lock(m_);
         if(queue_.size()<8) {queue_.push_back(r);if(r.op==Op::gun_holster)++holster_enqueued_;return true;}
         if(r.op==Op::gun_holster)++holster_dropped_;
@@ -176,7 +186,7 @@ private:
     inline static std::uint64_t holster_enqueued_{},holster_dropped_{},visibility_tick_{};
     inline static std::atomic<std::uint64_t> holster_serviced_{},holster_returned_{},holster_failed_{};
     inline static std::uintptr_t copy_{};inline static std::uint32_t copy_id_{};inline static std::uint64_t copy_since_{};inline static bool shown_{};
-    inline static SwordFlight flight_{};inline static LARGE_INTEGER flight_qpc_{};inline static std::uint64_t flight_since_{};
+    inline static SwordFlight flight_{};inline static LARGE_INTEGER flight_qpc_{};
     // A thrown sword striking a guard is a sword hit: the engine's TakeDamage with the player's own sword decl (NativeMelee),
     // once per guard per throw. Its path this frame and its blade (+-0.6 m around the prop's origin, which is not known to be
     // the hilt) are swept against a body capsule at the guard's drawn model origin (feet to head, 0.28 m): a living guard has
@@ -190,7 +200,7 @@ private:
         const auto side=cross(flight_.vel,Vec3{0,0,1});const double speed=length(flight_.vel);
         if(speed>4 && length(side)>1e-3) {flight_.spin_axis=side*(1/length(side));flight_.spin=-std::min(speed*1.6,16.);} // tumbles end over end
         trace_="launch "+text(flight_.pos)+" v"+text(flight_.vel);
-        copy_since_=GetTickCount64();flight_.flying=true;QueryPerformanceCounter(&flight_qpc_);flight_since_=GetTickCount64();struck_.clear();thrown_peak=static_cast<float>(speed);
+        copy_since_=GetTickCount64();flight_.flying=true;QueryPerformanceCounter(&flight_qpc_);struck_.clear();thrown_peak=static_cast<float>(speed);
     }
     template<class Read> static void fly(std::uintptr_t base,Read& read) {
         static const bool trace_ok=NativeWorldTrace::verify(base,read),melee_ok=NativeMelee::verify(base,read);
@@ -215,6 +225,7 @@ private:
         if(speed>=3 && melee_ok && sword_) {int fault{};
             if(strike(base,read,*game,from,flight_.pos,flight_.axis[0],.6,*sword_,struck_,fault)) {++thrown_hits;flight_.vel=flight_.vel*-.15;flight_.spin*=.3;} // the blade stops in the body and drops
             if(fault==2) sword_.reset();}
+        if(!SwordFlight::finite(flight_)) {flight_.flying=false;return;} // never hand the engine a non-finite transform: stay at the last one
         alignas(16) std::array<float,3> origin{float(flight_.pos.x),float(flight_.pos.y),float(flight_.pos.z)};
         alignas(16) std::array<float,9> axis{};
         for(unsigned i=0;i<3;++i) {axis[i*3]=float(flight_.axis[i].x);axis[i*3+1]=float(flight_.axis[i].y);axis[i*3+2]=float(flight_.axis[i].z);}
@@ -519,6 +530,8 @@ private:
             base+0x8ae9b0)(*game,decl,pos,axis,0,false,nullptr,zero.data(),zero.data());
     }
     template<class Read> static void teleport(std::uintptr_t base,std::uintptr_t e,const std::array<float,3>& pos,const std::array<float,9>& axis) {
+        const auto ok=[](const auto& v){return std::all_of(v.begin(),v.end(),[](float x){return std::isfinite(x);});};
+        if(!ok(pos) || !ok(axis)) return; // REA Q4: Teleport 87d1e0 has no finite check
         alignas(16) std::array<float,3> o=pos;alignas(16) std::array<float,9> a=axis;
         reinterpret_cast<void (__fastcall*)(std::uintptr_t,const float*,const float*,int)>(base+0x87d1e0)(e,o.data(),a.data(),0);
     }
