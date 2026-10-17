@@ -10,7 +10,7 @@ def check(source: str, aim: str) -> None:
     assert "d2vr::NativeInteractionAim::sword_contact_status_json()" in helper
     assert '\\"policy_rt_edges\\":' in helper
     live_begin = source.index('std::ofstream live(output_directory/L"xr-live-status.json"')
-    live_end = source.index('if(!live) throw std::runtime_error("Cannot save live XR session state")', live_begin)
+    live_end = source.index('if(!live) xr_status_write_failed=true', live_begin)
     live = source[live_begin:live_end]
     assert "live <<" in live
     assert live.count("combat_policy_status_json()") == 1, "Live status must export the existing coherent combat/contact helper exactly once"

@@ -137,6 +137,7 @@ static PresentFn original_present{};
 static std::ofstream xr_timing_csv,present_timing_csv;
 static d2vr::FrameTimingQueue frame_timing_queue;
 static std::atomic<bool> frame_timing_write_failed{};
+static std::atomic<bool> xr_status_write_failed{};
 static thread_local std::int64_t logic_discovery_cpu_ns{};
 static constexpr const char* present_timing_header="present,present_start_ns,xr_end_ns,pre_desktop_ns,present_end_ns,post_xr_cpu_ns,desktop_present_cpu_ns,present_total_cpu_ns,logic_discovery_cpu_ns,lean_cpu_ns,grab_control_cpu_ns,takedown_crouch_cpu_ns,controls_cpu_ns,post_xr_housekeeping_cpu_ns,gpu_hook_maintenance_cpu_ns,epoch,gameplay,capture_readback\n";
 struct CpuSpan {
@@ -303,15 +304,18 @@ HRESULT STDMETHODCALLTYPE create_texture2d_hook(ID3D11Device* device,const D3D11
     return original_create_texture2d(device,desc,initial,texture);
 }
 void install_glyph_hook(ID3D11Device* device) noexcept {
-    if(original_create_texture2d || !vr_glyphs_enabled || !device) return;
+    if(!vr_glyphs_enabled || !device) return;
     void* target=(*reinterpret_cast<void***>(device))[5]; // ID3D11Device::CreateTexture2D
+    // The hook is only ever disabled (never removed): streaming threads may still be inside create_texture2d_hook.
+    if(create_texture2d_target==target && original_create_texture2d) {MH_EnableHook(create_texture2d_target);return;}
+    if(original_create_texture2d) return; // retained hook belongs to another device vtable; never free its trampoline
     if(MH_CreateHook(target,reinterpret_cast<void*>(&create_texture2d_hook),reinterpret_cast<void**>(&original_create_texture2d))!=MH_OK) {original_create_texture2d=nullptr;return;}
     if(MH_EnableHook(target)!=MH_OK) {MH_RemoveHook(target);original_create_texture2d=nullptr;return;}
     create_texture2d_target=target;
 }
 void remove_glyph_hook() noexcept {
     if(!create_texture2d_target) return;
-    MH_DisableHook(create_texture2d_target);MH_RemoveHook(create_texture2d_target);create_texture2d_target=nullptr;original_create_texture2d=nullptr;
+    MH_DisableHook(create_texture2d_target); // keep target and trampoline: callers may be mid-hook
 }
 // Read-only: does arkEntityMarker::Update run once per frame or once per eye pass (build/marker-probe)?
 static d2vr::NativeMarkerProbe native_marker_probe;static bool native_marker_probe_installed=false;
@@ -6257,10 +6261,12 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                      << ",\"grab_decisions_dropped\":"<<native_grab.decision_dropped()
                                      << ",\"frame_timing_dropped\":"<<frame_timing_queue.dropped()
                                      << ",\"frame_timing_write_failed\":"<<(frame_timing_write_failed.load()?"true":"false")
+                                     << ",\"xr_status_write_failed\":"<<(xr_status_write_failed.load()?"true":"false")
                                      << ",\"shot_aim\":{\"installed\":" << native_shot_aim_installed << ",\"calls\":" << native_shot_aim.calls()
                                      << ",\"routed\":" << native_shot_aim.routed() << ",\"rejected\":" << native_shot_aim.rejected() << ",\"last_reason\":" << native_shot_aim.last_reason() << '}' 
                                      << feedback_status_json() << combat_policy_status_json() << ",\"headset_scene_visually_verified\":false}\n";
-                                if(!live) throw std::runtime_error("Cannot save live XR session state");
+                                if(!live) xr_status_write_failed=true; // diagnostics must never reach XR session recovery
+                                else {
                                 std::ofstream lifecycle(output_directory/L"xr-lifecycle.csv",std::ios::app);
                                 lifecycle << frames.load() << ',' << xr_live_status_tick << ',' << xr_last_state << ',' << xr_pose_epoch
                                           << ',' << xr_reference_events << ',' << (game_xr->last_should_render?1:0)
@@ -6268,7 +6274,8 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                           << ',' << (game_xr->last_tracked_pair?1:0) << ',' << xr_tracked_transfer_frames
                                           << ',' << static_cast<int>(game_xr->last_action_sync) << ',' << game_xr->active_input_hands
                                           << ',' << game_xr->grip_tracked_hands << ',' << controller_bridge.nonzero_reads() << '\n';
-                                if(!lifecycle) throw std::runtime_error("Cannot save XR lifecycle state");
+                                if(!lifecycle) xr_status_write_failed=true;
+                                }
                             }
                             xr_menu_layers=game_xr->menu_layers;
                             xr_controller_samples=game_xr->controller_samples;
@@ -7200,7 +7207,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
         for(auto& v:world_ui_draws) v=0;for(auto& v:world_ui_drawn_scopes) v=0;world_ui_target_frame={};world_ui_target_cycle={};
         xr_submitted=0;xr_dropped=0;xr_gameplay_frames=0;xr_menu_layers=0;xr_last_state=0;
         xr_timing_samples=xr_timing_rotations=present_timing_samples=0;previous_present_end_ns=0;previous_desktop_present_ns=0;
-        frame_timing_queue.reset();frame_timing_write_failed=false;
+        frame_timing_queue.reset();frame_timing_write_failed=false;xr_status_write_failed=false;
         xr_transfer_mask=0;xr_transfer_frame=0;xr_source_lit_fractions={};xr_tracked_transfer_frames=0;xr_live_status_tick=0;
         xr_menu_transfer_mask=0;xr_menu_transfer_frame=0;xr_capture_epoch=0;xr_pose_epoch=0;xr_reference_epoch=0;xr_state_events=0;xr_reference_events=0;
         authored_pair_captured=false;

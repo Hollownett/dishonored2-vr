@@ -520,6 +520,8 @@ python tests\physical_grip_routing_check.py
 if not "%errorlevel%"=="0" exit /b 1
 python tests\native_turning_lock_routing_check.py
 if not "%errorlevel%"=="0" exit /b 1
+python tests\diagnostic_isolation_routing_check.py
+if not "%errorlevel%"=="0" exit /b 1
 python tests\combat_scheduler_routing_check.py
 if not "%errorlevel%"=="0" exit /b 1
 python tests\sword_combat_routing_check.py
