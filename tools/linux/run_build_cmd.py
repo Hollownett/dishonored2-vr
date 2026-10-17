@@ -29,21 +29,53 @@ COMPAT = WORK / "compat"
 # /W4 /WX but cl does not (cl is clean on the same sources), or restores cl
 # semantics. Keep in sync with the README.
 CLANG_ONLY_FLAGS = [
+    "-ferror-limit=0",                    # see every error (compat gate needs them all)
     "-fno-crash-diagnostics",             # do not litter /tmp with reproducers
     "-Wno-unused-command-line-argument",  # e.g. /Fd: combined with /Zi /LD
     "-Wno-missing-braces",                # RUNTIME_FUNCTION{...} brace elision
     "-Wno-missing-field-initializers",    # partial aggregate initialisers
-    "-Wno-unused-parameter",
-    "-Wno-unused-function",
-    "-Wno-unused-variable",               # unused namespace-scope statics
-    "-Wno-unused-const-variable",
-    "-Wno-unused-but-set-variable",
-    "-Wno-unused-but-set-global",
-    "-Wno-sign-compare",                  # cl reports C4018/C4389 only for some of these
     "-Wno-microsoft-cast",                # function<->object pointer cast, accepted by cl
-    "-Wno-error=return-type",             # SEH __try/__finally bodies that end in return
     "/clang:-ffp-contract=off",           # cl does not contract; clang folds a*b-c as fused
 ]
+
+# clang diagnostics that cl ALSO raises at /W4 /WX (C4100, C4189/C4101, C4505,
+# C4018/C4389, C4715) are NOT muted. They are downgraded from errors to warnings
+# only so that tracked_warning_problems() can compare them against the exact
+# allowlist below; anything not on the list fails the step. A new unused
+# variable / sign-compare / missing return in src/ therefore FAILs here.
+TRACKED_GROUPS = ("unused-parameter", "unused-function", "unused-variable", "unused-const-variable",
+                  "unused-but-set-variable", "unused-but-set-global", "sign-compare", "return-type")
+CLANG_ONLY_FLAGS += ["-Wno-error=" + g for g in TRACKED_GROUPS]
+# (file regex, message regex): warnings clang raises today that cl does not
+# (statics/globals written but never read, SEH function ending, constant
+# comparisons) in exactly these places.
+TRACKED_WARNING_ALLOW = [
+    (r"src/dxgi_probe\.cpp", r"unused variable '(wheel_cursor|wheel_dial)'"),
+    (r"src/dxgi_probe\.cpp", r"variable 'world_ui_installed' set but not used"),
+    (r"tests/full_body_contact_arm_check\.cpp", r"unused function 'rigid'"),
+    (r"tests/glyph_swap_async_check\.cpp", r"variable 'creates' set but not used"),
+    (r"tests/hand_contact_check\.cpp", r"variable 'stop' set but not used"),
+    (r"tests/native_choke_distance_scope_check\.cpp", r"variable '(disables|enables|entry_calls)' set but not used"),
+    (r"tests/native_door_empty_gate_check\.cpp", r"non-void function does not return a value"),
+    (r"tests/native_door_request_check\.cpp", r"comparison of integers of different signs: 'const std::uint64_t'"),
+    (r"tests/native_hud_census_check\.cpp", r"unused variable 'second_member'"),
+    (r"tests/native_interaction_stop_check\.cpp", r"variable 'native_calls' set but not used"),
+    (r"tests/native_kill_range_scope_check\.cpp", r"variable 'reads' set but not used"),
+    (r"tests/native_manual_equip_hooks_check\.cpp", r"variable 'after_calls' set but not used"),
+    (r"tests/native_slash_speed_check\.cpp", r"variable '(primary_calls|secondary_calls)' set but not used"),
+]
+_TRACKED_RE = re.compile(r"^(\S+?)\(\d+,\d+\): warning: (.*) \[-W(%s)\]" % "|".join(TRACKED_GROUPS), re.M)
+
+
+def tracked_warning_problems(text):
+    """Tracked-group warnings in compiler output that are not on the allowlist."""
+    bad = []
+    for m in _TRACKED_RE.finditer(text):
+        path = m.group(1).replace("tests/../", "")
+        if not any(re.fullmatch(f, path) and re.search(msg, m.group(2)) for f, msg in TRACKED_WARNING_ALLOW):
+            bad.append(m.group(0))
+    return sorted(set(bad))
+
 
 # Steps that cannot work on Linux. Matched with re.search against the step's
 # command line (as written in build-msvc.cmd, with / separators) or its name.
@@ -105,6 +137,9 @@ ASYNC_EH_CHECKS = re.compile(r"tests/(native_initial_contact|native_regular_cont
 # are not in the repo. When they are missing the link drops them and uses
 # /force:unresolved, but only if every unresolved symbol is an ffx* symbol.
 # Such outputs are linked but never executed.
+# Checks that print a skip notice and still exit 0 must not count as passes.
+SELF_SKIP = re.compile(r"(?im)^[^\n]{0,60}\bskipped\s*$|^no d3d11 device\b.*$")
+
 FFX_LIB_RE = re.compile(r"third_party/fidelityfx/libs/\S+\.lib$")
 
 # clang-cl failures that cl does not have; see clang_compat.py. A compile that
@@ -296,6 +331,20 @@ def run_proc(argv, env, log, timeout, cwd=ROOT):
     return rc, log.read_bytes().decode("utf-8", "replace")
 
 
+# Every error of the original compile must be one of the known clang-only
+# signatures, or a cascade they cause, before the compat retry may stand in for it.
+COMPAT_ERROR_OK = re.compile(
+    COMPAT_SIGNATURES.pattern + r"|no viable overloaded '='")  # cascade of the NSDMI error (invalid nested struct)
+
+
+def unexplained_errors(text):
+    """Error lines of a failed compile that are not explained by the clang-only limitations."""
+    lines = [l for l in text.splitlines() if re.search(r"\b(fatal )?error: ", l)]
+    if "GenerateSEHFinallyFunction" in text:
+        lines = [l for l in lines if "unable to execute command" not in l and "frontend command failed" not in l]
+    return [l for l in lines if not COMPAT_ERROR_OK.search(l)]
+
+
 def build_compat_tree():
     """Rewritten copy of src/tests/tools C++ sources for the compat retry."""
     sys.path.insert(0, str(HERE))
@@ -377,6 +426,7 @@ def run():
     ap.add_argument("--dry-run", action="store_true", help="print the translated commands without running them")
     ap.add_argument("--no-compat", action="store_true", help="do not retry clang-only compile failures on the rewritten copy")
     ap.add_argument("--timeout", type=int, default=300, help="per-step timeout in seconds")
+    ap.add_argument("--strict", action="store_true", help="exit 3 if anything was compile-only or skipped")
     ap.add_argument("-v", "--verbose", action="store_true", help="show output of every step")
     opts = ap.parse_args()
 
@@ -458,14 +508,26 @@ def run():
                 print("        (building rewritten source copy for clang-only failures: tools/linux/clang_compat.py)", flush=True)
                 build_compat_tree()
                 compat_ready = True
-            rc2, text2 = run_proc(argv, env, log, opts.timeout, cwd=COMPAT)
-            if rc2 == 0:
-                rc, text, compat_note = 0, text2, True
+            unmatched = unexplained_errors(text)
+            if unmatched:
+                text += "\n[harness] not retried: errors beyond the known clang-only signatures:\n" + "\n".join(unmatched) + "\n"
             else:
-                text += "\n[harness] compat retry also failed:\n" + text2
+                rc2, text2 = run_proc(argv, env, log.with_suffix(".compat.log"), opts.timeout, cwd=COMPAT)
+                if rc2 == 0:
+                    rc, text, compat_note = 0, text2, True
+                else:
+                    text += "\n[harness] compat retry also failed:\n" + text2
         dt = time.time() - ts
 
         note = ""
+        if st.kind == "cl" and rc == 0:
+            problems = tracked_warning_problems(text)
+            if problems:
+                rc, text = 1, text + "\n[harness] warnings cl also raises at /W4 /WX (not on the allowlist):\n" + "\n".join(problems) + "\n"
+        if st.kind in ("run", "python") and rc == 0 and SELF_SKIP.search(text):
+            skipped.append((st.name, "check skipped itself at run time: " + SELF_SKIP.search(text).group(0).strip()))
+            print("SKIPPED %-60s %s" % (st.name, skipped[-1][1]))
+            continue
         if st.kind == "cl" and rc == 0 and degraded:
             unresolved = set(re.findall(r"undefined symbol: (\S+)", text))
             bad = sorted(u for u in unresolved if "ffx" not in u.lower())
@@ -495,8 +557,8 @@ def run():
 
     if opts.dry_run:
         return 0
-    print("\n==== summary: %d passed (%d of them compile-only via compat copy) / %d failed / %d skipped%s (%.0fs) ====" % (
-        len(passed) + len(compat_passed), len(compat_passed), len(failed), len(skipped),
+    print("\n==== summary: %d passed / %d compile-only / %d failed / %d skipped%s (%.0fs) ====" % (
+        len(passed), len(compat_passed), len(failed), len(skipped),
         " / %d blocked" % len(blocked) if blocked else "", time.time() - t0))
     for name, why in skipped:
         print("  SKIPPED %s -- %s" % (name, why))
@@ -506,7 +568,12 @@ def run():
         print("  BLOCKED %s" % name)
     for name in failed:
         print("  FAILED  %s" % name)
-    return 0 if not failed and not blocked else 1
+    if n == 0:
+        print("no steps selected", file=sys.stderr)
+        return 1
+    if failed or blocked:
+        return 1
+    return 3 if opts.strict and (compat_passed or skipped) else 0
 
 
 if __name__ == "__main__":

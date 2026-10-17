@@ -16,4 +16,11 @@ if "/analyze" in args:
     sys.stderr.write("cl shim: /analyze (MSVC static analysis) is not available with clang-cl\n")
     sys.exit(2)
 argv, _ = harness.cl_to_clang(args)
-os.execv(argv[0], argv)
+import subprocess  # noqa: E402
+p = subprocess.run(argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+text = p.stdout.decode("utf-8", "replace")
+sys.stdout.write(text)
+problems = harness.tracked_warning_problems(text) if p.returncode == 0 else []
+if problems:
+    sys.stdout.write("cl shim: warnings cl also raises at /W4 /WX:\n" + "\n".join(problems) + "\n")
+sys.exit(p.returncode or (1 if problems else 0))

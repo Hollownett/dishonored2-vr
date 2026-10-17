@@ -13,16 +13,20 @@ be deleted afterwards). Running it means accepting Microsoft's CRT/SDK license (
     python3 tools/linux/run_build_cmd.py --keep-going     # everything, report all failures
     python3 tools/linux/run_build_cmd.py --only 'door_owner|dxgi_probe\.obj'   # matching steps (+ their run step)
     python3 tools/linux/run_build_cmd.py --list | --dry-run | --no-compat | -v | --timeout N
-Exit code 0 only if nothing FAILED or was BLOCKED. Logs: `build/linux-harness/*.log`. Output: `build/`.
+Exit 0 only if nothing FAILED/BLOCKED; `--strict` also exits 3 if anything is compile-only or skipped.
+Checks that print a skip notice and exit 0 are reported SKIPPED. Logs: `build/linux-harness/*.log`. Output: `build/`.
 Final summary: passed / failed / skipped; every SKIPPED line has a reason (`SKIPS` in the script).
 Without `--keep-going` it stops at the first failure like `goto build_failed`.
 
 ## Known differences from cl
 - clang-cl-only flags (`CLANG_ONLY_FLAGS`): `-Wno-` for missing-braces, missing-field-initializers,
-  unused-parameter/function/variable/const-variable/but-set-*, sign-compare, microsoft-cast,
-  `-Wno-error=return-type`, `/clang:-ffp-contract=off` (clang folds `a*b-c` as fused). `/EHsc` is
-  kept, except `/EHa` for three checks that fault inside `__try` (clang needs it; cl does not).
-- `PASS*` = compile/link only, from a rewritten copy of src/tests/tools (`clang_compat.py`) because
+  microsoft-cast; `/clang:-ffp-contract=off` (clang folds `a*b-c` as fused). `/EHsc` is kept, except
+  `/EHa` for three checks that fault inside `__try` (clang needs it; cl does not).
+- Warnings cl also raises (unused-*, sign-compare, return-type) are NOT muted: any not on the exact
+  `TRACKED_WARNING_ALLOW` list (13 entries: unused/set-but-unused globals in dxgi_probe.cpp and 10
+  tests, one SEH function ending, one signed compare in native_door_request_check) FAILs the step.
+- `PASS*` = compile/link only, from a rewritten copy of src/tests/tools (`clang_compat.py`; only when every original error is a known
+  clang-only one, else FAIL) because
   clang-cl rejects code cl accepts: nested-struct default member initializers used in the enclosing
   class, `static alignas(N) T`, nested `__try/__finally` (clang segfaults). The rewrite is unsound
   for running, so those checks are never executed here; the real Windows run covers them.
