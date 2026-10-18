@@ -437,6 +437,100 @@ int main() {
         assert(peak<.16+cfg.depth_speed+1e-9);       // never launched
         assert(pushes>60);                           // continuous: a push most frames of the contact (219 frames, the first ~55 before it)
     }
+    // --- mass-aware pushes (C5): one write raises the prop's speed by at most push_force_n * dt / mass; dt 0 (a first write) is not capped
+    {   // push_force_cap: an 8 kg box swatted at 3 m/s (200 N: 0.278 m/s a write at 90 Hz)
+        const HandContactConfig cfg;NativeRigidBody box{};box.pose={{0,0,.2},{{{1,0,0},{0,1,0},{0,0,1}}}};box.bounds=NativeGrabBounds{{-.2,-.2,0},{.2,.2,.4}};
+        const auto shape=prop_shape(box);const auto palm=lone({-.25,0,.2},.06);
+        ContactInput in;in.dt=1./90;
+        const auto capped=hand_contact_s(palm,shape,{3,0,0},{},8,cfg,in);
+        const auto today=hand_contact_s(palm,shape,{3,0,0},{},8,cfg);
+        in.dt=0;const auto uncapped=hand_contact_s(palm,shape,{3,0,0},{},8,cfg,in);
+        std::cout<<"push_force_cap: 8 kg box, 3 m/s swat: "<<length(capped.velocity)<<" m/s capped (limit "<<200./90/8<<"), "<<length(today.velocity)<<" m/s uncapped\n";
+        assert(cfg.push_force_n==200.);
+        assert(capped.push && capped.capped && length(capped.velocity)<=200./90/8+1e-9 && length(capped.velocity)>=200./90/8-1e-9);
+        assert(uncapped.push && !uncapped.capped && !today.capped && length(uncapped.velocity-today.velocity)==0 && length(today.velocity)>.5);
+        // the cap counts from what the prop already does along the push: a box moving at 0.1 m/s may reach 0.1 + 0.278
+        in.dt=1./90;const auto moving=hand_contact_s(palm,shape,{3,0,0},{.1,0,0},8,cfg,in);
+        assert(moving.push && moving.capped && std::abs(moving.velocity.x-(.1+200./90/8))<1e-9);
+    }
+    // bottle_unchanged: the carry loop's 0.5 kg slow ride writes exactly the same velocities with dt = 1/90 as with dt = 0
+    {
+        const auto ride=[](double write_dt) {
+            const double dt=1./90,mu_g=.4*9.81,hand_v=.16;const auto g=synthetic_geometry();const HandContactConfig cfg;
+            double hx=-.30,bx=0,bvx=0,bvy=0;std::uint64_t t=1000,engaged_until=0;std::vector<Vec3> written;bool capped=false;
+            for(int i=0;i<330;++i) {
+                const bool moving=i<219;if(moving) hx+=hand_v*dt;t+=11;
+                ContactInput in;in.engaged=engaged_until>t;in.dt=write_dt;
+                const auto r=hand_contact(hand_proxies(g,palm_at({hx,0,.1}),{0,0,0,0,0}),prop_shape(bottle(bx,0)),moving?Vec3{hand_v,0,0}:Vec3{},{bvx,bvy,0},.5,cfg,in);
+                if(r.driving) engaged_until=t+cfg.engage_ms;
+                if(r.push) {bvx=r.velocity.x;bvy=r.velocity.y;written.push_back(r.velocity);}
+                capped=capped || r.capped;
+                bx+=bvx*dt;
+                const double speed=std::hypot(bvx,bvy),slow=mu_g*dt;
+                if(speed<=slow) bvx=bvy=0;else {bvx*=(speed-slow)/speed;bvy*=(speed-slow)/speed;}
+            }
+            return std::make_pair(written,capped);
+        };
+        const auto [capped,any_capped]=ride(1./90);const auto [free,none]=ride(0);
+        std::cout<<"bottle_unchanged: "<<capped.size()<<" writes with dt 1/90, "<<free.size()<<" with dt 0\n";
+        assert(!any_capped && !none && capped.size()==free.size() && capped.size()>60);
+        for(std::size_t i=0;i<capped.size();++i) assert(capped[i].x==free[i].x && capped[i].y==free[i].y && capped[i].z==free[i].z);
+    }
+    // time_factor_scales: the engine's time factor multiplies the push (phase 1 always passes 1, C13)
+    {
+        const HandContactConfig cfg;const auto shape=prop_shape(bottle(0));const auto palm=lone({-.085,0,.1},.06);
+        ContactInput in;const auto full=hand_contact_s(palm,shape,{.3,0,0},{},.5,cfg,in);
+        in.time_factor=.5;const auto half=hand_contact_s(palm,shape,{.3,0,0},{},.5,cfg,in);
+        std::cout<<"time_factor_scales: "<<length(full.velocity)<<" m/s at 1, "<<length(half.velocity)<<" m/s at 0.5\n";
+        assert(ContactInput{}.time_factor==1. && ContactInput{}.dt==0.);
+        assert(full.push && half.push && std::abs(length(half.velocity)-.5*length(full.velocity))<1e-9 && length(full.velocity)>.3);
+    }
+    // bad_time_factor_writes_nothing: a non-finite or non-positive time factor, a non-finite or negative dt: no write, no spin
+    {
+        const HandContactConfig cfg;const auto shape=prop_shape(bottle(0));const auto palm=lone({-.085,0,.1},.06);const double nan=std::nan("");
+        for(const double factor:{nan,0.,-1.,std::numeric_limits<double>::infinity()}) {
+            ContactInput in;in.time_factor=factor;const auto r=hand_contact_s(palm,shape,{.3,0,0},{.01,0,0},.5,cfg,in);
+            assert(!r.push && !r.turn && !r.capped && r.velocity.x==.01 && r.velocity.y==0);
+        }
+        for(const double dt:{nan,-1.,std::numeric_limits<double>::infinity()}) {
+            ContactInput in;in.dt=dt;const auto r=hand_contact_s(palm,shape,{.3,0,0},{.01,0,0},.5,cfg,in);
+            assert(!r.push && !r.turn && !r.capped && r.velocity.x==.01 && r.velocity.y==0);
+        }
+    }
+    // launch_cap (controller rulings, Task 6): a push never leaves the prop faster along the push than the hand moves along it + launch_margin (0.3,
+    // times the time factor); a ride may add the friction it gives back. A dv cap per write limits the acceleration only; this caps the final speed:
+    // the hand cannot throw by pushing. The default margin equals depth_speed, so the spring alone never reaches it: the cases below raise the spring.
+    {
+        const HandContactConfig base;const auto shape=prop_shape(bottle(0));
+        assert(base.launch_margin==.3 && base.launch_margin>=base.depth_speed);
+        auto cfg=base;cfg.depth_speed=.6;   // a spring that could throw: 5 cm into the bottle it adds 0.47 m/s
+        auto loose=cfg;loose.launch_margin=1e9;
+        const auto deep=lone({-.045,0,.1},.06);
+        // a 2 m/s swat: the write stops at 2.3
+        const auto swat=hand_contact_s(deep,shape,{2,0,0},{},1.,cfg),unbound=hand_contact_s(deep,shape,{2,0,0},{},1.,loose);
+        std::cout<<"launch_cap: 2 m/s swat writes "<<length(swat.velocity)<<" m/s ("<<length(unbound.velocity)<<" without the cap)\n";
+        assert(swat.push && std::abs(length(swat.velocity)-2.3)<1e-9 && length(unbound.velocity)>2.4);
+        // a slow hand pressing into a prop (a ride, not a swat): the write stops at hand + margin + the friction it gives back (0.05: the engine takes that
+        // off before the prop moves)
+        ContactInput slow;slow.friction=.05;
+        const auto press=hand_contact_s(deep,shape,{.146,0,0},{},1.,cfg,slow),press_unbound=hand_contact_s(deep,shape,{.146,0,0},{},1.,loose,slow);
+        assert(press.push && std::abs(length(press.velocity)-(.146+.3+.05))<1e-9 && length(press_unbound.velocity)>.146+.35+.05);
+        // a swat gives no friction back: the same friction estimate does not raise the cap
+        const auto fast=hand_contact_s(deep,shape,{2,0,0},{},1.,cfg,slow);assert(fast.push && std::abs(length(fast.velocity)-2.3)<1e-9);
+        // the hand's speed ALONG the push counts: a hand descending at 0.6 m/s while it moves 1.5 m/s sideways swats at 1.5 (+ the margin)
+        const auto descending=hand_contact_s(deep,shape,{1.5,0,-.6},{},1.,cfg);
+        assert(descending.push && std::abs(descending.velocity.x-1.8)<1e-9 && std::abs(descending.velocity.z)<1e-12);
+        // the cap is in game time: the time factor scales it with the push
+        ContactInput slowmo;slowmo.time_factor=.5;
+        const auto mo=hand_contact_s(deep,shape,{2,0,0},{},1.,cfg,slowmo);assert(mo.push && std::abs(length(mo.velocity)-1.15)<1e-9);
+        // a prop already faster than the cap along the push is never slowed: nothing is written
+        const auto ahead=hand_contact_s(deep,shape,{2,0,0},{2.5,0,0},1.,cfg);assert(!ahead.push && ahead.velocity.x==2.5);
+        // the ease of a resting hand (no hand speed; it eases out of overlaps up to `shallow`, 3 cm) stays within the margin
+        const auto rest=hand_contact_s(lone({-.067,0,.1},.06),shape,{},{},.5,cfg);assert(rest.push && length(rest.velocity)<=cfg.launch_margin+1e-9);
+        // with the default spring the cap does not bind on a swat: the write is the hand + the spring, as before the cap
+        const auto plain=hand_contact_s(deep,shape,{2,0,0},{},1.,base),plain_loose=hand_contact_s(deep,shape,{2,0,0},{},1.,[&]{auto c=base;c.launch_margin=1e9;return c;}());
+        assert(plain.push && length(plain.velocity-plain_loose.velocity)==0);
+    }
     // --- the world cast holds the drawn hand back from the prop (sim v525: 4-12 cm, whichever way its sweep crosses the prop): the tracked
     // hand pushes the prop that cast hit, and only that one; a shift past lag_limit is not believed
     {
