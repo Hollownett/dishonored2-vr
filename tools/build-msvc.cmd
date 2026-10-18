@@ -776,6 +776,10 @@ build\vr_perf_governor_check.exe
 if not "%errorlevel%"=="0" exit /b 1
 cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT /Isrc /Ithird_party\minhook\include tests\weapon_collision_check.cpp /Fo:build\weapon_collision_check.obj /Fe:build\weapon_collision_check.exe
 if not "%errorlevel%"=="0" exit /b 1
+cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT /Isrc /Ithird_party\minhook\include tools\push_lab.cpp /Fo:build\push_lab.obj /Fe:build\push_lab.exe
+if not "%errorlevel%"=="0" exit /b 1
+build\push_lab.exe build\push-lab
+if not "%errorlevel%"=="0" exit /b 1
 build\weapon_collision_check.exe
 if not "%errorlevel%"=="0" exit /b 1
 cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT /Isrc /Ithird_party\minhook\include tests\native_world_trace_check.cpp /Fo:build\native_world_trace_check.obj /Fe:build\native_world_trace_check.exe

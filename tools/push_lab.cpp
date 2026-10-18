@@ -1,3 +1,4 @@
+#define _CRT_SECURE_NO_WARNINGS
 // Offline push lab: hand-to-prop pushing, scenario simulations at 90 Hz with the CURRENT src/hand_contact.hpp math.
 // usage: push_lab <out_dir>        (tools/push_lab.sh [tag] compiles, runs and plots everything: artifacts/push-lab/<tag>/)
 // Per scenario it writes <name>.csv (one row per frame), <name>-proxies.csv (the 21 hand spheres per frame), and for the run
@@ -157,7 +158,8 @@ Run simulate(const Scenario& s,const rig::HandGeometry& geometry,const HandConta
     HandMotion motion;Jitter jitter;Vec3 p=s.prop,v{},previous=hand_at(s,0);std::uint64_t engaged_until=0;
     struct Meet {Vec3 shift{};bool latched{};};std::deque<Meet> meet_queue;Meet meet_now{};bool meet_latched=false;
     const bool meet_on=s.meet && env_or("PUSH_LAB_MEET",1)!=0;   // PUSH_LAB_MEET=0: the v509 cast on every scenario
-    Vec3 shift{},cast_point{},cast_normal{};bool cast_hit=false;double dbg_trim=0,dbg_friction=0; // the cast: last frame's hit, the shift it holds
+    const bool gate_on=env_or("PUSH_LAB_GATE",1)!=0,cast_wall=env_or("PUSH_LAB_CAST_WALL",0)!=0,cast_lag=env_or("PUSH_LAB_CAST_LAG",1)!=0,clamp_shift=env_or("PUSH_LAB_MAX_SHIFT",0)!=0;
+    Vec3 shift{},cast_point{},cast_normal{};bool cast_hit=false,cast_is_wall=false,shift_is_wall=false;double dbg_trim=0,dbg_friction=0; // the cast: last frame's hit, the shift it holds
 #ifndef LAB_OLD_API
     PropDrag drag;
 #endif
@@ -171,38 +173,47 @@ Run simulate(const Scenario& s,const rig::HandGeometry& geometry,const HandConta
         const Vec3 hand=hand_at(s,s.step>0?std::floor(t/s.step)*s.step:t),raw=s.jitter?hand+jitter.at(t):hand;
         double ts=t;if(s.timing>0) {ts=t+s.timing*(2*timing_noise(timing_rng)-1);ts=std::max(ts,last_sample+.0042);}
         last_sample=ts;motion.sample(raw,ts);
+        const auto refresh_cast=[&]() {   // the prop's pose and shape now, and the cast against them (the hit the shift reads is last frame's unless PUSH_LAB_CAST_LAG=0)
+            body.pose.position=p;body.bounds=NativeGrabBounds{p-half,p+half};
+            {   // the prop's axes: the identity turned by the tilt vector (Rodrigues)
+                const double angle=std::hypot(tx,ty);
+                if(angle<1e-9) body.pose.basis={{{1,0,0},{0,1,0},{0,0,1}}};
+                else {
+                    const Vec3 k{tx/angle,ty/angle,0};const double c=std::cos(angle),sn=std::sin(angle);
+                    for(unsigned i=0;i<3;++i) {const Vec3 e{double(i==0),double(i==1),double(i==2)};body.pose.basis[i]=e*c+cross(k,e)*sn+k*(dot(k,e)*(1-c));}
+                }
+            }
+            const auto shape=prop_shape(body);cast_is_wall=false;
+            if(s.cast) {   // the sphere cast (r .05) from the chest to the grip: the first place along it where the sphere touches the prop; the normal faces against the sweep
+                cast_hit=false;double prop_u=2;const Vec3 a=s.chest,dir=raw-a;const double span=length(dir);const unsigned n=static_cast<unsigned>(std::ceil(span/.004));
+                const auto at=[&](double u) {return a+dir*u;};
+                for(unsigned k=1;k<=n && !cast_hit;++k) if(rig::shape_distance(shape,at(double(k)/n))<=.05) {
+                    double lo=double(k-1)/n,hi=double(k)/n;for(int it=0;it<10;++it) {const double mid=(lo+hi)/2;if(rig::shape_distance(shape,at(mid))<=.05) hi=mid;else lo=mid;}
+                    const Vec3 c=at(hi);Vec3 nn=shape_normal(shape,c);if(length(nn)<.5) nn=dir*(-1/span);if(dot(nn,dir)>0) nn=nn*-1.;
+                    cast_normal=nn;cast_point=c-nn*rig::shape_distance(shape,c);cast_hit=true;prop_u=hi;
+                }
+                if(cast_wall && !std::isnan(s.wall) && dir.x>1e-9) {   // PUSH_LAB_CAST_WALL: the wall plane is a cast target too; the nearest hit along the sweep wins
+                    const double uw=(s.wall-.05-a.x)/dir.x;
+                    if(uw>=0 && uw<=1 && (!cast_hit || uw<prop_u)) {const Vec3 c=at(uw);cast_normal={-1,0,0};cast_point={s.wall,c.y,c.z};cast_hit=true;cast_is_wall=true;}
+                }
+            }
+            return shape;
+        };
+        if(!cast_lag) refresh_cast();   // PUSH_LAB_CAST_LAG=0: the cast is used in the frame it is computed
         {   // WeaponCollision::update: a hit (last frame's surface) pushes the grip out to palm_radius; engages at once, eases out at 1.5 m/s
             Vec3 target{};bool hit=false;
-            if(s.cast && cast_hit) {const double pen=dot(cast_point-raw,cast_normal)+.06;if(pen>0 && length(cast_point-raw)<.25) {target=cast_normal*pen;hit=true;}}
+            if(s.cast && cast_hit) {const double pen=dot(cast_point-raw,cast_normal)+.06;if(pen>0 && (!gate_on || length(cast_point-raw)<.25)) {target=cast_normal*pen;hit=true;shift_is_wall=cast_is_wall;if(clamp_shift && length(target)>.45) target=target*(.45/length(target));}}
             const double release=1.5*kDt;
             if(hit) {if(length(target)>=length(shift)) shift=target;else {Vec3 d=target-shift;const double l=length(d);if(l>release) d=d*(release/l);shift=shift+d;}}
             else {const double l=length(shift);shift=l<=release?Vec3{}:shift*((l-release)/l);}
         }
-        const Vec3 cast_part=meet_on && !meet_now.latched?Vec3{}:shift;   // meet: the cast does not hold the hand off a prop the contact pushes, the hand is moved out of it
+        const Vec3 cast_part=meet_on && !meet_now.latched && !(cast_wall && shift_is_wall)?Vec3{}:shift;   // meet: the cast does not hold the hand off a prop the contact pushes, the hand is moved out of it
         const Vec3 body_part=cast_part+meet_now.shift;
         const double glitch_size=s.glitch_t0>=0 && t>=s.glitch_t0?std::max(0.,s.glitch_shift-1.5*(t-s.glitch_t0)):0.;
         const Vec3 drawn=raw+body_part+(s.cast?Vec3{0,0,std::max(0.,.06-(raw.z+body_part.z))}:Vec3{})+s.glitch_dir*glitch_size; // + the table's hold-off: the grip stays palm_radius above it
         static const auto live_hand=live_geometry();
         const auto proxies=s.live?hand_proxies(live_hand,live_pose(drawn),{0,0,0,0,0}):hand_proxies(geometry,hand_pose(drawn,s.fingers,s.facing),{0,0,0,0,0});
-        body.pose.position=p;body.bounds=NativeGrabBounds{p-half,p+half};
-        {   // the prop's axes: the identity turned by the tilt vector (Rodrigues)
-            const double angle=std::hypot(tx,ty);
-            if(angle<1e-9) body.pose.basis={{{1,0,0},{0,1,0},{0,0,1}}};
-            else {
-                const Vec3 k{tx/angle,ty/angle,0};const double c=std::cos(angle),sn=std::sin(angle);
-                for(unsigned i=0;i<3;++i) {const Vec3 e{double(i==0),double(i==1),double(i==2)};body.pose.basis[i]=e*c+cross(k,e)*sn+k*(dot(k,e)*(1-c));}
-            }
-        }
-        const auto shape=prop_shape(body);
-        if(s.cast) {   // the sphere cast (r .05) from the chest to the grip: the first place along it where the sphere touches the prop; the normal faces against the sweep
-            cast_hit=false;const Vec3 a=s.chest,dir=raw-a;const double span=length(dir);const unsigned n=static_cast<unsigned>(std::ceil(span/.004));
-            const auto at=[&](double u) {return a+dir*u;};
-            for(unsigned k=1;k<=n && !cast_hit;++k) if(rig::shape_distance(shape,at(double(k)/n))<=.05) {
-                double lo=double(k-1)/n,hi=double(k)/n;for(int it=0;it<10;++it) {const double mid=(lo+hi)/2;if(rig::shape_distance(shape,at(mid))<=.05) hi=mid;else lo=mid;}
-                const Vec3 c=at(hi);Vec3 nn=shape_normal(shape,c);if(length(nn)<.5) nn=dir*(-1/span);if(dot(nn,dir)>0) nn=nn*-1.;
-                cast_normal=nn;cast_point=c-nn*rig::shape_distance(shape,c);cast_hit=true;
-            }
-        }
+        const auto shape=refresh_cast();
         const std::uint64_t now_ms=1000+static_cast<std::uint64_t>(std::llround(t*1000));
         const bool engaged=engaged_until>now_ms;
 #ifdef LAB_OLD_API
@@ -483,7 +494,7 @@ std::vector<Scenario> scenarios() {
         auto s=base("wall_cast","Pinned bottle: the live hand keeps pushing it into a wall, with the world cast","The live hand pushes the bottle (hand-push.json geometry) 0.35 m at 0.146 m/s toward a wall 30 cm past the bottle's axis; the bottle stops against it and the hand goes on 0.35 m. The drawn hand meets the bottle while it yields, and the cast holds it off again once the bottle is pinned (PropDrag blocked) or the hand is 12 cm into it.");
         s.steady=true;s.step=.03;s.timing=.004;s.gap_applies=false;s.live=true;s.cast=true;s.meet=true;s.info=true;
         s.chest={-.562,.0067,.90};s.size={.138,.138,.416};s.prop={0,0,.208};s.mass=1.;s.wall=.30;
-        s.hand={-.262,.0067,.102};s.legs={{{0,0,0},.2},{{.146,0,0},.6/.146}};s.seconds=.2+.6/.146+1.5;
+        s.hand={-.262,.0067,.102};const double ws=env_or("PUSH_LAB_WALL_SPEED",.146);s.legs={{{0,0,0},.2},{{ws,0,0},.6/ws}};s.seconds=.2+.6/ws+1.5;
         s.expect="INFO: a pinned prop is the cast's again (the hold-off of v509, which stops holding a hand 25 cm past its hit), so what the drawn hand does past the pin is v509's; the checks below are the aim, not a promise";
         s.judge=[](const Scenario&,const Metrics& m,const HandContactConfig&) {return std::vector<Check>{
             below("the bottle stays within the wall (lab: 1 cm over)",std::isnan(m.wall_over)?0.:m.wall_over,.01,100,"cm"),
@@ -687,7 +698,7 @@ int run_all(int argc,char** argv) {
     json+="]}";
     std::ofstream(dir/"scenarios.json")<<json;
     std::printf("push_lab: %zu scenarios, %u failed\n",runs.size(),failed_count);
-    return 0;
+    return failed_count?1:0;
 }
 } // namespace
 
