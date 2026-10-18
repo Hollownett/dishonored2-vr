@@ -73,7 +73,8 @@ struct ClampOutput {
                                         // wall tip (or the tip) with that prop excluded (ClampSweep::exclude): the caller honours exclude
     ClampSweep exclude_sweep;           // the probe leading into the excluded prop's pressed face, that prop excluded (ClampInput::exclude)
     bool held{};                        // drawn at last frame's hand while this frame's sweep validates a jump
-    bool contact_fresh{};};             // `contact`'s plane was made or re-hit within the last two answered raw casts (I3)
+    bool contact_fresh{};               // `contact`'s plane was made or re-hit within the last two answered raw casts (I3)
+    bool reacquired{};};                // this update re-acquired the side (first update, a gap, an epoch change, a reset): drawn == target, unswept
 
 namespace clamp_detail {
 inline Vec3 rotate(const std::array<Vec3,3>& basis,Vec3 local) {return basis[0]*local.x+basis[1]*local.y+basis[2]*local.z;}
@@ -402,7 +403,7 @@ public:
         const double elapsed=in.now-s.last_now;
         if(!s.has || in.epoch!=s.epoch || !(elapsed>=0) || elapsed>cfg_.gap_seconds) {
             // Re-acquire: nothing from before is trusted. The chest sweep validates the path to the controller.
-            s=Side{};take_hand(s,in);
+            s=Side{};take_hand(s,in);out.reacquired=true;
             if(finite(in.chest)) {out.state=ClampState::free;post_chest(s,in,out);}
             else {release(s);out.state=ClampState::released;++blocked_frames_[side];}
             store(s,in,in.target.position);
