@@ -459,7 +459,8 @@ sealed class MainForm : Form
     async Task LaunchVr()
     {
         if (launching) return;
-        if (!ready) { await RefreshChecks(); if (!ready) { SetStatus("Cannot launch", Ui.Bad, "Fix the red items under Setup checks first."); return; } }
+        await RefreshChecks(); // never trust a cached ready: the game may have been updated while the launcher sat open
+        if (!ready) { SetStatus("Cannot launch", Ui.Bad, "Fix the red items under Setup checks first."); return; }
         launching = true; stopping = false; launch.Enabled = false; stop.Enabled = true;
         log.Clear(); ShowLog(true);
         Append(log, $"Launching {candidate!.Dll} from {env.Root}", Ui.Teal);
