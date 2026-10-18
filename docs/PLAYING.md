@@ -184,4 +184,5 @@ been accepted. See [the verification report](feedback-2026-10-10.md).
 - `no-stealth-contact`: a sword contact on a guard the engine calls unaware is no longer held for the native Assassination / stealth kill (it is the ordinary hit again).
 - `gun-shape` containing `up back length radius` in metres (pistol default `0.06 0.06 0.36 0.035`): collision shape of the left-hand weapon.
 - `no-contact-damage`: sword damage only from the game's own attack animation. `no-impact-fx`: no surface sparks/sound from the weapons. `no-weapon-collision`: weapons pass through walls.
+- `no-hand-clamp`: the hands are drawn as before the physical-hands clamp (the chest-anchored palm hold), and shots leave from the controller again. Only the drawn hand and the shot origin change: throwing speed, grab and pickup selection and swing speed always follow the controller. For comparing in the headset; the status `hand_clamp.enabled` shows it. `hand-clamp-exclude-info-zero`: diagnostic for the hand clamp's sweep past a pushed prop (status `hand_clamp.exclusion`).
 - `hud-census`, `marker-probe`: diagnostics only, they write CSV logs to the output folder.

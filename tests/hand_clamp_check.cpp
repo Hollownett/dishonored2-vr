@@ -818,21 +818,46 @@ void budget_drops_tip_then_alternates() {
     run(b,550,2,4,false);
     CHECK(!b.tip_enabled() && b.alternate());
     run(b,100,4,8,false);
-    CHECK(!b.tip_enabled() && b.alternate()); // under 0.35 ms for less than 5 s: both stay
-    // Recovery (hysteresis): alternation goes first once the mean stayed under 0.35 ms for 5 s, then the tip after 5 s more.
-    run(b,100,8,9.05,false);
-    CHECK(!b.tip_enabled() && !b.alternate());
-    run(b,100,9.05,14,false);
-    CHECK(!b.tip_enabled() && !b.alternate());
-    run(b,100,14,14.1,false);
-    CHECK(b.tip_enabled() && !b.alternate());
-    // Between 0.35 and 0.5 ms nothing changes either way.
-    run(b,600,14.1,16.2,false);CHECK(!b.tip_enabled());
-    run(b,420,16.2,30,false);CHECK(!b.tip_enabled() && !b.alternate());
-    {CastBudget dip;run(dip,600,0,2.1,true);CHECK(!dip.tip_enabled()); // a dip shorter than 5 s does not recover
-     run(dip,100,2.1,6,false);run(dip,800,6,7,false);CHECK(!dip.tip_enabled() && dip.mean_us()<500); // the mean crosses 0.35 ms, not 0.5
-     run(dip,100,7,11.9,false);CHECK(!dip.tip_enabled());          // without the blip it would have recovered at ~7.2 s
-     run(dip,100,11.9,14.1,false);CHECK(dip.tip_enabled());}       // quiet again within 2 s of the blip, then 5 s
+    CHECK(!b.tip_enabled() && b.alternate()); // a cost that does not depend on the mode proves nothing about the better mode:
+    run(b,100,8,40,false);                    // 550 -> 100 measures factor 4 (capped), predicted 400: not under 0.4 ms
+    CHECK(!b.tip_enabled() && b.alternate() && std::abs(b.restore_factor()-4)<1e-9);
+    // Mode-dependent scenes (the cost of each mode), counting flips of either switch.
+    struct Scene {double tip,no_tip,alternate;};
+    const auto play=[](CastBudget& budget,const std::function<Scene(double)>& scene,double from,double to,std::vector<double>* flips) {
+        for(int i=1;from+i*dt<=to+1e-9;++i) {
+            const double t=from+i*dt;const auto c=scene(t);const bool tip=budget.tip_enabled(),alt=budget.alternate();
+            budget.note(alt?c.alternate:tip?c.tip:c.no_tip,t);
+            if(flips && (tip!=budget.tip_enabled() || alt!=budget.alternate())) flips->push_back(t);
+        }
+    };
+    {   // N2: a steady 600 us scene (300 without the tips, 150 alternating) flips once (the tips go) and never comes back.
+        CastBudget steady;std::vector<double> flips;
+        play(steady,[](double){return Scene{600,300,150};},0,180,&flips);
+        CHECK(flips.size()==1 && !steady.tip_enabled() && !steady.alternate() && std::abs(steady.restore_factor()-2)<.01);
+    }
+    {   // The scene gets cheap: the tips come back once the predicted cost stays under 0.4 ms for 5 s, and stay.
+        CastBudget lighter;std::vector<double> flips;
+        play(lighter,[](double t){return t<10?Scene{600,300,150}:Scene{320,160,80};},0,60,&flips);
+        CHECK(flips.size()==2 && flips[1]>=15-1e-6 && flips[1]<=18 && lighter.tip_enabled());
+    }
+    {   // A short rise of the predicted cost to 0.4 ms or more restarts the wait.
+        CastBudget dip;std::vector<double> flips;
+        play(dip,[](double t){return t<10?Scene{600,300,150}:t>=13 && t<13.5?Scene{900,500,250}:Scene{320,160,80};},0,60,&flips);
+        CHECK(flips.size()==2 && flips[1]>=13.5+5-1e-6);
+    }
+    {   // Backoff: a scene that only fits without the tips but measures a capped factor (600 / 90 -> 4, predicted 360) recovers and
+        // steps down again; each wait doubles, 5, 10, 20 ... up to 120 s.
+        CastBudget backoff;std::vector<double> flips;
+        play(backoff,[](double){return Scene{600,90,45};},0,600,&flips);
+        CHECK(flips.size()>=13 && flips.size()%2==1);
+        std::vector<double> waits;for(std::size_t i=1;i+0<flips.size();i+=2) waits.push_back(flips[i]-flips[i-1]);
+        CHECK(waits.size()>=6);   // from each step down to the next recovery: 5, 10, 20, 40, 80, 120, 120 ... s
+        for(std::size_t i=0;i<waits.size();++i) {const double expect=std::min(5*std::pow(2.,double(i)),120.);CHECK(std::abs(waits[i]-expect)<.05);}
+        unsigned in_last_minute=0;for(const double f:flips) in_last_minute+=f>540;CHECK(in_last_minute<=2);
+    }
+    {   // An affordable scene never steps down.
+        CastBudget fits;std::vector<double> flips;play(fits,[](double){return Scene{420,200,100};},0,60,&flips);CHECK(flips.empty() && fits.tip_enabled());
+    }
     b.reset();
     CHECK(b.tip_enabled() && !b.alternate() && b.mean_us()==0 && b.max_us()==0);
     CastBudget under;

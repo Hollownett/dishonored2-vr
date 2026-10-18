@@ -44,7 +44,8 @@ def check(dxgi: str, aim: str) -> None:
                  'in.hand=probes.hand;in.hand_count=probes.count;', 'in.tip=clamp_tip[side];in.wall_tip=clamp_wall_tip[side];'):
         assert need in loop, need
     # Last frame's answers, routed by the clamp's last state; then the meet's loose list and exclusion, then the update.
-    route = 'd2vr::route_clamp_hits(in,clamp_state[side],answer(0),answer(d2vr::NativeInteractionAim::tip_slot),answer(d2vr::NativeInteractionAim::wall_tip_slot),answer(d2vr::NativeInteractionAim::exclude_slot));'
+    route = 'd2vr::route_clamp_hits(in,clamp_state[side],slot0_answer,tip_answer,answer(d2vr::NativeInteractionAim::wall_tip_slot),answer(d2vr::NativeInteractionAim::exclude_slot));'
+    assert 'constautoslot0_answer=answer(0),tip_answer=answer(d2vr::NativeInteractionAim::tip_slot);' in loop
     assert route in loop
     assert loop.index(route) < loop.index('native_grab.hand_contact().fill_clamp_input(side,in,clamp_exclude[side]);') < loop.index('clamped=hand_clamp.update(side,in);clamp_state[side]=clamped.state;')
     # build/no-hand-clamp (M2): the pre-Task-5 drawn hand, exactly: chest palm sweep + blade, the meet() exemption. Only there.
@@ -92,24 +93,43 @@ def check(dxgi: str, aim: str) -> None:
     # Casts are answered only in gameplay (Stage0, logic 2). In a world UI the hand follows the controller kept out of the held planes
     # (I1); the hold is for the resume (re-acquire) frame only.
     assert 'constboolclamp_live=game_logic_mask()==2;' in clamp
-    gate = 'd2vr::ClampOutputclamped{};constboolclamp_updated=clamp_live||clamp_yield;if(clamp_updated){d2vr::ClampInputin{};'
+    gate = 'd2vr::ClampOutputclamped{};constboolclamp_updated=clamp_live||clamp_yield;boolclamp_post=false;if(clamp_updated){d2vr::ClampInputin{};'
     assert gate in clamped_part and clamped_part.index(gate) < clamped_part.index(route)
     paused = between(clamped_part, 'if(!clamp_updated){', '}elseif(clamped.valid&&!clamp_yield){constautopost=')
-    assert 'g.position=hand_clamp.keep_out(side,raw.basis,raw.position,std::nullopt);' in paused
+    assert 'g.position=d2vr::paused_hand(hand_clamp,side,raw,clamp_epoch,hand_clamp.config().snap_gap);' in paused  # N1: guarded keep-out
+    assert 'keep_out(' not in paused
     assert 'post_weapon_segment' not in paused and 'clamp_hold' not in paused and 'update(' not in paused
     assert clamped_part.count('clamp_hold.hold(') == 1
     # I2: while clamped, shots and the crosshair leave from the drawn barrel (direction untouched: the drawn barrel, v361).
     assert 'constautoshot=d2vr::clamped_shot_offset(g.position,raw.position,clamp_drew,now,game_xr->pose_epoch());' in clamped_part
     assert 'clamp_shot[side]=shot;' in clamped_part
     shot = between(s, 'barrel_aim(left);aim_offset(left);', 'native_gameplay_aim_trace.publish(*body,left,')
-    origin = 'left.position=d2vr::clamped_shot_origin(left.position,shot,GetTickCount64(),game_xr->pose_epoch());'
-    assert shot.index('left=*steady;') < shot.index('shot=clamp_shot[0];') < shot.index(origin) < shot.index('native_left_aim.publish(*body,left,') \
+    origin = 'left.position=d2vr::guarded_shot_origin(released_shot,clamp_shot[0],0,left.position,GetTickCount64(),game_xr->pose_epoch());'
+    assert shot.index('left=*steady;') < shot.index(origin) < shot.index('native_left_aim.publish(*body,left,') \
         < shot.index('native_shot_aim.publish(left,')
     assert 'left.basis' not in shot[shot.index(origin):]
     cross = between(s, 'barrel_aim(hand);aim_offset(hand);', 'native_crosshair.publish(')
-    assert cross.index('shot=clamp_shot[0];') < cross.index('hand.position=d2vr::clamped_shot_origin(hand.position,shot,GetTickCount64(),game_xr->pose_epoch());') \
+    assert cross.index('hand.position=d2vr::guarded_shot_origin(released_shot,clamp_shot[0],0,hand.position,GetTickCount64(),game_xr->pose_epoch());') \
         < cross.index('constautotarget=hand.position+hand.basis[0]*30.0;')
     assert 'hand.basis=' not in cross
+    # Ruling 1 (snap-back): the released guard reads last frame's slot 0 and tip-slot answers before the update, and after it posts its
+    # eye -> hand sweep on the tip slot (unused by a released side); the shot origin uses it while the side is released.
+    guard_read = '{std::lock_guard<std::mutex>hand_lock(hand_state_mutex);released_shot.read(side,slot0_answer,tip_answer,now);}'
+    assert guard_read in loop and loop.index(guard_read) < loop.index(route) < loop.index('clamped=hand_clamp.update(side,in);')
+    guard_post = 'eye_sweep=released_shot.posted(side,clamp_drew,clamped,clamp_post,{anchor.position[0],anchor.position[1],anchor.position[2]},target.position,now,game_xr->pose_epoch());'
+    assert guard_post in clamped_part and clamped_part.index('clamped=hand_clamp.update(side,in);') < clamped_part.index(guard_post)
+    assert 'if(eye_sweep){d2vr::NativeInteractionAim::post_weapon_segment(side,d2vr::NativeInteractionAim::tip_slot,eye_sweep->from,eye_sweep->to,eye_sweep->radius);' in clamped_part
+    assert 'clamped=hand_clamp.update(side,in);clamp_state[side]=clamped.state;clamp_post=in.post;' in clamped_part
+    # M2 scope: with build/no-hand-clamp the dxgi path bypasses the clamp entirely (legacy branch first, the clamp only in the else);
+    # the shot origin is then raw (neither clamp_shot nor released_shot is written), and the C9 raw routing is outside both branches.
+    assert s.count('hand_clamp.update(') == 1 and 'hand_clamp.update(' in clamped_part
+    assert loop.index('if(!hand_clamp_enabled){') < loop.index('}else{') < loop.index('hand_clamp.update(')
+    for name in ('hand_clamp.', 'released_shot', 'clamp_shot', 'clamp_hold', 'compose_blade', 'paused_hand'):
+        assert name not in legacy, name
+    assert s.count('clamp_shot[side]=') == 1 and 'clamp_shot[side]=' in clamped_part and s.count('released_shot.posted(') == 1
+    for raw_route in ('publish_hand(side,hands.grips[side],raw_grips[side]);', 'note_grip(side,raw_grips[side],', 'constauto&p=raw_grips[side].position;reach_hands'):
+        assert raw_route in s and raw_route not in loop, raw_route   # after the per-side branches: the same in both modes
+    assert loop.index('constautorel=raw.position+raw.basis[0]*') < loop.index('if(!hand_clamp_enabled){')   # swing speed raw in both modes
     # M4 (C9 selection): sword pickup reach and the wake/yank press read the controller; the sword drop position stays drawn.
     for need in ('in.copy_distance=d2vr::length(at-hand_raw.position);', 'in.pickup_dot=d2vr::dot(hand_raw.basis[0],', 'hand_raw=hand_raw_world[1];',
                  'w=hand_raw_world[h];v=hand_velocity[h];', 'r.pos={fl(hand_w.position.x),fl(hand_w.position.y),fl(hand_w.position.z)};'):
@@ -150,7 +170,7 @@ def check(dxgi: str, aim: str) -> None:
     # Status.
     status = between(s, '",\\"hand_clamp\\":{\\"active\\":', '",\\"hud_relayouts\\":')
     for field in ('contact_frames', 'snapbacks', 'reach_clamped', 'yields', 'missed_notes', 'repeated_updates', 'reacquire_blocked',
-                  'reacquire_holds', 'unanswered', 'cast_us', 'cast_us_max', 'tip_probe', 'alternate', 'enabled', 'exclusion', 'self_hits', 'unmapped'):
+                  'reacquire_holds', 'unanswered', 'cast_us', 'cast_us_max', 'tip_probe', 'alternate', 'enabled', 'restore_factor', 'recover_wait', 'released_shots', 'exclusion', 'self_hits', 'unmapped'):
         assert '\\"' + field + '\\":' in status, field
     assert s.index('",\\"weapon_collision\\":{') < s.index('",\\"hand_clamp\\":{\\"active\\":')
 
@@ -202,12 +222,15 @@ if __name__ == '__main__':
         ('if(clamped.reacquired) if(const auto kept=', 'if(false) if(const auto kept='),
         ('const bool clamp_updated=clamp_live || clamp_yield;', 'const bool clamp_updated=true;'),
         ('const bool clamp_live=game_logic_mask()==2;', 'const bool clamp_live=true;'),
-        ('g.position=hand_clamp.keep_out(side,raw.basis,raw.position,std::nullopt);',
+        ('g.position=d2vr::paused_hand(hand_clamp,side,raw,clamp_epoch,hand_clamp.config().snap_gap);',
          'if(const auto kept=clamp_hold.hold(side,clamp_epoch,clamp_root,target.position,hand_clamp.config().snap_gap)) g.position=*kept;'),
-        ('g.position=hand_clamp.keep_out(side,raw.basis,raw.position,std::nullopt);', 'g.position=raw.position;'),
         ('if(clamp_drew || !clamp_updated) clamp_hold.note(', 'if(clamp_drew) clamp_hold.note('),
-        ('left.position=d2vr::clamped_shot_origin(left.position,shot,GetTickCount64(),game_xr->pose_epoch());', ''),
-        ('hand.position=d2vr::clamped_shot_origin(hand.position,shot,GetTickCount64(),game_xr->pose_epoch());', ''),
+        ('left.position=d2vr::guarded_shot_origin(released_shot,clamp_shot[0],0,left.position,GetTickCount64(),game_xr->pose_epoch());', ''),
+        ('hand.position=d2vr::guarded_shot_origin(released_shot,clamp_shot[0],0,hand.position,GetTickCount64(),game_xr->pose_epoch());', ''),
+        ('{std::lock_guard<std::mutex> hand_lock(hand_state_mutex);released_shot.read(side,slot0_answer,tip_answer,now);}', ''),
+        ('if(eye_sweep) {d2vr::NativeInteractionAim::post_weapon_segment(', 'if(false) {d2vr::NativeInteractionAim::post_weapon_segment('),
+        ('clamp_state[side]=clamped.state;clamp_post=in.post;', 'clamp_state[side]=clamped.state;'),
+        ('g.position=d2vr::paused_hand(hand_clamp,side,raw,clamp_epoch,hand_clamp.config().snap_gap);', 'g.position=hand_clamp.keep_out(side,raw.basis,raw.position,std::nullopt);'),
         ('d2vr::clamped_shot_offset(g.position,raw.position,clamp_drew,', 'd2vr::clamped_shot_offset(g.position,raw.position,false,'),
         ('in.copy_distance=d2vr::length(at-hand_raw.position);', 'in.copy_distance=d2vr::length(at-hand_w.position);'),
         ('w=hand_raw_world[h];v=hand_velocity[h];', 'w=hand_world[h];v=hand_velocity[h];'),

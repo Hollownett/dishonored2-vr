@@ -110,4 +110,81 @@ private:
     std::array<Kept,2> kept_{};
 };
 
+// N1: the hand in a world UI (logic != 2, nothing is cast): the controller kept out of the planes the side held when the pause
+// began. Those are infinite half-spaces that nothing ages or refutes during the pause, so they apply only in the same epoch and only
+// while that keeps the hand within max_gap of the controller (a hand rested on a table drops below the table-top plane once the
+// controller is lowered beside it; a new level's menu never projects onto the old level's planes). Otherwise: the controller.
+inline Vec3 paused_hand(const HandClamp& clamp,unsigned side,const WorldTrackedPose& raw,std::uint64_t epoch,double max_gap) {
+    const auto held=clamp.side_epoch(side);
+    if(!held || *held!=epoch || !finite(raw.position)) return raw.position;
+    const Vec3 kept=clamp.keep_out(side,raw.basis,raw.position,std::nullopt);
+    return finite(kept) && length(kept-raw.position)<=max_gap?kept:raw.position;
+}
+
+// The shot origin while a side is released (G3 snap-back: it is drawn at the controller, which can be past a door). Last frame's
+// chest re-acquire sweep (the clamp's slot 0 while released) and an eye -> hand sweep (the tip slot, which a released side does
+// not use) say what lies between the body and the hand. The origin is the point on the chest -> barrel segment just short of the
+// surface the chest sweep met (by `margin`); the raw origin when it met nothing; the same on the eye -> barrel segment when there
+// is no usable chest answer (none within max_age, or the chest started inside geometry); the eye when neither is known.
+inline constexpr double released_shot_margin=.05;
+inline constexpr std::uint64_t released_shot_max_age_ms=100;
+inline constexpr double eye_sweep_radius=.02;
+// The point on from -> to just before the plane of `hit` (point, normal toward free space), backed off by margin along the
+// segment; `to` when it is not behind that plane; `from` when from is not in front of it.
+inline Vec3 before_surface(Vec3 from,Vec3 to,const ClampHit& hit,double margin) {
+    const double d0=dot(from-hit.point,hit.normal),d1=dot(to-hit.point,hit.normal),span=length(to-from);
+    if(!std::isfinite(d0) || !std::isfinite(d1) || !(span>0)) return from;
+    if(d1>=0) return to;
+    if(d0<=0) return from;
+    const double s=std::max(0.,d0/(d0-d1)-margin/span);
+    return from+(to-from)*s;
+}
+class ReleasedShotGuard {
+public:
+    struct Answer {Vec3 from{};std::optional<ClampHit> hit;std::uint64_t tick{};bool valid{};};
+    // Before this frame's update: the answers to what was posted for this side last frame (slot 0, the tip slot).
+    void read(unsigned side,const std::optional<ClampHit>& slot0,const std::optional<ClampHit>& tip_slot,std::uint64_t tick) {
+        if(side>1) return;auto& k=sides_[side];
+        if(k.chest_posted) k.chest={k.chest_posted->from,slot0,tick,true};
+        if(k.eye_posted) k.eye={k.eye_posted->from,tip_slot,tick,true};
+        k.chest_posted.reset();k.eye_posted.reset();
+    }
+    // After the update: whether the side is released (drawn by the clamp at the controller), the chest sweep it posted, and the
+    // eye sweep to post on the tip slot (returned; only while released and posting).
+    std::optional<ClampSweep> posted(unsigned side,bool clamp_drew,const ClampOutput& out,bool post,Vec3 eye,Vec3 hand,std::uint64_t tick,std::uint64_t epoch) {
+        if(side>1) return std::nullopt;auto& k=sides_[side];
+        k.released=clamp_drew && out.valid && out.state==ClampState::released;k.tick=tick;k.epoch=epoch;k.eye_at=eye;
+        if(!k.released) {k.chest={};k.eye={};return std::nullopt;}
+        if(out.palm_sweep.valid) k.chest_posted=out.palm_sweep;
+        if(!post || !finite(eye) || !finite(hand) || !(length(hand-eye)>=1e-3)) return std::nullopt;
+        k.eye_posted=ClampSweep{eye,hand,eye_sweep_radius,true};
+        return k.eye_posted;
+    }
+    void clear(unsigned side) {if(side<2) sides_[side]={};}
+    // This side was released at the last publication (same epoch, within max_age): the guarded origin applies.
+    bool applies(unsigned side,std::uint64_t now,std::uint64_t epoch) const {
+        if(side>1) return false;const auto& k=sides_[side];
+        return k.released && k.epoch==epoch && now>=k.tick && now-k.tick<=released_shot_max_age_ms;
+    }
+    Vec3 origin(unsigned side,Vec3 raw_origin,std::uint64_t now) const {
+        if(side>1) return raw_origin;const auto& k=sides_[side];
+        const auto fresh=[&](const Answer& a) {return a.valid && now>=a.tick && now-a.tick<=released_shot_max_age_ms;};
+        for(const Answer* a:{&k.chest,&k.eye}) {
+            if(!fresh(*a) || (a->hit && a->hit->initial_overlap)) continue;
+            if(!a->hit) return raw_origin;
+            return before_surface(a->from,raw_origin,*a->hit,released_shot_margin);
+        }
+        return finite(k.eye_at)?k.eye_at:raw_origin;
+    }
+private:
+    struct Side {bool released{};std::uint64_t tick{},epoch{};Vec3 eye_at{};Answer chest,eye;std::optional<ClampSweep> chest_posted,eye_posted;};
+    std::array<Side,2> sides_{};
+};
+
+// The shot (and crosshair) origin for one side: the released guard while the side is released, else the clamped offset (I2).
+inline Vec3 guarded_shot_origin(const ReleasedShotGuard& released,const ClampedShotOffset& clamped,unsigned side,Vec3 raw_origin,std::uint64_t now,
+                                std::uint64_t epoch) {
+    return released.applies(side,now,epoch)?released.origin(side,raw_origin,now):clamped_shot_origin(raw_origin,clamped,now,epoch);
+}
+
 } // namespace d2vr

@@ -368,16 +368,18 @@ static d2vr::HandClamp hand_clamp;static d2vr::CastBudget hand_clamp_budget;stat
 static std::array<d2vr::ClampState,2> clamp_state{};static std::array<std::optional<std::uintptr_t>,2> clamp_exclude{};static std::array<d2vr::HandMotion,2> clamp_motion{};
 static std::array<d2vr::ClampProbeSet,2> clamp_probes{};static std::array<d2vr::ClampProbe,2> clamp_tip{d2vr::default_clamp_tip(),d2vr::default_clamp_tip()},
     clamp_wall_tip{d2vr::default_clamp_wall_tip(),d2vr::default_clamp_wall_tip()};
-// build/no-hand-clamp: the pre-Task-5 drawn hand (chest palm sweep + blade, the meet's exemption), for a headset A/B. clamp_shot: the
-// drawn hand's offset from the controller while clamped (under hand_state_mutex): shots and the crosshair leave from the drawn barrel (I2).
-static bool hand_clamp_enabled=true;static std::array<d2vr::ClampedShotOffset,2> clamp_shot{};
+// build/no-hand-clamp (headset A/B): its scope is the drawn hand and the shot origin only. The drawn hand is the pre-Task-5 one (chest palm
+// sweep + blade, the meet's exemption) and shots leave from the raw controller aim; the C9 raw routing (throw velocity, press grips, grab
+// and pickup selection, swing speed) is a correctness fix and stays on in both modes. clamp_shot: the drawn hand's offset from the
+// controller while clamped (I2); released_shot: the origin guard while a side is released (G3 snap-back); both under hand_state_mutex.
+static bool hand_clamp_enabled=true;static std::array<d2vr::ClampedShotOffset,2> clamp_shot{};static d2vr::ReleasedShotGuard released_shot;
 static std::array<UINT64,2> clamp_posted_scope{};static std::array<bool,2> clamp_posted{};
 struct HandClampStatus {
     std::atomic<bool> active{};std::atomic<unsigned> state{},probes{},max_casts{};
-    std::atomic<UINT64> contact_frames{},snapbacks{},reach_clamped{},yields{},missed_notes{},repeated_updates{},reacquire_blocked{},reacquire_holds{},unanswered{};
+    std::atomic<UINT64> contact_frames{},snapbacks{},reach_clamped{},yields{},missed_notes{},repeated_updates{},reacquire_blocked{},reacquire_holds{},unanswered{},released_shots{};
 };
 static std::array<HandClampStatus,2> hand_clamp_status;static std::atomic<double> hand_clamp_cast_mean{},hand_clamp_cast_max{};
-static std::atomic<bool> hand_clamp_tip{true},hand_clamp_alternate{};
+static std::atomic<bool> hand_clamp_tip{true},hand_clamp_alternate{};static std::atomic<double> hand_clamp_restore{1},hand_clamp_recover_wait{5};
 static d2vr::VrCombat vr_combat;static bool vr_combat_enabled=true;static float slash_speed_factor=1.7f;static bool takedown_range_enabled=false;
 static d2vr::CombatDecision combat_decision{};
 static std::mutex combat_policy_mutex;
@@ -4034,8 +4036,9 @@ void prepare_head_view(void* view) noexcept {
                     if(const auto steady=aim_filter.sample(left,{1,game_xr->pose_epoch(),game_xr->reference_epoch(),1,0},us,true)) left=*steady;
                 }
                 // I2: while the left hand is clamped, the shot leaves from the drawn barrel (the direction is the drawn barrel's already).
-                {d2vr::ClampedShotOffset shot{};{std::lock_guard<std::mutex> hand_lock(hand_state_mutex);shot=clamp_shot[0];}
-                 left.position=d2vr::clamped_shot_origin(left.position,shot,GetTickCount64(),game_xr->pose_epoch());}
+                // While the left side is released (snap-back), from the near side of what lies between the body and the hand.
+                {std::lock_guard<std::mutex> hand_lock(hand_state_mutex);
+                 left.position=d2vr::guarded_shot_origin(released_shot,clamp_shot[0],0,left.position,GetTickCount64(),game_xr->pose_epoch());}
                 if(native_left_aim_requested) native_left_aim.publish(*body,left,game_xr->pose_epoch(),GetTickCount64(),true);
                 if(native_shot_aim_installed) native_shot_aim.publish(left,game_xr->pose_epoch(),GetTickCount64(),true);
                 else native_gameplay_aim_trace.publish(*body,left,game_xr->pose_epoch(),GetTickCount64(),true);
@@ -4188,7 +4191,7 @@ void prepare_head_view(void* view) noexcept {
                         refresh_clamp_probes(side,raw);
                         const auto& probes=clamp_probes[side];
                         clamp_motion[side].sample(target.position,clamp_now);const auto velocity=clamp_motion[side].velocity();
-                        d2vr::ClampOutput clamped{};const bool clamp_updated=clamp_live || clamp_yield;
+                        d2vr::ClampOutput clamped{};const bool clamp_updated=clamp_live || clamp_yield;bool clamp_post=false;
                         if(clamp_updated) {
                             d2vr::ClampInput in{};in.now=clamp_now;in.epoch=clamp_epoch;in.root=clamp_root;in.target=target;in.chest=chest;in.yield=clamp_yield;
                             in.post=d2vr::clamp_posts(clamp_alternate,hand_clamp_frame,side);in.tip_enabled=clamp_tip_on;
@@ -4198,7 +4201,9 @@ void prepare_head_view(void* view) noexcept {
                                 const auto h=d2vr::NativeInteractionAim::weapon_hit(side,answer_slot,now);if(!h) return std::nullopt;return d2vr::to_clamp_hit(*h);
                             };
                             if(clamp_posted[side] && d2vr::NativeInteractionAim::weapon_serial(side,0)<=clamp_posted_scope[side]) ++status.unanswered;
-                            d2vr::route_clamp_hits(in,clamp_state[side],answer(0),answer(d2vr::NativeInteractionAim::tip_slot),answer(d2vr::NativeInteractionAim::wall_tip_slot),answer(d2vr::NativeInteractionAim::exclude_slot));
+                            const auto slot0_answer=answer(0),tip_answer=answer(d2vr::NativeInteractionAim::tip_slot);
+                            {std::lock_guard<std::mutex> hand_lock(hand_state_mutex);released_shot.read(side,slot0_answer,tip_answer,now);} // a released side's chest and eye sweeps
+                            d2vr::route_clamp_hits(in,clamp_state[side],slot0_answer,tip_answer,answer(d2vr::NativeInteractionAim::wall_tip_slot),answer(d2vr::NativeInteractionAim::exclude_slot));
                             // The open hand leads the sweeps and is kept out of every held plane (one probe set for both, Task 3).
                             if(probes.valid) {
                                 clamp_tip[side]=d2vr::leading_probe(probes.hand,target,velocity,clamp_tip[side]);
@@ -4207,13 +4212,14 @@ void prepare_head_view(void* view) noexcept {
                             }
                             in.tip=clamp_tip[side];in.wall_tip=clamp_wall_tip[side];
                             native_grab.hand_contact().fill_clamp_input(side,in,clamp_exclude[side]); // loose props in reach (I2), last frame's met prop (I1)
-                            clamped=hand_clamp.update(side,in);clamp_state[side]=clamped.state;
+                            clamped=hand_clamp.update(side,in);clamp_state[side]=clamped.state;clamp_post=in.post;
                         }
                         std::uintptr_t held_by{};std::optional<std::uintptr_t> met_prop;clamp_posted[side]=false;
                         if(!clamp_updated) {
                             // World UI (logic != 2): nothing is cast or read. The hand follows the controller, kept out of the planes held before
-                            // the pause (no update: they do not age); the resume frame re-acquires with the hold below.
-                            g.position=hand_clamp.keep_out(side,raw.basis,raw.position,std::nullopt);
+                            // the pause while that keeps it within 0.35 m of the controller in the same epoch (N1: the planes do not age while
+                            // paused); otherwise the controller. The resume frame re-acquires with the hold below.
+                            g.position=d2vr::paused_hand(hand_clamp,side,raw,clamp_epoch,hand_clamp.config().snap_gap);
                         } else if(clamped.valid && !clamp_yield) {const auto post=[&](unsigned post_slot,const d2vr::ClampSweep& sweep) {
                                 if(!sweep.valid || (sweep.exclude && !*sweep.exclude)) return; // an excluded entity 0 maps to no body
                                 d2vr::NativeInteractionAim::post_weapon_segment(side,post_slot,sweep.from,sweep.to,sweep.radius,sweep.exclude?*sweep.exclude:0);
@@ -4250,8 +4256,13 @@ void prepare_head_view(void* view) noexcept {
                         const bool clamp_drew=clamp_updated && clamped.valid && !clamp_yield;
                         if(clamp_drew || !clamp_updated) clamp_hold.note(side,clamp_epoch,clamp_root,g.position);
                         // I2: while clamped, shots and the crosshair leave from the drawn barrel (read next frame by the aim publication).
+                        // While released (G3 snap-back, drawn at the controller), the chest re-acquire and an eye -> hand sweep on the tip slot (a
+                        // released side posts no tip) bound the origin to the near side of what lies between body and hand.
                         {const auto shot=d2vr::clamped_shot_offset(g.position,raw.position,clamp_drew,now,game_xr->pose_epoch());
-                         std::lock_guard<std::mutex> hand_lock(hand_state_mutex);clamp_shot[side]=shot;}
+                         std::optional<d2vr::ClampSweep> eye_sweep;
+                         {std::lock_guard<std::mutex> hand_lock(hand_state_mutex);clamp_shot[side]=shot;
+                          eye_sweep=released_shot.posted(side,clamp_drew,clamped,clamp_post,{anchor.position[0],anchor.position[1],anchor.position[2]},target.position,now,game_xr->pose_epoch());}
+                         if(eye_sweep) {d2vr::NativeInteractionAim::post_weapon_segment(side,d2vr::NativeInteractionAim::tip_slot,eye_sweep->from,eye_sweep->to,eye_sweep->radius);++status.released_shots;}}
                         status.active.store(clamp_drew);status.state.store(static_cast<unsigned>(clamped.state));status.probes.store(static_cast<unsigned>(probes.count));
                         status.contact_frames.store(hand_clamp.contact_frames(side));status.snapbacks.store(hand_clamp.snapbacks(side));
                         status.missed_notes.store(hand_clamp.missed_notes(side));status.repeated_updates.store(hand_clamp.repeated_updates(side));
@@ -4339,7 +4350,8 @@ void prepare_head_view(void* view) noexcept {
                     {static std::uint64_t noted_scope{};const auto scope=d2vr::NativeInteractionAim::clamp_cast_serial_.load();
                      if(scope!=noted_scope) {noted_scope=scope;hand_clamp_budget.note(d2vr::NativeInteractionAim::clamp_cast_us_.load(),clamp_now);}
                      hand_clamp_cast_mean.store(hand_clamp_budget.mean_us());hand_clamp_cast_max.store(hand_clamp_budget.max_us());
-                     hand_clamp_tip.store(hand_clamp_budget.tip_enabled());hand_clamp_alternate.store(hand_clamp_budget.alternate());}
+                     hand_clamp_tip.store(hand_clamp_budget.tip_enabled());hand_clamp_alternate.store(hand_clamp_budget.alternate());
+                     hand_clamp_restore.store(hand_clamp_budget.restore_factor());hand_clamp_recover_wait.store(hand_clamp_budget.recover_wait());}
                 } else { // an authored camera or no collision: the clamp yields, nothing stored is reused (C9)
                     hand_clamp.reset(0);hand_clamp.reset(1);clamp_hold.clear(0);clamp_hold.clear(1);clamp_exclude={};clamp_posted={};
                     for(auto& status:hand_clamp_status) status.active.store(false);
@@ -4666,8 +4678,8 @@ void prepare_head_view(void* view) noexcept {
                 auto hand=d2vr::to_game_pose(d2vr::camera_relative_controller(
                     {{p.position.x,p.position.y,p.position.z},{p.orientation.x,p.orientation.y,p.orientation.z,p.orientation.w}},hand_centre,head_origin.position),head_origin,anchor,1.0);
                 barrel_aim(hand);aim_offset(hand); // exactly the shot aim (it ignored the offset: shots landed 4 deg left of it)
-                {d2vr::ClampedShotOffset shot{};{std::lock_guard<std::mutex> hand_lock(hand_state_mutex);shot=clamp_shot[0];} // and its origin (I2)
-                 hand.position=d2vr::clamped_shot_origin(hand.position,shot,GetTickCount64(),game_xr->pose_epoch());}
+                {std::lock_guard<std::mutex> hand_lock(hand_state_mutex); // and its origin (I2, the snap-back guard)
+                 hand.position=d2vr::guarded_shot_origin(released_shot,clamp_shot[0],0,hand.position,GetTickCount64(),game_xr->pose_epoch());}
                 const auto target=hand.position+hand.basis[0]*30.0;
                 const auto d=target-world.position;
                 const double depth=d2vr::dot(d,world.basis[0]);
@@ -5108,6 +5120,9 @@ std::string feedback_status_json() {
             // (the note_drawn contract); unanswered: frames whose palm post the game thread had not answered (its previous answer was read);
             // cast_us: the clamp's own casts per frame (mean / max over 2 s, last scope), budget 500 (C14). exclusion: hits = another body
             // reported through the prop's exclusion (walls behind it), self_hits = the excluded body itself (the exclusion did not apply).
+            // released_shots: frames a released (snapped-back) side posted its eye sweep for the shot-origin guard. restore_factor /
+            // recover_wait: CastBudget's measured cost ratio of the better mode and its current recovery wait (s). enabled: false with
+            // build/no-hand-clamp, whose scope is the drawn hand and the shot origin only (C9 raw routing stays on in both modes).
             const auto pair=[](auto get) {std::ostringstream v;v<<'['<<get(hand_clamp_status[0])<<','<<get(hand_clamp_status[1])<<']';return v.str();};
             std::ostringstream o;
             o<<pair([](const HandClampStatus& h){return h.active.load()?"true":"false";})
@@ -5121,12 +5136,13 @@ std::string feedback_status_json() {
              <<",\"reacquire_blocked\":"<<pair([](const HandClampStatus& h){return h.reacquire_blocked.load();})
              <<",\"reacquire_holds\":"<<pair([](const HandClampStatus& h){return h.reacquire_holds.load();})
              <<",\"unanswered\":"<<pair([](const HandClampStatus& h){return h.unanswered.load();})
+             <<",\"released_shots\":"<<pair([](const HandClampStatus& h){return h.released_shots.load();})
              <<",\"probes\":"<<pair([](const HandClampStatus& h){return h.probes.load();})
              <<",\"max_casts\":"<<pair([](const HandClampStatus& h){return h.max_casts.load();})
              <<",\"cast_us\":"<<hand_clamp_cast_mean.load()<<",\"cast_us_max\":"<<hand_clamp_cast_max.load()
              <<",\"cast_us_last\":"<<d2vr::NativeInteractionAim::clamp_cast_us_.load()<<",\"casts_last\":"<<d2vr::NativeInteractionAim::clamp_cast_n_.load()
              <<",\"tip_probe\":"<<(hand_clamp_tip.load()?"true":"false")<<",\"alternate\":"<<(hand_clamp_alternate.load()?"true":"false")
-             <<",\"enabled\":"<<(hand_clamp_enabled?"true":"false")
+             <<",\"enabled\":"<<(hand_clamp_enabled?"true":"false")<<",\"restore_factor\":"<<hand_clamp_restore.load()<<",\"recover_wait\":"<<hand_clamp_recover_wait.load()
              <<",\"exclusion\":{\"casts\":"<<d2vr::NativeInteractionAim::clamp_exclude_casts_.load()<<",\"hits\":"<<d2vr::NativeInteractionAim::clamp_exclude_hits_.load()
              <<",\"self_hits\":"<<d2vr::NativeInteractionAim::clamp_exclude_self_hits_.load()<<",\"unmapped\":"<<d2vr::NativeInteractionAim::clamp_exclude_unmapped_.load()
              <<",\"info_zero\":"<<(d2vr::NativeInteractionAim::clamp_exclude_info_zero_.load()?"true":"false")<<'}';

@@ -227,10 +227,108 @@ void default_wall_tip() {
     }
     CHECK(out.wall_tip_sweep.valid && std::abs(out.wall_tip_sweep.radius-.035)<1e-12 && out.tip_sweep.valid);
 }
+// A 10 cm door, solid for 1 <= x <= 1.1 (near face normal -x), answered like a closest-hit sphere cast from the near side.
+std::optional<ClampHit> door_cast(const ClampSweep& s) {
+    if(!s.valid) return std::nullopt;
+    if(s.from.x+s.radius>=1 && s.from.x-s.radius<=1.1) return ClampHit{{1,s.from.y,s.from.z},{-1,0,0},5,3,true};
+    if(s.from.x<1 && s.to.x+s.radius>1) {
+        const double t=(1-s.radius-s.from.x)/(s.to.x-s.from.x);const Vec3 c=s.from+(s.to-s.from)*std::max(0.,t);
+        return ClampHit{{1,c.y,c.z},{-1,0,0},5,3,false};
+    }
+    return std::nullopt;
+}
+
+// Ruling 1 (snap-back exploit): the gun pushed 40 cm through a 10 cm door and held 1 s. The side snaps back (G3) and is drawn at
+// the controller, past the door; every shot origin of the second stays on the near side. The publication's order: last frame's
+// answers -> the released guard reads them -> clamp update -> the guard's eye sweep on the tip slot -> note_drawn -> shot origin.
+void released_shot_through_door() {
+    HandClamp clamp;ReleasedShotGuard guard;ClampOutput out{};const auto root=level_frame({0,0,0},{1,0,0});
+    const Vec3 chest{0,0,1},eye{0,0,1.6};double now=0;std::uint64_t tick=1000;bool started=false;
+    std::optional<ClampSweep> tip_slot_posted;   // what the tip slot carried last frame (the clamp's tip or the guard's eye sweep)
+    unsigned released_frames=0,guarded=0;double farthest=-1e9;
+    for(int f=0;f<100;++f) {
+        const Vec3 controller{f<10?.5+.09*f:1.4,0,1};
+        const auto slot0=started?door_cast(out.palm_sweep):std::nullopt;
+        const auto tip_answer=tip_slot_posted?door_cast(*tip_slot_posted):std::nullopt;
+        guard.read(0,slot0,tip_answer,tick);
+        ClampInput in{};in.now=now;in.epoch=1;in.root=root;in.target=pose_at(controller);in.chest=chest;in.tip_enabled=false;
+        if(started) route_clamp_hits(in,out.state,slot0,std::nullopt,std::nullopt,std::nullopt);
+        out=clamp.update(0,in);started=true;
+        tip_slot_posted=guard.posted(0,true,out,in.post,eye,controller,tick,7);
+        clamp.note_drawn(0,root,out.drawn.position);
+        // The shot, published from the next frame's aim: raw origin a little ahead of the grip, behind the door's far face.
+        const Vec3 raw_origin=controller+Vec3{.02,0,.01};
+        const auto clamped=clamped_shot_offset(out.drawn.position,controller,true,tick,7);
+        const Vec3 origin=guarded_shot_origin(guard,clamped,0,raw_origin,tick+11,7);
+        if(out.state==ClampState::released) {++released_frames;guarded+=guard.applies(0,tick+11,7);}
+        if(controller.x>1) farthest=std::max(farthest,origin.x);
+        now+=dt;tick+=11;
+    }
+    CHECK(clamp.snapbacks(0)>=1 && released_frames>=60 && guarded==released_frames);
+    CHECK(farthest<1);                                              // every origin on the near side of the door
+    std::printf("released_shot_through_door: %u released frames, farthest origin x %.4f\n",released_frames,farthest);
+    // The released guard's fallbacks: a chest that started inside geometry uses the eye sweep; nothing known: the eye.
+    ReleasedShotGuard g2;ClampOutput released{};released.valid=true;released.state=ClampState::released;released.palm_sweep={{.9,0,1},{1.4,0,1},.05,true};
+    CHECK(g2.posted(0,true,released,true,eye,{1.4,0,1},2000,7).has_value());
+    CHECK(g2.applies(0,2000,7) && !g2.applies(0,2000,8) && !g2.applies(0,2200,7) && !g2.applies(1,2000,7));
+    CHECK(length(g2.origin(0,{1.42,0,1.01},2005)-eye)<1e-12);       // posted, not answered yet: the eye
+    // The chest overlap reports a normal that would put the barrel in free space (+x): it is not trusted.
+    g2.read(0,ClampHit{{0,0,1},{1,0,0},5,3,true},door_cast({eye,{1.4,0,1},eye_sweep_radius,true}),2011);
+    const Vec3 by_eye=g2.origin(0,{1.42,0,1.01},2015);
+    CHECK(by_eye.x<1 && by_eye.x>.8);                               // on the eye -> barrel segment, before the door
+    g2.read(0,std::nullopt,std::nullopt,2022);                      // nothing posted since: answers kept from the last read
+    CHECK(length(g2.origin(0,{1.42,0,1.01},2025)-by_eye)<1e-12);
+    // A chest sweep that met nothing: the raw origin (the controller is in free space).
+    ReleasedShotGuard g3;g3.posted(0,true,released,true,eye,{1.4,0,1},3000,7);g3.read(0,std::nullopt,std::nullopt,3011);
+    CHECK(g3.origin(0,{1.42,0,1.01},3015).x==1.42);
+    // Stale answers (over 100 ms) are not used.
+    CHECK(length(g3.origin(0,{1.42,0,1.01},3200)-eye)<1e-12);
+    // Not released (contact or free): the guard does not apply, and clears its answers.
+    ClampOutput contact=released;contact.state=ClampState::contact;
+    CHECK(!g3.posted(0,true,contact,true,eye,{1.4,0,1},3300,7) && !g3.applies(0,3300,7));
+    CHECK(!g3.posted(0,false,released,true,eye,{1.4,0,1},3400,7) && !g3.applies(0,3400,7));   // a yield
+    // Answers from an earlier release are dropped when the release ends: released again 20 ms later, nothing answered yet -> the eye.
+    {ReleasedShotGuard g4;g4.posted(0,true,released,true,eye,{1.4,0,1},4000,7);g4.read(0,std::nullopt,std::nullopt,4011);
+     CHECK(g4.origin(0,{1.42,0,1.01},4012).x==1.42);
+     g4.posted(0,true,contact,true,eye,{1.4,0,1},4012,7);g4.posted(0,true,released,true,eye,{1.4,0,1},4023,7);
+     CHECK(length(g4.origin(0,{1.42,0,1.01},4025)-eye)<1e-12);}
+    // before_surface: the barrel in front of the plane stays; the cut backs off by the margin.
+    const ClampHit face{{1,0,0},{-1,0,0},5};
+    CHECK(before_surface({0,0,0},{.8,0,0},face,.05).x==.8 && std::abs(before_surface({0,0,0},{2,0,0},face,.05).x-.95)<1e-12);
+    CHECK(before_surface({1.2,0,0},{2,0,0},face,.05).x==1.2);
+}
+
+// A table at z = 0.8 (normal +z, solid below), answered like a closest-hit sphere cast.
+std::optional<ClampHit> table_cast(const ClampSweep& s) {
+    if(!s.valid) return std::nullopt;
+    const double s0=s.from.z-.8,s1=s.to.z-.8;
+    if(s0<s.radius) return ClampHit{{s.from.x,s.from.y,.8},{0,0,1},4,3,true};
+    if(s1>=s.radius) return std::nullopt;
+    const double t=(s0-s.radius)/(s0-s1);const Vec3 c=s.from+(s.to-s.from)*t;return ClampHit{{c.x,c.y,.8},{0,0,1},4,3,false};
+}
+
+// N1: a world UI opens with the hand resting on a table. The hand follows the controller kept out of the table top while within
+// 0.35 m of it; lowered further (beside the table) it drops with the controller; a new level's menu ignores the old planes.
+void paused_hand_guarded() {
+    HandClamp clamp;ClampOutput out{};const auto root=level_frame({0,0,0},{1,0,0});double now=0;bool started=false;
+    for(int f=0;f<60;++f) {
+        ClampInput in{};in.now=now;in.epoch=3;in.root=root;in.target=pose_at({.4,0,.75});in.chest={0,0,1.3};in.tip_enabled=false;
+        if(started) route_clamp_hits(in,out.state,table_cast(out.palm_sweep),std::nullopt,std::nullopt,std::nullopt);
+        out=clamp.update(0,in);started=true;clamp.note_drawn(0,root,out.drawn.position);now+=dt;
+    }
+    CHECK(out.state==ClampState::contact && std::abs(out.drawn.position.z-.855)<1e-6);
+    const double gap=clamp.config().snap_gap;
+    CHECK(std::abs(paused_hand(clamp,0,pose_at({.4,0,.7}),3,gap).z-.855)<1e-6);   // pressed 15 cm in: kept on the table top
+    CHECK(paused_hand(clamp,0,pose_at({.4,0,.9}),3,gap).z==.9);                 // above it: the controller
+    CHECK(paused_hand(clamp,0,pose_at({.4,0,.45}),3,gap).z==.45);               // 40 cm below the top: the controller
+    CHECK(paused_hand(clamp,0,pose_at({.4,0,.7}),4,gap).z==.7);                 // another epoch (a new level): the controller
+    CHECK(paused_hand(clamp,1,pose_at({.4,0,.7}),3,gap).z==.7);                 // the other side holds nothing
+    clamp.reset(0);CHECK(paused_hand(clamp,0,pose_at({.4,0,.7}),3,gap).z==.7);  // a reset (yielded) side: the controller
+}
 } // namespace
 
 int main() {
-    yields();posts();routes();probe_sets();hold_store();reacquire();blade_stab();blade_push_stays_out();shot_origin_thin_wall();default_wall_tip();
+    yields();posts();routes();probe_sets();hold_store();reacquire();blade_stab();blade_push_stays_out();shot_origin_thin_wall();default_wall_tip();released_shot_through_door();paused_hand_guarded();
     std::puts("PASS hand_clamp_feed_check: C9 yields, C14 cadence, answer routing, open-hand probe sets, re-acquire hold, blade stab, shot origin");
     return 0;
 }

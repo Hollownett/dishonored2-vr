@@ -136,11 +136,15 @@ template<std::size_t N> ClampProbe wall_leading_probe(const std::array<ClampProb
 }
 
 // C14: the clamp's cast cost per frame. A rolling mean over window_seconds; once a full window since the last change is
-// over budget_us, the fingertip sweep goes first, then the hands alternate frames. With hysteresis they come back in the
-// reverse order (alternation off first, then the tip) once the mean has stayed under recover_us for recover_seconds.
+// over budget_us, the fingertip sweeps go first, then the hands alternate frames. They come back in the reverse order only
+// when the cost predicted for the better mode stays under restore_us for the recovery wait: the mean now times restore_factor,
+// the ratio measured over the first full window after that step down (better-mode mean / this mode's; default 2, kept in
+// [1,4]). Each step down that follows a recovery doubles the wait (5, 10, 20 ... 120 s), so a scene that does not fit the budget
+// in the better mode cannot flip it back every few seconds (a tip that comes and goes clips walls every few seconds).
 class CastBudget {
 public:
-    static constexpr double budget_us=500,window_seconds=2,recover_us=350,recover_seconds=5;
+    static constexpr double budget_us=500,window_seconds=2,restore_us=400,default_restore_factor=2,max_restore_factor=4,
+                            recover_seconds=5,max_recover_seconds=120;
     void note(double frame_us,double now) {
         if(!std::isfinite(frame_us) || frame_us<0 || !std::isfinite(now)) return;
         if(!started_ || (!samples_.empty() && now<samples_.back().now)) {started_=true;start_=now;samples_.clear();quiet_=false;}
@@ -149,12 +153,23 @@ public:
         double sum=0,peak=0;
         for(const auto& s:samples_) {sum+=s.us;peak=std::max(peak,s.us);}
         mean_=sum/static_cast<double>(samples_.size());max_=peak;
-        if(mean_<recover_us) {if(!quiet_) {quiet_=true;quiet_start_=now;}} else quiet_=false;
-        if(now-start_>=window_seconds-1e-9 && mean_>budget_us && (tip_ || !alternate_)) {
+        const unsigned level=alternate_?2u:tip_?0u:1u;
+        const bool full=now-start_>=window_seconds-1e-9;
+        // The ratio this step down bought, measured once over its first full window.
+        if(level && !measured_[level] && full && mean_>0) {
+            measured_[level]=true;factor_[level]=std::clamp(before_[level]/mean_,1.,max_restore_factor);
+        }
+        const double predicted=level?mean_*factor_[level]:mean_;
+        if(level && predicted<restore_us) {if(!quiet_) {quiet_=true;quiet_start_=now;}} else quiet_=false;
+        if(full && mean_>budget_us && level<2) {
+            const unsigned next=level+1;
+            if(recovered_) recover_wait_=std::min(recover_wait_*2,max_recover_seconds);
+            recovered_=false;before_[next]=mean_;measured_[next]=false;factor_[next]=default_restore_factor;
             if(tip_) tip_=false; else alternate_=true;
-            start_=now;samples_.clear();quiet_=false; // the next decision measures the new mode for a full window
-        } else if((alternate_ || !tip_) && quiet_ && now-quiet_start_>=recover_seconds-1e-9) {
+            start_=now;samples_.clear();quiet_=false;   // the next decision measures the new mode for a full window
+        } else if(level && quiet_ && now-quiet_start_>=recover_wait_-1e-9) {
             if(alternate_) alternate_=false; else tip_=true;
+            recovered_=true;
             start_=now;samples_.clear();quiet_=false;
         }
     }
@@ -162,13 +177,15 @@ public:
     bool alternate() const {return alternate_;}
     double mean_us() const {return mean_;}
     double max_us() const {return max_;}
+    double recover_wait() const {return recover_wait_;}
+    double restore_factor() const {const unsigned level=alternate_?2u:tip_?0u:1u;return level?factor_[level]:1.;}
     void reset() {*this=CastBudget{};}
 private:
     struct Sample {double now,us;};
     std::deque<Sample> samples_;
-    double start_{},mean_{},max_{};
-    double quiet_start_{};
-    bool started_{},tip_{true},alternate_{},quiet_{};
+    double start_{},mean_{},max_{},quiet_start_{},recover_wait_{recover_seconds};
+    std::array<double,3> before_{},factor_{1,default_restore_factor,default_restore_factor};std::array<bool,3> measured_{};
+    bool started_{},tip_{true},alternate_{},quiet_{},recovered_{};
 };
 
 class HandClamp {
@@ -356,6 +373,8 @@ public:
     explicit HandClamp(HandClampConfig config={}) : cfg_(config) {}
     void reset(unsigned side) {if(side<2) sides_[side]=Side{};}   // keeps the counters
     std::uint64_t snapbacks(unsigned side) const {return side<2?snapbacks_[side]:0;}
+    // The epoch of the side's last update (none: reset, yielded or never updated).
+    std::optional<std::uint64_t> side_epoch(unsigned side) const {return side<2 && sides_[side].has?std::optional<std::uint64_t>{sides_[side].epoch}:std::nullopt;}
     std::uint64_t contact_frames(unsigned side) const {return side<2?contact_frames_[side]:0;}
     // Contract breaks: an update without note_drawn after the previous one, and a second update at the same `now`.
     std::uint64_t missed_notes(unsigned side) const {return side<2?missed_notes_[side]:0;}
