@@ -6262,6 +6262,7 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                      << ",\"frame_timing_dropped\":"<<frame_timing_queue.dropped()
                                      << ",\"frame_timing_write_failed\":"<<(frame_timing_write_failed.load()?"true":"false")
                                      << ",\"xr_status_write_failed\":"<<(xr_status_write_failed.load()?"true":"false")
+                                     << ",\"crosshair\":{\"installed\":" << native_crosshair_installed << ",\"applied\":" << native_crosshair.applied() << ",\"rejected\":" << native_crosshair.rejected() << ",\"failed\":" << (native_crosshair.failed()?"true":"false") << '}'
                                      << ",\"shot_aim\":{\"installed\":" << native_shot_aim_installed << ",\"calls\":" << native_shot_aim.calls()
                                      << ",\"routed\":" << native_shot_aim.routed() << ",\"rejected\":" << native_shot_aim.rejected() << ",\"last_reason\":" << native_shot_aim.last_reason() << '}' 
                                      << feedback_status_json() << combat_policy_status_json() << ",\"headset_scene_visually_verified\":false}\n";
@@ -8041,6 +8042,9 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
                << ",\"native_left_aim_candidates\":" << native_left_aim.candidates()
                << ",\"native_left_aim_applied\":" << native_left_aim.applied()
                << ",\"native_left_aim_rejected\":" << native_left_aim.rejected()
+               << ",\"native_crosshair_applied\":" << native_crosshair.applied()
+               << ",\"native_crosshair_rejected\":" << native_crosshair.rejected()
+               << ",\"native_crosshair_failed\":" << (native_crosshair.failed()?"true":"false")
                << ",\"native_left_aim_overlaps\":" << native_left_aim.overlap()
                << ",\"native_left_aim_write_failures\":" << native_left_aim.write_failures()
                << ",\"native_left_aim_rollback_failures\":" << native_left_aim.rollback_failures()

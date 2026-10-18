@@ -236,6 +236,7 @@ public:
     UINT64 applied() const {return applied_.load();}
     UINT64 rejected() const {return rejected_.load();}
     UINT64 skipped() const {return skipped_.load();}
+    bool failed() const {return failed_.load(std::memory_order_acquire);}
     UINT64 latch_clears() const {return latch_clears_.load();}
     UINT64 latch_failures() const {return latch_failures_.load();}
     bool routing() const {return active_.load() && route_.load();}
