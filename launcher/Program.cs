@@ -38,7 +38,7 @@ sealed class MainForm : Form
     readonly System.Windows.Forms.Timer poll = new() { Interval = 1000 };
     Candidate? candidate; List<Check> checks = new(); bool ready;
     string? artState = "checking";  // null = art present; otherwise importing progress or why it is missing
-    bool launching; bool stopping; bool importing; bool showLog;
+    bool launching; bool checking; bool stopping; bool importing; bool showLog;
     string statusText = "", statusDetail = ""; Color statusColor = Ui.Dim;
 
     // settings
@@ -458,9 +458,11 @@ sealed class MainForm : Form
     // ---------- launch / stop (Probe: the C# port of run_demo.ps1 -Launch -SkipPreflightWait, inject_probe.py and game_keys.py)
     async Task LaunchVr()
     {
-        if (launching) return;
-        await RefreshChecks(); // never trust a cached ready: the game may have been updated while the launcher sat open
-        if (!ready) { SetStatus("Cannot launch", Ui.Bad, "Fix the red items under Setup checks first."); return; }
+        if (launching || checking) return;
+        checking = true; launch.Enabled = false; // a second click during the re-check must not start a second launch
+        try { await RefreshChecks(); } // never trust a cached ready: the game may have been updated while the launcher sat open
+        finally { checking = false; }
+        if (!ready) { launch.Enabled = Ready; SetStatus("Cannot launch", Ui.Bad, "Fix the red items under Setup checks first."); return; }
         launching = true; stopping = false; launch.Enabled = false; stop.Enabled = true;
         log.Clear(); ShowLog(true);
         Append(log, $"Launching {candidate!.Dll} from {env.Root}", Ui.Teal);
@@ -488,7 +490,7 @@ sealed class MainForm : Form
     {
         var g = Env.Game();
         var (fresh, gp, logic) = env.LiveStatus();
-        launch.Enabled = !launching && Ready;
+        launch.Enabled = !launching && !checking && Ready;
         stop.Enabled = g != null && (fresh || launching) && !stopping;
         if (stopping) SetStatus("Stopping VR", Ui.Gold, "Waiting for the mod to restore the game.");
         else if (g != null && fresh && gp) SetStatus("VR running", Ui.Good, $"Gameplay active (logic mask {logic}). Put on your headset.");
