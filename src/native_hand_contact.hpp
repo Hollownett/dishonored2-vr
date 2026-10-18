@@ -147,12 +147,15 @@ public:
         std::optional<std::uintptr_t> exclude;      // next frame's ClampInput::exclude: the met prop, excluded from the extra sweep (I1)
         bool new_latch{};
     };
-    // Pure: one frame of the meet. latched: this side's latch (updated). depth_latch=false drops the clamp's depth from the latch (reference runs only).
+    struct MeetState {bool latched{};Vec3 offset{};bool has{};};   // per side: the latch; last frame's drawn hand - target (a meeting hand eases out of it)
+    // Pure: one frame of the meet. state: this side's (updated). dt: seconds since the last frame. depth_latch=false drops the clamp's depth from the latch
+    // (reference runs only). A meeting hand whose offset from the target shrinks eases at the clamp's release_speed, as the clamp's own hold does: a latch
+    // that lets go of a 4 m/s swat's bottle does not throw the drawn hand 20 cm forward in a frame.
     // clamp_holding (I3): the clamp's contact is a pushable prop's plane that the last answered cast made or hit directly; only then does the clamp's depth
     // (hand_clamp.hpp clamp_depth) count toward the latch, and only then does the latch hold below meet_unlatch (next_meet_latch).
-    static ClampMeet compose_meet(bool& latched,const MeetPublished& pub,const HandClamp& clamp,unsigned side,const ClampOutput& out,
-                                  const WorldTrackedPose& target,bool depth_latch=true) {
-        ClampMeet r{};
+    static ClampMeet compose_meet(MeetState& state,const MeetPublished& pub,const HandClamp& clamp,unsigned side,const ClampOutput& out,
+                                  const WorldTrackedPose& target,double dt,bool depth_latch=true) {
+        ClampMeet r{};bool& latched=state.latched;
         const std::optional<std::uintptr_t> cast=out.valid && out.contact?std::optional<std::uintptr_t>{out.contact->entity}:std::nullopt;
         const bool cast_pushable=cast && pub.pushable_has(*cast);
         r.clamp_holding=cast_pushable && out.state==ClampState::contact && out.contact_fresh;
@@ -166,6 +169,14 @@ public:
         }
         r.meeting=r.prop.has_value() || length(r.shift)>0;
         r.drawn=meet_drawn(clamp,side,out,target,r.meeting,r.prop,r.shift);
+        if(r.meeting && state.has && std::isfinite(dt) && dt>0) {
+            const Vec3 wanted=r.drawn-target.position;
+            if(finite(wanted) && length(wanted)<length(state.offset)) {
+                const Vec3 eased=state.offset+clamp_detail::clamp_length(wanted-state.offset,clamp.config().release_speed*std::min(dt,.1));
+                r.drawn=clamp.keep_out(side,target.basis,target.position+eased,r.prop);
+            }
+        }
+        state.offset=out.valid && finite(r.drawn-target.position)?r.drawn-target.position:Vec3{};state.has=out.valid;
         r.held_by=cast?*cast:(r.prop?*r.prop:(r.meeting?pub.entity:0));
         // The exclusion sweep runs while the hand meets a prop, and while the clamp holds it at a loose one (met or pinned): the wall behind is then
         // already held the frame a meet starts (its result lands a frame late).
@@ -178,14 +189,14 @@ public:
     ClampMeet meet_clamp(unsigned side,const HandClamp& clamp,const ClampOutput& out,const WorldTrackedPose& target) {
         MeetPublished pub{};
         if(side>1) return compose_meet_none(clamp,side,out,target);
-        {std::lock_guard<std::mutex> l(mutex_);if(!lanes_[side].active) {std::lock_guard<std::mutex> m(meet_mutex_);meet_latched_[side]=false;return compose_meet_none(clamp,side,out,target);}}
+        {std::lock_guard<std::mutex> l(mutex_);if(!lanes_[side].active) {std::lock_guard<std::mutex> m(meet_mutex_);meet_state_[side]={};meet_last_[side]=0;return compose_meet_none(clamp,side,out,target);}}
         std::lock_guard<std::mutex> l(meet_mutex_);const double now=seconds();
-        if(now-meet_.stamp>meet_stale) {meet_latched_[side]=false;return compose_meet_none(clamp,side,out,target);}
+        if(now-meet_.stamp>meet_stale) {meet_state_[side]={};meet_last_[side]=0;return compose_meet_none(clamp,side,out,target);}
         pub.fresh=now-meet_.side_stamp[side]<=meet_fresh;pub.outward=meet_.outward[side];pub.entity=meet_.entity[side];
         pub.pushable=meet_.pushable;pub.pushable_count=meet_.count;pub.loose=meet_.loose;pub.loose_count=meet_.loose_count;
-        bool latched=meet_latched_[side];
-        const auto r=compose_meet(latched,pub,clamp,side,out,target);
-        meet_latched_[side]=latched;
+        auto& state=meet_state_[side];
+        const double dt=meet_last_[side]>0?now-meet_last_[side]:0.;meet_last_[side]=now;
+        const auto r=compose_meet(state,pub,clamp,side,out,target,dt);
         if(r.new_latch) ++meet_latches;
         if(r.prop) ++meets;
         if(length(r.shift)>0) ++meet_shifts;
@@ -541,8 +552,9 @@ private:
     struct Meet {std::array<std::uintptr_t,8> pushable{};unsigned count{};std::array<std::uintptr_t,ClampInput::loose_capacity> loose{};unsigned loose_count{};double stamp{};std::array<std::uintptr_t,2> entity{};std::array<Vec3,2> outward{};std::array<double,2> side_stamp{};};
     Vec3 player_eye_{};double player_stamp_{-1e9}; // under mutex_
     static ClampMeet compose_meet_none(const HandClamp& clamp,unsigned side,const ClampOutput& out,const WorldTrackedPose& target) {
-        bool latched=false;return compose_meet(latched,MeetPublished{},clamp,side,out,target);
+        MeetState none{};return compose_meet(none,MeetPublished{},clamp,side,out,target,0.);
     }
+    std::array<MeetState,2> meet_state_{};std::array<double,2> meet_last_{}; // meet_clamp's per side (under meet_mutex_)
     std::mutex meet_mutex_;Meet meet_;std::array<bool,2> meet_latched_{}; // service -> meet(); latched: pinned, the cast holds the hand off the prop
     std::atomic<bool> latched_{};std::mutex found_mutex_;std::vector<std::uintptr_t> found_,gone_;std::uintptr_t service_game_{},service_world_{}; // discover() -> service(); the service's level
     std::ofstream log_,slow_;std::atomic<bool> log_on_{};unsigned logged_{},slow_logged_{};std::mutex log_mutex_;std::string pending_,slow_pending_;double log_drained_{};

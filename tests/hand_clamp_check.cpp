@@ -33,7 +33,9 @@ struct World {
     bool invalid_normals=false;// surface hits report normal_valid=false
     bool floor_first=false;    // every hand sweep reports a surface 6 cm under its start first (shadows all else)
     double wall_x_end=1e9;     // the x wall exists only where y < wall_x_end (a wall that ends)
-    bool slab=false;           // a loose prop (entity 20): the slab 0.80 <= x <= 0.90 in front of the x wall; a sweep excluding it passes through
+    bool slab=false;           // a loose prop (entity 20): the slab slab_x <= x <= slab_x + 0.10 in front of the x wall; a sweep excluding it passes through
+    double slab_x=.80;
+    bool thin=false;           // a thin loose prop (entity 22) lying on the floor: 0 <= z <= 0.015; a sweep excluding it passes through
     bool palm_inside_loose=false;  // the palm_inside overlaps report the loose prop (entity 20), not the world (12): a toppled bottle on the hand
     bool chest_prop=false;     // every chest sweep is stopped half way by a surface of the loose prop (entity 21)
     Vec3 chest{0,0,1};
@@ -43,10 +45,17 @@ struct World {
         if(from_chest && chest_prop) return ClampHit{s.from+(s.to-s.from)*.5,{0,0,1},21,6,false};
         if(!from_chest && palm_inside_loose) return ClampHit{s.from,inside_normal,20,6,true};
         if(slab && !(s.exclude && *s.exclude==20)) {   // the slab's front face, before anything behind it
-            const double s0=.80-s.radius-s.from.x;
-            if(s.from.x>=.80-s.radius && s.from.x<=.90+s.radius) return ClampHit{s.from,{-1,0,0},20,6,true};
+            const double s0=slab_x-s.radius-s.from.x;
+            if(s.from.x>=slab_x-s.radius && s.from.x<=slab_x+.10+s.radius) return ClampHit{s.from,{-1,0,0},20,6,true};
             if(s0>0 && s.to.x>s.from.x && s0<=s.to.x-s.from.x) {
-                const Vec3 c=s.from+(s.to-s.from)*(s0/(s.to.x-s.from.x));return ClampHit{{.80,c.y,c.z},{-1,0,0},20,6,false};
+                const Vec3 c=s.from+(s.to-s.from)*(s0/(s.to.x-s.from.x));return ClampHit{{slab_x,c.y,c.z},{-1,0,0},20,6,false};
+            }
+        }
+        if(thin && !(s.exclude && *s.exclude==22)) {   // the thin prop's top face, before the floor under it
+            const double s0=s.from.z-s.radius-.015;
+            if(s0<=0) return ClampHit{s.from,{0,0,1},22,6,true};
+            if(s.to.z<s.from.z && s0<=s.from.z-s.to.z) {
+                const Vec3 c=s.from+(s.to-s.from)*(s0/(s.from.z-s.to.z));return ClampHit{{c.x,c.y,.015},{0,0,1},22,6,false};
             }
         }
         if(from_chest && chest_inside) return ClampHit{s.from,{0,0,1},11,6,true};
@@ -946,9 +955,62 @@ void contact_fresh_tracks_answers() {
     ClampOutput o{};
     for(int i=0;i<30;++i) o=r.step({1.2,0,.5});
     CHECK(o.contact && o.contact_fresh);
-    r.drop_palm=[](unsigned){return true;};            // the results stop: the plane is held, not fresh
-    o=r.step({1.2,0,.5});o=r.step({1.2,0,.5});
-    CHECK(o.contact && o.contact->entity==7 && !o.contact_fresh);
+    r.drop_palm=[](unsigned){return true;};            // the results stop
+    o=r.step({1.2,0,.5});
+    CHECK(o.contact && o.contact_fresh);               // one stale answer is survived (fix round 3: no latch flicker at 4-5 m/s)
+    o=r.step({1.2,0,.5});
+    CHECK(o.contact && o.contact->entity==7 && !o.contact_fresh);   // two in a row: the plane is held, not fresh
+}
+
+// Fix round 3: a loose prop's plane is where the prop was. A new hit on the same face replaces it, and a face no raw cast
+// re-hits twice in a row is dropped: the hand follows a bottle knocked away instead of staying at its old face for 0.1 s.
+void moving_prop_planes_follow_the_prop() {
+    Rig r;r.world.slab=true;r.loose={20};r.step({.5,0,.5});
+    ClampOutput o=r.move_x({.5,0,.5},.95,1,ignore);   // 20.5 cm into it: under the snap gap
+    for(int i=0;i<10;++i) o=r.step({.95,0,.5});
+    CHECK(o.contact && o.contact->entity==20 && std::abs(o.drawn.position.x-.745)<1e-6);
+    r.world.slab_x=.86;                                 // the bottle was knocked 6 cm on
+    unsigned frames=0;
+    do {o=r.step({.95,0,.5});++frames;} while(o.drawn.position.x<.80 && frames<20);
+    CHECK(frames<=5 && std::abs(o.drawn.position.x-.805)<1e-6);   // two raw casts miss the old face (one result late): 5 frames, not plane_seconds
+}
+
+// Fix round 3: the meet drew somewhere else than the clamp (note_drawn): the clamp's ease continues from what was drawn, and
+// taking the hand back does not throw it to the hold it was easing on its own.
+void note_drawn_carries_the_ease() {
+    Rig r;r.step({.5,0,.5});
+    ClampOutput o{};
+    for(int i=0;i<30;++i) o=r.step({1.2,0,.5});        // held at 0.945, 25.5 cm short of the target
+    r.world.wall_x=false;                               // the wall is gone; the meet draws the target meanwhile
+    for(int i=0;i<12;++i) {r.note_override=Vec3{1.2,0,.5};o=r.step({1.2,0,.5});}
+    o=r.step({1.2,0,.5});                               // the clamp draws again: from the target, not from its own 25 cm hold eased 12 frames
+    CHECK(close_to(o.drawn.position,{1.2,0,.5},1e-6));
+}
+
+// Fix round 2 minor: over a met thin prop on a table, the exclusion sweep's table is held by the palm too (≤ 0.2 cm into it).
+void thin_prop_palm_stays_out_of_table() {
+    Rig r;r.world.wall_x=false;r.world.thin=true;r.loose={22};r.exclude=std::uintptr_t{22};
+    r.tip={{.09,0,0},.035};r.tip_enabled=true;
+    r.step({0,0,.5});
+    double deepest=0;
+    const auto watch=[&](const ClampOutput& o,Vec3 p) {
+        const Vec3 d=meet_drawn(r.clamp,0,o,pose_at(p),true,std::uintptr_t{22},{});
+        deepest=std::max(deepest,.05-d.z);              // the palm sphere's depth into the table (z = 0)
+        r.note_override=d;
+    };
+    r.move_to({0,0,.5},{.5,0,-.05},1,watch);           // forward and down: the forward tip leads, so the exclusion sweep is the tip's
+    for(int i=0;i<30;++i) {const auto o=r.step({.5,0,-.05});watch(o,{.5,0,-.05});}
+    CHECK(deepest<=.002);
+}
+
+// Fix round 3: the leading probe of a push that also goes down is the one that reaches farthest horizontally (it meets the wall
+// first); a hand moving mostly down leads with the lowest one.
+void leading_probe_horizontal_first() {
+    const std::array<ClampProbe,2> hand{{{{.114,.065,-.011},.019},{{.091,.016,-.133},.012}}};   // thumb tip, a finger tip hanging down
+    const auto grip=pose_at({});const ClampProbe fallback{{.09,0,0},.035};
+    CHECK(leading_probe(hand,grip,{1,0,-.3},fallback).local.x==.114);   // diagonal down: the thumb (a finger led before: 2.5 cm through the wall)
+    CHECK(leading_probe(hand,grip,{.2,0,-1},fallback).local.x==.091);   // mostly down: the finger
+    CHECK(leading_probe(hand,grip,{0,0,-1},fallback).local.x==.091);
 }
 
 void level_frame_and_hit_conversion() {
@@ -1027,5 +1089,9 @@ int main() {
     loose_overlap_never_snaps();
     loose_prop_never_keeps_released();
     contact_fresh_tracks_answers();
+    moving_prop_planes_follow_the_prop();
+    note_drawn_carries_the_ease();
+    thin_prop_palm_stays_out_of_table();
+    leading_probe_horizontal_first();
     std::puts("PASS");
 }
