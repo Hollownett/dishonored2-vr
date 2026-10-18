@@ -9,8 +9,10 @@
 //   hand_proxies (the synthetic hand of the unit test) -> prop_mass / prop_shape (as the service reads them) -> hand_contact with the
 //   sticky-contact window the service keeps -> the velocity write -> prop dynamics: gravity, a table (Coulomb friction, mu), an optional
 //   static wall (hard stop, no rebound). The prop is a rigid upright box (no rotation, no tipping); the velocity write acts on the
-//   centre of mass, like the engine's setter. The hand is drawn where it is tracked (no world-cast hold-off).
+//   centre of mass, like the engine's setter. The hand is drawn where it is tracked, except in the cast scenarios: there the production HandClamp
+//   (src/hand_clamp.hpp) holds the drawn hand at the prop and the wall, and the meet (NativeHandContact::next_meet_latch) decides when it is the clamp's.
 #include "../src/hand_contact.hpp"
+#include "../src/hand_clamp.hpp"
 #include "../src/native_hand_contact.hpp"
 #include <cmath>
 #include <cstdlib>
@@ -98,19 +100,19 @@ std::uint16_t inverse_mass_half(double kg) {
 }
 
 struct Leg {Vec3 velocity;double seconds;}; // the hand moves at `velocity` for `seconds` (a rest is velocity 0)
-struct Check {std::string name;bool ok;std::string value,limit;};
+struct Check {std::string name;bool ok;std::string value,limit;bool info{};}; // info: reported, never fails its scenario
 struct Frame {
     double t{};
     Vec3 hand{},raw{},estimate{},prop{},velocity{},written{},normal{};
     double hand_speed{},depth{},overlap{},front{},gap{},wall_over{},into_wall{},tilt{},actual{};
     Vec3 meet{};double meet_gap{kNaN},palm_gap{kNaN},front_over{kNaN};   // the drawn hand's move out of the prop; the nearest drawn proxy's and the palm's surface distance to the prop's (negative: inside); the drawn hand past the wall
-    Vec3 shift{};double gap_term{kNaN},error{kNaN},trim{},friction{};              // the cast's shift of the drawn hand; the contact's terms (debug columns)
-    bool touching{},driving{},push{},engaged{};
+    Vec3 shift{};double gap_term{kNaN},error{kNaN},trim{},friction{};              // the clamp's shift of the drawn hand; the contact's terms (debug columns)
+    bool touching{},driving{},push{},engaged{},clamp_held{};   // clamp_held: the clamp drew last frame's hand while a sweep validated a jump
 };
 struct Metrics {
     double dx{},dy{},dz{},horizontal{},gap{},drift{},lift{},peak{},min_vx{},hand_peak{},jitter{},creep{},ripple{kNaN},depth{},overlap{},end_speed{},tilt{},drift_x{},peak_actual{},ride_ratio{kNaN},gap_range{kNaN},first_push{kNaN};
     double wall_gap{kNaN},wall_end{kNaN},wall_over{kNaN},into_wall{kNaN},reversal{kNaN},speed_at_reversal{kNaN},peak_after_reversal{kNaN},min_step{};
-    unsigned pushes{},touch_frames{},pushes_last_second{},pushes_after_reversal{};
+    unsigned pushes{},touch_frames{},pushes_last_second{},pushes_after_reversal{},clamp_holds{};
     double meet_gap{kNaN},meet_overlap{kNaN},hand_over_wall{kNaN};   // while pushed: the farthest the nearest drawn proxy is from the prop, the deepest a drawn proxy is in it; the drawn hand's farthest reach past the wall
 };
 struct Scenario {
@@ -124,7 +126,7 @@ struct Scenario {
     bool live{};                                      // the real hand geometry, the neutral sim pose
     double glitch_t0{-1},glitch_shift{};Vec3 glitch_dir{};   // a static obstacle's clamp shoves the drawn hand along glitch_dir from glitch_t0 (it eases out at 1.5 m/s); the cast entity is not the prop then
     bool meet{};                                      // the drawn hand is moved out of a pushable prop instead of being held off it by the cast
-    bool cast{};Vec3 chest{};                         // the world cast: a sphere (r .05) swept chest -> grip holds the drawn hand palm_radius off the prop (lag = raw - drawn)
+    bool cast{};Vec3 chest{};                         // the world cast: the production HandClamp holds the drawn hand off the prop and the wall (lag = raw - drawn); chest: its re-acquire origin
     double timing{};                                  // +- seconds of wall-clock jitter on the instants the hand is sampled (the render thread's publish times)
     bool gap_applies{true},info{},steady{};                    // the gap to the fingertips means something; reported, not judged
     std::function<std::vector<Check>(const Scenario&,const Metrics&,const HandContactConfig&)> judge;
@@ -156,10 +158,19 @@ Run simulate(const Scenario& s,const rig::HandGeometry& geometry,const HandConta
     NativeRigidBody body{};body.pose={s.prop,{{{1,0,0},{0,1,0},{0,0,1}}}};body.bounds=NativeGrabBounds{s.prop-half,s.prop+half};
     run.mass=prop_mass(inverse_mass_half(s.mass),*body.bounds);
     HandMotion motion;Jitter jitter;Vec3 p=s.prop,v{},previous=hand_at(s,0);std::uint64_t engaged_until=0;
-    struct Meet {Vec3 shift{};bool latched{};};std::deque<Meet> meet_queue;Meet meet_now{};bool meet_latched=false;
-    const bool meet_on=s.meet && env_or("PUSH_LAB_MEET",1)!=0;   // PUSH_LAB_MEET=0: the v509 cast on every scenario
-    const bool gate_on=env_or("PUSH_LAB_GATE",1)!=0,cast_wall=env_or("PUSH_LAB_CAST_WALL",0)!=0,cast_lag=env_or("PUSH_LAB_CAST_LAG",1)!=0,clamp_shift=env_or("PUSH_LAB_MAX_SHIFT",0)!=0;
-    Vec3 shift{},cast_point{},cast_normal{};bool cast_hit=false,cast_is_wall=false,shift_is_wall=false;double dbg_trim=0,dbg_friction=0; // the cast: last frame's hit, the shift it holds
+    struct Meet {Vec3 shift{};bool clamped{};};std::deque<Meet> meet_queue;Meet meet_now{};bool meet_latched=false; // clamped: latched or pinned, the clamp draws the hand
+    const bool meet_on=s.meet && env_or("PUSH_LAB_MEET",1)!=0;   // PUSH_LAB_MEET=0: the clamp draws the hand on every scenario (no meet)
+    const bool cast_wall=env_or("PUSH_LAB_CAST_WALL",1)!=0;      // PUSH_LAB_CAST_WALL=0: the clamp's world has no wall (only the prop)
+    double dbg_trim=0,dbg_friction=0;
+    // The world cast is the production HandClamp (src/hand_clamp.hpp): it sweeps from last frame's drawn hand to the tracked grip (palm sphere + the leading
+    // fingertip probe) and reads each sweep's result one frame late. Its world: the prop (entity 1) and the wall plane (entity 0); the table is the lift below.
+    static const auto live_hand=live_geometry();
+    const auto grip_pose=[&](Vec3 position) {return s.live?live_pose(position):hand_pose(position,s.fingers,s.facing);};
+    const auto hand_at_pose=[&](const WorldTrackedPose& pose) {return s.live?hand_proxies(live_hand,pose,{0,0,0,0,0}):hand_proxies(geometry,pose,{0,0,0,0,0});};
+    std::array<ClampProbe,hand_proxy_count> open_hand{};   // the open hand's proxies in grip coordinates
+    {const auto local=hand_at_pose(grip_pose({}));for(std::size_t k=0;k<hand_proxy_count;++k) open_hand[k]={local[k].centre,local[k].radius};}
+    HandClamp clamp;ClampOutput clamp_out{};bool clamp_started=false;ClampProbe last_tip{{.09,0,0},.035};
+    const WorldTrackedPose root{{0,0,0},{{{1,0,0},{0,1,0},{0,0,1}}}};
 #ifndef LAB_OLD_API
     PropDrag drag;
 #endif
@@ -167,53 +178,72 @@ Run simulate(const Scenario& s,const rig::HandGeometry& geometry,const HandConta
     // table friction, the share of a step's friction the position integration sees (1 = the solver's order, live v505: ~0.5), tilt torque, onset kick
     const double mu=env_or("PUSH_LAB_MU",s.engine_mu),phase=env_or("PUSH_LAB_PHASE",s.phase),tip=env_or("PUSH_LAB_TIP",s.tip_accel),kick=env_or("PUSH_LAB_KICK",s.onset_gain);
     double engage_start=0,last_sample=-1;std::mt19937 timing_rng{777};std::uniform_real_distribution<double> timing_noise{0,1};
+    const auto prop_now=[&]() {   // the prop's pose and shape now
+        body.pose.position=p;body.bounds=NativeGrabBounds{p-half,p+half};
+        {   // the prop's axes: the identity turned by the tilt vector (Rodrigues)
+            const double angle=std::hypot(tx,ty);
+            if(angle<1e-9) body.pose.basis={{{1,0,0},{0,1,0},{0,0,1}}};
+            else {
+                const Vec3 k{tx/angle,ty/angle,0};const double c=std::cos(angle),sn=std::sin(angle);
+                for(unsigned i=0;i<3;++i) {const Vec3 e{double(i==0),double(i==1),double(i==2)};body.pose.basis[i]=e*c+cross(k,e)*sn+k*(dot(k,e)*(1-c));}
+            }
+        }
+        return prop_shape(body);
+    };
+    // A closest-hit sphere cast against the prop and the wall: an initial overlap is reported before any later hit (the deeper one when both start inside).
+    const auto answer=[&](const ClampSweep& sweep,const rig::HeldShape& shape)->std::optional<ClampHit> {
+        if(!sweep.valid) return std::nullopt;
+        const Vec3 a=sweep.from,dir=sweep.to-sweep.from;const double r=sweep.radius,span=length(dir);
+        const auto at=[&](double u) {return a+dir*u;};
+        std::optional<ClampHit> best;double best_u=2,deepest=0;
+        const double prop_start=rig::shape_distance(shape,a)-r;
+        if(prop_start<=0) {
+            Vec3 nn=shape_normal(shape,a);const bool valid=length(nn)>.5;
+            best=ClampHit{a,valid?nn:Vec3{0,0,1},1,0xffff,true,valid};best_u=-1;deepest=prop_start;
+        } else if(span>1e-9) {
+            const unsigned n=std::max(1u,static_cast<unsigned>(std::ceil(span/.004)));
+            for(unsigned k=1;k<=n;++k) if(rig::shape_distance(shape,at(double(k)/n))<=r) {
+                double lo=double(k-1)/n,hi=double(k)/n;for(int it=0;it<12;++it) {const double mid=(lo+hi)/2;if(rig::shape_distance(shape,at(mid))<=r) hi=mid;else lo=mid;}
+                const Vec3 c=at(hi);Vec3 nn=shape_normal(shape,c);if(length(nn)<.5) nn=dir*(-1/span);if(dot(nn,dir)>0) nn=nn*-1.;
+                best=ClampHit{c-nn*rig::shape_distance(shape,c),nn,1,0xffff,false,true};best_u=hi;break;
+            }
+        }
+        if(cast_wall && !std::isnan(s.wall)) {   // the plane x = wall, facing -x
+            const double s0=s.wall-a.x-r;
+            if(s0<=0) {if(best_u>=0 || s0<deepest) best=ClampHit{{s.wall,a.y,a.z},{-1,0,0},0,0xffff,true,true};}
+            else if(best_u>=0 && dir.x>1e-12 && s0/dir.x<=1 && s0/dir.x<best_u) {const Vec3 c=at(s0/dir.x);best=ClampHit{{s.wall,c.y,c.z},{-1,0,0},0,0xffff,false,true};}
+        }
+        return best;
+    };
     const unsigned frames=static_cast<unsigned>(std::lround(s.seconds/kDt));
     for(unsigned i=0;i<frames;++i) {
         const double t=i*kDt;
         const Vec3 hand=hand_at(s,s.step>0?std::floor(t/s.step)*s.step:t),raw=s.jitter?hand+jitter.at(t):hand;
         double ts=t;if(s.timing>0) {ts=t+s.timing*(2*timing_noise(timing_rng)-1);ts=std::max(ts,last_sample+.0042);}
         last_sample=ts;motion.sample(raw,ts);
-        const auto refresh_cast=[&]() {   // the prop's pose and shape now, and the cast against them (the hit the shift reads is last frame's unless PUSH_LAB_CAST_LAG=0)
-            body.pose.position=p;body.bounds=NativeGrabBounds{p-half,p+half};
-            {   // the prop's axes: the identity turned by the tilt vector (Rodrigues)
-                const double angle=std::hypot(tx,ty);
-                if(angle<1e-9) body.pose.basis={{{1,0,0},{0,1,0},{0,0,1}}};
-                else {
-                    const Vec3 k{tx/angle,ty/angle,0};const double c=std::cos(angle),sn=std::sin(angle);
-                    for(unsigned i=0;i<3;++i) {const Vec3 e{double(i==0),double(i==1),double(i==2)};body.pose.basis[i]=e*c+cross(k,e)*sn+k*(dot(k,e)*(1-c));}
-                }
+        if(s.cast) {   // last frame's sweeps answered against the world now (one frame late); slot 0 is the chest re-acquire while released
+            const auto world=prop_now();
+            ClampInput in{};in.now=t;in.epoch=1;in.root=root;in.target=grip_pose(raw);in.chest=s.chest;
+            if(clamp_started) {
+                const auto slot0=answer(clamp_out.palm_sweep,world);
+                if(clamp_out.state==ClampState::released) in.chest_hit=slot0;else in.palm_hit=slot0;
+                in.tip_hit=answer(clamp_out.tip_sweep,world);
             }
-            const auto shape=prop_shape(body);cast_is_wall=false;
-            if(s.cast) {   // the sphere cast (r .05) from the chest to the grip: the first place along it where the sphere touches the prop; the normal faces against the sweep
-                cast_hit=false;double prop_u=2;const Vec3 a=s.chest,dir=raw-a;const double span=length(dir);const unsigned n=static_cast<unsigned>(std::ceil(span/.004));
-                const auto at=[&](double u) {return a+dir*u;};
-                for(unsigned k=1;k<=n && !cast_hit;++k) if(rig::shape_distance(shape,at(double(k)/n))<=.05) {
-                    double lo=double(k-1)/n,hi=double(k)/n;for(int it=0;it<10;++it) {const double mid=(lo+hi)/2;if(rig::shape_distance(shape,at(mid))<=.05) hi=mid;else lo=mid;}
-                    const Vec3 c=at(hi);Vec3 nn=shape_normal(shape,c);if(length(nn)<.5) nn=dir*(-1/span);if(dot(nn,dir)>0) nn=nn*-1.;
-                    cast_normal=nn;cast_point=c-nn*rig::shape_distance(shape,c);cast_hit=true;prop_u=hi;
-                }
-                if(cast_wall && !std::isnan(s.wall) && dir.x>1e-9) {   // PUSH_LAB_CAST_WALL: the wall plane is a cast target too; the nearest hit along the sweep wins
-                    const double uw=(s.wall-.05-a.x)/dir.x;
-                    if(uw>=0 && uw<=1 && (!cast_hit || uw<prop_u)) {const Vec3 c=at(uw);cast_normal={-1,0,0};cast_point={s.wall,c.y,c.z};cast_hit=true;cast_is_wall=true;}
-                }
-            }
-            return shape;
-        };
-        if(!cast_lag) refresh_cast();   // PUSH_LAB_CAST_LAG=0: the cast is used in the frame it is computed
-        {   // WeaponCollision::update: a hit (last frame's surface) pushes the grip out to palm_radius; engages at once, eases out at 1.5 m/s
-            Vec3 target{};bool hit=false;
-            if(s.cast && cast_hit) {const double pen=dot(cast_point-raw,cast_normal)+.06;if(pen>0 && (!gate_on || length(cast_point-raw)<.25)) {target=cast_normal*pen;hit=true;shift_is_wall=cast_is_wall;if(clamp_shift && length(target)>.45) target=target*(.45/length(target));}}
-            const double release=1.5*kDt;
-            if(hit) {if(length(target)>=length(shift)) shift=target;else {Vec3 d=target-shift;const double l=length(d);if(l>release) d=d*(release/l);shift=shift+d;}}
-            else {const double l=length(shift);shift=l<=release?Vec3{}:shift*((l-release)/l);}
+            in.tip=last_tip=leading_probe(open_hand,in.target,motion.velocity(),last_tip);
+            clamp_out=clamp.update(0,in);clamp_started=true;
         }
-        const Vec3 cast_part=meet_on && !meet_now.latched && !(cast_wall && shift_is_wall)?Vec3{}:shift;   // meet: the cast does not hold the hand off a prop the contact pushes, the hand is moved out of it
-        const Vec3 body_part=cast_part+meet_now.shift;
+        // The meet: the drawn hand is the tracked one moved out of the prop it pushes, unless the meet is latched (or the prop pinned): then the clamp's.
+        // A clamp holding the hand at something else (the wall) keeps that hold under the meet's shift, as in the game.
+        const bool clamp_draws=!meet_on || meet_now.clamped;
+        const bool clamp_elsewhere=s.cast && clamp_out.contact && clamp_out.contact->entity!=1;
+        Vec3 base=raw;
+        if(s.cast && (clamp_draws || clamp_elsewhere)) base=clamp_out.drawn.position;
+        if(!clamp_draws) base=base+meet_now.shift;
         const double glitch_size=s.glitch_t0>=0 && t>=s.glitch_t0?std::max(0.,s.glitch_shift-1.5*(t-s.glitch_t0)):0.;
-        const Vec3 drawn=raw+body_part+(s.cast?Vec3{0,0,std::max(0.,.06-(raw.z+body_part.z))}:Vec3{})+s.glitch_dir*glitch_size; // + the table's hold-off: the grip stays palm_radius above it
-        static const auto live_hand=live_geometry();
-        const auto proxies=s.live?hand_proxies(live_hand,live_pose(drawn),{0,0,0,0,0}):hand_proxies(geometry,hand_pose(drawn,s.fingers,s.facing),{0,0,0,0,0});
-        const auto shape=refresh_cast();
+        const Vec3 drawn=base+(s.cast?Vec3{0,0,std::max(0.,.06-base.z)}:Vec3{})+s.glitch_dir*glitch_size; // + the table's hold-off: the grip stays palm_radius above it
+        if(s.cast) clamp.note_drawn(0,root,drawn);
+        const auto proxies=hand_at_pose(grip_pose(drawn));
+        const auto shape=prop_now();
         const std::uint64_t now_ms=1000+static_cast<std::uint64_t>(std::llround(t*1000));
         const bool engaged=engaged_until>now_ms;
 #ifdef LAB_OLD_API
@@ -224,7 +254,7 @@ Run simulate(const Scenario& s,const rig::HandGeometry& geometry,const HandConta
         ContactInput input;input.engaged=engaged;input.friction=drag.compensation();input.basis=body.pose.basis;input.blocked=drag.blocked(t);input.stalled=drag.stalled(t);
         input.lag=raw-drawn;
 #ifndef LAB_NO_HELD
-        input.held=s.cast && glitch_size<=0; // the cast's only obstacle in the lab is the prop, but for the glitch
+        input.held=s.cast && glitch_size<=0 && !clamp_elsewhere; // the drawn hand is back from the tracked one for the prop (not the wall, not the glitch)
 #endif
 #ifndef LAB_V505
         input.trim=drag.trim();input.age=engaged?t-engage_start:0.;
@@ -232,9 +262,12 @@ Run simulate(const Scenario& s,const rig::HandGeometry& geometry,const HandConta
         const auto r=hand_contact(proxies,shape,motion.velocity(),v,run.mass,cfg,input);
         dbg_trim=input.trim;dbg_friction=input.friction;
         if(meet_on) {   // what the service publishes (the way out of the prop), as the render thread takes it kMeetDelay frames later
-            const double out=length(r.outward),latch=env_or("PUSH_LAB_LATCH",NativeHandContact::meet_latch),unlatch=env_or("PUSH_LAB_UNLATCH",NativeHandContact::meet_unlatch),cap=env_or("PUSH_LAB_CAP",kMeetCap);
-            if(out>latch || input.blocked) meet_latched=true;else if(out<unlatch) meet_latched=false; // a pinned prop (PropDrag blocked) is the cast's, as in the service
-            meet_queue.push_back({meet_latched?Vec3{}:(out>cap?r.outward*(cap/out):r.outward),meet_latched});
+            // A pinned prop (PropDrag blocked) is not met: the service publishes no way out of it and does not list it pushable, so the clamp draws the hand.
+            const double out=input.blocked?0.:length(r.outward),cap=env_or("PUSH_LAB_CAP",kMeetCap);
+            const bool clamp_holding=clamp_out.state==ClampState::contact && clamp_out.contact && clamp_out.contact->entity==1;
+            meet_latched=NativeHandContact::next_meet_latch(meet_latched,out,clamp_holding);
+            const bool clamped=meet_latched || input.blocked;
+            meet_queue.push_back({clamped?Vec3{}:(out>cap?r.outward*(cap/out):r.outward),clamped});
             while(meet_queue.size()>kMeetDelay+1) meet_queue.pop_front();
             meet_now=meet_queue.size()>kMeetDelay?meet_queue.front():Meet{};
         }
@@ -249,7 +282,7 @@ Run simulate(const Scenario& s,const rig::HandGeometry& geometry,const HandConta
         Frame f{};f.t=t;f.hand=hand;f.raw=raw;f.estimate=motion.velocity();f.hand_speed=length(hand-previous)/kDt;previous=hand;
         f.touching=r.touching;f.driving=r.driving;f.push=r.push;f.engaged=engaged;f.depth=r.depth;f.normal=r.normal;
         f.written=r.push?r.velocity:Vec3{kNaN,kNaN,kNaN};
-        f.meet=meet_now.shift;f.shift=shift;f.trim=dbg_trim;f.friction=dbg_friction;if(r.has_gap) {f.gap_term=r.gap;f.error=r.error;}
+        f.meet=meet_now.shift;f.shift=s.cast?clamp_out.shift:Vec3{};f.clamp_held=s.cast && clamp_out.held;f.trim=dbg_trim;f.friction=dbg_friction;if(r.has_gap) {f.gap_term=r.gap;f.error=r.error;}
         f.front=-1e9;for(const auto& sp:proxies) {f.front=std::max(f.front,sp.centre.x+sp.radius);f.overlap=std::max(f.overlap,sp.radius-rig::shape_distance(shape,sp.centre));}
         {double nearest=1e9;for(const auto& sp:proxies) nearest=std::min(nearest,rig::shape_distance(shape,sp.centre)-sp.radius);f.meet_gap=nearest;f.palm_gap=rig::shape_distance(shape,proxies[0].centre)-proxies[0].radius;}
         if(!std::isnan(s.wall)) f.front_over=f.front-s.wall;
@@ -315,7 +348,7 @@ Metrics measure(const Scenario& s,const std::vector<Frame>& fr) {
         m.peak=std::max(m.peak,speed);m.min_vx=std::min(m.min_vx,f.velocity.x);m.hand_peak=std::max(m.hand_peak,length(f.estimate));
         m.depth=std::max(m.depth,f.depth);m.overlap=std::max(m.overlap,f.overlap);m.tilt=std::max(m.tilt,f.tilt);if(i>=9) m.peak_actual=std::max(m.peak_actual,std::hypot(f.prop.x-fr[i-9].prop.x,f.prop.y-fr[i-9].prop.y)/(9*kDt)); // the speed it really moved at, over 0.1 s (physics steps do not line up with frames)
         m.drift_x=std::max(m.drift_x,std::abs(f.prop.x-s.prop.x));
-        if(f.push) ++m.pushes;if(f.touching) ++m.touch_frames;
+        if(f.push) ++m.pushes;if(f.touching) ++m.touch_frames;if(f.clamp_held) ++m.clamp_holds;
         if(i>=fr.size()-second) {
             if(f.push) ++m.pushes_last_second;
             lo={std::min(lo.x,f.prop.x),std::min(lo.y,f.prop.y),std::min(lo.z,f.prop.z)};hi={std::max(hi.x,f.prop.x),std::max(hi.y,f.prop.y),std::max(hi.z,f.prop.z)};
@@ -491,16 +524,19 @@ std::vector<Scenario> scenarios() {
             c.expect="(v509) the bottle rides the tracked hand while the drawn hand stays at the cast's shell: the gap to the drawn proxies is the cast's shift";all.push_back(c);}
     }
     {   // the bottle is pinned against a wall and the hand keeps pushing: the drawn hand must stay out of the bottle and short of the wall
-        auto s=base("wall_cast","Pinned bottle: the live hand keeps pushing it into a wall, with the world cast","The live hand pushes the bottle (hand-push.json geometry) 0.35 m at 0.146 m/s toward a wall 30 cm past the bottle's axis; the bottle stops against it and the hand goes on 0.35 m. The drawn hand meets the bottle while it yields, and the cast holds it off again once the bottle is pinned (PropDrag blocked) or the hand is 12 cm into it.");
-        s.steady=true;s.step=.03;s.timing=.004;s.gap_applies=false;s.live=true;s.cast=true;s.meet=true;s.info=true;
+        auto s=base("wall_cast","Pinned bottle: the live hand keeps pushing it into a wall, with the world cast","The live hand pushes the bottle (hand-push.json geometry) 0.35 m at 0.146 m/s toward a wall 30 cm past the bottle's axis; the bottle stops against it and the hand goes on 0.35 m. The drawn hand meets the bottle while it yields, and the hand clamp (src/hand_clamp.hpp) holds it off again once the bottle is pinned (PropDrag blocked) or the hand is 8 cm into it (meet_latch), and keeps it while the clamp holds the hand at the bottle (next_meet_latch). PUSH_LAB_WALL_SPEED sets the push speed; PUSH_LAB_CAST_WALL=0 takes the wall out of the clamp's world.");
+        s.steady=true;s.step=.03;s.timing=.004;s.gap_applies=false;s.live=true;s.cast=true;s.meet=true;
         s.chest={-.562,.0067,.90};s.size={.138,.138,.416};s.prop={0,0,.208};s.mass=1.;s.wall=.30;
         s.hand={-.262,.0067,.102};const double ws=env_or("PUSH_LAB_WALL_SPEED",.146);s.legs={{{0,0,0},.2},{{ws,0,0},.6/ws}};s.seconds=.2+.6/ws+1.5;
-        s.expect="INFO: a pinned prop is the cast's again (the hold-off of v509, which stops holding a hand 25 cm past its hit), so what the drawn hand does past the pin is v509's; the checks below are the aim, not a promise";
-        s.judge=[](const Scenario&,const Metrics& m,const HandContactConfig&) {return std::vector<Check>{
+        s.expect="a pinned prop is the clamp's again, and stays the clamp's while the clamp holds the hand at it: the drawn hand never passes the wall (G1); the overlap and launch checks measure the tipped-bottle push, not G1 (info)";
+        s.judge=[](const Scenario&,const Metrics& m,const HandContactConfig&) {
+            auto overlap=below("no hand passing into the prop: the deepest drawn overlap <= 1 cm",m.meet_overlap,.01,100,"cm");overlap.info=true;
+            auto launch=below("never launched: written speed <= hand + 0.2 m/s",m.peak,.146+.2,1,"m/s");launch.info=true;
+            return std::vector<Check>{
             below("the bottle stays within the wall (lab: 1 cm over)",std::isnan(m.wall_over)?0.:m.wall_over,.01,100,"cm"),
-            below("no hand passing into the prop: the deepest drawn overlap <= 1 cm",m.meet_overlap,.01,100,"cm"),
+            overlap,
             below("the drawn hand stops short of the wall: its farthest proxy past the wall plane <= 1 cm",m.hand_over_wall,.01,100,"cm"),
-            below("never launched: written speed <= hand + 0.2 m/s",m.peak,.146+.2,1,"m/s")};};
+            launch};};
         all.push_back(s);
     }
     {   // a static clamp shoves the drawn hand into the bottle at the onset (sim v509 s2b/s2c)
@@ -661,7 +697,7 @@ int run_all(int argc,char** argv) {
         auto run=simulate(s,geometry,cfg);
         run.metrics=measure(s,run.frames);
         run.checks=s.judge?s.judge(s,run.metrics,cfg):std::vector<Check>{};
-        run.pass=true;for(const auto& c:run.checks) run.pass=run.pass && c.ok;
+        run.pass=true;for(const auto& c:run.checks) run.pass=run.pass && (c.ok || c.info);
         write_run(dir,run);runs.push_back(std::move(run));
     }
     std::ofstream csv(dir/"summary.csv");
@@ -677,7 +713,7 @@ int run_all(int argc,char** argv) {
     for(std::size_t n=0;n<runs.size();++n) {
         const auto& r=runs[n];const auto& s=r.scenario;const auto& m=r.metrics;
         const char* status=s.info?"info":r.pass?"pass":"fail";
-        std::string failed;for(const auto& ck:r.checks) if(!ck.ok) failed+=(failed.empty()?"":"; ")+ck.name;
+        std::string failed;for(const auto& ck:r.checks) if(!ck.ok) failed+=std::string(failed.empty()?"":"; ")+(ck.info?"(info) ":"")+ck.name;
         if(!s.info && !r.pass) ++failed_count;
         const auto g=[](double v,double scale=1) {return std::isfinite(v)?fmt("%.4g",v*scale):std::string();};
         csv<<s.name<<','<<status<<','<<g(m.dx,100)<<','<<g(m.horizontal,100)<<','<<(s.gap_applies?g(m.gap,100):"")<<','<<g(m.drift,1000)<<','<<g(m.lift,1000)<<','<<g(m.peak)<<','<<g(m.hand_peak)<<','
@@ -689,8 +725,8 @@ int run_all(int argc,char** argv) {
             "\"dx\":"+jnum(m.dx)+",\"dy\":"+jnum(m.dy)+",\"dz\":"+jnum(m.dz)+",\"horizontal\":"+jnum(m.horizontal)+",\"gap\":"+jnum(m.gap)+",\"drift\":"+jnum(m.drift)+",\"lift\":"+jnum(m.lift)+
             ",\"peak\":"+jnum(m.peak)+",\"hand_peak\":"+jnum(m.hand_peak)+",\"jitter\":"+jnum(m.jitter)+",\"creep\":"+jnum(m.creep)+",\"ripple\":"+jnum(m.ripple)+",\"depth\":"+jnum(m.depth)+",\"overlap\":"+jnum(m.overlap)+
             ",\"tilt\":"+jnum(m.tilt)+",\"pushes\":"+std::to_string(m.pushes)+",\"touch_frames\":"+std::to_string(m.touch_frames)+",\"into_wall\":"+jnum(m.into_wall)+",\"wall_gap\":"+jnum(m.wall_gap)+
-            ",\"wall_over\":"+jnum(m.wall_over)+"},\"checks\":[";
-        for(std::size_t k=0;k<r.checks.size();++k) json+=std::string(k?",":"")+"{\"name\":"+quote(r.checks[k].name)+",\"ok\":"+(r.checks[k].ok?"true":"false")+",\"value\":"+quote(r.checks[k].value)+",\"limit\":"+quote(r.checks[k].limit)+"}";
+            ",\"wall_over\":"+jnum(m.wall_over)+",\"clamp_holds\":"+std::to_string(m.clamp_holds)+"},\"checks\":[";
+        for(std::size_t k=0;k<r.checks.size();++k) json+=std::string(k?",":"")+"{\"name\":"+quote(r.checks[k].name)+",\"ok\":"+(r.checks[k].ok?"true":"false")+",\"info\":"+(r.checks[k].info?"true":"false")+",\"value\":"+quote(r.checks[k].value)+",\"limit\":"+quote(r.checks[k].limit)+"}";
         json+="]}";
         std::printf("%-22s %-5s displaced %7.2f cm  gap %s  drift %6.2f mm  lift %5.2f mm  tilt %5.1f deg  peak %6.3f m/s  jitter %6.3f mm  depth %5.1f mm  pushes %3u%s%s\n",s.name.c_str(),status,m.horizontal*100,
             s.gap_applies?fmt("%7.2f cm",m.gap*100).c_str():"      - cm",m.drift*1000,m.lift*1000,m.tilt,m.peak,m.jitter*1000,m.depth*1000,m.pushes,failed.empty()?"":"   FAILED: ",failed.c_str());

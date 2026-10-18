@@ -723,6 +723,14 @@ int main() {
             std::cout<<"service carry, cast holding the drawn hand 5 cm back: the face ends "<<(face-front)*100<<" cm from the tracked fingertips ("<<(bx-1.0)*100<<" cm moved), cast seen "<<solid.cast_seen.load()<<" held "<<solid.cast_held.load()<<"\n";
             assert(std::abs(face-front)<.03 && bx-1.0>.15 && solid.cast_seen>0 && solid.cast_held>0 && solid.faults==0);
         }
+        // --- meet_latch_holds_while_clamped: a latched (pinned) prop stays the clamp's while the clamp holds the hand at it, though the way out shrinks
+        // under meet_unlatch (the hand pushed past the prop's middle); without the hold it unlatches there as before
+        {
+            assert(NativeHandContact::next_meet_latch(true,.03,true));     // clamped at the prop: still latched
+            assert(!NativeHandContact::next_meet_latch(true,.03,false));   // not clamped: under meet_unlatch, unlatched
+            assert(NativeHandContact::next_meet_latch(false,.09,false));   // deeper than meet_latch: latches
+            assert(NativeHandContact::next_meet_latch(true,.06,false));    // between meet_unlatch and meet_latch: stays latched
+        }
         // --- meet(): the cast must not hold the hand off a light loose prop the contact pushes; the way out of an overlap; pinned (deep) and heavy props and a hand
         // that is not pushing keep the hold-off
         {

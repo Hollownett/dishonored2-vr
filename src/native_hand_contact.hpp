@@ -99,15 +99,22 @@ public:
     // this hand pushes, so the cast must not hold the hand off it; entity, shift: the prop the tracked hand overlaps most and how the drawn hand has to move to leave
     // it (zero: none), so tracked + shift touches the prop's surface. Nothing for a hand that is not pushing (closed, armed, holding), for a prop that is heavy or
     // out of reach, for a prop that does not give way (pinned), or for one the hand is more than meet_latch into (until it is back under meet_unlatch).
+    // clamp_holding: the hand clamp holds this hand at the prop now. A latched (pinned) prop stays latched while it does, whatever the depth: a hand pushed on
+    // through a pinned prop passes its middle, the way out shrinks under meet_unlatch, and an unlatch there would draw the tracked hand through the prop.
     struct Meeting {bool prop{};std::uintptr_t entity{};Vec3 shift{};};
-    Meeting meet(unsigned side,std::uintptr_t cast_entity) {
+    static bool next_meet_latch(bool latched,double depth,bool clamp_holding) noexcept {
+        return depth>meet_latch || (latched && (depth>=meet_unlatch || clamp_holding));
+    }
+    Meeting meet(unsigned side,std::uintptr_t cast_entity,bool clamp_holding=false) {
         Meeting m{};if(side>1) return m;
         {std::lock_guard<std::mutex> l(mutex_);if(!lanes_[side].active) {meet_latched_[side]=false;return m;}}
         std::lock_guard<std::mutex> l(meet_mutex_);const double now=seconds();
         if(now-meet_.stamp>meet_stale) {meet_latched_[side]=false;return m;}
         const bool fresh=now-meet_.side_stamp[side]<=meet_fresh;
         const double depth=fresh?length(meet_.outward[side]):0.;
-        if(depth>meet_latch) {if(!meet_latched_[side]) ++meet_latches;meet_latched_[side]=true;} else if(depth<meet_unlatch) meet_latched_[side]=false;
+        const bool latched=next_meet_latch(meet_latched_[side],depth,clamp_holding);
+        if(latched && !meet_latched_[side]) ++meet_latches;
+        meet_latched_[side]=latched;
         if(meet_latched_[side]) return m;
         if(cast_entity) for(unsigned i=0;i<meet_.count;++i) if(meet_.pushable[i]==cast_entity) {m.prop=true;++meets;}
         if(fresh && depth>0) {m.entity=meet_.entity[side];m.shift=meet_.outward[side];++meet_shifts;}
