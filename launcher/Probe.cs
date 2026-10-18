@@ -14,7 +14,7 @@ namespace DishonoredVR;
 /// plus tools/game_keys.py. Same probe configuration, launch record, run archives and safety checks; keys are posted to the game window only.</summary>
 public static class Probe
 {
-    public const string GameHash = "b671f8249422862bf557d00aab2f4bb671ed4515cc10ad8a8a9decad84516180";
+    internal const string GameHash = "b671f8249422862bf557d00aab2f4bb671ed4515cc10ad8a8a9decad84516180";
     const uint GameImageSize = 68988928;
     static readonly string[] ProbeOutputs = {
         "synchronized-diagnostics.jsonl", "native-grab-decisions.jsonl",

@@ -145,6 +145,32 @@ public sealed class Env
     public static bool VcRuntime() => new[] { "msvcp140.dll", "msvcp140_2.dll", "vcruntime140.dll", "vcruntime140_1.dll" }
         .All(f => File.Exists(Path.Combine(Environment.SystemDirectory, f)));
 
+    static readonly object buildLock = new();
+    static (string exe, long len, DateTime written, bool ok)? buildCache;
+
+    /// <summary>True when Dishonored2.exe in gameDir is the build this mod supports (SHA-256 equals Probe.GameHash). The ~100 MB hash is
+    /// computed once per exe path + length + last-write time; RunChecks runs on a worker thread (RefreshChecks), but the art-import
+    /// progress callback also calls it on the UI thread, where only a cache hit is expected. An unreadable exe counts as not supported.</summary>
+    public static bool GameBuildSupported(string? gameDir)
+    {
+        if (gameDir == null) return false;
+        try
+        {
+            var exe = Path.Combine(gameDir, "Dishonored2.exe");
+            var fi = new FileInfo(exe);
+            if (!fi.Exists) return false;
+            lock (buildLock)
+            {
+                if (buildCache is { } c && c.exe == fi.FullName && c.len == fi.Length && c.written == fi.LastWriteTimeUtc) return c.ok;
+                var ok = string.Equals(ModHome.Sha256(exe), Probe.GameHash, StringComparison.OrdinalIgnoreCase);
+                buildCache = (fi.FullName, fi.Length, fi.LastWriteTimeUtc, ok);
+                return ok;
+            }
+        }
+        catch (IOException) { return false; }
+        catch (UnauthorizedAccessException) { return false; }
+    }
+
     /// <summary>artState: null when the art is present, otherwise what to show (importing progress or why it is missing).</summary>
     public List<Check> RunChecks(string? artState)
     {
@@ -152,6 +178,10 @@ public sealed class Env
         var gd = FindGameDir();
         l.Add(new("Dishonored 2", gd != null, gd ?? "not found in any Steam library",
             "Install Dishonored 2 through Steam (app 403640). If it is installed, start Steam once so libraryfolders.vdf is written."));
+        var supported = GameBuildSupported(gd);
+        l.Add(new("Dishonored 2 (supported build)", supported,
+            gd == null ? "game not found" : supported ? "matches the pinned build" : "Game was updated by Steam; this mod build supports only the pinned version.",
+            "Use a mod build made for the installed game version, or verify the game files in Steam (Properties > Installed Files) to restore the supported build."));
         var rt = OpenXrRuntime();
         var vd = rt != null && (rt.Contains("vdxr", StringComparison.OrdinalIgnoreCase) || rt.Contains("VirtualDesktop", StringComparison.OrdinalIgnoreCase));
         l.Add(new("OpenXR runtime", rt != null, rt == null ? "no active runtime" : (vd ? "Virtual Desktop (VDXR)" : rt),
@@ -171,7 +201,7 @@ public sealed class Env
         return l;
     }
 
-    public bool Ready(Candidate? c) => c != null && FindGameDir() != null && (File.Exists(BundledLoader) || File.Exists(SteamVrLoader)) && VcRuntime();
+    public bool Ready(Candidate? c) => c != null && GameBuildSupported(FindGameDir()) && (File.Exists(BundledLoader) || File.Exists(SteamVrLoader)) && VcRuntime();
 
     public static Process? Game() => Process.GetProcessesByName("Dishonored2").FirstOrDefault();
 
