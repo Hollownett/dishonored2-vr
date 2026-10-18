@@ -577,6 +577,20 @@ std::vector<Scenario> scenarios() {
     // free_swat_*: the swat with no wall. At 2 m/s the drawn hand must not trail the run without the clamp-depth latch by more than 2 cm (I3); from 2.5 m/s
     // the latch toggles at most twice; up to 2.5 m/s the drawn hand also never moves more than 5 cm further in a frame than the tracked one (no flicker; above
     // that the latched hand catching up with the fleeing bottle's face in one frame is accepted and reported).
+    // Every judged wall scenario also exists with the hand sampled every frame on time, as a headset controller reports it (Task 6 R1, Task 6b), and
+    // the pinned-bottle ones with a heavier bottle. A heavy prop barely moves and holds the hand back (G4), so the clamp holds larger shifts.
+    const auto smooth_variant=[](Scenario s) {
+        s.name+="_smooth";s.smooth=true;s.step=0;s.timing=0;
+        s.title+=" (smooth tracking: every frame, on time)";
+        s.desc+=" Smooth variant: the hand is sampled every frame on time, so its speed reads true and the launch is judged (Task 6 R1); G1 is judged here too (Task 6b).";
+        return s;
+    };
+    const auto mass_variant=[](Scenario s,double kg) {
+        s.name+=fmt("_%.0fkg",kg);s.mass=kg;
+        s.title+=fmt(" (the bottle weighs %.0f kg)",kg);
+        s.desc+=fmt(" The bottle weighs %.0f kg instead of 1.",kg);
+        return s;
+    };
     struct Push {double speed;int kind;double angle{};};   // kind 0: wall, 1: wall + descending, 2: free, 3: wall + rising (angle > 0) or descending at angle degrees
     std::vector<Push> pushes{Push{.1,0},Push{.146,0},Push{.5,0},Push{1.,0},Push{1.5,0},Push{2.,0},Push{3.,0},
                              Push{.1,1},Push{.5,1},Push{1.5,1},Push{3.,1},Push{2.,2},Push{4.,2},Push{5.,2},Push{2.5,2},Push{3.,2},Push{3.5,2},Push{4.5,2}};
@@ -627,19 +641,15 @@ std::vector<Scenario> scenarios() {
             // cannot see the wall (no prop cast in phase 1) and the engine's solver stops a real prop: info there
             auto over=below("the bottle stays within the wall (lab: 1 cm over)",std::isnan(m.wall_over)?0.:m.wall_over,.01,100,"cm");over.info=speed!=.146 || push.kind!=0;
             auto g1=below("the drawn hand stops short of the wall: its farthest proxy past the wall plane <= 1 cm",m.hand_over_wall,.01,100,"cm");
-            // Smooth input finds two G1 failures that do not depend on this task's caps (the same with both off): the descending 75-degree push at 0.146 m/s
-            // (8.31 cm) and the plain push at 0.1 m/s (3.77 cm). The smooth-input G1 matrix is Task 6b's; G1 stays judged on the stepped originals.
-            const bool task6b=sc.smooth && ((angled && push.angle==-75. && speed==.146) || (push.kind==0 && speed==.1));
-            if(task6b) {g1.info=true;g1.name+=" (smooth input: pre-existing, independent of the push caps; Task 6b's smooth-input G1 matrix)";}
             std::vector<Check> checks{over,overlap,g1,launch};
             if(angled) checks.push_back(below("the leading probes switch to another probe at most twice",m.probe_flips,2,1,"flips"));
             return checks;};
         all.push_back(s);
         // R1: the same push with the hand sampled every frame on time (a headset controller): the launch check is judged here.
-        auto smooth=s;smooth.name+="_smooth";smooth.smooth=true;smooth.step=0;smooth.timing=0;
-        smooth.title+=" (smooth tracking: every frame, on time)";
-        smooth.desc+=" Smooth variant: the hand is sampled every frame on time, so its speed reads true and the launch is judged (Task 6 R1).";
+        const auto smooth=smooth_variant(s);
         all.push_back(smooth);
+        // Task 6b: a heavier prop holds the hand back harder and moves less, so the clamp's planes and the meet work at larger shifts (G1 judged).
+        if(push.kind==0 && (speed==.146 || speed==.5 || speed==1.5)) for(const double kg:{5.,11.}) all.push_back(mass_variant(smooth,kg));
     }
     // G1 along a bare wall (fix round 5): the live hand, 50 cm to the side of the bottle, presses into the wall at 0.5 m/s (the tracked grip ends 3.8 cm past it,
     // the fingers 17 cm) and slides 0.5 m along it, then rests 2 s. wall_slide_negy_*: toward -y, away from the thumb (the side probes lead the slide; at
@@ -660,6 +670,7 @@ std::vector<Scenario> scenarios() {
             below("the drawn hand stops short of the wall: its farthest proxy past the wall plane <= 1 cm",m.hand_over_wall,.01,100,"cm"),
             below("after the slide stops it stays out for 2 s: its farthest proxy past the wall plane <= 1 cm",m.hand_over_wall_rest,.01,100,"cm")};};
         all.push_back(s);
+        all.push_back(smooth_variant(s));
     }
     struct Wobble {const char* name;double radius,hz;int plane;bool bottle;};
     for(const Wobble w:{Wobble{"wall_wobble_xy_3cm_1hz",.03,1,0,false},Wobble{"wall_wobble_xy_8cm_2hz",.08,2,0,false},Wobble{"wall_wobble_yz_5cm_1hz",.05,1,2,false},
@@ -676,6 +687,9 @@ std::vector<Scenario> scenarios() {
         s.judge=[](const Scenario&,const Metrics& m,const HandContactConfig&) {return std::vector<Check>{
             below("the drawn hand stops short of the wall: its farthest proxy past the wall plane <= 1 cm",m.hand_over_wall,.01,100,"cm")};};
         all.push_back(s);
+        const auto smooth=smooth_variant(s);
+        all.push_back(smooth);
+        if(w.bottle) for(const double kg:{5.,11.}) all.push_back(mass_variant(smooth,kg));
     }
     {   // a static clamp shoves the drawn hand into the bottle at the onset (sim v509 s2b/s2c)
         auto s=base("sweep_live2_glitch","Sideways sweep, a static obstacle's clamp shoves the drawn hand into the bottle for 60 ms at the onset","The sweep_live2 sweep; 0.19 s after the first write the cast reports a hit that is not the bottle (entity 0) and holds the drawn hand 9.4 cm along +y, into the bottle, easing out at 1.5 m/s: the drawn proxies are 6 cm inside it for a few services while the tracked hand is where it was (sim v509: one write of 0.49-0.54 m/s).");
@@ -837,6 +851,7 @@ int run_all(int argc,char** argv) {
     const bool smooth=env_or("PUSH_LAB_SMOOTH",0)!=0;   // PUSH_LAB_SMOOTH=1: every scenario's hand is sampled every frame on time (no 30 ms steps, no timing jitter)
     for(auto s:scenarios()) {
         if(smooth) {s.step=0;s.timing=0;}
+        if(const double kg=env_or("PUSH_LAB_MASS",0);kg>0 && s.cast) s.mass=kg;   // PUSH_LAB_MASS=kg: every cast scenario's prop weighs this much (exploration; the judged mass variants are scenarios)
         auto run=simulate(s,geometry,cfg);
         run.metrics=measure(s,run.frames);
         if(s.trail_check) {

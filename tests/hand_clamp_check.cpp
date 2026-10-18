@@ -1236,6 +1236,83 @@ void level_frame_and_hit_conversion() {
 }
 } // namespace
 
+// Task 6b, cause A: two planes that disagree (a loose prop's face the wall's squeezes the hand against) leave the hand at the last one
+// projected. The wall does not move; the prop does. The loose faces are projected first and a wall last, whatever order they were hit in.
+// Fed by hand: the wall first, the prop's face second (the order that used to leave the hand 1 cm in the wall).
+void walls_win_over_loose_faces() {
+    HandClamp c;
+    const auto basis=pose_at({}).basis;
+    ClampProbe front{{.12,0,0},.03},back{{-.10,0,0},.03};   // an open hand 25 cm deep along x
+    const auto frame=[&](unsigned i,Vec3 target,std::optional<ClampHit> palm,std::optional<ClampHit> tip) {
+        ClampInput in{};
+        in.now=i*dt;in.epoch=1;in.root=level_frame({0,0,0},{1,0,0});in.target=pose_at(target);in.chest={0,0,1};
+        in.tip=back;in.tip_enabled=true;in.palm_hit=palm;in.tip_hit=tip;
+        in.hand[0]=front;in.hand[1]=back;in.hand_count=2;
+        in.loose[0]=30;in.loose_count=1;
+        const auto o=c.update(0,in);c.note_drawn(0,in.root,o.drawn.position);return o;
+    };
+    // A wall at x = 1 (entity 7, facing -x) and the back of a prop at x = 0.8 (entity 30, loose, facing +x): the 20 cm between them is
+    // narrower than the 25 cm hand, so no place keeps it out of both.
+    const ClampHit wall{{1,0,.5},{-1,0,0},7,3,false,true},prop{{.8,0,.5},{1,0,0},30,6,false,true};
+    frame(0,{.9,0,.5},std::nullopt,std::nullopt);
+    frame(1,{.9,0,.5},std::nullopt,std::nullopt);
+    ClampOutput o{};
+    for(unsigned i=2;i<6;++i) o=frame(i,{.9,0,.5},i==2?std::optional<ClampHit>{wall}:std::nullopt,i>=3?std::optional<ClampHit>{prop}:std::nullopt);   // a loose face is hit every frame
+    std::array<ClampHit,HandClamp::max_held_planes> held{};
+    CHECK(c.held_planes(0,held)==2 && held[0].entity==7 && held[1].entity==30);   // the wall first, the prop's face after it
+    CHECK(o.drawn.position.x<=1-.12-.03-.005+1e-9);   // the front of the hand is out of the wall; the prop's face is the one that gives
+    CHECK(close_to(c.keep_out(0,basis,{.9,0,.5},std::nullopt),{1-.12-.03-.005,0,.5},1e-9));
+}
+
+// Task 6b, cause C: a full plane list drops a loose prop's oldest face, not the wall. A bottle's faces were hit again every frame and
+// the wall, hit rarely (behind the bottle), was the oldest: the wall went and the hand followed the bottle through it.
+void full_planes_keep_the_wall() {
+    HandClamp c;
+    const auto face=[](double angle) {return ClampHit{{.1,.1*angle,.5},{-std::cos(angle),std::sin(angle),0},30,6,false,true};};
+    const auto frame=[&](unsigned i,std::optional<ClampHit> palm,std::optional<ClampHit> tip,std::optional<ClampHit> wall_tip) {
+        ClampInput in{};
+        in.now=i*dt;in.epoch=1;in.root=level_frame({0,0,0},{1,0,0});in.target=pose_at({.5,0,.5});in.chest={0,0,1};
+        in.tip={{.10,0,0},.02};in.tip_enabled=true;in.wall_tip={{.12,0,.04},.03};
+        in.palm_hit=palm;in.tip_hit=tip;in.wall_tip_hit=wall_tip;in.loose[0]=30;in.loose_count=1;
+        const auto o=c.update(0,in);c.note_drawn(0,in.root,o.drawn.position);return o;
+    };
+    frame(0,std::nullopt,std::nullopt,std::nullopt);frame(1,std::nullopt,std::nullopt,std::nullopt);
+    frame(2,ClampHit{{1,0,.5},{-1,0,0},7,3,false,true},std::nullopt,std::nullopt);   // the wall, hit once
+    frame(3,face(.3),face(.5),face(.7));                                             // three faces of a loose prop: the list is full
+    frame(4,face(.9),std::nullopt,std::nullopt);                                    // a fourth: one of the loose ones goes
+    std::array<ClampHit,HandClamp::max_held_planes> held{};
+    const auto n=c.held_planes(0,held);
+    CHECK(n==c.config().max_planes);
+    bool wall=false;
+    for(std::size_t i=0;i<n;++i) wall=wall || held[i].entity==7;
+    CHECK(wall);
+}
+
+// Task 6b, cause D: the wall tip and the exclusion probe sweep look_ahead past the target along the horizontal motion. The meet draws
+// the hand out of a prop by up to 8 cm a frame after the sweeps were posted, and a plane that disagrees with another pushes it
+// along its own normal: a wall 5 cm past the swept tip was met by no sweep until the drawn hand was in it.
+void wall_tip_looks_ahead() {
+    for(const double look:{.10,0.}) {
+        HandClampConfig cfg;cfg.look_ahead=look;
+        Rig r(cfg);r.tip={{.10,0,0},.02};r.tip_enabled=true;r.wall_tip={{.12,0,.04},.03};
+        r.step({.5,0,.5});
+        double extra=-1;bool wall=false;
+        Vec3 kicked{};
+        r.move_x({.5,0,.5},.80,.5,[&](const ClampOutput& o,Vec3 p) {
+            if(!o.wall_tip_sweep.valid || !o.tip_sweep.valid || p.x<.7 || p.x>.795) return;   // while it moves: the last, shorter step reads no motion
+            extra=(o.wall_tip_sweep.to.x-o.tip_sweep.to.x)-(.12-.10);   // the probes' own x offsets taken out: what is left is the look
+            std::array<ClampHit,HandClamp::max_held_planes> held{};
+            const auto n=r.clamp.held_planes(0,held);
+            wall=false;for(std::size_t i=0;i<n;++i) wall=wall || held[i].entity==7;
+            kicked=r.clamp.keep_out(0,pose_at(p).basis,p+Vec3{.08,0,0},std::nullopt);   // the meet's kick: 8 cm along the motion
+        });
+        CHECK(extra>=0 && std::abs(extra-look)<1e-9);
+        // The tracked hand's wall tip is 5-6 cm short of the wall at x = 1; the kick puts it 2-3 cm into it.
+        if(look>0) {CHECK(wall);CHECK(std::abs(kicked.x-(1-.12-.03-.005))<1e-6);}
+        else {CHECK(!wall);CHECK(kicked.x>.87);}   // nothing knew of the wall: the kick stands
+    }
+}
+
 int main() {
     // Corner, slide, hold, jump and walk tests run in every posting mode, with the same bounds.
     for(g_mode=0;g_mode<3;++g_mode) {
@@ -1295,5 +1372,8 @@ int main() {
     wall_tip_sweeps_past_the_pressed_prop();
     snap_timer_ignores_caller_additions();
     whole_hand_slides_along_a_wall();
+    walls_win_over_loose_faces();
+    full_planes_keep_the_wall();
+    wall_tip_looks_ahead();
     std::puts("PASS");
 }
