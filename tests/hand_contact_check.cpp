@@ -452,6 +452,19 @@ int main() {
         // the cap counts from what the prop already does along the push: a box moving at 0.1 m/s may reach 0.1 + 0.278
         in.dt=1./90;const auto moving=hand_contact_s(palm,shape,{3,0,0},{.1,0,0},8,cfg,in);
         assert(moving.push && moving.capped && std::abs(moving.velocity.x-(.1+200./90/8))<1e-9);
+        // a prop's first write is capped too (review I2): the service's dt for a prop it never wrote is one nominal frame, never 0
+        const PropDrag fresh;assert(NativeHandContact::write_dt(fresh,123.)==1./90);
+        PropDrag used;used.wrote({},10.);
+        assert(std::abs(NativeHandContact::write_dt(used,10.+1./90)-1./90)<1e-12 && NativeHandContact::write_dt(used,10.001)==1./240 && NativeHandContact::write_dt(used,15.)==1./30);
+        for(const double kg:{5.,11.}) { // a 3 m/s swat's first write onto a resting 5 kg / 11 kg prop: 200/90/5 = 0.444, 200/90/11 = 0.202 m/s
+            ContactInput first;first.dt=NativeHandContact::write_dt(fresh,0.);
+            const auto r=hand_contact_s(palm,shape,{3,0,0},{},kg,cfg,first);
+            std::cout<<"first write: "<<kg<<" kg prop, 3 m/s swat: "<<length(r.velocity)<<" m/s (cap "<<200./90/kg<<")\n";
+            assert(r.push && r.capped && length(r.velocity)<=200./90/kg+1e-9);
+        }
+        // the dv cap is in game time too (review M3): at time factor 0.5 one write adds half as much
+        ContactInput half_time;half_time.dt=1./90;half_time.time_factor=.5;
+        const auto slow=hand_contact_s(palm,shape,{3,0,0},{},8,cfg,half_time);assert(slow.push && slow.capped && std::abs(length(slow.velocity)-.5*200./90/8)<1e-9);
     }
     // bottle_unchanged: the carry loop's 0.5 kg slow ride writes exactly the same velocities with dt = 1/90 as with dt = 0
     {
@@ -484,6 +497,8 @@ int main() {
         std::cout<<"time_factor_scales: "<<length(full.velocity)<<" m/s at 1, "<<length(half.velocity)<<" m/s at 0.5\n";
         assert(ContactInput{}.time_factor==1. && ContactInput{}.dt==0.);
         assert(full.push && half.push && std::abs(length(half.velocity)-.5*length(full.velocity))<1e-9 && length(full.velocity)>.3);
+        // a time factor above 1 counts as 1 (review M3): a push never gets stronger than today
+        in.time_factor=2.;const auto fast=hand_contact_s(palm,shape,{.3,0,0},{},.5,cfg,in);assert(fast.push && length(fast.velocity-full.velocity)==0);
     }
     // bad_time_factor_writes_nothing: a non-finite or non-positive time factor, a non-finite or negative dt: no write, no spin
     {
@@ -520,6 +535,11 @@ int main() {
         // the hand's speed ALONG the push counts: a hand descending at 0.6 m/s while it moves 1.5 m/s sideways swats at 1.5 (+ the margin)
         const auto descending=hand_contact_s(deep,shape,{1.5,0,-.6},{},1.,cfg);
         assert(descending.push && std::abs(descending.velocity.x-1.8)<1e-9 && std::abs(descending.velocity.z)<1e-12);
+        // a hand rising at 75 degrees at 3 m/s moves 0.776 m/s along the (horizontal) push: the write stops at 0.776 + 0.3, not at its 3 m/s + 0.3 (review M2)
+        const double a75=75*3.14159265358979323846/180;
+        const auto rising=hand_contact_s(deep,shape,{3*std::cos(a75),0,3*std::sin(a75)},{},1.,cfg),rising_loose=hand_contact_s(deep,shape,{3*std::cos(a75),0,3*std::sin(a75)},{},1.,loose);
+        std::cout<<"launch_cap: hand rising at 75 degrees, 3 m/s: writes "<<length(rising.velocity)<<" m/s ("<<length(rising_loose.velocity)<<" without the cap)\n";
+        assert(rising.push && std::abs(length(rising.velocity)-(3*std::cos(a75)+.3))<1e-9 && length(rising_loose.velocity)>3*std::cos(a75)+.35);
         // the cap is in game time: the time factor scales it with the push
         ContactInput slowmo;slowmo.time_factor=.5;
         const auto mo=hand_contact_s(deep,shape,{2,0,0},{},1.,cfg,slowmo);assert(mo.push && std::abs(length(mo.velocity)-1.15)<1e-9);

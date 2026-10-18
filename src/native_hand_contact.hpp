@@ -83,9 +83,15 @@ public:
     // (held off by the cast again)
     std::atomic<std::uint64_t> meets{},meet_shifts{},meet_latches{};
     std::atomic<std::uint64_t> keepouts{}; // loose props skipped because they touch the player's body or lie under it (set_player)
-    std::atomic<std::uint64_t> capped_writes{}; // velocity writes the mass-aware cap bound (HandContactConfig::push_force_n * dt / mass, C5)
+    std::array<std::atomic<std::uint64_t>,2> capped_writes{}; // per side: velocity writes the mass-aware cap bound for that hand (push_force_n * dt / mass, C5)
     // The engine's time factor for pushes (C13): not read from the engine in phase 1 (its source is unverified, research open item 8), always 1.
-    static constexpr double time_factor=1.,write_dt_min=1./240,write_dt_max=1./30; // ContactInput::dt: the seconds since the prop's last write, clamped (0: a first write)
+    static constexpr double time_factor=1.,write_dt_min=1./240,write_dt_max=1./30,first_write_dt=1./90;
+    // ContactInput::dt for a prop: the seconds since its last write, clamped; a first write (a new candidate: PropDrag starts fresh each approach) counts one
+    // nominal frame, so no write is ever uncapped (C5). The push lab uses the same rule.
+    static double write_dt(const PropDrag& drag,double now) {
+        const double since=drag.since_write(now);
+        return since>0?std::clamp(since,write_dt_min,write_dt_max):first_write_dt;
+    }
     bool inline_discovery=true; // true: the registry scan runs inside service() (the unit tests); false: discover() runs it (native_grab.hpp)
     static constexpr std::uint64_t latch_services=150; // ~2 s of services with no discover() call at all: nobody calls it, the service scans after all
     HandContactConfig config{};
@@ -335,15 +341,15 @@ public:
             if(n.mass>0 && n.mass<config.heavy_kg && looses<loose.size()) loose[looses++]=n.entity; // light and loose, pinned or not: the clamp never snaps on it
             rig::HeldShape shape;
             try {shape=prop_shape(*n.body);} catch(const std::invalid_argument&) {continue;}
-            Vec3 velocity=n.velocity,spin{};bool pushed=false,capped=false;
-            const double since=n.drag.since_write(now),write_dt=since>0?std::clamp(since,write_dt_min,write_dt_max):0.;
+            Vec3 velocity=n.velocity,spin{};bool pushed=false;std::array<bool,2> capped{};
+            const double dt=write_dt(n.drag,now);
             for(unsigned side=0;side<2;++side) {
                 if(!hands[side].active) continue;
                 const auto palm=hands[side].proxies[0].centre;
                 if(length(n.body->bounds->closest(palm)-palm)>hand_span) continue;
                 ContactInput input;input.engaged=n.engaged_until>now_ms;input.lag=hands[side].lag;input.held=hands[side].held_by && hands[side].held_by==n.entity;if(input.held) ++cast_held;input.lag_known=lag_owned[side];input.friction=n.drag.compensation();
                 input.trim=n.drag.trim();input.age=input.engaged?now-n.engaged_at:0.;
-                input.blocked=n.drag.blocked(now);input.stalled=n.drag.stalled(now);input.basis=n.body->pose.basis;input.dt=write_dt;input.time_factor=time_factor;
+                input.blocked=n.drag.blocked(now);input.stalled=n.drag.stalled(now);input.basis=n.body->pose.basis;input.dt=dt;input.time_factor=time_factor;
                 const auto result=hand_contact(hands[side].proxies,shape,hands[side].velocity,velocity,n.mass,config,input);
                 if(met && length(result.outward)>length(outward[side])) {outward[side]=result.outward;outward_entity[side]=n.entity;}
                 if(result.touching) ++touches;
@@ -351,14 +357,14 @@ public:
                 n.drag.steer(result,now);
                 if(result.push || result.turn) { // a velocity to write, or only the uprighting spin (the velocity stays)
                     log_row(now_ms,side,*n.body,n.inverse_mass,n.mass,result,length(hands[side].velocity),length(velocity),input,!result.push); // every write, spin-only ones too
-                    velocity=result.velocity;spin=result.spin;pushed=true;capped=result.capped;
+                    velocity=result.velocity;spin=result.spin;pushed=true;capped[side]=result.capped;
                 }
             }
             if(pushed && writes<max_writes) {
                 const std::array<float,3> linear{static_cast<float>(velocity.x),static_cast<float>(velocity.y),static_cast<float>(velocity.z)};
                 const std::array<float,3> turn{static_cast<float>(spin.x),static_cast<float>(spin.y),static_cast<float>(spin.z)};
                 const auto w0=std::chrono::steady_clock::now();
-                write(world,n.body->handle,linear,turn);++writes;++pushes;if(capped) ++capped_writes;n.velocity=velocity;n.drag.wrote(velocity,now);
+                write(world,n.body->handle,linear,turn);++writes;++pushes;for(unsigned side=0;side<2;++side) if(capped[side]) ++capped_writes[side];n.velocity=velocity;n.drag.wrote(velocity,now);
                 const auto spent=micros(std::chrono::steady_clock::now()-w0);write_us+=spent;write_peak=std::max(write_peak,spent);
                 if(spent>50) ++slow_writes;
                 auto top=write_max_us.load();while(spent>top && !write_max_us.compare_exchange_weak(top,spent)) {}

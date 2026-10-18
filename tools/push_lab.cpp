@@ -296,7 +296,7 @@ Run simulate(const Scenario& s,const rig::HandGeometry& geometry,const HandConta
         if(s.engine) drag.observe(v,t);
         ContactInput input;input.engaged=engaged;input.friction=drag.compensation();input.basis=body.pose.basis;input.blocked=drag.blocked(t);input.stalled=drag.stalled(t);
         input.lag=raw-drawn;
-        {const double since=drag.since_write(t);input.dt=since>0?std::clamp(since,NativeHandContact::write_dt_min,NativeHandContact::write_dt_max):0.;} // as the service: 0 for a first write
+        input.dt=NativeHandContact::write_dt(drag,t); // as the service: the seconds since the last write, a first write one frame (1/90 s)
 #ifndef LAB_NO_HELD
         input.held=s.cast && glitch_size<=0 && meet_r.held_by==1; // the drawn hand is back from the tracked one for the prop (not the wall, not the glitch)
 #endif
@@ -614,7 +614,9 @@ std::vector<Scenario> scenarios() {
             // The launch (Task 6 rulings R1, R3): a push leaves the prop at most 0.3 m/s faster than the hand, once the engine has taken off the friction a ride's
             // write gives back. Judged on the smooth variants only: the 30 ms stepped hand moves 0.4 cm (0.146 m/s) to 6 cm (2 m/s) inside one frame, its speed
             // reads up to 0.19 / 3.2 m/s, and a push from it cannot be held to the scripted speed (task-6-report.md).
-            auto launch=below("never launched: written speed less the friction it gives back <= hand + 0.3 m/s (judged on the smooth variant)",m.launch,ws+.3+1e-9,1,"m/s");
+            // The hand's speed along the push (+x, toward the wall; the push is horizontal): an angled hand's forward part, ws cos(angle); a descending one's ws.
+            const double along=angled?ws*std::cos(push.angle*kPi/180):ws;
+            auto launch=below("never launched: written speed less the friction it gives back <= the hand's speed along the push + 0.3 m/s (judged on the smooth variant)",m.launch,along+.3+1e-9,1,"m/s");
             launch.info=!sc.smooth;
             if(free && speed==2.) return std::vector<Check>{below("the drawn hand trails the run without the clamp-depth latch by at most 2 cm (I3)",m.trail,.02,100,"cm"),jump,launch};
             if(free) {

@@ -99,8 +99,9 @@ struct ContactInput {
     bool blocked{};      // the prop has not followed its last writes (PropDrag::blocked): the hand is pressing it into something
     bool stalled{};      // its last three writes moved nothing (PropDrag::stalled): a resting hand's ease cannot overcome the friction
     std::array<Vec3,3> basis{{{1,0,0},{0,1,0},{0,0,1}}}; // the prop's axes in the world
-    double dt{};         // seconds since this prop's last write (the service clamps it to [1/240, 1/30]); 0: a first write, not capped (HandContactConfig::push_force_n)
-    double time_factor=1.; // the engine's time scale: multiplies the push. Not read from the engine in phase 1 (C13): always 1. Not finite or not positive: no write
+    double dt{};         // seconds since this prop's last write (NativeHandContact::write_dt: clamped to [1/240, 1/30], 1/90 for a first write); 0: not capped (unit tests)
+    double time_factor=1.; // the engine's time scale: multiplies the push, its launch cap and its dv cap. Not read from the engine in phase 1 (C13): always 1.
+                           // Above 1 it counts as 1 (a push never gets stronger than today, deviation 10); not finite or not positive: no write
 };
 
 // The prop's deceleration while the hand drives it (table friction), from the velocity a write left it with and the velocity found at
@@ -324,7 +325,8 @@ inline HandContact hand_contact(const HandProxies& proxies,const rig::HeldShape&
         goal=away*ease;
         if(lifting && moving) goal.z+=std::max(hand_velocity.z,0.);
     }
-    goal=goal*gain*in.time_factor;
+    const double time_factor=std::min(in.time_factor,1.); // [0, 1]: slow motion weakens a push, nothing strengthens it
+    goal=goal*gain*time_factor;
     const double cap=swat?cfg.swat_speed:cfg.max_speed,size=length(goal);
     if(size<1e-9) return out;
     if(size>cap) goal=goal*(cap/size);
@@ -334,9 +336,9 @@ inline HandContact hand_contact(const HandProxies& proxies,const rig::HeldShape&
     if(!swat && in.age<cfg.ramp_time) target=std::min(target,std::max(current,0.)+cfg.write_step+std::max(0.,in.friction+in.trim));
     // Never faster than the hand moves along the push + launch_margin, once the engine has taken the step's friction off (what a ride's write gives back
     // for it, as the ramp above). In game time.
-    target=std::min(target,(std::max(0.,dot(hand_velocity,direction))+cfg.launch_margin+(swat?0.:std::max(0.,in.friction+in.trim)))*in.time_factor);
-    if(in.dt>0) { // mass-aware: one write adds at most F dt / m
-        const double cap_target=std::max(current,0.)+cfg.push_force_n*in.dt/mass;
+    target=std::min(target,(std::max(0.,dot(hand_velocity,direction))+cfg.launch_margin+(swat?0.:std::max(0.,in.friction+in.trim)))*time_factor);
+    if(in.dt>0) { // mass-aware: one write adds at most F dt / m, dt in game time (the time factor's share of the real seconds)
+        const double cap_target=std::max(current,0.)+cfg.push_force_n*time_factor*in.dt/mass;
         if(target>cap_target) {target=cap_target;out.capped=true;}
     }
     if(target-current<cfg.min_gain) {out.capped=false;return out;} // nothing written: the cap bound no write
