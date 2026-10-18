@@ -9,6 +9,10 @@ Two pieces:
 
 Windows is unaffected: nothing under `src/`, `launcher/` or `tools/` changed.
 
+> **Status (2026-10-18): not yet tested in a headset.** The proxy and CLI pass their automated tests on Linux (unit tests, and a
+> Wine-hosted check with a stand-in game and a fake mod). A real Dishonored 2 + Proton + SteamVR + Steam Link session has
+> **not** been run yet. Use the checklist in section 8 for the first run and report what you see.
+
 Out of scope for this version: FSR 4, Virtual Desktop, WiVRn/ALVR, flatpak Steam, and the WinForms launcher under Wine.
 
 ## 2. Requirements
@@ -92,7 +96,7 @@ If Steam is not in the default location, pass `--steam-root <dir>` before the co
 
    The game keeps running flat.
 
-Alt-tabbing is safe. At launch the proxy appends `win_pauseOnFocusLoss "0"` and `in_controlInactiveWindow "1"` to `dishonored2Config.cfg` if they are missing, so the game does not pause when it loses focus. If the lines were only just added (the log shows `focus cvars appended`), the game may only apply them from the next launch.
+Alt-tabbing is safe. At launch the proxy appends `win_pauseOnFocusLoss "0"` and `in_controlInactiveWindow "1"` to `dishonored2Config.cfg` if they are missing, so the game does not pause when it loses focus. If the lines were only just added (the log shows `focus cvars appended`), the game may only apply them from the next launch. If the log shows `dishonored2Config.cfg not found`, run the game once without VR so it creates its config, then launch again.
 
 `start`, `stop` and `doctor` take `--mod-home <dir>` if the mod home is not the default.
 
@@ -137,3 +141,16 @@ python3 linux/tests/proxy_check/run_proxy_check.py -v
 ```
 
 The second one runs under Wine in the harness prefix. Never run it at the same time as `tools/linux/run_build_cmd.py`.
+
+## 8. First headset run checklist (manual)
+
+Nobody has done this yet. It is the acceptance test for the Linux path. Record the result for each step.
+
+1. `doctor` shows all 12 PASS with SteamVR running and the Quest connected through Steam Link.
+2. Launch Dishonored 2 from Steam. `linux-proxy.log` shows `game window found`.
+3. At the title screen, wait for `settle timeout` or run `d2vr-linux start`. The log shows `StartProbe begin`, and `artifacts/xr-live-status.json` updates about once a second.
+4. The headset shows the game image in both eyes, with no LUID-mismatch error in `dxgi-probe-failure.txt`.
+5. Head tracking moves the view. Both Touch controllers track, and snap turn works.
+6. Load a save. Gameplay stays responsive after alt-tabbing to a terminal and back. If the game pauses on focus loss in the very first session, note it: the focus settings are written at launch and may only take effect from the next launch.
+7. `d2vr-linux stop`: the log shows `StopProbe returned 0` and then `StartProbe returned 0`. The game keeps running flat.
+8. Quit the game, then run `d2vr-linux uninstall`. The game launches vanilla. Remove `dinput8=n,b` from the launch options.
