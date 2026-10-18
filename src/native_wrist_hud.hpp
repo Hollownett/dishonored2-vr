@@ -60,7 +60,7 @@ template<class Read> void wrist_hud_diagnostic_raw(Read& read,WristHudDiagnostic
 class WristHudDrawIdentity {
     struct Entry {std::uintptr_t iggy{};UINT64 tick{};};
     inline static std::mutex mutex_;
-    inline static std::array<Entry,16> entries_{};
+    static std::array<Entry,16> entries_; // defined after the class: clang-cl needs Entry's member initializers complete
 public:
     static void clear() {std::lock_guard<std::mutex> lock(mutex_);entries_={};}
     static void observe(std::uintptr_t iggy,UINT64 tick) {
@@ -78,6 +78,7 @@ public:
         return false;
     }
 };
+inline std::array<WristHudDrawIdentity::Entry,16> WristHudDrawIdentity::entries_{};
 inline WristHudField wrist_hud_caller(std::uintptr_t caller) noexcept {
     return caller==0x6749ba?WristHudField::health:caller==0x6752a8?WristHudField::mana:
         (caller==0x673e19 || caller==0x673ef0)?WristHudField::gadget:caller==0x673e7e?WristHudField::power:WristHudField::none;
@@ -169,7 +170,7 @@ private:
     inline static std::atomic<unsigned> depth_{};
     inline static std::mutex mutex_;
     inline static WristHudSnapshot snapshot_{};
-    inline static Diagnostics diagnostics_{};
+    static Diagnostics diagnostics_; // defined after the class: clang-cl needs Diagnostics' member initializers complete
     inline static constexpr std::array<unsigned char,26> code{0x48,0x89,0x5c,0x24,0x10,0x48,0x89,0x6c,0x24,0x18,0x48,0x89,0x74,0x24,0x20,0x41,0x56,0x48,0x83,0xec,0x30,0x48,0x83,0x79,0x08,0x00};
     static bool matches() noexcept {
         std::array<unsigned char,26> live{};SIZE_T size{};
@@ -241,4 +242,5 @@ public:
         return !depth_ && matches(); // Retain the original trampoline.
     }
 };
+inline NativeWristHud::Diagnostics NativeWristHud::diagnostics_{};
 } // namespace d2vr

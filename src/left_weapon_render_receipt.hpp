@@ -28,7 +28,7 @@ public:
     static_assert(std::is_trivially_copyable_v<Row>);
 private:
     struct Pending {Row row{};NativeLeftWeaponSocketOwner::Diagnostic owner{};bool sampled{};};
-    inline static thread_local std::array<Pending,8> pending_;
+    static thread_local std::array<Pending,8> pending_; // defined after the class: clang-cl needs Pending's member initializers complete
     inline static thread_local unsigned depth_{};
     std::atomic<bool> active_{},drain_failed_{},reconfigurable_{true},write_failed_{};Read read_{};std::uintptr_t base_{};
     std::atomic<std::uint64_t> next_tick_{},attempts_{},calls_{},missing_owner_{},other_binding_{},busy_{},overflow_{},cap_{},dropped_{},written_{};
@@ -232,4 +232,5 @@ public:
         }catch(...){write_failed_=true;active_=false;}
     }
 };
+inline thread_local std::array<LeftWeaponRenderReceipt::Pending,8> LeftWeaponRenderReceipt::pending_;
 }

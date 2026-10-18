@@ -399,8 +399,9 @@ private:
     std::uint64_t holster_receipts_{},holster_retirements_{},holster_gaps_{};
     HipAttempt last_hip_attempt_;
     std::array<std::uint64_t,static_cast<std::size_t>(HipReject::count)> hip_rejections_{};
-    inline static thread_local std::array<WheelCall,8> wheel_calls_{};
+    static thread_local std::array<WheelCall,8> wheel_calls_; // defined after the class: clang-cl needs WheelCall's member initializers complete
     inline static thread_local unsigned wheel_depth_{};
     inline static thread_local unsigned wheel_overflow_{};
 };
+inline thread_local std::array<NativeManualEquipRuntime::WheelCall,8> NativeManualEquipRuntime::wheel_calls_{};
 }

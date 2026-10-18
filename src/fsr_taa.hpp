@@ -45,7 +45,7 @@ private:
     UINT ready_w_{},ready_h_{},render_w_{},render_h_{},context_w_{},context_h_{};float ready_fraction_{1}; // context_*: max render size the FSR contexts/inputs were built for
     DXGI_FORMAT ready_native_format_{DXGI_FORMAT_UNKNOWN};
     std::array<Ref<ID3D11Resource>,2> motion_{}; // upscale mode: this frame's motion vectors per eye (from the TAA dispatch)
-    inline static thread_local Ref<ID3D11Resource> pass_source_{},pass_target_{}; // upscale draw seen in this post-tonemap pass
+    static thread_local Ref<ID3D11Resource> pass_source_,pass_target_; // upscale draw seen in this post-tonemap pass; defined after the class: clang-cl needs Ref's member initializers complete
     std::array<Candidate,4> candidates_{};std::mutex candidate_mutex_;
     std::atomic<UINT> wanted_w_{},wanted_h_{};
     std::atomic<DXGI_FORMAT> wanted_native_format_{DXGI_FORMAT_UNKNOWN};
@@ -475,4 +475,6 @@ private:
     }
 public:
 };
+inline thread_local FsrTaa::Ref<ID3D11Resource> FsrTaa::pass_source_{};
+inline thread_local FsrTaa::Ref<ID3D11Resource> FsrTaa::pass_target_{};
 } // namespace d2vr

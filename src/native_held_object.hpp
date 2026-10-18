@@ -215,7 +215,7 @@ private:
     inline static std::atomic<unsigned> depth_{};
     inline static SRWLOCK publication_lock_=SRWLOCK_INIT;
     inline static std::uint64_t publication_revision_{};inline static bool publication_exhausted_{};
-    inline static Target data_{};
+    static Target data_; // defined after the class: clang-cl needs Target's member initializers complete
     inline static std::atomic<std::uintptr_t> rf_{},throw_entity_{};inline static std::atomic<std::uint64_t> throw_tick_{};
     inline static float throw_v_[3]{};
     inline static std::uintptr_t layer_entity_{};inline static std::uint32_t layer_handle_{},layer_filter_{}; // game thread
@@ -389,4 +389,5 @@ private:
         } __except(EXCEPTION_EXECUTE_HANDLER) {throw_entity_.store(0);}
     }
 };
+inline NativeHeldObject::Target NativeHeldObject::data_{};
 } // namespace d2vr

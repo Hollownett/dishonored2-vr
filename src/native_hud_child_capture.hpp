@@ -39,7 +39,7 @@ private:
         unsigned slot{},eye{};UINT64 serial{};std::uintptr_t node{};
         Observer observer{};std::uint64_t ticket{};
     };
-    inline static thread_local Transaction transaction_;
+    static thread_local Transaction transaction_; // defined after the class: clang-cl needs Transaction's member initializers complete
 public:
     // Parent obtains context ONLY in native1037930 scope from renderer+8,
     // root RTV from renderer+B90. The native getter can be null out of scope.
@@ -119,4 +119,5 @@ public:
     // Invoke only after NativeHudChildDraw::disable has drained native scopes.
     void clear(){for(auto& bank:banks_)bank.clear();for(auto& tracker:completion_)tracker.clear();std::lock_guard<std::mutex> lock(mutex_);owners_={};owner_serials_={};}
 };
+inline thread_local NativeHudChildCapture::Transaction NativeHudChildCapture::transaction_;
 } // namespace d2vr

@@ -151,7 +151,7 @@ class NativeInteractionAim {
         rig::Identity sensor_identity{};
         mutable std::array<Contact,6> contacts{};mutable unsigned contact_count{};mutable bool contacts_overflow{};std::uint64_t ownership_revision{};};
     struct Retrieved {std::uintptr_t data{},world{};unsigned count{};std::uintptr_t preferred{};const Context* scope{};bool ranked{};};
-    inline static thread_local Retrieved retrieved_{};
+    static thread_local Retrieved retrieved_; // defined after the class: clang-cl needs Retrieved's member initializers complete
     inline static NativeInteractionAim* instance_{};
     inline static thread_local const Context* context_{};
     inline static thread_local const NativeLeanQuerySnapshot* lean_context_{};
@@ -590,7 +590,7 @@ class NativeInteractionAim {
     // sweep per finger (finger_ik.hpp: what each finger could touch; one posted per frame, the others' hits persist <=100 ms).
     // 9 and 10: the profile casts (dxgi_probe.cpp profile_step, radius_profile.hpp): across a prop the hand targets, from its two sides.
     inline static constexpr unsigned weapon_slots=11;
-    inline static std::mutex weapon_mutex_;inline static std::array<std::array<WeaponSegment,weapon_slots>,2> weapon_req_{};
+    inline static std::mutex weapon_mutex_;static std::array<std::array<WeaponSegment,weapon_slots>,2> weapon_req_; // defined after the class: clang-cl needs WeaponSegment's member initializers complete
     inline static std::array<std::array<std::optional<WorldTraceHit>,weapon_slots>,2> weapon_hit_{};inline static std::array<std::array<std::uint64_t,weapon_slots>,2> weapon_tick_{};
 public:
     static constexpr unsigned probe_slots=9;   // the finger probes: slots 3-8 (the palm's own and the weapon's come first)
@@ -627,7 +627,7 @@ public:
         NativeMelee::DamageResultObservation damage{};
         bool valid{};
     };
-    inline static SwordContactObservation sword_last_contact_;
+    static SwordContactObservation sword_last_contact_; // defined after the class: clang-cl needs SwordContactObservation's member initializers complete
     static SwordContactObservation sword_contact_observation() {
         std::lock_guard<std::mutex> guard(trace_mutex_);return sword_last_contact_;
     }
@@ -1816,6 +1816,9 @@ public:
     UINT64 lean_lifetime_overflow() const {return lean_lifetime_.overflow();}
     bool lean_lifetime_failed() const {return lean_lifetime_.failed();}
 };
+inline thread_local NativeInteractionAim::Retrieved NativeInteractionAim::retrieved_{};
+inline std::array<std::array<NativeInteractionAim::WeaponSegment,NativeInteractionAim::weapon_slots>,2> NativeInteractionAim::weapon_req_{};
+inline NativeInteractionAim::SwordContactObservation NativeInteractionAim::sword_last_contact_;
 #endif
 } // namespace d2vr
 

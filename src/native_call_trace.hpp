@@ -49,7 +49,9 @@ public:
     }
 private:
     struct Slot {volatile std::uint64_t count{},last_rcx{};std::uintptr_t rva{};void* target{};};
-    inline static std::array<Slot,128> slots_{};inline static std::array<std::uint64_t,128> seen_{};
+    static std::array<Slot,128> slots_; // defined after the class: clang-cl needs Slot's member initializers complete
+    inline static std::array<std::uint64_t,128> seen_{};
     inline static unsigned count_{};inline static unsigned char* thunks_{};inline static std::uint64_t last_poll_{};
 };
+inline std::array<NativeCallTrace::Slot,128> NativeCallTrace::slots_{};
 } // namespace d2vr

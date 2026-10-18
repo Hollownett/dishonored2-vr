@@ -6,6 +6,8 @@
 #include "native_head_query_lifetime.hpp"
 
 namespace d2vr {
+// NativeLeanLifecycle::Ticket. At namespace scope so clang-cl can use its member initializers in the class's default arguments.
+struct NativeLeanLifecycleTicket {unsigned index{};std::uint64_t serial{};std::uint32_t token{},flags{};std::uintptr_t caller{};explicit operator bool()const noexcept{return serial!=0;}};
 // Default-off passive observer. All engine calls here are original hook call-throughs.
 class NativeLeanLifecycle {
 public:
@@ -21,7 +23,7 @@ public:
         "488bc455488da8a8feffff4881ec5002000048c7442440feffffff4889581848",
         "40534883ec3048c7442420feffffff488bd941b001488bd1488d4c2440e8ae7c",
         "48894c240855535657415441564157488bec4883ec4048c745f0feffffff488b"};
-    struct Ticket {unsigned index{};std::uint64_t serial{};std::uint32_t token{},flags{};std::uintptr_t caller{};explicit operator bool()const noexcept{return serial!=0;}};
+    using Ticket=NativeLeanLifecycleTicket;
 private:
     friend struct NativeLeanLifecycleFixture;
     using Pair=void(__fastcall*)(std::uintptr_t,std::uintptr_t);

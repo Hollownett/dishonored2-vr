@@ -83,7 +83,7 @@ public:
     }
 private:
     struct Pending {Row row{};bool sampled{};};
-    inline static thread_local std::array<Pending,64> pending_{};
+    static thread_local std::array<Pending,64> pending_;
     inline static thread_local unsigned depth_{};
     std::uintptr_t base_{};Read read_{};
     std::atomic<bool> active_{},failed_{};
@@ -255,4 +255,5 @@ private:
             <<",\"packet_search_valid\":"<<snapshot.packet_search_valid<<",\"packet_present\":"<<snapshot.packet_present<<'}';
     }
 };
+inline thread_local std::array<NativeAssassinationReceipt::Pending,64> NativeAssassinationReceipt::pending_{};
 }

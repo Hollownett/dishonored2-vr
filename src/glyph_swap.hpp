@@ -32,7 +32,7 @@ class GlyphSwap {
     inline static std::shared_mutex map_mutex_;
     inline static std::unordered_map<ID3D11ShaderResourceView*,Entry> map_; // Empty entry: not a glyph
     inline static std::mutex pending_mutex_;inline static std::array<Ptr<ID3D11ShaderResourceView>,8> pending_{};inline static unsigned pending_count_{};
-    inline static std::mutex process_mutex_;inline static std::array<Job,8> jobs_{};
+    inline static std::mutex process_mutex_;static std::array<Job,8> jobs_; // defined after the class: clang-cl needs Job's member initializers complete
     inline static Ptr<IUnknown> device_identity_,context_identity_;
     inline static Ptr<ID3D11ShaderResourceView> transparent_; // 4x4 all-zero BC7 = fully transparent
     static void reset_owned() {
@@ -222,4 +222,5 @@ public:
         }
     }
 };
+inline std::array<GlyphSwap::Job,8> GlyphSwap::jobs_{};
 } // namespace d2vr

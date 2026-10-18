@@ -181,7 +181,7 @@ public:
         }
     }
 private:
-    inline static std::mutex m_;inline static std::vector<Request> queue_;inline static Copy published_{};
+    inline static std::mutex m_;inline static std::vector<Request> queue_;static Copy published_; // defined after the class: clang-cl needs Copy's member initializers complete
     inline static NativeWeaponVisibility::Snapshot visibility_{};
     inline static std::uint64_t holster_enqueued_{},holster_dropped_{},visibility_tick_{};
     inline static std::atomic<std::uint64_t> holster_serviced_{},holster_returned_{},holster_failed_{};
@@ -264,7 +264,7 @@ private:
     // Other dynamic props have no thrown damage at all: the mod sweeps them for 2.5 s against the guards and applies the
     // game's phys_damage (NPC_HITREACT_BIG) with an amount from the speed.
     struct PropFlight {std::uintptr_t entity{};std::uint32_t id{};Vec3 last{};LARGE_INTEGER qpc{};std::uint64_t until{};std::vector<std::uintptr_t> struck;};
-    inline static PropFlight prop_{};
+    static PropFlight prop_; // defined after the class: clang-cl needs PropFlight's member initializers complete
     template<class Read> static void thrown_prop(std::uintptr_t base,Read& read,const NativeGrab::Thrown& t) {
         const auto game=rig::value<std::uintptr_t>(read,base+0x39a5290);
         if(!game || !t.entity_id || (t.entity_id>>16)>=0x3fff || rig::value<std::uintptr_t>(read,*game+0x3130b0+(t.entity_id>>16)*8)!=t.entity ||
@@ -547,11 +547,12 @@ public:
     }
     inline static std::atomic<std::uint64_t> hip_frames{},visibility_skips{};
 private:
-    inline static Hip hip_req_{};inline static std::array<std::uintptr_t,2> hip_ent_{};inline static std::array<std::uint32_t,2> hip_id_{};
+    static Hip hip_req_; // defined after the class: clang-cl needs Hip's member initializers complete
+    inline static std::array<std::uintptr_t,2> hip_ent_{};inline static std::array<std::uint32_t,2> hip_id_{};
     inline static std::array<bool,2> hip_shown_{};inline static int emily_=-1;inline static std::array<int,2> hip_owner_{-1,-1};
     inline static std::array<std::optional<NativePlayerStateLease>,2> hip_owner_lease_{};
     struct HipExchange {bool blocked{};NativeManualEquipRuntime::HipContext draw;std::uint64_t publication_fence{};};
-    inline static HipExchange hip_exchange_{};
+    static HipExchange hip_exchange_; // defined after the class: clang-cl needs HipExchange's member initializers complete
     template<class Read> static std::optional<bool> hip_entity_current(std::uintptr_t base,Read& read,unsigned kind) {
         const auto entity=hip_ent_[kind];const auto spawn=hip_id_[kind];
         if(!entity)return false;
@@ -664,4 +665,8 @@ private:
         std::lock_guard<std::mutex> l(m_);published_=c;
     }
 };
+inline NativeWeaponHands::Copy NativeWeaponHands::published_{};
+inline NativeWeaponHands::PropFlight NativeWeaponHands::prop_{};
+inline NativeWeaponHands::Hip NativeWeaponHands::hip_req_{};
+inline NativeWeaponHands::HipExchange NativeWeaponHands::hip_exchange_{};
 } // namespace d2vr
