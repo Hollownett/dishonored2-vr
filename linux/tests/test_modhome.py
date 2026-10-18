@@ -161,7 +161,7 @@ class InstallTests(Case):
     def test_install_downloads_loader_when_no_zip_given(self):
         calls = []
 
-        def opener(url):
+        def opener(url, **kw):
             calls.append(url)
             return io.BytesIO(self.oxr_zip.read_bytes())
 
@@ -169,6 +169,21 @@ class InstallTests(Case):
                         openxr_source=self.write_src(), urlopen=opener)
         self.assertEqual(calls, [self.src["url"]])
         self.assertEqual((self.home / "third_party/openxr/bin/openxr_loader.dll").read_bytes(), LOADER)
+
+    def test_refused_install_never_downloads(self):
+        calls = []
+
+        def opener(url, **kw):
+            calls.append(url)
+            return io.BytesIO(b"")
+
+        for proxy, foreign in ((self.work / "nope.dll", False), (self.proxy, True)):
+            if foreign:
+                (self.f.game_dir / "dinput8.dll").write_bytes(b"MZ other")
+            with self.assertRaises(modhome.InstallError):
+                modhome.install(self.inst, self.zip, proxy, None, self.cache, game_sha256=self.f.exe_sha256,
+                                openxr_source=self.src, urlopen=opener)
+        self.assertEqual(calls, [])
 
     def write_src(self):
         p = self.work / "source.json"
@@ -197,7 +212,7 @@ class OpenXrTests(Case):
         calls = []
         data = self.oxr_zip.read_bytes()
 
-        def opener(url):
+        def opener(url, **kw):
             calls.append(url)
             return io.BytesIO(data)
 
@@ -208,14 +223,54 @@ class OpenXrTests(Case):
 
         shutil.rmtree(self.cache)
         with self.assertRaisesRegex(modhome.InstallError, "sha256"):
-            modhome.fetch_openxr_zip(self.src, self.cache, lambda url: io.BytesIO(b"garbage"))
+            modhome.fetch_openxr_zip(self.src, self.cache, lambda url, **kw: io.BytesIO(b"garbage"))
         self.assertEqual(os.listdir(self.cache), [])
 
-    def test_fetch_network_error_is_install_error(self):
-        def opener(url):
-            raise OSError("offline")
-        with self.assertRaisesRegex(modhome.InstallError, "--openxr-zip"):
+    def fetch_fails(self, opener, pattern):
+        with self.assertRaisesRegex(modhome.InstallError, pattern):
             modhome.fetch_openxr_zip(self.src, self.cache, opener)
+        self.assertEqual(os.listdir(self.cache) if self.cache.exists() else [], [])
+
+    def test_fetch_network_error_is_install_error(self):
+        def opener(url, **kw):
+            raise OSError("offline")
+        self.fetch_fails(opener, "--openxr-zip")
+
+    def test_fetch_timeout_is_install_error_and_passes_timeout(self):
+        import socket
+        seen = {}
+
+        def opener(url, **kw):
+            seen.update(kw)
+            raise socket.timeout("timed out")
+        self.fetch_fails(opener, "timed out")
+        self.assertEqual(seen, {"timeout": 30})
+
+    def test_fetch_urlerror_is_install_error(self):
+        import urllib.error
+
+        def opener(url, **kw):
+            raise urllib.error.URLError("no route")
+        self.fetch_fails(opener, "no route")
+
+    def test_fetch_over_size_cap_aborts(self):
+        class Endless(io.RawIOBase):
+            def read(self, n=-1):
+                return b"\0" * n
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+        old = modhome.MAX_DOWNLOAD
+        modhome.MAX_DOWNLOAD = 1 << 20
+        self.addCleanup(setattr, modhome, "MAX_DOWNLOAD", old)
+        self.fetch_fails(lambda url, **kw: Endless(), "exceeds")
+
+    def test_fetch_hash_mismatch_leaves_no_cache_file(self):
+        self.fetch_fails(lambda url, **kw: io.BytesIO(b"garbage"), "sha256")
 
 
 class UninstallTests(Case):

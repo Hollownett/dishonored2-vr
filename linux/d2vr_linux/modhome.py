@@ -24,6 +24,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 OPENXR_SOURCE = REPO_ROOT / "third_party/openxr/bin/source.json"
 DEFAULT_PROXY = REPO_ROOT / "build/linux-proxy/dinput8.dll"
 
+MAX_DOWNLOAD = 64 * 1024 * 1024
 _LOADER_REL = "third_party/openxr/bin/openxr_loader.dll"
 
 
@@ -115,16 +116,24 @@ def fetch_openxr_zip(source: dict, cache_dir: Path, urlopen=urllib.request.urlop
         return dest
     cache_dir.mkdir(parents=True, exist_ok=True)
     tmp = dest.with_name(dest.name + ".tmp")
+    h = hashlib.sha256()
+    size = 0
     try:
-        with urlopen(url) as resp:
-            data = resp.read()
-    except (OSError, ValueError) as e:
-        raise InstallError(f"could not download {url}: {e}. Download it yourself and pass --openxr-zip")
-    try:
-        if _sha(data) != source["zip_sha256"]:
+        with urlopen(url, timeout=30) as resp, open(tmp, "wb") as out:
+            while True:
+                chunk = resp.read(1 << 16)
+                if not chunk:
+                    break
+                size += len(chunk)
+                if size > MAX_DOWNLOAD:
+                    raise InstallError(f"download from {url} exceeds {MAX_DOWNLOAD >> 20} MB; aborted")
+                h.update(chunk)
+                out.write(chunk)
+        if h.hexdigest() != source["zip_sha256"]:
             raise InstallError(f"downloaded OpenXR zip from {url} does not match the pinned sha256")
-        tmp.write_bytes(data)
         os.replace(tmp, dest)
+    except (OSError, ValueError) as e:  # URLError and timeouts are OSErrors
+        raise InstallError(f"could not download {url}: {e}. Download it yourself and pass --openxr-zip")
     finally:
         if tmp.exists():
             tmp.unlink()
@@ -173,9 +182,6 @@ def install(inst: Install, zip_path: Path, proxy: Path, openxr_zip: "Path | None
         raise InstallError(str(e))
     release = read_release_zip(Path(zip_path), game_sha256)
     source, source_bytes, source_dir = _load_source(openxr_source)
-    if openxr_zip is None:
-        openxr_zip = fetch_openxr_zip(source, cache_dir, urlopen)
-    loader = read_openxr_loader(source, Path(openxr_zip))
     license_path = source_dir / "LICENSE"
     if not license_path.is_file():
         raise InstallError(f"{license_path} is missing")
@@ -188,6 +194,9 @@ def install(inst: Install, zip_path: Path, proxy: Path, openxr_zip: "Path | None
         raise InstallError(
             f"{target} is another mod's dinput8.dll; refusing to replace it. "
             "Move it away if you want to use this mod instead.")
+    if openxr_zip is None:
+        openxr_zip = fetch_openxr_zip(source, cache_dir, urlopen)
+    loader = read_openxr_loader(source, Path(openxr_zip))
 
     # 6: mod home
     changed = []
