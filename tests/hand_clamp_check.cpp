@@ -828,6 +828,30 @@ void event_on_new_contact() {
     CHECK(contacts>=2 && r.clamp.contact_frames(1)>=2 && r.clamp.contact_frames(0)==0);
 }
 
+// The meet composed with the clamp: a meet shift never moves the drawn hand through a plane the clamp holds; the met
+// prop's own planes are skipped; not meeting, the clamp's hand stands; a side holding nothing passes the meet through.
+void meet_never_passes_held_plane() {
+    Rig r;r.step({.5,0,.5});
+    ClampOutput o{};
+    for(int i=0;i<30;++i) o=r.step({1.2,0,.5});   // pressed into the wall at x = 1 (entity 7): held at 0.945
+    CHECK(o.state==ClampState::contact && std::abs(o.drawn.position.x-.945)<1e-6);
+    CHECK(std::abs(clamp_depth(o)-.2)<1e-6);   // the tracked grip 20 cm past the wall, beyond the 5.5 cm shell
+    CHECK(clamp_depth(ClampOutput{})==0);
+    const auto target=pose_at({1.2,0,.5});
+    Vec3 d=meet_drawn(r.clamp,0,o,target,true,std::nullopt,{.03,0,0});            // the meet would draw it 23 cm into the wall
+    CHECK(std::abs(d.x-.945)<1e-6 && std::abs(d.y)<1e-12 && std::abs(d.z-.5)<1e-12);
+    d=meet_drawn(r.clamp,0,o,target,true,std::uintptr_t{8},{0,.02,0});            // another prop met: the wall still holds; the shift's y stands
+    CHECK(std::abs(d.x-.945)<1e-6 && std::abs(d.y-.02)<1e-12);
+    d=meet_drawn(r.clamp,0,o,target,true,std::uintptr_t{7},{-.02,0,0});           // the wall is the met prop: its plane is skipped
+    CHECK(close_to(d,{1.18,0,.5},1e-12));
+    d=meet_drawn(r.clamp,0,o,target,false,std::uintptr_t{7},{-.02,0,0});          // not meeting: the clamp's hand
+    CHECK(close_to(d,o.drawn.position,0));
+    CHECK(close_to(r.clamp.keep_out(1,target.basis,{2,0,.5},std::nullopt),{2,0,.5},0));   // the other side holds nothing
+    CHECK(close_to(r.clamp.keep_out(5,target.basis,{2,0,.5},std::nullopt),{2,0,.5},0));
+    r.clamp.reset(0);
+    CHECK(close_to(r.clamp.keep_out(0,target.basis,{2,0,.5},std::nullopt),{2,0,.5},0));   // reset: nothing held
+}
+
 void level_frame_and_hit_conversion() {
     auto f=level_frame({1,2,3},{0,2,5});
     CHECK(close_to(f.position,{1,2,3},0) && close_to(f.basis[0],{0,1,0},1e-12) && close_to(f.basis[1],{-1,0,0},1e-12) && close_to(f.basis[2],{0,0,1},1e-12));
@@ -898,5 +922,6 @@ int main() {
     yield_passes_through();
     event_on_new_contact();
     level_frame_and_hit_conversion();
+    meet_never_passes_held_plane();
     std::puts("PASS");
 }

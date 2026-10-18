@@ -238,17 +238,21 @@ private:
     }
     // Pushes grip point p (oriented by basis) out of the planes by the probe's radius plus skin; adds each push to
     // `pushed` when given. direct_only: just the planes hit directly by this side's last answered result.
-    void project(const Side& s,const std::array<Vec3,3>& basis,Vec3& p,double* pushed=nullptr,bool direct_only=false) const {
+    // except: the planes of this entity are skipped.
+    void project(const Side& s,const std::array<Vec3,3>& basis,Vec3& p,double* pushed=nullptr,bool direct_only=false,
+                 std::optional<std::uintptr_t> except=std::nullopt) const {
         for(std::size_t i=0;i<s.plane_count;++i) {
             const auto& plane=s.planes[i];
             if(direct_only && (plane.tip || !plane.last_answer)) continue;
+            if(except && plane.entity==*except) continue;
             const Vec3 offset=clamp_detail::rotate(basis,plane.local);
             const double d=dot(p+offset-plane.point,plane.normal)-(plane.radius+cfg_.skin);
             if(d<0) {p=p-plane.normal*d;if(pushed) pushed[i]-=d;}
         }
     }
-    void project3(const Side& s,const std::array<Vec3,3>& basis,Vec3& p,double* pushed=nullptr,bool direct_only=false) const {
-        for(int pass=0;pass<3;++pass) project(s,basis,p,pushed,direct_only);
+    void project3(const Side& s,const std::array<Vec3,3>& basis,Vec3& p,double* pushed=nullptr,bool direct_only=false,
+                  std::optional<std::uintptr_t> except=std::nullopt) const {
+        for(int pass=0;pass<3;++pass) project(s,basis,p,pushed,direct_only,except);
     }
     ClampOutput finish(Side& s,const ClampOutput& out) {s.pending_note=true;s.last_out=out;return out;}
 
@@ -271,6 +275,18 @@ public:
         s.pending_note=false;
         s.prev_local=clamp_detail::local_point(root,drawn);   // non-finite: the next update snaps
         s.drawn_world=drawn;
+    }
+
+    // The meet (NativeHandContact::meet): the drawn hand is the target moved out of the prop it pushes (`met`, whose planes
+    // are skipped: the prop moves with the hand) instead of held off it. It is pushed out of every other plane this side
+    // holds now (last update's planes, no new cast), so the meet never moves the hand through a wall the clamp holds.
+    // Nothing held (a released or reset side): the meet position as it is.
+    Vec3 keep_out(unsigned side,const std::array<Vec3,3>& basis,Vec3 meet_position,std::optional<std::uintptr_t> met) const {
+        if(side>1 || !finite(meet_position)) return meet_position;
+        const auto& s=sides_[side];
+        if(!s.has || s.state==ClampState::released) return meet_position;
+        project3(s,basis,meet_position,nullptr,false,met);
+        return meet_position;
     }
 
     // Contract: one update per side per frame, `now` strictly increasing. In C14 alternate mode, pass post=false on the
@@ -472,5 +488,27 @@ public:
         return finish(s,out);
     }
 };
+
+// How deep the tracked grip is past the surface the clamp holds it at: the hold beyond the palm shell (palm_radius + skin).
+// NativeHandContact::meet latches on it as on the contact's depth: a tracked hand pushed on through a pinned or toppled
+// prop can overlap it only shallowly (under a fallen bottle) while the clamp holds the drawn hand 20 cm back.
+inline double clamp_depth(const ClampOutput& out,const HandClampConfig& cfg={}) {
+    if(!out.valid || out.state!=ClampState::contact || !out.contact) return 0;
+    const double depth=length(out.shift)-(cfg.palm_radius+cfg.skin);
+    return std::isfinite(depth)?std::max(0.,depth):0.;
+}
+
+// Where the hand is drawn, the clamp and the meet composed (C8, C9). meeting: the meet moves this hand
+// (NativeHandContact::Meeting::prop, or a non-zero shift); prop: the pushable prop the clamp holds the hand at (the cast
+// entity when Meeting::prop, else none); shift: Meeting::shift. Not meeting (latched, pinned, nothing met): the clamp's
+// hand as it is. Meeting: the hand the meet starts from is the target while the clamp's contact is the met prop (or there
+// is none), else the clamp's hand (it holds the hand at something else: a wall); it is moved by the shift, then pushed out
+// of every plane the clamp holds but the prop's, so a meet never moves the hand through a surface the clamp holds.
+inline Vec3 meet_drawn(const HandClamp& clamp,unsigned side,const ClampOutput& out,const WorldTrackedPose& target,bool meeting,
+                       std::optional<std::uintptr_t> prop,Vec3 shift) {
+    if(!meeting || !out.valid) return out.drawn.position;
+    const bool held_elsewhere=out.contact && !(prop && out.contact->entity==*prop);
+    return clamp.keep_out(side,target.basis,(held_elsewhere?out.drawn.position:target.position)+shift,prop);
+}
 
 } // namespace d2vr

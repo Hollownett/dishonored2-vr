@@ -746,6 +746,14 @@ int main() {
             const auto meeting=m.meet(1,bottle_entity);
             assert(writes.count(0x1000001));
             assert(meeting.prop && length(meeting.shift)<.1 && meeting.shift.x<0);            // met: the cast lets go of it, the way out is back along the push (this fake world never moves the bottle: the overlap grows)
+            {   // the clamp's depth latches too: the tracked grip 9 cm past the clamp's shell at the prop, though the contact's way out is shallow (a toppled bottle)
+                assert(length(meeting.shift)<NativeHandContact::meet_unlatch);
+                const auto latches=m.meet_latches.load();
+                const auto deep=m.meet(1,bottle_entity,true,.09);
+                assert(!deep.prop && length(deep.shift)==0 && m.meet_latches==latches+1);
+                assert(!m.meet(1,bottle_entity,true,0).prop);                   // still held at the prop: stays latched
+                assert(m.meet(1,bottle_entity,false,.09).prop);                 // the clamp's depth counts only while it holds the hand at the prop: unlatched
+            }
             assert(!m.meet(1,crate_entity).prop && !m.meet(1,0).prop);      // the heavy crate and an empty cast keep the hold-off
             assert(!m.meet(0,bottle_entity).prop && length(m.meet(0,bottle_entity).shift)==0); // the other hand is not published: its cast holds it
             build({1,1.0,0,.08,.08,.14,0x1c5de18,true,0x4000});put(motions+1*0x80+0x40,std::array<float,3>{0,0,0});
