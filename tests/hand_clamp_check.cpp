@@ -7,6 +7,7 @@ static int contract_breaks=0;
 #include <cstdio>
 #include <cstdlib>
 #include <functional>
+#include <vector>
 using namespace d2vr;
 // Posting mode for the parametrized tests: 0 = every frame, 1/2 = C14 alternate mode casting on even/odd frames.
 static int g_mode=0;
@@ -32,10 +33,22 @@ struct World {
     bool invalid_normals=false;// surface hits report normal_valid=false
     bool floor_first=false;    // every hand sweep reports a surface 6 cm under its start first (shadows all else)
     double wall_x_end=1e9;     // the x wall exists only where y < wall_x_end (a wall that ends)
+    bool slab=false;           // a loose prop (entity 20): the slab 0.80 <= x <= 0.90 in front of the x wall; a sweep excluding it passes through
+    bool palm_inside_loose=false;  // the palm_inside overlaps report the loose prop (entity 20), not the world (12): a toppled bottle on the hand
+    bool chest_prop=false;     // every chest sweep is stopped half way by a surface of the loose prop (entity 21)
     Vec3 chest{0,0,1};
     std::optional<ClampHit> cast(const ClampSweep& s) const {
         if(!s.valid) return std::nullopt;
         const bool from_chest=close_to(s.from,chest,1e-9);
+        if(from_chest && chest_prop) return ClampHit{s.from+(s.to-s.from)*.5,{0,0,1},21,6,false};
+        if(!from_chest && palm_inside_loose) return ClampHit{s.from,inside_normal,20,6,true};
+        if(slab && !(s.exclude && *s.exclude==20)) {   // the slab's front face, before anything behind it
+            const double s0=.80-s.radius-s.from.x;
+            if(s.from.x>=.80-s.radius && s.from.x<=.90+s.radius) return ClampHit{s.from,{-1,0,0},20,6,true};
+            if(s0>0 && s.to.x>s.from.x && s0<=s.to.x-s.from.x) {
+                const Vec3 c=s.from+(s.to-s.from)*(s0/(s.to.x-s.from.x));return ClampHit{{.80,c.y,c.z},{-1,0,0},20,6,false};
+            }
+        }
         if(from_chest && chest_inside) return ClampHit{s.from,{0,0,1},11,6,true};
         if(!from_chest && palm_inside) return ClampHit{s.from,inside_normal,12,6,true};
         if(!from_chest && floor_first) return ClampHit{s.from-Vec3{0,0,s.radius+.01},{0,0,1},13,6,false};
@@ -71,6 +84,8 @@ struct Rig {
     std::function<bool(unsigned)> drop_palm;   // true: lose this frame's palm result
     std::function<bool(unsigned)> post;        // C14 alternate mode: false skips this frame's cast
     std::optional<Vec3> note_override;         // drawn position reported to note_drawn once
+    std::vector<std::uintptr_t> loose;         // ClampInput::loose
+    std::optional<std::uintptr_t> exclude;     // ClampInput::exclude
     ClampOutput last{};bool have_last=false;int holds=0;   // frames held so far
     explicit Rig(HandClampConfig c={}) : clamp(c) {
         if(g_mode) post=[phase=static_cast<unsigned>(g_mode-1)](unsigned f) {return (f&1u)==phase;};
@@ -82,11 +97,14 @@ struct Rig {
         ClampInput in{};
         in.now=now();in.epoch=epoch;in.root=root;in.target=target;in.chest=world.chest;
         in.tip=tip;in.tip_enabled=tip_enabled;in.yield=yield;in.post=!post || post(frame);
+        for(const auto e:loose) if(in.loose_count<ClampInput::loose_capacity) in.loose[in.loose_count++]=e;
+        in.exclude=exclude;
         if(have_last) {
             const auto slot0=world.cast(last.palm_sweep);
             if(last.state==ClampState::released) in.chest_hit=slot0;
             else if(!(drop_palm && drop_palm(frame))) in.palm_hit=slot0;
             in.tip_hit=world.cast(last.tip_sweep);
+            in.exclude_hit=world.cast(last.exclude_sweep);
         }
         last=clamp.update(side,in);have_last=true;++frame;holds+=last.held;
         clamp.note_drawn(side,root,note_override?*note_override:last.drawn.position);note_override.reset();
@@ -852,6 +870,87 @@ void meet_never_passes_held_plane() {
     CHECK(close_to(r.clamp.keep_out(0,target.basis,{2,0,.5},std::nullopt),{2,0,.5},0));   // reset: nothing held
 }
 
+// Fix round 2: the held_elsewhere start, the way out clipped at the prop's plane, the met prop and a wall both held.
+void meet_start_and_clip() {
+    Rig r;r.step({.5,0,.5});
+    ClampOutput o{};
+    for(int i=0;i<30;++i) o=r.step({1.2,0,.5});   // held at the wall (entity 7) at 0.945
+    const auto target=pose_at({1.2,0,.5});
+    // Another prop is met while the clamp holds the hand at the wall: the meet starts from the clamp's hand, not the target.
+    Vec3 d=meet_drawn(r.clamp,0,o,target,true,std::uintptr_t{8},{-.1,0,0});
+    CHECK(std::abs(d.x-.845)<1e-6);                                    // from the target it would be 1.1, kept out to 0.945
+    // The met prop is the clamp's contact: a way out pointing into it (stale, or flipped past its middle) is clipped at its plane.
+    d=meet_drawn(r.clamp,0,o,target,true,std::uintptr_t{7},{.05,.02,0});
+    CHECK(close_to(d,{1.2,.02,.5},1e-12));                             // not 1.25: only the part along the plane stands
+    // The met prop and a wall both held (the y wall plays the prop): the prop's plane is skipped, the x wall still holds.
+    Rig c;c.world.wall_y=true;c.step({.5,.5,.5});
+    o=c.move_to({.5,.5,.5},{1.1,1.1,.5},1,ignore);
+    for(int i=0;i<10;++i) o=c.step({1.1,1.1,.5});
+    CHECK(o.state==ClampState::contact);
+    CHECK(o.drawn.position.x<=.945+1e-6 && o.drawn.position.y<=.945+1e-6);
+    const auto corner=pose_at({1.1,1.1,.5});
+    d=meet_drawn(c.clamp,0,o,corner,true,std::uintptr_t{9},{});
+    CHECK(d.x<=.945+1e-6);
+}
+
+// I1: a loose prop in front of a wall hides it from the closest-hit sweeps; the exclusion sweep holds it.
+void exclusion_sweep_holds_wall_behind_prop() {
+    for(const bool excluded:{false,true}) {
+        Rig r;r.world.slab=true;r.tip={{.08,0,0},.02};r.tip_enabled=true;r.loose={20};
+        if(excluded) r.exclude=std::uintptr_t{20};
+        r.step({.5,0,.5});
+        ClampOutput o{};
+        r.move_x({.5,0,.5},1.3,1.5,[&](const ClampOutput& q,Vec3) {o=q;});
+        for(int i=0;i<5;++i) o=r.step({1.3,0,.5});
+        CHECK(o.state==ClampState::contact && o.contact && o.contact->entity==20);
+        CHECK(o.exclude_sweep.valid && o.exclude_sweep.exclude && *o.exclude_sweep.exclude==20); // posted either way: the touched loose prop is excluded
+        // The meet draws the target (the prop is met), kept out of the wall the exclusion sweep found: the tip at 1 - skin.
+        const Vec3 d=meet_drawn(r.clamp,0,o,pose_at({1.3,0,.5}),true,std::uintptr_t{20},{});
+        CHECK(std::abs(d.x-(1-.005-.02-.08))<1e-6);
+    }
+    { // Without a loose list the touched slab is not excluded, and nothing posts the exclusion sweep.
+        Rig r;r.world.slab=true;r.step({.5,0,.5});
+        ClampOutput o{};
+        for(int i=0;i<20;++i) o=r.step({1.3,0,.5});
+        CHECK(!o.exclude_sweep.valid);
+        CHECK(meet_drawn(r.clamp,0,o,pose_at({1.3,0,.5}),true,std::uintptr_t{20},{}).x>1.29);  // the wall unknown: through it
+    }
+}
+
+// I2: a loose prop on the hand (a toppled bottle) never snaps the clamp; a world overlap still does.
+void loose_overlap_never_snaps() {
+    Rig r;r.world.wall_x=false;r.world.floor=false;r.world.palm_inside=true;r.world.palm_inside_loose=true;r.loose={20};
+    const Vec3 target{.5,0,.5};
+    for(int i=0;i<90;++i) {const auto o=r.step(target);CHECK(!o.snapped && o.state!=ClampState::released);}
+    CHECK(r.clamp.snapbacks(0)==0);
+    r.loose.clear();                                   // not loose (the service dropped it): three overlaps snap
+    ClampOutput o{};for(int i=0;i<4;++i) o=r.step(target);
+    CHECK(r.clamp.snapbacks(0)==1 && o.state==ClampState::released);
+}
+
+// I2: a release re-arms within 0.25 s when only a loose prop stops the chest re-acquire.
+void loose_prop_never_keeps_released() {
+    Rig r;press_until_snap(r);
+    r.world.chest_prop=true;r.loose={21};
+    const Vec3 free_space{.5,0,.5};
+    unsigned frames=0;ClampOutput o{};
+    do {o=r.step(free_space);++frames;} while(o.state==ClampState::released && frames<60);
+    CHECK(o.state!=ClampState::released && frames*dt<=.25);
+    Rig k;press_until_snap(k);k.world.chest_prop=true;   // not loose: the chest path is blocked, the side stays released
+    for(int i=0;i<45;++i) {o=k.step(free_space);CHECK(o.state==ClampState::released);}
+}
+
+// I3: contact_fresh says the contact plane was made or re-hit by the last answered cast.
+void contact_fresh_tracks_answers() {
+    Rig r;r.step({.5,0,.5});
+    ClampOutput o{};
+    for(int i=0;i<30;++i) o=r.step({1.2,0,.5});
+    CHECK(o.contact && o.contact_fresh);
+    r.drop_palm=[](unsigned){return true;};            // the results stop: the plane is held, not fresh
+    o=r.step({1.2,0,.5});o=r.step({1.2,0,.5});
+    CHECK(o.contact && o.contact->entity==7 && !o.contact_fresh);
+}
+
 void level_frame_and_hit_conversion() {
     auto f=level_frame({1,2,3},{0,2,5});
     CHECK(close_to(f.position,{1,2,3},0) && close_to(f.basis[0],{0,1,0},1e-12) && close_to(f.basis[1],{-1,0,0},1e-12) && close_to(f.basis[2],{0,0,1},1e-12));
@@ -923,5 +1022,10 @@ int main() {
     event_on_new_contact();
     level_frame_and_hit_conversion();
     meet_never_passes_held_plane();
+    meet_start_and_clip();
+    exclusion_sweep_holds_wall_behind_prop();
+    loose_overlap_never_snaps();
+    loose_prop_never_keeps_released();
+    contact_fresh_tracks_answers();
     std::puts("PASS");
 }

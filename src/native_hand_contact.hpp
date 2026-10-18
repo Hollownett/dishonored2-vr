@@ -35,6 +35,7 @@
 // its own and hands the entities it finds to the service through a small locked list (adopted at the start of a service, try_lock: never waits).
 // The registry scan reads through its own reader (`scan`: a direct-mapped cache of validated 64 KB blocks, native_grab.hpp) and stops at
 // scan_limit_us: the shared 32-entry, 100 ms region cache thrashed on entities scattered over the heap, a VirtualQuery per read.
+#include "hand_clamp.hpp"
 #include "hand_contact.hpp"
 #include "physical_grab.hpp"
 #include <algorithm>
@@ -124,6 +125,82 @@ public:
         return m;
     }
 
+    // ---- The meet composed with the hand clamp (physical hands phase 1, Task 3 rulings I1-I3). Render thread, per side, per frame:
+    //   fill_clamp_input(side,in,last.exclude) -> HandClamp::update -> meet_clamp(side,clamp,out,target) -> draw `drawn`,
+    //   HandClamp::note_drawn(drawn) -> publish(..., held_by=result.held_by). The push lab runs compose_meet with its own (delayed) service data.
+    struct MeetPublished {            // what the service told the render thread for this side
+        bool fresh{};Vec3 outward{};std::uintptr_t entity{};                  // the way out of the prop the tracked hand overlaps most
+        std::array<std::uintptr_t,8> pushable{};unsigned pushable_count{};    // props the contact pushes now (light, loose, not pinned)
+        std::array<std::uintptr_t,ClampInput::loose_capacity> loose{};unsigned loose_count{};   // light loose props in reach, pinned or not
+        bool pushable_has(std::uintptr_t e) const {for(unsigned i=0;i<std::min<unsigned>(pushable_count,8);++i) if(pushable[i]==e) return true;return false;}
+        bool loose_has(std::uintptr_t e) const {
+            for(unsigned i=0;i<std::min<unsigned>(loose_count,ClampInput::loose_capacity);++i) if(loose[i]==e) return true;
+            return pushable_has(e);
+        }
+    };
+    struct ClampMeet {
+        Vec3 drawn{};                               // where the hand is drawn (then HandClamp::note_drawn)
+        bool latched{},clamp_holding{},meeting{};   // the meet's latch after this frame; the clamp holds the hand at the prop's freshly hit plane; the meet moves the hand
+        std::optional<std::uintptr_t> prop;         // the pushable prop the clamp holds the hand at (its planes are skipped by meet_drawn)
+        Vec3 shift{};                               // the meet's way out (zero while latched)
+        std::uintptr_t held_by{};                   // publish(held_by) / ContactInput::held: whose hold the drawn hand's lag is (0: none)
+        std::optional<std::uintptr_t> exclude;      // next frame's ClampInput::exclude: the met prop, excluded from the extra sweep (I1)
+        bool new_latch{};
+    };
+    // Pure: one frame of the meet. latched: this side's latch (updated). depth_latch=false drops the clamp's depth from the latch (reference runs only).
+    // clamp_holding (I3): the clamp's contact is a pushable prop's plane that the last answered cast made or hit directly; only then does the clamp's depth
+    // (hand_clamp.hpp clamp_depth) count toward the latch, and only then does the latch hold below meet_unlatch (next_meet_latch).
+    static ClampMeet compose_meet(bool& latched,const MeetPublished& pub,const HandClamp& clamp,unsigned side,const ClampOutput& out,
+                                  const WorldTrackedPose& target,bool depth_latch=true) {
+        ClampMeet r{};
+        const std::optional<std::uintptr_t> cast=out.valid && out.contact?std::optional<std::uintptr_t>{out.contact->entity}:std::nullopt;
+        const bool cast_pushable=cast && pub.pushable_has(*cast);
+        r.clamp_holding=cast_pushable && out.state==ClampState::contact && out.contact_fresh;
+        const double depth=pub.fresh?length(pub.outward):0.;
+        const double cd=r.clamp_holding && depth_latch?clamp_depth(out):0.;
+        const double latch_depth=std::isfinite(cd)?std::max(depth,cd):depth;
+        const bool was=latched;latched=next_meet_latch(latched,latch_depth,r.clamp_holding);r.latched=latched;r.new_latch=latched && !was;
+        if(!latched) {
+            if(cast_pushable) r.prop=cast;
+            if(pub.fresh && depth>0 && std::isfinite(depth)) r.shift=pub.outward;
+        }
+        r.meeting=r.prop.has_value() || length(r.shift)>0;
+        r.drawn=meet_drawn(clamp,side,out,target,r.meeting,r.prop,r.shift);
+        r.held_by=cast?*cast:(r.prop?*r.prop:(r.meeting?pub.entity:0));
+        // The exclusion sweep runs while the hand meets a prop, and while the clamp holds it at a loose one (met or pinned): the wall behind is then
+        // already held the frame a meet starts (its result lands a frame late).
+        if(r.meeting) r.exclude=r.prop?r.prop:std::optional<std::uintptr_t>{pub.entity};
+        else if(cast && pub.loose_has(*cast)) r.exclude=cast;
+        if(r.exclude && !*r.exclude) r.exclude.reset();
+        return r;
+    }
+    // Render thread: compose_meet with what the service published (the counters as meet() keeps them).
+    ClampMeet meet_clamp(unsigned side,const HandClamp& clamp,const ClampOutput& out,const WorldTrackedPose& target) {
+        MeetPublished pub{};
+        if(side>1) return compose_meet_none(clamp,side,out,target);
+        {std::lock_guard<std::mutex> l(mutex_);if(!lanes_[side].active) {std::lock_guard<std::mutex> m(meet_mutex_);meet_latched_[side]=false;return compose_meet_none(clamp,side,out,target);}}
+        std::lock_guard<std::mutex> l(meet_mutex_);const double now=seconds();
+        if(now-meet_.stamp>meet_stale) {meet_latched_[side]=false;return compose_meet_none(clamp,side,out,target);}
+        pub.fresh=now-meet_.side_stamp[side]<=meet_fresh;pub.outward=meet_.outward[side];pub.entity=meet_.entity[side];
+        pub.pushable=meet_.pushable;pub.pushable_count=meet_.count;pub.loose=meet_.loose;pub.loose_count=meet_.loose_count;
+        bool latched=meet_latched_[side];
+        const auto r=compose_meet(latched,pub,clamp,side,out,target);
+        meet_latched_[side]=latched;
+        if(r.new_latch) ++meet_latches;
+        if(r.prop) ++meets;
+        if(length(r.shift)>0) ++meet_shifts;
+        return r;
+    }
+    // Render thread, before HandClamp::update: the loose props near the hand (I2) and the met prop to exclude (I1, from last frame's meet_clamp).
+    void fill_clamp_input(unsigned side,ClampInput& in,std::optional<std::uintptr_t> exclude) {
+        in.loose_count=0;in.exclude.reset();
+        if(side>1) return;
+        std::lock_guard<std::mutex> l(meet_mutex_);
+        if(seconds()-meet_.stamp>meet_stale) return;
+        in.loose=meet_.loose;in.loose_count=std::min<std::size_t>(meet_.loose_count,ClampInput::loose_capacity);
+        in.exclude=exclude;
+    }
+
     void install(const std::filesystem::path& file) {
         log_.open(file,std::ios::trunc);log_on_=log_.is_open();
         // gap/error/trim/friction/lag/held: the terms of the control (hand_contact.hpp) behind this write: lag is the size of the cast's shift of the drawn hand (m),
@@ -198,7 +275,7 @@ public:
         }
         std::chrono::steady_clock::duration body_time{},math_time{};
         unsigned writes=0,fulls=0;std::uint64_t write_peak=0;
-        std::array<std::uintptr_t,8> pushable{};unsigned pushables=0;std::array<Vec3,2> outward{};std::array<std::uintptr_t,2> outward_entity{}; // what meet() is told
+        std::array<std::uintptr_t,8> pushable{};unsigned pushables=0;std::array<std::uintptr_t,ClampInput::loose_capacity> loose{};unsigned looses=0;std::array<Vec3,2> outward{};std::array<std::uintptr_t,2> outward_entity{}; // what meet() is told
         std::array<bool,2> lag_owned{}; // the entity the cast holds a hand at (or the hand meets) is a prop of ours: that hand's lag is trusted for every prop
         for(unsigned side=0;side<2;++side) lag_owned[side]=hands[side].active && hands[side].held_by && std::any_of(near_.begin(),near_.end(),[&](const Near& n){return n.entity==hands[side].held_by;});
         for(auto it=near_.begin();it!=near_.end();) {
@@ -241,6 +318,7 @@ public:
             if(player && near_player(*n.body->bounds,*player)) {++keepouts;continue;} // against the player's body or under his feet: never shoved
             const bool met=n.mass>0 && n.mass<config.heavy_kg && !n.drag.blocked(now); // a loose prop in reach the contact pushes and that gives way
             if(met && pushables<pushable.size()) pushable[pushables++]=n.entity;
+            if(n.mass>0 && n.mass<config.heavy_kg && looses<loose.size()) loose[looses++]=n.entity; // light and loose, pinned or not: the clamp never snaps on it
             rig::HeldShape shape;
             try {shape=prop_shape(*n.body);} catch(const std::invalid_argument&) {continue;}
             Vec3 velocity=n.velocity,spin{};bool pushed=false;
@@ -275,7 +353,7 @@ public:
         {   // for the render thread: the props the contact pushes and the way out of the one each hand overlaps most (a busy lock waits for the next service)
             std::unique_lock<std::mutex> lock(meet_mutex_,std::try_to_lock);
             if(lock.owns_lock()) {
-                meet_.pushable=pushable;meet_.count=pushables;meet_.stamp=now;
+                meet_.pushable=pushable;meet_.count=pushables;meet_.loose=loose;meet_.loose_count=looses;meet_.stamp=now;
                 for(unsigned side=0;side<2;++side) if(hands[side].active) {meet_.outward[side]=outward[side];meet_.entity[side]=outward_entity[side];meet_.side_stamp[side]=now;}
             }
         }
@@ -460,8 +538,11 @@ private:
     std::mutex mutex_;std::array<Lane,2> lanes_{};std::atomic<bool> wanted_{};
     std::vector<Near> near_;std::array<std::uint64_t,2> seen_{};unsigned cursor_{1},cycle_{},scan_tick_{};
     std::vector<std::uintptr_t> slot_entity_;std::vector<std::uint8_t> slot_prop_;std::uintptr_t game_{},world_{}; // slot -> entity pointer and class (the scanner's)
-    struct Meet {std::array<std::uintptr_t,8> pushable{};unsigned count{};double stamp{};std::array<std::uintptr_t,2> entity{};std::array<Vec3,2> outward{};std::array<double,2> side_stamp{};};
+    struct Meet {std::array<std::uintptr_t,8> pushable{};unsigned count{};std::array<std::uintptr_t,ClampInput::loose_capacity> loose{};unsigned loose_count{};double stamp{};std::array<std::uintptr_t,2> entity{};std::array<Vec3,2> outward{};std::array<double,2> side_stamp{};};
     Vec3 player_eye_{};double player_stamp_{-1e9}; // under mutex_
+    static ClampMeet compose_meet_none(const HandClamp& clamp,unsigned side,const ClampOutput& out,const WorldTrackedPose& target) {
+        bool latched=false;return compose_meet(latched,MeetPublished{},clamp,side,out,target);
+    }
     std::mutex meet_mutex_;Meet meet_;std::array<bool,2> meet_latched_{}; // service -> meet(); latched: pinned, the cast holds the hand off the prop
     std::atomic<bool> latched_{};std::mutex found_mutex_;std::vector<std::uintptr_t> found_,gone_;std::uintptr_t service_game_{},service_world_{}; // discover() -> service(); the service's level
     std::ofstream log_,slow_;std::atomic<bool> log_on_{};unsigned logged_{},slow_logged_{};std::mutex log_mutex_;std::string pending_,slow_pending_;double log_drained_{};

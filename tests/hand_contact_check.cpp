@@ -731,6 +731,38 @@ int main() {
             assert(NativeHandContact::next_meet_latch(false,.09,false));   // deeper than meet_latch: latches
             assert(NativeHandContact::next_meet_latch(true,.06,false));    // between meet_unlatch and meet_latch: stays latched
         }
+        // --- compose_meet (fix round 2, I3): the clamp's depth latches only while its contact is the pushable prop's plane, freshly hit; a stale plane (the
+        // bottle flew off) never holds the hand back. held_by and the exclusion entity follow the clamp's contact and the met prop.
+        {
+            const HandClamp idle;const WorldTrackedPose target{{.3,0,.1},{{{1,0,0},{0,1,0},{0,0,1}}}};
+            ClampOutput out{};out.valid=true;out.state=ClampState::contact;out.drawn=target;out.drawn.position={.155,0,.1};out.shift={-.145,0,0}; // 9 cm past the shell
+            out.contact=ClampHit{{.2,0,.1},{-1,0,0},5,0,false,true};
+            NativeHandContact::MeetPublished pub{};pub.fresh=true;pub.entity=5;pub.pushable[0]=5;pub.pushable_count=1;
+            bool latched=false;
+            out.contact_fresh=false;
+            auto m=NativeHandContact::compose_meet(latched,pub,idle,0,out,target);
+            assert(!latched && !m.clamp_holding && m.meeting && m.prop && *m.prop==5 && m.held_by==5 && m.exclude && *m.exclude==5); // a stale plane: no latch, the meet draws
+            assert(std::abs(m.drawn.x-.3)<1e-12);
+            out.contact_fresh=true;
+            m=NativeHandContact::compose_meet(latched,pub,idle,0,out,target);
+            assert(latched && m.new_latch && m.clamp_holding && !m.meeting && !m.prop && std::abs(m.drawn.x-.155)<1e-12);   // fresh: the clamp's depth latches
+            m=NativeHandContact::compose_meet(latched,pub,idle,0,out,target,false);
+            assert(latched && !m.new_latch);                                // still held at the fresh prop plane: stays latched (depth_latch off only drops the depth)
+            out.contact_fresh=false;
+            m=NativeHandContact::compose_meet(latched,pub,idle,0,out,target);
+            assert(!latched && m.meeting);                                  // the plane went stale and the way out is shallow: unlatched
+            pub.pushable_count=0;pub.loose[0]=5;pub.loose_count=1;          // pinned: not pushable, loose
+            m=NativeHandContact::compose_meet(latched,pub,idle,0,out,target);
+            assert(!m.meeting && !m.prop && m.held_by==5 && m.exclude && *m.exclude==5 && std::abs(m.drawn.x-.155)<1e-12); // the clamp's hand; the wall behind still swept for
+            out.contact=ClampHit{{.2,0,.1},{-1,0,0},0,0,false,true};pub.fresh=true;pub.outward={-.01,0,0};pub.pushable[0]=5;pub.pushable_count=1;
+            m=NativeHandContact::compose_meet(latched,pub,idle,0,out,target);
+            assert(m.meeting && !m.prop && m.held_by==0 && m.exclude && *m.exclude==5);   // held at a wall (entity 0) while the shift meets prop 5
+            NativeHandContact fresh_contact;                                 // meet_clamp on a contact with no published hand: the clamp's hand as it is
+            const auto none=fresh_contact.meet_clamp(1,idle,out,target);
+            assert(!none.meeting && std::abs(none.drawn.x-.155)<1e-12);
+            ClampInput in{};fresh_contact.fill_clamp_input(1,in,std::uintptr_t{5});
+            assert(in.loose_count==0 && !in.exclude);                         // nothing served: no loose props, nothing to exclude
+        }
         // --- meet(): the cast must not hold the hand off a light loose prop the contact pushes; the way out of an overlap; pinned (deep) and heavy props and a hand
         // that is not pushing keep the hold-off
         {

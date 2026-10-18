@@ -28,7 +28,8 @@ namespace d2vr {
 
 struct ClampProbe {Vec3 local{};double radius{};};      // sphere in the grip frame (x forward, y left, z up)
 struct ClampHit {Vec3 point{},normal{};std::uintptr_t entity{};std::uint16_t material{0xffff};bool initial_overlap{};bool normal_valid{true};};
-struct ClampSweep {Vec3 from{},to{};double radius{};bool valid{};};
+// exclude: the body (its entity) the cast must not report (the native cast's source-body exclusion, request +0x68/+0x14).
+struct ClampSweep {Vec3 from{},to{};double radius{};bool valid{};std::optional<std::uintptr_t> exclude;};
 struct HandClampConfig {
     double palm_radius=.05,skin=.005,plane_seconds=.1,release_speed=1.5,snap_gap=.35,snap_seconds=.25,
            rearm_seconds=.1,gap_seconds=.25,haptic_cooldown=.08,speed_for_full=3.;
@@ -40,14 +41,28 @@ struct ClampInput {
     WorldTrackedPose target{};          // calibrated, reach-clamped controller grip
     Vec3 chest{};                       // free-space re-acquire origin
     std::optional<ClampHit> palm_hit,tip_hit,chest_hit; // results of the sweeps this side posted last frame
-    ClampProbe tip{};bool tip_enabled{true},post{true},yield{};};
+    ClampProbe tip{};bool tip_enabled{true},post{true},yield{};
+    // Loose props the push logic owns (light, in reach, pinned or not; NativeHandContact::fill_clamp_input): an initial
+    // overlap with one never counts toward the overlap snap, and a re-acquire sweep stopped by one does not keep the side
+    // released (a toppled bottle on the hand is pushed, not a reason to let go of the walls).
+    static constexpr std::size_t loose_capacity=8;
+    std::array<std::uintptr_t,loose_capacity> loose{};std::size_t loose_count{};
+    // The met prop (I1): this side also sweeps its leading probe with that body excluded, so a wall behind the prop is held
+    // as a plane (the closest-hit sweeps only ever report the prop in front of it). exclude_hit: last frame's result.
+    std::optional<std::uintptr_t> exclude;std::optional<ClampHit> exclude_hit;
+    bool is_loose(std::uintptr_t entity) const {
+        for(std::size_t i=0;i<std::min(loose_count,loose_capacity);++i) if(loose[i]==entity) return true;
+        return false;
+    }};
 enum class ClampState {free,contact,released};
 struct ClampOutput {
     bool valid{};WorldTrackedPose drawn{};Vec3 shift{};ClampState state{};bool snapped{};
     std::optional<ClampHit> contact;double approach_speed{};
     std::optional<CollisionEvent> event;std::optional<CollisionHaptic> haptic;
     ClampSweep palm_sweep,tip_sweep;    // palm_sweep is chest->target while released
-    bool held{};};                      // drawn at last frame's hand while this frame's sweep validates a jump
+    ClampSweep exclude_sweep;           // the leading probe, the met prop excluded (ClampInput::exclude)
+    bool held{};                        // drawn at last frame's hand while this frame's sweep validates a jump
+    bool contact_fresh{};};             // `contact`'s plane was made or re-hit by the last answered raw cast or since (I3)
 
 namespace clamp_detail {
 inline Vec3 rotate(const std::array<Vec3,3>& basis,Vec3 local) {return basis[0]*local.x+basis[1]*local.y+basis[2]*local.z;}
@@ -126,6 +141,7 @@ private:
         Vec3 point{},normal{},local{};double radius{},age{},direct_age{};
         std::uintptr_t entity{};std::uint16_t material{0xffff};bool tip{},refuted{};
         bool last_answer{};   // hit directly by this side's last answered result (it lands a frame late, or two in C14)
+        bool fresh{true};     // made or re-hit since the last answered raw (unslid) cast (I3; kept through frames without a result)
     };
     static constexpr std::size_t plane_capacity=8;
     struct Side {
@@ -135,6 +151,8 @@ private:
         std::array<Plane,plane_capacity> planes{};std::size_t plane_count{};
         double over_time{},clear_time{},since_haptic{1e9};unsigned overlap_count{},hold_frames{};
         Posted posted{Posted::none};bool last_slid{};ClampSweep posted_palm{},posted_tip{};ClampProbe posted_tip_probe{};
+        ClampSweep posted_exclude{};ClampProbe posted_exclude_probe{};bool posted_exclude_tip{};
+        std::optional<std::uintptr_t> loose_touch;   // a loose prop the last answered cast hit or started in (excluded from the next exclusion sweep)
         Vec3 seg_from{},seg_to{};bool has_segment{},seg_cut{};   // the path the last answered slot-0 sweep found free
         Vec3 clear_from_local{};bool has_clear_from{},last_overlap{};   // start of the last palm sweep that began free
         bool posted_slid{},slid_cut{};Vec3 slid_from{},slid_to{};unsigned slid_frames{1000};   // the last answered slid sweep
@@ -220,9 +238,9 @@ private:
         }
     }
     // Only a real surface hit makes a plane: an initial overlap or an invalid normal does not say where free space is.
-    void add_plane(Side& s,const ClampHit& hit,double radius,Vec3 local,bool tip) const {
+    void add_plane(Side& s,const ClampHit& hit,double radius,Vec3 local,bool tip,bool answer=true) const {
         if(!plane_hit(hit)) return;
-        const Plane plane{hit.point,hit.normal*(1/length(hit.normal)),local,radius,0,0,hit.entity,hit.material,tip,false,true};
+        const Plane plane{hit.point,hit.normal*(1/length(hit.normal)),local,radius,0,0,hit.entity,hit.material,tip,false,answer};
         std::size_t slot=s.plane_count;
         for(std::size_t i=0;i<s.plane_count;++i) {
             const auto& p=s.planes[i];
@@ -266,6 +284,7 @@ public:
     std::uint64_t repeated_updates(unsigned side) const {return side<2?repeated_updates_[side]:0;}
     // Frames held released because the re-acquire could not run: the chest was not finite or began inside geometry.
     std::uint64_t reacquire_blocked_frames(unsigned side) const {return side<2?blocked_frames_[side]:0;}
+
     // Contract: call once after every update that keeps the side (not after a yield or an invalid target), with the
     // position finally drawn (meet shift, blade push). The next frame's sweep starts there.
     void note_drawn(unsigned side,const WorldTrackedPose& root,Vec3 drawn) {
@@ -320,9 +339,18 @@ public:
         // What this side posted last frame decides how its results read; nothing posted, nothing to read.
         const Posted posted=s.posted;const ClampSweep answered=s.posted_palm,posted_tip=s.posted_tip;
         const ClampProbe tip_probe=s.posted_tip_probe;const bool answered_slid=s.posted_slid;
-        s.posted=Posted::none;s.posted_palm={};s.posted_tip={};s.posted_slid=false;
+        const ClampSweep posted_exclude=s.posted_exclude;const ClampProbe exclude_probe=s.posted_exclude_probe;const bool exclude_tip=s.posted_exclude_tip;
+        s.posted=Posted::none;s.posted_palm={};s.posted_tip={};s.posted_slid=false;s.posted_exclude={};
         if(s.slid_frames<1000) ++s.slid_frames;
         const std::optional<ClampHit>& slot0=in.palm_hit?in.palm_hit:in.chest_hit;
+        const bool slot0_loose=slot0 && in.is_loose(slot0->entity);   // a loose prop the push logic owns
+        if(posted!=Posted::none) {   // an answered cast: the planes it makes or re-hits are the fresh ones (I3)
+            // A slid sweep runs along the planes it slides on and cannot re-hit them: only a raw sweep's answer renews freshness.
+            if(!answered_slid) for(std::size_t i=0;i<s.plane_count;++i) s.planes[i].fresh=false;
+            s.loose_touch.reset();
+            if(slot0_loose) s.loose_touch=slot0->entity;
+            else if(posted_tip.valid && in.tip_hit && in.is_loose(in.tip_hit->entity)) s.loose_touch=in.tip_hit->entity;
+        }
 
         if(!finite(s.prev_local) || !finite(s.shift_local) || !finite(s.drawn_world) || !finite(s.target_world) ||
            !finite(s.prev_basis_local[0]) || !finite(s.prev_basis_local[1]) || !finite(s.prev_basis_local[2]))
@@ -335,7 +363,7 @@ public:
             const double age_step=std::min(dt,cfg_.plane_seconds*.5);
             for(std::size_t i=0;i<s.plane_count;++i) {s.planes[i].age+=age_step;s.planes[i].direct_age+=age_step;}
             // The re-acquire sweep: a chest inside geometry (crouched under a table) cannot validate the path.
-            if(posted==Posted::chest && slot0 && slot0->initial_overlap) release(s);
+            if(posted==Posted::chest && slot0 && slot0->initial_overlap && !slot0_loose) release(s);
             else if(posted!=Posted::none && answered.valid) {
                 const double t=slot0?hit_fraction(answered,*slot0):1.;
                 s.seg_from=answered.from;s.seg_to=answered.from+(answered.to-answered.from)*t;s.has_segment=true;
@@ -353,7 +381,8 @@ public:
                 if(posted==Posted::palm) {
                     // A hit that makes no plane (invalid normal) neither counts nor clears: the recovery sweep must not
                     // reset the deep-start count while the hand stays inside a surface it cannot describe.
-                    if(slot0 && slot0->initial_overlap) ++s.overlap_count;
+                    // An overlap with a loose prop never counts (I2): the push logic owns a prop on the hand.
+                    if(slot0 && slot0->initial_overlap) {if(!slot0_loose) ++s.overlap_count;}
                     else if(!slot0 || plane_hit(*slot0)) s.overlap_count=0;
                     if(cfg_.overlap_frames && s.overlap_count>=cfg_.overlap_frames) snap(side,s,out);
                 }
@@ -362,6 +391,13 @@ public:
                 judge(s,posted_tip,in.tip_hit,true);
                 if(in.tip_hit) add_plane(s,*in.tip_hit,tip_probe.radius,tip_probe.local,true);
             }
+            // The exclusion sweep (I1) only adds what lies behind the met prop: it judges nothing (it passes through the
+            // prop's planes by design) and does not steer the next sweep's slide.
+            if(s.state!=ClampState::released && posted_exclude.valid && in.exclude_hit && !in.exclude_hit->initial_overlap &&
+               !(posted_exclude.exclude && in.exclude_hit->entity==*posted_exclude.exclude)) {
+                if(exclude_tip) add_plane(s,*in.exclude_hit,exclude_probe.radius,exclude_probe.local,true);
+                else add_plane(s,*in.exclude_hit,cfg_.palm_radius,{},false,false);
+            }
             std::size_t kept=0;
             for(std::size_t i=0;i<s.plane_count;++i) if(s.planes[i].age<=cfg_.plane_seconds) s.planes[kept++]=s.planes[i];
             s.plane_count=kept;
@@ -369,8 +405,9 @@ public:
 
         bool rearmed=false;
         if(s.state==ClampState::released) {
-            const bool chest_inside=posted==Posted::chest && slot0 && slot0->initial_overlap;
-            if(posted==Posted::chest) s.clear_time=slot0?0:s.clear_time+dt;
+            const bool chest_inside=posted==Posted::chest && slot0 && slot0->initial_overlap && !slot0_loose;
+            // A re-acquire stopped only by a loose prop is clear (I2): the side re-arms within rearm_seconds.
+            if(posted==Posted::chest) s.clear_time=slot0 && !slot0_loose?0:s.clear_time+dt;
             if(chest_inside || !finite(in.chest)) ++blocked_frames_[side];
             if(s.clear_time<cfg_.rearm_seconds-1e-9) {released_frame(s,in,out);return finish(s,out);}
             // Re-arm: the chest-to-controller path stayed clear, so the controller is in free space. prev = target.
@@ -426,6 +463,7 @@ public:
         if(strongest<plane_capacity) {
             const auto& plane=s.planes[strongest];
             out.contact=ClampHit{plane.point,plane.normal,plane.entity,plane.material,false,true};
+            out.contact_fresh=plane.fresh;
             out.approach_speed=std::max(0.,-dot(velocity,plane.normal));
         }
         const bool was_contact=s.state==ClampState::contact;
@@ -483,6 +521,19 @@ public:
                                      end+clamp_detail::rotate(in.target.basis,in.tip.local),in.tip.radius,true};
                 if(finite(tip.from) && finite(tip.to)) {out.tip_sweep=tip;s.posted_tip=tip;s.posted_tip_probe=in.tip;}
             }
+            // I1: the leading probe (the palm without one) from the hand to the unslid target, the met prop excluded. A loose prop
+            // the last answered cast met (it hides the wall behind it from the closest-hit sweeps) is excluded when no prop is met.
+            const std::optional<std::uintptr_t> excluded=in.exclude?in.exclude:s.loose_touch;
+            if(excluded && out.palm_sweep.valid) {
+                const bool tip_probe_used=in.tip_enabled && clamp_detail::usable(in.tip);
+                const Vec3 local=tip_probe_used?in.tip.local:Vec3{};
+                ClampSweep ex{from+clamp_detail::rotate(from_basis,local),target+ahead+clamp_detail::rotate(in.target.basis,local),
+                              tip_probe_used?in.tip.radius:cfg_.palm_radius,true,excluded};
+                if(finite(ex.from) && finite(ex.to)) {
+                    out.exclude_sweep=ex;s.posted_exclude=ex;s.posted_exclude_tip=tip_probe_used;
+                    s.posted_exclude_probe=tip_probe_used?in.tip:ClampProbe{{},cfg_.palm_radius};
+                }
+            }
         }
         store(s,in,out.drawn.position);
         return finish(s,out);
@@ -508,6 +559,9 @@ inline Vec3 meet_drawn(const HandClamp& clamp,unsigned side,const ClampOutput& o
                        std::optional<std::uintptr_t> prop,Vec3 shift) {
     if(!meeting || !out.valid) return out.drawn.position;
     const bool held_elsewhere=out.contact && !(prop && out.contact->entity==*prop);
+    // The way out leaves the prop: it never carries the hand further into the prop than the clamp's plane on it says (a
+    // stale or flipped way out, the tracked hand past the prop's middle, would push the hand on through it and beyond).
+    if(!held_elsewhere && out.contact) {const double into=dot(shift,out.contact->normal);if(std::isfinite(into) && into<0) shift=shift-out.contact->normal*into;}
     return clamp.keep_out(side,target.basis,(held_elsewhere?out.drawn.position:target.position)+shift,prop);
 }
 
