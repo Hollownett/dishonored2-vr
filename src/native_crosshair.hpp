@@ -1,4 +1,5 @@
 #pragma once
+#include "crash_observer.hpp"
 #include "native_guarded_call.hpp"
 #include "native_readable_range.hpp"
 #include <windows.h>
@@ -155,6 +156,7 @@ private:
                     setter_(at+object_offset,&stage[0],reinterpret_cast<void*>(at+x_member_offset));
                     setter_(at+object_offset,&stage[1],reinterpret_cast<void*>(at+y_member_offset));
                 };
+                CrashOperation operation("native crosshair setter");
                 if(guarded_call(write_both)) {++applied_;applied=true;placed_=true;}
                 else {++rejected_;failed_.store(true,std::memory_order_release);} // stop writing until reinstall
             } else ++rejected_;
