@@ -437,7 +437,7 @@ int main() {
         assert(peak<.16+cfg.depth_speed+1e-9);       // never launched
         assert(pushes>60);                           // continuous: a push most frames of the contact (219 frames, the first ~55 before it)
     }
-    // --- mass-aware pushes (C5): one write raises the prop's speed by at most push_force_n * dt / mass; dt 0 (a first write) is not capped
+    // --- mass-aware pushes (C5): one write raises the prop's speed by at most push_force_n * dt / mass; a first write uses write_dt (1/90 s), so it is capped too
     {   // push_force_cap: an 8 kg box swatted at 3 m/s (200 N: 0.278 m/s a write at 90 Hz)
         const HandContactConfig cfg;NativeRigidBody box{};box.pose={{0,0,.2},{{{1,0,0},{0,1,0},{0,0,1}}}};box.bounds=NativeGrabBounds{{-.2,-.2,0},{.2,.2,.4}};
         const auto shape=prop_shape(box);const auto palm=lone({-.25,0,.2},.06);

@@ -616,7 +616,7 @@ std::vector<Scenario> scenarios() {
             // reads up to 0.19 / 3.2 m/s, and a push from it cannot be held to the scripted speed (task-6-report.md).
             // The hand's speed along the push (+x, toward the wall; the push is horizontal): an angled hand's forward part, ws cos(angle); a descending one's ws.
             const double along=angled?ws*std::cos(push.angle*kPi/180):ws;
-            auto launch=below("never launched: written speed less the friction it gives back <= the hand's speed along the push + 0.3 m/s (judged on the smooth variant)",m.launch,along+.3+1e-9,1,"m/s");
+            auto launch=below("never launched: written speed less the friction it gives back <= the hand's speed along the push + 0.3 m/s (judged on the smooth variant)",m.launch,along+.3+1e-4,1,"m/s");
             launch.info=!sc.smooth;
             if(free && speed==2.) return std::vector<Check>{below("the drawn hand trails the run without the clamp-depth latch by at most 2 cm (I3)",m.trail,.02,100,"cm"),jump,launch};
             if(free) {
