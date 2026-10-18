@@ -90,6 +90,7 @@ struct Rig {
     HandClamp clamp;World world;unsigned side=0;std::uint64_t epoch=1;double t0=0;unsigned frame=0;
     WorldTrackedPose root=level_frame({0,0,0},{1,0,0});
     ClampProbe tip{};bool tip_enabled=false;
+    ClampProbe wall_tip{};                     // ClampInput::wall_tip (radius 0: none)
     std::function<bool(unsigned)> drop_palm;   // true: lose this frame's palm result
     std::function<bool(unsigned)> post;        // C14 alternate mode: false skips this frame's cast
     std::optional<Vec3> note_override;         // drawn position reported to note_drawn once
@@ -105,7 +106,7 @@ struct Rig {
     ClampOutput step_pose(const WorldTrackedPose& target,bool yield=false) {
         ClampInput in{};
         in.now=now();in.epoch=epoch;in.root=root;in.target=target;in.chest=world.chest;
-        in.tip=tip;in.tip_enabled=tip_enabled;in.yield=yield;in.post=!post || post(frame);
+        in.tip=tip;in.tip_enabled=tip_enabled;in.wall_tip=wall_tip;in.yield=yield;in.post=!post || post(frame);
         for(const auto e:loose) if(in.loose_count<ClampInput::loose_capacity) in.loose[in.loose_count++]=e;
         in.exclude=exclude;
         if(have_last) {
@@ -114,7 +115,9 @@ struct Rig {
             else if(!(drop_palm && drop_palm(frame))) in.palm_hit=slot0;
             in.tip_hit=world.cast(last.tip_sweep);
             in.exclude_hit=world.cast(last.exclude_sweep);
+            in.wall_tip_hit=world.cast(last.wall_tip_sweep);
         }
+        CHECK(unsigned(last.palm_sweep.valid)+last.tip_sweep.valid+last.wall_tip_sweep.valid+last.exclude_sweep.valid<=4);   // C14: at most 4 casts a side
         last=clamp.update(side,in);have_last=true;++frame;holds+=last.held;
         clamp.note_drawn(side,root,note_override?*note_override:last.drawn.position);note_override.reset();
         CHECK(contract_breaks==0);
@@ -989,28 +992,100 @@ void note_drawn_carries_the_ease() {
 
 // Fix round 2 minor: over a met thin prop on a table, the exclusion sweep's table is held by the palm too (≤ 0.2 cm into it).
 void thin_prop_palm_stays_out_of_table() {
-    Rig r;r.world.wall_x=false;r.world.thin=true;r.loose={22};r.exclude=std::uintptr_t{22};
-    r.tip={{.09,0,0},.035};r.tip_enabled=true;
-    r.step({0,0,.5});
-    double deepest=0;
-    const auto watch=[&](const ClampOutput& o,Vec3 p) {
-        const Vec3 d=meet_drawn(r.clamp,0,o,pose_at(p),true,std::uintptr_t{22},{});
-        deepest=std::max(deepest,.05-d.z);              // the palm sphere's depth into the table (z = 0)
-        r.note_override=d;
-    };
-    r.move_to({0,0,.5},{.5,0,-.05},1,watch);           // forward and down: the forward tip leads, so the exclusion sweep is the tip's
-    for(int i=0;i<30;++i) {const auto o=r.step({.5,0,-.05});watch(o,{.5,0,-.05});}
-    CHECK(deepest<=.002);
+    for(const bool wall_tip:{false,true}) {   // fix round 4: the wall tip (the same forward probe) sweeps excluded in its own slot, the palm still leads into the prop
+        Rig r;r.world.wall_x=false;r.world.thin=true;r.loose={22};r.exclude=std::uintptr_t{22};
+        r.tip={{.09,0,0},.035};r.tip_enabled=true;if(wall_tip) r.wall_tip=r.tip;
+        r.step({0,0,.5});
+        double deepest=0;
+        const auto watch=[&](const ClampOutput& o,Vec3 p) {
+            const Vec3 d=meet_drawn(r.clamp,0,o,pose_at(p),true,std::uintptr_t{22},{});
+            deepest=std::max(deepest,.05-d.z);              // the palm sphere's depth into the table (z = 0)
+            r.note_override=d;
+        };
+        r.move_to({0,0,.5},{.5,0,-.05},1,watch);           // forward and down: the forward tip leads the motion, the palm leads into the prop's top face
+        for(int i=0;i<30;++i) {const auto o=r.step({.5,0,-.05});watch(o,{.5,0,-.05});}
+        CHECK(deepest<=.002);
+        CHECK(r.last.exclude_sweep.valid && r.last.exclude_sweep.radius==.05);   // the palm leads into the prop's top face
+        CHECK(r.last.wall_tip_sweep.valid==wall_tip && (!wall_tip || (r.last.wall_tip_sweep.exclude && *r.last.wall_tip_sweep.exclude==22)));
+    }
 }
 
-// Fix round 3: the leading probe of a push that also goes down is the one that reaches farthest horizontally (it meets the wall
-// first); a hand moving mostly down leads with the lowest one.
-void leading_probe_horizontal_first() {
-    const std::array<ClampProbe,2> hand{{{{.114,.065,-.011},.019},{{.091,.016,-.133},.012}}};   // thumb tip, a finger tip hanging down
+// Fix round 4: the leading probe follows the motion's own direction (no axis snapping), and the wall tip leads its horizontal
+// part: a wall meets first the probe that reaches farthest horizontally, however steeply the hand rises or falls.
+void leading_probes_follow_motion_and_walls() {
+    const double pi=3.14159265358979323846,c75=std::cos(75*pi/180),s75=std::sin(75*pi/180);
+    const std::array<ClampProbe,3> hand{{{{.114,.065,-.011},.019},{{.091,.016,-.133},.012},{{.030,.015,.026},.027}}};   // thumb tip, a finger tip hanging down, the back of the hand
     const auto grip=pose_at({});const ClampProbe fallback{{.09,0,0},.035};
-    CHECK(leading_probe(hand,grip,{1,0,-.3},fallback).local.x==.114);   // diagonal down: the thumb (a finger led before: 2.5 cm through the wall)
-    CHECK(leading_probe(hand,grip,{.2,0,-1},fallback).local.x==.091);   // mostly down: the finger
-    CHECK(leading_probe(hand,grip,{0,0,-1},fallback).local.x==.091);
+    CHECK(leading_probe(hand,grip,{1,0,-.3},fallback).local.x==.091);          // descending at 0.3: the hanging finger leads the motion
+    CHECK(leading_probe(hand,grip,{c75,0,s75},fallback).local.x==.030);        // rising at 75 degrees: the back of the hand
+    CHECK(wall_leading_probe(hand,grip,{1,0,-.3},fallback).local.x==.114);     // ... but the thumb meets a wall first
+    CHECK(wall_leading_probe(hand,grip,{c75,0,s75},fallback).local.x==.114);   // (5ee02eb: 7-8 cm into the wall at 45-75 degrees)
+    CHECK(wall_leading_probe(hand,grip,Vec3{c75,0,-s75}*.146,fallback).local.x==.114);   // 3.8 cm/s sideways is enough
+    CHECK(wall_leading_probe(hand,grip,{0,0,-1},fallback).local.x==.09);       // straight down: no horizontal lead, the probe stays
+    CHECK(wall_leading_probe(hand,grip,{.005,0,-1},hand[0]).local.x==.114);   // under 1 cm/s sideways: kept
+    CHECK(wall_leading_probe(hand,grip,{.03,0,0},hand[1]).local.x==.091);    // under 0.05 m/s: kept
+    // A probe in the lead is kept until another leads it by more than 5 mm: about 45 degrees the choice does not flicker.
+    const std::array<ClampProbe,2> pair{{{{.10,0,0},.02},{{0,0,.10},.02}}};   // forward, up
+    const auto at=[&](double degrees) {return Vec3{std::cos(degrees*pi/180),0,std::sin(degrees*pi/180)};};
+    ClampProbe current=leading_probe(pair,grip,at(40),fallback);
+    CHECK(current.local.x==.10);
+    unsigned flips=0;
+    for(int i=0;i<90;++i) {const auto next=leading_probe(pair,grip,at(i%2?44.:46.),current);flips+=!(next.local.z==current.local.z);current=next;}
+    CHECK(flips==0 && current.local.x==.10);                                   // the up probe leads by 2.5 mm at 46 degrees
+    CHECK(leading_probe(pair,grip,at(50),current).local.z==.10);              // by 1.2 cm at 50: it takes over
+    CHECK(wall_leading_probe(pair,grip,at(80),pair[1]).local.x==.10);         // a probe that does not lead horizontally is not kept
+}
+
+// Fix round 4: rising at 60 degrees into a wall, the probe leading the motion is the back of the hand; the wall tip (forward) is
+// swept too and holds the hand at the wall.
+void wall_tip_holds_a_rising_hand() {
+    for(const bool wall_tip:{true,false}) {
+        Rig r;r.world.floor=false;r.tip={{0,0,.06},.03};r.tip_enabled=true;
+        if(wall_tip) r.wall_tip={{.12,0,0},.02};
+        r.step({.5,0,.5});
+        double reach=0;unsigned swept=0;
+        r.move_to({.5,0,.5},{1.2,0,.5+.7*std::tan(60*3.14159265358979323846/180)},1,[&](const ClampOutput& o,Vec3) {
+            reach=std::max(reach,o.drawn.position.x+.12+.02);   // the forward probe's front
+            swept+=o.wall_tip_sweep.valid;
+        });
+        CHECK((swept>0)==wall_tip);
+        if(wall_tip) CHECK(reach<=1);             // held at the wall by the wall tip's plane
+        else CHECK(reach>1.05);                   // the palm alone: the forward probe 8.5 cm into the wall
+    }
+    if(g_mode==0) {   // the wall tip that is the tip is swept once (every frame casts here)
+        Rig r;r.tip={{.12,0,0},.02};r.tip_enabled=true;r.wall_tip=r.tip;
+        r.step({.5,0,.5});                         // the re-acquire
+        const auto o=r.step({.5,0,.5});CHECK(o.tip_sweep.valid && !o.wall_tip_sweep.valid);
+        r.tip_enabled=false;                       // C14 drops the fingertip sweeps: both
+        const auto q=r.step({.5,0,.5});CHECK(!q.tip_sweep.valid && !q.wall_tip_sweep.valid);
+    }
+}
+
+// Fix round 4: pushing a loose slab into a wall, the wall tip sweeps with the slab excluded in its own slot; the probe leading into
+// the slab's pressed face is that same forward probe, so no second exclusion sweep runs. The wall behind holds the forward probe.
+void wall_tip_sweeps_past_the_pressed_prop() {
+    Rig r;r.world.slab=true;r.tip={{0,0,.06},.03};r.tip_enabled=true;r.wall_tip={{.08,0,0},.02};r.loose={20};r.exclude=std::uintptr_t{20};
+    r.step({.5,0,.5});
+    ClampOutput o{};
+    r.move_x({.5,0,.5},1.3,1.5,[&](const ClampOutput& q,Vec3) {o=q;});
+    for(int i=0;i<5;++i) o=r.step({1.3,0,.5});
+    CHECK(o.wall_tip_sweep.valid && o.wall_tip_sweep.exclude && *o.wall_tip_sweep.exclude==20 && o.wall_tip_sweep.radius==.02);
+    CHECK(!o.exclude_sweep.valid);
+    const Vec3 d=meet_drawn(r.clamp,0,o,pose_at({1.3,0,.5}),true,std::uintptr_t{20},{});
+    CHECK(std::abs(d.x-(1-.005-.02-.08))<1e-6);
+}
+
+// Fix round 4 (B): what a caller draws on top of the clamp's hand (the meet's way out, the lab's table lift) never counts toward
+// the snap-back gap; the drawn hand still eases from it (note_drawn_carries_the_ease).
+void snap_timer_ignores_caller_additions() {
+    Rig r;r.world.floor=false;r.step({.5,0,.5});
+    ClampOutput o{};
+    for(int i=0;i<10;++i) o=r.step({1.1,0,.5});            // held at 0.945: the clamp's own push is 15.5 cm
+    for(int i=0;i<60;++i) {r.note_override=Vec3{.945,0,1.0};o=r.step({1.1,0,.5});   // a caller draws it 50 cm higher for 0.67 s
+        CHECK(!o.snapped && o.state!=ClampState::released);}
+    CHECK(r.clamp.snapbacks(0)==0 && o.drawn.position.z>.5);   // the drawn hand eases down from what was drawn
+    for(int i=0;i<60;++i) o=r.step({1.1,0,.5});
+    CHECK(close_to(o.drawn.position,{.945,0,.5},1e-6));
 }
 
 void level_frame_and_hit_conversion() {
@@ -1060,6 +1135,7 @@ int main() {
         release_eases_out();
         eased_hand_never_enters_plane();
         tip_probe_stops_fingers();
+        wall_tip_holds_a_rising_hand();
     }
     g_mode=0;
     deep_start_overlap_snaps();
@@ -1092,6 +1168,8 @@ int main() {
     moving_prop_planes_follow_the_prop();
     note_drawn_carries_the_ease();
     thin_prop_palm_stays_out_of_table();
-    leading_probe_horizontal_first();
+    leading_probes_follow_motion_and_walls();
+    wall_tip_sweeps_past_the_pressed_prop();
+    snap_timer_ignores_caller_additions();
     std::puts("PASS");
 }
