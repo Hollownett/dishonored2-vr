@@ -132,9 +132,6 @@ SKIPS = [
      "Wine: NativeInteractionAim::install installs NativeSlashSceneRate, which needs "
      "VirtualAlloc below the trampoline (see native_slash_speed_check); it fails with "
      "ERROR_INVALID_ADDRESS and install throws"),
-    (r"native_held_object_check", "run",
-     "Wine: GetTickCount64 advances in ~16 ms steps not aligned with Sleep; after Sleep(151) "
-     "the tick age is 144-145 ms, so the >150 ms stale-target case (line 261) cannot occur"),
 ]
 
 # cl catches hardware faults (bad reads) in __try/__except under plain /EHsc; clang

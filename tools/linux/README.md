@@ -39,6 +39,5 @@ Without `--keep-going` it stops at the first failure like `goto build_failed`.
   bind-flag validation, and anything needing the game, game data or art, PowerShell/cmd.exe or
   Windows-only Python APIs, are SKIPPED.
 - Wine's low address space is full, so trampoline/unwind-table checks that `VirtualAlloc` below
-  the trampoline (directly or through `NativeInteractionAim::install`) are SKIPPED. So is
-  `native_held_object_check`: Wine's `GetTickCount64` steps ~16 ms out of phase with `Sleep`.
+  the trampoline (directly or through `NativeInteractionAim::install`) are SKIPPED.
 - `cl` for python checks is a shim (`tools/linux/cl`) onto clang-cl.

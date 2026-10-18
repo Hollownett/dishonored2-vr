@@ -257,7 +257,7 @@ int main() {
     }
     {
         Fixture state;Held::Target captured{};std::uint64_t revision{};
-        assert(d2vr::NativeHeldObjectCheck::snapshot(captured,revision));Sleep(151);
+        assert(d2vr::NativeHeldObjectCheck::snapshot(captured,revision));while(GetTickCount64()-captured.tick<=150) Sleep(1);
         assert(!d2vr::NativeHeldObjectCheck::commit(captured,revision,output_position,output_axis));state.unchanged();
     }
     for(unsigned fault=0;fault<2;++fault) {
@@ -301,13 +301,6 @@ int main() {
         std::printf("held layer: tank filter 0x%x -> 0x%x for the hold, restored; bottle (DEBRIS) untouched\n",written[1][1],written[0][1]);
         Held::filter_seam_=nullptr;
     }
-    {
-        Fixture state;d2vr::NativeHeldObjectCheck::near_exhaustion();Held::publish(state.target);
-        Held::Target captured{};std::uint64_t revision{};assert(d2vr::NativeHeldObjectCheck::snapshot(captured,revision));
-        assert(revision==(std::numeric_limits<std::uint64_t>::max)());Held::clear();Held::publish(state.target);
-        assert(!Held::diagnostic_target(captured));
-        assert(!d2vr::NativeHeldObjectCheck::commit(state.target,revision,output_position,output_axis));state.unchanged();
-    }
     {   // nan_target_rejected / scaled_axis_rejected / reflection_rejected: invalid targets never replace the published one
         Fixture state;const auto before=Held::rejected_targets.load();
         auto bad=state.target;bad.pos[0]=7.f;bad.axis[4]=NAN;Held::publish(bad);
@@ -341,6 +334,13 @@ int main() {
         Held::publish(t);put(master+0x30c,std::array<float,9>{2,0,0,0,2,0,0,0,2});
         const auto before=Held::rejected_targets.load();state.place();state.unchanged();
         assert(!state.driven_right() && Held::rejected_targets.load()==before+1);
+    }
+    {
+        Fixture state;d2vr::NativeHeldObjectCheck::near_exhaustion();Held::publish(state.target);
+        Held::Target captured{};std::uint64_t revision{};assert(d2vr::NativeHeldObjectCheck::snapshot(captured,revision));
+        assert(revision==(std::numeric_limits<std::uint64_t>::max)());Held::clear();Held::publish(state.target);
+        assert(!Held::diagnostic_target(captured));
+        assert(!d2vr::NativeHeldObjectCheck::commit(state.target,revision,output_position,output_axis));state.unchanged();
     }
     Held::clear();Placement::process_owner().disable();
     std::puts("PASS actual held publish/place/anchor outputs and typed completion authority; owned buffers only, no engine/hook calls");
