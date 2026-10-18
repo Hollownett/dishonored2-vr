@@ -51,7 +51,7 @@ Out of scope for this version: FSR 4, Virtual Desktop, WiVRn/ALVR, flatpak Steam
    linux/d2vr-linux install --zip d2vr-vNNN-dll.zip
    ```
 
-   This copies the mod into the prefix (the mod home), the proxy and a one-line `d2vr-linux.ini` into the game folder, and downloads the OpenXR loader, verifying its hash. Offline, pass `--openxr-zip <OpenXR SDK zip>` instead. `--proxy <dir>` overrides the proxy location (default `build/linux-proxy`).
+   This copies the mod into the prefix (the mod home), the proxy and a one-line `d2vr-linux.ini` into the game folder, and downloads the OpenXR loader, verifying its hash. Offline, pass `--openxr-zip <OpenXR SDK zip>` instead. `--proxy <path to dinput8.dll>` overrides the proxy file (default `build/linux-proxy/dinput8.dll`).
 
    `install` refuses, and changes nothing, if the game's `Dishonored2.exe` is not the pinned build (17576867), if the release zip fails its hash check, or if the game folder already holds another mod's `dinput8.dll`.
 6. Let SteamVR be the host OpenXR runtime:
@@ -104,21 +104,23 @@ Alt-tabbing is safe. At launch the proxy appends `win_pauseOnFocusLoss "0"` and 
 
 Logs and artifacts live in the mod home, `<prefix>/drive_c/users/steamuser/AppData/Local/DishonoredVR/artifacts/`:
 
-- `linux-proxy.log` (the previous run is kept as `linux-proxy.previous.log`). Lines to look for:
+- `linux-proxy.log` (the previous run is kept as `linux-proxy.previous.log`). **If this file does not exist at all, the proxy never loaded:** check that the launch options contain `WINEDLLOVERRIDES="dinput8=n,b"` and that `dinput8.dll` is in the game folder (`doctor`, check "Proxy"). Lines to look for:
   - `game window found; waiting for start (trigger or 45 s)`
   - `start trigger` or `settle timeout`
   - `StartProbe begin ...`
-  - `StartProbe returned 0` means VR started.
+  - `StartProbe returned 0` means the VR session ran and ended normally.
+  - `StartProbe returned 2` means a previous VR session is still shutting down or restoring the game. Wait a few seconds and run `d2vr-linux start` again.
   - `StartProbe returned 3 (...\.git missing)` means the mod home is not installed. Run `install`.
   - `StartProbe returned 1 (see artifacts\dxgi-probe-failure.txt)` means the probe failed. Read `artifacts/dxgi-probe-failure.txt`.
   - `StopProbe returned 0` after `d2vr-linux stop`.
   - `expected exactly one d2vr_render_probe_arm_v*.dll`: the mod home holds zero or two mod DLLs. Re-run `install`.
-- `artifacts/dxgi-probe-failure.txt`: why the probe failed.
+- `artifacts/dxgi-probe-failure.txt`: why the probe failed to start.
+- `artifacts/xr-recoveries.log`: **why VR is not showing while the game runs.** If the proxy log stops at `StartProbe begin` and the headset stays dark, the mod is up but OpenXR session creation keeps failing and retrying; the reason (for example a LUID mismatch or the runtime not being available) is recorded here, not in `dxgi-probe-failure.txt`.
 - `artifacts/xr-live-status.json`: updates about once a second while VR runs.
 
 Common problems:
 
-- **"Game device differs from XR device requirements" (LUID mismatch).** The game and the VR compositor are on different GPUs. Check that `DXVK_FILTER_DEVICE_NAME` in the launch options matches the NVIDIA GPU name (re-run `launch-options`) and that the SteamVR compositor runs on the NVIDIA GPU.
+- **"Game device differs from XR device requirements" (LUID mismatch)**, found in `xr-recoveries.log` or `dxgi-probe-failure.txt`. The game and the VR compositor are on different GPUs. Check that `DXVK_FILTER_DEVICE_NAME` in the launch options matches the NVIDIA GPU name (re-run `launch-options`) and that the SteamVR compositor runs on the NVIDIA GPU.
 - **Black screen or shader errors.** The prefix needs the native `d3dcompiler_47`: `protontricks 403640 d3dcompiler_47`. `doctor` checks this.
 - **SteamVR was started after the game.** Quit the game, make sure SteamVR is running with the Quest connected, and launch the game again.
 - **Doctor reports the host OpenXR runtime missing.** Run `linux/d2vr-linux doctor --fix-openxr`.
@@ -149,7 +151,7 @@ Nobody has done this yet. It is the acceptance test for the Linux path. Record t
 1. `doctor` shows all 12 PASS with SteamVR running and the Quest connected through Steam Link.
 2. Launch Dishonored 2 from Steam. `linux-proxy.log` shows `game window found`.
 3. At the title screen, wait for `settle timeout` or run `d2vr-linux start`. The log shows `StartProbe begin`, and `artifacts/xr-live-status.json` updates about once a second.
-4. The headset shows the game image in both eyes, with no LUID-mismatch error in `dxgi-probe-failure.txt`.
+4. The headset shows the game image in both eyes, with no LUID-mismatch error in `xr-recoveries.log` or `dxgi-probe-failure.txt`. If the headset stays dark, copy `xr-recoveries.log` and `linux-proxy.log` into your report.
 5. Head tracking moves the view. Both Touch controllers track, and snap turn works.
 6. Load a save. Gameplay stays responsive after alt-tabbing to a terminal and back. If the game pauses on focus loss in the very first session, note it: the focus settings are written at launch and may only take effect from the next launch.
 7. `d2vr-linux stop`: the log shows `StopProbe returned 0` and then `StartProbe returned 0`. The game keeps running flat.
