@@ -6,6 +6,7 @@
 // transforms for the 20 body joints and both 69-joint arms (scaled skeleton);
 // export multiplies rotations by `scale` for skinning. No game calls or writes.
 #include "arm_body.hpp"
+#include "hand_reach.hpp"
 #include <algorithm>
 #include <string>
 #include <vector>
@@ -165,6 +166,10 @@ struct Output {
     std::vector<Xf> raw_arm[2];
     bool raw_hand_reached[2]{};
 };
+// One arm's reach as its last visible solve saw it, in solve space (hand_reach.hpp ArmReach before the world mapping):
+// the shoulder after the clavicle shrug, the unstretched arm length la+lb, and the wrist target in the hand_attachment
+// target's frame (inverse(hand)·wrist_target).
+struct ArmReachState {Vec3 shoulder{};double full{};Xf hand_to_wrist{};bool valid{};};
 
 class BodySolver {
     struct ArmState {
@@ -174,6 +179,7 @@ class BodySolver {
         std::uint64_t socket_token{};
         bool has_pole{},has_roll{},has_hold{};
         int finger_mode{};
+        ArmReachState reach{};
     };
 public:
     class FrozenArm {
@@ -300,13 +306,15 @@ public:
     double arm_scale(unsigned side) const {return side<2?arm_scale_[side]:1;}
     double torso_scale() const {return cal_.torso_scale;}
     const Skeleton& skeleton(int i) const {return sk_[i];}
+    // Reach of the last visible arm solve per side (not the raw-candidate or frozen re-solves); invalid after reset().
+    ArmReachState solved_reach(unsigned side) const {return side<2?arm_state_[side].reach:ArmReachState{};}
 
     // Call on reference-space epoch, native owner replacement or teleport.
     // Old planted feet and native blend sources cannot cross those boundaries.
     void reset_hold(int i) {arm_state_[i].has_hold=false;}
     void reset() {
         chest_={};feet_valid_=false;has_eye_=false;walk_=0;walk_on_=false;velocity_={};last_native_={};
-        for(int i=0;i<2;++i) {foot_[i]={};arm_state_[i].has_pole=false;arm_state_[i].has_roll=false;dragged_[i]=false;arm_state_[i].has_hold=false;arm_state_[i].socket_token=0;}
+        for(int i=0;i<2;++i) {foot_[i]={};arm_state_[i].has_pole=false;arm_state_[i].has_roll=false;dragged_[i]=false;arm_state_[i].has_hold=false;arm_state_[i].socket_token=0;arm_state_[i].reach={};}
         for(auto& p:progress_) p=0;
         for(auto& p:path_) p.clear();
     }
@@ -883,6 +891,7 @@ private:
         auto bind_attach=mul(inverse(s.bind[wrist_[i]]),s.bind[attach_[i]]);bind_attach.p=bind_attach.p*scale_;
         const auto wrist_target=mul(hand,inverse(native?bind_attach:hand_local(attach_[i])));
         const double la=length(s.bind[elbow_[i]].p-s.bind[upper_[i]].p),lb=length(s.bind[wrist_[i]].p-s.bind[elbow_[i]].p);
+        state.reach={{},la+lb,mul(inverse(hand),wrist_target),in.hand_valid[i]};
         // Clavicle: shrug toward far or high reaches (bounded).
         {
             const auto c=carried[clavicle_[i]].p,u=carried[upper_[i]].p;
@@ -900,25 +909,19 @@ private:
             }
         }
         const auto shoulder=w[upper_[i]].p;
+        state.reach.shoulder=shoulder;
         // Elbow pole: Boneworks policy (down/out, rises for high or rear reaches, palm-up turns it in).
         const auto palm=rotated(mul(wrist_target.q,conj(carried[wrist_[i]].q)),rotated(chest_delta,{0,0,-1}));
         const auto reach=wrist_target.p-shoulder;
         Vec3 pole=rig::boneworks_elbow_pole(length(reach)>1e-4?reach:fwd,fwd,outward,up,la+lb,dot(palm,up),
                                             state.has_pole?&state.pole:nullptr,dt);
         state.pole=pole;state.has_pole=true;
-        // Soft IK: near full reach the elbow straightens along an exponential instead of popping
-        // (2-bone IK has infinite d(elbow)/d(reach) at L); the hand stays exact through a small
-        // bone stretch, at most 6%, beyond which the hand stops short.
-        const double full=la+lb,soft=.08*full,d=length(reach);
-        double extension=1;
-        // Elbow straightness (softened distance / length) is continuous in d; when the stretch
-        // cap engages, the same arm shape is kept and the wrist stops short along the reach.
-        double target_distance=d;
-        if(d>full-soft) {
-            const double softened=full-soft*std::exp(-(d-(full-soft))/soft);
-            extension=std::min(1.06,d/softened);
-            target_distance=softened*extension;
-        }
+        // Soft IK (hand_reach.hpp soft_reach): near full reach the elbow straightens along an exponential instead of
+        // popping; the hand stays exact through a bone stretch of at most 6%, beyond which it stops short along the reach
+        // (max_exact_reach is where that starts). Elbow straightness is continuous in d; past the cap the arm shape is kept.
+        const double d=length(reach);
+        const auto soft=soft_reach(d,la+lb);
+        const double extension=soft.extension,target_distance=soft.target_distance;
         const auto toward=d>1e-9?shoulder+reach*(target_distance/d):wrist_target.p;
         const auto solved=solve_arm(shoulder,toward,pole,la*extension,lb*extension);
         reached=length(solved.wrist-wrist_target.p)<1e-5;
