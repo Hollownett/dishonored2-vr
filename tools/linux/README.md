@@ -12,8 +12,8 @@ be deleted afterwards). Running it means accepting Microsoft's CRT/SDK license (
 ## Use
     python3 tools/linux/run_build_cmd.py --keep-going     # everything, report all failures
     python3 tools/linux/run_build_cmd.py --only 'door_owner|dxgi_probe\.obj'   # matching steps (+ their run step)
-    python3 tools/linux/run_build_cmd.py --list | --dry-run | --no-compat | -v | --timeout N
-Exit 0 only if nothing FAILED/BLOCKED; `--strict` also exits 3 if anything is compile-only or skipped.
+    python3 tools/linux/run_build_cmd.py --list | --dry-run | -v | --timeout N
+Exit 0 only if nothing FAILED/BLOCKED; `--strict` also exits 3 if anything is skipped.
 Checks that print a skip notice and exit 0 are reported SKIPPED. Logs: `build/linux-harness/*.log`. Output: `build/`.
 Final summary: passed / failed / skipped; every SKIPPED line has a reason (`SKIPS` in the script).
 Without `--keep-going` it stops at the first failure like `goto build_failed`.
@@ -25,14 +25,20 @@ Without `--keep-going` it stops at the first failure like `goto build_failed`.
 - Warnings cl also raises (unused-*, sign-compare, return-type) are NOT muted: any not on the exact
   `TRACKED_WARNING_ALLOW` list (13 entries: unused/set-but-unused globals in dxgi_probe.cpp and 10
   tests, one SEH function ending, one signed compare in native_door_request_check) FAILs the step.
-- `PASS*` = compile/link only, from a rewritten copy of src/tests/tools (`clang_compat.py`; only when every original error is a known
-  clang-only one, else FAIL) because
-  clang-cl rejects code cl accepts: nested-struct default member initializers used in the enclosing
-  class, `static alignas(N) T`, nested `__try/__finally` (clang segfaults). The rewrite is unsound
-  for running, so those checks are never executed here; the real Windows run covers them.
+- The real sources compile unmodified. Keep them that way: clang-cl rejects three constructs cl
+  accepts. (1) A nested struct's default member initializers needed before the enclosing class is
+  complete: an in-class static member initializer (`inline static std::array<Nested,N> x_{};`) or a
+  default argument (`f(Nested n={})`). Define such a static after the class
+  (`inline std::array<C::Nested,N> C::x_{};`), or hoist the struct to namespace scope behind a
+  `using Nested=...;` alias. (2) `static alignas(N) T x;`: write `alignas(N) static T x;`.
+  (3) A `__try` nested inside a `__finally`, which crashes clang's SEH codegen: move the inner
+  `__try/__finally` into its own function.
 - Missing prebuilt FidelityFX `.lib`s (gitignored): the link drops them with `/force:unresolved`
   (only `ffx*` symbols allowed); such outputs are not runnable.
-- Checks needing a D3D11 GPU run under Wine's wined3d; the three that need real GPU output, and
-  anything needing the game, game art, PowerShell/cmd.exe or Windows-only Python APIs, are SKIPPED.
+- Checks needing a D3D11 GPU run under Wine's wined3d; those that need real GPU output or D3D11
+  bind-flag validation, and anything needing the game, game data or art, PowerShell/cmd.exe or
+  Windows-only Python APIs, are SKIPPED.
 - Wine's low address space is full, so trampoline/unwind-table checks that `VirtualAlloc` below
-  the trampoline are SKIPPED. `cl` for python checks is a shim (`tools/linux/cl`) onto clang-cl.
+  the trampoline (directly or through `NativeInteractionAim::install`) are SKIPPED. So is
+  `native_held_object_check`: Wine's `GetTickCount64` steps ~16 ms out of phase with `Sleep`.
+- `cl` for python checks is a shim (`tools/linux/cl`) onto clang-cl.

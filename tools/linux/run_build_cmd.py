@@ -22,14 +22,13 @@ TOOLCHAIN = Path(os.environ.get("D2VR_TOOLCHAIN", Path.home() / ".local/share/d2
 LLVM_BIN = TOOLCHAIN / "llvm" / "bin"
 XWIN = TOOLCHAIN / "xwin"
 WINEPREFIX = TOOLCHAIN / "wineprefix"
-WORK = ROOT / "build" / "linux-harness"       # logs, cl shim, compat copy
-COMPAT = WORK / "compat"
+WORK = ROOT / "build" / "linux-harness"       # logs, cl shim
 
 # clang-cl-only flags. Each silences a diagnostic that clang-cl emits at
 # /W4 /WX but cl does not (cl is clean on the same sources), or restores cl
 # semantics. Keep in sync with the README.
 CLANG_ONLY_FLAGS = [
-    "-ferror-limit=0",                    # see every error (compat gate needs them all)
+    "-ferror-limit=0",                    # see every error
     "-fno-crash-diagnostics",             # do not litter /tmp with reproducers
     "-Wno-unused-command-line-argument",  # e.g. /Fd: combined with /Zi /LD
     "-Wno-missing-braces",                # RUNTIME_FUNCTION{...} brace elision
@@ -95,6 +94,9 @@ SKIPS = [
      "needs the game's menu movies (tools/gen_menu_patches.py reads local game art)"),
     (r"native_art_movie_patch_check", "run",
      "needs the game's menu movie files (the test asserts its input file opens)"),
+    (r"glyph_swap_(async|gpu)_check", "run",
+     "needs artifacts/research/glyphs/extracted/ui_lib_controller_buttons.raw.iggytex "
+     "(extracted game data, gitignored, absent)"),
     # -- Windows-only tooling used inside the checks
     (r"tests/(render_perf_callback|render_perf_maintenance|repair_private_menu)_check\.py", "all",
      "uses subprocess.CREATE_NO_WINDOW / vcvars (Windows-only Python API)"),
@@ -111,16 +113,28 @@ SKIPS = [
     (r"tests/(sword_combat_routing|native_sword_contact_routing)_check\.py", "all",
      "the check compiles with cl and then executes the .exe directly (no Windows loader "
      "on Linux; the harness only runs executables through wine)"),
-    (r"(native_art_bounds|native_hud_fallback|eye_sharpen)_check", "run",
+    (r"(native_art_bounds|native_hud_fallback|eye_sharpen|game_xr_simulation)_check", "run",
      "Wine d3d11 (wined3d) has no usable GPU/GL device here: shader compile or "
      "GPU-computed pixels differ (needs a real or DXVK device)"),
     (r"fsr4_eye_upscaler_check", "run",
      "needs the AMD-signed FSR4 provider DLL and Authenticode verification (absent / "
      "unsupported under Wine)"),
-    (r"native_(choke_distance_scope|slash_speed|manual_equip_hooks|offered_choke)_check", "run",
+    (r"game_xr_wrist_recovery_check", "run",
+     "wined3d does not validate bind flags: CreateRenderTargetView on a texture without "
+     "D3D11_BIND_RENDER_TARGET succeeds (the D3D11 runtime returns E_INVALIDARG), so the "
+     "injected wrist swapchain failure never happens"),
+    (r"native_(choke_distance_scope|slash_speed|manual_equip_hooks|offered_choke|door_animation|"
+     r"assassination_receipt|manual_equip_runtime)_check", "run",
      "Wine: needs VirtualAlloc below the trampoline within 2 GB plus RtlAddFunctionTable; "
      "Wine's low address space is fully occupied, so the allocation fails with "
      "ERROR_INVALID_ADDRESS"),
+    (r"native_(interaction_install_order|interaction_stop|lean_query_trace)_check", "run",
+     "Wine: NativeInteractionAim::install installs NativeSlashSceneRate, which needs "
+     "VirtualAlloc below the trampoline (see native_slash_speed_check); it fails with "
+     "ERROR_INVALID_ADDRESS and install throws"),
+    (r"native_held_object_check", "run",
+     "Wine: GetTickCount64 advances in ~16 ms steps not aligned with Sleep; after Sleep(151) "
+     "the tick age is 144-145 ms, so the >150 ms stale-target case (line 261) cannot occur"),
 ]
 
 # cl catches hardware faults (bad reads) in __try/__except under plain /EHsc; clang
@@ -137,12 +151,6 @@ ASYNC_EH_CHECKS = re.compile(r"tests/(native_initial_contact|native_regular_cont
 SELF_SKIP = re.compile(r"(?im)^[^\n]{0,60}\bskipped\s*$|^no d3d11 device\b.*$")
 
 FFX_LIB_RE = re.compile(r"third_party/fidelityfx/libs/\S+\.lib$")
-
-# clang-cl failures that cl does not have; see clang_compat.py. A compile that
-# fails with one of these is retried on a rewritten copy of the sources.
-COMPAT_SIGNATURES = re.compile(
-    r"default member initializer for '\w+' needed within definition of enclosing class|"
-    r"GenerateSEHFinallyFunction|'alignas' attribute cannot be applied to types")
 
 
 class Step:
@@ -313,52 +321,18 @@ def wine_env():
     return env
 
 
-def run_proc(argv, env, log, timeout, cwd=ROOT):
+def run_proc(argv, env, log, timeout):
     # Output goes to a file, not a pipe: wine daemons spawned by the first run
     # inherit pipe descriptors and would keep a pipe open forever.
     with open(log, "wb") as f:
         try:
-            rc = subprocess.run(argv, cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=f,
+            rc = subprocess.run(argv, cwd=ROOT, env=env, stdin=subprocess.DEVNULL, stdout=f,
                                 stderr=subprocess.STDOUT, timeout=timeout).returncode
             note = ""
         except subprocess.TimeoutExpired:
             rc, note = 124, "\n[timeout after %ss]\n" % timeout
         f.write(note.encode())
     return rc, log.read_bytes().decode("utf-8", "replace")
-
-
-# Every error of the original compile must be one of the known clang-only
-# signatures, or a cascade they cause, before the compat retry may stand in for it.
-COMPAT_ERROR_OK = re.compile(
-    COMPAT_SIGNATURES.pattern + r"|no viable overloaded '='")  # cascade of the NSDMI error (invalid nested struct)
-
-
-def unexplained_errors(text):
-    """Error lines of a failed compile that are not explained by the clang-only limitations."""
-    lines = [l for l in text.splitlines() if re.search(r"\b(fatal )?error: ", l)]
-    if "GenerateSEHFinallyFunction" in text:
-        lines = [l for l in lines if "unable to execute command" not in l and "frontend command failed" not in l]
-    return [l for l in lines if not COMPAT_ERROR_OK.search(l)]
-
-
-def build_compat_tree():
-    """Rewritten copy of src/tests/tools C++ sources for the compat retry."""
-    sys.path.insert(0, str(HERE))
-    import clang_compat
-    if COMPAT.exists():
-        shutil.rmtree(COMPAT)
-    for top in ("src", "tests", "tools"):
-        for f in sorted((ROOT / top).rglob("*")):
-            if f.suffix not in (".cpp", ".hpp", ".h", ".c") or not f.is_file():
-                continue
-            dst = COMPAT / f.relative_to(ROOT)
-            dst.parent.mkdir(parents=True, exist_ok=True)
-            text = f.read_bytes().decode("utf-8", "surrogateescape")
-            dst.write_bytes(clang_compat.transform(text)[0].encode("utf-8", "surrogateescape"))
-    for name in ("third_party", "build"):
-        link = COMPAT / name
-        if not link.exists():
-            link.symlink_to(ROOT / name)
 
 
 def select_steps(steps, only):
@@ -420,9 +394,8 @@ def run():
     ap.add_argument("--list", action="store_true", help="list the steps and exit")
     ap.add_argument("--keep-going", action="store_true", help="do not stop at the first failure")
     ap.add_argument("--dry-run", action="store_true", help="print the translated commands without running them")
-    ap.add_argument("--no-compat", action="store_true", help="do not retry clang-only compile failures on the rewritten copy")
     ap.add_argument("--timeout", type=int, default=300, help="per-step timeout in seconds")
-    ap.add_argument("--strict", action="store_true", help="exit 3 if anything was compile-only or skipped")
+    ap.add_argument("--strict", action="store_true", help="exit 3 if anything was skipped")
     ap.add_argument("-v", "--verbose", action="store_true", help="show output of every step")
     opts = ap.parse_args()
 
@@ -445,9 +418,8 @@ def run():
         prepare_wine()
         install_cl_shim()
 
-    passed, compat_passed, failed, skipped, blocked = [], [], [], [], []
+    passed, failed, skipped, blocked = [], [], [], []
     exe_state = {}          # output exe -> (kind, reason), consulted by its run steps
-    compat_ready = False
     n = 0
     t0 = time.time()
     for i, st in enumerate(steps):
@@ -498,21 +470,6 @@ def run():
         log = WORK / (re.sub(r"[^A-Za-z0-9_.-]+", "_", label)[:150] + ".log")
         ts = time.time()
         rc, text = run_proc(argv, env, log, opts.timeout)
-        compat_note = False
-        if st.kind == "cl" and rc != 0 and not opts.no_compat and COMPAT_SIGNATURES.search(text):
-            if not compat_ready:
-                print("        (building rewritten source copy for clang-only failures: tools/linux/clang_compat.py)", flush=True)
-                build_compat_tree()
-                compat_ready = True
-            unmatched = unexplained_errors(text)
-            if unmatched:
-                text += "\n[harness] not retried: errors beyond the known clang-only signatures:\n" + "\n".join(unmatched) + "\n"
-            else:
-                rc2, text2 = run_proc(argv, env, log.with_suffix(".compat.log"), opts.timeout, cwd=COMPAT)
-                if rc2 == 0:
-                    rc, text, compat_note = 0, text2, True
-                else:
-                    text += "\n[harness] compat retry also failed:\n" + text2
         dt = time.time() - ts
 
         note = ""
@@ -532,14 +489,10 @@ def run():
             else:
                 exe_state[st.exe] = ("degraded", "linked without the prebuilt FidelityFX libs (absent from the repo); cannot run")
                 note = "link degraded: FidelityFX libs absent, %d ffx symbols unresolved" % len(unresolved)
-        if rc == 0 and compat_note and st.exe:
-            exe_state[st.exe] = ("compat", "built from the rewritten compat copy (clang_compat.py); not executed")
 
         if rc == 0:
-            (compat_passed if compat_note else passed).append(st.name)
-            print("%-7s %-60s %5.1fs%s%s" % ("PASS*" if compat_note else "PASS", st.name, dt,
-                                             "  [compat copy]" if compat_note else "",
-                                             "  [" + note + "]" if note else ""), flush=True)
+            passed.append(st.name)
+            print("%-7s %-60s %5.1fs%s" % ("PASS", st.name, dt, "  [" + note + "]" if note else ""), flush=True)
             if opts.verbose and text.strip():
                 print(text.rstrip())
         else:
@@ -553,13 +506,11 @@ def run():
 
     if opts.dry_run:
         return 0
-    print("\n==== summary: %d passed / %d compile-only / %d failed / %d skipped%s (%.0fs) ====" % (
-        len(passed), len(compat_passed), len(failed), len(skipped),
+    print("\n==== summary: %d passed / %d failed / %d skipped%s (%.0fs) ====" % (
+        len(passed), len(failed), len(skipped),
         " / %d blocked" % len(blocked) if blocked else "", time.time() - t0))
     for name, why in skipped:
         print("  SKIPPED %s -- %s" % (name, why))
-    for name in compat_passed:
-        print("  PASS*   %s -- compiled from the rewritten copy only" % name)
     for name in blocked:
         print("  BLOCKED %s" % name)
     for name in failed:
@@ -569,7 +520,7 @@ def run():
         return 1
     if failed or blocked:
         return 1
-    return 3 if opts.strict and (compat_passed or skipped) else 0
+    return 3 if opts.strict and skipped else 0
 
 
 if __name__ == "__main__":
