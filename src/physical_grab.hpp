@@ -77,7 +77,7 @@ public:
         const auto displacement=hand.position-previous_.position;
         // Check discontinuities even at duplicate or slow accepted timestamps,
         // before a released grip can convert old movement into a throw.
-        if(length(displacement)>.5) {valid_sample_=false;armed_=pressed_=false;velocity_={};tick_=tick;previous_=hand;velocity_origin_=hand.position;velocity_tick_=tick;return false;}
+        if(!(length(displacement)<=.5)) {valid_sample_=false;armed_=pressed_=false;velocity_={};tick_=tick;previous_=hand;velocity_origin_=hand.position;velocity_tick_=tick;return false;}
         // Samples inside one clock quantum leave velocity (and its baseline) alone; their motion enters the next spaced sample.
         if(tick-velocity_tick_>=grab_velocity_min_ms) {
             const auto dt=double(tick-velocity_tick_)*.001;

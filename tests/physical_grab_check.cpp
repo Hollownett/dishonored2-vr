@@ -153,5 +153,17 @@ int main() {
         hand.position.x+=.011;latest.sample(hand,.9f,true,1,148);
         assert(std::abs(latest.target().position.x-before-.011)<1e-4);
     }
+    // One non-finite hand sample mid-carry must not poison the velocity baseline for later samples.
+    {
+        PhysicalGrab nan_hand;auto hand=identity;auto held=identity;
+        nan_hand.sample(hand,0,true,1,100);nan_hand.sample(hand,0,true,1,116);nan_hand.sample(hand,.9f,true,1,132);
+        assert(nan_hand.bind(held));
+        hand.position.x+=.011;nan_hand.sample(hand,.9f,true,1,148);
+        auto bad=hand;bad.position.x=std::numeric_limits<double>::quiet_NaN();
+        nan_hand.sample(bad,.9f,true,1,164);
+        for(unsigned i=0;i<60;++i) {hand.position.x+=.011;nan_hand.sample(hand,0,true,1,180+16*i);}
+        assert(std::isfinite(nan_hand.velocity().x) && std::isfinite(nan_hand.velocity().y) && std::isfinite(nan_hand.velocity().z));
+        assert(nan_hand.velocity().x>.3);
+    }
     std::cout<<"PASS: grip hysteresis/rearm, relative pose, bounded dynamic motor/throw, focus/epoch/stale/blocked release, occupied-hand refusal and release\n";
 }
