@@ -8,8 +8,8 @@ static constexpr std::uintptr_t fixture_base=0x140000000,fixture_game=0x200000,f
 static std::map<std::uintptr_t,std::byte> memory;
 static bool race{},queue_in_stage{};static unsigned native_stages{},native_queues{};
 static std::array<void*,10> detours{};
-static alignas(16) std::array<std::byte,112> request;
-static alignas(16) d2vr::InteractionRay axes{};
+alignas(16) static std::array<std::byte,112> request;
+alignas(16) static d2vr::InteractionRay axes{};
 static int issued_id=-1;
 static void* slash_trampoline{};
 template<class T> static void put(std::uintptr_t at,T value) {

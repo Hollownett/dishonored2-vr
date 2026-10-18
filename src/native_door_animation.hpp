@@ -148,7 +148,7 @@ public:
     }
     unsigned char invoke_update(std::uintptr_t entry,std::uint32_t raw_dt,std::uintptr_t caller) {
         Prepared frame{};frame.entry=entry;++in_flight_;++callback_depth_;
-        __try {prepare_update(frame,caller,raw_dt);return update_body(frame,raw_dt);}__finally {__try {finish_update(frame);}__finally {--callback_depth_;--in_flight_;}}
+        __try {prepare_update(frame,caller,raw_dt);return update_body(frame,raw_dt);}__finally {finish_update_and_leave(frame);}
     }
 private:
     friend struct NativeDoorAnimationFixture;
@@ -312,6 +312,11 @@ private:
                 if(!frame.result && frame.index<receipt.count) {for(unsigned index=frame.index;index+1<receipt.count;++index)receipt.instances[index]=receipt.instances[index+1];--receipt.count;}
             }
         }__finally {if(frame.locked)state_.unlock();}
+    }
+    // invoke_update's cleanup: finish_update, then always leave the callback. Its own function because clang-cl cannot
+    // compile a __try nested in a __finally; same order, same guarantees, same exception specification as finish_update.
+    void finish_update_and_leave(Prepared& frame) {
+        __try {finish_update(frame);}__finally {--callback_depth_;--in_flight_;}
     }
     static void __fastcall input_hook(std::uintptr_t container,std::uintptr_t binding,std::uintptr_t input) {process_owner().invoke_input(container,binding,input);}
     static std::uintptr_t __fastcall evaluate_hook(std::uintptr_t schema,std::uintptr_t holder) {return process_owner().invoke_evaluate(schema,holder);}
