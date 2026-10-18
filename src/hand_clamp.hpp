@@ -54,6 +54,11 @@ struct ClampInput {
     // The met prop (I1): this side also sweeps its leading probe with that body excluded, so a wall behind the prop is held
     // as a plane (the closest-hit sweeps only ever report the prop in front of it). exclude_hit: last frame's result.
     std::optional<std::uintptr_t> exclude;std::optional<ClampHit> exclude_hit;
+    // The open hand's spheres in the grip frame (the set leading_probe chooses from). Every held plane keeps all of them out (and the
+    // probe that found it): a plane is a surface, not the probe that found it (sliding along a wall the side probes lead, and the forward
+    // fingers went 6 cm into the wall once only the palm was held). None: a plane holds only the probe that hit it.
+    static constexpr std::size_t hand_capacity=32;
+    std::array<ClampProbe,hand_capacity> hand{};std::size_t hand_count{};
     bool is_loose(std::uintptr_t entity) const {
         for(std::size_t i=0;i<std::min(loose_count,loose_capacity);++i) if(loose[i]==entity) return true;
         return false;
@@ -162,6 +167,7 @@ private:
 class HandClamp {
 public:
     static constexpr double shadow_seconds=.2;     // a plane kept only by shadowing gets this long past its last direct hit
+    static constexpr double contact_margin=.01;    // a plane the drawn hand is this close to does not age while no sweep reaches it
     static constexpr double max_lead=.15;          // the predictive extension never reaches farther per cast cadence
                                                    // (a jump is not extrapolated)
     static constexpr unsigned max_hold_frames=2;   // frames the hand may wait for a sweep to validate an unvalidated target
@@ -174,11 +180,13 @@ private:
         std::uintptr_t entity{};std::uint16_t material{0xffff};bool tip{},refuted{};
         bool last_answer{};   // hit directly by this side's last answered result (it lands a frame late, or two in C14)
         unsigned misses{};    // answered raw (unslid) casts since it was made or last re-hit (I3; frames without a result do not count)
+        bool touched{},news{};   // this frame: the drawn hand was within contact_margin of it; a sweep reached its region (judge)
     };
     static constexpr std::size_t plane_capacity=8;
     struct Side {
         bool has{};std::uint64_t epoch{};double last_now{};ClampState state{ClampState::free};
         Vec3 prev_local{},shift_local{};std::array<Vec3,3> prev_basis_local{};  // root (level player) frame, C11
+        std::array<ClampProbe,ClampInput::hand_capacity> hand{};std::size_t hand_count{};   // ClampInput::hand, this frame's
         Vec3 own_shift_local{};   // the clamp's own eased push: shift_local without what callers drew on top (note_drawn); the snap-back gap
         Vec3 drawn_world{},target_world{};std::array<Vec3,3> basis_world{};     // last frame in the world
         std::array<Plane,plane_capacity> planes{};std::size_t plane_count{};
@@ -270,6 +278,7 @@ private:
             if(p.tip!=tip) continue;
             const auto t=crossing(sweep,p.point,p.normal);
             if(!t) continue;   // the sweep never reached its region: no news
+            p.news=true;
             if(at && (*t>=*at || (*at-*t)*span<=.002)) {if(!p.refuted && p.direct_age<=shadow_seconds) p.age=0;}
             else p.refuted=true;
         }
@@ -297,16 +306,38 @@ private:
     // Pushes grip point p (oriented by basis) out of the planes by the probe's radius plus skin; adds each push to
     // `pushed` when given. direct_only: just the planes hit directly by this side's last answered result.
     // except: the planes of this entity are skipped.
+    // How far the hand reaches into a plane from the grip (oriented by basis): the most any of its spheres reaches along -normal
+    // (dot(R*local, -normal) + radius). The probe that made the plane, and with an open hand (ClampInput::hand) every one of its
+    // spheres too.
+    double reach(const Side& s,const std::array<Vec3,3>& basis,const Plane& plane) const {
+        const Vec3 into=plane.normal*-1.;
+        double r=dot(clamp_detail::rotate(basis,plane.local),into)+plane.radius;
+        if(!s.hand_count) return r;
+        for(std::size_t k=0;k<std::min(s.hand_count,s.hand.size());++k) {
+            const auto& probe=s.hand[k];
+            if(!clamp_detail::usable(probe)) continue;
+            const double q=dot(clamp_detail::rotate(basis,probe.local),into)+probe.radius;
+            if(std::isfinite(q)) r=std::max(r,q);
+        }
+        return r;
+    }
+    // How far grip point p (oriented by basis) is outside the plane's skin: negative when the hand is inside.
+    double clearance(const Side& s,const std::array<Vec3,3>& basis,Vec3 p,const Plane& plane) const {
+        return dot(p-plane.point,plane.normal)-reach(s,basis,plane)-cfg_.skin;
+    }
     void project(const Side& s,const std::array<Vec3,3>& basis,Vec3& p,double* pushed=nullptr,bool direct_only=false,
                  std::optional<std::uintptr_t> except=std::nullopt) const {
         for(std::size_t i=0;i<s.plane_count;++i) {
             const auto& plane=s.planes[i];
             if(direct_only && (plane.tip || !plane.last_answer)) continue;
             if(except && plane.entity==*except) continue;
-            const Vec3 offset=clamp_detail::rotate(basis,plane.local);
-            const double d=dot(p+offset-plane.point,plane.normal)-(plane.radius+cfg_.skin);
+            const double d=clearance(s,basis,p,plane);
             if(d<0) {p=p-plane.normal*d;if(pushed) pushed[i]-=d;}
         }
+    }
+    static void take_hand(Side& s,const ClampInput& in) {
+        s.hand_count=std::min(in.hand_count,in.hand.size());
+        for(std::size_t k=0;k<s.hand_count;++k) s.hand[k]=in.hand[k];
     }
     void project3(const Side& s,const std::array<Vec3,3>& basis,Vec3& p,double* pushed=nullptr,bool direct_only=false,
                   std::optional<std::uintptr_t> except=std::nullopt) const {
@@ -371,13 +402,14 @@ public:
         const double elapsed=in.now-s.last_now;
         if(!s.has || in.epoch!=s.epoch || !(elapsed>=0) || elapsed>cfg_.gap_seconds) {
             // Re-acquire: nothing from before is trusted. The chest sweep validates the path to the controller.
-            s=Side{};
+            s=Side{};take_hand(s,in);
             if(finite(in.chest)) {out.state=ClampState::free;post_chest(s,in,out);}
             else {release(s);out.state=ClampState::released;++blocked_frames_[side];}
             store(s,in,in.target.position);
             return finish(s,out);
         }
         const double dt=std::min(elapsed,.1);
+        take_hand(s,in);
         s.since_haptic+=dt;
 
         // What this side posted last frame decides how its results read; nothing posted, nothing to read.
@@ -409,7 +441,11 @@ public:
             // A long frame (a 100 ms hitch) ages a plane by at most half its life, so one hitch cannot expire a wall the
             // hand is pressed into before a sweep can confirm it again.
             const double age_step=std::min(dt,cfg_.plane_seconds*.5);
-            for(std::size_t i=0;i<s.plane_count;++i) {s.planes[i].age+=age_step;s.planes[i].direct_age+=age_step;}
+            for(std::size_t i=0;i<s.plane_count;++i) {
+                auto& plane=s.planes[i];
+                plane.age+=age_step;plane.direct_age+=age_step;plane.news=false;
+                plane.touched=!plane.refuted && clearance(s,s.basis_world,s.drawn_world,plane)<=contact_margin;
+            }
             // The re-acquire sweep: a chest inside geometry (crouched under a table) cannot validate the path.
             if(posted==Posted::chest && slot0 && slot0->initial_overlap && !slot0_loose) release(s);
             else if(posted!=Posted::none && answered.valid) {
@@ -455,6 +491,14 @@ public:
                 if(in.wall_tip_hit) add_plane(s,*in.wall_tip_hit,wall_probe.radius,wall_probe.local,true,true,in.is_loose(in.wall_tip_hit->entity));
             }
             behind(posted_exclude,in.exclude_hit,exclude_probe,exclude_tip);
+            // A plane the drawn hand still touches (within contact_margin, by any of its spheres) does not age in a frame no sweep
+            // reached it (a loose prop's plane still goes after fresh_misses missed casts): the swept probes need not come near it (sliding along a wall the side probes lead; stopped with only
+            // the fingers at it), and the fingers went 6 cm into the wall once it expired. A sweep that reaches it still refutes it,
+            // and one that a nearer surface stops still refreshes it only within shadow_seconds of its last direct hit.
+            for(std::size_t i=0;i<s.plane_count;++i) {
+                auto& plane=s.planes[i];
+                if(plane.touched && !plane.news && !plane.refuted) plane.age=std::max(0.,plane.age-age_step);
+            }
             std::size_t kept=0;
             // A loose prop moves: its plane is where the prop was when it was hit, and goes once fresh_misses answered raw casts
             // in a row miss it (a static plane lives plane_seconds). A swatted bottle's old faces otherwise held the hand 20-40 cm

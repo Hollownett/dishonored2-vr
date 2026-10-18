@@ -113,7 +113,7 @@ struct Metrics {
     double dx{},dy{},dz{},horizontal{},gap{},drift{},lift{},peak{},min_vx{},hand_peak{},jitter{},creep{},ripple{kNaN},depth{},overlap{},end_speed{},tilt{},drift_x{},peak_actual{},ride_ratio{kNaN},gap_range{kNaN},first_push{kNaN};
     double wall_gap{kNaN},wall_end{kNaN},wall_over{kNaN},into_wall{kNaN},reversal{kNaN},speed_at_reversal{kNaN},peak_after_reversal{kNaN},min_step{};
     unsigned pushes{},touch_frames{},pushes_last_second{},pushes_after_reversal{},clamp_holds{};
-    double meet_gap{kNaN},meet_overlap{kNaN},hand_over_wall{kNaN};
+    double meet_gap{kNaN},meet_overlap{kNaN},hand_over_wall{kNaN},hand_over_wall_rest{kNaN};
     double trail{kNaN};unsigned released_frames{};
     double latch_toggles{},max_jump{},probe_flips{};   // the meet's latch switching; the most the drawn hand moved in a frame beyond the tracked hand's own move; the leading probes' switches to another probe   // how far the drawn hand trails the no-depth-latch run (+x); frames the clamp was released   // while pushed: the farthest the nearest drawn proxy is from the prop, the deepest a drawn proxy is in it; the drawn hand's farthest reach past the wall
 };
@@ -133,6 +133,9 @@ struct Scenario {
     bool gap_applies{true},info{},steady{};                    // the gap to the fingertips means something; reported, not judged
     bool no_depth_latch{};                            // the meet does not latch on the clamp's depth (compose_meet depth_latch=false): the trail reference
     bool trail_check{};                               // also run with no_depth_latch and measure how far the drawn hand trails that run along +x
+    double roll{};                                    // the live grip turned this many radians about its forward axis (pi: thumb to -y, fingers up)
+    double wave{},wave_hz{},wave_from{};int wave_plane{};   // a circle of radius `wave` at wave_hz added to the hand path from wave_from (plane 0: x-y, 1: x-z, 2: y-z)
+    double rest_from{-1};                             // the drawn hand's farthest reach past the wall is also measured from this time on (hand_over_wall_rest)
     std::function<std::vector<Check>(const Scenario&,const Metrics&,const HandContactConfig&)> judge;
 };
 struct Run {Scenario scenario;std::vector<Frame> frames;std::vector<HandProxies> proxies;Metrics metrics;std::vector<Check> checks;double mass{};bool pass{};
@@ -141,6 +144,10 @@ struct Run {Scenario scenario;std::vector<Frame> frames;std::vector<HandProxies>
 Vec3 hand_at(const Scenario& s,double t) {
     Vec3 p=s.hand;double left=t;
     for(const auto& leg:s.legs) {const double d=std::min(left,leg.seconds);if(d<=0) break;p=p+leg.velocity*d;left-=d;}
+    if(s.wave>0 && t>s.wave_from) {
+        const double a=2*kPi*s.wave_hz*(t-s.wave_from),u=s.wave*(std::cos(a)-1),v=s.wave*std::sin(a);
+        p=p+(s.wave_plane==0?Vec3{u,v,0}:s.wave_plane==1?Vec3{u,0,v}:Vec3{0,u,v});
+    }
     return p;
 }
 // A hand held still against a prop is not still: white tracking noise, a physiological tremor and postural sway. Deterministic.
@@ -172,10 +179,15 @@ Run simulate(const Scenario& s,const rig::HandGeometry& geometry,const HandConta
     // The world cast is the production HandClamp (src/hand_clamp.hpp): it sweeps from last frame's drawn hand to the tracked grip (palm sphere + the leading
     // fingertip probe) and reads each sweep's result one frame late. Its world: the prop (entity 1) and the wall plane (entity 0); the table is the lift below.
     static const auto live_hand=live_geometry();
-    const auto grip_pose=[&](Vec3 position) {return s.live?live_pose(position):hand_pose(position,s.fingers,s.facing);};
+    const auto grip_pose=[&](Vec3 position) {
+        if(!s.live) return hand_pose(position,s.fingers,s.facing);
+        auto pose=live_pose(position);
+        if(s.roll!=0) {const double c=std::cos(s.roll),n=std::sin(s.roll);pose.basis[1]={0,c,n};pose.basis[2]={0,-n,c};}
+        return pose;
+    };
     const auto hand_at_pose=[&](const WorldTrackedPose& pose) {return s.live?hand_proxies(live_hand,pose,{0,0,0,0,0}):hand_proxies(geometry,pose,{0,0,0,0,0});};
     std::array<ClampProbe,hand_proxy_count> open_hand{};   // the open hand's proxies in grip coordinates
-    {const auto local=hand_at_pose(grip_pose({}));for(std::size_t k=0;k<hand_proxy_count;++k) open_hand[k]={local[k].centre,local[k].radius};}
+    {const auto local=hand_at_pose(s.live?live_pose({}):grip_pose({}));for(std::size_t k=0;k<hand_proxy_count;++k) open_hand[k]={local[k].centre,local[k].radius};}
     HandClamp clamp;ClampOutput clamp_out{};bool clamp_started=false;ClampProbe last_tip{{.09,0,0},.035},last_wall{},tip_before{},wall_before{};
     NativeHandContact::ClampMeet meet_r{};   // last frame's meet (its exclude feeds this frame's ClampInput, as fill_clamp_input does)
     const WorldTrackedPose root{{0,0,0},{{{1,0,0},{0,1,0},{0,0,1}}}};
@@ -245,6 +257,7 @@ Run simulate(const Scenario& s,const rig::HandGeometry& geometry,const HandConta
             tip_before=last_tip;wall_before=last_wall;
             in.tip=last_tip=leading_probe(open_hand,in.target,motion.velocity(),last_tip);
             in.wall_tip=last_wall=wall_leading_probe(open_hand,in.target,motion.velocity(),last_wall);
+            if(env_or("PUSH_LAB_WHOLE_HAND",1)!=0) {for(std::size_t k=0;k<open_hand.size();++k) in.hand[k]=open_hand[k];in.hand_count=open_hand.size();}   // PUSH_LAB_WHOLE_HAND=0: planes hold only their own probe
             // a probe-choice flip: the leader changes from one open-hand probe to another (leaving the start's default is a first choice, not a flip)
             const auto in_hand=[&](const ClampProbe& q) {for(const auto& o:open_hand) if(clamp_detail::same_probe(o,q)) return true;return false;};
             flips=unsigned(in_hand(tip_before) && !clamp_detail::same_probe(tip_before,last_tip))+unsigned(in_hand(wall_before) && !clamp_detail::same_probe(wall_before,last_wall));
@@ -407,6 +420,7 @@ Metrics measure(const Scenario& s,const std::vector<Frame>& fr) {
             m.meet_gap=gap;m.meet_overlap=over;
         }
         for(const auto& f:fr) if(std::isfinite(f.front_over)) m.hand_over_wall=std::isnan(m.hand_over_wall)?f.front_over:std::max(m.hand_over_wall,f.front_over);
+        if(s.rest_from>=0) for(const auto& f:fr) if(f.t>=s.rest_from && std::isfinite(f.front_over)) m.hand_over_wall_rest=std::isnan(m.hand_over_wall_rest)?f.front_over:std::max(m.hand_over_wall_rest,f.front_over);
     }
     {   // the ride: from the first driven frame to the last frame the hand moves
         std::size_t first=fr.size(),stop=0;
@@ -590,8 +604,7 @@ std::vector<Scenario> scenarios() {
             :"a pinned prop is the clamp's again; a meeting hand is kept out of the wall behind the prop: the drawn hand never passes the wall (G1); overlap and launch measure the tipped-bottle push, not G1 (info); the bottle's wall overshoot is judged at 0.146 m/s only (the lab's hard stop: one physics step of the write's speed)";
         s.judge=[ws,free,speed,push,angled](const Scenario&,const Metrics& m,const HandContactConfig&) {
             auto jump=below("the drawn hand never jumps: it moves at most 5 cm more in a frame than the tracked hand does (judged up to 2.5 m/s)",m.max_jump,.05,100,"cm");
-            // 2 m/s: 6 cm, as at 5ee02eb: a 30 ms tracking step of 6 cm is held one frame while the sweep validates it (Task 2's hold), then drawn (info)
-            jump.info=speed>2.5 || speed==2.;
+            jump.info=speed>2.5;
             if(free && speed==2.) return std::vector<Check>{below("the drawn hand trails the run without the clamp-depth latch by at most 2 cm (I3)",m.trail,.02,100,"cm"),jump};
             if(free) {
                 return std::vector<Check>{below("the meet's latch toggles at most twice (no flicker while chasing the bottle)",m.latch_toggles,2,1,"toggles"),jump};
@@ -605,6 +618,42 @@ std::vector<Scenario> scenarios() {
                 below("the drawn hand stops short of the wall: its farthest proxy past the wall plane <= 1 cm",m.hand_over_wall,.01,100,"cm"),launch};
             if(angled) checks.push_back(below("the leading probes switch to another probe at most twice",m.probe_flips,2,1,"flips"));
             return checks;};
+        all.push_back(s);
+    }
+    // G1 along a bare wall (fix round 5): the live hand, 50 cm to the side of the bottle, presses into the wall at 0.5 m/s (the tracked grip ends 3.8 cm past it,
+    // the fingers 17 cm) and slides 0.5 m along it, then rests 2 s. wall_slide_negy_*: toward -y, away from the thumb (the side probes lead the slide; at
+    // 4c68d93 the forward finger's wall plane expired and the fingers stayed 6 cm in the wall). wall_slide_posy_*: toward +y with the grip turned 180 degrees
+    // about its forward axis (thumb to -y, fingers up), the mirror case. wall_wobble_*: the hand pressed into the wall while it circles (3-8 cm, 1-2 Hz), on the
+    // bare wall and pushing the bottle into it. The drawn hand never passes the wall by more than 1 cm, nor in the 2 s after a slide stops.
+    for(const double dir:{-1.,1.}) for(const double speed:{.1,.5,1.5}) {
+        auto s=base(fmt("wall_slide_%s_%.0fcms",dir<0?"negy":"posy",speed*100).c_str(),"","");
+        s.title=fmt("The live hand presses into a bare wall and slides along it toward %sy at %.3g m/s, then rests 2 s",dir<0?"-":"+",speed);
+        s.desc="A wall 30 cm past the bottle's axis; the hand passes 50 cm beside the bottle. 0.2 s still, 0.6 m toward the wall at 0.5 m/s (the tracked grip ends 3.8 cm past the wall), 0.5 m along it, 2 s still.";
+        if(dir>0) s.desc+=" The grip is turned 180 degrees about its forward axis: thumb to -y, the fingers up, so the slide leads with the side away from the thumb.";
+        s.steady=true;s.step=.03;s.timing=.004;s.gap_applies=false;s.live=true;s.cast=true;s.meet=true;s.roll=dir>0?kPi:0.;
+        s.chest={-.562,.5067,.90};s.size={.138,.138,.416};s.prop={0,0,.208};s.mass=1.;s.wall=.30;
+        s.hand={-.262,.5067,.102};s.legs={{{0,0,0},.2},{{.5,0,0},1.2},{{0,dir*speed,0},.5/speed}};
+        s.rest_from=.2+1.2+.5/speed;s.seconds=s.rest_from+2;
+        s.expect="the drawn hand slides along the wall without entering it, and stays out once it stops (G1)";
+        s.judge=[](const Scenario&,const Metrics& m,const HandContactConfig&) {return std::vector<Check>{
+            below("the drawn hand stops short of the wall: its farthest proxy past the wall plane <= 1 cm",m.hand_over_wall,.01,100,"cm"),
+            below("after the slide stops it stays out for 2 s: its farthest proxy past the wall plane <= 1 cm",m.hand_over_wall_rest,.01,100,"cm")};};
+        all.push_back(s);
+    }
+    struct Wobble {const char* name;double radius,hz;int plane;bool bottle;};
+    for(const Wobble w:{Wobble{"wall_wobble_xy_3cm_1hz",.03,1,0,false},Wobble{"wall_wobble_xy_8cm_2hz",.08,2,0,false},Wobble{"wall_wobble_yz_5cm_1hz",.05,1,2,false},
+                        Wobble{"wall_wobble_bottle_xz_5cm_1hz",.05,1,1,true},Wobble{"wall_wobble_bottle_xy_3cm_2hz",.03,2,0,true}}) {
+        auto s=base(w.name,"","");
+        s.title=fmt("The live hand pressed into the wall%s circles %.0f cm at %.3g Hz (%s)",w.bottle?" through the pinned bottle":"",w.radius*100,w.hz,w.plane==0?"x-y":w.plane==1?"x-z":"y-z");
+        s.desc=std::string(w.bottle?"The wall_cast push (0.5 m/s) pins the bottle against the wall":"A bare wall 30 cm past the bottle's axis, the hand 50 cm beside the bottle, pressed in at 0.5 m/s")+
+            " (the tracked grip ends 3.8 cm past the wall); then for 3 s the hand circles in the given plane while it keeps pressing, and rests 1 s.";
+        s.steady=true;s.step=.03;s.timing=.004;s.gap_applies=false;s.live=true;s.cast=true;s.meet=true;
+        const double y=w.bottle?.0067:.5067;
+        s.chest={-.562,y,.90};s.size={.138,.138,.416};s.prop={0,0,.208};s.mass=1.;s.wall=.30;
+        s.hand={-.262,y,.102};s.legs={{{0,0,0},.2},{{.5,0,0},1.2}};s.wave=w.radius;s.wave_hz=w.hz;s.wave_plane=w.plane;s.wave_from=1.4;s.seconds=1.4+3+1;
+        s.expect="the drawn hand never passes the wall by more than 1 cm while the pressing hand wobbles (G1)";
+        s.judge=[](const Scenario&,const Metrics& m,const HandContactConfig&) {return std::vector<Check>{
+            below("the drawn hand stops short of the wall: its farthest proxy past the wall plane <= 1 cm",m.hand_over_wall,.01,100,"cm")};};
         all.push_back(s);
     }
     {   // a static clamp shoves the drawn hand into the bottle at the onset (sim v509 s2b/s2c)

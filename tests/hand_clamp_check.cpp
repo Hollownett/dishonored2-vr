@@ -91,6 +91,7 @@ struct Rig {
     WorldTrackedPose root=level_frame({0,0,0},{1,0,0});
     ClampProbe tip{};bool tip_enabled=false;
     ClampProbe wall_tip{};                     // ClampInput::wall_tip (radius 0: none)
+    std::vector<ClampProbe> hand;              // ClampInput::hand (empty: planes hold only their own probe)
     std::function<bool(unsigned)> drop_palm;   // true: lose this frame's palm result
     std::function<bool(unsigned)> post;        // C14 alternate mode: false skips this frame's cast
     std::optional<Vec3> note_override;         // drawn position reported to note_drawn once
@@ -109,6 +110,7 @@ struct Rig {
         in.tip=tip;in.tip_enabled=tip_enabled;in.wall_tip=wall_tip;in.yield=yield;in.post=!post || post(frame);
         for(const auto e:loose) if(in.loose_count<ClampInput::loose_capacity) in.loose[in.loose_count++]=e;
         in.exclude=exclude;
+        for(const auto& probe:hand) if(in.hand_count<ClampInput::hand_capacity) in.hand[in.hand_count++]=probe;
         if(have_last) {
             const auto slot0=world.cast(last.palm_sweep);
             if(last.state==ClampState::released) in.chest_hit=slot0;
@@ -1088,6 +1090,72 @@ void snap_timer_ignores_caller_additions() {
     CHECK(close_to(o.drawn.position,{.945,0,.5},1e-6));
 }
 
+// Fix round 5: every held plane keeps the whole open hand out, by its deepest sphere along the plane's normal. A small hand: fingers
+// 14 cm forward, two sides 6 cm out, one 8 cm down.
+const std::vector<ClampProbe> small_hand{{{.12,0,0},.02},{{.06,.04,0},.02},{{.06,-.04,0},.02},{{0,0,-.06},.02}};
+
+// Pressed into the wall and sliding along it, then still: the plane the forward fingers rest on is kept (no sweep reaches it: the
+// palm is 9 cm back), so the fingers stay out; without the open hand only the palm is held and the fingers go 9 cm in.
+void whole_hand_slides_along_a_wall() {
+    for(const bool whole:{true,false}) {
+        Rig r;r.world.floor=false;if(whole) r.hand=small_hand;
+        r.tip=small_hand[0];r.tip_enabled=true;          // the forward finger leads the push into the wall
+        r.step({.5,0,.5});
+        double reach=0;
+        const auto watch=[&](const ClampOutput& o,Vec3) {reach=std::max(reach,o.drawn.position.x+.14);};
+        r.move_x({.5,0,.5},1.03,.5,watch);
+        r.tip=small_hand[2];                              // the side probe leads the slide toward -y
+        r.move_to({1.03,0,.5},{1.03,-.5,.5},.5,watch);
+        for(int i=0;i<180;++i) watch(r.step({1.03,-.5,.5}),{});   // 2 s still
+        if(whole) CHECK(reach<=1+1e-6);   // never past the wall
+        else CHECK(reach>1.05);
+    }
+}
+
+// Whole-hand planes and edges: past the end of a wall the hand is let go once a sweep refutes the plane; in a corner it is held
+// out of both walls. Holds (frames drawn at last frame's hand while a jump is validated) are counted.
+void whole_hand_edges_and_corners() {
+    for(const double speed:{.5,3.}) for(const bool whole:{true,false}) {   // the hand slides past the end of the wall at y = 0.5
+        Rig r;r.world.floor=false;r.world.wall_x_end=.5;if(whole) {r.hand=small_hand;r.tip=small_hand[0];r.tip_enabled=true;}
+        const double side=whole?.06:.05,front=whole?.14:.05;   // how far the hand reaches sideways and forward
+        const Vec3 start{1.03,-.5,.5};
+        r.step({.5,-.5,.5});
+        r.move_x({.5,-.5,.5},start.x,1,ignore);
+        for(int i=0;i<10;++i) r.step(start);
+        const int before=r.holds;unsigned caught=0;
+        r.move_to(start,{1.03,1.5,.5},speed,[&](const ClampOutput& o,Vec3 p) {
+            if(o.drawn.position.y<.5-side) CHECK(o.drawn.position.x+front<=1+1e-6);   // in front of the wall: out of it
+            if(o.drawn.position.y>.5+side && o.drawn.position.x<p.x-1e-6) ++caught;   // the whole hand past the end and still held
+        });
+        if(g_mode==0) std::printf("%s past a wall end at %.1f m/s: %u frames caught, %d holds\n",whole?"whole hand":"palm only",speed,caught,r.holds-before);
+        // a plane past its wall's end goes once a raw sweep refutes it and it ages out: 5 and 13 frames for the palm alone at 4c68d93
+        CHECK(caught<=static_cast<unsigned>(std::lround(2*r.clamp.config().plane_seconds/dt))+2*static_cast<unsigned>(r.lead()) && r.holds-before<=static_cast<int>(r.lead()));
+        for(int i=0;i<30;++i) r.step({1.03,1.5,.5});
+        CHECK(close_to(r.last.drawn.position,{1.03,1.5,.5},1e-9));
+    }
+    {   // a static press into the corner x = 1, y = 1
+        Rig r;r.world.wall_y=true;r.hand=small_hand;r.tip=small_hand[0];r.tip_enabled=true;r.wall_tip=small_hand[0];   // the forward finger leads
+        r.step({.5,.5,.5});r.step({.5,.5,.5});
+        const int before=r.holds;
+        const auto inside=[&](const ClampOutput& o) {return std::max(o.drawn.position.x+.14-1,o.drawn.position.y+.06-1);};
+        r.move_to({.5,.5,.5},{1.05,1.03,.5},1,[&](const ClampOutput& o,Vec3) {CHECK(inside(o)<=.01 && !o.snapped);});
+        for(int i=0;i<270;++i) {const auto o=r.step({1.05,1.03,.5});CHECK(inside(o)<=.01 && !o.snapped);}
+        if(g_mode==0) std::printf("whole hand in a corner: %d holds, %.4f m from both walls\n",r.holds-before,-inside(r.last));
+        CHECK(r.last.state==ClampState::contact && inside(r.last)<=1e-6 && inside(r.last)>=-.005-1e-6 && r.clamp.snapbacks(0)==0);
+    }
+    for(const double speed:{1.,3.}) {   // pressed into the x wall, sliding into the y wall
+        Rig r;r.world.wall_y=true;r.hand=small_hand;r.tip=small_hand[1];r.tip_enabled=true;r.wall_tip=small_hand[1];   // the side probe leads +y
+        r.step({.5,0,.5});
+        r.move_x({.5,0,.5},1.,1,ignore);
+        for(int i=0;i<5;++i) r.step({1.,0,.5});
+        const int before=r.holds;double worst=-1;
+        r.move_to({1.,0,.5},{1.,1.15,.5},speed,[&](const ClampOutput& o,Vec3) {worst=std::max({worst,o.drawn.position.x+.14-1,o.drawn.position.y+.06-1});});
+        for(int i=0;i<10;++i) {const auto o=r.step({1.,1.15,.5});worst=std::max({worst,o.drawn.position.x+.14-1,o.drawn.position.y+.06-1});}
+        if(g_mode==0) std::printf("whole hand sliding into a corner at %.1f m/s: %d holds, deepest %.4f m\n",speed,r.holds-before,worst);
+        CHECK(worst<=.01);
+    }
+}
+
 void level_frame_and_hit_conversion() {
     auto f=level_frame({1,2,3},{0,2,5});
     CHECK(close_to(f.position,{1,2,3},0) && close_to(f.basis[0],{0,1,0},1e-12) && close_to(f.basis[1],{-1,0,0},1e-12) && close_to(f.basis[2],{0,0,1},1e-12));
@@ -1136,6 +1204,7 @@ int main() {
         eased_hand_never_enters_plane();
         tip_probe_stops_fingers();
         wall_tip_holds_a_rising_hand();
+        whole_hand_edges_and_corners();
     }
     g_mode=0;
     deep_start_overlap_snaps();
@@ -1171,5 +1240,6 @@ int main() {
     leading_probes_follow_motion_and_walls();
     wall_tip_sweeps_past_the_pressed_prop();
     snap_timer_ignores_caller_additions();
+    whole_hand_slides_along_a_wall();
     std::puts("PASS");
 }
