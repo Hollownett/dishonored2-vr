@@ -1,0 +1,424 @@
+// dinput8.dll proxy for Dishonored 2 under Proton. It forwards DirectInput8Create to the system dinput8 and, on a
+// worker thread, does in-process what launcher/Probe.cs Session does: wait for the game window and a start trigger,
+// write build\dxgi-probe.cfg, load the unchanged mod DLL from the mod home and call StartProbe. A stop-watcher thread
+// turns build\linux-stop into StopProbe. Fail safe: any failure is logged and the proxy idles; DirectInput8Create
+// keeps forwarding.
+#include <windows.h>
+#include <unknwn.h>
+
+#include <atomic>
+#include <exception>
+#include <optional>
+#include <string>
+#include <vector>
+
+#include "proxy_core.hpp"
+
+using namespace d2vr_linux;
+
+// Exported as DirectInput8Create by dinput8.def.
+extern "C" HRESULT WINAPI proxy_DirectInput8Create(HINSTANCE, DWORD, REFIID, LPVOID*, LPUNKNOWN);
+
+namespace {
+
+using ProbeFn = DWORD(WINAPI*)(void*);
+using DirectInput8CreateFn = HRESULT(WINAPI*)(HINSTANCE, DWORD, REFIID, LPVOID*, LPUNKNOWN);
+
+HMODULE g_self = nullptr;
+// Read through a volatile pointer so the marker stays a contiguous string in .rdata (modhome.is_our_proxy greps it).
+const char* volatile g_marker = kProxyMarker;
+
+// Paths below are written by the worker before it starts the stop watcher and are read-only afterwards.
+std::wstring g_build_dir;
+std::atomic<ProbeFn> g_stop_probe{nullptr};
+
+// ---------------- text and files
+
+std::string to_utf8(const std::wstring& w) {
+    if (w.empty()) return std::string();
+    int n = WideCharToMultiByte(CP_UTF8, 0, w.data(), static_cast<int>(w.size()), nullptr, 0, nullptr, nullptr);
+    std::string s(static_cast<size_t>(n > 0 ? n : 0), '\0');
+    if (n > 0) WideCharToMultiByte(CP_UTF8, 0, w.data(), static_cast<int>(w.size()), &s[0], n, nullptr, nullptr);
+    return s;
+}
+
+std::wstring from_utf8(const std::string& s) {
+    if (s.empty()) return std::wstring();
+    int n = MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()), nullptr, 0);
+    std::wstring w(static_cast<size_t>(n > 0 ? n : 0), L'\0');
+    if (n > 0) MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()), &w[0], n);
+    return w;
+}
+
+std::wstring num(unsigned long v) { return std::to_wstring(v); }
+
+std::wstring module_path(HMODULE module) {
+    std::wstring path(MAX_PATH, L'\0');
+    for (;;) {
+        DWORD n = GetModuleFileNameW(module, &path[0], static_cast<DWORD>(path.size()));
+        if (n == 0) return std::wstring();
+        if (n < path.size()) {
+            path.resize(n);
+            return path;
+        }
+        path.resize(path.size() * 2);
+    }
+}
+
+std::wstring parent(const std::wstring& path) {
+    size_t slash = path.find_last_of(L"\\/");
+    return slash == std::wstring::npos ? std::wstring() : path.substr(0, slash);
+}
+
+bool exists(const std::wstring& path) { return GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES; }
+
+bool is_dir(const std::wstring& path) {
+    DWORD a = GetFileAttributesW(path.c_str());
+    return a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY) != 0;
+}
+
+bool read_file(const std::wstring& path, std::string& out) {
+    out.clear();
+    HANDLE h = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+                           OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return false;
+    char buf[4096];
+    bool ok = true;
+    for (;;) {
+        DWORD got = 0;
+        if (!ReadFile(h, buf, sizeof buf, &got, nullptr)) {
+            ok = false;
+            break;
+        }
+        if (got == 0) break;
+        out.append(buf, got);
+    }
+    CloseHandle(h);
+    return ok;
+}
+
+// CREATE_ALWAYS replaces the file; OPEN_ALWAYS + FILE_APPEND_DATA appends.
+bool write_file(const std::wstring& path, const std::string& data, bool append) {
+    HANDLE h = CreateFileW(path.c_str(), append ? FILE_APPEND_DATA : GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_DELETE,
+                           nullptr, append ? OPEN_ALWAYS : CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return false;
+    DWORD put = 0;
+    bool ok = WriteFile(h, data.data(), static_cast<DWORD>(data.size()), &put, nullptr) && put == data.size();
+    CloseHandle(h);
+    return ok;
+}
+
+// ---------------- log: <modhome>\artifacts\linux-proxy.log, one ISO-8601-stamped line per event
+
+SRWLOCK g_log_lock = SRWLOCK_INIT;
+std::wstring g_log_path;  // empty until the worker opens the log; guarded by g_log_lock
+std::string g_log_pending;  // lines logged before that (e.g. by DirectInput8Create); guarded by g_log_lock
+
+void log_line(const std::wstring& msg) noexcept {
+    try {
+        SYSTEMTIME t;
+        GetLocalTime(&t);
+        wchar_t stamp[40];
+        swprintf_s(stamp, L"%04u-%02u-%02uT%02u:%02u:%02u.%03u ", t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute,
+                   t.wSecond, t.wMilliseconds);
+        const std::wstring line = stamp + msg + L"\r\n";
+        OutputDebugStringW((L"d2vr-linux proxy: " + line).c_str());
+        AcquireSRWLockExclusive(&g_log_lock);
+        if (g_log_path.empty())
+            g_log_pending += to_utf8(line);
+        else
+            write_file(g_log_path, to_utf8(line), true);
+        ReleaseSRWLockExclusive(&g_log_lock);
+    } catch (...) {
+    }
+}
+
+// Rotates any earlier log to linux-proxy.previous.log, then writes first_line and whatever was logged before.
+void open_log(const std::wstring& artifacts, const std::wstring& first_line) {
+    const std::wstring path = artifacts + L"\\" + kLogName;
+    if (exists(path)) MoveFileExW(path.c_str(), (artifacts + L"\\linux-proxy.previous.log").c_str(), MOVEFILE_REPLACE_EXISTING);
+    AcquireSRWLockExclusive(&g_log_lock);
+    g_log_path = path;
+    std::string pending;
+    pending.swap(g_log_pending);
+    ReleaseSRWLockExclusive(&g_log_lock);
+    log_line(first_line);
+    if (!pending.empty()) {
+        AcquireSRWLockExclusive(&g_log_lock);
+        write_file(path, pending, true);
+        ReleaseSRWLockExclusive(&g_log_lock);
+    }
+}
+
+// ---------------- DirectInput8Create forward
+
+INIT_ONCE g_real_once = INIT_ONCE_STATIC_INIT;
+DirectInput8CreateFn g_real_create = nullptr;
+
+BOOL CALLBACK resolve_real_dinput8(PINIT_ONCE, PVOID, PVOID*) {
+    wchar_t path[MAX_PATH + 16];
+    UINT n = GetSystemDirectoryW(path, MAX_PATH);
+    if (n == 0 || n >= MAX_PATH) {
+        log_line(L"DirectInput8Create: GetSystemDirectoryW failed (error " + num(GetLastError()) + L")");
+        return TRUE;
+    }
+    wcscat_s(path, L"\\dinput8.dll");
+    HMODULE real = LoadLibraryW(path);
+    if (real == nullptr) {
+        log_line(L"DirectInput8Create: cannot load " + std::wstring(path) + L" (error " + num(GetLastError()) + L")");
+        return TRUE;
+    }
+    if (real == g_self) {
+        log_line(L"DirectInput8Create: " + std::wstring(path) + L" resolves to this proxy");
+        FreeLibrary(real);
+        return TRUE;
+    }
+    auto fn = reinterpret_cast<DirectInput8CreateFn>(GetProcAddress(real, "DirectInput8Create"));
+    if (fn == nullptr || fn == &proxy_DirectInput8Create) {
+        log_line(L"DirectInput8Create: no usable DirectInput8Create in " + std::wstring(path));
+        return TRUE;
+    }
+    g_real_create = fn;
+    return TRUE;
+}
+
+// ---------------- stop watcher: build\linux-stop -> StopProbe
+
+DWORD WINAPI stop_watcher(void*) {
+    try {
+        const std::wstring stop = g_build_dir + L"\\" + kStopRequest;
+        bool delete_error_logged = false;
+        for (;;) {
+            Sleep(500);
+            if (!exists(stop)) continue;
+            if (!DeleteFileW(stop.c_str())) {  // act only once per request file
+                if (!delete_error_logged) log_line(L"cannot remove linux-stop (error " + num(GetLastError()) + L")");
+                delete_error_logged = true;
+                continue;
+            }
+            ProbeFn stop_probe = g_stop_probe.load();
+            if (stop_probe != nullptr)
+                log_line(L"StopProbe returned " + num(stop_probe(nullptr)));
+            else
+                log_line(L"StopProbe returned none (no session)");
+        }
+    } catch (const std::exception& e) {
+        log_line(L"stop watcher stopped: " + from_utf8(e.what()));
+    } catch (...) {
+        log_line(L"stop watcher stopped: unexpected exception");
+    }
+    return 0;
+}
+
+// ---------------- worker
+
+BOOL CALLBACK find_game_window_proc(HWND hwnd, LPARAM found) {
+    try {
+        DWORD pid = 0;
+        GetWindowThreadProcessId(hwnd, &pid);
+        if (pid != GetCurrentProcessId() || !IsWindowVisible(hwnd)) return TRUE;
+        wchar_t title[256];
+        // InternalGetWindowText does not send WM_GETTEXT, so a busy game thread cannot block the worker here.
+        int n = InternalGetWindowText(hwnd, title, 256);
+        if (n > 0 && is_game_window_title(std::wstring(title, static_cast<size_t>(n)))) {
+            *reinterpret_cast<bool*>(found) = true;
+            return FALSE;
+        }
+    } catch (...) {
+    }
+    return TRUE;
+}
+
+bool game_window_present() {
+    bool found = false;
+    EnumWindows(find_game_window_proc, reinterpret_cast<LPARAM>(&found));
+    return found;
+}
+
+std::vector<std::wstring> mod_dll_candidates(const std::wstring& build) {
+    std::vector<std::wstring> names;
+    WIN32_FIND_DATAW fd;
+    HANDLE h = FindFirstFileW((build + L"\\d2vr_render_probe_arm_v*.dll").c_str(), &fd);
+    if (h == INVALID_HANDLE_VALUE) return names;
+    do {
+        if ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0) names.push_back(fd.cFileName);
+    } while (FindNextFileW(h, &fd));
+    FindClose(h);
+    return names;
+}
+
+std::wstring expand_env(const wchar_t* text) {
+    DWORD n = ExpandEnvironmentStringsW(text, nullptr, 0);
+    if (n == 0) return std::wstring();
+    std::wstring out(n, L'\0');
+    n = ExpandEnvironmentStringsW(text, &out[0], n);
+    if (n == 0) return std::wstring();
+    out.resize(n - 1);
+    return out;
+}
+
+// GameKeys.PrepareConfig (launcher/Probe.cs:546-558), best effort.
+void append_focus_cvars() {
+    const std::wstring cfg_path =
+        expand_env(L"%USERPROFILE%\\Saved Games\\Arkane Studios\\Dishonored2\\base\\dishonored2Config.cfg");
+    std::string cfg;
+    if (cfg_path.empty() || !exists(cfg_path) || !read_file(cfg_path, cfg)) {
+        log_line(L"dishonored2Config.cfg not found");
+        return;
+    }
+    const std::string add = focus_cvars_to_append(cfg);
+    if (add.empty())
+        log_line(L"focus cvars present");
+    else if (write_file(cfg_path, add, true))
+        log_line(L"focus cvars appended");
+    else
+        log_line(L"focus cvars not appended (error " + num(GetLastError()) + L")");
+}
+
+struct ModExports {
+    ProbeFn status = nullptr, capabilities = nullptr, start = nullptr, stop = nullptr;
+    bool complete() const { return status && capabilities && start && stop; }
+};
+
+void run_worker() {
+    const std::wstring exe = module_path(nullptr);
+    std::string ini;
+    read_file(parent(exe) + L"\\" + kIniName, ini);  // a missing ini means the default mod home
+    const std::wstring home = mod_home_from_ini(from_utf8(ini));
+    if (!is_dir(home)) {
+        OutputDebugStringW((L"d2vr-linux proxy: mod home " + home + L" does not exist; idle\n").c_str());
+        return;
+    }
+    const std::wstring build = home + L"\\build";
+    const std::wstring artifacts = home + L"\\artifacts";
+    CreateDirectoryW(artifacts.c_str(), nullptr);
+    const DWORD pid = GetCurrentProcessId();
+    open_log(artifacts, L"proxy " + from_utf8(g_marker) + L" pid=" + num(pid) + L" exe=" + exe + L" modhome=" + home);
+
+    append_focus_cvars();
+
+    const std::wstring start_trigger = build + L"\\" + kStartTrigger;
+    if (DeleteFileW(start_trigger.c_str())) log_line(L"removed stale linux-start");
+    if (DeleteFileW((build + L"\\" + kStopRequest).c_str())) log_line(L"removed stale linux-stop");
+
+    g_build_dir = build;
+    HANDLE watcher = CreateThread(nullptr, 0, stop_watcher, nullptr, 0, nullptr);
+    if (watcher != nullptr)
+        CloseHandle(watcher);
+    else
+        log_line(L"cannot start the stop watcher (error " + num(GetLastError()) + L")");
+
+    std::string knob;
+    read_file(build + L"\\" + kSettleKnob, knob);
+    const unsigned settle = settle_seconds_from_knob(knob);
+
+    bool first_session = true;  // only the first session may start on the settle timeout
+    HMODULE mod = nullptr;
+    std::wstring loaded_name;
+    ModExports ex;
+    for (;;) {
+        while (!game_window_present()) Sleep(500);
+        const ULONGLONG found_at = GetTickCount64();
+        if (first_session)
+            log_line(L"game window found; waiting for start (trigger or " + num(settle) + L" s)");
+        else
+            log_line(L"waiting for start (trigger)");
+        for (;;) {
+            if (DeleteFileW(start_trigger.c_str())) {
+                log_line(L"start trigger");
+                break;
+            }
+            if (first_session && GetTickCount64() - found_at >= static_cast<ULONGLONG>(settle) * 1000) {
+                log_line(L"settle timeout");
+                break;
+            }
+            Sleep(500);
+        }
+        first_session = false;
+
+        std::wstring why;
+        const std::optional<std::wstring> pick = select_mod_dll(mod_dll_candidates(build), why);
+        if (!pick) {
+            log_line(why);
+            continue;
+        }
+        if (mod != nullptr && *pick != loaded_name) {
+            log_line(L"restart the game to load " + *pick);
+            continue;
+        }
+        const std::wstring dll = build + L"\\" + *pick;
+        if (!write_file(build + L"\\dxgi-probe.cfg", probe_config(pid), false)) {
+            log_line(L"cannot write build\\dxgi-probe.cfg (error " + num(GetLastError()) + L")");
+            continue;
+        }
+        for (const wchar_t* stale : {L"dxgi-probe-failure.txt", L"dxgi-probe-result.json", L"xr-live-status.json"})
+            DeleteFileW((artifacts + L"\\" + stale).c_str());
+
+        if (mod == nullptr) {
+            mod = LoadLibraryExW(dll.c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
+            if (mod == nullptr) {
+                log_line(L"cannot load " + dll + L" (error " + num(GetLastError()) + L")");
+                continue;
+            }
+            loaded_name = *pick;  // stays loaded until the game exits, as with the Windows launcher
+            ex.status = reinterpret_cast<ProbeFn>(GetProcAddress(mod, "ProbeStatus"));
+            ex.capabilities = reinterpret_cast<ProbeFn>(GetProcAddress(mod, "ProbeCapabilities"));
+            ex.start = reinterpret_cast<ProbeFn>(GetProcAddress(mod, "StartProbe"));
+            ex.stop = reinterpret_cast<ProbeFn>(GetProcAddress(mod, "StopProbe"));
+            if (ex.complete()) g_stop_probe.store(ex.stop);
+        }
+        if (!ex.complete()) {
+            log_line(loaded_name + L" does not export ProbeStatus, ProbeCapabilities, StartProbe and StopProbe");
+            continue;
+        }
+        const DWORD status = ex.status(nullptr);
+        if (status != 0) {
+            log_line(L"ProbeStatus=" + num(status) + L": a session is still active or restoring");
+            continue;
+        }
+        const DWORD caps = ex.capabilities(nullptr);
+        if (!capabilities_ok(caps)) {
+            log_line(L"ProbeCapabilities=" + num(caps) + L" lacks required " + num(kRequiredCapabilities));
+            continue;
+        }
+
+        log_line(L"StartProbe begin " + dll);
+        const DWORD code = ex.start(nullptr);
+        std::wstring result = L"StartProbe returned " + num(code);
+        if (code == 3) result += L" (" + home + L"\\.git missing)";
+        if (code == 1) result += L" (see artifacts\\dxgi-probe-failure.txt)";
+        log_line(result);
+        if (DeleteFileW(start_trigger.c_str())) log_line(L"removed linux-start written during the session");
+    }
+}
+
+DWORD WINAPI worker(void*) {
+    try {
+        run_worker();
+    } catch (const std::exception& e) {
+        log_line(L"worker stopped: " + from_utf8(e.what()));
+    } catch (...) {
+        log_line(L"worker stopped: unexpected exception");
+    }
+    return 0;
+}
+
+}  // namespace
+
+extern "C" HRESULT WINAPI proxy_DirectInput8Create(HINSTANCE inst, DWORD version, REFIID riid, LPVOID* out,
+                                                   LPUNKNOWN outer) {
+    InitOnceExecuteOnce(&g_real_once, resolve_real_dinput8, nullptr, nullptr);
+    if (g_real_create == nullptr) return E_FAIL;
+    return g_real_create(inst, version, riid, out, outer);
+}
+
+// Loader lock: only remember the module and start the worker.
+BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID) {
+    if (reason == DLL_PROCESS_ATTACH) {
+        DisableThreadLibraryCalls(instance);
+        g_self = instance;
+        HANDLE thread = CreateThread(nullptr, 0, worker, nullptr, 0, nullptr);
+        if (thread != nullptr) CloseHandle(thread);
+    }
+    return TRUE;
+}
