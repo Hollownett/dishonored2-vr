@@ -1,0 +1,10 @@
+WINE REGISTRY Version 2
+
+[Software\\Khronos\\OpenXR\\1] 1791989093
+#time=1dd5bea929f4040
+"ActiveRuntime"="C:\\openxr\\wineopenxr64.json"
+
+[Software\\Wow6432Node\\Khronos\\OpenXR\\1] 1791989093
+#time=1dd5bea929f4df6
+"ActiveRuntime"="C:\\openxr\\wineopenxr64.json"
+
