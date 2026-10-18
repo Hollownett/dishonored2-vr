@@ -47,44 +47,83 @@ def check(dxgi: str, aim: str) -> None:
     route = 'd2vr::route_clamp_hits(in,clamp_state[side],answer(0),answer(d2vr::NativeInteractionAim::tip_slot),answer(d2vr::NativeInteractionAim::wall_tip_slot),answer(d2vr::NativeInteractionAim::exclude_slot));'
     assert route in loop
     assert loop.index(route) < loop.index('native_grab.hand_contact().fill_clamp_input(side,in,clamp_exclude[side]);') < loop.index('clamped=hand_clamp.update(side,in);clamp_state[side]=clamped.state;')
+    # build/no-hand-clamp (M2): the pre-Task-5 drawn hand, exactly: chest palm sweep + blade, the meet() exemption. Only there.
+    legacy = between(loop, 'if(!hand_clamp_enabled){', '}else{')
+    for need in ('constautor=weapon_collision.update_with_palm(side,dt,chest,g.position,blade_axis,blade,query,blade_offset,blade_radius);',
+                 'if(!r.contact)cast_held[side]=0;elseif(palm_hit)cast_held[side]=palm_hit->entity;',
+                 'constautomeeting=native_grab.hand_contact().meet(side,cast_held[side]);',
+                 'cast_entities[side]=meeting.entity?meeting.entity:cast_held[side];', 'if(r.contact&&!meeting.prop)g.position=r.grip;',
+                 'if(r.contact)++weapon_contact_frames;', 'g.position=g.position+meeting.shift;', 'event=r.event;haptic=r.haptic;'):
+        assert need in legacy, need
+    assert 'hand_clamp.' not in legacy and 'clamp_hold' not in legacy and 'clamp_shot' not in legacy
+    assert 'hand_clamp_enabled=!fs::exists(root/L"build"/L"no-hand-clamp");' in s
+    assert 'staticboolhand_clamp_enabled=true;' in s
+    # The query: palm (slot 0) then blade (slot 1) on the pre-clamp path, the blade alone (slot 1) with the clamp.
+    for need in ('unsignedslot=hand_clamp_enabled?1u:0u;', 'constunsignedk=slot++;',
+                 'd2vr::NativeInteractionAim::post_weapon_segment(side,k,a,b,k?std::max(.02,blade_radius):.05);',
+                 'if(k==1)blade_hit=c;elseif(k==0)palm_hit=c;'):
+        assert need in loop, need
+    clamped_part = loop[loop.index(legacy) + len(legacy):]
+    assert '.meet(side,' not in s.replace(legacy, '') and 'cast_held' not in clamp.replace(legacy, '')
+    assert 'update_with_palm' not in s.replace(legacy, '')
     # Posts: palm/chest to slot 0, the tip, the wall tip and the exclusion sweep (with its excluded entity) to their slots; only while drawn.
-    posts = between(loop, 'if(clamped.valid&&!clamp_yield){constautopost=', 'constautomet=')
-    for need in ('d2vr::NativeInteractionAim::post_weapon_segment(side,slot,sweep.from,sweep.to,sweep.radius,sweep.exclude?*sweep.exclude:0);',
+    posts = between(clamped_part, 'if(clamped.valid&&!clamp_yield){constautopost=', 'constautomet=')
+    for need in ('d2vr::NativeInteractionAim::post_weapon_segment(side,post_slot,sweep.from,sweep.to,sweep.radius,sweep.exclude?*sweep.exclude:0);',
                  'if(!sweep.valid||(sweep.exclude&&!*sweep.exclude))return;', 'post(0,clamped.palm_sweep);',
                  'post(d2vr::NativeInteractionAim::tip_slot,clamped.tip_sweep);', 'post(d2vr::NativeInteractionAim::wall_tip_slot,clamped.wall_tip_sweep);',
                  'post(d2vr::NativeInteractionAim::exclude_slot,clamped.exclude_sweep);'):
         assert need in posts, need
-    # The meet composes with the clamp (Task 3: meet_clamp, never the old meet()); the re-acquire frame holds the hand.
-    assert '.meet(side,' not in s and 'hand_contact().meet(' not in s
-    meet = between(loop, 'constautomet=native_grab.hand_contact().meet_clamp(side,hand_clamp,clamped,target);', 'constautoblade_axis=')
-    for need in ('g.position=met.drawn;', 'held_by=met.held_by;', 'clamp_exclude[side]=met.exclude;',
+    # The meet composes with the clamp (Task 3: meet_clamp); the re-acquire frame holds the hand.
+    meet = between(clamped_part, 'constautomet=native_grab.hand_contact().meet_clamp(side,hand_clamp,clamped,target);', 'constautor=')
+    for need in ('g.position=met.drawn;', 'held_by=met.held_by;', 'clamp_exclude[side]=met.exclude;', 'met_prop=met.prop;',
                  'if(clamped.reacquired)if(constautokept=clamp_hold.hold(side,clamp_epoch,clamp_root,target.position,hand_clamp.config().snap_gap)){g.position=*kept;',
                  '}else{clamp_exclude[side].reset();clamp_hold.clear(side);}', 'cast_entities[side]=held_by;'):
         assert need in meet, need
-    # The blade sweeps from the drawn grip; note_drawn follows it every frame (missed_notes stays 0).
+    # The blade sweeps from the drawn grip; compose_blade (M1): the hand drawn kept out of the planes, the clamp told its own hand.
     blade = 'constautor=weapon_collision.update(side,dt,g.position,blade_axis,blade,query,blade_offset,blade_radius);'
-    assert blade in loop and 'weapon_collision.update(side,dt,chest' not in s
-    assert loop.index('clamped=hand_clamp.update(side,in);clamp_state[side]=clamped.state;') < loop.index('constautomet=') < loop.index(blade) < loop.index('g.position=r.grip;') \
-        < loop.index('hand_clamp.note_drawn(side,clamp_root,g.position);')
-    assert loop.index('d2vr::align_weapon_blade(g,*r.blade_dir,side==1&&reverse_sword);') < loop.index('hand_clamp.note_drawn(side,clamp_root,g.position);')
-    assert 'if(clamp_updated&&clamped.valid&&!clamp_yield)clamp_hold.note(side,clamp_epoch,clamp_root,g.position);' in loop
-    assert 'if(clamp_updated)hand_clamp.note_drawn(side,clamp_root,g.position);' in loop
-    # Casts are answered only in gameplay (Stage0, logic 2): elsewhere the clamp is not updated and the hand is held (a yield still resets it).
+    compose = 'constautocomposed=d2vr::compose_blade(hand_clamp,side,g.basis,g.position,r,met_prop);g.position=composed.drawn;'
+    note = 'if(clamp_updated)hand_clamp.note_drawn(side,clamp_root,composed.noted);'
+    assert blade in clamped_part and compose in clamped_part and note in clamped_part
+    assert clamped_part.index('clamped=hand_clamp.update(side,in);clamp_state[side]=clamped.state;') < clamped_part.index('constautomet=') \
+        < clamped_part.index(blade) < clamped_part.index(compose) < clamped_part.index(note)
+    assert clamped_part.index('d2vr::align_weapon_blade(g,*r.blade_dir,side==1&&reverse_sword);') < clamped_part.index(note)
+    assert 'note_drawn(side,clamp_root,g.position)' not in s and 'g.position=r.grip;' not in clamped_part
+    assert 'constboolclamp_drew=clamp_updated&&clamped.valid&&!clamp_yield;if(clamp_drew||!clamp_updated)clamp_hold.note(side,clamp_epoch,clamp_root,g.position);' in clamped_part
+    # Casts are answered only in gameplay (Stage0, logic 2). In a world UI the hand follows the controller kept out of the held planes
+    # (I1); the hold is for the resume (re-acquire) frame only.
     assert 'constboolclamp_live=game_logic_mask()==2;' in clamp
     gate = 'd2vr::ClampOutputclamped{};constboolclamp_updated=clamp_live||clamp_yield;if(clamp_updated){d2vr::ClampInputin{};'
-    assert gate in loop and loop.index(gate) < loop.index(route)
-    paused = between(loop, 'if(!clamp_updated){', '}elseif(clamped.valid&&!clamp_yield){constautopost=')
-    assert 'if(constautokept=clamp_hold.hold(side,clamp_epoch,clamp_root,target.position,hand_clamp.config().snap_gap))g.position=*kept;' in paused
-    assert 'post_weapon_segment' not in paused and 'hand_clamp.' not in paused.replace('hand_clamp.config()', '')
-    # Query lambda: the blade only (slot 1); the palm is the clamp's.
-    assert 'd2vr::NativeInteractionAim::post_weapon_segment(side,1,a,b,std::max(.02,blade_radius));' in loop
-    assert 'post_weapon_segment(side,k,' not in s
+    assert gate in clamped_part and clamped_part.index(gate) < clamped_part.index(route)
+    paused = between(clamped_part, 'if(!clamp_updated){', '}elseif(clamped.valid&&!clamp_yield){constautopost=')
+    assert 'g.position=hand_clamp.keep_out(side,raw.basis,raw.position,std::nullopt);' in paused
+    assert 'post_weapon_segment' not in paused and 'clamp_hold' not in paused and 'update(' not in paused
+    assert clamped_part.count('clamp_hold.hold(') == 1
+    # I2: while clamped, shots and the crosshair leave from the drawn barrel (direction untouched: the drawn barrel, v361).
+    assert 'constautoshot=d2vr::clamped_shot_offset(g.position,raw.position,clamp_drew,now,game_xr->pose_epoch());' in clamped_part
+    assert 'clamp_shot[side]=shot;' in clamped_part
+    shot = between(s, 'barrel_aim(left);aim_offset(left);', 'native_gameplay_aim_trace.publish(*body,left,')
+    origin = 'left.position=d2vr::clamped_shot_origin(left.position,shot,GetTickCount64(),game_xr->pose_epoch());'
+    assert shot.index('left=*steady;') < shot.index('shot=clamp_shot[0];') < shot.index(origin) < shot.index('native_left_aim.publish(*body,left,') \
+        < shot.index('native_shot_aim.publish(left,')
+    assert 'left.basis' not in shot[shot.index(origin):]
+    cross = between(s, 'barrel_aim(hand);aim_offset(hand);', 'native_crosshair.publish(')
+    assert cross.index('shot=clamp_shot[0];') < cross.index('hand.position=d2vr::clamped_shot_origin(hand.position,shot,GetTickCount64(),game_xr->pose_epoch());') \
+        < cross.index('constautotarget=hand.position+hand.basis[0]*30.0;')
+    assert 'hand.basis=' not in cross
+    # M4 (C9 selection): sword pickup reach and the wake/yank press read the controller; the sword drop position stays drawn.
+    for need in ('in.copy_distance=d2vr::length(at-hand_raw.position);', 'in.pickup_dot=d2vr::dot(hand_raw.basis[0],', 'hand_raw=hand_raw_world[1];',
+                 'w=hand_raw_world[h];v=hand_velocity[h];', 'r.pos={fl(hand_w.position.x),fl(hand_w.position.y),fl(hand_w.position.z)};'):
+        assert need in s, need
+    assert 'w=hand_world[h];' not in s and 'length(at-hand_w.position)' not in s
+    # M5: a default wall tip without hand geometry.
+    assert 'clamp_wall_tip{d2vr::default_clamp_wall_tip(),d2vr::default_clamp_wall_tip()};' in s
+    assert 'clamp_wall_tip[s]=d2vr::default_clamp_wall_tip();' in s
     # Events and haptics from either; contact frames from either.
-    for need in ('constautoevent=r.event?r.event:clamped.event;', 'constautohaptic=r.haptic?r.haptic:clamped.haptic;',
+    for need in ('event=r.event?r.event:clamped.event;haptic=r.haptic?r.haptic:clamped.haptic;',
                  'if(clamped.state==d2vr::ClampState::contact||r.contact)++weapon_contact_frames;', 'if(event){++weapon_contact_events;',
                  'if(event&&event->entity&&physical_grab_requested&&', 'if(haptic)game_xr->pulse(side,haptic->amplitude,haptic->seconds);'):
         assert need in clamp, need
-    for gone in ('r.event->', 'if(r.event)', 'if(r.haptic)', 'cast_held'):
+    for gone in ('r.event->', 'if(r.event)', 'if(r.haptic)'):
         assert gone not in clamp, gone
     # Swing speed (C9: attack detection) from the raw controller.
     assert 'constautorel=raw.position+raw.basis[0]*(side==1&&reverse_sword?-blade:blade)-' in loop
@@ -97,7 +136,7 @@ def check(dxgi: str, aim: str) -> None:
     assert 'staticvoidpublish_hand(unsignedside,constd2vr::WorldTrackedPose&drawn,constd2vr::WorldTrackedPose&raw){' in s
     producer = between(s, 'staticvoidpublish_hand(', 'staticboolnpc_entity(')
     assert 'window.emplace_back(qpc.QuadPart,raw.position);' in producer and '(raw.position-window.front().second)*(1/dt)' in producer
-    assert 'hand_world[side&1]=drawn;' in producer and 'g.position' not in producer
+    assert 'hand_world[side&1]=drawn;hand_raw_world[side&1]=raw;' in producer and 'g.position' not in producer
     assert 'if((hands.hands>>side)&1u)note_grip(side,raw_grips[side],hands.curls[side]);' in s
     assert 'constauto&p=raw_grips[side].position;reach_hands[side]=' in s
     assert 'note_grip(side,hands.grips' not in s and 'constauto&p=hands.grips[side].position;reach_hands' not in s
@@ -111,7 +150,7 @@ def check(dxgi: str, aim: str) -> None:
     # Status.
     status = between(s, '",\\"hand_clamp\\":{\\"active\\":', '",\\"hud_relayouts\\":')
     for field in ('contact_frames', 'snapbacks', 'reach_clamped', 'yields', 'missed_notes', 'repeated_updates', 'reacquire_blocked',
-                  'reacquire_holds', 'unanswered', 'cast_us', 'cast_us_max', 'tip_probe', 'alternate', 'exclusion', 'self_hits', 'unmapped'):
+                  'reacquire_holds', 'unanswered', 'cast_us', 'cast_us_max', 'tip_probe', 'alternate', 'enabled', 'exclusion', 'self_hits', 'unmapped'):
         assert '\\"' + field + '\\":' in status, field
     assert s.index('",\\"weapon_collision\\":{') < s.index('",\\"hand_clamp\\":{\\"active\\":')
 
@@ -152,8 +191,10 @@ if __name__ == '__main__':
         ('sweep.radius,sweep.exclude?*sweep.exclude:0);', 'sweep.radius);'),
         ('native_grab.hand_contact().fill_clamp_input(side,in,clamp_exclude[side]);', ''),
         ('clamp_exclude[side]=met.exclude;', ''),
-        ('hand_clamp.note_drawn(side,clamp_root,g.position);', ''),
-        ('const auto event=r.event?r.event:clamped.event;', 'const auto event=r.event;'),
+        ('if(clamp_updated) hand_clamp.note_drawn(side,clamp_root,composed.noted);', ''),
+        ('hand_clamp.note_drawn(side,clamp_root,composed.noted);', 'hand_clamp.note_drawn(side,clamp_root,composed.drawn);'),
+        ('g.position=composed.drawn;', 'g.position=r.grip;'),
+        ('event=r.event?r.event:clamped.event;', 'event=r.event;'),
         ('in.post=d2vr::clamp_posts(clamp_alternate,hand_clamp_frame,side);', 'in.post=true;'),
         ('hand_clamp_budget.note(d2vr::NativeInteractionAim::clamp_cast_us_.load(),clamp_now);', ''),
         ('hand_clamp=d2vr::HandClamp{};hand_clamp_budget.reset();', ''),
@@ -161,7 +202,19 @@ if __name__ == '__main__':
         ('if(clamped.reacquired) if(const auto kept=', 'if(false) if(const auto kept='),
         ('const bool clamp_updated=clamp_live || clamp_yield;', 'const bool clamp_updated=true;'),
         ('const bool clamp_live=game_logic_mask()==2;', 'const bool clamp_live=true;'),
-        ('if(clamp_updated) hand_clamp.note_drawn(', 'hand_clamp.note_drawn('),
+        ('g.position=hand_clamp.keep_out(side,raw.basis,raw.position,std::nullopt);',
+         'if(const auto kept=clamp_hold.hold(side,clamp_epoch,clamp_root,target.position,hand_clamp.config().snap_gap)) g.position=*kept;'),
+        ('g.position=hand_clamp.keep_out(side,raw.basis,raw.position,std::nullopt);', 'g.position=raw.position;'),
+        ('if(clamp_drew || !clamp_updated) clamp_hold.note(', 'if(clamp_drew) clamp_hold.note('),
+        ('left.position=d2vr::clamped_shot_origin(left.position,shot,GetTickCount64(),game_xr->pose_epoch());', ''),
+        ('hand.position=d2vr::clamped_shot_origin(hand.position,shot,GetTickCount64(),game_xr->pose_epoch());', ''),
+        ('d2vr::clamped_shot_offset(g.position,raw.position,clamp_drew,', 'd2vr::clamped_shot_offset(g.position,raw.position,false,'),
+        ('in.copy_distance=d2vr::length(at-hand_raw.position);', 'in.copy_distance=d2vr::length(at-hand_w.position);'),
+        ('w=hand_raw_world[h];v=hand_velocity[h];', 'w=hand_world[h];v=hand_velocity[h];'),
+        ('hand_clamp_enabled=!fs::exists(root/L"build"/L"no-hand-clamp");', 'hand_clamp_enabled=true;'),
+        ('const auto r=weapon_collision.update_with_palm(side,dt,chest,', 'const auto r=weapon_collision.update(side,dt,'),
+        ('unsigned slot=hand_clamp_enabled?1u:0u;', 'unsigned slot=1u;'),
+        ('clamp_wall_tip{d2vr::default_clamp_wall_tip(),d2vr::default_clamp_wall_tip()};', 'clamp_wall_tip{};'),
     )
     aim_mutations = (
         ('weapon_slots=14;', 'weapon_slots=12;'),

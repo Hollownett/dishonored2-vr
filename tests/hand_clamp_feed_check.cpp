@@ -138,10 +138,99 @@ void reacquire() {
     step({.5,0,1},true);CHECK(!out.reacquired);
     CHECK(clamp.missed_notes(0)==0 && clamp.repeated_updates(0)==0);
 }
+// M1: a 4.5 m/s sword stab 20 cm into a wall, in the publication's order (clamp -> blade from the drawn grip -> compose_blade ->
+// note_drawn). The blade's answers are one frame late (the previous segment's hit), as weapon_hit gives them. Judged: once the
+// blade touches, the tip never recoils more than 5 mm off the surface and settles on it.
+void blade_stab() {
+    HandClamp clamp;WeaponCollision blade_policy;ClampOutput out{};double now=0;bool started=false;
+    const auto root=level_frame({0,0,0},{1,0,0});const double blade=.65;
+    std::optional<CollisionHit> last_hit;   // what the previous frame's blade segment met
+    double worst_recoil=0,last_tip=0;bool touched=false;
+    for(int f=0;f<90;++f) {
+        const double x=std::min(.55,.2+.05*f);const Vec3 target{x,0,1};
+        ClampInput in{};in.now=now;in.epoch=1;in.root=root;in.target=pose_at(target);in.chest={0,0,1};in.tip=default_clamp_tip();in.wall_tip=default_clamp_wall_tip();
+        if(started) route_clamp_hits(in,out.state,wall_cast(out.palm_sweep),wall_cast(out.tip_sweep),wall_cast(out.wall_tip_sweep),std::nullopt);
+        out=clamp.update(0,in);started=true;
+        const Vec3 hand=out.drawn.position;
+        const auto query=[&](Vec3 a,Vec3 b)->std::optional<CollisionHit> {
+            const auto answer=last_hit;last_hit.reset();
+            if(b.x>1) {const double t=(1-a.x)/(b.x-a.x);last_hit=CollisionHit{a+(b-a)*t,{-1,0,0},t,7};}
+            return answer;
+        };
+        const auto r=blade_policy.update(0,dt,hand,{1,0,0},blade,query);
+        const auto composed=compose_blade(clamp,0,in.target.basis,hand,r,std::nullopt);
+        clamp.note_drawn(0,root,composed.noted);
+        last_tip=composed.drawn.x+blade;
+        if(r.contact) touched=true;
+        if(touched) worst_recoil=std::max(worst_recoil,1-last_tip);
+        now+=dt;
+    }
+    CHECK(touched && worst_recoil<=.005 && std::abs(last_tip-1)<1e-6);
+    CHECK(clamp.missed_notes(0)==0 && out.state==ClampState::free);
+    std::printf("blade_stab: worst recoil %.4f m, settled tip %.6f\n",worst_recoil,last_tip);
+}
+
+// A blade push never moves the hand through a plane the clamp holds: the hand pressed into the wall at x=1, the reversed blade's
+// tip 10.5 cm into a surface behind (x < 0.4) pushes it straight back toward the wall.
+void blade_push_stays_out() {
+    HandClamp clamp;ClampOutput out{};double now=0;bool started=false;const auto root=level_frame({0,0,0},{1,0,0});
+    for(int f=0;f<60;++f) {
+        ClampInput in{};in.now=now;in.epoch=1;in.root=root;in.target=pose_at({1.05,0,1});in.chest={0,0,1};in.tip_enabled=false;
+        if(started) route_clamp_hits(in,out.state,wall_cast(out.palm_sweep),std::nullopt,std::nullopt,std::nullopt);
+        out=clamp.update(0,in);started=true;clamp.note_drawn(0,root,out.drawn.position);now+=dt;
+    }
+    CHECK(std::abs(out.drawn.position.x-.945)<1e-6);
+    WeaponCollision blade_policy;
+    const auto r=blade_policy.update(0,dt,out.drawn.position,{-1,0,0},.65,[](Vec3,Vec3)->std::optional<CollisionHit> {return CollisionHit{{.4,0,1},{1,0,0},.5,9};});
+    CHECK(r.contact && r.shift.x>.1);                               // the blade alone would push the hand 10 cm into the wall
+    const auto composed=compose_blade(clamp,0,pose_at({}).basis,out.drawn.position,r,std::nullopt);
+    CHECK(composed.drawn.x<=.945+1e-9 && composed.noted.x==out.drawn.position.x);
+    // No blade push: the hand is drawn as given (a met prop's hand is never projected here).
+    WeaponCollision none;const auto idle=none.update(0,dt,{.98,0,1},{1,0,0},0,[](Vec3,Vec3)->std::optional<CollisionHit> {return std::nullopt;});
+    const auto kept=compose_blade(clamp,0,pose_at({}).basis,{.98,0,1},idle,std::nullopt);
+    CHECK(kept.drawn.x==.98 && kept.noted.x==.98);
+}
+
+// I2: a pistol pressed through a thin wall (x 1..1.1): the drawn hand rests at its near face, the controller is 20 cm in, the
+// controller's aim origin past the far face. Shots leave from the drawn barrel: on the near side.
+void shot_origin_thin_wall() {
+    HandClamp clamp;ClampOutput out{};double now=0;bool started=false;const auto root=level_frame({0,0,0},{1,0,0});
+    const Vec3 controller{1.2,0,1};
+    for(int f=0;f<60;++f) {
+        ClampInput in{};in.now=now;in.epoch=1;in.root=root;in.target=pose_at(f<10?Vec3{.5+.07*f,0,1}:controller);in.chest={0,0,1};in.tip_enabled=false;
+        if(started) route_clamp_hits(in,out.state,wall_cast(out.palm_sweep),std::nullopt,std::nullopt,std::nullopt);
+        out=clamp.update(0,in);started=true;clamp.note_drawn(0,root,out.drawn.position);now+=dt;
+    }
+    CHECK(out.state==ClampState::contact && out.drawn.position.x<1 && clamp.snapbacks(0)==0);
+    const Vec3 raw_aim=controller+Vec3{.02,0,.01};                 // the aim pose sits a little ahead of the grip
+    CHECK(raw_aim.x>1.1);                                           // the raw origin is behind the wall
+    const auto offset=clamped_shot_offset(out.drawn.position,controller,true,1000,7);
+    const Vec3 origin=clamped_shot_origin(raw_aim,offset,1016,7);
+    CHECK(offset.valid && origin.x<1 && origin.x>.9 && std::abs(origin.z-1.01)<1e-12);   // near side, at the drawn barrel
+    // Not clamped, stale, another epoch, or no offset: the controller's origin.
+    CHECK(!clamped_shot_offset(out.drawn.position,controller,false,1000,7).valid);
+    CHECK(!clamped_shot_offset(controller,controller,true,1000,7).valid);
+    CHECK(clamped_shot_origin(raw_aim,offset,1101,7).x==raw_aim.x && clamped_shot_origin(raw_aim,offset,999,7).x==raw_aim.x);
+    CHECK(clamped_shot_origin(raw_aim,offset,1016,8).x==raw_aim.x && clamped_shot_origin(raw_aim,ClampedShotOffset{},1016,7).x==raw_aim.x);
+    CHECK(!clamped_shot_offset({std::nan(""),0,0},controller,true,1000,7).valid);
+}
+
+// M5: without hand geometry the wall tip is a separate default sphere and is swept.
+void default_wall_tip() {
+    CHECK(!clamp_detail::same_probe(default_clamp_tip(),default_clamp_wall_tip()) && clamp_detail::usable(default_clamp_wall_tip()));
+    HandClamp clamp;ClampOutput out{};const auto root=level_frame({0,0,0},{1,0,0});
+    for(int f=0;f<3;++f) {
+        ClampInput in{};in.now=f*dt;in.epoch=1;in.root=root;in.target=pose_at({.3+.01*f,0,1});in.chest={0,0,1};
+        in.tip=default_clamp_tip();in.wall_tip=default_clamp_wall_tip();
+        if(f) route_clamp_hits(in,out.state,wall_cast(out.palm_sweep),wall_cast(out.tip_sweep),wall_cast(out.wall_tip_sweep),std::nullopt);
+        out=clamp.update(0,in);clamp.note_drawn(0,root,out.drawn.position);
+    }
+    CHECK(out.wall_tip_sweep.valid && std::abs(out.wall_tip_sweep.radius-.035)<1e-12 && out.tip_sweep.valid);
+}
 } // namespace
 
 int main() {
-    yields();posts();routes();probe_sets();hold_store();reacquire();
-    std::puts("PASS hand_clamp_feed_check: C9 yields, C14 cadence, answer routing, open-hand probe sets, re-acquire hold");
+    yields();posts();routes();probe_sets();hold_store();reacquire();blade_stab();blade_push_stays_out();shot_origin_thin_wall();default_wall_tip();
+    std::puts("PASS hand_clamp_feed_check: C9 yields, C14 cadence, answer routing, open-hand probe sets, re-acquire hold, blade stab, shot origin");
     return 0;
 }

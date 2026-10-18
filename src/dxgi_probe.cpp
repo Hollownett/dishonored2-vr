@@ -366,7 +366,11 @@ static d2vr::WeaponCollision weapon_collision;static bool weapon_collision_enabl
 // probes kept for their hysteresis; clamp_probes: the open hand (refresh_clamp_probes).
 static d2vr::HandClamp hand_clamp;static d2vr::CastBudget hand_clamp_budget;static d2vr::ClampReacquireHold clamp_hold;static UINT64 hand_clamp_frame{};
 static std::array<d2vr::ClampState,2> clamp_state{};static std::array<std::optional<std::uintptr_t>,2> clamp_exclude{};static std::array<d2vr::HandMotion,2> clamp_motion{};
-static std::array<d2vr::ClampProbeSet,2> clamp_probes{};static std::array<d2vr::ClampProbe,2> clamp_tip{d2vr::default_clamp_tip(),d2vr::default_clamp_tip()},clamp_wall_tip{};
+static std::array<d2vr::ClampProbeSet,2> clamp_probes{};static std::array<d2vr::ClampProbe,2> clamp_tip{d2vr::default_clamp_tip(),d2vr::default_clamp_tip()},
+    clamp_wall_tip{d2vr::default_clamp_wall_tip(),d2vr::default_clamp_wall_tip()};
+// build/no-hand-clamp: the pre-Task-5 drawn hand (chest palm sweep + blade, the meet's exemption), for a headset A/B. clamp_shot: the
+// drawn hand's offset from the controller while clamped (under hand_state_mutex): shots and the crosshair leave from the drawn barrel (I2).
+static bool hand_clamp_enabled=true;static std::array<d2vr::ClampedShotOffset,2> clamp_shot{};
 static std::array<UINT64,2> clamp_posted_scope{};static std::array<bool,2> clamp_posted{};
 struct HandClampStatus {
     std::atomic<bool> active{};std::atomic<unsigned> state{},probes{},max_casts{};
@@ -2374,6 +2378,7 @@ static std::atomic<UINT64> offered_choke_hint_frames{},choke_input_frames{},talk
 static std::atomic<int> gaze_ray_side{-1};static std::atomic<UINT64> gaze_ray_until{};static std::atomic<unsigned> yank_requests{},look_uses{},look_hits{};static std::array<bool,2> hand_at_neck{};static std::array<std::atomic<float>,2> yank_peak{};static std::array<std::atomic<unsigned>,2> yank_gate{};static d2vr::GunGrip gun_grip;static bool gun_owns{},hip_loaded{};static std::atomic<unsigned> hip_kind{};static std::atomic<int> hip_owner{-1};static std::array<std::atomic<unsigned>,3> gun_actions{}; // hip_kind: 0 pistol, 1 crossbow
 // The right hand in the world after weapon collision (render thread), with its velocity: where a dropped sword starts.
 static d2vr::WorldTrackedPose hand_world[2]{};static d2vr::Vec3 hand_velocity[2]{};static UINT64 hand_tick[2]{}; // under hand_state_mutex
+static d2vr::WorldTrackedPose hand_raw_world[2]{}; // the controller's pose (C9 selection: sword pickup reach, wake/yank press), under hand_state_mutex
 static std::optional<d2vr::Vec3> hip_xr_position;static UINT64 hip_pose_tick{},hip_pose_epoch{};
 static std::atomic<float> right_hand_peak{},sword_release_speed{}; // diagnostics: peak right-hand speed (decays), hand speed at the last drop
 static void publish_hand(unsigned side,const d2vr::WorldTrackedPose& drawn,const d2vr::WorldTrackedPose& raw) {
@@ -2391,7 +2396,7 @@ static void publish_hand(unsigned side,const d2vr::WorldTrackedPose& drawn,const
     std::lock_guard<std::mutex> l(hand_state_mutex);
     hand_velocity[side&1]=dt>.015 && dt<.25?(raw.position-window.front().second)*(1/dt):d2vr::Vec3{};
     if(side&1) right_hand_peak=static_cast<float>(std::max(d2vr::length(hand_velocity[1]),right_hand_peak.load()*.97));
-    hand_world[side&1]=drawn;hand_tick[side&1]=GetTickCount64();
+    hand_world[side&1]=drawn;hand_raw_world[side&1]=raw;hand_tick[side&1]=GetTickCount64();
 }
 static bool npc_entity(std::uintptr_t e) noexcept {std::uintptr_t vt{};return e && read_self(e,&vt,8) && vt==image_base+0x1c5e108;} // arkNPC
 // What a hand's grip holds rather than uses (user 2026-10-13: "move objects pickup like coins to a trigger"; the grip holds things):
@@ -2572,14 +2577,14 @@ static d2vr::WorldTrackedPose drawn_palm_frame(unsigned side,const d2vr::WorldTr
 // The hand clamp's open hand (ClampInput::hand, and the set leading_probe/wall_leading_probe choose from): the solid hands' open-hand
 // spheres in the grip frame, at the drawn palm's offset from the grip. Rebuilt for a new arm binding, and when that offset drifts past
 // 1 cm (not every frame: the leading probes' hysteresis compares spheres exactly); a rebuild keeps each chosen probe's index.
-// Without geometry: no set, the tip is default_clamp_tip() and there is no wall tip.
+// Without geometry: no set; the tip is default_clamp_tip() and the wall tip default_clamp_wall_tip() (M5).
 static void refresh_clamp_probes(unsigned side,const d2vr::WorldTrackedPose& grip) {
     static std::shared_ptr<const d2vr::rig::NativeArmBindingSnapshot> built_for;static std::array<std::optional<d2vr::rig::HandGeometry>,2> geometry{};
     side&=1u;
     if(const auto snapshot=arm_binding_cache.load();snapshot!=built_for) {
         built_for=snapshot;
         for(unsigned s=0;s<2;++s) {
-            geometry[s].reset();clamp_probes[s]={};clamp_tip[s]=d2vr::default_clamp_tip();clamp_wall_tip[s]={};
+            geometry[s].reset();clamp_probes[s]={};clamp_tip[s]=d2vr::default_clamp_tip();clamp_wall_tip[s]=d2vr::default_clamp_wall_tip();
             if(snapshot) try {
                 const auto& b=snapshot->bindings[s];
                 geometry[s]=d2vr::rig::hand_geometry(b.fingers.open,b.parents,b.finger_chains,b.palm,b.chain.wrist,b.bind_grip);
@@ -4028,6 +4033,9 @@ void prepare_head_view(void* view) noexcept {
                     const auto us=static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
                     if(const auto steady=aim_filter.sample(left,{1,game_xr->pose_epoch(),game_xr->reference_epoch(),1,0},us,true)) left=*steady;
                 }
+                // I2: while the left hand is clamped, the shot leaves from the drawn barrel (the direction is the drawn barrel's already).
+                {d2vr::ClampedShotOffset shot{};{std::lock_guard<std::mutex> hand_lock(hand_state_mutex);shot=clamp_shot[0];}
+                 left.position=d2vr::clamped_shot_origin(left.position,shot,GetTickCount64(),game_xr->pose_epoch());}
                 if(native_left_aim_requested) native_left_aim.publish(*body,left,game_xr->pose_epoch(),GetTickCount64(),true);
                 if(native_shot_aim_installed) native_shot_aim.publish(left,game_xr->pose_epoch(),GetTickCount64(),true);
                 else native_gameplay_aim_trace.publish(*body,left,game_xr->pose_epoch(),GetTickCount64(),true);
@@ -4134,12 +4142,15 @@ void prepare_head_view(void* view) noexcept {
                         const bool armed=(items>>side)&1u;
                         const double blade=armed?(side?.65:shape[2]):0.,blade_radius=armed && !side?shape[3]:0.;
                         const d2vr::Vec3 blade_offset=armed && !side?g.basis[2]*shape[0]-g.basis[0]*shape[1]:d2vr::Vec3{};
-                        std::optional<d2vr::CollisionHit> blade_hit; // this frame's weapon-segment (slot 1) surface
+                        // This frame's weapon-segment (slot 1) and, with build/no-hand-clamp only, hand (slot 0) surfaces. With the hand clamp the
+                        // query is the blade's alone (slot 1); the pre-clamp path asks the palm first (slot 0), then the blade.
+                        std::optional<d2vr::CollisionHit> blade_hit,palm_hit;unsigned slot=hand_clamp_enabled?1u:0u;
                         auto query=[&](d2vr::Vec3 a,d2vr::Vec3 b)->std::optional<d2vr::CollisionHit> {
-                            d2vr::NativeInteractionAim::post_weapon_segment(side,1,a,b,std::max(.02,blade_radius));
-                            const auto h=d2vr::NativeInteractionAim::weapon_hit(side,1,now);if(!h) return {};
+                            const unsigned k=slot++;
+                            d2vr::NativeInteractionAim::post_weapon_segment(side,k,a,b,k?std::max(.02,blade_radius):.05);
+                            const auto h=d2vr::NativeInteractionAim::weapon_hit(side,k,now);if(!h) return {};
                             auto c=d2vr::to_collision_hit(*h);const auto d=b-a;const double l2=d2vr::dot(d,d);
-                            c.fraction=l2>0?std::clamp(d2vr::dot(c.point-a,d)/l2,0.,1.):0.;blade_hit=c;return c; // last frame's surface, measured on this segment
+                            c.fraction=l2>0?std::clamp(d2vr::dot(c.point-a,d)/l2,0.,1.):0.;if(k==1) blade_hit=c;else if(k==0) palm_hit=c;return c; // last frame's surface, measured on this segment
                         };
                         // Blade tip speed relative to the head (the raw controller, C9: swing detection): a swing, not a walk into an NPC.
                         static std::array<d2vr::Vec3,2> last_rel{};static std::array<double,2> tip_speed{},tip_peak{};static std::array<LONGLONG,2> last_rel_qpc{};
@@ -4150,6 +4161,24 @@ void prepare_head_view(void* view) noexcept {
                              // Peak over ~150 ms: the blade meets the body at the end of the arc, and the cast result is a frame late.
                              tip_peak[side]=std::max(tip_speed[side],tip_peak[side]*std::exp(-std::max(rdt,0.)/.15));}
                          last_rel[side]=rel;last_rel_qpc[side]=qpc.QuadPart;tip_speed_now[side]=static_cast<float>(tip_peak[side]);}
+                        const auto blade_axis=side==1 && reverse_sword?g.basis[0]*-1.:g.basis[0]; // reverse grip: blade points back
+                        std::optional<d2vr::CollisionEvent> event;std::optional<d2vr::CollisionHaptic> haptic;
+                        if(!hand_clamp_enabled) {
+                            // build/no-hand-clamp (headset A/B): the drawn hand exactly as before physical hands Task 5. The palm sweeps from the chest
+                            // and the blade from the palm-corrected grip (WeaponCollision::update_with_palm). The entity the palm cast holds this hand
+                            // at is kept while the shift eases out; a light loose prop the solid hands push is met (moved out of by the contact's way
+                            // out), not held off.
+                            const auto r=weapon_collision.update_with_palm(side,dt,chest,g.position,blade_axis,blade,query,blade_offset,blade_radius);
+                            static std::array<std::uintptr_t,2> cast_held{};
+                            if(!r.contact) cast_held[side]=0;else if(palm_hit) cast_held[side]=palm_hit->entity;
+                            const auto meeting=native_grab.hand_contact().meet(side,cast_held[side]);
+                            cast_entities[side]=meeting.entity?meeting.entity:cast_held[side]; // whose contact the drawn hand's offset from the tracked one belongs to
+                            if(r.contact && !meeting.prop) g.position=r.grip;
+                            if(r.contact) ++weapon_contact_frames;
+                            g.position=g.position+meeting.shift;
+                            if(r.blade_dir) {d2vr::align_weapon_blade(g,*r.blade_dir,side==1 && reverse_sword);++weapon_contact_frames;}
+                            event=r.event;haptic=r.haptic;
+                        } else {
                         // The hand clamp (G1, G3, C3, C4, C8): it sweeps from the previous drawn hand to the reach-clamped controller grip and answers
                         // one frame late. It yields (draws the controller, sweeps nothing) to an authored arm, a native carry and a physical hold.
                         auto& status=hand_clamp_status[side];
@@ -4165,8 +4194,8 @@ void prepare_head_view(void* view) noexcept {
                             in.post=d2vr::clamp_posts(clamp_alternate,hand_clamp_frame,side);in.tip_enabled=clamp_tip_on;
                             // Last frame's answers (game-thread Stage0 scope). A post the game thread has not answered yet reads the slot's previous answer
                             // (<=100 ms): counted in status "unanswered" (UNVERIFIED in game how often the render thread outruns it).
-                            const auto answer=[&](unsigned slot)->std::optional<d2vr::ClampHit> {
-                                const auto h=d2vr::NativeInteractionAim::weapon_hit(side,slot,now);if(!h) return std::nullopt;return d2vr::to_clamp_hit(*h);
+                            const auto answer=[&](unsigned answer_slot)->std::optional<d2vr::ClampHit> {
+                                const auto h=d2vr::NativeInteractionAim::weapon_hit(side,answer_slot,now);if(!h) return std::nullopt;return d2vr::to_clamp_hit(*h);
                             };
                             if(clamp_posted[side] && d2vr::NativeInteractionAim::weapon_serial(side,0)<=clamp_posted_scope[side]) ++status.unanswered;
                             d2vr::route_clamp_hits(in,clamp_state[side],answer(0),answer(d2vr::NativeInteractionAim::tip_slot),answer(d2vr::NativeInteractionAim::wall_tip_slot),answer(d2vr::NativeInteractionAim::exclude_slot));
@@ -4180,12 +4209,14 @@ void prepare_head_view(void* view) noexcept {
                             native_grab.hand_contact().fill_clamp_input(side,in,clamp_exclude[side]); // loose props in reach (I2), last frame's met prop (I1)
                             clamped=hand_clamp.update(side,in);clamp_state[side]=clamped.state;
                         }
-                        std::uintptr_t held_by{};clamp_posted[side]=false;
-                        if(!clamp_updated) { // paused: nothing posted or read; the hand stays where it was drawn while that is near the controller
-                            if(const auto kept=clamp_hold.hold(side,clamp_epoch,clamp_root,target.position,hand_clamp.config().snap_gap)) g.position=*kept;
-                        } else if(clamped.valid && !clamp_yield) {const auto post=[&](unsigned slot,const d2vr::ClampSweep& sweep) {
+                        std::uintptr_t held_by{};std::optional<std::uintptr_t> met_prop;clamp_posted[side]=false;
+                        if(!clamp_updated) {
+                            // World UI (logic != 2): nothing is cast or read. The hand follows the controller, kept out of the planes held before
+                            // the pause (no update: they do not age); the resume frame re-acquires with the hold below.
+                            g.position=hand_clamp.keep_out(side,raw.basis,raw.position,std::nullopt);
+                        } else if(clamped.valid && !clamp_yield) {const auto post=[&](unsigned post_slot,const d2vr::ClampSweep& sweep) {
                                 if(!sweep.valid || (sweep.exclude && !*sweep.exclude)) return; // an excluded entity 0 maps to no body
-                                d2vr::NativeInteractionAim::post_weapon_segment(side,slot,sweep.from,sweep.to,sweep.radius,sweep.exclude?*sweep.exclude:0);
+                                d2vr::NativeInteractionAim::post_weapon_segment(side,post_slot,sweep.from,sweep.to,sweep.radius,sweep.exclude?*sweep.exclude:0);
                             };
                             post(0,clamped.palm_sweep);post(d2vr::NativeInteractionAim::tip_slot,clamped.tip_sweep);
                             post(d2vr::NativeInteractionAim::wall_tip_slot,clamped.wall_tip_sweep);post(d2vr::NativeInteractionAim::exclude_slot,clamped.exclude_sweep);
@@ -4195,7 +4226,7 @@ void prepare_head_view(void* view) noexcept {
                             // The meet (Task 3): a light loose prop the solid hands push is met, not held off; the meet never moves the hand through a
                             // plane the clamp holds. held_by: whose hold the drawn hand's lag is (the solid hands' publish).
                             const auto met=native_grab.hand_contact().meet_clamp(side,hand_clamp,clamped,target);
-                            g.position=met.drawn;held_by=met.held_by;clamp_exclude[side]=met.exclude;
+                            g.position=met.drawn;held_by=met.held_by;clamp_exclude[side]=met.exclude;met_prop=met.prop;
                             // The re-acquire frame (after a pause or a tracking gap) would draw the controller unswept, maybe inside a wall: hold the hand
                             // where it was last drawn while that is near; the clamp eases from it once its sweeps answer.
                             if(clamped.reacquired) if(const auto kept=clamp_hold.hold(side,clamp_epoch,clamp_root,target.position,hand_clamp.config().snap_gap)) {g.position=*kept;++status.reacquire_holds;}
@@ -4203,23 +4234,29 @@ void prepare_head_view(void* view) noexcept {
                         cast_entities[side]=held_by;
                         if(clamp_yield) ++status.yields;
                         if(reach_clamped) ++status.reach_clamped;
-                        // The blade sweeps from the drawn grip; a blade pushed straight into a surface moves the hand back (r.grip).
-                        const auto blade_axis=side==1 && reverse_sword?g.basis[0]*-1.:g.basis[0]; // reverse grip: blade points back
+                        // The blade sweeps from the drawn grip and eases its own push (a blade pushed straight into a surface moves the hand back); the
+                        // clamp is told its own hand, and the pushed hand stays out of the clamp's planes (compose_blade, M1).
                         const auto r=weapon_collision.update(side,dt,g.position,blade_axis,blade,query,blade_offset,blade_radius);
-                        g.position=r.grip;
-                        const auto event=r.event?r.event:clamped.event;const auto haptic=r.haptic?r.haptic:clamped.haptic;
+                        const auto composed=d2vr::compose_blade(hand_clamp,side,g.basis,g.position,r,met_prop);
+                        g.position=composed.drawn;
+                        event=r.event?r.event:clamped.event;haptic=r.haptic?r.haptic:clamped.haptic;
                         if(clamped.state==d2vr::ClampState::contact || r.contact) ++weapon_contact_frames;
                         if(r.blade_dir) { // rotate the hand basis so the weapon lies along the deflected blade axis
                             d2vr::align_weapon_blade(g,*r.blade_dir,side==1 && reverse_sword);
                             ++weapon_contact_frames;
                         }
-                        // Every update is followed by the position finally drawn (the next sweep starts there; a yield or an invalid target is ignored).
-                        if(clamp_updated) hand_clamp.note_drawn(side,clamp_root,g.position);
-                        if(clamp_updated && clamped.valid && !clamp_yield) clamp_hold.note(side,clamp_epoch,clamp_root,g.position);
-                        status.active.store(clamped.valid && !clamp_yield);status.state.store(static_cast<unsigned>(clamped.state));status.probes.store(static_cast<unsigned>(probes.count));
+                        // Every update is followed by the clamp's own hand (the next sweep starts there; a yield or an invalid target is ignored).
+                        if(clamp_updated) hand_clamp.note_drawn(side,clamp_root,composed.noted);
+                        const bool clamp_drew=clamp_updated && clamped.valid && !clamp_yield;
+                        if(clamp_drew || !clamp_updated) clamp_hold.note(side,clamp_epoch,clamp_root,g.position);
+                        // I2: while clamped, shots and the crosshair leave from the drawn barrel (read next frame by the aim publication).
+                        {const auto shot=d2vr::clamped_shot_offset(g.position,raw.position,clamp_drew,now,game_xr->pose_epoch());
+                         std::lock_guard<std::mutex> hand_lock(hand_state_mutex);clamp_shot[side]=shot;}
+                        status.active.store(clamp_drew);status.state.store(static_cast<unsigned>(clamped.state));status.probes.store(static_cast<unsigned>(probes.count));
                         status.contact_frames.store(hand_clamp.contact_frames(side));status.snapbacks.store(hand_clamp.snapbacks(side));
                         status.missed_notes.store(hand_clamp.missed_notes(side));status.repeated_updates.store(hand_clamp.repeated_updates(side));
                         status.reacquire_blocked.store(hand_clamp.reacquire_blocked_frames(side));
+                        }
                         if(side==1 && blade>0) {std::lock_guard<std::mutex> l(sword_tip_mutex);sword_tip=g.position+(reverse_sword?g.basis[0]*-1.:g.basis[0])*blade;sword_tip_tick=now;}
                         if(event) {++weapon_contact_events;
                             // Blade on the world: the surface reacts like a sword hit, quieter (engine contact FX on the game thread).
@@ -4629,6 +4666,8 @@ void prepare_head_view(void* view) noexcept {
                 auto hand=d2vr::to_game_pose(d2vr::camera_relative_controller(
                     {{p.position.x,p.position.y,p.position.z},{p.orientation.x,p.orientation.y,p.orientation.z,p.orientation.w}},hand_centre,head_origin.position),head_origin,anchor,1.0);
                 barrel_aim(hand);aim_offset(hand); // exactly the shot aim (it ignored the offset: shots landed 4 deg left of it)
+                {d2vr::ClampedShotOffset shot{};{std::lock_guard<std::mutex> hand_lock(hand_state_mutex);shot=clamp_shot[0];} // and its origin (I2)
+                 hand.position=d2vr::clamped_shot_origin(hand.position,shot,GetTickCount64(),game_xr->pose_epoch());}
                 const auto target=hand.position+hand.basis[0]*30.0;
                 const auto d=target-world.position;
                 const double depth=d2vr::dot(d,world.basis[0]);
@@ -5087,6 +5126,7 @@ std::string feedback_status_json() {
              <<",\"cast_us\":"<<hand_clamp_cast_mean.load()<<",\"cast_us_max\":"<<hand_clamp_cast_max.load()
              <<",\"cast_us_last\":"<<d2vr::NativeInteractionAim::clamp_cast_us_.load()<<",\"casts_last\":"<<d2vr::NativeInteractionAim::clamp_cast_n_.load()
              <<",\"tip_probe\":"<<(hand_clamp_tip.load()?"true":"false")<<",\"alternate\":"<<(hand_clamp_alternate.load()?"true":"false")
+             <<",\"enabled\":"<<(hand_clamp_enabled?"true":"false")
              <<",\"exclusion\":{\"casts\":"<<d2vr::NativeInteractionAim::clamp_exclude_casts_.load()<<",\"hits\":"<<d2vr::NativeInteractionAim::clamp_exclude_hits_.load()
              <<",\"self_hits\":"<<d2vr::NativeInteractionAim::clamp_exclude_self_hits_.load()<<",\"unmapped\":"<<d2vr::NativeInteractionAim::clamp_exclude_unmapped_.load()
              <<",\"info_zero\":"<<(d2vr::NativeInteractionAim::clamp_exclude_info_zero_.load()?"true":"false")<<'}';
@@ -6498,17 +6538,17 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                     static d2vr::TempleReach scabbard(-.17,-.10,-.10,.16,2u);
                                     const auto sheath=scabbard.update(head,{f.x,f.y,f.z},{u.x,u.y,u.z},hands,{input.left_grip,input.right_grip},logic==2 && !x_wheel.wheel(),GetTickCount64());
                                     if(sheath.entered==1) {++scabbard_entries;game_xr->pulse(1,.2f,.02f);}
-                                    {   const auto now_s=GetTickCount64();bool drawn{},busy{},fresh{};d2vr::WorldTrackedPose hand_w{};d2vr::Vec3 hand_v{};
+                                    {   const auto now_s=GetTickCount64();bool drawn{},busy{},fresh{};d2vr::WorldTrackedPose hand_w{},hand_raw{};d2vr::Vec3 hand_v{};
                                         {std::lock_guard<std::mutex> hand_lock(hand_state_mutex);drawn=(hand_weapon_bits&2u)!=0;busy=hand_carrying_bits!=0 || hand_holding_object;
-                                         hand_w=hand_world[1];hand_v=hand_velocity[1];fresh=hand_tick[1] && now_s-hand_tick[1]<=200;}
+                                         hand_w=hand_world[1];hand_raw=hand_raw_world[1];hand_v=hand_velocity[1];fresh=hand_tick[1] && now_s-hand_tick[1]<=200;}
                                         d2vr::SwordGrip::In in{};in.grip=game_xr->controller_input.right_grip;in.gameplay=logic==2 && !x_wheel.wheel() && fresh && hands[1];
                                         in.zone=sheath.in[1];in.drawn=drawn;in.busy=busy;in.now=now_s;
                                         const auto& gq=game_xr->grip_locations[1].pose.orientation;
                                         in.draw_dot=d2vr::rotated(d2vr::Quaternion{gq.x,gq.y,gq.z,gq.w},{0,0,-1}).y; // fist pointing up or down
                                         if(const auto copy=d2vr::NativeWeaponHands::copy();copy.present) {
-                                            const d2vr::Vec3 at{copy.pos[0],copy.pos[1],copy.pos[2]};in.copy=true;in.copy_distance=d2vr::length(at-hand_w.position);
+                                            const d2vr::Vec3 at{copy.pos[0],copy.pos[1],copy.pos[2]};in.copy=true;in.copy_distance=d2vr::length(at-hand_raw.position); // C9: picking up is selection (the controller)
                                             in.copy_reach=in.copy_distance<.45;in.copy_age_s=static_cast<double>(now_s-copy.since)/1000.;
-                                            in.pickup_dot=d2vr::dot(hand_w.basis[0],d2vr::Vec3{copy.blade[0],copy.blade[1],copy.blade[2]});
+                                            in.pickup_dot=d2vr::dot(hand_raw.basis[0],d2vr::Vec3{copy.blade[0],copy.blade[1],copy.blade[2]});
                                         }
                                         const auto o=sword_grip.update(in);sword_reversed=o.reversed;sword_owns=o.owns;
                                         if(o.action!=d2vr::SwordGrip::Action::none) {
@@ -6613,7 +6653,7 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                                 (h?game_xr->controller_input.right_grip:game_xr->controller_input.left_grip):0.f;
                                             const bool free_hand=!carrying_body && (h?!sword_owns && !(choke && hand_at_neck[1]):!gun_owns);
                                             d2vr::WorldTrackedPose w{};d2vr::Vec3 v{};bool fresh{};
-                                            {std::lock_guard<std::mutex> l(hand_state_mutex);w=hand_world[h];v=hand_velocity[h];fresh=hand_tick[h] && now_y-hand_tick[h]<=200;}
+                                            {std::lock_guard<std::mutex> l(hand_state_mutex);w=hand_raw_world[h];v=hand_velocity[h];fresh=hand_tick[h] && now_y-hand_tick[h]<=200;} // C9: the controller selects the body
                                             // A fresh squeeze by a free hand at a body whose ragdoll has settled wakes it (NativeWeaponHands::wake).
                                             const bool press=g>.6f && !squeezed[h];squeezed[h]=g>.6f || (squeezed[h] && g>.35f);
                                             if(press && fresh) {press_pos[h]=w.position;press_at[h]=now_y;} // where the hand took hold
@@ -7976,6 +8016,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
              try {std::ofstream f(output_directory/L"native-call-trace.csv");f<<"# hooks "<<n<<'/'<<rvas.size()<<'\n';} catch(...) {}}}
         gun_shape_override={};{std::ifstream knob(root/L"build"/L"gun-shape");GunShape v{};if(knob>>v[0]>>v[1]>>v[2]>>v[3] && v[2]>.05 && v[2]<.8 && v[3]>=0 && v[3]<.15) gun_shape_override=v;}
         {std::ifstream knob(root/L"build"/L"slash-speed");float f{};if(knob>>f && f>=1.f && f<=2.f) slash_speed_factor=f;}weapon_collision=d2vr::WeaponCollision{};weapon_collision_qpc=0;hand_clamp=d2vr::HandClamp{};hand_clamp_budget.reset();
+        hand_clamp_enabled=!fs::exists(root/L"build"/L"no-hand-clamp"); // headset A/B: the pre-Task-5 drawn hand
         d2vr::NativeInteractionAim::clamp_exclude_info_zero_=fs::exists(root/L"build"/L"hand-clamp-exclude-info-zero"); // diagnostic: +0x14 of the exclusion sweeps is 0, not the prop's filter word
         native_interaction_aim.slash_speed(vr_combat_enabled?slash_speed_factor:1.f);
         {taa_jitter_scale={1,1,1,1};std::ifstream knob(root/L"build"/L"taa-jitter-scale");for(auto& v:taa_jitter_scale) {float f{};if(!(knob>>f)) break;v=f;}}taa_live=taa_preference!=0;fsr_taa.enabled=taa_preference>=2; // diagnostics: simulated runs skip saved settings

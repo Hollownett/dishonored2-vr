@@ -136,21 +136,26 @@ template<std::size_t N> ClampProbe wall_leading_probe(const std::array<ClampProb
 }
 
 // C14: the clamp's cast cost per frame. A rolling mean over window_seconds; once a full window since the last change is
-// over budget_us, the fingertip sweep goes first, then the hands alternate frames. Both stay until reset().
+// over budget_us, the fingertip sweep goes first, then the hands alternate frames. With hysteresis they come back in the
+// reverse order (alternation off first, then the tip) once the mean has stayed under recover_us for recover_seconds.
 class CastBudget {
 public:
-    static constexpr double budget_us=500,window_seconds=2;
+    static constexpr double budget_us=500,window_seconds=2,recover_us=350,recover_seconds=5;
     void note(double frame_us,double now) {
         if(!std::isfinite(frame_us) || frame_us<0 || !std::isfinite(now)) return;
-        if(!started_ || (!samples_.empty() && now<samples_.back().now)) {started_=true;start_=now;samples_.clear();}
+        if(!started_ || (!samples_.empty() && now<samples_.back().now)) {started_=true;start_=now;samples_.clear();quiet_=false;}
         samples_.push_back({now,frame_us});
         while(samples_.front().now<=now-window_seconds) samples_.pop_front();
         double sum=0,peak=0;
         for(const auto& s:samples_) {sum+=s.us;peak=std::max(peak,s.us);}
         mean_=sum/static_cast<double>(samples_.size());max_=peak;
+        if(mean_<recover_us) {if(!quiet_) {quiet_=true;quiet_start_=now;}} else quiet_=false;
         if(now-start_>=window_seconds-1e-9 && mean_>budget_us && (tip_ || !alternate_)) {
             if(tip_) tip_=false; else alternate_=true;
-            start_=now;samples_.clear(); // the next decision measures the new mode for a full window
+            start_=now;samples_.clear();quiet_=false; // the next decision measures the new mode for a full window
+        } else if((alternate_ || !tip_) && quiet_ && now-quiet_start_>=recover_seconds-1e-9) {
+            if(alternate_) alternate_=false; else tip_=true;
+            start_=now;samples_.clear();quiet_=false;
         }
     }
     bool tip_enabled() const {return tip_;}
@@ -162,7 +167,8 @@ private:
     struct Sample {double now,us;};
     std::deque<Sample> samples_;
     double start_{},mean_{},max_{};
-    bool started_{},tip_{true},alternate_{};
+    double quiet_start_{};
+    bool started_{},tip_{true},alternate_{},quiet_{};
 };
 
 class HandClamp {

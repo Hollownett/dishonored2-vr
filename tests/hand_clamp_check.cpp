@@ -818,7 +818,21 @@ void budget_drops_tip_then_alternates() {
     run(b,550,2,4,false);
     CHECK(!b.tip_enabled() && b.alternate());
     run(b,100,4,8,false);
-    CHECK(!b.tip_enabled() && b.alternate()); // both stay until reset
+    CHECK(!b.tip_enabled() && b.alternate()); // under 0.35 ms for less than 5 s: both stay
+    // Recovery (hysteresis): alternation goes first once the mean stayed under 0.35 ms for 5 s, then the tip after 5 s more.
+    run(b,100,8,9.05,false);
+    CHECK(!b.tip_enabled() && !b.alternate());
+    run(b,100,9.05,14,false);
+    CHECK(!b.tip_enabled() && !b.alternate());
+    run(b,100,14,14.1,false);
+    CHECK(b.tip_enabled() && !b.alternate());
+    // Between 0.35 and 0.5 ms nothing changes either way.
+    run(b,600,14.1,16.2,false);CHECK(!b.tip_enabled());
+    run(b,420,16.2,30,false);CHECK(!b.tip_enabled() && !b.alternate());
+    {CastBudget dip;run(dip,600,0,2.1,true);CHECK(!dip.tip_enabled()); // a dip shorter than 5 s does not recover
+     run(dip,100,2.1,6,false);run(dip,800,6,7,false);CHECK(!dip.tip_enabled() && dip.mean_us()<500); // the mean crosses 0.35 ms, not 0.5
+     run(dip,100,7,11.9,false);CHECK(!dip.tip_enabled());          // without the blip it would have recovered at ~7.2 s
+     run(dip,100,11.9,14.1,false);CHECK(dip.tip_enabled());}       // quiet again within 2 s of the blip, then 5 s
     b.reset();
     CHECK(b.tip_enabled() && !b.alternate() && b.mean_us()==0 && b.max_us()==0);
     CastBudget under;

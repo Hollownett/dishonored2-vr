@@ -26,6 +26,19 @@ int main() {
         const auto q=bare.update(1,dt,{1.2,0,0},dir,0,[&](Vec3 a,Vec3 b){++queries;return wall(a,b);});
         CHECK(queries==0 && !q.contact && !q.event && !q.haptic && length(q.shift)==0 && q.grip.x==1.2);
     }
+    { // build/no-hand-clamp: the pre-hand-clamp palm path. A bare hand stops one palm radius off the surface; the blade sweeps
+      // from the palm-corrected grip; a wall far from the hand (body anchor inside geometry) never pushes it.
+        WeaponCollision legacy;const Vec3 anchor{0,0,0};
+        const auto q=legacy.update_with_palm(1,dt,anchor,{1.2,0,0},dir,0,wall);
+        CHECK(q.event&&!q.event->blade&&std::abs(q.grip.x-(1-.06))<1e-9);
+        unsigned queries=0;Vec3 blade_from{};WeaponCollision both;
+        const auto b=both.update_with_palm(0,dt,anchor,{1.02,0,0},{0,1,0},.3,[&](Vec3 a,Vec3 e){if(++queries==2) blade_from=a;return wall(a,e);});
+        CHECK(queries==2 && std::abs(blade_from.x-.94)<1e-9 && std::abs(b.grip.x-.94)<1e-9);
+        WeaponCollision far;const auto f=far.update_with_palm(1,dt,{1.5,0,0},{.5,0,0},dir,0,[](Vec3 a,Vec3)->std::optional<CollisionHit>{
+            if(a.x<=1.2) return std::nullopt;return CollisionHit{{1.2,0,0},{1,0,0},.6,3};}); // hit 0.7 m from the hand
+        CHECK(!f.contact && length(f.shift)==0);
+        CHECK(!legacy.update_with_palm(0,dt,{NAN,0,0},{.5,0,0},dir,.6,wall).contact);
+    }
     { // The blade starts at the grip it is given (the drawn one): a grip already held off the wall sweeps from there.
         unsigned queries=0;Vec3 from{};WeaponCollision drawn;
         drawn.update(0,dt,{.3,0,0},dir,.6,[&](Vec3 a,Vec3 b){++queries;from=a;return wall(a,b);},{0,0,.04});

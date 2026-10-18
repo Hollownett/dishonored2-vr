@@ -29,8 +29,36 @@ inline void route_clamp_hits(ClampInput& in,ClampState last_state,const std::opt
     in.tip_hit=tip;in.wall_tip_hit=wall_tip;in.exclude_hit=exclude;
 }
 
-// Without hand geometry the leading probe is one fingertip sphere ahead of the grip.
+// Without hand geometry the leading probe is one fingertip sphere ahead of the grip, and the wall tip one nearer the palm (a
+// separate sphere, so it is swept: without one the rising-diagonal case put the fingers 7-8 cm into walls, Task 3 "New A").
 inline ClampProbe default_clamp_tip() {return {{.09,0,0},.035};}
+inline ClampProbe default_clamp_wall_tip() {return {{.05,0,0},.035};}
+
+// The hand after the weapon's blade (WeaponCollision, which eases its own push). The clamp is told its own hand (`hand`: after the
+// meet and any hold), not the blade's push: both remembering the push made a 4.5 m/s stab recoil 5 cm past the surface and
+// bounce. A blade push never moves the hand through a plane the clamp holds (`met`: the met prop's planes are skipped).
+struct BladeComposed {Vec3 drawn{},noted{};};
+inline BladeComposed compose_blade(const HandClamp& clamp,unsigned side,const std::array<Vec3,3>& basis,Vec3 hand,const CollisionResult& blade,
+                                   std::optional<std::uintptr_t> met) {
+    BladeComposed r{blade.grip,hand};
+    if(finite(blade.shift) && length(blade.shift)>0) r.drawn=clamp.keep_out(side,basis,blade.grip,met);
+    return r;
+}
+
+// I2: while the clamp holds a hand off a surface, shots and the crosshair leave from the drawn barrel: the controller's aim origin
+// moved by the drawn hand's offset from the controller (last frame's: the aim is published before the hands). The direction is
+// the drawn barrel's already (headset v361). Without it a gun pressed through a thin wall or door fired from the far side.
+struct ClampedShotOffset {Vec3 offset{};std::uint64_t tick{},epoch{};bool valid{};};
+inline ClampedShotOffset clamped_shot_offset(Vec3 drawn,Vec3 raw,bool clamped,std::uint64_t tick,std::uint64_t epoch) {
+    const Vec3 d=drawn-raw;
+    if(!clamped || !finite(d) || !(length(d)>1e-3) || !(length(d)<=1)) return {};
+    return {d,tick,epoch,true};
+}
+inline constexpr std::uint64_t clamped_shot_max_age_ms=100;
+inline Vec3 clamped_shot_origin(Vec3 raw_origin,const ClampedShotOffset& o,std::uint64_t now,std::uint64_t epoch) {
+    if(!o.valid || o.epoch!=epoch || now<o.tick || now-o.tick>clamped_shot_max_age_ms || !finite(o.offset) || !finite(raw_origin)) return raw_origin;
+    return raw_origin+o.offset;
+}
 
 // The open hand's spheres in the grip frame: hand_proxies of the open hand posed at {palm_local, identity}, where palm_local is
 // the drawn palm's offset from the grip in grip axes (NativeHandContact::publish poses the same spheres at grip + palm offset).
