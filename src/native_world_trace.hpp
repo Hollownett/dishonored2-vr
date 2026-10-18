@@ -6,6 +6,7 @@
 #include "native_initial_contact.hpp"
 #include "native_regular_contact.hpp"
 #include "weapon_collision.hpp"
+#include "hand_clamp.hpp"
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -183,6 +184,8 @@ inline std::optional<WorldTraceHit> convert_world_hit(const NativeClosestCollect
 // Feeds WeaponCollision::update's query(from,to). Pass the sphere cast radius = palm_radius
 // ONLY if the policy's own palm_radius is set to 0 (otherwise the margin is applied twice).
 inline CollisionHit to_collision_hit(const WorldTraceHit& h) {return {h.point,h.normal,h.fraction,h.entity,h.material};}
+// Feeds HandClamp's palm_hit/tip_hit/chest_hit. Cast with the probe's own radius: the clamp keeps only skin on top.
+inline ClampHit to_clamp_hit(const WorldTraceHit& h) {return {h.point,h.normal,h.entity,h.material,h.initial_overlap};}
 
 class NativeWorldTrace {
 public:
