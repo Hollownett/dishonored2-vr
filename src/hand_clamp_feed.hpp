@@ -45,19 +45,33 @@ inline BladeComposed compose_blade(const HandClamp& clamp,unsigned side,const st
     return r;
 }
 
-// I2: while the clamp holds a hand off a surface, shots and the crosshair leave from the drawn barrel: the controller's aim origin
-// moved by the drawn hand's offset from the controller (last frame's: the aim is published before the hands). The direction is
-// the drawn barrel's already (headset v361). Without it a gun pressed through a thin wall or door fired from the far side.
-struct ClampedShotOffset {Vec3 offset{};std::uint64_t tick{},epoch{};bool valid{};};
-inline ClampedShotOffset clamped_shot_offset(Vec3 drawn,Vec3 raw,bool clamped,std::uint64_t tick,std::uint64_t epoch) {
-    const Vec3 d=drawn-raw;
-    if(!clamped || !finite(d) || !(length(d)>1e-3) || !(length(d)<=1)) return {};
-    return {d,tick,epoch,true};
+// I2 / N5: while the clamp holds a hand, shots and the crosshair leave from the drawn barrel: the controller's aim origin moved by the
+// drawn hand's offset from the controller (last frame's: the aim is published before the hands), then clipped at every plane the
+// clamp holds, on the segment from the drawn grip (kept out of them) to that origin, short of the surface by the released guard's
+// margin. The direction is the drawn barrel's already (headset v361). The clip is what keeps a thin door between the shot and the
+// far side: the aim pose sits 5-8 cm ahead of the grip, which the clamp stops only palm radius + skin off the face, and the offset
+// is one frame old during a jab (a 6 m/s jab-and-fire left the origin past a 5 cm door).
+struct ClampedShotOffset {
+    Vec3 offset{},drawn{};std::uint64_t tick{},epoch{};bool valid{};
+    std::array<ClampHit,HandClamp::max_held_planes> planes{};std::size_t plane_count{};
+};
+inline ClampedShotOffset clamped_shot_offset(Vec3 drawn,Vec3 raw,bool clamped,std::uint64_t tick,std::uint64_t epoch,const HandClamp* clamp=nullptr,
+                                             unsigned side=0) {
+    ClampedShotOffset o{};const Vec3 d=drawn-raw;
+    if(!clamped || !finite(d) || !finite(drawn) || !(length(d)<=1)) return o;
+    if(clamp) o.plane_count=clamp->held_planes(side,o.planes);
+    if(!(length(d)>1e-3) && !o.plane_count) return {};
+    o.offset=length(d)>1e-3?d:Vec3{};o.drawn=drawn;o.tick=tick;o.epoch=epoch;o.valid=true;
+    return o;
 }
 inline constexpr std::uint64_t clamped_shot_max_age_ms=100;
+inline constexpr double shot_plane_margin=.05;
+inline Vec3 before_surface(Vec3 from,Vec3 to,const ClampHit& hit,double margin);
 inline Vec3 clamped_shot_origin(Vec3 raw_origin,const ClampedShotOffset& o,std::uint64_t now,std::uint64_t epoch) {
     if(!o.valid || o.epoch!=epoch || now<o.tick || now-o.tick>clamped_shot_max_age_ms || !finite(o.offset) || !finite(raw_origin)) return raw_origin;
-    return raw_origin+o.offset;
+    Vec3 origin=raw_origin+o.offset;
+    for(std::size_t i=0;i<std::min(o.plane_count,o.planes.size());++i) origin=before_surface(o.drawn,origin,o.planes[i],shot_plane_margin);
+    return origin;
 }
 
 // The open hand's spheres in the grip frame: hand_proxies of the open hand posed at {palm_local, identity}, where palm_local is
@@ -122,11 +136,11 @@ inline Vec3 paused_hand(const HandClamp& clamp,unsigned side,const WorldTrackedP
 }
 
 // The shot origin while a side is released (G3 snap-back: it is drawn at the controller, which can be past a door). Last frame's
-// chest re-acquire sweep (the clamp's slot 0 while released) and an eye -> hand sweep (the tip slot, which a released side does
-// not use) say what lies between the body and the hand. The origin is the point on the chest -> barrel segment just short of the
+// chest re-acquire sweep (the clamp's slot 0 while released) and an eye -> hand sweep (the exclusion slot, which a released side
+// never posts: no meet while released; the tip slot was re-read as the tip's answer on the frame after a re-arm, N7) say what lies between the body and the hand. The origin is the point on the chest -> barrel segment just short of the
 // surface the chest sweep met (by `margin`); the raw origin when it met nothing; the same on the eye -> barrel segment when there
 // is no usable chest answer (none within max_age, or the chest started inside geometry); the eye when neither is known.
-inline constexpr double released_shot_margin=.05;
+inline constexpr double released_shot_margin=shot_plane_margin;
 inline constexpr std::uint64_t released_shot_max_age_ms=100;
 inline constexpr double eye_sweep_radius=.02;
 // The point on from -> to just before the plane of `hit` (point, normal toward free space), backed off by margin along the
@@ -142,15 +156,15 @@ inline Vec3 before_surface(Vec3 from,Vec3 to,const ClampHit& hit,double margin) 
 class ReleasedShotGuard {
 public:
     struct Answer {Vec3 from{};std::optional<ClampHit> hit;std::uint64_t tick{};bool valid{};};
-    // Before this frame's update: the answers to what was posted for this side last frame (slot 0, the tip slot).
-    void read(unsigned side,const std::optional<ClampHit>& slot0,const std::optional<ClampHit>& tip_slot,std::uint64_t tick) {
+    // Before this frame's update: the answers to what was posted for this side last frame (slot 0, the exclusion slot).
+    void read(unsigned side,const std::optional<ClampHit>& slot0,const std::optional<ClampHit>& eye_slot,std::uint64_t tick) {
         if(side>1) return;auto& k=sides_[side];
         if(k.chest_posted) k.chest={k.chest_posted->from,slot0,tick,true};
-        if(k.eye_posted) k.eye={k.eye_posted->from,tip_slot,tick,true};
+        if(k.eye_posted) k.eye={k.eye_posted->from,eye_slot,tick,true};
         k.chest_posted.reset();k.eye_posted.reset();
     }
     // After the update: whether the side is released (drawn by the clamp at the controller), the chest sweep it posted, and the
-    // eye sweep to post on the tip slot (returned; only while released and posting).
+    // eye sweep to post on the exclusion slot (returned; only while released and posting).
     std::optional<ClampSweep> posted(unsigned side,bool clamp_drew,const ClampOutput& out,bool post,Vec3 eye,Vec3 hand,std::uint64_t tick,std::uint64_t epoch) {
         if(side>1) return std::nullopt;auto& k=sides_[side];
         k.released=clamp_drew && out.valid && out.state==ClampState::released;k.tick=tick;k.epoch=epoch;k.eye_at=eye;
@@ -186,5 +200,9 @@ inline Vec3 guarded_shot_origin(const ReleasedShotGuard& released,const ClampedS
                                 std::uint64_t epoch) {
     return released.applies(side,now,epoch)?released.origin(side,raw_origin,now):clamped_shot_origin(raw_origin,clamped,now,epoch);
 }
+
+// N6: a load (the loading screen or a death reload: game logic 0 or bit 15, where the mod already suspends the avatar fit) forgets the
+// clamp's planes, the held hand and the shot state, even within the same epoch (a death reload can keep the player and pose epoch).
+inline bool clamp_forgets_on(unsigned logic) {return logic==0 || logic==(1u<<15);}
 
 } // namespace d2vr

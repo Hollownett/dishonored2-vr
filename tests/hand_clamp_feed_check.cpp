@@ -228,9 +228,9 @@ void default_wall_tip() {
     CHECK(out.wall_tip_sweep.valid && std::abs(out.wall_tip_sweep.radius-.035)<1e-12 && out.tip_sweep.valid);
 }
 // A 10 cm door, solid for 1 <= x <= 1.1 (near face normal -x), answered like a closest-hit sphere cast from the near side.
-std::optional<ClampHit> door_cast(const ClampSweep& s) {
+std::optional<ClampHit> door_cast(const ClampSweep& s,double thickness=.1) {
     if(!s.valid) return std::nullopt;
-    if(s.from.x+s.radius>=1 && s.from.x-s.radius<=1.1) return ClampHit{{1,s.from.y,s.from.z},{-1,0,0},5,3,true};
+    if(s.from.x+s.radius>=1 && s.from.x-s.radius<=1+thickness) return ClampHit{{1,s.from.y,s.from.z},{-1,0,0},5,3,true};
     if(s.from.x<1 && s.to.x+s.radius>1) {
         const double t=(1-s.radius-s.from.x)/(s.to.x-s.from.x);const Vec3 c=s.from+(s.to-s.from)*std::max(0.,t);
         return ClampHit{{1,c.y,c.z},{-1,0,0},5,3,false};
@@ -244,7 +244,7 @@ std::optional<ClampHit> door_cast(const ClampSweep& s) {
 void released_shot_through_door() {
     HandClamp clamp;ReleasedShotGuard guard;ClampOutput out{};const auto root=level_frame({0,0,0},{1,0,0});
     const Vec3 chest{0,0,1},eye{0,0,1.6};double now=0;std::uint64_t tick=1000;bool started=false;
-    std::optional<ClampSweep> tip_slot_posted;   // what the tip slot carried last frame (the clamp's tip or the guard's eye sweep)
+    std::optional<ClampSweep> tip_slot_posted;   // what the exclusion slot carried last frame (the guard's eye sweep)
     unsigned released_frames=0,guarded=0;double farthest=-1e9;
     for(int f=0;f<100;++f) {
         const Vec3 controller{f<10?.5+.09*f:1.4,0,1};
@@ -258,7 +258,7 @@ void released_shot_through_door() {
         clamp.note_drawn(0,root,out.drawn.position);
         // The shot, published from the next frame's aim: raw origin a little ahead of the grip, behind the door's far face.
         const Vec3 raw_origin=controller+Vec3{.02,0,.01};
-        const auto clamped=clamped_shot_offset(out.drawn.position,controller,true,tick,7);
+        const auto clamped=clamped_shot_offset(out.drawn.position,controller,true,tick,7,&clamp,0);
         const Vec3 origin=guarded_shot_origin(guard,clamped,0,raw_origin,tick+11,7);
         if(out.state==ClampState::released) {++released_frames;guarded+=guard.applies(0,tick+11,7);}
         if(controller.x>1) farthest=std::max(farthest,origin.x);
@@ -325,10 +325,89 @@ void paused_hand_guarded() {
     CHECK(paused_hand(clamp,1,pose_at({.4,0,.7}),3,gap).z==.7);                 // the other side holds nothing
     clamp.reset(0);CHECK(paused_hand(clamp,0,pose_at({.4,0,.7}),3,gap).z==.7);  // a reset (yielded) side: the controller
 }
+// N5: the shot while clamped against a thin door: steady presses into 2, 5 and 10 cm doors and jab-and-fire at 4-6 m/s, with the aim
+// origin 5 or 8 cm ahead of the grip, fingertip sweeps on and off (C14), 10 or 30 cm past the near face (30 cm: the side also snaps
+// back). The publication's order: the aim (last frame's offset, planes and guard; this frame's controller) -> the hands (answers ->
+// guard -> clamp update -> the guard's eye sweep on the exclusion slot -> note_drawn -> store the offset and the held planes).
+// Judged: every shot origin of the run on the near side of the door.
+double door_fire(double thickness,double speed,double ahead,double depth,bool tips,unsigned* released=nullptr,double* early=nullptr,double* free_hand=nullptr) {
+    HandClamp clamp;ReleasedShotGuard guard;ClampOutput out{};ClampedShotOffset stored{};const auto root=level_frame({0,0,0},{1,0,0});
+    const Vec3 chest{0,0,1},eye{0,0,1.6};double now=0,x=.4,farthest=-1e9;std::uint64_t tick=1000;bool started=false;
+    std::optional<ClampSweep> eye_posted;
+    const auto cast=[&](const ClampSweep& sweep) {return door_cast(sweep,thickness);};
+    for(int f=0;f<160;++f) {
+        x=std::min(1+depth,x+speed*dt);const Vec3 controller{x,0,1};
+        const Vec3 raw_origin=controller+Vec3{ahead,0,.01};
+        // The aim's first publish, before the hands (last frame's offset and planes): info only, it is published again below.
+        if(early) *early=std::max(*early,guarded_shot_origin(guard,stored,0,raw_origin,tick,7).x);
+        // The hands.
+        const auto slot0=started?cast(out.palm_sweep):std::nullopt;
+        const auto eye_answer=eye_posted?cast(*eye_posted):std::nullopt;
+        guard.read(0,slot0,eye_answer,tick);
+        ClampInput in{};in.now=now;in.epoch=1;in.root=root;in.target=pose_at(controller);in.chest=chest;in.tip_enabled=tips;
+        in.tip=default_clamp_tip();in.wall_tip=default_clamp_wall_tip();
+        if(started) route_clamp_hits(in,out.state,slot0,cast(out.tip_sweep),cast(out.wall_tip_sweep),std::nullopt);
+        out=clamp.update(0,in);started=true;
+        eye_posted=guard.posted(0,true,out,in.post,eye,controller,tick,7);
+        clamp.note_drawn(0,root,out.drawn.position);
+        stored=clamped_shot_offset(out.drawn.position,controller,true,tick,7,&clamp,0);
+        // The aim published again after the hands, with this frame's planes, offset and guard (what a shot uses from here on). Judged
+        // while the clamp holds the hand (contact) or it is snapped back (released); a free hand is info (no surface met yet).
+        const double x_now=guarded_shot_origin(guard,stored,0,raw_origin,tick+1,7).x;
+        if(out.state!=ClampState::free) farthest=std::max(farthest,x_now);else if(free_hand) *free_hand=std::max(*free_hand,x_now);
+        if(released && out.state==ClampState::released) ++*released;
+        now+=dt;tick+=11;
+    }
+    return farthest;
+}
+void shot_clipped_at_held_planes() {
+    double worst=-1e9,worst_early=-1e9,worst_free=-1e9;unsigned runs=0,released_runs=0;
+    for(const double thickness:{.02,.05,.10}) for(const double speed:{.5,4.,5.,6.}) for(const double ahead:{.05,.08})
+        for(const double depth:{.1,.3}) for(const bool tips:{true,false}) {
+            unsigned released=0;double early=-1e9,free_x=-1e9;const double farthest=door_fire(thickness,speed,ahead,depth,tips,&released,&early,&free_x);
+            worst_early=std::max(worst_early,early);worst_free=std::max(worst_free,free_x);
+            if(farthest>=1) std::printf("door %.2f speed %.1f ahead %.2f depth %.1f tips %d: origin %.4f\n",thickness,speed,ahead,depth,int(tips),farthest);
+            CHECK(farthest<1);worst=std::max(worst,farthest);++runs;released_runs+=released>0;
+        }
+    CHECK(released_runs>0 && released_runs<runs);                   // both the clamped and the snapped-back paths were judged
+    std::printf("shot_clipped_at_held_planes: %u runs (%u snap back), farthest origin x %.4f (door at 1); before-the-hands publish (info, not used: published after them) %.4f; free hand (info) %.4f\n",runs,released_runs,worst,worst_early,worst_free);
+    // Resting on the door face (pressed in, then back to the drawn hand: no offset, the touched plane still held): the aim 8 cm ahead
+    // of the grip is still clipped at the door.
+    {HandClamp clamp;ClampOutput out{};const auto root=level_frame({0,0,0},{1,0,0});double now=0;bool started=false;
+     for(int f=0;f<90;++f) {
+        ClampInput in{};in.now=now;in.epoch=1;in.root=root;in.target=pose_at({f<40?1.:.945,0,1});in.chest={0,0,1};in.tip_enabled=false;
+        if(started) route_clamp_hits(in,out.state,door_cast(out.palm_sweep,.02),std::nullopt,std::nullopt,std::nullopt);
+        out=clamp.update(0,in);started=true;clamp.note_drawn(0,root,out.drawn.position);now+=dt;
+     }
+     const auto rest=clamped_shot_offset(out.drawn.position,{.945,0,1},true,500,7,&clamp,0);
+     CHECK(rest.valid && rest.plane_count>0 && length(rest.offset)==0);
+     CHECK(clamped_shot_origin({1.025,0,1},rest,505,7).x<1);}
+    // The clip alone: a held plane at x = 1 and an origin 3 cm into it, from a grip 5.5 cm before it.
+    ClampedShotOffset o{};o.valid=true;o.epoch=7;o.tick=100;o.drawn={.945,0,1};o.planes[0]=ClampHit{{1,0,1},{-1,0,0},5};o.plane_count=1;
+    const Vec3 clipped=clamped_shot_origin({1.03,0,1},o,105,7);
+    CHECK(clipped.x<1-.04 && clipped.x>=.945);
+    o.plane_count=0;CHECK(clamped_shot_origin({1.03,0,1},o,105,7).x==1.03);   // no plane, no offset: the origin as it is
+}
+
+// N6: the loads that forget the clamp; a forgotten side draws the controller in the next menu (no pre-death planes).
+void reload_forgets() {
+    CHECK(clamp_forgets_on(0) && clamp_forgets_on(1u<<15));
+    CHECK(!clamp_forgets_on(2) && !clamp_forgets_on(256) && !clamp_forgets_on(16) && !clamp_forgets_on(1024) && !clamp_forgets_on((1u<<15)|2));
+    HandClamp clamp;ClampOutput out{};const auto root=level_frame({0,0,0},{1,0,0});double now=0;bool started=false;
+    for(int f=0;f<60;++f) {
+        ClampInput in{};in.now=now;in.epoch=3;in.root=root;in.target=pose_at({.4,0,.75});in.chest={0,0,1.3};in.tip_enabled=false;
+        if(started) route_clamp_hits(in,out.state,table_cast(out.palm_sweep),std::nullopt,std::nullopt,std::nullopt);
+        out=clamp.update(0,in);started=true;clamp.note_drawn(0,root,out.drawn.position);now+=dt;
+    }
+    CHECK(std::abs(paused_hand(clamp,0,pose_at({.4,0,.7}),3,.35).z-.855)<1e-6);   // same epoch, before the reload: kept out
+    clamp.reset(0);clamp.reset(1);                                                  // the publication's forget on a load
+    CHECK(paused_hand(clamp,0,pose_at({.4,0,.7}),3,.35).z==.7);                    // after it: the controller, same epoch
+    std::array<ClampHit,HandClamp::max_held_planes> planes{};CHECK(clamp.held_planes(0,planes)==0);
+}
 } // namespace
 
 int main() {
-    yields();posts();routes();probe_sets();hold_store();reacquire();blade_stab();blade_push_stays_out();shot_origin_thin_wall();default_wall_tip();released_shot_through_door();paused_hand_guarded();
+    yields();posts();routes();probe_sets();hold_store();reacquire();blade_stab();blade_push_stays_out();shot_origin_thin_wall();default_wall_tip();released_shot_through_door();paused_hand_guarded();shot_clipped_at_held_planes();reload_forgets();
     std::puts("PASS hand_clamp_feed_check: C9 yields, C14 cadence, answer routing, open-hand probe sets, re-acquire hold, blade stab, shot origin");
     return 0;
 }

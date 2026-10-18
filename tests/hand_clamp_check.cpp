@@ -818,9 +818,9 @@ void budget_drops_tip_then_alternates() {
     run(b,550,2,4,false);
     CHECK(!b.tip_enabled() && b.alternate());
     run(b,100,4,8,false);
-    CHECK(!b.tip_enabled() && b.alternate()); // a cost that does not depend on the mode proves nothing about the better mode:
-    run(b,100,8,40,false);                    // 550 -> 100 measures factor 4 (capped), predicted 400: not under 0.4 ms
-    CHECK(!b.tip_enabled() && b.alternate() && std::abs(b.restore_factor()-4)<1e-9);
+    CHECK(!b.tip_enabled() && b.alternate() && std::abs(b.restore_factor()-2.5)<1e-9);   // 550 -> 100 measured, capped at 2.5
+    run(b,100,8,40,false);                    // predicted 250 then 120 (600 -> 550 floored at 1.2): both come back
+    CHECK(b.tip_enabled() && !b.alternate());
     // Mode-dependent scenes (the cost of each mode), counting flips of either switch.
     struct Scene {double tip,no_tip,alternate;};
     const auto play=[](CastBudget& budget,const std::function<Scene(double)>& scene,double from,double to,std::vector<double>* flips) {
@@ -851,9 +851,24 @@ void budget_drops_tip_then_alternates() {
         play(backoff,[](double){return Scene{600,90,45};},0,600,&flips);
         CHECK(flips.size()>=13 && flips.size()%2==1);
         std::vector<double> waits;for(std::size_t i=1;i+0<flips.size();i+=2) waits.push_back(flips[i]-flips[i-1]);
-        CHECK(waits.size()>=6);   // from each step down to the next recovery: 5, 10, 20, 40, 80, 120, 120 ... s
-        for(std::size_t i=0;i<waits.size();++i) {const double expect=std::min(5*std::pow(2.,double(i)),120.);CHECK(std::abs(waits[i]-expect)<.05);}
+        CHECK(waits.size()>=6);   // from each step down to the next recovery: a covered window (2 s), then 5, 10, 20, 40, 80, 120 ... s
+        for(std::size_t i=0;i<waits.size();++i) {const double expect=2+std::min(5*std::pow(2.,double(i)),120.);CHECK(std::abs(waits[i]-expect)<.05);}
         unsigned in_last_minute=0;for(const double f:flips) in_last_minute+=f>540;CHECK(in_last_minute<=2);
+    }
+    {   // N4: one slow first scope after a load (a 15 s gap) decides nothing, twice; nor does one right after reset_window().
+        CastBudget load;std::vector<double> flips;const auto cheap=[](double){return Scene{200,100,50};};
+        play(load,cheap,0,10,&flips);
+        load.note(900,25);play(load,cheap,25,40,&flips);
+        load.note(900,55);load.note(900,55.011);play(load,cheap,55.011,90,&flips);
+        CHECK(flips.empty() && load.tip_enabled() && !load.alternate());
+        load.reset_window();load.note(5000,90.02);play(load,cheap,90.02,91,&flips);CHECK(flips.empty());
+        // After reset_window() the 600 us that follows needs its own covered window (2 s); mixed into the old one it crossed 0.5 ms at ~1.5 s.
+        load.reset_window();play(load,[](double){return Scene{600,300,150};},91,92.9,&flips);CHECK(flips.empty() && load.tip_enabled());
+        // A window needs 60 samples: a slow stream (2 Hz) over budget for 10 s decides nothing.
+        CastBudget sparse;for(int i=0;i<20;++i) sparse.note(900,i*.2);CHECK(sparse.tip_enabled());
+        // Continuous cost over budget after a reset still steps down, on a covered window.
+        CastBudget heavy;std::vector<double> f2;heavy.reset_window();
+        play(heavy,[](double){return Scene{900,300,150};},0,3,&f2);CHECK(f2.size()==1 && std::abs(f2[0]-2)<.02 && !heavy.tip_enabled());
     }
     {   // An affordable scene never steps down.
         CastBudget fits;std::vector<double> flips;play(fits,[](double){return Scene{420,200,100};},0,60,&flips);CHECK(flips.empty() && fits.tip_enabled());
