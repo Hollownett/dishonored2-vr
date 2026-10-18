@@ -31,6 +31,8 @@ const char* volatile g_marker = kProxyMarker;
 // Paths below are written by the worker before it starts the stop watcher and are read-only afterwards.
 std::wstring g_build_dir;
 std::atomic<ProbeFn> g_stop_probe{nullptr};
+// True from a start trigger (or settle timeout) until that attempt ends, StartProbe included.
+std::atomic<bool> g_attempt_active{false};
 
 // ---------------- text and files
 
@@ -111,6 +113,12 @@ bool write_file(const std::wstring& path, const std::string& data, bool append) 
 // ---------------- log: <modhome>\artifacts\linux-proxy.log, one ISO-8601-stamped line per event
 
 SRWLOCK g_log_lock = SRWLOCK_INIT;
+struct LogLock {
+    LogLock() { AcquireSRWLockExclusive(&g_log_lock); }
+    ~LogLock() { ReleaseSRWLockExclusive(&g_log_lock); }
+    LogLock(const LogLock&) = delete;
+    LogLock& operator=(const LogLock&) = delete;
+};
 std::wstring g_log_path;  // empty until the worker opens the log; guarded by g_log_lock
 std::string g_log_pending;  // lines logged before that (e.g. by DirectInput8Create); guarded by g_log_lock
 
@@ -119,16 +127,18 @@ void log_line(const std::wstring& msg) noexcept {
         SYSTEMTIME t;
         GetLocalTime(&t);
         wchar_t stamp[40];
-        swprintf_s(stamp, L"%04u-%02u-%02uT%02u:%02u:%02u.%03u ", t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute,
-                   t.wSecond, t.wMilliseconds);
+        swprintf_s(stamp, L"%04u-%02u-%02uT%02u:%02u:%02u.%03u ", static_cast<unsigned>(t.wYear),
+                   static_cast<unsigned>(t.wMonth), static_cast<unsigned>(t.wDay), static_cast<unsigned>(t.wHour),
+                   static_cast<unsigned>(t.wMinute), static_cast<unsigned>(t.wSecond),
+                   static_cast<unsigned>(t.wMilliseconds));
         const std::wstring line = stamp + msg + L"\r\n";
         OutputDebugStringW((L"d2vr-linux proxy: " + line).c_str());
-        AcquireSRWLockExclusive(&g_log_lock);
+        const std::string bytes = to_utf8(line);  // allocate before taking the lock
+        LogLock lock;
         if (g_log_path.empty())
-            g_log_pending += to_utf8(line);
+            g_log_pending += bytes;
         else
-            write_file(g_log_path, to_utf8(line), true);
-        ReleaseSRWLockExclusive(&g_log_lock);
+            write_file(g_log_path, bytes, true);
     } catch (...) {
     }
 }
@@ -137,16 +147,17 @@ void log_line(const std::wstring& msg) noexcept {
 void open_log(const std::wstring& artifacts, const std::wstring& first_line) {
     const std::wstring path = artifacts + L"\\" + kLogName;
     if (exists(path)) MoveFileExW(path.c_str(), (artifacts + L"\\linux-proxy.previous.log").c_str(), MOVEFILE_REPLACE_EXISTING);
-    AcquireSRWLockExclusive(&g_log_lock);
-    g_log_path = path;
+    std::wstring log_path = path;  // copied outside the lock; swapped in without allocating
     std::string pending;
-    pending.swap(g_log_pending);
-    ReleaseSRWLockExclusive(&g_log_lock);
+    {
+        LogLock lock;
+        g_log_path.swap(log_path);
+        pending.swap(g_log_pending);
+    }
     log_line(first_line);
     if (!pending.empty()) {
-        AcquireSRWLockExclusive(&g_log_lock);
+        LogLock lock;
         write_file(path, pending, true);
-        ReleaseSRWLockExclusive(&g_log_lock);
     }
 }
 
@@ -188,19 +199,43 @@ DWORD WINAPI stop_watcher(void*) {
     try {
         const std::wstring stop = g_build_dir + L"\\" + kStopRequest;
         bool delete_error_logged = false;
-        for (;;) {
-            Sleep(500);
-            if (!exists(stop)) continue;
-            if (!DeleteFileW(stop.c_str())) {  // act only once per request file
+        bool retry_logged = false;  // one "retrying" line per pending request
+        // Consumes the request once it is handled, so it acts only once per request file.
+        auto consume = [&](const std::wstring& message) {
+            retry_logged = false;
+            if (!DeleteFileW(stop.c_str())) {
                 if (!delete_error_logged) log_line(L"cannot remove linux-stop (error " + num(GetLastError()) + L")");
                 delete_error_logged = true;
+                return;
+            }
+            log_line(message);
+        };
+        for (;;) {
+            Sleep(500);
+            if (!exists(stop)) {
+                retry_logged = false;
                 continue;
             }
-            ProbeFn stop_probe = g_stop_probe.load();
-            if (stop_probe != nullptr)
-                log_line(L"StopProbe returned " + num(stop_probe(nullptr)));
-            else
-                log_line(L"StopProbe returned none (no session)");
+            // Read before calling StopProbe: a request seen while no attempt runs is for no session and is dropped,
+            // so it cannot stop the next session the moment it starts.
+            const bool attempt_active = g_attempt_active.load();
+            const ProbeFn stop_probe = g_stop_probe.load();
+            if (stop_probe == nullptr && !attempt_active) {
+                consume(L"StopProbe returned none (no session)");
+                continue;
+            }
+            if (stop_probe != nullptr) {
+                const DWORD code = stop_probe(nullptr);
+                if (code == 0 || !attempt_active) {
+                    consume(L"StopProbe returned " + num(code));
+                    continue;
+                }
+                if (!retry_logged)
+                    log_line(L"StopProbe returned " + num(code) + L"; linux-stop kept, retrying while the session starts");
+            } else if (!retry_logged) {
+                log_line(L"linux-stop kept until the mod DLL is loaded");
+            }
+            retry_logged = true;
         }
     } catch (const std::exception& e) {
         log_line(L"stop watcher stopped: " + from_utf8(e.what()));
@@ -317,6 +352,7 @@ void run_worker() {
     std::wstring loaded_name;
     ModExports ex;
     for (;;) {
+        g_attempt_active.store(false);
         while (!game_window_present()) Sleep(500);
         const ULONGLONG found_at = GetTickCount64();
         if (first_session)
@@ -335,7 +371,10 @@ void run_worker() {
             Sleep(500);
         }
         first_session = false;
+        g_attempt_active.store(true);
 
+        // Probe.Session order (launcher/Probe.cs:225-247): every refusal comes before the cfg is written and the
+        // previous session's outputs are deleted, so a refused start keeps that session's failure evidence.
         std::wstring why;
         const std::optional<std::wstring> pick = select_mod_dll(mod_dll_candidates(build), why);
         if (!pick) {
@@ -347,13 +386,6 @@ void run_worker() {
             continue;
         }
         const std::wstring dll = build + L"\\" + *pick;
-        if (!write_file(build + L"\\dxgi-probe.cfg", probe_config(pid), false)) {
-            log_line(L"cannot write build\\dxgi-probe.cfg (error " + num(GetLastError()) + L")");
-            continue;
-        }
-        for (const wchar_t* stale : {L"dxgi-probe-failure.txt", L"dxgi-probe-result.json", L"xr-live-status.json"})
-            DeleteFileW((artifacts + L"\\" + stale).c_str());
-
         if (mod == nullptr) {
             mod = LoadLibraryExW(dll.c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
             if (mod == nullptr) {
@@ -381,6 +413,12 @@ void run_worker() {
             log_line(L"ProbeCapabilities=" + num(caps) + L" lacks required " + num(kRequiredCapabilities));
             continue;
         }
+        if (!write_file(build + L"\\dxgi-probe.cfg", probe_config(pid), false)) {
+            log_line(L"cannot write build\\dxgi-probe.cfg (error " + num(GetLastError()) + L")");
+            continue;
+        }
+        for (const wchar_t* stale : {L"dxgi-probe-failure.txt", L"dxgi-probe-result.json", L"xr-live-status.json"})
+            DeleteFileW((artifacts + L"\\" + stale).c_str());
 
         log_line(L"StartProbe begin " + dll);
         const DWORD code = ex.start(nullptr);

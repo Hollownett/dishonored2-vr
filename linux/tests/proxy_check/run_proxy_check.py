@@ -166,6 +166,72 @@ class ProxyCheck(unittest.TestCase):
         self.assertIn("hr=0x00000000 iface=1", self.host_stdout())
         self.finish()
 
+    def test_refused_start_keeps_previous_outputs(self):
+        # Probe.Session refuses before it writes the cfg or deletes the last session's outputs (Probe.cs:225-247).
+        self.install_mod("fake_mod_lowcaps")
+        (self.home / "build/linux-settle-seconds").write_text("600")
+        previous = {name: self.home / "artifacts" / name for name in ("dxgi-probe-failure.txt", "dxgi-probe-result.json")}
+        for name, path in previous.items():
+            path.write_text("previous session " + name)
+        self.launch()
+        self.wait_for(lambda: "game window found" in self.log(), 30)
+        self.assertEqual(cli("start", "--mod-home", str(self.home)).returncode, 0)
+        self.wait_for(lambda: "ProbeCapabilities=1 lacks required 61017" in self.log(), 30)
+        for name, path in previous.items():
+            self.assertEqual(path.read_text(), "previous session " + name)
+        self.assertFalse((self.home / "build/dxgi-probe.cfg").exists())
+        self.assertNotIn("StartProbe begin", self.log())
+        self.finish()
+
+    def test_stop_during_startup_is_kept_until_accepted(self):
+        # The fake StopProbe returns 2 for 5 s after StartProbe begins, as the real one does until it is capturing.
+        self.install_mod()
+        (self.home / "build/linux-settle-seconds").write_text("600")
+        (self.home / "build/fake-start-delay-ms").write_text("5000")
+        self.launch()
+        self.wait_for(lambda: "game window found" in self.log(), 30)
+        self.assertEqual(cli("start", "--mod-home", str(self.home)).returncode, 0)
+        self.wait_for(self.marker.exists, 30)
+        self.assertEqual(cli("stop", "--mod-home", str(self.home)).returncode, 0)
+        self.wait_for(lambda: "retrying while the session starts" in self.log(), 15)
+        self.assertTrue((self.home / "build/linux-stop").exists())
+        # Without the retry the stop is lost and the fake StartProbe only returns (4) after 60 s.
+        self.wait_for(lambda: "StartProbe returned 0" in self.log() and "StopProbe returned 0" in self.log(), 30)
+        self.assertEqual(self.log().count("retrying while the session starts"), 1)
+        self.wait_for(lambda: not (self.home / "build/linux-stop").exists(), 5)
+        self.finish()
+
+    def test_second_session_after_stop(self):
+        self.install_mod()
+        (self.home / "build/linux-settle-seconds").write_text("600")
+        self.launch()
+        self.wait_for(lambda: "game window found" in self.log(), 30)
+        for session in (1, 2):
+            self.assertEqual(cli("start", "--mod-home", str(self.home)).returncode, 0)
+            self.wait_for(self.marker.exists, 30)
+            host_pid, cfg_pid = self.marker.read_text().split()
+            self.assertEqual(host_pid, cfg_pid)
+            self.marker.unlink()
+            self.assertEqual(cli("stop", "--mod-home", str(self.home)).returncode, 0)
+            self.wait_for(lambda: self.log().count("StartProbe returned 0") == session
+                          and self.log().count("StopProbe returned 0") == session, 15)
+        self.assertEqual(self.log().count("StartProbe begin"), 2)
+        self.assertIn("waiting for start (trigger)", self.log())
+        self.assertNotIn("restart the game", self.log())
+        self.finish()
+
+    def test_two_mod_dlls_refused_game_keeps_running(self):
+        self.install_mod()
+        shutil.copy2(self.built["fake_mod"], self.home / "build" / "d2vr_render_probe_arm_v998.dll")
+        (self.home / "build/linux-settle-seconds").write_text("600")
+        self.launch()
+        self.wait_for(lambda: "game window found" in self.log(), 30)
+        self.assertEqual(cli("start", "--mod-home", str(self.home)).returncode, 0)
+        self.wait_for(lambda: "expected exactly one d2vr_render_probe_arm_v*.dll in build (found 2)" in self.log(), 30)
+        self.assertFalse(self.marker.exists())
+        self.assertIn("hr=0x00000000 iface=1", self.host_stdout())
+        self.finish()
+
 
 if __name__ == "__main__":
     unittest.main()

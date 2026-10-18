@@ -1,5 +1,7 @@
 // Fake d2vr_render_probe_arm_v999.dll for run_proxy_check.py: the four exports of src/dxgi_probe.cpp with the same
 // signatures. StartProbe records "<own pid> <cfg pid>" in <root>\artifacts\fake-start.txt and blocks until StopProbe.
+// Like the real DLL, StopProbe returns 2 until the session is capturing; <root>\build\fake-start-delay-ms (optional)
+// sets how long StartProbe stays "starting" after writing the marker.
 #include <windows.h>
 
 #include <atomic>
@@ -15,6 +17,7 @@ extern "C" IMAGE_DOS_HEADER __ImageBase;
 namespace {
 
 std::atomic<bool> g_in_start{false};
+std::atomic<bool> g_capturing{false};
 std::atomic<HANDLE> g_stop_event{nullptr};
 
 std::wstring parent(const std::wstring& path) {
@@ -42,7 +45,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI ProbeStatus(void*) { return 0; }
 extern "C" __declspec(dllexport) DWORD WINAPI ProbeCapabilities(void*) { return FAKE_CAPS; }
 
 extern "C" __declspec(dllexport) DWORD WINAPI StopProbe(void*) {
-    if (!g_in_start.load()) return 2;
+    if (!g_capturing.load()) return 2;
     SetEvent(g_stop_event.load());
     return 0;
 }
@@ -62,6 +65,11 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
         std::ifstream cfg(root + L"\\build\\dxgi-probe.cfg");
         cfg >> cfg_pid;
     }
+    unsigned long start_delay_ms = 0;
+    {
+        std::ifstream delay(root + L"\\build\\fake-start-delay-ms");
+        delay >> start_delay_ms;
+    }
     // Write then rename, so the test never reads a half-written marker.
     const std::wstring marker = root + L"\\artifacts\\fake-start.txt";
     {
@@ -70,7 +78,10 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
     }
     MoveFileExW((marker + L".tmp").c_str(), marker.c_str(), MOVEFILE_REPLACE_EXISTING);
 
+    Sleep(start_delay_ms);
+    g_capturing.store(true);
     DWORD rc = WaitForSingleObject(ev, 60000) == WAIT_OBJECT_0 ? 0 : 4;
+    g_capturing.store(false);
     g_in_start.store(false);
     return rc;
 }
