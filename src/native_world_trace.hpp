@@ -108,6 +108,13 @@ inline constexpr std::uint32_t kWorldOccluderRequired=0;
 // Not for our use (AI/entity probes, semantics unknown): 0x2f/0x22f(0x638800), 0x2e/0x800(0x83c860),
 // 0x200/0x40(0x83a510), 0x22b/0x40(0x44bd90), 0x2b/0x40(0x3a2730).
 
+// A body the cast must not report (request +0x68/+0x14, the native source-body exclusion: 129a310 skips a target whose full id
+// equals the source body's). record: the body's pool record (pool + index*0xb0, as NativeWorldQuerySource::body); handle: its full
+// id (record+0x70); filter_info: written to +0x14 (the player's lease writes its controller's query filter info there; a prop has
+// none, so the hand clamp passes the body's own collision filter word, record+0x6c, or 0). UNVERIFIED in game: that walls still
+// report through such a cast (hand clamp status "exclusion").
+struct NativeCastExclusion {std::uintptr_t record{};std::uint32_t handle{},filter_info{};};
+
 struct WorldTraceHit {
     Vec3 point{};            // native contact position on the hit surface
     Vec3 centre{};           // from + (to-from)*fraction: where the swept sphere stops
@@ -278,9 +285,10 @@ public:
     static WorldTraceQueryResult sphere_query_checked(std::uintptr_t base,Read read,Cast cast,Construct construct,
             std::uintptr_t world,Vec3 from,Vec3 to,double radius,
             std::uint32_t layers=kWorldOccluderLayers,std::uint32_t required=kWorldOccluderRequired,const NativeWorldQuerySource* source=nullptr,
-            bool collect_initial=false) {
+            bool collect_initial=false,const NativeCastExclusion* exclude=nullptr) {
         if(!base || !read || !cast || !construct || !world || !(radius>0.0005) || radius>1) return {};
         if(collect_initial && !source)return {};
+        if(exclude && (source || !rig::pointer(exclude->record) || (exclude->handle&0xffffffu)==0xffffffu))return {};
         if(source && (source->base!=base || source->world!=world || !native_world_query_source_current(read,*source)))return {};
         std::uint64_t shape_tag_codec{};
         if(!read(world+shape_tag_codec_offset,&shape_tag_codec,8)) return {};
@@ -294,6 +302,7 @@ public:
                                              reinterpret_cast<std::uintptr_t>(shape.data()));
         if(!request) return {};
         if(source) {request->source_body=source->body;request->query_id=source->query_filter_info;}
+        else if(exclude) {request->source_body=exclude->record;request->query_id=exclude->filter_info;}
         auto collector=make_closest_collector(base+collector_vtable_rva);
         std::optional<NativeInitialContactCollector> initial_collector;NativeInitialContactTable initial_table{};
         std::optional<NativeRegularContactCollector> regular_collector;NativeInitialContactTable regular_table{};
@@ -355,8 +364,8 @@ public:
     }
     static std::optional<WorldTraceHit> sphere_cast(std::uintptr_t base,Read read,Cast cast,Construct construct,
             std::uintptr_t world,Vec3 from,Vec3 to,double radius,
-            std::uint32_t layers=kWorldOccluderLayers,std::uint32_t required=kWorldOccluderRequired) {
-        return sphere_query_checked(base,read,cast,construct,world,from,to,radius,layers,required).hit;
+            std::uint32_t layers=kWorldOccluderLayers,std::uint32_t required=kWorldOccluderRequired,const NativeCastExclusion* exclude=nullptr) {
+        return sphere_query_checked(base,read,cast,construct,world,from,to,radius,layers,required,nullptr,false,exclude).hit;
     }
 };
 

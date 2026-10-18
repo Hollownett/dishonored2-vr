@@ -62,9 +62,10 @@ void test_pure() {
     h=convert_world_hit(c,{.09,0,0},{.094,0,0},0x1234);
     CHECK(h && h->initial_overlap && h->normal_valid && h->normal.x==1 && h->centre.x==.09);
     cc=to_collision_hit(*h);CHECK(cc.normal.x==1 && cc.fraction==0);
-    CollisionConfig config{};config.palm_radius=.025;WeaponCollision collision(config);
-    const auto escaped=collision.update(0,.01,{.09,0,0},{.094,0,0},{1,0,0},0,[&](Vec3,Vec3) {return std::optional<CollisionHit>{cc};});
-    CHECK(escaped.contact && escaped.shift.x>0 && std::abs(escaped.grip.x-.1)<1e-6);
+    // The hand clamp reads the same overlap (WeaponCollision is blade-only since physical hands Task 5): the valid overlap normal
+    // and the initial-overlap flag reach it unchanged, so it keeps no plane from it and counts it toward the overlap snap.
+    const auto clamp_hit=to_clamp_hit(*h);
+    CHECK(clamp_hit.initial_overlap && clamp_hit.normal_valid && clamp_hit.normal.x==1 && clamp_hit.entity==0x1234 && std::abs(clamp_hit.point.x-.075)<1e-6);
     c.normal[0]=-1;h=convert_world_hit(c,{.09,0,0},{.094,0,0},0x1234);
     CHECK(h && h->initial_overlap && h->normal_valid && h->normal.x==-1);
     c.fraction=-.8f;CHECK(!convert_world_hit(c,{0,0,0},{1,0,0},1));
@@ -125,6 +126,24 @@ void test_verify_and_cast() {
     CHECK(!malformed_count.complete && !malformed_count.hit);fixture_hit_count=1;
     const auto checked=NativeWorldTrace::sphere_query_checked(base,read_mem,fake_cast,fake_construct,world,{0,0,0},{4,0,0},.025);
     CHECK(checked.complete && checked.hit && checked.hit->entity==0xE17717 && checked.hit->fraction==.25);
+    CHECK(seen.source_body==0 && seen.query_id==0); // a legacy cast excludes nothing
+    // The hand clamp's exclusion sweep (physical hands Task 5): the met prop's body record and filter word go to +0x68/+0x14.
+    const NativeCastExclusion prop{0x9000000,0x2a000777,0x00ff0004};
+    const auto excluded_casts=casts;
+    const auto excluded=NativeWorldTrace::sphere_cast(base,read_mem,fake_cast,fake_construct,world,{0,0,0},{4,0,0},.05,kWorldOccluderLayers,kWorldOccluderRequired,&prop);
+    CHECK(excluded && casts==excluded_casts+1 && seen.source_body==0x9000000 && seen.query_id==0x00ff0004 && excluded->entity==0xE17717);
+    CHECK(seen_filter.layer_mask==0xc43e && seen_filter.required_bits==0); // the layer filter is the legacy one
+    const NativeCastExclusion zero_info{0x9000000,0x2a000777,0};
+    CHECK(NativeWorldTrace::sphere_cast(base,read_mem,fake_cast,fake_construct,world,{0,0,0},{4,0,0},.05,kWorldOccluderLayers,kWorldOccluderRequired,&zero_info) &&
+          seen.source_body==0x9000000 && seen.query_id==0);
+    // A record that is no pointer, or a body without an index, casts nothing.
+    for(const auto bad:{NativeCastExclusion{0x9000001,0x2a000777,4},NativeCastExclusion{0,0x2a000777,4},NativeCastExclusion{0x9000000,0xffffff,4}}) {
+        const auto before=casts;
+        CHECK(!NativeWorldTrace::sphere_query_checked(base,read_mem,fake_cast,fake_construct,world,{0,0,0},{4,0,0},.05,kWorldOccluderLayers,kWorldOccluderRequired,nullptr,false,&bad).complete && casts==before);
+    }
+    // An exclusion never combines with the player's source lease.
+    NativeWorldQuerySource lease{};
+    {const auto before=casts;CHECK(!NativeWorldTrace::sphere_query_checked(base,read_mem,fake_cast,fake_construct,world,{0,0,0},{4,0,0},.05,kWorldOccluderLayers,kWorldOccluderRequired,&lease,false,&prop).complete && casts==before);}
 }
 int main() {
     test_pure();test_verify_and_cast();
