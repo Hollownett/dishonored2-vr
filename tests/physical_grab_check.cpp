@@ -143,5 +143,15 @@ int main() {
         for(unsigned i=0;i<20;++i) {hand.position.x+=.011;dup.sample(hand,0,true,1,1000+16*(i/2));}
         assert(std::abs(dup.velocity().x-1.375)<1.375*.15);
     }
+    // A held object follows the newest pose even when two samples share a clock quantum.
+    {
+        PhysicalGrab latest;auto hand=identity;auto held=identity;
+        latest.sample(hand,0,true,1,100);latest.sample(hand,0,true,1,116);latest.sample(hand,.9f,true,1,132);
+        assert(latest.bind(held));
+        hand.position.x+=.011;latest.sample(hand,.9f,true,1,148);
+        const auto before=latest.target().position.x;
+        hand.position.x+=.011;latest.sample(hand,.9f,true,1,148);
+        assert(std::abs(latest.target().position.x-before-.011)<1e-4);
+    }
     std::cout<<"PASS: grip hysteresis/rearm, relative pose, bounded dynamic motor/throw, focus/epoch/stale/blocked release, occupied-hand refusal and release\n";
 }

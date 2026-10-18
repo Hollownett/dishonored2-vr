@@ -55,9 +55,10 @@ struct GrabMotor {Vec3 linear{},angular{};bool release{};};
 // native and tracking loss cannot leave a body in a changed motion mode.
 class PhysicalGrab {
     bool armed_=false,pressed_=false,held_=false,valid_sample_=false;
-    std::uint64_t epoch_{},tick_{};
+    std::uint64_t epoch_{},tick_{},velocity_tick_{};
     WorldTrackedPose previous_{},relative_{};
-    Vec3 velocity_{};
+    // Velocity has its own baseline so same-quantum samples keep their motion while previous_/tick_ track the newest pose.
+    Vec3 velocity_{},velocity_origin_{};
 public:
     bool pressed() const {return pressed_;}
     // A squeeze the game owned at its press, handed to the physics hand mid-press (a yanked or woken body under it): the
@@ -71,22 +72,18 @@ public:
             // A fresh released sample is sufficient to rearm at a new epoch;
             // held grips and unusable/reset samples never acquire on return.
             armed_=valid_input && epoch!=epoch_ && grip<.35f && (!tick_ || tick>=tick_);
-            valid_sample_=false;pressed_=false;velocity_={};epoch_=epoch;tick_=tick;previous_=hand;return false;
+            valid_sample_=false;pressed_=false;velocity_={};epoch_=epoch;tick_=tick;previous_=hand;velocity_origin_=hand.position;velocity_tick_=tick;return false;
         }
-        const auto dt=double(tick-tick_)*.001;
         const auto displacement=hand.position-previous_.position;
         // Check discontinuities even at duplicate or slow accepted timestamps,
         // before a released grip can convert old movement into a throw.
-        if(length(displacement)>.5) {valid_sample_=false;armed_=pressed_=false;velocity_={};tick_=tick;previous_=hand;return false;}
-        if(tick-tick_<grab_velocity_min_ms) {
-            // Keep previous_/tick_/velocity_ so this motion enters the next spaced velocity sample.
-            if(grip<.35f) {armed_=true;pressed_=false;}
-            else if(armed_ && grip>=.45f) pressed_=true;
-            valid_sample_=true;return true;
-        }
-        {
+        if(length(displacement)>.5) {valid_sample_=false;armed_=pressed_=false;velocity_={};tick_=tick;previous_=hand;velocity_origin_=hand.position;velocity_tick_=tick;return false;}
+        // Samples inside one clock quantum leave velocity (and its baseline) alone; their motion enters the next spaced sample.
+        if(tick-velocity_tick_>=grab_velocity_min_ms) {
+            const auto dt=double(tick-velocity_tick_)*.001;
             const double weight=1-std::exp(-dt/.035);
-            velocity_=velocity_*(1-weight)+grab_limit(displacement*(1/dt),12)*weight;
+            velocity_=velocity_*(1-weight)+grab_limit((hand.position-velocity_origin_)*(1/dt),12)*weight;
+            velocity_origin_=hand.position;velocity_tick_=tick;
         }
         if(grip<.35f) {armed_=true;pressed_=false;}
         else if(armed_ && grip>=.45f) pressed_=true;
@@ -98,7 +95,7 @@ public:
     void keep_fresh(const WorldTrackedPose& hand,std::uint64_t epoch,std::uint64_t tick) {
         if(!valid_sample_ || epoch!=epoch_ || tick<tick_ || tick-tick_>grab_pose_freshness_ms || !grab_pose_valid(hand) ||
            length(hand.position-previous_.position)>.5) return;
-        tick_=tick;previous_=hand;
+        tick_=tick;previous_=hand;velocity_origin_=hand.position;velocity_tick_=tick;
     }
     bool bind(const WorldTrackedPose& object) {return bind(object,object.position);}
     bool bind(const WorldTrackedPose& object,Vec3 contact,double maximum_contact=.3) {
