@@ -8,7 +8,9 @@ static int contract_breaks=0;
 #include <cstdlib>
 #include <functional>
 using namespace d2vr;
-#define CHECK(x) do{if(!(x)){std::printf("FAIL %d: %s\n",__LINE__,#x);std::exit(1);}}while(0)
+// Posting mode for the parametrized tests: 0 = every frame, 1/2 = C14 alternate mode casting on even/odd frames.
+static int g_mode=0;
+#define CHECK(x) do{if(!(x)){std::printf("FAIL %d (mode %d): %s\n",__LINE__,g_mode,#x);std::exit(1);}}while(0)
 
 namespace {
 constexpr double dt=1./90;
@@ -29,6 +31,7 @@ struct World {
     Vec3 inside_normal{0,0,1}; // the normal those overlaps report
     bool invalid_normals=false;// surface hits report normal_valid=false
     bool floor_first=false;    // every hand sweep reports a surface 6 cm under its start first (shadows all else)
+    double wall_x_end=1e9;     // the x wall exists only where y < wall_x_end (a wall that ends)
     Vec3 chest{0,0,1};
     std::optional<ClampHit> cast(const ClampSweep& s) const {
         if(!s.valid) return std::nullopt;
@@ -43,12 +46,15 @@ struct World {
             if(!on[i]) continue;
             const auto& p=planes[i];
             const double s0=dot(s.from-p.point,p.normal),s1=dot(s.to-p.point,p.normal);
+            const auto exists=[&](Vec3 c) {return i!=0 || c.y<wall_x_end;};
+            if(s0<s.radius && !exists(s.from)) continue;
             if(s0<s.radius) { // starts inside: initial overlap, reported before any later hit
                 if(s0<deepest) {deepest=s0;best_t=-1;best=ClampHit{s.from-p.normal*s0,p.normal,p.entity,p.material,true};}
                 continue;
             }
             if(s1>=s.radius || best_t<0) continue;
             const double t=(s0-s.radius)/(s0-s1);
+            if(!exists(s.from+(s.to-s.from)*t)) continue;
             if(t<best_t) {best_t=t;const Vec3 c=s.from+(s.to-s.from)*t;best=ClampHit{c-p.normal*s.radius,p.normal,p.entity,p.material,false,!invalid_normals};}
         }
         return best;
@@ -65,8 +71,12 @@ struct Rig {
     std::function<bool(unsigned)> drop_palm;   // true: lose this frame's palm result
     std::function<bool(unsigned)> post;        // C14 alternate mode: false skips this frame's cast
     std::optional<Vec3> note_override;         // drawn position reported to note_drawn once
-    ClampOutput last{};bool have_last=false;
-    explicit Rig(HandClampConfig c={}) : clamp(c) {}
+    ClampOutput last{};bool have_last=false;int holds=0;   // frames held so far
+    explicit Rig(HandClampConfig c={}) : clamp(c) {
+        if(g_mode) post=[phase=static_cast<unsigned>(g_mode-1)](unsigned f) {return (f&1u)==phase;};
+    }
+    bool posting() const {return !post || post(frame-1);}   // whether the last step cast
+    double lead() const {return g_mode?2.:1.;}              // frames the last step's sweep predicts
     double now() const {return t0+frame*dt;}
     ClampOutput step_pose(const WorldTrackedPose& target,bool yield=false) {
         ClampInput in{};
@@ -78,7 +88,7 @@ struct Rig {
             else if(!(drop_palm && drop_palm(frame))) in.palm_hit=slot0;
             in.tip_hit=world.cast(last.tip_sweep);
         }
-        last=clamp.update(side,in);have_last=true;++frame;
+        last=clamp.update(side,in);have_last=true;++frame;holds+=last.held;
         clamp.note_drawn(side,root,note_override?*note_override:last.drawn.position);note_override.reset();
         CHECK(contract_breaks==0);
         return last;
@@ -111,15 +121,17 @@ const auto ignore=[](const ClampOutput&,Vec3){};
 void sweep_starts_at_previous_drawn() {
     Rig r;r.step({.5,0,.5});
     auto o=r.step({.5,0,.5});
+    while(r.post && !r.post(r.frame)) o=r.step({.5,0,.5});   // alternate mode: jump on a frame that casts
     const Vec3 previous=o.drawn.position;
     o=r.step({1.3,0,.5});
     CHECK(o.palm_sweep.valid && close_to(o.palm_sweep.from,previous,1e-9));
     CHECK(o.held && close_to(o.drawn.position,previous,1e-12)); // off the validated path: wait one frame
-    CHECK(o.palm_sweep.to.x<=1.3+HandClamp::max_lead+1e-9);       // a 0.8 m jump is not extrapolated
+    CHECK(o.palm_sweep.to.x<=1.3+HandClamp::max_lead*r.lead()+1e-9);   // a 0.8 m jump is not extrapolated
     for(int i=0;i<15;++i) { // hits arrive from the next frame on; a 0.355 m gap snaps only after 0.25 s
         const Vec3 before=o.drawn.position;
         o=r.step({1.3,0,.5});
-        CHECK(o.palm_sweep.valid);
+        CHECK(o.palm_sweep.valid==r.posting());
+        if(!r.posting()) {CHECK(o.drawn.position.x<=1-.05+1e-6 && o.drawn.position.x>=1-.05-.005-1e-6);continue;}
         // The previous drawn hand; one the late results left inside the wall starts outside the plane found since.
         if(before.x<=.95) CHECK(close_to(o.palm_sweep.from,before,1e-9));
         else CHECK(std::abs(o.palm_sweep.from.x-.945)<1e-9 && std::abs(o.palm_sweep.from.z-before.z)<1e-9);
@@ -149,17 +161,21 @@ void corner_two_planes() {
 }
 
 void grazing_slides() {
+  for(const double speed:{.5,2.5}) {   // and a sustained fast graze: one held cast cycle at most, at its onset
     Rig r;r.step({.5,0,.5});
     Vec3 p{.99,0,.5}; // palm centre 4 cm into the wall
     r.move_x({.5,0,.5},p.x,1,ignore);
     for(int i=0;i<5;++i) r.step(p);
+    const int before=r.holds;
     for(int i=0;i<90;++i) {
-        p.z+=.5*dt;
+        p.z+=speed*dt;
         const auto o=r.step(p);
         CHECK(o.state==ClampState::contact);
         CHECK(o.drawn.position.x>=.945-1e-9 && o.drawn.position.x<=.95);
-        CHECK(std::abs(o.drawn.position.z-p.z)<=1e-3 && std::abs(o.drawn.position.y)<=1e-9);
+        if(!o.held) CHECK(std::abs(o.drawn.position.z-p.z)<=1e-3 && std::abs(o.drawn.position.y)<=1e-9);
     }
+    CHECK(r.holds-before<=static_cast<int>(r.lead()));
+  }
 }
 
 void fast_approach_late_results() {
@@ -170,11 +186,14 @@ void fast_approach_late_results() {
         r.move_x(previous,1.25,speed,[&](const ClampOutput& o,Vec3 target) {
             CHECK(o.drawn.position.x<=.95+.005);
             deepest=std::max(deepest,o.drawn.position.x);
-            const Vec3 ahead=target+(target-previous);   // target + v*dt
-            // In contact every other sweep slides along the wall, two frames ahead.
-            const Vec3 slid{.945,ahead.y,ahead.z};
-            CHECK(o.palm_sweep.valid && (close_to(o.palm_sweep.to,ahead,1e-6) || (o.state==ClampState::contact && close_to(o.palm_sweep.to,slid,1e-6))));
-            if(o.state==ClampState::free) CHECK(close_to(o.palm_sweep.to,ahead,1e-6));
+            // target + v*dt (two frames in C14 alternate mode, on the frames that cast). In contact every other sweep
+            // slides along the wall, twice as far ahead.
+            const Vec3 ahead=target+(target-previous)*r.lead(),slid{.945,ahead.y,ahead.z};
+            CHECK(o.palm_sweep.valid==r.posting());
+            if(o.palm_sweep.valid && !o.held) {
+                CHECK(close_to(o.palm_sweep.to,ahead,1e-6) || (o.state==ClampState::contact && close_to(o.palm_sweep.to,slid,1e-6)));
+                if(o.state==ClampState::free) CHECK(close_to(o.palm_sweep.to,ahead,1e-6));
+            }
             previous=target;
         });
         for(int i=0;i<10;++i) {const auto o=r.step(previous);CHECK(o.drawn.position.x<=.95+.005);}
@@ -298,8 +317,11 @@ void walk_and_turn_carry() {
             const Vec3 local{dot(previous_drawn-previous_root.position,previous_root.basis[0]),
                              dot(previous_drawn-previous_root.position,previous_root.basis[1]),
                              dot(previous_drawn-previous_root.position,previous_root.basis[2])};
-            CHECK(o.palm_sweep.valid && close_to(o.palm_sweep.from,apply(r.root,local),1e-9));   // the carried hand
-            CHECK(close_to(o.palm_sweep.to,target.position+(target.position-previous_target.position),1e-9)); // world motion
+            CHECK(o.palm_sweep.valid==r.posting());
+            if(o.palm_sweep.valid) {
+                CHECK(close_to(o.palm_sweep.from,apply(r.root,local),1e-9));   // the carried hand
+                CHECK(close_to(o.palm_sweep.to,target.position+(target.position-previous_target.position)*r.lead(),1e-9)); // world motion
+            }
             CHECK(!o.held && !o.snapped && o.state==ClampState::free && close_to(o.drawn.position,target.position,1e-12));
         }
         previous_root=r.root;previous_target=target;previous_drawn=o.drawn.position;
@@ -327,6 +349,37 @@ void walk_into_wall_5ms() {
     CHECK(deepest>.94 && r.last.state==ClampState::contact && std::abs(r.last.drawn.position.x-.945)<1e-6);
     CHECK(r.clamp.snapbacks(0)==0);
   }
+  for(const double speed:{5.,1.4}) {   // walking diagonally arm-first into a corner
+    Rig r;r.world.wall_y=true;
+    const double c=std::sqrt(.5);
+    const Vec3 hand_local{.5,0,0};
+    Vec3 at{-1,-1,.5};
+    const auto place=[&]() {r.root=level_frame(at,{c,c,0});r.world.chest=at+Vec3{0,0,.4};return apply(r.root,hand_local);};
+    for(int i=0;i<3;++i) r.step(place());
+    while(at.x<.7) {
+        at=at+Vec3{c,c,0}*std::min(speed*dt,(.7-at.x)/c);
+        const auto o=r.step(place());
+        CHECK(o.drawn.position.x<=.96 && o.drawn.position.y<=.96 && !o.snapped);
+    }
+    for(int i=0;i<30;++i) {const auto o=r.step(place());CHECK(o.drawn.position.x<=.95 && o.drawn.position.y<=.95);}
+    CHECK(r.clamp.snapbacks(0)==0);
+  }
+}
+
+// A diagonal approach into a corner (both walls report at nearly the same fraction), and a palm pressed onto a table
+// and into a crate face, held for 3 s: never more than 1 cm inside either surface, no snap, settled on both.
+void static_corner_press() {
+    for(const Vec3 pressed:{Vec3{1.05,1.03,.5},Vec3{1.02,1.02,.5},Vec3{.99,.5,.03},Vec3{.99,.5,-.03}}) {
+        Rig r;r.world.wall_y=pressed.z>.4;
+        const auto inside=[&](const ClampOutput& o) {
+            return std::max({o.drawn.position.x-.95,r.world.wall_y?o.drawn.position.y-.95:-1.,.05-o.drawn.position.z});
+        };
+        r.step({.5,.5,.5});r.step({.5,.5,.5});
+        r.move_to({.5,.5,.5},pressed,1,[&](const ClampOutput& o,Vec3) {CHECK(inside(o)<=.01 && !o.snapped);});
+        for(int i=0;i<270;++i) {const auto o=r.step(pressed);CHECK(inside(o)<=.01 && !o.snapped);}
+        CHECK(r.last.state==ClampState::contact && inside(r.last)<=1e-6 && inside(r.last)>=-.005-1e-6);
+        CHECK(r.clamp.snapbacks(0)==0);
+    }
 }
 
 // Pressed on one wall and sliding at 3 m/s toward a second wall that only a slid sweep can meet (the raw sweep always
@@ -344,10 +397,10 @@ void corner_slide_3ms() {
   }
 }
 
-// A fast swipe along a wall (pressed 5.5 cm, up to 6 m/s): the hand follows the slide with at most one held frame at
-// its onset, never a hold/release stutter.
+// A fast swipe along a wall (pressed 5.5 cm, up to 6 m/s): the hand follows the slide with at most one held cast
+// cycle at its onset, never a hold/release stutter.
 void fast_wall_slide_no_stutter() {
-    for(const double speed:{2.5,4.,6.}) {
+    for(const double speed:{1.6,2.5,4.,5.,6.}) {
         Rig r;r.world.floor=false;
         r.step({.5,0,.5});
         r.move_x({.5,0,.5},1.,1,ignore);
@@ -358,7 +411,27 @@ void fast_wall_slide_no_stutter() {
             CHECK(std::abs(o.drawn.position.x-.945)<1e-6);
             if(!o.held) CHECK(std::abs(o.drawn.position.y-t.y)<1e-9);
         });
-        CHECK(holds<=1);
+        CHECK(holds<=static_cast<int>(r.lead()));   // one cast cycle at the onset: 1 frame, or 2 in C14 alternate mode
+    }
+}
+
+// Sliding past the end of a wall at 3-4 m/s: once the wall ends, its plane is refuted but still holds the hand off the
+// raw sweep's path for a few frames. A step from a validated hand is accepted, so there is no hold beyond the onset
+// cycle, the hand never enters the wall, and it follows the target past the end.
+void slide_past_wall_end() {
+    for(const double speed:{3.,4.}) {
+        Rig r;r.world.floor=false;r.world.wall_x_end=.5;
+        const Vec3 start{1.03,-.5,.5};
+        r.step({.5,-.5,.5});
+        r.move_x({.5,-.5,.5},start.x,1,ignore);
+        for(int i=0;i<10;++i) r.step(start);
+        const int before=r.holds;
+        r.move_to(start,{1.03,1.5,.5},speed,[&](const ClampOutput& o,Vec3) {
+            if(o.drawn.position.y<.5-.05) CHECK(o.drawn.position.x<=.96);
+        });
+        CHECK(r.holds-before<=static_cast<int>(r.lead()));
+        for(int i=0;i<30;++i) r.step({1.03,1.5,.5});
+        CHECK(close_to(r.last.drawn.position,{1.03,1.5,.5},1e-9));
     }
 }
 
@@ -366,17 +439,18 @@ void fast_wall_slide_no_stutter() {
 // hand does not go back to holding until a frame validates again (no hold/jump stutter).
 void hold_lasts_two_frames() {
     Rig r;r.world.wall_x=false;r.world.floor=false;r.world.floor_first=true;   // every sweep is cut at its start
+    const unsigned limit=HandClamp::max_hold_frames*static_cast<unsigned>(r.lead());   // two casts: 4 frames in C14
     const Vec3 a{.5,0,.5},b{.5,.3,.5};
-    for(int i=0;i<3;++i) r.step(a);
-    auto o=r.step(b);CHECK(o.held && close_to(o.drawn.position,a,1e-12));
-    o=r.step(b);CHECK(o.held && close_to(o.drawn.position,a,1e-12));
+    for(int i=0;i<4;++i) r.step(a);
+    ClampOutput o{};
+    for(unsigned i=0;i<limit;++i) {o=r.step(b);CHECK(o.held && close_to(o.drawn.position,a,1e-12));}
     o=r.step(b);CHECK(!o.held && close_to(o.drawn.position,b,1e-12));
     o=r.step(b);CHECK(!o.held);
-    for(int i=0;i<6;++i) o=r.step(a);   // back to a: two holds, then validated again
+    for(int i=0;i<12;++i) o=r.step(a);   // back to a: holds, then validated again
     CHECK(!o.held && close_to(o.drawn.position,a,1e-12));
-    int holds=0;
+    unsigned holds=0;
     for(int i=1;i<=20;++i) {o=r.step(a+Vec3{0,.3*i,0});holds+=o.held;}   // a new 0.3 m jump every frame
-    CHECK(holds==HandClamp::max_hold_frames && close_to(o.drawn.position,a+Vec3{0,6,0},1e-12));
+    CHECK(holds==limit && close_to(o.drawn.position,a+Vec3{0,6,0},1e-12));
 }
 
 // A snap turn swings the target 4.6 cm into a wall in one frame: hold, never draw it inside.
@@ -406,6 +480,18 @@ void hitch_holds_out_of_wall() {
             CHECK(o.drawn.position.x<=.96);
         }
         for(int i=0;i<10;++i) {const auto o=r.step({1.2,0,.5});CHECK(o.drawn.position.x<=.95);}
+        CHECK(hitched && r.clamp.snapbacks(0)==0);
+    }
+    for(const double hitch_at:{.7,.85,.9}) {   // a hitch on a diagonal approach into a corner
+        Rig r;r.world.wall_y=true;double x=.5;r.step({x,x,.5});
+        bool hitched=false;
+        while(x<1.1) {
+            if(!hitched && x>=hitch_at) {r.t0+=.1-dt;x+=.15;hitched=true;}
+            else x=std::min(1.1,x+1.5*dt);
+            const auto o=r.step({x,x,.5});
+            CHECK(o.drawn.position.x<=.96 && o.drawn.position.y<=.96 && !o.snapped);
+        }
+        for(int i=0;i<30;++i) {const auto o=r.step({1.1,1.1,.5});CHECK(o.drawn.position.x<=.95 && o.drawn.position.y<=.95);}
         CHECK(hitched && r.clamp.snapbacks(0)==0);
     }
 }
@@ -649,10 +735,14 @@ void tip_probe_stops_fingers() {
         Vec3 previous{.5,0,.5},previous_drawn{.5,0,.5};
         ClampOutput o=r.move_x({.5,0,.5},1.1,speed,[&](const ClampOutput& q,Vec3 target) {
             CHECK(q.drawn.position.x+.12<=1-.03+.005);
-            CHECK(q.tip_sweep.valid && std::abs(q.tip_sweep.radius-.03)<1e-12);
-            CHECK(close_to(q.tip_sweep.from,previous_drawn+Vec3{.12,0,0},1e-9));                     // previous drawn fingertip
-            CHECK(close_to(q.tip_sweep.to,q.palm_sweep.to+Vec3{.12,0,0},1e-9));                   // the palm's end, offset
-            if(q.state==ClampState::free) CHECK(close_to(q.tip_sweep.to,target+Vec3{.12,0,0}+(target-previous),1e-6)); // + v*dt
+            CHECK(q.tip_sweep.valid==r.posting());
+            if(q.tip_sweep.valid) {
+                CHECK(std::abs(q.tip_sweep.radius-.03)<1e-12);
+                CHECK(close_to(q.tip_sweep.from,previous_drawn+Vec3{.12,0,0},1e-9));                 // previous drawn fingertip
+                CHECK(close_to(q.tip_sweep.to,q.palm_sweep.to+Vec3{.12,0,0},1e-9));               // the palm's end, offset
+                if(q.state==ClampState::free && !q.held)                                            // + v*dt (two in C14)
+                    CHECK(close_to(q.tip_sweep.to,target+Vec3{.12,0,0}+(target-previous)*r.lead(),1e-6));
+            }
             previous=target;previous_drawn=q.drawn.position;
         });
         for(int i=0;i<10;++i) {o=r.step({1.1,0,.5});CHECK(o.drawn.position.x+.12<=1-.03+.005);}
@@ -765,26 +855,35 @@ void level_frame_and_hit_conversion() {
 } // namespace
 
 int main() {
-    sweep_starts_at_previous_drawn();
-    corner_two_planes();
-    grazing_slides();
-    fast_approach_late_results();
+    // Corner, slide, hold, jump and walk tests run in every posting mode, with the same bounds.
+    for(g_mode=0;g_mode<3;++g_mode) {
+        sweep_starts_at_previous_drawn();
+        corner_two_planes();
+        static_corner_press();
+        grazing_slides();
+        fast_approach_late_results();
+        walk_and_turn_carry();
+        walk_into_wall_5ms();
+        corner_slide_3ms();
+        fast_wall_slide_no_stutter();
+        slide_past_wall_end();
+        hold_lasts_two_frames();
+        snap_turn_holds_out_of_wall();
+        hitch_holds_out_of_wall();
+        door_opens_on_corner();
+        crate_removed_while_sliding();
+        release_eases_out();
+        eased_hand_never_enters_plane();
+        tip_probe_stops_fingers();
+    }
+    g_mode=0;
     deep_start_overlap_snaps();
     snap_after_gap_time();
     no_snap_short_gap();
     rearm_after_clear();
     non_finite_snaps();
-    walk_and_turn_carry();
-    walk_into_wall_5ms();
-    corner_slide_3ms();
-    fast_wall_slide_no_stutter();
-    hold_lasts_two_frames();
-    snap_turn_holds_out_of_wall();
-    hitch_holds_out_of_wall();
     alternate_mode_predicts_two_frames();
     invalid_normal_makes_no_plane();
-    door_opens_on_corner();
-    crate_removed_while_sliding();
     shadow_refresh_is_capped();
     haptic_cooldown();
     contract_counters();
@@ -793,10 +892,7 @@ int main() {
     tracking_gap_reacquires();
     reacquire_from_inside_geometry_no_flicker();
     intermittent_hits_no_flicker();
-    release_eases_out();
     stale_plane_expires();
-    eased_hand_never_enters_plane();
-    tip_probe_stops_fingers();
     leading_probe_picks_front();
     budget_drops_tip_then_alternates();
     yield_passes_through();

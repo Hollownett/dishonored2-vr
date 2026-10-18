@@ -117,13 +117,15 @@ private:
 class HandClamp {
 public:
     static constexpr double shadow_seconds=.2;     // a plane kept only by shadowing gets this long past its last direct hit
-    static constexpr double max_lead=.15;          // the predictive extension never reaches farther (a jump is not extrapolated)
+    static constexpr double max_lead=.15;          // the predictive extension never reaches farther per cast cadence
+                                                   // (a jump is not extrapolated)
     static constexpr unsigned max_hold_frames=2;   // frames the hand may wait for a sweep to validate an unvalidated target
 private:
     enum class Posted : unsigned char {none,palm,chest};
     struct Plane {
         Vec3 point{},normal{},local{};double radius{},age{},direct_age{};
         std::uintptr_t entity{};std::uint16_t material{0xffff};bool tip{},refuted{};
+        bool last_answer{};   // hit directly by this side's last answered result (it lands a frame late, or two in C14)
     };
     static constexpr std::size_t plane_capacity=8;
     struct Side {
@@ -133,8 +135,12 @@ private:
         std::array<Plane,plane_capacity> planes{};std::size_t plane_count{};
         double over_time{},clear_time{},since_haptic{1e9};unsigned overlap_count{},hold_frames{};
         Posted posted{Posted::none};bool last_slid{};ClampSweep posted_palm{},posted_tip{};ClampProbe posted_tip_probe{};
-        Vec3 seg_from{},seg_to{};bool has_segment{};   // the path the last answered slot-0 sweep found free
-        bool posted_slid{};Vec3 slid_from{},slid_to{};unsigned slid_frames{1000};   // the last answered slid sweep
+        Vec3 seg_from{},seg_to{};bool has_segment{},seg_cut{};   // the path the last answered slot-0 sweep found free
+        Vec3 clear_from_local{};bool has_clear_from{},last_overlap{};   // start of the last palm sweep that began free
+        bool posted_slid{},slid_cut{};Vec3 slid_from{},slid_to{};unsigned slid_frames{1000};   // the last answered slid sweep
+        unsigned posted_slid_window{},slid_window{};   // frames that slid sweep's lead covers after it is answered
+        bool drawn_validated{};                        // last frame drew a validated (or held) hand
+        unsigned cadence{1};                           // frames between casts: 1, or 2 in C14 alternate mode
         bool pending_note{};ClampOutput last_out{};
     };
     HandClampConfig cfg_;
@@ -160,7 +166,8 @@ private:
     }
     static void release(Side& s) {
         s.state=ClampState::released;s.plane_count=0;s.shift_local={};
-        s.over_time=0;s.clear_time=0;s.overlap_count=0;s.hold_frames=0;s.has_segment=false;s.slid_frames=1000;
+        s.over_time=0;s.clear_time=0;s.overlap_count=0;s.hold_frames=0;s.has_segment=false;s.slid_frames=1000;s.drawn_validated=false;
+        s.has_clear_from=false;s.last_overlap=false;
     }
     void snap(unsigned side,Side& s,ClampOutput& out) {release(s);++snapbacks_[side];out.snapped=true;}
     // Fraction along the sweep where its sphere first touches the plane (0 when it starts touching).
@@ -187,6 +194,15 @@ private:
         const double t=l2>1e-12?std::clamp(dot(p-a,d)/l2,0.,1.):0;
         return length(p-(a+d*t));
     }
+    // Within palm_radius of a swept segment. Past the end of a segment that a hit cut short lies unknown space (the
+    // second wall of a corner reports at the same fraction as the first): there only beyond_cut is allowed.
+    static constexpr double beyond_cut=.01;
+    bool on_segment(Vec3 p,Vec3 a,Vec3 b,bool cut) const {
+        const Vec3 d=b-a;const double l2=dot(d,d);
+        const double t=l2>1e-12?dot(p-a,d)/l2:1;   // a sweep stopped at its start (an overlap) is all end
+        const double distance=segment_distance(p,a,b);
+        return distance<=(cut && t>=1?beyond_cut:cfg_.palm_radius)+1e-9;
+    }
     // A closest-hit cast reports one surface. A held plane it reached at or beyond the hit is shadowed, not disproved:
     // it is kept fresh, but only within shadow_seconds of its last direct hit. One it passed through without reporting is
     // refuted and ages out.
@@ -206,7 +222,7 @@ private:
     // Only a real surface hit makes a plane: an initial overlap or an invalid normal does not say where free space is.
     void add_plane(Side& s,const ClampHit& hit,double radius,Vec3 local,bool tip) const {
         if(!plane_hit(hit)) return;
-        const Plane plane{hit.point,hit.normal*(1/length(hit.normal)),local,radius,0,0,hit.entity,hit.material,tip,false};
+        const Plane plane{hit.point,hit.normal*(1/length(hit.normal)),local,radius,0,0,hit.entity,hit.material,tip,false,true};
         std::size_t slot=s.plane_count;
         for(std::size_t i=0;i<s.plane_count;++i) {
             const auto& p=s.planes[i];
@@ -221,11 +237,11 @@ private:
         s.planes[slot]=plane;
     }
     // Pushes grip point p (oriented by basis) out of the planes by the probe's radius plus skin; adds each push to
-    // `pushed` when given. direct_only: just the planes hit directly by this frame's results.
+    // `pushed` when given. direct_only: just the planes hit directly by this side's last answered result.
     void project(const Side& s,const std::array<Vec3,3>& basis,Vec3& p,double* pushed=nullptr,bool direct_only=false) const {
         for(std::size_t i=0;i<s.plane_count;++i) {
             const auto& plane=s.planes[i];
-            if(direct_only && (plane.tip || plane.direct_age>0)) continue;
+            if(direct_only && (plane.tip || !plane.last_answer)) continue;
             const Vec3 offset=clamp_detail::rotate(basis,plane.local);
             const double d=dot(p+offset-plane.point,plane.normal)-(plane.radius+cfg_.skin);
             if(d<0) {p=p-plane.normal*d;if(pushed) pushed[i]-=d;}
@@ -298,17 +314,31 @@ public:
 
         // Fold in last frame's results.
         if(s.state!=ClampState::released) {
-            for(std::size_t i=0;i<s.plane_count;++i) {s.planes[i].age+=dt;s.planes[i].direct_age+=dt;}
+            // A long frame (a 100 ms hitch) ages a plane by at most half its life, so one hitch cannot expire a wall the
+            // hand is pressed into before a sweep can confirm it again.
+            const double age_step=std::min(dt,cfg_.plane_seconds*.5);
+            for(std::size_t i=0;i<s.plane_count;++i) {s.planes[i].age+=age_step;s.planes[i].direct_age+=age_step;}
             // The re-acquire sweep: a chest inside geometry (crouched under a table) cannot validate the path.
             if(posted==Posted::chest && slot0 && slot0->initial_overlap) release(s);
             else if(posted!=Posted::none && answered.valid) {
                 const double t=slot0?hit_fraction(answered,*slot0):1.;
                 s.seg_from=answered.from;s.seg_to=answered.from+(answered.to-answered.from)*t;s.has_segment=true;
-                if(answered_slid) {s.slid_from=s.seg_from;s.slid_to=s.seg_to;s.slid_frames=0;}
+                s.seg_cut=slot0.has_value();
+                if(answered_slid) {
+                    s.slid_from=s.seg_from;s.slid_to=s.seg_to;s.slid_cut=s.seg_cut;s.slid_frames=0;s.slid_window=s.posted_slid_window;
+                }
+                if(posted==Posted::palm) {
+                    s.last_overlap=slot0 && slot0->initial_overlap;
+                    if(!s.last_overlap) {s.clear_from_local=clamp_detail::local_point(in.root,answered.from);s.has_clear_from=true;}
+                }
+                for(std::size_t i=0;i<s.plane_count;++i) if(!s.planes[i].tip) s.planes[i].last_answer=false;
                 if(posted==Posted::palm) judge(s,answered,slot0,false);
                 if(slot0) add_plane(s,*slot0,cfg_.palm_radius,{},false);
                 if(posted==Posted::palm) {
-                    s.overlap_count=slot0 && slot0->initial_overlap?s.overlap_count+1:0;
+                    // A hit that makes no plane (invalid normal) neither counts nor clears: the recovery sweep must not
+                    // reset the deep-start count while the hand stays inside a surface it cannot describe.
+                    if(slot0 && slot0->initial_overlap) ++s.overlap_count;
+                    else if(!slot0 || plane_hit(*slot0)) s.overlap_count=0;
                     if(cfg_.overlap_frames && s.overlap_count>=cfg_.overlap_frames) snap(side,s,out);
                 }
             }
@@ -329,7 +359,7 @@ public:
             if(s.clear_time<cfg_.rearm_seconds-1e-9) {released_frame(s,in,out);return finish(s,out);}
             // Re-arm: the chest-to-controller path stayed clear, so the controller is in free space. prev = target.
             s.state=ClampState::free;s.clear_time=0;s.plane_count=0;s.shift_local={};s.overlap_count=0;s.over_time=0;
-            s.hold_frames=0;s.has_segment=false;s.slid_frames=1000;
+            s.hold_frames=0;s.has_segment=false;s.slid_frames=1000;s.has_clear_from=false;s.last_overlap=false;
             s.prev_local=clamp_detail::local_point(in.root,in.target.position);
             for(std::size_t i=0;i<3;++i) s.prev_basis_local[i]=clamp_detail::local_vector(in.root,in.target.basis[i]);
             s.drawn_world=in.target.position;s.basis_world=in.target.basis;
@@ -352,13 +382,17 @@ public:
         // Draw only what the answered sweep found free. A target off that path (a jump, a hitch, a snap turn) may be
         // behind a surface no sweep has met yet: keep last frame's hand, out of the known planes, for up to
         // max_hold_frames while this frame's sweep validates the way. These frames do not count toward snap-back.
-        // The last answered sweep, or the last slid one (it leads two frames, and a raw sweep pressed into a surface is
-        // cut short at its hit). Once the holds run out the hand follows unvalidated until a frame validates again.
-        const double reach=cfg_.palm_radius+1e-9;
-        const bool validated=rearmed || !s.has_segment || segment_distance(p,s.seg_from,s.seg_to)<=reach ||
-            (s.slid_frames<=2 && segment_distance(p,s.slid_from,s.slid_to)<=reach);
+        // The last answered sweep, or the last slid one while its lead still covers this frame (a raw sweep pressed into
+        // a surface is cut short at its hit), or, after a sweep that met nothing, a step of at most palm_radius from a
+        // hand drawn validated last frame (a plane that is being refuted can hold the hand off the raw sweep's path).
+        // Once the holds run out the hand follows unvalidated until a frame validates again.
+        const bool validated=rearmed || !s.has_segment || on_segment(p,s.seg_from,s.seg_to,s.seg_cut) ||
+            (s.slid_frames<=s.slid_window && on_segment(p,s.slid_from,s.slid_to,s.slid_cut)) ||
+            (!s.seg_cut && s.drawn_validated && length(p-s.drawn_world)<=cfg_.palm_radius+1e-9);
         bool hold=false;Vec3 held=s.drawn_world;
-        if(!validated && s.hold_frames<max_hold_frames) {project3(s,in.target.basis,held);hold=true;}
+        // A hold waits for max_hold_frames casts: in C14 alternate mode a cast is answered every other frame.
+        if(!validated && s.hold_frames<max_hold_frames*s.cadence) {project3(s,in.target.basis,held);hold=true;}
+        s.drawn_validated=hold || validated;
         if(hold) {
             ++s.hold_frames;out.held=true;out.drawn.position=held;out.shift=held-target;
         } else {
@@ -397,29 +431,37 @@ public:
         // Sweep from the previous drawn hand (carried by the root, C11; pushed out of the planes known now, since a late
         // result can leave it inside one) to one frame of world motion ahead of the target (C8), two after a frame
         // without a cast. A hold sweeps from the held hand to the target slid along the known planes.
-        // After a direct hit, the next sweep slides along the directly hit planes instead (two leads ahead, since every
+        // After this side's last answered result hit a plane directly, the next sweep slides along the planes it hit
+        // (in C14 alternate mode that result landed on the frame between posts) instead (two leads ahead, since every
         // other sweep slides): the closest-hit cast reports one surface, so this is how a second surface along the slide
         // (a corner, a crate on a table) is met directly, and how a shadowed plane that is gone gets refuted.
         // A raw sweep without a direct hit is followed by another raw sweep, so raw sweeps find the frames with results.
         if(in.post) {
             const double lead=posted==Posted::none?2.:1.;
-            const auto ahead_for=[&](double frames) {return clamp_detail::clamp_length(velocity*(dt*frames),max_lead);};
+            // The cap scales with the cadence: in C14 alternate mode a sweep must cover twice the frames.
+            const auto ahead_for=[&](double frames) {return clamp_detail::clamp_length(velocity*(dt*frames),max_lead*lead);};
             const Vec3 ahead=ahead_for(lead);
+            // Recovery: the last palm sweep began inside something no plane describes (an overlap makes no plane), so a
+            // sweep from the hand would again. Sweep from the start of the last palm sweep that began free instead.
+            const bool recover=s.last_overlap && s.has_clear_from;
             std::array<Vec3,3> from_basis=s.basis_world;Vec3 from=held;
-            if(!hold) {
+            if(!hold || recover) {
                 for(std::size_t i=0;i<3;++i) from_basis[i]=clamp_detail::rotate(in.root.basis,s.prev_basis_local[i]);
-                from=clamp_detail::world_point(in.root,s.prev_local);
+                from=clamp_detail::world_point(in.root,recover?s.clear_from_local:s.prev_local);
                 project3(s,from_basis,from);
             }
             Vec3 end=target+ahead;bool slid=false;
-            if(hold) {end=target+ahead_for(2*lead);project3(s,in.target.basis,end);slid=true;}   // slides along all known planes
+            if(hold || recover) {end=target+ahead_for(2*lead);project3(s,in.target.basis,end);slid=true;}   // along all known planes
             else if(!s.last_slid) {
-                for(std::size_t i=0;i<s.plane_count;++i) if(!s.planes[i].tip && s.planes[i].direct_age<=0) slid=true;
+                for(std::size_t i=0;i<s.plane_count;++i) if(!s.planes[i].tip && s.planes[i].last_answer) slid=true;
                 if(slid) {end=target+ahead_for(2*lead);project3(s,in.target.basis,end,nullptr,true);}
             }
             s.last_slid=slid;
             const ClampSweep palm{from,end,cfg_.palm_radius,true};
-            if(finite(palm.from) && finite(palm.to)) {out.palm_sweep=palm;s.posted=Posted::palm;s.posted_palm=palm;s.posted_slid=slid;}
+            if(finite(palm.from) && finite(palm.to)) {
+                out.palm_sweep=palm;s.posted=Posted::palm;s.posted_palm=palm;s.posted_slid=slid;
+                s.posted_slid_window=static_cast<unsigned>(2*lead);s.cadence=static_cast<unsigned>(lead);
+            }
             if(in.tip_enabled && clamp_detail::usable(in.tip)) {
                 const ClampSweep tip{from+clamp_detail::rotate(from_basis,in.tip.local),
                                      end+clamp_detail::rotate(in.target.basis,in.tip.local),in.tip.radius,true};
