@@ -83,6 +83,7 @@
 #include "wheel_avatar.hpp"
 #include "body_renderer.hpp"
 #include "full_body_driver.hpp"
+#include "hand_clamp_feed.hpp"
 #include "synchronized_observer.hpp"
 #include "hand_palette_contact.hpp"
 #include "native_hud_child_draw.hpp"
@@ -359,6 +360,20 @@ static std::atomic<UINT64> full_hand_clamped{},full_hand_fallback{};
 static std::atomic<UINT64> full_hand_prepared_uploads{},full_hand_receipt_missing{},full_hand_clear_receipts{},full_hand_receipt_rejected{};
 static std::atomic<UINT64> full_hand_ineligible_baseline{};
 static d2vr::WeaponCollision weapon_collision;static bool weapon_collision_enabled=true,hand_contact_enabled=true;static LONGLONG weapon_collision_qpc{};static std::atomic<UINT64> weapon_contact_frames{},weapon_contact_events{};
+// Physical hands phase 1 (hand_clamp.hpp, hand_clamp_feed.hpp): the drawn hand stops at world surfaces. Render thread only; the
+// status reads the HandClampStatus mirrors. clamp_state: each side's last output state (slot 0 answers the chest re-acquire while
+// released); clamp_exclude: the met prop the next update's exclusion sweep skips (meet_clamp); clamp_tip/clamp_wall_tip: the leading
+// probes kept for their hysteresis; clamp_probes: the open hand (refresh_clamp_probes).
+static d2vr::HandClamp hand_clamp;static d2vr::CastBudget hand_clamp_budget;static d2vr::ClampReacquireHold clamp_hold;static UINT64 hand_clamp_frame{};
+static std::array<d2vr::ClampState,2> clamp_state{};static std::array<std::optional<std::uintptr_t>,2> clamp_exclude{};static std::array<d2vr::HandMotion,2> clamp_motion{};
+static std::array<d2vr::ClampProbeSet,2> clamp_probes{};static std::array<d2vr::ClampProbe,2> clamp_tip{d2vr::default_clamp_tip(),d2vr::default_clamp_tip()},clamp_wall_tip{};
+static std::array<UINT64,2> clamp_posted_scope{};static std::array<bool,2> clamp_posted{};
+struct HandClampStatus {
+    std::atomic<bool> active{};std::atomic<unsigned> state{},probes{},max_casts{};
+    std::atomic<UINT64> contact_frames{},snapbacks{},reach_clamped{},yields{},missed_notes{},repeated_updates{},reacquire_blocked{},reacquire_holds{},unanswered{};
+};
+static std::array<HandClampStatus,2> hand_clamp_status;static std::atomic<double> hand_clamp_cast_mean{},hand_clamp_cast_max{};
+static std::atomic<bool> hand_clamp_tip{true},hand_clamp_alternate{};
 static d2vr::VrCombat vr_combat;static bool vr_combat_enabled=true;static float slash_speed_factor=1.7f;static bool takedown_range_enabled=false;
 static d2vr::CombatDecision combat_decision{};
 static std::mutex combat_policy_mutex;
@@ -2361,21 +2376,22 @@ static std::atomic<int> gaze_ray_side{-1};static std::atomic<UINT64> gaze_ray_un
 static d2vr::WorldTrackedPose hand_world[2]{};static d2vr::Vec3 hand_velocity[2]{};static UINT64 hand_tick[2]{}; // under hand_state_mutex
 static std::optional<d2vr::Vec3> hip_xr_position;static UINT64 hip_pose_tick{},hip_pose_epoch{};
 static std::atomic<float> right_hand_peak{},sword_release_speed{}; // diagnostics: peak right-hand speed (decays), hand speed at the last drop
-static void publish_hand(unsigned side,const d2vr::WorldTrackedPose& g) {
+static void publish_hand(unsigned side,const d2vr::WorldTrackedPose& drawn,const d2vr::WorldTrackedPose& raw) {
     // Throw velocity = the hand's displacement over the last ~60 ms. A per-frame difference aliases: positions arrive at the
     // tracking rate, not the render rate (sim v415 measured 1.9 m/s for a 6 m/s throw). A one-frame jump over 0.35 m is a
     // snap turn or a teleport, not a hand: the window restarts.
+    // C9 (physical hands): the velocity is the controller's (a hand stopped at a wall still throws), the drop position the drawn hand's.
     static std::array<std::deque<std::pair<LONGLONG,d2vr::Vec3>>,2> windows;auto& window=windows[side&1];
     LARGE_INTEGER qpc{},freq{};QueryPerformanceCounter(&qpc);QueryPerformanceFrequency(&freq);
-    if(!window.empty() && d2vr::length(g.position-window.back().second)>.35) window.clear();
-    window.emplace_back(qpc.QuadPart,g.position);
+    if(!window.empty() && d2vr::length(raw.position-window.back().second)>.35) window.clear();
+    window.emplace_back(qpc.QuadPart,raw.position);
     const auto age=[&](LONGLONG t){return static_cast<double>(qpc.QuadPart-t)/static_cast<double>(freq.QuadPart);};
     while(window.size()>2 && age(window[1].first)>=.06) window.pop_front();
     const double dt=age(window.front().first);
     std::lock_guard<std::mutex> l(hand_state_mutex);
-    hand_velocity[side&1]=dt>.015 && dt<.25?(g.position-window.front().second)*(1/dt):d2vr::Vec3{};
+    hand_velocity[side&1]=dt>.015 && dt<.25?(raw.position-window.front().second)*(1/dt):d2vr::Vec3{};
     if(side&1) right_hand_peak=static_cast<float>(std::max(d2vr::length(hand_velocity[1]),right_hand_peak.load()*.97));
-    hand_world[side&1]=g;hand_tick[side&1]=GetTickCount64();
+    hand_world[side&1]=drawn;hand_tick[side&1]=GetTickCount64();
 }
 static bool npc_entity(std::uintptr_t e) noexcept {std::uintptr_t vt{};return e && read_self(e,&vt,8) && vt==image_base+0x1c5e108;} // arkNPC
 // What a hand's grip holds rather than uses (user 2026-10-13: "move objects pickup like coins to a trigger"; the grip holds things):
@@ -2552,6 +2568,34 @@ static void note_drawn_palms(const d2vr::rig::ArmTrackingFrame& hands,const d2vr
 }
 static d2vr::WorldTrackedPose drawn_palm_frame(unsigned side,const d2vr::WorldTrackedPose& grip) {
     return drawn_palm_residual[side&1u].frame(grip,GetTickCount64());
+}
+// The hand clamp's open hand (ClampInput::hand, and the set leading_probe/wall_leading_probe choose from): the solid hands' open-hand
+// spheres in the grip frame, at the drawn palm's offset from the grip. Rebuilt for a new arm binding, and when that offset drifts past
+// 1 cm (not every frame: the leading probes' hysteresis compares spheres exactly); a rebuild keeps each chosen probe's index.
+// Without geometry: no set, the tip is default_clamp_tip() and there is no wall tip.
+static void refresh_clamp_probes(unsigned side,const d2vr::WorldTrackedPose& grip) {
+    static std::shared_ptr<const d2vr::rig::NativeArmBindingSnapshot> built_for;static std::array<std::optional<d2vr::rig::HandGeometry>,2> geometry{};
+    side&=1u;
+    if(const auto snapshot=arm_binding_cache.load();snapshot!=built_for) {
+        built_for=snapshot;
+        for(unsigned s=0;s<2;++s) {
+            geometry[s].reset();clamp_probes[s]={};clamp_tip[s]=d2vr::default_clamp_tip();clamp_wall_tip[s]={};
+            if(snapshot) try {
+                const auto& b=snapshot->bindings[s];
+                geometry[s]=d2vr::rig::hand_geometry(b.fingers.open,b.parents,b.finger_chains,b.palm,b.chain.wrist,b.bind_grip);
+            } catch(const std::exception&) {geometry[s].reset();}
+        }
+    }
+    if(!geometry[side]) return;
+    const auto offset=drawn_palm_frame(side,grip).position-grip.position;
+    const d2vr::Vec3 palm_local{d2vr::dot(offset,grip.basis[0]),d2vr::dot(offset,grip.basis[1]),d2vr::dot(offset,grip.basis[2])};
+    if(!d2vr::clamp_probe_set_stale(clamp_probes[side],palm_local)) return;
+    try {
+        const auto rebuilt=d2vr::clamp_probe_set(d2vr::hand_proxies(*geometry[side],{palm_local,{{{1,0,0},{0,1,0},{0,0,1}}}},std::array<float,5>{}),palm_local);
+        clamp_tip[side]=d2vr::remap_clamp_probe(clamp_probes[side],rebuilt,clamp_tip[side]);
+        clamp_wall_tip[side]=d2vr::remap_clamp_probe(clamp_probes[side],rebuilt,clamp_wall_tip[side]);
+        clamp_probes[side]=rebuilt;
+    } catch(const std::exception&) {clamp_probes[side]={};}
 }
 // The frame a held object is seated in: the drawn palm plus the build/held-offset knob (hand axes).
 static d2vr::WorldTrackedPose held_palm_frame(unsigned side,const d2vr::WorldTrackedPose& grip) {
@@ -4027,6 +4071,10 @@ void prepare_head_view(void* view) noexcept {
                 d2vr::NativeWeaponHands::hip({hip_valid && hip_loaded && empty_left && !left_gun_model.load() && game_logic_mask()==2,hip_kind.load(),hip_owner.load(),
                     {fl3(at.x),fl3(at.y),fl3(at.z)},{fl3(barrel.x),fl3(barrel.y),fl3(barrel.z),fl3(left.x),fl3(left.y),fl3(left.z),fl3(up.x),fl3(up.y),fl3(up.z)},GetTickCount64()});
             }
+            // Native ownership of the arms (C9: the hand clamp yields to authored animations), known before the hands are drawn.
+            const auto avatar_states=full_body_states(body->player);
+            const auto native_ownership=d2vr::fullbody::ownership(avatar_states,authored_camera);
+            const unsigned authored_hands=(authored_camera?3u:0u) | (native_ownership.arm[0]>0?1u:0u) | (native_ownership.arm[1]>0?2u:0u);
             if(!avatar_pose_gate.load(std::memory_order_acquire) || game_xr->state!=XR_SESSION_STATE_FOCUSED ||
                game_xr->last_action_sync!=XR_SUCCESS) native_interaction_aim.clear_door_contact();
             if(avatar_pose_gate.load(std::memory_order_acquire) && game_xr->state==XR_SESSION_STATE_FOCUSED && game_xr->last_action_sync==XR_SUCCESS) {
@@ -4047,17 +4095,35 @@ void prepare_head_view(void* view) noexcept {
                     intent.reference_epoch=hands.reference_epoch;intent.hands=hands.hands;
                     native_interaction_aim.publish_door_intent(*body,std::move(intent));
                 } else native_interaction_aim.clear_door_contact();
-                // Physical hands and weapons: the grip (and the weapon attached to it) stops at world geometry.
+                // Physical hands (phase 1, C9): the drawn hand stops at world surfaces (hand_clamp.hpp) and the weapon's blade at what its segment
+                // meets (weapon_collision.hpp). hands.grips become the drawn poses (rendered hand, arm IK target, drawn weapon); raw_grips keep the
+                // controller's (aim, attack/block and swing velocity, throw velocity, grab selection, interaction routing, native ownership).
                 if(weapon_collision_enabled && !authored_camera) {
                     LARGE_INTEGER qpc{},freq{};QueryPerformanceCounter(&qpc);QueryPerformanceFrequency(&freq);
                     const double dt=weapon_collision_qpc?std::clamp(static_cast<double>(qpc.QuadPart-weapon_collision_qpc)/static_cast<double>(freq.QuadPart),.001,.1):.011;
                     weapon_collision_qpc=qpc.QuadPart;
                     unsigned items{};{std::lock_guard<std::mutex> hand_lock(hand_state_mutex);items=hand_weapon_bits;} // was hand_item_bits: its right bit is only set while carrying, so the sword had no blade
                     if(body->tracked_shadow_walk()) items=0;
-                    const d2vr::Vec3 chest{anchor.position[0],anchor.position[1],anchor.position[2]-.35}; // a point in free space inside the body
+                    const d2vr::Vec3 chest{anchor.position[0],anchor.position[1],anchor.position[2]-.35}; // a point in free space inside the body: the re-acquire origin
                     const auto now=GetTickCount64();
+                    // The clamp's frame (C11, deviation 9): the camera anchor's level yaw frame. Its epoch: pose, reference and player (a level load or a
+                    // re-centre forgets the stored hand). Its clock: QPC seconds.
+                    const auto clamp_root=d2vr::level_frame({anchor.position[0],anchor.position[1],anchor.position[2]},{anchor.basis[0],anchor.basis[1],anchor.basis[2]});
+                    const double clamp_now=static_cast<double>(qpc.QuadPart)/static_cast<double>(freq.QuadPart);
+                    const auto clamp_epoch=hands.epoch^(hands.reference_epoch<<32)^static_cast<std::uint64_t>(body->player);
+                    // The arm's reach from the last visible solve (G2, C4): the clamp's target is reach-clamped so the clamp and the IK agree. One
+                    // frame stale (Task 4): the palm can fall 15-46 mm short for a frame while walking.
+                    const auto arm_reach=full_body.diagnostic();
+                    const bool reach_fresh=full_body_requested && tracked_arms_requested && arm_reach.body_valid && arm_reach.output_age_seconds<.25;
+                    unsigned carry_bits{}; // C9: a hand carrying a native object yields (the carried body is moved by physics, deviation 4)
+                    {std::lock_guard<std::mutex> hand_lock(hand_state_mutex);if(hand_holding_object && hand_state_tick && GetTickCount64()-hand_state_tick<=300) carry_bits=1u<<(hand_hold_side&1u);}
+                    const auto clamp_alternate=hand_clamp_budget.alternate();const auto clamp_tip_on=hand_clamp_budget.tip_enabled(); // C14
+                    // The game thread casts only in gameplay (Stage0, logic 2). In a world-UI pause (the wheel, menus) nothing is answered: the clamp is
+                    // left as it is and the hand held where it was drawn; back in gameplay after 0.25 s the clamp re-acquires (the hold below).
+                    const bool clamp_live=game_logic_mask()==2;
+                    ++hand_clamp_frame;for(auto& status:hand_clamp_status) status.active.store(false);
                     for(unsigned side=0;side<2;++side) if(hands.hands&(1u<<side)) {
-                        auto& g=hands.grips[side];unsigned slot=0;
+                        auto& g=hands.grips[side];const auto raw=raw_grips[side];
                         // Collision shapes from the weapon models: the sword's visible tip is .63 m out (projected tip check), thin.
                         // Left hand (by the native equip name): the pistol barrel sits above and behind the fist and is thick, the
                         // crossbow has its bow at the front; a thin line through the fist let boxes pass through them (headset v346).
@@ -4068,52 +4134,102 @@ void prepare_head_view(void* view) noexcept {
                         const bool armed=(items>>side)&1u;
                         const double blade=armed?(side?.65:shape[2]):0.,blade_radius=armed && !side?shape[3]:0.;
                         const d2vr::Vec3 blade_offset=armed && !side?g.basis[2]*shape[0]-g.basis[0]*shape[1]:d2vr::Vec3{};
-                        std::optional<d2vr::CollisionHit> blade_hit,palm_hit; // this frame's weapon-segment (slot 1) and hand (slot 0) surfaces
+                        std::optional<d2vr::CollisionHit> blade_hit; // this frame's weapon-segment (slot 1) surface
                         auto query=[&](d2vr::Vec3 a,d2vr::Vec3 b)->std::optional<d2vr::CollisionHit> {
-                            const unsigned k=slot++;
-                            d2vr::NativeInteractionAim::post_weapon_segment(side,k,a,b,k?std::max(.02,blade_radius):.05);
-                            const auto h=d2vr::NativeInteractionAim::weapon_hit(side,k,now);if(!h) return {};
+                            d2vr::NativeInteractionAim::post_weapon_segment(side,1,a,b,std::max(.02,blade_radius));
+                            const auto h=d2vr::NativeInteractionAim::weapon_hit(side,1,now);if(!h) return {};
                             auto c=d2vr::to_collision_hit(*h);const auto d=b-a;const double l2=d2vr::dot(d,d);
-                            c.fraction=l2>0?std::clamp(d2vr::dot(c.point-a,d)/l2,0.,1.):0.;if(k==1) blade_hit=c;else if(k==0) palm_hit=c;return c; // last frame's surface, measured on this segment
+                            c.fraction=l2>0?std::clamp(d2vr::dot(c.point-a,d)/l2,0.,1.):0.;blade_hit=c;return c; // last frame's surface, measured on this segment
                         };
-                        // Blade tip speed relative to the head (tracked pose, before any clamp): a swing, not a walk into an NPC.
+                        // Blade tip speed relative to the head (the raw controller, C9: swing detection): a swing, not a walk into an NPC.
                         static std::array<d2vr::Vec3,2> last_rel{};static std::array<double,2> tip_speed{},tip_peak{};static std::array<LONGLONG,2> last_rel_qpc{};
-                        {const auto rel=g.position+g.basis[0]*(side==1 && reverse_sword?-blade:blade)-d2vr::Vec3{anchor.position[0],anchor.position[1],anchor.position[2]};
+                        {const auto rel=raw.position+raw.basis[0]*(side==1 && reverse_sword?-blade:blade)-d2vr::Vec3{anchor.position[0],anchor.position[1],anchor.position[2]};
                          if(last_rel_qpc[side]) {const double rdt=static_cast<double>(qpc.QuadPart-last_rel_qpc[side])/static_cast<double>(freq.QuadPart);
                              const double v=rdt>1e-3?d2vr::length(rel-last_rel[side])/rdt:tip_speed[side];
                              tip_speed[side]=v>15?0.:tip_speed[side]*.4+v*.6; // >15 m/s: snap turn or teleport, not a swing
                              // Peak over ~150 ms: the blade meets the body at the end of the arc, and the cast result is a frame late.
                              tip_peak[side]=std::max(tip_speed[side],tip_peak[side]*std::exp(-std::max(rdt,0.)/.15));}
                          last_rel[side]=rel;last_rel_qpc[side]=qpc.QuadPart;tip_speed_now[side]=static_cast<float>(tip_peak[side]);}
-                        const auto blade_axis=side==1 && reverse_sword?g.basis[0]*-1.:g.basis[0]; // reverse grip: blade points back
-                        const auto r=weapon_collision.update(side,dt,chest,g.position,blade_axis,blade,query,blade_offset,blade_radius);
-                        d2vr::NativeHandContact::Meeting meeting{};
-                        {   // the entity the palm cast holds this hand at (kept while the shift eases out). The hand meets a light loose prop the solid hands push (the
-                            // physical-hand way: the drawn hand touches it and it moves) instead of being held off it: the cast's shift is not applied for it, the hand
-                            // is moved out of the prop it overlaps by what the contact computes, and the cast still fires its event and haptic. Static geometry,
-                            // heavy props, NPCs and a pinned prop keep the hold-off.
-                            static std::array<std::uintptr_t,2> cast_held{};
-                            if(!r.contact) cast_held[side]=0;else if(palm_hit) cast_held[side]=palm_hit->entity;
-                            meeting=native_grab.hand_contact().meet(side,cast_held[side]);
-                            cast_entities[side]=meeting.entity?meeting.entity:cast_held[side]; // whose contact the drawn hand's offset from the tracked one belongs to
+                        // The hand clamp (G1, G3, C3, C4, C8): it sweeps from the previous drawn hand to the reach-clamped controller grip and answers
+                        // one frame late. It yields (draws the controller, sweeps nothing) to an authored arm, a native carry and a physical hold.
+                        auto& status=hand_clamp_status[side];
+                        const bool clamp_yield=d2vr::clamp_yields(side,authored_hands,carry_bits,physical_grab_requested && native_grab.holding(side));
+                        bool reach_clamped=false;
+                        const auto target=clamp_yield || !reach_fresh?raw:d2vr::reach_clamp(raw,arm_reach.reach[side],&reach_clamped);
+                        refresh_clamp_probes(side,raw);
+                        const auto& probes=clamp_probes[side];
+                        clamp_motion[side].sample(target.position,clamp_now);const auto velocity=clamp_motion[side].velocity();
+                        d2vr::ClampOutput clamped{};const bool clamp_updated=clamp_live || clamp_yield;
+                        if(clamp_updated) {
+                            d2vr::ClampInput in{};in.now=clamp_now;in.epoch=clamp_epoch;in.root=clamp_root;in.target=target;in.chest=chest;in.yield=clamp_yield;
+                            in.post=d2vr::clamp_posts(clamp_alternate,hand_clamp_frame,side);in.tip_enabled=clamp_tip_on;
+                            // Last frame's answers (game-thread Stage0 scope). A post the game thread has not answered yet reads the slot's previous answer
+                            // (<=100 ms): counted in status "unanswered" (UNVERIFIED in game how often the render thread outruns it).
+                            const auto answer=[&](unsigned slot)->std::optional<d2vr::ClampHit> {
+                                const auto h=d2vr::NativeInteractionAim::weapon_hit(side,slot,now);if(!h) return std::nullopt;return d2vr::to_clamp_hit(*h);
+                            };
+                            if(clamp_posted[side] && d2vr::NativeInteractionAim::weapon_serial(side,0)<=clamp_posted_scope[side]) ++status.unanswered;
+                            d2vr::route_clamp_hits(in,clamp_state[side],answer(0),answer(d2vr::NativeInteractionAim::tip_slot),answer(d2vr::NativeInteractionAim::wall_tip_slot),answer(d2vr::NativeInteractionAim::exclude_slot));
+                            // The open hand leads the sweeps and is kept out of every held plane (one probe set for both, Task 3).
+                            if(probes.valid) {
+                                clamp_tip[side]=d2vr::leading_probe(probes.hand,target,velocity,clamp_tip[side]);
+                                clamp_wall_tip[side]=d2vr::wall_leading_probe(probes.hand,target,velocity,clamp_wall_tip[side]);
+                                in.hand=probes.hand;in.hand_count=probes.count;
+                            }
+                            in.tip=clamp_tip[side];in.wall_tip=clamp_wall_tip[side];
+                            native_grab.hand_contact().fill_clamp_input(side,in,clamp_exclude[side]); // loose props in reach (I2), last frame's met prop (I1)
+                            clamped=hand_clamp.update(side,in);clamp_state[side]=clamped.state;
                         }
-                        if(r.contact && !meeting.prop) g.position=r.grip;
-                        if(r.contact) ++weapon_contact_frames;
-                        g.position=g.position+meeting.shift;
+                        std::uintptr_t held_by{};clamp_posted[side]=false;
+                        if(!clamp_updated) { // paused: nothing posted or read; the hand stays where it was drawn while that is near the controller
+                            if(const auto kept=clamp_hold.hold(side,clamp_epoch,clamp_root,target.position,hand_clamp.config().snap_gap)) g.position=*kept;
+                        } else if(clamped.valid && !clamp_yield) {const auto post=[&](unsigned slot,const d2vr::ClampSweep& sweep) {
+                                if(!sweep.valid || (sweep.exclude && !*sweep.exclude)) return; // an excluded entity 0 maps to no body
+                                d2vr::NativeInteractionAim::post_weapon_segment(side,slot,sweep.from,sweep.to,sweep.radius,sweep.exclude?*sweep.exclude:0);
+                            };
+                            post(0,clamped.palm_sweep);post(d2vr::NativeInteractionAim::tip_slot,clamped.tip_sweep);
+                            post(d2vr::NativeInteractionAim::wall_tip_slot,clamped.wall_tip_sweep);post(d2vr::NativeInteractionAim::exclude_slot,clamped.exclude_sweep);
+                            if(clamped.palm_sweep.valid) {clamp_posted[side]=true;clamp_posted_scope[side]=d2vr::NativeInteractionAim::weapon_casts_.load();}
+                            const unsigned casts=unsigned(clamped.palm_sweep.valid)+unsigned(clamped.tip_sweep.valid)+unsigned(clamped.wall_tip_sweep.valid)+unsigned(clamped.exclude_sweep.valid);
+                            if(casts>status.max_casts.load()) status.max_casts.store(casts);
+                            // The meet (Task 3): a light loose prop the solid hands push is met, not held off; the meet never moves the hand through a
+                            // plane the clamp holds. held_by: whose hold the drawn hand's lag is (the solid hands' publish).
+                            const auto met=native_grab.hand_contact().meet_clamp(side,hand_clamp,clamped,target);
+                            g.position=met.drawn;held_by=met.held_by;clamp_exclude[side]=met.exclude;
+                            // The re-acquire frame (after a pause or a tracking gap) would draw the controller unswept, maybe inside a wall: hold the hand
+                            // where it was last drawn while that is near; the clamp eases from it once its sweeps answer.
+                            if(clamped.reacquired) if(const auto kept=clamp_hold.hold(side,clamp_epoch,clamp_root,target.position,hand_clamp.config().snap_gap)) {g.position=*kept;++status.reacquire_holds;}
+                        } else {clamp_exclude[side].reset();clamp_hold.clear(side);}
+                        cast_entities[side]=held_by;
+                        if(clamp_yield) ++status.yields;
+                        if(reach_clamped) ++status.reach_clamped;
+                        // The blade sweeps from the drawn grip; a blade pushed straight into a surface moves the hand back (r.grip).
+                        const auto blade_axis=side==1 && reverse_sword?g.basis[0]*-1.:g.basis[0]; // reverse grip: blade points back
+                        const auto r=weapon_collision.update(side,dt,g.position,blade_axis,blade,query,blade_offset,blade_radius);
+                        g.position=r.grip;
+                        const auto event=r.event?r.event:clamped.event;const auto haptic=r.haptic?r.haptic:clamped.haptic;
+                        if(clamped.state==d2vr::ClampState::contact || r.contact) ++weapon_contact_frames;
                         if(r.blade_dir) { // rotate the hand basis so the weapon lies along the deflected blade axis
                             d2vr::align_weapon_blade(g,*r.blade_dir,side==1 && reverse_sword);
                             ++weapon_contact_frames;
                         }
+                        // Every update is followed by the position finally drawn (the next sweep starts there; a yield or an invalid target is ignored).
+                        if(clamp_updated) hand_clamp.note_drawn(side,clamp_root,g.position);
+                        if(clamp_updated && clamped.valid && !clamp_yield) clamp_hold.note(side,clamp_epoch,clamp_root,g.position);
+                        status.active.store(clamped.valid && !clamp_yield);status.state.store(static_cast<unsigned>(clamped.state));status.probes.store(static_cast<unsigned>(probes.count));
+                        status.contact_frames.store(hand_clamp.contact_frames(side));status.snapbacks.store(hand_clamp.snapbacks(side));
+                        status.missed_notes.store(hand_clamp.missed_notes(side));status.repeated_updates.store(hand_clamp.repeated_updates(side));
+                        status.reacquire_blocked.store(hand_clamp.reacquire_blocked_frames(side));
                         if(side==1 && blade>0) {std::lock_guard<std::mutex> l(sword_tip_mutex);sword_tip=g.position+(reverse_sword?g.basis[0]*-1.:g.basis[0])*blade;sword_tip_tick=now;}
-                        if(r.event) {++weapon_contact_events;
+                        if(event) {++weapon_contact_events;
                             // Blade on the world: the surface reacts like a sword hit, quieter (engine contact FX on the game thread).
                             static std::array<UINT64,2> last_fx{};
-                            if(r.event->blade && !npc_entity(r.event->entity)) combat_log(side?"blade_world":"gun_world",r.event->entity,tip_speed[side],r.event->material);
-                            if(impact_fx_enabled && r.event->blade && !npc_entity(r.event->entity) && r.event->material!=0xffff && tip_peak[side]>=.6 && now-last_fx[side]>=150) {
+                            if(event->blade && !npc_entity(event->entity)) combat_log(side?"blade_world":"gun_world",event->entity,tip_speed[side],event->material);
+                            if(impact_fx_enabled && event->blade && !npc_entity(event->entity) && event->material!=0xffff && tip_peak[side]>=.6 && now-last_fx[side]>=150) {
                                 const auto f=[](double v){return static_cast<float>(v);};
-                                d2vr::NativeInteractionAim::request_impact_fx({{f(r.event->point.x),f(r.event->point.y),f(r.event->point.z)},
-                                    {f(r.event->normal.x),f(r.event->normal.y),f(r.event->normal.z)},f(std::min(tip_peak[side]*.35,4.)),r.event->material,side});last_fx[side]=now;}
-                            if(r.event->blade && npc_entity(r.event->entity)) {++npc_blade_contacts;combat_log("blade_npc",r.event->entity,tip_speed[side]);
+                                d2vr::NativeInteractionAim::request_impact_fx({{f(event->point.x),f(event->point.y),f(event->point.z)},
+                                    {f(event->normal.x),f(event->normal.y),f(event->normal.z)},f(std::min(tip_peak[side]*.35,4.)),event->material,side});last_fx[side]=now;}
+                            if(event->blade && npc_entity(event->entity)) {++npc_blade_contacts;combat_log("blade_npc",event->entity,tip_speed[side]);
                             }}
                         // Contact hit: a fast drawn blade touching a live NPC (new contact or pressed against the body: collision keeps
                         // the blade on the body surface) is damage now, through the engine's own TakeDamage on the game thread (native
@@ -4176,13 +4292,22 @@ void prepare_head_view(void* view) noexcept {
                         // (>1.2 m/s) remains only with build/no-hand-contact. A hand reaching
                         // to grab touches the prop slower, or already squeezing.
                         const float open_hand=side?game_xr->controller_input.right_grip:game_xr->controller_input.left_grip;
-                        if(r.event && r.event->entity && physical_grab_requested &&
-                           ((r.event->blade && r.event->speed>.4) || (!hand_contact_enabled && !armed && r.event->speed>1.2 && open_hand<.3f)))
-                            native_grab.poke(r.event->entity,r.event->normal*(-std::min(r.event->speed*.9,6.)),now);
-                        if(r.haptic) game_xr->pulse(side,r.haptic->amplitude,r.haptic->seconds);
+                        if(event && event->entity && physical_grab_requested &&
+                           ((event->blade && event->speed>.4) || (!hand_contact_enabled && !armed && event->speed>1.2 && open_hand<.3f)))
+                            native_grab.poke(event->entity,event->normal*(-std::min(event->speed*.9,6.)),now);
+                        if(haptic) game_xr->pulse(side,haptic->amplitude,haptic->seconds);
                     }
+                    // C14: the clamp's cast cost (both hands, slots 0 and 11-13) is noted once per game-thread scope that cast. Over 0.5 ms for
+                    // a 2 s window the fingertip sweeps go first, then the hands alternate frames (CastBudget).
+                    {static std::uint64_t noted_scope{};const auto scope=d2vr::NativeInteractionAim::clamp_cast_serial_.load();
+                     if(scope!=noted_scope) {noted_scope=scope;hand_clamp_budget.note(d2vr::NativeInteractionAim::clamp_cast_us_.load(),clamp_now);}
+                     hand_clamp_cast_mean.store(hand_clamp_budget.mean_us());hand_clamp_cast_max.store(hand_clamp_budget.max_us());
+                     hand_clamp_tip.store(hand_clamp_budget.tip_enabled());hand_clamp_alternate.store(hand_clamp_budget.alternate());}
+                } else { // an authored camera or no collision: the clamp yields, nothing stored is reused (C9)
+                    hand_clamp.reset(0);hand_clamp.reset(1);clamp_hold.clear(0);clamp_hold.clear(1);clamp_exclude={};clamp_posted={};
+                    for(auto& status:hand_clamp_status) status.active.store(false);
                 }
-                for(unsigned side=0;side<2;++side) if(hands.hands&(1u<<side)) publish_hand(side,hands.grips[side]);
+                for(unsigned side=0;side<2;++side) if(hands.hands&(1u<<side)) publish_hand(side,hands.grips[side],raw_grips[side]);
             }
             {std::lock_guard<std::mutex> origin_lock(arm_origin_mutex);
              hands.model_origin=arm_model_origin;hands.has_model_origin=arm_model_origin_frame!=0;
@@ -4197,10 +4322,7 @@ void prepare_head_view(void* view) noexcept {
                 if(hands.native_hands) hands.has_hand_state=true;
                 hands_native.store(hands.native_hands!=0);
             }
-            const auto avatar_states=full_body_states(body->player);
-            const auto native_ownership=d2vr::fullbody::ownership(avatar_states,authored_camera);
-            const unsigned authored_hands=hands.native_hands | (native_ownership.arm[0]>0?1u:0u) | (native_ownership.arm[1]>0?2u:0u);
-            hands.native_hands=authored_hands;if(authored_hands)hands.has_hand_state=true;
+            hands.native_hands=authored_hands;if(authored_hands)hands.has_hand_state=true; // hands.native_hands was authored_camera?3u:0u, as in authored_hands
             std::array<std::array<std::array<float,3>,5>,2> finger_turn{};std::array<bool,2> has_finger_turn{};
             {   // Finger contact IK (user, headset 2026-10-14: fingers must react to every object, like Boneworks/Bonelab): ONE system for all of
                 // them. Each tracked hand gathers a small shape set: what it holds (a native hold's seated cylinder, a physical grab's bounds) and
@@ -4357,7 +4479,7 @@ void prepare_head_view(void* view) noexcept {
                      if(t.grip_valid[side]) {last_local[side]=d2vr::body::mul(d2vr::body::inverse(t.eye),t.grip[side]);last_tick[side]=now_h;}
                      else if(last_tick[side] && now_h-last_tick[side]<=1000) {t.grip[side]=d2vr::body::mul(t.eye,last_local[side]);t.grip_valid[side]=true;}}
                     t.grip_value[side]=hands.curls[side];t.trigger[side]=hands.index_curls[side];
-                    if((hands.hands>>side)&1u) note_grip(side,hands.grips[side],hands.curls[side]);
+                    if((hands.hands>>side)&1u) note_grip(side,raw_grips[side],hands.curls[side]); // C9: the press is measured at the controller
                     t.has_finger[side]=has_finger_turn[side];
                     for(unsigned f=0;f<5;++f) for(unsigned j=0;j<3;++j) t.finger_turn[side][f][j]=finger_turn[side][f][j];
                     // The hinges the contact was tested about (the bones must bend about them, or the plan and the pose part sideways).
@@ -4374,8 +4496,8 @@ void prepare_head_view(void* view) noexcept {
                         if(side==hand_hold_side) t.grip_value[side]=std::max(t.grip_value[side],.8);}}
                 t.reverse_grip[1]=reverse_sword;
                 {   // every loose prop in reach of a hand, by entity: where each lay before a pickup flies it away (prop_watch.hpp)
-                    std::array<std::optional<std::array<float,3>>,2> reach_hands{};
-                    for(unsigned side=0;side<2;++side) if((hands.hands>>side)&1u) {const auto& p=hands.grips[side].position;reach_hands[side]=std::array<float,3>{static_cast<float>(p.x),static_cast<float>(p.y),static_cast<float>(p.z)};}
+                    std::array<std::optional<std::array<float,3>>,2> reach_hands{}; // C9: the controller's reach (grab selection), not the drawn hand's
+                    for(unsigned side=0;side<2;++side) if((hands.hands>>side)&1u) {const auto& p=raw_grips[side].position;reach_hands[side]=std::array<float,3>{static_cast<float>(p.x),static_cast<float>(p.y),static_cast<float>(p.z)};}
                     std::uintptr_t held_now{};{std::lock_guard<std::mutex> hand_lock(hand_state_mutex);held_now=held_entity;}
                     const auto game_ptr=d2vr::rig::value<std::uintptr_t>(read_self,image_base+0x39a5290);
                     if(game_ptr && d2vr::rig::typed(read_self,image_base,*game_ptr,0x1c940a8)) {
@@ -4942,7 +5064,33 @@ std::string feedback_status_json() {
         << ",\"applied\":" << [&]{std::ostringstream o;const auto a=full_body.thumb_applied();o<<'[';for(unsigned i=0;i<2;++i) {o<<(i?",":"")<<'['<<static_cast<int>(a[i][0]*10)<<','<<static_cast<int>(a[i][1]*10)<<','<<static_cast<int>(a[i][2]*10)<<']';}o<<']';return o.str();}()
         << ",\"planned\":" << [&]{std::ostringstream o;o<<'[';for(unsigned i=0;i<2;++i) {o<<(i?",":"")<<'['<<planned_thumb[i][0].load()<<','<<planned_thumb[i][1].load()<<','<<planned_thumb[i][2].load()<<','<<planned_thumb[i][3].load()<<']';}o<<']';return o.str();}()
         << ",\"drawn\":" << [&]{std::ostringstream o;o<<'[';for(unsigned i=0;i<2;++i) {o<<(i?",":"")<<'['<<drawn_thumb[i][0].load()<<','<<drawn_thumb[i][1].load()<<','<<drawn_thumb[i][2].load()<<','<<drawn_thumb[i][3].load()<<']';}o<<']';return o.str();}()
-<< ",\"checks\":[" << [&]{std::ostringstream o;for(unsigned i=0;i<2;++i) {o<<(i?",":"")<<'['<<thumb_checks[i][0].load()<<','<<thumb_checks[i][1].load()<<']';}return o.str();}() << "]}}" << ",\"watch\":[" << prop_watch.size() << "," << prop_watch.reads() << "," << (watch_calls.load()?static_cast<double>(watch_ns.load())/1000./static_cast<double>(watch_calls.load()):0.) << "," << watch_max_ns.load()/1000. << "," << watch_found.load() << "," << watch_missed.load() << "]" << ",\"fit\":[" << fits_done.load() << "," << fit_steps.load() << "," << (fit_steps.load()?static_cast<double>(fit_ns.load())/1000./static_cast<double>(fit_steps.load()):0.) << "," << fit_max_ns.load()/1000. << "," << fit_shift_mm.load() << "," << fit_slide_mm.load() << "]" << ",\"cast_us\":" << [&]{LARGE_INTEGER f{};QueryPerformanceFrequency(&f);const auto n=d2vr::NativeInteractionAim::weapon_cast_count_.load();return n && f.QuadPart?static_cast<double>(d2vr::NativeInteractionAim::weapon_cast_ticks_.load())*1e6/static_cast<double>(f.QuadPart)/static_cast<double>(n):0.0;}() << "}" << ",\"weapon_collision\":{\"enabled\":" << (weapon_collision_enabled?"true":"false") << ",\"casts\":" << d2vr::NativeInteractionAim::weapon_casts_.load() << ",\"contact_frames\":" << weapon_contact_frames.load() << ",\"events\":" << weapon_contact_events.load() << "}" << ",\"hud_relayouts\":" << d2vr::NativeHudChildDraw::hud_relayouts.load() << ",\"hud_panel_children\":" << d2vr::NativeHudChildDraw::panel_children.load() << ",\"sword_aim_frames\":" << sword_aim_frames.load() << ",\"gaze_takedown_frames\":" << gaze_takedown_frames.load() << ",\"overlay_hidden\":" << d2vr::NativeHudChildDraw::overlay_draws.load() << ",\"scabbard\":[" << scabbard_entries.load() << ',' << holster_fires.load() << "]" << ",\"sword_grip\":{\"actions\":[" << sword_actions[1].load() << ',' << sword_actions[2].load() << ',' << sword_actions[3].load() << ',' << sword_actions[4].load() << ',' << sword_actions[5].load() << ',' << sword_actions[6].load() << "],\"held\":" << (sword_grip.held()?"true":"false") << ",\"gun\":[" << gun_actions[1].load() << ',' << gun_actions[2].load() << ',' << (gun_grip.held()?1:0) << ',' << (hip_loaded?1:0) << "],\"reversed\":" << (sword_reversed.load()?"true":"false") << ",\"thrown\":[" << d2vr::NativeWeaponHands::thrown_hits.load() << ',' << d2vr::NativeWeaponHands::flight_frames.load() << ',' << d2vr::NativeWeaponHands::thrown_peak.load() << ',' << sword_release_speed.load() << ',' << right_hand_peak.load() << ',' << d2vr::NativeWeaponHands::services.load() << "],\"last_shove\":" << d2vr::NativeWeaponHands::last_shove.load() << ",\"ragdolls\":[" << d2vr::NativeWeaponHands::ragdolls.load() << ',' << d2vr::NativeWeaponHands::last_ragdoll.load() << ',' << yank_requests.load() << ',' << d2vr::NativeWeaponHands::yanks.load() << ',' << yank_peak[0].load() << ',' << yank_peak[1].load() << ',' << yank_gate[0].load() << ',' << yank_gate[1].load() << ',' << d2vr::NativeGrab::yank_holds_.load() << ',' << d2vr::NativeWeaponHands::wakes.load() << ',' << d2vr::NativeWeaponHands::holds_down.load() << ',' << d2vr::NativeWeaponHands::squeezes.load() << ',' << d2vr::NativeWeaponHands::guard_grabs.load() << ',' << d2vr::NativeWeaponHands::last_guard_d.load() << ',' << d2vr::NativeWeaponHands::last_guard_up.load() << ']' << ",\"look_uses\":" << look_uses.load() << ",\"look_hits\":" << look_hits.load() << ",\"stealth\":[" << d2vr::NativeMelee::unaware_asked.load() << ',' << d2vr::NativeMelee::unaware_yes.load() << ']' << ",\"use_diag\":[" << use_diag[0].load() << ',' << use_diag[1].load() << ',' << use_diag[2].load() << ',' << use_diag[3].load() << ',' << use_diag[4].load() << ',' << use_diag[5].load() << ',' << use_diag[6].load() << ',' << use_diag[7].load() << ',' << use_diag[8].load() << ',' << use_diag[9].load() << ']' << ",\"door_controller\":" << [&]{const auto state=d2vr::NativeDoorInteraction::process_owner().status();const auto metrics=native_interaction_aim.door_metrics();std::ostringstream value;value<<"{\"ownership\":"<<state.ownership<<",\"active\":"<<(state.active?"true":"false")<<",\"pending\":"<<(state.pending?"true":"false")<<",\"closing\":"<<(state.closing?"true":"false")<<",\"blocked\":"<<(state.blocked?"true":"false")<<",\"queries\":"<<metrics.queries<<",\"qualified\":"<<metrics.qualified<<",\"qpc_ticks\":"<<metrics.service_ticks<<",\"worst_qpc_ticks\":"<<metrics.worst_service_ticks<<'}';return value.str();}() << ",\"carry_head_pushes\":" << carry_head_pushes.load() << ",\"fist_takes\":" << fist_takes.load() << ",\"carries\":" << d2vr::NativeWeaponHands::carries.load() << ",\"block\":[" << block_pose_frames.load() << ',' << block_wanted.load() << ',' << gesture_blocks.load() << ',' << block_not_free.load() << ',' << block_not_held.load() << ',' << (d2vr::NativeWeaponHands::block_keeps_gun()?1:0) << ']' << ",\"hip_frames\":" << d2vr::NativeWeaponHands::hip_frames.load() << ",\"props_thrown\":[" << d2vr::NativeWeaponHands::props_marked.load() << ',' << d2vr::NativeWeaponHands::prop_hits.load() << ',' << (d2vr::NativeWeaponHands::phys_decl_ok.load()?1:0) << "],\"native\":[" << d2vr::NativeWeaponHands::ops.load() << ',' << d2vr::NativeWeaponHands::failures.load() << ',' << d2vr::NativeWeaponHands::spawned.load() << ',' << d2vr::NativeWeaponHands::removed.load() << "],\"copy\":" << [&]{const auto c=d2vr::NativeWeaponHands::copy();std::ostringstream o;if(!c.present) return std::string("null");o << "{\"pos\":[" << c.pos[0] << ',' << c.pos[1] << ',' << c.pos[2] << "],\"blade\":[" << c.blade[0] << ',' << c.blade[1] << ',' << c.blade[2] << "],\"flying\":" << (c.flying?"true":"false") << ",\"trace\":\"" << c.trace << "\"}";return o.str();}() << "}" << ",\"blade_pokes\":" << native_grab.pokes_.load() << ",\"interact\":[" << interact_bits.load() << ',' << interact_presses.load() << ']' << ",\"ragdoll_tows\":" << native_grab.tows_.load() << ",\"hand_contact\":[" << native_grab.hand_contact().publishes.load() << ',' << native_grab.hand_contact().services.load() << ',' << native_grab.hand_contact().tested.load() << ',' << native_grab.hand_contact().touches.load() << ',' << native_grab.hand_contact().pushes.load() << ',' << native_grab.hand_contact().faults.load() << ',' << native_grab.hand_contact().cost_us.load() << ',' << native_grab.hand_contact().cost_max_us.load() << ',' << native_grab.hand_contact().scan_us.load() << ',' << native_grab.hand_contact().body_us.load() << ',' << native_grab.hand_contact().math_us.load() << ',' << native_grab.hand_contact().slow_services.load() << ',' << native_grab.hand_contact().preempted.load() << ',' << native_grab.hand_contact().write_us.load() << ',' << native_grab.hand_contact().write_max_us.load() << ',' << native_grab.hand_contact().slow_writes.load() << ',' << native_grab.hand_contact().cast_seen.load() << ',' << native_grab.hand_contact().cast_held.load() << ',' << native_grab.hand_contact().discoveries.load() << ',' << native_grab.hand_contact().discover_us.load() << ',' << native_grab.hand_contact().discover_max_us.load() << ',' << native_grab.hand_contact().meets.load() << ',' << native_grab.hand_contact().meet_shifts.load() << ',' << native_grab.hand_contact().meet_latches.load() << ',' << native_grab.hand_contact().keepouts.load() << ']' << ",\"left_equip\":\"" << [&]{std::lock_guard<std::mutex> l(hand_state_mutex);std::string n(left_equip_name);for(auto& ch:n) if(ch=='"'||ch==92||static_cast<unsigned char>(ch)<32) ch='?';return n;}() << "\"" << ",\"hand_weapon_bits\":" << [&]{std::lock_guard<std::mutex> l(hand_state_mutex);return hand_weapon_bits;}() << ",\"prompt_latency_ms\":[" << prompt_latency_last.load() << ',' << prompt_latency_max.load() << "]" << ",\"sword_tip_ndc\":[" << sword_tip_ndc_x.load() << ',' << sword_tip_ndc_y.load() << "]" << ",\"wheel_zone\":{\"frames\":" << wheel_dbg_frames.load() << ",\"plane_frames\":" << wheel_dbg_plane.load() << ",\"size\":[" << wheel_dbg_w.load() << ',' << wheel_dbg_h.load() << "],\"uv\":[" << wheel_dbg_u.load() << ',' << wheel_dbg_v.load() << "],\"clicks\":" << wheel_zone_clicks.load() << ",\"last\":" << wheel_zone_last.load() << ",\"stage\":[" << wheel_stage_x.load() << ',' << wheel_stage_y.load() << "]}" << ",\"wrist_early_publications\":" << wrist_early_publications.load() << ",\"hud_holder_hidden\":" << d2vr::NativeHudChildDraw::holder_hidden.load() << ",\"hud_eye_node\":" << (d2vr::NativeHudChildDraw::eye_node.load()?"true":"false") << ",\"prompt_world\":" << (d2vr::NativeHudChildDraw::prompt_world.load()?"true":"false") << ",\"world_prompt_frames\":" << world_prompt_frames.load() << ",\"prompt_shows_hides\":[" << prompt_shows.load() << ',' << prompt_hides.load() << "],\"takedown_flips\":" << takedown_flips.load() << ",\"takedown_hints\":" << d2vr::NativeHudChildDraw::takedown_hints.load() << ",\"npc_blade_contacts\":" << npc_blade_contacts.load() << ",\"contact_hits\":[" << d2vr::NativeInteractionAim::melee_applied_.load() << ',' << d2vr::NativeInteractionAim::melee_rejected_.load() << ',' << d2vr::NativeInteractionAim::melee_faults_.load() << ']' << ",\"contact_rejects\":[" << d2vr::NativeInteractionAim::melee_why_[0].load() << ',' << d2vr::NativeInteractionAim::melee_why_[1].load() << ',' << d2vr::NativeInteractionAim::melee_why_[2].load() << ']' << ",\"corpse_chops\":" << d2vr::NativeMelee::chops.load() << ",\"tip_speed\":[" << tip_speed_now[0].load() << ',' << tip_speed_now[1].load() << ']' << ",\"slash_speed\":" << (d2vr::NativeSlashSceneRate::process_owner().enabled()?slash_speed_factor:1.f) << ",\"slash_scene_rate\":{\"enabled\":" << (d2vr::NativeSlashSceneRate::process_owner().enabled()?"true":"false") << ",\"accelerations\":" << d2vr::NativeSlashSceneRate::process_owner().accelerations() << ",\"setter_failures\":" << d2vr::NativeSlashSceneRate::process_owner().setter_failures() << "}" << ",\"block_unequip_vetoes\":" << d2vr::NativeBlockEligibility::process_owner().vetoes() << ",\"takedown_range\":" << (native_interaction_aim.takedown_ranges_applied()?"true":"false") << ",\"takedown_kill_rules\":" << native_interaction_aim.takedown_range_kill_rules() << ",\"held_object\":{\"installed\":" << (held_object_installed?"true":"false") << ",\"placed\":" << d2vr::NativeHeldObject::placed.load() << ",\"rejected_targets\":" << d2vr::NativeHeldObject::rejected_targets.load() << ",\"anchored\":" << d2vr::NativeHeldObject::anchored.load() << ",\"sim_invulnerable_blocked\":" << d2vr::NativeSimInvulnerable::blocked.load() << ",\"swarm_kill_skipped\":" << d2vr::NativeSwarmKillGuard::skipped.load() << ",\"swarm_why\":[" << d2vr::NativeMelee::swarm_why[0].load() << ',' << d2vr::NativeMelee::swarm_why[1].load() << ',' << d2vr::NativeMelee::swarm_why[2].load() << ',' << d2vr::NativeMelee::swarm_why[3].load() << "],\"thrown\":" << d2vr::NativeHeldObject::thrown.load() << ",\"throw_kept\":" << d2vr::NativeHeldObject::throw_kept.load() << ",\"throws\":" << held_throws.load() << ",\"drops\":" << held_drops.load() << "}" << ",\"arm_hidden\":" << arm_hidden_bits.load() << ",\"arm_shows\":" << d2vr::NativeHeldObject::arm_shows.load() << ",\"arm_hides_skipped\":" << d2vr::NativeHeldObject::hides_skipped.load() << ",\"held_world_renders\":" << d2vr::NativeHeldObject::world_renders.load() << ",\"held_debug\":[" << held_debug[0].load() << ',' << held_debug[1].load() << ',' << held_debug[2].load() << ',' << held_debug[3].load() << ',' << held_debug[4].load() << ',' << held_debug[5].load() << ',' << held_debug[6].load() << ',' << held_debug[7].load() << ',' << held_debug[8].load() << ',' << held_debug[9].load() << ',' << held_debug[10].load() << ',' << held_debug[11].load() << ',' << held_debug[12].load() << "]" << ",\"arm_show_failed\":" << (d2vr::NativeHeldObject::arm_show_failed.load()?"true":"false") << ",\"native_options_page\":[" << d2vr::NativeMenuEntry::clicks.load() << ',' << d2vr::NativeMenuEntry::queued.load() << ',' << d2vr::NativeMenuEntry::native_pages.load() << ',' << d2vr::NativeOptionsPage::opens.load() << ',' << d2vr::NativeOptionsPage::changes.load() << ',' << d2vr::NativeOptionsPage::faults.load() << ',' << d2vr::NativeOptionsPage::failed_step.load() << ',' << d2vr::NativeOptionsPage::last_show.load() << ',' << d2vr::NativeOptionsPage::action_flips.load() << ']' << ",\"impact_fx\":[" << d2vr::NativeInteractionAim::impact_played_.load() << ',' << d2vr::NativeInteractionAim::impact_skipped_.load() << ']' << ",\"hud_master_entries\":" << d2vr::NativeHudChildDraw::master_entries.load() << ",\"hud_window_layers\":" << (game_xr?game_xr->hud_window_layers:0) << ",\"hud_cylinder\":" << (game_xr && game_xr->cylinder_layers()?"true":"false") << ",\"hud_scale\":" << d2vr::NativeHudChildDraw::hud_scale.load()
+<< ",\"checks\":[" << [&]{std::ostringstream o;for(unsigned i=0;i<2;++i) {o<<(i?",":"")<<'['<<thumb_checks[i][0].load()<<','<<thumb_checks[i][1].load()<<']';}return o.str();}() << "]}}" << ",\"watch\":[" << prop_watch.size() << "," << prop_watch.reads() << "," << (watch_calls.load()?static_cast<double>(watch_ns.load())/1000./static_cast<double>(watch_calls.load()):0.) << "," << watch_max_ns.load()/1000. << "," << watch_found.load() << "," << watch_missed.load() << "]" << ",\"fit\":[" << fits_done.load() << "," << fit_steps.load() << "," << (fit_steps.load()?static_cast<double>(fit_ns.load())/1000./static_cast<double>(fit_steps.load()):0.) << "," << fit_max_ns.load()/1000. << "," << fit_shift_mm.load() << "," << fit_slide_mm.load() << "]" << ",\"cast_us\":" << [&]{LARGE_INTEGER f{};QueryPerformanceFrequency(&f);const auto n=d2vr::NativeInteractionAim::weapon_cast_count_.load();return n && f.QuadPart?static_cast<double>(d2vr::NativeInteractionAim::weapon_cast_ticks_.load())*1e6/static_cast<double>(f.QuadPart)/static_cast<double>(n):0.0;}() << "}" << ",\"weapon_collision\":{\"enabled\":" << (weapon_collision_enabled?"true":"false") << ",\"casts\":" << d2vr::NativeInteractionAim::weapon_casts_.load() << ",\"contact_frames\":" << weapon_contact_frames.load() << ",\"events\":" << weapon_contact_events.load() << "}" << ",\"hand_clamp\":{\"active\":" << [&]{
+            // Physical hands (C9/C14): per side [left,right]. state 0 free / 1 contact / 2 released; missed_notes and repeated_updates stay 0
+            // (the note_drawn contract); unanswered: frames whose palm post the game thread had not answered (its previous answer was read);
+            // cast_us: the clamp's own casts per frame (mean / max over 2 s, last scope), budget 500 (C14). exclusion: hits = another body
+            // reported through the prop's exclusion (walls behind it), self_hits = the excluded body itself (the exclusion did not apply).
+            const auto pair=[](auto get) {std::ostringstream v;v<<'['<<get(hand_clamp_status[0])<<','<<get(hand_clamp_status[1])<<']';return v.str();};
+            std::ostringstream o;
+            o<<pair([](const HandClampStatus& h){return h.active.load()?"true":"false";})
+             <<",\"state\":"<<pair([](const HandClampStatus& h){return h.state.load();})
+             <<",\"contact_frames\":"<<pair([](const HandClampStatus& h){return h.contact_frames.load();})
+             <<",\"snapbacks\":"<<pair([](const HandClampStatus& h){return h.snapbacks.load();})
+             <<",\"reach_clamped\":"<<pair([](const HandClampStatus& h){return h.reach_clamped.load();})
+             <<",\"yields\":"<<pair([](const HandClampStatus& h){return h.yields.load();})
+             <<",\"missed_notes\":"<<pair([](const HandClampStatus& h){return h.missed_notes.load();})
+             <<",\"repeated_updates\":"<<pair([](const HandClampStatus& h){return h.repeated_updates.load();})
+             <<",\"reacquire_blocked\":"<<pair([](const HandClampStatus& h){return h.reacquire_blocked.load();})
+             <<",\"reacquire_holds\":"<<pair([](const HandClampStatus& h){return h.reacquire_holds.load();})
+             <<",\"unanswered\":"<<pair([](const HandClampStatus& h){return h.unanswered.load();})
+             <<",\"probes\":"<<pair([](const HandClampStatus& h){return h.probes.load();})
+             <<",\"max_casts\":"<<pair([](const HandClampStatus& h){return h.max_casts.load();})
+             <<",\"cast_us\":"<<hand_clamp_cast_mean.load()<<",\"cast_us_max\":"<<hand_clamp_cast_max.load()
+             <<",\"cast_us_last\":"<<d2vr::NativeInteractionAim::clamp_cast_us_.load()<<",\"casts_last\":"<<d2vr::NativeInteractionAim::clamp_cast_n_.load()
+             <<",\"tip_probe\":"<<(hand_clamp_tip.load()?"true":"false")<<",\"alternate\":"<<(hand_clamp_alternate.load()?"true":"false")
+             <<",\"exclusion\":{\"casts\":"<<d2vr::NativeInteractionAim::clamp_exclude_casts_.load()<<",\"hits\":"<<d2vr::NativeInteractionAim::clamp_exclude_hits_.load()
+             <<",\"self_hits\":"<<d2vr::NativeInteractionAim::clamp_exclude_self_hits_.load()<<",\"unmapped\":"<<d2vr::NativeInteractionAim::clamp_exclude_unmapped_.load()
+             <<",\"info_zero\":"<<(d2vr::NativeInteractionAim::clamp_exclude_info_zero_.load()?"true":"false")<<'}';
+            return o.str();}() << "}" << ",\"hud_relayouts\":" << d2vr::NativeHudChildDraw::hud_relayouts.load() << ",\"hud_panel_children\":" << d2vr::NativeHudChildDraw::panel_children.load() << ",\"sword_aim_frames\":" << sword_aim_frames.load() << ",\"gaze_takedown_frames\":" << gaze_takedown_frames.load() << ",\"overlay_hidden\":" << d2vr::NativeHudChildDraw::overlay_draws.load() << ",\"scabbard\":[" << scabbard_entries.load() << ',' << holster_fires.load() << "]" << ",\"sword_grip\":{\"actions\":[" << sword_actions[1].load() << ',' << sword_actions[2].load() << ',' << sword_actions[3].load() << ',' << sword_actions[4].load() << ',' << sword_actions[5].load() << ',' << sword_actions[6].load() << "],\"held\":" << (sword_grip.held()?"true":"false") << ",\"gun\":[" << gun_actions[1].load() << ',' << gun_actions[2].load() << ',' << (gun_grip.held()?1:0) << ',' << (hip_loaded?1:0) << "],\"reversed\":" << (sword_reversed.load()?"true":"false") << ",\"thrown\":[" << d2vr::NativeWeaponHands::thrown_hits.load() << ',' << d2vr::NativeWeaponHands::flight_frames.load() << ',' << d2vr::NativeWeaponHands::thrown_peak.load() << ',' << sword_release_speed.load() << ',' << right_hand_peak.load() << ',' << d2vr::NativeWeaponHands::services.load() << "],\"last_shove\":" << d2vr::NativeWeaponHands::last_shove.load() << ",\"ragdolls\":[" << d2vr::NativeWeaponHands::ragdolls.load() << ',' << d2vr::NativeWeaponHands::last_ragdoll.load() << ',' << yank_requests.load() << ',' << d2vr::NativeWeaponHands::yanks.load() << ',' << yank_peak[0].load() << ',' << yank_peak[1].load() << ',' << yank_gate[0].load() << ',' << yank_gate[1].load() << ',' << d2vr::NativeGrab::yank_holds_.load() << ',' << d2vr::NativeWeaponHands::wakes.load() << ',' << d2vr::NativeWeaponHands::holds_down.load() << ',' << d2vr::NativeWeaponHands::squeezes.load() << ',' << d2vr::NativeWeaponHands::guard_grabs.load() << ',' << d2vr::NativeWeaponHands::last_guard_d.load() << ',' << d2vr::NativeWeaponHands::last_guard_up.load() << ']' << ",\"look_uses\":" << look_uses.load() << ",\"look_hits\":" << look_hits.load() << ",\"stealth\":[" << d2vr::NativeMelee::unaware_asked.load() << ',' << d2vr::NativeMelee::unaware_yes.load() << ']' << ",\"use_diag\":[" << use_diag[0].load() << ',' << use_diag[1].load() << ',' << use_diag[2].load() << ',' << use_diag[3].load() << ',' << use_diag[4].load() << ',' << use_diag[5].load() << ',' << use_diag[6].load() << ',' << use_diag[7].load() << ',' << use_diag[8].load() << ',' << use_diag[9].load() << ']' << ",\"door_controller\":" << [&]{const auto state=d2vr::NativeDoorInteraction::process_owner().status();const auto metrics=native_interaction_aim.door_metrics();std::ostringstream value;value<<"{\"ownership\":"<<state.ownership<<",\"active\":"<<(state.active?"true":"false")<<",\"pending\":"<<(state.pending?"true":"false")<<",\"closing\":"<<(state.closing?"true":"false")<<",\"blocked\":"<<(state.blocked?"true":"false")<<",\"queries\":"<<metrics.queries<<",\"qualified\":"<<metrics.qualified<<",\"qpc_ticks\":"<<metrics.service_ticks<<",\"worst_qpc_ticks\":"<<metrics.worst_service_ticks<<'}';return value.str();}() << ",\"carry_head_pushes\":" << carry_head_pushes.load() << ",\"fist_takes\":" << fist_takes.load() << ",\"carries\":" << d2vr::NativeWeaponHands::carries.load() << ",\"block\":[" << block_pose_frames.load() << ',' << block_wanted.load() << ',' << gesture_blocks.load() << ',' << block_not_free.load() << ',' << block_not_held.load() << ',' << (d2vr::NativeWeaponHands::block_keeps_gun()?1:0) << ']' << ",\"hip_frames\":" << d2vr::NativeWeaponHands::hip_frames.load() << ",\"props_thrown\":[" << d2vr::NativeWeaponHands::props_marked.load() << ',' << d2vr::NativeWeaponHands::prop_hits.load() << ',' << (d2vr::NativeWeaponHands::phys_decl_ok.load()?1:0) << "],\"native\":[" << d2vr::NativeWeaponHands::ops.load() << ',' << d2vr::NativeWeaponHands::failures.load() << ',' << d2vr::NativeWeaponHands::spawned.load() << ',' << d2vr::NativeWeaponHands::removed.load() << "],\"copy\":" << [&]{const auto c=d2vr::NativeWeaponHands::copy();std::ostringstream o;if(!c.present) return std::string("null");o << "{\"pos\":[" << c.pos[0] << ',' << c.pos[1] << ',' << c.pos[2] << "],\"blade\":[" << c.blade[0] << ',' << c.blade[1] << ',' << c.blade[2] << "],\"flying\":" << (c.flying?"true":"false") << ",\"trace\":\"" << c.trace << "\"}";return o.str();}() << "}" << ",\"blade_pokes\":" << native_grab.pokes_.load() << ",\"interact\":[" << interact_bits.load() << ',' << interact_presses.load() << ']' << ",\"ragdoll_tows\":" << native_grab.tows_.load() << ",\"hand_contact\":[" << native_grab.hand_contact().publishes.load() << ',' << native_grab.hand_contact().services.load() << ',' << native_grab.hand_contact().tested.load() << ',' << native_grab.hand_contact().touches.load() << ',' << native_grab.hand_contact().pushes.load() << ',' << native_grab.hand_contact().faults.load() << ',' << native_grab.hand_contact().cost_us.load() << ',' << native_grab.hand_contact().cost_max_us.load() << ',' << native_grab.hand_contact().scan_us.load() << ',' << native_grab.hand_contact().body_us.load() << ',' << native_grab.hand_contact().math_us.load() << ',' << native_grab.hand_contact().slow_services.load() << ',' << native_grab.hand_contact().preempted.load() << ',' << native_grab.hand_contact().write_us.load() << ',' << native_grab.hand_contact().write_max_us.load() << ',' << native_grab.hand_contact().slow_writes.load() << ',' << native_grab.hand_contact().cast_seen.load() << ',' << native_grab.hand_contact().cast_held.load() << ',' << native_grab.hand_contact().discoveries.load() << ',' << native_grab.hand_contact().discover_us.load() << ',' << native_grab.hand_contact().discover_max_us.load() << ',' << native_grab.hand_contact().meets.load() << ',' << native_grab.hand_contact().meet_shifts.load() << ',' << native_grab.hand_contact().meet_latches.load() << ',' << native_grab.hand_contact().keepouts.load() << ']' << ",\"left_equip\":\"" << [&]{std::lock_guard<std::mutex> l(hand_state_mutex);std::string n(left_equip_name);for(auto& ch:n) if(ch=='"'||ch==92||static_cast<unsigned char>(ch)<32) ch='?';return n;}() << "\"" << ",\"hand_weapon_bits\":" << [&]{std::lock_guard<std::mutex> l(hand_state_mutex);return hand_weapon_bits;}() << ",\"prompt_latency_ms\":[" << prompt_latency_last.load() << ',' << prompt_latency_max.load() << "]" << ",\"sword_tip_ndc\":[" << sword_tip_ndc_x.load() << ',' << sword_tip_ndc_y.load() << "]" << ",\"wheel_zone\":{\"frames\":" << wheel_dbg_frames.load() << ",\"plane_frames\":" << wheel_dbg_plane.load() << ",\"size\":[" << wheel_dbg_w.load() << ',' << wheel_dbg_h.load() << "],\"uv\":[" << wheel_dbg_u.load() << ',' << wheel_dbg_v.load() << "],\"clicks\":" << wheel_zone_clicks.load() << ",\"last\":" << wheel_zone_last.load() << ",\"stage\":[" << wheel_stage_x.load() << ',' << wheel_stage_y.load() << "]}" << ",\"wrist_early_publications\":" << wrist_early_publications.load() << ",\"hud_holder_hidden\":" << d2vr::NativeHudChildDraw::holder_hidden.load() << ",\"hud_eye_node\":" << (d2vr::NativeHudChildDraw::eye_node.load()?"true":"false") << ",\"prompt_world\":" << (d2vr::NativeHudChildDraw::prompt_world.load()?"true":"false") << ",\"world_prompt_frames\":" << world_prompt_frames.load() << ",\"prompt_shows_hides\":[" << prompt_shows.load() << ',' << prompt_hides.load() << "],\"takedown_flips\":" << takedown_flips.load() << ",\"takedown_hints\":" << d2vr::NativeHudChildDraw::takedown_hints.load() << ",\"npc_blade_contacts\":" << npc_blade_contacts.load() << ",\"contact_hits\":[" << d2vr::NativeInteractionAim::melee_applied_.load() << ',' << d2vr::NativeInteractionAim::melee_rejected_.load() << ',' << d2vr::NativeInteractionAim::melee_faults_.load() << ']' << ",\"contact_rejects\":[" << d2vr::NativeInteractionAim::melee_why_[0].load() << ',' << d2vr::NativeInteractionAim::melee_why_[1].load() << ',' << d2vr::NativeInteractionAim::melee_why_[2].load() << ']' << ",\"corpse_chops\":" << d2vr::NativeMelee::chops.load() << ",\"tip_speed\":[" << tip_speed_now[0].load() << ',' << tip_speed_now[1].load() << ']' << ",\"slash_speed\":" << (d2vr::NativeSlashSceneRate::process_owner().enabled()?slash_speed_factor:1.f) << ",\"slash_scene_rate\":{\"enabled\":" << (d2vr::NativeSlashSceneRate::process_owner().enabled()?"true":"false") << ",\"accelerations\":" << d2vr::NativeSlashSceneRate::process_owner().accelerations() << ",\"setter_failures\":" << d2vr::NativeSlashSceneRate::process_owner().setter_failures() << "}" << ",\"block_unequip_vetoes\":" << d2vr::NativeBlockEligibility::process_owner().vetoes() << ",\"takedown_range\":" << (native_interaction_aim.takedown_ranges_applied()?"true":"false") << ",\"takedown_kill_rules\":" << native_interaction_aim.takedown_range_kill_rules() << ",\"held_object\":{\"installed\":" << (held_object_installed?"true":"false") << ",\"placed\":" << d2vr::NativeHeldObject::placed.load() << ",\"rejected_targets\":" << d2vr::NativeHeldObject::rejected_targets.load() << ",\"anchored\":" << d2vr::NativeHeldObject::anchored.load() << ",\"sim_invulnerable_blocked\":" << d2vr::NativeSimInvulnerable::blocked.load() << ",\"swarm_kill_skipped\":" << d2vr::NativeSwarmKillGuard::skipped.load() << ",\"swarm_why\":[" << d2vr::NativeMelee::swarm_why[0].load() << ',' << d2vr::NativeMelee::swarm_why[1].load() << ',' << d2vr::NativeMelee::swarm_why[2].load() << ',' << d2vr::NativeMelee::swarm_why[3].load() << "],\"thrown\":" << d2vr::NativeHeldObject::thrown.load() << ",\"throw_kept\":" << d2vr::NativeHeldObject::throw_kept.load() << ",\"throws\":" << held_throws.load() << ",\"drops\":" << held_drops.load() << "}" << ",\"arm_hidden\":" << arm_hidden_bits.load() << ",\"arm_shows\":" << d2vr::NativeHeldObject::arm_shows.load() << ",\"arm_hides_skipped\":" << d2vr::NativeHeldObject::hides_skipped.load() << ",\"held_world_renders\":" << d2vr::NativeHeldObject::world_renders.load() << ",\"held_debug\":[" << held_debug[0].load() << ',' << held_debug[1].load() << ',' << held_debug[2].load() << ',' << held_debug[3].load() << ',' << held_debug[4].load() << ',' << held_debug[5].load() << ',' << held_debug[6].load() << ',' << held_debug[7].load() << ',' << held_debug[8].load() << ',' << held_debug[9].load() << ',' << held_debug[10].load() << ',' << held_debug[11].load() << ',' << held_debug[12].load() << "]" << ",\"arm_show_failed\":" << (d2vr::NativeHeldObject::arm_show_failed.load()?"true":"false") << ",\"native_options_page\":[" << d2vr::NativeMenuEntry::clicks.load() << ',' << d2vr::NativeMenuEntry::queued.load() << ',' << d2vr::NativeMenuEntry::native_pages.load() << ',' << d2vr::NativeOptionsPage::opens.load() << ',' << d2vr::NativeOptionsPage::changes.load() << ',' << d2vr::NativeOptionsPage::faults.load() << ',' << d2vr::NativeOptionsPage::failed_step.load() << ',' << d2vr::NativeOptionsPage::last_show.load() << ',' << d2vr::NativeOptionsPage::action_flips.load() << ']' << ",\"impact_fx\":[" << d2vr::NativeInteractionAim::impact_played_.load() << ',' << d2vr::NativeInteractionAim::impact_skipped_.load() << ']' << ",\"hud_master_entries\":" << d2vr::NativeHudChildDraw::master_entries.load() << ",\"hud_window_layers\":" << (game_xr?game_xr->hud_window_layers:0) << ",\"hud_cylinder\":" << (game_xr && game_xr->cylinder_layers()?"true":"false") << ",\"hud_scale\":" << d2vr::NativeHudChildDraw::hud_scale.load()
         << ",\"contact_gates\":[" << contact_gates[0].load() << ',' << contact_gates[1].load() << ',' << contact_gates[2].load() << ',' << contact_gates[3].load() << ',' << contact_gates[4].load() << ',' << contact_gates[5].load() << ',' << contact_gates[6].load() << ',' << contact_gates[7].load() << ']'
         << ",\"takedown_range_policy\":{\"choke\":\"" << (d2vr::NativeChokeDistanceScope::process_owner().enabled()?"private-view-x1.5":"native-unmodified") << "\",\"kill\":\"native-unmodified\",\"enabled\":" << (d2vr::NativeChokeDistanceScope::process_owner().enabled()?"true":"false") << ",\"substitutions\":" << d2vr::NativeChokeDistanceScope::process_owner().substitutions() << '}'
         << ",\"takedown\":{\"sensors\":" << takedown_sensors.load() << ",\"kill_frames\":" << takedown_kill_frames.load() << ",\"choke_frames\":" << takedown_choke_frames.load()
@@ -7827,7 +7975,8 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
          if(!rvas.empty()) {const auto n=d2vr::NativeCallTrace::install(image_base,rvas);
              try {std::ofstream f(output_directory/L"native-call-trace.csv");f<<"# hooks "<<n<<'/'<<rvas.size()<<'\n';} catch(...) {}}}
         gun_shape_override={};{std::ifstream knob(root/L"build"/L"gun-shape");GunShape v{};if(knob>>v[0]>>v[1]>>v[2]>>v[3] && v[2]>.05 && v[2]<.8 && v[3]>=0 && v[3]<.15) gun_shape_override=v;}
-        {std::ifstream knob(root/L"build"/L"slash-speed");float f{};if(knob>>f && f>=1.f && f<=2.f) slash_speed_factor=f;}weapon_collision=d2vr::WeaponCollision{};weapon_collision_qpc=0;
+        {std::ifstream knob(root/L"build"/L"slash-speed");float f{};if(knob>>f && f>=1.f && f<=2.f) slash_speed_factor=f;}weapon_collision=d2vr::WeaponCollision{};weapon_collision_qpc=0;hand_clamp=d2vr::HandClamp{};hand_clamp_budget.reset();
+        d2vr::NativeInteractionAim::clamp_exclude_info_zero_=fs::exists(root/L"build"/L"hand-clamp-exclude-info-zero"); // diagnostic: +0x14 of the exclusion sweeps is 0, not the prop's filter word
         native_interaction_aim.slash_speed(vr_combat_enabled?slash_speed_factor:1.f);
         {taa_jitter_scale={1,1,1,1};std::ifstream knob(root/L"build"/L"taa-jitter-scale");for(auto& v:taa_jitter_scale) {float f{};if(!(knob>>f)) break;v=f;}}taa_live=taa_preference!=0;fsr_taa.enabled=taa_preference>=2; // diagnostics: simulated runs skip saved settings
         // Per-eye temporal AA history (docs/image-quality-research.md). build/no-per-eye-taa disables it.
