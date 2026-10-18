@@ -7,6 +7,8 @@
 
 namespace d2vr {
 inline constexpr std::uint64_t grab_pose_freshness_ms=tracked_pose_freshness_ms;
+// Samples closer than this share a clock quantum; their motion waits for the next spaced sample instead of being dropped.
+inline constexpr std::uint64_t grab_velocity_min_ms=8;
 inline bool grab_pose_valid(const WorldTrackedPose& pose) {
     if(!finite(pose.position)) return false;
     for(unsigned i=0;i<3;++i) {
@@ -76,7 +78,13 @@ public:
         // Check discontinuities even at duplicate or slow accepted timestamps,
         // before a released grip can convert old movement into a throw.
         if(length(displacement)>.5) {valid_sample_=false;armed_=pressed_=false;velocity_={};tick_=tick;previous_=hand;return false;}
-        if(dt>=.001) {
+        if(tick-tick_<grab_velocity_min_ms) {
+            // Keep previous_/tick_/velocity_ so this motion enters the next spaced velocity sample.
+            if(grip<.35f) {armed_=true;pressed_=false;}
+            else if(armed_ && grip>=.45f) pressed_=true;
+            valid_sample_=true;return true;
+        }
+        {
             const double weight=1-std::exp(-dt/.035);
             velocity_=velocity_*(1-weight)+grab_limit(displacement*(1/dt),12)*weight;
         }

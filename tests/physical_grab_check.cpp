@@ -137,5 +137,11 @@ int main() {
     occupied.sample(identity,.9f,true,1,130);
     const auto occupied_release=occupied.motor(identity,false);
     assert(occupied_release && occupied_release->release && !occupied.held() && length(occupied_release->linear)==0);
+    // Two frames share each 16 ms tick quantum: the in-quantum motion must stay in the baseline, not vanish.
+    {
+        PhysicalGrab dup;auto hand=identity;
+        for(unsigned i=0;i<20;++i) {hand.position.x+=.011;dup.sample(hand,0,true,1,1000+16*(i/2));}
+        assert(std::abs(dup.velocity().x-1.375)<1.375*.15);
+    }
     std::cout<<"PASS: grip hysteresis/rearm, relative pose, bounded dynamic motor/throw, focus/epoch/stale/blocked release, occupied-hand refusal and release\n";
 }

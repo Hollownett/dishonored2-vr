@@ -79,7 +79,7 @@ void physical_routing(unsigned side,unsigned mode,unsigned transition=0) {
     const auto owner=*native_player_camera(read,fixture_base,fixture_camera);
     WorldTrackedPose hand{{},{{{1,0,0},{0,1,0},{0,0,1}}}};
     NativeGrab grab;NativeGrabCheck::setup(grab);GripIntent intent;
-    auto now=GetTickCount64();
+    auto now=GetTickCount64();const auto first_tick=now;
     grab.publish(side,owner,hand,0,1,now,true,false,now);grab.filter_native_grip(side,0,1,now,true,true,false);
     intent.update(0,0,now,true);
     const bool sword=mode==2,menu=mode==3,temple=mode==4,scabbard=mode==5,choke=mode==6;
@@ -105,7 +105,9 @@ void physical_routing(unsigned side,unsigned mode,unsigned transition=0) {
         NativeGrabCheck::dispatch(grab);assert(!grab.holding(side) && grab.picked()==0 && fixture_writes==0);
         return;
     }
-    Sleep(11);now=GetTickCount64();hand.position.x=.04;
+    // Velocity samples need a real gap past grab_velocity_min_ms; the tick clock is coarse (16 ms under Wine), so wait on it.
+    do {Sleep(1);now=GetTickCount64();} while(now-first_tick<2*grab_velocity_min_ms);
+    hand.position.x=.04;
     const auto holding=intent.update(.9f,0,now,true);assert(holding.fist);
     grab.publish(side,owner,hand,.9f,1,now,true,false,now);
     grab.filter_native_grip(side,.9f,1,now,true,true,false);
@@ -157,7 +159,8 @@ int main() {
         Sleep(1);const auto press=GetTickCount64();
         grab.publish(0,owner,hand,.9f,1,press,true,false,press);grab.filter_native_grip(0,.9f,1,press,true,true,false);
         NativeGrabCheck::dispatch(grab);assert(grab.holding(0) && fixture_originals==1 && fixture_writes==0);
-        Sleep(11);const auto move=GetTickCount64();hand.position.x=.05;
+        auto move=GetTickCount64();while(move-tick<2*grab_velocity_min_ms) {Sleep(1);move=GetTickCount64();} // coarse tick clock: wait for a real velocity gap
+        hand.position.x=.05;
         grab.publish(0,owner,hand,.9f,1,move,true,false,move);grab.filter_native_grip(0,.9f,1,move,true,true,false);
         fixture_transition=transition;NativeGrabCheck::dispatch(grab);
         // Transition 4 changes only the component's flag word (same generation): a held prop whose flags change as it moves
