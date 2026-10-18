@@ -11,7 +11,8 @@ Fill in the "Result" column during one Windows + headset session, then commit th
 | `g++ -std=c++17 -Isrc tests/physical_grab_check.cpp` (Task 8) | Linux | ok — 2026-10-18 |
 | Launcher sources compile (net8.0-windows, warnings as errors; scratch project without embedded payload) | Linux | 0 warnings / 0 errors — 2026-10-18 |
 | `tools\build-msvc.cmd` → exit 0 | **Windows** | |
-| `tools\build.ps1` (DLL + launcher) → exit 0 | **Windows** | |
+| `tools\build.ps1` (DLL and source archive; does not build the launcher) → exit 0 | **Windows** | |
+| `dotnet build launcher -c Release` → 0 warnings / 0 errors | **Windows** | |
 
 ## Headset / manual (Windows, one session)
 
