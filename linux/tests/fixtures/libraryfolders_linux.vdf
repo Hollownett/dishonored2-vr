@@ -1,0 +1,21 @@
+"libraryfolders"
+{
+	"0"
+	{
+		"path"		"/home/hollownet/.local/share/Steam"
+		"label"		""
+		"apps"
+		{
+			"250820"		"5554329553"
+		}
+	}
+	"1"
+	{
+		"path"		"/mnt/steam ssd/SteamLibrary"
+		"label"		""
+		"apps"
+		{
+			"403640"		"45263695341"
+		}
+	}
+}
