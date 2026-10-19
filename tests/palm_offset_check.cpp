@@ -136,7 +136,7 @@ int main() {
             fit.begin(1,default_palm_offset(1));require(fit.active(),"begin did not activate");
             for(int i=0;i<1000;++i) fit.nudge(1,1,1,1,.01);
             auto v=fit.value();require(palm_offset_valid(v),"nudged value out of bounds");
-            require(near(v.translation.x,.02*1.0*.0+v.translation.x) && v.translation.x>0 && v.translation.x<=.08+1e-12,"forward nudge wrong");
+            require(near(v.translation.x,.08) && near(v.translation.y,-.08) && near(v.pitch_deg,-30) && near(v.yaw_deg,-30),"full positive stick must saturate at the signed bounds");
             for(int i=0;i<2000;++i) fit.nudge(-1,-1,-1,-1,.01);
             v=fit.value();require(palm_offset_valid(v) && near(std::abs(v.translation.x),.08,1e-9) && near(std::abs(v.pitch_deg),30,1e-9),"opposite full nudge did not reach the bounds");
             const auto before=fit.value();
@@ -161,6 +161,65 @@ int main() {
             require(near(blend.update(true,.011),0),"armed hand keeps no tilt");
             require(blend.update(false,.011)>0 && blend.update(false,.011)<1,"unequip must ease back");
             blend.update(true,NAN);require(std::isfinite(blend.update(true,.011)),"non-finite dt");
+        }
+        {   // tilt only for EMPTY hands: weapon OR carrying OR holding an object (fresh state); the blend starts from the first state
+            require(palm_occupied_bits(2,0,false,0,true)==2,"weapon bit lost");
+            require(palm_occupied_bits(0,2,false,0,true)==2 && palm_occupied_bits(0,1,false,0,true)==1,"carrying hand not occupied");
+            require(palm_occupied_bits(0,0,true,0,true)==1 && palm_occupied_bits(0,0,true,1,true)==2,"held-object hand not occupied");
+            require(palm_occupied_bits(0,3,true,1,false)==0,"stale carry/hold state must not occupy a hand");
+            require(palm_occupied_bits(1,3,true,1,false)==1,"weapon bit needs no fresh state");
+            require(palm_occupied_bits(0,0,false,0,true)==0,"empty hands are not occupied");
+            PalmTiltBlend carrying,held,armed_first,empty_first;
+            require(near(carrying.update(palm_occupied_bits(0,2,false,0,true)&2,.011),0),"a carrying hand flashed the tilt");
+            require(near(held.update(palm_occupied_bits(0,0,true,0,true)&1,.011),0),"a held-object hand flashed the tilt");
+            require(near(armed_first.update(true,0),0) && near(armed_first.update(true,.011),0),"an armed hand at start flashed the tilt");
+            require(near(empty_first.update(false,.011),1),"an empty hand at start must tilt fully");
+            require(near(armed_first.update(false,.011),.011/.15,1e-9),"releasing a weapon must ease the tilt back in");
+            // a hand armed while untracked: the caller advances the blend every frame, so the first tracked frame is already at 0
+            PalmTiltBlend untracked;untracked.update(true,0);for(int i=0;i<30;++i) untracked.update(true,.011);
+            require(near(untracked.weight(),0),"reacquire flashed the tilt");
+        }
+        {   // profiles: optional runtime query, deferred save, non-Touch keys
+            const char* index="/interaction_profiles/valve/index_controller";
+            PalmCalibration cal;cal.profile_query_available=true;
+            require(cal.profile(0)==palm_default_profile,"fallback profile wrong");
+            const PalmOffset mine{{.01,.02,.03},7,-8};
+            require(!cal.confirm(1,mine),"a fit before the runtime named a profile must not save");
+            bool saved=true;auto got=cal.get(1,&saved);
+            require(!saved && near(got.translation.x,.01),"a deferred fit must still be used (unsaved)");
+            require(!cal.store().get(1,palm_default_profile).second,"a deferred fit was stranded under the Touch fallback");
+            require(!cal.set_profile(1,"bogus profile"),"an invalid runtime profile was accepted");
+            require(cal.set_profile(1,index),"the first real profile did not commit the deferred fit");
+            require(cal.store().get(1,index).second && near(cal.store().get(1,index).first.pitch_deg,7),"deferred fit not re-keyed to the real profile");
+            require(!cal.store().get(1,palm_default_profile).second,"Touch key must stay empty");
+            got=cal.get(1,&saved);require(saved && near(got.yaw_deg,-8),"re-keyed fit not used");
+            require(near(cal.get(0,&saved).translation.y,.03) && !saved,"the other hand must stay default");
+            require(!cal.set_profile(1,index),"the same profile must not re-save");
+            // a non-Touch controller: a fit is keyed under it, and switching to Touch finds the default again
+            require(cal.confirm(0,mine) == false,"left profile still unknown: deferred");
+            cal.set_profile(0,index);require(cal.store().get(0,index).second,"left fit lost");
+            cal.set_profile(1,palm_default_profile);cal.get(1,&saved);
+            require(cal.profile(1)==palm_default_profile && !saved,"profile switch must fall back to the default for the new profile");
+            // a runtime without the query functions: the suggested profile is authoritative, so the fit saves at once
+            PalmCalibration blind;blind.profile_query_available=false;
+            require(blind.confirm(0,mine) && blind.store().get(0,palm_default_profile).second,"no query functions: the fit must save under the fallback");
+        }
+        {   // save enforces the loader's cap, and the async writer writes the latest snapshot and never blocks the caller
+            const double tiny=-1.2345678901234567e-05; // the longest printed form of a double
+            PalmOffsetStore big;for(int i=0;i<16;++i) big.set(i&1,("/interaction_profiles/"+std::string(106,static_cast<char>('a'+i))).c_str(),PalmOffset{{tiny,tiny,tiny},tiny,tiny});
+            const auto file=temp_file("d2vr-palm-cap.txt");
+            big.save(file); // the worst case the store can hold still fits the loader's cap, so what save writes always loads
+            require(std::filesystem::file_size(file)<=PalmOffsetStore::max_bytes,"worst-case store exceeds the loader cap");
+            PalmOffsetStore reload;reload.load(file);require(reload.get(1,"/interaction_profiles/"+std::string(106,'b')).second,"worst-case store did not reload");
+            std::error_code cap_ec;std::filesystem::remove(file,cap_ec);
+            const auto async_file=temp_file("d2vr-palm-async.txt");
+            {PalmSaver saver(async_file);PalmOffsetStore a,b;a.set(0,touch,PalmOffset{{.01,0,0},1,1});b.set(0,touch,PalmOffset{{.02,0,0},2,2});
+             saver.submit(a);saver.submit(b);saver.flush();
+             require(!saver.error(),"async save failed");
+             PalmOffsetStore reload;reload.load(async_file);require(near(reload.get(0,touch).first.translation.x,.02,1e-12),"latest snapshot not written");
+             PalmSaver bad(std::filesystem::temp_directory_path()/"d2vr-no-such-dir"/"p.txt");bad.submit(a);bad.flush();require(bad.error(),"a failed async save must be reported");
+             bad.submit(a);} // destruction with a pending job must neither hang nor throw
+            std::error_code ec;std::filesystem::remove(async_file,ec);
         }
         std::cout<<"palm_offset_check: ok\n";return 0;
     } catch(const std::exception& e) {std::cerr<<"FAIL: "<<e.what()<<'\n';return 1;}

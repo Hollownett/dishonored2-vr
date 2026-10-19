@@ -4068,7 +4068,7 @@ void prepare_head_view(void* view) noexcept {
         }
         if(render_world_scene() && (tracked_arms_requested || native_weapon_attachment_requested) && eye==0) {
             const bool reverse_sword=sword_reversed.load();
-            d2vr::rig::ArmTrackingFrame hands{};std::array<d2vr::WorldTrackedPose,2> raw_grips{};std::array<std::uintptr_t,2> cast_entities{};hands.tick=GetTickCount64();hands.source_tick=game_xr->grip_pose_tick();hands.epoch=game_xr->pose_epoch();
+            d2vr::rig::ArmTrackingFrame hands{};std::array<d2vr::WorldTrackedPose,2> raw_grips{},palm_grips{};std::array<std::uintptr_t,2> cast_entities{};hands.tick=GetTickCount64();hands.source_tick=game_xr->grip_pose_tick();hands.epoch=game_xr->pose_epoch();
             hands.curls={std::clamp(game_xr->controller_input.left_grip,0.f,1.f),std::clamp(game_xr->controller_input.right_grip,0.f,1.f)};
             // A hand holding a prop closes around it rather than through it: an apple keeps the fist, a crate leaves it half open.
             if(physical_grab_requested) for(unsigned side=0;side<2;++side) if(const auto size=native_grab.held_size(side))
@@ -4120,19 +4120,23 @@ void prepare_head_view(void* view) noexcept {
                         {grip.orientation.x,grip.orientation.y,grip.orientation.z,grip.orientation.w}};
                     hands.grips[side]=d2vr::to_game_pose(d2vr::camera_relative_controller(tracked_grip,hand_centre,head_origin.position),head_origin,anchor,1.0);
                 }
-                {   // G5/C6/C12: the controller's grip origin is not the palm. Move it onto the palm before the clamp, the reach clamp, the arm IK
-                    // and the drawn weapon see it; an empty hand also gets the calibrated tilt, an armed hand the translation only (the weapon
-                    // direction the user accepted stays), eased over 0.15 s so equipping does not pop. Nothing here may throw into the XR path.
-                    unsigned armed_bits{};{std::lock_guard<std::mutex> hand_lock(hand_state_mutex);armed_bits=hand_weapon_bits;}
+                raw_grips=hands.grips; // the tracked poses, before the palm offset and before world collision moves the drawn hands
+                {   // G5/C6/C12: the controller's grip origin is not the palm. Move it onto the palm for the clamp, the reach clamp, the arm IK and the
+                    // drawn weapon; raw_grips (copied above) keep the controller for aim, press, selection, reach, throws and door intent (C9). Only an
+                    // EMPTY hand gets the calibrated tilt: a hand with a weapon, carrying a body or holding an object keeps the translation only, eased
+                    // over 0.15 s; the blend advances for every hand, tracked or not, from its first state. Nothing here may throw into the XR path.
+                    unsigned weapon_bits{},carrying_bits{},hold_side{};bool holding{},state_fresh{};
+                    {std::lock_guard<std::mutex> hand_lock(hand_state_mutex);weapon_bits=hand_weapon_bits;carrying_bits=hand_carrying_bits;holding=hand_holding_object;hold_side=hand_hold_side&1u;
+                     state_fresh=hand_state_tick && GetTickCount64()-hand_state_tick<=300;}
+                    const unsigned occupied=d2vr::palm_occupied_bits(weapon_bits,carrying_bits,holding,hold_side,state_fresh);
                     static std::array<d2vr::PalmTiltBlend,2> palm_tilt;static std::chrono::steady_clock::time_point palm_time{};
                     const auto palm_now=std::chrono::steady_clock::now();
                     const double palm_dt=palm_time.time_since_epoch().count()?std::chrono::duration<double>(palm_now-palm_time).count():0.;palm_time=palm_now;
-                    for(unsigned side=0;side<2;++side) if(hands.hands&(1u<<side)) try {
-                        const double tilt=palm_tilt[side].update(((armed_bits>>side)&1u)!=0,palm_dt);
+                    for(unsigned side=0;side<2;++side){const double tilt=palm_tilt[side].update(((occupied>>side)&1u)!=0,palm_dt);if(!(hands.hands&(1u<<side)))continue;try{
                         hands.grips[side]=d2vr::apply_palm_offset(hands.grips[side],game_xr->palm_offset(side),tilt);
-                    } catch(...) {}
+                    }catch(...){}}
                 }
-                raw_grips=hands.grips; // the tracked poses, before world collision moves the drawn hands
+                palm_grips=hands.grips; // the calibrated palms: the clamp's input (C9: drawn hand, reach clamp, arm IK and drawn weapon read these)
                 if(controller_aim_requested && physical_grab_requested && !authored_camera && game_logic_mask()==2) {
                     d2vr::NativeDoorIngress::Publication intent{};
                     intent.grips=raw_grips;intent.mapping_axes=hands.head_anchor.basis;intent.curls=hands.curls;
@@ -4170,7 +4174,7 @@ void prepare_head_view(void* view) noexcept {
                     {static std::uint64_t budget_epoch{};if(clamp_epoch!=budget_epoch || !clamp_live) {hand_clamp_budget.reset_window();budget_epoch=clamp_epoch;}}
                     ++hand_clamp_frame;for(auto& status:hand_clamp_status) status.active.store(false);
                     for(unsigned side=0;side<2;++side) if(hands.hands&(1u<<side)) {
-                        auto& g=hands.grips[side];const auto raw=raw_grips[side];
+                        auto& g=hands.grips[side];const auto raw=raw_grips[side],palm=palm_grips[side]; // raw: swing speed (C9); palm: the clamp's input
                         // Collision shapes from the weapon models: the sword's visible tip is .63 m out (projected tip check), thin.
                         // Left hand (by the native equip name): the pistol barrel sits above and behind the fist and is thick, the
                         // crossbow has its bow at the front; a thin line through the fist let boxes pass through them (headset v346).
@@ -4223,8 +4227,8 @@ void prepare_head_view(void* view) noexcept {
                         auto& status=hand_clamp_status[side];
                         const bool clamp_yield=d2vr::clamp_yields(side,authored_hands,carry_bits,physical_grab_requested && native_grab.holding(side));
                         bool reach_clamped=false;
-                        const auto target=clamp_yield || !reach_fresh?raw:d2vr::reach_clamp(raw,arm_reach.reach[side],&reach_clamped);
-                        refresh_clamp_probes(side,raw);
+                        const auto target=clamp_yield || !reach_fresh?palm:d2vr::reach_clamp(palm,arm_reach.reach[side],&reach_clamped);
+                        refresh_clamp_probes(side,palm);
                         const auto& probes=clamp_probes[side];
                         clamp_motion[side].sample(target.position,clamp_now);const auto velocity=clamp_motion[side].velocity();
                         d2vr::ClampOutput clamped{};const bool clamp_updated=clamp_live || clamp_yield;bool clamp_post=false;
@@ -4255,7 +4259,7 @@ void prepare_head_view(void* view) noexcept {
                             // World UI (logic != 2): nothing is cast or read. The hand follows the controller, kept out of the planes held before
                             // the pause while that keeps it within 0.35 m of the controller in the same epoch (N1: the planes do not age while
                             // paused); otherwise the controller. The resume frame re-acquires with the hold below.
-                            g.position=d2vr::paused_hand(hand_clamp,side,raw,clamp_epoch,hand_clamp.config().snap_gap);
+                            g.position=d2vr::paused_hand(hand_clamp,side,palm,clamp_epoch,hand_clamp.config().snap_gap);
                         } else if(clamped.valid && !clamp_yield) {const auto post=[&](unsigned post_slot,const d2vr::ClampSweep& sweep) {
                                 if(!sweep.valid || (sweep.exclude && !*sweep.exclude)) return; // an excluded entity 0 maps to no body
                                 d2vr::NativeInteractionAim::post_weapon_segment(side,post_slot,sweep.from,sweep.to,sweep.radius,sweep.exclude?*sweep.exclude:0);
@@ -4295,7 +4299,7 @@ void prepare_head_view(void* view) noexcept {
                         // While released (G3 snap-back, drawn at the controller), the chest re-acquire and an eye -> hand sweep on the exclusion slot
                         // (a released side never posts one: no meet while released; N7) bound the origin to the near side of what lies between body
                         // and hand. clamp_shot carries this frame's held planes: the origin is clipped at them while clamped (N5).
-                        {const auto shot=d2vr::clamped_shot_offset(g.position,raw.position,clamp_drew,now,game_xr->pose_epoch(),&hand_clamp,side);
+                        {const auto shot=d2vr::clamped_shot_offset(g.position,palm.position,clamp_drew,now,game_xr->pose_epoch(),&hand_clamp,side);
                          std::optional<d2vr::ClampSweep> eye_sweep;
                          {std::lock_guard<std::mutex> hand_lock(hand_state_mutex);clamp_shot[side]=shot;
                           eye_sweep=released_shot.posted(side,clamp_drew,clamped,clamp_post,{anchor.position[0],anchor.position[1],anchor.position[2]},target.position,now,game_xr->pose_epoch());}
@@ -4537,7 +4541,7 @@ void prepare_head_view(void* view) noexcept {
                     for(unsigned finger_index=0;finger_index<5;++finger_index) for(unsigned joint_index=0;joint_index<3;++joint_index)
                         solved_turns[finger_index][joint_index]=finger_turn[side][finger_index][joint_index];
                     const bool use_solved_turns=full_body_requested && tracked_arms_requested && has_finger_turn[side] && snapshot==finger_geometry_for;
-                    solid_hands.publish(side,can_push,hands.grips[side],raw_grips[side],hands.has_finger_curls?hands.finger_curls[side]:
+                    solid_hands.publish(side,can_push,hands.grips[side],palm_grips[side],hands.has_finger_curls?hands.finger_curls[side]:
                         std::array<float,5>{std::max(squeeze_now,.5f*trigger_now),trigger_now,squeeze_now,squeeze_now,squeeze_now},cast_entities[side],
                         drawn_palm_frame(side,hands.grips[side]).position-hands.grips[side].position,use_solved_turns?&solved_turns:nullptr);
                 }

@@ -25,19 +25,22 @@ def check(dxgi: str, aim: str) -> None:
     assert s.count('constautonative_ownership=') == 1 and s.count('constunsignedauthored_hands=') == 1
     assert 'hands.native_hands=authored_hands;if(authored_hands)hands.has_hand_state=true;' in s
 
-    # Task 8 (G5/C6): the palm offset moves the grip BEFORE the raw copy (the clamp, reach clamp, IK and drawn weapon all see the palm); the tilt
-    # weight comes from the side's armed bit (translation only for an armed hand), and a throw in it never reaches the XR path.
-    palm = between(s, 'unsignedarmed_bits{}', 'raw_grips=hands.grips;')
-    assert 'armed_bits=hand_weapon_bits;' in palm
-    assert 'palm_tilt[side].update(((armed_bits>>side)&1u)!=0,palm_dt)' in palm
+    # Task 8 (G5/C6, fix round 1): the controller's poses are copied BEFORE the palm offset (C9: aim, press, selection, reach, throw and door intent stay
+    # on the controller); the offset then makes palm_grips/hands.grips, which only the clamp, reach clamp, IK and drawn weapon read. The tilt applies to
+    # empty hands only (weapon, carrying or holding), the blend advances for every hand tracked or not, and a throw never reaches the XR path.
+    palm = between(s, 'unsignedweapon_bits{}', 'palm_grips=hands.grips;')
+    assert s.index('raw_grips=hands.grips;') < s.index('unsignedweapon_bits{}') < s.index('palm_grips=hands.grips;')
+    assert 'palm_occupied_bits(weapon_bits,carrying_bits,holding,hold_side,state_fresh)' in palm
+    assert 'for(unsignedside=0;side<2;++side){constdoubletilt=palm_tilt[side].update(((occupied>>side)&1u)!=0,palm_dt);if(!(hands.hands&(1u<<side)))continue;try{' in palm
     assert 'hands.grips[side]=d2vr::apply_palm_offset(hands.grips[side],game_xr->palm_offset(side),tilt);' in palm
     assert palm.index('apply_palm_offset(') < palm.index('}catch(...){}')
+    assert 'raw_grips=hands.grips' not in palm and 'raw_grips[side]=' not in palm
     # The raw poses are taken before anything moves the drawn hands.
     assert pub.index('raw_grips=hands.grips;') < pub.index('reach_clamp(') < pub.index('hand_clamp.update(')
     # Yields (C9): authored arms, a native carry on that side (fresh hand state), a physical hold. The reach clamp never applies on a yield.
     assert 'if(hand_holding_object&&hand_state_tick&&GetTickCount64()-hand_state_tick<=300)carry_bits=1u<<(hand_hold_side&1u);' in clamp
     for need in ('constboolclamp_yield=d2vr::clamp_yields(side,authored_hands,carry_bits,physical_grab_requested&&native_grab.holding(side));',
-                 'constautotarget=clamp_yield||!reach_fresh?raw:d2vr::reach_clamp(raw,arm_reach.reach[side],&reach_clamped);',
+                 'constautotarget=clamp_yield||!reach_fresh?palm:d2vr::reach_clamp(palm,arm_reach.reach[side],&reach_clamped);',
                  'in.yield=clamp_yield;', 'in.target=target;', 'in.root=clamp_root;', 'in.epoch=clamp_epoch;', 'in.chest=chest;',
                  'in.post=d2vr::clamp_posts(clamp_alternate,hand_clamp_frame,side);', 'in.tip_enabled=clamp_tip_on;'):
         assert need in loop, need
@@ -46,7 +49,7 @@ def check(dxgi: str, aim: str) -> None:
     assert 'constautoclamp_epoch=hands.epoch^(hands.reference_epoch<<32)^static_cast<std::uint64_t>(body->player);' in clamp
     assert 'constautoclamp_alternate=hand_clamp_budget.alternate();constautoclamp_tip_on=hand_clamp_budget.tip_enabled();' in clamp
     # The open-hand probe set feeds the leading probes and ClampInput::hand alike (Task 3 carry: else the wall-slide fix is off).
-    for need in ('refresh_clamp_probes(side,raw);', 'clamp_tip[side]=d2vr::leading_probe(probes.hand,target,velocity,clamp_tip[side]);',
+    for need in ('refresh_clamp_probes(side,palm);', 'clamp_tip[side]=d2vr::leading_probe(probes.hand,target,velocity,clamp_tip[side]);',
                  'clamp_wall_tip[side]=d2vr::wall_leading_probe(probes.hand,target,velocity,clamp_wall_tip[side]);',
                  'in.hand=probes.hand;in.hand_count=probes.count;', 'in.tip=clamp_tip[side];in.wall_tip=clamp_wall_tip[side];'):
         assert need in loop, need
@@ -103,12 +106,12 @@ def check(dxgi: str, aim: str) -> None:
     gate = 'd2vr::ClampOutputclamped{};constboolclamp_updated=clamp_live||clamp_yield;boolclamp_post=false;if(clamp_updated){d2vr::ClampInputin{};'
     assert gate in clamped_part and clamped_part.index(gate) < clamped_part.index(route)
     paused = between(clamped_part, 'if(!clamp_updated){', '}elseif(clamped.valid&&!clamp_yield){constautopost=')
-    assert 'g.position=d2vr::paused_hand(hand_clamp,side,raw,clamp_epoch,hand_clamp.config().snap_gap);' in paused  # N1: guarded keep-out
+    assert 'g.position=d2vr::paused_hand(hand_clamp,side,palm,clamp_epoch,hand_clamp.config().snap_gap);' in paused  # N1: guarded keep-out
     assert 'keep_out(' not in paused
     assert 'post_weapon_segment' not in paused and 'clamp_hold' not in paused and 'update(' not in paused
     assert clamped_part.count('clamp_hold.hold(') == 1
     # I2: while clamped, shots and the crosshair leave from the drawn barrel (direction untouched: the drawn barrel, v361).
-    assert 'constautoshot=d2vr::clamped_shot_offset(g.position,raw.position,clamp_drew,now,game_xr->pose_epoch(),&hand_clamp,side);' in clamped_part  # N5: held planes
+    assert 'constautoshot=d2vr::clamped_shot_offset(g.position,palm.position,clamp_drew,now,game_xr->pose_epoch(),&hand_clamp,side);' in clamped_part  # N5: held planes
     assert 'clamp_shot[side]=shot;' in clamped_part
     # N5: the hand-aimed left aim is published once, by publish_left_aim (guarded origin, then the publishes), after the hands when they
     # are published this frame (this frame's planes), else at once; a scope guard flushes it at the latest.
@@ -186,7 +189,7 @@ def check(dxgi: str, aim: str) -> None:
     assert 'note_grip(side,hands.grips' not in s and 'constauto&p=hands.grips[side].position;reach_hands' not in s
     # The drawn consumers keep the drawn hand: the arm IK target and the solid hands' drawn pose (raw for their push velocity).
     assert 't.grip[side]=d2vr::fullbody::from_basis(hands.grips[side].position,' in s
-    assert 'solid_hands.publish(side,can_push,hands.grips[side],raw_grips[side],' in s
+    assert 'solid_hands.publish(side,can_push,hands.grips[side],palm_grips[side],' in s
     assert 'intent.grips=raw_grips;' in s
     # Reset with the weapon collision; the exclusion's +0x14 knob.
     assert 'weapon_collision=d2vr::WeaponCollision{};weapon_collision_qpc=0;hand_clamp=d2vr::HandClamp{};hand_clamp_budget.reset();' in s
@@ -224,7 +227,7 @@ if __name__ == '__main__':
         ('note_grip(side,raw_grips[side],hands.curls[side]);', 'note_grip(side,hands.grips[side],hands.curls[side]);'),
         ('const auto& p=raw_grips[side].position;reach_hands[side]=', 'const auto& p=hands.grips[side].position;reach_hands[side]='),
         ('t.grip[side]=d2vr::fullbody::from_basis(hands.grips[side].position,', 't.grip[side]=d2vr::fullbody::from_basis(raw_grips[side].position,'),
-        ('const auto target=clamp_yield || !reach_fresh?raw:', 'const auto target=!reach_fresh?raw:'),
+        ('const auto target=clamp_yield || !reach_fresh?palm:', 'const auto target=!reach_fresh?palm:'),
         ('d2vr::clamp_yields(side,authored_hands,carry_bits,', 'd2vr::clamp_yields(side,0u,carry_bits,'),
         ('carry_bits,physical_grab_requested && native_grab.holding(side));', 'carry_bits,false);'),
         ('in.yield=clamp_yield;', 'in.yield=false;'),
@@ -246,7 +249,7 @@ if __name__ == '__main__':
         ('if(clamped.reacquired) if(const auto kept=', 'if(false) if(const auto kept='),
         ('const bool clamp_updated=clamp_live || clamp_yield;', 'const bool clamp_updated=true;'),
         ('const bool clamp_live=game_logic_mask()==2;', 'const bool clamp_live=true;'),
-        ('g.position=d2vr::paused_hand(hand_clamp,side,raw,clamp_epoch,hand_clamp.config().snap_gap);',
+        ('g.position=d2vr::paused_hand(hand_clamp,side,palm,clamp_epoch,hand_clamp.config().snap_gap);',
          'if(const auto kept=clamp_hold.hold(side,clamp_epoch,clamp_root,target.position,hand_clamp.config().snap_gap)) g.position=*kept;'),
         ('if(clamp_drew || !clamp_updated) clamp_hold.note(', 'if(clamp_drew) clamp_hold.note('),
         ('left.position=d2vr::guarded_shot_origin(released_shot,clamp_shot[0],0,left.position,GetTickCount64(),game_xr->pose_epoch());', ''),
@@ -261,8 +264,8 @@ if __name__ == '__main__':
         ('{std::lock_guard<std::mutex> hand_lock(hand_state_mutex);released_shot.read(side,slot0_answer,exclude_answer,now);}', ''),
         ('if(eye_sweep) {d2vr::NativeInteractionAim::post_weapon_segment(', 'if(false) {d2vr::NativeInteractionAim::post_weapon_segment('),
         ('clamp_state[side]=clamped.state;clamp_post=in.post;', 'clamp_state[side]=clamped.state;'),
-        ('g.position=d2vr::paused_hand(hand_clamp,side,raw,clamp_epoch,hand_clamp.config().snap_gap);', 'g.position=hand_clamp.keep_out(side,raw.basis,raw.position,std::nullopt);'),
-        ('d2vr::clamped_shot_offset(g.position,raw.position,clamp_drew,', 'd2vr::clamped_shot_offset(g.position,raw.position,false,'),
+        ('g.position=d2vr::paused_hand(hand_clamp,side,palm,clamp_epoch,hand_clamp.config().snap_gap);', 'g.position=hand_clamp.keep_out(side,palm.basis,palm.position,std::nullopt);'),
+        ('d2vr::clamped_shot_offset(g.position,palm.position,clamp_drew,', 'd2vr::clamped_shot_offset(g.position,palm.position,false,'),
         ('in.copy_distance=d2vr::length(at-hand_raw.position);', 'in.copy_distance=d2vr::length(at-hand_w.position);'),
         ('w=hand_raw_world[h];v=hand_velocity[h];', 'w=hand_world[h];v=hand_velocity[h];'),
         ('hand_clamp_enabled=!fs::exists(root/L"build"/L"no-hand-clamp");', 'hand_clamp_enabled=true;'),
@@ -276,6 +279,16 @@ if __name__ == '__main__':
         ('hits[side][slot]=cast(&*exclusion);', 'hits[side][slot]=cast(nullptr);'),
         ('weapon_req_[side][slot]={from,to,radius,true,exclude};', 'weapon_req_[side][slot]={from,to,radius,true};'),
     )
+    # Swapping the raw copy behind the palm offset (raw would carry the calibration) must be rejected.
+    raw_line = 'raw_grips=hands.grips; // the tracked poses, before the palm offset and before world collision moves the drawn hands\n'
+    assert raw_line in dxgi
+    swapped = dxgi.replace(raw_line, '', 1).replace('palm_grips=hands.grips;', raw_line + 'palm_grips=hands.grips;', 1)
+    try:
+        check(swapped, aim)
+    except (AssertionError, ValueError):
+        pass
+    else:
+        raise AssertionError('raw copy after the palm offset was accepted')
     for index, (needle, replacement) in enumerate(dxgi_mutations):
         assert needle in dxgi, f'dxgi mutation {index} missed its production target'
         try:

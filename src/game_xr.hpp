@@ -111,9 +111,9 @@ private:
     // G5/C6: grip-to-palm offsets per side and OpenXR interaction profile. Everything here is touched from the XR update and the render
     // thread, so it sits behind one mutex; file errors never leave this class (the hands keep the defaults and status says so).
     mutable std::mutex palm_mutex_;
-    PalmOffsetStore palm_store_;
+    PalmCalibration palm_;       // the store plus each hand's interaction profile (and a fit deferred until the profile is named)
+    PalmSaver palm_saver_;       // writes on a worker thread: the XR frame never waits on the disk
     std::filesystem::path palm_file_;
-    std::array<std::string,2> interaction_profiles_{};
     ULONGLONG profile_refresh_tick_{};
     bool palm_error_{};
     std::chrono::steady_clock::time_point settings_update_time_{};
@@ -140,8 +140,8 @@ private:
     XR_MEMBER(xrCreateActionSpace) XR_MEMBER(xrSyncActions) XR_MEMBER(xrGetActionStatePose)
     XR_MEMBER(xrGetActionStateFloat) XR_MEMBER(xrGetActionStateVector2f) XR_MEMBER(xrGetActionStateBoolean)
     XR_MEMBER(xrLocateSpace) XR_MEMBER(xrApplyHapticFeedback)
-    XR_MEMBER(xrGetCurrentInteractionProfile) XR_MEMBER(xrPathToString)
 #undef XR_MEMBER
+    PFN_xrGetCurrentInteractionProfile xrGetCurrentInteractionProfile{};PFN_xrPathToString xrPathToString{}; // optional: a runtime without them keeps the suggested profile
     UINT width_{},height_{};
     DXGI_FORMAT format_{};
     std::array<EyeSize,2> maximum_eye_sizes_{};
@@ -690,17 +690,15 @@ private:
     }
     PalmOffset palm_offset_stored(unsigned side) const {
         std::lock_guard<std::mutex> lock(palm_mutex_);
-        const auto profile=interaction_profiles_[side&1u].empty()?std::string(palm_default_profile):interaction_profiles_[side&1u];
-        return palm_store_.get(side,profile).first;
+        return palm_.get(side);
     }
-    // A confirmed fit is kept for this session even when the file cannot be written (then status reports the error).
+    // A confirmed fit is used at once (in memory); the file is written by the worker thread from a snapshot. A fit confirmed before the runtime named
+    // the profile waits for it (never stranded under the fallback). Only the in-memory update runs under palm_mutex_.
     void confirm_palm_offset(unsigned side,const PalmOffset& value) noexcept {
         try {
-            std::lock_guard<std::mutex> lock(palm_mutex_);
-            const auto profile=interaction_profiles_[side&1u].empty()?std::string(palm_default_profile):interaction_profiles_[side&1u];
-            palm_store_.set(side,profile,value);
-            if(palm_file_.empty()) return;
-            try {palm_store_.save(palm_file_);palm_error_=false;} catch(...) {palm_error_=true;}
+            std::optional<PalmOffsetStore> snapshot;
+            {std::lock_guard<std::mutex> lock(palm_mutex_);if(palm_.confirm(side,value)) snapshot=palm_.store();}
+            if(snapshot) palm_saver_.submit(std::move(*snapshot));
         } catch(...) {palm_error_=true;}
     }
     // The runtime reports the bound profile only after the session is focused and it has chosen one; re-ask once a second, never throw.
@@ -714,7 +712,9 @@ private:
                 if(!XR_SUCCEEDED(xrGetCurrentInteractionProfile(session_,hand_paths_[side],&state)) || state.interactionProfile==XR_NULL_PATH) continue;
                 char text[XR_MAX_PATH_LENGTH]{};uint32_t count{};
                 if(!XR_SUCCEEDED(xrPathToString(instance_,state.interactionProfile,sizeof(text),&count,text))) continue;
-                std::lock_guard<std::mutex> lock(palm_mutex_);interaction_profiles_[side]=text;
+                std::optional<PalmOffsetStore> snapshot;
+                {std::lock_guard<std::mutex> lock(palm_mutex_);if(palm_.set_profile(side,text)) snapshot=palm_.store();}
+                if(snapshot) palm_saver_.submit(std::move(*snapshot)); // a fit deferred until now is keyed under the real profile
             }
         } catch(...) {}
     }
@@ -881,24 +881,22 @@ public:
     // The interaction profile bound to a hand, or the one this mod suggests while the runtime has not said (Plan Spec deviation 7).
     std::string interaction_profile(unsigned side) const {
         std::lock_guard<std::mutex> lock(palm_mutex_);
-        const auto& p=interaction_profiles_[side&1u];
-        return p.empty()?std::string(palm_default_profile):p;
+        return palm_.profile(side);
     }
     // The grip-to-palm offset the hand uses now: the preview while the hand-fit page is open, else the saved value for this side and
     // profile, else the default (C6, C12). saved: the value came from the file or from a confirmed fit.
     PalmOffset palm_offset(unsigned side,bool* saved=nullptr) const {
         std::lock_guard<std::mutex> lock(palm_mutex_);
         side&=1u;
-        const auto profile=interaction_profiles_[side].empty()?std::string(palm_default_profile):interaction_profiles_[side];
-        const auto stored=palm_store_.get(side,profile);
-        if(saved) *saved=stored.second;
+        bool stored_saved{};const auto stored=palm_.get(side,&stored_saved);
+        if(saved) *saved=stored_saved;
         if(const auto preview=settings_.palm_preview(side)) return *preview;
-        return stored.first;
+        return stored;
     }
     // Status JSON fragment: "palm_offset":{...} (no leading comma).
     std::string palm_offset_status() const {
         std::ostringstream o;bool error;
-        {std::lock_guard<std::mutex> lock(palm_mutex_);error=palm_error_;}
+        error=palm_error_||palm_saver_.error();
         o<<"\"palm_offset\":{\"source\":[";
         for(unsigned side=0;side<2;++side) {bool saved{};palm_offset(side,&saved);o<<(side?",":"")<<(saved?"\"saved\"":"\"default\"");}
         o<<"],\"profile\":[";
@@ -1030,7 +1028,8 @@ public:
             preferences_file_=std::move(preferences_file);
             if(!preferences_file_.empty()) {
                 palm_file_=preferences_file_.parent_path()/L"vr-palm-offsets.txt";
-                try {palm_store_.load(palm_file_);} catch(...) {palm_error_=true;} // corrupt, oversized or locked: defaults, game keeps running
+                palm_saver_.set_file(palm_file_);
+                try {palm_.store().load(palm_file_);} catch(...) {palm_error_=true;} // corrupt, oversized or locked: defaults, game keeps running
             }
             get_=simulated_dispatch;
             if(!get_) {
@@ -1066,8 +1065,14 @@ public:
             XR_LOAD(xrCreateAction) XR_LOAD(xrSuggestInteractionProfileBindings) XR_LOAD(xrAttachSessionActionSets)
             XR_LOAD(xrCreateActionSpace) XR_LOAD(xrSyncActions) XR_LOAD(xrGetActionStatePose)
             XR_LOAD(xrGetActionStateFloat) XR_LOAD(xrGetActionStateVector2f) XR_LOAD(xrGetActionStateBoolean) XR_LOAD(xrLocateSpace) XR_LOAD(xrApplyHapticFeedback)
-            XR_LOAD(xrGetCurrentInteractionProfile) XR_LOAD(xrPathToString)
 #undef XR_LOAD
+            {   // optional (core OpenXR 1.0, but a missing one must not fail the XR start): without them the suggested profile is the key
+                PFN_xrVoidFunction address{};
+                if(XR_SUCCEEDED(get_(instance_,"xrGetCurrentInteractionProfile",&address)) && address) xrGetCurrentInteractionProfile=reinterpret_cast<PFN_xrGetCurrentInteractionProfile>(address);
+                address=nullptr;
+                if(XR_SUCCEEDED(get_(instance_,"xrPathToString",&address)) && address) xrPathToString=reinterpret_cast<PFN_xrPathToString>(address);
+                palm_.profile_query_available=xrGetCurrentInteractionProfile && xrPathToString;
+            }
             XrSystemGetInfo query{};query.type=XR_TYPE_SYSTEM_GET_INFO;query.formFactor=XR_FORM_FACTOR_HEAD_MOUNTED_DISPLAY;
             XrSystemId system{};
             checked(api<PFN_xrGetSystem>("xrGetSystem",instance_)(instance_,&query,&system),"Find headset");
