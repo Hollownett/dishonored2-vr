@@ -139,29 +139,29 @@ int main() {
     assert(occupied_release && occupied_release->release && !occupied.held() && length(occupied_release->linear)==0);
     // Two frames share each 16 ms tick quantum: the in-quantum motion must stay in the baseline, not vanish.
     {
-        PhysicalGrab dup;auto hand=identity;
-        for(unsigned i=0;i<20;++i) {hand.position.x+=.011;dup.sample(hand,0,true,1,1000+16*(i/2));}
+        PhysicalGrab dup;auto pose=identity;
+        for(unsigned i=0;i<20;++i) {pose.position.x+=.011;dup.sample(pose,0,true,1,1000+16*(i/2));}
         assert(std::abs(dup.velocity().x-1.375)<1.375*.15);
     }
     // A held object follows the newest pose even when two samples share a clock quantum.
     {
-        PhysicalGrab latest;auto hand=identity;auto held=identity;
-        latest.sample(hand,0,true,1,100);latest.sample(hand,0,true,1,116);latest.sample(hand,.9f,true,1,132);
+        PhysicalGrab latest;auto pose=identity;auto held=identity;
+        latest.sample(pose,0,true,1,100);latest.sample(pose,0,true,1,116);latest.sample(pose,.9f,true,1,132);
         assert(latest.bind(held));
-        hand.position.x+=.011;latest.sample(hand,.9f,true,1,148);
+        pose.position.x+=.011;latest.sample(pose,.9f,true,1,148);
         const auto before=latest.target().position.x;
-        hand.position.x+=.011;latest.sample(hand,.9f,true,1,148);
+        pose.position.x+=.011;latest.sample(pose,.9f,true,1,148);
         assert(std::abs(latest.target().position.x-before-.011)<1e-4);
     }
-    // One non-finite hand sample mid-carry must not poison the velocity baseline for later samples.
+    // One non-finite pose sample mid-carry must not poison the velocity baseline for later samples.
     {
-        PhysicalGrab nan_hand;auto hand=identity;auto held=identity;
-        nan_hand.sample(hand,0,true,1,100);nan_hand.sample(hand,0,true,1,116);nan_hand.sample(hand,.9f,true,1,132);
+        PhysicalGrab nan_hand;auto pose=identity;auto held=identity;
+        nan_hand.sample(pose,0,true,1,100);nan_hand.sample(pose,0,true,1,116);nan_hand.sample(pose,.9f,true,1,132);
         assert(nan_hand.bind(held));
-        hand.position.x+=.011;nan_hand.sample(hand,.9f,true,1,148);
-        auto bad=hand;bad.position.x=std::numeric_limits<double>::quiet_NaN();
+        pose.position.x+=.011;nan_hand.sample(pose,.9f,true,1,148);
+        auto bad=pose;bad.position.x=std::numeric_limits<double>::quiet_NaN();
         nan_hand.sample(bad,.9f,true,1,164);
-        for(unsigned i=0;i<60;++i) {hand.position.x+=.011;nan_hand.sample(hand,0,true,1,180+16*i);}
+        for(unsigned i=0;i<60;++i) {pose.position.x+=.011;nan_hand.sample(pose,0,true,1,180+16*i);}
         assert(std::isfinite(nan_hand.velocity().x) && std::isfinite(nan_hand.velocity().y) && std::isfinite(nan_hand.velocity().z));
         assert(nan_hand.velocity().x>.3);
     }
