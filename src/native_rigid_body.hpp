@@ -156,6 +156,24 @@ template<class Read> std::optional<NativeRigidBody> nearest_ragdoll_body(Read& r
     }
     return best;
 }
+// Only a dead (entity+0xd1 bit 0x08) or unconscious (0x20) guard may be pushed by a hand (C2). Bit 0x80 alone (an awake guard ragdolling
+// after a yank, native_ragdoll_body accepts him) is not enough: he gets up and fights.
+template<class Read> bool ragdoll_pushable_state(Read& read,std::uintptr_t entity) {
+    const auto state=rig::value<unsigned char>(read,entity+0xd1);
+    return state && (*state&0x28)!=0;
+}
+// The body of this guard nearest the hand, all 17 bones, for a hand that pushes (dead or unconscious only, each body dynamic). The
+// torso counts here: unlike a drag, a push needs no handle. Cheap for an awake guard: the state byte, then the first body is refused.
+template<class Read> std::optional<NativeRigidBody> pushable_ragdoll_body(Read& read,std::uintptr_t base,std::uintptr_t entity,Vec3 hand) {
+    if(!finite(hand) || !ragdoll_pushable_state(read,entity)) return {};
+    std::optional<NativeRigidBody> best;
+    for(int bone=0;bone<17;++bone) {
+        const auto body=native_ragdoll_body(read,base,entity,bone);
+        if(!body && bone==0) return {}; // bodies follow the animation, or this is no guard: skip the remaining reads
+        if(body && (!best || body->contact_distance(hand)<best->contact_distance(hand))) best=body;
+    }
+    return best;
+}
 // Re-read a grab target of either kind, keeping its bone.
 template<class Read> std::optional<NativeRigidBody> native_grab_body(Read& read,std::uintptr_t base,const NativeRigidBody& body) {
     return body.bone<0?native_rigid_body(read,base,body.entity):native_ragdoll_body(read,base,body.entity,body.bone);

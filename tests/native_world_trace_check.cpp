@@ -117,6 +117,16 @@ void test_verify_and_cast() {
         CHECK(NativeWorldTrace::body_class_of(read_mem,world,0x123456,0)==BodyClass::world && NativeWorldTrace::body_class_of(read_mem,world,0xffffff,0xE17717)==BodyClass::world);
         CHECK(NativeWorldTrace::body_class_of(read_mem,world,0x1fffff,0xE17717)==BodyClass::entity_static);   // the record is not mapped
     }
+    // Carry M6: a guard's ragdoll limb is hit as a dynamic body, so the clamp ranks its plane below a wall's. The record fields are those
+    // native_ragdoll_body reads on a dead or unconscious guard (flags 0x82 / 0x8a asleep, motion index, own handle at +0x70) and the
+    // keyframed bodies of a living one (0xce): only the first are dynamic. The limb's entity is the guard's.
+    {   const std::uint32_t count=0x200000,handle=0x123456,motion=0x1005,limb_awake=0x82,limb_asleep=0x8a,animated=0xce;
+        const std::uintptr_t record=pool+0x123456ull*0xb0,guard=0xE17718;
+        put(world+0x30,&count,4);put(record+0x70,&handle,4);put(record+0x40,&motion,4);
+        for(const auto flags:{limb_awake,limb_asleep}) {put(record+0x44,&flags,4);CHECK(NativeWorldTrace::body_class_of(read_mem,world,handle,guard)==BodyClass::dynamic);}
+        put(record+0x44,&animated,4);CHECK(NativeWorldTrace::body_class_of(read_mem,world,handle,guard)==BodyClass::entity_static);
+        const std::uint32_t restored=0x2;put(record+0x44,&restored,4); // the cast below hits this record as a plain dynamic body
+    }
     const auto hit=NativeWorldTrace::sphere_cast(base,read_mem,fake_cast,fake_construct,world,{0,0,0},{4,0,0},0.05);
     CHECK(hit && casts==1 && hit->entity==0xE17717 && hit->body_class==BodyClass::dynamic && hit->fraction==0.25 && hit->centre.x==1.0 && hit->normal.x==-1);
     CHECK(seen.shape_tag_codec==0xabcdef0 && seen.shape && seen.origin[0]==0 && seen.delta[0]==4.f && seen.inverse_delta[0]==.25f);

@@ -70,6 +70,9 @@ public:
     static constexpr unsigned registry_size=0x3fff,slice_size=1024,near_capacity=32,max_writes=8,scan_budget=256,recheck_cycles=32;
     static constexpr std::uint64_t full_period_ms=1000;static constexpr unsigned max_full_reads=3;
     static constexpr double scan_reach=.9,keep_reach=1.3,hand_span=.3,fresh_seconds=.1;
+    // A dead or unconscious guard (candidate kind 2) is a body 1.8 m long found by its origin (entity+0x300): his limbs lie that much further out.
+    static constexpr double npc_extra_reach=.5;
+    static constexpr std::uint64_t rechoose_ms=100; // a hand that left its limb looks for the nearest one again at most this often
     // Counters for the status JSON: services run, entities tested in full, hands touching a prop, velocity writes, faults, and
     // the cost of services past the early-outs (microseconds, total and worst).
     std::atomic<std::uint64_t> publishes{},services{},tested{},touches{},pushes{},faults{},cost_us{},cost_max_us{};
@@ -304,10 +307,15 @@ public:
             if(std::chrono::steady_clock::now()-began>std::chrono::microseconds(service_limit_us)) break; // the rest next service
             if(n.ignore_until>now_ms) {++it;continue;} // refused as a prop: not read at all until it expires
             const auto t0=std::chrono::steady_clock::now();
+            if(!n.kind) { // what the scan found: a prop (1) or a guard's body (2), classified once
+                n.kind=prop_class(scan,base,n.entity);
+                if(!n.kind) {it=near_.erase(it);continue;}
+            }
+            const bool guard=n.kind==2;
             // Where it is. A body in reach last service is refreshed from its record (which is also its position); the rest cost
-            // one position read.
+            // one position read. A guard has no light refresh: his origin says whether to look, his limb is re-read below.
             bool refreshed=false;Vec3 at{};
-            if(n.body && n.in_reach) {
+            if(n.body && n.in_reach && !guard) {
                 refreshed=refresh_body(scan,*game,n);
                 if(refreshed) at=n.body->pose.position;else {n.body.reset();n.in_reach=false;}
             }
@@ -316,12 +324,41 @@ public:
                 if(!pos) {it=near_.erase(it);continue;}
                 at={(*pos)[0],(*pos)[1],(*pos)[2]};
             }
-            const double d=palm_distance(at);
-            if(d>keep_reach) {it=near_.erase(it);continue;}
+            double d=palm_distance(at);
+            if(guard && n.body) d=std::min(d,palm_distance(n.body->pose.position)); // the origin can lie metres from the hand's limb
+            if(d>keep_reach+(guard?npc_extra_reach:0.)) {it=near_.erase(it);continue;}
             ++it;
-            if(d>n.reach) {n.in_reach=false;body_time+=std::chrono::steady_clock::now()-t0;continue;}
-            const bool want_full=!refreshed || now_ms>=n.next_full; // in reach and not just refreshed, or due: the full read
+            if(!guard && d>n.reach) {n.in_reach=false;body_time+=std::chrono::steady_clock::now()-t0;continue;}
+            const bool want_full=guard || !refreshed || now_ms>=n.next_full; // in reach and not just refreshed, or due: the full read
             const bool tired=fulls>=max_full_reads || (fulls>=1 && std::chrono::steady_clock::now()-began>std::chrono::microseconds(service_limit_us/3)); // a full read is ~45 reads
+            if(guard) {
+                // C2: a guard's limb is re-read in full every service (his bodies move with him), and the limb nearest a palm is chosen again when
+                // due, or when the hand left the limb it had (at most every rechoose_ms). Only a dead or unconscious guard is ever read.
+                const auto nearest_palm=[&](Vec3 p) {Vec3 best{};double least=1e18;for(const auto& h:hands) if(h.active && length(h.proxies[0].centre-p)<least) {least=length(h.proxies[0].centre-p);best=h.proxies[0].centre;}return best;};
+                bool choose=!n.body || now_ms>=n.next_full;
+                if(!choose && n.body->bounds) {
+                    const Vec3 palm=nearest_palm(n.body->pose.position);
+                    if(length(n.body->bounds->closest(palm)-palm)>hand_span) { // not by this limb any more: look for another, or wait
+                        if(now_ms<n.rechoose_after) {body_time+=std::chrono::steady_clock::now()-t0;continue;}
+                        choose=true;
+                    }
+                }
+                if(tired) {body_time+=std::chrono::steady_clock::now()-t0;continue;} // waits for the next service
+                ++fulls;
+                std::optional<NativeRigidBody> body;
+                if(ragdoll_pushable_state(scan,n.entity)) {
+                    if(!choose) body=native_ragdoll_body(scan,base,n.entity,n.body->bone);
+                    if(!body) body=pushable_ragdoll_body(scan,base,n.entity,nearest_palm(n.body?n.body->pose.position:at)),choose=true;
+                }
+                const auto motion=body?native_motion(scan,*body):std::nullopt;
+                if(!body || !body->bounds || body->world!=world) {n.ignore_until=now_ms+1000;n.body.reset();n.in_reach=false;body_time+=std::chrono::steady_clock::now()-t0;continue;} // awake, gone or not a body
+                if(!motion) {n.body.reset();n.in_reach=false;body_time+=std::chrono::steady_clock::now()-t0;continue;}
+                if(choose) {n.next_full=now_ms+full_period_ms+(n.entity>>4)%256;n.rechoose_after=now_ms+rechoose_ms;}
+                if(n.body && n.body->bone!=body->bone) {n.drag=PropDrag{};n.engaged_until=0;} // a new limb: the old one's friction and contact say nothing about it
+                n.body=*body;n.velocity=motion->velocity;
+                n.inverse_mass=motion->inverse_mass;n.mass=prop_mass(motion->inverse_mass,*body->bounds);
+                n.reach=length(body->bounds->maximum-body->bounds->minimum)*.5+hand_span+.05;++tested;
+            } else {
             if(want_full && tired && !refreshed) {body_time+=std::chrono::steady_clock::now()-t0;continue;} // waits for the next service
             if(want_full && !tired) {
                 ++fulls;
@@ -332,6 +369,7 @@ public:
                 n.body=*body;n.next_full=now_ms+full_period_ms+(n.entity>>4)%256;n.velocity=motion->velocity;
                 n.inverse_mass=motion->inverse_mass;n.mass=prop_mass(motion->inverse_mass,*body->bounds);
                 n.reach=length(body->bounds->maximum-body->bounds->minimum)*.5+hand_span+.05;++tested;
+            }
             }
             n.in_reach=true;n.drag.observe(n.velocity,now); // the velocity found now, against what the last write left it with
             const auto t1=std::chrono::steady_clock::now();body_time+=t1-t0;
@@ -474,7 +512,7 @@ private:
                     if(!slot_prop_[slot]) continue;
                     --budget;
                     const auto pos=rig::value<std::array<float,3>>(scan,entity+0x300);
-                    if(!pos || palm_distance({(*pos)[0],(*pos)[1],(*pos)[2]})>scan_reach) continue;
+                    if(!pos || palm_distance({(*pos)[0],(*pos)[1],(*pos)[2]})>scan_reach+(slot_prop_[slot]==2?npc_extra_reach:0.)) continue;
                     add(entity);
                 }
             }
@@ -482,7 +520,8 @@ private:
         }
     }
     struct Near {
-        std::uintptr_t entity{};double reach=.75;std::uint64_t ignore_until{},next_full{},engaged_until{};double engaged_at{}; // engaged_at: seconds, when this contact began
+        std::uintptr_t entity{};double reach=.75;std::uint64_t ignore_until{},next_full{},engaged_until{},rechoose_after{};double engaged_at{}; // engaged_at: seconds, when this contact began
+        std::uint8_t kind{};                   // 0 not classified yet, 1 prop, 2 guard (prop_class)
         bool in_reach{};                      // within reach at the last service: refreshed from its record, not its position
         std::optional<NativeRigidBody> body;  // the last full read; pose and bounds follow the record
         Vec3 velocity{};double mass{};std::uint16_t inverse_mass{};
@@ -549,10 +588,13 @@ private:
         if(log_.is_open() && !rows.empty()) {log_<<rows;log_.flush();}
         if(slow_.is_open() && !slow.empty()) {slow_<<slow;slow_.flush();}
     }
-    // The three entity classes native_rigid_body accepts (arkMovable among them); anything else can never be pushed.
-    template<class Read> static bool prop_class(Read& read,std::uintptr_t base,std::uintptr_t entity) {
+    // 1: one of the three entity classes native_rigid_body accepts (arkMovable among them); 2: a guard (arkNPC, pushable when dead or unconscious:
+    // native_rigid_body.hpp pushable_ragdoll_body); 0: anything else can never be pushed.
+    template<class Read> static std::uint8_t prop_class(Read& read,std::uintptr_t base,std::uintptr_t entity) {
         const auto vtable=rig::value<std::uintptr_t>(read,entity);
-        return vtable && (*vtable==base+0x1c886a8 || *vtable==base+0x1c87d58 || *vtable==base+0x1c5de18);
+        if(!vtable) return 0;
+        if(*vtable==base+0x1c886a8 || *vtable==base+0x1c87d58 || *vtable==base+0x1c5de18) return 1;
+        return *vtable==base+0x1c5e108?2:0;
     }
     struct Lane {std::optional<rig::HandGeometry> geometry;HandMotion motion;HandProxies proxies{};Vec3 velocity{},lag{};std::uintptr_t held_by{};bool active{};std::uint64_t serial{};double stamp{};};
     static double seconds() {return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();}
