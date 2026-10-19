@@ -2585,10 +2585,15 @@ static d2vr::WorldTrackedPose drawn_palm_frame(unsigned side,const d2vr::WorldTr
 // Without geometry: no set; the tip is default_clamp_tip() and the wall tip default_clamp_wall_tip() (M5).
 // N6: a load (the loading screen, a death reload: game logic 0 or bit 15) forgets the clamp even within the same epoch: its planes, the
 // held hand, the shot state and the C14 window (the modes and the backoff stay).
-static void forget_hand_clamp() noexcept {
+// Everything the clamp keeps between frames (planes, the held hand, the met prop, the sides' states, the shot offsets and guards): a load, an
+// authored camera and StartProbe all start from here. The C14 modes and window are the caller's.
+static void reset_clamp_state() noexcept {
     hand_clamp.reset(0);hand_clamp.reset(1);clamp_hold.clear(0);clamp_hold.clear(1);clamp_exclude={};clamp_posted={};clamp_state={};
-    hand_clamp_budget.reset_window();
     try {std::lock_guard<std::mutex> hand_lock(hand_state_mutex);released_shot.clear(0);released_shot.clear(1);clamp_shot={};} catch(...) {}
+}
+static void forget_hand_clamp() noexcept {
+    reset_clamp_state();
+    hand_clamp_budget.reset_window();
 }
 static void refresh_clamp_probes(unsigned side,const d2vr::WorldTrackedPose& grip) {
     static std::shared_ptr<const d2vr::rig::NativeArmBindingSnapshot> built_for;static std::array<std::optional<d2vr::rig::HandGeometry>,2> geometry{};
@@ -4427,7 +4432,7 @@ void prepare_head_view(void* view) noexcept {
                      hand_clamp_tip.store(hand_clamp_budget.tip_enabled());hand_clamp_alternate.store(hand_clamp_budget.alternate());
                      hand_clamp_restore.store(hand_clamp_budget.restore_factor());hand_clamp_recover_wait.store(hand_clamp_budget.recover_wait());}
                 } else { // an authored camera or no collision: the clamp yields, nothing stored is reused (C9)
-                    hand_clamp.reset(0);hand_clamp.reset(1);clamp_hold.clear(0);clamp_hold.clear(1);clamp_exclude={};clamp_posted={};
+                    reset_clamp_state(); // incl. clamp_shot / released_shot (the aim and the crosshair would otherwise reuse the last clamped offset) and clamp_state
                     for(auto& status:hand_clamp_status) status.active.store(false);
                 }
                 for(unsigned side=0;side<2;++side) if(hands.hands&(1u<<side)) publish_hand(side,hands.grips[side],raw_grips[side]);
@@ -8115,7 +8120,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
          if(!rvas.empty()) {const auto n=d2vr::NativeCallTrace::install(image_base,rvas);
              try {std::ofstream f(output_directory/L"native-call-trace.csv");f<<"# hooks "<<n<<'/'<<rvas.size()<<'\n';} catch(...) {}}}
         gun_shape_override={};{std::ifstream knob(root/L"build"/L"gun-shape");GunShape v{};if(knob>>v[0]>>v[1]>>v[2]>>v[3] && v[2]>.05 && v[2]<.8 && v[3]>=0 && v[3]<.15) gun_shape_override=v;}
-        {std::ifstream knob(root/L"build"/L"slash-speed");float f{};if(knob>>f && f>=1.f && f<=2.f) slash_speed_factor=f;}weapon_collision=d2vr::WeaponCollision{};weapon_collision_qpc=0;hand_clamp=d2vr::HandClamp{};hand_clamp_budget.reset();
+        {std::ifstream knob(root/L"build"/L"slash-speed");float f{};if(knob>>f && f>=1.f && f<=2.f) slash_speed_factor=f;}weapon_collision=d2vr::WeaponCollision{};weapon_collision_qpc=0;hand_clamp=d2vr::HandClamp{};hand_clamp_budget.reset();reset_clamp_state();
         hand_clamp_enabled=!fs::exists(root/L"build"/L"no-hand-clamp"); // headset A/B: the pre-Task-5 drawn hand
         d2vr::NativeInteractionAim::clamp_exclude_info_zero_=fs::exists(root/L"build"/L"hand-clamp-exclude-info-zero"); // diagnostic: +0x14 of the exclusion sweeps is 0, not the prop's filter word
         native_interaction_aim.slash_speed(vr_combat_enabled?slash_speed_factor:1.f);

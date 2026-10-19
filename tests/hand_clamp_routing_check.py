@@ -143,9 +143,17 @@ def check(dxgi: str, aim: str) -> None:
     nonworld = between(s, 'if(!render_world_scene()){native_audio_listener.clear();', 'return;}')
     assert 'if(d2vr::clamp_forgets_on(game_logic_mask()))forget_hand_clamp();' in nonworld
     forget = between(s, 'staticvoidforget_hand_clamp()noexcept{', 'staticvoidrefresh_clamp_probes(')
-    for need in ('hand_clamp.reset(0);hand_clamp.reset(1);', 'clamp_hold.clear(0);clamp_hold.clear(1);', 'hand_clamp_budget.reset_window();',
-                 'released_shot.clear(0);released_shot.clear(1);clamp_shot={};'):
-        assert need in forget, need
+    assert 'reset_clamp_state();' in forget and 'hand_clamp_budget.reset_window();' in forget
+    # Final review P3: one reset of everything the clamp keeps (planes, held hand, exclusion, state, shot offsets under hand_state_mutex),
+    # used by a load, an authored camera and StartProbe alike.
+    reset = between(s, 'staticvoidreset_clamp_state()noexcept{', 'staticvoidforget_hand_clamp()noexcept{')
+    for need in ('hand_clamp.reset(0);hand_clamp.reset(1);', 'clamp_hold.clear(0);clamp_hold.clear(1);', 'clamp_exclude={};', 'clamp_state={};',
+                 'std::lock_guard<std::mutex>hand_lock(hand_state_mutex);', 'released_shot.clear(0);released_shot.clear(1);clamp_shot={};'):
+        assert need in reset, need
+    assert reset.index('std::lock_guard<std::mutex>hand_lock(hand_state_mutex);') < reset.index('clamp_shot={};')
+    authored = between(s, 'nothingstoredisreused(C9)', 'for(unsignedside=0;side<2;++side)if(hands.hands&(1u<<side))publish_hand(')
+    assert authored.startswith('nothingstoredisreused(C9)reset_clamp_state();')
+    assert 'hand_clamp=d2vr::HandClamp{};hand_clamp_budget.reset();reset_clamp_state();' in s
     assert 'clamped=hand_clamp.update(side,in);clamp_state[side]=clamped.state;clamp_post=in.post;' in clamped_part
     # M2 scope: with build/no-hand-clamp the dxgi path bypasses the clamp entirely (legacy branch first, the clamp only in the else);
     # the shot origin is then raw (neither clamp_shot nor released_shot is written), and the C9 raw routing is outside both branches.
@@ -177,7 +185,6 @@ def check(dxgi: str, aim: str) -> None:
     # C14: the clamp's cast cost is noted once per game-thread scope; the hands alternate / drop the tip by CastBudget.
     after = clamp[clamp.index('hand_clamp_budget.note('):]
     assert 'clamp_cast_serial_.load();' in clamp and 'hand_clamp_budget.note(d2vr::NativeInteractionAim::clamp_cast_us_.load(),clamp_now);' in clamp
-    assert 'hand_clamp.reset(0);hand_clamp.reset(1);' in after
     # Publication after the clamp (C9): drawn hand for the drop position, raw controller for throw velocity, press grips and reach.
     assert 'for(unsignedside=0;side<2;++side)if(hands.hands&(1u<<side))publish_hand(side,hands.grips[side],raw_grips[side]);' in pub
     assert 'staticvoidpublish_hand(unsignedside,constd2vr::WorldTrackedPose&drawn,constd2vr::WorldTrackedPose&raw){' in s
@@ -192,7 +199,7 @@ def check(dxgi: str, aim: str) -> None:
     assert 'solid_hands.publish(side,can_push,hands.grips[side],palm_grips[side],' in s
     assert 'intent.grips=raw_grips;' in s
     # Reset with the weapon collision; the exclusion's +0x14 knob.
-    assert 'weapon_collision=d2vr::WeaponCollision{};weapon_collision_qpc=0;hand_clamp=d2vr::HandClamp{};hand_clamp_budget.reset();' in s
+    assert 'weapon_collision=d2vr::WeaponCollision{};weapon_collision_qpc=0;hand_clamp=d2vr::HandClamp{};hand_clamp_budget.reset();reset_clamp_state();' in s
     assert 'd2vr::NativeInteractionAim::clamp_exclude_info_zero_=fs::exists(root/L"build"/L"hand-clamp-exclude-info-zero");' in s
     # Status.
     status = between(s, '",\\"hand_clamp\\":{\\"active\\":', '",\\"hud_relayouts\\":')
