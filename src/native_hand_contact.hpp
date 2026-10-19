@@ -72,6 +72,8 @@ public:
     static constexpr double scan_reach=.9,keep_reach=1.3,hand_span=.3,fresh_seconds=.1;
     // A dead or unconscious guard (candidate kind 2) is a body 1.8 m long found by its origin (entity+0x300): his limbs lie that much further out.
     static constexpr double npc_extra_reach=.5;
+    static constexpr double heavy_kg_ragdoll=40.; // a guard's jointed bodies (a torso is 11-25 kg): pushed, slowly (the F*dt/m cap), where a prop of 12 kg is not
+    static constexpr std::uint64_t guard_ignore_ms=250; // a guard refused (awake, carried) is looked at again this soon: a knocked-out one is pushable at once
     static constexpr std::uint64_t rechoose_ms=100; // a hand that left its limb looks for the nearest one again at most this often
     // Counters for the status JSON: services run, entities tested in full, hands touching a prop, velocity writes, faults, and
     // the cost of services past the early-outs (microseconds, total and worst).
@@ -85,6 +87,7 @@ public:
     // meets: meet() calls for a pushable prop the cast was holding the hand at; meet_shifts: calls that moved the drawn hand out of a prop; meet_latches: pinned props
     // (held off by the cast again)
     std::atomic<std::uint64_t> meets{},meet_shifts{},meet_latches{};
+    std::atomic<std::uint64_t> ragdoll_chooses{}; // 17-body searches for a guard's nearest limb
     std::atomic<std::uint64_t> keepouts{}; // loose props skipped because they touch the player's body or lie under it (set_player)
     std::array<std::atomic<std::uint64_t>,2> capped_writes{}; // per side: velocity writes the mass-aware cap bound for that hand (push_force_n * dt / mass, C5)
     // The engine's time factor for pushes (C13): not read from the engine in phase 1 (its source is unverified, research open item 8), always 1.
@@ -106,6 +109,9 @@ public:
     // its feet, and the player sees a launch (sim v509 s2a: the camera hopped 1.5 m before any push; no write of the contact explains it, but none may shove what the player stands on).
     // Props the game carries or has attached to the player are refused by native_rigid_body already. Without a position (a unit test) nothing is kept out.
     static constexpr double player_radius=.40,player_below=2.2,player_above=.3;
+    // Render thread, every frame: the player carries a body natively (shoulder carry, CarryCorpse). While it is fresh no guard is pushed: the carry
+    // owns the corpse, velocity writes would fight it.
+    void set_carrying_body(bool carrying) {carrying_body_.store(carrying,std::memory_order_relaxed);carry_stamp_.store(seconds(),std::memory_order_relaxed);}
     void set_player(Vec3 eye) {if(!finite(eye)) return;std::lock_guard<std::mutex> l(mutex_);player_eye_=eye;player_stamp_=seconds();}
     static constexpr double meet_latch=.08,meet_unlatch=.055,meet_fresh=.06,meet_stale=.15; // m, m, s, s
     // Render thread, in the hand's world-cast block (dxgi_probe.cpp). cast_entity: what the palm cast holds the hand at (0: nothing). prop: that is a light loose prop
@@ -333,27 +339,31 @@ public:
             const bool tired=fulls>=max_full_reads || (fulls>=1 && std::chrono::steady_clock::now()-began>std::chrono::microseconds(service_limit_us/3)); // a full read is ~45 reads
             if(guard) {
                 // C2: a guard's limb is re-read in full every service (his bodies move with him), and the limb nearest a palm is chosen again when
-                // due, or when the hand left the limb it had (at most every rechoose_ms). Only a dead or unconscious guard is ever read.
+                // due, or when the hand left the limb it had; every choose, failed or not, waits rechoose_ms. Only a dead or unconscious guard that
+                // is not carried is ever read.
+                if(carrying_body_.load(std::memory_order_relaxed) && now-carry_stamp_.load(std::memory_order_relaxed)<=.25) {n.body.reset();n.in_reach=false;body_time+=std::chrono::steady_clock::now()-t0;continue;}
                 const auto nearest_palm=[&](Vec3 p) {Vec3 best{};double least=1e18;for(const auto& h:hands) if(h.active && length(h.proxies[0].centre-p)<least) {least=length(h.proxies[0].centre-p);best=h.proxies[0].centre;}return best;};
                 bool choose=!n.body || now_ms>=n.next_full;
                 if(!choose && n.body->bounds) {
                     const Vec3 palm=nearest_palm(n.body->pose.position);
-                    if(length(n.body->bounds->closest(palm)-palm)>hand_span) { // not by this limb any more: look for another, or wait
-                        if(now_ms<n.rechoose_after) {body_time+=std::chrono::steady_clock::now()-t0;continue;}
-                        choose=true;
-                    }
+                    if(length(n.body->bounds->closest(palm)-palm)>hand_span) choose=true; // not by this limb any more: look for another, or wait
+                }
+                if(choose && now_ms<n.rechoose_after) { // searched a moment ago: keep the limb (re-read below), or wait
+                    if(!n.body || !n.body->bounds || length(n.body->bounds->closest(nearest_palm(n.body->pose.position))-nearest_palm(n.body->pose.position))>hand_span) {body_time+=std::chrono::steady_clock::now()-t0;continue;}
+                    choose=false;
                 }
                 if(tired) {body_time+=std::chrono::steady_clock::now()-t0;continue;} // waits for the next service
                 ++fulls;
                 std::optional<NativeRigidBody> body;
                 if(ragdoll_pushable_state(scan,n.entity)) {
-                    if(!choose) body=native_ragdoll_body(scan,base,n.entity,n.body->bone);
-                    if(!body) body=pushable_ragdoll_body(scan,base,n.entity,nearest_palm(n.body?n.body->pose.position:at)),choose=true;
+                    if(!choose) {body=native_ragdoll_body(scan,base,n.entity,n.body->bone);if(body && !ragdoll_pushable_body(scan,*body)) body.reset();}
+                    if(!body && now_ms>=n.rechoose_after) {++ragdoll_chooses;body=pushable_ragdoll_body(scan,base,n.entity,nearest_palm(n.body?n.body->pose.position:at));choose=true;}
                 }
+                if(choose) n.rechoose_after=now_ms+rechoose_ms;
                 const auto motion=body?native_motion(scan,*body):std::nullopt;
-                if(!body || !body->bounds || body->world!=world) {n.ignore_until=now_ms+1000;n.body.reset();n.in_reach=false;body_time+=std::chrono::steady_clock::now()-t0;continue;} // awake, gone or not a body
+                if(!body || !body->bounds || body->world!=world) {n.ignore_until=now_ms+guard_ignore_ms;n.body.reset();n.in_reach=false;body_time+=std::chrono::steady_clock::now()-t0;continue;} // awake, carried, gone or not a body
                 if(!motion) {n.body.reset();n.in_reach=false;body_time+=std::chrono::steady_clock::now()-t0;continue;}
-                if(choose) {n.next_full=now_ms+full_period_ms+(n.entity>>4)%256;n.rechoose_after=now_ms+rechoose_ms;}
+                if(choose) n.next_full=now_ms+full_period_ms+(n.entity>>4)%256;
                 if(n.body && n.body->bone!=body->bone) {n.drag=PropDrag{};n.engaged_until=0;} // a new limb: the old one's friction and contact say nothing about it
                 n.body=*body;n.velocity=motion->velocity;
                 n.inverse_mass=motion->inverse_mass;n.mass=prop_mass(motion->inverse_mass,*body->bounds);
@@ -375,9 +385,11 @@ public:
             const auto t1=std::chrono::steady_clock::now();body_time+=t1-t0;
             if(n.body->entity==held[0] || n.body->entity==held[1]) continue;
             if(player && near_player(*n.body->bounds,*player)) {++keepouts;continue;} // against the player's body or under his feet: never shoved
-            const bool met=n.mass>0 && n.mass<config.heavy_kg && !n.drag.blocked(now); // a loose prop in reach the contact pushes and that gives way
+            const double heavy=guard?heavy_kg_ragdoll:config.heavy_kg; // per candidate: a guard's bodies are jointed, a prop stands alone
+            const bool met=n.mass>0 && n.mass<heavy && !n.drag.blocked(now); // a loose prop in reach the contact pushes and that gives way
             if(met && pushables<pushable.size()) pushable[pushables++]=n.entity;
-            if(n.mass>0 && n.mass<config.heavy_kg && looses<loose.size()) loose[looses++]=n.entity; // light and loose, pinned or not: the clamp never snaps on it
+            if(n.mass>0 && n.mass<heavy && looses<loose.size()) loose[looses++]=n.entity; // light and loose, pinned or not: the clamp never snaps on it
+            HandContactConfig contact_config=config;contact_config.heavy_kg=heavy;
             rig::HeldShape shape;
             try {shape=prop_shape(*n.body);} catch(const std::invalid_argument&) {continue;}
             Vec3 velocity=n.velocity,spin{};bool pushed=false;std::array<bool,2> capped{};
@@ -389,7 +401,7 @@ public:
                 ContactInput input;input.engaged=n.engaged_until>now_ms;input.lag=hands[side].lag;input.held=hands[side].held_by && hands[side].held_by==n.entity;if(input.held) ++cast_held;input.lag_known=lag_owned[side];input.friction=n.drag.compensation();
                 input.trim=n.drag.trim();input.age=input.engaged?now-n.engaged_at:0.;
                 input.blocked=n.drag.blocked(now);input.stalled=n.drag.stalled(now);input.basis=n.body->pose.basis;input.dt=dt;input.time_factor=time_factor;
-                const auto result=hand_contact(hands[side].proxies,shape,hands[side].velocity,velocity,n.mass,config,input);
+                const auto result=hand_contact(hands[side].proxies,shape,hands[side].velocity,velocity,n.mass,contact_config,input);
                 if(met && length(result.outward)>length(outward[side])) {outward[side]=result.outward;outward_entity[side]=n.entity;}
                 if(result.touching) ++touches;
                 if(result.driving) {if(n.engaged_until<=now_ms) n.engaged_at=now;n.engaged_until=now_ms+config.engage_ms;}
@@ -507,7 +519,9 @@ private:
                     if(!rig::pointer(entity)) {retire(slot_entity_[slot]);slot_entity_[slot]=0;slot_prop_[slot]=0;continue;}
                     if(slot_entity_[slot]!=entity || ((cycle_+slot)%recheck_cycles)==0) {
                         if(slot_entity_[slot]!=entity) retire(slot_entity_[slot]);
-                        --budget;slot_entity_[slot]=entity;slot_prop_[slot]=prop_class(scan,base,entity);
+                        --budget;const auto cls=prop_class(scan,base,entity);
+                        if(slot_entity_[slot]==entity && slot_prop_[slot]!=cls) retire(entity); // the address changed class in place: its candidate is classified anew
+                        slot_entity_[slot]=entity;slot_prop_[slot]=cls;
                     }
                     if(!slot_prop_[slot]) continue;
                     --budget;
@@ -603,6 +617,7 @@ private:
     std::vector<Near> near_;std::array<std::uint64_t,2> seen_{};unsigned cursor_{1},cycle_{},scan_tick_{};
     std::vector<std::uintptr_t> slot_entity_;std::vector<std::uint8_t> slot_prop_;std::uintptr_t game_{},world_{}; // slot -> entity pointer and class (the scanner's)
     struct Meet {std::array<std::uintptr_t,8> pushable{};unsigned count{};std::array<std::uintptr_t,ClampInput::loose_capacity> loose{};unsigned loose_count{};double stamp{};std::array<std::uintptr_t,2> entity{};std::array<Vec3,2> outward{};std::array<double,2> side_stamp{};};
+    std::atomic<bool> carrying_body_{};std::atomic<double> carry_stamp_{-1e9};
     Vec3 player_eye_{};double player_stamp_{-1e9}; // under mutex_
     static ClampMeet compose_meet_none(const HandClamp& clamp,unsigned side,const ClampOutput& out,const WorldTrackedPose& target) {
         MeetState none{};return compose_meet(none,MeetPublished{},clamp,side,out,target,0.);

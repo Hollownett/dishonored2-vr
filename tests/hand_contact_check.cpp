@@ -16,6 +16,10 @@ struct NativeHandContactPublicationFixture {
         std::array<NativeHandContact::Hand,2> hands{};contact.snapshot(hands,NativeHandContact::seconds(),false);
         const auto& hand=hands[side];return {hand.active,hand.proxies,hand.velocity,hand.lag,hand.held_by,hand.serial};
     }
+    static unsigned kind(const NativeHandContact& contact,std::uintptr_t entity) {
+        for(const auto& n:contact.near_) if(n.entity==entity) return n.kind;
+        return 99;
+    }
     template<class Read> static unsigned prop_class(Read& read,std::uintptr_t base,std::uintptr_t entity) {return NativeHandContact::prop_class(read,base,entity);}
     // Is this entity a candidate the service is skipping at now_ms (refused as a prop, until ignore_until)?
     static bool ignored(const NativeHandContact& contact,std::uintptr_t entity,std::uint64_t now_ms) {
@@ -1045,11 +1049,14 @@ int main() {
         put(npc,base+0x1c5e108);put(npc+0xa8,npc_id);put(npc+0xf0,model);put(npc+0x300,std::array<float,3>{10.f,0.f,0.f});
         put(npc+0x268,rig::List{list,1,1<<8});put(list,physics);put(physics,base+0x1c54008);put(physics+0x18,rig::Identity{3,10});put(physics+0x100,handles);
         put(handles+0x28,handles+0x120);put(handles+0x30,std::uint32_t{17});
+        put(physics+0x10,npc);put(physics+0xc8,std::array<unsigned char,12>{}); // the component's entity, native carry parent (+0xc8) and lease (+0xd2)
+        const std::uintptr_t userdata=0x2800000,stranger=0x2900000,stranger_component=0x2a00000;
+        put(userdata+8,physics);put(stranger+8,stranger_component);put(stranger_component+0x10,std::uintptr_t{0x2b00000});
         const auto bone_flags=[&](std::uint32_t flags) {for(std::uint32_t b=0;b<17;++b) put(pool+b*0xb0+0x44,flags);};
         for(std::uint32_t b=0;b<17;++b) { // bone b lies at x = b, so bone 10 (the right hand) is the one at x = 10
             const std::uint32_t h=0x1000000+b;put(handles+0x120+b*4,h);const auto rec=pool+b*0xb0;
             rig::Transform t{};t.f[0]=t.f[5]=t.f[10]=t.f[15]=1;t.f[12]=static_cast<float>(b);t.f[14]=.1f;
-            put(rec,t);put(rec+0x40,std::uint32_t{5+b});put(rec+0x70,h);put(rec+0x74,h);
+            put(rec,t);put(rec+0x40,std::uint32_t{5+b});put(rec+0x70,h);put(rec+0x74,h);put(rec+0x90,userdata);
             put(motions+(5+b)*0x80+0x40,std::array<float,3>{0,0,0});put(motions+(5+b)*0x80+0x26,std::uint16_t{0x4000});
         }
         bone_flags(0x82);
@@ -1061,11 +1068,12 @@ int main() {
         const auto make=[&]() {auto c=std::make_unique<NativeHandContact>();c->set_geometry(1,synthetic_geometry());c->scan_limit_us=c->service_limit_us=1<<30;return c;};
         std::array<std::uintptr_t,2> held{};
         // The right hand sweeps toward bone 10 at 0.4 m/s; every tick is 11 ms. now_ms keeps running across scenarios.
-        std::uint64_t now_ms=200000;
+        std::uint64_t now_ms=200000;bool carrying_body=false;
         const auto sweep=[&](NativeHandContact& c,int ticks,double from) {
             if(from<9.71) for(std::uint32_t b=0;b<17;++b) put(motions+(5+b)*0x80+0x40,std::array<float,3>{0,0,0}); // a fresh approach: the bodies at rest
             for(int i=0;i<ticks;++i) {
                 const auto pose=palm_at({from+.4*.011*i,0,.1});c.publish(1,true,pose,pose,{0,0,0,0,0});
+                c.set_carrying_body(carrying_body);
                 std::this_thread::sleep_for(std::chrono::milliseconds(11));c.service(read,base,world,now_ms+=11,held,write);}
         };
         // push_unconscious_guard: dynamic bodies, unconscious. Only bone 10 (the body the palm is by) is written.
@@ -1143,6 +1151,80 @@ int main() {
         {
             bone_flags(0x82);put(npc+0xd1,static_cast<unsigned char>(0x20));writes.clear();
             auto c=make();held[1]=npc;sweep(*c,60,9.70);held={};assert(writes.empty());
+        }
+
+        // Fix round 1 --------------------------------------------------------------------------------------------------------------
+        const auto reset_guard=[&]() {bone_flags(0x82);put(npc+0xd1,static_cast<unsigned char>(0x20));put(physics+0xc8,std::array<unsigned char,12>{});
+            put(npc+0x300,std::array<float,3>{10.f,0.f,0.f});carrying_body=false;writes.clear();held={};
+            for(std::uint32_t b=0;b<17;++b) {put(pool+b*0xb0+0x90,userdata);put(motions+(5+b)*0x80+0x26,std::uint16_t{0x4000});}};
+        // (1) never push a carried or leased body: the player's shoulder carry, a parent on the component, a lease, an NPC dragging him
+        {
+            reset_guard();carrying_body=true;
+            {auto c=make();sweep(*c,60,9.70);assert(writes.empty() && c->pushes==0);}      // the player carries a body natively: no guard is pushed
+            reset_guard();put(physics+0xc8,std::uintptr_t{0x3000000});
+            {auto c=make();sweep(*c,60,9.70);assert(writes.empty() && !pushable_ragdoll_body(read,base,npc,Vec3{10,0,.1}));}   // native carry parent
+            reset_guard();put(physics+0xd2,static_cast<unsigned char>(1));
+            {auto c=make();sweep(*c,60,9.70);assert(writes.empty() && !pushable_ragdoll_body(read,base,npc,Vec3{10,0,.1}));}   // a lease
+            reset_guard();
+            {auto c=make();sweep(*c,100,9.70);assert(writes.count(0x100000a));                                       // control: free, pushed
+             put(physics+0xc8,std::uintptr_t{0x3000000});writes.clear();sweep(*c,40,9.70+.4*.011*100);assert(writes.empty());}  // carried mid-push: stops
+            reset_guard();
+        }
+        // (2) per-candidate heavy limit: a 25 kg torso is pushed (slowly, F*dt/m), a 50 kg one refused, props keep 12 kg
+        {
+            const auto heavy=[&](std::uint32_t bone,double kg) { // the bone's inverse mass (hkHalf: the upper 16 bits of the float)
+                const float inverse=static_cast<float>(1./kg);std::uint32_t bits;std::memcpy(&bits,&inverse,4);
+                put(motions+(5+bone)*0x80+0x26,static_cast<std::uint16_t>(bits>>16));};
+            reset_guard();put(npc+0x300,std::array<float,3>{2.f,0.f,0.f});heavy(2,25);     // the chest: 0.32 m cube, estimate 11.5 kg
+            {auto c=make();sweep(*c,100,1.70);
+             assert(writes.size()==1 && writes.count(0x1000002) && writes[0x1000002].count>0);
+             assert(writes[0x1000002].first[0]>0 && writes[0x1000002].first[0]<=200./90/25+1e-3);
+             std::cout<<"heavy torso: 25 kg chest, first write "<<writes[0x1000002].first[0]<<" m/s (cap "<<200./90/25<<")\n";
+             assert(c->meet(1,npc).prop);}
+            reset_guard();put(npc+0x300,std::array<float,3>{0.f,0.f,0.f});heavy(0,50);       // the pelvis: 50 kg is past heavy_kg_ragdoll
+            {auto c=make();sweep(*c,100,-.30);assert(writes.empty() && !c->meet(1,npc).prop);}
+            reset_guard();put(npc+0x300,std::array<float,3>{0.f,0.f,0.f});heavy(0,39);
+            {auto c=make();sweep(*c,100,-.30);assert(writes.count(0x1000000));}
+            assert(NativeHandContact::heavy_kg_ragdoll==40. && HandContactConfig{}.heavy_kg==12.);
+            reset_guard();
+        }
+        // (3) ownership like inspect_hit_body: record+0x90 userdata -> component -> entity; a recycled handle of another entity is refused
+        {
+            reset_guard();
+            auto b=pushable_ragdoll_body(read,base,npc,Vec3{10.05,0,.1});assert(b && b->bone==10);
+            put(pool+10*0xb0+0x90,stranger);                                                  // bone 10's record now belongs to another entity
+            b=pushable_ragdoll_body(read,base,npc,Vec3{10.05,0,.1});assert(b && b->bone!=10);
+            {auto c=make();sweep(*c,60,9.70);assert(!writes.count(0x100000a));}
+            put(pool+10*0xb0+0x90,std::uintptr_t{0});b=pushable_ragdoll_body(read,base,npc,Vec3{10.05,0,.1});assert(b && b->bone!=10);   // no userdata at all
+            reset_guard();put(physics+0x10,std::uintptr_t{0x1234000});put(userdata+8,physics);
+            assert(!pushable_ragdoll_body(read,base,npc,Vec3{10.05,0,.1}) || pushable_ragdoll_body(read,base,npc,Vec3{10.05,0,.1})->bone!=10);
+            put(physics+0x10,npc);reset_guard();
+        }
+        // (4) a scan that reclassifies an address re-derives the candidate's kind
+        {
+            const unsigned pass=2*((0x3fff+1023)/1024);
+            const auto settle=[&](NativeHandContact& c,double x) {for(int i=0;i<(int(NativeHandContact::recheck_cycles)+2)*int(pass);++i) {
+                const auto pose=palm_at({x,0,.1});c.publish(1,true,pose,pose,{0,0,0,0,0});c.service(read,base,world,now_ms+=11,held,write);}};
+            reset_guard();auto c=make();settle(*c,9.70);assert(NativeHandContactPublicationFixture::kind(*c,npc)==2);
+            put(npc,base+0x1c886a8);settle(*c,9.70);assert(NativeHandContactPublicationFixture::kind(*c,npc)==1);   // guard -> prop
+            put(npc,base+0x1c5e108);settle(*c,9.70);assert(NativeHandContactPublicationFixture::kind(*c,npc)==2);   // prop -> guard
+            reset_guard();
+        }
+        // (5) a failing choose is throttled (100 ms), and a knocked-out guard is looked at again within 0.25 s
+        {
+            reset_guard();for(std::uint32_t b=0;b<17;++b) put(motions+(5+b)*0x80+0x26,std::uint16_t{0x4000});
+            const auto world_array=world+0x120;put(world_array,std::uintptr_t{0x7f00000});    // no motion array: every body read fails after the choose
+            auto c=make();sweep(*c,40,9.70);                                                  // 440 ms
+            std::cout<<"throttle: "<<c->ragdoll_chooses.load()<<" chooses in 40 services\n";
+            assert(c->ragdoll_chooses>0 && c->ragdoll_chooses<=6 && writes.empty());
+            put(world_array,motions);reset_guard();
+            // awake, then knocked out: pushable again within 0.25 s
+            put(npc+0xd1,static_cast<unsigned char>(0));
+            auto d=make();sweep(*d,30,9.70);assert(writes.empty());
+            put(npc+0xd1,static_cast<unsigned char>(0x20));writes.clear();
+            sweep(*d,40,9.70+.4*.011*30);                                                     // 440 ms of pushing: well past the 0.25 s window
+            assert(writes.count(0x100000a));
+            reset_guard();
         }
     }
     std::cout<<"hand_contact_check ok\n";

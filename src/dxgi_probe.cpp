@@ -4495,6 +4495,11 @@ void prepare_head_view(void* view) noexcept {
                 static std::shared_ptr<const d2vr::rig::NativeArmBindingSnapshot> contact_geometry_for;
                 auto& solid_hands=native_grab.hand_contact();
                 solid_hands.set_player({anchor.position[0],anchor.position[1],anchor.position[2]}); // props against the player's body or under his feet are never pushed
+                {   // a body on the player's shoulder (native CarryCorpse) is the game's: the free hand never pushes a guard meanwhile
+                    bool carrying_body{};{std::lock_guard<std::mutex> l(hand_state_mutex);
+                        carrying_body=hand_state_tick && GetTickCount64()-hand_state_tick<=300 && hand_carrying_bits!=0 && !hand_holding_object;}
+                    solid_hands.set_carrying_body(carrying_body);
+                }
                 const auto snapshot=arm_binding_cache.load();
                 if(snapshot!=contact_geometry_for) {
                     contact_geometry_for=snapshot;

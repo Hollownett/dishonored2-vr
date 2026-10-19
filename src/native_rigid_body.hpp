@@ -162,15 +162,37 @@ template<class Read> bool ragdoll_pushable_state(Read& read,std::uintptr_t entit
     const auto state=rig::value<unsigned char>(read,entity+0xd1);
     return state && (*state&0x28)!=0;
 }
-// The body of this guard nearest the hand, all 17 bones, for a hand that pushes (dead or unconscious only, each body dynamic). The
-// torso counts here: unlike a drag, a push needs no handle. Cheap for an awake guard: the state byte, then the first body is refused.
+// A body the hands may push is also not carried (component +0xc8 native parent, +0xd2 temporary lease: the check of native_rigid_body for a
+// prop) and belongs to this guard the way NativeWorldTrace::inspect_hit_body proves a hit body's owner: record +0x90 userdata -> +8 component ->
+// +0x10 entity. A recycled handle that now serves another entity is refused. (Kept out of native_ragdoll_body so the grab path is unchanged.)
+template<class Read> bool ragdoll_unclaimed(Read& read,std::uintptr_t component) {
+    std::array<unsigned char,12> carry{};
+    if(!read(component+0xc8,carry.data(),carry.size())) return false;
+    std::uintptr_t parent;std::memcpy(&parent,carry.data(),8);
+    return !parent && !carry[10];
+}
+template<class Read> bool ragdoll_owned(Read& read,const NativeRigidBody& body) {
+    using namespace rig;
+    const auto userdata=value<std::uintptr_t>(read,body.record+0x90);
+    if(!userdata || !pointer(*userdata)) return false;
+    const auto component=value<std::uintptr_t>(read,*userdata+8);
+    if(!component || !pointer(*component)) return false;
+    const auto entity=value<std::uintptr_t>(read,*component+0x10);
+    return entity && *entity==body.entity;
+}
+template<class Read> bool ragdoll_pushable_body(Read& read,const NativeRigidBody& body) {
+    return ragdoll_unclaimed(read,body.component) && ragdoll_owned(read,body);
+}
+// The body of this guard nearest the hand, all 17 bones, for a hand that pushes (dead or unconscious only, each body dynamic, owned and not
+// carried). The torso counts here: unlike a drag, a push needs no handle. Cheap for an awake guard: the state byte, then the first body is refused.
 template<class Read> std::optional<NativeRigidBody> pushable_ragdoll_body(Read& read,std::uintptr_t base,std::uintptr_t entity,Vec3 hand) {
     if(!finite(hand) || !ragdoll_pushable_state(read,entity)) return {};
     std::optional<NativeRigidBody> best;
     for(int bone=0;bone<17;++bone) {
         const auto body=native_ragdoll_body(read,base,entity,bone);
         if(!body && bone==0) return {}; // bodies follow the animation, or this is no guard: skip the remaining reads
-        if(body && (!best || body->contact_distance(hand)<best->contact_distance(hand))) best=body;
+        if(body && bone==0 && !ragdoll_unclaimed(read,body->component)) return {}; // carried or leased: all of him
+        if(body && ragdoll_owned(read,*body) && (!best || body->contact_distance(hand)<best->contact_distance(hand))) best=body;
     }
     return best;
 }
