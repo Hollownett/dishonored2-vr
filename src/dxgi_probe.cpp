@@ -2834,7 +2834,7 @@ static void resolve_pending_touch(std::uintptr_t e,unsigned side) {
 // Native held object (native_held_object.hpp), seated the Bonelab/HIGGS cylinder-grip way (finger_ik.hpp seat_held): the object's long
 // axis along the fist's hole axis, one radius out of the palm so the palm rests on it, held a third of the way up. Until its bounds are
 // measured the mesh centre sits on the palm. Render thread, from the tracking publication.
-static void publish_held_object(unsigned side,const d2vr::WorldTrackedPose& grip,std::uintptr_t state,std::uint64_t pose_epoch,std::uint64_t pose_tick,std::uint64_t reference_epoch,std::uint64_t acquisition) {
+static void publish_held_object(unsigned side,const d2vr::WorldTrackedPose& grip,const d2vr::WorldTrackedPose& raw,std::uintptr_t state,std::uint64_t pose_epoch,std::uint64_t pose_tick,std::uint64_t reference_epoch,std::uint64_t acquisition) {
     using namespace d2vr::rig;auto read=&read_self;
     static d2vr::Vec3 centre{},last{},published{};static LARGE_INTEGER last_qpc{};static UINT64 seat_since{};
     static bool geometry_captured{};static d2vr::WorldTrackedPose published_pose{};
@@ -3007,8 +3007,9 @@ static void publish_held_object(unsigned side,const d2vr::WorldTrackedPose& grip
     LARGE_INTEGER qpc{},freq{};QueryPerformanceCounter(&qpc);QueryPerformanceFrequency(&freq);
     const double dt=last_qpc.QuadPart?static_cast<double>(qpc.QuadPart-last_qpc.QuadPart)/static_cast<double>(freq.QuadPart):0;
     std::lock_guard<std::mutex> l(hand_state_mutex);held_entity=*e;
-    if(dt>.002 && dt<.1) {const auto v=(grip.position-last)*(1/dt);for(unsigned i=0;i<3;++i) held_hand_velocity[i]=held_hand_velocity[i]*.5+(i==0?v.x:i==1?v.y:v.z)*.5;}
-    last=grip.position;last_qpc=qpc;
+    // The throw velocity is the controller's own motion (C9), not the palm-offset grip's: the offset's rotation lever added ~0.3-0.45 m/s to a wrist flick.
+    if(dt>.002 && dt<.1) {const auto v=(raw.position-last)*(1/dt);for(unsigned i=0;i<3;++i) held_hand_velocity[i]=held_hand_velocity[i]*.5+(i==0?v.x:i==1?v.y:v.z)*.5;}
+    last=raw.position;last_qpc=qpc;
 }
 // Test commands (artifacts/vr-command.txt, polled every 500 ms on the Present thread; answer in
 // vr-command-result.txt): "unlock", "cvar <name> <int>" (any static idCVar, found by its name pointer
@@ -4651,7 +4652,7 @@ void prepare_head_view(void* view) noexcept {
                     std::uintptr_t state{};unsigned side{};std::uint64_t acquisition{};
                     {std::lock_guard<std::mutex> l(hand_state_mutex);if(hand_holding_object && hand_state_tick && GetTickCount64()-hand_state_tick<=300) state=hand_hold_state;side=hand_hold_side&1u;acquisition=hand_hold_generation;}
                     // The object goes in the hand the player sees (drawn_palm_frame: the solved palm, sim v379: 25 cm short of the grip).
-                    if(state && ((hands.hands>>side)&1u)) publish_held_object(side,hands.grips[side],state,hands.epoch,hands.tick,hands.reference_epoch,acquisition);
+                    if(state && ((hands.hands>>side)&1u)) publish_held_object(side,hands.grips[side],raw_grips[side],state,hands.epoch,hands.tick,hands.reference_epoch,acquisition);
                     else {held_placement_session.clear();const unsigned why=state?4u:3u;carry_diagnostics.clear_seen(why);d2vr::NativeHeldObject::clear(why);}}
                 t.epoch=hands.epoch^(hands.reference_epoch<<32);
                 t.tick=hands.tick;t.tracking_revision=tracked_stamp.revision;t.tracked_hands=hands.hands;

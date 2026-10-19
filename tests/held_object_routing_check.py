@@ -12,7 +12,7 @@ assert 'hand_holding_object=state->carry.hold_object();hand_hold_state=state->ca
 assert 'hand_holding_object=state->carry.active[0]'not in source
 assert 'hand_hold_state=state->carry.states[0]'not in source
 context=source.index('NativeHeldPlacement::process_owner().context(hands.epoch,')
-publication=source.index('publish_held_object(side,hands.grips[side],state,hands.epoch,hands.tick,hands.reference_epoch,acquisition)',context)
+publication=source.index('publish_held_object(side,hands.grips[side],raw_grips[side],state,hands.epoch,hands.tick,hands.reference_epoch,acquisition)',context)
 context_block=source[context:source.index(');',context)+2]
 for condition in ('held_object_installed','full_body_requested','tracked_arms_requested','!full_body_stopping.load()',
                   'avatar_pose_gate.load()','!authored_camera','game_logic_mask()==2','XR_SESSION_STATE_FOCUSED','XR_SUCCESS'):
@@ -26,6 +26,9 @@ for condition in ('NativeHeldPlacement::qualify(image_base,&read_self,*carry,sid
                   'held_placement_serial.store(t.placement_serial','NativeHeldObject::publish(t)'):
     assert condition in producer
 assert producer.index('placement.publish(')<producer.index('NativeHeldObject::publish(t)')
+# Final review minor 1: the throw velocity is the controller's own motion (C9), not the palm-offset grip's.
+whole=source[source.index('static void publish_held_object('):source.index('// Test commands (artifacts/vr-command.txt')]
+assert '(raw.position-last)*(1/dt)' in whole and 'last=raw.position;' in whole and 'grip.position-last' not in whole
 refusal=producer[producer.index('if(!t.placement_serial)'):producer.index('NativeHeldObject::publish(t)')]
 for condition in ('held_placement_serial.store(0','NativeHeldObject::clear(2)','carry_diagnostics.clear_seen(2)','held_entity=0;return;'):
     assert condition in refusal

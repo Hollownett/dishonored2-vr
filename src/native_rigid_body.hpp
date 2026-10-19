@@ -1,6 +1,7 @@
 #pragma once
 #include "game_rig.hpp"
 #include "physical_grab.hpp"
+#include <cstring>
 namespace d2vr {
 struct NativeGrabBounds {
     Vec3 minimum{},maximum{};

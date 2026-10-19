@@ -5,6 +5,8 @@
 // the arm IK and the drawn weapon see it. Aim, throws and selection keep the raw controller (C9).
 #include "tracked_pose.hpp"
 #include <algorithm>
+#include <atomic>
+#include <cstdlib>
 #include <cmath>
 #include <cstdint>
 #include <filesystem>
@@ -237,11 +239,11 @@ public:
 };
 
 // A load or confirm error that reads as cleared once a later save succeeds (successes: the saver's running count of good writes).
-class PalmErrorLatch {
-    bool raised_{};std::uint64_t at_{};
+class PalmErrorLatch {   // raised on the XR thread, read by the status thread: atomics
+    std::atomic<bool> raised_{false};std::atomic<std::uint64_t> at_{0};
 public:
-    void raise(std::uint64_t successes) noexcept {raised_=true;at_=successes;}
-    bool active(std::uint64_t successes) const noexcept {return raised_ && successes<=at_;}
+    void raise(std::uint64_t successes) noexcept {at_.store(successes,std::memory_order_relaxed);raised_.store(true,std::memory_order_release);}
+    bool active(std::uint64_t successes) const noexcept {return raised_.load(std::memory_order_acquire) && successes<=at_.load(std::memory_order_relaxed);}
 };
 
 // Writes snapshots of the store on a worker thread so the XR frame never waits on the disk. Only the newest pending snapshot is kept. One saver
