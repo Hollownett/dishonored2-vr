@@ -79,7 +79,7 @@ def check(dxgi: str, aim: str) -> None:
     assert 'update_with_palm' not in s.replace(legacy, '')
     # Posts: palm/chest to slot 0, the tip, the wall tip and the exclusion sweep (with its excluded entity) to their slots; only while drawn.
     posts = between(clamped_part, 'if(clamped.valid&&!clamp_yield){constautopost=', 'constautomet=')
-    for need in ('d2vr::NativeInteractionAim::post_weapon_segment(side,post_slot,sweep.from,sweep.to,sweep.radius,sweep.exclude?*sweep.exclude:0);',
+    for need in ('d2vr::NativeInteractionAim::post_weapon_segment(side,post_slot,sweep.from,sweep.to,sweep.radius,sweep.exclude?*sweep.exclude:0,met_body?met_body->bone:-1,met_body?met_body->handle:0u);',
                  'if(!sweep.valid||(sweep.exclude&&!*sweep.exclude))return;', 'post(0,clamped.palm_sweep);',
                  'post(d2vr::NativeInteractionAim::tip_slot,clamped.tip_sweep);', 'post(d2vr::NativeInteractionAim::wall_tip_slot,clamped.wall_tip_sweep);',
                  'post(d2vr::NativeInteractionAim::exclude_slot,clamped.exclude_sweep);'):
@@ -212,11 +212,11 @@ def check(dxgi: str, aim: str) -> None:
     a = compact(aim)
     for need in ('inlinestaticconstexprunsignedweapon_slots=14;', 'staticconstexprunsignedtip_slot=11,wall_tip_slot=12,exclude_slot=13;',
                  'returnslot==0||slot==tip_slot||slot==wall_tip_slot||slot==exclude_slot;',
-                 'weapon_req_[side][slot]={from,to,radius,true,exclude};'):
+                 'weapon_req_[side][slot]={from,to,radius,true,exclude,exclude_bone,exclude_handle};'):
         assert need in a, need
     stage = between(a, 'std::array<std::array<std::optional<WorldTraceHit>,weapon_slots>,2>hits{};', '++weapon_casts_;')
     # I1: a guard's limb maps too (native_cast_exclusion); an unmapped exclusion casts the sweep without it, never drops it.
-    for need in ('constautomapped=native_cast_exclusion(self->read_,self->base_,*world,entity,hand,', 'exclusion_of(seg.exclude,seg.from)',
+    for need in ('returnnative_cast_exclusion(self->read_,self->base_,*world,entity,seg.exclude_bone,seg.exclude_handle,', 'exclusion_of(seg.exclude,side,seg)', 'excluded.get(entity,side,seg.exclude_bone,seg.exclude_handle,',
                  'kWorldOccluderLayers,kWorldOccluderRequired,exclusion,clamp_slot(slot));', 'if(seg.exclude){', 'hits[side][slot]=cast(&*exclusion);',
                  '}else{++clamp_exclude_unmapped_;hits[side][slot]=cast(nullptr);}', '}elsehits[side][slot]=cast(nullptr);',
                  'if(clamp_slot(slot)){clamp_ticks+=', 'clamp_cast_us_.store(', '++clamp_cast_serial_;',
@@ -243,7 +243,7 @@ if __name__ == '__main__':
         ('in.tip=clamp_tip[side];in.wall_tip=clamp_wall_tip[side];', 'in.tip=clamp_tip[side];'),
         ('post(d2vr::NativeInteractionAim::exclude_slot,clamped.exclude_sweep);', ''),
         ('post(d2vr::NativeInteractionAim::wall_tip_slot,clamped.wall_tip_sweep);', ''),
-        ('sweep.radius,sweep.exclude?*sweep.exclude:0);', 'sweep.radius);'),
+        ('sweep.radius,sweep.exclude?*sweep.exclude:0,met_body?met_body->bone:-1,', 'sweep.radius,0,-1,'),
         ('native_grab.hand_contact().fill_clamp_input(side,in,clamp_exclude[side]);', ''),
         ('clamp_exclude[side]=met.exclude;', ''),
         ('if(clamp_updated) hand_clamp.note_drawn(side,clamp_root,composed.noted);', ''),
@@ -287,8 +287,8 @@ if __name__ == '__main__':
         ('hits[side][slot]=cast(&*exclusion);', 'hits[side][slot]=cast(nullptr);'),
         ('kWorldOccluderRequired,exclusion,clamp_slot(slot));', 'kWorldOccluderRequired,exclusion);'),
         ('else {++clamp_exclude_unmapped_;hits[side][slot]=cast(nullptr);}', 'else {++clamp_exclude_unmapped_;}'),
-        ('native_cast_exclusion(self->read_,self->base_,*world,entity,hand,', 'native_rigid_body_only(self->read_,self->base_,*world,entity,hand,'),
-        ('weapon_req_[side][slot]={from,to,radius,true,exclude};', 'weapon_req_[side][slot]={from,to,radius,true};'),
+        ('native_cast_exclusion(self->read_,self->base_,*world,entity,seg.exclude_bone,', 'native_rigid_body_only(self->read_,self->base_,*world,entity,seg.exclude_bone,'),
+        ('weapon_req_[side][slot]={from,to,radius,true,exclude,exclude_bone,exclude_handle};', 'weapon_req_[side][slot]={from,to,radius,true,exclude};'),
     )
     # Swapping the raw copy behind the palm offset (raw would carry the calibration) must be rejected.
     raw_line = 'raw_grips=hands.grips; // the tracked poses, before the palm offset and before world collision moves the drawn hands\n'

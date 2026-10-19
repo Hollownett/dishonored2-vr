@@ -123,6 +123,15 @@ public:
     // clamp_depth (hand_clamp.hpp clamp_depth, read while clamp_holding): how far the tracked grip is past the clamp's shell; the latch takes the deeper of it
     // and the contact's way out (a hand under a toppled bottle overlaps it shallowly while it is 20 cm past where the clamp holds it).
     struct Meeting {bool prop{};std::uintptr_t entity{};Vec3 shift{};};
+    // The guard body the service chose for a candidate (any of the 17 bones) and re-read this service: what the clamp's exclusion sweep must skip.
+    struct MetBody {std::uintptr_t entity{};int bone=-1;std::uint32_t handle{};};
+    // Render thread: the body the service met of this guard (nullopt for a prop or an entity it has not chosen a body of).
+    std::optional<MetBody> met_body(std::uintptr_t entity) {
+        if(!entity) return std::nullopt;
+        std::lock_guard<std::mutex> l(meet_mutex_);
+        for(unsigned i=0;i<std::min<unsigned>(meet_.body_count,meet_.bodies.size());++i) if(meet_.bodies[i].entity==entity) return meet_.bodies[i];
+        return std::nullopt;
+    }
     static bool next_meet_latch(bool latched,double depth,bool clamp_holding) noexcept {
         return depth>meet_latch || (latched && (depth>=meet_unlatch || clamp_holding));
     }
@@ -273,11 +282,12 @@ public:
         std::array<Hand,2> hands{};const double now=seconds();std::optional<Vec3> player;
         snapshot(hands,now,true,&player);
         if(!inline_discovery && !latched_.load(std::memory_order_relaxed) && services.load()>=latch_services && discoveries.load()==0) latched_=true;
+        bool starved=false; // latched, but discover() held the slot tables
         bool scan_here=inline_discovery || latched_.load(std::memory_order_relaxed);
         // The slot tables belong to one scanner at a time (discover() on the render thread, or this service once latched). The turn is held to
         // the end of the service; a service that finds discover() mid-scan skips its own scan this time and handles what it was handed.
         ScanTurn scan_turn(scanning_,scan_here);
-        if(scan_here && !scan_turn.owned()) scan_here=false;
+        if(scan_here && !scan_turn.owned()) {scan_here=false;starved=true;}   // discover() is mid-scan: try again at the very next service (discover() returns for good once latched)
         if(!hands[0].active && !hands[1].active) {
             near_.clear();seen_={};
             std::unique_lock<std::mutex> lock(meet_mutex_,std::try_to_lock);if(lock.owns_lock()) meet_.stamp=0; // nothing is met any more (meet() also checks the lane)
@@ -285,6 +295,7 @@ public:
         }
         if(hands[0].serial==seen_[0] && hands[1].serial==seen_[1]) return; // nothing new since the last service
         seen_={hands[0].serial,hands[1].serial};
+        if(starved) seen_={};   // so the next service runs again and takes its scan
         const auto began=std::chrono::steady_clock::now();const double cpu_began=cpu();++services;
         const auto micros=[](std::chrono::steady_clock::duration d) {return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(d).count());};
         const auto game=rig::value<std::uintptr_t>(scan,base+0x39a5290);
@@ -309,6 +320,7 @@ public:
         }
         std::chrono::steady_clock::duration body_time{},math_time{};
         unsigned writes=0,fulls=0;std::uint64_t write_peak=0;
+        std::array<MetBody,8> met_bodies{};unsigned met_count=0;
         std::array<std::uintptr_t,8> pushable{};unsigned pushables=0;std::array<std::uintptr_t,ClampInput::loose_capacity> loose{};unsigned looses=0;std::array<Vec3,2> outward{};std::array<std::uintptr_t,2> outward_entity{}; // what meet() is told
         std::array<bool,2> lag_owned{}; // the entity the cast holds a hand at (or the hand meets) is a prop of ours: that hand's lag is trusted for every prop
         for(unsigned side=0;side<2;++side) lag_owned[side]=hands[side].active && hands[side].held_by && std::any_of(near_.begin(),near_.end(),[&](const Near& n){return n.entity==hands[side].held_by;});
@@ -392,6 +404,7 @@ public:
             if(player && near_player(*n.body->bounds,*player)) {++keepouts;continue;} // against the player's body or under his feet: never shoved
             const double heavy=guard?heavy_kg_ragdoll:config.heavy_kg; // per candidate: a guard's bodies are jointed, a prop stands alone
             const bool met=n.mass>0 && n.mass<heavy && !n.drag.blocked(now); // a loose prop in reach the contact pushes and that gives way
+            if(guard && met_count<met_bodies.size()) met_bodies[met_count++]={n.entity,n.body->bone,n.body->handle};
             if(met && pushables<pushable.size()) pushable[pushables++]=n.entity;
             if(n.mass>0 && n.mass<heavy && looses<loose.size()) loose[looses++]=n.entity; // light and loose, pinned or not: the clamp never snaps on it
             HandContactConfig contact_config=config;contact_config.heavy_kg=heavy;
@@ -430,7 +443,7 @@ public:
         {   // for the render thread: the props the contact pushes and the way out of the one each hand overlaps most (a busy lock waits for the next service)
             std::unique_lock<std::mutex> lock(meet_mutex_,std::try_to_lock);
             if(lock.owns_lock()) {
-                meet_.pushable=pushable;meet_.count=pushables;meet_.loose=loose;meet_.loose_count=looses;meet_.stamp=now;
+                meet_.bodies=met_bodies;meet_.body_count=met_count;meet_.pushable=pushable;meet_.count=pushables;meet_.loose=loose;meet_.loose_count=looses;meet_.stamp=now;
                 for(unsigned side=0;side<2;++side) if(hands[side].active) {meet_.outward[side]=outward[side];meet_.entity[side]=outward_entity[side];meet_.side_stamp[side]=now;}
             }
         }
@@ -465,7 +478,6 @@ public:
         if(!hands[0].active && !hands[1].active) return;
         ScanTurn scan_turn(scanning_,true);
         if(!scan_turn.owned()) return;   // the latched service is scanning: it owns the slot tables
-        ++discoveries; // marked before the scan: the service must not read "no discover() call at all" while this one is in flight
         const auto began=std::chrono::steady_clock::now();
         const auto game=rig::value<std::uintptr_t>(scan,base+0x39a5290);
         if(!game || !rig::typed(scan,base,*game,0x1c940a8)) return;
@@ -484,7 +496,8 @@ public:
                 std::lock_guard<std::mutex> lock(found_mutex_);
                 if(gone_.size()<4*near_capacity) gone_.push_back(gone);});
         const auto spent=static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now()-began).count());
-        discover_us+=spent;auto top=discover_max_us.load();while(spent>top && !discover_max_us.compare_exchange_weak(top,spent)) {}
+        ++discoveries;discover_us+=spent;   // a discovery is a finished scan: one that returned early above does not disarm the service's latch fallback
+  auto top=discover_max_us.load();while(spent>top && !discover_max_us.compare_exchange_weak(top,spent)) {}
     }
 private:
     template<class T> static auto query_peak(T& reader,int)->decltype(static_cast<std::uint64_t>(reader.take_slowest())) {return static_cast<std::uint64_t>(reader.take_slowest());}
@@ -630,7 +643,7 @@ private:
     std::mutex mutex_;std::array<Lane,2> lanes_{};std::atomic<bool> wanted_{};
     std::vector<Near> near_;std::array<std::uint64_t,2> seen_{};unsigned cursor_{1},cycle_{},scan_tick_{};
     std::vector<std::uintptr_t> slot_entity_;std::vector<std::uint8_t> slot_prop_;std::uintptr_t game_{},world_{}; // slot -> entity pointer and class (the scanner's)
-    struct Meet {std::array<std::uintptr_t,8> pushable{};unsigned count{};std::array<std::uintptr_t,ClampInput::loose_capacity> loose{};unsigned loose_count{};double stamp{};std::array<std::uintptr_t,2> entity{};std::array<Vec3,2> outward{};std::array<double,2> side_stamp{};};
+    struct Meet {std::array<MetBody,8> bodies{};unsigned body_count{};std::array<std::uintptr_t,8> pushable{};unsigned count{};std::array<std::uintptr_t,ClampInput::loose_capacity> loose{};unsigned loose_count{};double stamp{};std::array<std::uintptr_t,2> entity{};std::array<Vec3,2> outward{};std::array<double,2> side_stamp{};};
     std::atomic<double> carry_until_{0.};
     Vec3 player_eye_{};double player_stamp_{-1e9}; // under mutex_
     static ClampMeet compose_meet_none(const HandClamp& clamp,unsigned side,const ClampOutput& out,const WorldTrackedPose& target) {

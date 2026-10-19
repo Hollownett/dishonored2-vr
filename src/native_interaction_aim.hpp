@@ -466,12 +466,11 @@ class NativeInteractionAim {
                     std::array<std::array<std::optional<WorldTraceHit>,weapon_slots>,2> hits{};
                     LARGE_INTEGER cast_begin{},cast_end{};unsigned cast_n=0,clamp_n=0;std::uint64_t clamp_ticks=0;QueryPerformanceCounter(&cast_begin);
                     // The hand clamp's exclusion sweeps (physical hands I1): the excluded entity's body (a prop's, or a dead guard's limb nearest the hand), mapped once per scope. Unmapped: cast without exclusion.
-                    std::array<std::pair<std::uintptr_t,std::optional<NativeCastExclusion>>,4> excluded{};unsigned excluded_n=0;
-                    const auto exclusion_of=[&](std::uintptr_t entity,Vec3 hand)->std::optional<NativeCastExclusion> {
-                        for(unsigned i=0;i<excluded_n;++i) if(excluded[i].first==entity) return excluded[i].second;
-                        const auto mapped=native_cast_exclusion(self->read_,self->base_,*world,entity,hand,clamp_exclude_info_zero_.load(std::memory_order_relaxed));
-                        if(excluded_n<excluded.size()) excluded[excluded_n++]={entity,mapped};
-                        return mapped;
+                    NativeExclusionCache excluded;
+                    // Keyed by (entity, side, the body the service met): each hand has its own met body of one corpse.
+                    const auto exclusion_of=[&](std::uintptr_t entity,unsigned side,const WeaponSegment& seg)->std::optional<NativeCastExclusion> {
+                        return excluded.get(entity,side,seg.exclude_bone,seg.exclude_handle,[&] {
+                            return native_cast_exclusion(self->read_,self->base_,*world,entity,seg.exclude_bone,seg.exclude_handle,clamp_exclude_info_zero_.load(std::memory_order_relaxed));});
                     };
                     for(unsigned side=0;side<2;++side) for(unsigned slot=0;slot<weapon_slots;++slot) if(const auto& seg=segments[side][slot];seg.valid && ++cast_n) {
                         LARGE_INTEGER slot_begin{},slot_end{};QueryPerformanceCounter(&slot_begin);
@@ -482,7 +481,7 @@ class NativeInteractionAim {
                         };
                         if(seg.exclude) {
                             ++clamp_exclude_casts_;
-                            if(const auto exclusion=exclusion_of(seg.exclude,seg.from)) {
+                            if(const auto exclusion=exclusion_of(seg.exclude,side,seg)) {
                                 hits[side][slot]=cast(&*exclusion);
                                 if(hits[side][slot]) {if(hits[side][slot]->body_handle==exclusion->handle) ++clamp_exclude_self_hits_;else ++clamp_exclude_hits_;}
                             } else {++clamp_exclude_unmapped_;hits[side][slot]=cast(nullptr);}   // never drop the sweep: without exclusion it still finds what it finds
@@ -612,7 +611,7 @@ class NativeInteractionAim {
             nonlethal_grip_revision_.load(std::memory_order_acquire)==revision;
     }
     // exclude: an entity whose body the cast must not report (the hand clamp's exclusion sweeps; 0: none).
-    struct WeaponSegment {Vec3 from{},to{};double radius{};bool valid{};std::uintptr_t exclude{};};
+    struct WeaponSegment {Vec3 from{},to{};double radius{};bool valid{};std::uintptr_t exclude{};int exclude_bone=-1;std::uint32_t exclude_handle{};};   // exclude_bone/handle: the guard body the contact service met (-1: a prop)
     // Slots per hand: 0 the hand clamp's palm sweep (the chest re-acquire while released), 1 weapon, 2 sword reach (hit detection only,
     // past the tip), 3 the palm sweep and 4-8 one closing-fingertip sweep per finger (finger_ik.hpp: what each finger could touch; one
     // posted per frame, the others' hits persist <=100 ms). 9 and 10: the profile casts (dxgi_probe.cpp profile_step, radius_profile.hpp):
@@ -634,8 +633,8 @@ public:
     inline static std::atomic<std::uint64_t> clamp_exclude_casts_{},clamp_exclude_unmapped_{},clamp_exclude_hits_{},clamp_exclude_self_hits_{};
     inline static std::atomic<bool> clamp_exclude_info_zero_{};
     // Render thread: post a sweep for the next game-thread scope; read the latest result (<=100 ms old).
-    static void post_weapon_segment(unsigned side,unsigned slot,Vec3 from,Vec3 to,double radius,std::uintptr_t exclude=0) {
-        if(side>1 || slot>=weapon_slots) return;std::lock_guard<std::mutex> guard(weapon_mutex_);weapon_req_[side][slot]={from,to,radius,true,exclude};
+    static void post_weapon_segment(unsigned side,unsigned slot,Vec3 from,Vec3 to,double radius,std::uintptr_t exclude=0,int exclude_bone=-1,std::uint32_t exclude_handle=0) {
+        if(side>1 || slot>=weapon_slots) return;std::lock_guard<std::mutex> guard(weapon_mutex_);weapon_req_[side][slot]={from,to,radius,true,exclude,exclude_bone,exclude_handle};
     }
     // The scope (weapon_casts_ count) that last answered this slot: unchanged since a post means the post is still unanswered.
     static std::uint64_t weapon_serial(unsigned side,unsigned slot) {

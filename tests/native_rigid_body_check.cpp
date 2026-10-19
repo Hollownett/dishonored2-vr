@@ -107,27 +107,46 @@ int main() {
         put(npc_pool+10*0xb0+0x44,std::uint32_t{0x8e});assert(!native_ragdoll_body(read,base,npc,10)); // keyframed body
         put(npc_pool+10*0xb0+0x44,std::uint32_t{0x82});put(npc,base+0x1c886a8);assert(!native_ragdoll_body(read,base,npc,10)); // not a guard
         put(npc,base+0x1c5e108);
-        {   // physical hands I1: the hand clamp's exclusion of a met dead/unconscious guard maps to his limb nearest the hand, so the wall behind
-            // him is still swept (a guard is no native_rigid_body prop; mapping only props dropped the sweep)
-            put(npc_pool+10*0xb0+0x6c,std::uint32_t{0x00ff0004});
-            const auto limb=native_cast_exclusion(read,base,world,npc,{10.2,0,0},false);
-            assert(limb && limb->handle==0x100000a && limb->record==npc_pool+10*0xb0 && limb->filter_info==0x00ff0004);
-            const auto zero=native_cast_exclusion(read,base,world,npc,{10.2,0,0},true);assert(zero && zero->handle==0x100000a && zero->filter_info==0);
-            assert(!native_cast_exclusion(read,base,world+8,npc,{10.2,0,0},false)); // another world: unmapped, the caller casts without exclusion
-            put(npc_pool+10*0xb0+0x44,std::uint32_t{0xce});put(npc_pool+6*0xb0+0x44,std::uint32_t{0xce});put(npc_pool+7*0xb0+0x44,std::uint32_t{0xce});
-            for(int bone:{9,12,13,15,16}) put(npc_pool+bone*0xb0+0x44,std::uint32_t{0xce});
-            assert(!native_cast_exclusion(read,base,world,npc,{10.2,0,0},false)); // an awake guard's keyframed bodies: unmapped
-            for(int bone:{6,7,9,10,12,13,15,16}) put(npc_pool+bone*0xb0+0x44,std::uint32_t{0x82});
-            put(npc,base+0x1c886a8);assert(!native_cast_exclusion(read,base,world,npc,{10.2,0,0},false)); // not a guard, not a prop
+        {   // physical hands I1: the clamp's exclusion of a met dead/unconscious guard is EXACTLY the body the contact service met (its bone and handle,
+            // any of the 17: a torso push too), validated again here; mapping props alone, or a limb nearest the hand, dropped or misplaced the sweep
+            for(std::uint32_t b=0;b<17;++b) {const auto rec=npc_pool+b*0xb0;const std::uintptr_t ud=0x9600000+b*0x100,comp=0x9700000+b*0x100;put(rec+0x90,ud);put(ud+8,comp);put(comp+0x10,npc);}
+            put(physics+0xc8,std::array<unsigned char,12>{});
+            put(npc_pool+3*0xb0+0x6c,std::uint32_t{0x00ff0004});
+            const auto torso=native_cast_exclusion(read,base,world,npc,3,0x1000003,false);   // bone 3 is no grab bone
+            assert(torso && torso->handle==0x1000003 && torso->record==npc_pool+3*0xb0 && torso->filter_info==0x00ff0004);
+            const auto zero=native_cast_exclusion(read,base,world,npc,3,0x1000003,true);assert(zero && zero->handle==0x1000003 && zero->filter_info==0);
+            assert(!native_cast_exclusion(read,base,world,npc,3,0x1000004,false));   // not the handle the service met (the list changed): unmapped
+            assert(!native_cast_exclusion(read,base,world+8,npc,3,0x1000003,false)); // another world
+            assert(!native_cast_exclusion(read,base,world,npc,-1,0x1000003,false));  // no bone published: unmapped (the caller casts without exclusion)
+            {   // two hands on one corpse: each side keeps its own met body (the cache is keyed by side, and by the body, not just the entity)
+                NativeExclusionCache cache;unsigned maps=0;put(npc_pool+10*0xb0+0x6c,std::uint32_t{0x00ff0008});
+                const auto left=cache.get(npc,0,3,0x1000003,[&] {++maps;return native_cast_exclusion(read,base,world,npc,3,0x1000003,false);});
+                const auto right=cache.get(npc,1,10,0x100000a,[&] {++maps;return native_cast_exclusion(read,base,world,npc,10,0x100000a,false);});
+                assert(maps==2 && left && right && left->handle==0x1000003 && right->handle==0x100000a);   // the second hand did not reuse the first's body
+                assert(cache.get(npc,0,3,0x1000003,[&] {++maps;return std::optional<NativeCastExclusion>{};})->handle==0x1000003 && maps==2);   // cached
+                const auto failed=cache.get(npc,1,4,0x1000004,[&] {++maps;return native_cast_exclusion(read,base,world,npc,4,0x1000099,false);});
+                assert(!failed && maps==3);cache.get(npc,1,4,0x1000004,[&] {++maps;return std::optional<NativeCastExclusion>{};});assert(maps==3);   // a failure is cached as well
+            }
+            put(0x9600000+3*0x100+8,std::uintptr_t{0});
+            {const std::uintptr_t other=0x9800000;put(0x9700000+3*0x100+0x10,other);put(0x9600000+3*0x100+8,std::uintptr_t{0x9700000+3*0x100});
+             assert(!native_cast_exclusion(read,base,world,npc,3,0x1000003,false));   // the body now belongs to another entity: not excluded
+             put(0x9700000+3*0x100+0x10,npc);}
+            put(0x9600000+3*0x100+8,std::uintptr_t{0x9700000+3*0x100});
+            assert(native_cast_exclusion(read,base,world,npc,3,0x1000003,false));
+            put(physics+0xc8,std::uintptr_t{0x1234});assert(!native_cast_exclusion(read,base,world,npc,3,0x1000003,false)); // carried: not excluded
+            put(physics+0xc8,std::array<unsigned char,12>{});
+            put(npc_pool+3*0xb0+0x44,std::uint32_t{0xce});assert(!native_cast_exclusion(read,base,world,npc,3,0x1000003,false)); // keyframed: awake guard
+            put(npc_pool+3*0xb0+0x44,std::uint32_t{0x82});
+            put(npc,base+0x1c886a8);assert(!native_cast_exclusion(read,base,world,npc,3,0x1000003,false)); // not a guard
             put(npc,base+0x1c5e108);
         }
         {   // a prop still maps by its own body
             put(world+0x28,pool);put(world+0x30,std::uint32_t{3});
             put(record+0x6c,std::uint32_t{0x00ff0008});
-            const auto prop=native_cast_exclusion(read,base,world,entity,{1,0,0},false);
+            const auto prop=native_cast_exclusion(read,base,world,entity,-1,handle,false);
             assert(prop && prop->record==record && prop->handle==handle && prop->filter_info==0x00ff0008);
-            put(record+0x6c,std::uint32_t{0});const auto none=native_cast_exclusion(read,base,world,entity,{1,0,0},false);assert(!none); // no filter word and not told to cast with zero: unmapped
-            assert(native_cast_exclusion(read,base,world,entity,{1,0,0},true));
+            put(record+0x6c,std::uint32_t{0});const auto none=native_cast_exclusion(read,base,world,entity,-1,handle,false);assert(!none); // no filter word and not told to cast with zero: unmapped
+            assert(native_cast_exclusion(read,base,world,entity,-1,handle,true));
         }
     }
     std::cout<<"PASS: native dynamic-body registry/component/handle ownership; static/keyframed/compound/attached/recycled/native-carryable exclusion; guard ragdoll limbs\n";

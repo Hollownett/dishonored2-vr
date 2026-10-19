@@ -4301,7 +4301,8 @@ void prepare_head_view(void* view) noexcept {
                             g.position=d2vr::paused_hand(hand_clamp,side,palm,clamp_epoch,hand_clamp.config().snap_gap);
                         } else if(clamped.valid && !clamp_yield) {const auto post=[&](unsigned post_slot,const d2vr::ClampSweep& sweep) {
                                 if(!sweep.valid || (sweep.exclude && !*sweep.exclude)) return; // an excluded entity 0 maps to no body
-                                d2vr::NativeInteractionAim::post_weapon_segment(side,post_slot,sweep.from,sweep.to,sweep.radius,sweep.exclude?*sweep.exclude:0);
+                                const auto met_body=sweep.exclude?native_grab.hand_contact().met_body(*sweep.exclude):std::nullopt;   // the guard body the contact service met (a prop: none)
+                                d2vr::NativeInteractionAim::post_weapon_segment(side,post_slot,sweep.from,sweep.to,sweep.radius,sweep.exclude?*sweep.exclude:0,met_body?met_body->bone:-1,met_body?met_body->handle:0u);
                             };
                             post(0,clamped.palm_sweep);post(d2vr::NativeInteractionAim::tip_slot,clamped.tip_sweep);
                             post(d2vr::NativeInteractionAim::wall_tip_slot,clamped.wall_tip_sweep);post(d2vr::NativeInteractionAim::exclude_slot,clamped.exclude_sweep);

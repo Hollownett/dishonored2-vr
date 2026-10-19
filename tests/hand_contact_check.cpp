@@ -851,12 +851,20 @@ int main() {
                 }
                 return read(at,out,size);};
             discover_reads_open=true;race.discover(interleaved,base);discover_reads_open=false;
-            assert(entered && race.discoveries.load()==1);
+            assert(entered && race.discoveries.load()==1);   // counted once its scan has finished
             assert(nested_registry_reads==0);   // the service did not scan the registry beside discover()
-            race.publish(1,true,pose,pose,{0,0,0,0,0});unsigned later_registry_reads=0;
+            // The service latched while discover() was mid-scan and skipped its scan: it must retry on the very next service (the same hand serial,
+            // nothing new published), not wait for a hand to move, because discover() now returns for good.
+            unsigned later_registry_reads=0;
             auto later=[&](std::uintptr_t where,void* into,std::size_t amount) {if(registry_slice(where,amount)) ++later_registry_reads;return read(where,into,amount);};
             race.service(later,base,world,99100,held,write);
-            assert(later_registry_reads==0 && race.faults==0);   // and it never latches afterwards: discover() has run
+            assert(later_registry_reads>0 && race.faults==0);
+            // A discover() that fails before scanning (no game object) is not a discovery: the latch fallback stays armed.
+            NativeHandContact failing;failing.set_geometry(1,synthetic_geometry());failing.scan_limit_us=failing.service_limit_us=1<<30;failing.inline_discovery=false;
+            failing.publish(1,true,pose,pose,{0,0,0,0,0});
+            auto unreadable=[&](std::uintptr_t,void*,std::size_t) {return false;};
+            failing.discover(unreadable,base);
+            assert(failing.discoveries.load()==0);
         }
         // --- the same ride with the world cast holding the drawn hand 5 cm back along its motion (sim v525), the bottle the entity it hit: the tracked
         // hand carries it, so the face ends at the tracked fingertips (5 cm short of them if the drawn hand pushed)
@@ -1119,6 +1127,14 @@ int main() {
             std::cout<<"push_unconscious_guard: "<<writes[0x100000a].count<<" writes to bone 10, first "<<writes[0x100000a].first[0]<<" m/s\n";
             // ragdoll_meetable: the guard is a pushable of the meet, like a prop, so the clamp exempts his planes
             assert(c->meet(1,npc).prop);
+            // the service publishes the exact body it met (bone and handle) for the exclusion sweep, and nothing for an entity it never met
+            {const auto met=c->met_body(npc);assert(met && met->entity==npc && met->bone==10 && met->handle==0x100000a);assert(!c->met_body(npc+8));}
+            // a torso push: the pelvis (bone 0, no grab bone) lies where the palm is and the wrist is moved away; the published body is that torso
+            {const auto place=[&](unsigned b,float x) {rig::Transform t{};t.f[0]=t.f[5]=t.f[10]=t.f[15]=1;t.f[12]=x;t.f[14]=.1f;put(pool+b*0xb0,t);};
+             place(0,10.f);place(10,3.f);put(npc+0xd1,static_cast<unsigned char>(0x20));writes.clear();
+             auto t=make();sweep(*t,100,9.70);
+             const auto met=t->met_body(npc);assert(met && met->bone==0 && !ragdoll_grab_bone(met->bone) && met->handle==0x1000000u);
+             place(0,0.f);place(10,10.f);}
             // dead (0x08) is pushable too
             put(npc+0xd1,static_cast<unsigned char>(0x08));writes.clear();
             auto d=make();sweep(*d,100,9.70);assert(writes.count(0x100000a) && writes.size()==1 && d->meet(1,npc).prop);
