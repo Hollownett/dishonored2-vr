@@ -96,7 +96,6 @@ struct Rig {
     std::function<bool(unsigned)> post;        // C14 alternate mode: false skips this frame's cast
     std::optional<Vec3> note_override;         // drawn position reported to note_drawn once
     std::vector<std::uintptr_t> loose;         // ClampInput::loose
-    std::vector<std::uintptr_t> dynamic;       // ClampInput::dynamic
     Vec3 kick{};                               // ClampInput::kick
     std::optional<std::uintptr_t> exclude;     // ClampInput::exclude
     ClampOutput last{};bool have_last=false;int holds=0;   // frames held so far
@@ -111,7 +110,6 @@ struct Rig {
         in.now=now();in.epoch=epoch;in.root=root;in.target=target;in.chest=world.chest;
         in.tip=tip;in.tip_enabled=tip_enabled;in.wall_tip=wall_tip;in.yield=yield;in.post=!post || post(frame);
         for(const auto e:loose) if(in.loose_count<ClampInput::loose_capacity) in.loose[in.loose_count++]=e;
-        for(const auto e:dynamic) if(in.dynamic_count<ClampInput::loose_capacity) in.dynamic[in.dynamic_count++]=e;
         in.kick=kick;
         in.exclude=exclude;
         for(const auto& probe:hand) if(in.hand_count<ClampInput::hand_capacity) in.hand[in.hand_count++]=probe;
@@ -936,10 +934,10 @@ void meet_never_passes_held_plane() {
     CHECK(close_to(d,{1.18,0,.5},1e-12));
     d=meet_drawn(r.clamp,0,o,target,false,std::uintptr_t{7},{-.02,0,0});          // not meeting: the clamp's hand
     CHECK(close_to(d,o.drawn.position,0));
-    CHECK(close_to(r.clamp.keep_out(1,target.basis,{2,0,.5},std::nullopt),{2,0,.5},0));   // the other side holds nothing
-    CHECK(close_to(r.clamp.keep_out(5,target.basis,{2,0,.5},std::nullopt),{2,0,.5},0));
+    CHECK(close_to(r.clamp.keep_out(1,target.basis,{.8,-.2,.5},std::nullopt),{.8,-.2,.5},0));   // the other side holds nothing
+    CHECK(close_to(r.clamp.keep_out(5,target.basis,{.8,-.2,.5},std::nullopt),{.8,-.2,.5},0));
     r.clamp.reset(0);
-    CHECK(close_to(r.clamp.keep_out(0,target.basis,{2,0,.5},std::nullopt),{2,0,.5},0));   // reset: nothing held
+    CHECK(close_to(r.clamp.keep_out(0,target.basis,{.8,-.2,.5},std::nullopt),{.8,-.2,.5},0));   // reset: nothing held
 }
 
 // Fix round 2: the held_elsewhere start, the way out clipped at the prop's plane, the met prop and a wall both held.
@@ -1318,7 +1316,7 @@ void wall_tip_looks_ahead() {
 }
 
 // ---- Fix round 1 (Task 6b review): static geometry outranks every dynamic prop; projection converges; the look-ahead is always on.
-// A crate that is too heavy to push (12 kg and up) is not in ClampInput::loose, but it is a prop: its entity is in ClampInput::dynamic.
+// A crate too heavy to push (12 kg and up) is not in ClampInput::loose, but its hit says it is a dynamic body (a 9th prop in reach included).
 // The hand is wider than the slot between the wall and the crate: it stays out of the wall and may enter the crate.
 void static_outranks_heavy_props() {
     for(const std::uintptr_t crate:{std::uintptr_t{31},std::uintptr_t{32}}) {   // 12 kg and 20 kg: the clamp sees an entity, not a mass
@@ -1330,10 +1328,10 @@ void static_outranks_heavy_props() {
             in.now=i*dt;in.epoch=1;in.root=level_frame({0,0,0},{1,0,0});in.target=pose_at(target);in.chest={0,0,1};
             in.tip=back;in.tip_enabled=true;in.palm_hit=palm;in.tip_hit=tip;
             in.hand[0]=front;in.hand[1]=back;in.hand_count=2;
-            in.dynamic[0]=crate;in.dynamic_count=1;
+            for(std::uintptr_t e=101;e<109;++e) in.loose[in.loose_count++]=e;   // the lists are full of other props: the rank comes from the hit's own body
             const auto o=c.update(0,in);c.note_drawn(0,in.root,o.drawn.position);return o;
         };
-        const ClampHit wall{{1,0,.5},{-1,0,0},7,3,false,true},face{{.8,0,.5},{1,0,0},crate,6,false,true};
+        const ClampHit wall{{1,0,.5},{-1,0,0},7,3,false,true},face{{.8,0,.5},{1,0,0},crate,6,false,true,BodyClass::dynamic};
         frame(0,{.9,0,.5},std::nullopt,std::nullopt);
         frame(1,{.9,0,.5},std::nullopt,std::nullopt);
         ClampOutput o{};
@@ -1346,12 +1344,12 @@ void static_outranks_heavy_props() {
 // All four planes are props' (none loose): a new face drops the oldest face, not the wall.
 void all_dynamic_eviction_keeps_the_wall() {
     HandClamp c;
-    const auto face=[](double angle) {return ClampHit{{.1,.1*angle,.5},{-std::cos(angle),std::sin(angle),0},31,6,false,true};};
+    const auto face=[](double angle) {return ClampHit{{.1,.1*angle,.5},{-std::cos(angle),std::sin(angle),0},31,6,false,true,BodyClass::dynamic};};
     const auto frame=[&](unsigned i,std::optional<ClampHit> palm,std::optional<ClampHit> tip,std::optional<ClampHit> wall_tip) {
         ClampInput in{};
         in.now=i*dt;in.epoch=1;in.root=level_frame({0,0,0},{1,0,0});in.target=pose_at({.5,0,.5});in.chest={0,0,1};
         in.tip={{.10,0,0},.02};in.tip_enabled=true;in.wall_tip={{.12,0,.04},.03};
-        in.palm_hit=palm;in.tip_hit=tip;in.wall_tip_hit=wall_tip;in.dynamic[0]=31;in.dynamic_count=1;
+        in.palm_hit=palm;in.tip_hit=tip;in.wall_tip_hit=wall_tip;
         const auto o=c.update(0,in);c.note_drawn(0,in.root,o.drawn.position);return o;
     };
     frame(0,std::nullopt,std::nullopt,std::nullopt);frame(1,std::nullopt,std::nullopt,std::nullopt);
@@ -1439,22 +1437,137 @@ void late_meet_kick_at_rest() {
     }
 }
 
-// Two static planes closer than the hand is wide: no place keeps it out of both. It is held where it was drawn (and snaps per G3 later), not
-// drawn inside either.
-void static_squeeze_holds() {
+// ---- Fix round 2: planes are ranked by the hit's own body; an infeasible squeeze retreats the hand toward the chest.
+// A slot of two static walls that narrows along +x: a flat upper wall (y <= -0.085 for the grip) and a lower wall rising with x (y >= -0.5 + 0.4 x
+// + 0.2). The hand (0.37 m across) fits where x <= 0.57. The controller is at x = 0.8 and the chest at x = 0, both at y = -0.2: the hand must stop at
+// the slot's mouth, outside both walls, not be drawn inside them.
+namespace {
+struct Funnel {
+    HandClamp c;ClampProbe front{{0,.15,0},.03},back{{0,-.15,0},.03};
+    Vec3 n1{0,-1,0},n2=unit(Vec3{-.4,1,0});
+    ClampHit h1{{0,.1,.5},n1,7,3,false,true},h2{{0,-.5,.5},n2,8,3,false,true,BodyClass::entity_static};
+    ClampOutput frame(unsigned i,Vec3 target,bool upper,bool lower) {
+        ClampInput in{};
+        in.now=i*dt;in.epoch=1;in.root=level_frame({0,0,0},{1,0,0});in.target=pose_at(target);in.chest={0,-.2,.5};
+        in.tip=back;in.tip_enabled=true;in.hand[0]=front;in.hand[1]=back;in.hand_count=2;
+        if(upper) in.palm_hit=h1;
+        if(lower) in.tip_hit=h2;
+        const auto o=c.update(0,in);c.note_drawn(0,in.root,o.drawn.position);return o;
+    }
+    // How far inside a wall the hand's deepest sphere is at grip p (negative: outside), the larger of the two walls.
+    double inside(Vec3 p) const {
+        double worst=-1e9;
+        for(const auto& h:{h1,h2}) {
+            const double reach=.15*std::abs(h.normal.y)+.03;   // the deepest sphere along -n
+            worst=std::max(worst,-(dot(p-h.point,h.normal)-reach));
+        }
+        return worst;
+    }
+};
+}
+
+void squeeze_entry_stops_at_the_mouth() {
+    Funnel f;ClampOutput o{};
+    f.frame(0,{.8,-.2,.5},false,false);f.frame(1,{.8,-.2,.5},false,false);
+    for(unsigned i=2;i<30;++i) {
+        o=f.frame(i,{.8,-.2,.5},true,true);
+        CHECK(finite(o.drawn.position));
+        if(i>=5) {CHECK(!o.snapped);CHECK(f.inside(o.drawn.position)<=.001);CHECK(o.drawn.position.x<.8 && o.drawn.position.x>.3);}
+    }
+    CHECK(f.c.squeeze_infeasible(0)==0);   // a place outside both exists: no minimax
+}
+
+// One wall holds the hand pressed; a second static plane appears that no place near the controller satisfies with the first: the hand
+// leaves the mouth, it is not held inside the new plane.
+void new_static_plane_during_a_hold() {
+    Funnel f;ClampOutput o{};
+    f.frame(0,{.8,-.2,.5},false,false);f.frame(1,{.8,-.2,.5},false,false);
+    for(unsigned i=2;i<8;++i) o=f.frame(i,{.8,-.2,.5},true,false);   // the upper wall alone: the hand is drawn at the controller
+    for(unsigned i=8;i<30;++i) {
+        o=f.frame(i,{.8,-.2,.5},true,true);
+        CHECK(finite(o.drawn.position));
+        if(i>=12) {CHECK(!o.snapped);CHECK(f.inside(o.drawn.position)<=.001);}
+    }
+}
+
+// keep_out in the same slot: the meet's position is pushed to where both walls are satisfied.
+void infeasible_keep_out_retreats() {
+    Funnel f;ClampOutput o{};
+    f.frame(0,{.8,-.2,.5},false,false);f.frame(1,{.8,-.2,.5},false,false);
+    for(unsigned i=2;i<8;++i) o=f.frame(i,{.8,-.2,.5},true,true);
+    const auto basis=pose_at({}).basis;
+    const Vec3 kept=f.c.keep_out(0,basis,{.8,-.2,.5},std::nullopt);
+    CHECK(f.inside(kept)<=.001);
+    CHECK(kept.x<.8 && kept.x>.3);
+}
+
+// Two parallel static walls closer than the hand is wide: no place satisfies both, not even the chest's. The hand goes to the place that
+// violates them least along the way to the chest and the counter says so. Nothing here asserts that the hand is inside either wall: the
+// check is that no place on the controller-to-chest segment is better.
+void parallel_squeeze_takes_the_least_violation() {
     HandClamp c;
     ClampProbe front{{0,.15,0},.03},back{{0,-.15,0},.03};
-    const auto frame=[&](unsigned i,Vec3 target,bool hits) {
+    const ClampHit up{{.5,.1,.5},{0,-1,0},7,3,false,true},down{{.5,-.1,.5},{0,1,0},8,3,false,true};
+    const auto violation=[&](Vec3 p) {return std::max(.18-(dot(p-up.point,up.normal)),.18-(dot(p-down.point,down.normal)));};
+    ClampOutput o{};
+    for(unsigned i=0;i<10;++i) {
         ClampInput in{};
-        in.now=i*dt;in.epoch=1;in.root=level_frame({0,0,0},{1,0,0});in.target=pose_at(target);in.chest={0,0,1};
+        in.now=i*dt;in.epoch=1;in.root=level_frame({0,0,0},{1,0,0});in.target=pose_at({.5+.01*i,.04,.5});in.chest={0,0,.5};
         in.tip=back;in.tip_enabled=true;in.hand[0]=front;in.hand[1]=back;in.hand_count=2;
-        if(hits) {in.palm_hit=ClampHit{{.5,.1,.5},{0,-1,0},7,3,false,true};in.tip_hit=ClampHit{{.5,-.1,.5},{0,1,0},8,3,false,true};}
+        if(i>=2) {in.palm_hit=up;in.tip_hit=down;}
+        o=c.update(0,in);c.note_drawn(0,in.root,o.drawn.position);
+        CHECK(finite(o.drawn.position));
+    }
+    double best=1e9;
+    for(int k=0;k<=400;++k) best=std::min(best,violation(Vec3{.5+.01*9,.04,.5}+(Vec3{0,0,.5}-Vec3{.5+.01*9,.04,.5})*(k/400.)));
+    CHECK(violation(o.drawn.position)<=best+.002);
+    CHECK(c.squeeze_infeasible(0)>0);
+}
+
+// keep_out honours solve()'s false return: two static planes no place satisfies (a wall at x = 1 and a door's face at x = 0.795, the hand 0.285 m
+// deep between them): the position goes to where the deepest violation is smallest on the way to the chest. Nothing asserts a position inside a
+// plane; the check is that no place on the segment is better, and that update() counts the frames.
+void infeasible_keep_out_takes_the_least_violation() {
+    HandClamp c;
+    ClampProbe front{{.12,0,0},.03},back{{-.10,0,0},.03};
+    const ClampHit wall{{1,0,.5},{-1,0,0},7,3,false,true},door{{.795,0,.5},{1,0,0},9,3,false,true,BodyClass::entity_static};
+    const auto violation=[&](double x) {return std::max(x+.12+.03+.005-1,.795+.10+.03+.005-x);};
+    ClampOutput o{};
+    for(unsigned i=0;i<10;++i) {
+        ClampInput in{};
+        in.now=i*dt;in.epoch=1;in.root=level_frame({0,0,0},{1,0,0});in.target=pose_at({1,0,.5});in.chest={0,0,.5};
+        in.tip=back;in.tip_enabled=true;in.hand[0]=front;in.hand[1]=back;in.hand_count=2;
+        if(i>=2) {in.palm_hit=wall;in.tip_hit=door;}
+        o=c.update(0,in);c.note_drawn(0,in.root,o.drawn.position);
+    }
+    const Vec3 kept=c.keep_out(0,pose_at({}).basis,{1,0,.5},std::nullopt);
+    double best=1e9;
+    for(int k=0;k<=1000;++k) best=std::min(best,violation(k/1000.));
+    CHECK(violation(kept.x)<=best+.002);
+    CHECK(violation(o.drawn.position.x)<=best+.002);
+    CHECK(c.squeeze_infeasible(0)>0);
+}
+
+// A full list of planes that all outrank a prop's new face keeps them: the face is dropped.
+void world_planes_outrank_a_new_prop_face() {
+    HandClamp c;
+    const auto wall=[](double angle,std::uintptr_t entity) {return ClampHit{{1,.1*angle,.5},{-std::cos(angle),std::sin(angle),0},entity,3,false,true};};
+    const auto frame=[&](unsigned i,std::optional<ClampHit> palm,std::optional<ClampHit> tip,std::optional<ClampHit> wall_tip) {
+        ClampInput in{};
+        in.now=i*dt;in.epoch=1;in.root=level_frame({0,0,0},{1,0,0});in.target=pose_at({.5,0,.5});in.chest={0,0,1};
+        in.tip={{.10,0,0},.02};in.tip_enabled=true;in.wall_tip={{.12,0,.04},.03};
+        in.palm_hit=palm;in.tip_hit=tip;in.wall_tip_hit=wall_tip;
         const auto o=c.update(0,in);c.note_drawn(0,in.root,o.drawn.position);return o;
     };
-    frame(0,{.5,0,.5},false);frame(1,{.5,0,.5},false);
-    ClampOutput o{};
-    for(unsigned i=2;i<8;++i) {o=frame(i,{.5+.01*(i-1),0,.5},true);CHECK(finite(o.drawn.position));CHECK(!o.snapped);}
-    CHECK(std::abs(o.drawn.position.x-.5)<1e-9 && std::abs(o.drawn.position.y)<1e-9);   // held where it was drawn
+    frame(0,std::nullopt,std::nullopt,std::nullopt);frame(1,std::nullopt,std::nullopt,std::nullopt);
+    frame(2,wall(.3,41),wall(.5,42),wall(.7,43));
+    frame(3,wall(.9,44),std::nullopt,std::nullopt);      // the fourth world plane: the list is full of them
+    ClampHit crate{{.2,0,.5},{1,0,0},31,6,false,true,BodyClass::dynamic};
+    frame(4,crate,std::nullopt,std::nullopt);
+    std::array<ClampHit,HandClamp::max_held_planes> held{};
+    const auto n=c.held_planes(0,held);
+    CHECK(n==c.config().max_planes);
+    for(std::size_t i=0;i<n;++i) CHECK(held[i].entity!=31);
 }
 
 int main() {
@@ -1482,10 +1595,15 @@ int main() {
         whole_hand_edges_and_corners();
         static_outranks_heavy_props();
         all_dynamic_eviction_keeps_the_wall();
+        world_planes_outrank_a_new_prop_face();
         sharp_hard_corners();
         same_probe_wall_tip_looks_ahead();
         late_meet_kick_at_rest();
-        static_squeeze_holds();
+        squeeze_entry_stops_at_the_mouth();
+        new_static_plane_during_a_hold();
+        infeasible_keep_out_retreats();
+        infeasible_keep_out_takes_the_least_violation();
+        parallel_squeeze_takes_the_least_violation();
     }
     g_mode=0;
     deep_start_overlap_snaps();

@@ -27,7 +27,11 @@
 namespace d2vr {
 
 struct ClampProbe {Vec3 local{};double radius{};};      // sphere in the grip frame (x forward, y left, z up)
-struct ClampHit {Vec3 point{},normal{};std::uintptr_t entity{};std::uint16_t material{0xffff};bool initial_overlap{};bool normal_valid{true};};
+// What the hit body is, read from the body itself when the cast answered: the world (no entity or body), an entity that does not move
+// (static or keyframed: a door, an animated actor) or a dynamic body (motion type 2, a prop of any mass). Ranked world > entity_static >
+// dynamic by the clamp. A body that could not be read is entity_static.
+enum class BodyClass : unsigned char {world,entity_static,dynamic};
+struct ClampHit {Vec3 point{},normal{};std::uintptr_t entity{};std::uint16_t material{0xffff};bool initial_overlap{};bool normal_valid{true};BodyClass body{BodyClass::world};};
 // exclude: the body (its entity) the cast must not report (the native cast's source-body exclusion, request +0x68/+0x14).
 struct ClampSweep {Vec3 from{},to{};double radius{};bool valid{};std::optional<std::uintptr_t> exclude;};
 struct HandClampConfig {
@@ -60,16 +64,9 @@ struct ClampInput {
     // fingers went 6 cm into the wall once only the palm was held). None: a plane holds only the probe that hit it.
     static constexpr std::size_t hand_capacity=32;
     std::array<ClampProbe,hand_capacity> hand{};std::size_t hand_count{};
-    // Every dynamic prop near the hand, of any mass (a 12 kg crate is not loose but it is not the world either): its planes rank below any
-    // plane of static geometry, in the projection and in the plane list. Loose props count as dynamic too.
-    std::array<std::uintptr_t,loose_capacity> dynamic{};std::size_t dynamic_count{};
     // The way out the meet will draw the hand along (world, from the contact service; zero: none). With the hand at rest it says which way
     // the wall tip's sweep must look.
     Vec3 kick{};
-    bool is_dynamic(std::uintptr_t entity) const {
-        for(std::size_t i=0;i<std::min(dynamic_count,loose_capacity);++i) if(dynamic[i]==entity) return true;
-        return is_loose(entity);
-    }
     bool is_loose(std::uintptr_t entity) const {
         for(std::size_t i=0;i<std::min(loose_count,loose_capacity);++i) if(loose[i]==entity) return true;
         return false;
@@ -226,7 +223,7 @@ private:
         unsigned misses{};    // answered raw (unslid) casts since it was made or last re-hit (I3; frames without a result do not count)
         bool touched{},news{};   // this frame: the drawn hand was within contact_margin of it; a sweep reached its region (judge)
         bool loose{};            // a loose prop's face (ClampInput::loose when it was hit): it moves out of the hand's way, a wall does not
-        bool dynamic{};          // a prop's face of any mass (ClampInput::dynamic or loose): it ranks below every plane of static geometry
+        unsigned char rank{2};   // 2 the world, 1 an entity that does not move, 0 a dynamic body or a loose prop (BodyClass of the hit): higher outranks lower
     };
     static constexpr std::size_t plane_capacity=8;
     struct Side {
@@ -234,6 +231,7 @@ private:
         Vec3 prev_local{},shift_local{};std::array<Vec3,3> prev_basis_local{};  // root (level player) frame, C11
         std::array<ClampProbe,ClampInput::hand_capacity> hand{};std::size_t hand_count{};   // ClampInput::hand, this frame's
         Vec3 own_shift_local{};   // the clamp's own eased push: shift_local without what callers drew on top (note_drawn); the snap-back gap
+        Vec3 chest_world{};   // the re-acquire origin of the last update (the end of a retreat)
         Vec3 drawn_world{},target_world{};std::array<Vec3,3> basis_world{};     // last frame in the world
         std::array<Plane,plane_capacity> planes{};std::size_t plane_count{};
         double over_time{},clear_time{},since_haptic{1e9};unsigned overlap_count{},hold_frames{};
@@ -254,7 +252,7 @@ private:
     };
     HandClampConfig cfg_;
     std::array<Side,2> sides_{};
-    std::array<std::uint64_t,2> snapbacks_{},contact_frames_{},missed_notes_{},repeated_updates_{},blocked_frames_{};
+    std::array<std::uint64_t,2> squeeze_infeasible_{},snapbacks_{},contact_frames_{},missed_notes_{},repeated_updates_{},blocked_frames_{};
 
     std::size_t capacity() const {return std::clamp<std::size_t>(cfg_.max_planes,1,plane_capacity);}
     static void store(Side& s,const ClampInput& in,Vec3 drawn) {
@@ -333,10 +331,10 @@ private:
     // loose: the hit is on a loose prop (ClampInput::loose). A prop moves: a new hit on a face the side already holds (same
     // probe, parallel normal) is that face where it is now, and replaces the old plane wherever it was (a swatted bottle
     // otherwise leaves a trail of its old faces that hold the hand 30 cm behind it).
-    void add_plane(Side& s,const ClampHit& hit,double radius,Vec3 local,bool tip,bool answer=true,bool loose=false,bool dynamic=false) const {
+    void add_plane(Side& s,const ClampHit& hit,double radius,Vec3 local,bool tip,bool answer=true,bool loose=false) const {
         if(!plane_hit(hit)) return;
         Plane plane{hit.point,hit.normal*(1/length(hit.normal)),local,radius,0,0,hit.entity,hit.material,tip,false,answer};
-        plane.loose=loose;plane.dynamic=dynamic || loose;
+        plane.loose=loose;plane.rank=loose?0:hit.body==BodyClass::dynamic?0:hit.body==BodyClass::entity_static?1:2;
         std::size_t slot=s.plane_count;
         for(std::size_t i=0;i<s.plane_count;++i) {
             const auto& p=s.planes[i];
@@ -345,13 +343,15 @@ private:
         }
         if(slot==s.plane_count) {
             if(s.plane_count<capacity()) ++s.plane_count;
-            else {   // full: static geometry outranks every prop. A prop's new face replaces the oldest prop face, and is dropped when
-                     // all the planes held are static; a static plane replaces the oldest prop face, else the oldest plane.
+            else {   // full: a plane replaces the oldest plane of the lowest rank that does not outrank it, and is dropped when every plane held
+                     // outranks it (the world over an entity that does not move over a dynamic body, whatever its mass)
                 std::size_t pick=s.plane_count;
-                for(std::size_t i=0;i<s.plane_count;++i) if(s.planes[i].dynamic && (pick==s.plane_count || s.planes[i].age>s.planes[pick].age)) pick=i;
-                if(pick==s.plane_count && plane.dynamic) return;
-                if(pick==s.plane_count)
-                    for(std::size_t i=0;i<s.plane_count;++i) if(pick==s.plane_count || s.planes[i].age>s.planes[pick].age) pick=i;
+                for(std::size_t i=0;i<s.plane_count;++i) {
+                    const auto& q=s.planes[i];
+                    if(q.rank>plane.rank) continue;
+                    if(pick==s.plane_count || q.rank<s.planes[pick].rank || (q.rank==s.planes[pick].rank && q.age>s.planes[pick].age)) pick=i;
+                }
+                if(pick==s.plane_count) return;
                 slot=pick;
             }
         }
@@ -385,18 +385,18 @@ private:
     // slot between a wall and a crate) the hand stays out of the static ones and enters the prop. Order does not matter: a prop's faces are
     // projected first and static ones last, pass after pass until nothing is deeper than converged (12 passes at most); a corner too sharp for that
     // is solved exactly (the least move that satisfies the planes, as a small QP over at most three active planes).
-    // False when the static planes alone cannot be satisfied (two walls closer than the hand): p is then left at the last pass, and the caller holds.
+    // False when the static planes alone cannot be satisfied (two walls closer than the hand): p is then left at the last pass, and the caller retreats (retreat()).
     static constexpr unsigned max_passes=12;
     static constexpr double converged=5e-4;
     bool solve(const Side& s,const std::array<Vec3,3>& basis,Vec3& p,double* pushed=nullptr,bool direct_only=false,
                std::optional<std::uintptr_t> except=std::nullopt) const {
-        struct Row {Vec3 n;double b;std::size_t plane;bool dynamic;};   // n . x >= b
+        struct Row {Vec3 n;double b;std::size_t plane;unsigned char rank;bool dynamic;};   // n . x >= b
         std::array<Row,plane_capacity> rows{};std::size_t m=0;
         for(std::size_t i=0;i<s.plane_count;++i) {
             const auto& plane=s.planes[i];
             if(direct_only && (plane.tip || !plane.last_answer)) continue;
             if(except && plane.entity==*except) continue;
-            rows[m++]={plane.normal,dot(plane.normal,plane.point)+reach(s,basis,plane)+cfg_.skin,i,plane.dynamic};
+            rows[m++]={plane.normal,dot(plane.normal,plane.point)+reach(s,basis,plane)+cfg_.skin,i,plane.rank,plane.rank==0};
         }
         const Vec3 start=p;
         const auto worst=[&](Vec3 x,bool statics_only) {
@@ -405,9 +405,9 @@ private:
             return w;
         };
         for(unsigned pass=0;pass<max_passes;++pass) {
-            for(const bool statics:{false,true})
+            for(unsigned char level=0;level<3;++level)   // dynamic bodies first, the world last
                 for(std::size_t k=0;k<m;++k) {
-                    if(rows[k].dynamic==statics) continue;
+                    if(rows[k].rank!=level) continue;
                     const double d=dot(rows[k].n,p)-rows[k].b;
                     if(d<0) {p=p-rows[k].n*d;if(pushed) pushed[rows[k].plane]-=d;}
                 }
@@ -477,6 +477,37 @@ private:
         p=solution;
         return true;
     }
+    // Two static planes that no place satisfies together near the controller (the hand is wider than the slot it is pushed into): the hand
+    // retreats along the segment from `from` (the controller, or the meet's position) to `to` (the chest) to the first place that satisfies
+    // every static plane held, found by bisection (12 steps). When even the chest does not, the place on the segment where the deepest
+    // violation is smallest (ternary search; the violation is a maximum of linear functions of the position): `minimax` is set.
+    Vec3 retreat(const Side& s,const std::array<Vec3,3>& basis,Vec3 from,Vec3 to,std::optional<std::uintptr_t> except,bool& minimax) const {
+        minimax=false;
+        if(!finite(from) || !finite(to)) return from;
+        const auto at=[&](double u) {return from+(to-from)*u;};
+        const auto violation=[&](double u) {
+            const Vec3 x=at(u);double w=-1e9;
+            for(std::size_t i=0;i<s.plane_count;++i) {
+                const auto& plane=s.planes[i];
+                if(plane.rank==0 || (except && plane.entity==*except)) continue;
+                w=std::max(w,-clearance(s,basis,x,plane));
+            }
+            return w;
+        };
+        if(violation(0)<=converged) return from;
+        if(violation(1)<=converged) {
+            double lo=0,hi=1;
+            for(int step=0;step<12;++step) {const double mid=(lo+hi)*.5;if(violation(mid)<=converged) hi=mid;else lo=mid;}
+            return at(hi);
+        }
+        minimax=true;
+        double lo=0,hi=1;
+        for(int step=0;step<24;++step) {
+            const double a=lo+(hi-lo)/3,b=hi-(hi-lo)/3;
+            if(violation(a)<violation(b)) hi=b;else lo=a;
+        }
+        return at((lo+hi)*.5);
+    }
     static void take_hand(Side& s,const ClampInput& in) {
         s.hand_count=std::min(in.hand_count,in.hand.size());
         for(std::size_t k=0;k<s.hand_count;++k) s.hand[k]=in.hand[k];
@@ -499,6 +530,7 @@ public:
     }
     // The epoch of the side's last update (none: reset, yielded or never updated).
     std::optional<std::uint64_t> side_epoch(unsigned side) const {return side<2 && sides_[side].has?std::optional<std::uint64_t>{sides_[side].epoch}:std::nullopt;}
+    std::uint64_t squeeze_infeasible(unsigned side) const {return side<2?squeeze_infeasible_[side]:0;}   // frames no place satisfied the static planes
     std::uint64_t contact_frames(unsigned side) const {return side<2?contact_frames_[side]:0;}
     // Contract breaks: an update without note_drawn after the previous one, and a second update at the same `now`.
     std::uint64_t missed_notes(unsigned side) const {return side<2?missed_notes_[side]:0;}
@@ -529,8 +561,10 @@ public:
         if(side>1 || !finite(meet_position)) return meet_position;
         const auto& s=sides_[side];
         if(!s.has || s.state==ClampState::released) return meet_position;
-        solve(s,basis,meet_position,nullptr,false,met);
-        return meet_position;
+        const Vec3 original=meet_position;
+        if(solve(s,basis,meet_position,nullptr,false,met)) return meet_position;
+        bool minimax=false;   // two static planes the hand cannot be outside of together: back toward the chest, as update() does
+        return retreat(s,basis,original,s.chest_world,met,minimax);
     }
 
     // Contract: one update per side per frame, `now` strictly increasing. In C14 alternate mode, pass post=false on the
@@ -552,14 +586,14 @@ public:
         const double elapsed=in.now-s.last_now;
         if(!s.has || in.epoch!=s.epoch || !(elapsed>=0) || elapsed>cfg_.gap_seconds) {
             // Re-acquire: nothing from before is trusted. The chest sweep validates the path to the controller.
-            s=Side{};take_hand(s,in);out.reacquired=true;
+            s=Side{};take_hand(s,in);s.chest_world=in.chest;out.reacquired=true;
             if(finite(in.chest)) {out.state=ClampState::free;post_chest(s,in,out);}
             else {release(s);out.state=ClampState::released;++blocked_frames_[side];}
             store(s,in,in.target.position);
             return finish(s,out);
         }
         const double dt=std::min(elapsed,.1);
-        take_hand(s,in);
+        take_hand(s,in);s.chest_world=in.chest;
         s.since_haptic+=dt;
 
         // What this side posted last frame decides how its results read; nothing posted, nothing to read.
@@ -611,7 +645,7 @@ public:
                 }
                 for(std::size_t i=0;i<s.plane_count;++i) if(!s.planes[i].tip) s.planes[i].last_answer=false;
                 if(posted==Posted::palm) judge(s,answered,slot0,false);
-                if(slot0) add_plane(s,*slot0,cfg_.palm_radius,{},false,true,slot0_loose,in.is_dynamic(slot0->entity));
+                if(slot0) add_plane(s,*slot0,cfg_.palm_radius,{},false,true,slot0_loose);
                 if(posted==Posted::palm) {
                     // A hit that makes no plane (invalid normal) neither counts nor clears: the recovery sweep must not
                     // reset the deep-start count while the hand stays inside a surface it cannot describe.
@@ -623,7 +657,7 @@ public:
             }
             if(s.state!=ClampState::released && posted_tip.valid) {
                 judge(s,posted_tip,in.tip_hit,true);
-                if(in.tip_hit) add_plane(s,*in.tip_hit,tip_probe.radius,tip_probe.local,true,true,in.is_loose(in.tip_hit->entity),in.is_dynamic(in.tip_hit->entity));
+                if(in.tip_hit) add_plane(s,*in.tip_hit,tip_probe.radius,tip_probe.local,true,true,in.is_loose(in.tip_hit->entity));
             }
             // An exclusion sweep (I1) only adds what lies behind the excluded prop: it judges nothing (it passes through the prop's
             // planes by design) and does not steer the next sweep's slide. What it finds is held by the probe that found it and by
@@ -632,14 +666,13 @@ public:
             const auto behind=[&](const ClampSweep& sweep,const std::optional<ClampHit>& hit,const ClampProbe& probe,bool tip) {
                 if(s.state==ClampState::released || !sweep.valid || !hit || hit->initial_overlap || (sweep.exclude && hit->entity==*sweep.exclude)) return;
                 const bool loose=in.is_loose(hit->entity);
-                const bool dynamic=in.is_dynamic(hit->entity);
-                if(tip) add_plane(s,*hit,probe.radius,probe.local,true,true,loose,dynamic);
-                add_plane(s,*hit,cfg_.palm_radius,{},false,false,loose,dynamic);
+                    if(tip) add_plane(s,*hit,probe.radius,probe.local,true,true,loose);
+                add_plane(s,*hit,cfg_.palm_radius,{},false,false,loose);
             };
             if(posted_wall.exclude) behind(posted_wall,in.wall_tip_hit,wall_probe,true);
             else if(s.state!=ClampState::released && posted_wall.valid) {
                 judge(s,posted_wall,in.wall_tip_hit,true);
-                if(in.wall_tip_hit) add_plane(s,*in.wall_tip_hit,wall_probe.radius,wall_probe.local,true,true,in.is_loose(in.wall_tip_hit->entity),in.is_dynamic(in.wall_tip_hit->entity));
+                if(in.wall_tip_hit) add_plane(s,*in.wall_tip_hit,wall_probe.radius,wall_probe.local,true,true,in.is_loose(in.wall_tip_hit->entity));
             }
             behind(posted_exclude,in.exclude_hit,exclude_probe,exclude_tip);
             // A plane the drawn hand still touches (within contact_margin, by any of its spheres) does not age in a frame no sweep
@@ -680,13 +713,21 @@ public:
         std::array<double,plane_capacity> pushed{};
         Vec3 p=target;
         const bool feasible=solve(s,in.target.basis,p,pushed.data());
-        // Two static planes closer than the hand is wide: no place is outside both. The hand stays where it was drawn (a hold; G3's
-        // snap-back takes it from there when the controller stays far), never inside either.
-        const Vec3 wanted=feasible?p-target:(finite(s.drawn_world)?s.drawn_world-target:Vec3{});
+        // Two static planes that no place near the controller satisfies together (the hand is wider than the slot it is pushed into): the
+        // hand retreats along the controller-to-chest segment to the first place outside every static plane held, or, when even the chest is
+        // not, to where they are violated least (squeeze_infeasible counts those frames). Never drawn at a place the planes rule out when
+        // another exists.
+        Vec3 wanted=p-target;
+        if(!feasible) {
+            bool minimax=false;
+            const Vec3 safe=retreat(s,in.target.basis,target,in.chest,std::nullopt,minimax);
+            wanted=safe-target;
+            if(minimax) ++squeeze_infeasible_[side];
+        }
         // Engage instantly (never render inside a surface); ease out at release_speed when the push shrinks. The eased hand never
         // enters a plane.
         const auto ease=[&](Vec3 from,double* push) {
-            Vec3 q=target+(length(wanted)>=length(from)?wanted:from+clamp_detail::clamp_length(wanted-from,cfg_.release_speed*dt));
+            Vec3 q=target+(!feasible || length(wanted)>=length(from)?wanted:from+clamp_detail::clamp_length(wanted-from,cfg_.release_speed*dt));
             if(feasible) solve(s,in.target.basis,q,push);
             return q-target;
         };
@@ -708,7 +749,12 @@ public:
             (!s.seg_cut && s.drawn_validated && length(p-s.drawn_world)<=cfg_.palm_radius+1e-9);
         bool hold=false;Vec3 held=s.drawn_world;
         // A hold waits for max_hold_frames casts: in C14 alternate mode a cast is answered every other frame.
-        if(!validated && s.hold_frames<max_hold_frames*s.cadence) {Vec3 out_of_planes=held;if(solve(s,in.target.basis,out_of_planes)) held=out_of_planes;hold=true;}   // two walls too close: as drawn
+        if(!validated && s.hold_frames<max_hold_frames*s.cadence) {
+            Vec3 out_of_planes=held;
+            if(solve(s,in.target.basis,out_of_planes)) held=out_of_planes;
+            else {bool minimax=false;held=retreat(s,in.target.basis,target,in.chest,std::nullopt,minimax);}   // two walls too close
+            hold=true;
+        }
         s.drawn_validated=hold || validated;
         if(hold) {
             ++s.hold_frames;out.held=true;out.drawn.position=held;out.shift=held-target;

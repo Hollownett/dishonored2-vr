@@ -213,12 +213,11 @@ public:
     }
     // Render thread, before HandClamp::update: the loose props near the hand (I2) and the met prop to exclude (I1, from last frame's meet_clamp).
     void fill_clamp_input(unsigned side,ClampInput& in,std::optional<std::uintptr_t> exclude) {
-        in.loose_count=0;in.dynamic_count=0;in.kick={};in.exclude.reset();
+        in.loose_count=0;in.kick={};in.exclude.reset();
         if(side>1) return;
         std::lock_guard<std::mutex> l(meet_mutex_);
         if(seconds()-meet_.stamp>meet_stale) return;
         in.loose=meet_.loose;in.loose_count=std::min<std::size_t>(meet_.loose_count,ClampInput::loose_capacity);
-        in.dynamic=meet_.dynamic;in.dynamic_count=std::min<std::size_t>(meet_.dynamic_count,ClampInput::loose_capacity);
         if(seconds()-meet_.side_stamp[side]<=meet_fresh) in.kick=meet_.outward[side];   // the way out the meet will take: the wall tip looks that way at rest
         in.exclude=exclude;
     }
@@ -297,7 +296,7 @@ public:
         }
         std::chrono::steady_clock::duration body_time{},math_time{};
         unsigned writes=0,fulls=0;std::uint64_t write_peak=0;
-        std::array<std::uintptr_t,8> pushable{};unsigned pushables=0;std::array<std::uintptr_t,ClampInput::loose_capacity> loose{};unsigned looses=0;std::array<std::uintptr_t,ClampInput::loose_capacity> dynamics{};unsigned dynamic_count=0;std::array<Vec3,2> outward{};std::array<std::uintptr_t,2> outward_entity{}; // what meet() is told
+        std::array<std::uintptr_t,8> pushable{};unsigned pushables=0;std::array<std::uintptr_t,ClampInput::loose_capacity> loose{};unsigned looses=0;std::array<Vec3,2> outward{};std::array<std::uintptr_t,2> outward_entity{}; // what meet() is told
         std::array<bool,2> lag_owned{}; // the entity the cast holds a hand at (or the hand meets) is a prop of ours: that hand's lag is trusted for every prop
         for(unsigned side=0;side<2;++side) lag_owned[side]=hands[side].active && hands[side].held_by && std::any_of(near_.begin(),near_.end(),[&](const Near& n){return n.entity==hands[side].held_by;});
         for(auto it=near_.begin();it!=near_.end();) {
@@ -340,7 +339,6 @@ public:
             if(player && near_player(*n.body->bounds,*player)) {++keepouts;continue;} // against the player's body or under his feet: never shoved
             const bool met=n.mass>0 && n.mass<config.heavy_kg && !n.drag.blocked(now); // a loose prop in reach the contact pushes and that gives way
             if(met && pushables<pushable.size()) pushable[pushables++]=n.entity;
-            if(n.mass>0 && dynamic_count<dynamics.size()) dynamics[dynamic_count++]=n.entity; // any mass: a crate is a prop, not the world (the clamp ranks static geometry above it)
             if(n.mass>0 && n.mass<config.heavy_kg && looses<loose.size()) loose[looses++]=n.entity; // light and loose, pinned or not: the clamp never snaps on it
             rig::HeldShape shape;
             try {shape=prop_shape(*n.body);} catch(const std::invalid_argument&) {continue;}
@@ -377,7 +375,7 @@ public:
         {   // for the render thread: the props the contact pushes and the way out of the one each hand overlaps most (a busy lock waits for the next service)
             std::unique_lock<std::mutex> lock(meet_mutex_,std::try_to_lock);
             if(lock.owns_lock()) {
-                meet_.pushable=pushable;meet_.count=pushables;meet_.loose=loose;meet_.loose_count=looses;meet_.dynamic=dynamics;meet_.dynamic_count=dynamic_count;meet_.stamp=now;
+                meet_.pushable=pushable;meet_.count=pushables;meet_.loose=loose;meet_.loose_count=looses;meet_.stamp=now;
                 for(unsigned side=0;side<2;++side) if(hands[side].active) {meet_.outward[side]=outward[side];meet_.entity[side]=outward_entity[side];meet_.side_stamp[side]=now;}
             }
         }
@@ -562,7 +560,7 @@ private:
     std::mutex mutex_;std::array<Lane,2> lanes_{};std::atomic<bool> wanted_{};
     std::vector<Near> near_;std::array<std::uint64_t,2> seen_{};unsigned cursor_{1},cycle_{},scan_tick_{};
     std::vector<std::uintptr_t> slot_entity_;std::vector<std::uint8_t> slot_prop_;std::uintptr_t game_{},world_{}; // slot -> entity pointer and class (the scanner's)
-    struct Meet {std::array<std::uintptr_t,8> pushable{};unsigned count{};std::array<std::uintptr_t,ClampInput::loose_capacity> loose{};unsigned loose_count{};std::array<std::uintptr_t,ClampInput::loose_capacity> dynamic{};unsigned dynamic_count{};double stamp{};std::array<std::uintptr_t,2> entity{};std::array<Vec3,2> outward{};std::array<double,2> side_stamp{};};
+    struct Meet {std::array<std::uintptr_t,8> pushable{};unsigned count{};std::array<std::uintptr_t,ClampInput::loose_capacity> loose{};unsigned loose_count{};double stamp{};std::array<std::uintptr_t,2> entity{};std::array<Vec3,2> outward{};std::array<double,2> side_stamp{};};
     Vec3 player_eye_{};double player_stamp_{-1e9}; // under mutex_
     static ClampMeet compose_meet_none(const HandClamp& clamp,unsigned side,const ClampOutput& out,const WorldTrackedPose& target) {
         MeetState none{};return compose_meet(none,MeetPublished{},clamp,side,out,target,0.);

@@ -95,8 +95,19 @@ void test_verify_and_cast() {
     put64(pool+0x123456ull*0xb0+0x90,slot);put64(slot+8,object);put64(object+0x10,0xE17717);
     CHECK(NativeWorldTrace::entity_of(read_mem,world,0x00123456)==0xE17717);
     CHECK(NativeWorldTrace::entity_of(read_mem,world,0xffffff)==0 && NativeWorldTrace::entity_of(read_mem,world,0x1)==0);
+    // The hit body's class, read from its record (flags & 7: 2 dynamic, anything else an entity that does not move); no body or entity is the world;
+    // a record that cannot be read ranks as an entity that does not move, never as a prop.
+    {   const std::uint32_t dynamic_flags=0x2,keyframed_flags=0x6;
+        put(pool+0x123456ull*0xb0+0x44,&dynamic_flags,4);
+        CHECK(NativeWorldTrace::body_class_of(read_mem,world,0x123456,0xE17717)==BodyClass::dynamic);
+        put(pool+0x123456ull*0xb0+0x44,&keyframed_flags,4);
+        CHECK(NativeWorldTrace::body_class_of(read_mem,world,0x123456,0xE17717)==BodyClass::entity_static);
+        CHECK(NativeWorldTrace::body_class_of(read_mem,world,0x123456,0)==BodyClass::world && NativeWorldTrace::body_class_of(read_mem,world,0xffffff,0xE17717)==BodyClass::world);
+        CHECK(NativeWorldTrace::body_class_of(read_mem,world,0x2fffff,0xE17717)==BodyClass::entity_static);   // the record is not mapped
+        put(pool+0x123456ull*0xb0+0x44,&dynamic_flags,4);
+    }
     const auto hit=NativeWorldTrace::sphere_cast(base,read_mem,fake_cast,fake_construct,world,{0,0,0},{4,0,0},0.05);
-    CHECK(hit && casts==1 && hit->entity==0xE17717 && hit->fraction==0.25 && hit->centre.x==1.0 && hit->normal.x==-1);
+    CHECK(hit && casts==1 && hit->entity==0xE17717 && hit->body_class==BodyClass::dynamic && hit->fraction==0.25 && hit->centre.x==1.0 && hit->normal.x==-1);
     CHECK(seen.shape_tag_codec==0xabcdef0 && seen.shape && seen.origin[0]==0 && seen.delta[0]==4.f && seen.inverse_delta[0]==.25f);
     CHECK(seen.flags==(0x3f000000u|7u) && seen_radius==0.05f);
     CHECK(seen_filter.vtable==base+0x1ad4b68 && seen_filter.layer_mask==0xc43e && seen_filter.required_bits==0 && seen_filter.storage==0x1ffff);

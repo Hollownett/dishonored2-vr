@@ -127,6 +127,7 @@ struct WorldTraceHit {
     std::uint16_t material{0xffff}; // collector +0x7c: physics material id of the hit surface (docs/native-impact-fx.md)
     std::uint32_t body_handle{0xffffff};
     std::uint32_t shape_key{0xffffffffu};
+    BodyClass body_class{BodyClass::world};   // read from the hit body when the cast answered (HandClamp ranks planes by it)
 };
 struct WorldTraceInitialHit {
     NativeInitialContact contact{};
@@ -192,7 +193,7 @@ inline std::optional<WorldTraceHit> convert_world_hit(const NativeClosestCollect
 // ONLY if the policy's own palm_radius is set to 0 (otherwise the margin is applied twice).
 inline CollisionHit to_collision_hit(const WorldTraceHit& h) {return {h.point,h.normal,h.fraction,h.entity,h.material};}
 // Feeds HandClamp's palm_hit/tip_hit/chest_hit. Cast with the probe's own radius: the clamp keeps only skin on top.
-inline ClampHit to_clamp_hit(const WorldTraceHit& h) {return {h.point,h.normal,h.entity,h.material,h.initial_overlap,h.normal_valid};}
+inline ClampHit to_clamp_hit(const WorldTraceHit& h) {return {h.point,h.normal,h.entity,h.material,h.initial_overlap,h.normal_valid,h.body_class};}
 
 class NativeWorldTrace {
 public:
@@ -244,6 +245,16 @@ public:
         std::uint32_t count{},handle{},broadphase{},entity_id{};
         std::uint8_t flags{};
     };
+    // What the hit body is, from the body record itself: no body or no entity is the world; motion type 2 (flags & 7, as native_rigid_body reads
+    // it) is a dynamic body whatever its mass; any other type is an entity that does not move (static or keyframed). A record that cannot be
+    // read is entity_static: it must not rank below a prop.
+    static BodyClass body_class_of(Read read,std::uintptr_t world,std::uint32_t body,std::uintptr_t entity) {
+        if(body==0xffffff || !entity) return BodyClass::world;
+        std::uintptr_t pool{};std::uint32_t flags{};
+        if(!read || !read(world+body_pool_offset,&pool,sizeof(pool)) || !rig::pointer(pool) ||
+           !read(pool+static_cast<std::uintptr_t>(body)*0xb0u+0x44,&flags,sizeof(flags))) return BodyClass::entity_static;
+        return (flags&7u)==2u?BodyClass::dynamic:BodyClass::entity_static;
+    }
     template<class Reader> static std::optional<CheckedHitBody> inspect_hit_body(Reader& read,const NativeWorldQuerySource& source,std::uint32_t handle) {
         const std::uint32_t index=handle&0xffffffu;
         if(handle==0xffffffffu || index==0xffffffu)return {};
@@ -342,6 +353,7 @@ public:
                 const double normal[3]{contact->normal.x,contact->normal.y,contact->normal.z};
                 for(unsigned axis=0;axis<3;++axis) {record.position[axis]=static_cast<float>(point[axis]);record.normal[axis]=static_cast<float>(normal[axis]);}
                 auto hit=convert_world_hit(record,from,to,*entity);if(!hit)return {};
+                hit->body_class=body_class_of(read,world,hit->body,hit->entity);
                 hit->static_support=false;result.regular->hits[index]=*hit;
                 if(!result.hit || hit->fraction<result.hit->fraction)result.hit=*hit;
             }
@@ -358,6 +370,7 @@ public:
             entity=*resolved;
         } else entity=entity_of(read,world,collector.body);
         auto hit=convert_world_hit(collector,from,to,entity);
+        if(hit)hit->body_class=body_class_of(read,world,hit->body,hit->entity);
         if(source && hit)hit->static_support=false;
         if(!hit)return {};
         result.hit=std::move(hit);return result;

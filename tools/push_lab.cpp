@@ -224,13 +224,13 @@ Run simulate(const Scenario& s,const rig::HandGeometry& geometry,const HandConta
         if(prop_excluded) {}
         else if(prop_start<=0) {
             Vec3 nn=shape_normal(shape,a);const bool valid=length(nn)>.5;
-            best=ClampHit{a,valid?nn:Vec3{0,0,1},1,0xffff,true,valid};best_u=-1;deepest=prop_start;
+            best=ClampHit{a,valid?nn:Vec3{0,0,1},1,0xffff,true,valid,BodyClass::dynamic};best_u=-1;deepest=prop_start;
         } else if(span>1e-9) {
             const unsigned n=std::max(1u,static_cast<unsigned>(std::ceil(span/.004)));
             for(unsigned k=1;k<=n;++k) if(rig::shape_distance(shape,at(double(k)/n))<=r) {
                 double lo=double(k-1)/n,hi=double(k)/n;for(int it=0;it<12;++it) {const double mid=(lo+hi)/2;if(rig::shape_distance(shape,at(mid))<=r) hi=mid;else lo=mid;}
                 const Vec3 c=at(hi);Vec3 nn=shape_normal(shape,c);if(length(nn)<.5) nn=dir*(-1/span);if(dot(nn,dir)>0) nn=nn*-1.;
-                best=ClampHit{c-nn*rig::shape_distance(shape,c),nn,1,0xffff,false,true};best_u=hi;break;
+                best=ClampHit{c-nn*rig::shape_distance(shape,c),nn,1,0xffff,false,true,BodyClass::dynamic};best_u=hi;break;
             }
         }
         if(cast_wall && !std::isnan(s.wall)) {   // the plane x = wall, facing -x
@@ -265,7 +265,6 @@ Run simulate(const Scenario& s,const rig::HandGeometry& geometry,const HandConta
             const auto in_hand=[&](const ClampProbe& q) {for(const auto& o:open_hand) if(clamp_detail::same_probe(o,q)) return true;return false;};
             flips=unsigned(in_hand(tip_before) && !clamp_detail::same_probe(tip_before,last_tip))+unsigned(in_hand(wall_before) && !clamp_detail::same_probe(wall_before,last_wall));
             if(run.mass>0 && run.mass<cfg.heavy_kg) {in.loose[0]=1;in.loose_count=1;}   // the service's loose list: the light bottle, pinned or not
-            in.dynamic[0]=1;in.dynamic_count=1;   // the bottle is a prop at any mass (the service lists every body in reach)
             if(meet_on) {in.exclude=meet_r.exclude;in.kick=meet_now.outward;}
             clamp_out=clamp.update(0,in);clamp_started=true;
             const unsigned casts=unsigned(clamp_out.palm_sweep.valid)+unsigned(clamp_out.tip_sweep.valid)+unsigned(clamp_out.wall_tip_sweep.valid)+unsigned(clamp_out.exclude_sweep.valid);

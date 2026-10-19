@@ -376,7 +376,7 @@ static bool hand_clamp_enabled=true;static std::array<d2vr::ClampedShotOffset,2>
 static std::array<UINT64,2> clamp_posted_scope{};static std::array<bool,2> clamp_posted{};
 struct HandClampStatus {
     std::atomic<bool> active{};std::atomic<unsigned> state{},probes{},max_casts{};
-    std::atomic<UINT64> contact_frames{},snapbacks{},reach_clamped{},yields{},missed_notes{},repeated_updates{},reacquire_blocked{},reacquire_holds{},unanswered{},released_shots{};
+    std::atomic<UINT64> contact_frames{},snapbacks{},squeeze_infeasible{},reach_clamped{},yields{},missed_notes{},repeated_updates{},reacquire_blocked{},reacquire_holds{},unanswered{},released_shots{};
 };
 static std::array<HandClampStatus,2> hand_clamp_status;static std::atomic<double> hand_clamp_cast_mean{},hand_clamp_cast_max{};
 static std::atomic<bool> hand_clamp_tip{true},hand_clamp_alternate{};static std::atomic<double> hand_clamp_restore{1},hand_clamp_recover_wait{5};
@@ -4289,7 +4289,7 @@ void prepare_head_view(void* view) noexcept {
                           eye_sweep=released_shot.posted(side,clamp_drew,clamped,clamp_post,{anchor.position[0],anchor.position[1],anchor.position[2]},target.position,now,game_xr->pose_epoch());}
                          if(eye_sweep) {d2vr::NativeInteractionAim::post_weapon_segment(side,d2vr::NativeInteractionAim::exclude_slot,eye_sweep->from,eye_sweep->to,eye_sweep->radius);++status.released_shots;}}
                         status.active.store(clamp_drew);status.state.store(static_cast<unsigned>(clamped.state));status.probes.store(static_cast<unsigned>(probes.count));
-                        status.contact_frames.store(hand_clamp.contact_frames(side));status.snapbacks.store(hand_clamp.snapbacks(side));
+                        status.contact_frames.store(hand_clamp.contact_frames(side));status.snapbacks.store(hand_clamp.snapbacks(side));status.squeeze_infeasible.store(hand_clamp.squeeze_infeasible(side));
                         status.missed_notes.store(hand_clamp.missed_notes(side));status.repeated_updates.store(hand_clamp.repeated_updates(side));
                         status.reacquire_blocked.store(hand_clamp.reacquire_blocked_frames(side));
                         }
@@ -5155,6 +5155,7 @@ std::string feedback_status_json() {
              <<",\"state\":"<<pair([](const HandClampStatus& h){return h.state.load();})
              <<",\"contact_frames\":"<<pair([](const HandClampStatus& h){return h.contact_frames.load();})
              <<",\"snapbacks\":"<<pair([](const HandClampStatus& h){return h.snapbacks.load();})
+             <<",\"squeeze_infeasible\":"<<pair([](const HandClampStatus& h){return h.squeeze_infeasible.load();})
              <<",\"reach_clamped\":"<<pair([](const HandClampStatus& h){return h.reach_clamped.load();})
              <<",\"yields\":"<<pair([](const HandClampStatus& h){return h.yields.load();})
              <<",\"missed_notes\":"<<pair([](const HandClampStatus& h){return h.missed_notes.load();})
