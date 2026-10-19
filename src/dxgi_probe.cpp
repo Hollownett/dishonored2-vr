@@ -2964,7 +2964,7 @@ static void publish_held_object(unsigned side,const d2vr::WorldTrackedPose& grip
     held_placement_serial.store(t.placement_serial,std::memory_order_release);
     const bool accepted=d2vr::NativeHeldObject::publish(t);
     // HoldObject draws the object as a view-model pinned to the camera; render it in the world, where the hand holds it.
-    if(float fp{};read_self(*e+0xc8,&fp,4) && fp!=0.f) d2vr::NativeInteractionAim::request_held_world(*e);
+    if(float fp{};read_self(*e+0xc8,&fp,4) && (fp!=0.f || !d2vr::NativeHeldObject::layer_settled(*e))) d2vr::NativeInteractionAim::request_held_world(*e);
     // Carry diagnostics: observation only (read_self reads are range-checked and SEH-guarded; the catch is for the C++ side). Rejected publishes
     // bound nothing this frame, so they are counted apart and not noted.
     try {

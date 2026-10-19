@@ -109,3 +109,17 @@ assert 'set_filter' not in layer and 'write' not in layer
 assert 'clear_reasons' in clear and 'layer_restore_.store(true' in clear
 assert 'static bool publish(const Target& t) noexcept' in held and 'rebind_overwrites' in anchor
 assert anchor.index('rebind_overwrites')<anchor.index('*reinterpret_cast<std::int16_t*>(rf+0x3d0)=-1')   # read back before the write
+
+# Task 10: the DEBRIS layer is serviced apart from the render scale, so a transient clear() is re-applied
+assert 'static void service_hold_layers(' in held and 'static bool layer_settled(' in held
+service=held[held.index('static void service_hold_layers('):]
+service=service[:service.index('\n    }\n')]
+assert 'layer_restore_.exchange(false)' in service and 'restore_layer(' in service and service.index('restore_layer(')<service.index('debris_layer(')
+world=held[held.index('static bool world_render('):]
+world=world[:world.index('\n    }\n')]
+assert 'debris_layer(' not in world
+aim=(root/'src/native_interaction_aim.hpp').read_text(encoding='utf-8-sig')
+stage0=aim[aim.index('held_world_.exchange(0)')-200:aim.index('held_world_.exchange(0)')+600]
+assert 'service_hold_layers(' in stage0 and 'NativeHeldObject::layer_restore_.exchange' not in aim
+assert stage0.index('service_hold_layers(')<stage0.index('world_render(')
+assert 'fp!=0.f || !d2vr::NativeHeldObject::layer_settled(*e)' in full

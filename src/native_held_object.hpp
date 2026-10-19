@@ -97,7 +97,7 @@ public:
     inline static std::atomic<float> bind_entity_err{-2.f};
     static void clear(unsigned reason=0) noexcept {
         ++clear_reasons[reason<clear_reasons.size()?reason:0];
-        layer_restore_.store(true,std::memory_order_release);
+        layer_settled_.store(0,std::memory_order_release);layer_restore_.store(true,std::memory_order_release);
         NativeHeldPlacement::process_owner().clear();
         AcquireSRWLockExclusive(&publication_lock_);
         __try {
@@ -159,13 +159,16 @@ public:
         }
         return shown;
     }
+    // The entity is still the one its handle names in the game's entity table.
+    template<class Read> static bool live_entity(std::uintptr_t base,Read& read,std::uintptr_t entity) {
+        const auto game=rig::value<std::uintptr_t>(read,base+0x39a5290);const auto id=entity?rig::value<std::uint32_t>(read,entity+0xa8):std::nullopt;
+        return game && id && *id!=0x3fff0010 && (*id>>16)<0x3fff && rig::value<std::uintptr_t>(read,*game+0x3130b0+(*id>>16)*8ull)==entity;
+    }
     // Game thread only: draw the held object in the world (render scale 0) so it shows where the hand holds it.
     template<class Read> static bool world_render(std::uintptr_t base,Read& read,std::uintptr_t entity) {
         static const bool verified=code(base+render_scale_rva,render_scale_code);
         if(!verified || !entity) return false;
-        const auto game=rig::value<std::uintptr_t>(read,base+0x39a5290);const auto id=rig::value<std::uint32_t>(read,entity+0xa8);
-        if(!game || !id || *id==0x3fff0010 || (*id>>16)>=0x3fff || rig::value<std::uintptr_t>(read,*game+0x3130b0+(*id>>16)*8ull)!=entity) return false;
-        debris_layer(base,read,entity);
+        if(!live_entity(base,read,entity)) return false;
         const auto scale=rig::value<float>(read,entity+0xc8);if(!scale || *scale==0.f) return true;
         __try {reinterpret_cast<void (__fastcall*)(std::uintptr_t,float)>(base+render_scale_rva)(entity,0.f);} __except(EXCEPTION_EXECUTE_HANDLER) {return false;}
         ++world_renders;return true;
@@ -182,19 +185,30 @@ public:
     inline static bool (*filter_seam_)(std::uintptr_t,std::uint32_t,std::uint32_t){}; // checks only: stands in for the engine call
     inline static std::atomic<std::uint64_t> layers_swapped{},layers_restored{};
     inline static std::atomic<bool> layer_restore_{};
+    // Settled mirror (any thread): the entity whose layer needs nothing more this hold - swapped, or checked and not RIGID_BODY. clear() and
+    // restore_layer() reset it, so a transient clear() makes the publisher ask for the service again even though the render scale is already 0.
+    inline static std::atomic<std::uintptr_t> layer_settled_{};
+    static bool layer_settled(std::uintptr_t entity) noexcept {return entity && layer_settled_.load(std::memory_order_acquire)==entity;}
     template<class Read> static bool debris_layer(std::uintptr_t base,Read& read,std::uintptr_t entity) {
         if(layer_entity_ && layer_entity_!=entity) restore_layer(base,read);
-        if(layer_entity_==entity) return true;
+        if(layer_entity_==entity) {layer_settled_.store(entity,std::memory_order_release);return true;}
         const auto body=throwable_body(base,read,entity);
-        if(!body || (body->second&0x1f)!=layer_rigid_body || !set_filter(base,read,body->first,(body->second&~0x1fu)|layer_debris)) return false;
-        layer_entity_=entity;layer_handle_=body->first;layer_filter_=body->second;++layers_swapped;return true;
+        if(body && (body->second&0x1f)!=layer_rigid_body) {layer_settled_.store(entity,std::memory_order_release);return false;}   // a bottle: nothing to write
+        if(!body || !set_filter(base,read,body->first,(body->second&~0x1fu)|layer_debris)) return false;
+        layer_entity_=entity;layer_handle_=body->first;layer_filter_=body->second;++layers_swapped;layer_settled_.store(entity,std::memory_order_release);return true;
+    }
+    // Game thread, every frame: give the body its own layer back when clear() asked (hold end or a transient clear), then, while an entity is
+    // held, take the DEBRIS layer again. The layer is serviced apart from the render scale, which is 0 after the first request.
+    template<class Read> static void service_hold_layers(std::uintptr_t base,Read& read,std::uintptr_t entity) {
+        if(layer_restore_.exchange(false)) restore_layer(base,read);
+        if(entity && live_entity(base,read,entity)) debris_layer(base,read,entity);
     }
     // Game thread: the hold ended (clear() asks); the body gets its own layer back while it is still the same body.
     template<class Read> static bool restore_layer(std::uintptr_t base,Read& read) {
         if(!layer_entity_) return false;
         const auto body=throwable_body(base,read,layer_entity_);
         const bool ok=body && body->first==layer_handle_ && set_filter(base,read,layer_handle_,layer_filter_);
-        layer_entity_=0;if(ok) ++layers_restored;return ok;
+        layer_entity_=0;layer_settled_.store(0,std::memory_order_release);if(ok) ++layers_restored;return ok;
     }
     // Diagnostics, read only: the collision layer (filter word & 0x1f) of the held entity's throwable body; 3 RIGID_BODY, 4 DEBRIS.
     // The cache keeps the body handle per entity: the component scan runs once per hold, then only the pool record is read.

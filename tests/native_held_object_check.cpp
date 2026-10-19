@@ -363,6 +363,42 @@ int main() {
         std::printf("held layer: tank filter 0x%x -> 0x%x for the hold, restored; bottle (DEBRIS) untouched\n",written[1][1],written[0][1]);
         Held::filter_seam_=nullptr;
     }
+    {   // Task 10: a transient clear() restores RIGID_BODY; the service re-applies DEBRIS while the hold goes on, and a real hold end leaves it restored
+        Fixture state;auto reader=read_memory;
+        constexpr std::uintptr_t component=0x240000000,world=0x241000000,pool=0x242000000;constexpr std::uint32_t handle=0x1000002;
+        put(entity+0x268,r::List{held_components,2,2u<<8});memory.put(held_components+8,component);
+        memory.put(component,base_address+0x1b64b68);memory.put(component+0x10,entity);memory.put(component+0xf8,handle);
+        memory.put(game_address+0x60410,world);memory.put(world+0x28,pool);memory.put(world+0x30,std::uint32_t{3});
+        static std::vector<std::array<std::uint32_t,2>> written;written.clear();
+        static std::uintptr_t filter_at=0;filter_at=pool+2*0xb0+0x6c;
+        memory.put(filter_at,std::uint32_t{(0x20u<<5)|3u});
+        Held::filter_seam_=[](std::uintptr_t,std::uint32_t h,std::uint32_t f) {written.push_back({h,f});memory.put(filter_at,f);return true;}; // the engine keeps what it is given
+        Held::clear();Held::layer_restore_.store(false);
+        const auto swapped=Held::layers_swapped.load();
+        {   // transient_clear_reapplies_debris
+            assert(!Held::layer_settled(entity));
+            Held::service_hold_layers(base_address,reader,entity);
+            assert(written.size()==1 && (written[0][1]&0x1f)==4u && Held::layer_settled(entity) && !Held::layer_settled(entity+8));
+            Held::service_hold_layers(base_address,reader,entity);assert(written.size()==1);   // settled: no further write
+            Held::clear();assert(!Held::layer_settled(entity));
+            Held::service_hold_layers(base_address,reader,entity);
+            assert(written.size()==3 && (written[1][1]&0x1f)==3u && (written[2][1]&0x1f)==4u && Held::layer_settled(entity));
+            assert(Held::layers_swapped.load()==swapped+2 && (r::value<std::uint32_t>(reader,filter_at).value()&0x1f)==4u);
+        }
+        {   // hold_end_restores
+            Held::clear();Held::service_hold_layers(base_address,reader,0);
+            assert(written.size()==4 && (written[3][1]&0x1f)==3u && !Held::layer_settled(entity));
+            Held::service_hold_layers(base_address,reader,0);assert(written.size()==4);
+        }
+        {   // bottle_settled_without_write
+            memory.put(filter_at,std::uint32_t{(0x20u<<5)|4u});written.clear();
+            assert(!Held::layer_settled(entity));Held::service_hold_layers(base_address,reader,entity);
+            assert(written.empty() && Held::layer_settled(entity));
+            Held::clear();assert(!Held::layer_settled(entity));
+        }
+        std::printf("held layer service: tank re-takes DEBRIS after a transient clear, RIGID_BODY after the hold; bottle settled without a write\n");
+        Held::filter_seam_=nullptr;
+    }
     {   // nan_target_rejected / scaled_axis_rejected / reflection_rejected: invalid targets never replace the published one
         Fixture state;const auto before=Held::rejected_targets.load();
         auto bad=state.target;bad.pos[0]=7.f;bad.axis[4]=NAN;Held::publish(bad);

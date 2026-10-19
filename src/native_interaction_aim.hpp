@@ -576,8 +576,8 @@ class NativeInteractionAim {
             if(const auto arms=arm_show_.exchange(0)) {if(self->active_ && self->logic_()==2) try {NativeHeldObject::show_arms(self->base_,self->read_,arms);} catch(...) {}}
             // Full-grip sword: equip requests from the input thread and the dropped copy (native_weapon_hands.hpp).
             if(self->logic_()==2) try {NativeWeaponHands::service(self->base_,self->read_);} catch(...) {}
-            if(const auto held=held_world_.exchange(0)) {if(self->active_ && self->logic_()==2) try {NativeHeldObject::world_render(self->base_,self->read_,held);} catch(...) {}}
-            if(NativeHeldObject::layer_restore_.exchange(false)) {if(self->active_ && self->logic_()==2) try {NativeHeldObject::restore_layer(self->base_,self->read_);} catch(...) {}}
+            // The held object's collision layer is serviced every frame (restore on clear, then DEBRIS while held), apart from its render scale.
+            {const auto held=held_world_.exchange(0);if(self->active_ && self->logic_()==2) try {NativeHeldObject::service_hold_layers(self->base_,self->read_,held);if(held) NativeHeldObject::world_render(self->base_,self->read_,held);} catch(...) {}}
             double probe_distance{};{std::lock_guard<std::mutex> guard(trace_mutex_);probe_distance=trace_distance_;trace_distance_=0;}
             if(probe_distance!=0) { // negative: straight down (game Z up)
                 std::string out="trace: ";
