@@ -6,10 +6,13 @@
 #include "tracked_pose.hpp"
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <fstream>
 #include <iterator>
 #include <array>
+#include <chrono>
 #include <condition_variable>
 #include <memory>
 #include <mutex>
@@ -73,10 +76,11 @@ public:
 // "d2vr-palm-offsets 1\n", then "<side> <profile> tx ty tz pitch yaw\n". At most 16 entries and 4096 bytes. load() throws on a file
 // that is unreadable, oversized or malformed and leaves the store as it was; a missing file is a first run, not an error.
 // The hands that are NOT empty, as a bit per side: a drawn weapon, a carried body or a held object. The tilt applies to empty hands only. Carrying
-// and holding come from a state the game publishes with a tick, so they count only while fresh; the weapon bits are used as published.
+// and holding come from a state the game publishes with a tick. While that state is not fresh (unknown) both hands count as occupied.
 inline unsigned palm_occupied_bits(unsigned weapon_bits,unsigned carrying_bits,bool holding,unsigned hold_side,bool state_fresh) {
-    unsigned bits=weapon_bits&3u;
-    if(state_fresh) {bits|=carrying_bits&3u;if(holding) bits|=1u<<(hold_side&1u);}
+    if(!state_fresh) return 3u; // the state is not known yet (session start, a stalled publication): no tilt until it is
+    unsigned bits=(weapon_bits|carrying_bits)&3u;
+    if(holding) bits|=1u<<(hold_side&1u);
     return bits;
 }
 
@@ -151,6 +155,10 @@ public:
         std::error_code ec;std::filesystem::rename(temporary,file,ec);
         if(ec) {std::error_code ignore;std::filesystem::remove(temporary,ignore);throw std::runtime_error("Cannot publish palm offsets; previous file retained");}
     }
+    void erase(unsigned side,const std::string& profile) {
+        side&=1u;
+        for(auto it=entries_.begin();it!=entries_.end();++it) if(it->side==side && it->profile==profile) {entries_.erase(it);return;}
+    }
     std::pair<PalmOffset,bool> get(unsigned side,const std::string& profile) const {
         side&=1u;
         if(const auto* e=find(side,profile)) return {e->value,true};
@@ -171,8 +179,10 @@ public:
 // (profile_query_available=false) treats the suggested profile as authoritative. Not thread-safe: the owner locks.
 class PalmCalibration {
     PalmOffsetStore store_;std::array<std::string,2> profile_{};std::array<std::optional<PalmOffset>,2> pending_{};
+    std::array<double,2> pending_since_{};std::array<bool,2> fallback_written_{};std::array<std::optional<PalmOffset>,2> fallback_prior_{};
     std::string key(unsigned side) const {return profile_[side&1u].empty()?std::string(palm_default_profile):profile_[side&1u];}
 public:
+    static constexpr double pending_seconds=5;
     bool profile_query_available=true;
     PalmOffsetStore& store() {return store_;}
     const PalmOffsetStore& store() const {return store_;}
@@ -184,11 +194,30 @@ public:
         if(saved) *saved=stored.second;
         return stored.first;
     }
-    // true: the store changed and should be written.
-    bool confirm(unsigned side,const PalmOffset& value) {
+    // true: the store changed and should be written. now: seconds on any steady clock (a fit waits pending_seconds for a profile).
+    bool confirm(unsigned side,const PalmOffset& value,double now=0) {
         side&=1u;
-        if(profile_[side].empty() && profile_query_available) {pending_[side]=clamp_palm_offset(value);return false;}
+        if(profile_[side].empty() && profile_query_available) {pending_[side]=clamp_palm_offset(value);pending_since_[side]=now;return false;}
         pending_[side].reset();store_.set(side,key(side),value);return true;
+    }
+    // A fit that has waited pending_seconds without a profile is written under the suggested fallback (and re-keyed if a profile arrives later).
+    // true: the store changed and should be written.
+    bool tick(double now) {
+        bool changed=false;
+        for(unsigned side=0;side<2;++side) {
+            if(!pending_[side] || !profile_[side].empty() || now-pending_since_[side]<=pending_seconds) continue;
+            if(!fallback_written_[side]) {
+                const auto prior=store_.get(side,palm_default_profile);
+                fallback_prior_[side]=prior.second?std::optional<PalmOffset>(prior.first):std::nullopt;
+                fallback_written_[side]=true;
+            }
+            const auto before=store_.get(side,palm_default_profile);
+            store_.set(side,palm_default_profile,*pending_[side]);
+            const auto after=store_.get(side,palm_default_profile);
+            changed=changed || !before.second || before.first.pitch_deg!=after.first.pitch_deg || before.first.yaw_deg!=after.first.yaw_deg ||
+                before.first.translation.x!=after.first.translation.x || before.first.translation.y!=after.first.translation.y || before.first.translation.z!=after.first.translation.z;
+        }
+        return changed;
     }
     // A profile reported by the runtime. true: a deferred fit was keyed under it and the store should be written.
     bool set_profile(unsigned side,const std::string& profile) {
@@ -196,50 +225,74 @@ public:
         if(!PalmOffsetStore::valid_profile(profile)) return false;
         profile_[side]=profile;
         if(!pending_[side]) return false;
+        if(fallback_written_[side] && profile!=palm_default_profile) { // undo the provisional fallback save
+            if(fallback_prior_[side]) store_.set(side,palm_default_profile,*fallback_prior_[side]);else store_.erase(side,palm_default_profile);
+        }
+        fallback_written_[side]=false;fallback_prior_[side].reset();
         store_.set(side,profile,*pending_[side]);pending_[side].reset();return true;
     }
 };
 
-// Writes snapshots of the store on a worker thread so the XR frame never waits on the disk. Only the newest pending snapshot is kept. The
-// worker owns its state (shared), so destroying the saver never blocks on the disk or on a thread the loader may have killed.
+// A load or confirm error that reads as cleared once a later save succeeds (successes: the saver's running count of good writes).
+class PalmErrorLatch {
+    bool raised_{};std::uint64_t at_{};
+public:
+    void raise(std::uint64_t successes) noexcept {raised_=true;at_=successes;}
+    bool active(std::uint64_t successes) const noexcept {return raised_ && successes<=at_;}
+};
+
+// Writes snapshots of the store on a worker thread so the XR frame never waits on the disk. Only the newest pending snapshot is kept. One saver
+// serves the whole process (process()), so two writers never share the .tmp file across XR recoveries. The worker owns its state (shared), so
+// destroying a saver never blocks on the disk or on a thread the loader may have killed.
 class PalmSaver {
+    struct Job {PalmOffsetStore store;std::filesystem::path file;};
     struct State {
-        std::mutex mutex;std::condition_variable wake,idle;std::optional<PalmOffsetStore> job;std::filesystem::path file;
-        bool stop{},busy{},error{},started{};
+        std::mutex mutex;std::condition_variable wake,idle;std::optional<Job> job;std::filesystem::path file;
+        bool stop{},busy{},error{},started{};std::uint64_t successes{};
     };
     std::shared_ptr<State> state_=std::make_shared<State>();
+    std::function<void(std::function<void()>)> spawner_; // empty: a detached std::thread
     static void run(std::shared_ptr<State> state) {
         std::unique_lock<std::mutex> lock(state->mutex);
         for(;;) {
             state->wake.wait(lock,[&]{return state->stop || state->job;});
-            if(state->stop && !state->job) return;
             if(state->stop) return; // shutting down: drop the pending write rather than stall the exit
             auto job=std::move(*state->job);state->job.reset();state->busy=true;
             lock.unlock();
-            bool failed=false;try {job.save(state->file);} catch(...) {failed=true;}
-            lock.lock();state->busy=false;state->error=failed;state->idle.notify_all();
+            bool failed=false;try {job.store.save(job.file);} catch(...) {failed=true;}
+            lock.lock();state->busy=false;state->error=failed;if(!failed) ++state->successes;state->idle.notify_all();
         }
     }
 public:
     PalmSaver()=default;
     explicit PalmSaver(std::filesystem::path file) {state_->file=std::move(file);}
-    void set_file(std::filesystem::path file) {std::lock_guard<std::mutex> lock(state_->mutex);state_->file=std::move(file);}
     PalmSaver(const PalmSaver&)=delete;PalmSaver& operator=(const PalmSaver&)=delete;
     ~PalmSaver() {{std::lock_guard<std::mutex> lock(state_->mutex);state_->stop=true;state_->idle.notify_all();}state_->wake.notify_all();}
+    // The process-wide saver; never destroyed (a detached worker may outlive static destruction).
+    static PalmSaver& process() {static PalmSaver* instance=new PalmSaver;return *instance;}
+    void set_file(std::filesystem::path file) {std::lock_guard<std::mutex> lock(state_->mutex);state_->file=std::move(file);}
+    void set_spawner(std::function<void(std::function<void()>)> spawner) {std::lock_guard<std::mutex> lock(state_->mutex);spawner_=std::move(spawner);}
     void submit(PalmOffsetStore snapshot) noexcept {
         try {
             std::lock_guard<std::mutex> lock(state_->mutex);
             if(state_->file.empty() || state_->stop) return;
-            state_->job=std::move(snapshot);
-            if(!state_->started) {state_->started=true;std::thread(run,state_).detach();}
+            state_->job=Job{std::move(snapshot),state_->file};
+            if(!state_->started) { // started only once a thread exists: a failed start is retried by the next submit
+                auto state=state_;auto body=[state]{run(state);};
+                if(spawner_) spawner_(body);else std::thread(body).detach();
+                state_->started=true;
+            }
         } catch(...) {}
         state_->wake.notify_all();
     }
-    void flush() { // for tests: wait until nothing is pending or being written
+    // Wait until nothing is pending or being written, at most `milliseconds`. true: idle.
+    bool flush_for(unsigned milliseconds) {
         std::unique_lock<std::mutex> lock(state_->mutex);
-        state_->idle.wait(lock,[&]{return !state_->job && !state_->busy;});
+        return state_->idle.wait_for(lock,std::chrono::milliseconds(milliseconds),[&]{return !state_->job && !state_->busy;});
     }
+    bool started() const {std::lock_guard<std::mutex> lock(state_->mutex);return state_->started;}
     bool error() const {std::lock_guard<std::mutex> lock(state_->mutex);return state_->error;}
+    std::uint64_t successes() const {std::lock_guard<std::mutex> lock(state_->mutex);return state_->successes;}
 };
 
 // The hand-fit step: the user holds a controller naturally, nudges with the thumbsticks, confirms with the trigger.

@@ -112,10 +112,9 @@ private:
     // thread, so it sits behind one mutex; file errors never leave this class (the hands keep the defaults and status says so).
     mutable std::mutex palm_mutex_;
     PalmCalibration palm_;       // the store plus each hand's interaction profile (and a fit deferred until the profile is named)
-    PalmSaver palm_saver_;       // writes on a worker thread: the XR frame never waits on the disk
     std::filesystem::path palm_file_;
     ULONGLONG profile_refresh_tick_{};
-    bool palm_error_{};
+    PalmErrorLatch palm_error_;  // a load/confirm error reads as cleared after the next successful save
     std::chrono::steady_clock::time_point settings_update_time_{};
     double palm_fit_dt_{};
     double effective_scale_=1;
@@ -688,6 +687,7 @@ private:
             checked(xrCreateActionSpace(session_,&space,&hand_spaces_[kind][side]),"Create controller space");
         }
     }
+    static double palm_clock() {return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();}
     PalmOffset palm_offset_stored(unsigned side) const {
         std::lock_guard<std::mutex> lock(palm_mutex_);
         return palm_.get(side);
@@ -697,16 +697,22 @@ private:
     void confirm_palm_offset(unsigned side,const PalmOffset& value) noexcept {
         try {
             std::optional<PalmOffsetStore> snapshot;
-            {std::lock_guard<std::mutex> lock(palm_mutex_);if(palm_.confirm(side,value)) snapshot=palm_.store();}
-            if(snapshot) palm_saver_.submit(std::move(*snapshot));
-        } catch(...) {palm_error_=true;}
+            {std::lock_guard<std::mutex> lock(palm_mutex_);if(palm_.confirm(side,value,palm_clock())) snapshot=palm_.store();}
+            if(snapshot) PalmSaver::process().submit(std::move(*snapshot));
+        } catch(...) {palm_error_.raise(PalmSaver::process().successes());}
     }
     // The runtime reports the bound profile only after the session is focused and it has chosen one; re-ask once a second, never throw.
     void refresh_interaction_profiles() noexcept {
         try {
             const auto now=GetTickCount64();
-            if(!xrGetCurrentInteractionProfile || !xrPathToString || now<profile_refresh_tick_) return;
+            if(now<profile_refresh_tick_) return;
             profile_refresh_tick_=now+1000;
+            {   // a fit that waited 5 s for a profile is saved under the fallback (and re-keyed if the profile arrives later)
+                std::optional<PalmOffsetStore> snapshot;
+                {std::lock_guard<std::mutex> lock(palm_mutex_);if(palm_.tick(palm_clock())) snapshot=palm_.store();}
+                if(snapshot) PalmSaver::process().submit(std::move(*snapshot));
+            }
+            if(!xrGetCurrentInteractionProfile || !xrPathToString) return;
             for(unsigned side=0;side<2;++side) {
                 XrInteractionProfileState state{};state.type=XR_TYPE_INTERACTION_PROFILE_STATE;
                 if(!XR_SUCCEEDED(xrGetCurrentInteractionProfile(session_,hand_paths_[side],&state)) || state.interactionProfile==XR_NULL_PATH) continue;
@@ -714,7 +720,7 @@ private:
                 if(!XR_SUCCEEDED(xrPathToString(instance_,state.interactionProfile,sizeof(text),&count,text))) continue;
                 std::optional<PalmOffsetStore> snapshot;
                 {std::lock_guard<std::mutex> lock(palm_mutex_);if(palm_.set_profile(side,text)) snapshot=palm_.store();}
-                if(snapshot) palm_saver_.submit(std::move(*snapshot)); // a fit deferred until now is keyed under the real profile
+                if(snapshot) PalmSaver::process().submit(std::move(*snapshot)); // a fit deferred until now is keyed under the real profile
             }
         } catch(...) {}
     }
@@ -896,7 +902,7 @@ public:
     // Status JSON fragment: "palm_offset":{...} (no leading comma).
     std::string palm_offset_status() const {
         std::ostringstream o;bool error;
-        error=palm_error_||palm_saver_.error();
+        error=palm_error_.active(PalmSaver::process().successes())||PalmSaver::process().error();
         o<<"\"palm_offset\":{\"source\":[";
         for(unsigned side=0;side<2;++side) {bool saved{};palm_offset(side,&saved);o<<(side?",":"")<<(saved?"\"saved\"":"\"default\"");}
         o<<"],\"profile\":[";
@@ -1028,8 +1034,8 @@ public:
             preferences_file_=std::move(preferences_file);
             if(!preferences_file_.empty()) {
                 palm_file_=preferences_file_.parent_path()/L"vr-palm-offsets.txt";
-                palm_saver_.set_file(palm_file_);
-                try {palm_.store().load(palm_file_);} catch(...) {palm_error_=true;} // corrupt, oversized or locked: defaults, game keeps running
+                PalmSaver::process().set_file(palm_file_);
+                try {palm_.store().load(palm_file_);} catch(...) {palm_error_.raise(PalmSaver::process().successes());} // corrupt, oversized or locked: defaults, game keeps running
             }
             get_=simulated_dispatch;
             if(!get_) {
@@ -1184,6 +1190,7 @@ public:
     }
     bool ready_to_close() {return !session_ || gpu_retirement_ready(close_retirement_);}
     void close() noexcept {
+        PalmSaver::process().flush_for(200); // a fit confirmed just before stop reaches the disk (bounded wait)
         ContextState::Scope graphics_scope(graphics_state_);
         // Production polls ready_to_close on the owner Present thread first.
         // Direct fixture/partial-construction destruction gets a bounded drain.

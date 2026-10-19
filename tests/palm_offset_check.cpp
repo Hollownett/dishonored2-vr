@@ -1,6 +1,9 @@
 #include "palm_offset.hpp"
 #include <cstdio>
+#include <chrono>
 #include <fstream>
+#include <functional>
+#include <system_error>
 #include <iostream>
 #include <string>
 using namespace d2vr;
@@ -166,8 +169,8 @@ int main() {
             require(palm_occupied_bits(2,0,false,0,true)==2,"weapon bit lost");
             require(palm_occupied_bits(0,2,false,0,true)==2 && palm_occupied_bits(0,1,false,0,true)==1,"carrying hand not occupied");
             require(palm_occupied_bits(0,0,true,0,true)==1 && palm_occupied_bits(0,0,true,1,true)==2,"held-object hand not occupied");
-            require(palm_occupied_bits(0,3,true,1,false)==0,"stale carry/hold state must not occupy a hand");
-            require(palm_occupied_bits(1,3,true,1,false)==1,"weapon bit needs no fresh state");
+            require(palm_occupied_bits(0,0,false,0,false)==3,"unknown hand state (not fresh) must count as occupied: no tilt until known");
+            require(palm_occupied_bits(1,0,false,0,false)==3,"unknown hand state occupies both hands");
             require(palm_occupied_bits(0,0,false,0,true)==0,"empty hands are not occupied");
             PalmTiltBlend carrying,held,armed_first,empty_first;
             require(near(carrying.update(palm_occupied_bits(0,2,false,0,true)&2,.011),0),"a carrying hand flashed the tilt");
@@ -178,6 +181,75 @@ int main() {
             // a hand armed while untracked: the caller advances the blend every frame, so the first tracked frame is already at 0
             PalmTiltBlend untracked;untracked.update(true,0);for(int i=0;i<30;++i) untracked.update(true,.011);
             require(near(untracked.weight(),0),"reacquire flashed the tilt");
+        }
+        {   // a weapon out at session start: the game has not published the hand state yet; no frame may tilt, and an empty hand eases in
+            PalmTiltBlend armed_start,empty_start;double worst=0;
+            for(int i=0;i<40;++i) { // 40 frames of unknown state, then the game publishes: left hand holds a weapon, right is empty
+                const unsigned occupied=i<20?palm_occupied_bits(0,0,false,0,false):palm_occupied_bits(1,0,false,0,true);
+                worst=std::max(worst,armed_start.update(occupied&1,.011));
+            }
+            require(worst==0,"a weapon out at session start flashed the tilt");
+            const double first=empty_start.update(palm_occupied_bits(0,0,false,0,false)&1,.011);
+            require(near(first,0),"unknown state must not tilt");
+            double w=0;int frames=0;while(w<1 && frames<100) {w=empty_start.update(palm_occupied_bits(0,0,false,0,true)&1,.011);++frames;}
+            require(frames>=13 && frames<=15,"an empty hand must ease the tilt in over ~0.15 s once the state is known");
+        }
+        {   // one process-wide saver; two GameXr lifetimes back to back with a save in flight; a bounded flush persists the last fit
+            require(&PalmSaver::process()==&PalmSaver::process(),"the saver must be one per process");
+            const auto file=temp_file("d2vr-palm-process.txt");
+            PalmOffsetStore a,b;a.set(0,touch,PalmOffset{{.01,0,0},1,1});b.set(0,touch,PalmOffset{{.05,0,0},9,9});
+            PalmSaver::process().set_file(file);PalmSaver::process().submit(a);            // lifetime 1: a save is in flight when it ends
+            PalmSaver::process().set_file(file);PalmSaver::process().submit(b);            // lifetime 2 starts at once: same file, same temp
+            require(PalmSaver::process().flush_for(2000),"bounded flush did not complete");
+            PalmOffsetStore reload;reload.load(file);
+            require(near(reload.get(0,touch).first.translation.x,.05,1e-12),"the newest fit was lost");
+            require(!std::filesystem::exists(std::filesystem::path(file).concat(L".tmp")),"a stale .tmp was left behind");
+            // a fit confirmed just before stop is persisted by a <=200 ms flush
+            PalmOffsetStore last;last.set(1,touch,PalmOffset{{.02,0,0},3,3});
+            PalmSaver::process().submit(last);require(PalmSaver::process().flush_for(200),"teardown flush exceeded its bound or did not finish");
+            PalmOffsetStore after;after.load(file);require(after.get(1,touch).second,"a fit confirmed just before stop was lost");
+            require(PalmSaver::process().flush_for(0),"an idle saver must flush at once");
+            std::error_code ec;std::filesystem::remove(file,ec);
+            // the flush is bounded even when the writer is stuck
+            PalmSaver stuck;stuck.set_file(file);stuck.set_spawner([](std::function<void()>){});stuck.submit(a); // the worker never runs
+            const auto began=std::chrono::steady_clock::now();
+            require(!stuck.flush_for(50) && std::chrono::steady_clock::now()-began<std::chrono::milliseconds(1000),"flush must give up after its bound");
+        }
+        {   // a failed thread start must not wedge saving
+            const auto file=temp_file("d2vr-palm-spawn.txt");
+            PalmSaver saver;saver.set_file(file);PalmOffsetStore a;a.set(0,touch,PalmOffset{{.03,0,0},1,1});
+            saver.set_spawner([](std::function<void()>) {throw std::system_error(std::make_error_code(std::errc::resource_unavailable_try_again));});
+            saver.submit(a);require(!saver.started(),"started was set although no thread exists");
+            saver.set_spawner(nullptr);saver.submit(a);
+            require(saver.flush_for(2000) && saver.started(),"saving did not recover after a failed thread start");
+            PalmOffsetStore reload;reload.load(file);require(reload.get(0,touch).second,"recovered save wrote nothing");
+            std::error_code ec;std::filesystem::remove(file,ec);
+        }
+        {   // the error flag clears after a successful save
+            PalmErrorLatch latch;require(!latch.active(0),"latch starts clear");
+            latch.raise(4);require(latch.active(4),"latch must hold until a save succeeds");
+            require(!latch.active(5),"a successful save must clear the error");
+            latch.raise(5);require(latch.active(5) && !latch.active(6),"a second error clears the same way");
+        }
+        {   // a pending fit waits 5 s for a profile, then saves under the Touch fallback and is re-keyed when the profile arrives
+            const char* index="/interaction_profiles/valve/index_controller";const PalmOffset mine{{.01,.02,.03},7,-8};
+            PalmCalibration cal;cal.profile_query_available=true;
+            require(!cal.confirm(1,mine,10.0),"deferred");
+            require(!cal.tick(14.9) && !cal.store().get(1,palm_default_profile).second,"saved before 5 s");
+            require(cal.tick(15.1) && cal.store().get(1,palm_default_profile).second,"not saved under the fallback after 5 s");
+            require(!cal.tick(16.0),"the fallback save must happen once");
+            require(cal.set_profile(1,index),"late profile did not re-key");
+            require(cal.store().get(1,index).second && near(cal.store().get(1,index).first.pitch_deg,7),"fit not re-keyed under the real profile");
+            require(!cal.store().get(1,palm_default_profile).second,"the fallback entry must be removed on re-key");
+            // a genuine earlier Touch entry is restored, not lost
+            PalmCalibration prior;prior.profile_query_available=true;const PalmOffset old{{.04,0,0},2,2};
+            prior.store().set(1,palm_default_profile,old);prior.confirm(1,mine,0.0);prior.tick(6.0);
+            require(near(prior.store().get(1,palm_default_profile).first.pitch_deg,7),"fallback save did not store the fit");
+            prior.set_profile(1,index);
+            require(near(prior.store().get(1,palm_default_profile).first.translation.x,.04,1e-12) && prior.store().get(1,palm_default_profile).second,"an earlier Touch entry was not restored");
+            // a profile that arrives in time never writes the fallback
+            PalmCalibration quick;quick.profile_query_available=true;quick.confirm(0,mine,0.0);
+            require(quick.set_profile(0,index) && !quick.tick(60.0) && !quick.store().get(0,palm_default_profile).second,"fallback written despite an in-time profile");
         }
         {   // profiles: optional runtime query, deferred save, non-Touch keys
             const char* index="/interaction_profiles/valve/index_controller";
@@ -214,10 +286,10 @@ int main() {
             std::error_code cap_ec;std::filesystem::remove(file,cap_ec);
             const auto async_file=temp_file("d2vr-palm-async.txt");
             {PalmSaver saver(async_file);PalmOffsetStore a,b;a.set(0,touch,PalmOffset{{.01,0,0},1,1});b.set(0,touch,PalmOffset{{.02,0,0},2,2});
-             saver.submit(a);saver.submit(b);saver.flush();
+             saver.submit(a);saver.submit(b);saver.flush_for(5000);
              require(!saver.error(),"async save failed");
              PalmOffsetStore reload;reload.load(async_file);require(near(reload.get(0,touch).first.translation.x,.02,1e-12),"latest snapshot not written");
-             PalmSaver bad(std::filesystem::temp_directory_path()/"d2vr-no-such-dir"/"p.txt");bad.submit(a);bad.flush();require(bad.error(),"a failed async save must be reported");
+             PalmSaver bad(std::filesystem::temp_directory_path()/"d2vr-no-such-dir"/"p.txt");bad.submit(a);bad.flush_for(5000);require(bad.error(),"a failed async save must be reported");
              bad.submit(a);} // destruction with a pending job must neither hang nor throw
             std::error_code ec;std::filesystem::remove(async_file,ec);
         }
