@@ -511,11 +511,12 @@ private:
     }
     // The solver's solve-space reach carried into the world by the root motion since that solve (as arm_frozen maps
     // poses), with the wrist expressed in the controller grip frame: grip -> attachment -> wrist.
+    mutable std::array<ExactReachCache,2> reach_cache_{};   // under mutex_ (diagnostic() is the only caller of world_reach)
     ArmReach world_reach(unsigned side) const {
         const auto r=solver_.solved_reach(side);
         if(!have_out_ || !have_root_solved_ || !have_root_last_ || !r.valid) return {};
         const auto world_from_solve=body::mul(root_last_,body::inverse(root_solved_));
-        ArmReach result{world_from_solve.p+rotated(world_from_solve.q,r.shoulder),max_exact_reach(r.full),
+        ArmReach result{world_from_solve.p+rotated(world_from_solve.q,r.shoulder),reach_cache_[side&1u].get(r.full),
                         body::mul(grip_to_attachment_[side],r.hand_to_wrist).p,false};
         result.valid=finite(result.shoulder) && finite(result.wrist_local) && std::isfinite(result.max_wrist) && result.max_wrist>0;
         return result;

@@ -84,6 +84,16 @@ int main() {
     clamp_beyond_reach();
     clamp_inside_reach();
     clamp_invalid_reach();
+    {   // the threshold is a function of the arm length alone: bisected once per length, not on every diagnostic() call (four a frame, two arms each)
+        ExactReachCache cache;
+        const double first=cache.get(.6);
+        check(first==max_exact_reach(.6) && cache.computed()==1,"the cache returns the bisected threshold");
+        for(int i=0;i<10;++i) check(cache.get(.6)==first,"a repeated length returns the same threshold");
+        check(cache.computed()==1,"a repeated length is not bisected again");
+        check(cache.get(.61)==max_exact_reach(.61) && cache.computed()==2,"a new length is bisected once");
+        check(cache.get(.61)==max_exact_reach(.61) && cache.computed()==2,"and then served from the cache");
+        check(cache.get(0)==0 && cache.get(std::nan(""))==0,"an invalid arm has no reach");
+    }
     if(failures) {std::printf("hand_reach_check: %d failure(s)\n",failures);return 1;}
     std::printf("PASS hand_reach_check: soft_reach rule, max_exact_reach bisection, translation-only reach_clamp\n");
     return 0;

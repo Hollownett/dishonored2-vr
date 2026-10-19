@@ -35,6 +35,17 @@ inline double max_exact_reach(double full) {
     return lo;
 }
 
+// max_exact_reach for one arm, bisected again only when the arm length changes (it changes on an arm solve, not per frame).
+class ExactReachCache {
+    double full_{},reach_{};bool have_{};unsigned computed_{};
+public:
+    double get(double full) {
+        if(!have_ || !(full==full_)) {reach_=max_exact_reach(full);full_=full;have_=true;++computed_;}
+        return reach_;
+    }
+    unsigned computed() const noexcept {return computed_;}
+};
+
 // One arm's reach in the world: the shoulder the last arm solve used, the farthest wrist distance it reaches exactly,
 // and the wrist in the controller grip frame (wrist = grip.position + R(grip)·wrist_local, R's columns = grip.basis).
 struct ArmReach {Vec3 shoulder{};double max_wrist{};Vec3 wrist_local{};bool valid{};};
