@@ -1040,7 +1040,9 @@ int main() {
         const std::uint32_t npc_id=0x20002;
         std::map<std::uintptr_t,unsigned char> bytes;
         const auto put=[&](std::uintptr_t at,const auto& value) {const auto* p=reinterpret_cast<const unsigned char*>(&value);for(std::size_t i=0;i<sizeof(value);++i) bytes[at+i]=p[i];};
+        bool fail_npc_vtable=false; // a transient read failure of the guard's vtable (the scan's class probe)
         const auto read=[&](std::uintptr_t at,void* out,std::size_t size) {
+            if(fail_npc_vtable && at==npc && size==8) return false;
             auto* p=static_cast<unsigned char*>(out);
             for(std::size_t i=0;i<size;++i) {const auto it=bytes.find(at+i);if(it==bytes.end()) return false;p[i]=it->second;}return true;};
         std::array<std::uintptr_t,0x3fff> registry{};registry[2]=npc;
@@ -1208,6 +1210,15 @@ int main() {
             reset_guard();auto c=make();settle(*c,9.70);assert(NativeHandContactPublicationFixture::kind(*c,npc)==2);
             put(npc,base+0x1c886a8);settle(*c,9.70);assert(NativeHandContactPublicationFixture::kind(*c,npc)==1);   // guard -> prop
             put(npc,base+0x1c5e108);settle(*c,9.70);assert(NativeHandContactPublicationFixture::kind(*c,npc)==2);   // prop -> guard
+            // a failed class probe is not a class change: a nearby guard stays a candidate through rechecks that cannot read his vtable
+            fail_npc_vtable=true;settle(*c,9.70);fail_npc_vtable=false;
+            assert(NativeHandContactPublicationFixture::tracked(*c,npc) && NativeHandContactPublicationFixture::kind(*c,npc)==2);
+            // the first service after a carry starts holds the gate, and the carry ending releases it at once
+            reset_guard();
+            {auto d=make();sweep(*d,100,9.70);assert(writes.count(0x100000a));writes.clear();
+             d->set_carrying_body(true);{const auto pose=palm_at({9.70+.4*.011*100,0,.1});d->publish(1,true,pose,pose,{0,0,0,0,0});d->service(read,base,world,now_ms+=11,held,write);}
+             assert(writes.empty());
+             d->set_carrying_body(false);carrying_body=false;sweep(*d,100,9.70);assert(writes.count(0x100000a));}
             reset_guard();
         }
         // (5) a failing choose is throttled (100 ms), and a knocked-out guard is looked at again within 0.25 s

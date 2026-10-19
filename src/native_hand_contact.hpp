@@ -111,7 +111,7 @@ public:
     static constexpr double player_radius=.40,player_below=2.2,player_above=.3;
     // Render thread, every frame: the player carries a body natively (shoulder carry, CarryCorpse). While it is fresh no guard is pushed: the carry
     // owns the corpse, velocity writes would fight it.
-    void set_carrying_body(bool carrying) {carrying_body_.store(carrying,std::memory_order_relaxed);carry_stamp_.store(seconds(),std::memory_order_relaxed);}
+    void set_carrying_body(bool carrying) {carry_until_.store(carrying?seconds()+.25:0.,std::memory_order_relaxed);} // one atomic: the gate holds until this time
     void set_player(Vec3 eye) {if(!finite(eye)) return;std::lock_guard<std::mutex> l(mutex_);player_eye_=eye;player_stamp_=seconds();}
     static constexpr double meet_latch=.08,meet_unlatch=.055,meet_fresh=.06,meet_stale=.15; // m, m, s, s
     // Render thread, in the hand's world-cast block (dxgi_probe.cpp). cast_entity: what the palm cast holds the hand at (0: nothing). prop: that is a light loose prop
@@ -315,6 +315,7 @@ public:
             const auto t0=std::chrono::steady_clock::now();
             if(!n.kind) { // what the scan found: a prop (1) or a guard's body (2), classified once
                 n.kind=prop_class(scan,base,n.entity);
+                if(n.kind==class_unread) {n.kind=0;++it;continue;} // the probe failed: ask again next service
                 if(!n.kind) {it=near_.erase(it);continue;}
             }
             const bool guard=n.kind==2;
@@ -341,7 +342,7 @@ public:
                 // C2: a guard's limb is re-read in full every service (his bodies move with him), and the limb nearest a palm is chosen again when
                 // due, or when the hand left the limb it had; every choose, failed or not, waits rechoose_ms. Only a dead or unconscious guard that
                 // is not carried is ever read.
-                if(carrying_body_.load(std::memory_order_relaxed) && now-carry_stamp_.load(std::memory_order_relaxed)<=.25) {n.body.reset();n.in_reach=false;body_time+=std::chrono::steady_clock::now()-t0;continue;}
+                if(now<carry_until_.load(std::memory_order_relaxed)) {n.body.reset();n.in_reach=false;body_time+=std::chrono::steady_clock::now()-t0;continue;}
                 const auto nearest_palm=[&](Vec3 p) {Vec3 best{};double least=1e18;for(const auto& h:hands) if(h.active && length(h.proxies[0].centre-p)<least) {least=length(h.proxies[0].centre-p);best=h.proxies[0].centre;}return best;};
                 bool choose=!n.body || now_ms>=n.next_full;
                 if(!choose && n.body->bounds) {
@@ -520,8 +521,12 @@ private:
                     if(slot_entity_[slot]!=entity || ((cycle_+slot)%recheck_cycles)==0) {
                         if(slot_entity_[slot]!=entity) retire(slot_entity_[slot]);
                         --budget;const auto cls=prop_class(scan,base,entity);
-                        if(slot_entity_[slot]==entity && slot_prop_[slot]!=cls) retire(entity); // the address changed class in place: its candidate is classified anew
-                        slot_entity_[slot]=entity;slot_prop_[slot]=cls;
+                        if(cls==class_unread) { // a failed probe is not a class: keep what is known (a new address is probed again next pass)
+                            if(slot_entity_[slot]!=entity) {slot_entity_[slot]=0;slot_prop_[slot]=0;continue;}
+                        } else {
+                            if(slot_entity_[slot]==entity && slot_prop_[slot]!=cls) retire(entity); // the address changed class in place: its candidate is classified anew
+                            slot_entity_[slot]=entity;slot_prop_[slot]=cls;
+                        }
                     }
                     if(!slot_prop_[slot]) continue;
                     --budget;
@@ -602,11 +607,13 @@ private:
         if(log_.is_open() && !rows.empty()) {log_<<rows;log_.flush();}
         if(slow_.is_open() && !slow.empty()) {slow_<<slow;slow_.flush();}
     }
+    // class_unread: the vtable could not be read (a transient failure says nothing about the class).
+    static constexpr std::uint8_t class_unread=0xff;
     // 1: one of the three entity classes native_rigid_body accepts (arkMovable among them); 2: a guard (arkNPC, pushable when dead or unconscious:
     // native_rigid_body.hpp pushable_ragdoll_body); 0: anything else can never be pushed.
     template<class Read> static std::uint8_t prop_class(Read& read,std::uintptr_t base,std::uintptr_t entity) {
         const auto vtable=rig::value<std::uintptr_t>(read,entity);
-        if(!vtable) return 0;
+        if(!vtable) return class_unread;
         if(*vtable==base+0x1c886a8 || *vtable==base+0x1c87d58 || *vtable==base+0x1c5de18) return 1;
         return *vtable==base+0x1c5e108?2:0;
     }
@@ -617,7 +624,7 @@ private:
     std::vector<Near> near_;std::array<std::uint64_t,2> seen_{};unsigned cursor_{1},cycle_{},scan_tick_{};
     std::vector<std::uintptr_t> slot_entity_;std::vector<std::uint8_t> slot_prop_;std::uintptr_t game_{},world_{}; // slot -> entity pointer and class (the scanner's)
     struct Meet {std::array<std::uintptr_t,8> pushable{};unsigned count{};std::array<std::uintptr_t,ClampInput::loose_capacity> loose{};unsigned loose_count{};double stamp{};std::array<std::uintptr_t,2> entity{};std::array<Vec3,2> outward{};std::array<double,2> side_stamp{};};
-    std::atomic<bool> carrying_body_{};std::atomic<double> carry_stamp_{-1e9};
+    std::atomic<double> carry_until_{0.};
     Vec3 player_eye_{};double player_stamp_{-1e9}; // under mutex_
     static ClampMeet compose_meet_none(const HandClamp& clamp,unsigned side,const ClampOutput& out,const WorldTrackedPose& target) {
         MeetState none{};return compose_meet(none,MeetPublished{},clamp,side,out,target,0.);
