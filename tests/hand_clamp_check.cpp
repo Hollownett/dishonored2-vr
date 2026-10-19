@@ -1641,6 +1641,38 @@ void touched_plane_survives_the_age_boundary() {
     }
 }
 
+// The touched test of the stale slot honours this update's own judge: a touched, stale world wall that a sweep passes through (a plate N is hit
+// beyond it) is refuted, so the rescue will not keep it, and it is the plane that gives its slot to N. A valid plane V of the same rank as N is
+// not evicted for the frame, and the hand does not clip it.
+void refuted_touched_plane_gives_its_slot() {
+    const double h=.0105;   // 10.5 ms frames: the wall's age is 94.5 ms after frame 11 and 105 ms before frame 12's purge
+    HandClamp c;
+    ClampProbe front{{.12,0,0},.03},back{{-.10,0,0},.03};
+    const ClampHit wall{{1,0,.5},{-1,0,0},7,3,false,true};
+    const ClampHit plates[3]{{{.3,0,.5},{1,0,0},51,3,false,true,BodyClass::entity_static},     // V1: the hand must stay in front of it (x >= 0.435)
+                             {{0,3,.5},{0,-1,0},52,3,false,true,BodyClass::entity_static},     // V2, V3: far off
+                             {{0,0,3},{0,0,-1},53,3,false,true,BodyClass::entity_static}};
+    const ClampHit plate{{1.2,0,.5},{-1,0,0},54,3,false,true,BodyClass::entity_static};      // N: beyond the wall along the sweep
+    for(unsigned i=0;i<15;++i) {
+        ClampInput in{};
+        const double x=i<3?.5:i<11?.5+.3*(i-2)/8:1.3;   // approaching the wall, untouched until frame 11; then the controller goes on through it
+        in.now=i*h;in.epoch=1;in.root=level_frame({0,0,0},{1,0,0});in.target=pose_at({x,0,.5});in.chest={0,0,.5};
+        in.tip=back;in.tip_enabled=true;in.hand[0]=front;in.hand[1]=back;in.hand_count=2;
+        if(i==2) in.palm_hit=wall;
+        else if(i>2 && i<12) in.palm_hit=plates[i%3];
+        else if(i==12) in.palm_hit=plate;
+        const auto o=c.update(0,in);c.note_drawn(0,in.root,o.drawn.position);
+        if(i>=12) {
+            std::array<ClampHit,HandClamp::max_held_planes> held{};
+            const auto n=c.held_planes(0,held);
+            bool has[3]{};for(std::size_t k=0;k<n;++k) for(int v=0;v<3;++v) has[v]=has[v] || held[k].entity==static_cast<std::uintptr_t>(51+v);
+            CHECK(has[0] && has[1] && has[2]);
+            CHECK(o.drawn.position.x>=.3+.10+.03+.005-1e-3);                                    // out of V1's half-space
+            CHECK(o.drawn.position.x+.12+.03<=1.2+.01);                                         // and out of N (the refuted wall is gone)
+        }
+    }
+}
+
 int main() {
     // Corner, slide, hold, jump and walk tests run in every posting mode, with the same bounds.
     for(g_mode=0;g_mode<3;++g_mode) {
@@ -1677,6 +1709,7 @@ int main() {
         expired_planes_never_block_a_live_hit();
         wall_and_door_fallback_reports_no_false_contact();
         touched_plane_survives_the_age_boundary();
+        refuted_touched_plane_gives_its_slot();
         parallel_squeeze_takes_the_least_violation();
     }
     g_mode=0;

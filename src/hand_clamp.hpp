@@ -349,8 +349,10 @@ private:
                 std::size_t pick=s.plane_count;
                 for(std::size_t i=0;i<s.plane_count;++i) {
                     const auto& q=s.planes[i];
-                    const bool stale=q.age>cfg_.plane_seconds && !q.touched;   // a plane the hand rests at is rescued this update, not stale
-                    const bool picked_stale=pick!=s.plane_count && s.planes[pick].age>cfg_.plane_seconds && !s.planes[pick].touched;
+                    // A plane the hand rests at is rescued this update, unless a sweep judged it already (news: reached and shadowed; refuted)
+                    const auto stale_plane=[&](const Plane& x) {return x.age>cfg_.plane_seconds && !(x.touched && !x.news && !x.refuted);};
+                    const bool stale=stale_plane(q);
+                    const bool picked_stale=pick!=s.plane_count && stale_plane(s.planes[pick]);
                     if(stale) {if(pick==s.plane_count || !picked_stale || q.age>s.planes[pick].age) pick=i;continue;}
                     if(picked_stale) continue;
                     if(q.rank>plane.rank) continue;
