@@ -25,6 +25,13 @@ def check(dxgi: str, aim: str) -> None:
     assert s.count('constautonative_ownership=') == 1 and s.count('constunsignedauthored_hands=') == 1
     assert 'hands.native_hands=authored_hands;if(authored_hands)hands.has_hand_state=true;' in s
 
+    # Task 8 (G5/C6): the palm offset moves the grip BEFORE the raw copy (the clamp, reach clamp, IK and drawn weapon all see the palm); the tilt
+    # weight comes from the side's armed bit (translation only for an armed hand), and a throw in it never reaches the XR path.
+    palm = between(s, 'unsignedarmed_bits{}', 'raw_grips=hands.grips;')
+    assert 'armed_bits=hand_weapon_bits;' in palm
+    assert 'palm_tilt[side].update(((armed_bits>>side)&1u)!=0,palm_dt)' in palm
+    assert 'hands.grips[side]=d2vr::apply_palm_offset(hands.grips[side],game_xr->palm_offset(side),tilt);' in palm
+    assert palm.index('apply_palm_offset(') < palm.index('}catch(...){}')
     # The raw poses are taken before anything moves the drawn hands.
     assert pub.index('raw_grips=hands.grips;') < pub.index('reach_clamp(') < pub.index('hand_clamp.update(')
     # Yields (C9): authored arms, a native carry on that side (fresh hand state), a physical hold. The reach clamp never applies on a yield.

@@ -167,6 +167,24 @@ inline std::vector<unsigned char> settings_panel_image(const VrSettings& setting
         text(L"A: start guided capture",8,438,632,480,24,cyan);
         text(L"Chest width is side to side, not circumference",8,484,632,514,17,muted);
         text(L"B or Y: return",8,524,632,558,18,white);
+    } else if(settings.calibration_page() && settings.hand_fit_page()) {
+        text(L"Hand fit",24,6,616,58,35,rgb(150,154,170),1);
+        text(L"Hand fit: hold the controllers naturally. Left stick moves the hand, right stick tilts it. Trigger confirms that hand. B returns.",20,62,620,150,18,white,0,DT_LEFT|DT_WORDBREAK);
+        for(unsigned side=0;side<2;++side) {
+            const int top=170+static_cast<int>(side)*96;const bool active=settings.hand_fit_side()==side;
+            if(active) fill(18,top,622,top+88,cyan);
+            const COLORREF ink2=active?rgb(10,20,30):white,value_ink=active?rgb(10,20,30):cyan;
+            text(side?L"Right hand":L"Left hand",28,top+4,300,top+44,22,ink2,0,DT_LEFT|DT_VCENTER|DT_SINGLELINE);
+            text(active?L"stick moves this hand":L"A selects this hand",300,top+4,612,top+44,15,ink2,0,DT_RIGHT|DT_VCENTER|DT_SINGLELINE);
+            if(const auto v=settings.palm_preview(side)) {
+                std::wostringstream o;o<<std::fixed<<std::setprecision(1)<<L"forward "<<v->translation.x*100<<L" cm   left "<<v->translation.y*100<<L" cm   up "<<v->translation.z*100<<L" cm";
+                text(o.str(),28,top+44,612,top+64,16,value_ink,0,DT_LEFT|DT_VCENTER|DT_SINGLELINE);
+                std::wostringstream t;t<<std::fixed<<std::setprecision(1)<<L"pitch "<<v->pitch_deg<<L" deg   yaw "<<v->yaw_deg<<L" deg";
+                text(t.str(),28,top+64,612,top+84,16,value_ink,0,DT_LEFT|DT_VCENTER|DT_SINGLELINE);
+            }
+        }
+        text(L"Empty hands use the tilt; a hand holding a weapon keeps the position only.",8,372,632,402,16,muted);
+        text(L"A: switch hand   Trigger: confirm   B: return",8,518,632,548,17,white,0,DT_RIGHT|DT_VCENTER|DT_SINGLELINE);
     } else if(settings.calibration_page()) {
         text(settings.calibration_stage()==AvatarCalibrationStage::shoulders?L"1. Measure shoulders":L"2. Measure arm reach",24,6,616,58,35,rgb(150,154,170),1);
         text(settings.calibration_stage()==AvatarCalibrationStage::shoulders?L"Grip centres at shoulder joints; hold both grips and keep still":L"Release grips, then hold both with arms straight out and level",4,62,636,92,16,white);
@@ -230,7 +248,7 @@ inline std::vector<unsigned char> settings_panel_image(const VrSettings& setting
         text(std::to_wstring(static_cast<int>(progress*100))+L"% stable hold (1 second)",8,410,632,442,19,cyan);
         text(settings.player_measurements().torso_width_metres?L"Chest width uses your entered measurement":L"Y: enter chest width and optional measured dimensions",8,450,632,478,17,muted);
         text(settings.calibration_height_text(),8,480,632,508,16,muted);
-        text(L"Y: measurements   B: VR settings",8,518,500,548,17,white,0,DT_RIGHT|DT_VCENTER|DT_SINGLELINE);
+        text(L"X: hand fit   Y: measurements   B: VR settings",8,518,500,548,17,white,0,DT_RIGHT|DT_VCENTER|DT_SINGLELINE);
         footer(false);
     } else {
         text(L"VR Settings",24,2,400,58,44,rgb(140,144,162),1,DT_LEFT|DT_VCENTER|DT_SINGLELINE);

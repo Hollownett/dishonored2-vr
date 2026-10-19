@@ -37,6 +37,8 @@
 #include <vector>
 #include <memory>
 #include <chrono>
+#include <mutex>
+#include <sstream>
 
 namespace d2vr {
 // Object-art destination for in-game tutorials: not object-anchored, so it is drawn on a
@@ -106,6 +108,16 @@ private:
     std::optional<TurnControl::Config> turning_change_;
     std::optional<int> temporal_change_,hud_change_;
     std::filesystem::path preferences_file_;
+    // G5/C6: grip-to-palm offsets per side and OpenXR interaction profile. Everything here is touched from the XR update and the render
+    // thread, so it sits behind one mutex; file errors never leave this class (the hands keep the defaults and status says so).
+    mutable std::mutex palm_mutex_;
+    PalmOffsetStore palm_store_;
+    std::filesystem::path palm_file_;
+    std::array<std::string,2> interaction_profiles_{};
+    ULONGLONG profile_refresh_tick_{};
+    bool palm_error_{};
+    std::chrono::steady_clock::time_point settings_update_time_{};
+    double palm_fit_dt_{};
     double effective_scale_=1;
     HMODULE loader_{};
     XrInstance instance_{XR_NULL_HANDLE};
@@ -128,6 +140,7 @@ private:
     XR_MEMBER(xrCreateActionSpace) XR_MEMBER(xrSyncActions) XR_MEMBER(xrGetActionStatePose)
     XR_MEMBER(xrGetActionStateFloat) XR_MEMBER(xrGetActionStateVector2f) XR_MEMBER(xrGetActionStateBoolean)
     XR_MEMBER(xrLocateSpace) XR_MEMBER(xrApplyHapticFeedback)
+    XR_MEMBER(xrGetCurrentInteractionProfile) XR_MEMBER(xrPathToString)
 #undef XR_MEMBER
     UINT width_{},height_{};
     DXGI_FORMAT format_{};
@@ -675,6 +688,36 @@ private:
             checked(xrCreateActionSpace(session_,&space,&hand_spaces_[kind][side]),"Create controller space");
         }
     }
+    PalmOffset palm_offset_stored(unsigned side) const {
+        std::lock_guard<std::mutex> lock(palm_mutex_);
+        const auto profile=interaction_profiles_[side&1u].empty()?std::string(palm_default_profile):interaction_profiles_[side&1u];
+        return palm_store_.get(side,profile).first;
+    }
+    // A confirmed fit is kept for this session even when the file cannot be written (then status reports the error).
+    void confirm_palm_offset(unsigned side,const PalmOffset& value) noexcept {
+        try {
+            std::lock_guard<std::mutex> lock(palm_mutex_);
+            const auto profile=interaction_profiles_[side&1u].empty()?std::string(palm_default_profile):interaction_profiles_[side&1u];
+            palm_store_.set(side,profile,value);
+            if(palm_file_.empty()) return;
+            try {palm_store_.save(palm_file_);palm_error_=false;} catch(...) {palm_error_=true;}
+        } catch(...) {palm_error_=true;}
+    }
+    // The runtime reports the bound profile only after the session is focused and it has chosen one; re-ask once a second, never throw.
+    void refresh_interaction_profiles() noexcept {
+        try {
+            const auto now=GetTickCount64();
+            if(!xrGetCurrentInteractionProfile || !xrPathToString || now<profile_refresh_tick_) return;
+            profile_refresh_tick_=now+1000;
+            for(unsigned side=0;side<2;++side) {
+                XrInteractionProfileState state{};state.type=XR_TYPE_INTERACTION_PROFILE_STATE;
+                if(!XR_SUCCEEDED(xrGetCurrentInteractionProfile(session_,hand_paths_[side],&state)) || state.interactionProfile==XR_NULL_PATH) continue;
+                char text[XR_MAX_PATH_LENGTH]{};uint32_t count{};
+                if(!XR_SUCCEEDED(xrPathToString(instance_,state.interactionProfile,sizeof(text),&count,text))) continue;
+                std::lock_guard<std::mutex> lock(palm_mutex_);interaction_profiles_[side]=text;
+            }
+        } catch(...) {}
+    }
     void sample_input() {
         grip_pose_tick_=0;controller_input={};grip_locations={};aim_locations={};grip_speeds={};grip_velocities={};grip_velocity_hands=0;
         action_sync_attempted=false;last_action_sync=XR_SESSION_NOT_FOCUSED;active_input_hands=0;grip_tracked_hands=0;stick_active_hands=0;
@@ -709,6 +752,7 @@ private:
         constexpr XrSpaceLocationFlags required=XR_SPACE_LOCATION_ORIENTATION_VALID_BIT|XR_SPACE_LOCATION_POSITION_VALID_BIT;
         for(UINT side=0;side<2;++side) if((grip_locations[side].locationFlags&required)==required) grip_tracked_hands|=1u<<side;
         if(grip_tracked_hands)grip_pose_tick_=GetTickCount64();
+        refresh_interaction_profiles();
         // Buttons/sticks are independent actions. A missing grip pose must not
         // disable navigation; pose-driven rig work validates tracking separately.
         auto get_info=[&](UINT action,UINT side) {
@@ -834,6 +878,34 @@ public:
     void avatar_runtime_status(AvatarFitRuntimeStatus status) {settings_.calibration_runtime(status);}
     AvatarFitRuntimeStatus avatar_runtime_status() const {return settings_.calibration_runtime();}
     UINT64 grip_pose_tick() const {return grip_pose_tick_;}
+    // The interaction profile bound to a hand, or the one this mod suggests while the runtime has not said (Plan Spec deviation 7).
+    std::string interaction_profile(unsigned side) const {
+        std::lock_guard<std::mutex> lock(palm_mutex_);
+        const auto& p=interaction_profiles_[side&1u];
+        return p.empty()?std::string(palm_default_profile):p;
+    }
+    // The grip-to-palm offset the hand uses now: the preview while the hand-fit page is open, else the saved value for this side and
+    // profile, else the default (C6, C12). saved: the value came from the file or from a confirmed fit.
+    PalmOffset palm_offset(unsigned side,bool* saved=nullptr) const {
+        std::lock_guard<std::mutex> lock(palm_mutex_);
+        side&=1u;
+        const auto profile=interaction_profiles_[side].empty()?std::string(palm_default_profile):interaction_profiles_[side];
+        const auto stored=palm_store_.get(side,profile);
+        if(saved) *saved=stored.second;
+        if(const auto preview=settings_.palm_preview(side)) return *preview;
+        return stored.first;
+    }
+    // Status JSON fragment: "palm_offset":{...} (no leading comma).
+    std::string palm_offset_status() const {
+        std::ostringstream o;bool error;
+        {std::lock_guard<std::mutex> lock(palm_mutex_);error=palm_error_;}
+        o<<"\"palm_offset\":{\"source\":[";
+        for(unsigned side=0;side<2;++side) {bool saved{};palm_offset(side,&saved);o<<(side?",":"")<<(saved?"\"saved\"":"\"default\"");}
+        o<<"],\"profile\":[";
+        for(unsigned side=0;side<2;++side) o<<(side?",":"")<<'"'<<interaction_profile(side)<<'"';
+        o<<"],\"error\":"<<(error?"true":"false")<<'}';
+        return o.str();
+    }
     std::optional<double> calibration_floor_y() const {return calibration_floor_y_;}
     AvatarCalibrationState avatar_calibration_state() const {return avatar_calibration_.state();}
     void suspend_avatar() {
@@ -956,6 +1028,10 @@ public:
             if(edge_antialiasing) antialiasing_=std::make_unique<EyeAntialiasing>(device);
             antialiasing_enabled_=edge_antialiasing;settings_.initialize(multiplier,edge_antialiasing,turning,mirror,sharpness,temporal_aa,hud_percent,controls_hint,player_measurements);
             preferences_file_=std::move(preferences_file);
+            if(!preferences_file_.empty()) {
+                palm_file_=preferences_file_.parent_path()/L"vr-palm-offsets.txt";
+                try {palm_store_.load(palm_file_);} catch(...) {palm_error_=true;} // corrupt, oversized or locked: defaults, game keeps running
+            }
             get_=simulated_dispatch;
             if(!get_) {
                 loader_=LoadLibraryExW(loader,nullptr,LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR|LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
@@ -990,6 +1066,7 @@ public:
             XR_LOAD(xrCreateAction) XR_LOAD(xrSuggestInteractionProfileBindings) XR_LOAD(xrAttachSessionActionSets)
             XR_LOAD(xrCreateActionSpace) XR_LOAD(xrSyncActions) XR_LOAD(xrGetActionStatePose)
             XR_LOAD(xrGetActionStateFloat) XR_LOAD(xrGetActionStateVector2f) XR_LOAD(xrGetActionStateBoolean) XR_LOAD(xrLocateSpace) XR_LOAD(xrApplyHapticFeedback)
+            XR_LOAD(xrGetCurrentInteractionProfile) XR_LOAD(xrPathToString)
 #undef XR_LOAD
             XrSystemGetInfo query{};query.type=XR_TYPE_SYSTEM_GET_INFO;query.formFactor=XR_FORM_FACTOR_HEAD_MOUNTED_DISPLAY;
             XrSystemId system{};
@@ -1258,13 +1335,20 @@ public:
                 settings_.calibration_status(avatar_calibration_.state());settings_.calibration_identity_changed();
             }
             avatar_prompt_reference_epoch_=current_reference;
-            auto changes=settings_.update(controller_input,gameplay,state==XR_SESSION_STATE_FOCUSED,pointer,settings_available);
+            {   // the fit starts from what the game uses now (palm_offsets() is ignored while the page is open)
+                const auto now=std::chrono::steady_clock::now();
+                palm_fit_dt_=settings_update_time_.time_since_epoch().count()?std::clamp(std::chrono::duration<double>(now-settings_update_time_).count(),0.,.1):0.;
+                settings_update_time_=now;
+                settings_.palm_offsets(palm_offset_stored(0),palm_offset_stored(1));
+            }
+            auto changes=settings_.update(controller_input,gameplay,state==XR_SESSION_STATE_FOCUSED,pointer,settings_available,palm_fit_dt_);
+            if(changes.palm_offset) confirm_palm_offset(changes.palm_offset->side,changes.palm_offset->value);
             // The game's own options page ("VR Settings"): its values and actions take the panel's path (apply, save, calibrate).
             if(const auto values=NativeOptionsPage::take_values()) native_settings::merge(changes,native_settings::apply(settings_,*values));
             for(const int row:NativeOptionsPage::take_actions()) native_settings::merge(changes,native_settings::action(settings_,row));
             const auto old_calibration_state=avatar_calibration_.state();
             const auto calibration_state=avatar_calibration_.synchronize(reference_epoch(),
-                settings_.open() && settings_.calibration_page() && !settings_.measurements_page() && !gameplay && state==XR_SESSION_STATE_FOCUSED);
+                settings_.open() && settings_.calibration_page() && !settings_.measurements_page() && !settings_.hand_fit_page() && !gameplay && state==XR_SESSION_STATE_FOCUSED);
             if(calibration_state!=old_calibration_state) settings_.calibration_status(calibration_state);
             if(changes.calibrate) {
                 calibration_floor_y_.reset();
@@ -1275,7 +1359,7 @@ public:
                 if(avatar_measurements_) avatar_calibration_.begin(reference_epoch(),*avatar_measurements_,calibration_floor_y_,settings_.player_measurements());
                 else settings_.calibration_status(AvatarCalibrationState::dimensions_unsupported);
             }
-            if(settings_.open() && !gameplay && settings_.calibration_page() && !settings_.measurements_page() && avatar_measurements_) {
+            if(settings_.open() && !gameplay && settings_.calibration_page() && !settings_.measurements_page() && !settings_.hand_fit_page() && avatar_measurements_) {
                 std::array<TrackedPose,2> hands{};
                 for(unsigned side=0;side<2;++side) {
                     const auto& p=grip_locations[side].pose;
