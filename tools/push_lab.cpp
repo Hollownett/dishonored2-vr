@@ -437,9 +437,9 @@ Metrics measure(const Scenario& s,const std::vector<Frame>& fr) {
             if(travel>.03) {
                 const Vec3 u=h*(1/travel);
                 m.ride_ratio=std::hypot(fr[stop].prop.x-fr[first].prop.x,fr[stop].prop.y-fr[first].prop.y)/travel;
-                double lo=1e9,hi=-1e9;
-                for(std::size_t i=first+10;i<=stop;++i) {const double d=dot(fr[i].prop-fr[i].hand,u);lo=std::min(lo,d);hi=std::max(hi,d);}
-                m.gap_range=hi-lo;
+                double gap_lo=1e9,gap_hi=-1e9;
+                for(std::size_t i=first+10;i<=stop;++i) {const double d=dot(fr[i].prop-fr[i].hand,u);gap_lo=std::min(gap_lo,d);gap_hi=std::max(gap_hi,d);}
+                m.gap_range=gap_hi-gap_lo;
             }
         }
     }
@@ -611,8 +611,8 @@ std::vector<Scenario> scenarios() {
         if(free) s.desc=fmt("wall_cast at %.3g m/s without the wall: the bottle flies off the swat.",ws)+(speed==2.?" The run is repeated without the clamp-depth latch (compose_meet depth_latch=false) and the drawn hands compared frame by frame.":" The meet's latch must not flicker while the hand chases the fleeing bottle.");
         s.steady=true;s.step=.03;s.timing=.004;s.gap_applies=false;s.live=true;s.cast=true;s.meet=true;
         s.chest={-.562,.0067,.90};s.size={.138,.138,.416};s.prop={0,0,.208};s.mass=1.;s.wall=free?kNaN:.30;s.trail_check=free && speed==2.;
-        const double down=descend?.3:env_or("PUSH_LAB_WALL_DOWN",0);   // PUSH_LAB_WALL_DOWN: the hand also descends at this share of its speed
-        s.hand={-.262,.0067,.102};s.legs={{{0,0,0},.2},{{ws,0,-down*ws},.6/ws}};s.seconds=.2+.6/ws+1.5;
+        const double drop=descend?.3:env_or("PUSH_LAB_WALL_DOWN",0);   // PUSH_LAB_WALL_DOWN: the hand also descends at this share of its speed
+        s.hand={-.262,.0067,.102};s.legs={{{0,0,0},.2},{{ws,0,-drop*ws},.6/ws}};s.seconds=.2+.6/ws+1.5;
         if(angled) {   // speed along the motion; 0.6 m toward the wall
             const double a=push.angle*kPi/180,forward=ws*std::cos(a);
             s.legs={{{0,0,0},.2},{{forward,0,ws*std::sin(a)},.6/forward}};s.seconds=.2+.6/forward+1.5;

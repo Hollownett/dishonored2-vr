@@ -261,8 +261,8 @@ int main() {
             bool saved=false;const auto got=next.get(1,&saved);
             require(saved && near(got.pitch_deg,7,1e-12) && next.store().provisional(1,palm_default_profile),"a fit with no profile was not persisted as provisional");
             require(next.set_profile(1,"/interaction_profiles/valve/index_controller") && next.store().get(1,"/interaction_profiles/valve/index_controller").second && !next.store().get(1,palm_default_profile).second,"earlier-session provisional entry not re-keyed");
-            PalmCalibration touch;touch.store().load(file);touch.set_profile(1,palm_default_profile);
-            require(touch.store().get(1,palm_default_profile).second && !touch.store().provisional(1,palm_default_profile),"Touch arrival must make the entry genuine");
+            PalmCalibration arrival;arrival.store().load(file);arrival.set_profile(1,palm_default_profile);
+            require(arrival.store().get(1,palm_default_profile).second && !arrival.store().provisional(1,palm_default_profile),"Touch arrival must make the entry genuine");
             std::error_code ec;std::filesystem::remove(file,ec);
         }
         {   // (b) a provisional entry never overwrites, restores over, or shadows a genuine Touch calibration
@@ -308,7 +308,7 @@ int main() {
             {PalmSaver saver(async_file);PalmOffsetStore a,b;a.set(0,touch,PalmOffset{{.01,0,0},1,1});b.set(0,touch,PalmOffset{{.02,0,0},2,2});
              saver.submit(a);saver.submit(b);saver.flush_for(5000);
              require(!saver.error(),"async save failed");
-             PalmOffsetStore reload;reload.load(async_file);require(near(reload.get(0,touch).first.translation.x,.02,1e-12),"latest snapshot not written");
+             PalmOffsetStore latest;latest.load(async_file);require(near(latest.get(0,touch).first.translation.x,.02,1e-12),"latest snapshot not written");
              PalmSaver bad(std::filesystem::temp_directory_path()/"d2vr-no-such-dir"/"p.txt");bad.submit(a);bad.flush_for(5000);require(bad.error(),"a failed async save must be reported");
              bad.submit(a);} // destruction with a pending job must neither hang nor throw
             std::error_code ec;std::filesystem::remove(async_file,ec);

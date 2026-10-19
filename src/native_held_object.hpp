@@ -421,10 +421,10 @@ private:
         // Read-back (diagnostics only, serialized by publication_lock_ with the previous write): did anything change the fields since we wrote them?
         if(last_write_rf_==t.rf) {
             // 0x753c10 writes these without our lock: read twice and judge only a stable pair; a recompute that differs by rounding or the -q sign is the same bind.
-            std::int16_t joint{},joint2{};float o[3],q[4],o2[3],q2[4];
-            std::memcpy(&joint,rf+0x3d0,2);std::memcpy(o,rf+0x3d4,12);std::memcpy(q,rf+0x3e0,16);
-            std::memcpy(&joint2,rf+0x3d0,2);std::memcpy(o2,rf+0x3d4,12);std::memcpy(q2,rf+0x3e0,16);
-            if(joint==joint2 && std::memcmp(o,o2,12)==0 && std::memcmp(q,q2,16)==0 && (joint!=-1 || rebind_changed(o,q,last_off_,last_quat_))) ++rebind_overwrites;
+            std::int16_t joint{},joint2{};float back_o[3],back_q[4],back_o2[3],back_q2[4];
+            std::memcpy(&joint,rf+0x3d0,2);std::memcpy(back_o,rf+0x3d4,12);std::memcpy(back_q,rf+0x3e0,16);
+            std::memcpy(&joint2,rf+0x3d0,2);std::memcpy(back_o2,rf+0x3d4,12);std::memcpy(back_q2,rf+0x3e0,16);
+            if(joint==joint2 && std::memcmp(back_o,back_o2,12)==0 && std::memcmp(back_q,back_q2,16)==0 && (joint!=-1 || rebind_changed(back_o,back_q,last_off_,last_quat_))) ++rebind_overwrites;
         }
         *reinterpret_cast<std::int16_t*>(rf+0x3d0)=-1;std::memcpy(rf+0x3d4,off,12);std::memcpy(rf+0x3e0,xyzw,16);
         std::memcpy(last_off_,off,12);std::memcpy(last_quat_,xyzw,16);last_write_rf_=t.rf;

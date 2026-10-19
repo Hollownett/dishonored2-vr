@@ -708,10 +708,10 @@ private:
             profile_refresh_tick_=now+1000;
             if(!xrGetCurrentInteractionProfile || !xrPathToString) return;
             for(unsigned side=0;side<2;++side) {
-                XrInteractionProfileState state{};state.type=XR_TYPE_INTERACTION_PROFILE_STATE;
-                if(!XR_SUCCEEDED(xrGetCurrentInteractionProfile(session_,hand_paths_[side],&state)) || state.interactionProfile==XR_NULL_PATH) continue;
+                XrInteractionProfileState profile_state{};profile_state.type=XR_TYPE_INTERACTION_PROFILE_STATE;
+                if(!XR_SUCCEEDED(xrGetCurrentInteractionProfile(session_,hand_paths_[side],&profile_state)) || profile_state.interactionProfile==XR_NULL_PATH) continue;
                 char text[XR_MAX_PATH_LENGTH]{};uint32_t count{};
-                if(!XR_SUCCEEDED(xrPathToString(instance_,state.interactionProfile,sizeof(text),&count,text))) continue;
+                if(!XR_SUCCEEDED(xrPathToString(instance_,profile_state.interactionProfile,sizeof(text),&count,text))) continue;
                 std::optional<PalmOffsetStore> snapshot;
                 {std::lock_guard<std::mutex> lock(palm_mutex_);if(palm_.set_profile(side,text)) snapshot=palm_.store();}
                 if(snapshot) PalmSaver::process().submit(std::move(*snapshot)); // a fit deferred until now is keyed under the real profile
