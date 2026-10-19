@@ -182,10 +182,19 @@ int main() {
         Held::clear();   // a new hold forgets the last write
         put(rf+0x3d4,std::array<float,3>{8,8,8});assert(d2vr::NativeHeldObjectCheck::anchor(again.target,master) && Held::rebind_overwrites.load()==base+3);
     }
-    {   // Task 9: clear(reason) counts per reason (out of range = 0) and still asks for the layer restore
-        auto& n=Held::clear_reasons;const auto b0=n[0].load(),b2=n[2].load(),b4=n[4].load();
-        Held::layer_restore_.store(false);Held::clear(2);assert(n[2].load()==b2+1 && Held::layer_restore_.load());
-        Held::clear(99);Held::clear();assert(n[0].load()==b0+2);Held::clear(4);assert(n[4].load()==b4+1);
+    {   // Task 9: clear(reason) counts per reason (out of range = 0) and still asks for the layer restore; final review P3: only a clear that tears down
+        // a publication is counted (the render thread clears every no-hold frame)
+        auto& n=Held::clear_reasons;
+        Held::clear();   // nothing published
+        const auto b0=n[0].load(),b2=n[2].load(),b4=n[4].load();
+        Held::layer_restore_.store(false);Held::clear(2);Held::clear(3);Held::clear(99);
+        assert(n[2].load()==b2 && n[0].load()==b0 && Held::layer_restore_.load());   // a no-op clear counts nothing, and still re-asks the restore
+        {   Fixture state;assert(Held::publish(state.target));
+            Held::clear(2);assert(n[2].load()==b2+1);
+            Held::clear(2);assert(n[2].load()==b2+1);}   // the publication is gone: the second clear is a no-op
+        {   Fixture state;assert(Held::publish(state.target));Held::clear(99);assert(n[0].load()==b0+1);}   // out of range = 0
+        {   Fixture state;assert(Held::publish(state.target));Held::clear();assert(n[0].load()==b0+2);}
+        {   Fixture state;assert(Held::publish(state.target));Held::clear(4);assert(n[4].load()==b4+1);}
     }
     for(unsigned mode=0;mode<10;++mode) {
         Fixture state;

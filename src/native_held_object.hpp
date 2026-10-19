@@ -96,7 +96,7 @@ public:
     // Carry diagnostics C6: |entity+0x300 - the post-carry target| at the last bind tick (-1 = none since the last clear).
     inline static std::atomic<float> bind_entity_err{-2.f};
     static void clear(unsigned reason=0) noexcept {
-        ++clear_reasons[reason<clear_reasons.size()?reason:0];
+        if(rf_.load(std::memory_order_acquire)) ++clear_reasons[reason<clear_reasons.size()?reason:0];   // only a publication being torn down counts; clear() also runs every no-hold frame
         layer_settled_.store(0,std::memory_order_release);layer_restore_.store(true,std::memory_order_release);
         NativeHeldPlacement::process_owner().clear();
         AcquireSRWLockExclusive(&publication_lock_);
