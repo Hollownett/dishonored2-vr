@@ -60,6 +60,16 @@ struct ClampInput {
     // fingers went 6 cm into the wall once only the palm was held). None: a plane holds only the probe that hit it.
     static constexpr std::size_t hand_capacity=32;
     std::array<ClampProbe,hand_capacity> hand{};std::size_t hand_count{};
+    // Every dynamic prop near the hand, of any mass (a 12 kg crate is not loose but it is not the world either): its planes rank below any
+    // plane of static geometry, in the projection and in the plane list. Loose props count as dynamic too.
+    std::array<std::uintptr_t,loose_capacity> dynamic{};std::size_t dynamic_count{};
+    // The way out the meet will draw the hand along (world, from the contact service; zero: none). With the hand at rest it says which way
+    // the wall tip's sweep must look.
+    Vec3 kick{};
+    bool is_dynamic(std::uintptr_t entity) const {
+        for(std::size_t i=0;i<std::min(dynamic_count,loose_capacity);++i) if(dynamic[i]==entity) return true;
+        return is_loose(entity);
+    }
     bool is_loose(std::uintptr_t entity) const {
         for(std::size_t i=0;i<std::min(loose_count,loose_capacity);++i) if(loose[i]==entity) return true;
         return false;
@@ -216,6 +226,7 @@ private:
         unsigned misses{};    // answered raw (unslid) casts since it was made or last re-hit (I3; frames without a result do not count)
         bool touched{},news{};   // this frame: the drawn hand was within contact_margin of it; a sweep reached its region (judge)
         bool loose{};            // a loose prop's face (ClampInput::loose when it was hit): it moves out of the hand's way, a wall does not
+        bool dynamic{};          // a prop's face of any mass (ClampInput::dynamic or loose): it ranks below every plane of static geometry
     };
     static constexpr std::size_t plane_capacity=8;
     struct Side {
@@ -322,10 +333,10 @@ private:
     // loose: the hit is on a loose prop (ClampInput::loose). A prop moves: a new hit on a face the side already holds (same
     // probe, parallel normal) is that face where it is now, and replaces the old plane wherever it was (a swatted bottle
     // otherwise leaves a trail of its old faces that hold the hand 30 cm behind it).
-    void add_plane(Side& s,const ClampHit& hit,double radius,Vec3 local,bool tip,bool answer=true,bool loose=false) const {
+    void add_plane(Side& s,const ClampHit& hit,double radius,Vec3 local,bool tip,bool answer=true,bool loose=false,bool dynamic=false) const {
         if(!plane_hit(hit)) return;
         Plane plane{hit.point,hit.normal*(1/length(hit.normal)),local,radius,0,0,hit.entity,hit.material,tip,false,answer};
-        plane.loose=loose;
+        plane.loose=loose;plane.dynamic=dynamic || loose;
         std::size_t slot=s.plane_count;
         for(std::size_t i=0;i<s.plane_count;++i) {
             const auto& p=s.planes[i];
@@ -334,14 +345,14 @@ private:
         }
         if(slot==s.plane_count) {
             if(s.plane_count<capacity()) ++s.plane_count;
-            else {   // full: replace the oldest face of a loose prop (it moves; the hand is pushing it), else the oldest. A wall is held longest: a
-                     // bottle's faces refresh every frame and used to push the wall (hit once in a while, behind the bottle) out.
-                const auto older=[&](bool loose_only) {
-                    std::size_t pick=s.plane_count;
-                    for(std::size_t i=0;i<s.plane_count;++i) if((!loose_only || s.planes[i].loose) && (pick==s.plane_count || s.planes[i].age>s.planes[pick].age)) pick=i;
-                    return pick;
-                };
-                slot=older(true);if(slot==s.plane_count) slot=older(false);
+            else {   // full: static geometry outranks every prop. A prop's new face replaces the oldest prop face, and is dropped when
+                     // all the planes held are static; a static plane replaces the oldest prop face, else the oldest plane.
+                std::size_t pick=s.plane_count;
+                for(std::size_t i=0;i<s.plane_count;++i) if(s.planes[i].dynamic && (pick==s.plane_count || s.planes[i].age>s.planes[pick].age)) pick=i;
+                if(pick==s.plane_count && plane.dynamic) return;
+                if(pick==s.plane_count)
+                    for(std::size_t i=0;i<s.plane_count;++i) if(pick==s.plane_count || s.planes[i].age>s.planes[pick].age) pick=i;
+                slot=pick;
             }
         }
         s.planes[slot]=plane;
@@ -368,27 +379,107 @@ private:
     double clearance(const Side& s,const std::array<Vec3,3>& basis,Vec3 p,const Plane& plane) const {
         return dot(p-plane.point,plane.normal)-reach(s,basis,plane)-cfg_.skin;
     }
-    void project(const Side& s,const std::array<Vec3,3>& basis,Vec3& p,double* pushed=nullptr,bool direct_only=false,
-                 std::optional<std::uintptr_t> except=std::nullopt) const {
-        // Loose props' faces first, everything else (a wall) last. Planes that disagree (a bottle's face pushes the hand toward a wall;
-        // the wall pushes it back) leave the hand at the last one projected, and that must be the surface that does not move.
-        for(const bool hard:{false,true})
-            for(std::size_t i=0;i<s.plane_count;++i) {
-                const auto& plane=s.planes[i];
-                if(plane.loose==hard) continue;
-                if(direct_only && (plane.tip || !plane.last_answer)) continue;
-                if(except && plane.entity==*except) continue;
-                const double d=clearance(s,basis,p,plane);
-                if(d<0) {p=p-plane.normal*d;if(pushed) pushed[i]-=d;}
+    // Pushes grip point p (oriented by basis) out of the planes held, each by the hand's reach into it plus skin; adds each push to `pushed`
+    // when given. direct_only: just the planes hit directly by this side's last answered result. except: the planes of this entity are skipped.
+    // Static geometry (every plane that is not a prop's) outranks any prop: where the planes cannot all be satisfied (the hand is wider than the
+    // slot between a wall and a crate) the hand stays out of the static ones and enters the prop. Order does not matter: a prop's faces are
+    // projected first and static ones last, pass after pass until nothing is deeper than converged (12 passes at most); a corner too sharp for that
+    // is solved exactly (the least move that satisfies the planes, as a small QP over at most three active planes).
+    // False when the static planes alone cannot be satisfied (two walls closer than the hand): p is then left at the last pass, and the caller holds.
+    static constexpr unsigned max_passes=12;
+    static constexpr double converged=5e-4;
+    bool solve(const Side& s,const std::array<Vec3,3>& basis,Vec3& p,double* pushed=nullptr,bool direct_only=false,
+               std::optional<std::uintptr_t> except=std::nullopt) const {
+        struct Row {Vec3 n;double b;std::size_t plane;bool dynamic;};   // n . x >= b
+        std::array<Row,plane_capacity> rows{};std::size_t m=0;
+        for(std::size_t i=0;i<s.plane_count;++i) {
+            const auto& plane=s.planes[i];
+            if(direct_only && (plane.tip || !plane.last_answer)) continue;
+            if(except && plane.entity==*except) continue;
+            rows[m++]={plane.normal,dot(plane.normal,plane.point)+reach(s,basis,plane)+cfg_.skin,i,plane.dynamic};
+        }
+        const Vec3 start=p;
+        const auto worst=[&](Vec3 x,bool statics_only) {
+            double w=0;
+            for(std::size_t k=0;k<m;++k) if(!statics_only || !rows[k].dynamic) w=std::max(w,rows[k].b-dot(rows[k].n,x));
+            return w;
+        };
+        for(unsigned pass=0;pass<max_passes;++pass) {
+            for(const bool statics:{false,true})
+                for(std::size_t k=0;k<m;++k) {
+                    if(rows[k].dynamic==statics) continue;
+                    const double d=dot(rows[k].n,p)-rows[k].b;
+                    if(d<0) {p=p-rows[k].n*d;if(pushed) pushed[rows[k].plane]-=d;}
+                }
+            if(worst(p,false)<=converged) return true;
+        }
+        // Not converged: the least move from where p started that satisfies a set of rows (all of them, else the static ones and as many of
+        // the props' as fit, the deepest first).
+        const auto exact=[&](const std::array<bool,plane_capacity>& use,Vec3& out) {
+            std::array<std::size_t,plane_capacity> ix{};std::size_t u=0;
+            for(std::size_t k=0;k<m;++k) if(use[k]) ix[u++]=k;
+            bool found=false;double best=1e300;
+            const auto try_set=[&](std::size_t count,const std::array<std::size_t,3>& pick) {
+                // Equalities n_a . x = b_a for the picked rows: x = start + sum l_a n_a, G l = b - n . start, G the Gram matrix.
+                std::array<std::array<double,3>,3> g{};std::array<double,3> r{},l{};
+                for(std::size_t a=0;a<count;++a) {
+                    r[a]=rows[pick[a]].b-dot(rows[pick[a]].n,start);
+                    for(std::size_t c=0;c<count;++c) g[a][c]=dot(rows[pick[a]].n,rows[pick[c]].n);
+                }
+                // Gauss elimination with partial pivoting.
+                for(std::size_t col=0;col<count;++col) {
+                    std::size_t piv=col;
+                    for(std::size_t row=col+1;row<count;++row) if(std::abs(g[row][col])>std::abs(g[piv][col])) piv=row;
+                    if(std::abs(g[piv][col])<1e-9) return;
+                    std::swap(g[piv],g[col]);std::swap(r[piv],r[col]);
+                    for(std::size_t row=col+1;row<count;++row) {
+                        const double f=g[row][col]/g[col][col];
+                        for(std::size_t c=col;c<count;++c) g[row][c]-=f*g[col][c];
+                        r[row]-=f*r[col];
+                    }
+                }
+                for(std::size_t a=count;a-->0;) {
+                    double v=r[a];for(std::size_t c=a+1;c<count;++c) v-=g[a][c]*l[c];
+                    l[a]=v/g[a][a];
+                }
+                Vec3 x=start;
+                for(std::size_t a=0;a<count;++a) {if(l[a]<-1e-9) return;x=x+rows[pick[a]].n*l[a];}
+                for(std::size_t q=0;q<u;++q) if(rows[ix[q]].b-dot(rows[ix[q]].n,x)>1e-9) return;
+                const double moved=length(x-start);
+                if(moved<best) {best=moved;out=x;found=true;}
+            };
+            {Vec3 x=start;bool ok=true;for(std::size_t q=0;q<u;++q) ok=ok && rows[ix[q]].b-dot(rows[ix[q]].n,x)<=1e-9;if(ok) {out=x;return true;}}
+            for(std::size_t a=0;a<u;++a) {
+                try_set(1,{a<u?ix[a]:0,0,0});
+                for(std::size_t b=a+1;b<u;++b) {
+                    try_set(2,{ix[a],ix[b],0});
+                    for(std::size_t c=b+1;c<u;++c) try_set(3,{ix[a],ix[b],ix[c]});
+                }
             }
+            return found;
+        };
+        std::array<bool,plane_capacity> use{};
+        for(std::size_t k=0;k<m;++k) use[k]=true;
+        Vec3 solution{};
+        if(!exact(use,solution)) {
+            for(std::size_t k=0;k<m;++k) use[k]=!rows[k].dynamic;
+            if(!exact(use,solution)) return false;   // two walls closer than the hand
+            std::array<std::size_t,plane_capacity> order{};std::size_t props=0;
+            for(std::size_t k=0;k<m;++k) if(rows[k].dynamic) order[props++]=k;
+            std::sort(order.begin(),order.begin()+props,[&](std::size_t a,std::size_t b){return rows[a].b-dot(rows[a].n,start)>rows[b].b-dot(rows[b].n,start);});
+            for(std::size_t q=0;q<props;++q) {
+                use[order[q]]=true;
+                Vec3 trial{};
+                if(exact(use,trial)) solution=trial;else use[order[q]]=false;
+            }
+        }
+        if(pushed) for(std::size_t k=0;k<m;++k) {const double d=dot(rows[k].n,solution-p);if(d>0) pushed[rows[k].plane]+=d;}
+        p=solution;
+        return true;
     }
     static void take_hand(Side& s,const ClampInput& in) {
         s.hand_count=std::min(in.hand_count,in.hand.size());
         for(std::size_t k=0;k<s.hand_count;++k) s.hand[k]=in.hand[k];
-    }
-    void project3(const Side& s,const std::array<Vec3,3>& basis,Vec3& p,double* pushed=nullptr,bool direct_only=false,
-                  std::optional<std::uintptr_t> except=std::nullopt) const {
-        for(int pass=0;pass<3;++pass) project(s,basis,p,pushed,direct_only,except);
     }
     ClampOutput finish(Side& s,const ClampOutput& out) {s.pending_note=true;s.last_out=out;return out;}
 
@@ -438,7 +529,7 @@ public:
         if(side>1 || !finite(meet_position)) return meet_position;
         const auto& s=sides_[side];
         if(!s.has || s.state==ClampState::released) return meet_position;
-        project3(s,basis,meet_position,nullptr,false,met);
+        solve(s,basis,meet_position,nullptr,false,met);
         return meet_position;
     }
 
@@ -520,7 +611,7 @@ public:
                 }
                 for(std::size_t i=0;i<s.plane_count;++i) if(!s.planes[i].tip) s.planes[i].last_answer=false;
                 if(posted==Posted::palm) judge(s,answered,slot0,false);
-                if(slot0) add_plane(s,*slot0,cfg_.palm_radius,{},false,true,slot0_loose);
+                if(slot0) add_plane(s,*slot0,cfg_.palm_radius,{},false,true,slot0_loose,in.is_dynamic(slot0->entity));
                 if(posted==Posted::palm) {
                     // A hit that makes no plane (invalid normal) neither counts nor clears: the recovery sweep must not
                     // reset the deep-start count while the hand stays inside a surface it cannot describe.
@@ -532,7 +623,7 @@ public:
             }
             if(s.state!=ClampState::released && posted_tip.valid) {
                 judge(s,posted_tip,in.tip_hit,true);
-                if(in.tip_hit) add_plane(s,*in.tip_hit,tip_probe.radius,tip_probe.local,true,true,in.is_loose(in.tip_hit->entity));
+                if(in.tip_hit) add_plane(s,*in.tip_hit,tip_probe.radius,tip_probe.local,true,true,in.is_loose(in.tip_hit->entity),in.is_dynamic(in.tip_hit->entity));
             }
             // An exclusion sweep (I1) only adds what lies behind the excluded prop: it judges nothing (it passes through the prop's
             // planes by design) and does not steer the next sweep's slide. What it finds is held by the probe that found it and by
@@ -541,13 +632,14 @@ public:
             const auto behind=[&](const ClampSweep& sweep,const std::optional<ClampHit>& hit,const ClampProbe& probe,bool tip) {
                 if(s.state==ClampState::released || !sweep.valid || !hit || hit->initial_overlap || (sweep.exclude && hit->entity==*sweep.exclude)) return;
                 const bool loose=in.is_loose(hit->entity);
-                if(tip) add_plane(s,*hit,probe.radius,probe.local,true,true,loose);
-                add_plane(s,*hit,cfg_.palm_radius,{},false,false,loose);
+                const bool dynamic=in.is_dynamic(hit->entity);
+                if(tip) add_plane(s,*hit,probe.radius,probe.local,true,true,loose,dynamic);
+                add_plane(s,*hit,cfg_.palm_radius,{},false,false,loose,dynamic);
             };
             if(posted_wall.exclude) behind(posted_wall,in.wall_tip_hit,wall_probe,true);
             else if(s.state!=ClampState::released && posted_wall.valid) {
                 judge(s,posted_wall,in.wall_tip_hit,true);
-                if(in.wall_tip_hit) add_plane(s,*in.wall_tip_hit,wall_probe.radius,wall_probe.local,true,true,in.is_loose(in.wall_tip_hit->entity));
+                if(in.wall_tip_hit) add_plane(s,*in.wall_tip_hit,wall_probe.radius,wall_probe.local,true,true,in.is_loose(in.wall_tip_hit->entity),in.is_dynamic(in.wall_tip_hit->entity));
             }
             behind(posted_exclude,in.exclude_hit,exclude_probe,exclude_tip);
             // A plane the drawn hand still touches (within contact_margin, by any of its spheres) does not age in a frame no sweep
@@ -587,13 +679,15 @@ public:
         const Vec3 target=in.target.position;
         std::array<double,plane_capacity> pushed{};
         Vec3 p=target;
-        project3(s,in.target.basis,p,pushed.data());
-        const Vec3 wanted=p-target;
+        const bool feasible=solve(s,in.target.basis,p,pushed.data());
+        // Two static planes closer than the hand is wide: no place is outside both. The hand stays where it was drawn (a hold; G3's
+        // snap-back takes it from there when the controller stays far), never inside either.
+        const Vec3 wanted=feasible?p-target:(finite(s.drawn_world)?s.drawn_world-target:Vec3{});
         // Engage instantly (never render inside a surface); ease out at release_speed when the push shrinks. The eased hand never
         // enters a plane.
         const auto ease=[&](Vec3 from,double* push) {
             Vec3 q=target+(length(wanted)>=length(from)?wanted:from+clamp_detail::clamp_length(wanted-from,cfg_.release_speed*dt));
-            project(s,in.target.basis,q,push);
+            if(feasible) solve(s,in.target.basis,q,push);
             return q-target;
         };
         // The drawn hand eases from what was drawn (note_drawn); the snap-back gap from the clamp's own push alone, so what a
@@ -614,7 +708,7 @@ public:
             (!s.seg_cut && s.drawn_validated && length(p-s.drawn_world)<=cfg_.palm_radius+1e-9);
         bool hold=false;Vec3 held=s.drawn_world;
         // A hold waits for max_hold_frames casts: in C14 alternate mode a cast is answered every other frame.
-        if(!validated && s.hold_frames<max_hold_frames*s.cadence) {project3(s,in.target.basis,held);hold=true;}
+        if(!validated && s.hold_frames<max_hold_frames*s.cadence) {Vec3 out_of_planes=held;if(solve(s,in.target.basis,out_of_planes)) held=out_of_planes;hold=true;}   // two walls too close: as drawn
         s.drawn_validated=hold || validated;
         if(hold) {
             ++s.hold_frames;out.held=true;out.drawn.position=held;out.shift=held-target;
@@ -672,13 +766,13 @@ public:
             if(!hold || recover) {
                 for(std::size_t i=0;i<3;++i) from_basis[i]=clamp_detail::rotate(in.root.basis,s.prev_basis_local[i]);
                 from=clamp_detail::world_point(in.root,recover?s.clear_from_local:s.prev_local);
-                project3(s,from_basis,from);
+                solve(s,from_basis,from);
             }
             Vec3 end=target+ahead;bool slid=false;
-            if(hold || recover) {end=target+ahead_for(2*lead);project3(s,in.target.basis,end);slid=true;}   // along all known planes
+            if(hold || recover) {end=target+ahead_for(2*lead);solve(s,in.target.basis,end);slid=true;}   // along all known planes
             else if(!s.last_slid) {
                 for(std::size_t i=0;i<s.plane_count;++i) if(!s.planes[i].tip && s.planes[i].last_answer) slid=true;
-                if(slid) {end=target+ahead_for(2*lead);project3(s,in.target.basis,end,nullptr,true);}
+                if(slid) {end=target+ahead_for(2*lead);solve(s,in.target.basis,end,nullptr,true);}
             }
             s.last_slid=slid;
             const ClampSweep palm{from,end,cfg_.palm_radius,true};
@@ -686,19 +780,31 @@ public:
                 out.palm_sweep=palm;s.posted=Posted::palm;s.posted_palm=palm;s.posted_slid=slid;
                 s.posted_slid_window=static_cast<unsigned>(2*lead);s.cadence=static_cast<unsigned>(lead);
             }
-            // The wall tip's and the exclusion probe's sweeps (not the tip's, which keeps the planes the hand rests at hit) end look_ahead
-            // beyond the target along the horizontal motion: the drawn hand is not always where the sweeps end. The meet takes it out of a
-            // prop by up to meet_latch (8 cm) a frame after the sweeps were posted, and a plane that disagrees with another pushes it along
-            // its own normal, so a wall a few cm past the swept tip was met by no sweep until the drawn hand was in it.
+            // The probe that acts as the wall tip (its own sweep, or the tip's when it is the same probe) and the exclusion probe's sweep end
+            // look_ahead beyond the target along the horizontal motion: the drawn hand is not always where the sweeps end. The meet takes it out
+            // of a prop by up to meet_latch (8 cm) a frame after the sweeps were posted, and a plane that disagrees with another pushes it along
+            // its own normal, so a wall a few cm past the swept tip was met by no sweep until the drawn hand was in it. At rest (under 1 cm/s)
+            // the way out the meet will take (ClampInput::kick) gives the direction. The plain tip of a separate wall tip is not extended: it keeps
+            // the planes the resting hand has hit.
             Vec3 look{};
-            if(cfg_.look_ahead>0) {const double h=std::hypot(velocity.x,velocity.y);if(std::isfinite(h) && h>=.01) look=Vec3{velocity.x/h,velocity.y/h,0}*cfg_.look_ahead;}
+            if(cfg_.look_ahead>0) {
+                Vec3 d{velocity.x,velocity.y,0};double h=std::hypot(d.x,d.y);
+                if(!std::isfinite(h) || h<.01) {d={in.kick.x,in.kick.y,0};h=std::hypot(d.x,d.y);if(!std::isfinite(h) || h<1e-3) h=0;}
+                if(h>0) look=d*(cfg_.look_ahead/h);
+            }
             const auto post_tip=[&](bool ahead_of_target,const ClampProbe& probe,ClampSweep& sweep) {
                 const ClampSweep tip{from+clamp_detail::rotate(from_basis,probe.local),end+(ahead_of_target?look:Vec3{})+clamp_detail::rotate(in.target.basis,probe.local),probe.radius,true};
                 if(finite(tip.from) && finite(tip.to)) sweep=tip;
             };
             const bool tip_on=in.tip_enabled && clamp_detail::usable(in.tip);
             const bool wall_on=in.tip_enabled && clamp_detail::usable(in.wall_tip) && !(tip_on && clamp_detail::same_probe(in.wall_tip,in.tip));
-            if(tip_on) {post_tip(false,in.tip,out.tip_sweep);if(out.tip_sweep.valid) {s.posted_tip=out.tip_sweep;s.posted_tip_probe=in.tip;}}
+            const std::optional<std::uintptr_t> excluded=in.exclude?in.exclude:s.loose_touch;
+            const bool excluding=excluded && out.palm_sweep.valid;
+            const bool tip_is_wall_tip=!excluding && tip_on && clamp_detail::usable(in.wall_tip) && clamp_detail::same_probe(in.wall_tip,in.tip);
+            if(tip_on) {
+                post_tip(tip_is_wall_tip,in.tip,out.tip_sweep);
+                if(out.tip_sweep.valid) {s.posted_tip=out.tip_sweep;s.posted_tip_probe=in.tip;}
+            }
             // I1: a loose prop the last answered cast met (or the met prop) hides what lies behind it from the closest-hit sweeps,
             // and a probe overlapping it sweeps from inside it. Two probes then also sweep from the hand to the unslid target with
             // that prop excluded (at most 4 casts a side):
@@ -708,8 +814,6 @@ public:
             //    tip; the palm wins a tie), when it is another one: what lies behind a prop lies beyond the face the hand presses
             //    (pressing a thin prop on a table with the fingers forward, the palm meets the table first). With no plane on the
             //    prop, the leader along the motion; at rest, the tip.
-            const std::optional<std::uintptr_t> excluded=in.exclude?in.exclude:s.loose_touch;
-            const bool excluding=excluded && out.palm_sweep.valid;
             const ClampProbe* wall=wall_on?&in.wall_tip:tip_on && clamp_detail::usable(in.wall_tip)?&in.tip:nullptr;
             const auto post_excluded=[&](const ClampProbe& probe,ClampSweep& sweep) {
                 const ClampSweep ex{from+clamp_detail::rotate(from_basis,probe.local),target+ahead+look+clamp_detail::rotate(in.target.basis,probe.local),

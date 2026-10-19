@@ -96,6 +96,8 @@ struct Rig {
     std::function<bool(unsigned)> post;        // C14 alternate mode: false skips this frame's cast
     std::optional<Vec3> note_override;         // drawn position reported to note_drawn once
     std::vector<std::uintptr_t> loose;         // ClampInput::loose
+    std::vector<std::uintptr_t> dynamic;       // ClampInput::dynamic
+    Vec3 kick{};                               // ClampInput::kick
     std::optional<std::uintptr_t> exclude;     // ClampInput::exclude
     ClampOutput last{};bool have_last=false;int holds=0;   // frames held so far
     explicit Rig(HandClampConfig c={}) : clamp(c) {
@@ -109,6 +111,8 @@ struct Rig {
         in.now=now();in.epoch=epoch;in.root=root;in.target=target;in.chest=world.chest;
         in.tip=tip;in.tip_enabled=tip_enabled;in.wall_tip=wall_tip;in.yield=yield;in.post=!post || post(frame);
         for(const auto e:loose) if(in.loose_count<ClampInput::loose_capacity) in.loose[in.loose_count++]=e;
+        for(const auto e:dynamic) if(in.dynamic_count<ClampInput::loose_capacity) in.dynamic[in.dynamic_count++]=e;
+        in.kick=kick;
         in.exclude=exclude;
         for(const auto& probe:hand) if(in.hand_count<ClampInput::hand_capacity) in.hand[in.hand_count++]=probe;
         if(have_last) {
@@ -1313,6 +1317,146 @@ void wall_tip_looks_ahead() {
     }
 }
 
+// ---- Fix round 1 (Task 6b review): static geometry outranks every dynamic prop; projection converges; the look-ahead is always on.
+// A crate that is too heavy to push (12 kg and up) is not in ClampInput::loose, but it is a prop: its entity is in ClampInput::dynamic.
+// The hand is wider than the slot between the wall and the crate: it stays out of the wall and may enter the crate.
+void static_outranks_heavy_props() {
+    for(const std::uintptr_t crate:{std::uintptr_t{31},std::uintptr_t{32}}) {   // 12 kg and 20 kg: the clamp sees an entity, not a mass
+        HandClamp c;
+        const auto basis=pose_at({}).basis;
+        ClampProbe front{{.12,0,0},.03},back{{-.10,0,0},.03};
+        const auto frame=[&](unsigned i,Vec3 target,std::optional<ClampHit> palm,std::optional<ClampHit> tip) {
+            ClampInput in{};
+            in.now=i*dt;in.epoch=1;in.root=level_frame({0,0,0},{1,0,0});in.target=pose_at(target);in.chest={0,0,1};
+            in.tip=back;in.tip_enabled=true;in.palm_hit=palm;in.tip_hit=tip;
+            in.hand[0]=front;in.hand[1]=back;in.hand_count=2;
+            in.dynamic[0]=crate;in.dynamic_count=1;
+            const auto o=c.update(0,in);c.note_drawn(0,in.root,o.drawn.position);return o;
+        };
+        const ClampHit wall{{1,0,.5},{-1,0,0},7,3,false,true},face{{.8,0,.5},{1,0,0},crate,6,false,true};
+        frame(0,{.9,0,.5},std::nullopt,std::nullopt);
+        frame(1,{.9,0,.5},std::nullopt,std::nullopt);
+        ClampOutput o{};
+        for(unsigned i=2;i<6;++i) o=frame(i,{.9,0,.5},i==2?std::optional<ClampHit>{wall}:std::nullopt,i>=3?std::optional<ClampHit>{face}:std::nullopt);
+        CHECK(o.drawn.position.x<=1-.12-.03-.005+1e-9);   // out of the wall; the crate's face is the one that gives
+        CHECK(close_to(c.keep_out(0,basis,{.9,0,.5},std::nullopt),{1-.12-.03-.005,0,.5},1e-9));
+    }
+}
+
+// All four planes are props' (none loose): a new face drops the oldest face, not the wall.
+void all_dynamic_eviction_keeps_the_wall() {
+    HandClamp c;
+    const auto face=[](double angle) {return ClampHit{{.1,.1*angle,.5},{-std::cos(angle),std::sin(angle),0},31,6,false,true};};
+    const auto frame=[&](unsigned i,std::optional<ClampHit> palm,std::optional<ClampHit> tip,std::optional<ClampHit> wall_tip) {
+        ClampInput in{};
+        in.now=i*dt;in.epoch=1;in.root=level_frame({0,0,0},{1,0,0});in.target=pose_at({.5,0,.5});in.chest={0,0,1};
+        in.tip={{.10,0,0},.02};in.tip_enabled=true;in.wall_tip={{.12,0,.04},.03};
+        in.palm_hit=palm;in.tip_hit=tip;in.wall_tip_hit=wall_tip;in.dynamic[0]=31;in.dynamic_count=1;
+        const auto o=c.update(0,in);c.note_drawn(0,in.root,o.drawn.position);return o;
+    };
+    frame(0,std::nullopt,std::nullopt,std::nullopt);frame(1,std::nullopt,std::nullopt,std::nullopt);
+    frame(2,ClampHit{{1,0,.5},{-1,0,0},7,3,false,true},std::nullopt,std::nullopt);
+    frame(3,face(.3),face(.5),face(.7));
+    frame(4,face(.9),std::nullopt,std::nullopt);
+    std::array<ClampHit,HandClamp::max_held_planes> held{};
+    const auto n=c.held_planes(0,held);
+    CHECK(n==c.config().max_planes);
+    bool wall=false;
+    for(std::size_t i=0;i<n;++i) wall=wall || held[i].entity==7;
+    CHECK(wall);
+}
+
+// Hard inside corners at 30, 45 and 60 degrees (two static planes, the hand deep in both): within 1 cm of each plane, drawn and eased.
+void sharp_hard_corners() {
+    for(const double degrees:{30.,45.,60.}) {
+        const double a=degrees*3.14159265358979323846/180;
+        const Vec3 n1{-1,0,0},n2{std::cos(a),std::sin(a),0},free=unit(n1+n2);   // walls meet at (1,0): the free wedge opens along `free`
+        HandClamp c;
+        ClampProbe front{{.05,0,0},.02},back{{-.04,0,0},.02};   // a small hand: a 30 degree corner takes the big one past the 35 cm snap-back gap
+        const auto frame=[&](unsigned i,Vec3 target,bool hits) {
+            ClampInput in{};
+            in.now=i*dt;in.epoch=1;in.root=level_frame({0,0,0},{1,0,0});in.target=pose_at(target);in.chest={0,0,1};
+            in.tip=back;in.tip_enabled=true;
+            in.hand[0]=front;in.hand[1]=back;in.hand_count=2;
+            if(hits) {in.palm_hit=ClampHit{{1,0,.5},n1,7,3,false,true};in.tip_hit=ClampHit{{1,0,.5},n2,8,3,false,true};}
+            const auto o=c.update(0,in);c.note_drawn(0,in.root,o.drawn.position);return o;
+        };
+        const Vec3 start=Vec3{1,0,.5}+free*.3,deep=Vec3{1,0,.5}+(degrees==30.?Vec3{-.07,0,0}:degrees==45.?Vec3{-.07,-.09,0}:Vec3{-.03,-.03,0});   // deep in both walls: three alternating projections stop short of the corner at 30 and 45 degrees
+        frame(0,start,false);frame(1,start,false);
+        ClampOutput o{};
+        for(unsigned i=2;i<40;++i) {
+            o=frame(i,deep,true);
+            // The clearance of the drawn grip from each plane's skin: the hand's deepest extent along -n (the front and back spheres) beyond it.
+            for(const Vec3 n:{n1,n2}) {
+                const double reach=std::max({.05,dot(Vec3{.05,0,0},n*-1.)+.02,dot(Vec3{-.04,0,0},n*-1.)+.02});
+                CHECK(finite(o.drawn.position));
+                if(i>=3) CHECK(dot(o.drawn.position-Vec3{1,0,.5},n)-reach>=-.01);
+            }
+        }
+    }
+}
+
+// The wall tip is the tip (same probe): its sweep looks ahead too, with the production default. A kick of 8 cm along the motion then lands on
+// a wall the sweep already met.
+void same_probe_wall_tip_looks_ahead() {
+    CHECK(HandClampConfig{}.look_ahead==.10);   // the production default
+    double end_x[2]{};Vec3 kicked[2]{};bool wall[2]{};
+    for(int run=0;run<2;++run) {
+        HandClampConfig cfg;if(run) cfg.look_ahead=0;
+        Rig r(cfg);r.tip={{.12,0,0},.03};r.tip_enabled=true;r.wall_tip=r.tip;
+        r.step({.5,0,.5});
+        r.move_x({.5,0,.5},.80,.5,[&](const ClampOutput& o,Vec3 p) {
+            if(!o.tip_sweep.valid || p.x<.7 || p.x>.795) return;
+            CHECK(!o.wall_tip_sweep.valid);   // one probe, one sweep
+            end_x[run]=o.tip_sweep.to.x-p.x;
+            std::array<ClampHit,HandClamp::max_held_planes> held{};
+            const auto n=r.clamp.held_planes(0,held);
+            wall[run]=false;for(std::size_t i=0;i<n;++i) wall[run]=wall[run] || held[i].entity==7;
+            kicked[run]=r.clamp.keep_out(0,pose_at(p).basis,p+Vec3{.08,0,0},std::nullopt);
+        });
+    }
+    CHECK(std::abs((end_x[0]-end_x[1])-.10)<1e-9);
+    CHECK(wall[0] && !wall[1]);
+    CHECK(std::abs(kicked[0].x-(1-.12-.03-.005))<1e-6);
+    CHECK(kicked[1].x>.855);   // nothing knew of the wall: the kick stands (p + 8 cm, p over 0.7)
+}
+
+// The hand at rest: ClampInput::kick (the meet's way out, from the contact service) says which way the wall tip looks.
+void late_meet_kick_at_rest() {
+    for(const bool kick:{true,false}) {
+        Rig r;r.tip={{.12,0,0},.03};r.tip_enabled=true;r.wall_tip=r.tip;
+        if(kick) r.kick={.08,0,0};
+        r.step({.8,0,.5});
+        ClampOutput o{};
+        for(int i=0;i<12;++i) o=r.step({.8,0,.5});
+        while(!r.posting()) o=r.step({.8,0,.5});
+        std::array<ClampHit,HandClamp::max_held_planes> held{};
+        const auto n=r.clamp.held_planes(0,held);
+        bool wall=false;for(std::size_t i=0;i<n;++i) wall=wall || held[i].entity==7;
+        const Vec3 d=r.clamp.keep_out(0,pose_at({.8,0,.5}).basis,{.88,0,.5},std::nullopt);   // the meet draws the hand 8 cm on
+        if(kick) {CHECK(wall);CHECK(std::abs(d.x-(1-.12-.03-.005))<1e-6);}
+        else {CHECK(!wall);CHECK(std::abs(d.x-.88)<1e-12);}
+    }
+}
+
+// Two static planes closer than the hand is wide: no place keeps it out of both. It is held where it was drawn (and snaps per G3 later), not
+// drawn inside either.
+void static_squeeze_holds() {
+    HandClamp c;
+    ClampProbe front{{0,.15,0},.03},back{{0,-.15,0},.03};
+    const auto frame=[&](unsigned i,Vec3 target,bool hits) {
+        ClampInput in{};
+        in.now=i*dt;in.epoch=1;in.root=level_frame({0,0,0},{1,0,0});in.target=pose_at(target);in.chest={0,0,1};
+        in.tip=back;in.tip_enabled=true;in.hand[0]=front;in.hand[1]=back;in.hand_count=2;
+        if(hits) {in.palm_hit=ClampHit{{.5,.1,.5},{0,-1,0},7,3,false,true};in.tip_hit=ClampHit{{.5,-.1,.5},{0,1,0},8,3,false,true};}
+        const auto o=c.update(0,in);c.note_drawn(0,in.root,o.drawn.position);return o;
+    };
+    frame(0,{.5,0,.5},false);frame(1,{.5,0,.5},false);
+    ClampOutput o{};
+    for(unsigned i=2;i<8;++i) {o=frame(i,{.5+.01*(i-1),0,.5},true);CHECK(finite(o.drawn.position));CHECK(!o.snapped);}
+    CHECK(std::abs(o.drawn.position.x-.5)<1e-9 && std::abs(o.drawn.position.y)<1e-9);   // held where it was drawn
+}
+
 int main() {
     // Corner, slide, hold, jump and walk tests run in every posting mode, with the same bounds.
     for(g_mode=0;g_mode<3;++g_mode) {
@@ -1336,6 +1480,12 @@ int main() {
         tip_probe_stops_fingers();
         wall_tip_holds_a_rising_hand();
         whole_hand_edges_and_corners();
+        static_outranks_heavy_props();
+        all_dynamic_eviction_keeps_the_wall();
+        sharp_hard_corners();
+        same_probe_wall_tip_looks_ahead();
+        late_meet_kick_at_rest();
+        static_squeeze_holds();
     }
     g_mode=0;
     deep_start_overlap_snaps();

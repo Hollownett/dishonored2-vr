@@ -265,7 +265,8 @@ Run simulate(const Scenario& s,const rig::HandGeometry& geometry,const HandConta
             const auto in_hand=[&](const ClampProbe& q) {for(const auto& o:open_hand) if(clamp_detail::same_probe(o,q)) return true;return false;};
             flips=unsigned(in_hand(tip_before) && !clamp_detail::same_probe(tip_before,last_tip))+unsigned(in_hand(wall_before) && !clamp_detail::same_probe(wall_before,last_wall));
             if(run.mass>0 && run.mass<cfg.heavy_kg) {in.loose[0]=1;in.loose_count=1;}   // the service's loose list: the light bottle, pinned or not
-            if(meet_on) in.exclude=meet_r.exclude;
+            in.dynamic[0]=1;in.dynamic_count=1;   // the bottle is a prop at any mass (the service lists every body in reach)
+            if(meet_on) {in.exclude=meet_r.exclude;in.kick=meet_now.outward;}
             clamp_out=clamp.update(0,in);clamp_started=true;
             const unsigned casts=unsigned(clamp_out.palm_sweep.valid)+unsigned(clamp_out.tip_sweep.valid)+unsigned(clamp_out.wall_tip_sweep.valid)+unsigned(clamp_out.exclude_sweep.valid);
             run.casts+=casts;run.max_casts=std::max(run.max_casts,casts);run.exclude_casts+=clamp_out.exclude_sweep.valid;
@@ -649,7 +650,7 @@ std::vector<Scenario> scenarios() {
         const auto smooth=smooth_variant(s);
         all.push_back(smooth);
         // Task 6b: a heavier prop holds the hand back harder and moves less, so the clamp's planes and the meet work at larger shifts (G1 judged).
-        if(push.kind==0 && (speed==.146 || speed==.5 || speed==1.5)) for(const double kg:{5.,11.}) all.push_back(mass_variant(smooth,kg));
+        if(push.kind==0 && (speed==.146 || speed==.5 || speed==1.5)) for(const double kg:{5.,11.,12.,20.}) all.push_back(mass_variant(smooth,kg));
     }
     // G1 along a bare wall (fix round 5): the live hand, 50 cm to the side of the bottle, presses into the wall at 0.5 m/s (the tracked grip ends 3.8 cm past it,
     // the fingers 17 cm) and slides 0.5 m along it, then rests 2 s. wall_slide_negy_*: toward -y, away from the thumb (the side probes lead the slide; at
@@ -689,7 +690,7 @@ std::vector<Scenario> scenarios() {
         all.push_back(s);
         const auto smooth=smooth_variant(s);
         all.push_back(smooth);
-        if(w.bottle) for(const double kg:{5.,11.}) all.push_back(mass_variant(smooth,kg));
+        if(w.bottle) for(const double kg:{5.,11.,12.,20.}) all.push_back(mass_variant(smooth,kg));
     }
     {   // a static clamp shoves the drawn hand into the bottle at the onset (sim v509 s2b/s2c)
         auto s=base("sweep_live2_glitch","Sideways sweep, a static obstacle's clamp shoves the drawn hand into the bottle for 60 ms at the onset","The sweep_live2 sweep; 0.19 s after the first write the cast reports a hit that is not the bottle (entity 0) and holds the drawn hand 9.4 cm along +y, into the bottle, easing out at 1.5 m/s: the drawn proxies are 6 cm inside it for a few services while the tracked hand is where it was (sim v509: one write of 0.49-0.54 m/s).");
