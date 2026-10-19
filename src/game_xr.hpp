@@ -111,6 +111,7 @@ private:
     // G5/C6: grip-to-palm offsets per side and OpenXR interaction profile. Everything here is touched from the XR update and the render
     // thread, so it sits behind one mutex; file errors never leave this class (the hands keep the defaults and status says so).
     mutable std::mutex palm_mutex_;
+    PalmPreviewMailbox palm_preview_; // the hand-fit preview, published by the XR thread after every settings change; palm_offset() reads this, never settings_
     PalmCalibration palm_;       // the store plus each hand's interaction profile (and a fit deferred until the profile is named)
     std::filesystem::path palm_file_;
     ULONGLONG profile_refresh_tick_{};
@@ -883,6 +884,8 @@ public:
         std::lock_guard<std::mutex> lock(palm_mutex_);
         return palm_.profile(side);
     }
+    // XR thread only (the thread that owns settings_): hand the current preview to the other threads.
+    void publish_palm_preview() noexcept {try {palm_preview_.publish({settings_.palm_preview(0),settings_.palm_preview(1)});} catch(...) {}}
     // The grip-to-palm offset the hand uses now: the preview while the hand-fit page is open, else the saved value for this side and
     // profile, else the default (C6, C12). saved: the value came from the file or from a confirmed fit.
     PalmOffset palm_offset(unsigned side,bool* saved=nullptr) const {
@@ -890,7 +893,7 @@ public:
         side&=1u;
         bool stored_saved{};const auto stored=palm_.get(side,&stored_saved);
         if(saved) *saved=stored_saved;
-        if(const auto preview=settings_.palm_preview(side)) return *preview;
+        if(const auto preview=palm_preview_.get(side)) return *preview;
         return stored;
     }
     // Status JSON fragment: "palm_offset":{...} (no leading comma).
@@ -1258,7 +1261,7 @@ public:
                 state=reinterpret_cast<XrEventDataSessionStateChanged*>(&event)->state;
                 if(state!=XR_SESSION_STATE_VISIBLE && state!=XR_SESSION_STATE_FOCUSED) {
                     continuity_.suspend();menu_panel_.reset();authored_panel_.reset();world_ui_pose_valid_=false;views_valid_=false;rendered_mask_=0;
-                    settings_.suspend();
+                    settings_.suspend();publish_palm_preview();
                 }
                 if(state==XR_SESSION_STATE_EXITING || state==XR_SESSION_STATE_LOSS_PENDING) exit_requested=true;
                 if(state==XR_SESSION_STATE_READY && !running_) {
@@ -1402,6 +1405,7 @@ public:
             // Includes squeeze: holding the calibration pose must not open the native weapon selector.
             if(changes.consume) {controller_input={};settings_consumed=true;}
             if(changes.test_unlock) test_unlock_requested=true;
+            publish_palm_preview(); // the fit page opened, was nudged, confirmed or left
         }
         // Notes (2) get no pointer: pointer input switches the game to keyboard glyphs ("Esc Close") and a note has nothing to click.
         // The wheel keeps it: its sector selection runs through the native pointer (without it the wheel ignored the cursor).

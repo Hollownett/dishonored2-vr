@@ -299,6 +299,15 @@ public:
 };
 
 // The hand-fit step: the user holds a controller naturally, nudges with the thumbsticks, confirms with the trigger.
+// The hand-fit page's live preview, published by the XR thread (which owns VrSettings and moves the fit) and read by the render thread
+// (palm_offset) and the status thread. A value is copied whole under its own lock, so a reader never sees a half-written PalmOffset.
+class PalmPreviewMailbox {
+    mutable std::mutex mutex_;
+    std::array<std::optional<PalmOffset>,2> preview_{};
+public:
+    void publish(const std::array<std::optional<PalmOffset>,2>& preview) {std::lock_guard<std::mutex> lock(mutex_);preview_=preview;}
+    std::optional<PalmOffset> get(unsigned side) const {std::lock_guard<std::mutex> lock(mutex_);return preview_[side&1u];}
+};
 class PalmFitStep {
     bool active_{};unsigned side_{};PalmOffset value_{};
 public:

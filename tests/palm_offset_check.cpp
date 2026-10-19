@@ -1,5 +1,7 @@
 #include "palm_offset.hpp"
+#include <atomic>
 #include <cstdio>
+#include <thread>
 #include <chrono>
 #include <fstream>
 #include <functional>
@@ -312,6 +314,23 @@ int main() {
              PalmSaver bad(std::filesystem::temp_directory_path()/"d2vr-no-such-dir"/"p.txt");bad.submit(a);bad.flush_for(5000);require(bad.error(),"a failed async save must be reported");
              bad.submit(a);} // destruction with a pending job must neither hang nor throw
             std::error_code ec;std::filesystem::remove(async_file,ec);
+        }
+        {   // the hand-fit preview crosses from the XR thread to the render and status threads whole, never torn (final review)
+            PalmPreviewMailbox box;
+            require(!box.get(0) && !box.get(1),"an unpublished preview must be empty");
+            box.publish({PalmOffset{{.01,.02,.03},4,5},std::nullopt});
+            require(box.get(0) && near(box.get(0)->pitch_deg,4) && !box.get(1),"the published preview was not readable");
+            box.publish({std::nullopt,std::nullopt});require(!box.get(0),"a closed page must clear the preview");
+            std::atomic<bool> stop{false},torn{false};
+            std::thread reader([&] {
+                while(!stop.load()) for(unsigned side=0;side<2;++side) if(const auto v=box.get(side)) {
+                    const double x=v->translation.x; // every field of one published value carries the same number
+                    if(v->translation.y!=x || v->translation.z!=x || v->pitch_deg!=x || v->yaw_deg!=x) torn=true;
+                }
+            });
+            for(int i=1;i<=200000;++i) {const double x=i;const PalmOffset o{{x,x,x},x,x};box.publish({o,o});}
+            stop=true;reader.join();
+            require(!torn.load(),"a torn preview was read");
         }
         std::cout<<"palm_offset_check: ok\n";return 0;
     } catch(const std::exception& e) {std::cerr<<"FAIL: "<<e.what()<<'\n';return 1;}
