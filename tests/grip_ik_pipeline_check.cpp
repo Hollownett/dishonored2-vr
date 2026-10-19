@@ -1,5 +1,6 @@
 #include "../src/grip_session.hpp"
 #include "../src/full_body_driver.hpp"
+#include "../src/hand_reach.hpp"
 #include <cassert>
 #include <iostream>
 
@@ -139,6 +140,54 @@ std::array<double,3> right_hand_check() {
     }
     assert(commits==2 && session.revoke()==GripSession::Drain::drained);return errors;
 }
+// G2/C4 IK feed: publish a grip, solve the arm the way the engine's arm upload does, return the palm.
+Xf feed_palm(const Rig& rig,Driver& driver,const Xf& grip,std::uint64_t tick,std::uint64_t frame_key) {
+    auto t=rig.tracking;t.grip[0]=grip;t.raw_grip[0]=grip;t.tick=t.source_tick=tick;t.seconds=tick/1000.;++t.tracking_revision;
+    driver.note_root(identity_frame);driver.publish(t,{});
+    const auto pose=driver.arm_frozen(0,rig.native_arm[0],identity_frame,tick,frame_key);assert(pose);
+    return rig.palm(pose->joints,identity_frame);
+}
+Vec3 reach_wrist(const ArmReach& reach,const WorldTrackedPose& grip) {
+    return grip.position+grip.basis[0]*reach.wrist_local.x+grip.basis[1]*reach.wrist_local.y+grip.basis[2]*reach.wrist_local.z;
+}
+// A grip inside reach goes to the IK unchanged and the palm lands on it; the diagnostic reach describes that arm.
+double ik_feed_inside_reach() {
+    Rig rig;Driver driver;rig.seed(driver);
+    auto grip=rig.tracking.grip[0];grip.p.x+=.1;
+    const auto palm=feed_palm(rig,driver,grip,110,2);
+    const double error=length(palm.p-grip.p);assert(error<.01);
+    const auto d=driver.diagnostic();const auto& reach=d.reach[0];
+    assert(reach.valid && reach.max_wrist>0 && d.arm_valid[0]);
+    bool clamped=true;const auto unchanged=reach_clamp(world_pose(grip),reach,&clamped);
+    assert(!clamped && length(unchanged.position-grip.p)==0);
+    // wrist = grip.p + R(grip)·wrist_local is the solved wrist, inside max_wrist of the solve-time shoulder.
+    assert(length(reach_wrist(reach,world_pose(grip))-d.wrist[0].p)<1e-3);
+    assert(length(d.wrist[0].p-reach.shoulder)<=reach.max_wrist+1e-6);
+    // The reach is reported in the world: a root moved since the solve carries the shoulder with it.
+    const Xf delta{body::rot_z(.3),{.2,-.1,0}};
+    driver.note_root(model_frame(delta));
+    const auto moved=driver.diagnostic().reach[0];
+    assert(moved.valid && length(moved.shoulder-body::mul(delta,Xf{{},reach.shoulder}).p)<1e-6);
+    assert(moved.max_wrist==reach.max_wrist && length(moved.wrist_local-reach.wrist_local)==0);
+    return error;
+}
+// A grip 0.4 m beyond reach: the unclamped arm stops short of it; the reach-clamped grip is reached.
+std::array<double,2> ik_feed_clamped_reach() {
+    Rig rig;Driver driver;rig.seed(driver);
+    const auto reach=driver.diagnostic().reach[0];assert(reach.valid);
+    const auto seed=world_pose(rig.tracking.grip[0]);
+    const auto wrist=reach_wrist(reach,seed);
+    const auto outward=unit(wrist-reach.shoulder);
+    auto far=seed;far.position=far.position+outward*(reach.max_wrist+.4-length(wrist-reach.shoulder));
+    assert(std::abs(length(reach_wrist(reach,far)-reach.shoulder)-(reach.max_wrist+.4))<1e-9);
+    bool clamped=false;const auto held=reach_clamp(far,reach,&clamped);assert(clamped);
+    const auto palm=feed_palm(rig,driver,rigid(held),110,2);
+    const double clamped_error=length(palm.p-held.position);assert(clamped_error<.01);
+    Driver unclamped;rig.seed(unclamped);
+    const auto short_palm=feed_palm(rig,unclamped,rigid(far),110,2);
+    const double gap=length(short_palm.p-far.position);assert(gap>.05);
+    return {clamped_error,gap};
+}
 }
 int main() {
     Rig rig;Hold hold(world_pose(rig.tracking.grip[0]));GripSession session;assert(hold.admit(session));
@@ -227,8 +276,12 @@ int main() {
     for(unsigned joint=0;joint<69;++joint)for(unsigned component=0;component<16;++component)
         assert((*skin_palette)[joint].f[component]==(*attachment_palette)[joint].f[component]);
     const auto right=right_hand_check();
+    const auto inside=ik_feed_inside_reach();
+    const auto feed=ik_feed_clamped_reach();
     std::cout<<"PASS composed grip/session/native-rig IK: blocked="<<blocked_error<<" raw="<<raw_error
         <<" root_without_compensation="<<uncompensated_root_error<<" root_compensated="<<corrected_root_error
         <<" right_blocked="<<right[0]<<" right_moved_rotated="<<right[1]<<" right_raw="<<right[2]
         <<"; moved/rotated anchor, raw-candidate separation, frozen/stale/released final commits rejected\n";
+    std::cout<<"PASS ik_feed_inside_reach: palm_error="<<inside<<"\n";
+    std::cout<<"PASS ik_feed_clamped_reach: palm_error="<<feed[0]<<" unclamped_gap="<<feed[1]<<"\n";
 }

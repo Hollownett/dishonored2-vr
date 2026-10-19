@@ -374,6 +374,49 @@ int main() {
         {std::ofstream invalid(preference_file);invalid<<"1 1.3 1 0 45 90 extra";}
         rejected=false;try {load_preferences(preference_file);} catch(const std::runtime_error&) {rejected=true;}
         require(rejected,"Unexpected preference fields accepted");std::filesystem::remove(preference_file);
+        {   // G5/C6: hand fit sub-page of the calibration page
+            VrSettings fit;fit.initialize(1,true);ControllerInput c{};c.active=true;
+            fit.palm_offsets(PalmOffset{{.01,.02,0},12,0},PalmOffset{{-.02,-.01,.03},9,4});
+            fit.open_calibration_from_native();fit.update(c,false,true);
+            require(fit.calibration_page(),"hand fit test: no calibration page");
+            require(!fit.hand_fit_page(),"hand fit open before X");
+            c.x=true;auto e=fit.update(c,false,true);
+            require(fit.hand_fit_page() && fit.calibration_page() && e.consume && !e.calibrate && !e.palm_offset,"X did not open hand fit");
+            c.x=false;fit.update(c,false,true);
+            require(fit.palm_preview(0) && fit.palm_preview(1),"no preview on the fit page");
+            {const auto page=settings_panel_image(fit,1,1280,1120,{}),calibration=settings_panel_image(VrSettings{},1,1280,1120,{});
+             require(!page.empty() && page!=calibration,"hand-fit page did not render");}
+            require(std::abs(fit.palm_preview(1)->translation.x+.02)<1e-12 && std::abs(fit.palm_preview(0)->pitch_deg-12)<1e-12,"fit did not start from the current offsets");
+            // Y and A have their old meanings only off the sub-page: here Y does not open measurements, A does not start capture
+            c.y=true;e=fit.update(c,false,true);require(!fit.measurements_page() && fit.hand_fit_page() && e.consume,"Y acted on the hand-fit page");c.y=false;fit.update(c,false,true);
+            c.a=true;e=fit.update(c,false,true);require(!e.calibrate && fit.hand_fit_side()==0,"A on hand fit: calibrated or did not switch hands");c.a=false;fit.update(c,false,true);
+            c.a=true;fit.update(c,false,true);c.a=false;fit.update(c,false,true);require(fit.hand_fit_side()==1,"A did not switch back");
+            // the sticks move only the active (right) hand
+            c.move_y=1;for(int i=0;i<90;++i) fit.update(c,false,true,{},true,1./90);c.move_y=0;
+            require(std::abs(fit.palm_preview(1)->translation.x-(-.02+.02))<1e-9,"stick did not move the active hand 2 cm/s");
+            require(std::abs(fit.palm_preview(0)->translation.x-.01)<1e-12,"stick moved the inactive hand");
+            // a trigger confirms that hand only
+            c.right_trigger=1;e=fit.update(c,false,true);
+            require(e.palm_offset && e.palm_offset->side==1 && std::abs(e.palm_offset->value.translation.x)<1e-9,"right trigger did not confirm the right hand");
+            require(fit.hand_fit_page(),"confirm closed the page");
+            e=fit.update(c,false,true);require(!e.palm_offset,"held trigger confirmed twice");
+            c.right_trigger=0;fit.update(c,false,true);
+            c.left_trigger=1;e=fit.update(c,false,true);
+            require(e.palm_offset && e.palm_offset->side==0 && std::abs(e.palm_offset->value.pitch_deg-12)<1e-12,"left trigger did not confirm the left hand");
+            c.left_trigger=0;fit.update(c,false,true);
+            // B leaves without a change, and the preview is gone
+            c.b=true;e=fit.update(c,false,true);c.b=false;
+            require(!e.palm_offset && !fit.hand_fit_page() && fit.calibration_page() && !fit.palm_preview(0),"B did not return without saving");
+            fit.update(c,false,true);
+            // leaving mid-fit (focus loss) drops the preview
+            c.x=true;fit.update(c,false,true);c.x=false;require(fit.hand_fit_page(),"re-enter failed");
+            fit.suspend();require(!fit.hand_fit_page() && !fit.palm_preview(1),"suspend left the fit open");
+            // a deadzone keeps a resting stick from drifting the hand
+            VrSettings rest;rest.initialize(1,true);rest.open_calibration_from_native();ControllerInput r{};r.active=true;rest.update(r,false,true);
+            r.x=true;rest.update(r,false,true);r.x=false;rest.update(r,false,true);r.move_x=.1f;r.turn_y=-.15f;
+            for(int i=0;i<200;++i) rest.update(r,false,true,{},true,.02);
+            require(std::abs(rest.palm_preview(1)->translation.y+.03)<1e-12 && std::abs(rest.palm_preview(1)->pitch_deg-15)<1e-12,"stick drift inside the deadzone moved the hand");
+        }
         std::cout<<"PASS: panel ray, debounced settings and measured dimensions, staged guidance/cancellation, focus release, bitmap and atomic v7 persistence with v6/v4/v3/v2/v1 migration\n";
         return 0;
     } catch(const std::exception& error) {std::cerr<<error.what()<<'\n';return 1;}

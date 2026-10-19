@@ -4,6 +4,7 @@
 #include "turn_control.hpp"
 #include "vr_preferences.hpp"
 #include "avatar_calibration.hpp"
+#include "palm_offset.hpp"
 #include <algorithm>
 #include <optional>
 
@@ -22,10 +23,15 @@ inline std::optional<PanelPointer> panel_pointer(const TrackedPose& aim,const Tr
     return p.u>=0 && p.u<=1 && p.v>=0 && p.v<=1?std::optional<PanelPointer>(p):std::nullopt;
 }
 class VrSettings {
-    bool previous_y_{},previous_a_{},previous_b_{},previous_x_{},previous_trigger_{},stick_held_{};
+    bool previous_y_{},previous_a_{},previous_b_{},previous_x_{},previous_trigger_{},previous_left_trigger_{},stick_held_{};
     bool controls_valid_{};
     bool open_{};
     bool calibration_page_{},measurements_page_{};
+    bool hand_fit_page_{};   // G5/C6: the hand-fit sub-page of the calibration page (X); both hands are fitted live, sticks move the active one
+    std::array<PalmFitStep,2> fit_{};
+    std::array<PalmOffset,2> palm_current_{default_palm_offset(0),default_palm_offset(1)};
+    unsigned fit_side_=1;
+    void leave_hand_fit() noexcept {hand_fit_page_=false;for(auto& step:fit_) step.cancel();}
     unsigned measurement_selected_{};
     AvatarPlayerMeasurements player_measurements_{};
     AvatarCalibrationStage calibration_stage_{AvatarCalibrationStage::shoulders};
@@ -70,9 +76,11 @@ class VrSettings {
         sharpness_=choices[(current+direction+static_cast<int>(choices.size()))%choices.size()];
     }
 public:
+    struct PalmOffsetChange {unsigned side{};PalmOffset value{};};
     struct Changes {std::optional<double> resolution;std::optional<bool> antialiasing;std::optional<int> temporal_aa;std::optional<TurnControl::Config> turning;
                    std::optional<MirrorMode> mirror;std::optional<double> sharpness;std::optional<int> hud_percent;std::optional<bool> controls_hint;
-                   bool recenter{},consume{},opened{},calibrate{},player_measurements{},test_unlock{};};
+                   bool recenter{},consume{},opened{},calibrate{},player_measurements{},test_unlock{};
+                   std::optional<PalmOffsetChange> palm_offset;};
     void initialize(double scale,bool aa,TurnControl::Config turning={},MirrorMode mirror=MirrorMode::both_eyes,double sharpness=.5,int temporal_aa=2,
         int hud_percent=65,bool controls_hint=true,AvatarPlayerMeasurements player_measurements={}) {
         requested_=scale;aa_=aa;turning_=turning;mirror_=mirror;sharpness_=sharpness;temporal_aa_=temporal_aa;
@@ -81,6 +89,15 @@ public:
     bool open() const noexcept {return open_;}
     bool calibration_page() const noexcept {return calibration_page_;}
     bool measurements_page() const noexcept {return measurements_page_;}
+    bool hand_fit_page() const noexcept {return hand_fit_page_;}
+    unsigned hand_fit_side() const noexcept {return fit_side_;}
+    // The offsets the fit starts from (the saved or default values the game is using now); the game refreshes them while the page is closed.
+    void palm_offsets(const PalmOffset& left,const PalmOffset& right) noexcept {if(!hand_fit_page_) palm_current_={left,right};}
+    // The live preview while the page is open; the hand the game draws follows it.
+    std::optional<PalmOffset> palm_preview(unsigned side) const {
+        if(!hand_fit_page_) return std::nullopt;
+        return fit_[side&1u].value();
+    }
     unsigned measurement_selected() const noexcept {return measurement_selected_;}
     const AvatarPlayerMeasurements& player_measurements() const noexcept {return player_measurements_;}
     AvatarCalibrationStage calibration_stage() const noexcept {return calibration_stage_;}
@@ -197,11 +214,11 @@ public:
             default:return L"Sharpening: Medium";
         }
     }
-    void suspend() noexcept {open_=false;calibration_page_=measurements_page_=false;controls_valid_=false;stick_held_=false;}
+    void suspend() noexcept {open_=false;calibration_page_=measurements_page_=false;leave_hand_fit();controls_valid_=false;stick_held_=false;}
     // Opened from the native menu's "VR Settings" item: held buttons from that click are not replayed.
-    void open_from_menu() noexcept {open_=true;calibration_page_=measurements_page_=false;selected_=0;controls_valid_=false;stick_held_=false;native_calibration_=false;}
+    void open_from_menu() noexcept {open_=true;calibration_page_=measurements_page_=false;leave_hand_fit();selected_=0;controls_valid_=false;stick_held_=false;native_calibration_=false;}
     // The game's own options page (vr_settings_native.hpp) sets values directly; the panel shows only calibration then.
-    void open_calibration_from_native() noexcept {open_=calibration_page_=true;measurements_page_=false;selected_=8;controls_valid_=false;stick_held_=false;native_calibration_=true;}
+    void open_calibration_from_native() noexcept {open_=calibration_page_=true;measurements_page_=false;leave_hand_fit();selected_=8;controls_valid_=false;stick_held_=false;native_calibration_=true;}
     void set_requested(double v) noexcept {requested_=std::clamp(v,.5,2.);}
     void set_antialiasing(bool v) noexcept {aa_=v;}
     void set_temporal_aa(int v) noexcept {temporal_aa_=std::clamp(v,0,6);}
@@ -216,27 +233,48 @@ public:
         suspend();calibration_prompted_=false;
         calibration_runtime_=AvatarFitRuntimeStatus::recalibration_required;
     }
-    Changes update(const ControllerInput& in,bool gameplay,bool focused,std::optional<PanelPointer> pointer={},bool settings_available=true) {
+    Changes update(const ControllerInput& in,bool gameplay,bool focused,std::optional<PanelPointer> pointer={},bool settings_available=true,double dt=1./90) {
         Changes out{};
         if(!focused || !in.active || gameplay || !settings_available) {suspend();return out;}
         const bool trigger=in.right_trigger>.55f;
         if(!controls_valid_) {
             // Returning to focus never interprets held buttons as fresh clicks.
-            previous_y_=in.y;previous_a_=in.a;previous_b_=in.b;previous_x_=in.x;previous_trigger_=trigger;
+            previous_y_=in.y;previous_a_=in.a;previous_b_=in.b;previous_x_=in.x;previous_trigger_=trigger;previous_left_trigger_=in.left_trigger>.55f;
             stick_held_=std::hypot(in.move_x,in.move_y)>.35;controls_valid_=true;
             out.consume=open_;return out;
         }
         const bool y=in.y&&!previous_y_,a=in.a&&!previous_a_,b=in.b&&!previous_b_,click=trigger&&!previous_trigger_,x=in.x&&!previous_x_;
-        previous_y_=in.y;previous_a_=in.a;previous_b_=in.b;previous_x_=in.x;previous_trigger_=trigger;
+        const bool left_trigger=in.left_trigger>.55f,left_click=left_trigger&&!previous_left_trigger_;
+        previous_y_=in.y;previous_a_=in.a;previous_b_=in.b;previous_x_=in.x;previous_trigger_=trigger;previous_left_trigger_=left_trigger;
         if(calibration_runtime_==AvatarFitRuntimeStatus::recalibration_required && !calibration_prompted_) {
             calibration_prompted_=true;open_=calibration_page_=true;selected_=8;
             out.opened=out.consume=true;return out;
         }
+        if(open_ && calibration_page_ && hand_fit_page_ && y) {out.consume=true;return out;} // Y has no meaning on the hand-fit page
         if(open_ && calibration_page_ && y) {measurements_page_=!measurements_page_;stick_held_=false;out.consume=true;return out;}
         if(y) {open_=!open_;if(!open_) calibration_page_=false;out.opened=open_;out.consume=true;return out;}
         if(!open_) return out;
         out.consume=true;
         if(calibration_page_) {
+            if(hand_fit_page_) {
+                // Hold the controllers naturally; the sticks nudge the active hand (A switches it); a trigger confirms that hand.
+                if(b) {leave_hand_fit();return out;}
+                if(a) fit_side_^=1u;
+                const auto deadzone=[](float v) {return std::abs(v)<.2f?0.f:v;};
+                fit_[fit_side_].nudge(deadzone(in.move_x),deadzone(in.move_y),deadzone(in.turn_x),deadzone(in.turn_y),dt);
+                for(unsigned side=0;side<2;++side) if(side?click:left_click) {
+                    if(const auto value=fit_[side].confirm()) {
+                        palm_current_[side]=*value;out.palm_offset=PalmOffsetChange{side,*value};
+                        fit_[side].begin(side,*value); // stays open: the other hand can be fitted next, or this one nudged again
+                    }
+                }
+                return out;
+            }
+            if(x && !measurements_page_) {
+                hand_fit_page_=true;fit_side_=1;stick_held_=false;
+                for(unsigned side=0;side<2;++side) fit_[side].begin(side,palm_current_[side]);
+                return out;
+            }
             if(measurements_page_) {
                 if(b) {measurements_page_=false;return out;}
                 if(pointer && click) {

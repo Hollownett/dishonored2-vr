@@ -35,6 +35,7 @@
 // its own and hands the entities it finds to the service through a small locked list (adopted at the start of a service, try_lock: never waits).
 // The registry scan reads through its own reader (`scan`: a direct-mapped cache of validated 64 KB blocks, native_grab.hpp) and stops at
 // scan_limit_us: the shared 32-entry, 100 ms region cache thrashed on entities scattered over the heap, a VirtualQuery per read.
+#include "hand_clamp.hpp"
 #include "hand_contact.hpp"
 #include "physical_grab.hpp"
 #include <algorithm>
@@ -69,6 +70,11 @@ public:
     static constexpr unsigned registry_size=0x3fff,slice_size=1024,near_capacity=32,max_writes=8,scan_budget=256,recheck_cycles=32;
     static constexpr std::uint64_t full_period_ms=1000;static constexpr unsigned max_full_reads=3;
     static constexpr double scan_reach=.9,keep_reach=1.3,hand_span=.3,fresh_seconds=.1;
+    // A dead or unconscious guard (candidate kind 2) is a body 1.8 m long found by its origin (entity+0x300): his limbs lie that much further out.
+    static constexpr double npc_extra_reach=.5;
+    static constexpr double heavy_kg_ragdoll=40.; // a guard's jointed bodies (a torso is 11-25 kg): pushed, slowly (the F*dt/m cap), where a prop of 12 kg is not
+    static constexpr std::uint64_t guard_ignore_ms=250; // a guard refused (awake, carried) is looked at again this soon: a knocked-out one is pushable at once
+    static constexpr std::uint64_t rechoose_ms=100; // a hand that left its limb looks for the nearest one again at most this often
     // Counters for the status JSON: services run, entities tested in full, hands touching a prop, velocity writes, faults, and
     // the cost of services past the early-outs (microseconds, total and worst).
     std::atomic<std::uint64_t> publishes{},services{},tested{},touches{},pushes{},faults{},cost_us{},cost_max_us{};
@@ -81,7 +87,17 @@ public:
     // meets: meet() calls for a pushable prop the cast was holding the hand at; meet_shifts: calls that moved the drawn hand out of a prop; meet_latches: pinned props
     // (held off by the cast again)
     std::atomic<std::uint64_t> meets{},meet_shifts{},meet_latches{};
+    std::atomic<std::uint64_t> ragdoll_chooses{}; // 17-body searches for a guard's nearest limb
     std::atomic<std::uint64_t> keepouts{}; // loose props skipped because they touch the player's body or lie under it (set_player)
+    std::array<std::atomic<std::uint64_t>,2> capped_writes{}; // per side: velocity writes the mass-aware cap bound for that hand (push_force_n * dt / mass, C5)
+    // The engine's time factor for pushes (C13): not read from the engine in phase 1 (its source is unverified, research open item 8), always 1.
+    static constexpr double time_factor=1.,write_dt_min=1./240,write_dt_max=1./30,first_write_dt=1./90;
+    // ContactInput::dt for a prop: the seconds since its last write, clamped; a first write (a new candidate: PropDrag starts fresh each approach) counts one
+    // nominal frame, so no write is ever uncapped (C5). The push lab uses the same rule.
+    static double write_dt(const PropDrag& drag,double now) {
+        const double since=drag.since_write(now);
+        return since>0?std::clamp(since,write_dt_min,write_dt_max):first_write_dt;
+    }
     bool inline_discovery=true; // true: the registry scan runs inside service() (the unit tests); false: discover() runs it (native_grab.hpp)
     static constexpr std::uint64_t latch_services=150; // ~2 s of services with no discover() call at all: nobody calls it, the service scans after all
     HandContactConfig config{};
@@ -93,25 +109,135 @@ public:
     // its feet, and the player sees a launch (sim v509 s2a: the camera hopped 1.5 m before any push; no write of the contact explains it, but none may shove what the player stands on).
     // Props the game carries or has attached to the player are refused by native_rigid_body already. Without a position (a unit test) nothing is kept out.
     static constexpr double player_radius=.40,player_below=2.2,player_above=.3;
+    // Render thread, every frame: the player carries a body natively (shoulder carry, CarryCorpse). While it is fresh no guard is pushed: the carry
+    // owns the corpse, velocity writes would fight it.
+    void set_carrying_body(bool carrying) {carry_until_.store(carrying?seconds()+.25:0.,std::memory_order_relaxed);} // one atomic: the gate holds until this time
     void set_player(Vec3 eye) {if(!finite(eye)) return;std::lock_guard<std::mutex> l(mutex_);player_eye_=eye;player_stamp_=seconds();}
     static constexpr double meet_latch=.08,meet_unlatch=.055,meet_fresh=.06,meet_stale=.15; // m, m, s, s
     // Render thread, in the hand's world-cast block (dxgi_probe.cpp). cast_entity: what the palm cast holds the hand at (0: nothing). prop: that is a light loose prop
     // this hand pushes, so the cast must not hold the hand off it; entity, shift: the prop the tracked hand overlaps most and how the drawn hand has to move to leave
     // it (zero: none), so tracked + shift touches the prop's surface. Nothing for a hand that is not pushing (closed, armed, holding), for a prop that is heavy or
     // out of reach, for a prop that does not give way (pinned), or for one the hand is more than meet_latch into (until it is back under meet_unlatch).
+    // clamp_holding: the hand clamp holds this hand at the prop now. A latched (pinned) prop stays latched while it does, whatever the depth: a hand pushed on
+    // through a pinned prop passes its middle, the way out shrinks under meet_unlatch, and an unlatch there would draw the tracked hand through the prop.
+    // clamp_depth (hand_clamp.hpp clamp_depth, read while clamp_holding): how far the tracked grip is past the clamp's shell; the latch takes the deeper of it
+    // and the contact's way out (a hand under a toppled bottle overlaps it shallowly while it is 20 cm past where the clamp holds it).
     struct Meeting {bool prop{};std::uintptr_t entity{};Vec3 shift{};};
-    Meeting meet(unsigned side,std::uintptr_t cast_entity) {
+    // The guard body the service chose for a candidate (any of the 17 bones) and re-read this service: what the clamp's exclusion sweep must skip.
+    struct MetBody {std::uintptr_t entity{};int bone=-1;std::uint32_t handle{};};
+    // Render thread: the body the service met of this guard (nullopt for a prop or an entity it has not chosen a body of).
+    std::optional<MetBody> met_body(std::uintptr_t entity) {
+        if(!entity) return std::nullopt;
+        std::lock_guard<std::mutex> l(meet_mutex_);
+        for(unsigned i=0;i<std::min<unsigned>(meet_.body_count,meet_.bodies.size());++i) if(meet_.bodies[i].entity==entity) return meet_.bodies[i];
+        return std::nullopt;
+    }
+    static bool next_meet_latch(bool latched,double depth,bool clamp_holding) noexcept {
+        return depth>meet_latch || (latched && (depth>=meet_unlatch || clamp_holding));
+    }
+    Meeting meet(unsigned side,std::uintptr_t cast_entity,bool clamp_holding=false,double clamp_depth=0) {
         Meeting m{};if(side>1) return m;
         {std::lock_guard<std::mutex> l(mutex_);if(!lanes_[side].active) {meet_latched_[side]=false;return m;}}
         std::lock_guard<std::mutex> l(meet_mutex_);const double now=seconds();
         if(now-meet_.stamp>meet_stale) {meet_latched_[side]=false;return m;}
         const bool fresh=now-meet_.side_stamp[side]<=meet_fresh;
         const double depth=fresh?length(meet_.outward[side]):0.;
-        if(depth>meet_latch) {if(!meet_latched_[side]) ++meet_latches;meet_latched_[side]=true;} else if(depth<meet_unlatch) meet_latched_[side]=false;
+        const double latch_depth=clamp_holding && std::isfinite(clamp_depth)?std::max(depth,clamp_depth):depth;
+        const bool latched=next_meet_latch(meet_latched_[side],latch_depth,clamp_holding);
+        if(latched && !meet_latched_[side]) ++meet_latches;
+        meet_latched_[side]=latched;
         if(meet_latched_[side]) return m;
         if(cast_entity) for(unsigned i=0;i<meet_.count;++i) if(meet_.pushable[i]==cast_entity) {m.prop=true;++meets;}
         if(fresh && depth>0) {m.entity=meet_.entity[side];m.shift=meet_.outward[side];++meet_shifts;}
         return m;
+    }
+
+    // ---- The meet composed with the hand clamp (physical hands phase 1, Task 3 rulings I1-I3). Render thread, per side, per frame:
+    //   fill_clamp_input(side,in,last.exclude) -> HandClamp::update -> meet_clamp(side,clamp,out,target) -> draw `drawn`,
+    //   HandClamp::note_drawn(drawn) -> publish(..., held_by=result.held_by). The push lab runs compose_meet with its own (delayed) service data.
+    struct MeetPublished {            // what the service told the render thread for this side
+        bool fresh{};Vec3 outward{};std::uintptr_t entity{};                  // the way out of the prop the tracked hand overlaps most
+        std::array<std::uintptr_t,8> pushable{};unsigned pushable_count{};    // props the contact pushes now (light, loose, not pinned)
+        std::array<std::uintptr_t,ClampInput::loose_capacity> loose{};unsigned loose_count{};   // light loose props in reach, pinned or not
+        bool pushable_has(std::uintptr_t e) const {for(unsigned i=0;i<std::min<unsigned>(pushable_count,8);++i) if(pushable[i]==e) return true;return false;}
+        bool loose_has(std::uintptr_t e) const {
+            for(unsigned i=0;i<std::min<unsigned>(loose_count,ClampInput::loose_capacity);++i) if(loose[i]==e) return true;
+            return pushable_has(e);
+        }
+    };
+    struct ClampMeet {
+        Vec3 drawn{};                               // where the hand is drawn (then HandClamp::note_drawn)
+        bool latched{},clamp_holding{},meeting{};   // the meet's latch after this frame; the clamp holds the hand at the prop's freshly hit plane; the meet moves the hand
+        std::optional<std::uintptr_t> prop;         // the pushable prop the clamp holds the hand at (its planes are skipped by meet_drawn)
+        Vec3 shift{};                               // the meet's way out (zero while latched)
+        std::uintptr_t held_by{};                   // publish(held_by) / ContactInput::held: whose hold the drawn hand's lag is (0: none)
+        std::optional<std::uintptr_t> exclude;      // next frame's ClampInput::exclude: the met prop, excluded from the extra sweep (I1)
+        bool new_latch{};
+    };
+    struct MeetState {bool latched{};Vec3 offset{};bool has{};};   // per side: the latch; last frame's drawn hand - target (a meeting hand eases out of it)
+    // Pure: one frame of the meet. state: this side's (updated). dt: seconds since the last frame. depth_latch=false drops the clamp's depth from the latch
+    // (reference runs only). A meeting hand whose offset from the target shrinks eases at the clamp's release_speed, as the clamp's own hold does: a latch
+    // that lets go of a 4 m/s swat's bottle does not throw the drawn hand 20 cm forward in a frame.
+    // clamp_holding (I3): the clamp's contact is a pushable prop's plane that the last answered cast made or hit directly; only then does the clamp's depth
+    // (hand_clamp.hpp clamp_depth) count toward the latch, and only then does the latch hold below meet_unlatch (next_meet_latch).
+    static ClampMeet compose_meet(MeetState& state,const MeetPublished& pub,const HandClamp& clamp,unsigned side,const ClampOutput& out,
+                                  const WorldTrackedPose& target,double dt,bool depth_latch=true) {
+        ClampMeet r{};bool& latched=state.latched;
+        const std::optional<std::uintptr_t> cast=out.valid && out.contact?std::optional<std::uintptr_t>{out.contact->entity}:std::nullopt;
+        const bool cast_pushable=cast && pub.pushable_has(*cast);
+        r.clamp_holding=cast_pushable && out.state==ClampState::contact && out.contact_fresh;
+        const double depth=pub.fresh?length(pub.outward):0.;
+        const double cd=r.clamp_holding && depth_latch?clamp_depth(out):0.;
+        const double latch_depth=std::isfinite(cd)?std::max(depth,cd):depth;
+        const bool was=latched;latched=next_meet_latch(latched,latch_depth,r.clamp_holding);r.latched=latched;r.new_latch=latched && !was;
+        if(!latched) {
+            if(cast_pushable) r.prop=cast;
+            if(pub.fresh && depth>0 && std::isfinite(depth)) r.shift=pub.outward;
+        }
+        r.meeting=r.prop.has_value() || length(r.shift)>0;
+        r.drawn=meet_drawn(clamp,side,out,target,r.meeting,r.prop,r.shift);
+        if(r.meeting && state.has && std::isfinite(dt) && dt>0) {
+            const Vec3 wanted=r.drawn-target.position;
+            if(finite(wanted) && length(wanted)<length(state.offset)) {
+                const Vec3 eased=state.offset+clamp_detail::clamp_length(wanted-state.offset,clamp.config().release_speed*std::min(dt,.1));
+                r.drawn=clamp.keep_out(side,target.basis,target.position+eased,r.prop);
+            }
+        }
+        state.offset=out.valid && finite(r.drawn-target.position)?r.drawn-target.position:Vec3{};state.has=out.valid;
+        r.held_by=cast?*cast:(r.prop?*r.prop:(r.meeting?pub.entity:0));
+        // The exclusion sweep runs while the hand meets a prop, and while the clamp holds it at a loose one (met or pinned): the wall behind is then
+        // already held the frame a meet starts (its result lands a frame late).
+        if(r.meeting) r.exclude=r.prop?r.prop:std::optional<std::uintptr_t>{pub.entity};
+        else if(cast && pub.loose_has(*cast)) r.exclude=cast;
+        if(r.exclude && !*r.exclude) r.exclude.reset();
+        return r;
+    }
+    // Render thread: compose_meet with what the service published (the counters as meet() keeps them).
+    ClampMeet meet_clamp(unsigned side,const HandClamp& clamp,const ClampOutput& out,const WorldTrackedPose& target) {
+        MeetPublished pub{};
+        if(side>1) return compose_meet_none(clamp,side,out,target);
+        {std::lock_guard<std::mutex> l(mutex_);if(!lanes_[side].active) {std::lock_guard<std::mutex> m(meet_mutex_);meet_state_[side]={};meet_last_[side]=0;return compose_meet_none(clamp,side,out,target);}}
+        std::lock_guard<std::mutex> l(meet_mutex_);const double now=seconds();
+        if(now-meet_.stamp>meet_stale) {meet_state_[side]={};meet_last_[side]=0;return compose_meet_none(clamp,side,out,target);}
+        pub.fresh=now-meet_.side_stamp[side]<=meet_fresh;pub.outward=meet_.outward[side];pub.entity=meet_.entity[side];
+        pub.pushable=meet_.pushable;pub.pushable_count=meet_.count;pub.loose=meet_.loose;pub.loose_count=meet_.loose_count;
+        auto& state=meet_state_[side];
+        const double dt=meet_last_[side]>0?now-meet_last_[side]:0.;meet_last_[side]=now;
+        const auto r=compose_meet(state,pub,clamp,side,out,target,dt);
+        if(r.new_latch) ++meet_latches;
+        if(r.prop) ++meets;
+        if(length(r.shift)>0) ++meet_shifts;
+        return r;
+    }
+    // Render thread, before HandClamp::update: the loose props near the hand (I2) and the met prop to exclude (I1, from last frame's meet_clamp).
+    void fill_clamp_input(unsigned side,ClampInput& in,std::optional<std::uintptr_t> exclude) {
+        in.loose_count=0;in.kick={};in.exclude.reset();
+        if(side>1) return;
+        std::lock_guard<std::mutex> l(meet_mutex_);
+        if(seconds()-meet_.stamp>meet_stale) return;
+        in.loose=meet_.loose;in.loose_count=std::min<std::size_t>(meet_.loose_count,ClampInput::loose_capacity);
+        if(seconds()-meet_.side_stamp[side]<=meet_fresh) in.kick=meet_.outward[side];   // the way out the meet will take: the wall tip looks that way at rest
+        in.exclude=exclude;
     }
 
     void install(const std::filesystem::path& file) {
@@ -156,7 +282,12 @@ public:
         std::array<Hand,2> hands{};const double now=seconds();std::optional<Vec3> player;
         snapshot(hands,now,true,&player);
         if(!inline_discovery && !latched_.load(std::memory_order_relaxed) && services.load()>=latch_services && discoveries.load()==0) latched_=true;
-        const bool scan_here=inline_discovery || latched_.load(std::memory_order_relaxed);
+        bool starved=false; // latched, but discover() held the slot tables
+        bool scan_here=inline_discovery || latched_.load(std::memory_order_relaxed);
+        // The slot tables belong to one scanner at a time (discover() on the render thread, or this service once latched). The turn is held to
+        // the end of the service; a service that finds discover() mid-scan skips its own scan this time and handles what it was handed.
+        ScanTurn scan_turn(scanning_,scan_here);
+        if(scan_here && !scan_turn.owned()) {scan_here=false;starved=true;}   // discover() is mid-scan: try again at the very next service (discover() returns for good once latched)
         if(!hands[0].active && !hands[1].active) {
             near_.clear();seen_={};
             std::unique_lock<std::mutex> lock(meet_mutex_,std::try_to_lock);if(lock.owns_lock()) meet_.stamp=0; // nothing is met any more (meet() also checks the lane)
@@ -164,6 +295,7 @@ public:
         }
         if(hands[0].serial==seen_[0] && hands[1].serial==seen_[1]) return; // nothing new since the last service
         seen_={hands[0].serial,hands[1].serial};
+        if(starved) seen_={};   // so the next service runs again and takes its scan
         const auto began=std::chrono::steady_clock::now();const double cpu_began=cpu();++services;
         const auto micros=[](std::chrono::steady_clock::duration d) {return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(d).count());};
         const auto game=rig::value<std::uintptr_t>(scan,base+0x39a5290);
@@ -188,7 +320,8 @@ public:
         }
         std::chrono::steady_clock::duration body_time{},math_time{};
         unsigned writes=0,fulls=0;std::uint64_t write_peak=0;
-        std::array<std::uintptr_t,8> pushable{};unsigned pushables=0;std::array<Vec3,2> outward{};std::array<std::uintptr_t,2> outward_entity{}; // what meet() is told
+        std::array<MetBody,8> met_bodies{};unsigned met_count=0;
+        std::array<std::uintptr_t,8> pushable{};unsigned pushables=0;std::array<std::uintptr_t,ClampInput::loose_capacity> loose{};unsigned looses=0;std::array<Vec3,2> outward{};std::array<std::uintptr_t,2> outward_entity{}; // what meet() is told
         std::array<bool,2> lag_owned{}; // the entity the cast holds a hand at (or the hand meets) is a prop of ours: that hand's lag is trusted for every prop
         for(unsigned side=0;side<2;++side) lag_owned[side]=hands[side].active && hands[side].held_by && std::any_of(near_.begin(),near_.end(),[&](const Near& n){return n.entity==hands[side].held_by;});
         for(auto it=near_.begin();it!=near_.end();) {
@@ -196,10 +329,16 @@ public:
             if(std::chrono::steady_clock::now()-began>std::chrono::microseconds(service_limit_us)) break; // the rest next service
             if(n.ignore_until>now_ms) {++it;continue;} // refused as a prop: not read at all until it expires
             const auto t0=std::chrono::steady_clock::now();
+            if(!n.kind) { // what the scan found: a prop (1) or a guard's body (2), classified once
+                n.kind=prop_class(scan,base,n.entity);
+                if(n.kind==class_unread) {n.kind=0;++it;continue;} // the probe failed: ask again next service
+                if(!n.kind) {it=near_.erase(it);continue;}
+            }
+            const bool guard=n.kind==2;
             // Where it is. A body in reach last service is refreshed from its record (which is also its position); the rest cost
-            // one position read.
+            // one position read. A guard has no light refresh: his origin says whether to look, his limb is re-read below.
             bool refreshed=false;Vec3 at{};
-            if(n.body && n.in_reach) {
+            if(n.body && n.in_reach && !guard) {
                 refreshed=refresh_body(scan,*game,n);
                 if(refreshed) at=n.body->pose.position;else {n.body.reset();n.in_reach=false;}
             }
@@ -208,12 +347,45 @@ public:
                 if(!pos) {it=near_.erase(it);continue;}
                 at={(*pos)[0],(*pos)[1],(*pos)[2]};
             }
-            const double d=palm_distance(at);
-            if(d>keep_reach) {it=near_.erase(it);continue;}
+            double d=palm_distance(at);
+            if(guard && n.body) d=std::min(d,palm_distance(n.body->pose.position)); // the origin can lie metres from the hand's limb
+            if(d>keep_reach+(guard?npc_extra_reach:0.)) {it=near_.erase(it);continue;}
             ++it;
-            if(d>n.reach) {n.in_reach=false;body_time+=std::chrono::steady_clock::now()-t0;continue;}
-            const bool want_full=!refreshed || now_ms>=n.next_full; // in reach and not just refreshed, or due: the full read
+            if(!guard && d>n.reach) {n.in_reach=false;body_time+=std::chrono::steady_clock::now()-t0;continue;}
+            const bool want_full=guard || !refreshed || now_ms>=n.next_full; // in reach and not just refreshed, or due: the full read
             const bool tired=fulls>=max_full_reads || (fulls>=1 && std::chrono::steady_clock::now()-began>std::chrono::microseconds(service_limit_us/3)); // a full read is ~45 reads
+            if(guard) {
+                // C2: a guard's limb is re-read in full every service (his bodies move with him), and the limb nearest a palm is chosen again when
+                // due, or when the hand left the limb it had; every choose, failed or not, waits rechoose_ms. Only a dead or unconscious guard that
+                // is not carried is ever read.
+                if(now<carry_until_.load(std::memory_order_relaxed)) {n.body.reset();n.in_reach=false;body_time+=std::chrono::steady_clock::now()-t0;continue;}
+                const auto nearest_palm=[&](Vec3 p) {Vec3 best{};double least=1e18;for(const auto& h:hands) if(h.active && length(h.proxies[0].centre-p)<least) {least=length(h.proxies[0].centre-p);best=h.proxies[0].centre;}return best;};
+                bool choose=!n.body || now_ms>=n.next_full;
+                if(!choose && n.body->bounds) {
+                    const Vec3 palm=nearest_palm(n.body->pose.position);
+                    if(length(n.body->bounds->closest(palm)-palm)>hand_span) choose=true; // not by this limb any more: look for another, or wait
+                }
+                if(choose && now_ms<n.rechoose_after) { // searched a moment ago: keep the limb (re-read below), or wait
+                    if(!n.body || !n.body->bounds || length(n.body->bounds->closest(nearest_palm(n.body->pose.position))-nearest_palm(n.body->pose.position))>hand_span) {body_time+=std::chrono::steady_clock::now()-t0;continue;}
+                    choose=false;
+                }
+                if(tired) {body_time+=std::chrono::steady_clock::now()-t0;continue;} // waits for the next service
+                ++fulls;
+                std::optional<NativeRigidBody> body;
+                if(ragdoll_pushable_state(scan,n.entity)) {
+                    if(!choose) {body=native_ragdoll_body(scan,base,n.entity,n.body->bone);if(body && !ragdoll_pushable_body(scan,*body)) body.reset();}
+                    if(!body && now_ms>=n.rechoose_after) {++ragdoll_chooses;body=pushable_ragdoll_body(scan,base,n.entity,nearest_palm(n.body?n.body->pose.position:at));choose=true;}
+                }
+                if(choose) n.rechoose_after=now_ms+rechoose_ms;
+                const auto motion=body?native_motion(scan,*body):std::nullopt;
+                if(!body || !body->bounds || body->world!=world) {n.ignore_until=now_ms+guard_ignore_ms;n.body.reset();n.in_reach=false;body_time+=std::chrono::steady_clock::now()-t0;continue;} // awake, carried, gone or not a body
+                if(!motion) {n.body.reset();n.in_reach=false;body_time+=std::chrono::steady_clock::now()-t0;continue;}
+                if(choose) n.next_full=now_ms+full_period_ms+(n.entity>>4)%256;
+                if(n.body && n.body->bone!=body->bone) {n.drag=PropDrag{};n.engaged_until=0;} // a new limb: the old one's friction and contact say nothing about it
+                n.body=*body;n.velocity=motion->velocity;
+                n.inverse_mass=motion->inverse_mass;n.mass=prop_mass(motion->inverse_mass,*body->bounds);
+                n.reach=length(body->bounds->maximum-body->bounds->minimum)*.5+hand_span+.05;++tested;
+            } else {
             if(want_full && tired && !refreshed) {body_time+=std::chrono::steady_clock::now()-t0;continue;} // waits for the next service
             if(want_full && !tired) {
                 ++fulls;
@@ -225,37 +397,43 @@ public:
                 n.inverse_mass=motion->inverse_mass;n.mass=prop_mass(motion->inverse_mass,*body->bounds);
                 n.reach=length(body->bounds->maximum-body->bounds->minimum)*.5+hand_span+.05;++tested;
             }
+            }
             n.in_reach=true;n.drag.observe(n.velocity,now); // the velocity found now, against what the last write left it with
             const auto t1=std::chrono::steady_clock::now();body_time+=t1-t0;
             if(n.body->entity==held[0] || n.body->entity==held[1]) continue;
             if(player && near_player(*n.body->bounds,*player)) {++keepouts;continue;} // against the player's body or under his feet: never shoved
-            const bool met=n.mass>0 && n.mass<config.heavy_kg && !n.drag.blocked(now); // a loose prop in reach the contact pushes and that gives way
+            const double heavy=guard?heavy_kg_ragdoll:config.heavy_kg; // per candidate: a guard's bodies are jointed, a prop stands alone
+            const bool met=n.mass>0 && n.mass<heavy && !n.drag.blocked(now); // a loose prop in reach the contact pushes and that gives way
+            if(guard && met_count<met_bodies.size()) met_bodies[met_count++]={n.entity,n.body->bone,n.body->handle};
             if(met && pushables<pushable.size()) pushable[pushables++]=n.entity;
+            if(n.mass>0 && n.mass<heavy && looses<loose.size()) loose[looses++]=n.entity; // light and loose, pinned or not: the clamp never snaps on it
+            HandContactConfig contact_config=config;contact_config.heavy_kg=heavy;
             rig::HeldShape shape;
             try {shape=prop_shape(*n.body);} catch(const std::invalid_argument&) {continue;}
-            Vec3 velocity=n.velocity,spin{};bool pushed=false;
+            Vec3 velocity=n.velocity,spin{};bool pushed=false;std::array<bool,2> capped{};
+            const double dt=write_dt(n.drag,now);
             for(unsigned side=0;side<2;++side) {
                 if(!hands[side].active) continue;
                 const auto palm=hands[side].proxies[0].centre;
                 if(length(n.body->bounds->closest(palm)-palm)>hand_span) continue;
                 ContactInput input;input.engaged=n.engaged_until>now_ms;input.lag=hands[side].lag;input.held=hands[side].held_by && hands[side].held_by==n.entity;if(input.held) ++cast_held;input.lag_known=lag_owned[side];input.friction=n.drag.compensation();
                 input.trim=n.drag.trim();input.age=input.engaged?now-n.engaged_at:0.;
-                input.blocked=n.drag.blocked(now);input.stalled=n.drag.stalled(now);input.basis=n.body->pose.basis;
-                const auto result=hand_contact(hands[side].proxies,shape,hands[side].velocity,velocity,n.mass,config,input);
+                input.blocked=n.drag.blocked(now);input.stalled=n.drag.stalled(now);input.basis=n.body->pose.basis;input.dt=dt;input.time_factor=time_factor;
+                const auto result=hand_contact(hands[side].proxies,shape,hands[side].velocity,velocity,n.mass,contact_config,input);
                 if(met && length(result.outward)>length(outward[side])) {outward[side]=result.outward;outward_entity[side]=n.entity;}
                 if(result.touching) ++touches;
                 if(result.driving) {if(n.engaged_until<=now_ms) n.engaged_at=now;n.engaged_until=now_ms+config.engage_ms;}
                 n.drag.steer(result,now);
                 if(result.push || result.turn) { // a velocity to write, or only the uprighting spin (the velocity stays)
                     log_row(now_ms,side,*n.body,n.inverse_mass,n.mass,result,length(hands[side].velocity),length(velocity),input,!result.push); // every write, spin-only ones too
-                    velocity=result.velocity;spin=result.spin;pushed=true;
+                    velocity=result.velocity;spin=result.spin;pushed=true;capped[side]=result.capped;
                 }
             }
             if(pushed && writes<max_writes) {
                 const std::array<float,3> linear{static_cast<float>(velocity.x),static_cast<float>(velocity.y),static_cast<float>(velocity.z)};
                 const std::array<float,3> turn{static_cast<float>(spin.x),static_cast<float>(spin.y),static_cast<float>(spin.z)};
                 const auto w0=std::chrono::steady_clock::now();
-                write(world,n.body->handle,linear,turn);++writes;++pushes;n.velocity=velocity;n.drag.wrote(velocity,now);
+                write(world,n.body->handle,linear,turn);++writes;++pushes;for(unsigned side=0;side<2;++side) if(capped[side]) ++capped_writes[side];n.velocity=velocity;n.drag.wrote(velocity,now);
                 const auto spent=micros(std::chrono::steady_clock::now()-w0);write_us+=spent;write_peak=std::max(write_peak,spent);
                 if(spent>50) ++slow_writes;
                 auto top=write_max_us.load();while(spent>top && !write_max_us.compare_exchange_weak(top,spent)) {}
@@ -265,7 +443,7 @@ public:
         {   // for the render thread: the props the contact pushes and the way out of the one each hand overlaps most (a busy lock waits for the next service)
             std::unique_lock<std::mutex> lock(meet_mutex_,std::try_to_lock);
             if(lock.owns_lock()) {
-                meet_.pushable=pushable;meet_.count=pushables;meet_.stamp=now;
+                meet_.bodies=met_bodies;meet_.body_count=met_count;meet_.pushable=pushable;meet_.count=pushables;meet_.loose=loose;meet_.loose_count=looses;meet_.stamp=now;
                 for(unsigned side=0;side<2;++side) if(hands[side].active) {meet_.outward[side]=outward[side];meet_.entity[side]=outward_entity[side];meet_.side_stamp[side]=now;}
             }
         }
@@ -298,6 +476,8 @@ public:
         if(inline_discovery || latched_.load(std::memory_order_relaxed) || !wanted()) return;
         std::array<Hand,2> hands{};snapshot(hands,seconds(),false);
         if(!hands[0].active && !hands[1].active) return;
+        ScanTurn scan_turn(scanning_,true);
+        if(!scan_turn.owned()) return;   // the latched service is scanning: it owns the slot tables
         const auto began=std::chrono::steady_clock::now();
         const auto game=rig::value<std::uintptr_t>(scan,base+0x39a5290);
         if(!game || !rig::typed(scan,base,*game,0x1c940a8)) return;
@@ -316,7 +496,8 @@ public:
                 std::lock_guard<std::mutex> lock(found_mutex_);
                 if(gone_.size()<4*near_capacity) gone_.push_back(gone);});
         const auto spent=static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now()-began).count());
-        ++discoveries;discover_us+=spent;auto top=discover_max_us.load();while(spent>top && !discover_max_us.compare_exchange_weak(top,spent)) {}
+        ++discoveries;discover_us+=spent;   // a discovery is a finished scan: one that returned early above does not disarm the service's latch fallback
+  auto top=discover_max_us.load();while(spent>top && !discover_max_us.compare_exchange_weak(top,spent)) {}
     }
 private:
     template<class T> static auto query_peak(T& reader,int)->decltype(static_cast<std::uint64_t>(reader.take_slowest())) {return static_cast<std::uint64_t>(reader.take_slowest());}
@@ -359,12 +540,18 @@ private:
                     if(!rig::pointer(entity)) {retire(slot_entity_[slot]);slot_entity_[slot]=0;slot_prop_[slot]=0;continue;}
                     if(slot_entity_[slot]!=entity || ((cycle_+slot)%recheck_cycles)==0) {
                         if(slot_entity_[slot]!=entity) retire(slot_entity_[slot]);
-                        --budget;slot_entity_[slot]=entity;slot_prop_[slot]=prop_class(scan,base,entity);
+                        --budget;const auto cls=prop_class(scan,base,entity);
+                        if(cls==class_unread) { // a failed probe is not a class: keep what is known (a new address is probed again next pass)
+                            if(slot_entity_[slot]!=entity) {slot_entity_[slot]=0;slot_prop_[slot]=0;continue;}
+                        } else {
+                            if(slot_entity_[slot]==entity && slot_prop_[slot]!=cls) retire(entity); // the address changed class in place: its candidate is classified anew
+                            slot_entity_[slot]=entity;slot_prop_[slot]=cls;
+                        }
                     }
                     if(!slot_prop_[slot]) continue;
                     --budget;
                     const auto pos=rig::value<std::array<float,3>>(scan,entity+0x300);
-                    if(!pos || palm_distance({(*pos)[0],(*pos)[1],(*pos)[2]})>scan_reach) continue;
+                    if(!pos || palm_distance({(*pos)[0],(*pos)[1],(*pos)[2]})>scan_reach+(slot_prop_[slot]==2?npc_extra_reach:0.)) continue;
                     add(entity);
                 }
             }
@@ -372,7 +559,8 @@ private:
         }
     }
     struct Near {
-        std::uintptr_t entity{};double reach=.75;std::uint64_t ignore_until{},next_full{},engaged_until{};double engaged_at{}; // engaged_at: seconds, when this contact began
+        std::uintptr_t entity{};double reach=.75;std::uint64_t ignore_until{},next_full{},engaged_until{},rechoose_after{};double engaged_at{}; // engaged_at: seconds, when this contact began
+        std::uint8_t kind{};                   // 0 not classified yet, 1 prop, 2 guard (prop_class)
         bool in_reach{};                      // within reach at the last service: refreshed from its record, not its position
         std::optional<NativeRigidBody> body;  // the last full read; pose and bounds follow the record
         Vec3 velocity{};double mass{};std::uint16_t inverse_mass{};
@@ -439,10 +627,15 @@ private:
         if(log_.is_open() && !rows.empty()) {log_<<rows;log_.flush();}
         if(slow_.is_open() && !slow.empty()) {slow_<<slow;slow_.flush();}
     }
-    // The three entity classes native_rigid_body accepts (arkMovable among them); anything else can never be pushed.
-    template<class Read> static bool prop_class(Read& read,std::uintptr_t base,std::uintptr_t entity) {
+    // class_unread: the vtable could not be read (a transient failure says nothing about the class).
+    static constexpr std::uint8_t class_unread=0xff;
+    // 1: one of the three entity classes native_rigid_body accepts (arkMovable among them); 2: a guard (arkNPC, pushable when dead or unconscious:
+    // native_rigid_body.hpp pushable_ragdoll_body); 0: anything else can never be pushed.
+    template<class Read> static std::uint8_t prop_class(Read& read,std::uintptr_t base,std::uintptr_t entity) {
         const auto vtable=rig::value<std::uintptr_t>(read,entity);
-        return vtable && (*vtable==base+0x1c886a8 || *vtable==base+0x1c87d58 || *vtable==base+0x1c5de18);
+        if(!vtable) return class_unread;
+        if(*vtable==base+0x1c886a8 || *vtable==base+0x1c87d58 || *vtable==base+0x1c5de18) return 1;
+        return *vtable==base+0x1c5e108?2:0;
     }
     struct Lane {std::optional<rig::HandGeometry> geometry;HandMotion motion;HandProxies proxies{};Vec3 velocity{},lag{};std::uintptr_t held_by{};bool active{};std::uint64_t serial{};double stamp{};};
     static double seconds() {return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();}
@@ -450,9 +643,24 @@ private:
     std::mutex mutex_;std::array<Lane,2> lanes_{};std::atomic<bool> wanted_{};
     std::vector<Near> near_;std::array<std::uint64_t,2> seen_{};unsigned cursor_{1},cycle_{},scan_tick_{};
     std::vector<std::uintptr_t> slot_entity_;std::vector<std::uint8_t> slot_prop_;std::uintptr_t game_{},world_{}; // slot -> entity pointer and class (the scanner's)
-    struct Meet {std::array<std::uintptr_t,8> pushable{};unsigned count{};double stamp{};std::array<std::uintptr_t,2> entity{};std::array<Vec3,2> outward{};std::array<double,2> side_stamp{};};
+    struct Meet {std::array<MetBody,8> bodies{};unsigned body_count{};std::array<std::uintptr_t,8> pushable{};unsigned count{};std::array<std::uintptr_t,ClampInput::loose_capacity> loose{};unsigned loose_count{};double stamp{};std::array<std::uintptr_t,2> entity{};std::array<Vec3,2> outward{};std::array<double,2> side_stamp{};};
+    std::atomic<double> carry_until_{0.};
     Vec3 player_eye_{};double player_stamp_{-1e9}; // under mutex_
+    static ClampMeet compose_meet_none(const HandClamp& clamp,unsigned side,const ClampOutput& out,const WorldTrackedPose& target) {
+        MeetState none{};return compose_meet(none,MeetPublished{},clamp,side,out,target,0.);
+    }
+    std::array<MeetState,2> meet_state_{};std::array<double,2> meet_last_{}; // meet_clamp's per side (under meet_mutex_)
     std::mutex meet_mutex_;Meet meet_;std::array<bool,2> meet_latched_{}; // service -> meet(); latched: pinned, the cast holds the hand off the prop
+    // Whoever scans the registry slot tables (slot_entity_, slot_prop_, cursor_, cycle_, scan_tick_) holds this; the other skips its scan.
+    std::atomic<bool> scanning_{};
+    class ScanTurn {
+        std::atomic<bool>& flag_;bool owned_;
+    public:
+        ScanTurn(std::atomic<bool>& flag,bool wanted) : flag_(flag),owned_(wanted && !flag.exchange(true,std::memory_order_acquire)) {}
+        ScanTurn(const ScanTurn&)=delete;ScanTurn& operator=(const ScanTurn&)=delete;
+        ~ScanTurn() {if(owned_) flag_.store(false,std::memory_order_release);}
+        bool owned() const noexcept {return owned_;}
+    };
     std::atomic<bool> latched_{};std::mutex found_mutex_;std::vector<std::uintptr_t> found_,gone_;std::uintptr_t service_game_{},service_world_{}; // discover() -> service(); the service's level
     std::ofstream log_,slow_;std::atomic<bool> log_on_{};unsigned logged_{},slow_logged_{};std::mutex log_mutex_;std::string pending_,slow_pending_;double log_drained_{};
 };

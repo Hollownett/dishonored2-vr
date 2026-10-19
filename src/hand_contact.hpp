@@ -58,6 +58,18 @@ struct HandContactConfig {
     // the player's hand is, and its proxies can sit inside the prop: sim v509 s2b/s2c, one onset frame with the drawn proxies 6 cm in and a write of 0.5 m/s for a hand
     // at 0.15. Past lag_trust (1 cm) of horizontal offset (the table's lift is vertical and stays trusted) nothing is read from it that frame.
     double lag_trust=.01;
+    // Mass-aware pushes (C5): one write raises the prop's speed along the push by at most push_force_n * dt / mass, dt the seconds since this prop's last
+    // write (ContactInput::dt; 0 = not capped). 200 N (controller ruling, Task 6 R2): a forward push runs mostly along the forearm (Bonelab's forearm
+    // drive is +-320-450 N; its lateral range 90-112 N, research Q4), and the brief's 120 N starting value sat on a knife-edge in the push lab (the 2.5 m/s
+    // free swat's meet latch flipped between 90 and 160 N). It applies on top of strength_kg and heavy_kg above, so a push only gets weaker than without it.
+    double push_force_n=200.;
+    // A push never leaves the prop faster along the push than the hand moves along it by more than launch_margin (m/s, times the time factor; 0.3, controller
+    // ruling Task 6 R3: 0.2 broke the lab's pinned-bottle wobble, and 0.3 equals depth_speed, so today it binds only where the goal exceeds the hand + the
+    // spring, e.g. a lift's vertical part, and it holds if the spring is ever raised): the cap above
+    // limits the acceleration of one write, this one the speed it ends at. The hand cannot throw by pushing (2 m/s push lab: 2.68 m/s written before it). A
+    // ride's write also carries the friction it gives back (ContactInput friction + trim): the engine takes that off before the prop moves (a rough table's
+    // ride, tests/hand_contact_check.cpp "ride mu 2", needs it, and a write into a wall must still grow past PropDrag::strong to be told from friction).
+    double launch_margin=.3;
 };
 struct HandContact {
     bool touching{};     // a proxy overlaps the prop
@@ -71,6 +83,7 @@ struct HandContact {
     double error{};      // gap - deadband: positive = the prop lags the hand, negative = it runs ahead (m)
     Vec3 velocity{};     // the prop's velocity after the push (the input when push is false)
     Vec3 spin{};         // the angular velocity (world, rad/s) to write with it: the uprighting, zero otherwise
+    bool capped{};       // the dv cap (push_force_n * dt / mass) bound this write
     Vec3 outward{};      // how the (tracked) hand has to move to leave the prop: along the deepest proxy's normal by its overlap, whichever proxy and way the hand moves;
                          // set even when nothing is pushed (a buried resting hand, a blocked prop). The drawn hand meets the prop by it (native_hand_contact.hpp meet)
 };
@@ -86,6 +99,9 @@ struct ContactInput {
     bool blocked{};      // the prop has not followed its last writes (PropDrag::blocked): the hand is pressing it into something
     bool stalled{};      // its last three writes moved nothing (PropDrag::stalled): a resting hand's ease cannot overcome the friction
     std::array<Vec3,3> basis{{{1,0,0},{0,1,0},{0,0,1}}}; // the prop's axes in the world
+    double dt{};         // seconds since this prop's last write (NativeHandContact::write_dt: clamped to [1/240, 1/30], 1/90 for a first write); 0: not capped (unit tests)
+    double time_factor=1.; // the engine's time scale: multiplies the push, its launch cap and its dv cap. Not read from the engine in phase 1 (C13): always 1.
+                           // Above 1 it counts as 1 (a push never gets stronger than today, deviation 10); not finite or not positive: no write
 };
 
 // The prop's deceleration while the hand drives it (table friction), from the velocity a write left it with and the velocity found at
@@ -93,13 +109,15 @@ struct ContactInput {
 // deceleration x step: the write adds compensation() back. A write that friction ate whole counts as all of it (the next is stronger);
 // one stronger than `strong` that still moved nothing means a wall or another prop: blocked().
 class PropDrag {
-    Vec3 written_{};double wrote_at_{},dv_{},dt_{},blocked_at_{},stalled_at_{},trim_{},steered_at_{};bool pending_{};unsigned blocked_{},stalled_{};
+    Vec3 written_{};double wrote_at_{},dv_{},dt_{},blocked_at_{},stalled_at_{},trim_{},steered_at_{};bool pending_{},ever_{};unsigned blocked_{},stalled_{};
 public:
     static constexpr double step=1./60,limit=.4,window=.9,strong=.45,trim_gain=30.,trim_min=-.12,trim_max=.3,trim_zone=.02;
     void wrote(Vec3 velocity,double seconds) {
         if(seconds-wrote_at_>.5) {dv_=dt_=0;trim_=0;}
-        written_=velocity;wrote_at_=seconds;pending_=length(velocity)>.03;
+        written_=velocity;wrote_at_=seconds;pending_=length(velocity)>.03;ever_=true;
     }
+    // Seconds since the last write (ContactInput::dt); 0 before the first one.
+    double since_write(double seconds) const {return ever_?seconds-wrote_at_:0.;}
     void observe(Vec3 velocity,double seconds) {
         if(!pending_) return;
         pending_=false;
@@ -239,6 +257,7 @@ inline HandContact hand_contact(const HandProxies& proxies,const rig::HeldShape&
         const HandContactConfig& cfg={},const ContactInput& in={}) {
     HandContact out{};out.velocity=body_velocity;
     if(!finite(hand_velocity) || !finite(body_velocity)) return out;
+    if(!std::isfinite(in.time_factor) || !(in.time_factor>0) || !std::isfinite(in.dt) || !(in.dt>=0)) return out; // a bad time input writes nothing
     if(!in.held && !in.lag_known && length(Vec3{in.lag.x,in.lag.y,0})>cfg.lag_trust) return out; // moved by something else: its proxies say nothing about this prop
     const double speed=length(hand_velocity);const bool moving=speed>=cfg.still_speed;
     const Vec3 heading=moving?hand_velocity*(1/speed):Vec3{};
@@ -306,7 +325,8 @@ inline HandContact hand_contact(const HandProxies& proxies,const rig::HeldShape&
         goal=away*ease;
         if(lifting && moving) goal.z+=std::max(hand_velocity.z,0.);
     }
-    goal=goal*gain;
+    const double time_factor=std::min(in.time_factor,1.); // [0, 1]: slow motion weakens a push, nothing strengthens it
+    goal=goal*gain*time_factor;
     const double cap=swat?cfg.swat_speed:cfg.max_speed,size=length(goal);
     if(size<1e-9) return out;
     if(size>cap) goal=goal*(cap/size);
@@ -314,7 +334,14 @@ inline HandContact hand_contact(const HandProxies& proxies,const rig::HeldShape&
     double target=length(goal);const double current=dot(body_velocity,direction);
     // A fresh contact adds a little per write: the first one is a ride, not a shove (what the friction costs is given on top).
     if(!swat && in.age<cfg.ramp_time) target=std::min(target,std::max(current,0.)+cfg.write_step+std::max(0.,in.friction+in.trim));
-    if(target-current<cfg.min_gain) return out;
+    // Never faster than the hand moves along the push + launch_margin, once the engine has taken the step's friction off (what a ride's write gives back
+    // for it, as the ramp above). In game time.
+    target=std::min(target,(std::max(0.,dot(hand_velocity,direction))+cfg.launch_margin+(swat?0.:std::max(0.,in.friction+in.trim)))*time_factor);
+    if(in.dt>0) { // mass-aware: one write adds at most F dt / m, dt in game time (the time factor's share of the real seconds)
+        const double cap_target=std::max(current,0.)+cfg.push_force_n*time_factor*in.dt/mass;
+        if(target>cap_target) {target=cap_target;out.capped=true;}
+    }
+    if(target-current<cfg.min_gain) {out.capped=false;return out;} // nothing written: the cap bound no write
     out.velocity=body_velocity+direction*(target-current);out.push=true;
     if(length(across)>0 && cfg.lateral_damp>0) { // what the prop does across the hand's motion follows the hand
         const Vec3 side=out.velocity-across*dot(out.velocity,across);Vec3 flat_side{side.x,side.y,0};

@@ -10,6 +10,7 @@
 #include "avatar_calibration.hpp"
 #include "tracked_pose_lifetime.hpp"
 #include "drawn_palm_residual.hpp"
+#include "hand_reach.hpp"
 #include <chrono>
 #include <cstring>
 #include <mutex>
@@ -152,6 +153,9 @@ struct Diagnostic {
     Vec3 plant[2]{},swing_from[2]{},swing_to[2]{};double phase[2]{},owned[4]{},palm_residual[2]{};
     ArmGate arm_gate[2]{ArmGate::no_solution,ArmGate::no_solution};
     double scale=1,arm_scale=1,arm_scale_side[2]{1,1},torso_scale=1,configured_palm_span{};std::optional<AvatarCalibrationResult> fit;
+    // Per side, the last visible arm solve's reach in the world (current root): reach_clamp a grip against it so the hand
+    // clamp and the arm IK agree on a reachable hand (G2, C4). Invalid without a solve, a root mapping or a tracked hand.
+    ArmReach reach[2]{};
 };
 class Driver {
 public:
@@ -433,6 +437,7 @@ public:
         for(unsigned i=0;i<2;++i)d.arm_scale_side[i]=solver_.arm_scale(i);d.torso_scale=solver_.torso_scale();
         d.configured_palm_span=configured_palm_span_;
         for(unsigned i=0;i<2;++i) {d.grip_to_attachment[i]=grip_to_attachment_[i];d.target_attachment[i]=hand_target(i,track_.grip[i]);}
+        for(unsigned i=0;i<2;++i) d.reach[i]=world_reach(i);
         return d;
     }
     double owned(unsigned k) const {std::lock_guard<std::mutex> lock(mutex_);return k<4?out_.owned[k]:0;}
@@ -503,6 +508,18 @@ private:
     }
     Xf hand_target(unsigned side,const Xf& grip) const {
         return body::mul(grip,grip_to_attachment_[side]);
+    }
+    // The solver's solve-space reach carried into the world by the root motion since that solve (as arm_frozen maps
+    // poses), with the wrist expressed in the controller grip frame: grip -> attachment -> wrist.
+    mutable std::array<ExactReachCache,2> reach_cache_{};   // under mutex_ (diagnostic() is the only caller of world_reach)
+    ArmReach world_reach(unsigned side) const {
+        const auto r=solver_.solved_reach(side);
+        if(!have_out_ || !have_root_solved_ || !have_root_last_ || !r.valid) return {};
+        const auto world_from_solve=body::mul(root_last_,body::inverse(root_solved_));
+        ArmReach result{world_from_solve.p+rotated(world_from_solve.q,r.shoulder),reach_cache_[side&1u].get(r.full),
+                        body::mul(grip_to_attachment_[side],r.hand_to_wrist).p,false};
+        result.valid=finite(result.shoulder) && finite(result.wrist_local) && std::isfinite(result.max_wrist) && result.max_wrist>0;
+        return result;
     }
     std::array<Transform,69> export_arm(unsigned side,const std::vector<Xf>& joints,const Frame& conv,const Frame& arm_frame) const {
         std::array<Transform,69> out{};

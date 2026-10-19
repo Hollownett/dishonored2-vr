@@ -28,6 +28,7 @@ extern "C" MH_STATUS WINAPI MH_DisableHook(LPVOID);
 #include "native_player_camera.hpp"
 #include "native_grab.hpp"
 #include "native_world_trace.hpp"
+#include "native_cast_exclusion.hpp"
 #include "anatomical_world_contact.hpp"
 #include "anatomical_raw_pair.hpp"
 #include "native_full_hand_contact.hpp"
@@ -463,13 +464,37 @@ class NativeInteractionAim {
                 const auto world=game?rig::value<std::uintptr_t>(self->read_,*game+NativeWorldTrace::world_offset):std::nullopt;
                 if(verified && self->active_ && self->logic_()==2 && camera && !camera->authored_view() && world && *world) {
                     std::array<std::array<std::optional<WorldTraceHit>,weapon_slots>,2> hits{};
-                    LARGE_INTEGER cast_begin{},cast_end{};unsigned cast_n=0;QueryPerformanceCounter(&cast_begin);
-                    for(unsigned side=0;side<2;++side) for(unsigned slot=0;slot<weapon_slots;++slot) if(const auto& seg=segments[side][slot];seg.valid && ++cast_n)
-                        hits[side][slot]=NativeWorldTrace::sphere_cast(self->base_,self->read_,reinterpret_cast<NativeWorldTrace::Cast>(self->base_+NativeWorldTrace::cast_rva),
-                            reinterpret_cast<NativeWorldTrace::Construct>(self->base_+NativeWorldTrace::sphere_ctor_rva),*world,seg.from,seg.to,seg.radius);
+                    LARGE_INTEGER cast_begin{},cast_end{};unsigned cast_n=0,clamp_n=0;std::uint64_t clamp_ticks=0;QueryPerformanceCounter(&cast_begin);
+                    // The hand clamp's exclusion sweeps (physical hands I1): the excluded entity's body (a prop's, or a dead guard's limb nearest the hand), mapped once per scope. Unmapped: cast without exclusion.
+                    NativeExclusionCache excluded;
+                    // Keyed by (entity, side, the body the service met): each hand has its own met body of one corpse.
+                    const auto exclusion_of=[&](std::uintptr_t entity,unsigned side,const WeaponSegment& seg)->std::optional<NativeCastExclusion> {
+                        return excluded.get(entity,side,seg.exclude_bone,seg.exclude_handle,[&] {
+                            return native_cast_exclusion(self->read_,self->base_,*world,entity,seg.exclude_bone,seg.exclude_handle,clamp_exclude_info_zero_.load(std::memory_order_relaxed));});
+                    };
+                    for(unsigned side=0;side<2;++side) for(unsigned slot=0;slot<weapon_slots;++slot) if(const auto& seg=segments[side][slot];seg.valid && ++cast_n) {
+                        LARGE_INTEGER slot_begin{},slot_end{};QueryPerformanceCounter(&slot_begin);
+                        const auto cast=[&](const NativeCastExclusion* exclusion) {
+                            return NativeWorldTrace::sphere_cast(self->base_,self->read_,reinterpret_cast<NativeWorldTrace::Cast>(self->base_+NativeWorldTrace::cast_rva),
+                                reinterpret_cast<NativeWorldTrace::Construct>(self->base_+NativeWorldTrace::sphere_ctor_rva),*world,seg.from,seg.to,seg.radius,
+                                kWorldOccluderLayers,kWorldOccluderRequired,exclusion,clamp_slot(slot));   // only the clamp's slots are ranked by body class
+                        };
+                        if(seg.exclude) {
+                            ++clamp_exclude_casts_;
+                            if(const auto exclusion=exclusion_of(seg.exclude,side,seg)) {
+                                hits[side][slot]=cast(&*exclusion);
+                                if(hits[side][slot]) {if(hits[side][slot]->body_handle==exclusion->handle) ++clamp_exclude_self_hits_;else ++clamp_exclude_hits_;}
+                            } else {++clamp_exclude_unmapped_;hits[side][slot]=cast(nullptr);}   // never drop the sweep: without exclusion it still finds what it finds
+                        } else hits[side][slot]=cast(nullptr);
+                        QueryPerformanceCounter(&slot_end);
+                        if(clamp_slot(slot)) {clamp_ticks+=static_cast<std::uint64_t>(slot_end.QuadPart-slot_begin.QuadPart);++clamp_n;}
+                    }
                     QueryPerformanceCounter(&cast_end);weapon_cast_ticks_+=static_cast<std::uint64_t>(cast_end.QuadPart-cast_begin.QuadPart);weapon_cast_count_+=cast_n;
+                    {LARGE_INTEGER frequency{};QueryPerformanceFrequency(&frequency);
+                     clamp_cast_us_.store(frequency.QuadPart?static_cast<double>(clamp_ticks)*1e6/static_cast<double>(frequency.QuadPart):0.);
+                     clamp_cast_n_.store(clamp_n);++clamp_cast_serial_;}
                     std::lock_guard<std::mutex> guard(weapon_mutex_);const auto now=GetTickCount64();
-                    for(unsigned side=0;side<2;++side) for(unsigned slot=0;slot<weapon_slots;++slot) if(segments[side][slot].valid) {weapon_hit_[side][slot]=hits[side][slot];weapon_tick_[side][slot]=now;}
+                    for(unsigned side=0;side<2;++side) for(unsigned slot=0;slot<weapon_slots;++slot) if(segments[side][slot].valid) {weapon_hit_[side][slot]=hits[side][slot];weapon_tick_[side][slot]=now;weapon_serial_[side][slot]=weapon_casts_.load()+1;}
                     ++weapon_casts_;
                 }
              } catch(...) {}}
@@ -546,8 +571,8 @@ class NativeInteractionAim {
             if(const auto arms=arm_show_.exchange(0)) {if(self->active_ && self->logic_()==2) try {NativeHeldObject::show_arms(self->base_,self->read_,arms);} catch(...) {}}
             // Full-grip sword: equip requests from the input thread and the dropped copy (native_weapon_hands.hpp).
             if(self->logic_()==2) try {NativeWeaponHands::service(self->base_,self->read_);} catch(...) {}
-            if(const auto held=held_world_.exchange(0)) {if(self->active_ && self->logic_()==2) try {NativeHeldObject::world_render(self->base_,self->read_,held);} catch(...) {}}
-            if(NativeHeldObject::layer_restore_.exchange(false)) {if(self->active_ && self->logic_()==2) try {NativeHeldObject::restore_layer(self->base_,self->read_);} catch(...) {}}
+            // The held object's collision layer is serviced every frame (restore on clear, then DEBRIS while held), apart from its render scale.
+            {const auto held=held_world_.exchange(0);if(self->active_ && self->logic_()==2) try {NativeHeldObject::service_hold_layers(self->base_,self->read_,held);if(held) NativeHeldObject::world_render(self->base_,self->read_,held);} catch(...) {}}
             double probe_distance{};{std::lock_guard<std::mutex> guard(trace_mutex_);probe_distance=trace_distance_;trace_distance_=0;}
             if(probe_distance!=0) { // negative: straight down (game Z up)
                 std::string out="trace: ";
@@ -585,24 +610,48 @@ class NativeInteractionAim {
             !nonlethal_grip_reserved_.load(std::memory_order_acquire) &&
             nonlethal_grip_revision_.load(std::memory_order_acquire)==revision;
     }
-    struct WeaponSegment {Vec3 from{},to{};double radius{};bool valid{};};
-    // Slots per hand: 0 palm, 1 weapon, 2 sword reach (hit detection only, past the tip), 3 the palm sweep and 4-8 one closing-fingertip
-    // sweep per finger (finger_ik.hpp: what each finger could touch; one posted per frame, the others' hits persist <=100 ms).
-    // 9 and 10: the profile casts (dxgi_probe.cpp profile_step, radius_profile.hpp): across a prop the hand targets, from its two sides.
-    inline static constexpr unsigned weapon_slots=11;
+    // exclude: an entity whose body the cast must not report (the hand clamp's exclusion sweeps; 0: none).
+    struct WeaponSegment {Vec3 from{},to{};double radius{};bool valid{};std::uintptr_t exclude{};int exclude_bone=-1;std::uint32_t exclude_handle{};};   // exclude_bone/handle: the guard body the contact service met (-1: a prop)
+    // Slots per hand: 0 the hand clamp's palm sweep (the chest re-acquire while released), 1 weapon, 2 sword reach (hit detection only,
+    // past the tip), 3 the palm sweep and 4-8 one closing-fingertip sweep per finger (finger_ik.hpp: what each finger could touch; one
+    // posted per frame, the others' hits persist <=100 ms). 9 and 10: the profile casts (dxgi_probe.cpp profile_step, radius_profile.hpp):
+    // across a prop the hand targets, from its two sides. 11-13: the hand clamp's leading fingertip, wall tip and exclusion sweeps
+    // (hand_clamp.hpp; with slot 0 at most 4 a hand, timed together as clamp_cast_us_, C14).
+    inline static constexpr unsigned weapon_slots=14;
     inline static std::mutex weapon_mutex_;static std::array<std::array<WeaponSegment,weapon_slots>,2> weapon_req_; // defined after the class: clang-cl needs WeaponSegment's member initializers complete
-    inline static std::array<std::array<std::optional<WorldTraceHit>,weapon_slots>,2> weapon_hit_{};inline static std::array<std::array<std::uint64_t,weapon_slots>,2> weapon_tick_{};
+    inline static std::array<std::array<std::optional<WorldTraceHit>,weapon_slots>,2> weapon_hit_{};inline static std::array<std::array<std::uint64_t,weapon_slots>,2> weapon_tick_{},weapon_serial_{};
 public:
     static constexpr unsigned probe_slots=9;   // the finger probes: slots 3-8 (the palm's own and the weapon's come first)
     static constexpr unsigned profile_slot=9;  // and 10
+    static constexpr unsigned tip_slot=11,wall_tip_slot=12,exclude_slot=13;   // the hand clamp's (slot 0 is its palm)
+    static constexpr bool clamp_slot(unsigned slot) {return slot==0 || slot==tip_slot || slot==wall_tip_slot || slot==exclude_slot;}
     inline static std::atomic<std::uint64_t> weapon_casts_{},weapon_cast_ticks_{},weapon_cast_count_{}; // QPC ticks and number of sphere casts run on the game thread
+    // The hand clamp's casts (slots 0, 11-13, both hands) in the last game-thread scope: cost (us) and count; serial: one more per scope.
+    inline static std::atomic<double> clamp_cast_us_{};inline static std::atomic<unsigned> clamp_cast_n_{};inline static std::atomic<std::uint64_t> clamp_cast_serial_{};
+    // Exclusion sweeps: cast; the entity had no checked dynamic body (no cast); a hit on another body (a wall reports through it);
+    // a hit on the excluded body itself (the native exclusion did not apply). build/hand-clamp-exclude-info-zero writes 0 to +0x14.
+    inline static std::atomic<std::uint64_t> clamp_exclude_casts_{},clamp_exclude_unmapped_{},clamp_exclude_hits_{},clamp_exclude_self_hits_{};
+    inline static std::atomic<bool> clamp_exclude_info_zero_{};
     // Render thread: post a sweep for the next game-thread scope; read the latest result (<=100 ms old).
-    static void post_weapon_segment(unsigned side,unsigned slot,Vec3 from,Vec3 to,double radius) {
-        if(side>1 || slot>=weapon_slots) return;std::lock_guard<std::mutex> guard(weapon_mutex_);weapon_req_[side][slot]={from,to,radius,true};
+    static void post_weapon_segment(unsigned side,unsigned slot,Vec3 from,Vec3 to,double radius,std::uintptr_t exclude=0,int exclude_bone=-1,std::uint32_t exclude_handle=0) {
+        if(side>1 || slot>=weapon_slots) return;std::lock_guard<std::mutex> guard(weapon_mutex_);weapon_req_[side][slot]={from,to,radius,true,exclude,exclude_bone,exclude_handle};
+    }
+    // The scope (weapon_casts_ count) that last answered this slot: unchanged since a post means the post is still unanswered.
+    static std::uint64_t weapon_serial(unsigned side,unsigned slot) {
+        if(side>1 || slot>=weapon_slots) return 0;std::lock_guard<std::mutex> guard(weapon_mutex_);return weapon_serial_[side][slot];
     }
     static std::optional<WorldTraceHit> weapon_hit(unsigned side,unsigned slot,std::uint64_t now) {
         if(side>1 || slot>=weapon_slots) return {};std::lock_guard<std::mutex> guard(weapon_mutex_);
         const auto t=weapon_tick_[side][slot];return t && now>=t && now-t<=100?weapon_hit_[side][slot]:std::nullopt;
+    }
+    // Diagnostics: did the palm, tip or wall-tip sweep of this side hit the entity? One lock for all three slots.
+    static bool weapon_hits_entity(unsigned side,std::uintptr_t entity,std::uint64_t now) {
+        if(side>1 || !entity) return false;std::lock_guard<std::mutex> guard(weapon_mutex_);
+        for(const unsigned slot:{0u,tip_slot,wall_tip_slot}) {
+            const auto t=weapon_tick_[side][slot];
+            if(t && now>=t && now-t<=100 && weapon_hit_[side][slot] && weapon_hit_[side][slot]->entity==entity) return true;
+        }
+        return false;
     }
     // Test hook: request one world trace (metres along the view) and collect its text result later.
     static void request_trace(double distance) {std::lock_guard<std::mutex> guard(trace_mutex_);trace_distance_=distance;}

@@ -233,6 +233,18 @@ inline XrResult XRAPI_CALL end_frame(XrSession,const XrFrameEndInfo* info) {
 inline XrResult XRAPI_CALL string_path(XrInstance,const char* name,XrPath* out) {
     auto found=paths.find(name);if(found==paths.end()) found=paths.emplace(name,paths.size()+1).first;*out=found->second;return XR_SUCCESS;
 }
+// Both hands report the Touch profile (Plan Spec deviation 7: xrGetCurrentInteractionProfile + xrPathToString).
+inline XrResult XRAPI_CALL current_profile(XrSession,XrPath,XrInteractionProfileState* out) {
+    XrPath touch{};string_path(XR_NULL_HANDLE,"/interaction_profiles/oculus/touch_controller",&touch);out->interactionProfile=touch;return XR_SUCCESS;
+}
+inline XrResult XRAPI_CALL path_to_string(XrInstance,XrPath path,uint32_t capacity,uint32_t* count,char* buffer) {
+    for(const auto& [name,value]:paths) if(value==path) {
+        const auto needed=static_cast<uint32_t>(name.size()+1);if(count) *count=needed;
+        if(capacity<needed || !buffer) return XR_ERROR_SIZE_INSUFFICIENT;
+        std::memcpy(buffer,name.c_str(),needed);return XR_SUCCESS;
+    }
+    return XR_ERROR_PATH_INVALID;
+}
 inline XrResult XRAPI_CALL create_actionset(XrInstance,const XrActionSetCreateInfo*,XrActionSet* out) {*out=actionset;return XR_SUCCESS;}
 inline XrResult XRAPI_CALL destroy_actionset(XrActionSet) {actions.clear();return XR_SUCCESS;}
 inline XrResult XRAPI_CALL create_action(XrActionSet,const XrActionCreateInfo* info,XrAction* out) {
@@ -302,6 +314,7 @@ inline XrResult XRAPI_CALL dispatch(XrInstance,const char* name,PFN_xrVoidFuncti
     SIM_ENTRY(xrCreateActionSpace,action_space) SIM_ENTRY(xrSyncActions,sync) SIM_ENTRY(xrGetActionStatePose,pose_action)
     SIM_ENTRY(xrGetActionStateFloat,float_action) SIM_ENTRY(xrGetActionStateVector2f,vector_action)
     SIM_ENTRY(xrGetActionStateBoolean,bool_action) SIM_ENTRY(xrLocateSpace,locate_space) SIM_ENTRY(xrApplyHapticFeedback,haptic)
+    SIM_ENTRY(xrGetCurrentInteractionProfile,current_profile) SIM_ENTRY(xrPathToString,path_to_string)
 #undef SIM_ENTRY
     return XR_ERROR_FUNCTION_UNSUPPORTED;
 }

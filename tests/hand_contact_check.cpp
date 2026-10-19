@@ -4,6 +4,7 @@
 #include <cstring>
 #include <iostream>
 #include <map>
+#include <memory>
 #include <limits>
 #include <thread>
 #include <vector>
@@ -14,6 +15,20 @@ struct NativeHandContactPublicationFixture {
     static Published snapshot(NativeHandContact& contact,unsigned side) {
         std::array<NativeHandContact::Hand,2> hands{};contact.snapshot(hands,NativeHandContact::seconds(),false);
         const auto& hand=hands[side];return {hand.active,hand.proxies,hand.velocity,hand.lag,hand.held_by,hand.serial};
+    }
+    static unsigned kind(const NativeHandContact& contact,std::uintptr_t entity) {
+        for(const auto& n:contact.near_) if(n.entity==entity) return n.kind;
+        return 99;
+    }
+    template<class Read> static unsigned prop_class(Read& read,std::uintptr_t base,std::uintptr_t entity) {return NativeHandContact::prop_class(read,base,entity);}
+    // Is this entity a candidate the service is skipping at now_ms (refused as a prop, until ignore_until)?
+    static bool ignored(const NativeHandContact& contact,std::uintptr_t entity,std::uint64_t now_ms) {
+        for(const auto& n:contact.near_) if(n.entity==entity) return n.ignore_until>now_ms;
+        return false;
+    }
+    static bool tracked(const NativeHandContact& contact,std::uintptr_t entity) {
+        for(const auto& n:contact.near_) if(n.entity==entity) return true;
+        return false;
     }
 };
 }
@@ -437,6 +452,120 @@ int main() {
         assert(peak<.16+cfg.depth_speed+1e-9);       // never launched
         assert(pushes>60);                           // continuous: a push most frames of the contact (219 frames, the first ~55 before it)
     }
+    // --- mass-aware pushes (C5): one write raises the prop's speed by at most push_force_n * dt / mass; a first write uses write_dt (1/90 s), so it is capped too
+    {   // push_force_cap: an 8 kg box swatted at 3 m/s (200 N: 0.278 m/s a write at 90 Hz)
+        const HandContactConfig cfg;NativeRigidBody box{};box.pose={{0,0,.2},{{{1,0,0},{0,1,0},{0,0,1}}}};box.bounds=NativeGrabBounds{{-.2,-.2,0},{.2,.2,.4}};
+        const auto shape=prop_shape(box);const auto palm=lone({-.25,0,.2},.06);
+        ContactInput in;in.dt=1./90;
+        const auto capped=hand_contact_s(palm,shape,{3,0,0},{},8,cfg,in);
+        const auto today=hand_contact_s(palm,shape,{3,0,0},{},8,cfg);
+        in.dt=0;const auto uncapped=hand_contact_s(palm,shape,{3,0,0},{},8,cfg,in);
+        std::cout<<"push_force_cap: 8 kg box, 3 m/s swat: "<<length(capped.velocity)<<" m/s capped (limit "<<200./90/8<<"), "<<length(today.velocity)<<" m/s uncapped\n";
+        assert(cfg.push_force_n==200.);
+        assert(capped.push && capped.capped && length(capped.velocity)<=200./90/8+1e-9 && length(capped.velocity)>=200./90/8-1e-9);
+        assert(uncapped.push && !uncapped.capped && !today.capped && length(uncapped.velocity-today.velocity)==0 && length(today.velocity)>.5);
+        // the cap counts from what the prop already does along the push: a box moving at 0.1 m/s may reach 0.1 + 0.278
+        in.dt=1./90;const auto moving=hand_contact_s(palm,shape,{3,0,0},{.1,0,0},8,cfg,in);
+        assert(moving.push && moving.capped && std::abs(moving.velocity.x-(.1+200./90/8))<1e-9);
+        // a prop's first write is capped too (review I2): the service's dt for a prop it never wrote is one nominal frame, never 0
+        const PropDrag fresh;assert(NativeHandContact::write_dt(fresh,123.)==1./90);
+        PropDrag used;used.wrote({},10.);
+        assert(std::abs(NativeHandContact::write_dt(used,10.+1./90)-1./90)<1e-12 && NativeHandContact::write_dt(used,10.001)==1./240 && NativeHandContact::write_dt(used,15.)==1./30);
+        for(const double kg:{5.,11.}) { // a 3 m/s swat's first write onto a resting 5 kg / 11 kg prop: 200/90/5 = 0.444, 200/90/11 = 0.202 m/s
+            ContactInput first;first.dt=NativeHandContact::write_dt(fresh,0.);
+            const auto r=hand_contact_s(palm,shape,{3,0,0},{},kg,cfg,first);
+            std::cout<<"first write: "<<kg<<" kg prop, 3 m/s swat: "<<length(r.velocity)<<" m/s (cap "<<200./90/kg<<")\n";
+            assert(r.push && r.capped && length(r.velocity)<=200./90/kg+1e-9);
+        }
+        // the dv cap is in game time too (review M3): at time factor 0.5 one write adds half as much
+        ContactInput half_time;half_time.dt=1./90;half_time.time_factor=.5;
+        const auto slow=hand_contact_s(palm,shape,{3,0,0},{},8,cfg,half_time);assert(slow.push && slow.capped && std::abs(length(slow.velocity)-.5*200./90/8)<1e-9);
+    }
+    // bottle_unchanged: the carry loop's 0.5 kg slow ride writes exactly the same velocities with dt = 1/90 as with dt = 0
+    {
+        const auto ride=[](double write_dt) {
+            const double dt=1./90,mu_g=.4*9.81,hand_v=.16;const auto g=synthetic_geometry();const HandContactConfig cfg;
+            double hx=-.30,bx=0,bvx=0,bvy=0;std::uint64_t t=1000,engaged_until=0;std::vector<Vec3> written;bool capped=false;
+            for(int i=0;i<330;++i) {
+                const bool moving=i<219;if(moving) hx+=hand_v*dt;t+=11;
+                ContactInput in;in.engaged=engaged_until>t;in.dt=write_dt;
+                const auto r=hand_contact(hand_proxies(g,palm_at({hx,0,.1}),{0,0,0,0,0}),prop_shape(bottle(bx,0)),moving?Vec3{hand_v,0,0}:Vec3{},{bvx,bvy,0},.5,cfg,in);
+                if(r.driving) engaged_until=t+cfg.engage_ms;
+                if(r.push) {bvx=r.velocity.x;bvy=r.velocity.y;written.push_back(r.velocity);}
+                capped=capped || r.capped;
+                bx+=bvx*dt;
+                const double speed=std::hypot(bvx,bvy),slow=mu_g*dt;
+                if(speed<=slow) bvx=bvy=0;else {bvx*=(speed-slow)/speed;bvy*=(speed-slow)/speed;}
+            }
+            return std::make_pair(written,capped);
+        };
+        const auto [capped,any_capped]=ride(1./90);const auto [free,none]=ride(0);
+        std::cout<<"bottle_unchanged: "<<capped.size()<<" writes with dt 1/90, "<<free.size()<<" with dt 0\n";
+        assert(!any_capped && !none && capped.size()==free.size() && capped.size()>60);
+        for(std::size_t i=0;i<capped.size();++i) assert(capped[i].x==free[i].x && capped[i].y==free[i].y && capped[i].z==free[i].z);
+    }
+    // time_factor_scales: the engine's time factor multiplies the push (phase 1 always passes 1, C13)
+    {
+        const HandContactConfig cfg;const auto shape=prop_shape(bottle(0));const auto palm=lone({-.085,0,.1},.06);
+        ContactInput in;const auto full=hand_contact_s(palm,shape,{.3,0,0},{},.5,cfg,in);
+        in.time_factor=.5;const auto half=hand_contact_s(palm,shape,{.3,0,0},{},.5,cfg,in);
+        std::cout<<"time_factor_scales: "<<length(full.velocity)<<" m/s at 1, "<<length(half.velocity)<<" m/s at 0.5\n";
+        assert(ContactInput{}.time_factor==1. && ContactInput{}.dt==0.);
+        assert(full.push && half.push && std::abs(length(half.velocity)-.5*length(full.velocity))<1e-9 && length(full.velocity)>.3);
+        // a time factor above 1 counts as 1 (review M3): a push never gets stronger than today
+        in.time_factor=2.;const auto fast=hand_contact_s(palm,shape,{.3,0,0},{},.5,cfg,in);assert(fast.push && length(fast.velocity-full.velocity)==0);
+    }
+    // bad_time_factor_writes_nothing: a non-finite or non-positive time factor, a non-finite or negative dt: no write, no spin
+    {
+        const HandContactConfig cfg;const auto shape=prop_shape(bottle(0));const auto palm=lone({-.085,0,.1},.06);const double nan=std::nan("");
+        for(const double factor:{nan,0.,-1.,std::numeric_limits<double>::infinity()}) {
+            ContactInput in;in.time_factor=factor;const auto r=hand_contact_s(palm,shape,{.3,0,0},{.01,0,0},.5,cfg,in);
+            assert(!r.push && !r.turn && !r.capped && r.velocity.x==.01 && r.velocity.y==0);
+        }
+        for(const double dt:{nan,-1.,std::numeric_limits<double>::infinity()}) {
+            ContactInput in;in.dt=dt;const auto r=hand_contact_s(palm,shape,{.3,0,0},{.01,0,0},.5,cfg,in);
+            assert(!r.push && !r.turn && !r.capped && r.velocity.x==.01 && r.velocity.y==0);
+        }
+    }
+    // launch_cap (controller rulings, Task 6): a push never leaves the prop faster along the push than the hand moves along it + launch_margin (0.3,
+    // times the time factor); a ride may add the friction it gives back. A dv cap per write limits the acceleration only; this caps the final speed:
+    // the hand cannot throw by pushing. The default margin equals depth_speed, so the spring alone never reaches it: the cases below raise the spring.
+    {
+        const HandContactConfig base;const auto shape=prop_shape(bottle(0));
+        assert(base.launch_margin==.3 && base.launch_margin>=base.depth_speed);
+        auto cfg=base;cfg.depth_speed=.6;   // a spring that could throw: 5 cm into the bottle it adds 0.47 m/s
+        auto loose=cfg;loose.launch_margin=1e9;
+        const auto deep=lone({-.045,0,.1},.06);
+        // a 2 m/s swat: the write stops at 2.3
+        const auto swat=hand_contact_s(deep,shape,{2,0,0},{},1.,cfg),unbound=hand_contact_s(deep,shape,{2,0,0},{},1.,loose);
+        std::cout<<"launch_cap: 2 m/s swat writes "<<length(swat.velocity)<<" m/s ("<<length(unbound.velocity)<<" without the cap)\n";
+        assert(swat.push && std::abs(length(swat.velocity)-2.3)<1e-9 && length(unbound.velocity)>2.4);
+        // a slow hand pressing into a prop (a ride, not a swat): the write stops at hand + margin + the friction it gives back (0.05: the engine takes that
+        // off before the prop moves)
+        ContactInput slow;slow.friction=.05;
+        const auto press=hand_contact_s(deep,shape,{.146,0,0},{},1.,cfg,slow),press_unbound=hand_contact_s(deep,shape,{.146,0,0},{},1.,loose,slow);
+        assert(press.push && std::abs(length(press.velocity)-(.146+.3+.05))<1e-9 && length(press_unbound.velocity)>.146+.35+.05);
+        // a swat gives no friction back: the same friction estimate does not raise the cap
+        const auto fast=hand_contact_s(deep,shape,{2,0,0},{},1.,cfg,slow);assert(fast.push && std::abs(length(fast.velocity)-2.3)<1e-9);
+        // the hand's speed ALONG the push counts: a hand descending at 0.6 m/s while it moves 1.5 m/s sideways swats at 1.5 (+ the margin)
+        const auto descending=hand_contact_s(deep,shape,{1.5,0,-.6},{},1.,cfg);
+        assert(descending.push && std::abs(descending.velocity.x-1.8)<1e-9 && std::abs(descending.velocity.z)<1e-12);
+        // a hand rising at 75 degrees at 3 m/s moves 0.776 m/s along the (horizontal) push: the write stops at 0.776 + 0.3, not at its 3 m/s + 0.3 (review M2)
+        const double a75=75*3.14159265358979323846/180;
+        const auto rising=hand_contact_s(deep,shape,{3*std::cos(a75),0,3*std::sin(a75)},{},1.,cfg),rising_loose=hand_contact_s(deep,shape,{3*std::cos(a75),0,3*std::sin(a75)},{},1.,loose);
+        std::cout<<"launch_cap: hand rising at 75 degrees, 3 m/s: writes "<<length(rising.velocity)<<" m/s ("<<length(rising_loose.velocity)<<" without the cap)\n";
+        assert(rising.push && std::abs(length(rising.velocity)-(3*std::cos(a75)+.3))<1e-9 && length(rising_loose.velocity)>3*std::cos(a75)+.35);
+        // the cap is in game time: the time factor scales it with the push
+        ContactInput slowmo;slowmo.time_factor=.5;
+        const auto mo=hand_contact_s(deep,shape,{2,0,0},{},1.,cfg,slowmo);assert(mo.push && std::abs(length(mo.velocity)-1.15)<1e-9);
+        // a prop already faster than the cap along the push is never slowed: nothing is written
+        const auto ahead=hand_contact_s(deep,shape,{2,0,0},{2.5,0,0},1.,cfg);assert(!ahead.push && ahead.velocity.x==2.5);
+        // the ease of a resting hand (no hand speed; it eases out of overlaps up to `shallow`, 3 cm) stays within the margin
+        const auto rest=hand_contact_s(lone({-.067,0,.1},.06),shape,{},{},.5,cfg);assert(rest.push && length(rest.velocity)<=cfg.launch_margin+1e-9);
+        // with the default spring the cap does not bind on a swat: the write is the hand + the spring, as before the cap
+        const auto plain=hand_contact_s(deep,shape,{2,0,0},{},1.,base),plain_loose=hand_contact_s(deep,shape,{2,0,0},{},1.,[&]{auto c=base;c.launch_margin=1e9;return c;}());
+        assert(plain.push && length(plain.velocity-plain_loose.velocity)==0);
+    }
     // --- the world cast holds the drawn hand back from the prop (sim v525: 4-12 cm, whichever way its sweep crosses the prop): the tracked
     // hand pushes the prop that cast hit, and only that one; a shift past lag_limit is not believed
     {
@@ -698,6 +827,45 @@ int main() {
             std::cout<<"discovery never called: the service scanned after "<<NativeHandContact::latch_services<<" services and pushed the bottle "<<(writes.count(0x1000001)?writes[0x1000001].count:0u)<<" times\n";
             assert(latch.discoveries==0 && writes.count(0x1000001) && writes[0x1000001].count>3 && latch.faults==0);
         }
+        // --- final review: discover() (render thread) and the latched service (physics thread) never scan the slot tables at the same time.
+        // The service is run from inside discover()'s first read (a thread switch at the worst moment) after the latch_services services
+        // with no discover() call at all: discover() marks its discovery before it scans, so the service does not latch, and it never
+        // reads the registry; the render thread's scan completes.
+        {
+            NativeHandContact race;race.set_geometry(1,synthetic_geometry());race.scan_limit_us=race.service_limit_us=1<<30;race.inline_discovery=false;
+            build({1,1.0,0,.035,.035,.14,0x1c5de18,true,0x4000});put(motions+1*0x80+0x40,std::array<float,3>{0,0,0});writes.clear();held={};
+            for(unsigned i=0;i<NativeHandContact::latch_services;++i) {
+                const auto pose=palm_at({.70+.0004*i,0,.1});race.publish(1,true,pose,pose,{0,0,0,0,0});
+                race.service(read,base,world,90000+i*11,held,write);
+            }
+            assert(race.services.load()>=NativeHandContact::latch_services && race.discoveries.load()==0);
+            const auto pose=palm_at({.76,0,.1});race.publish(1,true,pose,pose,{0,0,0,0,0});
+            bool entered=false,discover_reads_open=false;unsigned nested_registry_reads=0;
+            const auto registry_slice=[&](std::uintptr_t at,std::size_t size) {return size>=256 && at>=game+0x3130b0 && at<game+0x3130b0+0x3fffull*8;};   // a scan slice, not a single registry lookup
+            const auto interleaved=[&](std::uintptr_t at,void* out,std::size_t size) {
+                if(discover_reads_open && !entered) {   // the first read of discover()'s scan: the physics thread's service runs now
+                    entered=true;
+                    const auto fresh=palm_at({.77,0,.1});race.publish(1,true,fresh,fresh,{0,0,0,0,0});
+                    auto counting=[&](std::uintptr_t where,void* into,std::size_t amount) {if(registry_slice(where,amount)) ++nested_registry_reads;return read(where,into,amount);};
+                    race.service(counting,base,world,99000,held,write);
+                }
+                return read(at,out,size);};
+            discover_reads_open=true;race.discover(interleaved,base);discover_reads_open=false;
+            assert(entered && race.discoveries.load()==1);   // counted once its scan has finished
+            assert(nested_registry_reads==0);   // the service did not scan the registry beside discover()
+            // The service latched while discover() was mid-scan and skipped its scan: it must retry on the very next service (the same hand serial,
+            // nothing new published), not wait for a hand to move, because discover() now returns for good.
+            unsigned later_registry_reads=0;
+            auto later=[&](std::uintptr_t where,void* into,std::size_t amount) {if(registry_slice(where,amount)) ++later_registry_reads;return read(where,into,amount);};
+            race.service(later,base,world,99100,held,write);
+            assert(later_registry_reads>0 && race.faults==0);
+            // A discover() that fails before scanning (no game object) is not a discovery: the latch fallback stays armed.
+            NativeHandContact failing;failing.set_geometry(1,synthetic_geometry());failing.scan_limit_us=failing.service_limit_us=1<<30;failing.inline_discovery=false;
+            failing.publish(1,true,pose,pose,{0,0,0,0,0});
+            auto unreadable=[&](std::uintptr_t,void*,std::size_t) {return false;};
+            failing.discover(unreadable,base);
+            assert(failing.discoveries.load()==0);
+        }
         // --- the same ride with the world cast holding the drawn hand 5 cm back along its motion (sim v525), the bottle the entity it hit: the tracked
         // hand carries it, so the face ends at the tracked fingertips (5 cm short of them if the drawn hand pushed)
         {
@@ -723,6 +891,50 @@ int main() {
             std::cout<<"service carry, cast holding the drawn hand 5 cm back: the face ends "<<(face-front)*100<<" cm from the tracked fingertips ("<<(bx-1.0)*100<<" cm moved), cast seen "<<solid.cast_seen.load()<<" held "<<solid.cast_held.load()<<"\n";
             assert(std::abs(face-front)<.03 && bx-1.0>.15 && solid.cast_seen>0 && solid.cast_held>0 && solid.faults==0);
         }
+        // --- meet_latch_holds_while_clamped: a latched (pinned) prop stays the clamp's while the clamp holds the hand at it, though the way out shrinks
+        // under meet_unlatch (the hand pushed past the prop's middle); without the hold it unlatches there as before
+        {
+            assert(NativeHandContact::next_meet_latch(true,.03,true));     // clamped at the prop: still latched
+            assert(!NativeHandContact::next_meet_latch(true,.03,false));   // not clamped: under meet_unlatch, unlatched
+            assert(NativeHandContact::next_meet_latch(false,.09,false));   // deeper than meet_latch: latches
+            assert(NativeHandContact::next_meet_latch(true,.06,false));    // between meet_unlatch and meet_latch: stays latched
+        }
+        // --- compose_meet (fix round 2, I3): the clamp's depth latches only while its contact is the pushable prop's plane, freshly hit; a stale plane (the
+        // bottle flew off) never holds the hand back. held_by and the exclusion entity follow the clamp's contact and the met prop.
+        {
+            const HandClamp idle;const WorldTrackedPose target{{.3,0,.1},{{{1,0,0},{0,1,0},{0,0,1}}}};
+            ClampOutput out{};out.valid=true;out.state=ClampState::contact;out.drawn=target;out.drawn.position={.155,0,.1};out.shift={-.145,0,0}; // 9 cm past the shell
+            out.contact=ClampHit{{.2,0,.1},{-1,0,0},5,0,false,true};
+            NativeHandContact::MeetPublished pub{};pub.fresh=true;pub.entity=5;pub.pushable[0]=5;pub.pushable_count=1;
+            NativeHandContact::MeetState st{};const double dt=1./90;
+            out.contact_fresh=false;
+            auto m=NativeHandContact::compose_meet(st,pub,idle,0,out,target,dt);
+            assert(!st.latched && !m.clamp_holding && m.meeting && m.prop && *m.prop==5 && m.held_by==5 && m.exclude && *m.exclude==5); // a stale plane: no latch, the meet draws
+            assert(std::abs(m.drawn.x-.3)<1e-12);
+            out.contact_fresh=true;
+            m=NativeHandContact::compose_meet(st,pub,idle,0,out,target,dt);
+            assert(st.latched && m.new_latch && m.clamp_holding && !m.meeting && !m.prop && std::abs(m.drawn.x-.155)<1e-12);   // fresh: the clamp's depth latches
+            m=NativeHandContact::compose_meet(st,pub,idle,0,out,target,dt,false);
+            assert(st.latched && !m.new_latch);                             // still held at the fresh prop plane: stays latched (depth_latch off only drops the depth)
+            out.contact_fresh=false;
+            m=NativeHandContact::compose_meet(st,pub,idle,0,out,target,dt);
+            // The plane went stale and the way out is shallow: unlatched. The meeting hand eases out of the clamp's 14.5 cm hold at release_speed (1.5 m/s),
+            // it does not jump to the target in one frame (fix round 3: the 4-5 m/s swat threw it 20-40 cm forward).
+            assert(!st.latched && m.meeting && std::abs(m.drawn.x-(.155+1.5*dt))<1e-9);
+            for(int i=0;i<30;++i) m=NativeHandContact::compose_meet(st,pub,idle,0,out,target,dt);
+            assert(std::abs(m.drawn.x-.3)<1e-12);                           // eased all the way: 14.5 cm at 1.67 cm a frame
+            pub.pushable_count=0;pub.loose[0]=5;pub.loose_count=1;          // pinned: not pushable, loose
+            m=NativeHandContact::compose_meet(st,pub,idle,0,out,target,dt);
+            assert(!m.meeting && !m.prop && m.held_by==5 && m.exclude && *m.exclude==5 && std::abs(m.drawn.x-.155)<1e-12); // the clamp's hand; the wall behind still swept for
+            out.contact=ClampHit{{.2,0,.1},{-1,0,0},0,0,false,true};pub.fresh=true;pub.outward={-.01,0,0};pub.pushable[0]=5;pub.pushable_count=1;
+            m=NativeHandContact::compose_meet(st,pub,idle,0,out,target,dt);
+            assert(m.meeting && !m.prop && m.held_by==0 && m.exclude && *m.exclude==5);   // held at a wall (entity 0) while the shift meets prop 5
+            NativeHandContact fresh_contact;                                 // meet_clamp on a contact with no published hand: the clamp's hand as it is
+            const auto none=fresh_contact.meet_clamp(1,idle,out,target);
+            assert(!none.meeting && std::abs(none.drawn.x-.155)<1e-12);
+            ClampInput in{};fresh_contact.fill_clamp_input(1,in,std::uintptr_t{5});
+            assert(in.loose_count==0 && !in.exclude);                         // nothing served: no loose props, nothing to exclude
+        }
         // --- meet(): the cast must not hold the hand off a light loose prop the contact pushes; the way out of an overlap; pinned (deep) and heavy props and a hand
         // that is not pushing keep the hold-off
         {
@@ -738,6 +950,14 @@ int main() {
             const auto meeting=m.meet(1,bottle_entity);
             assert(writes.count(0x1000001));
             assert(meeting.prop && length(meeting.shift)<.1 && meeting.shift.x<0);            // met: the cast lets go of it, the way out is back along the push (this fake world never moves the bottle: the overlap grows)
+            {   // the clamp's depth latches too: the tracked grip 9 cm past the clamp's shell at the prop, though the contact's way out is shallow (a toppled bottle)
+                assert(length(meeting.shift)<NativeHandContact::meet_unlatch);
+                const auto latches=m.meet_latches.load();
+                const auto deep=m.meet(1,bottle_entity,true,.09);
+                assert(!deep.prop && length(deep.shift)==0 && m.meet_latches==latches+1);
+                assert(!m.meet(1,bottle_entity,true,0).prop);                   // still held at the prop: stays latched
+                assert(m.meet(1,bottle_entity,false,.09).prop);                 // the clamp's depth counts only while it holds the hand at the prop: unlatched
+            }
             assert(!m.meet(1,crate_entity).prop && !m.meet(1,0).prop);      // the heavy crate and an empty cast keep the hold-off
             assert(!m.meet(0,bottle_entity).prop && length(m.meet(0,bottle_entity).shift)==0); // the other hand is not published: its cast holds it
             build({1,1.0,0,.08,.08,.14,0x1c5de18,true,0x4000});put(motions+1*0x80+0x40,std::array<float,3>{0,0,0});
@@ -801,7 +1021,7 @@ int main() {
          const int jumped=services_until_tested({30,0,.1},pass+4);std::cout<<"cache: a prop at the hand's new spot was tested after "<<jumped<<" services\n";assert(jumped>0);
          rest({30,0,.1},2*pass);assert(entity_reads[4]-before<=8);}
         // The cache keys on the entity pointer, not the class forever: an address reused by a prop is found within recheck_cycles passes.
-        walker_at(6,6);build({7,-2,.3,.035,.035,.14,0x1c5e108,false,0x4000}); // arkNPC class beside the hand
+        walker_at(6,6);build({7,-2,.3,.035,.035,.14,0x1c5e258,false,0x4000}); // unverified pickup class beside the hand (arkNPC is a candidate since Task 7)
         {const auto tested=contact.tested.load();rest(home,60);assert(contact.tested==tested && position_reads[7]==0);} // never a candidate, never position-read
         put(0x2000000+7*0x100000ull,base+0x1c886a8);
         int recheck=0;{const auto before=contact.tested.load();while(contact.tested==before && recheck<(int(NativeHandContact::recheck_cycles)+2)*int(pass)) {rest(home,1);++recheck;}
@@ -817,7 +1037,7 @@ int main() {
         unsigned props=0;
         for(unsigned slot=1;slot<0x3fff;++slot) {
             const std::uintptr_t entity=entities+slot*stride;const bool prop=slot%16==0;props+=prop;
-            mem.put(game+0x3130b0+slot*8ull,entity);mem.put(entity,base+(prop?0x1c886a8:0x1c5e108));
+            mem.put(game+0x3130b0+slot*8ull,entity);mem.put(entity,base+(prop?0x1c886a8:0x1c5e258)); // the rest: a class that is never a candidate
             mem.put(entity+0x300,std::array<float,3>{prop?30.f+slot*.01f:50.f,0,.14f});
         }
         for(const unsigned slot:{5008u,9008u,14000u}) mem.put(entities+slot*stride+0x300,std::array<float,3>{.3f,0,.14f}); // three props at the hand, bodiless: refused
@@ -850,6 +1070,220 @@ int main() {
         // A new level (different world) is a new registry: the classes are read again from the start.
         live=world+0x1000;mem.put(game+0x60410,live);
         {const auto first=serve(at);assert(first.first>200 && first.first<=NativeHandContact::scan_budget+120);}
+    }
+
+    // --- Task 7 (C2): knocked-out and dead guards are pushable, awake and yanked ones are not
+    {
+        const std::uintptr_t base=0x140000000,game=0x1000000,world=0x5000000,pool=0x6000000,motions=0x9000000;
+        const std::uintptr_t npc=0x2200000,list=0x2300000,physics=0x2400000,handles=0x2500000,model=0x2600000;
+        const std::uint32_t npc_id=0x20002;
+        std::map<std::uintptr_t,unsigned char> bytes;
+        const auto put=[&](std::uintptr_t at,const auto& value) {const auto* p=reinterpret_cast<const unsigned char*>(&value);for(std::size_t i=0;i<sizeof(value);++i) bytes[at+i]=p[i];};
+        bool fail_npc_vtable=false; // a transient read failure of the guard's vtable (the scan's class probe)
+        const auto read=[&](std::uintptr_t at,void* out,std::size_t size) {
+            if(fail_npc_vtable && at==npc && size==8) return false;
+            auto* p=static_cast<unsigned char*>(out);
+            for(std::size_t i=0;i<size;++i) {const auto it=bytes.find(at+i);if(it==bytes.end()) return false;p[i]=it->second;}return true;};
+        std::array<std::uintptr_t,0x3fff> registry{};registry[2]=npc;
+        put(base+0x39a5290,game);put(game,base+0x1c940a8);put(game+0x60410,world);put(world+0x28,pool);put(world+0x30,std::uint32_t{20});put(world+0x120,motions);
+        put(game+0x3130b0,registry);
+        put(npc,base+0x1c5e108);put(npc+0xa8,npc_id);put(npc+0xf0,model);put(npc+0x300,std::array<float,3>{10.f,0.f,0.f});
+        put(npc+0x268,rig::List{list,1,1<<8});put(list,physics);put(physics,base+0x1c54008);put(physics+0x18,rig::Identity{3,10});put(physics+0x100,handles);
+        put(handles+0x28,handles+0x120);put(handles+0x30,std::uint32_t{17});
+        put(physics+0x10,npc);put(physics+0xc8,std::array<unsigned char,12>{}); // the component's entity, native carry parent (+0xc8) and lease (+0xd2)
+        const std::uintptr_t userdata=0x2800000,stranger=0x2900000,stranger_component=0x2a00000;
+        put(userdata+8,physics);put(stranger+8,stranger_component);put(stranger_component+0x10,std::uintptr_t{0x2b00000});
+        const auto bone_flags=[&](std::uint32_t flags) {for(std::uint32_t b=0;b<17;++b) put(pool+b*0xb0+0x44,flags);};
+        for(std::uint32_t b=0;b<17;++b) { // bone b lies at x = b, so bone 10 (the right hand) is the one at x = 10
+            const std::uint32_t h=0x1000000+b;put(handles+0x120+b*4,h);const auto rec=pool+b*0xb0;
+            rig::Transform t{};t.f[0]=t.f[5]=t.f[10]=t.f[15]=1;t.f[12]=static_cast<float>(b);t.f[14]=.1f;
+            put(rec,t);put(rec+0x40,std::uint32_t{5+b});put(rec+0x70,h);put(rec+0x74,h);put(rec+0x90,userdata);
+            put(motions+(5+b)*0x80+0x40,std::array<float,3>{0,0,0});put(motions+(5+b)*0x80+0x26,std::uint16_t{0x4000});
+        }
+        bone_flags(0x82);
+        struct Written {unsigned count{};std::array<float,3> first{};};
+        std::map<std::uint32_t,Written> writes;
+        const auto write=[&](std::uintptr_t w,std::uint32_t handle,const std::array<float,3>& linear,const std::array<float,3>&) {
+            assert(w==world && std::isfinite(linear[0]) && std::isfinite(linear[1]) && std::isfinite(linear[2]));
+            auto& e=writes[handle];if(!e.count) e.first=linear;++e.count;put(motions+(5+(handle&0xffffff))*0x80+0x40,linear);};
+        const auto make=[&]() {auto c=std::make_unique<NativeHandContact>();c->set_geometry(1,synthetic_geometry());c->scan_limit_us=c->service_limit_us=1<<30;return c;};
+        std::array<std::uintptr_t,2> held{};
+        // The right hand sweeps toward bone 10 at 0.4 m/s; every tick is 11 ms. now_ms keeps running across scenarios.
+        std::uint64_t now_ms=200000;bool carrying_body=false;
+        const auto sweep=[&](NativeHandContact& c,int ticks,double from) {
+            if(from<9.71) for(std::uint32_t b=0;b<17;++b) put(motions+(5+b)*0x80+0x40,std::array<float,3>{0,0,0}); // a fresh approach: the bodies at rest
+            for(int i=0;i<ticks;++i) {
+                const auto pose=palm_at({from+.4*.011*i,0,.1});c.publish(1,true,pose,pose,{0,0,0,0,0});
+                c.set_carrying_body(carrying_body);
+                std::this_thread::sleep_for(std::chrono::milliseconds(11));c.service(read,base,world,now_ms+=11,held,write);}
+        };
+        // push_unconscious_guard: dynamic bodies, unconscious. Only bone 10 (the body the palm is by) is written.
+        {
+            put(npc+0xd1,static_cast<unsigned char>(0x20));writes.clear();
+            auto c=make();sweep(*c,100,9.70);
+            assert(writes.size()==1 && writes.count(0x100000a) && writes[0x100000a].count>0);
+            assert(writes[0x100000a].first[0]>0 && std::abs(writes[0x100000a].first[1])<1e-4 && std::abs(writes[0x100000a].first[2])<1e-4);
+            assert(c->pushes>0 && c->faults==0);
+            std::cout<<"push_unconscious_guard: "<<writes[0x100000a].count<<" writes to bone 10, first "<<writes[0x100000a].first[0]<<" m/s\n";
+            // ragdoll_meetable: the guard is a pushable of the meet, like a prop, so the clamp exempts his planes
+            assert(c->meet(1,npc).prop);
+            // the service publishes the exact body it met (bone and handle) for the exclusion sweep, and nothing for an entity it never met
+            {const auto met=c->met_body(npc);assert(met && met->entity==npc && met->bone==10 && met->handle==0x100000a);assert(!c->met_body(npc+8));}
+            // a torso push: the pelvis (bone 0, no grab bone) lies where the palm is and the wrist is moved away; the published body is that torso
+            {const auto place=[&](unsigned b,float x) {rig::Transform t{};t.f[0]=t.f[5]=t.f[10]=t.f[15]=1;t.f[12]=x;t.f[14]=.1f;put(pool+b*0xb0,t);};
+             place(0,10.f);place(10,3.f);put(npc+0xd1,static_cast<unsigned char>(0x20));writes.clear();
+             auto t=make();sweep(*t,100,9.70);
+             const auto met=t->met_body(npc);assert(met && met->bone==0 && !ragdoll_grab_bone(met->bone) && met->handle==0x1000000u);
+             place(0,0.f);place(10,10.f);}
+            // dead (0x08) is pushable too
+            put(npc+0xd1,static_cast<unsigned char>(0x08));writes.clear();
+            auto d=make();sweep(*d,100,9.70);assert(writes.count(0x100000a) && writes.size()==1 && d->meet(1,npc).prop);
+        }
+        // awake_guard_not_pushed: bodies follow the animation (keyframed), not ragdolling.
+        {
+            bone_flags(0xce);put(npc+0xd1,static_cast<unsigned char>(0));writes.clear();
+            auto c=make();sweep(*c,30,9.70);
+            assert(writes.empty() && c->pushes==0 && !c->meet(1,npc).prop);
+            assert(NativeHandContactPublicationFixture::tracked(*c,npc) && NativeHandContactPublicationFixture::ignored(*c,npc,now_ms)); // skipped until ignore_until
+            // unconscious state with keyframed bodies is refused too: the body class decides as well
+            put(npc+0xd1,static_cast<unsigned char>(0x20));writes.clear();
+            auto d=make();sweep(*d,30,9.70);assert(writes.empty());
+            // dynamic bodies but neither dead nor unconscious: refused
+            bone_flags(0x82);put(npc+0xd1,static_cast<unsigned char>(0));writes.clear();
+            auto e=make();sweep(*e,30,9.70);assert(writes.empty() && e->pushes==0);
+        }
+        // yanked_guard_not_pushed: ragdolling alive (0x80), dynamic bodies. native_ragdoll_body takes him; the hands must not.
+        {
+            bone_flags(0x82);put(npc+0xd1,static_cast<unsigned char>(0x80));writes.clear();
+            assert(native_ragdoll_body(read,base,npc,10));
+            assert(!pushable_ragdoll_body(read,base,npc,Vec3{9.8,0,.1}));
+            auto c=make();sweep(*c,40,9.70);
+            assert(writes.empty() && c->pushes==0 && !c->meet(1,npc).prop);
+        }
+        // pushable_ragdoll_body: the nearest of all 17 bones, dynamic ones only, dead or unconscious only
+        {
+            bone_flags(0x82);put(npc+0xd1,static_cast<unsigned char>(0x20));
+            auto b=pushable_ragdoll_body(read,base,npc,Vec3{10.05,0,.1});assert(b && b->bone==10 && b->handle==0x100000a);
+            b=pushable_ragdoll_body(read,base,npc,Vec3{2.1,0,.1});assert(b && b->bone==2); // the chest: not a drag bone, but a push bone
+            b=pushable_ragdoll_body(read,base,npc,Vec3{-3,0,.1});assert(b && b->bone==0);
+            put(pool+10*0xb0+0x44,std::uint32_t{0xce});   // that one body keyframed: another bone answers
+            b=pushable_ragdoll_body(read,base,npc,Vec3{10.05,0,.1});assert(b && b->bone!=10);
+            bone_flags(0x82);
+            put(npc+0xd1,static_cast<unsigned char>(0xa8));assert(pushable_ragdoll_body(read,base,npc,Vec3{10,0,.1}));    // dead, unconscious and ragdolling
+            put(npc+0xd1,static_cast<unsigned char>(0x10));assert(!pushable_ragdoll_body(read,base,npc,Vec3{10,0,.1}));   // other bits only
+            put(npc+0xd1,static_cast<unsigned char>(0));assert(!pushable_ragdoll_body(read,base,npc,Vec3{10,0,.1}));
+            put(npc+0xd1,static_cast<unsigned char>(0x20));put(npc,base+0x1c886a8);
+            assert(!pushable_ragdoll_body(read,base,npc,Vec3{10,0,.1}));                                                  // not a guard
+            put(npc,base+0x1c5e108);
+            assert(NativeHandContactPublicationFixture::prop_class(read,base,npc)==2);
+            put(0x2700000,base+0x1c886a8);assert(NativeHandContactPublicationFixture::prop_class(read,base,0x2700000)==1);
+            put(0x2700000,base+0x1c1111);assert(NativeHandContactPublicationFixture::prop_class(read,base,0x2700000)==0);
+        }
+        // the guard wakes (or is revived) while a hand is on him: the writes stop
+        {
+            bone_flags(0x82);put(npc+0xd1,static_cast<unsigned char>(0x20));writes.clear();
+            auto c=make();sweep(*c,100,9.70);assert(writes.count(0x100000a));
+            put(npc+0xd1,static_cast<unsigned char>(0));writes.clear();
+            sweep(*c,60,9.70+.4*.011*100);
+            assert(writes.empty());
+        }
+        // the keep-out: a guard lying against the player is never shoved
+        {
+            bone_flags(0x82);put(npc+0xd1,static_cast<unsigned char>(0x20));writes.clear();
+            auto c=make();
+            for(int i=0;i<60;++i) {
+                const auto pose=palm_at({9.70+.4*.011*i,0,.1});c->publish(1,true,pose,pose,{0,0,0,0,0});c->set_player({9.9,0,1.4});
+                std::this_thread::sleep_for(std::chrono::milliseconds(11));c->service(read,base,world,now_ms+=11,held,write);}
+            assert(writes.empty() && c->keepouts>0);
+        }
+        // a hand's own grab (held) keeps the grab motor's body
+        {
+            bone_flags(0x82);put(npc+0xd1,static_cast<unsigned char>(0x20));writes.clear();
+            auto c=make();held[1]=npc;sweep(*c,60,9.70);held={};assert(writes.empty());
+        }
+
+        // Fix round 1 --------------------------------------------------------------------------------------------------------------
+        const auto reset_guard=[&]() {bone_flags(0x82);put(npc+0xd1,static_cast<unsigned char>(0x20));put(physics+0xc8,std::array<unsigned char,12>{});
+            put(npc+0x300,std::array<float,3>{10.f,0.f,0.f});carrying_body=false;writes.clear();held={};
+            for(std::uint32_t b=0;b<17;++b) {put(pool+b*0xb0+0x90,userdata);put(motions+(5+b)*0x80+0x26,std::uint16_t{0x4000});}};
+        // (1) never push a carried or leased body: the player's shoulder carry, a parent on the component, a lease, an NPC dragging him
+        {
+            reset_guard();carrying_body=true;
+            {auto c=make();sweep(*c,60,9.70);assert(writes.empty() && c->pushes==0);}      // the player carries a body natively: no guard is pushed
+            reset_guard();put(physics+0xc8,std::uintptr_t{0x3000000});
+            {auto c=make();sweep(*c,60,9.70);assert(writes.empty() && !pushable_ragdoll_body(read,base,npc,Vec3{10,0,.1}));}   // native carry parent
+            reset_guard();put(physics+0xd2,static_cast<unsigned char>(1));
+            {auto c=make();sweep(*c,60,9.70);assert(writes.empty() && !pushable_ragdoll_body(read,base,npc,Vec3{10,0,.1}));}   // a lease
+            reset_guard();
+            {auto c=make();sweep(*c,100,9.70);assert(writes.count(0x100000a));                                       // control: free, pushed
+             put(physics+0xc8,std::uintptr_t{0x3000000});writes.clear();sweep(*c,40,9.70+.4*.011*100);assert(writes.empty());}  // carried mid-push: stops
+            reset_guard();
+        }
+        // (2) per-candidate heavy limit: a 25 kg torso is pushed (slowly, F*dt/m), a 50 kg one refused, props keep 12 kg
+        {
+            const auto heavy=[&](std::uint32_t bone,double kg) { // the bone's inverse mass (hkHalf: the upper 16 bits of the float)
+                const float inverse=static_cast<float>(1./kg);std::uint32_t bits;std::memcpy(&bits,&inverse,4);
+                put(motions+(5+bone)*0x80+0x26,static_cast<std::uint16_t>(bits>>16));};
+            reset_guard();put(npc+0x300,std::array<float,3>{2.f,0.f,0.f});heavy(2,25);     // the chest: 0.32 m cube, estimate 11.5 kg
+            {auto c=make();sweep(*c,100,1.70);
+             assert(writes.size()==1 && writes.count(0x1000002) && writes[0x1000002].count>0);
+             assert(writes[0x1000002].first[0]>0 && writes[0x1000002].first[0]<=200./90/25+1e-3);
+             std::cout<<"heavy torso: 25 kg chest, first write "<<writes[0x1000002].first[0]<<" m/s (cap "<<200./90/25<<")\n";
+             assert(c->meet(1,npc).prop);}
+            reset_guard();put(npc+0x300,std::array<float,3>{0.f,0.f,0.f});heavy(0,50);       // the pelvis: 50 kg is past heavy_kg_ragdoll
+            {auto c=make();sweep(*c,100,-.30);assert(writes.empty() && !c->meet(1,npc).prop);}
+            reset_guard();put(npc+0x300,std::array<float,3>{0.f,0.f,0.f});heavy(0,39);
+            {auto c=make();sweep(*c,100,-.30);assert(writes.count(0x1000000));}
+            assert(NativeHandContact::heavy_kg_ragdoll==40. && HandContactConfig{}.heavy_kg==12.);
+            reset_guard();
+        }
+        // (3) ownership like inspect_hit_body: record+0x90 userdata -> component -> entity; a recycled handle of another entity is refused
+        {
+            reset_guard();
+            auto b=pushable_ragdoll_body(read,base,npc,Vec3{10.05,0,.1});assert(b && b->bone==10);
+            put(pool+10*0xb0+0x90,stranger);                                                  // bone 10's record now belongs to another entity
+            b=pushable_ragdoll_body(read,base,npc,Vec3{10.05,0,.1});assert(b && b->bone!=10);
+            {auto c=make();sweep(*c,60,9.70);assert(!writes.count(0x100000a));}
+            put(pool+10*0xb0+0x90,std::uintptr_t{0});b=pushable_ragdoll_body(read,base,npc,Vec3{10.05,0,.1});assert(b && b->bone!=10);   // no userdata at all
+            reset_guard();put(physics+0x10,std::uintptr_t{0x1234000});put(userdata+8,physics);
+            assert(!pushable_ragdoll_body(read,base,npc,Vec3{10.05,0,.1}) || pushable_ragdoll_body(read,base,npc,Vec3{10.05,0,.1})->bone!=10);
+            put(physics+0x10,npc);reset_guard();
+        }
+        // (4) a scan that reclassifies an address re-derives the candidate's kind
+        {
+            const unsigned pass=2*((0x3fff+1023)/1024);
+            const auto settle=[&](NativeHandContact& c,double x) {for(int i=0;i<(int(NativeHandContact::recheck_cycles)+2)*int(pass);++i) {
+                const auto pose=palm_at({x,0,.1});c.publish(1,true,pose,pose,{0,0,0,0,0});c.service(read,base,world,now_ms+=11,held,write);}};
+            reset_guard();auto c=make();settle(*c,9.70);assert(NativeHandContactPublicationFixture::kind(*c,npc)==2);
+            put(npc,base+0x1c886a8);settle(*c,9.70);assert(NativeHandContactPublicationFixture::kind(*c,npc)==1);   // guard -> prop
+            put(npc,base+0x1c5e108);settle(*c,9.70);assert(NativeHandContactPublicationFixture::kind(*c,npc)==2);   // prop -> guard
+            // a failed class probe is not a class change: a nearby guard stays a candidate through rechecks that cannot read his vtable
+            fail_npc_vtable=true;settle(*c,9.70);fail_npc_vtable=false;
+            assert(NativeHandContactPublicationFixture::tracked(*c,npc) && NativeHandContactPublicationFixture::kind(*c,npc)==2);
+            // the first service after a carry starts holds the gate, and the carry ending releases it at once
+            reset_guard();
+            {auto d=make();sweep(*d,100,9.70);assert(writes.count(0x100000a));writes.clear();
+             d->set_carrying_body(true);{const auto pose=palm_at({9.70+.4*.011*100,0,.1});d->publish(1,true,pose,pose,{0,0,0,0,0});d->service(read,base,world,now_ms+=11,held,write);}
+             assert(writes.empty());
+             d->set_carrying_body(false);carrying_body=false;sweep(*d,100,9.70);assert(writes.count(0x100000a));}
+            reset_guard();
+        }
+        // (5) a failing choose is throttled (100 ms), and a knocked-out guard is looked at again within 0.25 s
+        {
+            reset_guard();for(std::uint32_t b=0;b<17;++b) put(motions+(5+b)*0x80+0x26,std::uint16_t{0x4000});
+            const auto world_array=world+0x120;put(world_array,std::uintptr_t{0x7f00000});    // no motion array: every body read fails after the choose
+            auto c=make();sweep(*c,40,9.70);                                                  // 440 ms
+            std::cout<<"throttle: "<<c->ragdoll_chooses.load()<<" chooses in 40 services\n";
+            assert(c->ragdoll_chooses>0 && c->ragdoll_chooses<=6 && writes.empty());
+            put(world_array,motions);reset_guard();
+            // awake, then knocked out: pushable again within 0.25 s
+            put(npc+0xd1,static_cast<unsigned char>(0));
+            auto d=make();sweep(*d,30,9.70);assert(writes.empty());
+            put(npc+0xd1,static_cast<unsigned char>(0x20));writes.clear();
+            sweep(*d,40,9.70+.4*.011*30);                                                     // 440 ms of pushing: well past the 0.25 s window
+            assert(writes.count(0x100000a));
+            reset_guard();
+        }
     }
     std::cout<<"hand_contact_check ok\n";
 }

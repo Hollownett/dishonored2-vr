@@ -20,7 +20,8 @@ Without `--keep-going` it stops at the first failure like `goto build_failed`.
 
 ## Known differences from cl
 - clang-cl-only flags (`CLANG_ONLY_FLAGS`): `-Wno-` for missing-braces, missing-field-initializers,
-  microsoft-cast; `/clang:-ffp-contract=off` (clang folds `a*b-c` as fused). `/EHsc` is kept, except
+  microsoft-cast; `-Wshadow -Wshadow-field -Wshadow-field-in-constructor` (added: cl /W4 raises C4456-C4459, clang-cl /W4
+  does not, so under /WX they are errors here too; `-Wshadow-uncaptured-local` stays off); `/clang:-ffp-contract=off` (clang folds `a*b-c` as fused). `/EHsc` is kept, except
   `/EHa` for three checks that fault inside `__try` (clang needs it; cl does not).
 - Warnings cl also raises (unused-*, sign-compare, return-type) are NOT muted: any not on the exact
   `TRACKED_WARNING_ALLOW` list (13 entries: unused/set-but-unused globals in dxgi_probe.cpp and 10

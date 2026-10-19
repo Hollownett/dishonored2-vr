@@ -540,6 +540,8 @@ python tests\attachment_socket_audit_check.py
 if not "%errorlevel%"=="0" exit /b 1
 python tests\held_object_routing_check.py
 if not "%errorlevel%"=="0" exit /b 1
+python tests\hand_clamp_routing_check.py
+if not "%errorlevel%"=="0" exit /b 1
 python tests\full_hand_query_routing_check.py
 if not "%errorlevel%"=="0" exit /b 1
 python tests\full_hand_launch_check.py
@@ -558,6 +560,12 @@ cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT /Ithird_party\minhook\include
 if not "%errorlevel%"=="0" exit /b 1
 build\native_left_weapon_socket_check.exe
 if not "%errorlevel%"=="0" exit /b 1
+cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT /Isrc tests\carry_diagnostics_check.cpp /Fo:build\carry_diagnostics_check.obj /Fe:build\carry_diagnostics_check.exe
+if errorlevel 1 goto build_failed
+if not errorlevel 0 goto build_failed
+build\carry_diagnostics_check.exe
+if errorlevel 1 goto build_failed
+if not errorlevel 0 goto build_failed
 for %%T in (combat_target_memory_check native_left_weapon_socket_owner_check native_held_placement_check native_held_object_check) do (
     cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT /Ithird_party\minhook\include tests\%%T.cpp /Fo:build\%%T.obj /Fe:build\%%T.exe
     if errorlevel 1 goto build_failed
@@ -776,7 +784,31 @@ build\vr_perf_governor_check.exe
 if not "%errorlevel%"=="0" exit /b 1
 cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT /Isrc /Ithird_party\minhook\include tests\weapon_collision_check.cpp /Fo:build\weapon_collision_check.obj /Fe:build\weapon_collision_check.exe
 if not "%errorlevel%"=="0" exit /b 1
+cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT /Isrc /Ithird_party\minhook\include tools\push_lab.cpp /Fo:build\push_lab.obj /Fe:build\push_lab.exe
+if not "%errorlevel%"=="0" exit /b 1
+build\push_lab.exe build\push-lab
+if not "%errorlevel%"=="0" exit /b 1
 build\weapon_collision_check.exe
+if not "%errorlevel%"=="0" exit /b 1
+cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT /Isrc tests\hand_clamp_check.cpp /Fo:build\hand_clamp_check.obj /Fe:build\hand_clamp_check.exe
+if not "%errorlevel%"=="0" exit /b 1
+build\hand_clamp_check.exe
+if not "%errorlevel%"=="0" exit /b 1
+cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT /Isrc tests\hand_reach_check.cpp /Fo:build\hand_reach_check.obj /Fe:build\hand_reach_check.exe
+if not "%errorlevel%"=="0" exit /b 1
+build\hand_reach_check.exe
+if not "%errorlevel%"=="0" exit /b 1
+cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT /Isrc /Ithird_party\minhook\include tests\grip_ik_pipeline_check.cpp /Fo:build\grip_ik_pipeline_check.obj /Fe:build\grip_ik_pipeline_check.exe
+if not "%errorlevel%"=="0" exit /b 1
+build\grip_ik_pipeline_check.exe
+if not "%errorlevel%"=="0" exit /b 1
+cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT /Isrc /Ithird_party\minhook\include tests\hand_clamp_feed_check.cpp /Fo:build\hand_clamp_feed_check.obj /Fe:build\hand_clamp_feed_check.exe
+if not "%errorlevel%"=="0" exit /b 1
+cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT /Isrc tests\palm_offset_check.cpp /Fo:build\palm_offset_check.obj /Fe:build\palm_offset_check.exe
+if not "%errorlevel%"=="0" exit /b 1
+build\palm_offset_check.exe
+if not "%errorlevel%"=="0" exit /b 1
+build\hand_clamp_feed_check.exe
 if not "%errorlevel%"=="0" exit /b 1
 cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT /Isrc /Ithird_party\minhook\include tests\native_world_trace_check.cpp /Fo:build\native_world_trace_check.obj /Fe:build\native_world_trace_check.exe
 if not "%errorlevel%"=="0" exit /b 1

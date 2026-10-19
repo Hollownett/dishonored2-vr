@@ -10,6 +10,9 @@ std::map<std::uintptr_t,std::vector<unsigned char>> memory;
 bool corrupt_cast{},fail_construct{};
 float fixture_fraction=.25f;
 unsigned fixture_hit_count=1;
+static std::size_t class_reads;   // reads of a body record's flag word (+0x44): only body_class_of makes them
+bool read_mem(std::uintptr_t at,void* out,std::size_t size);
+bool counting_read(std::uintptr_t at,void* out,std::size_t size) {if(at==0x6000000ull+0x123456ull*0xb0+0x44) ++class_reads;return read_mem(at,out,size);}
 bool read_mem(std::uintptr_t at,void* out,std::size_t size) {
     for(const auto& [start,bytes]:memory) if(at>=start && at+size<=start+bytes.size()) {std::memcpy(out,bytes.data()+(at-start),size);return true;}
     return false;
@@ -62,9 +65,10 @@ void test_pure() {
     h=convert_world_hit(c,{.09,0,0},{.094,0,0},0x1234);
     CHECK(h && h->initial_overlap && h->normal_valid && h->normal.x==1 && h->centre.x==.09);
     cc=to_collision_hit(*h);CHECK(cc.normal.x==1 && cc.fraction==0);
-    CollisionConfig config{};config.palm_radius=.025;WeaponCollision collision(config);
-    const auto escaped=collision.update(0,.01,{.09,0,0},{.094,0,0},{1,0,0},0,[&](Vec3,Vec3) {return std::optional<CollisionHit>{cc};});
-    CHECK(escaped.contact && escaped.shift.x>0 && std::abs(escaped.grip.x-.1)<1e-6);
+    // The hand clamp reads the same overlap (WeaponCollision is blade-only since physical hands Task 5): the valid overlap normal
+    // and the initial-overlap flag reach it unchanged, so it keeps no plane from it and counts it toward the overlap snap.
+    const auto clamp_hit=to_clamp_hit(*h);
+    CHECK(clamp_hit.initial_overlap && clamp_hit.normal_valid && clamp_hit.normal.x==1 && clamp_hit.entity==0x1234 && std::abs(clamp_hit.point.x-.075)<1e-6);
     c.normal[0]=-1;h=convert_world_hit(c,{.09,0,0},{.094,0,0},0x1234);
     CHECK(h && h->initial_overlap && h->normal_valid && h->normal.x==-1);
     c.fraction=-.8f;CHECK(!convert_world_hit(c,{0,0,0},{1,0,0},1));
@@ -94,8 +98,40 @@ void test_verify_and_cast() {
     put64(pool+0x123456ull*0xb0+0x90,slot);put64(slot+8,object);put64(object+0x10,0xE17717);
     CHECK(NativeWorldTrace::entity_of(read_mem,world,0x00123456)==0xE17717);
     CHECK(NativeWorldTrace::entity_of(read_mem,world,0xffffff)==0 && NativeWorldTrace::entity_of(read_mem,world,0x1)==0);
+    // The hit body's class, read from its record as inspect_hit_body and native_rigid_body read it: index below the pool count, the record's own
+    // handle equal to the cast's, a motion object, and flags & 7 == 2 for a dynamic body; no body or entity is the world. Anything that does
+    // not check (a freed or reused slot, a short pool, a bad record) is an entity that does not move, never a prop.
+    {   const std::uint32_t dynamic_flags=0x2,keyframed_flags=0x6,count=0x200000,handle=0x123456,motion=0x1000,no_motion=0,other_handle=0x123457,short_pool=0x100;
+        const std::uintptr_t record=pool+0x123456ull*0xb0;
+        put(world+0x30,&count,4);put(record+0x70,&handle,4);put(record+0x40,&motion,4);put(record+0x44,&dynamic_flags,4);
+        CHECK(NativeWorldTrace::body_class_of(read_mem,world,0x123456,0xE17717)==BodyClass::dynamic);
+        put(record+0x44,&keyframed_flags,4);
+        CHECK(NativeWorldTrace::body_class_of(read_mem,world,0x123456,0xE17717)==BodyClass::entity_static);
+        put(record+0x44,&dynamic_flags,4);
+        put(record+0x70,&other_handle,4);   // the slot now holds another body
+        CHECK(NativeWorldTrace::body_class_of(read_mem,world,0x123456,0xE17717)==BodyClass::entity_static);
+        put(record+0x70,&handle,4);
+        put(record+0x40,&no_motion,4);      // no motion object
+        CHECK(NativeWorldTrace::body_class_of(read_mem,world,0x123456,0xE17717)==BodyClass::entity_static);
+        put(record+0x40,&motion,4);
+        put(world+0x30,&short_pool,4);           // the pool is shorter than the index
+        CHECK(NativeWorldTrace::body_class_of(read_mem,world,0x123456,0xE17717)==BodyClass::entity_static);
+        put(world+0x30,&count,4);
+        CHECK(NativeWorldTrace::body_class_of(read_mem,world,0x123456,0)==BodyClass::world && NativeWorldTrace::body_class_of(read_mem,world,0xffffff,0xE17717)==BodyClass::world);
+        CHECK(NativeWorldTrace::body_class_of(read_mem,world,0x1fffff,0xE17717)==BodyClass::entity_static);   // the record is not mapped
+    }
+    // Carry M6: a guard's ragdoll limb is hit as a dynamic body, so the clamp ranks its plane below a wall's. The record fields are those
+    // native_ragdoll_body reads on a dead or unconscious guard (flags 0x82 / 0x8a asleep, motion index, own handle at +0x70) and the
+    // keyframed bodies of a living one (0xce): only the first are dynamic. The limb's entity is the guard's.
+    {   const std::uint32_t count=0x200000,handle=0x123456,motion=0x1005,limb_awake=0x82,limb_asleep=0x8a,animated=0xce;
+        const std::uintptr_t record=pool+0x123456ull*0xb0,guard=0xE17718;
+        put(world+0x30,&count,4);put(record+0x70,&handle,4);put(record+0x40,&motion,4);
+        for(const auto flags:{limb_awake,limb_asleep}) {put(record+0x44,&flags,4);CHECK(NativeWorldTrace::body_class_of(read_mem,world,handle,guard)==BodyClass::dynamic);}
+        put(record+0x44,&animated,4);CHECK(NativeWorldTrace::body_class_of(read_mem,world,handle,guard)==BodyClass::entity_static);
+        const std::uint32_t restored=0x2;put(record+0x44,&restored,4); // the cast below hits this record as a plain dynamic body
+    }
     const auto hit=NativeWorldTrace::sphere_cast(base,read_mem,fake_cast,fake_construct,world,{0,0,0},{4,0,0},0.05);
-    CHECK(hit && casts==1 && hit->entity==0xE17717 && hit->fraction==0.25 && hit->centre.x==1.0 && hit->normal.x==-1);
+    CHECK(hit && casts==1 && hit->entity==0xE17717 && hit->body_class==BodyClass::dynamic && hit->fraction==0.25 && hit->centre.x==1.0 && hit->normal.x==-1);
     CHECK(seen.shape_tag_codec==0xabcdef0 && seen.shape && seen.origin[0]==0 && seen.delta[0]==4.f && seen.inverse_delta[0]==.25f);
     CHECK(seen.flags==(0x3f000000u|7u) && seen_radius==0.05f);
     CHECK(seen_filter.vtable==base+0x1ad4b68 && seen_filter.layer_mask==0xc43e && seen_filter.required_bits==0 && seen_filter.storage==0x1ffff);
@@ -125,6 +161,34 @@ void test_verify_and_cast() {
     CHECK(!malformed_count.complete && !malformed_count.hit);fixture_hit_count=1;
     const auto checked=NativeWorldTrace::sphere_query_checked(base,read_mem,fake_cast,fake_construct,world,{0,0,0},{4,0,0},.025);
     CHECK(checked.complete && checked.hit && checked.hit->entity==0xE17717 && checked.hit->fraction==.25);
+    CHECK(seen.source_body==0 && seen.query_id==0); // a legacy cast excludes nothing
+    // The hand clamp's exclusion sweep (physical hands Task 5): the met prop's body record and filter word go to +0x68/+0x14.
+    const NativeCastExclusion prop{0x9000000,0x2a000777,0x00ff0004};
+    const auto excluded_casts=casts;
+    const auto excluded=NativeWorldTrace::sphere_cast(base,read_mem,fake_cast,fake_construct,world,{0,0,0},{4,0,0},.05,kWorldOccluderLayers,kWorldOccluderRequired,&prop);
+    CHECK(excluded && casts==excluded_casts+1 && seen.source_body==0x9000000 && seen.query_id==0x00ff0004 && excluded->entity==0xE17717);
+    CHECK(seen_filter.layer_mask==0xc43e && seen_filter.required_bits==0); // the layer filter is the legacy one
+    const NativeCastExclusion zero_info{0x9000000,0x2a000777,0};
+    CHECK(NativeWorldTrace::sphere_cast(base,read_mem,fake_cast,fake_construct,world,{0,0,0},{4,0,0},.05,kWorldOccluderLayers,kWorldOccluderRequired,&zero_info) &&
+          seen.source_body==0x9000000 && seen.query_id==0);
+    // A record that is no pointer, or a body without an index, casts nothing.
+    for(const auto bad:{NativeCastExclusion{0x9000001,0x2a000777,4},NativeCastExclusion{0,0x2a000777,4},NativeCastExclusion{0x9000000,0xffffff,4}}) {
+        const auto before=casts;
+        CHECK(!NativeWorldTrace::sphere_query_checked(base,read_mem,fake_cast,fake_construct,world,{0,0,0},{4,0,0},.05,kWorldOccluderLayers,kWorldOccluderRequired,nullptr,false,&bad).complete && casts==before);
+    }
+    // An exclusion never combines with the player's source lease.
+    NativeWorldQuerySource lease{};
+    {const auto before=casts;CHECK(!NativeWorldTrace::sphere_query_checked(base,read_mem,fake_cast,fake_construct,world,{0,0,0},{4,0,0},.05,kWorldOccluderLayers,kWorldOccluderRequired,&lease,false,&prop).complete && casts==before);}
+    {   // Final review P3: only the hand clamp ranks planes by body class; every other cast skips the body-record reads
+        const auto before=casts;
+        class_reads=0;
+        const auto plain=NativeWorldTrace::sphere_cast(base,counting_read,fake_cast,fake_construct,world,{0,0,0},{4,0,0},0.05,kWorldOccluderLayers,kWorldOccluderRequired,nullptr,false);
+        const auto plain_reads=class_reads;class_reads=0;
+        const auto ranked=NativeWorldTrace::sphere_cast(base,counting_read,fake_cast,fake_construct,world,{0,0,0},{4,0,0},0.05,kWorldOccluderLayers,kWorldOccluderRequired,nullptr,true);
+        CHECK(casts==before+2 && plain && ranked && plain->entity==ranked->entity && plain->fraction==ranked->fraction);
+        CHECK(plain->body_class==BodyClass::world && ranked->body_class==BodyClass::dynamic);   // unclassified keeps the default
+        CHECK(plain_reads==0 && class_reads>0);
+    }
 }
 int main() {
     test_pure();test_verify_and_cast();

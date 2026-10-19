@@ -78,20 +78,30 @@ public:
         return det>0.f;
     }
     // Render thread (single writer).
-    static void publish(const Target& t) noexcept {
-        if(!target_valid(t)) {++rejected_targets;return;}
+    // Returns whether the target was accepted (the carry diagnostics only count frames something was published for).
+    static bool publish(const Target& t) noexcept {
+        if(!target_valid(t)) {++rejected_targets;return false;}
+        bool accepted{};
         AcquireSRWLockExclusive(&publication_lock_);
         __try {
-            if(!advance_publication_locked())return;
-            data_=t;rf_.store(t.rf,std::memory_order_release);
+            if(!advance_publication_locked())return false;
+            data_=t;rf_.store(t.rf,std::memory_order_release);accepted=true;
         } __finally {ReleaseSRWLockExclusive(&publication_lock_);}
+        return accepted;
     }
-    static void clear() noexcept {
-        layer_restore_.store(true,std::memory_order_release);
+    // reason: 0 unattributed, 1 rf/entity gone, 2 placement refused, 3 no hold this frame, 4 tracking dropout (carry diagnostics; counted per reason).
+    inline static std::array<std::atomic<std::uint64_t>,5> clear_reasons{};
+    // Carry diagnostics C2: anchor() reads back what 0x753c10's rebind block would overwrite (joint, offset, rotation) before it writes again.
+    inline static std::atomic<std::uint64_t> rebind_overwrites{};
+    // Carry diagnostics C6: |entity+0x300 - the post-carry target| at the last bind tick (-1 = none since the last clear).
+    inline static std::atomic<float> bind_entity_err{-2.f};
+    static void clear(unsigned reason=0) noexcept {
+        if(rf_.load(std::memory_order_acquire)) ++clear_reasons[reason<clear_reasons.size()?reason:0];   // only a publication being torn down counts; clear() also runs every no-hold frame
+        layer_settled_.store(0,std::memory_order_release);layer_restore_.store(true,std::memory_order_release);
         NativeHeldPlacement::process_owner().clear();
         AcquireSRWLockExclusive(&publication_lock_);
         __try {
-            (void)advance_publication_locked();data_={};rf_.store(0,std::memory_order_release);
+            (void)advance_publication_locked();data_={};rf_.store(0,std::memory_order_release);last_write_rf_=0;bind_entity_err.store(-2.f,std::memory_order_relaxed);
         } __finally {ReleaseSRWLockExclusive(&publication_lock_);}
     }
     // Render thread: the next set-velocity event of this entity (within 600 ms) carries v (m/s, game world).
@@ -149,13 +159,16 @@ public:
         }
         return shown;
     }
+    // The entity is still the one its handle names in the game's entity table.
+    template<class Read> static bool live_entity(std::uintptr_t base,Read& read,std::uintptr_t entity) {
+        const auto game=rig::value<std::uintptr_t>(read,base+0x39a5290);const auto id=entity?rig::value<std::uint32_t>(read,entity+0xa8):std::nullopt;
+        return game && id && *id!=0x3fff0010 && (*id>>16)<0x3fff && rig::value<std::uintptr_t>(read,*game+0x3130b0+(*id>>16)*8ull)==entity;
+    }
     // Game thread only: draw the held object in the world (render scale 0) so it shows where the hand holds it.
     template<class Read> static bool world_render(std::uintptr_t base,Read& read,std::uintptr_t entity) {
         static const bool verified=code(base+render_scale_rva,render_scale_code);
         if(!verified || !entity) return false;
-        const auto game=rig::value<std::uintptr_t>(read,base+0x39a5290);const auto id=rig::value<std::uint32_t>(read,entity+0xa8);
-        if(!game || !id || *id==0x3fff0010 || (*id>>16)>=0x3fff || rig::value<std::uintptr_t>(read,*game+0x3130b0+(*id>>16)*8ull)!=entity) return false;
-        debris_layer(base,read,entity);
+        if(!live_entity(base,read,entity)) return false;
         const auto scale=rig::value<float>(read,entity+0xc8);if(!scale || *scale==0.f) return true;
         __try {reinterpret_cast<void (__fastcall*)(std::uintptr_t,float)>(base+render_scale_rva)(entity,0.f);} __except(EXCEPTION_EXECUTE_HANDLER) {return false;}
         ++world_renders;return true;
@@ -172,19 +185,55 @@ public:
     inline static bool (*filter_seam_)(std::uintptr_t,std::uint32_t,std::uint32_t){}; // checks only: stands in for the engine call
     inline static std::atomic<std::uint64_t> layers_swapped{},layers_restored{};
     inline static std::atomic<bool> layer_restore_{};
+    // Settled mirror (any thread): the entity whose layer needs nothing more this hold - swapped, or checked and not RIGID_BODY. clear() and
+    // restore_layer() reset it, so a transient clear() makes the publisher ask for the service again even though the render scale is already 0.
+    inline static std::atomic<std::uintptr_t> layer_settled_{};
+    static bool layer_settled(std::uintptr_t entity) noexcept {return entity && layer_settled_.load(std::memory_order_acquire)==entity;}
     template<class Read> static bool debris_layer(std::uintptr_t base,Read& read,std::uintptr_t entity) {
         if(layer_entity_ && layer_entity_!=entity) restore_layer(base,read);
-        if(layer_entity_==entity) return true;
+        if(layer_entity_==entity) {layer_settled_.store(entity,std::memory_order_release);return true;}
         const auto body=throwable_body(base,read,entity);
-        if(!body || (body->second&0x1f)!=layer_rigid_body || !set_filter(base,read,body->first,(body->second&~0x1fu)|layer_debris)) return false;
-        layer_entity_=entity;layer_handle_=body->first;layer_filter_=body->second;++layers_swapped;return true;
+        if(body && (body->second&0x1f)!=layer_rigid_body) {layer_settled_.store(entity,std::memory_order_release);return false;}   // a bottle: nothing to write
+        if(!body || !set_filter(base,read,body->first,(body->second&~0x1fu)|layer_debris)) return false;
+        layer_entity_=entity;layer_handle_=body->first;layer_filter_=body->second;++layers_swapped;layer_settled_.store(entity,std::memory_order_release);return true;
+    }
+    // Game thread, every frame: give the body its own layer back when clear() asked (hold end or a transient clear), then, while an entity is
+    // held, take the DEBRIS layer again. The layer is serviced apart from the render scale, which is 0 after the first request.
+    template<class Read> static void service_hold_layers(std::uintptr_t base,Read& read,std::uintptr_t entity) {
+        if(layer_restore_.exchange(false)) restore_layer(base,read);
+        if(entity && live_entity(base,read,entity)) debris_layer(base,read,entity);
     }
     // Game thread: the hold ended (clear() asks); the body gets its own layer back while it is still the same body.
     template<class Read> static bool restore_layer(std::uintptr_t base,Read& read) {
         if(!layer_entity_) return false;
         const auto body=throwable_body(base,read,layer_entity_);
         const bool ok=body && body->first==layer_handle_ && set_filter(base,read,layer_handle_,layer_filter_);
-        layer_entity_=0;if(ok) ++layers_restored;return ok;
+        layer_entity_=0;layer_settled_.store(0,std::memory_order_release);if(ok) ++layers_restored;return ok;
+    }
+    // Diagnostics, read only: the collision layer (filter word & 0x1f) of the held entity's throwable body; 3 RIGID_BODY, 4 DEBRIS.
+    // The cache keeps the body handle per entity: the component scan runs once per hold, then only the pool record is read.
+    struct LayerCache {std::uintptr_t entity{},component{};std::uint32_t handle{};};   // keyed on entity + body handle (+ the component that owns it)
+    template<class Read> static std::optional<std::uint32_t> held_layer(std::uintptr_t base,Read& read,std::uintptr_t entity) {
+        const auto body=entity?throwable_body(base,read,entity):std::nullopt;
+        if(!body) return std::nullopt;
+        return body->second&0x1fu;
+    }
+    template<class Read> static std::optional<std::uint32_t> held_layer(std::uintptr_t base,Read& read,std::uintptr_t entity,LayerCache& cache) {
+        using namespace rig;
+        if(!entity) return std::nullopt;
+        // Still the same body? The component must still belong to the entity and still hold the cached handle; otherwise rescan.
+        if(cache.entity!=entity || !cache.handle || !cache.component ||
+           value<std::uintptr_t>(read,cache.component+0x10)!=entity || value<std::uint32_t>(read,cache.component+0xf8)!=cache.handle) {
+            cache={};std::uintptr_t component{};const auto body=throwable_body(base,read,entity,&component);
+            if(!body) return std::nullopt;
+            cache={entity,component,body->first};return body->second&0x1fu;
+        }
+        const auto game=value<std::uintptr_t>(read,base+0x39a5290);const auto world=game&&pointer(*game)?value<std::uintptr_t>(read,*game+0x60410):std::nullopt;
+        const auto pool=world&&pointer(*world)?value<std::uintptr_t>(read,*world+0x28):std::nullopt;const auto count=world&&pointer(*world)?value<std::uint32_t>(read,*world+0x30):std::nullopt;
+        const auto index=cache.handle&0xffffff;
+        const auto filter=pool&&count&&pointer(*pool)&&index<*count?value<std::uint32_t>(read,*pool+index*0xb0+0x6c):std::nullopt;
+        if(!filter) {cache={};return std::nullopt;}
+        return *filter&0x1fu;
     }
     // Render/any thread: is this arm entity currently hidden by the engine? (bit0 left, bit1 right)
     template<class Read> static unsigned hidden_arms(std::uintptr_t base,Read& read,std::uintptr_t body) {
@@ -220,7 +269,7 @@ private:
     inline static float throw_v_[3]{};
     inline static std::uintptr_t layer_entity_{};inline static std::uint32_t layer_handle_{},layer_filter_{}; // game thread
     // The throwable rigid body of a held entity: its physics handle and the filter word of its pool record.
-    template<class Read> static std::optional<std::pair<std::uint32_t,std::uint32_t>> throwable_body(std::uintptr_t base,Read& read,std::uintptr_t entity) {
+    template<class Read> static std::optional<std::pair<std::uint32_t,std::uint32_t>> throwable_body(std::uintptr_t base,Read& read,std::uintptr_t entity,std::uintptr_t* component_out=nullptr) {
         using namespace rig;
         const auto game=value<std::uintptr_t>(read,base+0x39a5290);const auto entries=entity?list(read,entity+0x268,256):std::nullopt;
         if(!game || !pointer(*game) || !entries) return {};
@@ -234,6 +283,7 @@ private:
         const auto pool=value<std::uintptr_t>(read,*world+0x28);const auto count=value<std::uint32_t>(read,*world+0x30);const auto index=*handle&0xffffff;
         if(!pool || !pointer(*pool) || !count || *count>0x100000 || index==0xffffff || index>=*count) return {};
         const auto filter=value<std::uint32_t>(read,*pool+index*0xb0+0x6c);if(!filter) return {};
+        if(component_out) *component_out=component;
         return std::pair<std::uint32_t,std::uint32_t>{*handle,*filter};
     }
     template<class Read> static bool set_filter(std::uintptr_t base,Read& read,std::uint32_t handle,std::uint32_t filter) {
@@ -315,6 +365,7 @@ private:
             if(!target_valid(t)) {++rejected_targets;return 0;}
             float cp[3],ca[9];std::memcpy(cp,reinterpret_cast<const void*>(t.entity+0x300),12);std::memcpy(ca,reinterpret_cast<const void*>(t.entity+0x30c),36);
             std::memcpy(pos,t.pos,12);std::memcpy(axis,t.axis,36);
+            bind_entity_err.store(std::sqrt((cp[0]-t.pos[0])*(cp[0]-t.pos[0])+(cp[1]-t.pos[1])*(cp[1]-t.pos[1])+(cp[2]-t.pos[2])*(cp[2]-t.pos[2])),std::memory_order_relaxed);
             bool anchored_here{};
             if(const auto m=*reinterpret_cast<const std::uintptr_t*>(t.rf+0x3c8)) anchored_here=anchor(t,m);
             if(lin && ang && dt>1e-4f && dt<.2f) { // keyframed drive toward the hand (the post-physics call passes dt 1 with lin == ang)
@@ -345,6 +396,15 @@ private:
     // The drawn model follows the bind, not the physics body: HoldObject binds to the player's camera joint ("camera_tag"),
     // pinning the object by the eye. Rebind to the master itself (joint -1: origin = master+0x300 + offset x master axis rows,
     // axis = ToMat3(quat x,y,z,w) x master axis; 0x7506d0, 0x111410, 0xdce0) with the offset/rotation that land on the hand.
+    // Did the bind fields move off what anchor() wrote? Offset beyond 1 mm, or rotation beyond 0.5 degrees (|dot| makes -q the same rotation).
+    static bool rebind_changed(const float o[3],const float q[4],const float last_o[3],const float last_q[4]) noexcept {
+        for(unsigned i=0;i<3;++i) if(!(std::abs(o[i]-last_o[i])<=1e-3f)) return true;
+        double dot=0,a=0,b=0;
+        for(unsigned i=0;i<4;++i) {dot+=double(q[i])*last_q[i];a+=double(q[i])*q[i];b+=double(last_q[i])*last_q[i];}
+        if(!(a>0) || !(b>0) || !std::isfinite(dot)) return true;
+        const double c=std::abs(dot)/std::sqrt(a*b);
+        return !(c>=0.99999048);   // cos(0.25 degrees): a 0.5 degree rotation
+    }
     static bool anchor(const Target& t,std::uintptr_t m) {
         float mo[3],ma[9],off[3],l[9];std::memcpy(mo,reinterpret_cast<const void*>(m+0x300),12);std::memcpy(ma,reinterpret_cast<const void*>(m+0x30c),36);
         for(unsigned i=0;i<3;++i) {
@@ -358,9 +418,19 @@ private:
         if(!(std::abs(norm-1.f)<1e-3f)) return false;
         for(float& c:xyzw) c/=norm;
         auto* rf=reinterpret_cast<char*>(t.rf);
+        // Read-back (diagnostics only, serialized by publication_lock_ with the previous write): did anything change the fields since we wrote them?
+        if(last_write_rf_==t.rf) {
+            // 0x753c10 writes these without our lock: read twice and judge only a stable pair; a recompute that differs by rounding or the -q sign is the same bind.
+            std::int16_t joint{},joint2{};float back_o[3],back_q[4],back_o2[3],back_q2[4];
+            std::memcpy(&joint,rf+0x3d0,2);std::memcpy(back_o,rf+0x3d4,12);std::memcpy(back_q,rf+0x3e0,16);
+            std::memcpy(&joint2,rf+0x3d0,2);std::memcpy(back_o2,rf+0x3d4,12);std::memcpy(back_q2,rf+0x3e0,16);
+            if(joint==joint2 && std::memcmp(back_o,back_o2,12)==0 && std::memcmp(back_q,back_q2,16)==0 && (joint!=-1 || rebind_changed(back_o,back_q,last_off_,last_quat_))) ++rebind_overwrites;
+        }
         *reinterpret_cast<std::int16_t*>(rf+0x3d0)=-1;std::memcpy(rf+0x3d4,off,12);std::memcpy(rf+0x3e0,xyzw,16);
+        std::memcpy(last_off_,off,12);std::memcpy(last_quat_,xyzw,16);last_write_rf_=t.rf;
         ++anchored;return true;
     }
+    inline static std::uintptr_t last_write_rf_{};inline static float last_off_[3]{},last_quat_[4]{};   // the last anchor write (under publication_lock_)
     static void __fastcall arm_part_hook(std::uint32_t* part,char show) {
         ++depth_;
         const unsigned mask=keep_mask_.load(std::memory_order_acquire);const auto at=reinterpret_cast<std::uintptr_t>(part);

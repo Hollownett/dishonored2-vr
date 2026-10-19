@@ -6,6 +6,7 @@
 #include "native_initial_contact.hpp"
 #include "native_regular_contact.hpp"
 #include "weapon_collision.hpp"
+#include "hand_clamp.hpp"
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -107,6 +108,13 @@ inline constexpr std::uint32_t kWorldOccluderRequired=0;
 // Not for our use (AI/entity probes, semantics unknown): 0x2f/0x22f(0x638800), 0x2e/0x800(0x83c860),
 // 0x200/0x40(0x83a510), 0x22b/0x40(0x44bd90), 0x2b/0x40(0x3a2730).
 
+// A body the cast must not report (request +0x68/+0x14, the native source-body exclusion: 129a310 skips a target whose full id
+// equals the source body's). record: the body's pool record (pool + index*0xb0, as NativeWorldQuerySource::body); handle: its full
+// id (record+0x70); filter_info: written to +0x14 (the player's lease writes its controller's query filter info there; a prop has
+// none, so the hand clamp passes the body's own collision filter word, record+0x6c, or 0). UNVERIFIED in game: that walls still
+// report through such a cast (hand clamp status "exclusion").
+struct NativeCastExclusion {std::uintptr_t record{};std::uint32_t handle{},filter_info{};};
+
 struct WorldTraceHit {
     Vec3 point{};            // native contact position on the hit surface
     Vec3 centre{};           // from + (to-from)*fraction: where the swept sphere stops
@@ -119,6 +127,7 @@ struct WorldTraceHit {
     std::uint16_t material{0xffff}; // collector +0x7c: physics material id of the hit surface (docs/native-impact-fx.md)
     std::uint32_t body_handle{0xffffff};
     std::uint32_t shape_key{0xffffffffu};
+    BodyClass body_class{BodyClass::world};   // read from the hit body when the cast answered (HandClamp ranks planes by it)
 };
 struct WorldTraceInitialHit {
     NativeInitialContact contact{};
@@ -183,6 +192,8 @@ inline std::optional<WorldTraceHit> convert_world_hit(const NativeClosestCollect
 // Feeds WeaponCollision::update's query(from,to). Pass the sphere cast radius = palm_radius
 // ONLY if the policy's own palm_radius is set to 0 (otherwise the margin is applied twice).
 inline CollisionHit to_collision_hit(const WorldTraceHit& h) {return {h.point,h.normal,h.fraction,h.entity,h.material};}
+// Feeds HandClamp's palm_hit/tip_hit/chest_hit. Cast with the probe's own radius: the clamp keeps only skin on top.
+inline ClampHit to_clamp_hit(const WorldTraceHit& h) {return {h.point,h.normal,h.entity,h.material,h.initial_overlap,h.normal_valid,h.body_class};}
 
 class NativeWorldTrace {
 public:
@@ -234,6 +245,23 @@ public:
         std::uint32_t count{},handle{},broadphase{},entity_id{};
         std::uint8_t flags{};
     };
+    // What the hit body is, from the body record, validated like inspect_hit_body and native_rigid_body: no body or no entity is the world; the
+    // index must lie below the pool count (world+0x30), the record's own handle (+0x70) must be the cast's, it must have a motion object (+0x40,
+    // under 0x100000), and flags & 7 == 2 (+0x44) makes it a dynamic body whatever its mass. Any other motion type is an entity that does not
+    // move (static or keyframed). A record that does not check out (a freed or reused slot, a short pool, an unreadable word) is entity_static:
+    // it must never rank below a prop on a stale read.
+    static BodyClass body_class_of(Read read,std::uintptr_t world,std::uint32_t handle,std::uintptr_t entity) {
+        const std::uint32_t index=handle&0xffffffu;
+        if(handle==0xffffffffu || index==0xffffffu || !entity) return BodyClass::world;
+        std::uintptr_t pool{};std::uint32_t count{},flags{},record_handle{},motion{};
+        if(!read || !read(world+body_pool_offset,&pool,sizeof(pool)) || !rig::pointer(pool) ||
+           !read(world+0x30,&count,sizeof(count)) || !count || count>0x1000000u || index>=count) return BodyClass::entity_static;
+        const auto record=pool+static_cast<std::uintptr_t>(index)*0xb0u;
+        if(!read(record+0x70,&record_handle,sizeof(record_handle)) || record_handle!=handle ||
+           !read(record+0x40,&motion,sizeof(motion)) || !motion || motion>=0x100000u ||
+           !read(record+0x44,&flags,sizeof(flags))) return BodyClass::entity_static;
+        return (flags&7u)==2u?BodyClass::dynamic:BodyClass::entity_static;
+    }
     template<class Reader> static std::optional<CheckedHitBody> inspect_hit_body(Reader& read,const NativeWorldQuerySource& source,std::uint32_t handle) {
         const std::uint32_t index=handle&0xffffffu;
         if(handle==0xffffffffu || index==0xffffffu)return {};
@@ -275,9 +303,10 @@ public:
     static WorldTraceQueryResult sphere_query_checked(std::uintptr_t base,Read read,Cast cast,Construct construct,
             std::uintptr_t world,Vec3 from,Vec3 to,double radius,
             std::uint32_t layers=kWorldOccluderLayers,std::uint32_t required=kWorldOccluderRequired,const NativeWorldQuerySource* source=nullptr,
-            bool collect_initial=false) {
+            bool collect_initial=false,const NativeCastExclusion* exclude=nullptr,bool classify=true) {   // classify: read the hit body's class (only the hand clamp ranks planes by it)
         if(!base || !read || !cast || !construct || !world || !(radius>0.0005) || radius>1) return {};
         if(collect_initial && !source)return {};
+        if(exclude && (source || !rig::pointer(exclude->record) || (exclude->handle&0xffffffu)==0xffffffu))return {};
         if(source && (source->base!=base || source->world!=world || !native_world_query_source_current(read,*source)))return {};
         std::uint64_t shape_tag_codec{};
         if(!read(world+shape_tag_codec_offset,&shape_tag_codec,8)) return {};
@@ -291,6 +320,7 @@ public:
                                              reinterpret_cast<std::uintptr_t>(shape.data()));
         if(!request) return {};
         if(source) {request->source_body=source->body;request->query_id=source->query_filter_info;}
+        else if(exclude) {request->source_body=exclude->record;request->query_id=exclude->filter_info;}
         auto collector=make_closest_collector(base+collector_vtable_rva);
         std::optional<NativeInitialContactCollector> initial_collector;NativeInitialContactTable initial_table{};
         std::optional<NativeRegularContactCollector> regular_collector;NativeInitialContactTable regular_table{};
@@ -330,6 +360,7 @@ public:
                 const double normal[3]{contact->normal.x,contact->normal.y,contact->normal.z};
                 for(unsigned axis=0;axis<3;++axis) {record.position[axis]=static_cast<float>(point[axis]);record.normal[axis]=static_cast<float>(normal[axis]);}
                 auto hit=convert_world_hit(record,from,to,*entity);if(!hit)return {};
+                if(classify)hit->body_class=body_class_of(read,world,hit->body_handle,hit->entity);
                 hit->static_support=false;result.regular->hits[index]=*hit;
                 if(!result.hit || hit->fraction<result.hit->fraction)result.hit=*hit;
             }
@@ -346,14 +377,15 @@ public:
             entity=*resolved;
         } else entity=entity_of(read,world,collector.body);
         auto hit=convert_world_hit(collector,from,to,entity);
+        if(hit && classify)hit->body_class=body_class_of(read,world,hit->body_handle,hit->entity);
         if(source && hit)hit->static_support=false;
         if(!hit)return {};
         result.hit=std::move(hit);return result;
     }
     static std::optional<WorldTraceHit> sphere_cast(std::uintptr_t base,Read read,Cast cast,Construct construct,
             std::uintptr_t world,Vec3 from,Vec3 to,double radius,
-            std::uint32_t layers=kWorldOccluderLayers,std::uint32_t required=kWorldOccluderRequired) {
-        return sphere_query_checked(base,read,cast,construct,world,from,to,radius,layers,required).hit;
+            std::uint32_t layers=kWorldOccluderLayers,std::uint32_t required=kWorldOccluderRequired,const NativeCastExclusion* exclude=nullptr,bool classify=true) {
+        return sphere_query_checked(base,read,cast,construct,world,from,to,radius,layers,required,nullptr,false,exclude,classify).hit;
     }
 };
 

@@ -157,7 +157,7 @@ public:
     template<class Consume> bool consume(std::uint64_t token,std::uint64_t now,Consume&& consume) {
         struct Frame : CallbackFrame {
             std::decay_t<Consume> action;
-            Frame(std::shared_ptr<State> state,Consume&& c):CallbackFrame(std::move(state)),action(std::forward<Consume>(c)) {}
+            Frame(std::shared_ptr<State> shared,Consume&& c):CallbackFrame(std::move(shared)),action(std::forward<Consume>(c)) {}
         };
         auto* frame=new Frame(state_,std::forward<Consume>(consume));
         const auto invoke=[](void* raw)->unsigned {

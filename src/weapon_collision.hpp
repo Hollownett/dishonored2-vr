@@ -1,6 +1,7 @@
 #pragma once
-// Pure policy: physical held weapon / hand. World queries are an input (see
-// docs/weapon-collision-integration.md); nothing here touches the engine.
+// Pure policy: the physical held weapon's blade. World queries are an input (see
+// docs/weapon-collision-integration.md); nothing here touches the engine. The hand itself stops at surfaces in hand_clamp.hpp
+// (physical hands phase 1): the blade sweeps from the grip the hand clamp drew.
 #include "tracked_pose.hpp"
 #include <cstdint>
 #include <optional>
@@ -12,16 +13,16 @@ struct CollisionHit {Vec3 point{},normal{};double fraction{};std::uintptr_t enti
 struct CollisionEvent {Vec3 point{},normal{};double speed{};std::uintptr_t entity{};bool blade{};unsigned side{};std::uint16_t material{0xffff};};
 struct CollisionHaptic {float amplitude{},seconds{};};
 struct CollisionConfig {
-    double palm_radius=.06;       // hand sphere
     double max_shift=.45;         // clamp never drags the weapon farther than this from the tracked pose
     double release_speed=1.5;     // m/s smooth release once the controller backs out
     double hold_seconds=.12;      // contact hysteresis: no new event/haptic while within it
     double haptic_cooldown=.08;
     double speed_for_full=3.0;    // impact m/s mapped to amplitude 1
+    double palm_radius=.06;       // update_with_palm only: the hand sphere of the pre-hand-clamp path (build/no-hand-clamp)
 };
 struct CollisionResult {
     Vec3 grip{};                  // clamped grip to render
-    Vec3 shift{};                 // grip minus raw grip (apply the same shift to the wrist target for hands)
+    Vec3 shift{};                 // grip minus the grip passed in (a blade pushed straight into a surface)
     std::optional<Vec3> blade_dir;  // blade touching a surface at an angle: rotate the weapon about the grip to this axis
     bool contact{};               // clamped, easing out, or inside hysteresis hold
     std::optional<CollisionEvent> event;   // new contact only
@@ -52,15 +53,27 @@ public:
     explicit WeaponCollision(CollisionConfig c={}) : cfg_(c) {}
     void reset(unsigned side) {if(side<2)sides_[side]=Side{};}
     bool in_contact(unsigned side) const {return side<2&&sides_[side].contact;}
-    // anchor: a point known to be in free space (shoulder/chest); the palm sweep starts there.
-    // dir: unit blade axis; blade_length 0 for a bare hand or ranged weapon.
+    // grip: the drawn grip (the hand clamp's); the blade sweeps from it. dir: unit blade axis; blade_length 0 for a bare hand
+    // (nothing is swept: the shift eases out).
+    // Blade only since physical hands Task 5: the chest-anchored palm sweep is gone (the hand clamp sweeps from the previous drawn hand).
     // blade_offset: segment start relative to the grip (a pistol barrel sits above and behind the fist); blade_radius:
     // the weapon's half thickness, already used as the sweep radius by the query, so a thick barrel stops at its surface.
     // query(Vec3 from,Vec3 to) -> std::optional<CollisionHit> (first solid along the segment).
-    template<class Query> CollisionResult update(unsigned side,double dt,Vec3 anchor,Vec3 grip,Vec3 dir,double blade_length,Query&& query,
+    template<class Query> CollisionResult update(unsigned side,double dt,Vec3 grip,Vec3 dir,double blade_length,Query&& query,
                                                  Vec3 blade_offset={},double blade_radius=0) {
+        return step(side,dt,nullptr,grip,dir,blade_length,query,blade_offset,blade_radius);
+    }
+    // The pre-hand-clamp path, kept for build/no-hand-clamp (a headset A/B): the palm sweeps anchor -> grip first (anchor: a point known
+    // to be in free space, the chest) and stops palm_radius off the first surface near the hand; the blade sweeps from that grip.
+    template<class Query> CollisionResult update_with_palm(unsigned side,double dt,Vec3 anchor,Vec3 grip,Vec3 dir,double blade_length,Query&& query,
+                                                           Vec3 blade_offset={},double blade_radius=0) {
+        return step(side,dt,&anchor,grip,dir,blade_length,query,blade_offset,blade_radius);
+    }
+private:
+    template<class Query> CollisionResult step(unsigned side,double dt,const Vec3* anchor,Vec3 grip,Vec3 dir,double blade_length,Query& query,
+                                               Vec3 blade_offset,double blade_radius) {
         CollisionResult out{};out.grip=grip;
-        if(side>1||!finite(anchor)||!finite(grip)||!finite(dir)||!(dt>0)||!std::isfinite(dt)||!std::isfinite(blade_length)) {if(side<2)reset(side);return out;}
+        if(side>1||(anchor && !finite(*anchor))||!finite(grip)||!finite(dir)||!finite(blade_offset)||!(dt>0)||!std::isfinite(dt)||!std::isfinite(blade_length)) {if(side<2)reset(side);return out;}
         auto& s=sides_[side];
         const Vec3 tip=grip+blade_offset+dir*blade_length;
         Vec3 vgrip{},vtip{};
@@ -68,21 +81,21 @@ public:
         s.prev_grip=grip;s.prev_tip=tip;s.has_prev=true;
         s.since_hit+=dt;s.since_haptic+=dt;
         Vec3 target{};std::optional<CollisionHit> best;bool blade=false;double speed=0;
-        // Palm: sweep anchor->grip; stop one radius off the surface.
-        if(const auto h=query(anchor,grip)) {
+        // Palm (update_with_palm only): sweep anchor->grip; stop one radius off the surface.
+        if(anchor) if(const auto h=query(*anchor,grip)) {
             const double pen=dot(h->point-grip,h->normal)+cfg_.palm_radius;
             // Only a surface at the hand pushes it. A hit far up the sweep means the body anchor is inside geometry
             // (crouching under the real head height): pushing the hand then made the sword jump out of it.
             if(pen>0 && length(h->point-grip)<.25) {target=h->normal*pen;best=h;speed=std::max(0.,-dot(vgrip,h->normal));}
         }
-        // Blade: sweep from the palm-corrected grip to the tip; push out by tip penetration.
+        // Blade: sweep from the (palm-corrected) grip to the tip; push out by tip penetration.
         if(blade_length>0) {
             const Vec3 g=grip+target+blade_offset,t=g+dir*blade_length;
             if(const auto h=query(g,t)) {
                 const double pen=dot(h->point-t,h->normal)+blade_radius;
                 if(pen>0) {
                     best=h;blade=true;speed=std::max(0.,-dot(vtip,h->normal));
-                    // Slide: the hand stays on the controller and the blade pivots about the grip until its tip rests
+                    // Slide: the hand stays where it is drawn and the blade pivots about the grip until its tip rests
                     // 1 cm off the surface. Shifting the whole hand by the tip depth made the sword jump out of the hand.
                     const double c=-(dot(g-h->point,h->normal)-.01-blade_radius)/blade_length;
                     const Vec3 tangent=dir-h->normal*dot(dir,h->normal);const double tl=length(tangent);

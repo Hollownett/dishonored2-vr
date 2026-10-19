@@ -35,6 +35,11 @@ CLANG_ONLY_FLAGS = [
     "-Wno-missing-field-initializers",    # partial aggregate initialisers
     "-Wno-microsoft-cast",                # function<->object pointer cast, accepted by cl
     "/clang:-ffp-contract=off",           # cl does not contract; clang folds a*b-c as fused
+    # cl /W4 raises C4456 (local hides local), C4457 (local hides parameter), C4458 (hides a class member,
+    # inherited included) and C4459 (hides a global); clang-cl /W4 raises none of them. These make them
+    # errors under /WX. -Wshadow-uncaptured-local stays off: cl does not warn about a lambda's own
+    # locals hiding an enclosing local it never captures.
+    "-Wshadow", "-Wshadow-field", "-Wshadow-field-in-constructor",
 ]
 
 # clang diagnostics that cl ALSO raises at /W4 /WX (C4100, C4189/C4101, C4505,
