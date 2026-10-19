@@ -1539,6 +1539,7 @@ void wall_and_door_squeeze_stays_out_of_the_wall() {
         if(i>=2) {in.palm_hit=wall;in.tip_hit=door;}
         o=c.update(0,in);c.note_drawn(0,in.root,o.drawn.position);
         if(i>=3) CHECK(o.drawn.position.x<=1-.12-.03-.005+1e-3);   // the front of the hand is out of the wall, from the first frame both are held
+        if(i>=3) CHECK(o.contact && o.contact->entity==7);   // the wall holds the hand; the door the hand is in is not a contact
     }
     const Vec3 kept=c.keep_out(0,pose_at({}).basis,{1,0,.5},std::nullopt);
     CHECK(kept.x<=1-.12-.03-.005+1e-3);
@@ -1593,6 +1594,53 @@ void world_planes_outrank_a_new_prop_face() {
     for(std::size_t i=0;i<n;++i) CHECK(held[i].entity!=31);
 }
 
+// The tiers' fallback measures its push from where the solve started: a hand 0.245 m outside the wall's hold, in the door's half-space only, is not
+// in contact with the wall (the projection passes had pushed it there before the fallback dropped the door).
+void wall_and_door_fallback_reports_no_false_contact() {
+    HandClamp c;
+    ClampProbe front{{.12,0,0},.03},back{{-.10,0,0},.03};
+    const ClampHit wall{{1,0,.5},{-1,0,0},7,3,false,true},door{{.795,0,.5},{1,0,0},9,3,false,true,BodyClass::entity_static};
+    for(unsigned i=0;i<12;++i) {
+        ClampInput in{};
+        in.now=i*dt;in.epoch=1;in.root=level_frame({0,0,0},{1,0,0});in.target=pose_at({.6,0,.5});in.chest={0,0,.5};
+        in.tip=back;in.tip_enabled=true;in.hand[0]=front;in.hand[1]=back;in.hand_count=2;
+        if(i>=2) {in.palm_hit=wall;in.tip_hit=door;}
+        const auto o=c.update(0,in);c.note_drawn(0,in.root,o.drawn.position);
+        if(i>=3) {CHECK(!o.contact && !o.event && !o.haptic);CHECK(length(o.shift)<1e-9);CHECK(std::abs(o.drawn.position.x-.6)<1e-9);}
+    }
+}
+
+// A plane the drawn hand rests at (touched) is not stale-evicted at the age boundary: it would have been rescued this update, and a prop's new face
+// on a full list took it instead (the hand then went 8.5 cm past the wall).
+void touched_plane_survives_the_age_boundary() {
+    // With 10.5 ms frames the wall's age is 94.5 ms after frame 11 and 105 ms before frame 12's purge: the hand reaches the wall (clearance under 1 cm)
+    // on frame 11, untouched until then, and a prop's fourth face arrives on frame 12.
+    for(unsigned late=12;late<=12;++late) {
+        const double h=.0105;
+        HandClamp c;
+        ClampProbe front{{.12,0,0},.03},back{{-.10,0,0},.03};
+        const ClampHit wall{{1,0,.5},{-1,0,0},7,3,false,true};
+        const auto face=[](double a) {return ClampHit{{.84,3,.5},{-std::sin(a),-std::cos(a),0},31,6,false,true,BodyClass::dynamic};};
+        for(unsigned i=0;i<late+3;++i) {
+            ClampInput in{};
+            const double x=i<3?.5:i<late-1?.5+.3*(i-2)/(late-4.):.84;
+            in.now=i*h;in.epoch=1;in.root=level_frame({0,0,0},{1,0,0});in.target=pose_at({x,0,.5});in.chest={0,0,.5};
+            in.tip=back;in.tip_enabled=true;in.hand[0]=front;in.hand[1]=back;in.hand_count=2;
+            if(i==2) in.palm_hit=wall;                                       // the wall, hit once; the rest of the list is a prop's faces, re-hit in turn
+            else if(i>2 && i<late) in.palm_hit=face(.1+.2*(i%3));
+            else if(i==late) in.palm_hit=face(.9);                            // a fourth face on a full list
+            const auto o=c.update(0,in);c.note_drawn(0,in.root,o.drawn.position);
+            if(i>=late) {
+                std::array<ClampHit,HandClamp::max_held_planes> held{};
+                const auto n=c.held_planes(0,held);
+                bool has_wall=false;for(std::size_t k=0;k<n;++k) has_wall=has_wall || held[k].entity==7;
+                CHECK(has_wall);
+                CHECK(o.drawn.position.x+.12+.03<=1+.01);
+            }
+        }
+    }
+}
+
 int main() {
     // Corner, slide, hold, jump and walk tests run in every posting mode, with the same bounds.
     for(g_mode=0;g_mode<3;++g_mode) {
@@ -1627,6 +1675,8 @@ int main() {
         infeasible_keep_out_retreats();
         wall_and_door_squeeze_stays_out_of_the_wall();
         expired_planes_never_block_a_live_hit();
+        wall_and_door_fallback_reports_no_false_contact();
+        touched_plane_survives_the_age_boundary();
         parallel_squeeze_takes_the_least_violation();
     }
     g_mode=0;

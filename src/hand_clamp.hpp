@@ -349,9 +349,10 @@ private:
                 std::size_t pick=s.plane_count;
                 for(std::size_t i=0;i<s.plane_count;++i) {
                     const auto& q=s.planes[i];
-                    const bool stale=q.age>cfg_.plane_seconds;
-                    if(stale) {if(pick==s.plane_count || !(s.planes[pick].age>cfg_.plane_seconds) || q.age>s.planes[pick].age) pick=i;continue;}
-                    if(pick!=s.plane_count && s.planes[pick].age>cfg_.plane_seconds) continue;
+                    const bool stale=q.age>cfg_.plane_seconds && !q.touched;   // a plane the hand rests at is rescued this update, not stale
+                    const bool picked_stale=pick!=s.plane_count && s.planes[pick].age>cfg_.plane_seconds && !s.planes[pick].touched;
+                    if(stale) {if(pick==s.plane_count || !picked_stale || q.age>s.planes[pick].age) pick=i;continue;}
+                    if(picked_stale) continue;
                     if(q.rank>plane.rank) continue;
                     if(pick==s.plane_count || q.rank<s.planes[pick].rank || (q.rank==s.planes[pick].rank && q.age>s.planes[pick].age)) pick=i;
                 }
@@ -404,6 +405,8 @@ private:
             rows[m++]={plane.normal,dot(plane.normal,plane.point)+reach(s,basis,plane)+cfg_.skin,i,plane.rank,plane.rank==0};
         }
         const Vec3 start=p;
+        std::array<double,plane_capacity> pushed_before{};
+        if(pushed) std::copy(pushed,pushed+plane_capacity,pushed_before.begin());
         const auto worst=[&](Vec3 x,bool statics_only) {
             double w=0;
             for(std::size_t k=0;k<m;++k) if(!statics_only || !rows[k].dynamic) w=std::max(w,rows[k].b-dot(rows[k].n,x));
@@ -463,6 +466,7 @@ private:
             }
             return found;
         };
+        if(pushed) std::copy(pushed_before.begin(),pushed_before.end(),pushed);   // the passes found no place: the answer's pushes are measured from the start
         std::array<bool,plane_capacity> use{};
         for(std::size_t k=0;k<m;++k) use[k]=true;
         Vec3 solution{};
@@ -487,7 +491,7 @@ private:
                 }
             }
         }
-        if(pushed) for(std::size_t k=0;k<m;++k) {const double d=dot(rows[k].n,solution-p);if(d>0) pushed[rows[k].plane]+=d;}
+        if(pushed) for(std::size_t k=0;k<m;++k) {const double d=dot(rows[k].n,solution-start);if(d>0) pushed[rows[k].plane]+=d;}
         p=solution;
         return true;
     }
