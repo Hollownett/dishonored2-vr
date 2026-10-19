@@ -73,7 +73,8 @@ public:
     double weight() const noexcept {return weight_;}
 };
 
-// "d2vr-palm-offsets 1\n", then "<side> <profile> tx ty tz pitch yaw\n". At most 16 entries and 4096 bytes. load() throws on a file
+// "d2vr-palm-offsets 2\n", then "<side> <profile> tx ty tz pitch yaw[ p]\n" (p: provisional, a fit saved before the runtime named the profile, keyed
+// under the suggested Touch profile until it does). Version 1 files (no flag) load as genuine. At most 16 entries and 4096 bytes. load() throws on a file
 // that is unreadable, oversized or malformed and leaves the store as it was; a missing file is a first run, not an error.
 // The hands that are NOT empty, as a bit per side: a drawn weapon, a carried body or a held object. The tilt applies to empty hands only. Carrying
 // and holding come from a state the game publishes with a tick. While that state is not fresh (unknown) both hands count as occupied.
@@ -88,7 +89,7 @@ class PalmOffsetStore {
 public:
     static constexpr std::size_t max_entries=16,max_bytes=4096,max_profile=128;
 private:
-    struct Entry {unsigned side{};std::string profile;PalmOffset value;};
+    struct Entry {unsigned side{};std::string profile;PalmOffset value;bool provisional{};};
     std::vector<Entry> entries_;
 public:
     static bool valid_profile(const std::string& p) {return profile_ok(p);}
@@ -126,7 +127,8 @@ public:
          if(in.bad()) throw std::runtime_error("Cannot read palm offsets");}
         if(text.size()>max_bytes) throw std::runtime_error("Palm offsets file too large");
         std::istringstream lines(text);std::string line;
-        if(!std::getline(lines,line) || line!="d2vr-palm-offsets 1") throw std::runtime_error("Bad palm offsets header");
+        if(!std::getline(lines,line) || (line!="d2vr-palm-offsets 1" && line!="d2vr-palm-offsets 2")) throw std::runtime_error("Bad palm offsets header");
+        const bool flags_allowed=line=="d2vr-palm-offsets 2";
         std::vector<Entry> parsed;
         while(std::getline(lines,line)) {
             if(line.empty()) continue;
@@ -135,17 +137,28 @@ public:
             if(!(fields>>side_token>>e.profile) || (side_token!="0" && side_token!="1")) throw std::runtime_error("Bad palm offset entry");
             e.side=side_token=="1";
             double v[5]{};for(auto& x:v) if(!number(fields,x)) throw std::runtime_error("Bad palm offset number");
-            std::string rest;if(fields>>rest) throw std::runtime_error("Trailing palm offset data");
+            std::string rest;
+            if(fields>>rest) {
+                if(!flags_allowed || rest!="p") throw std::runtime_error("Trailing palm offset data");
+                e.provisional=true;
+                if(fields>>rest) throw std::runtime_error("Trailing palm offset data");
+            }
             e.value={{v[0],v[1],v[2]},v[3],v[4]};
             if(!profile_ok(e.profile) || !palm_offset_valid(e.value)) throw std::runtime_error("Palm offset out of range");
-            for(const auto& p:parsed) if(p.side==e.side && p.profile==e.profile) throw std::runtime_error("Duplicate palm offset");
-            parsed.push_back(std::move(e));
+            bool merged=false;
+            for(auto& p:parsed) if(p.side==e.side && p.profile==e.profile) {
+                // a provisional entry never shadows a genuine one; two of a kind are corrupt
+                if(p.provisional==e.provisional) throw std::runtime_error("Duplicate palm offset");
+                if(p.provisional) p=e;
+                merged=true;break;
+            }
+            if(!merged) parsed.push_back(std::move(e));
         }
         entries_=std::move(parsed);
     }
     void save(const std::filesystem::path& file) const {
-        std::ostringstream text;text.precision(17);text<<"d2vr-palm-offsets 1\n";
-        for(const auto& e:entries_) text<<e.side<<' '<<e.profile<<' '<<e.value.translation.x<<' '<<e.value.translation.y<<' '<<e.value.translation.z<<' '<<e.value.pitch_deg<<' '<<e.value.yaw_deg<<'\n';
+        std::ostringstream text;text.precision(17);text<<"d2vr-palm-offsets 2\n";
+        for(const auto& e:entries_) text<<e.side<<' '<<e.profile<<' '<<e.value.translation.x<<' '<<e.value.translation.y<<' '<<e.value.translation.z<<' '<<e.value.pitch_deg<<' '<<e.value.yaw_deg<<(e.provisional?" p":"")<<'\n';
         const auto body=text.str();
         if(body.size()>max_bytes) throw std::runtime_error("Palm offsets would exceed the file limit"); // the loader would reject it
         auto temporary=file;temporary+=L".tmp";
@@ -164,72 +177,62 @@ public:
         if(const auto* e=find(side,profile)) return {e->value,true};
         return {default_palm_offset(side),false};
     }
-    void set(unsigned side,const std::string& profile,const PalmOffset& value) {
+    // true: the store changed. A provisional value never replaces a genuine entry; a genuine value replaces anything.
+    bool set(unsigned side,const std::string& profile,const PalmOffset& value,bool provisional=false) {
         side&=1u;
         if(!profile_ok(profile)) throw std::invalid_argument("Invalid interaction profile");
         const auto clamped=clamp_palm_offset(value);
-        if(auto* e=find(side,profile)) {e->value=clamped;return;}
+        if(auto* e=find(side,profile)) {
+            if(provisional && !e->provisional) return false;
+            e->value=clamped;e->provisional=provisional;return true;
+        }
         if(entries_.size()>=max_entries) entries_.erase(entries_.begin()); // the oldest entry makes room
-        entries_.push_back({side,profile,clamped});
+        entries_.push_back({side,profile,clamped,provisional});return true;
+    }
+    bool provisional(unsigned side,const std::string& profile) const {const auto* e=find(side&1u,profile);return e && e->provisional;}
+    // The runtime named this hand's profile: its provisional entry (kept under the Touch key) moves there. A genuine entry already under the
+    // real profile wins and the provisional fit is dropped. true: the store changed.
+    bool rekey_provisional(unsigned side,const std::string& profile) {
+        side&=1u;
+        if(!profile_ok(profile)) return false;
+        auto* e=find(side,palm_default_profile);
+        if(!e || !e->provisional) return false;
+        if(profile==palm_default_profile) {e->provisional=false;return true;}
+        const auto value=e->value;erase(side,palm_default_profile);
+        if(!find(side,profile)) set(side,profile,value);
+        return true;
     }
 };
 
-// The store plus the interaction profile each hand is bound to. A fit confirmed before the runtime has named the profile is held pending
-// and keyed under the real profile when it arrives (never stranded under the suggested fallback); a runtime that cannot be asked
-// (profile_query_available=false) treats the suggested profile as authoritative. Not thread-safe: the owner locks.
+// The store plus the interaction profile each hand is bound to. A fit confirmed before the runtime has named the profile is saved at once as a
+// provisional Touch entry and re-keyed when the profile arrives; a runtime that cannot be asked (profile_query_available=false) treats the
+// suggested profile as authoritative. Not thread-safe: the owner locks.
 class PalmCalibration {
-    PalmOffsetStore store_;std::array<std::string,2> profile_{};std::array<std::optional<PalmOffset>,2> pending_{};
-    std::array<double,2> pending_since_{};std::array<bool,2> fallback_written_{};std::array<std::optional<PalmOffset>,2> fallback_prior_{};
+    PalmOffsetStore store_;std::array<std::string,2> profile_{};
     std::string key(unsigned side) const {return profile_[side&1u].empty()?std::string(palm_default_profile):profile_[side&1u];}
 public:
-    static constexpr double pending_seconds=5;
     bool profile_query_available=true;
     PalmOffsetStore& store() {return store_;}
     const PalmOffsetStore& store() const {return store_;}
     std::string profile(unsigned side) const {return key(side);}
     PalmOffset get(unsigned side,bool* saved=nullptr) const {
-        side&=1u;
-        if(pending_[side]) {if(saved) *saved=false;return *pending_[side];}
-        const auto stored=store_.get(side,key(side));
+        const auto stored=store_.get(side&1u,key(side));
         if(saved) *saved=stored.second;
         return stored.first;
     }
-    // true: the store changed and should be written. now: seconds on any steady clock (a fit waits pending_seconds for a profile).
-    bool confirm(unsigned side,const PalmOffset& value,double now=0) {
+    // A confirmed fit is stored at once. With no profile known yet (and a runtime that can name one) it goes under the Touch key flagged
+    // provisional, and re-keys when the profile arrives. true: the store changed and should be written.
+    bool confirm(unsigned side,const PalmOffset& value) {
         side&=1u;
-        if(profile_[side].empty() && profile_query_available) {pending_[side]=clamp_palm_offset(value);pending_since_[side]=now;return false;}
-        pending_[side].reset();store_.set(side,key(side),value);return true;
+        const bool provisional=profile_[side].empty() && profile_query_available;
+        return store_.set(side,key(side),value,provisional);
     }
-    // A fit that has waited pending_seconds without a profile is written under the suggested fallback (and re-keyed if a profile arrives later).
-    // true: the store changed and should be written.
-    bool tick(double now) {
-        bool changed=false;
-        for(unsigned side=0;side<2;++side) {
-            if(!pending_[side] || !profile_[side].empty() || now-pending_since_[side]<=pending_seconds) continue;
-            if(!fallback_written_[side]) {
-                const auto prior=store_.get(side,palm_default_profile);
-                fallback_prior_[side]=prior.second?std::optional<PalmOffset>(prior.first):std::nullopt;
-                fallback_written_[side]=true;
-            }
-            const auto before=store_.get(side,palm_default_profile);
-            store_.set(side,palm_default_profile,*pending_[side]);
-            const auto after=store_.get(side,palm_default_profile);
-            changed=changed || !before.second || before.first.pitch_deg!=after.first.pitch_deg || before.first.yaw_deg!=after.first.yaw_deg ||
-                before.first.translation.x!=after.first.translation.x || before.first.translation.y!=after.first.translation.y || before.first.translation.z!=after.first.translation.z;
-        }
-        return changed;
-    }
-    // A profile reported by the runtime. true: a deferred fit was keyed under it and the store should be written.
+    // A profile reported by the runtime. true: provisional entries moved and the store should be written.
     bool set_profile(unsigned side,const std::string& profile) {
         side&=1u;
         if(!PalmOffsetStore::valid_profile(profile)) return false;
         profile_[side]=profile;
-        if(!pending_[side]) return false;
-        if(fallback_written_[side] && profile!=palm_default_profile) { // undo the provisional fallback save
-            if(fallback_prior_[side]) store_.set(side,palm_default_profile,*fallback_prior_[side]);else store_.erase(side,palm_default_profile);
-        }
-        fallback_written_[side]=false;fallback_prior_[side].reset();
-        store_.set(side,profile,*pending_[side]);pending_[side].reset();return true;
+        return store_.rekey_provisional(side,profile);
     }
 };
 

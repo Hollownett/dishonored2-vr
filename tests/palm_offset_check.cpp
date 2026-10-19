@@ -104,7 +104,7 @@ int main() {
         }
         {   // corrupt_file_keeps_defaults
             const auto file=temp_file("d2vr-palm-corrupt.txt");
-            require(throws_on_load(file,"d2vr-palm-offsets 2\n"),"bad header accepted");
+            require(throws_on_load(file,"d2vr-palm-offsets 3\n"),"bad header accepted");
             require(throws_on_load(file,""),"empty file accepted");
             require(throws_on_load(file,"d2vr-palm-offsets 1\n1 /interaction_profiles/oculus/touch_controller 0.09 0 0 15 0\n"),"out-of-bounds translation accepted");
             require(throws_on_load(file,"d2vr-palm-offsets 1\n1 /interaction_profiles/oculus/touch_controller 0 0 0 31 0\n"),"out-of-bounds tilt accepted");
@@ -231,50 +231,70 @@ int main() {
             require(!latch.active(5),"a successful save must clear the error");
             latch.raise(5);require(latch.active(5) && !latch.active(6),"a second error clears the same way");
         }
-        {   // a pending fit waits 5 s for a profile, then saves under the Touch fallback and is re-keyed when the profile arrives
-            const char* index="/interaction_profiles/valve/index_controller";const PalmOffset mine{{.01,.02,.03},7,-8};
-            PalmCalibration cal;cal.profile_query_available=true;
-            require(!cal.confirm(1,mine,10.0),"deferred");
-            require(!cal.tick(14.9) && !cal.store().get(1,palm_default_profile).second,"saved before 5 s");
-            require(cal.tick(15.1) && cal.store().get(1,palm_default_profile).second,"not saved under the fallback after 5 s");
-            require(!cal.tick(16.0),"the fallback save must happen once");
-            require(cal.set_profile(1,index),"late profile did not re-key");
-            require(cal.store().get(1,index).second && near(cal.store().get(1,index).first.pitch_deg,7),"fit not re-keyed under the real profile");
-            require(!cal.store().get(1,palm_default_profile).second,"the fallback entry must be removed on re-key");
-            // a genuine earlier Touch entry is restored, not lost
-            PalmCalibration prior;prior.profile_query_available=true;const PalmOffset old{{.04,0,0},2,2};
-            prior.store().set(1,palm_default_profile,old);prior.confirm(1,mine,0.0);prior.tick(6.0);
-            require(near(prior.store().get(1,palm_default_profile).first.pitch_deg,7),"fallback save did not store the fit");
-            prior.set_profile(1,index);
-            require(near(prior.store().get(1,palm_default_profile).first.translation.x,.04,1e-12) && prior.store().get(1,palm_default_profile).second,"an earlier Touch entry was not restored");
-            // a profile that arrives in time never writes the fallback
-            PalmCalibration quick;quick.profile_query_available=true;quick.confirm(0,mine,0.0);
-            require(quick.set_profile(0,index) && !quick.tick(60.0) && !quick.store().get(0,palm_default_profile).second,"fallback written despite an in-time profile");
-        }
-        {   // profiles: optional runtime query, deferred save, non-Touch keys
+        {   // profiles: optional runtime query, provisional entries, non-Touch keys
             const char* index="/interaction_profiles/valve/index_controller";
             PalmCalibration cal;cal.profile_query_available=true;
             require(cal.profile(0)==palm_default_profile,"fallback profile wrong");
             const PalmOffset mine{{.01,.02,.03},7,-8};
-            require(!cal.confirm(1,mine),"a fit before the runtime named a profile must not save");
-            bool saved=true;auto got=cal.get(1,&saved);
-            require(!saved && near(got.translation.x,.01),"a deferred fit must still be used (unsaved)");
-            require(!cal.store().get(1,palm_default_profile).second,"a deferred fit was stranded under the Touch fallback");
+            require(cal.confirm(1,mine),"a confirmed fit must be saved at once, even before the runtime names a profile");
+            bool saved=false;auto got=cal.get(1,&saved);
+            require(saved && near(got.translation.x,.01),"the fit must be in use at once");
+            require(cal.store().get(1,palm_default_profile).second && cal.store().provisional(1,palm_default_profile),"an unknown-profile fit must be stored provisionally under Touch");
             require(!cal.set_profile(1,"bogus profile"),"an invalid runtime profile was accepted");
-            require(cal.set_profile(1,index),"the first real profile did not commit the deferred fit");
-            require(cal.store().get(1,index).second && near(cal.store().get(1,index).first.pitch_deg,7),"deferred fit not re-keyed to the real profile");
-            require(!cal.store().get(1,palm_default_profile).second,"Touch key must stay empty");
+            require(cal.set_profile(1,index),"the first real profile did not re-key the provisional fit");
+            require(cal.store().get(1,index).second && near(cal.store().get(1,index).first.pitch_deg,7) && !cal.store().provisional(1,index),"provisional fit not re-keyed to a genuine entry");
+            require(!cal.store().get(1,palm_default_profile).second,"Touch key must be empty after the re-key");
             got=cal.get(1,&saved);require(saved && near(got.yaw_deg,-8),"re-keyed fit not used");
             require(near(cal.get(0,&saved).translation.y,.03) && !saved,"the other hand must stay default");
             require(!cal.set_profile(1,index),"the same profile must not re-save");
-            // a non-Touch controller: a fit is keyed under it, and switching to Touch finds the default again
-            require(cal.confirm(0,mine) == false,"left profile still unknown: deferred");
+            require(cal.confirm(0,mine),"left fit not saved");
             cal.set_profile(0,index);require(cal.store().get(0,index).second,"left fit lost");
             cal.set_profile(1,palm_default_profile);cal.get(1,&saved);
             require(cal.profile(1)==palm_default_profile && !saved,"profile switch must fall back to the default for the new profile");
-            // a runtime without the query functions: the suggested profile is authoritative, so the fit saves at once
             PalmCalibration blind;blind.profile_query_available=false;
-            require(blind.confirm(0,mine) && blind.store().get(0,palm_default_profile).second,"no query functions: the fit must save under the fallback");
+            require(blind.confirm(0,mine) && blind.store().get(0,palm_default_profile).second && !blind.store().provisional(0,palm_default_profile),"no query functions: the fit must be genuine under the fallback");
+        }
+        {   // (a) stop within 5 s with no profile ever reported: the fit is persisted (provisional flag included); (c) re-key on arrival
+            const auto file=temp_file("d2vr-palm-provisional.txt");const PalmOffset mine{{.01,.02,.03},7,-8};
+            PalmCalibration cal;cal.profile_query_available=true;cal.confirm(1,mine);cal.store().save(file);
+            PalmCalibration next;next.profile_query_available=true;next.store().load(file);
+            bool saved=false;const auto got=next.get(1,&saved);
+            require(saved && near(got.pitch_deg,7,1e-12) && next.store().provisional(1,palm_default_profile),"a fit with no profile was not persisted as provisional");
+            require(next.set_profile(1,"/interaction_profiles/valve/index_controller") && next.store().get(1,"/interaction_profiles/valve/index_controller").second && !next.store().get(1,palm_default_profile).second,"earlier-session provisional entry not re-keyed");
+            PalmCalibration touch;touch.store().load(file);touch.set_profile(1,palm_default_profile);
+            require(touch.store().get(1,palm_default_profile).second && !touch.store().provisional(1,palm_default_profile),"Touch arrival must make the entry genuine");
+            std::error_code ec;std::filesystem::remove(file,ec);
+        }
+        {   // (b) a provisional entry never overwrites, restores over, or shadows a genuine Touch calibration
+            const char* index="/interaction_profiles/valve/index_controller";
+            const PalmOffset genuine{{.04,0,0},2,2},fit{{.01,.02,.03},7,-8};
+            PalmCalibration cal;cal.profile_query_available=true;cal.store().set(1,palm_default_profile,genuine);
+            cal.confirm(1,fit);
+            require(near(cal.store().get(1,palm_default_profile).first.translation.x,.04,1e-12) && !cal.store().provisional(1,palm_default_profile),"a provisional fit overwrote a genuine Touch entry");
+            cal.set_profile(1,index);
+            require(near(cal.store().get(1,palm_default_profile).first.translation.x,.04,1e-12) && !cal.store().provisional(1,palm_default_profile),"re-key disturbed the genuine Touch entry");
+            require(!cal.store().get(1,index).second,"a dropped provisional fit must not appear under the real profile");
+            for(const bool genuine_first:{true,false}) {
+                const auto file=temp_file("d2vr-palm-shadow.txt");
+                const std::string g="1 /interaction_profiles/oculus/touch_controller 0.04 0 0 2 2\n",p="1 /interaction_profiles/oculus/touch_controller 0.01 0.02 0.03 7 -8 p\n";
+                write_raw(file,"d2vr-palm-offsets 2\n"+(genuine_first?g+p:p+g));
+                PalmOffsetStore store;store.load(file);
+                require(near(store.get(1,palm_default_profile).first.translation.x,.04,1e-12) && !store.provisional(1,palm_default_profile),"a provisional entry shadowed a genuine one on load");
+                std::error_code ec;std::filesystem::remove(file,ec);
+            }
+            PalmCalibration later;later.profile_query_available=true;later.confirm(0,fit);
+            later.set_profile(0,palm_default_profile);later.confirm(0,genuine);
+            require(near(later.store().get(0,palm_default_profile).first.translation.x,.04,1e-12) && !later.store().provisional(0,palm_default_profile),"genuine confirm did not replace");
+        }
+        {   // (d) the old format (header 1, no flag) still loads, as genuine; a flag in a header-1 file is corrupt
+            const auto file=temp_file("d2vr-palm-old.txt");
+            write_raw(file,"d2vr-palm-offsets 1\n1 /interaction_profiles/oculus/touch_controller 0.01 -0.02 0.03 7 -8\n");
+            PalmOffsetStore store;store.load(file);
+            require(store.get(1,palm_default_profile).second && !store.provisional(1,palm_default_profile) && near(store.get(1,palm_default_profile).first.pitch_deg,7),"old-format file did not load as genuine");
+            require(throws_on_load(file,"d2vr-palm-offsets 1\n1 /interaction_profiles/oculus/touch_controller 0 0 0 15 0 p\n"),"a provisional flag in a version-1 file accepted");
+            require(throws_on_load(file,"d2vr-palm-offsets 2\n1 /interaction_profiles/oculus/touch_controller 0 0 0 15 0 q\n"),"an unknown flag accepted");
+            require(throws_on_load(file,"d2vr-palm-offsets 2\n1 /interaction_profiles/oculus/touch_controller 0 0 0 15 0 p\n1 /interaction_profiles/oculus/touch_controller 0 0 0 15 0 p\n"),"two provisional duplicates accepted");
+            std::error_code ec;std::filesystem::remove(file,ec);
         }
         {   // save enforces the loader's cap, and the async writer writes the latest snapshot and never blocks the caller
             const double tiny=-1.2345678901234567e-05; // the longest printed form of a double

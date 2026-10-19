@@ -687,17 +687,16 @@ private:
             checked(xrCreateActionSpace(session_,&space,&hand_spaces_[kind][side]),"Create controller space");
         }
     }
-    static double palm_clock() {return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();}
     PalmOffset palm_offset_stored(unsigned side) const {
         std::lock_guard<std::mutex> lock(palm_mutex_);
         return palm_.get(side);
     }
-    // A confirmed fit is used at once (in memory); the file is written by the worker thread from a snapshot. A fit confirmed before the runtime named
-    // the profile waits for it (never stranded under the fallback). Only the in-memory update runs under palm_mutex_.
+    // A confirmed fit is used at once and written by the worker thread from a snapshot (provisionally under Touch while no profile is known).
+    // Only the in-memory update runs under palm_mutex_.
     void confirm_palm_offset(unsigned side,const PalmOffset& value) noexcept {
         try {
             std::optional<PalmOffsetStore> snapshot;
-            {std::lock_guard<std::mutex> lock(palm_mutex_);if(palm_.confirm(side,value,palm_clock())) snapshot=palm_.store();}
+            {std::lock_guard<std::mutex> lock(palm_mutex_);if(palm_.confirm(side,value)) snapshot=palm_.store();}
             if(snapshot) PalmSaver::process().submit(std::move(*snapshot));
         } catch(...) {palm_error_.raise(PalmSaver::process().successes());}
     }
@@ -707,11 +706,6 @@ private:
             const auto now=GetTickCount64();
             if(now<profile_refresh_tick_) return;
             profile_refresh_tick_=now+1000;
-            {   // a fit that waited 5 s for a profile is saved under the fallback (and re-keyed if the profile arrives later)
-                std::optional<PalmOffsetStore> snapshot;
-                {std::lock_guard<std::mutex> lock(palm_mutex_);if(palm_.tick(palm_clock())) snapshot=palm_.store();}
-                if(snapshot) PalmSaver::process().submit(std::move(*snapshot));
-            }
             if(!xrGetCurrentInteractionProfile || !xrPathToString) return;
             for(unsigned side=0;side<2;++side) {
                 XrInteractionProfileState state{};state.type=XR_TYPE_INTERACTION_PROFILE_STATE;
