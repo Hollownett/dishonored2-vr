@@ -142,6 +142,13 @@ int main() {
     }
     {
         Fixture state;assert(d2vr::NativeHeldObjectCheck::anchor(state.target,master));assert(!state.driven_right());
+        // Task 9: the anchor records how far its quaternion was from unit before normalising (finite, tiny for a proper rotation).
+        const auto dev=Held::anchor_quat_dev_max.load();assert(std::isfinite(dev) && dev>=0.f && dev<1e-3f);
+    }
+    {   // Task 9: clear(reason) counts per reason (out of range = 0) and still asks for the layer restore
+        auto& n=Held::clear_reasons;const auto b0=n[0].load(),b2=n[2].load();
+        Held::layer_restore_.store(false);Held::clear(2);assert(n[2].load()==b2+1 && Held::layer_restore_.load());
+        Held::clear(99);Held::clear();assert(n[0].load()==b0+2);
     }
     for(unsigned mode=0;mode<10;++mode) {
         Fixture state;
@@ -293,11 +300,13 @@ int main() {
         memory.put(pool+2*0xb0+0x6c,std::uint32_t{(0x20u<<5)|3u});
         static std::vector<std::array<std::uint32_t,2>> written;written.clear();
         Held::filter_seam_=[](std::uintptr_t game,std::uint32_t h,std::uint32_t f) {assert(game==game_address);written.push_back({h,f});return true;};
+        assert(Held::held_layer(base_address,reader,entity)==3u && written.empty()); // Task 9: read only, filter word & 0x1f
         assert(Held::debris_layer(base_address,reader,entity) && Held::debris_layer(base_address,reader,entity));
         assert(written.size()==1 && written[0][0]==handle && written[0][1]==((0x20u<<5)|4u));
         assert(Held::restore_layer(base_address,reader) && written.size()==2 && written[1][1]==((0x20u<<5)|3u) && !Held::restore_layer(base_address,reader));
         memory.put(pool+2*0xb0+0x6c,std::uint32_t{(0x20u<<5)|4u});
         assert(!Held::debris_layer(base_address,reader,entity) && written.size()==2);
+        assert(Held::held_layer(base_address,reader,entity)==4u && written.size()==2 && !Held::held_layer(base_address,reader,0));
         std::printf("held layer: tank filter 0x%x -> 0x%x for the hold, restored; bottle (DEBRIS) untouched\n",written[1][1],written[0][1]);
         Held::filter_seam_=nullptr;
     }

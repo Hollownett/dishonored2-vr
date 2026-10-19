@@ -560,6 +560,12 @@ cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT /Ithird_party\minhook\include
 if not "%errorlevel%"=="0" exit /b 1
 build\native_left_weapon_socket_check.exe
 if not "%errorlevel%"=="0" exit /b 1
+cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT /Isrc tests\carry_diagnostics_check.cpp /Fo:build\carry_diagnostics_check.obj /Fe:build\carry_diagnostics_check.exe
+if errorlevel 1 goto build_failed
+if not errorlevel 0 goto build_failed
+build\carry_diagnostics_check.exe
+if errorlevel 1 goto build_failed
+if not errorlevel 0 goto build_failed
 for %%T in (combat_target_memory_check native_left_weapon_socket_owner_check native_held_placement_check native_held_object_check) do (
     cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT /Ithird_party\minhook\include tests\%%T.cpp /Fo:build\%%T.obj /Fe:build\%%T.exe
     if errorlevel 1 goto build_failed

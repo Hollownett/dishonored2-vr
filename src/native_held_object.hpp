@@ -86,7 +86,11 @@ public:
             data_=t;rf_.store(t.rf,std::memory_order_release);
         } __finally {ReleaseSRWLockExclusive(&publication_lock_);}
     }
-    static void clear() noexcept {
+    // reason: 0 unattributed, 1 rf/entity gone, 2 placement refused, 3 no hold this frame (carry diagnostics; counted per reason).
+    inline static std::array<std::atomic<std::uint64_t>,4> clear_reasons{};
+    inline static std::atomic<float> anchor_quat_dev_max{}; // max |norm-1| of the anchor's quaternion before it is normalised (reader exchanges to 0)
+    static void clear(unsigned reason=0) noexcept {
+        ++clear_reasons[reason<clear_reasons.size()?reason:0];
         layer_restore_.store(true,std::memory_order_release);
         NativeHeldPlacement::process_owner().clear();
         AcquireSRWLockExclusive(&publication_lock_);
@@ -185,6 +189,12 @@ public:
         const auto body=throwable_body(base,read,layer_entity_);
         const bool ok=body && body->first==layer_handle_ && set_filter(base,read,layer_handle_,layer_filter_);
         layer_entity_=0;if(ok) ++layers_restored;return ok;
+    }
+    // Diagnostics, read only: the collision layer (filter word & 0x1f) of the held entity's throwable body; 3 RIGID_BODY, 4 DEBRIS.
+    template<class Read> static std::optional<std::uint32_t> held_layer(std::uintptr_t base,Read& read,std::uintptr_t entity) {
+        const auto body=entity?throwable_body(base,read,entity):std::nullopt;
+        if(!body) return std::nullopt;
+        return body->second&0x1fu;
     }
     // Render/any thread: is this arm entity currently hidden by the engine? (bit0 left, bit1 right)
     template<class Read> static unsigned hidden_arms(std::uintptr_t base,Read& read,std::uintptr_t body) {
@@ -355,6 +365,7 @@ private:
         const auto q=dvr::grab::quat_from_rot(l);float xyzw[4]{q.x,q.y,q.z,q.w};
         const float norm=std::sqrt(xyzw[0]*xyzw[0]+xyzw[1]*xyzw[1]+xyzw[2]*xyzw[2]+xyzw[3]*xyzw[3]);
         for(const float c:xyzw) if(!std::isfinite(c)) return false;
+        for(float seen=anchor_quat_dev_max.load(std::memory_order_relaxed),dev=std::abs(norm-1.f);dev>seen && !anchor_quat_dev_max.compare_exchange_weak(seen,dev,std::memory_order_relaxed););
         if(!(std::abs(norm-1.f)<1e-3f)) return false;
         for(float& c:xyzw) c/=norm;
         auto* rf=reinterpret_cast<char*>(t.rf);
