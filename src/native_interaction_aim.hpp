@@ -649,6 +649,15 @@ public:
         if(side>1 || slot>=weapon_slots) return {};std::lock_guard<std::mutex> guard(weapon_mutex_);
         const auto t=weapon_tick_[side][slot];return t && now>=t && now-t<=100?weapon_hit_[side][slot]:std::nullopt;
     }
+    // Diagnostics: did the palm, tip or wall-tip sweep of this side hit the entity? One lock for all three slots.
+    static bool weapon_hits_entity(unsigned side,std::uintptr_t entity,std::uint64_t now) {
+        if(side>1 || !entity) return false;std::lock_guard<std::mutex> guard(weapon_mutex_);
+        for(const unsigned slot:{0u,tip_slot,wall_tip_slot}) {
+            const auto t=weapon_tick_[side][slot];
+            if(t && now>=t && now-t<=100 && weapon_hit_[side][slot] && weapon_hit_[side][slot]->entity==entity) return true;
+        }
+        return false;
+    }
     // Test hook: request one world trace (metres along the view) and collect its text result later.
     static void request_trace(double distance) {std::lock_guard<std::mutex> guard(trace_mutex_);trace_distance_=distance;}
     // Render thread: a blade contact with a live NPC (one request per NPC per swing; the caller rate-limits).

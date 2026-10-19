@@ -347,8 +347,8 @@ static std::uint64_t hand_hold_generation{};static std::uint32_t hand_hold_spawn
 static d2vr::HeldPlacementSession held_placement_session;
 // Holding hand's world velocity (finite difference of the published grip) and the held entity, for the release throw.
 static std::array<double,3> held_hand_velocity{};static std::uintptr_t held_entity{};static std::array<double,3> held_offset{};
-// Carry diagnostics (Task 9): counters always on (atomics); the per-frame trace only when build/carry-trace exists (render thread, capped).
-static d2vr::CarryDiagnostics carry_diagnostics;static std::ofstream carry_trace_csv;static unsigned carry_trace_rows{};
+// Carry diagnostics (Task 9): counters always on (atomics); the per-frame trace only when build/carry-trace exists (a writer thread, capped, flushed every second and at teardown).
+static d2vr::CarryDiagnostics carry_diagnostics;static d2vr::CarryTraceWriter carry_trace;
 static bool held_object_installed{};static std::array<std::atomic<float>,13> held_debug{}; // published target xyz, entity origin xyz, render scale, grip palm xyz, mesh bounds centre xyz
 static std::atomic<unsigned> held_throws{},held_drops{},arm_hidden_bits{};
 static std::atomic<bool> hands_native{false};
@@ -2962,24 +2962,37 @@ static void publish_held_object(unsigned side,const d2vr::WorldTrackedPose& grip
         std::lock_guard<std::mutex> lock(hand_state_mutex);held_entity=0;return;
     }
     held_placement_serial.store(t.placement_serial,std::memory_order_release);
-    d2vr::NativeHeldObject::publish(t);
+    const bool accepted=d2vr::NativeHeldObject::publish(t);
     // HoldObject draws the object as a view-model pinned to the camera; render it in the world, where the hand holds it.
     if(float fp{};read_self(*e+0xc8,&fp,4) && fp!=0.f) d2vr::NativeInteractionAim::request_held_world(*e);
-    // Carry diagnostics: observation only (reads and counters); a failure here never reaches the XR path.
+    // Carry diagnostics: observation only (read_self reads are range-checked and SEH-guarded; the catch is for the C++ side). Rejected publishes
+    // bound nothing this frame, so they are counted apart and not noted.
     try {
-        const auto now=GetTickCount64();d2vr::CarryFrame cf;cf.tick=now;cf.entity=*e;
-        if(const auto layer=d2vr::NativeHeldObject::held_layer(image_base,read_self,*e)) cf.layer=*layer;
-        float scale{};if(read_self(*e+0xc8,&scale,4)) cf.render_scale=scale;
-        cf.residual_age_ms=drawn_palm_residual[side&1u].age_ms(now);
-        float quat[4]{};if(read_self(*rf+0x3e0,quat,sizeof quat)) cf.rf_quat_norm=std::sqrt(quat[0]*quat[0]+quat[1]*quat[1]+quat[2]*quat[2]+quat[3]*quat[3]);
-        std::int16_t joint{};if(read_self(*rf+0x3d0,&joint,sizeof joint)) cf.rf_joint=joint;
-        cf.anchor_quat_dev=d2vr::NativeHeldObject::anchor_quat_dev_max.exchange(0.f);
-        for(const unsigned slot:{0u,d2vr::NativeInteractionAim::tip_slot,d2vr::NativeInteractionAim::wall_tip_slot})
-            if(const auto hit=d2vr::NativeInteractionAim::weapon_hit(side,slot,now);hit && hit->entity==*e) cf.clamp_hit_held=true;
-        carry_diagnostics.note(cf);
-        carry_diagnostics.layers(d2vr::NativeHeldObject::layers_swapped.load(),d2vr::NativeHeldObject::layers_restored.load());
-        if(carry_trace_csv.is_open() && carry_trace_rows<d2vr::CarryDiagnostics::csv_max_rows) {
-            ++carry_trace_rows;carry_trace_csv<<d2vr::CarryDiagnostics::csv_row(cf)<<'\n';
+        if(!accepted) carry_diagnostics.rejected();
+        else {
+            static d2vr::NativeHeldObject::LayerCache layer_cache;
+            const auto now=GetTickCount64();d2vr::CarryFrame cf;cf.tick=now;cf.entity=*e;cf.hold_serial=acquisition;
+            if(const auto layer=d2vr::NativeHeldObject::held_layer(image_base,read_self,*e,layer_cache)) cf.layer=*layer;
+            float scale{};if(read_self(*e+0xc8,&scale,4)) cf.render_scale=scale;
+            cf.residual_age_ms=drawn_palm_residual[side&1u].age_ms(now);
+            // rf+0x3e0 twice: the mod's anchor() and 0x753c10 write it from other threads, so only two agreeing reads count as the engine's value.
+            for(float* norm:{&cf.rf_quat_norm,&cf.rf_quat_norm2}) {
+                float quat[4]{};if(read_self(*rf+0x3e0,quat,sizeof quat)) *norm=std::sqrt(quat[0]*quat[0]+quat[1]*quat[1]+quat[2]*quat[2]+quat[3]*quat[3]);
+            }
+            std::int16_t joint{};if(read_self(*rf+0x3d0,&joint,sizeof joint)) cf.rf_joint=joint;
+            std::array<float,3> at{};if(read_self(*e+0x300,at.data(),12)) cf.entity_err=std::sqrt((at[0]-t.pos[0])*(at[0]-t.pos[0])+(at[1]-t.pos[1])*(at[1]-t.pos[1])+(at[2]-t.pos[2])*(at[2]-t.pos[2]));
+            if(t.master_valid) if(const auto master=value<std::uintptr_t>(read,*rf+0x3c8);master && pointer(*master)) {
+                std::array<float,3> mo{};if(read_self(*master+0x300,mo.data(),12))
+                    cf.master_drift=std::sqrt((mo[0]-t.master_pos[0])*(mo[0]-t.master_pos[0])+(mo[1]-t.master_pos[1])*(mo[1]-t.master_pos[1])+(mo[2]-t.master_pos[2])*(mo[2]-t.master_pos[2]));
+            }
+            cf.clamp_hit_held=d2vr::NativeInteractionAim::weapon_hits_entity(side,*e,now);
+            cf.swaps=d2vr::NativeHeldObject::layers_swapped.load();cf.restores=d2vr::NativeHeldObject::layers_restored.load();
+            const auto recorded=carry_diagnostics.note(cf);
+            d2vr::CarryEngineCounters counters;counters.swaps=cf.swaps;counters.restores=cf.restores;
+            counters.rebind_overwrites=d2vr::NativeHeldObject::rebind_overwrites.load();counters.anchored=d2vr::NativeHeldObject::anchored.load();
+            for(unsigned r=0;r<counters.raw_clears.size();++r) counters.raw_clears[r]=d2vr::NativeHeldObject::clear_reasons[r].load();
+            carry_diagnostics.engine(counters);
+            carry_trace.push(recorded);   // formatted and written by the trace thread, not here
         }
     } catch(...) {}
     {std::array<float,3> at{};float fp{};read_self(*e+0x300,at.data(),12);read_self(*e+0xc8,&fp,4);
@@ -4634,7 +4647,7 @@ void prepare_head_view(void* view) noexcept {
                     {std::lock_guard<std::mutex> l(hand_state_mutex);if(hand_holding_object && hand_state_tick && GetTickCount64()-hand_state_tick<=300) state=hand_hold_state;side=hand_hold_side&1u;acquisition=hand_hold_generation;}
                     // The object goes in the hand the player sees (drawn_palm_frame: the solved palm, sim v379: 25 cm short of the grip).
                     if(state && ((hands.hands>>side)&1u)) publish_held_object(side,hands.grips[side],state,hands.epoch,hands.tick,hands.reference_epoch,acquisition);
-                    else {held_placement_session.clear();carry_diagnostics.clear_seen(3);d2vr::NativeHeldObject::clear(3);}}
+                    else {held_placement_session.clear();const unsigned why=state?4u:3u;carry_diagnostics.clear_seen(why);d2vr::NativeHeldObject::clear(why);}}
                 t.epoch=hands.epoch^(hands.reference_epoch<<32);
                 t.tick=hands.tick;t.tracking_revision=tracked_stamp.revision;t.tracked_hands=hands.hands;
                 if(synchronized_observer.enabled() || native_interaction_aim.anatomical_shadow_enabled() || native_interaction_aim.full_hand_collision())for(unsigned side=0;side<2;++side)if((hands.hands>>side)&1u) {
@@ -8005,10 +8018,8 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
             d2vr::NativeMenuEntry::owned_movie_patch=&d2vr::patch_vr_native_art_movie;
             d2vr::NativeMenuEntry::install(image_base);
         }
-        carry_trace_rows=0;if(carry_trace_csv.is_open())carry_trace_csv.close();
-        if(fs::exists(root/L"build"/L"carry-trace")) {
-            try {carry_trace_csv.open(output/L"native-carry-trace.csv",std::ios::trunc);if(carry_trace_csv.is_open())carry_trace_csv<<d2vr::CarryDiagnostics::csv_header()<<'\n';} catch(...) {}
-        }
+        carry_trace.stop();
+        if(fs::exists(root/L"build"/L"carry-trace")) carry_trace.start(output/L"native-carry-trace.csv");
         if(fs::exists(root/L"build"/L"upscale-probe")) {std::lock_guard<std::mutex> l(upscale_probe_mutex);upscale_probe_rows=0;upscale_probe_csv.open(output/L"upscale-probe.csv",std::ios::trunc);upscale_probe_on=true;}
         d2vr::GlyphSwap::observer=&ps_bind_observer;
         d2vr::PostTonemapPass::pass_end=[](int eye,ID3D11DeviceContext* c) {try {fsr_taa.post_tonemap_end(eye,c);} catch(...) {}};
@@ -8219,7 +8230,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
         const bool world_ui_disabled=d2vr::NativeWorldUi::disable();world_ui_installed=false;
         if(!world_ui_disabled) throw std::runtime_error("Native world UI scope did not restore or drain");
         restore_hud_scale();remove_glyph_hook();d2vr::GlyphSwap::disable();d2vr::SamplerLodBias::disable();
-        d2vr::NativeHeldObject::disable();held_object_installed=false;d2vr::NativeCallTrace::disable();d2vr::NativeSimInvulnerable::disable();d2vr::NativeSwarmKillGuard::disable();
+        carry_trace.stop();d2vr::NativeHeldObject::disable();held_object_installed=false;d2vr::NativeCallTrace::disable();d2vr::NativeSimInvulnerable::disable();d2vr::NativeSwarmKillGuard::disable();
         const bool audio_disabled=native_audio_listener.disable();
         const bool left_aim_disabled=native_left_aim.disable() && native_crosshair.disable() && native_fire_seam_trace.disable() && native_shot_aim.disable() &&
             native_hud_census.disable() && native_marker_probe.disable() && d2vr::NativeHudChildDraw::disable() && d2vr::NativeWristHud::disable();
@@ -8612,7 +8623,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
         bool arm_restore_deferred=false;
         const bool arm_upload_disabled=disable_arm_upload_hook(&arm_restore_deferred);
         restore_hud_scale();remove_glyph_hook();d2vr::GlyphSwap::disable();d2vr::SamplerLodBias::disable();
-        d2vr::NativeHeldObject::disable();held_object_installed=false;d2vr::NativeCallTrace::disable();d2vr::NativeSimInvulnerable::disable();d2vr::NativeSwarmKillGuard::disable();
+        carry_trace.stop();d2vr::NativeHeldObject::disable();held_object_installed=false;d2vr::NativeCallTrace::disable();d2vr::NativeSimInvulnerable::disable();d2vr::NativeSwarmKillGuard::disable();
         const bool audio_disabled=native_audio_listener.disable();
         const bool left_aim_disabled=native_left_aim.disable() && native_crosshair.disable() && native_fire_seam_trace.disable() && native_shot_aim.disable() &&
             native_hud_census.disable() && native_marker_probe.disable() && d2vr::NativeHudChildDraw::disable() && d2vr::NativeWristHud::disable();

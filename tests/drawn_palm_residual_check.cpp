@@ -18,7 +18,8 @@ int main() {
 
     assert(cache.age_ms(1010)==-1);
     cache.note(sample,context,1010);near(cache.frame(pose({4,2,3}),1010).position,{3.8,2,3});
-    assert(cache.age_ms(1010)==10 && cache.age_ms(1600)==600 && cache.age_ms(900)==0);
+    assert(cache.age_ms(1010)==10 && cache.age_ms(1490)==490 && cache.age_ms(900)==-1);
+    assert(cache.age_ms(1491)==-1 && cache.age_ms(1600)==-1); // past 500 ms frame() no longer applies it: no age reported
 
     near(cache.frame(pose({4,2,3},true),1010).position,{3.8,2,3});
 

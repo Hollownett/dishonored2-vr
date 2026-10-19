@@ -142,13 +142,24 @@ int main() {
     }
     {
         Fixture state;assert(d2vr::NativeHeldObjectCheck::anchor(state.target,master));assert(!state.driven_right());
-        // Task 9: the anchor records how far its quaternion was from unit before normalising (finite, tiny for a proper rotation).
-        const auto dev=Held::anchor_quat_dev_max.load();assert(std::isfinite(dev) && dev>=0.f && dev<1e-3f);
+        // Task 9 C2: the anchor reads back what it last wrote before it writes again; an engine rebind in between is counted.
+        const auto base=Held::rebind_overwrites.load();
+        Fixture again;assert(d2vr::NativeHeldObjectCheck::anchor(again.target,master) && Held::rebind_overwrites.load()==base);   // first write: nothing to compare
+        assert(d2vr::NativeHeldObjectCheck::anchor(again.target,master) && Held::rebind_overwrites.load()==base);               // untouched since: healthy
+        put(rf+0x3d4,std::array<float,3>{9,9,9});                                                                                 // 0x753c10 recomputes the offset
+        assert(d2vr::NativeHeldObjectCheck::anchor(again.target,master) && Held::rebind_overwrites.load()==base+1);
+        assert(d2vr::NativeHeldObjectCheck::anchor(again.target,master) && Held::rebind_overwrites.load()==base+1);               // our write restored it
+        put(rf+0x3e0,std::array<float,4>{0,0,.6f,.8f});
+        assert(d2vr::NativeHeldObjectCheck::anchor(again.target,master) && Held::rebind_overwrites.load()==base+2);              // rotation too
+        *reinterpret_cast<std::int16_t*>(rf+0x3d0)=5;                                                                             // joint rebound
+        assert(d2vr::NativeHeldObjectCheck::anchor(again.target,master) && Held::rebind_overwrites.load()==base+3);
+        Held::clear();   // a new hold forgets the last write
+        put(rf+0x3d4,std::array<float,3>{8,8,8});assert(d2vr::NativeHeldObjectCheck::anchor(again.target,master) && Held::rebind_overwrites.load()==base+3);
     }
     {   // Task 9: clear(reason) counts per reason (out of range = 0) and still asks for the layer restore
-        auto& n=Held::clear_reasons;const auto b0=n[0].load(),b2=n[2].load();
+        auto& n=Held::clear_reasons;const auto b0=n[0].load(),b2=n[2].load(),b4=n[4].load();
         Held::layer_restore_.store(false);Held::clear(2);assert(n[2].load()==b2+1 && Held::layer_restore_.load());
-        Held::clear(99);Held::clear();assert(n[0].load()==b0+2);
+        Held::clear(99);Held::clear();assert(n[0].load()==b0+2);Held::clear(4);assert(n[4].load()==b4+1);
     }
     for(unsigned mode=0;mode<10;++mode) {
         Fixture state;
@@ -301,6 +312,13 @@ int main() {
         static std::vector<std::array<std::uint32_t,2>> written;written.clear();
         Held::filter_seam_=[](std::uintptr_t game,std::uint32_t h,std::uint32_t f) {assert(game==game_address);written.push_back({h,f});return true;};
         assert(Held::held_layer(base_address,reader,entity)==3u && written.empty()); // Task 9: read only, filter word & 0x1f
+        Held::LayerCache cache;assert(Held::held_layer(base_address,reader,entity,cache)==3u && cache.entity==entity && cache.handle==handle);
+        memory.put(pool+2*0xb0+0x6c,std::uint32_t{(0x20u<<5)|4u});   // the cached handle is re-read without the component scan
+        memory.put(entity+0x268,r::List{held_components,0,0});
+        assert(Held::held_layer(base_address,reader,entity,cache)==4u);
+        memory.put(entity+0x268,r::List{held_components,2,2u<<8});memory.put(pool+2*0xb0+0x6c,std::uint32_t{(0x20u<<5)|3u});
+        assert(!Held::held_layer(base_address,reader,0,cache) && Held::held_layer(base_address,reader,entity,cache)==3u);
+        Held::LayerCache other{entity+8,0x1000009};assert(Held::held_layer(base_address,reader,entity,other)==3u && other.handle==handle); // another entity rescans
         assert(Held::debris_layer(base_address,reader,entity) && Held::debris_layer(base_address,reader,entity));
         assert(written.size()==1 && written[0][0]==handle && written[0][1]==((0x20u<<5)|4u));
         assert(Held::restore_layer(base_address,reader) && written.size()==2 && written[1][1]==((0x20u<<5)|3u) && !Held::restore_layer(base_address,reader));
@@ -322,6 +340,10 @@ int main() {
         assert(Held::diagnostic_target(kept) && kept.pos[0]==1.f && kept.axis[8]==1.f);
         state.place();assert(output_position[0]==1.f && state.driven_right());
         assert(Held::target_valid(state.target) && Held::rejected_targets.load()==before+6);
+        {   // Task 9: publish reports acceptance, so the diagnostics only count frames something was bound for
+            auto refused=state.target;refused.axis[8]=-1.f;assert(!Held::publish(refused) && Held::rejected_targets.load()==before+7);
+            assert(Held::publish(state.target) && Held::rejected_targets.load()==before+7);
+        }
     }
     {   // anchor_rejects_bad_master: bypasses publish. quat_from_rot always normalises (identity on a NaN norm), so the reachable
         // refusal is the |off|<4 bound on the offset computed from a NaN / huge master pose; the rf+0x3d0..0x3f0 bytes stay put.

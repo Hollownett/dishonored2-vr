@@ -78,24 +78,28 @@ public:
         return det>0.f;
     }
     // Render thread (single writer).
-    static void publish(const Target& t) noexcept {
-        if(!target_valid(t)) {++rejected_targets;return;}
+    // Returns whether the target was accepted (the carry diagnostics only count frames something was published for).
+    static bool publish(const Target& t) noexcept {
+        if(!target_valid(t)) {++rejected_targets;return false;}
+        bool accepted{};
         AcquireSRWLockExclusive(&publication_lock_);
         __try {
-            if(!advance_publication_locked())return;
-            data_=t;rf_.store(t.rf,std::memory_order_release);
+            if(!advance_publication_locked())return false;
+            data_=t;rf_.store(t.rf,std::memory_order_release);accepted=true;
         } __finally {ReleaseSRWLockExclusive(&publication_lock_);}
+        return accepted;
     }
-    // reason: 0 unattributed, 1 rf/entity gone, 2 placement refused, 3 no hold this frame (carry diagnostics; counted per reason).
-    inline static std::array<std::atomic<std::uint64_t>,4> clear_reasons{};
-    inline static std::atomic<float> anchor_quat_dev_max{}; // max |norm-1| of the anchor's quaternion before it is normalised (reader exchanges to 0)
+    // reason: 0 unattributed, 1 rf/entity gone, 2 placement refused, 3 no hold this frame, 4 tracking dropout (carry diagnostics; counted per reason).
+    inline static std::array<std::atomic<std::uint64_t>,5> clear_reasons{};
+    // Carry diagnostics C2: anchor() reads back what 0x753c10's rebind block would overwrite (joint, offset, rotation) before it writes again.
+    inline static std::atomic<std::uint64_t> rebind_overwrites{};
     static void clear(unsigned reason=0) noexcept {
         ++clear_reasons[reason<clear_reasons.size()?reason:0];
         layer_restore_.store(true,std::memory_order_release);
         NativeHeldPlacement::process_owner().clear();
         AcquireSRWLockExclusive(&publication_lock_);
         __try {
-            (void)advance_publication_locked();data_={};rf_.store(0,std::memory_order_release);
+            (void)advance_publication_locked();data_={};rf_.store(0,std::memory_order_release);last_write_rf_=0;
         } __finally {ReleaseSRWLockExclusive(&publication_lock_);}
     }
     // Render thread: the next set-velocity event of this entity (within 600 ms) carries v (m/s, game world).
@@ -191,10 +195,27 @@ public:
         layer_entity_=0;if(ok) ++layers_restored;return ok;
     }
     // Diagnostics, read only: the collision layer (filter word & 0x1f) of the held entity's throwable body; 3 RIGID_BODY, 4 DEBRIS.
+    // The cache keeps the body handle per entity: the component scan runs once per hold, then only the pool record is read.
+    struct LayerCache {std::uintptr_t entity{};std::uint32_t handle{};};
     template<class Read> static std::optional<std::uint32_t> held_layer(std::uintptr_t base,Read& read,std::uintptr_t entity) {
         const auto body=entity?throwable_body(base,read,entity):std::nullopt;
         if(!body) return std::nullopt;
         return body->second&0x1fu;
+    }
+    template<class Read> static std::optional<std::uint32_t> held_layer(std::uintptr_t base,Read& read,std::uintptr_t entity,LayerCache& cache) {
+        using namespace rig;
+        if(!entity) return std::nullopt;
+        if(cache.entity!=entity || !cache.handle) {
+            cache={};const auto body=throwable_body(base,read,entity);
+            if(!body) return std::nullopt;
+            cache={entity,body->first};return body->second&0x1fu;
+        }
+        const auto game=value<std::uintptr_t>(read,base+0x39a5290);const auto world=game&&pointer(*game)?value<std::uintptr_t>(read,*game+0x60410):std::nullopt;
+        const auto pool=world&&pointer(*world)?value<std::uintptr_t>(read,*world+0x28):std::nullopt;const auto count=world&&pointer(*world)?value<std::uint32_t>(read,*world+0x30):std::nullopt;
+        const auto index=cache.handle&0xffffff;
+        const auto filter=pool&&count&&pointer(*pool)&&index<*count?value<std::uint32_t>(read,*pool+index*0xb0+0x6c):std::nullopt;
+        if(!filter) {cache={};return std::nullopt;}
+        return *filter&0x1fu;
     }
     // Render/any thread: is this arm entity currently hidden by the engine? (bit0 left, bit1 right)
     template<class Read> static unsigned hidden_arms(std::uintptr_t base,Read& read,std::uintptr_t body) {
@@ -365,13 +386,20 @@ private:
         const auto q=dvr::grab::quat_from_rot(l);float xyzw[4]{q.x,q.y,q.z,q.w};
         const float norm=std::sqrt(xyzw[0]*xyzw[0]+xyzw[1]*xyzw[1]+xyzw[2]*xyzw[2]+xyzw[3]*xyzw[3]);
         for(const float c:xyzw) if(!std::isfinite(c)) return false;
-        for(float seen=anchor_quat_dev_max.load(std::memory_order_relaxed),dev=std::abs(norm-1.f);dev>seen && !anchor_quat_dev_max.compare_exchange_weak(seen,dev,std::memory_order_relaxed););
         if(!(std::abs(norm-1.f)<1e-3f)) return false;
         for(float& c:xyzw) c/=norm;
         auto* rf=reinterpret_cast<char*>(t.rf);
+        // Read-back (diagnostics only, serialized by publication_lock_ with the previous write): did anything change the fields since we wrote them?
+        if(last_write_rf_==t.rf) {
+            std::int16_t joint{};float o[3],q[4];
+            std::memcpy(&joint,rf+0x3d0,2);std::memcpy(o,rf+0x3d4,12);std::memcpy(q,rf+0x3e0,16);
+            if(joint!=-1 || std::memcmp(o,last_off_,12)!=0 || std::memcmp(q,last_quat_,16)!=0) ++rebind_overwrites;
+        }
         *reinterpret_cast<std::int16_t*>(rf+0x3d0)=-1;std::memcpy(rf+0x3d4,off,12);std::memcpy(rf+0x3e0,xyzw,16);
+        std::memcpy(last_off_,off,12);std::memcpy(last_quat_,xyzw,16);last_write_rf_=t.rf;
         ++anchored;return true;
     }
+    inline static std::uintptr_t last_write_rf_{};inline static float last_off_[3]{},last_quat_[4]{};   // the last anchor write (under publication_lock_)
     static void __fastcall arm_part_hook(std::uint32_t* part,char show) {
         ++depth_;
         const unsigned mask=keep_mask_.load(std::memory_order_acquire);const auto at=reinterpret_cast<std::uintptr_t>(part);

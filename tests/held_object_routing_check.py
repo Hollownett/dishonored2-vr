@@ -18,7 +18,7 @@ for condition in ('held_object_installed','full_body_requested','tracked_arms_re
                   'avatar_pose_gate.load()','!authored_camera','game_logic_mask()==2','XR_SESSION_STATE_FOCUSED','XR_SUCCESS'):
     assert condition in context_block
 assert context<publication<source.index('availability.placement_serial=held_placement_serial.load(',publication)
-assert 'else {held_placement_session.clear();carry_diagnostics.clear_seen(3);d2vr::NativeHeldObject::clear(3);}'in source[publication:publication+400]
+assert 'else {held_placement_session.clear();const unsigned why=state?4u:3u;carry_diagnostics.clear_seen(why);d2vr::NativeHeldObject::clear(why);}'in source[publication:publication+400]
 producer=source[source.index('static void publish_held_object('):source.index('// HoldObject draws the object as a view-model')]
 for condition in ('NativeHeldPlacement::qualify(image_base,&read_self,*carry,side,pose_epoch,pose_tick,t.tick)',
                   'proof->entity==*e','proof->rf==*rf','proof->carry.hold_state()==state','placement.publish(*proof,t.tick)',
@@ -63,7 +63,7 @@ clear=held[held.index('static void clear(unsigned reason=0) noexcept'):held.inde
 assert clear.count('NativeHeldPlacement::process_owner().clear()')==1
 assert clear.index('process_owner().clear()')<clear.index('AcquireSRWLockExclusive(')<clear.index('advance_publication_locked()')<clear.index('data_={};rf_.store(0,std::memory_order_release)')<clear.index('__finally {ReleaseSRWLockExclusive(')
 assert 'current('not in clear and 'completed('not in clear
-publish=held[held.index('static void publish('):held.index('static void clear(unsigned reason=0) noexcept')]
+publish=held[held.index('static bool publish('):held.index('static void clear(unsigned reason=0) noexcept')]
 assert publish.index('if(!target_valid(t))')<publish.index('++rejected_targets')<publish.index('AcquireSRWLockExclusive(')
 assert 'static bool target_valid(const Target& t) noexcept'in held and 'std::isfinite'in held and 'det>0.f'in held
 assert publish.index('AcquireSRWLockExclusive(')<publish.index('advance_publication_locked()')<publish.index('data_=t')<publish.index('rf_.store(t.rf')<publish.index('__finally {ReleaseSRWLockExclusive(')
@@ -82,20 +82,28 @@ assert 'NativeHeldPlacement::process_owner().current_driven_right('in socket
 assert 'availability.placement_serial,availability.epoch,carry,now' in compact(socket)
 print('PASS held-object production source routing only: typed49/50 placement/release, serialized target revision/freshness and same-hold acknowledgement; not compiled/runtime/headset proof')
 
-# Carry diagnostics (Task 9): observation only, named clear reasons, one CarryFrame per published frame.
+# Carry diagnostics (Task 9, fix round 1): observation only, named clear reasons, one CarryFrame per ACCEPTED publish, trace off the present thread.
 begin=source.index('static void publish_held_object(')
 full=source[begin:source.index('\n}\n',begin)]
 assert 'NativeHeldObject::clear(1)'in full and 'carry_diagnostics.clear_seen(1)'in full
+assert 'const bool accepted=d2vr::NativeHeldObject::publish(t)' in full
 assert full.index('NativeHeldObject::publish(t)')<full.index('carry_diagnostics.note(')
-note=full[full.index('try {\n        const auto now=GetTickCount64();d2vr::CarryFrame cf'):]
+note=full[full.index('try {\n        if(!accepted) carry_diagnostics.rejected();'):]
+assert 'else {' in note and note.index('carry_diagnostics.rejected()')<note.index('carry_diagnostics.note(')
 assert 'catch(...) {}' in note
-for condition in ('NativeHeldObject::held_layer(','residual_age_ms=','.age_ms(','anchor_quat_dev_max.exchange','rf+0x3e0','rf+0x3d0','weapon_hit(','csv_max_rows'):
-    assert condition in note
+for condition in ('NativeHeldObject::held_layer(image_base,read_self,*e,layer_cache)','cf.hold_serial=acquisition','residual_age_ms=','.age_ms(','rf+0x3e0','rf+0x3d0','rf_quat_norm2',
+                  'cf.entity_err','cf.master_drift','weapon_hits_entity(','rebind_overwrites','carry_trace.push(recorded)'):
+    assert condition in note,condition
+assert note.count('*rf+0x3e0')==1 and 'for(float* norm:{&cf.rf_quat_norm,&cf.rf_quat_norm2})' in note   # read twice
+assert '<<' not in note and 'csv_row' not in note and 'ofstream' not in note   # no formatting or file I/O on the present thread
 assert '__try' not in note and 'write_self' not in note and 'NativeHeldObject::clear(' not in note
 assert '\\"carry\\":' in source and 'carry_diagnostics.json()' in source
-assert 'native-carry-trace.csv' in source and 'L"carry-trace"' in source and 'CarryDiagnostics::csv_header()' in source
-assert 'anchor_quat_dev_max' in anchor and anchor.index('anchor_quat_dev_max')<anchor.index('std::abs(norm-1.f)<1e-3f')
+assert 'native-carry-trace.csv' in source and 'L"carry-trace"' in source and 'carry_trace.start(' in source
+assert source.count('carry_trace.stop();d2vr::NativeHeldObject::disable()')==2   # flushed at teardown
+assert 'anchor_quat_dev' not in source and 'anchor_quat_dev' not in held
 assert 'static std::optional<std::uint32_t> held_layer(' in held
-layer=held[held.index('static std::optional<std::uint32_t> held_layer('):held.index('// Render/any thread: is this arm entity currently hidden')]
+layer=held[held.index('struct LayerCache'):held.index('// Render/any thread: is this arm entity currently hidden')]
 assert 'set_filter' not in layer and 'write' not in layer
 assert 'clear_reasons' in clear and 'layer_restore_.store(true' in clear
+assert 'static bool publish(const Target& t) noexcept' in held and 'rebind_overwrites' in anchor
+assert anchor.index('rebind_overwrites')<anchor.index('*reinterpret_cast<std::int16_t*>(rf+0x3d0)=-1')   # read back before the write
