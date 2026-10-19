@@ -303,7 +303,7 @@ public:
     static WorldTraceQueryResult sphere_query_checked(std::uintptr_t base,Read read,Cast cast,Construct construct,
             std::uintptr_t world,Vec3 from,Vec3 to,double radius,
             std::uint32_t layers=kWorldOccluderLayers,std::uint32_t required=kWorldOccluderRequired,const NativeWorldQuerySource* source=nullptr,
-            bool collect_initial=false,const NativeCastExclusion* exclude=nullptr) {
+            bool collect_initial=false,const NativeCastExclusion* exclude=nullptr,bool classify=true) {   // classify: read the hit body's class (only the hand clamp ranks planes by it)
         if(!base || !read || !cast || !construct || !world || !(radius>0.0005) || radius>1) return {};
         if(collect_initial && !source)return {};
         if(exclude && (source || !rig::pointer(exclude->record) || (exclude->handle&0xffffffu)==0xffffffu))return {};
@@ -360,7 +360,7 @@ public:
                 const double normal[3]{contact->normal.x,contact->normal.y,contact->normal.z};
                 for(unsigned axis=0;axis<3;++axis) {record.position[axis]=static_cast<float>(point[axis]);record.normal[axis]=static_cast<float>(normal[axis]);}
                 auto hit=convert_world_hit(record,from,to,*entity);if(!hit)return {};
-                hit->body_class=body_class_of(read,world,hit->body_handle,hit->entity);
+                if(classify)hit->body_class=body_class_of(read,world,hit->body_handle,hit->entity);
                 hit->static_support=false;result.regular->hits[index]=*hit;
                 if(!result.hit || hit->fraction<result.hit->fraction)result.hit=*hit;
             }
@@ -377,15 +377,15 @@ public:
             entity=*resolved;
         } else entity=entity_of(read,world,collector.body);
         auto hit=convert_world_hit(collector,from,to,entity);
-        if(hit)hit->body_class=body_class_of(read,world,hit->body_handle,hit->entity);
+        if(hit && classify)hit->body_class=body_class_of(read,world,hit->body_handle,hit->entity);
         if(source && hit)hit->static_support=false;
         if(!hit)return {};
         result.hit=std::move(hit);return result;
     }
     static std::optional<WorldTraceHit> sphere_cast(std::uintptr_t base,Read read,Cast cast,Construct construct,
             std::uintptr_t world,Vec3 from,Vec3 to,double radius,
-            std::uint32_t layers=kWorldOccluderLayers,std::uint32_t required=kWorldOccluderRequired,const NativeCastExclusion* exclude=nullptr) {
-        return sphere_query_checked(base,read,cast,construct,world,from,to,radius,layers,required,nullptr,false,exclude).hit;
+            std::uint32_t layers=kWorldOccluderLayers,std::uint32_t required=kWorldOccluderRequired,const NativeCastExclusion* exclude=nullptr,bool classify=true) {
+        return sphere_query_checked(base,read,cast,construct,world,from,to,radius,layers,required,nullptr,false,exclude,classify).hit;
     }
 };
 

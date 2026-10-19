@@ -478,7 +478,7 @@ class NativeInteractionAim {
                         const auto cast=[&](const NativeCastExclusion* exclusion) {
                             return NativeWorldTrace::sphere_cast(self->base_,self->read_,reinterpret_cast<NativeWorldTrace::Cast>(self->base_+NativeWorldTrace::cast_rva),
                                 reinterpret_cast<NativeWorldTrace::Construct>(self->base_+NativeWorldTrace::sphere_ctor_rva),*world,seg.from,seg.to,seg.radius,
-                                kWorldOccluderLayers,kWorldOccluderRequired,exclusion);
+                                kWorldOccluderLayers,kWorldOccluderRequired,exclusion,clamp_slot(slot));   // only the clamp's slots are ranked by body class
                         };
                         if(seg.exclude) {
                             ++clamp_exclude_casts_;

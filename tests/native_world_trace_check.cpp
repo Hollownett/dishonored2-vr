@@ -10,6 +10,9 @@ std::map<std::uintptr_t,std::vector<unsigned char>> memory;
 bool corrupt_cast{},fail_construct{};
 float fixture_fraction=.25f;
 unsigned fixture_hit_count=1;
+static std::size_t class_reads;   // reads of a body record's flag word (+0x44): only body_class_of makes them
+bool read_mem(std::uintptr_t at,void* out,std::size_t size);
+bool counting_read(std::uintptr_t at,void* out,std::size_t size) {if(at==0x6000000ull+0x123456ull*0xb0+0x44) ++class_reads;return read_mem(at,out,size);}
 bool read_mem(std::uintptr_t at,void* out,std::size_t size) {
     for(const auto& [start,bytes]:memory) if(at>=start && at+size<=start+bytes.size()) {std::memcpy(out,bytes.data()+(at-start),size);return true;}
     return false;
@@ -176,6 +179,16 @@ void test_verify_and_cast() {
     // An exclusion never combines with the player's source lease.
     NativeWorldQuerySource lease{};
     {const auto before=casts;CHECK(!NativeWorldTrace::sphere_query_checked(base,read_mem,fake_cast,fake_construct,world,{0,0,0},{4,0,0},.05,kWorldOccluderLayers,kWorldOccluderRequired,&lease,false,&prop).complete && casts==before);}
+    {   // Final review P3: only the hand clamp ranks planes by body class; every other cast skips the body-record reads
+        const auto before=casts;
+        class_reads=0;
+        const auto plain=NativeWorldTrace::sphere_cast(base,counting_read,fake_cast,fake_construct,world,{0,0,0},{4,0,0},0.05,kWorldOccluderLayers,kWorldOccluderRequired,nullptr,false);
+        const auto plain_reads=class_reads;class_reads=0;
+        const auto ranked=NativeWorldTrace::sphere_cast(base,counting_read,fake_cast,fake_construct,world,{0,0,0},{4,0,0},0.05,kWorldOccluderLayers,kWorldOccluderRequired,nullptr,true);
+        CHECK(casts==before+2 && plain && ranked && plain->entity==ranked->entity && plain->fraction==ranked->fraction);
+        CHECK(plain->body_class==BodyClass::world && ranked->body_class==BodyClass::dynamic);   // unclassified keeps the default
+        CHECK(plain_reads==0 && class_reads>0);
+    }
 }
 int main() {
     test_pure();test_verify_and_cast();
