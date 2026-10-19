@@ -95,16 +95,27 @@ void test_verify_and_cast() {
     put64(pool+0x123456ull*0xb0+0x90,slot);put64(slot+8,object);put64(object+0x10,0xE17717);
     CHECK(NativeWorldTrace::entity_of(read_mem,world,0x00123456)==0xE17717);
     CHECK(NativeWorldTrace::entity_of(read_mem,world,0xffffff)==0 && NativeWorldTrace::entity_of(read_mem,world,0x1)==0);
-    // The hit body's class, read from its record (flags & 7: 2 dynamic, anything else an entity that does not move); no body or entity is the world;
-    // a record that cannot be read ranks as an entity that does not move, never as a prop.
-    {   const std::uint32_t dynamic_flags=0x2,keyframed_flags=0x6;
-        put(pool+0x123456ull*0xb0+0x44,&dynamic_flags,4);
+    // The hit body's class, read from its record as inspect_hit_body and native_rigid_body read it: index below the pool count, the record's own
+    // handle equal to the cast's, a motion object, and flags & 7 == 2 for a dynamic body; no body or entity is the world. Anything that does
+    // not check (a freed or reused slot, a short pool, a bad record) is an entity that does not move, never a prop.
+    {   const std::uint32_t dynamic_flags=0x2,keyframed_flags=0x6,count=0x200000,handle=0x123456,motion=0x1000,no_motion=0,other_handle=0x123457,short_pool=0x100;
+        const std::uintptr_t record=pool+0x123456ull*0xb0;
+        put(world+0x30,&count,4);put(record+0x70,&handle,4);put(record+0x40,&motion,4);put(record+0x44,&dynamic_flags,4);
         CHECK(NativeWorldTrace::body_class_of(read_mem,world,0x123456,0xE17717)==BodyClass::dynamic);
-        put(pool+0x123456ull*0xb0+0x44,&keyframed_flags,4);
+        put(record+0x44,&keyframed_flags,4);
         CHECK(NativeWorldTrace::body_class_of(read_mem,world,0x123456,0xE17717)==BodyClass::entity_static);
+        put(record+0x44,&dynamic_flags,4);
+        put(record+0x70,&other_handle,4);   // the slot now holds another body
+        CHECK(NativeWorldTrace::body_class_of(read_mem,world,0x123456,0xE17717)==BodyClass::entity_static);
+        put(record+0x70,&handle,4);
+        put(record+0x40,&no_motion,4);      // no motion object
+        CHECK(NativeWorldTrace::body_class_of(read_mem,world,0x123456,0xE17717)==BodyClass::entity_static);
+        put(record+0x40,&motion,4);
+        put(world+0x30,&short_pool,4);           // the pool is shorter than the index
+        CHECK(NativeWorldTrace::body_class_of(read_mem,world,0x123456,0xE17717)==BodyClass::entity_static);
+        put(world+0x30,&count,4);
         CHECK(NativeWorldTrace::body_class_of(read_mem,world,0x123456,0)==BodyClass::world && NativeWorldTrace::body_class_of(read_mem,world,0xffffff,0xE17717)==BodyClass::world);
-        CHECK(NativeWorldTrace::body_class_of(read_mem,world,0x2fffff,0xE17717)==BodyClass::entity_static);   // the record is not mapped
-        put(pool+0x123456ull*0xb0+0x44,&dynamic_flags,4);
+        CHECK(NativeWorldTrace::body_class_of(read_mem,world,0x1fffff,0xE17717)==BodyClass::entity_static);   // the record is not mapped
     }
     const auto hit=NativeWorldTrace::sphere_cast(base,read_mem,fake_cast,fake_construct,world,{0,0,0},{4,0,0},0.05);
     CHECK(hit && casts==1 && hit->entity==0xE17717 && hit->body_class==BodyClass::dynamic && hit->fraction==0.25 && hit->centre.x==1.0 && hit->normal.x==-1);

@@ -343,11 +343,15 @@ private:
         }
         if(slot==s.plane_count) {
             if(s.plane_count<capacity()) ++s.plane_count;
-            else {   // full: a plane replaces the oldest plane of the lowest rank that does not outrank it, and is dropped when every plane held
+            else {   // full: a plane that has outlived plane_seconds goes first (this update's purge comes after its hits are folded in, and a live hit is
+                     // never dropped for a stale plane); else a plane replaces the oldest plane of the lowest rank that does not outrank it, and is dropped when every plane held
                      // outranks it (the world over an entity that does not move over a dynamic body, whatever its mass)
                 std::size_t pick=s.plane_count;
                 for(std::size_t i=0;i<s.plane_count;++i) {
                     const auto& q=s.planes[i];
+                    const bool stale=q.age>cfg_.plane_seconds;
+                    if(stale) {if(pick==s.plane_count || !(s.planes[pick].age>cfg_.plane_seconds) || q.age>s.planes[pick].age) pick=i;continue;}
+                    if(pick!=s.plane_count && s.planes[pick].age>cfg_.plane_seconds) continue;
                     if(q.rank>plane.rank) continue;
                     if(pick==s.plane_count || q.rank<s.planes[pick].rank || (q.rank==s.planes[pick].rank && q.age>s.planes[pick].age)) pick=i;
                 }
@@ -385,7 +389,8 @@ private:
     // slot between a wall and a crate) the hand stays out of the static ones and enters the prop. Order does not matter: a prop's faces are
     // projected first and static ones last, pass after pass until nothing is deeper than converged (12 passes at most); a corner too sharp for that
     // is solved exactly (the least move that satisfies the planes, as a small QP over at most three active planes).
-    // False when the static planes alone cannot be satisfied (two walls closer than the hand): p is then left at the last pass, and the caller retreats (retreat()).
+    // False when the world's planes alone cannot be satisfied (two walls closer than the hand): p is then left at the last pass, and the caller
+    // retreats (retreat()). An entity that does not move and a dynamic body are met as far as the tiers above them allow.
     static constexpr unsigned max_passes=12;
     static constexpr double converged=5e-4;
     bool solve(const Side& s,const std::array<Vec3,3>& basis,Vec3& p,double* pushed=nullptr,bool direct_only=false,
@@ -462,24 +467,33 @@ private:
         for(std::size_t k=0;k<m;++k) use[k]=true;
         Vec3 solution{};
         if(!exact(use,solution)) {
-            for(std::size_t k=0;k<m;++k) use[k]=!rows[k].dynamic;
-            if(!exact(use,solution)) return false;   // two walls closer than the hand
-            std::array<std::size_t,plane_capacity> order{};std::size_t props=0;
-            for(std::size_t k=0;k<m;++k) if(rows[k].dynamic) order[props++]=k;
-            std::sort(order.begin(),order.begin()+props,[&](std::size_t a,std::size_t b){return rows[a].b-dot(rows[a].n,start)>rows[b].b-dot(rows[b].n,start);});
-            for(std::size_t q=0;q<props;++q) {
-                use[order[q]]=true;
+            // The tiers: the world's planes are hard (all of them or no solution: false, two walls closer than the hand); the planes of entities
+            // that do not move are met as far as the world allows; a dynamic body's as far as both allow. Within a tier all of its planes if they
+            // fit, else one by one, the deepest first. A wall and a door's face too close for the hand: the hand is out of the wall and in the door.
+            use={};
+            for(std::size_t k=0;k<m;++k) use[k]=rows[k].rank==2;
+            solution=start;
+            if(!exact(use,solution)) return false;
+            for(int tier=1;tier>=0;--tier) {
+                std::array<bool,plane_capacity> with=use;
+                std::array<std::size_t,plane_capacity> order{};std::size_t count=0;
+                for(std::size_t k=0;k<m;++k) if(rows[k].rank==tier) {with[k]=true;order[count++]=k;}
                 Vec3 trial{};
-                if(exact(use,trial)) solution=trial;else use[order[q]]=false;
+                if(exact(with,trial)) {use=with;solution=trial;continue;}
+                std::sort(order.begin(),order.begin()+count,[&](std::size_t x,std::size_t y){return rows[x].b-dot(rows[x].n,start)>rows[y].b-dot(rows[y].n,start);});
+                for(std::size_t q=0;q<count;++q) {
+                    use[order[q]]=true;
+                    if(exact(use,trial)) solution=trial;else use[order[q]]=false;
+                }
             }
         }
         if(pushed) for(std::size_t k=0;k<m;++k) {const double d=dot(rows[k].n,solution-p);if(d>0) pushed[rows[k].plane]+=d;}
         p=solution;
         return true;
     }
-    // Two static planes that no place satisfies together near the controller (the hand is wider than the slot it is pushed into): the hand
+    // Two planes of the world that no place satisfies together (the hand is wider than the slot it is pushed into): the hand
     // retreats along the segment from `from` (the controller, or the meet's position) to `to` (the chest) to the first place that satisfies
-    // every static plane held, found by bisection (12 steps). When even the chest does not, the place on the segment where the deepest
+    // every plane of the world held, found by bisection (12 steps). When even the chest does not, the place on the segment where the deepest
     // violation is smallest (ternary search; the violation is a maximum of linear functions of the position): `minimax` is set.
     Vec3 retreat(const Side& s,const std::array<Vec3,3>& basis,Vec3 from,Vec3 to,std::optional<std::uintptr_t> except,bool& minimax) const {
         minimax=false;
@@ -489,7 +503,7 @@ private:
             const Vec3 x=at(u);double w=-1e9;
             for(std::size_t i=0;i<s.plane_count;++i) {
                 const auto& plane=s.planes[i];
-                if(plane.rank==0 || (except && plane.entity==*except)) continue;
+                if(plane.rank<2 || (except && plane.entity==*except)) continue;
                 w=std::max(w,-clearance(s,basis,x,plane));
             }
             return w;

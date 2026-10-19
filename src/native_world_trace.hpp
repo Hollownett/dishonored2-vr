@@ -245,14 +245,21 @@ public:
         std::uint32_t count{},handle{},broadphase{},entity_id{};
         std::uint8_t flags{};
     };
-    // What the hit body is, from the body record itself: no body or no entity is the world; motion type 2 (flags & 7, as native_rigid_body reads
-    // it) is a dynamic body whatever its mass; any other type is an entity that does not move (static or keyframed). A record that cannot be
-    // read is entity_static: it must not rank below a prop.
-    static BodyClass body_class_of(Read read,std::uintptr_t world,std::uint32_t body,std::uintptr_t entity) {
-        if(body==0xffffff || !entity) return BodyClass::world;
-        std::uintptr_t pool{};std::uint32_t flags{};
+    // What the hit body is, from the body record, validated like inspect_hit_body and native_rigid_body: no body or no entity is the world; the
+    // index must lie below the pool count (world+0x30), the record's own handle (+0x70) must be the cast's, it must have a motion object (+0x40,
+    // under 0x100000), and flags & 7 == 2 (+0x44) makes it a dynamic body whatever its mass. Any other motion type is an entity that does not
+    // move (static or keyframed). A record that does not check out (a freed or reused slot, a short pool, an unreadable word) is entity_static:
+    // it must never rank below a prop on a stale read.
+    static BodyClass body_class_of(Read read,std::uintptr_t world,std::uint32_t handle,std::uintptr_t entity) {
+        const std::uint32_t index=handle&0xffffffu;
+        if(handle==0xffffffffu || index==0xffffffu || !entity) return BodyClass::world;
+        std::uintptr_t pool{};std::uint32_t count{},flags{},record_handle{},motion{};
         if(!read || !read(world+body_pool_offset,&pool,sizeof(pool)) || !rig::pointer(pool) ||
-           !read(pool+static_cast<std::uintptr_t>(body)*0xb0u+0x44,&flags,sizeof(flags))) return BodyClass::entity_static;
+           !read(world+0x30,&count,sizeof(count)) || !count || count>0x1000000u || index>=count) return BodyClass::entity_static;
+        const auto record=pool+static_cast<std::uintptr_t>(index)*0xb0u;
+        if(!read(record+0x70,&record_handle,sizeof(record_handle)) || record_handle!=handle ||
+           !read(record+0x40,&motion,sizeof(motion)) || !motion || motion>=0x100000u ||
+           !read(record+0x44,&flags,sizeof(flags))) return BodyClass::entity_static;
         return (flags&7u)==2u?BodyClass::dynamic:BodyClass::entity_static;
     }
     template<class Reader> static std::optional<CheckedHitBody> inspect_hit_body(Reader& read,const NativeWorldQuerySource& source,std::uint32_t handle) {
@@ -353,7 +360,7 @@ public:
                 const double normal[3]{contact->normal.x,contact->normal.y,contact->normal.z};
                 for(unsigned axis=0;axis<3;++axis) {record.position[axis]=static_cast<float>(point[axis]);record.normal[axis]=static_cast<float>(normal[axis]);}
                 auto hit=convert_world_hit(record,from,to,*entity);if(!hit)return {};
-                hit->body_class=body_class_of(read,world,hit->body,hit->entity);
+                hit->body_class=body_class_of(read,world,hit->body_handle,hit->entity);
                 hit->static_support=false;result.regular->hits[index]=*hit;
                 if(!result.hit || hit->fraction<result.hit->fraction)result.hit=*hit;
             }
@@ -370,7 +377,7 @@ public:
             entity=*resolved;
         } else entity=entity_of(read,world,collector.body);
         auto hit=convert_world_hit(collector,from,to,entity);
-        if(hit)hit->body_class=body_class_of(read,world,hit->body,hit->entity);
+        if(hit)hit->body_class=body_class_of(read,world,hit->body_handle,hit->entity);
         if(source && hit)hit->static_support=false;
         if(!hit)return {};
         result.hit=std::move(hit);return result;

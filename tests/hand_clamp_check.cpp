@@ -1524,14 +1524,13 @@ void parallel_squeeze_takes_the_least_violation() {
     CHECK(c.squeeze_infeasible(0)>0);
 }
 
-// keep_out honours solve()'s false return: two static planes no place satisfies (a wall at x = 1 and a door's face at x = 0.795, the hand 0.285 m
-// deep between them): the position goes to where the deepest violation is smallest on the way to the chest. Nothing asserts a position inside a
-// plane; the check is that no place on the segment is better, and that update() counts the frames.
-void infeasible_keep_out_takes_the_least_violation() {
+// The tiers: the world is hard, an entity that does not move is met as far as the world allows. A wall (world) and a door's face (entity_static)
+// 0.205 m apart, the hand 0.285 m deep: the hand stays out of the wall and enters the door, in the drawn hand and in keep_out; nothing counts
+// as infeasible (the world alone is satisfiable).
+void wall_and_door_squeeze_stays_out_of_the_wall() {
     HandClamp c;
     ClampProbe front{{.12,0,0},.03},back{{-.10,0,0},.03};
     const ClampHit wall{{1,0,.5},{-1,0,0},7,3,false,true},door{{.795,0,.5},{1,0,0},9,3,false,true,BodyClass::entity_static};
-    const auto violation=[&](double x) {return std::max(x+.12+.03+.005-1,.795+.10+.03+.005-x);};
     ClampOutput o{};
     for(unsigned i=0;i<10;++i) {
         ClampInput in{};
@@ -1539,13 +1538,37 @@ void infeasible_keep_out_takes_the_least_violation() {
         in.tip=back;in.tip_enabled=true;in.hand[0]=front;in.hand[1]=back;in.hand_count=2;
         if(i>=2) {in.palm_hit=wall;in.tip_hit=door;}
         o=c.update(0,in);c.note_drawn(0,in.root,o.drawn.position);
+        if(i>=3) CHECK(o.drawn.position.x<=1-.12-.03-.005+1e-3);   // the front of the hand is out of the wall, from the first frame both are held
     }
     const Vec3 kept=c.keep_out(0,pose_at({}).basis,{1,0,.5},std::nullopt);
-    double best=1e9;
-    for(int k=0;k<=1000;++k) best=std::min(best,violation(k/1000.));
-    CHECK(violation(kept.x)<=best+.002);
-    CHECK(violation(o.drawn.position.x)<=best+.002);
-    CHECK(c.squeeze_infeasible(0)>0);
+    CHECK(kept.x<=1-.12-.03-.005+1e-3);
+    CHECK(c.squeeze_infeasible(0)==0);
+}
+
+// Four world planes at their last frames of life and a live door hit (entity_static) on one of them: the door is held, and the hand is never
+// left unheld. (Which frame the first plane passes plane_seconds depends on the accumulated frame time: the door arrives on each of the three.)
+void expired_planes_never_block_a_live_hit() {
+    for(unsigned late=9;late<=11;++late) {
+        HandClamp c;
+        const auto wall=[](double angle,std::uintptr_t entity) {return ClampHit{{1,.1*angle,.5},{-std::cos(angle),std::sin(angle),0},entity,3,false,true};};
+        const ClampHit door{{.9,0,.5},{-1,0,0},9,3,false,true,BodyClass::entity_static};
+        const auto frame=[&](unsigned i,std::optional<ClampHit> palm,std::optional<ClampHit> tip,std::optional<ClampHit> wall_tip) {
+            ClampInput in{};
+            in.now=i*dt;in.epoch=1;in.root=level_frame({0,0,0},{1,0,0});in.target=pose_at({.2,0,.5});in.chest={0,0,1};
+            in.tip={{.10,0,0},.02};in.tip_enabled=true;in.wall_tip={{.12,0,.04},.03};
+            in.palm_hit=palm;in.tip_hit=tip;in.wall_tip_hit=wall_tip;
+            const auto o=c.update(0,in);c.note_drawn(0,in.root,o.drawn.position);return o;
+        };
+        std::array<ClampHit,HandClamp::max_held_planes> held{};
+        frame(0,std::nullopt,std::nullopt,std::nullopt);frame(1,std::nullopt,std::nullopt,std::nullopt);
+        frame(2,wall(.3,41),wall(.5,42),wall(.7,43));
+        frame(3,wall(.9,44),std::nullopt,std::nullopt);
+        for(unsigned i=4;i<2+late;++i) frame(i,std::nullopt,std::nullopt,std::nullopt);
+        frame(2+late,door,std::nullopt,std::nullopt);
+        const auto n=c.held_planes(0,held);
+        bool has_door=false;for(std::size_t i=0;i<n;++i) has_door=has_door || held[i].entity==9;
+        CHECK(has_door);
+    }
 }
 
 // A full list of planes that all outrank a prop's new face keeps them: the face is dropped.
@@ -1602,7 +1625,8 @@ int main() {
         squeeze_entry_stops_at_the_mouth();
         new_static_plane_during_a_hold();
         infeasible_keep_out_retreats();
-        infeasible_keep_out_takes_the_least_violation();
+        wall_and_door_squeeze_stays_out_of_the_wall();
+        expired_planes_never_block_a_live_hit();
         parallel_squeeze_takes_the_least_violation();
     }
     g_mode=0;
