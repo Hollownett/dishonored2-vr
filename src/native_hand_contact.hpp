@@ -273,7 +273,11 @@ public:
         std::array<Hand,2> hands{};const double now=seconds();std::optional<Vec3> player;
         snapshot(hands,now,true,&player);
         if(!inline_discovery && !latched_.load(std::memory_order_relaxed) && services.load()>=latch_services && discoveries.load()==0) latched_=true;
-        const bool scan_here=inline_discovery || latched_.load(std::memory_order_relaxed);
+        bool scan_here=inline_discovery || latched_.load(std::memory_order_relaxed);
+        // The slot tables belong to one scanner at a time (discover() on the render thread, or this service once latched). The turn is held to
+        // the end of the service; a service that finds discover() mid-scan skips its own scan this time and handles what it was handed.
+        ScanTurn scan_turn(scanning_,scan_here);
+        if(scan_here && !scan_turn.owned()) scan_here=false;
         if(!hands[0].active && !hands[1].active) {
             near_.clear();seen_={};
             std::unique_lock<std::mutex> lock(meet_mutex_,std::try_to_lock);if(lock.owns_lock()) meet_.stamp=0; // nothing is met any more (meet() also checks the lane)
@@ -459,6 +463,9 @@ public:
         if(inline_discovery || latched_.load(std::memory_order_relaxed) || !wanted()) return;
         std::array<Hand,2> hands{};snapshot(hands,seconds(),false);
         if(!hands[0].active && !hands[1].active) return;
+        ScanTurn scan_turn(scanning_,true);
+        if(!scan_turn.owned()) return;   // the latched service is scanning: it owns the slot tables
+        ++discoveries; // marked before the scan: the service must not read "no discover() call at all" while this one is in flight
         const auto began=std::chrono::steady_clock::now();
         const auto game=rig::value<std::uintptr_t>(scan,base+0x39a5290);
         if(!game || !rig::typed(scan,base,*game,0x1c940a8)) return;
@@ -477,7 +484,7 @@ public:
                 std::lock_guard<std::mutex> lock(found_mutex_);
                 if(gone_.size()<4*near_capacity) gone_.push_back(gone);});
         const auto spent=static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now()-began).count());
-        ++discoveries;discover_us+=spent;auto top=discover_max_us.load();while(spent>top && !discover_max_us.compare_exchange_weak(top,spent)) {}
+        discover_us+=spent;auto top=discover_max_us.load();while(spent>top && !discover_max_us.compare_exchange_weak(top,spent)) {}
     }
 private:
     template<class T> static auto query_peak(T& reader,int)->decltype(static_cast<std::uint64_t>(reader.take_slowest())) {return static_cast<std::uint64_t>(reader.take_slowest());}
@@ -631,6 +638,16 @@ private:
     }
     std::array<MeetState,2> meet_state_{};std::array<double,2> meet_last_{}; // meet_clamp's per side (under meet_mutex_)
     std::mutex meet_mutex_;Meet meet_;std::array<bool,2> meet_latched_{}; // service -> meet(); latched: pinned, the cast holds the hand off the prop
+    // Whoever scans the registry slot tables (slot_entity_, slot_prop_, cursor_, cycle_, scan_tick_) holds this; the other skips its scan.
+    std::atomic<bool> scanning_{};
+    class ScanTurn {
+        std::atomic<bool>& flag_;bool owned_;
+    public:
+        ScanTurn(std::atomic<bool>& flag,bool wanted) : flag_(flag),owned_(wanted && !flag.exchange(true,std::memory_order_acquire)) {}
+        ScanTurn(const ScanTurn&)=delete;ScanTurn& operator=(const ScanTurn&)=delete;
+        ~ScanTurn() {if(owned_) flag_.store(false,std::memory_order_release);}
+        bool owned() const noexcept {return owned_;}
+    };
     std::atomic<bool> latched_{};std::mutex found_mutex_;std::vector<std::uintptr_t> found_,gone_;std::uintptr_t service_game_{},service_world_{}; // discover() -> service(); the service's level
     std::ofstream log_,slow_;std::atomic<bool> log_on_{};unsigned logged_{},slow_logged_{};std::mutex log_mutex_;std::string pending_,slow_pending_;double log_drained_{};
 };

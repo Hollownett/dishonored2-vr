@@ -827,6 +827,37 @@ int main() {
             std::cout<<"discovery never called: the service scanned after "<<NativeHandContact::latch_services<<" services and pushed the bottle "<<(writes.count(0x1000001)?writes[0x1000001].count:0u)<<" times\n";
             assert(latch.discoveries==0 && writes.count(0x1000001) && writes[0x1000001].count>3 && latch.faults==0);
         }
+        // --- final review: discover() (render thread) and the latched service (physics thread) never scan the slot tables at the same time.
+        // The service is run from inside discover()'s first read (a thread switch at the worst moment) after the latch_services services
+        // with no discover() call at all: discover() marks its discovery before it scans, so the service does not latch, and it never
+        // reads the registry; the render thread's scan completes.
+        {
+            NativeHandContact race;race.set_geometry(1,synthetic_geometry());race.scan_limit_us=race.service_limit_us=1<<30;race.inline_discovery=false;
+            build({1,1.0,0,.035,.035,.14,0x1c5de18,true,0x4000});put(motions+1*0x80+0x40,std::array<float,3>{0,0,0});writes.clear();held={};
+            for(unsigned i=0;i<NativeHandContact::latch_services;++i) {
+                const auto pose=palm_at({.70+.0004*i,0,.1});race.publish(1,true,pose,pose,{0,0,0,0,0});
+                race.service(read,base,world,90000+i*11,held,write);
+            }
+            assert(race.services.load()>=NativeHandContact::latch_services && race.discoveries.load()==0);
+            const auto pose=palm_at({.76,0,.1});race.publish(1,true,pose,pose,{0,0,0,0,0});
+            bool entered=false,discover_reads_open=false;unsigned nested_registry_reads=0;
+            const auto registry_slice=[&](std::uintptr_t at,std::size_t size) {return size>=256 && at>=game+0x3130b0 && at<game+0x3130b0+0x3fffull*8;};   // a scan slice, not a single registry lookup
+            const auto interleaved=[&](std::uintptr_t at,void* out,std::size_t size) {
+                if(discover_reads_open && !entered) {   // the first read of discover()'s scan: the physics thread's service runs now
+                    entered=true;
+                    const auto fresh=palm_at({.77,0,.1});race.publish(1,true,fresh,fresh,{0,0,0,0,0});
+                    auto counting=[&](std::uintptr_t where,void* into,std::size_t amount) {if(registry_slice(where,amount)) ++nested_registry_reads;return read(where,into,amount);};
+                    race.service(counting,base,world,99000,held,write);
+                }
+                return read(at,out,size);};
+            discover_reads_open=true;race.discover(interleaved,base);discover_reads_open=false;
+            assert(entered && race.discoveries.load()==1);
+            assert(nested_registry_reads==0);   // the service did not scan the registry beside discover()
+            race.publish(1,true,pose,pose,{0,0,0,0,0});unsigned later_registry_reads=0;
+            auto later=[&](std::uintptr_t where,void* into,std::size_t amount) {if(registry_slice(where,amount)) ++later_registry_reads;return read(where,into,amount);};
+            race.service(later,base,world,99100,held,write);
+            assert(later_registry_reads==0 && race.faults==0);   // and it never latches afterwards: discover() has run
+        }
         // --- the same ride with the world cast holding the drawn hand 5 cm back along its motion (sim v525), the bottle the entity it hit: the tracked
         // hand carries it, so the face ends at the tracked fingertips (5 cm short of them if the drawn hand pushed)
         {
