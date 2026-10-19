@@ -93,13 +93,15 @@ public:
     inline static std::array<std::atomic<std::uint64_t>,5> clear_reasons{};
     // Carry diagnostics C2: anchor() reads back what 0x753c10's rebind block would overwrite (joint, offset, rotation) before it writes again.
     inline static std::atomic<std::uint64_t> rebind_overwrites{};
+    // Carry diagnostics C6: |entity+0x300 - the post-carry target| at the last bind tick (-1 = none since the last clear).
+    inline static std::atomic<float> bind_entity_err{-1.f};
     static void clear(unsigned reason=0) noexcept {
         ++clear_reasons[reason<clear_reasons.size()?reason:0];
         layer_restore_.store(true,std::memory_order_release);
         NativeHeldPlacement::process_owner().clear();
         AcquireSRWLockExclusive(&publication_lock_);
         __try {
-            (void)advance_publication_locked();data_={};rf_.store(0,std::memory_order_release);last_write_rf_=0;
+            (void)advance_publication_locked();data_={};rf_.store(0,std::memory_order_release);last_write_rf_=0;bind_entity_err.store(-1.f,std::memory_order_relaxed);
         } __finally {ReleaseSRWLockExclusive(&publication_lock_);}
     }
     // Render thread: the next set-velocity event of this entity (within 600 ms) carries v (m/s, game world).
@@ -196,7 +198,7 @@ public:
     }
     // Diagnostics, read only: the collision layer (filter word & 0x1f) of the held entity's throwable body; 3 RIGID_BODY, 4 DEBRIS.
     // The cache keeps the body handle per entity: the component scan runs once per hold, then only the pool record is read.
-    struct LayerCache {std::uintptr_t entity{};std::uint32_t handle{};};
+    struct LayerCache {std::uintptr_t entity{},component{};std::uint32_t handle{};};   // keyed on entity + body handle (+ the component that owns it)
     template<class Read> static std::optional<std::uint32_t> held_layer(std::uintptr_t base,Read& read,std::uintptr_t entity) {
         const auto body=entity?throwable_body(base,read,entity):std::nullopt;
         if(!body) return std::nullopt;
@@ -205,10 +207,12 @@ public:
     template<class Read> static std::optional<std::uint32_t> held_layer(std::uintptr_t base,Read& read,std::uintptr_t entity,LayerCache& cache) {
         using namespace rig;
         if(!entity) return std::nullopt;
-        if(cache.entity!=entity || !cache.handle) {
-            cache={};const auto body=throwable_body(base,read,entity);
+        // Still the same body? The component must still belong to the entity and still hold the cached handle; otherwise rescan.
+        if(cache.entity!=entity || !cache.handle || !cache.component ||
+           value<std::uintptr_t>(read,cache.component+0x10)!=entity || value<std::uint32_t>(read,cache.component+0xf8)!=cache.handle) {
+            cache={};std::uintptr_t component{};const auto body=throwable_body(base,read,entity,&component);
             if(!body) return std::nullopt;
-            cache={entity,body->first};return body->second&0x1fu;
+            cache={entity,component,body->first};return body->second&0x1fu;
         }
         const auto game=value<std::uintptr_t>(read,base+0x39a5290);const auto world=game&&pointer(*game)?value<std::uintptr_t>(read,*game+0x60410):std::nullopt;
         const auto pool=world&&pointer(*world)?value<std::uintptr_t>(read,*world+0x28):std::nullopt;const auto count=world&&pointer(*world)?value<std::uint32_t>(read,*world+0x30):std::nullopt;
@@ -251,7 +255,7 @@ private:
     inline static float throw_v_[3]{};
     inline static std::uintptr_t layer_entity_{};inline static std::uint32_t layer_handle_{},layer_filter_{}; // game thread
     // The throwable rigid body of a held entity: its physics handle and the filter word of its pool record.
-    template<class Read> static std::optional<std::pair<std::uint32_t,std::uint32_t>> throwable_body(std::uintptr_t base,Read& read,std::uintptr_t entity) {
+    template<class Read> static std::optional<std::pair<std::uint32_t,std::uint32_t>> throwable_body(std::uintptr_t base,Read& read,std::uintptr_t entity,std::uintptr_t* component_out=nullptr) {
         using namespace rig;
         const auto game=value<std::uintptr_t>(read,base+0x39a5290);const auto entries=entity?list(read,entity+0x268,256):std::nullopt;
         if(!game || !pointer(*game) || !entries) return {};
@@ -265,6 +269,7 @@ private:
         const auto pool=value<std::uintptr_t>(read,*world+0x28);const auto count=value<std::uint32_t>(read,*world+0x30);const auto index=*handle&0xffffff;
         if(!pool || !pointer(*pool) || !count || *count>0x100000 || index==0xffffff || index>=*count) return {};
         const auto filter=value<std::uint32_t>(read,*pool+index*0xb0+0x6c);if(!filter) return {};
+        if(component_out) *component_out=component;
         return std::pair<std::uint32_t,std::uint32_t>{*handle,*filter};
     }
     template<class Read> static bool set_filter(std::uintptr_t base,Read& read,std::uint32_t handle,std::uint32_t filter) {
@@ -346,6 +351,7 @@ private:
             if(!target_valid(t)) {++rejected_targets;return 0;}
             float cp[3],ca[9];std::memcpy(cp,reinterpret_cast<const void*>(t.entity+0x300),12);std::memcpy(ca,reinterpret_cast<const void*>(t.entity+0x30c),36);
             std::memcpy(pos,t.pos,12);std::memcpy(axis,t.axis,36);
+            bind_entity_err.store(std::sqrt((cp[0]-t.pos[0])*(cp[0]-t.pos[0])+(cp[1]-t.pos[1])*(cp[1]-t.pos[1])+(cp[2]-t.pos[2])*(cp[2]-t.pos[2])),std::memory_order_relaxed);
             bool anchored_here{};
             if(const auto m=*reinterpret_cast<const std::uintptr_t*>(t.rf+0x3c8)) anchored_here=anchor(t,m);
             if(lin && ang && dt>1e-4f && dt<.2f) { // keyframed drive toward the hand (the post-physics call passes dt 1 with lin == ang)
@@ -376,6 +382,15 @@ private:
     // The drawn model follows the bind, not the physics body: HoldObject binds to the player's camera joint ("camera_tag"),
     // pinning the object by the eye. Rebind to the master itself (joint -1: origin = master+0x300 + offset x master axis rows,
     // axis = ToMat3(quat x,y,z,w) x master axis; 0x7506d0, 0x111410, 0xdce0) with the offset/rotation that land on the hand.
+    // Did the bind fields move off what anchor() wrote? Offset beyond 1 mm, or rotation beyond 0.5 degrees (|dot| makes -q the same rotation).
+    static bool rebind_changed(const float o[3],const float q[4],const float last_o[3],const float last_q[4]) noexcept {
+        for(unsigned i=0;i<3;++i) if(!(std::abs(o[i]-last_o[i])<=1e-3f)) return true;
+        double dot=0,a=0,b=0;
+        for(unsigned i=0;i<4;++i) {dot+=double(q[i])*last_q[i];a+=double(q[i])*q[i];b+=double(last_q[i])*last_q[i];}
+        if(!(a>0) || !(b>0) || !std::isfinite(dot)) return true;
+        const double c=std::abs(dot)/std::sqrt(a*b);
+        return !(c>=0.99999048);   // cos(0.25 degrees): a 0.5 degree rotation
+    }
     static bool anchor(const Target& t,std::uintptr_t m) {
         float mo[3],ma[9],off[3],l[9];std::memcpy(mo,reinterpret_cast<const void*>(m+0x300),12);std::memcpy(ma,reinterpret_cast<const void*>(m+0x30c),36);
         for(unsigned i=0;i<3;++i) {
@@ -391,9 +406,11 @@ private:
         auto* rf=reinterpret_cast<char*>(t.rf);
         // Read-back (diagnostics only, serialized by publication_lock_ with the previous write): did anything change the fields since we wrote them?
         if(last_write_rf_==t.rf) {
-            std::int16_t joint{};float o[3],q[4];
+            // 0x753c10 writes these without our lock: read twice and judge only a stable pair; a recompute that differs by rounding or the -q sign is the same bind.
+            std::int16_t joint{},joint2{};float o[3],q[4],o2[3],q2[4];
             std::memcpy(&joint,rf+0x3d0,2);std::memcpy(o,rf+0x3d4,12);std::memcpy(q,rf+0x3e0,16);
-            if(joint!=-1 || std::memcmp(o,last_off_,12)!=0 || std::memcmp(q,last_quat_,16)!=0) ++rebind_overwrites;
+            std::memcpy(&joint2,rf+0x3d0,2);std::memcpy(o2,rf+0x3d4,12);std::memcpy(q2,rf+0x3e0,16);
+            if(joint==joint2 && std::memcmp(o,o2,12)==0 && std::memcmp(q,q2,16)==0 && (joint!=-1 || rebind_changed(o,q,last_off_,last_quat_))) ++rebind_overwrites;
         }
         *reinterpret_cast<std::int16_t*>(rf+0x3d0)=-1;std::memcpy(rf+0x3d4,off,12);std::memcpy(rf+0x3e0,xyzw,16);
         std::memcpy(last_off_,off,12);std::memcpy(last_quat_,xyzw,16);last_write_rf_=t.rf;

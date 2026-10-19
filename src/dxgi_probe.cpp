@@ -2980,11 +2980,11 @@ static void publish_held_object(unsigned side,const d2vr::WorldTrackedPose& grip
                 float quat[4]{};if(read_self(*rf+0x3e0,quat,sizeof quat)) *norm=std::sqrt(quat[0]*quat[0]+quat[1]*quat[1]+quat[2]*quat[2]+quat[3]*quat[3]);
             }
             std::int16_t joint{};if(read_self(*rf+0x3d0,&joint,sizeof joint)) cf.rf_joint=joint;
-            std::array<float,3> at{};if(read_self(*e+0x300,at.data(),12)) cf.entity_err=std::sqrt((at[0]-t.pos[0])*(at[0]-t.pos[0])+(at[1]-t.pos[1])*(at[1]-t.pos[1])+(at[2]-t.pos[2])*(at[2]-t.pos[2]));
-            if(t.master_valid) if(const auto master=value<std::uintptr_t>(read,*rf+0x3c8);master && pointer(*master)) {
-                std::array<float,3> mo{};if(read_self(*master+0x300,mo.data(),12))
-                    cf.master_drift=std::sqrt((mo[0]-t.master_pos[0])*(mo[0]-t.master_pos[0])+(mo[1]-t.master_pos[1])*(mo[1]-t.master_pos[1])+(mo[2]-t.master_pos[2])*(mo[2]-t.master_pos[2]));
-            }
+            cf.entity_err=d2vr::NativeHeldObject::bind_entity_err.load(std::memory_order_relaxed);   // vs the post-carry target, measured at the bind tick
+            cf.master_valid=t.master_valid;for(unsigned i=0;i<3;++i) cf.master_pos[i]=t.master_pos[i];   // the drift is judged across frames by note()
+            cf.rebinds=d2vr::NativeHeldObject::rebind_overwrites.load();
+            {std::lock_guard<std::mutex> speed_lock(hand_state_mutex);
+             cf.hand_speed=float(std::sqrt(held_hand_velocity[0]*held_hand_velocity[0]+held_hand_velocity[1]*held_hand_velocity[1]+held_hand_velocity[2]*held_hand_velocity[2]));}
             cf.clamp_hit_held=d2vr::NativeInteractionAim::weapon_hits_entity(side,*e,now);
             cf.swaps=d2vr::NativeHeldObject::layers_swapped.load();cf.restores=d2vr::NativeHeldObject::layers_restored.load();
             const auto recorded=carry_diagnostics.note(cf);
@@ -8217,6 +8217,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
                 failure << "xr_close_complete=" << xr_close_complete.load() << " headset_size_restored=" << headset_size_restored.load()
                         << " cached_output_restored=" << cached_output_restored.load() << " controller_import_restored=" << controller_import_restored
                         << " native_resize_hresult=" << native_resize_result.load() << " last_output=" << width.load() << 'x' << height.load() << '\n';
+                carry_trace.stop();
                 return 1;
             }
         }

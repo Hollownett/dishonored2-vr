@@ -92,7 +92,7 @@ note=full[full.index('try {\n        if(!accepted) carry_diagnostics.rejected();
 assert 'else {' in note and note.index('carry_diagnostics.rejected()')<note.index('carry_diagnostics.note(')
 assert 'catch(...) {}' in note
 for condition in ('NativeHeldObject::held_layer(image_base,read_self,*e,layer_cache)','cf.hold_serial=acquisition','residual_age_ms=','.age_ms(','rf+0x3e0','rf+0x3d0','rf_quat_norm2',
-                  'cf.entity_err','cf.master_drift','weapon_hits_entity(','rebind_overwrites','carry_trace.push(recorded)'):
+                  'cf.entity_err=d2vr::NativeHeldObject::bind_entity_err','cf.master_pos[i]=t.master_pos[i]','cf.hand_speed','weapon_hits_entity(','rebind_overwrites','carry_trace.push(recorded)'):
     assert condition in note,condition
 assert note.count('*rf+0x3e0')==1 and 'for(float* norm:{&cf.rf_quat_norm,&cf.rf_quat_norm2})' in note   # read twice
 assert '<<' not in note and 'csv_row' not in note and 'ofstream' not in note   # no formatting or file I/O on the present thread
@@ -100,6 +100,8 @@ assert '__try' not in note and 'write_self' not in note and 'NativeHeldObject::c
 assert '\\"carry\\":' in source and 'carry_diagnostics.json()' in source
 assert 'native-carry-trace.csv' in source and 'L"carry-trace"' in source and 'carry_trace.start(' in source
 assert source.count('carry_trace.stop();d2vr::NativeHeldObject::disable()')==2   # flushed at teardown
+assert 'carry_trace.stop();\n                return 1;' in source   # and on the early failure return
+assert 'master+0x300' not in note   # the master drift is judged across frames by note(), not re-read in the same call
 assert 'anchor_quat_dev' not in source and 'anchor_quat_dev' not in held
 assert 'static std::optional<std::uint32_t> held_layer(' in held
 layer=held[held.index('struct LayerCache'):held.index('// Render/any thread: is this arm entity currently hidden')]

@@ -9,7 +9,7 @@
 using namespace d2vr;
 static CarryFrame frame(unsigned i,std::uint32_t layer,float scale=0.f) {
     CarryFrame f;f.tick=1000+16ull*i;f.entity=0x1234;f.hold_serial=7;f.layer=layer;f.render_scale=scale;
-    f.rf_quat_norm=f.rf_quat_norm2=1.f;f.rf_joint=-1;f.entity_err=0.f;f.master_drift=0.f;f.residual_age_ms=20;return f;
+    f.rf_quat_norm=f.rf_quat_norm2=1.f;f.rf_joint=-1;f.entity_err=0.f;f.hand_speed=0.f;f.master_valid=true;f.residual_age_ms=20;return f;
 }
 static bool has(const std::string& s,const char* t) {return s.find(t)!=std::string::npos;}
 static size_t fields(const std::string& s) {size_t n=1;for(const char c:s) n+=c==',';return n;}
@@ -65,9 +65,26 @@ int main() {
         const auto j=d.json();assert(has(j,"\"max_residual_age_ms\":300") && has(j,"\"residual_none_frames\":1"));
         CarryDiagnostics e;e.note(f);assert(has(e.json(),"\"max_residual_age_ms\":null"));
     }
-    {   // C6
-        CarryDiagnostics d;auto f=frame(0,4);f.entity_err=.3f;f.master_drift=.02f;d.note(f);d.note(frame(1,4));
-        const auto j=d.json();assert(has(j,"\"max_entity_err\":0.3") && has(j,"\"entity_err_frames\":1") && has(j,"\"max_master_drift\":0.02"));
+    {   // C6: entity_err only counts while the hand is slow (normal drive lag at speed is not a break); master drift is across frames
+        CarryDiagnostics d;auto f=frame(0,4);f.entity_err=.3f;f.hand_speed=.1f;d.note(f);
+        f=frame(1,4);f.entity_err=.5f;f.hand_speed=1.2f;d.note(f);d.note(frame(2,4));
+        auto j=d.json();assert(has(j,"\"max_entity_err\":0.5") && has(j,"\"max_entity_err_slow\":0.3") && has(j,"\"entity_err_frames\":1"));
+        f=frame(3,4);f.entity_err=.4f;f.hand_speed=CarryFrame::unread;d.note(f);
+        assert(has(d.json(),"\"entity_err_frames\":1"));   // an unknown hand speed is not a slow hand
+        CarryDiagnostics m;   // the master walks 1 cm per frame, then the engine re-bases it by 0.5 m
+        for(unsigned i=0;i<4;++i) {auto g=frame(i,4);g.master_pos[0]=.01f*i;m.note(g);}
+        j=m.json();assert(has(j,"\"max_master_drift\":0.01"));
+        auto g=frame(4,4);g.master_pos[0]=.53f;const auto r=m.note(g);
+        assert(std::abs(r.master_drift-.5f)<1e-4f && has(m.json(),"\"max_master_drift\":0.5"));
+        auto first=frame(5,4);first.hold_serial=99;first.master_pos[0]=50.f;assert(m.note(first).master_drift<0.f);   // a new hold has no previous frame
+        auto invalid=frame(6,4);invalid.hold_serial=99;invalid.master_valid=false;assert(m.note(invalid).master_drift<0.f);
+    }
+    {   // C2 per hold: rebinds are lifetime counters on the frame; the row carries the hold's share
+        CarryDiagnostics d;auto f=frame(0,4);f.rebinds=10;assert(d.note(f).rebinds_hold==0);
+        f=frame(1,4);f.rebinds=12;assert(d.note(f).rebinds_hold==2);
+        f=frame(2,4);f.rebinds=12;f.hold_serial=8;assert(d.note(f).rebinds_hold==0);   // the next carry does not inherit the total
+        f=frame(3,4);f.rebinds=13;f.hold_serial=8;d.note(f);
+        assert(has(d.json(),"\"rebinds_hold_max\":2"));
     }
     {   // a hitch longer than 250 ms does not end the hold; a new publication serial or entity does
         CarryDiagnostics d;d.note(frame(0,3));d.note(frame(1,4));
@@ -90,10 +107,10 @@ int main() {
     {   // csv: 15 fields, null for unread values, no newline
         auto f=frame(3,4,1.f);f.residual_age_ms=-1;f.rf_joint=CarryFrame::joint_unread;f.entity_err=CarryFrame::unread;
         const auto row=CarryDiagnostics::csv_row(f);
-        assert(fields(CarryDiagnostics::csv_header())==15 && fields(row)==15 && row.find('\n')==std::string::npos);
-        assert(has(row,",null,1,1,") && row.substr(row.size()-12)==",null,null,0");
+        assert(fields(CarryDiagnostics::csv_header())==17 && fields(row)==17 && row.find('\n')==std::string::npos);
+        assert(has(row,",null,1,1,") && row.size()>21 && row.substr(row.size()-21)==",0,null,null,null,0,0");
         f.residual_age_ms=42;assert(has(CarryDiagnostics::csv_row(f),",42,"));
-        CarryFrame none;assert(has(CarryDiagnostics::csv_row(none),",null,0,0,null,null,null,null,"));
+        CarryFrame none;assert(has(CarryDiagnostics::csv_row(none),",null,0,0,null,null,null,null,") && fields(CarryDiagnostics::csv_row(none))==17);
         assert(CarryDiagnostics::csv_max_rows==20000);
     }
     {   // the trace writer: rows reach the file off the calling thread, stop() flushes everything, a stopped writer ignores frames
@@ -103,9 +120,22 @@ int main() {
         for(unsigned i=0;i<200;++i) {auto f=frame(i,4);f.hold_id=1;w.push(f);}
         w.stop();w.push(frame(300,4));
         std::ifstream in(path);std::string line;unsigned rows=0;bool first=true;
-        while(std::getline(in,line)) {if(first) {assert(line==CarryDiagnostics::csv_header());first=false;continue;}assert(fields(line)==15);++rows;}
+        while(std::getline(in,line)) {if(first) {assert(line==CarryDiagnostics::csv_header());first=false;continue;}assert(fields(line)==17);++rows;}
         assert(rows==w.written() && rows+w.dropped()==200 && rows>0);
         in.close();std::remove(path.c_str());
+    }
+    {   // lifetime: the destructor stops and joins (a static writer must never be destroyed joinable); a failed start closes out and can be retried
+        const std::string path="carry_trace_lifetime_check.csv";
+        {
+            CarryTraceWriter w;assert(w.start(path));
+            for(unsigned i=0;i<50;++i) {auto f=frame(i,4);f.hold_id=1;w.push(f);}
+        }   // no stop(): the destructor drains and closes
+        std::ifstream in(path);std::string line;unsigned lines=0;while(std::getline(in,line)) ++lines;
+        assert(lines>=2);in.close();
+        CarryTraceWriter w;assert(!w.start("no_such_directory_for_carry/x.csv"));
+        w.push(frame(0,4));w.stop();                    // inert after a failed start
+        assert(w.start(path));w.stop();w.stop();        // retry works; stop is idempotent
+        std::remove(path.c_str());
     }
     std::puts("carry_diagnostics_check passed");
     return 0;

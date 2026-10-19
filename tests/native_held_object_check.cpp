@@ -18,6 +18,7 @@ struct NativeHeldObjectCheck {
     static bool anchor(const NativeHeldObject::Target& target,std::uintptr_t master) {
         return NativeHeldObject::anchor(target,master);
     }
+    static bool changed(const float* o,const float* q,const float* lo,const float* lq) {return NativeHeldObject::rebind_changed(o,q,lo,lq);}
     static bool snapshot(NativeHeldObject::Target& target,std::uint64_t& revision) {
         return NativeHeldObject::snapshot(target,&revision);
     }
@@ -142,10 +143,35 @@ int main() {
     }
     {
         Fixture state;assert(d2vr::NativeHeldObjectCheck::anchor(state.target,master));assert(!state.driven_right());
+        {   // the post-carry bind error is published for the diagnostics: |entity+0x300 - the position the bind was given|
+            Fixture bound;bound.place();
+            const auto at=get<std::array<float,3>>(entity+0x300);const float e=std::sqrt((at[0]-output_position[0])*(at[0]-output_position[0])+(at[1]-output_position[1])*(at[1]-output_position[1])+(at[2]-output_position[2])*(at[2]-output_position[2]));
+            assert(std::abs(Held::bind_entity_err.load()-e)<1e-5f);
+            Held::clear();assert(Held::bind_entity_err.load()<0.f);
+        }
         // Task 9 C2: the anchor reads back what it last wrote before it writes again; an engine rebind in between is counted.
         const auto base=Held::rebind_overwrites.load();
         Fixture again;assert(d2vr::NativeHeldObjectCheck::anchor(again.target,master) && Held::rebind_overwrites.load()==base);   // first write: nothing to compare
         assert(d2vr::NativeHeldObjectCheck::anchor(again.target,master) && Held::rebind_overwrites.load()==base);               // untouched since: healthy
+        {   // an engine recompute with different rounding, or the -q sign, is the same bind: not an overwrite (offset <= 1 mm, rotation <= 0.5 deg)
+            auto o=get<std::array<float,3>>(rf+0x3d4);o[0]+=.0005f;put(rf+0x3d4,o);
+            assert(d2vr::NativeHeldObjectCheck::anchor(again.target,master) && Held::rebind_overwrites.load()==base);
+            auto q=get<std::array<float,4>>(rf+0x3e0);for(float& c:q) c=-c;put(rf+0x3e0,q);
+            assert(d2vr::NativeHeldObjectCheck::anchor(again.target,master) && Held::rebind_overwrites.load()==base);
+            q=get<std::array<float,4>>(rf+0x3e0);const float k=.0015f;   // ~0.17 deg about z
+            const float qn=std::sqrt(q[0]*q[0]+q[1]*q[1]+q[2]*q[2]+q[3]*q[3]);std::array<float,4> nudged{q[0],q[1],q[2]+k,q[3]};
+            const float nn=std::sqrt(nudged[0]*nudged[0]+nudged[1]*nudged[1]+nudged[2]*nudged[2]+nudged[3]*nudged[3]);for(float& c:nudged) c*=qn/nn;
+            put(rf+0x3e0,nudged);assert(d2vr::NativeHeldObjectCheck::anchor(again.target,master) && Held::rebind_overwrites.load()==base);
+        }
+        {   // the tolerance rule itself: a real 5 cm / 10 deg rebind is a change; 1 mm / 0.3 deg and -q are not
+            const float lo[3]{1,2,3},lq[4]{0,0,0,1};float o[3]{1,2,3},q[4]{0,0,0,1};
+            assert(!d2vr::NativeHeldObjectCheck::changed(o,q,lo,lq));
+            o[1]=2.0009f;assert(!d2vr::NativeHeldObjectCheck::changed(o,q,lo,lq));o[1]=2.05f;assert(d2vr::NativeHeldObjectCheck::changed(o,q,lo,lq));o[1]=2.f;
+            const float a=.3f*3.14159265f/180.f/2.f,b=10.f*3.14159265f/180.f/2.f;
+            q[2]=std::sin(a);q[3]=std::cos(a);assert(!d2vr::NativeHeldObjectCheck::changed(o,q,lo,lq));
+            q[2]=-std::sin(a);q[3]=-std::cos(a);assert(!d2vr::NativeHeldObjectCheck::changed(o,q,lo,lq));   // -q is the same rotation
+            q[2]=std::sin(b);q[3]=std::cos(b);assert(d2vr::NativeHeldObjectCheck::changed(o,q,lo,lq));
+        }
         put(rf+0x3d4,std::array<float,3>{9,9,9});                                                                                 // 0x753c10 recomputes the offset
         assert(d2vr::NativeHeldObjectCheck::anchor(again.target,master) && Held::rebind_overwrites.load()==base+1);
         assert(d2vr::NativeHeldObjectCheck::anchor(again.target,master) && Held::rebind_overwrites.load()==base+1);               // our write restored it
@@ -310,15 +336,24 @@ int main() {
         memory.put(game_address+0x60410,world);memory.put(world+0x28,pool);memory.put(world+0x30,std::uint32_t{3});
         memory.put(pool+2*0xb0+0x6c,std::uint32_t{(0x20u<<5)|3u});
         static std::vector<std::array<std::uint32_t,2>> written;written.clear();
+        {   // the body is recreated for the same entity (new handle, same component): the cache re-keys instead of reading a stale record
+            Held::LayerCache c;assert(Held::held_layer(base_address,reader,entity,c)==3u && c.handle==handle);
+            memory.put(world+0x30,std::uint32_t{4});memory.put(component+0xf8,std::uint32_t{0x1000003});memory.put(pool+3*0xb0+0x6c,std::uint32_t{(0x20u<<5)|4u});
+            assert(Held::held_layer(base_address,reader,entity,c)==4u && c.handle==0x1000003);
+            memory.put(component+0xf8,handle);memory.put(world+0x30,std::uint32_t{3});
+            memory.put(component+0x10,std::uintptr_t{0});   // the component no longer belongs to this entity: rescan finds nothing
+            assert(!Held::held_layer(base_address,reader,entity,c));
+            memory.put(component+0x10,entity);
+        }
         Held::filter_seam_=[](std::uintptr_t game,std::uint32_t h,std::uint32_t f) {assert(game==game_address);written.push_back({h,f});return true;};
         assert(Held::held_layer(base_address,reader,entity)==3u && written.empty()); // Task 9: read only, filter word & 0x1f
-        Held::LayerCache cache;assert(Held::held_layer(base_address,reader,entity,cache)==3u && cache.entity==entity && cache.handle==handle);
+        Held::LayerCache cache;assert(Held::held_layer(base_address,reader,entity,cache)==3u && cache.entity==entity && cache.handle==handle && cache.component==component);
         memory.put(pool+2*0xb0+0x6c,std::uint32_t{(0x20u<<5)|4u});   // the cached handle is re-read without the component scan
         memory.put(entity+0x268,r::List{held_components,0,0});
         assert(Held::held_layer(base_address,reader,entity,cache)==4u);
         memory.put(entity+0x268,r::List{held_components,2,2u<<8});memory.put(pool+2*0xb0+0x6c,std::uint32_t{(0x20u<<5)|3u});
         assert(!Held::held_layer(base_address,reader,0,cache) && Held::held_layer(base_address,reader,entity,cache)==3u);
-        Held::LayerCache other{entity+8,0x1000009};assert(Held::held_layer(base_address,reader,entity,other)==3u && other.handle==handle); // another entity rescans
+        Held::LayerCache other{entity+8,component,0x1000009};assert(Held::held_layer(base_address,reader,entity,other)==3u && other.handle==handle); // another entity rescans
         assert(Held::debris_layer(base_address,reader,entity) && Held::debris_layer(base_address,reader,entity));
         assert(written.size()==1 && written[0][0]==handle && written[0][1]==((0x20u<<5)|4u));
         assert(Held::restore_layer(base_address,reader) && written.size()==2 && written[1][1]==((0x20u<<5)|3u) && !Held::restore_layer(base_address,reader));
