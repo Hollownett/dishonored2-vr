@@ -24,6 +24,7 @@
 namespace d2vr {
 struct CarryFrame {
     static constexpr float unread=-1.f;            // sentinel for the float probes: a failed read is never a healthy value
+    static constexpr float no_bind=-2.f;           // entity_err only: no bind committed since the clear yet (nothing to measure)
     static constexpr std::int32_t joint_unread=0x7fff;
     static constexpr std::uint32_t layer_unread=0xff;
     std::uint64_t tick{};std::uintptr_t entity{};std::uint64_t hold_serial{};std::uint64_t hold_id{};std::uint32_t layer{layer_unread};
@@ -89,7 +90,8 @@ public:
             if(dev>quat_bad) {++bad_quat_reads_;raise(max_rf_norm_dev_,dev);}
         }
         if(f.residual_age_ms<0) ++residual_none_frames_; else raise<std::int64_t>(max_residual_age_ms_,f.residual_age_ms);
-        if(f.entity_err<0.f || !std::isfinite(f.entity_err)) ++failed_reads_;
+        if(f.entity_err==CarryFrame::no_bind) {} // no bind committed since the clear yet: nothing to measure, not a failed read
+        else if(f.entity_err<0.f || !std::isfinite(f.entity_err)) ++failed_reads_;
         else {
             raise(max_entity_err_,f.entity_err);
             if(f.hand_speed>=0.f && f.hand_speed<slow_hand) {raise(max_entity_err_slow_,f.entity_err);if(f.entity_err>entity_err_bad) ++entity_err_frames_;}

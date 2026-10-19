@@ -94,14 +94,14 @@ public:
     // Carry diagnostics C2: anchor() reads back what 0x753c10's rebind block would overwrite (joint, offset, rotation) before it writes again.
     inline static std::atomic<std::uint64_t> rebind_overwrites{};
     // Carry diagnostics C6: |entity+0x300 - the post-carry target| at the last bind tick (-1 = none since the last clear).
-    inline static std::atomic<float> bind_entity_err{-1.f};
+    inline static std::atomic<float> bind_entity_err{-2.f};
     static void clear(unsigned reason=0) noexcept {
         ++clear_reasons[reason<clear_reasons.size()?reason:0];
         layer_restore_.store(true,std::memory_order_release);
         NativeHeldPlacement::process_owner().clear();
         AcquireSRWLockExclusive(&publication_lock_);
         __try {
-            (void)advance_publication_locked();data_={};rf_.store(0,std::memory_order_release);last_write_rf_=0;bind_entity_err.store(-1.f,std::memory_order_relaxed);
+            (void)advance_publication_locked();data_={};rf_.store(0,std::memory_order_release);last_write_rf_=0;bind_entity_err.store(-2.f,std::memory_order_relaxed);
         } __finally {ReleaseSRWLockExclusive(&publication_lock_);}
     }
     // Render thread: the next set-velocity event of this entity (within 600 ms) carries v (m/s, game world).

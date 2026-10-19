@@ -59,6 +59,7 @@ int main() {
         d.note(f);
         const auto j=d.json();assert(has(j,"\"failed_reads\":4") && has(j,"\"bad_quat_reads\":0") && has(j,"\"max_rf_norm_dev\":0"));
         auto g=frame(1,4);g.rf_quat_norm=g.rf_quat_norm2=NAN;CarryDiagnostics e;e.note(g);assert(has(e.json(),"\"failed_reads\":1"));
+        auto nb=frame(2,4);nb.entity_err=CarryFrame::no_bind;CarryDiagnostics q;q.note(nb);assert(has(q.json(),"\"failed_reads\":0"));   // no bind yet is not a failed read
     }
     {   // C5: age only while applied; none counted
         CarryDiagnostics d;auto f=frame(0,4);f.residual_age_ms=300;d.note(f);f=frame(1,4);f.residual_age_ms=-1;d.note(f);

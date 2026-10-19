@@ -8697,6 +8697,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
         } catch(...) {}
         return 1;
     } catch(...) {
+        carry_trace.stop();
         flush_synchronized(true);
         flush_render_perf();
         flush_grab_decisions(true);
