@@ -28,6 +28,7 @@ extern "C" MH_STATUS WINAPI MH_DisableHook(LPVOID);
 #include "native_player_camera.hpp"
 #include "native_grab.hpp"
 #include "native_world_trace.hpp"
+#include "native_cast_exclusion.hpp"
 #include "anatomical_world_contact.hpp"
 #include "anatomical_raw_pair.hpp"
 #include "native_full_hand_contact.hpp"
@@ -464,16 +465,11 @@ class NativeInteractionAim {
                 if(verified && self->active_ && self->logic_()==2 && camera && !camera->authored_view() && world && *world) {
                     std::array<std::array<std::optional<WorldTraceHit>,weapon_slots>,2> hits{};
                     LARGE_INTEGER cast_begin{},cast_end{};unsigned cast_n=0,clamp_n=0;std::uint64_t clamp_ticks=0;QueryPerformanceCounter(&cast_begin);
-                    // The hand clamp's exclusion sweeps (physical hands I1): the excluded entity's body, mapped once per scope. Unmapped: no cast.
+                    // The hand clamp's exclusion sweeps (physical hands I1): the excluded entity's body (a prop's, or a dead guard's limb nearest the hand), mapped once per scope. Unmapped: cast without exclusion.
                     std::array<std::pair<std::uintptr_t,std::optional<NativeCastExclusion>>,4> excluded{};unsigned excluded_n=0;
-                    const auto exclusion_of=[&](std::uintptr_t entity)->std::optional<NativeCastExclusion> {
+                    const auto exclusion_of=[&](std::uintptr_t entity,Vec3 hand)->std::optional<NativeCastExclusion> {
                         for(unsigned i=0;i<excluded_n;++i) if(excluded[i].first==entity) return excluded[i].second;
-                        std::optional<NativeCastExclusion> mapped;
-                        if(const auto prop=native_rigid_body(self->read_,self->base_,entity,true);prop && prop->world==*world) {
-                            std::uint32_t info{};
-                            if(clamp_exclude_info_zero_.load(std::memory_order_relaxed)) mapped=NativeCastExclusion{prop->record,prop->handle,0};
-                            else if(self->read_(prop->record+0x6c,&info,sizeof(info)) && info) mapped=NativeCastExclusion{prop->record,prop->handle,info};
-                        }
+                        const auto mapped=native_cast_exclusion(self->read_,self->base_,*world,entity,hand,clamp_exclude_info_zero_.load(std::memory_order_relaxed));
                         if(excluded_n<excluded.size()) excluded[excluded_n++]={entity,mapped};
                         return mapped;
                     };
@@ -486,10 +482,10 @@ class NativeInteractionAim {
                         };
                         if(seg.exclude) {
                             ++clamp_exclude_casts_;
-                            if(const auto exclusion=exclusion_of(seg.exclude)) {
+                            if(const auto exclusion=exclusion_of(seg.exclude,seg.from)) {
                                 hits[side][slot]=cast(&*exclusion);
                                 if(hits[side][slot]) {if(hits[side][slot]->body_handle==exclusion->handle) ++clamp_exclude_self_hits_;else ++clamp_exclude_hits_;}
-                            } else ++clamp_exclude_unmapped_;
+                            } else {++clamp_exclude_unmapped_;hits[side][slot]=cast(nullptr);}   // never drop the sweep: without exclusion it still finds what it finds
                         } else hits[side][slot]=cast(nullptr);
                         QueryPerformanceCounter(&slot_end);
                         if(clamp_slot(slot)) {clamp_ticks+=static_cast<std::uint64_t>(slot_end.QuadPart-slot_begin.QuadPart);++clamp_n;}

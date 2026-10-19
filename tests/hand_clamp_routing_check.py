@@ -208,9 +208,10 @@ def check(dxgi: str, aim: str) -> None:
                  'weapon_req_[side][slot]={from,to,radius,true,exclude};'):
         assert need in a, need
     stage = between(a, 'std::array<std::array<std::optional<WorldTraceHit>,weapon_slots>,2>hits{};', '++weapon_casts_;')
-    for need in ('if(constautoprop=native_rigid_body(self->read_,self->base_,entity,true);prop&&prop->world==*world){',
-                 'mapped=NativeCastExclusion{prop->record,prop->handle,info};', 'if(seg.exclude){', 'hits[side][slot]=cast(&*exclusion);',
-                 '}else++clamp_exclude_unmapped_;', '}elsehits[side][slot]=cast(nullptr);',
+    # I1: a guard's limb maps too (native_cast_exclusion); an unmapped exclusion casts the sweep without it, never drops it.
+    for need in ('constautomapped=native_cast_exclusion(self->read_,self->base_,*world,entity,hand,', 'exclusion_of(seg.exclude,seg.from)',
+                 'if(seg.exclude){', 'hits[side][slot]=cast(&*exclusion);',
+                 '}else{++clamp_exclude_unmapped_;hits[side][slot]=cast(nullptr);}', '}elsehits[side][slot]=cast(nullptr);',
                  'if(clamp_slot(slot)){clamp_ticks+=', 'clamp_cast_us_.store(', '++clamp_cast_serial_;',
                  'if(hits[side][slot]->body_handle==exclusion->handle)++clamp_exclude_self_hits_;else++clamp_exclude_hits_;'):
         assert need in stage, need
@@ -277,6 +278,8 @@ if __name__ == '__main__':
         ('weapon_slots=14;', 'weapon_slots=12;'),
         ('if(clamp_slot(slot)) {clamp_ticks+=', 'if(slot==0) {clamp_ticks+='),
         ('hits[side][slot]=cast(&*exclusion);', 'hits[side][slot]=cast(nullptr);'),
+        ('else {++clamp_exclude_unmapped_;hits[side][slot]=cast(nullptr);}', 'else {++clamp_exclude_unmapped_;}'),
+        ('native_cast_exclusion(self->read_,self->base_,*world,entity,hand,', 'native_rigid_body_only(self->read_,self->base_,*world,entity,hand,'),
         ('weapon_req_[side][slot]={from,to,radius,true,exclude};', 'weapon_req_[side][slot]={from,to,radius,true};'),
     )
     # Swapping the raw copy behind the palm offset (raw would carry the calibration) must be rejected.

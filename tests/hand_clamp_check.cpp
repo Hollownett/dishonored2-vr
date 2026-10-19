@@ -35,6 +35,7 @@ struct World {
     double wall_x_end=1e9;     // the x wall exists only where y < wall_x_end (a wall that ends)
     bool slab=false;           // a loose prop (entity 20): the slab slab_x <= x <= slab_x + 0.10 in front of the x wall; a sweep excluding it passes through
     double slab_x=.80;
+    bool sweeps_ignore_exclusion=false;  // the game thread could not map the excluded entity (a guard's body): it casts the sweep without exclusion
     bool thin=false;           // a thin loose prop (entity 22) lying on the floor: 0 <= z <= 0.015; a sweep excluding it passes through
     bool palm_inside_loose=false;  // the palm_inside overlaps report the loose prop (entity 20), not the world (12): a toppled bottle on the hand
     bool chest_prop=false;     // every chest sweep is stopped half way by a surface of the loose prop (entity 21)
@@ -44,7 +45,7 @@ struct World {
         const bool from_chest=close_to(s.from,chest,1e-9);
         if(from_chest && chest_prop) return ClampHit{s.from+(s.to-s.from)*.5,{0,0,1},21,6,false};
         if(!from_chest && palm_inside_loose) return ClampHit{s.from,inside_normal,20,6,true};
-        if(slab && !(s.exclude && *s.exclude==20)) {   // the slab's front face, before anything behind it
+        if(slab && !(s.exclude && !sweeps_ignore_exclusion && *s.exclude==20)) {   // the slab's front face, before anything behind it
             const double s0=slab_x-s.radius-s.from.x;
             if(s.from.x>=slab_x-s.radius && s.from.x<=slab_x+.10+s.radius) return ClampHit{s.from,{-1,0,0},20,6,true};
             if(s0>0 && s.to.x>s.from.x && s0<=s.to.x-s.from.x) {
@@ -1133,6 +1134,24 @@ void wall_tip_sweeps_past_the_pressed_prop() {
     CHECK(std::abs(d.x-(1-.005-.02-.08))<1e-6);
 }
 
+// Final review I1: a dead guard (entity 20 stands in for the corpse) pushed against a wall. The game thread now maps his exclusion to his
+// limb, so the wall tip's excluded sweep passes through him and the wall behind is held (the drawn hand stops short of it, as for a slab).
+// A sweep that could not be mapped is cast without exclusion; the corpse then answers it and, being the excluded entity, adds no plane.
+void corpse_pushed_against_a_wall_holds_the_wall() {
+    for(const bool mapped:{true,false}) {
+        Rig r;r.world.slab=true;r.world.sweeps_ignore_exclusion=!mapped;r.tip={{0,0,.06},.03};r.tip_enabled=true;r.wall_tip={{.08,0,0},.02};
+        r.loose={20};r.exclude=std::uintptr_t{20};
+        r.step({.5,0,.5});
+        ClampOutput o{};
+        r.move_x({.5,0,.5},1.3,1.5,[&](const ClampOutput& q,Vec3) {o=q;});
+        for(int i=0;i<5;++i) o=r.step({1.3,0,.5});
+        CHECK(o.wall_tip_sweep.valid && o.wall_tip_sweep.exclude && *o.wall_tip_sweep.exclude==20);   // posted either way: never dropped
+        const Vec3 d=meet_drawn(r.clamp,0,o,pose_at({1.3,0,.5}),true,std::uintptr_t{20},{});
+        if(mapped) CHECK(std::abs(d.x-(1-.005-.02-.08))<1e-6);   // the wall behind the corpse is a plane
+        else CHECK(d.x>1-.005-.02-.08+1e-3);                       // unmapped: the corpse hides the wall (the degraded case the fix leaves)
+    }
+}
+
 // Fix round 4 (B): what a caller draws on top of the clamp's hand (the meet's way out, the lab's table lift) never counts toward
 // the snap-back gap; the drawn hand still eases from it (note_drawn_carries_the_ease).
 void snap_timer_ignores_caller_additions() {
@@ -1745,6 +1764,7 @@ int main() {
     thin_prop_palm_stays_out_of_table();
     leading_probes_follow_motion_and_walls();
     wall_tip_sweeps_past_the_pressed_prop();
+    corpse_pushed_against_a_wall_holds_the_wall();
     snap_timer_ignores_caller_additions();
     whole_hand_slides_along_a_wall();
     walls_win_over_loose_faces();
