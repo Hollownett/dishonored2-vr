@@ -136,6 +136,9 @@ int main() {
         auto cu=load_grab_tuning(write_file("d2vr_gt_catchup.cfg","catch_up_mps 2\ncatch_up_ramp_mps2 6\nstale_dt_s .2\n"));
         CHECK(cu.source==TuningSource::file && cu.value.catch_up_mps==2 && cu.value.catch_up_ramp_mps2==6 && cu.value.stale_dt_s==.2);
         expect_defaults_with_error("d2vr_gt_catchup_bad.cfg","catch_up_mps 0\n");
+        expect_defaults_with_error("d2vr_gt_stale_lt_dt.cfg","dt_max .08\nstale_dt_s .05\n");   // stale_dt_s < dt_max would pin recovery on
+        expect_defaults_with_error("d2vr_gt_stale_lt_dt2.cfg","stale_dt_s .05\ndt_max .08\n");   // regardless of key order
+        CHECK(load_grab_tuning(write_file("d2vr_gt_stale_eq_dt.cfg","dt_max .08\nstale_dt_s .08\n")).source==TuningSource::file);
         expect_defaults_with_error("d2vr_gt_unknown.cfg","bogus 1\n");
         expect_defaults_with_error("d2vr_gt_nan.cfg","axial_n 250\nlateral_n nan\n");
         expect_defaults_with_error("d2vr_gt_novalue.cfg","axial_n 250\ntow\n");

@@ -94,6 +94,7 @@ inline TuningLoad load_grab_tuning(const std::filesystem::path& file) noexcept {
             else return fail("unknown key: "+key+where);
             if(!ok) return fail("value out of bounds for "+key+where);
         }
+        if(t.stale_dt_s<t.dt_max) return fail("stale_dt_s must be >= dt_max");
         result.value=t;
         result.source=TuningSource::file;
     } catch(...) {

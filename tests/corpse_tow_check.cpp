@@ -62,6 +62,11 @@ int main() {
         CHECK(out.recovery_s==0 && frames>5 && frames<500);
         CHECK(worst<=t.catch_up_ramp_mps2*in.dt+1e-6);   // no step across the end of recovery
         CHECK(near(prev,4,1e-6));
+        {   // consecutive stale frames (dt 0.15) never re-arm an active ramp: it reaches the normal cap and ends
+            auto st=base(t,2.8,.8);st.pelvis_kg=.5;st.dt=.15;int ended=-1;
+            for(int i=0;i<10 && ended<0;++i) {auto o=plan_tow(st);st.recovery_s=o.recovery_s;if(i>0 && o.recovery_s==0) ended=i;}
+            CHECK(ended>=1 && ended<=6);   // cap = 1 + 4 t reaches 4 at t = 0.75 s = 5 frames
+        }
         in.recovery_s=.4;in.target={.84,0,0};out=plan_tow(in);CHECK(!out.write && out.recovery_s==0);   // reach closed to within 5 cm of the bind reach
         in.target={2.8,0,0};in.recovery_s=std::nan("");out=plan_tow(in);CHECK(out.recovery_s==0 && near(length(out.linear),4,1e-6));   // junk state is ignored
         in.recovery_s=0;in.dt=.04;in.target={1.3,0,0};out=plan_tow(in);CHECK(out.recovery_s==0 && near(length(out.linear),3*t.dt_max/.04,1e-6));   // 25 fps is not a hitch: only the dt_max/dt scaling

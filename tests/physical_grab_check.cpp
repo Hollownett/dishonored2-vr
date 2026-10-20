@@ -1,3 +1,4 @@
+#define D2VR_TESTING 1
 #include "../src/physical_grab.hpp"
 #include <cassert>
 #include <iostream>
@@ -236,9 +237,21 @@ int main() {
                 motor(g,.38,f);assert(g.recovery_s()==0);   // lag 0.02 m
                 assert(std::abs(step(g,0,f)-7.2)<2e-3);
             }
-            {   PhysicalGrab g;start(g,.4);step(g,0,.5);assert(g.recovery_s()>0);   // release resets it; the next grab starts in normal play (bind also resets: defence in depth, not reachable through the API)
+            {   PhysicalGrab g;start(g,.4);step(g,0,.5);assert(g.recovery_s()>0);   // release resets it; the next grab starts in normal play (bind also resets; reached through the D2VR_TESTING seam)
                 g.sample(id,0,true,1,1130);auto b=id;auto r=g.corpse_motor(b,true,1620,0,in(.6,f,&big));assert(r && r->motor.release && g.recovery_s()==0);
-                auto bb=id;assert(make(g,bb,{},3000) && g.recovery_s()==0);
+                g.set_recovery_for_tests(.7);assert(g.recovery_s()==.7);   // the seam: a stale recovery state left on an idle grab
+                auto bb=id;assert(make(g,bb,{},3000) && g.recovery_s()==0);   // bind() itself resets it
+            }
+            {   PhysicalGrab g;start(g,.4);   // a run of consecutive stale frames (dt 0.15) keeps the ramp running (never re-armed): it reaches the normal cap and ends
+                int ended=-1;for(int i=0;i<25 && ended<0;++i) {step(g,0,.15);if(g.recovery_s()==0) ended=i;}
+                assert(ended>=10 && ended<=16);   // cap(t) = 1 + 4 t reaches 10 at t = 2.25 s = 15 frames
+            }
+            {   PhysicalGrab g;start(g,.04,.08);   // no step in either closure across the exit: linear is inside the cap at once, angular (0.96 rad/s) ramps up to its normal value, then recovery ends
+                step(g,0,.5);auto first=motor(g,0,f);double pv=first.motor.linear.x,pw=length(first.motor.angular),worstv=0,worstw=0;int n=0;
+                while(g.recovery_s()>0 && n<100) {const auto r=motor(g,0,f);worstv=std::max(worstv,std::abs(r.motor.linear.x-pv));worstw=std::max(worstw,std::abs(length(r.motor.angular)-pw));
+                    pv=r.motor.linear.x;pw=length(r.motor.angular);++n;}
+                assert(g.recovery_s()==0 && n>10 && n<40 && worstv<1e-3 && worstw<=big.catch_up_ramp_mps2*f*.5+1e-3);
+                const auto after=motor(g,0,f);assert(std::abs(after.motor.linear.x-pv)<1e-3 && std::abs(length(after.motor.angular)-pw)<=big.catch_up_ramp_mps2*f*.5+1e-3 && std::abs(length(after.motor.angular)-.96)<2e-3);
             }
             {   PhysicalGrab a,b2;start(a,.4);start(b2,.4);   // no stale frame: the old law (error*18 + feed, limited to 10), never in recovery
                 for(int i=0;i<10;++i) assert(step(a,0,f)==step(b2,0,f) && a.recovery_s()==0);

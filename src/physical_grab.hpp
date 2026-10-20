@@ -96,6 +96,9 @@ public:
     bool held() const {return held_;}
     const Vec3& velocity() const {return velocity_;}
     double recovery_s() const {return recovery_s_;}
+#ifdef D2VR_TESTING
+    void set_recovery_for_tests(double seconds) {recovery_s_=seconds;}
+#endif
     bool sample(const WorldTrackedPose& hand,float grip,bool usable,std::uint64_t epoch,std::uint64_t tick) {
         const bool valid_input=usable && epoch && tick && grab_pose_valid(hand) && std::isfinite(grip) && grip>=0 && grip<=1;
         if(!valid_input || epoch!=epoch_ || tick<tick_ || (tick_ && tick-tick_>grab_pose_freshness_ms)) {
@@ -219,13 +222,17 @@ public:
         // (the hand's own feed velocity is not); recovery ends when the lag is under 5 cm or the window runs out. Outside recovery the law is unchanged.
         // The cap RAMPS (catch_up_mps + catch_up_ramp_mps2 * t) and recovery ends when it reaches the normal 10 m/s limit or the lag is under 5 cm and the rotation error under 0.1 rad, so no frame
         // jumps back to full gain. Only a hitch (raw dt > stale_dt_s) enters it: sustained low fps keeps just the per-frame dt_max/dt scaling above.
-        if(in.dt>tuning.stale_dt_s) recovery_s_=1e-9;
-        else if(recovery_s_>0) {recovery_s_+=in.dt;if((lag<.05 && length(spin)<.1) || tuning.catch_up_mps+tuning.catch_up_ramp_mps2*recovery_s_>=10) recovery_s_=0;}
+        // An active ramp is never re-armed by a further stale frame (it keeps ramping, so a run of slow frames still ends it); only an idle one arms.
+        if(recovery_s_>0) recovery_s_+=in.dt;
+        else if(in.dt>tuning.stale_dt_s) recovery_s_=1e-9;
         auto closure=error*(18*catch_up);auto spin_closure=spin*12;
         if(recovery_s_>0) {
-            const double cap=tuning.catch_up_mps+tuning.catch_up_ramp_mps2*recovery_s_;
-            const double c=length(closure);if(c>cap) closure=closure*(cap/c);
-            const double w=length(spin_closure),wcap=cap*.5;if(w>wcap) spin_closure=spin_closure*(wcap/w);   // angular: half the linear cap (5 rad/s vs 10 m/s)
+            const double cap=tuning.catch_up_mps+tuning.catch_up_ramp_mps2*recovery_s_,wcap=cap*.5;   // angular: half the linear cap (5 rad/s vs 10 m/s)
+            const double c=length(closure),w=length(spin_closure);
+            // Ends when the cap has reached the normal limit, or when both uncapped closures are already inside the caps and the body has caught up
+            // (lag under 5 cm, rotation under 0.1 rad): on that frame the capped and the normal law agree, so nothing steps.
+            if(cap>=10 || (c<=cap && w<=wcap && lag<.05 && length(spin)<.1)) recovery_s_=0;
+            else {if(c>cap) closure=closure*(cap/c);if(w>wcap) spin_closure=spin_closure*(wcap/w);}
         }
         const auto want_v=grab_limit(closure+feed,10),want_w=grab_limit(spin_closure,5);
         // Unknown body velocity: step from rest (the caller counts the fallback).

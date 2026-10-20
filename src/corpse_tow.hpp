@@ -25,8 +25,9 @@ inline TowOutput plan_tow(const TowInput& in) {
     // Stale-frame recovery (same rule as PhysicalGrab::corpse_motor): a stale dt starts a ramped cap on the closing speed;
     // it ends when the ramp reaches the normal limit or the pelvis is back within 5 cm of its reach.
     // The cap is catch_up_mps + catch_up_ramp_mps2 * t up to the normal 4 m/s tow limit; only a hitch (dt > stale_dt_s) enters it.
-    if(in.dt>in.tuning->stale_dt_s) out.recovery_s=1e-9;
-    else if(out.recovery_s>0) {out.recovery_s+=in.dt;if(in.tuning->catch_up_mps+in.tuning->catch_up_ramp_mps2*out.recovery_s>=4.) out.recovery_s=0;}
+    if(out.recovery_s>0) {   // an active ramp keeps ramping through further stale frames (never re-armed); only an idle one arms
+        out.recovery_s+=in.dt;if(in.tuning->catch_up_mps+in.tuning->catch_up_ramp_mps2*out.recovery_s>=4.) out.recovery_s=0;
+    } else if(in.dt>in.tuning->stale_dt_s) out.recovery_s=1e-9;
     if(!(in.bind_reach>0) || !std::isfinite(in.bind_reach)) {out.bind_reach=std::clamp(reach,.4,1.4);return out;}
     if(reach<=in.bind_reach+.05) {out.recovery_s=0;return out;}
     if(in.limb_saturated) {out.disabled_saturated=true;return out;}
