@@ -198,6 +198,17 @@ int main() {
                 assert(r->implied_force_n>0);
             }
         }
+        {   // stale_dt_bounds_the_catch_up: the hand is 0.4 m ahead of the body; a normal frame closes at the full gain, a 0.5 s stale frame does not jump
+            GrabTuning big;big.strength_scale=10;   // cap out of the way so the motor law shows
+            auto probe=[&](double dt) {
+                PhysicalGrab g;auto b=id;assert(make(g,b,{}));
+                auto hnd=id;hnd.position.x=.4;g.sample(hnd,1,true,1,1120);
+                auto r=g.corpse_motor(b,true,1620,0,in(.6,dt,&big));assert(r && !r->motor.release);return r->motor.linear.x;};   // now = sample + 0.5 s: the jump's own velocity has decayed away
+            const double normal=probe(1./90),at_max=probe(big.dt_max),stale=probe(.5);
+                        assert(normal>5 && std::abs(at_max-normal)<1e-9);   // dt <= dt_max: unchanged
+            assert(stale<1.2 && stale>0 && stale<normal/4);      // 0.4 m x 18 / 15 = 0.48 m/s
+            assert(probe(2*big.dt_max)<normal && probe(2*big.dt_max)>stale);   // monotone in the staleness
+        }
         {   // release_writes_no_velocity
             PhysicalGrab g;auto b=id;assert(make(g,b,{}));
             auto hnd=id;hnd.position.x=.05;g.sample(hnd,1,true,1,1030);g.sample(hnd,0,true,1,1040);

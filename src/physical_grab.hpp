@@ -208,7 +208,11 @@ public:
         const auto source=source_tick?std::min(source_tick,tick_):tick_;
         const auto age=now>=source?now-source:0;
         const auto feed=now?(now>=source?velocity_*std::exp(-double(age>32?age-32:0)*.001/.035):Vec3{}):velocity_;
-        const auto want_v=grab_limit(error*18+feed,10),want_w=grab_limit(spin*12,5);
+        // Stale frame (a game-thread hitch: raw dt beyond dt_max): the hand kept moving while no motor ran, so `error` holds the whole stall.
+        // Closing it at the normal gain would command a jump (0.4 m x 18 = 7 m/s) and whip the chain; scale the error term by dt_max/dt so the
+        // catch-up speed a stall can ask for stays what a normal frame could (smooth catch-up, as the hand lags and then closes in Bonelab).
+        const double catch_up=in.dt>tuning.dt_max?tuning.dt_max/in.dt:1.;
+        const auto want_v=grab_limit(error*(18*catch_up)+feed,10),want_w=grab_limit(spin*12,5);
         // Unknown body velocity: step from rest (the caller counts the fallback).
         const Vec3 v0=in.velocity_known?in.body_velocity:Vec3{},w0=in.velocity_known?in.body_spin:Vec3{};
         const auto step=cap_velocity_step(v0,w0,want_v,want_w,previous_.basis[0],in.object_kg,in.inertia_kgm2,dt,tuning,in.share);

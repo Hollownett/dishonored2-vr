@@ -1,6 +1,6 @@
 #define _CRT_SECURE_NO_WARNINGS
 // Offline corpse-drag lab: a 17-body ragdoll driven by the PRODUCTION hand motor, force cap, tow planner and runaway envelope.
-// usage: corpse_drag_lab <out_dir>      writes scenarios.json (header, judged checks, metrics) and one CSV per scenario.
+// usage: corpse_drag_lab <out_dir> [--explore]      writes scenarios.json (header, judged checks, metrics) and one CSV per scenario.
 //
 // Consumed unmodified from src/: PhysicalGrab::corpse_motor (lag rule, cap_velocity_step, dt clamp), GrabTuning, ragdoll_class_kg and
 // hanging_mass, plan_tow, RunawayDetector, EntityLockout, DwellTimer (through PhysicalGrab). The scenario judgements are the tests.
@@ -16,6 +16,7 @@
 #include "../src/ragdoll_safety.hpp"
 #include "../src/corpse_tow.hpp"
 #include "../src/native_rigid_body.hpp"
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstdarg>
@@ -133,11 +134,16 @@ struct HandSpec {
 struct Frame {double t{};Vec3 hand{},held{},pelvis{};double held_speed{},peak17{},lag{},force{},cap_fraction{};bool capped{},written{},held_flag{};int reason{},peak_bone{};};
 struct Metrics {
     double peak_all=0,peak_after_hitch=0,force_ratio_hypot=0,force_ratio_axial=0,combined_force_ratio=0,lift_time=std::nan(""),release_time=std::nan(""),
-        lag_start=std::nan(""),pelvis_miss=std::nan(""),pelvis_travel=0,stretch=0,runaway_time=std::nan(""),max_lag=0,end_hold_z=0,end_gap=0,hand_stop=std::nan("");
+        lag_start=std::nan(""),pelvis_miss=std::nan(""),pelvis_travel=0,stretch=0,runaway_time=std::nan(""),max_lag=0,end_hold_z=0,end_gap=0,hand_stop=std::nan(""),
+        dv_ratio=0,release_lin=0,release_ang=0,min_hand_lift=std::nan("");   // dv_ratio: worst measured |dv| per tick over F_pinned*min(dt,1/30)/m_eff_pinned (independent of implied_force_n)
     ReleaseReason reason=ReleaseReason::none;
-    unsigned writes=0,writes_after_release=0,release_frame_writes=0,tow_writes=0,locked_frames=0;bool lock_at_099=false,lock_at_100=true;
+    unsigned writes=0,writes_after_release=0,release_frame_writes=0,tow_writes=0,locked_frames=0,all_hands_write_ticks=0;bool lock_at_099=false,lock_at_100=true;
     bool released=false;
 };
+// The implied force corpse_motor REPORTS, against the pinned literal envelope (self-reported: it only catches a changed constant). The measured
+// |dv| check is the one computed from the lab's own state with literals, independent of implied_force_n.
+Check force_report(const Metrics& m) {return below("reported implied_force_n vs pinned literal envelope hypot(900,270)",m.force_ratio_hypot,1.01);}
+Check dv_check(const Metrics& m) {return below("measured |dv| per tick vs hypot(900,270)*min(dt,1/30)/m_eff (independent)",m.dv_ratio,1.01);}
 struct Scenario {
     std::string name,title,desc,expect;bool info=false;
     GrabTuning tuning;std::vector<HandSpec> hands;
@@ -170,7 +176,7 @@ void simulate(Scenario& s) {
     std::array<double,17> z0{};for(int i=0;i<17;++i) z0[std::size_t(i)]=d.x[std::size_t(i)].z;
     const std::size_t n=s.hands.size();
     std::vector<PhysicalGrab> grabs(n);std::vector<Vec3> prev_hand(n);std::vector<double> tow_reach(n,0);
-    std::vector<bool> bound(n,false),open(n,false);
+    std::vector<bool> bound(n,false),open(n,false);std::vector<double> hand_lift(n,0);
     EntityLockout lockout;const std::uint32_t entity=7;
     Metrics& m=s.m;m=Metrics{};
     const std::uint64_t base=100000;
@@ -211,6 +217,7 @@ void simulate(Scenario& s) {
             std::array<std::optional<Vec3>,17> vel{};for(int i=0;i<17;++i) vel[std::size_t(i)]=d.v[std::size_t(i)];
             const auto verdict=RunawayDetector::check(vel);
             Frame fr;fr.t=t;fr.peak17=verdict.max_speed;
+            unsigned tick_writes=0;
             for(std::size_t h=0;h<n;++h) {
                 if(!grabs[h].held()) continue;
                 if(verdict.runaway) {
@@ -231,13 +238,20 @@ void simulate(Scenario& s) {
                 if(cm->lag_m<=.5) lag_since=std::nan("");
                 if(!cm->write) continue;
                 if(cm->motor.release) {
-                    const unsigned w_before=m.writes;
+                    // A release frame must carry a zero motor. The lab would apply a non-zero one, so it counts that as a write and records the magnitudes.
                     d.m[std::size_t(b)]=ragdoll_class_kg[std::size_t(b)];
-                    m.released=true;m.reason=cm->reason;m.release_time=t;m.release_frame_writes=m.writes-w_before;
+                    m.release_lin=std::max(m.release_lin,length(cm->motor.linear));m.release_ang=std::max(m.release_ang,length(cm->motor.angular));
+                    if(length(cm->motor.linear)>0 || length(cm->motor.angular)>0) ++m.release_frame_writes;
+                    m.released=true;m.reason=cm->reason;m.release_time=t;
                     if(cm->reason==ReleaseReason::lag && !std::isnan(lag_since)) m.lag_start=lag_since;
                     continue;
                 }
-                d.v[std::size_t(b)]=cm->motor.linear;++m.writes;fr.written=true;
+                {   // independent delta-v bound from literals (not the production constants): |dv| <= F_envelope * min(dt, 1/30) / (2 + share * clamp(kg, .5, 60))
+                    const double kg=std::clamp(in.object_kg,.5,60.),m_eff=2+hs.share*kg,dt_c=std::min(dt,1./30);
+                    const double dv=length(cm->motor.linear-d.v[std::size_t(b)]);
+                    m.dv_ratio=std::max(m.dv_ratio,dv/(std::hypot(kPinnedAxial,kPinnedLateral)*dt_c/m_eff));
+                }
+                d.v[std::size_t(b)]=cm->motor.linear;++m.writes;++tick_writes;fr.written=true;
                 if(s.drive==Scenario::stiff) d.m[std::size_t(b)]=1e6;
                 else if(s.drive==Scenario::coupled) d.m[std::size_t(b)]=std::max(ragdoll_class_kg[std::size_t(b)],effective_mass(in.object_kg,s.tuning,hs.share));
                 fr.force+=cm->implied_force_n;fr.capped=fr.capped||cm->capped;fr.cap_fraction=cm->cap_fraction;
@@ -251,6 +265,7 @@ void simulate(Scenario& s) {
                     if(plan.write) {d.v[0].x=plan.linear.x;d.v[0].y=plan.linear.y;++m.tow_writes;}
                 }
             }
+            if(n>1 && tick_writes==n) ++m.all_hands_write_ticks;
             last_motor_t=t;
             fr.held_flag=grabs[0].held();
             s.frames.push_back(fr);
@@ -265,10 +280,12 @@ void simulate(Scenario& s) {
         auto& fr=s.frames.back();fr.hand=prev_hand[0];fr.held=d.x[std::size_t(s.hands[0].bone)];fr.pelvis=d.x[0];fr.held_speed=length(d.v[std::size_t(s.hands[0].bone)]);
         fr.peak17=std::max(fr.peak17,d.peak_speed());fr.peak_bone=d.peak_bone();
         m.peak_all=std::max(m.peak_all,d.peak_speed());
+        for(std::size_t h=0;h<n;++h) hand_lift[h]=std::max(hand_lift[h],d.x[std::size_t(s.hands[h].bone)].z-z0[std::size_t(s.hands[h].bone)]);
         if(s.hitch_at>=0 && t>=settle_hitch_end-1e-9) m.peak_after_hitch=std::max(m.peak_after_hitch,d.peak_speed());
         if(s.lift_probe && std::isnan(m.lift_time) && d.x[std::size_t(s.hands[std::size_t(s.lift_hand)].bone)].z-z0[std::size_t(s.hands[std::size_t(s.lift_hand)].bone)]>=s.lift_target-.03) m.lift_time=t;
     }
     {const auto& last=s.frames.back();m.end_gap=std::hypot(last.pelvis.x-last.hand.x,last.pelvis.y-last.hand.y);}
+    m.min_hand_lift=*std::min_element(hand_lift.begin(),hand_lift.end());
     m.stretch=d.max_stretch;m.pelvis_travel=length(d.x[0]-Vec3{kRestXY[0].x,kRestXY[0].y,d.x[0].z});
     m.end_hold_z=d.x[std::size_t(s.hands[0].bone)].z-z0[std::size_t(s.hands[0].bone)];
     // drag probe: pelvis position 0.5 s after the hand's stop against its final rest (end of the run)
@@ -310,15 +327,15 @@ std::vector<Scenario> scenarios(const GrabTuning& base) {
         s.judge=[=](const Scenario&,const Metrics& m) {return std::vector<Check>{
             below("pelvis within 0.15 m of its rest 0.5 s after the hand stops",m.pelvis_miss,.15,"m"),speed_check(m,6),
             truth("no lag release",!m.released,m.released?"released":"held"),
-            below("implied force / hypot(900,270) N",m.force_ratio_hypot,1.01)};};
+            force_report(m),dv_check(m)};};
         all.push_back(s);
     }
     {
         auto s=make("lift_half_metre","Ankle lift 0.5 m","implied force never above the scaled cap envelope (+1%)");
         s.hands={lift_hand(13,.5,1.,0,1.,0,.25)};s.duration=2.5;s.lift_probe=true;
         s.judge=[=](const Scenario&,const Metrics& m) {return std::vector<Check>{
-            below("implied force / hypot(900,270) N",m.force_ratio_hypot,1.01),
-            below("implied force / 900 N axial cap (info: lateral part adds)",m.force_ratio_axial,1.0625,"",true),
+            force_report(m),dv_check(m),
+            below("reported implied_force_n / 900 N axial cap (info: lateral part adds)",m.force_ratio_axial,1.0625,"",true),
             truth("lifted 0.5 m",!std::isnan(m.lift_time),fmt("%.3f s",m.lift_time))};};
         all.push_back(s);
     }
@@ -335,26 +352,29 @@ std::vector<Scenario> scenarios(const GrabTuning& base) {
             truth("scale 1: slower than 1.0 s, or lag release",std::isnan(m.lift_time) || m.lift_time>1.0 || m.released,fmt("lift %.3f s released %d",m.lift_time,m.released))};};
         all.push_back(c);
     }
-    {
-        auto s=make("forgiving_swing","Swing the hanging body at 3 m/s for 2 s","no lag release; peak over all 17 bodies under 12 m/s");
-        const double R=kSwingR,rise_t=.3,tr=kSwingRamp,omega=kSwingV/R;
+    const auto swing=[&](const char* name,double v,bool info) {
+        auto s=make(name,fmt("Swing the hanging body at %.1f m/s for 2 s",v).c_str(),"no lag release; peak over all 17 bodies under 12 m/s");
+        const double R=kSwingR,rise_t=.3,tr=kSwingRamp,omega=v/R;
         HandSpec h;h.bone=13;Vec3 p=at_bone(13);p.z=kHang;const Vec3 centre=p-Vec3{R,0,0};
         h.path=[=](double t) {
             const double a=ramp_distance(t-rise_t,omega,tr);
             return Vec3{centre.x+R*std::cos(a),centre.y+R*std::sin(a),p.z};};
         const Vec3 shoulder{centre.x,centre.y,kShoulderZ};
         h.axis=[=](double,Vec3 pos) {return unit(pos-shoulder);};
-        s.hands={h};s.hang_z=kHang;s.pins={13};s.duration=rise_t+tr+2.0+.3;
+        s.hands={h};s.hang_z=kHang;s.pins={13};s.duration=rise_t+tr+2.0+.3;s.info=info;
         s.judge=[=](const Scenario&,const Metrics& m) {return std::vector<Check>{
-            truth("no lag release",!m.released,m.released?fmt("released at %.2f s",m.release_time):"held"),
-            below("peak over all 17 bodies",m.peak_all,12,"m/s"),below("implied force / hypot(900,270) N",m.force_ratio_hypot,1.01)};};
-        all.push_back(s);
-    }
+            truth("no lag release",!m.released,m.released?fmt("released at %.2f s",m.release_time):"held",info),
+            below("peak over all 17 bodies",m.peak_all,12,"m/s",info),force_report(m),dv_check(m)};};
+        return s;
+    };
+    all.push_back(swing("forgiving_swing",kSwingV,false));
+    {auto s=swing("swing_3ms_info",3.0,true);s.title+=" (the brief's original 3 m/s)";all.push_back(s);}
     {
         auto s=make("flick_4ms","4 m/s wrist flick","peak speed over all 17 bodies under 12 m/s");
         s.hands={drag_hand(7,{0,1,0},.6,4,.08)};s.duration=2.5;
         s.judge=[=](const Scenario&,const Metrics& m) {return std::vector<Check>{below("peak over all 17 bodies",m.peak_all,12,"m/s"),
-            below("implied force / hypot(900,270) N",m.force_ratio_hypot,1.01)};};
+            truth("the flick keeps the body held (no release)",!m.released,m.released?fmt("released at %.3f s, reason %u",m.release_time,unsigned(m.reason)):"held"),
+            force_report(m),dv_check(m)};};
         all.push_back(s);
     }
     {
@@ -362,7 +382,8 @@ std::vector<Scenario> scenarios(const GrabTuning& base) {
         auto h=lift_hand(7,0,1.,0);h.release_at=.5;h.path=[p=at_bone(7)](double) {return p;};s.hands={h};s.duration=1.5;
         s.judge=[=](const Scenario&,const Metrics& m) {return std::vector<Check>{
             truth("released by open fist",m.released && m.reason==ReleaseReason::open_fist,m.released?fmt("reason %u",unsigned(m.reason)):"held"),
-            truth("zero writes on or after the release",m.release_frame_writes==0 && m.writes_after_release==0,fmt("%u / %u",m.release_frame_writes,m.writes_after_release)),
+            truth("release frame motor is exactly zero (linear, angular magnitudes)",m.release_lin==0 && m.release_ang==0,fmt("%.3g / %.3g",m.release_lin,m.release_ang)),
+            truth("zero velocity writes on the release frame and after (release_frame_writes counts a non-zero release motor)",m.release_frame_writes==0 && m.writes_after_release==0,fmt("%u / %u",m.release_frame_writes,m.writes_after_release)),
             below("no body above 0.5 m/s",m.peak_all,.5,"m/s")};};
         all.push_back(s);
     }
@@ -376,12 +397,14 @@ std::vector<Scenario> scenarios(const GrabTuning& base) {
         all.push_back(s);
     }
     {
-        auto s=make("two_hands_two_limbs","Both hands lift different limbs","combined implied force <= two hands' envelope (+1%)");
+        auto s=make("two_hands_two_limbs","Both hands lift different limbs","both hands write each tick and lift >= 0.5 m; combined implied force <= two hands' envelope (+1%)");
         s.hands={lift_hand(13,.5,1.,0,.5,0,.25),lift_hand(10,.5,1.,0,.5,0,.25)};
         s.duration=2.5;s.lift_probe=true;
-        s.judge=[=](const Scenario& sc,const Metrics&) {double worst=0;
+        s.judge=[=](const Scenario& sc,const Metrics& m) {double worst=0;
             for(const auto& fr:sc.frames) worst=std::max(worst,fr.force);
-            return std::vector<Check>{below("combined implied force / (2 x hypot(900,270))",worst/(2*std::hypot(kPinnedAxial,kPinnedLateral)),1.01)};};
+            return std::vector<Check>{below("combined reported implied_force_n vs 2 x pinned envelope hypot(900,270)",worst/(2*std::hypot(kPinnedAxial,kPinnedLateral)),1.01),dv_check(m),
+                truth("both hands write on the same tick",m.all_hands_write_ticks>0,fmt("%u ticks",m.all_hands_write_ticks)),
+                truth("the body lifts >= 0.5 m (the lower of the two held limbs)",m.min_hand_lift>=.5,fmt("%.3f m",m.min_hand_lift))};};
         all.push_back(s);
     }
     {
@@ -391,16 +414,32 @@ std::vector<Scenario> scenarios(const GrabTuning& base) {
             truth("released by lag",m.released && m.reason==ReleaseReason::lag,m.released?fmt("reason %u",unsigned(m.reason)):"held"),
             truth("release 0.25 s (+/- 1 frame) after the error passed 0.5 m",!std::isnan(m.lag_start) && std::fabs((m.release_time-m.lag_start)-.25)<=kFrame*1.01,
                 fmt("%.4f s",m.release_time-m.lag_start)),
+            truth("release frame motor is exactly zero",m.release_lin==0 && m.release_ang==0,fmt("%.3g / %.3g",m.release_lin,m.release_ang)),
             truth("zero velocity written at and after the release",m.release_frame_writes==0 && m.writes_after_release==0,fmt("%u / %u",m.release_frame_writes,m.writes_after_release)),
-            below("implied force / hypot(900,270) N while the body is pinned",m.force_ratio_hypot,1.01)};};
+            force_report(m),dv_check(m)};};
         all.push_back(s);
     }
     {
-        auto s=make("hitch","One 0.5 s game-thread hitch during a slow wrist drag (0.3 m/s: the hand jumps 0.15 m)","no body above 6 m/s after the hitch");
-        s.hands={drag_hand(7,{0,1,0},3,kHitchV,.3)};s.hitch_at=1.2;s.hitch_len=.5;s.duration=4.5;
-        s.judge=[=](const Scenario& sc,const Metrics& m) {return std::vector<Check>{below("no body above 6 m/s after the hitch",m.peak_after_hitch,6,"m/s"),
-            truth("the first lagging frame after the hitch does not release (dt clamped for the lag timer too)",!m.released || m.release_time>sc.hitch_at+sc.hitch_len+.1,m.released?fmt("released at %.3f s (hitch ends %.3f s)",m.release_time,sc.hitch_at+sc.hitch_len):"held")};};
+        // The catch-up limit (dt_max/dt on a stale frame) bounds the stale frame only; the NEXT normal frames still close the leftover lag at the full
+        // gain (a 0.5 s hitch leaves the body ~0.3 m behind), so the far end of the chain whips. Measured (see the report): 6 m/s is NOT achieved at 0.8 m/s.
+        // Judged: the runaway envelope (12 m/s) is not reached and the hold survives; the 6 m/s target is reported as INFO. At 1.2 m/s even the 12 m/s bound
+        // is exceeded (known limit, INFO until the catch-up rule is extended past the stale frame).
+        const auto hitch_judge=[](double limit,bool info,bool want6) {return [=](const Scenario& sc,const Metrics& m) {std::vector<Check> c{
+            below(fmt("no body above %g m/s after the hitch",limit),m.peak_after_hitch,limit,"m/s",info),
+            truth("no runaway release after the hitch",!(m.released && m.reason==ReleaseReason::runaway),m.released?fmt("released at %.3f s, reason %u",m.release_time,unsigned(m.reason)):"held",info),
+            truth("the first lagging frame after the hitch does not release (dt clamped for the lag timer too)",!m.released || m.release_time>sc.hitch_at+sc.hitch_len+.1,
+                m.released?fmt("released at %.3f s (hitch ends %.3f s)",m.release_time,sc.hitch_at+sc.hitch_len):"held",info)};
+            if(want6) c.push_back(below("INFO target: no body above 6 m/s after the hitch (not achieved by the catch-up limit alone)",m.peak_after_hitch,6,"m/s",true));
+            return c;};};
+        auto s=make("hitch","One 0.5 s game-thread hitch during a 0.8 m/s wrist drag (the hand jumps 0.4 m)","no body above 12 m/s (runaway limit) after the hitch, hold survives; 6 m/s target reported as INFO");
+        s.hands={drag_hand(7,{0,1,0},3,.8,.3)};s.hitch_at=1.2;s.hitch_len=.5;s.duration=4.5;s.judge=hitch_judge(12,false,true);
         all.push_back(s);
+        auto f=make("hitch_1p2_info","INFO 0.5 s hitch during a 1.2 m/s wrist drag (the hand jumps 0.6 m)","target < 12 m/s: KNOWN LIMIT, exceeded");
+        f.info=true;f.hands={drag_hand(7,{0,1,0},3,1.2,.3)};f.hitch_at=1.2;f.hitch_len=.5;f.duration=4.5;f.judge=hitch_judge(12,true,false);
+        all.push_back(f);
+        auto g=make("hitch_slow_0p3","One 0.5 s hitch during a slow 0.3 m/s drag (the hand jumps 0.15 m)","no body above 6 m/s after the hitch");
+        g.hands={drag_hand(7,{0,1,0},3,kHitchV,.3)};g.hitch_at=1.2;g.hitch_len=.5;g.duration=4.5;g.judge=hitch_judge(6,false,false);
+        all.push_back(g);
         auto c=make("hitch_lift","One 0.5 s hitch while lifting a hanging body at 1 m/s (the hand jumps 0.5 m)","no body above 6 m/s after the hitch; the clamped dt keeps the heavy lift gentle");
         c.hands={lift_hand(13,1.,1.,0,1.,kHang)};c.hang_z=kHang;c.pins={13};c.hitch_at=.3;c.hitch_len=.5;c.duration=3;c.lift_probe=true;
         c.judge=[=](const Scenario& sc,const Metrics& m) {return std::vector<Check>{below("no body above 6 m/s after the hitch",m.peak_after_hitch,6,"m/s"),
@@ -411,7 +450,7 @@ std::vector<Scenario> scenarios(const GrabTuning& base) {
         auto s=make("collar_lift","Chest (collar) lift 0.5 m","implied force within the scaled cap envelope (+1%)");
         s.hands={lift_hand(2,.5,1.,0,1.,0,.25)};s.duration=2.5;s.lift_probe=true;
         s.judge=[=](const Scenario&,const Metrics& m) {return std::vector<Check>{
-            below("implied force / hypot(900,270) N",m.force_ratio_hypot,1.01),
+            force_report(m),dv_check(m),
             truth("lifted 0.5 m",!std::isnan(m.lift_time),fmt("%.3f s",m.lift_time))};};
         all.push_back(s);
     }
@@ -427,10 +466,10 @@ std::vector<Scenario> scenarios(const GrabTuning& base) {
             truth("lift time recorded",!std::isnan(m.lift_time),fmt("%.3f s",m.lift_time))};};
         all.push_back(two);
     }
-    // ---- tow scenarios: drag_3m and the wall case with the tow on (real pelvis velocity through plan_tow)
+    // ---- tow scenarios: INFO only. The production default is tow OFF (grab_force_cap.hpp); Task 10 wires limb_saturated before it may be judged on.
     {
         auto s=make("drag_3m_tow","Wrist drag 3 m with the pelvis tow ON","same judgement as drag_3m, tow writes counted");
-        s.tuning.tow=true;s.hands={drag_hand(7,{0,1,0},3,1.2,.3)};s.drag_probe=true;s.drag_stop=move_time(3,1.2,.3);s.duration=s.drag_stop+3;
+        s.info=true;s.tuning.tow=true;s.hands={drag_hand(7,{0,1,0},3,1.2,.3)};s.drag_probe=true;s.drag_stop=move_time(3,1.2,.3);s.duration=s.drag_stop+3;
         s.judge=[=](const Scenario&,const Metrics& m) {return std::vector<Check>{
             below("pelvis within 0.15 m of its rest 0.5 s after the hand stops",m.pelvis_miss,.15,"m"),speed_check(m,6),
             truth("no lag release",!m.released,m.released?"released":"held"),
@@ -438,14 +477,14 @@ std::vector<Scenario> scenarios(const GrabTuning& base) {
             below("the body ends within 0.8 m of the hand (the tow brings it along; limb-only trails by an arm length)",m.end_gap,.8,"m")};};
         all.push_back(s);
         auto w=make("stuck_on_wall_tow","Blocked by a wall, tow ON","still released by lag at 0.25 s, zero velocity written");
-        w.tuning.tow=true;w.hands={drag_hand(7,{0,1,0},2.0,1.2,.3)};w.wall_y=kWrist.y+.2;w.duration=3.5;
+        w.info=true;w.tuning.tow=true;w.hands={drag_hand(7,{0,1,0},2.0,1.2,.3)};w.wall_y=kWrist.y+.2;w.duration=3.5;
         w.judge=[=](const Scenario&,const Metrics& m) {return std::vector<Check>{
             truth("released by lag",m.released && m.reason==ReleaseReason::lag,m.released?fmt("reason %u",unsigned(m.reason)):"held"),
             truth("zero velocity written at and after the release",m.release_frame_writes==0 && m.writes_after_release==0,fmt("%u / %u",m.release_frame_writes,m.writes_after_release)),
             below("no body above 6 m/s",m.peak_all,6,"m/s")};};
         all.push_back(w);
         auto f=make("flick_4ms_tow","4 m/s flick with the tow ON","peak under 12 m/s");
-        f.tuning.tow=true;f.hands={drag_hand(7,{0,1,0},.6,4,.08)};f.duration=2.5;
+        f.info=true;f.tuning.tow=true;f.hands={drag_hand(7,{0,1,0},.6,4,.08)};f.duration=2.5;
         f.judge=[=](const Scenario&,const Metrics& m) {return std::vector<Check>{below("peak over all 17 bodies",m.peak_all,12,"m/s")};};
         all.push_back(f);
     }
@@ -478,10 +517,6 @@ std::vector<Scenario> scenarios(const GrabTuning& base) {
             auto l=make(k?"forgiving_lift_light":"forgiving_lift_coupled",(std::string("INFO one-hand hanging lift, ")+names[k]+" joint solve").c_str(),"info");
             l.info=true;l.drive=k?Scenario::light:Scenario::coupled;l.hands={lift_hand(13,.5,kLiftV,0,1.,kHang)};l.hang_z=kHang;l.pins={13};l.duration=2.5;l.lift_probe=true;l.judge=row;all.push_back(l);
         }
-        auto h=make("hitch_fast_drag","INFO 0.5 s hitch during a 0.8 m/s drag (the hand jumps 0.4 m)","info: the chain whips");
-        h.info=true;h.hands={drag_hand(7,{0,1,0},3,.8,.3)};h.hitch_at=1.2;h.hitch_len=.5;h.duration=4.5;
-        h.judge=[=](const Scenario&,const Metrics& m) {return std::vector<Check>{truth("peak after the hitch (runaway limit 12)",true,fmt("%.2f m/s",m.peak_after_hitch),true)};};
-        all.push_back(h);
     }
     return all;
 }
@@ -497,30 +532,39 @@ void write_csv(const fs::path& dir,const Scenario& s) {
 
 int main(int argc,char** argv) {
     try {
-        if(argc<2) {std::cerr<<"usage: corpse_drag_lab <out_dir>\n";return 2;}
-        const fs::path dir=argv[1];fs::create_directories(dir);
-        if(const char* e=std::getenv("CORPSE_LAB_LIFT_V")) kLiftV=std::atof(e);
-        if(const char* e=std::getenv("CORPSE_LAB_HANG_Z")) kHang=std::atof(e);
-        if(const char* e=std::getenv("CORPSE_LAB_SWING_RAMP")) kSwingRamp=std::atof(e);
-        if(const char* e=std::getenv("CORPSE_LAB_SWING_V")) kSwingV=std::atof(e);
-        if(const char* e=std::getenv("CORPSE_LAB_SWING_R")) kSwingR=std::atof(e);
-        if(const char* e=std::getenv("CORPSE_LAB_BRISK")) kBrisk=std::atof(e);
-        if(const char* e=std::getenv("CORPSE_LAB_SHOULDER_Z")) kShoulderZ=std::atof(e);
-        if(const char* e=std::getenv("CORPSE_LAB_STAND")) kStand=std::atof(e);
+        // usage: corpse_drag_lab <out_dir> [--explore]. The default run uses the shipped defaults and the fixed scenario constants only;
+        // the CORPSE_LAB_* environment overrides are honoured only with --explore (tuning exploration, never a judged run).
+        bool explore=false;const char* out=nullptr;
+        for(int a=1;a<argc;++a) {if(std::string(argv[a])=="--explore") explore=true; else if(!out) out=argv[a]; else {out=nullptr;break;}}
+        if(!out) {std::cerr<<"usage: corpse_drag_lab <out_dir> [--explore]\n";return 2;}
+        const fs::path dir=out;fs::create_directories(dir);
+        const auto env=[&](const char* name)->const char* {return explore?std::getenv(name):nullptr;};
+        if(const char* e=env("CORPSE_LAB_LIFT_V")) kLiftV=std::atof(e);
+        if(const char* e=env("CORPSE_LAB_HANG_Z")) kHang=std::atof(e);
+        if(const char* e=env("CORPSE_LAB_SWING_RAMP")) kSwingRamp=std::atof(e);
+        if(const char* e=env("CORPSE_LAB_SWING_V")) kSwingV=std::atof(e);
+        if(const char* e=env("CORPSE_LAB_SWING_R")) kSwingR=std::atof(e);
+        if(const char* e=env("CORPSE_LAB_BRISK")) kBrisk=std::atof(e);
+        if(const char* e=env("CORPSE_LAB_SHOULDER_Z")) kShoulderZ=std::atof(e);
+        if(const char* e=env("CORPSE_LAB_STAND")) kStand=std::atof(e);
         GrabTuning base;   // production defaults, as shipped (grab_force_cap.hpp)
-        if(const char* e=std::getenv("CORPSE_LAB_LIFT_FRACTION")) base.lift_fraction=std::atof(e);
-        if(const char* e=std::getenv("CORPSE_LAB_SCALE")) base.strength_scale=std::atof(e);
-        if(const char* e=std::getenv("CORPSE_LAB_HITCH_V")) kHitchV=std::atof(e);
-        if(const char* e=std::getenv("CORPSE_LAB_LIN_DAMP")) kLinDamp=std::atof(e);
-        if(const char* e=std::getenv("CORPSE_LAB_JOINT_DAMP")) kJointDamp=std::atof(e);
-        if(const char* e=std::getenv("CORPSE_LAB_HAND_KG")) base.hand_kg=std::atof(e);
-        if(const char* e=std::getenv("CORPSE_LAB_DT_MAX")) base.dt_max=std::atof(e);
-        if(const char* e=std::getenv("CORPSE_LAB_FLOOR")) base.mass_floor_kg=std::atof(e);
-        if(const char* e=std::getenv("CORPSE_LAB_TORQUE")) base.torque_nm=std::atof(e);
+        if(const char* e=env("CORPSE_LAB_LIFT_FRACTION")) base.lift_fraction=std::atof(e);
+        if(const char* e=env("CORPSE_LAB_SCALE")) base.strength_scale=std::atof(e);
+        if(const char* e=env("CORPSE_LAB_HITCH_V")) kHitchV=std::atof(e);
+        if(const char* e=env("CORPSE_LAB_LIN_DAMP")) kLinDamp=std::atof(e);
+        if(const char* e=env("CORPSE_LAB_JOINT_DAMP")) kJointDamp=std::atof(e);
+        if(const char* e=env("CORPSE_LAB_HAND_KG")) base.hand_kg=std::atof(e);
+        if(const char* e=env("CORPSE_LAB_DT_MAX")) base.dt_max=std::atof(e);
+        if(const char* e=env("CORPSE_LAB_FLOOR")) base.mass_floor_kg=std::atof(e);
+        if(const char* e=env("CORPSE_LAB_TORQUE")) base.torque_nm=std::atof(e);
         auto list=scenarios(base);
+        for(auto& sc:list) {   // label the model: judged rows are logic checks on the stiff joint model; everything else is INFO
+            if(sc.info) {if(sc.title.rfind("INFO",0)!=0) sc.title="INFO "+sc.title;}
+            else {if(sc.drive!=Scenario::stiff) throw std::runtime_error("judged scenario "+sc.name+" must use the stiff joint model");sc.title+=" [logic (stiff model)]";}
+        }
         unsigned failed=0;std::string json="{\"honesty\":"+quote("Offline model, not the Havok solver: point masses with the class-table masses, max-separation joints with damping (position based), a floor at z=bone radius with Coulomb friction, optional wall half-space; no rotation, body-body collision or joint limits. The motor, force cap, lag rule, tow planner and runaway envelope are the production headers. It pins logic and the shape of the feel; only the headset (Tier C) declares feel met.")+
             ",\"dt\":"+jnum(kFrame)+",\"substeps\":"+jnum(kSub)+",\"tuning\":{\"strength_scale\":"+jnum(base.strength_scale)+",\"axial_n\":"+jnum(base.axial_n)+",\"lateral_n\":"+jnum(base.lateral_n)+",\"torque_nm\":"+jnum(base.torque_nm)+
-            ",\"lift_fraction\":"+jnum(base.lift_fraction)+",\"hand_kg\":"+jnum(base.hand_kg)+",\"mass_floor_kg\":"+jnum(base.mass_floor_kg)+",\"mass_ceiling_kg\":"+jnum(base.mass_ceiling_kg)+",\"tow\":"+(base.tow?"true":"false")+"},\"scenarios\":[";
+            ",\"lift_fraction\":"+jnum(base.lift_fraction)+",\"hand_kg\":"+jnum(base.hand_kg)+",\"mass_floor_kg\":"+jnum(base.mass_floor_kg)+",\"mass_ceiling_kg\":"+jnum(base.mass_ceiling_kg)+",\"tow\":"+(base.tow?"true":"false")+"},\"explore\":"+(explore?"true":"false")+",\"scenarios\":[";
         std::printf("%-30s %-5s %s\n","scenario","state","checks");
         for(std::size_t n=0;n<list.size();++n) {
             auto& s=list[n];simulate(s);s.checks=s.judge(s,s.m);
@@ -533,7 +577,7 @@ int main(int argc,char** argv) {
             std::printf("\n");
             std::printf("%-30s       peak %.2f m/s, lift %s, release %s, lag max %.2f, writes %u, tow %u, stretch %.3f m, force_ratio %.3f\n","",s.m.peak_all,std::isnan(s.m.lift_time)?"-":fmt("%.3f s",s.m.lift_time).c_str(),
                 s.m.released?fmt("%u@%.3f",unsigned(s.m.reason),s.m.release_time).c_str():"-",s.m.max_lag,s.m.writes,s.m.tow_writes,s.m.stretch,s.m.force_ratio_hypot);
-            json+=std::string(n?",":"")+"{\"name\":"+quote(s.name)+",\"title\":"+quote(s.title)+",\"expect\":"+quote(s.expect)+",\"status\":"+quote(status)+",\"metrics\":{"+
+            json+=std::string(n?",":"")+"{\"name\":"+quote(s.name)+",\"title\":"+quote(s.title)+",\"expect\":"+quote(s.expect)+",\"status\":"+quote(status)+",\"model\":"+quote(s.info?"info":"logic (stiff model)")+",\"metrics\":{"+
                 "\"peak_all\":"+jnum(s.m.peak_all)+",\"peak_after_hitch\":"+jnum(s.m.peak_after_hitch)+",\"force_ratio_hypot\":"+jnum(s.m.force_ratio_hypot)+",\"lift_time\":"+jnum(s.m.lift_time)+
                 ",\"release_time\":"+jnum(s.m.release_time)+",\"release_reason\":"+std::to_string(unsigned(s.m.reason))+",\"max_lag\":"+jnum(s.m.max_lag)+",\"pelvis_miss\":"+jnum(s.m.pelvis_miss)+
                 ",\"pelvis_travel\":"+jnum(s.m.pelvis_travel)+",\"joint_stretch\":"+jnum(s.m.stretch)+",\"writes\":"+std::to_string(s.m.writes)+",\"tow_writes\":"+std::to_string(s.m.tow_writes)+"},\"checks\":[";

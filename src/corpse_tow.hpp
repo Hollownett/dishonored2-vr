@@ -24,7 +24,9 @@ inline TowOutput plan_tow(const TowInput& in) {
     if(!(in.bind_reach>0) || !std::isfinite(in.bind_reach)) {out.bind_reach=std::clamp(reach,.4,1.4);return out;}
     if(reach<=in.bind_reach+.05) return out;
     if(in.limb_saturated) {out.disabled_saturated=true;return out;}
-    const double speed=std::min((reach-in.bind_reach)*6,4.);
+    // A stale frame (raw dt beyond dt_max) scales the catch-up by dt_max/dt, the same rule as PhysicalGrab::corpse_motor.
+    const double catch_up=in.dt>in.tuning->dt_max?in.tuning->dt_max/in.dt:1.;
+    const double speed=std::min((reach-in.bind_reach)*6*catch_up,4.);
     const Vec3 dir=pull*(1/reach);
     const Vec3 wanted=dir*speed;
     Vec3 current=in.pelvis_velocity;current.z=0;

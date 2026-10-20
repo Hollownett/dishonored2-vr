@@ -14,12 +14,8 @@ TowInput base(const GrabTuning& t,double reach,double bind) {
 }
 }
 int main() {
-    {   // on_by_default_writes (flipped by the Task 9 corpse-drag lab: the pelvis follows a dragged limb)
-        const GrabTuning t;CHECK(t.tow);
-        TowInput in=base(t,2,.5);const auto out=plan_tow(in);CHECK(out.write && !out.disabled_saturated);
-    }
-    {   // off_when_disabled_no_write (build/grab-tuning.cfg "tow 0")
-        GrabTuning t;t.tow=false;
+    {   // off_by_default_no_write (Task 10 turns it on when it wires limb_saturated)
+        const GrabTuning t;CHECK(!t.tow);
         TowInput in=base(t,2,.5);const auto out=plan_tow(in);CHECK(!out.write && !out.disabled_saturated && near(out.bind_reach,.5));
     }
     {   // first_call_sets_reach_clamped
@@ -36,10 +32,16 @@ int main() {
     }
     {   // speed_6_per_metre_max_4 (force cap loosened so the law shows)
         auto t=tow_on();t.strength_scale=10;t.axial_n=600;t.mass_floor_kg=.1;
-        auto in=base(t,1.3,.8);in.pelvis_kg=.5;in.dt=.1;
+        auto in=base(t,1.3,.8);in.pelvis_kg=.5;in.dt=1./30;
         auto out=plan_tow(in);CHECK(out.write && near(length(out.linear),3,1e-6) && near(out.linear.x,3,1e-6));
-        in=base(t,2.8,.8);in.pelvis_kg=.5;in.dt=.1;
+        in=base(t,2.8,.8);in.pelvis_kg=.5;in.dt=1./30;
         out=plan_tow(in);CHECK(out.write && near(length(out.linear),4,1e-6));
+    }
+    {   // stale_dt_scales_the_catch_up: a 0.5 s stale frame asks for dt_max/dt of the normal speed (2.0 m x 6 / 15 = 0.8), dt <= dt_max is unchanged
+        auto t=tow_on();t.strength_scale=10;t.axial_n=600;t.mass_floor_kg=.1;
+        auto in=base(t,2.8,.8);in.pelvis_kg=.5;in.dt=.5;
+        auto out=plan_tow(in);CHECK(out.write && near(length(out.linear),.8,1e-6));
+        in.dt=t.dt_max;out=plan_tow(in);CHECK(near(length(out.linear),4,1e-6));
     }
     {   // horizontal_only
         auto t=tow_on();auto in=base(t,1.3,.8);in.target={1.3,0,1};in.pelvis_velocity={0,0,5};
@@ -64,7 +66,7 @@ int main() {
     }
     {   // horizontal speed equals the law with a loose cap; vertical offset does not count as reach
         auto t=tow_on();t.strength_scale=10;t.axial_n=600;t.mass_floor_kg=.1;
-        auto in=base(t,1.3,.8);in.pelvis_kg=.5;in.dt=.1;in.target={1.3,0,2};
+        auto in=base(t,1.3,.8);in.pelvis_kg=.5;in.dt=1./30;in.target={1.3,0,2};
         auto out=plan_tow(in);CHECK(out.write && near(out.linear.x,3,1e-6) && out.linear.z==0);
         in.target={.84,0,5};CHECK(!plan_tow(in).write);
     }
