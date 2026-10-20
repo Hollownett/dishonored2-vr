@@ -1,0 +1,32 @@
+{
+  "sword_contact": {
+    "enqueued": 10,
+    "capture_rejected": 0,
+    "consumer_rejected": 0,
+    "stealth": [
+      1,
+      0,
+      1,
+      0,
+      0
+    ],
+    "stealth_reject": [
+      8,
+      1,
+      0,
+      0,
+      0
+    ],
+    "hit_height": [
+      1,
+      5,
+      2
+    ]
+  },
+  "takedown": {
+    "swings": 10,
+    "swings_with_kill": 1,
+    "ga_offered_frames": 0,
+    "ga_offered_swings": 0
+  }
+}

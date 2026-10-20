@@ -553,6 +553,8 @@ python tests\sword_combat_routing_check.py
 if not "%errorlevel%"=="0" exit /b 1
 python tests\native_sword_contact_routing_check.py
 if not "%errorlevel%"=="0" exit /b 1
+python tests\stealth_session_report_check.py
+if not "%errorlevel%"=="0" exit /b 1
 cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT /Isrc /Ithird_party\minhook\include tests\native_sword_contact_check.cpp /Fo:build\native_sword_contact_check.obj /Fe:build\native_sword_contact_check.exe
 if not "%errorlevel%"=="0" exit /b 1
 build\native_sword_contact_check.exe
