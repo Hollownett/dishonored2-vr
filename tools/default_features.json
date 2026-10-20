@@ -1,0 +1,117 @@
+{
+ "version": 1,
+ "features": [
+  {
+   "id": "full-body",
+   "file": "full-body",
+   "kind": "enable",
+   "label": "Full body and tracked arms",
+   "help": "Shows your body and tracks both arms and legs in VR.",
+   "default": true
+  },
+  {
+   "id": "power-gestures",
+   "file": "power-gestures",
+   "kind": "enable",
+   "label": "Power gestures (new, untested)",
+   "help": "Hand gestures that trigger your powers; not yet tested in a headset.",
+   "default": false
+  },
+  {
+   "id": "hand-clamp",
+   "file": "no-hand-clamp",
+   "kind": "disable",
+   "label": "Hand reach clamp",
+   "help": "Keeps your virtual hands from stretching away from your body.",
+   "default": true
+  },
+  {
+   "id": "hand-blink",
+   "file": "no-hand-blink",
+   "kind": "disable",
+   "label": "Blink aimed by the left hand",
+   "help": "Blink aims along your left hand instead of your head.",
+   "default": true
+  },
+  {
+   "id": "hand-crosshair",
+   "file": "no-hand-crosshair",
+   "kind": "disable",
+   "label": "Hand crosshair",
+   "help": "Shows the aiming crosshair where your hand points.",
+   "default": true
+  },
+  {
+   "id": "hand-shots",
+   "file": "no-hand-shots",
+   "kind": "disable",
+   "label": "Shots from the hand",
+   "help": "Firearms and crossbow shoot along your hand, not your head.",
+   "default": true
+  },
+  {
+   "id": "stealth-contact",
+   "file": "no-stealth-contact",
+   "kind": "disable",
+   "label": "Stealth kills by sword contact",
+   "help": "Touching an unaware enemy with the sword performs the stealth kill.",
+   "default": true
+  },
+  {
+   "id": "contact-damage",
+   "file": "no-contact-damage",
+   "kind": "disable",
+   "label": "Sword contact damage",
+   "help": "Sword hits you land physically deal damage.",
+   "default": true
+  },
+  {
+   "id": "weapon-collision",
+   "file": "no-weapon-collision",
+   "kind": "disable",
+   "label": "Weapon collision",
+   "help": "The sword collides with enemies and the world.",
+   "default": true
+  },
+  {
+   "id": "impact-fx",
+   "file": "no-impact-fx",
+   "kind": "disable",
+   "label": "Impact effects",
+   "help": "Plays hit effects and feedback when the sword strikes.",
+   "default": true
+  },
+  {
+   "id": "takedown-range",
+   "file": "no-takedown-range",
+   "kind": "disable",
+   "label": "Longer takedown range",
+   "help": "Takedown reach is 1.5 times longer to suit VR.",
+   "default": true
+  },
+  {
+   "id": "slash-speed",
+   "file": "no-slash-speed",
+   "kind": "disable",
+   "label": "Faster slashes",
+   "help": "Slash animations play 1.7 times faster.",
+   "default": true
+  },
+  {
+   "id": "physical-crouch",
+   "file": "no-physical-crouch",
+   "kind": "disable",
+   "label": "Physical crouch",
+   "help": "Crouch by crouching in real life.",
+   "default": true
+  },
+  {
+   "id": "vr-glyphs",
+   "file": "no-vr-glyphs",
+   "kind": "disable",
+   "label": "Quest button labels",
+   "help": "Shows Quest controller button names instead of gamepad glyphs.",
+   "default": true
+  }
+ ]
+}

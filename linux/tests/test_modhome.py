@@ -273,6 +273,84 @@ class OpenXrTests(Case):
         self.fetch_fails(lambda url, **kw: io.BytesIO(b"garbage"), "sha256")
 
 
+class FeatureTests(Case):
+    def features(self):
+        return json.loads((modhome.DEFAULT_FEATURES).read_text())["features"]
+
+    def test_install_seeds_default_features(self):
+        self.install()
+        b = self.home / "build"
+        for f in self.features():
+            want = f["kind"] == "enable" and f["default"]
+            self.assertEqual((b / f["file"]).exists(), want, f["id"])
+        self.assertTrue((b / "launcher-features.json").is_file())
+        self.assertTrue((b / "full-body").exists())
+        self.assertFalse((b / "power-gestures").exists())  # default false: not created
+        self.assertFalse((b / "no-hand-blink").exists())
+        self.assertEqual(set(json.loads((b / "launcher-features.json").read_text())["seeded"]),
+                         {f["id"] for f in self.features()})
+
+    def test_install_is_idempotent_with_features(self):
+        self.install()
+        self.assertEqual(self.install(), [])
+
+    def test_disabled_feature_survives_reinstall(self):
+        b = self.home / "build"
+        b.mkdir(parents=True)
+        (b / "launcher-features.json").write_text(json.dumps({"version": 1, "off": ["full-body"], "seeded": ["full-body"]}))
+        self.install()
+        self.assertFalse((b / "full-body").exists())
+        self.install()
+        self.assertFalse((b / "full-body").exists())
+
+    def test_handmade_no_knob_adopted(self):
+        b = self.home / "build"
+        b.mkdir(parents=True)
+        (b / "no-stealth-contact").write_bytes(b"")
+        self.install()
+        self.assertTrue((b / "no-stealth-contact").exists())
+        self.assertIn("stealth-contact", json.loads((b / "launcher-features.json").read_text())["off"])
+
+    def test_handmade_enable_knob_and_unknown_files_kept(self):
+        b = self.home / "build"
+        b.mkdir(parents=True)
+        (b / "power-gestures").write_bytes(b"")
+        (b / "hud-scale").write_text("0.75")
+        self.install()
+        self.assertTrue((b / "power-gestures").exists())
+        self.assertEqual((b / "hud-scale").read_text(), "0.75")
+        self.assertTrue((b / "fsr4.off").exists())
+
+    def test_corrupt_state_file_replaced(self):
+        b = self.home / "build"
+        b.mkdir(parents=True)
+        (b / "launcher-features.json").write_text("{garbage")
+        self.install()
+        self.assertTrue((b / "launcher-features.json.bad").exists())
+        self.assertTrue((b / "full-body").exists())
+
+    def test_requires_dll_knob_skipped_when_dll_lacks_it(self):
+        lst = self.tmp / "list.json"
+        lst.write_text(json.dumps({"version": 1, "features": [
+            {"id": "x", "file": "x-knob", "kind": "enable", "label": "x", "help": "x", "default": True, "requires_dll_knob": "x-knob"}]}))
+        modhome.apply_default_features(self.home, lst, dll=b"nothing")
+        self.assertFalse((self.home / "build/x-knob").exists())
+        modhome.apply_default_features(self.home, lst, dll="x-knob".encode("utf-16-le"))
+        self.assertTrue((self.home / "build/x-knob").exists())
+
+    def test_features_file_matches_csharp_list(self):
+        import re
+        fs = self.features()
+        ids = [f["id"] for f in fs]
+        self.assertEqual(len(ids), len(set(ids)))
+        for f in fs:
+            self.assertRegex(f["file"], r"^[a-z0-9-]+$")
+            self.assertIn(f["kind"], ("enable", "disable"))
+            self.assertIsInstance(f["default"], bool)
+            self.assertTrue(f["label"] and f["help"])
+        self.assertFalse({"hold-y-menu", "corpse-grab"} & set(ids))
+
+
 class UninstallTests(Case):
     def test_uninstall_removes_only_our_files(self):
         self.install()

@@ -45,6 +45,19 @@ public static class ModHome
         foreach (var old in Directory.GetFiles(Path.Combine(dir, "build"), "d2vr_render_probe_arm_v*.dll"))
             if (!Path.GetFileName(old).Equals(dll, StringComparison.OrdinalIgnoreCase))
                 try { File.Delete(old); } catch (IOException) { } catch (UnauthorizedAccessException) { }
+        // Default-on feature knobs (tools/default_features.json): seeded once, then the user's choices and hand-made knobs are kept.
+        try
+        {
+            using var fs = asm.GetManifestResourceStream("features.json");
+            if (fs != null)
+            {
+                var list = Features.Load(fs);
+                var known = list.Any(f => f.RequiresDllKnob != null) ? Features.ScanKnobs(File.ReadAllBytes(dllPath)) : null;
+                log?.Invoke($"Features: {Features.Apply(Path.Combine(dir, "build"), list, known)} seeded");
+            }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidDataException or System.Text.Json.JsonException or KeyNotFoundException)
+        { log?.Invoke("Features not applied: " + ex.Message); }
         return new Candidate(manifest, dll, dllPath);
     }
 

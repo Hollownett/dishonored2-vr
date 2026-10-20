@@ -54,6 +54,8 @@ Out of scope for this version: FSR 4, Virtual Desktop, WiVRn/ALVR, flatpak Steam
    This copies the mod into the prefix (the mod home), the proxy and a one-line `d2vr-linux.ini` into the game folder, and downloads the OpenXR loader, verifying its hash. Offline, pass `--openxr-zip <OpenXR SDK zip>` instead. `--proxy <path to dinput8.dll>` overrides the proxy file (default `build/linux-proxy/dinput8.dll`).
 
    `install` refuses, and changes nothing, if the game's `Dishonored2.exe` is not the pinned build (17576867), if the release zip fails its hash check, or if the game folder already holds another mod's `dinput8.dll`.
+
+   The install also writes the default feature knobs into the mod home's `build/` (the list is `tools/default_features.json`; state in `build/launcher-features.json`). To turn a feature off, edit `build/launcher-features.json`, or delete the knob file and add its id to `off` (for a `no-*` knob, create the file and add the id to `off`); it stays off across reinstalls.
 6. Let SteamVR be the host OpenXR runtime:
 
    ```

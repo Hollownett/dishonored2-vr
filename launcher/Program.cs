@@ -119,6 +119,13 @@ sealed class MainForm : Form
             if (env.Standalone)
                 try { env.Pinned = await Task.Run(() => ModHome.Install(env.Root)); }
                 catch (Exception ex) { env.InstallError = ex.Message; Append(log, "Mod install failed: " + ex.Message, Ui.Bad); }
+            else if (Environment.GetCommandLineArgs().Contains("--seed-features"))  // developer mode only on request: repo knob files are hand-kept
+                try
+                {
+                    using var fs = typeof(Features).Assembly.GetManifestResourceStream("features.json")!;
+                    Append(log, $"Features: {Features.Apply(env.P("build"), Features.Load(fs))} seeded", Ui.Text);
+                }
+                catch (Exception ex) { Append(log, "Features not applied: " + ex.Message, Ui.Bad); }
             artState = Ui.Art.Present || noArt ? null : Env.FindGameDir() == null ? "needs Dishonored 2 installed" : "not imported yet";
             await RefreshChecks(); LoadSettings();
             // First start (or art missing): import it from the user's own install; the calibration poses follow, and are

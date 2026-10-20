@@ -22,6 +22,8 @@ DLL_RE = r"^d2vr_render_probe_arm_v[0-9]+\.dll$"
 MANIFEST_RE = r"^repair-v[0-9]+-test-candidate\.json$"
 REPO_ROOT = Path(__file__).resolve().parents[2]
 OPENXR_SOURCE = REPO_ROOT / "third_party/openxr/bin/source.json"
+DEFAULT_FEATURES = REPO_ROOT / "tools/default_features.json"
+FEATURES_STATE = "launcher-features.json"
 DEFAULT_PROXY = REPO_ROOT / "build/linux-proxy/dinput8.dll"
 
 MAX_DOWNLOAD = 64 * 1024 * 1024
@@ -170,6 +172,52 @@ def _load_source(openxr_source):
     return json.loads(raw), raw, p.parent
 
 
+def _knob_in_dll(dll: bytes, name: str) -> bool:
+    return name.encode("utf-16-le") in dll
+
+
+def apply_default_features(home: Path, list_path: Path = DEFAULT_FEATURES, dll: "bytes | None" = None) -> list:
+    """Seed the default feature knobs in <home>/build (same semantics as launcher/Features.cs Apply). Features not yet seen:
+    a knob file the user already made is kept (a no-* file is adopted as 'off'); otherwise a default-true 'enable' row gets its file.
+    Features already in 'seeded' are never touched, so a turned-off feature stays off. Returns the changed paths (relative)."""
+    build = Path(home) / "build"
+    features = json.loads(Path(list_path).read_text())["features"]
+    state_path = build / FEATURES_STATE
+    off, seeded = set(), set()
+    changed = []
+    if state_path.is_file():
+        try:
+            d = json.loads(state_path.read_text())
+            off, seeded = set(map(str, d["off"])), set(map(str, d["seeded"]))
+        except (ValueError, KeyError, TypeError, OSError):
+            os.replace(state_path, state_path.with_name(state_path.name + ".bad"))
+            changed.append(f"build/{FEATURES_STATE}.bad")
+            off, seeded = set(), set()
+    for f in features:
+        req = f.get("requires_dll_knob")
+        if req and dll is not None and not _knob_in_dll(dll, req):
+            continue
+        if f["id"] in seeded:
+            continue
+        path = build / f["file"]
+        enable = f["kind"] == "enable"
+        if path.exists():
+            if not enable:
+                off.add(f["id"])
+        elif f.get("default"):
+            if enable and _write(path, b""):
+                changed.append(f"build/{f['file']}")
+        else:
+            if not enable and _write(path, b""):
+                changed.append(f"build/{f['file']}")
+            off.add(f["id"])
+        seeded.add(f["id"])
+    data = (json.dumps({"version": 1, "off": sorted(off), "seeded": sorted(seeded)}, indent=2) + "\n").encode()
+    if _write(state_path, data):
+        changed.append(f"build/{FEATURES_STATE}")
+    return changed
+
+
 def install(inst: Install, zip_path: Path, proxy: Path, openxr_zip: "Path | None", cache_dir: Path,
             game_sha256: str = GAME_SHA256, openxr_source=OPENXR_SOURCE,
             urlopen=urllib.request.urlopen) -> list:
@@ -225,6 +273,8 @@ def install(inst: Install, zip_path: Path, proxy: Path, openxr_zip: "Path | None
                 changed.append(f"build/{old.name}")
             except OSError:
                 pass  # still loaded by a running game
+
+    changed += apply_default_features(home, dll=release.dll)
 
     # 7: game dir
     if _write(target, proxy_bytes):

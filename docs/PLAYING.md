@@ -173,9 +173,10 @@ Headset appearance, combat feel, note readability and complete gameplay have not
 been accepted. See [the verification report](feedback-2026-10-10.md).
 
 ## Experiments (files in the build folder)
+These are on by default in the launcher (except where a line says otherwise); the file is the switch.
 - `hud-scale` containing e.g. `0.75`: how far the HUD is pulled towards the centre (1 = the game's own layout, default 0.65).
 - `no-physical-crouch`: turn off crouching by sitting down. Full arms are currently disabled regardless of `no-full-arms`.
-- `power-gestures`: cast the equipped left-hand power with gestures (open-palm push, clap, palm at the temple; while aiming Blink, flick the hand toward you to blink). Off by default until tested.
+- `power-gestures`: cast the equipped left-hand power with gestures (open-palm push, clap, palm at the temple; while aiming Blink, flick the hand toward you to blink). Off by default until tested; the launcher lists it as "new, untested" and does not enable it for you.
 - `fsr` containing `sharpness mvx mvy jitterx jittery` (default `0.3 -1 -1 1 -1`): FSR 3 tuning. `no-fsr-reactive`: turn off the hand/weapon ghosting guard.
 - `no-hand-crosshair`, `no-hand-shots`: switch off the crosshair move or hand-aimed shots.
 - `no-hand-blink`: Blink (the teleport power) aims along the left hand's pointing direction while the left trigger is held, like the other left-hand powers; this switches it back to the head. Status `blink_aim` shows the hook (`routed`, `last_reason`, `last_dest`), and `native_left_aim` the left-aim counters.
