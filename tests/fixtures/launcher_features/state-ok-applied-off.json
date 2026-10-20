@@ -1,0 +1,5 @@
+{
+ "kind": "state",
+ "expect": "ok",
+ "content": "{\"version\": 2, \"off\": [], \"seeded\": [\"full-body\"], \"applied\": {\"full-body\": {\"file\": \"full-body\", \"kind\": \"enable\", \"off\": false}}}"
+}

@@ -422,7 +422,7 @@ class FeatureEvolutionTests(Case):
         modhome.apply_default_features(self.home)
         st = self.state()
         self.assertEqual(st["version"], 2)
-        self.assertEqual(st["applied"]["full-body"], {"file": "full-body", "kind": "enable"})
+        self.assertEqual(st["applied"]["full-body"], {"file": "full-body", "kind": "enable", "off": False})
         self.assertFalse((self.home / "build/full-body").exists())  # seeded earlier: not re-created
 
     def test_unreadable_state_aborts_untouched(self):
@@ -468,6 +468,79 @@ class FeatureEvolutionTests(Case):
         self.assertEqual((b / "full-body").read_text(), "0.5 0.2")
         self.assertFalse((b / "full-body.off-by-launcher").exists())
 
+    def test_second_retire_keeps_first_saved_copy(self):
+        b = self.home / "build"
+        b.mkdir(parents=True)
+        (b / "full-body").write_text("A")
+        modhome.apply_default_features(self.home)
+        modhome.set_feature(self.home, "full-body", False)
+        (b / "full-body").write_text("B")
+        modhome.apply_default_features(self.home)  # off wins: B is set aside too
+        self.assertFalse((b / "full-body").exists())
+        self.assertEqual((b / "full-body.off-by-launcher").read_text(), "A")
+        self.assertEqual((b / "full-body.off-by-launcher.1").read_text(), "B")
+        modhome.set_feature(self.home, "full-body", True)
+        self.assertEqual((b / "full-body").read_text(), "B")  # newest copy
+        self.assertEqual((b / "full-body.off-by-launcher").read_text(), "A")
+
+    def test_restore_never_clobbers_existing_file(self):
+        b = self.home / "build"
+        b.mkdir(parents=True)
+        (b / "full-body").write_text("A")
+        modhome.apply_default_features(self.home)
+        modhome.set_feature(self.home, "full-body", False)
+        (b / "full-body").write_text("C")
+        modhome.set_feature(self.home, "full-body", True)
+        self.assertEqual((b / "full-body").read_text(), "C")
+        self.assertTrue((b / "full-body.off-by-launcher").exists())
+        # the race: the target appears between the check and the move
+        src = b / "x.off-by-launcher"
+        src.write_text("S")
+        dst = b / "x"
+        dst.write_text("D")
+        with self.assertRaises(FileExistsError):
+            modhome._move_noclobber(src, dst)
+        self.assertEqual(dst.read_text(), "D")
+        self.assertTrue(src.exists())
+
+    def test_leaving_off_turns_feature_back_on(self):
+        b = self.home / "build"
+        b.mkdir(parents=True)
+        (b / "full-body").write_text("0.5 0.2")
+        modhome.apply_default_features(self.home)
+        modhome.set_feature(self.home, "full-body", False)
+        modhome.set_feature(self.home, "hand-blink", False)
+        st = self.state()
+        st["off"] = []
+        (b / "launcher-features.json").write_text(json.dumps(st))
+        modhome.apply_default_features(self.home)
+        self.assertEqual((b / "full-body").read_text(), "0.5 0.2")
+        self.assertFalse((b / "full-body.off-by-launcher").exists())
+        self.assertFalse((b / "no-hand-blink").exists())
+
+    def test_renamed_row_migrates_saved_copies(self):
+        self.apply(self.row("y", "y-old", "enable"))
+        b = self.home / "build"
+        (b / "y-old").write_text("T")
+        modhome.set_feature(self.home, "y", False, self.lst(self.row("y", "y-old", "enable")))
+        self.apply(self.row("y", "y-new", "enable"))
+        self.assertFalse((b / "y-old.off-by-launcher").exists())
+        self.assertEqual((b / "y-new.off-by-launcher").read_text(), "T")
+        modhome.set_feature(self.home, "y", True, self.lst(self.row("y", "y-new", "enable")))
+        self.assertEqual((b / "y-new").read_text(), "T")
+
+    def test_version_float_is_corrupt(self):
+        self.write_state('{"version":1.0,"off":["full-body"],"seeded":[]}')
+        modhome.apply_default_features(self.home)
+        self.assertTrue((self.home / "build/launcher-features.json.bad").exists())
+
+    def test_unknown_version_aborts_untouched(self):
+        self.write_state('{"version":7,"off":[],"seeded":[]}')
+        with self.assertRaises(modhome.FeatureError):
+            modhome.apply_default_features(self.home)
+        self.assertFalse((self.home / "build/launcher-features.json.bad").exists())
+        self.assertFalse((self.home / "build/full-body").exists())
+
     def test_shared_fixtures(self):
         names = sorted(FIXTURES.glob("*.json"))
         self.assertGreater(len(names), 10)
@@ -485,8 +558,16 @@ class FeatureEvolutionTests(Case):
                 elif j["kind"] == "state":
                     shutil.rmtree(self.home, True)
                     self.write_state(j["content"])
-                    modhome.apply_default_features(self.home)
-                    self.assertEqual((self.home / "build/launcher-features.json.bad").exists(), j["expect"] == "corrupt")
+                    bad = self.home / "build/launcher-features.json.bad"
+                    if j["expect"] == "abort":
+                        with self.assertRaises(modhome.FeatureError):
+                            modhome.apply_default_features(self.home)
+                        self.assertFalse(bad.exists())
+                        self.assertFalse((self.home / "build/full-body").exists())
+                        self.assertEqual((self.home / "build/launcher-features.json").read_text(), j["content"])
+                    else:
+                        modhome.apply_default_features(self.home)
+                        self.assertEqual(bad.exists(), j["expect"] == "corrupt")
                 else:
                     found = modhome.scan_knobs(bytes.fromhex(j["hex"]))
                     for c in j["contains"]:

@@ -196,19 +196,21 @@ def load_features(list_path: "Path | None" = None) -> list:
                 if not isinstance(r.get(k), str):
                     raise ValueError(f"missing {k}")
             for k in ("id", "file"):
-                if not _NAME_RE.match(r[k]):
+                if not _NAME_RE.fullmatch(r[k]):
                     raise ValueError(f"bad {k}: {r[k]!r}")
             if r["kind"] not in ("enable", "disable"):
                 raise ValueError("bad kind")
             if not isinstance(r.get("default"), bool):
                 raise ValueError("default must be a boolean")
             req = r.get("requires_dll_knob")
-            if "requires_dll_knob" in r and not (isinstance(req, str) and _NAME_RE.match(req)):
+            if "requires_dll_knob" in r and not (isinstance(req, str) and _NAME_RE.fullmatch(req)):
                 raise ValueError("bad requires_dll_knob")
             if r["id"] in seen:
                 raise ValueError("duplicate id")
             seen.add(r["id"])
             out.append(r)
+        if len({r["file"] for r in out}) != len(out):
+            raise ValueError("duplicate file")
         return out
     except (OSError, ValueError, KeyError, TypeError) as e:
         raise FeatureError(f"feature list {list_path}: {e}")
@@ -250,8 +252,10 @@ def _read_state(state_path: Path, changed: list, log):
         raise FeatureError(f"cannot read {state_path}: {e}")
     try:
         d = json.loads(raw)
-        if not isinstance(d, dict) or d.get("version") not in (1, 2):
-            raise ValueError("bad version")
+        if not isinstance(d, dict) or type(d.get("version")) is not int:
+            raise ValueError("version is not an integer")
+        if d["version"] not in (1, 2):  # well-formed but another version: abort, do not archive or re-seed
+            raise FeatureError(f"{state_path} has unknown version {d['version']}")
         off, seeded = _str_list(d["off"]), _str_list(d["seeded"])
         applied = {}
         if d["version"] == 2 and "applied" in d:
@@ -260,7 +264,9 @@ def _read_state(state_path: Path, changed: list, log):
             for k, v in d["applied"].items():
                 if not (isinstance(v, dict) and isinstance(v.get("file"), str) and isinstance(v.get("kind"), str)):
                     raise ValueError("applied row")
-                applied[k] = (v["file"], v["kind"])
+                if "off" in v and not isinstance(v["off"], bool):
+                    raise ValueError("applied off")
+                applied[k] = (v["file"], v["kind"], v.get("off"))
         return off, seeded, applied
     except (ValueError, KeyError, TypeError):
         try:
@@ -278,31 +284,73 @@ def _touch(path: Path, changed: list, build: Path) -> None:
         changed.append(f"build/{path.name}")
 
 
+def _saved_copies(path: Path) -> list:
+    """Saved copies of a file in order: `.off-by-launcher` (0), `.off-by-launcher.1`, ... as (n, path)."""
+    out = []
+    if path.parent.is_dir():
+        for p in path.parent.iterdir():
+            m = re.fullmatch(re.escape(path.name + _SAVED) + r"(?:\.([0-9]+))?", p.name)
+            if m:
+                out.append((int(m.group(1) or 0), p))
+    return sorted(out)
+
+
+def _free_slot(path: Path) -> Path:
+    c = path.with_name(path.name + _SAVED)
+    i = 1
+    while c.exists():
+        c = path.with_name(f"{path.name}{_SAVED}.{i}")
+        i += 1
+    return c
+
+
+def _move_noclobber(src: Path, dst: Path) -> None:
+    """Move src to dst, never replacing an existing dst (FileExistsError)."""
+    try:
+        os.link(src, dst)  # fails if dst exists
+    except FileExistsError:
+        raise
+    except OSError:  # no hard links on this filesystem: exclusive-create copy
+        with open(src, "rb") as r, open(dst, "xb") as w:
+            w.write(r.read())
+    os.unlink(src)
+
+
 def _retire(path: Path, changed: list) -> None:
-    """Turn an enable knob off without losing a valued file: empty is deleted, anything else is set aside."""
+    """Turn an enable knob off without losing a valued file: empty is deleted, anything else is set aside in the first free
+    `.off-by-launcher[.N]` slot (an earlier saved copy is never overwritten)."""
     if not path.exists():
         return
     if path.stat().st_size == 0:
         path.unlink()
     else:
-        os.replace(path, path.with_name(path.name + _SAVED))
+        _move_noclobber(path, _free_slot(path))
     changed.append(f"build/{path.name}")
 
 
 def _restore(path: Path, changed: list, build: Path) -> None:
+    """Bring the newest saved copy back (or create an empty file); an existing file is never replaced."""
     if path.exists():
         return
-    saved = path.with_name(path.name + _SAVED)
-    if saved.exists():
-        os.replace(saved, path)
+    saved = _saved_copies(path)
+    if saved:
+        try:
+            _move_noclobber(saved[-1][1], path)
+        except FileExistsError:
+            return
         changed.append(f"build/{path.name}")
     else:
         _touch(path, changed, build)
 
 
+def _migrate_saved(old: Path, new: Path) -> None:
+    for _, p in _saved_copies(old):
+        _move_noclobber(p, _free_slot(new))
+
+
 def _write_state(state_path: Path, off, seeded, applied, changed: list) -> None:
     data = (json.dumps({"version": 2, "off": sorted(off), "seeded": sorted(seeded),
-                        "applied": {k: {"file": v[0], "kind": v[1]} for k, v in sorted(applied.items())}}, indent=2) + "\n").encode()
+                        "applied": {k: {"file": v[0], "kind": v[1], "off": v[2]} for k, v in sorted(applied.items())}}, indent=2) + "\n").encode()
     if _write(state_path, data):
         changed.append(f"build/{FEATURES_STATE}")
 
@@ -326,9 +374,13 @@ def apply_default_features(home: Path, list_path: "Path | None" = None, dll: "by
         enable = f["kind"] == "enable"
         was_seeded = f["id"] in seeded
         old = applied.get(f["id"])
-        row_changed = was_seeded and old is not None and old != (f["file"], f["kind"])
-        if row_changed and log:
-            log(f"feature {f['id']}: row changed ({old[1]} {old[0]} -> {f['kind']} {f['file']}); the old file is left in place")
+        row_changed = was_seeded and old is not None and old[:2] != (f["file"], f["kind"])
+        prev_off = old[2] if old is not None and old[2] is not None else f["id"] in off
+        if row_changed:
+            if log:
+                log(f"feature {f['id']}: row changed ({old[1]} {old[0]} -> {f['kind']} {f['file']}); the old file is left in place")
+            if old[1] == "enable" and f["kind"] == "enable" and old[0] != f["file"]:
+                _migrate_saved(build / old[0], path)
         if f["id"] in off:
             if enable:
                 _retire(path, changed)
@@ -344,13 +396,25 @@ def apply_default_features(home: Path, list_path: "Path | None" = None, dll: "by
             elif not enable:
                 _touch(path, changed, build)
                 off.add(f["id"])
+        elif prev_off:  # the id left `off` since the last run: turn the feature back on
+            if enable:
+                _restore(path, changed, build)
+            elif path.exists():
+                path.unlink()
+                changed.append(f"build/{path.name}")
         seeded.add(f["id"])
-        applied[f["id"]] = (f["file"], f["kind"])
+        applied[f["id"]] = (f["file"], f["kind"], f["id"] in off)
     try:
         _write_state(state_path, off, seeded, applied, changed)
     except OSError as e:
         raise FeatureError(f"cannot write {state_path}: {e}")
     return changed
+
+
+def feature_states(home: Path, list_path: "Path | None" = None) -> list:
+    """[(id, on, label)] from the knob files in <home>/build."""
+    build = Path(home) / "build"
+    return [(f["id"], (build / f["file"]).exists() == (f["kind"] == "enable"), f["label"]) for f in load_features(list_path)]
 
 
 def set_feature(home: Path, feature_id: str, on: bool, list_path: "Path | None" = None) -> list:
@@ -372,7 +436,7 @@ def set_feature(home: Path, feature_id: str, on: bool, list_path: "Path | None" 
         _touch(path, changed, build)
     (off.discard if on else off.add)(f["id"])
     seeded.add(f["id"])
-    applied[f["id"]] = (f["file"], f["kind"])
+    applied[f["id"]] = (f["file"], f["kind"], not on)
     _write_state(build / FEATURES_STATE, off, seeded, applied, changed)
     return changed
 

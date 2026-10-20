@@ -1,0 +1,5 @@
+{
+ "kind": "state",
+ "expect": "abort",
+ "content": "{\"version\": 3, \"off\": [\"full-body\"], \"seeded\": []}"
+}

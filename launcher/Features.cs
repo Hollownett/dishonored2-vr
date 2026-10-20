@@ -21,7 +21,7 @@ public static class Features
     /// <summary>The state file could not be read or archived (I/O). Apply aborts without touching knobs or state.</summary>
     public sealed class FeaturesStateException(string message, Exception? inner = null) : IOException(message, inner);
 
-    static readonly System.Text.RegularExpressions.Regex NameRe = new("^[a-z0-9-]+$");
+    static readonly System.Text.RegularExpressions.Regex NameRe = new(@"^[a-z0-9-]+\z");
 
     static string Name(JsonElement e, string key)
     {
@@ -47,13 +47,17 @@ public static class Features
             list.Add(new Feature(Name(e, "id"), Name(e, "file"), kind, S("label"), S("help"), def.GetBoolean(), req));
         }
         if (list.Select(f => f.Id).Distinct().Count() != list.Count) throw new InvalidDataException("Duplicate feature id");
+        if (list.Select(f => f.File).Distinct().Count() != list.Count) throw new InvalidDataException("Duplicate feature file");
         return list;
     }
+
+    /// <summary>What Apply/Set last did for an id: its file and kind, and whether it left the feature off (null = unknown, v1/early v2 states).</summary>
+    readonly record struct Applied(string File, string Kind, bool? Off);
 
     sealed class StateFile
     {
         public SortedSet<string> Off = new(StringComparer.Ordinal), Seeded = new(StringComparer.Ordinal);
-        public SortedDictionary<string, (string File, string Kind)> Applied = new(StringComparer.Ordinal);
+        public SortedDictionary<string, Applied> Applied = new(StringComparer.Ordinal);
     }
 
     static string StatePath(string buildDir) => Path.Combine(buildDir, StateName);
@@ -77,8 +81,10 @@ public static class Features
         {
             using var doc = JsonDocument.Parse(bytes);
             var root = doc.RootElement;
-            var version = root.GetProperty("version").GetInt32();
-            if (version is not (1 or 2)) throw new InvalidDataException("unknown version");
+            var vEl = root.GetProperty("version");
+            if (vEl.ValueKind != JsonValueKind.Number || !vEl.TryGetInt32(out var version)) throw new InvalidDataException("version is not an integer");
+            // A well-formed state of another version is not corruption: abort rather than archive and re-seed.
+            if (version is not (1 or 2)) throw new FeaturesStateException($"{p} has unknown version {version}");
             var s = new StateFile();
             foreach (var x in Strings(root.GetProperty("off"))) s.Off.Add(x);
             foreach (var x in Strings(root.GetProperty("seeded"))) s.Seeded.Add(x);
@@ -90,7 +96,10 @@ public static class Features
                     if (kv.Value.ValueKind != JsonValueKind.Object) throw new InvalidDataException("bad applied row");
                     var fl = kv.Value.GetProperty("file"); var kd = kv.Value.GetProperty("kind");
                     if (fl.ValueKind != JsonValueKind.String || kd.ValueKind != JsonValueKind.String) throw new InvalidDataException("bad applied row");
-                    s.Applied[kv.Name] = (fl.GetString()!, kd.GetString()!);
+                    bool? off = null;
+                    if (kv.Value.TryGetProperty("off", out var of))
+                        off = of.ValueKind is JsonValueKind.True or JsonValueKind.False ? of.GetBoolean() : throw new InvalidDataException("bad applied off");
+                    s.Applied[kv.Name] = new Applied(fl.GetString()!, kd.GetString()!, off);
                 }
             }
             return s;
@@ -106,11 +115,17 @@ public static class Features
 
     static void WriteState(string buildDir, StateFile s)
     {
-        var applied = s.Applied.ToDictionary(kv => kv.Key, kv => new { file = kv.Value.File, kind = kv.Value.Kind });
+        var applied = s.Applied.ToDictionary(kv => kv.Key, kv => new { file = kv.Value.File, kind = kv.Value.Kind, off = kv.Value.Off });
         var text = JsonSerializer.Serialize(new { version = 2, off = s.Off.ToArray(), seeded = s.Seeded.ToArray(), applied }, new JsonSerializerOptions { WriteIndented = true }) + "\n";
         var bytes = Encoding.UTF8.GetBytes(text);
         var p = StatePath(buildDir);
-        if (File.Exists(p) && File.ReadAllBytes(p).AsSpan().SequenceEqual(bytes)) return;
+        if (File.Exists(p))
+        {
+            byte[] old;
+            try { old = File.ReadAllBytes(p); }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { throw new FeaturesStateException("Cannot read " + p + ": " + ex.Message, ex); }
+            if (old.AsSpan().SequenceEqual(bytes)) return;
+        }
         var tmp = p + ".tmp";
         File.WriteAllBytes(tmp, bytes);
         File.Move(tmp, p, true);
@@ -126,19 +141,51 @@ public static class Features
 
     const string Saved = ".off-by-launcher";
 
-    /// <summary>Turns an enable knob off without losing a valued file (full-body holds tuning): empty files are deleted, others are set aside.</summary>
+    static readonly System.Text.RegularExpressions.Regex SavedRe = new(@"^\.off-by-launcher(\.([0-9]+))?\z");
+
+    /// <summary>Saved copies of a file in order: `.off-by-launcher` (0), `.off-by-launcher.1`, ...</summary>
+    static List<(int N, string Path)> SavedCopies(string path)
+    {
+        var dir = Path.GetDirectoryName(path)!; var name = Path.GetFileName(path);
+        var list = new List<(int, string)>();
+        if (!Directory.Exists(dir)) return list;
+        foreach (var f in Directory.GetFiles(dir, name + ".off-by-launcher*"))
+        {
+            var m = SavedRe.Match(Path.GetFileName(f).Substring(name.Length));
+            if (m.Success) list.Add((m.Groups[2].Success ? int.Parse(m.Groups[2].Value) : 0, f));
+        }
+        return list.OrderBy(x => x.Item1).ToList();
+    }
+
+    static string FreeSavedSlot(string path)
+    {
+        var c = path + Saved;
+        for (int i = 1; File.Exists(c); i++) c = path + Saved + "." + i;
+        return c;
+    }
+
+    /// <summary>Turns an enable knob off without losing a valued file (full-body holds tuning): empty files are deleted, others are set
+    /// aside in the first free `.off-by-launcher[.N]` slot (an earlier saved copy is never overwritten).</summary>
     static void Retire(string path)
     {
         if (!File.Exists(path)) return;
         if (new FileInfo(path).Length == 0) File.Delete(path);
-        else File.Move(path, path + Saved, true);
+        else File.Move(path, FreeSavedSlot(path));
     }
 
+    /// <summary>Brings the newest saved copy back (or creates an empty file); an existing file is never replaced.</summary>
     static void Restore(string path)
     {
         if (File.Exists(path)) return;
-        if (File.Exists(path + Saved)) File.Move(path + Saved, path);
+        var saved = SavedCopies(path);
+        if (saved.Count > 0) File.Move(saved[^1].Path, path);
         else Touch(path);
+    }
+
+    /// <summary>A renamed row: carry the old name's saved copies over to free slots of the new name.</summary>
+    static void MigrateSaved(string oldPath, string newPath)
+    {
+        foreach (var (_, p) in SavedCopies(oldPath)) File.Move(p, FreeSavedSlot(newPath));
     }
 
     static void ForceOff(Feature f, string path) { if (f.IsEnable) Retire(path); else Touch(path); }
@@ -171,8 +218,14 @@ public static class Features
             if (f.RequiresDllKnob != null && knownKnobs != null && !knownKnobs.Contains(f.RequiresDllKnob)) continue;
             var path = Path.Combine(buildDir, f.File);
             var seeded = s.Seeded.Contains(f.Id);
-            bool changed = seeded && s.Applied.TryGetValue(f.Id, out var ap) && (ap.File != f.File || ap.Kind != f.Kind);
-            if (changed) log?.Invoke($"Feature {f.Id}: row changed ({s.Applied[f.Id].Kind} {s.Applied[f.Id].File} -> {f.Kind} {f.File}); the old file is left in place");
+            Applied ap = default;
+            bool changed = seeded && s.Applied.TryGetValue(f.Id, out ap) && (ap.File != f.File || ap.Kind != f.Kind);
+            bool wasOff = s.Applied.TryGetValue(f.Id, out var prev) && prev.Off is bool po ? po : s.Off.Contains(f.Id);
+            if (changed)
+            {
+                log?.Invoke($"Feature {f.Id}: row changed ({ap.Kind} {ap.File} -> {f.Kind} {f.File}); the old file is left in place");
+                if (ap.Kind == "enable" && f.Kind == "enable" && ap.File != f.File) MigrateSaved(Path.Combine(buildDir, ap.File), path);
+            }
             if (s.Off.Contains(f.Id)) ForceOff(f, path);
             else if (!seeded || changed)
             {
@@ -180,8 +233,12 @@ public static class Features
                 else if (f.Default) { if (f.IsEnable) Touch(path); }
                 else if (!f.IsEnable) { Touch(path); s.Off.Add(f.Id); }  // disable row that defaults off: the no-file is the switch
             }
+            else if (wasOff)  // the id left `off` since the last run: turn the feature back on
+            {
+                if (f.IsEnable) Restore(path); else if (File.Exists(path)) File.Delete(path);
+            }
             s.Seeded.Add(f.Id);
-            s.Applied[f.Id] = (f.File, f.Kind);
+            s.Applied[f.Id] = new Applied(f.File, f.Kind, s.Off.Contains(f.Id));
         }
         WriteState(buildDir, s);
         return s.Seeded.Count - before;
@@ -197,7 +254,7 @@ public static class Features
         else { if (on) { if (File.Exists(path)) File.Delete(path); } else Touch(path); }
         if (on) s.Off.Remove(f.Id); else s.Off.Add(f.Id);
         s.Seeded.Add(f.Id);
-        s.Applied[f.Id] = (f.File, f.Kind);
+        s.Applied[f.Id] = new Applied(f.File, f.Kind, !on);
         WriteState(buildDir, s);
     }
 

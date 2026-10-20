@@ -7,6 +7,10 @@ from pathlib import Path
 root = Path(__file__).resolve().parents[1]
 features = json.loads((root / "tools/default_features.json").read_text())["features"]
 source = (root / "src/dxgi_probe.cpp").read_text(encoding="utf-8")
+files = [f["file"] for f in features]
+assert len(files) == len(set(files)), "duplicate feature file"
+ids = [f["id"] for f in features]
+assert len(ids) == len(set(ids)), "duplicate feature id"
 for f in features:
     for key in ("id", "file", "requires_dll_knob"):
         if key in f:

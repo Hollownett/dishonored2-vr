@@ -140,8 +140,10 @@ string StateText(string d) => File.ReadAllText(Path.Combine(d, "launcher-feature
         else if (kind == "state")
         {
             var d = NewBuild(); WriteState(d, j.GetProperty("content").GetString()!);
-            Features.Apply(d, list);
-            Check("fixture " + name, Has(d, "launcher-features.json.bad") == (j.GetProperty("expect").GetString() == "corrupt"));
+            var expect = j.GetProperty("expect").GetString();
+            bool aborted = false; try { Features.Apply(d, list); } catch (Features.FeaturesStateException) { aborted = true; }
+            bool bad = Has(d, "launcher-features.json.bad");
+            Check("fixture " + name, expect == "abort" ? aborted && !bad && !Has(d, "full-body") && StateText(d).Contains("\"version\": 3") : !aborted && bad == (expect == "corrupt"));
         }
         else
         {
@@ -149,6 +151,44 @@ string StateText(string d) => File.ReadAllText(Path.Combine(d, "launcher-feature
             Check("fixture " + name, j.GetProperty("contains").EnumerateArray().All(x => found.Contains(x.GetString()!)) && !j.GetProperty("absent").EnumerateArray().Any(x => found.Contains(x.GetString()!)));
         }
     }
+}
+
+{   // round 2
+    var fb = F("full-body");
+    var d = NewBuild(); string P(string n) => Path.Combine(d, n);
+    File.WriteAllText(P("full-body"), "A"); Features.Apply(d, list);
+    Features.Set(d, fb, false);
+    File.WriteAllText(P("full-body"), "B"); Features.Apply(d, list);  // off wins: B is set aside too
+    Check("second_retire_keeps_first_saved_copy", !Has(d, "full-body") && File.ReadAllText(P("full-body.off-by-launcher")) == "A" && File.ReadAllText(P("full-body.off-by-launcher.1")) == "B");
+    Features.Set(d, fb, true);
+    Check("restore_takes_newest_copy", File.ReadAllText(P("full-body")) == "B" && File.ReadAllText(P("full-body.off-by-launcher")) == "A");
+    File.WriteAllText(P("full-body"), "C"); Features.Set(d, fb, true);
+    Check("restore_never_clobbers_existing_file", File.ReadAllText(P("full-body")) == "C" && Has(d, "full-body.off-by-launcher"));
+}
+{
+    var fb = F("full-body"); var d = NewBuild(); string P(string n) => Path.Combine(d, n);
+    File.WriteAllText(P("full-body"), "0.5 0.2"); Features.Apply(d, list); Features.Set(d, fb, false);
+    // the user edits the state: removes full-body (enable) and no-hand-blink (disable) from off
+    Features.Set(d, F("hand-blink"), false);
+    var doc = System.Text.Json.Nodes.JsonNode.Parse(StateText(d))!;
+    var off = doc["off"]!.AsArray(); for (int i = off.Count - 1; i >= 0; i--) off.RemoveAt(i);
+    File.WriteAllText(P("launcher-features.json"), doc.ToJsonString());
+    Features.Apply(d, list);
+    Check("leaving_off_turns_feature_back_on", File.ReadAllText(P("full-body")) == "0.5 0.2" && !Has(d, "full-body.off-by-launcher") && !Has(d, "no-hand-blink") && Features.State(d, list)["hand-blink"].On);
+}
+{
+    var d = NewBuild(); string P(string n) => Path.Combine(d, n);
+    Features.Apply(d, new[] { Row("y", "y-old", "enable") });
+    File.WriteAllText(P("y-old"), "T"); Features.Set(d, Row("y", "y-old", "enable"), false);
+    Features.Apply(d, new[] { Row("y", "y-new", "enable") });
+    Check("renamed_row_migrates_saved_copies", Has(d, "y-old.off-by-launcher") == false && File.ReadAllText(P("y-new.off-by-launcher")) == "T" && !Has(d, "y-new"));
+    Features.Set(d, Row("y", "y-new", "enable"), true);
+    Check("renamed_row_restores_migrated_tuning", File.ReadAllText(P("y-new")) == "T");
+}
+{
+    var d = NewBuild(); File.WriteAllText(Path.Combine(d, "launcher-features.json"), "{\"version\":7,\"off\":[],\"seeded\":[]}");
+    bool aborted = false; try { Features.Apply(d, list); } catch (Features.FeaturesStateException) { aborted = true; }
+    Check("unknown_version_aborts_untouched", aborted && !Has(d, "full-body") && !Has(d, "launcher-features.json.bad"));
 }
 Console.WriteLine(failures == 0 ? "ALL PASS" : failures + " FAILED");
 return failures == 0 ? 0 : 1;

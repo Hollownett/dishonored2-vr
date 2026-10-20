@@ -173,7 +173,7 @@ Headset appearance, combat feel, note readability and complete gameplay have not
 been accepted. See [the verification report](feedback-2026-10-10.md).
 
 ## Experiments (files in the build folder)
-These are on by default in the launcher (except where a line says otherwise); the file is the switch.
+These are on by default in the launcher (except where a line says otherwise). Switch them in the launcher (Windows) or with `d2vr-linux feature` (Linux); a knob file you create by hand for a feature the launcher has switched off is set aside at the next start. The file names below are what the mod reads.
 - `hud-scale` containing e.g. `0.75`: how far the HUD is pulled towards the centre (1 = the game's own layout, default 0.65).
 - `no-physical-crouch`: turn off crouching by sitting down. Full arms are currently disabled regardless of `no-full-arms`.
 - `power-gestures`: cast the equipped left-hand power with gestures (open-palm push, clap, palm at the temple; while aiming Blink, flick the hand toward you to blink). Off by default until tested; the launcher lists it as "new, untested" and does not enable it for you.

@@ -1,4 +1,4 @@
-"""d2vr-linux command line: install, uninstall, doctor, launch-options, start, stop, sim (developer)."""
+"""d2vr-linux command line: install, uninstall, doctor, launch-options, feature, start, stop, sim (developer)."""
 import argparse
 import sys
 import urllib.request
@@ -27,6 +27,14 @@ def _parser():
     for name, text in (("start", "ask the running game to start VR"), ("stop", "ask the running game to stop VR")):
         s = sub.add_parser(name, help=text)
         s.add_argument("--mod-home", type=Path, help="mod home directory")
+    s = sub.add_parser("feature", help="list the feature knobs or switch one on or off")
+    fsub = s.add_subparsers(dest="feature_cmd", required=True, metavar="ACTION")
+    fl = fsub.add_parser("list", help="print each feature: id, on/off, label")
+    fl.add_argument("--mod-home", type=Path, help="mod home directory")
+    for nm in ("on", "off"):
+        fo = fsub.add_parser(nm, help=f"switch a feature {nm} (it stays {nm} across reinstalls)")
+        fo.add_argument("id", help="feature id from 'feature list'")
+        fo.add_argument("--mod-home", type=Path, help="mod home directory")
     s = sub.add_parser("sim", help="developer: run the game with the simulated-VR backend and a gameplay script (no headset)",
                        description="Developer-only simulated-VR test run. Refuses while the game or SteamVR vrserver runs. "
                        "Backs up your saves, launches the game through Steam, drives a scripted scenario, snapshots the "
@@ -131,6 +139,22 @@ def _cmd_launch_options(proc_root):
     return 0
 
 
+def _cmd_feature(a, home):
+    mod_home = a.mod_home or modhome.mod_home_dir(steam.locate(home, a.steam_root).prefix)
+    if not (mod_home / "build").is_dir():
+        raise CliError(f"{mod_home / 'build'} does not exist; run: d2vr-linux install --zip <d2vr-vNNN-dll.zip>")
+    if a.feature_cmd == "list":
+        for fid, on, label in modhome.feature_states(mod_home):
+            print(f"{fid:<18} {'on ' if on else 'off'}  {label}")
+        return 0
+    ids = [f["id"] for f in modhome.load_features()]
+    if a.id not in ids:
+        raise CliError(f"unknown feature {a.id!r}; known: {', '.join(ids)}")
+    modhome.set_feature(mod_home, a.id, a.feature_cmd == "on")
+    print(f"{a.id}: {a.feature_cmd}")
+    return 0
+
+
 def _cmd_request(a, home, name):
     if a.mod_home:
         mod_home = a.mod_home
@@ -156,9 +180,11 @@ def main(argv=None, *, home=None, proc_root=Path("/proc"), icd_dirs=None, urlope
             return _cmd_doctor(args, home, proc_root, icd_dirs)
         if args.command == "launch-options":
             return _cmd_launch_options(proc_root)
+        if args.command == "feature":
+            return _cmd_feature(args, home)
         if args.command == "sim":
             return _cmd_sim(args, home, proc_root, sim_env)
         return _cmd_request(args, home, modhome.START_TRIGGER if args.command == "start" else modhome.STOP_REQUEST)
-    except (CliError, sim.SimError, steam.SteamError, modhome.InstallError, OSError) as e:
+    except (CliError, sim.SimError, steam.SteamError, modhome.InstallError, modhome.FeatureError, OSError) as e:
         print(f"d2vr-linux: error: {e}", file=sys.stderr)
         return 1

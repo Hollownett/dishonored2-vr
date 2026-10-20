@@ -105,6 +105,36 @@ class InstallTests(test_modhome.Case):
         self.assertTrue((self.home / "build/linux-stop").exists())
 
 
+class FeatureCliTests(test_modhome.Case):
+    def go(self, *args):
+        return run(["feature", *args[:1], *args[1:], "--mod-home", str(self.home)], home=self.f.home)
+
+    def test_list_on_off_roundtrip(self):
+        self.install()
+        rc, out, err = self.go("list")
+        self.assertEqual(rc, 0, err)
+        self.assertRegex(out, r"full-body\s+on\s+Full body")
+        self.assertRegex(out, r"power-gestures\s+off\s")
+        rc, out, err = self.go("off", "full-body")
+        self.assertEqual(rc, 0, err)
+        self.assertFalse((self.home / "build/full-body").exists())
+        self.assertRegex(self.go("list")[1], r"full-body\s+off\s")
+        self.install()  # reinstall keeps it off
+        self.assertFalse((self.home / "build/full-body").exists())
+        self.assertEqual(self.go("on", "full-body")[0], 0)
+        self.assertTrue((self.home / "build/full-body").exists())
+        self.assertEqual(self.go("on", "power-gestures")[0], 0)
+        self.assertTrue((self.home / "build/power-gestures").exists())
+
+    def test_unknown_id_and_missing_home(self):
+        self.install()
+        rc, out, err = self.go("on", "nope")
+        self.assertEqual(rc, 1)
+        self.assertIn("unknown feature", err)
+        rc, out, err = run(["feature", "list", "--mod-home", str(self.tmp / "nowhere")], home=self.f.home)
+        self.assertEqual(rc, 1)
+
+
 class DoctorTests(test_doctor.Case):
     def go(self, *args):
         with mock.patch.object(steam, "GAME_SHA256", self.f.exe_sha256), \

@@ -55,7 +55,15 @@ Out of scope for this version: FSR 4, Virtual Desktop, WiVRn/ALVR, flatpak Steam
 
    `install` refuses, and changes nothing, if the game's `Dishonored2.exe` is not the pinned build (17576867), if the release zip fails its hash check, or if the game folder already holds another mod's `dinput8.dll`.
 
-   The install also writes the default feature knobs into the mod home's `build/` (the list is `tools/default_features.json`; state in `build/launcher-features.json`). To turn a feature off, add its id to the `off` list in `build/launcher-features.json` and run `install` again: `off` is authoritative, so the knob file is removed (an `enable` knob holding a value, such as `full-body`, is set aside as `<file>.off-by-launcher` and restored when you switch it back on) or the `no-*` file is created, and it stays that way across reinstalls. To turn it back on, remove the id from `off` and delete the `no-*` file (or create the `enable` file).
+   The install also writes the default feature knobs into the mod home's `build/` (the list is `tools/default_features.json`; state in `build/launcher-features.json`). Switch features with:
+
+   ```
+   linux/d2vr-linux feature list          # id, on/off, label
+   linux/d2vr-linux feature off full-body
+   linux/d2vr-linux feature on full-body
+   ```
+
+   A switched-off feature stays off across reinstalls: the state's `off` list is authoritative and every install re-applies it (an `enable` knob file is removed; if it holds a value, such as `full-body`, it is set aside as `<file>.off-by-launcher`, then `.1`, `.2`, ... and the newest is restored when the feature is switched back on; a `no-*` file is created). Editing `off` by hand works the same way at the next install; removing an id from `off` turns the feature back on then. Features marked "new, untested" are not enabled by default.
 6. Let SteamVR be the host OpenXR runtime:
 
    ```

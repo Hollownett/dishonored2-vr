@@ -1,5 +1,0 @@
-{
- "kind": "state",
- "expect": "corrupt",
- "content": "{\"version\": 9, \"off\": [], \"seeded\": []}"
-}
