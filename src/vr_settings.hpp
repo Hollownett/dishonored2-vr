@@ -26,6 +26,7 @@ class VrSettings {
     bool previous_y_{},previous_a_{},previous_b_{},previous_x_{},previous_trigger_{},previous_left_trigger_{},stick_held_{};
     bool controls_valid_{};
     bool open_{};
+    bool gameplay_open_{}; // opened by holding Y during play: the panel keeps running while `gameplay` is true
     bool calibration_page_{},measurements_page_{};
     bool hand_fit_page_{};   // G5/C6: the hand-fit sub-page of the calibration page (X); both hands are fitted live, sticks move the active one
     std::array<PalmFitStep,2> fit_{};
@@ -214,9 +215,11 @@ public:
             default:return L"Sharpening: Medium";
         }
     }
-    void suspend() noexcept {open_=false;calibration_page_=measurements_page_=false;leave_hand_fit();controls_valid_=false;stick_held_=false;}
+    void suspend() noexcept {open_=false;gameplay_open_=false;calibration_page_=measurements_page_=false;leave_hand_fit();controls_valid_=false;stick_held_=false;}
     // Opened from the native menu's "VR Settings" item: held buttons from that click are not replayed.
     void open_from_menu() noexcept {open_=true;calibration_page_=measurements_page_=false;leave_hand_fit();selected_=0;controls_valid_=false;stick_held_=false;native_calibration_=false;}
+    // Opened in gameplay by holding Y (y_hold.hpp): the same panel on page 0. Y (a new press) or B closes it.
+    void open_from_gameplay() noexcept {open_from_menu();gameplay_open_=true;}
     // The game's own options page (vr_settings_native.hpp) sets values directly; the panel shows only calibration then.
     void open_calibration_from_native() noexcept {open_=calibration_page_=true;measurements_page_=false;leave_hand_fit();selected_=8;controls_valid_=false;stick_held_=false;native_calibration_=true;}
     void set_requested(double v) noexcept {requested_=std::clamp(v,.5,2.);}
@@ -235,7 +238,9 @@ public:
     }
     Changes update(const ControllerInput& in,bool gameplay,bool focused,std::optional<PanelPointer> pointer={},bool settings_available=true,double dt=1./90) {
         Changes out{};
-        if(!focused || !in.active || gameplay || !settings_available) {suspend();return out;}
+        const bool from_gameplay=gameplay && gameplay_open_ && open_;
+        if(!gameplay) gameplay_open_=false;
+        if(!focused || !in.active || (gameplay && !from_gameplay) || (!settings_available && !from_gameplay)) {suspend();return out;}
         const bool trigger=in.right_trigger>.55f;
         if(!controls_valid_) {
             // Returning to focus never interprets held buttons as fresh clicks.
@@ -246,7 +251,7 @@ public:
         const bool y=in.y&&!previous_y_,a=in.a&&!previous_a_,b=in.b&&!previous_b_,click=trigger&&!previous_trigger_,x=in.x&&!previous_x_;
         const bool left_trigger=in.left_trigger>.55f,left_click=left_trigger&&!previous_left_trigger_;
         previous_y_=in.y;previous_a_=in.a;previous_b_=in.b;previous_x_=in.x;previous_trigger_=trigger;previous_left_trigger_=left_trigger;
-        if(calibration_runtime_==AvatarFitRuntimeStatus::recalibration_required && !calibration_prompted_) {
+        if(!gameplay && calibration_runtime_==AvatarFitRuntimeStatus::recalibration_required && !calibration_prompted_) {
             calibration_prompted_=true;open_=calibration_page_=true;selected_=8;
             out.opened=out.consume=true;return out;
         }
@@ -346,6 +351,7 @@ public:
             const auto next=std::clamp(std::round((requested_+horizontal*.1)*10)/10,.5,2.);
             if(next!=requested_) {requested_=next;out.resolution=next;}
         }
+        if(from_gameplay) {calibration_page_=false;out.calibrate=false;} // the fit needs the paused menu's still scene
         return out;
     }
 };

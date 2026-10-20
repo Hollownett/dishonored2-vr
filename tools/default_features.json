@@ -112,6 +112,14 @@
    "label": "Quest button labels",
    "help": "Shows Quest controller button names instead of gamepad glyphs.",
    "default": true
+  },
+  {
+   "id": "hold-y-menu",
+   "file": "no-hold-y-menu",
+   "kind": "disable",
+   "label": "Hold Y for VR settings",
+   "help": "Holding the left Y button during play opens the VR settings; a short press still talks to people.",
+   "default": true
   }
  ]
 }

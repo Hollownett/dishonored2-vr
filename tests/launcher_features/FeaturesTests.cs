@@ -11,7 +11,7 @@ string Listing(string d) => string.Join("|", Directory.GetFiles(d).OrderBy(x => 
 bool Has(string d, string f) => File.Exists(Path.Combine(d, f));
 string[] Ids(string d, string key) => System.Text.Json.JsonDocument.Parse(File.ReadAllText(Path.Combine(d, "launcher-features.json"))).RootElement.GetProperty(key).EnumerateArray().Select(x => x.GetString()!).ToArray();
 
-Check("list_has_no_unwanted_rows", !list.Any(f => f.Id is "hold-y-menu" or "corpse-grab") && list.Count == list.Select(f => f.Id).Distinct().Count());
+Check("list_has_no_unwanted_rows", !list.Any(f => f.Id is "corpse-grab") && list.Count(f => f.Id == "hold-y-menu" && f.File == "no-hold-y-menu" && f.Kind == "disable" && f.Default) == 1 && list.Count == list.Select(f => f.Id).Distinct().Count());
 
 {   // fresh_home_enables_every_default
     var d = NewBuild(); Features.Apply(d, list);

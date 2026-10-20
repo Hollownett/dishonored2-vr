@@ -11,6 +11,7 @@
 #include "render_size.hpp"
 #include "canted_fov.hpp"
 #include "menu_panel.hpp"
+#include "y_hold.hpp"
 #include "xr_continuity.hpp"
 #include "xr_layer_pose.hpp"
 #include "eye_antialiasing.hpp"
@@ -69,6 +70,7 @@ class GameXr {
     Microsoft::WRL::ComPtr<ID3D11Texture2D> settings_texture_;
     std::unique_ptr<DesktopMirror> settings_compositor_;
     bool native_pointer_enabled_{};
+    YHold y_hold_;bool y_hold_menu_request_{},y_hold_raw_was_{},y_hold_gameplay_was_{};std::chrono::steady_clock::time_point y_hold_press_start_{};
 public:
     bool wheel_native_pointer=true; // build/wheel-no-pointer: the wheel selects by stick only (pointer events switch it to keyboard glyphs)
 private:
@@ -941,6 +943,11 @@ public:
     UINT64 antialiased_eyes() const noexcept {return antialiasing_?antialiasing_->eye_passes:0;}
     bool settings_open() const noexcept {return settings_.open();}
     std::atomic<bool> settings_requested{false}; // native menu "VR Settings" item (native_menu_entry.hpp)
+    // Hold left Y in gameplay opens the settings (y_hold.hpp). The game thread sets y_hold_blocked each frame while a Talk prompt is
+    // offered to Y or the wheel owns it; build/no-hold-y-menu clears y_hold_enabled.
+    std::atomic<bool> y_hold_blocked{false};
+    bool y_hold_enabled=true;
+    std::atomic<UINT64> y_hold_fires{0},y_hold_blocked_presses{0},y_hold_last_ms{0};
     void avatar_measurements(NativeAvatarMeasurements value) {
         avatar_measurements_=value;
         // Keep the player's body across reloads/avatar/reference changes: refit without a new pose.
@@ -1389,6 +1396,22 @@ public:
         last_tracked_pair=rendered_mask_==3;
         sample_input();
         // Preserve squeeze actions before the paused overlay consumes controls.
+        // Hold left Y during play: open the settings. Fed with the raw button before anything zeroes it; a Talk offer or the wheel
+        // (y_hold_blocked) owns the press instead. Not fed while the panel is open: Y then closes it by a new press (VrSettings).
+        if(gameplay && settings_enabled_ && y_hold_enabled && state==XR_SESSION_STATE_FOCUSED && controller_input.active && !settings_.open()) {
+            const auto now=std::chrono::steady_clock::now();
+            // A Y still held from before gameplay (paused menu, load) belongs to that screen, not to a new hold.
+            const bool raw_y=controller_input.y,blocked=y_hold_blocked.load() || !y_hold_gameplay_was_;
+            if(raw_y && !y_hold_raw_was_) {y_hold_press_start_=now;if(blocked) ++y_hold_blocked_presses;}
+            y_hold_raw_was_=raw_y;
+            const auto hold=y_hold_.update(raw_y,blocked,std::chrono::duration<double>(now.time_since_epoch()).count());
+            if(hold.fire) {
+                y_hold_menu_request_=true;++y_hold_fires;
+                y_hold_last_ms=static_cast<UINT64>(std::chrono::duration<double,std::milli>(now-y_hold_press_start_).count());
+            }
+            if(hold.suppress_y) {controller_input.y=false;controller_input.suppress_y=true;} // the game never sees the press that opened it
+        } else if(!gameplay || !controller_input.active) {y_hold_.reset();y_hold_raw_was_=false;}
+        y_hold_gameplay_was_=gameplay && controller_input.active;
         const bool raw_both_grips_held=controller_input.left_grip>=.8f && controller_input.right_grip>=.8f;
         // In menus a left-grip squeeze re-places the menu where the user is looking.
         const bool menu_grip=controller_input.left_grip>=.6f;
@@ -1404,6 +1427,10 @@ public:
         {const auto now_ms=GetTickCount64();if(now_ms>=native_rows_tick_) {native_rows_tick_=now_ms+250;NativeOptionsPage::publish(native_settings::rows(settings_));}}
         if(settings_enabled_) {
             if(settings_requested.exchange(false) && !gameplay) {settings_.open_from_menu();}
+            if(y_hold_menu_request_) {
+                y_hold_menu_request_=false;
+                if(gameplay && !settings_.open()) {settings_.open_from_gameplay();pulse(0,.4f,.08f);}
+            }
             if(settings_.open()) {
                 constexpr XrSpaceLocationFlags valid_pose=XR_SPACE_LOCATION_ORIENTATION_VALID_BIT|XR_SPACE_LOCATION_POSITION_VALID_BIT;
                 const auto& aim=aim_locations[1];

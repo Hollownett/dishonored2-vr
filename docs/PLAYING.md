@@ -71,6 +71,9 @@ Raise your left hand in front of your face and turn it like checking a watch to 
 Open the game's pause menu and choose **VR Settings**. Its controls appear in
 the native menu image, beside the game's navigation. Point with the right
 controller and use its trigger to select. Y while paused remains a shortcut.
+During play, hold left Y for about half a second to open the settings; a short
+Y still talks to an NPC. Press Y again or B to close. The `no-hold-y-menu` knob
+(or the launcher's "Hold Y for VR settings" switch) turns the hold off.
 From there you can set:
 - resolution scale
 - anti-aliasing: FSR Native, FSR Quality (renders at 77% and upscales), FSR Balanced (67% and upscales), Game TAA or Off. The displayed generation reflects the active backend. Your saved selection is preserved. Reduced input resolution is verified; headset FPS gains remain unmeasured.

@@ -208,5 +208,16 @@ int main() {
         control.y=control.native_y_quick_action=true;
         assert(crouch_pad.compose(control,true,5210).wButtons&XINPUT_GAMEPAD_Y);
     }
+    {   // y_hold_suppression_blocks_game_y: a press the hold-Y menu owns never reaches the game
+        d2vr::PadComposer suppress_pad;d2vr::ControllerInput control{};control.active=true;
+        suppress_pad.compose(control,true,6000);
+        control.y=control.native_y_quick_action=true;control.suppress_y=true;
+        assert(!(suppress_pad.compose(control,true,6010).wButtons&XINPUT_GAMEPAD_Y));
+        control.native_y_quick_action=false;
+        assert(!(suppress_pad.compose(control,true,6020).wButtons&XINPUT_GAMEPAD_Y));
+        control.y=false;control.suppress_y=false;suppress_pad.compose(control,true,6030);
+        control.y=control.native_y_quick_action=true;
+        assert(suppress_pad.compose(control,true,6040).wButtons&XINPUT_GAMEPAD_Y);
+    }
     std::cout << "PASS: VR pad mapping, native window connection probe through patched XInput, menu/focus/stale release and import restoration, menu grip taps\n";
 }

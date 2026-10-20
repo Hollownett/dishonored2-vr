@@ -21,6 +21,34 @@ int main() {
             VrSettings fsr3;fsr3.initialize(1,true,{},MirrorMode::both_eyes,.5,4);fsr3.upscaler_generation(3);
             require(std::wstring(fsr3.temporal_aa_text())==L"Anti-aliasing: FSR 3 Balanced (67%)","FSR3 label wrong");
         }
+        {   // open_from_gameplay_opens_page_zero / closes_on_y_press_after_open_from_gameplay
+            VrSettings held;ControllerInput idle{};idle.active=true;
+            held.update(idle,true,true);
+            require(!held.open(),"Gameplay opened settings without a hold");
+            held.open_from_gameplay();
+            require(held.open() && !held.calibration_page(),"open_from_gameplay did not open page 0");
+            require(held.update(idle,true,true,{},false).consume && held.open(),"Gameplay settings closed or leaked input on the first frame");
+            require(held.update(idle,true,true,{},false).consume && held.open(),"Gameplay settings did not keep running without settings_available");
+            ControllerInput down=idle;down.move_y=-1;
+            held.update(down,true,true,{},false);held.update(idle,true,true,{},false);
+            require(held.open(),"Gameplay settings closed on a stick move");
+            ControllerInput press=idle;press.y=true;
+            const auto closed=held.update(press,true,true,{},false);
+            require(!held.open() && closed.consume,"Y press did not close gameplay settings");
+            require(!held.update(press,true,true,{},false).consume,"Closed gameplay settings kept consuming input");
+            held.open_from_gameplay();held.update(idle,true,true,{},false);
+            ControllerInput back=idle;back.b=true;
+            require(held.update(back,true,true,{},false).consume && !held.open(),"B did not close gameplay settings");
+            held.open_from_gameplay();held.update(idle,true,true,{},false);
+            require(!held.update(idle,true,false,{},false).consume && !held.open(),"Focus loss kept gameplay settings open");
+            VrSettings plain;plain.open_from_menu();
+            plain.update(idle,true,true);
+            require(!plain.open(),"A menu-opened panel survived gameplay without the hold flag");
+            VrSettings page;page.open_from_gameplay();page.update(idle,true,true,{},false);
+            for(int i=0;i<2;++i) {ControllerInput step=idle;step.move_y=1;page.update(step,true,true,{},false);page.update(idle,true,true,{},false);}
+            ControllerInput accept=idle;accept.a=true;
+            require(!page.update(accept,true,true,{},false).calibrate && !page.calibration_page(),"Gameplay settings started a calibration");
+        }
         {
             VrSettings setup;ControllerInput neutral{};neutral.active=true;
             setup.calibration_runtime(AvatarFitRuntimeStatus::recalibration_required);

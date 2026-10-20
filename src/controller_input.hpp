@@ -19,6 +19,7 @@ struct ControllerInput {
     bool a{},b{},x{},y{},left_click{},right_click{},menu{};
     bool journal{},suppress_pause{},menu_modifier{};
     bool native_y_quick_action{};
+    bool suppress_y{}; // the hold-Y menu owns this press: the game must not also see it, quick action or not
     bool lean_controlled{},lean_modifier{},lean_suspended{};
     std::array<bool,4> dpad{}; // right, up, left, down (native QUICK_0..3).
 };
@@ -50,7 +51,7 @@ public:
         if(in.a) buttons|=XINPUT_GAMEPAD_A;
         if(in.b) buttons|=XINPUT_GAMEPAD_B;
         if(in.x) buttons|=XINPUT_GAMEPAD_X;
-        if(in.y && (!gameplay || in.native_y_quick_action)) buttons|=XINPUT_GAMEPAD_Y;
+        if(in.y && !in.suppress_y && (!gameplay || in.native_y_quick_action)) buttons|=XINPUT_GAMEPAD_Y;
         if(in.left_click) buttons|=XINPUT_GAMEPAD_LEFT_THUMB;
         if(in.right_click) buttons|=XINPUT_GAMEPAD_RIGHT_THUMB;
         if(pause) buttons|=XINPUT_GAMEPAD_START;

@@ -350,7 +350,8 @@ class FeatureTests(Case):
             self.assertIn(f["kind"], ("enable", "disable"))
             self.assertIsInstance(f["default"], bool)
             self.assertTrue(f["label"] and f["help"])
-        self.assertFalse({"hold-y-menu", "corpse-grab"} & set(ids))
+        self.assertFalse({"corpse-grab"} & set(ids))
+        self.assertIn("hold-y-menu", ids)
 
 
 FIXTURES = Path(__file__).resolve().parents[2] / "tests/fixtures/launcher_features"
