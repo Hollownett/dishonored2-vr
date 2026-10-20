@@ -82,9 +82,10 @@ public static class Features
             using var doc = JsonDocument.Parse(bytes);
             var root = doc.RootElement;
             var vEl = root.GetProperty("version");
-            if (vEl.ValueKind != JsonValueKind.Number || !vEl.TryGetInt32(out var version)) throw new InvalidDataException("version is not an integer");
-            // A well-formed state of another version is not corruption: abort rather than archive and re-seed.
-            if (version is not (1 or 2)) throw new FeaturesStateException($"{p} has unknown version {version}");
+            if (vEl.ValueKind != JsonValueKind.Number || !System.Text.RegularExpressions.Regex.IsMatch(vEl.GetRawText(), @"^-?[0-9]+\z")) throw new InvalidDataException("version is not an integer");
+            // A well-formed state of another version (any integer outside 1 and 2) is not corruption: abort rather than archive and re-seed.
+            var version = vEl.TryGetInt64(out var v64) ? v64 : -1;
+            if (version is not (1 or 2)) throw new FeaturesStateException($"{p} has unknown version {vEl.GetRawText()}");
             var s = new StateFile();
             foreach (var x in Strings(root.GetProperty("off"))) s.Off.Add(x);
             foreach (var x in Strings(root.GetProperty("seeded"))) s.Seeded.Add(x);
@@ -97,7 +98,7 @@ public static class Features
                     var fl = kv.Value.GetProperty("file"); var kd = kv.Value.GetProperty("kind");
                     if (fl.ValueKind != JsonValueKind.String || kd.ValueKind != JsonValueKind.String) throw new InvalidDataException("bad applied row");
                     bool? off = null;
-                    if (kv.Value.TryGetProperty("off", out var of))
+                    if (kv.Value.TryGetProperty("off", out var of) && of.ValueKind != JsonValueKind.Null)  // null = unknown, as absent
                         off = of.ValueKind is JsonValueKind.True or JsonValueKind.False ? of.GetBoolean() : throw new InvalidDataException("bad applied off");
                     s.Applied[kv.Name] = new Applied(fl.GetString()!, kd.GetString()!, off);
                 }
@@ -106,7 +107,7 @@ public static class Features
         }
         catch (Exception ex) when (ex is JsonException or InvalidOperationException or KeyNotFoundException or FormatException or InvalidDataException)
         {
-            try { File.Move(p, p + ".bad", true); }
+            try { File.Move(p, FreeSlot(p + ".bad"), false); }
             catch (Exception mv) when (mv is IOException or UnauthorizedAccessException) { throw new FeaturesStateException("Cannot archive corrupt " + p + ": " + mv.Message, mv); }
             log?.Invoke("Feature state was corrupt and was moved to " + StateName + ".bad");
             return new StateFile();
@@ -115,7 +116,12 @@ public static class Features
 
     static void WriteState(string buildDir, StateFile s)
     {
-        var applied = s.Applied.ToDictionary(kv => kv.Key, kv => new { file = kv.Value.File, kind = kv.Value.Kind, off = kv.Value.Off });
+        var applied = s.Applied.ToDictionary(kv => kv.Key, kv =>
+        {
+            var row = new Dictionary<string, object> { ["file"] = kv.Value.File, ["kind"] = kv.Value.Kind };
+            if (kv.Value.Off is bool b) row["off"] = b;  // never write null
+            return row;
+        });
         var text = JsonSerializer.Serialize(new { version = 2, off = s.Off.ToArray(), seeded = s.Seeded.ToArray(), applied }, new JsonSerializerOptions { WriteIndented = true }) + "\n";
         var bytes = Encoding.UTF8.GetBytes(text);
         var p = StatePath(buildDir);
@@ -157,11 +163,24 @@ public static class Features
         return list.OrderBy(x => x.Item1).ToList();
     }
 
-    static string FreeSavedSlot(string path)
+    static string FreeSlot(string baseName)
     {
-        var c = path + Saved;
-        for (int i = 1; File.Exists(c); i++) c = path + Saved + "." + i;
+        var c = baseName;
+        for (int i = 1; File.Exists(c); i++) c = baseName + "." + i;
         return c;
+    }
+
+    static string FreeSavedSlot(string path) => FreeSlot(path + Saved);
+
+    /// <summary>Test hook: runs just before a no-clobber move so a test can create the destination (a race).</summary>
+    internal static Action<string>? BeforeMove;
+
+    /// <summary>Moves without replacing; a destination that appears first is a typed error (nothing is lost, a retry converges).</summary>
+    static void MoveNoClobber(string src, string dst)
+    {
+        BeforeMove?.Invoke(dst);
+        try { File.Move(src, dst, false); }
+        catch (IOException) when (File.Exists(dst)) { throw new FeaturesStateException($"{dst} already exists; {src} was left in place"); }
     }
 
     /// <summary>Turns an enable knob off without losing a valued file (full-body holds tuning): empty files are deleted, others are set
@@ -170,7 +189,7 @@ public static class Features
     {
         if (!File.Exists(path)) return;
         if (new FileInfo(path).Length == 0) File.Delete(path);
-        else File.Move(path, FreeSavedSlot(path));
+        else MoveNoClobber(path, FreeSavedSlot(path));
     }
 
     /// <summary>Brings the newest saved copy back (or creates an empty file); an existing file is never replaced.</summary>
@@ -178,14 +197,15 @@ public static class Features
     {
         if (File.Exists(path)) return;
         var saved = SavedCopies(path);
-        if (saved.Count > 0) File.Move(saved[^1].Path, path);
+        // newest by modification time; ties go to the highest slot number
+        if (saved.Count > 0) MoveNoClobber(saved.OrderBy(x => File.GetLastWriteTimeUtc(x.Path)).ThenBy(x => x.N).Last().Path, path);
         else Touch(path);
     }
 
     /// <summary>A renamed row: carry the old name's saved copies over to free slots of the new name.</summary>
     static void MigrateSaved(string oldPath, string newPath)
     {
-        foreach (var (_, p) in SavedCopies(oldPath)) File.Move(p, FreeSavedSlot(newPath));
+        foreach (var (_, p) in SavedCopies(oldPath)) MoveNoClobber(p, FreeSavedSlot(newPath));
     }
 
     static void ForceOff(Feature f, string path) { if (f.IsEnable) Retire(path); else Touch(path); }

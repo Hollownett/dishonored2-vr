@@ -264,13 +264,13 @@ def _read_state(state_path: Path, changed: list, log):
             for k, v in d["applied"].items():
                 if not (isinstance(v, dict) and isinstance(v.get("file"), str) and isinstance(v.get("kind"), str)):
                     raise ValueError("applied row")
-                if "off" in v and not isinstance(v["off"], bool):
+                if v.get("off") is not None and not isinstance(v["off"], bool):
                     raise ValueError("applied off")
-                applied[k] = (v["file"], v["kind"], v.get("off"))
+                applied[k] = (v["file"], v["kind"], v.get("off"))  # off may be null/absent: unknown
         return off, seeded, applied
     except (ValueError, KeyError, TypeError):
         try:
-            os.replace(state_path, state_path.with_name(state_path.name + ".bad"))
+            os.replace(state_path, _free_name(state_path.with_name(state_path.name + ".bad")))
         except OSError as e:
             raise FeatureError(f"cannot archive corrupt {state_path}: {e}")
         changed.append(f"build/{FEATURES_STATE}.bad")
@@ -295,13 +295,25 @@ def _saved_copies(path: Path) -> list:
     return sorted(out)
 
 
-def _free_slot(path: Path) -> Path:
-    c = path.with_name(path.name + _SAVED)
+def _free_name(base: Path) -> Path:
+    c = base
     i = 1
     while c.exists():
-        c = path.with_name(f"{path.name}{_SAVED}.{i}")
+        c = base.with_name(f"{base.name}.{i}")
         i += 1
     return c
+
+
+def _free_slot(path: Path) -> Path:
+    return _free_name(path.with_name(path.name + _SAVED))
+
+
+def _move_slot(src: Path, dst: Path) -> None:
+    """_move_noclobber, with a destination that appeared first reported as the typed error (nothing is lost)."""
+    try:
+        _move_noclobber(src, dst)
+    except FileExistsError:
+        raise FeatureError(f"{dst} already exists; {src} was left in place")
 
 
 def _move_noclobber(src: Path, dst: Path) -> None:
@@ -324,7 +336,7 @@ def _retire(path: Path, changed: list) -> None:
     if path.stat().st_size == 0:
         path.unlink()
     else:
-        _move_noclobber(path, _free_slot(path))
+        _move_slot(path, _free_slot(path))
     changed.append(f"build/{path.name}")
 
 
@@ -334,10 +346,9 @@ def _restore(path: Path, changed: list, build: Path) -> None:
         return
     saved = _saved_copies(path)
     if saved:
-        try:
-            _move_noclobber(saved[-1][1], path)
-        except FileExistsError:
-            return
+        # newest by modification time; ties go to the highest slot number
+        newest = max(saved, key=lambda x: (x[1].stat().st_mtime_ns, x[0]))[1]
+        _move_slot(newest, path)
         changed.append(f"build/{path.name}")
     else:
         _touch(path, changed, build)
@@ -345,12 +356,12 @@ def _restore(path: Path, changed: list, build: Path) -> None:
 
 def _migrate_saved(old: Path, new: Path) -> None:
     for _, p in _saved_copies(old):
-        _move_noclobber(p, _free_slot(new))
+        _move_slot(p, _free_slot(new))
 
 
 def _write_state(state_path: Path, off, seeded, applied, changed: list) -> None:
     data = (json.dumps({"version": 2, "off": sorted(off), "seeded": sorted(seeded),
-                        "applied": {k: {"file": v[0], "kind": v[1], "off": v[2]} for k, v in sorted(applied.items())}}, indent=2) + "\n").encode()
+                        "applied": {k: {"file": v[0], "kind": v[1], **({"off": v[2]} if v[2] is not None else {})} for k, v in sorted(applied.items())}}, indent=2) + "\n").encode()
     if _write(state_path, data):
         changed.append(f"build/{FEATURES_STATE}")
 

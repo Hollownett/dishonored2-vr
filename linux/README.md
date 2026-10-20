@@ -63,7 +63,7 @@ Out of scope for this version: FSR 4, Virtual Desktop, WiVRn/ALVR, flatpak Steam
    linux/d2vr-linux feature on full-body
    ```
 
-   A switched-off feature stays off across reinstalls: the state's `off` list is authoritative and every install re-applies it (an `enable` knob file is removed; if it holds a value, such as `full-body`, it is set aside as `<file>.off-by-launcher`, then `.1`, `.2`, ... and the newest is restored when the feature is switched back on; a `no-*` file is created). Editing `off` by hand works the same way at the next install; removing an id from `off` turns the feature back on then. Features marked "new, untested" are not enabled by default.
+   A switched-off feature stays off across reinstalls: the state's `off` list is authoritative and every install re-applies it (an `enable` knob file is removed; if it holds a value, such as `full-body`, it is set aside as `<file>.off-by-launcher`, then `.1`, `.2`, ... and the most recently modified is restored when the feature is switched back on; a `no-*` file is created). Editing `off` by hand works the same way at the next install; removing an id from `off` turns the feature back on then. Features marked "new, untested" are not enabled by default.
 6. Let SteamVR be the host OpenXR runtime:
 
    ```

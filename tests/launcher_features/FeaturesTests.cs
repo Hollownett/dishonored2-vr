@@ -143,7 +143,7 @@ string StateText(string d) => File.ReadAllText(Path.Combine(d, "launcher-feature
             var expect = j.GetProperty("expect").GetString();
             bool aborted = false; try { Features.Apply(d, list); } catch (Features.FeaturesStateException) { aborted = true; }
             bool bad = Has(d, "launcher-features.json.bad");
-            Check("fixture " + name, expect == "abort" ? aborted && !bad && !Has(d, "full-body") && StateText(d).Contains("\"version\": 3") : !aborted && bad == (expect == "corrupt"));
+            Check("fixture " + name, expect == "abort" ? aborted && !bad && !Has(d, "full-body") && StateText(d) == j.GetProperty("content").GetString() : !aborted && bad == (expect == "corrupt"));
         }
         else
         {
@@ -189,6 +189,43 @@ string StateText(string d) => File.ReadAllText(Path.Combine(d, "launcher-feature
     var d = NewBuild(); File.WriteAllText(Path.Combine(d, "launcher-features.json"), "{\"version\":7,\"off\":[],\"seeded\":[]}");
     bool aborted = false; try { Features.Apply(d, list); } catch (Features.FeaturesStateException) { aborted = true; }
     Check("unknown_version_aborts_untouched", aborted && !Has(d, "full-body") && !Has(d, "launcher-features.json.bad"));
+}
+
+{   // round 3
+    var fb = F("full-body");
+    {   // 1. round-1 state, off absent: Set another feature, Apply -> no archive, off intact
+        var d = NewBuild(); string P(string n) => Path.Combine(d, n);
+        WriteState(d, "{\"version\":2,\"off\":[\"full-body\"],\"seeded\":[\"full-body\"],\"applied\":{\"full-body\":{\"file\":\"full-body\",\"kind\":\"enable\"}}}");
+        Features.Set(d, F("hand-blink"), false);
+        var written = StateText(d);
+        Features.Apply(d, list);
+        Check("null_off_never_written_round_trip", !written.Contains("null") && !Has(d, "launcher-features.json.bad") && Ids(d, "off").Contains("full-body") && !Has(d, "full-body"));
+        Features.Apply(d, list.Where(f => f.Id != "full-body").ToList());  // row skipped: its applied entry is carried
+        Features.Set(d, F("hand-clamp"), false);
+        Features.Apply(d, list);
+        Check("carried_applied_entry_round_trips", !Has(d, "launcher-features.json.bad") && Ids(d, "off").Contains("full-body") && !Has(d, "full-body"));
+    }
+    {   // 2. .bad never overwritten
+        var d = NewBuild(); WriteState(d, "{g1"); Features.Apply(d, list);
+        WriteState(d, "{g2"); Features.Apply(d, list);
+        Check("bad_archives_not_overwritten", File.ReadAllText(Path.Combine(d, "launcher-features.json.bad")) == "{g1" && File.ReadAllText(Path.Combine(d, "launcher-features.json.bad.1")) == "{g2");
+    }
+    {   // 3. newest by mtime with a numbering gap
+        var d = NewBuild(); string P(string n) => Path.Combine(d, n);
+        File.WriteAllText(P("full-body.off-by-launcher"), "C"); File.WriteAllText(P("full-body.off-by-launcher.3"), "B");
+        File.SetLastWriteTimeUtc(P("full-body.off-by-launcher"), DateTime.UtcNow);
+        File.SetLastWriteTimeUtc(P("full-body.off-by-launcher.3"), DateTime.UtcNow.AddHours(-2));
+        Features.Set(d, fb, true);
+        Check("restore_picks_newest_by_mtime_with_gap", File.ReadAllText(P("full-body")) == "C" && Has(d, "full-body.off-by-launcher.3"));
+    }
+    {   // 4. slot collision is typed
+        var d = NewBuild(); string P(string n) => Path.Combine(d, n);
+        File.WriteAllText(P("full-body"), "T");
+        Features.BeforeMove = dst => File.WriteAllText(dst, "X");
+        bool typed = false; try { Features.Set(d, fb, false); } catch (Features.FeaturesStateException) { typed = true; }
+        Features.BeforeMove = null;
+        Check("slot_collision_is_typed_error", typed && File.ReadAllText(P("full-body")) == "T" && File.ReadAllText(P("full-body.off-by-launcher")) == "X");
+    }
 }
 Console.WriteLine(failures == 0 ? "ALL PASS" : failures + " FAILED");
 return failures == 0 ? 0 : 1;

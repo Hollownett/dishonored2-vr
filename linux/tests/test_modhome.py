@@ -5,6 +5,7 @@ import os
 import shutil
 import sys
 import tempfile
+import time
 import unittest
 from unittest import mock
 import zipfile
@@ -540,6 +541,55 @@ class FeatureEvolutionTests(Case):
             modhome.apply_default_features(self.home)
         self.assertFalse((self.home / "build/launcher-features.json.bad").exists())
         self.assertFalse((self.home / "build/full-body").exists())
+
+    def test_null_off_never_written_round_trip(self):
+        self.write_state('{"version":2,"off":["full-body"],"seeded":["full-body"],"applied":{"full-body":{"file":"full-body","kind":"enable"}}}')
+        modhome.set_feature(self.home, "hand-blink", False)
+        text = (self.home / "build/launcher-features.json").read_text()
+        self.assertNotIn("null", text)
+        modhome.apply_default_features(self.home)
+        self.assertFalse((self.home / "build/launcher-features.json.bad").exists())
+        self.assertIn("full-body", self.state()["off"])
+        self.assertFalse((self.home / "build/full-body").exists())
+        # a null on read is accepted as unknown
+        st = self.state()
+        st["applied"]["full-body"]["off"] = None
+        (self.home / "build/launcher-features.json").write_text(json.dumps(st))
+        modhome.apply_default_features(self.home)
+        self.assertFalse((self.home / "build/launcher-features.json.bad").exists())
+
+    def test_bad_archives_not_overwritten(self):
+        self.write_state("{g1")
+        modhome.apply_default_features(self.home)
+        self.write_state("{g2")
+        modhome.apply_default_features(self.home)
+        b = self.home / "build"
+        self.assertEqual((b / "launcher-features.json.bad").read_text(), "{g1")
+        self.assertEqual((b / "launcher-features.json.bad.1").read_text(), "{g2")
+
+    def test_restore_picks_newest_by_mtime_with_gap(self):
+        b = self.home / "build"
+        b.mkdir(parents=True)
+        (b / "full-body.off-by-launcher").write_text("C")
+        (b / "full-body.off-by-launcher.3").write_text("B")
+        now = time.time()
+        os.utime(b / "full-body.off-by-launcher", (now, now))
+        os.utime(b / "full-body.off-by-launcher.3", (now - 7200, now - 7200))
+        modhome.set_feature(self.home, "full-body", True)
+        self.assertEqual((b / "full-body").read_text(), "C")
+        self.assertTrue((b / "full-body.off-by-launcher.3").exists())
+
+    def test_slot_collision_is_typed_error(self):
+        b = self.home / "build"
+        b.mkdir(parents=True)
+        (b / "full-body").write_text("T")
+        taken = b / "taken"
+        taken.write_text("X")
+        with mock.patch.object(modhome, "_free_slot", lambda path: taken):
+            with self.assertRaises(modhome.FeatureError):
+                modhome.set_feature(self.home, "full-body", False)
+        self.assertEqual((b / "full-body").read_text(), "T")
+        self.assertEqual(taken.read_text(), "X")
 
     def test_shared_fixtures(self):
         names = sorted(FIXTURES.glob("*.json"))
