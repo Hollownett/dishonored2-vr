@@ -164,7 +164,8 @@ private:
         std::vector<NativeRigidBody> candidates;NativeGrabDiscovery discovery;
         std::optional<NativeRigidBody> focus;UINT64 focus_tick{};Vec3 focus_hand{};std::uintptr_t focus_excluded{};
         bool pending_release{},release_throw{},attempted{},acquired{},decision_deferred{};
-        double tow{}; // a dragged body's pelvis follows its grabbed limb at this distance (set on the first motor write)
+        double tow{},tow_recovery{}; // a dragged body's pelvis follows its grabbed limb at this distance (set on the first motor write); tow_recovery: plan_tow's stale-frame recovery time
+        void reset_tow() {tow=0;tow_recovery=0;last_tow=0;}
         Gate gate=Gate::none;float raw_grip{};UINT64 decision_tick{};bool decision_usable{};
         UINT64 consumed{},last_motor{},last_tow{},last_acquisition{},owner_epoch{},grip_epoch{};
         UINT64 focus_calls{},focus_us{},focus_max_us{};
@@ -335,13 +336,13 @@ private:
     // the grab, the pelvis slides after it along the floor (sim v402: the wrist alone moved 0.86 m and dragged the pelvis 0.19 m).
     void tow(Lane& lane,const NativeRigidBody& held,double dt) {
         const auto pelvis=native_ragdoll_body(read_,base_,held.entity,0);if(!pelvis) return;
-        TowInput in;in.target=lane.grab.target().position;in.pelvis=pelvis->pose.position;in.bind_reach=lane.tow;
+        TowInput in;in.target=lane.grab.target().position;in.pelvis=pelvis->pose.position;in.bind_reach=lane.tow;in.recovery_s=lane.tow_recovery;
         in.pelvis_kg=ragdoll_class_kg[0];in.dt=dt;in.tuning=&tuning_;
         in.limb_saturated=false; // Task 10 supplies CorpseMotor.capped
         const auto motion=native_motion(read_,*pelvis); // the plan writes an absolute velocity, so it needs the current one for the cap
         if(!motion) {++tow_unreadable_;return;}
         in.pelvis_velocity=motion->velocity;
-        const auto plan=plan_tow(in);lane.tow=plan.bind_reach;if(!plan.write) return;
+        const auto plan=plan_tow(in);lane.tow=plan.bind_reach;lane.tow_recovery=plan.recovery_s;if(!plan.write) return;
         alignas(16) std::array<float,4> linear{static_cast<float>(plan.linear.x),static_cast<float>(plan.linear.y),0,0};
         alignas(16) std::array<float,4> angular{};
         CrashOperation operation("native ragdoll tow velocity");
@@ -393,7 +394,7 @@ private:
                 }
                 if(motor->release) {
                     if(body->bone<0 && length(motor->linear)>3) {std::lock_guard<std::mutex> g(thrown_mutex_);thrown_=Thrown{body->entity,body->component,body->entity_id,motor->linear,now};}
-                    lane.held.reset();lane.pending_release=false;lane.tow=0;lane.last_tow=0;}
+                    lane.held.reset();lane.pending_release=false;lane.reset_tow();}
             }
         } else if(const auto yanked=yanked_entity_[side].load();yanked && now<yanked_until_[side].load() && sample && physical_usable && lane.grab.pressed()) {
             // The guard this hand just yanked into ragdoll (NativeWeaponHands::yank): the hand had his collar or arm, so it takes
@@ -401,7 +402,7 @@ private:
             if(const auto limb=nearest_ragdoll_body(read_,base_,yanked,p.hand.position);limb && limb->world==world) {
                 auto at_hand=limb->pose;at_hand.position=at_hand.position+(p.hand.position-limb->contact(p.hand.position));
                 if(lane.grab.bind(at_hand,p.hand.position,grab_acquire_distance)) {
-                    lane.held=limb;lane.acquired=true;lane.tow=0;lane.last_tow=0;lane.owner_player=p.owner.player;lane.owner_camera=p.owner.camera;
+                    lane.held=limb;lane.acquired=true;lane.reset_tow();lane.owner_player=p.owner.player;lane.owner_camera=p.owner.camera;
                     lane.owner_generation=p.owner.camera_identity.generation;lane.owner_epoch=p.epoch;++picked_;++yank_holds_;yanked_entity_[side]=0;
                     probe_masses(*limb,now);
                 }
@@ -428,7 +429,7 @@ private:
             }
             const auto contact=body?acquisition_contact(lane,*body,now):std::nullopt;
             if(body && contact && body->world==world && cleared(lane,*body,now) && lane.grab.bind(body->pose,*contact,grab_acquire_distance)) {
-                lane.held=body;lane.acquired=true;lane.tow=0;lane.last_tow=0;lane.owner_player=p.owner.player;lane.owner_camera=p.owner.camera;
+                lane.held=body;lane.acquired=true;lane.reset_tow();lane.owner_player=p.owner.player;lane.owner_camera=p.owner.camera;
                 lane.owner_generation=p.owner.camera_identity.generation;lane.owner_epoch=p.epoch;++picked_;
                 probe_masses(*body,now);
             }
@@ -708,7 +709,7 @@ public:
             if(*verdict && contact && lane.owner.physical() && (!other || other->entity!=after->entity || other->handle!=after->handle) &&
                lane.grab.sample(p.hand,p.grip,true,p.epoch,p.tick) &&
                lane.grab.bind(after->pose,*contact,grab_acquire_distance)) {
-                lane.held=after;lane.acquired=true;lane.pending_release=false;lane.tow=0;lane.last_tow=0;
+                lane.held=after;lane.acquired=true;lane.pending_release=false;lane.reset_tow();
                 lane.owner_player=p.owner.player;lane.owner_camera=p.owner.camera;
                 lane.owner_generation=p.owner.camera_identity.generation;lane.owner_epoch=p.epoch;++picked_;
             }

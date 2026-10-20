@@ -137,7 +137,7 @@ struct Metrics {
         lag_start=std::nan(""),pelvis_miss=std::nan(""),pelvis_travel=0,stretch=0,runaway_time=std::nan(""),max_lag=0,end_hold_z=0,end_gap=0,hand_stop=std::nan(""),
         dv_ratio=0,release_lin=0,release_ang=0,min_hand_lift=std::nan("");   // dv_ratio: worst measured |dv| per tick over F_pinned*min(dt,1/30)/m_eff_pinned (independent of implied_force_n)
     ReleaseReason reason=ReleaseReason::none;
-    unsigned writes=0,writes_after_release=0,release_frame_writes=0,tow_writes=0,locked_frames=0,all_hands_write_ticks=0;bool lock_at_099=false,lock_at_100=true;
+    unsigned writes=0,writes_after_release=0,release_frame_writes=0,tow_writes=0,locked_frames=0,all_hands_write_ticks=0,held_ticks=0;bool lock_at_099=false,lock_at_100=true;
     bool released=false;
 };
 // The implied force corpse_motor REPORTS, against the pinned literal envelope (self-reported: it only catches a changed constant). The measured
@@ -217,7 +217,7 @@ void simulate(Scenario& s) {
             std::array<std::optional<Vec3>,17> vel{};for(int i=0;i<17;++i) vel[std::size_t(i)]=d.v[std::size_t(i)];
             const auto verdict=RunawayDetector::check(vel);
             Frame fr;fr.t=t;fr.peak17=verdict.max_speed;
-            unsigned tick_writes=0;
+            unsigned tick_writes=0;bool any_held=false;for(const auto& gr:grabs) any_held=any_held||gr.held();if(any_held) ++m.held_ticks;
             for(std::size_t h=0;h<n;++h) {
                 if(!grabs[h].held()) continue;
                 if(verdict.runaway) {
@@ -403,8 +403,8 @@ std::vector<Scenario> scenarios(const GrabTuning& base) {
         s.judge=[=](const Scenario& sc,const Metrics& m) {double worst=0;
             for(const auto& fr:sc.frames) worst=std::max(worst,fr.force);
             return std::vector<Check>{below("combined reported implied_force_n vs 2 x pinned envelope hypot(900,270)",worst/(2*std::hypot(kPinnedAxial,kPinnedLateral)),1.01),dv_check(m),
-                truth("both hands write on the same tick",m.all_hands_write_ticks>0,fmt("%u ticks",m.all_hands_write_ticks)),
-                truth("the body lifts >= 0.5 m (the lower of the two held limbs)",m.min_hand_lift>=.5,fmt("%.3f m",m.min_hand_lift))};};
+                truth("both hands write on >= 90% of the held ticks",m.held_ticks>0 && m.all_hands_write_ticks>=.9*m.held_ticks,fmt("%u of %u held ticks",m.all_hands_write_ticks,m.held_ticks)),
+                truth("the body lifts >= 0.5 m (the lower of the two held limbs; margin is thin, reported not retuned)",m.min_hand_lift>=.5,fmt("%.3f m",m.min_hand_lift))};};
         all.push_back(s);
     }
     {
@@ -420,7 +420,7 @@ std::vector<Scenario> scenarios(const GrabTuning& base) {
         all.push_back(s);
     }
     {
-        // Stale-frame recovery (PhysicalGrab::corpse_motor): the error-closure speed is capped at catch_up_mps for catch_up_window_s after a stale frame.
+        // Stale-frame recovery (PhysicalGrab::corpse_motor): the error-closure cap starts at catch_up_mps and ramps at catch_up_ramp_mps2 after a hitch.
         const auto hitch_judge=[](double limit,bool lag_ok) {return [=](const Scenario& sc,const Metrics& m) {return std::vector<Check>{
             below(fmt("no body above %g m/s after the hitch",limit),m.peak_after_hitch,limit,"m/s"),
             truth("no runaway release after the hitch",!(m.released && m.reason==ReleaseReason::runaway),m.released?fmt("released at %.3f s, reason %u",m.release_time,unsigned(m.reason)):"held"),
@@ -437,6 +437,9 @@ std::vector<Scenario> scenarios(const GrabTuning& base) {
             truth("no lag release",!(m.released && m.reason==ReleaseReason::lag),m.released?fmt("released at %.3f s, reason %u",m.release_time,unsigned(m.reason)):"held"),
             below("peak after the hitch (reported, INFO)",m.peak_after_hitch,12,"m/s",true)};};
         all.push_back(f);
+        auto l=make("hitch_1p2_long","One 0.6 s hitch during a 1.2 m/s wrist drag (the hand jumps 0.72 m)","no runaway release, no lag release (peak reported)");
+        l.hands={drag_hand(7,{0,1,0},3,1.2,.3)};l.hitch_at=1.2;l.hitch_len=.6;l.duration=4.5;l.judge=f.judge;
+        all.push_back(l);
         auto g=make("hitch_slow_0p3","One 0.5 s hitch during a slow 0.3 m/s drag (the hand jumps 0.15 m)","no body above 6 m/s after the hitch");
         g.hands={drag_hand(7,{0,1,0},3,kHitchV,.3)};g.hitch_at=1.2;g.hitch_len=.5;g.duration=4.5;g.judge=hitch_judge(6,false);
         all.push_back(g);
@@ -564,7 +567,7 @@ int main(int argc,char** argv) {
         }
         unsigned failed=0;std::string json="{\"honesty\":"+quote("Offline model, not the Havok solver: point masses with the class-table masses, max-separation joints with damping (position based), a floor at z=bone radius with Coulomb friction, optional wall half-space; no rotation, body-body collision or joint limits. The motor, force cap, lag rule, tow planner and runaway envelope are the production headers. It pins logic and the shape of the feel; only the headset (Tier C) declares feel met.")+
             ",\"dt\":"+jnum(kFrame)+",\"substeps\":"+jnum(kSub)+",\"tuning\":{\"strength_scale\":"+jnum(base.strength_scale)+",\"axial_n\":"+jnum(base.axial_n)+",\"lateral_n\":"+jnum(base.lateral_n)+",\"torque_nm\":"+jnum(base.torque_nm)+
-            ",\"lift_fraction\":"+jnum(base.lift_fraction)+",\"hand_kg\":"+jnum(base.hand_kg)+",\"mass_floor_kg\":"+jnum(base.mass_floor_kg)+",\"mass_ceiling_kg\":"+jnum(base.mass_ceiling_kg)+",\"tow\":"+(base.tow?"true":"false")+"},\"explore\":"+(explore?"true":"false")+",\"scenarios\":[";
+            ",\"stale_dt_s\":"+jnum(base.stale_dt_s)+",\"catch_up_mps\":"+jnum(base.catch_up_mps)+",\"catch_up_ramp_mps2\":"+jnum(base.catch_up_ramp_mps2)+",\"dt_max\":"+jnum(base.dt_max)+",\"lift_fraction\":"+jnum(base.lift_fraction)+",\"hand_kg\":"+jnum(base.hand_kg)+",\"mass_floor_kg\":"+jnum(base.mass_floor_kg)+",\"mass_ceiling_kg\":"+jnum(base.mass_ceiling_kg)+",\"tow\":"+(base.tow?"true":"false")+"},\"explore\":"+(explore?"true":"false")+",\"scenarios\":[";
         std::printf("%-30s %-5s %s\n","scenario","state","checks");
         for(std::size_t n=0;n<list.size();++n) {
             auto& s=list[n];simulate(s);s.checks=s.judge(s,s.m);

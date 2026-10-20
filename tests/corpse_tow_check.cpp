@@ -2,6 +2,10 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <algorithm>
+#include <fstream>
+#include <sstream>
+#include <string>
 using namespace d2vr;
 #define CHECK(x) do{if(!(x)){std::printf("FAIL %d: %s\n",__LINE__,#x);std::exit(1);}}while(0)
 namespace {
@@ -43,17 +47,32 @@ int main() {
         auto out=plan_tow(in);CHECK(out.write && near(length(out.linear),.8,1e-6));
         in.dt=t.dt_max;out=plan_tow(in);CHECK(near(length(out.linear),4,1e-6));
     }
-    {   // stale_recovery: a stale frame opens the window; the normal frames after it keep the closing speed at catch_up_mps; it ends on expiry or when the reach closes
+    {   // stale_recovery: a hitch (dt > stale_dt_s) starts a ramped cap (catch_up_mps + ramp * t) up to the normal 4 m/s, where it ends with no step
         auto t=tow_on();t.strength_scale=10;t.axial_n=600;t.mass_floor_kg=.1;
         auto in=base(t,2.8,.8);in.pelvis_kg=.5;in.dt=1./30;
         auto out=plan_tow(in);CHECK(near(length(out.linear),4,1e-6) && out.recovery_s==0);   // normal play: unchanged law, no state
-        in.dt=.1;out=plan_tow(in);CHECK(out.write && near(length(out.linear),t.catch_up_mps,1e-6) && near(out.recovery_s,t.catch_up_window_s));
-        in.dt=1./30;in.recovery_s=out.recovery_s;
-        for(int i=0;i<5;++i) {out=plan_tow(in);CHECK(near(length(out.linear),t.catch_up_mps,1e-6) && out.recovery_s<in.recovery_s);in.recovery_s=out.recovery_s;}
-        in.recovery_s=1./60;out=plan_tow(in);CHECK(out.recovery_s==0);   // the window ran out during this frame: the law is back to normal
-        CHECK(near(length(out.linear),4,1e-6));
+        in.dt=.5;out=plan_tow(in);CHECK(out.write && length(out.linear)<=t.catch_up_mps+1e-9 && out.recovery_s>0);
+        in.dt=1./90;in.recovery_s=out.recovery_s;double tt=0,prev=length(out.linear),worst=0;int frames=0;
+        while(in.recovery_s>0 && frames<500) {
+            out=plan_tow(in);tt+=in.dt;++frames;
+            const double v=length(out.linear);
+            if(out.recovery_s>0) CHECK(near(v,t.catch_up_mps+t.catch_up_ramp_mps2*tt,1e-6));
+            if(frames>1) worst=std::max(worst,std::fabs(v-prev));prev=v;in.recovery_s=out.recovery_s;
+        }
+        CHECK(out.recovery_s==0 && frames>5 && frames<500);
+        CHECK(worst<=t.catch_up_ramp_mps2*in.dt+1e-6);   // no step across the end of recovery
+        CHECK(near(prev,4,1e-6));
         in.recovery_s=.4;in.target={.84,0,0};out=plan_tow(in);CHECK(!out.write && out.recovery_s==0);   // reach closed to within 5 cm of the bind reach
         in.target={2.8,0,0};in.recovery_s=std::nan("");out=plan_tow(in);CHECK(out.recovery_s==0 && near(length(out.linear),4,1e-6));   // junk state is ignored
+        in.recovery_s=0;in.dt=.04;in.target={1.3,0,0};out=plan_tow(in);CHECK(out.recovery_s==0 && near(length(out.linear),3*t.dt_max/.04,1e-6));   // 25 fps is not a hitch: only the dt_max/dt scaling
+    }
+    {   // routing (source-level): native_grab.hpp carries plan_tow's recovery state in the Lane and resets it wherever the tow reach resets
+        std::ifstream f("src/native_grab.hpp");std::stringstream ss;ss<<f.rdbuf();const std::string src=ss.str();
+        CHECK(!src.empty());
+        auto count=[&](const std::string& n) {int c=0;for(std::size_t p=src.find(n);p!=std::string::npos;p=src.find(n,p+1)) ++c;return c;};
+        CHECK(count("lane.tow=0")==0 && count("lane.reset_tow();")==4);
+        CHECK(count("void reset_tow() {tow=0;tow_recovery=0;last_tow=0;}")==1);
+        CHECK(count("in.recovery_s=lane.tow_recovery;")==1 && count("lane.tow_recovery=plan.recovery_s;")==1);
     }
     {   // horizontal_only
         auto t=tow_on();auto in=base(t,1.3,.8);in.target={1.3,0,1};in.pelvis_velocity={0,0,5};

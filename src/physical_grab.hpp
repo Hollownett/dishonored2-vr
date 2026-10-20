@@ -81,7 +81,7 @@ class PhysicalGrab {
     bool forced_release_=false,has_released_=false;
     std::uint64_t release_tick_{};
     Vec3 last_anchor_{};
-    double recovery_s_=0;   // stale-frame recovery window left (s); 0 = normal play. Reset on bind and release.
+    double recovery_s_=0;   // time spent in stale-frame recovery (s, > 0 while recovering; 0 = normal play). Reset on bind and release.
     void note_release(ReleaseReason reason,bool forced) {
         recovery_s_=0;reason_=reason;forced_release_=forced;release_tick_=tick_;has_released_=true;
     }
@@ -217,11 +217,17 @@ public:
         // The stale frame also opens a recovery window: the NORMAL frames that follow still see the leftover lag (a 0.5 s stall leaves ~0.3 m) and
         // would close it at the full gain (~6 m/s), whipping the chain. While recovering, the error-closure term alone is capped at catch_up_mps
         // (the hand's own feed velocity is not); recovery ends when the lag is under 5 cm or the window runs out. Outside recovery the law is unchanged.
-        if(in.dt>tuning.dt_max) recovery_s_=tuning.catch_up_window_s;
-        else if(recovery_s_>0) {recovery_s_-=in.dt;if(recovery_s_<=0 || lag<.05) recovery_s_=0;}
-        auto closure=error*(18*catch_up);
-        if(recovery_s_>0) {const double c=length(closure);if(c>tuning.catch_up_mps) closure=closure*(tuning.catch_up_mps/c);}
-        const auto want_v=grab_limit(closure+feed,10),want_w=grab_limit(spin*12,5);
+        // The cap RAMPS (catch_up_mps + catch_up_ramp_mps2 * t) and recovery ends when it reaches the normal 10 m/s limit or the lag is under 5 cm and the rotation error under 0.1 rad, so no frame
+        // jumps back to full gain. Only a hitch (raw dt > stale_dt_s) enters it: sustained low fps keeps just the per-frame dt_max/dt scaling above.
+        if(in.dt>tuning.stale_dt_s) recovery_s_=1e-9;
+        else if(recovery_s_>0) {recovery_s_+=in.dt;if((lag<.05 && length(spin)<.1) || tuning.catch_up_mps+tuning.catch_up_ramp_mps2*recovery_s_>=10) recovery_s_=0;}
+        auto closure=error*(18*catch_up);auto spin_closure=spin*12;
+        if(recovery_s_>0) {
+            const double cap=tuning.catch_up_mps+tuning.catch_up_ramp_mps2*recovery_s_;
+            const double c=length(closure);if(c>cap) closure=closure*(cap/c);
+            const double w=length(spin_closure),wcap=cap*.5;if(w>wcap) spin_closure=spin_closure*(wcap/w);   // angular: half the linear cap (5 rad/s vs 10 m/s)
+        }
+        const auto want_v=grab_limit(closure+feed,10),want_w=grab_limit(spin_closure,5);
         // Unknown body velocity: step from rest (the caller counts the fallback).
         const Vec3 v0=in.velocity_known?in.body_velocity:Vec3{},w0=in.velocity_known?in.body_spin:Vec3{};
         const auto step=cap_velocity_step(v0,w0,want_v,want_w,previous_.basis[0],in.object_kg,in.inertia_kgm2,dt,tuning,in.share);

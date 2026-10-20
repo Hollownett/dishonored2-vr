@@ -32,7 +32,7 @@ int main() {
     {   // lab_tuned_defaults_pinned (tools/corpse_drag_lab.cpp, Task 9)
         const GrabTuning t;
         CHECK(t.strength_scale==3 && t.axial_n==300 && t.lateral_n==90 && t.torque_nm==30 && t.hand_kg==2 && t.mass_floor_kg==.5 && t.mass_ceiling_kg==60);
-        CHECK(t.lift_fraction==.25 && !t.tow && !t.use_measured_mass && near(t.dt_max,1./30) && t.catch_up_mps==1 && t.catch_up_window_s==.5);
+        CHECK(t.lift_fraction==.25 && !t.tow && !t.use_measured_mass && near(t.dt_max,1./30) && t.catch_up_mps==1 && t.catch_up_ramp_mps2==4 && t.stale_dt_s==.1);
     }
     // axial_cap_300n
     {
@@ -133,8 +133,8 @@ int main() {
         CHECK(r.source==TuningSource::file && r.error.empty());
         CHECK(r.value.axial_n==250 && r.value.strength_scale==2 && !r.value.tow && r.value.lift_fraction==.4);
         CHECK(r.value.lateral_n==90 && !r.value.use_measured_mass && r.value.axial_cap()==500);
-        auto cu=load_grab_tuning(write_file("d2vr_gt_catchup.cfg","catch_up_mps 2\ncatch_up_window_s .8\n"));
-        CHECK(cu.source==TuningSource::file && cu.value.catch_up_mps==2 && cu.value.catch_up_window_s==.8);
+        auto cu=load_grab_tuning(write_file("d2vr_gt_catchup.cfg","catch_up_mps 2\ncatch_up_ramp_mps2 6\nstale_dt_s .2\n"));
+        CHECK(cu.source==TuningSource::file && cu.value.catch_up_mps==2 && cu.value.catch_up_ramp_mps2==6 && cu.value.stale_dt_s==.2);
         expect_defaults_with_error("d2vr_gt_catchup_bad.cfg","catch_up_mps 0\n");
         expect_defaults_with_error("d2vr_gt_unknown.cfg","bogus 1\n");
         expect_defaults_with_error("d2vr_gt_nan.cfg","axial_n 250\nlateral_n nan\n");
@@ -142,7 +142,8 @@ int main() {
         expect_defaults_with_error("d2vr_gt_big.cfg",std::string(5000,'#'));
         struct B {const char* k;double lo,hi;};
         const B bounds[]={{"axial_n",50,600},{"lateral_n",20,300},{"torque_nm",5,60},{"strength_scale",.5,10},
-                          {"lift_fraction",0,1},{"mass_floor_kg",.1,5},{"mass_ceiling_kg",10,200}};
+                          {"lift_fraction",0,1},{"mass_floor_kg",.1,5},{"mass_ceiling_kg",10,200},{"hand_kg",.1,20},{"dt_max",.005,.1},
+                          {"stale_dt_s",.034,1},{"catch_up_mps",.2,10},{"catch_up_ramp_mps2",.5,100}};
         for(auto& b:bounds) {
             for(double v:{b.lo-(b.hi-b.lo)*.01-1e-6,b.hi+(b.hi-b.lo)*.01+1e-6}) {
                 char buf[96];std::snprintf(buf,sizeof buf,"axial_n 250\n%s %.9g\n",b.k,v);

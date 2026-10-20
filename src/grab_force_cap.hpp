@@ -7,7 +7,7 @@
 // Defaults tuned in tools/corpse_drag_lab.cpp (Task 9): lift_fraction .5 -> .25 (the one-hand swing and the heavy hitch both pass only in a
 // narrow window around it, a property of the lab model), tow stays off until Task 10 wires CorpseMotor.capped into limb_saturated.
 // The lab model is optimistic (point masses, a stiff written velocity, no rotation, no Havok solver) and whether this FEELS right is a headset question
-// (Tier C), not something the lab proves; catch_up_mps 1.0 / catch_up_window_s 0.5 hold a 0.5 s hitch to 3.9 m/s (0.8 m/s drag) and 5.9 m/s (1.2 m/s drag) in the lab, against 11.9 and 16.6 with only the per-frame dt_max/dt scaling. The headset session retunes them in build/grab-tuning.cfg.
+// (Tier C), not something the lab proves; catch_up_mps 1.0 ramping at catch_up_ramp_mps2 (see the lab) holds a 0.5 s hitch to 3.9 m/s (0.8 m/s drag) and 5.9 m/s (1.2 m/s drag) in the lab, against 11.9 and 16.6 with only the per-frame dt_max/dt scaling. The headset session retunes them in build/grab-tuning.cfg.
 #include "tracked_pose.hpp"
 #include <algorithm>
 #include <cmath>
@@ -21,7 +21,10 @@
 namespace d2vr {
 struct GrabTuning {double axial_n=300,lateral_n=90,torque_nm=30,strength_scale=3,hand_kg=2,mass_floor_kg=.5,mass_ceiling_kg=60,
     lift_fraction=.25,dt_max=1./30,
-    catch_up_mps=1.,catch_up_window_s=.5;   // after a stale frame (raw dt > dt_max) the error-closure speed (not the hand's own feed) is capped at catch_up_mps until the lag is under 5 cm or catch_up_window_s runs out
+    stale_dt_s=.1,        // a frame is STALE (a game-thread hitch; enters recovery) only when its raw dt exceeds this; sustained low fps (dt 0.04) is not a hitch
+    catch_up_mps=1.,      // recovery: the error-closure speed (not the hand's own feed) starts capped here ...
+    catch_up_ramp_mps2=4.;   // ... and the cap rises by this per second, so recovery ends without a step (when the cap reaches the normal limit: 10 m/s linear, 4 m/s tow) or the lag is under 5 cm
+    // The angular closure is capped at half the linear cap (the normal limits are 5 rad/s and 10 m/s), so it also ramps up to its normal limit with no jump.
     bool tow=false,use_measured_mass=false;
     double axial_cap() const {return axial_n*strength_scale;} double lateral_cap() const {return lateral_n*strength_scale;} double torque_cap() const {return torque_nm*strength_scale;}};
 enum class TuningSource {defaults,file};
@@ -83,8 +86,9 @@ inline TuningLoad load_grab_tuning(const std::filesystem::path& file) noexcept {
             else if(key=="mass_ceiling_kg") ok=ranged(t.mass_ceiling_kg,10,200);
             else if(key=="hand_kg") ok=ranged(t.hand_kg,.1,20);
             else if(key=="dt_max") ok=ranged(t.dt_max,.005,.1);
+            else if(key=="stale_dt_s") ok=ranged(t.stale_dt_s,.034,1);
             else if(key=="catch_up_mps") ok=ranged(t.catch_up_mps,.2,10);
-            else if(key=="catch_up_window_s") ok=ranged(t.catch_up_window_s,.05,2);
+            else if(key=="catch_up_ramp_mps2") ok=ranged(t.catch_up_ramp_mps2,.5,100);
             else if(key=="tow") {ok=v==0||v==1;if(ok) t.tow=v==1;}
             else if(key=="use_measured_mass") {ok=v==0||v==1;if(ok) t.use_measured_mass=v==1;}
             else return fail("unknown key: "+key+where);
