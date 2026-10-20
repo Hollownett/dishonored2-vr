@@ -14,7 +14,11 @@ def check(source: str, consumer: str) -> None:
     assert not re.search(r"trigger|raw\.|takedown|button", condition)
     assert "!drawn?1u:!contact_hand?2u:contact_hand->epoch!=game_xr->pose_epoch()?3u:" in condition
     assert "(physical_grab_requested && native_grab.holding(1))?4u:" in condition
-    assert "speed<d2vr::SwordHitGate::hit_speed?5u:" in condition
+    assert "too_slow?5u:" in condition
+    assert source.index("classify_contact_speed(") < source.index("const unsigned why=")
+    assert "stealth_strike(speed,rear_side,stealth_speed)" in source and "stealth_strike(speed,rear_side,d2vr::SwordHitGate::hit_speed)" not in source
+    assert 'L"stealth-speed"' in source and "stealth_speed_from_knob(" in source
+    assert "resolve_stealth_act(" in consumer
     begin = source.index("const unsigned why=")
     end = source.index("// The tip striking", begin)
     producer = source[begin:end]
@@ -53,7 +57,7 @@ if __name__ == "__main__":
         ("const unsigned why=!drawn?1u:", "const unsigned why=raw.right_trigger>.55f?9u:!drawn?1u:"),
         ("const unsigned why=!drawn?1u:", "const unsigned why=!takedown_kill_held.load()?9u:!drawn?1u:"),
         ("contact_hand->epoch!=game_xr->pose_epoch()?3u:", "false?3u:"),
-        ("(physical_grab_requested && native_grab.holding(1))?4u:speed<d2vr::SwordHitGate::hit_speed?5u:", "false?4u:speed<d2vr::SwordHitGate::hit_speed?5u:"),
+        ("(physical_grab_requested && native_grab.holding(1))?4u:too_slow?5u:", "false?4u:too_slow?5u:"),
         ("request_sword_contact(*owned_contact)", "request_melee_hit(hit)"),
     )
     for needle, replacement in mutations:
@@ -98,7 +102,7 @@ int main() {
     Xr xr;auto* game_xr=&xr;Grab native_grab;Contact observed;auto* contact=&observed;
     bool drawn=true,physical_grab_requested=true;
     std::optional<Hand> contact_hand=Hand{};
-    double speed=2;std::uint64_t now=1000;unsigned side=1;std::array<double,2> tip_speed{};d2vr::SwordHitGate sword_hit_gate;
+    double speed=2;bool too_slow=false;std::uint64_t now=1000;unsigned side=1;std::array<double,2> tip_speed{};d2vr::SwordHitGate sword_hit_gate;
     const auto gate=[&] {@CONDITION@ return why==0u;};
     for(unsigned buttons=0;buttons<64;++buttons) {
         Raw raw{float(buttons&1),float((buttons>>1)&1),float((buttons>>2)&1),float((buttons>>3)&1),buttons};
@@ -106,7 +110,7 @@ int main() {
     }
     drawn=false;assert(!gate());drawn=true;native_grab.held=true;assert(!gate());native_grab.held=false;
     contact_hand.reset();assert(!gate());contact_hand=Hand{10};assert(!gate());contact_hand=Hand{};
-    speed=1.49;assert(!gate());speed=2;sword_hit_gate.commit(contact->entity,900);assert(!gate());
+    too_slow=true;assert(!gate());too_slow=false;sword_hit_gate.commit(contact->entity,900);assert(!gate());
     sword_hit_gate.commit(contact->entity,500);assert(gate());
     unsigned logic=2;bool controls_focus=true,authored_camera=false;Input input;Wheel x_wheel;
     std::uint64_t sword_hand_tick=1000,sword_pose_tick=1000;

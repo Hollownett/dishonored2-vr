@@ -4397,11 +4397,20 @@ void prepare_head_view(void* view) noexcept {
                             const double speed=std::max<double>(tip_peak[side],combat_tip_peak.load()); // XR-space swing detector speed
                             const auto contact_hand=d2vr::NativeInteractionAim::sword_hand_.current(now);
                             ++contact_gates[0];
+                            // Rear/side first: a calm stroke is only enough from behind, so the speed gate needs it.
+                            std::array<float,3> npc_at{},row0{},player_at{};
+                            const bool rear_side=read_self(contact->entity+0x30c,row0.data(),12) && read_self(contact->entity+0x300,npc_at.data(),12) &&
+                                read_self(body->player+0x300,player_at.data(),12) && d2vr::attacker_rear_or_side(row0.data(),npc_at.data(),player_at.data());
+                            const double stealth_speed=d2vr::NativeInteractionAim::stealth_speed_.load();
+                            const auto speed_class=d2vr::classify_contact_speed(speed,stealth_speed,d2vr::SwordHitGate::hit_speed);
+                            const bool too_slow=speed_class==d2vr::ContactSpeedClass::too_slow || (speed_class==d2vr::ContactSpeedClass::stealth_only && !rear_side);
                             const unsigned why=!drawn?1u:!contact_hand?2u:contact_hand->epoch!=game_xr->pose_epoch()?3u:
-                                (physical_grab_requested && native_grab.holding(1))?4u:speed<d2vr::SwordHitGate::hit_speed?5u:
+                                (physical_grab_requested && native_grab.holding(1))?4u:too_slow?5u:
                                 !sword_hit_gate.open(contact->entity,now,tip_speed[side])?6u:0u;
-                            if(why) ++contact_gates[why];
-                            else {
+                            if(why) {
+                                ++contact_gates[why];
+                                if(why==5 && rear_side) ++d2vr::NativeInteractionAim::stealth_reject_[1]; // a slow attempt from behind: the report sees it
+                            } else {
                                 const auto f=[](double v){return static_cast<float>(v);};const auto& n=contact->normal;const auto& q=contact->point;
                                 d2vr::MeleeHitRequest hit{contact->entity,{f(q.x),f(q.y),f(q.z)},{f(n.x),f(n.y),f(n.z)},{f(-n.x),f(-n.y),f(-n.z)},now};
                                 auto contact_reader=&read_self;
@@ -4410,15 +4419,11 @@ void prepare_head_view(void* view) noexcept {
                                 if(!owned_contact)++d2vr::NativeInteractionAim::sword_capture_rejected_;
                                 else owned_contact->native_offer=(kill_sensor_spawn.load()==owned_contact->victim_spawn && now>=kill_sensor_tick.load() && now-kill_sensor_tick.load()<=250) ||
                                     (ga_offered_now.load() || (now>=ga_offered_tick.load() && now-ga_offered_tick.load()<=250)); // only picks the hold window (700 vs 120 ms)
-                                std::array<float,3> npc_at{};
                                 if(owned_contact) {
-                                    std::array<float,3> row0{},player_at{};
-                                    // Victim-based stealth strike: any deliberate contact from the rear or the side; the engine-side unaware/damageable checks decide on the game thread.
-                                    const bool rear_side=read_self(contact->entity+0x30c,row0.data(),12) && read_self(contact->entity+0x300,npc_at.data(),12) &&
-                                        read_self(body->player+0x300,player_at.data(),12) && d2vr::attacker_rear_or_side(row0.data(),npc_at.data(),player_at.data());
-                                    owned_contact->stealth_strike=d2vr::stealth_strike(speed,rear_side,d2vr::SwordHitGate::hit_speed);
+                                    // Victim-based stealth strike: a calm deliberate contact from the rear or the side; the engine-side unaware/damageable checks decide on the game thread.
+                                    owned_contact->stealth_strike=d2vr::stealth_strike(speed,rear_side,stealth_speed);
+                                    owned_contact->stealth_only=speed_class==d2vr::ContactSpeedClass::stealth_only;
                                     if(!rear_side) ++d2vr::NativeInteractionAim::stealth_reject_[0];
-                                    else if(!owned_contact->stealth_strike) ++d2vr::NativeInteractionAim::stealth_reject_[1];
                                 }
                                 // TODO(near-pass assist): a stealth contact that only just misses the guard (blade passes within a hand span) could still count.
                                 if(owned_contact && d2vr::NativeInteractionAim::request_sword_contact(*owned_contact)) {
@@ -7980,7 +7985,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
                 } catch(...) {return false;}
             };
         }
-        ui_dump_requested=fs::exists(root/L"build"/L"ui-dump");ui_dump_state.clear();left_aim_wanted=false;early_wrist_owner.reset();vitals_file=0;next_vitals_probe=0;wrist_early_publications=0;world_prompt_frames=0;prompt_shows=prompt_hides=takedown_flips=npc_blade_contacts=0;d2vr::NativeInteractionAim::melee_enabled_=true;d2vr::NativeInteractionAim::impact_enabled_=true;d2vr::NativeImpactFx::reset();d2vr::NativeInteractionAim::impact_played_=0;d2vr::NativeInteractionAim::impact_skipped_=0;d2vr::NativeInteractionAim::melee_applied_=0;d2vr::NativeInteractionAim::melee_rejected_=0;d2vr::NativeInteractionAim::melee_faults_=0;for(auto& w:d2vr::NativeInteractionAim::melee_why_) w=0;for(auto& w:d2vr::NativeInteractionAim::stealth_reject_) w=0;for(auto& w:d2vr::NativeInteractionAim::hit_height_) w=0;ga_offered_frames=ga_offered_swings=0;{std::error_code ec;fs::remove(output_directory/L"native-combat.csv",ec);} // the DLL outlives sessions
+        ui_dump_requested=fs::exists(root/L"build"/L"ui-dump");ui_dump_state.clear();left_aim_wanted=false;early_wrist_owner.reset();vitals_file=0;next_vitals_probe=0;wrist_early_publications=0;world_prompt_frames=0;prompt_shows=prompt_hides=takedown_flips=npc_blade_contacts=0;d2vr::NativeInteractionAim::melee_enabled_=true;d2vr::NativeInteractionAim::impact_enabled_=true;d2vr::NativeImpactFx::reset();d2vr::NativeInteractionAim::impact_played_=0;d2vr::NativeInteractionAim::impact_skipped_=0;d2vr::NativeInteractionAim::melee_applied_=0;d2vr::NativeInteractionAim::melee_rejected_=0;d2vr::NativeInteractionAim::melee_faults_=0;for(auto& w:d2vr::NativeInteractionAim::melee_why_) w=0;for(auto& w:d2vr::NativeInteractionAim::stealth_reject_) w=0;d2vr::NativeInteractionAim::stealth_slow_aware_drops_=0;for(auto& w:d2vr::NativeInteractionAim::hit_height_) w=0;ga_offered_frames=ga_offered_swings=0;{std::error_code ec;fs::remove(output_directory/L"native-combat.csv",ec);} // the DLL outlives sessions
         if(fs::exists(root/L"build"/L"hud-node-census")) {
             hud_node_census_path=output/L"hud-node-census.csv";
             d2vr::NativeHudChildDraw::census=&hud_node_census;
@@ -8135,7 +8140,8 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
         if(assassination_receipt_requested &&
            !d2vr::NativeAssassinationReceipt::process_owner().start(image_base,&read_self,output))
             throw std::runtime_error("Passive native assassination receipt could not initialize safely");
-        weapon_collision_enabled=!fs::exists(root/L"build"/L"no-weapon-collision");contact_damage_enabled=!fs::exists(root/L"build"/L"no-contact-damage");d2vr::NativeInteractionAim::stealth_enabled_=!fs::exists(root/L"build"/L"no-stealth-contact");impact_fx_enabled=!fs::exists(root/L"build"/L"no-impact-fx");hand_contact_enabled=!fs::exists(root/L"build"/L"no-hand-contact");
+        weapon_collision_enabled=!fs::exists(root/L"build"/L"no-weapon-collision");contact_damage_enabled=!fs::exists(root/L"build"/L"no-contact-damage");d2vr::NativeInteractionAim::stealth_enabled_=!fs::exists(root/L"build"/L"no-stealth-contact");
+        {std::ifstream knob(root/L"build"/L"stealth-speed");std::string text;if(knob) std::getline(knob,text);d2vr::NativeInteractionAim::stealth_speed_=d2vr::stealth_speed_from_knob(text);}impact_fx_enabled=!fs::exists(root/L"build"/L"no-impact-fx");hand_contact_enabled=!fs::exists(root/L"build"/L"no-hand-contact");
         slash_speed_factor=fs::exists(root/L"build"/L"no-slash-speed")?1.f:1.7f;takedown_range_enabled=!fs::exists(root/L"build"/L"no-takedown-range");
         native_interaction_aim.takedown_ranges(takedown_range_enabled);
         d2vr::game_art().folder(root/L"artifacts"/L"game-art"); // the user's own extracted game art (tools/extract_game_art.py)

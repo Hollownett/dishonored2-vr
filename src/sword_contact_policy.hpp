@@ -10,13 +10,15 @@
 #include <cmath>
 #include <cstdint>
 #include <optional>
+#include <string>
+#include <cstdlib>
 
 namespace d2vr {
 enum class StealthAct {wait,drop,hit,kill};
 // native_offer: the engine's kill sensor targets this victim right now, so its own Assassination is expected from the next Slash press.
 inline constexpr std::uint64_t stealth_window_ms(bool native_offer) noexcept {return native_offer?700:120;}
 // A stealth strike is victim-based (Bonelab: the contact itself is the hit, no body-part pick): a deliberate contact (tip speed at least
-// the sword hit gate) from the rear or the side of the victim (NPC forward is minus row 0 of its reference frame, entity +0x30c;
+// the stealth speed, default .6 m/s) from the rear or the side of the victim (NPC forward is minus row 0 of its reference frame, entity +0x30c;
 // attacker cos to forward < +0.2). The game's kill sensor is NOT a gate any more (it flickers with gaze); the engine-side
 // damageable/unaware checks on the game thread still are, so an alerted or frontal guard gets the ordinary hit.
 inline constexpr float rear_side_cos=.2f;
@@ -26,6 +28,21 @@ inline bool attacker_rear_or_side(const float row0[3],const float npc[3],const f
     if(!(f>.01f) || !(d>1e-6f)) return false;
     return (fx*dx+fy*dy)/std::sqrt(f*d)<rear_side_cos;
 }
+// A stealth strike has its own, lower speed: a calm deliberate stab from behind must be enough (the ordinary hit keeps hit_speed).
+inline constexpr double stealth_speed_default=.6; // m/s head-relative peak tip speed; a resting or drifting hand stays below .3
+inline double stealth_speed_from_knob(const std::string& text) noexcept {
+    const char* b=text.c_str();while(*b==' '||*b=='\t'||*b=='\r'||*b=='\n') ++b;
+    char* end=nullptr;const double v=std::strtod(b,&end);
+    if(end==b || !std::isfinite(v)) return stealth_speed_default;
+    return v<.3?.3:v>1.5?1.5:v;
+}
+enum class ContactSpeedClass {too_slow,stealth_only,hit};
+inline ContactSpeedClass classify_contact_speed(double peak,double stealth_speed,double hit_speed) noexcept {
+    if(!std::isfinite(peak)) return ContactSpeedClass::too_slow;
+    return peak>=hit_speed?ContactSpeedClass::hit:peak>=stealth_speed?ContactSpeedClass::stealth_only:ContactSpeedClass::too_slow;
+}
+// A calm touch (below the hit speed) on a guard who turned out to be aware must never land the ordinary alerting hit.
+inline StealthAct resolve_stealth_act(StealthAct act,bool stealth_only) noexcept {return act==StealthAct::hit&&stealth_only?StealthAct::drop:act;}
 inline bool stealth_strike(double tip_speed,bool rear_or_side,double hit_speed) noexcept {return rear_or_side && tip_speed>=hit_speed;}
 template<class Payload> class StealthHold {
     std::optional<Payload> held_;std::uint32_t victim_{};std::uint64_t tick_{},window_{};

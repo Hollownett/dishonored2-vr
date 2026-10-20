@@ -530,6 +530,8 @@ class NativeInteractionAim {
                         else if(stealth_hold_.hold(contact,contact.victim_spawn,final_now,contact.native_offer)) {++stealth_counts_[0];continue;}
                         else ++stealth_reject_[4];
                     }
+                    // A calm contact (below the hit speed) is only ever a stealth kill: never the ordinary alerting hit.
+                    if(contact.stealth_only) {++stealth_slow_aware_drops_;continue;}
                     NativeMelee::DamageResultObservation observation{};
                     const auto outcome=NativeMelee::apply(self->base_,self->read_,contact.equipment.sword,contact.hit,&observation);
                     ++sword_contact_invoked_;if(observation.returned_buffer)++sword_damage_results_;
@@ -549,8 +551,10 @@ class NativeInteractionAim {
                     const bool choking=nonlethal_grip_reserved_.load(std::memory_order_acquire) || (owned && native_player_state_active(self->read_,c.owner,native_state_choke,native_state_choke_vtable));
                     const bool unaware=alive && NativeMelee::unaware(self->base_,self->read_,c.hit.victim);
                     const auto sword=c.equipment.sword;const auto hit=c.hit;
-                    const auto act=stealth_hold_.service(now,unaware,alive,native,choking,owned);
-                    if(act==StealthAct::drop) ++stealth_counts_[native?1:4];
+                    const auto raw_act=stealth_hold_.service(now,unaware,alive,native,choking,owned);
+                    const auto act=resolve_stealth_act(raw_act,c.stealth_only);
+                    if(raw_act==StealthAct::hit && act==StealthAct::drop) ++stealth_slow_aware_drops_;
+                    else if(act==StealthAct::drop) ++stealth_counts_[native?1:4];
                     else if(act==StealthAct::hit || act==StealthAct::kill) {
                         auto strike=sword;if(act==StealthAct::kill) strike.unaware_amount=1000.f;
                         NativeMelee::DamageResultObservation observation{};
@@ -693,6 +697,7 @@ public:
             <<",\"epoch_rejected\":"<<sword_epoch_rejected_.load()<<",\"consumer_rejected\":"<<sword_contact_rejected_.load()
             <<",\"stealth\":["<<stealth_counts_[0].load()<<','<<stealth_counts_[1].load()<<','<<stealth_counts_[2].load()<<','<<stealth_counts_[3].load()<<','<<stealth_counts_[4].load()<<']'
             <<",\"stealth_reject\":["<<stealth_reject_[0].load()<<','<<stealth_reject_[1].load()<<','<<stealth_reject_[2].load()<<','<<stealth_reject_[3].load()<<','<<stealth_reject_[4].load()<<']'
+            <<",\"stealth_speed\":"<<stealth_speed_.load()<<",\"slow_aware_drops\":"<<stealth_slow_aware_drops_.load()
             <<",\"hit_height\":["<<hit_height_[0].load()<<','<<hit_height_[1].load()<<','<<hit_height_[2].load()<<']'
             <<",\"invoked\":"<<sword_contact_invoked_.load()<<",\"native_returned\":"<<sword_damage_results_.load()<<",\"last\":";
         if(!observation.valid)output<<"null";
@@ -722,6 +727,8 @@ public:
     }
     inline static StealthHold<OwnedSwordContact> stealth_hold_; // game thread only
     inline static std::atomic<bool> stealth_enabled_{true};
+    inline static std::atomic<double> stealth_speed_{stealth_speed_default}; // m/s, knob build\stealth-speed; the near-pass assist reads it too
+    inline static std::atomic<std::uint64_t> stealth_slow_aware_drops_{};   // calm contacts on a guard who proved aware: dropped, no ordinary hit
     inline static std::array<std::atomic<std::uint64_t>,5> stealth_reject_{}; // not behind/side, slow, not unaware, not damageable, other (hold slot taken by another victim)
     inline static std::array<std::atomic<std::uint64_t>,3> hit_height_{};     // committed contacts by hit height above the victim's feet: leg < 0.9 m, torso 0.9-1.5 m, head > 1.5 m
     inline static std::array<std::atomic<std::uint64_t>,5> stealth_counts_{}; // held, native took it, stealth kill, noticed (ordinary hit), dropped (dead/choke/owner lost)

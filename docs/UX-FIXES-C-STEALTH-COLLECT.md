@@ -48,7 +48,7 @@ python3 tools/stealth_session_report.py <path-to-xr-live-status.json> [native-co
 
 | Cause | Evidence | Fix | Task |
 | --- | --- | --- | --- |
-| **S, swing too slow at contact** | `stealth_reject[1]` dominant; `contact_hit` speeds under 1.5 m/s | The gate `SwordHitGate::hit_speed` is a head-relative tip speed and the contact is measured at the end of a stroke; measure the peak speed over the last 120 ms. | Task 10 cause S |
+| **S, swing too slow at contact** | `stealth_reject[1]` dominant (since Task 13 slow attempts from behind below `stealth_speed`, default 0.6 m/s, land here; before it they were hidden in `contact_gates[5]`); `contact_hit` speeds under 1.5 m/s | Fixed by Task 13: stealth has its own lower threshold (`build\stealth-speed`). The gate `SwordHitGate::hit_speed` is a head-relative tip speed and the contact is measured at the end of a stroke; measure the peak speed over the last 120 ms. | Task 10 cause S |
 | **B, not behind** | `stealth_reject[0]` | The rear/side cos < +0.2 test fails for guards that turn while walking; use the guard's velocity-forward when moving, and widen to cos < +0.35 for the 200 ms before contact. | Task 10 cause B |
 | **U, engine says aware** | `stealth_reject[2]` | `NativeMelee::unaware` is false when he is close behind (proximity notice) before the blade lands; do not require `unaware` at contact time when it was true within the previous 400 ms (latch it on approach). | Task 10 cause U |
 | **D, not damageable** | `stealth_reject[3]` | Victim flags (+0xd1/+0xd7) read as invulnerable mid-animation; retry for 150 ms. | Task 10 cause D |

@@ -100,7 +100,39 @@ void deliberate_strike_from_behind() {
     assert(stealth_window_ms(true)==700 && stealth_window_ms(false)==120);
 }
 
+void classify_speed_bands() {
+    const double s=stealth_speed_default,h=SwordHitGate::hit_speed;
+    assert(classify_contact_speed(.59,s,h)==ContactSpeedClass::too_slow);
+    assert(classify_contact_speed(.6,s,h)==ContactSpeedClass::stealth_only);
+    assert(classify_contact_speed(1.49,s,h)==ContactSpeedClass::stealth_only);
+    assert(classify_contact_speed(1.5,s,h)==ContactSpeedClass::hit);
+    assert(classify_contact_speed(std::nan(""),s,h)==ContactSpeedClass::too_slow);
+}
+
+void stealth_strike_uses_stealth_speed() {
+    assert(stealth_strike(.8,true,stealth_speed_default));
+    assert(!stealth_strike(.8,false,stealth_speed_default));
+    assert(!stealth_strike(.8,true,SwordHitGate::hit_speed)); // the old gate would have dropped it
+}
+
+void knob_parsing() {
+    assert(stealth_speed_from_knob("")==.6 && stealth_speed_from_knob("0.45")==.45 && stealth_speed_from_knob("0.1")==.3);
+    assert(stealth_speed_from_knob("9")==1.5 && stealth_speed_from_knob("abc")==.6 && stealth_speed_from_knob(" 0.7\n")==.7);
+    assert(stealth_speed_from_knob("nan")==.6);
+}
+
+void slow_contact_on_aware_guard_is_dropped() {
+    assert(resolve_stealth_act(StealthAct::hit,true)==StealthAct::drop);
+    assert(resolve_stealth_act(StealthAct::hit,false)==StealthAct::hit);
+    for(const auto a:{StealthAct::kill,StealthAct::wait,StealthAct::drop})
+        assert(resolve_stealth_act(a,true)==a && resolve_stealth_act(a,false)==a);
+}
+
 int main() {
+    classify_speed_bands();
+    stealth_strike_uses_stealth_speed();
+    knob_parsing();
+    slow_contact_on_aware_guard_is_dropped();
     deliberate_strike_from_behind();
     recorded_contacts_before_native_assassination();
     window_and_terminal_cases();
