@@ -348,7 +348,7 @@ sealed class ArtButton : Button
 /// Real focus, so Tab and screen readers work; the game's brush stroke marks the focused row.</summary>
 sealed class ArtCheck : ArtControl
 {
-    bool isChecked, hover;
+    bool isChecked, hover, spaceDown;
     public readonly string Label, Help;
     public event EventHandler? Toggled;
     public ArtCheck(string label, string help)
@@ -371,18 +371,19 @@ sealed class ArtCheck : ArtControl
     {
         switch (e.KeyCode)
         {
-            case Keys.Space: Checked = !Checked; break;
+            case Keys.Space: if (!e.Alt && (Control.ModifierKeys == Keys.None) && !spaceDown) { spaceDown = true; Checked = !Checked; } break;
             case Keys.Up: Parent?.SelectNextControl(this, false, true, false, false); break;
             case Keys.Down: Parent?.SelectNextControl(this, true, true, false, false); break;
             default: base.OnKeyDown(e); return;
         }
         e.Handled = true;
     }
+    protected override void OnKeyUp(KeyEventArgs e) { if (e.KeyCode == Keys.Space) spaceDown = false; base.OnKeyUp(e); }
+    protected override void OnLostFocus(EventArgs e) { spaceDown = false; Invalidate(); base.OnLostFocus(e); }
     protected override void OnMouseDown(MouseEventArgs e) { Focus(); Checked = !Checked; base.OnMouseDown(e); }
     protected override void OnMouseEnter(EventArgs e) { hover = true; Invalidate(); base.OnMouseEnter(e); }
     protected override void OnMouseLeave(EventArgs e) { hover = false; Invalidate(); base.OnMouseLeave(e); }
     protected override void OnGotFocus(EventArgs e) { Invalidate(); base.OnGotFocus(e); }
-    protected override void OnLostFocus(EventArgs e) { Invalidate(); base.OnLostFocus(e); }
     protected override void OnEnabledChanged(EventArgs e) { Invalidate(); base.OnEnabledChanged(e); }
 
     protected override void OnPaint(PaintEventArgs e)

@@ -611,7 +611,7 @@ sealed class MainForm : Form
         }
         catch (Exception ex)
         {
-            loadingFeatures = true; try { row.SetSilently(!row.Checked); } finally { loadingFeatures = false; }  // show what is really on disk
+            LoadFeatures();  // the boxes always show what is really on disk
             SetSettingsMsg("Not changed: " + ex.Message, Ui.Bad);
         }
     }
@@ -641,9 +641,9 @@ sealed class MainForm : Form
             Select(hint, prefs.Hint != 0 ? 1 : 0, "");
             options.Invalidate();
             SetSettingsMsg(File.Exists(env.SettingsFile) ? "Loaded build\\vr-settings.cfg. Changes apply the next time VR starts." : "No saved file yet; showing defaults.", Ui.Dim);
-            LoadFeatures();
         }
         catch (Exception ex) { SetSettingsMsg(ex.Message, Ui.Bad); }
+        LoadFeatures();
     }
 
     void SaveSettings()
