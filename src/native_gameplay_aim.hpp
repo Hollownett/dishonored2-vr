@@ -38,6 +38,7 @@ class NativeGameplayAim {
     std::array<bool,2> enabled_{};
     std::atomic<bool> active_{false},route_{false},failed_{false};
     std::atomic<UINT> depth_{},producer_depth_{};
+    std::atomic<UINT64> last_applied_tick_{};
     std::atomic<UINT64> calls_{},candidates_{},applied_{},rejected_{},overlap_{},write_failures_{},rollback_failures_{};
     std::mutex mutex_;TrackedGameplayAim tracked_;std::ofstream log_;
     static AimOwner owner(const NativePlayerCamera& s) {return {s.player,s.camera,s.camera_identity.generation};}
@@ -61,7 +62,7 @@ class NativeGameplayAim {
                 const auto result=write_gameplay_aim(read_,write_,destination,native,*planned);
                 if(result==AimWriteResult::changed_before_write) {++rejected_;return;}
                 applied=result==AimWriteResult::applied;
-                if(applied) ++applied_;
+                if(applied) {++applied_;last_applied_tick_.store(GetTickCount64(),std::memory_order_release);}
                 else {
                     ++write_failures_;failed_=true;route_=false;
                     if(result==AimWriteResult::rollback_failed) ++rollback_failures_;
@@ -132,7 +133,7 @@ public:
             for(unsigned i=0;i<3;++i) log_<<','<<kind<<"_origin"<<i;
             for(unsigned i=0;i<9;++i) log_<<','<<kind<<"_axis"<<i;
         }
-        log_<<'\n';clear();calls_=candidates_=applied_=rejected_=overlap_=write_failures_=rollback_failures_=0;failed_=false;route_=route;instance_=this;
+        log_<<'\n';clear();last_applied_tick_=0;calls_=candidates_=applied_=rejected_=overlap_=write_failures_=rollback_failures_=0;failed_=false;route_=route;instance_=this;
         const std::array<void*,2> hooks{reinterpret_cast<void*>(&finalize),reinterpret_cast<void*>(&build)};
         const std::array<void**,2> originals{reinterpret_cast<void**>(&finalize_),reinterpret_cast<void**>(&build_)};
         for(unsigned i=0;i<2;++i) {
@@ -163,6 +164,10 @@ public:
         try {std::lock_guard<std::mutex> lock(mutex_);log_.close();tracked_={};} catch(...) {return false;}
         return restored;
     }
+    // Tick of the last write that read back clean; Blink aim compares it with its own call time.
+    UINT64 last_applied_tick() const {return last_applied_tick_.load(std::memory_order_acquire);}
+    // Camera the published left aim is keyed to (0 when nothing is published).
+    std::uintptr_t owner_camera() {std::lock_guard<std::mutex> lock(mutex_);return tracked_.owner.camera;}
     UINT64 calls() const {return calls_.load();}
     UINT64 candidates() const {return candidates_.load();}
     UINT64 applied() const {return applied_.load();}

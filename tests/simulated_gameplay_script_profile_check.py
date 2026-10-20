@@ -63,6 +63,18 @@ class GameplayScriptProfileCheck(unittest.TestCase):
             with self.subTest(pitch=str(pitch)[:30]),self.assertRaises(ValueError):
                 self.compile({'segments':[dict(segment,head_pitch_degrees=pitch)]})
 
+    def test_when_v6(self):
+        seg=lambda i,**k:dict({'start_ms':i*10,'end_ms':i*10+10,'input':{'a':True}},**k)
+        _,legacy=self.compile({'segments':[seg(0,when='gameplay')]})
+        self.assertEqual(legacy.splitlines()[0],'D2VR_GAMEPLAY_SCRIPT 1 10000 1')  # default keeps the old version
+        for name,code in (('menu','1'),('always','2')):
+            _,transport=self.compile({'segments':[seg(0),seg(1,when=name)]})
+            rows=transport.splitlines();self.assertEqual(rows[0],'D2VR_GAMEPLAY_SCRIPT 6 10000 2')
+            self.assertEqual((len(rows[1].split()),rows[1].split()[-1],rows[2].split()[-1]),(30,'0',code))
+        for bad in ('menus',1,None,True,''):
+            with self.subTest(when=str(bad)),self.assertRaises(ValueError):
+                self.compile({'segments':[seg(0,when=bad)]})
+
     def test_absolute_poses_v5_and_trace_conversion(self):
         pose=[0,1.65,0,0,0,0,1]
         seg=lambda i,**k:dict({'start_ms':i*10,'end_ms':i*10+10,'input':{'x':True},'head_pose':pose,'right_hand_pose':[1,2,3,0,0,0,1]},**k)

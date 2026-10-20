@@ -199,10 +199,18 @@ void stealth_dispatch_boundaries() {
 }
 
 void contact_presses_attack() {
-    // blade touching the kill-sensor target without a readable arc: one attack press; nothing without the sensor target
-    Sim hit;hit.run(40);hit.f.kill=true;hit.f.contact_attack=true;hit.run(1);hit.f.contact_attack=false;hit.run(20);
-    CHECK(hit.swing==SwingKind::slash && hit.any_rt && hit.c.update(hit.f).attacks.recognized==1);
-    Sim blind;blind.run(40);blind.f.contact_attack=true;blind.run(21);CHECK(!blind.any_rt && blind.swing==SwingKind::none);
+    // a stealth contact presses the attack once even without a readable arc and without a flagged kill target; nothing without the contact
+    Sim hit;hit.run(40);hit.f.contact_attack=true;hit.run(1);hit.f.contact_attack=false;hit.run(20);
+    CHECK(!hit.f.kill && hit.swing==SwingKind::slash && hit.any_rt && hit.c.update(hit.f).attacks.recognized==1);
+    Sim kill;kill.run(40);kill.f.kill=true;kill.f.contact_attack=true;kill.run(1);kill.f.contact_attack=false;kill.run(20);
+    CHECK(kill.swing==SwingKind::slash && kill.any_rt && kill.c.update(kill.f).attacks.recognized==1);
+    Sim none;none.run(40);none.f.kill=true;none.run(21);CHECK(!none.any_rt && none.swing==SwingKind::none);
+    Sim idle;idle.run(61);CHECK(!idle.any_rt && idle.swing==SwingKind::none);
+    // the native offered verdict drives the kill flag; the flickering sensor target only stands in when GlobalAssassination is unknown
+    CHECK(kill_flag(true,true,false,false) && kill_flag(false,true,false,true) && !kill_flag(false,true,true,false));
+    CHECK(kill_flag(false,false,true,false) && !kill_flag(false,false,false,false));
+    bool steady=true;for(int frame=0;frame<10;++frame) steady&=kill_flag(true,true,frame%2==0,false); // sensor blinks, offered steady
+    CHECK(steady);
 }
 
 int main() {

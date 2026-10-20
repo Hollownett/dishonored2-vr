@@ -216,13 +216,14 @@ int main() {
         // Settings remain pixels in the native menu stage, with the native navigation intact.
         assert(sim::summary.layer_type==XR_TYPE_COMPOSITION_LAYER_QUAD);
         assert(sim::summary.quad.subImage.imageRect.extent.width==64);
+        // the menu panel's chain is the 36-row band (eye rows 14..49), so eye row y shows at y-14
         const auto native_pixel=pixel(device.Get(),context.Get(),sim::summary.images[0].Get());
         assert(native_pixel==Pixel({23,147,81,255}));
-        assert(pixel(device.Get(),context.Get(),sim::summary.images[0].Get(),20,32)!=native_pixel);
+        assert(pixel(device.Get(),context.Get(),sim::summary.images[0].Get(),20,18)!=native_pixel);
         // The measured native right navigation column and top mission header stay untouched.
-        assert(pixel(device.Get(),context.Get(),sim::summary.images[0].Get(),41,29)==native_pixel);
-        assert(pixel(device.Get(),context.Get(),sim::summary.images[0].Get(),41,39)==native_pixel);
-        assert(pixel(device.Get(),context.Get(),sim::summary.images[0].Get(),32,17)==native_pixel);
+        assert(pixel(device.Get(),context.Get(),sim::summary.images[0].Get(),41,15)==native_pixel);
+        assert(pixel(device.Get(),context.Get(),sim::summary.images[0].Get(),41,25)==native_pixel);
+        assert(pixel(device.Get(),context.Get(),sim::summary.images[0].Get(),32,3)==native_pixel);
         sim::control.input.y=false;frame(false);sim::control.input.move_x=1;frame(false);
         assert(xr.take_resolution_request()==1.1);sim::control.input.move_x=0;frame(false);
         sim::control.input.b=true;frame(false);assert(!xr.settings_open());++scenarios;
@@ -281,10 +282,10 @@ int main() {
         assert(pixel(device.Get(),context.Get(),sim::summary.images[1].Get())==Pixel({10,80,99,255}));++scenarios;
         // Repeat lifecycle/load at high speed to expose stale handles and leaks.
         for(unsigned i=0;i<1000;++i) frame();++scenarios;
-        assert(sim::summary.protocol_errors==0);
+        assert(sim::summary.protocol_errors==0 && sim::summary.chain_ops_in_frame==0 && xr.swapchain_creates_in_frame==0 && sim::summary.subrect_layers==0 && xr.subrect_layers==0);
     }
     assert(!sim::instantiated && !sim::session_created && sim::spaces.empty() && sim::chains.empty());
-    assert(sim::summary.protocol_errors==0 && sim::summary.waits==sim::summary.ends);
+    assert(sim::summary.protocol_errors==0 && sim::summary.subrect_layers==0 && sim::summary.waits==sim::summary.ends);
     std::ofstream report("artifacts/simulated-vr-check.json");
     report << "{\"simulated_vr\":true,\"bridge\":\"production GameXr\",\"device\":\"D3D11 WARP\",\"scenarios\":" << scenarios
            << ",\"xr_frames\":" << sim::summary.ends << ",\"protocol_errors\":0,\"resource_cleanup_verified\":true,\"native_game_interaction_verified\":false,\"headset_acceptance\":false}\n";

@@ -51,6 +51,11 @@ struct CombatTuning {
     float choke_fwd_min=0.2f,choke_fwd_max=0.7f,choke_below=0.4f,choke_above=0.1f,choke_grip=0.55f,choke_grace_ms=500;
 };
 
+// The kill flag of a frame: the native offered verdict (GlobalAssassination +0x1d0, steady) or the remembered target; the flickering
+// sensor target only stands in while GlobalAssassination is not resolved.
+inline constexpr bool kill_flag(bool offered,bool offered_known,bool sensor_kill,bool remembered) noexcept {
+    return offered || remembered || (!offered_known && sensor_kill);
+}
 struct CombatFrame {
     GV3 head_pos,head_fwd,head_right;
     GV3 pos,aim,vel;                        // sword hand grip position, blade direction, linear velocity
@@ -60,7 +65,7 @@ struct CombatFrame {
     bool explicit_block{};
     CombatTarget current_target{},remembered_target{};
     bool kill{},choke{},drop{};             // native sensors qualified this frame (TakedownState)
-    bool contact_attack{};                  // the blade touched the NPC the native kill sensor targets: press the attack once, swing or not
+    bool contact_attack{};                  // stealth contact (fast blade touch from the rear/side of an unaware-candidate): press the attack once, swing or not
     bool ev_hit{},ev_block{},ev_kill{};     // optional one-frame game events for haptics
     std::uint64_t now_ms{};
 };
@@ -157,9 +162,10 @@ public:
             tip_=tip;hand_prev_=f.pos;prev_head_=f.head_pos;prev_fwd_=f.head_fwd;last_ms_=now;
         }
 
-        // A contact on the sensor's own target presses the attack even when the arc was too small to read as a swing: the native Slash
-        // then arbitrates the Assassination before the contact's ordinary damage could alert him (headset v559: sometimes it never came).
-        if(kind==SwingKind::none && f.contact_attack && f.kill && now>=cool_until_ && pending_==Pending::none) {
+        // A stealth contact (fast sword contact from the rear/side of a guard, sword_contact_policy.hpp) presses the attack even when the arc
+        // was too small to read as a swing and with no kill target flagged: the native Slash then arbitrates the Assassination before the
+        // contact's ordinary damage could alert him. contact_attack is only ever set for such a contact.
+        if(kind==SwingKind::none && f.contact_attack && now>=cool_until_ && pending_==Pending::none) {
             kind=SwingKind::slash;in_seg_=false;armed_=false;cool_until_=now+static_cast<std::uint64_t>(t_.cooldown_ms);
         }
 

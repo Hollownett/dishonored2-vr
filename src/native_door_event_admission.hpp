@@ -473,11 +473,9 @@ private:
            std::memcmp(code.data()+prefix,expected.data(),14) || std::memcmp(code.data()+prefix+14,relay.data(),14))return false;
         auto* metadata=metadata_[index];
         if(!metadata) {
-            const auto aligned=trampoline&~std::uintptr_t{0xffff};
-            for(unsigned slot=1;slot<=4096 && aligned>slot*0x10000ull;++slot) {metadata=static_cast<Metadata*>(VirtualAlloc(reinterpret_cast<void*>(aligned-slot*0x10000ull),4096,MEM_RESERVE|MEM_COMMIT,PAGE_READWRITE));if(metadata)break;}
-            if(!metadata)return false;metadata_[index]=metadata;const auto base=reinterpret_cast<std::uintptr_t>(metadata);
-            if(base>=trampoline || trampoline-base>UINT32_MAX-39)return false;const auto begin=static_cast<DWORD>(trampoline-base);
-            metadata->functions={RUNTIME_FUNCTION{begin,begin+prefix+14,static_cast<DWORD>(offsetof(Metadata,unwind))},RUNTIME_FUNCTION{begin+prefix+14,begin+prefix+28,static_cast<DWORD>(offsetof(Metadata,relay))}};
+            metadata=static_cast<Metadata*>(alloc_unwind_above(trampoline));if(!metadata)return false;metadata_[index]=metadata;
+            const auto rva=reinterpret_cast<std::uintptr_t>(metadata)-trampoline;
+            metadata->functions={RUNTIME_FUNCTION{0,prefix+14,static_cast<DWORD>(rva+offsetof(Metadata,unwind))},RUNTIME_FUNCTION{prefix+14,prefix+28,static_cast<DWORD>(rva+offsetof(Metadata,relay))}};
             metadata->unwind=unwinds[index];metadata->relay={1,0,0,0};
         }
         if(!patched_[index]) {
@@ -485,8 +483,9 @@ private:
             protection_[index]=previous;std::memcpy(reinterpret_cast<void*>(trampoline+prefix),replacement.data(),14);patched_[index]=true;protection_pending_[index]=true;cache_pending_[index]=true;
             if(!restore_protection(index))return false;
         }
-        const auto base=reinterpret_cast<std::uintptr_t>(metadata);const auto begin=static_cast<DWORD>(trampoline-base);
-        const std::array<RUNTIME_FUNCTION,2> expected_functions{{{begin,begin+prefix+14,static_cast<DWORD>(offsetof(Metadata,unwind))},{begin+prefix+14,begin+prefix+28,static_cast<DWORD>(offsetof(Metadata,relay))}}};
+        const auto base=trampoline,block=reinterpret_cast<std::uintptr_t>(metadata);if(block<=base || block-base>UINT32_MAX-4096)return false;
+        const auto rva=block-base;
+        const std::array<RUNTIME_FUNCTION,2> expected_functions{{{0,prefix+14,static_cast<DWORD>(rva+offsetof(Metadata,unwind))},{prefix+14,prefix+28,static_cast<DWORD>(rva+offsetof(Metadata,relay))}}};
         if(std::memcmp(metadata->functions.data(),expected_functions.data(),sizeof(expected_functions)) || metadata->unwind!=unwinds[index] || metadata->relay!=std::array<unsigned char,4>{1,0,0,0})return false;
         if(!registered_[index]) {
             for(unsigned offset=0;offset<prefix+28;++offset) {DWORD64 lookup{};if(RtlLookupFunctionEntry(trampoline+offset,&lookup,nullptr))return false;}

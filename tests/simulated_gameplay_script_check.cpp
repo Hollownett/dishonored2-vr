@@ -104,7 +104,18 @@ int main() {
     assert(rejects("D2VR_GAMEPLAY_SCRIPT 5 10000 1\n1000 2000"+zeros+" 1 0 1.65 0 0 0")); // truncated pose
     assert(rejects("D2VR_GAMEPLAY_SCRIPT 5 10000 1\n1000 2000"+zeros)); // no mask
     assert(rejects("D2VR_GAMEPLAY_SCRIPT 5 10000 4097"));
-    assert(rejects("D2VR_GAMEPLAY_SCRIPT 6 10000 1"));
+    assert(rejects("D2VR_GAMEPLAY_SCRIPT 7 10000 1"));
+    assert(rejects("D2VR_GAMEPLAY_SCRIPT 6 10000 1\n1000 2000"+zeros+" 0")); // v6 requires when after the mask
+    assert(rejects("D2VR_GAMEPLAY_SCRIPT 6 10000 1\n1000 2000"+zeros+" 0 3")); // when out of range
+    assert(rejects("D2VR_GAMEPLAY_SCRIPT 6 10000 1\n1000 2000"+zeros+" 0 -1"));
+    {std::string a_zeros;for(int i=0;i<26;++i) a_zeros+=i==8?" 1":" 0"; // button A pressed
+     d2vr::SimulatedGameplayScript when;std::istringstream w("D2VR_GAMEPLAY_SCRIPT 6 10000 3\n1000 2000"+a_zeros+" 0 1\n3000 4000"+a_zeros+" 0 2\n5000 6000"+a_zeros+" 0 0\n");
+     when.load(w,10);index=7;
+     assert(when.sample(1500,false,true,&index).a && index==0); // menu-only applies outside gameplay
+     const auto in=when.sample(1500,true,true,&index);assert(!in.a && in.active && index==-1); // ...and not in gameplay
+     assert(when.sample(3500,false,true).a && when.sample(3500,true,true).a); // always
+     assert(!when.sample(5500,false,true).a && when.sample(5500,true,true).a); // gameplay only
+     assert(!when.sample(1500,false,false).active && !when.sample(3500,true,false).a);} // unfocused stays neutral
     {d2vr::SimulatedGameplayScript many;std::string text="D2VR_GAMEPLAY_SCRIPT 5 10000 1000\n";
      for(int i=0;i<1000;++i) text+=std::to_string(i*10)+" "+std::to_string(i*10+10)+zeros+" 0\n";
      std::istringstream many_source(text);many.load(many_source,10);assert(many.size()==1000);} // more than 128 segments only from version 5

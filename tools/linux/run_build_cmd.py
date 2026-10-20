@@ -128,15 +128,6 @@ SKIPS = [
      "wined3d does not validate bind flags: CreateRenderTargetView on a texture without "
      "D3D11_BIND_RENDER_TARGET succeeds (the D3D11 runtime returns E_INVALIDARG), so the "
      "injected wrist swapchain failure never happens"),
-    (r"native_(choke_distance_scope|slash_speed|manual_equip_hooks|offered_choke|door_animation|"
-     r"assassination_receipt|manual_equip_runtime)_check", "run",
-     "Wine: needs VirtualAlloc below the trampoline within 2 GB plus RtlAddFunctionTable; "
-     "Wine's low address space is fully occupied, so the allocation fails with "
-     "ERROR_INVALID_ADDRESS"),
-    (r"native_(interaction_install_order|interaction_stop|lean_query_trace)_check", "run",
-     "Wine: NativeInteractionAim::install installs NativeSlashSceneRate, which needs "
-     "VirtualAlloc below the trampoline (see native_slash_speed_check); it fails with "
-     "ERROR_INVALID_ADDRESS and install throws"),
 ]
 
 # cl catches hardware faults (bad reads) in __try/__except under plain /EHsc; clang

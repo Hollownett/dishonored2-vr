@@ -1,10 +1,10 @@
-"""d2vr-linux command line: install, uninstall, doctor, launch-options, start, stop."""
+"""d2vr-linux command line: install, uninstall, doctor, launch-options, start, stop, sim (developer)."""
 import argparse
 import sys
 import urllib.request
 from pathlib import Path
 
-from . import doctor, modhome, steam
+from . import doctor, modhome, sim, steam
 
 
 class CliError(Exception):
@@ -27,7 +27,43 @@ def _parser():
     for name, text in (("start", "ask the running game to start VR"), ("stop", "ask the running game to stop VR")):
         s = sub.add_parser(name, help=text)
         s.add_argument("--mod-home", type=Path, help="mod home directory")
+    s = sub.add_parser("sim", help="developer: run the game with the simulated-VR backend and a gameplay script (no headset)",
+                       description="Developer-only simulated-VR test run. Refuses while the game or SteamVR vrserver runs. "
+                       "Backs up your saves, launches the game through Steam, drives a scripted scenario, snapshots the "
+                       "artifacts, closes the game and restores your saves. See linux/README.md.")
+    s.add_argument("--scenario", default="oil_tank_drop", help="tools/linux/scenarios/<name>.py (default: oil_tank_drop)")
+    s.add_argument("--script", type=Path, help="gameplay script JSON ({\"segments\": [...]}) instead of a scenario")
+    s.add_argument("--seconds", type=int, default=0, help="session length 10-120 (default: lead + scenario + 6)")
+    s.add_argument("--lead", type=float, default=sim.LEAD_SECONDS, help="neutral seconds before the scenario while the save loads (default 75)")
+    s.add_argument("--test-save", type=Path, help="savegame folder (SLOT*/profile.bin) to play instead of your saves")
+    s.add_argument("--settle", type=int, default=None, help="proxy settle seconds before the session starts (default: proxy's 45)")
+    s.add_argument("--no-autocontinue", dest="autocontinue", action="store_false", help="do not post Enter to the title menus")
+    s.add_argument("--autocontinue-delay", type=int, default=10, help="seconds after the session starts before Enter (default 10)")
+    s.add_argument("--status-field", action="append", metavar="PATH",
+                   help="xr-live-status.json field to print, dotted path (repeatable; default gameplay, logic_mask, game_layers_submitted, carry)")
+    s.add_argument("--start-timeout", type=float, default=480, help="seconds to wait for the session to start (default 480)")
+    s.add_argument("--close-timeout", type=float, default=30, help="seconds between the polite and the forced close (default 30)")
+    s.add_argument("--steam-cmd", default=sim.DEFAULT_STEAM_CMD, help="command that launches the game (default: steam -applaunch 403640)")
+    s.add_argument("--backup-root", type=Path, default=None, help="default ~/d2vr-test-builds/save-backups")
+    s.add_argument("--out-root", type=Path, default=None, help="default ~/d2vr-test-builds/sim-runs")
+    s.add_argument("--mod-home", type=Path, help="mod home directory")
+    s.add_argument("--dry-run", action="store_true", help="check everything and print the plan; write and launch nothing")
+    s.add_argument("--restore", nargs="?", const=True, default=None, metavar="BACKUP",
+                   help="restore your saves from the newest restore-pending backup (or BACKUP) and remove the dev knobs")
     return p
+
+
+def _cmd_sim(a, home, proc_root, sim_env):
+    root = home / "d2vr-test-builds"
+    a.backup_root = a.backup_root or root / "save-backups"
+    a.out_root = a.out_root or root / "sim-runs"
+    env = sim_env or sim.Env(proc_root=proc_root)
+    env.steam_cmd = a.steam_cmd
+    env.close_timeout = a.close_timeout
+    try:
+        return sim.run_sim(a, home, env)
+    except sim.SimError as e:
+        raise CliError(str(e))
 
 
 def _gpu_launch_line(proc_root):
@@ -106,7 +142,7 @@ def _cmd_request(a, home, name):
     return 0
 
 
-def main(argv=None, *, home=None, proc_root=Path("/proc"), icd_dirs=None, urlopen=None) -> int:
+def main(argv=None, *, home=None, proc_root=Path("/proc"), icd_dirs=None, urlopen=None, sim_env=None) -> int:
     args = _parser().parse_args(argv)
     home = Path.home() if home is None else Path(home)
     icd_dirs = doctor.DEFAULT_ICD_DIRS if icd_dirs is None else icd_dirs
@@ -120,7 +156,9 @@ def main(argv=None, *, home=None, proc_root=Path("/proc"), icd_dirs=None, urlope
             return _cmd_doctor(args, home, proc_root, icd_dirs)
         if args.command == "launch-options":
             return _cmd_launch_options(proc_root)
+        if args.command == "sim":
+            return _cmd_sim(args, home, proc_root, sim_env)
         return _cmd_request(args, home, modhome.START_TRIGGER if args.command == "start" else modhome.STOP_REQUEST)
-    except (CliError, steam.SteamError, modhome.InstallError, OSError) as e:
+    except (CliError, sim.SimError, steam.SteamError, modhome.InstallError, OSError) as e:
         print(f"d2vr-linux: error: {e}", file=sys.stderr)
         return 1

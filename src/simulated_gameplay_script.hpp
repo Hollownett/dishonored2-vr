@@ -10,12 +10,12 @@
 namespace d2vr {
 // Developer commands only. Native pad composition still applies its release gates.
 class SimulatedGameplayScript {
-    struct Segment {UINT64 start{},end{};ControllerInput input{};float head_pitch_degrees{},hand_pitch_degrees{};std::array<float,9> offsets{};unsigned mask{};std::array<std::array<float,7>,3> poses{};};
+    struct Segment {UINT64 start{},end{};ControllerInput input{};float head_pitch_degrees{},hand_pitch_degrees{};std::array<float,9> offsets{};unsigned mask{};std::array<std::array<float,7>,3> poses{};unsigned when{};};
     std::vector<Segment> segments_;
 public:
     void load(std::istream& source,unsigned seconds) {
         std::string magic;unsigned version{},duration{},count{};
-        if(!(source>>magic>>version>>duration>>count) || magic!="D2VR_GAMEPLAY_SCRIPT" || (version<1 || version>5) ||
+        if(!(source>>magic>>version>>duration>>count) || magic!="D2VR_GAMEPLAY_SCRIPT" || (version<1 || version>6) ||
            seconds<10 || seconds>120 || duration!=seconds*1000 || count==0 || count>(version>=5?4096u:128u))
             throw std::invalid_argument("Invalid gameplay script header");
         std::vector<Segment> parsed;UINT64 previous{};
@@ -49,6 +49,8 @@ public:
                     for(unsigned j=3;j<7;++j) p[j]/=n;
                 }
             }
+            // Version 6: when the segment applies: 0 gameplay only (earlier versions), 1 menus/non-gameplay only, 2 always.
+            if(version>=6 && (!(source>>s.when) || s.when>2)) throw std::invalid_argument("Invalid gameplay script when");
             parsed.push_back(s);previous=s.end;
         }
         std::string extra;if(source>>extra) throw std::invalid_argument("Trailing gameplay script data");
@@ -58,10 +60,11 @@ public:
         if(index) *index=-1;
         if(head_pitch_degrees) *head_pitch_degrees=0;
         ControllerInput neutral{};neutral.active=focused;
-        if(!gameplay || !focused) return neutral;
+        if(!focused) return neutral;
         for(std::size_t i=0;i<segments_.size();++i) {
             const auto& s=segments_[i];
             if(elapsed>=s.start && elapsed<s.end) {
+                if(!((s.when==0 && gameplay) || (s.when==1 && !gameplay) || s.when==2)) return neutral;
                 if(index) *index=static_cast<int>(i);
                 if(head_pitch_degrees) *head_pitch_degrees=s.head_pitch_degrees;
                 return s.input;

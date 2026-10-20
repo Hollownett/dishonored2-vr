@@ -9,6 +9,10 @@
 #include <string>
 
 static LRESULT CALLBACK window_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+    if (msg == WM_KEYDOWN) {
+        std::printf("key 0x%02lx\n", static_cast<unsigned long>(wp));
+        std::fflush(stdout);
+    }
     return DefWindowProcW(hwnd, msg, wp, lp);
 }
 

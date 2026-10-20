@@ -19,7 +19,7 @@ static XrResult XRAPI_CALL create_chain(XrSession session,const XrSwapchainCreat
     auto& chain=*sim::chains.at(*out);
     for(auto& texture:chain.textures) {
         D3D11_TEXTURE2D_DESC desc{};texture->GetDesc(&desc);desc.Format=DXGI_FORMAT_R8G8B8A8_TYPELESS;
-        if(broken && created>2)desc.BindFlags=D3D11_BIND_SHADER_RESOURCE;
+        if(broken && (info->width==128 || info->width==192))desc.BindFlags=D3D11_BIND_SHADER_RESOURCE;
         texture.Reset();assert(SUCCEEDED(sim::device->CreateTexture2D(&desc,nullptr,&texture)));
     }
     return result;
@@ -59,6 +59,7 @@ int main() {
             };
             frame();frame();assert(xr.last_tracked_pair && xr.last_layer_submitted);
             assert(xr.native_art_source(1,true,art.Get(),{0,0,0,90,24,1},123,xr.pose_epoch(),GetTickCount64()));
+            frame();assert(xr.last_tracked_pair && xr.last_layer_submitted && !xr.native_art_presented(1,true)); // the canvas is created between frames: this one only records its size
             frame();assert(xr.last_tracked_pair && xr.last_layer_submitted);
             if(scenario==2)assert(!xr.native_art_presented(1,true));
             if(scenario==1) {
@@ -75,9 +76,10 @@ int main() {
                 assert(xr.native_art_source(1,true,art.Get(),{0,0,0,89,24,1},123,xr.pose_epoch(),GetTickCount64()));
                 frame();assert(xr.wrist_target_creations==3 && created==base); // one-pixel animation reuses canvas
                 assert(xr.native_art_source(1,true,grown.Get(),{0,0,0,150,24,1},123,xr.pose_epoch(),GetTickCount64()));
-                frame(); // First retirement poll fences the old GPU work and skips only this panel.
+                frame(); // The outgrown canvas is only flagged inside the frame.
+                frame(); // First retirement poll (between frames) fences the old GPU work and skips only this panel.
                 assert(created==base && xr.wrist_retirement_waits>0 && xr.last_layer_submitted);
-                assert(!xr.native_art_presented(1,true) && sim::chains.size()==3);
+                assert(!xr.native_art_presented(1,true) && sim::chains.size()==6); // eyes, pointer, controls card, wheel dot, wrist
                 for(unsigned poll=0;poll<100 && created==base;++poll) {Sleep(1);frame();}
                 assert(created==base+1 && xr.wrist_target_creations==6 && sim::chains.size()==base);
                 assert(xr.native_art_presented(1,true));
@@ -85,7 +87,7 @@ int main() {
                 assert(sim::summary.overlays.empty());observer_fault=false;
                 assert(!xr.native_art_presented(1,true));
             }
-            assert(sim::summary.protocol_errors==0);
+            assert(sim::summary.protocol_errors==0 && sim::summary.chain_ops_in_frame==0 && xr.swapchain_creates_in_frame==0);
         }
         assert(sim::chains.empty());
     }

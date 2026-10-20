@@ -27,6 +27,7 @@ using DirectInput8CreateFn = HRESULT(WINAPI*)(HINSTANCE, DWORD, REFIID, LPVOID*,
 HMODULE g_self = nullptr;
 // Read through a volatile pointer so the marker stays a contiguous string in .rdata (modhome.is_our_proxy greps it).
 const char* volatile g_marker = kProxyMarker;
+const char* volatile g_sim_marker = kSimMarker;
 
 // Paths below are written by the worker before it starts the stop watcher and are read-only afterwards.
 std::wstring g_build_dir;
@@ -256,7 +257,7 @@ BOOL CALLBACK find_game_window_proc(HWND hwnd, LPARAM found) {
         // InternalGetWindowText does not send WM_GETTEXT, so a busy game thread cannot block the worker here.
         int n = InternalGetWindowText(hwnd, title, 256);
         if (n > 0 && is_game_window_title(std::wstring(title, static_cast<size_t>(n)))) {
-            *reinterpret_cast<bool*>(found) = true;
+            *reinterpret_cast<HWND*>(found) = hwnd;
             return FALSE;
         }
     } catch (...) {
@@ -264,10 +265,64 @@ BOOL CALLBACK find_game_window_proc(HWND hwnd, LPARAM found) {
     return TRUE;
 }
 
-bool game_window_present() {
-    bool found = false;
+HWND find_game_window() {
+    HWND found = nullptr;
     EnumWindows(find_game_window_proc, reinterpret_cast<LPARAM>(&found));
     return found;
+}
+
+bool game_window_present() { return find_game_window() != nullptr; }
+
+// WM_KEYDOWN, 80 ms, WM_KEYUP to the game window (launcher GameKeys.Post).
+bool post_key(int vk) {
+    HWND hwnd = find_game_window();
+    if (hwnd == nullptr) return false;
+    const LPARAM scan = static_cast<LPARAM>(MapVirtualKeyW(static_cast<UINT>(vk), 0));
+    PostMessageW(hwnd, WM_KEYDOWN, static_cast<WPARAM>(vk), 1 | (scan << 16));
+    Sleep(80);
+    PostMessageW(hwnd, WM_KEYUP, static_cast<WPARAM>(vk), 1 | (scan << 16) | (3LL << 30));
+    return true;
+}
+
+// Opt-in (build\linux-autocontinue): as launcher/Probe.cs Launch does for a game it started, post Enter (title -> Campaign ->
+// Continue, then any load prompt) once the session is up, until the mod reports gameplay. Ends with the attempt.
+std::wstring g_artifacts_dir;
+DWORD WINAPI autocontinue_thread(void* arg) {
+    try {
+        const unsigned delay = static_cast<unsigned>(reinterpret_cast<ULONG_PTR>(arg));
+        for (unsigned waited = 0; waited < delay * 10; ++waited) {
+            if (!g_attempt_active.load()) return 0;
+            Sleep(100);
+        }
+        // Menus animate and Wine may drop an early key: keep posting every 4 s (up to 12) until the mod reports gameplay.
+        for (int i = 0; i < 12; ++i) {
+            if (!g_attempt_active.load()) return 0;
+            std::string status;
+            read_file(g_artifacts_dir + L"\\xr-live-status.json", status);
+            if (status_says_gameplay(status)) {
+                log_line(L"autocontinue: gameplay reached; no more keys sent");
+                return 0;
+            }
+            if (!post_key(VK_RETURN)) {
+                log_line(L"autocontinue: game window not found");
+                return 0;
+            }
+            const auto mask_at = status.find("\"logic_mask\":");
+            std::wstring mask = L"?";
+            if (mask_at != std::string::npos) {
+                mask.clear();
+                for (size_t k = mask_at + 13; k < status.size() && status[k] >= '0' && status[k] <= '9'; ++k) mask += static_cast<wchar_t>(status[k]);
+            }
+            log_line(L"autocontinue: posted Enter " + num(static_cast<unsigned long>(i + 1)) + L" (logic_mask " + mask + L")");
+            for (int w = 0; w < 40; ++w) {
+                if (!g_attempt_active.load()) return 0;
+                Sleep(100);
+            }
+        }
+    } catch (...) {
+        log_line(L"autocontinue stopped: unexpected exception");
+    }
+    return 0;
 }
 
 std::vector<std::wstring> mod_dll_candidates(const std::wstring& build) {
@@ -328,7 +383,7 @@ void run_worker() {
     const std::wstring artifacts = home + L"\\artifacts";
     CreateDirectoryW(artifacts.c_str(), nullptr);
     const DWORD pid = GetCurrentProcessId();
-    open_log(artifacts, L"proxy " + from_utf8(g_marker) + L" pid=" + num(pid) + L" exe=" + exe + L" modhome=" + home);
+    open_log(artifacts, L"proxy " + from_utf8(g_marker) + L" " + from_utf8(g_sim_marker) + L" pid=" + num(pid) + L" exe=" + exe + L" modhome=" + home);
 
     append_focus_cvars();
 
@@ -413,7 +468,19 @@ void run_worker() {
             log_line(L"ProbeCapabilities=" + num(caps) + L" lacks required " + num(kRequiredCapabilities));
             continue;
         }
-        if (!write_file(build + L"\\dxgi-probe.cfg", probe_config(pid), false)) {
+        std::string config = probe_config(pid);
+        {
+            std::string override_text;
+            if (read_file(build + L"\\" + kProbeOverride, override_text)) {
+                if (const auto custom = probe_config_from_override(override_text, pid)) {
+                    config = *custom;
+                    log_line(L"probe config override: " + from_utf8(config.substr(0, config.size() - 1)));
+                } else {
+                    log_line(L"probe config override ignored (empty file)");
+                }
+            }
+        }
+        if (!write_file(build + L"\\dxgi-probe.cfg", config, false)) {
             log_line(L"cannot write build\\dxgi-probe.cfg (error " + num(GetLastError()) + L")");
             continue;
         }
@@ -421,6 +488,16 @@ void run_worker() {
             DeleteFileW((artifacts + L"\\" + stale).c_str());
 
         log_line(L"StartProbe begin " + dll);
+        {
+            std::string knob_text;
+            if (read_file(build + L"\\" + kAutoContinueKnob, knob_text)) {
+                const unsigned delay = autocontinue_seconds_from_knob(knob_text);
+                log_line(L"autocontinue armed: Enter after " + num(delay) + L" s");
+                g_artifacts_dir = artifacts;
+                HANDLE t = CreateThread(nullptr, 0, autocontinue_thread, reinterpret_cast<void*>(static_cast<ULONG_PTR>(delay)), 0, nullptr);
+                if (t != nullptr) CloseHandle(t);
+            }
+        }
         const DWORD code = ex.start(nullptr);
         std::wstring result = L"StartProbe returned " + num(code);
         if (code == 3) result += L" (" + home + L"\\.git missing)";

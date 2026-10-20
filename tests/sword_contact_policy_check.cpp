@@ -86,12 +86,18 @@ void live_beats_corpse() {
 // NPC at origin facing +x (reference-frame row 0 = -x, the live-tested convention); thrust threshold of the swing detector is 1.7 m/s.
 void deliberate_strike_from_behind() {
     const float row0[3]{-1,0,0},npc[3]{0,0,0},behind[3]{-.9f,.1f,0},front[3]{.9f,0,0},side[3]{0,.9f,0};
-    assert(attacker_behind(row0,npc,behind) && !attacker_behind(row0,npc,front) && !attacker_behind(row0,npc,side));
-    const float unknown[3]{0,0,0};assert(!attacker_behind(unknown,npc,behind));
-    assert(stealth_strike(4.0,true,true,1.7));            // fast strike from behind on the sensor's target: held -> native / kill
-    assert(!stealth_strike(.6,true,true,1.7));            // slow brush from behind: ordinary path, never a kill
-    assert(!stealth_strike(4.0,false,true,1.7));          // fast strike from the front on an unaware guard: ordinary hit
-    assert(!stealth_strike(4.0,true,false,1.7));          // not an NPC the game offers a takedown on (civilian / non-hostile): ordinary hit
+    assert(attacker_rear_or_side(row0,npc,behind) && attacker_rear_or_side(row0,npc,side) && !attacker_rear_or_side(row0,npc,front));
+    // boundary at cos +0.2: just inside (cos .19) is a strike, just outside (cos .21) is frontal
+    const float inside[3]{.19f,.98f,0},outside[3]{.21f,.98f,0};
+    assert(attacker_rear_or_side(row0,npc,inside) && !attacker_rear_or_side(row0,npc,outside));
+    const float unknown[3]{0,0,0};assert(!attacker_rear_or_side(unknown,npc,behind) && !attacker_rear_or_side(row0,npc,npc));
+    const double hit=SwordHitGate::hit_speed;
+    assert(stealth_strike(4.0,true,hit));                 // fast contact from behind/side: held -> native / kill, no sensor needed
+    assert(stealth_strike(hit,true,hit));                 // exactly the gate speed counts
+    assert(!stealth_strike(.6,true,hit));                 // slow brush: ordinary path
+    assert(!stealth_strike(4.0,false,hit));               // frontal contact: ordinary hit
+    // native_offer no longer gates the strike, only picks the hold window
+    assert(stealth_window_ms(true)==700 && stealth_window_ms(false)==120);
 }
 
 int main() {

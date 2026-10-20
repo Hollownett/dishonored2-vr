@@ -12,6 +12,7 @@
 #include "canted_fov.hpp"
 #include "menu_panel.hpp"
 #include "xr_continuity.hpp"
+#include "xr_layer_pose.hpp"
 #include "eye_antialiasing.hpp"
 #include "eye_sharpen.hpp"
 #include "desktop_mirror.hpp"
@@ -34,6 +35,7 @@
 #include <cstring>
 #include <stdexcept>
 #include <string>
+#include <cstdio>
 #include <vector>
 #include <memory>
 #include <chrono>
@@ -83,6 +85,7 @@ private:
     std::array<bool,2> wrist_acquired_{};
     std::array<Microsoft::WRL::ComPtr<ID3D11Query>,2> wrist_retirement_;
     std::array<bool,2> wrist_recreate_{};
+    std::array<std::array<UINT,2>,2> wrist_want_{}; // canvas size wrist_layer needs; prepare_overlays creates it between frames
     Microsoft::WRL::ComPtr<ID3D11Query> close_retirement_;
     std::array<UINT64,2> wrist_retry_ticks_{};
     std::array<UINT64,2> wrist_image_ticks_{};
@@ -153,8 +156,10 @@ private:
     Microsoft::WRL::ComPtr<ID3D11Texture2D> world_ui_source_;
     unsigned world_ui_kind_{};bool world_ui_full_{};
     XrSwapchain world_ui_chain_{};
+    ChainSizes chain_sizes_; // every live swapchain's size: the submit guard checks quad/cylinder sub-rects against it
+    XrSwapchain menu_band_chain_{};std::vector<XrSwapchainImageD3D11KHR> menu_band_images_;UINT menu_band_width_{},menu_band_height_{}; // the menu/cutscene panel's 16:9 band
     std::vector<XrSwapchainImageD3D11KHR> world_ui_images_;
-    UINT world_ui_width_{},world_ui_height_{};
+    UINT world_ui_width_{},world_ui_height_{}; // the chain's size: width x the displayed rows
     bool world_ui_pose_valid_{};
     TrackedPose world_ui_pose_{};
     // HUD window: gameplay HUD (prompts, tutorials, notifications) captured into one offscreen
@@ -229,67 +234,100 @@ private:
         world_ui_pose_=world_ui_front_pose(head,world_ui_kind_==1?.9:1.05);
         world_ui_pose_valid_=true;return world_ui_pose_;
     }
-    XrCompositionLayerQuad world_ui_layer() {
+    // SteamVR fails xrEndFrame for a swapchain created (or destroyed) inside a frame: every overlay chain is built by prepare_overlays()
+    // between frames; a layer whose chain is missing or the wrong size shows nothing this frame.
+    void count_chain_op() {if(frame_open_) ++swapchain_creates_in_frame;}
+    void create_overlay_chain(const XrSwapchainCreateInfo& info,XrSwapchain& chain,const char* name) {
+        count_chain_op();checked(api<PFN_xrCreateSwapchain>("xrCreateSwapchain",instance_)(session_,&info,&chain),name);chain_sizes_[chain]={info.width,info.height};
+    }
+    void destroy_overlay_chain(XrSwapchain chain,const char* name) {count_chain_op();chain_sizes_.erase(chain);checked(xrDestroySwapchain(chain),name);}
+    // A quad/cylinder swapchain is exactly the size of what it shows (SteamVR rejects sub-rects): rebuilt here, between frames, when that size changes.
+    void rebuild_overlay_chain(XrSwapchain& chain,std::vector<XrSwapchainImageD3D11KHR>& images,UINT& have_width,UINT& have_height,UINT width,UINT height,const std::string& label) {
+        if(chain && have_width==width && have_height==height) return;
+        if(chain) drain_gpu_for_surface();
+        images.clear();if(chain) destroy_overlay_chain(chain,("Destroy old "+label).c_str());
+        chain=XR_NULL_HANDLE;
+        XrSwapchainCreateInfo info{};info.type=XR_TYPE_SWAPCHAIN_CREATE_INFO;info.format=format_;
+        info.usageFlags=XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT|XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT;
+        info.width=width;info.height=height;info.sampleCount=1;info.faceCount=1;info.arraySize=1;info.mipCount=1;
+        create_overlay_chain(info,chain,("Create "+label).c_str());
+        auto enumerate=api<PFN_xrEnumerateSwapchainImages>("xrEnumerateSwapchainImages",instance_);uint32_t count{};
+        checked(enumerate(chain,0,&count,nullptr),("Count "+label+" images").c_str());
+        images.resize(count);for(auto& i:images) i.type=XR_TYPE_SWAPCHAIN_IMAGE_D3D11_KHR;
+        checked(enumerate(chain,count,&count,reinterpret_cast<XrSwapchainImageBaseHeader*>(images.data())),("Read "+label+" images").c_str());
+        have_width=width;have_height=height;
+    }
+    void ensure_world_ui_chain() {
+        if(!world_ui_source_) return;
         D3D11_TEXTURE2D_DESC desc{};world_ui_source_->GetDesc(&desc);
-        if(!world_ui_chain_ || world_ui_width_!=desc.Width || world_ui_height_!=desc.Height) {
-            if(world_ui_chain_) drain_gpu_for_surface();
-            world_ui_images_.clear();if(world_ui_chain_) checked(xrDestroySwapchain(world_ui_chain_),"Destroy old world UI surface");
-            world_ui_chain_=XR_NULL_HANDLE;
-            XrSwapchainCreateInfo info{};info.type=XR_TYPE_SWAPCHAIN_CREATE_INFO;info.format=format_;
-            info.usageFlags=XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT|XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT;
-            info.width=desc.Width;info.height=desc.Height;info.sampleCount=1;info.faceCount=1;info.arraySize=1;info.mipCount=1;
-            checked(api<PFN_xrCreateSwapchain>("xrCreateSwapchain",instance_)(session_,&info,&world_ui_chain_),"Create world UI surface");
-            auto enumerate=api<PFN_xrEnumerateSwapchainImages>("xrEnumerateSwapchainImages",instance_);uint32_t count{};
-            checked(enumerate(world_ui_chain_,0,&count,nullptr),"Count world UI images");
-            world_ui_images_.resize(count);for(auto& i:world_ui_images_) i.type=XR_TYPE_SWAPCHAIN_IMAGE_D3D11_KHR;
-            checked(enumerate(world_ui_chain_,count,&count,reinterpret_cast<XrSwapchainImageBaseHeader*>(world_ui_images_.data())),"Read world UI images");
-            world_ui_width_=desc.Width;world_ui_height_=desc.Height;
-        }
+        rebuild_overlay_chain(world_ui_chain_,world_ui_images_,world_ui_width_,world_ui_height_,desc.Width,static_cast<UINT>(world_ui_rows(desc)),"world UI surface");
+    }
+    void ensure_menu_band_chain() {
+        if(width_) rebuild_overlay_chain(menu_band_chain_,menu_band_images_,menu_band_width_,menu_band_height_,width_,static_cast<UINT>(menu_view().rows),"menu panel surface");
+    }
+    // Copies the menu/cutscene band of the left eye image into the band chain the panel shows; false when the chain is not (yet) the band size.
+    bool copy_menu_band(ID3D11Texture2D* eye) {
+        const auto view=menu_view();
+        if(!menu_band_chain_ || menu_band_width_!=width_ || menu_band_height_!=static_cast<UINT>(view.rows)) return false;
+        XrSwapchainImageAcquireInfo acquire{};acquire.type=XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO;uint32_t index{};
+        checked(xrAcquireSwapchainImage(menu_band_chain_,&acquire,&index),"Acquire menu panel image");
+        XrSwapchainImageWaitInfo wait{};wait.type=XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO;wait.timeout=1'000'000'000;
+        XrSwapchainImageReleaseInfo release{};release.type=XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO;
+        const auto ready=xrWaitSwapchainImage(menu_band_chain_,&wait);
+        if(XR_FAILED(ready) || ready==XR_TIMEOUT_EXPIRED) {xrReleaseSwapchainImage(menu_band_chain_,&release);checked(ready,"Wait menu panel image");throw std::runtime_error("Menu panel image wait timed out");}
+        const D3D11_BOX band{0,static_cast<UINT>(view.y),0,width_,static_cast<UINT>(view.y+view.rows),1};
+        context_->CopySubresourceRegion(menu_band_images_.at(index).texture,0,0,0,0,eye,0,&band);
+        checked(xrReleaseSwapchainImage(menu_band_chain_,&release),"Release menu panel image");return true;
+    }
+    std::optional<XrCompositionLayerQuad> world_ui_layer() {
+        D3D11_TEXTURE2D_DESC desc{};world_ui_source_->GetDesc(&desc);
+        const int rows=world_ui_rows(desc);
+        if(!world_ui_chain_ || world_ui_width_!=desc.Width || world_ui_height_!=static_cast<UINT>(rows)) return {};
         if(!world_ui_stale_) { // stale: the quad re-shows the last released image
         XrSwapchainImageAcquireInfo acquire{};acquire.type=XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO;uint32_t index{};
         checked(xrAcquireSwapchainImage(world_ui_chain_,&acquire,&index),"Acquire world UI image");
         XrSwapchainImageWaitInfo wait{};wait.type=XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO;wait.timeout=1'000'000'000;
         const auto ready=xrWaitSwapchainImage(world_ui_chain_,&wait);checked(ready,"Wait world UI image");
         if(ready==XR_TIMEOUT_EXPIRED) throw std::runtime_error("World UI image wait timed out");
-        context_->CopyResource(world_ui_images_.at(index).texture,world_ui_source_.Get());
+        const UINT top=(desc.Height-rows)/2;const D3D11_BOX band{0,top,0,desc.Width,top+static_cast<UINT>(rows),1}; // only the shown band
+        context_->CopySubresourceRegion(world_ui_images_.at(index).texture,0,0,0,0,world_ui_source_.Get(),0,&band);
         XrSwapchainImageReleaseInfo release{};release.type=XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO;
         checked(xrReleaseSwapchainImage(world_ui_chain_,&release),"Release world UI image");
         }
         const auto& pose=world_ui_pose();
         // The native selector lays potion shortcuts and controls at the top
         // and bottom of the actual movie image, outside the pause-menu band.
-        const int rows=world_ui_rows(desc);
         const float width=world_ui_width();
         XrCompositionLayerQuad layer{};layer.type=XR_TYPE_COMPOSITION_LAYER_QUAD;layer.space=local_;
         layer.layerFlags=XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;layer.eyeVisibility=XR_EYE_VISIBILITY_BOTH;
         layer.pose.orientation={static_cast<float>(pose.orientation.x),static_cast<float>(pose.orientation.y),static_cast<float>(pose.orientation.z),static_cast<float>(pose.orientation.w)};
         layer.pose.position={static_cast<float>(pose.position.x),static_cast<float>(pose.position.y),static_cast<float>(pose.position.z)};
         layer.size={width,width*rows/desc.Width};layer.subImage.swapchain=world_ui_chain_;
-        layer.subImage.imageRect.offset={0,static_cast<int>((desc.Height-rows)/2)};layer.subImage.imageRect.extent={static_cast<int>(desc.Width),rows};return layer;
+        layer.subImage.imageRect.extent={static_cast<int>(desc.Width),rows};return layer;
     }
-    XrCompositionLayerQuad hud_window_layer() {
+    void ensure_hud_window_chain() {
+        if(!hud_window_source_) return;
         D3D11_TEXTURE2D_DESC desc{};hud_window_source_->GetDesc(&desc);
-        if(!hud_window_chain_ || hud_window_width_!=desc.Width || hud_window_height_!=desc.Height) {
-            if(hud_window_chain_) drain_gpu_for_surface();
-            hud_window_images_.clear();if(hud_window_chain_) checked(xrDestroySwapchain(hud_window_chain_),"Destroy old HUD window surface");
-            hud_window_chain_=XR_NULL_HANDLE;
-            XrSwapchainCreateInfo info{};info.type=XR_TYPE_SWAPCHAIN_CREATE_INFO;info.format=format_;
-            info.usageFlags=XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT|XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT;
-            info.width=desc.Width;info.height=desc.Height;info.sampleCount=1;info.faceCount=1;info.arraySize=1;info.mipCount=1;
-            checked(api<PFN_xrCreateSwapchain>("xrCreateSwapchain",instance_)(session_,&info,&hud_window_chain_),"Create HUD window surface");
-            auto enumerate=api<PFN_xrEnumerateSwapchainImages>("xrEnumerateSwapchainImages",instance_);uint32_t count{};
-            checked(enumerate(hud_window_chain_,0,&count,nullptr),"Count HUD window images");
-            hud_window_images_.resize(count);for(auto& i:hud_window_images_) i.type=XR_TYPE_SWAPCHAIN_IMAGE_D3D11_KHR;
-            checked(enumerate(hud_window_chain_,count,&count,reinterpret_cast<XrSwapchainImageBaseHeader*>(hud_window_images_.data())),"Read HUD window images");
-            hud_window_width_=desc.Width;hud_window_height_=desc.Height;
-        }
+        const auto crop=hud_window_crop(desc.Width,desc.Height,1.); // the crop's size depends only on the texture
+        rebuild_overlay_chain(hud_window_chain_,hud_window_images_,hud_window_width_,hud_window_height_,crop.w,crop.h,"HUD window surface");
+    }
+    std::optional<XrCompositionLayerQuad> hud_window_layer() {
+        D3D11_TEXTURE2D_DESC desc{};hud_window_source_->GetDesc(&desc);
+        // Crop to the relaid content (hud_percent scale about the stage centre) and size it to ~38 deg wide.
+        // The whole 16:9 stage (fitted by width into the texture) on one screen. Width in degrees: at most
+        // 58% of this headset's horizontal FOV and 60 deg, scaled by the HUD size setting (55-100%).
+        const double hfov_deg=(views_[0].fov.angleRight-views_[0].fov.angleLeft)*57.29577951308232;
+        const double window_deg=hud_screen_degrees(hfov_deg,settings_.hud_percent());
+        const auto crop=hud_window_crop(desc.Width,desc.Height,1.,hud_window_config_.distance,window_deg);
+        if(!hud_window_chain_ || hud_window_width_!=static_cast<UINT>(crop.w) || hud_window_height_!=static_cast<UINT>(crop.h)) return {};
         if(!hud_window_stale_) { // stale: re-show the last released image
         XrSwapchainImageAcquireInfo acquire{};acquire.type=XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO;uint32_t index{};
         checked(xrAcquireSwapchainImage(hud_window_chain_,&acquire,&index),"Acquire HUD window image");
         XrSwapchainImageWaitInfo wait{};wait.type=XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO;wait.timeout=1'000'000'000;
         const auto ready=xrWaitSwapchainImage(hud_window_chain_,&wait);checked(ready,"Wait HUD window image");
         if(ready==XR_TIMEOUT_EXPIRED) throw std::runtime_error("HUD window image wait timed out");
-        context_->CopyResource(hud_window_images_.at(index).texture,hud_window_source_.Get());
+        const D3D11_BOX box{static_cast<UINT>(crop.x),static_cast<UINT>(crop.y),0,static_cast<UINT>(crop.x+crop.w),static_cast<UINT>(crop.y+crop.h),1}; // only the shown crop
+        context_->CopySubresourceRegion(hud_window_images_.at(index).texture,0,0,0,0,hud_window_source_.Get(),0,&box);
         XrSwapchainImageReleaseInfo release{};release.type=XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO;
         checked(xrReleaseSwapchainImage(hud_window_chain_,&release),"Release HUD window image");
         }
@@ -299,18 +337,12 @@ private:
         const auto& l=views_[0].pose;const auto& r=views_[1].pose;
         const auto pose=hud_window_.update({{(l.position.x+r.position.x)*.5,(l.position.y+r.position.y)*.5,(l.position.z+r.position.z)*.5},
             {l.orientation.x,l.orientation.y,l.orientation.z,l.orientation.w}},dt,hud_window_config_);
-        // Crop to the relaid content (hud_percent scale about the stage centre) and size it to ~38 deg wide.
-        // The whole 16:9 stage (fitted by width into the texture) on one screen. Width in degrees: at most
-        // 58% of this headset's horizontal FOV and 60 deg, scaled by the HUD size setting (55-100%).
-        const double hfov_deg=(views_[0].fov.angleRight-views_[0].fov.angleLeft)*57.29577951308232;
-        const double window_deg=hud_screen_degrees(hfov_deg,settings_.hud_percent());
-        const auto crop=hud_window_crop(desc.Width,desc.Height,1.,hud_window_config_.distance,window_deg);
         XrCompositionLayerQuad layer{};layer.type=XR_TYPE_COMPOSITION_LAYER_QUAD;layer.space=local_;
         layer.layerFlags=XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;layer.eyeVisibility=XR_EYE_VISIBILITY_BOTH;
         layer.pose.orientation={static_cast<float>(pose.orientation.x),static_cast<float>(pose.orientation.y),static_cast<float>(pose.orientation.z),static_cast<float>(pose.orientation.w)};
         layer.pose.position={static_cast<float>(pose.position.x),static_cast<float>(pose.position.y),static_cast<float>(pose.position.z)};
         layer.size={static_cast<float>(crop.width_m),static_cast<float>(crop.height_m)};layer.subImage.swapchain=hud_window_chain_;
-        layer.subImage.imageRect.offset={crop.x,crop.y};layer.subImage.imageRect.extent={crop.w,crop.h};
+        layer.subImage.imageRect.extent={crop.w,crop.h};
         if(cylinder_supported_) { // same screen, curved: every point at the window distance from the eyes
             hud_cylinder_={XR_TYPE_COMPOSITION_LAYER_CYLINDER_KHR};hud_cylinder_.layerFlags=layer.layerFlags;hud_cylinder_.space=local_;
             hud_cylinder_.eyeVisibility=XR_EYE_VISIBILITY_BOTH;hud_cylinder_.subImage=layer.subImage;
@@ -324,20 +356,23 @@ private:
         return layer;
     }
     // A 32x32 alpha-blended quad (menu pointer) uploaded every frame.
-    XrCompositionLayerQuad small_quad(XrSwapchain& chain,std::vector<XrSwapchainImageD3D11KHR>& images,
-        const std::array<std::uint8_t,32*32*4>& pixels,const TrackedPose& p,float size) {
+    void ensure_small_chain(XrSwapchain& chain,std::vector<XrSwapchainImageD3D11KHR>& images) {
         if(!chain) {
             XrSwapchainCreateInfo info{};info.type=XR_TYPE_SWAPCHAIN_CREATE_INFO;
             info.usageFlags=XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT|XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT;
             info.format=DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;info.width=32;info.height=32;
             info.sampleCount=1;info.faceCount=1;info.arraySize=1;info.mipCount=1;
-            checked(api<PFN_xrCreateSwapchain>("xrCreateSwapchain",instance_)(session_,&info,&chain),"Create small quad");
+            create_overlay_chain(info,chain,"Create small quad");
             auto enumerate=api<PFN_xrEnumerateSwapchainImages>("xrEnumerateSwapchainImages",instance_);uint32_t count{};
             checked(enumerate(chain,0,&count,nullptr),"Count small quad images");
             images.resize(count);for(auto& image:images) image.type=XR_TYPE_SWAPCHAIN_IMAGE_D3D11_KHR;
             checked(enumerate(chain,count,&count,reinterpret_cast<XrSwapchainImageBaseHeader*>(images.data())),"Read small quad images");
             if(images.empty()) throw std::runtime_error("XR small quad has no images");
         }
+    }
+    XrCompositionLayerQuad small_quad(XrSwapchain& chain,std::vector<XrSwapchainImageD3D11KHR>& images,
+        const std::array<std::uint8_t,32*32*4>& pixels,const TrackedPose& p,float size) {
+        if(!chain) throw std::logic_error("small quad chain is created by prepare_overlays");
         XrSwapchainImageAcquireInfo acquire{};acquire.type=XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO;uint32_t index{};
         checked(xrAcquireSwapchainImage(chain,&acquire,&index),"Acquire small quad");
         XrSwapchainImageWaitInfo wait{};wait.type=XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO;wait.timeout=1'000'000'000;
@@ -420,7 +455,7 @@ private:
     bool retire_wrist(unsigned side) {
         if(!wrist_chains_[side]) {wrist_recreate_[side]=false;return true;}
         if(wrist_acquired_[side] || !gpu_retirement_ready(wrist_retirement_[side])) {++wrist_retirement_waits;return false;}
-        checked(xrDestroySwapchain(wrist_chains_[side]),"Destroy retired wrist HUD");
+        destroy_overlay_chain(wrist_chains_[side],"Destroy retired wrist HUD");
         wrist_chains_[side]=XR_NULL_HANDLE;wrist_targets_[side].clear();wrist_images_[side].clear();
         native_wrist_sizes_[side]={};wrist_retirement_[side].Reset();wrist_recreate_[side]=false;return true;
     }
@@ -428,7 +463,6 @@ private:
         // Optional layers must never stall the scene while the compositor is
         // busy. A timeout retains acquisition until a later successful wait.
         if(!release_pending_wrist(side)) {++wrist_timeouts;return {};}
-        if(wrist_recreate_[side] && !retire_wrist(side)) return {};
         constexpr XrSpaceLocationFlags valid=XR_SPACE_LOCATION_ORIENTATION_VALID_BIT|XR_SPACE_LOCATION_POSITION_VALID_BIT;
         const auto now=GetTickCount64(),epoch=pose_epoch();
         const auto* primary=&native_wrist_art_[side];
@@ -460,34 +494,9 @@ private:
         const auto contained=native_panel_fit(views_,*pose,panel_width,panel_height);
         if(!contained) return {};
         auto& chain=wrist_chains_[side];auto& images=wrist_images_[side];
-        if(chain && (native_wrist_sizes_[side][0]<width || native_wrist_sizes_[side][1]<height)) {
-            wrist_recreate_[side]=true;if(!retire_wrist(side)) return {};
-        }
-        if(!chain) {
-            // Grow in blocks; animated native bounds do not recreate a chain
-            // for every one-pixel change, and shrinking can reuse the canvas.
-            const auto canvas_width=(width+63u)&~63u,canvas_height=(height+63u)&~63u;
-            XrSwapchainCreateInfo info{};info.type=XR_TYPE_SWAPCHAIN_CREATE_INFO;
-            info.usageFlags=XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT|XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT;
-            info.format=format_;info.width=canvas_width;info.height=canvas_height;
-            info.sampleCount=1;info.faceCount=1;info.arraySize=1;info.mipCount=1;
-            checked(api<PFN_xrCreateSwapchain>("xrCreateSwapchain",instance_)(session_,&info,&chain),"Create wrist HUD");
-            auto enumerate=api<PFN_xrEnumerateSwapchainImages>("xrEnumerateSwapchainImages",instance_);uint32_t count{};
-            checked(enumerate(chain,0,&count,nullptr),"Count wrist HUD images");
-            images.resize(count);for(auto& i:images) i.type=XR_TYPE_SWAPCHAIN_IMAGE_D3D11_KHR;
-            checked(enumerate(chain,count,&count,reinterpret_cast<XrSwapchainImageBaseHeader*>(images.data())),"Read wrist HUD images");
-            if(images.empty()) throw std::runtime_error("XR wrist HUD has no images");
-            Microsoft::WRL::ComPtr<ID3D11Device> device;context_->GetDevice(&device);
-            D3D11_RENDER_TARGET_VIEW_DESC target{};target.Format=format_;target.ViewDimension=D3D11_RTV_DIMENSION_TEXTURE2D;
-            wrist_targets_[side].resize(count);
-            for(unsigned i=0;i<count;++i) {
-                images[i].texture->GetDesc(&wrist_failure_texture);
-                wrist_failure_hresult=device->CreateRenderTargetView(images[i].texture,&target,&wrist_targets_[side][i]);
-                if(FAILED(wrist_failure_hresult)) throw std::runtime_error("Create typed native wrist target failed: "+std::to_string(wrist_failure_hresult));
-                ++wrist_target_creations;
-            }
-            native_wrist_sizes_[side]={canvas_width,canvas_height};
-        }
+        // Grow in blocks; animated native bounds do not recreate a chain for every one-pixel change, and shrinking can reuse the canvas.
+        if(chain && (native_wrist_sizes_[side][0]<width || native_wrist_sizes_[side][1]<height)) wrist_recreate_[side]=true;
+        if(wrist_recreate_[side] || !chain) {wrist_want_[side]={(width+63u)&~63u,(height+63u)&~63u};return {};} // prepare_overlays retires/creates it between frames
         XrSwapchainImageAcquireInfo acquire{};acquire.type=XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO;uint32_t index{};
         checked(xrAcquireSwapchainImage(chain,&acquire,&index),"Acquire wrist HUD");
         wrist_acquired_[side]=true;
@@ -513,15 +522,43 @@ private:
         layer.eyeVisibility=XR_EYE_VISIBILITY_BOTH;
         layer.pose.orientation={static_cast<float>(contained->orientation.x),static_cast<float>(contained->orientation.y),static_cast<float>(contained->orientation.z),static_cast<float>(contained->orientation.w)};
         layer.pose.position={static_cast<float>(contained->position.x),static_cast<float>(contained->position.y),static_cast<float>(contained->position.z)};
-        layer.subImage.swapchain=chain;layer.subImage.imageRect.extent={static_cast<int32_t>(width),static_cast<int32_t>(height)};
+        // The whole (transparent-padded) canvas is shown; the quad is moved so the content keeps its exact place and size.
+        const auto canvas=native_wrist_sizes_[side];
+        const auto shift=rotated(normalized(contained->orientation),{(canvas[0]-static_cast<double>(width))*.5*pixel_scale,-(canvas[1]-static_cast<double>(height))*.5*pixel_scale,0});
+        layer.pose.position={static_cast<float>(contained->position.x+shift.x),static_cast<float>(contained->position.y+shift.y),static_cast<float>(contained->position.z+shift.z)};
+        layer.subImage.swapchain=chain;layer.subImage.imageRect.extent={static_cast<int32_t>(canvas[0]),static_cast<int32_t>(canvas[1])};
         native_wrist_art_shown_[static_cast<unsigned>(primary-native_wrist_art_.data())]=true;
         if(mana)native_wrist_art_shown_[2]=true;
-        layer.size={panel_width,panel_height};
+        layer.size={pixel_scale*canvas[0],pixel_scale*canvas[1]};
         return layer;
     }
-    std::optional<XrCompositionLayerQuad> optional_wrist_layer(unsigned side) {
-        if(GetTickCount64()<wrist_retry_ticks_[side]) return {};
-        try {return wrist_layer(side);}
+    void create_wrist_chain(unsigned side,UINT canvas_width,UINT canvas_height) {
+        auto& chain=wrist_chains_[side];auto& images=wrist_images_[side];
+        {
+            XrSwapchainCreateInfo info{};info.type=XR_TYPE_SWAPCHAIN_CREATE_INFO;
+            info.usageFlags=XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT|XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT;
+            info.format=format_;info.width=canvas_width;info.height=canvas_height;
+            info.sampleCount=1;info.faceCount=1;info.arraySize=1;info.mipCount=1;
+            create_overlay_chain(info,chain,"Create wrist HUD");
+            auto enumerate=api<PFN_xrEnumerateSwapchainImages>("xrEnumerateSwapchainImages",instance_);uint32_t count{};
+            checked(enumerate(chain,0,&count,nullptr),"Count wrist HUD images");
+            images.resize(count);for(auto& i:images) i.type=XR_TYPE_SWAPCHAIN_IMAGE_D3D11_KHR;
+            checked(enumerate(chain,count,&count,reinterpret_cast<XrSwapchainImageBaseHeader*>(images.data())),"Read wrist HUD images");
+            if(images.empty()) throw std::runtime_error("XR wrist HUD has no images");
+            Microsoft::WRL::ComPtr<ID3D11Device> device;context_->GetDevice(&device);
+            D3D11_RENDER_TARGET_VIEW_DESC target{};target.Format=format_;target.ViewDimension=D3D11_RTV_DIMENSION_TEXTURE2D;
+            wrist_targets_[side].resize(count);
+            for(unsigned i=0;i<count;++i) {
+                images[i].texture->GetDesc(&wrist_failure_texture);
+                wrist_failure_hresult=device->CreateRenderTargetView(images[i].texture,&target,&wrist_targets_[side][i]);
+                if(FAILED(wrist_failure_hresult)) throw std::runtime_error("Create typed native wrist target failed: "+std::to_string(wrist_failure_hresult));
+                ++wrist_target_creations;
+            }
+            native_wrist_sizes_[side]={canvas_width,canvas_height};wrist_want_[side]={};
+        }
+    }
+    template<class F> std::optional<XrCompositionLayerQuad> guarded_wrist(unsigned side,F&& run) {
+        try {return run();}
         catch(const XrOperationError& error) {
             // A lost runtime/device is a session failure; optional allocation
             // pressure can drop this layer while the projection keeps running.
@@ -539,6 +576,42 @@ private:
         if(observe_wrist_failure) observe_wrist_failure(side,wrist_failure_reason.c_str());
         return {};
     }
+    std::optional<XrCompositionLayerQuad> optional_wrist_layer(unsigned side) {
+        if(GetTickCount64()<wrist_retry_ticks_[side]) return {};
+        return guarded_wrist(side,[&]{return wrist_layer(side);});
+    }
+    void prepare_wrist(unsigned side) {
+        if(GetTickCount64()<wrist_retry_ticks_[side]) return;
+        guarded_wrist(side,[&]()->std::optional<XrCompositionLayerQuad> {
+            if(wrist_recreate_[side] && !retire_wrist(side)) return {};
+            if(!wrist_chains_[side] && wrist_want_[side][0]) create_wrist_chain(side,wrist_want_[side][0],wrist_want_[side][1]);
+            return {};
+        });
+    }
+    // Everything that creates or destroys a swapchain after the session starts runs here, outside xrBeginFrame..xrEndFrame:
+    // fixed-size panels once, size-dependent panels (world UI, HUD window, wrist) when their size changed or a retirement fence passed.
+    void prepare_overlays() {
+        if(frame_open_) return;
+        ensure_small_chain(pointer_chain_,pointer_images_);ensure_hint_chain();ensure_dot_chain();
+        ensure_world_ui_chain();ensure_hud_window_chain();ensure_menu_band_chain();
+        for(unsigned side=0;side<2;++side) prepare_wrist(side);
+    }
+    void ensure_hint_chain() {
+        constexpr unsigned width=512,height=384;
+        if(!hint_chain_) {
+            XrSwapchainCreateInfo info{};info.type=XR_TYPE_SWAPCHAIN_CREATE_INFO;
+            info.usageFlags=XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT|XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT;
+            info.format=DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;info.width=width;info.height=height;
+            info.sampleCount=1;info.faceCount=1;info.arraySize=1;info.mipCount=1;
+            create_overlay_chain(info,hint_chain_,"Create controls card");
+            auto enumerate=api<PFN_xrEnumerateSwapchainImages>("xrEnumerateSwapchainImages",instance_);uint32_t count{};
+            checked(enumerate(hint_chain_,0,&count,nullptr),"Count controls card images");
+            hint_images_.resize(count);for(auto& image:hint_images_) image.type=XR_TYPE_SWAPCHAIN_IMAGE_D3D11_KHR;
+            checked(enumerate(hint_chain_,count,&count,reinterpret_cast<XrSwapchainImageBaseHeader*>(hint_images_.data())),"Read controls card images");
+            if(hint_images_.empty()) throw std::runtime_error("XR controls card has no images");
+            hint_filled_.assign(count,false);hint_pixels_=controls_hint_image(width,height);
+        }
+    }
     // Wrist controls card: shown above the left controller while it is raised in front of the face
     // with its side turned toward the eyes (a watch glance), always facing the head.
     std::optional<XrCompositionLayerQuad> hint_layer() {
@@ -553,19 +626,7 @@ private:
         const auto side=rotated(normalized(Quaternion{grip.pose.orientation.x,grip.pose.orientation.y,grip.pose.orientation.z,grip.pose.orientation.w}),{1,0,0});
         if(dot(side,to_head*(1/distance))<.6) return {}; // palm (+X of the left grip) toward the eyes; the back of the wrist is the health watch
         constexpr unsigned width=512,height=384;
-        if(!hint_chain_) {
-            XrSwapchainCreateInfo info{};info.type=XR_TYPE_SWAPCHAIN_CREATE_INFO;
-            info.usageFlags=XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT|XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT;
-            info.format=DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;info.width=width;info.height=height;
-            info.sampleCount=1;info.faceCount=1;info.arraySize=1;info.mipCount=1;
-            checked(api<PFN_xrCreateSwapchain>("xrCreateSwapchain",instance_)(session_,&info,&hint_chain_),"Create controls card");
-            auto enumerate=api<PFN_xrEnumerateSwapchainImages>("xrEnumerateSwapchainImages",instance_);uint32_t count{};
-            checked(enumerate(hint_chain_,0,&count,nullptr),"Count controls card images");
-            hint_images_.resize(count);for(auto& image:hint_images_) image.type=XR_TYPE_SWAPCHAIN_IMAGE_D3D11_KHR;
-            checked(enumerate(hint_chain_,count,&count,reinterpret_cast<XrSwapchainImageBaseHeader*>(hint_images_.data())),"Read controls card images");
-            if(hint_images_.empty()) throw std::runtime_error("XR controls card has no images");
-            hint_filled_.assign(count,false);hint_pixels_=controls_hint_image(width,height);
-        }
+        if(!hint_chain_) return {}; // created by prepare_overlays
         XrSwapchainImageAcquireInfo acquire{};acquire.type=XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO;uint32_t index{};
         checked(xrAcquireSwapchainImage(hint_chain_,&acquire,&index),"Acquire controls card");
         XrSwapchainImageWaitInfo wait{};wait.type=XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO;wait.timeout=1'000'000'000;
@@ -589,16 +650,14 @@ private:
         layer.size={.2f,.15f};layer.subImage.swapchain=hint_chain_;layer.subImage.imageRect.extent={static_cast<int32_t>(width),static_cast<int32_t>(height)};
         return layer;
     }
-    // Wheel pointer dot: a ~3 cm quad at the hand-ray hit, facing the head, bright disc with a dark rim.
-    std::optional<XrCompositionLayerQuad> dot_layer() {
-        if(!wheel_cursor_ || !views_valid_) return {};
+    void ensure_dot_chain() {
         constexpr unsigned size=64;
         if(!dot_chain_) {
             XrSwapchainCreateInfo info{};info.type=XR_TYPE_SWAPCHAIN_CREATE_INFO;
             info.usageFlags=XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT|XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT;
             info.format=DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;info.width=info.height=size;
             info.sampleCount=1;info.faceCount=1;info.arraySize=1;info.mipCount=1;
-            checked(api<PFN_xrCreateSwapchain>("xrCreateSwapchain",instance_)(session_,&info,&dot_chain_),"Create wheel dot");
+            create_overlay_chain(info,dot_chain_,"Create wheel dot");
             auto enumerate=api<PFN_xrEnumerateSwapchainImages>("xrEnumerateSwapchainImages",instance_);uint32_t count{};
             checked(enumerate(dot_chain_,0,&count,nullptr),"Count wheel dot images");
             dot_images_.resize(count);for(auto& image:dot_images_) image.type=XR_TYPE_SWAPCHAIN_IMAGE_D3D11_KHR;
@@ -606,6 +665,12 @@ private:
             if(dot_images_.empty()) throw std::runtime_error("XR wheel dot has no images");
             dot_filled_.assign(count,false);
         }
+    }
+    // Wheel pointer dot: a ~3 cm quad at the hand-ray hit, facing the head, bright disc with a dark rim.
+    std::optional<XrCompositionLayerQuad> dot_layer() {
+        if(!wheel_cursor_ || !views_valid_) return {};
+        constexpr unsigned size=64;
+        if(!dot_chain_) return {}; // created by prepare_overlays
         XrSwapchainImageAcquireInfo acquire{};acquire.type=XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO;uint32_t index{};
         checked(xrAcquireSwapchainImage(dot_chain_,&acquire,&index),"Acquire wheel dot");
         XrSwapchainImageWaitInfo wait{};wait.type=XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO;wait.timeout=1'000'000'000;
@@ -829,6 +894,11 @@ public:
     }
     bool edge_antialiasing_enabled() const noexcept {return antialiasing_enabled_;}
     UINT64 hint_layers{};
+    std::array<UINT64,4> layer_pose_repaired{},layer_pose_dropped{};UINT64 layer_pose_no_submit{};
+    std::string layer_pose_last; // kind and raw pose of the most recent offending layer
+    UINT64 end_frame_rejections{};unsigned end_frame_rejected_run_{};void (*observe_frame_rejection)(const char*){}; // layer errors dropped as one frame
+    UINT64 subrect_layers{}; // quad/cylinder layers submitted with a rect smaller than their swapchain; must stay 0
+    UINT64 swapchain_creates_in_frame{}; // xrCreateSwapchain/xrDestroySwapchain between xrBeginFrame and xrEndFrame; must stay 0
     std::array<UINT64,2> wrist_layers{};
     UINT64 wrist_failures{},wrist_timeouts{},wrist_target_creations{},wrist_retirement_waits{};
     HRESULT wrist_failure_hresult{S_OK},wrist_device_removed{S_OK};
@@ -1124,6 +1194,7 @@ public:
             if(std::find(formats.begin(),formats.end(),static_cast<int64_t>(format))==formats.end()) throw std::runtime_error("Game colour format is unsupported by XR");
             resize(width,height,format);
             device->GetImmediateContext(&context_);
+            prepare_overlays();
         } catch(...) {close();throw;}
     }
     GameXr(const GameXr&)=delete;
@@ -1166,10 +1237,11 @@ public:
         try {
             drain_gpu_for_surface();
             for(auto& chain:chains_) if(chain) {
-                checked(xrDestroySwapchain(chain),"Destroy replaced eye swapchain");chain=XR_NULL_HANDLE;
+                chain_sizes_.erase(chain);checked(xrDestroySwapchain(chain),"Destroy replaced eye swapchain");chain=XR_NULL_HANDLE;
             }
         } catch(...) {for(auto chain:next) if(chain) xrDestroySwapchain(chain);throw;}
-        chains_=next;images_=std::move(images);width_=width;height_=height;format_=format;rendered_mask_=0;
+        chains_=next;images_=std::move(images);width_=width;height_=height;format_=format;rendered_mask_=0;menu_band_width_=0; // prepare_overlays rebuilds the band chain
+        for(auto chain:chains_) chain_sizes_[chain]={width,height};
         for(UINT eye=0;eye<2;++eye) {
             D3D11_TEXTURE2D_DESC actual{};images_[eye][0].texture->GetDesc(&actual);eye_texture_formats[eye]=actual.Format;
         }
@@ -1208,6 +1280,8 @@ public:
         hud_window_chain_=XR_NULL_HANDLE;hud_window_width_=hud_window_height_=0;hud_window_.reset();
         if(world_ui_chain_ && xrDestroySwapchain) xrDestroySwapchain(world_ui_chain_);
         world_ui_chain_=XR_NULL_HANDLE;world_ui_width_=world_ui_height_=0;world_ui_kind_=0;world_ui_pose_valid_=false;
+        if(menu_band_chain_ && xrDestroySwapchain) xrDestroySwapchain(menu_band_chain_);
+        menu_band_chain_=XR_NULL_HANDLE;menu_band_images_.clear();menu_band_width_=menu_band_height_=0;chain_sizes_.clear();
         pointer_images_.clear();
         if(pointer_chain_ && xrDestroySwapchain) {xrDestroySwapchain(pointer_chain_);pointer_chain_=XR_NULL_HANDLE;}
         hint_images_.clear();hint_filled_.clear();
@@ -1285,6 +1359,7 @@ public:
             settings_.calibration_status(avatar_calibration_.synchronize(reference_epoch(),false));
             return;
         }
+        prepare_overlays();
         XrFrameWaitInfo wait{};wait.type=XR_TYPE_FRAME_WAIT_INFO;frame_={};frame_.type=XR_TYPE_FRAME_STATE;
         auto stage_start=cpu_time_ns();
         checked(xrWaitFrame(session_,&wait,&frame_),"Wait game XR frame");
@@ -1436,7 +1511,7 @@ public:
         if(gameplay) menu_panel_.reset();
         if(continuity_.usable() && left && right &&
            (!world_scene || !tracked_gameplay_required_ || rendered_mask_==3)) {
-            std::array<ID3D11Texture2D*,2> sources{left,right};
+            std::array<ID3D11Texture2D*,2> sources{left,right};bool menu_band_ready=false;
             if(settings_.open()) {update_settings_image(pointer);++settings_layers;}
             const auto sharpness=static_cast<float>(settings_.sharpness());
             if(sharpness>0 && !sharpen_) {
@@ -1495,6 +1570,7 @@ public:
                     }
                 }
                 if(mirror_rects[eye]) mirror_->draw(images_[eye].at(index).texture,*mirror_rects[eye]);
+                if(eye==0 && !world_scene) menu_band_ready=copy_menu_band(images_[0].at(index).texture);
                 layers[eye].subImage.swapchain=chains_[eye];
                 layers[eye].subImage.imageRect.extent={static_cast<int32_t>(width_),static_cast<int32_t>(height_)};
                     if(observe_transfer && !settings_.open()) observe_transfer(eye,processed,images_[eye].at(index).texture,layers[eye],gameplay,rendered_mask_==3,sources[eye]);
@@ -1511,23 +1587,26 @@ public:
                 menu.pose.orientation={static_cast<float>(pose.orientation.x),static_cast<float>(pose.orientation.y),
                     static_cast<float>(pose.orientation.z),static_cast<float>(pose.orientation.w)};
                 menu.pose.position={static_cast<float>(pose.position.x),static_cast<float>(pose.position.y),static_cast<float>(pose.position.z)};
-                menu.size={view.width,view.height};menu.subImage=layers[0].subImage;
-                menu.subImage.imageRect.offset={0,view.y};menu.subImage.imageRect.extent={static_cast<int32_t>(width_),view.rows};
+                menu.size={view.width,view.height};menu.subImage.swapchain=menu_band_chain_; // the band chain shows whole (no sub-rect)
+                menu.subImage.imageRect.extent={static_cast<int32_t>(width_),view.rows};
                 layer=reinterpret_cast<const XrCompositionLayerBaseHeader*>(&menu);
             }
-            end.layerCount=1;end.layers=&layer;
+            end.layerCount=world_scene || menu_band_ready?1:0;end.layers=&layer; // no band chain yet (between a resize and prepare_overlays): nothing this frame
             if(world_scene && !authored_camera) {
                 // Projection first, then the wrist controls card.
                 end.layerCount=0;menu_layers_with_pointer[end.layerCount++]=layer;
                 if(world_ui_kind_ && world_ui_source_) {
-                    world_ui_panel=world_ui_layer();menu_layers_with_pointer[end.layerCount++]=reinterpret_cast<const XrCompositionLayerBaseHeader*>(&*world_ui_panel);
-                    ++world_ui_layers;++world_ui_layers_by_kind[world_ui_kind_-1];last_world_ui_layer=true;
+                    if((world_ui_panel=world_ui_layer())) {
+                        menu_layers_with_pointer[end.layerCount++]=reinterpret_cast<const XrCompositionLayerBaseHeader*>(&*world_ui_panel);
+                        ++world_ui_layers;++world_ui_layers_by_kind[world_ui_kind_-1];last_world_ui_layer=true;
+                    }
                 }
                 if(gameplay && !world_ui_kind_ && hud_window_source_) {
-                    hud_window_panel=hud_window_layer();
-                    menu_layers_with_pointer[end.layerCount++]=cylinder_supported_?reinterpret_cast<const XrCompositionLayerBaseHeader*>(&hud_cylinder_):
-                        reinterpret_cast<const XrCompositionLayerBaseHeader*>(&*hud_window_panel);
-                    ++hud_window_layers;
+                    if((hud_window_panel=hud_window_layer())) {
+                        menu_layers_with_pointer[end.layerCount++]=cylinder_supported_?reinterpret_cast<const XrCompositionLayerBaseHeader*>(&hud_cylinder_):
+                            reinterpret_cast<const XrCompositionLayerBaseHeader*>(&*hud_window_panel);
+                        ++hud_window_layers;
+                    }
                 }
                 for(unsigned side:{1u,0u}) if(gameplay) { // health/mana first: the ammo screen copy sits below it
                     if((wrist_panels[side]=optional_wrist_layer(side))) {
@@ -1542,7 +1621,22 @@ public:
             }
         }
         timing.transfer_ns=cpu_time_ns()-stage_start;stage_start=cpu_time_ns();
-        checked(xrEndFrame(session_,&end),"Submit game XR frame");frame_open_=false;
+        std::array<const XrCompositionLayerBaseHeader*,12> kept{}; // end.layers points here through xrEndFrame and the failure dump
+        {static const char* const kinds[]={"projection","quad","cylinder","other"};
+        const auto guard=guard_frame_layers(end,kept.data(),kept.size());
+        subrect_layers+=count_subrect_layers(end,chain_sizes_);
+        for(size_t k=0;k<4;++k) {layer_pose_repaired[k]+=guard.repaired[k];layer_pose_dropped[k]+=guard.dropped[k];}
+        if(guard.submit_none) ++layer_pose_no_submit;
+        if(guard.bad_kind>=0) {char text[160];std::snprintf(text,sizeof(text),"%s q=(%g,%g,%g,%g) p=(%g,%g,%g)",kinds[guard.bad_kind],guard.bad_pose.orientation.x,guard.bad_pose.orientation.y,guard.bad_pose.orientation.z,guard.bad_pose.orientation.w,guard.bad_pose.position.x,guard.bad_pose.position.y,guard.bad_pose.position.z);layer_pose_last=text;}}
+        if(const auto ended=xrEndFrame(session_,&end);XR_FAILED(ended)) {
+            // SteamVR fails single frames with layer errors ("compositor failed EndFrame()"): drop that frame instead of recreating the
+            // session (the user sees SteamVR home); a run of 30 still recovers. The layer dump goes to xr-recoveries.log either way.
+            const auto name="Submit game XR frame ["+describe_frame_layers(end)+"]";
+            const bool layer_error=ended==XR_ERROR_POSE_INVALID || ended==XR_ERROR_SWAPCHAIN_RECT_INVALID || ended==XR_ERROR_LAYER_INVALID || ended==XR_ERROR_LAYER_LIMIT_EXCEEDED;
+            if(!layer_error || ++end_frame_rejected_run_>30) checked(ended,name.c_str());
+            ++end_frame_rejections;if(observe_frame_rejection) observe_frame_rejection((name+": "+std::to_string(ended)+" (frame dropped)").c_str());
+        } else end_frame_rejected_run_=0;
+        frame_open_=false;
         timing.submit_ns=cpu_time_ns()-stage_start;timing.end_ns=cpu_time_ns();
         last_layer_submitted=end.layerCount!=0;last_menu_layer=last_layer_submitted && !world_scene;
         last_authored_camera_layer=last_layer_submitted && authored_camera && !settings_.open();

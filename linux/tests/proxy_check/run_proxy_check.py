@@ -220,6 +220,47 @@ class ProxyCheck(unittest.TestCase):
         self.assertNotIn("restart the game", self.log())
         self.finish()
 
+    def test_probe_override_replaces_config(self):
+        self.install_mod()
+        (self.home / "build/linux-settle-seconds").write_text("600")
+        (self.home / "build/linux-probe-override.cfg").write_text("{pid} 0 6 1 custom {pid}\n")
+        self.launch()
+        self.wait_for(lambda: "game window found" in self.log(), 30)
+        self.assertEqual(cli("start", "--mod-home", str(self.home)).returncode, 0)
+        self.wait_for(self.marker.exists, 30)
+        host_pid, _ = self.marker.read_text().split()
+        self.assertEqual((self.home / "build/dxgi-probe.cfg").read_text(), "{0} 0 6 1 custom {0}\n".format(host_pid))
+        self.assertIn("probe config override: " + host_pid + " 0 6 1 custom " + host_pid, self.log())
+        self.assertNotIn("autocontinue", self.log())
+        self.assertNotIn("key 0x", self.host_stdout())
+        self.finish()
+
+    def test_autocontinue_posts_enter_until_gameplay(self):
+        self.install_mod()
+        (self.home / "build/linux-settle-seconds").write_text("600")
+        (self.home / "build/linux-autocontinue").write_text("1")
+        self.launch()
+        self.wait_for(lambda: "game window found" in self.log(), 30)
+        self.assertEqual(cli("start", "--mod-home", str(self.home)).returncode, 0)
+        self.wait_for(lambda: self.host_stdout().count("key 0x0d") >= 3, 40)
+        self.assertIn("autocontinue armed: Enter after 1 s", self.log())
+        self.assertIn("autocontinue: posted Enter 3 (logic_mask ?)", self.log())
+        self.finish()
+
+    def test_autocontinue_stops_at_gameplay(self):
+        self.install_mod()
+        (self.home / "build/linux-settle-seconds").write_text("600")
+        (self.home / "build/linux-autocontinue").write_text("4")
+        self.launch()
+        self.wait_for(lambda: "game window found" in self.log(), 30)
+        self.assertEqual(cli("start", "--mod-home", str(self.home)).returncode, 0)
+        # The proxy deletes the previous session's status at start; the mod writes a fresh one once in gameplay.
+        self.wait_for(lambda: "StartProbe begin" in self.log(), 30)
+        (self.home / "artifacts/xr-live-status.json").write_text('{"gameplay":true}')
+        self.wait_for(lambda: "gameplay reached; no more keys sent" in self.log(), 30)
+        self.assertNotIn("key 0x", self.host_stdout())
+        self.finish()
+
     def test_two_mod_dlls_refused_game_keeps_running(self):
         self.install_mod()
         shutil.copy2(self.built["fake_mod"], self.home / "build" / "d2vr_render_probe_arm_v998.dll")

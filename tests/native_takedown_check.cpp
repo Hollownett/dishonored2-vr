@@ -235,6 +235,43 @@ void scenario_missing_and_rate_limit() {
 
 } // namespace
 
+// GlobalAssassination +0x1d0 is the offered signal: steady while the kill sensor's target id flickers, never read from a stale/foreign component.
+void scenario_global_offered() {
+    const uptr game = 0x140100000, player = 0x140200000, array = 0x140300000;
+    const uptr choke = 0x140400000, ass = 0x140400100, drop = 0x140400200, ga = 0x140400400, mch = 0x140500000;
+    Mem m;
+    build_game(m, game, player, array, {choke, ass, drop, ga});
+    machine(m, mch);
+    sensor(m, choke, vt_choke, player, mch);
+    sensor(m, ass, vt_assassination, player, mch);
+    sensor(m, drop, vt_drop, player, mch);
+    m.put<uptr>(ga, base + 0x1b3f998);
+    m.put<uptr>(ga + 0x10, player);
+    m.put<uptr>(ga + 0x1d0, 0);
+    d2vr::NativeTakedowns t;
+    auto st = t.poll(m, base, 1000);
+    require(!st.offered, "G: handler 0 -> not offered");
+    require(t.global_assassination() == ga, "G: GlobalAssassination found");
+    m.put<uptr>(ga + 0x1d0, base + 0x2222);
+    st = t.poll(m, base, 1001);
+    require(st.offered && !st.kill, "G: handler set -> offered without the sensor target");
+    for (int frame = 0; frame < 8; ++frame) { // the sensor target blinks, the offered signal does not
+        m.put<std::uint32_t>(ass + 0x40, frame % 2 ? none : 0x2000u);
+        st = t.poll(m, base, 1002 + frame);
+        require(st.offered, "G: offered is flicker-immune");
+        require(st.kill == (frame % 2 == 0), "G: sensor flag still follows its own target");
+    }
+    m.put<uptr>(ga + 0x1d0, 0);
+    require(!t.poll(m, base, 1020).offered, "G: handler cleared -> not offered");
+    m.put<uptr>(ga + 0x1d0, base + 0x2222);m.put<uptr>(ga + 0x10, player + 8);
+    require(!t.poll(m, base, 1021).offered, "G: foreign owner -> not offered");
+    m.put<uptr>(ga + 0x10, player);m.put<uptr>(ga, base + 0x999);
+    require(!t.poll(m, base, 1022).offered, "G: wrong vtable -> not offered");
+    auto unreadable = [&](uptr address, void* out, std::size_t n) { return address == ga + 0x1d0 ? false : m.read(address, out, n); };
+    m.put<uptr>(ga, base + 0x1b3f998);
+    require(!t.poll(unreadable, base, 1023).offered, "G: unreadable -> not offered");
+}
+
 int main() {
     {
         Mem m;d2vr::NativeActionCameraReader reader;
@@ -266,6 +303,7 @@ int main() {
     scenario_wrong_owner();
     scenario_player_change();
     scenario_missing_and_rate_limit();
+    scenario_global_offered();
     std::printf("PASS\n");
     return 0;
 }

@@ -4,6 +4,7 @@
 #endif
 #include <windows.h>
 #include <MinHook.h>
+#include "native_trampoline_unwind.hpp"
 #include <intrin.h>
 #include <array>
 #include <atomic>
@@ -181,24 +182,19 @@ private:
            std::memcmp(bytes.data()+prefix,expected.data(),14) || std::memcmp(bytes.data()+prefix+14,relay.data(),14))return false;
         auto* metadata=metadata_[index];
         if(!metadata) {
-            const auto aligned=trampoline&~std::uintptr_t{0xffff};
-            for(unsigned slot=1;slot<=4096 && aligned>slot*0x10000ull;++slot) {
-                metadata=static_cast<Metadata*>(VirtualAlloc(reinterpret_cast<void*>(aligned-slot*0x10000ull),4096,MEM_RESERVE|MEM_COMMIT,PAGE_READWRITE));if(metadata)break;
-            }
-            if(!metadata)return false;
+            metadata=static_cast<Metadata*>(alloc_unwind_above(trampoline));if(!metadata)return false;
             metadata_[index]=metadata;*metadata=Metadata{};
-            const auto address=reinterpret_cast<std::uintptr_t>(metadata);
-            if(address>=trampoline || trampoline-address>UINT32_MAX-prefix-28)return false;
-            const auto begin=static_cast<DWORD>(trampoline-address);
-            metadata->functions={RUNTIME_FUNCTION{begin,begin+prefix+14,static_cast<DWORD>(offsetof(Metadata,unwind))},
-                RUNTIME_FUNCTION{begin+prefix+14,begin+prefix+28,static_cast<DWORD>(offsetof(Metadata,relay))}};
+            const auto rva=reinterpret_cast<std::uintptr_t>(metadata)-trampoline;
+            metadata->functions={RUNTIME_FUNCTION{0,prefix+14,static_cast<DWORD>(rva+offsetof(Metadata,unwind))},
+                RUNTIME_FUNCTION{prefix+14,prefix+28,static_cast<DWORD>(rva+offsetof(Metadata,relay))}};
             metadata->unwind=unwinds[index];
         }
-        const auto address=reinterpret_cast<std::uintptr_t>(metadata),begin=trampoline-address;
-        if(address>=trampoline || begin>UINT32_MAX-prefix-28)return false;
+        const auto address=trampoline,block=reinterpret_cast<std::uintptr_t>(metadata);
+        if(block<=address || block-address>UINT32_MAX-4096)return false;
+        const auto rva=block-address;
         const std::array<RUNTIME_FUNCTION,2> expected_functions{{
-            {static_cast<DWORD>(begin),static_cast<DWORD>(begin+prefix+14),static_cast<DWORD>(offsetof(Metadata,unwind))},
-            {static_cast<DWORD>(begin+prefix+14),static_cast<DWORD>(begin+prefix+28),static_cast<DWORD>(offsetof(Metadata,relay))}}};
+            {0,prefix+14,static_cast<DWORD>(rva+offsetof(Metadata,unwind))},
+            {prefix+14,prefix+28,static_cast<DWORD>(rva+offsetof(Metadata,relay))}}};
         if(std::memcmp(metadata->functions.data(),expected_functions.data(),sizeof(expected_functions)) ||
            metadata->unwind!=unwinds[index] || metadata->relay!=std::array<unsigned char,4>{1,0,0,0})return false;
         if(!patched_[index]) {

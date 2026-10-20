@@ -30,10 +30,24 @@ int main() {
                settle_seconds_from_knob("99999") == 3600,
            "settle");
     expect(focus_cvars_to_append("seta a \"1\"") ==
-               "\r\nwin_pauseOnFocusLoss \"0\"\r\nin_controlInactiveWindow \"1\"\r\n",
+               "\r\nwin_pauseOnFocusLoss \"0\"\r\nin_controlInactiveWindow \"1\"\r\nr_fullscreen \"0\"\r\n",
            "focus append");
-    expect(focus_cvars_to_append("win_pauseOnFocusLoss \"1\"\nin_controlInactiveWindow \"0\"\n").empty(),
+    expect(focus_cvars_to_append("win_pauseOnFocusLoss \"1\"\nin_controlInactiveWindow \"0\"\nr_fullscreen \"1\"\n").empty(),
            "focus present (value not forced)");
+
+    expect(probe_config_from_override("  123 {pid} x\r\n\n", 4242).value() == "123 4242 x\n", "override substitutes {pid}");
+    expect(probe_config_from_override("{pid} 0 {pid}", 7).value() == "7 0 7\n", "override substitutes every {pid}");
+    expect(probe_config_from_override("{pid", 7).value() == "{pid\n", "override keeps a broken token");
+    expect(!probe_config_from_override(" \r\n\t", 7).has_value(), "blank override falls back");
+    expect(!probe_config_from_override("", 7).has_value(), "empty override falls back");
+    expect(autocontinue_seconds_from_knob("") == 10 && autocontinue_seconds_from_knob("x") == 10 &&
+               autocontinue_seconds_from_knob(" 25\n") == 25 && autocontinue_seconds_from_knob("0") == 0 &&
+               autocontinue_seconds_from_knob("99999") == 600,
+           "autocontinue knob");
+    expect(status_says_gameplay("{\"a\":1,\"gameplay\":true,\"b\":2}") && status_says_gameplay("{\"gameplay\" : 1}") &&
+               !status_says_gameplay("{\"gameplay\":false}") && !status_says_gameplay("{\"gameplay\":0}") &&
+               !status_says_gameplay("{\"gameplay_at_capture\":true}") && !status_says_gameplay(""),
+           "status gameplay");
 
     if (g_failed != 0) return 1;
     std::printf("proxy_core_check: all passed\n");

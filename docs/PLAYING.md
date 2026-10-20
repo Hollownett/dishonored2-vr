@@ -58,7 +58,7 @@ headset listening validation is still required. See [audio evidence and checks](
 | A fast right-hand swing | Sword attack |
 | Sword held in front of your chest or face, any angle | Block. Small parry moves keep blocking; only a real swing attacks. A power or shot from the left hand briefly lowers the block, then it comes back |
 | Right trigger with the sword in hand | Block too |
-| Behind an unaware enemy: a quick sideways slash of the right hand near your neck height | Lethal takedown (a normal sword swing also works). This is separate from the nonlethal grip hold and physical full-fist grab |
+| Behind or beside an unaware enemy: any fast sword contact (leg, torso or head, no aiming at the neck needed) | Silent lethal takedown: the contact itself is the hit and replaces the alerting sword hit. A thrust at a guard the game offers a takedown on works too. Facing a guard, or one who already noticed you, is an ordinary hit. A slow touch never kills. Set the knob `no-stealth-contact` to turn the contact takedown off. This is separate from the nonlethal grip hold and physical full-fist grab |
 | Left trigger | Use the power or weapon in your left hand, aimed by your left hand. A gripped gun fires; a full fist never casts |
 | Hold right grip while the game offers its Choke hint (v548 test candidate) | Start a nonlethal choke, then keep holding to finish. No artificial gaze wait or neck-pose requirement. Body carry and full-fist physical grab stay separate |
 | Menu button | Pause. Hold for the journal; hold with the right stick for the quick slots |
@@ -178,6 +178,7 @@ been accepted. See [the verification report](feedback-2026-10-10.md).
 - `power-gestures`: cast the equipped left-hand power with gestures (open-palm push, clap, palm at the temple; while aiming Blink, flick the hand toward you to blink). Off by default until tested.
 - `fsr` containing `sharpness mvx mvy jitterx jittery` (default `0.3 -1 -1 1 -1`): FSR 3 tuning. `no-fsr-reactive`: turn off the hand/weapon ghosting guard.
 - `no-hand-crosshair`, `no-hand-shots`: switch off the crosshair move or hand-aimed shots.
+- `no-hand-blink`: Blink (the teleport power) aims along the left hand's pointing direction while the left trigger is held, like the other left-hand powers; this switches it back to the head. Status `blink_aim` shows the hook (`routed`, `last_reason`, `last_dest`), and `native_left_aim` the left-aim counters.
 - `no-vr-glyphs`: keep the Xbox button pictures in prompts instead of the Quest control labels.
 - `slash-speed` containing 1-2 (default 1.7): play rate of the game's own sword attack. `no-slash-speed`: the game's speed.
 - `no-takedown-range`: the game's choke takedown range (VR default: distance, height and angle x1.5).

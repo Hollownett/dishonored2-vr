@@ -96,7 +96,7 @@ If Steam is not in the default location, pass `--steam-root <dir>` before the co
 
    The game keeps running flat.
 
-Alt-tabbing is safe. At launch the proxy appends `win_pauseOnFocusLoss "0"` and `in_controlInactiveWindow "1"` to `dishonored2Config.cfg` if they are missing, so the game does not pause when it loses focus. If the lines were only just added (the log shows `focus cvars appended`), the game may only apply them from the next launch. If the log shows `dishonored2Config.cfg not found`, run the game once without VR so it creates its config, then launch again.
+Alt-tabbing is safe. At launch the proxy appends `win_pauseOnFocusLoss "0"`, `in_controlInactiveWindow "1"` and `r_fullscreen "0"` to `dishonored2Config.cfg` if they are missing, so the game does not pause when it loses focus and runs windowed (headset-sized output needs a windowed swapchain; in exclusive fullscreen `xr-recoveries.log` repeats "Recommended headset output requires a windowed game swapchain" and VR never starts). If the lines were only just added (the log shows `focus cvars appended`), the game may only apply them from the next launch. If the log shows `dishonored2Config.cfg not found`, run the game once without VR so it creates its config, then launch again.
 
 `start`, `stop` and `doctor` take `--mod-home <dir>` if the mod home is not the default.
 
@@ -142,6 +142,8 @@ python3 -m unittest discover -s linux/tests -v
 python3 linux/tests/proxy_check/run_proxy_check.py -v
 ```
 
+`tests/test_sim.py` covers the `sim` safety refusals and the save backup/restore logic against a fake prefix and fake `/proc`. For simulated game runs see section 9.
+
 The second one runs under Wine in the harness prefix. Never run it at the same time as `tools/linux/run_build_cmd.py`.
 
 ## 8. First headset run checklist (manual)
@@ -156,3 +158,26 @@ Nobody has done this yet. It is the acceptance test for the Linux path. Record t
 6. Load a save. Gameplay stays responsive after alt-tabbing to a terminal and back. If the game pauses on focus loss in the very first session, note it: the focus settings are written at launch and may only take effect from the next launch.
 7. `d2vr-linux stop`: the log shows `StopProbe returned 0` and then `StartProbe returned 0`. The game keeps running flat.
 8. Quit the game, then run `d2vr-linux uninstall`. The game launches vanilla. Remove `dinput8=n,b` from the launch options.
+
+## 9. Simulated test runs (developer)
+
+`d2vr-linux sim` runs the real game under Proton with the mod's scripted XR backend (`src/simulated_xr.hpp`, no headset, no SteamVR) and plays a gameplay script, like the Windows `tools/vr_selftest.py`. It is for developers; a normal headset session never uses it.
+
+**Safety.** The command refuses to start if `Dishonored2.exe` or SteamVR's `vrserver` is running (your own session), and it only ever signals a game it launched itself. Before touching anything it copies `savegame/` and `dishonored2Config.cfg` to `~/d2vr-test-builds/save-backups/<timestamp>-sim/` (backups are never deleted). While a run is unfinished that folder holds a `restore-pending` file and further runs are refused. At the end the saves are restored and checked against SHA-256 hashes taken at backup time. If the restore cannot be verified, or the game would not close, the backup is kept and the command tells you to run `d2vr-linux sim --restore`. The dev files it writes into the mod home (`build/linux-probe-override.cfg`, `linux-autocontinue`, `linux-settle-seconds`, `simulated-gameplay-script.cfg`, `artifacts/simulated-gameplay-script.json`, and the previous `dxgi-probe.cfg`) are put back or removed. The run overwrites the mod home's `artifacts/` (a copy goes to the snapshot).
+
+**One-time prerequisites.** The installed proxy must be a build that carries the sim knobs (`python3 linux/proxy/build.py`, then `d2vr-linux install --zip ...`; `sim` says so if the installed one is older), and the mod home needs a mod DLL with the simulated-VR and gameplay-script capabilities (a dev build, not necessarily the release). `sim` installs nothing.
+
+```
+linux/d2vr-linux sim --dry-run                      # checks and plan; writes and launches nothing
+linux/d2vr-linux sim --test-save ~/saves/next-to-a-tank --status-field carry --status-field sword_grip.carries
+linux/d2vr-linux sim --restore                      # after a crash or an interrupted run
+```
+
+Useful options: `--scenario NAME` (a script under `tools/linux/scenarios/`, default `oil_tank_drop`) or `--script FILE.json` (the `{"segments": [...]}` format of `tools/simulated_gameplay_script.py`), `--seconds N` (10-120, default lead + scenario + 6), `--lead S` (neutral seconds before the scenario while the save loads, default 75), `--test-save DIR` (a `savegame` folder to play instead of your saves, swapped in like `tools/sim_saves.sh in`), `--settle S`, `--no-autocontinue`, `--status-field PATH` (repeatable, dotted path into `xr-live-status.json`; defaults `gameplay`, `logic_mask`, `game_layers_submitted`, `carry`), `--steam-cmd` (default `steam -applaunch 403640`, so your Steam launch options apply).
+
+What a run does: check the safety rules, back up the saves, write the dev files, launch the game, wait for `StartProbe begin` and then `StartProbe returned` in `artifacts/linux-proxy.log`, close the game (SIGTERM, SIGKILL after `--close-timeout`, default 30 s), copy `artifacts/` and the dev config to `~/d2vr-test-builds/sim-runs/<timestamp>/`, restore everything, and print the chosen status fields from the snapshot. Exit code 0 only if `StartProbe returned 0`; 2 if the saves could not be restored.
+
+How it works: the proxy (`linux/proxy`) honours two opt-in files in the mod home `build/` folder. `linux-probe-override.cfg` replaces the fixed headset `dxgi-probe.cfg` (`{pid}` is replaced by the game pid; the log shows `probe config override`). `linux-autocontinue` makes the proxy post Enter to the game window three times (title, Campaign, Continue, as `launcher/Probe.cs` does for a game it started) 10 s after the session starts, stopping once `xr-live-status.json` says `"gameplay":true`. The sim config is the `tools/vr_selftest.py` profile: simulated VR plus input (flag 2), timed session, no saved settings, gameplay-script flag 1. The script clock starts with the session, so the scenario begins after `--lead` seconds of neutral input while the save loads. To change a config field by hand, write your own `build/linux-probe-override.cfg` (field order: `tools/inject_probe.py probe_config`).
+
+**Scenario `oil_tank_drop` (UNTESTED).** Holds the right grip next to a whale-oil tank, lifts to the chest, lowers the hand to the floor, releases and waits (`tools/linux/scenarios/oil_tank_drop.py`, hand poses from the `hold` scenario of `vr_selftest.py`). It needs a save that starts the player standing next to a tank, facing it, with the tank on the floor within reach in front of the knees. To make one: play to a tank in the headset or on the desktop, stand about half a metre from it looking at it, save (a manual save slot), quit the game, and copy `savegame/` (the `SLOT*` folders and `profile.bin`) to a folder of your own; pass that folder as `--test-save`. Without such a save the scenario grabs whatever physical object is nearest the right hand and drops it, which still exercises the carry/drop path but proves nothing about tanks. No real run has been done yet.
+

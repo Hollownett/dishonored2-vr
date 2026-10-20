@@ -1,6 +1,7 @@
 #pragma once
 #include <windows.h>
 #include <MinHook.h>
+#include "native_trampoline_unwind.hpp"
 #include <intrin.h>
 #include "native_slash_speed.hpp"
 #include <array>
@@ -198,17 +199,17 @@ private:
     bool verify_perform_unwind() const noexcept {
         const auto trampoline=reinterpret_cast<std::uintptr_t>(originals_[0].load(std::memory_order_acquire));
         const auto metadata_base=reinterpret_cast<std::uintptr_t>(perform_metadata_);
-        if(!trampoline || !metadata_base || metadata_base>=trampoline || trampoline-metadata_base>0xffffffffull-perform_trampoline_size ||
+        if(!trampoline || !metadata_base || metadata_base<=trampoline || metadata_base-trampoline>0xffffffffull-4096 ||
             perform_protection_pending_ || perform_cache_flush_pending_)return false;
         std::array<unsigned char,perform_trampoline_size> code{};PerformMetadata metadata{};
         if(!trampoline_read(trampoline,code.data(),code.size()) || !trampoline_read(metadata_base,&metadata,sizeof(metadata)) ||
             std::memcmp(code.data(),prologues[0].data(),8))return false;
         const auto tail=owned_perform_tail(base_);
-        if(std::memcmp(code.data()+8,tail.data(),tail.size()) || metadata.function.BeginAddress!=trampoline-metadata_base ||
+        if(std::memcmp(code.data()+8,tail.data(),tail.size()) || metadata.function.BeginAddress!=0 ||
             metadata.function.EndAddress!=metadata.function.BeginAddress+perform_trampoline_size ||
-            metadata.function.UnwindData!=offsetof(PerformMetadata,unwind) || metadata.unwind!=std::array<unsigned char,8>{1,8,2,0,8,0xb2,4,0x60})return false;
+            metadata.function.UnwindData!=metadata_base-trampoline+offsetof(PerformMetadata,unwind) || metadata.unwind!=std::array<unsigned char,8>{1,8,2,0,8,0xb2,4,0x60})return false;
         DWORD64 lookup_base{};
-        return RtlLookupFunctionEntry(trampoline+8,&lookup_base,nullptr)==&perform_metadata_->function && lookup_base==metadata_base;
+        return RtlLookupFunctionEntry(trampoline+8,&lookup_base,nullptr)==&perform_metadata_->function && lookup_base==trampoline;
     }
     bool prepare_perform_unwind() noexcept {
         if(semantic_fixture_)return true;
@@ -222,20 +223,11 @@ private:
         const auto replacement=owned_perform_tail(base_);
         const auto expected=perform_relay_patched_?replacement:expected_perform_tail(base_);
         if(std::memcmp(current.data()+8,expected.data(),expected.size()))return false;
-        PerformMetadata* metadata{};
-        const auto aligned=trampoline&~std::uintptr_t{0xffff};
-        for(unsigned slot=1;slot<=4096 && aligned>static_cast<std::uintptr_t>(slot)*0x10000;++slot) {
-            const auto address=aligned-static_cast<std::uintptr_t>(slot)*0x10000;
-            if(trampoline-address>0xffffffffull-perform_trampoline_size)break;
-            metadata=static_cast<PerformMetadata*>(VirtualAlloc(reinterpret_cast<void*>(address),4096,MEM_RESERVE|MEM_COMMIT,PAGE_READWRITE));
-            if(metadata)break;
-        }
-        if(!metadata)return false;
+        auto* metadata=static_cast<PerformMetadata*>(alloc_unwind_above(trampoline));if(!metadata)return false;
         const auto metadata_base=reinterpret_cast<std::uintptr_t>(metadata);
-        if(metadata_base>=trampoline || trampoline-metadata_base>0xffffffffull-perform_trampoline_size) {VirtualFree(metadata,0,MEM_RELEASE);return false;}
-        metadata->function.BeginAddress=static_cast<DWORD>(trampoline-metadata_base);
-        metadata->function.EndAddress=metadata->function.BeginAddress+static_cast<DWORD>(perform_trampoline_size);
-        metadata->function.UnwindData=static_cast<DWORD>(offsetof(PerformMetadata,unwind));
+        metadata->function.BeginAddress=0;
+        metadata->function.EndAddress=static_cast<DWORD>(perform_trampoline_size);
+        metadata->function.UnwindData=static_cast<DWORD>(metadata_base-trampoline+offsetof(PerformMetadata,unwind));
         metadata->unwind={1,8,2,0,8,0xb2,4,0x60};
         DWORD previous{};
         if(!VirtualProtect(reinterpret_cast<void*>(trampoline+8),replacement.size(),PAGE_EXECUTE_READWRITE,&previous)) {VirtualFree(metadata,0,MEM_RELEASE);return false;}
@@ -246,7 +238,7 @@ private:
         const bool flushed=FlushInstructionCache(GetCurrentProcess(),reinterpret_cast<void*>(trampoline),perform_trampoline_size)!=FALSE;
         perform_cache_flush_pending_=!flushed;
         if(!protected_again || !flushed) {VirtualFree(metadata,0,MEM_RELEASE);return false;}
-        if(!RtlAddFunctionTable(&metadata->function,1,metadata_base)) {VirtualFree(metadata,0,MEM_RELEASE);return false;}
+        if(!RtlAddFunctionTable(&metadata->function,1,trampoline)) {VirtualFree(metadata,0,MEM_RELEASE);return false;}
         perform_metadata_=metadata;perform_unwind_registered_=true;return verify_perform_unwind();
     }
     static bool verify_callers(std::uintptr_t base,SafeReader& reader) noexcept {

@@ -63,6 +63,7 @@
 #include "native_crosshair.hpp"
 #include "native_fire_seam_trace.hpp"
 #include "native_shot_aim.hpp"
+#include "native_blink_aim.hpp"
 #include "native_hud_census.hpp"
 #include "grab_beam.hpp"
 #include "native_marker_probe.hpp"
@@ -273,6 +274,7 @@ static d2vr::WheelHands x_wheel;static d2vr::WheelFaceButtons wheel_face;static 
 static d2vr::NativeCrosshair native_crosshair;static d2vr::NativeFireSeamTrace native_fire_seam_trace;
 // Ranged shots leave along the active hand: the launch call 0x639970 gets the hand origin/axis.
 static d2vr::NativeShotAim native_shot_aim;static bool native_shot_aim_installed=false;
+static d2vr::NativeBlinkAim native_blink_aim;static bool native_blink_aim_installed=false;
 static d2vr::NativeHudCensus native_hud_census;static bool native_hud_census_installed=false;
 // VR button prompts: each Xbox prompt glyph is its own small BC7 texture. When the game creates one
 // (identified by size and content signature) it gets a BC7 texture with the Quest control label instead.
@@ -2417,6 +2419,7 @@ static std::atomic<unsigned> interact_bits{};static std::atomic<UINT64> interact
 static bool swarm_contact_kill{};
 static bool swarm_agent_entity(std::uintptr_t e) noexcept {std::uintptr_t vt{};std::uint8_t f{};return swarm_contact_kill && e && read_self(e,&vt,8) && vt==image_base+0x1c44ce8 && read_self(e+0xd0,&f,1) && !(f&1);}
 // Combat timeline for hit-latency tests (tools/npc_watch.py logs NPC health on the same GetTickCount64 clock).
+static std::atomic<bool> ga_offered_now{};static std::atomic<UINT64> ga_offered_frames{},ga_offered_swings{},ga_offered_tick{}; // GlobalAssassination +0x1d0 != 0 (native offered verdict, NativeTakedowns::poll)
 static std::atomic<std::uint32_t> kill_sensor_spawn{};static std::atomic<UINT64> kill_sensor_tick{},contact_attack_tick{}; // the native kill sensor's target; a sensor-target contact asks VrCombat for the press
 static d2vr::SwordHitGate sword_hit_gate;static std::array<std::atomic<UINT64>,8> contact_gates{}; // NPC contacts dropped before the queue: not drawn, no hand, epoch, grabbing, slow, same stroke
 static std::atomic<UINT64> npc_blade_contacts{};using GunShape=std::array<double,4>;static GunShape gun_shape_override{};static bool contact_damage_enabled=true,impact_fx_enabled=true;static std::array<std::atomic<float>,2> tip_speed_now{};static std::atomic<float> combat_tip_peak{};static std::atomic<bool> sword_reversed{};
@@ -4042,6 +4045,7 @@ void prepare_head_view(void* view) noexcept {
             {std::lock_guard<std::mutex> hand_lock(hand_state_mutex);
              left.position=d2vr::guarded_shot_origin(released_shot,clamp_shot[0],0,left.position,GetTickCount64(),game_xr->pose_epoch());}
             if(native_left_aim_requested) native_left_aim.publish(*body,left,game_xr->pose_epoch(),GetTickCount64(),true);
+            if(native_blink_aim_installed) native_blink_aim.publish(left,game_xr->pose_epoch(),GetTickCount64(),true);
             if(native_shot_aim_installed) native_shot_aim.publish(left,game_xr->pose_epoch(),GetTickCount64(),true);
             else native_gameplay_aim_trace.publish(*body,left,game_xr->pose_epoch(),GetTickCount64(),true);
         };
@@ -4069,6 +4073,7 @@ void prepare_head_view(void* view) noexcept {
                     left=ll>1e-3?left*(1/ll):d2vr::Vec3{anchor.basis[3],anchor.basis[4],anchor.basis[5]};
                     sword_aim.basis={f,left,d2vr::cross(f,left)};
                     native_left_aim.publish(*body,sword_aim,game_xr->pose_epoch(),GetTickCount64(),true);++sword_aim_frames;
+                    if(native_blink_aim_installed) native_blink_aim.clear();
                 }
             } else if([&]{ // The game aims by gaze unless the left hand is aiming (left trigger held, +400 ms for release-fired powers).
                     // The game's own use/takedown selection follows this aim: on the left hand it favoured left-hand pickups and
@@ -4076,7 +4081,7 @@ void prepare_head_view(void* view) noexcept {
                     static UINT64 hand_aim_until{};const auto now_g=GetTickCount64();
                     if(game_xr->controller_input.left_trigger>=.1f) {hand_aim_until=now_g+400;left_aim_wanted=true;}
                     return native_left_aim_requested && now_g>=hand_aim_until;}()) {
-                ++gaze_takedown_frames;native_gameplay_aim_trace.clear();if(native_shot_aim_installed) native_shot_aim.clear();
+                ++gaze_takedown_frames;native_gameplay_aim_trace.clear();if(native_shot_aim_installed) native_shot_aim.clear();if(native_blink_aim_installed) native_blink_aim.clear();
                 // Publish the head itself (not "clear"): released, the camera kept the last written pitch (e.g. the holster's
                 // up-aim), so swimming climbed out of the water. With the head, swimming and interaction follow the gaze.
                 d2vr::WorldTrackedPose gaze{};gaze.position={anchor.position[0],anchor.position[1],anchor.position[2]};
@@ -4103,7 +4108,7 @@ void prepare_head_view(void* view) noexcept {
                 // drawn barrel's already); while it is released (snap-back), from the near side of what lies between the body and the hand.
                 if(render_world_scene() && (tracked_arms_requested || native_weapon_attachment_requested)) pending_left_aim=left; // after the hands
                 else publish_left_aim(left);
-            } else {native_gameplay_aim_trace.clear();native_left_aim.clear();native_weapon_attachment.clear();if(native_shot_aim_installed) native_shot_aim.clear();}
+            } else {native_gameplay_aim_trace.clear();native_left_aim.clear();native_weapon_attachment.clear();if(native_shot_aim_installed) native_shot_aim.clear();if(native_blink_aim_installed) native_blink_aim.clear();}
         }
         if(render_world_scene() && (tracked_arms_requested || native_weapon_attachment_requested) && eye==0) {
             const bool reverse_sword=sword_reversed.load();
@@ -4401,16 +4406,24 @@ void prepare_head_view(void* view) noexcept {
                                 const auto contact_machine=d2vr::rig::value<std::uintptr_t>(contact_reader,body->controller+0x58);
                                 auto owned_contact=contact_machine?d2vr::capture_sword_contact(contact_reader,image_base,*contact_machine,hit,contact_hand->epoch,now):std::nullopt;
                                 if(!owned_contact)++d2vr::NativeInteractionAim::sword_capture_rejected_;
-                                else owned_contact->native_offer=kill_sensor_spawn.load()==owned_contact->victim_spawn && now>=kill_sensor_tick.load() && now-kill_sensor_tick.load()<=250;
+                                else owned_contact->native_offer=(kill_sensor_spawn.load()==owned_contact->victim_spawn && now>=kill_sensor_tick.load() && now-kill_sensor_tick.load()<=250) ||
+                                    (ga_offered_now.load() || (now>=ga_offered_tick.load() && now-ga_offered_tick.load()<=250)); // only picks the hold window (700 vs 120 ms)
+                                std::array<float,3> npc_at{};
                                 if(owned_contact) {
-                                    std::array<float,3> row0{},npc_at{},player_at{};
-                                    const bool behind=read_self(contact->entity+0x30c,row0.data(),12) && read_self(contact->entity+0x300,npc_at.data(),12) &&
-                                        read_self(body->player+0x300,player_at.data(),12) && d2vr::attacker_behind(row0.data(),npc_at.data(),player_at.data());
-                                    owned_contact->stealth_strike=d2vr::stealth_strike(speed,behind,owned_contact->native_offer,vr_combat.tuning().thrust_speed);
+                                    std::array<float,3> row0{},player_at{};
+                                    // Victim-based stealth strike: any deliberate contact from the rear or the side; the engine-side unaware/damageable checks decide on the game thread.
+                                    const bool rear_side=read_self(contact->entity+0x30c,row0.data(),12) && read_self(contact->entity+0x300,npc_at.data(),12) &&
+                                        read_self(body->player+0x300,player_at.data(),12) && d2vr::attacker_rear_or_side(row0.data(),npc_at.data(),player_at.data());
+                                    owned_contact->stealth_strike=d2vr::stealth_strike(speed,rear_side,d2vr::SwordHitGate::hit_speed);
+                                    if(!rear_side) ++d2vr::NativeInteractionAim::stealth_reject_[0];
+                                    else if(!owned_contact->stealth_strike) ++d2vr::NativeInteractionAim::stealth_reject_[1];
                                 }
+                                // TODO(near-pass assist): a stealth contact that only just misses the guard (blade passes within a hand span) could still count.
                                 if(owned_contact && d2vr::NativeInteractionAim::request_sword_contact(*owned_contact)) {
                                     sword_hit_gate.commit(contact->entity,now);++contact_gates[7];
                                     if(owned_contact->stealth_strike) contact_attack_tick=now;
+                                    // Hit height above the guard's feet (entity +0x300 is the origin at the feet; z is up): leg < 0.9 m, torso to 1.5 m, head above.
+                                    if(std::isfinite(npc_at[2])) {const float h=f(q.z)-npc_at[2];++d2vr::NativeInteractionAim::hit_height_[h<.9f?0:h<=1.5f?1:2];}
                                     std::uint8_t f1{},f7{};read_self(contact->entity+0xd1,&f1,1);read_self(contact->entity+0xd7,&f7,1);
                                     combat_log("contact_hit",contact->entity,speed,(f1<<8)|f7);
                                 }
@@ -5238,7 +5251,7 @@ std::string feedback_status_json() {
         << ",\"contact_gates\":[" << contact_gates[0].load() << ',' << contact_gates[1].load() << ',' << contact_gates[2].load() << ',' << contact_gates[3].load() << ',' << contact_gates[4].load() << ',' << contact_gates[5].load() << ',' << contact_gates[6].load() << ',' << contact_gates[7].load() << ']'
         << ",\"takedown_range_policy\":{\"choke\":\"" << (d2vr::NativeChokeDistanceScope::process_owner().enabled()?"private-view-x1.5":"native-unmodified") << "\",\"kill\":\"native-unmodified\",\"enabled\":" << (d2vr::NativeChokeDistanceScope::process_owner().enabled()?"true":"false") << ",\"substitutions\":" << d2vr::NativeChokeDistanceScope::process_owner().substitutions() << '}'
         << ",\"takedown\":{\"sensors\":" << takedown_sensors.load() << ",\"kill_frames\":" << takedown_kill_frames.load() << ",\"choke_frames\":" << takedown_choke_frames.load()
-        << ",\"drop_frames\":" << takedown_drop_frames.load() << ",\"swings\":" << physical_swings << ",\"gestures\":" << takedown_gestures.load() << ",\"swings_with_kill\":" << swings_with_kill.load() << ",\"repress\":" << takedown_repress.load() << '}' 
+        << ",\"drop_frames\":" << takedown_drop_frames.load() << ",\"swings\":" << physical_swings << ",\"gestures\":" << takedown_gestures.load() << ",\"swings_with_kill\":" << swings_with_kill.load() << ",\"repress\":" << takedown_repress.load() << ",\"ga_offered_frames\":" << ga_offered_frames.load() << ",\"ga_offered_swings\":" << ga_offered_swings.load() << '}' 
         << ",\"native_hud_children\":{\"identified\":" << d2vr::NativeHudChildDraw::identified.load()
         << ",\"published\":" << d2vr::NativeHudChildDraw::publish_accepts.load() << ",\"prompt_suppressed\":" << d2vr::NativeHudChildDraw::suppressed.load()
         << ",\"rejected\":" << d2vr::NativeHudChildDraw::publish_rejects.load()
@@ -5252,6 +5265,7 @@ std::string feedback_status_json() {
         << ",\"arm_uploads\":" << full_body_arm_uploads.load() << ",\"visible\":" << full_body_visible.load()
         << ",\"material_failures\":" << full_body_material_failures.load() << ",\"material_reasons\":[" << full_body_material_reasons[0].load() << ',' << full_body_material_reasons[1].load() << ',' << full_body_material_reasons[2].load() << ',' << full_body_material_reasons[3].load() << ',' << full_body_material_reasons[4].load() << ',' << full_body_material_reasons[5].load() << ',' << full_body_material_reasons[6].load() << ',' << full_body_material_reasons[7].load() << ']' << ",\"solves\":" << full_body.solves()
         << ",\"finger_modes\":" << [&]{std::ostringstream o;const auto m=full_body.finger_modes();o<<'[';for(unsigned i=0;i<2;++i) {o<<(i?",":"")<<'['<<m[i][0]<<','<<m[i][1]<<','<<m[i][2]<<','<<m[i][3]<<']';}o<<']';return o.str();}()
+        << ",\"grip\":" << [&]{std::ostringstream o;const auto g=full_body.grip_state();o<<'[';for(unsigned i=0;i<2;++i) {o<<(i?",":"")<<"{\"reverse\":"<<(g[i].reversed?"true":"false")<<",\"attach_in_fist\":["<<g[i].attach_in_fist[0]<<','<<g[i].attach_in_fist[1]<<','<<g[i].attach_in_fist[2]<<"],\"hilt_miss_m\":"<<g[i].hilt_miss<<'}';}o<<']';return o.str();}()
         << ",\"finger_inputs\":" << [&]{std::ostringstream o;const auto m=full_body.finger_inputs();o<<'[';for(unsigned i=0;i<2;++i) {o<<(i?",":"")<<'['<<m[i][0]<<','<<m[i][1]<<']';}o<<']';return o.str();}()
         << ",\"solver_failures\":" << full_body.failures() << ",\"owned\":[" << full_body.owned(0) << ',' << full_body.owned(1)
         << ',' << full_body.owned(2) << ',' << full_body.owned(3) << "]}"
@@ -5968,6 +5982,7 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                 game_xr->observe_transfer=&capture_xr_transfer;
                                 game_xr->observe_settings=&capture_settings_transfer;
                                 game_xr->observe_wrist=&capture_wrist_hud;
+                                game_xr->observe_frame_rejection=[](const char* text) {note_recoverable(text);};
                                 game_xr->observe_wrist_failure=[](unsigned side,const char* reason) {
                                     note_recoverable(("Optional wrist HUD side "+std::to_string(side)+": "+reason).c_str());
                                 };
@@ -6081,7 +6096,7 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                      auto place=[&](XrPosef& out,unsigned bit,unsigned k) {if(poses.mask&bit) {const auto& p=poses.pose[k];out.position={p[0],p[1],p[2]};out.orientation={p[3],p[4],p[5],p[6]};}};
                                      place(d2vr::simxr::control.head,1,0);place(d2vr::simxr::control.grips[0],2,1);place(d2vr::simxr::control.grips[1],4,2);}
                                     d2vr::simxr::control.aims=d2vr::simxr::control.grips;
-                                    if(gameplay || x_wheel.wheel() || scripted_ui || !focused) input=command; // Native pad gameplay remains gated; UI tests use the actual controller pointer.
+                                    if(gameplay || x_wheel.wheel() || scripted_ui || !focused || index>=0) input=command; // index>=0 outside gameplay only for version 6 menu/always segments; Native pad gameplay remains gated; UI tests use the actual controller pointer.
                                     if(index!=simulated_gameplay_last_index || gameplay!=simulated_gameplay_last_gameplay || focused!=simulated_gameplay_last_focused) {
                                         simulated_gameplay_csv<<elapsed<<','<<index<<','<<gameplay<<','<<focused;
                                         for(float value:{command.move_x,command.move_y,command.turn_x,command.turn_y,command.left_trigger,command.right_trigger,command.left_grip,command.right_grip}) simulated_gameplay_csv<<','<<value;
@@ -6500,7 +6515,7 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                      << ",\"native_arm_reach_clamps\":[" << arm_pose_clamps[0].load() << ',' << arm_pose_clamps[1].load() << ']'
                                      << ",\"native_controller_reads\":" << controller_bridge.reads()
                                      << ",\"native_virtual_controller_reads\":" << controller_bridge.virtual_reads()
-                                     << ",\"native_nonzero_controller_reads\":" << controller_bridge.nonzero_reads() << ",\"native_lb_reads\":" << controller_bridge.lb_reads() << ",\"wheel_frames\":" << wheel_frames << ",\"logic_mask\":" << published_logic.load() << ",\"published_move\":[" << published_move_x.load() << ',' << published_move_y.load() << ']' << ",\"hint_layers\":" << (game_xr?game_xr->hint_layers:0) << ",\"lb_inputs\":" << controller_bridge.lb_inputs() << ",\"lb_published\":" << controller_bridge.lb_published() << ",\"wheel_logic\":" << wheel_logic << ",\"native_x_reads\":" << controller_bridge.x_reads()
+                                     << ",\"native_nonzero_controller_reads\":" << controller_bridge.nonzero_reads() << ",\"native_lb_reads\":" << controller_bridge.lb_reads() << ",\"wheel_frames\":" << wheel_frames << ",\"logic_mask\":" << published_logic.load() << ",\"published_move\":[" << published_move_x.load() << ',' << published_move_y.load() << ']' << ",\"hint_layers\":" << (game_xr?game_xr->hint_layers:0) << ",\"layer_pose_repaired\":[" << (game_xr?game_xr->layer_pose_repaired[0]:0) << ',' << (game_xr?game_xr->layer_pose_repaired[1]:0) << ',' << (game_xr?game_xr->layer_pose_repaired[2]:0) << "],\"layer_pose_dropped\":[" << (game_xr?game_xr->layer_pose_dropped[0]:0) << ',' << (game_xr?game_xr->layer_pose_dropped[1]:0) << ',' << (game_xr?game_xr->layer_pose_dropped[2]:0) << "],\"layer_pose_no_submit\":" << (game_xr?game_xr->layer_pose_no_submit:0) << ",\"subrect_layers\":" << (game_xr?game_xr->subrect_layers:0) << ",\"swapchain_creates_in_frame\":" << (game_xr?game_xr->swapchain_creates_in_frame:0) << ",\"end_frame_rejections\":" << (game_xr?game_xr->end_frame_rejections:0) << ",\"layer_pose_last\":\"" << (game_xr?game_xr->layer_pose_last:std::string()) << '"' << ",\"lb_inputs\":" << controller_bridge.lb_inputs() << ",\"lb_published\":" << controller_bridge.lb_published() << ",\"wheel_logic\":" << wheel_logic << ",\"native_x_reads\":" << controller_bridge.x_reads()
                                      << ",\"native_pause_button_reads\":" << controller_bridge.pause_reads()
                                      << ",\"native_joystick_focus_calls\":" << native_pad_focus.calls()
                                      << ",\"native_joystick_focus_overrides\":" << native_pad_focus.overrides()
@@ -6557,7 +6572,12 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                      << ",\"xr_status_write_failed\":"<<(xr_status_write_failed.load()?"true":"false")
                                      << ",\"crosshair\":{\"installed\":" << native_crosshair_installed << ",\"applied\":" << native_crosshair.applied() << ",\"rejected\":" << native_crosshair.rejected() << ",\"failed\":" << (native_crosshair.failed()?"true":"false") << '}'
                                      << ",\"shot_aim\":{\"installed\":" << native_shot_aim_installed << ",\"calls\":" << native_shot_aim.calls()
-                                     << ",\"routed\":" << native_shot_aim.routed() << ",\"rejected\":" << native_shot_aim.rejected() << ",\"last_reason\":" << native_shot_aim.last_reason() << '}' 
+                                     << ",\"routed\":" << native_shot_aim.routed() << ",\"rejected\":" << native_shot_aim.rejected() << ",\"last_reason\":" << native_shot_aim.last_reason() << '}'
+                                     << ",\"blink_aim\":" << native_blink_aim.status_json()
+                                     << ",\"native_left_aim\":{\"requested\":" << native_left_aim_requested << ",\"calls\":" << native_left_aim.calls()
+                                     << ",\"candidates\":" << native_left_aim.candidates() << ",\"applied\":" << native_left_aim.applied()
+                                     << ",\"rejected\":" << native_left_aim.rejected() << ",\"overlaps\":" << native_left_aim.overlap()
+                                     << ",\"write_failures\":" << native_left_aim.write_failures() << '}' 
                                      << feedback_status_json() << combat_policy_status_json() << ",\"headset_scene_visually_verified\":false}\n";
                                 if(!live) xr_status_write_failed=true; // diagnostics must never reach XR session recovery
                                 else {
@@ -7069,6 +7089,7 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                         const double lift=crouch_lift.update(physical_crouch_enabled && physical_crouch.compensate(crouch.crouched),native_camera_up.load(),f.now_ms);
                                         crouch_lift_m=lift;if(lift>0) ++crouch_lift_frames;
                                     }
+                                    if(takedown.offered) {++ga_offered_frames;ga_offered_tick=GetTickCount64();}ga_offered_now=takedown.offered;
                                     if(takedown.choke) ++takedown_choke_frames;if(takedown.kill) ++takedown_kill_frames;if(takedown.drop) ++takedown_drop_frames;
                                     {static bool td_was{};const bool td=takedown.kill || takedown.choke;if(td!=td_was) {++takedown_flips;td_was=td;}} // native sensor blinking
                                     takedown_kill_now=takedown.kill || takedown.drop;
@@ -7114,7 +7135,7 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                         takedown_kill_held=target_memory.remembered.operator bool();
                                         cf.current_target=target_valid?current_target:d2vr::CombatTarget{};
                                         cf.remembered_target=target_memory.remembered;
-                                        cf.kill=takedown.kill || takedown_kill_held.load();cf.choke=takedown.choke;cf.drop=takedown.drop;cf.now_ms=f.now_ms;
+                                        cf.kill=d2vr::kill_flag(takedown.offered,native_takedowns.global_assassination()!=0,takedown.kill,takedown_kill_held.load());cf.choke=takedown.choke;cf.drop=takedown.drop;cf.now_ms=f.now_ms;
                                         {const auto at=contact_attack_tick.exchange(0);cf.contact_attack=at && f.now_ms>=at && f.now_ms-at<=250;}
                                         combat_live=cf.allowed && cf.tracked && (cf.equipped || cf.shadow_walk);
                                         combat_decision=vr_combat.update(cf);
@@ -7159,7 +7180,7 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                         combat_target_memory.update({},0,{},GetTickCount64(),false);takedown_kill_tick=0;takedown_kill_held=false;
                                     }
                                     if(cd.swing!=d2vr::SwingKind::none) {
-                                        ++physical_swings;if(takedown_kill_now) ++swings_with_kill;combat_log(cd.swing==d2vr::SwingKind::thrust?"thrust":cd.swing==d2vr::SwingKind::overhead?"overhead":"slash",0,0);
+                                        ++physical_swings;if(takedown_kill_now) ++swings_with_kill;if(ga_offered_now.load()) ++ga_offered_swings;combat_log(cd.swing==d2vr::SwingKind::thrust?"thrust":cd.swing==d2vr::SwingKind::overhead?"overhead":"slash",0,0);
                                         (cd.swing==d2vr::SwingKind::thrust?combat_thrusts:cd.swing==d2vr::SwingKind::overhead?combat_overheads:combat_slashes)++;
                                     }
                                     if(cd.stealth_kill) {++combat_stealth_kills;++takedown_gestures;}
@@ -7923,6 +7944,18 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
             }
             catch(const std::exception& error) {note_recoverable((std::string("Hand-aimed shots disabled: ")+error.what()).c_str());}
         }
+        if(native_left_aim_requested) {
+            // Blink aims along the left hand (docs/native-blink-aim.md). The knob keeps the observer and drops the override.
+            try {
+                native_blink_aim.install(image_base,&read_self,&game_logic_mask,
+                    +[](std::uintptr_t camera)->bool{const auto state=d2vr::native_player_camera(read_self,image_base,camera);return state && !state->authored_view();},
+                    +[]()->std::uintptr_t{return native_left_aim.owner_camera();},
+                    +[]()->UINT64{return native_left_aim.last_applied_tick();},
+                    !fs::exists(root/L"build"/L"no-hand-blink"));
+                native_blink_aim_installed=true;
+            }
+            catch(const std::exception& error) {note_recoverable((std::string("Hand-aimed Blink disabled: ")+error.what()).c_str());}
+        }
         if(head_requested && !d2vr::NativeWristHud::install(image_base,&read_self))
             note_recoverable("Native wrist HUD values unavailable; retaining native HUD");
         if(head_requested && !d2vr::NativeHudChildDraw::install(image_base,&read_self))
@@ -7945,7 +7978,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
                 } catch(...) {return false;}
             };
         }
-        ui_dump_requested=fs::exists(root/L"build"/L"ui-dump");ui_dump_state.clear();left_aim_wanted=false;early_wrist_owner.reset();vitals_file=0;next_vitals_probe=0;wrist_early_publications=0;world_prompt_frames=0;prompt_shows=prompt_hides=takedown_flips=npc_blade_contacts=0;d2vr::NativeInteractionAim::melee_enabled_=true;d2vr::NativeInteractionAim::impact_enabled_=true;d2vr::NativeImpactFx::reset();d2vr::NativeInteractionAim::impact_played_=0;d2vr::NativeInteractionAim::impact_skipped_=0;d2vr::NativeInteractionAim::melee_applied_=0;d2vr::NativeInteractionAim::melee_rejected_=0;d2vr::NativeInteractionAim::melee_faults_=0;for(auto& w:d2vr::NativeInteractionAim::melee_why_) w=0;{std::error_code ec;fs::remove(output_directory/L"native-combat.csv",ec);} // the DLL outlives sessions
+        ui_dump_requested=fs::exists(root/L"build"/L"ui-dump");ui_dump_state.clear();left_aim_wanted=false;early_wrist_owner.reset();vitals_file=0;next_vitals_probe=0;wrist_early_publications=0;world_prompt_frames=0;prompt_shows=prompt_hides=takedown_flips=npc_blade_contacts=0;d2vr::NativeInteractionAim::melee_enabled_=true;d2vr::NativeInteractionAim::impact_enabled_=true;d2vr::NativeImpactFx::reset();d2vr::NativeInteractionAim::impact_played_=0;d2vr::NativeInteractionAim::impact_skipped_=0;d2vr::NativeInteractionAim::melee_applied_=0;d2vr::NativeInteractionAim::melee_rejected_=0;d2vr::NativeInteractionAim::melee_faults_=0;for(auto& w:d2vr::NativeInteractionAim::melee_why_) w=0;for(auto& w:d2vr::NativeInteractionAim::stealth_reject_) w=0;for(auto& w:d2vr::NativeInteractionAim::hit_height_) w=0;ga_offered_frames=ga_offered_swings=0;{std::error_code ec;fs::remove(output_directory/L"native-combat.csv",ec);} // the DLL outlives sessions
         if(fs::exists(root/L"build"/L"hud-node-census")) {
             hud_node_census_path=output/L"hud-node-census.csv";
             d2vr::NativeHudChildDraw::census=&hud_node_census;
@@ -8240,10 +8273,10 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
         restore_hud_scale();remove_glyph_hook();d2vr::GlyphSwap::disable();d2vr::SamplerLodBias::disable();
         carry_trace.stop();d2vr::NativeHeldObject::disable();held_object_installed=false;d2vr::NativeCallTrace::disable();d2vr::NativeSimInvulnerable::disable();d2vr::NativeSwarmKillGuard::disable();
         const bool audio_disabled=native_audio_listener.disable();
-        const bool left_aim_disabled=native_left_aim.disable() && native_crosshair.disable() && native_fire_seam_trace.disable() && native_shot_aim.disable() &&
+        const bool left_aim_disabled=native_left_aim.disable() && native_crosshair.disable() && native_fire_seam_trace.disable() && native_shot_aim.disable() && native_blink_aim.disable() &&
             native_hud_census.disable() && native_marker_probe.disable() && d2vr::NativeHudChildDraw::disable() && d2vr::NativeWristHud::disable();
         native_marker_probe_installed=false;
-        native_crosshair_installed=fire_seam_installed=native_shot_aim_installed=false;
+        native_crosshair_installed=fire_seam_installed=native_shot_aim_installed=native_blink_aim_installed=false;
         const bool gameplay_aim_disabled=native_gameplay_aim_trace.disable() && left_aim_disabled;
         const bool native_camera_disabled=native_camera_trace.disable() && gameplay_aim_disabled && audio_disabled;
         const bool native_attachment_disabled=native_weapon_attachment.disable();

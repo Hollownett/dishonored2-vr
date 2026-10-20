@@ -155,6 +155,9 @@ struct Inputs {
 };
 struct Output {
     std::vector<Xf> body,arm[2];Xf arm_frame[2];
+    // Held-item grip diagnostics per hand: the attachment joint in the drawn-fist frame (origin = wrap centre of the posed finger joints,
+    // axes = the wrist's; metres), how far that wrap centre sits off the hilt line (the attachment's X axis), and whether the reverse flip was applied.
+    double fist_attach[2][3]{},hilt_miss[2]{};bool grip_reversed[2]{};
     double scale=1;bool hand_reached[2]{};Vec3 feet[2];bool stepping[2]{};
     double owned[4]{}; // eased native weights: legs, torso, left arm, right arm
     double phase[2]{};Vec3 swing_from[2]{},swing_to[2]{};
@@ -176,6 +179,7 @@ class BodySolver {
         Vec3 pole{};
         double roll{},hold_steady{},thumb_applied[3]{};
         Xf hold{},hold_prev{};
+        Vec3 wrap{}; // wrap centre of the native curled fingers in the attachment's parent frame, followed like hold
         std::uint64_t socket_token{};
         bool has_pole{},has_roll{},has_hold{};
         int finger_mode{};
@@ -529,6 +533,14 @@ public:
             out.arm_frame[i]=chest;
             auto candidate_state=arm_state_[i];
             out.arm[i]=pose_arm(i,chest,chest_delta,in,dt,out.hand_reached[i],arm_state_[i]);
+            {   // grip diagnostics (see Output::fist_attach)
+                const auto& wr=out.arm[i][wrist_[i]],&at=out.arm[i][attach_[i]];
+                const auto centre=wrap_centre(i,out.arm[i]),local=rotated(conj(wr.q),at.p-centre);
+                out.fist_attach[i][0]=local.x;out.fist_attach[i][1]=local.y;out.fist_attach[i][2]=local.z;
+                const auto blade=rotated(at.q,{1,0,0}),off=centre-at.p;
+                out.hilt_miss[i]=length(off-blade*dot(off,blade));
+                out.grip_reversed[i]=in.reverse_grip[i] && arm_state_[i].has_hold;
+            }
             out.finger_mode[i]=arm_state_[i].finger_mode;for(int s2=0;s2<3;++s2) out.thumb_applied[i][s2]=arm_state_[i].thumb_applied[s2];
             const auto& na=native && source->arm[i].size()==out.arm[i].size()?source->arm[i]:std::vector<Xf>{};
             if(!na.empty() && (weight(2+i)>0 || weight(4+i)>0)) {
@@ -572,9 +584,18 @@ private:
     bool dragged_[2]{};
     // Stable item-hold local (attachment relative to wrist): follows the native local only once it has been steady.
     Vec3 palm_attach_[2]{};
-    Vec3 fist_parent_[2]{}; // the fist centre (hand_bind.hpp's interior palm centre) in the attachment's parent frame, bind units
     // Fingers: [side][thumb,index,medium,ring,pinky][01..04]; axes are in each joint's local frame.
     int finger_[2][5][4]{};Vec3 finger_axis_[2][5][4]{};
+    // Wrap centre of the curled fingers: mean of the index..pinky 02-04 joints (where a closed fist surrounds a handle).
+    Vec3 wrap_centre(int i,const std::vector<Xf>& pose) const {
+        Vec3 sum{};int count=0;
+        for(int f=1;f<5;++f) for(int k=1;k<4;++k) {const int j=finger_[i][f][k];if(j>=0 && j<static_cast<int>(pose.size())) {sum=sum+pose[j].p;++count;}}
+        return count?sum*(1./count):pose[wrist_[i]].p;
+    }
+    Vec3 wrap_in_parent(int i,const std::vector<Xf>& native,double scale) const {
+        const auto& parent=native[sk_[1+i].parent[attach_[i]]];
+        return rotated(conj(parent.q),wrap_centre(i,native)-parent.p)*scale;
+    }
 
     // Flexion axis per finger joint from the T-pose bind: palms face down (-Z), so a finger
     // segment d curls about cross(d, palm); the thumb folds toward the middle knuckle.
@@ -584,8 +605,6 @@ private:
         const auto at=[&](int j) {return a.bind[j].p;};
         const Vec3 across=at(finger_[i][2][1]);
         palm_attach_[i]=unit(rotated(conj(a.bind[attach_[i]].q),palm));
-        {Vec3 knuckles{};for(int f=1;f<5;++f) knuckles=knuckles+at(finger_[i][f][1])*.25;
-         const auto& parent=a.bind[a.parent[attach_[i]]];fist_parent_[i]=rotated(conj(parent.q),(at(wrist_[i])+knuckles)*.5-parent.p);}
         for(int f=0;f<5;++f) for(int k=0;k<4;++k) {
             const int j=finger_[i][f][k];if(j<0) continue;
             int child=-1;for(size_t c=0;c<a.parent.size();++c) if(a.parent[c]==j && a.names[c].find("helper")==std::string::npos) {child=static_cast<int>(c);break;}
@@ -862,20 +881,25 @@ private:
             // the standing clips' socket (sword_idle T -.0148 -.0916 .0262 vs sneak .0305 -.0654 .025, native units;
             // keeping the sneak offset put the fist on the blade above the handle, headset v346).
             if(i==1 && rotated(n.q,{0,1,0}).z<-.5) {n.q=mul(n.q,axis_angle({0,0,1},kPi));n.p=n.p+Vec3{-.0453,-.0262,.0012}*scale_;}
-            if(!state.has_hold) {state.hold=state.hold_prev=n;state.hold_steady=0;state.has_hold=true;}
+            const auto wrap=wrap_in_parent(i,*native,scale_);
+            if(!state.has_hold) {state.hold=state.hold_prev=n;state.wrap=wrap;state.hold_steady=0;state.has_hold=true;}
             else if(dt>0) {
                 const double ang=2*std::acos(std::min(1.,std::abs(n.q.x*state.hold_prev.q.x+n.q.y*state.hold_prev.q.y+n.q.z*state.hold_prev.q.z+n.q.w*state.hold_prev.q.w)));
                 const bool calm=ang/dt<20*kPi/180 && length(n.p-state.hold_prev.p)/dt<.05;
                 state.hold_steady=calm?state.hold_steady+dt:0;state.hold_prev=n;
-                if(state.hold_steady>=.25) {const double k=std::min(1.,dt*8);state.hold={nlerp(state.hold.q,n.q,k),state.hold.p+(n.p-state.hold.p)*k};}
+                if(state.hold_steady>=.25) {const double k=std::min(1.,dt*8);state.hold={nlerp(state.hold.q,n.q,k),state.hold.p+(n.p-state.hold.p)*k};state.wrap=state.wrap+(wrap-state.wrap)*k;}
             }
         }
         const auto hand_local=[&](int j) {
             if(j==attach_[i] && native_socket) {
                 auto h=state.hold;
-                if(in.reverse_grip[i]) { // half a turn about the palm normal through the fist centre: the same point of the handle stays in the fist
-                    const auto n=palm_attach_[i],c=rotated(conj(h.q),fist_parent_[i]*scale_-h.p),across=c-n*dot(c,n);
-                    h.p=h.p+rotated(h.q,across*2.);h.q=mul(h.q,axis_angle(n,kPi));
+                if(in.reverse_grip[i]) {
+                    // Half a turn about attachment Z (the finger axis in the hold, perpendicular to both the blade = attachment X and the palm = attachment Y,
+                    // so it reverses the blade instead of rolling it) through the hilt point nearest the wrap centre of the curled fingers: the pivot lies on the hilt
+                    // line, which therefore maps onto itself and keeps passing through the fist.
+                    const auto n=palm_attach_[i],blade=rotated(h.q,{1,0,0}),axis=rotated(h.q,n);
+                    const auto pivot=h.p+blade*dot(state.wrap-h.p,blade),d=h.p-pivot;
+                    h.p=pivot+axis*(2.*dot(d,axis))-d;h.q=mul(h.q,axis_angle(n,kPi));
                 }
                 return h;
             }

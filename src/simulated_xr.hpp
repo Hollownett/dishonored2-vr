@@ -39,7 +39,7 @@ struct Control {
     XrDuration advance=11'111'111;
 };
 struct Summary {
-    std::uint64_t waits{},begins{},ends{},layers{},protocol_errors{};
+    std::uint64_t waits{},begins{},ends{},layers{},protocol_errors{},chain_ops_in_frame{},subrect_layers{}; // chain_ops_in_frame: create/destroy swapchain between begin and end (SteamVR rejects the frame)
     XrTime display_time{};
     XrStructureType layer_type{};
     std::array<XrCompositionLayerProjectionView,2> eyes{};
@@ -173,6 +173,7 @@ inline XrResult XRAPI_CALL formats(XrSession,uint32_t capacity,uint32_t* count,i
     out[0]=DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;out[1]=DXGI_FORMAT_R8G8B8A8_UNORM;return XR_SUCCESS;
 }
 inline XrResult XRAPI_CALL create_chain(XrSession,const XrSwapchainCreateInfo* info,XrSwapchain* out) {
+    if(begun) ++summary.chain_ops_in_frame;
     if(!info->width || !info->height || info->width>4096 || info->height>4096 || info->sampleCount!=1) return XR_ERROR_VALIDATION_FAILURE;
     auto chain=std::make_unique<Chain>();chain->info=*info;
     D3D11_TEXTURE2D_DESC desc{};desc.Width=info->width;desc.Height=info->height;desc.MipLevels=desc.ArraySize=1;
@@ -182,6 +183,7 @@ inline XrResult XRAPI_CALL create_chain(XrSession,const XrSwapchainCreateInfo* i
     *out=reinterpret_cast<XrSwapchain>(chain.get());chains.emplace(*out,std::move(chain));return XR_SUCCESS;
 }
 inline XrResult XRAPI_CALL destroy_chain(XrSwapchain chain) {
+    if(begun) ++summary.chain_ops_in_frame;
     const auto at=chains.find(chain);if(at==chains.end()) return XR_ERROR_HANDLE_INVALID;
     if(at->second->acquired) return invalid();chains.erase(at);return XR_SUCCESS;
 }
@@ -210,6 +212,12 @@ inline bool image(const XrSwapchainSubImage& sub,unsigned side) {
        r.offset.x+r.extent.width>static_cast<int>(c.info.width) || r.offset.y+r.extent.height>static_cast<int>(c.info.height)) return false;
     if(side<2) summary.images[side]=c.textures[c.current];return true;
 }
+// SteamVR rejects frames whose quad/cylinder shows less than its whole swapchain.
+inline bool full_extent(const XrSwapchainSubImage& sub) {
+    const auto at=chains.find(sub.swapchain);if(at==chains.end()) return false;
+    const auto& r=sub.imageRect;const auto& info=at->second->info;
+    return r.offset.x==0 && r.offset.y==0 && r.extent.width==static_cast<int>(info.width) && r.extent.height==static_cast<int>(info.height);
+}
 inline XrResult XRAPI_CALL end_frame(XrSession,const XrFrameEndInfo* info) {
     if(!begun || info->displayTime!=display_time) return invalid();
     // An acquired, not-yet-ready OPTIONAL surface may remain pending across
@@ -223,6 +231,7 @@ inline XrResult XRAPI_CALL end_frame(XrSession,const XrFrameEndInfo* info) {
             for(unsigned side=0;side<2;++side) {if(!image(p->views[side].subImage,side)) return invalid();summary.eyes[side]=p->views[side];}
         } else if(layer->type==XR_TYPE_COMPOSITION_LAYER_QUAD) {
             const auto* p=reinterpret_cast<const XrCompositionLayerQuad*>(layer);
+            if(!full_extent(p->subImage)) {++summary.subrect_layers;return XR_ERROR_SWAPCHAIN_RECT_INVALID;}
             if(i==0) {if(!image(p->subImage,0)) return invalid();summary.quad=*p;}
             else {if(!image(p->subImage,2)) return invalid();summary.overlays.push_back(*p);}
         } else return XR_ERROR_LAYER_INVALID;

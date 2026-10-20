@@ -14,7 +14,8 @@ namespace d2vr {
 //   arkCpntPlayerSensorDropAssassination vtable 0x1b3f0a8, candidate list +0x70 (count low 24 bits of +0x78)
 // Common base: +0x10 owner (the player), +0x20 player state machine (vtable 0x1c73d58), +0x38 enabled.
 // Choke is a native BLOCK (RB) hold; lethal and drop kills are a MELEE (RT) press [inferred].
-struct TakedownState {bool choke{},kill{},drop{};std::uint32_t spawn{}; // target spawn id (kill, else choke, else first drop candidate); 0 = none
+struct TakedownState {bool choke{},kill{},drop{};std::uint32_t spawn{};
+    bool offered{}; // GlobalAssassination +0x1d0 (the rule handler that passed, 0 = nothing offered): the exact 3 m / 1.7 m / unaware verdict, steady where the sensor target flickers // target spawn id (kill, else choke, else first drop candidate); 0 = none
     std::uint32_t kill_spawn{},drop_spawn{};
     bool any() const noexcept {return choke || kill || drop;}};
 // Finds the three sensors (a component walk, done rarely); poll() then reads only their fields.
@@ -30,7 +31,7 @@ class NativeTakedowns {
     }
     template<class Read> void scan(Read& read,std::uintptr_t base) {
         using namespace rig;
-        player_=0;sensor_={};
+        player_=0;global_=0;sensor_={};
         auto game=value<std::uintptr_t>(read,base+0x39a5290);
         if(!game || !typed(read,base,*game,0x1c940a8)) return;
         auto player=value<std::uintptr_t>(read,*game+0x3130b0);
@@ -68,6 +69,8 @@ public:
             out.drop=valid_id(target);
             if(out.drop)drop_id=*target;
         }
+        if(global_ && value<std::uintptr_t>(read,global_)==base+0x1b3f998 && value<std::uintptr_t>(read,global_+0x10)==player_)
+            out.offered=value<std::uintptr_t>(read,global_+0x1d0).value_or(0)!=0;
         out.spawn=out.kill?kill_id:out.choke?choke_id:out.drop?drop_id:0;
         out.kill_spawn=kill_id;out.drop_spawn=drop_id;
         return out;
