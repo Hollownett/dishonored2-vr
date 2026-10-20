@@ -1,0 +1,5 @@
+{
+ "kind": "list",
+ "expect": "reject",
+ "content": "{\"version\": 1, \"features\": {\"a\": 1}}"
+}

@@ -1,0 +1,10 @@
+{
+ "kind": "scan",
+ "hex": "0000006e006f002d00680061006e0064002d0062006c0069006e006b000000",
+ "contains": [
+  "no-hand-blink"
+ ],
+ "absent": [
+  "blink-x"
+ ]
+}

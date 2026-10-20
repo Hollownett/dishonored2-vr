@@ -56,7 +56,7 @@ public static class ModHome
                 log?.Invoke($"Features: {Features.Apply(Path.Combine(dir, "build"), list, known)} seeded");
             }
         }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidDataException or System.Text.Json.JsonException or KeyNotFoundException)
+        catch (Exception ex)  // a bad list or an unreadable state must not fail an otherwise valid install
         { log?.Invoke("Features not applied: " + ex.Message); }
         return new Candidate(manifest, dll, dllPath);
     }

@@ -10,3 +10,6 @@ third_party/**/*.dll
 third_party/**/*.lib
 # Decoded from the game's own animation files: game data stays on the user's machine
 tests/player_clip_fixture.hpp
+
+/tests/launcher_features/obj/
+/tests/launcher_features/bin/

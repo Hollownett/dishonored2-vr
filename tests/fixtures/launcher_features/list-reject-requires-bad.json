@@ -1,0 +1,5 @@
+{
+ "kind": "list",
+ "expect": "reject",
+ "content": "{\"version\": 1, \"features\": [{\"id\": \"a-b\", \"file\": \"a-b\", \"kind\": \"enable\", \"label\": \"L\", \"help\": \"H\", \"default\": true, \"requires_dll_knob\": \"..\\\\\\\\x\"}]}"
+}

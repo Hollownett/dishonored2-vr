@@ -19,7 +19,7 @@ Code: `Core.cs` (checks, settings file, mod/dev root), `ModHome.cs` (installs th
 
 ## Mod home
 
-The first start also writes the default feature knobs (`tools/default_features.json`, embedded as `features.json`) into `build\` and records them in `build\launcher-features.json` (`off`, `seeded`). A feature you turn off stays off across launches and updates, and a knob file you made by hand is kept (a `no-*` file is adopted as off). Features marked `"default": false` (power gestures) are listed but not created. In developer mode (repo root) nothing is seeded unless `--seed-features` is passed.
+The first start also writes the default feature knobs (`tools/default_features.json`, embedded as `features.json`) into `build\` and records them in `build\launcher-features.json` (`off`, `seeded`). `off` is authoritative: a feature listed there is kept off on every start (an `enable` knob file is removed, or set aside as `<file>.off-by-launcher` when it holds a value; a `no-*` file is created). A feature you turn off stays off across launches and updates, and a knob file you made by hand is kept (a `no-*` file is adopted as off). Features marked `"default": false` (power gestures) are listed but not created. In developer mode (repo root) nothing is seeded unless `--seed-features` is passed.
 
 On start the launcher writes every embedded file that is missing or different into `%LOCALAPPDATA%\DishonoredVR` (`--home <dir>` overrides), verifies the DLL's sha256 against its manifest, and deletes older `d2vr_render_probe_arm_v*.dll` files (a version still loaded in a running game is locked and stays). The layout is the repo layout the DLL expects (`src/dxgi_probe.cpp`: root = the DLL folder's parent, and `StartProbe` refuses to run without `<root>\.git`):
 

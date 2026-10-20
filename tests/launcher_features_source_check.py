@@ -8,6 +8,9 @@ root = Path(__file__).resolve().parents[1]
 features = json.loads((root / "tools/default_features.json").read_text())["features"]
 source = (root / "src/dxgi_probe.cpp").read_text(encoding="utf-8")
 for f in features:
+    for key in ("id", "file", "requires_dll_knob"):
+        if key in f:
+            assert re.fullmatch(r"[a-z0-9-]+", f[key]), f"{f.get('id')}: bad {key} {f[key]!r}"
     if f.get("requires_dll_knob"):
         continue
     assert f'L"build"/L"{f["file"]}"' in source, f'{f["id"]}: knob {f["file"]} is not read in src/dxgi_probe.cpp'

@@ -3,6 +3,7 @@ import hashlib
 import json
 import os
 import re
+import sys
 import time
 import urllib.request
 import zipfile
@@ -172,49 +173,207 @@ def _load_source(openxr_source):
     return json.loads(raw), raw, p.parent
 
 
-def _knob_in_dll(dll: bytes, name: str) -> bool:
-    return name.encode("utf-16-le") in dll
+class FeatureError(Exception):
+    """The feature list or state cannot be used (I/O or invalid list). apply_default_features touches nothing when it raises."""
 
 
-def apply_default_features(home: Path, list_path: Path = DEFAULT_FEATURES, dll: "bytes | None" = None) -> list:
-    """Seed the default feature knobs in <home>/build (same semantics as launcher/Features.cs Apply). Features not yet seen:
-    a knob file the user already made is kept (a no-* file is adopted as 'off'); otherwise a default-true 'enable' row gets its file.
-    Features already in 'seeded' are never touched, so a turned-off feature stays off. Returns the changed paths (relative)."""
-    build = Path(home) / "build"
-    features = json.loads(Path(list_path).read_text())["features"]
-    state_path = build / FEATURES_STATE
-    off, seeded = set(), set()
-    changed = []
-    if state_path.is_file():
+_NAME_RE = re.compile(r"^[a-z0-9-]+$")
+_SAVED = ".off-by-launcher"
+
+
+def load_features(list_path: "Path | None" = None) -> list:
+    """Parse and validate the whole list (same rules as launcher/Features.cs Load); any bad row rejects it."""
+    list_path = DEFAULT_FEATURES if list_path is None else list_path
+    try:
+        rows = json.loads(Path(list_path).read_text(encoding="utf-8"))["features"]
+        if not isinstance(rows, list):
+            raise ValueError("features is not a list")
+        out, seen = [], set()
+        for r in rows:
+            if not isinstance(r, dict):
+                raise ValueError("row is not an object")
+            for k in ("id", "file", "kind", "label", "help"):
+                if not isinstance(r.get(k), str):
+                    raise ValueError(f"missing {k}")
+            for k in ("id", "file"):
+                if not _NAME_RE.match(r[k]):
+                    raise ValueError(f"bad {k}: {r[k]!r}")
+            if r["kind"] not in ("enable", "disable"):
+                raise ValueError("bad kind")
+            if not isinstance(r.get("default"), bool):
+                raise ValueError("default must be a boolean")
+            req = r.get("requires_dll_knob")
+            if "requires_dll_knob" in r and not (isinstance(req, str) and _NAME_RE.match(req)):
+                raise ValueError("bad requires_dll_knob")
+            if r["id"] in seen:
+                raise ValueError("duplicate id")
+            seen.add(r["id"])
+            out.append(r)
+        return out
+    except (OSError, ValueError, KeyError, TypeError) as e:
+        raise FeatureError(f"feature list {list_path}: {e}")
+
+
+def scan_knobs(dll: bytes) -> set:
+    """UTF-16 strings of [a-z0-9-] (3+ chars) at either byte parity, as launcher/Features.cs ScanKnobs."""
+    found = set()
+    for start in (0, 1):
+        run = []
+        for i in range(start, len(dll) - 1, 2):
+            c = dll[i] | dll[i + 1] << 8
+            if 0x61 <= c <= 0x7a or 0x30 <= c <= 0x39 or c == 0x2d:
+                run.append(chr(c))
+                continue
+            if len(run) >= 3:
+                found.add("".join(run))
+            run = []
+        if len(run) >= 3:
+            found.add("".join(run))
+    return found
+
+
+def _str_list(v) -> set:
+    if not isinstance(v, list) or not all(isinstance(x, str) for x in v):
+        raise ValueError("not a list of strings")
+    return set(v)
+
+
+def _read_state(state_path: Path, changed: list, log):
+    """(off, seeded, applied). I/O errors raise FeatureError; parse/type errors archive the file to .bad and start fresh."""
+    if state_path.is_dir():
+        raise FeatureError(f"{state_path} is a folder")
+    if not state_path.exists():
+        return set(), set(), {}
+    try:
+        raw = state_path.read_bytes()
+    except OSError as e:
+        raise FeatureError(f"cannot read {state_path}: {e}")
+    try:
+        d = json.loads(raw)
+        if not isinstance(d, dict) or d.get("version") not in (1, 2):
+            raise ValueError("bad version")
+        off, seeded = _str_list(d["off"]), _str_list(d["seeded"])
+        applied = {}
+        if d["version"] == 2 and "applied" in d:
+            if not isinstance(d["applied"], dict):
+                raise ValueError("applied")
+            for k, v in d["applied"].items():
+                if not (isinstance(v, dict) and isinstance(v.get("file"), str) and isinstance(v.get("kind"), str)):
+                    raise ValueError("applied row")
+                applied[k] = (v["file"], v["kind"])
+        return off, seeded, applied
+    except (ValueError, KeyError, TypeError):
         try:
-            d = json.loads(state_path.read_text())
-            off, seeded = set(map(str, d["off"])), set(map(str, d["seeded"]))
-        except (ValueError, KeyError, TypeError, OSError):
             os.replace(state_path, state_path.with_name(state_path.name + ".bad"))
-            changed.append(f"build/{FEATURES_STATE}.bad")
-            off, seeded = set(), set()
+        except OSError as e:
+            raise FeatureError(f"cannot archive corrupt {state_path}: {e}")
+        changed.append(f"build/{FEATURES_STATE}.bad")
+        if log:
+            log("feature state was corrupt and was moved to launcher-features.json.bad")
+        return set(), set(), {}
+
+
+def _touch(path: Path, changed: list, build: Path) -> None:
+    if not path.exists() and _write(path, b""):
+        changed.append(f"build/{path.name}")
+
+
+def _retire(path: Path, changed: list) -> None:
+    """Turn an enable knob off without losing a valued file: empty is deleted, anything else is set aside."""
+    if not path.exists():
+        return
+    if path.stat().st_size == 0:
+        path.unlink()
+    else:
+        os.replace(path, path.with_name(path.name + _SAVED))
+    changed.append(f"build/{path.name}")
+
+
+def _restore(path: Path, changed: list, build: Path) -> None:
+    if path.exists():
+        return
+    saved = path.with_name(path.name + _SAVED)
+    if saved.exists():
+        os.replace(saved, path)
+        changed.append(f"build/{path.name}")
+    else:
+        _touch(path, changed, build)
+
+
+def _write_state(state_path: Path, off, seeded, applied, changed: list) -> None:
+    data = (json.dumps({"version": 2, "off": sorted(off), "seeded": sorted(seeded),
+                        "applied": {k: {"file": v[0], "kind": v[1]} for k, v in sorted(applied.items())}}, indent=2) + "\n").encode()
+    if _write(state_path, data):
+        changed.append(f"build/{FEATURES_STATE}")
+
+
+def apply_default_features(home: Path, list_path: "Path | None" = None, dll: "bytes | None" = None, log=None) -> list:
+    """Same semantics as launcher/Features.cs Apply. `off` is authoritative (enable: file absent, disable: file present);
+    otherwise features not yet seen, or whose file/kind changed, are seeded (default-true rows only) and user-made knobs adopted.
+    Old files of changed rows and removed rows are never deleted. Raises FeatureError (touching nothing) on a bad list or an
+    unreadable state file. Returns the changed paths (relative)."""
+    build = Path(home) / "build"
+    features = load_features(list_path)
+    known = scan_knobs(dll) if dll is not None else None
+    state_path = build / FEATURES_STATE
+    changed = []
+    off, seeded, applied = _read_state(state_path, changed, log)
     for f in features:
         req = f.get("requires_dll_knob")
-        if req and dll is not None and not _knob_in_dll(dll, req):
-            continue
-        if f["id"] in seeded:
+        if req and known is not None and req not in known:
             continue
         path = build / f["file"]
         enable = f["kind"] == "enable"
-        if path.exists():
-            if not enable:
+        was_seeded = f["id"] in seeded
+        old = applied.get(f["id"])
+        row_changed = was_seeded and old is not None and old != (f["file"], f["kind"])
+        if row_changed and log:
+            log(f"feature {f['id']}: row changed ({old[1]} {old[0]} -> {f['kind']} {f['file']}); the old file is left in place")
+        if f["id"] in off:
+            if enable:
+                _retire(path, changed)
+            else:
+                _touch(path, changed, build)
+        elif not was_seeded or row_changed:
+            if path.exists():
+                if not enable:
+                    off.add(f["id"])
+            elif f["default"]:
+                if enable:
+                    _touch(path, changed, build)
+            elif not enable:
+                _touch(path, changed, build)
                 off.add(f["id"])
-        elif f.get("default"):
-            if enable and _write(path, b""):
-                changed.append(f"build/{f['file']}")
-        else:
-            if not enable and _write(path, b""):
-                changed.append(f"build/{f['file']}")
-            off.add(f["id"])
         seeded.add(f["id"])
-    data = (json.dumps({"version": 1, "off": sorted(off), "seeded": sorted(seeded)}, indent=2) + "\n").encode()
-    if _write(state_path, data):
-        changed.append(f"build/{FEATURES_STATE}")
+        applied[f["id"]] = (f["file"], f["kind"])
+    try:
+        _write_state(state_path, off, seeded, applied, changed)
+    except OSError as e:
+        raise FeatureError(f"cannot write {state_path}: {e}")
+    return changed
+
+
+def set_feature(home: Path, feature_id: str, on: bool, list_path: "Path | None" = None) -> list:
+    """The user's explicit switch (Python twin of Features.Set)."""
+    build = Path(home) / "build"
+    f = next((r for r in load_features(list_path) if r["id"] == feature_id), None)
+    if f is None:
+        raise FeatureError(f"unknown feature {feature_id}")
+    changed = []
+    off, seeded, applied = _read_state(build / FEATURES_STATE, changed, None)
+    path = build / f["file"]
+    if f["kind"] == "enable":
+        _restore(path, changed, build) if on else _retire(path, changed)
+    elif on:
+        if path.exists():
+            path.unlink()
+            changed.append(f"build/{path.name}")
+    else:
+        _touch(path, changed, build)
+    (off.discard if on else off.add)(f["id"])
+    seeded.add(f["id"])
+    applied[f["id"]] = (f["file"], f["kind"])
+    _write_state(build / FEATURES_STATE, off, seeded, applied, changed)
     return changed
 
 
@@ -274,7 +433,10 @@ def install(inst: Install, zip_path: Path, proxy: Path, openxr_zip: "Path | None
             except OSError:
                 pass  # still loaded by a running game
 
-    changed += apply_default_features(home, dll=release.dll)
+    try:  # feature seeding must not fail an otherwise valid install
+        changed += apply_default_features(home, dll=release.dll, log=lambda m: print("d2vr: " + m, file=sys.stderr))
+    except Exception as e:  # noqa: BLE001
+        print(f"d2vr: warning: default features were not applied: {e}", file=sys.stderr)
 
     # 7: game dir
     if _write(target, proxy_bytes):

@@ -1,0 +1,5 @@
+{
+ "kind": "list",
+ "expect": "reject",
+ "content": "{\"version\": 1, \"features\": [{\"id\": \"a-b\", \"file\": \"/etc/passwd\", \"kind\": \"enable\", \"label\": \"L\", \"help\": \"H\", \"default\": true}]}"
+}

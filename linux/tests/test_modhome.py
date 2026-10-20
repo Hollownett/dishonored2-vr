@@ -6,6 +6,7 @@ import shutil
 import sys
 import tempfile
 import unittest
+from unittest import mock
 import zipfile
 from pathlib import Path
 
@@ -349,6 +350,149 @@ class FeatureTests(Case):
             self.assertIsInstance(f["default"], bool)
             self.assertTrue(f["label"] and f["help"])
         self.assertFalse({"hold-y-menu", "corpse-grab"} & set(ids))
+
+
+FIXTURES = Path(__file__).resolve().parents[2] / "tests/fixtures/launcher_features"
+
+
+class FeatureEvolutionTests(Case):
+    def row(self, id, file, kind, default=True):
+        return {"id": id, "file": file, "kind": kind, "label": id, "help": id, "default": default}
+
+    def lst(self, *rows, name="l.json"):
+        p = self.tmp / name
+        p.write_text(json.dumps({"version": 1, "features": list(rows)}))
+        return p
+
+    def apply(self, *rows, **kw):
+        return modhome.apply_default_features(self.home, self.lst(*rows), **kw)
+
+    def state(self):
+        return json.loads((self.home / "build/launcher-features.json").read_text())
+
+    def write_state(self, text):
+        b = self.home / "build"
+        b.mkdir(parents=True, exist_ok=True)
+        (b / "launcher-features.json").write_text(text)
+
+    def test_off_entry_for_unseeded_id_stays_off(self):
+        self.write_state('{"version":1,"off":["full-body","hand-blink"],"seeded":[]}')
+        modhome.apply_default_features(self.home)
+        b = self.home / "build"
+        self.assertFalse((b / "full-body").exists())
+        self.assertTrue((b / "no-hand-blink").exists())
+        self.assertIn("full-body", self.state()["seeded"])
+        (b / "full-body").write_bytes(b"")
+        modhome.apply_default_features(self.home)
+        self.assertFalse((b / "full-body").exists())
+
+    def test_readme_method_turns_feature_off(self):
+        self.install()
+        b = self.home / "build"
+        st = self.state()
+        st["off"] = sorted(set(st["off"]) | {"full-body", "vr-glyphs"})
+        (b / "launcher-features.json").write_text(json.dumps(st))
+        self.install()
+        self.assertFalse((b / "full-body").exists())
+        self.assertTrue((b / "no-vr-glyphs").exists())
+
+    def test_kind_change_keeps_off(self):
+        self.apply(self.row("x", "x-old", "enable"))
+        modhome.set_feature(self.home, "x", False, self.lst(self.row("x", "x-old", "enable")))
+        self.apply(self.row("x", "x-new", "disable"))
+        b = self.home / "build"
+        self.assertTrue((b / "x-new").exists())
+        self.assertFalse((b / "x-old").exists())
+        self.assertIn("x", self.state()["off"])
+
+    def test_file_rename_seeds_new_default(self):
+        self.apply(self.row("y", "y-old", "enable"))
+        self.apply(self.row("y", "y-new", "enable"))
+        self.assertTrue((self.home / "build/y-new").exists())
+        self.assertTrue((self.home / "build/y-old").exists())
+
+    def test_removed_row_untouched(self):
+        self.apply(self.row("z", "z-knob", "enable"))
+        self.apply(self.row("w", "w-knob", "enable"))
+        self.assertTrue((self.home / "build/z-knob").exists())
+        self.assertIn("z", self.state()["seeded"])
+
+    def test_v1_state_upgrades(self):
+        self.write_state('{"version":1,"off":[],"seeded":["full-body"]}')
+        modhome.apply_default_features(self.home)
+        st = self.state()
+        self.assertEqual(st["version"], 2)
+        self.assertEqual(st["applied"]["full-body"], {"file": "full-body", "kind": "enable"})
+        self.assertFalse((self.home / "build/full-body").exists())  # seeded earlier: not re-created
+
+    def test_unreadable_state_aborts_untouched(self):
+        b = self.home / "build"
+        (b / "launcher-features.json").mkdir(parents=True)
+        with self.assertRaises(modhome.FeatureError):
+            modhome.apply_default_features(self.home)
+        self.assertFalse((b / "full-body").exists())
+
+    def test_read_oserror_aborts_untouched(self):
+        self.write_state('{"version":1,"off":["full-body"],"seeded":["full-body"]}')
+        real = Path.read_bytes
+        def boom(self_):
+            if self_.name == "launcher-features.json":
+                raise PermissionError("locked")
+            return real(self_)
+        with mock.patch.object(Path, "read_bytes", boom):
+            with self.assertRaises(modhome.FeatureError):
+                modhome.apply_default_features(self.home)
+        self.assertFalse((self.home / "build/launcher-features.json.bad").exists())
+        self.assertIn("full-body", self.state()["off"])
+
+    def test_install_survives_bad_feature_list(self):
+        with mock.patch.object(modhome, "DEFAULT_FEATURES", self.tmp / "missing.json"):
+            with mock.patch.object(sys, "stderr", io.StringIO()) as err:
+                changed = self.install()
+        self.assertIn("build/d2vr_render_probe_arm_v999.dll", changed)
+        self.assertIn("not applied", err.getvalue())
+
+    def test_loader_rejects_bad_names(self):
+        for bad in ("../x", "/etc/passwd", "Bad"):
+            with self.assertRaises(modhome.FeatureError):
+                modhome.load_features(self.lst(self.row("a", bad, "enable")))
+
+    def test_full_body_tuning_survives_off_on(self):
+        b = self.home / "build"
+        b.mkdir(parents=True)
+        (b / "full-body").write_text("0.5 0.2")
+        modhome.apply_default_features(self.home)
+        modhome.set_feature(self.home, "full-body", False)
+        self.assertFalse((b / "full-body").exists())
+        modhome.set_feature(self.home, "full-body", True)
+        self.assertEqual((b / "full-body").read_text(), "0.5 0.2")
+        self.assertFalse((b / "full-body.off-by-launcher").exists())
+
+    def test_shared_fixtures(self):
+        names = sorted(FIXTURES.glob("*.json"))
+        self.assertGreater(len(names), 10)
+        for n, p in enumerate(names):
+            j = json.loads(p.read_text())
+            with self.subTest(p.name):
+                if j["kind"] == "list":
+                    lp = self.tmp / f"fx{n}.json"
+                    lp.write_text(j["content"])
+                    if j["expect"] == "ok":
+                        modhome.load_features(lp)
+                    else:
+                        with self.assertRaises(modhome.FeatureError):
+                            modhome.load_features(lp)
+                elif j["kind"] == "state":
+                    shutil.rmtree(self.home, True)
+                    self.write_state(j["content"])
+                    modhome.apply_default_features(self.home)
+                    self.assertEqual((self.home / "build/launcher-features.json.bad").exists(), j["expect"] == "corrupt")
+                else:
+                    found = modhome.scan_knobs(bytes.fromhex(j["hex"]))
+                    for c in j["contains"]:
+                        self.assertIn(c, found)
+                    for a in j["absent"]:
+                        self.assertNotIn(a, found)
 
 
 class UninstallTests(Case):

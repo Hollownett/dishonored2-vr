@@ -77,5 +77,78 @@ Check("list_has_no_unwanted_rows", !list.Any(f => f.Id is "hold-y-menu" or "corp
     var bytes = System.Text.Encoding.Unicode.GetBytes("\0build\0no-hand-blink\0");
     Check("scan_knobs_finds_utf16_names", Features.ScanKnobs(bytes).Contains("no-hand-blink"));
 }
+
+Feature Row(string id, string file, string kind, bool def = true) => new(id, file, kind, id, id, def);
+IReadOnlyList<Feature> LoadText(string text) => Features.Load(new MemoryStream(System.Text.Encoding.UTF8.GetBytes(text)));
+void WriteState(string d, string text) => File.WriteAllText(Path.Combine(d, "launcher-features.json"), text);
+string StateText(string d) => File.ReadAllText(Path.Combine(d, "launcher-features.json"));
+
+{   // 1. off is authoritative
+    var d = NewBuild(); WriteState(d, "{\"version\":1,\"off\":[\"full-body\",\"hand-blink\"],\"seeded\":[]}");
+    Features.Apply(d, list);
+    Check("off_entry_for_unseeded_id_stays_off", !Has(d, "full-body") && Has(d, "no-hand-blink") && Has(d, "no-hand-clamp") == false && Ids(d, "seeded").Contains("full-body"));
+    // seeded + off + file reappeared (enable): off wins
+    File.WriteAllText(Path.Combine(d, "full-body"), "");
+    Features.Apply(d, list);
+    Check("off_wins_over_reappeared_file", !Has(d, "full-body"));
+}
+{   // 2. list evolution
+    var d = NewBuild();
+    Features.Apply(d, new[] { Row("x", "x-old", "enable") });
+    Features.Set(d, Row("x", "x-old", "enable"), false);
+    Features.Apply(d, new[] { Row("x", "x-new", "disable") });
+    Check("kind_change_keeps_off", Has(d, "x-new") && !Has(d, "x-old") && Ids(d, "off").Contains("x"));
+    var d2 = NewBuild(); Features.Apply(d2, new[] { Row("y", "y-old", "enable") });
+    Features.Apply(d2, new[] { Row("y", "y-new", "enable") });
+    Check("file_rename_seeds_new_default", Has(d2, "y-new") && Has(d2, "y-old"));
+    var d3 = NewBuild(); Features.Apply(d3, new[] { Row("z", "z-knob", "enable") });
+    Features.Apply(d3, new[] { Row("w", "w-knob", "enable") });
+    Check("removed_row_untouched", Has(d3, "z-knob") && Ids(d3, "seeded").Contains("z") && Ids(d3, "seeded").Contains("w"));
+    var d4 = NewBuild(); WriteState(d4, "{\"version\":1,\"off\":[],\"seeded\":[\"full-body\"]}");
+    Features.Apply(d4, list);
+    var doc = System.Text.Json.JsonDocument.Parse(StateText(d4)).RootElement;
+    Check("v1_state_upgrades", doc.GetProperty("version").GetInt32() == 2 && !Has(d4, "full-body") && doc.GetProperty("applied").GetProperty("full-body").GetProperty("kind").GetString() == "enable");
+}
+{   // 3. read errors abort untouched
+    var d = NewBuild(); Directory.CreateDirectory(Path.Combine(d, "launcher-features.json"));
+    bool typed = false; try { Features.Apply(d, list); } catch (Features.FeaturesStateException) { typed = true; }
+    Check("unreadable_state_aborts_untouched", typed && !Has(d, "full-body") && Directory.Exists(Path.Combine(d, "launcher-features.json")));
+}
+{   // 4/5. malformed list (via fixtures below); bad list never applies
+    bool rejected = false; try { LoadText("{\"features\":5}"); } catch (Exception) { rejected = true; }
+    Check("malformed_list_rejected", rejected);
+}
+{   // 7. valued full-body survives off/on
+    var d = NewBuild(); File.WriteAllText(Path.Combine(d, "full-body"), "0.5 0.2");
+    Features.Apply(d, list);
+    Features.Set(d, F("full-body"), false);
+    bool off = !Has(d, "full-body");
+    Features.Set(d, F("full-body"), true);
+    Check("full_body_tuning_survives_off_on", off && File.ReadAllText(Path.Combine(d, "full-body")) == "0.5 0.2" && !Has(d, "full-body.off-by-launcher"));
+}
+{   // 6. shared fixtures
+    var dir = Path.Combine(AppContext.BaseDirectory, "fixtures");
+    foreach (var file in Directory.GetFiles(dir, "*.json").OrderBy(x => x))
+    {
+        var j = System.Text.Json.JsonDocument.Parse(File.ReadAllText(file)).RootElement;
+        var name = Path.GetFileNameWithoutExtension(file); var kind = j.GetProperty("kind").GetString();
+        if (kind == "list")
+        {
+            bool ok = true; try { LoadText(j.GetProperty("content").GetString()!); } catch (Exception) { ok = false; }
+            Check("fixture " + name, ok == (j.GetProperty("expect").GetString() == "ok"));
+        }
+        else if (kind == "state")
+        {
+            var d = NewBuild(); WriteState(d, j.GetProperty("content").GetString()!);
+            Features.Apply(d, list);
+            Check("fixture " + name, Has(d, "launcher-features.json.bad") == (j.GetProperty("expect").GetString() == "corrupt"));
+        }
+        else
+        {
+            var found = Features.ScanKnobs(Convert.FromHexString(j.GetProperty("hex").GetString()!));
+            Check("fixture " + name, j.GetProperty("contains").EnumerateArray().All(x => found.Contains(x.GetString()!)) && !j.GetProperty("absent").EnumerateArray().Any(x => found.Contains(x.GetString()!)));
+        }
+    }
+}
 Console.WriteLine(failures == 0 ? "ALL PASS" : failures + " FAILED");
 return failures == 0 ? 0 : 1;
