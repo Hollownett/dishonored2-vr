@@ -60,7 +60,10 @@ struct CorpseMotorInput {Vec3 body_velocity{},body_spin{};bool velocity_known{},
     double object_kg{},inertia_kgm2{},share{1.},dt{};const GrabTuning* tuning{};};
 // What Task 10 needs per write: the command, the cap fraction (share of the commanded velocity change removed), the capped flag,
 // the implied force, and the release reason (none while held).
-struct CorpseMotor {GrabMotor motor;double lag_m{};bool capped{};double cap_fraction{};double implied_force_n{};ReleaseReason reason{ReleaseReason::none};};
+// write=false: nothing to write this frame (invalid dt); the hold continues. A non-finite input or result releases with
+// ReleaseReason::fault (a zero-velocity release; the caller writes nothing). cap_fraction is the share of the LINEAR velocity
+// change removed by the cap (angular share only when the linear change is zero).
+struct CorpseMotor {GrabMotor motor;double lag_m{};bool capped{};double cap_fraction{};double implied_force_n{};ReleaseReason reason{ReleaseReason::none};bool write{true};};
 // The grasp point kept for the drawn hand to blend out after a release (A-12): weight falls 1 -> 0 over anchor_blend_s.
 struct ReleasedAnchor {Vec3 position{};double weight{};std::uint64_t released_at{};};
 // A velocity motor keeps the native body dynamic, so collision/gravity remain
@@ -124,7 +127,8 @@ public:
     }
     bool bind(const WorldTrackedPose& object) {return bind(object,object.position);}
     bool bind(const WorldTrackedPose& object,Vec3 contact,double maximum_contact=.3) {
-        if(forced_release_ && tick_>=release_tick_ && double(tick_-release_tick_)*.001<regrab_cooldown_s) return false;
+        // A hand clock that went backwards (stale rebase) keeps the cooldown running until it passes the release tick again.
+        if(forced_release_ && (tick_<release_tick_ || double(tick_-release_tick_)*.001<regrab_cooldown_s)) return false;
         if(!valid_sample_ || !pressed_ || held_ || !grab_pose_valid(object) || !finite(contact) ||
            !std::isfinite(maximum_contact) || maximum_contact<0 || maximum_contact>.55 ||
            length(contact-previous_.position)>maximum_contact || length(contact-object.position)>3) return false;
@@ -149,21 +153,23 @@ public:
         for(unsigned i=0;i<3;++i) result.basis[i]=grab_world(previous_,relative_.basis[i]);
         return result;
     }
-    GrabMotor release(bool throw_velocity) {
-        note_release(throw_velocity?ReleaseReason::open_fist:ReleaseReason::lifecycle,false);
+    // `reason`: open_fist only for a grip-open, lag for a blocked-carry release, lifecycle for a handoff or tracking loss (default).
+    // Bookkeeping only happens when a hold actually ends, so releasing an idle lane keeps the cooldown, reason and anchor.
+    GrabMotor release(bool throw_velocity,ReleaseReason reason=ReleaseReason::lifecycle) {
+        if(held_) note_release(reason,false);
         held_=false;return {throw_velocity && valid_sample_?velocity_:Vec3{}, {},true};
     }
-    GrabMotor release_sample(const WorldTrackedPose& hand,float grip,bool usable,std::uint64_t epoch,std::uint64_t tick,bool throw_velocity) {
+    GrabMotor release_sample(const WorldTrackedPose& hand,float grip,bool usable,std::uint64_t epoch,std::uint64_t tick,bool throw_velocity,ReleaseReason reason=ReleaseReason::lifecycle) {
         // Native grip release can arrive before the next motor callback.
         const bool accepted=sample(hand,grip,usable,epoch,tick);
-        return release(throw_velocity && accepted);
+        return release(throw_velocity && accepted,reason);
     }
     std::optional<GrabMotor> motor(const WorldTrackedPose& object,bool usable,std::uint64_t now=0,std::uint64_t source_tick=0) {
         if(!held_) return {};
-        last_anchor_=anchor(object);
-        if(!usable || !valid_sample_ || !pressed_ || !grab_pose_valid(object)) return release(usable && valid_sample_ && !pressed_);
+        if(usable && valid_sample_ && grab_pose_valid(object)) last_anchor_=anchor(object);
+        if(!usable || !valid_sample_ || !pressed_ || !grab_pose_valid(object)) {const bool open=usable && valid_sample_ && !pressed_;return release(open,open?ReleaseReason::open_fist:ReleaseReason::lifecycle);}
         const auto goal=target();const auto error=goal.position-object.position;
-        if(length(error)>1.5) return release(valid_sample_ && pressed_); // fast swing outran the motor: throw, do not dead-drop // Wall blockage or an ownership discontinuity.
+        if(length(error)>1.5) return release(valid_sample_ && pressed_,ReleaseReason::lag); // fast swing outran the motor: throw, do not dead-drop // Wall blockage or an ownership discontinuity.
         const auto spin=grab_rotation_error(object,goal);
         const auto source=source_tick?std::min(source_tick,tick_):tick_;
         const auto age=now>=source?now-source:0;
@@ -178,8 +184,8 @@ public:
             // A corpse release writes no velocity; a prop release is today's release(throw).
             CorpseMotor out;out.lag_m=lag;out.reason=reason;
             if(in.corpse) {held_=false;out.motor=GrabMotor{{},{},true};}
-            else out.motor=release(throw_velocity);
-            note_release(reason,forced&&in.corpse);   // props keep their old behaviour: no cooldown
+            else out.motor=release(throw_velocity,reason);   // props keep their old behaviour: no cooldown
+            if(in.corpse) note_release(reason,forced);
             return out;
         };
         if(in.state_changed) return finish(ReleaseReason::state_changed,false,false,0);
@@ -187,20 +193,28 @@ public:
             const bool open=usable && valid_sample_ && !pressed_;
             return finish(open?ReleaseReason::open_fist:ReleaseReason::lifecycle,false,open,0);
         }
+        const GrabTuning fallback;const auto& tuning=in.tuning?*in.tuning:fallback;
+        // Non-finite inputs never reach the engine: release as a fault (no velocity).
+        if(!finite(in.body_velocity) || !finite(in.body_spin) || !std::isfinite(in.share) || !std::isfinite(in.object_kg) || !std::isfinite(in.inertia_kgm2))
+            return finish(ReleaseReason::fault,false,false,0);
+        // One validated, clamped dt feeds both the lag timer and the cap; an unusable dt writes nothing this frame.
+        if(!(in.dt>0) || !std::isfinite(in.dt)) {CorpseMotor idle;idle.write=false;return idle;}
+        const double dt=std::min(in.dt,tuning.dt_max);
         const auto goal=target();const auto error=goal.position-object.position;
         const auto lag=length(anchor(goal)-anchor(object));
-        if(in.corpse) {if(lag_timer_.update(lag>lag_release_m,in.dt)) return finish(ReleaseReason::lag,true,false,lag);}
+        if(in.corpse) {if(lag_timer_.update(lag>lag_release_m,dt)) return finish(ReleaseReason::lag,true,false,lag);}
         else if(length(error)>1.5) return finish(ReleaseReason::lag,false,pressed_,lag);
         const auto spin=grab_rotation_error(object,goal);
         const auto source=source_tick?std::min(source_tick,tick_):tick_;
         const auto age=now>=source?now-source:0;
         const auto feed=now?(now>=source?velocity_*std::exp(-double(age>32?age-32:0)*.001/.035):Vec3{}):velocity_;
         const auto want_v=grab_limit(error*18+feed,10),want_w=grab_limit(spin*12,5);
-        const GrabTuning fallback;const auto& tuning=in.tuning?*in.tuning:fallback;
         // Unknown body velocity: step from rest (the caller counts the fallback).
         const Vec3 v0=in.velocity_known?in.body_velocity:Vec3{},w0=in.velocity_known?in.body_spin:Vec3{};
-        const auto step=cap_velocity_step(v0,w0,want_v,want_w,previous_.basis[0],in.object_kg,in.inertia_kgm2,in.dt,tuning,in.share);
-        const auto asked=length(want_v-v0)+length(want_w-w0),given=length(step.linear-v0)+length(step.angular-w0);
+        const auto step=cap_velocity_step(v0,w0,want_v,want_w,previous_.basis[0],in.object_kg,in.inertia_kgm2,dt,tuning,in.share);
+        if(!finite(step.linear) || !finite(step.angular)) return finish(ReleaseReason::fault,false,false,lag);
+        const auto asked=length(want_v-v0)>1e-12?length(want_v-v0):length(want_w-w0),
+            given=length(want_v-v0)>1e-12?length(step.linear-v0):length(step.angular-w0);
         CorpseMotor out;
         out.motor=GrabMotor{step.linear,step.angular,false};out.lag_m=lag;
         out.capped=step.linear_capped||step.angular_capped;

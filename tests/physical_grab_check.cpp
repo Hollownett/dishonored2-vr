@@ -290,5 +290,91 @@ int main() {
             assert(r && r->motor.release && r->motor.linear.x>0);
         }
     }
+    // ---- Task 7 fix round 1 ----
+    {
+        const WorldTrackedPose id{{},{{{1,0,0},{0,1,0},{0,0,1}}}};
+        const double nan=std::numeric_limits<double>::quiet_NaN();
+        GrabTuning dflt;
+        auto in=[&](double dt=.01,bool corpse=true) {CorpseMotorInput i;i.corpse=corpse;i.object_kg=10;i.inertia_kgm2=bone_inertia(10,.2);i.dt=dt;i.tuning=&dflt;i.velocity_known=true;return i;};
+        auto make=[&](PhysicalGrab& g,const WorldTrackedPose& body,Vec3 contact,const WorldTrackedPose& h=WorldTrackedPose{{},{{{1,0,0},{0,1,0},{0,0,1}}}}) {
+            g.sample(h,0,true,1,1000);g.sample(h,0,true,1,1010);g.sample(h,1,true,1,1020);return g.bind(body,contact);};
+        auto reach=[&](PhysicalGrab& g,WorldTrackedPose& h,double x,std::uint64_t t) {
+            while(h.position.x<x-1e-12) {h.position.x=std::min(x,h.position.x+.25);g.sample(h,1,true,1,t);}};
+        auto lag_release=[&](PhysicalGrab& g,WorldTrackedPose& b,double dt=.01) {
+            std::optional<CorpseMotor> r;for(unsigned i=0;i<60 && !(r && r->motor.release);++i) r=g.corpse_motor(b,true,0,0,in(dt));return r;};
+        {   // 1: release(false) on an idle lane keeps cooldown, reason, anchor; a fresh lane has no anchor
+            PhysicalGrab fresh;fresh.release(false);assert(!fresh.released_anchor(0) && fresh.release_reason()==ReleaseReason::none);
+            PhysicalGrab g;auto b=id;assert(make(g,b,{}));auto h=id;reach(g,h,.9,1030);
+            auto r=lag_release(g,b);assert(r && r->reason==ReleaseReason::lag);
+            const auto before=g.released_anchor(1030);assert(before);
+            g.release(false);g.release_sample(h,0,true,1,1040,false);
+            assert(g.release_reason()==ReleaseReason::lag && g.released_anchor(1030) && length(g.released_anchor(1030)->position-before->position)<1e-12);
+            g.sample(h,0,true,1,1100);g.sample(h,1,true,1,1110);auto near=h;assert(!g.bind(near));
+        }
+        {   // 2: non-finite velocity, spin, share -> fault release, no finite-looking write
+            for(unsigned k=0;k<3;++k) {
+                PhysicalGrab g;auto b=id;assert(make(g,b,{}));auto h=id;h.position.x=.3;g.sample(h,1,true,1,1030);
+                auto inp=in();if(k==0) inp.body_velocity.x=nan;if(k==1) inp.body_spin.y=nan;if(k==2) inp.share=nan;
+                auto r=g.corpse_motor(b,true,0,0,inp);
+                assert(r && r->motor.release && r->reason==ReleaseReason::fault && length(r->motor.linear)==0 && length(r->motor.angular)==0 && !g.held());
+            }
+        }
+        {   // 3: dt 0 / NaN write nothing and never fire; a .3 s hitch clamps to dt_max and does not release on the first lagging frame
+            for(const double dt:{0.,nan,-1.}) {
+                PhysicalGrab g;auto b=id;assert(make(g,b,{}));auto h=id;reach(g,h,.6,1030);
+                for(unsigned i=0;i<50;++i) {auto r=g.corpse_motor(b,true,0,0,in(dt));assert(r && !r->write && !r->motor.release && g.held());}
+            }
+            PhysicalGrab g;auto b=id;assert(make(g,b,{}));auto h=id;reach(g,h,.6,1030);
+            auto r=g.corpse_motor(b,true,0,0,in(.3));assert(r && r->write && !r->motor.release);
+        }
+        {   // 4: stale-tick sequence keeps the cooldown
+            PhysicalGrab g;auto b=id;assert(make(g,b,{}));auto h=id;reach(g,h,.9,1030);
+            auto r=lag_release(g,b);assert(r && r->reason==ReleaseReason::lag);
+            g.sample(h,0,true,1,1020);g.sample(h,0,true,1,1026);g.sample(h,1,true,1,1027);
+            auto near=h;assert(!g.bind(near));
+        }
+        {   // 5: release reasons
+            PhysicalGrab g;auto b=id;assert(make(g,b,{}));auto h=id;reach(g,h,2.,1030);   // 1.5 m blocked carry (prop)
+            h.position.x=0;
+            PhysicalGrab p;assert(make(p,b,{}));auto far=id;reach(p,far,1.6,1030);
+            auto m=p.motor(b,true);assert(m && m->release && p.release_reason()==ReleaseReason::lag);
+            // immediate regrab after a PROP 1.5 m release is allowed
+            p.sample(far,0,true,1,1100);p.sample(far,1,true,1,1110);assert(p.bind(b,far.position));
+            PhysicalGrab o;assert(make(o,b,{}));o.sample(id,0,true,1,1030);
+            m=o.motor(b,true);assert(m && m->release && o.release_reason()==ReleaseReason::open_fist);
+            PhysicalGrab hd;assert(make(hd,b,{}));hd.release_sample(id,1,true,1,1030,true);assert(hd.release_reason()==ReleaseReason::lifecycle);
+            PhysicalGrab c;assert(make(c,b,{}));auto cf=id;reach(c,cf,1.6,1030);
+            auto cr=lag_release(c,b);assert(cr && cr->reason==ReleaseReason::lag);
+            // prop throw velocity equals the hand velocity
+            PhysicalGrab t;assert(make(t,b,{}));auto th=id;th.position.x=.3;t.sample(th,1,true,1,1040);t.sample(th,0,true,1,1050);
+            auto tv=t.corpse_motor(b,true,0,0,in(.01,false));assert(tv && tv->motor.release && length(tv->motor.linear-t.velocity())<1e-12 && t.velocity().x>0);
+        }
+        {   // 6: NaN object pose leaves the released anchor finite
+            PhysicalGrab g;auto b=id;assert(make(g,b,{.05,0,0}));
+            auto bad=b;bad.position.x=nan;auto m=g.motor(bad,true);assert(m && m->release);
+            auto a=g.released_anchor(1020);assert(a && finite(a->position));
+        }
+        {   // 7: offset contact + rotated hand/object: lag_m equals the anchor distance; lag release anchor is the object anchor
+            WorldTrackedPose rot=id;rot.basis={{{0,1,0},{-1,0,0},{0,0,1}}};
+            auto b=rot;b.position={0,0,0};PhysicalGrab g;
+            assert(make(g,b,{0,.1,0},rot));
+            auto h=rot;std::uint64_t t=1030;
+            while(h.position.y<.6-1e-12) {h.position.y=std::min(.6,h.position.y+.25);g.sample(h,1,true,1,t);}
+            auto r=g.corpse_motor(b,true,0,0,in());
+            assert(r && std::abs(r->lag_m-length(g.anchor(g.target())-g.anchor(b)))<1e-9 && std::abs(r->lag_m-.6)<1e-9);
+            r=lag_release(g,b);assert(r && r->reason==ReleaseReason::lag);
+            auto a=g.released_anchor(t);assert(a && length(a->position-g.anchor(b))<1e-9);
+            // cap axis: hand rotated 90 degrees about z has forward along +y; the axial cap applies to y, the lateral cap to x
+            GrabTuning one;one.strength_scale=1;
+            PhysicalGrab c;auto cb=rot;assert(make(c,cb,{},rot));
+            auto ch=rot;ch.position={.3,.3,0};c.sample(ch,1,true,1,1030);
+            auto inp=in();inp.tuning=&one;auto cr=c.corpse_motor(cb,true,0,0,inp);
+            assert(cr && cr->capped && std::abs(cr->motor.linear.y)<=300*.01/12+1e-9 && std::abs(cr->motor.linear.x)<=90*.01/12+1e-9);
+            assert(std::abs(cr->motor.linear.y)>std::abs(cr->motor.linear.x)*1.5);
+            // bind with a real offset contact: no jump
+            PhysicalGrab n;auto nb=id;nb.position={.1,0,0};assert(make(n,nb,{.2,0,0}));
+            auto nr=n.corpse_motor(nb,true,0,0,in());assert(nr && length(nr->motor.linear)==0 && length(nr->motor.angular)==0 && !nr->capped && nr->cap_fraction==0);
+        }
+    }
     std::cout<<"PASS: grip hysteresis/rearm, relative pose, bounded dynamic motor/throw, focus/epoch/stale/blocked release, occupied-hand refusal and release\n";
 }
