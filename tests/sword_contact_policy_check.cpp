@@ -128,7 +128,35 @@ void slow_contact_on_aware_guard_is_dropped() {
         assert(resolve_stealth_act(a,true)==a && resolve_stealth_act(a,false)==a);
 }
 
+void native_attack_arming() {
+    assert(arms_native_attack(true,false,false) && arms_native_attack(true,false,true));  // fast stealth
+    assert(arms_native_attack(true,true,true));                                           // calm + the engine offers the victim
+    assert(!arms_native_attack(true,true,false));                                         // calm without offer: no press
+    assert(!arms_native_attack(false,false,true) && !arms_native_attack(false,true,true)); // not a stealth strike
+}
+
+void slow_reject_counts_once_per_episode() {
+    SlowRejectLatch l;unsigned n=0;
+    for(std::uint64_t t=1000;t<3000;t+=16) n+=l.first(7,t);   // resting blade for 2 s
+    assert(n==1);
+    assert(l.first(8,3016));                                  // a second guard counts again
+    assert(!l.first(8,3100) && l.first(8,3500));              // same guard after a 400 ms gap counts again
+}
+
+struct CalmPayload {bool stealth_only{};};
+void fast_contact_clears_calm_flag_on_held_payload() {
+    StealthHold<CalmPayload> hold;
+    assert(hold.hold({true},7,1000,true) && hold.payload()->stealth_only);
+    assert(hold.hold({false},7,1100,true));                   // absorbed
+    hold.payload_mut()->stealth_only=false;                   // what the consumer does for a non-calm contact
+    assert(!hold.payload()->stealth_only);
+    assert(hold.service(1110,false,true,false,false,true)==StealthAct::hit); // aware now: the fast swing's ordinary hit stands
+}
+
 int main() {
+    native_attack_arming();
+    slow_reject_counts_once_per_episode();
+    fast_contact_clears_calm_flag_on_held_payload();
     classify_speed_bands();
     stealth_strike_uses_stealth_speed();
     knob_parsing();

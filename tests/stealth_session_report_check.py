@@ -70,6 +70,15 @@ def held_native_offered_but_no_kill():
     assert (v["likely_cause"], v["fix_task"]) == ("engine_rule_rejects", "Task 10 cause K"), v
 
 
+def slow_drop_counters_are_notes_not_buckets():
+    st = mkstatus(enq=3, reject=(0, 3, 0, 0, 0))
+    st["sword_contact"].update({"slow_aware_drops": 2, "slow_unheld_drops": 1})
+    v = report.verdict(st, [])
+    assert any(n.startswith("slow_aware_drops=2") for n in v["notes"]) and any(n.startswith("slow_unheld_drops=1") for n in v["notes"]), v
+    assert v["contacts"] == 3 and sum(v["buckets"].values()) == 3, v
+    assert not any("slow_" in n and "drops" in n for n in report.verdict(mkstatus(enq=1), [])["notes"])
+
+
 def held_native_took_it():
     v = report.verdict(mkstatus(3, (3, 3, 0, 0, 0)), [])
     assert (v["stage"], v["likely_cause"]) == ("dropped", "native_took_over"), v

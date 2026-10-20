@@ -18,7 +18,15 @@ def check(source: str, consumer: str) -> None:
     assert source.index("classify_contact_speed(") < source.index("const unsigned why=")
     assert "stealth_strike(speed,rear_side,stealth_speed)" in source and "stealth_strike(speed,rear_side,d2vr::SwordHitGate::hit_speed)" not in source
     assert 'L"stealth-speed"' in source and "stealth_speed_from_knob(" in source
+    assert "const bool too_slow=speed_class==d2vr::ContactSpeedClass::too_slow || (speed_class==d2vr::ContactSpeedClass::stealth_only && !rear_side);" in source
+    assert "d2vr::arms_native_attack(owned_contact->stealth_strike,owned_contact->stealth_only,owned_contact->native_offer)) contact_attack_tick=now;" in source
+    assert "if(owned_contact->stealth_strike) contact_attack_tick=now;" not in source
+    assert "slow_reject_latch.first(contact->entity,now)" in source
     assert "resolve_stealth_act(" in consumer
+    assert "const auto act=resolve_stealth_act(raw_act,c.stealth_only);" in consumer
+    drop = consumer.index("if(contact.stealth_only) {++stealth_slow_unheld_drops_;continue;}")
+    assert drop < consumer.index("NativeMelee::apply(self->base_,self->read_,contact.equipment.sword,contact.hit,&observation)")
+    assert "held_payload->stealth_only=false" in consumer
     begin = source.index("const unsigned why=")
     end = source.index("// The tip striking", begin)
     producer = source[begin:end]

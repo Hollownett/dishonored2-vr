@@ -60,6 +60,11 @@ def verdict(status, combat_rows):
     notes = []
     if accounted != enqueued:
         notes.append("buckets sum to %d, enqueued=%d (pre-enqueue rejects or consumer rejects)" % (accounted, enqueued))
+    for key, text in (("slow_aware_drops", "calm contacts dropped because the guard turned aware while held (no ordinary hit)"),
+                      ("slow_unheld_drops", "calm contacts dropped without being held (aware, not damageable, slot busy or stealth off)")):
+        value = sc.get(key)
+        if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+            notes.append("%s=%d: %s" % (key, value, text))
     hh = sc.get("hit_height")
     if isinstance(hh, list) and len(hh) >= 3 and hh[2] > 0 and hh[0] == 0 and hh[1] == 0:
         notes.append("head-height contacts only")

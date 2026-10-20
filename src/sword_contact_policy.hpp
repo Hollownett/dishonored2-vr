@@ -43,12 +43,27 @@ inline ContactSpeedClass classify_contact_speed(double peak,double stealth_speed
 }
 // A calm touch (below the hit speed) on a guard who turned out to be aware must never land the ordinary alerting hit.
 inline StealthAct resolve_stealth_act(StealthAct act,bool stealth_only) noexcept {return act==StealthAct::hit&&stealth_only?StealthAct::drop:act;}
+// The native Slash press (contact_attack_tick) is the engine's own ordinary attack unless its kill sensor offers this victim (then it
+// becomes the Assassination). A calm contact must not press it without that offer: the hold kill handles the calm case.
+inline constexpr bool arms_native_attack(bool stealth_strike,bool stealth_only,bool native_offer) noexcept {return stealth_strike&&(!stealth_only||native_offer);}
+// Counts a rejected slow contact once per victim episode (the blade resting on a guard rejects every frame).
+class SlowRejectLatch {
+    std::uintptr_t entity_{};std::uint64_t last_{};
+public:
+    inline static constexpr std::uint64_t gap_ms=300;
+    bool first(std::uintptr_t entity,std::uint64_t now) noexcept {
+        const bool fresh=entity!=entity_ || now<last_ || now-last_>gap_ms;
+        entity_=entity;last_=now;return fresh;
+    }
+};
 inline bool stealth_strike(double tip_speed,bool rear_or_side,double hit_speed) noexcept {return rear_or_side && tip_speed>=hit_speed;}
 template<class Payload> class StealthHold {
     std::optional<Payload> held_;std::uint32_t victim_{};std::uint64_t tick_{},window_{};
 public:
     bool pending() const noexcept {return held_.has_value();}
     const Payload* payload() const noexcept {return held_?&*held_:nullptr;}
+    // Lets a full-speed contact absorbed into a calm hold clear the payload's calm flag (it keeps its ordinary-hit fallback).
+    Payload* payload_mut() noexcept {return held_?&*held_:nullptr;}
     std::uint32_t victim() const noexcept {return held_?victim_:0;}
     // true: absorbed (a free slot, or another contact on the held victim, whose first contact keeps the deadline).
     bool hold(const Payload& payload,std::uint32_t victim,std::uint64_t now,bool native_offer) {
