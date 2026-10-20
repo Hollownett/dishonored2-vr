@@ -44,7 +44,29 @@ int main() {
     {   // mass_cap_binds: 300 N * 0.01 s / (12 kg + 2 kg hand)
         auto t=tow_on();auto in=base(t,2.4,.8);in.dt=.01;in.pelvis_kg=12;
         const auto out=plan_tow(in);CHECK(out.write);
-        CHECK(length(out.linear)<=300*.01/14+1e-9 && length(out.linear)>0);
+        CHECK(near(length(out.linear),300*.01/14,1e-6));
+    }
+    {   // moving pelvis: the cap limits the DELTA from the current velocity, not the absolute speed
+        auto t=tow_on();auto in=base(t,2.8,.8);in.dt=.01;in.pelvis_kg=12;in.pelvis_velocity={3,0,0};   // wanted 4
+        auto out=plan_tow(in);const double cap=300*.01/14;
+        CHECK(out.write && near(out.linear.x-3,cap,1e-6) && near(out.linear.y,0));
+        in.pelvis_velocity={1.5,0,0};out=plan_tow(in);CHECK(near(out.linear.x-1.5,cap,1e-6));
+        in.pelvis_velocity={3.9,0,0};out=plan_tow(in);CHECK(near(out.linear.x,4,1e-9)); // inside the cap: reaches the wanted speed
+        in.pelvis_velocity={5,0,0};out=plan_tow(in);CHECK(out.write && near(out.linear.x,5-cap,1e-6)); // faster than wanted: eased down by the cap
+    }
+    {   // heavier pelvis -> smaller step (mass reaches the cap)
+        auto t=tow_on();auto in=base(t,2.4,.8);in.dt=.01;in.pelvis_kg=30;
+        CHECK(near(length(plan_tow(in).linear),300*.01/32,1e-6));
+    }
+    {   // horizontal speed equals the law with a loose cap; vertical offset does not count as reach
+        auto t=tow_on();t.strength_scale=10;t.axial_n=600;t.mass_floor_kg=.1;
+        auto in=base(t,1.3,.8);in.pelvis_kg=.5;in.dt=.1;in.target={1.3,0,2};
+        auto out=plan_tow(in);CHECK(out.write && near(out.linear.x,3,1e-6) && out.linear.z==0);
+        in.target={.84,0,5};CHECK(!plan_tow(in).write);
+    }
+    {   // saturation only reports when the tow would have written
+        auto t=tow_on();auto in=base(t,.84,.8);in.limb_saturated=true;CHECK(!plan_tow(in).disabled_saturated);
+        in=base(t,2,0);in.limb_saturated=true;const auto out=plan_tow(in);CHECK(!out.disabled_saturated && !out.write);
     }
     {   // saturated_limb_disables
         auto t=tow_on();auto in=base(t,2,.8);in.limb_saturated=true;
