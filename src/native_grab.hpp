@@ -178,6 +178,9 @@ private:
     UINT64 obstruction_token_{};bool obstruction_required_{};
     UINT64 acquisition_samples_{};std::ofstream acquisitions_;
     // F1 mass probe (read-only): build/mass-probe, read once at install, appends to artifacts/mass-probe.csv at a bind, at most 200 rows per session.
+    // Collar (chest/neck) holds stay off by default: the mass probe has not yet confirmed bones 2/3 are chest/neck. Enabled only while
+    // build/collar-grab exists; remove this knob once the probe verifies the bone map. The yank path below passes allow_collar=false.
+    bool collar_grab_{};
     bool mass_probe_{};unsigned mass_probe_rows_{};std::ofstream mass_probe_out_;
     static constexpr unsigned mass_probe_limit=200;
     void probe_masses(const NativeRigidBody& body,UINT64 now) {
@@ -252,8 +255,8 @@ private:
             if(!id || (*id>>16)!=index || !pos)return {};
             const Vec3 point{(*pos)[0],(*pos)[1],(*pos)[2]};
             if(!finite(point) || length(point-p.hand.position)>grab_retain_distance+3)return {};
-            return guard?nearest_ragdoll_body(read_,base_,*entity,p.hand.position):native_rigid_body(read_,base_,*entity);
-        },[&](const NativeRigidBody& body){return body.bone<0?native_rigid_body(read_,base_,body.entity):nearest_ragdoll_body(read_,base_,body.entity,p.hand.position);});
+            return guard?corpse_candidate(read_,base_,*entity,p.hand.position,collar_grab_):native_rigid_body(read_,base_,*entity);
+        },[&](const NativeRigidBody& body){return body.bone<0?native_rigid_body(read_,base_,body.entity):corpse_candidate(read_,base_,body.entity,p.hand.position,collar_grab_);});
         if(!refresh && lane.focus_tick && now>=lane.focus_tick && now-lane.focus_tick<100 &&
            length(p.hand.position-lane.focus_hand)<.05 && lane.focus_excluded==excluded) {
             if(!lane.focus) return {};
@@ -713,8 +716,9 @@ public:
         log_.open(file,std::ios::trunc);if(!log_) throw std::runtime_error("Cannot open native grab evidence");
         acquisitions_.open(file.parent_path()/L"native-grab-acquisition.csv",std::ios::trunc);
         if(!acquisitions_) throw std::runtime_error("Cannot open native acquisition evidence");
-        mass_probe_=false;mass_probe_rows_=0;mass_probe_out_.close();
+        mass_probe_=false;mass_probe_rows_=0;mass_probe_out_.close();collar_grab_=false;
         {std::error_code ec;const auto root=file.parent_path().parent_path();
+         collar_grab_=std::filesystem::exists(root/L"build"/L"collar-grab",ec);
          if(std::filesystem::exists(root/L"build"/L"mass-probe",ec)) {
             mass_probe_out_.open(file.parent_path()/L"mass-probe.csv",std::ios::trunc);
             if(mass_probe_out_) {mass_probe_out_<<mass_probe_csv_header()<<'\n';mass_probe_out_.flush();mass_probe_=true;}

@@ -137,6 +137,20 @@ int main() {
         put(npc_pool+10*0xb0+0x44,std::uint32_t{0x8e});assert(!native_ragdoll_body(read,base,npc,10)); // keyframed body
         put(npc_pool+10*0xb0+0x44,std::uint32_t{0x82});put(npc,base+0x1c886a8);assert(!native_ragdoll_body(read,base,npc,10)); // not a guard
         put(npc,base+0x1c5e108);
+        {   // collar targets (chest 2, neck 3): dead or unconscious guards only, and only when the caller allows them
+            for(int b=0;b<17;++b) {const bool want=b==2||b==3||b==6||b==7||b==9||b==10||b==12||b==13||b==15||b==16;assert(ragdoll_hold_bone(b)==want);}
+            put(npc+0xd1,static_cast<unsigned char>(0x08));
+            assert(nearest_ragdoll_body(read,base,npc,{2.02,0,0})->bone!=2 && ragdoll_grab_bone(nearest_ragdoll_body(read,base,npc,{2.02,0,0})->bone)); // default: a limb
+            assert(nearest_ragdoll_body(read,base,npc,{2.02,0,0},true)->bone==2);
+            assert(nearest_ragdoll_body(read,base,npc,{3,0,0},true)->bone==3);
+            for(const double x:{0.0,4.0,0.5,3.9}) {const auto b=nearest_ragdoll_body(read,base,npc,{x,0,0},true);assert(b && b->bone!=0 && b->bone!=4 && b->bone!=1);}
+            put(npc+0xd1,static_cast<unsigned char>(0x80));
+            assert(!ragdoll_pushable_state(read,npc) && !corpse_candidate(read,base,npc,{2.02,0,0},true) && !corpse_candidate(read,base,npc,{2.02,0,0},false)); // awake ragdolling: no candidate
+            put(npc+0xd1,static_cast<unsigned char>(0x20));
+            assert(corpse_candidate(read,base,npc,{2.02,0,0},true)->bone==2 && ragdoll_grab_bone(corpse_candidate(read,base,npc,{2.02,0,0},false)->bone));
+            put(npc+0xd1,static_cast<unsigned char>(0x08));assert(corpse_candidate(read,base,npc,{3,0,0},true)->bone==3);
+            put(npc+0xd1,static_cast<unsigned char>(0xa0));
+        }
         {   // physical hands I1: the clamp's exclusion of a met dead/unconscious guard is EXACTLY the body the contact service met (its bone and handle,
             // any of the 17: a torso push too), validated again here; mapping props alone, or a limb nearest the hand, dropped or misplaced the sweep
             for(std::uint32_t b=0;b<17;++b) {const auto rec=npc_pool+b*0xb0;const std::uintptr_t ud=0x9600000+b*0x100,comp=0x9700000+b*0x100;put(rec+0x90,ud);put(ud+8,comp);put(comp+0x10,npc);}

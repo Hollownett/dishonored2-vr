@@ -98,6 +98,9 @@ inline constexpr std::array<double,17> ragdoll_bone_radius{.14,.13,.16,.07,.11,.
 inline constexpr bool ragdoll_grab_bone(int bone) {
     return bone==6 || bone==7 || bone==9 || bone==10 || bone==12 || bone==13 || bone==15 || bone==16;
 }
+// Dead or unconscious guards can also be held by the collar (chest 2, neck 3): a full fist on the collar is a physical hold, while a grip alone
+// stays the game's shoulder carry. Kept apart from ragdoll_grab_bone so the limb-versus-torso wake classification does not change.
+inline constexpr bool ragdoll_hold_bone(int bone) {return ragdoll_grab_bone(bone) || bone==2 || bone==3;}
 template<class Read> std::optional<NativeRigidBody> native_ragdoll_body(Read& read,std::uintptr_t base,std::uintptr_t entity,int bone) {
     using namespace rig;
     if(bone<0 || bone>=17) return {};
@@ -146,11 +149,11 @@ template<class Read> std::optional<NativeRigidBody> native_ragdoll_body(Read& re
        value<std::uint32_t>(read,record+0x70)!=handle || value<std::uintptr_t>(read,*game+0x3130b0+(*id>>16)*8)!=entity) return {};
     return result;
 }
-// The grabbable limb of this body nearest the hand.
-template<class Read> std::optional<NativeRigidBody> nearest_ragdoll_body(Read& read,std::uintptr_t base,std::uintptr_t entity,Vec3 hand) {
+// The grabbable limb of this body nearest the hand (with allow_collar: the chest and neck too, dead or unconscious guards only).
+template<class Read> std::optional<NativeRigidBody> nearest_ragdoll_body(Read& read,std::uintptr_t base,std::uintptr_t entity,Vec3 hand,bool allow_collar=false) {
     std::optional<NativeRigidBody> best;
     for(int bone=0;bone<17;++bone) {
-        if(!ragdoll_grab_bone(bone)) continue;
+        if(allow_collar?!ragdoll_hold_bone(bone):!ragdoll_grab_bone(bone)) continue;
         const auto body=native_ragdoll_body(read,base,entity,bone);
         if(body && (!best || body->contact_distance(hand)<best->contact_distance(hand))) best=body;
         if(!body && bone==3) break; // not a guard body the hands can drag: skip the remaining reads
@@ -162,6 +165,12 @@ template<class Read> std::optional<NativeRigidBody> nearest_ragdoll_body(Read& r
 template<class Read> bool ragdoll_pushable_state(Read& read,std::uintptr_t entity) {
     const auto state=rig::value<unsigned char>(read,entity+0xd1);
     return state && (*state&0x28)!=0;
+}
+// Discovery branch for a guard: a candidate only when he is dead or unconscious (an awake guard, even one ragdolling after a yank, gives none;
+// living guards are the pull-and-stagger path). The collar bones are offered only when allow_collar (the build/collar-grab knob).
+template<class Read> std::optional<NativeRigidBody> corpse_candidate(Read& read,std::uintptr_t base,std::uintptr_t entity,Vec3 hand,bool allow_collar) {
+    if(!ragdoll_pushable_state(read,entity)) return {};
+    return nearest_ragdoll_body(read,base,entity,hand,allow_collar);
 }
 // A body the hands may push is also not carried (component +0xc8 native parent, +0xd2 temporary lease: the check of native_rigid_body for a
 // prop) and belongs to this guard the way NativeWorldTrace::inspect_hit_body proves a hit body's owner: record +0x90 userdata -> +8 component ->
