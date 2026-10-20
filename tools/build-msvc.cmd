@@ -584,6 +584,15 @@ if not "%errorlevel%"=="0" exit /b 1
 cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT /Isrc tests\carry_diagnostics_check.cpp /Fo:build\carry_diagnostics_check.obj /Fe:build\carry_diagnostics_check.exe
 if errorlevel 1 goto build_failed
 if not errorlevel 0 goto build_failed
+cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT /Isrc tests\corpse_diagnostics_check.cpp /Fo:build\corpse_diagnostics_check.obj /Fe:build\corpse_diagnostics_check.exe
+if errorlevel 1 goto build_failed
+if not errorlevel 0 goto build_failed
+build\corpse_diagnostics_check.exe
+if errorlevel 1 goto build_failed
+if not errorlevel 0 goto build_failed
+python tests\corpse_routing_check.py
+if errorlevel 1 goto build_failed
+if not errorlevel 0 goto build_failed
 build\carry_diagnostics_check.exe
 if errorlevel 1 goto build_failed
 if not errorlevel 0 goto build_failed
