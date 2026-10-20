@@ -9,24 +9,30 @@
 #include <cmath>
 
 namespace d2vr {
-struct TowInput {Vec3 target{},pelvis{},pelvis_velocity{};double bind_reach{},pelvis_kg{},dt{};bool limb_saturated{};const GrabTuning* tuning{};};
+struct TowInput {Vec3 target{},pelvis{},pelvis_velocity{};double bind_reach{},pelvis_kg{},dt{},recovery_s{};bool limb_saturated{};const GrabTuning* tuning{};};
 // write: apply `linear` (absolute pelvis velocity, z = 0) with zero angular velocity. bind_reach: store back as the lane's tow reach.
-struct TowOutput {bool write{};Vec3 linear{};double bind_reach{};bool disabled_saturated{};};
+struct TowOutput {bool write{};Vec3 linear{};double bind_reach{},recovery_s{};bool disabled_saturated{};};
 
 inline TowOutput plan_tow(const TowInput& in) {
     TowOutput out;
     out.bind_reach=std::isfinite(in.bind_reach)?in.bind_reach:0;
     if(!in.tuning || !in.tuning->tow) return out;
+    out.recovery_s=std::isfinite(in.recovery_s)&&in.recovery_s>0?in.recovery_s:0;   // carried by the caller's lane, like bind_reach
     if(!finite(in.target) || !finite(in.pelvis) || !finite(in.pelvis_velocity) || !std::isfinite(in.pelvis_kg) || !std::isfinite(in.dt) || !(in.dt>0)) return out;
     Vec3 pull=in.target-in.pelvis;pull.z=0;
     const double reach=length(pull);
     if(!std::isfinite(reach)) return out;
+    // Stale-frame recovery (same rule as PhysicalGrab::corpse_motor): a stale dt opens a window in which the closing speed is capped at catch_up_mps;
+    // it ends when the window runs out or the pelvis is back within 5 cm of its reach.
+    if(in.dt>in.tuning->dt_max) out.recovery_s=in.tuning->catch_up_window_s;
+    else if(out.recovery_s>0) {out.recovery_s-=in.dt;if(out.recovery_s<=0) out.recovery_s=0;}
     if(!(in.bind_reach>0) || !std::isfinite(in.bind_reach)) {out.bind_reach=std::clamp(reach,.4,1.4);return out;}
-    if(reach<=in.bind_reach+.05) return out;
+    if(reach<=in.bind_reach+.05) {out.recovery_s=0;return out;}
     if(in.limb_saturated) {out.disabled_saturated=true;return out;}
     // A stale frame (raw dt beyond dt_max) scales the catch-up by dt_max/dt, the same rule as PhysicalGrab::corpse_motor.
     const double catch_up=in.dt>in.tuning->dt_max?in.tuning->dt_max/in.dt:1.;
-    const double speed=std::min((reach-in.bind_reach)*6*catch_up,4.);
+    double speed=std::min((reach-in.bind_reach)*6*catch_up,4.);
+    if(out.recovery_s>0) speed=std::min(speed,in.tuning->catch_up_mps);
     const Vec3 dir=pull*(1/reach);
     const Vec3 wanted=dir*speed;
     Vec3 current=in.pelvis_velocity;current.z=0;

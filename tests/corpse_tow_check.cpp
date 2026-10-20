@@ -43,6 +43,18 @@ int main() {
         auto out=plan_tow(in);CHECK(out.write && near(length(out.linear),.8,1e-6));
         in.dt=t.dt_max;out=plan_tow(in);CHECK(near(length(out.linear),4,1e-6));
     }
+    {   // stale_recovery: a stale frame opens the window; the normal frames after it keep the closing speed at catch_up_mps; it ends on expiry or when the reach closes
+        auto t=tow_on();t.strength_scale=10;t.axial_n=600;t.mass_floor_kg=.1;
+        auto in=base(t,2.8,.8);in.pelvis_kg=.5;in.dt=1./30;
+        auto out=plan_tow(in);CHECK(near(length(out.linear),4,1e-6) && out.recovery_s==0);   // normal play: unchanged law, no state
+        in.dt=.1;out=plan_tow(in);CHECK(out.write && near(length(out.linear),t.catch_up_mps,1e-6) && near(out.recovery_s,t.catch_up_window_s));
+        in.dt=1./30;in.recovery_s=out.recovery_s;
+        for(int i=0;i<5;++i) {out=plan_tow(in);CHECK(near(length(out.linear),t.catch_up_mps,1e-6) && out.recovery_s<in.recovery_s);in.recovery_s=out.recovery_s;}
+        in.recovery_s=1./60;out=plan_tow(in);CHECK(out.recovery_s==0);   // the window ran out during this frame: the law is back to normal
+        CHECK(near(length(out.linear),4,1e-6));
+        in.recovery_s=.4;in.target={.84,0,0};out=plan_tow(in);CHECK(!out.write && out.recovery_s==0);   // reach closed to within 5 cm of the bind reach
+        in.target={2.8,0,0};in.recovery_s=std::nan("");out=plan_tow(in);CHECK(out.recovery_s==0 && near(length(out.linear),4,1e-6));   // junk state is ignored
+    }
     {   // horizontal_only
         auto t=tow_on();auto in=base(t,1.3,.8);in.target={1.3,0,1};in.pelvis_velocity={0,0,5};
         const auto out=plan_tow(in);CHECK(out.write && out.linear.z==0 && out.linear.x>0);

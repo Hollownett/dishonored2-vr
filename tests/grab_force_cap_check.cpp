@@ -32,7 +32,7 @@ int main() {
     {   // lab_tuned_defaults_pinned (tools/corpse_drag_lab.cpp, Task 9)
         const GrabTuning t;
         CHECK(t.strength_scale==3 && t.axial_n==300 && t.lateral_n==90 && t.torque_nm==30 && t.hand_kg==2 && t.mass_floor_kg==.5 && t.mass_ceiling_kg==60);
-        CHECK(t.lift_fraction==.25 && !t.tow && !t.use_measured_mass && near(t.dt_max,1./30));
+        CHECK(t.lift_fraction==.25 && !t.tow && !t.use_measured_mass && near(t.dt_max,1./30) && t.catch_up_mps==1 && t.catch_up_window_s==.5);
     }
     // axial_cap_300n
     {
@@ -133,6 +133,9 @@ int main() {
         CHECK(r.source==TuningSource::file && r.error.empty());
         CHECK(r.value.axial_n==250 && r.value.strength_scale==2 && !r.value.tow && r.value.lift_fraction==.4);
         CHECK(r.value.lateral_n==90 && !r.value.use_measured_mass && r.value.axial_cap()==500);
+        auto cu=load_grab_tuning(write_file("d2vr_gt_catchup.cfg","catch_up_mps 2\ncatch_up_window_s .8\n"));
+        CHECK(cu.source==TuningSource::file && cu.value.catch_up_mps==2 && cu.value.catch_up_window_s==.8);
+        expect_defaults_with_error("d2vr_gt_catchup_bad.cfg","catch_up_mps 0\n");
         expect_defaults_with_error("d2vr_gt_unknown.cfg","bogus 1\n");
         expect_defaults_with_error("d2vr_gt_nan.cfg","axial_n 250\nlateral_n nan\n");
         expect_defaults_with_error("d2vr_gt_novalue.cfg","axial_n 250\ntow\n");

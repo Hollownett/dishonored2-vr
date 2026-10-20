@@ -81,8 +81,9 @@ class PhysicalGrab {
     bool forced_release_=false,has_released_=false;
     std::uint64_t release_tick_{};
     Vec3 last_anchor_{};
+    double recovery_s_=0;   // stale-frame recovery window left (s); 0 = normal play. Reset on bind and release.
     void note_release(ReleaseReason reason,bool forced) {
-        reason_=reason;forced_release_=forced;release_tick_=tick_;has_released_=true;
+        recovery_s_=0;reason_=reason;forced_release_=forced;release_tick_=tick_;has_released_=true;
     }
 public:
     // Corpse lag rule (Bonelab's hand lags a blocked body, then lets go): the grasp point trailing its target by more than
@@ -94,6 +95,7 @@ public:
     void arm() noexcept {armed_=true;}
     bool held() const {return held_;}
     const Vec3& velocity() const {return velocity_;}
+    double recovery_s() const {return recovery_s_;}
     bool sample(const WorldTrackedPose& hand,float grip,bool usable,std::uint64_t epoch,std::uint64_t tick) {
         const bool valid_input=usable && epoch && tick && grab_pose_valid(hand) && std::isfinite(grip) && grip>=0 && grip<=1;
         if(!valid_input || epoch!=epoch_ || tick<tick_ || (tick_ && tick-tick_>grab_pose_freshness_ms)) {
@@ -135,7 +137,7 @@ public:
         relative_.position=grab_local(previous_,object.position-previous_.position);
         for(unsigned i=0;i<3;++i) relative_.basis[i]=grab_local(previous_,object.basis[i]);
         contact_local_=grab_local(object,contact-object.position);
-        lag_timer_.reset();has_released_=false;forced_release_=false;reason_=ReleaseReason::none;last_anchor_=contact;
+        recovery_s_=0;lag_timer_.reset();has_released_=false;forced_release_=false;reason_=ReleaseReason::none;last_anchor_=contact;
         held_=true;return true;
     }
     // The grasped point: object origin plus the stored contact offset in the object's current frame (valid while held()).
@@ -212,7 +214,14 @@ public:
         // Closing it at the normal gain would command a jump (0.4 m x 18 = 7 m/s) and whip the chain; scale the error term by dt_max/dt so the
         // catch-up speed a stall can ask for stays what a normal frame could (smooth catch-up, as the hand lags and then closes in Bonelab).
         const double catch_up=in.dt>tuning.dt_max?tuning.dt_max/in.dt:1.;
-        const auto want_v=grab_limit(error*(18*catch_up)+feed,10),want_w=grab_limit(spin*12,5);
+        // The stale frame also opens a recovery window: the NORMAL frames that follow still see the leftover lag (a 0.5 s stall leaves ~0.3 m) and
+        // would close it at the full gain (~6 m/s), whipping the chain. While recovering, the error-closure term alone is capped at catch_up_mps
+        // (the hand's own feed velocity is not); recovery ends when the lag is under 5 cm or the window runs out. Outside recovery the law is unchanged.
+        if(in.dt>tuning.dt_max) recovery_s_=tuning.catch_up_window_s;
+        else if(recovery_s_>0) {recovery_s_-=in.dt;if(recovery_s_<=0 || lag<.05) recovery_s_=0;}
+        auto closure=error*(18*catch_up);
+        if(recovery_s_>0) {const double c=length(closure);if(c>tuning.catch_up_mps) closure=closure*(tuning.catch_up_mps/c);}
+        const auto want_v=grab_limit(closure+feed,10),want_w=grab_limit(spin*12,5);
         // Unknown body velocity: step from rest (the caller counts the fallback).
         const Vec3 v0=in.velocity_known?in.body_velocity:Vec3{},w0=in.velocity_known?in.body_spin:Vec3{};
         const auto step=cap_velocity_step(v0,w0,want_v,want_w,previous_.basis[0],in.object_kg,in.inertia_kgm2,dt,tuning,in.share);

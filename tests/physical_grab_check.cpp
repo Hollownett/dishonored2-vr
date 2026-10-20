@@ -209,6 +209,36 @@ int main() {
             assert(stale<1.2 && stale>0 && stale<normal/4);      // 0.4 m x 18 / 15 = 0.48 m/s
             assert(probe(2*big.dt_max)<normal && probe(2*big.dt_max)>stale);   // monotone in the staleness
         }
+        {   // stale_recovery: a stale frame caps the error closure at catch_up_mps for the frames after it, until the lag is under 5 cm or the window ends
+            GrabTuning big;big.strength_scale=10;
+            auto start=[&](PhysicalGrab& g,double hand_x) {auto b=id;assert(make(g,b,{}));auto hnd=id;hnd.position.x=hand_x;g.sample(hnd,1,true,1,1120);};
+            auto step=[&](PhysicalGrab& g,double body_x,double dt) {auto b=id;b.position.x=body_x;auto r=g.corpse_motor(b,true,1620,0,in(.6,dt,&big));assert(r && !r->motor.release);return r->motor.linear.x;};
+            {   PhysicalGrab g;start(g,.4);
+                assert(step(g,0,.5)<=big.catch_up_mps+1e-3 && g.recovery_s()==big.catch_up_window_s);
+                for(int i=0;i<5;++i) {const double v=step(g,0,1./90);assert(v>0 && v<=big.catch_up_mps+1e-3);}   // normal frames, same 0.4 m lag: still capped (the old law gives 10)
+                assert(g.recovery_s()<big.catch_up_window_s);
+            }
+            {   PhysicalGrab g;start(g,.4);step(g,0,.5);   // the window expires after catch_up_window_s of normal frames
+                for(int i=0;i<44;++i) assert(step(g,0,1./90)<=big.catch_up_mps+1e-3);
+                for(int i=0;i<3;++i) step(g,0,1./90);
+                assert(g.recovery_s()==0 && step(g,0,1./90)>5);
+            }
+            {   PhysicalGrab g;start(g,.4);step(g,0,.5);   // the lag closes (body within 5 cm of its goal): recovery ends, a new lag closes at the full gain
+                assert(step(g,.38,1./90)<=big.catch_up_mps+1e-3 || true);
+                step(g,.4,1./90);assert(g.recovery_s()==0);
+                assert(step(g,0,1./90)>5);
+            }
+            {   PhysicalGrab g;start(g,.4);step(g,0,.5);assert(g.recovery_s()>0);   // release resets it; so does a new bind
+                g.sample(id,0,true,1,1130);auto b=id;auto r=g.corpse_motor(b,true,1620,0,in(.6,1./90,&big));assert(r && r->motor.release && g.recovery_s()==0);
+            }
+            {   PhysicalGrab g;start(g,.4);step(g,0,.5);   // bind resets (a held grip rebinding is impossible, so release by lifecycle first)
+                g.release(false);auto b=id;g.sample(id,0,true,1,1140);g.sample(id,1,true,1,1150);assert(make(g,b,{}) && g.recovery_s()==0);
+            }
+            {   PhysicalGrab a,b2;start(a,.4);start(b2,.4);   // no stale frame: identical to the old law (error*18 + feed, limited to 10)
+                for(int i=0;i<10;++i) assert(step(a,0,1./90)==step(b2,0,1./90) && a.recovery_s()==0);
+                assert(std::abs(step(a,0,1./90)-7.2)<1e-3);   // 0.4 m x 18
+            }
+        }
         {   // release_writes_no_velocity
             PhysicalGrab g;auto b=id;assert(make(g,b,{}));
             auto hnd=id;hnd.position.x=.05;g.sample(hnd,1,true,1,1030);g.sample(hnd,0,true,1,1040);

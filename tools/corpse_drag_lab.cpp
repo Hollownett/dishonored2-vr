@@ -175,7 +175,7 @@ void simulate(Scenario& s) {
     } else for(int i=0;i<int(s.preroll/kFrame);++i) for(int k=0;k<kSub;++k) d.step(kFrame/kSub);
     std::array<double,17> z0{};for(int i=0;i<17;++i) z0[std::size_t(i)]=d.x[std::size_t(i)].z;
     const std::size_t n=s.hands.size();
-    std::vector<PhysicalGrab> grabs(n);std::vector<Vec3> prev_hand(n);std::vector<double> tow_reach(n,0);
+    std::vector<PhysicalGrab> grabs(n);std::vector<Vec3> prev_hand(n);std::vector<double> tow_reach(n,0),tow_recovery(n,0);
     std::vector<bool> bound(n,false),open(n,false);std::vector<double> hand_lift(n,0);
     EntityLockout lockout;const std::uint32_t entity=7;
     Metrics& m=s.m;m=Metrics{};
@@ -260,8 +260,8 @@ void simulate(Scenario& s) {
                 // pelvis tow
                 if(s.tuning.tow && b!=0) {
                     TowInput ti;ti.target=grabs[h].target().position;ti.pelvis=d.x[0];ti.pelvis_velocity=d.v[0];ti.bind_reach=tow_reach[h];
-                    ti.pelvis_kg=ragdoll_class_kg[0];ti.dt=dt;ti.limb_saturated=cm->capped;ti.tuning=&s.tuning;
-                    const auto plan=plan_tow(ti);tow_reach[h]=plan.bind_reach;
+                    ti.pelvis_kg=ragdoll_class_kg[0];ti.dt=dt;ti.recovery_s=tow_recovery[h];ti.limb_saturated=cm->capped;ti.tuning=&s.tuning;
+                    const auto plan=plan_tow(ti);tow_reach[h]=plan.bind_reach;tow_recovery[h]=plan.recovery_s;
                     if(plan.write) {d.v[0].x=plan.linear.x;d.v[0].y=plan.linear.y;++m.tow_writes;}
                 }
             }
@@ -420,25 +420,25 @@ std::vector<Scenario> scenarios(const GrabTuning& base) {
         all.push_back(s);
     }
     {
-        // The catch-up limit (dt_max/dt on a stale frame) bounds the stale frame only; the NEXT normal frames still close the leftover lag at the full
-        // gain (a 0.5 s hitch leaves the body ~0.3 m behind), so the far end of the chain whips. Measured (see the report): 6 m/s is NOT achieved at 0.8 m/s.
-        // Judged: the runaway envelope (12 m/s) is not reached and the hold survives; the 6 m/s target is reported as INFO. At 1.2 m/s even the 12 m/s bound
-        // is exceeded (known limit, INFO until the catch-up rule is extended past the stale frame).
-        const auto hitch_judge=[](double limit,bool info,bool want6) {return [=](const Scenario& sc,const Metrics& m) {std::vector<Check> c{
-            below(fmt("no body above %g m/s after the hitch",limit),m.peak_after_hitch,limit,"m/s",info),
-            truth("no runaway release after the hitch",!(m.released && m.reason==ReleaseReason::runaway),m.released?fmt("released at %.3f s, reason %u",m.release_time,unsigned(m.reason)):"held",info),
-            truth("the first lagging frame after the hitch does not release (dt clamped for the lag timer too)",!m.released || m.release_time>sc.hitch_at+sc.hitch_len+.1,
-                m.released?fmt("released at %.3f s (hitch ends %.3f s)",m.release_time,sc.hitch_at+sc.hitch_len):"held",info)};
-            if(want6) c.push_back(below("INFO target: no body above 6 m/s after the hitch (not achieved by the catch-up limit alone)",m.peak_after_hitch,6,"m/s",true));
-            return c;};};
-        auto s=make("hitch","One 0.5 s game-thread hitch during a 0.8 m/s wrist drag (the hand jumps 0.4 m)","no body above 12 m/s (runaway limit) after the hitch, hold survives; 6 m/s target reported as INFO");
-        s.hands={drag_hand(7,{0,1,0},3,.8,.3)};s.hitch_at=1.2;s.hitch_len=.5;s.duration=4.5;s.judge=hitch_judge(12,false,true);
+        // Stale-frame recovery (PhysicalGrab::corpse_motor): the error-closure speed is capped at catch_up_mps for catch_up_window_s after a stale frame.
+        const auto hitch_judge=[](double limit,bool lag_ok) {return [=](const Scenario& sc,const Metrics& m) {return std::vector<Check>{
+            below(fmt("no body above %g m/s after the hitch",limit),m.peak_after_hitch,limit,"m/s"),
+            truth("no runaway release after the hitch",!(m.released && m.reason==ReleaseReason::runaway),m.released?fmt("released at %.3f s, reason %u",m.release_time,unsigned(m.reason)):"held"),
+            truth(lag_ok?"no lag release after the hitch":"the first lagging frame after the hitch does not release (dt clamped for the lag timer too)",
+                lag_ok?!(m.released && m.reason==ReleaseReason::lag):(!m.released || m.release_time>sc.hitch_at+sc.hitch_len+.1),
+                m.released?fmt("released at %.3f s (hitch ends %.3f s)",m.release_time,sc.hitch_at+sc.hitch_len):"held")};};};
+        auto s=make("hitch","One 0.5 s game-thread hitch during a 0.8 m/s wrist drag (the hand jumps 0.4 m)","no body above 6 m/s after the hitch, hold survives");
+        s.hands={drag_hand(7,{0,1,0},3,.8,.3)};s.hitch_at=1.2;s.hitch_len=.5;s.duration=4.5;s.judge=hitch_judge(6,true);
         all.push_back(s);
-        auto f=make("hitch_1p2_info","INFO 0.5 s hitch during a 1.2 m/s wrist drag (the hand jumps 0.6 m)","target < 12 m/s: KNOWN LIMIT, exceeded");
-        f.info=true;f.hands={drag_hand(7,{0,1,0},3,1.2,.3)};f.hitch_at=1.2;f.hitch_len=.5;f.duration=4.5;f.judge=hitch_judge(12,true,false);
+        auto f=make("hitch_1p2","One 0.5 s hitch during a 1.2 m/s wrist drag (the hand jumps 0.6 m)","no runaway release, no lag release (peak reported)");
+        f.hands={drag_hand(7,{0,1,0},3,1.2,.3)};f.hitch_at=1.2;f.hitch_len=.5;f.duration=4.5;
+        f.judge=[=](const Scenario&,const Metrics& m) {return std::vector<Check>{
+            truth("no runaway release",!(m.released && m.reason==ReleaseReason::runaway),m.released?fmt("released at %.3f s, reason %u",m.release_time,unsigned(m.reason)):"held"),
+            truth("no lag release",!(m.released && m.reason==ReleaseReason::lag),m.released?fmt("released at %.3f s, reason %u",m.release_time,unsigned(m.reason)):"held"),
+            below("peak after the hitch (reported, INFO)",m.peak_after_hitch,12,"m/s",true)};};
         all.push_back(f);
         auto g=make("hitch_slow_0p3","One 0.5 s hitch during a slow 0.3 m/s drag (the hand jumps 0.15 m)","no body above 6 m/s after the hitch");
-        g.hands={drag_hand(7,{0,1,0},3,kHitchV,.3)};g.hitch_at=1.2;g.hitch_len=.5;g.duration=4.5;g.judge=hitch_judge(6,false,false);
+        g.hands={drag_hand(7,{0,1,0},3,kHitchV,.3)};g.hitch_at=1.2;g.hitch_len=.5;g.duration=4.5;g.judge=hitch_judge(6,false);
         all.push_back(g);
         auto c=make("hitch_lift","One 0.5 s hitch while lifting a hanging body at 1 m/s (the hand jumps 0.5 m)","no body above 6 m/s after the hitch; the clamped dt keeps the heavy lift gentle");
         c.hands={lift_hand(13,1.,1.,0,1.,kHang)};c.hang_z=kHang;c.pins={13};c.hitch_at=.3;c.hitch_len=.5;c.duration=3;c.lift_probe=true;
