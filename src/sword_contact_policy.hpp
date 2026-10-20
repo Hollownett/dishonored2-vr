@@ -43,9 +43,9 @@ inline ContactSpeedClass classify_contact_speed(double peak,double stealth_speed
 }
 // A calm touch (below the hit speed) on a guard who turned out to be aware must never land the ordinary alerting hit.
 inline StealthAct resolve_stealth_act(StealthAct act,bool stealth_only) noexcept {return act==StealthAct::hit&&stealth_only?StealthAct::drop:act;}
-// The native Slash press (contact_attack_tick) is the engine's own ordinary attack unless its kill sensor offers this victim (then it
+// The native Slash press (contact_attack_tick) is the engine's own ordinary attack unless its kill sensor offers exactly this victim (fresh, victim-specific) (then it
 // becomes the Assassination). A calm contact must not press it without that offer: the hold kill handles the calm case.
-inline constexpr bool arms_native_attack(bool stealth_strike,bool stealth_only,bool native_offer) noexcept {return stealth_strike&&(!stealth_only||native_offer);}
+inline constexpr bool arms_native_attack(bool stealth_strike,bool stealth_only,bool native_offer_victim,bool stealth_enabled) noexcept {return stealth_strike&&(!stealth_only||(native_offer_victim&&stealth_enabled));}
 // Counts a rejected slow contact once per victim episode (the blade resting on a guard rejects every frame).
 class SlowRejectLatch {
     std::uintptr_t entity_{};std::uint64_t last_{};

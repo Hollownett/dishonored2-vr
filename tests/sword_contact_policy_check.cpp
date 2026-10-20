@@ -129,10 +129,13 @@ void slow_contact_on_aware_guard_is_dropped() {
 }
 
 void native_attack_arming() {
-    assert(arms_native_attack(true,false,false) && arms_native_attack(true,false,true));  // fast stealth
-    assert(arms_native_attack(true,true,true));                                           // calm + the engine offers the victim
-    assert(!arms_native_attack(true,true,false));                                         // calm without offer: no press
-    assert(!arms_native_attack(false,false,true) && !arms_native_attack(false,true,true)); // not a stealth strike
+    // (stealth_strike, stealth_only, native_offer_victim, stealth_enabled)
+    assert(arms_native_attack(true,false,false,true) && arms_native_attack(true,false,true,true));  // fast stealth: unchanged
+    assert(arms_native_attack(true,false,false,false));                                              // fast, stealth knob off: unchanged
+    assert(arms_native_attack(true,true,true,true));                                                 // calm + victim-specific offer
+    assert(!arms_native_attack(true,true,false,true));                                               // calm + global-only offer / none
+    assert(!arms_native_attack(true,true,true,false));                                               // calm + stealth disabled
+    assert(!arms_native_attack(false,false,true,true) && !arms_native_attack(false,true,true,true)); // not a stealth strike
 }
 
 void slow_reject_counts_once_per_episode() {
@@ -140,7 +143,8 @@ void slow_reject_counts_once_per_episode() {
     for(std::uint64_t t=1000;t<3000;t+=16) n+=l.first(7,t);   // resting blade for 2 s
     assert(n==1);
     assert(l.first(8,3016));                                  // a second guard counts again
-    assert(!l.first(8,3100) && l.first(8,3500));              // same guard after a 400 ms gap counts again
+    assert(!l.first(8,3100) && l.first(8,3500));
+    assert(!l.first(8,3700));                                 // a 200 ms re-touch merges into the same episode (300 ms rule)              // same guard after a 400 ms gap counts again
 }
 
 struct CalmPayload {bool stealth_only{};};

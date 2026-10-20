@@ -2423,6 +2423,7 @@ static bool swarm_agent_entity(std::uintptr_t e) noexcept {std::uintptr_t vt{};s
 // Combat timeline for hit-latency tests (tools/npc_watch.py logs NPC health on the same GetTickCount64 clock).
 static std::atomic<bool> ga_offered_now{};static std::atomic<UINT64> ga_offered_frames{},ga_offered_swings{},ga_offered_tick{}; // GlobalAssassination +0x1d0 != 0 (native offered verdict, NativeTakedowns::poll)
 static std::atomic<std::uint32_t> kill_sensor_spawn{};static std::atomic<UINT64> kill_sensor_tick{},contact_attack_tick{}; // the native kill sensor's target; a sensor-target contact asks VrCombat for the press
+static d2vr::SlowRejectLatch slow_reject_latch; // render thread only; reset at StartProbe
 static d2vr::SwordHitGate sword_hit_gate;static std::array<std::atomic<UINT64>,8> contact_gates{}; // NPC contacts dropped before the queue: not drawn, no hand, epoch, grabbing, slow, same stroke
 static std::atomic<UINT64> npc_blade_contacts{};using GunShape=std::array<double,4>;static GunShape gun_shape_override{};static bool contact_damage_enabled=true,impact_fx_enabled=true;static std::array<std::atomic<float>,2> tip_speed_now{};static std::atomic<float> combat_tip_peak{};static std::atomic<bool> sword_reversed{};
 static void combat_log(const char* what,std::uintptr_t entity,double value,int extra=-1) noexcept {
@@ -4409,7 +4410,6 @@ void prepare_head_view(void* view) noexcept {
                                 !sword_hit_gate.open(contact->entity,now,tip_speed[side])?6u:0u;
                             if(why) {
                                 ++contact_gates[why];
-                                static d2vr::SlowRejectLatch slow_reject_latch;
                                 if(why==5 && rear_side && slow_reject_latch.first(contact->entity,now)) ++d2vr::NativeInteractionAim::stealth_reject_[1]; // a slow attempt from behind: the report sees it
                             } else {
                                 const auto f=[](double v){return static_cast<float>(v);};const auto& n=contact->normal;const auto& q=contact->point;
@@ -4424,12 +4424,14 @@ void prepare_head_view(void* view) noexcept {
                                     // Victim-based stealth strike: a calm deliberate contact from the rear or the side; the engine-side unaware/damageable checks decide on the game thread.
                                     owned_contact->stealth_strike=d2vr::stealth_strike(speed,rear_side,stealth_speed);
                                     owned_contact->stealth_only=speed_class==d2vr::ContactSpeedClass::stealth_only;
+                                    // Victim-specific and fresh (100 ms): the global ga_offered legs name no victim and must not arm a calm press.
+                                    owned_contact->native_offer_victim=kill_sensor_spawn.load()==owned_contact->victim_spawn && now>=kill_sensor_tick.load() && now-kill_sensor_tick.load()<=100;
                                     if(!rear_side) ++d2vr::NativeInteractionAim::stealth_reject_[0];
                                 }
                                 // TODO(near-pass assist): a stealth contact that only just misses the guard (blade passes within a hand span) could still count.
                                 if(owned_contact && d2vr::NativeInteractionAim::request_sword_contact(*owned_contact)) {
                                     sword_hit_gate.commit(contact->entity,now);++contact_gates[7];
-                                    if(d2vr::arms_native_attack(owned_contact->stealth_strike,owned_contact->stealth_only,owned_contact->native_offer)) contact_attack_tick=now;
+                                    if(d2vr::arms_native_attack(owned_contact->stealth_strike,owned_contact->stealth_only,owned_contact->native_offer_victim,d2vr::NativeInteractionAim::stealth_enabled_.load())) contact_attack_tick=now;
                                     // Hit height above the guard's feet (entity +0x300 is the origin at the feet; z is up): leg < 0.9 m, torso to 1.5 m, head above.
                                     if(std::isfinite(npc_at[2])) {const float h=f(q.z)-npc_at[2];++d2vr::NativeInteractionAim::hit_height_[h<.9f?0:h<=1.5f?1:2];}
                                     std::uint8_t f1{},f7{};read_self(contact->entity+0xd1,&f1,1);read_self(contact->entity+0xd7,&f7,1);
@@ -7986,7 +7988,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
                 } catch(...) {return false;}
             };
         }
-        ui_dump_requested=fs::exists(root/L"build"/L"ui-dump");ui_dump_state.clear();left_aim_wanted=false;early_wrist_owner.reset();vitals_file=0;next_vitals_probe=0;wrist_early_publications=0;world_prompt_frames=0;prompt_shows=prompt_hides=takedown_flips=npc_blade_contacts=0;d2vr::NativeInteractionAim::melee_enabled_=true;d2vr::NativeInteractionAim::impact_enabled_=true;d2vr::NativeImpactFx::reset();d2vr::NativeInteractionAim::impact_played_=0;d2vr::NativeInteractionAim::impact_skipped_=0;d2vr::NativeInteractionAim::melee_applied_=0;d2vr::NativeInteractionAim::melee_rejected_=0;d2vr::NativeInteractionAim::melee_faults_=0;for(auto& w:d2vr::NativeInteractionAim::melee_why_) w=0;for(auto& w:d2vr::NativeInteractionAim::stealth_reject_) w=0;d2vr::NativeInteractionAim::stealth_slow_aware_drops_=0;d2vr::NativeInteractionAim::stealth_slow_unheld_drops_=0;for(auto& w:d2vr::NativeInteractionAim::hit_height_) w=0;ga_offered_frames=ga_offered_swings=0;{std::error_code ec;fs::remove(output_directory/L"native-combat.csv",ec);} // the DLL outlives sessions
+        ui_dump_requested=fs::exists(root/L"build"/L"ui-dump");ui_dump_state.clear();left_aim_wanted=false;early_wrist_owner.reset();vitals_file=0;next_vitals_probe=0;wrist_early_publications=0;world_prompt_frames=0;prompt_shows=prompt_hides=takedown_flips=npc_blade_contacts=0;d2vr::NativeInteractionAim::melee_enabled_=true;d2vr::NativeInteractionAim::impact_enabled_=true;d2vr::NativeImpactFx::reset();d2vr::NativeInteractionAim::impact_played_=0;d2vr::NativeInteractionAim::impact_skipped_=0;d2vr::NativeInteractionAim::melee_applied_=0;d2vr::NativeInteractionAim::melee_rejected_=0;d2vr::NativeInteractionAim::melee_faults_=0;for(auto& w:d2vr::NativeInteractionAim::melee_why_) w=0;for(auto& w:d2vr::NativeInteractionAim::stealth_reject_) w=0;d2vr::NativeInteractionAim::stealth_slow_aware_drops_=0;d2vr::NativeInteractionAim::stealth_slow_unheld_drops_=0;slow_reject_latch=d2vr::SlowRejectLatch{};for(auto& w:d2vr::NativeInteractionAim::hit_height_) w=0;ga_offered_frames=ga_offered_swings=0;{std::error_code ec;fs::remove(output_directory/L"native-combat.csv",ec);} // the DLL outlives sessions
         if(fs::exists(root/L"build"/L"hud-node-census")) {
             hud_node_census_path=output/L"hud-node-census.csv";
             d2vr::NativeHudChildDraw::census=&hud_node_census;

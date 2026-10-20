@@ -88,7 +88,8 @@ struct OwnedSwordContact {
     std::uint64_t pose_epoch{};
     bool stealth_strike{}; // deliberate, from behind, on the kill sensor's target (sword_contact_policy.hpp)
     bool stealth_only{}; // the contact was below the hit speed: it may only ever become a stealth kill, never an ordinary hit
-    bool native_offer{}; // the native kill sensor targeted this victim when the blade touched him (render thread)
+    bool native_offer{}; // the kill sensor targeted this victim (250 ms) OR the global assassination verdict was offered (not victim-specific); only picks the hold window (render thread)
+    bool native_offer_victim{}; // the kill sensor targeted exactly this victim within 100 ms of the touch; the only offer that may arm a calm native press
 };
 template<class Read> bool native_contact_victim(Read& read,const NativePlayerStateLease& owner,std::uintptr_t victim,std::uint32_t spawn) {
     if(!spawn || spawn==NativeMelee::invalid_id || (spawn>>16)>=0x3fff || victim==owner.player)return false;
