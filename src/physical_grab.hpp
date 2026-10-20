@@ -1,6 +1,9 @@
 #pragma once
 #include "tracked_pose.hpp"
 #include "tracked_pose_lifetime.hpp"
+#include "dwell_timer.hpp"
+#include "grab_force_cap.hpp"
+#include "release_reason.hpp"
 #include <algorithm>
 #include <cstdint>
 #include <optional>
@@ -51,6 +54,15 @@ inline Vec3 grab_rotation_error(const WorldTrackedPose& object,const WorldTracke
     return n<1e-9?axis*2:axis*(2*std::atan2(n,q[3])/n);
 }
 struct GrabMotor {Vec3 linear{},angular{};bool release{};};
+// Input for PhysicalGrab::corpse_motor. corpse=false is a prop: the force cap only, with motor()'s 1.5 m release and throw.
+struct CorpseMotorInput {Vec3 body_velocity{},body_spin{};bool velocity_known{},corpse{true};
+    bool state_changed{};   // caller saw the entity change state this tick; wins over an open fist (the release reason is state_changed)
+    double object_kg{},inertia_kgm2{},share{1.},dt{};const GrabTuning* tuning{};};
+// What Task 10 needs per write: the command, the cap fraction (share of the commanded velocity change removed), the capped flag,
+// the implied force, and the release reason (none while held).
+struct CorpseMotor {GrabMotor motor;double lag_m{};bool capped{};double cap_fraction{};double implied_force_n{};ReleaseReason reason{ReleaseReason::none};};
+// The grasp point kept for the drawn hand to blend out after a release (A-12): weight falls 1 -> 0 over anchor_blend_s.
+struct ReleasedAnchor {Vec3 position{};double weight{};std::uint64_t released_at{};};
 // A velocity motor keeps the native body dynamic, so collision/gravity remain
 // native and tracking loss cannot leave a body in a changed motion mode.
 class PhysicalGrab {
@@ -59,7 +71,20 @@ class PhysicalGrab {
     WorldTrackedPose previous_{},relative_{};
     // Velocity has its own baseline so same-quantum samples keep their motion while previous_/tick_ track the newest pose.
     Vec3 velocity_{},velocity_origin_{};
+    // Hand-to-limb contact point in the object's own frame (snatch grab: the bind stores it, the first command is zero).
+    Vec3 contact_local_{};
+    DwellTimer lag_timer_{lag_release_s};
+    ReleaseReason reason_=ReleaseReason::none;
+    bool forced_release_=false,has_released_=false;
+    std::uint64_t release_tick_{};
+    Vec3 last_anchor_{};
+    void note_release(ReleaseReason reason,bool forced) {
+        reason_=reason;forced_release_=forced;release_tick_=tick_;has_released_=true;
+    }
 public:
+    // Corpse lag rule (Bonelab's hand lags a blocked body, then lets go): the grasp point trailing its target by more than
+    // lag_release_m for lag_release_s releases; a forced release blocks a regrab for regrab_cooldown_s (a flapping grip).
+    static constexpr double lag_release_m=.5,lag_release_s=.25,regrab_cooldown_s=.3,anchor_blend_s=.25;
     bool pressed() const {return pressed_;}
     // A squeeze the game owned at its press, handed to the physics hand mid-press (a yanked or woken body under it): the
     // grip already held latches on the next valid sample, as if pressed fresh.
@@ -99,12 +124,25 @@ public:
     }
     bool bind(const WorldTrackedPose& object) {return bind(object,object.position);}
     bool bind(const WorldTrackedPose& object,Vec3 contact,double maximum_contact=.3) {
+        if(forced_release_ && tick_>=release_tick_ && double(tick_-release_tick_)*.001<regrab_cooldown_s) return false;
         if(!valid_sample_ || !pressed_ || held_ || !grab_pose_valid(object) || !finite(contact) ||
            !std::isfinite(maximum_contact) || maximum_contact<0 || maximum_contact>.55 ||
            length(contact-previous_.position)>maximum_contact || length(contact-object.position)>3) return false;
         relative_.position=grab_local(previous_,object.position-previous_.position);
         for(unsigned i=0;i<3;++i) relative_.basis[i]=grab_local(previous_,object.basis[i]);
+        contact_local_=grab_local(object,contact-object.position);
+        lag_timer_.reset();has_released_=false;forced_release_=false;reason_=ReleaseReason::none;last_anchor_=contact;
         held_=true;return true;
+    }
+    // The grasped point: object origin plus the stored contact offset in the object's current frame (valid while held()).
+    Vec3 anchor(const WorldTrackedPose& object) const {return object.position+grab_world(object,contact_local_);}
+    ReleaseReason release_reason() const {return reason_;}
+    // The last grasp point for the drawn hand to blend out over anchor_blend_s after a release; `tick` is the hand sample clock (ms).
+    std::optional<ReleasedAnchor> released_anchor(std::uint64_t tick) const {
+        if(!has_released_ || held_ || tick<release_tick_) return {};
+        const auto age=double(tick-release_tick_)*.001;
+        if(age>=anchor_blend_s) return {};
+        return ReleasedAnchor{last_anchor_,1-age/anchor_blend_s,release_tick_};
     }
     WorldTrackedPose target() const {
         auto result=previous_;result.position=previous_.position+grab_world(previous_,relative_.position);
@@ -112,6 +150,7 @@ public:
         return result;
     }
     GrabMotor release(bool throw_velocity) {
+        note_release(throw_velocity?ReleaseReason::open_fist:ReleaseReason::lifecycle,false);
         held_=false;return {throw_velocity && valid_sample_?velocity_:Vec3{}, {},true};
     }
     GrabMotor release_sample(const WorldTrackedPose& hand,float grip,bool usable,std::uint64_t epoch,std::uint64_t tick,bool throw_velocity) {
@@ -121,6 +160,7 @@ public:
     }
     std::optional<GrabMotor> motor(const WorldTrackedPose& object,bool usable,std::uint64_t now=0,std::uint64_t source_tick=0) {
         if(!held_) return {};
+        last_anchor_=anchor(object);
         if(!usable || !valid_sample_ || !pressed_ || !grab_pose_valid(object)) return release(usable && valid_sample_ && !pressed_);
         const auto goal=target();const auto error=goal.position-object.position;
         if(length(error)>1.5) return release(valid_sample_ && pressed_); // fast swing outran the motor: throw, do not dead-drop // Wall blockage or an ownership discontinuity.
@@ -129,6 +169,44 @@ public:
         const auto age=now>=source?now-source:0;
         const auto feed=now?(now>=source?velocity_*std::exp(-double(age>32?age-32:0)*.001/.035):Vec3{}):velocity_;
         return GrabMotor{grab_limit(error*18+feed,10),grab_limit(spin*12,5),false};
+    }
+    std::optional<CorpseMotor> corpse_motor(const WorldTrackedPose& object,bool usable,std::uint64_t now,std::uint64_t source_tick,const CorpseMotorInput& in) {
+        if(!held_) return {};
+        const bool hand_ok=usable && valid_sample_ && grab_pose_valid(object);
+        if(hand_ok) last_anchor_=anchor(object);
+        auto finish=[&](ReleaseReason reason,bool forced,bool throw_velocity,double lag) {
+            // A corpse release writes no velocity; a prop release is today's release(throw).
+            CorpseMotor out;out.lag_m=lag;out.reason=reason;
+            if(in.corpse) {held_=false;out.motor=GrabMotor{{},{},true};}
+            else out.motor=release(throw_velocity);
+            note_release(reason,forced&&in.corpse);   // props keep their old behaviour: no cooldown
+            return out;
+        };
+        if(in.state_changed) return finish(ReleaseReason::state_changed,false,false,0);
+        if(!hand_ok || !pressed_) {
+            const bool open=usable && valid_sample_ && !pressed_;
+            return finish(open?ReleaseReason::open_fist:ReleaseReason::lifecycle,false,open,0);
+        }
+        const auto goal=target();const auto error=goal.position-object.position;
+        const auto lag=length(anchor(goal)-anchor(object));
+        if(in.corpse) {if(lag_timer_.update(lag>lag_release_m,in.dt)) return finish(ReleaseReason::lag,true,false,lag);}
+        else if(length(error)>1.5) return finish(ReleaseReason::lag,false,pressed_,lag);
+        const auto spin=grab_rotation_error(object,goal);
+        const auto source=source_tick?std::min(source_tick,tick_):tick_;
+        const auto age=now>=source?now-source:0;
+        const auto feed=now?(now>=source?velocity_*std::exp(-double(age>32?age-32:0)*.001/.035):Vec3{}):velocity_;
+        const auto want_v=grab_limit(error*18+feed,10),want_w=grab_limit(spin*12,5);
+        const GrabTuning fallback;const auto& tuning=in.tuning?*in.tuning:fallback;
+        // Unknown body velocity: step from rest (the caller counts the fallback).
+        const Vec3 v0=in.velocity_known?in.body_velocity:Vec3{},w0=in.velocity_known?in.body_spin:Vec3{};
+        const auto step=cap_velocity_step(v0,w0,want_v,want_w,previous_.basis[0],in.object_kg,in.inertia_kgm2,in.dt,tuning,in.share);
+        const auto asked=length(want_v-v0)+length(want_w-w0),given=length(step.linear-v0)+length(step.angular-w0);
+        CorpseMotor out;
+        out.motor=GrabMotor{step.linear,step.angular,false};out.lag_m=lag;
+        out.capped=step.linear_capped||step.angular_capped;
+        out.cap_fraction=asked>1e-12?std::clamp(1-given/asked,0.,1.):0;
+        out.implied_force_n=step.implied_force_n;
+        return out;
     }
 };
 } // namespace d2vr

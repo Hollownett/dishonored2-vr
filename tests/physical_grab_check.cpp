@@ -2,6 +2,7 @@
 #include <cassert>
 #include <iostream>
 #include <limits>
+#include "../src/grab_force_cap.hpp"
 int main() {
     using namespace d2vr;
     {
@@ -164,6 +165,130 @@ int main() {
         for(unsigned i=0;i<60;++i) {pose.position.x+=.011;nan_hand.sample(pose,0,true,1,180+16*i);}
         assert(std::isfinite(nan_hand.velocity().x) && std::isfinite(nan_hand.velocity().y) && std::isfinite(nan_hand.velocity().z));
         assert(nan_hand.velocity().x>.3);
+    }
+    // ---- Task 7: capped corpse/prop motor ----
+    {
+        const WorldTrackedPose id{{},{{{1,0,0},{0,1,0},{0,0,1}}}};
+        auto make=[&](PhysicalGrab& g,WorldTrackedPose body,Vec3 contact,std::uint64_t t0=1000) {
+            g.sample(id,0,true,1,t0);g.sample(id,0,true,1,t0+10);g.sample(id,1,true,1,t0+20);
+            return g.bind(body,contact);
+        };
+        auto in=[](double kg,double dt,const GrabTuning* t,bool corpse=true) {
+            CorpseMotorInput i;i.corpse=corpse;i.object_kg=kg;i.inertia_kgm2=bone_inertia(kg,.2);i.dt=dt;i.tuning=t;i.velocity_known=true;return i;};
+        // Hand samples reject jumps over .5 m, so far targets are reached in steps.
+        auto reach=[&](PhysicalGrab& g,WorldTrackedPose& h,double x,std::uint64_t t) {
+            while(h.position.x<x-1e-12) {h.position.x=std::min(x,h.position.x+.25);g.sample(h,1,true,1,t);}};
+        GrabTuning one;one.strength_scale=1;GrabTuning dflt;
+        auto body=id;body.position={.1,0,0};
+        {   // corpse_bind_no_jump
+            PhysicalGrab g;assert(make(g,body,{.1,0,0}));
+            body.position={.1,0,0};
+            auto r=g.corpse_motor(body,true,0,0,in(10,.01,&dflt));
+            assert(r && !r->motor.release && length(r->motor.linear)==0 && length(r->motor.angular)==0 && !r->capped);
+        }
+        {   // corpse_motor_is_capped
+            for(const double scale:{1.,3.}) {
+                GrabTuning t;t.strength_scale=scale;
+                PhysicalGrab g;auto b=id;assert(make(g,b,{}));
+                auto hnd=id;hnd.position.x=.4;g.sample(hnd,1,true,1,1120);
+                auto inp=in(10,.1,&t);inp.dt=.01;
+                auto r=g.corpse_motor(b,true,0,0,inp);
+                assert(r && r->capped && r->cap_fraction>0 && r->cap_fraction<1);
+                assert(std::abs(r->motor.linear.x)<=300*scale*.01/12+1e-9 && r->motor.linear.x>0);
+                assert(r->implied_force_n>0);
+            }
+        }
+        {   // release_writes_no_velocity
+            PhysicalGrab g;auto b=id;assert(make(g,b,{}));
+            auto hnd=id;hnd.position.x=.05;g.sample(hnd,1,true,1,1030);g.sample(hnd,0,true,1,1040);
+            auto r=g.corpse_motor(b,true,0,0,in(10,.01,&dflt));
+            assert(r && r->motor.release && length(r->motor.linear)==0 && length(r->motor.angular)==0 && r->reason==ReleaseReason::open_fist);
+            assert(g.release_reason()==ReleaseReason::open_fist && !g.held());
+        }
+        {   // A-11: state change and open fist on one tick -> state_changed
+            PhysicalGrab g;auto b=id;assert(make(g,b,{}));
+            g.sample(id,0,true,1,1030);
+            auto inp=in(10,.01,&dflt);inp.state_changed=true;
+            auto r=g.corpse_motor(b,true,0,0,inp);
+            assert(r && r->motor.release && r->reason==ReleaseReason::state_changed);
+        }
+        {   // lag_release_after_quarter_second, and the stuck body (no velocity) variant
+            for(const bool known:{true,false}) {
+                PhysicalGrab g;auto b=id;assert(make(g,b,{}));
+                auto hnd=id;std::uint64_t t=1030;reach(g,hnd,.6,t);
+                auto inp=in(10,.01,&dflt);inp.velocity_known=known;
+                std::optional<CorpseMotor> r;
+                for(unsigned i=0;i<24;++i) {r=g.corpse_motor(b,true,0,0,inp);assert(r && !r->motor.release && r->lag_m>.59);}
+                for(unsigned i=0;i<2 && !(r && r->motor.release);++i) r=g.corpse_motor(b,true,0,0,inp);
+                assert(r && r->motor.release && r->reason==ReleaseReason::lag && length(r->motor.linear)==0 && length(r->motor.angular)==0);
+            }
+            PhysicalGrab g;auto b=id;assert(make(g,b,{}));
+            auto hnd=id;hnd.position.x=.49;g.sample(hnd,1,true,1,1030);
+            for(unsigned i=0;i<500;++i) {auto r=g.corpse_motor(b,true,0,0,in(10,.01,&dflt));assert(r && !r->motor.release);}
+            // 0.6 m excursion that clears resets the timer
+            PhysicalGrab h;auto b2=id;assert(make(h,b2,{}));
+            for(unsigned round=0;round<2;++round) {
+                auto far=id;reach(h,far,.6,1030+round*100);
+                for(unsigned i=0;i<20;++i) assert(!h.corpse_motor(b2,true,0,0,in(10,.01,&dflt))->motor.release);
+                {auto back=far;back.position.x=.3;h.sample(back,1,true,1,1040+round*100);}
+                h.sample(id,1,true,1,1050+round*100);assert(!h.corpse_motor(b2,true,0,0,in(10,.01,&dflt))->motor.release);
+            }
+        }
+        {   // cooldown_blocks_regrab_flapping_grip
+            PhysicalGrab g;auto b=id;assert(make(g,b,{}));
+            auto hnd=id;reach(g,hnd,.9,1030);
+            std::optional<CorpseMotor> r;
+            for(unsigned i=0;i<30 && !(r && r->motor.release);++i) r=g.corpse_motor(b,true,0,0,in(10,.01,&dflt));
+            assert(r && r->reason==ReleaseReason::lag);
+            const std::uint64_t rel=1030;
+            g.sample(hnd,0,true,1,rel+10);
+            for(std::uint64_t t=rel+20;t<rel+300;t+=20) {
+                g.sample(hnd,0,true,1,t);g.sample(hnd,1,true,1,t+5);
+                assert(!g.bind(b,hnd.position,.55) );
+            }
+            g.sample(hnd,0,true,1,rel+290);g.sample(hnd,1,true,1,rel+300);
+            auto near=hnd;assert(g.bind(near));
+            // open fist release is not delayed
+            auto b3=id;PhysicalGrab o;assert(make(o,b3,{}));
+            o.sample(id,0,true,1,1030);o.corpse_motor(b3,true,0,0,in(10,.01,&dflt));
+            o.sample(id,1,true,1,1040);assert(o.bind(b3,{}));
+        }
+        {   // two_hands_split_mass: effective mass 2 + .5*20 = 12
+            PhysicalGrab g;auto b=id;assert(make(g,b,{}));
+            auto hnd=id;hnd.position.x=.4;g.sample(hnd,1,true,1,1120);
+            auto inp=in(20,.01,&one);inp.share=.5;
+            auto r=g.corpse_motor(b,true,0,0,inp);
+            assert(r && std::abs(r->motor.linear.x-300*.01/12)<1e-9);
+        }
+        {   // anchor_tracks_object_rotation
+            auto b=id;b.position={1,2,3};
+            PhysicalGrab h;auto hnd=id;hnd.position={1,2,3};h.sample(hnd,0,true,1,1000);h.sample(hnd,0,true,1,1010);h.sample(hnd,1,true,1,1020);
+            assert(h.bind(b,{1.1,2,3}));
+            assert(length(h.anchor(b)-Vec3{1.1,2,3})<1e-9);
+            auto rot=b;rot.basis={{{0,1,0},{-1,0,0},{0,0,1}}};
+            assert(length(h.anchor(rot)-Vec3{1,2.1,3})<1e-9);
+        }
+        {   // A-12 post-release blend: anchor stays for .25 s
+            PhysicalGrab g;auto b=id;assert(make(g,b,{.05,0,0}));
+            g.sample(id,0,true,1,1030);
+            auto r=g.corpse_motor(b,true,0,0,in(10,.01,&dflt));assert(r && r->motor.release);
+            auto a=g.released_anchor(1030);assert(a && length(a->position-Vec3{.05,0,0})<1e-9 && std::abs(a->weight-1)<1e-9);
+            a=g.released_anchor(1030+125);assert(a && std::abs(a->weight-.5)<1e-9);
+            assert(!g.released_anchor(1030+250));
+        }
+        {   // prop_mode_keeps_old_release
+            PhysicalGrab g;auto b=id;assert(make(g,b,{}));
+            auto hnd=id;reach(g,hnd,1.6,1030);
+            auto r=g.corpse_motor(b,true,0,0,in(5,.01,&dflt,false));assert(r && r->motor.release);
+            PhysicalGrab p;auto b2=id;assert(make(p,b2,{}));
+            auto hnd2=id;reach(p,hnd2,.8,1030);
+            for(unsigned i=0;i<500;++i) {r=p.corpse_motor(b2,true,0,0,in(5,.01,&dflt,false));assert(r && !r->motor.release);}
+            assert(r->capped && length(r->motor.linear)<10);
+            auto fast=id;PhysicalGrab q;auto b3=id;assert(make(q,b3,{}));
+            fast.position.x=.1;q.sample(fast,1,true,1,1050);q.sample(fast,0,true,1,1060);
+            r=q.corpse_motor(b3,true,0,0,in(5,.01,&dflt,false));
+            assert(r && r->motor.release && r->motor.linear.x>0);
+        }
     }
     std::cout<<"PASS: grip hysteresis/rearm, relative pose, bounded dynamic motor/throw, focus/epoch/stale/blocked release, occupied-hand refusal and release\n";
 }

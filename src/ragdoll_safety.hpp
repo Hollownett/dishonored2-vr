@@ -3,6 +3,7 @@
 // Every corpse/guard ragdoll event post and velocity write goes through these guards.
 #include "arm_ik.hpp"
 #include "native_motion.hpp"
+#include "release_reason.hpp"
 #include <array>
 #include <atomic>
 #include <cmath>
@@ -13,7 +14,6 @@
 #include <optional>
 namespace d2vr {
 
-enum class ReleaseReason : unsigned {none,open_fist,lag,lifecycle,runaway,fault,state_changed,refused};
 enum class PostDecision {allow,already_dynamic,retry_wait,ceiling,disabled,refused,locked};
 
 // UNITS: every `now` in this header is monotonic SECONDS. Callers on GetTickCount64() milliseconds convert with
