@@ -278,6 +278,25 @@ public static class Features
         WriteState(buildDir, s);
     }
 
+    /// <summary>Set by id; an id not in the list is an ArgumentException (nothing is touched).</summary>
+    public static void Set(string buildDir, IReadOnlyList<Feature> list, string id, bool on)
+    {
+        var f = list.FirstOrDefault(x => x.Id == id) ?? throw new ArgumentException("Unknown feature id: " + id, nameof(id));
+        Set(buildDir, f, on);
+    }
+
+    /// <summary>The launcher's "Restore defaults": every feature goes to its Default (a default-off row such as power-gestures is switched off, not on).
+    /// Nothing is deleted: a valued knob file turned off is set aside as a saved copy and comes back when the feature is switched on again.
+    /// Then Apply seeds anything not yet recorded. Throws FeaturesStateException like Apply.</summary>
+    public static void RestoreDefaults(string buildDir, IReadOnlyList<Feature> list, IReadOnlySet<string>? knownKnobs = null, Action<string>? log = null)
+    {
+        Directory.CreateDirectory(buildDir);
+        ReadState(buildDir, log);  // surface an unreadable state before touching any knob
+        foreach (var f in list)
+            if (f.RequiresDllKnob == null || knownKnobs == null || knownKnobs.Contains(f.RequiresDllKnob)) Set(buildDir, f, f.Default);
+        Apply(buildDir, list, knownKnobs, log);
+    }
+
     /// <summary>Knob names are UTF-16 strings in the DLL (L"no-hand-blink"); returns every [a-z0-9-] run of 3+ characters.</summary>
     public static IReadOnlySet<string> ScanKnobs(byte[] dll)
     {

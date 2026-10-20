@@ -344,6 +344,108 @@ sealed class ArtButton : Button
     }
 }
 
+/// <summary>A labelled check row with dim help text. Space or a click toggles it; Up/Down move to the neighbouring row.
+/// Real focus, so Tab and screen readers work; the game's brush stroke marks the focused row.</summary>
+sealed class ArtCheck : ArtControl
+{
+    bool isChecked, hover;
+    public readonly string Label, Help;
+    public event EventHandler? Toggled;
+    public ArtCheck(string label, string help)
+    {
+        Label = label; Help = help; Cursor = Cursors.Hand; TabStop = true;
+        SetStyle(ControlStyles.Selectable, true);
+        AccessibleRole = AccessibleRole.CheckButton; AccessibleName = label; AccessibleDescription = help;
+    }
+    public int RowHeight => S(54);
+    public bool Checked
+    {
+        get => isChecked;
+        set { if (isChecked == value) return; isChecked = value; Invalidate(); Toggled?.Invoke(this, EventArgs.Empty); AccessibilityNotifyClients(AccessibleEvents.StateChange, -1); }
+    }
+    /// <summary>Sets the box without raising Toggled (used when loading the saved state).</summary>
+    public void SetSilently(bool v) { if (isChecked == v) return; isChecked = v; Invalidate(); AccessibilityNotifyClients(AccessibleEvents.StateChange, -1); }
+
+    protected override bool IsInputKey(Keys k) => (k & Keys.KeyCode) is Keys.Up or Keys.Down || base.IsInputKey(k);
+    protected override void OnKeyDown(KeyEventArgs e)
+    {
+        switch (e.KeyCode)
+        {
+            case Keys.Space: Checked = !Checked; break;
+            case Keys.Up: Parent?.SelectNextControl(this, false, true, false, false); break;
+            case Keys.Down: Parent?.SelectNextControl(this, true, true, false, false); break;
+            default: base.OnKeyDown(e); return;
+        }
+        e.Handled = true;
+    }
+    protected override void OnMouseDown(MouseEventArgs e) { Focus(); Checked = !Checked; base.OnMouseDown(e); }
+    protected override void OnMouseEnter(EventArgs e) { hover = true; Invalidate(); base.OnMouseEnter(e); }
+    protected override void OnMouseLeave(EventArgs e) { hover = false; Invalidate(); base.OnMouseLeave(e); }
+    protected override void OnGotFocus(EventArgs e) { Invalidate(); base.OnGotFocus(e); }
+    protected override void OnLostFocus(EventArgs e) { Invalidate(); base.OnLostFocus(e); }
+    protected override void OnEnabledChanged(EventArgs e) { Invalidate(); base.OnEnabledChanged(e); }
+
+    protected override void OnPaint(PaintEventArgs e)
+    {
+        var g = e.Graphics; Ui.Quality(g);
+        bool sel = Focused && Enabled;
+        var hl = new Rectangle(0, S(2), Width, Height - S(4));
+        if (sel) Ui.Brush(g, hl); else if (hover && Enabled) Ui.Brush(g, hl, .12f);
+        int bs = S(18), bx = S(28), by = (Height - bs) / 2;
+        var box = new Rectangle(bx, by, bs, bs);
+        var ink = sel ? Ui.OnBrush : Enabled ? Ui.Soft : Ui.Faint;
+        using (var pen = new Pen(ink, Math.Max(1.5f, S(1.5f)))) g.DrawRectangle(pen, box);
+        if (isChecked) Ui.Diamond(g, box.X + bs / 2f, box.Y + bs / 2f, bs * .3f, sel ? Ui.OnBrush : Ui.Gold, true);
+        const TextFormatFlags f = TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix | TextFormatFlags.EndEllipsis | TextFormatFlags.VerticalCenter;
+        int tx = bx + bs + S(16), tw = Math.Max(10, Width - tx - S(14));
+        var lf = Ui.Font(this, 12f); var hf = Ui.Font(this, 9f, FontStyle.Regular, Ui.Sans);
+        TextRenderer.DrawText(g, Label, lf, new Rectangle(tx, S(6), tw, Height / 2 - S(6)), sel ? Ui.OnBrush : Enabled ? Ui.Text : Ui.Faint, f);
+        TextRenderer.DrawText(g, Help, hf, new Rectangle(tx, Height / 2, tw, Height / 2 - S(5)), sel ? Ui.OnBrush : Ui.Dim, f);
+    }
+}
+
+/// <summary>A vertical stack of ArtCheck rows that scrolls with the mouse wheel and keeps the focused row in view.</summary>
+sealed class CheckList : ArtControl
+{
+    readonly List<ArtCheck> rows = new();
+    int scroll;
+    public CheckList() { SetStyle(ControlStyles.Selectable, false); TabStop = false; AccessibleRole = AccessibleRole.Grouping; AccessibleName = "Features"; }
+    public IReadOnlyList<ArtCheck> Rows => rows;
+    public void Add(ArtCheck c)
+    {
+        rows.Add(c); Controls.Add(c);
+        c.GotFocus += (_, _) => EnsureVisible(c);
+        c.MouseWheel += (_, e) => Scroll(-e.Delta);
+    }
+    int Total => rows.Count == 0 ? 0 : rows.Sum(r => r.RowHeight);
+    public void Relayout()
+    {
+        scroll = Math.Clamp(scroll, 0, Math.Max(0, Total - Height));
+        int y = -scroll;
+        foreach (var r in rows) { r.Bounds = new Rectangle(0, y, Math.Max(10, Width - S(10)), r.RowHeight); y += r.RowHeight; }
+        Invalidate(true);
+    }
+    void Scroll(int delta) { scroll = Math.Clamp(scroll + delta / 2, 0, Math.Max(0, Total - Height)); Relayout(); }
+    void EnsureVisible(ArtCheck c)
+    {
+        int top = c.Top + scroll;  // top in content coordinates
+        if (top < scroll) scroll = top; else if (top + c.RowHeight > scroll + Height) scroll = top + c.RowHeight - Height;
+        Relayout();
+    }
+    protected override void OnMouseWheel(MouseEventArgs e) { Scroll(-e.Delta); base.OnMouseWheel(e); }
+    protected override void OnResize(EventArgs e) { base.OnResize(e); Relayout(); }
+    protected override void OnPaint(PaintEventArgs e)
+    {
+        if (Total > Height)  // a thin scroll thumb on the right edge
+        {
+            var g = e.Graphics; int th = Math.Max(S(24), Height * Height / Total), ty = (Height - th) * scroll / Math.Max(1, Total - Height);
+            using var b = new SolidBrush(Color.FromArgb(110, Ui.Soft));
+            g.FillRectangle(b, Width - S(4), ty, S(3), th);
+        }
+        base.OnPaint(e);
+    }
+}
+
 public sealed record Item(string Text, object Val);
 
 /// <summary>One settings row: a list of choices cycled with the arrows, or an integer slider.</summary>

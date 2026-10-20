@@ -227,5 +227,50 @@ string StateText(string d) => File.ReadAllText(Path.Combine(d, "launcher-feature
         Check("slot_collision_is_typed_error", typed && File.ReadAllText(P("full-body")) == "T" && File.ReadAllText(P("full-body.off-by-launcher")) == "X");
     }
 }
+{   // round 4: launcher Features page
+    {   // set_off_then_on_roundtrip
+        var d = NewBuild(); Features.Apply(d, list); var before = Listing(d);
+        Features.Set(d, list, "full-body", false); Features.Set(d, list, "hand-blink", false);
+        bool off = !Has(d, "full-body") && Has(d, "no-hand-blink") && Ids(d, "off").OrderBy(x => x).SequenceEqual(new[] { "full-body", "hand-blink" });
+        Features.Set(d, list, "full-body", true); Features.Set(d, list, "hand-blink", true);
+        Check("set_off_then_on_roundtrip", off && Listing(d) == before && Ids(d, "off").Length == 0);
+    }
+    {   // set_rejects_unknown_id
+        var d = NewBuild(); Features.Apply(d, list); var before = Listing(d); var st = StateText(d);
+        bool threw = false; try { Features.Set(d, list, "no-such-feature", false); } catch (ArgumentException) { threw = true; }
+        Check("set_rejects_unknown_id", threw && Listing(d) == before && StateText(d) == st);
+    }
+    {   // state_reports_on_for_untouched_defaults
+        var d = NewBuild(); Features.Apply(d, list); var all = Features.State(d, list);
+        Check("state_reports_on_for_untouched_defaults", list.All(f => all[f.Id].On == f.Default && !all[f.Id].Adopted));
+        var d2 = NewBuild();  // before any Apply: knob files are absent, so enable rows read off and disable rows read on, no exception
+        var none = Features.State(d2, list);
+        Check("state_before_apply_does_not_throw", none["hand-blink"].On && !none["full-body"].On);
+    }
+    {   // restore_defaults_keeps_user_data
+        var d = NewBuild(); string P(string n) => Path.Combine(d, n);
+        Features.Apply(d, list);
+        File.WriteAllText(P("full-body"), "0.5 0.2");
+        Features.Set(d, list, "full-body", false);       // tuning set aside as a saved copy
+        Features.Set(d, list, "hand-blink", false);
+        Features.Set(d, list, "power-gestures", true);   // default-off row switched on by the user
+        File.WriteAllText(P("hud-scale"), "0.75");
+        bool setAside = File.ReadAllText(P("full-body.off-by-launcher")) == "0.5 0.2" && !Has(d, "full-body");
+        Features.RestoreDefaults(d, list);
+        var st = Features.State(d, list);
+        Check("restore_defaults_restores_saved_tuning", setAside && File.ReadAllText(P("full-body")) == "0.5 0.2" && !Has(d, "full-body.off-by-launcher"));
+        Check("restore_defaults_matches_defaults", list.All(f => st[f.Id].On == f.Default) && !Has(d, "no-hand-blink") && !Has(d, "power-gestures") && Ids(d, "off").SequenceEqual(new[] { "power-gestures" }));
+        Check("restore_defaults_leaves_unknown_files", File.ReadAllText(P("hud-scale")) == "0.75");
+        var again = Listing(d); Features.RestoreDefaults(d, list);
+        Check("restore_defaults_is_idempotent", Listing(d) == again);
+        Features.Set(d, list, "power-gestures", true); Features.RestoreDefaults(d, list);
+        Check("restore_defaults_switches_default_off_row_off", !Has(d, "power-gestures") && !Features.State(d, list)["power-gestures"].On);
+    }
+    {   // restore_defaults_aborts_on_unreadable_state
+        var d = NewBuild(); Directory.CreateDirectory(Path.Combine(d, "launcher-features.json"));
+        bool typed = false; try { Features.RestoreDefaults(d, list); } catch (Features.FeaturesStateException) { typed = true; }
+        Check("restore_defaults_aborts_on_unreadable_state", typed && !Has(d, "full-body"));
+    }
+}
 Console.WriteLine(failures == 0 ? "ALL PASS" : failures + " FAILED");
 return failures == 0 ? 0 : 1;

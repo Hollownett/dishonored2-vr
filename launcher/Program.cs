@@ -46,6 +46,12 @@ sealed class MainForm : Form
     readonly Option res, aa, hud, turn, snap, smooth, mirror, sharp, hint;
     readonly ArtButton save = new("Save", Look.Primary), reload = new("Reload", Look.Secondary);
     string settingsMsg = ""; Color settingsMsgColor = Ui.Dim;
+    // settings: the Features view (default-on features, each switchable; changes are written at once)
+    readonly CheckList featList = new();
+    readonly ArtButton featToggle = new("Features", Look.Secondary), restore = new("Restore defaults", Look.Secondary);
+    IReadOnlyList<Feature> features = Array.Empty<Feature>();
+    string? featuresError; bool showFeatures, loadingFeatures;
+    Control settingsLast = null!;  // the last button of the row; the message line sits to its right
     Prefs prefs = new();
 
     // tools
@@ -92,7 +98,22 @@ sealed class MainForm : Form
         options.Selected = 1;
         options.SelectionChanged += () => pages[1].Invalidate(new Rectangle(0, options.Bottom, pages[1].Width, pages[1].Height - options.Bottom));
         save.Click += (_, _) => SaveSettings(); reload.Click += (_, _) => LoadSettings();
-        pages[1].Controls.AddRange(new Control[] { options, save, reload });
+        try
+        {
+            using var fs = typeof(Features).Assembly.GetManifestResourceStream("features.json")!;
+            features = Features.Load(fs);
+        }
+        catch (Exception ex) { featuresError = "Features list unavailable: " + ex.Message; }
+        foreach (var f in features)
+        {
+            var row = new ArtCheck(f.Label, f.Help); var feat = f;
+            row.Toggled += (_, _) => { if (!loadingFeatures) SetFeature(feat, row); };
+            featList.Add(row);
+        }
+        featList.Visible = false; restore.Visible = false; featToggle.Enabled = featuresError == null;
+        featToggle.Click += (_, _) => ShowFeatures(!showFeatures);
+        restore.Click += (_, _) => RestoreFeatureDefaults();
+        pages[1].Controls.AddRange(new Control[] { options, featList, save, reload, restore, featToggle });
         pages[1].Painter = PaintSettings;
 
         // ---- Tools page
@@ -296,10 +317,21 @@ sealed class MainForm : Form
     void LayoutSettings()
     {
         var p = pages[1]; int w = p.Width, plateH = S(84), btnH = S(54), gap = S(12);
+        if (showFeatures)
+        {
+            featList.Bounds = new Rectangle(0, 0, w, Math.Max(S(120), p.Height - btnH - gap * 2));
+            int fy = featList.Bottom + gap + (btnH - S(40)) / 2;
+            restore.Bounds = new Rectangle(0, fy, Math.Max(S(180), restore.Natural), S(40));
+            featToggle.Bounds = new Rectangle(restore.Right + S(10), fy, Math.Max(S(150), featToggle.Natural), S(40));
+            settingsLast = featToggle; featList.Relayout();
+            return;
+        }
         options.Bounds = new Rectangle(0, 0, w, Math.Max(S(200), Math.Min(options.IdealHeight, p.Height - plateH - btnH - gap * 2)));
         int y = options.Bottom + gap + plateH + gap;
         save.Bounds = new Rectangle(-S(6), y, Math.Max(S(150), save.Natural), btnH);
         reload.Bounds = new Rectangle(save.Right + S(6), y + (btnH - S(40)) / 2, Math.Max(S(120), reload.Natural), S(40));
+        featToggle.Bounds = new Rectangle(reload.Right + S(10), reload.Top, Math.Max(S(150), featToggle.Natural), S(40));
+        settingsLast = featToggle;
     }
 
     void LayoutTools()
@@ -519,7 +551,8 @@ sealed class MainForm : Form
 
     void PaintSettings(Graphics g)
     {
-        var p = pages[1]; var o = options.Current;
+        var p = pages[1]; var o = showFeatures ? null : options.Current;
+        if (showFeatures) { PaintSettingsMsg(g); return; }
         var plate = new Rectangle(0, options.Bottom + S(12), p.Width, S(84));
         Ui.Image(g, Ui.Art["menu_background"], Rectangle.Inflate(plate, S(30), S(26)), .95f);
         Ui.Divider(g, new Rectangle(0, plate.Y, plate.Width, S(14)), .55f);
@@ -529,8 +562,69 @@ sealed class MainForm : Form
             Ui.Spaced(g, o.Name.ToUpperInvariant(), Ui.Font(p, 9.5f, FontStyle.Bold), Ui.Gold, S(28), plate.Y + S(22), 2.4f * DeviceDpi / 96f);
             TextRenderer.DrawText(g, o.Help, Ui.Font(p, 10.5f, FontStyle.Regular, Ui.Sans), new Rectangle(S(28), plate.Y + S(44), plate.Width - S(40), plate.Height - S(44)), Ui.Soft, np | TextFormatFlags.WordBreak | TextFormatFlags.EndEllipsis);
         }
-        var m = new Rectangle(reload.Right + S(18), save.Top, Math.Max(S(60), p.Width - reload.Right - S(18)), save.Height);
-        TextRenderer.DrawText(g, settingsMsg, Ui.Font(p, 9.5f, FontStyle.Regular, Ui.Sans), m, settingsMsgColor, np | TextFormatFlags.WordBreak | TextFormatFlags.VerticalCenter);
+        PaintSettingsMsg(g);
+    }
+
+    void PaintSettingsMsg(Graphics g)
+    {
+        var p = pages[1]; int x = settingsLast.Right + S(18);
+        int top = showFeatures ? featList.Bottom + S(12) : save.Top, h = showFeatures ? S(54) : save.Height;
+        var m = new Rectangle(x, top, Math.Max(S(60), p.Width - x), h);
+        TextRenderer.DrawText(g, settingsMsg, Ui.Font(p, 9.5f, FontStyle.Regular, Ui.Sans), m, settingsMsgColor,
+            TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix | TextFormatFlags.WordBreak | TextFormatFlags.VerticalCenter);
+    }
+
+    /// <summary>Switches the Settings page between the option list and the Features list.</summary>
+    void ShowFeatures(bool on)
+    {
+        showFeatures = on;
+        options.Visible = !on; save.Visible = !on; reload.Visible = !on; featList.Visible = on; restore.Visible = on;
+        featToggle.Text = on ? "Back to options" : "Features";
+        if (on) LoadFeatures(); else SetSettingsMsg("", Ui.Dim);
+        LayoutSettings(); pages[1].Invalidate(true);
+        if (on && featList.Rows.Count > 0) featList.Rows[0].Focus(); else if (!on) options.Focus();
+    }
+
+    string FeatureBuild => env.P("build");
+
+    /// <summary>Reads the knob files into the check rows (no writes).</summary>
+    void LoadFeatures()
+    {
+        if (featuresError != null) { SetSettingsMsg(featuresError, Ui.Bad); return; }
+        loadingFeatures = true;
+        try
+        {
+            var st = Features.State(FeatureBuild, features);
+            for (int i = 0; i < features.Count; i++) featList.Rows[i].SetSilently(st[features[i].Id].On);
+            if (showFeatures) SetSettingsMsg("Each switch is saved at once. It applies the next time VR starts.", Ui.Dim);
+        }
+        catch (Exception ex) { SetSettingsMsg("Cannot read feature state: " + ex.Message, Ui.Bad); }
+        finally { loadingFeatures = false; }
+    }
+
+    void SetFeature(Feature f, ArtCheck row)
+    {
+        try
+        {
+            Features.Set(FeatureBuild, f, row.Checked);
+            SetSettingsMsg($"{f.Label}: {(row.Checked ? "on" : "off")}. Applies the next time VR starts.", Ui.Good);
+        }
+        catch (Exception ex)
+        {
+            loadingFeatures = true; try { row.SetSilently(!row.Checked); } finally { loadingFeatures = false; }  // show what is really on disk
+            SetSettingsMsg("Not changed: " + ex.Message, Ui.Bad);
+        }
+    }
+
+    void RestoreFeatureDefaults()
+    {
+        try
+        {
+            Features.RestoreDefaults(FeatureBuild, features);
+            LoadFeatures();
+            SetSettingsMsg("Defaults restored. Your saved tuning files were kept. Applies the next time VR starts.", Ui.Good);
+        }
+        catch (Exception ex) { LoadFeatures(); SetSettingsMsg("Not restored: " + ex.Message, Ui.Bad); }
     }
 
     void SetSettingsMsg(string text, Color c) { settingsMsg = text; settingsMsgColor = c; pages[1].Invalidate(); }
@@ -547,6 +641,7 @@ sealed class MainForm : Form
             Select(hint, prefs.Hint != 0 ? 1 : 0, "");
             options.Invalidate();
             SetSettingsMsg(File.Exists(env.SettingsFile) ? "Loaded build\\vr-settings.cfg. Changes apply the next time VR starts." : "No saved file yet; showing defaults.", Ui.Dim);
+            LoadFeatures();
         }
         catch (Exception ex) { SetSettingsMsg(ex.Message, Ui.Bad); }
     }
