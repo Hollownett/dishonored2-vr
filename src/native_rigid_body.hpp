@@ -156,7 +156,6 @@ template<class Read> std::optional<NativeRigidBody> nearest_ragdoll_body(Read& r
         if(allow_collar?!ragdoll_hold_bone(bone):!ragdoll_grab_bone(bone)) continue;
         const auto body=native_ragdoll_body(read,base,entity,bone);
         if(body && (!best || body->contact_distance(hand)<best->contact_distance(hand))) best=body;
-        if(!body && bone==3) break; // not a guard body the hands can drag: skip the remaining reads
     }
     return best;
 }

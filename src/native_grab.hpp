@@ -716,9 +716,10 @@ public:
         log_.open(file,std::ios::trunc);if(!log_) throw std::runtime_error("Cannot open native grab evidence");
         acquisitions_.open(file.parent_path()/L"native-grab-acquisition.csv",std::ios::trunc);
         if(!acquisitions_) throw std::runtime_error("Cannot open native acquisition evidence");
-        mass_probe_=false;mass_probe_rows_=0;mass_probe_out_.close();collar_grab_=false;
+        mass_probe_=false;mass_probe_rows_=0;mass_probe_out_.close();
         {std::error_code ec;const auto root=file.parent_path().parent_path();
          collar_grab_=std::filesystem::exists(root/L"build"/L"collar-grab",ec);
+         if(collar_grab_) {std::ofstream note(loss_file_,std::ios::app);note<<"knob build/collar-grab present: chest/neck hold targets enabled\n";}
          if(std::filesystem::exists(root/L"build"/L"mass-probe",ec)) {
             mass_probe_out_.open(file.parent_path()/L"mass-probe.csv",std::ios::trunc);
             if(mass_probe_out_) {mass_probe_out_<<mass_probe_csv_header()<<'\n';mass_probe_out_.flush();mass_probe_=true;}

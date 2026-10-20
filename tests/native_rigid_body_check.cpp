@@ -144,6 +144,12 @@ int main() {
             assert(nearest_ragdoll_body(read,base,npc,{2.02,0,0},true)->bone==2);
             assert(nearest_ragdoll_body(read,base,npc,{3,0,0},true)->bone==3);
             for(const double x:{0.0,4.0,0.5,3.9}) {const auto b=nearest_ragdoll_body(read,base,npc,{x,0,0},true);assert(b && b->bone!=0 && b->bone!=4 && b->bone!=1);}
+            for(const int bad:{3,2}) {   // an unreadable collar body must not hide the limbs
+                const auto rec=npc_pool+bad*0xb0;put(rec+0x44,std::uint32_t{0xce});
+                const auto limb=nearest_ragdoll_body(read,base,npc,{6.0,0,0},true);
+                assert(limb && limb->bone==6);
+                put(rec+0x44,std::uint32_t{0x82});
+            }
             put(npc+0xd1,static_cast<unsigned char>(0x80));
             assert(!ragdoll_pushable_state(read,npc) && !corpse_candidate(read,base,npc,{2.02,0,0},true) && !corpse_candidate(read,base,npc,{2.02,0,0},false)); // awake ragdolling: no candidate
             put(npc+0xd1,static_cast<unsigned char>(0x20));
