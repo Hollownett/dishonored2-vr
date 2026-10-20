@@ -7,7 +7,7 @@ Goal: find out why sword stealth kills from behind are missed, so Task 10 fixes 
 1. Start VR and go to a level with unaware guards (standing or patrolling, not alerted).
 2. Make a manual save before each guard.
 3. For each of 10 attempts: approach from behind, swing the sword fast at his back, neck or head once. Note on paper "kill / hit / nothing" and where you hit (back, head, legs).
-4. Do not restart the game between attempts. Quit normally.
+4. Do not restart the game between attempts. Quit normally. Quit the game fully between collection sessions: the contact and stealth counters are only reset when the game starts, so a second session in the same process mixes the two.
 
 ## 2. Where the files are
 
@@ -36,7 +36,7 @@ Confirmed against `src/native_interaction_aim.hpp` (`sword_contact_status_json`,
 | `takedown.swings`, `.swings_with_kill` | physical swings, and swings during a native kill offer |
 | `takedown.ga_offered_frames`, `.ga_offered_swings` | frames / swings where the native Assassination was offered |
 
-`native-combat.csv` columns are `tick,what,entity,value,extra`. Look at rows named `contact_hit`, `slash`, `thrust`, `overhead` (the `value` column is the tip speed) and any `stealth` rows.
+`native-combat.csv` columns are `tick,what,entity,value,extra`. Look at rows named `contact_hit`, `slash`, `thrust`, `overhead` (the `value` column is the tip speed).
 
 ## 4. Run the report
 

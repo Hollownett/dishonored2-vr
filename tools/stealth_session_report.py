@@ -36,7 +36,7 @@ def _result(contacts, buckets, stage, cause, fix, notes):
 
 def verdict(status, combat_rows):
     empty = {"stealth_held": 0, "not_behind": 0, "slow": 0, "not_unaware": 0,
-             "not_damageable": 0, "other": 0}
+             "not_damageable": 0, "other": 0, "unaccounted": 0}
     sc = status.get("sword_contact")
     sc = sc if isinstance(sc, dict) else {}
     stealth = _counts(sc, "stealth", 5)
@@ -54,8 +54,12 @@ def verdict(status, combat_rows):
     for name, index, _ in REJECT_ORDER:
         buckets[name] = reject[index]
     accounted = sum(buckets.values())
-    buckets["other"] += max(0, contacts - accounted)
+    enqueued = contacts
+    contacts = max(enqueued, accounted)
+    buckets["unaccounted"] = contacts - accounted
     notes = []
+    if accounted != enqueued:
+        notes.append("buckets sum to %d, enqueued=%d (pre-enqueue rejects or consumer rejects)" % (accounted, enqueued))
     hh = sc.get("hit_height")
     if isinstance(hh, list) and len(hh) >= 3 and hh[2] > 0 and hh[0] == 0 and hh[1] == 0:
         notes.append("head-height contacts only")
@@ -84,7 +88,8 @@ def verdict(status, combat_rows):
             return _result(contacts, buckets, stage, "hold_expired_no_native_offer", "Task 10 cause W", notes)
         return _result(contacts, buckets, stage, "engine_rule_rejects", "Task 10 cause K", notes)
     if best:
-        return _result(contacts, buckets, stage, best[1], best[2], notes)
+        notes.append("held strikes outnumber the largest reject bucket (%s=%d) and none resolved" % (best[1], best[0]))
+        return _result(contacts, buckets, stage, "unresolved", "collect again", notes)
     return _result(contacts, buckets, stage, "unresolved", "", notes)
 
 

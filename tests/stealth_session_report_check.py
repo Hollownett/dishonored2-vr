@@ -19,6 +19,22 @@ def report_buckets_sum_to_contacts():
     assert v["contacts"] == 10 and sum(v["buckets"].values()) == 10, v
 
 
+def buckets_over_count_is_reported():
+    v = report.verdict(mkstatus(2, (0, 0, 0, 0, 0), (3, 2, 0, 0, 0)), [])
+    assert v["contacts"] == 5 and sum(v["buckets"].values()) == 5 and v["buckets"]["unaccounted"] == 0, v
+    assert any("buckets sum to 5, enqueued=2" in n for n in v["notes"]), v
+
+
+def buckets_shortfall_is_unaccounted():
+    v = report.verdict(mkstatus(10, (0, 0, 0, 0, 0), (3, 0, 0, 0, 0)), [])
+    assert v["buckets"]["unaccounted"] == 7 and v["buckets"]["other"] == 0 and sum(v["buckets"].values()) == 10, v
+
+
+def held_outnumber_rejects_is_unresolved():
+    v = report.verdict(mkstatus(8, (5, 0, 0, 0, 0), (3, 0, 0, 0, 0)), [])
+    assert (v["likely_cause"], v["fix_task"]) == ("unresolved", "collect again"), v
+
+
 def slow_dominates_points_to_speed_gate():
     v = report.verdict(mkstatus(7, reject=(0, 7, 0, 0, 0)), [])
     assert (v["likely_cause"], v["fix_task"]) == ("slow", "Task 10 cause S"), v
