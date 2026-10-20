@@ -36,6 +36,7 @@
 // The registry scan reads through its own reader (`scan`: a direct-mapped cache of validated 64 KB blocks, native_grab.hpp) and stops at
 // scan_limit_us: the shared 32-entry, 100 ms region cache thrashed on entities scattered over the heap, a VirtualQuery per read.
 #include "hand_clamp.hpp"
+#include "native_motion.hpp"
 #include "hand_contact.hpp"
 #include "physical_grab.hpp"
 #include <algorithm>
@@ -50,20 +51,6 @@
 #include <vector>
 
 namespace d2vr {
-struct NativeMotion {Vec3 velocity{};std::uint16_t inverse_mass{};};
-template<class Read> std::optional<NativeMotion> native_motion(Read& read,const NativeRigidBody& body) {
-    using namespace rig;
-    const auto index=value<std::uint32_t>(read,body.record+0x40);
-    const auto array=value<std::uintptr_t>(read,body.world+0x120);
-    if(!index || *index>=0x100000 || !array || !pointer(*array)) return {};
-    const auto at=*array+static_cast<std::uintptr_t>(*index)*0x80;
-    const auto v=value<std::array<float,3>>(read,at+0x40);const auto m=value<std::uint16_t>(read,at+0x26);
-    if(!v || !m) return {};
-    const Vec3 velocity{(*v)[0],(*v)[1],(*v)[2]};
-    if(!finite(velocity) || length(velocity)>100) return {};
-    return NativeMotion{velocity,*m};
-}
-
 class NativeHandContact {
     friend struct NativeHandContactPublicationFixture;
 public:

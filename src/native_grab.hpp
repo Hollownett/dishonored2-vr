@@ -4,6 +4,7 @@
 #include <MinHook.h>
 #include "native_rigid_body.hpp"
 #include "native_hand_contact.hpp"
+#include "mass_probe.hpp"
 #include "full_hand_contact.hpp"
 #include "native_player_camera.hpp"
 #include "crash_observer.hpp"
@@ -176,6 +177,19 @@ private:
     bool enabled_{};std::atomic<bool> active_{};std::atomic<unsigned> depth_{};
     UINT64 obstruction_token_{};bool obstruction_required_{};
     UINT64 acquisition_samples_{};std::ofstream acquisitions_;
+    // F1 mass probe (read-only): build/mass-probe, read once at install, appends to artifacts/mass-probe.csv at a bind, at most 200 rows per session.
+    bool mass_probe_{};unsigned mass_probe_rows_{};std::ofstream mass_probe_out_;
+    static constexpr unsigned mass_probe_limit=200;
+    void probe_masses(const NativeRigidBody& body,UINT64 now) {
+        if(!mass_probe_ || !mass_probe_out_ || mass_probe_rows_>=mass_probe_limit) return;
+        try {
+            std::vector<MassProbeRow> rows;
+            if(body.bone>=0) rows=probe_ragdoll_masses(read_,base_,body.entity,now);
+            else if(const auto row=probe_prop_mass(read_,body,now)) rows.push_back(*row);
+            for(const auto& row:rows) {if(mass_probe_rows_>=mass_probe_limit) break;mass_probe_out_<<mass_probe_csv_row(row)<<'\n';++mass_probe_rows_;}
+            mass_probe_out_.flush();
+        } catch(...) {mass_probe_=false;}
+    }
     std::mutex mutex_;std::array<Lane,2> lanes_{};
     UINT64 lifecycle_revision_{1};
     bool contact_required_{};
@@ -377,6 +391,7 @@ private:
                 if(lane.grab.bind(at_hand,p.hand.position,grab_acquire_distance)) {
                     lane.held=limb;lane.acquired=true;lane.tow=0;lane.owner_player=p.owner.player;lane.owner_camera=p.owner.camera;
                     lane.owner_generation=p.owner.camera_identity.generation;lane.owner_epoch=p.epoch;++picked_;++yank_holds_;yanked_entity_[side]=0;
+                    probe_masses(*limb,now);
                 }
             }
         } else if(sample && physical_usable && lane.grab.pressed() && !lane.acquired && (!lane.attempted || now-lane.last_acquisition>=100)) {
@@ -403,6 +418,7 @@ private:
             if(body && contact && body->world==world && cleared(lane,*body,now) && lane.grab.bind(body->pose,*contact,grab_acquire_distance)) {
                 lane.held=body;lane.acquired=true;lane.tow=0;lane.owner_player=p.owner.player;lane.owner_camera=p.owner.camera;
                 lane.owner_generation=p.owner.camera_identity.generation;lane.owner_epoch=p.epoch;++picked_;
+                probe_masses(*body,now);
             }
         }
     }
@@ -697,6 +713,12 @@ public:
         log_.open(file,std::ios::trunc);if(!log_) throw std::runtime_error("Cannot open native grab evidence");
         acquisitions_.open(file.parent_path()/L"native-grab-acquisition.csv",std::ios::trunc);
         if(!acquisitions_) throw std::runtime_error("Cannot open native acquisition evidence");
+        mass_probe_=false;mass_probe_rows_=0;mass_probe_out_.close();
+        {std::error_code ec;const auto root=file.parent_path().parent_path();
+         if(std::filesystem::exists(root/L"build"/L"mass-probe",ec)) {
+            mass_probe_out_.open(file.parent_path()/L"mass-probe.csv",std::ios::trunc);
+            if(mass_probe_out_) {mass_probe_out_<<mass_probe_csv_header()<<'\n';mass_probe_out_.flush();mass_probe_=true;}
+         }}
         acquisitions_<<std::setprecision(9)<<"tick_ms,side,hand_x,hand_y,hand_z,candidates,nearest_entity_id,contact_distance\n";
         log_<<std::setprecision(9)<<"tick_ms,side,entity_id,component,generation,handle,body_flags,release,x,y,z,target_x,target_y,target_z,vx,vy,vz,wx,wy,wz\n";
         {std::lock_guard<std::mutex> lock(mutex_);advance_lifecycle_locked();lanes_={};}
@@ -713,7 +735,7 @@ public:
         if(enabled_) {if(MH_DisableHook(reinterpret_cast<void*>(base_+rva))!=MH_OK) return false;enabled_=false;}
         const auto deadline=GetTickCount64()+5000;while(depth_ && GetTickCount64()<deadline) Sleep(1);if(depth_) return false;
         std::array<unsigned char,32> code{};const bool restored=!original_ || (read_(base_+rva,code.data(),code.size()) && code==dispatch_code);
-        try {std::lock_guard<std::mutex> lock(mutex_);for(auto& lane:lanes_) {lane.grab.release(false);lane.held.reset();}log_.close();acquisitions_.close();} catch(...) {return false;}
+        try {std::lock_guard<std::mutex> lock(mutex_);for(auto& lane:lanes_) {lane.grab.release(false);lane.held.reset();}log_.close();acquisitions_.close();mass_probe_out_.close();mass_probe_=false;} catch(...) {return false;}
         return restored;
     }
     bool enabled() const noexcept {return active_.load(std::memory_order_acquire);}

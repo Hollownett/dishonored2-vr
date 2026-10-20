@@ -1,5 +1,7 @@
 #include "../src/native_rigid_body.hpp"
 #include "../src/native_cast_exclusion.hpp"
+#include "../src/mass_probe.hpp"
+#include <algorithm>
 #include <cassert>
 #include <cstring>
 #include <map>
@@ -81,6 +83,34 @@ int main() {
             const std::uint32_t h=0x1000000+b;put(handles+0x120+b*4,h);put(handles+0x28,handles+0x120);put(handles+0x30,std::uint32_t{17});const auto rec=npc_pool+b*0xb0;
             rig::Transform bt{};bt.f[0]=bt.f[5]=bt.f[10]=bt.f[15]=1;bt.f[12]=static_cast<float>(b);
             put(rec,bt);put(rec+0x40,std::uint32_t{5+b});put(rec+0x44,std::uint32_t{0x82});put(rec+0x70,h);put(rec+0x74,h);
+        }
+        {   // read-only mass probe: 17 rows from the pool records and the motion array
+            const std::uintptr_t motions=0x9900000;put(world+0x120,motions);
+            for(std::uint32_t b=0;b<17;++b) {put(motions+(5+b)*0x80+0x26,static_cast<std::uint16_t>(0x3f00+b));put(motions+(5+b)*0x80+0x40,std::array<float,3>{0,0,0});} // 0x3f00 = inverse 0.5 (2 kg)
+            std::size_t reads_before=0;auto counting=[&](std::uintptr_t at,void* out,std::size_t size) {++reads_before;return read(at,out,size);};
+            const auto rows=probe_ragdoll_masses(counting,base,npc,77);
+            assert(reads_before>0 && rows.size()==17);
+            for(int b=0;b<17;++b) {
+                const auto& r=rows[static_cast<std::size_t>(b)];
+                assert(r.bone==b && r.tick==77 && r.entity_id==npc_id && r.handle==0x1000000u+static_cast<std::uint32_t>(b));
+                assert(r.raw_inverse_half==0x3f00+b && r.record_flags==0x82 && r.class_kg==ragdoll_class_kg[static_cast<std::size_t>(b)]);
+                assert(std::string(ragdoll_bone_name(r.bone))==ragdoll_bone_name(b));
+            }
+            assert(std::abs(rows[0].decoded_kg-2.0)<1e-9 && !rows[0].rejected && !rows[10].rejected);
+            put(motions+(5+3)*0x80+0x26,std::uint16_t{0x7fc0});   // NaN half on the neck
+            const auto bad=probe_ragdoll_masses(read,base,npc,78);assert(bad.size()==17 && bad[3].rejected && bad[3].decoded_kg==0);
+            put(motions+(5+3)*0x80+0x26,static_cast<std::uint16_t>(0x3f03));
+            put(npc_pool+5*0xb0+0x44,std::uint32_t{0xce});   // bone 5 no longer resolves: skipped
+            const auto fewer=probe_ragdoll_masses(read,base,npc,79);assert(fewer.size()==16 && fewer[5].bone==6);
+            put(npc_pool+5*0xb0+0x44,std::uint32_t{0x82});
+            const auto prop_row=probe_prop_mass(read,*native_ragdoll_body(read,base,npc,10),80);
+            assert(prop_row && prop_row->bone==10 && prop_row->raw_inverse_half==0x3f0a);
+            const auto header=mass_probe_csv_header();
+            for(const auto& r:rows) {
+                const auto line=mass_probe_csv_row(r);
+                assert(std::count(line.begin(),line.end(),',')==std::count(header.begin(),header.end(),','));
+            }
+            assert(mass_probe_csv_row(rows[2]).find("chest")!=std::string::npos);
         }
         const auto wrist=native_ragdoll_body(read,base,npc,10);
         assert(wrist && wrist->bone==10 && wrist->handle==0x100000a && wrist->pose.position.x==10 && wrist->bounds);
