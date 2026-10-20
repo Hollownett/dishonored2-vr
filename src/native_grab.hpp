@@ -9,6 +9,8 @@
 #include "native_player_camera.hpp"
 #include "crash_observer.hpp"
 #include "physical_grab.hpp"
+#include "corpse_tow.hpp"
+#include "grab_mass.hpp"
 #include "right_grip_owner.hpp"
 #include "selection_policy.hpp"
 #include <atomic>
@@ -330,13 +332,13 @@ private:
     }
     // A body dragged by a limb follows at the limb's reach: when the hand pulls the grabbed limb farther from the pelvis than at
     // the grab, the pelvis slides after it along the floor (sim v402: the wrist alone moved 0.86 m and dragged the pelvis 0.19 m).
-    void tow(Lane& lane,const NativeRigidBody& held) {
+    void tow(Lane& lane,const NativeRigidBody& held,double dt) {
         const auto pelvis=native_ragdoll_body(read_,base_,held.entity,0);if(!pelvis) return;
-        Vec3 pull=lane.grab.target().position-pelvis->pose.position;pull.z=0;const auto reach=length(pull);
-        if(lane.tow<=0) {lane.tow=std::clamp(reach,.4,1.4);return;}
-        if(reach<=lane.tow+.05) return;
-        const auto speed=std::min((reach-lane.tow)*6,4.);
-        alignas(16) std::array<float,4> linear{static_cast<float>(pull.x/reach*speed),static_cast<float>(pull.y/reach*speed),0,0};
+        TowInput in;in.target=lane.grab.target().position;in.pelvis=pelvis->pose.position;in.bind_reach=lane.tow;
+        in.pelvis_kg=ragdoll_class_kg[0];in.dt=dt;in.tuning=&tuning_;
+        in.limb_saturated=false; // Task 10 supplies CorpseMotor.capped; the pelvis velocity is not read yet either (zero)
+        const auto plan=plan_tow(in);lane.tow=plan.bind_reach;if(!plan.write) return;
+        alignas(16) std::array<float,4> linear{static_cast<float>(plan.linear.x),static_cast<float>(plan.linear.y),0,0};
         alignas(16) std::array<float,4> angular{};
         CrashOperation operation("native ragdoll tow velocity");
         const auto result=write_velocity(reinterpret_cast<void*>(pelvis->world),pelvis->handle,linear.data(),angular.data());
@@ -380,8 +382,8 @@ private:
                 lane.grab.motor(body->pose,physical_usable && sample && same_owner,now,p.source_tick);
             if(motor && (motor->release || now-lane.last_motor>=10)) {
                 if(!write(lane,side,*body,*motor)) return;
-                lane.last_motor=now;
-                if(body->bone>0 && !motor->release) tow(lane,*body);
+                const auto previous_motor=lane.last_motor;lane.last_motor=now;
+                if(body->bone>0 && !motor->release) tow(lane,*body,previous_motor && now>previous_motor?(now-previous_motor)/1000.:1./60);
                 if(motor->release) {
                     if(body->bone<0 && length(motor->linear)>3) {std::lock_guard<std::mutex> g(thrown_mutex_);thrown_=Thrown{body->entity,body->component,body->entity_id,motor->linear,now};}
                     lane.held.reset();lane.pending_release=false;lane.tow=0;}
@@ -553,6 +555,7 @@ public:
     static std::optional<Thrown> take_thrown() {std::lock_guard<std::mutex> g(thrown_mutex_);auto t=thrown_;thrown_.reset();return t;}
     inline static std::mutex thrown_mutex_;inline static std::optional<Thrown> thrown_{};
     std::atomic<UINT64> pokes_{},tows_{};
+    GrabTuning tuning_{}; // tow stays off by default (Task 9 decides); Task 10 loads build/grab-tuning.cfg
     bool waiting_native_query(unsigned side) {std::lock_guard<std::mutex> lock(mutex_);return lanes_.at(side).decision_deferred;}
     // Entity of the physics prop this hand would grab, 0 if none.
     std::uintptr_t focus_entity(unsigned side,UINT64 now) {
