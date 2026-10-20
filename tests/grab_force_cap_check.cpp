@@ -25,10 +25,15 @@ void expect_defaults_with_error(const char* name,const std::string& text) {
     CHECK(r.value.axial_n==d.axial_n && r.value.lateral_n==d.lateral_n && r.value.torque_nm==d.torque_nm);
     CHECK(r.value.strength_scale==d.strength_scale && r.value.lift_fraction==d.lift_fraction);
     CHECK(r.value.mass_floor_kg==d.mass_floor_kg && r.value.mass_ceiling_kg==d.mass_ceiling_kg);
-    CHECK(r.value.hand_kg==d.hand_kg && r.value.dt_max==d.dt_max && !r.value.tow && !r.value.use_measured_mass);
+    CHECK(r.value.hand_kg==d.hand_kg && r.value.dt_max==d.dt_max && r.value.tow==d.tow && !r.value.use_measured_mass);
 }
 }
 int main() {
+    {   // lab_tuned_defaults_pinned (tools/corpse_drag_lab.cpp, Task 9)
+        const GrabTuning t;
+        CHECK(t.strength_scale==3 && t.axial_n==300 && t.lateral_n==90 && t.torque_nm==30 && t.hand_kg==2 && t.mass_floor_kg==.5 && t.mass_ceiling_kg==60);
+        CHECK(t.lift_fraction==.25 && t.tow && !t.use_measured_mass && near(t.dt_max,1./30));
+    }
     // axial_cap_300n
     {
         auto c=cap_velocity_step(zero,zero,X*10,zero,X,10,1,.01,scale1());
@@ -124,9 +129,9 @@ int main() {
     {
         auto missing=load_grab_tuning(std::filesystem::temp_directory_path()/"d2vr_no_such_grab_tuning.cfg");
         CHECK(missing.source==TuningSource::defaults && missing.error.empty() && missing.value.axial_n==300);
-        auto r=load_grab_tuning(write_file("d2vr_gt_ok.cfg","# comment\naxial_n 250\nstrength_scale 2\ntow 1\n\nlift_fraction .25\n"));
+        auto r=load_grab_tuning(write_file("d2vr_gt_ok.cfg","# comment\naxial_n 250\nstrength_scale 2\ntow 0\n\nlift_fraction .4\n"));
         CHECK(r.source==TuningSource::file && r.error.empty());
-        CHECK(r.value.axial_n==250 && r.value.strength_scale==2 && r.value.tow && r.value.lift_fraction==.25);
+        CHECK(r.value.axial_n==250 && r.value.strength_scale==2 && !r.value.tow && r.value.lift_fraction==.4);
         CHECK(r.value.lateral_n==90 && !r.value.use_measured_mass && r.value.axial_cap()==500);
         expect_defaults_with_error("d2vr_gt_unknown.cfg","bogus 1\n");
         expect_defaults_with_error("d2vr_gt_nan.cfg","axial_n 250\nlateral_n nan\n");

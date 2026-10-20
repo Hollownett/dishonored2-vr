@@ -562,7 +562,7 @@ public:
     static std::optional<Thrown> take_thrown() {std::lock_guard<std::mutex> g(thrown_mutex_);auto t=thrown_;thrown_.reset();return t;}
     inline static std::mutex thrown_mutex_;inline static std::optional<Thrown> thrown_{};
     std::atomic<UINT64> pokes_{},tows_{},tow_unreadable_{};
-    GrabTuning tuning_{}; // tow stays off by default (Task 9 decides); Task 10 loads build/grab-tuning.cfg
+    GrabTuning tuning_{}; // tow is on by default (Task 9 lab decision); Task 10 loads build/grab-tuning.cfg
     bool waiting_native_query(unsigned side) {std::lock_guard<std::mutex> lock(mutex_);return lanes_.at(side).decision_deferred;}
     // Entity of the physics prop this hand would grab, 0 if none.
     std::uintptr_t focus_entity(unsigned side,UINT64 now) {

@@ -826,6 +826,10 @@ cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT /Isrc /Ithird_party\minhook\i
 if not "%errorlevel%"=="0" exit /b 1
 build\push_lab.exe build\push-lab
 if not "%errorlevel%"=="0" exit /b 1
+cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT /Isrc tools\corpse_drag_lab.cpp /Fo:build\corpse_drag_lab.obj /Fe:build\corpse_drag_lab.exe
+if not "%errorlevel%"=="0" exit /b 1
+build\corpse_drag_lab.exe build\corpse-lab
+if not "%errorlevel%"=="0" exit /b 1
 build\weapon_collision_check.exe
 if not "%errorlevel%"=="0" exit /b 1
 cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT /Isrc tests\hand_clamp_check.cpp /Fo:build\hand_clamp_check.obj /Fe:build\hand_clamp_check.exe

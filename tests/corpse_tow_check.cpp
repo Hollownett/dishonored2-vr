@@ -14,8 +14,12 @@ TowInput base(const GrabTuning& t,double reach,double bind) {
 }
 }
 int main() {
-    {   // off_by_default_no_write
-        const GrabTuning t;CHECK(!t.tow);
+    {   // on_by_default_writes (flipped by the Task 9 corpse-drag lab: the pelvis follows a dragged limb)
+        const GrabTuning t;CHECK(t.tow);
+        TowInput in=base(t,2,.5);const auto out=plan_tow(in);CHECK(out.write && !out.disabled_saturated);
+    }
+    {   // off_when_disabled_no_write (build/grab-tuning.cfg "tow 0")
+        GrabTuning t;t.tow=false;
         TowInput in=base(t,2,.5);const auto out=plan_tow(in);CHECK(!out.write && !out.disabled_saturated && near(out.bind_reach,.5));
     }
     {   // first_call_sets_reach_clamped

@@ -4,6 +4,8 @@
 // along the forearm and weaker sideways, and the held body adds to the hand's effective mass. We can only write velocities,
 // so the same law limits how much the body's velocity may change per motor tick: dv_max = F_max * dt / m_effective.
 // All caps are multiplied by strength_scale (forgiving default 3: one hand lifts and swings a whole body).
+// Defaults tuned in tools/corpse_drag_lab.cpp (Task 9): lift_fraction .5 -> .25 (the one-hand swing and the heavy hitch both pass only in a
+// narrow window around it), tow off -> on (the pelvis follows the dragged limb). The headset session retunes them in build/grab-tuning.cfg.
 #include "tracked_pose.hpp"
 #include <algorithm>
 #include <cmath>
@@ -16,7 +18,7 @@
 
 namespace d2vr {
 struct GrabTuning {double axial_n=300,lateral_n=90,torque_nm=30,strength_scale=3,hand_kg=2,mass_floor_kg=.5,mass_ceiling_kg=60,
-    lift_fraction=.5,dt_max=1./30;bool tow=false,use_measured_mass=false;
+    lift_fraction=.25,dt_max=1./30;bool tow=true,use_measured_mass=false;
     double axial_cap() const {return axial_n*strength_scale;} double lateral_cap() const {return lateral_n*strength_scale;} double torque_cap() const {return torque_nm*strength_scale;}};
 enum class TuningSource {defaults,file};
 struct TuningLoad {GrabTuning value;TuningSource source{TuningSource::defaults};std::string error;};

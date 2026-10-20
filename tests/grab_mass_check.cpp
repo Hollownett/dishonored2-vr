@@ -51,8 +51,9 @@ int main() {
     {   // hanging_mass_ramp
         GrabTuning t;
         CHECK(hanging_mass(7,0,t)==0);
-        CHECK(near(hanging_mass(7,.125,t),.5*.5*(75-.6)));
-        CHECK(near(hanging_mass(7,.25,t),.5*(75-.6)) && near(hanging_mass(7,3,t),.5*(75-.6)));
+        CHECK(t.lift_fraction==.25);   // lab-tuned default (tools/corpse_drag_lab.cpp)
+        CHECK(near(hanging_mass(7,.125,t),.25*.5*(75-.6)));
+        CHECK(near(hanging_mass(7,.25,t),.25*(75-.6)) && near(hanging_mass(7,3,t),.25*(75-.6)));
         CHECK(hanging_mass(7,-1,t)==0 && hanging_mass(7,std::nan(""),t)==0 && hanging_mass(17,1,t)==0);
     }
     {   // csv row field count equals the header's (plain struct, no fixture)
