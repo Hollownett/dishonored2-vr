@@ -45,7 +45,7 @@ public:
         if(yaw && !vertical && std::fabs(wrap(*yaw-held_))>=snap_rad) {held_=*yaw;++snaps_;}
         return held_;
     }
-    void reset() noexcept {in_=false;}
+    void reset() noexcept {in_=false;snaps_=0;}
     std::uint64_t snaps() const {return snaps_;}
 };
 

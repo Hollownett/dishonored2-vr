@@ -22,7 +22,8 @@ inline std::optional<AudioListenerPose> audio_listener_pose(const WorldTrackedPo
     return result;
 }
 // Use the physical eye centre, never a pupil or a canted render orientation.
-// Authored scenes use the same native camera centre and axes as the renderer.
+// Authored scenes: `authored` is the pose the caller wants heard from (the head-owned view at the native camera position,
+// or the native camera itself under legacy-authored-camera).
 inline std::optional<AudioListenerPose> head_audio_pose(const TrackedPose& centre,const TrackedPose& origin,
     const GameCameraPose& anchor,Vec3 admitted_offset,const GameCameraPose* authored=nullptr) {
     try {

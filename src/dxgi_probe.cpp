@@ -354,7 +354,7 @@ static d2vr::HeldPlacementSession held_placement_session;
 static std::array<double,3> held_hand_velocity{};static std::uintptr_t held_entity{};static std::array<double,3> held_offset{};
 // Carry diagnostics (Task 9): counters always on (atomics); the per-frame trace only when build/carry-trace exists (a writer thread, capped, flushed every second and at teardown).
 static bool legacy_authored_camera=false; // build/legacy-authored-camera: authored scenes use the native camera rotation (and the +5% FOV)
-static d2vr::AuthoredHeading authored_heading;static std::optional<double> authored_heading_now; // render thread only (prepare_head_view, under log_mutex)
+static d2vr::AuthoredHeading authored_heading;static std::optional<double> authored_heading_now;static std::uint64_t authored_heading_frame=~0ull; // the frame authored_heading_now was advanced for (eye 0) // render thread only (prepare_head_view, under log_mutex)
 static d2vr::ComfortMeter comfort_meter;static std::mutex comfort_mutex; // fed by the render thread, read by the status writer
 static d2vr::CarryDiagnostics carry_diagnostics;static d2vr::CarryTraceWriter carry_trace;
 static d2vr::CorpseDiagnostics corpse_diagnostics;static d2vr::CorpseTraceWriter corpse_trace;   // F4: zero until the corpse grab (Tasks 10-12) notes into it
@@ -3887,7 +3887,7 @@ void prepare_head_view(void* view) noexcept {
             const double comfort_t=static_cast<double>(comfort_now.QuadPart)/static_cast<double>(comfort_freq.QuadPart);
             if(const UINT64 comfort_count=native_turning.applied();comfort_count!=comfort_last_turns) {comfort_last_turns=comfort_count;comfort_turn_t=comfort_t;}
             const bool comfort_turning=native_turning_requested && comfort_t-comfort_turn_t<.15;
-            if(!legacy_authored_camera) authored_heading_now=authored_heading.update(source_anchor,authored_camera,head_pose_epoch);
+            if(!legacy_authored_camera) {authored_heading_now=authored_heading.update(source_anchor,authored_camera,head_pose_epoch);authored_heading_frame=frames.load();}
             std::lock_guard<std::mutex> comfort_lock(comfort_mutex);
             comfort_meter.set_authored_snaps(authored_heading.snaps());
             comfort_meter.feed({static_cast<double>(comfort_now.QuadPart)/static_cast<double>(comfort_freq.QuadPart),
@@ -4767,7 +4767,7 @@ void prepare_head_view(void* view) noexcept {
             const d2vr::TrackedPose eye_pose{{xr_eye.pose.position.x,xr_eye.pose.position.y,xr_eye.pose.position.z},orientation};
             std::optional<d2vr::GameCameraPose> native_eye;
             if(legacy_authored_camera) native_eye=d2vr::authored_eye_camera(source_anchor,centre_pose,eye_pose);
-            else if(authored_heading_now) {
+            else if(authored_heading_now && authored_heading_frame==frames.load()) { // eye 1 never reuses a previous frame's heading
                 try {native_eye=d2vr::authored_head_view(source_anchor,*authored_heading_now,centre_pose,eye_pose,1.0,head_origin.orientation);}
                 catch(const std::invalid_argument&) {native_eye.reset();}
             }
@@ -4843,7 +4843,16 @@ void prepare_head_view(void* view) noexcept {
             throw std::runtime_error("Cannot write temporary render-only head pose");
         if(eye==0) {
             constexpr auto tracked_head=XR_VIEW_STATE_ORIENTATION_TRACKED_BIT|XR_VIEW_STATE_POSITION_TRACKED_BIT;
-            const auto listener=d2vr::head_audio_pose(centre_pose,head_origin,anchor,head_offset,authored_camera?&source_anchor:nullptr);
+            // Authored scenes: the listener faces where the head-owned view faces (not the spinning native camera), at the native camera
+            // position. Legacy knob: the native camera's own axes, as before.
+            std::optional<d2vr::GameCameraPose> listener_view;
+            if(authored_camera && !legacy_authored_camera && authored_heading_now && authored_heading_frame==frames.load()) {
+                try {listener_view=d2vr::authored_head_view(source_anchor,*authored_heading_now,centre_pose,centre_pose,1.0,head_origin.orientation);}
+                catch(const std::invalid_argument&) {listener_view.reset();}
+            }
+            const bool listener_missing=authored_camera && !legacy_authored_camera && !listener_view;
+            const auto listener=listener_missing?std::optional<d2vr::AudioListenerPose>{}:
+                d2vr::head_audio_pose(centre_pose,head_origin,anchor,head_offset,authored_camera?(legacy_authored_camera?&source_anchor:&*listener_view):nullptr);
             if(listener && game_logic_mask()==2 && game_xr->state==XR_SESSION_STATE_FOCUSED &&
                (game_xr->tracking_flags()&tracked_head)==tracked_head)
             {

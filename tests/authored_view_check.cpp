@@ -17,6 +17,8 @@ static GameCameraPose native_yaw_pitch_roll(double yaw,double pitch=0,double rol
     return p;
 }
 static Quaternion about_y(double a){return {0,std::sin(a/2),0,std::cos(a/2)};} // XR yaw (left turn is +a)
+static Quaternion about_x(double a){return {std::sin(a/2),0,0,std::cos(a/2)};}
+static Quaternion about_z(double a){return {0,0,std::sin(a/2),std::cos(a/2)};}
 static Quaternion mul(Quaternion a,Quaternion b){return multiplied(a,b);}
 static double yaw_of(const GameCameraPose& p){return std::atan2(p.basis[1],p.basis[0]);}
 static bool near(double a,double b,double e=1e-4){return std::fabs(a-b)<e;}
@@ -83,5 +85,44 @@ int main(){
     { // a non-finite native basis never produces a heading
      auto bad=native_yaw_pitch_roll(0);bad.basis[0]=std::numeric_limits<float>::quiet_NaN();
      AuthoredHeading h;assert(!h.update(bad,true,1));}
+    { // heading_yaw differs from the native yaw: the output follows the held heading, never the live native camera
+     const auto nat=native_yaw_pitch_roll(.9,-.4,.3);
+     const TrackedPose c0{{0,1.6,0},{0,0,0,1}},c1{{0,1.6,0},about_y(.2)};
+     assert(near(yaw_of(authored_head_view(nat,.1,c0,c0)),.1));
+     assert(near(yaw_of(authored_head_view(nat,.1,c1,c1)),.3));}
+    { // non-identity origin: the recenter yaw is removed (origin .5, eye .85 -> heading + .35)
+     const auto nat=native_yaw_pitch_roll(.9);
+     const TrackedPose c{{0,1.6,0},about_y(.85)};
+     assert(near(yaw_of(authored_head_view(nat,.1,c,c,1,about_y(.5))),.1+.35));
+     assert(near(yaw_of(authored_head_view(nat,.1,c,c)),.1+.85));}
+    { // HMD pitch and roll reach the output basis; native pitch and roll do not
+     const auto nat=native_yaw_pitch_roll(.9,-.5,.4);
+     const Quaternion qs[2]={mul(about_y(.3),about_x(.4)),mul(about_y(.3),about_z(.5))};
+     for(const auto& q:qs){
+      const TrackedPose c{{0,1.6,0},q};
+      const auto o=authored_head_view(nat,0,c,c);
+      const Vec3 f=rotated(q,{0,0,-1}),l=rotated(q,{-1,0,0}),u=rotated(q,{0,1,0});
+      const Vec3 want[3]={{-f.z,-f.x,f.y},{-l.z,-l.x,l.y},{-u.z,-u.x,u.y}};
+      for(int i=0;i<3;++i){
+       const Vec3 w=want[i];
+       const Vec3 got{o.basis[i*3],o.basis[i*3+1],o.basis[i*3+2]};
+       assert(near(got.x,w.x) && near(got.y,w.y) && near(got.z,w.z));}
+      assert(std::fabs(o.basis[2])>.01 || std::fabs(o.basis[8]-1)>.01); // the pose is genuinely tilted
+     }}
+    { // IPD direction: the right eye sits along the output's right (minus left)
+     const auto nat=native_yaw_pitch_roll(.5,.3,.2);
+     const Quaternion q=mul(about_y(.7),about_x(-.2));
+     const TrackedPose centre{{0,1.6,0},q};
+     const Vec3 right=rotated(q,{1,0,0});
+     const TrackedPose l{centre.position-right*.032,q},r{centre.position+right*.032,q};
+     const auto a=authored_head_view(nat,.1,centre,l),b=authored_head_view(nat,.1,centre,r);
+     const Vec3 d{double(b.position[0])-a.position[0],double(b.position[1])-a.position[1],double(b.position[2])-a.position[2]};
+     const Vec3 lb{b.basis[3],b.basis[4],b.basis[5]};
+     assert(dot(d,lb*-1.)>.99*length(d));}
+    { // entering with a vertical native forward takes the yaw from the left axis
+     AuthoredHeading h;auto y=h.update(native_yaw_pitch_roll(1.2,1.5),true,1);assert(y && near(*y,1.2,1e-3));}
+    { // reset() clears the snap count
+     AuthoredHeading h;h.update(native_yaw_pitch_roll(0),true,1);h.update(native_yaw_pitch_roll(1),true,1);assert(h.snaps()==1);
+     h.reset();assert(h.snaps()==0);}
     std::cout<<"authored_view_check ok\n";
 }
