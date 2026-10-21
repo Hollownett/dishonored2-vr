@@ -115,3 +115,44 @@ No fix is described, because the evidence does not name the hook. The next exper
 optional hook groups off one at a time (pad focus first, since it is the only one that touches input), and compare stall counts, at least 4 runs per arm.
 
 Not used: 2 of the 7 allowed runs. The legacy fallbacks were only checked in the Wine proxy check, not on the real game.
+
+## Results: bisecting the early-start stall (Task 6b, 2026-10-22)
+
+Method: early start (`--settle 8`, which stalled 5 of 6 times before), one optional hook group switched off per arm with `--knob`, stop an
+arm at its first stall (a group that is the sole cause would give clean runs every time, so one stall refutes it). Groups with no knob were switched
+off in a scratch DLL (a copy named like the installed v600, never committed; the source edit was reverted, the worktree is clean) that added
+`scratch-no-pad`, `scratch-no-bridge`, `scratch-no-hud` and `scratch-no-worldui` checks around the matching `install` calls in StartProbe.
+10 of the 20 allowed runs were used.
+
+| arm (switched off) | how | runs | stalls |
+|---|---|---|---|
+| baseline, settle 12 (new proxy, Task 6) | none | 2 | 1 |
+| movie patches and menu entry hook (`NativeMenuEntry`, the owned-load callback) | `no-menu-entry` | 1 | 1 |
+| VR glyph replacement | `no-vr-glyphs` | 1 | 1 |
+| native pad focus hook (`native_pad_focus`) | scratch `scratch-no-pad` | 1 | 1 |
+| HUD group (wrist HUD, HUD child draw, HUD rect) | scratch `scratch-no-hud` | 1 | 1 |
+| all of: pad focus, controller bridge, HUD group, world UI, menu entry, glyphs, `hud-window-off`, `no-hold-y-menu` | scratch + knobs | 1 | 1 |
+| controllers off through the probe config (to switch pad focus off without a DLL) | override config | 3 | 3 invalid: 2 refused by StartProbe (turning and simulated input need controllers), 1 never left `logic_mask` 0, so not comparable |
+| `--probe-mode paired` | flat paired stereo | 1 | game exited during the session (not comparable) |
+| `--probe-mode single` | flat single eye | 1 | no `xr-live-status.json`, so no `logic_mask` to judge; "OK" only means StartProbe returned 0 (not comparable) |
+
+Every comparable arm stalled the same way (menu reached at 36 to 37 s, Enter ignored, `logic_mask` stuck at 64). Even with every optional group off
+the stall remains, so none of the optional groups is the cause, alone or together. One run of the all-off arm does not prove the
+stall rate there is as high as the baseline's, only that it is not zero.
+
+Cause: not identified. What the bisection rules out is the whole optional part of StartProbe. What is left is the code every session runs:
+the dummy D3D11 device and swapchain that `find_present` creates (`src/dxgi_probe.cpp` 7857), MinHook initialisation and the Present and ResizeBuffers hooks,
+the D3D11 context dispatch bindings (`src/gpu_dispatch_bindings.hpp`: MinHook batch hooks on viewport, render-target and draw calls of every context, applied with
+`MH_ApplyQueued`, which suspends the game's other threads) and the simulated XR session. A start at 14 s or earlier overlaps their roughly 1.75 s of setup
+(first hooked layer 1.75 s after `StartProbe begin` in every run) with something the game does at about 12 to 16 s after launch; the code does not say what.
+
+Proposed next steps (not done, not shipped):
+1. A scratch DLL that returns from StartProbe after `find_present` only (dummy device created and destroyed, nothing hooked). If early starts still stall, the cause is the dummy
+   device or hidden window, and the fix is to read the Present vtable slot from the game's own swapchain at its first Present instead of creating a device.
+2. A scratch DLL that installs the Present hook but never binds the context dispatch hooks (`gpu_bindings.bind`). If clean, defer the first bind until `logic_mask` first reaches 64
+   (the menu), keeping every feature, since the menu is the first time the redirected render targets matter.
+3. Whichever is clean, repeat at settle 8 four times, then twice more to confirm.
+The defence in depth for now is unchanged: the 20 s default start, which was clean 7 of 7.
+
+Incidents: one run (no-vr-glyphs) ended with the rig unable to restore a save slot file that the game removed while closing; `d2vr-linux sim --restore`
+restored it and verified. After every run the installed DLL hash was ff0daf65...bc927 and `build/` held only its own files.
