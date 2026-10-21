@@ -120,6 +120,14 @@
    "label": "Hold Y for VR settings",
    "help": "Holding the left Y button during play opens the VR settings; a short press still talks to people.",
    "default": true
+  },
+  {
+   "id": "authored-head-view",
+   "file": "legacy-authored-camera",
+   "kind": "disable",
+   "label": "Headset owns the view in takedowns and scenes",
+   "help": "During takedowns and scripted scenes the view follows your head instead of the game's spinning camera.",
+   "default": true
   }
  ]
 }

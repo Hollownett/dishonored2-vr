@@ -21,6 +21,7 @@ class ComfortMeter {
     double authored_s_{};
     unsigned long long entries_{},jerk_events_{},yaw_events_{},unreq_events_{},skipped_{},samples_{};
     double v_peak_{},yaw_peak_{},unreq_peak_{};
+    unsigned long long authored_snaps_{}; // set by the caller (AuthoredHeading::snaps); not derived from samples
     static double wrap(double a) noexcept {
         const double pi=3.14159265358979323846;
         while(a>pi) a-=2*pi;
@@ -28,6 +29,7 @@ class ComfortMeter {
         return a;
     }
 public:
+    void set_authored_snaps(unsigned long long n) noexcept {authored_snaps_=n;}
     void feed(const ComfortSample& s) noexcept {
         if(!finite(s.anchor_pos) || !std::isfinite(s.t_s) || !std::isfinite(s.anchor_yaw) || !std::isfinite(s.hmd_yaw)) {++skipped_;return;}
         if(!have_prev_) {prev_=s;prev_authored_=s.authored;have_prev_=true;if(s.authored) ++entries_;return;}
@@ -54,7 +56,7 @@ public:
          <<",\"anchor_v_peak\":"<<v_peak_<<",\"anchor_jerk_events\":"<<jerk_events_
          <<",\"view_yaw_rate_peak\":"<<yaw_peak_<<",\"view_yaw_events\":"<<yaw_events_
          <<",\"unrequested_yaw_rate_peak\":"<<unreq_peak_<<",\"unrequested_yaw_events\":"<<unreq_events_
-         <<",\"samples\":"<<samples_<<",\"skipped\":"<<skipped_<<'}';
+         <<",\"samples\":"<<samples_<<",\"skipped\":"<<skipped_<<",\"authored_snaps\":"<<authored_snaps_<<'}';
         return o.str();
     }
 };

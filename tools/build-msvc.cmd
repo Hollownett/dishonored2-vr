@@ -300,6 +300,10 @@ cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT /Isrc tests\comfort_meter_che
 if not "%errorlevel%"=="0" exit /b 1
 build\comfort_meter_check.exe
 if not "%errorlevel%"=="0" exit /b 1
+cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT /Isrc tests\authored_view_check.cpp /Fo:build\authored_view_check.obj /Fe:build\authored_view_check.exe
+if not "%errorlevel%"=="0" exit /b 1
+build\authored_view_check.exe
+if not "%errorlevel%"=="0" exit /b 1
 cl /nologo /std:c++17 /EHsc /W4 /WX /O2 /MT tests\native_carry_snapshot_check.cpp /Fo:build\native_carry_snapshot_check.obj /Fe:build\native_carry_snapshot_check.exe
 if not "%errorlevel%"=="0" exit /b 1
 build\native_carry_snapshot_check.exe
@@ -558,6 +562,8 @@ if not "%errorlevel%"=="0" exit /b 1
 python tests\native_sword_contact_routing_check.py
 if not "%errorlevel%"=="0" exit /b 1
 python tests\hold_y_routing_check.py
+if not "%errorlevel%"=="0" exit /b 1
+python tests\authored_view_routing_check.py
 if not "%errorlevel%"=="0" exit /b 1
 python tests\launcher_features_source_check.py
 if not "%errorlevel%"=="0" exit /b 1

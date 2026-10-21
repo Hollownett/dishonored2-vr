@@ -48,6 +48,7 @@
 #include "prop_watch.hpp"
 #include "carry_diagnostics.hpp"
 #include "comfort_meter.hpp"
+#include "authored_view.hpp"
 #include "corpse_diagnostics.hpp"
 #include "held_placement_session.hpp"
 #include "simulated_xr.hpp"
@@ -352,6 +353,8 @@ static d2vr::HeldPlacementSession held_placement_session;
 // Holding hand's world velocity (finite difference of the published grip) and the held entity, for the release throw.
 static std::array<double,3> held_hand_velocity{};static std::uintptr_t held_entity{};static std::array<double,3> held_offset{};
 // Carry diagnostics (Task 9): counters always on (atomics); the per-frame trace only when build/carry-trace exists (a writer thread, capped, flushed every second and at teardown).
+static bool legacy_authored_camera=false; // build/legacy-authored-camera: authored scenes use the native camera rotation (and the +5% FOV)
+static d2vr::AuthoredHeading authored_heading;static std::optional<double> authored_heading_now; // render thread only (prepare_head_view, under log_mutex)
 static d2vr::ComfortMeter comfort_meter;static std::mutex comfort_mutex; // fed by the render thread, read by the status writer
 static d2vr::CarryDiagnostics carry_diagnostics;static d2vr::CarryTraceWriter carry_trace;
 static d2vr::CorpseDiagnostics corpse_diagnostics;static d2vr::CorpseTraceWriter corpse_trace;   // F4: zero until the corpse grab (Tasks 10-12) notes into it
@@ -3816,7 +3819,7 @@ void prepare_head_view(void* view) noexcept {
             cant=d2vr::canted_fov(xr_eye.fov.angleLeft,xr_eye.fov.angleRight,xr_eye.fov.angleUp,xr_eye.fov.angleDown);
             if(cant) render_fov={-cant->half_x,cant->half_x,cant->half_y,-cant->half_y};
         }
-        if(action.scripted) {
+        if(action.scripted && legacy_authored_camera) { // the headset owns the view now; the widening hid the native camera's own spin
             render_fov.left=static_cast<float>(d2vr::authored_fov_angle(render_fov.left));
             render_fov.right=static_cast<float>(d2vr::authored_fov_angle(render_fov.right));
             render_fov.up=static_cast<float>(d2vr::authored_fov_angle(render_fov.up));
@@ -3884,7 +3887,9 @@ void prepare_head_view(void* view) noexcept {
             const double comfort_t=static_cast<double>(comfort_now.QuadPart)/static_cast<double>(comfort_freq.QuadPart);
             if(const UINT64 comfort_count=native_turning.applied();comfort_count!=comfort_last_turns) {comfort_last_turns=comfort_count;comfort_turn_t=comfort_t;}
             const bool comfort_turning=native_turning_requested && comfort_t-comfort_turn_t<.15;
+            if(!legacy_authored_camera) authored_heading_now=authored_heading.update(source_anchor,authored_camera,head_pose_epoch);
             std::lock_guard<std::mutex> comfort_lock(comfort_mutex);
+            comfort_meter.set_authored_snaps(authored_heading.snaps());
             comfort_meter.feed({static_cast<double>(comfort_now.QuadPart)/static_cast<double>(comfort_freq.QuadPart),
                 {source_anchor.position[0],source_anchor.position[1],source_anchor.position[2]},
                 std::atan2(static_cast<double>(anchor.basis[1]),static_cast<double>(anchor.basis[0])),
@@ -4759,8 +4764,13 @@ void prepare_head_view(void* view) noexcept {
         d2vr::TrackedPose tracked{head_origin.position+head_offset+(pupil-centre),orientation};
         auto world=d2vr::to_game_pose(tracked,head_origin,anchor,1.0);
         if(authored_camera) {
-            const auto native_eye=d2vr::authored_eye_camera(source_anchor,centre_pose,
-                {{xr_eye.pose.position.x,xr_eye.pose.position.y,xr_eye.pose.position.z},orientation});
+            const d2vr::TrackedPose eye_pose{{xr_eye.pose.position.x,xr_eye.pose.position.y,xr_eye.pose.position.z},orientation};
+            std::optional<d2vr::GameCameraPose> native_eye;
+            if(legacy_authored_camera) native_eye=d2vr::authored_eye_camera(source_anchor,centre_pose,eye_pose);
+            else if(authored_heading_now) {
+                try {native_eye=d2vr::authored_head_view(source_anchor,*authored_heading_now,centre_pose,eye_pose,1.0,head_origin.orientation);}
+                catch(const std::invalid_argument&) {native_eye.reset();}
+            }
             if(!native_eye) {native_audio_listener.clear();return;}
             world.position={native_eye->position[0],native_eye->position[1],native_eye->position[2]};
             for(unsigned i=0;i<3;++i) world.basis[i]={native_eye->basis[i*3],native_eye->basis[i*3+1],native_eye->basis[i*3+2]};
@@ -8160,6 +8170,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
         {std::ifstream knob(root/L"build"/L"upscale");float f=1;if(knob>>f && f>=.5f && f<=1) upscale_fraction=f;} // diagnostics override
         projection_jitter=!fs::exists(root/L"build"/L"no-projection-jitter");
         hold_y_menu_enabled=!fs::exists(root/L"build"/L"no-hold-y-menu");
+        legacy_authored_camera=fs::exists(root/L"build"/L"legacy-authored-camera");authored_heading.reset();authored_heading_now.reset();
         taa_mv_dejitter.enabled=!fs::exists(root/L"build"/L"no-taa-mv-dejitter");
         vr_combat_enabled=!fs::exists(root/L"build"/L"legacy-combat");vr_combat.reset();
         assassination_receipt_requested=head_requested && fs::exists(root/L"build"/L"assassination-receipts");

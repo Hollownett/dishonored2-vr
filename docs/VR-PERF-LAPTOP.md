@@ -23,3 +23,17 @@ Reading these numbers: `view_yaw_*` measures the engine anchor (body) yaw. Scrip
 about 0 is the correct reading while standing still; it is not a sign that the scripted yaw failed. The idle scenario therefore
 cannot show wobble. Later before/after comparisons of the comfort meter need a scenario where the player moves (oil_tank_drop at
 least); idle is only good for the cost (GPU/CPU) baseline and as a floor.
+
+## Comfort changes (plan D)
+
+| Task | Change | Sim result (idle) |
+| --- | --- | --- |
+| 2 | The headset owns view rotation in authored scenes (`authored_view.hpp`; knob `legacy-authored-camera`). Status: `comfort.authored_snaps`. | NOT MEASURED. 2026-10-21 09:00 (two candidate runs, one control run): all three ended `StartProbe returned 4` because the save never left the loading screen (`logic_mask` stayed 64 through 12 Enter presses). The control run used the unchanged installed DLL (sha256 ff0daf65...) and failed the same way, so it is the environment (save/load state after the 08:22 run), not this change. `comfort` stayed at `samples:0`. The installed DLL's SHA-256 was unchanged and no restore marker remained. Retry when the save loads. |
+
+Unit-level proof stands in until then: `tests/authored_view_check.cpp` (heading hold/snap, HMD-owned basis, IPD) and
+`tests/authored_view_routing_check.py` (wiring and knob). An idle run cannot exercise an authored scene in any case; the
+expected idle reading is `authored_ms` 0, `authored_snaps` 0.
+
+## Headset checklist (Task 11)
+
+- [ ] Task 2: choke a guard from behind; turn your head during the animation; the view follows your head; no spin.

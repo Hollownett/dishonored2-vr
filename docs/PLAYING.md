@@ -171,6 +171,12 @@ Weapons are held like real objects: a weapon stays in your hand only while you s
   calibration are deferred. Verified authored full-body actions retain native
   ownership of the hands while the action plays.
 
+## Comfort
+- Takedowns and scripted scenes: the game's own camera spins, pitches and rolls during them, but the view now follows
+  only your head. The scene's heading is held and re-aimed only when the game turns by 30 degrees or more (status
+  `comfort.authored_snaps` counts those). Not yet confirmed in the headset. Put `legacy-authored-camera` in the build
+  folder for the old behaviour (the game's camera rotation, with the slightly wider field of view).
+
 The v199 build passed automated and actual-game simulated-controller checks.
 Headset appearance, combat feel, note readability and complete gameplay have not
 been accepted. See [the verification report](feedback-2026-10-10.md).
@@ -178,6 +184,7 @@ been accepted. See [the verification report](feedback-2026-10-10.md).
 ## Experiments (files in the build folder)
 These are on by default in the launcher (except where a line says otherwise). Switch them in the launcher (Windows) or with `d2vr-linux feature` (Linux); a knob file you create by hand for a feature the launcher has switched off is set aside at the next start. The file names below are what the mod reads.
 - `hud-scale` containing e.g. `0.75`: how far the HUD is pulled towards the centre (1 = the game's own layout, default 0.65).
+- `legacy-authored-camera`: during takedowns and scripted scenes use the game's camera rotation again instead of your head's (and its +5% wider field of view).
 - `no-physical-crouch`: turn off crouching by sitting down. Full arms are currently disabled regardless of `no-full-arms`.
 - `power-gestures`: cast the equipped left-hand power with gestures (open-palm push, clap, palm at the temple; while aiming Blink, flick the hand toward you to blink). Off by default until tested; the launcher lists it as "new, untested" and does not enable it for you.
 - `fsr` containing `sharpness mvx mvy jitterx jittery` (default `0.3 -1 -1 1 -1`): FSR 3 tuning. `no-fsr-reactive`: turn off the hand/weapon ghosting guard.

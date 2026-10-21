@@ -29,6 +29,7 @@ int main(){
     {ComfortMeter m;for(int i=0;i<90;++i) m.feed(S(i*dt,0,2.*i*dt));const auto j=m.json();
      assert(field(j,"view_yaw_events")>0 && field(j,"unrequested_yaw_events")>0);}
     assert(!has(ComfortMeter{}.json(),"e+"));
+    {ComfortMeter m;assert(field(m.json(),"authored_snaps")==0);m.set_authored_snaps(3);assert(field(m.json(),"authored_snaps")==3);}
     {ComfortMeter m;m.feed(S(0,0,3.14));m.feed(S(dt,0,-3.14));assert(field(m.json(),"view_yaw_events")==0);} // wrap
     assert(has(ComfortMeter{}.json(),"\"skipped\":0"));
     std::cout<<"PASS: comfort meter\n";
