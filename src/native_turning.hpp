@@ -214,6 +214,7 @@ public:
         try {std::lock_guard<std::mutex> lock(log_mutex_);log_.close();} catch(...) {return false;}
         return restored;
     }
+    bool smooth_live() {return !failed_.load() && control_.smooth_live();}
     bool failed() const {return failed_.load();}
     UINT64 calls() const {return calls_.load();}
     UINT64 applied() const {return applied_.load();}

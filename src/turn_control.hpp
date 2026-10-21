@@ -51,7 +51,7 @@ public:
         if(!writer_available || !std::isfinite(axis) || std::abs(axis)>1.01) {cancel();return true;}
         axis_=axis;input_ms_=now;live_=true;
         if(config_.mode==Mode::snap) snap_.observe(axis,true,true,now,epoch);
-        else if(std::abs(axis)<=.15) {centred_=true;ramp_t_=0;} // back in the deadzone: the next push eases in again
+        else if(std::abs(axis)<.15) {centred_=true;ramp_t_=0;} // back in the deadzone: the next push eases in again
         return true;
     }
     std::optional<Request> consume(double dt,bool native_gameplay_ready,
@@ -71,6 +71,8 @@ public:
         if(delta==0) return {};
         return Request{delta,input_ms_,update,epoch};
     }
+    // True while smooth turning owns the stick and it was centred after activation: the stick can really turn the player.
+    bool smooth_live() {std::lock_guard<std::mutex> lock(mutex_);return config_.mode==Mode::smooth && live_ && centred_;}
     void suspend() {std::lock_guard<std::mutex> lock(mutex_);cancel();}
 };
 

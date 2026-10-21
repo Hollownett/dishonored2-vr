@@ -27,6 +27,7 @@ public:
     bool enabled() const noexcept {return enabled_;}
     float opacity() const noexcept {return opacity_;}
     // Slews linearly towards the target: 0 -> max in rise_s, max -> 0 in fall_s. A bad dt leaves the opacity alone.
+    void reset() noexcept {opacity_=0;}
     float update(const VignetteInput& in) noexcept {
         if(!enabled_) {opacity_=0;return 0;}
         if(!std::isfinite(in.dt) || in.dt<=0) return opacity_;
@@ -39,6 +40,12 @@ public:
         return opacity_;
     }
 };
+
+// The vignette only has a non-zero target during free gameplay: not in authored scenes (takedowns, cutscenes), menus or the
+// settings panel, nor while loading (gameplay false).
+inline bool vignette_target_allowed(bool gameplay,bool authored,bool menu_open,bool settings_open) noexcept {
+    return gameplay && !authored && !menu_open && !settings_open;
+}
 
 // Knob file `comfort-vignette`: a strength 0..1. Anything unreadable keeps the default.
 inline float parse_vignette_strength(const std::string& text,float fallback=ComfortVignette::default_max_opacity) {

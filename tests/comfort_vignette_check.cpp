@@ -2,6 +2,7 @@
 #include <cassert>
 #include <cmath>
 #include <iostream>
+#include <limits>
 
 using namespace d2vr;
 static bool close_to(double a,double b,double e=1e-5) {return std::fabs(a-b)<e;}
@@ -75,6 +76,47 @@ static void ring_image_shape() {
     for(unsigned i=0;i<image.size();i+=4) assert(image[i]==0 && image[i+1]==0 && image[i+2]==0);
 }
 
+static void max_not_sum() {
+    ComfortVignette v;float f{};
+    for(int i=0;i<50;++i) f=v.update({1.0,.5,.01}); // move 1/3, turn 1/3: the larger, not 2/3
+    assert(close_to(f,.2));
+    ComfortVignette w;
+    for(int i=0;i<50;++i) f=w.update({1.5,.3,.01}); // move .5 beats turn .2
+    assert(close_to(f,.3));
+    ComfortVignette u;
+    for(int i=0;i<50;++i) f=u.update({.6,1.2,.01}); // turn .8 beats move .2
+    assert(close_to(f,.48));
+}
+static void turn_axis_normalisation() {
+    const double full=3.14159265358979/2; // 90 deg/s
+    assert(stick_turn_rate_rad_s(TurnControl::Mode::smooth,.15,90)==0);
+    assert(close_to(stick_turn_rate_rad_s(TurnControl::Mode::smooth,1.,90),full));
+    assert(close_to(stick_turn_rate_rad_s(TurnControl::Mode::smooth,.575,90),full*.5));
+    assert(close_to(stick_turn_rate_rad_s(TurnControl::Mode::smooth,-.575,90),full*.5)); // magnitude only
+    assert(close_to(stick_turn_rate_rad_s(TurnControl::Mode::smooth,2.,90),full)); // clamped
+}
+static void bad_input_leaves_opacity() {
+    ComfortVignette v;
+    for(int i=0;i<5;++i) v.update({3,0,.01});
+    const float before=v.opacity();
+    assert(before>0 && before<.6f);
+    assert(v.update({3,0,std::nan("")})==before);
+    assert(v.update({3,0,-.01})==before);
+    assert(v.update({3,0,0})==before);
+    assert(v.update({3,0,std::numeric_limits<double>::infinity()})==before);
+    assert(v.update({std::nan(""),0,.01})<=before); // a bad speed is rest: it can only fall
+    ComfortVignette r;
+    for(int i=0;i<50;++i) r.update({3,0,.01});
+    r.reset();assert(r.opacity()==0);
+}
+static void target_gating() {
+    assert(vignette_target_allowed(true,false,false,false));
+    assert(!vignette_target_allowed(false,false,false,false)); // loading / not gameplay
+    assert(!vignette_target_allowed(true,true,false,false));   // takedown or cutscene
+    assert(!vignette_target_allowed(true,false,true,false));   // menu / wheel
+    assert(!vignette_target_allowed(true,false,false,true));   // settings panel
+}
+
 int main() {
     vignette_zero_at_rest();
     vignette_rises_with_stick_speed();
@@ -82,5 +124,9 @@ int main() {
     snap_turn_no_vignette();
     knob_strength_parsing();
     ring_image_shape();
+    max_not_sum();
+    turn_axis_normalisation();
+    bad_input_leaves_opacity();
+    target_gating();
     std::cout << "comfort vignette checks passed\n";
 }
