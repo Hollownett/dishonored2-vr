@@ -2,7 +2,7 @@
 // Performance telemetry: rolling window of the last 900 submitted XR frames (10 s at 90 Hz) so before/after
 // comparisons of a change need no external profiler. feed() is O(1) with no allocation; json() sorts copies of the
 // ring and is called once per status write. No locks of its own: the caller serialises feed/json (see comfort_meter.hpp).
-// pace_ns: present-to-present interval (display-locked, >= one period). mod_cpu_ns: time inside our Present hook
+// pace_ns: present-to-present interval (display-locked, >= one period). mod_cpu_ns ("to XR submit": time inside our Present hook up to the end of the XR submit; the JSON key mod_cpu_* stays stable for tools/perf_run_report.py; the full hook is frame_split hook_ms)
 // excluding xrWaitFrame. A frame with period_ns==0 is ignored (no display period known yet).
 #include <algorithm>
 #include <array>

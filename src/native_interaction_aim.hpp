@@ -194,7 +194,7 @@ class NativeInteractionAim {
     std::atomic<bool> active_{false};
     std::atomic<bool> takedown_ranges_enabled_{false};
     std::atomic<bool> stopping_{false};
-    std::atomic<UINT> depth_{};
+    std::atomic<UINT> depth_{};std::atomic<DWORD> game_thread_id_{}; // last thread to run a Stage0 hook (frame split telemetry)
     std::atomic<UINT64> stage_calls_{},rays_{},routed_{},rejected_{},samples_{},overlap_{};
     std::atomic<UINT> owned_depth_{};
     std::atomic<UINT64> volume_requests_{},volume_rejected_{},ranked_{},ranking_rejected_{},direct_shortcuts_filtered_{},occluded_scan_continued_{};
@@ -363,6 +363,7 @@ class NativeInteractionAim {
     };
     template<unsigned Index> static void __fastcall stage(void* sensor) {
         auto* self=instance_;StageFrame frame{context_,retrieved_,lean_context_,lean_transaction_,crash_operation};
+        self->game_thread_id_.store(GetCurrentThreadId(),std::memory_order_relaxed);
         ++self->depth_;++self->stage_calls_;context_=nullptr;retrieved_={};lean_context_=nullptr;lean_transaction_=nullptr;
         __try {stage_body<Index>(sensor,frame);}
         __finally {
@@ -1865,6 +1866,7 @@ public:
     UINT64 direct_shortcuts_filtered() const {return direct_shortcuts_filtered_.load();}
     UINT64 volume_requests() const {return volume_requests_.load();}
     UINT64 volume_rejected() const {return volume_rejected_.load();}
+    DWORD game_thread_id() const {return game_thread_id_.load(std::memory_order_relaxed);}
     UINT64 character_gaze_admitted() const {return character_gaze_admitted_.load();}
     UINT64 character_gaze_declined() const {return character_gaze_declined_.load();}
     UINT64 calls() const {return stage_calls_.load();}

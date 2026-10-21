@@ -300,6 +300,10 @@ cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT /Isrc tests\comfort_meter_che
 if not "%errorlevel%"=="0" exit /b 1
 cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT /Isrc tests\perf_meter_check.cpp /Fo:build\perf_meter_check.obj /Fe:build\perf_meter_check.exe
 if not "%errorlevel%"=="0" exit /b 1
+cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT /Isrc tests\frame_split_check.cpp /Fo:build\frame_split_check.obj /Fe:build\frame_split_check.exe
+if not "%errorlevel%"=="0" exit /b 1
+build\frame_split_check.exe
+if not "%errorlevel%"=="0" exit /b 1
 build\perf_meter_check.exe
 if not "%errorlevel%"=="0" exit /b 1
 python tests\perf_run_report_check.py

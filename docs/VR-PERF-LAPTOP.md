@@ -43,7 +43,7 @@ and no restore marker exists.
 
 What is measured: `xr-live-status.json` now carries a `"perf"` block (`src/perf_meter.hpp`), a rolling window of the last 900
 gameplay frames: `pace_ms_p50`, `pace_ms_p95` (present-to-present), `missed_fraction`, `mod_cpu_ms_mean` and `mod_cpu_ms_p95`
-(time in our Present hook up to the end of the XR submit, minus `xrWaitFrame`), `fraction` (render fraction), `period_ms`, `frames`.
+(`mod_cpu` = time in our Present hook "to XR submit" only, i.e. up to the end of the XR submit, minus `xrWaitFrame`; the JSON key name is kept stable for `tools/perf_run_report.py`. The full-hook number is `frame_split.split.hook_ms_p50`), `fraction` (render fraction), `period_ms`, `frames`.
 `python3 tools/perf_run_report.py <xr-live-status.json> [--before <earlier>]` prints the one-line summary and the delta.
 
 Hardware: NVIDIA GeForce RTX 3070 Laptop GPU, 8192 MiB; AMD Ryzen 9 5900HX (8 cores / 16 threads), hybrid laptop.
@@ -77,3 +77,12 @@ editing the user's real files, so they are not measured even once the session is
 ## Headset checklist (Task 11)
 
 - [ ] Task 2: choke a guard from behind; turn your head during the animation; the view follows your head; no spin.
+
+## Frame split block (plan E task 1)
+
+`xr-live-status.json` also carries `"frame_split":{"adapter":{name,vendor,vram_mb},"split":{...}}` over the same 900-frame gameplay window:
+`interval_ms_p50/p95` (Present enter to Present enter), `eye0_ms_p50` (eye 0 begin to eye 1 begin), `eye1_ms_p50` (eye 1 begin to Present enter),
+`hook_ms_p50` (Present enter to exit, the full hook including the desktop Present), `eye1_share` (eye1 p50 / interval p50), `gpu_busy`
+(native GPU elapsed over the interval, p50; `null` without the `native-gpu-timing` knob), `render_thread_busy` and `game_thread_busy`
+(GetThreadTimes delta over wall delta, about 1 s window; `null` when the thread clock is coarse or unknown), `frames`, `split_skipped`
+(frames with a missing or out-of-order eye stamp). The first gameplay frame after a menu or load feeds no interval sample.
