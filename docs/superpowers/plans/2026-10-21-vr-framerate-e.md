@@ -98,6 +98,7 @@ Also modify `tools/build-msvc.cmd`.
 - `d2vr-linux sim --probe-mode xr|paired|single` (default `xr`):
   - `paired` and `single` set the existing diagnostic stereo modes 3 and 2 (`dxgi_probe.cpp:7553-7591`) in the rig's override config instead of the XR mode. Both are flat, with no XR.
   - Used only for measurement B (findings §3). If mode 2 fails under Proton, the rig reports it and the campaign records "B: not measurable".
+- `d2vr-linux sim --vr-setting KEY=VALUE` (repeatable; keys only `temporal_aa`, `resolution`, `mirror`, with values validated like `vr_preferences.hpp` parses them) makes the run use those VR settings. Today `sim_probe_config` forces `saved_settings 0`, so `vr-settings.cfg` is never read (plan D Task 6 finding). Either write a run-only settings file through `FileGuard` and let the override enable it, or pass the values through the override config, whichever the probe already supports (`grep -n saved_settings src/dxgi_probe.cpp`). The user's own `vr-settings.cfg` is never edited. Test: `vr_setting_applied_and_user_cfg_untouched`.
 - `--env KEY=VALUE` (repeatable; allowed keys only `DXVK_HUD`, `DXVK_LOG_LEVEL`, `__GL_THREADED_OPTIMIZATIONS`) is added to the launch environment.
 - Every run's artifacts include `adapter.txt`, copied from the status block `"adapter"` (Task 1).
 - `tools/perf_bound_report.py <run-dir> [<run-dir> ...] [--before <json>]` prints one row per run, then a verdict line. Each row shows `mode`, `adapter`, `interval p50/p95`, `eye0/eye1 ms`, `eye1_share`, `hook ms`, `gpu_busy`, and `render/game thread busy`.
