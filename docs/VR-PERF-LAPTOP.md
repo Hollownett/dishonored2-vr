@@ -34,6 +34,46 @@ Unit-level proof stands in until then: `tests/authored_view_check.cpp` (heading 
 `tests/authored_view_routing_check.py` (wiring and knob). An idle run cannot exercise an authored scene in any case; the
 expected idle reading is `authored_ms` 0, `authored_snaps` 0.
 
+## Performance baseline
+
+This is the "before" for Tasks 7-10. Status: **baseline outstanding: session locked.** On 2026-10-21 the first sim run was refused
+by the rig (`d2vr-linux: error: session is locked; unlock before running`), so no run was made and no number below is measured.
+Nothing was started or changed: the installed DLL's SHA-256 stayed `ff0daf6566a62a44a31cef372a93114fc42790f2a13eb9887f3dfb3de63bc927`
+and no restore marker exists.
+
+What is measured: `xr-live-status.json` now carries a `"perf"` block (`src/perf_meter.hpp`), a rolling window of the last 900
+gameplay frames: `pace_ms_p50`, `pace_ms_p95` (present-to-present), `missed_fraction`, `mod_cpu_ms_mean` and `mod_cpu_ms_p95`
+(time in our Present hook up to the end of the XR submit, minus `xrWaitFrame`), `fraction` (render fraction), `period_ms`, `frames`.
+`python3 tools/perf_run_report.py <xr-live-status.json> [--before <earlier>]` prints the one-line summary and the delta.
+
+Hardware: NVIDIA GeForce RTX 3070 Laptop GPU, 8192 MiB; AMD Ryzen 9 5900HX (8 cores / 16 threads), hybrid laptop.
+Sim headset: the scripted XR backend, no real HMD. Its render resolution is to be recorded from the first run (the rig config
+uses `resolution 1.0`, `mode 6`, `saved_settings 0`); the numbers are relative, for before/after comparison, not headset fps.
+
+Procedure, with the session unlocked and the game and `vrserver` not running:
+
+```
+linux/d2vr-linux sim --scenario idle --lead 28 --seconds 120 --candidate-dll <dll built as d2vr_render_probe_arm_v600.dll> --status-field perf
+linux/d2vr-linux sim --scenario oil_tank_drop --lead 28 --seconds 120 --candidate-dll <same> --status-field perf
+```
+
+There is no "walking" scenario; `oil_tank_drop` is the moving one (it needs a tank save for a meaningful run, see linux/README.md).
+
+| Run | Scenario | p50 / p95 / missed% / mod cpu / fraction |
+| --- | --- | --- |
+| 1 | idle | NOT MEASURED (session locked) |
+| 2 | oil_tank_drop | NOT MEASURED (session locked) |
+
+A/B rows. The rig's guarded per-run override (`linux-probe-override.cfg`, see `sim_probe_config` in `linux/d2vr_linux/sim.py`) fixes
+`saved_settings 0`, so `vr-settings.cfg` is not read, and it has no hook for the `governor` knob. None of these can be set without
+editing the user's real files, so they are not measured even once the session is unlocked, unless the rig gains such an override:
+
+| Row | Result |
+| --- | --- |
+| aa mode Native vs FSR 3 Quality vs Balanced | not measured: rig cannot set aa mode safely |
+| mirror both eyes vs one eye | not measured: rig cannot set mirror safely |
+| governor on vs off | not measured: rig cannot set the governor knob safely |
+
 ## Headset checklist (Task 11)
 
 - [ ] Task 2: choke a guard from behind; turn your head during the animation; the view follows your head; no spin.
