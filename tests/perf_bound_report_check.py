@@ -140,4 +140,23 @@ with tempfile.TemporaryDirectory() as d:
         raise AssertionError("--any-adapter must not exist")
     except SystemExit as e:
         assert e.code == 2
+with tempfile.TemporaryDirectory() as d:
+    # phase_and_mod_gpu_printed (plan E task 3b): phase sums, list counts and the mod's own GPU spans print under the row
+    doc = status(.8)
+    doc["frame_split"]["split"].update({
+        "gpu_phase_ms_p50": {"pre": 2.5, "eye0": 4.0, "eye1": 3.0, "hook": 0.5},
+        "gpu_phase_lists_p50": {"pre": 20, "eye0": 31, "eye1": 12, "hook": 3},
+        "mod_gpu_ms_p50": {"fsr_eye0": 0.4, "eye_copy": 0.125, "sum": 0.525}})
+    rc, out = main(run(d, "ph", doc, knobs=[]))
+    assert rc == 0, out
+    assert "gpu phases p50: pre 2.50 ms (20 lists) / eye0 4.00 ms (31 lists) / eye1 3.00 ms (12 lists) / hook 0.50 ms (3 lists) / sum of p50s 10.00 ms" in out, out
+    assert "mod gpu p50: fsr_eye0 0.400 / eye_copy 0.125 / sum 0.525 ms" in out, out
+    # a run without the blocks prints no extra lines, and a malformed block is dropped, not a crash
+    assert "gpu phases" not in main(run(d, "np", status(.8), knobs=[]))[1]
+    bad_doc = status(.8)
+    bad_doc["frame_split"]["split"]["gpu_phase_ms_p50"] = {"pre": "x"}
+    assert "gpu phases" not in main(run(d, "bp", bad_doc, knobs=[]))[1]
+    j = Path(d) / "ph.json"
+    assert main(run(d, "ph2", doc, knobs=[]), "--json", str(j))[0] == 0
+    assert json.loads(j.read_text())["rows"][0]["phase_ms"]["eye0"] == 4.0
 print('PASS: perf bound report verdicts, invalid runs, adapter, result file, bad runs and delta')

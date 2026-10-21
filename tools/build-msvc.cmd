@@ -956,6 +956,10 @@ cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT tests\native_list_gpu_timer_c
 if not "%errorlevel%"=="0" exit /b 1
 build\native_list_gpu_timer_check.exe
 if not "%errorlevel%"=="0" exit /b 1
+cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT tests\mod_gpu_timer_check.cpp /Fo:build\mod_gpu_timer_check.obj /Fe:build\mod_gpu_timer_check.exe /link d3d11.lib dxgi.lib
+if not "%errorlevel%"=="0" exit /b 1
+build\mod_gpu_timer_check.exe
+if not "%errorlevel%"=="0" exit /b 1
 set D2VR_DIAGNOSTIC_OUTPUT=build\d2vr_render_probe.dll
 cl /nologo /std:c++17 /EHsc /W4 /WX /O2 /MT tests\native_graphics_owner_check.cpp /Fo:build\native_graphics_owner_check.obj /Fe:build\native_graphics_owner_check.exe /link d3d11.lib dxgi.lib user32.lib
 if not "%errorlevel%"=="0" exit /b 1

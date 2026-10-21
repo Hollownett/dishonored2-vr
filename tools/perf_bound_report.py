@@ -71,9 +71,16 @@ def classify(row):
 def _blank(path, mode, knobs, reason):
     row = {"run": str(path), "mode": mode, "source": None, "adapter": None, "gameplay": None, "frames": 0, "interval_p50": None,
            "interval_p95": None, "eye0": None, "eye1": None, "eye1_share": None, "hook": None, "gpu_busy": None, "gpu_span": None,
-           "render_busy": None, "game_busy": None, "user_knobs": knobs, "note": "", "invalid": reason}
+           "phase_ms": None, "phase_lists": None, "mod_gpu": None, "render_busy": None, "game_busy": None, "user_knobs": knobs, "note": "", "invalid": reason}
     row["verdict"] = classify(row)
     return row
+
+
+def _dict_of_nums(v):
+    """A {name: number} block (gpu_phase_ms_p50, mod_gpu_ms_p50) or None; non-numeric entries drop the whole block."""
+    if not isinstance(v, dict) or not v:
+        return None
+    return {k: x for k, x in v.items()} if all(_num(x) is not None for x in v.values()) else None
 
 
 def _split_of(doc):
@@ -124,7 +131,9 @@ def load_run(path):
                "interval_p50": _num(split.get("interval_ms_p50")), "interval_p95": _num(split.get("interval_ms_p95")),
                "eye0": _num(split.get("eye0_ms_p50")), "eye1": _num(split.get("eye1_ms_p50")),
                "eye1_share": _num(split.get("eye1_share")), "hook": _num(split.get("hook_ms_p50")),
-               "gpu_busy": _num(split.get("gpu_busy")), "gpu_span": _num(split.get("gpu_span")), "render_busy": _num(split.get("render_thread_busy")),
+               "gpu_busy": _num(split.get("gpu_busy")), "gpu_span": _num(split.get("gpu_span")),
+               "phase_ms": _dict_of_nums(split.get("gpu_phase_ms_p50")), "phase_lists": _dict_of_nums(split.get("gpu_phase_lists_p50")),
+               "mod_gpu": _dict_of_nums(split.get("mod_gpu_ms_p50")), "render_busy": _num(split.get("render_thread_busy")),
                "game_busy": _num(split.get("game_thread_busy")), "user_knobs": knobs,
                "note": "" if status else "result file: no gameplay flag, every counted Present is included"}
         if row["gpu_busy"] is None and row["gameplay"] is not False and row["frames"]:
@@ -142,6 +151,18 @@ def load_run(path):
 
 def _f(v, spec=".2f"):
     return "n/a" if v is None else format(v, spec)
+
+
+def format_phases(r):
+    """Second line of a row: GPU ms (and list count) per frame phase, then the mod's own GPU spans. '' when the run has neither."""
+    out = []
+    if r.get("phase_ms"):
+        lists = r.get("phase_lists") or {}
+        parts = [f"{k} {_f(v)} ms ({int(lists[k]) if k in lists else '?'} lists)" for k, v in r["phase_ms"].items()]
+        out.append("  gpu phases p50: " + " / ".join(parts) + f" / sum of p50s {_f(sum(r['phase_ms'].values()))} ms")
+    if r.get("mod_gpu"):
+        out.append("  mod gpu p50: " + " / ".join(f"{k} {_f(v, '.3f')}" for k, v in r["mod_gpu"].items()) + " ms")
+    return "\n".join(out)
 
 
 def format_row(r):
@@ -206,6 +227,9 @@ def main(argv=None):
     rows = [load_run(r) for r in a.runs]
     for r in rows:
         print(format_row(r))
+        extra = format_phases(r)
+        if extra:
+            print(extra)
     print(f"VERDICT: {overall(rows)}")
     if before is not None:
         print(format_delta(before, rows))

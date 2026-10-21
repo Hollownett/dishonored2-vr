@@ -15,6 +15,7 @@
 #include "fsr4_eye_upscaler.hpp"
 #include "taa_dispatch.hpp"
 #include "gpu_pass_timer.hpp"
+#include "mod_gpu_timer.hpp"
 
 namespace d2vr {
 // Replaces the native TAA dispatch of each eye with its own FSR 3.1 context (Luma's D2 map:
@@ -365,6 +366,7 @@ private:
         if(job.upscale && (!e.colour_in.p || !e.upscaled.p)) {++failures;return;}
         LARGE_INTEGER cpu_start{},cpu_end{},cpu_freq{};QueryPerformanceCounter(&cpu_start);QueryPerformanceFrequency(&cpu_freq);
         const int ticket=timing_enabled.load()?e.timer.begin(c):-1;
+        ModGpuScope mod_scope(c,job.eye==0?ModSpan::fsr_eye0:ModSpan::fsr_eye1); // task 3b: the mod's FSR GPU time per eye
         CsState saved;saved.save(c);
         ID3D11ShaderResourceView* null_srv[16]{};ID3D11UnorderedAccessView* null_uav[8]{};
         c->CSSetShaderResources(0,16,null_srv);c->CSSetUnorderedAccessViews(0,8,null_uav,nullptr);

@@ -3,6 +3,7 @@
 #include <wrl/client.h>
 #include <array>
 #include <cstdint>
+#include "frame_split.hpp"
 
 namespace d2vr {
 // Optional diagnostic lane, called only by the game's immediate-context owner.
@@ -17,6 +18,7 @@ private:
     struct Frame {
         Ptr<ID3D11Query> disjoint,span_end;
         std::array<Pair,max_lists> lists;
+        std::array<std::uint8_t,max_lists> phase{};
         unsigned count{},dropped{};
         bool pending{},invalid{};
         std::uint64_t sequence{};
@@ -33,6 +35,7 @@ public:
         std::uint64_t frames{},lists{},recorded_lists{},dropped_frames{},dropped_lists{},
             unready_polls{},disjoint{},query_failures{},rejected_calls{},last_sequence{};
         unsigned last_lists{},last_dropped_lists{};
+        PhaseGpu last_phase{}; // latest completed timer frame, summed by the phase each list was executed in
         double last_list_sum_ms{},last_elapsed_ms{},total_list_sum_ms{},total_elapsed_ms{};
     };
 private:
@@ -76,7 +79,7 @@ public:
             }
             if(clock.Disjoint || !clock.Frequency) {frame.pending=false;++stats_.disjoint;continue;}
             if(frame.invalid) {frame.pending=false;continue;}
-            UINT64 first{},span_end{},sum{};bool complete=true;
+            UINT64 first{},span_end{},sum{};bool complete=true;UINT64 phase_sum[phase_count]{};unsigned phase_lists[phase_count]{};
             for(unsigned i=0;i<frame.count;++i) {
                 UINT64 start{},end{};
                 if(!read(context,frame.lists[i].start.Get(),&start,sizeof start,failed) ||
@@ -84,6 +87,7 @@ public:
                 if(end<start) {failed=true;++stats_.query_failures;complete=false;break;}
                 if(!i) first=start;
                 sum+=end-start;
+                phase_sum[frame.phase[i]%phase_count]+=end-start;++phase_lists[frame.phase[i]%phase_count];
             }
             if(complete) complete=read(context,frame.span_end.Get(),&span_end,sizeof span_end,failed);
             if(!complete) {
@@ -98,10 +102,12 @@ public:
             if(frame.sequence>stats_.last_sequence) {
                 stats_.last_sequence=frame.sequence;stats_.last_lists=frame.count;stats_.last_dropped_lists=frame.dropped;
                 stats_.last_list_sum_ms=list_ms;stats_.last_elapsed_ms=elapsed_ms;
+                stats_.last_phase={};stats_.last_phase.valid=true;
+                for(unsigned p=0;p<phase_count;++p) {stats_.last_phase.ms[p]=static_cast<double>(phase_sum[p])*scale;stats_.last_phase.lists[p]=phase_lists[p];}
             }
         }
     }
-    Ticket begin_list(ID3D11DeviceContext* context) {
+    Ticket begin_list(ID3D11DeviceContext* context,Phase phase=Phase::pre) {
         if(!owns(context)) {++stats_.rejected_calls;return 0;}
         if(suppressed_) {++stats_.dropped_lists;return 0;}
         if(open_ticket_) {++stats_.dropped_lists;++frames_[static_cast<unsigned>(active_)].dropped;return 0;}
@@ -115,6 +121,7 @@ public:
         }
         auto& frame=frames_[static_cast<unsigned>(active_)];
         if(frame.count==frame.lists.size()) {++stats_.dropped_lists;++frame.dropped;return 0;}
+        frame.phase[frame.count]=static_cast<std::uint8_t>(phase);
         context->End(frame.lists[frame.count].start.Get());
         open_ticket_=++next_ticket_;
         return open_ticket_;

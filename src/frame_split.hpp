@@ -27,6 +27,25 @@
 #include <vector>
 
 namespace d2vr {
+// GPU phase attribution (plan E task 3b). A native command list is tagged by the CPU phase it is EXECUTED in, taken from the
+// same stamps the eye split uses: pre = after the previous Present's exit (stamps reset there) until the eye-0 begin;
+// eye0 = eye-0 begin until the eye-1 begin; eye1 = eye-1 begin until Present enter; hook = inside the Present hook.
+// Edge cases (all by construction of EyeStamps::phase): a list executed before the eye stamps of its own frame exist is "pre"
+// (the engine is one frame deep, so this is the previous frame's setup/shadow/upload work consumed now); with eye 0 missing
+// (auxiliary view, mono) a list after eye 1 is still eye1 and before it pre; an auxiliary/GUI begin (-1) stamps nothing so its
+// lists fall into the phase already running; with the eye-begin hook off (no eye_boundary) every list outside the Present hook is pre.
+enum class Phase : unsigned {pre=0,eye0=1,eye1=2,hook=3};
+constexpr unsigned phase_count=4;
+inline const char* phase_name(unsigned p) noexcept {static const char* const n[phase_count]{"pre","eye0","eye1","hook"};return n[p<phase_count?p:0];}
+// The mod's own GPU work, timed with timestamp pairs (mod_gpu_timer.hpp). Reported as mod_gpu_ms_p50.
+enum class ModSpan : unsigned {fsr_eye0=0,fsr_eye1,aa_sharpen,eye_copy,eye_overlay,layer_overlays,eye_capture};
+constexpr unsigned mod_span_count=7;
+inline const char* mod_span_name(unsigned i) noexcept {
+    static const char* const n[mod_span_count]{"fsr_eye0","fsr_eye1","aa_sharpen","eye_copy","eye_overlay","layer_overlays","eye_capture"};
+    return n[i<mod_span_count?i:0];
+}
+struct PhaseGpu {double ms[phase_count]{};unsigned lists[phase_count]{};bool valid{};}; // one timer frame, summed per phase
+struct ModGpu {double ms[mod_span_count]{};bool valid{};};
 struct FrameStamps {std::int64_t eye0_begin{-1},eye1_begin{},present_enter{},present_exit{};};
 // Per-Present eye begin stamps. begin() runs on the render thread for every begin-view call, under the caller's lock.
 class EyeStamps {
@@ -44,6 +63,13 @@ public:
         return eye;
     }
     std::int64_t eye_ns(int eye) const noexcept {return ns_[eye];}
+    // The phase an ExecuteCommandList called NOW belongs to (see the Phase comment). in_hook wins over the eye stamps.
+    Phase phase(bool in_hook) const noexcept {
+        if(in_hook) return Phase::hook;
+        if(ns_[1]>0) return Phase::eye1;
+        if(ns_[0]>=0) return Phase::eye0;
+        return Phase::pre;
+    }
     unsigned begins() const noexcept {return begins_;} // non-null begins since the last reset (saturates at 255)
     int idx_a() const noexcept {return idx_a_;} // raw index of the first / second non-null begin (diagnostic)
     int idx_b() const noexcept {return idx_b_;}
@@ -54,7 +80,7 @@ private:
 class FrameSplit {
 public:
     static constexpr std::size_t window=900;
-    void feed(const FrameStamps& s,std::int64_t prev_present_enter,std::int64_t qpc_freq,std::uint64_t gpu_list_sum_ns,std::uint64_t gpu_span_ns) noexcept {
+    void feed(const FrameStamps& s,std::int64_t prev_present_enter,std::int64_t qpc_freq,std::uint64_t gpu_list_sum_ns,std::uint64_t gpu_span_ns,const PhaseGpu* phases=nullptr,const ModGpu* mod=nullptr) noexcept {
         if(qpc_freq<=0 || s.present_enter<=0) return;
         const double ns=1e9/static_cast<double>(qpc_freq);
         auto span=[&](std::int64_t a,std::int64_t b)->std::uint64_t {return b>a?static_cast<std::uint64_t>(static_cast<double>(b-a)*ns):0;};
@@ -67,6 +93,10 @@ public:
         eye1_[slot]=eyes?span(s.eye1_begin,s.present_enter):0;
         if(!eyes) ++skipped_;
         gpu_[slot]=gpu_list_sum_ns;span_[slot]=gpu_span_ns;
+        phase_valid_[slot]=phases && phases->valid;mod_valid_[slot]=mod && mod->valid;
+        for(unsigned i=0;i<phase_count;++i) {phase_ms_[i][slot]=phase_valid_[slot]?static_cast<float>(phases->ms[i]):0.f;phase_lists_[i][slot]=phase_valid_[slot]?static_cast<std::uint16_t>(std::min(phases->lists[i],65535u)):0;}
+        for(unsigned i=0;i<mod_span_count;++i) mod_ms_[i][slot]=mod_valid_[slot]?static_cast<float>(mod->ms[i]):0.f;
+        mod_sum_[slot]=0.f;if(mod_valid_[slot]) for(unsigned i=0;i<mod_span_count;++i) mod_sum_[slot]+=mod_ms_[i][slot];
         head_=(head_+1)%window;
         if(count_<window) ++count_;
     }
@@ -93,10 +123,36 @@ public:
          <<",\"eye1_share\":"<<(i50>0?e1/i50:0.)<<",\"gpu_busy\":";
         median(o,busy);o<<",\"gpu_span\":";median(o,span);
         o<<",\"render_thread_busy\":";opt(o,render_);o<<",\"game_thread_busy\":";opt(o,game_);
+        o<<",\"gpu_phase_ms_p50\":";phase_json(o,true);o<<",\"gpu_phase_lists_p50\":";phase_json(o,false);
+        o<<",\"mod_gpu_ms_p50\":";mod_json(o);
         o<<",\"frames\":"<<count_<<",\"split_skipped\":"<<skipped_<<'}';
         return o.str();
     }
 private:
+    // p50 over the frames that carry a phase sample. Zero is a real value here (a phase with no lists), so zeros are kept.
+    template<class A> static double median_of(const A& a,const std::array<bool,window>& valid,std::size_t count,bool& any) {
+        std::vector<double> v;v.reserve(count);
+        for(std::size_t i=0;i<count;++i) if(valid[i]) v.push_back(static_cast<double>(a[i]));
+        any=!v.empty();if(v.empty()) return 0;
+        std::sort(v.begin(),v.end());
+        return v[std::min(v.size()-1,static_cast<std::size_t>(.5*static_cast<double>(v.size())+.999999)-1)];
+    }
+    void phase_json(std::ostringstream& o,bool ms_not_lists) const {
+        bool any=false;median_of(phase_valid_,phase_valid_,count_,any);
+        if(!any) {o<<"null";return;}
+        o<<'{';
+        for(unsigned i=0;i<phase_count;++i) {bool a=false;
+            const double v=ms_not_lists?median_of(phase_ms_[i],phase_valid_,count_,a):median_of(phase_lists_[i],phase_valid_,count_,a);
+            o<<(i?",":"")<<'"'<<phase_name(i)<<"\":"<<v;}
+        o<<'}';
+    }
+    void mod_json(std::ostringstream& o) const {
+        bool any=false;median_of(mod_valid_,mod_valid_,count_,any);
+        if(!any) {o<<"null";return;}
+        o<<'{';
+        for(unsigned i=0;i<mod_span_count;++i) {bool a=false;o<<'"'<<mod_span_name(i)<<"\":"<<median_of(mod_ms_[i],mod_valid_,count_,a)<<',';}
+        bool a=false;o<<"\"sum\":"<<median_of(mod_sum_,mod_valid_,count_,a)<<'}';
+    }
     static void opt(std::ostringstream& o,double v) {if(v<0) o<<"null"; else o<<v;}
     static double ms(std::uint64_t ns) noexcept {return static_cast<double>(ns)/1e6;}
     static std::uint64_t rank(const std::vector<std::uint64_t>& sorted,double p) noexcept { // nearest rank
@@ -107,6 +163,9 @@ private:
         return sorted[k-1];
     }
     std::array<std::uint64_t,window> interval_{},eye0_{},eye1_{},hook_{},gpu_{},span_{};
+    std::array<std::array<float,window>,phase_count> phase_ms_{};std::array<std::array<std::uint16_t,window>,phase_count> phase_lists_{};
+    std::array<std::array<float,window>,mod_span_count> mod_ms_{};std::array<float,window> mod_sum_{};
+    std::array<bool,window> phase_valid_{},mod_valid_{};
     std::size_t head_{},count_{};std::uint64_t skipped_{};
     double render_{-1},game_{-1};bool accepted_{};
 };

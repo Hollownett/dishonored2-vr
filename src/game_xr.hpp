@@ -7,6 +7,7 @@
 #include <openxr/openxr.h>
 #include <openxr/openxr_platform.h>
 #include "context_state.hpp"
+#include "mod_gpu_timer.hpp"
 #include "controller_input.hpp"
 #include "render_size.hpp"
 #include "canted_fov.hpp"
@@ -1731,9 +1732,12 @@ public:
                 if(!eye_texture_matches(desc,width_,height_,format_))
                     throw std::runtime_error("Game eye source does not match the current XR swapchain");
                 // Independent per-eye processing; menus retain the exact native image.
-                auto processed=gameplay && antialiasing_enabled_ && settings_.temporal_aa()<2?antialiasing_->apply(sources[eye]):sources[eye]; // FSR 3 already anti-aliased
+                ID3D11Texture2D* processed=nullptr;
+                {ModGpuScope aa_scope(context_.Get(),ModSpan::aa_sharpen); // task 3b
+                processed=gameplay && antialiasing_enabled_ && settings_.temporal_aa()<2?antialiasing_->apply(sources[eye]):sources[eye]; // FSR 3 already anti-aliased
                 // Sharpening also helps menu text (menus get no SMAA).
-                if(sharpness>0) processed=sharpen_->apply(processed,sharpness);
+                if(sharpness>0) processed=sharpen_->apply(processed,sharpness);}
+                {ModGpuScope copy_scope(context_.Get(),ModSpan::eye_copy); // task 3b
                 if(settings_.open() && !gameplay) {
                     const auto view=menu_view();
                     const auto rect=SettingsMenuLayout::image_rect(width_,height_,view.y,view.rows);
@@ -1742,7 +1746,8 @@ public:
                     settings_compositor_->draw(settings_texture_.Get(),{static_cast<float>(rect.x),static_cast<float>(rect.y),static_cast<float>(rect.width),static_cast<float>(rect.height)});
                     settings_compositor_->end(images_[eye].at(index).texture);
                     if(observe_settings_composition) observe_settings_composition(processed,images_[eye].at(index).texture,rect);
-                } else context_->CopyResource(images_[eye].at(index).texture,processed);
+                } else context_->CopyResource(images_[eye].at(index).texture,processed);}
+                {ModGpuScope overlay_scope(context_.Get(),ModSpan::eye_overlay); // task 3b: native object art + desktop mirror draws
                 layers[eye].type=XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW;
                 layers[eye].pose=rendered_mask_==3?rendered_views_[eye].pose:views_[eye].pose;
                 layers[eye].fov=rendered_mask_==3?rendered_views_[eye].fov:XrFovf{-hfov*.5f,hfov*.5f,vfov*.5f,-vfov*.5f};
@@ -1759,7 +1764,7 @@ public:
                         }
                     }
                 }
-                if(mirror_rects[eye]) mirror_->draw(images_[eye].at(index).texture,*mirror_rects[eye]);
+                if(mirror_rects[eye]) mirror_->draw(images_[eye].at(index).texture,*mirror_rects[eye]);}
                 if(eye==0 && !world_scene) menu_band_ready=copy_menu_band(images_[0].at(index).texture);
                 layers[eye].subImage.swapchain=chains_[eye];
                 layers[eye].subImage.imageRect.extent={static_cast<int32_t>(width_),static_cast<int32_t>(height_)};
@@ -1783,6 +1788,7 @@ public:
             }
             end.layerCount=world_scene || menu_band_ready?1:0;end.layers=&layer; // no band chain yet (between a resize and prepare_overlays): nothing this frame
             if(world_scene && !authored_camera) {
+                ModGpuScope layers_scope(context_.Get(),ModSpan::layer_overlays); // task 3b: HUD/wrist/vignette panel updates
                 // Projection first, then the wrist controls card.
                 end.layerCount=0;menu_layers_with_pointer[end.layerCount++]=layer;
                 if(world_ui_kind_ && world_ui_source_) {

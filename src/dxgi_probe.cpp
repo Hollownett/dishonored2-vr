@@ -52,6 +52,7 @@
 #include "comfort_vignette.hpp"
 #include "perf_meter.hpp"
 #include "frame_split.hpp"
+#include "mod_gpu_timer.hpp"
 #include "authored_view.hpp"
 #include "corpse_diagnostics.hpp"
 #include "held_placement_session.hpp"
@@ -363,6 +364,9 @@ static d2vr::AuthoredHeading authored_heading;static std::optional<double> autho
 static std::atomic<bool> frame_split_trace_on{false};
 static d2vr::FrameSplit frame_split;static std::mutex frame_split_mutex;
 static d2vr::EyeStamps frame_split_eyes; // guarded by frame_split_mutex
+static std::atomic<bool> frame_split_in_hook{false}; // task 3b: set while the Present hook runs; tags lists executed there as phase "hook"
+// task 3b: per-frame CPU cost of the three probe diagnostics (eye_boundary hook, arm_upload observer), steady_clock ns, only counted while native-gpu-timing is on
+static std::atomic<std::uint64_t> diag_eye_boundary_ns{},diag_eye_boundary_calls{},diag_arm_upload_ns{},diag_arm_upload_calls{};
 static std::atomic<std::int64_t> frame_split_prev_enter_ns{}; // Present thread writes, reset_perf_governor may clear
 // build/frame-split-trace: one CSV row per fed frame (frame,eye0,eye1,enter,exit,prev,accepted,begins,idx_a,idx_b); rows are queued under frame_split_mutex
 // and written by the status writer, never on the render thread. Capped at FrameSplitTrace::max_rows.
@@ -1038,11 +1042,19 @@ static FullHandUploadWork* full_hand_upload_work(void* model,UINT count) noexcep
     }catch(...) {return nullptr;}
 }
 void invoke_arm_upload(void* model,const void* source,UINT count,FullHandUploadWork* contact);
+// task 3b: the observer's own CPU cost (a helper because the hook below uses __try and cannot hold objects with destructors)
+static void timed_observe_arm_upload(void* model,const void* source,UINT count,std::uintptr_t caller) noexcept {
+    if(!native_gpu_requested) {observe_arm_upload(model,source,count,caller);return;}
+    const auto t0=std::chrono::steady_clock::now();
+    observe_arm_upload(model,source,count,caller);
+    diag_arm_upload_ns.fetch_add(static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now()-t0).count()),std::memory_order_relaxed);
+    diag_arm_upload_calls.fetch_add(1,std::memory_order_relaxed);
+}
 void __fastcall arm_upload_hook(void* model,const void* source,UINT count) {
     arm_upload_depth.fetch_add(1,std::memory_order_acq_rel);
     FullHandUploadWork* contact{};
     __try {
-        observe_arm_upload(model,source,count,reinterpret_cast<std::uintptr_t>(_ReturnAddress()));
+        timed_observe_arm_upload(model,source,count,reinterpret_cast<std::uintptr_t>(_ReturnAddress()));
         contact=full_hand_upload_work(model,count);
         invoke_arm_upload(model,source,count,contact);
     } __finally {delete contact;arm_upload_depth.fetch_sub(1,std::memory_order_acq_rel);}
@@ -1099,7 +1111,9 @@ void __fastcall eye_begin_hook(void* backend,void* world,void* view,int index) {
         frame_split_eyes.begin(reinterpret_cast<std::uintptr_t>(view),left_view,right_view,index,stamp_ns);
     }
     if(native_marker_probe_installed) native_marker_probe.eye_phase(index==0?1u:2u);
+    {const auto diag_t0=std::chrono::steady_clock::now(); // task 3b: eye_boundary + native_eye_capture observer CPU (includes the capture CopyResource encode)
     observe_eye_begin(view);
+    if(native_gpu_requested) {diag_eye_boundary_ns.fetch_add(static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now()-diag_t0).count()),std::memory_order_relaxed);diag_eye_boundary_calls.fetch_add(1,std::memory_order_relaxed);}}
     // 0x374b60 applies the native resolution fractions AFTER 0x374e40 returns.
     // This later eye boundary observes the resulting world viewport, rather
     // than the full-size TAA/upscale viewport.
@@ -3310,7 +3324,8 @@ void observe_eye_begin(void* view) noexcept {
                 if(context) {
                     // The previous native main-view's world and GUI commands
                     // are complete, before this second view can overwrite it.
-                    context->CopyResource(paired_left.Get(),paired_backbuffer.Get());
+                    {d2vr::ModGpuScope capture_scope(context,d2vr::ModSpan::eye_capture); // task 3b
+                    context->CopyResource(paired_left.Get(),paired_backbuffer.Get());}
                     paired_left_ready=true;++native_eye_copy_count;
                 }
             }
@@ -5322,6 +5337,9 @@ std::string feedback_status_json() {
         << ",\"lists\":" << native_gpu_summary.lists << ",\"last_list_sum_ms\":" << native_gpu_summary.last_list_sum_ms
         << ",\"last_elapsed_ms\":" << native_gpu_summary.last_elapsed_ms << ",\"dropped_lists\":" << native_gpu_summary.dropped_lists
         << ",\"query_failures\":" << native_gpu_summary.query_failures << ",\"epoch\":" << native_gpu_epoch << ",\"coverage\":\"native command lists; excludes intervening FSR and immediate draws\"}"
+        << ",\"diag_cost\":{\"eye_boundary_ns\":" << diag_eye_boundary_ns.load() << ",\"eye_boundary_calls\":" << diag_eye_boundary_calls.load()
+        << ",\"arm_upload_ns\":" << diag_arm_upload_ns.load() << ",\"arm_upload_calls\":" << diag_arm_upload_calls.load()
+        << ",\"mod_gpu_frames\":" << d2vr::mod_gpu_timer().stats().frames << ",\"mod_gpu_dropped_spans\":" << d2vr::mod_gpu_timer().stats().dropped_spans << "}"
         << ",\"object_cue_layers\":[" << xr_beam_layers_by_hand[0] << ',' << xr_beam_layers_by_hand[1] << ']'
         << ",\"object_cue_layers_obsolete\":true,\"synchronized_observer\":{\"enabled\":" << (synchronized_observer.enabled()?"true":"false")
         << ",\"dropped\":" << synchronized_observer.dropped() << ",\"bytes\":" << synchronized_bytes.load() << ",\"byte_limit\":134217728"
@@ -5856,9 +5874,13 @@ void sample_stereo(IDXGISwapChain* chain,UINT64 number,const DXGI_SWAP_CHAIN_DES
                                     const std::array<int,4> config{temporal_live_mode.load(),static_cast<int>(std::lround(fsr_taa.fraction.load()*1000)),static_cast<int>(width.load()),static_cast<int>(height.load())};
                                     if(!native_gpu_prepared || config!=native_gpu_config) {
                                         native_gpu_timer.clear();ComPtr<ID3D11Device> device;context->GetDevice(&device);
-                                        native_gpu_prepared=native_gpu_timer.prepare(device.Get());native_gpu_config=config;++native_gpu_epoch;
+                                        native_gpu_prepared=native_gpu_timer.prepare(device.Get());if(native_gpu_prepared) d2vr::mod_gpu_timer().prepare(device.Get());native_gpu_config=config;++native_gpu_epoch;
                                     }
-                                    if(native_gpu_prepared) ticket=native_gpu_timer.begin_list(context);
+                                    if(native_gpu_prepared) {
+                                        d2vr::Phase phase=d2vr::Phase::pre;
+                                        {std::lock_guard<std::mutex> phase_lock(frame_split_mutex);phase=frame_split_eyes.phase(frame_split_in_hook.load(std::memory_order_acquire));}
+                                        ticket=native_gpu_timer.begin_list(context,phase);
+                                    }
                                 }
                                 d2vr::TaaDispatchHook::execute_original(context,list,restore);
                                 if(perf_ticket)render_perf_gpu->end_span(context,perf_ticket);
@@ -6000,6 +6022,7 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
     }
     RenderPerfPresentExit perf_present_exit;
     const auto present_start_ns=d2vr::GameXr::cpu_time_ns();
+    struct SplitHookScope {SplitHookScope() {frame_split_in_hook.store(true,std::memory_order_release);} ~SplitHookScope() {frame_split_in_hook.store(false,std::memory_order_release);}} split_hook_scope;
     const bool measure_present=capturing.load() && xr_requested && !(flags&DXGI_PRESENT_TEST);
     const auto discovery_before_ns=logic_discovery_cpu_ns;
     d2vr::FrameTimingRecord frame_timing_record{};
@@ -6023,7 +6046,7 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
         std::lock_guard<std::mutex> xr_lock(log_mutex);
         XrGraphicsScope graphics_scope;
         if(!game_xr || game_xr->ready_to_close()) {
-            if(native_gpu_prepared) {native_gpu_summary=native_gpu_timer.stats();native_gpu_timer.clear();native_gpu_prepared=false;}
+            if(native_gpu_prepared) {native_gpu_summary=native_gpu_timer.stats();native_gpu_timer.clear();native_gpu_prepared=false;d2vr::mod_gpu_timer().clear();}
             restore_audio_session();
             render_perf_retire();game_xr.reset();restore_stereo();
             {std::lock_guard<std::mutex> gpu_lock(gpu_mutex);paired_left.Reset();paired_backbuffer.Reset();
@@ -7609,6 +7632,9 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
         split_span_ns=native_gpu_requested && native_gpu_prepared?static_cast<std::uint64_t>(std::max(0.,native_gpu_summary.last_elapsed_ms)*1e6):0;
         split_pending=true;
     }
+    if(native_gpu_requested && native_gpu_prepared && d2vr::mod_gpu_timer().active()) { // close the mod's GPU bracket: every mod span of this frame is encoded
+        if(auto* split_context=gpu_game_context.load(std::memory_order_acquire)) {d2vr::mod_gpu_timer().finish_frame(split_context);d2vr::mod_gpu_timer().poll(split_context);}
+    }
     const auto desktop_start_ns=d2vr::GameXr::cpu_time_ns();
     const auto result=original_present(chain,desktop_interval,flags);
     {
@@ -7617,8 +7643,12 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
         const d2vr::FrameStamps split_stamps{frame_split_eyes.eye_ns(0),frame_split_eyes.eye_ns(1),present_start_ns,split_exit_ns};
         const auto split_begins=frame_split_eyes.begins();const auto split_idx_a=frame_split_eyes.idx_a(),split_idx_b=frame_split_eyes.idx_b();
         frame_split_eyes.reset(); // consumed (or discarded outside gameplay)
+        frame_split_in_hook.store(false,std::memory_order_release); // lists after this point belong to the next frame's "pre"
         if(split_pending) {
-            frame_split.feed(split_stamps,split_prev_enter_ns,1'000'000'000,split_gpu_ns,split_span_ns);
+            const bool split_timed=native_gpu_requested && native_gpu_prepared;
+            const d2vr::PhaseGpu split_phase=split_timed?native_gpu_summary.last_phase:d2vr::PhaseGpu{};
+            const d2vr::ModGpu split_mod=split_timed?d2vr::mod_gpu_timer().stats().last:d2vr::ModGpu{};
+            frame_split.feed(split_stamps,split_prev_enter_ns,1'000'000'000,split_gpu_ns,split_span_ns,&split_phase,&split_mod);
             if(frame_split_trace_on.load(std::memory_order_relaxed)) frame_split_trace.push(split_stamps.eye0_begin,split_stamps.eye1_begin,split_stamps.present_enter,split_stamps.present_exit,split_prev_enter_ns,frame_split.last_accepted(),split_begins,split_idx_a,split_idx_b);
         } else if(!(flags&DXGI_PRESENT_TEST)) {
             // This Present did not feed (no XR wait/submit, menu, load, error path): the next gameplay frame starts a fresh interval and pace.

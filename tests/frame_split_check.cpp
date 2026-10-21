@@ -70,5 +70,35 @@ int main(){
       {EyeStamps e;e.reset(); // a mono frame (one real view) stamps only eye 0 and is rejected by the window check
        e.begin(L,L,R,0,10);FrameSplit m;m.feed({e.eye_ns(0),e.eye_ns(1),400,450},5,1'000'000'000,0,0);assert(!m.last_accepted());}
     }
+    { // GPU phase tagging (plan E task 3b): a list is tagged by the CPU phase it is executed in, from the eye stamps.
+      const std::uintptr_t L=0x1000,R=0x2000;
+      {EyeStamps e;e.reset(); // list_before_eye0_is_pre (also the edge: the eye stamps of its own frame do not exist yet)
+       assert(e.phase(false)==Phase::pre);}
+      {EyeStamps e;e.reset();e.begin(L,L,R,0,100); // list_between_eyes_is_eye0
+       assert(e.phase(false)==Phase::eye0);}
+      {EyeStamps e;e.reset();e.begin(L,L,R,0,100);e.begin(R,L,R,0,200); // list_after_eye1_is_eye1
+       assert(e.phase(false)==Phase::eye1);}
+      {EyeStamps e;e.reset();e.begin(L,L,R,0,100);e.begin(R,L,R,0,200); // list_in_hook_is_hook, whatever the stamps say
+       assert(e.phase(true)==Phase::hook);EyeStamps f;f.reset();assert(f.phase(true)==Phase::hook);}
+      {EyeStamps e;e.reset();e.begin(0,L,R,-1,100); // a GUI/null begin stamps nothing: still pre
+       assert(e.phase(false)==Phase::pre);}
+      {EyeStamps e;e.reset();e.begin(L,L,R,0,0); // a test clock may start at 0: eye 0 at 0 is a real stamp
+       assert(e.phase(false)==Phase::eye0);}
+      {EyeStamps e;e.reset();e.begin(L,L,R,0,100);e.begin(R,L,R,0,200);e.reset(); // the Present exit reset puts the next lists back in pre
+       assert(e.phase(false)==Phase::pre);}
+    }
+    { // per_phase_sums_over_window: p50 of the per-frame phase sums and list counts, null when no frame carries a sample
+      FrameSplit none;none.feed({0,60000,110000,125000},-30000,10'000'000,0,0);
+      assert(none.json().find("\"gpu_phase_ms_p50\":null")!=std::string::npos&&none.json().find("\"mod_gpu_ms_p50\":null")!=std::string::npos);
+      FrameSplit m;
+      for(int i=0;i<5;++i){PhaseGpu p;p.valid=true;p.ms[0]=1+i;p.ms[1]=2;p.ms[2]=3;p.ms[3]=0;p.lists[0]=10+i;p.lists[1]=4;p.lists[2]=5;p.lists[3]=0;
+          ModGpu g;g.valid=true;g.ms[0]=.5;g.ms[3]=.25*(i+1);
+          m.feed({0,60000,110000,125000},-30000,10'000'000,0,0,&p,&g);}
+      const auto j=m.json();
+      assert(j.find("\"gpu_phase_ms_p50\":{\"pre\":3,\"eye0\":2,\"eye1\":3,\"hook\":0}")!=std::string::npos);
+      assert(j.find("\"gpu_phase_lists_p50\":{\"pre\":12,\"eye0\":4,\"eye1\":5,\"hook\":0}")!=std::string::npos);
+      assert(j.find("\"mod_gpu_ms_p50\":{\"fsr_eye0\":0.5,\"fsr_eye1\":0,\"aa_sharpen\":0,\"eye_copy\":0.75,")!=std::string::npos);
+      assert(j.find("\"sum\":1.25}")!=std::string::npos);
+      assert(std::string(phase_name(0))=="pre"&&std::string(phase_name(3))=="hook"&&std::string(mod_span_name(6))=="eye_capture");}
     std::cout<<"PASS: frame split\n";
 }

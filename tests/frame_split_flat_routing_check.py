@@ -26,5 +26,5 @@ assert 'PostTonemapPass::eye_views[0]' in hook and 'PostTonemapPass::eye_views[1
 assert 'frame_split_eye_ns[index]' not in probe and 'if(index==0 || index==1) {const auto stamp_ns' not in probe
 # gpu_busy is the list sum, gpu_span the elapsed span, at both feed sites
 assert probe.count('last_list_sum_ms)*1e6):0;') == 2 and probe.count('split_span_ns=native_gpu_requested') == 2
-assert 'split_gpu_ns,split_span_ns);' in probe
+assert 'split_gpu_ns,split_span_ns,&split_phase,&split_mod);' in probe
 print('PASS: frame split flat-mode feed and result-file block')

@@ -195,3 +195,52 @@ Measured 2026-10-21 on the sim rig (throughput without a compositor, not headset
 - Boot-only versus live was not separated: the cvars were set through the game config, so boot-time allocations (`r_shadowParallelSliceCnt`, `r_shadowParallelSliceSize`) took effect, which a runtime write could not reproduce. They saved nothing either way. `lodd` changed the frame, so config values are being read.
 - Not tested (budget 13 of 14 runs, rig cannot pass a value with spaces): `r_shadowCascadeFars "4 10 24 50"`, `r_downsampleQuality 2`, texture streaming cvars, particle cvars, `r_shadowsRats/Bloodflies` (already 0 in this config), god rays (already skipped). No screenshot comparison was made because nothing was a candidate to keep.
 - Consequence for plan D: the frame is not reduced by this class of cvar on this scene. The mono-view diagnostic (3.74 ms) remains the only measured lever.
+
+## GPU phase attribution (plan E Task 3b): where the fixed GPU time goes
+
+Run `20261021T174007` (sim rig, `oil_tank_drop`, lead 28, 120 s, `native-gpu-timing`, RTX 3070 laptop, 900-frame window, build knobs carry-trace / fsr4.off / full-body). Each native command list is tagged by the CPU phase in which it is *executed* (stamps from the eye-begin hook and the Present hook); its GPU time is the timestamp pair. The phase GPU times are the lagged per-frame sums, p50 over the window.
+
+| phase | GPU ms p50 | lists p50 |
+|---|---|---|
+| pre (previous Present exit to eye-0 begin) | 0.00 | 0 |
+| eye0 (eye-0 begin to eye-1 begin) | 7.21 | 45 |
+| eye1 (eye-1 begin to Present enter) | 3.93 | 45 |
+| hook (inside the Present hook) | 0.00 | 0 |
+| sum of the p50s | 11.14 | 90 |
+
+Context: CPU interval p50 13.73 ms, eye0 span 3.12 ms, eye1 span 9.56 ms, hook 0.77 ms, `gpu_busy` 0.81, `gpu_span` 0.97.
+
+**Reading.** Every native list is executed after the eye-0 begin: the engine does all its list submission inside the two view passes, so nothing is left in "pre" or "hook" on this scene. The dominant phase is eye0 at 7.2 ms of 11.1, against 3.9 ms for eye1. The CPU spans show the opposite split (eye0 3.1 ms, eye1 9.6 ms): the render thread submits the eye-0 lists quickly while the GPU is still behind, and then waits. Because the engine is one frame deep (Setup for frame N is consumed by Begin in frame N+1, findings §1), "eye0" lists are not only the left eye: they include the view-independent work the engine does when the first view begins (shadow maps, culling-dependent uploads, particle and animation updates), which the eye-1 phase does not repeat. That is consistent with the 3.2 ms eye0-minus-eye1 difference and with the earlier finding that mono view (one view) saves only 2.5 ms. So roughly 3.9 ms is one view's worth of scene passes and about 3.3 ms is work that runs once per frame inside the first view. Exactly 45 lists per phase is a property of the engine's pass structure, not a measurement artefact (the capacity is 128). Which individual passes make up the 3.3 ms is not resolved here; that needs the per-list `render-perf` lane or a capture.
+
+**Edge cases found.** (1) A list executed before the eye stamps of its own frame exist is tagged "pre"; the stamps reset at Present exit, so the first lists after a Present are "pre". Here none were. (2) With the eye-begin hook off (no `eye_boundary`), every list outside the Present hook is "pre". (3) A GUI/null view begin stamps nothing, so its lists stay in the running phase. (4) The timer frame closes inside the Present hook, so lists executed in the hook after that point are counted in the next timer frame, tagged "hook". (5) The p50 of each phase is taken separately, so the phase p50s need not add to the p50 of the frame sum (11.14 here against a 11.25 ms last frame).
+
+### The mod's own GPU work (p50 per frame, same run)
+
+| span | GPU ms |
+|---|---|
+| FSR dispatch, eye 0 | 1.037 |
+| FSR dispatch, eye 1 | 1.046 |
+| AA / sharpen | 0.090 |
+| eye copy (CopyResource to the XR swapchain) | 0.056 |
+| eye overlay draws (native object art, desktop mirror) | 0.033 |
+| HUD / wrist / vignette layer updates | 0.000 |
+| `native_eye_capture` copy | 0.025 |
+| sum | 2.285 |
+
+The mod's GPU work is about 2.3 ms per frame, of which FSR is 2.08 ms. It is not the 9 ms fixed cost. It sits outside the list sum, so list sum plus mod is about 13.4 ms of a 13.7 ms interval, which is why the laptop is GPU-bound at 72 Hz-class intervals. Caveats: the sim's render size is smaller than the headset's (FSR here is 1.04 ms per eye; see the headset data below), and a timestamp pair measures GPU execution between the two points, not queue wait.
+
+### Headset session, same day (context, not from this rig)
+
+Interval p50 45.4 ms; engine gap p50 19.7 ms at 2020x2160 per eye; xrEndFrame submit 4.4 ms; transfer 1.1 ms (p95 10); FSR3 native GPU 2.84 ms per eye; SteamVR display period 33-44 ms, i.e. throttled to 1/3 to 1/4 of 90 Hz. In the headset FSR costs 5.7 ms per frame (2.7x the sim), so the mod GPU work is no longer small there and scales with render size. The engine lists were not timed in that session (`native-gpu-timing` was off).
+
+### What the three probe diagnostics in the real `dxgi-probe.cfg` cost
+
+Counters from the same run (6901 frames):
+
+| diagnostic | per-frame CPU | per-frame GPU | needed for normal play |
+|---|---|---|---|
+| `eye_boundary` (hook on the engine begin-view function; match under `gpu_mutex`; CSV only for the first 1500 begins) | 4.0 calls/frame, 37.6 us/call, **0.15 ms/frame** | none itself | yes: `native_eye_capture` and per-eye TAA history depend on it |
+| `native_eye_capture` (one full-resolution backbuffer `CopyResource` into `paired_left` at the eye-1 begin) | included in the eye_boundary time (encode only) | **0.025 ms/frame** | yes: it is how the left eye image is captured for the XR submit |
+| `arm_upload_observer` (hook on the native arm palette consumer; 45.5 uploads/frame, reads rig memory under `arm_log_mutex`; CSV of 100 samples per side then stops) | 3.5 us/call, **0.16 ms/frame** | none | yes: tracked arms and the body avatar use the same hook and need it |
+
+None of the three is a meaningful share of the frame: about 0.3 ms of render-thread CPU and 0.03 ms of GPU together. They are not the cause of the fixed GPU time and removing them is not a frame-rate lever. The CPU numbers are wall time inside the hook on a loaded render thread, so treat them as upper bounds.

@@ -92,6 +92,16 @@ int main(int argc,char** argv) {
         timer.end_list(context.Get(),teardown);timer.finish_frame(context.Get());retire(timer,context.Get(),1);
         std::printf("PASS (%s): native sum %.6f ms, elapsed %.6f ms; multilist, capacity, owner, stale ticket, async and cleanup checks\n",
             hardware?"hardware":"WARP",measured.last_list_sum_ms,measured.last_elapsed_ms);
+        { // phase tags (task 3b): lists executed in different phases are summed and counted per phase
+            timer.clear();check(timer.prepare(device.Get()),"reprepare for phase tags");
+            const d2vr::Phase tags[]{d2vr::Phase::pre,d2vr::Phase::pre,d2vr::Phase::eye0,d2vr::Phase::eye1,d2vr::Phase::eye1,d2vr::Phase::eye1};
+            for(auto tag:tags) {const auto t=timer.begin_list(context.Get(),tag);check(t!=0,"phase list begins");context->ExecuteCommandList(list.Get(),TRUE);timer.end_list(context.Get(),t);}
+            timer.finish_frame(context.Get());retire(timer,context.Get(),1);
+            const auto ph=timer.stats().last_phase;
+            check(ph.valid && ph.lists[0]==2 && ph.lists[1]==1 && ph.lists[2]==3 && ph.lists[3]==0,"per-phase list counts");
+            double total=0;for(double v:ph.ms) {check(v>=0,"phase ms non-negative");total+=v;}
+            check(std::fabs(total-timer.stats().last_list_sum_ms)<1e-6,"phase sums add up to the list sum");
+        }
         timer.clear();return 0;
     } catch(const std::exception& e) {std::fprintf(stderr,"FAIL: %s\n",e.what());return 1;}
 }
