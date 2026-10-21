@@ -301,3 +301,21 @@ HEAD 9e50b37. Run folders: `~/d2vr-test-builds/sim-runs/20261021T221957` (M0) an
   this file once per run, so two consecutive frames showing one fresh eye each could not be produced; the evidence for alternation is the
   counters (9240 alternated frames, one view per frame, the two layers submitted every frame). A per-frame eye capture would need a new probe hook.
 - Not measured: the comfort of a one-frame interocular delay (Pulfrich-style shimmer). Only the headset decides.
+
+### Alternate eye and temporal AA (plan F task 3, path B)
+
+Decision: alternate-eye mode forces temporal AA off (the "off, SMAA row only" mode 0), whatever the saved preference or settings panel asks
+for, and the SMAA pass still runs. A correct but jagged-edged image beats ghosting. There is no launcher row for the knob yet; when one is
+added it must say "performance mode (may shimmer on fast motion; temporal AA off, SMAA only)".
+
+Evidence (sim run 20261021T230548, `build/alt-taa-trace`, 100 gameplay frames, frames 4217-4316, alternate-eye on):
+- The engine keeps ONE view object: a single address (0x82c15cc0) on all 100 frames, while the logical eye alternates 0/1.
+- Setup rolls the view's jitter and previous-matrix block in place every call: the roll counter `+0x77b4` rose by exactly 1 per frame, and
+  `+0x7858` (previous jitter) equalled the previous frame's `+0x7850` on 99 of 99 rows. So the "previous" state of every frame is the OTHER
+  eye's (one frame old), never the same eye's (two frames old). The sampled matrix words (`+0x7390` / `+0x7410`, first row x) were equal for both
+  eyes on most rows, so they cannot show the pose difference; the structural result above is the evidence.
+- Path A would need per-eye previous matrices written into a block whose layout (`+0x7390..0x75cc` rolled to `+0x7410..`, overlapping ranges)
+  is only known from static reading, plus per-eye FSR history and dt. That is guesswork about engine state, so it was not done.
+- `fsr_vfov`, the jitter counter and `eye_jitter` are indexed by the logical eye in either path.
+- M2 image with temporal AA forced off (run above, one still frame): clean edges, no doubled outline. One frame cannot show temporal
+  ghosting, and the removed history means there is none to ghost; judging the SMAA-only edge quality and the shimmer needs the headset.

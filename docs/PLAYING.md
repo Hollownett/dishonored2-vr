@@ -79,7 +79,7 @@ From there you can set:
 - resolution scale
 - anti-aliasing: FSR Native, FSR Quality (renders at 77% and upscales), FSR Balanced (67% and upscales), Game TAA or Off. The displayed generation reflects the active backend. Your saved selection is preserved. Reduced input resolution is verified; headset FPS gains remain unmeasured.
   The FSR 3 Quality/Balanced modes upscale after the game's tonemapping, so the HUD stays sharp. Combine Quality with a higher resolution scale for a sharper image at the same cost
-- edge smoothing, SMAA (on by default; skipped automatically while FSR 3 is on)
+- edge smoothing, SMAA (on by default; skipped automatically while FSR 3 is on, except in the experimental alternate-eye performance mode, which turns temporal AA off and always uses SMAA)
 - sharpening (off, low, medium, high, max; default medium)
 - HUD size (55%, 65% default, 75%, 85%, 100% = the game's own layout) and controls card on the left wrist (on/off)
 - monitor view: what the desktop game window shows while you play - right eye (default: copying one eye costs less render time than both), left eye, or both eyes side by side

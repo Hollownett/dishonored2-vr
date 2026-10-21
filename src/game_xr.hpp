@@ -1789,7 +1789,7 @@ public:
                 // Independent per-eye processing; menus retain the exact native image.
                 ID3D11Texture2D* processed=nullptr;
                 {ModGpuScope aa_scope(context_.Get(),ModSpan::aa_sharpen); // task 3b
-                processed=gameplay && antialiasing_enabled_ && settings_.temporal_aa()<2 && !alt_stale?antialiasing_->apply(sources[eye]):sources[eye]; // FSR 3 already anti-aliased
+                processed=gameplay && antialiasing_enabled_ && alternate_smaa_applies(alternate_enabled,settings_.temporal_aa()) && !alt_stale?antialiasing_->apply(sources[eye]):sources[eye]; // FSR 3 already anti-aliased
                 // Sharpening also helps menu text (menus get no SMAA).
                 if(sharpness>0 && !alt_stale) processed=sharpen_->apply(processed,sharpness);}
                 {ModGpuScope copy_scope(context_.Get(),ModSpan::eye_copy); // task 3b

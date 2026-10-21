@@ -1151,6 +1151,7 @@ static bool view_jitter_abi=false;static std::atomic<UINT64> view_jitter_writes{
 void __fastcall setup_hook(void* view,int* window_rect,int* render_rect);
 // The registered trampoline survives stopped sessions. Select the current mode
 // on every call so a desktop run cannot leave VR using its observation callback.
+void alt_taa_trace(void* view) noexcept; // build/alt-taa-trace (diagnostic): the one view object's address, jitter and rolled previous-matrix words
 void __fastcall view_setup_hook(void* view,int* window_rect,int* render_rect) {
     const auto previous_operation=d2vr::crash_operation;
     d2vr::crash_operation="native view setup";
@@ -1161,6 +1162,7 @@ void __fastcall view_setup_hook(void* view,int* window_rect,int* render_rect) {
             if(claimed) observe_eye_setup(view);
             if(claimed) prepare_head_view(view);
             original(view,window_rect,render_rect);
+            if(claimed) alt_taa_trace(view);
             if(claimed && forced_view_jitter && view_jitter_abi) { // see d2vr::engine_taa_jitter
                 *reinterpret_cast<d2vr::TaaJitter*>(static_cast<std::byte*>(view)+0x7850)=*forced_view_jitter;forced_view_jitter.reset();++view_jitter_writes;
             }
@@ -3923,7 +3925,8 @@ void prepare_head_view(void* view) noexcept {
             render_fov.up=static_cast<float>(d2vr::authored_fov_angle(render_fov.up));
             render_fov.down=static_cast<float>(d2vr::authored_fov_angle(render_fov.down));
         }
-        fsr_vfov[static_cast<std::size_t>(eye)]=render_fov.up-render_fov.down;
+        const std::size_t eye_slot=d2vr::alternate_state_slot(alt_eye,eye); // per-eye temporal state follows the logical eye
+        fsr_vfov[eye_slot]=render_fov.up-render_fov.down;
         auto optical=d2vr::eye_projection(projection,render_fov);
         if(!optical) {native_audio_listener.clear();native_left_aim.clear();native_weapon_attachment.clear();return;}
         d2vr::TaaJitter taa_view_jitter{};
@@ -3931,7 +3934,7 @@ void prepare_head_view(void* view) noexcept {
             // The forced projection carries no TAA jitter; add the engine's own sub-pixel sample
             // (same index as its cb_jittervectors), shifting NDC by (2jx/W, 2jy/H).
             std::uint32_t counter{};read_self(image_base+d2vr::taa_history::frame_counter_rva,&counter,sizeof counter);
-            jitter_counter[static_cast<std::size_t>(eye)]=counter;
+            jitter_counter[eye_slot]=counter;
             const auto j=d2vr::engine_taa_jitter(counter,static_cast<float>(taa_width.load()),static_cast<float>(taa_height.load()));
             auto pj=j;pj.x*=taa_jitter_scale[0];pj.y*=taa_jitter_scale[1];d2vr::apply_taa_jitter(*optical,pj);taa_view_jitter={j.x*taa_jitter_scale[2],j.y*taa_jitter_scale[3]};
         }
@@ -4919,7 +4922,7 @@ void prepare_head_view(void* view) noexcept {
         // engine_projection: symmetric frusta only; the engine builds the projection from hfov/vfov itself,
         // including its TAA sub-pixel jitter, which a forced projection (flag +0x140) drops.
         if(!(engine_projection && symmetric_frustum_requested)) {std::memcpy(bytes.data()+0x100,optical->data(),64);bytes[0x140]=std::byte{1};forced_view_jitter=taa_view_jitter;
-            {std::lock_guard<std::mutex> l(eye_jitter_mutex);auto& e=eye_jitter[static_cast<std::size_t>(eye)];e={taa_view_jitter.x,taa_view_jitter.y,e[0],e[1]};}}
+            {std::lock_guard<std::mutex> l(eye_jitter_mutex);auto& e=eye_jitter[eye_slot];e={taa_view_jitter.x,taa_view_jitter.y,e[0],e[1]};}}
         if(per_frame && native_crosshair_installed) {
             // Aim point 30 units along the active hand, projected into this eye's tangent-space frustum.
             constexpr XrSpaceLocationFlags required=XR_SPACE_LOCATION_ORIENTATION_VALID_BIT|XR_SPACE_LOCATION_POSITION_VALID_BIT;
@@ -4989,6 +4992,30 @@ void prepare_head_view(void* view) noexcept {
             {render_fov.left,render_fov.right,render_fov.up,render_fov.down},cant?&rendered_orientation:nullptr);
     } catch(const std::exception& error) {native_audio_listener.clear();forced_view_jitter.reset();note_recoverable(error.what());}
     catch(...) {native_audio_listener.clear();forced_view_jitter.reset();note_recoverable("Unknown head-view exception");}
+}
+
+// Diagnostic (plan F task 3 step 1, knob build/alt-taa-trace, alternate-eye on only): 100 rows of what the engine's view object holds after Setup rolled it.
+void alt_taa_trace(void* view) noexcept {
+    static std::atomic<int> rows{0};
+    static std::atomic<int> state{-1}; // -1 unread, 0 off, 1 on
+    if(!view || !alternate_on()) return;
+    if(state.load()<0) state=fs::exists(output_directory.parent_path()/L"build"/L"alt-taa-trace")?1:0;
+    if(state.load()!=1 || rows.load()>=100 || game_logic_mask()!=2) return; // gameplay only: loading calls Setup many times per Present
+    try {
+        static std::mutex trace_mutex;static UINT64 last_frame{};static std::ofstream trace_csv;
+        std::lock_guard<std::mutex> lock(trace_mutex);
+        if(rows.load()>=100 || last_frame==frames.load()+1) return;
+        last_frame=frames.load()+1;
+        if(!trace_csv.is_open()) {trace_csv.open(output_directory/L"alt-taa-trace.csv");trace_csv<<"row,frame,view,logical_eye,jit_cur_x,jit_cur_y,jit_prev_x,jit_prev_y,flag77b4,cur7390_0,cur7390_1,cur7390_2,cur7390_3,prev7410_0,prev7410_1,prev7410_2,prev7410_3,proj_100_0,proj_100_2\n";}
+        std::array<float,2> jitter_now{},jitter_prev{};std::array<float,4> current{},previous{};std::array<float,3> projection{};std::uint32_t flag{};
+        const auto at=reinterpret_cast<std::uintptr_t>(view);
+        if(!read_self(at+0x7850,jitter_now.data(),8) || !read_self(at+0x7858,jitter_prev.data(),8) || !read_self(at+0x77b4,&flag,4) ||
+           !read_self(at+0x7390,current.data(),16) || !read_self(at+0x7410,previous.data(),16) || !read_self(at+0x100,projection.data(),12)) return;
+        trace_csv<<rows.load()<<','<<frames.load()+1<<",0x"<<std::hex<<at<<std::dec<<','<<d2vr::AlternateEye::parity_eye(frames.load()+1)<<','<<jitter_now[0]<<','<<jitter_now[1]<<','<<jitter_prev[0]<<','<<jitter_prev[1]<<','<<flag;
+        for(float f:current) trace_csv<<','<<f;
+        for(float f:previous) trace_csv<<','<<f;
+        trace_csv<<','<<projection[0]<<','<<projection[2]<<'\n';trace_csv.flush();++rows;
+    } catch(...) {}
 }
 
 void restore_head_view() noexcept {
@@ -6801,7 +6828,7 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                             xr_wrist_layers=game_xr->wrist_layers;xr_world_ui_layers_by_kind=game_xr->world_ui_layers_by_kind;
                             if(const auto hud=game_xr->take_hud_request()) {d2vr::NativeHudRect::scale=*hud/100.f;d2vr::NativeHudChildDraw::hud_scale=*hud/100.f;}
                             if(d2vr::NativeMenuEntry::requested.exchange(false)) game_xr->settings_requested=true; // the native menu item was chosen
-                            if(const auto request=game_xr->take_temporal_request()) {temporal_live_mode=*request;native_cvars.set(d2vr::NativeCvars::skip_temporal_aa,*request?0:1);taa_live=*request!=0;fsr_taa.enabled=*request>=2;fsr_taa.fsr4_active=*request>=5;if(*request>=2) fsr_taa.request_reset();upscale_fraction=aa_mode_fraction(*request);reset_perf_governor(*request);apply_upscale(upscale_fraction);}
+                            if(auto requested_temporal=game_xr->take_temporal_request()) {const int request_mode=d2vr::alternate_effective_temporal(alternate_on(),*requested_temporal);const int* request=&request_mode;temporal_live_mode=*request;native_cvars.set(d2vr::NativeCvars::skip_temporal_aa,*request?0:1);taa_live=*request!=0;fsr_taa.enabled=*request>=2;fsr_taa.fsr4_active=*request>=5;if(*request>=2) fsr_taa.request_reset();upscale_fraction=aa_mode_fraction(*request);reset_perf_governor(*request);apply_upscale(upscale_fraction);}
                             if(const auto request=game_xr->take_turning_request()) {
                                 turning_config=*request;if(!turn_ramp_enabled) turning_config.ramp_s=0;native_turning.configure(turning_config);
                                 native_turning_requested=request->mode!=d2vr::TurnControl::Mode::native;
@@ -8567,6 +8594,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
         if(fs::exists(root/L"build"/L"force-taa") && !taa_preference) taa_preference=1;
         {std::ifstream knob(root/L"build"/L"aa-mode");int mode=-1;if(knob>>mode && mode>=0 && mode<=6) taa_preference=mode;} // diagnostics: 0 off, 1 TAA, 2-4 FSR 3, 5-6 FSR 4
         if(fs::exists(root/L"build"/L"fsr4") && taa_preference>=2 && taa_preference<=3) taa_preference+=3; // legacy knob: FSR 4 at the same scale
+        taa_preference=d2vr::alternate_effective_temporal(alternate_on(),taa_preference); // alternate-eye: temporal AA off (SMAA row), see alternate_eye.hpp
         fsr_taa.fsr4_active=taa_preference>=5;
         temporal_live_mode=taa_preference;
         upscale_fraction=aa_mode_fraction(taa_preference);

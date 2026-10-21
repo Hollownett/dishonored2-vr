@@ -80,4 +80,11 @@ assert 'return alternate_pair_ready(rendered_mask_,alternate_fresh_eye,' in xr
 assert 'if(alternate_may_keep(gameplay,authored_camera,settings_.open())) keep_alternate_eye_(eye,processed);' in xr
 assert 'alt_kept_ok_(authored_camera || settings_.open())' in xr and 'if(nonfree) return false;' in xr
 assert 'if(!alternate_enabled && (alt_kept_[0] || alt_kept_[1])) {alt_kept_[0].Reset();alt_kept_[1].Reset();' in xr   # released after fallback
+# plan F task 3 (path B): temporal AA is off in alternate mode (startup, settings requests, SMAA still runs); per-eye state follows the logical eye
+assert 'taa_preference=d2vr::alternate_effective_temporal(alternate_on(),taa_preference);' in probe
+assert 'd2vr::alternate_effective_temporal(alternate_on(),*requested_temporal)' in probe
+assert 'alternate_smaa_applies(alternate_enabled,settings_.temporal_aa())' in xr
+assert 'const std::size_t eye_slot=d2vr::alternate_state_slot(alt_eye,eye);' in head
+assert 'fsr_vfov[eye_slot]=' in head and 'jitter_counter[eye_slot]=counter;' in head and 'auto& e=eye_jitter[eye_slot];' in head
+assert 'fsr_vfov[static_cast<std::size_t>(eye)]' not in head and 'jitter_counter[static_cast<std::size_t>(eye)]' not in head
 print('PASS: alternate-eye knob routing (gating, own-eye pose, kept image, view-count truth, fallback, status)')

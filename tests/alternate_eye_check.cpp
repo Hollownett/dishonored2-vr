@@ -197,6 +197,19 @@ static void mismatch_falls_back_after_thirty() {
     for (int i = 0; i < 29; ++i) CHECK(!r.note(true));
     CHECK(r.note(true));
 }
+static void temporal_aa_forced_off_in_alternate_mode() {
+    for (int requested = 0; requested <= 6; ++requested) {
+        CHECK(alternate_effective_temporal(true, requested) == 0);          // TAA / FSR 3 / FSR 4 all become the SMAA row
+        CHECK(alternate_effective_temporal(false, requested) == requested);  // every other mode keeps what was asked
+        // the SMAA pass runs in alternate mode even when the saved preference names an FSR mode; otherwise the old rule (FSR skips it)
+        CHECK(alternate_smaa_applies(true, requested));
+        CHECK(alternate_smaa_applies(false, requested) == (requested < 2));
+    }
+}
+static void per_eye_state_follows_the_logical_eye() {
+    CHECK(alternate_state_slot(0, 0) == 0 && alternate_state_slot(1, 0) == 1);   // the one view is native slot 0 whichever eye it renders
+    CHECK(alternate_state_slot(-1, 0) == 0 && alternate_state_slot(-1, 1) == 1); // paired / knob off: the native slot, unchanged
+}
 int main() {
     parity_alternates_in_gameplay();
     menus_and_authored_render_paired();
@@ -208,5 +221,7 @@ int main() {
     gating_decisions();
     fresh_eye_and_need_mask();
     mismatch_falls_back_after_thirty();
+    temporal_aa_forced_off_in_alternate_mode();
+    per_eye_state_follows_the_logical_eye();
     std::puts("PASS: alternate eye (parity, paired gating, epoch, age, stale pose)");
 }

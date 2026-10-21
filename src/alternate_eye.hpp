@@ -11,6 +11,7 @@
 // Eye identity is never taken from the engine's raw begin index (it is 2 for both views in XR): the view is named by address
 // (EyeStamps in frame_split.hpp) and the logical eye is the alternation parity of the frame.
 #include <array>
+#include <cstddef>
 #include <cstdint>
 
 namespace d2vr {
@@ -51,6 +52,16 @@ public:
 private:
     unsigned run_{};
 };
+
+// Temporal AA in alternate-eye mode (plan F task 3, path B). The engine keeps ONE view object in one-view mode: its rolled previous matrices
+// and jitter belong to the OTHER eye (IPD offset + the pose change), so TAA/FSR motion vectors and history would be wrong and ghost. Alternate
+// mode therefore forces the temporal mode to 0 (the SMAA row), whatever was requested, and the SMAA pass runs even when the saved preference
+// names an FSR mode (which normally skips SMAA).
+inline int alternate_effective_temporal(bool alternate_on, int requested) noexcept {return alternate_on ? 0 : requested;}
+inline bool alternate_smaa_applies(bool alternate_on, int saved_temporal) noexcept {return saved_temporal < 2 || alternate_on;}
+// Per-eye state (fsr_vfov, jitter counter, eye_jitter) is indexed by the LOGICAL eye of the view being prepared, not the native slot (always 0
+// for the one view).
+inline std::size_t alternate_state_slot(int logical_eye, int native_slot) noexcept {return static_cast<std::size_t>(logical_eye >= 0 ? logical_eye : native_slot);}
 
 class AlternateEye {
 public:
