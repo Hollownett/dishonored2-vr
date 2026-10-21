@@ -26,6 +26,7 @@ class VrSettings {
     bool previous_y_{},previous_a_{},previous_b_{},previous_x_{},previous_trigger_{},previous_left_trigger_{},stick_held_{};
     bool controls_valid_{};
     bool open_{};
+    bool close_latch_{}; // gameplay panel just closed: input held through the close stays consumed until released
     bool gameplay_open_{}; // opened by holding Y during play: the panel keeps running while `gameplay` is true
     bool calibration_page_{},measurements_page_{};
     bool hand_fit_page_{};   // G5/C6: the hand-fit sub-page of the calibration page (X); both hands are fitted live, sticks move the active one
@@ -215,7 +216,7 @@ public:
             default:return L"Sharpening: Medium";
         }
     }
-    void suspend() noexcept {open_=false;gameplay_open_=false;calibration_page_=measurements_page_=false;leave_hand_fit();controls_valid_=false;stick_held_=false;}
+    void suspend() noexcept {open_=false;gameplay_open_=false;close_latch_=false;calibration_page_=measurements_page_=false;leave_hand_fit();controls_valid_=false;stick_held_=false;}
     // Opened from the native menu's "VR Settings" item: held buttons from that click are not replayed.
     void open_from_menu() noexcept {open_=true;calibration_page_=measurements_page_=false;leave_hand_fit();selected_=0;controls_valid_=false;stick_held_=false;native_calibration_=false;}
     // Opened in gameplay by holding Y (y_hold.hpp): the same panel on page 0. Y (a new press) or B closes it.
@@ -238,8 +239,15 @@ public:
     }
     Changes update(const ControllerInput& in,bool gameplay,bool focused,std::optional<PanelPointer> pointer={},bool settings_available=true,double dt=1./90) {
         Changes out{};
+        if(!gameplay) {gameplay_open_=close_latch_=false;}
+        else if(gameplay_open_ && !open_) {gameplay_open_=false;close_latch_=true;} // closed (Y, B or the close row) since the last update
+        if(close_latch_ && focused && in.active) {
+            // A button held through the close (B would holster the sword, Y would talk) must not reach the game as a fresh press.
+            if(in.a || in.b || in.x || in.y || in.left_click || in.right_click || in.left_trigger>.3f || in.right_trigger>.3f ||
+               in.left_grip>.3f || in.right_grip>.3f) {out.consume=true;return out;}
+            close_latch_=false;
+        }
         const bool from_gameplay=gameplay && gameplay_open_ && open_;
-        if(!gameplay) gameplay_open_=false;
         if(!focused || !in.active || (gameplay && !from_gameplay) || (!settings_available && !from_gameplay)) {suspend();return out;}
         const bool trigger=in.right_trigger>.55f;
         if(!controls_valid_) {

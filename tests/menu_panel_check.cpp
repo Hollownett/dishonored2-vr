@@ -26,6 +26,19 @@ int main() {
         require(std::abs(summoned.position.x-.3)<.02);
         panel.reset();const auto reopened=panel.place({{3,1.8,4},{0,std::sqrt(.5),0,std::sqrt(.5)}});
         require(std::abs(reopened.position.x-1.85)<1e-6 && std::abs(reopened.position.z-4)<1e-6);
+        {   // hold(): the gameplay settings panel is placed once, stays put while open, and is placed afresh on the next open
+            d2vr::MenuPanel world;
+            const auto at_open=world.hold({{0,1.7,0},{0,0,0,1}});
+            require(std::abs(at_open.position.z+1.15)<1e-6);
+            const auto turned=world.hold({{2,1.7,3},{0,std::sqrt(.5),0,std::sqrt(.5)}}); // walked and turned 90 degrees
+            require(turned.position.x==at_open.position.x && turned.position.z==at_open.position.z && turned.orientation.w==at_open.orientation.w);
+            world.summon();
+            for(int frame=0;frame<60;++frame) world.hold({{2,1.7,3},{0,std::sqrt(.5),0,std::sqrt(.5)}});
+            require(std::abs(world.hold({{9,1.7,9},{0,0,0,1}}).position.x-at_open.position.x)<1e-9);
+            world.reset();
+            const auto again=world.hold({{2,1.7,3},{0,std::sqrt(.5),0,std::sqrt(.5)}});
+            require(std::abs(again.position.x-.85)<1e-6 && std::abs(again.position.z-3)<1e-6);
+        }
         const auto wide=d2vr::MenuPanel::extent(1920,1080),portrait=d2vr::MenuPanel::extent(2496,2688);
         require(std::abs(wide[0]/wide[1]-1920.f/1080.f)<1e-5 && wide[0]<=1.8f && wide[1]<=1.2f &&
             std::abs(portrait[0]/portrait[1]-2496.f/2688.f)<1e-5 && portrait[0]<=1.8f && portrait[1]<=1.2f);

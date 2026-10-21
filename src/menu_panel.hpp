@@ -20,6 +20,12 @@ public:
     explicit MenuPanel(double distance=1.15) noexcept : distance_m(distance) {}
     void reset() noexcept {placed_=false;following_=false;}
     void summon() noexcept {following_=true;}
+    // World-locked use (the settings panel opened during play): placed once in front of the head when first asked, then never moved
+    // until reset(); no gliding after the head.
+    const TrackedPose& hold(const TrackedPose& head) {
+        if(!placed_) return place(head);
+        return pose_;
+    }
     const TrackedPose& place(const TrackedPose& head) {
         if(!finite(head.position)) throw std::invalid_argument("Invalid menu head position");
         const auto forward=level_forward(head.orientation);

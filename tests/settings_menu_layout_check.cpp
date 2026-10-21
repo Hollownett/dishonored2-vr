@@ -28,6 +28,17 @@ int main() {
         catch(const std::invalid_argument&) {rejected=true;}
         assert(rejected);
     }
+    {   // quad_fit: the world quad covers exactly the band rectangle that pointer() maps (u,v of the stage -> panel u,v)
+        const auto fit=SettingsMenuLayout::quad_fit(1.4,1.4*1080/1920);
+        assert(std::abs(fit.width-.7)<1e-9 && std::abs(fit.height-.6125)<1e-9);
+        const double band_w=1.4,band_h=1.4*1080/1920;
+        // left edge of the quad in band coordinates (0..1 across the band)
+        const double left=.5+(fit.dx-fit.width*.5)/band_w,right=.5+(fit.dx+fit.width*.5)/band_w;
+        const double top=.5-(fit.dy+fit.height*.5)/band_h,bottom=.5-(fit.dy-fit.height*.5)/band_h;
+        const auto tl=SettingsMenuLayout::pointer({left+1e-9,top+1e-9}),br=SettingsMenuLayout::pointer({right-1e-9,bottom-1e-9});
+        assert(tl && br && tl->u<1e-6 && tl->v<1e-6 && br->u>1-1e-6 && br->v>1-1e-6);
+        assert(!SettingsMenuLayout::pointer({left-.01,top+.1}) && !SettingsMenuLayout::pointer({right+.01,top+.1}));
+    }
     VrSettings settings;ControllerInput held{};held.active=true;held.a=true;held.right_trigger=1;
     settings.open_from_menu();
     const auto first=settings.update(held,false,true,PanelPointer{.8,.15});

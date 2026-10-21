@@ -35,12 +35,36 @@ int main() {
             ControllerInput press=idle;press.y=true;
             const auto closed=held.update(press,true,true,{},false);
             require(!held.open() && closed.consume,"Y press did not close gameplay settings");
-            require(!held.update(press,true,true,{},false).consume,"Closed gameplay settings kept consuming input");
+            require(held.update(press,true,true,{},false).consume,"Y held through the close reached the game");
+            require(!held.update(idle,true,true,{},false).consume,"Closed gameplay settings kept consuming input after release");
             held.open_from_gameplay();held.update(idle,true,true,{},false);
             ControllerInput back=idle;back.b=true;
             require(held.update(back,true,true,{},false).consume && !held.open(),"B did not close gameplay settings");
             held.open_from_gameplay();held.update(idle,true,true,{},false);
             require(!held.update(idle,true,false,{},false).consume && !held.open(),"Focus loss kept gameplay settings open");
+            {   // the Y that opened it is still down: it must not close the panel; a later fresh press does
+                VrSettings opened;ControllerInput hold=idle;hold.y=true;
+                opened.open_from_gameplay();
+                for(int frame=0;frame<6;++frame) require(opened.update(hold,true,true,{},false).consume && opened.open(),"Opening Y still held closed the gameplay panel");
+                opened.update(idle,true,true,{},false);
+                require(opened.open(),"Releasing the opening Y closed the panel");
+                require(opened.update(hold,true,true,{},false).consume && !opened.open(),"A fresh Y press after release did not close the panel");
+            }
+            {   // close_leak: a button held through the close stays consumed until released, then input passes again
+                VrSettings leak;ControllerInput shut=idle;shut.b=true;
+                leak.open_from_gameplay();leak.update(idle,true,true,{},false);
+                require(leak.update(shut,true,true,{},false).consume && !leak.open(),"B did not close");
+                for(int frame=0;frame<4;++frame) require(leak.update(shut,true,true,{},false).consume,"B held through the close reached the game");
+                require(!leak.update(idle,true,true,{},false).consume,"Input stayed consumed after B was released");
+                require(!leak.update(shut,true,true,{},false).consume && !leak.open(),"A later B press was swallowed or reopened");
+                VrSettings trigger;ControllerInput pull=idle;pull.right_trigger=1;ControllerInput yclose=idle;yclose.y=true;
+                trigger.open_from_gameplay();trigger.update(idle,true,true,{},false);trigger.update(yclose,true,true,{},false); // Y yclose closes
+                pull.y=true;
+                require(trigger.update(pull,true,true,{},false).consume,"Y and trigger held through the close reached the game");
+                ControllerInput only_trigger=idle;only_trigger.right_trigger=1;
+                require(trigger.update(only_trigger,true,true,{},false).consume,"Trigger held through the close reached the game");
+                require(!trigger.update(idle,true,true,{},false).consume,"Trigger latch never released");
+            }
             VrSettings plain;plain.open_from_menu();
             plain.update(idle,true,true);
             require(!plain.open(),"A menu-opened panel survived gameplay without the hold flag");

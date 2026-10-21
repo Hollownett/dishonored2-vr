@@ -6606,6 +6606,7 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                             xr_menu_layers=game_xr->menu_layers;
                             xr_controller_samples=game_xr->controller_samples;
                             post_xr_housekeeping_cpu_ns=d2vr::GameXr::cpu_time_ns()-xr_housekeeping_start;
+                            game_xr->y_hold_blocked=false; // set again below only when the controls block runs and a Talk offer or the wheel owns Y
                             if(controller_requested) {
                                 CpuSpan controls_span{controls_cpu_ns};
                                 if(native_menu_mode) {

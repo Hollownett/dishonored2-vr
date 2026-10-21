@@ -54,6 +54,13 @@ void blocked_midway_cancels_the_press() {
     for(double t=0;t<.4;t+=step) (void)h.update(true,false,t);
     for(double t=.4;t<2.0;t+=step) {const auto r=h.update(true,t<.5,t);assert(!r.fire);}
 }
+void only_first_sample_blocked_never_fires() {
+    YHold h;
+    assert(!h.update(true,true,0).fire);
+    for(double t=step;t<2.0;t+=step) {const auto r=h.update(true,false,t);assert(!r.fire && !r.suppress_y);}
+    (void)h.update(false,false,2.1);
+    assert(!h.update(true,false,3.0).fire && h.update(true,false,3.6).fire); // the next press is free again
+}
 void hold_exactly_at_threshold() {
     YHold h;
     (void)h.update(false,false,0);
@@ -99,6 +106,7 @@ int main() {
     blocked_at_start_never_fires();
     talk_offer_suppresses_hold();
     blocked_midway_cancels_the_press();
+    only_first_sample_blocked_never_fires();
     hold_exactly_at_threshold();
     negative_or_backwards_time_resets();
     nan_time_ignored();

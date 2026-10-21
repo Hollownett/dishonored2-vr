@@ -19,6 +19,12 @@ struct SettingsMenuLayout {
         if(right<=left || bottom<=top) throw std::invalid_argument("Native menu content area is too small");
         return {left,band_y+top,right-left,bottom-top};
     }
+    // The panel's own quad (640x560 image) inside a native menu band `band_w` x `band_h` metres: size and the offset of its centre
+    // from the band centre (right and up), so a world-locked quad hit-tests exactly like the band rectangle `pointer` maps.
+    struct QuadFit {double dx{},dy{},width{},height{};};
+    static QuadFit quad_fit(double band_w,double band_h) noexcept {
+        return {((x+width*.5)/stage_width-.5)*band_w,-((y+height*.5)/stage_height-.5)*band_h,band_w*width/stage_width,band_h*height/stage_height};
+    }
     // Input uses the cropped native menu stage, before mapping to the full eye image.
     static std::optional<PanelPointer> pointer(PanelPointer menu) noexcept {
         if(!std::isfinite(menu.u) || !std::isfinite(menu.v)) return {};

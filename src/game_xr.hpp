@@ -69,8 +69,10 @@ class GameXr {
     bool settings_enabled_{};
     Microsoft::WRL::ComPtr<ID3D11Texture2D> settings_texture_;
     std::unique_ptr<DesktopMirror> settings_compositor_;
+    std::vector<unsigned char> settings_pixels_;XrSwapchain settings_chain_{};std::vector<XrSwapchainImageD3D11KHR> settings_images_;
+    bool settings_in_world_{}; // the panel was opened during play: a world-locked quad, not part of the eye image
     bool native_pointer_enabled_{};
-    YHold y_hold_;bool y_hold_menu_request_{},y_hold_raw_was_{},y_hold_gameplay_was_{};std::chrono::steady_clock::time_point y_hold_press_start_{};
+    YHold y_hold_;bool y_hold_menu_request_{},y_hold_raw_was_{},y_hold_gameplay_was_{},y_hold_wait_release_{};std::chrono::steady_clock::time_point y_hold_press_start_{};
 public:
     bool wheel_native_pointer=true; // build/wheel-no-pointer: the wheel selects by stick only (pointer events switch it to keyboard glyphs)
 private:
@@ -200,16 +202,53 @@ private:
             if(FAILED(device->CreateTexture2D(&desc,nullptr,&settings_texture_))) throw std::runtime_error("Cannot create native menu settings image");
             settings_compositor_=std::make_unique<DesktopMirror>(device.Get());
         }
-        const auto pixels=settings_panel_image(settings_,effective_scale_,width_,height_,pointer);
+        settings_pixels_=settings_panel_image(settings_,effective_scale_,width_,height_,pointer);
+        const auto& pixels=settings_pixels_;
         context_->UpdateSubresource(settings_texture_.Get(),0,nullptr,pixels.data(),640*4,0);
         if(observe_settings) observe_settings(settings_texture_.Get(),pixels.data(),pixels.size());
     }
-    const TrackedPose& panel_pose(MenuPanel& panel) {
+    TrackedPose head_pose_now() const {
         const auto& l=views_[0].pose;const auto& r=views_[1].pose;
-        return panel.place({{(l.position.x+r.position.x)*.5,(l.position.y+r.position.y)*.5,(l.position.z+r.position.z)*.5},
-            {l.orientation.x,l.orientation.y,l.orientation.z,l.orientation.w}});
+        return {{(l.position.x+r.position.x)*.5,(l.position.y+r.position.y)*.5,(l.position.z+r.position.z)*.5},
+            {l.orientation.x,l.orientation.y,l.orientation.z,l.orientation.w}};
     }
-    const TrackedPose& native_menu_pose() {return panel_pose(menu_panel_);}
+    const TrackedPose& panel_pose(MenuPanel& panel) {return panel.place(head_pose_now());}
+    // The settings panel opened during play stays where it was placed when it opened (world-locked); menus follow the head gently.
+    const TrackedPose& native_menu_pose() {return settings_in_world_?menu_panel_.hold(head_pose_now()):panel_pose(menu_panel_);}
+    // Gameplay settings panel: its own 640x560 quad (like the paused menu's band, at the same pose) so the pointer hits what is drawn.
+    void ensure_settings_chain() {
+        if(!settings_enabled_ || settings_chain_) return;
+        XrSwapchainCreateInfo info{};info.type=XR_TYPE_SWAPCHAIN_CREATE_INFO;
+        info.usageFlags=XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT|XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT;
+        info.format=DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;info.width=640;info.height=560;
+        info.sampleCount=1;info.faceCount=1;info.arraySize=1;info.mipCount=1;
+        create_overlay_chain(info,settings_chain_,"Create settings panel");
+        auto enumerate=api<PFN_xrEnumerateSwapchainImages>("xrEnumerateSwapchainImages",instance_);uint32_t count{};
+        checked(enumerate(settings_chain_,0,&count,nullptr),"Count settings panel images");
+        settings_images_.resize(count);for(auto& image:settings_images_) image.type=XR_TYPE_SWAPCHAIN_IMAGE_D3D11_KHR;
+        checked(enumerate(settings_chain_,count,&count,reinterpret_cast<XrSwapchainImageBaseHeader*>(settings_images_.data())),"Read settings panel images");
+        if(settings_images_.empty()) throw std::runtime_error("XR settings panel has no images");
+    }
+    std::optional<XrCompositionLayerQuad> settings_layer() {
+        if(!settings_chain_ || settings_pixels_.size()!=640u*560u*4u || !views_valid_) return {}; // chain is created between frames
+        XrSwapchainImageAcquireInfo acquire{};acquire.type=XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO;uint32_t index{};
+        checked(xrAcquireSwapchainImage(settings_chain_,&acquire,&index),"Acquire settings panel");
+        XrSwapchainImageWaitInfo wait{};wait.type=XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO;wait.timeout=1'000'000'000;
+        const auto ready=xrWaitSwapchainImage(settings_chain_,&wait);
+        XrSwapchainImageReleaseInfo release{};release.type=XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO;
+        if(XR_FAILED(ready) || ready==XR_TIMEOUT_EXPIRED) {xrReleaseSwapchainImage(settings_chain_,&release);checked(ready,"Wait settings panel");throw std::runtime_error("Settings panel wait timed out");}
+        context_->UpdateSubresource(settings_images_.at(index).texture,0,nullptr,settings_pixels_.data(),640*4,0);
+        checked(xrReleaseSwapchainImage(settings_chain_,&release),"Release settings panel");
+        const auto& panel=native_menu_pose();const auto view=menu_view();
+        const auto fit=SettingsMenuLayout::quad_fit(view.width,view.height);
+        const auto centre=panel.position+rotated(panel.orientation,{fit.dx,fit.dy,0});
+        XrCompositionLayerQuad layer{};layer.type=XR_TYPE_COMPOSITION_LAYER_QUAD;layer.space=local_;
+        layer.layerFlags=XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT|XR_COMPOSITION_LAYER_UNPREMULTIPLIED_ALPHA_BIT;layer.eyeVisibility=XR_EYE_VISIBILITY_BOTH;
+        layer.pose.orientation={static_cast<float>(panel.orientation.x),static_cast<float>(panel.orientation.y),static_cast<float>(panel.orientation.z),static_cast<float>(panel.orientation.w)};
+        layer.pose.position={static_cast<float>(centre.x),static_cast<float>(centre.y),static_cast<float>(centre.z)};
+        layer.size={static_cast<float>(fit.width),static_cast<float>(fit.height)};
+        layer.subImage.swapchain=settings_chain_;layer.subImage.imageRect.extent={640,560};return layer;
+    }
     // Wheel .8 m (fixed in front), notes and black market .45 m (held in the left hand), journal 1 m.
     // VR settings "HUD size" scales every UI element alike (65% = 1): world UI, prompts, markers, wrist, HUD screen.
 public:
@@ -594,7 +633,7 @@ private:
     // fixed-size panels once, size-dependent panels (world UI, HUD window, wrist) when their size changed or a retirement fence passed.
     void prepare_overlays() {
         if(frame_open_) return;
-        ensure_small_chain(pointer_chain_,pointer_images_);ensure_hint_chain();ensure_dot_chain();
+        ensure_small_chain(pointer_chain_,pointer_images_);ensure_settings_chain();ensure_hint_chain();ensure_dot_chain();
         ensure_world_ui_chain();ensure_hud_window_chain();ensure_menu_band_chain();
         for(unsigned side=0;side<2;++side) prepare_wrist(side);
     }
@@ -1000,7 +1039,7 @@ public:
     }
     std::optional<AvatarCalibrationResult> avatar_calibration() const {return avatar_calibration_.result(reference_epoch());}
     void reject_avatar_dimensions() {avatar_calibration_.reject_dimensions();settings_.calibration_status(avatar_calibration_.state());}
-    UINT64 settings_layers{};
+    UINT64 settings_layers{},settings_world_layers{};
     UINT64 world_ui_layers{};
     std::array<UINT64,3> world_ui_layers_by_kind{};
     bool last_world_ui_layer{};
@@ -1401,7 +1440,9 @@ public:
         if(gameplay && settings_enabled_ && y_hold_enabled && state==XR_SESSION_STATE_FOCUSED && controller_input.active && !settings_.open()) {
             const auto now=std::chrono::steady_clock::now();
             // A Y still held from before gameplay (paused menu, load) belongs to that screen, not to a new hold.
-            const bool raw_y=controller_input.y,blocked=y_hold_blocked.load() || !y_hold_gameplay_was_;
+            const bool raw_y=controller_input.y;
+            if(!raw_y) y_hold_wait_release_=false; // the Y that opened the panel (or closed it) is still down: it is nobody's new press
+            const bool blocked=y_hold_blocked.load() || !y_hold_gameplay_was_ || y_hold_wait_release_;
             if(raw_y && !y_hold_raw_was_) {y_hold_press_start_=now;if(blocked) ++y_hold_blocked_presses;}
             y_hold_raw_was_=raw_y;
             const auto hold=y_hold_.update(raw_y,blocked,std::chrono::duration<double>(now.time_since_epoch()).count());
@@ -1409,7 +1450,9 @@ public:
                 y_hold_menu_request_=true;++y_hold_fires;
                 y_hold_last_ms=static_cast<UINT64>(std::chrono::duration<double,std::milli>(now-y_hold_press_start_).count());
             }
-            if(hold.suppress_y) {controller_input.y=false;controller_input.suppress_y=true;} // the game never sees the press that opened it
+            // Not on the fire frame: the opening update must see the held Y so it is not a fresh press that closes the panel at once
+            // (the panel's consume hides it from the game that frame).
+            if(hold.suppress_y && !hold.fire) {controller_input.y=false;controller_input.suppress_y=true;}
         } else if(!gameplay || !controller_input.active) {y_hold_.reset();y_hold_raw_was_=false;}
         y_hold_gameplay_was_=gameplay && controller_input.active;
         const bool raw_both_grips_held=controller_input.left_grip>=.8f && controller_input.right_grip>=.8f;
@@ -1429,8 +1472,13 @@ public:
             if(settings_requested.exchange(false) && !gameplay) {settings_.open_from_menu();}
             if(y_hold_menu_request_) {
                 y_hold_menu_request_=false;
-                if(gameplay && !settings_.open()) {settings_.open_from_gameplay();pulse(0,.4f,.08f);}
+                if(gameplay && !settings_.open()) {
+                    menu_panel_.reset(); // placed afresh, once, in front of the head
+                    y_hold_.reset();y_hold_wait_release_=true;
+                    settings_.open_from_gameplay();pulse(0,.4f,.08f);
+                }
             }
+            settings_in_world_=gameplay && settings_.open();
             if(settings_.open()) {
                 constexpr XrSpaceLocationFlags valid_pose=XR_SPACE_LOCATION_ORIENTATION_VALID_BIT|XR_SPACE_LOCATION_POSITION_VALID_BIT;
                 const auto& aim=aim_locations[1];
@@ -1535,7 +1583,9 @@ public:
         XrFrameEndInfo end{};end.type=XR_TYPE_FRAME_END_INFO;end.displayTime=frame_.predictedDisplayTime;
         end.environmentBlendMode=XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
         const XrCompositionLayerBaseHeader* layer=reinterpret_cast<const XrCompositionLayerBaseHeader*>(&projection);
-        if(gameplay) menu_panel_.reset();
+        if(gameplay && !settings_.open()) menu_panel_.reset();
+        const bool settings_world=gameplay && settings_.open();settings_in_world_=settings_world;
+        std::optional<XrCompositionLayerQuad> settings_panel;
         if(continuity_.usable() && left && right &&
            (!world_scene || !tracked_gameplay_required_ || rendered_mask_==3)) {
             std::array<ID3D11Texture2D*,2> sources{left,right};bool menu_band_ready=false;
@@ -1571,7 +1621,7 @@ public:
                 auto processed=gameplay && antialiasing_enabled_ && settings_.temporal_aa()<2?antialiasing_->apply(sources[eye]):sources[eye]; // FSR 3 already anti-aliased
                 // Sharpening also helps menu text (menus get no SMAA).
                 if(sharpness>0) processed=sharpen_->apply(processed,sharpness);
-                if(settings_.open()) {
+                if(settings_.open() && !gameplay) {
                     const auto view=menu_view();
                     const auto rect=SettingsMenuLayout::image_rect(width_,height_,view.y,view.rows);
                     settings_compositor_->begin(width_,height_,format_);
@@ -1641,6 +1691,9 @@ public:
                 }
                 if(gameplay && !wrist_panels[0] && settings_.controls_hint() && (hint_panel=hint_layer())) {
                     menu_layers_with_pointer[end.layerCount++]=reinterpret_cast<const XrCompositionLayerBaseHeader*>(&*hint_panel);++hint_layers;
+                }
+                if(settings_world && (settings_panel=settings_layer())) {
+                    menu_layers_with_pointer[end.layerCount++]=reinterpret_cast<const XrCompositionLayerBaseHeader*>(&*settings_panel);++settings_world_layers;
                 }
                 if((gameplay || world_ui_kind_==1) && wheel_cursor_ && (dot_panel=dot_layer())) // last: drawn over the wheel (open wheel is not gameplay)
                     menu_layers_with_pointer[end.layerCount++]=reinterpret_cast<const XrCompositionLayerBaseHeader*>(&*dot_panel);

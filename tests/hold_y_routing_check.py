@@ -16,6 +16,14 @@ def check(probe: str, game_xr: str, settings: str, features: str) -> None:
     # a Talk offer or the wheel owns the press
     assert "game_xr->y_hold_blocked=talk_target.has_value() || talk_route.owned || x_wheel.wheel()" in probe
     assert "game_xr->y_hold_enabled=hold_y_menu_enabled;" in probe
+    # fire frame keeps the held Y (the opening update seeds it); the panel is a world-locked quad, not part of the eye image
+    assert "if(hold.suppress_y && !hold.fire)" in game_xr
+    assert "menu_panel_.reset();" in game_xr and "y_hold_.reset();y_hold_wait_release_=true;" in game_xr
+    assert "if(gameplay && !settings_.open()) menu_panel_.reset();" in game_xr
+    assert "menu_panel_.hold(head_pose_now())" in game_xr and "settings_layer()" in game_xr and "ensure_settings_chain();" in game_xr
+    assert "if(settings_.open() && !gameplay) {" in game_xr
+    assert "game_xr->y_hold_blocked=false;" in probe
+    assert "close_latch_" in settings
     assert "gameplay_open_" in settings and "void open_from_gameplay()" in settings
     assert '"file": "no-hold-y-menu"' in features and '"kind": "disable"' in features
 

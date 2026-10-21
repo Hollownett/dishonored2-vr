@@ -72,7 +72,7 @@ Open the game's pause menu and choose **VR Settings**. Its controls appear in
 the native menu image, beside the game's navigation. Point with the right
 controller and use its trigger to select. Y while paused remains a shortcut.
 During play, hold left Y for about half a second to open the settings; a short
-Y still talks to an NPC. Press Y again or B to close. The `no-hold-y-menu` knob
+Y still talks to an NPC. The game keeps running behind the panel (it does not pause). Press Y again or B to close. The `no-hold-y-menu` knob
 (or the launcher's "Hold Y for VR settings" switch) turns the hold off.
 From there you can set:
 - resolution scale
