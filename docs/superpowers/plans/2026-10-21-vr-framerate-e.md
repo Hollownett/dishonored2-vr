@@ -142,7 +142,7 @@ Also modify `tools/build-msvc.cmd`.
   - one paragraph, "What the data says". Every claim cites a run row.
 - [ ] **Step 3: Gate inputs.** Write the three numbers Task 5 needs:
   - `engine_ms` = interval p50 − hook p50;
-  - `eye2_share` = 1 − B2/B1 (fallback eye1_share);
+  - `eye2_share` = A1's `eye1_share` (measured per eye in XR mode). B2/B1 is a cross-check only: paired mode needs the GPU trace flag on, so B1 carries extra overhead;
   - `over_budget` = interval p50 > 13.9.
 - [ ] **Step 4: Verify** that the installed DLL hash is unchanged and that no pending marker or knob is left. Commit `docs: plan E bound analysis on the laptop`.
 
