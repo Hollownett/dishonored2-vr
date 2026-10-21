@@ -23,6 +23,7 @@
 #include "menu_input.hpp"
 #include "menu_pointer.hpp"
 #include "controls_hint_image.hpp"
+#include "comfort_vignette.hpp"
 #include "grab_beam.hpp"
 #include "world_ui_pose.hpp"
 #include "hud_window.hpp"
@@ -80,6 +81,14 @@ private:
     std::vector<XrSwapchainImageD3D11KHR> pointer_images_;
     XrSwapchain hint_chain_{};
     XrSwapchain dot_chain_{};std::vector<XrSwapchainImageD3D11KHR> dot_images_;std::vector<bool> dot_filled_;
+    // Locomotion comfort vignette: a head-locked quad showing a black ring texture, created by prepare_overlays between frames.
+    static constexpr unsigned vignette_texture_size=96; // not a multiple of 64: the wrist test tells wrist canvases apart by width
+    XrSwapchain vignette_chain_{};std::vector<XrSwapchainImageD3D11KHR> vignette_images_;std::vector<bool> vignette_filled_;
+    std::vector<std::uint8_t> vignette_ring_,vignette_baked_;
+    XrSpace view_space_{}; // XR_REFERENCE_SPACE_TYPE_VIEW when the runtime gives one; otherwise the quad is rebuilt from the head pose each frame
+    bool color_scale_supported_{}; // XR_KHR_composition_layer_color_scale_bias enabled on the instance
+    XrCompositionLayerColorScaleBiasKHR vignette_scale_{XR_TYPE_COMPOSITION_LAYER_COLOR_SCALE_BIAS_KHR}; // chained to the quad; lives until xrEndFrame
+    float vignette_baked_opacity_{-1};UINT64 vignette_bake_tick_{};
     std::optional<Vec3> wheel_cursor_;
     bool cylinder_supported_{};XrCompositionLayerCylinderKHR hud_cylinder_{XR_TYPE_COMPOSITION_LAYER_CYLINDER_KHR};
     bool world_ui_stale_{},hud_window_stale_{};std::uint64_t world_ui_fresh_tick_{},hud_window_fresh_tick_{};
@@ -633,7 +642,7 @@ private:
     // fixed-size panels once, size-dependent panels (world UI, HUD window, wrist) when their size changed or a retirement fence passed.
     void prepare_overlays() {
         if(frame_open_) return;
-        ensure_small_chain(pointer_chain_,pointer_images_);ensure_settings_chain();ensure_hint_chain();ensure_dot_chain();
+        ensure_small_chain(pointer_chain_,pointer_images_);ensure_settings_chain();ensure_hint_chain();ensure_dot_chain();ensure_vignette_chain();
         ensure_world_ui_chain();ensure_hud_window_chain();ensure_menu_band_chain();
         for(unsigned side=0;side<2;++side) prepare_wrist(side);
     }
@@ -736,6 +745,73 @@ private:
         layer.eyeVisibility=XR_EYE_VISIBILITY_BOTH;layer.pose.orientation=h;
         layer.pose.position={static_cast<float>(wheel_cursor_->x),static_cast<float>(wheel_cursor_->y),static_cast<float>(wheel_cursor_->z)};
         layer.size={.03f,.03f};layer.subImage.swapchain=dot_chain_;layer.subImage.imageRect.extent={size,size};
+        return layer;
+    }
+    void ensure_vignette_chain() {
+        if(!vignette_enabled || vignette_chain_) return;
+        constexpr unsigned size=vignette_texture_size;
+        XrSwapchainCreateInfo info{};info.type=XR_TYPE_SWAPCHAIN_CREATE_INFO;
+        info.usageFlags=XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT|XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT;
+        info.format=DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;info.width=info.height=size;
+        info.sampleCount=1;info.faceCount=1;info.arraySize=1;info.mipCount=1;
+        create_overlay_chain(info,vignette_chain_,"Create comfort vignette");
+        auto enumerate=api<PFN_xrEnumerateSwapchainImages>("xrEnumerateSwapchainImages",instance_);uint32_t count{};
+        checked(enumerate(vignette_chain_,0,&count,nullptr),"Count comfort vignette images");
+        vignette_images_.resize(count);for(auto& image:vignette_images_) image.type=XR_TYPE_SWAPCHAIN_IMAGE_D3D11_KHR;
+        checked(enumerate(vignette_chain_,count,&count,reinterpret_cast<XrSwapchainImageBaseHeader*>(vignette_images_.data())),"Read comfort vignette images");
+        if(vignette_images_.empty()) throw std::runtime_error("XR comfort vignette has no images");
+        vignette_filled_.assign(count,false);vignette_ring_=vignette_ring_image(size);vignette_baked_.clear();vignette_baked_opacity_=-1;
+    }
+    // Black ring over everything else, fixed to the head: shown only while the stick is moving or turning the player.
+    // With XR_KHR_composition_layer_color_scale_bias the opacity is the layer's alpha scale over a texture that never changes.
+    // Without it the opacity is baked into the texture alpha, at most 10 times a second (a cheap alpha ramp, no per-frame work).
+    std::optional<XrCompositionLayerQuad> vignette_layer() {
+        const float wanted=vignette_opacity.load(std::memory_order_relaxed);
+        if(!vignette_enabled || !vignette_chain_ || !std::isfinite(wanted) || wanted<.01f) return {};
+        if(!view_space_ && !views_valid_) return {};
+        const float opacity=std::min(wanted,1.f);
+        constexpr unsigned size=vignette_texture_size;
+        const std::uint8_t* upload=vignette_ring_.data();
+        if(!color_scale_supported_) {
+            const auto now=GetTickCount64();
+            if(vignette_baked_.empty() || (now-vignette_bake_tick_>=100 && std::fabs(opacity-vignette_baked_opacity_)>=1.f/255)) {
+                vignette_baked_=vignette_ring_;
+                for(std::size_t i=3;i<vignette_baked_.size();i+=4) vignette_baked_[i]=static_cast<std::uint8_t>(std::lround(vignette_ring_[i]*opacity));
+                vignette_baked_opacity_=opacity;vignette_bake_tick_=now;++vignette_bakes;
+            }
+            upload=vignette_baked_.data();
+        }
+        XrSwapchainImageAcquireInfo acquire{};acquire.type=XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO;uint32_t index{};
+        checked(xrAcquireSwapchainImage(vignette_chain_,&acquire,&index),"Acquire comfort vignette");
+        XrSwapchainImageWaitInfo wait{};wait.type=XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO;wait.timeout=1'000'000'000;
+        const auto ready=xrWaitSwapchainImage(vignette_chain_,&wait);checked(ready,"Wait comfort vignette");
+        if(ready==XR_TIMEOUT_EXPIRED) throw std::runtime_error("Comfort vignette wait timed out");
+        XrSwapchainImageReleaseInfo release{};release.type=XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO;
+        try {
+            if(!color_scale_supported_ || !vignette_filled_.at(index)) { // scaled layer: each runtime image is filled once
+                context_->UpdateSubresource(vignette_images_.at(index).texture,0,nullptr,upload,size*4,0);vignette_filled_[index]=true;
+            }
+        } catch(...) {xrReleaseSwapchainImage(vignette_chain_,&release);throw;}
+        checked(xrReleaseSwapchainImage(vignette_chain_,&release),"Release comfort vignette");
+        constexpr float distance=1.f,extent=3.f; // 3 m square at 1 m: +-56 degrees; the clear centre (radius .55) is +-39 degrees
+        XrCompositionLayerQuad layer{};layer.type=XR_TYPE_COMPOSITION_LAYER_QUAD;
+        layer.layerFlags=XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT|XR_COMPOSITION_LAYER_UNPREMULTIPLIED_ALPHA_BIT;layer.eyeVisibility=XR_EYE_VISIBILITY_BOTH;
+        if(view_space_) {
+            layer.space=view_space_;layer.pose.orientation={0,0,0,1};layer.pose.position={0,0,-distance};
+        } else {
+            const auto& h=views_[0].pose.orientation;
+            const auto facing=normalized(Quaternion{h.x,h.y,h.z,h.w});
+            const auto head=head_pose_now();
+            const auto centre=Vec3{head.position.x,head.position.y,head.position.z}+rotated(facing,{0,0,-distance});
+            layer.space=local_;
+            layer.pose.orientation={static_cast<float>(facing.x),static_cast<float>(facing.y),static_cast<float>(facing.z),static_cast<float>(facing.w)};
+            layer.pose.position={static_cast<float>(centre.x),static_cast<float>(centre.y),static_cast<float>(centre.z)};
+        }
+        if(color_scale_supported_) {
+            vignette_scale_.next=nullptr;vignette_scale_.colorScale={1.f,1.f,1.f,opacity};vignette_scale_.colorBias={0.f,0.f,0.f,0.f};
+            layer.next=&vignette_scale_;
+        }
+        layer.size={extent,extent};layer.subImage.swapchain=vignette_chain_;layer.subImage.imageRect.extent={static_cast<int32_t>(size),static_cast<int32_t>(size)};
         return layer;
     }
     static void checked(XrResult value,const char* name) {
@@ -935,6 +1011,10 @@ public:
     }
     bool edge_antialiasing_enabled() const noexcept {return antialiasing_enabled_;}
     UINT64 hint_layers{};
+    // Comfort vignette: the opacity (0..1) is set by the render thread each frame; knob `no-comfort-vignette` clears the enable flag
+    // before the session starts, so no chain, space or extension is ever made.
+    std::atomic<float> vignette_opacity{0};static inline bool vignette_enabled=true; UINT64 vignette_layers{},vignette_bakes{}; // vignette_enabled is class-wide: set before the first GameXr exists (the instance extensions and VIEW space follow it)
+    bool vignette_color_scale() const noexcept {return color_scale_supported_;}
     std::array<UINT64,4> layer_pose_repaired{},layer_pose_dropped{};UINT64 layer_pose_no_submit{};
     std::string layer_pose_last; // kind and raw pose of the most recent offending layer
     UINT64 end_frame_rejections{};unsigned end_frame_rejected_run_{};void (*observe_frame_rejection)(const char*){}; // layer errors dropped as one frame
@@ -1165,14 +1245,20 @@ public:
                 if(XR_SUCCEEDED(enumerate(nullptr,0,&count,nullptr)) && count) {
                     std::vector<XrExtensionProperties> props(count,{XR_TYPE_EXTENSION_PROPERTIES});
                     if(XR_SUCCEEDED(enumerate(nullptr,count,&count,props.data())))
-                        for(const auto& prop:props) cylinder_supported_=cylinder_supported_ || !std::strcmp(prop.extensionName,XR_KHR_COMPOSITION_LAYER_CYLINDER_EXTENSION_NAME);
+                        for(const auto& prop:props) {
+                            cylinder_supported_=cylinder_supported_ || !std::strcmp(prop.extensionName,XR_KHR_COMPOSITION_LAYER_CYLINDER_EXTENSION_NAME);
+                            color_scale_supported_=color_scale_supported_ || !std::strcmp(prop.extensionName,XR_KHR_COMPOSITION_LAYER_COLOR_SCALE_BIAS_EXTENSION_NAME);
+                        }
                 }
-            } catch(...) {cylinder_supported_=false;}
-            const std::array<const char*,2> extensions{XR_KHR_D3D11_ENABLE_EXTENSION_NAME,XR_KHR_COMPOSITION_LAYER_CYLINDER_EXTENSION_NAME};
+            } catch(...) {cylinder_supported_=false;color_scale_supported_=false;}
+            if(!vignette_enabled) color_scale_supported_=false; // nothing would use it
+            std::vector<const char*> extensions{XR_KHR_D3D11_ENABLE_EXTENSION_NAME};
+            if(cylinder_supported_) extensions.push_back(XR_KHR_COMPOSITION_LAYER_CYLINDER_EXTENSION_NAME);
+            if(color_scale_supported_) extensions.push_back(XR_KHR_COMPOSITION_LAYER_COLOR_SCALE_BIAS_EXTENSION_NAME);
             XrInstanceCreateInfo create{};create.type=XR_TYPE_INSTANCE_CREATE_INFO;
             strcpy_s(create.applicationInfo.applicationName,"Dishonored 2 game-image preview");
             create.applicationInfo.apiVersion=XR_MAKE_VERSION(1,0,0);
-            create.enabledExtensionCount=cylinder_supported_?2:1;create.enabledExtensionNames=extensions.data();
+            create.enabledExtensionCount=static_cast<uint32_t>(extensions.size());create.enabledExtensionNames=extensions.data();
             checked(api<PFN_xrCreateInstance>("xrCreateInstance",XR_NULL_HANDLE)(&create,&instance_),"Create XR instance");
 #define XR_LOAD(name) name=api<PFN_##name>(#name,instance_);
             XR_LOAD(xrDestroyInstance) XR_LOAD(xrDestroySession) XR_LOAD(xrDestroySpace)
@@ -1220,6 +1306,11 @@ public:
             XrReferenceSpaceCreateInfo space{};space.type=XR_TYPE_REFERENCE_SPACE_CREATE_INFO;
             space.referenceSpaceType=XR_REFERENCE_SPACE_TYPE_LOCAL;space.poseInReferenceSpace.orientation.w=1;
             checked(api<PFN_xrCreateReferenceSpace>("xrCreateReferenceSpace",instance_)(session_,&space,&local_),"Create local XR space");
+            if(vignette_enabled) { // head-locked comfort ring; every runtime must offer VIEW, but a failure only means the fallback pose is used
+                XrReferenceSpaceCreateInfo view{};view.type=XR_TYPE_REFERENCE_SPACE_CREATE_INFO;
+                view.referenceSpaceType=XR_REFERENCE_SPACE_TYPE_VIEW;view.poseInReferenceSpace.orientation.w=1;
+                if(XR_FAILED(api<PFN_xrCreateReferenceSpace>("xrCreateReferenceSpace",instance_)(session_,&view,&view_space_))) view_space_=XR_NULL_HANDLE;
+            }
             PFN_xrVoidFunction enumerate_raw{};
             if(get_(instance_,"xrEnumerateReferenceSpaces",&enumerate_raw)==XR_SUCCESS && enumerate_raw) {
                 PFN_xrEnumerateReferenceSpaces enumerate{};std::memcpy(&enumerate,&enumerate_raw,sizeof enumerate);
@@ -1358,6 +1449,9 @@ public:
         if(settings_chain_ && xrDestroySwapchain) {xrDestroySwapchain(settings_chain_);settings_chain_=XR_NULL_HANDLE;}
         dot_images_.clear();dot_filled_.clear();wheel_cursor_.reset();
         if(dot_chain_ && xrDestroySwapchain) {xrDestroySwapchain(dot_chain_);dot_chain_=XR_NULL_HANDLE;}
+        vignette_images_.clear();vignette_filled_.clear();
+        if(vignette_chain_ && xrDestroySwapchain) {xrDestroySwapchain(vignette_chain_);vignette_chain_=XR_NULL_HANDLE;}
+        if(view_space_ && xrDestroySpace) {xrDestroySpace(view_space_);view_space_=XR_NULL_HANDLE;}
         for(auto& kind:hand_spaces_) for(auto& space:kind) if(space && xrDestroySpace) {xrDestroySpace(space);space=XR_NULL_HANDLE;}
         for(auto& chain:chains_) if(chain && xrDestroySwapchain) {xrDestroySwapchain(chain);chain=XR_NULL_HANDLE;}
         if(floor_space_ && xrDestroySpace) {xrDestroySpace(floor_space_);floor_space_=XR_NULL_HANDLE;}calibration_floor_y_.reset();grip_pose_tick_=0;grip_velocity_hands=0;
@@ -1594,7 +1688,7 @@ public:
         XrCompositionLayerProjection projection{};projection.type=XR_TYPE_COMPOSITION_LAYER_PROJECTION;
         XrCompositionLayerQuad menu{};menu.type=XR_TYPE_COMPOSITION_LAYER_QUAD;
         std::optional<XrCompositionLayerQuad> world_ui_panel,hud_window_panel;
-        std::optional<XrCompositionLayerQuad> hint_panel,dot_panel;
+        std::optional<XrCompositionLayerQuad> hint_panel,dot_panel,vignette_panel;
         std::array<std::optional<XrCompositionLayerQuad>,2> wrist_panels;
         std::array<const XrCompositionLayerBaseHeader*,12> menu_layers_with_pointer{};
         projection.space=local_;projection.viewCount=2;
@@ -1716,6 +1810,9 @@ public:
                 }
                 if((gameplay || world_ui_kind_==1) && wheel_cursor_ && (dot_panel=dot_layer())) // last: drawn over the wheel (open wheel is not gameplay)
                     menu_layers_with_pointer[end.layerCount++]=reinterpret_cast<const XrCompositionLayerBaseHeader*>(&*dot_panel);
+                if(gameplay && (vignette_panel=vignette_layer())) { // submitted last: the ring sits over the HUD panels too
+                    menu_layers_with_pointer[end.layerCount++]=reinterpret_cast<const XrCompositionLayerBaseHeader*>(&*vignette_panel);++vignette_layers;
+                }
                 end.layers=menu_layers_with_pointer.data();
             }
         }

@@ -298,6 +298,8 @@ build\native_head_query_lifetime_check.exe
 if not "%errorlevel%"=="0" exit /b 1
 cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT /Isrc tests\comfort_meter_check.cpp /Fo:build\comfort_meter_check.obj /Fe:build\comfort_meter_check.exe
 if not "%errorlevel%"=="0" exit /b 1
+cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT /Isrc tests\comfort_vignette_check.cpp /Fo:build\comfort_vignette_check.obj /Fe:build\comfort_vignette_check.exe
+if not "%errorlevel%"=="0" exit /b 1
 cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT /Isrc tests\anchor_smoother_check.cpp /Fo:build\anchor_smoother_check.obj /Fe:build\anchor_smoother_check.exe
 if not "%errorlevel%"=="0" exit /b 1
 cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT /Isrc tests\perf_meter_check.cpp /Fo:build\perf_meter_check.obj /Fe:build\perf_meter_check.exe
@@ -321,6 +323,8 @@ python tests\mono_view_routing_check.py
 if errorlevel 1 goto build_failed
 if not errorlevel 0 goto build_failed
 build\comfort_meter_check.exe
+if not "%errorlevel%"=="0" exit /b 1
+build\comfort_vignette_check.exe
 if not "%errorlevel%"=="0" exit /b 1
 build\anchor_smoother_check.exe
 if not "%errorlevel%"=="0" exit /b 1

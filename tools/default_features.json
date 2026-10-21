@@ -136,6 +136,22 @@
    "label": "Smooth the camera's up-and-down motion",
    "help": "Landings, crouching and stairs ease the view height instead of jolting it; falls and teleports still follow exactly.",
    "default": true
+  },
+  {
+   "id": "turn-ramp",
+   "file": "no-turn-ramp",
+   "kind": "disable",
+   "label": "Ease into smooth turning",
+   "help": "Smooth turning builds up to full speed over a moment instead of starting at once, which is gentler on the stomach. Snap turning is unchanged.",
+   "default": true
+  },
+  {
+   "id": "comfort-vignette",
+   "file": "no-comfort-vignette",
+   "kind": "disable",
+   "label": "Darken the edges while moving",
+   "help": "A soft dark ring closes in while the stick walks or smooth-turns you, and fades away when you stop. Head movement and snap turns never trigger it.",
+   "default": true
   }
  ]
 }

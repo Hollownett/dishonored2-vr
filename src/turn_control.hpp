@@ -12,7 +12,8 @@ inline double quest_turn_axis_to_native(double axis) {return -axis;}
 class TurnControl {
 public:
     enum class Mode {native=0,snap=1,smooth=2};
-    struct Config {Mode mode=Mode::native;double snap_degrees=45,smooth_degrees_per_second=90;};
+    struct Config {Mode mode=Mode::native;double snap_degrees=45,smooth_degrees_per_second=90;
+        double ramp_s=.15;}; // smooth turning eases in over ramp_s seconds after the stick leaves the deadzone (0 = off: full speed at once)
     struct Request {double radians{};std::uint64_t input_ms{},update{},epoch{};};
 private:
     std::mutex mutex_;
@@ -21,15 +22,23 @@ private:
     double axis_{};
     std::uint64_t input_ms_{},epoch_{},last_update_{};
     bool live_=false,centred_=false;
-    void cancel() {snap_.suspend();live_=false;centred_=false;}
+    double ramp_t_{}; // seconds the stick has been past the deadzone, driving smooth turning
+    void cancel() {snap_.suspend();live_=false;centred_=false;ramp_t_=0;}
+    // Area under the 0..1 ramp between t0 and t0+dt, in seconds: turning stays independent of the native frame rate.
+    static double ramp_seconds(double t0,double dt,double ramp) {
+        if(ramp<=0) return dt;
+        const auto area=[ramp](double t) {return t<ramp?t*t/(2*ramp):ramp/2+(t-ramp);};
+        return area(t0+dt)-area(t0);
+    }
 public:
     void configure(Config config) {
         if(config.mode<Mode::native || config.mode>Mode::smooth ||
-           !std::isfinite(config.smooth_degrees_per_second) || config.smooth_degrees_per_second<15 || config.smooth_degrees_per_second>360)
+           !std::isfinite(config.smooth_degrees_per_second) || config.smooth_degrees_per_second<15 || config.smooth_degrees_per_second>360 ||
+           !std::isfinite(config.ramp_s) || config.ramp_s<0 || config.ramp_s>1)
             throw std::invalid_argument("Invalid VR turning configuration");
         std::lock_guard<std::mutex> lock(mutex_);
         snap_.configure({config.mode==Mode::snap,config.snap_degrees,.6,.3});
-        config_=config;live_=false;centred_=false;input_ms_=0;epoch_=0;last_update_=0;
+        config_=config;live_=false;centred_=false;ramp_t_=0;input_ms_=0;epoch_=0;last_update_=0;
     }
     // Claim RX during configured gameplay even if its writer is unavailable:
     // falling back to a sensitivity-dependent native turn would be surprising.
@@ -42,7 +51,7 @@ public:
         if(!writer_available || !std::isfinite(axis) || std::abs(axis)>1.01) {cancel();return true;}
         axis_=axis;input_ms_=now;live_=true;
         if(config_.mode==Mode::snap) snap_.observe(axis,true,true,now,epoch);
-        else if(std::abs(axis)<.15) centred_=true;
+        else if(std::abs(axis)<=.15) {centred_=true;ramp_t_=0;} // back in the deadzone: the next push eases in again
         return true;
     }
     std::optional<Request> consume(double dt,bool native_gameplay_ready,
@@ -56,8 +65,9 @@ public:
         if(config_.mode==Mode::snap) delta=snap_.take(true,now,epoch);
         else if(config_.mode==Mode::smooth && centred_ && std::abs(axis_)>.15) {
             const auto speed=std::copysign((std::min(std::abs(axis_),1.)-.15)/.85,axis_);
-            delta=speed*config_.smooth_degrees_per_second*3.14159265358979323846/180.*dt;
-        }
+            delta=speed*config_.smooth_degrees_per_second*3.14159265358979323846/180.*ramp_seconds(ramp_t_,dt,config_.ramp_s);
+            ramp_t_+=dt;
+        } else ramp_t_=0;
         if(delta==0) return {};
         return Request{delta,input_ms_,update,epoch};
     }

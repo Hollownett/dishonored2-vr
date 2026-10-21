@@ -183,6 +183,16 @@ Weapons are held like real objects: a weapon stays in your hand only while you s
   (status `comfort.smoother_resets`; `comfort.view_jerk_events` vs `comfort.anchor_jerk_events` compares the smoothed and
   raw height). Not yet confirmed in the headset; the tracked arms may look stretched for a moment after a crouch. Put
   `no-camera-smoothing` in the build folder for the old behaviour.
+- Smooth-turn ramp: smooth turning eases from zero to full speed over 0.15 s after the right stick leaves its deadzone,
+  and starts again after the stick returns to centre. Snap turning is unchanged. Put `no-turn-ramp` in the build folder for
+  the old instant start.
+- Locomotion comfort vignette: a soft black ring, fixed to your head, closes in while the stick walks or smooth-turns you
+  (it rises in 0.1 s and fades in 0.3 s; strength follows the stick, up to 60% opacity). Moving your head, snap turns and
+  menus never trigger it. The game's own walk speed is not read: a full stick counts as a nominal 3 m/s. The ring uses
+  the OpenXR colour-scale extension when the runtime offers it; otherwise its opacity is re-baked at most 10 times a
+  second and may look steppy. Put a number from 0 to 1 in a `comfort-vignette` file in the build folder to change the
+  maximum strength, or `no-comfort-vignette` there to turn it off. Status: `comfort.vignette` (`enabled`, `max`,
+  `frames_shown`, `color_scale`). Not yet confirmed in the headset.
 
 The v199 build passed automated and actual-game simulated-controller checks.
 Headset appearance, combat feel, note readability and complete gameplay have not

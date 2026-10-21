@@ -3,6 +3,8 @@
 #include <iostream>
 #include <limits>
 
+static bool close_to(double a,double b,double e) {return std::abs(a-b)<=e;}
+
 int main() {
     using T=d2vr::TurnControl;
     constexpr double pi=3.14159265358979323846;
@@ -36,7 +38,7 @@ int main() {
     assert(!control.consume(.2,true,492,3,6)); // Long native stall cannot cause a large jump.
 
     for(unsigned hz:{20u,45u,90u}) {
-        control.configure({T::Mode::smooth,45,90});
+        control.configure({T::Mode::smooth,45,90,0}); // ramp_zero_is_old_behaviour: full speed from the first update
         control.publish(0,true,true,true,true,1000,4);
         double total{};
         for(unsigned i=0;i<hz;++i) {
@@ -46,6 +48,40 @@ int main() {
             assert(!control.consume(1./hz,true,now+2,4,i+1));
         }
         assert(std::abs(total-pi/2)<1e-12); // Same speed across native frame rates.
+    }
+    {   // ramp: 0 -> 1 over ramp_s once the stick leaves the deadzone, restarting after it returns
+        const auto run=[&](T& c,double axis,std::uint64_t& now,std::uint64_t& update,double dt) {
+            now+=10;c.publish(axis,true,true,true,true,now,7);
+            const auto step=c.consume(dt,true,now+1,7,++update);return step?step->radians:0.;
+        };
+        const double full=pi/2*.01; // 90 deg/s over a 10 ms update
+        T ramped;ramped.configure({T::Mode::smooth,45,90});
+        std::uint64_t now=5000,update=0;
+        assert(run(ramped,0,now,update,.01)==0);
+        const auto first=run(ramped,1,now,update,.01);
+        assert(first>0 && first<full*.1); // ramp_starts_at_zero: the first 10 ms is a sliver of full speed
+        double total=first,last=first;
+        for(int i=1;i<15;++i) {last=run(ramped,1,now,update,.01);assert(last>0 && last<=full+1e-12);total+=last;}
+        assert(close_to(last,full,full*.07) && last<full); // 140..150 ms: almost, not yet full
+        assert(close_to(total,pi/2*(.15/2),1e-9)); // area of the ramp: ramp_s/2 seconds at full speed
+        assert(close_to(run(ramped,1,now,update,.01),full,1e-12)); // ramp_reaches_full_at_150ms
+        assert(close_to(run(ramped,1,now,update,.01),full,1e-12));
+        assert(run(ramped,0,now,update,.01)==0); // ramp_resets_on_centre
+        const auto again=run(ramped,1,now,update,.01);
+        assert(again>0 && close_to(again,first,1e-12));
+        T off;off.configure({T::Mode::smooth,45,90,0});now=6000;update=0;
+        run(off,0,now,update,.01);
+        assert(close_to(run(off,1,now,update,.01),full,1e-12)); // ramp_zero_is_old_behaviour
+        T half;half.configure({T::Mode::smooth,45,90,.15});now=7000;update=0;
+        run(half,0,now,update,.01);
+        double slow{},fast{};
+        for(int i=0;i<3;++i) slow+=run(half,1,now,update,.01);
+        T once;once.configure({T::Mode::smooth,45,90,.15});now=8000;update=0;
+        run(once,0,now,update,.01);
+        fast=run(once,1,now,update,.03); // same elapsed time in one coarse update gives the same angle
+        assert(close_to(slow,fast,1e-12));
+        bool rejected=false;try {T bad;bad.configure({T::Mode::smooth,45,90,-1});} catch(const std::invalid_argument&) {rejected=true;}
+        assert(rejected);
     }
     control.configure({T::Mode::smooth,45,90});
     control.publish(1,true,true,true,true,2000,5);assert(!control.consume(.01,true,2001,5,1));
