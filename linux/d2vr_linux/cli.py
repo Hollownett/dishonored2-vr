@@ -55,6 +55,8 @@ def _parser():
     s.add_argument("--backup-root", type=Path, default=None, help="default ~/d2vr-test-builds/save-backups")
     s.add_argument("--out-root", type=Path, default=None, help="default ~/d2vr-test-builds/sim-runs")
     s.add_argument("--mod-home", type=Path, help="mod home directory")
+    s.add_argument("--candidate-dll", type=Path, metavar="PATH",
+                   help="run this DLL instead of the installed one: the installed DLL is backed up, swapped for the run and restored (verified by SHA-256)")
     s.add_argument("--dry-run", action="store_true", help="check everything and print the plan; write and launch nothing")
     s.add_argument("--restore", nargs="?", const=True, default=None, metavar="BACKUP",
                    help="restore your saves from the newest restore-pending backup (or BACKUP) and remove the dev knobs")

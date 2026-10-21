@@ -9,6 +9,7 @@ config override that the proxy honours, then restores the user's saves and remov
   until a verified restore; a pending backup blocks further runs until `sim --restore`.
 """
 import filecmp
+import hashlib
 import importlib.util
 import json
 import os
@@ -181,6 +182,82 @@ def swap_in_test_save(prefix, test_dir):
     _copy_into(test_dir, savegame)
 
 
+# ---------------------------------------------------------------- candidate DLL
+
+def is_pe_dll(data):
+    """True for a PE image with the DLL characteristic (MZ header, PE signature, IMAGE_FILE_DLL)."""
+    if len(data) < 0x40 or data[:2] != b"MZ":
+        return False
+    off = int.from_bytes(data[0x3C:0x40], "little")
+    if off + 24 > len(data) or data[off:off + 4] != b"PE\0\0":
+        return False
+    return bool(int.from_bytes(data[off + 22:off + 24], "little") & 0x2000)
+
+
+def installed_dll(mod_home):
+    found = sorted(p for p in (Path(mod_home) / "build").glob("d2vr_render_probe_arm_v*.dll") if re.fullmatch(modhome.DLL_RE, p.name))
+    if len(found) != 1:
+        raise SimError(f"expected exactly one d2vr_render_probe_arm_v*.dll in {Path(mod_home) / 'build'} (found {len(found)})")
+    return found[0]
+
+
+def check_candidate(candidate, installed):
+    """Candidate must be a PE DLL carrying the name the mod home's DLL has (the proxy loads it by that name). -> sha256."""
+    candidate = Path(candidate)
+    if not candidate.is_file():
+        raise SimError(f"--candidate-dll {candidate} is not a file")
+    if candidate.name != installed.name:
+        raise SimError(f"--candidate-dll is named {candidate.name} but the mod home uses {installed.name}; "
+                       "the proxy loads that exact name (build the candidate with the same version name)")
+    data = candidate.read_bytes()
+    if not is_pe_dll(data):
+        raise SimError(f"--candidate-dll {candidate} is not a PE DLL")
+    return hashlib.sha256(data).hexdigest()
+
+
+def place_atomic(data, dest):
+    """Write bytes next to dest and rename over it, so the file is never half-written."""
+    dest = Path(dest)
+    tmp = dest.with_name(dest.name + ".d2vr-tmp")
+    tmp.write_bytes(data)
+    os.replace(tmp, dest)
+
+
+def backup_dll(backup, installed):
+    """Copy the installed DLL into the save backup folder (same restore-pending guard) and record it in info.json."""
+    installed, backup = Path(installed), Path(backup)
+    data = installed.read_bytes()
+    digest = hashlib.sha256(data).hexdigest()
+    copy = backup / f"installed-{installed.name}"
+    copy.write_bytes(data)
+    if steam.sha256_file(copy) != digest:
+        raise SimError(f"the backup copy {copy} does not match the installed DLL")
+    info_path = backup / "info.json"
+    info = json.loads(info_path.read_text())
+    info["dll"] = {"path": str(installed), "backup": copy.name, "sha256": digest}
+    info_path.write_text(json.dumps(info, indent=1) + "\n")
+    return digest
+
+
+def restore_dll(backup, info):
+    """Put the backed-up DLL back atomically and verify by SHA-256. -> (ok, notes)."""
+    d = info.get("dll")
+    if not d:
+        return True, []
+    src, dest = Path(backup) / d["backup"], Path(d["path"])
+    manual = f"cp -f '{src}' '{dest}'"
+    try:
+        data = src.read_bytes()
+        if hashlib.sha256(data).hexdigest() != d["sha256"]:
+            return False, [f"the DLL backup {src} no longer matches its recorded hash; restore it by hand: {manual}"]
+        place_atomic(data, dest)
+        if steam.sha256_file(dest) != d["sha256"]:
+            return False, [f"installed DLL differs after restore; run by hand: {manual}"]
+    except OSError as e:
+        return False, [f"cannot restore the installed DLL ({e}); run by hand: {manual}"]
+    return True, [f"installed DLL restored and verified ({d['sha256']})"]
+
+
 def restore_saves(prefix, backup):
     """Put the backed-up saves and config back, verify, and drop the restore-pending marker only if they match.
     Returns (ok, notes). Extra files the run created in savegame/ are reported, not deleted."""
@@ -198,6 +275,9 @@ def restore_saves(prefix, backup):
         expected = info["files"]
     except (OSError, ValueError, KeyError) as e:
         return False, [f"cannot read {backup / 'info.json'}: {e}"]
+    dll_ok, dll_notes = restore_dll(backup, info)
+    ok = ok and dll_ok
+    notes.extend(dll_notes)
     now = manifest(savegame)
     for rel, digest in expected.items():
         if rel not in now:
@@ -473,6 +553,13 @@ def _plan(a, home, env):
     for name in (OVERRIDE_NAME, AUTOCONTINUE_NAME):
         if (mod_home / "build" / name).exists():
             problems.append(f"{mod_home / 'build' / name} exists (an earlier run?); remove it or run: d2vr-linux sim --restore")
+    candidate = None
+    if getattr(a, "candidate_dll", None) and len(dlls) == 1:
+        try:
+            candidate = (Path(a.candidate_dll), check_candidate(a.candidate_dll, mod_home / "build" / dlls[0]),
+                         steam.sha256_file(mod_home / "build" / dlls[0]))
+        except SimError as e:
+            problems.append(str(e))
     if not (mod_home / ".git").is_dir():
         problems.append(f"{mod_home / '.git'} missing (run install)")
     if a.test_save:
@@ -498,13 +585,13 @@ def _plan(a, home, env):
     if length * 1000 > seconds * 1000:
         raise SimError(f"the script is {length:g} s long but the session is {seconds} s")
     script_json, script_cfg = compile_script(segments, seconds)
-    return inst, mod_home, seconds, script_json, script_cfg
+    return inst, mod_home, seconds, script_json, script_cfg, candidate
 
 
 def run_sim(a, home, env):
     if a.restore:
         return do_restore(a, home, env)
-    inst, mod_home, seconds, script_json, script_cfg = _plan(a, home, env)
+    inst, mod_home, seconds, script_json, script_cfg, candidate = _plan(a, home, env)
     override = sim_probe_config(seconds)
     build, art = mod_home / "build", mod_home / "artifacts"
     env.out(f"[sim] scenario {a.script or a.scenario}: {seconds} s session, mod home {mod_home}")
@@ -512,6 +599,9 @@ def run_sim(a, home, env):
         env.out("[sim] dry run: nothing written. Override config:")
         env.out("  " + override.strip())
         env.out(f"[sim] script: {script_cfg.splitlines()[0]}")
+        if candidate:
+            env.out(f"[sim] candidate DLL {candidate[0]}: sha256 {candidate[1]}; installed {installed_dll(mod_home)} "
+                    f"sha256 {candidate[2]} is backed up, replaced for the run and restored afterwards")
         return 0
 
     stamp = _timestamp()
@@ -521,6 +611,15 @@ def run_sim(a, home, env):
     run_dir = Path(a.out_root) / stamp
     started = None
     try:
+        if candidate:
+            target = installed_dll(mod_home)
+            before = backup_dll(backup, target)
+            if before != candidate[2]:
+                raise SimError("the installed DLL changed while planning")
+            place_atomic(candidate[0].read_bytes(), target)
+            if steam.sha256_file(target) != candidate[1]:
+                raise SimError("candidate DLL was not placed correctly")
+            env.out(f"[sim] candidate DLL placed (installed {before[:12]} backed up to {backup}; restored afterwards)")
         if a.test_save:
             swap_in_test_save(inst.prefix, a.test_save)
             env.out(f"[sim] test save {a.test_save} swapped in")

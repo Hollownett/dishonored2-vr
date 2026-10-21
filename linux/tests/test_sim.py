@@ -271,6 +271,103 @@ class FullRun(Case):
         self.assertEqual((self.mod_home / "build/linux-settle-seconds").read_text(), "30\n")
 
 
+def fake_pe(tag=b""):
+    """Smallest thing is_pe_dll accepts: MZ, e_lfanew=0x40, PE signature, DLL characteristic."""
+    hdr = bytearray(0x40 + 24)
+    hdr[:2] = b"MZ"
+    hdr[0x3C:0x40] = (0x40).to_bytes(4, "little")
+    hdr[0x40:0x44] = b"PE\0\0"
+    hdr[0x40 + 22:0x40 + 24] = (0x2000).to_bytes(2, "little")
+    return bytes(hdr) + tag
+
+
+class Candidate(FullRun):
+    def setUp(self):
+        super().setUp()
+        self.installed = self.mod_home / "build/d2vr_render_probe_arm_v600.dll"
+        self.installed.write_bytes(fake_pe(b"installed"))
+        self.original = self.installed.read_bytes()
+        cdir = self.tmp / "cand"
+        cdir.mkdir()
+        self.cand = cdir / "d2vr_render_probe_arm_v600.dll"
+        self.cand.write_bytes(fake_pe(b"candidate"))
+
+    def test_candidate_dll_swapped_and_restored(self):
+        env, state = self.fake_game()
+        seen = {}
+        inner = env.launch
+
+        def launch():
+            seen["during"] = self.installed.read_bytes()
+            inner()
+
+        env.launch = launch
+        rc, out, err = self.run_cli("--candidate-dll", str(self.cand), env=env)
+        self.assertEqual(rc, 0, "\n".join(self.lines) + err)
+        self.assertEqual(seen["during"], self.cand.read_bytes())
+        self.assertEqual(self.installed.read_bytes(), self.original)
+        self.assertEqual(sim.pending_backups(self.backups), [])
+        b = next(self.backups.glob("*-sim"))
+        self.assertEqual((b / "installed-d2vr_render_probe_arm_v600.dll").read_bytes(), self.original)
+        self.assertFalse(list((self.mod_home / "build").glob("*.d2vr-tmp")))
+
+    def test_candidate_restored_after_launch_failure(self):
+        def launch():
+            self.during_dll = self.installed.read_bytes()
+            raise OSError("steam not found")
+
+        env = self.env(launch=launch)
+        rc, out, err = self.run_cli("--candidate-dll", str(self.cand), env=env)
+        self.assertEqual(rc, 1)
+        self.assertIn("steam not found", err)
+        self.assertEqual(self.during_dll, self.cand.read_bytes())
+        self.assertEqual(self.installed.read_bytes(), self.original)
+        self.assertEqual(sim.pending_backups(self.backups), [])
+
+    def test_candidate_wrong_name_refused(self):
+        wrong = self.tmp / "cand/d2vr_render_probe_arm_v601.dll"
+        wrong.write_bytes(fake_pe())
+        rc, out, err = self.run_cli("--dry-run", "--candidate-dll", str(wrong))
+        self.assertEqual(rc, 1)
+        self.assertIn("v601", err)
+        self.assertIn("v600", err)
+        notpe = self.tmp / "cand/notpe"
+        notpe.mkdir()
+        bad = notpe / "d2vr_render_probe_arm_v600.dll"
+        bad.write_bytes(b"MZ not a dll")
+        rc, out, err = self.run_cli("--dry-run", "--candidate-dll", str(bad))
+        self.assertEqual(rc, 1)
+        self.assertIn("not a PE DLL", err)
+        self.assertEqual(self.installed.read_bytes(), self.original)
+
+    def test_restore_recovers_interrupted_candidate(self):
+        backup = sim.backup_saves(self.f.prefix, self.backups, "T1")
+        sim.backup_dll(backup, self.installed)
+        sim.place_atomic(self.cand.read_bytes(), self.installed)  # the run died with the candidate in place
+        rc, out, err = self.run_cli("--restore")
+        self.assertEqual(rc, 0, err + out)
+        self.assertEqual(self.installed.read_bytes(), self.original)
+        self.assertFalse((backup / sim.PENDING).exists())
+
+    def test_restore_failure_keeps_pending_and_prints_command(self):
+        backup = sim.backup_saves(self.f.prefix, self.backups, "T1")
+        sim.backup_dll(backup, self.installed)
+        (backup / "installed-d2vr_render_probe_arm_v600.dll").write_bytes(b"corrupt")
+        rc, out, err = self.run_cli("--restore")
+        self.assertEqual(rc, 2)
+        self.assertIn("cp -f", out)
+        self.assertTrue((backup / sim.PENDING).exists())
+
+    def test_dry_run_prints_hashes(self):
+        import hashlib
+        rc, out, err = self.run_cli("--dry-run", "--candidate-dll", str(self.cand))
+        self.assertEqual(rc, 0, err)
+        self.assertIn(hashlib.sha256(self.cand.read_bytes()).hexdigest(), "\n".join(self.lines) + out)
+        self.assertIn(hashlib.sha256(self.original).hexdigest(), "\n".join(self.lines) + out)
+        self.assertEqual(self.installed.read_bytes(), self.original)
+        self.assertFalse(self.backups.exists())
+
+
 class Pure(unittest.TestCase):
     def test_probe_config_matches_launcher_layout(self):
         fields = sim.sim_probe_config(90).split()
@@ -286,6 +383,23 @@ class Pure(unittest.TestCase):
         self.assertTrue(cfg.startswith("D2VR_GAMEPLAY_SCRIPT 6 90000 "))
         with self.assertRaises(sim.SimError):
             sim.scenario_segments("../x", 0)
+
+    def test_idle_compiles(self):
+        segments = sim.scenario_segments("idle", 30000)
+        text, cfg = sim.compile_script(segments, 120)
+        self.assertTrue(cfg.startswith("D2VR_GAMEPLAY_SCRIPT "))
+        prev = 0
+        for s in segments:
+            self.assertLessEqual(prev, s["start_ms"])
+            self.assertLess(s["start_ms"], s["end_ms"])
+            prev = s["end_ms"]
+            if s.get("when", "gameplay") == "gameplay":
+                self.assertFalse({k for k in s["input"] if k != "move_x" or s["input"][k]}, s)
+            self.assertNotIn("turn_x", s["input"])
+        self.assertLessEqual(prev, 120000)
+        gameplay = [s for s in segments if s["start_ms"] >= 30000]
+        self.assertEqual(gameplay[-1]["end_ms"] - 30000, 90000)
+        self.assertTrue(all(abs(s["head_pitch_degrees"]) <= 10 for s in gameplay))
 
     def test_dig(self):
         self.assertEqual(sim.dig({"a": {"b": [1, 2]}}, "a.b.1"), (2, True))
