@@ -1,3 +1,5 @@
+using System.Security.Cryptography;
+using System.Text.RegularExpressions;
 using System.Text;
 
 namespace DishonoredVR;
@@ -19,31 +21,50 @@ public static class ProxyInstall
 
     public static bool IsOurs(ReadOnlySpan<byte> image) => image.IndexOf(MarkerBytes) >= 0;
 
-    public static bool IsOursFile(string path)
+    static readonly byte[] ExportBytes = Encoding.ASCII.GetBytes("DirectInput8Create");
+
+    /// <summary>Identity of a dinput8.dll on disk. With the embedded proxy given: same size and SHA-256 is ours; otherwise (an older build of ours) it needs the
+    /// marker and the one DirectInput8Create export name as a second check. A foreign DLL, or one that cannot be read, is not ours.</summary>
+    public static bool IsOursFile(string path, byte[]? embedded = null)
     {
-        try { return File.Exists(path) && IsOurs(File.ReadAllBytes(path)); }
+        try
+        {
+            if (!File.Exists(path)) return false;
+            var bytes = File.ReadAllBytes(path);
+            if (embedded != null && bytes.Length == embedded.Length && SHA256.HashData(bytes).AsSpan().SequenceEqual(SHA256.HashData(embedded))) return true;
+            return IsOurs(bytes) && bytes.AsSpan().IndexOf(ExportBytes) >= 0;
+        }
         catch (IOException) { return false; }
         catch (UnauthorizedAccessException) { return false; }
     }
 
     public static bool Installed(string gameDir) => IsOursFile(Path.Combine(gameDir, DllName));
 
-    /// <summary>Checks everything, then writes the proxy and the ini. Returns the files that changed. Throws InvalidOperationException with the reason
-    /// (nothing is written in that case); an IOException from a locked file (game running) propagates.</summary>
+    /// <summary>True when one of the game's loaded modules is the dinput8.dll we installed in gameDir (same path, our identity). A foreign dinput8.dll,
+    /// even one in the same place, is not ours.</summary>
+    public static bool OurProxyLoaded(string gameDir, IEnumerable<string> loadedModulePaths)
+    {
+        var want = Path.GetFullPath(Path.Combine(gameDir, DllName));
+        return loadedModulePaths.Any(m => string.Equals(Path.GetFullPath(m), want, StringComparison.OrdinalIgnoreCase)) && IsOursFile(want);
+    }
+
+    /// <summary>Checks everything, then writes the ini and the proxy (ini first, so a partial state is still meaningful). Returns the files that changed.
+    /// Throws InvalidOperationException with the reason (nothing is written in that case); an IOException from a locked file (game running) propagates.</summary>
     public static IReadOnlyList<string> Install(string gameDir, string modHome, byte[] proxy)
     {
         if (!Directory.Exists(gameDir)) throw new InvalidOperationException($"game folder {gameDir} does not exist");
         if (!IsOurs(proxy)) throw new InvalidOperationException("the embedded dinput8.dll is not the d2vr proxy (no identity marker)");
         var target = Path.Combine(gameDir, DllName);
-        if (File.Exists(target) && !IsOursFile(target))
+        if (File.Exists(target) && !IsOursFile(target, proxy))
             throw new InvalidOperationException($"{target} is another mod's dinput8.dll; refusing to replace it. Move it away to use this launcher's fast start");
         var changed = new List<string>();
-        if (Write(target, proxy)) changed.Add(DllName);
         if (Write(Path.Combine(gameDir, IniName), Encoding.UTF8.GetBytes(modHome.TrimEnd('\\') + "\r\n"))) changed.Add(IniName);  // UTF-8, no BOM: the proxy decodes it as UTF-8
+        if (Write(target, proxy)) changed.Add(DllName);
+        changed.Sort((a, b) => string.CompareOrdinal(b, a));  // dinput8.dll first, as reported
         return changed;
     }
 
-    /// <summary>Removes our proxy and the ini; a foreign dinput8.dll is left alone (modhome.uninstall).</summary>
+    /// <summary>Removes our proxy, the ini and our leftover .tmp files; a foreign dinput8.dll is left alone (modhome.uninstall).</summary>
     public static IReadOnlyList<string> Uninstall(string gameDir)
     {
         var removed = new List<string>();
@@ -51,7 +72,40 @@ public static class ProxyInstall
         if (IsOursFile(dll)) { File.Delete(dll); removed.Add(DllName); }
         var ini = Path.Combine(gameDir, IniName);
         if (File.Exists(ini)) { File.Delete(ini); removed.Add(IniName); }
+        var dllTmp = dll + ".tmp";
+        if (IsOursFile(dllTmp)) { File.Delete(dllTmp); removed.Add(DllName + ".tmp"); }
+        var iniTmp = ini + ".tmp";
+        if (File.Exists(iniTmp)) { File.Delete(iniTmp); removed.Add(IniName + ".tmp"); }
         return removed;
+    }
+
+    public enum StartPath { None, Proxy, Injected }
+
+    /// <summary>Stop VR goes through linux-stop only when our proxy runs the session and the launcher did not inject it itself.</summary>
+    public static bool StopViaProxy(bool proxyLoaded, StartPath path) => proxyLoaded && path != StartPath.Injected;
+
+    public enum StartState { Pending, Started, Failed, Ended }
+
+    /// <summary>Reads the proxy log of the current game start. "StartProbe begin" means the session is up; "StartProbe returned N" comes when
+    /// StartProbe returns: 0 after the session ended, anything else a failed start (code is then set, reason says what it means).</summary>
+    public static StartState ReadStart(string logText, out int code, out string reason)
+    {
+        code = 0; reason = "";
+        var m = Regex.Match(logText, @"StartProbe returned (\d+)");
+        if (m.Success)
+        {
+            code = int.Parse(m.Groups[1].Value);
+            if (code == 0) return StartState.Ended;
+            reason = code switch
+            {
+                1 => "the probe failed (see artifacts\\dxgi-probe-failure.txt)",
+                2 => "a previous VR session is still shutting down or restoring the game; wait a few seconds and launch again",
+                3 => "the mod home is not installed (its .git folder is missing)",
+                _ => "unknown start failure",
+            };
+            return StartState.Failed;
+        }
+        return logText.Contains("StartProbe begin") ? StartState.Started : StartState.Pending;
     }
 
     static bool Write(string path, byte[] data)

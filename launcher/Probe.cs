@@ -75,6 +75,7 @@ public static class Probe
         if (games.Length == 0)
         {
             bool viaProxy = TryInstallProxy(root, log);
+            if (viaProxy) SetAsidePreviousProxyLog(root);  // only lines written by this game start may count
             GameKeys.PrepareConfig(log);
             Process.Start(new ProcessStartInfo("steam://rungameid/403640") { UseShellExecute = true });  // Steam app 403640 is Dishonored 2
             log("Starting Dishonored 2 through Steam...");
@@ -84,6 +85,7 @@ public static class Probe
             {
                 if (games.Length == 0) throw new InvalidOperationException("Steam did not start Dishonored 2 within 3 minutes.");
                 log($"Game started; the proxy starts VR about {ProxyInstall.DefaultStartSeconds} s after its window appears (artifacts\\linux-proxy.log). Use Stop VR to stop.");
+                SessionPath = ProxyInstall.StartPath.Proxy;
                 await ContinueAfterProxyStart(root, games[0].Id, log, inGameplay);
                 return false;
             }
@@ -101,6 +103,7 @@ public static class Probe
         }
         if (games.Length != 1) throw new InvalidOperationException("Start Dishonored 2 and enter gameplay or its pause menu; exactly one process is required.");
         int pid = games[0].Id;
+        SessionPath = ProxyInstall.StartPath.Injected;
         await Task.Run(() => Session(root, c.Dll, pid, log, () =>
         {
             if (startedGame) _ = Task.Run(async () =>
@@ -134,6 +137,7 @@ public static class Probe
             if (!File.Exists(proxy)) throw new InvalidOperationException("this launcher build carries no proxy (build\\dinput8.dll)");
             var changed = ProxyInstall.Install(gameDir, root, File.ReadAllBytes(proxy));
             log(changed.Count == 0 ? $"Proxy already installed in {gameDir}." : $"Proxy installed in {gameDir} ({string.Join(", ", changed)}).");
+            log($"Note: with the proxy installed, every start of Dishonored 2 starts VR about {ProxyInstall.DefaultStartSeconds} s after its window. To play flat, use Tools > Uninstall proxy.");
             return true;
         }
         catch (Exception ex)  // not installable (foreign dinput8.dll, no permission, missing payload): today's behaviour
@@ -143,17 +147,29 @@ public static class Probe
         }
     }
 
-    /// <summary>True when the game process has our proxy loaded (dinput8.dll from the game folder).</summary>
+    /// <summary>Which path started the session this launcher last ran; Stop VR uses linux-stop only for a proxy session.</summary>
+    public static volatile ProxyInstall.StartPath SessionPath = ProxyInstall.StartPath.None;
+
+    /// <summary>True when the game process has OUR proxy loaded (the dinput8.dll we installed in the game folder, identity-checked). A foreign
+    /// dinput8.dll (ReShade and the like) is not ours.</summary>
     public static bool ProxyLoadedIn(Process game)
     {
         try
         {
             var dir = Path.GetDirectoryName(game.MainModule?.FileName);
-            if (dir == null) return false;
-            var want = Path.Combine(dir, ProxyInstall.DllName);
-            return game.Modules.Cast<ProcessModule>().Any(m => string.Equals(m.FileName, want, StringComparison.OrdinalIgnoreCase));
+            return dir != null && ProxyInstall.OurProxyLoaded(dir, game.Modules.Cast<ProcessModule>().Select(m => m.FileName));
         }
         catch (Exception ex) when (ex is Win32Exception or InvalidOperationException or NotSupportedException) { return false; }
+    }
+
+    static void SetAsidePreviousProxyLog(string root)
+    {
+        try
+        {
+            var log = Path.Combine(root, "artifacts", "linux-proxy.log");
+            if (File.Exists(log)) File.Move(log, Path.Combine(root, "artifacts", "linux-proxy.previous.log"), true);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
     }
 
     /// <summary>Stop for a proxy session: build\linux-stop, which the proxy's stop watcher turns into StopProbe.</summary>
@@ -164,25 +180,42 @@ public static class Probe
         File.WriteAllText(path, DateTimeOffset.UtcNow.ToUnixTimeSeconds().ToString());
     }
 
-    /// <summary>With the proxy the launcher still continues the last save like the injection path did: waits for "StartProbe returned" in the proxy log,
-    /// then posts Enter up to three times.</summary>
+    static string ReadProxyLog(string logFile)
+    {
+        try
+        {
+            using var fs = new FileStream(logFile, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+            using var sr = new StreamReader(fs);
+            return sr.ReadToEnd();
+        }
+        catch (IOException) { return ""; }
+        catch (UnauthorizedAccessException) { return ""; }
+    }
+
+    /// <summary>With the proxy the launcher still continues the last save like the injection path did: waits for "StartProbe begin" in the proxy log
+    /// (the previous log was set aside before the launch), checks that StartProbe did not return a failure code, then posts Enter up to three times.
+    /// "StartProbe returned" only appears when a start fails or the session has ended.</summary>
     static async Task ContinueAfterProxyStart(string root, int pid, Action<string> log, Func<bool> inGameplay)
     {
         var logFile = Path.Combine(root, "artifacts", "linux-proxy.log");
-        var deadline = DateTime.UtcNow.AddSeconds(120);
+        var deadline = DateTime.UtcNow.AddSeconds(180);
         while (DateTime.UtcNow < deadline)
         {
             if (Process.GetProcessesByName("Dishonored2").Length == 0) return;
-            try
+            var state = ProxyInstall.ReadStart(ReadProxyLog(logFile), out var code, out var why);
+            if (state == ProxyInstall.StartState.Failed) { log($"VR did not start: StartProbe returned {code}: {why}. No keys sent."); return; }
+            if (state == ProxyInstall.StartState.Started)
             {
-                using var fs = new FileStream(logFile, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
-                using var sr = new StreamReader(fs);
-                if (sr.ReadToEnd().Contains("StartProbe returned")) { log("VR started by the proxy."); await Task.Delay(4000); await PostEnters(pid, log, inGameplay); return; }
+                log("The proxy started the VR session.");
+                await Task.Delay(4000);
+                state = ProxyInstall.ReadStart(ReadProxyLog(logFile), out code, out why);
+                if (state == ProxyInstall.StartState.Failed) { log($"VR did not start: StartProbe returned {code}: {why}. No keys sent."); return; }
+                await PostEnters(pid, log, inGameplay);
+                return;
             }
-            catch (IOException) { }
             await Task.Delay(1000);
         }
-        log("The proxy has not reported a VR start yet; check artifacts\\linux-proxy.log. No keys sent.");
+        log("The proxy has not started VR yet (VR may still start later); check artifacts\\linux-proxy.log. No keys sent.");
     }
 
     // ---------------- inject_probe.py: the fixed headset configuration run_demo.ps1 passes

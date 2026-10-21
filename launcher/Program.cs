@@ -532,16 +532,19 @@ sealed class MainForm : Form
 
     async Task StopVr()
     {
-        var g = Env.Game(); var c = candidate ?? env.LatestCandidate(out _);
-        if (g == null || c == null) { Append(log, "Nothing to stop (game not running).", Ui.Dim); return; }
-        stopping = true; stop.Enabled = false; ShowLog(true);
-        if (Probe.ProxyLoadedIn(g))
+        var g = Env.Game();
+        if (g == null) { Append(log, "Nothing to stop (game not running).", Ui.Dim); return; }
+        if (ProxyInstall.StopViaProxy(Probe.ProxyLoadedIn(g), Probe.SessionPath))
         {
+            stopping = true; stop.Enabled = false; ShowLog(true);
             Append(log, $"Stopping VR through the proxy in Dishonored2 (pid {g.Id})", Ui.Teal);
-            try { Probe.RequestProxyStop(env.Root); Append(log, "Stop requested; the mod is restoring the game.", Ui.Good); }
+            try { Probe.RequestProxyStop(env.Root); Append(log, "Stop requested. If VR has not started yet the request is held until it has, then stops it at once; otherwise the mod is restoring the game.", Ui.Good); }
             catch (Exception ex) { Append(log, "Stop failed: " + ex.Message, Ui.Bad); }
             stopping = false; return;
         }
+        var c = candidate ?? env.LatestCandidate(out _);
+        if (c == null) { Append(log, "Nothing to stop (no mod candidate).", Ui.Dim); return; }
+        stopping = true; stop.Enabled = false; ShowLog(true);
         Append(log, $"Stopping {c.Dll} in Dishonored2 (pid {g.Id})", Ui.Teal);
         try { await Task.Run(() => Probe.Stop(env.Root, c.Dll, g.Id, l => Append(log, l))); Append(log, "Stop accepted; the mod is restoring the game.", Ui.Good); }
         catch (Exception ex) { Append(log, "Stop failed: " + ex.Message, Ui.Bad); }
