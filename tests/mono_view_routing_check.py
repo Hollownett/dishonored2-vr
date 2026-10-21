@@ -33,7 +33,7 @@ assert probe.count('diagnostic_mode_pointer=left_metadata.data();') == 2  # flat
 setup = between(probe, 'void observe_eye_setup(void* view) noexcept {', 'void observe_eye_begin(void* view) noexcept {')
 assert 'native.size()!=(mono?1u:2u)' in setup and 'eye_views[1]=0' in setup and 'difference<.001f' in setup
 head = between(probe, 'void prepare_head_view(void* view) noexcept {', 'void restore_head_view() noexcept')
-assert 'const bool mono=mono_view_state.load()==1 && stereo_active.load();' in head
+assert 'const bool mono=mono_view_state.load()==1 && stereo_active.load() && !(alternate_on() && native.size()==2);' in head # plan F: alternate-eye paired frames take the paired path
 assert 'native.size()!=(mono?1u:2u)' in head and 'difference<.001f' in head
 assert 'GameXr::mono_centre_view(*xr_views)' in head
 # eye 0 guarded per-frame sites still run once: the single view is eye 0

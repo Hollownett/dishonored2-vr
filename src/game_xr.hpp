@@ -6,6 +6,7 @@
 #define XR_USE_GRAPHICS_API_D3D11
 #include <openxr/openxr.h>
 #include <openxr/openxr_platform.h>
+#include "alternate_eye.hpp"
 #include "context_state.hpp"
 #include "mod_gpu_timer.hpp"
 #include "controller_input.hpp"
@@ -197,6 +198,10 @@ private:
     XrTime locate_display_time_{};
     XrViewStateFlags located_view_flags_{};
     UINT rendered_mask_{};
+    // alternate-eye (plan F task 1): the kept image + view of each eye, written only while alternate_enabled. Records carry the exact view
+    // (pose + FOV) an image was rendered with, so the eye that was not rendered this frame is submitted with its own render pose.
+    std::array<EyeRecord<XrView>,2> alt_records_{};
+    std::array<Microsoft::WRL::ComPtr<ID3D11Texture2D>,2> alt_kept_{};
     enum InputAction : UINT {Grip,Aim,Stick,Trigger,Squeeze,FirstButton,SecondButton,StickClick,Menu,InputCount};
     XrActionSet action_set_{XR_NULL_HANDLE};
     std::array<XrAction,InputCount> actions_{};
@@ -1133,6 +1138,12 @@ public:
     UINT64 controller_samples{};
     UINT64 authored_camera_layers{};
     bool last_should_render{},last_views_valid{},last_tracked_pair{};
+    // alternate-eye (plan F task 1), set by the probe before each present(). Off by default: every branch below is gated on alternate_enabled.
+    bool alternate_enabled{};          // knob on and not fallen back
+    int alternate_fresh_eye{-1};       // the one eye rendered for this displayed frame, -1 = both (paired frame)
+    std::uint64_t alternate_frame{};   // displayed-frame number of this present (the probe's Present counter, first frame 1)
+    bool alternate_error{};            // an eye image could not be kept; the probe falls back to paired for the session
+    std::uint64_t alternate_kept_frame(int eye) const noexcept {return (eye==0 || eye==1) && alt_records_[static_cast<std::size_t>(eye)].valid?alt_records_[static_cast<std::size_t>(eye)].frame:0;}
     bool last_layer_submitted{},last_menu_layer{};
     bool last_authored_camera_layer{};
     UINT64 state_events{},reference_events{};
@@ -1384,6 +1395,47 @@ public:
     const std::array<XrView,2>* tracking_views() const {
         return running_ && views_valid_ && continuity_.usable()?&views_:nullptr;
     }
+    // The eye views of this frame as the layers will carry them. Alternate mode: the eye rendered this frame is the recorded
+    // render view, the other eye is its kept record (its own pose, never this frame's). Paired mode: rendered_views_ (unchanged).
+    std::array<EyeRecord<XrView>,2> alt_effective_() const {
+        std::array<EyeRecord<XrView>,2> out=alt_records_;
+        for(int eye=0;eye<2;++eye) if(alternate_fresh_eye<0 || eye==alternate_fresh_eye) {
+            const auto e=static_cast<std::size_t>(eye);
+            out[e]={rendered_views_[e],alternate_frame,pose_epoch(),true,rendered_display_times_[e],rendered_locate_cpu_times_[e]};
+        }
+        return out;
+    }
+    // True when both eyes can be submitted with views that match their images. Paired mode: the old rendered_mask_==3 rule.
+    bool tracked_pair_() const {
+        if(!alternate_enabled) return rendered_mask_==3;
+        const UINT need=alternate_fresh_eye<0?3u:1u<<alternate_fresh_eye;
+        return (rendered_mask_&need)==need && build_layer_views(alt_effective_(),alternate_frame,pose_epoch()).ok;
+    }
+    XrView tracked_view_(UINT eye) const {return alternate_enabled?build_layer_views(alt_effective_(),alternate_frame,pose_epoch()).views[eye]:rendered_views_[eye];}
+    // The eye that was not rendered this frame needs its kept image, at the swapchain's size.
+    bool alt_kept_ok_() const {
+        if(!alternate_enabled || alternate_fresh_eye<0) return true;
+        const auto& kept=alt_kept_[static_cast<std::size_t>(1-alternate_fresh_eye)];
+        if(!kept) return false;
+        D3D11_TEXTURE2D_DESC desc{};kept->GetDesc(&desc);
+        return eye_texture_matches(desc,width_,height_,format_);
+    }
+    // Copies the eye image that was just rendered (after anti-aliasing / sharpening, before overlays) and its view for later frames.
+    void keep_alternate_eye_(UINT eye,ID3D11Texture2D* processed) {
+        auto& record=alt_records_[eye];
+        record={};
+        D3D11_TEXTURE2D_DESC desc{};processed->GetDesc(&desc);
+        if(!(rendered_mask_&(1u<<eye))) return; // no view was recorded for this image: keep nothing
+        if(!eye_texture_matches(desc,width_,height_,format_)) {alternate_error=true;return;}
+        if(alt_kept_[eye]) {D3D11_TEXTURE2D_DESC have{};alt_kept_[eye]->GetDesc(&have);if(!eye_texture_matches(have,width_,height_,format_)) alt_kept_[eye].Reset();}
+        if(!alt_kept_[eye]) {
+            Microsoft::WRL::ComPtr<ID3D11Device> device;context_->GetDevice(&device);
+            desc.Usage=D3D11_USAGE_DEFAULT;desc.BindFlags=0;desc.CPUAccessFlags=0;desc.MiscFlags=0;
+            if(FAILED(device->CreateTexture2D(&desc,nullptr,&alt_kept_[eye]))) {alternate_error=true;return;}
+        }
+        context_->CopyResource(alt_kept_[eye].Get(),processed);
+        record={rendered_views_[eye],alternate_frame,pose_epoch(),true,rendered_display_times_[eye],rendered_locate_cpu_times_[eye]};
+    }
     // perf-mono-view diagnostic: the one engine view sits at the midpoint of the two eye poses, faces their mean orientation and
     // covers both eyes' FOV (the union), so the one image is valid for both projection layers (flat, no stereo depth).
     static XrView mono_centre_view(const std::array<XrView,2>& v) {
@@ -1466,9 +1518,13 @@ public:
         const bool world_scene=gameplay || world_ui_kind_!=0;
         last_world_ui_layer=false;
         timing={};timing.start_ns=cpu_time_ns();
-        if(rendered_mask_==3) {
+        if(tracked_pair_()) {
             timing.rendered_display_times=rendered_display_times_;
             timing.rendered_locate_cpu_times=rendered_locate_cpu_times_;
+            if(alternate_enabled) { // the kept eye's times are those of the locate it was rendered from
+                const auto records=alt_effective_();
+                for(std::size_t eye=0;eye<2;++eye) {timing.rendered_display_times[eye]=records[eye].display_time;timing.rendered_locate_cpu_times[eye]=records[eye].locate_cpu_time;}
+            }
         }
         ContextState::Scope graphics_scope(graphics_state_);
         last_should_render=false;last_views_valid=false;last_tracked_pair=false;
@@ -1538,13 +1594,13 @@ public:
             last_should_render,views_valid_,frame_.predictedDisplayTime)) {
             menu_panel_.reset();authored_panel_.reset();world_ui_pose_valid_=false;rendered_mask_=0;
         }
-        last_tracked_pair=rendered_mask_==3;
+        last_tracked_pair=tracked_pair_();
         sample_input();
         // Preserve squeeze actions before the paused overlay consumes controls.
         // Hold left Y during play: open the settings. Fed with the raw button before anything zeroes it; a Talk offer or the wheel
         // (y_hold_blocked) owns the press instead. Not fed while the panel is open: Y then closes it by a new press (VrSettings).
         const bool panel_drawable=SettingsMenuLayout::gameplay_drawable(gameplay,authored_camera,continuity_.usable() && left && right,
-            !tracked_gameplay_required_ || rendered_mask_==3,views_valid_,settings_chain_!=XR_NULL_HANDLE);
+            !tracked_gameplay_required_ || tracked_pair_(),views_valid_,settings_chain_!=XR_NULL_HANDLE);
         if(gameplay && settings_enabled_ && y_hold_enabled && panel_drawable && state==XR_SESSION_STATE_FOCUSED && controller_input.active && !settings_.open()) {
             const auto now=std::chrono::steady_clock::now();
             // A Y still held from before gameplay (paused menu, load) belongs to that screen, not to a new hold.
@@ -1696,7 +1752,7 @@ public:
         const bool settings_world=gameplay && settings_.open();settings_in_world_=settings_world;
         std::optional<XrCompositionLayerQuad> settings_panel;
         if(continuity_.usable() && left && right &&
-           (!world_scene || !tracked_gameplay_required_ || rendered_mask_==3)) {
+           (!world_scene || !tracked_gameplay_required_ || tracked_pair_()) && alt_kept_ok_()) {
             std::array<ID3D11Texture2D*,2> sources{left,right};bool menu_band_ready=false;
             if(settings_.open()) {update_settings_image(pointer);++settings_layers;}
             const auto sharpness=static_cast<float>(settings_.sharpness());
@@ -1716,6 +1772,9 @@ public:
                 if(mirror_rects[0] || mirror_rects[1]) mirror_->begin(desktop_desc.Width,desktop_desc.Height,desktop_desc.Format);
             }
             for(UINT eye=0;eye<2;++eye) {
+                // alternate-eye: the eye that was not rendered this frame is resubmitted from its kept image (sources[eye] is that copy)
+                const bool alt_stale=alternate_enabled && alternate_fresh_eye>=0 && static_cast<int>(eye)!=alternate_fresh_eye;
+                if(alt_stale) sources[eye]=alt_kept_[eye].Get();
                 XrSwapchainImageAcquireInfo acquire{};acquire.type=XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO;uint32_t index{};
                 checked(xrAcquireSwapchainImage(chains_[eye],&acquire,&index),"Acquire game eye");
                 XrSwapchainImageWaitInfo image_wait{};image_wait.type=XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO;image_wait.timeout=1'000'000'000;
@@ -1729,9 +1788,9 @@ public:
                 // Independent per-eye processing; menus retain the exact native image.
                 ID3D11Texture2D* processed=nullptr;
                 {ModGpuScope aa_scope(context_.Get(),ModSpan::aa_sharpen); // task 3b
-                processed=gameplay && antialiasing_enabled_ && settings_.temporal_aa()<2?antialiasing_->apply(sources[eye]):sources[eye]; // FSR 3 already anti-aliased
+                processed=gameplay && antialiasing_enabled_ && settings_.temporal_aa()<2 && !alt_stale?antialiasing_->apply(sources[eye]):sources[eye]; // FSR 3 already anti-aliased
                 // Sharpening also helps menu text (menus get no SMAA).
-                if(sharpness>0) processed=sharpen_->apply(processed,sharpness);}
+                if(sharpness>0 && !alt_stale) processed=sharpen_->apply(processed,sharpness);}
                 {ModGpuScope copy_scope(context_.Get(),ModSpan::eye_copy); // task 3b
                 if(settings_.open() && !gameplay) {
                     const auto view=menu_view();
@@ -1742,15 +1801,16 @@ public:
                     settings_compositor_->end(images_[eye].at(index).texture);
                     if(observe_settings_composition) observe_settings_composition(processed,images_[eye].at(index).texture,rect);
                 } else context_->CopyResource(images_[eye].at(index).texture,processed);}
+                if(alternate_enabled && !alt_stale && gameplay) keep_alternate_eye_(eye,processed);
                 {ModGpuScope overlay_scope(context_.Get(),ModSpan::eye_overlay); // task 3b: native object art + desktop mirror draws
                 layers[eye].type=XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW;
-                layers[eye].pose=rendered_mask_==3?rendered_views_[eye].pose:views_[eye].pose;
-                layers[eye].fov=rendered_mask_==3?rendered_views_[eye].fov:XrFovf{-hfov*.5f,hfov*.5f,vfov*.5f,-vfov*.5f};
-                if(gameplay && !authored_camera && rendered_mask_==3) {
+                layers[eye].pose=tracked_pair_()?tracked_view_(eye).pose:views_[eye].pose;
+                layers[eye].fov=tracked_pair_()?tracked_view_(eye).fov:XrFovf{-hfov*.5f,hfov*.5f,vfov*.5f,-vfov*.5f};
+                if(gameplay && !authored_camera && tracked_pair_()) {
                     const auto now=GetTickCount64();XrView view{XR_TYPE_VIEW};view.pose=layers[eye].pose;view.fov=layers[eye].fov;
                     for(unsigned art_slot=0;art_slot<native_object_art_.size();++art_slot) if(const auto& art=native_object_art_[art_slot];art.fresh(pose_epoch(),now)) {
                         const auto aspect=static_cast<double>(art.crop.right-art.crop.left)/(art.crop.bottom-art.crop.top);
-                        const auto locked=art_slot==tutorial_art_slot?head_locked_art_point(rendered_views_[0].pose,rendered_views_[1].pose):std::optional<Vec3>{};
+                        const auto locked=art_slot==tutorial_art_slot?head_locked_art_point(tracked_view_(0).pose,tracked_view_(1).pose):std::optional<Vec3>{};
                         if(art_slot==tutorial_art_slot && !locked)continue;
                         if(const auto rect=native_art_rect(view,locked?*locked:art.point,art.width*hud_scale(),aspect)) {
                             if(!native_eye_art_) {Microsoft::WRL::ComPtr<ID3D11Device> device;context_->GetDevice(&device);native_eye_art_=std::make_unique<NativeEyeArt>(device.Get());}
@@ -1763,7 +1823,7 @@ public:
                 if(eye==0 && !world_scene) menu_band_ready=copy_menu_band(images_[0].at(index).texture);
                 layers[eye].subImage.swapchain=chains_[eye];
                 layers[eye].subImage.imageRect.extent={static_cast<int32_t>(width_),static_cast<int32_t>(height_)};
-                    if(observe_transfer && !settings_.open()) observe_transfer(eye,processed,images_[eye].at(index).texture,layers[eye],gameplay,rendered_mask_==3,sources[eye]);
+                    if(observe_transfer && !settings_.open()) observe_transfer(eye,processed,images_[eye].at(index).texture,layers[eye],gameplay,tracked_pair_(),sources[eye]);
                 } catch(...) {xrReleaseSwapchainImage(chains_[eye],&release);throw;}
                 checked(xrReleaseSwapchainImage(chains_[eye],&release),"Release game eye");
             }

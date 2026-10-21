@@ -322,11 +322,18 @@ if not errorlevel 0 goto build_failed
 python tests\mono_view_routing_check.py
 if errorlevel 1 goto build_failed
 if not errorlevel 0 goto build_failed
+python tests\alternate_eye_knob_check.py
+if errorlevel 1 goto build_failed
+if not errorlevel 0 goto build_failed
 build\comfort_meter_check.exe
 if not "%errorlevel%"=="0" exit /b 1
 build\comfort_vignette_check.exe
 if not "%errorlevel%"=="0" exit /b 1
 build\anchor_smoother_check.exe
+if not "%errorlevel%"=="0" exit /b 1
+cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT /Isrc tests\alternate_eye_check.cpp /Fo:build\alternate_eye_check.obj /Fe:build\alternate_eye_check.exe
+if not "%errorlevel%"=="0" exit /b 1
+build\alternate_eye_check.exe
 if not "%errorlevel%"=="0" exit /b 1
 cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT /Isrc tests\authored_view_check.cpp /Fo:build\authored_view_check.obj /Fe:build\authored_view_check.exe
 if not "%errorlevel%"=="0" exit /b 1

@@ -1302,6 +1302,18 @@ static LONG diagnostic_separation{};
 static std::atomic<int> mono_view_state{0};
 static std::atomic<UINT64> mono_eye_frame{0},mono_view_frames{0},mono_view_misses{0},mono_view_unexpected{0}; // eye-0 begin matched for Present N; frames presented; consecutive misses; unexpected 2-view frames
 void mono_view_fallback(const char* reason) noexcept;
+// build/alternate-eye (plan F task 1, opt-in): on top of the mono-view path the engine renders ONE eye per displayed frame, alternating by frame
+// parity, and the other eye is resubmitted from its kept image and render pose. State: 0 off, 1 on, 2 fallback to paired (session).
+// The knob also turns mono_view_state on, so every mono branch applies; alternation only changes WHICH eye pose the one view takes and what is copied.
+static std::atomic<int> alt_eye_state{0};
+static std::atomic<UINT64> alt_frames{0},alt_paired_frames{0},alt_fallbacks{0},alt_mismatch{0}; // alternated, paired-in-gameplay, session fallbacks, consecutive plan/observation disagreements
+static std::atomic<UINT64> alt_head_stamp{0}; // (displayed frame<<1)|eye of the view recorded by prepare_head_view
+static std::atomic<UINT64> alt_plan_stamp{0}; // (displayed frame<<2)|(planned eye+1), planned in the Present before the frame renders; 0 = none
+static d2vr::AlternateEye alt_plan;           // render thread (Present hook) only
+static UINT64 alt_epoch_seen{};
+static bool alt_descriptor_paired{};          // which descriptor is installed right now (render thread only)
+static bool alternate_on() noexcept {return alt_eye_state.load()==1 && mono_view_state.load()==1;}
+void alternate_fallback(const char* reason) noexcept;
 static UINT64 stereo_start_frame{};
 static ULONGLONG stereo_start_tick{};
 static UINT captured_logic_mask{};
@@ -3264,7 +3276,7 @@ void observe_eye_setup(void* view) noexcept {
         const auto pose=d2vr::decode_render_view(bytes);
         std::array<std::byte,16> classified_header{};
         const auto native=native_views(&classified_header);
-        const bool mono=mono_view_state.load()==1; // one prepared view; it is eye 0 and still has to match the view this Setup received
+        const bool mono=mono_view_state.load()==1 && !(alternate_on() && native.size()==2); // one prepared view; it is eye 0 and still has to match the view this Setup received (alternate-eye paired frames prepare two)
         if(!pose || native.size()!=(mono?1u:2u)) return;
         int eye=-1;
         for(int i=0;i<static_cast<int>(native.size());++i) {
@@ -3846,13 +3858,26 @@ void prepare_head_view(void* view) noexcept {
         std::array<std::byte,d2vr::camera_read_size> prefix{};std::memcpy(prefix.data(),bytes.data(),prefix.size());
         auto input=d2vr::decode_render_view(prefix);auto native=native_views();
         // perf-mono-view: with the one-view descriptor installed the engine prepares exactly one view; it is eye 0 and is placed at the centre.
-        const bool mono=mono_view_state.load()==1 && stereo_active.load();
+        const bool mono=mono_view_state.load()==1 && stereo_active.load() && !(alternate_on() && native.size()==2); // alternate-eye paired frames prepare two views and take the paired path
         if(mono && native.size()==2) { // the descriptor did not take: stay paired for this session after a sustained run of it
             if(++mono_view_unexpected>=30 && native.size()==2) mono_view_fallback("perf-mono-view: engine still prepares two views");
             native_left_aim.clear();native_weapon_attachment.clear();return;
         }
         if(mono) mono_view_unexpected=0;
         if(!input || native.size()!=(mono?1u:2u)) {native_left_aim.clear();native_weapon_attachment.clear();return;}
+        // alternate-eye: the plan for this displayed frame is only a request. The observed view count decides: two views = a paired frame (taken above as
+        // the paired path), one view = the parity eye. A disagreement is dropped (no record = nothing presented) and counted; a sustained run falls back.
+        int alt_eye=-1;
+        if(alternate_on() && stereo_active.load()) {
+            const UINT64 target=frames.load()+1,plan=alt_plan_stamp.load();
+            const bool planned=(plan>>2)==target;
+            const bool wanted_paired=planned && (plan&3u)==0,wanted_single=planned && (plan&3u)!=0;
+            if(!mono ? wanted_single : wanted_paired) {
+                if(++alt_mismatch>=30) alternate_fallback("alternate-eye: the engine view count disagreed with the plan for 30 frames");
+                if(mono) {native_left_aim.clear();native_weapon_attachment.clear();return;}
+            } else alt_mismatch=0;
+            if(mono) alt_eye=d2vr::AlternateEye::parity_eye(target);
+        }
         int eye=-1;
         for(int i=0;i<static_cast<int>(native.size());++i) {
             float difference{};
@@ -3863,7 +3888,7 @@ void prepare_head_view(void* view) noexcept {
         ++head_matched;
         std::array<float,16> projection{};std::memcpy(projection.data(),bytes.data()+0x100,64);
         const XrView mono_xr_eye=mono?d2vr::GameXr::mono_centre_view(*xr_views):XrView{};
-        const auto& xr_eye=mono?mono_xr_eye:(*xr_views)[eye];
+        const auto& xr_eye=alt_eye>=0?(*xr_views)[static_cast<std::size_t>(alt_eye)]:mono?mono_xr_eye:(*xr_views)[eye]; // alternate-eye: the parity eye's own pose and FOV, not the centre
         const auto& native_second=native[mono?0u:1u]; // the other prepared view (mono: the same one, so the centre is the view itself)
         auto body=d2vr::native_player_camera(read_self,image_base,head_body_camera);
         if(!body) {body=d2vr::find_native_player_camera(read_self,image_base);if(body) head_body_camera=body->camera;}
@@ -3881,7 +3906,7 @@ void prepare_head_view(void* view) noexcept {
         // Canted eye: turn the view toward the middle of the optical FOV and keep a symmetric frustum around it
         // (the engine's screen-space passes need symmetric frusta; see canted_fov.hpp). Authored cameras keep theirs.
         std::optional<d2vr::CantedFov> cant;
-        if(cant_requested && symmetric_frustum_requested && !action.scripted && !mono) {
+        if(cant_requested && symmetric_frustum_requested && !action.scripted && (!mono || alt_eye>=0)) {
             cant=d2vr::canted_fov(xr_eye.fov.angleLeft,xr_eye.fov.angleRight,xr_eye.fov.angleUp,xr_eye.fov.angleDown);
             if(cant) render_fov={-cant->half_x,cant->half_x,cant->half_y,-cant->half_y};
         }
@@ -4946,7 +4971,10 @@ void prepare_head_view(void* view) noexcept {
         }
         const XrQuaternionf rendered_orientation{static_cast<float>(orientation.x),static_cast<float>(orientation.y),static_cast<float>(orientation.z),static_cast<float>(orientation.w)};
         ++head_writes;
-        if(mono) { // the one image serves both projection layers: same centre pose, same (union) FOV, so rendered_mask_ reaches 3
+        if(alt_eye>=0) { // alternate-eye: this eye's own pose and FOV, recorded for this eye only; the other eye keeps its kept record
+            game_xr->record_rendered_eye(static_cast<UINT>(alt_eye),{render_fov.left,render_fov.right,render_fov.up,render_fov.down},cant?&rendered_orientation:nullptr);
+            alt_head_stamp=((frames.load()+1)<<1)|static_cast<UINT64>(alt_eye);
+        } else if(mono) { // the one image serves both projection layers: same centre pose, same (union) FOV, so rendered_mask_ reaches 3
             const XrFovf fov{render_fov.left,render_fov.right,render_fov.up,render_fov.down};
             game_xr->record_rendered_eye(0,fov,&rendered_orientation,&xr_eye.pose.position);
             game_xr->record_rendered_eye(1,fov,&rendered_orientation,&xr_eye.pose.position);
@@ -5132,6 +5160,49 @@ void mono_view_fallback(const char* reason) noexcept {
     if(InterlockedCompareExchangePointer(mode,paired_metadata.data(),mono_pointer)==mono_pointer) diagnostic_mode_pointer=paired_metadata.data();
     LONG half{};std::memcpy(&half,&diagnostic_half_separation,4);
     if(InterlockedCompareExchange(separation,half,diagnostic_separation)==diagnostic_separation) diagnostic_separation=half;
+}
+
+// alternate-eye lost its footing (view count, kept image or descriptor): paired rendering for the rest of the session, logged once.
+void alternate_fallback(const char* reason) noexcept {
+    int expected=1;
+    if(!alt_eye_state.compare_exchange_strong(expected,2)) return;
+    ++alt_fallbacks;
+    mono_view_fallback(reason); // logs once and restores the paired descriptor and half separation
+}
+
+// Installs the paired (two-view) or the single-view descriptor for the frames that render after this Present. Render thread (Present hook).
+// Going paired the pointer is written first, going single the separation first: the gap between the two writes then prepares two views at
+// one position (the head-view match refuses them, the frame is dropped) and never one view displaced by half the separation.
+void alternate_select_descriptor(bool paired) noexcept {
+    if(alt_descriptor_paired==paired || !stereo_active.load() || !paired_requested) return;
+    auto mode=reinterpret_cast<void* volatile*>(image_base+d2vr::selected_mode_rva);
+    auto separation=reinterpret_cast<volatile LONG*>(image_base+d2vr::separation_value_rva);
+    void* const current=diagnostic_mode_pointer;
+    void* const target=paired?static_cast<void*>(paired_metadata.data()):static_cast<void*>(left_metadata.data());
+    LONG half{};std::memcpy(&half,&diagnostic_half_separation,4);
+    const LONG wanted=paired?half:0,old=diagnostic_separation;
+    const auto write_pointer=[&] {return InterlockedCompareExchangePointer(mode,target,current)==current;};
+    const auto write_separation=[&] {return InterlockedCompareExchange(separation,wanted,old)==old;};
+    const bool ok=paired?(write_pointer() && write_separation()):(write_separation() && write_pointer());
+    if(!ok) {alternate_fallback("alternate-eye: the stereo descriptor was changed by someone else");return;}
+    diagnostic_mode_pointer=target;diagnostic_separation=wanted;alt_descriptor_paired=paired;
+}
+
+// After each Present's XR submit: tell the plan which eye images were kept, then plan the next displayed frame and install its descriptor.
+// gameplay: in the game world; free_gameplay: gameplay with the settings panel closed. Menus, loading and the panel never alternate (paired = the existing paths).
+void alternate_after_present(UINT64 number,bool gameplay,bool free_gameplay,bool authored,int fresh_eye) noexcept {
+    if(!game_xr) return;
+    for(int eye=0;eye<2;++eye) if(game_xr->alternate_kept_frame(eye)==number) alt_plan.rendered(eye,number);
+    if(free_gameplay && !authored) { // frames in free gameplay that were not alternated (paired refresh, dropped) are counted here
+        if(fresh_eye>=0 && game_xr->last_tracked_pair) ++alt_frames;
+        else ++alt_paired_frames;
+    }
+    const UINT64 epoch=game_xr->pose_epoch();
+    const bool epoch_changed=epoch!=alt_epoch_seen;
+    alt_epoch_seen=epoch;
+    const int next=alt_plan.eye_for_frame(number+1,free_gameplay,authored,epoch_changed);
+    alt_plan_stamp=((number+1)<<2)|static_cast<UINT64>(next+1);
+    if(gameplay) alternate_select_descriptor(next<0); // menus and loading keep whichever descriptor is installed
 }
 
 bool capture_texture(ID3D11Texture2D* buffer,ID3D11Device* device,const wchar_t* filename) {
@@ -5450,6 +5521,8 @@ std::string feedback_status_json() {
              <<",\"info_zero\":"<<(d2vr::NativeInteractionAim::clamp_exclude_info_zero_.load()?"true":"false")<<'}';
             return o.str();}() << "}" << ",\"corpse\":" << corpse_diagnostics.json() << ",\"perf\":" << [&]{std::lock_guard<std::mutex> l(perf_meter_mutex);return perf_meter.json();}() << ",\"frame_split\":" << frame_split_status_json()
                << ",\"mono_view\":\"" << (mono_view_state.load()==1?"on":mono_view_state.load()==2?"fallback":"off") << "\",\"mono_view_frames\":" << mono_view_frames.load()
+               << ",\"alternate_eye\":{\"state\":\"" << (alt_eye_state.load()==1?"on":alt_eye_state.load()==2?"fallback":"off") << "\",\"frames\":" << alt_frames.load()
+               << ",\"paired_frames\":" << alt_paired_frames.load() << ",\"fallbacks\":" << alt_fallbacks.load() << '}'
                << ",\"comfort\":" << [&]{std::lock_guard<std::mutex> l(comfort_mutex);auto text=comfort_meter.json();std::ostringstream v;v<<",\"vignette\":{\"enabled\":"<<(comfort_vignette.enabled() && comfort_vignette.max_opacity()>0?"true":"false")<<",\"max\":"<<comfort_vignette.max_opacity()<<",\"frames_shown\":"<<(game_xr?game_xr->vignette_layers:0)<<",\"color_scale\":"<<(game_xr && game_xr->vignette_color_scale()?"true":"false")<<",\"turn_ramp\":"<<(turn_ramp_enabled?"true":"false")<<"}";text.insert(text.size()-1,v.str());return text;}() << ",\"carry\":" << carry_diagnostics.json() << ",\"hold_y\":{\"enabled\":" << (hold_y_menu_enabled?"true":"false") << ",\"fires\":" << (game_xr?game_xr->y_hold_fires.load():0) << ",\"blocked_presses\":" << (game_xr?game_xr->y_hold_blocked_presses.load():0) << ",\"last_hold_ms\":" << (game_xr?game_xr->y_hold_last_ms.load():0) << "}" << "," << (game_xr?game_xr->palm_offset_status():std::string("\"palm_offset\":null")) << ",\"hand_push\":{\"force_n\":" << native_grab.hand_contact().config.push_force_n << ",\"capped\":[" << native_grab.hand_contact().capped_writes[0].load() << ',' << native_grab.hand_contact().capped_writes[1].load() << "],\"time_factor\":" << d2vr::NativeHandContact::time_factor << ",\"time_factor_verified\":false,\"mass_verified\":false}" << ",\"hud_relayouts\":" << d2vr::NativeHudChildDraw::hud_relayouts.load() << ",\"hud_panel_children\":" << d2vr::NativeHudChildDraw::panel_children.load() << ",\"sword_aim_frames\":" << sword_aim_frames.load() << ",\"gaze_takedown_frames\":" << gaze_takedown_frames.load() << ",\"overlay_hidden\":" << d2vr::NativeHudChildDraw::overlay_draws.load() << ",\"scabbard\":[" << scabbard_entries.load() << ',' << holster_fires.load() << "]" << ",\"sword_grip\":{\"actions\":[" << sword_actions[1].load() << ',' << sword_actions[2].load() << ',' << sword_actions[3].load() << ',' << sword_actions[4].load() << ',' << sword_actions[5].load() << ',' << sword_actions[6].load() << "],\"held\":" << (sword_grip.held()?"true":"false") << ",\"gun\":[" << gun_actions[1].load() << ',' << gun_actions[2].load() << ',' << (gun_grip.held()?1:0) << ',' << (hip_loaded?1:0) << "],\"reversed\":" << (sword_reversed.load()?"true":"false") << ",\"thrown\":[" << d2vr::NativeWeaponHands::thrown_hits.load() << ',' << d2vr::NativeWeaponHands::flight_frames.load() << ',' << d2vr::NativeWeaponHands::thrown_peak.load() << ',' << sword_release_speed.load() << ',' << right_hand_peak.load() << ',' << d2vr::NativeWeaponHands::services.load() << "],\"last_shove\":" << d2vr::NativeWeaponHands::last_shove.load() << ",\"ragdolls\":[" << d2vr::NativeWeaponHands::ragdolls.load() << ',' << d2vr::NativeWeaponHands::last_ragdoll.load() << ',' << yank_requests.load() << ',' << d2vr::NativeWeaponHands::yanks.load() << ',' << yank_peak[0].load() << ',' << yank_peak[1].load() << ',' << yank_gate[0].load() << ',' << yank_gate[1].load() << ',' << d2vr::NativeGrab::yank_holds_.load() << ',' << d2vr::NativeWeaponHands::wakes.load() << ',' << d2vr::NativeWeaponHands::holds_down.load() << ',' << d2vr::NativeWeaponHands::squeezes.load() << ',' << d2vr::NativeWeaponHands::guard_grabs.load() << ',' << d2vr::NativeWeaponHands::last_guard_d.load() << ',' << d2vr::NativeWeaponHands::last_guard_up.load() << ']' << ",\"look_uses\":" << look_uses.load() << ",\"look_hits\":" << look_hits.load() << ",\"stealth\":[" << d2vr::NativeMelee::unaware_asked.load() << ',' << d2vr::NativeMelee::unaware_yes.load() << ']' << ",\"use_diag\":[" << use_diag[0].load() << ',' << use_diag[1].load() << ',' << use_diag[2].load() << ',' << use_diag[3].load() << ',' << use_diag[4].load() << ',' << use_diag[5].load() << ',' << use_diag[6].load() << ',' << use_diag[7].load() << ',' << use_diag[8].load() << ',' << use_diag[9].load() << ']' << ",\"door_controller\":" << [&]{const auto state=d2vr::NativeDoorInteraction::process_owner().status();const auto metrics=native_interaction_aim.door_metrics();std::ostringstream value;value<<"{\"ownership\":"<<state.ownership<<",\"active\":"<<(state.active?"true":"false")<<",\"pending\":"<<(state.pending?"true":"false")<<",\"closing\":"<<(state.closing?"true":"false")<<",\"blocked\":"<<(state.blocked?"true":"false")<<",\"queries\":"<<metrics.queries<<",\"qualified\":"<<metrics.qualified<<",\"qpc_ticks\":"<<metrics.service_ticks<<",\"worst_qpc_ticks\":"<<metrics.worst_service_ticks<<'}';return value.str();}() << ",\"carry_head_pushes\":" << carry_head_pushes.load() << ",\"fist_takes\":" << fist_takes.load() << ",\"carries\":" << d2vr::NativeWeaponHands::carries.load() << ",\"block\":[" << block_pose_frames.load() << ',' << block_wanted.load() << ',' << gesture_blocks.load() << ',' << block_not_free.load() << ',' << block_not_held.load() << ',' << (d2vr::NativeWeaponHands::block_keeps_gun()?1:0) << ']' << ",\"hip_frames\":" << d2vr::NativeWeaponHands::hip_frames.load() << ",\"props_thrown\":[" << d2vr::NativeWeaponHands::props_marked.load() << ',' << d2vr::NativeWeaponHands::prop_hits.load() << ',' << (d2vr::NativeWeaponHands::phys_decl_ok.load()?1:0) << "],\"native\":[" << d2vr::NativeWeaponHands::ops.load() << ',' << d2vr::NativeWeaponHands::failures.load() << ',' << d2vr::NativeWeaponHands::spawned.load() << ',' << d2vr::NativeWeaponHands::removed.load() << "],\"copy\":" << [&]{const auto c=d2vr::NativeWeaponHands::copy();std::ostringstream o;if(!c.present) return std::string("null");o << "{\"pos\":[" << c.pos[0] << ',' << c.pos[1] << ',' << c.pos[2] << "],\"blade\":[" << c.blade[0] << ',' << c.blade[1] << ',' << c.blade[2] << "],\"flying\":" << (c.flying?"true":"false") << ",\"trace\":\"" << c.trace << "\"}";return o.str();}() << "}" << ",\"blade_pokes\":" << native_grab.pokes_.load() << ",\"interact\":[" << interact_bits.load() << ',' << interact_presses.load() << ']' << ",\"ragdoll_tows\":" << native_grab.tows_.load() << ",\"hand_contact\":[" << native_grab.hand_contact().publishes.load() << ',' << native_grab.hand_contact().services.load() << ',' << native_grab.hand_contact().tested.load() << ',' << native_grab.hand_contact().touches.load() << ',' << native_grab.hand_contact().pushes.load() << ',' << native_grab.hand_contact().faults.load() << ',' << native_grab.hand_contact().cost_us.load() << ',' << native_grab.hand_contact().cost_max_us.load() << ',' << native_grab.hand_contact().scan_us.load() << ',' << native_grab.hand_contact().body_us.load() << ',' << native_grab.hand_contact().math_us.load() << ',' << native_grab.hand_contact().slow_services.load() << ',' << native_grab.hand_contact().preempted.load() << ',' << native_grab.hand_contact().write_us.load() << ',' << native_grab.hand_contact().write_max_us.load() << ',' << native_grab.hand_contact().slow_writes.load() << ',' << native_grab.hand_contact().cast_seen.load() << ',' << native_grab.hand_contact().cast_held.load() << ',' << native_grab.hand_contact().discoveries.load() << ',' << native_grab.hand_contact().discover_us.load() << ',' << native_grab.hand_contact().discover_max_us.load() << ',' << native_grab.hand_contact().meets.load() << ',' << native_grab.hand_contact().meet_shifts.load() << ',' << native_grab.hand_contact().meet_latches.load() << ',' << native_grab.hand_contact().keepouts.load() << ']' << ",\"left_equip\":\"" << [&]{std::lock_guard<std::mutex> l(hand_state_mutex);std::string n(left_equip_name);for(auto& ch:n) if(ch=='"'||ch==92||static_cast<unsigned char>(ch)<32) ch='?';return n;}() << "\"" << ",\"hand_weapon_bits\":" << [&]{std::lock_guard<std::mutex> l(hand_state_mutex);return hand_weapon_bits;}() << ",\"prompt_latency_ms\":[" << prompt_latency_last.load() << ',' << prompt_latency_max.load() << "]" << ",\"sword_tip_ndc\":[" << sword_tip_ndc_x.load() << ',' << sword_tip_ndc_y.load() << "]" << ",\"wheel_zone\":{\"frames\":" << wheel_dbg_frames.load() << ",\"plane_frames\":" << wheel_dbg_plane.load() << ",\"size\":[" << wheel_dbg_w.load() << ',' << wheel_dbg_h.load() << "],\"uv\":[" << wheel_dbg_u.load() << ',' << wheel_dbg_v.load() << "],\"clicks\":" << wheel_zone_clicks.load() << ",\"last\":" << wheel_zone_last.load() << ",\"stage\":[" << wheel_stage_x.load() << ',' << wheel_stage_y.load() << "]}" << ",\"wrist_early_publications\":" << wrist_early_publications.load() << ",\"hud_holder_hidden\":" << d2vr::NativeHudChildDraw::holder_hidden.load() << ",\"hud_eye_node\":" << (d2vr::NativeHudChildDraw::eye_node.load()?"true":"false") << ",\"prompt_world\":" << (d2vr::NativeHudChildDraw::prompt_world.load()?"true":"false") << ",\"world_prompt_frames\":" << world_prompt_frames.load() << ",\"prompt_shows_hides\":[" << prompt_shows.load() << ',' << prompt_hides.load() << "],\"takedown_flips\":" << takedown_flips.load() << ",\"takedown_hints\":" << d2vr::NativeHudChildDraw::takedown_hints.load() << ",\"npc_blade_contacts\":" << npc_blade_contacts.load() << ",\"contact_hits\":[" << d2vr::NativeInteractionAim::melee_applied_.load() << ',' << d2vr::NativeInteractionAim::melee_rejected_.load() << ',' << d2vr::NativeInteractionAim::melee_faults_.load() << ']' << ",\"contact_rejects\":[" << d2vr::NativeInteractionAim::melee_why_[0].load() << ',' << d2vr::NativeInteractionAim::melee_why_[1].load() << ',' << d2vr::NativeInteractionAim::melee_why_[2].load() << ']' << ",\"corpse_chops\":" << d2vr::NativeMelee::chops.load() << ",\"tip_speed\":[" << tip_speed_now[0].load() << ',' << tip_speed_now[1].load() << ']' << ",\"slash_speed\":" << (d2vr::NativeSlashSceneRate::process_owner().enabled()?slash_speed_factor:1.f) << ",\"slash_scene_rate\":{\"enabled\":" << (d2vr::NativeSlashSceneRate::process_owner().enabled()?"true":"false") << ",\"accelerations\":" << d2vr::NativeSlashSceneRate::process_owner().accelerations() << ",\"setter_failures\":" << d2vr::NativeSlashSceneRate::process_owner().setter_failures() << "}" << ",\"block_unequip_vetoes\":" << d2vr::NativeBlockEligibility::process_owner().vetoes() << ",\"takedown_range\":" << (native_interaction_aim.takedown_ranges_applied()?"true":"false") << ",\"takedown_kill_rules\":" << native_interaction_aim.takedown_range_kill_rules() << ",\"layer\":" << d2vr::NativeHeldObject::layer_json() << ",\"release_watch\":" << d2vr::NativeInteractionAim::release_watch_json() << ",\"held_object\":{\"installed\":" << (held_object_installed?"true":"false") << ",\"placed\":" << d2vr::NativeHeldObject::placed.load() << ",\"rejected_targets\":" << d2vr::NativeHeldObject::rejected_targets.load() << ",\"anchored\":" << d2vr::NativeHeldObject::anchored.load() << ",\"sim_invulnerable_blocked\":" << d2vr::NativeSimInvulnerable::blocked.load() << ",\"swarm_kill_skipped\":" << d2vr::NativeSwarmKillGuard::skipped.load() << ",\"swarm_why\":[" << d2vr::NativeMelee::swarm_why[0].load() << ',' << d2vr::NativeMelee::swarm_why[1].load() << ',' << d2vr::NativeMelee::swarm_why[2].load() << ',' << d2vr::NativeMelee::swarm_why[3].load() << "],\"thrown\":" << d2vr::NativeHeldObject::thrown.load() << ",\"throw_kept\":" << d2vr::NativeHeldObject::throw_kept.load() << ",\"throws\":" << held_throws.load() << ",\"drops\":" << held_drops.load() << "}" << ",\"arm_hidden\":" << arm_hidden_bits.load() << ",\"arm_shows\":" << d2vr::NativeHeldObject::arm_shows.load() << ",\"arm_hides_skipped\":" << d2vr::NativeHeldObject::hides_skipped.load() << ",\"held_world_renders\":" << d2vr::NativeHeldObject::world_renders.load() << ",\"held_debug\":[" << held_debug[0].load() << ',' << held_debug[1].load() << ',' << held_debug[2].load() << ',' << held_debug[3].load() << ',' << held_debug[4].load() << ',' << held_debug[5].load() << ',' << held_debug[6].load() << ',' << held_debug[7].load() << ',' << held_debug[8].load() << ',' << held_debug[9].load() << ',' << held_debug[10].load() << ',' << held_debug[11].load() << ',' << held_debug[12].load() << "]" << ",\"arm_show_failed\":" << (d2vr::NativeHeldObject::arm_show_failed.load()?"true":"false") << ",\"native_options_page\":[" << d2vr::NativeMenuEntry::clicks.load() << ',' << d2vr::NativeMenuEntry::queued.load() << ',' << d2vr::NativeMenuEntry::native_pages.load() << ',' << d2vr::NativeOptionsPage::opens.load() << ',' << d2vr::NativeOptionsPage::changes.load() << ',' << d2vr::NativeOptionsPage::faults.load() << ',' << d2vr::NativeOptionsPage::failed_step.load() << ',' << d2vr::NativeOptionsPage::last_show.load() << ',' << d2vr::NativeOptionsPage::action_flips.load() << ']' << ",\"impact_fx\":[" << d2vr::NativeInteractionAim::impact_played_.load() << ',' << d2vr::NativeInteractionAim::impact_skipped_.load() << ']' << ",\"hud_master_entries\":" << d2vr::NativeHudChildDraw::master_entries.load() << ",\"hud_window_layers\":" << (game_xr?game_xr->hud_window_layers:0) << ",\"hud_cylinder\":" << (game_xr && game_xr->cylinder_layers()?"true":"false") << ",\"hud_scale\":" << d2vr::NativeHudChildDraw::hud_scale.load()
         << ",\"contact_gates\":[" << contact_gates[0].load() << ',' << contact_gates[1].load() << ',' << contact_gates[2].load() << ',' << contact_gates[3].load() << ',' << contact_gates[4].load() << ',' << contact_gates[5].load() << ',' << contact_gates[6].load() << ',' << contact_gates[7].load() << ']'
         << ",\"takedown_range_policy\":{\"choke\":\"" << (d2vr::NativeChokeDistanceScope::process_owner().enabled()?"private-view-x1.5":"native-unmodified") << "\",\"kill\":\"native-unmodified\",\"enabled\":" << (d2vr::NativeChokeDistanceScope::process_owner().enabled()?"true":"false") << ",\"substitutions\":" << d2vr::NativeChokeDistanceScope::process_owner().substitutions() << '}'
@@ -6173,8 +6246,9 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                 if(FAILED(device->CreateTexture2D(&texture,nullptr,&paired_left))) throw std::runtime_error("Cannot allocate paired eye texture");
                             }
                             mono_path=mono_view_state.load()==1;
+                            if(alternate_on() && views.size()==2) mono_path=false; // alternate-eye paired frame: the existing paired readiness
                             // perf-mono-view: ready when this frame's one view was matched at its begin (eye 0, by address) and the engine prepared exactly one
-                            pair_ready=mono_path?(stereo_active.load() && views.size()==1 && mono_eye_frame.load()==number):
+                            pair_ready=mono_path?(stereo_active.load() && views.size()==1 && mono_eye_frame.load()==number && (!alternate_on() || (alt_head_stamp.load()>>1)==number)):
                                 paired_left_ready && views.size()==2 && (native_eye_capture_requested?native_eye_pair.complete():
                                 (paired_binds_per_eye && paired_buffer_binds==paired_binds_per_eye*2));
                             if(pair_ready && native_eye_capture_requested && !mono_path) ++native_eye_pairs;
@@ -6184,6 +6258,7 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                             ++paired_bind_histogram[std::min<UINT>(paired_buffer_binds,15)];
                             paired_buffer_binds=0;paired_left_ready=false;native_eye_pair.reset();
                         }
+                        const int alt_fresh=alternate_on() && mono_path && pair_ready?static_cast<int>(alt_head_stamp.load()&1u):-1; // the one eye rendered for this Present
                         if(mono_path && gameplay && stereo_active.load()) { // a sustained miss in gameplay means the one view cannot be named: pair again
                             if(pair_ready) mono_view_misses=0;
                             else if(++mono_view_misses>=180) mono_view_fallback("perf-mono-view: the one engine view was not matched for 180 gameplay frames");
@@ -6535,9 +6610,14 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                             } else if(!gameplay) game_xr->wrist_hud({});
                             render_perf_publish_scope(context.Get(),gameplay,now_status);
                             {const auto left=fsr_taa.eye_upscaler_generation[0].load(),right=fsr_taa.eye_upscaler_generation[1].load();game_xr->upscaler_generation((left==right || mono_view_state.load()==1) && left?left:0);}
+                            game_xr->alternate_enabled=alternate_on();game_xr->alternate_fresh_eye=alt_fresh;game_xr->alternate_frame=number;
                             game_xr->present(completed_left.Get(),completed_right.Get(),
                                 views.empty()?1.4f:views[0].pose->horizontal_fov,views.empty()?.88f:views[0].pose->vertical_fov,gameplay,authored_camera,game_logic_mask()==4,
                                 pair_ready?completed_right.Get():nullptr,mirror_view(desc.OutputWindow),game_logic_mask()==32);
+                            if(alternate_on()) {
+                                if(game_xr->alternate_error) alternate_fallback("alternate-eye: an eye image could not be kept");
+                                else alternate_after_present(number,gameplay,gameplay && !game_xr->settings_open(),authored_camera,alt_fresh);
+                            }
                             if(game_xr->test_unlock_requested) {game_xr->test_unlock_requested=false;test_unlock_applied=apply_test_unlock();}
                             poll_test_commands();
                             const auto xr_housekeeping_start=game_xr->timing.end_ns?game_xr->timing.end_ns:d2vr::GameXr::cpu_time_ns();
@@ -8129,6 +8209,11 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
             if(fs::exists(root/L"build"/L"perf-mono-view")) {
                 if(xr_requested && head_requested && paired_requested && eye_boundary_requested && native_eye_capture_requested && !single_eye_requested) mono_view_state=1;
                 else {mono_view_state=2;note_recoverable("perf-mono-view needs head-tracked paired XR with native eye capture; staying paired");}
+            }
+            alt_eye_state=0;alt_frames=0;alt_paired_frames=0;alt_fallbacks=0;alt_mismatch=0;alt_head_stamp=0;alt_plan_stamp=0;alt_epoch_seen=0;alt_descriptor_paired=false;alt_plan.reset();
+            if(fs::exists(root/L"build"/L"alternate-eye")) { // plan F task 1: alternate-eye rides on the mono-view path (same prerequisites)
+                if(xr_requested && head_requested && paired_requested && eye_boundary_requested && native_eye_capture_requested && !single_eye_requested) {alt_eye_state=1;mono_view_state=1;}
+                else {alt_eye_state=2;note_recoverable("alternate-eye needs head-tracked paired XR with native eye capture; staying paired");}
             }
         }
         if(stereo_requested) {
