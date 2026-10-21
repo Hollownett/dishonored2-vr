@@ -60,7 +60,7 @@ class VrSettings {
     int hud_percent_{65};
     bool controls_hint_{true};
     TurnControl::Config turning_;
-    MirrorMode mirror_{MirrorMode::both_eyes};
+    MirrorMode mirror_{MirrorMode::right_eye};
     double sharpness_{.5};
     bool native_calibration_{}; // calibration opened from the game's own options page: B returns there
     void cycle_turning(int direction) {
@@ -89,7 +89,7 @@ public:
                    std::optional<MirrorMode> mirror;std::optional<double> sharpness;std::optional<int> hud_percent;std::optional<bool> controls_hint;
                    bool recenter{},consume{},opened{},calibrate{},player_measurements{},test_unlock{};
                    std::optional<PalmOffsetChange> palm_offset;};
-    void initialize(double scale,bool aa,TurnControl::Config turning={},MirrorMode mirror=MirrorMode::both_eyes,double sharpness=.5,int temporal_aa=2,
+    void initialize(double scale,bool aa,TurnControl::Config turning={},MirrorMode mirror=MirrorMode::right_eye,double sharpness=.5,int temporal_aa=2,
         int hud_percent=65,bool controls_hint=true,AvatarPlayerMeasurements player_measurements={}) {
         requested_=scale;aa_=aa;turning_=turning;mirror_=mirror;sharpness_=sharpness;temporal_aa_=temporal_aa;
         hud_percent_=hud_percent;controls_hint_=controls_hint;player_measurements_=player_measurements;

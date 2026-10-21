@@ -13,7 +13,7 @@ struct VrPreferences {
     double resolution=1;
     bool antialiasing=true;
     TurnControl::Config turning{TurnControl::Mode::snap,45,90};
-    MirrorMode mirror=MirrorMode::both_eyes;
+    MirrorMode mirror=MirrorMode::right_eye; // one eye: the desktop copy of both eyes costs render-thread time (1.5 ms on Windows)
     double sharpness=.5;
     int temporal_aa=2; // anti-aliasing: 0 off (SMAA row only), 1 game TAA, 2 FSR 3 native, 3 FSR 3 quality (77% render), 4 FSR 3 balanced (67%), 5 FSR 4 native, 6 FSR 4 quality (77%)
     int hud_percent=65; // HUD drawn at this size about the view centre (native_hud_rect.hpp)

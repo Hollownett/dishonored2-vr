@@ -81,7 +81,7 @@ From there you can set:
 - edge smoothing, SMAA (on by default; skipped automatically while FSR 3 is on)
 - sharpening (off, low, medium, high, max; default medium)
 - HUD size (55%, 65% default, 75%, 85%, 100% = the game's own layout) and controls card on the left wrist (on/off)
-- monitor view: what the desktop game window shows while you play - both eyes side by side (default), left eye or right eye
+- monitor view: what the desktop game window shows while you play - right eye (default: copying one eye costs less render time than both), left eye, or both eyes side by side
 - turning (snap or smooth)
 - recenter
 - legacy avatar calibration; it is not required by the current hands-only mode

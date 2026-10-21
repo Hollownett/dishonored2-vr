@@ -167,7 +167,7 @@ int main() {
         require(toggle.antialiasing && !*toggle.antialiasing,"Pointer did not toggle AA");
         in.right_trigger=0;menu.update(in,false,true);in.right_trigger=1;
         const auto mirror_click=menu.update(in,false,true,PanelPointer{.5,.336});
-        require(mirror_click.mirror && *mirror_click.mirror==MirrorMode::right_eye && menu.mirror()==MirrorMode::right_eye,"Pointer did not cycle monitor view");
+        require(mirror_click.mirror && *mirror_click.mirror==MirrorMode::left_eye && menu.mirror()==MirrorMode::left_eye,"Pointer did not cycle monitor view");
         require(!menu.update(in,false,true,PanelPointer{.5,.336}).mirror,"Held trigger changed monitor view repeatedly");
         in.right_trigger=0;menu.update(in,false,true);in.right_trigger=1;
         const auto sharp_click=menu.update(in,false,true,PanelPointer{.5,.4});
@@ -260,7 +260,7 @@ int main() {
             require(edge_stick.antialiasing && *edge_stick.antialiasing && rows.antialiasing(),"Stick did not toggle edge AA");
             press(0,-1);
             const auto mirror_stick=press(1,0);
-            require(mirror_stick.mirror && *mirror_stick.mirror==MirrorMode::right_eye && rows.mirror()==MirrorMode::right_eye,"Stick did not cycle monitor view");
+            require(mirror_stick.mirror && *mirror_stick.mirror==MirrorMode::left_eye && rows.mirror()==MirrorMode::left_eye,"Stick did not cycle monitor view");
             press(0,-1);
             const auto sharp_stick=press(1,0);
             require(sharp_stick.sharpness && *sharp_stick.sharpness==.75 && rows.sharpness()==.75,"Stick did not cycle sharpening");
@@ -369,7 +369,7 @@ int main() {
         std::ofstream output("artifacts/vr-settings-preview.rgba",std::ios::binary);
         output.write(reinterpret_cast<const char*>(pixels.data()),static_cast<std::streamsize>(pixels.size()));
         require(static_cast<bool>(output),"Cannot save settings preview");
-        {VrPreferences d;require(d.antialiasing && d.temporal_aa==2 && d.hud_percent==65 && d.controls_hint && d.sharpness==.5 && d.mirror==MirrorMode::both_eyes,"VrPreferences defaults differ");}
+        {VrPreferences d;require(d.antialiasing && d.temporal_aa==2 && d.hud_percent==65 && d.controls_hint && d.sharpness==.5 && d.mirror==MirrorMode::right_eye,"VrPreferences defaults differ");}
         const auto preference_file=std::filesystem::path("build/vr-settings-test.cfg");
         save_preferences(preference_file,{1.3,true,{TurnControl::Mode::smooth,45,120},MirrorMode::left_eye,.75,0,65,true});
         {std::ifstream raw(preference_file);int version{};raw>>version;require(version==7,"Saved preferences are not version 7");}
@@ -417,7 +417,7 @@ int main() {
         {std::ofstream legacy(preference_file);legacy<<"1 1.4 1 2 45 120\n";}
         const auto migrated=load_preferences(preference_file);
         require(migrated && migrated->resolution==1.4 && migrated->antialiasing && migrated->turning.mode==TurnControl::Mode::smooth &&
-            migrated->turning.smooth_degrees_per_second==120 && migrated->mirror==MirrorMode::both_eyes && migrated->sharpness==.5 && migrated->temporal_aa==2 &&
+            migrated->turning.smooth_degrees_per_second==120 && migrated->mirror==MirrorMode::right_eye && migrated->sharpness==.5 && migrated->temporal_aa==2 &&
             migrated->hud_percent==65 && migrated->controls_hint,
             "Version 1 migration differs");
         {std::ofstream version2(preference_file);version2<<"2 1.3 1 2 45 120 1 0.25\n";}

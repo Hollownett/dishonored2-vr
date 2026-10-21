@@ -11,7 +11,7 @@ namespace DishonoredVR;
 public sealed class Prefs
 {
     public double Resolution = 1, Sharpness = .5, SnapDeg = 45, SmoothDps = 90;
-    public int Aa = 1, Mode = 1, Mirror = 2, TemporalAa = 2, Hud = 65, Hint = 1;
+    public int Aa = 1, Mode = 1, Mirror = 0, TemporalAa = 2, Hud = 65, Hint = 1;
     public string[] Measurements = { "0", "0", "0", "0", "0" };
 
     public static Prefs Load(string file)

@@ -1218,7 +1218,7 @@ public:
     bool exit_requested=false;
     GameXr(ID3D11Device* device,UINT width,UINT height,DXGI_FORMAT format,const wchar_t* loader,bool controllers=false,bool tracked_gameplay=false,bool edge_antialiasing=false,bool settings=false,double multiplier=1,
         TurnControl::Config turning={},std::filesystem::path preferences_file={},bool native_pointer=false,PFN_xrGetInstanceProcAddr simulated_dispatch=nullptr,
-        MirrorMode mirror=MirrorMode::both_eyes,double sharpness=.5,int temporal_aa=2,int hud_percent=65,bool controls_hint=true,AvatarPlayerMeasurements player_measurements={})
+        MirrorMode mirror=MirrorMode::right_eye,double sharpness=.5,int temporal_aa=2,int hud_percent=65,bool controls_hint=true,AvatarPlayerMeasurements player_measurements={})
         :graphics_state_(device),settings_enabled_(settings),native_pointer_enabled_(native_pointer),controller_enabled_(controllers),tracked_gameplay_required_(tracked_gameplay) {
         ContextState::Scope graphics_scope(graphics_state_);
         try {
