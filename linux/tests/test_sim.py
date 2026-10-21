@@ -55,6 +55,14 @@ class Case(unittest.TestCase):
         patcher.start()
         self.addCleanup(patcher.stop)
 
+        def real_launcher(*_a, **_k):
+            raise AssertionError("a test reached the real Steam launcher; inject a fake with env=self.env(launch=...)")
+
+        for target in (unittest.mock.patch.object(sim.Env, "_launch", real_launcher),
+                       unittest.mock.patch.object(sim.subprocess, "Popen", real_launcher)):
+            target.start()
+            self.addCleanup(target.stop)
+
     def args(self, *extra):
         argv = ["--steam-root", str(self.f.steam_root), "sim", "--backup-root", str(self.backups),
                 "--out-root", str(self.runs), *extra]
@@ -273,6 +281,10 @@ class FullRun(Case):
         rc, out, err = self.run_cli("--settle", "5", env=env)
         self.assertEqual(rc, 0, "\n".join(self.lines))
         self.assertEqual((self.mod_home / "build/linux-settle-seconds").read_text(), "30\n")
+
+
+def shutil_error(*a, **k):
+    raise RuntimeError("not an OSError")
 
 
 def fake_pe(tag=b""):
@@ -496,6 +508,150 @@ class Candidate(FullRun):
         rc, out, err = self.run_cli("--restore")
         self.assertEqual(rc, 0, out + err)
         self.assertEqual(self.installed.read_bytes(), self.original)
+
+    def test_real_launcher_guard_fails_loudly(self):
+        with self.assertRaises(AssertionError):
+            sim.Env()._launch()
+
+    def test_lost_dll_record_keeps_marker_and_never_succeeds(self):
+        backup = self.pending()
+        (backup / sim.DLL_RECORD).unlink()
+        rc, out, err = self.run_cli("--restore")
+        self.assertEqual(rc, 2)
+        self.assertIn("UNKNOWN", out)
+        self.assertTrue((backup / sim.PENDING).exists())
+        self.assertEqual(self.installed.read_bytes(), self.cand.read_bytes())
+
+    def test_legacy_info_json_dll_entry_is_used(self):
+        import hashlib
+        backup = self.pending()
+        rec = json.loads((backup / sim.DLL_RECORD).read_text())
+        (backup / sim.DLL_RECORD).unlink()
+        info = json.loads((backup / "info.json").read_text())
+        info["dll"] = {"path": rec["path"], "backup": rec["backup"], "sha256": rec["original_sha256"]}
+        (backup / "info.json").write_text(json.dumps(info))
+        rc, out, err = self.run_cli("--restore")  # destination is the candidate: unknown candidate hash, so check by hand
+        self.assertEqual(rc, 2)
+        self.assertIn("legacy record", out)
+        self.assertTrue((backup / sim.PENDING).exists())
+        sim.place_atomic(self.original, self.installed)  # now the original is there: nothing to do
+        rc, out, err = self.run_cli("--restore")
+        self.assertEqual(rc, 0, out)
+        self.assertFalse((backup / sim.PENDING).exists())
+
+    def test_manual_command_is_hash_guarded_and_absent_for_bad_backup(self):
+        env, state = self.fake_game()
+        env.kill = lambda pid, sig: state["killed"].append((pid, sig))
+        env.close_timeout = 3
+        rc, out, err = self.run_cli("--candidate-dll", str(self.cand), env=env)
+        text = "\n".join(self.lines)
+        self.assertEqual(rc, 2)
+        self.assertIn("sha256sum", text)
+        self.assertIn("&& cp -f", text)
+        self.assertIn("sim --restore", text)
+
+    def test_game_not_closing_with_corrupt_backup_prints_no_copy_command(self):
+        env, state = self.fake_game()
+        env.kill = lambda pid, sig: state["killed"].append((pid, sig))
+        env.close_timeout = 3
+        inner = env.launch
+
+        def launch():
+            inner()
+            next(self.backups.glob("*-sim/installed-*.dll")).write_bytes(b"corrupt")
+
+        env.launch = launch
+        rc, out, err = self.run_cli("--candidate-dll", str(self.cand), env=env)
+        text = "\n".join(self.lines)
+        self.assertEqual(rc, 2)
+        self.assertNotIn("cp -f", text)
+        self.assertIn("do NOT copy", text)
+
+    def test_symlinked_installed_dll_refused(self):
+        real = self.tmp / "real-dll.dll"
+        real.write_bytes(self.original)
+        self.installed.unlink()
+        self.installed.symlink_to(real)
+        rc, out, err = self.run_cli("--candidate-dll", str(self.cand), env=self.env(launch=lambda: None))
+        self.assertEqual(rc, 1)
+        self.assertIn("symlink", err)
+        self.assertTrue(self.installed.is_symlink())
+        self.assertFalse(self.backups.exists())
+
+    def test_symlinked_build_dir_refused(self):
+        build = self.mod_home / "build"
+        moved = self.tmp / "build-elsewhere"
+        build.rename(moved)
+        build.symlink_to(moved)
+        rc, out, err = self.run_cli("--candidate-dll", str(self.cand), env=self.env(launch=lambda: None))
+        self.assertEqual(rc, 1)
+        self.assertIn("symlink", err)
+
+    def test_candidate_changed_after_planning_is_hashed_as_placed(self):
+        import hashlib
+        changed = fake_pe(b"rebuilt in the meantime")
+        real_compile = sim.compile_script
+
+        def compile_and_change(*a, **k):
+            r = real_compile(*a, **k)
+            self.cand.write_bytes(changed)  # the harness rebuilt the candidate after the plan hashed it
+            return r
+
+        seen = {}
+        env, state = self.fake_game()
+        inner = env.launch
+
+        def launch():
+            seen["during"] = self.installed.read_bytes()
+            inner()
+
+        env.launch = launch
+        with unittest.mock.patch.object(sim, "compile_script", compile_and_change):
+            rc, out, err = self.run_cli("--candidate-dll", str(self.cand), env=env)
+        self.assertEqual(rc, 0, "\n".join(self.lines) + err)
+        self.assertEqual(seen["during"], changed)
+        self.assertEqual(self.installed.read_bytes(), self.original)  # restored: the record holds the hash of what was placed
+        self.assertEqual(sim.pending_backups(self.backups), [])
+
+    def test_unrestorable_backup_says_how_to_clear_it(self):
+        backup = self.pending()
+        sim.place_atomic(fake_pe(b"newer install"), self.installed)
+        rc, out, err = self.run_cli("--restore")
+        self.assertEqual(rc, 2)
+        self.assertIn(f"rm '{backup / sim.PENDING}'", out)
+        rc, out, err = self.run_cli("--dry-run")  # the refusal for new runs names it too
+        self.assertEqual(rc, 1)
+        self.assertIn(f"rm '{backup / sim.PENDING}'", err)
+
+    def test_dev_knobs_removed_even_when_restore_fails(self):
+        self.pending()
+        sim.place_atomic(fake_pe(b"newer install"), self.installed)
+        for n in ("linux-probe-override.cfg", "linux-autocontinue", "simulated-gameplay-script.cfg"):
+            (self.mod_home / "build" / n).write_text("x")
+        (self.mod_home / "artifacts/simulated-gameplay-script.json").write_text("{}")
+        rc, out, err = self.run_cli("--restore")
+        self.assertEqual(rc, 2)
+        for n in ("linux-probe-override.cfg", "linux-autocontinue", "simulated-gameplay-script.cfg"):
+            self.assertFalse((self.mod_home / "build" / n).exists(), n)
+        self.assertFalse((self.mod_home / "artifacts/simulated-gameplay-script.json").exists())
+
+    def test_snapshot_error_does_not_skip_restore(self):
+        env, state = self.fake_game()
+        with unittest.mock.patch.object(sim, "snapshot", side_effect=shutil_error):
+            rc, out, err = self.run_cli("--candidate-dll", str(self.cand), env=env)
+        self.assertEqual(self.installed.read_bytes(), self.original)
+        self.assertEqual(self.savegame.joinpath("SLOT01/data.bin").read_bytes(), b"user slot")
+        self.assertIn("snapshot failed", "\n".join(self.lines))
+        self.assertEqual(sim.pending_backups(self.backups), [])
+
+    def test_close_game_error_does_not_traceback_and_reports(self):
+        env, state = self.fake_game()
+        with unittest.mock.patch.object(sim, "close_game", side_effect=RuntimeError("boom")):
+            rc, out, err = self.run_cli("--candidate-dll", str(self.cand), env=env)
+        text = "\n".join(self.lines)
+        self.assertIn("closing the game failed", text)
+        self.assertEqual(rc, 2)  # game process still listed: nothing restored, message names the DLL
+        self.assertIn("STILL INSTALLED", text)
 
     def test_place_atomic_failure_leaves_no_temp_file(self):
         from unittest import mock

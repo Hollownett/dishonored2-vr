@@ -19,7 +19,7 @@ refused by Steam (`AppError_5 "FamilySharing"`); after the account switch it lau
  "view_yaw_events":0,"unrequested_yaw_rate_peak":0,"unrequested_yaw_events":0,"samples":6328,"skipped":0}
 ```
 
-Caveat: the idle script asks for yaw +-20 deg over 10 s (absolute head_pose), yet `view_yaw_rate_peak` is about 2e-5 and
-`samples` is 6328 for a 120 s session, so either the meter's units hide it or the scripted yaw is not reaching the game view
-(the simulator's wait_frame overrides the head orientation while a script is active). Treat these as a floor, and re-check
-the yaw path before reading small "after" differences into them.
+Reading these numbers: `view_yaw_*` measures the engine anchor (body) yaw. Scripted HMD yaw does not rotate the anchor, so
+about 0 is the correct reading while standing still; it is not a sign that the scripted yaw failed. The idle scenario therefore
+cannot show wobble. Later before/after comparisons of the comfort meter need a scenario where the player moves (oil_tank_drop at
+least); idle is only good for the cost (GPU/CPU) baseline and as a floor.
