@@ -27,6 +27,24 @@ int main(){
     {AnchorSmoother s;s.update(P(1,0),dt,1);const auto o=s.update(P(1,3),dt,1);assert(o.x==3 && s.resets()==1);}
     {AnchorSmoother s;s.update(P(1),dt,1);const auto o=s.update(P(2.5),dt,1);assert(o.z==2.5 && s.resets()==1);}
     {AnchorSmoother s;s.update(P(1),dt,1);const auto o=s.update(P(1.5,.01,.02),dt,1);assert(o.x==.01 && o.y==.02);assert(s.resets()==0);}
+    {AnchorSmoother s;s.update(P(1,0,0),dt,1);const auto o=s.update(P(1,0,3),dt,1);assert(o.y==3 && s.resets()==1);} // y teleport
+    {AnchorSmoother s;s.update(P(1,0,0),dt,1);const auto o=s.update(P(1,0,.5),dt,1);assert(o.y==.5 && s.resets()==0);}
+    {AnchorSmoother s; // free fall from rest: the output never jumps and the lag closes
+     double raw=0,v=0,prev_out=0,prev_raw=0,lag06=1;s.update(P(0),dt,1);
+     for(double t=dt;t<1.0;t+=dt){v+=9.81*dt;raw-=v*dt;const double o=s.update(P(raw),dt,1).z;
+         assert(std::fabs(o-prev_out)<=std::fabs(raw-prev_raw)+4.0*dt+1e-6);
+         prev_out=o;prev_raw=raw;if(t>=.6&&lag06==1) lag06=o-raw;}
+     assert(lag06<=.05);assert(s.resets()==0);}
+    {AnchorSmoother s; // fall for 0.5 s, then it lands
+     double raw=0,v=0,prev_out=0,prev_raw=0;s.update(P(0),dt,1);double o=0;
+     for(double t=dt;t<1.5;t+=dt){if(t<.5){v+=9.81*dt;raw-=v*dt;}
+         o=s.update(P(raw),dt,1).z;
+         assert(std::fabs(o-prev_out)<=std::fabs(raw-prev_raw)+4.0*dt+1e-6);
+         prev_out=o;prev_raw=raw;}
+     assert(std::fabs(o-raw)<1e-6);assert(s.resets()==0);}
+    {AnchorSmoother s; // a single-frame crouch step is not mistaken for a fall
+     for(int i=0;i<30;++i) s.update(P(1.6),dt,1);
+     const double first=s.update(P(1.1),dt,1).z;assert(1.6-first<=1.5*dt+1e-9);}
     {AnchorSmoother s;s.update(P(1),dt,1);const auto o=s.update(P(1.2),dt,2);assert(o.z==1.2 && s.resets()==1);}
     {AnchorSmoother s;s.update(P(1),dt,1);
      assert(s.update(P(1.2),0,1).z==1.2 && s.resets()==1);

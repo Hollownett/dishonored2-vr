@@ -77,6 +77,7 @@ editing the user's real files, so they are not measured even once the session is
 ## Headset checklist (Task 11)
 
 - [ ] Task 2: choke a guard from behind; turn your head during the animation; the view follows your head; no spin.
+- [ ] Task 3: mantle onto a ledge and drop off a roof: no lag swoop and no pop. Also crouch and stand with the tracked arms on: arms keep their length.
 
 ## Frame split block (plan E task 1)
 

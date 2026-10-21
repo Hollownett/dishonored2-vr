@@ -10,17 +10,18 @@
 #include <cstdint>
 
 namespace d2vr {
-struct AnchorSmootherConfig {double tau_s=.12,max_rate_mps=1.5,fall_rate_mps=3,fall_hold_s=.1,teleport_m=1.0;};
+struct AnchorSmootherConfig {double tau_s=.12,max_rate_mps=1.5,fall_rate_mps=3,fall_hold_s=.1,teleport_m=1.0,catch_up_mps=4,sink_lag_m=.15,sink_hold_s=.05;};
 
 class AnchorSmoother {
     AnchorSmootherConfig cfg_;
     bool have_{};
     std::uint64_t epoch_{},resets_{};
     Vec3 raw_{};
-    double out_z_{},fall_s_{};
+    double out_z_{},fall_s_{},sink_s_{};
+    bool falling_{}; // a real fall was detected: the lag closes at |raw speed|+catch_up_mps, never in one frame
     Vec3 reset_to(const Vec3& raw,std::uint64_t epoch,bool count) noexcept {
         if(count) ++resets_;
-        have_=true;epoch_=epoch;raw_=raw;out_z_=raw.z;fall_s_=0;
+        have_=true;epoch_=epoch;raw_=raw;out_z_=raw.z;fall_s_=sink_s_=0;falling_=false;
         return raw;
     }
 public:
@@ -32,10 +33,19 @@ public:
         const Vec3 d=raw-raw_;
         if(std::fabs(d.x)>cfg_.teleport_m || std::fabs(d.y)>cfg_.teleport_m || std::fabs(d.z)>cfg_.teleport_m)
             return reset_to(raw,epoch,true);
-        if(-d.z/dt>cfg_.fall_rate_mps) fall_s_+=dt;else fall_s_=0;
+        const double rate=-d.z/dt; // downward raw speed
+        if(rate>cfg_.fall_rate_mps) fall_s_+=dt;else fall_s_=0;
+        if(rate>cfg_.max_rate_mps) sink_s_+=dt;else sink_s_=0;
         raw_=raw;
-        if(fall_s_+1e-9>=cfg_.fall_hold_s) out_z_=raw.z;
-        else {
+        const double lag=out_z_-raw.z;
+        // A fall is a hold above fall_rate, or a sustained sink the speed limit cannot follow (so the lag stays bounded).
+        // A one-frame step (a crouch or a stair) is neither, and keeps the slow filter.
+        if(!falling_ && (fall_s_+1e-9>=cfg_.fall_hold_s || (sink_s_+1e-9>=cfg_.sink_hold_s && lag>cfg_.sink_lag_m))) falling_=true;
+        if(falling_) {
+            const double delta=raw.z-out_z_,limit=(std::fabs(d.z)/dt+cfg_.catch_up_mps)*dt;
+            if(delta>=-limit && delta<=limit) {out_z_=raw.z;falling_=false;}
+            else out_z_+=delta<0?-limit:limit;
+        } else {
             double step=(raw.z-out_z_)*(1-std::exp(-dt/cfg_.tau_s));
             const double limit=cfg_.max_rate_mps*dt;
             step=std::fmax(-limit,std::fmin(limit,step));
@@ -43,7 +53,7 @@ public:
         }
         return {raw.x,raw.y,out_z_};
     }
-    void reset() noexcept {have_=false;fall_s_=0;}
+    void reset() noexcept {have_=false;fall_s_=sink_s_=0;falling_=false;}
     std::uint64_t resets() const {return resets_;}
 };
 } // namespace d2vr
