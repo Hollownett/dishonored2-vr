@@ -83,6 +83,10 @@ editing the user's real files, so they are not measured even once the session is
 `xr-live-status.json` also carries `"frame_split":{"adapter":{name,vendor,vram_mb},"split":{...}}` over the same 900-frame gameplay window:
 `interval_ms_p50/p95` (Present enter to Present enter), `eye0_ms_p50` (eye 0 begin to eye 1 begin), `eye1_ms_p50` (eye 1 begin to Present enter),
 `hook_ms_p50` (Present enter to exit, the full hook including the desktop Present), `eye1_share` (eye1 p50 / interval p50), `gpu_busy`
-(native GPU elapsed over the interval, p50; `null` without the `native-gpu-timing` knob), `render_thread_busy` and `game_thread_busy`
+(native GPU elapsed over the interval, p50; native command lists only, excluding FSR and immediate draws, from a timer that lags 1-3 frames, so read it as a lagged lower bound; `null` without the `native-gpu-timing` knob), `render_thread_busy` and `game_thread_busy`
 (GetThreadTimes delta over wall delta, about 1 s window; `null` when the thread clock is coarse or unknown), `frames`, `split_skipped`
-(frames with a missing or out-of-order eye stamp). The first gameplay frame after a menu or load feeds no interval sample.
+(cumulative; frames whose eye stamps were missing, out of order or stale, i.e. not `prev present < eye0 <= eye1 <= present`). The first gameplay frame after a menu or load feeds no interval sample.
+
+Debug trace: create `build/frame-split-trace` before launch to get `native-frame-split-trace.csv` (columns `frame,eye0,eye1,enter,exit,prev,accepted`,
+steady_clock ns; one row per fed frame, capped at 20000 rows, written by the status writer, not the render thread). Plan E task 3 checks that
+`accepted` is 1 on nearly every frame and `eye1 < enter`; many 0 rows mean the eye hooks do not run between two Presents as assumed.

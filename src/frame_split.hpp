@@ -4,10 +4,15 @@
 // last 900 frames, feed() is O(1) with no allocation, json() sorts copies of the ring and runs once per status write.
 // No locks of its own: the caller serialises feed/thread_sample/json (see comfort_meter.hpp, comfort_mutex).
 // Stamps are ticks of one monotonic clock (qpc_freq ticks per second; the probe passes steady_clock nanoseconds with
-// freq 1e9, the same clock as GameXr::cpu_time_ns). A missing stamp is <=0; prev_present_enter 0 = none (eye0_begin only: <0, so a clock that
-// starts at 0 still works in tests; the probe passes -1 for "eye 0 did not begin this frame").
-// A frame whose eye stamps are missing or out of order is counted in split_skipped and contributes no eye samples;
-// its interval and hook samples still count.
+// freq 1e9, the same clock as GameXr::cpu_time_ns). eye0_begin is missing when <0 (so a test clock may start at 0; the probe
+// passes -1 for "eye 0 did not begin this frame"); eye1_begin, present_enter and present_exit are missing when <=0;
+// prev_present_enter 0 = none (first frame after a gap).
+// Eye samples are accepted only when prev_present_enter < eye0_begin <= eye1_begin <= present_enter, i.e. both eyes began
+// after the previous Present and before this one. Anything else (missing, out of order, stale eye stamps from an earlier
+// frame, or no previous Present) is counted in split_skipped and contributes no eye samples; its interval and hook
+// samples still count. split_skipped is cumulative since start; everything else is the 900-frame window.
+// gpu_busy: the probe feeds native_gpu_summary.last_elapsed_ms, the native command lists only (no FSR or immediate draws),
+// from a timer that lags 1-3 frames. Read it as a lagged lower bound on GPU busy; null when the native-gpu-timing knob is off.
 #include <algorithm>
 #include <array>
 #include <cstddef>
@@ -28,7 +33,8 @@ public:
         const std::size_t slot=head_;
         interval_[slot]=prev_present_enter!=0?span(prev_present_enter,s.present_enter):0;
         hook_[slot]=s.present_exit>0?span(s.present_enter,s.present_exit):0;
-        const bool eyes=s.eye0_begin>=0 && s.eye1_begin>0 && s.eye1_begin>s.eye0_begin && s.present_enter>=s.eye1_begin;
+        accepted_=prev_present_enter!=0 && s.eye0_begin>=0 && s.eye0_begin>prev_present_enter && s.eye1_begin>=s.eye0_begin && s.eye1_begin>0 && s.present_enter>=s.eye1_begin;
+        const bool eyes=accepted_;
         eye0_[slot]=eyes?span(s.eye0_begin,s.eye1_begin):0;
         eye1_[slot]=eyes?span(s.eye1_begin,s.present_enter):0;
         if(!eyes) ++skipped_;
@@ -36,6 +42,7 @@ public:
         head_=(head_+1)%window;
         if(count_<window) ++count_;
     }
+    bool last_accepted() const noexcept {return accepted_;} // whether the latest feed passed the eye check (for the trace)
     // render/game busy fraction of the latest window; negative = unknown (coarse or zero thread clock) -> null.
     void thread_sample(double render_busy,double game_busy) noexcept {render_=render_busy;game_=game_busy;}
     std::string json() const {
@@ -70,6 +77,28 @@ private:
     }
     std::array<std::uint64_t,window> interval_{},eye0_{},eye1_{},hook_{},gpu_{};
     std::size_t head_{},count_{};std::uint64_t skipped_{};
-    double render_{-1},game_{-1};
+    double render_{-1},game_{-1};bool accepted_{};
+};
+// Optional per-frame CSV trace (knob build/frame-split-trace). push() runs on the render thread under the caller's lock:
+// fixed array, no allocation; drain() formats text on the status thread. Capped so a long run cannot fill the disk.
+class FrameSplitTrace {
+public:
+    static constexpr std::size_t ring=4096,max_rows=20000;
+    static const char* header() {return "frame,eye0,eye1,enter,exit,prev,accepted";}
+    void push(std::int64_t eye0,std::int64_t eye1,std::int64_t enter,std::int64_t exit_ns,std::int64_t prev,bool accepted) noexcept {
+        if(pushed_>=max_rows) return;
+        if(head_-tail_>=ring) {++dropped_;return;}
+        rows_[head_%ring]={pushed_,eye0,eye1,enter,exit_ns,prev,accepted};++head_;++pushed_;
+    }
+    std::string drain() {
+        std::ostringstream o;
+        for(;tail_<head_;++tail_) {const auto& r=rows_[tail_%ring];
+            o<<r.frame<<','<<r.eye0<<','<<r.eye1<<','<<r.enter<<','<<r.exit<<','<<r.prev<<','<<(r.accepted?1:0)<<'\n';}
+        return o.str();
+    }
+    std::uint64_t dropped() const noexcept {return dropped_;}
+private:
+    struct Row {std::uint64_t frame;std::int64_t eye0,eye1,enter,exit,prev;bool accepted;};
+    std::array<Row,ring> rows_{};std::uint64_t head_{},tail_{},pushed_{},dropped_{};
 };
 } // namespace d2vr

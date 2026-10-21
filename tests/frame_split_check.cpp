@@ -33,5 +33,17 @@ int main(){
      assert(near(field(m.json(),"frames"),900));}
     {FrameSplit m;m.feed({0,60000,110000,125000},0,F,5); // first frame after a gap: no previous present, no interval
      assert(near(field(m.json(),"interval_ms_p50"),0));}
+    {FrameSplit m;m.feed({20000,60000,110000,125000},30000,F,0); // stale_eye0_skipped: eye0 began before the previous Present
+     const auto j=m.json();
+     assert(near(field(j,"split_skipped"),1)&&near(field(j,"eye0_ms_p50"),0)&&near(field(j,"interval_ms_p50"),8.0)&&!m.last_accepted());
+     m.feed({30000,60000,110000,125000},30000,F,0);assert(!m.last_accepted()); // eye0 exactly at prev is also stale
+     m.feed({30001,60000,110000,125000},30000,F,0);assert(m.last_accepted());}
+    {FrameSplit m; // multi_frame_percentiles: intervals 10..19 ms with one bad-eye frame in the middle
+     for(int i=0;i<10;++i){const std::int64_t prev=1'000'000,enter=prev+(10+i)*10000;
+         m.feed({i==5?prev-1:prev+1000,prev+30000,enter,enter+5000},prev,F,(10+i)*1'000'000ull/2);}
+     const auto j=m.json();
+     assert(near(field(j,"interval_ms_p50"),14)&&near(field(j,"interval_ms_p95"),19)&&near(field(j,"split_skipped"),1)&&near(field(j,"frames"),10));
+     assert(near(field(j,"gpu_busy"),.5)&&near(field(j,"hook_ms_p50"),.5));}
+    {FrameSplitTrace t;t.push(1,2,3,4,5,true);assert(t.drain()=="0,1,2,3,4,5,1\n"&&t.drain().empty());}
     std::cout<<"PASS: frame split\n";
 }

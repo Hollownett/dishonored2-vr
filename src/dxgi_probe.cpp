@@ -358,8 +358,13 @@ static std::array<double,3> held_hand_velocity{};static std::uintptr_t held_enti
 static bool legacy_authored_camera=false; // build/legacy-authored-camera: authored scenes use the native camera rotation (and the +5% FOV)
 static d2vr::AuthoredHeading authored_heading;static std::optional<double> authored_heading_now;static std::uint64_t authored_heading_frame=~0ull; // the frame authored_heading_now was advanced for (eye 0) // render thread only (prepare_head_view, under log_mutex)
 // Frame split (plan E task 1): eye-begin and Present stamps are steady_clock ns (GameXr::cpu_time_ns), fed once per gameplay Present.
+static std::atomic<bool> frame_split_trace_on{false};
 static d2vr::FrameSplit frame_split;static std::mutex frame_split_mutex;
-static std::int64_t frame_split_eye_ns[2]{-1,0},frame_split_prev_enter_ns{};
+static std::int64_t frame_split_eye_ns[2]{-1,0};
+static std::atomic<std::int64_t> frame_split_prev_enter_ns{}; // Present thread writes, reset_perf_governor may clear
+// build/frame-split-trace: one CSV row per fed frame (frame,eye0,eye1,enter,exit,prev,accepted); rows are queued under frame_split_mutex
+// and written by the status writer, never on the render thread. Capped at FrameSplitTrace::max_rows.
+static d2vr::FrameSplitTrace frame_split_trace;static std::mutex frame_split_trace_file_mutex;static std::ofstream frame_split_trace_file;
 static std::string frame_split_adapter_json; // written once from the swap chain's adapter; guarded by frame_split_mutex
 static d2vr::PerfMeter perf_meter;static std::mutex perf_meter_mutex; // fed on the render thread, read by the status writer
 static d2vr::ComfortMeter comfort_meter;static std::mutex comfort_mutex; // fed by the render thread, read by the status writer
@@ -1223,7 +1228,7 @@ static d2vr::PerfGovernor perf_governor;static bool perf_governor_enabled=true,p
 static void reset_perf_governor(int mode) {
     const float f=aa_mode_fraction(mode);perf_governor_active=perf_governor_enabled && mode>=2 && f<.999f;
     d2vr::PerfGovernorConfig c;c.start_scale=f;c.max_scale=std::min(.95f,f+.15f);c.busy_high=1.02f;c.min_scale=std::min(.6f,f); // busy_high: missed slots stay the main down signal
-    perf_governor=d2vr::PerfGovernor(c);perf_prev_start_ns=perf_prev_display=0;frame_split_prev_enter_ns=0;
+    perf_governor=d2vr::PerfGovernor(c);perf_prev_start_ns=perf_prev_display=0;frame_split_prev_enter_ns.store(0);
     fsr_taa.max_fraction=perf_governor_active?c.max_scale:0.f; // governor steps reuse the FSR contexts
 }
 static bool upscale_active=false;
@@ -5059,14 +5064,20 @@ struct ThreadBusyClock {
 static std::string frame_split_status_json() {
     static ThreadBusyClock render_clock,game_clock;static std::int64_t last_sample_ns{};
     const auto now_ns=d2vr::GameXr::cpu_time_ns();
-    std::lock_guard<std::mutex> split_lock(frame_split_mutex);
+    std::string trace_text,adapter_text;d2vr::FrameSplit snapshot;
+    std::lock_guard<std::mutex> trace_file_lock(frame_split_trace_file_mutex);
+    {std::lock_guard<std::mutex> split_lock(frame_split_mutex);
     if(!last_sample_ns || now_ns-last_sample_ns>=1'000'000'000) {
         const auto frame_now=static_cast<std::uint64_t>(frames.load());
         const auto render_busy=render_clock.sample(xr_present_thread,now_ns,frame_now);
-        const auto game_busy=game_clock.sample(native_interaction_aim.game_thread_id(),now_ns,frame_now);
+        const auto game_busy=game_clock.sample(native_interaction_aim.stage0_thread_id(),now_ns,frame_now);
         frame_split.thread_sample(render_busy,game_busy);last_sample_ns=now_ns;
     }
-    return "{\"adapter\":"+(frame_split_adapter_json.empty()?std::string("null"):frame_split_adapter_json)+",\"split\":"+frame_split.json()+'}';
+    snapshot=frame_split; // copy under the lock, sort outside it
+    adapter_text=frame_split_adapter_json.empty()?std::string("null"):frame_split_adapter_json;
+    if(frame_split_trace_on.load()) trace_text=frame_split_trace.drain();}
+    if(!trace_text.empty() && frame_split_trace_file.is_open()) {frame_split_trace_file<<trace_text;frame_split_trace_file.flush();}
+    return "{\"adapter\":"+adapter_text+",\"split\":"+snapshot.json()+'}';
 }
 std::string feedback_status_json() {
     std::ostringstream out;
@@ -6461,12 +6472,12 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                     }
                                     if(perf_governor_active && perf_governor.feed({work,static_cast<std::uint64_t>(t.display_period),missed})) upscale_fraction=perf_governor.scale(); // the 100 ms apply_upscale tick commits it
                                     // Frame split: queued here, fed after the desktop Present so the hook span is complete.
-                                    split_prev_enter_ns=frame_split_prev_enter_ns;frame_split_prev_enter_ns=present_start_ns;
+                                    split_prev_enter_ns=frame_split_prev_enter_ns.exchange(present_start_ns);
                                     split_gpu_ns=native_gpu_requested && native_gpu_prepared?static_cast<std::uint64_t>(std::max(0.,native_gpu_summary.last_elapsed_ms)*1e6):0;
                                     split_pending=true;
                                 } else {
                                     // A menu, load or world-UI pause is a gap: the next gameplay frame must not feed one huge pace/interval sample.
-                                    perf_prev_start_ns=perf_prev_display=0;frame_split_prev_enter_ns=0;
+                                    perf_prev_start_ns=perf_prev_display=0;frame_split_prev_enter_ns.store(0);
                                 }
                                 frame_timing_record.xr={
                                     static_cast<std::int64_t>(number),
@@ -7492,7 +7503,13 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
         std::lock_guard<std::mutex> split_lock(frame_split_mutex);
         const d2vr::FrameStamps split_stamps{frame_split_eye_ns[0],frame_split_eye_ns[1],present_start_ns,split_exit_ns};
         frame_split_eye_ns[0]=-1;frame_split_eye_ns[1]=0; // consumed (or discarded outside gameplay)
-        if(split_pending) frame_split.feed(split_stamps,split_prev_enter_ns,1'000'000'000,split_gpu_ns);
+        if(split_pending) {
+            frame_split.feed(split_stamps,split_prev_enter_ns,1'000'000'000,split_gpu_ns);
+            if(frame_split_trace_on.load(std::memory_order_relaxed)) frame_split_trace.push(split_stamps.eye0_begin,split_stamps.eye1_begin,split_stamps.present_enter,split_stamps.present_exit,split_prev_enter_ns,frame_split.last_accepted());
+        } else if(!(flags&DXGI_PRESENT_TEST)) {
+            // This Present did not feed (no XR wait/submit, menu, load, error path): the next gameplay frame starts a fresh interval and pace.
+            frame_split_prev_enter_ns.store(0);perf_prev_start_ns=perf_prev_display=0;
+        }
         if(split_pending && frame_split_adapter_json.empty()) {
             frame_split_adapter_json="null"; // one attempt; a failed query leaves it null
             Microsoft::WRL::ComPtr<IDXGIDevice> split_dxgi;Microsoft::WRL::ComPtr<IDXGIAdapter> split_adapter;DXGI_ADAPTER_DESC split_desc{};
@@ -8182,6 +8199,11 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
         }
         corpse_trace.stop();carry_trace.stop();
         if(fs::exists(root/L"build"/L"carry-trace")) carry_trace.start(output/L"native-carry-trace.csv");
+        {std::lock_guard<std::mutex> trace_file_lock(frame_split_trace_file_mutex);
+         if(!frame_split_trace_file.is_open() && fs::exists(root/L"build"/L"frame-split-trace")) {
+             frame_split_trace_file.open(output/L"native-frame-split-trace.csv",std::ios::trunc);
+             if(frame_split_trace_file.is_open()) {frame_split_trace_file<<d2vr::FrameSplitTrace::header()<<'\n';frame_split_trace_on=true;}
+         }}
         if(fs::exists(root/L"build"/L"bonelab-trace")) corpse_trace.start(output/L"native-corpse-trace.csv");
         if(fs::exists(root/L"build"/L"upscale-probe")) {std::lock_guard<std::mutex> l(upscale_probe_mutex);upscale_probe_rows=0;upscale_probe_csv.open(output/L"upscale-probe.csv",std::ios::trunc);upscale_probe_on=true;}
         d2vr::GlyphSwap::observer=&ps_bind_observer;
