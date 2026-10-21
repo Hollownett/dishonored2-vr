@@ -31,6 +31,12 @@ SIM_MARKER = b"D2VR-LINUX-SIM-1"  # the proxy carries this once it supports the 
 OVERRIDE_NAME = "linux-probe-override.cfg"
 AUTOCONTINUE_NAME = "linux-autocontinue"
 SETTLE_NAME = "linux-settle-seconds"
+KNOBS_NAME = "linux-sim-knobs"  # names of the --knob files this run created, so `sim --restore` can remove them after a hard kill
+AA_MODE_KNOB = "aa-mode"  # the probe reads build/aa-mode (0..6) as the temporal AA preference
+KNOB_RE = re.compile(r"[a-z0-9-]+")
+PROBE_MODES = {"xr": 6, "paired": 3, "single": 2}  # dxgi_probe.cpp stereo_flag: 2 single eye, 3 paired (both flat, no XR), 6 head-tracked XR
+ENV_KEYS = ("DXVK_HUD", "DXVK_LOG_LEVEL", "__GL_THREADED_OPTIMIZATIONS")
+VR_SETTING_KEYS = ("temporal_aa", "resolution", "mirror")
 SCRIPT_CFG = "simulated-gameplay-script.cfg"
 SCRIPT_JSON = "simulated-gameplay-script.json"
 SAVE_BASE_REL = Path("drive_c/users/steamuser/Saved Games/Arkane Studios/Dishonored2/base")
@@ -501,13 +507,76 @@ PROBE_FIELDS = ("pid camera mode paired skip_taa full_render_scale symmetric_fru
                 "physical_grab left_aim cleanup_exception gameplay_script weapon_attachment").split()
 
 
-def sim_probe_config(seconds, simulated=2, gameplay_script=1):
+def sim_probe_config(seconds, simulated=2, gameplay_script=1, probe_mode="xr", resolution=None):
+    """The override config. probe_mode paired/single are the flat diagnostic stereo modes 3 and 2: no XR, so every field that
+    needs head tracking, controllers or the simulated backend is off (the probe rejects the config otherwise).
+    resolution (XR only) needs headset sizing and the full render scale, which the probe requires for any value but 1.0."""
+    if probe_mode not in PROBE_MODES:
+        raise SimError(f"unknown --probe-mode {probe_mode!r} (xr, paired or single)")
     v = dict(pid="{pid}", camera=0, mode=6, paired=1, skip_taa=0, full_render_scale=0, symmetric_frustum=1, controllers=1,
              headset_size=0, eye_boundary=1, native_eye_capture=1, seconds=int(seconds), arm_upload_observer=1,
              optical_density=0, arm_palette_copy=0, tracked_arms=1, stable_camera=1, resolution="1.0", eye_aa=0,
              camera_trace=0, turning=1, snap=45, smooth=90, saved_settings=0, menu=0, simulated=simulated, controller_aim=1,
              physical_grab=1, left_aim=1, cleanup_exception=0, gameplay_script=gameplay_script, weapon_attachment=0)
+    if probe_mode != "xr":
+        if resolution is not None:
+            raise SimError("the resolution setting needs --probe-mode xr")
+        v.update(mode=PROBE_MODES[probe_mode], paired=0, symmetric_frustum=0, controllers=0, tracked_arms=0, stable_camera=0,
+                 turning=0, simulated=0, controller_aim=0, physical_grab=0, left_aim=0, gameplay_script=0, weapon_attachment=0)
+        if probe_mode == "single":  # the eye observers, native capture and arm observer need paired rendering
+            v.update(eye_boundary=0, native_eye_capture=0, arm_upload_observer=0)
+    elif resolution is not None:
+        v.update(resolution=format(float(resolution), "g"), full_render_scale=1, headset_size=1)
     return " ".join(str(v[k]) for k in PROBE_FIELDS) + "\n"
+
+
+def parse_knobs(names):
+    out = []
+    for n in names or ():
+        if not KNOB_RE.fullmatch(n):
+            raise SimError(f"--knob {n!r} must match [a-z0-9-]+ (a file name under build/, no path)")
+        if n not in out:
+            out.append(n)
+    return out
+
+
+def parse_env(pairs):
+    out = {}
+    for item in pairs or ():
+        key, eq, value = item.partition("=")
+        if not eq or key not in ENV_KEYS:
+            raise SimError(f"--env {item!r}: use KEY=VALUE with KEY one of {', '.join(ENV_KEYS)}")
+        if not re.fullmatch(r"[A-Za-z0-9_.,:=+-]*", value):
+            raise SimError(f"--env {key}: the value has characters outside [A-Za-z0-9_.,:=+-]")
+        out[key] = value
+    return out
+
+
+def parse_vr_settings(pairs):
+    """KEY=VALUE -> {key: value}, validated like vr_preferences.hpp (temporal_aa 0..6, resolution 0.5..2, mirror 0..2)."""
+    out = {}
+    for item in pairs or ():
+        key, eq, value = item.partition("=")
+        if not eq or key not in VR_SETTING_KEYS:
+            raise SimError(f"--vr-setting {item!r}: use KEY=VALUE with KEY one of {', '.join(VR_SETTING_KEYS)}")
+        try:
+            if key == "resolution":
+                num = float(value)
+                if not (0.5 <= num <= 2.0):  # also false for nan
+                    raise ValueError
+                out[key] = num
+            else:
+                if not re.fullmatch(r"[0-9]+", value) or int(value) > (6 if key == "temporal_aa" else 2):
+                    raise ValueError
+                out[key] = int(value)
+        except ValueError:
+            raise SimError(f"--vr-setting {item!r}: " + {"resolution": "resolution must be 0.5 to 2.0",
+                           "temporal_aa": "temporal_aa must be an integer 0 to 6",
+                           "mirror": "mirror must be 0 (right eye), 1 (left eye) or 2 (both)"}[key])
+    if out.get("mirror", 2) != 2:
+        raise SimError("--vr-setting mirror: a simulated run cannot apply a mirror mode (the probe reads it only from saved "
+                       "settings, which the simulated backend rejects); only mirror=2, the default, is accepted")
+    return out
 
 
 def _load_tool(name, path):
@@ -605,13 +674,14 @@ class Env:
         self.out = out or (lambda s: print(s, flush=True))
         self.steam_cmd = DEFAULT_STEAM_CMD
         self.close_timeout = 30.0
+        self.launch_env = {}  # --env pairs, added to the launch environment
 
     def _lock_probe(self):
         return session_lock_state()
 
     def _launch(self):
         subprocess.Popen(shlex.split(self.steam_cmd), stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                         stderr=subprocess.DEVNULL, start_new_session=True)
+                         stderr=subprocess.DEVNULL, start_new_session=True, env={**os.environ, **self.launch_env})
 
 
 def _timestamp():
@@ -686,6 +756,24 @@ def snapshot(mod_home, dest, info):
         if src.is_file():
             shutil.copy2(src, build / name)
     (dest / "run-info.json").write_text(json.dumps(info, indent=1, default=str) + "\n")
+    write_adapter_txt(dest)
+
+
+def write_adapter_txt(dest):
+    """adapter.txt: the status block "adapter" ({name, vendor, vram_mb}) as one JSON line, or `null` when the run has none."""
+    try:
+        adapter = json.loads((dest / "artifacts" / "xr-live-status.json").read_text(encoding="utf-8-sig")).get("adapter")
+    except (OSError, ValueError, AttributeError):
+        adapter = None
+    (dest / "adapter.txt").write_text(json.dumps(adapter) + "\n")
+
+
+def _recorded_knobs(build):
+    try:
+        names = (build / KNOBS_NAME).read_text().split()
+    except OSError:
+        return []
+    return [n for n in names if KNOB_RE.fullmatch(n)]  # never a path
 
 
 def do_restore(a, home, env):
@@ -719,7 +807,7 @@ def _do_restore(a, home, env):
             if not ok:
                 env.out(f"[sim]   {clear_hint(backup)}")
             failed = failed or not ok
-    for name in (OVERRIDE_NAME, AUTOCONTINUE_NAME, SCRIPT_CFG):  # dev knobs would change the real game: gone whatever happened above
+    for name in (OVERRIDE_NAME, AUTOCONTINUE_NAME, SCRIPT_CFG, KNOBS_NAME, *_recorded_knobs(mod_home / "build")):  # dev knobs would change the real game: gone whatever happened above
         (mod_home / "build" / name).unlink(missing_ok=True)
     (mod_home / "artifacts" / SCRIPT_JSON).unlink(missing_ok=True)
     return 2 if failed else 0
@@ -748,7 +836,7 @@ def _plan(a, home, env):
     dlls = sorted(p.name for p in (mod_home / "build").glob("d2vr_render_probe_arm_v*.dll")) if (mod_home / "build").is_dir() else []
     if len(dlls) != 1:
         problems.append(f"expected exactly one d2vr_render_probe_arm_v*.dll in {mod_home / 'build'} (found {len(dlls)})")
-    for name in (OVERRIDE_NAME, AUTOCONTINUE_NAME):
+    for name in (OVERRIDE_NAME, AUTOCONTINUE_NAME, KNOBS_NAME):
         if (mod_home / "build" / name).exists():
             problems.append(f"{mod_home / 'build' / name} exists (an earlier run?); remove it or run: d2vr-linux sim --restore")
     candidate = None
@@ -800,14 +888,27 @@ def run_sim(a, home, env):
 
 
 def _run_sim(a, home, env):
+    knobs = parse_knobs(getattr(a, "knob", None))
+    launch_env = parse_env(getattr(a, "env", None))
+    settings = parse_vr_settings(getattr(a, "vr_setting", None))
+    probe_mode = getattr(a, "probe_mode", None) or "xr"
+    if "temporal_aa" in settings:
+        if AA_MODE_KNOB in knobs:
+            raise SimError(f"--knob {AA_MODE_KNOB} conflicts with --vr-setting temporal_aa (both write build/{AA_MODE_KNOB})")
+        knobs.append(AA_MODE_KNOB)
     inst, mod_home, seconds, script_json, script_cfg, candidate = _plan(a, home, env)
-    override = sim_probe_config(seconds)
+    override = sim_probe_config(seconds, probe_mode=probe_mode, resolution=settings.get("resolution"))
     build, art = mod_home / "build", mod_home / "artifacts"
     env.out(f"[sim] scenario {a.script or a.scenario}: {seconds} s session, mod home {mod_home}")
     if a.dry_run:
         env.out("[sim] dry run: nothing written. Override config:")
         env.out("  " + override.strip())
         env.out(f"[sim] script: {script_cfg.splitlines()[0]}")
+        env.out(f"[sim] probe mode {probe_mode}")
+        for n in knobs:
+            env.out(f"[sim] knob build/{n}" + (f" = {settings['temporal_aa']}" if n == AA_MODE_KNOB and "temporal_aa" in settings else " (empty)"))
+        for k, v in launch_env.items():
+            env.out(f"[sim] env {k}={v}")
         if candidate:
             env.out(f"[sim] candidate DLL {candidate[0]}: sha256 {candidate[1]}; installed {installed_dll(mod_home)} "
                     f"sha256 {candidate[2]} is backed up, replaced for the run and restored afterwards")
@@ -845,6 +946,12 @@ def _run_sim(a, home, env):
             guard.write(build / AUTOCONTINUE_NAME, str(a.autocontinue_delay) + "\n")
         if a.settle is not None:
             guard.write(build / SETTLE_NAME, str(a.settle) + "\n")
+        fresh_knobs = [n for n in knobs if not (build / n).exists()]
+        if fresh_knobs:  # a hard kill skips the guard; `sim --restore` removes these by name
+            guard.write(build / KNOBS_NAME, "\n".join(fresh_knobs) + "\n")
+        for n in knobs:
+            guard.write(build / n, f"{settings['temporal_aa']}\n" if n == AA_MODE_KNOB and "temporal_aa" in settings else "")
+        env.launch_env = launch_env
         bad = conflicts(env.proc_root)
         if bad:
             raise SimError("refusing to launch: " + "; ".join(bad))

@@ -720,6 +720,180 @@ class Candidate(FullRun):
         self.assertFalse(self.backups.exists())
 
 
+class Knobs(FullRun):
+    """--knob, --probe-mode, --vr-setting and --env. Every test injects the fake launcher (fake_game)."""
+
+    def watched(self, returns="0"):
+        env, state = self.fake_game(returns=returns)
+        inner, seen = env.launch, {}
+
+        def launch():
+            build = self.mod_home / "build"
+            seen["files"] = sorted(p.name for p in build.iterdir())
+            seen["contents"] = {p.name: p.read_text() for p in build.iterdir() if p.is_file() and p.suffix != ".dll"}
+            seen["env"] = dict(env.launch_env)
+            inner()
+
+        env.launch = launch
+        return env, seen
+
+    def fields(self):
+        return dict(zip(sim.PROBE_FIELDS, self.during["override"].split()))
+
+    def test_knob_written_and_removed(self):
+        env, seen = self.watched()
+        rc, out, err = self.run_cli("--knob", "native-gpu-timing", "--knob", "frame-split-trace", env=env)
+        self.assertEqual(rc, 0, "\n".join(self.lines) + err)
+        self.assertEqual(seen["contents"]["native-gpu-timing"], "")
+        self.assertIn("frame-split-trace", seen["files"])
+        for n in ("native-gpu-timing", "frame-split-trace", sim.KNOBS_NAME):
+            self.assertFalse((self.mod_home / "build" / n).exists(), n)
+
+    def test_knob_removed_after_failed_run(self):
+        env, seen = self.watched(returns="1")
+        rc, out, err = self.run_cli("--knob", "native-gpu-timing", env=env)
+        self.assertEqual(rc, 1)
+        self.assertIn("native-gpu-timing", seen["files"])
+        self.assertFalse((self.mod_home / "build/native-gpu-timing").exists())
+        self.assertFalse((self.mod_home / sim.KNOBS_NAME).exists())
+
+    def test_knob_removed_after_launch_raises(self):
+        env, seen = self.watched()
+
+        def boom():
+            raise RuntimeError("steam missing")
+
+        env.launch = boom
+        with self.assertRaises(RuntimeError):
+            self.run_cli("--knob", "native-gpu-timing", env=env)
+        self.assertFalse((self.mod_home / "build/native-gpu-timing").exists())
+
+    def test_users_own_knob_comes_back(self):
+        (self.mod_home / "build/aa-mode").write_text("5\n")
+        env, seen = self.watched()
+        rc, out, err = self.run_cli("--knob", "aa-mode", env=env)
+        self.assertEqual(rc, 0)
+        self.assertEqual(seen["contents"]["aa-mode"], "")
+        self.assertEqual((self.mod_home / "build/aa-mode").read_text(), "5\n")
+
+    def test_knob_name_rejected(self):
+        for bad in ("../x", "a/b", "Up", "a.b", "", "x\n", "-x/.."):
+            env, seen = self.watched()
+            rc, out, err = self.run_cli("--knob=" + bad, env=env)
+            self.assertEqual(rc, 1, repr(bad))
+            self.assertIn("--knob", err)
+            self.assertNotIn("files", seen, "the game must not launch")
+        self.assertFalse((self.mod_home.parent / "x").exists())
+        self.assertEqual(sim.pending_backups(self.backups), [])
+
+    def test_restore_removes_recorded_knobs_after_a_hard_kill(self):
+        (self.mod_home / "build" / sim.KNOBS_NAME).write_text("native-gpu-timing\n../evil\n")
+        (self.mod_home / "build/native-gpu-timing").write_text("")
+        (self.mod_home / "evil").write_text("keep")
+        rc, out, err = self.run_cli("--restore")
+        self.assertEqual(rc, 0)
+        self.assertFalse((self.mod_home / "build/native-gpu-timing").exists())
+        self.assertFalse((self.mod_home / "build" / sim.KNOBS_NAME).exists())
+        self.assertTrue((self.mod_home / "evil").exists())
+
+    def test_dry_run_lists_knob_and_writes_nothing(self):
+        rc, out, err = self.run_cli("--dry-run", "--knob", "native-gpu-timing", "--probe-mode", "single",
+                                    "--vr-setting", "temporal_aa=3", "--env", "DXVK_HUD=fps")
+        self.assertEqual(rc, 0, err)
+        for text in ("knob build/native-gpu-timing", "knob build/aa-mode = 3", "probe mode single", "env DXVK_HUD=fps"):
+            self.assertIn(text, out)
+        self.assertEqual(sorted(p.name for p in (self.mod_home / "build").iterdir()), ["d2vr_render_probe_arm_v600.dll", "dxgi-probe.cfg"])
+
+    def test_probe_mode_default_is_xr(self):
+        env, seen = self.watched()
+        self.assertEqual(self.run_cli(env=env)[0], 0)
+        f = self.fields()
+        self.assertEqual((f["mode"], f["simulated"], f["controllers"], f["gameplay_script"]), ("6", "2", "1", "1"))
+
+    def test_probe_mode_paired_sets_flag_3(self):
+        env, seen = self.watched()
+        self.assertEqual(self.run_cli("--probe-mode", "paired", env=env)[0], 0)
+        f = self.fields()
+        self.assertEqual(f["mode"], "3")
+        # flat, no XR: nothing that needs head tracking, controllers or the simulated backend
+        for k in ("simulated", "controllers", "gameplay_script", "tracked_arms", "stable_camera", "left_aim", "physical_grab",
+                  "controller_aim", "turning", "symmetric_frustum", "saved_settings", "headset_size"):
+            self.assertEqual(f[k], "0", k)
+        self.assertEqual((f["eye_boundary"], f["native_eye_capture"]), ("1", "1"))
+
+    def test_probe_mode_single_sets_flag_2(self):
+        env, seen = self.watched()
+        self.assertEqual(self.run_cli("--probe-mode", "single", env=env)[0], 0)
+        f = self.fields()
+        self.assertEqual(f["mode"], "2")
+        for k in ("simulated", "controllers", "eye_boundary", "native_eye_capture", "arm_upload_observer", "paired"):
+            self.assertEqual(f[k], "0", k)
+
+    def test_probe_mode_unknown_refused(self):
+        with self.assertRaises(SystemExit):  # argparse choices
+            self.run_cli("--probe-mode", "stereo")
+
+    def test_env_key_not_allowed_refused(self):
+        for bad in ("LD_PRELOAD=/x.so", "PATH=/tmp", "DXVK_HUD", "DXVK_HUD=fps;rm", "dxvk_hud=fps"):
+            env, seen = self.watched()
+            rc, out, err = self.run_cli("--env", bad, env=env)
+            self.assertEqual(rc, 1, bad)
+            self.assertIn("--env", err)
+            self.assertNotIn("files", seen)
+
+    def test_env_added_to_launch(self):
+        env, seen = self.watched()
+        rc, out, err = self.run_cli("--env", "DXVK_HUD=fps,frametimes", "--env", "__GL_THREADED_OPTIMIZATIONS=0", env=env)
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(seen["env"], {"DXVK_HUD": "fps,frametimes", "__GL_THREADED_OPTIMIZATIONS": "0"})
+
+    def test_vr_setting_applied_and_user_cfg_untouched(self):
+        cfg = self.mod_home / "build/vr-settings.cfg"
+        cfg.write_text("7 1.5 1 0 45 90 2 0.5 2 65 1 0 0 0 0 0\n")
+        before = (cfg.read_bytes(), cfg.stat().st_mtime_ns)
+        env, seen = self.watched()
+        rc, out, err = self.run_cli("--vr-setting", "temporal_aa=4", "--vr-setting", "resolution=1.2", "--vr-setting", "mirror=2", env=env)
+        self.assertEqual(rc, 0, "\n".join(self.lines) + err)
+        self.assertEqual(seen["contents"]["aa-mode"], "4\n")
+        f = self.fields()
+        self.assertEqual((f["resolution"], f["headset_size"], f["full_render_scale"], f["saved_settings"]), ("1.2", "1", "1", "0"))
+        self.assertEqual((cfg.read_bytes(), cfg.stat().st_mtime_ns), before)
+        self.assertFalse((self.mod_home / "build/aa-mode").exists())
+
+    def test_vr_setting_values_validated(self):
+        for bad in ("temporal_aa=7", "temporal_aa=-1", "temporal_aa=x", "resolution=0.4", "resolution=2.5", "resolution=nan",
+                    "mirror=3", "mirror=0", "sharpness=1", "resolution", "temporal_aa=1.5"):
+            env, seen = self.watched()
+            rc, out, err = self.run_cli("--vr-setting", bad, env=env)
+            self.assertEqual(rc, 1, bad)
+            self.assertNotIn("files", seen)
+
+    def test_vr_setting_conflicts_refused(self):
+        env, seen = self.watched()
+        self.assertEqual(self.run_cli("--vr-setting", "temporal_aa=1", "--knob", "aa-mode", env=env)[0], 1)
+        self.assertEqual(self.run_cli("--vr-setting", "resolution=1.2", "--probe-mode", "paired", env=env)[0], 1)
+        self.assertNotIn("files", seen)
+
+    def test_adapter_txt_in_snapshot(self):
+        env, state = self.fake_game()
+        inner = env.launch
+
+        def launch():
+            inner()
+            (self.mod_home / "artifacts/xr-live-status.json").write_text(json.dumps(
+                {"gameplay": True, "adapter": {"name": "NVIDIA GeForce RTX 3070 Laptop GPU", "vendor": 4318, "vram_mb": 8192}}))
+
+        env.launch = launch
+        self.assertEqual(self.run_cli(env=env)[0], 0)
+        snap = next(self.runs.glob("*"))
+        self.assertEqual(json.loads((snap / "adapter.txt").read_text())["name"], "NVIDIA GeForce RTX 3070 Laptop GPU")
+
+    def test_adapter_txt_null_without_block(self):
+        env, state = self.fake_game()
+        self.assertEqual(self.run_cli(env=env)[0], 0)
+        self.assertEqual((next(self.runs.glob("*")) / "adapter.txt").read_text().strip(), "null")
+
+
 class Pure(unittest.TestCase):
     def test_probe_config_matches_launcher_layout(self):
         fields = sim.sim_probe_config(90).split()

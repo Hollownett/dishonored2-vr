@@ -57,6 +57,14 @@ def _parser():
     s.add_argument("--mod-home", type=Path, help="mod home directory")
     s.add_argument("--candidate-dll", type=Path, metavar="PATH",
                    help="run this DLL instead of the installed one: the installed DLL is backed up, swapped for the run and restored (verified by SHA-256)")
+    s.add_argument("--knob", action="append", metavar="NAME", default=[],
+                   help="write an empty build/NAME dev knob for this run (repeatable; [a-z0-9-]+); removed afterwards whatever happens")
+    s.add_argument("--probe-mode", choices=list(sim.PROBE_MODES), default="xr",
+                   help="xr (default, simulated headset) or the flat diagnostic modes paired / single (no XR, for the single-view measurement)")
+    s.add_argument("--vr-setting", action="append", metavar="KEY=VALUE", default=[],
+                   help="VR setting for this run only (repeatable): temporal_aa 0-6, resolution 0.5-2.0, mirror 2. Your vr-settings.cfg is never read or changed")
+    s.add_argument("--env", action="append", metavar="KEY=VALUE", default=[],
+                   help="launch environment (repeatable): DXVK_HUD, DXVK_LOG_LEVEL or __GL_THREADED_OPTIMIZATIONS")
     s.add_argument("--dry-run", action="store_true", help="check everything and print the plan; write and launch nothing")
     s.add_argument("--restore", nargs="?", const=True, default=None, metavar="BACKUP",
                    help="restore your saves from the newest restore-pending backup (or BACKUP) and remove the dev knobs")
