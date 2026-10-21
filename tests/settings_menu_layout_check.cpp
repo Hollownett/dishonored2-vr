@@ -39,6 +39,20 @@ int main() {
         assert(tl && br && tl->u<1e-6 && tl->v<1e-6 && br->u>1-1e-6 && br->v>1-1e-6);
         assert(!SettingsMenuLayout::pointer({left-.01,top+.1}) && !SettingsMenuLayout::pointer({right+.01,top+.1}));
     }
+    static_assert(SettingsMenuLayout::gameplay_drawable(true,false,true,true,true,true),"drawable gameplay panel");
+    static_assert(!SettingsMenuLayout::gameplay_drawable(true,true,true,true,true,true),"cutscene camera draws no panel");
+    static_assert(!SettingsMenuLayout::gameplay_drawable(false,false,true,true,true,true) && !SettingsMenuLayout::gameplay_drawable(true,false,false,true,true,true) &&
+                  !SettingsMenuLayout::gameplay_drawable(true,false,true,false,true,true) && !SettingsMenuLayout::gameplay_drawable(true,false,true,true,false,true) &&
+                  !SettingsMenuLayout::gameplay_drawable(true,false,true,true,true,false),"any missing piece draws nothing");
+    {   // undrawable: an open gameplay panel is closed (suspended) and consumes nothing; drawable: it stays and consumes
+        VrSettings panel;ControllerInput idle{};idle.active=true;
+        panel.open_from_gameplay();panel.update(idle,true,true,{},false);
+        const bool drawable=SettingsMenuLayout::gameplay_drawable(true,false,true,true,true,true);
+        assert(drawable && panel.update(idle,true,true,{},false).consume && panel.gameplay_panel_open());
+        const bool hidden=SettingsMenuLayout::gameplay_drawable(true,true,true,true,true,true);
+        if(panel.gameplay_panel_open() && !hidden) panel.suspend(); // what GameXr does
+        assert(!panel.open() && !panel.update(idle,true,true,{},false).consume);
+    }
     VrSettings settings;ControllerInput held{};held.active=true;held.a=true;held.right_trigger=1;
     settings.open_from_menu();
     const auto first=settings.update(held,false,true,PanelPointer{.8,.15});

@@ -79,7 +79,7 @@ int main() {
                 frame(); // The outgrown canvas is only flagged inside the frame.
                 frame(); // First retirement poll (between frames) fences the old GPU work and skips only this panel.
                 assert(created==base && xr.wrist_retirement_waits>0 && xr.last_layer_submitted);
-                assert(!xr.native_art_presented(1,true) && sim::chains.size()==6); // eyes, pointer, controls card, wheel dot, wrist
+                assert(!xr.native_art_presented(1,true) && sim::chains.size()==7); // eyes, pointer, settings panel, controls card, wheel dot, wrist
                 for(unsigned poll=0;poll<100 && created==base;++poll) {Sleep(1);frame();}
                 assert(created==base+1 && xr.wrist_target_creations==6 && sim::chains.size()==base);
                 assert(xr.native_art_presented(1,true));

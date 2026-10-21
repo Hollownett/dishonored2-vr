@@ -65,6 +65,40 @@ int main() {
                 require(trigger.update(only_trigger,true,true,{},false).consume,"Trigger held through the close reached the game");
                 require(!trigger.update(idle,true,true,{},false).consume,"Trigger latch never released");
             }
+            {   // latch details: timeout, reopen, only what was down, sticks, menu
+                const auto close_with_b=[&](VrSettings& panel,ControllerInput held) {
+                    panel.open_from_gameplay();panel.update(idle,true,true,{},false);
+                    ControllerInput b=held;b.b=true;require(panel.update(b,true,true,{},false).consume && !panel.open(),"B did not close");
+                    return held;
+                };
+                VrSettings stuck;ControllerInput drift=idle;drift.right_trigger=1;
+                close_with_b(stuck,drift);drift.b=true;
+                int frames=0;while(stuck.update(drift,true,true,{},false,1./90).consume && frames<1000) ++frames;
+                require(frames>=1.5*90-3 && frames<=1.5*90+3,"A stuck trigger did not release the latch at 1.5 s");
+                VrSettings again;ControllerInput yheld=idle;yheld.y=true;
+                again.open_from_gameplay();again.update(idle,true,true,{},false);again.update(yheld,true,true,{},false); // Y press closes
+                require(again.update(yheld,true,true,{},false).consume,"Y latch missing");
+                again.open_from_gameplay();
+                require(again.update(yheld,true,true,{},false).consume && again.open(),"Reopen while latched closed at once");
+                again.update(idle,true,true,{},false);
+                require(again.update(yheld,true,true,{},false).consume && !again.open(),"A reopened panel could not be closed while the old latch was live");
+                VrSettings grip;ControllerInput squeeze=idle;squeeze.left_grip=.9f;
+                close_with_b(grip,squeeze);
+                require(grip.update(squeeze,true,true,{},false).consume,"Grip held through the close reached the game");
+                ControllerInput a_and_grip=squeeze;a_and_grip.a=true;
+                require(grip.update(a_and_grip,true,true,{},false).consume,"Latched grip released early");
+                ControllerInput a_only=idle;a_only.a=true;
+                require(!grip.update(a_only,true,true,{},false).consume,"A pressed during the latch extended it");
+                VrSettings stick;ControllerInput walk=idle;walk.move_x=1;
+                close_with_b(stick,walk);walk.b=true;
+                require(stick.update(walk,true,true,{},false).consume,"Stick held through the close reached the game");
+                walk.move_x=.2f;walk.b=false;
+                require(!stick.update(walk,true,true,{},false).consume,"Re-centred stick stayed latched");
+                VrSettings menu;ControllerInput pause=idle;pause.menu=true;
+                close_with_b(menu,pause);
+                require(menu.update(pause,true,true,{},false).consume,"Menu held through the close reached the game");
+                require(!menu.update(idle,true,true,{},false).consume,"Menu latch never released");
+            }
             VrSettings plain;plain.open_from_menu();
             plain.update(idle,true,true);
             require(!plain.open(),"A menu-opened panel survived gameplay without the hold flag");

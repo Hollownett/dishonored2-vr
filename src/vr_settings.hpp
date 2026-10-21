@@ -26,7 +26,13 @@ class VrSettings {
     bool previous_y_{},previous_a_{},previous_b_{},previous_x_{},previous_trigger_{},previous_left_trigger_{},stick_held_{};
     bool controls_valid_{};
     bool open_{};
-    bool close_latch_{}; // gameplay panel just closed: input held through the close stays consumed until released
+    bool close_latch_{},latch_started_{};unsigned latch_mask_{};double latch_age_{};
+    static unsigned held_mask(const ControllerInput& in) noexcept {
+        const auto off=[](float x,float y) {return std::abs(x)>=.3f || std::abs(y)>=.3f;};
+        return (in.a?1u:0u)|(in.b?2u:0u)|(in.x?4u:0u)|(in.y?8u:0u)|(in.left_click?16u:0u)|(in.right_click?32u:0u)|(in.menu?64u:0u)|
+            (in.left_trigger>.3f?128u:0u)|(in.right_trigger>.3f?256u:0u)|(in.left_grip>.3f?512u:0u)|(in.right_grip>.3f?1024u:0u)|
+            (off(in.move_x,in.move_y)?2048u:0u)|(off(in.turn_x,in.turn_y)?4096u:0u);
+    } // gameplay panel just closed: input held through the close stays consumed until released
     bool gameplay_open_{}; // opened by holding Y during play: the panel keeps running while `gameplay` is true
     bool calibration_page_{},measurements_page_{};
     bool hand_fit_page_{};   // G5/C6: the hand-fit sub-page of the calibration page (X); both hands are fitted live, sticks move the active one
@@ -216,11 +222,13 @@ public:
             default:return L"Sharpening: Medium";
         }
     }
-    void suspend() noexcept {open_=false;gameplay_open_=false;close_latch_=false;calibration_page_=measurements_page_=false;leave_hand_fit();controls_valid_=false;stick_held_=false;}
+    void suspend() noexcept {open_=false;gameplay_open_=false;close_latch_=latch_started_=false;calibration_page_=measurements_page_=false;leave_hand_fit();controls_valid_=false;stick_held_=false;}
     // Opened from the native menu's "VR Settings" item: held buttons from that click are not replayed.
     void open_from_menu() noexcept {open_=true;calibration_page_=measurements_page_=false;leave_hand_fit();selected_=0;controls_valid_=false;stick_held_=false;native_calibration_=false;}
     // Opened in gameplay by holding Y (y_hold.hpp): the same panel on page 0. Y (a new press) or B closes it.
-    void open_from_gameplay() noexcept {open_from_menu();gameplay_open_=true;}
+    void open_from_gameplay() noexcept {open_from_menu();gameplay_open_=true;close_latch_=latch_started_=false;}
+    bool gameplay_panel_open() const noexcept {return gameplay_open_ && open_;}
+    static constexpr double latch_timeout_s=1.5;
     // The game's own options page (vr_settings_native.hpp) sets values directly; the panel shows only calibration then.
     void open_calibration_from_native() noexcept {open_=calibration_page_=true;measurements_page_=false;leave_hand_fit();selected_=8;controls_valid_=false;stick_held_=false;native_calibration_=true;}
     void set_requested(double v) noexcept {requested_=std::clamp(v,.5,2.);}
@@ -240,11 +248,14 @@ public:
     Changes update(const ControllerInput& in,bool gameplay,bool focused,std::optional<PanelPointer> pointer={},bool settings_available=true,double dt=1./90) {
         Changes out{};
         if(!gameplay) {gameplay_open_=close_latch_=false;}
-        else if(gameplay_open_ && !open_) {gameplay_open_=false;close_latch_=true;} // closed (Y, B or the close row) since the last update
+        else if(gameplay_open_ && !open_) {gameplay_open_=false;close_latch_=latch_started_=true;latch_age_=0;} // closed (Y, B or the close row) since the last update
         if(close_latch_ && focused && in.active) {
-            // A button held through the close (B would holster the sword, Y would talk) must not reach the game as a fresh press.
-            if(in.a || in.b || in.x || in.y || in.left_click || in.right_click || in.left_trigger>.3f || in.right_trigger>.3f ||
-               in.left_grip>.3f || in.right_grip>.3f) {out.consume=true;return out;}
+            // Only what was down when the panel closed is latched (B would holster the sword, Y would talk, a stick would walk): each
+            // control leaves the latch once released, the whole latch ends after latch_timeout_s whatever is still held.
+            if(latch_started_) {latch_mask_=held_mask(in);latch_started_=false;} // first frame after the close: what is down now
+            else latch_mask_&=held_mask(in);
+            latch_age_+=std::clamp(dt,0.,.1);
+            if(latch_mask_ && latch_age_<latch_timeout_s) {out.consume=true;return out;}
             close_latch_=false;
         }
         const bool from_gameplay=gameplay && gameplay_open_ && open_;

@@ -24,6 +24,10 @@ def check(probe: str, game_xr: str, settings: str, features: str) -> None:
     assert "if(settings_.open() && !gameplay) {" in game_xr
     assert "game_xr->y_hold_blocked=false;" in probe
     assert "close_latch_" in settings
+    assert "SettingsMenuLayout::gameplay_drawable(gameplay,authored_camera," in game_xr and "&& panel_drawable && state==XR_SESSION_STATE_FOCUSED" in game_xr
+    assert "if(settings_.gameplay_panel_open() && !panel_drawable) settings_.suspend();" in game_xr
+    assert "if(settings_chain_ && xrDestroySwapchain) {xrDestroySwapchain(settings_chain_);settings_chain_=XR_NULL_HANDLE;}" in game_xr
+    assert "latch_timeout_s=1.5" in settings
     assert "gameplay_open_" in settings and "void open_from_gameplay()" in settings
     assert '"file": "no-hold-y-menu"' in features and '"kind": "disable"' in features
 

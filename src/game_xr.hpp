@@ -1340,6 +1340,8 @@ public:
             wrist_retirement_[side].Reset();wrist_recreate_[side]=false;
         }
         if(hint_chain_ && xrDestroySwapchain) {xrDestroySwapchain(hint_chain_);hint_chain_=XR_NULL_HANDLE;}
+        settings_images_.clear();
+        if(settings_chain_ && xrDestroySwapchain) {xrDestroySwapchain(settings_chain_);settings_chain_=XR_NULL_HANDLE;}
         dot_images_.clear();dot_filled_.clear();wheel_cursor_.reset();
         if(dot_chain_ && xrDestroySwapchain) {xrDestroySwapchain(dot_chain_);dot_chain_=XR_NULL_HANDLE;}
         for(auto& kind:hand_spaces_) for(auto& space:kind) if(space && xrDestroySpace) {xrDestroySpace(space);space=XR_NULL_HANDLE;}
@@ -1437,7 +1439,9 @@ public:
         // Preserve squeeze actions before the paused overlay consumes controls.
         // Hold left Y during play: open the settings. Fed with the raw button before anything zeroes it; a Talk offer or the wheel
         // (y_hold_blocked) owns the press instead. Not fed while the panel is open: Y then closes it by a new press (VrSettings).
-        if(gameplay && settings_enabled_ && y_hold_enabled && state==XR_SESSION_STATE_FOCUSED && controller_input.active && !settings_.open()) {
+        const bool panel_drawable=SettingsMenuLayout::gameplay_drawable(gameplay,authored_camera,continuity_.usable() && left && right,
+            !tracked_gameplay_required_ || rendered_mask_==3,views_valid_,settings_chain_!=XR_NULL_HANDLE);
+        if(gameplay && settings_enabled_ && y_hold_enabled && panel_drawable && state==XR_SESSION_STATE_FOCUSED && controller_input.active && !settings_.open()) {
             const auto now=std::chrono::steady_clock::now();
             // A Y still held from before gameplay (paused menu, load) belongs to that screen, not to a new hold.
             const bool raw_y=controller_input.y;
@@ -1453,7 +1457,7 @@ public:
             // Not on the fire frame: the opening update must see the held Y so it is not a fresh press that closes the panel at once
             // (the panel's consume hides it from the game that frame).
             if(hold.suppress_y && !hold.fire) {controller_input.y=false;controller_input.suppress_y=true;}
-        } else if(!gameplay || !controller_input.active) {y_hold_.reset();y_hold_raw_was_=false;}
+        } else if(!gameplay || !controller_input.active || !panel_drawable) {y_hold_.reset();y_hold_raw_was_=false;}
         y_hold_gameplay_was_=gameplay && controller_input.active;
         const bool raw_both_grips_held=controller_input.left_grip>=.8f && controller_input.right_grip>=.8f;
         // In menus a left-grip squeeze re-places the menu where the user is looking.
@@ -1472,12 +1476,13 @@ public:
             if(settings_requested.exchange(false) && !gameplay) {settings_.open_from_menu();}
             if(y_hold_menu_request_) {
                 y_hold_menu_request_=false;
-                if(gameplay && !settings_.open()) {
+                if(gameplay && panel_drawable && !settings_.open()) {
                     menu_panel_.reset(); // placed afresh, once, in front of the head
                     y_hold_.reset();y_hold_wait_release_=true;
                     settings_.open_from_gameplay();pulse(0,.4f,.08f);
                 }
             }
+            if(settings_.gameplay_panel_open() && !panel_drawable) settings_.suspend(); // never consume input while the panel is not drawn
             settings_in_world_=gameplay && settings_.open();
             if(settings_.open()) {
                 constexpr XrSpaceLocationFlags valid_pose=XR_SPACE_LOCATION_ORIENTATION_VALID_BIT|XR_SPACE_LOCATION_POSITION_VALID_BIT;

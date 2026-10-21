@@ -19,6 +19,11 @@ struct SettingsMenuLayout {
         if(right<=left || bottom<=top) throw std::invalid_argument("Native menu content area is too small");
         return {left,band_y+top,right-left,bottom-top};
     }
+    // The gameplay panel exists only while the overlay path can draw it (a cutscene camera or a lost view draws nothing): it never
+    // opens then, and an open one closes instead of consuming input unseen.
+    static constexpr bool gameplay_drawable(bool gameplay,bool authored_camera,bool presentable,bool tracked,bool views_valid,bool chain) noexcept {
+        return gameplay && !authored_camera && presentable && tracked && views_valid && chain;
+    }
     // The panel's own quad (640x560 image) inside a native menu band `band_w` x `band_h` metres: size and the offset of its centre
     // from the band centre (right and up), so a world-locked quad hit-tests exactly like the band rectangle `pointer` maps.
     struct QuadFit {double dx{},dy{},width{},height{};};
