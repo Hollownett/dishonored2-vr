@@ -167,3 +167,31 @@ stayed ff0daf65...bc927 and no knob or marker was left after either run.
 - M1 is still GPU-heavy (0.88 of the interval), so even one view is near the 90 Hz budget: p50 10.70 ms is under 11.1 ms, p95 11.56 ms is over it. At 72 Hz (13.9 ms) it has 3.2 ms of room.
 - M0 here (14.43 ms) matches the same-day reference on HEAD 1309f51 (14.31 ms, run 20261021T131156).
 - Caveat: this is an upper bound for alternate-eye rendering. AER would still pay the engine's view-independent work every frame and adds eye-desync, TAA/FSR history and previous-matrix work that the mono diagnostic skips (the native TAA history twins are not driven in mono). Mono timing needs no stale-eye handling.
+
+## Measured VR cvar preset (plan D Task 9): nothing qualified
+
+Ruling: **no cvar enters a VR preset; Task 9 ships only this table and the rig option `--game-cvar NAME=VALUE`** (appends `NAME "VALUE"` to the prefix game config for one run; the existing verified restore puts the original back). The rule was a saving of at least 0.3 ms interval p50 in two runs; no candidate reached 0.3 ms even once against the same-day baseline mean, so no second runs were made and no `VrCvarPreset` code, RVAs or `no-vr-cvar-preset` knob were added.
+
+Measured 2026-10-21 on the sim rig (throughput without a compositor, not headset fps), candidate HEAD 022d051 built as `d2vr_render_probe_arm_v601.dll`, sha256 `8c069e909788a0343c9986217fd2b80d48bd3fac8c435bfb737344de7918c6cc`, run under the installed name. `oil_tank_drop --lead 28 --seconds 120 --knob native-gpu-timing`, RTX 3070 mobile, same conditions as the Bound analysis (asusd Balanced; user knobs `fsr4.off`, `carry-trace`, `full-body` present in every run). The user's config already had `r_skipGodRays 1`, `r_skipLensFlares 1`, `r_skipBloom 1`, `r_shadowQualityPreset 2`, `r_shadowsRats 0`, `r_shadowsBloodflies 0`, `r_oceanQualityPreset 1`, `r_maxDynamicDecalsPreset 1`, so those were not retested. After every run the installed DLL was `ff0daf65...bc927`, the game config matched its pre-run SHA-256, and no knob or restore-pending marker was left.
+
+| Run (dir) | Config cvar appended | interval p50 / p95 (ms) | vs baseline mean 14.44 | gpu_busy | Kept |
+| --- | --- | --- | --- | --- | --- |
+| base1 (160532) | none | 14.18 / 15.23 | | 0.82 | |
+| base2 (163350) | none | 14.69 / 15.97 | | 0.81 | |
+| shdiv1 (160841) | `r_shadowParallelResolutionDividerLevel 1` | 14.44 / 15.73 | 0.00 | 0.81 | no |
+| spot1 (161150) | `r_shadowSpotAndOmniLowResolutionDividerEnabled 1` | 14.62 / 16.35 | +0.18 | 0.82 | no |
+| cull5 (161459) | `r_shadowCullDistance 5` | 14.45 / 15.71 | +0.01 | 0.81 | no |
+| lod1 (161803) | `r_lodZoomMultiplicator 0.5` | 14.70 / 16.04 | +0.26 | 0.81 | no |
+| lodd (162121) | `lod_dist_level0..3` 1 / 2 / 4 / 7 (defaults 3 / 6 / 12 / 20) | 16.32 / 18.17 | +1.88 | 0.82 | no (slower) |
+| scat (162425) | `r_skipLightScattering 1` | 14.63 / 15.74 | +0.19 | 0.81 | no |
+| dec (162740) | `r_maxDynamicDecals 4` | 14.55 / 15.87 | +0.11 | 0.81 | no |
+| ssr (163044) | `r_skipOceanSSR 1` | 14.70 / 15.96 | +0.26 | 0.81 | no |
+| cnt2 (163705) | `r_shadowParallelSliceCnt 2` | 14.73 / 16.61 | +0.29 | 0.81 | no |
+| shall (164009) | shadow stack: divider level 2, spot/omni divider 1, cull distance 5, slice size 512 | 14.39 / 15.50 | -0.05 | 0.81 | no |
+| lod4 (164315) | `r_lodZoomMultiplicator 4` | 14.53 / 15.77 | +0.09 | 0.81 | no |
+
+- Run-to-run spread of the two baselines is 0.51 ms (14.18 to 14.69), larger than the 0.3 ms threshold, and the same-day M0 reference was 14.43. Every candidate is inside that spread except `lodd`, which is 1.9 ms slower.
+- Even the stacked shadow run (the most aggressive shadow settings on the list) saved nothing, and `gpu_busy` stayed at 0.81 to 0.82 in every run. In this scene shadows, decals, light scattering and ocean SSR are not where the GPU time goes. That agrees with the Bound analysis: resolution did not move the frame either.
+- Boot-only versus live was not separated: the cvars were set through the game config, so boot-time allocations (`r_shadowParallelSliceCnt`, `r_shadowParallelSliceSize`) took effect, which a runtime write could not reproduce. They saved nothing either way. `lodd` changed the frame, so config values are being read.
+- Not tested (budget 13 of 14 runs, rig cannot pass a value with spaces): `r_shadowCascadeFars "4 10 24 50"`, `r_downsampleQuality 2`, texture streaming cvars, particle cvars, `r_shadowsRats/Bloodflies` (already 0 in this config), god rays (already skipped). No screenshot comparison was made because nothing was a candidate to keep.
+- Consequence for plan D: the frame is not reduced by this class of cvar on this scene. The mono-view diagnostic (3.74 ms) remains the only measured lever.
