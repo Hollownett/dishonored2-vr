@@ -296,6 +296,10 @@ cl /nologo /std:c++17 /EHsc /W4 /WX /O2 /MT tests\native_head_query_lifetime_che
 if not "%errorlevel%"=="0" exit /b 1
 build\native_head_query_lifetime_check.exe
 if not "%errorlevel%"=="0" exit /b 1
+cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT /Isrc tests\comfort_meter_check.cpp /Fo:build\comfort_meter_check.obj /Fe:build\comfort_meter_check.exe
+if not "%errorlevel%"=="0" exit /b 1
+build\comfort_meter_check.exe
+if not "%errorlevel%"=="0" exit /b 1
 cl /nologo /std:c++17 /EHsc /W4 /WX /O2 /MT tests\native_carry_snapshot_check.cpp /Fo:build\native_carry_snapshot_check.obj /Fe:build\native_carry_snapshot_check.exe
 if not "%errorlevel%"=="0" exit /b 1
 build\native_carry_snapshot_check.exe
