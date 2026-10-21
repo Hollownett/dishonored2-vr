@@ -26,11 +26,12 @@ struct Memory {
 };
 
 int main() {
-    constexpr std::uintptr_t base=0x140000000,bob=base+0x398e200,shakes=base+0x39a41a0;
+    constexpr std::uintptr_t base=0x140000000,bob=base+0x398e200,shakes=base+0x39a41a0,nobob=base+0x39a3490;
     Memory memory;
-    for(auto address:{bob,shakes}) for(unsigned i=0;i<0x50;++i) memory.bytes[address+i]=std::byte{};
+    for(auto address:{bob,shakes,nobob}) for(unsigned i=0;i<0x50;++i) memory.bytes[address+i]=std::byte{};
     memory.put(bob+0x30,base+0x1c5a9c8);memory.put(shakes+0x30,base+0x1c8dec8);
     memory.put(bob+0x48,4u);memory.put(shakes+0x48,1u);
+    memory.put(nobob+0x30,base+0x1c8cf60);memory.put(nobob+0x48,9u);
     memory.put(bob+0x28,1);memory.put(bob+0x2c,1.f);
     auto read=[&](std::uintptr_t a,void* b,std::size_t n) {return memory.read(a,b,n);};
     auto exchange=[&](std::uintptr_t a,std::uint64_t b,std::uint64_t c) {return memory.exchange(a,b,c);};
@@ -38,6 +39,8 @@ int main() {
     d2vr::CameraComfort comfort;
     comfort.apply(base,read,exchange);
     assert(comfort.active() && memory.integer(bob+0x28)==0 && memory.integer(shakes+0x28)==1);
+    // applies_three_entries_atomically: pm_noBob (flags 1|8 as the native ctor stores) becomes 1/1.0.
+    float one{};assert(memory.integer(nobob+0x28)==1 && memory.read(nobob+0x2c,&one,4) && one==1.f);
     assert(comfort.restore(read,exchange) && !comfort.active() && memory.bytes==baseline);
 
     // A later native/user value survives shutdown, including a fractional bob.
@@ -57,6 +60,13 @@ int main() {
     assert(comfort.restore(read,exchange) && memory.bytes==baseline);
 
     memory.put(shakes+0x30,base+0x1c8dec9);const auto writes=memory.writes;rejected=false;
+    try {comfort.apply(base,read,exchange);} catch(const std::runtime_error&) {rejected=true;}
+    assert(rejected && memory.writes==writes && !comfort.active());
+    // third_entry_mismatch_changes_nothing: wrong type on pm_noBob rejects before any write.
+    memory.put(nobob+0x48,4u);const auto before_third=memory.bytes;rejected=false;
+    try {comfort.apply(base,read,exchange);} catch(const std::runtime_error&) {rejected=true;}
+    assert(rejected && memory.writes==writes && !comfort.active() && memory.bytes==before_third);
+    memory.put(nobob+0x48,9u);memory.put(nobob+0x30,base+0x1c8cf61);rejected=false;
     try {comfort.apply(base,read,exchange);} catch(const std::runtime_error&) {rejected=true;}
     assert(rejected && memory.writes==writes && !comfort.active());
     std::cout<<"PASS: comfort cache identity, atomic activation, exact restoration, preserved user changes, partial rollback and failed-read retry; synthetic memory only\n";

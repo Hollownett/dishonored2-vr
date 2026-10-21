@@ -12,7 +12,7 @@ namespace d2vr {
 // bytes during a session, never the string, flags, callback or saved config.
 class CameraComfort {
     struct Entry {std::uintptr_t address{};std::uint64_t before{},ours{};bool owned{};};
-    std::array<Entry,2> entries_{};
+    std::array<Entry,3> entries_{};
     unsigned preserved_changes_{};
     static std::uint64_t cached(int integer,float real) {
         std::uint64_t packed{};
@@ -43,12 +43,16 @@ public:
     void apply(std::uintptr_t base,Read& read,CompareExchange& exchange) {
         if(active()) throw std::runtime_error("Camera comfort override is still owned");
         struct Profile {std::uintptr_t rva,name;unsigned type;int integer;float real;};
-        constexpr std::array<Profile,2> profiles{{
+        // pm_noBob: header 0x39a3490 / name 0x1c8cf60 found in the pinned exe via Ghidra:
+        // string "pm_noBob" xref -> static ctor 0x141391d80 -> FUN_1401008f0(&0x1439a3490,
+        // name,"0" default,flags 1,...) -> FUN_140101640 stores name at +0x30, flags at +0x48.
+        constexpr std::array<Profile,3> profiles{{
             {0x398e200,0x1c5a9c8,4,0,0.f}, // ark_playerBobAmount
-            {0x39a41a0,0x1c8dec8,1,1,1.f}  // view_skipShakes
+            {0x39a41a0,0x1c8dec8,1,1,1.f}, // view_skipShakes
+            {0x39a3490,0x1c8cf60,1,1,1.f}  // pm_noBob (disables engine view bob; default 0)
         }};
         entries_={};preserved_changes_=0;
-        // Validate both variables before changing either one.
+        // Validate every variable before changing either one.
         for(unsigned i=0;i<profiles.size();++i) {
             const auto& p=profiles[i];std::array<std::byte,0x50> header{};
             if(!read(base+p.rva,header.data(),header.size())) throw std::runtime_error("Cannot inspect comfort variable");
