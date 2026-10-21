@@ -168,13 +168,46 @@ Also modify `tools/build-msvc.cmd`.
 - [ ] **Step 3: Measure** before and after (≤ 4 runs) and add the rows to `docs/VR-PERF-LAPTOP.md`.
 - [ ] **Step 4: Mutation.** With `throttles_after_120_stable` set to fire at 1, a test must fail. Restore. Commit `perf: throttle discovery once stable; mirror off option`.
 
+## Task 5a: Mono-view XR diagnostic: the real one-view frame time (added 2026-10-21 after Task 3)
+
+Why: Task 3 showed the engine's GPU time does not drop with render resolution. FSR 3 Quality at 77% gave 11.95 ms of list time against 11.23 ms at Native. The CPU per-eye spans are distorted by stalls: the render thread waits on the GPU after the right-eye begin, so `eye1_share` .71 shows where the wait lands, not what each eye costs. The only direct way to learn what alternate-eye rendering would save is to make the engine prepare one view per frame in XR and measure the interval.
+
+**Files:** Modify `src/dxgi_probe.cpp`:
+- the descriptor preparation around `prepare_stereo`, plus the single-eye path at ~4927 and ~5733 that `stereo_flag==2` uses today;
+- the eye identification at ~3217-3261 (`PostTonemapPass::eye_views`) and `native_eye_pair`.
+
+Modify `src/game_xr.hpp` (`record_rendered_eye`, `rendered_mask_`, the per-eye copy at ~1616-1660) and `docs/VR-PERF-LAPTOP.md`. Create `tests/mono_view_routing_check.py`, registered in the harness.
+
+**Interfaces:**
+- Knob `perf-mono-view` (diagnostic only, never in `default_features.json`). In XR mode the engine gets the single-eye descriptor (one view, full viewport, centre pose: the midpoint of the two eye poses with the centre orientation).
+  - The one rendered image is copied to BOTH eye swapchains.
+  - Both projection layers carry the same centre pose and the union FOV, so the image is flat (no stereo depth). That is expected and fine for a timing diagnostic.
+  - `record_rendered_eye` is called for eye 0 and eye 1 with the same data, so `rendered_mask_==3` holds.
+- Every `eye==0`-guarded per-frame site still runs once per frame. With one view, eye 0 is the only view.
+- On any identification failure the frame falls back to today's paired path for that session, logs once, and the status shows `"mono_view":"fallback"`. It never presents garbage and never crashes.
+- Status: `"mono_view": "off" | "on" | "fallback"`.
+
+- [ ] **Step 1: Routing check** `tests/mono_view_routing_check.py`:
+  - the knob string is read once in StartProbe;
+  - the mono branch writes the single-eye descriptor only when the knob is set;
+  - both eye swapchains are filled from the same source in mono;
+  - the fallback path exists.
+- [ ] **Step 2: Implement.** Run the full harness: no regression from the current baseline.
+- [ ] **Step 3: Measure** on the sim rig with the same scenario and candidate as Task 3's A1 re-run (`oil_tank_drop`, `--lead 28 --seconds 120`, `--knob native-gpu-timing`):
+  - M0: paired, no knob. One run, or reuse the A1 re-run if HEAD's render path is unchanged.
+  - M1: `--knob perf-mono-view`.
+  - Record interval p50/p95, gpu_busy (list sum) and render-thread busy for both.
+  - `mono_saving` = 1 − M1/M0 on interval p50.
+  - Check the screenshot or status that M1 reached gameplay (`gameplay` true, `mono_view` "on").
+- [ ] **Step 4: Commit** `perf(diag): mono-view XR diagnostic and its measurement`.
+
 ## Task 5: Decision gate: alternate-eye rendering or close (controller ruling)
 
 **Files:** `.superpowers/sdd/2026-10-21-vr-framerate-e/progress.md` (the ruling). If the gate passes, also `docs/superpowers/plans/2026-10-2x-alternate-eye-f.md`.
 
 - [ ] **Step 1: Re-run** Task 3 A1 on HEAD, after D7, D8, E4 and D9 have landed.
 - [ ] **Step 2: Rule.**
-  - **The gate passes** when `over_budget` holds on the re-run AND `eye2_share` ≥ 0.40 AND the verdict is CPU-BOUND(render) or MIXED. Then write plan F, "alternate-eye rendering as a knob-gated performance mode", from findings §5. Its scope:
+  - **The gate passes** when `over_budget` holds on the re-run AND Task 5a's `mono_saving` ≥ 0.25 (one view per frame saves at least a quarter of the frame) AND the verdict is not CPU-BOUND(game). (Revised 2026-10-21: the CPU `eye2_share` is stall-confounded; `mono_saving` measures the saving directly.) Then write plan F, "alternate-eye rendering as a knob-gated performance mode", from findings §5. Its scope:
     - explicit eye parity;
     - per-eye staleness in `GameXr::present` (`rendered_mask_` per eye with a max age of 1 frame);
     - first-view-of-frame keying for every `eye==0` site;
