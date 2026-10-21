@@ -90,3 +90,48 @@ editing the user's real files, so they are not measured even once the session is
 Debug trace: create `build/frame-split-trace` before launch to get `native-frame-split-trace.csv` (columns `frame,eye0,eye1,enter,exit,prev,accepted`,
 steady_clock ns; one row per fed frame, capped at 20000 rows, written by the status writer, not the render thread). Plan E task 3 checks that
 `accepted` is 1 on nearly every frame and `eye1 < enter`; many 0 rows mean the eye hooks do not run between two Presents as assumed.
+
+## Bound analysis (plan E)
+
+Measured 2026-10-21 on the sim rig (throughput without a compositor, not headset fps). Candidate: HEAD (9ad49cc) built as `d2vr_render_probe_arm_v601.dll`, run under the installed name; candidate SHA-256 `835ddbec32c458e8de39fadc48d631932287b6aad5441d88d75db64c3fd794d3`. The installed DLL (`ff0daf6566a62a44a31cef372a93114fc42790f2a13eb9887f3dfb3de63bc927`) was verified unchanged after every run, with no restore-pending marker and no rig knob left.
+
+Conditions: NVIDIA GeForce RTX 3070 Laptop GPU, 8192 MiB, driver 615.71.09; AMD Ryzen 9 5900HX (8 cores, 16 threads); AC online; no other compute process on the GPU. **Deviation:** `powerprofilesctl get` and `asusctl profile get` both reported Balanced (asusd's AC profile is Performance, but it only applies on a power event), not Performance as the plan wants. I did not change it. All runs share this condition, so the comparison between rows holds, but the absolute numbers may be a little pessimistic. The mod home also held the user's own knobs `fsr4.off`, `carry-trace` and `full-body` in every run. Scenario `oil_tank_drop`, `--lead 28 --seconds 120`. All runs used the NVIDIA adapter.
+
+| Run | Setup | Run dir | interval p50 / p95 (ms) | hook p50 | gpu_busy | render / game thread busy | Verdict |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| A1 | xr, `native-gpu-timing`, `frame-split-trace`, FSR 3 Native, both-eye mirror | 20261021T120930 | 14.10 / 15.33 | 0.81 | 0.97 | 0.71 / 0.54 | GPU-BOUND |
+| A2 | DXVK_HUD | not run | | | | | A2: HUD not captured (the rig takes no screenshot) |
+| B1 | `--probe-mode paired` | 20261021T121243 | 7.54 / 9.42 (menu) | 4.52 | n/a | n/a | INVALID: StartProbe returned 4, never left the main menu (logic_mask 0) |
+| B2 | `--probe-mode single` | 20261021T121602 | 3.95 / 6.76 (menu) | 2.52 | n/a | n/a | not measurable: started and exited 0, but stayed in the menu (logic_mask 0); the rig's MIXED verdict counts menu frames |
+| C | xr, `render-perf` | 20261021T121908 | 14.57 / 15.77 | 0.85 | n/a (no timing knob) | 0.69 / n/a | MIXED (no gpu_busy) |
+| E1 | A1 plus FSR 3 Quality (`temporal_aa=3`, 77% render scale) | 20261021T122223 | 14.63 / 15.85 | 0.78 | 0.96 | 0.68 / 0.53 | GPU-BOUND |
+| E2 | A1 plus mirror one eye | not measurable yet | | | | | the mirror default changes in a later task |
+
+Per-run perf block (`pace_ms`, same frames): A1 p50 14.09, p95 15.35, missed_fraction 0, mod_cpu mean 0.78 ms; C p50 14.59; E1 p50 14.64, fraction 0.77 (confirms the Quality setting was applied). Every xr row had `missed_fraction` 0 against a 11.1 ms period, because the sim has no compositor; ignore that field here.
+
+### Per-eye numbers are not trustworthy
+
+The A1 trace (`native-frame-split-trace.csv`, 6817 rows) has **accepted=1 on 0% of frames (0 of 6817)**. Every row has eye0 = -1 (the eye 0 begin hook was never stamped) and a valid eye1, so the frame-split rule `prev < eye0 <= eye1 <= present` fails on all of them. `split_skipped` is 6763 in A1, 6592 in E1 and 6680 in C. The `eye0_ms_p50`, `eye1_ms_p50` and `eye1_share` values (all 0) in A1, C and E1 are therefore empty, not measured zeros. This is below the 50% line: per-eye CPU numbers from this build cannot be used. Interval, hook, gpu_busy and thread busy do not depend on the eye stamps and are still usable.
+
+Run C's `render-perf-gpu.csv` has no usable per-eye GPU time either: only 55 rows carry eye 0 (median 0.09 ms) and none carry eye 1. Its category 5 row (eye -1, median 13.8 ms, 6574 samples) matches the whole-frame GPU time that A1's gpu_busy gives (0.97 x 14.10 = 13.7 ms), so it is a per-frame total, not a per-eye one. Eye 0 against eye 1 GPU ms: not measured.
+
+### The numbers
+
+- **Verdict:** A1 and E1 are GPU-BOUND; C is MIXED only because it had no gpu_busy.
+- **eye1_share:** not measurable on this build (trace accepted 0%). The reported 0.00 in A1 is not a measurement.
+- **B2/B1 ratio:** not measurable. B1 and B2 both stayed in the main menu, so their intervals (7.54 and 3.95 ms) are menu frames and must not be used. Neither cross-checks A1.
+- **Long pole:** the GPU. In A1 the native GPU work fills 97% of the interval (about 13.7 of 14.10 ms), while the render thread is 71% busy and the game thread 54% busy. Neither CPU thread is saturated. E1 agrees (gpu_busy 0.96; render 0.68, game 0.53). gpu_busy is a lagged lower bound that counts native command lists only, so the true GPU load is at least this high.
+- **The mod's share:** hook p50 0.81 ms over a 14.10 ms interval is 5.7% (A1). The mod's own CPU is about 0.78 ms per frame (A1 perf block). The mod is not the cost.
+- **Budget gap:** the interval p50 is 14.10 ms against 13.9 ms (72 Hz), so A1 is 0.20 ms over, about 1.4%. p95 is 15.33 ms, 1.43 ms over. Against 90 Hz (11.1 ms) the gap is 3.0 ms at p50.
+
+### What the data says
+
+On the laptop, the sim frame is GPU-bound and only just over the 72 Hz budget. In A1 the GPU is busy for 97% of a 14.10 ms interval, and neither the render thread (71%) nor the game thread (54%) is close to full, so extra CPU work removed would not shorten the frame; the mod itself costs 0.81 ms (5.7%). The control run E1 gives a result that does not fit a simple pixel-bound GPU: dropping the render scale to 77% (FSR 3 Quality) did not shorten the frame (14.63 ms against 14.10 ms, within run-to-run noise, with gpu_busy still 0.96). So the GPU time is mostly not in pixel work that the FSR upscale scale controls, or it is held at that interval by something else, so lowering resolution is not a way to reach 72 Hz here. I cannot say how much of the frame is the second eye, because the eye hooks never produced a valid pair (0% accepted) and the single-view runs B1 and B2 never reached gameplay. This means the data neither supports nor rules out alternate-eye rendering; the engine frame is about 13.3 ms and over budget, and the second-eye share is unknown. Two limits apply: the rig has no compositor, and asusd was in Balanced, not Performance.
+
+### Gate inputs for Task 5
+
+- `engine_ms` = interval p50 - hook p50 = 14.0954 - 0.8057 = **13.29** (A1).
+- `eye2_share` = A1 `eye1_share`: **not measurable** (the value is 0 only because the trace accepted 0 of 6817 frames; do not read it as zero). B2/B1 is not available either.
+- `over_budget` = interval p50 > 13.9: **true** (14.10 ms, A1).
+
+The Task 5 gate says "second eye costs at least 40% of the engine frame and still over budget". Over budget is true; the second-eye share cannot be tested with this build. The frame-split eye0 stamp (eye 0 begin never recorded) needs fixing and A1 needs to be re-run before the gate can be ruled on.
