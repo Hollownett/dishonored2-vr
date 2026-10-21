@@ -2494,7 +2494,7 @@ static std::string combat_policy_status_json() {
         <<",\"resumed\":"<<stats.resumed<<",\"timeout_ordinary\":"<<stats.timeout_ordinary
         <<",\"cancelled_target\":"<<stats.cancelled_target<<",\"cancelled_context\":"<<stats.cancelled_context
         <<",\"policy_rt_edges\":"<<stats.dispatched<<"}"
-        <<",\"attack_intent\":{\"presses\":"<<attack_intent.presses()<<",\"slash\":"<<attack_intent.slashes()<<",\"stab\":"<<attack_intent.stabs()
+        <<",\"attack_intent\":{\"presses\":"<<attack_intent.presses()<<",\"slash\":"<<attack_intent.slashes()<<",\"stab\":"<<attack_intent.stabs()<<",\"contact\":"<<attack_intent.contacts()
         <<",\"honoured\":"<<attack_honour.honoured()<<",\"not_honoured\":"<<attack_honour.not_honoured()
         <<",\"pad_frames\":"<<attack_intent_pad_frames.load()<<",\"dropped\":"<<attack_press.dropped()
         <<",\"legacy\":"<<(legacy_sword_contact?"true":"false")<<",\"honour_read\":"<<(attack_intent_honour_read.load()?"true":"false")<<"}"
@@ -4506,7 +4506,8 @@ void prepare_head_view(void* view) noexcept {
                                 read_self(body->player+0x300,player_at.data(),12) && d2vr::attacker_rear_or_side(row0.data(),npc_at.data(),player_at.data());
                             const double stealth_speed=d2vr::NativeInteractionAim::stealth_speed_.load();
                             const auto speed_class=d2vr::classify_contact_speed(speed,stealth_speed,d2vr::SwordHitGate::hit_speed);
-                            const bool too_slow=speed_class==d2vr::ContactSpeedClass::too_slow || (speed_class==d2vr::ContactSpeedClass::stealth_only && (legacy_sword_contact?!rear_side:true)); // new path: a calm touch never damages (the native press owns stealth)
+                            const bool legacy_too_slow=speed_class==d2vr::ContactSpeedClass::too_slow || (speed_class==d2vr::ContactSpeedClass::stealth_only && !rear_side); // legacy gate
+                            const bool too_slow=legacy_sword_contact?legacy_too_slow:!(speed>=d2vr::AttackIntent::contact_min_mps); // new path: only a resting blade is ignored; a unaware guard gets the native press, no mod damage
                             const unsigned why=!drawn?1u:!contact_hand?2u:contact_hand->epoch!=game_xr->pose_epoch()?3u:
                                 (physical_grab_requested && native_grab.holding(1))?4u:too_slow?5u:
                                 !sword_hit_gate.open(contact->entity,now,tip_speed[side])?6u:0u;
@@ -4525,7 +4526,7 @@ void prepare_head_view(void* view) noexcept {
                                 if(owned_contact) {
                                     // Victim-based stealth strike: a calm deliberate contact from the rear or the side; the engine-side unaware/damageable checks decide on the game thread.
                                     owned_contact->stealth_strike=legacy_sword_contact && d2vr::stealth_strike(speed,rear_side,stealth_speed); // new path: no hold, no mod-made kill
-                                    owned_contact->stealth_only=speed_class==d2vr::ContactSpeedClass::stealth_only;
+                                    owned_contact->stealth_only=legacy_sword_contact?speed_class==d2vr::ContactSpeedClass::stealth_only:speed<d2vr::SwordHitGate::hit_speed; // new path: a calm contact never damages an aware guard
                                     // Victim-specific and fresh (100 ms): the global ga_offered legs name no victim and must not arm a calm press.
                                     owned_contact->native_offer_victim=kill_sensor_spawn.load()==owned_contact->victim_spawn && now>=kill_sensor_tick.load() && now-kill_sensor_tick.load()<=100;
                                     if(!rear_side) ++d2vr::NativeInteractionAim::stealth_reject_[0];
@@ -7393,6 +7394,10 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                             const double now_s=std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
                                             const auto polls=controller_bridge.virtual_reads();
                                             const auto to_vec=[](const d2vr::GV3& v){return d2vr::Vec3{v.x,v.y,v.z};};
+                                            const auto contact_at=d2vr::NativeInteractionAim::intent_contact_tick_.exchange(0);
+                                            const bool contact_wanted=contact_at && f.now_ms>=contact_at && f.now_ms-contact_at<=250;
+                                            if(contact_wanted && live && attack_intent.contact_press(now_s,drawn_now)) {
+                                                if(attack_press.start(f.now_ms,polls)) attack_honour.press(f.now_ms);}
                                             if(attack_intent.update({now_s,to_vec(cf.pos),to_vec(cf.head_pos),live,to_vec(cf.aim)},crouch.crouched,drawn_now) && live)
                                                 if(attack_press.start(f.now_ms,polls)) attack_honour.press(f.now_ms);
                                             if(!live) attack_press.reset();
@@ -8469,7 +8474,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
         taa_mv_dejitter.enabled=!fs::exists(root/L"build"/L"no-taa-mv-dejitter");
         vr_combat_enabled=!fs::exists(root/L"build"/L"legacy-combat");vr_combat.reset();
         legacy_sword_contact=fs::exists(root/L"build"/L"legacy-sword-contact");d2vr::NativeInteractionAim::legacy_contact_=legacy_sword_contact;
-        attack_intent=d2vr::AttackIntent{};attack_press=d2vr::AttackPress{};attack_honour=d2vr::AttackHonour{};attack_intent_owns=attack_intent_rt=false;attack_intent_pad_frames=0;attack_intent_honour_read=false;
+        d2vr::NativeInteractionAim::intent_contact_tick_=0;d2vr::NativeInteractionAim::intent_episode_=d2vr::SlowRejectLatch{};attack_intent=d2vr::AttackIntent{};attack_press=d2vr::AttackPress{};attack_honour=d2vr::AttackHonour{};attack_intent_owns=attack_intent_rt=false;attack_intent_pad_frames=0;attack_intent_honour_read=false;
         assassination_receipt_requested=head_requested && fs::exists(root/L"build"/L"assassination-receipts");
         if(assassination_receipt_requested &&
            !d2vr::NativeAssassinationReceipt::process_owner().start(image_base,&read_self,output))

@@ -17,6 +17,7 @@ public:
     inline static constexpr double cooldown_s=.3,min_dt_s=.004,max_gap_s=.25;
     inline static constexpr double stab_window_s=.4,stab_min_travel_m=.20,stab_min_straight=.75,stab_min_align=.5;
     inline static constexpr unsigned rearm_samples=2;
+    inline static constexpr double contact_min_mps=.3; // a blade slower than this is resting on the guard, not attacking
     // Returns true on the one sample a press should start.
     bool update(const AttackSample& s,bool crouched,bool weapon_drawn) noexcept {
         if(!s.tracked || !std::isfinite(s.t_s) || !finite(s.hand_pos) || !finite(s.head_pos)) {restart();return false;}
@@ -42,7 +43,15 @@ public:
         ++presses_;if(slash)++slash_;else ++stab_;
         return true;
     }
+    // A sword contact on a guard the engine still calls unaware asks for the same press (the caller checked the contact speed and the
+    // once-per-episode rule). It shares the 300 ms cooldown and disarms, so one motion never presses twice (nor a slash right after).
+    bool contact_press(double t_s,bool weapon_drawn) noexcept {
+        if(!weapon_drawn || !std::isfinite(t_s) || t_s<cooldown_until_) return false;
+        armed_=false;slow_run_=0;cooldown_until_=t_s+cooldown_s;++presses_;++contact_;
+        return true;
+    }
     std::uint64_t presses() const noexcept {return presses_;}
+    std::uint64_t contacts() const noexcept {return contact_;}
     std::uint64_t slashes() const noexcept {return slash_;}
     std::uint64_t stabs() const noexcept {return stab_;}
     double speed() const noexcept {return speed_;}
@@ -51,7 +60,7 @@ private:
     bool have_{},armed_{};double last_t_{},cooldown_until_{},speed_{};Vec3 last_rel_{};
     std::array<double,3> speeds_{};unsigned speed_i_{},speed_n_{},slow_run_{};
     std::array<double,history_cap> ht_{};std::array<Vec3,history_cap> hp_{};unsigned history_n_{},history_head_{};
-    std::uint64_t presses_{},slash_{},stab_{};
+    std::uint64_t presses_{},slash_{},stab_{},contact_{};
     void seed(double t,Vec3 rel) noexcept {have_=true;last_t_=t;last_rel_=rel;}
     void restart() noexcept {have_=false;speed_n_=speed_i_=slow_run_=0;history_n_=history_head_=0;speed_=0;}
     double median3() const noexcept {

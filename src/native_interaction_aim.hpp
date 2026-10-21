@@ -525,7 +525,11 @@ class NativeInteractionAim {
                     // native attack and the engine decides. A guard still unaware gets no contact damage (it would alert him before the press
                     // resolves); an aware guard is hit as before. A calm touch never reaches here (the producer drops it).
                     if(!legacy_contact_.load(std::memory_order_relaxed)) {
-                        if(NativeMelee::damageable(self->base_,self->read_,contact.hit.victim) && NativeMelee::unaware(self->base_,self->read_,contact.hit.victim)) {++intent_unaware_deferred_;continue;}
+                        if(NativeMelee::damageable(self->base_,self->read_,contact.hit.victim) && NativeMelee::unaware(self->base_,self->read_,contact.hit.victim)) {
+                            // No mod-made damage; the contact (moving at least 0.3 m/s, the producer's rule) asks for the native attack, once per episode.
+                            ++intent_unaware_deferred_;
+                            if(intent_episode_.first(contact.victim_spawn,final_now)) intent_contact_tick_.store(final_now,std::memory_order_release);
+                            continue;}
                     } else
                     // A guard the engine calls unaware is not hit: the native Slash may still make this the Assassination, or the
                     // contact becomes the stealth kill below (sword_contact_policy.hpp). Anything else is the ordinary hit.
@@ -738,6 +742,8 @@ public:
     inline static StealthHold<OwnedSwordContact> stealth_hold_; // game thread only
     inline static std::atomic<bool> stealth_enabled_{true};
     inline static std::atomic<bool> legacy_contact_{false}; // build/legacy-sword-contact: the old hold/drop/kill routing
+    inline static std::atomic<std::uint64_t> intent_contact_tick_{}; // a contact on an unaware guard wants the native attack pressed (control loop consumes it)
+    inline static SlowRejectLatch intent_episode_; // game thread only
     inline static std::atomic<std::uint64_t> intent_unaware_deferred_{}; // contacts on an unaware guard left to the native attack press
     inline static std::atomic<double> stealth_speed_{stealth_speed_default}; // m/s, knob build\stealth-speed; the near-pass assist reads it too
     inline static std::atomic<std::uint64_t> stealth_slow_unheld_drops_{}; // calm contacts never held (aware, not damageable, slot busy, stealth off): dropped

@@ -18,7 +18,10 @@ def check(source: str, consumer: str) -> None:
     assert source.index("classify_contact_speed(") < source.index("const unsigned why=")
     assert "legacy_sword_contact && d2vr::stealth_strike(speed,rear_side,stealth_speed)" in source and "stealth_strike(speed,rear_side,d2vr::SwordHitGate::hit_speed)" not in source
     assert 'L"stealth-speed"' in source and "stealth_speed_from_knob(" in source
-    assert "const bool too_slow=speed_class==d2vr::ContactSpeedClass::too_slow || (speed_class==d2vr::ContactSpeedClass::stealth_only && (legacy_sword_contact?!rear_side:true));" in source
+    assert "const bool too_slow=legacy_sword_contact?legacy_too_slow:!(speed>=d2vr::AttackIntent::contact_min_mps);" in source
+    assert "(speed_class==d2vr::ContactSpeedClass::stealth_only && !rear_side)" in source
+    assert "intent_episode_.first(contact.victim_spawn,final_now)" in consumer and "intent_contact_tick_.store(final_now" in consumer
+    assert "intent_contact_tick_.exchange(0)" in source and "attack_intent.contact_press(now_s,drawn_now)" in source
     assert "legacy_sword_contact && d2vr::arms_native_attack(" in source
     assert "if(owned_contact->stealth_strike) contact_attack_tick=now;" not in source
     assert "if(why==5 && rear_side && slow_reject_latch.first(contact->entity,now)) ++d2vr::NativeInteractionAim::stealth_reject_[1];" in source

@@ -129,6 +129,43 @@ static void a_slash_speed_counts_as_slash_even_crouched() {
     Rig r;r.settle();
     assert(r.run(30,{3.6,0,0},{0,0,0},true,true)==1 && r.in.slashes()==1);
 }
+static void slow_contact_on_unaware_presses_once() {
+    Rig r;r.settle();
+    assert(r.in.contact_press(r.t,true) && r.in.presses()==1 && r.in.contacts()==1 && r.in.slashes()==0);
+    assert(!r.in.contact_press(r.t+.1,true)); // inside the shared cooldown
+    assert(!r.in.contact_press(r.t+.5,false)); // sword not drawn
+    assert(r.in.contact_press(r.t+.5,true) && r.in.contacts()==2);
+}
+static void resting_contact_no_press() {
+    // the producer's rule: under contact_min_mps the blade is resting; the wiring pins it
+    assert(AttackIntent::contact_min_mps==.3);
+    std::ifstream g(std::filesystem::absolute(std::filesystem::path(__FILE__)).parent_path().parent_path()/"src"/"dxgi_probe.cpp");assert(g);
+    const std::string probe((std::istreambuf_iterator<char>(g)),std::istreambuf_iterator<char>());
+    assert(probe.find("!(speed>=d2vr::AttackIntent::contact_min_mps)")!=std::string::npos);
+}
+static void contact_and_slash_same_motion_press_once() {
+    Rig r;r.settle();
+    r.run(1,{4,0,0},{0,0,0},false,true); // a swing begins; the contact lands first
+    // armed but the contact fired: the swing in progress must not press again
+    assert(r.in.contact_press(r.t,true));
+    assert(r.run(60,{4,0,0},{0,0,0},false,true)==0 && r.in.presses()==1);
+    // and the other order: a slash first, then the contact inside the cooldown
+    Rig q;q.settle();
+    assert(q.run(12,{4,0,0},{0,0,0},false,true)==1);
+    assert(!q.in.contact_press(q.t,true) && q.in.presses()==1);
+}
+static void contact_press_uses_the_same_press_path() {
+    std::ifstream g(std::filesystem::absolute(std::filesystem::path(__FILE__)).parent_path().parent_path()/"src"/"dxgi_probe.cpp");assert(g);
+    const std::string probe((std::istreambuf_iterator<char>(g)),std::istreambuf_iterator<char>());
+    const auto b=probe.find("const auto contact_at=");assert(b!=std::string::npos);
+    const auto e=probe.find("attack_intent_rt=live",b);assert(e!=std::string::npos);
+    const std::string w=probe.substr(b,e-b);
+    assert(w.find("if(contact_wanted && live && attack_intent.contact_press(now_s,drawn_now)) {")!=std::string::npos && w.find("attack_press.start(f.now_ms,polls)")!=std::string::npos &&
+           w.find("attack_honour.press(f.now_ms)")!=std::string::npos);
+    assert(w.find("input.")==std::string::npos && w.find("NativeMelee")==std::string::npos);
+    // the pad is written only from attack_intent_rt (shared with slash/stab): the pad composer path
+    assert(probe.find("if(logic==2 && attack_intent_rt) {input.right_trigger=1;")!=std::string::npos);
+}
 static void press_holds_120ms_then_until_two_polls_capped_at_500ms() {
     AttackPress p;
     assert(p.start(1000,10));
@@ -190,6 +227,10 @@ int main() {
     stab_only_when_crouched();
     stab_needs_travel_and_straightness();
     a_slash_speed_counts_as_slash_even_crouched();
+    slow_contact_on_unaware_presses_once();
+    resting_contact_no_press();
+    contact_and_slash_same_motion_press_once();
+    contact_press_uses_the_same_press_path();
     press_holds_120ms_then_until_two_polls_capped_at_500ms();
     honour_counts_a_takedown_seen_within_600ms();
     attack_intent_never_forces_kill();
