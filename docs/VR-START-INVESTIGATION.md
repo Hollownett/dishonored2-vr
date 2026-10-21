@@ -70,3 +70,48 @@ Stalls therefore correlate with starting the mod during the first ~12 s (engine 
 ## Rig notes
 
 Eight runs, installed DLL only (hash ff0daf65...bc927 verified after the last run; no knob or marker left, `build/` holds the pre-existing `fsr4.off`, `full-body`, `carry-trace`). Run logs: `~/d2vr-test-builds/sim-runs/20261021T233705`, `...T233939`, `...T234217`, `...T234451`, `...T234802`, `...T235105`, `...T235350`, `...T235632`.
+
+## Results (plan C Task 6, 2026-10-22)
+
+Task 6 implemented the gate (`linux/proxy/proxy_core.hpp` `start_gate`, commit d4fd87c) with the 20 s default and added permanent
+probes to the proxy log: d3d11.dll and dxgi.dll load time, every `logic_mask` change, the first layer the hooked mod submitted, gameplay,
+and on every posted Enter the menu input counters (`native_pad_window_gates`, `native_pad_poll_gates`, `native_joystick_wakeups`,
+`native_menu_button_events`, `native_controller_reads`, each with the change since the previous Enter). All times are ms since the game process was created.
+Five more sim runs with the new proxy (installed in the game folder; the old one is kept at
+`/tmp/claude-1000/-home-hollownet/846b35a1-4067-4547-b512-e6ba817998ea/scratchpad/dinput8.orig.t6`), same command as above:
+
+| run | `--settle` | StartProbe begin | menu (mask 64) | result |
+|---|---|---|---|---|
+| s12a | 12 | 14.1 s | 36.9 s | OK, gameplay at 52.2 s |
+| s12b | 12 | 14.2 s | 37.2 s | FAILED (returned 4), mask stuck at 64, 8 more Enters ignored |
+| s13a | 13 | 15.2 s | 36.8 s | OK, gameplay 53.3 s |
+| s13b | 13 | 15.2 s | 38.2 s | OK, gameplay 53.2 s |
+| default | 20 (new default) | 22.7 s | 37.2 s | OK, gameplay 55.0 s |
+
+Timings (default run, others within 0.5 s): process start to window found 2.1 s (1.6 to 2.1 across runs); window found to "present seen"
+(client area, two polls) 0.5 s, the polling granularity; start 20.0 s after that; first layer submitted with the mod hooked 1.75 s after
+`StartProbe begin` in every run (this is the hook installation time, not the game's first Present); logos to menu: mask 0 until 36.8 to 38.2 s in
+every run regardless of when the mod started; Enter to gameplay: 15 to 17 s. d3d11.dll and dxgi.dll are already loaded 0.09 to 0.18 s after process start (the game
+imports them statically), so module presence says nothing about readiness. The first Present of the game itself is not observable from the proxy
+and the DLL only sees Presents after its hook is in; "present seen" is the window-based stand-in the coordinator chose.
+
+What the probes say about the early stall:
+
+1. It is not deterministic. Same start time (settle 12, 14.1 and 14.2 s after process start), one OK and one stalled. Over both tasks: starts at or before
+   14.2 s stalled 5 of 6 times (settle 0, 8, 8, 11 and 12 stalled; the other 12 worked), starts at 15.2 s or later worked 7 of 7 (13 x2, 14, 20 x2, 30, 45).
+   The sample cannot show that the risk is exactly zero from 15 s.
+2. The mod and the game both look healthy while it stalls: 25k layers submitted, the menu appears at the same 36.8 to 38.2 s as in a good run,
+   `game_window_foreground` is true, the pad poll gates and controller reads advance at the same rate as in a good run (about 1,000 and 2,000 per 4 s at the menu),
+   `native_pad_window_overrides` and `native_joystick_focus_overrides` are 0 in all runs.
+3. The mod does not count the keyboard Enter at all (`native_menu_button_events` is 0 in good runs too), so the counters cannot show whether the game
+   saw the key. The only difference found between stalled and good runs is `native_joystick_wakeups` at the end (stalled 1 or 2, good 4), which counts
+   lease changes and may be an effect rather than a cause. The first Enter at the menu arrived 3.4 to 3.6 s after the menu appeared in both a good and a stalled run.
+4. Not found: any log or status field that differs before the stall. The menu movies patched count and rejected count (20 patched, 0 rejected at the menu) are the same.
+
+Cause: not identified. The correlation with a start before roughly 15 s after process start remains, so the 20 s default stays. Candidate cause, unproven:
+StartProbe takes about 1.75 s to hook; started within a window around 12 to 14 s after process start it overlaps the game's own title/menu preparation, and
+one of the hooks installed in that window (`native_pad_focus.install`, the movie-load patch callback) leaves the title menu not taking keyboard Enter.
+No fix is described, because the evidence does not name the hook. The next experiment that would: repeat settle 8 to 12 with `--knob` files that switch the
+optional hook groups off one at a time (pad focus first, since it is the only one that touches input), and compare stall counts, at least 4 runs per arm.
+
+Not used: 2 of the 7 allowed runs. The legacy fallbacks were only checked in the Wine proxy check, not on the real game.
