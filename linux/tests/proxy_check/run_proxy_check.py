@@ -191,6 +191,28 @@ class ProxyCheck(unittest.TestCase):
         self.assertFalse(self.marker.exists())
         self.finish()
 
+    def test_legacy_mode_with_garbage_knob_is_45_seconds(self):
+        self.install_mod()
+        (self.home / "build/linux-start-mode").write_text("legacy")
+        (self.home / "build/linux-settle-seconds").write_text("abc")
+        self.launch()
+        self.wait_for(lambda: "game window found" in self.log(), 30)
+        self.assertIn("legacy settle 45000 ms", self.log())
+        self.finish()
+
+    def test_oversized_knob_is_ignored_and_logged_once(self):
+        self.install_mod()
+        # Read whole this is "1" (start 1 s after the window); beyond 64 KiB it must count as absent: default 20 s.
+        (self.home / "build/linux-settle-seconds").write_text("1" + " " * 70000)
+        self.launch()
+        self.wait_for(lambda: "present seen (client" in self.log(), 30)
+        time.sleep(3)
+        log = self.log()
+        self.assertIn("present + settle 20000 ms", log)
+        self.assertEqual(log.count("larger than 64 KiB"), 1)
+        self.assertFalse(self.marker.exists())
+        self.finish()
+
     def test_no_present_falls_back(self):
         self.install_mod()
         (self.home / "build/linux-settle-seconds").write_text("1")

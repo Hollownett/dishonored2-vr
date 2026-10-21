@@ -178,6 +178,24 @@ inline unsigned start_timeout_ms(const std::string& timeout_knob, unsigned settl
     return settle_ms > kDefaultStartTimeoutMs ? settle_ms : kDefaultStartTimeoutMs;
 }
 
+// Legacy wait in ms: the settle knob if it is plain digits (blank, garbage and oversized files give the old 45 s).
+inline unsigned legacy_wait_ms(const std::string& settle_knob) {
+    const std::string t = trim_ascii(settle_knob);
+    if (t.empty() || t.find_first_not_of("0123456789") != std::string::npos) return kLegacySettleSeconds * 1000;
+    return start_settle_ms_from_knob(t);
+}
+
+// Knob and status files larger than this are treated as absent (and logged once).
+inline constexpr size_t kMaxSmallFileBytes = 64 * 1024;
+
+// At most kMax allowed probe lines per session, then exactly one "suppressed" line (allow() false, first_suppressed() true once).
+struct ProbeLineBudget {
+    static constexpr unsigned kMax = 200;
+    unsigned used = 0;
+    bool allow() { return used < kMax ? (++used, true) : (++used, false); }
+    bool first_suppressed() const { return used == kMax + 1; }
+};
+
 struct StartGateInput {
     bool window;
     bool present_seen;

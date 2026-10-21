@@ -80,7 +80,25 @@ bool is_dir(const std::wstring& path) {
     return a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY) != 0;
 }
 
-bool read_file(const std::wstring& path, std::string& out) {
+void log_line(const std::wstring& msg) noexcept;
+bool read_file(const std::wstring& path, std::string& out, size_t cap = 0);
+
+// Knobs and the status file: more than kMaxSmallFileBytes counts as absent, logged once per file.
+bool read_small(const std::wstring& path, std::string& out) {
+    static std::vector<std::wstring> warned;
+    if (!read_file(path, out, kMaxSmallFileBytes)) return false;
+    if (out.size() <= kMaxSmallFileBytes) return true;
+    out.clear();
+    bool seen = false;
+    for (const auto& w : warned) seen = seen || w == path;
+    if (!seen) {
+        warned.push_back(path);
+        log_line(L"ignoring " + path + L": larger than 64 KiB");
+    }
+    return false;
+}
+
+bool read_file(const std::wstring& path, std::string& out, size_t cap) {
     out.clear();
     HANDLE h = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
                            OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
@@ -95,6 +113,7 @@ bool read_file(const std::wstring& path, std::string& out) {
         }
         if (got == 0) break;
         out.append(buf, got);
+        if (cap != 0 && out.size() > cap) break;  // caller treats the oversized read as absent
     }
     CloseHandle(h);
     return ok;
@@ -331,13 +350,16 @@ DWORD WINAPI session_probe_thread(void*) {
     try {
         std::optional<unsigned long long> mask;
         bool layer = false, gameplay = false;
+        ProbeLineBudget budget;  // a flapping mask must not grow the log without bound
         while (g_attempt_active.load()) {
             std::string status;
-            if (read_file(g_artifacts_dir + L"\\xr-live-status.json", status)) {
+            if (read_small(g_artifacts_dir + L"\\xr-live-status.json", status)) {
                 const auto m = json_number(status, "logic_mask");
                 if (m && (!mask || *m != *mask)) {
-                    log_line(L"probe: logic_mask " + (mask ? num(static_cast<unsigned long>(*mask)) : std::wstring(L"none")) + L" -> " +
+                    if (budget.allow()) log_line(L"probe: logic_mask " + (mask ? num(static_cast<unsigned long>(*mask)) : std::wstring(L"none")) + L" -> " +
                              num(static_cast<unsigned long>(*m)) + at_text());
+                    else if (budget.first_suppressed())
+                        log_line(L"probe: more than 200 logic_mask changes; further changes not logged");
                     mask = m;
                 }
                 const auto layers = json_number(status, "game_layers_submitted");
@@ -371,7 +393,7 @@ DWORD WINAPI autocontinue_thread(void* arg) {
         for (int i = 0; i < 12; ++i) {
             if (!g_attempt_active.load()) return 0;
             std::string status;
-            read_file(g_artifacts_dir + L"\\xr-live-status.json", status);
+            read_small(g_artifacts_dir + L"\\xr-live-status.json", status);
             if (status_says_gameplay(status)) {
                 log_line(L"autocontinue: gameplay reached; no more keys sent");
                 return 0;
@@ -458,7 +480,7 @@ struct ModExports {
 void run_worker() {
     const std::wstring exe = module_path(nullptr);
     std::string ini;
-    read_file(parent(exe) + L"\\" + kIniName, ini);  // a missing ini means the default mod home
+    read_small(parent(exe) + L"\\" + kIniName, ini);  // a missing ini means the default mod home
     const std::wstring home = mod_home_from_ini(from_utf8(ini));
     if (!is_dir(home)) {
         OutputDebugStringW((L"d2vr-linux proxy: mod home " + home + L" does not exist; idle\n").c_str());
@@ -484,13 +506,13 @@ void run_worker() {
         log_line(L"cannot start the stop watcher (error " + num(GetLastError()) + L")");
 
     std::string knob, mode_text, timeout_text;
-    read_file(build + L"\\" + kSettleKnob, knob);
-    read_file(build + L"\\" + kStartModeKnob, mode_text);
-    read_file(build + L"\\" + kStartTimeoutKnob, timeout_text);
+    read_small(build + L"\\" + kSettleKnob, knob);
+    read_small(build + L"\\" + kStartModeKnob, mode_text);
+    read_small(build + L"\\" + kStartTimeoutKnob, timeout_text);
     // The old wait (window + 45 s, no present gate) comes back with linux-start-mode=legacy or linux-settle-seconds=45.
     const bool legacy = start_mode_is_legacy(mode_text) || settle_knob_is_legacy(knob);
     const unsigned settle_ms = start_settle_ms_from_knob(knob);
-    const unsigned legacy_ms = knob.empty() || trim_ascii(knob).empty() ? kLegacySettleSeconds * 1000 : settle_ms;
+    const unsigned legacy_ms = legacy_wait_ms(knob);
     const unsigned timeout_ms = legacy ? legacy_ms : start_timeout_ms(timeout_text, settle_ms);
 
     bool first_session = true;  // only the first session may start on the settle timeout
@@ -594,7 +616,7 @@ void run_worker() {
         std::string config = probe_config(pid);
         {
             std::string override_text;
-            if (read_file(build + L"\\" + kProbeOverride, override_text)) {
+            if (read_small(build + L"\\" + kProbeOverride, override_text)) {
                 if (const auto custom = probe_config_from_override(override_text, pid)) {
                     config = *custom;
                     log_line(L"probe config override: " + from_utf8(config.substr(0, config.size() - 1)));
@@ -615,7 +637,7 @@ void run_worker() {
         if (HANDLE t = CreateThread(nullptr, 0, session_probe_thread, nullptr, 0, nullptr)) CloseHandle(t);
         {
             std::string knob_text;
-            if (read_file(build + L"\\" + kAutoContinueKnob, knob_text)) {
+            if (read_small(build + L"\\" + kAutoContinueKnob, knob_text)) {
                 const unsigned delay = autocontinue_seconds_from_knob(knob_text);
                 log_line(L"autocontinue armed: Enter after " + num(delay) + L" s");
                 g_artifacts_dir = artifacts;

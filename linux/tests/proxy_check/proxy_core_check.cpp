@@ -80,6 +80,18 @@ int main() {
         g.present_seen = true;
         expect(start_gate(g) == StartGateDecision::wait, "time_going_backwards_waits");
     }
+    expect(legacy_wait_ms("") == 45000 && legacy_wait_ms("abc") == 45000 && legacy_wait_ms("4") == 4000 && legacy_wait_ms(" 45\n") == 45000 &&
+               legacy_wait_ms("4x") == 45000,
+           "legacy_wait_ms: garbage gives the old 45 s");
+    {
+        ProbeLineBudget b;
+        unsigned allowed = 0, suppressed_marks = 0;
+        for (int i = 0; i < 1000; ++i) {
+            if (b.allow()) ++allowed;
+            else if (b.first_suppressed()) ++suppressed_marks;
+        }
+        expect(allowed == 200 && suppressed_marks == 1, "probe budget: 200 lines then one suppressed mark");
+    }
     expect(json_number("{\"a\":1,\"logic_mask\":64,\"b\":x}", "logic_mask") == 64 && !json_number("{\"logic_mask\":-1}", "logic_mask") &&
                !json_number("{}", "logic_mask"),
            "json_number");
