@@ -276,3 +276,28 @@ What it shows:
 Choice: the default stays FSR 3 Native (`temporal_aa=2`). By the rule (the cheapest mode whose image is not visibly broken, and game TAA wins only if it is clearly cheaper) no mode beat it by more than the noise. No source default was changed.
 
 Caveats: one still frame per mode cannot show temporal shimmer or ghosting, which is what AA is for in VR; the stills only judge edge quality. The viewpoint was identical across the five runs. To test game TAA in the headset (the only place its real saving shows), pick it in the VR settings panel (see PLAYING.md); a one-run A/B of modes 1 and 2 there is the open question.
+
+## Performance mode (alternate eye)
+
+Plan F task 1, knob `build/alternate-eye` (opt-in; it also turns on the mono-view path). The engine renders one eye per displayed frame
+(parity of the frame), the other eye is resubmitted from its kept image with the pose it was rendered from. Sim rig, RTX 3070 mobile,
+`oil_tank_drop --lead 28 --seconds 120`, knob `native-gpu-timing` (build/ also held `fsr4.off`, `carry-trace`, `full-body` in both runs),
+HEAD 9e50b37. Run folders: `~/d2vr-test-builds/sim-runs/20261021T221957` (M0) and `20261021T222320` (M2).
+
+| | M0 paired | M2 alternate-eye |
+|---|---|---|
+| interval p50 / p95 | 13.51 / 14.65 ms (74 fps) | 10.37 / 11.24 ms (96 fps) |
+| gpu_busy / gpu_span | 0.82 / 0.97 | 0.81 / 0.95 |
+| render thread busy | 0.70 | 0.67 |
+| GPU lists per frame p50 | eye0 7.20 ms (45) + eye1 3.78 ms (45) | 8.38 ms (45), no second view |
+| mod GPU p50 (sum) | 2.19 ms (fsr_eye0 0.99, fsr_eye1 1.00) | 1.30 ms (fsr 1.18, kept/stale eye copy 0.03) |
+| verdict | MIXED | MIXED |
+
+- Interval drops 23% (3.1 ms), the same order as the mono-view diagnostic (about 10.7 ms), so the second view really is gone.
+- Status after M2: `"alternate_eye":{"state":"on","alternated":9240,"paired":1,"fallbacks":0}`, `mono_view_frames` 9240. In 120 s the mode
+  alternated on every tracked free-gameplay frame, had one paired refresh frame (the start), and never fell back. M0 reports state off.
+- The paired view's `eye0`/`eye1` split is not defined in M2 (one view): `split_skipped` counts every frame by design.
+- Image: `dxgi-stereo.rgba` of M2 (1912x1046) converted to PNG and viewed: a sane gameplay frame (oil tank pipe, hand). The rig captures
+  this file once per run, so two consecutive frames showing one fresh eye each could not be produced; the evidence for alternation is the
+  counters (9240 alternated frames, one view per frame, the two layers submitted every frame). A per-frame eye capture would need a new probe hook.
+- Not measured: the comfort of a one-frame interocular delay (Pulfrich-style shimmer). Only the headset decides.
