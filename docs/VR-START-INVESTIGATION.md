@@ -1,0 +1,72 @@
+# Why VR starts 45 s after launch, and what is safe earlier
+
+Plan C Task 5 (R2). Date 2026-10-21. Branch feat/bonelab-feel. Installed mod DLL `d2vr_render_probe_arm_v600.dll`
+(sha256 ff0daf65...bc927), Linux proxy `dinput8.dll` in the game folder. Exe pinned `b671f824...`.
+
+## Why the delay exists
+
+| Claim | Source | Status |
+|---|---|---|
+| The Windows launcher waits a fixed 45 s after it sees the process, "for the title screen" | `launcher/Probe.cs` `Task.Delay(45000)` in `Launch` (added in `d2043a2`, 2026-10-13, v399, unchanged since) | confirmed by code; no commit message gives a measured reason |
+| The Linux proxy copies it: `kDefaultSettleSeconds = 45`, counted from "game window found" | `linux/proxy/proxy_core.hpp:25`, `linux/proxy/dinput8_proxy.cpp` (settle loop after `game window found`), added in `3667925` | confirmed by code |
+| Inject at the title so that UI movies loaded with the level get the owned-load patches | `tools/vr_selftest.py:950` (`--inject-at-title`) | asserted in help text. Consistent with the code: the movie patches (`src/controller_glyph_atlas.hpp`, `src/menu_patches.hpp`) are applied only from the load callback, so a movie loaded before the mod is in stays unpatched. This only requires injecting before the Continue load, not 45 s |
+| "VR does not start during the logos or loading screens" | `linux/README.md:99` | only asserted. Measured below: it is true only for starts in roughly the first 12 s |
+| `StartProbe` needs a windowed swapchain and "retries forever" otherwise | `linux/proxy/proxy_core.hpp:146` comment; real check `src/dxgi_probe.cpp:6338` (throws "requires a windowed game swapchain") | confirmed by code; the proxy writes `r_fullscreen "0"` before launch so the swapchain is windowed from its first creation |
+| The 45 s is about the title screen being up | measured below: the menu (logic_mask 64) first appears 36-40 s after process start, so 45 s from the window leaves about 7 s of margin | confirmed by measurement |
+
+## What StartProbe needs (src/dxgi_probe.cpp, StartProbe at 7896)
+
+- Preconditions: not already started, receipt/equip hook owners ready (7897-7898); `<root>\.git` exists, else returns 3 (7933).
+- The Present hook target comes from a hidden dummy window, device and swapchain that `find_present` (7857) creates itself and reads vtable slots 8 (Present) and 13 (ResizeBuffers) from. It does not wait for the game's device or window. Those are system dxgi addresses, valid at process start.
+- Byte checks on the game image (`image_base` + RVA, about 60 uses before the end of StartProbe, camera identity at about 8260, output-size getters at about 8310, the `install(image_base, ...)` calls at 8391-8674) run inside StartProbe, before the first Present the game makes. The image is loaded and the window exists at process start + 1.5 s, and all sim starts from settle 0 passed them (StartProbe ran, 25,000 layers submitted).
+- ResizeBuffers is hooked at 8296-8307 (only with `--paired`) and verified.
+
+Answers:
+
+- (a) No hook target is invalid at process start but valid at the first Present: the Present target is a dummy-device vtable slot, the engine byte checks passed at settle 0. Nothing in the code needs the title screen.
+- (b) Nothing assumes the title UI movies are not yet loaded. The reverse holds: starting earlier patches more movies (the status of the settle-0 run shows `native_art_movies.patched` 20, `rejected` 0).
+- (c) The hook on a swapchain re-creation: `resize_buffers_hook` (1360) and the headset-size restore check (6181, `headset_size_restored`); `xr_resolution_changes` (6843) counts XR size changes. The runs below did not exercise a mode switch because `r_fullscreen "0"` is in the config from the start.
+
+So Step 2 finds no code dependency on the title. Step 3 finds a behavioural one.
+
+## Experiment (Linux sim rig, installed DLL, no headset)
+
+Command: `d2vr-linux sim --settle S --lead 28 --seconds 120 --scenario idle` (autocontinue delay 10 s, except run 3). Process start is the first `proxy` log line; the window is found 1.5 s later in every run (2.0 s once).
+
+| # | `--settle` | StartProbe begin after process start | menu (mask 64) first seen after process start | result |
+|---|---|---|---|---|
+| 1 | 0 | 1.5 s | 36.1-40.2 s | FAILED, StartProbe returned 4, gameplay false, no crash |
+| 2 | 8 | 9.5 s | 36.1-40.2 s | FAILED, same |
+| 3 | 8, Enter delayed to 40 s | 9.5 s | Enter 1 at 49.7 s already at mask 64 | FAILED, same: 12 Enters at the menu, none worked |
+| 4 | 45 (control) | 46.6 s | before the first Enter at 56.7 s | OK, gameplay true |
+| 5 | 30 | 31.6 s | 41-45 s | OK |
+| 6 | 20 | 21.5 s | 39.2-43.3 s | OK |
+| 7 | 14 | 15.5 s | 36.2-40.3 s | OK |
+| 8 | 11 | 13.0 s | 35.4-39.5 s | FAILED, same |
+
+Failure signature: the session runs normally (25k layers, the mod is alive), the menu comes up, and 12 posted Enters never reach gameplay (`logic_mask` stays 64). Run 3 shows it is not the Enter timing: the Enters came only at the menu and still failed. This is the "StartProbe returned 4, logic_mask 64" stall named as a known flake. Every start earlier than about 13 s after process start failed (4 of 4), every start from 15.5 s on succeeded (4 of 4). With 8 runs this is a boundary, not proof; a flake that happens to line up cannot be excluded, and it would show as a failure at a later settle. Cause of the early failure is not identified.
+
+Stalls therefore correlate with starting the mod during the first ~12 s (engine init, before logos play), not with logos in general: settle 14 and 20 started during the logo movies (mask 0) and worked.
+
+## Flat phase measured
+
+- (a) process start to window found: 1.5 s (2.0 s once).
+- (b) window found to first Present: not measured. The proxy log has no such line and no scratch build was made; `StartProbe` does not wait for it. Named probe for Task 6 below.
+- (c) logos to title to menu: logic_mask 0 until 35.4-40.3 s after process start, 64 (menu) from then on; Continue then loads gameplay in about 10-20 s. The flat phase a user sees today is therefore about 47 s of waiting plus about 14 s of loading, with the title ready after about 38 s.
+
+## Decision
+
+**P3, with a fixed floor instead of a readiness poll: start at window found + 20 s (about 21.5 s after process start) instead of 45 s.** Reason: Step 2 finds no code dependency on the title, but Step 3 shows starts in the first ~12 s stall at the menu, and no readiness signal (window, swapchain, 5 s) is known to separate 11 s from 14 s, so P1 (settle <= 8) is refuted by runs 1-3 and P2 (logos-ended detection) by run 6 and 7, which started inside the logos and worked. 20 s saves about 25 s, leaves a 6 s margin over the earliest success (14 s after the window) and was clean once, so a second clean run is the headset checklist item. It does not meet "VR immediately from the launcher"; that needs the Task 6 probe to explain the early failure.
+
+**Windows launcher: W2** (dinput8 proxy beside `Dishonored2.exe`, loaded at process start, launcher writes only the start trigger). Reasons: the user approved a file in the game folder on 2026-10-21; it matches Linux, where the same loop and knob (`linux-settle-seconds`) already exist; the proxy waits on the window itself with no `Process.GetProcessesByName` polling and no fixed `Task.Delay(45000)`; and it can start at the window-plus-N s point exactly, while W1 can only start after the launcher notices the process (2 s poll) and must inject remotely. W1 stays as the fail-safe fallback (global constraint: any failure falls back to today's behaviour). Restore the old delay with `build\vr-start-delay-seconds` (Windows) / `build\linux-settle-seconds` (Linux).
+
+## Task 6 runtime probes (not assumptions)
+
+1. Scratch/permanent log line at the first game Present and at each `logic_mask` change with the time since process start, to measure (b) and see what changes at about 13 s.
+2. A sim run of `--settle 12` and `--settle 13` repeated twice each, to separate a hard boundary from a flake.
+3. At a failed early start, capture what the menu sees: does Enter reach the game window (`native_pad_window_gates` in `xr-live-status.json`), or is the title input state not initialised.
+4. Headset check: a real controller press at the title after a 20 s start (Enter is only the sim's stand-in).
+
+## Rig notes
+
+Eight runs, installed DLL only (hash ff0daf65...bc927 verified after the last run; no knob or marker left, `build/` holds the pre-existing `fsr4.off`, `full-body`, `carry-trace`). Run logs: `~/d2vr-test-builds/sim-runs/20261021T233705`, `...T233939`, `...T234217`, `...T234451`, `...T234802`, `...T235105`, `...T235350`, `...T235632`.
