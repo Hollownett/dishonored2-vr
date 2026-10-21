@@ -317,6 +317,9 @@ if not errorlevel 0 goto build_failed
 python tests\frame_split_flat_routing_check.py
 if errorlevel 1 goto build_failed
 if not errorlevel 0 goto build_failed
+python tests\mono_view_routing_check.py
+if errorlevel 1 goto build_failed
+if not errorlevel 0 goto build_failed
 build\comfort_meter_check.exe
 if not "%errorlevel%"=="0" exit /b 1
 build\anchor_smoother_check.exe

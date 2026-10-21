@@ -1297,9 +1297,23 @@ public:
     const std::array<XrView,2>* tracking_views() const {
         return running_ && views_valid_ && continuity_.usable()?&views_:nullptr;
     }
-    void record_rendered_eye(UINT eye,XrFovf rendered_fov,const XrQuaternionf* rendered_orientation=nullptr) {
+    // perf-mono-view diagnostic: the one engine view sits at the midpoint of the two eye poses, faces their mean orientation and
+    // covers both eyes' FOV (the union), so the one image is valid for both projection layers (flat, no stereo depth).
+    static XrView mono_centre_view(const std::array<XrView,2>& v) {
+        const auto pose=[](const XrPosef& p){return TrackedPose{{p.position.x,p.position.y,p.position.z},{p.orientation.x,p.orientation.y,p.orientation.z,p.orientation.w}};};
+        const auto centre=eye_centre_pose(pose(v[0].pose),pose(v[1].pose));
+        XrView out=v[0];
+        out.pose.position={static_cast<float>(centre.position.x),static_cast<float>(centre.position.y),static_cast<float>(centre.position.z)};
+        out.pose.orientation={static_cast<float>(centre.orientation.x),static_cast<float>(centre.orientation.y),static_cast<float>(centre.orientation.z),static_cast<float>(centre.orientation.w)};
+        out.fov={std::min(v[0].fov.angleLeft,v[1].fov.angleLeft),std::max(v[0].fov.angleRight,v[1].fov.angleRight),
+                 std::max(v[0].fov.angleUp,v[1].fov.angleUp),std::min(v[0].fov.angleDown,v[1].fov.angleDown)};
+        return out;
+    }
+    // rendered_position: mono only (both eyes record the same centre position; the orientation comes through rendered_orientation).
+    void record_rendered_eye(UINT eye,XrFovf rendered_fov,const XrQuaternionf* rendered_orientation=nullptr,const XrVector3f* rendered_position=nullptr) {
         rendered_views_[eye]=views_[eye];rendered_views_[eye].fov=rendered_fov;rendered_mask_|=1u<<eye;
-        if(rendered_orientation) rendered_views_[eye].pose.orientation=*rendered_orientation; // canted eye
+        if(rendered_orientation) rendered_views_[eye].pose.orientation=*rendered_orientation; // canted eye / mono centre
+        if(rendered_position) rendered_views_[eye].pose.position=*rendered_position;
         rendered_display_times_[eye]=locate_display_time_;
         rendered_locate_cpu_times_[eye]=locate_cpu_time_;
     }
