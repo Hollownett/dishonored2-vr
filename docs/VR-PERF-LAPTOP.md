@@ -83,13 +83,14 @@ editing the user's real files, so they are not measured even once the session is
 `xr-live-status.json` also carries `"frame_split":{"adapter":{name,vendor,vram_mb},"split":{...}}` over the same 900-frame gameplay window:
 `interval_ms_p50/p95` (Present enter to Present enter), `eye0_ms_p50` (eye 0 begin to eye 1 begin), `eye1_ms_p50` (eye 1 begin to Present enter),
 `hook_ms_p50` (Present enter to exit, the full hook including the desktop Present), `eye1_share` (eye1 p50 / interval p50), `gpu_busy`
-(native GPU elapsed over the interval, p50; native command lists only, excluding FSR and immediate draws, from a timer that lags 1-3 frames, so read it as a lagged lower bound; `null` without the `native-gpu-timing` knob), `render_thread_busy` and `game_thread_busy`
+(the SUM of the native command-list durations over the interval, p50; native command lists only, excluding FSR and immediate draws, from a timer that lags 1-3 frames, so read it as a lagged lower bound; `null` without the `native-gpu-timing` knob), `gpu_span`
+(the same ratio from the elapsed span, first list start to last list end, which also counts idle gaps between lists, so `gpu_span >= gpu_busy`; diagnostic only, the verdict uses `gpu_busy`), `render_thread_busy` and `game_thread_busy`
 (GetThreadTimes delta over wall delta, about 1 s window; `null` when the thread clock is coarse or unknown), `frames`, `split_skipped`
 (cumulative; frames whose eye stamps were missing, out of order or stale, i.e. not `prev present < eye0 <= eye1 <= present`). The first gameplay frame after a menu or load feeds no interval sample.
 
-Debug trace: create `build/frame-split-trace` before launch to get `native-frame-split-trace.csv` (columns `frame,eye0,eye1,enter,exit,prev,accepted`,
+Debug trace: create `build/frame-split-trace` before launch to get `native-frame-split-trace.csv` (columns `frame,eye0,eye1,enter,exit,prev,accepted,begins,idx_a,idx_b`; the last three are diagnostics: the number of non-null begin-view calls this frame and the raw index argument of the first and second one, -9 = none,
 steady_clock ns; one row per fed frame, capped at 20000 rows, written by the status writer, not the render thread). Plan E task 3 checks that
-`accepted` is 1 on nearly every frame and `eye1 < enter`; many 0 rows mean the eye hooks do not run between two Presents as assumed.
+`accepted` is 1 on nearly every frame and `eye1 < enter`; many 0 rows mean the eye hooks do not run between two Presents as assumed. The eye is named by view address against the published per-eye views (not by the raw index; `begins` should be 2 in paired XR gameplay).
 
 ## Bound analysis (plan E)
 
@@ -108,6 +109,10 @@ Conditions: NVIDIA GeForce RTX 3070 Laptop GPU, 8192 MiB, driver 615.71.09; AMD 
 | E2 | A1 plus mirror one eye | not measurable yet | | | | | the mirror default changes in a later task |
 
 Per-run perf block (`pace_ms`, same frames): A1 p50 14.09, p95 15.35, missed_fraction 0, mod_cpu mean 0.78 ms; C p50 14.59; E1 p50 14.64, fraction 0.77 (confirms the Quality setting was applied). Every xr row had `missed_fraction` 0 against a 11.1 ms period, because the sim has no compositor; ignore that field here.
+
+### Correction: gpu_busy in the table above was the elapsed span
+
+The `gpu_busy` column (0.97, 0.96) was computed from `native_gpu_elapsed_ns`, the span from the first list's start to the last list's end, which counts idle gaps between lists. The sum of the list durations (`native_gpu_list_sum_ns`, A1 median about 11.6 ms of a 14.10 ms interval, 0.82) is the busy figure, and `gpu_busy` is now that sum; the old value is reported as `gpu_span`. By the sum, A1 and E1 are about 0.8 busy, which the verdict rule calls MIXED (below .90, and the render thread at .71 is not saturated), not GPU-BOUND. Read "GPU-BOUND" and "the GPU fills 97%" below as span-based. The per-eye cause: the begin hook stamped by the raw index argument, and eye 0 was never stamped that way in paired XR; the eye is now named by view address (`begins`, `idx_a`, `idx_b` in the trace record the raw indices of the first two non-null begins, so one sim run with `frame-split-trace` shows what the engine passes).
 
 ### Per-eye numbers are not trustworthy
 

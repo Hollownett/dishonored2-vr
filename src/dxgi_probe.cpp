@@ -360,9 +360,9 @@ static d2vr::AuthoredHeading authored_heading;static std::optional<double> autho
 // Frame split (plan E task 1): eye-begin and Present stamps are steady_clock ns (GameXr::cpu_time_ns), fed once per gameplay Present.
 static std::atomic<bool> frame_split_trace_on{false};
 static d2vr::FrameSplit frame_split;static std::mutex frame_split_mutex;
-static std::int64_t frame_split_eye_ns[2]{-1,0};
+static d2vr::EyeStamps frame_split_eyes; // guarded by frame_split_mutex
 static std::atomic<std::int64_t> frame_split_prev_enter_ns{}; // Present thread writes, reset_perf_governor may clear
-// build/frame-split-trace: one CSV row per fed frame (frame,eye0,eye1,enter,exit,prev,accepted); rows are queued under frame_split_mutex
+// build/frame-split-trace: one CSV row per fed frame (frame,eye0,eye1,enter,exit,prev,accepted,begins,idx_a,idx_b); rows are queued under frame_split_mutex
 // and written by the status writer, never on the render thread. Capped at FrameSplitTrace::max_rows.
 static d2vr::FrameSplitTrace frame_split_trace;static std::mutex frame_split_trace_file_mutex;static std::ofstream frame_split_trace_file;
 static std::string frame_split_adapter_json; // written once from the swap chain's adapter; guarded by frame_split_mutex
@@ -1088,7 +1088,12 @@ void observe_eye_setup(void* view) noexcept;
 void observe_eye_begin(void* view) noexcept;
 void __fastcall eye_begin_hook(void* backend,void* world,void* view,int index) {
     d2vr::CrashOperation operation("native eye begin");
-    if(index==0 || index==1) {const auto stamp_ns=d2vr::GameXr::cpu_time_ns();std::lock_guard<std::mutex> split_stamp_lock(frame_split_mutex);frame_split_eye_ns[index]=stamp_ns;}
+    { // frame split: name the eye by view address (the identity the paired XR path uses), never by the raw index
+        const auto stamp_ns=d2vr::GameXr::cpu_time_ns();
+        const auto left_view=d2vr::PostTonemapPass::eye_views[0].load(),right_view=d2vr::PostTonemapPass::eye_views[1].load();
+        std::lock_guard<std::mutex> split_stamp_lock(frame_split_mutex);
+        frame_split_eyes.begin(reinterpret_cast<std::uintptr_t>(view),left_view,right_view,index,stamp_ns);
+    }
     if(native_marker_probe_installed) native_marker_probe.eye_phase(index==0?1u:2u);
     observe_eye_begin(view);
     // 0x374b60 applies the native resolution fractions AFTER 0x374e40 returns.
@@ -5927,7 +5932,7 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
     d2vr::FrameTimingRecord frame_timing_record{};
     std::int64_t frame_xr_end_ns{},lean_cpu_ns{},grab_control_cpu_ns{},takedown_crouch_cpu_ns{},controls_cpu_ns{},post_xr_housekeeping_cpu_ns{},gpu_hook_maintenance_cpu_ns{};
     std::uint64_t timing_epoch{},timing_present{};bool timing_gameplay=false;
-    bool split_pending=false;std::int64_t split_prev_enter_ns=0;std::uint64_t split_gpu_ns=0; // frame split: fed after the desktop Present
+    bool split_pending=false;std::int64_t split_prev_enter_ns=0;std::uint64_t split_gpu_ns=0,split_span_ns=0; // frame split: fed after the desktop Present
     UINT desktop_interval=interval;
     const auto previous_end_ns=previous_present_end_ns.load();
     const auto capture_before=std::array<UINT64,6>{xr_transfer_mask,xr_menu_transfer_mask,
@@ -6473,7 +6478,8 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                     if(perf_governor_active && perf_governor.feed({work,static_cast<std::uint64_t>(t.display_period),missed})) upscale_fraction=perf_governor.scale(); // the 100 ms apply_upscale tick commits it
                                     // Frame split: queued here, fed after the desktop Present so the hook span is complete.
                                     split_prev_enter_ns=frame_split_prev_enter_ns.exchange(present_start_ns);
-                                    split_gpu_ns=native_gpu_requested && native_gpu_prepared?static_cast<std::uint64_t>(std::max(0.,native_gpu_summary.last_elapsed_ms)*1e6):0;
+                                    split_gpu_ns=native_gpu_requested && native_gpu_prepared?static_cast<std::uint64_t>(std::max(0.,native_gpu_summary.last_list_sum_ms)*1e6):0;
+        split_span_ns=native_gpu_requested && native_gpu_prepared?static_cast<std::uint64_t>(std::max(0.,native_gpu_summary.last_elapsed_ms)*1e6):0;
                                     split_pending=true;
                                 } else {
                                     // A menu, load or world-UI pause is a gap: the next gameplay frame must not feed one huge pace/interval sample.
@@ -7500,7 +7506,8 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
     // the sim rig's single-view measurement has intervals. Every counted Present is a sample; eye stamps may be absent (single eye).
     if(!xr_requested && stereo_requested && capturing.load() && !(flags&DXGI_PRESENT_TEST)) {
         split_prev_enter_ns=frame_split_prev_enter_ns.exchange(present_start_ns);
-        split_gpu_ns=native_gpu_requested && native_gpu_prepared?static_cast<std::uint64_t>(std::max(0.,native_gpu_summary.last_elapsed_ms)*1e6):0;
+        split_gpu_ns=native_gpu_requested && native_gpu_prepared?static_cast<std::uint64_t>(std::max(0.,native_gpu_summary.last_list_sum_ms)*1e6):0;
+        split_span_ns=native_gpu_requested && native_gpu_prepared?static_cast<std::uint64_t>(std::max(0.,native_gpu_summary.last_elapsed_ms)*1e6):0;
         split_pending=true;
     }
     const auto desktop_start_ns=d2vr::GameXr::cpu_time_ns();
@@ -7508,11 +7515,12 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
     {
         const auto split_exit_ns=d2vr::GameXr::cpu_time_ns();
         std::lock_guard<std::mutex> split_lock(frame_split_mutex);
-        const d2vr::FrameStamps split_stamps{frame_split_eye_ns[0],frame_split_eye_ns[1],present_start_ns,split_exit_ns};
-        frame_split_eye_ns[0]=-1;frame_split_eye_ns[1]=0; // consumed (or discarded outside gameplay)
+        const d2vr::FrameStamps split_stamps{frame_split_eyes.eye_ns(0),frame_split_eyes.eye_ns(1),present_start_ns,split_exit_ns};
+        const auto split_begins=frame_split_eyes.begins();const auto split_idx_a=frame_split_eyes.idx_a(),split_idx_b=frame_split_eyes.idx_b();
+        frame_split_eyes.reset(); // consumed (or discarded outside gameplay)
         if(split_pending) {
-            frame_split.feed(split_stamps,split_prev_enter_ns,1'000'000'000,split_gpu_ns);
-            if(frame_split_trace_on.load(std::memory_order_relaxed)) frame_split_trace.push(split_stamps.eye0_begin,split_stamps.eye1_begin,split_stamps.present_enter,split_stamps.present_exit,split_prev_enter_ns,frame_split.last_accepted());
+            frame_split.feed(split_stamps,split_prev_enter_ns,1'000'000'000,split_gpu_ns,split_span_ns);
+            if(frame_split_trace_on.load(std::memory_order_relaxed)) frame_split_trace.push(split_stamps.eye0_begin,split_stamps.eye1_begin,split_stamps.present_enter,split_stamps.present_exit,split_prev_enter_ns,frame_split.last_accepted(),split_begins,split_idx_a,split_idx_b);
         } else if(!(flags&DXGI_PRESENT_TEST)) {
             // This Present did not feed (no XR wait/submit, menu, load, error path): the next gameplay frame starts a fresh interval and pace.
             frame_split_prev_enter_ns.store(0);perf_prev_start_ns=perf_prev_display=0;

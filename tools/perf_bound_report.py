@@ -5,6 +5,9 @@ usage: perf_bound_report.py RUN [RUN ...] [--before PREVIOUS.json] [--json OUT.j
 RUN is a sim run folder or a status/result json. The data is the "frame_split" block ({"adapter":..., "split":...}) of
 artifacts/xr-live-status.json (XR runs), else of artifacts/dxgi-probe-result.json, the only file a flat run
 (--probe-mode paired|single) writes. The row says which file it used ("source").
+gpu_busy is the SUM of the native command-list durations over the interval; gpu_span is the elapsed first-start-to-last-end
+span, which also counts idle gaps between lists. The verdict uses gpu_busy only; gpu_span is shown so a span-only "GPU-bound"
+(span .97 while the lists sum to .80) is visible as the gap it is.
 Verdict per run: GPU-BOUND when gpu_busy >= .90; CPU-BOUND(render) or CPU-BOUND(game) when gpu_busy < .70 and that thread's
 busy fraction is >= .85 (render first); otherwise MIXED. INVALID runs (missing file or block, no gameplay, no frames, an
 adapter that is not NVIDIA) are listed with the reason and never averaged in. The overall VERDICT line is GPU-BOUND,
@@ -67,7 +70,7 @@ def classify(row):
 
 def _blank(path, mode, knobs, reason):
     row = {"run": str(path), "mode": mode, "source": None, "adapter": None, "gameplay": None, "frames": 0, "interval_p50": None,
-           "interval_p95": None, "eye0": None, "eye1": None, "eye1_share": None, "hook": None, "gpu_busy": None,
+           "interval_p95": None, "eye0": None, "eye1": None, "eye1_share": None, "hook": None, "gpu_busy": None, "gpu_span": None,
            "render_busy": None, "game_busy": None, "user_knobs": knobs, "note": "", "invalid": reason}
     row["verdict"] = classify(row)
     return row
@@ -121,7 +124,7 @@ def load_run(path):
                "interval_p50": _num(split.get("interval_ms_p50")), "interval_p95": _num(split.get("interval_ms_p95")),
                "eye0": _num(split.get("eye0_ms_p50")), "eye1": _num(split.get("eye1_ms_p50")),
                "eye1_share": _num(split.get("eye1_share")), "hook": _num(split.get("hook_ms_p50")),
-               "gpu_busy": _num(split.get("gpu_busy")), "render_busy": _num(split.get("render_thread_busy")),
+               "gpu_busy": _num(split.get("gpu_busy")), "gpu_span": _num(split.get("gpu_span")), "render_busy": _num(split.get("render_thread_busy")),
                "game_busy": _num(split.get("game_thread_busy")), "user_knobs": knobs,
                "note": "" if status else "result file: no gameplay flag, every counted Present is included"}
         if row["gpu_busy"] is None and row["gameplay"] is not False and row["frames"]:
@@ -146,7 +149,7 @@ def format_row(r):
     knobs = "unknown" if r["user_knobs"] is None else (", ".join(r["user_knobs"]) or "none")
     return (f"{Path(r['run']).name}: mode {r['mode']} / source {r['source'] or 'none'} / adapter {name if isinstance(name, str) else 'unknown'} / "
             f"interval p50 {_f(r['interval_p50'])} p95 {_f(r['interval_p95'])} ms / eye0 {_f(r['eye0'])} eye1 {_f(r['eye1'])} ms / "
-            f"eye1_share {_f(r['eye1_share'])} / hook {_f(r['hook'])} ms / gpu_busy {_f(r['gpu_busy'])} / "
+            f"eye1_share {_f(r['eye1_share'])} / hook {_f(r['hook'])} ms / gpu_busy {_f(r['gpu_busy'])} span {_f(r['gpu_span'])} / "
             f"render {_f(r['render_busy'])} game {_f(r['game_busy'])} busy / build knobs: {knobs} / {r['verdict']}"
             + (f" [{r['note']}]" if r["note"] else ""))
 

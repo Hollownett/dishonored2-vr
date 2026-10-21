@@ -7,8 +7,8 @@ import perf_bound_report as r
 
 NV = {"name": "NVIDIA GeForce RTX 3070 Laptop GPU", "vendor": 4318, "vram_mb": 8192}
 
-def split(gpu, render=.5, game=.5, frames=900, p50=16.0, eye1=6.0):
-    return {"interval_ms_p50": p50, "interval_ms_p95": p50 + 3, "eye0_ms_p50": 7.0, "eye1_ms_p50": eye1,
+def split(gpu, render=.5, game=.5, frames=900, p50=16.0, eye1=6.0, span=None):
+    return {"gpu_span": span, "interval_ms_p50": p50, "interval_ms_p95": p50 + 3, "eye0_ms_p50": 7.0, "eye1_ms_p50": eye1,
             "hook_ms_p50": 1.5, "eye1_share": eye1 / p50, "gpu_busy": gpu, "render_thread_busy": render,
             "game_thread_busy": game, "frames": frames, "split_skipped": 0}
 
@@ -42,8 +42,12 @@ with tempfile.TemporaryDirectory() as d:
     v, out = verdict(run(d, "g", status(.95)))
     assert v == "GPU-BOUND", v
     for text in ("mode xr", "source xr-live-status.json", "NVIDIA GeForce RTX 3070", "interval p50 16.00 p95 19.00", "eye0 7.00 eye1 6.00",
-                 "eye1_share 0.38", "hook 1.50", "gpu_busy 0.95", "render 0.50 game 0.50", "build knobs: unknown"):
+                 "eye1_share 0.38", "hook 1.50", "gpu_busy 0.95 span n/a", "render 0.50 game 0.50", "build knobs: unknown"):
         assert text in out, (text, out)
+    # the verdict follows gpu_busy (list sum), not gpu_span: span .97 with lists summing to .80 is not GPU-bound
+    v, out = verdict(run(d, "span", status(.80, span=.97)))
+    assert v == "MIXED" and "gpu_busy 0.80 span 0.97" in out, out
+    assert verdict(run(d, "span2", status(.95, span=.97)))[0] == "GPU-BOUND"
     # verdict_cpu_render / verdict_cpu_game
     assert verdict(run(d, "cr", status(.5, render=.92, game=.6)))[0] == "CPU-BOUND(render)"
     assert verdict(run(d, "cg", status(.5, render=.6, game=.9)))[0] == "CPU-BOUND(game)"
