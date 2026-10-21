@@ -76,6 +76,8 @@ editing the user's real files, so they are not measured even once the session is
 
 ## Headset checklist (Task 11)
 
+- Early VR start: write `8` into `build/linux-settle-seconds`, launch, and use the controller at the title and menu. Does the menu accept input, and does Continue load? (The sim's posted Enter stalls at starts ≤14 s; a real controller may not. If it works, the default can drop to about 8 s.) Delete the file afterwards.
+
 - [ ] Task 2: choke a guard from behind; turn your head during the animation; the view follows your head; no spin.
 - [ ] Task 3: mantle onto a ledge and drop off a roof: no lag swoop and no pop. Also crouch and stand with the tracked arms on: arms keep their length.
 - [ ] Plan G task 3: from behind on an unaware guard, a fast swing kills and a crouched stab kills (watch `attack_intent` in `xr-live-status.json`: `honoured` rises).
