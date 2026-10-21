@@ -1,13 +1,17 @@
 #pragma once
 // Comfort telemetry: numbers that let camera-wobble and view-spin fixes be
-// measured before and after. Fed once per frame; no allocation, no locks.
+// measured before and after. Fed once per frame; no allocation, no locks of its own
+// (the caller serialises feed/json). Known undercount: callers that return early
+// before feeding (anchor/calibration failures) simply produce no sample.
+// view_yaw_* counts ALL anchor yaw, including the player's own turning;
+// unrequested_yaw_* counts only frames with turning=false (wobble/spin signal).
 #include "arm_ik.hpp"
 #include <cmath>
 #include <sstream>
 #include <string>
 
 namespace d2vr {
-struct ComfortSample {double t_s{};Vec3 anchor_pos{};double anchor_yaw{};double hmd_yaw{};bool authored{};};
+struct ComfortSample {double t_s{};Vec3 anchor_pos{};double anchor_yaw{};double hmd_yaw{};bool authored{};bool turning{};};
 
 class ComfortMeter {
     static constexpr double max_dt=.25,jerk_limit=30.,yaw_limit=1.5;
@@ -15,8 +19,8 @@ class ComfortMeter {
     ComfortSample prev_{};
     double prev_v_{};
     double authored_s_{};
-    unsigned long long entries_{},jerk_events_{},yaw_events_{},skipped_{},samples_{};
-    double v_peak_{},yaw_peak_{};
+    unsigned long long entries_{},jerk_events_{},yaw_events_{},unreq_events_{},skipped_{},samples_{};
+    double v_peak_{},yaw_peak_{},unreq_peak_{};
     static double wrap(double a) noexcept {
         const double pi=3.14159265358979323846;
         while(a>pi) a-=2*pi;
@@ -41,13 +45,15 @@ public:
         const double yr=std::fabs(wrap(s.anchor_yaw-prev_.anchor_yaw))/dt;
         yaw_peak_=std::fmax(yaw_peak_,yr);
         if(yr>yaw_limit) ++yaw_events_;
+        if(!s.turning) {unreq_peak_=std::fmax(unreq_peak_,yr);if(yr>yaw_limit) ++unreq_events_;}
         prev_=s;prev_authored_=s.authored;
     }
     std::string json() const {
         std::ostringstream o;
-        o<<"{\"authored_ms\":"<<authored_s_*1000.<<",\"authored_entries\":"<<entries_
+        o<<"{\"authored_ms\":"<<static_cast<long long>(std::llround(authored_s_*1000.))<<",\"authored_entries\":"<<entries_
          <<",\"anchor_v_peak\":"<<v_peak_<<",\"anchor_jerk_events\":"<<jerk_events_
          <<",\"view_yaw_rate_peak\":"<<yaw_peak_<<",\"view_yaw_events\":"<<yaw_events_
+         <<",\"unrequested_yaw_rate_peak\":"<<unreq_peak_<<",\"unrequested_yaw_events\":"<<unreq_events_
          <<",\"samples\":"<<samples_<<",\"skipped\":"<<skipped_<<'}';
         return o.str();
     }

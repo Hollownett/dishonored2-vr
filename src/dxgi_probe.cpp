@@ -3878,11 +3878,17 @@ void prepare_head_view(void* view) noexcept {
         if(eye==0) { // comfort telemetry: raw engine anchor (before any smoothing), levelled body heading, HMD yaw
             static LARGE_INTEGER comfort_freq{};if(!comfort_freq.QuadPart) QueryPerformanceFrequency(&comfort_freq);
             LARGE_INTEGER comfort_now{};QueryPerformanceCounter(&comfort_now);
+            // The mod's own turning: a turn applied by the physics adapter within the last 150 ms (snap turns count for the frame they
+            // apply, smooth turns while the stick keeps applying them).
+            static UINT64 comfort_last_turns{};static double comfort_turn_t{-1e9};
+            const double comfort_t=static_cast<double>(comfort_now.QuadPart)/static_cast<double>(comfort_freq.QuadPart);
+            if(const UINT64 comfort_count=native_turning.applied();comfort_count!=comfort_last_turns) {comfort_last_turns=comfort_count;comfort_turn_t=comfort_t;}
+            const bool comfort_turning=native_turning_requested && comfort_t-comfort_turn_t<.15;
             std::lock_guard<std::mutex> comfort_lock(comfort_mutex);
             comfort_meter.feed({static_cast<double>(comfort_now.QuadPart)/static_cast<double>(comfort_freq.QuadPart),
                 {source_anchor.position[0],source_anchor.position[1],source_anchor.position[2]},
                 std::atan2(static_cast<double>(anchor.basis[1]),static_cast<double>(anchor.basis[0])),
-                d2vr::tracked_yaw(centre_pose.orientation,head_origin.orientation),authored_camera});
+                d2vr::tracked_yaw(centre_pose.orientation,head_origin.orientation),authored_camera,comfort_turning});
         }
         // 6DoF: physical head motion moves the render camera within a comfortable
         // volume around the calibrated origin; hands shift by the same offset so
