@@ -928,6 +928,10 @@ cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT /Ithird_party\openxr\include 
 if not "%errorlevel%"=="0" exit /b 1
 build\xr_layer_pose_check.exe
 if not "%errorlevel%"=="0" exit /b 1
+cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT /Ithird_party\openxr\include tests\xr_quad_validation_check.cpp /Fo:build\xr_quad_validation_check.obj /Fe:build\xr_quad_validation_check.exe
+if not "%errorlevel%"=="0" exit /b 1
+build\xr_quad_validation_check.exe
+if not "%errorlevel%"=="0" exit /b 1
 cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT tests\xr_present_pacing_check.cpp /Fo:build\xr_present_pacing_check.obj /Fe:build\xr_present_pacing_check.exe
 if not "%errorlevel%"=="0" exit /b 1
 build\xr_present_pacing_check.exe

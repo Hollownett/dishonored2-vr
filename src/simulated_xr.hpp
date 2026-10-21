@@ -10,6 +10,7 @@
 #include <openxr/openxr_platform.h>
 #include <wrl/client.h>
 #include "controller_input.hpp"
+#include "xr_quad_validation.hpp"
 #include "tracked_pose.hpp"
 #include <array>
 #include <deque>
@@ -60,6 +61,7 @@ inline XrSessionState state=XR_SESSION_STATE_UNKNOWN;
 inline XrTime display_time=1'000'000'000;
 inline std::deque<XrEventDataBuffer> events;
 inline std::map<XrSpace,std::unique_ptr<Space>> spaces;
+inline bool color_scale_enabled=true; // the simulated instance offers XR_KHR_composition_layer_color_scale_bias
 inline std::map<XrSwapchain,std::unique_ptr<Chain>> chains;
 inline std::map<std::string,XrPath> paths;
 inline std::map<XrAction,std::string> actions;
@@ -231,6 +233,11 @@ inline XrResult XRAPI_CALL end_frame(XrSession,const XrFrameEndInfo* info) {
             for(unsigned side=0;side<2;++side) {if(!image(p->views[side].subImage,side)) return invalid();summary.eyes[side]=p->views[side];}
         } else if(layer->type==XR_TYPE_COMPOSITION_LAYER_QUAD) {
             const auto* p=reinterpret_cast<const XrCompositionLayerQuad*>(layer);
+            {   // what the spec and SteamVR require of every quad: live space, unit orientation, positive size, rect inside the swapchain
+                const auto chain=chains.find(p->subImage.swapchain);
+                const QuadChainFacts facts{chain!=chains.end(),chain!=chains.end()?chain->second->info.width:0u,chain!=chains.end()?chain->second->info.height:0u};
+                if(const auto bad=validate_quad_layer(*p,spaces.count(p->space)!=0,facts,color_scale_enabled);XR_FAILED(bad)) return bad;
+            }
             if(!full_extent(p->subImage)) {++summary.subrect_layers;return XR_ERROR_SWAPCHAIN_RECT_INVALID;}
             if(i==0) {if(!image(p->subImage,0)) return invalid();summary.quad=*p;}
             else {if(!image(p->subImage,2)) return invalid();summary.overlays.push_back(*p);}

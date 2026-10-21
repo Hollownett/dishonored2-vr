@@ -8433,6 +8433,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
             std::lock_guard<std::mutex> comfort_lock(comfort_mutex);
             comfort_vignette=d2vr::ComfortVignette{};comfort_vignette.set_max_opacity(strength);comfort_vignette.set_enabled(vignette_on);
             d2vr::GameXr::vignette_enabled=vignette_on;
+            d2vr::GameXr::vignette_color_scale_requested=fs::exists(root/L"build"/L"vignette-color-scale");
         }
         taa_mv_dejitter.enabled=!fs::exists(root/L"build"/L"no-taa-mv-dejitter");
         vr_combat_enabled=!fs::exists(root/L"build"/L"legacy-combat");vr_combat.reset();

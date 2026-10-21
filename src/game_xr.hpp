@@ -86,9 +86,10 @@ private:
     static constexpr unsigned vignette_texture_size=96; // not a multiple of 64: the wrist test tells wrist canvases apart by width
     XrSwapchain vignette_chain_{};std::vector<XrSwapchainImageD3D11KHR> vignette_images_;std::vector<bool> vignette_filled_;
     std::vector<std::uint8_t> vignette_ring_,vignette_baked_;
-    XrSpace view_space_{}; // XR_REFERENCE_SPACE_TYPE_VIEW when the runtime gives one; otherwise the quad is rebuilt from the head pose each frame
+    XrSpace view_space_{}; // unused: the VIEW-space quad was rejected by SteamVR (POSE_INVALID); the ring is rebuilt from the head pose in LOCAL space
     bool color_scale_supported_{}; // XR_KHR_composition_layer_color_scale_bias enabled on the instance
     XrCompositionLayerColorScaleBiasKHR vignette_scale_{XR_TYPE_COMPOSITION_LAYER_COLOR_SCALE_BIAS_KHR}; // chained to the quad; lives until xrEndFrame
+    bool vignette_runtime_off_{}; // the runtime rejected a frame carrying the vignette: it stays off for this session instead of dropping frames until recovery
     float vignette_baked_opacity_{-1};UINT64 vignette_bake_tick_{};
     std::optional<Vec3> wheel_cursor_;
     bool cylinder_supported_{};XrCompositionLayerCylinderKHR hud_cylinder_{XR_TYPE_COMPOSITION_LAYER_CYLINDER_KHR};
@@ -769,13 +770,13 @@ private:
     std::optional<XrCompositionLayerQuad> vignette_layer() {
         const float wanted=vignette_opacity.load(std::memory_order_relaxed);
         if(!vignette_enabled || !vignette_chain_ || !std::isfinite(wanted) || wanted<.01f) return {};
-        if(!view_space_ && !views_valid_) return {};
+        if(vignette_runtime_off_ || !views_valid_) return {};
         const float opacity=std::min(wanted,1.f);
         constexpr unsigned size=vignette_texture_size;
         const std::uint8_t* upload=vignette_ring_.data();
         if(!color_scale_supported_) {
             const auto now=GetTickCount64();
-            if(vignette_baked_.empty() || (now-vignette_bake_tick_>=100 && std::fabs(opacity-vignette_baked_opacity_)>=1.f/255)) {
+            if(vignette_baked_.empty() || (now-vignette_bake_tick_>=50 && std::fabs(opacity-vignette_baked_opacity_)>=1.f/255)) {
                 vignette_baked_=vignette_ring_;
                 for(std::size_t i=3;i<vignette_baked_.size();i+=4) vignette_baked_[i]=static_cast<std::uint8_t>(std::lround(vignette_ring_[i]*opacity));
                 vignette_baked_opacity_=opacity;vignette_bake_tick_=now;++vignette_bakes;
@@ -797,9 +798,8 @@ private:
         constexpr float distance=1.f,extent=3.f; // 3 m square at 1 m: +-56 degrees; the clear centre (radius .55) is +-39 degrees
         XrCompositionLayerQuad layer{};layer.type=XR_TYPE_COMPOSITION_LAYER_QUAD;
         layer.layerFlags=XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT|XR_COMPOSITION_LAYER_UNPREMULTIPLIED_ALPHA_BIT;layer.eyeVisibility=XR_EYE_VISIBILITY_BOTH;
-        if(view_space_) {
-            layer.space=view_space_;layer.pose.orientation={0,0,0,1};layer.pose.position={0,0,-distance};
-        } else {
+        {   // LOCAL space like every other quad we submit (SteamVR/wineopenxr rejected the VIEW-space quad with POSE_INVALID):
+            // the pose is built each frame from the located head pose
             const auto& h=views_[0].pose.orientation;
             const auto facing=normalized(Quaternion{h.x,h.y,h.z,h.w});
             const auto head=head_pose_now();
@@ -1014,7 +1014,7 @@ public:
     UINT64 hint_layers{};
     // Comfort vignette: the opacity (0..1) is set by the render thread each frame; knob `no-comfort-vignette` clears the enable flag
     // before the session starts, so no chain, space or extension is ever made.
-    std::atomic<float> vignette_opacity{0};static inline bool vignette_enabled=true; UINT64 vignette_layers{},vignette_bakes{}; // vignette_enabled is class-wide: set before the first GameXr exists (the instance extensions and VIEW space follow it)
+    std::atomic<float> vignette_opacity{0};static inline bool vignette_enabled=true,vignette_color_scale_requested=false; UINT64 vignette_layers{},vignette_bakes{}; // vignette_enabled is class-wide: set before the first GameXr exists (the instance extensions and VIEW space follow it)
     bool vignette_color_scale() const noexcept {return color_scale_supported_;}
     std::array<UINT64,4> layer_pose_repaired{},layer_pose_dropped{};UINT64 layer_pose_no_submit{};
     std::string layer_pose_last; // kind and raw pose of the most recent offending layer
@@ -1252,7 +1252,7 @@ public:
                         }
                 }
             } catch(...) {cylinder_supported_=false;color_scale_supported_=false;}
-            if(!vignette_enabled) color_scale_supported_=false; // nothing would use it
+            if(!vignette_enabled || !vignette_color_scale_requested) color_scale_supported_=false; // nothing would use it; the chained struct is opt-in (build/vignette-color-scale)
             std::vector<const char*> extensions{XR_KHR_D3D11_ENABLE_EXTENSION_NAME};
             if(cylinder_supported_) extensions.push_back(XR_KHR_COMPOSITION_LAYER_CYLINDER_EXTENSION_NAME);
             if(color_scale_supported_) extensions.push_back(XR_KHR_COMPOSITION_LAYER_COLOR_SCALE_BIAS_EXTENSION_NAME);
@@ -1307,11 +1307,6 @@ public:
             XrReferenceSpaceCreateInfo space{};space.type=XR_TYPE_REFERENCE_SPACE_CREATE_INFO;
             space.referenceSpaceType=XR_REFERENCE_SPACE_TYPE_LOCAL;space.poseInReferenceSpace.orientation.w=1;
             checked(api<PFN_xrCreateReferenceSpace>("xrCreateReferenceSpace",instance_)(session_,&space,&local_),"Create local XR space");
-            if(vignette_enabled) { // head-locked comfort ring; every runtime must offer VIEW, but a failure only means the fallback pose is used
-                XrReferenceSpaceCreateInfo view{};view.type=XR_TYPE_REFERENCE_SPACE_CREATE_INFO;
-                view.referenceSpaceType=XR_REFERENCE_SPACE_TYPE_VIEW;view.poseInReferenceSpace.orientation.w=1;
-                if(XR_FAILED(api<PFN_xrCreateReferenceSpace>("xrCreateReferenceSpace",instance_)(session_,&view,&view_space_))) view_space_=XR_NULL_HANDLE;
-            }
             PFN_xrVoidFunction enumerate_raw{};
             if(get_(instance_,"xrEnumerateReferenceSpaces",&enumerate_raw)==XR_SUCCESS && enumerate_raw) {
                 PFN_xrEnumerateReferenceSpaces enumerate{};std::memcpy(&enumerate,&enumerate_raw,sizeof enumerate);
@@ -1835,6 +1830,10 @@ public:
             // session (the user sees SteamVR home); a run of 30 still recovers. The layer dump goes to xr-recoveries.log either way.
             const auto name="Submit game XR frame ["+describe_frame_layers(end)+"]";
             const bool layer_error=ended==XR_ERROR_POSE_INVALID || ended==XR_ERROR_SWAPCHAIN_RECT_INVALID || ended==XR_ERROR_LAYER_INVALID || ended==XR_ERROR_LAYER_LIMIT_EXCEEDED;
+            if(layer_error && vignette_panel && !vignette_runtime_off_) { // the optional ring is the likeliest culprit and costs nothing to lose
+                vignette_runtime_off_=true;end_frame_rejected_run_=0;
+                if(observe_frame_rejection) observe_frame_rejection("Comfort vignette disabled for this session after the runtime rejected a frame carrying it");
+            }
             if(!layer_error || ++end_frame_rejected_run_>30) checked(ended,name.c_str());
             ++end_frame_rejections;if(observe_frame_rejection) observe_frame_rejection((name+": "+std::to_string(ended)+" (frame dropped)").c_str());
         } else end_frame_rejected_run_=0;
