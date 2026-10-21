@@ -141,3 +141,29 @@ On the laptop, the sim frame is GPU-bound and only just over the 72 Hz budget. I
 - `over_budget` = interval p50 > 13.9: **true** (14.10 ms, A1).
 
 The Task 5 gate says "second eye costs at least 40% of the engine frame and still over budget". Over budget is true; the second-eye share cannot be tested with this build. The frame-split eye0 stamp (eye 0 begin never recorded) needs fixing and A1 needs to be re-run before the gate can be ruled on.
+
+## Mono-view diagnostic (plan E Task 5a): what one engine view per frame saves
+
+Diagnostic only: knob `perf-mono-view` (never in `default_features.json`). In XR the engine is given the single-eye descriptor (one
+full-viewport view, separation written as 0 so the view sits at the camera). The mod places that view at the midpoint of the two eye
+poses with the mean orientation and the union FOV, copies the one image to both eye swapchains, and records it for both eyes
+(`rendered_mask_` 3). The image is flat (no stereo depth); it exists to time the engine, not to be looked at. Any identification
+failure (the engine still prepares two views for 30 setups, or the one view is not matched for 180 gameplay frames) returns to the
+paired descriptor for the rest of the session and the status shows `"mono_view":"fallback"`. Status: `"mono_view":"off"|"on"|"fallback"`
+and `"mono_view_frames"`. Routing is pinned by `tests/mono_view_routing_check.py`.
+
+Measured 2026-10-21 on the sim rig (throughput without a compositor, not headset fps), same build for both rows (commit 32e5a77, built as
+`d2vr_render_probe_arm_v600.dll`, sha256 bd6354ec8fcc04c312b971be6e084d49e0ffd3b8570f249db199d2ff9e577432), `oil_tank_drop --lead 28 --seconds 120 --knob native-gpu-timing`, NVIDIA RTX 3070 mobile, default FSR/mirror
+settings as in A1. Both runs reached gameplay (`gameplay` true); M1 status: `mono_view` "on", `mono_view_frames` 8848. The installed DLL
+stayed ff0daf65...bc927 and no knob or marker was left after either run.
+
+| Run | Setup | Run dir | interval p50 / p95 (ms) | hook p50 | gpu_busy (list sum) | render thread busy |
+| --- | --- | --- | --- | --- | --- | --- |
+| M0 | paired, no knob | 20261021T143645 | 14.43 / 15.72 | 0.81 | 0.82 (11.9 ms) | 0.67 |
+| M1 | `perf-mono-view` | 20261021T142525 | 10.70 / 11.56 | 0.76 | 0.88 (9.4 ms) | 0.65 |
+
+- `mono_saving` = 1 - 10.6959 / 14.4324 = **0.259** (26% of the interval p50, 3.74 ms). Against the engine frame (interval - hook, 13.62 ms) the second view costs about 27%, not 50%.
+- The GPU list sum fell only 2.5 ms (11.9 to 9.4 ms, 21%), so about 60% of the per-view GPU cost is shared or fixed; the interval fell more than the list sum because the second eye's FSR/XR-side work and gaps went with it.
+- M1 is still GPU-heavy (0.88 of the interval), so even one view is near the 90 Hz budget: p50 10.70 ms is under 11.1 ms, p95 11.56 ms is over it. At 72 Hz (13.9 ms) it has 3.2 ms of room.
+- M0 here (14.43 ms) matches the same-day reference on HEAD 1309f51 (14.31 ms, run 20261021T131156).
+- Caveat: this is an upper bound for alternate-eye rendering. AER would still pay the engine's view-independent work every frame and adds eye-desync, TAA/FSR history and previous-matrix work that the mono diagnostic skips (the native TAA history twins are not driven in mono). Mono timing needs no stale-eye handling.
