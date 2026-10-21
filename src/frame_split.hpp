@@ -80,17 +80,22 @@ private:
 class FrameSplit {
 public:
     static constexpr std::size_t window=900;
-    void feed(const FrameStamps& s,std::int64_t prev_present_enter,std::int64_t qpc_freq,std::uint64_t gpu_list_sum_ns,std::uint64_t gpu_span_ns,const PhaseGpu* phases=nullptr,const ModGpu* mod=nullptr) noexcept {
+    void feed(const FrameStamps& s,std::int64_t prev_present_enter,std::int64_t qpc_freq,std::uint64_t gpu_list_sum_ns,std::uint64_t gpu_span_ns,const PhaseGpu* phases=nullptr,const ModGpu* mod=nullptr,bool single_view=false) noexcept {
         if(qpc_freq<=0 || s.present_enter<=0) return;
         const double ns=1e9/static_cast<double>(qpc_freq);
         auto span=[&](std::int64_t a,std::int64_t b)->std::uint64_t {return b>a?static_cast<std::uint64_t>(static_cast<double>(b-a)*ns):0;};
         const std::size_t slot=head_;
         interval_[slot]=prev_present_enter!=0?span(prev_present_enter,s.present_enter):0;
         hook_[slot]=s.present_exit>0?span(s.present_enter,s.present_exit):0;
-        accepted_=prev_present_enter!=0 && s.eye0_begin>=0 && s.eye0_begin>prev_present_enter && s.eye1_begin>=s.eye0_begin && s.eye1_begin>0 && s.present_enter>=s.eye1_begin;
+        // single_view (alternate-eye): the engine renders one view per Present, so only eye 0's begin exists (eye1_begin missing). That frame is
+        // accepted on eye 0 alone, and eye 0's span runs to Present; eye 1 contributes nothing. Frames that did stamp both eyes (paired refresh)
+        // still use the two-eye rule. single_view false (every other mode) never takes this branch.
+        const bool one_eye=single_view && s.eye1_begin<=0;
+        accepted_=prev_present_enter!=0 && s.eye0_begin>=0 && s.eye0_begin>prev_present_enter &&
+            (one_eye?s.present_enter>=s.eye0_begin:(s.eye1_begin>=s.eye0_begin && s.eye1_begin>0 && s.present_enter>=s.eye1_begin));
         const bool eyes=accepted_;
-        eye0_[slot]=eyes?span(s.eye0_begin,s.eye1_begin):0;
-        eye1_[slot]=eyes?span(s.eye1_begin,s.present_enter):0;
+        eye0_[slot]=eyes?span(s.eye0_begin,one_eye?s.present_enter:s.eye1_begin):0;
+        eye1_[slot]=eyes && !one_eye?span(s.eye1_begin,s.present_enter):0;
         if(!eyes) ++skipped_;
         gpu_[slot]=gpu_list_sum_ns;span_[slot]=gpu_span_ns;
         phase_valid_[slot]=phases && phases->valid;mod_valid_[slot]=mod && mod->valid;

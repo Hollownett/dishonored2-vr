@@ -7,7 +7,7 @@ def check(probe: str, features: str) -> None:
     assert "d2vr::authored_head_view(source_anchor,*authored_heading_now," in body
     assert "authored_heading.update(source_anchor,authored_camera,head_pose_epoch)" in body
     # the heading is advanced once per frame (eye 0), both eyes read it
-    start = body.index("if(eye==0) {")
+    start = body.index("if(per_frame) {")
     update = body.index("authored_heading.update(")
     end = body.index("\n        }\n", start)  # the eye-0 block closes at 8-space indent
     assert start < update < end, "heading update must sit inside the eye-0 block"

@@ -12,6 +12,16 @@ int main(){
      assert(near(field(j,"eye0_ms_p50"),6.0)&&near(field(j,"eye1_ms_p50"),5.0)&&near(field(j,"hook_ms_p50"),1.5));
      assert(near(field(j,"interval_ms_p50"),14.0)&&near(field(j,"interval_ms_p95"),14.0));
      assert(near(field(j,"eye1_share"),5./14)&&near(field(j,"frames"),1)&&near(field(j,"split_skipped"),0));}
+    {FrameSplit m;m.feed({20000,0,110000,125000},10000,F,0,0,nullptr,nullptr,true); // single_view_frame_accepted_on_eye0 (alternate-eye: one view per Present)
+     const auto j=m.json();
+     assert(near(field(j,"split_skipped"),0)&&near(field(j,"eye0_ms_p50"),9.0)&&near(field(j,"eye1_ms_p50"),0)&&near(field(j,"interval_ms_p50"),10.0));}
+    {FrameSplit m;m.feed({20000,0,110000,125000},10000,F,0,0); // single_view_off_still_skips_a_one_eye_frame (every other mode)
+     assert(near(field(m.json(),"split_skipped"),1));}
+    {FrameSplit m;m.feed({5000,0,110000,125000},10000,F,0,0,nullptr,nullptr,true); // single_view_still_needs_a_begin_after_the_previous_present
+     assert(near(field(m.json(),"split_skipped"),1));}
+    {FrameSplit m;m.feed({20000,60000,110000,125000},10000,F,0,0,nullptr,nullptr,true); // single_view_with_both_stamps_uses_the_two_eye_rule (paired refresh frame)
+     const auto j=m.json();
+     assert(near(field(j,"split_skipped"),0)&&near(field(j,"eye0_ms_p50"),4.0)&&near(field(j,"eye1_ms_p50"),5.0));}
     {FrameSplit m;m.feed({0,0,110000,125000},-30000,F,0,0); // missing_eye_frame_skipped
      const auto j=m.json();
      assert(near(field(j,"split_skipped"),1)&&near(field(j,"eye0_ms_p50"),0)&&near(field(j,"eye1_ms_p50"),0)&&near(field(j,"interval_ms_p50"),14.0)&&near(field(j,"frames"),1));}

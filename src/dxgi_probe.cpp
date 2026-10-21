@@ -1312,6 +1312,7 @@ static std::atomic<UINT64> alt_head_stamp{0}; // (displayed frame<<1)|eye of the
 static std::atomic<UINT64> alt_plan_stamp{0}; // (displayed frame<<2)|(planned eye+1), planned in the Present before the frame renders; 0 = none
 static d2vr::AlternateEye alt_plan;           // render thread (Present hook) only
 static UINT64 alt_epoch_seen{};
+static UINT64 alt_per_frame_done{}; // displayed frame whose per-frame mod work already ran (prepare_head_view, under log_mutex)
 static bool alt_descriptor_paired{};          // which descriptor is installed right now (render thread only)
 static bool alternate_on() noexcept {return alt_eye_state.load()==1 && mono_view_state.load()==1;}
 void alternate_fallback(const char* reason) noexcept;
@@ -3886,6 +3887,12 @@ void prepare_head_view(void* view) noexcept {
         }
         if(eye<0) {native_left_aim.clear();native_weapon_attachment.clear();return;}
         ++head_matched;
+        // Per-frame mod work (comfort meter, authored heading, hands/body, turning, listener, crosshair, ...) runs for the FIRST view prepared for a
+        // displayed frame. Paired: that is eye 0, as before. Alternate-eye single-view frames: a frame-counter compare (the one view is slot 0
+        // whichever eye it renders, so a bare slot-0 test would be right only by accident); the logical eye only changes the view this Setup writes.
+        const UINT64 per_frame_target=frames.load()+1;
+        const bool per_frame=alt_eye>=0?alt_per_frame_done!=per_frame_target:eye==0;
+        if(alt_eye>=0) alt_per_frame_done=per_frame_target;
         std::array<float,16> projection{};std::memcpy(projection.data(),bytes.data()+0x100,64);
         const XrView mono_xr_eye=mono?d2vr::GameXr::mono_centre_view(*xr_views):XrView{};
         const auto& xr_eye=alt_eye>=0?(*xr_views)[static_cast<std::size_t>(alt_eye)]:mono?mono_xr_eye:(*xr_views)[eye]; // alternate-eye: the parity eye's own pose and FOV, not the centre
@@ -3983,7 +3990,7 @@ void prepare_head_view(void* view) noexcept {
         const auto calibration=head_calibration.get(centre_pose,game_xr->reference_epoch(),body->player,body->camera,body->camera_identity.generation,true);
         if(!calibration) {native_audio_listener.clear();native_left_aim.clear();native_weapon_attachment.clear();return;}
         head_origin=*calibration;
-        if(eye==0) { // comfort telemetry: raw engine anchor (before any smoothing), levelled body heading, HMD yaw
+        if(per_frame) { // comfort telemetry: raw engine anchor (before any smoothing), levelled body heading, HMD yaw
             static LARGE_INTEGER comfort_freq{};if(!comfort_freq.QuadPart) QueryPerformanceFrequency(&comfort_freq);
             LARGE_INTEGER comfort_now{};QueryPerformanceCounter(&comfort_now);
             // The mod's own turning: a turn applied by the physics adapter within the last 150 ms (snap turns count for the frame they
@@ -4005,7 +4012,7 @@ void prepare_head_view(void* view) noexcept {
         // volume around the calibrated origin; hands shift by the same offset so
         // they stay on the controllers. Native collision still uses the game camera.
         auto head_offset=centre-head_origin.position;
-        if(eye==0 && game_logic_mask()==2) {physical_drop=-head_offset.y;native_camera_up=anchor.position[2];physical_drop_valid=true;} // physical crouch inputs
+        if(per_frame && game_logic_mask()==2) {physical_drop=-head_offset.y;native_camera_up=anchor.position[2];physical_drop_valid=true;} // physical crouch inputs
         if(const double h=std::hypot(head_offset.x,head_offset.z);h>.45) {head_offset.x*=.45/h;head_offset.z*=.45/h;}
         {   // A carried body lies on the right shoulder, 20-30 cm from the eye: leaning right put the camera inside it (headset: "fills
             // the right eye"; sim v463 eye pairs: 15 cm right is inside). Head collision: while carrying, the camera does not move
@@ -4026,16 +4033,16 @@ void prepare_head_view(void* view) noexcept {
         head_offset.y=std::clamp(head_offset.y+crouch_lift_now,-.7,.3+crouch_lift_now);
         const auto hand_centre=centre-head_offset;
         native_art_pose_epoch=game_xr->pose_epoch();d2vr::NativeHudChildDraw::tutorial_epoch=native_art_pose_epoch.load();
-        if(eye==0 && game_logic_mask()==2 && !authored_camera) {
+        if(per_frame && game_logic_mask()==2 && !authored_camera) {
             d2vr::WorldTrackedPose hud_frame{};hud_frame.position={anchor.position[0],anchor.position[1],anchor.position[2]};
             for(unsigned i=0;i<3;++i) hud_frame.basis[i]={anchor.basis[i*3],anchor.basis[i*3+1],anchor.basis[i*3+2]};
             native_hud_world_frame={hud_frame,head_origin,hand_centre,game_xr->pose_epoch(),frames.load(),GetTickCount64()};
         }
-        if(native_turning_requested && eye==0 && game_logic_mask()==2)
+        if(native_turning_requested && per_frame && game_logic_mask()==2)
             native_turning.publish_head(d2vr::tracked_yaw(centre_pose.orientation,head_origin.orientation),GetTickCount64(),
                 game_xr->reference_epoch(),*body,game_xr->state==XR_SESSION_STATE_FOCUSED && !body->authored_view());
         if(physical_grab_requested && tracked_arms_requested && !avatar_pose_gate.load(std::memory_order_acquire)) native_grab.clear();
-        if(game_logic_mask()==2 && physical_grab_requested && eye==0 && (!tracked_arms_requested || avatar_pose_gate.load(std::memory_order_acquire))) {
+        if(game_logic_mask()==2 && physical_grab_requested && per_frame && (!tracked_arms_requested || avatar_pose_gate.load(std::memory_order_acquire))) {
             if(simulated_input_requested && !simulated_gameplay_script_requested && simulated_grab_target) {
                 const auto elapsed=simulated_grab_clock.sample(GetTickCount64()-simulated_input_start,
                     tracked_arms_requested,avatar_pose_gate.load(std::memory_order_acquire),true).value_or(0);
@@ -4099,7 +4106,7 @@ void prepare_head_view(void* view) noexcept {
                     game_xr->pose_epoch(),GetTickCount64(),tracked,occupied,game_xr->grip_pose_tick());
             }
         }
-        if(eye==0 && controller_trace_csv.is_open()) {
+        if(per_frame && controller_trace_csv.is_open()) {
             static UINT64 next_trace{};const auto now_t=GetTickCount64();
             if(now_t>=next_trace) {
                 next_trace=now_t+33;const auto& in=game_xr->controller_input;
@@ -4120,7 +4127,7 @@ void prepare_head_view(void* view) noexcept {
                 static unsigned trace_rows{};if(++trace_rows%30==0) controller_trace_csv.flush();
             }
         }
-        if(game_logic_mask()==2 && controller_aim_requested && eye==0) {
+        if(game_logic_mask()==2 && controller_aim_requested && per_frame) {
             constexpr XrSpaceLocationFlags required=XR_SPACE_LOCATION_ORIENTATION_VALID_BIT|XR_SPACE_LOCATION_POSITION_VALID_BIT; // as grip_tracked_hands
             // Native acquisition alternates between hands; pressing grip locks
             // the selected hand. Nearby objects use a sphere at the grip centre.
@@ -4187,7 +4194,7 @@ void prepare_head_view(void* view) noexcept {
             void flush() noexcept {if(pending) {const auto left=*pending;pending.reset();try {publish(left);} catch(...) {}}}
             ~PendingLeftAim() {flush();}
         } pending_publish{pending_left_aim,publish_left_aim};
-        if(game_logic_mask()==2 && (native_camera_trace_requested || native_left_aim_requested) && eye==0) {
+        if(game_logic_mask()==2 && (native_camera_trace_requested || native_left_aim_requested) && per_frame) {
             constexpr XrSpaceLocationFlags required=XR_SPACE_LOCATION_ORIENTATION_VALID_BIT|XR_SPACE_LOCATION_POSITION_VALID_BIT; // as grip_tracked_hands
             // Powers, pistol and crossbow live in the left hand: the game aim, the crosshair and the
             // shots always follow the left hand (the interaction ray picks its own hand).
@@ -4242,7 +4249,7 @@ void prepare_head_view(void* view) noexcept {
                 else publish_left_aim(left);
             } else {native_gameplay_aim_trace.clear();native_left_aim.clear();native_weapon_attachment.clear();if(native_shot_aim_installed) native_shot_aim.clear();if(native_blink_aim_installed) native_blink_aim.clear();}
         }
-        if(render_world_scene() && (tracked_arms_requested || native_weapon_attachment_requested) && eye==0) {
+        if(render_world_scene() && (tracked_arms_requested || native_weapon_attachment_requested) && per_frame) {
             const bool reverse_sword=sword_reversed.load();
             d2vr::rig::ArmTrackingFrame hands{};std::array<d2vr::WorldTrackedPose,2> raw_grips{},palm_grips{};std::array<std::uintptr_t,2> cast_entities{};hands.tick=GetTickCount64();hands.source_tick=game_xr->grip_pose_tick();hands.epoch=game_xr->pose_epoch();
             hands.curls={std::clamp(game_xr->controller_input.left_grip,0.f,1.f),std::clamp(game_xr->controller_input.right_grip,0.f,1.f)};
@@ -4913,7 +4920,7 @@ void prepare_head_view(void* view) noexcept {
         // including its TAA sub-pixel jitter, which a forced projection (flag +0x140) drops.
         if(!(engine_projection && symmetric_frustum_requested)) {std::memcpy(bytes.data()+0x100,optical->data(),64);bytes[0x140]=std::byte{1};forced_view_jitter=taa_view_jitter;
             {std::lock_guard<std::mutex> l(eye_jitter_mutex);auto& e=eye_jitter[static_cast<std::size_t>(eye)];e={taa_view_jitter.x,taa_view_jitter.y,e[0],e[1]};}}
-        if(eye==0 && native_crosshair_installed) {
+        if(per_frame && native_crosshair_installed) {
             // Aim point 30 units along the active hand, projected into this eye's tangent-space frustum.
             constexpr XrSpaceLocationFlags required=XR_SPACE_LOCATION_ORIENTATION_VALID_BIT|XR_SPACE_LOCATION_POSITION_VALID_BIT;
             // The crosshair belongs to the gun/power hand (left), never to the sword hand.
@@ -4949,7 +4956,7 @@ void prepare_head_view(void* view) noexcept {
         head_wrote=true;SIZE_T written{};
         if(!WriteProcessMemory(GetCurrentProcess(),reinterpret_cast<void*>(source+0x9c),bytes.data()+0x9c,head_saved.size(),&written) || written!=head_saved.size())
             throw std::runtime_error("Cannot write temporary render-only head pose");
-        if(eye==0) {
+        if(per_frame) {
             constexpr auto tracked_head=XR_VIEW_STATE_ORIENTATION_TRACKED_BIT|XR_VIEW_STATE_POSITION_TRACKED_BIT;
             // Authored scenes: the listener faces where the head-owned view faces (not the spinning native camera), at the native camera
             // position. Legacy knob: the native camera's own axes, as before.
@@ -7787,7 +7794,7 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
             const bool split_timed=native_gpu_requested && native_gpu_prepared;
             const d2vr::PhaseGpu split_phase=split_timed?native_gpu_summary.last_phase:d2vr::PhaseGpu{};
             const d2vr::ModGpu split_mod=split_timed?d2vr::mod_gpu_timer().stats().last:d2vr::ModGpu{};
-            frame_split.feed(split_stamps,split_prev_enter_ns,1'000'000'000,split_gpu_ns,split_span_ns,&split_phase,&split_mod);
+            frame_split.feed(split_stamps,split_prev_enter_ns,1'000'000'000,split_gpu_ns,split_span_ns,&split_phase,&split_mod,alternate_on());
             if(frame_split_trace_on.load(std::memory_order_relaxed)) frame_split_trace.push(split_stamps.eye0_begin,split_stamps.eye1_begin,split_stamps.present_enter,split_stamps.present_exit,split_prev_enter_ns,frame_split.last_accepted(),split_begins,split_idx_a,split_idx_b);
         } else if(!(flags&DXGI_PRESENT_TEST)) {
             // This Present did not feed (no XR wait/submit, menu, load, error path): the next gameplay frame starts a fresh interval and pace.
@@ -8212,7 +8219,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
                 if(xr_requested && head_requested && paired_requested && eye_boundary_requested && native_eye_capture_requested && !single_eye_requested) mono_view_state=1;
                 else {mono_view_state=2;note_recoverable("perf-mono-view needs head-tracked paired XR with native eye capture; staying paired");}
             }
-            alt_eye_state=0;alt_alternated=0;alt_paired=0;alt_fallbacks=0;alt_mismatch_run.reset();alt_head_stamp=0;alt_plan_stamp=0;alt_epoch_seen=0;alt_descriptor_paired=false;alt_plan.reset();
+            alt_eye_state=0;alt_alternated=0;alt_paired=0;alt_fallbacks=0;alt_mismatch_run.reset();alt_head_stamp=0;alt_plan_stamp=0;alt_epoch_seen=0;alt_per_frame_done=0;alt_descriptor_paired=false;alt_plan.reset();
             if(fs::exists(root/L"build"/L"alternate-eye")) { // plan F task 1: alternate-eye rides on the mono-view path (same prerequisites)
                 if(xr_requested && head_requested && paired_requested && eye_boundary_requested && native_eye_capture_requested && !single_eye_requested) {alt_eye_state=1;mono_view_state=1;}
                 else {alt_eye_state=2;note_recoverable("alternate-eye needs head-tracked paired XR with native eye capture; staying paired");}
