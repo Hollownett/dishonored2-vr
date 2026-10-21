@@ -16,15 +16,17 @@ def check(source: str, consumer: str) -> None:
     assert "(physical_grab_requested && native_grab.holding(1))?4u:" in condition
     assert "too_slow?5u:" in condition
     assert source.index("classify_contact_speed(") < source.index("const unsigned why=")
-    assert "stealth_strike(speed,rear_side,stealth_speed)" in source and "stealth_strike(speed,rear_side,d2vr::SwordHitGate::hit_speed)" not in source
+    assert "legacy_sword_contact && d2vr::stealth_strike(speed,rear_side,stealth_speed)" in source and "stealth_strike(speed,rear_side,d2vr::SwordHitGate::hit_speed)" not in source
     assert 'L"stealth-speed"' in source and "stealth_speed_from_knob(" in source
-    assert "const bool too_slow=speed_class==d2vr::ContactSpeedClass::too_slow || (speed_class==d2vr::ContactSpeedClass::stealth_only && !rear_side);" in source
-    assert "d2vr::arms_native_attack(" in source
+    assert "const bool too_slow=speed_class==d2vr::ContactSpeedClass::too_slow || (speed_class==d2vr::ContactSpeedClass::stealth_only && (legacy_sword_contact?!rear_side:true));" in source
+    assert "legacy_sword_contact && d2vr::arms_native_attack(" in source
     assert "if(owned_contact->stealth_strike) contact_attack_tick=now;" not in source
     assert "if(why==5 && rear_side && slow_reject_latch.first(contact->entity,now)) ++d2vr::NativeInteractionAim::stealth_reject_[1];" in source
     assert "slow_reject_latch=d2vr::SlowRejectLatch{}" in source
     assert "arms_native_attack(owned_contact->stealth_strike,owned_contact->stealth_only,owned_contact->native_offer_victim,d2vr::NativeInteractionAim::stealth_enabled_.load())" in source
     assert "owned_contact->native_offer_victim=kill_sensor_spawn.load()==owned_contact->victim_spawn && now>=kill_sensor_tick.load() && now-kill_sensor_tick.load()<=100;" in source
+    assert "if(!legacy_contact_.load(std::memory_order_relaxed)) {" in consumer and "++intent_unaware_deferred_;continue;" in consumer
+    assert 'L"legacy-sword-contact"' in source and "legacy_sword_contact=fs::exists(" in source
     assert "resolve_stealth_act(" in consumer
     assert "const auto act=resolve_stealth_act(raw_act,c.stealth_only);" in consumer
     drop = consumer.index("if(contact.stealth_only) {++stealth_slow_unheld_drops_;continue;}")

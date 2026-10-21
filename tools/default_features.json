@@ -152,6 +152,14 @@
    "label": "Darken the edges while moving",
    "help": "A soft dark ring closes in while the stick walks or smooth-turns you, and fades away when you stop. Head movement and snap turns never trigger it.",
    "default": true
+  },
+  {
+   "id": "intent-attacks",
+   "file": "legacy-sword-contact",
+   "kind": "disable",
+   "label": "Sword swings press the game's attack",
+   "help": "A fast swing with the sword drawn, or a straight stab while crouched, presses the game's own attack, and the game decides whether it is a stealth kill. Turn off for the older contact-based routing.",
+   "default": true
   }
  ]
 }

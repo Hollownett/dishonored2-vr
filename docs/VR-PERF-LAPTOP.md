@@ -78,6 +78,9 @@ editing the user's real files, so they are not measured even once the session is
 
 - [ ] Task 2: choke a guard from behind; turn your head during the animation; the view follows your head; no spin.
 - [ ] Task 3: mantle onto a ledge and drop off a roof: no lag swoop and no pop. Also crouch and stand with the tracked arms on: arms keep their length.
+- [ ] Plan G task 3: from behind on an unaware guard, a fast swing kills and a crouched stab kills (watch `attack_intent` in `xr-live-status.json`: `honoured` rises).
+- [ ] Plan G task 3: an aware guard: a swing is a normal attack, never a kill.
+- [ ] Plan G task 3: no accidental attacks while walking, turning your head or resting the sword hand (`attack_intent.presses` stays 0).
 
 ## Frame split block (plan E task 1)
 

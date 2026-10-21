@@ -521,6 +521,12 @@ class NativeInteractionAim {
                     const auto final_now=GetTickCount64();const auto final_hand=sword_hand_.current(final_now);
                     if(!final_hand || final_hand->epoch!=contact.pose_epoch || final_hand->epoch!=sword_pose_epoch_.load(std::memory_order_acquire) ||
                        final_now<contact.hit.tick || final_now-contact.hit.tick>100 || !melee_batch_current(melee_revision)) {++sword_contact_rejected_;continue;}
+                    // Without legacy-sword-contact (plan G task 3) the mod never holds or forces anything: the physical attack presses the
+                    // native attack and the engine decides. A guard still unaware gets no contact damage (it would alert him before the press
+                    // resolves); an aware guard is hit as before. A calm touch never reaches here (the producer drops it).
+                    if(!legacy_contact_.load(std::memory_order_relaxed)) {
+                        if(NativeMelee::damageable(self->base_,self->read_,contact.hit.victim) && NativeMelee::unaware(self->base_,self->read_,contact.hit.victim)) {++intent_unaware_deferred_;continue;}
+                    } else
                     // A guard the engine calls unaware is not hit: the native Slash may still make this the Assassination, or the
                     // contact becomes the stealth kill below (sword_contact_policy.hpp). Anything else is the ordinary hit.
                     if(contact.stealth_strike && stealth_enabled_.load(std::memory_order_relaxed)) {
@@ -701,7 +707,7 @@ public:
             <<",\"epoch_rejected\":"<<sword_epoch_rejected_.load()<<",\"consumer_rejected\":"<<sword_contact_rejected_.load()
             <<",\"stealth\":["<<stealth_counts_[0].load()<<','<<stealth_counts_[1].load()<<','<<stealth_counts_[2].load()<<','<<stealth_counts_[3].load()<<','<<stealth_counts_[4].load()<<']'
             <<",\"stealth_reject\":["<<stealth_reject_[0].load()<<','<<stealth_reject_[1].load()<<','<<stealth_reject_[2].load()<<','<<stealth_reject_[3].load()<<','<<stealth_reject_[4].load()<<']'
-            <<",\"stealth_speed\":"<<stealth_speed_.load()<<",\"slow_aware_drops\":"<<stealth_slow_aware_drops_.load()<<",\"slow_unheld_drops\":"<<stealth_slow_unheld_drops_.load()
+            <<",\"stealth_speed\":"<<stealth_speed_.load()<<",\"slow_aware_drops\":"<<stealth_slow_aware_drops_.load()<<",\"slow_unheld_drops\":"<<stealth_slow_unheld_drops_.load()<<",\"intent_unaware_deferred\":"<<intent_unaware_deferred_.load()
             <<",\"hit_height\":["<<hit_height_[0].load()<<','<<hit_height_[1].load()<<','<<hit_height_[2].load()<<']'
             <<",\"invoked\":"<<sword_contact_invoked_.load()<<",\"native_returned\":"<<sword_damage_results_.load()<<",\"last\":";
         if(!observation.valid)output<<"null";
@@ -731,6 +737,8 @@ public:
     }
     inline static StealthHold<OwnedSwordContact> stealth_hold_; // game thread only
     inline static std::atomic<bool> stealth_enabled_{true};
+    inline static std::atomic<bool> legacy_contact_{false}; // build/legacy-sword-contact: the old hold/drop/kill routing
+    inline static std::atomic<std::uint64_t> intent_unaware_deferred_{}; // contacts on an unaware guard left to the native attack press
     inline static std::atomic<double> stealth_speed_{stealth_speed_default}; // m/s, knob build\stealth-speed; the near-pass assist reads it too
     inline static std::atomic<std::uint64_t> stealth_slow_unheld_drops_{}; // calm contacts never held (aware, not damageable, slot busy, stealth off): dropped
     inline static std::atomic<std::uint64_t> stealth_slow_aware_drops_{};   // held calm contacts whose guard turned aware (service hit->drop)
