@@ -79,10 +79,10 @@ class ProxyCheck(unittest.TestCase):
     def install_mod(self, target="fake_mod"):
         shutil.copy2(self.built[target], self.home / "build" / "d2vr_render_probe_arm_v999.dll")
 
-    def launch(self):
+    def launch(self, *extra):
         # A file, not a pipe: a wineserver started by this run would inherit a pipe and block reads.
         self.host_out = open(self.tmp / "host-stdout.txt", "wb")
-        self.host = subprocess.Popen(["wine", str(self.game / "proxy_host.exe"), "90"],
+        self.host = subprocess.Popen(["wine", str(self.game / "proxy_host.exe"), "90", *extra],
                                      env=wine_support.wine_env("dinput8=n,b"), cwd=self.game,
                                      stdin=subprocess.DEVNULL, stdout=self.host_out, stderr=subprocess.STDOUT)
 
@@ -135,12 +135,72 @@ class ProxyCheck(unittest.TestCase):
         self.wait_for(lambda: "StartProbe returned 0" in self.log() and "StopProbe returned 0" in self.log(), 15)
         self.finish()
 
-    def test_settle_timeout_autostarts_first_session(self):
+    def log_time(self, text):
+        """Seconds (float, same-day) of the first log line containing text."""
+        for line in self.log().splitlines():
+            if text in line:
+                h, m, sec = line[11:23].split(":")
+                return int(h) * 3600 + int(m) * 60 + float(sec)
+        self.fail("no log line %r\n%s" % (text, self.log()))
+
+    def test_early_start_after_present(self):
         self.install_mod()
-        (self.home / "build/linux-settle-seconds").write_text("2")
+        (self.home / "build/linux-settle-seconds").write_text("1")
         self.launch()
         self.wait_for(self.marker.exists, 30)
-        self.assertIn("settle timeout", self.log())
+        log = self.log()
+        self.assertIn("present seen (client", log)
+        self.assertIn("start (present+settle 1000 ms)", log)
+        self.assertNotIn("settle timeout", log)
+        self.assertLess(self.log_time("StartProbe begin") - self.log_time("game window found"), 8)
+        self.assertEqual(cli("stop", "--mod-home", str(self.home)).returncode, 0)
+        self.wait_for(lambda: "StartProbe returned 0" in self.log(), 15)
+        self.finish()
+
+    def test_default_settle_is_twenty_seconds(self):
+        self.install_mod()
+        self.launch()
+        self.wait_for(lambda: "present seen" in self.log(), 30)
+        self.assertIn("present + settle 20000 ms", self.log())
+        time.sleep(3)
+        self.assertFalse(self.marker.exists())
+        self.finish()
+
+    def test_legacy_knob_waits(self):
+        self.install_mod()
+        (self.home / "build/linux-start-mode").write_text("legacy\n")
+        (self.home / "build/linux-settle-seconds").write_text("4")
+        self.launch()
+        self.wait_for(self.marker.exists, 30)
+        log = self.log()
+        self.assertIn("settle timeout", log)
+        self.assertNotIn("present seen (client", log)
+        self.assertGreaterEqual(self.log_time("StartProbe begin") - self.log_time("game window found"), 4)
+        self.assertEqual(cli("stop", "--mod-home", str(self.home)).returncode, 0)
+        self.wait_for(lambda: "StartProbe returned 0" in self.log(), 15)
+        self.finish()
+
+    def test_settle_knob_45_is_legacy(self):
+        self.install_mod()
+        (self.home / "build/linux-settle-seconds").write_text("45")
+        self.launch()
+        self.wait_for(lambda: "game window found" in self.log(), 30)
+        self.assertIn("legacy settle 45000 ms", self.log())
+        time.sleep(3)
+        self.assertNotIn("present seen (client", self.log())
+        self.assertFalse(self.marker.exists())
+        self.finish()
+
+    def test_no_present_falls_back(self):
+        self.install_mod()
+        (self.home / "build/linux-settle-seconds").write_text("1")
+        (self.home / "build/linux-start-timeout-seconds").write_text("3")
+        self.launch("minimized")
+        self.wait_for(self.marker.exists, 30)
+        log = self.log()
+        self.assertIn("start (settle timeout, no present seen)", log)
+        self.assertNotIn("present seen (client", log)
+        self.assertGreaterEqual(self.log_time("StartProbe begin") - self.log_time("game window found"), 3)
         self.assertEqual(cli("stop", "--mod-home", str(self.home)).returncode, 0)
         self.wait_for(lambda: "StartProbe returned 0" in self.log(), 15)
         self.finish()
@@ -244,7 +304,7 @@ class ProxyCheck(unittest.TestCase):
         self.assertEqual(cli("start", "--mod-home", str(self.home)).returncode, 0)
         self.wait_for(lambda: self.host_stdout().count("key 0x0d") >= 3, 40)
         self.assertIn("autocontinue armed: Enter after 1 s", self.log())
-        self.assertIn("autocontinue: posted Enter 3 (logic_mask ?)", self.log())
+        self.wait_for(lambda: "autocontinue: posted Enter 3 (logic_mask ?) native_pad_window_gates=0(+0)" in self.log(), 10)
         self.finish()
 
     def test_autocontinue_stops_at_gameplay(self):

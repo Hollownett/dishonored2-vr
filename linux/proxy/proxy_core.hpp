@@ -22,7 +22,14 @@ inline constexpr wchar_t kAutoContinueKnob[] = L"linux-autocontinue";
 inline constexpr unsigned kDefaultAutoContinueSeconds = 10;
 // 1|8|16|64|512|1024|2048|8192|16384|32768 (launcher/Probe.cs RequiredCapabilities)
 inline constexpr unsigned long kRequiredCapabilities = 61017;
-inline constexpr unsigned kDefaultSettleSeconds = 45;
+// Start gate (docs/VR-START-INVESTIGATION.md): VR starts this long after the game window has a client area. 20 s was clean on the
+// sim rig, starts in the first ~12 s stalled at the menu. build\linux-settle-seconds = 45 restores the old window+45 s wait.
+inline constexpr unsigned kDefaultSettleMs = 20000;
+inline constexpr unsigned kLegacySettleSeconds = 45;
+// A present that is never seen falls back to a timeout from the window (never idle forever).
+inline constexpr unsigned kDefaultStartTimeoutMs = 60000;
+inline constexpr wchar_t kStartModeKnob[] = L"linux-start-mode";           // "legacy" = old window+delay logic, no present gate
+inline constexpr wchar_t kStartTimeoutKnob[] = L"linux-start-timeout-seconds";  // developer/test: timeout when no present is seen
 
 inline bool is_space(wchar_t c) { return c == L' ' || c == L'\t' || c == L'\r' || c == L'\n' || c == L'\v' || c == L'\f'; }
 
@@ -126,20 +133,85 @@ inline bool capabilities_ok(unsigned long caps) { return (caps & kRequiredCapabi
 
 inline bool is_game_window_title(const std::wstring& title) { return title.find(L"Dishonored") != std::wstring::npos; }
 
-// Decimal integer clamped to 0..3600; anything else gives the default.
-inline unsigned settle_seconds_from_knob(const std::string& text) {
+inline std::string trim_ascii(const std::string& text) {
     size_t b = 0, e = text.size();
     auto sp = [](char c) { return c == ' ' || c == '\t' || c == '\r' || c == '\n'; };
     while (b < e && sp(text[b])) ++b;
     while (e > b && sp(text[e - 1])) --e;
-    if (b == e) return kDefaultSettleSeconds;
+    return text.substr(b, e - b);
+}
+
+// build\linux-settle-seconds: decimal seconds 0..3600 -> milliseconds; blank or anything else gives the default.
+inline unsigned start_settle_ms_from_knob(const std::string& text) {
+    const std::string t = trim_ascii(text);
+    if (t.empty()) return kDefaultSettleMs;
     unsigned long v = 0;
-    for (size_t i = b; i < e; ++i) {
-        if (text[i] < '0' || text[i] > '9') return kDefaultSettleSeconds;
-        v = v * 10 + static_cast<unsigned long>(text[i] - '0');
+    for (char c : t) {
+        if (c < '0' || c > '9') return kDefaultSettleMs;
+        v = v * 10 + static_cast<unsigned long>(c - '0');
         if (v > 3600) v = 3600;
     }
-    return static_cast<unsigned>(v);
+    return static_cast<unsigned>(v * 1000);
+}
+
+// The old behaviour exactly: an explicit 45 in the settle knob.
+inline bool settle_knob_is_legacy(const std::string& text) {
+    const std::string t = trim_ascii(text);
+    return !t.empty() && start_settle_ms_from_knob(t) == kLegacySettleSeconds * 1000 && t.find_first_not_of("0123456789") == std::string::npos;
+}
+
+// build\linux-start-mode: exactly "legacy", case-insensitive, whitespace-trimmed.
+inline bool start_mode_is_legacy(const std::string& text) {
+    std::string t = trim_ascii(text);
+    for (char& c : t) if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+    return t == "legacy";
+}
+
+// Timeout when no present is seen: the settle itself if longer than the default, else the default (a test that sets a
+// 600 s settle to keep the proxy idle is not cut short at 60 s). build\linux-start-timeout-seconds overrides (1..3600).
+inline unsigned start_timeout_ms(const std::string& timeout_knob, unsigned settle_ms) {
+    const std::string t = trim_ascii(timeout_knob);
+    if (!t.empty() && t.find_first_not_of("0123456789") == std::string::npos && t.size() <= 4) {
+        const unsigned long v = std::stoul(t);
+        if (v >= 1 && v <= 3600) return static_cast<unsigned>(v * 1000);
+    }
+    return settle_ms > kDefaultStartTimeoutMs ? settle_ms : kDefaultStartTimeoutMs;
+}
+
+struct StartGateInput {
+    bool window;
+    bool present_seen;
+    unsigned long long now_ms;
+    unsigned long long window_at_ms;
+    unsigned long long present_at_ms;
+    unsigned settle_ms;
+    unsigned timeout_ms;
+    bool trigger;
+};
+enum class StartGateDecision { wait, start_present, start_timeout, start_trigger };
+
+// Trigger wins; else present + settle; else the timeout from the window; else wait. Time going backwards waits.
+inline StartGateDecision start_gate(const StartGateInput& in) {
+    if (in.trigger) return StartGateDecision::start_trigger;
+    if (!in.window || in.now_ms < in.window_at_ms) return StartGateDecision::wait;
+    if (in.present_seen) {
+        const unsigned long long base = in.present_at_ms > in.window_at_ms ? in.present_at_ms : in.window_at_ms;
+        if (in.now_ms >= base + in.settle_ms) return StartGateDecision::start_present;
+    }
+    if (in.now_ms - in.window_at_ms >= in.timeout_ms) return StartGateDecision::start_timeout;
+    return StartGateDecision::wait;
+}
+
+// Number after "key": in the status JSON (first occurrence), for the proxy's session probes.
+inline std::optional<unsigned long long> json_number(const std::string& json, const std::string& key) {
+    const std::string needle = "\"" + key + "\":";
+    size_t at = json.find(needle);
+    if (at == std::string::npos) return std::nullopt;
+    at += needle.size();
+    if (at >= json.size() || json[at] < '0' || json[at] > '9') return std::nullopt;
+    unsigned long long v = 0;
+    for (; at < json.size() && json[at] >= '0' && json[at] <= '9'; ++at) v = v * 10 + static_cast<unsigned long long>(json[at] - '0');
+    return v;
 }
 
 // GameKeys.PrepareConfig (launcher/Probe.cs:550-555): cvars missing from the config, ready to append. r_fullscreen: the game

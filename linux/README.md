@@ -90,13 +90,13 @@ If Steam is not in the default location, pass `--steam-root <dir>` before the co
 1. Start SteamVR and connect the Quest through Steam Link first. SteamVR must be running before the game starts.
 2. Run `linux/d2vr-linux doctor`. All 12 checks should show PASS.
 3. Launch Dishonored 2 from Steam.
-4. At the title screen, either wait 45 seconds (the proxy logs `settle timeout`) or run:
+4. Wait. The proxy starts VR 20 seconds after the game window has a client area (about 21 seconds after launch; the log shows `start (present+settle 20000 ms)`). A flat logo may show until then. To start sooner run:
 
    ```
    linux/d2vr-linux start
    ```
 
-   VR does not start during the logos or loading screens. A `linux-start` file left over from a previous session is ignored.
+   Starts in roughly the first 12 seconds after launch stalled at the menu in the sim rig (docs/VR-START-INVESTIGATION.md), so do not run `start` that early. A `linux-start` file left over from a previous session is ignored. Fallbacks, both as files in the mod home `build` folder: `linux-settle-seconds` with `45` restores the old wait (45 s from the window, no present check; any other number is the settle in seconds), and `linux-start-mode` containing `legacy` forces the old window-plus-delay logic. If no client area is ever seen the proxy starts anyway after 60 s (`linux-start-timeout-seconds` changes this, for tests).
 5. Put the headset on and load your save.
 6. Before quitting the game, run:
 
@@ -115,8 +115,9 @@ Alt-tabbing is safe. At launch the proxy appends `win_pauseOnFocusLoss "0"`, `in
 Logs and artifacts live in the mod home, `<prefix>/drive_c/users/steamuser/AppData/Local/DishonoredVR/artifacts/`:
 
 - `linux-proxy.log` (the previous run is kept as `linux-proxy.previous.log`). **If this file does not exist at all, the proxy never loaded:** check that the launch options contain `WINEDLLOVERRIDES="dinput8=n,b"` and that `dinput8.dll` is in the game folder (`doctor`, check "Proxy"). Lines to look for:
-  - `game window found; waiting for start (trigger or 45 s)`
-  - `start trigger` or `settle timeout`
+  - `game window found; waiting for start (trigger or present + settle 20000 ms, timeout 60000 ms) (t+N ms)`, then `present seen (client WxH)`
+  - `start (present+settle 20000 ms)`, `start trigger`, `start (settle timeout, no present seen)` or (legacy) `settle timeout`
+  - Probe lines, always on: `probe: d3d11.dll loaded` and `probe: dxgi.dll loaded` (t+ms since the process started), and once the session runs `probe: logic_mask A -> B`, `probe: first Present with the mod hooked` and `probe: gameplay true`. Each `autocontinue: posted Enter` line also lists the menu input counters (`native_pad_window_gates` and others, with the change since the previous Enter).
   - `StartProbe begin ...`
   - `StartProbe returned 0` means the VR session ran and ended normally.
   - `StartProbe returned 2` means a previous VR session is still shutting down or restoring the game. Wait a few seconds and run `d2vr-linux start` again.
@@ -162,7 +163,7 @@ Nobody has done this yet. It is the acceptance test for the Linux path. Record t
 
 1. `doctor` shows all 12 PASS with SteamVR running and the Quest connected through Steam Link.
 2. Launch Dishonored 2 from Steam. `linux-proxy.log` shows `game window found`.
-3. At the title screen, wait for `settle timeout` or run `d2vr-linux start`. The log shows `StartProbe begin`, and `artifacts/xr-live-status.json` updates about once a second.
+3. Wait for `start (present+settle ...)` (20 s after the window) or run `d2vr-linux start`. The log shows `StartProbe begin`, and `artifacts/xr-live-status.json` updates about once a second.
 4. The headset shows the game image in both eyes, with no LUID-mismatch error in `xr-recoveries.log` or `dxgi-probe-failure.txt`. If the headset stays dark, copy `xr-recoveries.log` and `linux-proxy.log` into your report.
 5. Head tracking moves the view. Both Touch controllers track, and snap turn works.
 6. Load a save. Gameplay stays responsive after alt-tabbing to a terminal and back. If the game pauses on focus loss in the very first session, note it: the focus settings are written at launch and may only take effect from the next launch.

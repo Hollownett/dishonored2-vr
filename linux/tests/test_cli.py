@@ -196,5 +196,20 @@ class WrapperTests(unittest.TestCase):
         self.assertEqual(r.returncode, 2)
 
 
+
+class SettleHelpTests(unittest.TestCase):
+    def test_settle_help_mentions_new_default(self):
+        parser = cli.build_parser() if hasattr(cli, "build_parser") else None
+        text = parser.format_help() if parser else ""
+        if not parser:
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out), self.assertRaises(SystemExit):
+                cli.main(["sim", "--help"])
+            text = out.getvalue()
+        flat = " ".join(text.split())
+        # The sim parser nests under "sim"; find the --settle paragraph whichever parser was used.
+        self.assertIn("default: 20", flat)
+        self.assertIn("--settle 45 restores the old wait", flat)
+
 if __name__ == "__main__":
     unittest.main()

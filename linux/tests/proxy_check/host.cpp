@@ -55,7 +55,8 @@ int main(int argc, char** argv) {
         input->Release();
         return 4;
     }
-    ShowWindow(hwnd, SW_SHOW);
+    // "minimized" as the second argument: a window with no client area, so the proxy never sees a present.
+    ShowWindow(hwnd, argc > 2 && std::string(argv[2]) == "minimized" ? SW_SHOWMINIMIZED : SW_SHOW);
     UpdateWindow(hwnd);
 
     const std::wstring exit_file = exe_dir() + L"\\host-exit";

@@ -44,7 +44,7 @@ def _parser():
     s.add_argument("--seconds", type=int, default=0, help="session length 10-120 (default: lead + scenario + 6)")
     s.add_argument("--lead", type=float, default=sim.LEAD_SECONDS, help="neutral seconds before the scenario while the save loads (default 75)")
     s.add_argument("--test-save", type=Path, help="savegame folder (SLOT*/profile.bin) to play instead of your saves")
-    s.add_argument("--settle", type=int, default=None, help="proxy settle seconds before the session starts (default: proxy's 45)")
+    s.add_argument("--settle", type=int, default=None, help="proxy settle seconds after the game window has a client area (default: 20; --settle 45 restores the old wait of 45 s from the window with no present check)")
     s.add_argument("--no-autocontinue", dest="autocontinue", action="store_false", help="do not post Enter to the title menus")
     s.add_argument("--autocontinue-delay", type=int, default=10, help="seconds after the session starts before Enter (default 10)")
     s.add_argument("--status-field", action="append", metavar="PATH",

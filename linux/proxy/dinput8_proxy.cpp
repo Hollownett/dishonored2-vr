@@ -284,9 +284,82 @@ bool post_key(int vk) {
     return true;
 }
 
+std::wstring g_artifacts_dir;
+
+// ---------------- start gate signals and session probes (docs/VR-START-INVESTIGATION.md)
+
+// Milliseconds since this process was created, for the probe log lines.
+unsigned long long ms_since_process_start() {
+    FILETIME created{}, exited{}, kernel{}, user{}, now{};
+    if (!GetProcessTimes(GetCurrentProcess(), &created, &exited, &kernel, &user)) return 0;
+    GetSystemTimeAsFileTime(&now);
+    ULARGE_INTEGER a, b;
+    a.LowPart = created.dwLowDateTime, a.HighPart = created.dwHighDateTime;
+    b.LowPart = now.dwLowDateTime, b.HighPart = now.dwHighDateTime;
+    return b.QuadPart > a.QuadPart ? (b.QuadPart - a.QuadPart) / 10000 : 0;
+}
+
+std::wstring at_text() { return L" (t+" + std::to_wstring(ms_since_process_start()) + L" ms)"; }
+
+// The cheap "first present" stand-in: the game window is visible, not minimised, and has a client area. The proxy cannot hook
+// Present itself (the mod does that at StartProbe), so this is the earliest signal it can read without touching D3D.
+bool game_client_size(unsigned& w, unsigned& h) {
+    HWND hwnd = find_game_window();
+    RECT r{};
+    if (hwnd == nullptr || IsIconic(hwnd) || !GetClientRect(hwnd, &r) || r.right <= r.left || r.bottom <= r.top) return false;
+    w = static_cast<unsigned>(r.right - r.left);
+    h = static_cast<unsigned>(r.bottom - r.top);
+    return true;
+}
+
+// Probe: log once when d3d11.dll and dxgi.dll first appear in the process.
+void log_graphics_modules() {
+    static bool d3d = false, dxgi = false;
+    if (!d3d && GetModuleHandleW(L"d3d11.dll") != nullptr) {
+        d3d = true;
+        log_line(L"probe: d3d11.dll loaded" + at_text());
+    }
+    if (!dxgi && GetModuleHandleW(L"dxgi.dll") != nullptr) {
+        dxgi = true;
+        log_line(L"probe: dxgi.dll loaded" + at_text());
+    }
+}
+
+// Probe, one per attempt: poll xr-live-status.json while the attempt runs and log every logic_mask change, the first layer
+// the mod submitted (the first game Present after the hook is in), and gameplay. 250 ms, one file read each.
+DWORD WINAPI session_probe_thread(void*) {
+    try {
+        std::optional<unsigned long long> mask;
+        bool layer = false, gameplay = false;
+        while (g_attempt_active.load()) {
+            std::string status;
+            if (read_file(g_artifacts_dir + L"\\xr-live-status.json", status)) {
+                const auto m = json_number(status, "logic_mask");
+                if (m && (!mask || *m != *mask)) {
+                    log_line(L"probe: logic_mask " + (mask ? num(static_cast<unsigned long>(*mask)) : std::wstring(L"none")) + L" -> " +
+                             num(static_cast<unsigned long>(*m)) + at_text());
+                    mask = m;
+                }
+                const auto layers = json_number(status, "game_layers_submitted");
+                if (!layer && layers && *layers > 0) {
+                    layer = true;
+                    log_line(L"probe: first Present with the mod hooked (game_layers_submitted > 0)" + at_text());
+                }
+                if (!gameplay && status_says_gameplay(status)) {
+                    gameplay = true;
+                    log_line(L"probe: gameplay true" + at_text());
+                }
+            }
+            Sleep(250);
+        }
+    } catch (...) {
+        log_line(L"session probe stopped: unexpected exception");
+    }
+    return 0;
+}
+
 // Opt-in (build\linux-autocontinue): as launcher/Probe.cs Launch does for a game it started, post Enter (title -> Campaign ->
 // Continue, then any load prompt) once the session is up, until the mod reports gameplay. Ends with the attempt.
-std::wstring g_artifacts_dir;
 DWORD WINAPI autocontinue_thread(void* arg) {
     try {
         const unsigned delay = static_cast<unsigned>(reinterpret_cast<ULONG_PTR>(arg));
@@ -313,7 +386,19 @@ DWORD WINAPI autocontinue_thread(void* arg) {
                 mask.clear();
                 for (size_t k = mask_at + 13; k < status.size() && status[k] >= '0' && status[k] <= '9'; ++k) mask += static_cast<wchar_t>(status[k]);
             }
-            log_line(L"autocontinue: posted Enter " + num(static_cast<unsigned long>(i + 1)) + L" (logic_mask " + mask + L")");
+            // Probe: does the menu input path see the key? Counters from the status file and their change since the last Enter.
+            static const char* const kInput[] = {"native_pad_window_gates", "native_pad_poll_gates", "native_joystick_wakeups",
+                                                 "native_menu_button_events", "native_controller_reads"};
+            static unsigned long long previous[5] = {};
+            std::wstring seen;
+            for (int k = 0; k < 5; ++k) {
+                const auto v = json_number(status, kInput[k]);
+                const unsigned long long now_v = v ? *v : 0;
+                seen += L" " + from_utf8(kInput[k]) + L"=" + num(static_cast<unsigned long>(now_v)) + L"(+" +
+                        num(static_cast<unsigned long>(now_v >= previous[k] ? now_v - previous[k] : 0)) + L")";
+                previous[k] = now_v;
+            }
+            log_line(L"autocontinue: posted Enter " + num(static_cast<unsigned long>(i + 1)) + L" (logic_mask " + mask + L")" + seen + at_text());
             for (int w = 0; w < 40; ++w) {
                 if (!g_attempt_active.load()) return 0;
                 Sleep(100);
@@ -398,9 +483,15 @@ void run_worker() {
     else
         log_line(L"cannot start the stop watcher (error " + num(GetLastError()) + L")");
 
-    std::string knob;
+    std::string knob, mode_text, timeout_text;
     read_file(build + L"\\" + kSettleKnob, knob);
-    const unsigned settle = settle_seconds_from_knob(knob);
+    read_file(build + L"\\" + kStartModeKnob, mode_text);
+    read_file(build + L"\\" + kStartTimeoutKnob, timeout_text);
+    // The old wait (window + 45 s, no present gate) comes back with linux-start-mode=legacy or linux-settle-seconds=45.
+    const bool legacy = start_mode_is_legacy(mode_text) || settle_knob_is_legacy(knob);
+    const unsigned settle_ms = start_settle_ms_from_knob(knob);
+    const unsigned legacy_ms = knob.empty() || trim_ascii(knob).empty() ? kLegacySettleSeconds * 1000 : settle_ms;
+    const unsigned timeout_ms = legacy ? legacy_ms : start_timeout_ms(timeout_text, settle_ms);
 
     bool first_session = true;  // only the first session may start on the settle timeout
     HMODULE mod = nullptr;
@@ -408,22 +499,54 @@ void run_worker() {
     ModExports ex;
     for (;;) {
         g_attempt_active.store(false);
-        while (!game_window_present()) Sleep(500);
+        for (;;) {
+            log_graphics_modules();
+            if (game_window_present()) break;
+            Sleep(500);
+        }
         const ULONGLONG found_at = GetTickCount64();
+        log_graphics_modules();
         if (first_session)
-            log_line(L"game window found; waiting for start (trigger or " + num(settle) + L" s)");
+            log_line(L"game window found; waiting for start (trigger or " +
+                     (legacy ? L"legacy settle " + num(timeout_ms) + L" ms" : L"present + settle " + num(settle_ms) + L" ms, timeout " + num(timeout_ms) + L" ms") +
+                     L")" + at_text());
         else
             log_line(L"waiting for start (trigger)");
+        bool present_seen = false;
+        ULONGLONG present_at = 0;
+        unsigned pw = 0, ph = 0;
+        bool prev_client = false;
+        ULONGLONG last_poll = 0;
         for (;;) {
-            if (DeleteFileW(start_trigger.c_str())) {
-                log_line(L"start trigger");
+            const ULONGLONG now = GetTickCount64();
+            if (first_session && !legacy && !present_seen && now - last_poll >= 500) {
+                last_poll = now;
+                const bool client = game_client_size(pw, ph);
+                if (client && prev_client) {  // two consecutive polls 500 ms apart
+                    present_seen = true;
+                    present_at = now;
+                    log_line(L"present seen (client " + num(pw) + L"x" + num(ph) + L")" + at_text());
+                }
+                prev_client = client;
+            }
+            const bool trigger = DeleteFileW(start_trigger.c_str()) != 0;
+            // Later sessions start only on the trigger: window_at is kept but the timeout is out of reach.
+            StartGateInput in{true, present_seen, now, found_at, present_at, settle_ms, first_session ? timeout_ms : 0xFFFFFFFFu, trigger};
+            if (!first_session) in.present_seen = false;
+            const StartGateDecision d = start_gate(in);
+            if (d == StartGateDecision::start_trigger) {
+                log_line(L"start trigger" + at_text());
                 break;
             }
-            if (first_session && GetTickCount64() - found_at >= static_cast<ULONGLONG>(settle) * 1000) {
-                log_line(L"settle timeout");
+            if (d == StartGateDecision::start_present) {
+                log_line(L"start (present+settle " + num(settle_ms) + L" ms)" + at_text());
                 break;
             }
-            Sleep(500);
+            if (d == StartGateDecision::start_timeout) {
+                log_line(legacy ? L"settle timeout" + at_text() : L"start (settle timeout, no present seen)" + at_text());
+                break;
+            }
+            Sleep(100);
         }
         first_session = false;
         g_attempt_active.store(true);
@@ -487,7 +610,9 @@ void run_worker() {
         for (const wchar_t* stale : {L"dxgi-probe-failure.txt", L"dxgi-probe-result.json", L"xr-live-status.json"})
             DeleteFileW((artifacts + L"\\" + stale).c_str());
 
-        log_line(L"StartProbe begin " + dll);
+        log_line(L"StartProbe begin " + dll + at_text());
+        g_artifacts_dir = artifacts;
+        if (HANDLE t = CreateThread(nullptr, 0, session_probe_thread, nullptr, 0, nullptr)) CloseHandle(t);
         {
             std::string knob_text;
             if (read_file(build + L"\\" + kAutoContinueKnob, knob_text)) {
