@@ -244,3 +244,30 @@ Counters from the same run (6901 frames):
 | `arm_upload_observer` (hook on the native arm palette consumer; 45.5 uploads/frame, reads rig memory under `arm_log_mutex`; CSV of 100 samples per side then stops) | 3.5 us/call, **0.16 ms/frame** | none | yes: tracked arms and the body avatar use the same hook and need it |
 
 None of the three is a meaningful share of the frame: about 0.3 ms of render-thread CPU and 0.03 ms of GPU together. They are not the cause of the fixed GPU time and removing them is not a frame-rate lever. The CPU numbers are wall time inside the hook on a loaded render thread, so treat them as upper bounds.
+
+## Anti-aliasing modes compared (plan G Task 2): the default stays FSR 3 Native
+
+Measured 2026-10-21 on the sim rig (throughput without a compositor, at the sim's own 1912x1046 resolution, not headset fps). Candidate: HEAD 9868024 as `d2vr_render_probe_arm_v600.dll` (SHA-256 `93c76bd5907f91e271190097358ba44c3b8415c639c3fca4a18827b064ec66c4`), scenario `oil_tank_drop`, `--lead 28 --seconds 120`, `--knob native-gpu-timing --vr-setting temporal_aa=N`. NVIDIA RTX 3070 Laptop, `fsr4.off`, `carry-trace`, `full-body` in `build/` for every run. The installed DLL (`ff0daf65...bc927`) was verified unchanged after every run. FSR 4 (modes 5, 6) is RDNA4-only and was not run.
+
+"List sum" is the sum of the p50 per-phase native command-list times; "total GPU" adds the mod's own GPU work (FSR plus sharpen, copies, overlays), which is where the FSR cost sits.
+
+| Mode | Run | interval p50 / p95 (ms) | FSR GPU per eye (ms) | list sum (ms) | total GPU (ms) | Image |
+| --- | --- | --- | --- | --- | --- | --- |
+| 0 off (SMAA row only) | 20261021T180453 | 13.88 / 14.97 | 0 | 13.31 | 13.52 | stair-stepped edges, otherwise clean |
+| 1 game TAA | 20261021T180757 | 13.79 / 15.14 | 0 | 13.21 | 13.42 | slightly smoother than 0, diagonals still stepped |
+| 1 game TAA (repeat) | 20261021T181924 | 13.81 / 14.94 | 0 | 13.27 | 13.48 | same |
+| 2 FSR 3 Native (default) | 20261021T180143 | 14.00 / 17.39 | 1.03 / 1.05 | 11.49 | 13.77 | smoothest edges, clean |
+| 2 FSR 3 Native (repeat) | 20261021T182230 | 13.84 / 15.20 | 1.04 / 1.05 | 11.24 | 13.53 | same |
+| 3 FSR 3 Quality (77%) | 20261021T181101 | 14.33 / 15.68 | 0.79 / 0.79 | 12.25 | 14.03 | grainy speckle on flat surfaces, coloured fringes on dark edges |
+| 4 FSR 3 Balanced (67%) | 20261021T181405 | 14.08 / 15.24 | 0.72 / 0.72 | 12.11 | 13.76 | grainy speckle, soft and smeared edges |
+
+What it shows:
+
+- The sim interval is about 14 ms for every mode (13.8 to 14.3 p50). The sim GPU is saturated near 14 ms whatever the mode, so the interval cannot rank them, and the repeats show a run-to-run spread of about 0.2 ms p50 (and one 17.4 ms p95 outlier in mode 2 that did not repeat).
+- The mod's FSR pass costs 1.04 ms per eye here, but FSR 3 Native replaces the game's own TAA passes, so the list sum falls by 1.7 ms. Net, game TAA saves only 0.1 to 0.35 ms of total GPU per frame in the sim (13.45 against 13.65 averaged over the two runs each), inside the noise. At headset resolution (2.84 ms per eye measured for FSR) both sides scale up, but the sim cannot say by how much the net changes; only the headset can.
+- Quality and Balanced render fewer pixels but cost more total GPU in the sim (14.03 and 13.76 ms) and look visibly worse (grain and fringing), so they are not a cheaper default.
+- Off and game TAA are not clearly cheaper than FSR 3 Native and leave visibly stepped edges.
+
+Choice: the default stays FSR 3 Native (`temporal_aa=2`). By the rule (the cheapest mode whose image is not visibly broken, and game TAA wins only if it is clearly cheaper) no mode beat it by more than the noise. No source default was changed.
+
+Caveats: one still frame per mode cannot show temporal shimmer or ghosting, which is what AA is for in VR; the stills only judge edge quality. The viewpoint was identical across the five runs. To test game TAA in the headset (the only place its real saving shows), pick it in the VR settings panel (see PLAYING.md); a one-run A/B of modes 1 and 2 there is the open question.

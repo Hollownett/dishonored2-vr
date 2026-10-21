@@ -91,6 +91,14 @@ Settings are saved for the next session.
 The current launch profile uses FSR 3 Native. Resolution, movement, snap angle,
 smooth-turn speed, HUD size and monitor-view preferences were preserved.
 
+Anti-aliasing default: FSR 3 Native stays the default. On the sim rig no mode
+(Off, Game TAA, FSR Quality, FSR Balanced) was measurably cheaper than it, and
+Quality and Balanced looked visibly grainier; see "Anti-aliasing modes compared"
+in docs/VR-PERF-LAPTOP.md. A saved `vr-settings.cfg` keeps your own choice. To
+change it, open the VR settings panel in the headset and cycle the anti-aliasing
+row (Game TAA, FSR Native, Quality, Balanced, Off); the choice is saved for the
+next session. Game TAA is the one worth trying if FSR Native costs too much in your headset.
+
 ## What changes in the game while VR is on
 These change only while VR is on, and are restored on exit:
 - camera bob and shake, camera motion blur, depth of field and dynamic resolution are switched off;
