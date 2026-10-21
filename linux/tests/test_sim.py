@@ -1213,6 +1213,25 @@ class Pure(unittest.TestCase):
         with self.assertRaises(sim.SimError):
             sim.scenario_segments("../x", 0)
 
+    def test_crouch_walk_compiles(self):
+        segments = sim.scenario_segments("crouch_walk", 28000)
+        text, cfg = sim.compile_script(segments, 120)
+        self.assertTrue(cfg.startswith("D2VR_GAMEPLAY_SCRIPT 6 120000 "))
+        prev = 0
+        for s in segments:
+            self.assertLessEqual(prev, s["start_ms"])
+            self.assertLess(s["start_ms"], s["end_ms"])
+            prev = s["end_ms"]
+        self.assertEqual(prev, 28000 + 90000)
+        gameplay = [s for s in segments if s.get("when", "gameplay") == "gameplay" and s["start_ms"] >= 28000]
+        walking = [s for s in gameplay if s["input"].get("move_y")]
+        crouched = [s for s in gameplay if s["head_pose"][1] < 1.4]
+        self.assertEqual(len(crouched), 3)
+        self.assertEqual(walking[0]["start_ms"], 28000)
+        self.assertEqual(walking[-1]["end_ms"], 28000 + 10000 + 3 * 5000)
+        self.assertEqual(gameplay[-1]["input"]["move_y"], 0.0)
+        self.assertLessEqual(prev, 120000)
+
     def test_idle_compiles(self):
         segments = sim.scenario_segments("idle", 30000)
         text, cfg = sim.compile_script(segments, 120)

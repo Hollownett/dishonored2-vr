@@ -176,6 +176,11 @@ Weapons are held like real objects: a weapon stays in your hand only while you s
   only your head. The scene's heading is held and re-aimed only when the game turns by 30 degrees or more (status
   `comfort.authored_snaps` counts those). Not yet confirmed in the headset. Put `legacy-authored-camera` in the build
   folder for the old behaviour (the game's camera rotation, with the slightly wider field of view).
+- Camera height smoothing: landings, crouching and stairs no longer jolt the view. The game camera's vertical motion is
+  eased (about 0.12 s) and limited to 1.5 m/s; horizontal motion is untouched, a real fall (over 3 m/s for 0.1 s) passes
+  straight through, and a teleport, loading or time hitch resets it (status `comfort.smoother_resets`; `comfort.view_jerk_events`
+  vs `comfort.anchor_jerk_events` compares the smoothed and raw height). Not yet confirmed in the headset. Put
+  `no-camera-smoothing` in the build folder for the old behaviour.
 
 The v199 build passed automated and actual-game simulated-controller checks.
 Headset appearance, combat feel, note readability and complete gameplay have not

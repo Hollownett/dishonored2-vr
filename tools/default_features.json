@@ -128,6 +128,14 @@
    "label": "Headset owns the view in takedowns and scenes",
    "help": "During takedowns and scripted scenes the view follows your head instead of the game's spinning camera.",
    "default": true
+  },
+  {
+   "id": "camera-smoothing",
+   "file": "no-camera-smoothing",
+   "kind": "disable",
+   "label": "Smooth the camera's up-and-down motion",
+   "help": "Landings, crouching and stairs ease the view height instead of jolting it; falls and teleports still follow exactly.",
+   "default": true
   }
  ]
 }

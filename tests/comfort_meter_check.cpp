@@ -28,6 +28,15 @@ int main(){
      assert(field(j,"view_yaw_events")>0 && field(j,"unrequested_yaw_events")==0 && field(j,"unrequested_yaw_rate_peak")==0);}
     {ComfortMeter m;for(int i=0;i<90;++i) m.feed(S(i*dt,0,2.*i*dt));const auto j=m.json();
      assert(field(j,"view_yaw_events")>0 && field(j,"unrequested_yaw_events")>0);}
+    {ComfortMeter m;ComfortSample a;for(int i=0;i<60;++i){const double t=i*dt;double z=0;
+        if(t>=.2&&t<.25) z=-.1*(t-.2)/.05; else if(t>=.25) z=-.1;
+        a=S(t,z);a.view_pos={0,0,0};a.has_view=true;m.feed(a);} // smoothed view stays flat while the raw anchor jerks
+     const auto j=m.json();assert(field(j,"anchor_jerk_events")>=1 && field(j,"view_jerk_events")==0 && field(j,"view_v_peak")==0);
+     ComfortMeter n;n.set_smoother_resets(4);assert(field(n.json(),"smoother_resets")==4);
+     ComfortMeter r;for(int i=0;i<60;++i){const double t=i*dt;double z=0;
+        if(t>=.2&&t<.25) z=-.1*(t-.2)/.05; else if(t>=.25) z=-.1;
+        a=S(t,z);a.view_pos={0,0,z};a.has_view=true;r.feed(a);}
+     assert(field(r.json(),"view_jerk_events")==field(r.json(),"anchor_jerk_events"));}
     assert(!has(ComfortMeter{}.json(),"e+"));
     {ComfortMeter m;assert(field(m.json(),"authored_snaps")==0);m.set_authored_snaps(3);assert(field(m.json(),"authored_snaps")==3);}
     {ComfortMeter m;m.feed(S(0,0,3.14));m.feed(S(dt,0,-3.14));assert(field(m.json(),"view_yaw_events")==0);} // wrap

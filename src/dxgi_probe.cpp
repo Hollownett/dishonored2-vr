@@ -47,6 +47,7 @@
 #include "finger_snapshot.hpp"
 #include "prop_watch.hpp"
 #include "carry_diagnostics.hpp"
+#include "anchor_smoother.hpp"
 #include "comfort_meter.hpp"
 #include "perf_meter.hpp"
 #include "frame_split.hpp"
@@ -367,6 +368,7 @@ static std::atomic<std::int64_t> frame_split_prev_enter_ns{}; // Present thread 
 static d2vr::FrameSplitTrace frame_split_trace;static std::mutex frame_split_trace_file_mutex;static std::ofstream frame_split_trace_file;
 static std::string frame_split_adapter_json; // written once from the swap chain's adapter; guarded by frame_split_mutex
 static d2vr::PerfMeter perf_meter;static std::mutex perf_meter_mutex; // fed on the render thread, read by the status writer
+static d2vr::AnchorSmoother anchor_smoother;static bool camera_smoothing_enabled=true;static std::uint64_t anchor_smooth_frame=~0ull;static double anchor_smooth_z=0,anchor_smooth_t=0; // build/no-camera-smoothing; render thread only (prepare_head_view). The z smoothed for anchor_smooth_frame, shared by both eyes, the authored view and the audio listener.
 static d2vr::ComfortMeter comfort_meter;static std::mutex comfort_mutex; // fed by the render thread, read by the status writer
 static d2vr::CarryDiagnostics carry_diagnostics;static d2vr::CarryTraceWriter carry_trace;
 static d2vr::CorpseDiagnostics corpse_diagnostics;static d2vr::CorpseTraceWriter corpse_trace;   // F4: zero until the corpse grab (Tasks 10-12) notes into it
@@ -3881,6 +3883,20 @@ void prepare_head_view(void* view) noexcept {
             if(!frozen) {native_audio_listener.clear();native_left_aim.clear();native_weapon_attachment.clear();return;}
             source_anchor=*frozen;
         } else authored_camera_anchor.clear();
+        const std::array<float,3> raw_anchor_position{source_anchor.position[0],source_anchor.position[1],source_anchor.position[2]};
+        if(camera_smoothing_enabled) { // vertical only, once per frame: both eyes, the authored view and the listener share the value
+            if(anchor_smooth_frame!=frames.load()) {
+                static LARGE_INTEGER smooth_freq{};if(!smooth_freq.QuadPart) QueryPerformanceFrequency(&smooth_freq);
+                LARGE_INTEGER smooth_now{};QueryPerformanceCounter(&smooth_now);
+                const double smooth_t=static_cast<double>(smooth_now.QuadPart)/static_cast<double>(smooth_freq.QuadPart);
+                constexpr double units_per_metre=1.0; // game units per metre (1 today, as in every other anchor conversion here)
+                const auto smoothed=anchor_smoother.update({raw_anchor_position[0]/units_per_metre,raw_anchor_position[1]/units_per_metre,raw_anchor_position[2]/units_per_metre},
+                    smooth_t-anchor_smooth_t,head_pose_epoch);
+                anchor_smooth_t=smooth_t;anchor_smooth_frame=frames.load();
+                anchor_smooth_z=std::isfinite(smoothed.z)?smoothed.z*units_per_metre:static_cast<double>(raw_anchor_position[2]);
+            }
+            source_anchor.position[2]=static_cast<float>(anchor_smooth_z);
+        }
         const auto compensation=native_turning_requested?native_turning.head_compensation(game_xr->reference_epoch()):0;
         auto anchor_state=*body;
         if(action.combat && !authored_camera) {
@@ -3907,11 +3923,12 @@ void prepare_head_view(void* view) noexcept {
             const bool comfort_turning=native_turning_requested && comfort_t-comfort_turn_t<.15;
             if(!legacy_authored_camera) {authored_heading_now=authored_heading.update(source_anchor,authored_camera,head_pose_epoch);authored_heading_frame=frames.load();}
             std::lock_guard<std::mutex> comfort_lock(comfort_mutex);
-            comfort_meter.set_authored_snaps(authored_heading.snaps());
+            comfort_meter.set_authored_snaps(authored_heading.snaps());comfort_meter.set_smoother_resets(anchor_smoother.resets());
             comfort_meter.feed({static_cast<double>(comfort_now.QuadPart)/static_cast<double>(comfort_freq.QuadPart),
-                {source_anchor.position[0],source_anchor.position[1],source_anchor.position[2]},
+                {raw_anchor_position[0],raw_anchor_position[1],raw_anchor_position[2]},
                 std::atan2(static_cast<double>(anchor.basis[1]),static_cast<double>(anchor.basis[0])),
-                d2vr::tracked_yaw(centre_pose.orientation,head_origin.orientation),authored_camera,comfort_turning});
+                d2vr::tracked_yaw(centre_pose.orientation,head_origin.orientation),authored_camera,comfort_turning,
+                {source_anchor.position[0],source_anchor.position[1],source_anchor.position[2]},true});
         }
         // 6DoF: physical head motion moves the render camera within a comfortable
         // volume around the calibrated origin; hands shift by the same offset so
@@ -8288,6 +8305,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
         projection_jitter=!fs::exists(root/L"build"/L"no-projection-jitter");
         hold_y_menu_enabled=!fs::exists(root/L"build"/L"no-hold-y-menu");
         legacy_authored_camera=fs::exists(root/L"build"/L"legacy-authored-camera");authored_heading.reset();authored_heading_now.reset();
+        camera_smoothing_enabled=!fs::exists(root/L"build"/L"no-camera-smoothing");anchor_smoother.reset();anchor_smooth_frame=~0ull;
         taa_mv_dejitter.enabled=!fs::exists(root/L"build"/L"no-taa-mv-dejitter");
         vr_combat_enabled=!fs::exists(root/L"build"/L"legacy-combat");vr_combat.reset();
         assassination_receipt_requested=head_requested && fs::exists(root/L"build"/L"assassination-receipts");
