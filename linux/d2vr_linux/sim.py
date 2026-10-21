@@ -571,16 +571,43 @@ def summarize(status_file, fields):
 
 # ---------------------------------------------------------------- the run
 
+def session_lock_state(run=subprocess.run, environ=os.environ):
+    """True if the desktop session is locked, False if not, None if neither tool answered. A locked GNOME session
+    throttles the game window to ~1 fps, so the menu key presses never land and the run fails after minutes."""
+    def ask(argv):
+        try:
+            r = run(argv, capture_output=True, text=True, timeout=5)
+        except (OSError, subprocess.SubprocessError):
+            return None
+        return r.stdout if r.returncode == 0 else None
+    sid = environ.get("XDG_SESSION_ID")
+    if sid:
+        out = ask(["loginctl", "show-session", sid, "-p", "LockedHint"])
+        if out and "LockedHint=" in out:
+            return "LockedHint=yes" in out
+    out = ask(["gdbus", "call", "--session", "--dest", "org.gnome.ScreenSaver", "--object-path",
+               "/org/gnome/ScreenSaver", "--method", "org.gnome.ScreenSaver.GetActive"])
+    if out and "true" in out.lower():
+        return True
+    if out and "false" in out.lower():
+        return False
+    return None
+
+
 class Env:
     """Everything the run touches outside the filesystem, injectable for tests."""
 
     def __init__(self, proc_root=Path("/proc"), sleep=time.sleep, clock=time.monotonic, launch=None, kill=os.kill,
-                 out=None):
+                 out=None, lock_probe=None):
         self.proc_root, self.sleep, self.clock, self.kill = Path(proc_root), sleep, clock, kill
         self.launch = launch or self._launch
+        self.lock_probe = lock_probe or self._lock_probe
         self.out = out or (lambda s: print(s, flush=True))
         self.steam_cmd = DEFAULT_STEAM_CMD
         self.close_timeout = 30.0
+
+    def _lock_probe(self):
+        return session_lock_state()
 
     def _launch(self):
         subprocess.Popen(shlex.split(self.steam_cmd), stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
@@ -705,6 +732,12 @@ def _plan(a, home, env):
     bad = conflicts(env.proc_root)
     if bad:
         raise SimError("refusing to run: " + "; ".join(bad) + ". Close it first; the sim rig never touches a running session.")
+    if not a.dry_run:
+        locked = env.lock_probe()
+        if locked:
+            raise SimError("session is locked; unlock before running")
+        if locked is None:
+            env.out("[sim] warning: cannot tell whether the session is locked (no loginctl / gdbus answer); continuing")
     pend = pending_backups(a.backup_root)
     if pend:
         raise SimError(f"an earlier sim run left your saves swapped (restore-pending in {pend[0]}); "

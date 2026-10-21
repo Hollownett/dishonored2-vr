@@ -1,5 +1,6 @@
 import contextlib
 import io
+import subprocess
 import json
 import os
 import signal
@@ -59,6 +60,7 @@ class Case(unittest.TestCase):
             raise AssertionError("a test reached the real Steam launcher; inject a fake with env=self.env(launch=...)")
 
         for target in (unittest.mock.patch.object(sim.Env, "_launch", real_launcher),
+                       unittest.mock.patch.object(sim.Env, "_lock_probe", lambda self: False),
                        unittest.mock.patch.object(sim.subprocess, "Popen", real_launcher)):
             target.start()
             self.addCleanup(target.stop)
@@ -85,6 +87,41 @@ class Case(unittest.TestCase):
 
 
 class Safety(Case):
+    def test_refuses_when_session_locked(self):
+        e = self.env(launch=lambda: None)
+        e.lock_probe = lambda: True
+        rc, out, err = self.run_cli(env=e)
+        self.assertEqual(rc, 1)
+        self.assertIn("session is locked; unlock before running", err)
+        self.assertFalse(self.backups.exists())
+
+    def test_locked_session_does_not_stop_a_dry_run(self):
+        e = self.env(launch=lambda: None)
+        e.lock_probe = lambda: True
+        rc, out, err = self.run_cli("--dry-run", env=e)
+        self.assertEqual(rc, 0, err)
+
+    def test_unknown_lock_state_warns_and_continues(self):
+        e = self.env(launch=lambda: None)
+        e.lock_probe = lambda: None
+        rc, out, err = self.run_cli("--dry-run", env=e)
+        self.assertEqual(rc, 0, err)
+
+    def test_lock_state_from_tools(self):
+        def fake(table):
+            def run(argv, **_k):
+                key = argv[0]
+                if key not in table:
+                    raise FileNotFoundError(key)
+                return subprocess.CompletedProcess(argv, 0, table[key], "")
+            return run
+        sid = {"XDG_SESSION_ID": "3"}
+        self.assertTrue(sim.session_lock_state(fake({"loginctl": "LockedHint=yes\n"}), sid))
+        self.assertFalse(sim.session_lock_state(fake({"loginctl": "LockedHint=no\n"}), sid))
+        self.assertTrue(sim.session_lock_state(fake({"gdbus": "(true,)\n"}), {}))
+        self.assertFalse(sim.session_lock_state(fake({"gdbus": "(false,)\n"}), sid))
+        self.assertIsNone(sim.session_lock_state(fake({}), sid))
+
     def test_refuses_when_game_running(self):
         fake_proc(self.proc, 4242, "Dishonored2.exe", ["Z:\\game\\Dishonored2.exe"])
         rc, out, err = self.run_cli("--dry-run")
