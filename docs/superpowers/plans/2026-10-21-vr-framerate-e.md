@@ -146,6 +146,33 @@ Also modify `tools/build-msvc.cmd`.
   - `over_budget` = interval p50 > 13.9.
 - [ ] **Step 4: Verify** that the installed DLL hash is unchanged and that no pending marker or knob is left. Commit `docs: plan E bound analysis on the laptop`.
 
+## Task 3b: GPU phase attribution: where the fixed GPU time goes (added 2026-10-21)
+
+Why: on the laptop the GPU sits at its power cap with memory activity at 100% and SM at 75-80%. About 11.9 ms of native-list GPU time per frame does not shrink with render resolution (Task 3), with shadow, LOD and decal cvars (plan D Task 9), and only drops by 2.5 ms with one view (Task 5a). So roughly 9 ms of GPU work per frame does not depend on views, resolution or shadows. Before anything can be cut, we need to know what that work is.
+
+**Files:** Modify `src/native_list_gpu_timer.hpp`, `src/frame_split.hpp`, `src/dxgi_probe.cpp` (the list-timer call site ~5854, the eye-begin hook, and the mod's own GPU work: FSR dispatch, eye copies, `native_eye_capture`, overlay draws), and `tools/perf_bound_report.py`. Add tests.
+
+**Interfaces:**
+- Each timed native command list is tagged with the frame phase it was executed in:
+  - `pre`: after the previous Present, before the eye-0 begin;
+  - `eye0`: eye-0 begin until eye-1 begin;
+  - `eye1`: eye-1 begin until Present enter;
+  - `hook`: inside the Present hook.
+  The tag is taken on the CPU when `ExecuteCommandList` is called. The GPU duration comes from the existing timestamp pairs.
+- Per frame, sum the GPU durations per phase, plus the list count per phase. Add `"gpu_phase_ms_p50":{"pre","eye0","eye1","hook"}` and `"gpu_phase_lists_p50":{...}` to `frame_split.split`.
+- The mod's own GPU work is timed with timestamp pairs around:
+  - the FSR dispatch per eye (the existing fsr_gpu columns can be reused);
+  - the eye copy (`CopyResource` to the swapchain);
+  - the `native_eye_capture` and `arm_upload_observer` copies;
+  - the overlay draws (HUD, wrists, vignette).
+  Report these as `"mod_gpu_ms_p50":{...}`. Use DONOTFLUSH polling only, as the existing timers do, with no stalls.
+- `perf_bound_report.py` prints the phase sums and mod GPU sums per row.
+
+- [ ] **Step 1: Tests.** Phase tagging with known stamps (`list_before_eye0_is_pre`, `list_between_eyes_is_eye0`, `list_after_eye1_is_eye1`, `list_in_hook_is_hook`), per-phase sums over a window, and the report's printing.
+- [ ] **Step 2: Implement.** Make the tests green, then run the full harness.
+- [ ] **Step 3: One sim run** (`oil_tank_drop`, `--lead 28 --seconds 120`, `--knob native-gpu-timing`) on the laptop. Write the phase table into `docs/VR-PERF-LAPTOP.md` under "GPU phase attribution", with one paragraph naming the dominant phase and what is known to run in it (findings §1, the RVAs). Also write which probe diagnostics in the user's real `dxgi-probe.cfg` (`native_eye_capture`, `eye_boundary`, `arm_upload_observer`) cost GPU or CPU every frame, and whether each is needed for normal play.
+- [ ] **Step 4: Commit** `perf(diag): GPU time per frame phase and the mod's own GPU work`.
+
 ## Task 4: Cut the mod's own render-thread cost
 
 **Files:**
