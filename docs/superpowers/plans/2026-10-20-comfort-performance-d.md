@@ -124,6 +124,34 @@ Modified:
 - [ ] **Step 4: Baseline run on the sim rig:** `linux/d2vr-linux sim --scenario idle --seconds 90 --status-field comfort` (and the walking scenario, if one exists: `ls tools/linux/scenarios`). Paste the block into the commit message as the "before" numbers.
 - [ ] **Step 5: Mutation:** drop the authored accumulation; `authored_time_accumulates` must fail. Restore. Full harness, then commit `feat: comfort telemetry (authored time, anchor jerk, view yaw rate)`.
 
+## Task 1b: Sim rig runs a candidate DLL without touching the user's install, plus an idle scenario (R4 tooling)
+
+Added 2026-10-21 (ledger ruling): the sim rig runs whatever DLL is installed in the user's mod home, so a new build could not be measured without changing the user's install.
+
+**Files:** Modify `linux/d2vr_linux/sim.py`, `linux/d2vr_linux/cli.py`, `linux/tests/test_sim.py`, `linux/README.md` (section on the sim rig). Create `tools/linux/scenarios/idle.py`.
+
+**Interfaces:**
+- `d2vr-linux sim --candidate-dll PATH`:
+  - Before the launch it checks that PATH is a PE DLL whose name matches the DLL the mod home uses (read the same marker or manifest the installer uses).
+  - It copies the installed DLL to `<backup-root>/<run-id>/installed-<name>` and verifies the copy by SHA-256.
+  - It then places the candidate in the mod home atomically.
+  - After the run it always restores the original: in a `finally`, through the same guard the saves and knobs use, verified by SHA-256.
+  - On restore failure it prints the exact manual command and exits non-zero.
+  - `--dry-run` prints the plan, including both hashes.
+  - `--restore` also restores a DLL left by an interrupted run (the backup records it).
+- `tools/linux/scenarios/idle.py`: `build(lead_ms) -> list[dict]` with the same segment format as `oil_tank_drop.py`. It runs the neutral lead-in with A pulses on menus only, then 90 s of standing still. The head yaws ±20° slowly over 10 s and pitches ±10°; there is no stick input.
+
+- [ ] **Step 1: Failing tests** in `linux/tests/test_sim.py`:
+  - `test_candidate_dll_swapped_and_restored` (fake mod home: after run, installed bytes equal the original);
+  - `test_candidate_restored_after_launch_failure`;
+  - `test_candidate_wrong_name_refused`;
+  - `test_restore_recovers_interrupted_candidate`;
+  - `test_dry_run_prints_hashes`;
+  - `test_idle_compiles` (monotonic segments, last end ≤ 120000, no stick input in gameplay segments).
+- [ ] **Step 2: Implement**, run `python3 -m unittest linux.tests.test_sim`, green.
+- [ ] **Step 3: Real run, only if the game and SteamVR are not running** (the rig refuses otherwise; never kill them). Build the current candidate with the harness, then run `linux/d2vr-linux sim --scenario idle --candidate-dll <harness output dll> --status-field comfort`. Write the `comfort` block into `docs/VR-PERF-LAPTOP.md` (create it with a "Comfort baseline" section) as the plan-D "before" numbers. Check afterwards that the installed DLL hash equals the pre-run hash. If the rig cannot run, record "baseline outstanding: <reason>".
+- [ ] **Step 4: Commit** `feat(linux): sim rig runs a candidate DLL and restores the install; idle scenario`.
+
 ## Task 2: The head owns rotation in authored scenes (R1)
 
 **Files:** Create `src/authored_view.hpp`, `tests/authored_view_check.cpp`. Modify `src/dxgi_probe.cpp` (~4735-4741 and the authored FOV ~3814: the +5% widening is kept only with `legacy-authored-camera`), `docs/PLAYING.md`, `tools/build-msvc.cmd`.
