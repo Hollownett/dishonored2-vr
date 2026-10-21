@@ -1246,6 +1246,28 @@ class Pure(unittest.TestCase):
         swing = [s for s in segments if s.get("start_ms", 0) >= 28000 + 5500 and s.get("end_ms", 0) <= 28000 + 5800]
         self.assertEqual(len(swing), 6)   # the swing at the floor is 0.3 s: fast enough to throw, not drop
 
+    def test_sword_sweep_compiles(self):
+        segments = sim.scenario_segments("sword_sweep", 28000)
+        text, cfg = sim.compile_script(segments, 120)
+        self.assertTrue(cfg.startswith("D2VR_GAMEPLAY_SCRIPT "))
+        prev = 0
+        for s in segments:
+            self.assertLessEqual(prev, s["start_ms"])
+            self.assertLess(s["start_ms"], s["end_ms"])
+            prev = s["end_ms"]
+        self.assertLessEqual(prev, 120000)
+        self.assertLessEqual(len(segments), 128)
+        sweeps = [s for s in segments if s["start_ms"] >= 28000 and "right_hand_offset" in s]
+        self.assertTrue(all(not s["input"].get("right_grip") for s in sweeps))  # nothing is grabbed
+        # the slow phase stays under the 3 m/s slash speed and the fast phase passes it
+        def speed(seg_a, seg_b):
+            dx = abs(seg_b["right_hand_offset"][0] - seg_a["right_hand_offset"][0])
+            return dx / ((seg_b["end_ms"] - seg_a["end_ms"]) / 1000.)
+        slow = [speed(sweeps[i], sweeps[i + 1]) for i in range(1, 10)]
+        fast = [speed(sweeps[i], sweeps[i + 1]) for i in range(len(sweeps) - 20, len(sweeps) - 10)]
+        self.assertLess(max(slow), 1.2)
+        self.assertGreater(max(fast), 3.0)
+
     def test_crouch_walk_compiles(self):
         segments = sim.scenario_segments("crouch_walk", 28000)
         text, cfg = sim.compile_script(segments, 120)

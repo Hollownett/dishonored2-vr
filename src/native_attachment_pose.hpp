@@ -63,6 +63,10 @@ class NativeAttachmentPose {
     unsigned allowed_{};std::uint64_t policy_epoch_{},policy_tick_{},policy_revision_{},policy_reference_epoch_{},policy_mapping_revision_{};
     std::atomic<std::uint64_t> substitutions_{},calls_{};
     static constexpr std::uint64_t freshness_ms=tracked_pose_freshness_ms;
+public:
+    static constexpr std::uint64_t publish_grace_ms=100;
+private:
+    std::atomic<std::uint64_t> clears_{},grace_accepts_{},rejects_policy_{},rejects_source_{},rejects_other_{};
     static bool admission_valid(const NativeAttachmentAdmission& value) noexcept {
         return (!value.context && !value.receipt && !value.acquire && !value.release) ||
             (value.context && value.receipt && value.acquire && value.release);
@@ -91,6 +95,14 @@ class NativeAttachmentPose {
     }
     bool source_allowed(const NativeAttachmentSource& source,std::uint64_t now) const {
         return source_retained(source,now) && source.tick==policy_tick_ && source.revision==policy_revision_;
+    }
+    // The solve a worker publishes can be one tracking sample behind the policy: the head-view thread published the next sample
+    // between the arm solve and this publication. Same epochs, a strictly older tick and revision, and no more than
+    // publish_grace_ms old is still the pose the player saw a moment ago; refusing it dropped the palette (hand and sword fell back
+    // to the native arm) for that upload. A different epoch or mapping, a backward revision at the same tick, or an older pose is refused as before.
+    bool source_in_grace(const NativeAttachmentSource& source,std::uint64_t now) const {
+        return source_retained(source,now) && source.tick<policy_tick_ && source.revision<policy_revision_ &&
+            now-source.tick<=publish_grace_ms && (!source.source_tick || now-source.source_tick<=publish_grace_ms);
     }
     bool frame_current(std::uintptr_t animation,const NativeAttachmentSource& source,bool exact) const {
         std::array<float,15> frame{};
@@ -268,20 +280,28 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);const auto now=GetTickCount64();
         sides_[side]={}; // Rejected/replaced uploads must never leave an older palette alive.
         if(!(allowed_&(1u<<side)) || !policy_epoch_ || now<policy_tick_ || now-policy_tick_>freshness_ms ||
-           !admission_valid(source.admission) || !receipt_policy_valid(source) || !source_allowed(source,now) || !animation || !first_slot || !frame_current(animation,source,true) ||
-           !palette_slots_current(animation,first_slot)) return false;
+           !admission_valid(source.admission) || !receipt_policy_valid(source)) {++rejects_policy_;return false;}
+        const bool exact=source_allowed(source,now);
+        if(!exact && !source_in_grace(source,now)) {++rejects_source_;return false;}
+        if(!animation || !first_slot || !frame_current(animation,source,true) ||
+           !palette_slots_current(animation,first_slot)) {++rejects_other_;return false;}
         for(unsigned joint=0;joint<joints.size();++joint)
-            if(joint<2?!valid_cuff_affine(joints[joint]):!rig::valid(joints[joint])) return false;
+            if(joint<2?!valid_cuff_affine(joints[joint]):!rig::valid(joints[joint])) {++rejects_other_;return false;}
         sides_[side]={animation,first_slot,joints,source};
+        if(!exact)++grace_accepts_;
         return true;
     }
-    void clear(unsigned side) {if(side>1) return;std::lock_guard<std::mutex> lock(mutex_);sides_[side]={};}
+    void clear(unsigned side) {if(side>1) return;std::lock_guard<std::mutex> lock(mutex_);if(sides_[side].animation)++clears_;sides_[side]={};}
+    // Palettes removed by clear() (a live palette only), accepted one sample behind the policy, and refused publications by cause
+    // (policy/age/admission, source not current, frame/slot/joint checks): status arm_flicker.
+    struct Counters {std::uint64_t clears{},grace_accepts{},rejects_policy{},rejects_source{},rejects_other{};};
+    Counters counters() const {return {clears_.load(),grace_accepts_.load(),rejects_policy_.load(),rejects_source_.load(),rejects_other_.load()};}
     void install(std::uintptr_t base,Read read) {
         base_=base;read_=read;
         std::array<unsigned char,16> code{};
         if(!read(base+query_rva,code.data(),16) || code!=query_code || !read(base+reader_rva,code.data(),16) || code!=reader_code)
             throw std::runtime_error("Native attachment readers differ from the supported executable");
-        instance_=this;{std::lock_guard<std::mutex> lock(mutex_);sides_={};allowed_=0;policy_epoch_=policy_tick_=policy_revision_=policy_reference_epoch_=policy_mapping_revision_=0;}substitutions_=calls_=0;
+        instance_=this;{std::lock_guard<std::mutex> lock(mutex_);sides_={};allowed_=0;policy_epoch_=policy_tick_=policy_revision_=policy_reference_epoch_=policy_mapping_revision_=0;}substitutions_=calls_=0;clears_=grace_accepts_=rejects_policy_=rejects_source_=rejects_other_=0;
         if(!query_ && MH_CreateHook(reinterpret_cast<void*>(base+query_rva),reinterpret_cast<void*>(&query_hook),reinterpret_cast<void**>(&query_))!=MH_OK)
             throw std::runtime_error("Cannot create attachment query hook");
         if(!reader_ && MH_CreateHook(reinterpret_cast<void*>(base+reader_rva),reinterpret_cast<void*>(&reader_hook),reinterpret_cast<void**>(&reader_))!=MH_OK)

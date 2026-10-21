@@ -193,9 +193,15 @@ int main() {
     assert(ordered.diagnostic().wall_dt<.02 && !ordered.diagnostic().gap_reset);
     // Exact callback/source monotonic clock, independently of publication wall age.
     auto t=tracking;t.tick=3000;ordered.publish(stamp(t),{});const auto before_age=ordered.solves();
-    assert(!ordered.arm_frozen(0,native_arm[0],identity,2999));
+    assert(!ordered.arm_frozen(0,native_arm[0],identity,2899)); // a callback 101 ms before the publication is a clock fault, not a fresh pose
+    assert(ordered.arm_why(0)==2);
     assert(!ordered.arm_frozen(0,native_arm[0],identity,3251));
+    assert(ordered.arm_why(0)==3);
     assert(ordered.solves()==before_age && ordered.diagnostic().arm_gate[0]==ArmGate::stale_age);
+    // single_missed_sample_keeps_tracked_palette: a callback that read its clock just before the head-view thread published
+    // (GetTickCount64 quanta, thread preemption) uses the newest pose instead of dropping both hands for the frame.
+    assert(ordered.arm_frozen(0,native_arm[0],identity,2999) && ordered.arm_why(0)==0);
+    assert(ordered.arm_frozen(0,native_arm[0],identity,2900));
     assert(ordered.arm_frozen(0,native_arm[0],identity,3250));
     Driver invalid_clock;auto invalid_tracking=t;invalid_tracking.tick=0;invalid_clock.publish(stamp(invalid_tracking),{});
     assert(!invalid_clock.arm_frozen(0,native_arm[0],identity,3000) && invalid_clock.solves()==0);
@@ -203,7 +209,8 @@ int main() {
     assert(!ordered.arm_frozen(0,native_arm[0],identity,3151));
     assert(ordered.arm_frozen(0,native_arm[0],identity,3150));
     xr_age.source_tick=3100;ordered.publish(xr_age,{});
-    assert(!ordered.arm_frozen(0,native_arm[0],identity,3000));
+    assert(ordered.arm_frozen(0,native_arm[0],identity,3000)); // the sample may be 100 ms ahead of the callback's clock
+    assert(!ordered.arm_frozen(0,native_arm[0],identity,2999) && ordered.arm_why(0)==2); // fallback_after_grace_window
     // Native ownership can blend the rendered legs on duplicate publications,
     // but may not migrate planted/swing targets or advance ownership weights.
     for(unsigned i=0;i<30;++i) {t.tick+=33;ordered.publish(stamp(t),body::native_ownership("Mantle"));assert(ordered.body(native_body,identity));}

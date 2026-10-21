@@ -378,10 +378,19 @@ public:
         if(side>1) return {};
         std::lock_guard<std::mutex> lock(mutex_);
         const bool latched=frame_key && frame_key==latched_key_ && have_out_;
-        if(callback_tick && !latched && (!have_track_ || !track_.tick || callback_tick<track_.tick || callback_tick-track_.tick>tracked_pose_freshness_ms ||
-           (track_.source_tick && (callback_tick<track_.source_tick || callback_tick-track_.source_tick>tracked_pose_freshness_ms)))) {
-            diag_.arm_callback[side]=++diag_.callback_serial;diag_.arm_valid[side]=false;diag_.arm_gate[side]=ArmGate::stale_age;
-            return {};
+        if(callback_tick && !latched) {
+            // A track newer than the callback (the head-view thread published after this callback read its clock) is not old:
+            // only that pose moved on, and the solve below uses the newest one. Refusing it dropped both hands for that frame.
+            const auto skew=[&](std::uint64_t stamp) {return callback_tick<stamp && stamp-callback_tick>tracked_pose_future_skew_ms;};
+            const auto aged=[&](std::uint64_t stamp) {return callback_tick>=stamp && callback_tick-stamp>tracked_pose_freshness_ms;};
+            unsigned why=0;
+            if(!have_track_ || !track_.tick) why=1;
+            else if(skew(track_.tick) || (track_.source_tick && skew(track_.source_tick))) why=2;
+            else if(aged(track_.tick) || (track_.source_tick && aged(track_.source_tick))) why=3;
+            if(why) {
+                diag_.arm_callback[side]=++diag_.callback_serial;diag_.arm_valid[side]=false;diag_.arm_gate[side]=ArmGate::stale_age;
+                arm_why_[side]=why;return {};
+            }
         }
         auto& n=native_.arm[side];n.resize(69);
         for(unsigned j=0;j<69;++j) n[j]=to_xf(native[j]);
@@ -391,7 +400,11 @@ public:
         (void)solve_locked(frame_key);
         diag_.arm_gate[side]=!latched && have_track_ && std::chrono::duration<double>(std::chrono::steady_clock::now()-published_).count()>tracked_pose_freshness_seconds?ArmGate::stale_age:
             !have_out_?ArmGate::no_solution:(solved_revision_!=revision_ && !latched)?ArmGate::stale_revision:ArmGate::ready;
-        if(diag_.arm_gate[side]!=ArmGate::ready || out_.arm[side].size()!=69) return {};
+        if(diag_.arm_gate[side]!=ArmGate::ready || out_.arm[side].size()!=69) {
+            arm_why_[side]=diag_.arm_gate[side]==ArmGate::stale_age?3u:diag_.arm_gate[side]==ArmGate::stale_revision?5u:4u;
+            return {};
+        }
+        arm_why_[side]=0;
         // The engine places the arm model at its own (native) chest; express our world joints there.
         const auto arm_frame=frame_of(frame);
         const auto conv=anchored(side,arm_frame);
@@ -427,6 +440,9 @@ public:
         }
         return posed;
     }
+    // Why the last arm_frozen(side) returned nothing (ArmFlicker::Why): 0 = it did not, 1 no track yet, 2 the callback read its clock
+    // before a newer publication (skew past tolerance), 3 the track is older than the freshness window, 4 no solution, 5 stale revision.
+    unsigned arm_why(unsigned side) const {std::lock_guard<std::mutex> lock(mutex_);return side<2?arm_why_[side]:0u;}
     Diagnostic diagnostic() const {
         std::lock_guard<std::mutex> lock(mutex_);auto d=diag_;
         if(have_root_last_)d.current_root={root_last_.p,{rotated(root_last_.q,{1,0,0}),rotated(root_last_.q,{0,1,0}),rotated(root_last_.q,{0,0,1})}};
@@ -463,6 +479,7 @@ public:
 
 private:
     mutable std::mutex mutex_;
+    unsigned arm_why_[2]{};
     body::BodySolver solver_;
     body::Inputs solved_inputs_{};
     std::shared_ptr<const body::BodySolver> contact_model_;

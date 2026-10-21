@@ -95,6 +95,7 @@
 #include "wheel_avatar.hpp"
 #include "body_renderer.hpp"
 #include "full_body_driver.hpp"
+#include "arm_flicker.hpp"
 #include "hand_clamp_feed.hpp"
 #include "synchronized_observer.hpp"
 #include "hand_palette_contact.hpp"
@@ -1002,7 +1003,17 @@ void observe_taa_pass(void* ctx,int eye) {
     taa_capture.record(context.Get(),eye,frames.load());
 }
 static d2vr::NativeAttachmentPose attachment_pose;
+static d2vr::ArmFlicker arm_flicker;
+static std::string arm_flicker_json(); // status arm_flicker: tracked<->fallback transitions of the hand/sword palette
 static bool attachment_pose_installed=false;
+static std::string arm_flicker_json() {
+    const auto c=attachment_pose.counters();
+    auto text=arm_flicker.json(c.clears);
+    text.pop_back();
+    text+=",\"publish\":{\"grace_accepts\":"+std::to_string(c.grace_accepts)+",\"rejects_policy\":"+std::to_string(c.rejects_policy)+
+        ",\"rejects_source\":"+std::to_string(c.rejects_source)+",\"rejects_other\":"+std::to_string(c.rejects_other)+"}}";
+    return text;
+}
 static bool taa_history_requested=false,taa_history_installed=false;
 static unsigned native_cvar_overrides{};
 static bool comfort_requested=false,comfort_applied=false,comfort_restored=true;
@@ -1923,6 +1934,8 @@ void invoke_arm_upload(void* model,const void* source,UINT count,FullHandUploadW
     if(capturing.load(std::memory_order_acquire) && (arm_copy_requested || tracked_arms_requested) && snapshot)
         side=snapshot->side_for_model(reinterpret_cast<std::uintptr_t>(model)).value_or(2);
     if(side<2) {
+        const auto flicker_calls=arm_pose_calls[side].load(),flicker_fallbacks=arm_pose_fallbacks[side].load();
+        unsigned flicker_why=d2vr::ArmFlicker::other;
         try {
             auto reader=&read_self;
             const auto native=d2vr::rig::arm_upload(reader,image_base,snapshot->arms[side],reinterpret_cast<std::uintptr_t>(source),count);
@@ -1940,7 +1953,9 @@ void invoke_arm_upload(void* model,const void* source,UINT count,FullHandUploadW
                            body_model && d2vr::rig::pointer(*body_model) && read_self(*body_model+0x1860,root.data(),sizeof(root))) full_body.note_root(root);
                     }
                     const auto arm_frame_key=frames.load()+1;
-                    if(const auto posed=full_body.arm_frozen(side,native->joints,native->model_frame,GetTickCount64(),arm_frame_key)) {
+                    const auto arm_posed=full_body.arm_frozen(side,native->joints,native->model_frame,GetTickCount64(),arm_frame_key);
+                    flicker_why=arm_posed?static_cast<unsigned>(d2vr::ArmFlicker::publish_refused):full_body.arm_why(side);
+                    if(const auto& posed=arm_posed) {
                         palette=posed->joints;
                         const auto& t=posed->tracking;
                         if(diagnostic)diagnostic->palette_pose={t.tick,t.source_tick,t.tracking_revision,t.pose_epoch,t.reference_epoch,t.mapping_revision,
@@ -2125,6 +2140,11 @@ void invoke_arm_upload(void* model,const void* source,UINT count,FullHandUploadW
                 }
             } else {if(attachment_pose_installed)attachment_pose.clear(side);++arm_pose_fallbacks[side];}
         } catch(...) {if(attachment_pose_installed)attachment_pose.clear(side);++arm_pose_fallbacks[side];}
+        { // arm_flicker: one record per arm upload that was either the tracked palette or a fallback to the native arm
+            const bool tracked_palette=arm_pose_calls[side].load()>flicker_calls;
+            if(tracked_palette || arm_pose_fallbacks[side].load()>flicker_fallbacks)
+                arm_flicker.note(side,tracked_palette,tracked_palette?0u:flicker_why);
+        }
     }
     const auto consume_native=[&] {
     // Exactly one native call, outside all mailbox/observer mutexes. Native
@@ -6498,7 +6518,7 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                         const unsigned tracked=(full_body.owned(2)<.5?1u:0u)|(full_body.owned(3)<.5?2u:0u);
                                         const auto hidden=d2vr::NativeHeldObject::hidden_arms(image_base,reader,state->arms[0].body);arm_hidden_bits=hidden;
                                         d2vr::NativeHeldObject::keep_arms(state->arms[0].body,tracked&1u); // the engine's own left-arm hides are skipped
-                                        if(hidden&tracked) d2vr::NativeInteractionAim::request_arm_show(hidden&tracked);
+                                        if(hidden&tracked) {arm_flicker.weapon_hidden_frame();d2vr::NativeInteractionAim::request_arm_show(hidden&tracked);}
                                     }
                                 }
                                 const auto rig=arm_binding_cache.load();
@@ -6876,6 +6896,7 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                      << ",\"tracked_arms_requested\":" << (tracked_arms_requested?"true":"false")
                                      << ",\"native_arm_pose_calls\":[" << arm_pose_calls[0].load() << ',' << arm_pose_calls[1].load() << ']'
                                      << ",\"native_arm_pose_fallbacks\":[" << arm_pose_fallbacks[0].load() << ',' << arm_pose_fallbacks[1].load() << ']'
+                                     << ",\"arm_flicker\":" << arm_flicker_json()
                                      << ",\"native_arm_reach_clamps\":[" << arm_pose_clamps[0].load() << ',' << arm_pose_clamps[1].load() << ']'
                                      << ",\"native_controller_reads\":" << controller_bridge.reads()
                                      << ",\"native_virtual_controller_reads\":" << controller_bridge.virtual_reads()
@@ -8194,6 +8215,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
                 throw std::runtime_error("Native camera shake consumer differs from pinned profile");
         }
         for(unsigned side=0;side<2;++side) {arm_copy_calls[side]=0;arm_pose_calls[side]=0;arm_pose_fallbacks[side]=0;arm_pose_clamps[side]=0;}
+        arm_flicker.reset();
         arm_upload_seen={};arm_upload_samples={};arm_upload_rejected={};
         avatar_uploads={};avatar_rig_snapshot.reset();last_avatar_rig.reset();last_verified_avatar_rig.reset();arm_binding_cache.clear();arm_rig_refresh_tick=0;arm_tracking.clear_calibration();
         d2vr::NativeLeftWeaponSocketOwner::process_owner().configure(
@@ -8992,6 +9014,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
                << ",\"native_arm_copy_calls\":[" << arm_copy_calls[0].load() << ',' << arm_copy_calls[1].load() << ']'
                << ",\"native_arm_pose_calls\":[" << arm_pose_calls[0].load() << ',' << arm_pose_calls[1].load() << ']'
                << ",\"native_arm_pose_fallbacks\":[" << arm_pose_fallbacks[0].load() << ',' << arm_pose_fallbacks[1].load() << ']'
+                                     << ",\"arm_flicker\":" << arm_flicker_json()
                << ",\"native_arm_reach_clamps\":[" << arm_pose_clamps[0].load() << ',' << arm_pose_clamps[1].load() << ']'
                << ",\"tracked_arm_units_per_metre\":1.0,\"tracked_arm_metric_scale_verified\":false"
                << ",\"avatar_calibration_applied\":" << (avatar_calibration_applied?"true":"false")

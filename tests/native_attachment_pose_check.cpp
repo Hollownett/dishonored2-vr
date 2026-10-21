@@ -163,6 +163,26 @@ struct NativeAttachmentPoseCheck {
         assert(pose.sides_[1].source.tick==source.tick);
         source.tick=GetTickCount64()-251;policy();publish();assert(call(false)==17 && !pose.sides_[1].animation);
         source.tick=GetTickCount64();policy();publish();assert(call(true)==17);
+        // single_missed_sample_keeps_tracked_palette and weapon_stays_visible_through_one_missed_frame: the head-view thread moved the policy on one sample before this publication.
+        {
+            const auto base=source;auto behind=source;behind.tick=GetTickCount64()-20;behind.revision=base.revision-1;
+            const auto before=pose.counters();
+            source.tick=GetTickCount64()-5;source.revision=base.revision+1;policy();   // policy is now one sample ahead of `behind`
+            assert(pose.publish(1,animation,native,tracked,behind));assert(call(true)==17);
+            assert(pose.counters().grace_accepts==before.grace_accepts+1);
+            // fallback_after_grace_window: a pose older than the grace window is refused (and the stale palette dropped)
+            auto old=behind;old.tick=GetTickCount64()-(NativeAttachmentPose::publish_grace_ms+20);
+            assert(!pose.publish(1,animation,native,tracked,old));assert(call(false)==17 && !pose.sides_[1].animation);
+            assert(pose.counters().rejects_source>before.rejects_source);
+            // epoch_change_still_falls_back_immediately: another epoch, reference or mapping never rides the grace
+            for(unsigned which=0;which<3;++which) {
+                auto changed=behind;if(which==0)++changed.epoch;else if(which==1)++changed.reference_epoch;else ++changed.mapping_revision;
+                assert(!pose.publish(1,animation,native,tracked,changed));assert(call(false)==17);
+            }
+            // a backward revision at the same tick (the replayed sample) is still refused
+            auto replay=source;--replay.revision;assert(!pose.publish(1,animation,native,tracked,replay));
+            source=base;policy();publish();assert(call(true)==17);
+        }
         auto rejected=source;--rejected.revision;
         assert(!pose.publish(1,animation,native,tracked,rejected));assert(call(false)==17 && !pose.sides_[1].animation);
         publish();assert(call(true)==17);
