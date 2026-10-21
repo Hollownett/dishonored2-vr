@@ -766,7 +766,7 @@ class Knobs(FullRun):
         self.assertEqual(rc, 1)
         self.assertIn("native-gpu-timing", seen["files"])
         self.assertFalse((self.mod_home / "build/native-gpu-timing").exists())
-        self.assertFalse((self.mod_home / sim.KNOBS_NAME).exists())
+        self.assertFalse((self.mod_home / "build" / sim.KNOBS_NAME).exists())
 
     def test_knob_removed_after_launch_raises(self):
         env, seen = self.watched()
@@ -796,6 +796,132 @@ class Knobs(FullRun):
     def test_existing_knob_refused_even_in_a_dry_run(self):
         (self.mod_home / "build/native-gpu-timing").write_text("1")
         self.assertEqual(self.run_cli("--dry-run", "--knob", "native-gpu-timing")[0], 1)
+
+    # ---- the probe's StartProbe rules for the override line, encoded (dxgi_probe.cpp ~7632-7930); update with the probe
+    def probe_rejects(self, line):
+        f = dict(zip(sim.PROBE_FIELDS, line.split()))
+        i = lambda k: int(f[k])  # noqa: E731
+        mode = i("mode")
+        if not 0 <= mode <= 6:
+            return "Unknown diagnostic mode"
+        xr, head = mode in (5, 6), mode == 6
+        stereo = (0 < mode < 4) or xr
+        single, paired = mode == 2, mode == 3 or xr
+        trace = i("paired")  # the fourth field is the GPU trace flag
+        if trace not in (0, 1) or (trace and (not stereo or single)):
+            return "Unknown GPU diagnostic mode"
+        for k in ("skip_taa", "symmetric_frustum", "controllers"):
+            if i(k) and not head:
+                return k + " requires head-tracked XR mode"
+        if i("full_render_scale") and not xr:
+            return "Full render scale requires XR mode"
+        if i("headset_size") and not (head and i("full_render_scale")):
+            return "headset sizing"
+        if i("eye_boundary") and not paired:
+            return "eye observation requires paired"
+        if i("native_eye_capture") and not i("eye_boundary"):
+            return "native eye capture requires the observer"
+        if i("seconds") == 0 and not paired:
+            return "Continuous sessions require paired rendering"
+        if i("arm_upload_observer") and not paired:
+            return "arm observer requires paired"
+        if i("tracked_arms") and not (head and i("controllers") and i("arm_upload_observer")):
+            return "tracked arms"
+        if i("stable_camera") and not head:
+            return "comfort requires head"
+        if float(f["resolution"]) != 1.0 and not i("headset_size"):
+            return "resolution needs headset sizing"
+        if i("eye_aa") and not xr:
+            return "eye AA requires XR"
+        if i("turning") and not i("controllers"):
+            return "turning requires controllers"
+        if i("simulated") and (not xr or i("seconds") == 0 or i("saved_settings")):
+            return "simulated VR needs a timed XR run without saved settings"
+        if i("simulated") == 2 and not i("controllers"):
+            return "simulated input needs controllers"
+        for k in ("controller_aim", "physical_grab"):
+            if i(k) and not (head and i("controllers")):
+                return k + " requires tracked controllers"
+        if i("left_aim") and not (head and i("controllers") and xr and paired):
+            return "left aim"
+        if i("gameplay_script") and not (i("simulated") == 2 and xr and paired and i("native_eye_capture") and head and i("controllers")):
+            return "gameplay script"
+        if i("weapon_attachment"):
+            return "attachment"
+        if paired and not trace:
+            return "Paired rendering requires its target hooks"
+        return None
+
+    def test_probe_override_lines_pass_the_probes_validation(self):
+        for mode in ("xr", "paired", "single"):
+            self.assertIsNone(self.probe_rejects(sim.sim_probe_config(90, simulated=2 if mode == "xr" else 0,
+                                                                      gameplay_script=1 if mode == "xr" else 0, probe_mode=mode)), mode)
+        self.assertIsNone(self.probe_rejects(sim.sim_probe_config(90, resolution=1.2)))
+        # the validator itself catches the bug this round fixed
+        bad = dict(zip(sim.PROBE_FIELDS, sim.sim_probe_config(90, probe_mode="paired").split()))
+        bad["paired"] = "0"
+        self.assertEqual(self.probe_rejects(" ".join(bad[k] for k in sim.PROBE_FIELDS)), "Paired rendering requires its target hooks")
+
+    def test_paired_override_pins_the_gpu_trace_flag(self):
+        f = dict(zip(sim.PROBE_FIELDS, sim.sim_probe_config(90, probe_mode="paired").split()))
+        self.assertEqual((f["mode"], f["paired"]), ("3", "1"))
+        f = dict(zip(sim.PROBE_FIELDS, sim.sim_probe_config(90, probe_mode="single").split()))
+        self.assertEqual((f["mode"], f["paired"]), ("2", "0"))
+
+    def test_dxgi_probe_cfg_symlink_refused(self):
+        cfg = self.mod_home / "build/dxgi-probe.cfg"
+        cfg.unlink()
+        user = self.tmp / "my-probe.cfg"
+        user.write_text("USER CFG\n")
+        cfg.symlink_to(user)
+        env, seen = self.watched()
+        rc, out, err = self.run_cli(env=env)
+        self.assertEqual(rc, 1)
+        self.assertIn("dxgi-probe.cfg is a symlink", err)
+        self.assertNotIn("files", seen)
+        self.assertTrue(cfg.is_symlink())
+        self.assertEqual(user.read_text(), "USER CFG\n")
+        self.assertEqual(self.run_cli("--dry-run")[0], 1)
+
+    def test_stale_artifacts_are_not_snapshotted(self):
+        art = self.mod_home / "artifacts"
+        old = art / "xr-live-status.json"
+        old.write_text(json.dumps({"gameplay": True, "frame_split": {"adapter": {"name": "NVIDIA OLD"}, "split": {"frames": 5}}}))
+        (art / "dxgi-probe-result.json").write_text("{}")
+        past = __import__("time").time() - 3600
+        for p in (old, art / "dxgi-probe-result.json"):
+            os.utime(p, (past, past))
+        env, state = self.fake_game(status=False)  # the game writes only its proxy log this time
+        rc, out, err = self.run_cli(env=env)
+        snap = next(self.runs.glob("*"))
+        self.assertFalse((snap / "artifacts/xr-live-status.json").exists())
+        self.assertFalse((snap / "artifacts/dxgi-probe-result.json").exists())
+        self.assertTrue((snap / "artifacts/linux-proxy.log").exists())
+        self.assertEqual((snap / "adapter.txt").read_text().strip(), "null")
+
+    def test_unlaunched_run_snapshots_no_artifacts(self):
+        (self.mod_home / "artifacts/xr-live-status.json").write_text("{}")
+        sim.snapshot(self.mod_home, self.tmp / "snap", {}, since_ns=None)
+        self.assertFalse(list((self.tmp / "snap/artifacts").glob("*")) if (self.tmp / "snap/artifacts").exists() else [])
+
+    def test_restore_cleanup_runs_inside_defer_sigint(self):
+        self.write_record({"build/foo": b""})
+        order = []
+        real_defer, real_release = sim.defer_sigint, sim.release_recorded
+
+        @__import__("contextlib").contextmanager
+        def defer(out=None):
+            order.append("enter")
+            yield
+            order.append("exit")
+
+        def release(mod_home):
+            order.append("release")
+            return real_release(mod_home)
+
+        with unittest.mock.patch.object(sim, "defer_sigint", defer), unittest.mock.patch.object(sim, "release_recorded", release):
+            self.assertEqual(self.run_cli("--restore")[0], 0)
+        self.assertEqual(order[-3:], ["enter", "release", "exit"])
 
     def test_rig_owned_knob_names_refused(self):
         for bad in (sim.KNOBS_NAME, sim.AUTOCONTINUE_NAME, sim.SETTLE_NAME):

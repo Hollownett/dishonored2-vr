@@ -530,7 +530,9 @@ def sim_probe_config(seconds, simulated=2, gameplay_script=1, probe_mode="xr", r
     if probe_mode != "xr":
         if resolution is not None:
             raise SimError("the resolution setting needs --probe-mode xr")
-        v.update(mode=PROBE_MODES[probe_mode], paired=0, symmetric_frustum=0, controllers=0, tracked_arms=0, stable_camera=0,
+        # the fourth field is the GPU trace flag: the probe rejects stereo mode 3 without it ("Paired rendering requires its target
+        # hooks") and rejects it with mode 2
+        v.update(mode=PROBE_MODES[probe_mode], paired=1 if probe_mode == "paired" else 0, symmetric_frustum=0, controllers=0, tracked_arms=0, stable_camera=0,
                  turning=0, simulated=0, controller_aim=0, physical_grab=0, left_aim=0, gameplay_script=0, weapon_attachment=0)
         if probe_mode == "single":  # the eye observers, native capture and arm observer need paired rendering
             v.update(eye_boundary=0, native_eye_capture=0, arm_upload_observer=0)
@@ -753,11 +755,31 @@ def close_game(env, launched, notes):
     return _wait(env, lambda: not game_processes(env.proc_root), 60)
 
 
-def snapshot(mod_home, dest, info):
+ARTIFACT_SLACK_NS = 2_000_000_000  # file systems stamp mtimes from a coarse clock; a previous run is minutes older
+
+
+def snapshot(mod_home, dest, info, since_ns=None):
+    """Copy this run's artifacts. Only files modified at or after the launch (minus a small slack) are copied, so a run that
+    failed before the game wrote anything never carries the previous run's status; since_ns None (never launched): none."""
     dest.mkdir(parents=True, exist_ok=True)
     art = mod_home / "artifacts"
     if art.is_dir():
-        shutil.copytree(art, dest / "artifacts", dirs_exist_ok=True)
+        cutoff = None if since_ns is None else since_ns - ARTIFACT_SLACK_NS
+
+        def stale(directory, names):
+            skip = []
+            for n in names:
+                p = Path(directory) / n
+                if p.is_dir() and not p.is_symlink():
+                    continue
+                try:
+                    if cutoff is None or p.stat().st_mtime_ns < cutoff:
+                        skip.append(n)
+                except OSError:
+                    skip.append(n)
+            return skip
+
+        shutil.copytree(art, dest / "artifacts", dirs_exist_ok=True, ignore=stale)
     build = dest / "build"
     build.mkdir(exist_ok=True)
     for name in ("dxgi-probe.cfg", OVERRIDE_NAME, SCRIPT_CFG):
@@ -846,7 +868,7 @@ def check_run_files(mod_home, knobs, settings, a):
         elif os.path.lexists(build / n):
             what = "--vr-setting temporal_aa" if n == AA_MODE_KNOB and "temporal_aa" in settings else f"--knob {n}"
             problems.append(f"{build / n} already exists and {what} would overwrite it; remove it or drop the option")
-    targets = [build / OVERRIDE_NAME, build / SCRIPT_CFG, art / SCRIPT_JSON, build / AUTOCONTINUE_NAME, build / SETTLE_NAME,
+    targets = [build / "dxgi-probe.cfg", build / OVERRIDE_NAME, build / SCRIPT_CFG, art / SCRIPT_JSON, build / AUTOCONTINUE_NAME, build / SETTLE_NAME,
                build / KNOBS_NAME, *(build / n for n in knobs)]
     for t in targets:
         if t.is_symlink():
@@ -898,7 +920,8 @@ def _do_restore(a, home, env):
                 env.out(f"[sim]   {clear_hint(backup)}")
             failed = failed or not ok
     # dev knobs would change the real game: gone, but only the files the record proves the rig wrote and nobody changed since
-    released, notes = release_recorded(mod_home)
+    with defer_sigint(env.out):
+        released, notes = release_recorded(mod_home)
     for n in notes:
         env.out(f"[sim]   {n}")
     if not released:
@@ -1111,7 +1134,8 @@ def _run_sim(a, home, env):
             try:
                 snapshot(mod_home, run_dir, {"scenario": a.script or a.scenario, "seconds": seconds, "override": override,
                                              "return_code": rc, "reason": reason, "notes": notes, "backup": str(backup),
-                                             "probe_mode": probe_mode, "user_knobs": user_knobs, "rig_knobs": knobs})
+                                             "probe_mode": probe_mode, "user_knobs": user_knobs, "rig_knobs": knobs},
+                         since_ns=started)
                 env.out(f"[sim] artifacts snapshot: {run_dir}")
             except Exception as e:  # noqa: BLE001
                 env.out(f"[sim] snapshot failed ({type(e).__name__}): {e}")

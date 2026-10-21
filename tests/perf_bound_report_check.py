@@ -16,11 +16,11 @@ def status(gpu, adapter=NV, gameplay=True, **kw):
     # the real layout: frame_split = {"adapter": ..., "split": {...}}
     return {"gameplay": gameplay, "frame_split": {"adapter": adapter, "split": split(gpu, **kw)}}
 
-def run(d, name, doc, mode="xr", knobs=None, file="xr-live-status.json"):
+def run(d, name, doc, mode="xr", knobs=None, file="xr-live-status.json", **info_extra):
     p = Path(d) / name
     (p / "artifacts").mkdir(parents=True)
     (p / "artifacts" / file).write_text(json.dumps(doc))
-    info = {"probe_mode": mode}
+    info = {"probe_mode": mode, **info_extra}
     if knobs is not None:
         info["user_knobs"] = knobs
     (p / "run-info.json").write_text(json.dumps(info))
@@ -76,6 +76,16 @@ with tempfile.TemporaryDirectory() as d:
     # mode comes from run-info.json
     assert "mode paired" in verdict(run(d, "pm", status(.95), mode="paired"))[1] and "mode single" in verdict(run(d, "sm", status(.95), mode="single"))[1]
     assert "mode ?" in verdict(run(d, "om", status(.95), mode="bogus"))[1]
+    # paired rows say the GPU trace is in the numbers; a failed run is INVALID with its reason even if stale data is there
+    assert "paired includes GPU-trace overhead" in verdict(run(d, "pt", status(.95), mode="paired"))[1]
+    assert "paired includes" not in verdict(run(d, "st", status(.95), mode="single"))[1]
+    v, out = verdict(run(d, "fail", status(.95), return_code=1, reason="StartProbe returned 1"))
+    assert v == "INVALID" and "INVALID (run failed: StartProbe returned 1)" in out, out
+    assert "INVALID (run failed: the game exited" in verdict(run(d, "fail2", status(.95), return_code=0, reason="the game exited during the session"))[1]
+    assert "run failed: return code 2" in verdict(run(d, "fail3", status(.95), return_code=2))[1]
+    v, out = verdict(run(d, "fail4", {"gameplay": True}, return_code=1, reason="no StartProbe begin"))
+    assert "INVALID (run failed: no StartProbe begin)" in out, out
+    assert verdict(run(d, "okrc", status(.95), return_code=0, reason=""))[0] == "GPU-BOUND"
     # flat run: only dxgi-probe-result.json, no gameplay flag; the row says so
     flat = run(d, "flat", {"presents": 500, "frame_split": {"adapter": NV, "split": split(None, frames=450)}}, mode="single",
                file="dxgi-probe-result.json")

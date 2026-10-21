@@ -93,6 +93,9 @@ def load_run(path):
         candidates = [p]
     else:
         candidates = [p / "artifacts" / "xr-live-status.json", p / "artifacts" / "dxgi-probe-result.json"]
+    failure = None
+    if info.get("return_code") not in (None, 0) or info.get("reason"):
+        failure = str(info.get("reason") or f"return code {info.get('return_code')}")[:100]
     seen_any = False
     for c in candidates:
         try:
@@ -123,8 +126,14 @@ def load_run(path):
                "note": "" if status else "result file: no gameplay flag, every counted Present is included"}
         if row["gpu_busy"] is None and row["gameplay"] is not False and row["frames"]:
             row["note"] = (row["note"] + "; " if row["note"] else "") + "no gpu_busy (native-gpu-timing knob off?)"
+        if failure:
+            row["invalid"] = f"run failed: {failure}"
+        if mode == "paired":
+            row["note"] = (row["note"] + "; " if row["note"] else "") + "paired includes GPU-trace overhead"
         row["verdict"] = classify(row)
         return row
+    if failure:
+        return _blank(path, mode, knobs, f"run failed: {failure}")
     return _blank(path, mode, knobs, "unreadable status" if seen_any else "no status or result file")
 
 
