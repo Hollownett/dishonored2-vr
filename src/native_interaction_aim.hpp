@@ -595,6 +595,20 @@ class NativeInteractionAim {
             // Full-grip sword: equip requests from the input thread and the dropped copy (native_weapon_hands.hpp).
             if(self->logic_()==2) try {NativeWeaponHands::service(self->base_,self->read_);} catch(...) {}
             // The held object's collision layer is serviced every frame (restore on clear, then DEBRIS while held), apart from its render scale.
+            // Released object height watch (status "release_watch"): z at release, minimum and last over the next 3 s. Game Z is up.
+            if(self->active_ && self->logic_()==2) try {
+                if(const auto e=NativeHeldObject::released_entity.exchange(0)) {
+                    if(const auto b=native_rigid_body(self->read_,self->base_,e,true)) {
+                        release_watch_entity_=e;release_watch_until_=GetTickCount64()+3000;
+                        const float z=static_cast<float>(b->pose.position.z);release_watch_z0_=release_watch_min_=release_watch_last_=z;++release_watches_;
+                    }
+                }
+                if(release_watch_entity_ && GetTickCount64()<release_watch_until_) {
+                    if(const auto b=native_rigid_body(self->read_,self->base_,release_watch_entity_,true)) {
+                        const float z=static_cast<float>(b->pose.position.z);release_watch_last_=z;if(z<release_watch_min_) release_watch_min_=z;
+                    }
+                } else release_watch_entity_=0;
+            } catch(...) {}
             {const auto held=held_world_.exchange(0);if(self->active_ && self->logic_()==2) try {NativeHeldObject::service_hold_layers(self->base_,self->read_,held);if(held) NativeHeldObject::world_render(self->base_,self->read_,held);} catch(...) {}}
             double probe_distance{};{std::lock_guard<std::mutex> guard(trace_mutex_);probe_distance=trace_distance_;trace_distance_=0;}
             if(probe_distance!=0) { // negative: straight down (game Z up)
@@ -758,6 +772,15 @@ public:
     inline static std::atomic<unsigned> arm_show_{};
     static void request_arm_show(unsigned mask) noexcept {arm_show_|=mask;}
     inline static std::atomic<std::uintptr_t> held_world_{};
+    inline static std::uintptr_t release_watch_entity_{};inline static std::uint64_t release_watch_until_{};
+public:
+    inline static std::atomic<float> release_watch_z0_{},release_watch_min_{},release_watch_last_{};inline static std::atomic<std::uint64_t> release_watches_{};
+    static std::string release_watch_json() {
+        char b[200];std::snprintf(b,sizeof(b),"{\"count\":%llu,\"z_at_release\":%.3f,\"z_min\":%.3f,\"z_last\":%.3f,\"floor_z\":null}",
+            (unsigned long long)release_watches_.load(),release_watch_z0_.load(),release_watch_min_.load(),release_watch_last_.load());
+        return b;
+    }
+public:
     static void request_held_world(std::uintptr_t entity) noexcept {held_world_=entity;}
     static void request_console(const std::string& line) {std::lock_guard<std::mutex> guard(trace_mutex_);if(console_lines_.size()<32) console_lines_.push_back(line);}
     static std::string take_trace_result() {std::lock_guard<std::mutex> guard(trace_mutex_);std::string r;r.swap(trace_result_);return r;}

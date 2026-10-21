@@ -18,6 +18,7 @@
 #include "../third_party/minhook/include/MinHook.h"
 #include "game_rig.hpp"
 #include "held_release.hpp"
+#include "layer_ledger.hpp"
 #include "native_held_placement.hpp"
 #include "physical_grab.hpp"
 #include "../third_party/dishonored_vr/grab_pose.h"
@@ -28,6 +29,7 @@
 #include <cstring>
 #include <limits>
 #include <optional>
+#include <string>
 #include <utility>
 
 namespace d2vr {
@@ -199,7 +201,7 @@ public:
         const auto body=throwable_body(base,read,entity);
         if(body && (body->second&0x1f)!=layer_rigid_body) {layer_settled_.store(entity,std::memory_order_release);return false;}   // a bottle: nothing to write
         if(!body || !set_filter(base,read,body->first,(body->second&~0x1fu)|layer_debris)) return false;
-        layer_entity_=entity;layer_handle_=body->first;layer_filter_=body->second;++layers_swapped;layer_settled_.store(entity,std::memory_order_release);return true;
+        layer_entity_=entity;layer_handle_=body->first;layer_filter_=body->second;++layers_swapped;ledger_.swapped();layer_settled_.store(entity,std::memory_order_release);return true;
     }
     // Game thread, every frame: give the body its own layer back when clear() asked (hold end or a transient clear), then, while an entity is
     // held, take the DEBRIS layer again. The layer is serviced apart from the render scale, which is 0 after the first request.
@@ -210,9 +212,26 @@ public:
     // Game thread: the hold ended (clear() asks); the body gets its own layer back while it is still the same body.
     template<class Read> static bool restore_layer(std::uintptr_t base,Read& read) {
         if(!layer_entity_) return false;
+        const auto step=ledger_.attempt(live_entity(base,read,layer_entity_));
+        if(step==LayerLedger::Step::give_up) {layer_entity_=0;layer_settled_.store(0,std::memory_order_release);++layers_abandoned;return false;}
+        if(step==LayerLedger::Step::none) {layer_entity_=0;return false;}
+        // The original layer bits go back on the body's CURRENT handle and filter (the handle can be reissued after the throw).
         const auto body=throwable_body(base,read,layer_entity_);
-        const bool ok=body && body->first==layer_handle_ && set_filter(base,read,layer_handle_,layer_filter_);
-        layer_entity_=0;layer_settled_.store(0,std::memory_order_release);if(ok) ++layers_restored;return ok;
+        const bool ok=body && set_filter(base,read,body->first,(body->second&~0x1fu)|(layer_filter_&0x1fu));
+        ledger_.result(ok);
+        if(ok) {released_entity.store(layer_entity_);layer_entity_=0;layer_settled_.store(0,std::memory_order_release);++layers_restored;return true;}
+        ++layer_restore_misses;layer_restore_.store(true,std::memory_order_release);   // retry next frame (bounded by the ledger)
+        return false;
+    }
+    inline static LayerLedger ledger_{};
+    inline static std::atomic<std::uintptr_t> released_entity{};   // set when a swapped object is handed back (restored or given up); the release height watch takes it
+    inline static std::atomic<std::uint64_t> layers_abandoned{},layer_restore_misses{};
+    // Live layer counters for the status (the per-hold carry block is only noted while a hold lasts, so it never sees a restore).
+    static std::string layer_json() {
+        char b[256];std::snprintf(b,sizeof(b),"{\"swaps\":%llu,\"restores\":%llu,\"abandoned\":%llu,\"misses\":%llu,\"restores_per_release\":%.3f}",
+            (unsigned long long)layers_swapped.load(),(unsigned long long)layers_restored.load(),(unsigned long long)layers_abandoned.load(),
+            (unsigned long long)layer_restore_misses.load(),layers_swapped.load()?double(layers_restored.load())/double(layers_restored.load()+layers_abandoned.load()?layers_restored.load()+layers_abandoned.load():1):0.);
+        return b;
     }
     // Diagnostics, read only: the collision layer (filter word & 0x1f) of the held entity's throwable body; 3 RIGID_BODY, 4 DEBRIS.
     // The cache keeps the body handle per entity: the component scan runs once per hold, then only the pool record is read.
