@@ -2,26 +2,26 @@
 // Vertical smoothing for the engine camera anchor: landings, crouching and stairs move the engine's eye height in
 // steps that, rendered 1:1, wobble the player's view. The vertical axis (game z) follows the raw value through a
 // first-order filter with a speed limit; horizontal axes pass through unchanged (locomotion latency makes people sick).
-// A real fall (raw z dropping faster than fall_rate_mps for fall_hold_s) passes straight through, and anything that
-// looks like a teleport, a new epoch or a bad time step resets to the raw value. Units: metres per second, the caller
+// The lag |raw.z - out.z| never exceeds max_lag_m: past that the output rides max_lag_m behind raw and moves at raw's own
+// speed, never faster (a fall, a fast crouch or a mantle). When raw slows, the output closes the lag at most catch_up_mps
+// faster than raw. A teleport, a new epoch or a bad time step resets to the raw value. Units: metres per second, the caller
 // converts game units. Called once per frame; no allocation.
 #include "arm_ik.hpp"
 #include <cmath>
 #include <cstdint>
 
 namespace d2vr {
-struct AnchorSmootherConfig {double tau_s=.12,max_rate_mps=1.5,fall_rate_mps=3,fall_hold_s=.1,teleport_m=1.0,catch_up_mps=4,sink_lag_m=.15,sink_hold_s=.05;};
+struct AnchorSmootherConfig {double tau_s=.12,max_rate_mps=1.5,max_lag_m=.20,catch_up_mps=2.0,teleport_m=1.0;};
 
 class AnchorSmoother {
     AnchorSmootherConfig cfg_;
     bool have_{};
     std::uint64_t epoch_{},resets_{};
     Vec3 raw_{};
-    double out_z_{},fall_s_{},sink_s_{};
-    bool falling_{}; // a real fall was detected: the lag closes at |raw speed|+catch_up_mps, never in one frame
+    double out_z_{};
     Vec3 reset_to(const Vec3& raw,std::uint64_t epoch,bool count) noexcept {
         if(count) ++resets_;
-        have_=true;epoch_=epoch;raw_=raw;out_z_=raw.z;fall_s_=sink_s_=0;falling_=false;
+        have_=true;epoch_=epoch;raw_=raw;out_z_=raw.z;
         return raw;
     }
 public:
@@ -33,27 +33,20 @@ public:
         const Vec3 d=raw-raw_;
         if(std::fabs(d.x)>cfg_.teleport_m || std::fabs(d.y)>cfg_.teleport_m || std::fabs(d.z)>cfg_.teleport_m)
             return reset_to(raw,epoch,true);
-        const double rate=-d.z/dt; // downward raw speed
-        if(rate>cfg_.fall_rate_mps) fall_s_+=dt;else fall_s_=0;
-        if(rate>cfg_.max_rate_mps) sink_s_+=dt;else sink_s_=0;
         raw_=raw;
-        const double lag=out_z_-raw.z;
-        // A fall is a hold above fall_rate, or a sustained sink the speed limit cannot follow (so the lag stays bounded).
-        // A one-frame step (a crouch or a stair) is neither, and keeps the slow filter.
-        if(!falling_ && (fall_s_+1e-9>=cfg_.fall_hold_s || (sink_s_+1e-9>=cfg_.sink_hold_s && lag>cfg_.sink_lag_m))) falling_=true;
-        if(falling_) {
-            const double delta=raw.z-out_z_,limit=(std::fabs(d.z)/dt+cfg_.catch_up_mps)*dt;
-            if(delta>=-limit && delta<=limit) {out_z_=raw.z;falling_=false;}
-            else out_z_+=delta<0?-limit:limit;
-        } else {
-            double step=(raw.z-out_z_)*(1-std::exp(-dt/cfg_.tau_s));
-            const double limit=cfg_.max_rate_mps*dt;
-            step=std::fmax(-limit,std::fmin(limit,step));
-            out_z_+=step;
-        }
+        // Small motion: first-order filter with a speed limit. Once the lag is past half of max_lag_m the output also closes it
+        // at up to catch_up_mps (rising smoothly with the lag), which is what drains a big lag after raw stops or slows.
+        const double err=raw.z-out_z_,lag=std::fabs(err);
+        const double ease=std::fmax(0.,std::fmin(1.,(lag-.5*cfg_.max_lag_m)/(.75*cfg_.max_lag_m)));
+        double speed=std::fmin(cfg_.max_rate_mps*dt,lag*(1-std::exp(-dt/cfg_.tau_s)));
+        speed=std::fmin(lag,std::fmax(speed,cfg_.catch_up_mps*ease*dt));
+        out_z_+=err<0?-speed:speed;
+        // Bounded lag: the output moves with raw, never faster than raw itself.
+        if(out_z_-raw.z>cfg_.max_lag_m) out_z_=raw.z+cfg_.max_lag_m;
+        else if(raw.z-out_z_>cfg_.max_lag_m) out_z_=raw.z-cfg_.max_lag_m;
         return {raw.x,raw.y,out_z_};
     }
-    void reset() noexcept {have_=false;fall_s_=sink_s_=0;falling_=false;}
+    void reset() noexcept {have_=false;}
     std::uint64_t resets() const {return resets_;}
 };
 } // namespace d2vr
