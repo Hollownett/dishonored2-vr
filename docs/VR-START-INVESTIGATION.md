@@ -156,3 +156,27 @@ The defence in depth for now is unchanged: the 20 s default start, which was cle
 
 Incidents: one run (no-vr-glyphs) ended with the rig unable to restore a save slot file that the game removed while closing; `d2vr-linux sim --restore`
 restored it and verified. After every run the installed DLL hash was ff0daf65...bc927 and `build/` held only its own files.
+
+### Round 2 (scratch DLLs S1 to S3, `--settle 8`, 6 more runs, 16 of 20 used in total)
+
+| arm | what the scratch DLL did | runs | stalls |
+|---|---|---|---|
+| S1 | StartProbe returns after `find_present` (dummy device made and destroyed), no hooks, sleeps 100 s | 1 | not judgeable (see below) |
+| S1b | StartProbe returns before `find_present`: the DLL is loaded and StartProbe's prologue runs, nothing else | 2 (settle 8 and 20) | not judgeable |
+| S2 | everything, but the context dispatch hooks are never bound (`ensure_game_gpu_hooks` and the deferred-context bind skipped) | 1 | 1 |
+| S3 | everything, dispatch binds deferred until `logic_mask` first reaches 64 | 1 | 1 (stalled at the menu, so the binds that follow the 64 were not the cause either) |
+| control, settle 20 | same scratch DLL, no scratch knob | 1 | 0 (gameplay at 54.2 s) |
+
+S1 and S1b cannot be judged. With no mod session there is no `xr-live-status.json`, so I sampled the game's RSS and read bytes instead. A clean run climbs to
+5.6 to 5.7 GB with read bytes rising; every stalled run sits at 4.7 to 4.9 GB with read bytes frozen. S1 (settle 8) shows the stalled profile, but so does S1b
+at settle 20, which started at the safe time. So without a running session the game does not take the Enter keys at all (the mod's own pad focus is what lets
+the menu take input in this headless setup), and that profile says nothing about the timing. Both were therefore recorded as not judgeable, not as stalls.
+
+Conclusions:
+- The dispatch bindings are not the cause: S2 never binds them and still stalls. S3 is not clean, so the deferral was not implemented (the `legacy-early-binds` knob and the confirmation runs were not done).
+- Together with round 1 (no optional group is the cause), what remains is only the code every session runs before a status file exists: the DLL load,
+  the dummy device in `find_present`, MinHook initialisation, the Present and ResizeBuffers hooks, the crash observer and the simulated XR session. The sim cannot tell these apart without a signal
+  that does not depend on the mod's pad focus.
+- Proposed (not done): give the scratch DLL its own observable, for example a small thread that writes the menu state from `game_logic_mask()` (a game memory read, no hooks) to a file.
+  With that, S1 and S1b become judgeable and the dummy device, the Present hook and the XR session can be separated one at a time. If the dummy device is the cause, read the Present slot from the game's own swapchain
+  at its first Present instead of creating a device.
