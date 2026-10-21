@@ -23,8 +23,11 @@ at = probe.index('L"alternate-eye"')
 assert at < probe.index('            prepare_stereo();', at)
 block = probe[at:at + 700]
 assert 'alt_eye_state=1;mono_view_state=1;' in block and 'alt_eye_state=2;' in block and 'native_eye_capture_requested' in block
-if features.exists():
-    assert 'alternate-eye' not in features.read_text(encoding='utf-8')
+if features.exists():  # plan F task 4: a launcher row exists, opt-in only (default off, enable kind, file alternate-eye)
+    import json
+    rows = [f for f in json.loads(features.read_text(encoding='utf-8'))['features'] if f['file'] == 'alternate-eye']
+    assert len(rows) == 1 and rows[0]['id'] == 'performance-mode' and rows[0]['kind'] == 'enable' and rows[0]['default'] is False
+    assert 'SMAA' in rows[0]['label'] and 'shimmer' in rows[0]['label']
 
 # GameXr: everything is off by default and gated
 assert 'bool alternate_enabled{};' in xr and 'int alternate_fresh_eye{-1};' in xr

@@ -83,6 +83,10 @@ editing the user's real files, so they are not measured even once the session is
 - [ ] Plan G task 3: no accidental attacks while walking, turning your head or resting the sword hand (`attack_intent.presses` stays 0).
 - [ ] Plan G task 4: the takedown prompt appears behind an unaware guard (at least 25 cm wide, near eye height, readable at 1.5 m); `takedown_hints` rises in `xr-live-status.json`. An oil tank or door still shows its pick-up prompt.
 - [ ] Plan G task 5: throw the oil tank at the floor and at a wall: it bounces and stays in the level (it leaves at the game's own throw speed along your hand's direction; `held_object.thrown` rises). Put `legacy-throw` in the build folder for the old hand-speed throw.
+- [ ] Plan F: performance mode on: fps at 72 Hz vs off (same area, 90 s).
+- [ ] Plan F: performance mode: turn your head and strafe past a guard: shimmer acceptable?
+- [ ] Plan F: performance mode: fast hand swings: hands look solid?
+- [ ] Plan F: performance mode: SMAA edges acceptable?
 
 ## Frame split block (plan E task 1)
 

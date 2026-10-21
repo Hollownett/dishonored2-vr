@@ -207,6 +207,16 @@ The v199 build passed automated and actual-game simulated-controller checks.
 Headset appearance, combat feel, note readability and complete gameplay have not
 been accepted. See [the verification report](feedback-2026-10-10.md).
 
+## Performance mode (experimental, off by default)
+The launcher row "performance mode: one eye per frame (more fps; may shimmer on fast motion; anti-aliasing SMAA only)" (file `build/alternate-eye`)
+makes the game draw one eye per frame, alternating left and right, and the headset reprojects the other eye from its last image and pose. On the
+sim rig this took the frame interval from 13.5 ms to 10.4 ms. The costs:
+- fast motion (a head turn while strafing past a guard, a fast sword swing) can shimmer, because the two eyes show moments one frame apart;
+- anti-aliasing is SMAA only: temporal AA (FSR 3, FSR 4, Game TAA) is switched off while the mode is on, whatever the settings panel says;
+- menus, the settings panel, loading, takedowns and cutscenes are drawn normally (both eyes);
+- if the mode loses track of the engine's views it falls back to normal drawing for the rest of the session (and temporal AA stays off).
+Whether it is comfortable is only known in the headset: see the checklist in docs/VR-PERF-LAPTOP.md.
+
 ## Experiments (files in the build folder)
 These are on by default in the launcher (except where a line says otherwise). Switch them in the launcher (Windows) or with `d2vr-linux feature` (Linux); a knob file you create by hand for a feature the launcher has switched off is set aside at the next start. The file names below are what the mod reads.
 - `hud-scale` containing e.g. `0.75`: how far the HUD is pulled towards the centre (1 = the game's own layout, default 0.65).

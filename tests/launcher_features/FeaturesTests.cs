@@ -11,6 +11,7 @@ string Listing(string d) => string.Join("|", Directory.GetFiles(d).OrderBy(x => 
 bool Has(string d, string f) => File.Exists(Path.Combine(d, f));
 string[] Ids(string d, string key) => System.Text.Json.JsonDocument.Parse(File.ReadAllText(Path.Combine(d, "launcher-features.json"))).RootElement.GetProperty(key).EnumerateArray().Select(x => x.GetString()!).ToArray();
 
+Check("performance_mode_row_is_opt_in_alternate_eye", list.Count(f => f.Id == "performance-mode" && f.File == "alternate-eye" && f.Kind == "enable" && !f.Default && f.Label.Contains("SMAA") && f.Label.Contains("shimmer")) == 1);
 Check("list_has_no_unwanted_rows", !list.Any(f => f.Id is "corpse-grab") && list.Count(f => f.Id == "hold-y-menu" && f.File == "no-hold-y-menu" && f.Kind == "disable" && f.Default) == 1 && list.Count == list.Select(f => f.Id).Distinct().Count());
 
 {   // fresh_home_enables_every_default
@@ -259,7 +260,7 @@ string StateText(string d) => File.ReadAllText(Path.Combine(d, "launcher-feature
         Features.RestoreDefaults(d, list);
         var st = Features.State(d, list);
         Check("restore_defaults_restores_saved_tuning", setAside && File.ReadAllText(P("full-body")) == "0.5 0.2" && !Has(d, "full-body.off-by-launcher"));
-        Check("restore_defaults_matches_defaults", list.All(f => st[f.Id].On == f.Default) && !Has(d, "no-hand-blink") && !Has(d, "power-gestures") && Ids(d, "off").SequenceEqual(new[] { "power-gestures" }));
+        Check("restore_defaults_matches_defaults", list.All(f => st[f.Id].On == f.Default) && !Has(d, "no-hand-blink") && !Has(d, "power-gestures") && Ids(d, "off").SequenceEqual(new[] { "performance-mode", "power-gestures" }));
         Check("restore_defaults_leaves_unknown_files", File.ReadAllText(P("hud-scale")) == "0.75");
         var again = Listing(d); Features.RestoreDefaults(d, list);
         Check("restore_defaults_is_idempotent", Listing(d) == again);

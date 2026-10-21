@@ -168,6 +168,14 @@
    "label": "Readable takedown prompt",
    "help": "The kill and choke hint over a guard is drawn at least 25 cm wide so it can be read. Turn off for the older 7 cm hint.",
    "default": true
+  },
+  {
+   "id": "performance-mode",
+   "file": "alternate-eye",
+   "kind": "enable",
+   "label": "performance mode: one eye per frame (more fps; may shimmer on fast motion; anti-aliasing SMAA only)",
+   "help": "The game draws one eye per frame, alternating, and the headset reprojects the other. Roughly a quarter less frame time, so more fps. Fast motion can shimmer and the picture uses SMAA edges only (no temporal anti-aliasing). Experimental; off by default.",
+   "default": false
   }
  ]
 }
