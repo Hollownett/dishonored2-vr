@@ -7496,6 +7496,13 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
         if(xr_requested && capturing.load()) {desktop_interval=interval;recover_xr_session("Unknown renderer callback exception");}
         else {native_output_size.clear();cached_output_restored=cached_output_size.restore();record_callback_error("Unknown renderer callback exception");callback_failed=true;capturing=false;}
     }
+    // Flat diagnostic stereo modes (paired 3 / single 2) have no XR path above: feed the frame split from the Present itself, so
+    // the sim rig's single-view measurement has intervals. Every counted Present is a sample; eye stamps may be absent (single eye).
+    if(!xr_requested && stereo_requested && capturing.load() && !(flags&DXGI_PRESENT_TEST)) {
+        split_prev_enter_ns=frame_split_prev_enter_ns.exchange(present_start_ns);
+        split_gpu_ns=native_gpu_requested && native_gpu_prepared?static_cast<std::uint64_t>(std::max(0.,native_gpu_summary.last_elapsed_ms)*1e6):0;
+        split_pending=true;
+    }
     const auto desktop_start_ns=d2vr::GameXr::cpu_time_ns();
     const auto result=original_present(chain,desktop_interval,flags);
     {
@@ -8455,6 +8462,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
         if(!crash_observer.remove()) throw std::runtime_error("Exception observer did not drain; restart the game");
         std::ofstream result(output/L"dxgi-probe-result.json",std::ios::trunc);
         result << "{\"pid\":" << GetCurrentProcessId() << ",\"presents\":" << frames.load() << ",\"valid_camera_poses\":" << valid_poses.load()
+               << ",\"frame_split\":" << frame_split_status_json() // same shape as xr-live-status.json: {"adapter":..,"split":..}; the only data a flat run has
                << ",\"simulated_gameplay_script_requested\":" << (simulated_gameplay_script_requested?"true":"false")
                << ",\"simulated_gameplay_script_segments\":" << simulated_gameplay_script.size()
                << ",\"simulated_gameplay_command_rows\":" << simulated_gameplay_rows

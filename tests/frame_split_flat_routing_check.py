@@ -1,0 +1,21 @@
+"""Flat diagnostic stereo modes (paired 3 / single 2) feed the frame split from the Present hook, and every mode's
+dxgi-probe-result.json carries the frame_split block (nested {adapter, split}, like xr-live-status.json)."""
+from pathlib import Path
+
+probe = (Path(__file__).resolve().parents[1] / 'src' / 'dxgi_probe.cpp').read_text(encoding='utf-8')
+
+# the flat feed sits before the desktop Present and reuses the XR path's stamp, previous-enter and gpu handling
+feed_at = probe.index('if(!xr_requested && stereo_requested && capturing.load() && !(flags&DXGI_PRESENT_TEST)) {')
+present_at = probe.index('const auto result=original_present(chain,desktop_interval,flags);')
+assert feed_at < present_at
+block = probe[feed_at:probe.index('}', probe.index('split_pending=true;', feed_at))]
+assert 'split_prev_enter_ns=frame_split_prev_enter_ns.exchange(present_start_ns);' in block
+assert 'native_gpu_requested && native_gpu_prepared' in block
+# the consuming code after the Present is shared: one feed site, one adapter query
+assert probe.count('frame_split.feed(') == 1 and probe.count('frame_split_adapter_json="null"') == 1
+# a Present that did not feed (including XR modes outside gameplay) still resets the interval
+assert 'else if(!(flags&DXGI_PRESENT_TEST)) {' in probe[present_at:present_at + 1500]
+# the result file every mode writes
+result_at = probe.index('std::ofstream result(output/L"dxgi-probe-result.json"')
+assert '<< ",\\"frame_split\\":" << frame_split_status_json()' in probe[result_at:result_at + 600]
+print('PASS: frame split flat-mode feed and result-file block')
