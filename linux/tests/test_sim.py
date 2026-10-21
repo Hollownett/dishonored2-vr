@@ -548,6 +548,7 @@ class Candidate(FullRun):
         self.assertEqual(rc, 2)
         self.assertIn("sha256sum", text)
         self.assertIn("&& cp -f", text)
+        self.assertIn(".d2vr-manual' && mv -f", text)
         self.assertIn("sim --restore", text)
 
     def test_game_not_closing_with_corrupt_backup_prints_no_copy_command(self):

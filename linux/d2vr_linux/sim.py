@@ -282,9 +282,10 @@ def backup_dll(backup, installed, candidate_sha):
 
 
 def manual_restore_command(src, dest, orig, cand):
-    """A hash-guarded shell command: copies only if the destination is still the candidate and the backup is the original."""
+    """A hash-guarded shell command: copies only if the destination is still the candidate and the backup is the original;
+    copy-then-rename so an interrupted copy never truncates the installed DLL."""
     return (f"[ \"$(sha256sum '{dest}' | cut -d' ' -f1)\" = {cand} ] && [ \"$(sha256sum '{src}' | cut -d' ' -f1)\" = {orig} ] "
-            f"&& cp -f '{src}' '{dest}'")
+            f"&& cp -f '{src}' '{dest}.d2vr-manual' && mv -f '{dest}.d2vr-manual' '{dest}'")
 
 
 def clear_hint(backup):
