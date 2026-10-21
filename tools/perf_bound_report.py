@@ -1,13 +1,17 @@
 #!/usr/bin/env python3
 """Is the game CPU-bound or GPU-bound? One row per sim-rig run, then a verdict line.
 
-usage: perf_bound_report.py RUN [RUN ...] [--before PREVIOUS.json] [--json OUT.json] [--any-adapter]
-RUN is a sim run folder (artifacts/xr-live-status.json inside it, plus run-info.json and adapter.txt when present) or an
-xr-live-status.json. Reads the "frame_split" and "adapter" status blocks (plan E task 1).
+usage: perf_bound_report.py RUN [RUN ...] [--before PREVIOUS.json] [--json OUT.json]
+RUN is a sim run folder or a status/result json. The data is the "frame_split" block ({"adapter":..., "split":...}) of
+artifacts/xr-live-status.json (XR runs), else of artifacts/dxgi-probe-result.json, the only file a flat run
+(--probe-mode paired|single) writes. The row says which file it used ("source").
 Verdict per run: GPU-BOUND when gpu_busy >= .90; CPU-BOUND(render) or CPU-BOUND(game) when gpu_busy < .70 and that thread's
-busy fraction is >= .85 (render first); otherwise MIXED. INVALID runs (no gameplay, no frames, wrong adapter) are listed but
-never averaged in. This laptop must run on the NVIDIA GPU, so an adapter without "NVIDIA" in its name is INVALID unless
---any-adapter. --json writes the rows; a later run passes that file as --before to print the delta.
+busy fraction is >= .85 (render first); otherwise MIXED. INVALID runs (missing file or block, no gameplay, no frames, an
+adapter that is not NVIDIA) are listed with the reason and never averaged in. The overall VERDICT line is GPU-BOUND,
+CPU-BOUND(render), CPU-BOUND(game), MIXED or INVALID. Gameplay: the status file says it; the result file has no gameplay flag,
+so a flat row counts every counted Present (menu frames included) and its note says so. Each row lists the knob files that
+were in build/ when the run launched (run-info.json): compare A/B rows only when those match. --json writes the rows;
+a later run passes that file as --before to print the delta.
 """
 import argparse
 import json
@@ -17,34 +21,40 @@ from pathlib import Path
 GPU_BOUND = 0.90
 GPU_LOW = 0.70
 THREAD_BOUND = 0.85
-MODES = {6: "xr", 3: "paired", 2: "single"}
+MODES = {"xr", "paired", "single"}
 
 
 def _load(path):
     return json.loads(Path(path).read_text(encoding="utf-8-sig"))
 
 
-def _mode(run):
+def _run_info(run):
     try:
-        override = _load(run / "run-info.json").get("override", "")
-        return MODES.get(int(override.split()[2]), "?")
-    except (OSError, ValueError, IndexError, AttributeError, TypeError):
-        return "?"
+        info = _load(run / "run-info.json")
+        return info if isinstance(info, dict) else {}
+    except (OSError, ValueError):
+        return {}
 
 
-def classify(row, any_adapter=False):
-    """-> verdict string for one row dict (keys as in load_run)."""
-    if not row["gameplay"] or not row["frames"]:
+def _num(v):
+    return v if isinstance(v, (int, float)) and not isinstance(v, bool) else None
+
+
+def classify(row):
+    """-> verdict string for one row dict. INVALID rows carry their reason in parentheses."""
+    if row.get("invalid"):
+        return f"INVALID ({row['invalid']})"
+    if row["gameplay"] is False or not row["frames"]:
         return "INVALID (no gameplay frames)"
-    name = row["adapter"].get("name") if isinstance(row["adapter"], dict) else None
-    if not any_adapter:
-        if not name:
-            return "INVALID (no adapter info)"
-        if "nvidia" not in name.lower():
-            return "INVALID (wrong adapter)"
+    adapter = row["adapter"]
+    name = adapter.get("name") if isinstance(adapter, dict) else None
+    if not isinstance(name, str) or not name:
+        return "INVALID (no adapter info)"
+    if "nvidia" not in name.lower():
+        return "INVALID (wrong adapter)"
     gpu, render, game = row["gpu_busy"], row["render_busy"], row["game_busy"]
     if gpu is None:
-        return "MIXED (no gpu_busy)"
+        return "MIXED"
     if gpu >= GPU_BOUND:
         return "GPU-BOUND"
     if gpu < GPU_LOW:
@@ -55,28 +65,67 @@ def classify(row, any_adapter=False):
     return "MIXED"
 
 
-def load_run(path, any_adapter=False):
-    run = Path(path)
-    status = run if run.is_file() else run / "artifacts" / "xr-live-status.json"
-    if run.is_file():
-        run = run.parent
-    doc = _load(status)
-    fs = doc.get("frame_split")
-    if not isinstance(fs, dict):
-        raise ValueError(f"{status}: no frame_split block")
-    adapter = doc.get("adapter")
-    if adapter is None and (run / "adapter.txt").is_file():
-        try:
-            adapter = json.loads((run / "adapter.txt").read_text())
-        except ValueError:
-            adapter = None
-    row = {"run": str(path), "mode": _mode(run), "adapter": adapter, "gameplay": bool(doc.get("gameplay")),
-           "frames": fs.get("frames") or 0, "interval_p50": fs.get("interval_ms_p50"), "interval_p95": fs.get("interval_ms_p95"),
-           "eye0": fs.get("eye0_ms_p50"), "eye1": fs.get("eye1_ms_p50"), "eye1_share": fs.get("eye1_share"),
-           "hook": fs.get("hook_ms_p50"), "gpu_busy": fs.get("gpu_busy"), "render_busy": fs.get("render_thread_busy"),
-           "game_busy": fs.get("game_thread_busy")}
-    row["verdict"] = classify(row, any_adapter)
+def _blank(path, mode, knobs, reason):
+    row = {"run": str(path), "mode": mode, "source": None, "adapter": None, "gameplay": None, "frames": 0, "interval_p50": None,
+           "interval_p95": None, "eye0": None, "eye1": None, "eye1_share": None, "hook": None, "gpu_busy": None,
+           "render_busy": None, "game_busy": None, "user_knobs": knobs, "note": "", "invalid": reason}
+    row["verdict"] = classify(row)
     return row
+
+
+def _split_of(doc):
+    fs = doc.get("frame_split") if isinstance(doc, dict) else None
+    if isinstance(fs, dict) and isinstance(fs.get("split"), dict):
+        return fs["split"], fs.get("adapter")
+    return None, None
+
+
+def load_run(path):
+    """Never raises for a bad run: it becomes an INVALID row with the reason."""
+    p = Path(path)
+    run = p.parent if p.is_file() else p
+    if p.is_file() and p.parent.name == "artifacts":
+        run = p.parent.parent
+    info = _run_info(run)
+    mode = info.get("probe_mode") if info.get("probe_mode") in MODES else "?"
+    knobs = info.get("user_knobs") if isinstance(info.get("user_knobs"), list) else None
+    if p.is_file():
+        candidates = [p]
+    else:
+        candidates = [p / "artifacts" / "xr-live-status.json", p / "artifacts" / "dxgi-probe-result.json"]
+    seen_any = False
+    for c in candidates:
+        try:
+            doc = _load(c)
+        except OSError:
+            continue
+        except ValueError:
+            seen_any = True
+            continue
+        seen_any = True
+        split, adapter = _split_of(doc)
+        if split is None:
+            continue
+        status = c.name == "xr-live-status.json" or (c.name != "dxgi-probe-result.json" and "gameplay" in doc)
+        if adapter is None and (run / "adapter.txt").is_file():
+            try:
+                adapter = json.loads((run / "adapter.txt").read_text())
+            except ValueError:
+                adapter = None
+        gameplay = bool(doc.get("gameplay")) if status else None
+        row = {"run": str(path), "mode": mode, "source": c.name, "adapter": adapter if isinstance(adapter, dict) else None,
+               "gameplay": gameplay, "frames": _num(split.get("frames")) or 0,
+               "interval_p50": _num(split.get("interval_ms_p50")), "interval_p95": _num(split.get("interval_ms_p95")),
+               "eye0": _num(split.get("eye0_ms_p50")), "eye1": _num(split.get("eye1_ms_p50")),
+               "eye1_share": _num(split.get("eye1_share")), "hook": _num(split.get("hook_ms_p50")),
+               "gpu_busy": _num(split.get("gpu_busy")), "render_busy": _num(split.get("render_thread_busy")),
+               "game_busy": _num(split.get("game_thread_busy")), "user_knobs": knobs,
+               "note": "" if status else "result file: no gameplay flag, every counted Present is included"}
+        if row["gpu_busy"] is None and row["gameplay"] is not False and row["frames"]:
+            row["note"] = (row["note"] + "; " if row["note"] else "") + "no gpu_busy (native-gpu-timing knob off?)"
+        row["verdict"] = classify(row)
+        return row
+    return _blank(path, mode, knobs, "unreadable status" if seen_any else "no status or result file")
 
 
 def _f(v, spec=".2f"):
@@ -85,9 +134,12 @@ def _f(v, spec=".2f"):
 
 def format_row(r):
     name = r["adapter"].get("name") if isinstance(r["adapter"], dict) else None
-    return (f"{Path(r['run']).name}: mode {r['mode']} / adapter {name or 'unknown'} / interval p50 {_f(r['interval_p50'])} "
-            f"p95 {_f(r['interval_p95'])} ms / eye0 {_f(r['eye0'])} eye1 {_f(r['eye1'])} ms / eye1_share {_f(r['eye1_share'])} / "
-            f"hook {_f(r['hook'])} ms / gpu_busy {_f(r['gpu_busy'])} / render {_f(r['render_busy'])} game {_f(r['game_busy'])} busy / {r['verdict']}")
+    knobs = "unknown" if r["user_knobs"] is None else (", ".join(r["user_knobs"]) or "none")
+    return (f"{Path(r['run']).name}: mode {r['mode']} / source {r['source'] or 'none'} / adapter {name if isinstance(name, str) else 'unknown'} / "
+            f"interval p50 {_f(r['interval_p50'])} p95 {_f(r['interval_p95'])} ms / eye0 {_f(r['eye0'])} eye1 {_f(r['eye1'])} ms / "
+            f"eye1_share {_f(r['eye1_share'])} / hook {_f(r['hook'])} ms / gpu_busy {_f(r['gpu_busy'])} / "
+            f"render {_f(r['render_busy'])} game {_f(r['game_busy'])} busy / build knobs: {knobs} / {r['verdict']}"
+            + (f" [{r['note']}]" if r["note"] else ""))
 
 
 def valid(rows):
@@ -97,7 +149,7 @@ def valid(rows):
 def overall(rows):
     ok = valid(rows)
     if not ok:
-        return "INVALID (no usable run)"
+        return "INVALID"
     kinds = {r["verdict"] for r in ok}
     return kinds.pop() if len(kinds) == 1 else "MIXED"
 
@@ -107,7 +159,7 @@ METRICS = (("interval p50", "interval_p50", "ms"), ("interval p95", "interval_p9
 
 
 def _mean(rows, key):
-    vals = [r[key] for r in rows if r[key] is not None]
+    vals = [r[key] for r in rows if r.get(key) is not None]
     return sum(vals) / len(vals) if vals else None
 
 
@@ -119,7 +171,9 @@ def format_delta(before, after):
     for label, key, unit in METRICS:
         mb, ma = _mean(b, key), _mean(a, key)
         parts.append(f"{label} n/a" if mb is None or ma is None else f"{label} {ma - mb:+.2f}{unit}")
-    return f"delta vs before ({len(b)} valid run(s) -> {len(a)}): " + " / ".join(parts)
+    kb = {tuple(r.get("user_knobs") or ()) for r in b} | {tuple(r.get("user_knobs") or ()) for r in a}
+    warn = "" if len(kb) == 1 else " [WARNING: the runs had different knob files in build/; not a like-for-like comparison]"
+    return f"delta vs before ({len(b)} valid run(s) -> {len(a)}): " + " / ".join(parts) + warn
 
 
 def main(argv=None):
@@ -127,21 +181,28 @@ def main(argv=None):
     ap.add_argument("runs", nargs="+")
     ap.add_argument("--before")
     ap.add_argument("--json", dest="json_out")
-    ap.add_argument("--any-adapter", action="store_true", help="accept a non-NVIDIA adapter (not for this laptop)")
     a = ap.parse_args(argv)
     try:
-        rows = [load_run(r, a.any_adapter) for r in a.runs]
-        before = _load(a.before)["rows"] if a.before else None
-        for r in rows:
-            print(format_row(r))
-        print(f"VERDICT: {overall(rows)}")
-        if before is not None:
-            print(format_delta(before, rows))
-        if a.json_out:
-            Path(a.json_out).write_text(json.dumps({"rows": rows}, indent=1) + "\n")
+        before = None
+        if a.before:
+            before = _load(a.before)["rows"]
+            if not isinstance(before, list) or not all(isinstance(r, dict) and isinstance(r.get("verdict"), str) for r in before):
+                raise ValueError(f"{a.before}: not a perf_bound_report --json file")
     except (OSError, ValueError, KeyError, TypeError) as e:
-        print(f"perf_bound_report: {e}", file=sys.stderr)
+        print(f"perf_bound_report: --before: {e}", file=sys.stderr)
         return 1
+    rows = [load_run(r) for r in a.runs]
+    for r in rows:
+        print(format_row(r))
+    print(f"VERDICT: {overall(rows)}")
+    if before is not None:
+        print(format_delta(before, rows))
+    if a.json_out:
+        try:
+            Path(a.json_out).write_text(json.dumps({"rows": rows}, indent=1) + "\n")
+        except OSError as e:
+            print(f"perf_bound_report: {e}", file=sys.stderr)
+            return 1
     return 0
 
 

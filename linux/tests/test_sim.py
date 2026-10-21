@@ -55,6 +55,10 @@ class Case(unittest.TestCase):
         patcher = __import__("unittest").mock.patch.dict(os.environ, {"XDG_STATE_HOME": str(self.tmp / "state")})
         patcher.start()
         self.addCleanup(patcher.stop)
+        self.real_home = self.tmp / "realhome"
+        rh = unittest.mock.patch.object(sim, "real_home", lambda: self.real_home)
+        rh.start()
+        self.addCleanup(rh.stop)
 
         def real_launcher(*_a, **_k):
             raise AssertionError("a test reached the real Steam launcher; inject a fake with env=self.env(launch=...)")
@@ -75,6 +79,14 @@ class Case(unittest.TestCase):
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             rc = cli.main(self.args(*extra), home=self.f.home, proc_root=self.proc, sim_env=env)
         return rc, out.getvalue(), err.getvalue()
+
+    def write_record(self, files):
+        """A hard-killed run's record: files = {relative path: bytes the rig wrote}."""
+        import hashlib
+        rec = {rel: hashlib.sha256(data).hexdigest() for rel, data in files.items()}
+        (self.mod_home / "build" / sim.KNOBS_NAME).write_text(json.dumps({"version": 1, "files": rec}))
+        for rel, data in files.items():
+            (self.mod_home / rel).write_bytes(data)
 
     def env(self, launch=None):
         clock = {"t": 0.0}
@@ -220,7 +232,7 @@ class Saves(Case):
     def test_cli_restore(self):
         backup = sim.backup_saves(self.f.prefix, self.backups, "T1")
         sim.swap_in_test_save(self.f.prefix, self.test_save)
-        (self.mod_home / "build/linux-probe-override.cfg").write_text("x")
+        self.write_record({"build/linux-probe-override.cfg": b"x"})
         rc, out, err = self.run_cli("--restore")
         self.assertEqual(rc, 0, err)
         self.assertIn("restored", out)
@@ -508,7 +520,7 @@ class Candidate(FullRun):
         def never():
             raise RuntimeError("must not launch")
 
-        with sim.run_lock(self.f.home):
+        with sim.run_lock(self.mod_home):
             rc, out, err = self.run_cli("--candidate-dll", str(self.cand), env=self.env(launch=never))
             self.assertEqual(rc, 1)
             self.assertIn("holds", err)
@@ -524,7 +536,7 @@ class Candidate(FullRun):
         env, state = self.fake_game()
         rc, out, err = self.run_cli("--candidate-dll", str(self.cand), env=env)
         self.assertEqual(rc, 0)
-        with sim.run_lock(self.f.home):
+        with sim.run_lock(self.mod_home):
             pass
 
     def test_game_still_running_names_the_dll(self):
@@ -664,9 +676,8 @@ class Candidate(FullRun):
     def test_dev_knobs_removed_even_when_restore_fails(self):
         self.pending()
         sim.place_atomic(fake_pe(b"newer install"), self.installed)
-        for n in ("linux-probe-override.cfg", "linux-autocontinue", "simulated-gameplay-script.cfg"):
-            (self.mod_home / "build" / n).write_text("x")
-        (self.mod_home / "artifacts/simulated-gameplay-script.json").write_text("{}")
+        self.write_record({"build/linux-probe-override.cfg": b"x", "build/linux-autocontinue": b"x",
+                           "build/simulated-gameplay-script.cfg": b"x", "artifacts/simulated-gameplay-script.json": b"{}"})
         rc, out, err = self.run_cli("--restore")
         self.assertEqual(rc, 2)
         for n in ("linux-probe-override.cfg", "linux-autocontinue", "simulated-gameplay-script.cfg"):
@@ -768,13 +779,184 @@ class Knobs(FullRun):
             self.run_cli("--knob", "native-gpu-timing", env=env)
         self.assertFalse((self.mod_home / "build/native-gpu-timing").exists())
 
-    def test_users_own_knob_comes_back(self):
-        (self.mod_home / "build/aa-mode").write_text("5\n")
+    def test_existing_knob_refused_and_untouched(self):
+        for name in ("native-gpu-timing", "aa-mode"):
+            (self.mod_home / "build" / name).write_text("5\n")
+        for extra in (["--knob", "native-gpu-timing"], ["--vr-setting", "temporal_aa=3"]):
+            env, seen = self.watched()
+            rc, out, err = self.run_cli(*extra, env=env)
+            self.assertEqual(rc, 1, extra)
+            self.assertIn("already exists", err)
+            self.assertIn(extra[1] if extra[0] == "--knob" else "aa-mode", err)
+            self.assertNotIn("files", seen, "the game must not launch")
+        for name in ("native-gpu-timing", "aa-mode"):
+            self.assertEqual((self.mod_home / "build" / name).read_text(), "5\n")
+        self.assertEqual(sim.pending_backups(self.backups), [])
+
+    def test_existing_knob_refused_even_in_a_dry_run(self):
+        (self.mod_home / "build/native-gpu-timing").write_text("1")
+        self.assertEqual(self.run_cli("--dry-run", "--knob", "native-gpu-timing")[0], 1)
+
+    def test_rig_owned_knob_names_refused(self):
+        for bad in (sim.KNOBS_NAME, sim.AUTOCONTINUE_NAME, sim.SETTLE_NAME):
+            env, seen = self.watched()
+            rc, out, err = self.run_cli("--knob", bad, env=env)
+            self.assertEqual(rc, 1, bad)
+            self.assertIn("rig itself owns", err)
+            self.assertNotIn("files", seen)
+
+    def test_symlink_target_refused(self):
+        outside = self.tmp / "outside"
+        outside.write_text("user data")
+        (self.mod_home / "build/native-gpu-timing").symlink_to(outside)
         env, seen = self.watched()
-        rc, out, err = self.run_cli("--knob", "aa-mode", env=env)
+        rc, out, err = self.run_cli("--knob", "native-gpu-timing", env=env)
+        self.assertEqual(rc, 1)
+        self.assertEqual(outside.read_text(), "user data")
+        self.assertTrue((self.mod_home / "build/native-gpu-timing").is_symlink())
+        # a dangling link, and a link where a rig file goes
+        (self.mod_home / "build/native-gpu-timing").unlink()
+        (self.mod_home / "build/native-gpu-timing").symlink_to(self.tmp / "nowhere")
+        self.assertEqual(self.run_cli("--knob", "native-gpu-timing", env=env)[0], 1)
+        (self.mod_home / "build/native-gpu-timing").unlink()
+        (self.mod_home / "build/linux-settle-seconds").symlink_to(outside)
+        rc, out, err = self.run_cli("--settle", "5", env=env)
+        self.assertEqual(rc, 1)
+        self.assertIn("symlink", err)
+        self.assertEqual(outside.read_text(), "user data")
+        self.assertNotIn("files", seen)
+
+    def test_record_lists_every_written_file_with_its_hash(self):
+        import hashlib
+        env, seen = self.watched()
+        rc, out, err = self.run_cli("--knob", "native-gpu-timing", "--settle", "5", env=env)
+        self.assertEqual(rc, 0, err)
+        rec = json.loads(seen["contents"][sim.KNOBS_NAME])["files"]
+        self.assertEqual(set(rec), {"build/linux-probe-override.cfg", "build/simulated-gameplay-script.cfg",
+                                    "artifacts/simulated-gameplay-script.json", "build/linux-autocontinue",
+                                    "build/linux-settle-seconds", "build/native-gpu-timing"})
+        self.assertEqual(rec["build/linux-settle-seconds"], hashlib.sha256(b"5\n").hexdigest())
+        self.assertEqual(rec["build/native-gpu-timing"], hashlib.sha256(b"").hexdigest())
+
+    def test_restore_removes_recorded_files_after_a_hard_kill(self):
+        self.write_record({"build/native-gpu-timing": b"", "build/linux-settle-seconds": b"5\n",
+                           "build/linux-probe-override.cfg": b"x", "artifacts/simulated-gameplay-script.json": b"{}"})
+        rc, out, err = self.run_cli("--restore")
+        self.assertEqual(rc, 0, out + err)
+        for rel in ("build/native-gpu-timing", "build/linux-settle-seconds", "build/linux-probe-override.cfg",
+                    "artifacts/simulated-gameplay-script.json", "build/" + sim.KNOBS_NAME):
+            self.assertFalse((self.mod_home / rel).exists(), rel)
+
+    def test_restore_leaves_a_file_that_changed_since(self):
+        self.write_record({"build/foo": b"", "build/bar": b""})
+        (self.mod_home / "build/foo").write_text("the user's own content")
+        rc, out, err = self.run_cli("--restore")
+        self.assertEqual(rc, 2)
+        self.assertEqual((self.mod_home / "build/foo").read_text(), "the user's own content")
+        self.assertFalse((self.mod_home / "build/bar").exists())
+        self.assertIn("left alone", "\n".join(self.lines) + out)
+        self.assertTrue((self.mod_home / "build" / sim.KNOBS_NAME).exists())
+
+    def test_restore_ignores_unsafe_record_paths_and_symlinks(self):
+        (self.mod_home / "evil").write_text("keep")
+        link_target = self.tmp / "target"
+        link_target.write_text("")
+        (self.mod_home / "build/lnk").symlink_to(link_target)
+        import hashlib
+        empty = hashlib.sha256(b"").hexdigest()
+        (self.mod_home / "build" / sim.KNOBS_NAME).write_text(json.dumps({"files": {
+            "build/../evil": empty, "../evil": empty, "build/a/b": empty, "build/lnk": empty}}))
+        rc, out, err = self.run_cli("--restore")
+        self.assertEqual(rc, 2)
+        self.assertTrue((self.mod_home / "evil").exists() and link_target.exists())
+        self.assertTrue((self.mod_home / "build/lnk").is_symlink())
+
+    def test_restore_without_a_record_deletes_nothing(self):
+        (self.mod_home / "build/linux-settle-seconds").write_text("30\n")
+        (self.mod_home / "build/linux-autocontinue").write_text("10\n")
+        rc, out, err = self.run_cli("--restore")
         self.assertEqual(rc, 0)
-        self.assertEqual(seen["contents"]["aa-mode"], "")
-        self.assertEqual((self.mod_home / "build/aa-mode").read_text(), "5\n")
+        self.assertTrue((self.mod_home / "build/linux-settle-seconds").exists())
+
+    def test_leftover_record_refuses_a_new_run(self):
+        self.write_record({"build/foo": b""})
+        rc, out, err = self.run_cli("--dry-run")
+        self.assertEqual(rc, 1)
+        self.assertIn(sim.KNOBS_NAME, err)
+
+    def test_guard_restore_is_atomic_and_leaves_no_temp(self):
+        target = self.mod_home / "build/linux-settle-seconds"
+        target.write_text("30\n")
+        g = sim.FileGuard()
+        g.write(target, "5\n")
+        calls = []
+        real = sim.place_atomic
+        with unittest.mock.patch.object(sim, "place_atomic", lambda d, p, e=None: (calls.append(p), real(d, p, e))[1]):
+            self.assertEqual(g.restore(), [])
+        self.assertEqual(calls, [target])
+        self.assertEqual(target.read_text(), "30\n")
+        self.assertFalse(list((self.mod_home / "build").glob("*.d2vr-tmp")))
+
+    def test_settle_file_removed_after_hard_kill_via_record(self):
+        self.write_record({"build/linux-settle-seconds": b"5\n"})
+        self.assertEqual(self.run_cli("--restore")[0], 0)
+        self.assertFalse((self.mod_home / "build/linux-settle-seconds").exists())
+
+    def test_users_own_settle_file_comes_back_after_a_normal_run(self):
+        (self.mod_home / "build/linux-settle-seconds").write_text("30\n")
+        env, seen = self.watched()
+        self.assertEqual(self.run_cli("--settle", "5", env=env)[0], 0)
+        self.assertEqual(seen["contents"]["linux-settle-seconds"], "5\n")
+        self.assertEqual((self.mod_home / "build/linux-settle-seconds").read_text(), "30\n")
+
+    def test_lock_path_ignores_xdg_state_home_and_home(self):
+        a = sim.lock_path(self.mod_home)
+        with unittest.mock.patch.dict(os.environ, {"XDG_STATE_HOME": str(self.tmp / "other"), "HOME": str(self.tmp / "elsewhere")}):
+            self.assertEqual(sim.lock_path(self.mod_home), a)
+        os.environ.pop("XDG_STATE_HOME", None)
+        self.assertEqual(sim.lock_path(self.mod_home), a)
+        self.assertEqual(a.parent, self.real_home / ".local/state/d2vr")
+        self.assertNotEqual(sim.lock_path(self.tmp / "another-mod-home"), a)
+        self.assertFalse(str(a).startswith(str(self.mod_home)))
+
+    def test_lock_is_shared_across_environments(self):
+        with sim.run_lock(self.mod_home):
+            with unittest.mock.patch.dict(os.environ, {"XDG_STATE_HOME": str(self.tmp / "other")}):
+                with self.assertRaises(sim.SimError):
+                    with sim.run_lock(self.mod_home):
+                        pass
+
+
+    def test_user_knobs_recorded_and_warned(self):
+        for n in ("fsr", "aa-mode", "harmless-note"):
+            (self.mod_home / "build" / n).write_text("1")
+        env, seen = self.watched()
+        rc, out, err = self.run_cli("--knob", "native-gpu-timing", env=env)
+        self.assertEqual(rc, 0, err)
+        info = json.loads((next(self.runs.glob("*")) / "run-info.json").read_text())
+        self.assertEqual(info["user_knobs"], ["aa-mode", "fsr", "harmless-note"])
+        self.assertEqual(info["rig_knobs"], ["native-gpu-timing"])
+        text = "\n".join(self.lines)
+        self.assertIn("warning", text)
+        self.assertIn("aa-mode, fsr", text)
+        self.assertNotIn("harmless-note,", text)
+        self.assertNotIn("native-gpu-timing,", text.split("warning")[1])
+
+    def test_flat_run_adapter_and_summary_come_from_the_result_file(self):
+        env, state = self.fake_game(status=False)
+        inner = env.launch
+
+        def launch():
+            inner()
+            (self.mod_home / "artifacts/dxgi-probe-result.json").write_text(json.dumps(
+                {"presents": 100, "frame_split": {"adapter": {"name": "NVIDIA X", "vendor": 4318, "vram_mb": 8192}, "split": {"frames": 90}}}))
+
+        env.launch = launch
+        rc, out, err = self.run_cli("--probe-mode", "single", "--status-field", "frame_split.split.frames", env=env)
+        self.assertEqual(rc, 0, err)
+        snap = next(self.runs.glob("*"))
+        self.assertEqual(json.loads((snap / "adapter.txt").read_text())["name"], "NVIDIA X")
+        self.assertIn("frame_split.split.frames = 90", "\n".join(self.lines))
 
     def test_knob_name_rejected(self):
         for bad in ("../x", "a/b", "Up", "a.b", "", "x\n", "-x/.."):
@@ -785,16 +967,6 @@ class Knobs(FullRun):
             self.assertNotIn("files", seen, "the game must not launch")
         self.assertFalse((self.mod_home.parent / "x").exists())
         self.assertEqual(sim.pending_backups(self.backups), [])
-
-    def test_restore_removes_recorded_knobs_after_a_hard_kill(self):
-        (self.mod_home / "build" / sim.KNOBS_NAME).write_text("native-gpu-timing\n../evil\n")
-        (self.mod_home / "build/native-gpu-timing").write_text("")
-        (self.mod_home / "evil").write_text("keep")
-        rc, out, err = self.run_cli("--restore")
-        self.assertEqual(rc, 0)
-        self.assertFalse((self.mod_home / "build/native-gpu-timing").exists())
-        self.assertFalse((self.mod_home / "build" / sim.KNOBS_NAME).exists())
-        self.assertTrue((self.mod_home / "evil").exists())
 
     def test_dry_run_lists_knob_and_writes_nothing(self):
         rc, out, err = self.run_cli("--dry-run", "--knob", "native-gpu-timing", "--probe-mode", "single",
@@ -881,7 +1053,7 @@ class Knobs(FullRun):
         def launch():
             inner()
             (self.mod_home / "artifacts/xr-live-status.json").write_text(json.dumps(
-                {"gameplay": True, "adapter": {"name": "NVIDIA GeForce RTX 3070 Laptop GPU", "vendor": 4318, "vram_mb": 8192}}))
+                {"gameplay": True, "frame_split": {"adapter": {"name": "NVIDIA GeForce RTX 3070 Laptop GPU", "vendor": 4318, "vram_mb": 8192}, "split": {}}}))
 
         env.launch = launch
         self.assertEqual(self.run_cli(env=env)[0], 0)
@@ -895,6 +1067,11 @@ class Knobs(FullRun):
 
 
 class Pure(unittest.TestCase):
+    def test_real_home_is_the_account_home_not_the_environment(self):
+        import pwd
+        with unittest.mock.patch.dict(os.environ, {"HOME": "/nonexistent-home"}):
+            self.assertEqual(sim.real_home(), Path(pwd.getpwuid(os.getuid()).pw_dir))
+
     def test_probe_config_matches_launcher_layout(self):
         fields = sim.sim_probe_config(90).split()
         self.assertEqual(len(fields), len(sim.PROBE_FIELDS))

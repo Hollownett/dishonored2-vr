@@ -15,6 +15,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import pwd
 import re
 import shlex
 import shutil
@@ -31,7 +32,10 @@ SIM_MARKER = b"D2VR-LINUX-SIM-1"  # the proxy carries this once it supports the 
 OVERRIDE_NAME = "linux-probe-override.cfg"
 AUTOCONTINUE_NAME = "linux-autocontinue"
 SETTLE_NAME = "linux-settle-seconds"
-KNOBS_NAME = "linux-sim-knobs"  # names of the --knob files this run created, so `sim --restore` can remove them after a hard kill
+KNOBS_NAME = "linux-sim-knobs"  # JSON record of every file the run wrote (relative path -> sha256), so `sim --restore` can remove them after a hard kill
+RESERVED_KNOBS = (KNOBS_NAME, AUTOCONTINUE_NAME, SETTLE_NAME, "linux-probe-override", "simulated-gameplay-script")
+RENDER_KNOB_RE = re.compile(r"(aa-|fsr|governor|no-governor|native-gpu|no-mip|force-taa|taa-|upscale|render-|resolution|sharp|no-vr-cvar)")
+NOT_KNOBS = ("dxgi-probe.cfg", "vr-settings.cfg")
 AA_MODE_KNOB = "aa-mode"  # the probe reads build/aa-mode (0..6) as the temporal AA preference
 KNOB_RE = re.compile(r"[a-z0-9-]+")
 PROBE_MODES = {"xr": 6, "paired": 3, "single": 2}  # dxgi_probe.cpp stereo_flag: 2 single eye, 3 paired (both flat, no XR), 6 head-tracked XR
@@ -418,15 +422,20 @@ def _restore_save_files(prefix, backup):
 
 # ---------------------------------------------------------------- run lock and signal shield
 
-def lock_path(home):
-    base = os.environ.get("XDG_STATE_HOME")
-    return (Path(base) if base else Path(home) / ".local/state") / "d2vr" / "sim.lock"
+def real_home():
+    """The account's home directory, not $HOME or $XDG_STATE_HOME: every run on one mod home must find the same lock."""
+    return Path(pwd.getpwuid(os.getuid()).pw_dir)
+
+
+def lock_path(mod_home):
+    key = hashlib.sha256(str(Path(mod_home).resolve()).encode()).hexdigest()[:16]
+    return real_home() / ".local/state/d2vr" / f"sim-{key}.lock"
 
 
 @contextlib.contextmanager
-def run_lock(home):
-    """One exclusive flock for the whole run or restore, independent of --backup-root and outside the mod home."""
-    path = lock_path(home)
+def run_lock(mod_home):
+    """One exclusive flock per mod home for the whole run or restore, independent of --backup-root, the environment and the mod home itself."""
+    path = lock_path(mod_home)
     path.parent.mkdir(parents=True, exist_ok=True)
     fd = os.open(str(path), os.O_RDWR | os.O_CREAT, 0o600)
     try:
@@ -491,7 +500,7 @@ class FileGuard:
                 if data is None:
                     path.unlink(missing_ok=True)
                 else:
-                    path.write_bytes(data)
+                    place_atomic(data, path)
             except OSError as e:
                 failed.append(f"{path}: {e}")
         self.original.clear()
@@ -759,27 +768,108 @@ def snapshot(mod_home, dest, info):
     write_adapter_txt(dest)
 
 
+def adapter_of(doc):
+    """The adapter block of a status or result document: frame_split.adapter (current layout), else a top-level adapter."""
+    if not isinstance(doc, dict):
+        return None
+    fs = doc.get("frame_split")
+    if isinstance(fs, dict) and "adapter" in fs:
+        return fs["adapter"]
+    return doc.get("adapter")
+
+
 def write_adapter_txt(dest):
-    """adapter.txt: the status block "adapter" ({name, vendor, vram_mb}) as one JSON line, or `null` when the run has none."""
-    try:
-        adapter = json.loads((dest / "artifacts" / "xr-live-status.json").read_text(encoding="utf-8-sig")).get("adapter")
-    except (OSError, ValueError, AttributeError):
-        adapter = None
+    """adapter.txt: the adapter block ({name, vendor, vram_mb}) as one JSON line, or `null`. From xr-live-status.json, else
+    dxgi-probe-result.json (the only file a flat run writes)."""
+    adapter = None
+    for name in ("xr-live-status.json", "dxgi-probe-result.json"):
+        try:
+            adapter = adapter_of(json.loads((dest / "artifacts" / name).read_text(encoding="utf-8-sig")))
+        except (OSError, ValueError):
+            adapter = None
+        if adapter is not None:
+            break
     (dest / "adapter.txt").write_text(json.dumps(adapter) + "\n")
 
 
-def _recorded_knobs(build):
+# ---- the record of files the rig wrote: sha256 per path, so a restore after a hard kill removes only what is still ours
+
+def _rel_ok(rel):
+    parts = rel.split("/")
+    return len(parts) == 2 and parts[0] in ("build", "artifacts") and parts[1] not in ("", ".", "..") and "\\" not in rel and "\0" not in rel
+
+
+def read_record(build):
+    """-> ({relative path: sha256}, problem or None). A missing record is ({}, None)."""
     try:
-        names = (build / KNOBS_NAME).read_text().split()
+        data = json.loads((build / KNOBS_NAME).read_text())
+        files = data["files"]
+        if not isinstance(files, dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in files.items()):
+            raise ValueError("files")
+        return {k: v for k, v in files.items() if _rel_ok(k)}, None
+    except FileNotFoundError:
+        return {}, None
+    except (OSError, ValueError, KeyError, TypeError) as e:
+        return {}, f"cannot read {build / KNOBS_NAME} ({e}); remove the dev files in build/ by hand if you are sure they are not yours"
+
+
+def release_recorded(mod_home):
+    """Remove the files the record lists, but only those whose bytes still match the recorded sha256 (and are not symlinks).
+    -> (all_handled, notes). The record is dropped only when everything it lists is gone or was reported."""
+    mod_home = Path(mod_home)
+    files, problem = read_record(mod_home / "build")
+    notes, ok = ([problem] if problem else []), problem is None
+    for rel, digest in sorted(files.items()):
+        path = mod_home / rel
+        if path.is_symlink():
+            notes.append(f"{path} is a symlink; left alone")
+            ok = False
+        elif not path.exists():
+            continue
+        elif _sha(path) == digest:
+            path.unlink()
+        else:
+            notes.append(f"{path} no longer holds what the run wrote (you or another tool changed it); left alone")
+            ok = False
+    if ok:
+        (mod_home / "build" / KNOBS_NAME).unlink(missing_ok=True)
+    return ok, notes
+
+
+def check_run_files(mod_home, knobs, settings, a):
+    """Refuse (before anything is written) to touch a file the user owns or a symlink: -> list of problems."""
+    build, art = mod_home / "build", mod_home / "artifacts"
+    problems = []
+    for n in knobs:
+        if n in RESERVED_KNOBS or n.removeprefix("linux-").startswith(("probe-override", "sim-knobs")):
+            problems.append(f"--knob {n} is a file the rig itself owns; pick another name")
+        elif os.path.lexists(build / n):
+            what = "--vr-setting temporal_aa" if n == AA_MODE_KNOB and "temporal_aa" in settings else f"--knob {n}"
+            problems.append(f"{build / n} already exists and {what} would overwrite it; remove it or drop the option")
+    targets = [build / OVERRIDE_NAME, build / SCRIPT_CFG, art / SCRIPT_JSON, build / AUTOCONTINUE_NAME, build / SETTLE_NAME,
+               build / KNOBS_NAME, *(build / n for n in knobs)]
+    for t in targets:
+        if t.is_symlink():
+            problems.append(f"{t} is a symlink; refusing to write through it")
+    return problems
+
+
+def user_knob_files(build, rig_names):
+    """Names in build/ that the run did not write itself: the probe reads many of them unconditionally."""
+    try:
+        names = sorted(p.name for p in Path(build).iterdir() if p.name not in rig_names and p.name not in NOT_KNOBS
+                       and not p.name.endswith((".dll", ".d2vr-tmp")) and not p.name.startswith("."))
     except OSError:
         return []
-    return [n for n in names if KNOB_RE.fullmatch(n)]  # never a path
+    return names
 
 
 def do_restore(a, home, env):
     """`sim --restore [BACKUP]`: restore the DLL and saves of every pending (or the named) backup, oldest first, and clean
     the dev knobs. All backups are tried; the oldest backup owns the original DLL per path."""
-    with run_lock(home):
+    inst = steam.locate(home, a.steam_root)
+    mod_home = Path(a.mod_home) if a.mod_home else modhome.mod_home_dir(inst.prefix)
+    with run_lock(mod_home):
         return _do_restore(a, home, env)
 
 
@@ -807,10 +897,13 @@ def _do_restore(a, home, env):
             if not ok:
                 env.out(f"[sim]   {clear_hint(backup)}")
             failed = failed or not ok
-    for name in (OVERRIDE_NAME, AUTOCONTINUE_NAME, SCRIPT_CFG, KNOBS_NAME, *_recorded_knobs(mod_home / "build")):  # dev knobs would change the real game: gone whatever happened above
-        (mod_home / "build" / name).unlink(missing_ok=True)
-    (mod_home / "artifacts" / SCRIPT_JSON).unlink(missing_ok=True)
-    return 2 if failed else 0
+    # dev knobs would change the real game: gone, but only the files the record proves the rig wrote and nobody changed since
+    released, notes = release_recorded(mod_home)
+    for n in notes:
+        env.out(f"[sim]   {n}")
+    if not released:
+        env.out(f"[sim] some dev files in {mod_home / 'build'} were left alone (see above); check them by hand")
+    return 2 if failed or not released else 0
 
 
 def _plan(a, home, env):
@@ -837,8 +930,8 @@ def _plan(a, home, env):
     if len(dlls) != 1:
         problems.append(f"expected exactly one d2vr_render_probe_arm_v*.dll in {mod_home / 'build'} (found {len(dlls)})")
     for name in (OVERRIDE_NAME, AUTOCONTINUE_NAME, KNOBS_NAME):
-        if (mod_home / "build" / name).exists():
-            problems.append(f"{mod_home / 'build' / name} exists (an earlier run?); remove it or run: d2vr-linux sim --restore")
+        if os.path.lexists(mod_home / "build" / name):
+            problems.append(f"{mod_home / 'build' / name} exists (an earlier run?); run: d2vr-linux sim --restore (it removes only what the run wrote); otherwise remove it by hand")
     candidate = None
     if getattr(a, "candidate_dll", None) and (mod_home / "build").is_symlink():
         problems.append(f"{mod_home / 'build'} is a symlink; refusing to swap a DLL through it")
@@ -883,7 +976,9 @@ def run_sim(a, home, env):
         return do_restore(a, home, env)
     if a.dry_run:
         return _run_sim(a, home, env)
-    with run_lock(home):
+    inst = steam.locate(home, a.steam_root)
+    mod_home = Path(a.mod_home) if a.mod_home else modhome.mod_home_dir(inst.prefix)
+    with run_lock(mod_home):
         return _run_sim(a, home, env)
 
 
@@ -898,6 +993,9 @@ def _run_sim(a, home, env):
         knobs.append(AA_MODE_KNOB)
     inst, mod_home, seconds, script_json, script_cfg, candidate = _plan(a, home, env)
     override = sim_probe_config(seconds, probe_mode=probe_mode, resolution=settings.get("resolution"))
+    owned = check_run_files(mod_home, knobs, settings, a)
+    if owned:
+        raise SimError("; ".join(owned))
     build, art = mod_home / "build", mod_home / "artifacts"
     env.out(f"[sim] scenario {a.script or a.scenario}: {seconds} s session, mod home {mod_home}")
     if a.dry_run:
@@ -917,7 +1015,7 @@ def _run_sim(a, home, env):
     stamp = _timestamp()
     backup = backup_saves(inst.prefix, a.backup_root, stamp)
     env.out(f"[sim] saves backed up to {backup}")
-    guard, notes, launched, rc, reason, placed = FileGuard(), [], False, 1, "", False
+    guard, notes, launched, rc, reason, placed, user_knobs = FileGuard(), [], False, 1, "", False, []
     run_dir = Path(a.out_root) / stamp
     started = None
     try:
@@ -939,18 +1037,25 @@ def _run_sim(a, home, env):
             swap_in_test_save(inst.prefix, a.test_save)
             env.out(f"[sim] test save {a.test_save} swapped in")
         guard.remember(build / "dxgi-probe.cfg")
-        guard.write(build / OVERRIDE_NAME, override)
-        guard.write(build / SCRIPT_CFG, script_cfg)
-        guard.write(art / SCRIPT_JSON, script_json)
+        as_bytes = lambda x: x if isinstance(x, bytes) else x.encode("utf-8")  # noqa: E731
+        planned = {build / OVERRIDE_NAME: as_bytes(override), build / SCRIPT_CFG: as_bytes(script_cfg), art / SCRIPT_JSON: as_bytes(script_json)}
         if a.autocontinue:
-            guard.write(build / AUTOCONTINUE_NAME, str(a.autocontinue_delay) + "\n")
+            planned[build / AUTOCONTINUE_NAME] = (str(a.autocontinue_delay) + "\n").encode()
         if a.settle is not None:
-            guard.write(build / SETTLE_NAME, str(a.settle) + "\n")
-        fresh_knobs = [n for n in knobs if not (build / n).exists()]
-        if fresh_knobs:  # a hard kill skips the guard; `sim --restore` removes these by name
-            guard.write(build / KNOBS_NAME, "\n".join(fresh_knobs) + "\n")
+            planned[build / SETTLE_NAME] = (str(a.settle) + "\n").encode()
         for n in knobs:
-            guard.write(build / n, f"{settings['temporal_aa']}\n" if n == AA_MODE_KNOB and "temporal_aa" in settings else "")
+            planned[build / n] = (f"{settings['temporal_aa']}\n" if n == AA_MODE_KNOB and "temporal_aa" in settings else "").encode()
+        # the record first (a hard kill skips the guard): path -> sha256 of the bytes about to be written
+        record = {str(p.relative_to(mod_home)): hashlib.sha256(d).hexdigest() for p, d in planned.items()}
+        guard.write(build / KNOBS_NAME, json.dumps({"version": 1, "files": record}, indent=1) + "\n")
+        for p, d in planned.items():
+            guard.write(p, d)
+        rig_names = {p.name for p in planned} | {KNOBS_NAME}
+        user_knobs = user_knob_files(build, rig_names)
+        rendering = [n for n in user_knobs if RENDER_KNOB_RE.match(n)]
+        if rendering:
+            env.out("[sim] warning: build/ already holds knobs that change rendering: " + ", ".join(rendering) +
+                    ". They apply to this run (the probe reads them unconditionally); the report lists them per run")
         env.launch_env = launch_env
         bad = conflicts(env.proc_root)
         if bad:
@@ -1005,7 +1110,8 @@ def _run_sim(a, home, env):
                     gone = not game_processes(env.proc_root)
             try:
                 snapshot(mod_home, run_dir, {"scenario": a.script or a.scenario, "seconds": seconds, "override": override,
-                                             "return_code": rc, "reason": reason, "notes": notes, "backup": str(backup)})
+                                             "return_code": rc, "reason": reason, "notes": notes, "backup": str(backup),
+                                             "probe_mode": probe_mode, "user_knobs": user_knobs, "rig_knobs": knobs})
                 env.out(f"[sim] artifacts snapshot: {run_dir}")
             except Exception as e:  # noqa: BLE001
                 env.out(f"[sim] snapshot failed ({type(e).__name__}): {e}")
@@ -1043,7 +1149,10 @@ def _run_sim(a, home, env):
                 env.out(f"[sim] the game is still running: saves NOT restored.{dll_note} Close it, then run: d2vr-linux sim --restore ({backup})")
                 rc = 2
     env.out(f"[sim] result: {'OK' if rc == 0 else 'FAILED'}{(' (' + reason + ')') if reason else ''}")
-    env.out("[sim] status fields (xr-live-status.json):")
-    for line in summarize(run_dir / "artifacts" / "xr-live-status.json", a.status_field or DEFAULT_FIELDS):
+    status_file = run_dir / "artifacts" / "xr-live-status.json"
+    if not status_file.is_file() and (run_dir / "artifacts" / "dxgi-probe-result.json").is_file():
+        status_file = run_dir / "artifacts" / "dxgi-probe-result.json"  # a flat probe mode writes only the result file
+    env.out(f"[sim] status fields ({status_file.name}):")
+    for line in summarize(status_file, a.status_field or DEFAULT_FIELDS):
         env.out(line)
     return rc
