@@ -33,6 +33,7 @@
 #include <utility>
 
 namespace d2vr {
+struct NativeHeldReleased {std::uintptr_t entity{};std::uint32_t id{},handle{};};   // the object a real throw/drop handed back (release height watch)
 class NativeHeldObject {
     friend struct NativeHeldObjectCheck;
 public:
@@ -196,41 +197,85 @@ public:
     inline static std::atomic<std::uintptr_t> layer_settled_{};
     static bool layer_settled(std::uintptr_t entity) noexcept {return entity && layer_settled_.load(std::memory_order_acquire)==entity;}
     template<class Read> static bool debris_layer(std::uintptr_t base,Read& read,std::uintptr_t entity) {
-        if(layer_entity_ && layer_entity_!=entity) restore_layer(base,read);
+        if(layer_entity_ && layer_entity_!=entity) {ledger_.released(layer_entity_);layer_entity_=0;}   // its restore stays pending; a new grab never overwrites it
         if(layer_entity_==entity) {layer_settled_.store(entity,std::memory_order_release);return true;}
-        const auto body=throwable_body(base,read,entity);
-        if(body && (body->second&0x1f)!=layer_rigid_body) {layer_settled_.store(entity,std::memory_order_release);return false;}   // a bottle: nothing to write
-        if(!body || !set_filter(base,read,body->first,(body->second&~0x1fu)|layer_debris)) return false;
-        layer_entity_=entity;layer_handle_=body->first;layer_filter_=body->second;++layers_swapped;ledger_.swapped();layer_settled_.store(entity,std::memory_order_release);return true;
+        const auto body=throwable_body_full(base,read,entity);
+        if(body && (body->filter&0x1f)!=layer_rigid_body) {layer_settled_.store(entity,std::memory_order_release);return false;}   // a bottle: nothing to write
+        const auto id=rig::value<std::uint32_t>(read,entity+0xa8);
+        if(!body || !body->record_ok || !body->identity_ok || !id || !set_filter(base,read,body->handle,(body->filter&~0x1fu)|layer_debris)) return false;
+        LayerEntry e;e.entity=entity;e.entity_id=*id;e.handle=body->handle;e.filter=body->filter;e.generation=body->identity.generation;e.flags=body->identity.flags;
+        layer_entity_=entity;++layers_swapped;ledger_.swapped(e);layer_settled_.store(entity,std::memory_order_release);return true;
     }
-    // Game thread, every frame: give the body its own layer back when clear() asked (hold end or a transient clear), then, while an entity is
-    // held, take the DEBRIS layer again. The layer is serviced apart from the render scale, which is 0 after the first request.
+    // Any thread: the pose epoch (level load, session change). The game thread gives every pending restore up without writing.
+    inline static std::atomic<std::uint64_t> epoch_seen_{};
+    static void note_epoch(std::uint64_t epoch) noexcept {epoch_seen_.store(epoch,std::memory_order_release);}
+    // Any thread: the hold ended by a real throw or drop of this entity (not a transient clear). The watch starts when its restore lands.
+    inline static std::atomic<std::uintptr_t> real_release_{};
+    static void note_real_release(std::uintptr_t entity) noexcept {real_release_.store(entity,std::memory_order_release);}
+    // Game thread, every frame: pending restores run (retried until the budget is spent), then, while an entity is held, it takes the
+    // DEBRIS layer again. The layer is serviced apart from the render scale, which is 0 after the first request.
     template<class Read> static void service_hold_layers(std::uintptr_t base,Read& read,std::uintptr_t entity) {
-        if(layer_restore_.exchange(false)) restore_layer(base,read);
+        const auto epoch=epoch_seen_.load(std::memory_order_acquire);
+        if(epoch!=layer_epoch_) {
+            layer_epoch_=epoch;
+            if(ledger_.pending()) {const auto before=ledger_.abandoned();ledger_.clear_all();layers_abandoned+=ledger_.abandoned()-before;}
+            layer_entity_=0;layer_settled_.store(0,std::memory_order_release);real_release_.store(0);released_ = {};
+        }
+        if(layer_restore_.exchange(false)) restore_layer(base,read);else restore_pending(base,read);
         if(entity && live_entity(base,read,entity)) debris_layer(base,read,entity);
     }
-    // Game thread: the hold ended (clear() asks); the body gets its own layer back while it is still the same body.
+    // The hold ended (clear() asks): the held entry becomes releasable and every pending restore runs. True when a restore landed in this call.
     template<class Read> static bool restore_layer(std::uintptr_t base,Read& read) {
-        if(!layer_entity_) return false;
-        const auto step=ledger_.attempt(live_entity(base,read,layer_entity_));
-        if(step==LayerLedger::Step::give_up) {layer_entity_=0;layer_settled_.store(0,std::memory_order_release);++layers_abandoned;return false;}
-        if(step==LayerLedger::Step::none) {layer_entity_=0;return false;}
-        // The original layer bits go back on the body's CURRENT handle and filter (the handle can be reissued after the throw).
-        const auto body=throwable_body(base,read,layer_entity_);
-        const bool ok=body && set_filter(base,read,body->first,(body->second&~0x1fu)|(layer_filter_&0x1fu));
-        ledger_.result(ok);
-        if(ok) {released_entity.store(layer_entity_);layer_entity_=0;layer_settled_.store(0,std::memory_order_release);++layers_restored;return true;}
-        ++layer_restore_misses;layer_restore_.store(true,std::memory_order_release);   // retry next frame (bounded by the ledger)
-        return false;
+        const auto before=layers_restored.load();
+        if(layer_entity_) {ledger_.released(layer_entity_);layer_entity_=0;layer_settled_.store(0,std::memory_order_release);}
+        restore_pending(base,read);
+        return layers_restored.load()>before;
     }
+    // The object a restore may write: same entity id and registry slot, same body component identity, same pool handle and record self-handle.
+    template<class Read> static LayerLedger::Probe probe_entry(std::uintptr_t base,Read& read,const LayerEntry& e) {
+        const auto id=rig::value<std::uint32_t>(read,e.entity+0xa8);
+        const auto game=rig::value<std::uintptr_t>(read,base+0x39a5290);
+        if(!id || !game || !rig::pointer(*game)) return LayerLedger::Probe::unreadable;
+        if(*id!=e.entity_id || *id==0x3fff0010 || (*id>>16)>=0x3fff) return LayerLedger::Probe::mismatch;
+        const auto slot=rig::value<std::uintptr_t>(read,*game+0x3130b0+(*id>>16)*8ull);
+        if(!slot) return LayerLedger::Probe::unreadable;
+        if(*slot!=e.entity) return LayerLedger::Probe::mismatch;
+        const auto body=throwable_body_full(base,read,e.entity);
+        if(!body) return LayerLedger::Probe::unreadable;
+        if(!body->record_ok || !body->identity_ok || body->handle!=e.handle || body->identity.generation!=e.generation || body->identity.flags!=e.flags) return LayerLedger::Probe::mismatch;
+        return LayerLedger::Probe::match;
+    }
+    template<class Read> static void restore_pending(std::uintptr_t base,Read& read) {
+        if(!ledger_.pending()) return;
+        const auto before=ledger_.abandoned();
+        ledger_.service(
+            [&](const LayerEntry& e){return probe_entry(base,read,e);},
+            [&](const LayerEntry& e){
+                const auto body=throwable_body_full(base,read,e.entity);   // the final identity re-read, immediately before the write
+                if(!body || probe_entry(base,read,e)!=LayerLedger::Probe::match) return LayerLedger::Write::mismatch;
+                const bool ok=set_filter(base,read,body->handle,(body->filter&~0x1fu)|(e.filter&0x1fu));
+                if(!ok) ++layer_restore_misses;
+                return ok?LayerLedger::Write::ok:LayerLedger::Write::failed;
+            },
+            [&](const LayerEntry& e,bool restored){
+                if(restored) {
+                    ++layers_restored;
+                    // The release watch follows only a real throw or drop of this very entity.
+                    if(real_release_.load(std::memory_order_acquire)==e.entity) {real_release_.store(0);released_={e.entity,e.entity_id,e.handle};released_pending_.store(true,std::memory_order_release);}
+                }
+            });
+        layers_abandoned+=ledger_.abandoned()-before;
+    }
+    using Released=NativeHeldReleased;
+    inline static Released released_{};inline static std::atomic<bool> released_pending_{};
+    inline static std::uint64_t layer_epoch_{};
     inline static LayerLedger ledger_{};
-    inline static std::atomic<std::uintptr_t> released_entity{};   // set when a swapped object is handed back (restored or given up); the release height watch takes it
     inline static std::atomic<std::uint64_t> layers_abandoned{},layer_restore_misses{};
-    // Live layer counters for the status (the per-hold carry block is only noted while a hold lasts, so it never sees a restore).
     static std::string layer_json() {
-        char b[256];std::snprintf(b,sizeof(b),"{\"swaps\":%llu,\"restores\":%llu,\"abandoned\":%llu,\"misses\":%llu,\"restores_per_release\":%.3f}",
+        char b[256];std::snprintf(b,sizeof(b),"{\"swaps\":%llu,\"restores\":%llu,\"abandoned\":%llu,\"misses\":%llu,\"pending\":%u,\"restores_per_release\":%.3f}",
             (unsigned long long)layers_swapped.load(),(unsigned long long)layers_restored.load(),(unsigned long long)layers_abandoned.load(),
-            (unsigned long long)layer_restore_misses.load(),layers_swapped.load()?double(layers_restored.load())/double(layers_restored.load()+layers_abandoned.load()?layers_restored.load()+layers_abandoned.load():1):0.);
+            (unsigned long long)layer_restore_misses.load(),ledger_.pending(),
+            (layers_restored.load()+layers_abandoned.load())?double(layers_restored.load())/double(layers_restored.load()+layers_abandoned.load()):0.);
         return b;
     }
     // Diagnostics, read only: the collision layer (filter word & 0x1f) of the held entity's throwable body; 3 RIGID_BODY, 4 DEBRIS.
@@ -290,9 +335,10 @@ private:
     static Target data_; // defined after the class: clang-cl needs Target's member initializers complete
     inline static std::atomic<std::uintptr_t> rf_{},throw_entity_{};inline static std::atomic<std::uint64_t> throw_tick_{};
     inline static float throw_v_[3]{};
-    inline static std::uintptr_t layer_entity_{};inline static std::uint32_t layer_handle_{},layer_filter_{}; // game thread
+    inline static std::uintptr_t layer_entity_{}; // game thread
     // The throwable rigid body of a held entity: its physics handle and the filter word of its pool record.
-    template<class Read> static std::optional<std::pair<std::uint32_t,std::uint32_t>> throwable_body(std::uintptr_t base,Read& read,std::uintptr_t entity,std::uintptr_t* component_out=nullptr) {
+    struct Body {std::uint32_t handle{},filter{};std::uintptr_t component{};rig::Identity identity{};bool record_ok{},identity_ok{};};
+    template<class Read> static std::optional<Body> throwable_body_full(std::uintptr_t base,Read& read,std::uintptr_t entity) {
         using namespace rig;
         const auto game=value<std::uintptr_t>(read,base+0x39a5290);const auto entries=entity?list(read,entity+0x268,256):std::nullopt;
         if(!game || !pointer(*game) || !entries) return {};
@@ -305,9 +351,16 @@ private:
         if(!handle || !*handle || !world || !pointer(*world) || value<std::uintptr_t>(read,component+0x10)!=entity) return {};
         const auto pool=value<std::uintptr_t>(read,*world+0x28);const auto count=value<std::uint32_t>(read,*world+0x30);const auto index=*handle&0xffffff;
         if(!pool || !pointer(*pool) || !count || *count>0x100000 || index==0xffffff || index>=*count) return {};
-        const auto filter=value<std::uint32_t>(read,*pool+index*0xb0+0x6c);if(!filter) return {};
-        if(component_out) *component_out=component;
-        return std::pair<std::uint32_t,std::uint32_t>{*handle,*filter};
+        const auto record=*pool+index*0xb0;
+        const auto filter=value<std::uint32_t>(read,record+0x6c);if(!filter) return {};
+        const auto first=value<std::uint32_t>(read,record+0x70),second=value<std::uint32_t>(read,record+0x74);
+        const auto identity=started(read,component);
+        return Body{*handle,*filter,component,identity?*identity:Identity{},first && second && *first==*handle && *second==*handle,identity.has_value()};
+    }
+    template<class Read> static std::optional<std::pair<std::uint32_t,std::uint32_t>> throwable_body(std::uintptr_t base,Read& read,std::uintptr_t entity,std::uintptr_t* component_out=nullptr) {
+        const auto b=throwable_body_full(base,read,entity);if(!b) return {};
+        if(component_out) *component_out=b->component;
+        return std::pair<std::uint32_t,std::uint32_t>{b->handle,b->filter};
     }
     template<class Read> static bool set_filter(std::uintptr_t base,Read& read,std::uint32_t handle,std::uint32_t filter) {
         const auto game=rig::value<std::uintptr_t>(read,base+0x39a5290);if(!game || !rig::pointer(*game)) return false;

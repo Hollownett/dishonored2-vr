@@ -344,6 +344,7 @@ int main() {
         memory.put(component,base_address+0x1b64b68);memory.put(component+0x10,entity);memory.put(component+0xf8,handle);
         memory.put(game_address+0x60410,world);memory.put(world+0x28,pool);memory.put(world+0x30,std::uint32_t{3});
         memory.put(pool+2*0xb0+0x6c,std::uint32_t{(0x20u<<5)|3u});
+        memory.put(pool+2*0xb0+0x70,handle);memory.put(pool+2*0xb0+0x74,handle);memory.put(component+0x18,r::Identity{42,10});
         static std::vector<std::array<std::uint32_t,2>> written;written.clear();
         {   // the body is recreated for the same entity (new handle, same component): the cache re-keys instead of reading a stale record
             Held::LayerCache c;assert(Held::held_layer(base_address,reader,entity,c)==3u && c.handle==handle);
@@ -369,6 +370,14 @@ int main() {
         memory.put(pool+2*0xb0+0x6c,std::uint32_t{(0x20u<<5)|4u});
         assert(!Held::debris_layer(base_address,reader,entity) && written.size()==2);
         assert(Held::held_layer(base_address,reader,entity)==4u && written.size()==2 && !Held::held_layer(base_address,reader,0));
+        {   // the body was recreated (new identity) after the swap: the restore is given up and never written
+            memory.put(pool+2*0xb0+0x6c,std::uint32_t{(0x20u<<5)|3u});
+            assert(Held::debris_layer(base_address,reader,entity) && written.size()==3);
+            memory.put(component+0x18,r::Identity{43,10});
+            const auto gave_up=Held::layers_abandoned.load();
+            assert(!Held::restore_layer(base_address,reader) && written.size()==3 && Held::layers_abandoned.load()==gave_up+1 && Held::ledger_.pending()==0);
+            memory.put(component+0x18,r::Identity{42,10});
+        }
         std::printf("held layer: tank filter 0x%x -> 0x%x for the hold, restored; bottle (DEBRIS) untouched\n",written[1][1],written[0][1]);
         Held::filter_seam_=nullptr;
     }
@@ -381,6 +390,7 @@ int main() {
         static std::vector<std::array<std::uint32_t,2>> written;written.clear();
         static std::uintptr_t filter_at=0;filter_at=pool+2*0xb0+0x6c;
         memory.put(filter_at,std::uint32_t{(0x20u<<5)|3u});
+        memory.put(pool+2*0xb0+0x70,handle);memory.put(pool+2*0xb0+0x74,handle);memory.put(component+0x18,r::Identity{42,10});
         Held::filter_seam_=[](std::uintptr_t,std::uint32_t h,std::uint32_t f) {written.push_back({h,f});memory.put(filter_at,f);return true;}; // the engine keeps what it is given
         Held::clear();Held::layer_restore_.store(false);
         const auto swapped=Held::layers_swapped.load();

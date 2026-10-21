@@ -595,18 +595,21 @@ class NativeInteractionAim {
             // Full-grip sword: equip requests from the input thread and the dropped copy (native_weapon_hands.hpp).
             if(self->logic_()==2) try {NativeWeaponHands::service(self->base_,self->read_);} catch(...) {}
             // The held object's collision layer is serviced every frame (restore on clear, then DEBRIS while held), apart from its render scale.
-            // Released object height watch (status "release_watch"): z at release, minimum and last over the next 3 s. Game Z is up.
+            // Released object height watch (status "release_watch"): z at a real throw/drop's restore, minimum and last over the next 3 s.
+            // Game Z is up. Read-only; it stops when the entity id and body handle no longer validate.
             if(self->active_ && self->logic_()==2) try {
-                if(const auto e=NativeHeldObject::released_entity.exchange(0)) {
-                    if(const auto b=native_rigid_body(self->read_,self->base_,e,true)) {
-                        release_watch_entity_=e;release_watch_until_=GetTickCount64()+3000;
+                if(NativeHeldObject::released_pending_.exchange(false)) {
+                    const auto r=NativeHeldObject::released_;
+                    if(const auto b=native_rigid_body(self->read_,self->base_,r.entity,true);b && b->entity_id==r.id && b->handle==r.handle) {
+                        release_watch_entity_=r.entity;release_watch_id_=r.id;release_watch_handle_=r.handle;release_watch_until_=GetTickCount64()+3000;
                         const float z=static_cast<float>(b->pose.position.z);release_watch_z0_=release_watch_min_=release_watch_last_=z;++release_watches_;
                     }
                 }
                 if(release_watch_entity_ && GetTickCount64()<release_watch_until_) {
-                    if(const auto b=native_rigid_body(self->read_,self->base_,release_watch_entity_,true)) {
+                    const auto b=native_rigid_body(self->read_,self->base_,release_watch_entity_,true);
+                    if(b && b->entity_id==release_watch_id_ && b->handle==release_watch_handle_) {
                         const float z=static_cast<float>(b->pose.position.z);release_watch_last_=z;if(z<release_watch_min_) release_watch_min_=z;
-                    }
+                    } else release_watch_entity_=0;
                 } else release_watch_entity_=0;
             } catch(...) {}
             {const auto held=held_world_.exchange(0);if(self->active_ && self->logic_()==2) try {NativeHeldObject::service_hold_layers(self->base_,self->read_,held);if(held) NativeHeldObject::world_render(self->base_,self->read_,held);} catch(...) {}}
@@ -772,7 +775,7 @@ public:
     inline static std::atomic<unsigned> arm_show_{};
     static void request_arm_show(unsigned mask) noexcept {arm_show_|=mask;}
     inline static std::atomic<std::uintptr_t> held_world_{};
-    inline static std::uintptr_t release_watch_entity_{};inline static std::uint64_t release_watch_until_{};
+    inline static std::uintptr_t release_watch_entity_{};inline static std::uint32_t release_watch_id_{},release_watch_handle_{};inline static std::uint64_t release_watch_until_{};
 public:
     inline static std::atomic<float> release_watch_z0_{},release_watch_min_{},release_watch_last_{};inline static std::atomic<std::uint64_t> release_watches_{};
     static std::string release_watch_json() {

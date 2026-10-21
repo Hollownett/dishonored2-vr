@@ -4716,6 +4716,7 @@ void prepare_head_view(void* view) noexcept {
                 native_grab.discover_contacts(); // the registry scan, off the physics thread
             }
             const auto tracked_stamp=tracked_arms_requested?arm_tracking.publish(hands):d2vr::rig::ArmTrackingStamp{};
+            d2vr::NativeHeldObject::note_epoch(hands.epoch);
             d2vr::NativeHeldPlacement::process_owner().context(hands.epoch,held_object_installed && full_body_requested &&
                 tracked_arms_requested && !full_body_stopping.load() && avatar_pose_gate.load() && !authored_camera &&
                 game_logic_mask()==2 && game_xr->state==XR_SESSION_STATE_FOCUSED && game_xr->last_action_sync==XR_SUCCESS);
@@ -7559,8 +7560,8 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                          d2vr::Vec3 tv{r.velocity[0],r.velocity[1],r.velocity[2]};   // the hook scales it (engine speed, or the old x1.5 capped at 20 with build/legacy-throw)
                                          const float f3[3]{float(tv.x),float(tv.y),float(tv.z)};
                                          if(entity && held_object_installed) d2vr::NativeHeldObject::arm_throw(entity,f3);
-                                         held_rt_until=now_h+120;++held_throws;}
-                                     else if(r.drop) {held_use_until=now_h+100;++held_drops;}
+                                         held_rt_until=now_h+120;++held_throws;d2vr::NativeHeldObject::note_real_release(entity);}
+                                     else if(r.drop) {held_use_until=now_h+100;++held_drops;d2vr::NativeHeldObject::note_real_release(entity);}
                                      if(now_h<held_rt_until) input.right_trigger=1;
                                      if(now_h<held_use_until) input.x=true;}
                                     // Holster: a B press holds native Interact (the game sheathes on a long Interact).
