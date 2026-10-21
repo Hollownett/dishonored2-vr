@@ -22,6 +22,36 @@ inline bool alternate_image_fresh(std::uint64_t rendered_frame, std::uint64_t no
     return rendered_frame != 0 && rendered_frame <= now && now - rendered_frame <= alternate_max_age;
 }
 
+// Gating the glue uses, kept pure so the tests exercise the real decisions. Authored and settings state is read AT the Present that submits a
+// frame; the plan (made one Present earlier) is never trusted for it.
+inline bool alternate_free_gameplay(bool gameplay, bool settings_open) noexcept {return gameplay && !settings_open;}
+// A one-view frame may be presented as an alternated eye only in free gameplay. Otherwise the frame is dropped (never one fresh eye + one stale).
+inline bool alternate_single_view_allowed(bool authored, bool settings_open) noexcept {return !authored && !settings_open;}
+// An eye image may be kept for later frames only if it was made in free gameplay (never a cut, takedown, menu or settings image).
+inline bool alternate_may_keep(bool gameplay, bool authored, bool settings_open) noexcept {return gameplay && !authored && !settings_open;}
+// The one eye rendered for this Present: the recorded view's eye when a one-view frame is ready, else -1 (paired / both eyes fresh).
+inline int alternate_fresh_eye(bool on, bool single_view_path, bool ready, std::uint64_t head_stamp) noexcept {
+    return on && single_view_path && ready ? static_cast<int>(head_stamp & 1u) : -1;
+}
+// Eyes whose view must have been recorded for this Present (bit per eye).
+inline unsigned alternate_need_mask(int fresh_eye) noexcept {return fresh_eye == 0 ? 1u : fresh_eye == 1 ? 2u : 3u;}
+inline bool alternate_pair_ready(unsigned rendered_mask, int fresh_eye, bool layers_ok) noexcept {
+    const unsigned need = alternate_need_mask(fresh_eye);
+    return (rendered_mask & need) == need && layers_ok;
+}
+// Consecutive plan/observation disagreements; true when the session must fall back to paired.
+class AlternateMismatch {
+public:
+    static constexpr unsigned limit = 30;
+    bool note(bool mismatch) noexcept {
+        if (!mismatch) {run_ = 0; return false;}
+        return ++run_ >= limit;
+    }
+    void reset() noexcept {run_ = 0;}
+private:
+    unsigned run_{};
+};
+
 class AlternateEye {
 public:
     // The eye (0 left, 1 right) the engine renders for `frame`, or -1 for a paired frame (both eyes rendered, both fresh).
@@ -35,7 +65,12 @@ public:
         int result = -1;
         if (gameplay && !authored) {
             const int eye = static_cast<int>(frame & 1u);
-            if (can_submit(1 - eye, frame)) result = eye;
+            // The first free frame after a menu, cut, takedown or settings panel is paired: whatever images exist were made before or during it.
+            if (!refresh_ && can_submit(1 - eye, frame)) result = eye;
+            refresh_ = false;
+        } else {
+            refresh_ = true;
+            clear_images();
         }
         have_ = true;
         last_frame_ = frame;
@@ -53,6 +88,7 @@ public:
     void reset() noexcept {
         clear_images();
         have_ = false;
+        refresh_ = true;
         last_frame_ = 0;
         last_result_ = -1;
     }
@@ -65,6 +101,7 @@ private:
     std::uint64_t last_frame_{};
     int last_result_{-1};
     bool have_{};
+    bool refresh_{true};
 };
 
 template <class View>

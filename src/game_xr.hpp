@@ -1408,13 +1408,13 @@ public:
     // True when both eyes can be submitted with views that match their images. Paired mode: the old rendered_mask_==3 rule.
     bool tracked_pair_() const {
         if(!alternate_enabled) return rendered_mask_==3;
-        const UINT need=alternate_fresh_eye<0?3u:1u<<alternate_fresh_eye;
-        return (rendered_mask_&need)==need && build_layer_views(alt_effective_(),alternate_frame,pose_epoch()).ok;
+        return alternate_pair_ready(rendered_mask_,alternate_fresh_eye,build_layer_views(alt_effective_(),alternate_frame,pose_epoch()).ok);
     }
     XrView tracked_view_(UINT eye) const {return alternate_enabled?build_layer_views(alt_effective_(),alternate_frame,pose_epoch()).views[eye]:rendered_views_[eye];}
     // The eye that was not rendered this frame needs its kept image, at the swapchain's size.
-    bool alt_kept_ok_() const {
+    bool alt_kept_ok_(bool nonfree) const {
         if(!alternate_enabled || alternate_fresh_eye<0) return true;
+        if(nonfree) return false; // authored scene / settings panel: a single fresh eye is never paired with a kept one (the probe drops these frames already)
         const auto& kept=alt_kept_[static_cast<std::size_t>(1-alternate_fresh_eye)];
         if(!kept) return false;
         D3D11_TEXTURE2D_DESC desc{};kept->GetDesc(&desc);
@@ -1515,6 +1515,7 @@ public:
     // desktop: the game's backbuffer; in gameplay it receives the processed eyes per the monitor-view setting.
     void present(ID3D11Texture2D* left,ID3D11Texture2D* right,float hfov,float vfov,bool gameplay=true,bool authored_camera=false,bool settings_available=false,
         ID3D11Texture2D* desktop=nullptr,std::array<UINT,2> desktop_view={},bool cinematic=false) {
+        if(!alternate_enabled && (alt_kept_[0] || alt_kept_[1])) {alt_kept_[0].Reset();alt_kept_[1].Reset();alt_records_={};} // fallen back: release the kept copies
         const bool world_scene=gameplay || world_ui_kind_!=0;
         last_world_ui_layer=false;
         timing={};timing.start_ns=cpu_time_ns();
@@ -1752,7 +1753,7 @@ public:
         const bool settings_world=gameplay && settings_.open();settings_in_world_=settings_world;
         std::optional<XrCompositionLayerQuad> settings_panel;
         if(continuity_.usable() && left && right &&
-           (!world_scene || !tracked_gameplay_required_ || tracked_pair_()) && alt_kept_ok_()) {
+           (!world_scene || !tracked_gameplay_required_ || tracked_pair_()) && alt_kept_ok_(authored_camera || settings_.open())) {
             std::array<ID3D11Texture2D*,2> sources{left,right};bool menu_band_ready=false;
             if(settings_.open()) {update_settings_image(pointer);++settings_layers;}
             const auto sharpness=static_cast<float>(settings_.sharpness());
@@ -1801,7 +1802,10 @@ public:
                     settings_compositor_->end(images_[eye].at(index).texture);
                     if(observe_settings_composition) observe_settings_composition(processed,images_[eye].at(index).texture,rect);
                 } else context_->CopyResource(images_[eye].at(index).texture,processed);}
-                if(alternate_enabled && !alt_stale && gameplay) keep_alternate_eye_(eye,processed);
+                if(alternate_enabled && !alt_stale && gameplay) {
+                    if(alternate_may_keep(gameplay,authored_camera,settings_.open())) keep_alternate_eye_(eye,processed);
+                    else alt_records_[eye]={}; // a cut, takedown or settings image is shown now and never kept
+                }
                 {ModGpuScope overlay_scope(context_.Get(),ModSpan::eye_overlay); // task 3b: native object art + desktop mirror draws
                 layers[eye].type=XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW;
                 layers[eye].pose=tracked_pair_()?tracked_view_(eye).pose:views_[eye].pose;

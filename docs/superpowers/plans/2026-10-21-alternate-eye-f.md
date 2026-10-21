@@ -76,6 +76,7 @@
 
 **Files:** `src/fsr_taa.hpp`, `src/game_stereo.hpp` (jitter index), `src/dxgi_probe.cpp` (`view_setup_hook`, previous matrices), and `src/native_taa_history.hpp`.
 
+- Carry-over from Task 1 review: `prepare_head_view` still indexes `fsr_vfov[eye]`, `jitter_counter[eye]` and the TAA publishes by the native slot (always 0 in alternate mode), while the logical eye is `alt_eye`. Decide per-eye vs forced-off here.
 - [ ] **Step 1: Decide by evidence.** Log the view object's address and its previous-matrix and jitter fields (`+0x7850`, per findings §5) over 100 frames in alternate mode, on the sim. Write down whether the engine keeps one view object, and what its previous matrices hold.
 - [ ] **Step 2: Implement one of the two paths.**
   - **Path A:** per-eye FSR history with a per-eye jitter counter and a 2-frame dt, plus correct per-eye previous matrices written in `view_setup_hook`.

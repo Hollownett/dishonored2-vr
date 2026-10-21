@@ -32,7 +32,7 @@ assert 'if(!alternate_enabled) return rendered_mask_==3;' in xr   # the paired r
 assert xr.count('rendered_mask_==3') == 2                           # the helper and its comment: no other direct use remains
 assert 'return alternate_enabled?build_layer_views(alt_effective_(),alternate_frame,pose_epoch()).views[eye]:rendered_views_[eye];' in xr
 assert 'const bool alt_stale=alternate_enabled && alternate_fresh_eye>=0' in xr
-assert 'if(alternate_enabled && !alt_stale && gameplay) keep_alternate_eye_(eye,processed);' in xr
+assert 'if(alternate_enabled && !alt_stale && gameplay) {' in xr
 assert '&& !alt_stale?antialiasing_->apply(sources[eye])' in xr and 'if(sharpness>0 && !alt_stale)' in xr
 assert 'if(!alternate_enabled || alternate_fresh_eye<0) return true;' in xr
 # a stale eye is drawn from the kept copy of ITS OWN image and its layer view is its own record
@@ -53,7 +53,7 @@ assert 'if(alt_eye>=0) {' in head and 'record_rendered_eye(static_cast<UINT>(alt
 assert 'alt_head_stamp=((frames.load()+1)<<1)|static_cast<UINT64>(alt_eye);' in head
 assert 'raw_index' not in head
 # the Present: a one-view frame is ready only when the recorded view was made for THIS displayed frame
-assert '(!alternate_on() || (alt_head_stamp.load()>>1)==number)' in probe
+assert '(!alternate_on() || ((alt_head_stamp.load()>>1)==number && !alt_nonfree))' in probe
 assert 'if(alternate_on() && views.size()==2) mono_path=false;' in probe
 assert 'game_xr->alternate_enabled=alternate_on();game_xr->alternate_fresh_eye=alt_fresh;game_xr->alternate_frame=number;' in probe
 assert probe.count('alternate_enabled') == 1 or 'game_xr->alternate_enabled' in probe
@@ -67,6 +67,17 @@ assert 'paired?(write_pointer() && write_separation()):(write_separation() && wr
 fb = between(probe, 'void alternate_fallback(const char* reason) noexcept {', 'void alternate_select_descriptor(')
 assert 'compare_exchange_strong(expected,2)' in fb and 'mono_view_fallback(reason)' in fb
 assert 'alternate_fallback("alternate-eye: an eye image could not be kept")' in probe
-assert '\\"alternate_eye\\":{\\"state\\":' in probe and '\\"frames\\":" << alt_frames.load()' in probe
+assert '\\"alternate_eye\\":{\\"state\\":' in probe and '\\"alternated\\":" << alt_alternated.load()' in probe
+assert '\\"paired\\":" << alt_paired.load()' in probe and '\\"fallbacks\\":" << alt_fallbacks.load()' in probe
 assert 'alternate_eye_check.cpp' in build and 'alternate_eye_knob_check.py' in build
+# fix round 1: authored / settings are read at the Present that submits the frame, not from the lagging plan; every gate is the tested function
+assert 'const bool alt_nonfree=alternate_on() && !d2vr::alternate_single_view_allowed(authored_camera,game_xr && game_xr->settings_open());' in probe
+assert '((alt_head_stamp.load()>>1)==number && !alt_nonfree)' in probe
+assert 'const int alt_fresh=d2vr::alternate_fresh_eye(alternate_on(),mono_path,pair_ready,alt_head_stamp.load());' in probe
+assert 'alternate_after_present(number,gameplay,d2vr::alternate_free_gameplay(gameplay,game_xr->settings_open()),authored_camera,alt_fresh);' in probe
+assert 'if(alt_mismatch_run.note(mismatch)) alternate_fallback("alternate-eye: the engine view count disagreed with the plan for 30 frames");' in head and 'if(mismatch && mono)' in head
+assert 'return alternate_pair_ready(rendered_mask_,alternate_fresh_eye,' in xr
+assert 'if(alternate_may_keep(gameplay,authored_camera,settings_.open())) keep_alternate_eye_(eye,processed);' in xr
+assert 'alt_kept_ok_(authored_camera || settings_.open())' in xr and 'if(nonfree) return false;' in xr
+assert 'if(!alternate_enabled && (alt_kept_[0] || alt_kept_[1])) {alt_kept_[0].Reset();alt_kept_[1].Reset();' in xr   # released after fallback
 print('PASS: alternate-eye knob routing (gating, own-eye pose, kept image, view-count truth, fallback, status)')
