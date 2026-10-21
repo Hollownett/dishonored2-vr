@@ -163,7 +163,7 @@ stayed ff0daf65...bc927 and no knob or marker was left after either run.
 | M1 | `perf-mono-view` | 20261021T142525 | 10.70 / 11.56 | 0.76 | 0.88 (9.4 ms) | 0.65 |
 
 - `mono_saving` = 1 - 10.6959 / 14.4324 = **0.259** (26% of the interval p50, 3.74 ms). Against the engine frame (interval - hook, 13.62 ms) the second view costs about 27%, not 50%.
-- The GPU list sum fell only 2.5 ms (11.9 to 9.4 ms, 21%), so about 60% of the per-view GPU cost is shared or fixed; the interval fell more than the list sum because the second eye's FSR/XR-side work and gaps went with it.
+- The GPU list sum fell only 2.5 ms (11.9 to 9.4 ms, 21%), so about 60% of the per-view GPU cost is shared or fixed; the interval fell more than the list sum (inferred, not measured) because per-eye work outside the native lists (FSR, post, gaps) went too.
 - M1 is still GPU-heavy (0.88 of the interval), so even one view is near the 90 Hz budget: p50 10.70 ms is under 11.1 ms, p95 11.56 ms is over it. At 72 Hz (13.9 ms) it has 3.2 ms of room.
 - M0 here (14.43 ms) matches the same-day reference on HEAD 1309f51 (14.31 ms, run 20261021T131156).
 - Caveat: this is an upper bound for alternate-eye rendering. AER would still pay the engine's view-independent work every frame and adds eye-desync, TAA/FSR history and previous-matrix work that the mono diagnostic skips (the native TAA history twins are not driven in mono). Mono timing needs no stale-eye handling.
