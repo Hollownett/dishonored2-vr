@@ -273,5 +273,37 @@ string StateText(string d) => File.ReadAllText(Path.Combine(d, "launcher-feature
         Check("restore_defaults_aborts_on_unreadable_state", typed && !Has(d, "full-body"));
     }
 }
+{   // proxy install (launcher/ProxyInstall.cs), on temp folders only
+    string NewGame() { var d = Path.Combine(Path.GetTempPath(), "d2vrproxy-" + Guid.NewGuid().ToString("N")); Directory.CreateDirectory(d); return d; }
+    var ours = System.Text.Encoding.ASCII.GetBytes("MZ-fake-proxy " + ProxyInstall.Marker + " tail");
+    var theirs = System.Text.Encoding.ASCII.GetBytes("MZ-another-mods-dinput8");
+    const string home = @"C:\Users\me\AppData\Local\DishonoredVR";
+    string Dll(string g) => Path.Combine(g, "dinput8.dll"); string Ini(string g) => Path.Combine(g, "d2vr-linux.ini");
+
+    {   var g = NewGame(); File.WriteAllBytes(Dll(g), theirs);
+        string? why = null; try { ProxyInstall.Install(g, home, ours); } catch (InvalidOperationException e) { why = e.Message; }
+        Check("launcher_proxy_install_refuses_foreign_dinput8", why != null && why.Contains("another mod") && File.ReadAllBytes(Dll(g)).SequenceEqual(theirs) && !File.Exists(Ini(g)));
+        Check("uninstall_leaves_foreign_dinput8", ProxyInstall.Uninstall(g).Count == 0 && File.ReadAllBytes(Dll(g)).SequenceEqual(theirs) && !ProxyInstall.Installed(g)); }
+    {   var g = NewGame(); string? why = null;
+        try { ProxyInstall.Install(g, home, theirs); } catch (InvalidOperationException e) { why = e.Message; }
+        Check("install_refuses_a_payload_without_the_marker", why != null && why.Contains("marker") && !File.Exists(Dll(g)) && !File.Exists(Ini(g)));
+        string? why2 = null; try { ProxyInstall.Install(Path.Combine(g, "missing"), home, ours); } catch (InvalidOperationException e) { why2 = e.Message; }
+        Check("install_refuses_a_missing_game_folder", why2 != null); }
+    {   var g = NewGame();
+        var changed = ProxyInstall.Install(g, home, ours);
+        var ini = File.ReadAllBytes(Ini(g));
+        Check("install_writes_proxy_and_ini", changed.SequenceEqual(new[] { "dinput8.dll", "d2vr-linux.ini" }) && File.ReadAllBytes(Dll(g)).SequenceEqual(ours) && ProxyInstall.Installed(g)
+            && System.Text.Encoding.UTF8.GetString(ini) == home + "\r\n" && ini[0] != 0xEF && !Directory.GetFiles(g, "*.tmp").Any());
+        Check("install_is_idempotent", ProxyInstall.Install(g, home, ours).Count == 0);
+        var ours2 = System.Text.Encoding.ASCII.GetBytes("MZ-newer " + ProxyInstall.Marker);
+        Check("install_replaces_our_older_proxy", ProxyInstall.Install(g, home + "\\", ours2).SequenceEqual(new[] { "dinput8.dll" }) && File.ReadAllBytes(Dll(g)).SequenceEqual(ours2));
+        var removed = ProxyInstall.Uninstall(g);
+        Check("install_uninstall_round_trip", removed.SequenceEqual(new[] { "dinput8.dll", "d2vr-linux.ini" }) && !File.Exists(Dll(g)) && !File.Exists(Ini(g)) && !ProxyInstall.Installed(g) && Directory.GetFileSystemEntries(g).Length == 0);
+        Check("uninstall_twice_is_a_no_op", ProxyInstall.Uninstall(g).Count == 0); }
+    {   var g = NewGame(); ProxyInstall.Install(g, home, ours); File.Delete(Dll(g)); File.WriteAllBytes(Dll(g), theirs);
+        var removed = ProxyInstall.Uninstall(g);   // modhome.uninstall: ini goes, a foreign dll stays
+        Check("uninstall_removes_ini_but_not_a_foreign_dll", removed.SequenceEqual(new[] { "d2vr-linux.ini" }) && File.Exists(Dll(g))); }
+    Check("fallback_and_default_seconds", ProxyInstall.DefaultStartSeconds == 20 && ProxyInstall.FallbackDelaySeconds == 45);
+}
 Console.WriteLine(failures == 0 ? "ALL PASS" : failures + " FAILED");
 return failures == 0 ? 0 : 1;

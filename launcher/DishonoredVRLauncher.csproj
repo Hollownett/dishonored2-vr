@@ -40,6 +40,9 @@
     <EmbeddedResource Include="$(RepoRoot)\third_party\dishonored_vr\LICENSE" LogicalName="home/third_party/dishonored_vr/LICENSE" WithCulture="false" />
     <EmbeddedResource Include="$(RepoRoot)\tools\default_features.json" LogicalName="features.json" WithCulture="false" />
     <EmbeddedResource Include="$(RepoRoot)\THIRD_PARTY_NOTICES.md" LogicalName="home/THIRD_PARTY_NOTICES.md" WithCulture="false" />
+    <!-- The Windows build of linux/proxy/dinput8_proxy.cpp (tools\build-msvc.cmd build_proxy_win). The launcher copies it beside Dishonored2.exe
+         (ProxyInstall.cs); a launcher built without it falls back to the old 45 s wait. -->
+    <EmbeddedResource Include="$(RepoRoot)\build\dinput8.dll" LogicalName="home/build/dinput8.dll" WithCulture="false" Condition="Exists('$(RepoRoot)\build\dinput8.dll')" />
   </ItemGroup>
 
   <!-- The newest artifacts\repair-vNNN-test-candidate.json that is not launch_blocked and whose build\<dll> exists (as Core.cs

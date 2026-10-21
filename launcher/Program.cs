@@ -57,6 +57,7 @@ sealed class MainForm : Form
     // tools
     readonly TextBox custom = new();
     readonly ArtButton[] cmdButtons, diagButtons;
+    readonly ArtButton uninstallProxy = new("Uninstall proxy", Look.Secondary);
     readonly ArtButton send = new("Send", Look.Secondary), result = new("Show result", Look.Secondary), selftest = new("Run self-test", Look.Secondary);
 
     public MainForm(Env e, int startPage, string? shot, bool exitAfter, bool plainStyle)
@@ -128,7 +129,8 @@ sealed class MainForm : Form
         var openRuns = new ArtButton("Open runs", Look.Secondary); openRuns.Click += (_, _) => Open(Directory.Exists(env.P("artifacts", "runs")) ? env.P("artifacts", "runs") : env.Art);
         var openRoot = new ArtButton("Open mod folder", Look.Secondary); openRoot.Click += (_, _) => Open(env.Root);
         // The self-test is a repo Python tool: developer mode only.
-        diagButtons = env.Standalone ? new[] { openArt, openRuns, openRoot } : new[] { selftest, openArt, openRuns, openRoot };
+        uninstallProxy.Click += (_, _) => UninstallProxy();
+        diagButtons = env.Standalone ? new[] { uninstallProxy, openArt, openRuns, openRoot } : new[] { uninstallProxy, selftest, openArt, openRuns, openRoot };
         StyleText(toolOut);
         pages[2].Controls.AddRange(cmdButtons); pages[2].Controls.AddRange(new Control[] { custom, send, result }); pages[2].Controls.AddRange(diagButtons); pages[2].Controls.Add(toolOut);
         pages[2].Painter = PaintTools;
@@ -507,11 +509,25 @@ sealed class MainForm : Form
         Append(log, $"Launching {candidate!.Dll} from {env.Root}", Ui.Teal);
         try
         {
-            await Probe.Launch(candidate, env.Root, l => Append(log, l), () => env.LiveStatus().gameplay);
-            Append(log, "VR session ended and the game was restored.", Ui.Good);
+            if (await Probe.Launch(candidate, env.Root, l => Append(log, l), () => env.LiveStatus().gameplay))
+                Append(log, "VR session ended and the game was restored.", Ui.Good);
+            else Append(log, "Launch done; the in-game proxy runs VR. Stop VR ends it.", Ui.Good);
         }
         catch (Exception ex) { Append(log, "Launch failed: " + ex.Message, Ui.Bad); }
         launching = false; launch.Enabled = true; Tick();
+    }
+
+    /// <summary>Removes our dinput8 proxy and d2vr-linux.ini from the game folder (a foreign dinput8.dll is left alone).</summary>
+    void UninstallProxy()
+    {
+        var gameDir = Env.FindGameDir();
+        if (gameDir == null) { Append(toolOut, "Dishonored 2 folder not found.", Ui.Bad); return; }
+        try
+        {
+            var removed = ProxyInstall.Uninstall(gameDir);
+            Append(toolOut, removed.Count == 0 ? "No d2vr proxy in the game folder." : "Removed from the game folder: " + string.Join(", ", removed), Ui.Good);
+        }
+        catch (Exception ex) { Append(toolOut, "Uninstall failed (close the game first): " + ex.Message, Ui.Bad); }
     }
 
     async Task StopVr()
@@ -519,6 +535,13 @@ sealed class MainForm : Form
         var g = Env.Game(); var c = candidate ?? env.LatestCandidate(out _);
         if (g == null || c == null) { Append(log, "Nothing to stop (game not running).", Ui.Dim); return; }
         stopping = true; stop.Enabled = false; ShowLog(true);
+        if (Probe.ProxyLoadedIn(g))
+        {
+            Append(log, $"Stopping VR through the proxy in Dishonored2 (pid {g.Id})", Ui.Teal);
+            try { Probe.RequestProxyStop(env.Root); Append(log, "Stop requested; the mod is restoring the game.", Ui.Good); }
+            catch (Exception ex) { Append(log, "Stop failed: " + ex.Message, Ui.Bad); }
+            stopping = false; return;
+        }
         Append(log, $"Stopping {c.Dll} in Dishonored2 (pid {g.Id})", Ui.Teal);
         try { await Task.Run(() => Probe.Stop(env.Root, c.Dll, g.Id, l => Append(log, l))); Append(log, "Stop accepted; the mod is restoring the game.", Ui.Good); }
         catch (Exception ex) { Append(log, "Stop failed: " + ex.Message, Ui.Bad); }

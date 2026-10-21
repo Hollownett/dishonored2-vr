@@ -180,3 +180,7 @@ Conclusions:
 - Proposed (not done): give the scratch DLL its own observable, for example a small thread that writes the menu state from `game_logic_mask()` (a game memory read, no hooks) to a file.
   With that, S1 and S1b become judgeable and the dummy device, the Present hook and the XR session can be separated one at a time. If the dummy device is the cause, read the Present slot from the game's own swapchain
   at its first Present instead of creating a device.
+
+## Task 7: Windows launcher (W2)
+
+The Windows launcher installs the dinput8 proxy beside `Dishonored2.exe` (user approved 2026-10-21) and starts only Steam; the proxy uses the Task 6 start gate (default window + 20 s). `build\dinput8.dll` is built from `linux/proxy/dinput8_proxy.cpp` by `tools\build-msvc.cmd` (`build_proxy_win`); the proxy needed no source change (mod home from `d2vr-linux.ini` as UTF-8, real dinput8 from `GetSystemDirectoryW`, i.e. `System32`). If the proxy cannot be installed the launcher logs why and uses the old 45 s injection path. **Windows run outstanding**: observed seconds from window to VR are not yet measured; see the headset checklist in `docs/VR-PERF-LAPTOP.md`.

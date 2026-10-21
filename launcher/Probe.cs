@@ -54,9 +54,11 @@ public static class Probe
 
     // ---------------- run_demo.ps1 -Launch -SkipPreflightWait (headset), injecting at the title screen
 
-    /// <summary>Starts the game if needed, waits for its title screen, then runs the session until StopProbe, game exit or failure.
+    /// <summary>Starts the game if needed. Preferred path (proxy): installs the dinput8 proxy beside Dishonored2.exe, starts Steam and lets the proxy start VR
+    /// inside the game about <see cref="ProxyInstall.DefaultStartSeconds"/> s after its window appears; returns false (no session ran here). Fallback
+    /// (proxy not installable, logged why) and an already running game: waits 45 s and runs the session until StopProbe, game exit or failure; returns true.
     /// When this call started the game it posts Enter three times (title, Campaign, Continue) to the game window once the mod is in.</summary>
-    public static async Task Launch(Candidate c, string root, Action<string> log, Func<bool> inGameplay)
+    public static async Task<bool> Launch(Candidate c, string root, Action<string> log, Func<bool> inGameplay)
     {
         using (var doc = JsonDocument.Parse(File.ReadAllText(c.Manifest)))
         {
@@ -72,17 +74,30 @@ public static class Probe
         bool startedGame = false;
         if (games.Length == 0)
         {
+            bool viaProxy = TryInstallProxy(root, log);
             GameKeys.PrepareConfig(log);
             Process.Start(new ProcessStartInfo("steam://rungameid/403640") { UseShellExecute = true });  // Steam app 403640 is Dishonored 2
             log("Starting Dishonored 2 through Steam...");
             var deadline = DateTime.UtcNow.AddMinutes(3);
             while (games.Length == 0 && DateTime.UtcNow < deadline) { await Task.Delay(2000); games = Process.GetProcessesByName("Dishonored2"); }
+            if (viaProxy)
+            {
+                if (games.Length == 0) throw new InvalidOperationException("Steam did not start Dishonored 2 within 3 minutes.");
+                log($"Game started; the proxy starts VR about {ProxyInstall.DefaultStartSeconds} s after its window appears (artifacts\\linux-proxy.log). Use Stop VR to stop.");
+                await ContinueAfterProxyStart(root, games[0].Id, log, inGameplay);
+                return false;
+            }
             if (games.Length > 0)
             {
-                log("Game started; waiting 45 s for the title screen.");
-                await Task.Delay(45000);
+                log($"Game started; waiting {ProxyInstall.FallbackDelaySeconds} s for the title screen.");
+                await Task.Delay(ProxyInstall.FallbackDelaySeconds * 1000);
                 games = Process.GetProcessesByName("Dishonored2"); startedGame = true;
             }
+        }
+        if (games.Length == 1 && ProxyLoadedIn(games[0]))
+        {
+            log("The proxy is already loaded in the running game and starts VR itself. Use Stop VR to stop it, or restart the game.");
+            return false;
         }
         if (games.Length != 1) throw new InvalidOperationException("Start Dishonored 2 and enter gameplay or its pause menu; exactly one process is required.");
         int pid = games[0].Id;
@@ -91,15 +106,83 @@ public static class Probe
             if (startedGame) _ = Task.Run(async () =>
             {
                 await Task.Delay(10000);  // let the session come up first, as tools/vr_selftest.py --inject-at-title does
-                foreach (var _ in Enumerable.Range(0, 3))
-                {
-                    if (inGameplay()) { log("Gameplay reached; no more keys sent."); return; }
-                    if (!GameKeys.Post(pid, 0x0D)) { log("Game window not found; load your save on the desktop."); return; }
-                    log("Posted Enter to the game window (title -> Campaign -> Continue).");
-                    await Task.Delay(1500);
-                }
+                await PostEnters(pid, log, inGameplay);
             });
         }));
+        return true;
+    }
+
+    static async Task PostEnters(int pid, Action<string> log, Func<bool> inGameplay)
+    {
+        foreach (var _ in Enumerable.Range(0, 3))
+        {
+            if (inGameplay()) { log("Gameplay reached; no more keys sent."); return; }
+            if (!GameKeys.Post(pid, 0x0D)) { log("Game window not found; load your save on the desktop."); return; }
+            log("Posted Enter to the game window (title -> Campaign -> Continue).");
+            await Task.Delay(1500);
+        }
+    }
+
+    /// <summary>The embedded proxy (home\build\dinput8.dll) beside Dishonored2.exe plus d2vr-linux.ini. Any problem is logged with the reason and the
+    /// old 45 s injection path is used instead.</summary>
+    static bool TryInstallProxy(string root, Action<string> log)
+    {
+        try
+        {
+            var gameDir = Env.FindGameDir() ?? throw new InvalidOperationException("the Dishonored 2 folder was not found");
+            var proxy = Path.Combine(root, "build", ProxyInstall.DllName);
+            if (!File.Exists(proxy)) throw new InvalidOperationException("this launcher build carries no proxy (build\\dinput8.dll)");
+            var changed = ProxyInstall.Install(gameDir, root, File.ReadAllBytes(proxy));
+            log(changed.Count == 0 ? $"Proxy already installed in {gameDir}." : $"Proxy installed in {gameDir} ({string.Join(", ", changed)}).");
+            return true;
+        }
+        catch (Exception ex)  // not installable (foreign dinput8.dll, no permission, missing payload): today's behaviour
+        {
+            log($"Proxy not installed: {ex.Message}; using the old {ProxyInstall.FallbackDelaySeconds} s wait.");
+            return false;
+        }
+    }
+
+    /// <summary>True when the game process has our proxy loaded (dinput8.dll from the game folder).</summary>
+    public static bool ProxyLoadedIn(Process game)
+    {
+        try
+        {
+            var dir = Path.GetDirectoryName(game.MainModule?.FileName);
+            if (dir == null) return false;
+            var want = Path.Combine(dir, ProxyInstall.DllName);
+            return game.Modules.Cast<ProcessModule>().Any(m => string.Equals(m.FileName, want, StringComparison.OrdinalIgnoreCase));
+        }
+        catch (Exception ex) when (ex is Win32Exception or InvalidOperationException or NotSupportedException) { return false; }
+    }
+
+    /// <summary>Stop for a proxy session: build\linux-stop, which the proxy's stop watcher turns into StopProbe.</summary>
+    public static void RequestProxyStop(string root)
+    {
+        var path = Path.Combine(root, "build", "linux-stop");
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        File.WriteAllText(path, DateTimeOffset.UtcNow.ToUnixTimeSeconds().ToString());
+    }
+
+    /// <summary>With the proxy the launcher still continues the last save like the injection path did: waits for "StartProbe returned" in the proxy log,
+    /// then posts Enter up to three times.</summary>
+    static async Task ContinueAfterProxyStart(string root, int pid, Action<string> log, Func<bool> inGameplay)
+    {
+        var logFile = Path.Combine(root, "artifacts", "linux-proxy.log");
+        var deadline = DateTime.UtcNow.AddSeconds(120);
+        while (DateTime.UtcNow < deadline)
+        {
+            if (Process.GetProcessesByName("Dishonored2").Length == 0) return;
+            try
+            {
+                using var fs = new FileStream(logFile, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+                using var sr = new StreamReader(fs);
+                if (sr.ReadToEnd().Contains("StartProbe returned")) { log("VR started by the proxy."); await Task.Delay(4000); await PostEnters(pid, log, inGameplay); return; }
+            }
+            catch (IOException) { }
+            await Task.Delay(1000);
+        }
+        log("The proxy has not reported a VR start yet; check artifacts\\linux-proxy.log. No keys sent.");
     }
 
     // ---------------- inject_probe.py: the fixed headset configuration run_demo.ps1 passes

@@ -974,6 +974,13 @@ cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT tests\mod_gpu_timer_check.cpp
 if not "%errorlevel%"=="0" exit /b 1
 build\mod_gpu_timer_check.exe
 if not "%errorlevel%"=="0" exit /b 1
+rem build_proxy_win: the dinput8 proxy (linux/proxy/dinput8_proxy.cpp) for the Windows launcher, which installs it beside Dishonored2.exe
+cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT /DUNICODE /D_UNICODE /Ilinux\proxy /Fo:build\dinput8_proxy.obj /LD linux\proxy\dinput8_proxy.cpp /Fe:build\dinput8.dll /link /DEF:linux\proxy\dinput8.def kernel32.lib user32.lib
+if not "%errorlevel%"=="0" exit /b 1
+python tests\proxy_win_build_check.py
+if not "%errorlevel%"=="0" exit /b 1
+python tests\start_gate_parity_check.py
+if not "%errorlevel%"=="0" exit /b 1
 set D2VR_DIAGNOSTIC_OUTPUT=build\d2vr_render_probe.dll
 cl /nologo /std:c++17 /EHsc /W4 /WX /O2 /MT tests\native_graphics_owner_check.cpp /Fo:build\native_graphics_owner_check.obj /Fe:build\native_graphics_owner_check.exe /link d3d11.lib dxgi.lib user32.lib
 if not "%errorlevel%"=="0" exit /b 1
