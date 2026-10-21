@@ -551,6 +551,29 @@ def parse_knobs(names):
     return out
 
 
+CVAR_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+CVAR_VALUE_RE = re.compile(r"-?[0-9]+(\.[0-9]+)?|[A-Za-z0-9_.-]{1,32}")
+
+
+def parse_game_cvars(pairs):
+    """NAME=VALUE -> [(name, value)] for the game config (one run only). Name is an identifier; value a plain number or a short safe token."""
+    out = []
+    for item in pairs or ():
+        name, eq, value = item.partition("=")
+        if not eq or not CVAR_NAME_RE.fullmatch(name) or not CVAR_VALUE_RE.fullmatch(value):
+            raise SimError(f"--game-cvar {item!r}: use NAME=VALUE with NAME [A-Za-z_][A-Za-z0-9_]* and VALUE a number or a token of at most 32 characters [A-Za-z0-9_.-]")
+        out.append((name, value))
+    return out
+
+
+def append_game_cvars(cfg, cvars):
+    """Append `NAME "VALUE"` lines to the game config. Call only after backup_saves: the verified restore puts the original back."""
+    data = cfg.read_bytes() if cfg.is_file() else b""
+    if data and not data.endswith(b"\n"):
+        data += b"\n"
+    cfg.write_bytes(data + "".join(f'{n} "{v}"\n' for n, v in cvars).encode())
+
+
 def parse_env(pairs):
     out = {}
     for item in pairs or ():
@@ -1009,6 +1032,7 @@ def _run_sim(a, home, env):
     knobs = parse_knobs(getattr(a, "knob", None))
     launch_env = parse_env(getattr(a, "env", None))
     settings = parse_vr_settings(getattr(a, "vr_setting", None))
+    game_cvars = parse_game_cvars(getattr(a, "game_cvar", None))
     probe_mode = getattr(a, "probe_mode", None) or "xr"
     if "temporal_aa" in settings:
         if AA_MODE_KNOB in knobs:
@@ -1030,6 +1054,8 @@ def _run_sim(a, home, env):
             env.out(f"[sim] knob build/{n}" + (f" = {settings['temporal_aa']}" if n == AA_MODE_KNOB and "temporal_aa" in settings else " (empty)"))
         for k, v in launch_env.items():
             env.out(f"[sim] env {k}={v}")
+        for n, v in game_cvars:
+            env.out(f'[sim] game config (this run only): {n} "{v}"')
         if candidate:
             env.out(f"[sim] candidate DLL {candidate[0]}: sha256 {candidate[1]}; installed {installed_dll(mod_home)} "
                     f"sha256 {candidate[2]} is backed up, replaced for the run and restored afterwards")
@@ -1056,6 +1082,9 @@ def _run_sim(a, home, env):
             if steam.sha256_file(target) != cand_sha:
                 raise SimError("candidate DLL was not placed correctly")
             env.out(f"[sim] candidate DLL placed (installed {before[:12]} backed up to {backup}; restored afterwards)")
+        if game_cvars:
+            append_game_cvars(save_paths(inst.prefix)[1], game_cvars)
+            env.out("[sim] game config cvars appended (restored afterwards): " + ", ".join(f"{n}={v}" for n, v in game_cvars))
         if a.test_save:
             swap_in_test_save(inst.prefix, a.test_save)
             env.out(f"[sim] test save {a.test_save} swapped in")

@@ -1084,6 +1084,32 @@ class Knobs(FullRun):
         self.assertEqual(json.loads((snap / "adapter.txt").read_text())["name"], "NVIDIA X")
         self.assertIn("frame_split.split.frames = 90", "\n".join(self.lines))
 
+    def test_game_cvar_appended_and_restored(self):
+        env, state = self.fake_game()
+        inner, seen = env.launch, {}
+
+        def launch():
+            seen["cfg"] = self.config.read_text()
+            inner()
+
+        env.launch = launch
+        before = self.config.read_bytes()
+        rc, out, err = self.run_cli("--game-cvar", "r_shadowQualityPreset=0", "--game-cvar", "r_x=1.5", env=env)
+        self.assertEqual(rc, 0, "\n".join(self.lines) + err)
+        self.assertEqual(seen["cfg"], 'seta r_fullscreen "1"\nr_shadowQualityPreset "0"\nr_x "1.5"\n')
+        self.assertEqual(self.config.read_bytes(), before)
+        self.assertEqual(sim.pending_backups(self.backups), [])
+
+    def test_game_cvar_name_rejected(self):
+        for bad in ("a b=1", "1x=1", "../x=1", "x", "x=", 'x="1"', "x=1;2", "x=" + "a" * 40, "=1", "x=1\n"):
+            env, seen = self.watched()
+            rc, out, err = self.run_cli("--game-cvar=" + bad, env=env)
+            self.assertEqual(rc, 1, repr(bad))
+            self.assertIn("--game-cvar", err)
+            self.assertNotIn("files", seen, "the game must not launch")
+        self.assertEqual(self.config.read_text(), 'seta r_fullscreen "1"\n')
+        self.assertEqual(sim.pending_backups(self.backups), [])
+
     def test_knob_name_rejected(self):
         for bad in ("../x", "a/b", "Up", "a.b", "", "x\n", "-x/.."):
             env, seen = self.watched()

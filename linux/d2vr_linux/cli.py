@@ -63,6 +63,8 @@ def _parser():
                    help="xr (default, simulated headset) or the flat diagnostic modes paired / single (no XR, for the single-view measurement)")
     s.add_argument("--vr-setting", action="append", metavar="KEY=VALUE", default=[],
                    help="VR setting for this run only (repeatable): temporal_aa 0-6, resolution 0.5-2.0, mirror 2. Your vr-settings.cfg is never read or changed")
+    s.add_argument("--game-cvar", action="append", metavar="NAME=VALUE", default=[],
+                   help="append NAME \"VALUE\" to the game config for this run only (repeatable); the verified restore puts your config back")
     s.add_argument("--env", action="append", metavar="KEY=VALUE", default=[],
                    help="launch environment (repeatable): DXVK_HUD, DXVK_LOG_LEVEL or __GL_THREADED_OPTIMIZATIONS")
     s.add_argument("--dry-run", action="store_true", help="check everything and print the plan; write and launch nothing")
