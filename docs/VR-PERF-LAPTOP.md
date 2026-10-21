@@ -81,6 +81,7 @@ editing the user's real files, so they are not measured even once the session is
 - [ ] Plan G task 3: from behind on an unaware guard, a fast swing kills and a crouched stab kills (watch `attack_intent` in `xr-live-status.json`: `honoured` rises).
 - [ ] Plan G task 3: an aware guard: a swing is a normal attack, never a kill.
 - [ ] Plan G task 3: no accidental attacks while walking, turning your head or resting the sword hand (`attack_intent.presses` stays 0).
+- [ ] Plan G task 4: the takedown prompt appears behind an unaware guard (at least 25 cm wide, near eye height, readable at 1.5 m); `takedown_hints` rises in `xr-live-status.json`. An oil tank or door still shows its pick-up prompt.
 
 ## Frame split block (plan E task 1)
 

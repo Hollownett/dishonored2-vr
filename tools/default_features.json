@@ -160,6 +160,14 @@
    "label": "Sword swings press the game's attack",
    "help": "A fast swing with the sword drawn, or a straight stab while crouched, presses the game's own attack, and the game decides whether it is a stealth kill. Turn off for the older contact-based routing.",
    "default": true
+  },
+  {
+   "id": "readable-takedown-prompt",
+   "file": "legacy-takedown-prompt",
+   "kind": "disable",
+   "label": "Readable takedown prompt",
+   "help": "The kill and choke hint over a guard is drawn at least 25 cm wide so it can be read. Turn off for the older 7 cm hint.",
+   "default": true
   }
  ]
 }

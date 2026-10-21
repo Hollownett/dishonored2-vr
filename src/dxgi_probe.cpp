@@ -90,6 +90,7 @@
 #include "vr_gestures.hpp"
 #include "native_hud_rect.hpp"
 #include "native_takedown.hpp"
+#include "takedown_prompt_size.hpp"
 #include "native_action_camera.hpp"
 #include "wheel_avatar.hpp"
 #include "body_renderer.hpp"
@@ -341,6 +342,7 @@ static d2vr::PhysicalCrouch physical_crouch;static bool physical_crouch_pulse=fa
 static std::atomic<double> physical_drop{0},native_camera_up{0},crouch_lift_m{0};static std::atomic<std::uint64_t> carry_head_pushes{};static std::atomic<bool> physical_drop_valid{false};
 static std::atomic<UINT64> crouch_pulses{},crouch_native_frames{},crouch_lift_frames{};
 static d2vr::WheelDial wheel_dial;static d2vr::WheelCursor wheel_cursor;static d2vr::WheelPointer wheel_pointer;static int wheel_dial_sector=-1;static std::atomic<UINT64> wheel_dial_frames{};
+static std::atomic<bool> legacy_takedown_prompt{false}; // build/legacy-takedown-prompt: the old 7.5 cm hint
 static d2vr::GestureSet gestures;static d2vr::NativeTakedowns native_takedowns;static std::uint64_t takedown_strike_until{};
 static d2vr::NativeActionCameraReader native_action_camera;
 static std::atomic<UINT64> takedown_choke_frames{},takedown_kill_frames{},takedown_drop_frames{},takedown_gestures{},takedown_flips{},prompt_shows{},prompt_hides{};static std::atomic<unsigned> takedown_sensors{};static bool power_gestures_enabled=false;static std::uint64_t gesture_cast_until{},gesture_release_until{};
@@ -3724,7 +3726,7 @@ void publish_native_hud_art(UINT64 now) {
                 const d2vr::Vec3 head{((*views)[0].pose.position.x+(*views)[1].pose.position.x)*.5,((*views)[0].pose.position.y+(*views)[1].pose.position.y)*.5,((*views)[0].pose.position.z+(*views)[1].pose.position.z)*.5};
                 // x HUD size. Kill/choke hints small (user: "should not be big"); talk / carry-body prompts larger (too small in v349).
                 const double dist=d2vr::length(point-head);
-                art_width=take?std::clamp(dist*.05,.07,1.):npc?std::clamp(dist*.12,.2,2.):std::clamp(dist*.09,.16,2.);
+                art_width=take?d2vr::takedown_prompt_width(dist,legacy_takedown_prompt):npc?std::clamp(dist*.12,.2,2.):std::clamp(dist*.09,.16,2.);
             }
             }
         } else if(slot==11) {art_width=.9;
@@ -8493,6 +8495,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
         vr_combat_enabled=!fs::exists(root/L"build"/L"legacy-combat");vr_combat.reset();
         legacy_sword_contact=fs::exists(root/L"build"/L"legacy-sword-contact") || !vr_combat_enabled; // legacy-combat: the old contact behaviour applies completely
         d2vr::NativeInteractionAim::legacy_contact_=legacy_sword_contact;
+        legacy_takedown_prompt=fs::exists(root/L"build"/L"legacy-takedown-prompt");
         d2vr::NativeInteractionAim::intent_contact_tick_=0;d2vr::NativeInteractionAim::intent_episode_=d2vr::SlowRejectLatch{};attack_intent=d2vr::AttackIntent{};attack_press=d2vr::AttackPress{};attack_honour=d2vr::AttackHonour{};attack_intent_owns=attack_intent_rt=false;attack_intent_pad_frames=0;attack_intent_honour_read=false;
         assassination_receipt_requested=head_requested && fs::exists(root/L"build"/L"assassination-receipts");
         if(assassination_receipt_requested &&
