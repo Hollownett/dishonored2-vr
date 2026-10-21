@@ -6,6 +6,7 @@ import signal
 import sys
 import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -50,6 +51,9 @@ class Case(unittest.TestCase):
         (self.test_save / "SLOT05/data.bin").write_bytes(b"tank slot")
         (self.test_save / "profile.bin").write_bytes(b"tank profile")
         self.lines = []
+        patcher = __import__("unittest").mock.patch.dict(os.environ, {"XDG_STATE_HOME": str(self.tmp / "state")})
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def args(self, *extra):
         argv = ["--steam-root", str(self.f.steam_root), "sim", "--backup-root", str(self.backups),
@@ -340,23 +344,177 @@ class Candidate(FullRun):
         self.assertIn("not a PE DLL", err)
         self.assertEqual(self.installed.read_bytes(), self.original)
 
+    def pending(self, stamp="T1", cand=None):
+        """An interrupted run: backup + record made, candidate in place."""
+        import hashlib
+        cand = self.cand.read_bytes() if cand is None else cand
+        backup = sim.backup_saves(self.f.prefix, self.backups, stamp)
+        sim.backup_dll(backup, self.installed, hashlib.sha256(cand).hexdigest())
+        sim.place_atomic(cand, self.installed)
+        return backup
+
     def test_restore_recovers_interrupted_candidate(self):
-        backup = sim.backup_saves(self.f.prefix, self.backups, "T1")
-        sim.backup_dll(backup, self.installed)
-        sim.place_atomic(self.cand.read_bytes(), self.installed)  # the run died with the candidate in place
+        backup = self.pending()
         rc, out, err = self.run_cli("--restore")
         self.assertEqual(rc, 0, err + out)
         self.assertEqual(self.installed.read_bytes(), self.original)
         self.assertFalse((backup / sim.PENDING).exists())
 
-    def test_restore_failure_keeps_pending_and_prints_command(self):
-        backup = sim.backup_saves(self.f.prefix, self.backups, "T1")
-        sim.backup_dll(backup, self.installed)
+    def test_corrupt_backup_gives_no_cp_advice_and_does_not_write(self):
+        backup = self.pending()
         (backup / "installed-d2vr_render_probe_arm_v600.dll").write_bytes(b"corrupt")
         rc, out, err = self.run_cli("--restore")
         self.assertEqual(rc, 2)
-        self.assertIn("cp -f", out)
+        self.assertNotIn("cp -f", out)
+        self.assertIn("fails its hash check", out)
+        self.assertEqual(self.installed.read_bytes(), self.cand.read_bytes())
         self.assertTrue((backup / sim.PENDING).exists())
+
+    def test_corrupt_backup_but_destination_already_original_is_success(self):
+        backup = self.pending()
+        sim.place_atomic(self.original, self.installed)
+        (backup / "installed-d2vr_render_probe_arm_v600.dll").write_bytes(b"corrupt")
+        rc, out, err = self.run_cli("--restore")
+        self.assertEqual(rc, 0, out + err)
+        self.assertEqual(self.installed.read_bytes(), self.original)
+
+    def test_destination_changed_is_not_overwritten(self):
+        import hashlib
+        backup = self.pending()
+        newer = fake_pe(b"newer install")
+        sim.place_atomic(newer, self.installed)
+        rc, out, err = self.run_cli("--restore")
+        self.assertEqual(rc, 2)
+        self.assertEqual(self.installed.read_bytes(), newer)
+        self.assertTrue((backup / sim.PENDING).exists())
+        self.assertIn(hashlib.sha256(self.cand.read_bytes()).hexdigest(), out)
+        self.assertIn(hashlib.sha256(self.original).hexdigest(), out)
+
+    def test_destination_missing_is_not_recreated(self):
+        backup = self.pending()
+        self.installed.unlink()
+        rc, out, err = self.run_cli("--restore")
+        self.assertEqual(rc, 2)
+        self.assertFalse(self.installed.exists())
+        self.assertTrue((backup / sim.PENDING).exists())
+
+    def test_dll_restored_even_if_savegame_missing(self):
+        import shutil
+        backup = self.pending()
+        shutil.rmtree(backup / "savegame")
+        rc, out, err = self.run_cli("--restore")
+        self.assertEqual(rc, 2)
+        self.assertEqual(self.installed.read_bytes(), self.original)
+        self.assertTrue((backup / sim.PENDING).exists())
+
+    def test_dll_restored_even_if_info_json_unreadable(self):
+        backup = self.pending()
+        (backup / "info.json").write_text("{not json")
+        rc, out, err = self.run_cli("--restore")
+        self.assertEqual(rc, 2)
+        self.assertEqual(self.installed.read_bytes(), self.original)
+
+    def test_dll_restored_even_if_save_copy_raises(self):
+        from unittest import mock
+        backup = self.pending()
+        with mock.patch.object(sim, "_copy_into", side_effect=OSError("disk full")):
+            rc, out, err = self.run_cli("--restore")
+        self.assertEqual(rc, 2)
+        self.assertEqual(self.installed.read_bytes(), self.original)
+        self.assertIn("disk full", out)
+
+    def test_malformed_dll_record_is_reported_not_raised(self):
+        backup = self.pending()
+        (backup / sim.DLL_RECORD).write_text('{"path": 5}')
+        rc, out, err = self.run_cli("--restore")
+        self.assertEqual(rc, 2)
+        self.assertIn("cannot read the DLL record", out)
+        self.assertNotIn("Traceback", err)
+
+    def test_two_pending_backups_original_wins(self):
+        import hashlib
+        b1 = self.pending("T1")
+        cand2 = fake_pe(b"second candidate")
+        b2 = sim.backup_saves(self.f.prefix, self.backups, "T2")
+        sim.backup_dll(b2, self.installed, hashlib.sha256(cand2).hexdigest())  # captured the first candidate as "installed"
+        sim.place_atomic(cand2, self.installed)
+        rc, out, err = self.run_cli("--restore")
+        self.assertEqual(rc, 0, out + err)
+        self.assertEqual(self.installed.read_bytes(), self.original)
+        self.assertEqual(sim.pending_backups(self.backups), [])
+        self.assertIn("older backup", out)
+
+    def test_every_pending_backup_is_tried_after_a_failure(self):
+        import shutil
+        b1 = sim.backup_saves(self.f.prefix, self.backups, "T1")
+        shutil.rmtree(b1 / "savegame")  # saves-only backup that cannot restore
+        b2 = self.pending("T2")
+        rc, out, err = self.run_cli("--restore")
+        self.assertEqual(rc, 2)
+        self.assertEqual(self.installed.read_bytes(), self.original)
+        self.assertFalse((b2 / sim.PENDING).exists())
+        self.assertTrue((b1 / sim.PENDING).exists())
+
+    def test_lock_held_refuses_run_and_restore(self):
+        def never():
+            raise RuntimeError("must not launch")
+
+        with sim.run_lock(self.f.home):
+            rc, out, err = self.run_cli("--candidate-dll", str(self.cand), env=self.env(launch=never))
+            self.assertEqual(rc, 1)
+            self.assertIn("holds", err)
+            self.assertFalse(self.backups.exists())
+            self.assertEqual(self.installed.read_bytes(), self.original)
+            rc, out, err = self.run_cli("--restore", "--backup-root", str(self.tmp / "elsewhere"))  # independent of --backup-root
+            self.assertEqual(rc, 1)
+            self.assertIn("holds", err)
+        rc, out, err = self.run_cli("--dry-run", "--candidate-dll", str(self.cand))
+        self.assertEqual(rc, 0, err)
+
+    def test_lock_released_after_run(self):
+        env, state = self.fake_game()
+        rc, out, err = self.run_cli("--candidate-dll", str(self.cand), env=env)
+        self.assertEqual(rc, 0)
+        with sim.run_lock(self.f.home):
+            pass
+
+    def test_game_still_running_names_the_dll(self):
+        env, state = self.fake_game()
+        env.kill = lambda pid, sig: state["killed"].append((pid, sig))  # never dies
+        env.close_timeout = 3
+        rc, out, err = self.run_cli("--candidate-dll", str(self.cand), env=env)
+        text = "\n".join(self.lines)
+        self.assertEqual(rc, 2)
+        self.assertIn("STILL INSTALLED", text)
+        self.assertIn("d2vr_render_probe_arm_v600.dll", text)
+        self.assertIn("cp -f", text)
+        self.assertIn("sim --restore", text)
+        self.assertEqual(self.installed.read_bytes(), self.cand.read_bytes())
+        # after the game is gone, --restore finishes the job
+        shutil_rm = __import__("shutil").rmtree
+        shutil_rm(self.proc / "5000", ignore_errors=True)
+        rc, out, err = self.run_cli("--restore")
+        self.assertEqual(rc, 0, out + err)
+        self.assertEqual(self.installed.read_bytes(), self.original)
+
+    def test_place_atomic_failure_leaves_no_temp_file(self):
+        from unittest import mock
+        with mock.patch.object(os, "replace", side_effect=OSError("boom")):
+            with self.assertRaises(OSError):
+                sim.place_atomic(b"x", self.installed)
+        self.assertFalse(list((self.mod_home / "build").glob("*.d2vr-tmp")))
+        self.assertEqual(self.installed.read_bytes(), self.original)
+
+    def test_interrupt_is_deferred_during_restore(self):
+        got = []
+        old = signal.signal(signal.SIGINT, signal.default_int_handler)
+        try:
+            with sim.defer_sigint(got.append):
+                os.kill(os.getpid(), signal.SIGINT)  # would raise KeyboardInterrupt without the shield
+            self.assertIs(signal.getsignal(signal.SIGINT), signal.default_int_handler)
+        finally:
+            signal.signal(signal.SIGINT, old)
+        self.assertTrue(got)
 
     def test_dry_run_prints_hashes(self):
         import hashlib
@@ -400,6 +558,14 @@ class Pure(unittest.TestCase):
         gameplay = [s for s in segments if s["start_ms"] >= 30000]
         self.assertEqual(gameplay[-1]["end_ms"] - 30000, 90000)
         self.assertTrue(all(abs(s["head_pitch_degrees"]) <= 10 for s in gameplay))
+        import math
+        yaws = [2 * math.degrees(math.asin(s["head_pose"][4])) for s in gameplay]  # qy ~ sin(yaw/2) up to the small pitch term
+        self.assertAlmostEqual(max(yaws), 20, delta=1.0)
+        self.assertAlmostEqual(min(yaws), -20, delta=1.0)
+        self.assertTrue(all(s["head_pose"][:3] == [0.0, 1.65, 0.0] for s in gameplay))
+        # yaw sin(2*pi*t/10 s): positive -> non-positive at the half period, 5 s in
+        flips = [gameplay[i]["start_ms"] - 30000 for i in range(1, len(gameplay)) if yaws[i - 1] > 0 >= yaws[i]]
+        self.assertAlmostEqual(flips[0], 5000, delta=300)
 
     def test_dig(self):
         self.assertEqual(sim.dig({"a": {"b": [1, 2]}}, "a.b.1"), (2, True))

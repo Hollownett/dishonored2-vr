@@ -8,6 +8,8 @@ config override that the proxy honours, then restores the user's saves and remov
 - backs up the saves and dishonored2Config.cfg before touching anything (never deleted) and marks the backup `restore-pending`
   until a verified restore; a pending backup blocks further runs until `sim --restore`.
 """
+import contextlib
+import fcntl
 import filecmp
 import hashlib
 import importlib.util
@@ -215,69 +217,156 @@ def check_candidate(candidate, installed):
     return hashlib.sha256(data).hexdigest()
 
 
+def _fsync_dir(path):
+    try:
+        fd = os.open(str(path), os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
+
+
+def _write_durable(path, data):
+    with open(path, "wb") as f:
+        f.write(data)
+        f.flush()
+        os.fsync(f.fileno())
+
+
 def place_atomic(data, dest):
-    """Write bytes next to dest and rename over it, so the file is never half-written."""
+    """Write bytes (fsynced) next to dest and rename over it, so the file is never half-written. No temp file is left on failure."""
     dest = Path(dest)
     tmp = dest.with_name(dest.name + ".d2vr-tmp")
-    tmp.write_bytes(data)
-    os.replace(tmp, dest)
+    try:
+        _write_durable(tmp, data)
+        os.replace(tmp, dest)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            tmp.unlink()
+        raise
+    _fsync_dir(dest.parent)
 
 
-def backup_dll(backup, installed):
-    """Copy the installed DLL into the save backup folder (same restore-pending guard) and record it in info.json."""
-    installed, backup = Path(installed), Path(backup)
+def _sha(path):
+    try:
+        return steam.sha256_file(path)
+    except OSError:
+        return None
+
+
+DLL_RECORD = "dll.json"
+
+
+def backup_dll(backup, installed, candidate_sha):
+    """Copy the installed DLL into the save backup folder (same restore-pending guard) and write dll.json (atomically,
+    fsynced) naming the resolved path, the original hash and the candidate hash. Everything is durable before the swap."""
+    installed, backup = Path(installed).resolve(), Path(backup)
     data = installed.read_bytes()
     digest = hashlib.sha256(data).hexdigest()
     copy = backup / f"installed-{installed.name}"
-    copy.write_bytes(data)
+    _write_durable(copy, data)
     if steam.sha256_file(copy) != digest:
         raise SimError(f"the backup copy {copy} does not match the installed DLL")
-    info_path = backup / "info.json"
-    info = json.loads(info_path.read_text())
-    info["dll"] = {"path": str(installed), "backup": copy.name, "sha256": digest}
-    info_path.write_text(json.dumps(info, indent=1) + "\n")
+    rec = {"path": str(installed), "backup": copy.name, "original_sha256": digest, "candidate_sha256": candidate_sha}
+    tmp = backup / (DLL_RECORD + ".tmp")
+    _write_durable(tmp, (json.dumps(rec, indent=1) + "\n").encode())
+    os.replace(tmp, backup / DLL_RECORD)
+    _fsync_dir(backup)
     return digest
 
 
-def restore_dll(backup, info):
-    """Put the backed-up DLL back atomically and verify by SHA-256. -> (ok, notes)."""
-    d = info.get("dll")
-    if not d:
-        return True, []
-    src, dest = Path(backup) / d["backup"], Path(d["path"])
-    manual = f"cp -f '{src}' '{dest}'"
+def read_dll_record(backup):
+    """-> (record or None, problem or None). Malformed records are a problem, not an exception."""
+    p = Path(backup) / DLL_RECORD
+    if not p.exists():
+        return None, None
     try:
-        data = src.read_bytes()
-        if hashlib.sha256(data).hexdigest() != d["sha256"]:
-            return False, [f"the DLL backup {src} no longer matches its recorded hash; restore it by hand: {manual}"]
-        place_atomic(data, dest)
-        if steam.sha256_file(dest) != d["sha256"]:
-            return False, [f"installed DLL differs after restore; run by hand: {manual}"]
+        rec = json.loads(p.read_text())
+        for k in ("path", "backup", "original_sha256", "candidate_sha256"):
+            if not isinstance(rec[k], str) or not rec[k]:
+                raise ValueError(k)
+        return rec, None
+    except (OSError, ValueError, KeyError, TypeError) as e:
+        return None, f"cannot read the DLL record {p} ({e}); the installed DLL may still be the candidate: compare it with {Path(backup)}/installed-*.dll"
+
+
+def restore_dll(backup, seen=None, known=()):
+    """Put the original DLL back, but only when the destination still holds this run's candidate. -> (ok, notes).
+    Already the original: success. Anything else (newer install, missing file): nothing is written, the caller keeps the
+    pending marker. known: candidate hashes of every pending run, so a chain of interrupted runs still counts as ours. seen (path -> (ok, backup)) makes only the oldest backup per path act; later ones write nothing."""
+    rec, problem = read_dll_record(backup)
+    if problem:
+        return False, [problem]
+    if rec is None:
+        return True, []
+    dest, src = Path(rec["path"]), Path(backup) / rec["backup"]
+    orig, cand = rec["original_sha256"], rec["candidate_sha256"]
+    if seen is not None:
+        if rec["path"] in seen:
+            first_ok, first = seen[rec["path"]]
+            return first_ok, [f"DLL {dest.name}: not touched, the older backup {first} owns the original" + ("" if first_ok else " (its restore did not complete)")]
+        seen[rec["path"]] = (False, Path(backup))
+    cur = _sha(dest)
+
+    def done(ok, notes):
+        if seen is not None:
+            seen[rec["path"]] = (ok, Path(backup))
+        return ok, notes
+
+    if cur == orig:
+        return done(True, [f"installed DLL {dest.name} is already the original ({orig})"])
+    if cur != cand and cur not in known:
+        return done(False, [f"NOT restoring {dest}: it holds {cur or 'no file'}, which is neither this run's candidate ({cand}) "
+                            f"nor the original ({orig}); something installed over it. Left alone; the pending marker stays. "
+                            f"The original is kept in {src}"])
+    if _sha(src) != orig:
+        return done(False, [f"the DLL backup {src} fails its hash check (expected {orig}); NOT copying it. The installed DLL is "
+                            f"still the candidate ({cand}); reinstall the mod (d2vr-linux install --zip ...) to replace it"])
+    try:
+        place_atomic(src.read_bytes(), dest)
     except OSError as e:
-        return False, [f"cannot restore the installed DLL ({e}); run by hand: {manual}"]
-    return True, [f"installed DLL restored and verified ({d['sha256']})"]
+        return done(False, [f"cannot restore the installed DLL ({e}); once the game has exited run: cp -f '{src}' '{dest}'"])
+    if _sha(dest) != orig:
+        return done(False, [f"installed DLL differs after restore; once the game has exited run: cp -f '{src}' '{dest}'"])
+    return done(True, [f"installed DLL restored and verified ({orig})"])
 
 
-def restore_saves(prefix, backup):
-    """Put the backed-up saves and config back, verify, and drop the restore-pending marker only if they match.
-    Returns (ok, notes). Extra files the run created in savegame/ are reported, not deleted."""
+def restore_saves(prefix, backup, seen=None, known=()):
+    """Restore the DLL first (it needs only dll.json), then put the saves and config back and verify; drop the restore-pending
+    marker only if both match. Returns (ok, notes). Extra files the run created in savegame/ are reported, not deleted."""
     backup = Path(backup)
+    dll_ok, notes = restore_dll(backup, seen, known)
+    try:
+        ok, snotes = _restore_save_files(prefix, backup)
+    except Exception as e:  # noqa: BLE001 - the DLL is already handled; report and keep the marker
+        ok, snotes = False, [f"saves could not be restored ({type(e).__name__}: {e})"]
+    notes = notes + snotes
+    ok = ok and dll_ok
+    if ok:
+        marker = backup / PENDING
+        if marker.exists():
+            marker.unlink()
+    return ok, notes
+
+
+def _restore_save_files(prefix, backup):
     savegame, cfg = save_paths(prefix)
     if not (backup / "savegame").is_dir():
         return False, [f"{backup / 'savegame'} is missing"]
-    _clear_slots(savegame)
-    _copy_into(backup / "savegame", savegame)
-    if (backup / cfg.name).is_file():
-        shutil.copy2(backup / cfg.name, cfg)
-    notes, ok = [], True
     try:
         info = json.loads((backup / "info.json").read_text())
         expected = info["files"]
     except (OSError, ValueError, KeyError) as e:
         return False, [f"cannot read {backup / 'info.json'}: {e}"]
-    dll_ok, dll_notes = restore_dll(backup, info)
-    ok = ok and dll_ok
-    notes.extend(dll_notes)
+    _clear_slots(savegame)
+    _copy_into(backup / "savegame", savegame)
+    if (backup / cfg.name).is_file():
+        shutil.copy2(backup / cfg.name, cfg)
+    notes, ok = [], True
     now = manifest(savegame)
     for rel, digest in expected.items():
         if rel not in now:
@@ -290,11 +379,49 @@ def restore_saves(prefix, backup):
     if info.get("config_sha256") is not None and (not cfg.is_file() or steam.sha256_file(cfg) != info["config_sha256"]):
         ok = False
         notes.append(f"differs after restore: {cfg.name}")
-    if ok:
-        marker = backup / PENDING
-        if marker.exists():
-            marker.unlink()
     return ok, notes
+
+
+# ---------------------------------------------------------------- run lock and signal shield
+
+def lock_path(home):
+    base = os.environ.get("XDG_STATE_HOME")
+    return (Path(base) if base else Path(home) / ".local/state") / "d2vr" / "sim.lock"
+
+
+@contextlib.contextmanager
+def run_lock(home):
+    """One exclusive flock for the whole run or restore, independent of --backup-root and outside the mod home."""
+    path = lock_path(home)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(str(path), os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            raise SimError(f"another sim run or restore holds {path}; wait for it to finish (nothing was touched)")
+        yield
+    finally:
+        os.close(fd)  # closing releases the flock
+
+
+@contextlib.contextmanager
+def defer_sigint(out=None):
+    """Hold SIGINT/SIGTERM back until the block ends (main thread only)."""
+    got = []
+    old = {}
+    try:
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            old[sig] = signal.signal(sig, lambda n, f: got.append(n))
+    except ValueError:  # not the main thread
+        old = {}
+    try:
+        yield
+    finally:
+        for sig, h in old.items():
+            signal.signal(sig, h)
+        if got and out:
+            out("[sim] an interrupt arrived while restoring; it was held back until the restore finished")
 
 
 def pending_backups(backup_root):
@@ -507,7 +634,13 @@ def snapshot(mod_home, dest, info):
 
 
 def do_restore(a, home, env):
-    """`sim --restore [BACKUP]`: put saves back from the newest (or named) pending backup and clean the dev knobs."""
+    """`sim --restore [BACKUP]`: restore the DLL and saves of every pending (or the named) backup, oldest first, and clean
+    the dev knobs. All backups are tried; the oldest backup owns the original DLL per path."""
+    with run_lock(home):
+        return _do_restore(a, home, env)
+
+
+def _do_restore(a, home, env):
     inst = steam.locate(home, a.steam_root)
     mod_home = Path(a.mod_home) if a.mod_home else modhome.mod_home_dir(inst.prefix)
     backup_root = Path(a.backup_root)
@@ -520,13 +653,17 @@ def do_restore(a, home, env):
         pending = pending_backups(backup_root)
     if not pending:
         env.out("[sim] nothing to restore (no restore-pending backup)")
-    for backup in pending:
-        ok, notes = restore_saves(inst.prefix, backup)
-        for n in notes:
-            env.out(f"[sim]   {n}")
-        env.out(f"[sim] {'restored' if ok else 'RESTORE MISMATCH, backup kept at'} {backup}")
-        if not ok:
-            return 2
+    failed, seen = False, {}
+    known = {r["candidate_sha256"] for r in (read_dll_record(p)[0] for p in pending) if r}
+    with defer_sigint(env.out):
+        for backup in sorted(pending, key=lambda p: p.name):
+            ok, notes = restore_saves(inst.prefix, backup, seen, known)
+            for n in notes:
+                env.out(f"[sim]   {n}")
+            env.out(f"[sim] {'restored' if ok else 'RESTORE INCOMPLETE, backup kept at'} {backup}")
+            failed = failed or not ok
+    if failed:
+        return 2
     for name in (OVERRIDE_NAME, AUTOCONTINUE_NAME, SCRIPT_CFG):
         (mod_home / "build" / name).unlink(missing_ok=True)
     (mod_home / "artifacts" / SCRIPT_JSON).unlink(missing_ok=True)
@@ -591,6 +728,13 @@ def _plan(a, home, env):
 def run_sim(a, home, env):
     if a.restore:
         return do_restore(a, home, env)
+    if a.dry_run:
+        return _run_sim(a, home, env)
+    with run_lock(home):
+        return _run_sim(a, home, env)
+
+
+def _run_sim(a, home, env):
     inst, mod_home, seconds, script_json, script_cfg, candidate = _plan(a, home, env)
     override = sim_probe_config(seconds)
     build, art = mod_home / "build", mod_home / "artifacts"
@@ -607,15 +751,16 @@ def run_sim(a, home, env):
     stamp = _timestamp()
     backup = backup_saves(inst.prefix, a.backup_root, stamp)
     env.out(f"[sim] saves backed up to {backup}")
-    guard, notes, launched, rc, reason = FileGuard(), [], False, 1, ""
+    guard, notes, launched, rc, reason, placed = FileGuard(), [], False, 1, "", False
     run_dir = Path(a.out_root) / stamp
     started = None
     try:
         if candidate:
             target = installed_dll(mod_home)
-            before = backup_dll(backup, target)
+            before = backup_dll(backup, target, candidate[1])
             if before != candidate[2]:
                 raise SimError("the installed DLL changed while planning")
+            placed = True
             place_atomic(candidate[0].read_bytes(), target)
             if steam.sha256_file(target) != candidate[1]:
                 raise SimError("candidate DLL was not placed correctly")
@@ -674,26 +819,34 @@ def run_sim(a, home, env):
     except SimError as e:
         reason = str(e)
     finally:
-        gone = close_game(env, launched, notes)
-        try:
-            snapshot(mod_home, run_dir, {"scenario": a.script or a.scenario, "seconds": seconds, "override": override,
-                                         "return_code": rc, "reason": reason, "notes": notes, "backup": str(backup)})
-            env.out(f"[sim] artifacts snapshot: {run_dir}")
-        except OSError as e:
-            env.out(f"[sim] snapshot failed: {e}")
-        failed = guard.restore()
-        if failed:
-            env.out("[sim] could not reset dev files: " + "; ".join(failed))
-        if gone:
-            ok, rnotes = restore_saves(inst.prefix, backup)
-            for n in rnotes:
-                env.out(f"[sim]   {n}")
-            env.out("[sim] saves restored and verified" if ok else f"[sim] RESTORE MISMATCH: backup kept at {backup}; fix and run: d2vr-linux sim --restore")
-            if not ok:
+        with defer_sigint(env.out):
+            gone = close_game(env, launched, notes)
+            try:
+                snapshot(mod_home, run_dir, {"scenario": a.script or a.scenario, "seconds": seconds, "override": override,
+                                             "return_code": rc, "reason": reason, "notes": notes, "backup": str(backup)})
+                env.out(f"[sim] artifacts snapshot: {run_dir}")
+            except OSError as e:
+                env.out(f"[sim] snapshot failed: {e}")
+            failed = guard.restore()
+            if failed:
+                env.out("[sim] could not reset dev files: " + "; ".join(failed))
+            if gone:
+                ok, rnotes = restore_saves(inst.prefix, backup)
+                for n in rnotes:
+                    env.out(f"[sim]   {n}")
+                env.out("[sim] saves and installed DLL restored and verified" if ok else f"[sim] RESTORE INCOMPLETE: backup kept at {backup}; fix and run: d2vr-linux sim --restore")
+                if not ok:
+                    rc = 2
+            else:
+                dll_note = ""
+                if placed or (candidate and (backup / DLL_RECORD).exists()):
+                    rec, _ = read_dll_record(backup)
+                    if rec:
+                        dll_note = (f" The candidate DLL is STILL INSTALLED at {rec['path']}; once the game has exited run: "
+                                    f"cp -f '{backup / rec['backup']}' '{rec['path']}' (valid only while that file is still the candidate)"
+                                    " or simply the command below.")
+                env.out(f"[sim] the game is still running: saves NOT restored.{dll_note} Close it, then run: d2vr-linux sim --restore ({backup})")
                 rc = 2
-        else:
-            env.out(f"[sim] the game is still running: saves NOT restored. Close it, then run: d2vr-linux sim --restore ({backup})")
-            rc = 2
     env.out(f"[sim] result: {'OK' if rc == 0 else 'FAILED'}{(' (' + reason + ')') if reason else ''}")
     env.out("[sim] status fields (xr-live-status.json):")
     for line in summarize(run_dir / "artifacts" / "xr-live-status.json", a.status_field or DEFAULT_FIELDS):
