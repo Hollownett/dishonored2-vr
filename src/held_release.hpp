@@ -2,10 +2,33 @@
 // Native held object (bottle, glass, severed arm) in VR: the holding hand keeps it while its grip is squeezed; letting go
 // throws it along the hand's motion when the hand moves fast, otherwise drops it. A pickup made with a short grip click
 // (released within click_ms of the carry starting) keeps the object until the next squeeze is let go.
+#include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstdint>
 
 namespace d2vr {
+// The velocity a thrown held object leaves with. The engine's own throw (83de90) has already chosen a speed and arc and
+// posts them as the set-velocity event; the hand supplies only the DIRECTION, so a thrown tank keeps the engine's speed
+// (a ballistic solve, x0.7) instead of a hand speed that can tunnel a heavy body through a thin floor mesh.
+// legacy=true is the old behaviour (build/legacy-throw): hand velocity x1.5, capped at 20 m/s, replacing the engine's.
+// ok=false: leave the event untouched (engine velocity blocked or non-finite, hand direction unusable).
+struct HeldThrow {std::array<double,3> v{};bool ok{};};
+inline HeldThrow held_throw_velocity(const std::array<double,3>& hand,const std::array<double,3>& engine,bool legacy) noexcept {
+    HeldThrow out{};
+    for(double c:hand) if(!std::isfinite(c)) return out;
+    const double hand_speed=std::sqrt(hand[0]*hand[0]+hand[1]*hand[1]+hand[2]*hand[2]);
+    if(legacy) {
+        const double scale=hand_speed>0?std::min(1.5,20./hand_speed):1.5;
+        for(unsigned i=0;i<3;++i) out.v[i]=hand[i]*scale;
+        out.ok=true;return out;
+    }
+    for(double c:engine) if(!std::isfinite(c)) return out;
+    const double engine_speed=std::sqrt(engine[0]*engine[0]+engine[1]*engine[1]+engine[2]*engine[2]);
+    if(!(hand_speed>1e-3) || !(engine_speed>1e-3)) return out;
+    for(unsigned i=0;i<3;++i) out.v[i]=hand[i]/hand_speed*engine_speed;
+    out.ok=true;return out;
+}
 class HeldRelease {
 public:
     using V=std::array<double,3>;

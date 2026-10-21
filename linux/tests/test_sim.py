@@ -1239,6 +1239,13 @@ class Pure(unittest.TestCase):
         with self.assertRaises(sim.SimError):
             sim.scenario_segments("../x", 0)
 
+    def test_oil_tank_throw_compiles(self):
+        segments = sim.scenario_segments("oil_tank_throw", 28000)
+        text, cfg = sim.compile_script(segments, 120)
+        self.assertTrue(cfg.startswith("D2VR_GAMEPLAY_SCRIPT 6 120000 "))
+        swing = [s for s in segments if s.get("start_ms", 0) >= 28000 + 5500 and s.get("end_ms", 0) <= 28000 + 5800]
+        self.assertEqual(len(swing), 6)   # the swing at the floor is 0.3 s: fast enough to throw, not drop
+
     def test_crouch_walk_compiles(self):
         segments = sim.scenario_segments("crouch_walk", 28000)
         text, cfg = sim.compile_script(segments, 120)

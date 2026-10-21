@@ -7556,7 +7556,7 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                      const auto now_h=GetTickCount64();
                                      const auto r=held_release.update(holding && controls_focus,side?raw.right_grip:raw.left_grip,v,game_xr->grip_speeds[side],now_h);
                                      if(r.toss) { // ponytail: x1.5 for arm-throw speeds vs the native 11 m/s lob, capped; tune in headset
-                                         d2vr::Vec3 tv{r.velocity[0]*1.5,r.velocity[1]*1.5,r.velocity[2]*1.5};tv=d2vr::grab_limit(tv,20);
+                                         d2vr::Vec3 tv{r.velocity[0],r.velocity[1],r.velocity[2]};   // the hook scales it (engine speed, or the old x1.5 capped at 20 with build/legacy-throw)
                                          const float f3[3]{float(tv.x),float(tv.y),float(tv.z)};
                                          if(entity && held_object_installed) d2vr::NativeHeldObject::arm_throw(entity,f3);
                                          held_rt_until=now_h+120;++held_throws;}
@@ -8482,6 +8482,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
         legacy_authored_camera=fs::exists(root/L"build"/L"legacy-authored-camera");authored_heading.reset();authored_heading_now.reset();
         camera_smoothing_enabled=!fs::exists(root/L"build"/L"no-camera-smoothing");anchor_smoother.reset();anchor_smooth_frame=~0ull;
         turn_ramp_enabled=!fs::exists(root/L"build"/L"no-turn-ramp");
+        d2vr::NativeHeldObject::legacy_throw.store(fs::exists(root/L"build"/L"legacy-throw"));
         {   // locomotion comfort vignette: on unless build/no-comfort-vignette; build/comfort-vignette may hold a 0..1 strength
             const bool vignette_on=!fs::exists(root/L"build"/L"no-comfort-vignette");
             float strength=d2vr::ComfortVignette::default_max_opacity;

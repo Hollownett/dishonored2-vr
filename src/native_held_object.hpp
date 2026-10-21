@@ -17,6 +17,7 @@
 #include <intrin.h>
 #include "../third_party/minhook/include/MinHook.h"
 #include "game_rig.hpp"
+#include "held_release.hpp"
 #include "native_held_placement.hpp"
 #include "physical_grab.hpp"
 #include "../third_party/dishonored_vr/grab_pose.h"
@@ -105,6 +106,9 @@ public:
         } __finally {ReleaseSRWLockExclusive(&publication_lock_);}
     }
     // Render thread: the next set-velocity event of this entity (within 600 ms) carries v (m/s, game world).
+    // v: the hand's velocity (the caller no longer scales it); the hook keeps the engine's own speed and takes only v's direction
+    // unless legacy_throw is set (build/legacy-throw), when the old x1.5 hand velocity replaces the engine's.
+    inline static std::atomic<bool> legacy_throw{false};
     static void arm_throw(std::uintptr_t entity,const float v[3]) noexcept {
         for(unsigned i=0;i<3;++i) throw_v_[i]=v[i];
         throw_tick_.store(GetTickCount64(),std::memory_order_relaxed);throw_entity_.store(entity,std::memory_order_release);
@@ -454,7 +458,9 @@ private:
             if(!p || reinterpret_cast<const unsigned char*>(p)[0x19]) return; // additive impulse: not the throw
             throw_entity_.store(0);
             if(std::sqrt(p[0]*p[0]+p[1]*p[1]+p[2]*p[2])<=.15f) {++throw_kept;return;} // blocked: native keeps it by the eye
-            for(unsigned i=0;i<3;++i) p[i]=throw_v_[i];
+            const auto out=held_throw_velocity({throw_v_[0],throw_v_[1],throw_v_[2]},{p[0],p[1],p[2]},legacy_throw.load(std::memory_order_relaxed));
+            if(!out.ok) {++throw_kept;return;}
+            for(unsigned i=0;i<3;++i) p[i]=static_cast<float>(out.v[i]);
             ++thrown;
         } __except(EXCEPTION_EXECUTE_HANDLER) {throw_entity_.store(0);}
     }
