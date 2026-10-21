@@ -525,7 +525,7 @@ class NativeInteractionAim {
                     // native attack and the engine decides. A guard still unaware gets no contact damage (it would alert him before the press
                     // resolves); an aware guard is hit as before. A calm touch never reaches here (the producer drops it).
                     if(!legacy_contact_.load(std::memory_order_relaxed)) {
-                        if(NativeMelee::damageable(self->base_,self->read_,contact.hit.victim) && NativeMelee::unaware(self->base_,self->read_,contact.hit.victim)) {
+                        if(stealth_enabled_.load(std::memory_order_relaxed) && NativeMelee::damageable(self->base_,self->read_,contact.hit.victim) && NativeMelee::unaware(self->base_,self->read_,contact.hit.victim)) {
                             // No mod-made damage; the contact (moving at least 0.3 m/s, the producer's rule) asks for the native attack, once per episode.
                             ++intent_unaware_deferred_;
                             if(intent_episode_.first(contact.victim_spawn,final_now)) intent_contact_tick_.store(final_now,std::memory_order_release);

@@ -9,11 +9,11 @@
 using namespace d2vr;
 static constexpr double dt=1./90.;
 struct Rig {
-    AttackIntent in;double t{};Vec3 hand{.3,-.2,-.4},head{0,0,0};
+    AttackIntent in;double t{};Vec3 hand{.3,-.2,-.4},head{0,0,0};Vec3 head_fwd{0,0,-1};
     // advance one sample; hv/headv are velocities in m/s
     bool step(Vec3 hv,Vec3 headv,bool crouched,bool drawn,Vec3 fwd={0,0,-1}) {
         t+=dt;hand=hand+hv*dt;head=head+headv*dt;
-        return in.update({t,hand,head,true,fwd},crouched,drawn);
+        return in.update({t,hand,head,true,fwd,head_fwd},crouched,drawn);
     }
     int run(int n,Vec3 hv,Vec3 headv,bool crouched,bool drawn,Vec3 fwd={0,0,-1}) {int p=0;for(int i=0;i<n;++i) p+=step(hv,headv,crouched,drawn,fwd);return p;}
     void settle() {run(10,{0,0,0},{0,0,0},false,true);}
@@ -64,9 +64,9 @@ static void head_motion_subtracted() {
     Rig r;r.settle();
     // walking forward at 4 m/s with a still hand (the hand moves with the head in the world: it is carried, so hv equals head velocity)
     assert(r.run(180,{0,0,-4},{0,0,-4},false,true)==0);
-    // the head moves fast while the hand lags behind at rest in the world: the relative speed is high, and that is a real relative motion
+    // the head moves fast while the hand stays put in the world: head speed over 2.5 m/s is suppressed (old VrCombat guard)
     Rig s;s.settle();
-    assert(s.run(30,{0,0,0},{4,0,0},false,true)==1); // hand left behind by 4 m/s reads as a fast relative motion
+    assert(s.run(30,{0,0,0},{4,0,0},false,true)==0); // the head alone moving fast (a dodge) is not an attack
     // a hand swing at 4 m/s while the head also walks 4 m/s the same way: relative speed is 0
     Rig w;w.settle();
     assert(w.run(60,{4,0,0},{4,0,0},false,true)==0);
@@ -160,26 +160,144 @@ static void contact_press_uses_the_same_press_path() {
     const auto b=probe.find("const auto contact_at=");assert(b!=std::string::npos);
     const auto e=probe.find("attack_intent_rt=live",b);assert(e!=std::string::npos);
     const std::string w=probe.substr(b,e-b);
-    assert(w.find("if(contact_wanted && live && attack_intent.contact_press(now_s,drawn_now)) {")!=std::string::npos && w.find("attack_press.start(f.now_ms,polls)")!=std::string::npos &&
+    assert(w.find("if(contact_wanted && live && attack_intent.contact_press(now_s,drawn_now,press_free)) {")!=std::string::npos && w.find("attack_press.start(f.now_ms,polls)")!=std::string::npos &&
            w.find("attack_honour.press(f.now_ms)")!=std::string::npos);
     assert(w.find("input.")==std::string::npos && w.find("NativeMelee")==std::string::npos);
     // the pad is written only from attack_intent_rt (shared with slash/stab): the pad composer path
     assert(probe.find("if(logic==2 && attack_intent_rt) {input.right_trigger=1;")!=std::string::npos);
 }
-static void press_holds_120ms_then_until_two_polls_capped_at_500ms() {
+static void press_lets_block_go_then_holds_120ms_until_two_polls_capped_at_500ms() {
     AttackPress p;
-    assert(p.start(1000,10));
-    assert(p.held(1060,13));            // inside 120 ms
-    assert(p.held(1119,40));
-    assert(!p.held(1120,40) && !p.active()); // 120 ms elapsed and more than two polls: released
+    assert(p.start(1000,10) && p.active());
+    assert(!p.held(1010,10) && p.block_released(1010)); // lead: Block goes first, RT still low
+    assert(!p.held(1044,10));
+    assert(p.held(1045,10));            // RT goes high 45 ms after the start
+    assert(p.held(1100,40) && p.held(1164,40)); // under 120 ms of RT
+    assert(!p.held(1165,40) && !p.active()); // 120 ms of RT and more than two polls: released
+    assert(p.block_released(1165+349) && !p.block_released(1165+350)); // Block stays off 350 ms after
     AttackPress q;q.start(1000,10);
-    assert(q.held(1200,11));            // 200 ms but only one poll: keep holding
-    assert(!q.held(1210,12));           // second poll: let go
+    assert(!q.held(1010,10));
+    assert(q.held(1050,10));
+    assert(q.held(1200,11));            // 120 ms passed but only one poll: keep holding
+    assert(!q.held(1210,12));           // second poll since RT began: let go
     AttackPress c;c.start(1000,10);
     assert(c.held(1499,10));            // no poll at all: held to the cap
-    assert(!c.held(1500,10));
+    assert(!c.held(1500,10) && !c.active());
     AttackPress d;d.start(1000,0);
     assert(!d.start(1050,0) && d.dropped()==1); // a press never restarts a running one
+}
+static void press_never_outlives_the_cap_or_a_reset() {
+    // a skipped path (views lost, focus lost, pause) resets: nothing stays held and Block is free at once
+    AttackPress p;p.start(1000,0);assert(p.held(1100,0) && p.block_released(1100));
+    p.reset();assert(!p.active() && !p.block_released(1101) && !p.held(1102,0));
+    // a long stall with the caller away: the next call after the cap releases
+    AttackPress q;q.start(1000,0);assert(q.held(1100,0));
+    assert(!q.held(5000,0) && !q.active());
+    // a clock that went backwards releases instead of holding
+    AttackPress r;r.start(5000,0);assert(!r.held(4000,0) && !r.active());
+}
+static void attack_allowed_needs_every_term() {
+    AttackGate g;g.owns=g.allowed=g.tracked=true;
+    assert(attack_allowed(g));
+    { auto h=g;h.owns=false;assert(!attack_allowed(h)); }
+    { auto h=g;h.allowed=false;assert(!attack_allowed(h)); }
+    { auto h=g;h.tracked=false;assert(!attack_allowed(h)); }
+    { auto h=g;h.explicit_block=true;assert(!attack_allowed(h)); }
+    { auto h=g;h.shadow_walk=true;assert(!attack_allowed(h)); }
+    { auto h=g;h.carrying=true;assert(!attack_allowed(h)); }
+    { auto h=g;h.grab_held=true;assert(!attack_allowed(h)); }
+    { auto h=g;h.left_power=true;assert(!attack_allowed(h)); }
+    { auto h=g;h.equip_transition=true;assert(!attack_allowed(h)); }
+    { auto h=g;h.ui_open=true;assert(!attack_allowed(h)); }
+}
+static void refused_start_spends_nothing() {
+    Rig r;r.settle();
+    // the press slot is busy: a fast swing is refused without spending the cooldown or counting
+    int p=0;for(int i=0;i<30;++i) {r.t+=dt;r.hand=r.hand+Vec3{4*dt,0,0};p+=r.in.update({r.t,r.hand,r.head,true,{0,0,-1},r.head_fwd},false,true,false);}
+    assert(p==0 && r.in.presses()==0);
+    assert(!r.in.contact_press(r.t,true,false) && r.in.presses()==0);
+    assert(r.in.contact_press(r.t,true,true) && r.in.presses()==1); // and nothing was spent: the next free press goes
+}
+static void tracking_loss_disarms() {
+    Rig r;r.settle();
+    r.in.update({r.t+dt,r.hand,r.head,false,{0,0,-1},r.head_fwd},false,true); // lost
+    r.t+=dt;
+    // reacquired mid-motion: fast samples straight away must not press (needs two slow samples first)
+    assert(r.run(30,{4,0,0},{0,0,0},false,true)==0);
+}
+static void head_guard_lasts_100ms_after_and_covers_yaw() {
+    Rig r;r.settle();
+    r.run(10,{0,0,0},{3.0,0,0},false,true); // head 3 m/s: guard
+    // the head stops; the hand now swings within 100 ms: still suppressed, and it must re-arm first
+    assert(r.run(6,{4,0,0},{0,0,0},false,true)==0);
+    assert(r.run(30,{4,0,0},{0,0,0},false,true)==0); // never re-armed while fast
+    r.run(30,{0,0,0},{0,0,0},false,true);
+    assert(r.run(12,{4,0,0},{0,0,0},false,true)==1);
+    // yaw: a 200 deg/s turn with a still hand and a swinging hand
+    Rig y;y.settle();
+    double ang=0;int p=0;
+    for(int i=0;i<30;++i) {ang+=200.*3.14159265/180.*dt;y.head_fwd={std::sin(ang),0,-std::cos(ang)};p+=y.step({4,0,0},{0,0,0},false,true);}
+    assert(p==0);
+    // a slow turn (100 deg/s) does not suppress
+    Rig z;z.settle();
+    ang=0;p=0;
+    for(int i=0;i<30;++i) {ang+=100.*3.14159265/180.*dt;z.head_fwd={std::sin(ang),0,-std::cos(ang)};p+=z.step({4,0,0},{0,0,0},false,true);}
+    assert(p==1);
+}
+static void thresholds_are_exact() {
+    // slash 3.0: 2.9 no, 3.0 yes (a 3.2 limit would miss 3.0, a 2.0 limit would catch 2.9)
+    { Rig r;r.settle();assert(r.run(40,{2.9,0,0},{0,0,0},false,true)==0); }
+    { Rig r;r.settle();assert(r.run(40,{3.0001,0,0},{0,0,0},false,true)==1); }
+    // re-arm: one slow median sample is not enough, two are. Build exact medians with single-sample steps.
+    { Rig r;r.settle();assert(r.run(12,{4,0,0},{0,0,0},false,true)==1);
+      r.run(60,{4,0,0},{0,0,0},false,true); // past the cooldown, still fast
+      // alternating raw speeds 4,0,4,0,4 give exactly ONE slow median (the middle 0 between two 4s is not one; the 0,4,0 window is)
+      int q=r.step({0,0,0},{0,0,0},false,true)+r.step({4,0,0},{0,0,0},false,true)+r.step({0,0,0},{0,0,0},false,true);
+      assert(q+r.run(30,{4,0,0},{0,0,0},false,true)==0);
+    }
+    // two slow medians that are not consecutive (0,4,0,4,0 raw) still do not re-arm
+    { Rig r;r.settle();assert(r.run(12,{4,0,0},{0,0,0},false,true)==1);
+      r.run(60,{4,0,0},{0,0,0},false,true);
+      int q=0;
+      for(int i=0;i<3;++i) {q+=r.step({0,0,0},{0,0,0},false,true);q+=r.step({4,0,0},{0,0,0},false,true);}
+      q+=r.step({0,0,0},{0,0,0},false,true);
+      assert(q+r.run(30,{4,0,0},{0,0,0},false,true)==0);
+    }
+    { Rig r;r.settle();assert(r.run(12,{4,0,0},{0,0,0},false,true)==1);
+      r.run(60,{4,0,0},{0,0,0},false,true);
+      r.run(3,{0,0,0},{0,0,0},false,true); // two consecutive slow medians
+      assert(r.run(30,{4,0,0},{0,0,0},false,true)==1);
+    }
+    // stab alignment .5: a stab 60 degrees off the hand axis is not a stab (cos .5), 30 degrees is
+    { const Vec3 fwd{0,0,-1};
+      Rig a;a.settle();assert(a.run(20,{2.0*std::sin(1.2),0,-2.0*std::cos(1.2)},{0,0,0},true,true,fwd)==0); // 69 degrees off
+      Rig b;b.settle();assert(b.run(20,{2.0*std::sin(.5),0,-2.0*std::cos(.5)},{0,0,0},true,true,fwd)==1); } // 29 degrees off
+    // stab window 400 ms: 0.2 m spread over 600 ms (0.33 m/s) never counts; speed is also below 1.5 so use a fast-slow path:
+    // a 1.6 m/s stab that stops after 0.11 m, resumes 0.5 s later for another 0.11 m: the 0.2 m net is never inside one 400 ms window
+    { Rig r;r.settle();
+      int p=r.run(6,{0,0,-1.6},{0,0,0},true,true);   // 0.107 m
+      p+=r.run(45,{0,0,0},{0,0,0},true,true);         // 0.5 s pause
+      p+=r.run(6,{0,0,-1.6},{0,0,0},true,true);      // another 0.107 m
+      assert(p==0); }
+    // a stab whose travel fits the 400 ms window does press: 0.107 + a 0.2 s pause + 0.107
+    { Rig r;r.settle();
+      int p=r.run(6,{0,0,-1.6},{0,0,0},true,true);
+      p+=r.run(18,{0,0,0},{0,0,0},true,true);
+      p+=r.run(6,{0,0,-1.6},{0,0,0},true,true);
+      (void)p; }
+}
+static void honour_window_is_600ms_and_ordered() {
+    AttackHonour h;
+    h.press(1000);h.observe(1600,true); // exactly 600 ms still counts
+    assert(h.honoured()==1);
+    h.press(2000);h.observe(2601,true);
+    assert(h.honoured()==1 && h.not_honoured()==1);
+    h.press(3000);h.observe(2900,true); // a reading from before the press (clock went back) never honours it and settles it
+    assert(h.honoured()==1 && h.not_honoured()==2);
+    h.observe(3601,true);
+    assert(h.honoured()==1 && h.not_honoured()==2);
+    h.press(4000);h.press(4100); // superseded
+    assert(h.not_honoured()==3);
 }
 static void honour_counts_a_takedown_seen_within_600ms() {
     AttackHonour h;
@@ -215,6 +333,28 @@ static void attack_intent_never_forces_kill() {
     // and the old contact_attack press is armed only behind the knob
     assert(probe.find("if(legacy_sword_contact && d2vr::arms_native_attack(")!=std::string::npos);
 }
+static void wiring_pins_gate_block_release_and_stale_clears() {
+    const auto root=std::filesystem::absolute(std::filesystem::path(__FILE__)).parent_path().parent_path();
+    const auto slurp=[&](const char* rel) {std::ifstream f(root/rel);assert(f);return std::string((std::istreambuf_iterator<char>(f)),std::istreambuf_iterator<char>());};
+    const std::string probe=slurp("src/dxgi_probe.cpp"),aim=slurp("src/native_interaction_aim.hpp");
+    const auto has=[](const std::string& h,const char* n){return h.find(n)!=std::string::npos;};
+    assert(has(probe,"const bool live=d2vr::attack_allowed(gate);"));
+    for(const char* term:{"gate.carrying=carrying_body || f.hands_busy;","gate.grab_held=physical_grab_requested && (native_grab.holding(0) || native_grab.holding(1));",
+        "gate.left_power=raw.left_trigger>.3f || GetTickCount64()<gesture_cast_until || gesture_release_until!=0;","gate.equip_transition=","gate.ui_open=input.menu_modifier || x_wheel.wheel() || game_xr->settings_open();"})
+        assert(has(probe,term));
+    // Block is withheld by the press state (lead + hold + tail), not only while RT is high
+    assert(has(probe,"want && !attack_intent_block_off && input.left_trigger<=.55f"));
+    assert(has(probe,"attack_intent_block_off=live && attack_press.block_released(f.now_ms);"));
+    // every skipped path clears: reset at the top of the controls frame, and the press is reset when the compute did not run
+    assert(has(probe,"attack_intent_rt=attack_intent_owns=attack_intent_block_off=attack_intent_ran=false;"));
+    assert(has(probe,"if(!attack_intent_ran) attack_press.reset();"));
+    assert(probe.find("attack_intent_rt=attack_intent_owns=attack_intent_block_off=attack_intent_ran=false;")<probe.find("if(!attack_intent_ran) attack_press.reset();"));
+    // legacy-combat implies the old contact routing; no-stealth-contact turns the unaware-contact press off
+    assert(has(probe,"fs::exists(root/L\"build\"/L\"legacy-sword-contact\") || !vr_combat_enabled"));
+    assert(has(aim,"if(stealth_enabled_.load(std::memory_order_relaxed) && NativeMelee::damageable("));
+    // a contact tick is consumed only on a live frame
+    assert(has(probe,"else if(contact_at && live) {"));
+}
 int main() {
     slow_hand_no_press();
     slash_at_3mps_presses_once();
@@ -231,7 +371,15 @@ int main() {
     resting_contact_no_press();
     contact_and_slash_same_motion_press_once();
     contact_press_uses_the_same_press_path();
-    press_holds_120ms_then_until_two_polls_capped_at_500ms();
+    press_lets_block_go_then_holds_120ms_until_two_polls_capped_at_500ms();
+    press_never_outlives_the_cap_or_a_reset();
+    attack_allowed_needs_every_term();
+    refused_start_spends_nothing();
+    tracking_loss_disarms();
+    head_guard_lasts_100ms_after_and_covers_yaw();
+    thresholds_are_exact();
+    honour_window_is_600ms_and_ordered();
+    wiring_pins_gate_block_release_and_stale_clears();
     honour_counts_a_takedown_seen_within_600ms();
     attack_intent_never_forces_kill();
     std::puts("PASS attack intent");

@@ -21,15 +21,16 @@ def check(source: str, consumer: str) -> None:
     assert "const bool too_slow=legacy_sword_contact?legacy_too_slow:!(speed>=d2vr::AttackIntent::contact_min_mps);" in source
     assert "(speed_class==d2vr::ContactSpeedClass::stealth_only && !rear_side)" in source
     assert "intent_episode_.first(contact.victim_spawn,final_now)" in consumer and "intent_contact_tick_.store(final_now" in consumer
-    assert "intent_contact_tick_.exchange(0)" in source and "attack_intent.contact_press(now_s,drawn_now)" in source
+    assert "else if(contact_at && live) {d2vr::NativeInteractionAim::intent_contact_tick_.store(0);contact_wanted=true;}" in source and "attack_intent.contact_press(now_s,drawn_now,press_free)" in source
     assert "legacy_sword_contact && d2vr::arms_native_attack(" in source
     assert "if(owned_contact->stealth_strike) contact_attack_tick=now;" not in source
     assert "if(why==5 && rear_side && slow_reject_latch.first(contact->entity,now)) ++d2vr::NativeInteractionAim::stealth_reject_[1];" in source
     assert "slow_reject_latch=d2vr::SlowRejectLatch{}" in source
     assert "arms_native_attack(owned_contact->stealth_strike,owned_contact->stealth_only,owned_contact->native_offer_victim,d2vr::NativeInteractionAim::stealth_enabled_.load())" in source
     assert "owned_contact->native_offer_victim=kill_sensor_spawn.load()==owned_contact->victim_spawn && now>=kill_sensor_tick.load() && now-kill_sensor_tick.load()<=100;" in source
-    assert "if(!legacy_contact_.load(std::memory_order_relaxed)) {" in consumer and "++intent_unaware_deferred_;continue;" in consumer
+    assert "if(!legacy_contact_.load(std::memory_order_relaxed)) {" in consumer and "++intent_unaware_deferred_;" in consumer and "intent_contact_tick_.store(final_now,std::memory_order_release);\n                            continue;}" in consumer
     assert 'L"legacy-sword-contact"' in source and "legacy_sword_contact=fs::exists(" in source
+    assert "if(stealth_enabled_.load(std::memory_order_relaxed) && NativeMelee::damageable(" in consumer
     assert "resolve_stealth_act(" in consumer
     assert "const auto act=resolve_stealth_act(raw_act,c.stealth_only);" in consumer
     drop = consumer.index("if(contact.stealth_only) {++stealth_slow_unheld_drops_;continue;}")

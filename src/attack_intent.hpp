@@ -9,7 +9,18 @@
 
 namespace d2vr {
 // hand_fwd is the direction the hand points (blade axis); a zero vector means "unknown", which can never read as a stab.
-struct AttackSample {double t_s{};Vec3 hand_pos{},head_pos{};bool tracked{};Vec3 hand_fwd{};};
+// hand_fwd / head_fwd: unit directions (a zero vector means unknown: no stab, no yaw guard).
+struct AttackSample {double t_s{};Vec3 hand_pos{},head_pos{};bool tracked{};Vec3 hand_fwd{},head_fwd{};};
+
+// Everything that must be true for a physical attack to press. Pure so one test pins each term.
+struct AttackGate {
+    bool owns{},allowed{},tracked{},explicit_block{},shadow_walk{};
+    bool carrying{},grab_held{},left_power{},equip_transition{},ui_open{};
+};
+inline constexpr bool attack_allowed(const AttackGate& g) noexcept {
+    return g.owns && g.allowed && g.tracked && !g.explicit_block && !g.shadow_walk &&
+           !g.carrying && !g.grab_held && !g.left_power && !g.equip_transition && !g.ui_open;
+}
 
 class AttackIntent {
 public:
@@ -17,17 +28,27 @@ public:
     inline static constexpr double cooldown_s=.3,min_dt_s=.004,max_gap_s=.25;
     inline static constexpr double stab_window_s=.4,stab_min_travel_m=.20,stab_min_straight=.75,stab_min_align=.5;
     inline static constexpr unsigned rearm_samples=2;
+    inline static constexpr double max_head_mps=2.5,max_yaw_dps=150.,head_guard_s=.1;
     inline static constexpr double contact_min_mps=.3; // a blade slower than this is resting on the guard, not attacking
     // Returns true on the one sample a press should start.
-    bool update(const AttackSample& s,bool crouched,bool weapon_drawn) noexcept {
+    // press_free: the caller's AttackPress can start now; without it nothing is spent (no cooldown, no count).
+    bool update(const AttackSample& s,bool crouched,bool weapon_drawn,bool press_free=true) noexcept {
         if(!s.tracked || !std::isfinite(s.t_s) || !finite(s.hand_pos) || !finite(s.head_pos)) {restart();return false;}
         const Vec3 rel=s.hand_pos-s.head_pos; // the head's own motion is out of the signal; head turning leaves it unchanged
-        if(!have_ || s.t_s<last_t_ || s.t_s-last_t_>max_gap_s) {restart();seed(s.t_s,rel);return false;}
+        if(!have_ || s.t_s<last_t_ || s.t_s-last_t_>max_gap_s) {restart();seed(s.t_s,rel,s);return false;}
         const double dt=s.t_s-last_t_;
         if(dt<min_dt_s) return false;
         const double raw=length(rel-last_rel_)/dt;
-        if(raw>glitch_mps) {seed(s.t_s,rel);history_n_=0;return false;} // a tracking jump is not a movement: drop the sample, keep arming state
-        last_t_=s.t_s;last_rel_=rel;
+        if(raw>glitch_mps) {seed(s.t_s,rel,s);history_n_=0;return false;} // a tracking jump is not a movement: drop the sample, keep arming state
+        // The head moving fast (a dodge, a lean, a turn) is not an attack, nor the 100 ms after it; the hand must re-arm afterwards.
+        const double head_mps=length(s.head_pos-last_head_)/dt;
+        double yaw_dps=0;
+        if(length(s.head_fwd)>1e-6 && length(last_head_fwd_)>1e-6) {
+            double c=dot(s.head_fwd,last_head_fwd_)/(length(s.head_fwd)*length(last_head_fwd_));
+            c=c>1?1:c<-1?-1:c;yaw_dps=std::acos(c)*57.29578/dt;
+        }
+        if(head_mps>max_head_mps || yaw_dps>max_yaw_dps) guard_until_=s.t_s+head_guard_s;
+        last_t_=s.t_s;last_rel_=rel;last_head_=s.head_pos;last_head_fwd_=s.head_fwd;
         speeds_[speed_i_++%3]=raw;if(speed_n_<3)++speed_n_;
         push_history(s.t_s,rel);
         if(speed_n_<3) return false;
@@ -35,6 +56,8 @@ public:
         speed_=med;
         if(med<rearm_mps) {if(slow_run_<rearm_samples)++slow_run_;} else slow_run_=0;
         if(slow_run_>=rearm_samples) armed_=true;
+        if(s.t_s<guard_until_) {armed_=false;slow_run_=0;return false;}
+        if(!press_free) return false;
         if(!armed_ || s.t_s<cooldown_until_ || !weapon_drawn) return false;
         bool slash=med>=slash_mps,stab=false;
         if(!slash && crouched && med>=stab_mps) stab=is_stab(s.hand_fwd);
@@ -45,8 +68,8 @@ public:
     }
     // A sword contact on a guard the engine still calls unaware asks for the same press (the caller checked the contact speed and the
     // once-per-episode rule). It shares the 300 ms cooldown and disarms, so one motion never presses twice (nor a slash right after).
-    bool contact_press(double t_s,bool weapon_drawn) noexcept {
-        if(!weapon_drawn || !std::isfinite(t_s) || t_s<cooldown_until_) return false;
+    bool contact_press(double t_s,bool weapon_drawn,bool press_free=true) noexcept {
+        if(!weapon_drawn || !press_free || !std::isfinite(t_s) || t_s<cooldown_until_) return false;
         armed_=false;slow_run_=0;cooldown_until_=t_s+cooldown_s;++presses_;++contact_;
         return true;
     }
@@ -57,12 +80,12 @@ public:
     double speed() const noexcept {return speed_;}
 private:
     static constexpr unsigned history_cap=64;
-    bool have_{},armed_{};double last_t_{},cooldown_until_{},speed_{};Vec3 last_rel_{};
+    bool have_{},armed_{};double last_t_{},cooldown_until_{},speed_{},guard_until_{};Vec3 last_rel_{},last_head_{},last_head_fwd_{};
     std::array<double,3> speeds_{};unsigned speed_i_{},speed_n_{},slow_run_{};
     std::array<double,history_cap> ht_{};std::array<Vec3,history_cap> hp_{};unsigned history_n_{},history_head_{};
     std::uint64_t presses_{},slash_{},stab_{},contact_{};
-    void seed(double t,Vec3 rel) noexcept {have_=true;last_t_=t;last_rel_=rel;}
-    void restart() noexcept {have_=false;speed_n_=speed_i_=slow_run_=0;history_n_=history_head_=0;speed_=0;}
+    void seed(double t,Vec3 rel,const AttackSample& s) noexcept {have_=true;last_t_=t;last_rel_=rel;last_head_=s.head_pos;last_head_fwd_=s.head_fwd;}
+    void restart() noexcept {have_=false;armed_=false;speed_n_=speed_i_=slow_run_=0;history_n_=history_head_=0;speed_=0;}
     double median3() const noexcept {
         const double a=speeds_[0],b=speeds_[1],c=speeds_[2];
         return a<b?(b<c?b:(a<c?c:a)):(a<c?a:(b<c?c:b));
@@ -90,29 +113,40 @@ private:
     }
 };
 
-// Holds the native attack button for min_hold_ms, then keeps holding until the game has polled the pad at least twice since the
-// press began (so the edge is never swallowed between two polls), capped at max_ms. polls is a running count of the game's reads.
+// The native attack is ignored while Block (RB) is held, and Block cancels a running slash. So a press first lets Block go for
+// lead_ms, then holds the attack for min_hold_ms and keeps holding until the game has polled the pad at least twice since the attack
+// went high (so the edge is never swallowed between two polls), capped at max_ms from the start. Block stays released while the
+// press runs and for tail_ms after it. polls is a running count of the game's pad reads.
 class AttackPress {
 public:
-    inline static constexpr std::uint64_t min_hold_ms=120,max_ms=500;
+    inline static constexpr std::uint64_t lead_ms=45,min_hold_ms=120,max_ms=500,tail_ms=350;
     inline static constexpr std::uint64_t min_polls=2;
+    bool active() const noexcept {return active_;}
     bool start(std::uint64_t now_ms,std::uint64_t polls) noexcept {
+        (void)polls;
         if(active_) {++dropped_;return false;}
-        active_=true;since_=now_ms;polls_at_start_=polls;++starts_;return true;
+        active_=true;rt_=false;rt_started_=false;since_=now_ms;++starts_;return true;
     }
-    // true while the button is to be held this frame
+    // Advance the state and return whether the attack button is held this frame.
     bool held(std::uint64_t now_ms,std::uint64_t polls) noexcept {
         if(!active_) return false;
-        const std::uint64_t age=now_ms>=since_?now_ms-since_:0;
-        if(age>=max_ms || (age>=min_hold_ms && polls-polls_at_start_>=min_polls)) {active_=false;return false;}
-        return true;
+        const std::uint64_t age=now_ms>=since_?now_ms-since_:max_ms;
+        if(age>=max_ms) {finish(now_ms);return false;}
+        if(age<lead_ms) return false; // Block is let go first
+        if(!rt_started_) {rt_started_=true;rt_at_=now_ms;polls_at_rt_=polls;}
+        if(now_ms-rt_at_>=min_hold_ms && polls-polls_at_rt_>=min_polls) {finish(now_ms);return false;}
+        rt_=true;return true;
     }
-    bool active() const noexcept {return active_;}
-    void reset() noexcept {active_=false;}
+    // Block (RB) must stay off while a press runs and shortly after.
+    bool block_released(std::uint64_t now_ms) const noexcept {
+        return active_ || (end_ms_ && now_ms>=end_ms_ && now_ms-end_ms_<tail_ms);
+    }
+    void reset() noexcept {active_=rt_=rt_started_=false;end_ms_=0;}
     std::uint64_t starts() const noexcept {return starts_;}
     std::uint64_t dropped() const noexcept {return dropped_;}
 private:
-    bool active_{};std::uint64_t since_{},polls_at_start_{},starts_{},dropped_{};
+    bool active_{},rt_{},rt_started_{};std::uint64_t since_{},rt_at_{},polls_at_rt_{},end_ms_{},starts_{},dropped_{};
+    void finish(std::uint64_t now_ms) noexcept {active_=rt_=false;end_ms_=now_ms?now_ms:1;}
 };
 
 // Whether the engine honoured a press: its assassination state (player FSM 13) was seen within window_ms after the press.

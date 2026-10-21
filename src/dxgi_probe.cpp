@@ -418,7 +418,7 @@ static d2vr::CombatDecision combat_decision{};
 // Plan G task 3 (src/attack_intent.hpp): without build/legacy-sword-contact a drawn-sword slash or a crouched stab presses the game's attack
 // and the engine decides the stealth kill. Controller thread only, except the atomics (status). reset at StartProbe.
 static d2vr::AttackIntent attack_intent;static d2vr::AttackPress attack_press;static d2vr::AttackHonour attack_honour;
-static bool legacy_sword_contact=false;static bool attack_intent_owns=false,attack_intent_rt=false;
+static bool legacy_sword_contact=false;static bool attack_intent_owns=false,attack_intent_rt=false,attack_intent_block_off=false,attack_intent_ran=false;
 static std::atomic<UINT64> attack_intent_pad_frames{};static std::atomic<bool> attack_intent_honour_read{};
 static std::mutex combat_policy_mutex;
 static d2vr::CombatDecision combat_policy_observation{};
@@ -6839,6 +6839,7 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                             xr_menu_layers=game_xr->menu_layers;
                             xr_controller_samples=game_xr->controller_samples;
                             post_xr_housekeeping_cpu_ns=d2vr::GameXr::cpu_time_ns()-xr_housekeeping_start;
+                            attack_intent_rt=attack_intent_owns=attack_intent_block_off=attack_intent_ran=false; // set again only by this frame's compute: no stale RT/RB on any skipped path
                             game_xr->y_hold_blocked=false; // set again below only when the controls block runs and a Talk offer or the wheel owns Y
                             if(controller_requested) {
                                 CpuSpan controls_span{controls_cpu_ns};
@@ -7390,18 +7391,34 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                         // attack_intent_compute_begin
                                         {   const bool drawn_now=sword_combat_owned && cf.equipped;
                                             attack_intent_owns=!legacy_sword_contact && drawn_now;
-                                            const bool live=attack_intent_owns && cf.allowed && cf.tracked && !cf.explicit_block && !cf.shadow_walk;
+                                            attack_intent_ran=true;
+                                            bool carrying_body{};{std::lock_guard<std::mutex> hand_lock(hand_state_mutex);carrying_body=hand_carrying_bits!=0 || hand_holding_object;}
+                                            d2vr::AttackGate gate{};
+                                            gate.owns=attack_intent_owns;gate.allowed=cf.allowed;gate.tracked=cf.tracked;gate.explicit_block=cf.explicit_block;gate.shadow_walk=cf.shadow_walk;
+                                            gate.carrying=carrying_body || f.hands_busy;
+                                            gate.grab_held=physical_grab_requested && (native_grab.holding(0) || native_grab.holding(1));
+                                            gate.left_power=raw.left_trigger>.3f || GetTickCount64()<gesture_cast_until || gesture_release_until!=0;
+                                            gate.equip_transition=d2vr::NativeManualEquipRuntime::process_owner().status().holster_pending;
+                                            gate.ui_open=input.menu_modifier || x_wheel.wheel() || game_xr->settings_open();
+                                            const bool live=d2vr::attack_allowed(gate);
                                             const double now_s=std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
                                             const auto polls=controller_bridge.virtual_reads();
                                             const auto to_vec=[](const d2vr::GV3& v){return d2vr::Vec3{v.x,v.y,v.z};};
-                                            const auto contact_at=d2vr::NativeInteractionAim::intent_contact_tick_.exchange(0);
-                                            const bool contact_wanted=contact_at && f.now_ms>=contact_at && f.now_ms-contact_at<=250;
-                                            if(contact_wanted && live && attack_intent.contact_press(now_s,drawn_now)) {
-                                                if(attack_press.start(f.now_ms,polls)) attack_honour.press(f.now_ms);}
-                                            if(attack_intent.update({now_s,to_vec(cf.pos),to_vec(cf.head_pos),live,to_vec(cf.aim)},crouch.crouched,drawn_now) && live)
-                                                if(attack_press.start(f.now_ms,polls)) attack_honour.press(f.now_ms);
+                                            // A contact tick is only consumed on a live frame; a stale one (over 250 ms) is dropped.
+                                            bool contact_wanted=false;
+                                            {const auto contact_at=d2vr::NativeInteractionAim::intent_contact_tick_.load(std::memory_order_acquire);
+                                             if(contact_at && (f.now_ms<contact_at || f.now_ms-contact_at>250)) d2vr::NativeInteractionAim::intent_contact_tick_.store(0);
+                                             else if(contact_at && live) {d2vr::NativeInteractionAim::intent_contact_tick_.store(0);contact_wanted=true;}}
+                                            attack_press.held(f.now_ms,polls); // advance first: a press that just finished frees the slot this frame
                                             if(!live) attack_press.reset();
+                                            const bool press_free=!attack_press.active();
+                                            if(contact_wanted && live && attack_intent.contact_press(now_s,drawn_now,press_free)) {
+                                                if(attack_press.start(f.now_ms,polls)) attack_honour.press(f.now_ms);}
+                                            if(attack_intent.update({now_s,to_vec(cf.pos),to_vec(cf.head_pos),live,to_vec(cf.aim),to_vec(cf.head_fwd)},crouch.crouched,drawn_now,
+                                                    press_free && !attack_press.active()) && live)
+                                                if(attack_press.start(f.now_ms,polls)) attack_honour.press(f.now_ms);
                                             attack_intent_rt=live && attack_press.held(f.now_ms,polls);
+                                            attack_intent_block_off=live && attack_press.block_released(f.now_ms);
                                             if(attack_intent_rt) ++attack_intent_pad_frames;
                                             // The honour check: did the engine's own assassination state (player FSM 13) start within 600 ms of a press.
                                             if(choke_owner) {attack_intent_honour_read=true;
@@ -7426,7 +7443,7 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                         if(want) {++block_wanted;if(!right_free) ++block_not_free;if(!sword_grip.held()) ++block_not_held;}
                                         // A power or a shot from the left hand: Block (RB) steps aside while the left trigger is held and 250 ms
                                         // after, then comes back by itself (user, headset v447: "block can be used along with weapon, powers").
-                                        if(right_free && sword_grip.held() && want && !attack_intent_rt && input.left_trigger<=.55f) {input.right_grip=1;++gesture_blocks;} // Block would swallow the attack press
+                                        if(right_free && sword_grip.held() && want && !attack_intent_block_off && input.left_trigger<=.55f) {input.right_grip=1;++gesture_blocks;} // Block would swallow the attack press
                                         if(vr_combat_enabled && combat_decision.block) ++block_pose_frames;}
                                     if(!vr_combat_enabled && gesture.takedown_pulse) {takedown_strike_until=GetTickCount64()+150;++takedown_gestures;}
                                     if(power_gestures_enabled && gesture.power!=d2vr::PowerGesture::none) {
@@ -7467,6 +7484,7 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                         combat_log("attack_policy",cd.attack_target.spawn,static_cast<double>(cd.scheduled_press),static_cast<int>(cd.attack_transition));
                                     // attack_intent_press_tick: with the sword drawn and no legacy-sword-contact, only the intent press (below) drives the attack button.
                                     if(logic==2 && cd.rt) {input.right_trigger=1;swing_until_tick=std::max<ULONGLONG>(swing_until_tick,GetTickCount64()+250);} // melee aim follows the blade
+                                    if(!attack_intent_ran) attack_press.reset(); // the compute was skipped this frame: nothing stays held
                                     if(attack_intent_owns) input.right_trigger=0; // the old swing recogniser no longer presses; the intent press below does
                                     if(logic==2 && attack_intent_rt) {input.right_trigger=1;swing_until_tick=std::max<ULONGLONG>(swing_until_tick,GetTickCount64()+250);}
                                     // attack_intent_wiring_end
@@ -8473,7 +8491,8 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
         }
         taa_mv_dejitter.enabled=!fs::exists(root/L"build"/L"no-taa-mv-dejitter");
         vr_combat_enabled=!fs::exists(root/L"build"/L"legacy-combat");vr_combat.reset();
-        legacy_sword_contact=fs::exists(root/L"build"/L"legacy-sword-contact");d2vr::NativeInteractionAim::legacy_contact_=legacy_sword_contact;
+        legacy_sword_contact=fs::exists(root/L"build"/L"legacy-sword-contact") || !vr_combat_enabled; // legacy-combat: the old contact behaviour applies completely
+        d2vr::NativeInteractionAim::legacy_contact_=legacy_sword_contact;
         d2vr::NativeInteractionAim::intent_contact_tick_=0;d2vr::NativeInteractionAim::intent_episode_=d2vr::SlowRejectLatch{};attack_intent=d2vr::AttackIntent{};attack_press=d2vr::AttackPress{};attack_honour=d2vr::AttackHonour{};attack_intent_owns=attack_intent_rt=false;attack_intent_pad_frames=0;attack_intent_honour_read=false;
         assassination_receipt_requested=head_requested && fs::exists(root/L"build"/L"assassination-receipts");
         if(assassination_receipt_requested &&
