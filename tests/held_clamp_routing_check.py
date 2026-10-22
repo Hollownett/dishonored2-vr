@@ -82,4 +82,7 @@ drawn = probe.index("drawn_anchor.update(side,seat,hands.grips[side].position")
 shift = probe.index("held_clamp_live.applied[side]={}")
 hand = probe.index("publish_hand(side,hands.grips[side],raw_grips[side])")
 assert drawn < shift < hand
+# the released-object height watch reads the held item the way the layer swap finds it (native_rigid_body does not map a HoldObject item)
+watch = aim[aim.index("auto watched_z"):aim.index("release_watch_json")]
+assert "exclusion_body(" in watch and "native_rigid_body(" not in watch
 print("held_clamp_routing_check ok")

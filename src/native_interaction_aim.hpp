@@ -602,18 +602,25 @@ class NativeInteractionAim {
             // Released object height watch (status "release_watch"): z at a real throw/drop's restore, minimum and last over the next 3 s.
             // Game Z is up. Read-only; it stops when the entity id and body handle no longer validate.
             if(self->active_ && self->logic_()==2) try {
+                // The watched body is read the way the layer swap finds it (a HoldObject item is not a native_rigid_body prop: sim 2026-10-22, the watch never
+                // started): entity id, the throwable component's handle, and the entity origin (+0x300, game Z up).
+                const auto watched_z=[&](std::uintptr_t entity,std::uint32_t id,std::uint32_t handle)->std::optional<float> {
+                    const auto live_id=rig::value<std::uint32_t>(self->read_,entity+0xa8);
+                    const auto body=NativeHeldObject::exclusion_body(self->base_,self->read_,entity);
+                    float at[3]{};
+                    if(!live_id || *live_id!=id || !body || body->handle!=handle || !self->read_(entity+0x300,at,sizeof at) || !std::isfinite(at[2])) return std::nullopt;
+                    return at[2];
+                };
                 if(NativeHeldObject::released_pending_.exchange(false)) {
                     const auto r=NativeHeldObject::released_;
-                    if(const auto b=native_rigid_body(self->read_,self->base_,r.entity,true);b && b->entity_id==r.id && b->handle==r.handle) {
+                    if(const auto z=watched_z(r.entity,r.id,r.handle)) {
                         release_watch_entity_=r.entity;release_watch_id_=r.id;release_watch_handle_=r.handle;release_watch_until_=GetTickCount64()+3000;
-                        const float z=static_cast<float>(b->pose.position.z);release_watch_z0_=release_watch_min_=release_watch_last_=z;++release_watches_;
+                        release_watch_z0_=release_watch_min_=release_watch_last_=*z;++release_watches_;
                     }
                 }
                 if(release_watch_entity_ && GetTickCount64()<release_watch_until_) {
-                    const auto b=native_rigid_body(self->read_,self->base_,release_watch_entity_,true);
-                    if(b && b->entity_id==release_watch_id_ && b->handle==release_watch_handle_) {
-                        const float z=static_cast<float>(b->pose.position.z);release_watch_last_=z;if(z<release_watch_min_) release_watch_min_=z;
-                    } else release_watch_entity_=0;
+                    if(const auto z=watched_z(release_watch_entity_,release_watch_id_,release_watch_handle_)) {release_watch_last_=*z;if(*z<release_watch_min_) release_watch_min_=*z;}
+                    else release_watch_entity_=0;
                 } else release_watch_entity_=0;
             } catch(...) {}
             {const auto held=held_world_.exchange(0);if(self->active_ && self->logic_()==2) try {NativeHeldObject::service_hold_layers(self->base_,self->read_,held);if(held) NativeHeldObject::world_render(self->base_,self->read_,held);} catch(...) {}}
