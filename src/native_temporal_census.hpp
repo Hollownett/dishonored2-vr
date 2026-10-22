@@ -268,7 +268,7 @@ public:
         }
     }
     void dispatch(ID3D11DeviceContext* context,UINT x,UINT y,UINT z) noexcept {
-        if(jobs_closed_.load(std::memory_order_acquire) && !scope_.current.context)return;
+        if(!scope_.current.context)return; // Only admitted native POSTPROC scopes; no D3D access outside them.
         if(!enter_reader())return;
         try {
             Event e;e.kind=Kind::dispatch;e.thread=thread();e.job=scope_.current;e.groups={x,y,z};e.context_type=static_cast<unsigned>(context->GetType());
@@ -349,7 +349,7 @@ public:
             case temporal_census::Stop::callback_error:reason="callback_error";break;
             }
             std::ofstream json(output/L"native-temporal-census.json.tmp",std::ios::trunc);
-            json<<"{\"diagnostic_only\":true,\"production_admission\":false,\"shader_bytecode_identity_known\":false,\"depth_producer_known\":false,\"gpu_order_proven\":false,\"all_process_dispatch_coverage\":false,\"coverage\":\"existing hooked Dispatch implementation only\",\"stop\":"<<static_cast<unsigned>(summary.stop)<<",\"stop_reason\":\""<<reason<<"\",\"complete\":"<<((summary.stop==temporal_census::Stop::pass_limit && !summary.incomplete && !summary.dropped && !summary.active_jobs)?"true":"false")<<",\"incomplete\":"<<(summary.incomplete?"true":"false")<<",\"armed_once\":"<<(ledger_.armed_once()?"true":"false")<<",\"attempted\":"<<summary.attempted<<",\"accepted\":"<<summary.accepted<<",\"dropped\":"<<summary.dropped<<",\"unknown\":"<<summary.unknown<<",\"native_passes\":"<<summary.passes<<",\"pass_admission_refused\":"<<summary.pass_admission_refused<<",\"active_jobs\":"<<summary.active_jobs<<",\"inside_postproc_dispatches\":"<<summary.inside_dispatches<<",\"outside_postproc_dispatches\":"<<summary.outside_dispatches<<",\"objects\":"<<summary.objects<<",\"contexts\":"<<summary.contexts<<"}\n";
+            json<<"{\"diagnostic_only\":true,\"production_admission\":false,\"shader_bytecode_identity_known\":false,\"depth_producer_known\":false,\"gpu_order_proven\":false,\"all_process_dispatch_coverage\":false,\"coverage\":\"native POSTPROC-scoped existing hooked Dispatch implementation only\",\"stop\":"<<static_cast<unsigned>(summary.stop)<<",\"stop_reason\":\""<<reason<<"\",\"complete\":"<<((summary.stop==temporal_census::Stop::pass_limit && !summary.incomplete && !summary.dropped && !summary.active_jobs)?"true":"false")<<",\"incomplete\":"<<(summary.incomplete?"true":"false")<<",\"armed_once\":"<<(ledger_.armed_once()?"true":"false")<<",\"attempted\":"<<summary.attempted<<",\"accepted\":"<<summary.accepted<<",\"dropped\":"<<summary.dropped<<",\"unknown\":"<<summary.unknown<<",\"native_passes\":"<<summary.passes<<",\"pass_admission_refused\":"<<summary.pass_admission_refused<<",\"active_jobs\":"<<summary.active_jobs<<",\"inside_postproc_dispatches\":"<<summary.inside_dispatches<<",\"outside_postproc_dispatches_semantics\":\"recorded only; out-of-scope calls skipped before D3D access\",\"outside_postproc_dispatches\":"<<summary.outside_dispatches<<",\"objects\":"<<summary.objects<<",\"contexts\":"<<summary.contexts<<"}\n";
             json.flush();json.close();if(!json)return false;
             std::filesystem::rename(output/L"native-temporal-census.json.tmp",output/L"native-temporal-census.json");
             flushed_=true;requested_=false;ledger_.release_objects();return true;

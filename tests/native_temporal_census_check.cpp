@@ -98,7 +98,19 @@ int main() {
         std::ifstream summary(root/L"native-temporal-census.json");
         const std::string text((std::istreambuf_iterator<char>(summary)),std::istreambuf_iterator<char>());
         assert(text.find("\"complete\":false")!=std::string::npos && text.find("waiting_missing_qualified_pair")!=std::string::npos);
-        summary.close();assert(capture.configure(false,nullptr,nullptr));std::filesystem::remove_all(root);
+        summary.close();assert(capture.configure(false,nullptr,nullptr));
+        // Armed but outside an admitted POSTPROC scope: this invalid D3D pointer
+        // must never be dereferenced, queried or retained by the wrapper.
+        assert(capture.configure(true,nullptr,nullptr));
+        capture.setup(setup(0),true);capture.setup(setup(1),true);
+        capture.dispatch(reinterpret_cast<ID3D11DeviceContext*>(std::uintptr_t{1}),3,5,7);
+        assert(capture.stop() && capture.flush(root));
+        std::ifstream scoped_summary(root/L"native-temporal-census.json");
+        const std::string scoped_text((std::istreambuf_iterator<char>(scoped_summary)),std::istreambuf_iterator<char>());
+        assert(scoped_text.find("\"armed_once\":true")!=std::string::npos);
+        assert(scoped_text.find("\"contexts\":0")!=std::string::npos && scoped_text.find("\"attempted\":0")!=std::string::npos);
+        assert(scoped_text.find("native POSTPROC-scoped existing hooked Dispatch implementation only")!=std::string::npos);
+        scoped_summary.close();assert(capture.configure(false,nullptr,nullptr));std::filesystem::remove_all(root);
     }
 #endif
     std::cout<<"native_temporal_census_check: passed (portable binding/lifetime evidence only)\n";
