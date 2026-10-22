@@ -7,29 +7,36 @@ def check(probe: str, game_xr: str, settings: str, features: str) -> None:
     for key in ("fires", "blocked_presses", "last_hold_ms"):
         assert f'\\"{key}\\":' in probe, key
     assert '#include "y_hold.hpp"' in game_xr
-    assert "y_hold_.update(raw_y,blocked," in game_xr
-    # the feed is gameplay-only and stops while the panel is open (Y then closes it by a fresh press)
-    feed = game_xr[game_xr.index("if(gameplay && settings_enabled_ && y_hold_enabled"):]
-    assert "!settings_.open()" in feed[:feed.index("{")]
-    assert "settings_.open_from_gameplay()" in game_xr
-    assert "controller_input.suppress_y=true" in game_xr
+    assert "y_hold_menu_.update(controller_input.y,y_hold_blocked.load(),hold_screen" in game_xr
+    assert "!gameplay && settings_available && settings_enabled_?YHoldMenu::Screen::pause" in game_xr
+    assert "controller_input.pause_request=hold.pause;" in game_xr
+    assert "if(hold.settings && !settings_.open())" in game_xr
+    assert "settings_.open_from_gameplay();else settings_.open_from_menu();" in game_xr
+    assert "if(!legacy_hold_y_settings && !settings_.open()) settings_input.y=false;" in game_xr
+    assert "settings_.update(settings_input,gameplay," in game_xr
+    assert 'L"legacy-hold-y-settings"' in probe
+    assert "game_xr->legacy_hold_y_settings=legacy_hold_y_settings;" in probe
     # a Talk offer or the wheel owns the press
     assert "game_xr->y_hold_blocked=talk_target.has_value() || talk_route.owned || x_wheel.wheel()" in probe
     assert "game_xr->y_hold_enabled=hold_y_menu_enabled;" in probe
-    # fire frame keeps the held Y (the opening update seeds it); the panel is a world-locked quad, not part of the eye image
-    assert "if(hold.suppress_y && !hold.fire)" in game_xr
-    assert "menu_panel_.reset();" in game_xr and "y_hold_.reset();y_hold_wait_release_=true;" in game_xr
+    assert "if(game_xr->y_hold_blocked.load()) input.pause_request=false;" in probe
+    # Only an opening settings update sees held Y; Pause consumes Y on its fire frame.
+    assert "if(hold.suppress_y && !hold.settings)" in game_xr
+    assert "menu_panel_.reset();" in game_xr
     assert "if(gameplay && !settings_.open()) menu_panel_.reset();" in game_xr
     assert "menu_panel_.hold(head_pose_now())" in game_xr and "settings_layer()" in game_xr and "ensure_settings_chain();" in game_xr
     assert "if(settings_.open() && !gameplay) {" in game_xr
     assert "game_xr->y_hold_blocked=false;" in probe
     assert "close_latch_" in settings
-    assert "SettingsMenuLayout::gameplay_drawable(gameplay,authored_camera," in game_xr and "&& panel_drawable && state==XR_SESSION_STATE_FOCUSED" in game_xr
+    assert "SettingsMenuLayout::gameplay_drawable(gameplay,authored_camera," in game_xr
+    assert "hold_ready=y_hold_enabled && state==XR_SESSION_STATE_FOCUSED && controller_input.active" in game_xr
+    assert "(!legacy_hold_y_settings || (settings_enabled_ && panel_drawable))" in game_xr
     assert "if(settings_.gameplay_panel_open() && !panel_drawable) settings_.suspend();" in game_xr
     assert "if(settings_chain_ && xrDestroySwapchain) {xrDestroySwapchain(settings_chain_);settings_chain_=XR_NULL_HANDLE;}" in game_xr
     assert "latch_timeout_s=1.5" in settings
     assert "gameplay_open_" in settings and "void open_from_gameplay()" in settings
     assert '"file": "no-hold-y-menu"' in features and '"kind": "disable"' in features
+    assert '"file": "legacy-hold-y-settings"' in features
 
 
 if __name__ == "__main__":

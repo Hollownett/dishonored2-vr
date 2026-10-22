@@ -53,7 +53,8 @@ headset listening validation is still required. See [audio evidence and checks](
 | Full fist (grip + trigger, grip about 45%) | Grab physically: a body by a limb, a bottle, a glass, an ashtray, any loose prop. The fingers wrap whatever the hand holds. Once held, the grip alone keeps it |
 | Right grip over your right shoulder | Draw the sword. It stays in your hand only while you keep squeezing (see *Weapons in your hands*) |
 | Left grip at your left hip | Draw the pistol or crossbow. It stays in your hand only while you keep squeezing |
-| Y on an offered Talk prompt (v553 test candidate) | Talk to that exact NPC or open the shop; the prompt shows Y. Grip no longer commits that Talk offer. In gameplay Y has no other action |
+| Y on an offered Talk prompt | Talk to that exact NPC or open the shop; the prompt shows Y. Grip no longer commits that Talk offer |
+| Y held for 0.6 s (no Talk offer or wheel) | Open the game pause menu. Release, then hold Y again while paused for VR settings |
 | Move your head sideways | Lean physically. The v553 test candidate removes button-driven lean; Y does not modify stick movement or turning |
 | A fast right-hand swing with the sword drawn (3 m/s or more, your own walking and head motion not counted) | Presses the game's own attack. The game decides what it is: on a guard who has not noticed you, seen from behind, it is the silent assassination; on one who has noticed you, an ordinary attack |
 | A straight stab while crouched (starts at 1.5 m/s, at least 20 cm of travel, a straight line along the hand's pointing direction) | The same game attack, so a crouched stab from behind on an unaware guard is the assassination. Standing, only a real swing attacks |
@@ -71,10 +72,15 @@ Raise your left hand in front of your face and turn it like checking a watch to 
 ## VR settings
 Open the game's pause menu and choose **VR Settings**. Its controls appear in
 the native menu image, beside the game's navigation. Point with the right
-controller and use its trigger to select. Y while paused remains a shortcut.
-During play, hold left Y for about half a second to open the settings; a short
-Y still talks to an NPC. The game keeps running behind the panel (it does not pause). Press Y again or B to close. The `no-hold-y-menu` knob
-(or the launcher's "Hold Y for VR settings" switch) turns the hold off.
+controller and use its trigger to select.
+During play, hold left Y for 0.6 seconds to open the game's pause menu. Release Y,
+then hold it again while paused to open VR settings. A short Y during play still
+talks to an NPC; a Talk offer or the weapon wheel keeps ownership of that press.
+Press Y again or B to close VR settings.
+The `no-hold-y-menu` knob (the launcher's "Hold Y menu shortcut" switch) turns the
+hold shortcut off. `legacy-hold-y-settings` restores the previous behavior: hold Y
+during play opens a settings panel while the game keeps running, and a short Y
+while paused opens settings. These routing changes still need headset verification.
 From there you can set:
 - resolution scale
 - anti-aliasing: FSR Native, FSR Quality (renders at 77% and upscales), FSR Balanced (67% and upscales), Game TAA or Off. The displayed generation reflects the active backend. Your saved selection is preserved. Reduced input resolution is verified; headset FPS gains remain unmeasured.

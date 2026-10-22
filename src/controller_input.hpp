@@ -18,6 +18,7 @@ struct ControllerInput {
     float move_x{},move_y{},turn_x{},turn_y{},left_trigger{},right_trigger{},left_grip{},right_grip{};
     bool a{},b{},x{},y{},left_click{},right_click{},menu{};
     bool journal{},suppress_pause{},menu_modifier{};
+    bool pause_request{}; // one qualified hold-Y event; the composer makes the native Start pulse pollable
     bool native_y_quick_action{};
     bool suppress_y{}; // the hold-Y menu owns this press: the game must not also see it, quick action or not
     bool lean_controlled{},lean_modifier{},lean_suspended{};
@@ -29,6 +30,8 @@ inline bool native_directional_stick(const ControllerInput& in) noexcept {
 
 class PadComposer {
     MenuTap menu_tap_;
+    bool pause_request_was_{},pause_clock_valid_{};
+    std::uint64_t pause_until_{},pause_last_tick_{};
     bool previous_gameplay_=false,previous_active_=false,previous_modifier_=false,previous_directional_=false;
     WORD blocked_buttons_{};
     unsigned blocked_analog_{};
@@ -62,7 +65,13 @@ public:
     void set_legacy_trigger(bool legacy) {legacy_trigger_=legacy;power_held_=false;power_low_frames_=0;}
     inline static constexpr std::uint64_t menu_shoulder_tap_ms=120; // well under the menus' 225 ms repeat delay
     XINPUT_GAMEPAD compose(const ControllerInput& in,bool gameplay,std::uint64_t now=GetTickCount64()) {
-        const bool pause=menu_tap_.update(in.menu,in.active && !in.suppress_pause,now);
+        const bool pause_allowed=in.active && !in.suppress_pause && !in.menu_modifier;
+        const bool pause_clock_reset=pause_clock_valid_ && now<pause_last_tick_;
+        if(!pause_allowed || pause_clock_reset || (gameplay && !previous_gameplay_)) pause_until_=0;
+        if(pause_allowed && !pause_clock_reset && previous_active_ && gameplay && previous_gameplay_ &&
+            in.pause_request && !pause_request_was_) pause_until_=now+150;
+        pause_request_was_=in.pause_request;pause_last_tick_=now;pause_clock_valid_=true;
+        const bool pause=menu_tap_.update(in.menu,in.active && !in.suppress_pause,now) || (pause_allowed && now<pause_until_);
         if(!in.active) {
             previous_active_=previous_modifier_=previous_directional_=false;blocked_buttons_=0;blocked_analog_=0;shoulder_held_={};
             power_held_=false;power_low_frames_=0;

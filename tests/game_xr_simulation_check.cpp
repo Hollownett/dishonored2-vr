@@ -43,6 +43,7 @@ int main() {
     unsigned scenarios=0;
     {
         d2vr::GameXr xr(device.Get(),64,64,DXGI_FORMAT_R8G8B8A8_UNORM_SRGB,nullptr,true,true,true,true,1,{}, {},true,&sim::dispatch);
+        xr.legacy_hold_y_settings=true; // retain the legacy short-Y settings pixel coverage below
         auto frame=[&](bool gameplay=true,bool authored=false,bool complete=true,bool settings_available=true) {
             if(xr.tracking_views() && complete) {
                 const auto& views=*xr.tracking_views();xr.record_rendered_eye(0,views[0].fov);xr.record_rendered_eye(1,views[1].fov);

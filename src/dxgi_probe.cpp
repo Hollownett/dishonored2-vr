@@ -2536,7 +2536,7 @@ static std::uint64_t hip_draw_generation{};
 static bool manual_wheel_closing{};
 static std::optional<d2vr::rig::NativeCarrySnapshot> controls_carry_snapshot;
 static d2vr::TalkYOwner talk_y_owner;
-static bool hold_y_menu_enabled=true; // build/no-hold-y-menu: hold left Y in gameplay opens the VR settings (y_hold.hpp)
+static bool hold_y_menu_enabled=true,legacy_hold_y_settings=false; // hold Y: native Pause, then VR settings; legacy restores the gameplay panel
 static std::atomic<UINT64> offered_choke_hint_frames{},choke_input_frames{},talk_y_input_frames{};
 static std::atomic<int> gaze_ray_side{-1};static std::atomic<UINT64> gaze_ray_until{};static std::atomic<unsigned> yank_requests{},look_uses{},look_hits{};static std::array<bool,2> hand_at_neck{};static std::array<std::atomic<float>,2> yank_peak{};static std::array<std::atomic<unsigned>,2> yank_gate{};static d2vr::GunGrip gun_grip;static bool gun_owns{},hip_loaded{};static std::atomic<unsigned> hip_kind{};static std::atomic<int> hip_owner{-1};static std::array<std::atomic<unsigned>,3> gun_actions{}; // hip_kind: 0 pistol, 1 crossbow
 // The right hand in the world after weapon collision (render thread), with its velocity: where a dropped sword starts.
@@ -6646,7 +6646,7 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                     turning_config,saved_settings_requested?output_directory.parent_path()/L"build"/L"vr-settings.cfg":fs::path{},native_menu_mode==2,
                                     simulated_vr_requested?&d2vr::simxr::dispatch:nullptr,mirror_mode_requested,sharpness_requested,taa_preference,hud_preference,hint_preference,player_measurements_requested);
                                 game_xr->wheel_native_pointer=!fs::exists(output_directory.parent_path()/L"build"/L"wheel-no-pointer");
-                                game_xr->y_hold_enabled=hold_y_menu_enabled;
+                                game_xr->y_hold_enabled=hold_y_menu_enabled;game_xr->legacy_hold_y_settings=legacy_hold_y_settings;
                                 game_xr->observe_transfer=&capture_xr_transfer;
                                 game_xr->observe_settings=&capture_settings_transfer;
                                 game_xr->observe_wrist=&capture_wrist_hud;
@@ -7533,6 +7533,8 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                 if(talk_route.owned || (logic==2 && !x_wheel.wheel() && talk_route.consume_y)) input.y=false;
                                 // Hold-Y menu: a Talk prompt offered to either hand (or a claimed Talk) or the wheel owns Y; a short Y there keeps its meaning.
                                 game_xr->y_hold_blocked=talk_target.has_value() || talk_route.owned || x_wheel.wheel() || input.menu_modifier;
+                                // The hold recognizer sampled before this frame's Talk query: recheck ownership before admitting Start.
+                                if(game_xr->y_hold_blocked.load()) input.pause_request=false;
                                 if(!(controls_choke_owner==choke_owner)) {offered_choke_grip={};controls_choke_owner=choke_owner;}
                                 bool choke_occupied=true;std::optional<d2vr::rig::NativeCarrySnapshot> choke_carry;
                                 {std::lock_guard<std::mutex> hand_lock(hand_state_mutex);
@@ -8944,6 +8946,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
         {std::ifstream knob(root/L"build"/L"upscale");float f=1;if(knob>>f && f>=.5f && f<=1) upscale_fraction=f;} // diagnostics override
         projection_jitter=!fs::exists(root/L"build"/L"no-projection-jitter");
         hold_y_menu_enabled=!fs::exists(root/L"build"/L"no-hold-y-menu");
+        legacy_hold_y_settings=fs::exists(root/L"build"/L"legacy-hold-y-settings");
         legacy_authored_camera=fs::exists(root/L"build"/L"legacy-authored-camera");authored_heading.reset();authored_heading_now.reset();
         aim_smoothing_enabled=!fs::exists(root/L"build"/L"no-aim-smoothing");aim_smoother.reset();   // plan H2
         controller_bridge.set_legacy_trigger(fs::exists(root/L"build"/L"legacy-trigger-mapping"));   // plan H3: restores the raw analog left trigger (no hysteresis, no release debounce)

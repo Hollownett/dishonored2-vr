@@ -3,6 +3,7 @@
 #include <cmath>
 #include <cstdio>
 #include <limits>
+#include <initializer_list>
 
 using namespace d2vr;
 
@@ -99,6 +100,78 @@ void fire_not_repeated_while_held_after_menu_closes() {
     assert(!h.update(false,false,6.2).suppress_y);
 }
 
+void menu_routing() {
+    using Screen=YHoldMenu::Screen;
+    YHoldMenu menu;
+    auto sample=[&](bool y,Screen screen,double t,bool blocked=false,bool open=false,bool legacy=false) {
+        return menu.update(y,blocked,screen,open,legacy,t);
+    };
+    sample(false,Screen::gameplay,0);
+    assert(!sample(true,Screen::gameplay,1).pause);
+    auto r=sample(true,Screen::gameplay,1.61);
+    assert(r.pause && !r.settings && r.suppress_y && r.held_s>=.6);
+    assert(!sample(true,Screen::gameplay,2).pause); // no repeated event even if the game has not polled Start yet
+    r=sample(true,Screen::pause,2.1);
+    assert(!r.settings && r.suppress_y);
+    assert(!sample(true,Screen::pause,5).settings); // opening hold cannot also open settings
+    sample(false,Screen::pause,5.1);
+    sample(true,Screen::pause,6);
+    r=sample(true,Screen::pause,6.61);
+    assert(r.settings && !r.pause);
+    sample(true,Screen::pause,6.7,false,true); // panel sees held Y, not a fresh close
+    sample(false,Screen::pause,6.8,false,true);
+    sample(true,Screen::pause,7,false,true); // fresh Y closes the panel
+    r=sample(true,Screen::pause,8);
+    assert(!r.settings && r.suppress_y);
+    sample(false,Screen::pause,8.1);
+    sample(true,Screen::pause,9);
+    assert(sample(true,Screen::pause,9.61).settings);
+}
+
+void menu_cancellation_and_legacy() {
+    using Screen=YHoldMenu::Screen;
+    for(bool blocked_at_start:{false,true}) {
+        YHoldMenu menu;
+        menu.update(false,false,Screen::gameplay,false,false,0);
+        auto r=menu.update(true,blocked_at_start,Screen::gameplay,false,false,1);
+        assert(!r.pause && r.blocked_press==blocked_at_start);
+        menu.update(true,true,Screen::gameplay,false,false,1.3); // Talk/wheel/modifier claims the press
+        r=menu.update(true,false,Screen::gameplay,false,false,2);
+        assert(!r.pause && !r.settings && !r.suppress_y);
+        menu.update(false,false,Screen::gameplay,false,false,2.1);
+        menu.update(true,false,Screen::gameplay,false,false,3);
+        assert(menu.update(true,false,Screen::gameplay,false,false,3.61).pause);
+    }
+    // Focus/tracking/load/wheel loss cancels a pending hold, and a held return is not a fresh press.
+    for(auto restored:{Screen::gameplay,Screen::pause}) {
+        YHoldMenu menu;
+        menu.update(false,false,Screen::gameplay,false,false,0);
+        menu.update(true,false,Screen::gameplay,false,false,1);
+        menu.update(true,false,Screen::unavailable,false,false,1.4);
+        auto r=menu.update(true,false,restored,false,false,2);
+        assert(!r.pause && !r.settings && r.suppress_y);
+        r=menu.update(true,false,restored,false,false,3);
+        assert(!r.pause && !r.settings);
+        menu.update(false,false,restored,false,false,3.1);
+        menu.update(true,false,restored,false,false,4);
+        r=menu.update(true,false,restored,false,false,4.61);
+        assert(r.pause==(restored==Screen::gameplay) && r.settings==(restored==Screen::pause));
+    }
+    YHoldMenu legacy;
+    legacy.update(false,false,Screen::gameplay,false,true,0);
+    legacy.update(true,false,Screen::gameplay,false,true,1);
+    const auto r=legacy.update(true,false,Screen::gameplay,false,true,1.61);
+    assert(r.settings && !r.pause);
+    legacy.update(false,false,Screen::pause,false,true,2);
+    legacy.update(true,false,Screen::pause,false,true,3);
+    assert(!legacy.update(true,false,Screen::pause,false,true,4).settings); // old paused short-Y shortcut owns this
+    YHoldMenu tap;
+    tap.update(false,false,Screen::gameplay,false,false,0);
+    assert(!tap.update(true,false,Screen::gameplay,false,false,1).suppress_y);
+    const auto short_release=tap.update(false,false,Screen::gameplay,false,false,1.1);
+    assert(!short_release.pause && !short_release.settings && !short_release.suppress_y);
+}
+
 int main() {
     short_press_never_fires();
     hold_fires_once();
@@ -111,5 +184,7 @@ int main() {
     negative_or_backwards_time_resets();
     nan_time_ignored();
     fire_not_repeated_while_held_after_menu_closes();
+    menu_routing();
+    menu_cancellation_and_legacy();
     std::puts("y_hold_check ok");
 }

@@ -75,6 +75,47 @@ int main() {
     assert(!(menu.compose(input,true,1320).wButtons&XINPUT_GAMEPAD_START)); // Resume cannot re-pause.
     assert(!menu.compose(input,true,1200).wButtons); // Clock reset cancels the pulse.
 
+    {   // A hold-Y event emits a pollable native Start pulse immediately, without a physical Menu button or release.
+        d2vr::PadComposer hold_pad;d2vr::ControllerInput hold{};hold.active=true;
+        hold_pad.compose(hold,true,1400);
+        hold.pause_request=true;hold.y=hold.native_y_quick_action=hold.suppress_y=true;
+        pad=hold_pad.compose(hold,true,1410);
+        assert((pad.wButtons&XINPUT_GAMEPAD_START) && !(pad.wButtons&XINPUT_GAMEPAD_Y));
+        hold.pause_request=false;
+        assert(hold_pad.compose(hold,false,1559).wButtons&XINPUT_GAMEPAD_START);
+        assert(!(hold_pad.compose(hold,false,1560).wButtons&XINPUT_GAMEPAD_START));
+        hold.y=hold.suppress_y=false;
+        hold_pad.compose(hold,true,1600);
+        hold.pause_request=true;
+        assert(hold_pad.compose(hold,true,1610).wButtons&XINPUT_GAMEPAD_START);
+        assert(!(hold_pad.compose(hold,true,1800).wButtons&XINPUT_GAMEPAD_START)); // held event cannot retrigger
+    }
+    for(unsigned cancel=0;cancel<5;++cancel) {
+        d2vr::PadComposer hold_pad;d2vr::ControllerInput hold{};hold.active=true;
+        hold_pad.compose(hold,true,1800);hold.pause_request=true;
+        assert(hold_pad.compose(hold,true,1810).wButtons&XINPUT_GAMEPAD_START);
+        hold.pause_request=false;
+        if(cancel==0) hold.active=false;
+        if(cancel==1) hold.suppress_pause=true;
+        if(cancel==2) hold.menu_modifier=true;
+        if(cancel==3) { // resume before the pulse expires must not re-pause
+            hold_pad.compose(hold,false,1820);
+            assert(!(hold_pad.compose(hold,true,1830).wButtons&XINPUT_GAMEPAD_START));
+        } else assert(!(hold_pad.compose(hold,true,cancel==4?1700:1820).wButtons&XINPUT_GAMEPAD_START));
+        hold.active=true;hold.suppress_pause=hold.menu_modifier=false;
+        assert(!(hold_pad.compose(hold,true,1840).wButtons&XINPUT_GAMEPAD_START));
+    }
+    {   // Inactive/paused/startup request is not queued for a later active gameplay frame.
+        for(unsigned context=0;context<3;++context) {
+            d2vr::PadComposer hold_pad;d2vr::ControllerInput hold{};hold.active=context!=0;
+            if(context!=2) hold_pad.compose(hold,context==0,1900);
+            hold.pause_request=true;
+            assert(!(hold_pad.compose(hold,context!=1,1910).wButtons&XINPUT_GAMEPAD_START));
+            hold.active=true;
+            assert(!(hold_pad.compose(hold,true,1920).wButtons&XINPUT_GAMEPAD_START));
+        }
+    }
+
     // Chord cancellation affects Pause only: native Back and all four
     // shortcuts remain pollable, with no duplicate Start on release.
     d2vr::PadComposer chords;input={};input.active=true;chords.compose(input,true,2000);

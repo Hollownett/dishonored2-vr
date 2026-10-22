@@ -1,7 +1,7 @@
 #pragma once
 #include <cmath>
 namespace d2vr {
-// Hold the left Y button to open the VR settings in gameplay. A short Y keeps its meaning (talk, wheel quick action).
+// Recognize a left-Y hold. A short Y keeps its meaning (talk, wheel quick action).
 // update() is called once per frame with the raw Y state. `blocked` is true while a Talk prompt is offered to Y or the wheel or a menu
 // owns Y: a press that sees `blocked` at any moment belongs to that owner and never fires. `fire` is true on exactly one call per
 // press (the first one with y held for hold_s); `suppress_y` is true from that call until Y is released, so the game never also sees
@@ -29,6 +29,38 @@ public:
         Result out{};
         if(!cancelled_ && !fired_ && now_s-start_>=config_.hold_s) {fired_=true;out.fire=true;}
         out.suppress_y=fired_;
+        return out;
+    }
+};
+
+// Route a fresh hold to the screen where it began. Screen/focus changes and a settings-panel close require release first,
+// so the hold that pauses cannot also open settings, and a held close cannot reopen them. No native menu/game addresses.
+class YHoldMenu {
+public:
+    enum class Screen {unavailable,gameplay,pause};
+    struct Result {bool pause{},settings{},suppress_y{},blocked_press{};double held_s{};};
+private:
+    YHold hold_;
+    Screen screen_{Screen::unavailable};
+    bool wait_release_{true},raw_was_{};
+    double press_start_{};
+public:
+    Result update(bool y,bool blocked,Screen screen,bool settings_open,bool legacy,double now_s) noexcept {
+        if(screen!=screen_) {hold_.reset();wait_release_=y;screen_=screen;}
+        const bool eligible=screen!=Screen::unavailable && !settings_open && !(legacy && screen==Screen::pause);
+        if(!eligible) {hold_.reset();wait_release_=y;raw_was_=y;return {};}
+        if(!y) wait_release_=false;
+        blocked=wait_release_ || (screen==Screen::gameplay && blocked);
+        Result out{};
+        if(y && !raw_was_) {press_start_=now_s;out.blocked_press=blocked;}
+        raw_was_=y;
+        const auto held=hold_.update(y,blocked,now_s);
+        if(held.fire) {
+            out.pause=screen==Screen::gameplay && !legacy;
+            out.settings=!out.pause;
+            out.held_s=now_s-press_start_;
+        }
+        out.suppress_y=held.suppress_y || (y && (wait_release_ || screen==Screen::pause));
         return out;
     }
 };

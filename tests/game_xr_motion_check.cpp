@@ -46,6 +46,31 @@ int main() {
     assert((xr.grip_tracked_hands&xr.grip_velocity_hands&2u)==0);
     sim::control.poses_valid=true;sim::control.hands=1;frame();assert(xr.grip_velocity_hands==1 && xr.grip_speeds[1]==0);
     sim::control.hands=3;frame();assert(xr.grip_velocity_hands==3);
+    {   // Production GameXr + pad composer: hold Y pauses, continued hold cannot open settings; a fresh paused hold can.
+        d2vr::PadComposer composer;d2vr::ControllerInput idle{};idle.active=true;composer.compose(idle,true,1000);
+        sim::control.input.y=false;frame();
+        sim::control.input.y=true;frame();
+        assert(!xr.controller_input.pause_request && !xr.settings_open());
+        Sleep(620);frame();
+        assert(xr.controller_input.pause_request && xr.controller_input.suppress_y && !xr.settings_open());
+        assert(composer.compose(xr.controller_input,true,1010).wButtons&XINPUT_GAMEPAD_START);
+        auto paused_frame=[&] {xr.present(scene.Get(),scene.Get(),1.6f,1.6f,false,false,true);};
+        paused_frame();assert(!xr.settings_open() && !xr.controller_input.pause_request);
+        Sleep(620);paused_frame();assert(!xr.settings_open());
+        sim::control.input.y=false;paused_frame();
+        sim::control.input.y=true;paused_frame();assert(!xr.settings_open()); // no old short-Y opening
+        Sleep(620);paused_frame();assert(xr.settings_open());
+        paused_frame();assert(xr.settings_open()); // the opening hold does not close it
+        sim::control.input.y=false;paused_frame();
+        sim::control.input.y=true;paused_frame();assert(!xr.settings_open()); // fresh press closes settings
+        Sleep(620);paused_frame();assert(!xr.settings_open()); // held close cannot reopen
+        sim::control.input.y=false;paused_frame();
+        frame();
+        xr.y_hold_enabled=false;
+        sim::control.input.y=true;frame();Sleep(620);frame();
+        assert(!xr.controller_input.pause_request && !xr.settings_open());
+        sim::control.input.y=false;frame();
+    }
     xr.close();assert(sim::spaces.empty());
     std::cout<<"PASS: production GameXr keeps valid per-hand runtime velocity separate from zero/missing, nonfinite and tracking/action loss\n";
 }

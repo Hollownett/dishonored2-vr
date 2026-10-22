@@ -79,7 +79,7 @@ class GameXr {
     std::vector<unsigned char> settings_pixels_;XrSwapchain settings_chain_{};std::vector<XrSwapchainImageD3D11KHR> settings_images_;
     bool settings_in_world_{}; // the panel was opened during play: a world-locked quad, not part of the eye image
     bool native_pointer_enabled_{};
-    YHold y_hold_;bool y_hold_menu_request_{},y_hold_raw_was_{},y_hold_gameplay_was_{},y_hold_wait_release_{};std::chrono::steady_clock::time_point y_hold_press_start_{};
+    YHoldMenu y_hold_menu_;
 public:
     bool wheel_native_pointer=true; // build/wheel-no-pointer: the wheel selects by stick only (pointer events switch it to keyboard glyphs)
 private:
@@ -1198,10 +1198,10 @@ public:
     UINT64 antialiased_eyes() const noexcept {return antialiasing_?antialiasing_->eye_passes:0;}
     bool settings_open() const noexcept {return settings_.open();}
     std::atomic<bool> settings_requested{false}; // native menu "VR Settings" item (native_menu_entry.hpp)
-    // Hold left Y in gameplay opens the settings (y_hold.hpp). The game thread sets y_hold_blocked each frame while a Talk prompt is
+    // Hold left Y in gameplay opens native Pause; a fresh hold in Pause opens settings. The game thread sets y_hold_blocked while a Talk prompt is
     // offered to Y or the wheel owns it; build/no-hold-y-menu clears y_hold_enabled.
     std::atomic<bool> y_hold_blocked{false};
-    bool y_hold_enabled=true;
+    bool y_hold_enabled=true,legacy_hold_y_settings=false;
     std::atomic<UINT64> y_hold_fires{0},y_hold_blocked_presses{0},y_hold_last_ms{0};
     void avatar_measurements(NativeAvatarMeasurements value) {
         avatar_measurements_=value;
@@ -1751,28 +1751,23 @@ public:
         last_tracked_pair=tracked_pair_();
         sample_input();
         // Preserve squeeze actions before the paused overlay consumes controls.
-        // Hold left Y during play: open the settings. Fed with the raw button before anything zeroes it; a Talk offer or the wheel
-        // (y_hold_blocked) owns the press instead. Not fed while the panel is open: Y then closes it by a new press (VrSettings).
+        // Recognize raw Y before settings consumes input. Only the exact native pause state permits the paused shortcut;
+        // wheel/title/loading are not Pause. Legacy keeps the previous gameplay settings panel and paused short-Y shortcut.
         const bool panel_drawable=SettingsMenuLayout::gameplay_drawable(gameplay,authored_camera,continuity_.usable() && left && right,
             !tracked_gameplay_required_ || tracked_pair_(),views_valid_,settings_chain_!=XR_NULL_HANDLE);
-        if(gameplay && settings_enabled_ && y_hold_enabled && panel_drawable && state==XR_SESSION_STATE_FOCUSED && controller_input.active && !settings_.open()) {
-            const auto now=std::chrono::steady_clock::now();
-            // A Y still held from before gameplay (paused menu, load) belongs to that screen, not to a new hold.
-            const bool raw_y=controller_input.y;
-            if(!raw_y) y_hold_wait_release_=false; // the Y that opened the panel (or closed it) is still down: it is nobody's new press
-            const bool blocked=y_hold_blocked.load() || !y_hold_gameplay_was_ || y_hold_wait_release_;
-            if(raw_y && !y_hold_raw_was_) {y_hold_press_start_=now;if(blocked) ++y_hold_blocked_presses;}
-            y_hold_raw_was_=raw_y;
-            const auto hold=y_hold_.update(raw_y,blocked,std::chrono::duration<double>(now.time_since_epoch()).count());
-            if(hold.fire) {
-                y_hold_menu_request_=true;++y_hold_fires;
-                y_hold_last_ms=static_cast<UINT64>(std::chrono::duration<double,std::milli>(now-y_hold_press_start_).count());
-            }
-            // Not on the fire frame: the opening update must see the held Y so it is not a fresh press that closes the panel at once
-            // (the panel's consume hides it from the game that frame).
-            if(hold.suppress_y && !hold.fire) {controller_input.y=false;controller_input.suppress_y=true;}
-        } else if(!gameplay || !controller_input.active || !panel_drawable) {y_hold_.reset();y_hold_raw_was_=false;}
-        y_hold_gameplay_was_=gameplay && controller_input.active;
+        const bool hold_ready=y_hold_enabled && state==XR_SESSION_STATE_FOCUSED && controller_input.active;
+        const bool hold_gameplay=gameplay && !authored_camera && continuity_.usable() && views_valid_ &&
+            (!legacy_hold_y_settings || (settings_enabled_ && panel_drawable));
+        const auto hold_screen=!hold_ready?YHoldMenu::Screen::unavailable:
+            hold_gameplay?YHoldMenu::Screen::gameplay:
+            !gameplay && settings_available && settings_enabled_?YHoldMenu::Screen::pause:YHoldMenu::Screen::unavailable;
+        const auto hold=y_hold_menu_.update(controller_input.y,y_hold_blocked.load(),hold_screen,settings_.open(),legacy_hold_y_settings,
+            std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count());
+        if(hold.blocked_press) ++y_hold_blocked_presses;
+        if(hold.pause || hold.settings) {++y_hold_fires;y_hold_last_ms=static_cast<UINT64>(hold.held_s*1000);}
+        controller_input.pause_request=hold.pause;
+        // An opening settings update must see the held Y to seed its edge state. A native Pause event suppresses it immediately.
+        if(hold.suppress_y && !hold.settings) {controller_input.y=false;controller_input.suppress_y=true;}
         const bool raw_both_grips_held=controller_input.left_grip>=.8f && controller_input.right_grip>=.8f;
         // In menus a left-grip squeeze re-places the menu where the user is looking.
         const bool menu_grip=controller_input.left_grip>=.6f;
@@ -1788,13 +1783,10 @@ public:
         {const auto now_ms=GetTickCount64();if(now_ms>=native_rows_tick_) {native_rows_tick_=now_ms+250;NativeOptionsPage::publish(native_settings::rows(settings_));}}
         if(settings_enabled_) {
             if(settings_requested.exchange(false) && !gameplay) {settings_.open_from_menu();}
-            if(y_hold_menu_request_) {
-                y_hold_menu_request_=false;
-                if(gameplay && panel_drawable && !settings_.open()) {
-                    menu_panel_.reset(); // placed afresh, once, in front of the head
-                    y_hold_.reset();y_hold_wait_release_=true;
-                    settings_.open_from_gameplay();pulse(0,.4f,.08f);
-                }
+            if(hold.settings && !settings_.open()) {
+                menu_panel_.reset(); // place a legacy gameplay panel afresh; paused settings stay in the native menu
+                if(gameplay) settings_.open_from_gameplay();else settings_.open_from_menu();
+                pulse(0,.4f,.08f);
             }
             if(settings_.gameplay_panel_open() && !panel_drawable) settings_.suspend(); // never consume input while the panel is not drawn
             settings_in_world_=gameplay && settings_.open();
@@ -1819,7 +1811,10 @@ public:
                 settings_update_time_=now;
                 settings_.palm_offsets(palm_offset_stored(0),palm_offset_stored(1));
             }
-            auto changes=settings_.update(controller_input,gameplay,state==XR_SESSION_STATE_FOCUSED,pointer,settings_available,palm_fit_dt_);
+            auto settings_input=controller_input;
+            // A paused tap of Y must not bypass the new hold, but Y still closes an open panel and serves calibration pages.
+            if(!legacy_hold_y_settings && !settings_.open()) settings_input.y=false;
+            auto changes=settings_.update(settings_input,gameplay,state==XR_SESSION_STATE_FOCUSED,pointer,settings_available,palm_fit_dt_);
             if(changes.palm_offset) confirm_palm_offset(changes.palm_offset->side,changes.palm_offset->value);
             // The game's own options page ("VR Settings"): its values and actions take the panel's path (apply, save, calibrate).
             if(const auto values=NativeOptionsPage::take_values()) native_settings::merge(changes,native_settings::apply(settings_,*values));
