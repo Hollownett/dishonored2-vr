@@ -32,7 +32,7 @@ int main() {
     {   // lab_tuned_defaults_pinned (tools/corpse_drag_lab.cpp, Task 9)
         const GrabTuning t;
         CHECK(t.strength_scale==3 && t.axial_n==300 && t.lateral_n==90 && t.torque_nm==30 && t.hand_kg==2 && t.mass_floor_kg==.5 && t.mass_ceiling_kg==60);
-        CHECK(t.lift_fraction==.25 && !t.tow && !t.use_measured_mass && near(t.dt_max,1./30) && t.catch_up_mps==1 && t.catch_up_ramp_mps2==4 && t.stale_dt_s==.1);
+        CHECK(t.lift_fraction==.25 && t.tow && !t.use_measured_mass && near(t.dt_max,1./30) && t.catch_up_mps==1 && t.catch_up_ramp_mps2==4 && t.stale_dt_s==.1);
     }
     // axial_cap_300n
     {

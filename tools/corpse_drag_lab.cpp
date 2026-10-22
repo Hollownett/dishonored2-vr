@@ -469,7 +469,7 @@ std::vector<Scenario> scenarios(const GrabTuning& base) {
             truth("lift time recorded",!std::isnan(m.lift_time),fmt("%.3f s",m.lift_time))};};
         all.push_back(two);
     }
-    // ---- tow scenarios: INFO only. The production default is tow OFF (grab_force_cap.hpp); Task 10 wires limb_saturated before it may be judged on.
+    // ---- tow scenarios: INFO only. The production default is tow ON (grab_force_cap.hpp, Task 10 wires limb_saturated); every judged scenario above runs with the shipped default, tow included.
     {
         auto s=make("drag_3m_tow","Wrist drag 3 m with the pelvis tow ON","same judgement as drag_3m, tow writes counted");
         s.info=true;s.tuning.tow=true;s.hands={drag_hand(7,{0,1,0},3,1.2,.3)};s.drag_probe=true;s.drag_stop=move_time(3,1.2,.3);s.duration=s.drag_stop+3;

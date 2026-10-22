@@ -18,8 +18,9 @@ TowInput base(const GrabTuning& t,double reach,double bind) {
 }
 }
 int main() {
-    {   // off_by_default_no_write (Task 10 turns it on when it wires limb_saturated)
-        const GrabTuning t;CHECK(!t.tow);
+    {   // tow is ON by default (Task 10 wired limb_saturated); the knob `tow 0` still turns it off and then nothing is written
+        CHECK(GrabTuning{}.tow);
+        GrabTuning t;t.tow=false;
         TowInput in=base(t,2,.5);const auto out=plan_tow(in);CHECK(!out.write && !out.disabled_saturated && near(out.bind_reach,.5));
     }
     {   // first_call_sets_reach_clamped
@@ -75,7 +76,8 @@ int main() {
         std::ifstream f("src/native_grab.hpp");std::stringstream ss;ss<<f.rdbuf();const std::string src=ss.str();
         CHECK(!src.empty());
         auto count=[&](const std::string& n) {int c=0;for(std::size_t p=src.find(n);p!=std::string::npos;p=src.find(n,p+1)) ++c;return c;};
-        CHECK(count("lane.tow=0")==0 && count("lane.reset_tow();")==4);
+        CHECK(count("lane.tow=0")==0 && count("lane.reset_tow();")==3);   // the three bind sites; every release goes through Lane::end_hold, which resets it too
+        CHECK(count("bind_motion=0;anchor_view={};reset_tow();")==1);
         CHECK(count("void reset_tow() {tow=0;tow_recovery=0;last_tow=0;}")==1);
         CHECK(count("in.recovery_s=lane.tow_recovery;")==1 && count("lane.tow_recovery=plan.recovery_s;")==1);
     }

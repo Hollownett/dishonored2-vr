@@ -648,6 +648,12 @@ if not errorlevel 0 goto build_failed
 build\corpse_diagnostics_check.exe
 if errorlevel 1 goto build_failed
 if not errorlevel 0 goto build_failed
+cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT /DD2VR_TESTING /Isrc /Ithird_party\minhook\include tests\corpse_hold_check.cpp /Fo:build\corpse_hold_check.obj /Fe:build\corpse_hold_check.exe
+if errorlevel 1 goto build_failed
+if not errorlevel 0 goto build_failed
+build\corpse_hold_check.exe
+if errorlevel 1 goto build_failed
+if not errorlevel 0 goto build_failed
 python tests\corpse_routing_check.py
 if errorlevel 1 goto build_failed
 if not errorlevel 0 goto build_failed
