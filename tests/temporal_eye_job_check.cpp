@@ -1,11 +1,39 @@
 #include "temporal_eye_job.hpp"
 #include <cassert>
+#include <cstdlib>
+#include <new>
 #include <iostream>
 #include <string>
 #include <type_traits>
 #include <vector>
+// CPU allocation-failure injection for sole-owner custom-deleter reentry.
+// The counter resets before throwing so cleanup callbacks can allocate normally.
+namespace allocation_failure { int remaining = -1; }
+#if defined(_MSC_VER)
+#define TEST_NOINLINE __declspec(noinline)
+#else
+#define TEST_NOINLINE __attribute__((noinline))
+#endif
+TEST_NOINLINE void* operator new(std::size_t size) {
+    if (allocation_failure::remaining == 0) {
+        allocation_failure::remaining = -1;
+        throw std::bad_alloc();
+    }
+    if (allocation_failure::remaining > 0) --allocation_failure::remaining;
+    if (void* p = std::malloc(size ? size : 1)) return p;
+    throw std::bad_alloc();
+}
+TEST_NOINLINE void operator delete(void* p) noexcept { std::free(p); }
+TEST_NOINLINE void operator delete(void* p, std::size_t) noexcept { std::free(p); }
+#undef TEST_NOINLINE
 using namespace temporal_eye;
 namespace {
+bool submitted(const RetainedJobs::ExecuteResult& r) {
+    return r.status == RetainedJobs::ExecuteStatus::submitted && bool(r.submission);
+}
+bool missed(const RetainedJobs::ExecuteResult& r) {
+    return r.status == RetainedJobs::ExecuteStatus::miss && !r.submission && r.deferred.owner && r.deferred.id.valid();
+}
 struct Reference {
     int* destroyed;
     explicit Reference(int* value) : destroyed(value) {}
@@ -17,7 +45,10 @@ List list(std::uint64_t serial, int* destroyed = nullptr) { return {id(serial), 
 RenderInputs inputs(unsigned eye = 0) {
     RenderInputs r;
     r.identity.key = {17, 9, eye};
-    r.identity.generations = {1, 2, 3, 4, 5};
+    r.identity.generations = {1, 2, 3, 4, 5, 6};
+    r.identity.device = id(90);
+    r.identity.requested_mode = RequestedMode::dlaa;
+    r.identity.selected_backend = Backend::dlss;
     r.identity.colour = {100, 80, 2, 3, 90, 70, 10};
     r.identity.depth = {100, 80, 2, 3, 90, 70, 11};
     r.identity.motion = {100, 80, 2, 3, 90, 70, 12};
@@ -27,10 +58,20 @@ RenderInputs inputs(unsigned eye = 0) {
     r.motion = {id(103), lease(), r.identity.key, 1, 12};
     r.output = {id(104), lease(), r.identity.key, 1, 13};
     r.feature_owner = lease();
-    r.jitter_x = .25f;
-    r.jitter_y = -.25f;
-    r.mv_scale_x = -90;
-    r.mv_scale_y = -70;
+    r.device_owner = lease();
+    r.depth_view_owner = lease();
+    r.identity.colour_selection = {r.colour.id, 1};
+    r.identity.depth_selection = {r.depth.id, 2};
+    r.identity.motion_selection = {r.motion.id, 3};
+    r.identity.output_selection = {r.output.id, 4};
+    r.identity.depth_view = {id(110), r.identity.depth_selection, 5,
+                             DepthViewDimension::texture2d, 11, 0, 1, 0, 1};
+    r.identity.jitter = {.25f, -.25f, -.125f, .125f, 3, 32, false};
+    r.identity.motion_contract = {-90, -70, false, MotionDirection::current_to_previous,
+                                 MotionUnits::uv, MotionResolution::active_render};
+    r.identity.colour_contract = {ColourDomain::native_scene, ColourEncoding::linear,
+                                  ExposureSource::automatic, true, true, 1, 1, {}, {}};
+    r.identity.inverted_depth = true;
     return r;
 }
 ExecutionInputs current() {
@@ -44,7 +85,7 @@ struct Fake final : Executor {
     std::vector<bool> restores;
     bool depth_ok = true, evaluate_ok = true;
     RetainedJobs* queue{};
-    Identity remainder{};
+    List remainder{};
     ExecutionInputs* caller_state{};
     RetainedJobs::Reservation old_reservation{};
     bool try_reentry{};
@@ -54,7 +95,9 @@ struct Fake final : Executor {
         assert(l.owner);
         if (try_reentry) {
             try_reentry = false;
-            assert(!queue->execute(remainder, !restore, current(), *this));
+            auto blocked = queue->execute(remainder, !restore, current(), *this);
+            assert(blocked.status == RetainedJobs::ExecuteStatus::busy && !blocked.submission);
+            assert(blocked.deferred.id == remainder.id && blocked.deferred.owner && blocked.restore == !restore);
             assert(!queue->retire({old_reservation.chain}));
             assert(!queue->split(old_reservation, list(999)));
             if (caller_state) caller_state->backend_enabled = false;
@@ -67,7 +110,7 @@ struct Fake final : Executor {
     }
     bool evaluate(const RenderInputs& r) noexcept override {
         events.push_back("evaluate" + std::to_string(r.identity.key.eye));
-        assert(r.jitter_x == .25f && r.mv_scale_x == -90);
+        assert(r.identity.jitter.current_x == .25f && r.identity.motion_contract.scale_x == -90);
         return evaluate_ok;
     }
     void fallback(const RenderInputs& r) noexcept override {
@@ -89,12 +132,14 @@ void phases_and_lifetime(bool restore) {
     r.motion.owner = lease(&destroyed);
     r.output.owner = lease(&destroyed);
     r.feature_owner = lease(&destroyed);
+    r.device_owner = lease(&destroyed);
+    r.depth_view_owner = lease(&destroyed);
     auto context_owner = lease(&destroyed);
     assert(valid(r)); // No future command lists or execution restore required.
     auto reservation = q.reserve(id(1), context_owner, r);
     assert(reservation);
     r.identity.key.frame = 999; // Caller changes do not mutate frozen receipt.
-    r.jitter_x = 123;
+    r.identity.jitter.current_x = 123;
     assert(!q.finished(id(1), list(22)));
     auto prefix = list(21, &destroyed);
     assert(q.split(reservation, prefix)); // adapter's successful Finish(TRUE)
@@ -111,20 +156,20 @@ void phases_and_lifetime(bool restore) {
     auto state = current();
     Fake f;
     f.queue = &q;
-    f.remainder = id(22);
+    f.remainder = list(22);
     f.caller_state = &state;
     f.old_reservation = reservation;
     f.try_reentry = true;
-    auto submission = q.execute(id(22), restore, state, f);
-    assert(submission && !state.backend_enabled);
+    auto submission = q.execute(list(22), restore, state, f);
+    assert(submitted(submission) && !state.backend_enabled);
     expect(f, {"list21", "depth0", "evaluate0", "list22"});
     assert(f.restores == std::vector<bool>({restore, restore}));
     assert(destroyed == 0); // CPU return is explicitly NOT retirement.
-    assert(!q.execute(id(22), restore, current(), f));
-    assert(!q.retire({submission.serial + 1000}));
-    assert(q.retire(submission));
-    assert(destroyed == 8); // 4 resources, feature, context and 2 lists.
-    assert(!q.retire(submission));
+    assert(missed(q.execute(list(22), restore, current(), f)));
+    assert(!q.retire({submission.submission.serial + 1000}));
+    assert(q.retire(submission.submission));
+    assert(destroyed == 10); // 4 resources, feature/device/view, context and 2 lists.
+    assert(!q.retire(submission.submission));
 }
 void chains_and_contexts() {
     RetainedJobs q;
@@ -138,12 +183,12 @@ void chains_and_contexts() {
     assert(q.finished(id(2), list(42)));
     assert(q.finished(id(1), list(33)));
     Fake f;
-    auto bs = q.execute(id(42), false, current(), f);
-    auto as = q.execute(id(33), true, current(), f);
+    auto bs = q.execute(list(42), false, current(), f);
+    auto as = q.execute(list(33), true, current(), f);
     expect(f, {"list41", "depth1", "evaluate1", "list42", "list31", "depth0",
                "evaluate0", "list32", "depth1", "evaluate1", "list33"});
     assert(f.restores == std::vector<bool>({false, false, true, true, true}));
-    assert(q.retire(bs) && q.retire(as));
+    assert(q.retire(bs.submission) && q.retire(as.submission));
 }
 void rejection_and_capacity() {
     RetainedJobs q;
@@ -210,10 +255,10 @@ void stale_fallbacks() {
         default: assert(false);
         }
         Fake f;
-        auto submission = q.execute(id(52), true, state, f);
+        auto submission = q.execute(list(52), true, state, f);
         expect(f, {"list51", "fallback0", "list52"});
-        assert(!q.execute(id(52), false, current(), f));
-        assert(q.retire(submission));
+        assert(missed(q.execute(list(52), false, current(), f)));
+        assert(q.retire(submission.submission));
     }
     for (bool depth_failure : {false, true}) {
         RetainedJobs q;
@@ -222,15 +267,15 @@ void stale_fallbacks() {
         Fake f;
         f.depth_ok = !depth_failure;
         f.evaluate_ok = false;
-        auto submission = q.execute(id(62), false, current(), f);
+        auto submission = q.execute(list(62), false, current(), f);
         if (depth_failure) expect(f, {"list61", "depth0", "fallback0", "list62"});
         else expect(f, {"list61", "depth0", "evaluate0", "fallback0", "list62"});
-        assert(q.retire(submission));
+        assert(q.retire(submission.submission));
     }
 }
 void sealed_capacity_and_cancelled_chain() {
     RetainedJobs q;
-    std::array<RetainedJobs::Submission, RetainedJobs::capacity> submissions{};
+    std::array<RetainedJobs::ExecuteResult, RetainedJobs::capacity> submissions{};
     Fake f;
     for (std::size_t n = 0; n < submissions.size(); ++n) {
         const auto context = id(200 + n);
@@ -240,33 +285,243 @@ void sealed_capacity_and_cancelled_chain() {
         assert(refused_split && q.cancel(refused_split)); // preserves first prefix
         assert(q.finished(context, list(301 + n * 2)));
         assert(!q.finished(context, list(400 + n)));
-        submissions[n] = q.execute(id(301 + n * 2), false, current(), f);
-        assert(submissions[n]);
+        submissions[n] = q.execute(list(301 + n * 2), false, current(), f);
+        assert(submitted(submissions[n]));
     }
     assert(!q.reserve(id(999), lease(), inputs())); // submitted slots still own leases
     assert(f.events.size() == RetainedJobs::capacity * 4);
-    assert(q.retire(submissions[0]));
+    assert(q.retire(submissions[0].submission));
     auto available = q.reserve(id(999), lease(), inputs());
     assert(available && q.cancel(available));
-    for (std::size_t n = 1; n < submissions.size(); ++n) assert(q.retire(submissions[n]));
+    for (std::size_t n = 1; n < submissions.size(); ++n) assert(q.retire(submissions[n].submission));
+}
+void complete_receipt_freshness() {
+    using Change = void (*)(InputIdentity&);
+    const Change changes[] = {
+        [](InputIdentity& e) { ++e.generations.dimensions; },
+        [](InputIdentity& e) { ++e.device.incarnation; },
+        [](InputIdentity& e) { e.requested_mode = RequestedMode::dlss_quality; },
+        [](InputIdentity& e) { e.selected_backend = Backend::fsr4; },
+        [](InputIdentity& e) { ++e.colour.mip_levels; },
+        [](InputIdentity& e) { ++e.colour.array_size; },
+        [](InputIdentity& e) { ++e.colour.sample_count; },
+        [](InputIdentity& e) { ++e.colour.sample_quality; },
+        [](InputIdentity& e) { ++e.colour.usage; },
+        [](InputIdentity& e) { ++e.colour.bind_flags; },
+        [](InputIdentity& e) { ++e.colour.cpu_access_flags; },
+        [](InputIdentity& e) { ++e.colour.misc_flags; },
+        [](InputIdentity& e) { ++e.colour_selection.resource.incarnation; },
+        [](InputIdentity& e) { ++e.colour_selection.generation; },
+        [](InputIdentity& e) { ++e.depth_selection.resource.incarnation; },
+        [](InputIdentity& e) { ++e.depth_selection.generation; },
+        [](InputIdentity& e) { ++e.motion_selection.resource.incarnation; },
+        [](InputIdentity& e) { ++e.motion_selection.generation; },
+        [](InputIdentity& e) { ++e.output_selection.resource.incarnation; },
+        [](InputIdentity& e) { ++e.output_selection.generation; },
+        [](InputIdentity& e) { ++e.depth_view.view.incarnation; },
+        [](InputIdentity& e) { ++e.depth_view.resource.resource.incarnation; },
+        [](InputIdentity& e) { ++e.depth_view.resource.generation; },
+        [](InputIdentity& e) { ++e.depth_view.generation; },
+        [](InputIdentity& e) { ++e.depth_view.format; },
+        [](InputIdentity& e) { ++e.depth_view.most_detailed_mip; },
+        [](InputIdentity& e) { ++e.depth_view.mip_levels; },
+        [](InputIdentity& e) { ++e.depth_view.first_array_slice; },
+        [](InputIdentity& e) { ++e.depth_view.array_size; },
+        [](InputIdentity& e) { e.depth_view.dimension = DepthViewDimension::texture2d_ms; },
+        [](InputIdentity& e) { ++e.jitter.current_x; },
+        [](InputIdentity& e) { ++e.jitter.current_y; },
+        [](InputIdentity& e) { ++e.jitter.previous_x; },
+        [](InputIdentity& e) { ++e.jitter.previous_y; },
+        [](InputIdentity& e) { ++e.jitter.phase; },
+        [](InputIdentity& e) { ++e.jitter.phase_count; },
+        [](InputIdentity& e) { e.jitter.reset_history = true; },
+        [](InputIdentity& e) { ++e.motion_contract.scale_x; },
+        [](InputIdentity& e) { ++e.motion_contract.scale_y; },
+        [](InputIdentity& e) { e.motion_contract.jittered = true; },
+        [](InputIdentity& e) { e.motion_contract.direction = MotionDirection::previous_to_current; },
+        [](InputIdentity& e) { e.motion_contract.units = MotionUnits::pixels; },
+        [](InputIdentity& e) { e.motion_contract.resolution = MotionResolution::full_render; },
+        [](InputIdentity& e) { e.colour_contract.domain = ColourDomain::post_tonemap; },
+        [](InputIdentity& e) { e.colour_contract.encoding = ColourEncoding::perceptual_gamma; },
+        [](InputIdentity& e) { e.colour_contract.exposure = ExposureSource::fixed; },
+        [](InputIdentity& e) { e.colour_contract.hdr = false; },
+        [](InputIdentity& e) { e.colour_contract.auto_exposure = false; },
+        [](InputIdentity& e) { ++e.colour_contract.pre_exposure; },
+        [](InputIdentity& e) { ++e.colour_contract.exposure_scale; },
+        [](InputIdentity& e) { ++e.colour_contract.exposure_resource.resource.incarnation; },
+        [](InputIdentity& e) { ++e.colour_contract.exposure_resource.generation; },
+        [](InputIdentity& e) { ++e.colour_contract.exposure_shape.sample_count; },
+        [](InputIdentity& e) { e.inverted_depth = false; },
+    };
+    for (auto change : changes) {
+        RetainedJobs q;
+        auto r = q.reserve(id(1), lease(), inputs());
+        assert(q.split(r, list(81)) && q.finished(id(1), list(82)));
+        auto state = current();
+        change(state.expected[0]);
+        Fake f;
+        auto result = q.execute(list(82), false, state, f);
+        assert(submitted(result));
+        expect(f, {"list81", "fallback0", "list82"});
+        assert(q.retire(result.submission));
+    }
+    using Invalid = void (*)(RenderInputs&);
+    const Invalid invalidations[] = {
+        [](RenderInputs& r) { r.identity.colour.sample_count = 0; },
+        [](RenderInputs& r) { r.identity.depth.sample_count = 2; },
+        [](RenderInputs& r) { r.identity.depth_view.dimension = DepthViewDimension::texture2d_ms; },
+        [](RenderInputs& r) { r.identity.motion.array_size = 0; },
+        [](RenderInputs& r) { r.identity.output.mip_levels = 0; },
+        [](RenderInputs& r) { r.identity.depth_view.most_detailed_mip = 1; },
+        [](RenderInputs& r) { r.identity.depth_view.first_array_slice = 1; },
+        [](RenderInputs& r) { ++r.identity.depth_selection.generation; },
+        [](RenderInputs& r) { ++r.identity.colour_selection.resource.incarnation; },
+        [](RenderInputs& r) { r.identity.device = {}; },
+        [](RenderInputs& r) { r.device_owner.reset(); },
+        [](RenderInputs& r) { r.depth_view_owner.reset(); },
+        [](RenderInputs& r) { r.identity.jitter.phase = 32; },
+        [](RenderInputs& r) { r.identity.motion_contract.scale_x = 0; },
+        [](RenderInputs& r) { r.identity.colour_contract.pre_exposure = 0; },
+        [](RenderInputs& r) { r.identity.colour_contract.exposure_scale = 0; },
+        [](RenderInputs& r) { r.identity.colour_contract.auto_exposure = false; },
+        [](RenderInputs& r) { r.identity.colour_contract.exposure = ExposureSource::texture; },
+    };
+    for (auto invalidate : invalidations) {
+        auto r = inputs();
+        invalidate(r);
+        RetainedJobs q;
+        assert(!valid(r) && !q.reserve(id(1), lease(), r));
+    }
+}
+void texture_exposure_lease() {
+    int destroyed = 0;
+    auto r = inputs();
+    r.identity.colour_contract.exposure = ExposureSource::texture;
+    r.identity.colour_contract.auto_exposure = false;
+    r.identity.colour_contract.exposure_resource = {id(115), 8};
+    r.identity.colour_contract.exposure_shape = {1, 1, 0, 0, 1, 1, 21};
+    r.exposure_owner = lease(&destroyed);
+    auto state = current();
+    state.expected[0] = r.identity;
+    RetainedJobs q;
+    auto reservation = q.reserve(id(1), lease(), r);
+    assert(reservation && q.split(reservation, list(83)) && q.finished(id(1), list(84)));
+    r = {};
+    Fake f;
+    auto result = q.execute(list(84), false, state, f);
+    assert(submitted(result) && destroyed == 0);
+    expect(f, {"list83", "depth0", "evaluate0", "list84"});
+    assert(q.retire(result.submission) && destroyed == 1);
+}
+void allocation_failure_reentry() {
+    // Sweep reserve's allocation points, then reach success. Failures must leave
+    // no occupied slot, and destroy the sole moved context owner outside the lock.
+    bool reached_success = false;
+    unsigned failures = 0;
+    for (int fail_after = 0; fail_after < 8 && !reached_success; ++fail_after) {
+        RetainedJobs q;
+        auto r = inputs();
+        unsigned releases = 0;
+        Lease sole_context(new int(1), [&](const void* p) {
+            ++releases;
+            auto nested = q.reserve(id(998), lease(), r);
+            assert(nested && q.cancel(nested)); // deadlocks if deleter runs under queue mutex
+            delete static_cast<const int*>(p);
+        });
+        allocation_failure::remaining = fail_after;
+        try {
+            auto reserved = q.reserve(id(1), std::move(sole_context), r);
+            allocation_failure::remaining = -1;
+            assert(reserved && !sole_context);
+            assert(q.cancel(reserved));
+            reached_success = true;
+        } catch (const std::bad_alloc&) {
+            allocation_failure::remaining = -1;
+            ++failures;
+            assert(!sole_context);
+            auto retried = q.reserve(id(1), lease(), r);
+            assert(retried && q.cancel(retried));
+        }
+        assert(releases == 1);
+    }
+    assert(reached_success && failures >= 2);
+}
+void cross_chain_reentry() {
+    RetainedJobs q;
+    auto a = q.reserve(id(1), lease(), inputs(0));
+    auto b = q.reserve(id(2), lease(), inputs(1));
+    assert(q.split(a, list(81)) && q.finished(id(1), list(82)));
+    assert(q.split(b, list(91)) && q.finished(id(2), list(92)));
+    struct SharedDepth final : Executor {
+        RetainedJobs& queue;
+        int depth = -1, busy_lease_destroyed = 0;
+        std::vector<std::string> events;
+        std::vector<bool> restores;
+        RetainedJobs::ExecuteResult deferred, unknown;
+        explicit SharedDepth(RetainedJobs& value) : queue(value) {}
+        void native(const List& l, bool restore) noexcept override {
+            events.push_back("list" + std::to_string(l.id.incarnation));
+            restores.push_back(restore);
+            if (l.id == id(81)) {
+                depth = 0; // This prefix produced left depth in the SHARED native texture.
+                auto incoming = list(92, &busy_lease_destroyed);
+                deferred = queue.execute(incoming, true, current(), *this);
+                incoming = {};
+                assert(deferred.status == RetainedJobs::ExecuteStatus::busy);
+                assert(!deferred.submission && deferred.deferred.id == id(92));
+                assert(deferred.deferred.owner && deferred.restore && busy_lease_destroyed == 0);
+                // Unknown lists can overwrite depth too: busy MUST NOT mean native miss.
+                unknown = queue.execute(list(99), false, current(), *this);
+                assert(unknown.status == RetainedJobs::ExecuteStatus::busy && unknown.deferred.owner);
+                assert(depth == 0); // B's native prefix has not interleaved.
+            } else if (l.id == id(91)) depth = 1;
+        }
+        bool snapshot_depth(const RenderInputs& r) noexcept override {
+            assert(depth == static_cast<int>(r.identity.key.eye));
+            events.push_back("depth" + std::to_string(depth));
+            return true;
+        }
+        bool evaluate(const RenderInputs& r) noexcept override {
+            assert(depth == static_cast<int>(r.identity.key.eye));
+            events.push_back("evaluate" + std::to_string(depth));
+            return true;
+        }
+        void fallback(const RenderInputs&) noexcept override { assert(false); }
+    } f(q);
+    auto first = q.execute(list(82), false, current(), f);
+    assert(submitted(first) && f.depth == 0 && f.busy_lease_destroyed == 0);
+    // The adapter stores busy requests in arrival order and retries after unwind.
+    auto second = q.execute(std::move(f.deferred.deferred), f.deferred.restore, current(), f);
+    assert(submitted(second) && f.depth == 1 && f.busy_lease_destroyed == 1);
+    auto unknown = q.execute(std::move(f.unknown.deferred), f.unknown.restore, current(), f);
+    assert(missed(unknown)); // Only now may adapter forward the unknown native list.
+    f.native(unknown.deferred, unknown.restore); // Miss result still owns a moved retry.
+    assert(f.events == std::vector<std::string>({"list81", "depth0", "evaluate0", "list82",
+                                               "list91", "depth1", "evaluate1", "list92", "list99"}));
+    assert(f.restores == std::vector<bool>({false, false, true, true, false}));
+    assert(missed(q.execute(list(82), false, current(), f)));
+    assert(missed(q.execute(list(92), false, current(), f)));
+    assert(q.retire(first.submission) && q.retire(second.submission));
 }
 void reused_addresses() {
     RetainedJobs q;
     auto a = q.reserve(id(1), lease(), inputs());
     assert(q.split(a, list(71)) && q.finished(id(1), list(72)));
     Fake f;
-    auto old = q.execute(id(72), false, current(), f);
-    assert(q.retire(old));
+    auto old = q.execute(list(72), false, current(), f);
+    assert(q.retire(old.submission));
     auto b = q.reserve(id(1), lease(), inputs());
     List new_prefix{{71, 171}, lease()}, new_remainder{{72, 172}, lease()};
     assert(q.split(b, new_prefix) && q.finished(id(1), new_remainder));
-    assert(!q.execute(id(72), false, current(), f)); // old raw address cannot match
-    auto fresh = q.execute(new_remainder.id, true, current(), f);
-    assert(fresh && !q.retire(old) && q.retire(fresh));
+    assert(missed(q.execute(list(72), false, current(), f))); // old raw address cannot match
+    auto fresh = q.execute(new_remainder, true, current(), f);
+    assert(submitted(fresh) && !q.retire(old.submission) && q.retire(fresh.submission));
     expect(f, {"list71", "depth0", "evaluate0", "list72", "list171", "depth0", "evaluate0", "list172"});
 }
 }
 int main() {
+    static_assert(!std::is_constructible<bool, RetainedJobs::ExecuteResult>::value,
+                  "busy cannot silently take native-on-miss boolean paths");
     static_assert(!std::is_copy_constructible<RetainedJobs>::value, "queue ownership is unique");
     phases_and_lifetime(false);
     phases_and_lifetime(true);
@@ -274,6 +529,10 @@ int main() {
     rejection_and_capacity();
     stale_fallbacks();
     sealed_capacity_and_cancelled_chain();
+    complete_receipt_freshness();
+    texture_exposure_lease();
+    allocation_failure_reentry();
+    cross_chain_reentry();
     reused_addresses();
     std::cout << "temporal_eye_job_check: passed\n";
 }
