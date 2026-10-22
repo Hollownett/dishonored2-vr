@@ -5280,7 +5280,10 @@ void prepare_head_view(void* view) noexcept {
                 try {native_eye=d2vr::authored_head_view(source_anchor,*authored_heading_now,centre_pose,eye_pose,1.0,head_origin.orientation,authored_physical_offset);}
                 catch(const std::invalid_argument&) {native_eye.reset();}
             }
-            if(!native_eye) {native_audio_listener.clear();return;}
+            if(!native_eye) {
+                pending_left_aim.reset(); // failure must not publish pending intent from scope exit
+                native_audio_listener.clear();native_shot_aim.clear();native_crosshair.clear();return;
+            }
             world.position={native_eye->position[0],native_eye->position[1],native_eye->position[2]};
             for(unsigned i=0;i<3;++i) world.basis[i]={native_eye->basis[i*3],native_eye->basis[i*3+1],native_eye->basis[i*3+2]};
         }
@@ -5395,8 +5398,9 @@ void prepare_head_view(void* view) noexcept {
             for(UINT trace_eye=mono?0u:static_cast<UINT>(eye);trace_eye<=(mono?1u:static_cast<UINT>(eye));++trace_eye)
                 alt_pose_trace_setup(alt_display,static_cast<int>(trace_eye),game_xr->recorded_rendered_view(trace_eye),position,basis);
         alternate_taa_setup_ready=alternate_taa_phase.has_value() && head_wrote;
-    } catch(const std::exception& error) {native_audio_listener.clear();forced_view_jitter.reset();note_recoverable(error.what());}
-    catch(...) {native_audio_listener.clear();forced_view_jitter.reset();note_recoverable("Unknown head-view exception");}
+    // PendingLeftAim has unwound before either handler; cleanup wins over its final publication.
+    } catch(const std::exception& error) {native_audio_listener.clear();native_shot_aim.clear();native_crosshair.clear();forced_view_jitter.reset();note_recoverable(error.what());}
+    catch(...) {native_audio_listener.clear();native_shot_aim.clear();native_crosshair.clear();forced_view_jitter.reset();note_recoverable("Unknown head-view exception");}
 }
 
 // Diagnostic (plan F task 3 step 1, knob build/alt-taa-trace, alternate-eye on only): 100 rows of what the engine's view object holds after Setup rolled it.
