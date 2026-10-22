@@ -182,8 +182,8 @@ public:
         if(copy_ && shown_ && flight_.flying) {CrashOperation operation("native weapon flight");try {fly(base,read);} catch(...) {flight_.flying=false;}}
         {CrashOperation operation("native hip holster");try {service_hip(base,read);} catch(...) {}}
         hold_down(base,read);
-        service_guard_probe(base,read);
         service_wake_retries(base,read,clock_ms());
+        service_guard_probe(base,read);
         if(const auto t=NativeGrab::take_thrown()) {CrashOperation operation("native thrown prop");try {thrown_prop(base,read,*t);} catch(...) {}}
         if(prop_.until && GetTickCount64()<prop_.until) {CrashOperation operation("native thrown prop flight");try {fly_prop(base,read);} catch(...) {prop_.until=0;}}
         publish(base,read);
@@ -414,15 +414,25 @@ public:
     }
     static bool guard_probe_armed() {return guard_probe_plan_.experiment!=GuardExperiment::none;}
 private:
+    static bool guard_probe_ask_unaware(std::uintptr_t base,std::uintptr_t npc,bool& answer) {
+        __try {answer=reinterpret_cast<bool (__fastcall*)(std::uintptr_t)>(base+NativeMelee::unaware_rva)(npc);return true;} __except(EXCEPTION_EXECUTE_HANDLER) {return false;}
+    }
     template<class Read> static GuardSample guard_probe_sample(std::uintptr_t base,Read& read,std::uintptr_t npc) {
-        return sample_guard(read,base,npc,clock_ms(),[&](std::uintptr_t n){return NativeMelee::unaware(base,read,n);});
+        return sample_guard(read,base,npc,clock_ms(),[&](std::uintptr_t n)->std::optional<bool> {
+            std::array<unsigned char,32> got{};
+            if(!read(base+NativeMelee::unaware_rva,got.data(),got.size()) || got!=NativeMelee::unaware_code) return std::nullopt; // the engine function is not the pinned one
+            bool answer{};if(!guard_probe_ask_unaware(base,n,answer)) return std::nullopt; // a fault inside the engine test is "did not run", never "alerted"
+            return answer;});
     }
     template<class Read> static bool guard_probe_fire(std::uintptr_t base,Read& read,std::uintptr_t npc,Vec3 hand,const Request& r) {
         if(!guard_probe_armed() || guard_probe_run_.active) return false;
-        const auto plan=guard_probe_plan_;guard_probe_plan_={};++guard_probes;
+        const auto plan=guard_probe_plan_;
+        auto& run=guard_probe_run_;GuardProbeRun next;
+        next.out.open(guard_probe_csv_,std::ios::trunc);if(!next.out) return true; // the plan and the knob stay (nothing was consumed), and the pull is skipped rather than falling back to the ragdoll
+        guard_probe_plan_={};++guard_probes;
         std::error_code ec;std::filesystem::remove(guard_probe_knob_,ec); // one experiment per run
-        auto& run=guard_probe_run_;run=GuardProbeRun{};
-        run.out.open(guard_probe_csv_,std::ios::trunc);if(!run.out) return false;
+        run=std::move(next);
+        run.id=rig::value<std::uint32_t>(read,npc+0xa8).value_or(0);
         run.out<<guard_sample_csv_header()<<'\n'<<guard_sample_csv_row(guard_probe_sample(base,read,npc))<<'\n'; // the state before anything happens
         const auto now=clock_ms();run.active=true;run.npc=npc;run.hand=hand;run.until=now+6000;run.next_sample=now+50;
         if(plan.experiment==GuardExperiment::teleport_step) {run.steps_left=plan.steps;run.step_m=plan.step_m;run.next_step=now+100;return true;}
@@ -431,7 +441,9 @@ private:
         Request s=r;s.op=Op::shove;s.target=npc;s.amount=0;
         const std::string decl=plan.experiment==GuardExperiment::shove_decl?"components/base/damage/"+plan.decl+".damage":"components/base/damage/shove_damage.damage";
         s.decl=decl.c_str();s.vel={float(-pull.x/l),float(-pull.y/l),0}; // as the pull does: hit from the side he is pulled to
-        shove(base,read,s);                                                // the shove only: no START_RAGDOLL, no velocity
+        const bool applied=shove(base,read,s);                              // the probe posts no START_RAGDOLL and no velocity itself; the shove's own reaction is what is measured
+        std::ofstream note(guard_probe_csv_.parent_path()/"guard-probe-result.txt",std::ios::trunc);
+        note<<"experiment="<<(plan.experiment==GuardExperiment::shove_decl?"shove_decl":"shove")<<" decl="<<decl<<" applied="<<(applied?1:0)<<" last_shove="<<last_shove.load()<<'\n';
         return true;
     }
     template<class Read> static void service_guard_probe(std::uintptr_t base,Read& read) {
@@ -439,7 +451,9 @@ private:
         const auto now=clock_ms();
         if(run.steps_left && now>=run.next_step) {
             const auto at=rig::value<std::array<float,3>>(read,run.npc+0x300);
-            if(at && living(read,run.npc)) {
+            const auto id_now=rig::value<std::uint32_t>(read,run.npc+0xa8);
+            if(!id_now || *id_now!=run.id || !rig::typed(read,base,run.npc,NativeMelee::npc_vtable_rva)) run.steps_left=1; // the guard is gone or the slot was reused: stop stepping
+            else if(at && living(read,run.npc)) {
                 const double dx=run.hand.x-(*at)[0],dy=run.hand.y-(*at)[1],d=std::hypot(dx,dy);
                 if(d>1e-3 && std::isfinite(d)) {
                     const double m=std::min(run.step_m,d);

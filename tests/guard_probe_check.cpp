@@ -46,16 +46,16 @@ int main() {
         CHECK(parse_guard_probe("shove_decl "+std::string(64,'a')));
     }
     {   // csv_row_field_count_matches_header
-        GuardSample s;s.tick=12345;s.entity_id=0x20002;s.position={1.5,-2.25,3};s.state_d1=0x20;s.unaware=true;s.bodies_dynamic=true;s.read_ok=true;
+        GuardSample s;s.tick=12345;s.entity_id=0x20002;s.position={1.5,-2.25,3};s.state_d1=0x20;s.unaware=true;s.bodies_dynamic=true;s.read_ok=true;s.unaware_ok=true;
         const auto row=guard_sample_csv_row(s);
-        CHECK(commas(row)==commas(guard_sample_csv_header()) && commas(row)==8);
-        CHECK(row=="12345,131074,1.5000,-2.2500,3.0000,32,1,1,1");
-        CHECK(commas(guard_sample_csv_row(GuardSample{}))==8);
+        CHECK(commas(row)==commas(guard_sample_csv_header()) && commas(row)==9);
+        CHECK(row=="12345,131074,1.5000,-2.2500,3.0000,32,1,1,1,1");
+        CHECK(commas(guard_sample_csv_row(GuardSample{}))==9);
     }
     {   // sample_garbage_read_is_marked_not_ok
         Fixture f;auto read=[&](std::uintptr_t at,void* out,std::size_t n){return f.read(at,out,n);};
-        int asked=0;auto ask=[&](std::uintptr_t){++asked;return true;};
-        auto good=sample_guard(read,f.base,f.npc,7,ask);CHECK(good.read_ok && good.entity_id==f.npc_id && good.position.x==1.5 && good.position.z==3.5 && good.unaware && asked==1 && good.tick==7);
+        int asked=0;auto ask=[&](std::uintptr_t)->std::optional<bool> {++asked;return true;};
+        auto good=sample_guard(read,f.base,f.npc,7,ask);CHECK(good.read_ok && good.entity_id==f.npc_id && good.position.x==1.5 && good.position.z==3.5 && good.unaware && good.unaware_ok && asked==1 && good.tick==7);
         f.put(f.npc+0xf0,std::uintptr_t{0xdead0001}); // an unreadable (and misaligned) model pointer
         asked=0;auto bad=sample_guard(read,f.base,f.npc,8,ask);CHECK(!bad.read_ok && !bad.unaware && !bad.bodies_dynamic && bad.position.x==0 && asked==0);
         f.put(f.npc+0xf0,std::uintptr_t{0x7ff000000000});bad=sample_guard(read,f.base,f.npc,8,ask);CHECK(!bad.read_ok); // aligned, unmapped
@@ -64,9 +64,16 @@ int main() {
         auto none=[&](std::uintptr_t at,void*,std::size_t){(void)at;return false;};
         CHECK(!sample_guard(none,f.base,f.npc,9,ask).read_ok);
     }
+    {   // a stealth test that did not run is neither aware nor unaware
+        Fixture f;auto read=[&](std::uintptr_t at,void* out,std::size_t n){return f.read(at,out,n);};
+        auto did_not_run=[&](std::uintptr_t)->std::optional<bool> {return std::nullopt;};
+        auto s=sample_guard(read,f.base,f.npc,1,did_not_run);CHECK(s.read_ok && !s.unaware && !s.unaware_ok);
+        auto aware=[&](std::uintptr_t)->std::optional<bool> {return false;};
+        s=sample_guard(read,f.base,f.npc,1,aware);CHECK(s.unaware_ok && !s.unaware);
+    }
     {   // sample_flags_ragdoll_bodies
         Fixture f;auto read=[&](std::uintptr_t at,void* out,std::size_t n){return f.read(at,out,n);};
-        auto ask=[&](std::uintptr_t){return false;};
+        auto ask=[&](std::uintptr_t)->std::optional<bool> {return false;};
         auto s=sample_guard(read,f.base,f.npc,1,ask);CHECK(s.read_ok && !s.bodies_dynamic && !s.unaware && s.state_d1==1);
         f.bodies(true);s=sample_guard(read,f.base,f.npc,2,ask);CHECK(s.read_ok && s.bodies_dynamic);
         f.bodies(false);CHECK(!sample_guard(read,f.base,f.npc,3,ask).bodies_dynamic);

@@ -14,12 +14,12 @@
 #include <string>
 
 namespace d2vr {
-struct GuardSample {std::uint64_t tick{};std::uint32_t entity_id{};Vec3 position{};unsigned char state_d1{};bool unaware{};bool bodies_dynamic{};bool read_ok{};};
-inline std::string guard_sample_csv_header() {return "tick_ms,entity_id,x,y,z,state_d1,unaware,bodies_dynamic,read_ok";}
+struct GuardSample {std::uint64_t tick{};std::uint32_t entity_id{};Vec3 position{};unsigned char state_d1{};bool unaware{};bool bodies_dynamic{};bool read_ok{};bool unaware_ok{};};
+inline std::string guard_sample_csv_header() {return "tick_ms,entity_id,x,y,z,state_d1,unaware,bodies_dynamic,read_ok,unaware_ok";}
 inline std::string guard_sample_csv_row(const GuardSample& s) {
-    char b[160];
-    std::snprintf(b,sizeof b,"%llu,%u,%.4f,%.4f,%.4f,%u,%d,%d,%d",static_cast<unsigned long long>(s.tick),s.entity_id,s.position.x,s.position.y,s.position.z,
-        static_cast<unsigned>(s.state_d1),s.unaware?1:0,s.bodies_dynamic?1:0,s.read_ok?1:0);
+    char b[176];
+    std::snprintf(b,sizeof b,"%llu,%u,%.4f,%.4f,%.4f,%u,%d,%d,%d,%d",static_cast<unsigned long long>(s.tick),s.entity_id,s.position.x,s.position.y,s.position.z,
+        static_cast<unsigned>(s.state_d1),s.unaware?1:0,s.bodies_dynamic?1:0,s.read_ok?1:0,s.unaware_ok?1:0);
     return b;
 }
 enum class GuardExperiment {none,shove,shove_decl,teleport_step};
@@ -27,7 +27,7 @@ struct GuardProbePlan {GuardExperiment experiment{};std::string decl;double step
 inline constexpr double guard_probe_max_step_m=.5;
 inline constexpr unsigned guard_probe_max_steps=20;
 // The running experiment (game thread only): kept outside the hook class because clang-cl needs member initializers complete before a static of the type.
-struct GuardProbeRun {bool active{};std::uintptr_t npc{};Vec3 hand{};std::uint64_t until{},next_sample{},next_step{};unsigned steps_left{};double step_m{};std::ofstream out;};
+struct GuardProbeRun {bool active{};std::uintptr_t npc{};Vec3 hand{};std::uint64_t until{},next_sample{},next_step{};std::uint32_t id{};unsigned steps_left{};double step_m{};std::ofstream out;};
 // "shove" | "shove_decl <name>" | "teleport_step <metres> <count>"; anything else (empty, unknown word, bad number, out of bounds, trailing words) is rejected.
 // <name> is a damage decl under components/base/damage/ (lower-case letters, digits and underscores, up to 64).
 inline std::optional<GuardProbePlan> parse_guard_probe(const std::string& file_text) {
@@ -56,7 +56,8 @@ inline std::optional<GuardProbePlan> parse_guard_probe(const std::string& file_t
 }
 // One sample of a living guard: id (+0xa8), state byte (+0xd1), drawn model origin (model +0x1860), the engine's stealth test and whether his bone-0
 // body is dynamic (a ragdoll: flags & 7 == 2, what native_ragdoll_body requires). read_ok is false if any plain read failed (the rest is then zero).
-// `unaware` is a callable (npc) -> bool, run only when the reads succeeded.
+// `unaware` is a callable (npc) -> std::optional<bool> (empty = the engine test did not run), called only when the reads succeeded. bodies_dynamic false means "not a
+// readable dynamic ragdoll": it cannot tell a keyframed guard from a failed physics read, so read it together with state_d1 and the position.
 template<class Read,class Unaware> GuardSample sample_guard(Read& read,std::uintptr_t base,std::uintptr_t npc,std::uint64_t tick,Unaware&& unaware) {
     GuardSample s;s.tick=tick;
     if(!rig::pointer(npc)) return s;
@@ -67,7 +68,7 @@ template<class Read,class Unaware> GuardSample sample_guard(Read& read,std::uint
     if(!id || !state || !at || !std::isfinite((*at)[0]) || !std::isfinite((*at)[1]) || !std::isfinite((*at)[2])) return s;
     s.entity_id=*id;s.state_d1=*state;s.position={(*at)[0],(*at)[1],(*at)[2]};
     s.bodies_dynamic=native_ragdoll_body(read,base,npc,0).has_value();
-    s.unaware=unaware(npc);
+    if(const std::optional<bool> a=unaware(npc)) {s.unaware=*a;s.unaware_ok=true;} // a stealth test that did not run is not "alerted"
     s.read_ok=true;
     return s;
 }
