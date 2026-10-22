@@ -88,18 +88,26 @@ void floor_press_stops_at_floor() {
 
 void corner_two_planes_no_penetration() {
     Rig rig;
-    unsigned inside=0;
-    for(unsigned f=0;f<60;++f) {   // long enough for every plane to lapse unless it is re-hit
-        const auto o=rig.step(pose_at({1.3,0,-.3}));   // inside both the wall and the floor
+    // Moves in from free space (a sweep that starts inside geometry makes no plane); the request ends inside both the wall and the floor.
+    constexpr unsigned approach=60;
+    for(unsigned f=0;f<approach+60;++f) {
+        const double k=std::min(1.,static_cast<double>(f)/approach);
+        const auto o=rig.step(pose_at({-.5+1.8*k,0,1.-1.3*k}));
         CHECK(finite(o.target.position));
-        if(f>=3) {
+        if(f>=approach+3) {   // the corner's second plane learned within 3 frames of the request settling; every plane holds for good (re-hit by the slid sweeps)
             CHECK(past_wall(o)<=.01);
             CHECK(o.target.position.z-radius>=-.01);
-        } else ++inside;
+        }
     }
-    CHECK(inside==3);
-    const auto o=rig.out;
-    CHECK(o.clamped);
+    CHECK(rig.out.clamped);
+}
+void initial_overlap_hits_make_no_plane() {
+    Rig rig;   // starts inside the wall and floor: the engine's penetration data says nothing about where the surface is
+    for(unsigned f=0;f<20;++f) {
+        const auto req=pose_at({1.3,0,-.3});
+        const auto o=rig.step(req);
+        CHECK(identical(o.target,req) && !o.clamped);
+    }
 }
 
 void free_space_untouched() {
@@ -148,20 +156,22 @@ void held_proxies_long_axis() {
 }
 
 void release_after_quarter_second() {
-    // The wall holds the object at x ~ 0.8 while the request is 0.4 m behind it.
+    // The wall holds the object at x ~ 0.795 while the request stays `gap` metres behind it (the object arrives from free space).
     const auto run=[](double gap,double seconds,double& when_released) {
         Rig rig;when_released=-1;
+        constexpr unsigned ramp=30;
+        for(unsigned f=0;f<ramp;++f) rig.step(pose_at({-.5+(.795+gap+.5)*f/ramp,0,2}));
+        const double t0=rig.now();
         for(unsigned f=0;f<static_cast<unsigned>(seconds/dt)+2;++f) {
-            rig.step(pose_at({.8+gap,0,2}));
-            if(rig.clamp.should_release() && when_released<0) when_released=rig.out.valid?rig.now()-dt:0;
+            rig.step(pose_at({.795+gap,0,2}));
+            if(rig.clamp.should_release() && when_released<0) when_released=rig.now()-dt-t0;
         }
         return rig.clamp.should_release();
     };
     double when=0;
-    // Gap time is counted from the first frame the clamp holds; a hit arrives one frame late.
     CHECK(run(.4,.20,when)==false);
     CHECK(run(.4,.50,when)==true);
-    CHECK(when>=.25 && when<=.34);
+    CHECK(when>=.25-dt && when<=.34);
     CHECK(run(.30,2.,when)==false);
 }
 void release_timer_exact() {
@@ -191,9 +201,11 @@ void non_finite_requested_invalid() {
     CHECK(rig.step(pose_at({0,0,2})).valid);
 }
 
+// Carries the object into the wall from free space, then presses on (request x = 1.2).
+void into_wall(Rig& rig) {for(unsigned f=0;f<60;++f) rig.step(pose_at({-.5+1.7*std::min(1.,f/30.),0,2}));}
 void epoch_change_resets_planes() {
     Rig rig;
-    for(unsigned f=0;f<20;++f) rig.step(pose_at({1.2,0,2}));
+    into_wall(rig);
     CHECK(rig.out.clamped);
     rig.epoch=2;
     rig.last_sweeps={};   // the new object has no sweeps in flight
@@ -203,7 +215,7 @@ void epoch_change_resets_planes() {
 
 void yield_clears_state() {
     Rig rig;
-    for(unsigned f=0;f<20;++f) rig.step(pose_at({1.2,0,2}));
+    into_wall(rig);
     CHECK(rig.out.clamped);
     const auto req=pose_at({1.2,0,2});
     const auto y=rig.step(req,true);
@@ -217,8 +229,8 @@ void two_proxies_keep_every_sphere_out() {
     // A tilted-free upright tank: the lowest sphere meets the floor, the others stay above it.
     Rig rig;rig.proxies=three();
     for(unsigned f=0;f<60;++f) {
-        const auto o=rig.step(pose_at({0,0,.2-.8*std::min(f,30u)/30.}));
-        if(f>=10) CHECK(o.target.position.z-.5-radius>=-.01);
+        const auto o=rig.step(pose_at({0,0,1.4-1.8*std::min(f,45u)/45.}));   // down from free space, the request ends 0.4 m under the floor
+        if(f>=50) CHECK(o.target.position.z-.5-radius>=-.01 && o.clamped);
     }
 }
 
@@ -321,6 +333,7 @@ int main() {
     wall_carry_0p1_to_3ms();
     floor_press_stops_at_floor();
     corner_two_planes_no_penetration();
+    initial_overlap_hits_make_no_plane();
     free_space_untouched();
     unreadable_bounds_no_clamp();
     held_proxies_long_axis();

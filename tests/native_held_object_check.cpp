@@ -409,6 +409,13 @@ int main() {
             assert(written.size()==4 && (written[3][1]&0x1f)==3u && !Held::layer_settled(entity));
             Held::service_hold_layers(base_address,reader,0);assert(written.size()==4);
         }
+        {   // exclusion_body: the held item's own body (record, handle, filter word) for the held sweeps' source-body exclusion
+            memory.put(filter_at,std::uint32_t{(0x20u<<5)|4u});
+            const auto body=Held::exclusion_body(base_address,reader,entity);
+            assert(body && body->record==pool+2*0xb0 && body->handle==handle && body->world==world && (body->filter&0x1f)==4u);
+            assert(!Held::exclusion_body(base_address,reader,entity+0x1000));   // an entity without that component maps nothing
+            memory.put(filter_at,std::uint32_t{(0x20u<<5)|3u});
+        }
         {   // bottle_settled_without_write
             memory.put(filter_at,std::uint32_t{(0x20u<<5)|4u});written.clear();
             assert(!Held::layer_settled(entity));Held::service_hold_layers(base_address,reader,entity);
@@ -422,10 +429,17 @@ int main() {
             Held::begin_safe_release();Held::clear();
             Held::service_hold_layers(base_address,reader,0);Held::service_hold_layers(base_address,reader,0);
             assert(written.size()==1 && (r::value<std::uint32_t>(reader,filter_at).value()&0x1f)==4u);   // nothing restored while the release is pending
+            {   // the engine's own drop writes RIGID_BODY back: the pending release puts DEBRIS on again (once; a stable DEBRIS is not written twice)
+                const auto before=Held::layers_reasserted.load();
+                memory.put(filter_at,std::uint32_t{(0x20u<<5)|3u});
+                Held::service_hold_layers(base_address,reader,0);
+                assert(written.size()==2 && (written[1][1]&0x1f)==4u && Held::layers_reasserted.load()==before+1);
+                Held::service_hold_layers(base_address,reader,0);assert(written.size()==2);
+            }
             Held::allow_restore();assert(!Held::restore_hold_.load());
             Held::service_hold_layers(base_address,reader,0);
-            assert(written.size()==2 && (written[1][1]&0x1f)==3u && (r::value<std::uint32_t>(reader,filter_at).value()&0x1f)==3u);
-            Held::allow_restore();Held::service_hold_layers(base_address,reader,0);assert(written.size()==2);   // exactly once
+            assert(written.size()==3 && (written[2][1]&0x1f)==3u && (r::value<std::uint32_t>(reader,filter_at).value()&0x1f)==3u);
+            Held::allow_restore();Held::service_hold_layers(base_address,reader,0);assert(written.size()==3);   // exactly once
         }
         {   // a hold that starts again cancels the pending release: the layer is still DEBRIS and the next real end restores it
             written.clear();Held::service_hold_layers(base_address,reader,entity);assert(written.size()==1 && (written[0][1]&0x1f)==4u);

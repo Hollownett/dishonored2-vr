@@ -32,7 +32,7 @@ assert pose < clamp < published < target < publication, "clamp must sit after th
 assert "origin=out.target.position" in publish, "the clamped target replaces the requested position"
 assert "post_held_sweeps(side,out.sweeps,*e)" in publish, "the held sweeps exclude the held entity (*e)"
 assert "L.clamp.note_published(" in publish
-assert "in.hits[i]=d2vr::to_clamp_hit(*raw_hits[i])" in publish, "hits go back by proxy index, converted at the clamp boundary"
+assert "in.hits[i]=d2vr::to_clamp_hit(*raw_hits[i])" in publish and "raw_hits[i]->entity==*e" in publish, "hits go back by proxy index, converted at the clamp boundary"
 assert "serial>L.posted_scope" in publish, "an answer counts only after a game-thread scope ran since the post"
 
 # every hold end goes through held_clear (the release check begins before the restore can be armed)

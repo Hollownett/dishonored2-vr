@@ -213,7 +213,15 @@ public:
         const auto id=rig::value<std::uint32_t>(read,entity+0xa8);
         if(!body || !body->record_ok || !body->identity_ok || !id || !set_filter(base,read,body->handle,(body->filter&~0x1fu)|layer_debris)) return false;
         LayerEntry e;e.entity=entity;e.entity_id=*id;e.handle=body->handle;e.filter=body->filter;e.generation=body->identity.generation;e.flags=body->identity.flags;
-        layer_entity_=entity;++layers_swapped;ledger_.swapped(e);layer_settled_.store(entity,std::memory_order_release);return true;
+        layer_entity_=entity;swap_entry_=e;++layers_swapped;ledger_.swapped(e);layer_settled_.store(entity,std::memory_order_release);return true;
+    }
+    // The held entity's body as a world cast must be told to skip it (held_clamp.hpp sweeps): the same single throwable component the layer swap writes
+    // (the generic prop mapping of native_cast_exclusion does not find a HoldObject item, and its sweeps then reported the object itself).
+    struct ExclusionBody {std::uintptr_t record{},world{};std::uint32_t handle{},filter{};};
+    template<class Read> static std::optional<ExclusionBody> exclusion_body(std::uintptr_t base,Read& read,std::uintptr_t entity) {
+        const auto body=throwable_body_full(base,read,entity);
+        if(!body || !body->record_ok || !body->identity_ok || !body->record || !body->filter) return {};
+        return ExclusionBody{body->record,body->world,body->handle,body->filter};
     }
     // Any thread: the pose epoch (level load, session change). The game thread gives every pending restore up without writing.
     inline static std::atomic<std::uint64_t> epoch_seen_{};
@@ -233,6 +241,17 @@ public:
         if(restore_hold_.load(std::memory_order_acquire) && GetTickCount64()-restore_hold_since_.load(std::memory_order_acquire)>restore_hold_max_ms) allow_restore();
         if(layer_restore_.exchange(false)) restore_layer(base,read);else restore_pending(base,read);
         if(entity && live_entity(base,read,entity)) debris_layer(base,read,entity);
+        else if(restore_hold_.load(std::memory_order_acquire) && layer_entity_) reassert_debris(base,read);
+    }
+    // While a safe release is pending the object must stay DEBRIS: the engine's own drop writes RIGID_BODY back (sim 2026-10-22: layer_at_release 3), which
+    // would put a body that still overlaps the floor back among the solid ones. Written only to the very object that was swapped (the ledger's identity
+    // re-read first), and only while the release waits.
+    inline static std::atomic<std::uint64_t> layers_reasserted{};
+    template<class Read> static void reassert_debris(std::uintptr_t base,Read& read) {
+        if(!layer_entity_ || swap_entry_.entity!=layer_entity_) return;
+        const auto body=throwable_body_full(base,read,layer_entity_);
+        if(!body || (body->filter&0x1f)!=layer_rigid_body || probe_entry(base,read,swap_entry_)!=LayerLedger::Probe::match) return;
+        if(set_filter(base,read,body->handle,(body->filter&~0x1fu)|layer_debris)) ++layers_reasserted;
     }
     // The hold ended (clear() asks): the held entry becomes releasable and every pending restore runs. True when a restore landed in this call.
     template<class Read> static bool restore_layer(std::uintptr_t base,Read& read) {
@@ -346,8 +365,9 @@ private:
     inline static std::atomic<std::uintptr_t> rf_{},throw_entity_{};inline static std::atomic<std::uint64_t> throw_tick_{};
     inline static float throw_v_[3]{};
     inline static std::uintptr_t layer_entity_{}; // game thread
+    inline static LayerEntry swap_entry_{};       // game thread: the entry debris_layer last put in the ledger
     // The throwable rigid body of a held entity: its physics handle and the filter word of its pool record.
-    struct Body {std::uint32_t handle{},filter{};std::uintptr_t component{};rig::Identity identity{};bool record_ok{},identity_ok{};};
+    struct Body {std::uint32_t handle{},filter{};std::uintptr_t component{};rig::Identity identity{};bool record_ok{},identity_ok{};std::uintptr_t record{},world{};};
     template<class Read> static std::optional<Body> throwable_body_full(std::uintptr_t base,Read& read,std::uintptr_t entity) {
         using namespace rig;
         const auto game=value<std::uintptr_t>(read,base+0x39a5290);const auto entries=entity?list(read,entity+0x268,256):std::nullopt;
@@ -365,7 +385,7 @@ private:
         const auto filter=value<std::uint32_t>(read,record+0x6c);if(!filter) return {};
         const auto first=value<std::uint32_t>(read,record+0x70),second=value<std::uint32_t>(read,record+0x74);
         const auto identity=started(read,component);
-        return Body{*handle,*filter,component,identity?*identity:Identity{},first && second && *first==*handle && *second==*handle,identity.has_value()};
+        return Body{*handle,*filter,component,identity?*identity:Identity{},first && second && *first==*handle && *second==*handle,identity.has_value(),record,*world};
     }
     template<class Read> static std::optional<std::pair<std::uint32_t,std::uint32_t>> throwable_body(std::uintptr_t base,Read& read,std::uintptr_t entity,std::uintptr_t* component_out=nullptr) {
         const auto b=throwable_body_full(base,read,entity);if(!b) return {};

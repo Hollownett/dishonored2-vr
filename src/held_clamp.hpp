@@ -181,7 +181,9 @@ private:
     static constexpr double converged=5e-4,fallback_tolerance=2e-3,max_gap=.5;
     std::size_t capacity() const {return std::clamp<std::size_t>(cfg_.max_planes,1,plane_capacity);}
     void add_plane(const ClampHit& hit) {
-        if(!hit.normal_valid || !finite(hit.point) || !finite(hit.normal)) return;
+        // As HandClamp: a sweep that starts inside geometry (initial overlap) does not say where the surface is (its point and normal are the engine's
+        // penetration data, sim 2026-10-22: a pickup next to a surface pushed the target more than 0.35 m); only a hit along the sweep makes a plane.
+        if(hit.initial_overlap || !hit.normal_valid || !finite(hit.point) || !finite(hit.normal)) return;
         const double l=length(hit.normal);
         if(!(l>.5)) return;
         Plane plane{hit.point,hit.normal*(1/l),0,

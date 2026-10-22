@@ -216,7 +216,7 @@ def check(dxgi: str, aim: str) -> None:
         assert need in a, need
     stage = between(a, 'std::array<std::array<std::optional<WorldTraceHit>,weapon_slots>,2>hits{};', '++weapon_casts_;')
     # I1: a guard's limb maps too (native_cast_exclusion); an unmapped exclusion casts the sweep without it, never drops it.
-    for need in ('returnnative_cast_exclusion(self->read_,self->base_,*world,entity,seg.exclude_bone,seg.exclude_handle,', 'exclusion_of(seg.exclude,side,seg)', 'excluded.get(entity,side,seg.exclude_bone,seg.exclude_handle,',
+    for need in ('automapped=native_cast_exclusion(self->read_,self->base_,*world,entity,seg.exclude_bone,seg.exclude_handle,', 'NativeHeldObject::exclusion_body(self->base_,self->read_,entity)', 'exclusion_of(seg.exclude,side,seg)', 'excluded.get(entity,side,seg.exclude_bone,seg.exclude_handle,',
                  'kWorldOccluderLayers,kWorldOccluderRequired,exclusion,clamp_slot(slot));', 'if(seg.exclude){', 'hits[side][slot]=cast(&*exclusion);',
                  '}else{++clamp_exclude_unmapped_;hits[side][slot]=cast(nullptr);}', '}elsehits[side][slot]=cast(nullptr);',
                  'if(clamp_slot(slot)){clamp_ticks+=', 'clamp_cast_us_.store(', '++clamp_cast_serial_;',

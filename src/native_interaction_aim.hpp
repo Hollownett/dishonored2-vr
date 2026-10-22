@@ -471,7 +471,11 @@ class NativeInteractionAim {
                     // Keyed by (entity, side, the body the service met): each hand has its own met body of one corpse.
                     const auto exclusion_of=[&](std::uintptr_t entity,unsigned side,const WeaponSegment& seg)->std::optional<NativeCastExclusion> {
                         return excluded.get(entity,side,seg.exclude_bone,seg.exclude_handle,[&] {
-                            return native_cast_exclusion(self->read_,self->base_,*world,entity,seg.exclude_bone,seg.exclude_handle,clamp_exclude_info_zero_.load(std::memory_order_relaxed));});
+                            auto mapped=native_cast_exclusion(self->read_,self->base_,*world,entity,seg.exclude_bone,seg.exclude_handle,clamp_exclude_info_zero_.load(std::memory_order_relaxed));
+                            // A native hold's item is not found by the generic prop mapping: its own throwable body (the one the layer swap writes) is.
+                            if(!mapped && seg.exclude_bone<0) if(const auto held=NativeHeldObject::exclusion_body(self->base_,self->read_,entity); held && held->world==*world)
+                                mapped=NativeCastExclusion{held->record,held->handle,held->filter};
+                            return mapped;});
                     };
                     for(unsigned side=0;side<2;++side) for(unsigned slot=0;slot<weapon_slots;++slot) if(const auto& seg=segments[side][slot];seg.valid && ++cast_n) {
                         LARGE_INTEGER slot_begin{},slot_end{};QueryPerformanceCounter(&slot_begin);
