@@ -93,8 +93,8 @@
    "id": "takedown-range",
    "file": "no-takedown-range",
    "kind": "disable",
-   "label": "Longer takedown range",
-   "help": "Takedown reach is 1.5 times longer to suit VR.",
+   "label": "Closer takedown trigger",
+   "help": "Choke and stealth-kill offers (and their prompts) appear closer to the guard: 0.75 of the game's reach, never longer. Set build/takedown-range-scale (0.5 to 1.0) to change it.",
    "default": true
   },
   {

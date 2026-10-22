@@ -3,6 +3,7 @@
 #include <MinHook.h>
 #include "native_trampoline_unwind.hpp"
 #include "native_slash_speed.hpp"
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cmath>
@@ -61,7 +62,9 @@ public:
     }
     void enabled(bool value) noexcept {policy_enabled_=false;++epoch_;policy_enabled_=value && installed() && !stopping_;}
     bool enabled() const noexcept {return policy_enabled_ && !stopping_;}
-    void factor(float value) noexcept {if(std::isfinite(value) && value>=1.f && value<=2.f) {++epoch_;factor_=value;}}
+    // 0.5..2: below 1 the distance and height gates shrink (closer takedowns); the yaw windows never narrow (view_value).
+    void factor(float value) noexcept {if(std::isfinite(value) && value>=.5f && value<=2.f) {++epoch_;factor_=value;}}
+    static float view_value(unsigned index,float factor) noexcept {return shipped[index]*(index<2?factor:factor>1.f?factor:1.f);}
     float factor() const noexcept {return factor_;}
     bool installed(unsigned index) const noexcept {return index<2 && installed_[index];}
     bool installed() const noexcept {return installed(0) && installed(1);}
@@ -152,7 +155,7 @@ private:
         const auto before=enabled()?qualify(frame.sensor):std::nullopt;
         if(before && enabled() && frame.epoch==epoch_ && frame.factor==factor()) {
             frame.qualification=*before;frame.view=before->source;
-            for(unsigned index=0;index<6;++index) {const float value=shipped[index]*frame.factor;std::memcpy(frame.view.data()+offsets[index],&value,4);}
+            for(unsigned index=0;index<6;++index) {const float value=view_value(index,frame.factor);std::memcpy(frame.view.data()+offsets[index],&value,4);}
             frame.prepared=true;
         }
         entry(frame.sensor);
@@ -263,7 +266,7 @@ private:
     std::array<Metadata*,2> metadata_{};std::array<bool,2> registered_{},patched_{},protection_pending_{},cache_pending_{};
     std::array<DWORD,2> protection_{};
     std::atomic<bool> policy_enabled_{},stopping_{true},stop_complete_{true},unwind_ready_{};
-    std::atomic<float> factor_{1.5f};std::atomic<std::uint64_t> epoch_{},substitutions_{};std::atomic<unsigned> in_flight_{};
+    std::atomic<float> factor_{.75f};std::atomic<std::uint64_t> epoch_{},substitutions_{};std::atomic<unsigned> in_flight_{};
     bool semantic_fixture_{};
     inline static thread_local Frame* current_frame_{};
     inline static thread_local unsigned callback_depth_{};

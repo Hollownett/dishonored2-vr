@@ -45,6 +45,7 @@ extern "C" MH_STATUS WINAPI MH_DisableHook(LPVOID);
 #include "native_talk_offer.hpp"
 #include "native_character_gaze.hpp"
 #include "sword_contact_policy.hpp"
+#include "takedown_range_policy.hpp"
 #include <vector>
 #include <string>
 #include <vector>
@@ -1839,6 +1840,8 @@ public:
         }
         return restored;
     }
+    // The choke private view's scale (build/takedown-range-scale): distance and height only ever shrink (takedown_range_policy.hpp).
+    void takedown_range_scale(float scale) noexcept {NativeChokeDistanceScope::process_owner().factor(choke_view_factor(scale));}
     void takedown_ranges(bool enabled) noexcept {
         takedown_ranges_enabled_=enabled;
         NativeChokeDistanceScope::process_owner().enabled(enabled && active_.load(std::memory_order_acquire) && !stopping_.load(std::memory_order_acquire));
