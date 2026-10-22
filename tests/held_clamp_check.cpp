@@ -221,6 +221,100 @@ void two_proxies_keep_every_sphere_out() {
         if(f>=10) CHECK(o.target.position.z-.5-radius>=-.01);
     }
 }
+
+// ---- SafeRelease ----
+constexpr double fdt=.02;
+// Lab-style floor: the object's penetration shrinks by the commanded velocity along +z; free when depth <= 0.
+struct FloorLab {
+    double depth=.04;double max_written=0;bool restored=false;bool restored_inside=false;
+    // Returns the answer for the zero-length cast at the current pose.
+    SafeReleaseInput ask(double now) const {
+        SafeReleaseInput in{};in.now=now;in.released=true;in.sweep_answered=true;in.depth=depth;
+        if(depth>0) in.overlap=ClampHit{{0,0,0},{0,0,1},7,3,true};
+        return in;
+    }
+    SafeReleaseOutput step(SafeRelease& r,double now) {
+        const auto o=r.update(ask(now));
+        if(o.write) {max_written=std::max(max_written,length(o.velocity));depth-=o.velocity.z*fdt;}
+        if(o.restore_layer) {restored=true;if(depth>0) restored_inside=true;}
+        return o;
+    }
+};
+void release_in_free_space_restores_immediately() {
+    SafeRelease r;SafeReleaseInput in{};in.now=1;in.released=true;in.sweep_answered=true;
+    const auto o=r.update(in);
+    CHECK(o.restore_layer && !o.write && !o.unresolved && o.phase==ReleasePhase::done);
+    CHECK(!r.update(in).restore_layer);   // exactly once
+}
+void release_inside_floor_resolves_within_half_second() {
+    SafeRelease r;FloorLab lab;bool unresolved=false;double when=-1;
+    for(unsigned f=0;f<40 && !lab.restored;++f) {
+        const auto o=lab.step(r,f*fdt);
+        if(o.restore_layer) {when=f*fdt;unresolved=o.unresolved;}
+        CHECK(o.write==(o.phase==ReleasePhase::depenetrating));
+    }
+    CHECK(lab.restored && !lab.restored_inside && !unresolved && when<=.5);
+    CHECK(lab.max_written<=1.5+1e-12 && lab.max_written>0);
+}
+void layer_not_restored_while_checking() {
+    SafeRelease r;
+    for(double t=0;t<.4;t+=.02) {
+        SafeReleaseInput in{};in.now=t;in.released=true;
+        const auto o=r.update(in);
+        CHECK(!o.restore_layer && !o.write && o.phase==ReleasePhase::checking);
+    }
+    SafeReleaseInput in{};in.now=.5;in.released=true;   // never answered: gives up, counted
+    const auto o=r.update(in);
+    CHECK(o.restore_layer && o.unresolved);
+}
+void never_frees_counts_unresolved() {
+    SafeRelease r;bool restored=false,unresolved=false;
+    for(unsigned f=0;f<=30 && !restored;++f) {
+        SafeReleaseInput in{};in.now=f*.02;in.released=true;in.sweep_answered=true;in.depth=.1;
+        in.overlap=ClampHit{{0,0,0},{0,0,1},7,3,true};
+        const auto o=r.update(in);
+        if(!o.restore_layer) CHECK(o.phase!=ReleasePhase::done && length(o.velocity)<=1.5+1e-12);
+        else {CHECK(f*.02>=.5-1e-9);restored=true;unresolved=o.unresolved;}
+    }
+    CHECK(restored && unresolved);
+}
+void corner_release_resolves_or_counts() {
+    SafeRelease r;bool done=false;double speed=0;
+    for(unsigned f=0;f<60 && !done;++f) {
+        SafeReleaseInput in{};in.now=f*.02;in.released=true;in.sweep_answered=true;in.depth=.03;
+        in.overlap=ClampHit{{0,0,0},f%2?Vec3{-1,0,0}:Vec3{0,0,1},7,3,true};
+        const auto o=r.update(in);
+        speed=std::max(speed,length(o.velocity));
+        if(o.restore_layer) {done=true;CHECK(f*.02<=.5+1e-9);}
+    }
+    CHECK(done && speed<=1.5+1e-12);
+}
+void no_normal_pushes_up() {
+    SafeRelease r;SafeReleaseInput in{};in.now=0;in.released=true;in.sweep_answered=true;in.depth=.02;
+    ClampHit hit{{0,0,0},{0,0,0},7,3,true,false};in.overlap=hit;
+    const auto o=r.update(in);
+    CHECK(o.write && o.velocity.x==0 && o.velocity.y==0 && o.velocity.z>0 && !o.restore_layer);
+}
+void non_finite_overlap_ignored() {
+    SafeRelease r;SafeReleaseInput in{};in.now=0;in.released=true;in.sweep_answered=true;in.depth=.02;
+    in.overlap=ClampHit{{0,0,0},{std::nan(""),0,1},7,3,true};
+    auto o=r.update(in);
+    CHECK(!o.write && !o.restore_layer && o.phase==ReleasePhase::checking);
+    in.overlap=ClampHit{{0,0,0},{0,0,1},7,3,true};in.depth=std::nan("");   // a bad depth still pushes at the floor speed
+    o=r.update(in);
+    CHECK(o.write && std::isfinite(o.velocity.z) && o.velocity.z<=1.5);
+}
+void reset_idles() {
+    SafeRelease r;SafeReleaseInput in{};in.now=0;in.released=true;in.sweep_answered=true;in.depth=.02;
+    in.overlap=ClampHit{{0,0,0},{0,0,1},7,3,true};
+    r.update(in);
+    r.reset();
+    SafeReleaseInput idle{};idle.now=1;
+    const auto o=r.update(idle);
+    CHECK(o.phase==ReleasePhase::idle && !o.write && !o.restore_layer);
+    in.now=2;in.overlap.reset();
+    CHECK(r.update(in).restore_layer);   // starts a fresh check
+}
 } // namespace
 
 int main() {
@@ -236,5 +330,13 @@ int main() {
     epoch_change_resets_planes();
     yield_clears_state();
     two_proxies_keep_every_sphere_out();
+    release_in_free_space_restores_immediately();
+    release_inside_floor_resolves_within_half_second();
+    layer_not_restored_while_checking();
+    never_frees_counts_unresolved();
+    corner_release_resolves_or_counts();
+    no_normal_pushes_up();
+    non_finite_overlap_ignored();
+    reset_idles();
     std::puts("held_clamp_check OK");
 }

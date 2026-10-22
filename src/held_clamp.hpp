@@ -203,4 +203,54 @@ private:
     DwellTimer dwell_{};bool released_{},last_slid_{};
 };
 
+// Safe release (Part 5A): a released object keeps the DEBRIS layer until a zero-length cast from its pose reports it free; while it
+// overlaps the world it is driven out along the contact normal at no more than max_speed for at most max_seconds, and the layer
+// then returns exactly once (restore_layer). When it never frees, the layer returns anyway and `unresolved` is set, so the failure is
+// counted. The layer is never restored while checking or depenetrating. No teleport: only a velocity is requested.
+enum class ReleasePhase {idle,checking,depenetrating,done};
+struct SafeReleaseInput {
+    double now{};bool released{};
+    std::optional<ClampHit> overlap;   // the answer to the zero-length cast from the released pose (none: free)
+    bool sweep_answered{};             // overlap is this frame's answer (an unanswered cast waits)
+    double depth{};};                  // how far inside, metres: the caller's dot(hit.point - pose.position, -normal) clamped >= 0 (preflight B-2)
+struct SafeReleaseOutput {ReleasePhase phase{};Vec3 velocity{};bool write{};bool restore_layer{};bool unresolved{};std::uint64_t depen_frames{};};
+class SafeRelease {
+public:
+    static constexpr double max_speed=1.5,max_seconds=.5;
+    SafeReleaseOutput update(const SafeReleaseInput& in) {
+        SafeReleaseOutput out{};
+        out.depen_frames=depen_frames_;
+        if(!in.released || !std::isfinite(in.now)) {
+            if(phase_==ReleasePhase::done && !in.released) reset();
+            out.phase=phase_;
+            return out;
+        }
+        if(phase_==ReleasePhase::idle) {phase_=ReleasePhase::checking;start_=in.now;}
+        if(phase_==ReleasePhase::done) {out.phase=phase_;return out;}
+        bool pushing=phase_==ReleasePhase::depenetrating;
+        if(in.sweep_answered) {
+            if(!in.overlap) {return finish(out,false);}
+            const ClampHit& hit=*in.overlap;
+            const bool normal_ok=hit.normal_valid && finite(hit.normal) && length(hit.normal)>.5;
+            if(normal_ok || !hit.normal_valid) {   // a non-finite normal is not an answer at all (below)
+                const Vec3 n=normal_ok?unit(hit.normal):Vec3{0,0,1};
+                const double depth=std::isfinite(in.depth)?std::max(0.,in.depth):0.;
+                velocity_=n*std::min(max_speed,depth*20+.3);
+                phase_=ReleasePhase::depenetrating;pushing=true;
+            }
+        }
+        if(in.now-start_>=max_seconds) return finish(out,true);
+        out.phase=phase_;
+        if(pushing) {out.write=true;out.velocity=velocity_;out.depen_frames=++depen_frames_;}
+        return out;
+    }
+    void reset() {phase_=ReleasePhase::idle;start_=0;velocity_={};}
+private:
+    SafeReleaseOutput finish(SafeReleaseOutput out,bool unresolved) {
+        phase_=ReleasePhase::done;out.phase=phase_;out.restore_layer=true;out.unresolved=unresolved;out.depen_frames=depen_frames_;
+        return out;
+    }
+    ReleasePhase phase_{};double start_{};Vec3 velocity_{};std::uint64_t depen_frames_{};
+};
+
 } // namespace d2vr
