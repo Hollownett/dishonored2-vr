@@ -21,6 +21,7 @@
 #include "native_grab.hpp"
 #include "ragdoll_safety.hpp"
 #include "corpse_diagnostics.hpp"
+#include "guard_probe.hpp"
 #include "native_weapon_visibility.hpp"
 #include "native_manual_equip_runtime.hpp"
 #include "crash_observer.hpp"
@@ -34,6 +35,8 @@
 #include <vector>
 #include <string>
 #include <cstdio>
+#include <filesystem>
+#include <fstream>
 #include <cstring>
 
 namespace d2vr {
@@ -179,6 +182,7 @@ public:
         if(copy_ && shown_ && flight_.flying) {CrashOperation operation("native weapon flight");try {fly(base,read);} catch(...) {flight_.flying=false;}}
         {CrashOperation operation("native hip holster");try {service_hip(base,read);} catch(...) {}}
         hold_down(base,read);
+        service_guard_probe(base,read);
         service_wake_retries(base,read,clock_ms());
         if(const auto t=NativeGrab::take_thrown()) {CrashOperation operation("native thrown prop");try {thrown_prop(base,read,*t);} catch(...) {}}
         if(prop_.until && GetTickCount64()<prop_.until) {CrashOperation operation("native thrown prop flight");try {fly_prop(base,read);} catch(...) {prop_.until=0;}}
@@ -386,6 +390,7 @@ private:
         if(!best) best=guard_at(base,read,hand,.5);
         grabbed_[side]=0;
         if(!best) return true; // nobody there: the hand just moved fast
+        if(guard_probe_fire(base,read,best,hand,r)) return true; // dev knob build/guard-probe: one lever experiment instead of the pull
         Vec3 pull{r.vel[0],r.vel[1],r.vel[2]};if(length(pull)>6) pull=pull*(6/length(pull));
         Request s=r;s.op=Op::shove;s.target=best;s.decl="components/base/damage/shove_damage.damage";
         s.vel={float(-pull.x/std::max(length(pull),1e-6)),float(-pull.y/std::max(length(pull),1e-6)),0}; // hit from the side he is pulled to
@@ -393,6 +398,58 @@ private:
         const bool ok=ragdoll(base,read,best,{float(pull.x),float(pull.y),float(pull.z)});
         if(ok) {++yanks;NativeGrab::yanked(r.side,best,GetTickCount64()+1500);} // the squeezing hand keeps hold of him
         return ok;
+    }
+    // Task 14 dev probe (build/guard-probe, off by default, read once at start by arm_guard_probe): the next full-fist squeeze at a living guard runs ONE
+    // lever experiment instead of the pull (shove alone, a named damage decl, or horizontal teleport steps toward the hand; never START_RAGDOLL or a
+    // velocity), samples him every 50 ms for 6 s into artifacts/guard-probe.csv, and deletes the knob file. The engine calls are the existing ones.
+    // The teleport keeps no orientation (identity axis): the experiment measures displacement and what the AI does, not facing.
+    inline static GuardProbePlan guard_probe_plan_{};inline static std::filesystem::path guard_probe_knob_,guard_probe_csv_;inline static GuardProbeRun guard_probe_run_{};
+public:
+    inline static std::atomic<unsigned> guard_probes{};
+    static void arm_guard_probe(const std::filesystem::path& knob,const std::filesystem::path& csv) {
+        guard_probe_plan_={};guard_probe_run_=GuardProbeRun{};guard_probe_knob_=knob;guard_probe_csv_=csv;
+        std::error_code ec;if(!std::filesystem::exists(knob,ec)) return;
+        std::ifstream in(knob);std::string text((std::istreambuf_iterator<char>(in)),std::istreambuf_iterator<char>());
+        if(const auto plan=parse_guard_probe(text)) guard_probe_plan_=*plan;
+    }
+    static bool guard_probe_armed() {return guard_probe_plan_.experiment!=GuardExperiment::none;}
+private:
+    template<class Read> static GuardSample guard_probe_sample(std::uintptr_t base,Read& read,std::uintptr_t npc) {
+        return sample_guard(read,base,npc,clock_ms(),[&](std::uintptr_t n){return NativeMelee::unaware(base,read,n);});
+    }
+    template<class Read> static bool guard_probe_fire(std::uintptr_t base,Read& read,std::uintptr_t npc,Vec3 hand,const Request& r) {
+        if(!guard_probe_armed() || guard_probe_run_.active) return false;
+        const auto plan=guard_probe_plan_;guard_probe_plan_={};++guard_probes;
+        std::error_code ec;std::filesystem::remove(guard_probe_knob_,ec); // one experiment per run
+        auto& run=guard_probe_run_;run=GuardProbeRun{};
+        run.out.open(guard_probe_csv_,std::ios::trunc);if(!run.out) return false;
+        run.out<<guard_sample_csv_header()<<'\n'<<guard_sample_csv_row(guard_probe_sample(base,read,npc))<<'\n'; // the state before anything happens
+        const auto now=clock_ms();run.active=true;run.npc=npc;run.hand=hand;run.until=now+6000;run.next_sample=now+50;
+        if(plan.experiment==GuardExperiment::teleport_step) {run.steps_left=plan.steps;run.step_m=plan.step_m;run.next_step=now+100;return true;}
+        Vec3 pull{r.vel[0],r.vel[1],r.vel[2]};if(length(pull)>6) pull=pull*(6/length(pull));
+        const double l=std::max(length(pull),1e-6);
+        Request s=r;s.op=Op::shove;s.target=npc;s.amount=0;
+        const std::string decl=plan.experiment==GuardExperiment::shove_decl?"components/base/damage/"+plan.decl+".damage":"components/base/damage/shove_damage.damage";
+        s.decl=decl.c_str();s.vel={float(-pull.x/l),float(-pull.y/l),0}; // as the pull does: hit from the side he is pulled to
+        shove(base,read,s);                                                // the shove only: no START_RAGDOLL, no velocity
+        return true;
+    }
+    template<class Read> static void service_guard_probe(std::uintptr_t base,Read& read) {
+        auto& run=guard_probe_run_;if(!run.active) return;
+        const auto now=clock_ms();
+        if(run.steps_left && now>=run.next_step) {
+            const auto at=rig::value<std::array<float,3>>(read,run.npc+0x300);
+            if(at && living(read,run.npc)) {
+                const double dx=run.hand.x-(*at)[0],dy=run.hand.y-(*at)[1],d=std::hypot(dx,dy);
+                if(d>1e-3 && std::isfinite(d)) {
+                    const double m=std::min(run.step_m,d);
+                    teleport<Read>(base,run.npc,{static_cast<float>((*at)[0]+dx/d*m),static_cast<float>((*at)[1]+dy/d*m),(*at)[2]},{1,0,0,0,1,0,0,0,1});
+                }
+            }
+            --run.steps_left;run.next_step=now+100;
+        }
+        if(now>=run.next_sample) {run.out<<guard_sample_csv_row(guard_probe_sample(base,read,run.npc))<<'\n';run.next_sample+=50;}
+        if(now>=run.until) {run.out.flush();run.out.close();run.active=false;}
     }
     // A free hand squeezing at a body (dead or unconscious) whose ragdoll is not live: corpses settle into a static or
     // un-instanced ragdoll some minutes after a load (sim v419), so a limb could not be dragged. The game's DropCorpse wakes a

@@ -32,6 +32,12 @@ def main():
         end = max(s["end_ms"] for s in segments)
         assert end <= 120000, (name, end)
         assert end - LEAD <= 120000 - LEAD, (name, end)
+    sim.compile_script(sim.scenario_segments("guard_probe", 45000), 120)  # Task 14
+    hands = (ROOT / "src/native_weapon_hands.hpp").read_text(encoding="utf-8")
+    fire = hands[hands.index("static bool guard_probe_fire("):hands.index("static void service_guard_probe(")]
+    assert "ragdoll(" not in fire and "0xb9" not in fire and "0x149" not in fire, "the probe never posts START_RAGDOLL or a velocity"
+    assert "if(guard_probe_fire(base,read,best,hand,r)) return true;" in hands[hands.index("static bool yank("):hands.index("static bool yank(") + 1600]
+    assert "arm_guard_probe(root/L\"build\"/L\"guard-probe\"" in (ROOT / "src/dxgi_probe.cpp").read_text(encoding="utf-8")
     # the old scenarios still build the same way
     assert sim.scenario_segments("oil_tank_drop", 45000)[-1]["end_ms"] == 45000 + 14000
     stress = sim.scenario_segments("corpse_stress", LEAD)

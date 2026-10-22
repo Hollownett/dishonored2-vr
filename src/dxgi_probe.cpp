@@ -8510,6 +8510,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
         { // START_RAGDOLL budget: build/no-ragdoll-posts is read here whether or not the physical grab is on (it also stops the legacy yank's posts); counted into the corpse block
             const auto kill=d2vr::KillSwitches::read(root/L"build");
             d2vr::NativeWeaponHands::post_budget.disable(kill.no_posts);
+            d2vr::NativeWeaponHands::arm_guard_probe(root/L"build"/L"guard-probe",output/L"guard-probe.csv"); // dev knob, off by default; one experiment per run (Task 14)
             d2vr::NativeWeaponHands::wake_diag=&corpse_diagnostics;d2vr::NativeWeaponHands::wake_lockout=&native_grab.lockout();
         }
         native_interaction_aim.attach_physical_grab(physical_grab_requested?&native_grab:nullptr);

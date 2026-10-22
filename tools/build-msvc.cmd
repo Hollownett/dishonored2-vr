@@ -452,6 +452,10 @@ cl /nologo /std:c++17 /EHsc /W4 /WX /O2 /MT tests\native_rigid_body_check.cpp /F
 if not "%errorlevel%"=="0" exit /b 1
 build\native_rigid_body_check.exe
 if not "%errorlevel%"=="0" exit /b 1
+cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT /Isrc tests\guard_probe_check.cpp /Fo:build\guard_probe_check.obj /Fe:build\guard_probe_check.exe
+if not "%errorlevel%"=="0" exit /b 1
+build\guard_probe_check.exe
+if not "%errorlevel%"=="0" exit /b 1
 cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT /DD2VR_TESTING /Isrc tests\ragdoll_safety_check.cpp /Fo:build\ragdoll_safety_check.obj /Fe:build\ragdoll_safety_check.exe
 if not "%errorlevel%"=="0" exit /b 1
 build\ragdoll_safety_check.exe
