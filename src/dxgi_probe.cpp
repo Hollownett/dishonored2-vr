@@ -73,6 +73,7 @@
 #include "vr_controls.hpp"
 #include "play_controls.hpp"
 #include "native_crosshair.hpp"
+#include "aim_smoother.hpp"
 #include "native_fire_seam_trace.hpp"
 #include "native_shot_aim.hpp"
 #include "native_blink_aim.hpp"
@@ -388,6 +389,7 @@ static std::atomic<std::int64_t> frame_split_prev_enter_ns{}; // Present thread 
 static d2vr::FrameSplitTrace frame_split_trace;static std::mutex frame_split_trace_file_mutex;static std::ofstream frame_split_trace_file;
 static std::string frame_split_adapter_json; // written once from the swap chain's adapter; guarded by frame_split_mutex
 static d2vr::PerfMeter perf_meter;static std::mutex perf_meter_mutex; // fed on the render thread, read by the status writer
+static d2vr::AimSmoother aim_smoother;static bool aim_smoothing_enabled=true; // plan H2: build/no-aim-smoothing; build/aim-smoothing "min_cutoff beta d_cutoff". Render thread only (prepare_head_view), once per displayed frame, shared by the gameplay aim and the crosshair
 static d2vr::AnchorSmoother anchor_smoother;static bool camera_smoothing_enabled=true;static std::uint64_t anchor_smooth_frame=~0ull;static double anchor_smooth_z=0,anchor_smooth_t=0; // build/no-camera-smoothing; render thread only (prepare_head_view). The z smoothed for anchor_smooth_frame, shared by both eyes, the authored view and the audio listener.
 static d2vr::ComfortVignette comfort_vignette;static bool turn_ramp_enabled=true;static std::atomic<float> published_turn_rate_rad_s{},published_stick_speed_mps{}; // build/no-comfort-vignette, build/comfort-vignette (strength), build/no-turn-ramp; the vignette is fed on the render thread under comfort_mutex, the stick turn rate by the controller thread
 static d2vr::ComfortMeter comfort_meter;static std::mutex comfort_mutex; // fed by the render thread, read by the status writer
@@ -2655,6 +2657,15 @@ template<class P> static void aim_offset(P& p) noexcept {
     const auto f=p.basis[0]*std::cos(y)+p.basis[1]*std::sin(y),l=p.basis[1]*std::cos(y)-p.basis[0]*std::sin(y),u=p.basis[2];
     p.basis={f*std::cos(q)+u*std::sin(q),l,u*std::cos(q)-f*std::sin(q)};
 }
+// Plan H2: the hand AIM ray (shots, powers, Blink aim, the crosshair) is smoothed by a speed-adaptive One Euro filter, once per displayed frame, in the player's anchor
+// frame. Applied after the barrel/offset, before the clamp's origin guard. Never to the drawn hand, the sword or the interaction ray (takedown / Use targeting).
+static void smooth_aim(d2vr::WorldTrackedPose& aim,const d2vr::GameCameraPose& anchor_pose,std::uint64_t frame_id,std::uint64_t pose_epoch,std::uint64_t reference_epoch) noexcept {
+    if(!aim_smoothing_enabled) return;
+    d2vr::WorldTrackedPose frame{};frame.position={anchor_pose.position[0],anchor_pose.position[1],anchor_pose.position[2]};
+    for(unsigned axis=0;axis<3;++axis) frame.basis[axis]={anchor_pose.basis[axis*3],anchor_pose.basis[axis*3+1],anchor_pose.basis[axis*3+2]};
+    const auto us=static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
+    aim=aim_smoother.sample(aim,frame,frame_id,pose_epoch,reference_epoch,us);
+}
 // Small live creatures (bloodflies, rats; arkNPC or swarm agents, sim v383) are not in the world sweep the blade uses: a blade passing within 15 cm of one
 // counts as a contact (headset v361: all 8 sword contacts were dead flies or the nest; the live wasps were never touched).
 // Nearby small arkNPCs (render bounds under 1 m) are listed every 250 ms; each frame tests their bounds against the blade.
@@ -4475,7 +4486,7 @@ void prepare_head_view(void* view) noexcept {
                 const auto& p=aim.pose;
                 auto left=d2vr::to_game_pose(d2vr::camera_relative_controller(
                     {{p.position.x,p.position.y,p.position.z},{p.orientation.x,p.orientation.y,p.orientation.z,p.orientation.w}},hand_centre,head_origin.position),head_origin,anchor,1.0);
-                barrel_aim(left);aim_offset(left);
+                barrel_aim(left);aim_offset(left);smooth_aim(left,anchor,per_frame_target,game_xr->pose_epoch(),game_xr->reference_epoch());
                 {   // Very slight (<= 0.1 deg, 6 ms) micro-jitter filter on the one aim that shots, powers and the crosshair all read.
                     static d2vr::WeaponPoseStabilizer aim_filter;
                     const auto us=static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
@@ -5194,7 +5205,7 @@ void prepare_head_view(void* view) noexcept {
                 const auto& p=aim.pose;
                 auto hand=d2vr::to_game_pose(d2vr::camera_relative_controller(
                     {{p.position.x,p.position.y,p.position.z},{p.orientation.x,p.orientation.y,p.orientation.z,p.orientation.w}},hand_centre,head_origin.position),head_origin,anchor,1.0);
-                barrel_aim(hand);aim_offset(hand); // exactly the shot aim (it ignored the offset: shots landed 4 deg left of it)
+                barrel_aim(hand);aim_offset(hand);smooth_aim(hand,anchor,per_frame_target,game_xr->pose_epoch(),game_xr->reference_epoch()); // exactly the shot aim (it ignored the offset: shots landed 4 deg left of it)
                 {std::lock_guard<std::mutex> hand_lock(hand_state_mutex); // and its origin (I2, the snap-back guard)
                  hand.position=d2vr::guarded_shot_origin(released_shot,clamp_shot[0],0,hand.position,GetTickCount64(),game_xr->pose_epoch());}
                 const auto target=hand.position+hand.basis[0]*30.0;
@@ -8934,6 +8945,9 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
         projection_jitter=!fs::exists(root/L"build"/L"no-projection-jitter");
         hold_y_menu_enabled=!fs::exists(root/L"build"/L"no-hold-y-menu");
         legacy_authored_camera=fs::exists(root/L"build"/L"legacy-authored-camera");authored_heading.reset();authored_heading_now.reset();
+        aim_smoothing_enabled=!fs::exists(root/L"build"/L"no-aim-smoothing");aim_smoother.reset();   // plan H2
+        {[[maybe_unused]] const bool legacy_corpse_strength=fs::exists(root/L"build"/L"legacy-corpse-strength");}   // plan H1: applied by NativeGrab::corpse_knobs_from (KillSwitches); named here so the launcher feature list and the source check see it
+        {aim_smoother.set_params({});std::ifstream knob(root/L"build"/L"aim-smoothing");if(knob) {std::ostringstream text;text<<knob.rdbuf();bool ok=false;const auto params=d2vr::AimSmootherParams::parse(text.str().substr(0,200),&ok);if(ok) aim_smoother.set_params(params);}}
         camera_smoothing_enabled=!fs::exists(root/L"build"/L"no-camera-smoothing");anchor_smoother.reset();anchor_smooth_frame=~0ull;
         turn_ramp_enabled=!fs::exists(root/L"build"/L"no-turn-ramp");
         discovery_throttle_enabled=!fs::exists(root/L"build"/L"no-discovery-throttle"); // plan E task 4: discovery every 8th frame once stable

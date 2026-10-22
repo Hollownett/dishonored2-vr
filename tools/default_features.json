@@ -186,6 +186,14 @@
    "default": true
   },
   {
+   "id": "aim-smoothing",
+   "file": "no-aim-smoothing",
+   "kind": "disable",
+   "label": "Steadier aim",
+   "help": "Smooths small hand tremors in the aim of the crosshair, Blink, shots and powers: still hands are steadied, quick sweeps stay responsive. Your drawn hand and sword are not affected. Turn off for the raw hand aim.",
+   "default": true
+  },
+  {
    "id": "overlay-skip",
    "file": "no-overlay-skip",
    "kind": "disable",
