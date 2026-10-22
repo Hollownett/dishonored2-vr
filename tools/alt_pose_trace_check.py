@@ -40,6 +40,8 @@ def parse(path):
     setups, begins, presents = {}, {}, defaultdict(dict)
     with open(path, newline="") as handle:
         for row in csv.DictReader(handle):
+            if any(v is None for v in row.values()):
+                continue   # a row cut short (the probe flushes every 64 rows; the last write is torn when the game is killed)
             event = row["event"]
             if event == "setup":
                 display = int(row["display"])
