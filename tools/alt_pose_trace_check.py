@@ -106,6 +106,7 @@ def check(path, verbose=False):
     failures = defaultdict(int)
     first = {}
     deg_errors, mm_errors = [], []
+    per_eye = {0: defaultdict(int), 1: defaultdict(int)}   # per eye: paired layer problems, one-eye fresh/stale problems, pose errors
     for display in sorted(presents):
         layers = presents[display]
         if len(layers) != 2 or layers[0]["tracked"] != "1" or layers[1]["tracked"] != "1":
@@ -134,17 +135,23 @@ def check(path, verbose=False):
                     deg, mm = pose_error(layers[e], setup[e])
                     deg_errors.append(deg)
                     mm_errors.append(mm)
+                    per_eye[e]["layers"] += 1
+                    per_eye[e]["deg_sum"] += deg
                     if close(floats(layers[e], XR_KEYS), floats(setup[e], XR_KEYS), POSE_TOL):
+                        per_eye[e]["exact"] += 1
                         continue
                     if e in nxt and close(floats(layers[e], XR_KEYS), floats(nxt[e], XR_KEYS), POSE_TOL):
                         problems.append("layer_pose_is_the_next_setup")      # the one-frame skew: the latest Setup, not the image's
+                        per_eye[e]["next_setup"] += 1
                     else:
                         problems.append("layer_pose_matches_no_setup")
+                        per_eye[e]["no_setup"] += 1
                 if any(e in nxt and not close(floats(setup[e], XR_KEYS), floats(nxt[e], XR_KEYS), POSE_TOL) for e in (0, 1)):
                     distinguishable += 1
         else:
             # ---- a one-eye frame (alternate mode)
             checked += 1
+            per_eye[fresh]["fresh"] += 1
             setup = setups.get(display, {})
             if fresh not in setup:
                 problems.append("no_setup_for_fresh_eye")
@@ -179,6 +186,9 @@ def check(path, verbose=False):
             # the eye of the Setup recorded for this Present must be the fresh eye (a view promoted for the wrong eye)
             if fresh not in setup and setup:
                 problems.append("setup_for_this_present_names_eye_%d_not_fresh_%d" % (next(iter(setup)), fresh))
+        if fresh >= 0:
+            for p in problems:
+                per_eye[fresh]["fresh_problems"] += 1
         for p in problems:
             failures[p] += 1
             first.setdefault(p, display)
@@ -191,6 +201,13 @@ def check(path, verbose=False):
         print("  paired layer-vs-image pose error: orientation deg %s; position mm %s" % (quantiles(deg_errors), quantiles(mm_errors)))
     for name, count in sorted(failures.items()):
         print("  %-55s %6d (first at Present %d)" % (name, count, first[name]))
+    for e in (0, 1):
+        c = per_eye[e]
+        if c["layers"]:
+            print("  eye %d paired layers: %d checked, %d exact, %d next-Setup (skew), %d no-Setup; mean orientation error %.4f deg"
+                  % (e, c["layers"], c["exact"], c["next_setup"], c["no_setup"], c["deg_sum"] / c["layers"]))
+        if c["fresh"]:
+            print("  eye %d fresh in %d one-eye Presents, %d problems" % (e, c["fresh"], c["fresh_problems"]))
     if checked == 0 and paired_checked == 0:
         print("  no tracked Presents in the trace")
         return 1
