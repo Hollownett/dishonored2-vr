@@ -544,12 +544,15 @@ public:
             if(fallback_only_seen)publication_.fallback_only(fallback_only_succeeded);
         }
         executor.native(chain->remainder, restore);
+        PairState submitted_pair_state;
         {
             std::lock_guard<std::mutex> lock(mutex_);
             chain->phase = Phase::submitted;
+            // Snapshot this submission before another execute may mutate the ledger.
+            submitted_pair_state = publication_.state();
             executing_ = false;
         }
-        return {ExecuteStatus::submitted, {chain->serial}, {}, restore, publication_.state()};
+        return {ExecuteStatus::submitted, {chain->serial}, {}, restore, submitted_pair_state};
     }
     // Adapter signals only AFTER fence/query completion (or proven device loss).
     // Until then queue owns every list/resource/context/feature even if token is lost.
