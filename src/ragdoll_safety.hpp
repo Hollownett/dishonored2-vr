@@ -25,22 +25,21 @@ inline double seconds_from_ms(std::uint64_t ms) noexcept {return static_cast<dou
 class EntityLockout {
 public:
     static constexpr double seconds=1;
-    void lock(std::uint32_t entity_id,double now) noexcept {
-        for(auto& e:entries_) if(e.used&&e.id==entity_id) {e.until=now+seconds;return;}
-        Entry* pick=&entries_[0];
-        for(auto& e:entries_) {
-            if(!e.used) {pick=&e;break;}
-            if(e.until<pick->until) pick=&e;
-        }
-        pick->used=true;pick->id=entity_id;pick->until=now+seconds;
+    // A lock never evicts a lock that is still active: with all 16 slots held by active locks, a new entity is NOT locked and the refusal is counted
+    // (refused()), so a runaway body can never become grabbable again because other entities churned the table. Expired slots are reusable.
+    bool lock(std::uint32_t entity_id,double now) noexcept {
+        for(auto& e:entries_) if(e.used&&e.id==entity_id) {e.until=now+seconds;return true;}
+        for(auto& e:entries_) if(!e.used || e.until<=now) {e.used=true;e.id=entity_id;e.until=now+seconds;return true;}
+        ++refused_;return false;
     }
+    std::uint64_t refused() const noexcept {return refused_;}
     bool locked(std::uint32_t entity_id,double now) const noexcept {
         for(const auto& e:entries_) if(e.used&&e.id==entity_id) return now<e.until;
         return false;
     }
 private:
     struct Entry {bool used{};std::uint32_t id{};double until{};};
-    std::array<Entry,16> entries_{};
+    std::array<Entry,16> entries_{};std::uint64_t refused_{};
 };
 
 // START_RAGDOLL (0xb9) budget. Game-thread-only (see above).

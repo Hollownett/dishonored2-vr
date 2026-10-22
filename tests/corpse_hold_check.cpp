@@ -3,6 +3,7 @@
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include "../src/native_grab.hpp"
+#include "../src/native_weapon_hands.hpp"
 #include <cmath>
 #include <fstream>
 #include <filesystem>
@@ -118,6 +119,7 @@ struct NativeGrabCheck {
     static void tune(NativeGrab& grab,const GrabTuning& t) {grab.tuning_=t;}
     static bool contact_blocked(NativeGrab& grab,std::uintptr_t entity,bool guard) {return grab.contact_write_blocked(entity,guard);}
     static std::mutex& mutex(NativeGrab& grab) {return grab.mutex_;}
+    static void instance(NativeGrab* grab) {NativeGrab::instance_=grab;}
     static std::string source() {std::ifstream f("src/native_grab.hpp");std::stringstream ss;ss<<f.rdbuf();return ss.str();}
 };
 }
@@ -523,12 +525,154 @@ void install_knobs_load_and_switch() {
     }
     fs::remove_all(root);
 }
+}   // anonymous namespace
+namespace d2vr {
+struct WakeBudgetCheck {
+    static bool wake(unsigned side,Vec3 hand) {NativeWeaponHands::Request r{};r.op=NativeWeaponHands::Op::wake;r.side=side;r.pos={float(hand.x),float(hand.y),float(hand.z)};return NativeWeaponHands::wake(base,wide_read,r);}
+    static void retries(std::uint64_t now) {NativeWeaponHands::service_wake_retries(base,wide_read,now);}
+    static bool ragdoll(std::uintptr_t npc) {return NativeWeaponHands::ragdoll(base,wide_read,npc,{0,0,0});}
+    static void hooks(void* (*post)(unsigned,unsigned,std::uint32_t),std::uint64_t (*clock)()) {NativeWeaponHands::post_hook=post;NativeWeaponHands::clock_hook=clock;}
+    static void hold_down() {NativeWeaponHands::hold_down(base,wide_read);}
+    static void reset() {NativeWeaponHands::wake_pending_={};NativeWeaponHands::wake_refused_[0]=NativeWeaponHands::wake_refused_[1]=false;}
+    // the registry is a 0x3fff-slot array read in one piece; unmapped slots read as empty
+    static bool wide_read(std::uintptr_t at,void* out,std::size_t size) {
+        const std::uintptr_t registry=game+0x3130b0,end=registry+0x3fff*8;
+        if(at>=registry && at+size<=end) {for(std::size_t i=0;i<size;++i) {const auto it=bytes.find(at+i);static_cast<unsigned char*>(out)[i]=it==bytes.end()?0:it->second;}return true;}
+        return read(at,out,size);
+    }
+};
+}
+namespace {
+std::vector<std::pair<unsigned,std::uint32_t>> posted;std::array<unsigned char,0x20> post_buffer{};std::uint64_t fake_clock=0;
+void* post_stub(unsigned msg,unsigned,std::uint32_t target) {posted.emplace_back(msg,target);return post_buffer.data();}
+std::uint64_t clock_stub() {return fake_clock;}
+struct WakeRig {
+    CorpseDiagnostics diag;
+    // a settled corpse at x0 (its ragdoll bodies keyframed: they do not read dynamic), the hand 0.2 m beside it
+    WakeRig() {
+        fixture(0x08,0x08,false);posted.clear();WakeBudgetCheck::reset();
+        WakeBudgetCheck::hooks(post_stub,clock_stub);NativeWeaponHands::wake_diag=&diag;NativeWeaponHands::wake_lockout=nullptr;
+        NativeWeaponHands::post_budget.disable(false);
+    }
+    ~WakeRig() {WakeBudgetCheck::hooks(nullptr,nullptr);NativeWeaponHands::wake_diag=nullptr;NativeGrabCheck::instance(nullptr);}
+    void corpse(std::uintptr_t npc,std::uint32_t id,std::uint32_t first,double x0,bool dynamic,unsigned char state=0x08) {
+        build_guard(npc,id,0x4010000+first*0x100,0x4020000+first*0x100,0x4030000+first*0x100,0x4040000+first*0x100,first,first+5,x0,state);
+        put(0x4040000+first*0x100+0x1860,std::array<float,3>{float(x0),0,0});
+        if(!dynamic) for(int b=0;b<17;++b) put(record_of(first,b)+0x44,std::uint32_t{0xce});
+    }
+    std::size_t posts() const {return posted.size();}
+};
+void wake_posts_once_per_squeeze() {
+    WakeRig w;fake_clock=500000;w.corpse(guard_a,0x50005,0,0,false);
+    const Vec3 hand{.2,0,.5};
+    CHECK(WakeBudgetCheck::wake(0,hand) && w.posts()==1 && posted[0].first==0xb9 && posted[0].second==0x50005);
+    fake_clock+=100;WakeBudgetCheck::wake(0,hand);fake_clock+=300;WakeBudgetCheck::wake(1,hand);   // more squeezes inside the second: no post
+    CHECK(w.posts()==1);
+    const auto json=w.diag.json();
+    CHECK(has(json,"\"event_posts_b9\":1") && has(json,"\"event_posts_suppressed\":2") && has(json,"\"wake_attempts\":3") && has(json,"\"wake_refused\":0"));
+}
+void already_dynamic_corpse_posts_nothing() {
+    WakeRig w;fake_clock=600000;w.corpse(guard_a,0x60006,0,0,true);
+    CHECK(WakeBudgetCheck::wake(0,{.2,0,.5}));
+    CHECK(w.posts()==0 && has(w.diag.json(),"\"wake_attempts\":0"));
+}
+void retry_after_one_second_then_refused_with_flag() {
+    WakeRig w;fake_clock=700000;w.corpse(guard_a,0x70007,0,0,false);
+    WakeBudgetCheck::wake(0,{.2,0,.5});CHECK(w.posts()==1);
+    for(int step=1;step<=30;++step) {   // services every 100 ms for 3 s
+        fake_clock+=100;WakeBudgetCheck::retries(fake_clock);
+        if(step==9) CHECK(w.posts()==1);                                        // 0.9 s: nothing yet
+        if(step==10) CHECK(w.posts()==2);                                       // 1.0 s: the one retry
+        if(step==19) CHECK(w.posts()==2 && !NativeWeaponHands::take_wake_refusal(0));
+    }
+    CHECK(w.posts()==2);                                                        // nothing after the retry, nothing after the refusal
+    CHECK(NativeWeaponHands::take_wake_refusal(0) && !NativeWeaponHands::take_wake_refusal(0) && !NativeWeaponHands::take_wake_refusal(1));
+    CHECK(has(w.diag.json(),"\"wake_refused\":1") && has(w.diag.json(),"\"event_posts_b9\":2"));
+    WakeBudgetCheck::wake(0,{.2,0,.5});CHECK(w.posts()==2 && NativeWeaponHands::take_wake_refusal(0));   // a later squeeze on the same corpse is refused too, with the flag
+}
+void wake_stops_when_the_body_turns_dynamic() {
+    WakeRig w;fake_clock=800000;w.corpse(guard_a,0x80008,0,0,false);
+    WakeBudgetCheck::wake(0,{.2,0,.5});
+    for(int b=0;b<17;++b) put(record_of(0,b)+0x44,std::uint32_t{0x82});   // the post worked
+    for(int step=1;step<=30;++step) {fake_clock+=100;WakeBudgetCheck::retries(fake_clock);}
+    CHECK(w.posts()==1 && !NativeWeaponHands::take_wake_refusal(0));
+}
+void kill_switch_blocks_wake_and_legacy_yank_posts() {
+    WakeRig w;fake_clock=900000;w.corpse(guard_a,0x90009,0,0,false);
+    NativeWeaponHands::post_budget.disable(true);
+    CHECK(WakeBudgetCheck::wake(0,{.2,0,.5}) && w.posts()==0);
+    // a living guard (state 0): the legacy yank's ragdoll post is blocked too
+    fixture(0x00,0x00,false);build_guard(guard_b,0xa000a,0x4110000,0x4120000,0x4130000,0x4140000,b_first,b_motion,20,0x00);
+    CHECK(!WakeBudgetCheck::ragdoll(guard_b) && w.posts()==0);
+    NativeWeaponHands::post_budget.disable(false);
+    CHECK(WakeBudgetCheck::ragdoll(guard_b) && w.posts()==1);   // control: with the switch off the same call posts
+}
+void corpse_never_reposted_on_400ms_timer() {
+    WakeRig w;fake_clock=1000000;w.corpse(guard_a,0xb000b,0,0,true);
+    NativeGrab grab;NativeGrabCheck::setup(grab);
+    NativeGrabCheck::instance(&grab);
+    // hold the corpse's wrist with a real lane of this grab
+    NativeGrab& g=grab;
+    auto owner=*native_player_camera(read,base,camera);
+    auto step=[&](Vec3 p,float raw,UINT64 dt) {static UINT64 t=3000000;t+=dt;WorldTrackedPose hand{p,{{{1,0,0},{0,1,0},{0,0,1}}}};
+        g.publish(0,owner,hand,raw,1,t,true,false,t);g.filter_native_grip(0,raw,1,t,true,true,false);NativeGrabCheck::consume(g,0,t);if(raw<.35f) g.focus_point(0,t);};
+    for(int i=0;i<18;++i) step({2,0,0},0,20);
+    step({2,0,0},.9f,100);
+    CHECK(g.holding(0) && g.held_ragdoll(0)==guard_a);
+    for(int i=0;i<5;++i) {WakeBudgetCheck::hold_down();fake_clock+=500;}
+    CHECK(w.posts()==0);   // a dead body is never re-posted by the 400 ms hold-down timer
+    NativeGrabCheck::instance(nullptr);
+}
+void ceiling_two_posts_per_second_across_entities() {
+    WakeRig w;fake_clock=1100000;
+    const double xs[3]{0,20,40};const std::uintptr_t npcs[3]{guard_a,guard_b,0x4300000};
+    for(int i=0;i<3;++i) w.corpse(npcs[i],0xc000c+(i<<16),i*0x20,xs[i],false);
+    for(int i=0;i<3;++i) WakeBudgetCheck::wake(0,{xs[i]+.2,0,.5});
+    CHECK(w.posts()==2);
+    CHECK(has(w.diag.json(),"\"event_posts_b9\":2") && has(w.diag.json(),"\"event_posts_suppressed\":1"));
+    fake_clock+=1000;WakeBudgetCheck::wake(0,{40.2,0,.5});CHECK(w.posts()==3);   // a second later the deferred one goes through
+}
+void lockout_never_evicts_active_and_yank_consults_it() {
+    {   // the table: 16 active locks cannot be displaced by a 17th
+        EntityLockout l;for(std::uint32_t i=1;i<=16;++i) CHECK(l.lock(i,100));
+        CHECK(!l.lock(77,100.1) && l.refused()==1 && l.locked(1,100.5) && l.locked(16,100.5) && !l.locked(77,100.5));
+    }
+    {   // a runaway locked guard is not yanked back into a legacy hold; unlocked he is (control). The corpse envelope is off so only the yank path can bind.
+        for(const bool locked:{true,false}) {
+            fixture(0x08);Rig r;CorpseOptions off;off.enabled=false;r.grab.configure_corpse(off);
+            const Vec3 wrist{2,0,0};
+            if(locked) r.grab.lockout().lock(id_a,seconds_from_ms(r.t+300));
+            for(int i=0;i<4;++i) r.step(0,wrist,0,20);
+            NativeGrab::yanked(0,guard_a,r.t+5000);
+            r.step(0,wrist,.9f,50);r.step(0,wrist,.9f,50);
+            CHECK(r.grab.holding(0)==!locked);
+            NativeGrab::yanked(0,0,0);
+        }
+    }
+    {   // a held living guard (legacy motor) who dies while locked out is dropped, not promoted
+        fixture(0x80);Rig r;
+        r.grab.configure_corpse(CorpseOptions{});
+        NativeGrab::yanked(0,guard_a,r.t+60000);
+        const Vec3 wrist{2,0,0};
+        for(int i=0;i<4;++i) r.step(0,wrist,0,20);
+        r.step(0,wrist,.9f,50);r.step(0,wrist,.9f,50);
+        NativeGrab::yanked(0,0,0);
+        REQUIRE(r.grab.holding(0) && !NativeGrabCheck::corpse(r.grab,0));
+        r.grab.lockout().lock(id_a,seconds_from_ms(r.t+10));
+        put(guard_a+0xd1,static_cast<unsigned char>(0x08));
+        const auto before=writes.size();
+        r.step(0,wrist+Vec3{.1,0,0},.9f,50);
+        CHECK(!r.grab.holding(0) && writes.size()==before && has(r.json(),"\"binds\":[0,0]"));   // dropped before a corpse bind was counted
+    }
+}
 void source_routing() {
     const auto src=NativeGrabCheck::source();
     CHECK(!src.empty());
     auto count=[&](const std::string& piece) {int c=0;for(auto at=src.find(piece);at!=std::string::npos;at=src.find(piece,at+1)) ++c;return c;};
     // every velocity write of the capped lane goes through write(...); the fault latch trips in the fault branches only
     CHECK(count("write_velocity(")==5);   // unchanged by the fix round
+    {std::ifstream f("src/native_weapon_hands.hpp");std::stringstream ss;ss<<f.rdbuf();const auto w=ss.str();
+     CHECK(w.find("hold_down(base,read);\n        service_wake_retries(base,read,clock_ms());")!=std::string::npos);}   // the retry service runs from the game-thread service, beside hold_down
     CHECK(count("corpse_knobs_from(root)")==1 && count("configure_corpse(knobs.options)")==1 && count("contact_.write_blocked=")==1);   // write(), tow(), apply_poke(), apply_contact() and the definition
     CHECK(count("FaultLatch::trip()")==1 && count("trip_fault_latch()")>=3);
     const auto lock=src.find("lockout_.locked(body.entity_id,now_s)"),motor=src.find("lane.grab.corpse_motor(");
@@ -559,6 +703,14 @@ int main() {
     one_hand_lift_not_pinned_by_tow();
     two_hands_one_runaway_counts_once();
     install_knobs_load_and_switch();
+    wake_posts_once_per_squeeze();
+    already_dynamic_corpse_posts_nothing();
+    retry_after_one_second_then_refused_with_flag();
+    wake_stops_when_the_body_turns_dynamic();
+    kill_switch_blocks_wake_and_legacy_yank_posts();
+    corpse_never_reposted_on_400ms_timer();
+    ceiling_two_posts_per_second_across_entities();
+    lockout_never_evicts_active_and_yank_consults_it();
     source_routing();
     if(failures) {std::printf("%d check(s) failed\n",failures);return 1;}
     std::printf("corpse_hold_check ok\n");

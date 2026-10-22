@@ -19,6 +19,8 @@
 #include "native_block_eligibility.hpp"
 #include "native_world_trace.hpp"
 #include "native_grab.hpp"
+#include "ragdoll_safety.hpp"
+#include "corpse_diagnostics.hpp"
 #include "native_weapon_visibility.hpp"
 #include "native_manual_equip_runtime.hpp"
 #include "crash_observer.hpp"
@@ -76,9 +78,12 @@ struct SwordFlight {
         axis={blade,cross(n,blade),n};
     }
 };
+// A settled corpse a wake posted for (see NativeWeaponHands::wake_pending_).
+struct WakeEntry {bool used{},retried{};std::uintptr_t entity{};std::uint32_t id{};unsigned side{};std::uint64_t at_ms{};};
 class NativeWeaponHands {
     friend struct NativeHipVisibilityFixture;
     friend struct NativeWeaponExchangeFixture;
+    friend struct WakeBudgetCheck;
 public:
     enum class Op : unsigned {draw,sheathe,drop,pickup,recall,stow,gun_draw,gun_holster,shove,ragdoll,yank,wake};
     // shove: the game's TakeDamage on target (an arkNPC) with damage decl `decl` (a name under the damage type), from pos
@@ -109,6 +114,14 @@ public:
     inline static std::atomic<std::uint64_t> ops{},failures{},spawned{},removed{},thrown_hits{},flight_frames{},services{},props_marked{},prop_hits{};
     inline static std::atomic<float> thrown_peak{}; // launch speed of the last drop, m/s
     inline static std::atomic<bool> phys_decl_ok{};inline static std::atomic<std::uint64_t> ragdolls{},yanks{},wakes{},holds_down{},squeezes{},guard_grabs{};
+    // START_RAGDOLL budget (Bonelab feel Task 11). Every wake of a settled corpse asks post_budget first: one post per wake, one retry after 1 s
+    // if the primary body still does not read dynamic, then a refusal (take_wake_refusal: the input thread pulses the hand), global ceiling 2/s.
+    // build/no-ragdoll-posts disables it (dxgi_probe), which also stops the legacy living-guard yank's posts (no ceiling for those, deviation 4).
+    // wake_diag / wake_lockout are set by dxgi_probe (the NativeGrab's diagnostics and runaway lockout); null in a bare process.
+    inline static EventPostBudget post_budget;
+    inline static CorpseDiagnostics* wake_diag=nullptr;
+    inline static EntityLockout* wake_lockout=nullptr;
+    static bool take_wake_refusal(unsigned side) noexcept {return wake_refused_[side&1u].exchange(false);}
     inline static std::atomic<float> last_guard_d{},last_guard_up{}; // diagnostics: the nearest living guard to the hand at the last search
     inline static std::atomic<int> last_ragdoll{};inline static std::atomic<int> last_shove{-2}; // -2 none, -1 no decl, 0 applied, 1 rejected, 2 fault
     template<class Read> static bool verify(std::uintptr_t base,Read& read) {
@@ -166,6 +179,7 @@ public:
         if(copy_ && shown_ && flight_.flying) {CrashOperation operation("native weapon flight");try {fly(base,read);} catch(...) {flight_.flying=false;}}
         {CrashOperation operation("native hip holster");try {service_hip(base,read);} catch(...) {}}
         hold_down(base,read);
+        service_wake_retries(base,read,clock_ms());
         if(const auto t=NativeGrab::take_thrown()) {CrashOperation operation("native thrown prop");try {thrown_prop(base,read,*t);} catch(...) {}}
         if(prop_.until && GetTickCount64()<prop_.until) {CrashOperation operation("native thrown prop flight");try {fly_prop(base,read);} catch(...) {prop_.until=0;}}
         publish(base,read);
@@ -298,7 +312,20 @@ private:
     // Entity events (ARK_MSG_*): payload = 8112c0(eventManager 810240() = game+0x1e8968, +0xc8e8, msg, size, target id), filled
     // by the caller, delivered by the game. START_RAGDOLL 0xb9 {u64 0, u64 0} is what DropCorpse/Far Reach post (829a10, 43fe94);
     // VELOCITY_IMPULSE 0x149 {v[3], w[3], u16 flags} the generic set-velocity event (docs/native-hold-object.md).
+#ifdef D2VR_TESTING
+    inline static void* (*post_hook)(unsigned msg,unsigned size,std::uint32_t target)=nullptr;   // tests: replaces the engine event manager
+    inline static std::uint64_t (*clock_hook)()=nullptr;
+#endif
+    static std::uint64_t clock_ms() {
+#ifdef D2VR_TESTING
+        if(clock_hook) return clock_hook();
+#endif
+        return GetTickCount64();
+    }
     template<class Read> static void* post(std::uintptr_t base,Read& read,unsigned msg,unsigned size,std::uint32_t target) {
+#ifdef D2VR_TESTING
+        if(post_hook) return post_hook(msg,size,target);
+#endif
         static const bool pinned=[&]{std::array<unsigned char,14> a{},b{};
             const std::array<unsigned char,14> want_a{0x48,0x8b,0x05,0x49,0x50,0x19,0x03,0x48,0x05,0x68,0x89,0x1e,0x00,0xc3};
             const std::array<unsigned char,14> want_b{0x48,0x89,0x5c,0x24,0x08,0x48,0x89,0x74,0x24,0x10,0x44,0x89,0x4c,0x24};
@@ -308,6 +335,7 @@ private:
         return manager?reinterpret_cast<void* (__fastcall*)(std::uintptr_t,unsigned,unsigned,std::uint32_t)>(base+0x8112c0)(manager+0xc8e8,msg,size,target):nullptr;
     }
     template<class Read> static bool ragdoll(std::uintptr_t base,Read& read,std::uintptr_t npc,std::array<float,3> velocity) {
+        if(post_budget.disabled()) {last_ragdoll=-3;return false;} // build/no-ragdoll-posts
         const auto id=rig::value<std::uint32_t>(read,npc+0xa8);
         if(!id || !rig::typed(read,base,npc,NativeMelee::npc_vtable_rva) || !living(read,npc)) {last_ragdoll=-1;return false;}
         auto* p=post(base,read,0xb9,0x10,*id);if(!p) {last_ragdoll=-2;return false;}
@@ -407,10 +435,54 @@ private:
         if(!at_body) return true;
         if(live) return true; // a live limb: the hand's own grab takes it
         const auto id=rig::value<std::uint32_t>(read,best+0xa8);if(!id) return false;
-        auto* p=post(base,read,0xb9,0x10,*id);if(!p) return false;
-        std::memset(p,0,0x10);++wakes;NativeGrab::yanked(r.side,best,GetTickCount64()+1500);
-        return true;
+        const auto now=clock_ms();
+        if(wake_diag) wake_diag->note_wake_attempt();
+        static const EntityLockout none;
+        switch(post_budget.request(*id,false,seconds_from_ms(now),wake_lockout?*wake_lockout:none)) {
+        case PostDecision::allow: {
+            auto* p=post(base,read,0xb9,0x10,*id);if(!p) return false;
+            std::memset(p,0,0x10);++wakes;if(wake_diag) wake_diag->note_post(true);
+            remember_wake(best,*id,r.side,now);NativeGrab::yanked(r.side,best,now+1500);
+            return true;
+        }
+        case PostDecision::refused: refuse_wake(r.side);return true;
+        default: if(wake_diag) wake_diag->note_post(false);return true;   // waiting for the retry, ceiling, locked, disabled: no post
+        }
     }
+    // The settled corpse a wake posted for, until its primary body reads dynamic (or it is refused).
+    inline static std::array<WakeEntry,4> wake_pending_{};
+    inline static std::array<std::atomic<bool>,2> wake_refused_{};
+    static void refuse_wake(unsigned side) {if(wake_diag) wake_diag->note_wake_refused();wake_refused_[side&1u]=true;}
+    static void remember_wake(std::uintptr_t entity,std::uint32_t id,unsigned side,std::uint64_t now) {
+        WakeEntry* slot=nullptr;
+        for(auto& e:wake_pending_) if(e.used && e.id==id) slot=&e;
+        for(auto& e:wake_pending_) if(!slot && !e.used) slot=&e;
+        if(!slot) {slot=&wake_pending_[0];for(auto& e:wake_pending_) if(e.at_ms<slot->at_ms) slot=&e;}
+        *slot=WakeEntry{true,false,entity,id,side&1u,now};
+    }
+public:
+    // Game thread, beside hold_down. A remembered corpse whose primary body still does not read dynamic one second after its post gets the one retry;
+    // one more second without it and the budget refuses: the side is flagged for the refusal haptic and the entry is dropped. A corpse that wakes,
+    // changes state or leaves the registry is forgotten (and the budget's entry with it).
+    template<class Read> static void service_wake_retries(std::uintptr_t base,Read& read,std::uint64_t now_ms) {
+        static const EntityLockout none;
+        for(auto& e:wake_pending_) {
+            if(!e.used) continue;
+            const auto id=rig::value<std::uint32_t>(read,e.entity+0xa8);const auto state=rig::value<unsigned char>(read,e.entity+0xd1);
+            if(!id || *id!=e.id || !state || !(*state&0x28) || native_ragdoll_body(read,base,e.entity,0)) {post_budget.forget(e.id);e.used=false;continue;}
+            if(now_ms<e.at_ms || now_ms-e.at_ms<1000) continue;
+            switch(post_budget.request(e.id,false,seconds_from_ms(now_ms),wake_lockout?*wake_lockout:none)) {
+            case PostDecision::allow: { // the one retry
+                auto* p=post(base,read,0xb9,0x10,e.id);if(!p) {e.used=false;break;}
+                std::memset(p,0,0x10);++wakes;if(wake_diag) wake_diag->note_post(true);
+                e.retried=true;e.at_ms=now_ms;break;
+            }
+            case PostDecision::refused: refuse_wake(e.side);e.used=false;break;
+            default: if(wake_diag) wake_diag->note_post(false);break;   // ceiling or lockout: try again next service
+            }
+        }
+    }
+private:
 public:
     static bool block_keeps_gun() noexcept {return NativeBlockEligibility::process_owner().enabled();}
 private:
@@ -418,6 +490,7 @@ private:
     // conscious ragdoll recovers after 0.5-2 s by itself (sim v432), faster than a hand can drag him.
     inline static std::array<std::uintptr_t,2> held_guard_{};inline static std::array<std::uint64_t,2> held_since_{},held_post_{};
     template<class Read> static void hold_down(std::uintptr_t base,Read& read) {
+        if(post_budget.disabled()) return; // build/no-ragdoll-posts
         auto* grab=NativeGrab::instance();if(!grab) return;
         const auto now=GetTickCount64();
         for(unsigned side=0;side<2;++side) {

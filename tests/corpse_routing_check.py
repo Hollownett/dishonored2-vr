@@ -39,9 +39,23 @@ def check_hold(source: str, probe: str) -> None:
     assert source.count("load_grab_tuning(") == 1 and "grab-tuning.cfg" in source and "KillSwitches::read(" in source
 
 
+def check_wake(hands: str, probe: str) -> None:
+    """Task 11: START_RAGDOLL posts go through the budget; the refusal pulses the hand; the kill switch reaches the budget and the legacy yank."""
+    assert "post_budget.request(*id,false" in hands and "service_wake_retries(base,read,clock_ms())" in hands
+    wake = hands[hands.index("static bool wake("):hands.index("static void refuse_wake(")]
+    assert wake.count("post(base,read,0xb9") == 1, "wake posts once, after the budget decision"
+    assert wake.index("post_budget.request") < wake.index("post(base,read,0xb9")
+    assert "if(post_budget.disabled())" in hands[hands.index("static bool ragdoll("):hands.index("static bool ragdoll(") + 200]
+    assert "if(post_budget.disabled()) return;" in hands[hands.index("static void hold_down("):hands.index("static void hold_down(") + 120]
+    assert hands.count("0x149") == 2, "no new VELOCITY_IMPULSE use (the comment and the legacy yank's own post)"
+    assert "take_wake_refusal(h)) game_xr->pulse(h,.6f,.08f)" in probe
+    assert "post_budget.disable(kill.no_posts)" in probe and "wake_lockout=&native_grab.lockout()" in probe
+
+
 if __name__ == "__main__":
     root = Path(__file__).resolve().parents[1]
     check((root / "src" / "dxgi_probe.cpp").read_text(encoding="utf-8"))
     check_hold((root / "src" / "native_grab.hpp").read_text(encoding="utf-8"), (root / "src" / "dxgi_probe.cpp").read_text(encoding="utf-8"))
+    check_wake((root / "src" / "native_weapon_hands.hpp").read_text(encoding="utf-8"), (root / "src" / "dxgi_probe.cpp").read_text(encoding="utf-8"))
     print("corpse_routing_check ok")
     sys.exit(0)

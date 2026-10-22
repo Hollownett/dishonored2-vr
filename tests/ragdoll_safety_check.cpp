@@ -216,6 +216,15 @@ void runaway_ignores_missing_bodies() {
     auto r=RunawayDetector::check(v);
     CHECK(!r.runaway);CHECK(!r.non_finite);CHECK(r.max_speed==0);
 }
+void lockout_never_evicts_active() {
+    EntityLockout l;
+    for(std::uint32_t i=1;i<=16;++i) CHECK(l.lock(i,10+i*.01));   // 16 active locks
+    CHECK(!l.lock(99,10.5) && l.refused()==1);                      // the 17th is refused, not swapped in for an active one
+    for(std::uint32_t i=1;i<=16;++i) CHECK(l.locked(i,10.5));       // nobody was evicted
+    CHECK(!l.locked(99,10.5));
+    CHECK(l.lock(5,10.6) && l.refused()==1);                        // an existing entity just extends
+    CHECK(l.lock(99,12.0) && l.locked(99,12.5) && l.refused()==1);  // once the old ones expired, slots are reusable
+}
 void lockout_1s() {
     EntityLockout l;
     CHECK(!l.locked(1,0));
@@ -251,7 +260,7 @@ int main() {
     forget_restarts();ceiling_2_per_second();flapping_200_cycles_within_ceiling();
     disabled_blocks_all();eviction_keeps_working();
     runaway_speed_12();runaway_non_finite();runaway_ignores_missing_bodies();
-    lockout_1s();runaway_through_native_motion();refused_survives_eviction_churn();full_table_of_young_entries_defers();lockout_blocks_posts();kill_switch_fails_closed();ms_conversion();ceiling_deferred_retry_allowed_later();fault_latch_sticks();kill_switches_read();
+    lockout_never_evicts_active();lockout_1s();runaway_through_native_motion();refused_survives_eviction_churn();full_table_of_young_entries_defers();lockout_blocks_posts();kill_switch_fails_closed();ms_conversion();ceiling_deferred_retry_allowed_later();fault_latch_sticks();kill_switches_read();
     std::puts("ragdoll_safety_check OK");
     return 0;
 }

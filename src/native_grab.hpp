@@ -627,7 +627,12 @@ private:
             }
             lane.held=*body;
             lane.anchor_view=HoldAnchorView{true,lane.grab.anchor(body->pose),now};
-            if(!lane.capped && body->bone>=0 && corpse_enabled_ && ragdoll_pushable_state(read_,body->entity)) begin_hold(lane,side,*body,now); // a held living guard died: the corpse envelope takes over
+            if(!lane.capped && body->bone>=0 && corpse_enabled_ && ragdoll_pushable_state(read_,body->entity)) { // a held living guard died: the corpse envelope takes over
+                if(lockout_.locked(body->entity_id,seconds_from_ms(now))) { // ... unless he is locked out: no hold, no write
+                    lane.grab.release(false,ReleaseReason::lifecycle);lane.end_hold();lane.pending_release=false;return;
+                }
+                begin_hold(lane,side,*body,now);
+            }
             if(lane.capped) {
                 capped_tick(lane,side,*body,now,physical_usable && sample && same_owner,usable && same_owner);
                 return;
@@ -652,7 +657,8 @@ private:
         } else if(const auto yanked=yanked_entity_[side].load();yanked && now<yanked_until_[side].load() && sample && physical_usable && lane.grab.pressed()) {
             // The guard this hand just yanked into ragdoll (NativeWeaponHands::yank): the hand had his collar or arm, so it takes
             // his nearest limb and pulls it into the fist (bound as if the limb's contact point were at the hand).
-            if(const auto limb=nearest_ragdoll_body(read_,base_,yanked,p.hand.position);limb && limb->world==world) {
+            if(const auto limb=nearest_ragdoll_body(read_,base_,yanked,p.hand.position);limb && limb->world==world &&
+               !lockout_.locked(limb->entity_id,seconds_from_ms(now))) { // a runaway guard is not yanked back into a hold inside his lockout
                 auto at_hand=limb->pose;at_hand.position=at_hand.position+(p.hand.position-limb->contact(p.hand.position));
                 if(lane.grab.bind(at_hand,p.hand.position,grab_acquire_distance)) {
                     lane.held=limb;lane.acquired=true;lane.reset_tow();lane.owner_player=p.owner.player;lane.owner_camera=p.owner.camera;
@@ -843,6 +849,7 @@ public:
     bool no_ragdoll_posts() const noexcept {return no_posts_;} // build/no-ragdoll-posts, read at install; the wake path (Task 11) honours it
     // The runaway lockout is dispatcher-thread only (EntityLockout is not thread-safe): Task 11's post budget reads it from the same callback.
     EntityLockout& lockout() noexcept {return lockout_;}
+    std::uint64_t lock_refused() const noexcept {return lockout_.refused();}
     void attach_corpse_trace(CorpseTraceWriter* trace) {std::lock_guard<std::mutex> lock(mutex_);corpse_trace_=trace;}
     UINT64 velocity_unknown() const {return velocity_unknown_.load();}
     UINT64 corpse_cost_us() const {return corpse_cost_us_.load();}UINT64 corpse_cost_max_us() const {return corpse_cost_max_us_.load();}
