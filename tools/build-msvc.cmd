@@ -6,6 +6,10 @@ if not exist artifacts\research\glyphs mkdir artifacts\research\glyphs
 if not exist build\md mkdir build\md
 cl /nologo /c /TC /W3 /O2 /MD /Ithird_party\minhook\include third_party\minhook\src\buffer.c third_party\minhook\src\hook.c third_party\minhook\src\trampoline.c third_party\minhook\src\hde\hde64.c /Fo:build\md\
 if not "%errorlevel%"=="0" exit /b 1
+cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MD /Isrc tests\native_temporal_census_check.cpp /Fo:build\native_temporal_census_check.obj /Fe:build\native_temporal_census_check.exe
+if errorlevel 1 goto build_failed
+build\native_temporal_census_check.exe
+if errorlevel 1 goto build_failed
 cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MD /Isrc tests\dlss_lifecycle_check.cpp /Fo:build\dlss_lifecycle_check.obj /Fe:build\dlss_lifecycle_check.exe /link third_party\dlss\lib\nvsdk_ngx_d.lib d3d11.lib dxgi.lib advapi32.lib user32.lib uuid.lib
 if errorlevel 1 goto build_failed
 build\dlss_lifecycle_check.exe

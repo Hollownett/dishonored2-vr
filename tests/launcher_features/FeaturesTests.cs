@@ -260,7 +260,7 @@ string StateText(string d) => File.ReadAllText(Path.Combine(d, "launcher-feature
         Features.RestoreDefaults(d, list);
         var st = Features.State(d, list);
         Check("restore_defaults_restores_saved_tuning", setAside && File.ReadAllText(P("full-body")) == "0.5 0.2" && !Has(d, "full-body.off-by-launcher"));
-        Check("restore_defaults_matches_defaults", list.All(f => st[f.Id].On == f.Default) && !Has(d, "no-hand-blink") && !Has(d, "power-gestures") && Ids(d, "off").SequenceEqual(new[] { "power-gestures" }));
+        Check("restore_defaults_matches_defaults", list.All(f => st[f.Id].On == f.Default) && !Has(d, "no-hand-blink") && !Has(d, "power-gestures") && Ids(d, "off").OrderBy(x => x, StringComparer.Ordinal).SequenceEqual(list.Where(f => !f.Default).Select(f => f.Id).OrderBy(x => x, StringComparer.Ordinal)));
         Check("restore_defaults_leaves_unknown_files", File.ReadAllText(P("hud-scale")) == "0.75");
         var again = Listing(d); Features.RestoreDefaults(d, list);
         Check("restore_defaults_is_idempotent", Listing(d) == again);

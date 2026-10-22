@@ -38,6 +38,7 @@
 #include "native_gameplay_aim.hpp"
 #include "weapon_pose_stabilizer.hpp"
 #include "aim_ray_receipt.hpp"
+#include "native_temporal_census.hpp"
 #include <chrono>
 #include "native_turning.hpp"
 #include "native_menu.hpp"
@@ -1230,7 +1231,7 @@ void __fastcall view_setup_hook(void* view,int* window_rect,int* render_rect) {
         } else setup_hook(view,window_rect,render_rect);
     } __finally {
         if(claimed && alternate_taa_setup_ready && !setup_completed) alternate_taa_runtime.abort();
-        if(claimed && !setup_completed && head_requested) fsr_taa.invalidate_dlss_sources();
+        if(claimed && !setup_completed && head_requested) {fsr_taa.invalidate_dlss_sources();d2vr::NativeTemporalCensus::process_owner().invalidate_setup();}
         if(claimed && head_requested) restore_head_view();
         head_depth.fetch_sub(1,std::memory_order_acq_rel);
         d2vr::crash_operation=previous_operation;
@@ -3604,11 +3605,11 @@ void observe_eye_setup(void* view) noexcept {
 // Completion is published after original Setup and the supported forced-jitter
 // write. The pre-Setup eye classifier alone cannot certify the newly written stamp.
 std::optional<temporal_eye::NativePass> read_dlss_pass_metadata(std::uintptr_t view) noexcept {
-    if(!temporal_eye::diagnostic_capture_enabled.load(std::memory_order_relaxed) || !dlss_view_metadata_abi) return {};
+    if((!temporal_eye::diagnostic_capture_enabled.load(std::memory_order_relaxed) && !d2vr::NativeTemporalCensus::process_owner().wants_metadata()) || !dlss_view_metadata_abi) return {};
     try {return d2vr::taa_history::read_pass_metadata(&read_self,view);}catch(...) {return {};}
 }
 std::optional<temporal_eye::SetupObservation> begin_dlss_setup_observation(void* view) noexcept {
-    if(!temporal_eye::diagnostic_capture_enabled.load(std::memory_order_relaxed) || !dlss_view_metadata_abi || !view || !stereo_active.load() || alternate_on() || mono_view_state.load()==1) return {};
+    if((!temporal_eye::diagnostic_capture_enabled.load(std::memory_order_relaxed) && !d2vr::NativeTemporalCensus::process_owner().wants_setup()) || !dlss_view_metadata_abi || !view || !stereo_active.load() || alternate_on() || mono_view_state.load()==1) return {};
     try {
         temporal_eye::SetupObservation observation;observation.pass.view=reinterpret_cast<std::uintptr_t>(view);
         std::lock_guard<std::mutex> lock(gpu_mutex);
@@ -3631,11 +3632,12 @@ void complete_dlss_setup_observation(const std::optional<temporal_eye::SetupObse
     const auto verify=begin_dlss_setup_observation(reinterpret_cast<void*>(input->pass.view));
     const auto pass=read_dlss_pass_metadata(input->pass.view);
     if(!verify || !pass || verify->eye!=input->eye || verify->allocation!=input->allocation ||
-       verify->camera_owner!=input->camera_owner) {fsr_taa.invalidate_dlss_sources();return;}
+       verify->camera_owner!=input->camera_owner) {fsr_taa.invalidate_dlss_sources();d2vr::NativeTemporalCensus::process_owner().invalidate_setup();return;}
     auto completed=*input;completed.pass=*pass;completed.setup_completed=true;completed.forced_jitter_written=jitter_written;
     // Submitted source versus native current7390 exposes CPU Setup correspondence.
     // This does not prove later GPU constants or pixel consumption.
     fsr_taa.observe_dlss_setup(completed);
+    d2vr::NativeTemporalCensus::process_owner().setup(completed,render_world_scene() && stereo_active.load() && !alternate_on() && mono_view_state.load()!=1);
 }
 
 void observe_eye_begin(void* view) noexcept {
@@ -8350,6 +8352,12 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
     if(!disable_arm_upload_hook()) return 2; // Drain a completed deferred restore.
     if(gpu_bindings.poisoned() || started.exchange(true)) return 2;
     struct PerfLogFinalizer {~PerfLogFinalizer(){flush_render_perf(true);}} perf_log_finalizer;
+    struct CensusFinalizer {
+        ~CensusFinalizer() {
+            d2vr::TaaDispatchHook::diagnostic_dispatch=nullptr;d2vr::NativeTaaHistory::diagnostic_job=nullptr;
+            d2vr::NativeTemporalCensus::process_owner().flush(output_directory,true);
+        }
+    } census_finalizer;
     struct AssassinationReceiptFinalizer {
         bool finished{},drained{};
         bool finish() noexcept {
@@ -8384,6 +8392,12 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
         if(!fs::exists(root/L".git")) return 3;
         output=root/L"artifacts";
         output_directory=output;recovery_log_path=output/L"xr-recoveries.log";
+        if(!d2vr::NativeTemporalCensus::process_owner().flush(output_directory,true))
+            throw std::runtime_error("Prior native temporal census must drain and flush before activation");
+        const bool census_requested=fs::exists(root/L"build"/L"native-temporal-census");
+        if(census_requested)fs::remove(output/L"native-temporal-census.json"); // no stale completion marker while new capture waits
+        if(!d2vr::NativeTemporalCensus::process_owner().configure(census_requested,&read_self,&read_dlss_pass_metadata))
+            throw std::runtime_error("Native temporal census callbacks have not drained");
         {std::ofstream reset(recovery_log_path,std::ios::trunc);}recoverable_faults=0;xr_recoveries=0;xr_retry_tick=0;script_capture_next=2000;physical_swings=0;sword_swing={};swing_until_tick=0;native_menu_failure_noted=native_turning_failure_noted=native_left_aim_failure_noted=false;
         fs::create_directories(output);
         auto game=fs::path(module_path(nullptr));
@@ -8787,8 +8801,12 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
         if(setup_requested || head_requested || eye_boundary_requested) {
             setup_target=reinterpret_cast<void*>(image_base+setup_rva);
             view_jitter_abi=verify_view_jitter_abi();
-            dlss_view_metadata_abi=temporal_eye::diagnostic_capture_enabled.load(std::memory_order_relaxed) && view_jitter_abi && d2vr::alternate_taa::verified_abi(&read_self,image_base);
+            dlss_view_metadata_abi=(temporal_eye::diagnostic_capture_enabled.load(std::memory_order_relaxed) || d2vr::NativeTemporalCensus::process_owner().wants_setup()) && view_jitter_abi && d2vr::alternate_taa::verified_abi(&read_self,image_base);
             taa_history.capture_metadata(temporal_eye::diagnostic_capture_enabled.load(std::memory_order_relaxed) && dlss_view_metadata_abi);
+            if(dlss_view_metadata_abi && d2vr::NativeTemporalCensus::process_owner().wants_setup()) {
+                d2vr::NativeTaaHistory::diagnostic_job=+[](bool enter,void* context,d2vr::temporal_census::Token& token) noexcept {d2vr::NativeTemporalCensus::process_owner().observe_job(enter,context,token);};
+                d2vr::TaaDispatchHook::diagnostic_dispatch=+[](ID3D11DeviceContext* context,UINT x,UINT y,UINT z) noexcept {d2vr::NativeTemporalCensus::process_owner().dispatch(context,x,y,z);};
+            }
             if(!read_self(image_base+setup_rva,setup_original_bytes.data(),setup_original_bytes.size()) || setup_original_bytes!=setup_expected_bytes)
                 throw std::runtime_error("Native view setup entry differs from supported executable");
             setup_csv.open(output/L"native-view-setup.csv",std::ios::trunc);
@@ -9170,6 +9188,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
         if(status!=MH_OK) {capturing=false; throw std::runtime_error(std::string("Present hook enable failed: ")+MH_StatusToString(status));}
         enabled=true;
         while(probe_session.running(GetTickCount64()) && !callback_failed.load() && !xr_exit_requested.load()) {
+            d2vr::NativeTemporalCensus::process_owner().flush(output_directory);
             d2vr::LeftWeaponRenderReceipt::process_owner().flush();
             if(assassination_receipt_requested)d2vr::NativeAssassinationReceipt::process_owner().flush();
             flush_synchronized();
@@ -9186,6 +9205,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
             }
             Sleep(20);
         }
+        d2vr::NativeTemporalCensus::process_owner().flush(output_directory,true);
         flush_synchronized(true);
         flush_render_perf();
         flush_grab_decisions(true);

@@ -256,6 +256,14 @@
    "label": "Eye images carry the head pose they were drawn from",
    "help": "The game draws a frame one step behind the mod's camera update, so each eye image is sent to the headset with the head pose it was actually drawn from (the headset corrects the rest of the head motion itself). Turn off to send the newer pose as before: the world could lag and judder on head turns and while walking.",
    "default": true
+  },
+  {
+   "id": "native-temporal-census",
+   "file": "native-temporal-census",
+   "kind": "enable",
+   "label": "Capture graphics diagnostics",
+   "help": "Saves a short graphics trace for troubleshooting once gameplay is ready. Off by default; this does not enable DLSS.",
+   "default": false
   }
  ]
 }

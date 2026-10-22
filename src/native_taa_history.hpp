@@ -12,6 +12,7 @@
 #include <intrin.h>
 #include "taa_dispatch.hpp"
 #include "alternate_native_taa.hpp"
+#include "native_temporal_census.hpp"
 
 // Per-eye temporal-AA history for native two-view stereo.
 //
@@ -277,6 +278,8 @@ class NativeTaaHistory {
 public:
     // Diagnostic observer, called on the pass's job thread after a planned eye pass is recorded.
     void (*after_pass)(void* ctx,int eye)=nullptr;
+    using DiagnosticJob=void (*)(bool,void*,temporal_census::Token&) noexcept;
+    inline static std::atomic<DiagnosticJob> diagnostic_job{};
     void capture_metadata(bool enabled) noexcept {metadata_enabled_=enabled;}
 private:
     unsigned long long run(void* ctx,const taa_history::PassPlan& plan) {
@@ -303,9 +306,16 @@ private:
         if(pass.eye==1) ++right_swaps_;else if(pass.write) ++left_flips_;
         return result;
     }
+    unsigned long long observed_invoke(void* ctx,DiagnosticJob observer) {
+        temporal_census::Token token{};
+        observer(true,ctx,token);
+        __try {return invoke(ctx);}
+        __finally {observer(false,ctx,token);}
+    }
     static unsigned long long __fastcall dispatch(void* ctx) {
         auto& self=*instance_;++self.depth_;++self.in_flight_;
-        __try {return self.invoke(ctx);} __finally {--self.in_flight_;--self.depth_;}
+        const auto observer=diagnostic_job.load(std::memory_order_relaxed);
+        __try {return observer?self.observed_invoke(ctx,observer):self.invoke(ctx);} __finally {--self.in_flight_;--self.depth_;}
     }
     static bool same_resource(std::uintptr_t a,std::uintptr_t b) noexcept {
         auto query=[](std::uintptr_t resource,D3D11_TEXTURE2D_DESC& desc) {

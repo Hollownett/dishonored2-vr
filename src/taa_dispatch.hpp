@@ -47,6 +47,8 @@ public:
     // Called inside a marked pass; returns true when it recorded a replacement instead of the original.
     using Handler=bool (*)(ID3D11DeviceContext*,int eye,UINT,UINT,UINT,Fn original);
     inline static std::atomic<Handler> handler{};
+    using DiagnosticDispatch=void (*)(ID3D11DeviceContext*,UINT,UINT,UINT) noexcept;
+    inline static std::atomic<DiagnosticDispatch> diagnostic_dispatch{};
     inline static std::atomic<UINT64> marked{},replaced{};
     inline static thread_local int pass_eye=-1;
     inline static thread_local std::optional<std::array<float,4>> pass_jitter; // set by NativeTaaHistory around a planned eye pass
@@ -97,6 +99,7 @@ private:
     }
     inline static Fn original_{};inline static void* target_{};inline static std::atomic<int> depth_{};
     static void STDMETHODCALLTYPE hook(ID3D11DeviceContext* c,UINT x,UINT y,UINT z) {
+        if(const auto observer=diagnostic_dispatch.load(std::memory_order_relaxed))observer(c,x,y,z);
         const int eye=pass_eye;
         if(eye<0) {original_(c,x,y,z);return;}
         ++depth_;++marked;
