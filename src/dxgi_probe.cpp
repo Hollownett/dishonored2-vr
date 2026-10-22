@@ -3637,7 +3637,7 @@ void complete_dlss_setup_observation(const std::optional<temporal_eye::SetupObse
     // Submitted source versus native current7390 exposes CPU Setup correspondence.
     // This does not prove later GPU constants or pixel consumption.
     fsr_taa.observe_dlss_setup(completed);
-    d2vr::NativeTemporalCensus::process_owner().setup(completed,render_world_scene() && stereo_active.load() && !alternate_on() && mono_view_state.load()!=1);
+    d2vr::NativeTemporalCensus::process_owner().setup(completed,d2vr::TaaDispatchHook::installed() && render_world_scene() && stereo_active.load() && !alternate_on() && mono_view_state.load()!=1);
 }
 
 void observe_eye_begin(void* view) noexcept {
