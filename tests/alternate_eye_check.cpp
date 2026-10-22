@@ -369,7 +369,22 @@ static void image_shown_at_present_carries_the_submitted_eye_and_pose() {
     const auto bug = run_pipeline(1);              // the task 1 stamping: the Setup for "the next Present"
     CHECK(bug.alternated > 0 && bug.eye_mismatches == bug.alternated);  // every alternated Present put the other eye's image in the swapchain
 }
+static void paired_frames_never_trip_the_miss_fallback() {
+    unsigned m = 0;
+    for (int i = 0; i < 1000; ++i) m = alternate_miss_count(m, false, false);   // a long menu / cutscene: paired, not ready
+    CHECK(m == 0);
+    for (int i = 0; i < 179; ++i) m = alternate_miss_count(m, true, false);     // one-view frames that miss
+    CHECK(m == 179);
+    m = alternate_miss_count(m, false, false);                                  // a paired frame resets the run
+    CHECK(m == 0);
+    for (int i = 0; i < 100; ++i) m = alternate_miss_count(m, true, false);
+    m = alternate_miss_count(m, true, true);                                    // a ready frame resets it
+    CHECK(m == 0);
+    for (int i = 0; i < 180; ++i) m = alternate_miss_count(m, true, false);
+    CHECK(m >= 180);                                                            // 180 consecutive one-view misses still fall back
+}
 int main() {
+    paired_frames_never_trip_the_miss_fallback();
     parity_alternates_in_gameplay();
     menus_and_authored_render_paired();
     epoch_change_renders_paired_once();

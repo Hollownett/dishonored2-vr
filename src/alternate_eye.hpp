@@ -84,6 +84,10 @@ inline AlternateReadiness alternate_present_readiness(bool have_slot, unsigned m
     return out;
 }
 
+// The consecutive-miss counter behind the perf-mono-view fallback. Only a frame PLANNED as one view (alternated) and not ready counts as a miss;
+// a ready frame, or a paired frame (menu, cutscene, doffed headset), resets it, so a long non-alternating stretch never disables the mode.
+inline unsigned alternate_miss_count(unsigned misses, bool planned_single, bool ready) noexcept {return ready || !planned_single ? 0u : misses + 1u;}
+
 // True when an image kept at `rendered_frame` may still be submitted at displayed frame `now`.
 inline bool alternate_image_fresh(std::uint64_t rendered_frame, std::uint64_t now) noexcept {
     return rendered_frame != 0 && rendered_frame <= now && now - rendered_frame <= alternate_max_age;

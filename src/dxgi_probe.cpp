@@ -1332,6 +1332,7 @@ static d2vr::AlternateMismatch alt_mismatch_run; // consecutive plan/observation
 // (Setup under log_mutex, the Present hook under log_mutex).
 static d2vr::PendingViews<XrView> alt_pending;
 static std::atomic<UINT64> alt_plan_stamp{0}; // (display frame<<2)|(planned eye+1), planned at the Present two frames before the image shows; 0 = none
+static std::atomic<unsigned char> alt_planned_single[2]{}; // by display-frame parity: the plan for that frame was one view (alternated)
 static d2vr::AlternateEye alt_plan;           // render thread (Present hook) only
 static UINT64 alt_epoch_seen{};
 static UINT64 alt_per_frame_done{}; // displayed frame whose per-frame mod work already ran (prepare_head_view, under log_mutex)
@@ -5482,6 +5483,7 @@ void alternate_after_present(UINT64 number,bool gameplay,bool free_gameplay,bool
     const UINT64 next_display=d2vr::alternate_display_frame(number);
     const int next=alt_plan.eye_for_frame(next_display,free_gameplay,authored,epoch_changed);
     alt_plan_stamp=(next_display<<2)|static_cast<UINT64>(next+1);
+    alt_planned_single[next_display&1]=next>=0?1:0;
     if(gameplay) alternate_select_descriptor(next<0); // menus and loading keep whichever descriptor is installed
 }
 
@@ -6558,8 +6560,11 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                             for(UINT slot_eye=0;slot_eye<2;++slot_eye) if(alt_slot->mask&(1u<<slot_eye))
                                 game_xr->record_rendered_view(slot_eye,alt_slot->view[slot_eye],alt_slot->display_time[slot_eye],alt_slot->locate_cpu_time[slot_eye]);
                         if((mono_path || alternate_on()) && gameplay && stereo_active.load()) { // a sustained miss in gameplay means the one view cannot be named: pair again
-                            if(pair_ready) mono_view_misses=0;
-                            else if(++mono_view_misses>=180) mono_view_fallback("perf-mono-view: the one engine view was not matched for 180 gameplay frames");
+                            // alternate-eye counts only frames planned as one view; paired frames (menu, cutscene) reset it
+                            if(alternate_on()) mono_view_misses=d2vr::alternate_miss_count(static_cast<unsigned>(mono_view_misses.load()),alt_planned_single[number&1].load()!=0,pair_ready);
+                            else if(pair_ready) mono_view_misses=0;
+                            else ++mono_view_misses;
+                            if(mono_view_misses>=180) mono_view_fallback("perf-mono-view: the one engine view was not matched for 180 gameplay frames");
                         }
                         if(!cached_output_frame_ready) {completed_left.Reset();completed_right.Reset();}
                         // Do not hold the GPU-observer lock across OpenXR calls.
@@ -8513,7 +8518,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
                 if(xr_requested && head_requested && paired_requested && eye_boundary_requested && native_eye_capture_requested && !single_eye_requested) mono_view_state=1;
                 else {mono_view_state=2;note_recoverable("perf-mono-view needs head-tracked paired XR with native eye capture; staying paired");}
             }
-            alt_eye_state=0;alt_alternated=0;alt_paired=0;alt_fallbacks=0;alt_mismatch_run.reset();alt_pending.reset();alt_plan_stamp=0;alt_epoch_seen=0;alt_per_frame_done=0;alt_descriptor_paired=false;alt_plan.reset();
+            alt_eye_state=0;alt_alternated=0;alt_paired=0;alt_fallbacks=0;alt_mismatch_run.reset();alt_pending.reset();alt_plan_stamp=0;alt_planned_single[0]=0;alt_planned_single[1]=0;alt_epoch_seen=0;alt_per_frame_done=0;alt_descriptor_paired=false;alt_plan.reset();
             alt_pose_trace_rows=0;{std::lock_guard<std::mutex> trace_lock(alt_pose_trace_mutex);if(alt_pose_trace_csv.is_open()) alt_pose_trace_csv.close();}
             alt_pose_trace_state=fs::exists(root/L"build"/L"alt-pose-trace")?1:0; // diagnostic: alt-pose-trace.csv (alternate-eye on only)
             if(fs::exists(root/L"build"/L"alternate-eye")) { // plan F task 1: alternate-eye rides on the mono-view path (same prerequisites)

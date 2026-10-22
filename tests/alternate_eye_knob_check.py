@@ -117,3 +117,7 @@ assert 'const std::size_t eye_slot=d2vr::alternate_state_slot(alt_eye,eye);' in 
 assert 'fsr_vfov[eye_slot]=' in head and 'jitter_counter[eye_slot]=counter;' in head and 'auto& e=eye_jitter[eye_slot];' in head
 assert 'fsr_vfov[static_cast<std::size_t>(eye)]' not in head and 'jitter_counter[static_cast<std::size_t>(eye)]' not in head
 print('PASS: alternate-eye knob routing (gating, own-eye pose, display-frame records, kept image, view-count truth, fallback, status)')
+
+# the 180-frame miss counter counts only frames planned as one view; paired frames reset it (review double-vision I1)
+assert 'mono_view_misses=d2vr::alternate_miss_count(static_cast<unsigned>(mono_view_misses.load()),alt_planned_single[number&1].load()!=0,pair_ready);' in probe
+assert 'alt_planned_single[next_display&1]=next>=0?1:0;' in probe
