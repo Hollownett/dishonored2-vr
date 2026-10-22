@@ -70,9 +70,9 @@ assert 'alt_slot=alt_pending.take(number);' in present_alt and 'views.size()' no
 assert 'd2vr::alternate_present_readiness(alt_slot.has_value(),alt_slot?alt_slot->mask:0u,alt_slot?alt_slot->epoch:0,' in present_alt
 assert 'mono_eye_frame.load()==number,paired_left_ready && native_eye_pair.complete(),alt_nonfree);' in present_alt
 assert 'mono_path=alt_ready.single;pair_ready=alt_ready.ready;alt_fresh=alt_ready.fresh_eye;' in probe
-assert 'if(alternate_on() && pair_ready && alt_slot && game_xr)' in probe
+assert 'if((alternate_on() || layer_pose_sync_on()) && pair_ready && alt_slot && game_xr)' in probe   # layer-pose sync promotes paired slots the same way
 assert 'game_xr->record_rendered_view(slot_eye,alt_slot->view[slot_eye],alt_slot->display_time[slot_eye],alt_slot->locate_cpu_time[slot_eye]);' in probe
-assert probe.count('alt_pending.record(') == 1 and probe.count('alt_pending.take(') == 1 and 'alt_pending.reset();' in probe
+assert probe.count('alt_pending.record(') == 2 and probe.count('alt_pending.take(') == 3 and 'alt_pending.reset();' in probe   # + the paired layer-pose sync (own / latest slot)
 # knob-off: the old readiness line is untouched (the alternate branch is an else-less if before it)
 assert 'pair_ready=mono_path?(stereo_active.load() && views.size()==1 && mono_eye_frame.load()==number):' in probe
 assert 'game_xr->alternate_enabled=alternate_on();game_xr->alternate_fresh_eye=alt_fresh;game_xr->alternate_frame=number;' in probe
@@ -100,7 +100,7 @@ assert 'rendered_views_[eye]=view;rendered_mask_|=1u<<eye;' in xr
 # the pose trace is a diagnostic: read once in StartProbe; every eye mode (alternate, paired, perf-mono), never a behaviour change
 assert probe.count('L"alt-pose-trace"') == 1 and 'alt_pose_trace_state=fs::exists(root/L"build"/L"alt-pose-trace")?1:0;' in probe
 assert 'static bool alt_pose_trace_on() noexcept {return alt_pose_trace_state.load()==1;}' in probe
-assert 'if(alt_pose_trace_on() && !(alternate_on() && stereo_active.load())) {' in head   # paired / mono Setup rows, after the record
+assert 'if(alt_pose_trace_on() && !layer_pose_sync_on() && !(alternate_on() && stereo_active.load()))' in head   # paired / mono Setup rows (knob-off record), after the record
 # fix round 1: authored / settings are read at the Present that submits the frame, not from the lagging plan; every gate is the tested function
 assert 'const bool alt_nonfree=alternate_on() && !d2vr::alternate_single_view_allowed(authored_camera,game_xr && game_xr->settings_open());' in probe
 assert 'std::optional<d2vr::PendingViews<XrView>::Slot> alt_slot;int alt_fresh=-1;' in probe

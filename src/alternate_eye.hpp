@@ -67,6 +67,26 @@ private:
 // The one eye a Setup mask rendered: 0 or 1 for a one-view frame, -1 for a paired frame (3) or nothing (0).
 inline int alternate_mask_fresh_eye(unsigned mask) noexcept {return mask == 1u ? 0 : mask == 2u ? 1 : -1;}
 
+// Layer-pose sync for the paired and perf-mono paths (knob off; 2026-10-22). The same one-frame pipeline: the legacy glue wrote a Setup's
+// views into GameXr at Setup time, so Present P submitted the views of the Setup made in the interval just before it (whose image shows at
+// P+1) with the image of the Setup before that (shown at P). On every head move the layer pose ran one frame ahead of its image, and the
+// compositor reprojected from the wrong pose: the world lagged the head by a frame on every turn and step (headset: "unstable image").
+// With sync the Setup's views wait in PendingViews for display frame F+2 and are promoted at that Present, as alternate mode does.
+// A slot is promotable for a Present when it was recorded for it (have_slot), holds both eyes, and its pose epoch is still current.
+inline bool paired_views_promotable(bool have_slot, unsigned mask, std::uint64_t slot_epoch, std::uint64_t epoch) noexcept {
+    return have_slot && mask == 3u && slot_epoch == epoch;
+}
+// Which slot a paired Present promotes: its own (the Setup whose image it shows), else the latest Setup's (the one recorded for the next
+// Present: exactly what the legacy glue submitted, so a Present whose own Setup bailed or was located in an old epoch is submitted as
+// before instead of being dropped; the glue counts these), else nothing (the layers go out untracked, as they did before).
+enum class PairedSlot {none, own, latest};
+inline PairedSlot paired_slot_to_promote(bool have_own, unsigned own_mask, std::uint64_t own_epoch, bool have_latest, unsigned latest_mask,
+                                         std::uint64_t latest_epoch, std::uint64_t epoch) noexcept {
+    if (paired_views_promotable(have_own, own_mask, own_epoch, epoch)) return PairedSlot::own;
+    if (paired_views_promotable(have_latest, latest_mask, latest_epoch, epoch)) return PairedSlot::latest;
+    return PairedSlot::none;
+}
+
 // Present-side readiness of a display frame, from the Setup slot recorded for it and what the glue observed in the interval before this
 // Present. A one-view frame is ready when its view's Begin was matched for this Present (mono_begin_matched) and the frame is free
 // gameplay (not authored, not the settings panel); a paired frame when both Begins completed and the left image was copied out

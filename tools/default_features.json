@@ -200,6 +200,14 @@
    "label": "performance mode: one eye per frame (more fps; may shimmer on fast motion; anti-aliasing SMAA only)",
    "help": "The game draws one eye per frame, alternating, and the headset reprojects the other. Roughly a quarter less frame time, so more fps. Fast motion can shimmer and the picture uses SMAA edges only (no temporal anti-aliasing). On by default; turn it off here if it bothers you.",
    "default": true
+  },
+  {
+   "id": "layer-pose-sync",
+   "file": "no-layer-pose-sync",
+   "kind": "disable",
+   "label": "Eye images carry the head pose they were drawn from",
+   "help": "The game draws a frame one step behind the mod's camera update, so each eye image is sent to the headset with the head pose it was actually drawn from (the headset corrects the rest of the head motion itself). Turn off to send the newer pose as before: the world could lag and judder on head turns and while walking.",
+   "default": true
   }
  ]
 }
