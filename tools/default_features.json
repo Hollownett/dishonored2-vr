@@ -194,6 +194,14 @@
    "default": true
   },
   {
+   "id": "steady-power-trigger",
+   "file": "legacy-trigger-mapping",
+   "kind": "disable",
+   "label": "Steady power trigger",
+   "help": "Holding the left trigger to aim Blink stays a hold: a light squeeze or a flicker no longer casts it early, and a quick tap still casts at once. Turn off for the raw trigger.",
+   "default": true
+  },
+  {
    "id": "overlay-skip",
    "file": "no-overlay-skip",
    "kind": "disable",

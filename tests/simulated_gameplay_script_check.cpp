@@ -23,7 +23,7 @@ int main() {
     // A native PadComposer sees the same commands and retains its activation gates.
     d2vr::PadComposer pad;pad.compose(script.sample(900,true,true),true,900);
     const auto native=pad.compose(script.sample(1000,true,true),true,1000);
-    assert(native.sThumbLY>16000 && native.bLeftTrigger==51 && (native.wButtons&XINPUT_GAMEPAD_A));
+    assert(native.sThumbLY>16000 && native.bLeftTrigger==0 && (native.wButtons&XINPUT_GAMEPAD_A)); // plan H3: a .2 squeeze is below the .55 power press level
     const auto neutral=pad.compose(script.sample(1001,true,false),false,1001);
     assert(neutral.sThumbLY==0 && neutral.bLeftTrigger==0 && neutral.wButtons==0);
     // The script's raw squeeze follows the production press-owner/pad path.

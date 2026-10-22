@@ -8946,6 +8946,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
         hold_y_menu_enabled=!fs::exists(root/L"build"/L"no-hold-y-menu");
         legacy_authored_camera=fs::exists(root/L"build"/L"legacy-authored-camera");authored_heading.reset();authored_heading_now.reset();
         aim_smoothing_enabled=!fs::exists(root/L"build"/L"no-aim-smoothing");aim_smoother.reset();   // plan H2
+        controller_bridge.set_legacy_trigger(fs::exists(root/L"build"/L"legacy-trigger-mapping"));   // plan H3: restores the raw analog left trigger (no hysteresis, no release debounce)
         {[[maybe_unused]] const bool legacy_corpse_strength=fs::exists(root/L"build"/L"legacy-corpse-strength");}   // plan H1: applied by NativeGrab::corpse_knobs_from (KillSwitches); named here so the launcher feature list and the source check see it
         {aim_smoother.set_params({});std::ifstream knob(root/L"build"/L"aim-smoothing");if(knob) {std::ostringstream text;text<<knob.rdbuf();bool ok=false;const auto params=d2vr::AimSmootherParams::parse(text.str().substr(0,200),&ok);if(ok) aim_smoother.set_params(params);}}
         camera_smoothing_enabled=!fs::exists(root/L"build"/L"no-camera-smoothing");anchor_smoother.reset();anchor_smooth_frame=~0ull;

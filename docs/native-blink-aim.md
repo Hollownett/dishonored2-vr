@@ -146,3 +146,7 @@ or `0x14061e500`/`0x14061e6c0` (low level shape casts, take explicit start/dir: 
 * `ark_player_new_blink` runtime value (`DAT_143987e48`) not read; only changes which reach formula applies (4).
 * Decl field names for `arkDeclCpntPowerBlink` (`decl+0x198/0x19c/0x1b0..0x1b8/0x1f4..0x200`) were not resolved; their meaning above is from use, INFERRED.
 * Stage-scheduling concurrency inside one stage is not verified (affects only whether a bracketed override would be safe).
+
+## Hold-to-aim trigger (plan H3)
+
+Blink aims while the left trigger is held and casts on release. The pad composer (`PadComposer::power_trigger`, `src/controller_input.hpp`) now gives the game a clean hold: press at >= 0.55, release at <= 0.25 held for at least 2 composes and 30 ms, and the value is kept above the game's own XInput press level (30/255) while held. A one-frame gap from an upstream gate, or noise on a light squeeze, no longer reads as a release (which casts at once). A deliberate block (menu, focus guard) still releases immediately, and a quick tap casts within about 30 ms of the finger lifting. `build/legacy-trigger-mapping` (feature `steady-power-trigger`) restores the raw analog trigger.

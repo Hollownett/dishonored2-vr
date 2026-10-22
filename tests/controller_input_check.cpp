@@ -219,5 +219,50 @@ int main() {
         control.y=control.native_y_quick_action=true;
         assert(suppress_pad.compose(control,true,6040).wButtons&XINPUT_GAMEPAD_Y);
     }
+    {   // plan H3: the left trigger reaches the game as a clean hold
+        auto fresh=[](d2vr::PadComposer& c,d2vr::ControllerInput& in,std::uint64_t t){in={};in.active=true;c.compose(in,true,t);};
+        {   // noisy_trigger_hold_never_releases: a squeeze wobbling around the game's own press level and the old release level
+            d2vr::PadComposer c;d2vr::ControllerInput in;fresh(c,in,9000);
+            in.left_trigger=.9f;assert(c.compose(in,true,9010).bLeftTrigger>30);
+            const float wobble[]{.7f,.2f,.8f,.5f,.1f,.6f,.9f,.24f,.4f,.15f,.7f,.3f,.05f,.8f,.5f};
+            std::uint64_t t=9020;
+            for(float v:wobble){in.left_trigger=v;assert(c.compose(in,true,t).bLeftTrigger>30);t+=11;} // never a one-frame release
+            in.left_trigger=.8f;assert(c.compose(in,true,t).bLeftTrigger>30);
+        }
+        {   // clean_tap_still_casts: a tap presses on its first frame and releases within the debounce bound
+            d2vr::PadComposer c;d2vr::ControllerInput in;fresh(c,in,9100);
+            in.left_trigger=1;assert(c.compose(in,true,9110).bLeftTrigger==255);
+            in.left_trigger=0;std::uint64_t t=9121;unsigned held_frames=0;
+            while(c.compose(in,true,t).bLeftTrigger>0){++held_frames;t+=11;assert(held_frames<6);}
+            assert(t-9110<=11+30+11); // released no later than ~30 ms after the finger let go (plus one frame step)
+            assert(held_frames>=1);
+            // and a light squeeze below the press level never casts
+            d2vr::PadComposer light;fresh(light,in,9300);
+            in.left_trigger=.4f;assert(light.compose(in,true,9310).bLeftTrigger==0);
+        }
+        {   // cleared_frame_does_not_release_held_power: an upstream gate zeroing one frame is bridged; a deliberate block is not
+            d2vr::PadComposer c;d2vr::ControllerInput in;fresh(c,in,9400);
+            in.left_trigger=1;assert(c.compose(in,true,9410).bLeftTrigger==255);
+            in.left_trigger=0;assert(c.compose(in,true,9421).bLeftTrigger>30);   // one cleared frame
+            in.left_trigger=1;assert(c.compose(in,true,9432).bLeftTrigger==255);
+            in.left_trigger=0;assert(c.compose(in,true,9443).bLeftTrigger>30);
+            in.menu_modifier=true;in.left_trigger=1;assert(c.compose(in,true,9454).bLeftTrigger==0); // menu owns the trigger: released at once
+        }
+        {   // release_after_hold_casts_once: one press edge, one release edge, however long the hold
+            d2vr::PadComposer c;d2vr::ControllerInput in;fresh(c,in,9500);
+            unsigned presses=0,releases=0;bool was=false;std::uint64_t t=9510;
+            for(int i=0;i<120;++i,t+=11){
+                in.left_trigger=i<100?(i%3==0?.35f:i%3==1?.95f:.2f):0.f;
+                const bool now=c.compose(in,true,t).bLeftTrigger>30;
+                if(now&&!was)++presses;if(!now&&was)++releases;was=now;
+            }
+            assert(presses==1 && releases==1 && !was);
+        }
+        {   // the legacy knob restores the raw mapping
+            d2vr::PadComposer c;d2vr::ControllerInput in;fresh(c,in,9700);c.set_legacy_trigger(true);
+            in.left_trigger=.4f;assert(c.compose(in,true,9710).bLeftTrigger==102);
+            in.left_trigger=0;assert(c.compose(in,true,9721).bLeftTrigger==0);
+        }
+    }
     std::cout << "PASS: VR pad mapping, native window connection probe through patched XInput, menu/focus/stale release and import restoration, menu grip taps\n";
 }

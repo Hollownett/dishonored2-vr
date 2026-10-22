@@ -36,15 +36,36 @@ class PadComposer {
     static SHORT stick(float value) {
         return std::isfinite(value)?static_cast<SHORT>(std::lround(std::clamp(value,-1.f,1.f)*32767.f)):0;
     }
+    // Plan H3: the left trigger (powers) reaches the game as a clean hold. The raw analog crossed the game's own XInput
+    // press level (30/255 = .12) with noise, and an upstream gate clearing one frame read as a release, which casts Blink.
+    bool power_held_{};std::uint64_t power_low_since_{};unsigned power_low_frames_{};bool legacy_trigger_{};
+    float power_trigger(float raw,std::uint64_t now) {
+        if(!std::isfinite(raw)) raw=0;
+        raw=std::clamp(raw,0.f,1.f);
+        if(legacy_trigger_) return raw;
+        if(!power_held_) {
+            if(raw>=power_press) {power_held_=true;power_low_frames_=0;}
+            else return 0;
+        } else if(raw<=power_release) {
+            if(power_low_frames_++==0) power_low_since_=now;
+            if(power_low_frames_>=power_release_frames && now-power_low_since_>=power_release_ms) {power_held_=false;power_low_frames_=0;return 0;}
+        } else power_low_frames_=0;
+        return raw>power_hold_floor?raw:power_hold_floor; // above the game's press level through any dip or debounced gap
+    }
     static BYTE trigger(float value) {
         return std::isfinite(value)?static_cast<BYTE>(std::lround(std::clamp(value,0.f,1.f)*255.f)):0;
     }
 public:
+    inline static constexpr float power_press=.55f,power_release=.25f,power_hold_floor=.3f;
+    inline static constexpr unsigned power_release_frames=2;
+    inline static constexpr std::uint64_t power_release_ms=30;
+    void set_legacy_trigger(bool legacy) {legacy_trigger_=legacy;power_held_=false;power_low_frames_=0;}
     inline static constexpr std::uint64_t menu_shoulder_tap_ms=120; // well under the menus' 225 ms repeat delay
     XINPUT_GAMEPAD compose(const ControllerInput& in,bool gameplay,std::uint64_t now=GetTickCount64()) {
         const bool pause=menu_tap_.update(in.menu,in.active && !in.suppress_pause,now);
         if(!in.active) {
             previous_active_=previous_modifier_=previous_directional_=false;blocked_buttons_=0;blocked_analog_=0;shoulder_held_={};
+            power_held_=false;power_low_frames_=0;
             return {};
         }
         WORD buttons=0;
@@ -93,9 +114,12 @@ public:
             !(buttons&(XINPUT_GAMEPAD_Y|XINPUT_GAMEPAD_LEFT_SHOULDER));
         XINPUT_GAMEPAD pad{};pad.wButtons=buttons;
         if(gameplay && !in.menu_modifier) {
-            if(!(blocked_analog_&1)) pad.bLeftTrigger=trigger(in.left_trigger);
+            // A deliberate block (menu, focus guard, fresh activation) drops the hold at once; only a gap in the value is bridged.
+            if(blocked_analog_&1) {power_held_=false;power_low_frames_=0;}
+            else pad.bLeftTrigger=trigger(power_trigger(in.left_trigger,now));
             if(!(blocked_analog_&2)) pad.bRightTrigger=trigger(in.right_trigger);
         }
+        else {power_held_=false;power_low_frames_=0;}
         if(!in.menu_modifier && !(blocked_analog_&16)) {
             pad.sThumbLX=stick(in.move_x);pad.sThumbLY=stick(in.move_y);
         }
@@ -214,6 +238,7 @@ public:
         // its state mutex while notifying that thread.
         if(input.active && installed_.load() && game_window_ && !connection_attempted_.exchange(true)) notify_connection(true);
     }
+    void set_legacy_trigger(bool legacy) {std::lock_guard<std::mutex> lock(mutex_);composer_.set_legacy_trigger(legacy);}
     void set_game_window(HWND window) {
         DWORD owner{};
         if(!window || !GetWindowThreadProcessId(window,&owner) || owner!=GetCurrentProcessId())
