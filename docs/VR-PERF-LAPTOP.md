@@ -377,6 +377,32 @@ The pose match holds per Present: the fresh layer carries the Setup's pose and F
 position (eye-specific), the stale layer carries its own Setup's pose from exactly one Present earlier. The disparity magnitude is not
 comparable across runs (different viewpoint at the sample time); the sign is.
 
+### Paired path: the layer pose was one frame ahead of its image (layer-pose sync, fixed 2026-10-22)
+
+The same one-frame engine pipeline bit the knob-off (paired) path, which `rendered_views_` had always recorded at Setup time
+(`record_rendered_eye`): the Setup made while the counter reads F wrote the views located at Present F, the engine rendered them in the next
+interval, and the image showed at Present F+2; but by then `rendered_views_` already held the Setup of counter F+1, so every paired layer
+went out with the pose of the NEXT image. The compositor reprojects from the submitted pose, so during a head turn the world lagged the head
+by one frame and jittered with the frame-time variance (headset session 1, paired at 30 fps: the submitted pose was located 29.5 ms p50
+before the Present, the image 59 ms; `rendered_display - display_time` 0.001 ms, i.e. the layer claimed the pose of its own display time
+while its image was a frame old). User reports: "head turn still provides unstable image", "same for walking".
+
+Fix (`src/alternate_eye.hpp` `paired_views_promotable` / `paired_slot_to_promote`, `src/dxgi_probe.cpp`): the paired and perf-mono Setups
+record their view(s) in the same `PendingViews` alternate mode uses, keyed to display frame F+2, and the Present promotes the slot recorded
+for it (`record_rendered_view`). A Present without its own slot (a Setup that bailed, a recentre since) promotes the latest Setup's slot,
+exactly the old submission for that frame, counted in status `layer_pose_sync.fallbacks`; with neither it is untracked as before. Knob
+`build/no-layer-pose-sync` (launcher row `layer-pose-sync`, kind disable) restores the Setup-time record line for line. Alternate mode is
+untouched. Tests: `tests/layer_pose_sync_check.cpp` (both glues against the F+2 engine model: the Setup-time record is one frame ahead on
+every Present, sync is exact; 8/8 header mutants killed: depth 0/2, promotable mask/epoch/slot, latest-before-own, no fallback, take ignoring
+the frame), `tests/layer_pose_sync_routing_check.py`, `tests/alt_pose_trace_check.py` (the trace checker's paired join). The pose trace
+(`build/alt-pose-trace`) now works in every eye mode and `tools/alt_pose_trace_check.py` names a layer carrying the next Setup's pose
+`layer_pose_is_the_next_setup`, with the layer-vs-image pose error in degrees and mm; scenario `head_turn_walk` moves the head every frame
+(a static head cannot show the skew). Sim numbers: `.superpowers/sdd/2026-10-21-alternate-eye-f/paired-skew-report.md`.
+
+Next candidate, not changed: the prediction horizon. The Setup locates for `predictedDisplayTime + period` but its image shows two
+periods later (paired: one period short; alternate: fresh eye one, stale eye two; headset session 3 `rendered_display - display_time`
+p50 -22 ms). Rotation is now corrected by the compositor; translation (walking 1.5 m/s x 30 ms = 4.5 cm) is not.
+
 ### Alternate eye and temporal AA (plan F task 3, path B)
 
 Decision: alternate-eye mode forces temporal AA off (the "off, SMAA row only" mode 0), whatever the saved preference or settings panel asks

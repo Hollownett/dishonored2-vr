@@ -32,10 +32,10 @@ static Run run_pipeline(bool sync, const Scenario& sc) {
         const std::uint64_t counter = present - 1;   // the Present counter during the interval that ends at this Present
         // the Setup of that interval: both eyes from the locate made at Present `counter`, shown at Present counter+2 (the engine, literally)
         if (sc.setup_ok[counter]) {
-            image[counter + 2] = next_pose;
+            image[counter + 2] = next_pose;   // the engine, literally: shown two Presents after the counter value the Setup saw
             for (int e = 0; e < 2; ++e) {
                 const View view{next_pose};
-                if (sync) pending.record(counter + 2, e, view, sc.epoch[counter], 0, 0);
+                if (sync) pending.record(alternate_display_frame(counter), e, view, sc.epoch[counter], 0, 0);   // the glue's belief (depth 1 = F+2)
                 else {rendered_views[static_cast<std::size_t>(e)] = view; rendered_mask |= 1u << e;}
             }
             ++next_pose;
