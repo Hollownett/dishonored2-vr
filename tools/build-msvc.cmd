@@ -917,6 +917,10 @@ cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT /Isrc tests\hand_clamp_check.
 if not "%errorlevel%"=="0" exit /b 1
 build\hand_clamp_check.exe
 if not "%errorlevel%"=="0" exit /b 1
+cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT /Isrc tests\held_clamp_check.cpp /Fo:build\held_clamp_check.obj /Fe:build\held_clamp_check.exe
+if not "%errorlevel%"=="0" exit /b 1
+build\held_clamp_check.exe
+if not "%errorlevel%"=="0" exit /b 1
 cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT /Isrc tests\hand_reach_check.cpp /Fo:build\hand_reach_check.obj /Fe:build\hand_reach_check.exe
 if not "%errorlevel%"=="0" exit /b 1
 build\hand_reach_check.exe
