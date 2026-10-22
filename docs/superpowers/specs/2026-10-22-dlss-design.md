@@ -4,6 +4,8 @@
 Goal: optional paired-eye DLAA first, then DLSS Quality, preserving accepted locomotion, turning, AA modes 0..6, and existing fallback rendering.
 No implementation, builds, GPU probes, simulations, game sessions, or headset claims accompany this document.
 
+Existing game integrations: [Luma Framework and Dishonored2GraphicalUpgrade](../../existing-dishonored2-dlss.md). Luma's public D2 implementation is the first reference for native bindings, jitter/MV conversion and deferred scheduling; its default SR-instance use does not establish our required per-eye histories. Compare its mappings with current VR resources before adding new engine integration; no existing injector compatibility is assumed.
+
 ## Integration and distribution boundary
 
 Pin NVIDIA DLSS SDK `9981c6350dc58c0ce21f024fd65e31e851c31689` (310.9.16), with a hashed source/license/header/library manifest.
