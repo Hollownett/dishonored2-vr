@@ -337,6 +337,46 @@ HEAD 9e50b37. Run folders: `~/d2vr-test-builds/sim-runs/20261021T221957` (M0) an
   counters (9240 alternated frames, one view per frame, the two layers submitted every frame). A per-frame eye capture would need a new probe hook.
 - Not measured: the comfort of a one-frame interocular delay (Pulfrich-style shimmer). Only the headset decides.
 
+### Double vision in performance mode: the engine pipeline is one frame deep (fixed 2026-10-22)
+
+Headset session 2 (2026-10-22, performance mode on, 3576 alternated frames, 0 fallbacks): "у меня в глазах двоилось" (double vision).
+Root cause: the engine renders a view one Present after the mod's Setup hook wrote it (findings §1; `NativeEyeSources` matches a Begin only
+against the Setup published one Present earlier, which is why `mono_eye_frame`/`alt_head_stamp` could both equal the Present number while
+describing different views). Task 1 stamped the Setup made while the counter read F for Present F+1, but its image is on screen at Present
+F+2. With the eye flipping every frame, the image of eye k always landed in swapchain 1-k, and the kept copy inherited the swap: a
+pseudo-stereo pair, consistently reversed, which the eyes cannot fuse. The pose submitted with it was that other eye's own pose, so nothing in
+the per-frame checks could see it; only the images could.
+
+Evidence from the existing sim runs (`tools`-free check, `xr-t<sec>-left/right.rgba` pairs, central band, best horizontal alignment of the
+right image against the left): M0 paired `20261021T221957` +88 px at every sample from t=50 s; M2 alternate `20261021T222320` and
+`20261021T230548` -96 px at the same samples. Same magnitude, opposite sign: swapped eyes.
+
+Fix (`src/alternate_eye.hpp`, `src/dxgi_probe.cpp`, `src/game_xr.hpp`): everything is keyed to the DISPLAY frame of an image
+(`alternate_display_frame(F) = F+2`). A Setup's view is recorded in `PendingViews` for that frame and promoted into GameXr at that Present
+(`record_rendered_view`), so the layer carries exactly the pose and FOV the image was rendered with; the Present-time readiness comes from the
+slot recorded for the Present (`alternate_present_readiness`), never from the view count the engine prepared since (that is the next frame's);
+the planner plans the display frame two Presents ahead and counts the Setup already in flight (`AlternateEye::eye_for_frame`). A side effect:
+the descriptor switch no longer drops a frame on each paired/single transition. Diagnostic knob `build/alt-pose-trace` writes
+`alt-pose-trace.csv` (per Setup: the view written and its display frame; per Begin: the pose in the view's render copy; per Present: the
+layers submitted); `python3 tools/alt_pose_trace_check.py alt-pose-trace.csv` joins them. Tests: `tests/alternate_eye_check.cpp` drives the
+real helpers against an engine model that delivers Setup(F) at Present F+2 and shows that the task 1 stamping puts the other eye's image in
+every alternated frame; `tests/alt_pose_trace_check.py` does the same for the trace checker.
+
+Sim proof (`oil_tank_drop --lead 28 --seconds 120`, knobs `alternate-eye`, `native-gpu-timing`, `alt-pose-trace`; full report with the trace
+join sample in `.superpowers/sdd/2026-10-21-alternate-eye-f/double-vision-report.md`, scripts and anaglyph in
+`~/d2vr-test-builds/double-vision-2026-10-22/`):
+
+| | fixed build, run `20261022T093102` | control: `alternate_pipeline_depth=0` (the task 1 stamping), run `20261022T093710` |
+|---|---|---|
+| alternate_eye | on, alternated 11771, paired 2, fallbacks 0 | on, alternated 12155, paired 1, fallbacks 0 (as healthy-looking as the headset session) |
+| interval p50 / p95 | 7.89 / 8.69 ms (gpu_busy 0.95) | 7.57 / 8.21 ms (gpu_busy 0.94) |
+| `tools/alt_pose_trace_check.py` | 11781 tracked one-eye Presents, 0 mismatches | 12150 checked, 12149 with the Begin rendering another Setup whose eye is the other one |
+| right-vs-left disparity t=50..110 s | +68 px (the paired run's sign) | -96 px (reversed: swapped eyes) |
+
+The pose match holds per Present: the fresh layer carries the Setup's pose and FOV, the Begin's render copy carries that Setup's game
+position (eye-specific), the stale layer carries its own Setup's pose from exactly one Present earlier. The disparity magnitude is not
+comparable across runs (different viewpoint at the sample time); the sign is.
+
 ### Alternate eye and temporal AA (plan F task 3, path B)
 
 Decision: alternate-eye mode forces temporal AA off (the "off, SMAA row only" mode 0), whatever the saved preference or settings panel asks

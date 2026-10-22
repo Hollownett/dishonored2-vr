@@ -1,7 +1,10 @@
 """alternate-eye (plan F task 1): source-routing pins. With the knob off nothing changes (every new branch is gated on the knob / on
 GameXr::alternate_enabled, which defaults to off); with it on the one engine view is the parity eye with that eye's own pose and FOV,
 only that eye's swapchain is refreshed from it, the other eye is resubmitted from its kept image with its kept pose, and a disagreement
-falls back to paired for the session. The pure logic is tests/alternate_eye_check.cpp; the timing and images are a sim run."""
+falls back to paired for the session. The engine pipeline is one frame deep (2026-10-22 double vision): a Setup is recorded for the Present
+that SHOWS its image (alternate_display_frame), promoted into GameXr at that Present, and the plan is made for that display frame; the
+Present-time view count (the next frame's Setup) never gates a frame. The pure logic is tests/alternate_eye_check.cpp; the timing and
+images are a sim run, and tools/alt_pose_trace_check.py joins the alt-pose-trace.csv of one."""
 import re
 from pathlib import Path
 
@@ -49,21 +52,38 @@ assert 'build_layer_views(alt_effective_(),alternate_frame,pose_epoch()).ok' in 
 
 # probe: the plan is only a request; the view count decides; the logical eye is the frame parity, never the raw begin index
 head = between(probe, 'void prepare_head_view(void* view) noexcept {', 'void restore_head_view() noexcept')
-assert 'alt_eye=d2vr::AlternateEye::parity_eye(target)' in head
+assert 'const UINT64 alt_display=d2vr::alternate_display_frame(frames.load());' in head   # the Present that shows this Setup's image
+assert 'alt_eye=d2vr::AlternateEye::parity_eye(alt_display)' in head and 'parity_eye(target)' not in head
+assert 'const bool planned=(plan>>2)==alt_display;' in head
 assert 'alternate_fallback("alternate-eye: the engine view count disagreed with the plan for 30 frames")' in head
 assert '(*xr_views)[static_cast<std::size_t>(alt_eye)]' in head
-assert 'if(alt_eye>=0) {' in head and 'record_rendered_eye(static_cast<UINT>(alt_eye)' in head
-assert 'alt_head_stamp=((frames.load()+1)<<1)|static_cast<UINT64>(alt_eye);' in head
+# the view is recorded for its display frame, never written into GameXr at Setup (that would name it for the next Present)
+assert 'if(alternate_on() && stereo_active.load()) { // alternate-eye: this view' in head
+assert 'const int logical_eye=alt_eye>=0?alt_eye:eye;' in head
+assert 'game_xr->rendered_view(static_cast<UINT>(logical_eye),{render_fov.left,render_fov.right,render_fov.up,render_fov.down},cant?&rendered_orientation:nullptr)' in head
+assert 'alt_pending.record(alt_display,logical_eye,recorded,game_xr->pose_epoch(),game_xr->tracking_prediction_time(),game_xr->locate_cpu_time());' in head
+assert 'record_rendered_eye(static_cast<UINT>(alt_eye)' not in head and 'alt_head_stamp' not in probe
 assert 'raw_index' not in head
-# the Present: a one-view frame is ready only when the recorded view was made for THIS displayed frame
-assert '(!alternate_on() || ((alt_head_stamp.load()>>1)==number && !alt_nonfree))' in probe
-assert 'if(alternate_on() && views.size()==2) mono_path=false;' in probe
+# the Present: this Present shows the Setup recorded FOR it; the view count the engine prepared since is the next frame's and never gates it
+present_alt = between(probe, 'if(alternate_on()) {\n                                // alternate-eye: this Present shows', 'mono_path=alt_ready.single;')
+assert 'alt_slot=alt_pending.take(number);' in present_alt and 'views.size()' not in present_alt
+assert 'd2vr::alternate_present_readiness(alt_slot.has_value(),alt_slot?alt_slot->mask:0u,alt_slot?alt_slot->epoch:0,' in present_alt
+assert 'mono_eye_frame.load()==number,paired_left_ready && native_eye_pair.complete(),alt_nonfree);' in present_alt
+assert 'mono_path=alt_ready.single;pair_ready=alt_ready.ready;alt_fresh=alt_ready.fresh_eye;' in probe
+assert 'if(alternate_on() && pair_ready && alt_slot && game_xr)' in probe
+assert 'game_xr->record_rendered_view(slot_eye,alt_slot->view[slot_eye],alt_slot->display_time[slot_eye],alt_slot->locate_cpu_time[slot_eye]);' in probe
+assert probe.count('alt_pending.record(') == 1 and probe.count('alt_pending.take(') == 1 and 'alt_pending.reset();' in probe
+# knob-off: the old readiness line is untouched (the alternate branch is an else-less if before it)
+assert 'pair_ready=mono_path?(stereo_active.load() && views.size()==1 && mono_eye_frame.load()==number):' in probe
 assert 'game_xr->alternate_enabled=alternate_on();game_xr->alternate_fresh_eye=alt_fresh;game_xr->alternate_frame=number;' in probe
 assert probe.count('alternate_enabled') == 1 or 'game_xr->alternate_enabled' in probe
 
 # plan + descriptor + fallback + status
 after = between(probe, 'void alternate_after_present(', 'bool capture_texture(')
-assert 'alt_plan.rendered(eye,number)' in after and 'alt_plan.eye_for_frame(number+1,free_gameplay,authored,epoch_changed)' in after
+assert 'alt_plan.rendered(eye,number)' in after
+assert 'const UINT64 next_display=d2vr::alternate_display_frame(number);' in after   # the plan is for the frame the next Setup SHOWS
+assert 'alt_plan.eye_for_frame(next_display,free_gameplay,authored,epoch_changed)' in after and 'number+1' not in after
+assert 'alt_plan_stamp=(next_display<<2)|static_cast<UINT64>(next+1);' in after
 assert 'if(gameplay) alternate_select_descriptor(next<0);' in after
 sel = between(probe, 'void alternate_select_descriptor(bool paired) noexcept {', 'void alternate_after_present(')
 assert 'paired?(write_pointer() && write_separation()):(write_separation() && write_pointer())' in sel
@@ -72,11 +92,17 @@ assert 'compare_exchange_strong(expected,2)' in fb and 'mono_view_fallback(reaso
 assert 'alternate_fallback("alternate-eye: an eye image could not be kept")' in probe
 assert '\\"alternate_eye\\":{\\"state\\":' in probe and '\\"alternated\\":" << alt_alternated.load()' in probe
 assert '\\"paired\\":" << alt_paired.load()' in probe and '\\"fallbacks\\":" << alt_fallbacks.load()' in probe
-assert 'alternate_eye_check.cpp' in build and 'alternate_eye_knob_check.py' in build
+assert 'alternate_eye_check.cpp' in build and 'alternate_eye_knob_check.py' in build and 'alt_pose_trace_check.py' in build
+# GameXr: the promoted view is exactly the one the Setup wrote (pose, FOV, canted orientation, locate times)
+assert 'XrView rendered_view(UINT eye,XrFovf rendered_fov,const XrQuaternionf* rendered_orientation=nullptr) const {' in xr
+assert 'void record_rendered_view(UINT eye,const XrView& view,XrTime display_time,std::int64_t locate_cpu) {' in xr
+assert 'rendered_views_[eye]=view;rendered_mask_|=1u<<eye;' in xr
+# the pose trace is a diagnostic: read once in StartProbe, alternate-eye on only
+assert probe.count('L"alt-pose-trace"') == 1 and 'alt_pose_trace_state=fs::exists(root/L"build"/L"alt-pose-trace")?1:0;' in probe
+assert 'static bool alt_pose_trace_on() noexcept {return alt_pose_trace_state.load()==1 && alternate_on();}' in probe
 # fix round 1: authored / settings are read at the Present that submits the frame, not from the lagging plan; every gate is the tested function
 assert 'const bool alt_nonfree=alternate_on() && !d2vr::alternate_single_view_allowed(authored_camera,game_xr && game_xr->settings_open());' in probe
-assert '((alt_head_stamp.load()>>1)==number && !alt_nonfree)' in probe
-assert 'const int alt_fresh=d2vr::alternate_fresh_eye(alternate_on(),mono_path,pair_ready,alt_head_stamp.load());' in probe
+assert 'std::optional<d2vr::PendingViews<XrView>::Slot> alt_slot;int alt_fresh=-1;' in probe
 assert 'alternate_after_present(number,gameplay,d2vr::alternate_free_gameplay(gameplay,game_xr->settings_open()),authored_camera,alt_fresh);' in probe
 assert 'if(alt_mismatch_run.note(mismatch)) alternate_fallback("alternate-eye: the engine view count disagreed with the plan for 30 frames");' in head and 'if(mismatch && mono)' in head
 assert 'return alternate_pair_ready(rendered_mask_,alternate_fresh_eye,' in xr
@@ -90,4 +116,4 @@ assert 'alternate_smaa_applies(alternate_enabled,settings_.temporal_aa())' in xr
 assert 'const std::size_t eye_slot=d2vr::alternate_state_slot(alt_eye,eye);' in head
 assert 'fsr_vfov[eye_slot]=' in head and 'jitter_counter[eye_slot]=counter;' in head and 'auto& e=eye_jitter[eye_slot];' in head
 assert 'fsr_vfov[static_cast<std::size_t>(eye)]' not in head and 'jitter_counter[static_cast<std::size_t>(eye)]' not in head
-print('PASS: alternate-eye knob routing (gating, own-eye pose, kept image, view-count truth, fallback, status)')
+print('PASS: alternate-eye knob routing (gating, own-eye pose, display-frame records, kept image, view-count truth, fallback, status)')

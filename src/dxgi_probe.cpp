@@ -1327,13 +1327,42 @@ void mono_view_fallback(const char* reason) noexcept;
 static std::atomic<int> alt_eye_state{0};
 static std::atomic<UINT64> alt_alternated{0},alt_paired{0},alt_fallbacks{0}; // submitted tracked frames with one fresh eye; submitted tracked free-gameplay frames with both eyes fresh; session fallbacks
 static d2vr::AlternateMismatch alt_mismatch_run; // consecutive plan/observation disagreements (prepare_head_view, under log_mutex)
-static std::atomic<UINT64> alt_head_stamp{0}; // (displayed frame<<1)|eye of the view recorded by prepare_head_view
-static std::atomic<UINT64> alt_plan_stamp{0}; // (displayed frame<<2)|(planned eye+1), planned in the Present before the frame renders; 0 = none
+// The views each Setup wrote, keyed by the display frame that shows its image (alternate_display_frame: the engine pipeline is one frame
+// deep, so a Setup made while the counter reads F is on screen at Present F+2). Promoted into GameXr at that Present. Present thread only
+// (Setup under log_mutex, the Present hook under log_mutex).
+static d2vr::PendingViews<XrView> alt_pending;
+static std::atomic<UINT64> alt_plan_stamp{0}; // (display frame<<2)|(planned eye+1), planned at the Present two frames before the image shows; 0 = none
 static d2vr::AlternateEye alt_plan;           // render thread (Present hook) only
 static UINT64 alt_epoch_seen{};
 static UINT64 alt_per_frame_done{}; // displayed frame whose per-frame mod work already ran (prepare_head_view, under log_mutex)
 static bool alt_descriptor_paired{};          // which descriptor is installed right now (render thread only)
 static bool alternate_on() noexcept {return alt_eye_state.load()==1 && mono_view_state.load()==1;}
+// Diagnostic (knob build/alt-pose-trace, alternate-eye on only): alt-pose-trace.csv with, per Setup, the view the engine was given and the
+// display frame it renders (event setup: presented = counter at Setup, display, eye, XR pose, FOV, game position and forward axis written);
+// per matched Begin the pose in the view's render copy, the one the engine consumes (event begin: presented = counter at Begin, display =
+// the Present that ends its interval, slot eye, game position and forward axis); per submitted layer its pose and FOV (event present:
+// display = the Present, eye, pose, FOV, tracked, fresh eye). tools/alt_pose_trace_check.py joins them: the layer of the fresh eye must
+// carry the pose of the Setup whose image the Begin rendered, and that Setup's eye must be the fresh eye.
+static std::atomic<int> alt_pose_trace_state{0};static std::ofstream alt_pose_trace_csv;static std::mutex alt_pose_trace_mutex;static std::atomic<int> alt_pose_trace_rows{0}; // state read in StartProbe
+static bool alt_pose_trace_on() noexcept {return alt_pose_trace_state.load()==1 && alternate_on();}
+static void alt_pose_trace_row(const std::string& row) noexcept {
+    try {
+        std::lock_guard<std::mutex> trace_lock(alt_pose_trace_mutex);
+        if(alt_pose_trace_rows.load()>=60000) return;
+        if(!alt_pose_trace_csv.is_open()) {
+            alt_pose_trace_csv.open(output_directory/L"alt-pose-trace.csv");
+            alt_pose_trace_csv<<"event,presented,display,eye,px,py,pz,qx,qy,qz,qw,fl,fr,fu,fd,gx,gy,gz,bx,by,bz,tracked,fresh\n";
+        }
+        alt_pose_trace_csv<<row<<'\n';
+        if(++alt_pose_trace_rows%64==0) alt_pose_trace_csv.flush();
+    } catch(...) {}
+}
+static std::string alt_pose_trace_pose(const XrPosef& pose,const XrFovf& fov) {
+    std::ostringstream o;o.precision(9);
+    o<<pose.position.x<<','<<pose.position.y<<','<<pose.position.z<<','<<pose.orientation.x<<','<<pose.orientation.y<<','<<pose.orientation.z<<','<<pose.orientation.w
+     <<','<<fov.angleLeft<<','<<fov.angleRight<<','<<fov.angleUp<<','<<fov.angleDown;
+    return o.str();
+}
 void alternate_fallback(const char* reason) noexcept;
 static UINT64 stereo_start_frame{};
 static ULONGLONG stereo_start_tick{};
@@ -3514,6 +3543,15 @@ void observe_eye_begin(void* view) noexcept {
             }
             if(eye>=0) ++eye_begin_matches;
             if(eye==0 && mono_view_state.load()==1) mono_eye_frame=frames.load()+1; // the Present that ends this frame is frames+1
+            if(eye>=0 && alt_pose_trace_on()) { // the pose the engine renders this view with: its render copy, written by the Setup one Present ago
+                std::array<float,3> copy_position{};std::array<float,9> copy_basis{};
+                if(read_self(address+render_copy_offset+0xa8,copy_position.data(),12) && read_self(address+render_copy_offset+0xcc,copy_basis.data(),36)) {
+                    std::ostringstream row;row.precision(9);
+                    row<<"begin,"<<frames.load()<<','<<d2vr::alternate_begin_display_frame(frames.load())<<','<<eye<<",,,,,,,,,,,,"
+                       <<copy_position[0]<<','<<copy_position[1]<<','<<copy_position[2]<<','<<copy_basis[0]<<','<<copy_basis[1]<<','<<copy_basis[2]<<",,";
+                    alt_pose_trace_row(row.str());
+                }
+            }
             if(native_eye_capture_requested && same_context && stereo_active.load() &&
                native_eye_pair.begin(eye) && paired_left && paired_backbuffer) {
                 auto context=gpu_game_context.load(std::memory_order_acquire);
@@ -4039,15 +4077,18 @@ void prepare_head_view(void* view) noexcept {
         if(!input || native.size()!=(mono?1u:2u)) {native_left_aim.clear();native_weapon_attachment.clear();return;}
         // alternate-eye: the plan for this displayed frame is only a request. The observed view count decides: two views = a paired frame (taken above as
         // the paired path), one view = the parity eye. A disagreement is dropped (no record = nothing presented) and counted; a sustained run falls back.
+        // The frame this Setup renders is the one that SHOWS its image: the engine pipeline is one frame deep, so that is the Present after the next
+        // one (alternate_display_frame), and the eye, the plan and the recorded view are all keyed to it.
         int alt_eye=-1;
+        const UINT64 alt_display=d2vr::alternate_display_frame(frames.load());
         if(alternate_on() && stereo_active.load()) {
-            const UINT64 target=frames.load()+1,plan=alt_plan_stamp.load();
-            const bool planned=(plan>>2)==target;
+            const UINT64 plan=alt_plan_stamp.load();
+            const bool planned=(plan>>2)==alt_display;
             const bool wanted_paired=planned && (plan&3u)==0,wanted_single=planned && (plan&3u)!=0;
             const bool mismatch=!mono ? wanted_single : wanted_paired;
             if(alt_mismatch_run.note(mismatch)) alternate_fallback("alternate-eye: the engine view count disagreed with the plan for 30 frames");
             if(mismatch && mono) {native_left_aim.clear();native_weapon_attachment.clear();return;}
-            if(mono) alt_eye=d2vr::AlternateEye::parity_eye(target);
+            if(mono) alt_eye=d2vr::AlternateEye::parity_eye(alt_display);
         }
         int eye=-1;
         for(int i=0;i<static_cast<int>(native.size());++i) {
@@ -5175,9 +5216,17 @@ void prepare_head_view(void* view) noexcept {
         }
         const XrQuaternionf rendered_orientation{static_cast<float>(orientation.x),static_cast<float>(orientation.y),static_cast<float>(orientation.z),static_cast<float>(orientation.w)};
         ++head_writes;
-        if(alt_eye>=0) { // alternate-eye: this eye's own pose and FOV, recorded for this eye only; the other eye keeps its kept record
-            game_xr->record_rendered_eye(static_cast<UINT>(alt_eye),{render_fov.left,render_fov.right,render_fov.up,render_fov.down},cant?&rendered_orientation:nullptr);
-            alt_head_stamp=((frames.load()+1)<<1)|static_cast<UINT64>(alt_eye);
+        if(alternate_on() && stereo_active.load()) { // alternate-eye: this view (the parity eye's own pose and FOV, or one of a paired frame) is recorded for
+            // the Present that shows its image and promoted into GameXr there; until then the other eye keeps its kept record
+            const int logical_eye=alt_eye>=0?alt_eye:eye;
+            const XrView recorded=game_xr->rendered_view(static_cast<UINT>(logical_eye),{render_fov.left,render_fov.right,render_fov.up,render_fov.down},cant?&rendered_orientation:nullptr);
+            alt_pending.record(alt_display,logical_eye,recorded,game_xr->pose_epoch(),game_xr->tracking_prediction_time(),game_xr->locate_cpu_time());
+            if(alt_pose_trace_on()) {
+                std::ostringstream row;row.precision(9);
+                row<<"setup,"<<frames.load()<<','<<alt_display<<','<<logical_eye<<','<<alt_pose_trace_pose(recorded.pose,recorded.fov)
+                   <<','<<position[0]<<','<<position[1]<<','<<position[2]<<','<<basis[0]<<','<<basis[1]<<','<<basis[2]<<",,";
+                alt_pose_trace_row(row.str());
+            }
         } else if(mono) { // the one image serves both projection layers: same centre pose, same (union) FOV, so rendered_mask_ reaches 3
             const XrFovf fov{render_fov.left,render_fov.right,render_fov.up,render_fov.down};
             game_xr->record_rendered_eye(0,fov,&rendered_orientation,&xr_eye.pose.position);
@@ -5428,8 +5477,11 @@ void alternate_after_present(UINT64 number,bool gameplay,bool free_gameplay,bool
     const UINT64 epoch=game_xr->pose_epoch();
     const bool epoch_changed=epoch!=alt_epoch_seen;
     alt_epoch_seen=epoch;
-    const int next=alt_plan.eye_for_frame(number+1,free_gameplay,authored,epoch_changed);
-    alt_plan_stamp=((number+1)<<2)|static_cast<UINT64>(next+1);
+    // The descriptor installed now shapes the Setup made before the next Present, whose image shows one Present later still (the engine pipeline
+    // is one frame deep): the plan is for that display frame.
+    const UINT64 next_display=d2vr::alternate_display_frame(number);
+    const int next=alt_plan.eye_for_frame(next_display,free_gameplay,authored,epoch_changed);
+    alt_plan_stamp=(next_display<<2)|static_cast<UINT64>(next+1);
     if(gameplay) alternate_select_descriptor(next<0); // menus and loading keep whichever descriptor is installed
 }
 
@@ -5955,6 +6007,11 @@ void capture_xr_transfer(UINT eye,ID3D11Texture2D* source,ID3D11Texture2D* desti
         xr_capture_epoch=game_xr->pose_epoch();xr_transfer_mask=0;xr_menu_transfer_mask=0;xr_tracked_transfer_frames=0;
     }
     if(eye==0 && gameplay && tracked) ++xr_tracked_transfer_frames;
+    if(gameplay && eye<2 && alt_pose_trace_on()) { // the layer as submitted for this Present
+        std::ostringstream row;row.precision(9);
+        row<<"present,"<<frames.load()<<','<<frames.load()<<','<<eye<<','<<alt_pose_trace_pose(layer.pose,layer.fov)<<",,,,,,,"<<(tracked?1:0)<<','<<(game_xr?game_xr->alternate_fresh_eye:-1);
+        alt_pose_trace_row(row.str());
+    }
     // Avoid capturing the first tracked view while temporal buffers still hold
     // the desktop/startup projection. Count submitted pairs, not idle Presents.
     auto& mask=gameplay?xr_transfer_mask:xr_menu_transfer_mask;
@@ -6465,6 +6522,7 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                         // alternate-eye: authored / settings state is read here, at this Present (the plan lags a frame); a one-view frame in it is dropped
                         const bool alt_nonfree=alternate_on() && !d2vr::alternate_single_view_allowed(authored_camera,game_xr && game_xr->settings_open());
                         bool pair_ready{},mono_path{};
+                        std::optional<d2vr::PendingViews<XrView>::Slot> alt_slot;int alt_fresh=-1; // alternate-eye: the Setup views this Present shows, the one eye they refresh
                         {
                             std::lock_guard<std::mutex> gpu_lock(gpu_mutex);
                             if(!paired_backbuffer) {
@@ -6476,9 +6534,17 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                 if(FAILED(device->CreateTexture2D(&texture,nullptr,&paired_left))) throw std::runtime_error("Cannot allocate paired eye texture");
                             }
                             mono_path=mono_view_state.load()==1;
-                            if(alternate_on() && views.size()==2) mono_path=false; // alternate-eye paired frame: the existing paired readiness
+                            if(alternate_on()) {
+                                // alternate-eye: this Present shows the image of the Setup recorded FOR it, one engine frame ago (the views the engine prepared
+                                // since are the next frame's). Its mask says whether that was one view (ready when its Begin was matched for this Present and
+                                // the frame is free gameplay) or a pair (ready when both Begins completed and the left image was copied out).
+                                alt_slot=alt_pending.take(number);
+                                const auto alt_ready=d2vr::alternate_present_readiness(alt_slot.has_value(),alt_slot?alt_slot->mask:0u,alt_slot?alt_slot->epoch:0,
+                                    game_xr?game_xr->pose_epoch():0,stereo_active.load(),mono_eye_frame.load()==number,paired_left_ready && native_eye_pair.complete(),alt_nonfree);
+                                mono_path=alt_ready.single;pair_ready=alt_ready.ready;alt_fresh=alt_ready.fresh_eye;
+                            } else
                             // perf-mono-view: ready when this frame's one view was matched at its begin (eye 0, by address) and the engine prepared exactly one
-                            pair_ready=mono_path?(stereo_active.load() && views.size()==1 && mono_eye_frame.load()==number && (!alternate_on() || ((alt_head_stamp.load()>>1)==number && !alt_nonfree))):
+                            pair_ready=mono_path?(stereo_active.load() && views.size()==1 && mono_eye_frame.load()==number):
                                 paired_left_ready && views.size()==2 && (native_eye_capture_requested?native_eye_pair.complete():
                                 (paired_binds_per_eye && paired_buffer_binds==paired_binds_per_eye*2));
                             if(pair_ready && native_eye_capture_requested && !mono_path) ++native_eye_pairs;
@@ -6488,8 +6554,10 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                             ++paired_bind_histogram[std::min<UINT>(paired_buffer_binds,15)];
                             paired_buffer_binds=0;paired_left_ready=false;native_eye_pair.reset();
                         }
-                        const int alt_fresh=d2vr::alternate_fresh_eye(alternate_on(),mono_path,pair_ready,alt_head_stamp.load()); // the one eye rendered for this Present
-                        if(mono_path && gameplay && stereo_active.load()) { // a sustained miss in gameplay means the one view cannot be named: pair again
+                        if(alternate_on() && pair_ready && alt_slot && game_xr) // the promoted views are this Present's rendered views: the layer of each refreshed eye carries them
+                            for(UINT slot_eye=0;slot_eye<2;++slot_eye) if(alt_slot->mask&(1u<<slot_eye))
+                                game_xr->record_rendered_view(slot_eye,alt_slot->view[slot_eye],alt_slot->display_time[slot_eye],alt_slot->locate_cpu_time[slot_eye]);
+                        if((mono_path || alternate_on()) && gameplay && stereo_active.load()) { // a sustained miss in gameplay means the one view cannot be named: pair again
                             if(pair_ready) mono_view_misses=0;
                             else if(++mono_view_misses>=180) mono_view_fallback("perf-mono-view: the one engine view was not matched for 180 gameplay frames");
                         }
@@ -8445,7 +8513,9 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
                 if(xr_requested && head_requested && paired_requested && eye_boundary_requested && native_eye_capture_requested && !single_eye_requested) mono_view_state=1;
                 else {mono_view_state=2;note_recoverable("perf-mono-view needs head-tracked paired XR with native eye capture; staying paired");}
             }
-            alt_eye_state=0;alt_alternated=0;alt_paired=0;alt_fallbacks=0;alt_mismatch_run.reset();alt_head_stamp=0;alt_plan_stamp=0;alt_epoch_seen=0;alt_per_frame_done=0;alt_descriptor_paired=false;alt_plan.reset();
+            alt_eye_state=0;alt_alternated=0;alt_paired=0;alt_fallbacks=0;alt_mismatch_run.reset();alt_pending.reset();alt_plan_stamp=0;alt_epoch_seen=0;alt_per_frame_done=0;alt_descriptor_paired=false;alt_plan.reset();
+            alt_pose_trace_rows=0;{std::lock_guard<std::mutex> trace_lock(alt_pose_trace_mutex);if(alt_pose_trace_csv.is_open()) alt_pose_trace_csv.close();}
+            alt_pose_trace_state=fs::exists(root/L"build"/L"alt-pose-trace")?1:0; // diagnostic: alt-pose-trace.csv (alternate-eye on only)
             if(fs::exists(root/L"build"/L"alternate-eye")) { // plan F task 1: alternate-eye rides on the mono-view path (same prerequisites)
                 if(xr_requested && head_requested && paired_requested && eye_boundary_requested && native_eye_capture_requested && !single_eye_requested) {alt_eye_state=1;mono_view_state=1;}
                 else {alt_eye_state=2;note_recoverable("alternate-eye needs head-tracked paired XR with native eye capture; staying paired");}

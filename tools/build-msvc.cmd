@@ -338,6 +338,9 @@ if not errorlevel 0 goto build_failed
 python tests\alternate_eye_routing_check.py
 if errorlevel 1 goto build_failed
 if not errorlevel 0 goto build_failed
+python tests\alt_pose_trace_check.py
+if errorlevel 1 goto build_failed
+if not errorlevel 0 goto build_failed
 build\comfort_meter_check.exe
 if not "%errorlevel%"=="0" exit /b 1
 build\comfort_vignette_check.exe

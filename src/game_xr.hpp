@@ -1514,6 +1514,19 @@ public:
                  std::max(v[0].fov.angleUp,v[1].fov.angleUp),std::min(v[0].fov.angleDown,v[1].fov.angleDown)};
         return out;
     }
+    // alternate-eye: the view an eye image is rendered with (this frame's located view with the rendered FOV and, for a canted eye, the
+    // rendered orientation). The probe records it in its PendingViews for the Present that shows the image (one engine frame later than
+    // the next Present) and promotes it there with record_rendered_view, so the layer carries exactly the pose and FOV of its image.
+    XrView rendered_view(UINT eye,XrFovf rendered_fov,const XrQuaternionf* rendered_orientation=nullptr) const {
+        XrView view=views_[eye];view.fov=rendered_fov;
+        if(rendered_orientation) view.pose.orientation=*rendered_orientation;
+        return view;
+    }
+    std::int64_t locate_cpu_time() const noexcept {return locate_cpu_time_;}
+    void record_rendered_view(UINT eye,const XrView& view,XrTime display_time,std::int64_t locate_cpu) {
+        rendered_views_[eye]=view;rendered_mask_|=1u<<eye;
+        rendered_display_times_[eye]=display_time;rendered_locate_cpu_times_[eye]=locate_cpu;
+    }
     // rendered_position: mono only (both eyes record the same centre position; the orientation comes through rendered_orientation).
     void record_rendered_eye(UINT eye,XrFovf rendered_fov,const XrQuaternionf* rendered_orientation=nullptr,const XrVector3f* rendered_position=nullptr) {
         rendered_views_[eye]=views_[eye];rendered_views_[eye].fov=rendered_fov;rendered_mask_|=1u<<eye;

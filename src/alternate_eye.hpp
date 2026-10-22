@@ -10,13 +10,79 @@
 //                      records are valid, from the same pose epoch, and no older than max_age frames.
 // Eye identity is never taken from the engine's raw begin index (it is 2 for both views in XR): the view is named by address
 // (EyeStamps in frame_split.hpp) and the logical eye is the alternation parity of the frame.
+//
+// The engine pipeline is ONE frame deep (framerate findings §1; NativeEyeSources matches a Begin only against the Setup published one
+// Present earlier): a view Setup prepared while the Present counter reads F is begun in the next interval and its image is on screen at
+// Present F+2, not F+1. Everything here is therefore indexed by the DISPLAY frame of an image (alternate_display_frame), the Setup's views
+// wait in PendingViews until that Present promotes them, and the planner knows that the Setup it asked for last is still in flight.
+// (2026-10-22 headset session: task 1 stamped the Setup for Present F+1, so with the eye flipping every frame each swapchain received the
+// OTHER eye's image, a pseudo-stereo pair the eyes cannot fuse: "double vision". The sim's left/right disparity had the reversed sign.)
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 
 namespace d2vr {
 
 inline constexpr std::uint64_t alternate_max_age = 2; // an eye image older than this many displayed frames is never submitted
+inline constexpr std::uint64_t alternate_pipeline_depth = 1; // Presents between a view Setup's interval and the one that shows its image
+
+// The displayed frame (Present number) that shows the image of a view Setup made while the Present counter read `presented`.
+inline std::uint64_t alternate_display_frame(std::uint64_t presented) noexcept {return presented + 1 + alternate_pipeline_depth;}
+// The displayed frame of a Begin made while the counter read `presented`: the Present that ends its interval.
+inline std::uint64_t alternate_begin_display_frame(std::uint64_t presented) noexcept {return presented + 1;}
+
+// The views the engine was given for display frames not yet presented. One slot per display-frame parity is enough: the Setup for frame D
+// is made in the interval that ends at Present D-1 and read at Present D, while the Setup for D+1 (made after Present D-1) lands in the slot
+// Present D-1 has already consumed. A slot recorded for a frame that is never promoted is simply overwritten two Setups later.
+template <class View>
+class PendingViews {
+public:
+    struct Slot {
+        std::uint64_t display{};             // 0 = empty
+        unsigned mask{};                     // bit per eye recorded (1 or 2: a one-view frame; 3: a paired frame)
+        std::uint64_t epoch{};               // pose epoch the views were located in
+        std::array<View, 2> view{};
+        std::array<std::int64_t, 2> display_time{}, locate_cpu_time{};
+    };
+    void record(std::uint64_t display, int eye, const View& view, std::uint64_t epoch, std::int64_t display_time, std::int64_t locate_cpu) noexcept {
+        if ((eye != 0 && eye != 1) || display == 0) return;
+        Slot& slot = slots_[display & 1u];
+        if (slot.display != display) slot = Slot{};
+        const auto e = static_cast<std::size_t>(eye);
+        slot.display = display; slot.epoch = epoch; slot.mask |= 1u << e;
+        slot.view[e] = view; slot.display_time[e] = display_time; slot.locate_cpu_time[e] = locate_cpu;
+    }
+    // The Setup views recorded for display frame `display`, or nothing when no Setup was recorded for it (loading, a menu, a dropped Setup).
+    std::optional<Slot> take(std::uint64_t display) const noexcept {
+        const Slot& slot = slots_[display & 1u];
+        if (slot.display != display || slot.mask == 0) return std::nullopt;
+        return slot;
+    }
+    void reset() noexcept {slots_ = {};}
+private:
+    std::array<Slot, 2> slots_{};
+};
+
+// The one eye a Setup mask rendered: 0 or 1 for a one-view frame, -1 for a paired frame (3) or nothing (0).
+inline int alternate_mask_fresh_eye(unsigned mask) noexcept {return mask == 1u ? 0 : mask == 2u ? 1 : -1;}
+
+// Present-side readiness of a display frame, from the Setup slot recorded for it and what the glue observed in the interval before this
+// Present. A one-view frame is ready when its view's Begin was matched for this Present (mono_begin_matched) and the frame is free
+// gameplay (not authored, not the settings panel); a paired frame when both Begins completed and the left image was copied out
+// (pair_complete). The slot's pose epoch must still be current (a recentre since the Setup drops the frame). `single` is reported
+// whether or not the frame is ready (the mono miss counter); `fresh_eye` is the one eye to refresh, -1 when paired or not ready.
+struct AlternateReadiness {bool ready{}; bool single{}; int fresh_eye{-1};};
+inline AlternateReadiness alternate_present_readiness(bool have_slot, unsigned mask, std::uint64_t slot_epoch, std::uint64_t epoch, bool stereo_active,
+                                                      bool mono_begin_matched, bool pair_complete, bool nonfree) noexcept {
+    AlternateReadiness out;
+    if (!have_slot || mask == 0 || mask > 3u) return out;
+    out.single = mask != 3u;
+    if (slot_epoch != epoch || !stereo_active) return out;
+    out.ready = out.single ? (mono_begin_matched && !nonfree) : pair_complete;
+    if (out.ready) out.fresh_eye = alternate_mask_fresh_eye(mask);
+    return out;
+}
 
 // True when an image kept at `rendered_frame` may still be submitted at displayed frame `now`.
 inline bool alternate_image_fresh(std::uint64_t rendered_frame, std::uint64_t now) noexcept {
@@ -30,10 +96,6 @@ inline bool alternate_free_gameplay(bool gameplay, bool settings_open) noexcept 
 inline bool alternate_single_view_allowed(bool authored, bool settings_open) noexcept {return !authored && !settings_open;}
 // An eye image may be kept for later frames only if it was made in free gameplay (never a cut, takedown, menu or settings image).
 inline bool alternate_may_keep(bool gameplay, bool authored, bool settings_open) noexcept {return gameplay && !authored && !settings_open;}
-// The one eye rendered for this Present: the recorded view's eye when a one-view frame is ready, else -1 (paired / both eyes fresh).
-inline int alternate_fresh_eye(bool on, bool single_view_path, bool ready, std::uint64_t head_stamp) noexcept {
-    return on && single_view_path && ready ? static_cast<int>(head_stamp & 1u) : -1;
-}
 // Eyes whose view must have been recorded for this Present (bit per eye).
 inline unsigned alternate_need_mask(int fresh_eye) noexcept {return fresh_eye == 0 ? 1u : fresh_eye == 1 ? 2u : 3u;}
 inline bool alternate_pair_ready(unsigned rendered_mask, int fresh_eye, bool layers_ok) noexcept {
@@ -65,19 +127,23 @@ inline std::size_t alternate_state_slot(int logical_eye, int native_slot) noexce
 
 class AlternateEye {
 public:
-    // The eye (0 left, 1 right) the engine renders for `frame`, or -1 for a paired frame (both eyes rendered, both fresh).
+    // The eye (0 left, 1 right) the engine renders for display frame `frame`, or -1 for a paired frame (both eyes rendered, both fresh).
     // Alternates by parity (even frames left) only in free gameplay. Menus, loading, the settings panel and authored scenes
     // (gameplay false or authored true) are -1. After reset() or an epoch change, and whenever the eye that is NOT rendered
     // this frame could not be submitted (it would be stale), the frame is -1 too: one paired frame refreshes both eyes, then
     // alternation resumes. Idempotent per frame (a second call for the same frame returns the first answer).
+    // The plan is made one engine frame ahead (at Present frame-2, see alternate_display_frame), so the Setup planned last (for frame-1) is
+    // still in flight when this one is planned: it counts as refreshing its eye(s) at frame-1, provided the Present just made delivered an
+    // image (rendered() since the last plan). A Present that delivered nothing means the pipeline stalled, and only kept images count.
     int eye_for_frame(std::uint64_t frame, bool gameplay, bool authored, bool epoch_changed) noexcept {
         if (have_ && frame == last_frame_) return last_result_;
-        if (epoch_changed) clear_images();
+        if (epoch_changed) {clear_images(); have_ = false;}  // the in-flight Setup was located in the old epoch: its Present drops it
         int result = -1;
         if (gameplay && !authored) {
-            const int eye = static_cast<int>(frame & 1u);
+            const int eye = static_cast<int>(frame & 1u), other = 1 - eye;
+            const bool in_flight = have_ && last_frame_ + 1 == frame && (last_result_ < 0 || last_result_ == other) && delivered_;
             // The first free frame after a menu, cut, takedown or settings panel is paired: whatever images exist were made before or during it.
-            if (!refresh_ && can_submit(1 - eye, frame)) result = eye;
+            if (!refresh_ && (can_submit(other, frame) || in_flight)) result = eye;
             refresh_ = false;
         } else {
             refresh_ = true;
@@ -86,6 +152,7 @@ public:
         have_ = true;
         last_frame_ = frame;
         last_result_ = result;
+        delivered_ = false;
         return result;
     }
     // False when that eye's image is more than 2 frames old (or was never kept, or the index is not an eye).
@@ -94,12 +161,13 @@ public:
     }
     // An image for `eye` was kept at displayed frame `frame` (frame 0 is "never": frames start at 1).
     void rendered(int eye, std::uint64_t frame) noexcept {
-        if (eye == 0 || eye == 1) frame_[eye] = frame;
+        if (eye == 0 || eye == 1) {frame_[eye] = frame; delivered_ = true;}
     }
     void reset() noexcept {
         clear_images();
         have_ = false;
         refresh_ = true;
+        delivered_ = false;
         last_frame_ = 0;
         last_result_ = -1;
     }
@@ -113,6 +181,7 @@ private:
     int last_result_{-1};
     bool have_{};
     bool refresh_{true};
+    bool delivered_{};
 };
 
 template <class View>
