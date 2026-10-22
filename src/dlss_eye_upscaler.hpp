@@ -220,10 +220,11 @@ private:
     std::shared_ptr<Validation> validation_;
     std::shared_ptr<Core> core_;
     std::shared_ptr<Pair> active_;
-    Status status_;
+    Status status_, cached_status_;
     Desc last_request_;
     Paths last_paths_;
     ID3D11Device* last_device_{};
+    ID3D11DeviceContext* last_context_{};
     bool attempted_{};
     static bool same(const Desc& a, const Desc& b) noexcept {
         // Phase/jitter values change each rendered frame; the create contract uses
@@ -252,6 +253,24 @@ private:
             (d.colour == Format::rgba16_float || d.colour == Format::rgba8_unorm || d.colour == Format::r11g11b10_float) &&
             (d.output == Format::rgba16_float || d.output == Format::rgba8_unorm || d.output == Format::r11g11b10_float);
     }
+    // Returned SDK objects are not reference counted. Never adopt an alias to
+    // ANY live Core/Pair, including quarantined generations and another facade.
+    static bool map_owned(NVSDK_NGX_Parameter* value, const Pair* partial = nullptr, const Eye* receiving = nullptr) noexcept {
+        if (!value) return false;
+        for (const auto& weak : cores()) if (const auto core = weak.lock()) if (core->capability == value) return true;
+        for (const auto& pair : pairs()) if (pair) for (const auto& eye : pair->eyes)
+            if (eye.parameters == value) return true;
+        if (partial) for (const auto& eye : partial->eyes)
+            if (&eye != receiving && eye.parameters == value) return true;
+        return false;
+    }
+    static bool handle_owned(NVSDK_NGX_Handle* value, const Pair* partial, const Eye* receiving) noexcept {
+        if (!value) return false;
+        for (const auto& pair : pairs()) if (pair) for (const auto& eye : pair->eyes)
+            if (eye.handle == value) return true;
+        for (const auto& eye : partial->eyes) if (&eye != receiving && eye.handle == value) return true;
+        return false;
+    }
     static void collect_locked() noexcept {
         for (auto& p : pairs()) if (p && p->retired && (!p->attempted_gpu || p->gpu_safe) && p.use_count() == 1) p.reset();
     }
@@ -259,8 +278,9 @@ private:
         if (active_) { active_->retired = true; active_.reset(); }
         collect_locked();
     }
-    bool fail(Reason reason, NVSDK_NGX_Result result = NVSDK_NGX_Result_Success, int eye = -1) noexcept {
-        status_.reason = reason; status_.result = result; status_.eye = eye; return false;
+    bool fail(Reason reason, NVSDK_NGX_Result result = NVSDK_NGX_Result_Success, int eye = -1) {
+        status_.reason = reason; status_.result = result; status_.eye = eye;
+        cached_status_ = status_; return false;
     }
     static int flags(const Desc& d) noexcept {
         int f{};
@@ -293,27 +313,38 @@ public:
         std::lock_guard<std::mutex> lock(mutex()); auto result = status_;
         result.cleanup_result = cleanup_failure(); return result;
     }
-    bool ready() const { std::lock_guard<std::mutex> lock(mutex()); return active_ && !active_->retired; }
+    bool ready() const { std::lock_guard<std::mutex> lock(mutex()); return active_ && !active_->retired && status_.reason == Reason::none; }
     Lease lease() const { std::lock_guard<std::mutex> lock(mutex()); return Lease(active_); }
     // Serialized lifecycle point on the actual immediate context, outside recording.
     bool prepare(ID3D11Device* device, ID3D11DeviceContext* context, const Desc& desc, const Paths& paths) {
         std::lock_guard<std::mutex> lock(mutex());
-        if (attempted_ && last_device_ == device && same(last_request_, desc) &&
-            last_paths_.provider_directory == paths.provider_directory && last_paths_.cache_directory == paths.cache_directory) {
-            if (active_ && !active_->retired) return true;
-            // Preserve the original failure and result; do not replace it with a vague retry reason.
+        // Context validation precedes EVERY cached-success/failure decision. An
+        // invalid incoming boundary must not inherit a valid older preparation.
+        if (!calls_.complete() || !validation_) return fail(Reason::invalid_calls);
+        const auto context_reason = validation_->context(device, context);
+        if (context_reason != Reason::none || (core_ && core_->device == device && core_->context != context)) {
+            // This rejected boundary is not an attempted SDK request and must not
+            // replace the cached diagnostic/retry identity of the last valid one.
+            status_ = {};
+            status_.reason = context_reason != Reason::none ? context_reason : Reason::invalid_context;
             return false;
         }
-        attempted_ = true; last_device_ = device; last_request_ = desc; last_paths_ = paths;
+        if (attempted_ && last_device_ == device && last_context_ == context && same(last_request_, desc) &&
+            last_paths_.provider_directory == paths.provider_directory && last_paths_.cache_directory == paths.cache_directory) {
+            status_ = cached_status_;
+            if (active_ && !active_->retired && core_ && core_->context == context) {
+                status_.reason = Reason::none; return true;
+            }
+            // Preserve the original SDK failure and result without an init storm.
+            return false;
+        }
+        attempted_ = true; last_device_ = device; last_context_ = context; last_request_ = desc; last_paths_ = paths;
         retire_active_locked(); status_ = {};
         status_.expected_provider = paths.provider_directory + L"\\nvngx_dlss.dll";
-        if (!calls_.complete() || !validation_) return fail(Reason::invalid_calls);
         if (!dimensions(desc)) return fail(Reason::invalid_dimensions);
         if (!conventions(desc)) return fail(Reason::invalid_conventions);
         const auto path_reason = validation_->paths(paths);
         if (path_reason != Reason::none) return fail(path_reason);
-        const auto context_reason = validation_->context(device, context);
-        if (context_reason != Reason::none) return fail(context_reason);
         collect_locked();
         std::shared_ptr<Pair>* slot = nullptr;
         for (auto& p : pairs()) if (!p && !slot) slot = &p;
@@ -348,6 +379,10 @@ public:
                 if (ngx_failed(result) || result != NVSDK_NGX_Result_Success) return fail(Reason::init_failed, result);
                 c->initialized = true;
                 result = calls_.capability(&c->capability);
+                const bool duplicate_capability = map_owned(c->capability);
+                if (duplicate_capability) c->capability = nullptr;
+                if (duplicate_capability && result == NVSDK_NGX_Result_Success)
+                    return fail(Reason::duplicate_history, result);
                 if (ngx_failed(result) || result != NVSDK_NGX_Result_Success || !c->capability) return fail(Reason::capability_failed, result);
                 int available = 0, driver = 0;
                 result = calls_.get_i(c->capability, NVSDK_NGX_Parameter_SuperSampling_Available, &available);
@@ -374,11 +409,10 @@ public:
         for (unsigned eye = 0; eye < 2; ++eye) {
             auto& e = pair->eyes[eye];
             auto result = calls_.allocate(&e.parameters);
-            const bool duplicate_map = e.parameters && (e.parameters == core_->capability ||
-                (eye == 1 && e.parameters == pair->eyes[0].parameters));
+            const bool duplicate_map = map_owned(e.parameters, pair.get(), &e);
             if (duplicate_map) e.parameters = nullptr; // Matching object still owned elsewhere.
             if (ngx_failed(result) || result != NVSDK_NGX_Result_Success || !e.parameters)
-                return abort_pair(duplicate_map && !ngx_failed(result) ? Reason::duplicate_history : Reason::allocate_failed,
+                return abort_pair(duplicate_map && result == NVSDK_NGX_Result_Success ? Reason::duplicate_history : Reason::allocate_failed,
                                   result, static_cast<int>(eye));
             NVSDK_NGX_DLSS_Create_Params create{};
             create.Feature.InWidth = create.Feature.InTargetWidth = desc.width;
@@ -386,10 +420,10 @@ public:
             create.Feature.InPerfQualityValue = NVSDK_NGX_PerfQuality_Value_DLAA;
             create.InFeatureCreateFlags = flags(desc);
             result = calls_.create(context, &e.handle, e.parameters, &create);
-            const bool duplicate_handle = eye == 1 && e.handle && e.handle == pair->eyes[0].handle;
+            const bool duplicate_handle = handle_owned(e.handle, pair.get(), &e);
             if (duplicate_handle) e.handle = nullptr;
             if (ngx_failed(result) || result != NVSDK_NGX_Result_Success || !e.handle)
-                return abort_pair(duplicate_handle && !ngx_failed(result) ? Reason::duplicate_history : Reason::create_failed,
+                return abort_pair(duplicate_handle && result == NVSDK_NGX_Result_Success ? Reason::duplicate_history : Reason::create_failed,
                                   result, static_cast<int>(eye));
         }
         status_.expected_provider = paths.provider_directory + L"\\nvngx_dlss.dll";
@@ -397,7 +431,7 @@ public:
         if (observed != Reason::none) return abort_pair(observed, NVSDK_NGX_Result_Success, -1);
         status_.observed_provider_verified = true;
         pair->status.reason = Reason::none;
-        *slot = pair; active_ = std::move(pair); status_.reason = Reason::none;
+        *slot = pair; active_ = std::move(pair); status_.reason = Reason::none; cached_status_ = status_;
         return true;
     }
     // Job lease retains Pair/Core/device/maps and generation scratch even across
@@ -521,6 +555,10 @@ private:
             do {
                 if (_wcsicmp(entry.szModule, L"nvngx_dlss.dll") == 0) { found = entry.szExePath; ++count; }
             } while (Module32NextW(snapshot, &entry));
+            // A partial scan proves neither absence nor uniqueness. Preserve the
+            // API's terminal error before snapshot cleanup changes thread error state.
+            const DWORD scan_end = GetLastError();
+            if (scan_end != ERROR_NO_MORE_FILES) return L"?";
             return count > 1 ? L"?" : found;
         }
         Reason before_init(const Paths&) noexcept override {

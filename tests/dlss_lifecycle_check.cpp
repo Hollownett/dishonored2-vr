@@ -4,6 +4,7 @@
 #include <cassert>
 #include <cstring>
 #include <iostream>
+#include <iterator>
 #include <set>
 #include <thread>
 #include <vector>
@@ -24,6 +25,9 @@ struct Fixture {
     bool out_on_failure{}, null_on_success{}, alias_map{}, alias_handle{};
     int available = 1, driver{};
     bool zero_init{};
+    NVSDK_NGX_Parameter* external_map{};
+    NVSDK_NGX_Handle* external_handle{};
+    std::string external_at;
     std::atomic<int> entries{0};
     struct Guard {
         Fixture& f;
@@ -36,13 +40,14 @@ struct Fixture {
         U::Reason foreign_reason = U::Reason::none, observed_reason = U::Reason::none;
         struct Resource { ID3D11Resource* pointer; ID3D11Device* device; U::Surface shape; };
         std::vector<Resource> resources;
+        ID3D11DeviceContext* extra_context{};
         explicit Validator(Fixture& value) : f(value) {}
         U::Reason paths(const U::Paths& p) noexcept override {
             assert(p.provider_directory == L"C:\\signed-provider" && p.cache_directory == L"C:\\cache");
             return path_reason;
         }
         U::Reason context(ID3D11Device* d, ID3D11DeviceContext* c) noexcept override {
-            if (!d || !c || c != opaque<ID3D11DeviceContext>(reinterpret_cast<std::uintptr_t>(d) + 10)) return U::Reason::invalid_context;
+            if (!d || !c || (c != opaque<ID3D11DeviceContext>(reinterpret_cast<std::uintptr_t>(d) + 10) && c != extra_context)) return U::Reason::invalid_context;
             return context_reason;
         }
         U::Reason before_init(const U::Paths&) noexcept override { return foreign_reason; }
@@ -90,14 +95,16 @@ struct Fixture {
     static NVSDK_NGX_Result NVSDK_CONV capability(NVSDK_NGX_Parameter** out) {
         Guard g("capability"); auto& f = *fixture;
         const bool failure = f.fails("capability");
-        if ((!failure && !f.null_on_success && f.null_operation != "capability") || (failure && f.out_on_failure)) *out = f.map();
+        if ((!failure && !f.null_on_success && f.null_operation != "capability") || (failure && f.out_on_failure))
+            *out = f.external_at == "capability" ? f.external_map : f.map();
         return failure ? bad : ok;
     }
     static NVSDK_NGX_Result NVSDK_CONV allocate(NVSDK_NGX_Parameter** out) {
         Guard g("allocate"); auto& f = *fixture; const auto eye = f.allocation++ % 2;
         const bool failure = f.fails("allocate" + std::to_string(eye));
         if ((!failure && !f.null_on_success && f.null_operation != "allocate" + std::to_string(eye)) || (failure && f.out_on_failure)) {
-            if (eye == 1 && f.alias_map) *out = reinterpret_cast<NVSDK_NGX_Parameter*>(&f.map_tokens[f.next_map - 1]);
+            if (f.external_at == "allocate" + std::to_string(eye)) *out = f.external_map;
+            else if (eye == 1 && f.alias_map) *out = reinterpret_cast<NVSDK_NGX_Parameter*>(&f.map_tokens[f.next_map - 1]);
             else *out = f.map();
         }
         return failure ? bad : ok;
@@ -123,7 +130,8 @@ struct Fixture {
             NVSDK_NGX_DLSS_Feature_Flags_DepthInverted | NVSDK_NGX_DLSS_Feature_Flags_AutoExposure));
         const bool failure = f.fails("create" + std::to_string(eye));
         if ((!failure && !f.null_on_success && f.null_operation != "create" + std::to_string(eye)) || (failure && f.out_on_failure)) {
-            if (eye == 1 && f.alias_handle) *out = reinterpret_cast<NVSDK_NGX_Handle*>(&f.handle_tokens[f.next_handle - 1]);
+            if (f.external_at == "create" + std::to_string(eye)) *out = f.external_handle;
+            else if (eye == 1 && f.alias_handle) *out = reinterpret_cast<NVSDK_NGX_Handle*>(&f.handle_tokens[f.next_handle - 1]);
             else *out = f.handle();
         }
         return failure ? bad : ok;
@@ -358,6 +366,76 @@ void incompatible_shared_owner() {
     assert(first.ready() && f.init_count == 1 && f.shutdown_count == 0);
     second.disable(); first.disable(); assert(f.shutdown_count == 1);
 }
+void aliases_across_live_generations() {
+    for (bool handles : {false, true}) for (bool failure : {false, true}) for (bool other_facade : {false, true}) {
+        Fixture f; auto first = f.owner(); auto second = f.owner();
+        assert(Fixture::prepare(first)); auto old = first.lease(); auto in = f.eval();
+        assert(U::evaluate(old, in)); // Must not free these objects before real retirement.
+        const auto old_maps = f.maps; const auto old_handles = f.handles;
+        f.external_map = *std::next(f.maps.begin()); // Existing left-eye map, not the capability.
+        f.external_handle = *f.handles.begin();
+        f.external_at = handles ? "create0" : "allocate0";
+        f.failure = failure ? f.external_at : ""; f.out_on_failure = failure;
+        auto next = Fixture::desc(); ++next.feature_generation;
+        auto& target = other_facade ? second : first;
+        assert(!Fixture::prepare(target, next));
+        assert(target.status().result == (failure ? bad : ok));
+        assert(target.status().reason == (failure ? (handles ? U::Reason::create_failed : U::Reason::allocate_failed) : U::Reason::duplicate_history));
+        assert(f.maps == old_maps && f.handles == old_handles && f.shutdown_count == 0);
+        f.external_at.clear(); f.failure.clear();
+        if (other_facade) { ++in.frame; ++in.pair; assert(U::evaluate(old, in)); }
+        first.disable(); second.disable();
+        assert(f.maps == old_maps && f.handles == old_handles);
+        assert(U::confirm_gpu_retirement(old)); old = {}; U::collect_retired();
+        assert(f.maps.empty() && f.handles.empty() && f.shutdown_count == 1);
+    }
+    // A newly initialized device's capability out pointer is also untrusted.
+    for (bool eye_map : {false, true}) for (bool failure : {false, true}) {
+        Fixture f; auto first = f.owner(); auto second = f.owner();
+        assert(Fixture::prepare(first)); auto old = first.lease(); auto in = f.eval();
+        assert(U::evaluate(old, in));
+        const auto old_maps = f.maps; const auto old_handles = f.handles;
+        f.external_map = eye_map ? *std::next(f.maps.begin()) : *f.maps.begin();
+        f.external_at = "capability"; f.failure = failure ? "capability" : ""; f.out_on_failure = failure;
+        assert(!Fixture::prepare(second, Fixture::desc(), 12));
+        assert(second.status().result == (failure ? bad : ok));
+        assert(second.status().reason == (failure ? U::Reason::capability_failed : U::Reason::duplicate_history));
+        assert(f.maps == old_maps && f.handles == old_handles && f.shutdown_count == 1); // Only new device closes.
+        first.disable(); second.disable(); assert(U::confirm_gpu_retirement(old)); old = {}; U::collect_retired();
+        assert(f.maps.empty() && f.handles.empty() && f.shutdown_count == 2);
+    }
+}
+void repeated_prepare_context_validation() {
+    {
+        Fixture f; auto u = f.owner(); assert(Fixture::prepare(u));
+        const auto events = f.events.size();
+        for (auto* invalid : {static_cast<ID3D11DeviceContext*>(nullptr), opaque<ID3D11DeviceContext>(22)}) {
+            assert(!u.prepare(opaque<ID3D11Device>(11), invalid, Fixture::desc(), Fixture::paths()));
+            assert(u.status().reason == U::Reason::invalid_context && !u.ready() && f.events.size() == events);
+        }
+        f.validation->context_reason = U::Reason::wrong_device;
+        assert(!Fixture::prepare(u) && u.status().reason == U::Reason::wrong_device && f.events.size() == events);
+        f.validation->context_reason = U::Reason::none;
+        f.validation->extra_context = opaque<ID3D11DeviceContext>(31); // Another context accepted by validation.
+        assert(!u.prepare(opaque<ID3D11Device>(11), f.validation->extra_context, Fixture::desc(), Fixture::paths()));
+        assert(!u.ready() && f.events.size() == events); // Must still match the retained Core's context.
+        assert(Fixture::prepare(u) && u.ready() && f.events.size() == events);
+        u.disable();
+    }
+    {
+        Fixture f; auto u = f.owner();
+        assert(!u.prepare(opaque<ID3D11Device>(11), nullptr, Fixture::desc(), Fixture::paths()));
+        assert(f.init_count == 0 && Fixture::prepare(u) && f.init_count == 1); // Correction is eligible.
+        u.disable();
+    }
+    {
+        Fixture f; auto u = f.owner(); f.failure = "create0";
+        assert(!Fixture::prepare(u)); const auto events = f.events.size();
+        assert(!u.prepare(opaque<ID3D11Device>(11), nullptr, Fixture::desc(), Fixture::paths()));
+        assert(!Fixture::prepare(u) && f.events.size() == events);
+        assert(u.status().reason == U::Reason::create_failed && u.status().result == bad); // Original failure survived.
+    }
+}
 void cleanup_failures_are_once() {
     for (const char* failure : {"release", "destroy", "shutdown"}) {
         Fixture f; auto u = f.owner(); assert(Fixture::prepare(u)); f.failure = failure;
@@ -369,6 +447,6 @@ void cleanup_failures_are_once() {
 int main() {
     static_assert(static_cast<int>(NVSDK_NGX_PerfQuality_Value_DLAA) == 5, "pinned SDK DLAA ABI");
     failure_cleanup(); reasons_and_validation(); histories_and_retirement();
-    evaluation_failures_and_invalid_inputs(); bounded_quarantine(); shared_core_and_concurrency(); incompatible_shared_owner(); cleanup_failures_are_once();
+    evaluation_failures_and_invalid_inputs(); bounded_quarantine(); shared_core_and_concurrency(); incompatible_shared_owner(); aliases_across_live_generations(); repeated_prepare_context_validation(); cleanup_failures_are_once();
     std::cout << "dlss_lifecycle_check: passed (injected CPU calls only)\n";
 }
