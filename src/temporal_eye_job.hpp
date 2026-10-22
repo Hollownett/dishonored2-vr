@@ -1,5 +1,6 @@
 #pragma once
 #include <array>
+#include <atomic>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -11,6 +12,11 @@
 
 // Portable retained-command contract. Adapters own native API/ABI knowledge.
 namespace temporal_eye {
+// Internal capture gate; T5 owns any eventual user opt-in. ABI availability alone never enables it.
+inline std::atomic<bool> diagnostic_capture_enabled{false};
+template<class Capture> void capture_diagnostic(Capture&& capture) {
+    if(diagnostic_capture_enabled.load(std::memory_order_relaxed)) std::forward<Capture>(capture)();
+}
 using Lease = std::shared_ptr<const void>; // COM adapters can supply a Release deleter.
 struct Identity {
     std::uintptr_t address{};
@@ -229,20 +235,23 @@ enum class PairState { incomplete, coherent, fallback, failed };
 // merely while waiting for the second eye. No output is published by this ledger.
 class PairPublication {
     std::optional<InputIdentity> contract_;
+    // Weak ownership identity keeps telemetry from extending GPU resource lifetime.
+    std::weak_ptr<const void> feature_owner_;
     std::array<bool,2> seen_{},success_{};
     PairState state_ = PairState::incomplete;
 public:
-    PairState observe(const InputIdentity& input,EyeOutcome outcome) noexcept {
-        if(!contract_ || input.key.pair>contract_->key.pair) {contract_=input;seen_={};success_={};state_=PairState::incomplete;}
-        if(input.key.eye>1 || input.key.pair!=contract_->key.pair ||
+    PairState observe(const InputIdentity& input,const Lease& feature_owner,EyeOutcome outcome) noexcept {
+        if(!contract_ || input.key.pair>contract_->key.pair) {contract_=input;feature_owner_=feature_owner;seen_={};success_={};state_=PairState::incomplete;}
+        if(!feature_owner || feature_owner.owner_before(feature_owner_) || feature_owner_.owner_before(feature_owner) ||
+           input.key.eye>1 || input.key.pair!=contract_->key.pair ||
            !(input.generations==contract_->generations) || !(input.device==contract_->device) ||
            input.requested_mode!=contract_->requested_mode || input.selected_backend!=contract_->selected_backend ||
            !(input.colour==contract_->colour) || !(input.depth==contract_->depth) ||
            !(input.motion==contract_->motion) || !(input.output==contract_->output) ||
            !(input.motion_contract==contract_->motion_contract) || !(input.colour_contract==contract_->colour_contract) ||
-           !(input.jitter==contract_->jitter) || input.inverted_depth!=contract_->inverted_depth) return state_=PairState::fallback;
+           !(input.jitter==contract_->jitter) || input.inverted_depth!=contract_->inverted_depth) return state_==PairState::failed?state_:state_=PairState::fallback;
         const auto eye=input.key.eye;
-        if(seen_[eye]) return state_=PairState::fallback;
+        if(seen_[eye]) return state_==PairState::failed?state_:state_=PairState::fallback;
         seen_[eye]=true;success_[eye]=outcome==EyeOutcome::temporal;
         if(outcome==EyeOutcome::failed) return state_=PairState::failed;
         if(outcome==EyeOutcome::fallback && state_!=PairState::failed) return state_=PairState::fallback;
@@ -526,8 +535,8 @@ public:
             const auto eye = r.identity.key.eye;
             const bool fresh = current.backend_enabled && r.identity == current.expected[eye] &&
                 provenance(r.depth) == current.depth[eye] && provenance(r.motion) == current.motion[eye];
-            if (fresh && executor.snapshot_depth(r) && executor.evaluate(r)) publication_.observe(r.identity,EyeOutcome::temporal);
-            else publication_.observe(r.identity,executor.fallback(r)?EyeOutcome::fallback:EyeOutcome::failed);
+            if (fresh && executor.snapshot_depth(r) && executor.evaluate(r)) publication_.observe(r.identity,r.feature_owner,EyeOutcome::temporal);
+            else publication_.observe(r.identity,r.feature_owner,executor.fallback(r)?EyeOutcome::fallback:EyeOutcome::failed);
             if(fallback_only_seen)publication_.fallback_only(fallback_only_succeeded);
         }
         executor.native(chain->remainder, restore);

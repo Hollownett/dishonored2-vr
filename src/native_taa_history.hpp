@@ -255,7 +255,7 @@ class NativeTaaHistory {
             thread_local std::vector<taa_history::ParamEntry> scratch;
             // Snapshots are copied only after ready_ is observed (maintain() writes them before setting it).
             taa_history::PassInputs in{base_,{eye_views_[0].load(),eye_views_[1].load()}};
-            in.capture_metadata=metadata_enabled_.load();
+            in.capture_metadata=temporal_eye::diagnostic_capture_enabled.load(std::memory_order_relaxed) && metadata_enabled_.load();
             if(alternate_) {
                 in.single_view=alternate_->single_view.load();std::uintptr_t view{};
                 if(in.single_view && read_(reinterpret_cast<std::uintptr_t>(ctx)+taa_history::ctx_view,&view,8) && view==in.single_view)

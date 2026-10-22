@@ -138,6 +138,16 @@ int main() {
         in.twins_ready=true;
         require(plan_pass(read_memory,in,ctx_at,alternation,plan,scratch)==PassResult::planned && plan.eye==1 && plan.write,"Right eye planned");
         require(plan.replaced[0]==handle(t0) && plan.replaced[1]==handle(t1),"First right pass keeps engine roles");
+        unsigned optional_reads=0;
+        const auto count_optional=[&](std::uintptr_t address,void* out,std::size_t size) {
+            if(address==view_at+d2vr::alternate_taa::stamp_offset ||
+               address==view_at+d2vr::alternate_taa::current_matrix_offsets[0]) ++optional_reads;
+            return read_memory(address,out,size);
+        };
+        PassPlan disabled_plan;
+        require(plan_pass(count_optional,in,ctx_at,alternation,disabled_plan,scratch)==PassResult::planned &&
+                !disabled_plan.metadata && optional_reads==0 && disabled_plan.replaced==plan.replaced,
+                "Disabled optional capture makes no metadata reads and preserves legacy planning");
         auto metadata_input=in;metadata_input.capture_metadata=true;PassPlan optional_plan;
         const auto fail_optional_stamp=[&](std::uintptr_t address,void* out,std::size_t size) {
             return address!=view_at+d2vr::alternate_taa::stamp_offset && read_memory(address,out,size);

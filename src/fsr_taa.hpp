@@ -111,6 +111,7 @@ public:
     std::atomic<unsigned> dlss_input_gate{static_cast<unsigned>(temporal_eye::Admission::missing_pair)};
     std::atomic<std::uint64_t> dlss_depth_selection_generation{},dlss_mv_capture_sequence{};
     void observe_dlss_setup(const temporal_eye::SetupObservation& setup) noexcept {
+        if(!temporal_eye::diagnostic_capture_enabled.load(std::memory_order_relaxed)) return;
         std::lock_guard<std::mutex> lock(source_mutex_);
         if(source_pairs_.publish(setup)) {
             ++dlss_setup_receipts;
@@ -119,11 +120,13 @@ public:
             }
         } else ++dlss_setup_rejected;
     }
-    void invalidate_dlss_sources() noexcept {
+    void invalidate_dlss_sources(bool force_cleanup=false) noexcept {
+        if(!force_cleanup && !temporal_eye::diagnostic_capture_enabled.load(std::memory_order_relaxed)) return;
         std::lock_guard<std::mutex> lock(source_mutex_);source_pairs_.invalidate();stamped_motion_={};last_taa_setup_serial_={};
         dlss_input_gate=static_cast<unsigned>(temporal_eye::Admission::missing_pair);
     }
     void observe_dlss_taa(unsigned eye,const TaaBindings& bindings,const std::optional<temporal_eye::NativePass>& metadata) noexcept {
+        if(!temporal_eye::diagnostic_capture_enabled.load(std::memory_order_relaxed)) return;
         if(eye>1) return;
         try {
             std::lock_guard<std::mutex> lock(source_mutex_);
@@ -140,6 +143,7 @@ public:
         } catch(...) {++dlss_pass_rejected;}
     }
     bool dlss_post_motion_matches(unsigned eye,const std::optional<temporal_eye::NativePass>& metadata) noexcept {
+        if(!temporal_eye::diagnostic_capture_enabled.load(std::memory_order_relaxed)) return false;
         std::lock_guard<std::mutex> lock(source_mutex_);
         if(eye>1 || !metadata) {++dlss_mv_missing;return false;}
         const auto current=source_pairs_.resolve(eye,*metadata);const auto& motion=stamped_motion_[eye];
@@ -200,7 +204,7 @@ public:
     // Post-tonemap pass end (job thread): split after the upscale draw; FSR runs between prefix and remainder.
     void post_tonemap_end(int eye,ID3D11DeviceContext* c) {
         // This match is diagnostic only; missing optional metadata must not alter FSR.
-        if(eye>=0 && eye<2) (void)dlss_post_motion_matches(static_cast<unsigned>(eye),PostTonemapPass::pass_metadata);
+        if(temporal_eye::diagnostic_capture_enabled.load(std::memory_order_relaxed) && eye>=0 && eye<2) (void)dlss_post_motion_matches(static_cast<unsigned>(eye),PostTonemapPass::pass_metadata);
         Ref<ID3D11Resource> source,target;source.reset(pass_source_.p);target.reset(pass_target_.p);pass_source_.reset();pass_target_.reset();
         if(fraction.load()>=.999f || !enabled.load() || eye<0 || eye>1 || !c || !source.p || !target.p) return;
         if(!ready.load()) {++upscale_skipped;return;}
@@ -243,9 +247,9 @@ public:
         // current TAA size; shadow/unknown clears keep their existing cheap inventory path.
         bool relevant=false;
         const auto capture_w=wanted_w_.load(),capture_h=wanted_h_.load();
-        if(context && capture_w && capture_h) for(const auto& candidate:candidates_)
+        if(temporal_eye::diagnostic_capture_enabled.load(std::memory_order_relaxed) && context && capture_w && capture_h) for(const auto& candidate:candidates_)
             if(candidate.resource==r && candidate.w==capture_w && candidate.h==capture_h) relevant=true;
-        if(relevant) try {
+        if(relevant) try { temporal_eye::capture_diagnostic([&] {
             auto value=std::make_shared<ClearSnapshot>();const auto sequence=++clear_sequence_;
             value->event={{reinterpret_cast<std::uintptr_t>(context),sequence},{reinterpret_cast<std::uintptr_t>(dsv),sequence},
                 {reinterpret_cast<std::uintptr_t>(r),sequence},sequence,GetCurrentThreadId(),flags,depth,stencil};
@@ -253,7 +257,7 @@ public:
             ID3D11Texture2D* texture{};
             if(SUCCEEDED(r->QueryInterface(__uuidof(ID3D11Texture2D),reinterpret_cast<void**>(&texture))) && texture) {texture->GetDesc(&value->resource_desc);texture->Release();}
             observed=std::move(value);++dlss_clear_events;
-        } catch(...) {++dlss_clear_capture_failed;}
+        }); } catch(...) {++dlss_clear_capture_failed;}
         for(auto& c:candidates_) if(c.resource==r) {++c.clears;if(observed)c.clear=std::move(observed);r->Release();return;}
         ID3D11Texture2D* t{};D3D11_TEXTURE2D_DESC d{};
         if(SUCCEEDED(r->QueryInterface(__uuidof(ID3D11Texture2D),reinterpret_cast<void**>(&t)))) {t->GetDesc(&d);t->Release();}
@@ -285,7 +289,7 @@ public:
         const float f=fraction.load();
         if(ready.load() && ready_w_==w && ready_h_==h && ready_fraction_==f && ready_native_format_==wanted_native_format_.load() && depth_resource_.p==best.resource &&
            (!timing_enabled.load() || ((*eyes_)[0].timer.valid() && (*eyes_)[1].timer.valid()))) {
-            std::lock_guard<std::mutex> lock(mutex_);selected_clear_=best.clear;return;
+            if(temporal_eye::diagnostic_capture_enabled.load(std::memory_order_relaxed)) {std::lock_guard<std::mutex> lock(mutex_);selected_clear_=best.clear;}return;
         }
         std::lock_guard<std::mutex> lock(mutex_);
         ready=false;
@@ -308,7 +312,7 @@ public:
             ID3D11ShaderResourceView* view{};
             if(FAILED(device->CreateShaderResourceView(best.resource,&sd,&view))) {++create_failures;return;}
             depth_view_.adopt(view);depth_resource_.reset(best.resource);
-            selected_clear_=best.clear;dlss_depth_selection_generation=++depth_selection_generation_;
+            if(temporal_eye::diagnostic_capture_enabled.load(std::memory_order_relaxed)) {selected_clear_=best.clear;dlss_depth_selection_generation=++depth_selection_generation_;}
         }
         const bool upscale=f<.999f;
         const UINT rw=upscale?static_cast<UINT>(std::lround(w*f)):w,rh=upscale?static_cast<UINT>(std::lround(h*f)):h;
@@ -360,7 +364,7 @@ public:
         ready=true;
     }
     void clear() {
-        invalidate_dlss_sources();
+        invalidate_dlss_sources(true);
         std::lock_guard<std::mutex> lock(mutex_);
         ready=false;++reset_epoch_;
         for(auto& e:*eyes_) {e.fsr.destroy();e.fsr4.destroy();e.timer.clear();e.depth.reset();e.depth_uav.reset();e.reactive.reset();e.reactive_uav.reset();e.colour_in.reset();e.upscaled.reset();}

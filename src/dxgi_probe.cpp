@@ -918,7 +918,7 @@ bool taa_dispatch_handler(ID3D11DeviceContext* c,int eye,UINT x,UINT y,UINT z,d2
             }
         }
     }
-    if(taa && eye>=0 && eye<2) {
+    if(temporal_eye::diagnostic_capture_enabled.load(std::memory_order_relaxed) && taa && eye>=0 && eye<2) {
         auto metadata=d2vr::TaaDispatchHook::pass_metadata;
         if(metadata) {const auto current=read_dlss_pass_metadata(metadata->view);if(!current || !(*current==*metadata))metadata.reset();}
         fsr_taa.observe_dlss_taa(static_cast<unsigned>(eye),b,metadata);
@@ -3603,11 +3603,11 @@ void observe_eye_setup(void* view) noexcept {
 // Completion is published after original Setup and the supported forced-jitter
 // write. The pre-Setup eye classifier alone cannot certify the newly written stamp.
 std::optional<temporal_eye::NativePass> read_dlss_pass_metadata(std::uintptr_t view) noexcept {
-    if(!dlss_view_metadata_abi) return {};
+    if(!temporal_eye::diagnostic_capture_enabled.load(std::memory_order_relaxed) || !dlss_view_metadata_abi) return {};
     try {return d2vr::taa_history::read_pass_metadata(&read_self,view);}catch(...) {return {};}
 }
 std::optional<temporal_eye::SetupObservation> begin_dlss_setup_observation(void* view) noexcept {
-    if(!dlss_view_metadata_abi || !view || !stereo_active.load() || alternate_on() || mono_view_state.load()==1) return {};
+    if(!temporal_eye::diagnostic_capture_enabled.load(std::memory_order_relaxed) || !dlss_view_metadata_abi || !view || !stereo_active.load() || alternate_on() || mono_view_state.load()==1) return {};
     try {
         temporal_eye::SetupObservation observation;observation.pass.view=reinterpret_cast<std::uintptr_t>(view);
         std::lock_guard<std::mutex> lock(gpu_mutex);
@@ -8785,8 +8785,8 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
         if(setup_requested || head_requested || eye_boundary_requested) {
             setup_target=reinterpret_cast<void*>(image_base+setup_rva);
             view_jitter_abi=verify_view_jitter_abi();
-            dlss_view_metadata_abi=view_jitter_abi && d2vr::alternate_taa::verified_abi(&read_self,image_base);
-            taa_history.capture_metadata(dlss_view_metadata_abi);
+            dlss_view_metadata_abi=temporal_eye::diagnostic_capture_enabled.load(std::memory_order_relaxed) && view_jitter_abi && d2vr::alternate_taa::verified_abi(&read_self,image_base);
+            taa_history.capture_metadata(temporal_eye::diagnostic_capture_enabled.load(std::memory_order_relaxed) && dlss_view_metadata_abi);
             if(!read_self(image_base+setup_rva,setup_original_bytes.data(),setup_original_bytes.size()) || setup_original_bytes!=setup_expected_bytes)
                 throw std::runtime_error("Native view setup entry differs from supported executable");
             setup_csv.open(output/L"native-view-setup.csv",std::ios::trunc);

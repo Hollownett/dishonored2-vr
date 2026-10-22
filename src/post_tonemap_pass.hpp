@@ -27,7 +27,9 @@ class PostTonemapPass {
         }
         if(eye<0) return original_(ctx);
         ++depth_;pass_eye=eye;pass_context=nullptr;pass_metadata.reset();
-        if(const auto reader=metadata_reader.load()) pass_metadata=reader(view);
+        temporal_eye::capture_diagnostic([&] {
+            if(const auto reader=metadata_reader.load()) pass_metadata=reader(view);
+        });
         unsigned long long result{};
         __try {result=original_(ctx);}
         __finally {

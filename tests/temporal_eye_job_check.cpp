@@ -588,7 +588,8 @@ void completion_quarantine_and_pair_results() {
     }
     for(int fail_eye=-1;fail_eye<2;++fail_eye) {
         RetainedJobs q;
-        auto left=q.reserve(id(1),lease(),inputs(0)),right=q.reserve(id(2),lease(),inputs(1));
+        auto l=inputs(0),r=inputs(1);r.feature_owner=l.feature_owner;
+        auto left=q.reserve(id(1),lease(),l),right=q.reserve(id(2),lease(),r);
         assert(q.split(left,list(311)) && q.finished(id(1),list(312)));
         assert(q.split(right,list(321)) && q.finished(id(2),list(322)));
         Fake f;f.evaluate_ok=fail_eye!=0;
@@ -607,10 +608,28 @@ void completion_quarantine_and_pair_results() {
         expect(f,{"list331","depth0","evaluate0","fallback0","list332"});
         assert(failed.pair_state==PairState::failed && q.retire(failed.submission));
     }
-    PairPublication ledger;auto left=inputs(0).identity,right=inputs(1).identity;
-    assert(ledger.observe(left,EyeOutcome::temporal)==PairState::incomplete);
+    PairPublication ledger;auto left=inputs(0).identity,right=inputs(1).identity;auto owner=lease();
+    assert(ledger.observe(left,owner,EyeOutcome::temporal)==PairState::incomplete);
+    { // Same numbers and even the same raw pointer cannot replace owning identity.
+        PairPublication distinct;auto other=Lease(owner.get(),[](const void*){});
+        assert(distinct.observe(left,owner,EyeOutcome::temporal)==PairState::incomplete);
+        assert(distinct.observe(right,other,EyeOutcome::temporal)==PairState::fallback);
+        PairPublication same;Lease alias(owner,owner.get());
+        assert(same.observe(left,owner,EyeOutcome::temporal)==PairState::incomplete);
+        assert(same.observe(right,alias,EyeOutcome::temporal)==PairState::coherent);
+    }
+    for(unsigned mismatch=0;mismatch<3;++mismatch) {
+        PairPublication sticky;auto changed=right;
+        assert(sticky.observe(left,owner,EyeOutcome::failed)==PairState::failed);
+        if(mismatch==0) ++changed.generations.feature;
+        if(mismatch==1) changed.key.eye=0;
+        assert(sticky.observe(changed,owner,EyeOutcome::temporal)==PairState::failed);
+        assert(sticky.fallback_only(true)==PairState::failed);
+        auto newer=left;++newer.key.pair;
+        assert(sticky.observe(newer,owner,EyeOutcome::temporal)==PairState::incomplete);
+    }
     ++right.generations.feature;
-    assert(ledger.observe(right,EyeOutcome::temporal)==PairState::fallback); // mixed feature generations
+    assert(ledger.observe(right,owner,EyeOutcome::temporal)==PairState::fallback); // mixed feature generations
 }
 void reused_addresses() {
     RetainedJobs q;
@@ -632,6 +651,14 @@ int main() {
     static_assert(!std::is_constructible<bool, RetainedJobs::ExecuteResult>::value,
                   "busy cannot silently take native-on-miss boolean paths");
     static_assert(!std::is_copy_constructible<RetainedJobs>::value, "queue ownership is unique");
+    assert(!diagnostic_capture_enabled.load());
+    unsigned captures=0;int retained_destroyed=0;Lease retained;
+    auto capture=[&] {++captures;retained=lease(&retained_destroyed);};
+    capture_diagnostic(capture);
+    assert(captures==0 && !retained && retained_destroyed==0);
+    diagnostic_capture_enabled=true;capture_diagnostic(capture);
+    assert(captures==1 && retained && retained_destroyed==0);
+    retained.reset();assert(retained_destroyed==1);diagnostic_capture_enabled=false;
     phases_and_lifetime(false);
     phases_and_lifetime(true);
     chains_and_contexts();
