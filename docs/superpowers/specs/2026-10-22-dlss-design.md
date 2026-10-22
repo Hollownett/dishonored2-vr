@@ -25,18 +25,19 @@ Upscale: capture MV at TAA, bypass TAA with the existing copy, and split after t
 Keep the existing `TaaDispatchHook::execute_handler` wrapper, caller restore flags, timing, and world-UI completion ordering. Already-immediate work dispatches at that same seam.
 Never drop a prefix/remainder because a temporal job is stale. `frame_split.hpp` is telemetry, not a replacement scheduler.
 
-Each immutable job owns COM references plus the following receipt, captured before split:
+Each job freezes the following render-input receipt, including retained resource/owner references, before split; recording and execution metadata live in a separate envelope:
 
 | Receipt | Exact identity and generation |
 | --- | --- |
 | Eye/frame | Logical eye 0/1, stereo pair ID, same-eye rendered-frame sequence, reset epoch and history-valid flag |
-| Recording | Deferred context identity, retained prefix and remainder, chain order, original restore flags |
 | Resources | Retained color, MV, native output, native depth resource and SRV; resource identity/selection generation for each |
 | Depth/MV | Producing eye/frame, producing boundary/sequence and active rectangle; upscale MV receipt must come from this frame's TAA capture |
 | Shape | Full descriptors/formats/sample counts, active input/output rectangles and origins, render/output dimensions, dimension generation |
 | Backend/device | Requested mode, actual selected backend, backend generation, device identity/generation, feature generation, immutable owner lease |
 | Temporal inputs | Actual rendered jitter current/previous in pixels, jitter phase/sequence generation, MV scale/jitter convention, color/exposure contract |
 
+The recording envelope captures deferred-context identity when reserving the slot. A successful split supplies and retains each prefix; that prefix identity is then immutable. Chain assembly remains staged until `finished` supplies and retains the exact remainder, sealing list identities and chain order for execution. No future list identity is required in the pre-split render receipt.
+`execute` receives the caller's `ExecuteCommandList` restore-state flag at execution and passes it through the existing executor; it is execution input, not frozen render/recording metadata. `FinishCommandList(TRUE)` preserves deferred recording state across the split and is distinct from either caller-selected execution restore value. Already-immediate dispatch needs no deferred-list envelope.
 Reject missing, mismatched, or stale receipts before evaluation; a resource address or eye index alone is insufficient.
 The current greatest-clear-count depth selection is heuristic; retaining its view establishes lifetime only. Prove that each executed prefix produces that eye's depth and snapshot it before any later prefix overwrites the shared native resource.
 Current upscale `motion_` slots lack a frame stamp; add one and require exact eye/frame/dimension correspondence.
