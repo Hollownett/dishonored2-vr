@@ -12,6 +12,8 @@
 
 namespace d2vr {
 struct MirrorRect {float x,y,width,height;};
+// Modes 0 (right eye), 1 (left eye) and 2 (both) draw into the desktop window; 3 (off) and anything else draw nothing: no canvas, no copy.
+inline bool mirror_draws(int mode) noexcept {return mode>=0 && mode<=2;}
 // Desktop composition plan: index 0 is the left eye, 1 the right eye. A shown
 // eye is fitted inside its area with its aspect preserved and the leftover
 // letterbox/pillarbox space centred. Mode 0/1 fill the target with one eye,
@@ -19,7 +21,7 @@ struct MirrorRect {float x,y,width,height;};
 inline std::array<std::optional<MirrorRect>,2> mirror_layout(int mode,UINT target_width,UINT target_height,
                                                             UINT eye_width,UINT eye_height) {
     std::array<std::optional<MirrorRect>,2> result{};
-    if(mode<0 || mode>2 || !target_width || !target_height || !eye_width || !eye_height) return result;
+    if(!mirror_draws(mode) || !target_width || !target_height || !eye_width || !eye_height) return result;
     const auto fit=[](UINT area_x,UINT area_y,UINT area_width,UINT area_height,UINT source_width,UINT source_height) {
         const auto scale=std::min(static_cast<double>(area_width)/source_width,
                                   static_cast<double>(area_height)/source_height);

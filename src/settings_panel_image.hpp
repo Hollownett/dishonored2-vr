@@ -133,7 +133,7 @@ inline std::vector<unsigned char> settings_panel_image(const VrSettings& setting
         {L"Resolution",scale.str(),(settings.requested()-.5)/1.5,L"Sets how many pixels each eye renders. Higher is sharper but slower; the mod caps it to what the GPU can hold. Now "+size.str()+L"."},
         split(settings.temporal_aa_text(),-1,L"Smooths shimmering edges over time. Game TAA is the original; FSR Native uses full resolution; Quality and Balanced render fewer pixels and upscale. The label shows the active backend."),
         {L"Edge anti-aliasing",settings.antialiasing()?L"SMAA Ultra":L"Native only",-1,L"SMAA Ultra cleans up jagged edges that the temporal pass misses. Native only keeps the game's own edge handling."},
-        split(settings.mirror_text(),-1,L"Chooses what the desktop monitor mirrors: both eyes side by side, or one eye alone. It does not change the headset image."),
+        split(settings.mirror_text(),-1,L"Chooses what the desktop monitor mirrors: both eyes side by side, one eye alone, or off (the fastest). It does not change the headset image."),
         split(settings.sharpness_text(),settings.sharpness(),L"Contrast sharpening applied after anti-aliasing. Raise it if the image looks soft, lower it if edges crawl."),
         split(settings.hud_text(),hud_fraction,L"Scales the HUD and on-screen prompts shown in VR. 55% sits in the centre of your view; 100% keeps the original game layout."),
         split(settings.controls_hint_text(),-1,L"Shows controller button hints in the world during play. Turn it off once you know the controls."),

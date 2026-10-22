@@ -37,7 +37,7 @@ inline std::vector<NativeOptionsPage::Row> rows(const VrSettings& s) {
         0,0,1,s.temporal_aa(),2,{"Off","Game TAA","FSR 3 Native","FSR 3 Quality (77%)","FSR 3 Balanced (67%)","FSR 4 Native","FSR 4 Quality (77%)"}};
     r[edge_aa]={K::toggle,"Edge anti-aliasing (SMAA)","SMAA Ultra cleans up jagged edges that the temporal pass misses.",0,0,1,s.antialiasing()?1:0,0,{}};
     r[mirror]={K::stepper,"Monitor view","Chooses what the desktop monitor mirrors. It does not change the headset image.",
-        0,0,1,static_cast<int>(s.mirror()),static_cast<int>(MirrorMode::both_eyes),{"Right eye","Left eye","Both eyes"}};
+        0,0,1,static_cast<int>(s.mirror()),static_cast<int>(MirrorMode::both_eyes),{"Right eye","Left eye","Both eyes","Off"}};
     r[sharpening]={K::stepper,"Sharpening","Contrast sharpening after anti-aliasing. Raise it if the image looks soft, lower it if edges crawl.",
         0,0,1,static_cast<int>(std::lround(s.sharpness()*4)),2,{"Off","Low","Medium","High","Max"}};
     r[hud]={K::stepper,"HUD size","Scales the HUD and prompts in VR. 55% sits in the centre of your view; 100% keeps the game layout; larger sizes enlarge prompts and markers.",
@@ -57,7 +57,7 @@ inline VrSettings::Changes apply(VrSettings& s,const std::vector<int>& v) {
     if(const int x=at(resolution);x>=50 && x<=200 && std::lround(s.requested()*100)!=x) {s.set_requested(x/100.);c.resolution=s.requested();}
     if(const int x=at(temporal);x>=0 && x<=6 && x!=s.temporal_aa()) {s.set_temporal_aa(x);c.temporal_aa=x;}
     if(const int x=at(edge_aa);x>=0 && (x!=0)!=s.antialiasing()) {s.set_antialiasing(x!=0);c.antialiasing=x!=0;}
-    if(const int x=at(mirror);x>=0 && x<=2 && x!=static_cast<int>(s.mirror())) {s.set_mirror(static_cast<MirrorMode>(x));c.mirror=s.mirror();}
+    if(const int x=at(mirror);x>=0 && x<=3 && x!=static_cast<int>(s.mirror())) {s.set_mirror(static_cast<MirrorMode>(x));c.mirror=s.mirror();}
     if(const int x=at(sharpening);x>=0 && x<=4 && x!=std::lround(s.sharpness()*4)) {s.set_sharpness(x/4.);c.sharpness=s.sharpness();}
     if(const int x=at(hud);x>=0 && x<static_cast<int>(hud_choices.size()) && hud_choices[static_cast<std::size_t>(x)]!=s.hud_percent())
         {s.set_hud_percent(hud_choices[static_cast<std::size_t>(x)]);c.hud_percent=s.hud_percent();}

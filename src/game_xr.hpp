@@ -26,6 +26,8 @@
 #include "menu_pointer.hpp"
 #include "controls_hint_image.hpp"
 #include "comfort_vignette.hpp"
+#include "overlay_dirty.hpp"
+#include "xr_cpu_spans.hpp"
 #include "grab_beam.hpp"
 #include "world_ui_pose.hpp"
 #include "hud_window.hpp"
@@ -95,6 +97,36 @@ private:
     std::optional<Vec3> wheel_cursor_;
     bool cylinder_supported_{};XrCompositionLayerCylinderKHR hud_cylinder_{XR_TYPE_COMPOSITION_LAYER_CYLINDER_KHR};
     bool world_ui_stale_{},hud_window_stale_{};std::uint64_t world_ui_fresh_tick_{},hud_window_fresh_tick_{};
+    // Plan E task 4: an overlay quad whose content did not change re-submits its last released image instead of acquire/draw/release.
+    // Each kind has a gate (overlay_dirty.hpp); a swapchain's generation is bumped whenever it is (re)created, so the first frame of a new
+    // chain, an epoch change, a failed render and a session restart always render. Knob build/no-overlay-skip draws every frame as before.
+    std::array<OverlayDirty,overlay_kind_count> overlay_gate_{};
+    std::unordered_map<XrSwapchain,std::uint64_t> chain_generations_;std::uint64_t chain_generation_counter_{};
+    std::uint64_t settings_pixel_generation_{},world_ui_draw_tick_{},hud_window_draw_tick_{},unknown_draw_tick_{};
+    std::uint64_t chain_generation(XrSwapchain chain) const {const auto at=chain_generations_.find(chain);return at==chain_generations_.end()?0:at->second;}
+    // True: draw a fresh image now (the gate stays invalid until overlay_rendered(), so any throw or timeout between the two leaves it
+    // dirty). False: re-submit the last released image (counted as a skip).
+    bool overlay_needs_image(OverlayKind kind,XrSwapchain chain,std::uint64_t content,std::uint64_t max_hold_ms,OverlayKey& key) {
+        auto& gate=overlay_gate_[static_cast<unsigned>(kind)];
+        key={chain_generation(chain),pose_epoch(),content};
+        if(!overlay_skip_enabled || gate.must_render(key,GetTickCount64(),max_hold_ms)) {gate.invalidate();return true;}
+        overlay_stats.note(kind,false);return false;
+    }
+    void overlay_rendered(OverlayKind kind,const OverlayKey& key) {
+        overlay_gate_[static_cast<unsigned>(kind)].rendered(key,GetTickCount64());overlay_stats.note(kind,true);
+    }
+    void invalidate_overlays() {for(auto& gate:overlay_gate_) gate.invalidate();}
+public:
+    OverlayStats overlay_stats;
+    XrCpuSpans xr_spans; // measurement only: CPU time of each xr-facing step of the frame, both eyes summed
+    struct SpanClock { // adds the elapsed CPU time to one span when it goes out of scope
+        XrCpuSpans& spans;XrSpan span;std::int64_t start;
+        SpanClock(XrCpuSpans& s,XrSpan which) noexcept:spans(s),span(which),start(cpu_time_ns()) {}
+        ~SpanClock() {spans.add(span,cpu_time_ns()-start);}
+        SpanClock(const SpanClock&)=delete;SpanClock& operator=(const SpanClock&)=delete;
+    };
+    static inline bool overlay_skip_enabled=true; // build/no-overlay-skip clears it before the first GameXr exists
+private:
     std::array<XrSwapchain,2> wrist_chains_{};
     std::array<std::vector<XrSwapchainImageD3D11KHR>,2> wrist_images_;
     std::array<std::vector<Microsoft::WRL::ComPtr<ID3D11RenderTargetView>>,2> wrist_targets_;
@@ -218,7 +250,8 @@ private:
             if(FAILED(device->CreateTexture2D(&desc,nullptr,&settings_texture_))) throw std::runtime_error("Cannot create native menu settings image");
             settings_compositor_=std::make_unique<DesktopMirror>(device.Get());
         }
-        settings_pixels_=settings_panel_image(settings_,effective_scale_,width_,height_,pointer);
+        {auto next=settings_panel_image(settings_,effective_scale_,width_,height_,pointer);
+         if(next!=settings_pixels_) {settings_pixels_=std::move(next);++settings_pixel_generation_;}}
         const auto& pixels=settings_pixels_;
         context_->UpdateSubresource(settings_texture_.Get(),0,nullptr,pixels.data(),640*4,0);
         if(observe_settings) observe_settings(settings_texture_.Get(),pixels.data(),pixels.size());
@@ -247,6 +280,8 @@ private:
     }
     std::optional<XrCompositionLayerQuad> settings_layer() {
         if(!settings_chain_ || settings_pixels_.size()!=640u*560u*4u || !views_valid_) return {}; // chain is created between frames
+        OverlayKey overlay_key;
+        if(overlay_needs_image(OverlayKind::settings,settings_chain_,settings_overlay_content(settings_pixel_generation_),0,overlay_key)) {
         XrSwapchainImageAcquireInfo acquire{};acquire.type=XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO;uint32_t index{};
         checked(xrAcquireSwapchainImage(settings_chain_,&acquire,&index),"Acquire settings panel");
         XrSwapchainImageWaitInfo wait{};wait.type=XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO;wait.timeout=1'000'000'000;
@@ -255,6 +290,8 @@ private:
         if(XR_FAILED(ready) || ready==XR_TIMEOUT_EXPIRED) {xrReleaseSwapchainImage(settings_chain_,&release);checked(ready,"Wait settings panel");throw std::runtime_error("Settings panel wait timed out");}
         context_->UpdateSubresource(settings_images_.at(index).texture,0,nullptr,settings_pixels_.data(),640*4,0);
         checked(xrReleaseSwapchainImage(settings_chain_,&release),"Release settings panel");
+        overlay_rendered(OverlayKind::settings,overlay_key);
+        }
         const auto& panel=native_menu_pose();const auto view=menu_view();
         const auto fit=SettingsMenuLayout::quad_fit(view.width,view.height);
         const auto centre=panel.position+rotated(panel.orientation,{fit.dx,fit.dy,0});
@@ -295,9 +332,9 @@ private:
     // between frames; a layer whose chain is missing or the wrong size shows nothing this frame.
     void count_chain_op() {if(frame_open_) ++swapchain_creates_in_frame;}
     void create_overlay_chain(const XrSwapchainCreateInfo& info,XrSwapchain& chain,const char* name) {
-        count_chain_op();checked(api<PFN_xrCreateSwapchain>("xrCreateSwapchain",instance_)(session_,&info,&chain),name);chain_sizes_[chain]={info.width,info.height};
+        count_chain_op();checked(api<PFN_xrCreateSwapchain>("xrCreateSwapchain",instance_)(session_,&info,&chain),name);chain_sizes_[chain]={info.width,info.height};chain_generations_[chain]=++chain_generation_counter_;
     }
-    void destroy_overlay_chain(XrSwapchain chain,const char* name) {count_chain_op();chain_sizes_.erase(chain);checked(xrDestroySwapchain(chain),name);}
+    void destroy_overlay_chain(XrSwapchain chain,const char* name) {count_chain_op();chain_sizes_.erase(chain);chain_generations_.erase(chain);checked(xrDestroySwapchain(chain),name);}
     // A quad/cylinder swapchain is exactly the size of what it shows (SteamVR rejects sub-rects): rebuilt here, between frames, when that size changes.
     void rebuild_overlay_chain(XrSwapchain& chain,std::vector<XrSwapchainImageD3D11KHR>& images,UINT& have_width,UINT& have_height,UINT width,UINT height,const std::string& label) {
         if(chain && have_width==width && have_height==height) return;
@@ -340,7 +377,10 @@ private:
         D3D11_TEXTURE2D_DESC desc{};world_ui_source_->GetDesc(&desc);
         const int rows=world_ui_rows(desc);
         if(!world_ui_chain_ || world_ui_width_!=desc.Width || world_ui_height_!=static_cast<UINT>(rows)) return {};
-        if(!world_ui_stale_) { // stale: the quad re-shows the last released image
+        OverlayKey overlay_key;
+        if(world_ui_stale_) overlay_stats.note(OverlayKind::world_ui,false); // stale: the quad re-shows the last released image
+        else if(overlay_needs_image(OverlayKind::world_ui,world_ui_chain_,world_ui_overlay_content(reinterpret_cast<std::uintptr_t>(world_ui_source_.Get()),world_ui_draw_tick_,
+                world_ui_kind_,world_ui_full_,desc.Width,static_cast<unsigned>(rows)),overlay_refresh_ms,overlay_key)) {
         XrSwapchainImageAcquireInfo acquire{};acquire.type=XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO;uint32_t index{};
         checked(xrAcquireSwapchainImage(world_ui_chain_,&acquire,&index),"Acquire world UI image");
         XrSwapchainImageWaitInfo wait{};wait.type=XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO;wait.timeout=1'000'000'000;
@@ -350,6 +390,7 @@ private:
         context_->CopySubresourceRegion(world_ui_images_.at(index).texture,0,0,0,0,world_ui_source_.Get(),0,&band);
         XrSwapchainImageReleaseInfo release{};release.type=XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO;
         checked(xrReleaseSwapchainImage(world_ui_chain_,&release),"Release world UI image");
+        overlay_rendered(OverlayKind::world_ui,overlay_key);
         }
         const auto& pose=world_ui_pose();
         // The native selector lays potion shortcuts and controls at the top
@@ -377,7 +418,10 @@ private:
         const double window_deg=hud_screen_degrees(hfov_deg,settings_.hud_percent());
         const auto crop=hud_window_crop(desc.Width,desc.Height,1.,hud_window_config_.distance,window_deg);
         if(!hud_window_chain_ || hud_window_width_!=static_cast<UINT>(crop.w) || hud_window_height_!=static_cast<UINT>(crop.h)) return {};
-        if(!hud_window_stale_) { // stale: re-show the last released image
+        OverlayKey overlay_key;
+        if(hud_window_stale_) overlay_stats.note(OverlayKind::hud_window,false); // stale: re-show the last released image
+        else if(overlay_needs_image(OverlayKind::hud_window,hud_window_chain_,hud_window_overlay_content(reinterpret_cast<std::uintptr_t>(hud_window_source_.Get()),hud_window_draw_tick_,
+                crop.x,crop.y,crop.w,crop.h),overlay_refresh_ms,overlay_key)) {
         XrSwapchainImageAcquireInfo acquire{};acquire.type=XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO;uint32_t index{};
         checked(xrAcquireSwapchainImage(hud_window_chain_,&acquire,&index),"Acquire HUD window image");
         XrSwapchainImageWaitInfo wait{};wait.type=XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO;wait.timeout=1'000'000'000;
@@ -387,6 +431,7 @@ private:
         context_->CopySubresourceRegion(hud_window_images_.at(index).texture,0,0,0,0,hud_window_source_.Get(),0,&box);
         XrSwapchainImageReleaseInfo release{};release.type=XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO;
         checked(xrReleaseSwapchainImage(hud_window_chain_,&release),"Release HUD window image");
+        overlay_rendered(OverlayKind::hud_window,overlay_key);
         }
         const auto now=std::chrono::steady_clock::now();
         const double dt=hud_window_time_.time_since_epoch().count()?std::chrono::duration<double>(now-hud_window_time_).count():0;
@@ -554,6 +599,10 @@ private:
         // Grow in blocks; animated native bounds do not recreate a chain for every one-pixel change, and shrinking can reuse the canvas.
         if(chain && (native_wrist_sizes_[side][0]<width || native_wrist_sizes_[side][1]<height)) wrist_recreate_[side]=true;
         if(wrist_recreate_[side] || !chain) {wrist_want_[side]={(width+63u)&~63u,(height+63u)&~63u};return {};} // prepare_overlays retires/creates it between frames
+        const auto art_facts=[](const NativeArtSource& a) {return WristArtFacts{reinterpret_cast<std::uintptr_t>(a.texture.Get()),a.tick,a.owner,a.crop.left,a.crop.top,a.crop.right,a.crop.bottom,a.premultiplied};};
+        const auto primary_facts=art_facts(art);const auto mana_facts=mana?art_facts(*mana):WristArtFacts{};
+        const auto wrist_kind=side?OverlayKind::wrist_right:OverlayKind::wrist_left;OverlayKey overlay_key;
+        if(overlay_needs_image(wrist_kind,chain,wrist_overlay_content(primary_facts,mana?&mana_facts:nullptr,native_wrist_sizes_[side][0],native_wrist_sizes_[side][1]),overlay_refresh_ms,overlay_key)) {
         XrSwapchainImageAcquireInfo acquire{};acquire.type=XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO;uint32_t index{};
         checked(xrAcquireSwapchainImage(chain,&acquire,&index),"Acquire wrist HUD");
         wrist_acquired_[side]=true;
@@ -573,6 +622,8 @@ private:
         }
         checked(xrReleaseSwapchainImage(chain,&release),"Release wrist HUD");
         wrist_acquired_[side]=false;
+        overlay_rendered(wrist_kind,overlay_key);
+        }
         XrCompositionLayerQuad layer{};layer.type=XR_TYPE_COMPOSITION_LAYER_QUAD;layer.space=local_;
         layer.layerFlags=XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
         if(!art.premultiplied) layer.layerFlags|=XR_COMPOSITION_LAYER_UNPREMULTIPLIED_ALPHA_BIT;
@@ -684,6 +735,8 @@ private:
         if(dot(side,to_head*(1/distance))<.6) return {}; // palm (+X of the left grip) toward the eyes; the back of the wrist is the health watch
         constexpr unsigned width=512,height=384;
         if(!hint_chain_) return {}; // created by prepare_overlays
+        OverlayKey overlay_key;
+        if(overlay_needs_image(OverlayKind::hint,hint_chain_,static_overlay_content(),0,overlay_key)) {
         XrSwapchainImageAcquireInfo acquire{};acquire.type=XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO;uint32_t index{};
         checked(xrAcquireSwapchainImage(hint_chain_,&acquire,&index),"Acquire controls card");
         XrSwapchainImageWaitInfo wait{};wait.type=XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO;wait.timeout=1'000'000'000;
@@ -697,6 +750,8 @@ private:
             }
         } catch(...) {xrReleaseSwapchainImage(hint_chain_,&release);throw;}
         checked(xrReleaseSwapchainImage(hint_chain_,&release),"Release controls card");
+        overlay_rendered(OverlayKind::hint,overlay_key);
+        }
         const auto& h=views_[0].pose.orientation;
         const auto facing=normalized(Quaternion{h.x,h.y,h.z,h.w});
         const auto centre=hand+rotated(facing,{0,.11,0});
@@ -728,6 +783,8 @@ private:
         if(!wheel_cursor_ || !views_valid_) return {};
         constexpr unsigned size=64;
         if(!dot_chain_) return {}; // created by prepare_overlays
+        OverlayKey overlay_key;
+        if(overlay_needs_image(OverlayKind::dot,dot_chain_,static_overlay_content(),0,overlay_key)) {
         XrSwapchainImageAcquireInfo acquire{};acquire.type=XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO;uint32_t index{};
         checked(xrAcquireSwapchainImage(dot_chain_,&acquire,&index),"Acquire wheel dot");
         XrSwapchainImageWaitInfo wait{};wait.type=XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO;wait.timeout=1'000'000'000;
@@ -746,6 +803,8 @@ private:
             }
         } catch(...) {xrReleaseSwapchainImage(dot_chain_,&release);throw;}
         checked(xrReleaseSwapchainImage(dot_chain_,&release),"Release wheel dot");
+        overlay_rendered(OverlayKind::dot,overlay_key);
+        }
         const auto& h=views_[0].pose.orientation;
         XrCompositionLayerQuad layer{};layer.type=XR_TYPE_COMPOSITION_LAYER_QUAD;layer.space=local_;
         layer.layerFlags=XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT|XR_COMPOSITION_LAYER_UNPREMULTIPLIED_ALPHA_BIT;
@@ -788,6 +847,8 @@ private:
             }
             upload=vignette_baked_.data();
         }
+        OverlayKey overlay_key;
+        if(overlay_needs_image(OverlayKind::vignette,vignette_chain_,vignette_overlay_content(color_scale_supported_,vignette_bakes),0,overlay_key)) {
         XrSwapchainImageAcquireInfo acquire{};acquire.type=XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO;uint32_t index{};
         checked(xrAcquireSwapchainImage(vignette_chain_,&acquire,&index),"Acquire comfort vignette");
         XrSwapchainImageWaitInfo wait{};wait.type=XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO;wait.timeout=1'000'000'000;
@@ -800,6 +861,8 @@ private:
             }
         } catch(...) {xrReleaseSwapchainImage(vignette_chain_,&release);throw;}
         checked(xrReleaseSwapchainImage(vignette_chain_,&release),"Release comfort vignette");
+        overlay_rendered(OverlayKind::vignette,overlay_key);
+        }
         constexpr float distance=1.f,extent=3.f; // 3 m square at 1 m: +-56 degrees; the clear centre (radius .55) is +-39 degrees
         XrCompositionLayerQuad layer{};layer.type=XR_TYPE_COMPOSITION_LAYER_QUAD;
         layer.layerFlags=XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT|XR_COMPOSITION_LAYER_UNPREMULTIPLIED_ALPHA_BIT;layer.eyeVisibility=XR_EYE_VISIBILITY_BOTH;
@@ -1160,24 +1223,27 @@ public:
     // Latest completed HUD window surface (or null to hide it); set each frame by the producer.
     // Same hold as world_ui: a frame without a fresh panel capture re-shows the last image (up to 400 ms)
     // and keeps the window's placement, instead of blinking and re-placing the window.
-    void hud_window(ID3D11Texture2D* source) {
+    // draw_tick: when the engine last drew into the captured surface (0 = unknown: the image is then redrawn every frame).
+    void hud_window(ID3D11Texture2D* source,std::uint64_t draw_tick=0) {
         const auto now=GetTickCount64();
         if(!source && hud_window_source_ && hud_window_chain_ && now-hud_window_fresh_tick_<400) {hud_window_stale_=true;return;}
         if(!source) hud_window_.reset();
         hud_window_source_=source;hud_window_stale_=false;if(source) hud_window_fresh_tick_=now;
+        hud_window_draw_tick_=draw_tick?draw_tick:++unknown_draw_tick_;
     }
     UINT64 hud_window_layers{};
     // A frame without a completed capture re-shows the last released image (up to 400 ms) instead of
     // dropping the layer: dropping it made the open wheel blink while its art updated.
     // full_height: the movie lays controls at its top/bottom edges, outside the 16:9 band (the black market, sim v381: its
     // category bar, money and Purchase/Back rows sat at 78-96% of the height and were cut off).
-    void world_ui(ID3D11Texture2D* source,unsigned kind,bool full_height=false) {
+    void world_ui(ID3D11Texture2D* source,unsigned kind,bool full_height=false,std::uint64_t draw_tick=0) {
         if(kind>3) kind=0;world_ui_full_=kind==1 || full_height;
         if(!kind) {world_ui_kind_=0;world_ui_source_.Reset();world_ui_pose_valid_=false;world_ui_stale_=false;return;}
         const auto now=GetTickCount64();
         if(!source && kind==world_ui_kind_ && world_ui_source_ && world_ui_chain_ && now-world_ui_fresh_tick_<400) {world_ui_stale_=true;return;}
         if(kind!=world_ui_kind_) world_ui_pose_valid_=false;
         world_ui_kind_=kind;world_ui_source_=source;world_ui_stale_=false;if(source) world_ui_fresh_tick_=now;
+        world_ui_draw_tick_=draw_tick?draw_tick:++unknown_draw_tick_;
     }
     ControllerInput controller_input{};
     NativeMenuInput native_menu_input{};
@@ -1471,7 +1537,7 @@ public:
             XrFrameEndInfo end{};end.type=XR_TYPE_FRAME_END_INFO;end.displayTime=frame_.predictedDisplayTime;
             end.environmentBlendMode=XR_ENVIRONMENT_BLEND_MODE_OPAQUE;xrEndFrame(session_,&end);frame_open_=false;
         }
-        context_.Reset();
+        context_.Reset();invalidate_overlays();chain_generations_.clear(); // a restarted session re-renders every overlay
         settings_texture_.Reset();settings_compositor_.reset();
         world_ui_source_.Reset();world_ui_images_.clear();
         hud_window_source_.Reset();hud_window_images_.clear();
@@ -1761,7 +1827,7 @@ public:
                 Microsoft::WRL::ComPtr<ID3D11Device> device;context_->GetDevice(&device);sharpen_=std::make_unique<EyeSharpen>(device.Get());
             }
             std::array<std::optional<MirrorRect>,2> mirror_rects{};D3D11_TEXTURE2D_DESC desktop_desc{};
-            if(gameplay && desktop) {
+            if(gameplay && desktop && mirror_draws(static_cast<int>(settings_.mirror()))) { // monitor view off: no layout, canvas or copy
                 desktop->GetDesc(&desktop_desc);
                 // Lay out in the displayed window's pixels, then map into the stretched backbuffer.
                 const auto view=desktop_view[0] && desktop_view[1]?desktop_view:std::array<UINT,2>{desktop_desc.Width,desktop_desc.Height};
@@ -1777,10 +1843,11 @@ public:
                 const bool alt_stale=alternate_enabled && alternate_fresh_eye>=0 && static_cast<int>(eye)!=alternate_fresh_eye;
                 if(alt_stale) sources[eye]=alt_kept_[eye].Get();
                 XrSwapchainImageAcquireInfo acquire{};acquire.type=XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO;uint32_t index{};
+                {SpanClock span(xr_spans,XrSpan::acquire_wait);
                 checked(xrAcquireSwapchainImage(chains_[eye],&acquire,&index),"Acquire game eye");
                 XrSwapchainImageWaitInfo image_wait{};image_wait.type=XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO;image_wait.timeout=1'000'000'000;
                 auto ready=xrWaitSwapchainImage(chains_[eye],&image_wait);checked(ready,"Wait game eye");
-                if(ready==XR_TIMEOUT_EXPIRED) throw std::runtime_error("Game eye wait timed out");
+                if(ready==XR_TIMEOUT_EXPIRED) throw std::runtime_error("Game eye wait timed out");}
                 XrSwapchainImageReleaseInfo release{};release.type=XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO;
                 try {
                 D3D11_TEXTURE2D_DESC desc{};sources[eye]->GetDesc(&desc);
@@ -1789,10 +1856,12 @@ public:
                 // Independent per-eye processing; menus retain the exact native image.
                 ID3D11Texture2D* processed=nullptr;
                 {ModGpuScope aa_scope(context_.Get(),ModSpan::aa_sharpen); // task 3b
+                SpanClock span(xr_spans,XrSpan::aa_sharpen);
                 processed=gameplay && antialiasing_enabled_ && alternate_smaa_applies(alternate_enabled,settings_.temporal_aa()) && !alt_stale?antialiasing_->apply(sources[eye]):sources[eye]; // FSR 3 already anti-aliased
                 // Sharpening also helps menu text (menus get no SMAA).
                 if(sharpness>0 && !alt_stale) processed=sharpen_->apply(processed,sharpness);}
                 {ModGpuScope copy_scope(context_.Get(),ModSpan::eye_copy); // task 3b
+                SpanClock span(xr_spans,XrSpan::copy);
                 if(settings_.open() && !gameplay) {
                     const auto view=menu_view();
                     const auto rect=SettingsMenuLayout::image_rect(width_,height_,view.y,view.rows);
@@ -1807,6 +1876,7 @@ public:
                     else alt_records_[eye]={}; // a cut, takedown or settings image is shown now and never kept
                 }
                 {ModGpuScope overlay_scope(context_.Get(),ModSpan::eye_overlay); // task 3b: native object art + desktop mirror draws
+                SpanClock span(xr_spans,XrSpan::overlay_draws);
                 layers[eye].type=XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW;
                 layers[eye].pose=tracked_pair_()?tracked_view_(eye).pose:views_[eye].pose;
                 layers[eye].fov=tracked_pair_()?tracked_view_(eye).fov:XrFovf{-hfov*.5f,hfov*.5f,vfov*.5f,-vfov*.5f};
@@ -1827,9 +1897,9 @@ public:
                 if(eye==0 && !world_scene) menu_band_ready=copy_menu_band(images_[0].at(index).texture);
                 layers[eye].subImage.swapchain=chains_[eye];
                 layers[eye].subImage.imageRect.extent={static_cast<int32_t>(width_),static_cast<int32_t>(height_)};
-                    if(observe_transfer && !settings_.open()) observe_transfer(eye,processed,images_[eye].at(index).texture,layers[eye],gameplay,tracked_pair_(),sources[eye]);
+                    if(observe_transfer && !settings_.open()) {SpanClock span(xr_spans,XrSpan::transfer_observer);observe_transfer(eye,processed,images_[eye].at(index).texture,layers[eye],gameplay,tracked_pair_(),sources[eye]);}
                 } catch(...) {xrReleaseSwapchainImage(chains_[eye],&release);throw;}
-                checked(xrReleaseSwapchainImage(chains_[eye],&release),"Release game eye");
+                {SpanClock span(xr_spans,XrSpan::release);checked(xrReleaseSwapchainImage(chains_[eye],&release),"Release game eye");}
             }
             if(mirror_rects[0] || mirror_rects[1]) {mirror_->end(desktop);++mirrored_frames;}
             if(!world_scene) {
@@ -1848,6 +1918,7 @@ public:
             end.layerCount=world_scene || menu_band_ready?1:0;end.layers=&layer; // no band chain yet (between a resize and prepare_overlays): nothing this frame
             if(world_scene && !authored_camera) {
                 ModGpuScope layers_scope(context_.Get(),ModSpan::layer_overlays); // task 3b: HUD/wrist/vignette panel updates
+                SpanClock layers_span(xr_spans,XrSpan::overlay_layers);
                 // Projection first, then the wrist controls card.
                 end.layerCount=0;menu_layers_with_pointer[end.layerCount++]=layer;
                 if(world_ui_kind_ && world_ui_source_) {
@@ -1879,9 +1950,11 @@ public:
                     menu_layers_with_pointer[end.layerCount++]=reinterpret_cast<const XrCompositionLayerBaseHeader*>(&*vignette_panel);++vignette_layers;
                 }
                 end.layers=menu_layers_with_pointer.data();
+                overlay_stats.end_frame();
             }
         }
         timing.transfer_ns=cpu_time_ns()-stage_start;stage_start=cpu_time_ns();
+        xr_spans.end_frame();
         std::array<const XrCompositionLayerBaseHeader*,12> kept{}; // end.layers points here through xrEndFrame and the failure dump
         {static const char* const kinds[]={"projection","quad","cylinder","other"};
         const auto guard=guard_frame_layers(end,kept.data(),kept.size());

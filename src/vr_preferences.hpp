@@ -8,7 +8,7 @@
 #include <windows.h>
 
 namespace d2vr {
-enum class MirrorMode {right_eye=0,left_eye=1,both_eyes=2};
+enum class MirrorMode {right_eye=0,left_eye=1,both_eyes=2,off=3}; // off: the desktop window gets no copy of either eye (the game keeps presenting its own window)
 struct VrPreferences {
     double resolution=1;
     bool antialiasing=true;
@@ -23,8 +23,8 @@ struct VrPreferences {
 inline void validate_preferences(const VrPreferences& p) {
     if(!std::isfinite(p.resolution) || p.resolution<.5 || p.resolution>2)
         throw std::invalid_argument("VR preference resolution must be 0.5 to 2.0");
-    if(p.mirror<MirrorMode::right_eye || p.mirror>MirrorMode::both_eyes)
-        throw std::invalid_argument("VR preference mirror mode must be right eye, left eye or both eyes");
+    if(p.mirror<MirrorMode::right_eye || p.mirror>MirrorMode::off)
+        throw std::invalid_argument("VR preference mirror mode must be right eye, left eye, both eyes or off");
     if(!std::isfinite(p.sharpness) || p.sharpness<0 || p.sharpness>1)
         throw std::invalid_argument("VR preference sharpness must be 0.0 to 1.0");
     if(p.hud_percent<50 || p.hud_percent>200) throw std::invalid_argument("VR preference HUD size must be 50 to 200 percent");
@@ -45,7 +45,7 @@ inline std::optional<VrPreferences> load_preferences(const std::filesystem::path
         throw std::runtime_error("Invalid VR preferences; the saved file was preserved");
     // Version 2 predates the mirror/sharpness rows.
     if(version>=2) {
-        if(!(in>>mirror>>p.sharpness) || mirror<0 || mirror>2 || !std::isfinite(p.sharpness) || p.sharpness<0 || p.sharpness>1)
+        if(!(in>>mirror>>p.sharpness) || mirror<0 || mirror>3 || !std::isfinite(p.sharpness) || p.sharpness<0 || p.sharpness>1)
             throw std::runtime_error("Invalid VR preferences; the saved file was preserved");
         p.mirror=static_cast<MirrorMode>(mirror);
     }

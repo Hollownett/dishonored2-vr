@@ -35,7 +35,7 @@ public sealed class Prefs
     public string Validate()
     {
         if (Resolution < .5 || Resolution > 2) return "Resolution must be 0.5 to 2.0.";
-        if (Mirror is < 0 or > 2) return "Monitor view must be right, left or both eyes.";
+        if (Mirror is < 0 or > 3) return "Monitor view must be right, left, both eyes or off.";
         if (Sharpness < 0 || Sharpness > 1) return "Sharpening must be 0 to 1.";
         if (Hud < 50 || Hud > 100) return "HUD size must be 50 to 100 percent.";
         if (TemporalAa is < 0 or > 6) return "Anti-aliasing mode must be 0 to 6.";

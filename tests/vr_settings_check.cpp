@@ -378,6 +378,24 @@ int main() {
             saved->turning.smooth_degrees_per_second==120 && saved->mirror==MirrorMode::left_eye && saved->sharpness==.75 && !saved->temporal_aa &&
             saved->hud_percent==65 && saved->controls_hint,
             "Version 4 preference round trip differs");
+        { // mirror_off_round_trips: the fourth monitor view saves, loads, validates and never cycles into itself
+            const auto off_file=std::filesystem::path("build/vr-settings-test-off.cfg");
+            save_preferences(off_file,{1.0,true,{TurnControl::Mode::snap,45,90},MirrorMode::off,.5,2,65,true});
+            const auto off=load_preferences(off_file);
+            require(off && off->mirror==MirrorMode::off && static_cast<int>(off->mirror)==3,"Mirror off did not round trip");
+            bool rejected=false;try {save_preferences(off_file,{1.0,true,{TurnControl::Mode::snap,45,90},static_cast<MirrorMode>(4),.5,2,65,true});} catch(const std::invalid_argument&) {rejected=true;}
+            require(rejected,"Mirror mode 4 was accepted");
+            {std::ofstream raw(off_file,std::ios::trunc);raw<<"7 1 1 0 45 90 4 0.5 2 65 1 0 0 0 0 0\n";}
+            bool refused=false;try {load_preferences(off_file);} catch(const std::runtime_error&) {refused=true;}
+            require(refused,"A saved mirror mode 4 loaded");
+            std::error_code ignored;std::filesystem::remove(off_file,ignored);
+            auto off_settings=menu;off_settings.set_mirror(MirrorMode::off);
+            require(std::wstring(off_settings.mirror_text())==L"Monitor view: Off","Mirror off has no label");
+            off_settings.cycle_mirror(1); // the panel row steps away from off onto a real view
+            require(off_settings.mirror()==MirrorMode::right_eye,"Stepping forward from off did not land on the right eye");
+            off_settings.set_mirror(MirrorMode::off);off_settings.cycle_mirror(-1);require(off_settings.mirror()==MirrorMode::both_eyes,"Stepping back from off did not land on both eyes");
+            off_settings.set_mirror(MirrorMode::both_eyes);off_settings.cycle_mirror(1);require(off_settings.mirror()==MirrorMode::right_eye,"The three views no longer wrap");
+        }
         bool rejected=false;try {save_preferences(preference_file,{.1,false,{}});} catch(const std::invalid_argument&) {rejected=true;}
         require(rejected && load_preferences(preference_file)->resolution==1.3,"Invalid save changed working preferences");
         rejected=false;try {save_preferences(preference_file,{1.3,false,{},MirrorMode::both_eyes,1.5});} catch(const std::invalid_argument&) {rejected=true;}
@@ -445,7 +463,7 @@ int main() {
         {std::ofstream invalid(preference_file);invalid<<"3 1.3 1 2 45 120 0 0.5 2";}
         rejected=false;try {load_preferences(preference_file);} catch(const std::runtime_error&) {rejected=true;}
         require(rejected,"Out-of-range temporal AA was loaded");
-        {std::ofstream invalid(preference_file);invalid<<"2 1.3 1 2 45 120 3 0.5";}
+        {std::ofstream invalid(preference_file);invalid<<"2 1.3 1 2 45 120 4 0.5";}
         rejected=false;try {load_preferences(preference_file);} catch(const std::runtime_error&) {rejected=true;}
         require(rejected,"Out-of-range monitor view was loaded");
         {std::ofstream invalid(preference_file);invalid<<"2 1.3 1 2 45 120 0 1.5";}

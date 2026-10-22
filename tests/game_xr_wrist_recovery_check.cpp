@@ -83,6 +83,8 @@ int main() {
                 for(unsigned poll=0;poll<100 && created==base;++poll) {Sleep(1);frame();}
                 assert(created==base+1 && xr.wrist_target_creations==6 && sim::chains.size()==base);
                 assert(xr.native_art_presented(1,true));
+                // Plan E task 4: unchanged art re-submits the last released image without drawing, so the observer (and its fault) needs a changed crop.
+                assert(xr.native_art_source(1,true,grown.Get(),{0,0,0,149,24,1},123,xr.pose_epoch(),GetTickCount64()));
                 observer_fault=true;frame();assert(xr.wrist_failures==1 && xr.last_layer_submitted);
                 assert(sim::summary.overlays.empty());observer_fault=false;
                 assert(!xr.native_art_presented(1,true));

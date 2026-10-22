@@ -170,6 +170,22 @@
    "default": true
   },
   {
+   "id": "overlay-skip",
+   "file": "no-overlay-skip",
+   "kind": "disable",
+   "label": "Redraw HUD panels only when they change",
+   "help": "The HUD, wrist watches, controls card, settings panel and wheel dot send the headset a new image only when their picture changed, and reuse the last one otherwise. Turn off to send a new image every frame as before.",
+   "default": true
+  },
+  {
+   "id": "discovery-throttle",
+   "file": "no-discovery-throttle",
+   "kind": "disable",
+   "label": "Check the game's screen state less often when nothing changes",
+   "help": "After about two seconds of an unchanged game state (playing, in a menu), the mod re-reads it every eighth frame instead of every frame. A change is noticed within eight frames. Turn off to read it every time.",
+   "default": true
+  },
+  {
    "id": "performance-mode",
    "file": "alternate-eye",
    "kind": "enable",

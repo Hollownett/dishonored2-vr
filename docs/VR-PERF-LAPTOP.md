@@ -354,3 +354,37 @@ Evidence (sim run 20261021T230548, `build/alt-taa-trace`, 100 gameplay frames, f
 - `fsr_vfov`, the jitter counter and `eye_jitter` are indexed by the logical eye in either path.
 - M2 image with temporal AA forced off (run above, one still frame): clean edges, no doubled outline. One frame cannot show temporal
   ghosting, and the removed history means there is none to ghost; judging the SMAA-only edge quality and the shimmer needs the headset.
+
+## Cutting the mod's own per-frame cost (plan E Task 4)
+
+Three changes, each with a knob that restores the old behaviour:
+
+1. **Discovery cadence** (`src/discovery_cadence.hpp`, knob `no-discovery-throttle`). `game_logic_mask()` re-read the engine's manager table on every call; the render path makes about 90 calls a frame. Now the first call of a frame decides for the whole frame: every frame until the answer has been unchanged for 120 frames, then every 8th frame (the others return the last answer). A failed validation, the game leaving state 3 (a load) and a pose-epoch change bring back every-frame reads. A real change (a menu opening) can therefore be noticed up to 7 frames late once the state has been stable for 120 frames (about 80 ms at 90 Hz, about 300 ms at the headset's 22 fps).
+2. **Overlay swapchains** (`src/overlay_dirty.hpp`, knob `no-overlay-skip`). The HUD window, wrists, controls card, settings panel, world UI, wheel dot and comfort vignette acquire, draw and release an image only when their content changed; otherwise the quad re-submits its last released image (allowed by OpenXR, and the same mechanism the stale world UI / HUD hold already used). Each kind has its own dirty key:
+
+   | Kind | Key |
+   | --- | --- |
+   | HUD window | capture texture, the engine's last draw tick of that surface (`WorldUiCapture::Snapshot::recorded_tick`), crop box |
+   | World UI | capture texture, draw tick, panel kind, full-height flag, copied width and rows |
+   | Wrist (each side) | art texture, its capture tick and owner, crop, alpha mode, the mana half's same facts, canvas size |
+   | Controls card, wheel dot | constant (the pixels never change; one fill per runtime image) |
+   | Settings panel | a counter that moves only when the generated 640x560 pixels differ from the previous ones |
+   | Comfort vignette | constant with colour-scale; otherwise the number of alpha bakes (at most 10 a second) |
+
+   Never skipped: the first frame of a (re)created swapchain (every chain made through `create_overlay_chain` gets a new generation), a pose-epoch change, a session close, any render that did not finish (the gate is invalid from the moment a render starts until its release), and an image older than 500 ms for the tick-keyed kinds (a draw inside the same millisecond is invisible to a tick). Spaces, sizes and poses of the layers are unchanged, so every layer still passes `xr_quad_validation.hpp`.
+3. **Monitor view `off`** (`MirrorMode::off=3`, in `vr-settings.cfg`, the launcher and the native options page). No layout, canvas or desktop copy. The game's own Present still runs: its measured cost is 0.02 ms (headset `desktop_present_cpu_ns` p50), so skipping it would risk the window and swapchain for nothing. Default stays right eye.
+
+Status (`xr-live-status.json`): `overlay_releases_per_frame` (p50 per overlay frame), `overlay_skipped`, `overlay_released`, `overlay_frames`, `overlay_skips_per_frame`, `overlay_by_kind` (`[released, skipped]` per kind), `discovery` (`reads`, `served_from_cache`, `invalidations`) and `xr_cpu_spans_ms` (measurement only: `[p50, p95]` ms per frame of the acquire+wait, AA/sharpen, eye copy, overlay draws, transfer observer, release and overlay-layer steps, both eyes summed).
+
+Measured 2026-10-22 on the sim rig (throughput without a compositor, not headset fps; wineopenxr is not in the path, so the xr-call saving is NOT visible here). `oil_tank_drop --lead 28 --seconds 120 --knob native-gpu-timing`, NVIDIA RTX 3070 mobile, user knobs `fsr4.off`, `carry-trace`, `full-body` present in every run. Before = HEAD 9d00077 built as `d2vr_render_probe_arm_v600.dll` (sha256 41fdc12c84e4f2923d103388ec881d9e0604d3c6e0c9a6f8c71e67e91cfdf1d1); after = the Task 4 change. Installed DLL ff0daf65...bc927 verified after every run, no knob or marker left.
+
+| Run | Build | Run dir | hook p50 (ms) | interval p50 / p95 (ms) | eye1 p50 | releases / frame p50 | overlay_skipped |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 1 | before | 20261022T050544 | 0.793 | 13.93 / 16.08 | 9.69 | n/a | n/a |
+| 2 | after | 20261022T051745 | 0.445 | 11.04 / 14.58 | 7.06 | 1 | 707 |
+| 3 | after | 20261022T052103 | 0.414 | 11.30 / 14.74 | 7.49 | 1 | 690 |
+| 4 | before | 20261022T052349 | 0.809 | 14.25 / 15.56 | 9.93 | n/a | n/a |
+
+Hook p50 drops 0.35-0.39 ms in both after runs against both before runs (gate: at least 0.2 ms in two runs). The interval drops 2.6-3.2 ms: the 86 % of `game_logic_mask` calls now answered from the cache (`discovery`: about 150 000 reads against 910 000-927 000 cached calls per run) were costing more than the hook shows; the extra is probably calls made from the engine's own eye-begin and hook paths, which are outside the hook span (not separated by a measurement). Overlays in the sim: the HUD window releases once per frame (7415-7523 releases, 0 skips) because the engine redraws that surface every frame, so its tick changes every frame; only the left wrist is held (177-181 releases, 690-707 skips). So in the sim `overlay_releases_per_frame` is 1 and the HUD window is the whole overlay cost. Separating the discovery and overlay shares would take another pair of runs with one knob each; it was not done (4-run limit).
+
+Other xr-facing work per frame (measured, not changed; sim p50 / p95 ms, both eyes summed, `xr_cpu_spans_ms`): acquire+wait 0.001 / 0.0015, AA+sharpen CPU 0.035 / 0.060, eye copy (`CopyResource`) 0.001 / 0.002, overlay draws 0.065 / 0.113, transfer observer 0.001 / 0.23, release 0.0003 / 0.0008, overlay layers 0.005 / 0.009. These are near zero under the sim's scripted XR backend; the headset's 1.1 ms transfer (p95 10 ms) will show which of them is expensive under wineopenxr once a session records `xr_cpu_spans_ms`.

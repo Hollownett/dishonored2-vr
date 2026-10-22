@@ -181,6 +181,16 @@ int main() {
         assert(xr.native_menu_input.active && !xr.last_pointer_layer && xr.pointer_layers==0);
         sim::control.grips[0].position.x+=.2f;frame(false,false,true,false);
         assert(sim::summary.overlays.front().pose.position.x==dial_pose.position.x);
+        { // Plan E task 4: the same capture (same draw tick) is not copied again but the quad is still submitted; a new tick copies again.
+            xr.world_ui(left.Get(),1,false,900);frame(false,false,true,false);
+            const auto kind=d2vr::OverlayKind::world_ui;
+            const auto skipped_before=xr.overlay_stats.skipped(kind),drawn_before=xr.overlay_stats.released(kind);
+            xr.world_ui(left.Get(),1,false,900);frame(false,false,true,false);
+            assert(xr.last_world_ui_layer && !sim::summary.overlays.empty());
+            assert(xr.overlay_stats.skipped(kind)==skipped_before+1 && xr.overlay_stats.released(kind)==drawn_before);
+            xr.world_ui(left.Get(),1,false,901);frame(false,false,true,false);
+            assert(xr.last_world_ui_layer && xr.overlay_stats.released(kind)==drawn_before+1 && xr.overlay_stats.skipped(kind)==skipped_before+1);
+        }
         xr.world_ui(left.Get(),3);frame(false,false,true,false);
         const auto text_pose=sim::summary.overlays.front().pose;
         assert(std::abs(text_pose.position.y-sim::control.head.position.y)<1e-5f);

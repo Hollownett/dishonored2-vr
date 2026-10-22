@@ -76,7 +76,6 @@ class VrSettings {
         }
         turning_=choices[(current+direction+static_cast<int>(choices.size()))%choices.size()];
     }
-    void cycle_mirror(int direction) {mirror_=static_cast<MirrorMode>((static_cast<int>(mirror_)+direction+3)%3);}
     void cycle_sharpness(int direction) {
         constexpr std::array<double,5> choices{{0,.25,.5,.75,1}};
         int current=2;
@@ -84,6 +83,11 @@ class VrSettings {
         sharpness_=choices[(current+direction+static_cast<int>(choices.size()))%choices.size()];
     }
 public:
+    // The panel cycles the three views; "off" is set from the launcher or the native options page, and stepping away from it lands on a view.
+    void cycle_mirror(int direction) {
+        if(mirror_==MirrorMode::off) {mirror_=direction>=0?MirrorMode::right_eye:MirrorMode::both_eyes;return;}
+        mirror_=static_cast<MirrorMode>((static_cast<int>(mirror_)+direction+3)%3);
+    }
     struct PalmOffsetChange {unsigned side{};PalmOffset value{};};
     struct Changes {std::optional<double> resolution;std::optional<bool> antialiasing;std::optional<int> temporal_aa;std::optional<TurnControl::Config> turning;
                    std::optional<MirrorMode> mirror;std::optional<double> sharpness;std::optional<int> hud_percent;std::optional<bool> controls_hint;
@@ -210,6 +214,7 @@ public:
         switch(mirror_) {
             case MirrorMode::right_eye:return L"Monitor view: Right eye";
             case MirrorMode::left_eye:return L"Monitor view: Left eye";
+            case MirrorMode::off:return L"Monitor view: Off";
             default:return L"Monitor view: Both eyes";
         }
     }

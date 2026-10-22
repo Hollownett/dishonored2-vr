@@ -52,6 +52,8 @@
 #include "comfort_vignette.hpp"
 #include "perf_meter.hpp"
 #include "frame_split.hpp"
+#include "discovery_cadence.hpp"
+#include "overlay_dirty.hpp"
 #include "mod_gpu_timer.hpp"
 #include "authored_view.hpp"
 #include "corpse_diagnostics.hpp"
@@ -3198,6 +3200,32 @@ static void poll_test_commands() noexcept {
         for(const auto& l:lines) out<<now<<' '<<run_test_command(l)<<std::endl;
     } catch(...) {}
 }
+// Plan E task 4: the manager-table discovery below runs every frame until its answer has been unchanged for 120 frames, then every 8th
+// frame (the other frames return the last answer). A failed validation, a load (game state != 3) or a pose-epoch change brings back
+// every-frame reads. Knob build/no-discovery-throttle keeps the every-call read.
+static bool discovery_throttle_enabled=true;
+static struct DiscoveryThrottle {
+    std::mutex mutex;d2vr::DiscoveryCadence cadence;UINT mask{};bool have{},changed{},last_due{true};std::uint64_t epoch{},decided_frame{~0ull};
+    void restart() {cadence.invalidate();have=false;decided_frame=~0ull;}
+    std::atomic<UINT64> served_from_cache{},reads{};
+} discovery_throttle;
+static std::string discovery_status_json() {
+    std::lock_guard<std::mutex> lock(discovery_throttle.mutex);
+    std::ostringstream o;o<<"{\"throttle\":"<<(discovery_throttle_enabled?"true":"false")<<",\"throttling\":"<<(discovery_throttle.cadence.throttling()?"true":"false")
+        <<",\"reads\":"<<discovery_throttle.reads.load()<<",\"served_from_cache\":"<<discovery_throttle.served_from_cache.load()
+        <<",\"invalidations\":"<<discovery_throttle.cadence.invalidations()<<'}';
+    return o.str();
+}
+static std::string overlay_status_json() {
+    std::ostringstream o;
+    if(!game_xr) {o<<"\"overlay_releases_per_frame\":null,\"overlay_skipped\":null";return o.str();}
+    const auto& stats=game_xr->overlay_stats;
+    o<<"\"overlay_releases_per_frame\":"<<stats.releases_per_frame_p50()<<",\"overlay_skipped\":"<<stats.skipped()<<",\"overlay_released\":"<<stats.released()
+     <<",\"overlay_frames\":"<<stats.frames()<<",\"overlay_skips_per_frame\":"<<stats.skips_per_frame_p50()
+     <<",\"overlay_skip_enabled\":"<<(d2vr::GameXr::overlay_skip_enabled?"true":"false")<<",\"overlay_by_kind\":"<<stats.by_kind_json()<<",\"xr_cpu_spans_ms\":"<<game_xr->xr_spans.json()
+     <<",\"discovery\":"<<discovery_status_json();
+    return o.str();
+}
 UINT game_logic_mask() {
     CpuSpan discovery_span{logic_discovery_cpu_ns};
     // MIT headtracking profile, corroborated against the live engine manager.
@@ -3205,10 +3233,35 @@ UINT game_logic_mask() {
     std::uintptr_t game{},vtable{};int state{};
     if(!read_self(image_base+0x39a5290,&game,8) || !game ||
        !read_self(game,&vtable,8) || vtable!=image_base+0x1c940a8 ||
-       !read_self(game+0x341058,&state,4) || state!=3) return 0;
+       !read_self(game+0x341058,&state,4) || state!=3) {
+        if(discovery_throttle_enabled) {std::lock_guard<std::mutex> lock(discovery_throttle.mutex);discovery_throttle.restart();}
+        return 0;
+    }
+    if(discovery_throttle_enabled) {
+        std::lock_guard<std::mutex> lock(discovery_throttle.mutex);
+        const auto epoch=game_xr?game_xr->pose_epoch():0;
+        if(epoch!=discovery_throttle.epoch) {discovery_throttle.epoch=epoch;discovery_throttle.restart();}
+        const auto frame=frames.load(std::memory_order_relaxed);
+        if(frame!=discovery_throttle.decided_frame) { // the first call of a frame decides for the whole frame
+            discovery_throttle.last_due=discovery_throttle.cadence.due(frame,!discovery_throttle.changed);
+            discovery_throttle.changed=false;discovery_throttle.decided_frame=frame;
+        }
+        const bool due=discovery_throttle.last_due;
+        if(!due && discovery_throttle.have) {discovery_throttle.served_from_cache.fetch_add(1,std::memory_order_relaxed);return discovery_throttle.mask;}
+    }
+    const auto publish=[](UINT answer) {
+        if(!discovery_throttle_enabled) return answer;
+        std::lock_guard<std::mutex> lock(discovery_throttle.mutex);
+        if(!discovery_throttle.have || discovery_throttle.mask!=answer) discovery_throttle.changed=true;
+        discovery_throttle.mask=answer;discovery_throttle.have=true;discovery_throttle.reads.fetch_add(1,std::memory_order_relaxed);
+        return answer;
+    };
     const auto manager=game+0x1f6ec8;
     std::array<std::uintptr_t,0x8b8/8> entries{};
-    if(!read_self(manager,entries.data(),sizeof(entries))) return 0;
+    if(!read_self(manager,entries.data(),sizeof(entries))) {
+        if(discovery_throttle_enabled) {std::lock_guard<std::mutex> lock(discovery_throttle.mutex);discovery_throttle.restart();}
+        return 0;
+    }
     // The manager mixes scalars and pointers. Validate ranges before discovery.
     // Keep slots that validated as logic entries and re-probe
     // everything only every 250 ms or when one of those slots changes.
@@ -3236,7 +3289,7 @@ UINT game_logic_mask() {
         std::memcpy(&backref,bytes.data()+8,8);std::memcpy(&id,bytes.data()+0x18,4);
         if(backref==manager && id>0 && id<17 && bytes[0x40]==std::byte{1}) mask|=1u<<id;
     }
-    return mask;
+    return publish(mask);
 }
 
 void trace_avatar_fit(const char* reason,UINT64 present,const std::shared_ptr<const d2vr::rig::NativeArmBindingSnapshot>& rig) {
@@ -6645,7 +6698,7 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                 const auto ui=index<3?world_ui_capture.snapshot(index):d2vr::WorldUiCapture::Snapshot{};
                                 const auto now=GetTickCount64();
                                 const bool fresh=ui && world_ui_completion.ready(index,0,ui.scope_id) && now>=ui.recorded_tick && now-ui.recorded_tick<250;
-                                game_xr->world_ui(fresh?ui.texture.Get():nullptr,static_cast<unsigned>(kind),logic==1024); // black market: whole image
+                                game_xr->world_ui(fresh?ui.texture.Get():nullptr,static_cast<unsigned>(kind),logic==1024,fresh?ui.recorded_tick:0); // black market: whole image; the capture's draw tick keys the overlay redraw
                                 if(fresh) ui_dump(L"wheel",ui.texture.Get());
                                 if(fresh && !world_ui_first_seen[index]) world_ui_first_seen[index]=now;
                                 if(fresh && !world_ui_captured[index] && now-world_ui_first_seen[index]>=500) {
@@ -6674,7 +6727,7 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                     const auto snap=native_hud_art_capture.snapshot(12);const auto n=GetTickCount64();
                                     if(snap.image && n>=snap.image.recorded_tick && n-snap.image.recorded_tick<250) panel=snap.image;
                                 }
-                                game_xr->hud_window(panel.texture.Get());
+                                game_xr->hud_window(panel.texture.Get(),panel.recorded_tick);
                                 if(panel.texture) ui_dump(L"hud",panel.texture.Get());
                             }
                             const auto now_status=GetTickCount64();
@@ -6918,7 +6971,7 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                      << ",\"native_arm_reach_clamps\":[" << arm_pose_clamps[0].load() << ',' << arm_pose_clamps[1].load() << ']'
                                      << ",\"native_controller_reads\":" << controller_bridge.reads()
                                      << ",\"native_virtual_controller_reads\":" << controller_bridge.virtual_reads()
-                                     << ",\"native_nonzero_controller_reads\":" << controller_bridge.nonzero_reads() << ",\"native_lb_reads\":" << controller_bridge.lb_reads() << ",\"wheel_frames\":" << wheel_frames << ",\"logic_mask\":" << published_logic.load() << ",\"published_move\":[" << published_move_x.load() << ',' << published_move_y.load() << ']' << ",\"hint_layers\":" << (game_xr?game_xr->hint_layers:0) << ",\"layer_pose_repaired\":[" << (game_xr?game_xr->layer_pose_repaired[0]:0) << ',' << (game_xr?game_xr->layer_pose_repaired[1]:0) << ',' << (game_xr?game_xr->layer_pose_repaired[2]:0) << "],\"layer_pose_dropped\":[" << (game_xr?game_xr->layer_pose_dropped[0]:0) << ',' << (game_xr?game_xr->layer_pose_dropped[1]:0) << ',' << (game_xr?game_xr->layer_pose_dropped[2]:0) << "],\"layer_pose_no_submit\":" << (game_xr?game_xr->layer_pose_no_submit:0) << ",\"subrect_layers\":" << (game_xr?game_xr->subrect_layers:0) << ",\"swapchain_creates_in_frame\":" << (game_xr?game_xr->swapchain_creates_in_frame:0) << ",\"end_frame_rejections\":" << (game_xr?game_xr->end_frame_rejections:0) << ",\"layer_pose_last\":\"" << (game_xr?game_xr->layer_pose_last:std::string()) << '"' << ",\"lb_inputs\":" << controller_bridge.lb_inputs() << ",\"lb_published\":" << controller_bridge.lb_published() << ",\"wheel_logic\":" << wheel_logic << ",\"native_x_reads\":" << controller_bridge.x_reads()
+                                     << ",\"native_nonzero_controller_reads\":" << controller_bridge.nonzero_reads() << ",\"native_lb_reads\":" << controller_bridge.lb_reads() << ",\"wheel_frames\":" << wheel_frames << ",\"logic_mask\":" << published_logic.load() << ",\"published_move\":[" << published_move_x.load() << ',' << published_move_y.load() << ']' << ",\"hint_layers\":" << (game_xr?game_xr->hint_layers:0) << ',' << overlay_status_json() << ",\"layer_pose_repaired\":[" << (game_xr?game_xr->layer_pose_repaired[0]:0) << ',' << (game_xr?game_xr->layer_pose_repaired[1]:0) << ',' << (game_xr?game_xr->layer_pose_repaired[2]:0) << "],\"layer_pose_dropped\":[" << (game_xr?game_xr->layer_pose_dropped[0]:0) << ',' << (game_xr?game_xr->layer_pose_dropped[1]:0) << ',' << (game_xr?game_xr->layer_pose_dropped[2]:0) << "],\"layer_pose_no_submit\":" << (game_xr?game_xr->layer_pose_no_submit:0) << ",\"subrect_layers\":" << (game_xr?game_xr->subrect_layers:0) << ",\"swapchain_creates_in_frame\":" << (game_xr?game_xr->swapchain_creates_in_frame:0) << ",\"end_frame_rejections\":" << (game_xr?game_xr->end_frame_rejections:0) << ",\"layer_pose_last\":\"" << (game_xr?game_xr->layer_pose_last:std::string()) << '"' << ",\"lb_inputs\":" << controller_bridge.lb_inputs() << ",\"lb_published\":" << controller_bridge.lb_published() << ",\"wheel_logic\":" << wheel_logic << ",\"native_x_reads\":" << controller_bridge.x_reads()
                                      << ",\"native_pause_button_reads\":" << controller_bridge.pause_reads()
                                      << ",\"native_joystick_focus_calls\":" << native_pad_focus.calls()
                                      << ",\"native_joystick_focus_overrides\":" << native_pad_focus.overrides()
@@ -8653,6 +8706,8 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
         legacy_authored_camera=fs::exists(root/L"build"/L"legacy-authored-camera");authored_heading.reset();authored_heading_now.reset();
         camera_smoothing_enabled=!fs::exists(root/L"build"/L"no-camera-smoothing");anchor_smoother.reset();anchor_smooth_frame=~0ull;
         turn_ramp_enabled=!fs::exists(root/L"build"/L"no-turn-ramp");
+        discovery_throttle_enabled=!fs::exists(root/L"build"/L"no-discovery-throttle"); // plan E task 4: discovery every 8th frame once stable
+        d2vr::GameXr::overlay_skip_enabled=!fs::exists(root/L"build"/L"no-overlay-skip");  // plan E task 4: unchanged overlays re-submit their last image
         d2vr::NativeHeldObject::legacy_throw.store(fs::exists(root/L"build"/L"legacy-throw"));
         {   // locomotion comfort vignette: on unless build/no-comfort-vignette; build/comfort-vignette may hold a 0..1 strength
             const bool vignette_on=!fs::exists(root/L"build"/L"no-comfort-vignette");
@@ -9144,7 +9199,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
                << ",\"xr_controller_samples\":" << xr_controller_samples
                << ",\"native_controller_reads\":" << controller_bridge.reads()
                << ",\"native_vr_controller_reads\":" << controller_bridge.virtual_reads()
-               << ",\"native_nonzero_vr_controller_reads\":" << controller_bridge.nonzero_reads() << ",\"native_lb_reads\":" << controller_bridge.lb_reads() << ",\"wheel_frames\":" << wheel_frames << ",\"hint_layers\":" << (game_xr?game_xr->hint_layers:0) << ",\"lb_inputs\":" << controller_bridge.lb_inputs() << ",\"lb_published\":" << controller_bridge.lb_published() << ",\"wheel_logic\":" << wheel_logic << ",\"native_x_reads\":" << controller_bridge.x_reads()
+               << ",\"native_nonzero_vr_controller_reads\":" << controller_bridge.nonzero_reads() << ",\"native_lb_reads\":" << controller_bridge.lb_reads() << ",\"wheel_frames\":" << wheel_frames << ",\"hint_layers\":" << (game_xr?game_xr->hint_layers:0) << ',' << overlay_status_json() << ",\"lb_inputs\":" << controller_bridge.lb_inputs() << ",\"lb_published\":" << controller_bridge.lb_published() << ",\"wheel_logic\":" << wheel_logic << ",\"native_x_reads\":" << controller_bridge.x_reads()
                << ",\"native_pause_button_reads\":" << controller_bridge.pause_reads()
                << ",\"head_anchor_trace_samples\":" << head_anchor_samples
                << ",\"head_calibration_captures\":" << head_calibration.captures()
