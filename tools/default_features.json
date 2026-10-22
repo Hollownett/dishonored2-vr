@@ -146,6 +146,14 @@
    "default": true
   },
   {
+   "id": "action-camera-alignment",
+   "file": "legacy-action-camera-alignment",
+   "kind": "disable",
+   "label": "Keep physical head offset during actions",
+   "help": "Preserve bounded lean and crouch compensation during head-owned actions; reset camera history when its owner, reference or action mode changes. Experimental, headset verification pending.",
+   "default": true
+  },
+  {
    "id": "camera-smoothing",
    "file": "no-camera-smoothing",
    "kind": "disable",

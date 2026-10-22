@@ -56,6 +56,7 @@
 #include "overlay_dirty.hpp"
 #include "mod_gpu_timer.hpp"
 #include "authored_view.hpp"
+#include "action_camera_alignment.hpp"
 #include "corpse_diagnostics.hpp"
 #include "drawn_anchor.hpp"
 #include "held_clamp.hpp"
@@ -375,6 +376,9 @@ static d2vr::HeldPlacementSession held_placement_session;
 static std::array<double,3> held_hand_velocity{};static std::uintptr_t held_entity{};static std::array<double,3> held_offset{};
 // Carry diagnostics (Task 9): counters always on (atomics); the per-frame trace only when build/carry-trace exists (a writer thread, capped, flushed every second and at teardown).
 static bool legacy_authored_camera=false; // build/legacy-authored-camera: authored scenes use the native camera rotation (and the +5% FOV)
+static bool action_camera_alignment_enabled=true; // build/legacy-action-camera-alignment restores pre-H5 offsets/history
+static d2vr::ActionCameraContext action_camera_context;
+static d2vr::Vec3 action_camera_physical_offset; // first callback's bounded offset, shared by authored eyes/listener
 static d2vr::AuthoredHeading authored_heading;static std::optional<double> authored_heading_now;static std::uint64_t authored_heading_frame=~0ull; // the frame authored_heading_now was advanced for (eye 0) // render thread only (prepare_head_view, under log_mutex)
 // Frame split (plan E task 1): eye-begin and Present stamps are steady_clock ns (GameXr::cpu_time_ns), fed once per gameplay Present.
 static std::atomic<bool> frame_split_trace_on{false};
@@ -4180,6 +4184,16 @@ void prepare_head_view(void* view) noexcept {
         const auto action=native_action_camera.poll(read_self,image_base,body->player,GetTickCount64());
         const bool authored_camera=action.owns_camera(body->authored_view(),
             (body->mode==7 || body->target_mode==7) && !body->tracked_shadow_walk());
+        d2vr::ActionCameraStep action_camera_step{};
+        if(action_camera_alignment_enabled) {
+            action_camera_step=action_camera_context.sample(frames.load(),
+                {body->player,body->camera,body->camera_identity.generation,head_pose_epoch,game_xr->reference_epoch(),authored_camera},per_frame);
+            if(!action_camera_step.accepted) {native_audio_listener.clear();native_left_aim.clear();native_weapon_attachment.clear();return;}
+            if(action_camera_step.changed) {
+                anchor_smoother.reset();anchor_smooth_frame=~0ull;
+                head_body_anchor.clear();authored_camera_anchor.clear();
+            }
+        }
         d2vr::NativeInteractionAim::publish_sword_pose_epoch(game_xr->pose_epoch());
         d2vr::EyeFov render_fov{xr_eye.fov.angleLeft,xr_eye.fov.angleRight,xr_eye.fov.angleUp,xr_eye.fov.angleDown};
         if(symmetric_frustum_requested) {
@@ -4289,7 +4303,7 @@ void prepare_head_view(void* view) noexcept {
             const double comfort_t=static_cast<double>(comfort_now.QuadPart)/static_cast<double>(comfort_freq.QuadPart);
             if(const UINT64 comfort_count=native_turning.applied();comfort_count!=comfort_last_turns) {comfort_last_turns=comfort_count;comfort_turn_t=comfort_t;}
             const bool comfort_turning=native_turning_requested && comfort_t-comfort_turn_t<.15;
-            if(!legacy_authored_camera) {authored_heading_now=authored_heading.update(source_anchor,authored_camera,head_pose_epoch);authored_heading_frame=frames.load();}
+            if(!legacy_authored_camera && (!action_camera_alignment_enabled || action_camera_step.advance)) {authored_heading_now=authored_heading.update(source_anchor,authored_camera,action_camera_alignment_enabled?action_camera_step.history_epoch:head_pose_epoch);authored_heading_frame=frames.load();}
             std::lock_guard<std::mutex> comfort_lock(comfort_mutex);
             comfort_meter.set_authored_snaps(authored_heading.snaps());comfort_meter.set_smoother_resets(anchor_smoother.resets());
             comfort_meter.feed({static_cast<double>(comfort_now.QuadPart)/static_cast<double>(comfort_freq.QuadPart),
@@ -4321,6 +4335,8 @@ void prepare_head_view(void* view) noexcept {
         // While physically crouched the game's own crouch drop is added back, so the view keeps the real head height.
         const double crouch_lift_now=crouch_lift_m.load();
         head_offset.y=std::clamp(head_offset.y+crouch_lift_now,-.7,.3+crouch_lift_now);
+        if(action_camera_alignment_enabled && action_camera_step.advance) action_camera_physical_offset=head_offset;
+        const d2vr::Vec3 authored_physical_offset=action_camera_alignment_enabled?action_camera_physical_offset:d2vr::Vec3{};
         const auto hand_centre=centre-head_offset;
         native_art_pose_epoch=game_xr->pose_epoch();d2vr::NativeHudChildDraw::tutorial_epoch=native_art_pose_epoch.load();
         if(per_frame && game_logic_mask()==2 && !authored_camera) {
@@ -5199,7 +5215,7 @@ void prepare_head_view(void* view) noexcept {
             std::optional<d2vr::GameCameraPose> native_eye;
             if(legacy_authored_camera) native_eye=d2vr::authored_eye_camera(source_anchor,centre_pose,eye_pose);
             else if(authored_heading_now && authored_heading_frame==frames.load()) { // eye 1 never reuses a previous frame's heading
-                try {native_eye=d2vr::authored_head_view(source_anchor,*authored_heading_now,centre_pose,eye_pose,1.0,head_origin.orientation);}
+                try {native_eye=d2vr::authored_head_view(source_anchor,*authored_heading_now,centre_pose,eye_pose,1.0,head_origin.orientation,authored_physical_offset);}
                 catch(const std::invalid_argument&) {native_eye.reset();}
             }
             if(!native_eye) {native_audio_listener.clear();return;}
@@ -5217,6 +5233,8 @@ void prepare_head_view(void* view) noexcept {
             head_anchor_csv << ',' << orientation.x << ',' << orientation.y << ',' << orientation.z << ',' << orientation.w
                 << ',' << world.position.x << ',' << world.position.y << ',' << world.position.z;
             for(auto v:world.basis) head_anchor_csv << ',' << v.x << ',' << v.y << ',' << v.z;
+            head_anchor_csv << ',' << authored_camera << ',' << action_camera_alignment_enabled << ',' << action_camera_step.history_epoch
+                << ',' << authored_physical_offset.x << ',' << authored_physical_offset.y << ',' << authored_physical_offset.z;
             head_anchor_csv << '\n';++head_anchor_samples;
             if(head_anchor_samples%120==0) head_anchor_csv.flush();
             if(!head_anchor_csv) throw std::runtime_error("Cannot save rendered camera anchor trace");
@@ -5275,10 +5293,10 @@ void prepare_head_view(void* view) noexcept {
         if(per_frame) {
             constexpr auto tracked_head=XR_VIEW_STATE_ORIENTATION_TRACKED_BIT|XR_VIEW_STATE_POSITION_TRACKED_BIT;
             // Authored scenes: the listener faces where the head-owned view faces (not the spinning native camera), at the native camera
-            // position. Legacy knob: the native camera's own axes, as before.
+            // position plus the shared physical offset. Legacy knob: the native camera's own axes, as before.
             std::optional<d2vr::GameCameraPose> listener_view;
             if(authored_camera && !legacy_authored_camera && authored_heading_now && authored_heading_frame==frames.load()) {
-                try {listener_view=d2vr::authored_head_view(source_anchor,*authored_heading_now,centre_pose,centre_pose,1.0,head_origin.orientation);}
+                try {listener_view=d2vr::authored_head_view(source_anchor,*authored_heading_now,centre_pose,centre_pose,1.0,head_origin.orientation,authored_physical_offset);}
                 catch(const std::invalid_argument&) {listener_view.reset();}
             }
             const bool listener_missing=authored_camera && !legacy_authored_camera && !listener_view;
@@ -8466,7 +8484,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
             }
             head_anchor_csv << ",xr_qx,xr_qy,xr_qz,xr_qw,render_p0,render_p1,render_p2";
             for(unsigned i=0;i<9;++i) head_anchor_csv << ",render_b" << i;
-            head_anchor_csv << '\n';
+            head_anchor_csv << ",authored,action_camera_alignment,action_history_epoch,physical_x,physical_y,physical_z\n";
         }
         int turning_mode=0;double snap_degrees=45,smooth_rate=90;
         config>>turning_mode>>snap_degrees>>smooth_rate;
@@ -8998,6 +9016,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
         hold_y_menu_enabled=!fs::exists(root/L"build"/L"no-hold-y-menu");
         legacy_hold_y_settings=fs::exists(root/L"build"/L"legacy-hold-y-settings");
         legacy_authored_camera=fs::exists(root/L"build"/L"legacy-authored-camera");authored_heading.reset();authored_heading_now.reset();
+        action_camera_alignment_enabled=!fs::exists(root/L"build"/L"legacy-action-camera-alignment");action_camera_context.reset();action_camera_physical_offset={};
         aim_smoothing_enabled=!fs::exists(root/L"build"/L"no-aim-smoothing");aim_smoother.reset();   // plan H2
         controller_bridge.set_legacy_trigger(fs::exists(root/L"build"/L"legacy-trigger-mapping"));   // plan H3: restores the raw analog left trigger (no hysteresis, no release debounce)
         {[[maybe_unused]] const bool legacy_corpse_strength=fs::exists(root/L"build"/L"legacy-corpse-strength");}   // plan H1: applied by NativeGrab::corpse_knobs_from (KillSwitches); named here so the launcher feature list and the source check see it
@@ -9305,6 +9324,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
                << ",\"native_menu_failed\":" << (native_menu.failed()?"true":"false")
                << ",\"native_menu_error\":" << std::quoted(native_menu.error())
                << ",\"native_turning_failed\":" << (native_turning.failed()?"true":"false")
+               << ",\"action_camera_alignment_enabled\":" << (action_camera_alignment_enabled?"true":"false")
                << ",\"camera_comfort_requested\":" << (comfort_requested?"true":"false")
                << ",\"camera_comfort_applied\":" << (comfort_applied?"true":"false")
                << ",\"camera_comfort_restored\":" << (comfort_restored?"true":"false")

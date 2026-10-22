@@ -50,20 +50,25 @@ public:
 };
 
 // The native centre position plus the physical eye offset, turned by the headset into the held heading's frame;
-// orientation is the headset's, in that level frame. `origin` is the yaw-only recenter reference (default none).
+// physical_offset optionally preserves bounded gameplay translation; orientation is the headset's, in that level frame. `origin` is the yaw-only recenter reference (default none).
 inline GameCameraPose authored_head_view(const GameCameraPose& native_centre,double heading_yaw,
     const TrackedPose& centre,const TrackedPose& eye,double units_per_metre=1,
-    const Quaternion& origin={0,0,0,1}) {
+    const Quaternion& origin={0,0,0,1},const Vec3& physical_offset={}) {
     if(!std::isfinite(heading_yaw) || !finite(centre.position) || !finite(eye.position) ||
        !std::isfinite(units_per_metre) || units_per_metre<=0 || units_per_metre>1000)
         throw std::invalid_argument("Invalid authored head view input");
     const Vec3 offset=eye.position-centre.position;
     if(length(offset)>.15) throw std::invalid_argument("Eye offset is stale or mismatched");
+    // Already bounded/crouch-compensated by gameplay. Validate separately from pupil/IPD.
+    // Crouch lift is at most .9 m, so the gameplay upper bound is .3 + .9 m.
+    if(!finite(physical_offset) || std::hypot(physical_offset.x,physical_offset.z)>.450001 ||
+       physical_offset.y<-.700001 || physical_offset.y>1.200001)
+        throw std::invalid_argument("Physical head offset is outside the gameplay volume");
     for(float f:native_centre.position) if(!std::isfinite(f)) throw std::invalid_argument("Invalid native centre");
     const double c=std::cos(heading_yaw),s=std::sin(heading_yaw);
     GameCameraPose level=native_centre;
     level.basis={static_cast<float>(c),static_cast<float>(s),0.f, static_cast<float>(-s),static_cast<float>(c),0.f, 0.f,0.f,1.f};
-    const auto world=to_game_pose({offset,eye.orientation},{{0,0,0},origin},level,units_per_metre);
+    const auto world=to_game_pose({physical_offset+offset,eye.orientation},{{0,0,0},origin},level,units_per_metre);
     GameCameraPose out=native_centre;
     for(int i=0;i<3;++i) {
         out.position[i]=static_cast<float>(i==0?world.position.x:i==1?world.position.y:world.position.z); // already anchored at the native centre

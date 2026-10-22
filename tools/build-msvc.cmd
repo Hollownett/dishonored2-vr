@@ -370,6 +370,10 @@ cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT /Isrc tests\authored_view_che
 if not "%errorlevel%"=="0" exit /b 1
 build\authored_view_check.exe
 if not "%errorlevel%"=="0" exit /b 1
+cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT /Isrc tests\action_camera_alignment_check.cpp /Fo:build\action_camera_alignment_check.obj /Fe:build\action_camera_alignment_check.exe
+if not "%errorlevel%"=="0" exit /b 1
+build\action_camera_alignment_check.exe
+if not "%errorlevel%"=="0" exit /b 1
 cl /nologo /std:c++17 /EHsc /W4 /WX /O2 /MT tests\native_carry_snapshot_check.cpp /Fo:build\native_carry_snapshot_check.obj /Fe:build\native_carry_snapshot_check.exe
 if not "%errorlevel%"=="0" exit /b 1
 build\native_carry_snapshot_check.exe

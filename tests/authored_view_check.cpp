@@ -124,5 +124,43 @@ int main(){
     { // reset() clears the snap count
      AuthoredHeading h;h.update(native_yaw_pitch_roll(0),true,1);h.update(native_yaw_pitch_roll(1),true,1);assert(h.snaps()==1);
      h.reset();assert(h.snaps()==0);}
+    { // Physical translation and crouch lift enter once, independently of IPD and recenter yaw.
+     const auto nat=native_yaw_pitch_roll(.4);
+     const TrackedPose origin{{.2,1.7,-.1},about_y(.6)};
+     const TrackedPose centre{{.5,1.2,-.2},about_y(.9)};
+     const Vec3 offset{.3,-.5+.4,-.1}; // bounded lean, physical crouch, measured native lift
+     const Vec3 pupil=rotated(centre.orientation,{.032,0,0});
+     const TrackedPose l{centre.position-pupil,centre.orientation},r{centre.position+pupil,centre.orientation};
+     const auto a=authored_head_view(nat,.4,centre,l,1,origin.orientation,offset);
+     const auto b=authored_head_view(nat,.4,centre,r,1,origin.orientation,offset);
+     const auto listener=authored_head_view(nat,.4,centre,centre,1,origin.orientation,offset);
+     const auto gameplay=to_game_pose({origin.position+offset,centre.orientation},origin,nat,1);
+     const Vec3 want=gameplay.position;
+     const Vec3 mid{(double(a.position[0])+b.position[0])*.5,(double(a.position[1])+b.position[1])*.5,(double(a.position[2])+b.position[2])*.5};
+     assert(length(mid-want)<1e-5);
+     for(int i=0;i<3;++i) assert(near((double(a.position[i])+b.position[i])*.5,listener.position[i],1e-5));
+     assert(near(length(Vec3{b.position[0]-a.position[0],b.position[1]-a.position[1],b.position[2]-a.position[2]}),.064,1e-5));
+     const auto old=authored_head_view(nat,.4,centre,centre,1,origin.orientation);
+     const auto zero=authored_head_view(nat,.4,centre,centre,1,origin.orientation,{});
+     assert(old.position==zero.position && old.position==nat.position);
+     // Different body/held headings (e.g. native turning compensation) rotate a nonzero offset.
+     auto body=nat;const double compensated=.4-.25;
+     body.basis={float(std::cos(compensated)),float(std::sin(compensated)),0,float(-std::sin(compensated)),float(std::cos(compensated)),0,0,0,1};
+     const auto other=to_game_pose({origin.position+offset,centre.orientation},origin,body,1);
+     assert(length(other.position-want)>.05); // no universal handoff continuity claim
+     AuthoredHeading heading;heading.update(nat,true,1);
+     const auto snapped=heading.update(native_yaw_pitch_roll(1.1),true,1);assert(snapped && heading.snaps()==1);
+     const auto reaimed=authored_head_view(nat,*snapped,centre,centre,1,origin.orientation,offset);
+     assert(std::hypot(double(reaimed.position[0])-listener.position[0],double(reaimed.position[1])-listener.position[1])>.1);
+     int rejected=0;
+     for(const auto bad: {Vec3{.46,0,0},Vec3{0,-.71,0},Vec3{0,1.21,0},Vec3{0,std::numeric_limits<double>::infinity(),0}}) {
+         try {authored_head_view(nat,.4,centre,centre,1,origin.orientation,bad);} catch(const std::invalid_argument&) {++rejected;}
+     }
+     assert(rejected==4);
+     // A valid .3 m lean does not loosen the independent .15 m stale-pupil rejection.
+     try {authored_head_view(nat,.4,centre,{centre.position+Vec3{.16,0,0},centre.orientation},1,origin.orientation,offset);assert(false);}
+     catch(const std::invalid_argument&) {}
+     authored_head_view(nat,.4,centre,centre,1,origin.orientation,{.45,1.2,0});
+    }
     std::cout<<"authored_view_check ok\n";
 }

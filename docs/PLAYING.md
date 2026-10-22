@@ -191,6 +191,13 @@ Weapons are held like real objects: a weapon stays in your hand only while you s
   only your head. The scene's heading is held and re-aimed only when the game turns by 30 degrees or more (status
   `comfort.authored_snaps` counts those). Not yet confirmed in the headset. Put `legacy-authored-camera` in the build
   folder for the old behaviour (the game's camera rotation, with the slightly wider field of view).
+- Experimental action camera alignment preserves the same bounded physical lean and crouch compensation during
+  head-owned takedowns and scenes. Camera owner, reference and action-mode changes start fresh height/heading history.
+  Ordinary movement and turning retain their existing tuning. Put `legacy-action-camera-alignment` in the build folder
+  to restore the pre-H5 physical-offset and history policy. `legacy-authored-camera` still selects the native rotation policy.
+  Headset placement, collision clearance and comfort remain unverified. Different action/gameplay headings can rotate
+  your offset at entry/exit or at a 30-degree re-aim; ongoing authored motion can still have up to 20 cm of height lag.
+  This does not identify or retune gameplay-owned climbing. See [engineering details](action-camera-alignment.md).
 - Camera height smoothing: landings, crouching and stairs no longer jolt the view. Small up-and-down motion of the game
   camera is eased (about 0.12 s, at most 1.5 m/s). The view never lags more than 20 cm behind the real camera height: in a
   fall, a fast crouch or a climb it simply moves with the camera at the camera's own speed, never faster, and then catches
@@ -227,6 +234,7 @@ The double-vision fix for this mode is not yet confirmed in a headset. A menu or
 These are on by default in the launcher (except where a line says otherwise). Switch them in the launcher (Windows) or with `d2vr-linux feature` (Linux); a knob file you create by hand for a feature the launcher has switched off is set aside at the next start. The file names below are what the mod reads.
 - `hud-scale` containing e.g. `0.75`: how far the HUD is pulled towards the centre (1 = the game's own layout, default 0.65).
 - `legacy-sword-contact`: bring back the older sword routing: the swing recogniser's press plus the calm-contact hold that makes the mod itself finish a stealth kill. Without it, a drawn-sword swing or crouched stab only presses the game's attack and the game alone decides; a guard who has not noticed you takes no contact damage (the press settles it first), and a calm touch does nothing. `xr-live-status.json` shows `attack_intent` (presses, slash, stab, honoured, not_honoured).
+- `legacy-action-camera-alignment`: restore the pre-H5 action offset and camera-history behavior.
 - `legacy-authored-camera`: during takedowns and scripted scenes use the game's camera rotation again instead of your head's (and its +5% wider field of view).
 - `no-physical-crouch`: turn off crouching by sitting down. Full arms are currently disabled regardless of `no-full-arms`.
 - `power-gestures`: cast the equipped left-hand power with gestures (open-palm push, clap, palm at the temple; while aiming Blink, flick the hand toward you to blink). Off by default until tested; the launcher lists it as "new, untested" and does not enable it for you.
