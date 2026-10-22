@@ -10,11 +10,20 @@ This is an implementation checkpoint for the [design](superpowers/specs/2026-10-
 | --- | --- | --- |
 | T1 | SDK-independent immutable render receipts, strong input/list leases, staged split/sealed execution envelopes, ordered fallback nodes, explicit busy/defer result and GPU-retirement boundary | Scoped source review and CPU checks passed. Portable scheduling/lifetime checks do not implement the native adapter. Initial commits `ad9d130`, `0dc5c24`; subsequent portable extensions belong to partial T3. |
 | T2 | SDK-typed serialized NGX owner, independent eye feature/parameter histories, bounded retirement, partial-failure rollback, explicit provider validation and expected/observable loaded-module diagnostics | Scoped re-review passed at `81b0df8` after `97ef347`. Controller strict Windows-target CPU checks, typed SDK ABI compile/link and MinHook/production DLL cross compile/link passed without degraded allowances. Native MSVC and actual device/provider execution remain pending. |
-| T3 | Completed-Setup view/pair/projection metadata, exact native counter/owner correspondence, retained clear-context/resource/view diagnostics, portable mixed-node order, copy compatibility, pair outcome and retirement/quarantine contracts | Partial source only, initially `4aee87c`, with corrective commits `f10d411`, `4365eeb`. Initial candidate CPU and production cross-link passed. Corrective CPU checks pass; final corrective review and combined source archive/production compile are pending at this checkpoint. |
+| T3 | Completed-Setup view/pair/projection metadata, exact native counter/owner correspondence, retained clear-context/resource/view diagnostics, portable mixed-node order, copy compatibility, pair outcome and retirement/quarantine contracts | Partial source only, initially `4aee87c`, with corrective commits `f10d411`, `4365eeb`, `bcaee8c`. Independent corrective reviews passed, including execution-result serialization. Final combined CPU and source-matched cross compile/link passed at candidate `6e4f59e`; native integration remains partial. |
 
 T2 pins the NVIDIA SDK headers and static `/MD` library to commit `9981c6350dc58c0ce21f024fd65e31e851c31689`; [provenance](../third_party/dlss/source.json) and [notices](../THIRD_PARTY_NOTICES.md) are retained. The compile-only lane checks exact typed SDK APIs. Injected lifecycle tests make no real NGX/device calls. No provider was downloaded, bundled or initialized by this work.
 
-T2's final controller DLL hash was `421af86715e28dadf775a88bf6abeeae9e673e48f97e2a3352a59abba88a68e8`. That evidence covers the T2 snapshot, not later T3 or aim changes. T3's initial successful production link likewise does not validate subsequent corrections or the final combined candidate.
+T2's final controller DLL hash was `421af86715e28dadf775a88bf6abeeae9e673e48f97e2a3352a59abba88a68e8`. That evidence covers the T2 snapshot. The final combined T3-corrected and aim candidate has separate evidence:
+
+- Built source commit: `6e4f59e`; T3 corrective reviews and the scoped aim re-review passed.
+- Controller CPU lane: eight groups, sixteen build/run steps passed; affected native-shot/crosshair checks added four passing steps after the final cleanup correction.
+- Typed SDK ABI, MinHook and production DLL cross compile/link: three steps passed, `degraded=false`. No generated ABI or production artifact was executed.
+- DLL SHA-256: `8d1f5232a1fa462ae83f8f8e77052fbd153310da946a093af33c1a1247bfe368`.
+- Source archive: `20261022T192531.125906Z-229152b8`; source comparison confirmed `source_unchanged_during_build=true`.
+- Source provenance: `build/d2vr_render_probe_aim_candidate.dll.source.json`.
+
+These are offline source/CPU/cross-toolchain results. The DLL has not been run in the game or headset, and the native DLSS adapter remains incomplete.
 
 ## Partial T3 boundary
 
@@ -40,4 +49,4 @@ Production admission remains refused where these contracts are unknown. This is 
 - **T7:** explicitly authorized Windows RTX input, provider-selection, recovery and GPU ownership validation; repeat for Quality. No such runtime validation has occurred.
 - **T8:** explicitly authorized headset acceptance and separate actual Proton/DXVK-NVAPI verification for both staged modes, plus release/legal prerequisites. No visual quality, comfort, complete gameplay or Proton success is established.
 
-Native MSVC `/W4 /WX` remains pending; cross-toolchain compile/link results do not replace it. Final combined review, strict CPU checks, production compile/link and source-archive matching remain controller gates. Game, VR, GPU/device/provider execution and headset validation remain restricted until explicitly authorized. Any future provider use follows the explicit user-supplied signed-provider lane; there is no provider download/copy automation or distribution authorization.
+Native MSVC `/W4 /WX` remains pending; cross-toolchain compile/link results do not replace it. Final combined source review, CPU checks, cross compile/link and source-archive matching passed for the named `6e4f59e` candidate; later source changes require fresh verification. Game, VR, GPU/device/provider execution and headset validation remain restricted until explicitly authorized. Any future provider use follows the explicit user-supplied signed-provider lane; there is no provider download/copy automation or distribution authorization.
