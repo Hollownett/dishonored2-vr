@@ -19,7 +19,12 @@
 #include <string>
 
 namespace d2vr {
-struct GrabTuning {double axial_n=300,lateral_n=90,torque_nm=30,strength_scale=3,hand_kg=2,mass_floor_kg=.5,mass_ceiling_kg=60,
+// Plan H1 (v603 Windows test: "make corpses 2 times easier to move"): the shipped strength_scale doubled, 3 -> 6. strength_scale multiplies the axial, lateral and
+// torque caps together (and the tow's pelvis pull, which uses the same cap law), so every force limit doubles and the lab's hand lead at the cap halves.
+// What stays put on purpose: the 10 m/s / 5 rad/s motor limits, the catch-up ramp (hitch / fling protection), the 4 m/s tow limit, the lag release, RunawayDetector,
+// EntityLockout and the fault releases. The 3.0 below is the pre-H1 value: build/legacy-corpse-strength restores it.
+constexpr double kLegacyCorpseStrengthScale=3.,kCorpseStrengthScale=2*kLegacyCorpseStrengthScale;
+struct GrabTuning {double axial_n=300,lateral_n=90,torque_nm=30,strength_scale=kCorpseStrengthScale,hand_kg=2,mass_floor_kg=.5,mass_ceiling_kg=60,
     lift_fraction=.25,dt_max=1./30,
     stale_dt_s=.1,        // a frame is STALE (a game-thread hitch; enters recovery) only when its raw dt exceeds this; sustained low fps (dt 0.04) is not a hitch
     catch_up_mps=1.,      // recovery: the error-closure speed (not the hand's own feed) starts capped here ...

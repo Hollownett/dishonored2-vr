@@ -152,7 +152,9 @@ double expected_cap(double object_kg,double dt,const GrabTuning& tuning,double s
 
 void dead_guard_wrist_binds_and_write_is_capped() {
     fixture();Rig r;
-    // bone 12 (a calf, class 3.4 kg): effective mass 5.4 kg, cap 900 N * (1/30 s) / 5.4 kg = 5.6 m/s per write
+    // bone 12 (a calf, class 3.4 kg): effective mass 5.4 kg. At the H1 shipped strength (1800 N) the per-write cap is 11.1 m/s, above the 10 m/s motor limit, so a light
+    // calf is no longer capped; the cap path is exercised at the pre-H1 strength (900 N * (1/30 s) / 5.4 kg = 5.6 m/s per write).
+    GrabTuning legacy;legacy.strength_scale=kLegacyCorpseStrengthScale;NativeGrabCheck::tune(r.grab,legacy);
     const Vec3 calf{2.4,0,0};
     REQUIRE(r.grasp(0,calf));
     CHECK(NativeGrabCheck::bone(r.grab,0)==12 && NativeGrabCheck::corpse(r.grab,0) && NativeGrabCheck::capped(r.grab,0));
@@ -160,7 +162,7 @@ void dead_guard_wrist_binds_and_write_is_capped() {
     const auto before=writes.size();
     r.step(0,calf+Vec3{.4,0,0},.9f,100);   // 0.4 m in 100 ms
     REQUIRE(writes.size()==before+1);
-    const GrabTuning tuning;const double cap=expected_cap(3.4,.1,tuning);
+    const double cap=expected_cap(3.4,.1,legacy);
     const auto& w=writes.back();
     CHECK(w.handle==handle_of(a_first,12));
     const double dv=std::hypot(w.linear[0],std::hypot(w.linear[1],w.linear[2]));
@@ -506,7 +508,7 @@ void install_knobs_load_and_switch() {
     const auto root=fs::temp_directory_path()/"d2vr_corpse_knobs";fs::remove_all(root);fs::create_directories(root/"build");
     {
         const auto none=NativeGrab::corpse_knobs_from(root);
-        CHECK(none.options.enabled && !none.options.from_file && none.options.tuning.tow && none.options.tuning.strength_scale==3 && !none.kill.no_posts);
+        CHECK(none.options.enabled && !none.options.from_file && none.options.tuning.tow && none.options.tuning.strength_scale==6 && !none.kill.legacy_corpse_strength && !none.kill.no_posts);
     }
     {std::ofstream f(root/"build"/"grab-tuning.cfg");f<<"strength_scale 5\ntow 0\naxial_n 250\n";}
     {
@@ -518,12 +520,22 @@ void install_knobs_load_and_switch() {
     {std::ofstream f(root/"build"/"grab-tuning.cfg");f<<"strength_scale 99\n";}   // out of bounds: defaults and a message
     {
         const auto k=NativeGrab::corpse_knobs_from(root);
-        CHECK(!k.options.from_file && k.options.tuning.strength_scale==3 && !k.loaded.error.empty());
+        CHECK(!k.options.from_file && k.options.tuning.strength_scale==6 && !k.loaded.error.empty());
     }
     {std::ofstream f(root/"build"/"no-corpse-grab");}{std::ofstream f(root/"build"/"no-ragdoll-posts");}
     {
         const auto k=NativeGrab::corpse_knobs_from(root);
         CHECK(!k.options.enabled && k.kill.no_posts && k.kill.no_corpse_grab);
+    }
+    // H1: build/legacy-corpse-strength restores the pre-H1 caps (3x), also over a valid cfg's strength_scale; the rest of the cfg still applies.
+    fs::remove(root/"build"/"no-corpse-grab");fs::remove(root/"build"/"no-ragdoll-posts");
+    {std::ofstream f(root/"build"/"legacy-corpse-strength");}
+    {
+        const auto k=NativeGrab::corpse_knobs_from(root);
+        CHECK(k.kill.legacy_corpse_strength && k.options.tuning.strength_scale==3 && k.options.enabled);
+        std::ofstream(root/"build"/"grab-tuning.cfg")<<"strength_scale 5\naxial_n 250\n";
+        const auto c=NativeGrab::corpse_knobs_from(root);
+        CHECK(c.options.from_file && c.options.tuning.strength_scale==3 && c.options.tuning.axial_n==250);
     }
     fs::remove_all(root);
 }

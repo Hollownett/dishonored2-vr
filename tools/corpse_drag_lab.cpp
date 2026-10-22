@@ -41,7 +41,7 @@ double kLinDamp=.2,kJointDamp=3;   // CORPSE_LAB_LIN_DAMP / _JOINT_DAMP (1/s)
 constexpr double kFrame=1./90,kG=9.81,kMu=.5,kSub=8;
 // Pinned expectations, independent of the tunable production defaults: 3 x (300 axial, 90 lateral). A mutation of the production
 // constants must move the lab's judgement, so these are literals here.
-constexpr double kPinnedAxial=900,kPinnedLateral=270;
+constexpr double kPinnedAxial=1800,kPinnedLateral=540;   // plan H1: doubled from 900/270 (strength_scale 3 -> 6)
 std::string fmt(const char* f,...) {char b[512];va_list a;va_start(a,f);std::vsnprintf(b,sizeof b,f,a);va_end(a);return b;}
 std::string quote(const std::string& s) {std::string o="\"";for(char c:s){if(c=='"'||c=='\\')o+='\\';o+=c;}return o+"\"";}
 std::string jnum(double v) {return std::isfinite(v)?fmt("%.6g",v):"null";}
@@ -142,8 +142,8 @@ struct Metrics {
 };
 // The implied force corpse_motor REPORTS, against the pinned literal envelope (self-reported: it only catches a changed constant). The measured
 // |dv| check is the one computed from the lab's own state with literals, independent of implied_force_n.
-Check force_report(const Metrics& m) {return below("reported implied_force_n vs pinned literal envelope hypot(900,270)",m.force_ratio_hypot,1.01);}
-Check dv_check(const Metrics& m) {return below("measured |dv| per tick vs hypot(900,270)*min(dt,1/30)/m_eff (independent)",m.dv_ratio,1.01);}
+Check force_report(const Metrics& m) {return below("reported implied_force_n vs pinned literal envelope hypot(1800,540)",m.force_ratio_hypot,1.01);}
+Check dv_check(const Metrics& m) {return below("measured |dv| per tick vs hypot(1800,540)*min(dt,1/30)/m_eff (independent)",m.dv_ratio,1.01);}
 struct Scenario {
     std::string name,title,desc,expect;bool info=false;
     GrabTuning tuning;std::vector<HandSpec> hands;
@@ -335,7 +335,7 @@ std::vector<Scenario> scenarios(const GrabTuning& base) {
         s.hands={lift_hand(13,.5,1.,0,1.,0,.25)};s.duration=2.5;s.lift_probe=true;
         s.judge=[=](const Scenario&,const Metrics& m) {return std::vector<Check>{
             force_report(m),dv_check(m),
-            below("reported implied_force_n / 900 N axial cap (info: lateral part adds)",m.force_ratio_axial,1.0625,"",true),
+            below("reported implied_force_n / 1800 N axial cap (info: lateral part adds)",m.force_ratio_axial,1.0625,"",true),
             truth("lifted 0.5 m",!std::isnan(m.lift_time),fmt("%.3f s",m.lift_time))};};
         all.push_back(s);
     }
@@ -402,7 +402,7 @@ std::vector<Scenario> scenarios(const GrabTuning& base) {
         s.duration=2.5;s.lift_probe=true;
         s.judge=[=](const Scenario& sc,const Metrics& m) {double worst=0;
             for(const auto& fr:sc.frames) worst=std::max(worst,fr.force);
-            return std::vector<Check>{below("combined reported implied_force_n vs 2 x pinned envelope hypot(900,270)",worst/(2*std::hypot(kPinnedAxial,kPinnedLateral)),1.01),dv_check(m),
+            return std::vector<Check>{below("combined reported implied_force_n vs 2 x pinned envelope hypot(1800,540)",worst/(2*std::hypot(kPinnedAxial,kPinnedLateral)),1.01),dv_check(m),
                 truth("both hands write on >= 90% of the held ticks",m.held_ticks>0 && m.all_hands_write_ticks>=.9*m.held_ticks,fmt("%u of %u held ticks",m.all_hands_write_ticks,m.held_ticks)),
                 truth("the body lifts >= 0.5 m (the lower of the two held limbs; margin is thin, reported not retuned)",m.min_hand_lift>=.5,fmt("%.3f m",m.min_hand_lift))};};
         all.push_back(s);
@@ -462,7 +462,10 @@ std::vector<Scenario> scenarios(const GrabTuning& base) {
         one.hands={lift_hand(13,.5,kBrisk,0,1.,kHang)};one.hang_z=kHang;one.pins={13};one.duration=2.5;one.lift_probe=true;one.info=true;
         one.judge=[=](const Scenario&,const Metrics& m) {return std::vector<Check>{truth("time to 0.5 m",true,fmt("%.3f s",m.lift_time),true)};};
         all.push_back(one);
-        auto two=make("two_hands_faster","Brisk lift of both ankles","two hands reach 0.5 m sooner than one, without lag release");
+        // Plan H1 before/after: the same brisk lift at the pre-H1 strength_scale (kLegacyCorpseStrengthScale); main() compares it with the shipped one.
+        auto old=one;old.name="h1_brisk_lift_legacy";old.title="Brisk ankle lift, one hand, pre-H1 strength (comparison)";old.tuning.strength_scale=kLegacyCorpseStrengthScale;
+        all.push_back(old);
+        auto two=make("two_hands_faster","Brisk lift of both ankles","two hands reach 0.5 m no later than one (H1: one hand already keeps up), without lag release");
         two.hands={lift_hand(13,.5,kBrisk,0,.5,kHang),lift_hand(16,.5,kBrisk,0,.5,kHang)};two.hang_z=kHang;two.pins={13,16};two.duration=2.5;two.lift_probe=true;
         two.judge=[=](const Scenario&,const Metrics& m) {return std::vector<Check>{
             truth("both hands lift without lag release",!m.released,m.released?"released":"held"),
@@ -592,9 +595,16 @@ int main(int argc,char** argv) {
         // two_hands_faster is a comparison between runs
         std::size_t one=0,two=0;for(std::size_t i=0;i<list.size();++i){if(list[i].name=="lift_brisk_one_hand")one=i;if(list[i].name=="two_hands_faster")two=i;}
         const double t1=list[one].m.lift_time,t2=list[two].m.lift_time;
-        const bool faster=!std::isnan(t2) && (std::isnan(t1) || t2<t1-1e-9);
+        const bool faster=!std::isnan(t2) && (std::isnan(t1) || t2<=t1+1e-9);   // H1: one hand now keeps up with the brisk hand (0.311 s both), so "not slower" is the claim
         std::printf("two_hands_faster: one hand %.3f s, two hands %.3f s -> %s\n",t1,t2,faster?"faster":"NOT faster");
         if(!faster) ++failed;
+        {   // H1: the shipped strength must lead the hand by half as much (or less) as the pre-H1 one, and not lift slower. The cap binds in the brisk lift (force_ratio ~ 1 at 3x).
+            std::size_t now_i=0,old_i=0;for(std::size_t i=0;i<list.size();++i){if(list[i].name=="lift_brisk_one_hand")now_i=i;if(list[i].name=="h1_brisk_lift_legacy")old_i=i;}
+            const auto& n=list[now_i].m;const auto& o=list[old_i].m;
+            const bool easier=n.max_lag<=o.max_lag*.5+1e-9 && !std::isnan(n.lift_time) && (std::isnan(o.lift_time) || n.lift_time<=o.lift_time+1e-9) && !n.released;
+            std::printf("h1_easier: brisk lift hand lead %.3f m (legacy %.3f m), lift %.3f s (legacy %.3f s) -> %s\n",n.max_lag,o.max_lag,n.lift_time,o.lift_time,easier?"at most half the lead":"NOT easier");
+            if(!easier) ++failed;
+        }
         std::printf("corpse_drag_lab: %zu scenarios, %u failed\n",list.size(),failed);
         return failed?1:0;
     } catch(const std::exception& e) {std::cerr<<"exception: "<<e.what()<<"\n";return 3;}

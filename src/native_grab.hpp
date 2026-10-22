@@ -1048,6 +1048,7 @@ public:
     static CorpseKnobs corpse_knobs_from(const std::filesystem::path& root) {
         CorpseKnobs knobs;
         knobs.kill=KillSwitches::read(root/L"build");knobs.loaded=load_grab_tuning(root/L"build"/L"grab-tuning.cfg");
+        if(knobs.kill.legacy_corpse_strength) knobs.loaded.value.strength_scale=kLegacyCorpseStrengthScale;   // plan H1: build/legacy-corpse-strength restores the pre-H1 (3x) caps, over a cfg value too
         knobs.options.enabled=!knobs.kill.no_corpse_grab;knobs.options.tuning=knobs.loaded.value;knobs.options.from_file=knobs.loaded.source==TuningSource::file;
         return knobs;
     }

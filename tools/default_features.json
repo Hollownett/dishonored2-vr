@@ -178,6 +178,14 @@
    "default": true
   },
   {
+   "id": "easy-corpse-grab",
+   "file": "legacy-corpse-strength",
+   "kind": "disable",
+   "label": "Bodies move twice as easily",
+   "help": "A carried or dragged body follows your hand with twice the pulling strength, so it lags less. Turn off for the earlier, heavier feel.",
+   "default": true
+  },
+  {
    "id": "overlay-skip",
    "file": "no-overlay-skip",
    "kind": "disable",

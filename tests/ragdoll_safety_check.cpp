@@ -252,7 +252,9 @@ void kill_switches_read() {
     k=KillSwitches::read(d);CHECK(k.no_posts&&k.no_corpse_grab);
     std::filesystem::remove(d/"no-ragdoll-posts");
     k=KillSwitches::read(d);CHECK(!k.no_posts&&k.no_corpse_grab);
-    k=KillSwitches::read(d/"missing");CHECK(!k.no_posts&&!k.no_corpse_grab);
+    k=KillSwitches::read(d/"missing");CHECK(!k.no_posts&&!k.no_corpse_grab&&!k.legacy_corpse_strength);
+    std::ofstream(d/"legacy-corpse-strength")<<"";
+    k=KillSwitches::read(d);CHECK(k.legacy_corpse_strength&&!k.no_posts&&k.no_corpse_grab);
 }
 }
 int main() {

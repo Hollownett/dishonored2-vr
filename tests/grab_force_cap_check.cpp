@@ -31,22 +31,37 @@ void expect_defaults_with_error(const char* name,const std::string& text) {
 int main() {
     {   // lab_tuned_defaults_pinned (tools/corpse_drag_lab.cpp, Task 9)
         const GrabTuning t;
-        CHECK(t.strength_scale==3 && t.axial_n==300 && t.lateral_n==90 && t.torque_nm==30 && t.hand_kg==2 && t.mass_floor_kg==.5 && t.mass_ceiling_kg==60);
+        CHECK(t.strength_scale==6 && t.axial_n==300 && t.lateral_n==90 && t.torque_nm==30 && t.hand_kg==2 && t.mass_floor_kg==.5 && t.mass_ceiling_kg==60);
         CHECK(t.lift_fraction==.25 && t.tow && !t.use_measured_mass && near(t.dt_max,1./30) && t.catch_up_mps==1 && t.catch_up_ramp_mps2==4 && t.stale_dt_s==.1);
+    }
+    // corpse_caps_twice_pre_h1 (plan H1): every cap the corpse motor and the tow use is exactly 2x the pre-H1 value (strength_scale 3 -> 6); the legacy value is restorable.
+    {
+        const GrabTuning now;GrabTuning old;old.strength_scale=kLegacyCorpseStrengthScale;
+        CHECK(kLegacyCorpseStrengthScale==3 && now.strength_scale==2*old.strength_scale);
+        CHECK(now.axial_cap()==2*old.axial_cap() && now.lateral_cap()==2*old.lateral_cap() && now.torque_cap()==2*old.torque_cap());
+        CHECK(now.axial_cap()==1800 && now.lateral_cap()==540 && old.axial_cap()==900);
+        // the velocity step a capped body may take per tick doubles too, linear and angular
+        auto a=cap_velocity_step(zero,zero,X*10,zero,X,10,1,.01,now),b=cap_velocity_step(zero,zero,X*10,zero,X,10,1,.01,old);
+        CHECK(near(a.linear.x,2*b.linear.x) && near(a.implied_force_n,2*b.implied_force_n));
+        auto w=cap_velocity_step(zero,zero,zero,Y*100,X,10,1,.01,now),w0=cap_velocity_step(zero,zero,zero,Y*100,X,10,1,.01,old);
+        CHECK(near(length(w.angular),2*length(w0.angular)));
+        // what must NOT move: the hitch / fling protection and the mass model
+        CHECK(now.catch_up_mps==old.catch_up_mps && now.catch_up_ramp_mps2==old.catch_up_ramp_mps2 && now.stale_dt_s==old.stale_dt_s && now.dt_max==old.dt_max);
+        CHECK(now.hand_kg==old.hand_kg && now.lift_fraction==old.lift_fraction && now.mass_floor_kg==old.mass_floor_kg && now.mass_ceiling_kg==old.mass_ceiling_kg);
     }
     // axial_cap_300n
     {
         auto c=cap_velocity_step(zero,zero,X*10,zero,X,10,1,.01,scale1());
         CHECK(near(c.linear.x,300*.01/12) && near(c.linear.y,0) && c.linear_capped);
         auto d=cap_velocity_step(zero,zero,X*10,zero,X,10,1,.01,GrabTuning{});
-        CHECK(near(d.linear.x,900*.01/12) && d.linear_capped);
+        CHECK(near(d.linear.x,1800*.01/12) && d.linear_capped);
     }
     // lateral_cap_90n
     {
         auto c=cap_velocity_step(zero,zero,Y*10,zero,X,10,1,.01,scale1());
         CHECK(near(length(c.linear),90*.01/12) && c.linear_capped);
         auto d=cap_velocity_step(zero,zero,Y*10,zero,X,10,1,.01,GrabTuning{});
-        CHECK(near(length(d.linear),270*.01/12));
+        CHECK(near(length(d.linear),540*.01/12));
     }
     // light_limb_follows
     {
