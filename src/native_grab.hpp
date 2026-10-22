@@ -3,6 +3,8 @@
 #include <windows.h>
 #include <MinHook.h>
 #include "native_rigid_body.hpp"
+#include "native_held_object.hpp"
+#include "release_depen.hpp"
 #include "native_hand_contact.hpp"
 #include "mass_probe.hpp"
 #include "full_hand_contact.hpp"
@@ -718,19 +720,27 @@ private:
     struct Poke {std::uintptr_t entity{};Vec3 velocity{};UINT64 tick{};};Poke poke_{};
     NativeHandContact contact_;ScanReader scan_,discovery_scan_;ThreadClock clock_;
     // Safe release (held_clamp.hpp SafeRelease): a dropped object that is still inside the world gets a small outward velocity (<= 1.5 m/s, asked for by
-    // the render thread every frame until it is clear), written here with the other velocity writers. One request, consumed within 100 ms; the body is
-    // re-read (entity id, pool handle) by native_rigid_body just before the write, and a prop a lane holds is never written.
-    struct Depen {std::uintptr_t entity{};Vec3 velocity{};UINT64 tick{};};Depen depen_{};
+    // the render thread every frame until it is clear), written here with the other velocity writers. One request (release_depen.hpp), consumed within
+    // 100 ms; it names the entity, its entity id and its throwable component's handle, all re-read just before the write, and a new hold cancels it. A
+    // native hold's item is not a native_rigid_body prop (that mapping refuses the native-carry component): its body is the single throwable component
+    // the layer swap writes (NativeHeldObject::exclusion_body), the same mapping the exclusion sweeps and the release watch use.
+    ReleaseDepen depen_{};
     void apply_release_depen() {
-        Depen d{};{std::lock_guard<std::mutex> lock(mutex_);d=depen_;depen_={};
-            for(const auto& lane:lanes_) if(lane.held && lane.held->entity==d.entity) return;}
-        if(!d.entity || GetTickCount64()-d.tick>100) return;
-        if(!finite(d.velocity) || length(d.velocity)>NativeGrab::depen_max_speed+1e-6) {++depen_rejected_;return;}
-        const auto body=native_rigid_body(read_,base_,d.entity);if(!body) {++depen_rejected_;return;}
+        ReleaseDepenRequest d{};std::uintptr_t world=0;
+        {std::lock_guard<std::mutex> lock(mutex_);
+            if(!depen_.pending()) return;
+            const auto held=[&](std::uintptr_t entity) {for(const auto& lane:lanes_) if(lane.held && lane.held->entity==entity) return true;return false;};
+            const auto live_id=[&](std::uintptr_t entity)->std::optional<std::uint32_t> {return rig::value<std::uint32_t>(read_,entity+0xa8);};
+            const auto live_handle=[&](std::uintptr_t entity)->std::optional<std::uint32_t> {
+                const auto body=NativeHeldObject::exclusion_body(base_,read_,entity);if(!body) return std::nullopt;world=body->world;return body->handle;};
+            const auto verdict=depen_.take(GetTickCount64(),live_id,live_handle,held,d);
+            if(verdict==ReleaseDepen::Verdict::none || verdict==ReleaseDepen::Verdict::held || verdict==ReleaseDepen::Verdict::stale) return;
+            if(verdict!=ReleaseDepen::Verdict::ready) {++depen_rejected_;return;}
+        }
         alignas(16) std::array<float,4> linear{static_cast<float>(d.velocity.x),static_cast<float>(d.velocity.y),static_cast<float>(d.velocity.z),0};
         alignas(16) std::array<float,4> angular{};
         CrashOperation operation("native release depenetration velocity");
-        const auto result=write_velocity(reinterpret_cast<void*>(body->world),body->handle,linear.data(),angular.data());
+        const auto result=write_velocity(reinterpret_cast<void*>(world),d.handle,linear.data(),angular.data());
         if(result==VelocityWrite::faulted) {++contact_.faults;release_all();return;}
         if(result==VelocityWrite::written) ++depen_writes_;
     }
@@ -842,8 +852,9 @@ public:
     }
     void poke(std::uintptr_t entity,Vec3 velocity,UINT64 now) {std::lock_guard<std::mutex> lock(mutex_);poke_={entity,velocity,now};}
     // Render thread: the outward velocity of a released object inside the world (the next dispatcher call applies it). Never above depen_max_speed.
-    static constexpr double depen_max_speed=1.5;
-    void release_depen(std::uintptr_t entity,Vec3 velocity,UINT64 now) {std::lock_guard<std::mutex> lock(mutex_);depen_={entity,velocity,now};}
+    static constexpr double depen_max_speed=ReleaseDepen::max_speed;
+    void release_depen(std::uintptr_t entity,std::uint32_t id,std::uint32_t handle,Vec3 velocity,UINT64 now) {std::lock_guard<std::mutex> lock(mutex_);depen_.request({entity,id,handle,velocity,now});}
+    void cancel_release_depen() {std::lock_guard<std::mutex> lock(mutex_);depen_.cancel();}
     std::atomic<UINT64> depen_writes_{},depen_rejected_{};
     // A guard yanked into ragdoll by this hand (NativeWeaponHands::yank): its lane takes his nearest limb until `until`.
     static void yanked(unsigned side,std::uintptr_t entity,UINT64 until) {yanked_entity_[side&1]=entity;yanked_until_[side&1]=until;}

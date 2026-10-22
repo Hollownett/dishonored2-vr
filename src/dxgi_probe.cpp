@@ -2954,6 +2954,7 @@ struct HeldClampLive {
     d2vr::WorldTrackedPose pose{};UINT64 hold_tick{};
     std::uint64_t posted_scope{},last_serial{},release_scope{};
     d2vr::Vec3 shift[2]{},applied[2]{};
+    std::array<d2vr::ClampSweep,d2vr::held_proxy_capacity> release_sweeps{};   // the probes the pending release answer belongs to
     bool overlap_seen{};
 };
 static HeldClampLive held_clamp_live;
@@ -2979,6 +2980,7 @@ static void held_clear(unsigned why) {held_clamp_end();d2vr::NativeHeldObject::c
 static void held_clamp_begin(unsigned side,std::uintptr_t entity,std::uint32_t id) {
     auto& L=held_clamp_live;
     if(L.releasing) {L.releasing=false;d2vr::NativeHeldObject::cancel_safe_release();}
+    native_grab.cancel_release_depen();   // a push asked for the previous hold's object never reaches a re-grabbed (or any new) one
     L.clamp.reset();L.safe.reset();L.proxies.reset();L.holding=true;L.drop_sent=false;held_clamp_drop_request.store(0);L.posted=false;L.last_serial=0;L.side=side&1u;L.entity=entity;L.entity_id=id;
 }
 static void held_clamp_release_step() {
@@ -2995,24 +2997,26 @@ static void held_clamp_release_step() {
     d2vr::SafeReleaseInput in{};in.now=now;in.released=true;
     const auto& proxies=*L.proxies;
     if(L.release_posted) {
-        const auto serial=d2vr::NativeInteractionAim::weapon_serial(L.side,0);
+        const auto serial=d2vr::NativeInteractionAim::weapon_serial(L.side,0,d2vr::NativeInteractionAim::producer_release);
         if(serial>L.release_scope && serial!=L.last_serial) {
             L.last_serial=serial;in.sweep_answered=true;
-            const auto hits=d2vr::NativeInteractionAim::held_hits(L.side,now_ms);
-            for(std::size_t i=0;i<proxies.count && i<hits.size();++i) if(hits[i] && hits[i]->initial_overlap) {
-                const auto c=d2vr::clamp_detail::world_point(pose,proxies.sphere[i].local);
-                const double depth=std::max(0.,proxies.sphere[i].radius-d2vr::length(c-hits[i]->point));   // probe radius minus hit distance (progress ruling B-2)
-                if(!in.overlap || depth>in.depth) {in.overlap=d2vr::to_clamp_hit(*hits[i]);in.depth=depth;}
+            const auto hits=d2vr::NativeInteractionAim::held_hits(L.side,now_ms,d2vr::NativeInteractionAim::producer_release);
+            for(std::size_t i=0;i<proxies.count && i<hits.size();++i) if(hits[i]) {
+                const auto depth=d2vr::release_probe_depth(L.release_sweeps[i],*hits[i]);   // a hit along the probe or a start inside geometry; a resting contact is clear
+                if(depth && (!in.overlap || *depth>in.depth)) {in.overlap=d2vr::to_clamp_hit(*hits[i]);in.depth=*depth;}
             }
             if(in.overlap && !L.overlap_seen) {L.overlap_seen=true;++held_clamp_status.overlap_on_release;}
         }
     }
     const auto out=L.safe.update(in);
-    if(out.write) {native_grab.release_depen(L.entity,out.velocity,now_ms);held_clamp_status.release_depen_frames.store(out.depen_frames);}
+    if(out.write) {
+        const auto body=d2vr::NativeHeldObject::exclusion_body(image_base,read_self,L.entity);   // the HoldObject item's throwable component (the handle the dispatcher re-checks)
+        if(body) native_grab.release_depen(L.entity,L.entity_id,body->handle,out.velocity,now_ms);
+        held_clamp_status.release_depen_frames.store(out.depen_frames);
+    }
     if(out.restore_layer) {finish(out.unresolved);return;}
-    std::array<d2vr::ClampSweep,d2vr::held_proxy_capacity> sweeps{};
-    for(std::size_t i=0;i<proxies.count;++i) {const auto c=d2vr::clamp_detail::world_point(pose,proxies.sphere[i].local);sweeps[i]={c,c,proxies.sphere[i].radius,true,std::nullopt};}
-    d2vr::NativeInteractionAim::post_held_sweeps(L.side,sweeps,L.entity);
+    L.release_sweeps=d2vr::release_probe_sweeps(proxies,pose);   // a real cast (>= min_cast_length): the engine does not run a zero-length one
+    d2vr::NativeInteractionAim::post_held_sweeps(L.side,L.release_sweeps,L.entity,d2vr::NativeInteractionAim::producer_release);
     L.release_posted=true;L.release_scope=d2vr::NativeInteractionAim::weapon_casts_.load();
 }
 static void publish_held_object(unsigned side,const d2vr::WorldTrackedPose& grip,const d2vr::WorldTrackedPose& raw,std::uintptr_t state,std::uint64_t pose_epoch,std::uint64_t pose_tick,std::uint64_t reference_epoch,std::uint64_t acquisition) {
@@ -3139,7 +3143,7 @@ static void publish_held_object(unsigned side,const d2vr::WorldTrackedPose& grip
         }
         d2vr::HeldClampInput in{};in.now=held_clamp_seconds();in.epoch=pose_epoch^(reference_epoch<<32);in.requested={origin,{X,Y,Z}};in.proxies=L.proxies;
         if(L.posted && L.proxies) { // last frame's answers, only once the game thread has run a scope since the post (the slots keep older results for 100 ms)
-            const auto serial=d2vr::NativeInteractionAim::weapon_serial(side,0);
+            const auto serial=d2vr::NativeInteractionAim::weapon_serial(side,0,d2vr::NativeInteractionAim::producer_held);
             if(serial>L.posted_scope && serial!=L.last_serial) {
                 L.last_serial=serial;
                 const auto raw_hits=d2vr::NativeInteractionAim::held_hits(side,GetTickCount64());
@@ -4575,7 +4579,7 @@ void prepare_head_view(void* view) noexcept {
                         // The hand clamp (G1, G3, C3, C4, C8): it sweeps from the previous drawn hand to the reach-clamped controller grip and answers
                         // one frame late. It yields (draws the controller, sweeps nothing) to an authored arm, a native carry and a physical hold.
                         auto& status=hand_clamp_status[side];
-                        const bool clamp_yield=d2vr::clamp_yields(side,authored_hands,carry_bits,physical_grab_requested && native_grab.holding(side));
+                        const bool clamp_yield=d2vr::clamp_yields(side,authored_hands,carry_bits,physical_grab_requested && native_grab.holding(side)) || (held_clamp_live.releasing && held_clamp_live.side==(side&1u));   // a pending safe release owns the clamp's slots
                         bool reach_clamped=false;
                         const auto target=clamp_yield || !reach_fresh?palm:d2vr::reach_clamp(palm,arm_reach.reach[side],&reach_clamped);
                         refresh_clamp_probes(side,palm);

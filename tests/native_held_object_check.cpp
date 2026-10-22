@@ -455,6 +455,30 @@ int main() {
             Held::service_hold_layers(base_address,reader,0);Held::service_hold_layers(base_address,reader,0);
             assert(written.size()==2 && (written[1][1]&0x1f)==3u && !Held::restore_hold_.load());
         }
+        {   // an epoch change (recenter, XR suspend/resume) during the release window must not strand the object on DEBRIS: the ledger restores it, once
+            written.clear();memory.put(filter_at,std::uint32_t{(0x20u<<5)|3u});Held::clear();Held::service_hold_layers(base_address,reader,0);written.clear();
+            Held::service_hold_layers(base_address,reader,entity);assert(written.size()==1 && (r::value<std::uint32_t>(reader,filter_at).value()&0x1f)==4u);
+            Held::begin_safe_release();Held::clear();
+            Held::service_hold_layers(base_address,reader,0);assert(written.size()==1 && Held::restore_hold_.load());   // waiting for the release check
+            const auto restored=Held::layers_restored.load(),abandoned=Held::layers_abandoned.load();
+            Held::note_epoch(Held::epoch_seen_.load()+1);
+            Held::service_hold_layers(base_address,reader,0);
+            assert(written.size()==2 && (written[1][1]&0x1f)==3u && (r::value<std::uint32_t>(reader,filter_at).value()&0x1f)==3u);   // back on RIGID_BODY
+            assert(Held::layers_restored.load()==restored+1 && Held::layers_abandoned.load()==abandoned && !Held::restore_hold_.load());
+            Held::allow_restore();Held::service_hold_layers(base_address,reader,0);assert(written.size()==2);   // exactly once
+            // the same during a live hold: the held object is restored and takes DEBRIS again on the next service
+            Held::service_hold_layers(base_address,reader,entity);assert(written.size()==3 && (written[2][1]&0x1f)==4u);
+            Held::note_epoch(Held::epoch_seen_.load()+1);Held::service_hold_layers(base_address,reader,entity);
+            assert(written.size()==5 && (written[3][1]&0x1f)==3u && (written[4][1]&0x1f)==4u);
+            Held::clear();Held::service_hold_layers(base_address,reader,0);assert(written.size()==6 && (written[5][1]&0x1f)==3u);
+            // a level load changes the entity: the entry is given up without a write
+            Held::service_hold_layers(base_address,reader,entity);const auto writes=written.size();
+            Held::begin_safe_release();Held::clear();
+            put(entity+0xa8,std::uint32_t{spawn+0x10000});   // another entity now owns the slot
+            Held::note_epoch(Held::epoch_seen_.load()+1);Held::service_hold_layers(base_address,reader,0);
+            assert(written.size()==writes && Held::layers_abandoned.load()>abandoned);
+            put(entity+0xa8,spawn);
+        }
         std::printf("held layer service: tank re-takes DEBRIS after a transient clear, RIGID_BODY after the hold; bottle settled without a write\n");
         Held::filter_seam_=nullptr;
     }

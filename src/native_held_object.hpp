@@ -235,7 +235,16 @@ public:
         const auto epoch=epoch_seen_.load(std::memory_order_acquire);
         if(epoch!=layer_epoch_) {
             layer_epoch_=epoch;
-            if(ledger_.pending()) {const auto before=ledger_.abandoned();ledger_.clear_all();layers_abandoned+=ledger_.abandoned()-before;}
+            // A recenter or an XR suspend/resume changes the epoch without reloading the level: an entry still on DEBRIS (a held object, or a released one
+            // waiting for its safe release) is restored through the ledger first, its identity re-read before the write (a level load fails that and the
+            // entry is given up); only what could not be restored is abandoned, so a live object is never left on DEBRIS.
+            if(ledger_.pending()) {
+                const auto before=ledger_.abandoned();
+                if(layer_entity_) {ledger_.released(layer_entity_);layer_entity_=0;}
+                restore_pending(base,read);
+                if(ledger_.pending()) ledger_.clear_all();
+                layers_abandoned+=ledger_.abandoned()-before;
+            }
             layer_entity_=0;layer_settled_.store(0,std::memory_order_release);real_release_.store(0);released_ = {};restore_hold_.store(false,std::memory_order_release);
         }
         if(restore_hold_.load(std::memory_order_acquire) && GetTickCount64()-restore_hold_since_.load(std::memory_order_acquire)>restore_hold_max_ms) allow_restore();

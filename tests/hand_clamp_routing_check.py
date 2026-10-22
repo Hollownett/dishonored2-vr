@@ -39,7 +39,7 @@ def check(dxgi: str, aim: str) -> None:
     assert pub.index('raw_grips=hands.grips;') < pub.index('reach_clamp(') < pub.index('hand_clamp.update(')
     # Yields (C9): authored arms, a native carry on that side (fresh hand state), a physical hold. The reach clamp never applies on a yield.
     assert 'if(hand_holding_object&&hand_state_tick&&GetTickCount64()-hand_state_tick<=300)carry_bits=1u<<(hand_hold_side&1u);' in clamp
-    for need in ('constboolclamp_yield=d2vr::clamp_yields(side,authored_hands,carry_bits,physical_grab_requested&&native_grab.holding(side));',
+    for need in ('constboolclamp_yield=d2vr::clamp_yields(side,authored_hands,carry_bits,physical_grab_requested&&native_grab.holding(side))||(held_clamp_live.releasing&&held_clamp_live.side==(side&1u));',
                  'constautotarget=clamp_yield||!reach_fresh?palm:d2vr::reach_clamp(palm,arm_reach.reach[side],&reach_clamped);',
                  'in.yield=clamp_yield;', 'in.target=target;', 'in.root=clamp_root;', 'in.epoch=clamp_epoch;', 'in.chest=chest;',
                  'in.post=d2vr::clamp_posts(clamp_alternate,hand_clamp_frame,side);', 'in.tip_enabled=clamp_tip_on;'):
@@ -212,7 +212,7 @@ def check(dxgi: str, aim: str) -> None:
     a = compact(aim)
     for need in ('inlinestaticconstexprunsignedweapon_slots=14;', 'staticconstexprunsignedtip_slot=11,wall_tip_slot=12,exclude_slot=13;',
                  'returnslot==0||slot==tip_slot||slot==wall_tip_slot||slot==exclude_slot;',
-                 'weapon_req_[side][slot]={from,to,radius,true,exclude,exclude_bone,exclude_handle};'):
+                 'weapon_req_[side][slot]={from,to,radius,true,exclude,exclude_bone,exclude_handle,producer};'):
         assert need in a, need
     stage = between(a, 'std::array<std::array<std::optional<WorldTraceHit>,weapon_slots>,2>hits{};', '++weapon_casts_;')
     # I1: a guard's limb maps too (native_cast_exclusion); an unmapped exclusion casts the sweep without it, never drops it.
@@ -237,7 +237,7 @@ if __name__ == '__main__':
         ('t.grip[side]=d2vr::fullbody::from_basis(hands.grips[side].position,', 't.grip[side]=d2vr::fullbody::from_basis(raw_grips[side].position,'),
         ('const auto target=clamp_yield || !reach_fresh?palm:', 'const auto target=!reach_fresh?palm:'),
         ('d2vr::clamp_yields(side,authored_hands,carry_bits,', 'd2vr::clamp_yields(side,0u,carry_bits,'),
-        ('carry_bits,physical_grab_requested && native_grab.holding(side));', 'carry_bits,false);'),
+        ('carry_bits,physical_grab_requested && native_grab.holding(side))', 'carry_bits,false)'),
         ('in.yield=clamp_yield;', 'in.yield=false;'),
         ('in.hand=probes.hand;in.hand_count=probes.count;', 'in.hand_count=0;'),
         ('in.tip=clamp_tip[side];in.wall_tip=clamp_wall_tip[side];', 'in.tip=clamp_tip[side];'),
@@ -288,7 +288,7 @@ if __name__ == '__main__':
         ('kWorldOccluderRequired,exclusion,clamp_slot(slot));', 'kWorldOccluderRequired,exclusion);'),
         ('else {++clamp_exclude_unmapped_;hits[side][slot]=cast(nullptr);}', 'else {++clamp_exclude_unmapped_;}'),
         ('native_cast_exclusion(self->read_,self->base_,*world,entity,seg.exclude_bone,', 'native_rigid_body_only(self->read_,self->base_,*world,entity,seg.exclude_bone,'),
-        ('weapon_req_[side][slot]={from,to,radius,true,exclude,exclude_bone,exclude_handle};', 'weapon_req_[side][slot]={from,to,radius,true,exclude};'),
+        ('weapon_req_[side][slot]={from,to,radius,true,exclude,exclude_bone,exclude_handle,producer};', 'weapon_req_[side][slot]={from,to,radius,true,exclude,exclude_bone,exclude_handle};'),
     )
     # Swapping the raw copy behind the palm offset (raw would carry the calibration) must be rejected.
     raw_line = 'raw_grips=hands.grips; // the tracked poses, before the palm offset and before world collision moves the drawn hands\n'

@@ -205,14 +205,44 @@ private:
     DwellTimer dwell_{};bool released_{},last_slid_{};
 };
 
-// Safe release (Part 5A): a released object keeps the DEBRIS layer until a zero-length cast from its pose reports it free; while it
+// The release probes. The engine never runs a cast shorter than min_cast_length (make_cast_request, native_world_trace.hpp: it answers null with a fresh
+// serial), so a probe that starts and ends on the proxy centre would read every release as clear. Each probe therefore starts release_probe_length
+// outside its proxy sphere (away from the middle of the object; straight up for a sphere at the middle: the usual penetration is into the floor) and
+// sweeps to the sphere's centre: a surface between the two, or a start already inside geometry, is the overlap.
+inline constexpr double release_probe_length=.08,min_cast_length=1e-3;
+inline std::array<ClampSweep,held_proxy_capacity> release_probe_sweeps(const HeldProxies& proxies,const WorldTrackedPose& pose) {
+    std::array<ClampSweep,held_proxy_capacity> out{};
+    const std::size_t n=std::min(proxies.count,held_proxy_capacity);
+    Vec3 middle{};
+    for(std::size_t i=0;i<n;++i) middle=middle+proxies.sphere[i].local;
+    if(n) middle=middle*(1./static_cast<double>(n));
+    for(std::size_t i=0;i<n;++i) {
+        const Vec3 centre=clamp_detail::world_point(pose,proxies.sphere[i].local);
+        Vec3 away=clamp_detail::rotate(pose.basis,proxies.sphere[i].local-middle);
+        const double l=length(away);
+        away=l>.01?away*(1/l):Vec3{0,0,1};
+        out[i]={centre+away*release_probe_length,centre,proxies.sphere[i].radius,true,std::nullopt};
+    }
+    return out;
+}
+// How far inside the world a release probe's answer says the proxy sphere is, or none when the probe is clear. Hit is a WorldTraceHit
+// (point, centre, fraction, initial_overlap): a start inside geometry has the engine's penetration data (radius minus the distance from the sphere
+// centre to the surface point); a hit along the probe means the sphere's final position lies behind a surface (how far past first contact it is). A
+// hit at the very end of the probe is the resting contact of a sphere sitting on the floor, not an overlap.
+template<class Hit> std::optional<double> release_probe_depth(const ClampSweep& sweep,const Hit& hit) {
+    if(hit.initial_overlap) return std::max(0.,sweep.radius-length(sweep.to-hit.point));
+    if(!(hit.fraction<.98)) return std::nullopt;
+    return std::min(sweep.radius,length(sweep.to-hit.centre));
+}
+
+// Safe release (Part 5A): a released object keeps the DEBRIS layer until a short cast into each proxy sphere from just outside the object reports it free; while it
 // overlaps the world it is driven out along the contact normal at no more than max_speed for at most max_seconds, and the layer
 // then returns exactly once (restore_layer). When it never frees, the layer returns anyway and `unresolved` is set, so the failure is
 // counted. The layer is never restored while checking or depenetrating. No teleport: only a velocity is requested.
 enum class ReleasePhase {idle,checking,depenetrating,done};
 struct SafeReleaseInput {
     double now{};bool released{};
-    std::optional<ClampHit> overlap;   // the answer to the zero-length cast from the released pose (none: free)
+    std::optional<ClampHit> overlap;   // the answer to the release probes (release_probe_sweeps); none: free
     bool sweep_answered{};             // overlap is this frame's answer (an unanswered cast waits)
     double depth{};};                  // how far inside, metres: the caller's dot(hit.point - pose.position, -normal) clamped >= 0 (preflight B-2)
 struct SafeReleaseOutput {ReleasePhase phase{};Vec3 velocity{};bool write{};bool restore_layer{};bool unresolved{};std::uint64_t depen_frames{};};

@@ -1,4 +1,5 @@
 #include "held_clamp.hpp"
+#include "native_world_trace.hpp"
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -327,6 +328,37 @@ void reset_idles() {
     in.now=2;in.overlap.reset();
     CHECK(r.update(in).restore_layer);   // starts a fresh check
 }
+
+// The engine never runs a cast shorter than 1e-3 (make_cast_request answers null with a fresh serial), so a zero-length release probe reads every
+// release as clear and the depenetration never happens. Every release probe must be a real cast the engine accepts.
+void release_probes_are_never_zero_length() {
+    for(const auto& proxies:{tank(),three()}) {
+        const auto sweeps=release_probe_sweeps(proxies,pose_at({3,4,5}));
+        for(std::size_t i=0;i<proxies.count;++i) {
+            CHECK(sweeps[i].valid && sweeps[i].radius==proxies.sphere[i].radius);
+            CHECK(length(sweeps[i].to-sweeps[i].from)>=min_cast_length && length(sweeps[i].to-sweeps[i].from)>=release_probe_length-1e-9);
+            // the engine accepts it: make_cast_request rejects a sweep shorter than 1e-3
+            CHECK(make_cast_request(sweeps[i].from,sweeps[i].to,1,1,1).has_value());
+            // it ends on the proxy sphere's centre and starts outside the object, away from its middle
+            const Vec3 centre=pose_at({3,4,5}).position+proxies.sphere[i].local;
+            CHECK(length(sweeps[i].to-centre)<1e-12);
+        }
+    }
+    CHECK(!make_cast_request({1,1,1},{1,1,1},1,1,1).has_value());   // the old construction {c,c}: refused
+    const auto t=release_probe_sweeps(tank(),pose_at({0,0,0}));
+    CHECK(t[0].from.z>t[0].to.z);   // a sphere at the middle is probed from above (into the floor it rests in)
+    const auto three_sweeps=release_probe_sweeps(three(),pose_at({0,0,0}));
+    CHECK(three_sweeps[0].from.z<three_sweeps[0].to.z && three_sweeps[2].from.z>three_sweeps[2].to.z);   // the ends are probed from beyond the ends
+}
+void release_probe_depth_reads_overlap_and_ignores_resting_contact() {
+    const ClampSweep sweep{{0,0,.08},{0,0,0},radius,true,std::nullopt};
+    WorldTraceHit start_inside{};start_inside.initial_overlap=true;start_inside.point={0,0,-.1};start_inside.fraction=0;
+    const auto inside=release_probe_depth(sweep,start_inside);CHECK(inside && std::abs(*inside-(radius-.1))<1e-9);
+    WorldTraceHit along{};along.fraction=.5;along.centre={0,0,.04};along.point={0,0,-.16};
+    const auto behind=release_probe_depth(sweep,along);CHECK(behind && std::abs(*behind-.04)<1e-9);
+    WorldTraceHit resting{};resting.fraction=1.;resting.centre={0,0,0};resting.point={0,0,-radius};
+    CHECK(!release_probe_depth(sweep,resting));   // a sphere sitting on the floor is clear
+}
 } // namespace
 
 int main() {
@@ -351,5 +383,7 @@ int main() {
     no_normal_pushes_up();
     non_finite_overlap_ignored();
     reset_idles();
+    release_probes_are_never_zero_length();
+    release_probe_depth_reads_overlap_and_ignores_resting_contact();
     std::puts("held_clamp_check OK");
 }

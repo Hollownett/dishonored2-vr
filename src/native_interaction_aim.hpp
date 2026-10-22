@@ -456,7 +456,7 @@ class NativeInteractionAim {
             // World-trace probe ("trace" test command): one sphere cast along the native camera's view, on this
             // game-thread scope only (the same engine call 0x3b7b90 makes here). Verifies the weapon-collision source.
             // Weapon/hand collision sweeps posted by the render thread (one frame late by design).
-            {std::array<std::array<WeaponSegment,weapon_slots>,2> segments;{std::lock_guard<std::mutex> guard(weapon_mutex_);segments=weapon_req_;for(auto& side:weapon_req_) for(auto& seg:side) seg.valid=false;}
+            {auto segments=take_weapon_requests();
              bool any=false;for(const auto& side:segments) for(const auto& seg:side) any=any || seg.valid;
              if(any) try {
                 static const bool verified=NativeWorldTrace::verify(self->base_,self->read_);
@@ -498,9 +498,7 @@ class NativeInteractionAim {
                     {LARGE_INTEGER frequency{};QueryPerformanceFrequency(&frequency);
                      clamp_cast_us_.store(frequency.QuadPart?static_cast<double>(clamp_ticks)*1e6/static_cast<double>(frequency.QuadPart):0.);
                      clamp_cast_n_.store(clamp_n);++clamp_cast_serial_;}
-                    std::lock_guard<std::mutex> guard(weapon_mutex_);const auto now=GetTickCount64();
-                    for(unsigned side=0;side<2;++side) for(unsigned slot=0;slot<weapon_slots;++slot) if(segments[side][slot].valid) {weapon_hit_[side][slot]=hits[side][slot];weapon_tick_[side][slot]=now;weapon_serial_[side][slot]=weapon_casts_.load()+1;}
-                    ++weapon_casts_;
+                    record_weapon_answers(segments,hits,GetTickCount64());
                 }
              } catch(...) {}}
             // Contact sword hits posted by the render thread: the engine's TakeDamage on this game-thread scope.
@@ -662,7 +660,7 @@ class NativeInteractionAim {
             nonlethal_grip_revision_.load(std::memory_order_acquire)==revision;
     }
     // exclude: an entity whose body the cast must not report (the hand clamp's exclusion sweeps; 0: none).
-    struct WeaponSegment {Vec3 from{},to{};double radius{};bool valid{};std::uintptr_t exclude{};int exclude_bone=-1;std::uint32_t exclude_handle{};};   // exclude_bone/handle: the guard body the contact service met (-1: a prop)
+    struct WeaponSegment {Vec3 from{},to{};double radius{};bool valid{};std::uintptr_t exclude{};int exclude_bone=-1;std::uint32_t exclude_handle{};std::uint8_t producer{};};   // exclude_bone/handle: the guard body the contact service met (-1: a prop)
     // Slots per hand: 0 the hand clamp's palm sweep (the chest re-acquire while released), 1 weapon, 2 sword reach (hit detection only,
     // past the tip), 3 the palm sweep and 4-8 one closing-fingertip sweep per finger (finger_ik.hpp: what each finger could touch; one
     // posted per frame, the others' hits persist <=100 ms). 9 and 10: the profile casts (dxgi_probe.cpp profile_step, radius_profile.hpp):
@@ -670,8 +668,9 @@ class NativeInteractionAim {
     // (hand_clamp.hpp; with slot 0 at most 4 a hand, timed together as clamp_cast_us_, C14).
     inline static constexpr unsigned weapon_slots=14;
     inline static std::mutex weapon_mutex_;static std::array<std::array<WeaponSegment,weapon_slots>,2> weapon_req_; // defined after the class: clang-cl needs WeaponSegment's member initializers complete
-    inline static std::array<std::array<std::optional<WorldTraceHit>,weapon_slots>,2> weapon_hit_{};inline static std::array<std::array<std::uint64_t,weapon_slots>,2> weapon_tick_{},weapon_serial_{};
+    inline static std::array<std::array<std::optional<WorldTraceHit>,weapon_slots>,2> weapon_hit_{};inline static std::array<std::array<std::uint64_t,weapon_slots>,2> weapon_tick_{},weapon_serial_{};inline static std::array<std::array<std::uint8_t,weapon_slots>,2> weapon_producer_{};
 public:
+    static constexpr unsigned slot_count=weapon_slots;   // checks
     static constexpr unsigned probe_slots=9;   // the finger probes: slots 3-8 (the palm's own and the weapon's come first)
     static constexpr unsigned profile_slot=9;  // and 10
     static constexpr unsigned tip_slot=11,wall_tip_slot=12,exclude_slot=13;   // the hand clamp's (slot 0 is its palm)
@@ -684,32 +683,50 @@ public:
     inline static std::atomic<std::uint64_t> clamp_exclude_casts_{},clamp_exclude_unmapped_{},clamp_exclude_hits_{},clamp_exclude_self_hits_{};
     inline static std::atomic<bool> clamp_exclude_info_zero_{};
     // Render thread: post a sweep for the next game-thread scope; read the latest result (<=100 ms old).
-    static void post_weapon_segment(unsigned side,unsigned slot,Vec3 from,Vec3 to,double radius,std::uintptr_t exclude=0,int exclude_bone=-1,std::uint32_t exclude_handle=0) {
-        if(side>1 || slot>=weapon_slots) return;std::lock_guard<std::mutex> guard(weapon_mutex_);weapon_req_[side][slot]={from,to,radius,true,exclude,exclude_bone,exclude_handle};
+    // producer: who asked (producer_clamp 0: the hand clamp, the weapon and the finger probes; producer_held: the held object's clamp sweeps; producer_release:
+    // the safe-release probes). The slots are shared, the answer carries the producer of the request it answers, and a reader asks for its own: another
+    // producer's request that overwrote its own before the game thread copied it is never read as its answer.
+    static constexpr std::uint8_t producer_clamp=0,producer_held=1,producer_release=2;
+    static void post_weapon_segment(unsigned side,unsigned slot,Vec3 from,Vec3 to,double radius,std::uintptr_t exclude=0,int exclude_bone=-1,std::uint32_t exclude_handle=0,std::uint8_t producer=producer_clamp) {
+        if(side>1 || slot>=weapon_slots) return;std::lock_guard<std::mutex> guard(weapon_mutex_);weapon_req_[side][slot]={from,to,radius,true,exclude,exclude_bone,exclude_handle,producer};
+    }
+    // Game thread: the requests posted since the last scope (each is answered once).
+    static std::array<std::array<WeaponSegment,weapon_slots>,2> take_weapon_requests() {
+        std::lock_guard<std::mutex> guard(weapon_mutex_);auto segments=weapon_req_;
+        for(auto& side:weapon_req_) for(auto& seg:side) seg.valid=false;
+        return segments;
+    }
+    // Game thread: record the answers of a scope (the segments it copied, their hits) with each request's producer.
+    static void record_weapon_answers(const std::array<std::array<WeaponSegment,weapon_slots>,2>& segments,const std::array<std::array<std::optional<WorldTraceHit>,weapon_slots>,2>& hits,std::uint64_t now) {
+        std::lock_guard<std::mutex> guard(weapon_mutex_);
+        for(unsigned side=0;side<2;++side) for(unsigned slot=0;slot<weapon_slots;++slot) if(segments[side][slot].valid) {
+            weapon_hit_[side][slot]=hits[side][slot];weapon_tick_[side][slot]=now;weapon_serial_[side][slot]=weapon_casts_.load()+1;weapon_producer_[side][slot]=segments[side][slot].producer;
+        }
+        ++weapon_casts_;
     }
     // The scope (weapon_casts_ count) that last answered this slot: unchanged since a post means the post is still unanswered.
-    static std::uint64_t weapon_serial(unsigned side,unsigned slot) {
-        if(side>1 || slot>=weapon_slots) return 0;std::lock_guard<std::mutex> guard(weapon_mutex_);return weapon_serial_[side][slot];
+    static std::uint64_t weapon_serial(unsigned side,unsigned slot,std::uint8_t producer=producer_clamp) {
+        if(side>1 || slot>=weapon_slots) return 0;std::lock_guard<std::mutex> guard(weapon_mutex_);return weapon_producer_[side][slot]==producer?weapon_serial_[side][slot]:0;
     }
-    static std::optional<WorldTraceHit> weapon_hit(unsigned side,unsigned slot,std::uint64_t now) {
+    static std::optional<WorldTraceHit> weapon_hit(unsigned side,unsigned slot,std::uint64_t now,std::uint8_t producer=producer_clamp) {
         if(side>1 || slot>=weapon_slots) return {};std::lock_guard<std::mutex> guard(weapon_mutex_);
-        const auto t=weapon_tick_[side][slot];return t && now>=t && now-t<=100?weapon_hit_[side][slot]:std::nullopt;
+        const auto t=weapon_tick_[side][slot];return t && now>=t && now-t<=100 && weapon_producer_[side][slot]==producer?weapon_hit_[side][slot]:std::nullopt;
     }
     // The held object's sweeps (held_clamp.hpp, Part 5A): up to 4 sphere casts a frame on the holding hand's clamp slots (0, tip, wall tip, exclude), the
     // hand clamp itself being yielded to the carry. exclude: the held entity (its body must not report itself). Hits come back by proxy index, <=100 ms old.
     static constexpr unsigned held_sweep_slots=4;
     static constexpr unsigned held_slot(std::size_t index) {return index==0?0u:index==1?tip_slot:index==2?wall_tip_slot:exclude_slot;}
-    template<class Sweeps> static void post_held_sweeps(unsigned side,const Sweeps& sweeps,std::uintptr_t exclude) {
+    template<class Sweeps> static void post_held_sweeps(unsigned side,const Sweeps& sweeps,std::uintptr_t exclude,std::uint8_t producer=producer_held) {
         if(side>1 || !exclude) return;
         for(std::size_t i=0;i<sweeps.size() && i<held_sweep_slots;++i) {
             const auto& sweep=sweeps[i];
             if(!sweep.valid || !std::isfinite(sweep.radius) || !(sweep.radius>0) || !finite(sweep.from) || !finite(sweep.to)) continue;
-            post_weapon_segment(side,held_slot(i),sweep.from,sweep.to,sweep.radius,exclude);
+            post_weapon_segment(side,held_slot(i),sweep.from,sweep.to,sweep.radius,exclude,-1,0,producer);
         }
     }
-    static std::array<std::optional<WorldTraceHit>,held_sweep_slots> held_hits(unsigned side,std::uint64_t now) {
+    static std::array<std::optional<WorldTraceHit>,held_sweep_slots> held_hits(unsigned side,std::uint64_t now,std::uint8_t producer=producer_held) {
         std::array<std::optional<WorldTraceHit>,held_sweep_slots> out{};
-        for(std::size_t i=0;i<held_sweep_slots;++i) out[i]=weapon_hit(side,held_slot(i),now);
+        for(std::size_t i=0;i<held_sweep_slots;++i) out[i]=weapon_hit(side,held_slot(i),now,producer);
         return out;
     }
     // Diagnostics: did the palm, tip or wall-tip sweep of this side hit the entity? One lock for all three slots.

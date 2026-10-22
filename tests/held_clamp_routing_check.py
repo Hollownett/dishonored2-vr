@@ -44,7 +44,21 @@ assert "begin_safe_release()" in end
 step = function(probe, "static void held_clamp_release_step()")
 assert "allow_restore()" in step and "release_depen(" in step
 assert step.index("L.safe.update(in)") < step.index("if(out.restore_layer) {finish(")  # allow_restore only via finish, after SafeRelease says so
-assert "weapon_serial(L.side,0)" in step, "SafeRelease sees an answer only when one arrived"
+assert "weapon_serial(L.side,0,d2vr::NativeInteractionAim::producer_release)" in step, "SafeRelease sees an answer only when one arrived, and only its own"
+assert "held_hits(L.side,now_ms,d2vr::NativeInteractionAim::producer_release)" in step and "producer_release);" in step, "the release reads only answers tagged release"
+assert "weapon_serial(side,0,d2vr::NativeInteractionAim::producer_held)" in publish, "the held clamp reads only answers tagged held"
+# a release probe is a real cast: never the zero-length {c,c} construction (the engine does not run casts shorter than 1e-3)
+assert "release_probe_sweeps(proxies,pose)" in step and "{c,c," not in step and "post_held_sweeps(L.side,sweeps" not in step, "zero-length release probes"
+assert "release_probe_depth(" in step
+# the depenetration push names entity, id and handle, uses the HoldObject body mapping (not native_rigid_body), and a new hold cancels it
+assert "native_grab.release_depen(L.entity,L.entity_id,body->handle," in step and "exclusion_body(image_base,read_self,L.entity)" in step
+begin = function(probe, "static void held_clamp_begin(")
+assert "native_grab.cancel_release_depen()" in begin, "a new hold cancels a pending depenetration push"
+apply = function(grab, "void apply_release_depen()")
+assert "NativeHeldObject::exclusion_body(base_,read_,entity)" in apply and "native_rigid_body(" not in apply, "the HoldObject body is mapped the layer swap's way"
+assert "depen_.take(" in apply and "write_velocity(reinterpret_cast<void*>(world),d.handle," in apply
+# the slots carry a producer
+assert "producer_release" in aim and "weapon_producer_[side][slot]=segments[side][slot].producer" in aim
 
 # layer writes live in native_held_object.hpp only, and the restore goes through the ledger
 for name, text in (("dxgi_probe.cpp", probe), ("native_grab.hpp", grab), ("native_interaction_aim.hpp", aim)):
@@ -65,7 +79,7 @@ for rva in ("0xc85860", "0xc90de0"):
 
 # the depenetration write is the existing velocity setter, validated
 depen = function(grab, "void apply_release_depen()")
-assert "native_rigid_body(read_,base_,d.entity)" in depen and "write_velocity(" in depen and "GetTickCount64()-d.tick>100" in depen
+assert "write_velocity(" in depen and "GetTickCount64()" in depen
 assert "release_all()" in depen
 
 # knob, status, launcher row
