@@ -9,7 +9,9 @@
 #include <mutex>
 #include <stdexcept>
 #include <vector>
+#include <intrin.h>
 #include "taa_dispatch.hpp"
+#include "alternate_native_taa.hpp"
 
 // Per-eye temporal-AA history for native two-view stereo.
 //
@@ -105,10 +107,11 @@ inline std::array<std::uint64_t,2> assignment(const std::array<std::uint64_t,2>&
 struct PassInputs {
     std::uintptr_t base{};std::array<std::uintptr_t,2> eye_views{};
     bool twins_ready{};std::array<ImageSnapshot,2> originals{},twins{};
+    std::uintptr_t single_view{};std::optional<alternate_taa::Receipt> receipt;
 };
 enum class PassResult {untracked,idle,fallback,rebuild,planned};
 struct PassPlan {
-    int eye=-1;std::uint32_t counter{};bool write{};
+    int eye=-1;std::uint32_t counter{};bool write{};std::optional<std::array<float,4>> jitter;
     std::array<std::uintptr_t,2> slots{};std::array<std::uint64_t,2> engine{},replaced{};
 };
 // Pure planning against engine memory read through `read`. It never writes.
@@ -116,8 +119,16 @@ template<class Read> PassResult plan_pass(Read read,const PassInputs& in,std::ui
                                          PassPlan& plan,std::vector<ParamEntry>& scratch) {
     std::uintptr_t view{};
     if(!read(ctx+ctx_view,&view,sizeof view)) return PassResult::untracked;
-    const int eye=eye_of(view,in.eye_views[0],in.eye_views[1]);
-    if(eye<0) return PassResult::untracked;
+    int eye=eye_of(view,in.eye_views[0],in.eye_views[1]);
+    if(in.single_view && view==in.single_view) {
+        std::uint32_t stamp{};
+        if(!in.receipt || !read(view+alternate_taa::stamp_offset,&stamp,4) ||
+            in.receipt->key.view!=view || in.receipt->key.native_counter!=stamp || !in.receipt->admitted) return PassResult::fallback;
+        eye=in.receipt->key.eye;
+        plan.jitter=std::array<float,4>{in.receipt->current.jitter[0],in.receipt->current.jitter[1],
+            in.receipt->previous.jitter[0],in.receipt->previous.jitter[1]};
+    }
+    if(eye<0 || eye>1) return PassResult::untracked;
     std::uint8_t flags_a{},flags_b{};
     if(!read(view+view_flags_a,&flags_a,1) || !read(view+view_flags_b,&flags_b,1)) return PassResult::fallback;
     if(!temporal_runs(flags_a,flags_b)) return PassResult::idle;
@@ -160,6 +171,31 @@ inline void restore_plan(const PassPlan& plan) noexcept {
     if(plan.write) for(int k=0;k<2;++k)
         InterlockedCompareExchange64(reinterpret_cast<volatile LONG64*>(plan.slots[k]),static_cast<LONG64>(plan.engine[k]),static_cast<LONG64>(plan.replaced[k]));
 }
+// Only an unqualified alternate main view uses this scoped native AA gate. All original post-process work still runs once.
+using NativePass=unsigned long long (__fastcall*)(void*);
+inline unsigned long long without_temporal(NativePass original,void* ctx,std::uintptr_t view) {
+    const auto flags=reinterpret_cast<volatile char*>(view+view_flags_b);
+    const std::uint32_t stamp=*reinterpret_cast<volatile std::uint32_t*>(view+alternate_taa::stamp_offset);
+    char before=*flags;bool ours=false;
+    while(!(before&4)) {
+        const char seen=_InterlockedCompareExchange8(flags,static_cast<char>(before|4),before);
+        if(seen==before) {ours=true;break;}
+        before=seen;
+    }
+    unsigned long long result{};
+    __try {result=original(ctx);}
+    __finally {
+        if(ours && *reinterpret_cast<volatile std::uint32_t*>(view+alternate_taa::stamp_offset)==stamp) {
+            char current=*flags;
+            while(current&4) {
+                const char seen=_InterlockedCompareExchange8(flags,static_cast<char>(current&~4),current);
+                if(seen==current) break;
+                current=seen;
+            }
+        }
+    }
+    return result;
+}
 } // namespace taa_history
 
 class NativeTaaHistory {
@@ -181,7 +217,7 @@ class NativeTaaHistory {
         {0x2bfa0,8,{0x48,0x8d,0x81,0x98,0x00,0x00,0x00,0xc3}},                                     // handle = image+0x98
     }};
     inline static NativeTaaHistory* instance_{};
-    Pass original_{};Allocate allocate_{};Read read_{};std::uintptr_t base_{};bool enabled_{};
+    Pass original_{};Allocate allocate_{};Read read_{};std::uintptr_t base_{};bool enabled_{};alternate_taa::Runtime* alternate_{};
     std::atomic<bool> active_{},ready_{},rebuild_{};std::atomic<unsigned> depth_{},in_flight_{};
     std::array<std::atomic<std::uintptr_t>,2> eye_views_{},observed_{};
     std::array<taa_history::Alternation,2> alternation_{};
@@ -202,6 +238,11 @@ class NativeTaaHistory {
             thread_local std::vector<taa_history::ParamEntry> scratch;
             // Snapshots are copied only after ready_ is observed (maintain() writes them before setting it).
             taa_history::PassInputs in{base_,{eye_views_[0].load(),eye_views_[1].load()}};
+            if(alternate_) {
+                in.single_view=alternate_->single_view.load();std::uintptr_t view{};
+                if(in.single_view && read_(reinterpret_cast<std::uintptr_t>(ctx)+taa_history::ctx_view,&view,8) && view==in.single_view)
+                    in.receipt=alternate_->resolve(view);
+            }
             if(ready_.load()) {in.twins_ready=true;in.originals=originals_;in.twins=twins_;}
             const auto result=taa_history::plan_pass(read_,in,reinterpret_cast<std::uintptr_t>(ctx),alternation_,plan,scratch);
             if(result==taa_history::PassResult::idle) ++idle_;
@@ -220,17 +261,23 @@ public:
     void (*after_pass)(void* ctx,int eye)=nullptr;
 private:
     unsigned long long run(void* ctx,const taa_history::PassPlan& plan) {
-        taa_history::apply_plan(plan);TaaDispatchHook::pass_eye=plan.eye;TaaDispatchHook::post_taa=false;TaaDispatchHook::pass_context=nullptr;
+        taa_history::apply_plan(plan);TaaDispatchHook::pass_jitter=plan.jitter;TaaDispatchHook::pass_eye=plan.eye;TaaDispatchHook::post_taa=false;TaaDispatchHook::pass_context=nullptr;
         __try {return original_(ctx);}
         __finally {
-            TaaDispatchHook::pass_eye=-1;taa_history::restore_plan(plan);
+            TaaDispatchHook::pass_eye=-1;TaaDispatchHook::pass_jitter.reset();taa_history::restore_plan(plan);
             if(const auto end=TaaDispatchHook::pass_end.load()) end(plan.eye,TaaDispatchHook::pass_context);
         }
     }
     unsigned long long invoke(void* ctx) {
         ++passes_;
         taa_history::PassPlan pass{};
-        if(!active_.load() || !plan(ctx,pass)) return original_(ctx);
+        if(!active_.load()) return original_(ctx);
+        if(!plan(ctx,pass)) {
+            std::uintptr_t view{};
+            if(alternate_ && read_(reinterpret_cast<std::uintptr_t>(ctx)+taa_history::ctx_view,&view,8) &&
+                view && view==alternate_->single_view.load()) return taa_history::without_temporal(original_,ctx,view);
+            return original_(ctx);
+        }
         const auto result=run(ctx,pass);
         if(after_pass) after_pass(ctx,pass.eye);
         alternation_[static_cast<std::size_t>(pass.eye)].advance();
@@ -256,6 +303,8 @@ private:
             if(InterlockedCompareExchange(counter,taa_history::reset_passes,value)==value) break;
     }
 public:
+    void alternate_runtime(alternate_taa::Runtime* runtime) noexcept {alternate_=runtime;}
+    void reset_histories() noexcept {alternation_[0].reset();alternation_[1].reset();if(base_) request_reset();}
     // Stable native view objects from qualified Setup calls; 0 clears an eye.
     void publish_eye_view(unsigned eye,std::uintptr_t view) noexcept {if(eye<2) eye_views_[eye]=view;}
     void clear_eye_views() noexcept {eye_views_[0]=0;eye_views_[1]=0;alternation_[0].reset();alternation_[1].reset();}

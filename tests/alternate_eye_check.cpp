@@ -201,8 +201,9 @@ static void mismatch_falls_back_after_thirty() {
     for (int i = 0; i < 29; ++i) CHECK(!r.note(true));
     CHECK(r.note(true));
 }
-static void temporal_aa_forced_off_in_alternate_mode() {
+static void temporal_aa_requires_verified_alternate_history() {
     for (int requested = 0; requested <= 6; ++requested) {
+        CHECK(alternate_effective_temporal(true, requested, true) == (requested == 1 ? 1 : 0));
         CHECK(alternate_effective_temporal(true, requested) == 0);          // TAA / FSR 3 / FSR 4 all become the SMAA row
         CHECK(alternate_effective_temporal(false, requested) == requested);  // every other mode keeps what was asked
         // the SMAA pass runs in alternate mode even when the saved preference names an FSR mode; otherwise the old rule (FSR skips it)
@@ -395,7 +396,7 @@ int main() {
     gating_decisions();
     fresh_eye_and_need_mask();
     mismatch_falls_back_after_thirty();
-    temporal_aa_forced_off_in_alternate_mode();
+    temporal_aa_requires_verified_alternate_history();
     per_eye_state_follows_the_logical_eye();
     setup_image_shows_one_present_later();
     present_readiness_from_the_setup_slot();

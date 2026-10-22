@@ -594,6 +594,9 @@ static std::uintptr_t full_body_machine{},full_body_machine_player{};
 static d2vr::CameraComfort camera_comfort;
 static d2vr::NativeCvars native_cvars;
 static d2vr::NativeTaaHistory taa_history;
+static d2vr::alternate_taa::Runtime alternate_taa_runtime;
+static bool alternate_native_taa_enabled=false,alternate_native_taa_abi=false;
+static thread_local bool alternate_taa_setup_ready=false;
 // Scripted-simulation diagnostic: per-eye TAA constants (current/previous matrices, jitter).
 static d2vr::TaaConstantsCapture taa_capture,taa_capture_b2{64,2};static std::ofstream taa_capture_csv,taa_capture_b2_csv;static ULONGLONG taa_capture_after_tick{};
 bool read_self(std::uintptr_t address,void* data,std::size_t size);
@@ -934,7 +937,9 @@ bool taa_dispatch_handler(ID3D11DeviceContext* c,int eye,UINT x,UINT y,UINT z,d2
     }
     std::lock_guard<std::mutex> lock(taa_dispatch_mutex);
     if(taa && eye>=0 && eye<2 && !fsr_taa.enabled.load()) { // native TAA: its motion vectors carry the jitter step (see taa_mv_dejitter.hpp)
-        std::array<float,4> e;{std::lock_guard<std::mutex> l(eye_jitter_mutex);e=eye_jitter[static_cast<std::size_t>(eye)];}
+        std::array<float,4> e;
+        if(d2vr::TaaDispatchHook::pass_jitter) e=*d2vr::TaaDispatchHook::pass_jitter;
+        else {std::lock_guard<std::mutex> l(eye_jitter_mutex);e=eye_jitter[static_cast<std::size_t>(eye)];}
         try {if(taa_mv_dejitter.dispatch(c,b,d2vr::TaaMvDejitter::step(e[0],e[1],e[2],e[3]),original,x,y,z)) return true;} catch(...) {}
     }
     if(!taa_dispatch_csv.is_open() || taa_dispatch_rows>=400 || (taa && taa_dispatch_rows>40 && taa_dispatch_matches%97)) return false;
@@ -1183,17 +1188,31 @@ void __fastcall view_setup_hook(void* view,int* window_rect,int* render_rect) {
     d2vr::crash_operation="native view setup";
     const auto original=original_setup.load(std::memory_order_acquire);
     const bool claimed=head_depth.fetch_add(1,std::memory_order_acq_rel)==0;
+    bool setup_completed=false;
+    if(claimed) {alternate_taa_setup_ready=false;if(GetCurrentThreadId()==xr_present_thread) alternate_taa_runtime.cancel_plan();}
     __try {
         if(head_requested) {
             if(claimed) observe_eye_setup(view);
             if(claimed) prepare_head_view(view);
-            original(view,window_rect,render_rect);
+            if(claimed && GetCurrentThreadId()==xr_present_thread && alternate_taa_runtime.planned() && !alternate_taa_setup_ready) {
+                alternate_taa_runtime.cancel_plan();alternate_taa_runtime.fail(reinterpret_cast<std::uintptr_t>(view));
+                native_cvars.set(d2vr::NativeCvars::skip_temporal_aa,1);
+            }
+            if(claimed && alternate_taa_setup_ready && !alternate_taa_runtime.seed(reinterpret_cast<std::uintptr_t>(view))) {
+                alternate_taa_runtime.failed=true;native_cvars.set(d2vr::NativeCvars::skip_temporal_aa,1);
+            }
+            original(view,window_rect,render_rect);setup_completed=true;
             if(claimed) alt_taa_trace(view);
             if(claimed && forced_view_jitter && view_jitter_abi) { // see d2vr::engine_taa_jitter
                 *reinterpret_cast<d2vr::TaaJitter*>(static_cast<std::byte*>(view)+0x7850)=*forced_view_jitter;forced_view_jitter.reset();++view_jitter_writes;
             }
+            if(claimed && alternate_taa_setup_ready) {
+                alternate_taa_runtime.finish(reinterpret_cast<std::uintptr_t>(view));
+                if(alternate_taa_runtime.failed.load()) native_cvars.set(d2vr::NativeCvars::skip_temporal_aa,1);
+            }
         } else setup_hook(view,window_rect,render_rect);
     } __finally {
+        if(claimed && alternate_taa_setup_ready && !setup_completed) alternate_taa_runtime.abort();
         if(claimed && head_requested) restore_head_view();
         head_depth.fetch_sub(1,std::memory_order_acq_rel);
         d2vr::crash_operation=previous_operation;
@@ -1347,6 +1366,9 @@ static UINT64 alt_epoch_seen{};
 static UINT64 alt_per_frame_done{}; // displayed frame whose per-frame mod work already ran (prepare_head_view, under log_mutex)
 static bool alt_descriptor_paired{};          // which descriptor is installed right now (render thread only)
 static bool alternate_on() noexcept {return alt_eye_state.load()==1 && mono_view_state.load()==1;}
+static bool alternate_native_taa_allowed() noexcept {
+    return alternate_native_taa_enabled && alternate_native_taa_abi && projection_jitter && taa_history_installed && !alternate_taa_runtime.failed.load();
+}
 // Layer-pose sync for the paired / perf-mono paths (2026-10-22, the one-frame pose-versus-image skew of the knob-off path, see
 // alternate_eye.hpp): a paired Setup's views wait in alt_pending for the Present that shows their image, as in alternate mode, instead of
 // being written into GameXr at Setup time (where the Present after the next one submitted them with the image of the Setup before).
@@ -1791,6 +1813,11 @@ bool read_self(std::uintptr_t address,void* data,std::size_t size) {
     const bool ok=read_self_raw(address,data,size);
     if(read_self_profiling) read_self_count(reinterpret_cast<std::uintptr_t>(_ReturnAddress()),size,!ok);
     return ok;
+}
+
+bool write_taa_state(std::uintptr_t address,const void* data,std::size_t size) {
+    SIZE_T written{};
+    return address && data && WriteProcessMemory(GetCurrentProcess(),reinterpret_cast<void*>(address),data,size,&written) && written==size;
 }
 
 bool write_self_aim(std::uintptr_t address,const void* data,std::size_t size) noexcept {
@@ -3579,6 +3606,8 @@ void observe_eye_begin(void* view) noexcept {
                 }
             }
             if(eye>=0) ++eye_begin_matches;
+            if(eye>=0 && alternate_taa_runtime.single_view.load()==address && game_xr)
+                alternate_taa_runtime.begin(address,d2vr::alternate_begin_display_frame(frames.load()),game_xr->pose_epoch(),game_xr->reference_epoch());
             if(eye==0 && mono_view_state.load()==1) mono_eye_frame=frames.load()+1; // the Present that ends this frame is frames+1
             if(eye>=0 && alt_pose_trace_on()) { // the pose the engine renders this view with: its render copy, written by the Setup one Present ago
                 std::array<float,3> copy_position{};std::array<float,9> copy_basis{};
@@ -4175,11 +4204,23 @@ void prepare_head_view(void* view) noexcept {
         fsr_vfov[eye_slot]=render_fov.up-render_fov.down;
         auto optical=d2vr::eye_projection(projection,render_fov);
         if(!optical) {native_audio_listener.clear();native_left_aim.clear();native_weapon_attachment.clear();return;}
+        std::optional<std::uint32_t> alternate_taa_phase;
+        if(alternate_native_taa_allowed() && taa_live.load() && !fsr_taa.enabled.load() && alt_eye>=0) {
+            d2vr::alternate_taa::Key temporal_key;
+            temporal_key.view=source;temporal_key.display=alt_display;temporal_key.eye=alt_eye;temporal_key.single=true;
+            temporal_key.pose_epoch=game_xr->pose_epoch();temporal_key.reference_epoch=game_xr->reference_epoch();
+            temporal_key.width=taa_width.load()?taa_width.load():width.load();temporal_key.height=taa_height.load()?taa_height.load():height.load();
+            {std::lock_guard<std::mutex> temporal_owner_lock(gpu_mutex);temporal_key.allocation=eye_view_allocation;temporal_key.owner=eye_camera_owner;}
+            if(read_self(image_base+d2vr::taa_history::frame_counter_rva,&temporal_key.native_counter,4)) alternate_taa_phase=alternate_taa_runtime.plan(temporal_key);
+            if(!alternate_taa_phase) {alternate_taa_runtime.fail(source);native_cvars.set(d2vr::NativeCvars::skip_temporal_aa,1);}
+            else if(alternate_taa_runtime.needs_reset()) taa_history.reset_histories();
+        } else if(alternate_taa_runtime.single_view.load() && !alternate_taa_runtime.failed.load()) {alternate_taa_runtime.retire();taa_history.reset_histories();}
         d2vr::TaaJitter taa_view_jitter{};
         if(projection_jitter && taa_live.load() && taa_width.load() && taa_height.load()) {
             // The forced projection carries no TAA jitter; add the engine's own sub-pixel sample
             // (same index as its cb_jittervectors), shifting NDC by (2jx/W, 2jy/H).
             std::uint32_t counter{};read_self(image_base+d2vr::taa_history::frame_counter_rva,&counter,sizeof counter);
+            if(alternate_taa_phase) counter=*alternate_taa_phase;
             jitter_counter[eye_slot]=counter;
             const auto j=d2vr::engine_taa_jitter(counter,static_cast<float>(taa_width.load()),static_cast<float>(taa_height.load()));
             auto pj=j;pj.x*=taa_jitter_scale[0];pj.y*=taa_jitter_scale[1];d2vr::apply_taa_jitter(*optical,pj);taa_view_jitter={j.x*taa_jitter_scale[2],j.y*taa_jitter_scale[3]};
@@ -5279,6 +5320,7 @@ void prepare_head_view(void* view) noexcept {
         if(alt_pose_trace_on() && !layer_pose_sync_on() && !(alternate_on() && stereo_active.load())) // the Setup-time record, as the layer will carry it
             for(UINT trace_eye=mono?0u:static_cast<UINT>(eye);trace_eye<=(mono?1u:static_cast<UINT>(eye));++trace_eye)
                 alt_pose_trace_setup(alt_display,static_cast<int>(trace_eye),game_xr->recorded_rendered_view(trace_eye),position,basis);
+        alternate_taa_setup_ready=alternate_taa_phase.has_value() && head_wrote;
     } catch(const std::exception& error) {native_audio_listener.clear();forced_view_jitter.reset();note_recoverable(error.what());}
     catch(...) {native_audio_listener.clear();forced_view_jitter.reset();note_recoverable("Unknown head-view exception");}
 }
@@ -6205,7 +6247,7 @@ void sample_stereo(IDXGISwapChain* chain,UINT64 number,const DXGI_SWAP_CHAIN_DES
     std::lock_guard<std::mutex> lock(log_mutex);
     if(!capturing.load()) return;
     if(xr_requested && !render_world_scene()) {
-        if(taa_history_installed) taa_history.clear_eye_views();
+        if(taa_history_installed) taa_history.clear_eye_views();alternate_taa_runtime.invalidate();
         restore_stereo();
         std::lock_guard<std::mutex> gpu_lock(gpu_mutex);
         eye_sources.invalidate();eye_view_allocation=0;eye_camera_owner={};
@@ -6399,7 +6441,7 @@ void recover_xr_session(const char* reason) noexcept {
         // cannot be destroyed while our GPU commands still reference it.
         xr_recovery_retiring=static_cast<bool>(game_xr);
         restore_audio_session();
-        restore_stereo();if(taa_history_installed) taa_history.clear_eye_views();
+        restore_stereo();if(taa_history_installed) taa_history.clear_eye_views();alternate_taa_runtime.invalidate();
         attachment_pose.set_allowed(0,0,0);full_body_tracking_ready=false;full_body.clear();full_body_restore_requested=true;native_grab.clear();arm_tracking.clear();native_interaction_aim.clear();native_left_aim.clear();native_weapon_attachment.clear();
         if(controller_requested) controller_bridge.publish({},false);
         ++xr_recoveries;
@@ -7152,7 +7194,11 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                             xr_wrist_layers=game_xr->wrist_layers;xr_world_ui_layers_by_kind=game_xr->world_ui_layers_by_kind;
                             if(const auto hud=game_xr->take_hud_request()) {d2vr::NativeHudRect::scale=*hud/100.f;d2vr::NativeHudChildDraw::hud_scale=*hud/100.f;}
                             if(d2vr::NativeMenuEntry::requested.exchange(false)) game_xr->settings_requested=true; // the native menu item was chosen
-                            if(auto requested_temporal=game_xr->take_temporal_request()) {const int request_mode=d2vr::alternate_effective_temporal(alternate_on(),*requested_temporal);const int* request=&request_mode;temporal_live_mode=*request;native_cvars.set(d2vr::NativeCvars::skip_temporal_aa,*request?0:1);taa_live=*request!=0;fsr_taa.enabled=*request>=2;fsr_taa.fsr4_active=*request>=5;if(*request>=2) fsr_taa.request_reset();upscale_fraction=aa_mode_fraction(*request);reset_perf_governor(*request);apply_upscale(upscale_fraction);}
+                            if(alternate_on() && temporal_live_mode.load()==1 && alternate_taa_runtime.failed.load()) {
+                                native_cvars.set(d2vr::NativeCvars::skip_temporal_aa,1);temporal_live_mode=0;taa_live=false;
+                                note_recoverable("Alternate native TAA ownership failed; using spatial AA for this session");
+                            }
+                            if(auto requested_temporal=game_xr->take_temporal_request()) {alternate_taa_runtime.invalidate();taa_history.reset_histories();const int request_mode=d2vr::alternate_effective_temporal(alternate_on(),*requested_temporal,alternate_native_taa_allowed());const int* request=&request_mode;temporal_live_mode=*request;native_cvars.set(d2vr::NativeCvars::skip_temporal_aa,*request?0:1);taa_live=*request!=0;fsr_taa.enabled=*request>=2;fsr_taa.fsr4_active=*request>=5;if(*request>=2) fsr_taa.request_reset();upscale_fraction=aa_mode_fraction(*request);reset_perf_governor(*request);apply_upscale(upscale_fraction);}
                             if(const auto request=game_xr->take_turning_request()) {
                                 turning_config=*request;if(!turn_ramp_enabled) turning_config.ramp_s=0;native_turning.configure(turning_config);
                                 native_turning_requested=request->mode!=d2vr::TurnControl::Mode::native;
@@ -8938,7 +8984,11 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
         if(fs::exists(root/L"build"/L"force-taa") && !taa_preference) taa_preference=1;
         {std::ifstream knob(root/L"build"/L"aa-mode");int mode=-1;if(knob>>mode && mode>=0 && mode<=6) taa_preference=mode;} // diagnostics: 0 off, 1 TAA, 2-4 FSR 3, 5-6 FSR 4
         if(fs::exists(root/L"build"/L"fsr4") && taa_preference>=2 && taa_preference<=3) taa_preference+=3; // legacy knob: FSR 4 at the same scale
-        taa_preference=d2vr::alternate_effective_temporal(alternate_on(),taa_preference); // alternate-eye: temporal AA off (SMAA row), see alternate_eye.hpp
+        alternate_native_taa_enabled=!fs::exists(root/L"build"/L"no-alternate-native-taa");
+        alternate_native_taa_abi=alternate_native_taa_enabled && d2vr::alternate_taa::verified_abi(&read_self,image_base) && verify_view_jitter_abi();
+        alternate_taa_runtime.configure(&read_self,&write_taa_state);
+        const bool alternate_taa_requested=alternate_native_taa_abi && !fs::exists(root/L"build"/L"no-per-eye-taa") && !fs::exists(root/L"build"/L"no-projection-jitter");
+        taa_preference=d2vr::alternate_effective_temporal(alternate_on(),taa_preference,alternate_taa_requested);
         fsr_taa.fsr4_active=taa_preference>=5;
         temporal_live_mode=taa_preference;
         upscale_fraction=aa_mode_fraction(taa_preference);
@@ -9012,6 +9062,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
         // Per-eye temporal AA history (docs/image-quality-research.md). build/no-per-eye-taa disables it.
         taa_history_requested=native_eye_capture_requested && head_requested && !fs::exists(root/L"build"/L"no-per-eye-taa");
         taa_history_installed=false;
+        taa_history.alternate_runtime(alternate_native_taa_abi?&alternate_taa_runtime:nullptr);
         if(taa_history_requested) {
             try {taa_history.install(image_base,&read_self);taa_history_installed=true;
                 if(simulated_gameplay_script_requested) {
@@ -9033,6 +9084,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
             auto reader=&read_self;auto exchange=&exchange_cached_value;
             camera_comfort.apply(image_base,reader,exchange);comfort_applied=true;comfort_restored=false;
         }
+        if(alternate_on() && !taa_history_installed) {taa_preference=0;temporal_live_mode=0;taa_live=false;fsr_taa.enabled=false;}
         native_cvar_overrides=head_requested?native_cvars.apply(image_base,read_self_ref,taa_history_installed):0;
         if(head_requested && fs::exists(root/L"build"/L"vr-ssao")) native_cvars.set(6,0); // keep ambient occlusion (quality over ~1.5 ms/frame)
         // Always match the preference: a previous AA-off session in the same game process left the cvar at 1.
@@ -9274,6 +9326,11 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
                << ",\"beam_layers_by_hand\":[" << xr_beam_layers_by_hand[0] << ',' << xr_beam_layers_by_hand[1] << ']'
                << feedback_status_json() << ",\"hud_rect_installed\":" << (hud_rect_installed?"true":"false") << ",\"hud_rect_calls\":" << d2vr::NativeHudRect::calls.load() << ",\"hud_rect_scaled\":" << d2vr::NativeHudRect::scaled.load() << ",\"hud_marker_unshrunk\":" << d2vr::NativeHudRect::unshrunk_writes.load() << ",\"hud_world_markers_unshrunk\":" << d2vr::NativeHudRect::unshrunk_markers.load() << ",\"hud_rect_size\":[" << d2vr::NativeHudRect::last_w.load() << ',' << d2vr::NativeHudRect::last_h.load() << "]" << ",\"takedown_sensors\":" << takedown_sensors.load() << ",\"takedown_choke_frames\":" << takedown_choke_frames.load() << ",\"takedown_kill_frames\":" << takedown_kill_frames.load() << ",\"takedown_drop_frames\":" << takedown_drop_frames.load() << ",\"takedown_gestures\":" << takedown_gestures.load() << ",\"wheel_dial_frames\":" << wheel_dial_frames.load() << ",\"combat\":{\"enabled\":" << (vr_combat_enabled?"true":"false") << ",\"thrusts\":" << combat_thrusts.load() << ",\"slashes\":" << combat_slashes.load() << ",\"overheads\":" << combat_overheads.load() << ",\"stealth_kills\":" << combat_stealth_kills.load() << ",\"drop_assists\":" << combat_drop_assists.load() << ",\"parries\":" << combat_parries.load() << ",\"choke_frames\":" << combat_choke_frames.load() << "}" << ",\"test_unlock_applied\":" << test_unlock_applied.load() << ",\"logic_mask\":" << published_logic.load() << ",\"published_move\":[" << published_move_x.load() << ',' << published_move_y.load() << ']' << ",\"menu_entry_patched\":" << d2vr::NativeMenuEntry::patched.load() << ",\"menu_entry_mismatched\":" << d2vr::NativeMenuEntry::mismatched.load() << ",\"menu_entry_clicks\":" << d2vr::NativeMenuEntry::clicks.load() << ",\"crouch_pulses\":" << crouch_pulses.load() << ",\"crouch_native_frames\":" << crouch_native_frames.load() << ",\"crouch_lift_frames\":" << crouch_lift_frames.load() << ",\"gesture_blocks\":" << gesture_blocks.load() << ",\"block\":[" << block_pose_frames.load() << ',' << block_wanted.load() << ',' << gesture_blocks.load() << ',' << block_not_free.load() << ',' << block_not_held.load() << ',' << (d2vr::NativeWeaponHands::block_keeps_gun()?1:0) << ']' << ",\"gesture_casts\":" << gesture_casts.load() << ",\"gesture_jumps\":" << gesture_jumps.load() << ",\"world_ui_hook_restored\":" << (world_ui_disabled?"true":"false") << ",\"world_ui_identified\":" << d2vr::NativeWorldUi::identified.load() << ",\"world_ui_native_scopes\":" << d2vr::NativeWorldUi::redirected.load() << ",\"world_ui_target_calls\":" << d2vr::NativeWorldUi::target_calls.load() << ",\"world_ui_target_redirected\":" << d2vr::NativeWorldUi::target_redirected.load() << ",\"world_ui_layers\":" << xr_world_ui_layers << ",\"world_ui_redirects\":" << world_ui_capture.redirects.load() << ",\"world_ui_scoped_draws\":" << world_ui_scoped_draws.load() << ",\"world_ui_layers_by_kind_draws\":[" << world_ui_draws[0].load() << ',' << world_ui_draws[1].load() << ',' << world_ui_draws[2].load() << ']' << ",\"world_ui_mismatches\":" << world_ui_mismatch.load() << ",\"world_ui_create_failures\":" << world_ui_capture.create_failures.load() << ",\"fsr_replaced\":" << fsr_taa.replaced.load() << ",\"fsr_taa_copies\":" << fsr_taa.taa_copies.load() << ",\"fsr_upscaled\":" << fsr_taa.upscaled.load() << ",\"fsr_upscale_skipped\":" << fsr_taa.upscale_skipped.load() << ",\"fsr_eye_dispatches\":[" << fsr_taa.eye_dispatches[0].load() << ',' << fsr_taa.eye_dispatches[1].load() << ']' << ",\"fsr_eye_resets\":[" << fsr_taa.eye_resets[0].load() << ',' << fsr_taa.eye_resets[1].load() << ']' << ",\"fsr_fallback_copies\":" << fsr_taa.fallback_copies.load() << ",\"fsr_stale_jobs\":" << fsr_taa.stale_jobs.load() << ",\"upscale_active\":" << (upscale_active?"true":"false") << ",\"taa_jitter_scale\":[" << taa_jitter_scale[0] << ',' << taa_jitter_scale[1] << ',' << taa_jitter_scale[2] << ',' << taa_jitter_scale[3] << ']' << ",\"jitter_same\":" << jitter_same.load() << ",\"jitter_differ\":" << jitter_differ.load() << ",\"projection_jitter\":" << (projection_jitter?"true":"false") << ",\"view_jitter_abi\":" << (view_jitter_abi?"true":"false") << ",\"view_jitter_writes\":" << view_jitter_writes.load() << ",\"fsr_not_ready\":" << fsr_taa.not_ready.load() << ",\"device_flags\":" << device_creation_flags.load() << ",\"fsr_failures\":" << fsr_taa.failures.load() << ",\"fsr_create_failures\":" << fsr_taa.create_failures.load() << ",\"taa_dispatch_marked\":" << d2vr::TaaDispatchHook::marked.load() << ",\"taa_mv_dejitter\":[" << taa_mv_dejitter.applied.load() << ',' << taa_mv_dejitter.skipped.load() << ',' << taa_mv_dejitter.failures.load() << ']' << ",\"taa_dispatch_matches\":" << taa_dispatch_matches.load()
                << ",\"taa_history_installed\":" << (taa_history_installed?"true":"false") << ",\"taa_passes\":" << taa_history.passes()
+               << ",\"alternate_native_taa_abi\":" << (alternate_native_taa_abi?"true":"false")
+               << ",\"alternate_native_taa_failed\":" << (alternate_taa_runtime.failed.load()?"true":"false")
+               << ",\"alternate_native_taa_completed\":" << alternate_taa_runtime.completed.load()
+               << ",\"alternate_native_taa_admitted\":" << alternate_taa_runtime.admitted.load()
+               << ",\"alternate_native_taa_rejected\":" << alternate_taa_runtime.rejected.load()
                << ",\"taa_right_swaps\":" << taa_history.right_swaps() << ",\"taa_left_flips\":" << taa_history.left_flips()
                << ",\"taa_fallbacks\":" << taa_history.fallbacks() << ",\"taa_rebuild_waits\":" << taa_history.rebuild_waits()
                << ",\"taa_idle\":" << taa_history.idle() << ",\"taa_rebuilds\":" << taa_history.rebuilds() << ",\"taa_failures\":" << taa_history.failures()

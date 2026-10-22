@@ -3,6 +3,7 @@
 #include <d3d11.h>
 #include <MinHook.h>
 #include <array>
+#include <optional>
 #include <atomic>
 
 namespace d2vr {
@@ -46,7 +47,8 @@ public:
     using Handler=bool (*)(ID3D11DeviceContext*,int eye,UINT,UINT,UINT,Fn original);
     inline static std::atomic<Handler> handler{};
     inline static std::atomic<UINT64> marked{},replaced{};
-    inline static thread_local int pass_eye=-1; // set by NativeTaaHistory around a planned eye pass
+    inline static thread_local int pass_eye=-1;
+    inline static thread_local std::optional<std::array<float,4>> pass_jitter; // set by NativeTaaHistory around a planned eye pass
     inline static thread_local bool post_taa=false; // the TAA dispatch of this pass has been recorded
     inline static thread_local ID3D11DeviceContext* pass_context=nullptr; // deferred context seen at that dispatch
     // Called on the job thread when a marked pass returns (eye, its deferred context or null).

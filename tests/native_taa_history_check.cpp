@@ -12,6 +12,21 @@ static bool read_memory(std::uintptr_t address,void* out,std::size_t size) {
     if(!address) return false;
     std::memcpy(out,reinterpret_cast<const void*>(address),size);return true;
 }
+static unsigned fallback_calls{};
+static unsigned long long __fastcall fallback_pass(void* context) {
+    auto bytes=static_cast<unsigned char*>(context);++fallback_calls;
+    require((bytes[view_flags_b]&4)!=0,"Fallback established the temporal skip flag");
+    bytes[view_flags_b]|=0x20; // unrelated engine flags must survive cleanup
+    return 73;
+}
+static unsigned long long __fastcall fallback_throw(void* context) {
+    fallback_pass(context);throw std::runtime_error("injected native exception");
+}
+static unsigned long long __fastcall fallback_new_frame(void* context) {
+    fallback_pass(context);
+    auto stamp=reinterpret_cast<std::uint32_t*>(static_cast<unsigned char*>(context)+d2vr::alternate_taa::stamp_offset);
+    ++*stamp;return 74;
+}
 
 // Synthetic engine memory with the verified offsets.
 struct FakeImage {alignas(16) std::array<unsigned char,0x148> bytes{};};
@@ -79,7 +94,7 @@ int main() {
         // Plan, apply and restore against synthetic job/view/table memory.
         static FakeImage s0,s1,t0,t1;
         make_image(s0,26,0x5000);make_image(s1,26,0x6000);make_image(t0,26,0x7000);make_image(t1,26,0x8000);
-        alignas(16) std::array<unsigned char,0x3b00> view{};
+        alignas(16) std::array<unsigned char,0xc000> view{};
         alignas(16) std::array<ParamEntry,3> table{{{0x8f93ab75u,0,1},{history_hashes[0],0,handle(s0)},{history_hashes[1],0,handle(s1)}}};
         alignas(16) std::array<unsigned char,0x120> ctx{};
         const auto view_at=reinterpret_cast<std::uintptr_t>(view.data()),table_at=reinterpret_cast<std::uintptr_t>(table.data());
@@ -108,6 +123,34 @@ int main() {
         apply_plan(plan);table[1].value=42;restore_plan(plan); // a foreign write is never undone
         require(table[1].value==42 && table[2].value==handle(s1),"Restore is compare-exchange");
         table[1].value=handle(s0);
+
+        // One native pointer can name either logical eye only through a Begin-admitted receipt.
+        in.single_view=view_at;in.eye_views={view_at,view_at};
+        std::memcpy(view.data()+d2vr::alternate_taa::stamp_offset,&counter,4);
+        require(plan_pass(read_memory,in,ctx_at,alternation,plan,scratch)==PassResult::fallback,"Singleton without receipt fails closed");
+        d2vr::alternate_taa::Receipt receipt{};
+        receipt.key.view=view_at;receipt.key.native_counter=counter;receipt.key.eye=1;
+        receipt.current.jitter={.1f,.2f};receipt.previous.jitter={-.2f,-.1f};in.receipt=receipt;
+        require(plan_pass(read_memory,in,ctx_at,alternation,plan,scratch)==PassResult::fallback,"Setup-only receipt rejected");
+        in.receipt->admitted=true;
+        require(plan_pass(read_memory,in,ctx_at,alternation,plan,scratch)==PassResult::planned && plan.eye==1 &&
+                plan.jitter==std::optional<std::array<float,4>>{{.1f,.2f,-.2f,-.1f}},"Receipt supplies own-eye identity and frozen jitter");
+        ++in.receipt->key.native_counter;
+        require(plan_pass(read_memory,in,ctx_at,alternation,plan,scratch)==PassResult::fallback,"Stale singleton receipt rejected");
+        in.single_view=0;in.receipt.reset();plan={};
+
+        require(without_temporal(fallback_pass,view.data(),view_at)==73 && fallback_calls==1 && view[view_flags_b]==0x20,
+                "Fallback calls original once and preserves unrelated flags");
+        view[view_flags_b]=4;
+        require(without_temporal(fallback_pass,view.data(),view_at)==73 && fallback_calls==2 && view[view_flags_b]==0x24,
+                "Existing native skip flag retained");
+        view[view_flags_b]=0;
+        bool threw=false;try {without_temporal(fallback_throw,view.data(),view_at);} catch(const std::runtime_error&) {threw=true;}
+        require(threw && fallback_calls==3 && view[view_flags_b]==0x20,"Exception restores only owned skip bit");
+        view[view_flags_b]=0;
+        require(without_temporal(fallback_new_frame,view.data(),view_at)==74 && fallback_calls==4 && view[view_flags_b]==0x24,
+                "Fallback never restores flags into a newer native frame");
+        view[view_flags_b]=0;
 
         in.eye_views={view_at,0x1234};
         alternation[0].reset();

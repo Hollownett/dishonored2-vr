@@ -1,5 +1,7 @@
 # Image quality in native stereo: TAA, post effects and options
 
+Later implementation: [alternate-eye native Game TAA candidate, 2026-10-22](alternate-native-taa.md). This document preserves the original paired-view research below.
+
 Status: research only, 2026-10-09. No game process was touched and nothing was built or injected.
 Static evidence comes from the pinned Steam executable
 (SHA-256 `b671f824…6180`, local copy `artifacts/re-toolchain/direct-ghidra/Dishonored2-steam17576867.exe`).

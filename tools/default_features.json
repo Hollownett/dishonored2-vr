@@ -229,8 +229,16 @@
    "id": "performance-mode",
    "file": "alternate-eye",
    "kind": "enable",
-   "label": "performance mode: one eye per frame (more fps; may shimmer on fast motion; anti-aliasing SMAA only)",
-   "help": "The game draws one eye per frame, alternating, and the headset reprojects the other. Roughly a quarter less frame time, so more fps. Fast motion can shimmer and the picture uses SMAA edges only (no temporal anti-aliasing). On by default; turn it off here if it bothers you.",
+   "label": "performance mode: one eye per frame (more fps; may shimmer on fast motion)",
+   "help": "The game draws one eye per frame, alternating, and the headset reprojects the other. Roughly a quarter less frame time, so more fps. Fast motion can shimmer. Game TAA is available through the separate native TAA option; FSR modes use SMAA in performance mode. On by default; turn it off here if it bothers you.",
+   "default": true
+  },
+  {
+   "id": "alternate-native-taa",
+   "file": "no-alternate-native-taa",
+   "kind": "disable",
+   "label": "Game TAA in performance mode (experimental)",
+   "help": "Allows Game TAA with separate history and previous camera state for each eye. Select Game TAA in VR settings to use it. Falls back to SMAA if native ownership checks fail. Headset validation is pending; turn off to use SMAA throughout performance mode.",
    "default": true
   },
   {

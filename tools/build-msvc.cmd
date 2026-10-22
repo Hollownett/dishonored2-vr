@@ -350,6 +350,14 @@ build\comfort_vignette_check.exe
 if not "%errorlevel%"=="0" exit /b 1
 build\anchor_smoother_check.exe
 if not "%errorlevel%"=="0" exit /b 1
+cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT /Isrc tests\alternate_taa_state_check.cpp /Fo:build\alternate_taa_state_check.obj /Fe:build\alternate_taa_state_check.exe
+if not "%errorlevel%"=="0" exit /b 1
+build\alternate_taa_state_check.exe
+if not "%errorlevel%"=="0" exit /b 1
+cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT /Isrc tests\alternate_native_taa_check.cpp /Fo:build\alternate_native_taa_check.obj /Fe:build\alternate_native_taa_check.exe
+if not "%errorlevel%"=="0" exit /b 1
+build\alternate_native_taa_check.exe
+if not "%errorlevel%"=="0" exit /b 1
 cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT /Isrc tests\alternate_eye_check.cpp /Fo:build\alternate_eye_check.obj /Fe:build\alternate_eye_check.exe
 if not "%errorlevel%"=="0" exit /b 1
 build\alternate_eye_check.exe
