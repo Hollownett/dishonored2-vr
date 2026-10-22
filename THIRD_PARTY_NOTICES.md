@@ -156,3 +156,21 @@ embeds the mod DLL (which statically links MinHook, SMAA and the FidelityFX FSR 
 loader/upscaler DLLs, this file and the license files listed above (`third_party/*/LICENSE*`, `third_party/fsr4/licenses/*`),
 and writes them to the user's mod home (`%LOCALAPPDATA%\DishonoredVR`). It contains no Dishonored 2 assets: game art is
 read from the user's own install at runtime.
+
+## NVIDIA DLSS SDK (optional paired-eye backend, not yet integrated)
+
+Four unmodified public headers and the license are retained from NVIDIA/DLSS,
+commit `9981c6350dc58c0ce21f024fd65e31e851c31689` (310.9.16). Exact source
+paths, URLs, SHA-256 and Git blob hashes are recorded in
+`third_party/dlss/source.json`; the upstream terms remain in
+`third_party/dlss/LICENSE.txt` and the original header notices are unchanged.
+The x64 `/MD` SDK static library `nvsdk_ngx_d.lib` is an explicitly pinned,
+local build dependency and is intentionally excluded from Git. No DLSS provider
+DLL is downloaded, bundled, copied, installed or distributed by this change.
+
+SDK static linkage has release obligations even when the provider is supplied
+by the user. Publication terms, license compatibility, notices, attribution,
+trademarks and any other applicable SDK/RTX supplement obligations remain
+pending separate release review; this implementation grants no shipping approval.
+Windows/Proton provider discovery and signature behavior, actual per-eye inputs,
+GPU retirement and headset quality remain runtime acceptance gates.

@@ -1,0 +1,63 @@
+{
+  "repository": "NVIDIA/DLSS",
+  "commit": "9981c6350dc58c0ce21f024fd65e31e851c31689",
+  "version": "310.9.16",
+  "provider_included": false,
+  "header_closure": [
+    "include/nvsdk_ngx.h",
+    "include/nvsdk_ngx_defs.h",
+    "include/nvsdk_ngx_params.h",
+    "include/nvsdk_ngx_helpers_d3d.h"
+  ],
+  "local_library_requirement": "lib/nvsdk_ngx_d.lib is intentionally gitignored; provide the exact pinned /MD x64 static SDK library locally before build. No provider DLL is distributed.",
+  "files": [
+    {
+      "upstream_path": "LICENSE.txt",
+      "size": 26620,
+      "git_blob_sha1": "80756566d773cdac55179c5ae16c4495df7f73b5",
+      "sha256": "d4216e39ebef5f9b50a6712ebb37beeb5379862a67733a9999c651f21592aaf0",
+      "local_path": "third_party/dlss/LICENSE.txt",
+      "url": "https://raw.githubusercontent.com/NVIDIA/DLSS/9981c6350dc58c0ce21f024fd65e31e851c31689/LICENSE.txt"
+    },
+    {
+      "upstream_path": "include/nvsdk_ngx.h",
+      "size": 40289,
+      "git_blob_sha1": "ae6b49174049eed69cc377b2fffd3c901651f764",
+      "sha256": "dc38e7467cf415379c9d12ae1b6e4a494c453ed92720fb53e92aecb523e7b848",
+      "local_path": "third_party/dlss/include/nvsdk_ngx.h",
+      "url": "https://raw.githubusercontent.com/NVIDIA/DLSS/9981c6350dc58c0ce21f024fd65e31e851c31689/include/nvsdk_ngx.h"
+    },
+    {
+      "upstream_path": "include/nvsdk_ngx_defs.h",
+      "size": 44313,
+      "git_blob_sha1": "807fa2475e90214f6846b9b4840be92e7bd66b5b",
+      "sha256": "ea23f33497cd274860d1c25a97644fce807dcb0037c594547203343103fad03e",
+      "local_path": "third_party/dlss/include/nvsdk_ngx_defs.h",
+      "url": "https://raw.githubusercontent.com/NVIDIA/DLSS/9981c6350dc58c0ce21f024fd65e31e851c31689/include/nvsdk_ngx_defs.h"
+    },
+    {
+      "upstream_path": "include/nvsdk_ngx_params.h",
+      "size": 7744,
+      "git_blob_sha1": "014d9f4adec600ea3677947b7f98258da9f9c7fc",
+      "sha256": "943bc8cc5cdae03b6303016fbad3183636f2335ae27a2d18776798c3b4efabbc",
+      "local_path": "third_party/dlss/include/nvsdk_ngx_params.h",
+      "url": "https://raw.githubusercontent.com/NVIDIA/DLSS/9981c6350dc58c0ce21f024fd65e31e851c31689/include/nvsdk_ngx_params.h"
+    },
+    {
+      "upstream_path": "include/nvsdk_ngx_helpers_d3d.h",
+      "size": 31976,
+      "git_blob_sha1": "664f99d95d3f8375304dc558ec601a66635ade7b",
+      "sha256": "ec75224f36ed6580baaf250fa83620405ad81a1d98c2c436654a0c9cf6a6b8ba",
+      "local_path": "third_party/dlss/include/nvsdk_ngx_helpers_d3d.h",
+      "url": "https://raw.githubusercontent.com/NVIDIA/DLSS/9981c6350dc58c0ce21f024fd65e31e851c31689/include/nvsdk_ngx_helpers_d3d.h"
+    },
+    {
+      "upstream_path": "lib/Windows_x86_64/x64/nvsdk_ngx_d.lib",
+      "size": 4090658,
+      "git_blob_sha1": "0ce76bb837102e2c695e89eb1a3d3317811feadf",
+      "sha256": "bc43df9ec032004fde681d3e3afd01cde239e03a0125b822e88674c84287f99c",
+      "local_path": "third_party/dlss/lib/nvsdk_ngx_d.lib",
+      "url": "https://raw.githubusercontent.com/NVIDIA/DLSS/9981c6350dc58c0ce21f024fd65e31e851c31689/lib/Windows_x86_64/x64/nvsdk_ngx_d.lib"
+    }
+  ]
+}

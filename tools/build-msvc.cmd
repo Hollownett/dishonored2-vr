@@ -6,6 +6,10 @@ if not exist artifacts\research\glyphs mkdir artifacts\research\glyphs
 if not exist build\md mkdir build\md
 cl /nologo /c /TC /W3 /O2 /MD /Ithird_party\minhook\include third_party\minhook\src\buffer.c third_party\minhook\src\hook.c third_party\minhook\src\trampoline.c third_party\minhook\src\hde\hde64.c /Fo:build\md\
 if not "%errorlevel%"=="0" exit /b 1
+cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MD /Isrc tests\dlss_lifecycle_check.cpp /Fo:build\dlss_lifecycle_check.obj /Fe:build\dlss_lifecycle_check.exe /link third_party\dlss\lib\nvsdk_ngx_d.lib d3d11.lib dxgi.lib advapi32.lib user32.lib uuid.lib
+if errorlevel 1 goto build_failed
+build\dlss_lifecycle_check.exe
+if errorlevel 1 goto build_failed
 cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MD tests\audio_listener_pose_check.cpp /Fo:build\audio_listener_pose_check.obj /Fe:build\audio_listener_pose_check.exe
 if errorlevel 1 goto build_failed
 if not errorlevel 0 goto build_failed
@@ -1064,7 +1068,7 @@ if "%~1"=="pipeline" set D2VR_DIAGNOSTIC_OUTPUT=build\d2vr_render_probe_pipeline
 if "%~1"=="paired" set D2VR_DIAGNOSTIC_OUTPUT=build\d2vr_render_probe_paired.dll
 if "%~1"=="view_setup" set D2VR_DIAGNOSTIC_OUTPUT=build\d2vr_render_probe_view_setup.dll
 if not "%~2"=="" set D2VR_DIAGNOSTIC_OUTPUT=build\%~2
-cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /bigobj /Zi /Fd:build\dxgi_probe.pdb /MD /LD /Ithird_party\minhook\include /Ithird_party\openxr\include /Ithird_party\fidelityfx src\dxgi_probe.cpp build\md\buffer.obj build\md\hook.obj build\md\trampoline.obj build\md\hde64.obj /Fo:build\dxgi_probe.obj /Fe:%D2VR_DIAGNOSTIC_OUTPUT% /link /DEBUG /OPT:REF /OPT:ICF d3d11.lib dxgi.lib bcrypt.lib user32.lib d3dcompiler.lib gdi32.lib third_party\fidelityfx\libs\ffx_backend_dx11_x64.lib third_party\fidelityfx\libs\ffx_fsr3_x64.lib third_party\fidelityfx\libs\ffx_fsr3upscaler_x64.lib third_party\fidelityfx\libs\ffx_frameinterpolation_x64.lib third_party\fidelityfx\libs\ffx_opticalflow_x64.lib
+cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /bigobj /Zi /Fd:build\dxgi_probe.pdb /MD /LD /FIsrc\dlss_eye_upscaler.hpp /Ithird_party\minhook\include /Ithird_party\openxr\include /Ithird_party\fidelityfx src\dxgi_probe.cpp build\md\buffer.obj build\md\hook.obj build\md\trampoline.obj build\md\hde64.obj /Fo:build\dxgi_probe.obj /Fe:%D2VR_DIAGNOSTIC_OUTPUT% /link /DEBUG /OPT:REF /OPT:ICF third_party\dlss\lib\nvsdk_ngx_d.lib advapi32.lib uuid.lib d3d11.lib dxgi.lib bcrypt.lib user32.lib d3dcompiler.lib gdi32.lib third_party\fidelityfx\libs\ffx_backend_dx11_x64.lib third_party\fidelityfx\libs\ffx_fsr3_x64.lib third_party\fidelityfx\libs\ffx_fsr3upscaler_x64.lib third_party\fidelityfx\libs\ffx_frameinterpolation_x64.lib third_party\fidelityfx\libs\ffx_opticalflow_x64.lib
 exit /b %errorlevel%
 :build_failed
 exit /b 1
