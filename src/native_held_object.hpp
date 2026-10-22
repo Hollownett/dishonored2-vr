@@ -101,7 +101,8 @@ public:
     inline static std::atomic<float> bind_entity_err{-2.f};
     static void clear(unsigned reason=0) noexcept {
         if(rf_.load(std::memory_order_acquire)) ++clear_reasons[reason<clear_reasons.size()?reason:0];   // only a publication being torn down counts; clear() also runs every no-hold frame
-        layer_settled_.store(0,std::memory_order_release);layer_restore_.store(true,std::memory_order_release);
+        layer_settled_.store(0,std::memory_order_release);
+        if(!restore_hold_.load(std::memory_order_acquire)) layer_restore_.store(true,std::memory_order_release);   // a safe release in progress arms it itself (allow_restore)
         NativeHeldPlacement::process_owner().clear();
         AcquireSRWLockExclusive(&publication_lock_);
         __try {
@@ -192,6 +193,14 @@ public:
     inline static bool (*filter_seam_)(std::uintptr_t,std::uint32_t,std::uint32_t){}; // checks only: stands in for the engine call
     inline static std::atomic<std::uint64_t> layers_swapped{},layers_restored{};
     inline static std::atomic<bool> layer_restore_{};
+    // Safe release (held_clamp.hpp SafeRelease, Part 5A): while true the hold's end does not arm the layer restore, so the object keeps DEBRIS until the
+    // render thread has seen it clear of the world and says allow_restore(); the restore itself still runs through the ledger (identity re-read before the
+    // write, exactly once). A hold that starts again cancels it; a render thread that never answers is overtaken after restore_hold_max_ms.
+    inline static std::atomic<bool> restore_hold_{};inline static std::atomic<std::uint64_t> restore_hold_since_{};
+    static constexpr std::uint64_t restore_hold_max_ms=2000;
+    static void begin_safe_release() noexcept {layer_restore_.store(false,std::memory_order_release);restore_hold_since_.store(GetTickCount64(),std::memory_order_release);restore_hold_.store(true,std::memory_order_release);}
+    static void allow_restore() noexcept {if(restore_hold_.exchange(false,std::memory_order_acq_rel)) layer_restore_.store(true,std::memory_order_release);}
+    static void cancel_safe_release() noexcept {restore_hold_.store(false,std::memory_order_release);}
     // Settled mirror (any thread): the entity whose layer needs nothing more this hold - swapped, or checked and not RIGID_BODY. clear() and
     // restore_layer() reset it, so a transient clear() makes the publisher ask for the service again even though the render scale is already 0.
     inline static std::atomic<std::uintptr_t> layer_settled_{};
@@ -219,8 +228,9 @@ public:
         if(epoch!=layer_epoch_) {
             layer_epoch_=epoch;
             if(ledger_.pending()) {const auto before=ledger_.abandoned();ledger_.clear_all();layers_abandoned+=ledger_.abandoned()-before;}
-            layer_entity_=0;layer_settled_.store(0,std::memory_order_release);real_release_.store(0);released_ = {};
+            layer_entity_=0;layer_settled_.store(0,std::memory_order_release);real_release_.store(0);released_ = {};restore_hold_.store(false,std::memory_order_release);
         }
+        if(restore_hold_.load(std::memory_order_acquire) && GetTickCount64()-restore_hold_since_.load(std::memory_order_acquire)>restore_hold_max_ms) allow_restore();
         if(layer_restore_.exchange(false)) restore_layer(base,read);else restore_pending(base,read);
         if(entity && live_entity(base,read,entity)) debris_layer(base,read,entity);
     }

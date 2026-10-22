@@ -712,7 +712,7 @@ void source_routing() {
     CHECK(!src.empty());
     auto count=[&](const std::string& piece) {int c=0;for(auto at=src.find(piece);at!=std::string::npos;at=src.find(piece,at+1)) ++c;return c;};
     // every velocity write of the capped lane goes through write(...); the fault latch trips in the fault branches only
-    CHECK(count("write_velocity(")==5);   // unchanged by the fix round
+    CHECK(count("write_velocity(")==6);   // the definition, write(), tow(), apply_poke(), apply_contact() and B4's apply_release_depen() (safe release, one validated write)
     {std::ifstream f("src/native_weapon_hands.hpp");std::stringstream ss;ss<<f.rdbuf();const auto w=ss.str();
      CHECK(w.find("hold_down(base,read);\n        service_wake_retries(base,read,clock_ms());")!=std::string::npos);}   // the retry service runs from the game-thread service, beside hold_down
     CHECK(count("corpse_knobs_from(root)")==1 && count("configure_corpse(knobs.options)")==1 && count("contact_.write_blocked=")==1);   // write(), tow(), apply_poke(), apply_contact() and the definition

@@ -12,13 +12,13 @@ assert 'hand_holding_object=state->carry.hold_object();hand_hold_state=state->ca
 assert 'hand_holding_object=state->carry.active[0]'not in source
 assert 'hand_hold_state=state->carry.states[0]'not in source
 context=source.index('NativeHeldPlacement::process_owner().context(hands.epoch,')
-publication=source.index('publish_held_object(side,hands.grips[side],raw_grips[side],state,hands.epoch,hands.tick,hands.reference_epoch,acquisition)',context)
+publication=source.index('publish_held_object(side,requested_grip,raw_grips[side],state,hands.epoch,hands.tick,hands.reference_epoch,acquisition)',context)
 context_block=source[context:source.index(');',context)+2]
 for condition in ('held_object_installed','full_body_requested','tracked_arms_requested','!full_body_stopping.load()',
                   'avatar_pose_gate.load()','!authored_camera','game_logic_mask()==2','XR_SESSION_STATE_FOCUSED','XR_SUCCESS'):
     assert condition in context_block
 assert context<publication<source.index('availability.placement_serial=held_placement_serial.load(',publication)
-assert 'else {held_placement_session.clear();const unsigned why=state?4u:3u;carry_diagnostics.clear_seen(why);d2vr::NativeHeldObject::clear(why);}'in source[publication:publication+400]
+assert 'else {held_placement_session.clear();const unsigned why=state?4u:3u;carry_diagnostics.clear_seen(why);held_clear(why);}'in source[publication:publication+400]   # held_clear = the safe-release check, then NativeHeldObject::clear (held_clamp_routing_check)
 producer=source[source.index('static void publish_held_object('):source.index('// HoldObject draws the object as a view-model')]
 for condition in ('NativeHeldPlacement::qualify(image_base,&read_self,*carry,side,pose_epoch,pose_tick,t.tick)',
                   'proof->entity==*e','proof->rf==*rf','proof->carry.hold_state()==state','placement.publish(*proof,t.tick)',
@@ -30,7 +30,7 @@ assert producer.index('placement.publish(')<producer.index('NativeHeldObject::pu
 whole=source[source.index('static void publish_held_object('):source.index('// Test commands (artifacts/vr-command.txt')]
 assert '(raw.position-last)*(1/dt)' in whole and 'last=raw.position;' in whole and 'grip.position-last' not in whole
 refusal=producer[producer.index('if(!t.placement_serial)'):producer.index('NativeHeldObject::publish(t)')]
-for condition in ('held_placement_serial.store(0','NativeHeldObject::clear(2)','carry_diagnostics.clear_seen(2)','held_entity=0;return;'):
+for condition in ('held_placement_serial.store(0','held_clear(2)','carry_diagnostics.clear_seen(2)','held_entity=0;return;'):
     assert condition in refusal
 assert 'held_placement_session.clear()' in refusal
 assert 'held_placement_session.update({*e,*rf,state,*id,side,pose_epoch,reference_epoch,acquisition})' in producer
@@ -88,7 +88,7 @@ print('PASS held-object production source routing only: typed49/50 placement/rel
 # Carry diagnostics (Task 9, fix round 1): observation only, named clear reasons, one CarryFrame per ACCEPTED publish, trace off the present thread.
 begin=source.index('static void publish_held_object(')
 full=source[begin:source.index('\n}\n',begin)]
-assert 'NativeHeldObject::clear(1)'in full and 'carry_diagnostics.clear_seen(1)'in full
+assert 'held_clear(1)'in full and 'carry_diagnostics.clear_seen(1)'in full
 assert 'const bool accepted=d2vr::NativeHeldObject::publish(t)' in full
 assert full.index('NativeHeldObject::publish(t)')<full.index('carry_diagnostics.note(')
 note=full[full.index('try {\n        if(!accepted) carry_diagnostics.rejected();'):]

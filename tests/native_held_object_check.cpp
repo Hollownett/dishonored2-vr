@@ -415,6 +415,32 @@ int main() {
             assert(written.empty() && Held::layer_settled(entity));
             Held::clear();assert(!Held::layer_settled(entity));
         }
+        {   // safe_release_defers_layer_restore: the hold ends, the layer stays DEBRIS until allow_restore(), then the ledger restores it once
+            memory.put(filter_at,std::uint32_t{(0x20u<<5)|3u});written.clear();Held::clear();Held::service_hold_layers(base_address,reader,0);written.clear();
+            Held::service_hold_layers(base_address,reader,entity);
+            assert(written.size()==1 && (written[0][1]&0x1f)==4u);
+            Held::begin_safe_release();Held::clear();
+            Held::service_hold_layers(base_address,reader,0);Held::service_hold_layers(base_address,reader,0);
+            assert(written.size()==1 && (r::value<std::uint32_t>(reader,filter_at).value()&0x1f)==4u);   // nothing restored while the release is pending
+            Held::allow_restore();assert(!Held::restore_hold_.load());
+            Held::service_hold_layers(base_address,reader,0);
+            assert(written.size()==2 && (written[1][1]&0x1f)==3u && (r::value<std::uint32_t>(reader,filter_at).value()&0x1f)==3u);
+            Held::allow_restore();Held::service_hold_layers(base_address,reader,0);assert(written.size()==2);   // exactly once
+        }
+        {   // a hold that starts again cancels the pending release: the layer is still DEBRIS and the next real end restores it
+            written.clear();Held::service_hold_layers(base_address,reader,entity);assert(written.size()==1 && (written[0][1]&0x1f)==4u);
+            Held::begin_safe_release();Held::clear();Held::cancel_safe_release();
+            Held::service_hold_layers(base_address,reader,entity);assert(written.size()==1);
+            Held::clear();Held::service_hold_layers(base_address,reader,0);assert(written.size()==2 && (written[1][1]&0x1f)==3u);
+        }
+        {   // a render thread that never answers is overtaken after restore_hold_max_ms (the layer is never stranded)
+            written.clear();Held::service_hold_layers(base_address,reader,entity);assert(written.size()==1);
+            Held::begin_safe_release();Held::clear();
+            Held::service_hold_layers(base_address,reader,0);assert(written.size()==1);
+            Held::restore_hold_since_.store(1);   // long ago
+            Held::service_hold_layers(base_address,reader,0);Held::service_hold_layers(base_address,reader,0);
+            assert(written.size()==2 && (written[1][1]&0x1f)==3u && !Held::restore_hold_.load());
+        }
         std::printf("held layer service: tank re-takes DEBRIS after a transient clear, RIGID_BODY after the hold; bottle settled without a write\n");
         Held::filter_seam_=nullptr;
     }

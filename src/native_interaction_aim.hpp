@@ -684,6 +684,23 @@ public:
         if(side>1 || slot>=weapon_slots) return {};std::lock_guard<std::mutex> guard(weapon_mutex_);
         const auto t=weapon_tick_[side][slot];return t && now>=t && now-t<=100?weapon_hit_[side][slot]:std::nullopt;
     }
+    // The held object's sweeps (held_clamp.hpp, Part 5A): up to 4 sphere casts a frame on the holding hand's clamp slots (0, tip, wall tip, exclude), the
+    // hand clamp itself being yielded to the carry. exclude: the held entity (its body must not report itself). Hits come back by proxy index, <=100 ms old.
+    static constexpr unsigned held_sweep_slots=4;
+    static constexpr unsigned held_slot(std::size_t index) {return index==0?0u:index==1?tip_slot:index==2?wall_tip_slot:exclude_slot;}
+    template<class Sweeps> static void post_held_sweeps(unsigned side,const Sweeps& sweeps,std::uintptr_t exclude) {
+        if(side>1 || !exclude) return;
+        for(std::size_t i=0;i<sweeps.size() && i<held_sweep_slots;++i) {
+            const auto& sweep=sweeps[i];
+            if(!sweep.valid || !std::isfinite(sweep.radius) || !(sweep.radius>0) || !finite(sweep.from) || !finite(sweep.to)) continue;
+            post_weapon_segment(side,held_slot(i),sweep.from,sweep.to,sweep.radius,exclude);
+        }
+    }
+    static std::array<std::optional<WorldTraceHit>,held_sweep_slots> held_hits(unsigned side,std::uint64_t now) {
+        std::array<std::optional<WorldTraceHit>,held_sweep_slots> out{};
+        for(std::size_t i=0;i<held_sweep_slots;++i) out[i]=weapon_hit(side,held_slot(i),now);
+        return out;
+    }
     // Diagnostics: did the palm, tip or wall-tip sweep of this side hit the entity? One lock for all three slots.
     static bool weapon_hits_entity(unsigned side,std::uintptr_t entity,std::uint64_t now) {
         if(side>1 || !entity) return false;std::lock_guard<std::mutex> guard(weapon_mutex_);

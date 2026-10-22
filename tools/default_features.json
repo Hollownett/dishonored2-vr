@@ -26,6 +26,14 @@
    "default": true
   },
   {
+   "id": "held-clamp",
+   "file": "no-held-clamp",
+   "kind": "disable",
+   "label": "Carried objects stop at walls and floors",
+   "help": "A carried object (a tank, a crate) stops at walls and floors instead of passing through, your hand stays with it, and a dropped one is pushed clear before it falls. Turn off to carry as before.",
+   "default": true
+  },
+  {
    "id": "hand-blink",
    "file": "no-hand-blink",
    "kind": "disable",

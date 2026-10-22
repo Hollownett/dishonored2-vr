@@ -717,6 +717,23 @@ private:
     // (0x89fb0 stays the only velocity caller). One request, consumed within 100 ms.
     struct Poke {std::uintptr_t entity{};Vec3 velocity{};UINT64 tick{};};Poke poke_{};
     NativeHandContact contact_;ScanReader scan_,discovery_scan_;ThreadClock clock_;
+    // Safe release (held_clamp.hpp SafeRelease): a dropped object that is still inside the world gets a small outward velocity (<= 1.5 m/s, asked for by
+    // the render thread every frame until it is clear), written here with the other velocity writers. One request, consumed within 100 ms; the body is
+    // re-read (entity id, pool handle) by native_rigid_body just before the write, and a prop a lane holds is never written.
+    struct Depen {std::uintptr_t entity{};Vec3 velocity{};UINT64 tick{};};Depen depen_{};
+    void apply_release_depen() {
+        Depen d{};{std::lock_guard<std::mutex> lock(mutex_);d=depen_;depen_={};
+            for(const auto& lane:lanes_) if(lane.held && lane.held->entity==d.entity) return;}
+        if(!d.entity || GetTickCount64()-d.tick>100) return;
+        if(!finite(d.velocity) || length(d.velocity)>NativeGrab::depen_max_speed+1e-6) {++depen_rejected_;return;}
+        const auto body=native_rigid_body(read_,base_,d.entity);if(!body) {++depen_rejected_;return;}
+        alignas(16) std::array<float,4> linear{static_cast<float>(d.velocity.x),static_cast<float>(d.velocity.y),static_cast<float>(d.velocity.z),0};
+        alignas(16) std::array<float,4> angular{};
+        CrashOperation operation("native release depenetration velocity");
+        const auto result=write_velocity(reinterpret_cast<void*>(body->world),body->handle,linear.data(),angular.data());
+        if(result==VelocityWrite::faulted) {++contact_.faults;release_all();return;}
+        if(result==VelocityWrite::written) ++depen_writes_;
+    }
     void apply_poke() {
         Poke p{};{std::lock_guard<std::mutex> lock(mutex_);p=poke_;poke_={};
             for(const auto& lane:lanes_) if(lane.held && lane.held->entity==p.entity) return;} // a held prop follows its hand
@@ -749,6 +766,7 @@ private:
     void invoke(void* manager,void* command) {
         original_(manager,command);
         try {apply_poke();} catch(...) {}
+        try {apply_release_depen();} catch(...) {}
         try {apply_contact(reinterpret_cast<std::uintptr_t>(manager));} catch(...) {++contact_.faults;}
         try {update(reinterpret_cast<std::uintptr_t>(manager));} catch(...) {
             release_all();
@@ -823,6 +841,10 @@ public:
         try {contact_.discover(discovery_scan_,base_);} catch(...) {++contact_.faults;}
     }
     void poke(std::uintptr_t entity,Vec3 velocity,UINT64 now) {std::lock_guard<std::mutex> lock(mutex_);poke_={entity,velocity,now};}
+    // Render thread: the outward velocity of a released object inside the world (the next dispatcher call applies it). Never above depen_max_speed.
+    static constexpr double depen_max_speed=1.5;
+    void release_depen(std::uintptr_t entity,Vec3 velocity,UINT64 now) {std::lock_guard<std::mutex> lock(mutex_);depen_={entity,velocity,now};}
+    std::atomic<UINT64> depen_writes_{},depen_rejected_{};
     // A guard yanked into ragdoll by this hand (NativeWeaponHands::yank): its lane takes his nearest limb until `until`.
     static void yanked(unsigned side,std::uintptr_t entity,UINT64 until) {yanked_entity_[side&1]=entity;yanked_until_[side&1]=until;}
     inline static std::array<std::atomic<std::uintptr_t>,2> yanked_entity_{};inline static std::array<std::atomic<UINT64>,2> yanked_until_{};
