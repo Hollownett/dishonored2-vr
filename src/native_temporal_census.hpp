@@ -226,7 +226,12 @@ public:
         try {
             if(entering) {
                 if(jobs_closed_.load(std::memory_order_acquire)) {
-                    if(accepting_.load()) {std::lock_guard<std::mutex> lock(mutex_);ledger_.refuse_job();}
+                    if(accepting_.load()) {
+                        std::lock_guard<std::mutex> lock(mutex_);
+                        // The control thread may have stopped/drained while this
+                        // callback waited. Never mutate a flushed snapshot then.
+                        if(accepting_.load() && jobs_closed_.load())ledger_.refuse_job();
+                    }
                     if(scope_.current.context) {token=scope_.push({});token.active=false;}
                     return;
                 }
