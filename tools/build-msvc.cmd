@@ -214,6 +214,10 @@ if not errorlevel 0 goto build_failed
 build\raw_hand_candidate_check.exe
 if errorlevel 1 goto build_failed
 if not errorlevel 0 goto build_failed
+cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT /Isrc tests\aim_ray_receipt_check.cpp /Fo:build\aim_ray_receipt_check.obj /Fe:build\aim_ray_receipt_check.exe
+if errorlevel 1 goto build_failed
+build\aim_ray_receipt_check.exe
+if errorlevel 1 goto build_failed
 cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT /Isrc tests\temporal_eye_job_check.cpp /Fo:build\temporal_eye_job_check.obj /Fe:build\temporal_eye_job_check.exe
 if errorlevel 1 goto build_failed
 if not errorlevel 0 goto build_failed

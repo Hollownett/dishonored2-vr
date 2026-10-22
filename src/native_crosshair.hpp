@@ -85,6 +85,10 @@ class NativeCrosshair {
     inline static constexpr std::uintptr_t update_rva=0x672f70,setter_rva=0x2a2c0,setter_call_rva=0x67318f;
     inline static constexpr std::uintptr_t stage_x_rva=0x3989eac,stage_y_rva=0x3989f2c;
 public:
+    struct Binding {
+        std::uintptr_t element{},movie{},iggy{},list{};std::uint32_t count{};std::uint64_t tick{};
+        std::array<std::byte,0x28> record{};
+    };
     std::atomic<float> ndc_limit{1.f};
 private:
     inline static constexpr std::uintptr_t movie_offset=0x98,object_offset=0x3a8;
@@ -108,7 +112,7 @@ private:
     std::atomic<bool> active_{false},route_{false};
     std::atomic<UINT> depth_{};
     std::atomic<UINT64> calls_{},applied_{},rejected_{},skipped_{},latch_clears_{},latch_failures_{},samples_{};
-    std::mutex mutex_;Publication publication_;std::ofstream log_;
+    std::mutex mutex_;Publication publication_;Binding binding_;std::ofstream log_;
     std::atomic<bool> placed_{false},failed_{false};
     inline static const std::byte zero_byte{};
 
@@ -127,7 +131,13 @@ private:
             std::uintptr_t movie{};
             // The engine's own guard, and its teardown signal: while the movie is
             // null the AS3 object has been released and the engine touches neither.
-            if(!read_(at+movie_offset,&movie,sizeof movie) || !movie) return;
+            if(!read_(at+movie_offset,&movie,sizeof movie) || !movie) {std::lock_guard<std::mutex> lock(mutex_);binding_={};return;}
+            Binding live{at,movie,0,0,0,now};
+            if(!read_(at+object_offset+8,&live.iggy,8) || !live.iggy ||
+               !read_(at+object_offset+as3_data_offset,&live.list,8) || !live.list ||
+               !read_(at+object_offset+as3_count_offset,&live.count,4) || !(live.count&as3_count_mask) || (live.count&as3_count_mask)>16 ||
+               !read_(live.list+((live.count&as3_count_mask)-1)*0x28,live.record.data(),live.record.size())) live={};
+            {std::lock_guard<std::mutex> lock(mutex_);binding_=live;}
             const auto owns=!failed_.load(std::memory_order_acquire) && route_.load(std::memory_order_acquire) && logic_()==2 && publication.active &&
                 publication.epoch && now>=publication.tick && now-publication.tick<=freshness_ms;
             if(!owns) {
@@ -147,7 +157,8 @@ private:
                 // rather than dropping the whole correction for that frame.
                 // ndc_limit>1 when the HUD is drawn shrunk about the centre (native_hud_rect.hpp):
                 // the caller pre-divides the aim point so the drawn reticle still lands on it.
-                const float limit=ndc_limit.load(std::memory_order_relaxed);
+                const float requested_limit=ndc_limit.load(std::memory_order_relaxed);
+                const float limit=std::isfinite(requested_limit) && requested_limit>0 ? requested_limit : 1.f;
                 const auto stage=crosshair_stage_position(std::clamp(publication.x,-limit,limit),
                     std::clamp(publication.y,-limit,limit),stage_x,stage_y);
                 // The setter takes the ADDRESS of the cached object field and of the member handle fields.
@@ -186,7 +197,26 @@ public:
     void publish(float ndc_x,float ndc_y,std::uint64_t epoch,std::uint64_t tick,bool active) {
         std::lock_guard<std::mutex> lock(mutex_);publication_={ndc_x,ndc_y,epoch,tick,active};
     }
-    void clear() {std::lock_guard<std::mutex> lock(mutex_);publication_={};}
+    void clear() {std::lock_guard<std::mutex> lock(mutex_);publication_={};binding_={};}
+    std::optional<Binding> binding(std::uint64_t now) noexcept {
+        try {
+            if(!active_.load() || !route_.load() || failed_.load() || !logic_ || logic_()!=2) return {};
+            Binding out;{std::lock_guard<std::mutex> lock(mutex_);out=binding_;}
+            if(!out.element || !out.tick || now<out.tick || now-out.tick>250) return {};
+            Binding current{out.element,0,0,0,0,out.tick};
+            if(!read_(out.element+movie_offset,&current.movie,8) || current.movie!=out.movie || !current.movie ||
+               !read_(out.element+object_offset+8,&current.iggy,8) || current.iggy!=out.iggy ||
+               !read_(out.element+object_offset+as3_data_offset,&current.list,8) || current.list!=out.list ||
+               !read_(out.element+object_offset+as3_count_offset,&current.count,4) || current.count!=out.count ||
+               !read_(out.list+((out.count&as3_count_mask)-1)*0x28,current.record.data(),current.record.size()) || current.record!=out.record) return {};
+            return out;
+        } catch(...) {return {};}
+    }
+    bool owns(const Binding& candidate,std::uint64_t now) noexcept {
+        const auto live=binding(now);
+        return live && live->element==candidate.element && live->movie==candidate.movie && live->iggy==candidate.iggy &&
+            live->list==candidate.list && live->count==candidate.count && live->record==candidate.record;
+    }
     void install(std::uintptr_t base,Read read,Write write,Logic logic,const std::filesystem::path& file,bool route=false) {
         if(!base || !read || !write || !logic || active_ || (instance_ && instance_!=this))
             throw std::runtime_error("Invalid native crosshair ownership");
@@ -209,7 +239,7 @@ public:
         log_.open(file,std::ios::trunc);
         if(!log_) throw std::runtime_error("Cannot open native crosshair log");
         log_<<std::setprecision(9)<<"tick_ms,thread,element,applied,ndc_x,ndc_y,epoch,age_ms,stage_x,stage_y\n";
-        {std::lock_guard<std::mutex> lock(mutex_);publication_={};}
+        {std::lock_guard<std::mutex> lock(mutex_);publication_={};binding_={};}
         calls_=applied_=rejected_=skipped_=latch_clears_=latch_failures_=samples_=0;failed_=false;route_=route;instance_=this;
         const auto target=reinterpret_cast<void*>(base_+update_rva);
         if(!original_ && MH_CreateHook(target,reinterpret_cast<void*>(&update),reinterpret_cast<void**>(&original_))!=MH_OK)
@@ -229,7 +259,7 @@ public:
         if(depth_) return false;
         std::array<std::byte,32> code{};
         const bool restored=!original_ || (read_(base_+update_rva,code.data(),code.size()) && code==expected);
-        try {std::lock_guard<std::mutex> lock(mutex_);log_.close();publication_={};} catch(...) {return false;}
+        try {std::lock_guard<std::mutex> lock(mutex_);log_.close();publication_={};binding_={};} catch(...) {return false;}
         return restored;
     }
     UINT64 calls() const {return calls_.load();}

@@ -70,8 +70,9 @@ static void make_element(Element& element) {
     const std::uintptr_t movie=0x1000,object=reinterpret_cast<std::uintptr_t>(element.bytes.data());
     std::memcpy(element.bytes.data()+movie_offset,&movie,8);
     // object_offset is an embedded arkIggyAS3Object: +0x00 vtable (never null), +0x18 idList data, +0x20 count (low 24 bits).
-    const std::uintptr_t vtable=0x2000,data=object+object_offset+0x28;const std::uint32_t count=1;
+    const std::uintptr_t vtable=0x2000,data=object+object_offset+0x28,iggy=0x3000;const std::uint32_t count=1;
     std::memcpy(element.bytes.data()+object_offset,&vtable,8);
+    std::memcpy(element.bytes.data()+object_offset+8,&iggy,8);
     std::memcpy(element.bytes.data()+object_offset+as3_data_offset,&data,8);
     std::memcpy(element.bytes.data()+object_offset+as3_count_offset,&count,4);
     element.bytes[latch_offset]=std::byte{1};
@@ -154,6 +155,17 @@ int main() {
         require(set_members[0]==element.bytes.data()+x_member_offset && std::abs(set_values[0]-480.0f)<1e-3f,"x uses member +0x660");
         require(set_members[1]==element.bytes.data()+y_member_offset && std::abs(set_values[1]-135.0f)<1e-3f,"y uses member +0x670");
         require(latch(element)==std::byte{1},"The active correction does not change the native centred latch");
+        const auto binding=crosshair.binding(GetTickCount64());
+        require(binding && crosshair.owns(*binding,GetTickCount64()),"Live element/movie/list identity is owned");
+        require(!crosshair.binding(binding->tick+251),"Old element updates cannot authorize permanent draw ownership");
+        element.bytes[object_offset+0x28+8]=std::byte{1};
+        require(!crosshair.binding(GetTickCount64()),"Changed AS3 record invalidates a node binding even with the same list address");
+        element.bytes[object_offset+0x28+8]=std::byte{0};
+        const std::uintptr_t changed_movie=0x1001;
+        std::memcpy(element.bytes.data()+movie_offset,&changed_movie,8);
+        require(!crosshair.owns(*binding,GetTickCount64()),"Replaced movie never inherits old crosshair binding");
+        std::memcpy(element.bytes.data()+movie_offset,&binding->movie,8);
+
 
         setter_calls=0;set_latch(element,std::byte{1});
         crosshair.publish(0.5f,-0.25f,1,GetTickCount64()-1000,true);

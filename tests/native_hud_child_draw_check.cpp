@@ -3,18 +3,24 @@
 #include "../src/native_hud_child_draw.hpp"
 #include <cassert>
 #include <iostream>
+#include <limits>
+extern "C" MH_STATUS WINAPI MH_DisableHook(LPVOID) {return MH_OK;}
 namespace {
 alignas(8) std::array<std::byte,0x1668> fixture_file{};
 alignas(8) std::array<std::byte,0xe0> fixture_node{};
 alignas(8) std::array<std::byte,0x100> fixture_iggy{};
 const char fixture_path[]="ui/hud.iggy";
 unsigned originals{},before{},after{},begins{},ends{};
-float* fixture_matrix{};bool changed{},capture_enabled{};float expect_x=-1.f;
+float* fixture_matrix{};bool changed{},capture_enabled{},eye_owner_ok=true;float expect_x=-1.f,glyph_factor=-1.f;
 d2vr::NativeHudChildKind last_kind{};UINT64 last_epoch{},last_tick{};std::uintptr_t last_owner{};bool last_talk_offer{},last_talk_glyph{};
 bool read(std::uintptr_t at,void* out,std::size_t size){SIZE_T n{};return ReadProcessMemory(GetCurrentProcess(),reinterpret_cast<void*>(at),out,size,&n) && n==size;}
 std::uint32_t __fastcall original(void* iggy,float* matrix,void* node,void* aux,void* p5,void* p6,std::uint32_t clip,float depth){
     ++originals;assert(iggy==fixture_iggy.data() && node==fixture_node.data() && aux==reinterpret_cast<void*>(1) && p5==reinterpret_cast<void*>(2) && p6==reinterpret_cast<void*>(3) && clip==123 && depth==4.5f);
-    if(changed)assert(matrix!=fixture_matrix && matrix[4]==103);
+    if(glyph_factor>=0.f) {
+        assert(matrix!=fixture_matrix && matrix[4]==fixture_matrix[4] && matrix[5]==fixture_matrix[5]);
+        for(unsigned i=0;i<4;++i)assert(std::fabs(matrix[i]-fixture_matrix[i]*glyph_factor)<1e-6f);
+    }
+    else if(changed)assert(matrix!=fixture_matrix && matrix[4]==103);
     else if(expect_x>=0)assert(expect_x==100.f?matrix==fixture_matrix:(matrix!=fixture_matrix && std::fabs(matrix[4]-expect_x)<1e-3f));
     else assert(matrix==fixture_matrix);
     return 456;
@@ -23,6 +29,26 @@ void observe(const d2vr::NativeHudChildScope& scope,bool entering,std::uint32_t 
 bool begin(const d2vr::NativeHudChildScope&)noexcept{++begins;return capture_enabled;}
 void end(const d2vr::NativeHudChildScope&)noexcept{++ends;}
 bool transform(const d2vr::NativeHudChildScope&,std::array<float,6>& matrix)noexcept{matrix[4]+=3;return true;}
+alignas(8) std::array<std::byte,0xe0> ancestor_node{};
+unsigned nested_glyphs{};
+float nested_scale{};
+std::uint32_t __fastcall nested_original(void* iggy,float* matrix,void* node,void* aux,void* p5,void* p6,std::uint32_t clip,float depth) {
+    assert(aux==reinterpret_cast<void*>(1) && p5==reinterpret_cast<void*>(2) && p6==reinterpret_cast<void*>(3) && clip==123 && depth==4.5f);
+    const auto root=reinterpret_cast<std::uintptr_t>(fixture_iggy.data())+0x26b0;
+    if(reinterpret_cast<std::uintptr_t>(node)==root)
+        return d2vr::NativeHudChildDraw::invoke_fixture(iggy,matrix,ancestor_node.data(),aux,p5,p6,clip,depth);
+    if(node==ancestor_node.data()) {
+        // Native drawing composes this child's local transform with the incoming parent.
+        std::array<float,6> child{matrix[0],matrix[1],matrix[2],matrix[3],
+            matrix[4]+matrix[0]*50.f+matrix[2]*60.f,matrix[5]+matrix[1]*50.f+matrix[3]*60.f};
+        return d2vr::NativeHudChildDraw::invoke_fixture(iggy,child.data(),fixture_node.data(),aux,p5,p6,clip,depth);
+    }
+    assert(node==fixture_node.data());++nested_glyphs;
+    assert(std::fabs(matrix[0]-.65f*nested_scale)<1e-5f && std::fabs(matrix[3]-.65f*nested_scale)<1e-5f);
+    assert(std::fabs(matrix[4]-150.f)<1e-3f && std::fabs(matrix[5]-260.f)<1e-3f);
+    return 456;
+}
+
 }
 int main(){
     using namespace d2vr;const auto iggy=reinterpret_cast<std::uintptr_t>(fixture_iggy.data()),node=reinterpret_cast<std::uintptr_t>(fixture_node.data()),file=reinterpret_cast<std::uintptr_t>(fixture_file.data()),path=reinterpret_cast<std::uintptr_t>(fixture_path),root=iggy+0x26b0;
@@ -220,5 +246,48 @@ int main(){
      expect_x=-1.f;NativeHudChildDraw::hud_movie=nullptr;NativeHudChildDraw::hud_scale=1.f;NativeHudChildDraw::begin=nullptr;NativeHudChildDraw::end=nullptr;}
     NativeHudChildDraw::panel_active=false;NativeHudChildDraw::panel_generic=false;NativeHudChildDraw::tutorial_epoch=0;NativeHudChildDraw::nesting_=0;
     NativeHudChildDraw::clear();NativeHudChildDraw::observer=nullptr;
+    // Exact crosshair node is scaled independently of panel layout, with a live owner/movie.
+    matrix={1,.2f,-.3f,1,100,200};const auto saved_matrix=matrix;
+    NativeHudChildDraw::begin=nullptr;NativeHudChildDraw::end=nullptr;NativeHudChildDraw::transform=nullptr;
+    NativeHudChildDraw::eye_live=+[](const NativeCrosshair::Binding& b,UINT64 now) noexcept {
+        return eye_owner_ok && b.element==99 && b.movie==88 && b.iggy==reinterpret_cast<std::uintptr_t>(fixture_iggy.data()) &&
+            b.tick && now>=b.tick && now-b.tick<=250;
+    };
+    NativeCrosshair::Binding eye_binding;eye_binding.element=99;eye_binding.movie=88;eye_binding.iggy=iggy;eye_binding.tick=GetTickCount64();
+    NativeWristHud::observe_draw(iggy,GetTickCount64());
+    assert(NativeHudChildDraw::publish_eye(node,eye_binding));
+    for(bool panel:{false,true})for(float scale:{.55f,.65f,1.f,2.f}) {
+        NativeHudChildDraw::panel_active=panel;NativeHudChildDraw::hud_scale=scale;glyph_factor=.65f*scale;
+        assert(call()==456 && matrix==saved_matrix); // pivot, caller bytes, raw ABI args and return stay unchanged
+    }
+    glyph_factor=-1.f;expect_x=-1.f;NativeHudChildDraw::panel_active=false;
+    NativeHudChildDraw::hud_scale=std::numeric_limits<float>::quiet_NaN();assert(call()==456 && matrix==saved_matrix);
+    NativeHudChildDraw::hud_scale=.65f;
+    eye_owner_ok=false;assert(call()==456); // stale update/owner, even if the raw hint still matches
+    eye_owner_ok=true;
+    std::memcpy(fixture_file.data()+0x1608,&replaced_iggy,8);assert(call()==456);
+    std::memcpy(fixture_file.data()+0x1608,&iggy,8);
+    std::memcpy(fixture_node.data()+0x80,&cycle,8);assert(call()==456); // no longer in live movie tree
+    std::memcpy(fixture_node.data()+0x80,&root,8);
+    NativeHudChildDraw::clear_eye();NativeHudChildDraw::eye_node=node;assert(call()==456); // hint alone is never authority
+    assert(NativeHudChildDraw::publish_eye(node,eye_binding));NativeHudChildDraw::clear();assert(call()==456);
+    assert(NativeHudChildDraw::publish_eye(node,eye_binding));NativeHudChildDraw::fixture(read,0x140000000,original);assert(call()==456);
+    // Actual nested hook route: MasterHUD scaling is inherited by the reticle, then undone exactly once.
+    NativeHudChildDraw::fixture(read,0x140000000,nested_original);
+    NativeHudChildDraw::hud_movie=+[](void* movie) noexcept {return movie==fixture_iggy.data();};
+    NativeHudChildDraw::hud_layout_node=+[](void*,void* child) noexcept {return child==ancestor_node.data();};
+    std::memcpy(ancestor_node.data()+0x80,&root,8);
+    const auto ancestor=reinterpret_cast<std::uintptr_t>(ancestor_node.data());std::memcpy(fixture_node.data()+0x80,&ancestor,8);
+    assert(NativeHudChildDraw::publish_eye(node,eye_binding));
+    for(float scale:{.55f,.65f,1.f,2.f}) {
+        nested_scale=scale;NativeHudChildDraw::hud_scale=scale;
+        std::array<float,6> parent{1,0,0,1,100,200};
+        assert(NativeHudChildDraw::invoke_fixture(fixture_iggy.data(),parent.data(),reinterpret_cast<void*>(root),
+            reinterpret_cast<void*>(1),reinterpret_cast<void*>(2),reinterpret_cast<void*>(3),123,4.5f)==456);
+        assert((parent==std::array<float,6>{1,0,0,1,100,200}));
+    }
+    assert(nested_glyphs==4);std::memcpy(fixture_node.data()+0x80,&root,8);
+    NativeHudChildDraw::fixture(read,0x140000000,original);NativeHudChildDraw::hud_movie=nullptr;NativeHudChildDraw::hud_layout_node=nullptr;
+    assert(NativeHudChildDraw::publish_eye(node,eye_binding));assert(NativeHudChildDraw::disable());assert(call()==456);
     std::cout<<"native child draw ABI/return, capture/matrix, kind clearing, stale capacity reclaim and exact-owner wrist refresh checks passed\n";
 }

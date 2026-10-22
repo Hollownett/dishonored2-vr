@@ -1,6 +1,7 @@
 #pragma once
 #include "native_hud_art_probe.hpp"
 #include "interaction_ray.hpp"
+#include "native_crosshair.hpp"
 #include <atomic>
 #include <mutex>
 
@@ -64,6 +65,25 @@ inline bool native_hud_panel_relayout(std::array<float,6>& m,const std::array<fl
     for(const auto v:out)if(!std::isfinite(v))return false;
     m=out;return true;
 }
+// Reticle draw matrix maps its local registration origin to the aim point.
+// Shrink only the linear part: translation (the aim pivot), caller bytes and siblings stay intact.
+inline bool native_crosshair_glyph_scale(std::array<float,6>& matrix,float hud_scale) noexcept {
+    if(!std::isfinite(hud_scale) || hud_scale<.3f || hud_scale>2.f)return false;
+    for(float v:matrix)if(!std::isfinite(v))return false;
+    const float k=.65f*hud_scale;auto out=matrix;
+    for(unsigned i=0;i<4;++i)out[i]*=k;
+    for(float v:out)if(!std::isfinite(v))return false;
+    matrix=out;return true;
+}
+// Undo the known flat-HUD ancestor scale before sizing the eye-space reticle.
+// Its native x/y already name the aim point; inherited panel layout must not move it.
+inline bool native_crosshair_unlayout(std::array<float,6>& matrix,float k,const std::array<float,2>& centre) noexcept {
+    if(!std::isfinite(k) || k<.3f || k>=.999f)return false;
+    auto out=matrix;for(unsigned i=0;i<4;++i)out[i]/=k;
+    out[4]=centre[0]+(matrix[4]-centre[0])/k;out[5]=centre[1]+(matrix[5]-centre[1])/k;
+    for(float v:out)if(!std::isfinite(v))return false;
+    matrix=out;return true;
+}
 // HUD screen: panel children keep their native stage layout. One transform fits the movie's 1920x1080 stage
 // (placed by its root matrix: scale root_s, origin root_tx/ty) to the panel capture texture by width and
 // centres it vertically, so nothing overflows the texture whatever eye size the HUD target has.
@@ -99,6 +119,8 @@ public:
     using Census=void (*)(void* iggy,const float* matrix,void* node,unsigned nesting) noexcept;
     inline static std::atomic<Census> census{};
     inline static thread_local unsigned nesting_{};
+    inline static thread_local float eye_layout_scale_=1.f;
+    inline static thread_local std::array<float,2> eye_layout_centre_{};
     // Nesting of the innermost container kept native only because it holds a wrist widget. Its other children are
     // that widget's frame (ring backdrop, slot diamonds): drawn flat they were head-locked in the lens corner, on the
     // HUD screen they were orphaned decorations. They are not drawn; the wrist shows the widget itself.
@@ -109,7 +131,32 @@ public:
     // HUD screen exceptions. eye_node: the crosshair, which the mod places on the left hand's aim in EYE coordinates,
     // so it is drawn natively into the eye (on the panel it was offset from the hand). prompt_world: a hand points at
     // the prompt's object, so the prompt is captured as world art beside that hand instead of joining the panel.
-    inline static std::atomic<std::uintptr_t> eye_node{};
+    inline static std::atomic<std::uintptr_t> eye_node{}; // Hint only; never ownership proof.
+    using EyeLive=bool (*)(const NativeCrosshair::Binding&,UINT64) noexcept;
+    inline static std::atomic<EyeLive> eye_live{};
+private:
+    struct EyeBinding {std::uintptr_t node,file;NativeCrosshair::Binding owner;};
+    inline static EyeBinding eye_binding_{};
+    static std::uintptr_t live_eye_node(void* iggy) noexcept {
+        if(!active_.load() || !read_ || !mutex_.try_lock())return 0;
+        const auto b=eye_binding_;mutex_.unlock();
+        const auto live=eye_live.load();
+        if(!b.node || b.owner.iggy!=reinterpret_cast<std::uintptr_t>(iggy) || !live || !live(b.owner,GetTickCount64()))return 0;
+        try {
+            if(!wrist_hud_file_owned(read_,base_,b.file) || rig::value<std::uintptr_t>(read_,b.file+0x1608)!=b.owner.iggy ||
+               rig::value<std::uintptr_t>(read_,b.owner.iggy+0x78)!=b.file || !NativeHudArtProbe::in_tree(read_,b.owner.iggy,b.node))return 0;
+            return b.node;
+        } catch(...) {return 0;}
+    }
+public:
+    static bool publish_eye(std::uintptr_t node,const NativeCrosshair::Binding& owner) noexcept {
+        std::uintptr_t file{};
+        if(!node || !read_ || !owner.iggy || !read_(owner.iggy+0x78,&file,8) || !file)return false;
+        {std::lock_guard<std::mutex> lock(mutex_);eye_binding_={node,file,owner};eye_node=node;}
+        if(live_eye_node(reinterpret_cast<void*>(owner.iggy))==node)return true;
+        clear_eye();return false;
+    }
+    static void clear_eye() noexcept {std::lock_guard<std::mutex> lock(mutex_);eye_binding_={};eye_node=0;}
     inline static std::atomic<UINT64> overlay_draws{}; // full-screen overlays (damage vignette) not drawn
     inline static std::atomic<bool> prompt_world{};
     inline static thread_local bool holder_eye_{},holder_eye_hit_{};
@@ -215,7 +262,7 @@ private:
         NativeHudChildScope out{};const auto epoch=tutorial_epoch.load(std::memory_order_relaxed);
         if(current || !active_.load() || !epoch || !node || !matrix ||
            !((nesting_==3 && master_) || (nesting_==2 && sibling) || (nesting_==holder_level_+1 && ((master_ && holder_level_>=3) || (holder_eye_ && holder_level_>=2)))))return out;
-        if(const auto eye=eye_node.load(std::memory_order_relaxed)) {
+        if(const auto eye=live_eye_node(iggy)) {
             if(reinterpret_cast<std::uintptr_t>(node)==eye)return out;
             std::uintptr_t at=eye;for(unsigned hop=0;hop<12 && at;++hop){if(!read_(at+0x80,&at,sizeof(at)))break;
                 if(at==reinterpret_cast<std::uintptr_t>(node)){holder_hit_=true;holder_eye_hit_=true;return out;}}
@@ -285,11 +332,23 @@ private:
         const auto profile=cpu_profile.load(std::memory_order_relaxed);
         if(profile)profile(0,nesting_);
         if(const auto observe=census.load(std::memory_order_relaxed)) observe(iggy,matrix,node,nesting_);
+        if(node && reinterpret_cast<std::uintptr_t>(node)==eye_node.load(std::memory_order_relaxed) &&
+           reinterpret_cast<std::uintptr_t>(node)==live_eye_node(iggy)) {
+            alignas(16) std::array<float,6> glyph{};
+            bool scaled=matrix && read_(reinterpret_cast<std::uintptr_t>(matrix),glyph.data(),sizeof glyph);
+            if(scaled && eye_layout_scale_!=1.f)scaled=native_crosshair_unlayout(glyph,eye_layout_scale_,eye_layout_centre_);
+            if(scaled)scaled=native_crosshair_glyph_scale(glyph,hud_scale.load(std::memory_order_relaxed));
+            std::uint32_t result{};
+            if(profile)profile(1,nesting_);
+            __try {result=original_(iggy,scaled?glyph.data():matrix,node,aux,p5,p6,clip,depth);}
+            __finally {if(profile){profile(2,nesting_);profile(3,nesting_);}--nesting_;--depth_;}
+            return result;
+        }
         // Full-screen overlays (DamageVignette) are laid out for the flat screen; in the eye they showed as a sharp-edged
         // square (headset). Not drawn: the game's own full-frame damage tint post-process remains.
         const bool hide_overlay=panel_active.load(std::memory_order_relaxed) && nesting_==2 && root_[0]>0.f && read_ && full_screen_overlay(node);
         if(hide_overlay) ++overlay_draws;
-        alignas(16) std::array<float,6> laid{};bool relaid=false;
+        alignas(16) std::array<float,6> laid{};bool relaid=false;float inherited_layout=1.f;
         const bool window=panel_active.load(std::memory_order_relaxed);bool entered_master=false,sibling=false,holder_entered=false,hide_child=false,eye_saved=false;unsigned holder_saved=0;
         if(window && nesting_==2 && !master_) {
             const auto is_hud=hud_movie.load(std::memory_order_relaxed);const auto qualifies=hud_layout_node.load(std::memory_order_relaxed);
@@ -316,7 +375,7 @@ private:
                         for(unsigned i=0;i<4;++i) laid[i]*=k;
                         laid[4]=stage_centre_[0]+k*(laid[4]-stage_centre_[0]);laid[5]=stage_centre_[1]+k*(laid[5]-stage_centre_[1]);
                         relaid=true;for(const auto value:laid) relaid=relaid && std::isfinite(value);
-                        if(relaid) ++hud_relayouts;
+                        if(relaid) {++hud_relayouts;inherited_layout=k;}
                     }
                 }
             }
@@ -359,8 +418,10 @@ private:
         const bool suppress=hide || hide_overlay || ((scope.kind==NativeHudChildKind::prompt || scope.kind==NativeHudChildKind::panel) && !capture && start);
         if(suppress)++suppressed;
         if(profile)profile(1,nesting_);
+        const auto saved_eye_scale=eye_layout_scale_;const auto saved_eye_centre=eye_layout_centre_;
+        if(inherited_layout!=1.f && relaid && !changed && !suppress) {eye_layout_scale_=inherited_layout;eye_layout_centre_=stage_centre_;}
         __try {if(!suppress)result=original_(iggy,changed?copied.data():relaid?laid.data():matrix,node,aux,p5,p6,clip,depth);}
-        __finally {if(profile)profile(2,nesting_);if(scope.kind!=NativeHudChildKind::none){if(capture)stop(scope);if(watch)watch(scope,false,result);current=previous;}if(entered_master)master_=false;if(holder_entered){holder_level_=holder_saved;holder_eye_=eye_saved;}if(profile)profile(3,nesting_);--nesting_;--depth_;}
+        __finally {eye_layout_scale_=saved_eye_scale;eye_layout_centre_=saved_eye_centre;if(profile)profile(2,nesting_);if(scope.kind!=NativeHudChildKind::none){if(capture)stop(scope);if(watch)watch(scope,false,result);current=previous;}if(entered_master)master_=false;if(holder_entered){holder_level_=holder_saved;holder_eye_=eye_saved;}if(profile)profile(3,nesting_);--nesting_;--depth_;}
         return result;
     }
 public:
@@ -385,7 +446,7 @@ public:
         }
         if(!free)return reject();*free={kind,geometry.file,geometry.iggy,geometry.display_node,owner,epoch,tick};free->target=target;++publish_accepts;return true;
     }
-    static void clear() {std::lock_guard<std::mutex> lock(mutex_);bindings_={};prompt_roots_={};prompt_target_={};prompt_target_tick_=0;prompt_talk_=false;takedown_={};takedown_tick_=0;widget_nodes_={};widget_iggy_={};widget_count_=widget_next_=0;}
+    static void clear() {std::lock_guard<std::mutex> lock(mutex_);eye_binding_={};eye_node=0;bindings_={};prompt_roots_={};prompt_target_={};prompt_target_tick_=0;prompt_talk_=false;takedown_={};takedown_tick_=0;widget_nodes_={};widget_iggy_={};widget_count_=widget_next_=0;}
     // Producer: the NPC the native takedown sensor qualified this frame (empty = none).
     static void set_takedown(NativeInteractionTargetIdentity target,UINT64 tick) {std::lock_guard<std::mutex> lock(mutex_);takedown_=target;takedown_tick_=target?tick:0;}
     inline static std::atomic<UINT64> takedown_hints{};
@@ -415,7 +476,7 @@ public:
         const auto status=MH_EnableHook(target_);active_=status==MH_OK || status==MH_ERROR_ENABLED;return active_.load();
     }
     static bool disable() noexcept {
-        cpu_profile=nullptr;active_=false;transform=nullptr;begin=nullptr;end=nullptr;observer=nullptr;hud_movie=nullptr;tutorial_movie=nullptr;panel_movie=nullptr;tutorial_epoch=0;hud_layout_node=nullptr;hud_scale=1.f;panel_active=false;panel_generic=false;hud_file=0;eye_node=0;prompt_world=false;
+        cpu_profile=nullptr;eye_live=nullptr;clear_eye();active_=false;transform=nullptr;begin=nullptr;end=nullptr;observer=nullptr;hud_movie=nullptr;tutorial_movie=nullptr;panel_movie=nullptr;tutorial_epoch=0;hud_layout_node=nullptr;hud_scale=1.f;panel_active=false;panel_generic=false;hud_file=0;eye_node=0;prompt_world=false;
         if(!target_)return true;const auto result=MH_DisableHook(target_);if(result!=MH_OK && result!=MH_ERROR_DISABLED)return false;
         const auto until=GetTickCount64()+2000;while(depth_ && GetTickCount64()<until)Sleep(1);if(depth_)return false;clear();return true;
     }
