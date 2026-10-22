@@ -97,9 +97,10 @@ assert 'alternate_eye_check.cpp' in build and 'alternate_eye_knob_check.py' in b
 assert 'XrView rendered_view(UINT eye,XrFovf rendered_fov,const XrQuaternionf* rendered_orientation=nullptr) const {' in xr
 assert 'void record_rendered_view(UINT eye,const XrView& view,XrTime display_time,std::int64_t locate_cpu) {' in xr
 assert 'rendered_views_[eye]=view;rendered_mask_|=1u<<eye;' in xr
-# the pose trace is a diagnostic: read once in StartProbe, alternate-eye on only
+# the pose trace is a diagnostic: read once in StartProbe; every eye mode (alternate, paired, perf-mono), never a behaviour change
 assert probe.count('L"alt-pose-trace"') == 1 and 'alt_pose_trace_state=fs::exists(root/L"build"/L"alt-pose-trace")?1:0;' in probe
-assert 'static bool alt_pose_trace_on() noexcept {return alt_pose_trace_state.load()==1 && alternate_on();}' in probe
+assert 'static bool alt_pose_trace_on() noexcept {return alt_pose_trace_state.load()==1;}' in probe
+assert 'if(alt_pose_trace_on() && !(alternate_on() && stereo_active.load())) {' in head   # paired / mono Setup rows, after the record
 # fix round 1: authored / settings are read at the Present that submits the frame, not from the lagging plan; every gate is the tested function
 assert 'const bool alt_nonfree=alternate_on() && !d2vr::alternate_single_view_allowed(authored_camera,game_xr && game_xr->settings_open());' in probe
 assert 'std::optional<d2vr::PendingViews<XrView>::Slot> alt_slot;int alt_fresh=-1;' in probe

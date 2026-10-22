@@ -1523,6 +1523,7 @@ public:
         return view;
     }
     std::int64_t locate_cpu_time() const noexcept {return locate_cpu_time_;}
+    XrView recorded_rendered_view(UINT eye) const {return rendered_views_[eye];} // diagnostic (alt-pose-trace): what the layer of `eye` will carry
     void record_rendered_view(UINT eye,const XrView& view,XrTime display_time,std::int64_t locate_cpu) {
         rendered_views_[eye]=view;rendered_mask_|=1u<<eye;
         rendered_display_times_[eye]=display_time;rendered_locate_cpu_times_[eye]=locate_cpu;

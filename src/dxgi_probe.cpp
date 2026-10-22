@@ -1338,18 +1338,19 @@ static UINT64 alt_epoch_seen{};
 static UINT64 alt_per_frame_done{}; // displayed frame whose per-frame mod work already ran (prepare_head_view, under log_mutex)
 static bool alt_descriptor_paired{};          // which descriptor is installed right now (render thread only)
 static bool alternate_on() noexcept {return alt_eye_state.load()==1 && mono_view_state.load()==1;}
-// Diagnostic (knob build/alt-pose-trace, alternate-eye on only): alt-pose-trace.csv with, per Setup, the view the engine was given and the
-// display frame it renders (event setup: presented = counter at Setup, display, eye, XR pose, FOV, game position and forward axis written);
-// per matched Begin the pose in the view's render copy, the one the engine consumes (event begin: presented = counter at Begin, display =
-// the Present that ends its interval, slot eye, game position and forward axis); per submitted layer its pose and FOV (event present:
-// display = the Present, eye, pose, FOV, tracked, fresh eye). tools/alt_pose_trace_check.py joins them: the layer of the fresh eye must
-// carry the pose of the Setup whose image the Begin rendered, and that Setup's eye must be the fresh eye.
+// Diagnostic (knob build/alt-pose-trace; every eye mode: alternate, paired, perf-mono): alt-pose-trace.csv with, per Setup, the view the
+// engine was given and the display frame it renders (event setup: presented = counter at Setup, display, eye, XR pose, FOV, game position
+// and forward axis written); per matched Begin the pose in the view's render copy, the one the engine consumes (event begin: presented =
+// counter at Begin, display = the Present that ends its interval, slot eye, game position and forward axis); per submitted layer its pose and
+// FOV (event present: display = the Present, eye, pose, FOV, tracked, fresh eye, -1 = both eyes fresh). tools/alt_pose_trace_check.py joins
+// them: the layer of a fresh eye must carry the pose of the Setup whose image the Begin rendered (and in alternate mode that Setup's eye must
+// be the fresh eye); a layer carrying the NEXT Setup's pose is the one-frame pose-versus-image skew (paired path, 2026-10-22).
 static std::atomic<int> alt_pose_trace_state{0};static std::ofstream alt_pose_trace_csv;static std::mutex alt_pose_trace_mutex;static std::atomic<int> alt_pose_trace_rows{0}; // state read in StartProbe
-static bool alt_pose_trace_on() noexcept {return alt_pose_trace_state.load()==1 && alternate_on();}
+static bool alt_pose_trace_on() noexcept {return alt_pose_trace_state.load()==1;}
 static void alt_pose_trace_row(const std::string& row) noexcept {
     try {
         std::lock_guard<std::mutex> trace_lock(alt_pose_trace_mutex);
-        if(alt_pose_trace_rows.load()>=60000) return;
+        if(alt_pose_trace_rows.load()>=150000) return; // paired mode writes 6 rows per Present (~2 min at 8 ms)
         if(!alt_pose_trace_csv.is_open()) {
             alt_pose_trace_csv.open(output_directory/L"alt-pose-trace.csv");
             alt_pose_trace_csv<<"event,presented,display,eye,px,py,pz,qx,qy,qz,qw,fl,fr,fu,fd,gx,gy,gz,bx,by,bz,tracked,fresh\n";
@@ -5234,6 +5235,15 @@ void prepare_head_view(void* view) noexcept {
             game_xr->record_rendered_eye(1,fov,&rendered_orientation,&xr_eye.pose.position);
         } else game_xr->record_rendered_eye(static_cast<UINT>(eye),
             {render_fov.left,render_fov.right,render_fov.up,render_fov.down},cant?&rendered_orientation:nullptr);
+        if(alt_pose_trace_on() && !(alternate_on() && stereo_active.load())) { // paired / perf-mono: the view(s) this Setup recorded, keyed to the Present that shows the image
+            for(UINT trace_eye=mono?0u:static_cast<UINT>(eye);trace_eye<(mono?2u:static_cast<UINT>(eye)+1u);++trace_eye) {
+                const XrView recorded=game_xr->recorded_rendered_view(trace_eye);
+                std::ostringstream row;row.precision(9);
+                row<<"setup,"<<frames.load()<<','<<alt_display<<','<<trace_eye<<','<<alt_pose_trace_pose(recorded.pose,recorded.fov)
+                   <<','<<position[0]<<','<<position[1]<<','<<position[2]<<','<<basis[0]<<','<<basis[1]<<','<<basis[2]<<",,";
+                alt_pose_trace_row(row.str());
+            }
+        }
     } catch(const std::exception& error) {native_audio_listener.clear();forced_view_jitter.reset();note_recoverable(error.what());}
     catch(...) {native_audio_listener.clear();forced_view_jitter.reset();note_recoverable("Unknown head-view exception");}
 }
@@ -8520,7 +8530,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
             }
             alt_eye_state=0;alt_alternated=0;alt_paired=0;alt_fallbacks=0;alt_mismatch_run.reset();alt_pending.reset();alt_plan_stamp=0;alt_planned_single[0]=0;alt_planned_single[1]=0;alt_epoch_seen=0;alt_per_frame_done=0;alt_descriptor_paired=false;alt_plan.reset();
             alt_pose_trace_rows=0;{std::lock_guard<std::mutex> trace_lock(alt_pose_trace_mutex);if(alt_pose_trace_csv.is_open()) alt_pose_trace_csv.close();}
-            alt_pose_trace_state=fs::exists(root/L"build"/L"alt-pose-trace")?1:0; // diagnostic: alt-pose-trace.csv (alternate-eye on only)
+            alt_pose_trace_state=fs::exists(root/L"build"/L"alt-pose-trace")?1:0; // diagnostic: alt-pose-trace.csv (every eye mode)
             if(fs::exists(root/L"build"/L"alternate-eye")) { // plan F task 1: alternate-eye rides on the mono-view path (same prerequisites)
                 if(xr_requested && head_requested && paired_requested && eye_boundary_requested && native_eye_capture_requested && !single_eye_requested) {alt_eye_state=1;mono_view_state=1;}
                 else {alt_eye_state=2;note_recoverable("alternate-eye needs head-tracked paired XR with native eye capture; staying paired");}
