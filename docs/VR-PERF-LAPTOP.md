@@ -91,6 +91,34 @@ editing the user's real files, so they are not measured even once the session is
 - [ ] Plan F: performance mode: fast hand swings: hands look solid?
 - [ ] Plan F: performance mode: SMAA edges acceptable?
 
+### Bonelab feel, Part 1: corpse and prop grab (plan A, Tier C)
+
+Save the `corpse` block of `xr-live-status.json` after each item (`binds`, `releases`, `lag_m_max`, `peak_body_speed`, `peak_bone_speed_all17`, `runaway`, `fault_latch`, `event_posts_b9`, `wake_attempts`, `wake_refused`, `body_near_player`, `drawn_anchor_gap_m`, `bones`, `tuning`) plus `prop_seat_gap_m`. The first run is a tuning session, not a validation.
+
+- [ ] Tuning session: drag a dead guard by the ankle, then lift and swing him (items 1 and 2). Edit `build/grab-tuning.cfg` (`axial_n`, `lateral_n`, `lift_fraction`, `tow`, `strength_scale`), restart, repeat; write down the values you prefer.
+- [ ] Bonelab 1: grab a dead guard's limb and walk away: he follows with weight and the hand sits on the grasp point after about a quarter second, never jumping to it; open the fist and he drops where he is (no throw).
+- [ ] Bonelab 2: lift a whole body with one hand and swing it: forgiving, nothing flies off (`peak_bone_speed_all17` under 12, `runaway` 0). Walk the body around for two minutes.
+- [ ] Bonelab 3: hold the collar with `build/collar-grab` present: the chest and neck come up (full fist only; `bones.collar` rises).
+- [ ] Bonelab 4: two hands on one body: both hold, each takes half the load, and letting go of one keeps the other.
+- [ ] Bonelab 5: pull the body against a wall or the floor: the drawn hand stays within 0.35 m of your real hand (`drawn_anchor_gap_m`), and when the body lags more than 0.5 m for 0.25 s it lets go (`releases.lag`), with a 0.3 s wait before regrabbing.
+- [ ] Bonelab 6: a living guard grabbed from behind is pulled and staggers and is alerted; he is never ragdolled by the grab (`event_posts_b9` stays within 2 x `wake_attempts`).
+- [ ] Bonelab 7: an unconscious guard wakes while you hold him: the hold ends (`releases.state_changed` rises), no fling. Also reload a save mid-hold: no crash (`releases.lifecycle`).
+- [ ] Bonelab 8: for every prop (bottle, crate, book, apple): the visible hand sits on the object's grasp point, easing in and out; then create `build/no-prop-grasp-point` and restart: the old drawing is back (`prop_grasp_point` false). Save `prop_seat_gap_m`. A native item (the oil tank) is unchanged either way.
+
+### Bonelab feel, Tier B scenarios (rig)
+
+Run with `linux/d2vr-linux sim --candidate-dll ... --scenario NAME --status-field corpse`, then `python3 tools/linux/bonelab_run_check.py ~/d2vr-test-builds/sim-runs/<stamp> --scenario NAME` (several run dirs for `corpse_stress`: four sessions of 50 cycles, `--lead 45`).
+
+| Scenario | Needs |
+| --- | --- |
+| `oil_tank_drop`, `oil_tank_throw` | the current save (a tank is reachable); native hold, so the corpse counters stay 0 and only crash safety is checked |
+| `corpse_drag`, `corpse_lift`, `corpse_stress`, `corpse_prompt`, `corpse_probe`, `corpse_reload` | needs test save: a `savegame` folder (`~/d2vr-test-saves/corpse-dead`) that starts the player standing and facing a dead guard lying on the floor, a limb about 0.5 m ahead at knee height, no other guard awake nearby |
+| `corpse_collar` | the same save, run with `--knob collar-grab` |
+| `corpse_two_hands` | the same save, with both ankles (or wrists) reachable at once |
+| `corpse_reload` | UNVERIFIED: it presses menu then A on the first pause entry; if that does not reload, use headset item 7 |
+
+Outstanding until that save exists: every corpse scenario run (the scripts compile and fit the session; the checker is tested on fixtures only).
+
 ## Frame split block (plan E task 1)
 
 `xr-live-status.json` also carries `"frame_split":{"adapter":{name,vendor,vram_mb},"split":{...}}` over the same 900-frame gameplay window:

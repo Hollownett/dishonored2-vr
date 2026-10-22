@@ -661,6 +661,9 @@ if not errorlevel 0 goto build_failed
 python tests\corpse_routing_check.py
 if errorlevel 1 goto build_failed
 if not errorlevel 0 goto build_failed
+python tests\bonelab_scenarios_check.py
+if errorlevel 1 goto build_failed
+if not errorlevel 0 goto build_failed
 build\carry_diagnostics_check.exe
 if errorlevel 1 goto build_failed
 if not errorlevel 0 goto build_failed

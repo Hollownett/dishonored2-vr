@@ -9,45 +9,15 @@ segment is a neutral lead-in while the game is driven into gameplay). Hand offse
 default right hand (0.4 m ahead, 0.2 m right, 0.35 m below the eye); x right, y up, z backward. The head looks down at the
 object. Pose numbers follow tools/vr_selftest.py's 'hold' scenario (a bottle on the floor in front of the player).
 """
-NEUTRAL = {"move_x": 0.0}
-GRIP = {"right_grip": 1.0}
-CLOSE = {"right_grip": 1.0, "right_trigger": 1.0}  # a full fist for the grab; the grip alone then keeps the object
-REACH = [-0.2, -0.8, -0.2]   # hand in front of the knees, within reach of an object on the floor
-CHEST = [-0.1, -0.2, -0.2]   # lifted to the chest
-FLOOR = [-0.2, -1.15, -0.3]  # hand about 0.1 m above the floor
-HEAD_PITCH = -50
+import importlib.util
+from pathlib import Path
 
-
-def _glide(t0, t1, a, b, steps, inp):
-    out = []
-    for i in range(steps):
-        k = (i + 1) / steps
-        out.append({"start_ms": round(t0 + (t1 - t0) * i / steps), "end_ms": round(t0 + (t1 - t0) * (i + 1) / steps),
-                    "head_pitch_degrees": HEAD_PITCH, "input": dict(inp),
-                    "right_hand_offset": [round(x + (y - x) * k, 4) for x, y in zip(a, b)]})
-    return out
-
-
-def _hold(t0, t1, inp, offset):
-    return {"start_ms": t0, "end_ms": t1, "head_pitch_degrees": HEAD_PITCH, "input": dict(inp), "right_hand_offset": list(offset)}
-
-
-PRESS_FIRST_MS, PRESS_EVERY_MS, PRESS_MS = 8000, 3000, 200
-
-
-def _lead_in(lead_ms):
-    """Neutral gameplay-time lead plus A pulses (menu-only segments) every 3 s so title -> Campaign -> Continue (and a
-    'press A to continue' after loading) advance by themselves; each pulse is released before the next, so it is a fresh edge.
-    Menu segments are inert once the game is in gameplay."""
-    out, cursor = [], 0
-    for start in range(PRESS_FIRST_MS, lead_ms - PRESS_MS + 1, PRESS_EVERY_MS):
-        if start > cursor:
-            out.append({"start_ms": cursor, "end_ms": start, "head_pitch_degrees": 0, "input": dict(NEUTRAL)})
-        out.append({"start_ms": start, "end_ms": start + PRESS_MS, "input": {"a": True}, "when": "menu"})
-        cursor = start + PRESS_MS
-    if cursor < lead_ms:
-        out.append({"start_ms": cursor, "end_ms": lead_ms, "head_pitch_degrees": 0, "input": dict(NEUTRAL)})
-    return out
+_spec = importlib.util.spec_from_file_location("d2vr_scenario_lib", Path(__file__).resolve().parents[1] / "scenario_lib.py")
+_lib = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(_lib)
+NEUTRAL, GRIP, CLOSE, REACH, CHEST, FLOOR, HEAD_PITCH = _lib.NEUTRAL, _lib.GRIP, _lib.CLOSE, _lib.REACH, _lib.CHEST, _lib.FLOOR, _lib.HEAD_PITCH
+PRESS_FIRST_MS, PRESS_EVERY_MS, PRESS_MS = _lib.PRESS_FIRST_MS, _lib.PRESS_EVERY_MS, _lib.PRESS_MS
+_glide, _hold, _lead_in = _lib.glide, _lib.hold, _lib.lead_in
 
 
 def build(lead_ms):
