@@ -178,11 +178,11 @@ private:
         // force-capped pipeline); neither: a legacy-yanked living guard on the old motor. mass: kg the cap last used; last_capped: CorpseMotor.capped of the
         // last write (it feeds the tow's limb_saturated); bind_pelvis_z: where the pelvis was at the bind (the lift that hangs mass on the held limb).
         bool corpse{},capped{},last_capped{},near_noted{},mass_noted{};
-        double mass{},bind_pelvis_z{std::numeric_limits<double>::quiet_NaN()};std::uint32_t bind_motion{};UINT64 bound_at{};
+        double mass{},bind_pelvis_z{std::numeric_limits<double>::quiet_NaN()};std::uint32_t bind_motion{};std::optional<std::uint32_t> bind_owner;UINT64 bound_at{};
         HoldAnchorView anchor_view{};
         void end_hold() {
             held.reset();corpse=capped=last_capped=near_noted=mass_noted=false;mass=0;bind_pelvis_z=std::numeric_limits<double>::quiet_NaN();
-            bind_motion=0;anchor_view={};reset_tow();
+            bind_motion=0;bind_owner.reset();anchor_view={};reset_tow();
         }
         Gate gate=Gate::none;float raw_grip{};UINT64 decision_tick{};bool decision_usable{};
         UINT64 consumed{},last_motor{},last_tow{},last_acquisition{},owner_epoch{},grip_epoch{};
@@ -203,12 +203,25 @@ private:
     // Collar (chest/neck) holds stay off by default: the mass probe has not yet confirmed bones 2/3 are chest/neck. Enabled only while
     // build/collar-grab exists; remove this knob once the probe verifies the bone map. The yank path below passes allow_collar=false.
     bool collar_grab_{};
+    static constexpr float collar_fist_squeeze=.35f; // one threshold for offering the collar (discovery) and binding it: a full fist reserves the lane here
     // Corpse hold (Task 10). All of this is touched under mutex_ (the dispatcher callback, the render-thread accessors) except the atomics.
     // corpse_enabled_: build/no-corpse-grab clears it; lockout_ and the dispatcher cost counters are dispatcher-thread only; no_posts_ is
     // build/no-ragdoll-posts, read at install for the wake path (Task 11).
     bool corpse_enabled_=true,no_posts_{};
     EntityLockout lockout_{};CorpseDiagnostics corpse_diag_{};CorpseTraceWriter* corpse_trace_{};
     UINT64 pass_cost_us_{};std::atomic<UINT64> corpse_cost_us_{},corpse_cost_max_us_{},velocity_unknown_{};
+    // hold_anchor() must never wait for a dispatcher pass: the pass publishes a copy of each lane's anchor under this small mutex (held only for the copy).
+    UINT64 last_pass_ms_{};
+    std::mutex snapshot_mutex_;std::array<HoldAnchorView,2> snapshot_{};
+    void publish_snapshot_locked() {std::lock_guard<std::mutex> lock(snapshot_mutex_);for(unsigned side=0;side<2;++side) snapshot_[side]=lanes_[side].anchor_view;}
+    // Hand-contact pushes (apply_contact) respect the runaway lockout and the session latch: a guard's body is left alone while either applies.
+    bool contact_write_blocked(std::uintptr_t entity,bool guard) {
+        if(!guard) return false;
+        if(FaultLatch::tripped()) return true;
+        const auto id=rig::value<std::uint32_t>(read_,entity+0xa8);
+        if(!id) return true;
+        std::lock_guard<std::mutex> lock(mutex_);return lockout_.locked(*id,seconds_from_ms(last_pass_ms_)); // the clock of the last dispatcher pass, the one the lock was set on
+    }
     void trip_fault_latch() noexcept {FaultLatch::trip();corpse_diag_.set_fault_latch(true);}
     bool mass_probe_{};unsigned mass_probe_rows_{};std::ofstream mass_probe_out_;
     static constexpr unsigned mass_probe_limit=200;
@@ -274,7 +287,7 @@ private:
         } cost{lane};
         const auto excluded=other?other->entity:0;const auto excluded_handle=other?other->handle:0;
         // Collar (chest, neck) targets are offered only to a full fist (the published squeeze is zero for a grip alone, which stays the game's shoulder carry).
-        const bool collar=collar_grab_ && lane.raw_grip>=.35f;
+        const bool collar=collar_grab_ && lane.raw_grip>=collar_fist_squeeze;
         const auto game=rig::value<std::uintptr_t>(read_,base_+0x39a5290);
         if(!game || !rig::typed(read_,base_,*game,0x1c940a8)) {lane.discovery.reset();lane.focus.reset();return {};}
         const auto& candidates=lane.discovery.advance(p.hand.position,p.tick,[&](unsigned index)->std::optional<NativeRigidBody> {
@@ -314,7 +327,7 @@ private:
     }
     // The collar bones (chest 2, neck 3) are a physical hold only on a full fist: the published squeeze is nonzero only for one (dxgi_probe publishes zero
     // for a grip alone, which stays the game's own shoulder carry), and only while build/collar-grab is on. Limbs are unaffected.
-    bool hold_bone_allowed(int bone,float squeeze) const {return (bone!=2 && bone!=3) || (collar_grab_ && squeeze>=.45f);}
+    bool hold_bone_allowed(int bone,float squeeze) const {return (bone!=2 && bone!=3) || (collar_grab_ && squeeze>=collar_fist_squeeze);}
     static bool request_current(const ObstructionRequest& r,const Publication& p,UINT64 now) {
         return p.usable && !p.occupied && p.epoch==r.epoch && p.tick==r.tick && p.source_tick==r.source_tick &&
             length(p.hand.position-r.hand.position)==0 &&
@@ -388,7 +401,8 @@ private:
         if(!motion) {++tow_unreadable_;return result;}
         in.pelvis_velocity=motion->velocity;
         const auto plan=plan_tow(in);lane.tow=plan.bind_reach;lane.tow_recovery=plan.recovery_s;result.saturated=plan.disabled_saturated;if(!plan.write) return result;
-        alignas(16) std::array<float,4> linear{static_cast<float>(plan.linear.x),static_cast<float>(plan.linear.y),0,0};
+        // the plan holds the pelvis on the floor plane; its vertical speed is left as read, so a body lifted or swung by one hand is not pinned by the tow
+        alignas(16) std::array<float,4> linear{static_cast<float>(plan.linear.x),static_cast<float>(plan.linear.y),static_cast<float>(motion->velocity.z),0};
         alignas(16) std::array<float,4> angular{};
         CrashOperation operation("native ragdoll tow velocity");
         const auto outcome=write_velocity(reinterpret_cast<void*>(pelvis->world),pelvis->handle,linear.data(),angular.data());
@@ -400,7 +414,7 @@ private:
     // hknpMotion read of a body (shared layout with native_motion): unreadable = the memory is not there (the velocity is then unknown, counted),
     // garbage = it read but is non-finite or above 100 m/s (the hold is dropped without a write). Angular velocity sits at +0x50; a bad spin reads as rest.
     enum class MotionStatus {unreadable,ok,garbage};
-    struct MotionState {MotionStatus status{MotionStatus::unreadable};Vec3 velocity{},spin{};std::optional<std::uint16_t> inverse;std::uint32_t index{};};
+    struct MotionState {MotionStatus status{MotionStatus::unreadable};Vec3 velocity{},spin{};std::optional<std::uint16_t> inverse;std::uint32_t index{};std::optional<std::uint32_t> owner;};
     MotionState read_motion_state(const NativeRigidBody& body) const {
         using namespace rig;MotionState out;
         const auto index=value<std::uint32_t>(read_,body.record+0x40);
@@ -411,6 +425,7 @@ private:
         const auto v=value<std::array<float,3>>(read_,at+0x40);
         if(!v) return out;
         out.inverse=value<std::uint16_t>(read_,at+0x26);
+        out.owner=value<std::uint32_t>(read_,at+0x28); // the entry's first attached body id: format unverified live, so only a CHANGE from the bind is used
         const Vec3 velocity{(*v)[0],(*v)[1],(*v)[2]};
         if(!finite(velocity) || length(velocity)>100) {out.status=MotionStatus::garbage;return out;}
         out.status=MotionStatus::ok;out.velocity=velocity;
@@ -467,7 +482,7 @@ private:
         lane.capped=lane.corpse || body.bone<0;
         lane.last_capped=false;lane.near_noted=lane.mass_noted=false;lane.mass=0;lane.bind_pelvis_z=std::numeric_limits<double>::quiet_NaN();
         lane.bound_at=now;if(lane.capped) lane.last_motor=0; // no write yet this hold: the first one measures its dt from the bind
-        lane.bind_motion=read_motion_state(body).index;
+        {const auto motion=read_motion_state(body);lane.bind_motion=motion.index;lane.bind_owner=motion.owner;}
         if(lane.corpse && body.bone>0) if(const auto pelvis=native_ragdoll_body(read_,base_,body.entity,0)) lane.bind_pelvis_z=pelvis->pose.position.z;
         lane.anchor_view=HoldAnchorView{true,lane.grab.anchor(body.pose),now};
         if(lane.corpse) corpse_diag_.note_bind(side,body.bone,ragdoll_body_mass(body.bone,std::nullopt,tuning_.use_measured_mass).source);
@@ -482,18 +497,25 @@ private:
     // One motor tick of a corpse or prop lane; the lifecycle re-read of the held body has already passed this tick. Order for a corpse: fault latch or
     // lockout, then the state byte (+0xd1 lost 0x28), then an open fist, then (at most every 10 ms) the 17-body runaway check, the capped motor, the write
     // and the tow. A prop skips the ragdoll-only steps and keeps its throw. Returns false only when a fault released every lane: the caller stops.
+    // A runaway: this hold ends as `runaway` (counted once), the entity is locked, and a second hand on the same body lets go as a lifecycle release.
+    void runaway_release(Lane& lane,unsigned side,const NativeRigidBody& body,double now_s) {
+        lockout_.lock(body.entity_id,now_s);end_capped_hold(lane,side,ReleaseReason::runaway);
+        auto& sibling=lanes_[1-side];
+        if(sibling.held && sibling.corpse && sibling.held->entity==body.entity) end_capped_hold(sibling,1-side,ReleaseReason::lifecycle);
+    }
     bool capped_tick(Lane& lane,unsigned side,const NativeRigidBody& body,UINT64 now,bool motor_usable,bool release_usable) {
         struct Cost {UINT64& total;std::chrono::steady_clock::time_point start=std::chrono::steady_clock::now();
             ~Cost() {total+=static_cast<UINT64>(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now()-start).count());}} cost{pass_cost_us_};
         const auto& p=lane.published;const bool corpse=lane.corpse;const double now_s=seconds_from_ms(now);
+        // A tripped session latch ends every capped hold before any write, props included (a fault means the engine objects are suspect).
+        if(FaultLatch::tripped()) {corpse_diag_.set_fault_latch(true);end_capped_hold(lane,side,ReleaseReason::fault);return true;}
         if(corpse) {
-            if(FaultLatch::tripped()) {corpse_diag_.set_fault_latch(true);end_capped_hold(lane,side,ReleaseReason::fault);return true;}
             if(lockout_.locked(body.entity_id,now_s)) {end_capped_hold(lane,side,ReleaseReason::runaway);return true;}
             const auto state=rig::value<unsigned char>(read_,body.entity+0xd1);
             if(!state || !(*state&0x28)) {end_capped_hold(lane,side,ReleaseReason::state_changed);return true;} // wins over an open fist on the same tick
             if(lane.pending_release) { // an open fist or a lost owner: a runaway body still counts and locks the entity first
                 const auto held_motion=read_motion_state(body);
-                if(RunawayDetector::check(ragdoll_velocities(body,held_motion)).runaway) {lockout_.lock(body.entity_id,now_s);end_capped_hold(lane,side,ReleaseReason::runaway);return true;}
+                if(RunawayDetector::check(ragdoll_velocities(body,held_motion)).runaway) {runaway_release(lane,side,body,now_s);return true;}
                 end_capped_hold(lane,side,lane.release_throw?ReleaseReason::open_fist:ReleaseReason::lifecycle);return true;
             }
         } else if(lane.pending_release) { // a prop: the release throws with the hand's velocity, as before
@@ -509,16 +531,18 @@ private:
         const double dt=elapsed>0?elapsed:1./60; // two ticks inside one clock quantum: assume one nominal tick
         const auto motion=read_motion_state(body);
         if(motion.status==MotionStatus::garbage && !corpse) {end_capped_hold(lane,side,ReleaseReason::fault);return true;}
-        if(motion.index) { // the body's slot in the motion array is fixed for its life: a different one is a recycled body
-            if(!lane.bind_motion) lane.bind_motion=motion.index;
-            else if(motion.index!=lane.bind_motion) {end_capped_hold(lane,side,ReleaseReason::lifecycle);return true;}
+        // The body's slot in the motion array and the body that entry belongs to are fixed for its life; a different slot or owner is a recycled body.
+        // A corpse hold with no baseline (the motion read failed at the bind) is refused: nothing is written on a path that cannot be validated.
+        if(corpse && (!lane.bind_motion || !lane.bind_owner)) {end_capped_hold(lane,side,ReleaseReason::lifecycle);return true;}
+        if(motion.index && ((lane.bind_motion && motion.index!=lane.bind_motion) || (lane.bind_owner && motion.owner!=lane.bind_owner))) {
+            end_capped_hold(lane,side,ReleaseReason::lifecycle);return true;
         }
         double peak=0;
         if(corpse) {
+            if(motion.status==MotionStatus::garbage) {lockout_.lock(body.entity_id,now_s);end_capped_hold(lane,side,ReleaseReason::fault);return true;} // untrusted memory: a fault, not a runaway
             const auto verdict=RunawayDetector::check(ragdoll_velocities(body,motion));
-            if(verdict.runaway) {lockout_.lock(body.entity_id,now_s);end_capped_hold(lane,side,ReleaseReason::runaway);return true;} // never corrected with another write
+            if(verdict.runaway) {runaway_release(lane,side,body,now_s);return true;} // never corrected with another write
             peak=verdict.max_speed;
-            if(motion.status==MotionStatus::garbage) {end_capped_hold(lane,side,ReleaseReason::fault);return true;}
         }
         const std::optional<std::uint16_t> half=motion.status==MotionStatus::ok?motion.inverse:std::nullopt;
         BodyMass mass;std::optional<NativeRigidBody> pelvis;double hanging=0,radius=.15;
@@ -569,7 +593,7 @@ private:
         return true;
     }
     void update_lane(unsigned side,std::uintptr_t world,UINT64 now) {
-        auto& lane=lanes_[side];
+        auto& lane=lanes_[side];last_pass_ms_=now;
         if(lane.consumed==lane.published.serial && (!lane.held || now-lane.last_motor<10)) return;
         const auto& p=lane.published;lane.consumed=p.serial;
         // A pending native query must not disarm the observed-release physics
@@ -677,6 +701,7 @@ private:
         const auto now=GetTickCount64();
         pass_cost_us_=0;
         for(unsigned side=0;side<2;++side) update_lane(side,*world,now);
+        publish_snapshot_locked();
         if(pass_cost_us_) { // the capped hold's game-thread time for both hands in this callback (budget 0.2 ms)
             corpse_cost_us_+=pass_cost_us_;
             auto seen=corpse_cost_max_us_.load();while(pass_cost_us_>seen && !corpse_cost_max_us_.compare_exchange_weak(seen,pass_cost_us_)) {}
@@ -710,10 +735,9 @@ private:
         contact_.service(scan_,base_,*world,GetTickCount64(),held,[&](std::uintptr_t w,std::uint32_t handle,const std::array<float,3>& v,const std::array<float,3>& spin) {
             alignas(16) std::array<float,4> linear{v[0],v[1],v[2],0};
             alignas(16) std::array<float,4> angular{spin[0],spin[1],spin[2],0};
-            if(FaultLatch::tripped()) return; // a ragdoll write faulted this session: no further hand-contact pushes either
             CrashOperation operation("native hand contact velocity");
             const auto result=write_velocity(reinterpret_cast<void*>(w),handle,linear.data(),angular.data());
-            if(result==VelocityWrite::faulted) {++contact_.faults;release_all();}
+            if(result==VelocityWrite::faulted) {if(contact_.last_write_ragdoll) trip_fault_latch();++contact_.faults;release_all();}
         },[this] {return clock_.micros();});
     }
     void invoke(void* manager,void* command) {
@@ -813,7 +837,7 @@ public:
     // The grasp point of what this hand holds as of the last dispatcher tick (render thread; a corpse or a prop). active=false when nothing is held.
     HoldAnchorView hold_anchor(unsigned side) {
         if(side>=2) return {};
-        std::lock_guard<std::mutex> lock(mutex_);return lanes_[side].anchor_view;
+        std::lock_guard<std::mutex> lock(snapshot_mutex_);return snapshot_[side]; // never mutex_: the render thread does not wait for a dispatcher pass
     }
     bool corpse_enabled() {std::lock_guard<std::mutex> lock(mutex_);return corpse_enabled_;}
     bool no_ragdoll_posts() const noexcept {return no_posts_;} // build/no-ragdoll-posts, read at install; the wake path (Task 11) honours it
@@ -964,7 +988,7 @@ public:
             // Commit the queried pose before another eye publication replaces it.
             const auto& other=lanes_[1-side].held;
             const auto contact=acquisition_contact(lane,*after,GetTickCount64());
-            if(*verdict && contact && lane.owner.physical() && !(after->bone>=0 && lockout_.locked(after->entity_id,seconds_from_ms(GetTickCount64()))) && (!other || other->entity!=after->entity || other->handle!=after->handle) &&
+            if(*verdict && contact && lane.owner.physical() && hold_bone_allowed(after->bone,p.grip) && !(after->bone>=0 && lockout_.locked(after->entity_id,seconds_from_ms(GetTickCount64()))) && (!other || other->entity!=after->entity || other->handle!=after->handle) &&
                lane.grab.sample(p.hand,p.grip,true,p.epoch,p.tick) &&
                lane.grab.bind(after->pose,*contact,grab_acquire_distance)) {
                 lane.held=after;lane.acquired=true;lane.pending_release=false;lane.reset_tow();
@@ -975,6 +999,15 @@ public:
             lane.gate=*verdict?(lane.held?Gate::physical_held:Gate::physical_reserved):Gate::obstruction_blocked;
             ++p.serial;record_decision(side,GetTickCount64());
         }
+    }
+    // The install-time corpse knobs of a mod root (<root>/build/no-corpse-grab, no-ragdoll-posts, grab-tuning.cfg): a valid cfg replaces the tuning, an
+    // invalid one leaves the defaults and says why, no-corpse-grab clears `enabled`. Pure, so a test can run it on a temp directory.
+    struct CorpseKnobs {CorpseOptions options;KillSwitches kill;TuningLoad loaded;};
+    static CorpseKnobs corpse_knobs_from(const std::filesystem::path& root) {
+        CorpseKnobs knobs;
+        knobs.kill=KillSwitches::read(root/L"build");knobs.loaded=load_grab_tuning(root/L"build"/L"grab-tuning.cfg");
+        knobs.options.enabled=!knobs.kill.no_corpse_grab;knobs.options.tuning=knobs.loaded.value;knobs.options.from_file=knobs.loaded.source==TuningSource::file;
+        return knobs;
     }
     void install(std::uintptr_t base,Read read,Logic logic,const std::filesystem::path& file) {
         base_=base;read_=read;logic_=logic;
@@ -991,11 +1024,9 @@ public:
          collar_grab_=std::filesystem::exists(root/L"build"/L"collar-grab",ec);
          if(collar_grab_) {std::ofstream note(loss_file_,std::ios::app);note<<"knob build/collar-grab present: chest/neck hold targets enabled (full fist only)\n";}
          // Corpse hold knobs and the tuning file, read once here so the shipped configuration is the one that was tested (valid file or the defaults).
-         const auto kill=KillSwitches::read(root/L"build");
-         const auto loaded=load_grab_tuning(root/L"build"/L"grab-tuning.cfg");
+         const auto knobs=corpse_knobs_from(root);const auto& kill=knobs.kill;const auto& loaded=knobs.loaded;
          no_posts_=kill.no_posts;
-         CorpseOptions options;options.enabled=!kill.no_corpse_grab;options.tuning=loaded.value;options.from_file=loaded.source==TuningSource::file;
-         configure_corpse(options);
+         configure_corpse(knobs.options);
          {std::ofstream note(loss_file_,std::ios::app);
           if(kill.no_corpse_grab) note<<"knob build/no-corpse-grab present: corpse bodies are not grab candidates\n";
           if(kill.no_posts) note<<"knob build/no-ragdoll-posts present: no ragdoll event posts\n";
@@ -1010,6 +1041,7 @@ public:
         {std::lock_guard<std::mutex> lock(mutex_);advance_lifecycle_locked();lanes_={};lockout_={};}
         decision_begin_=decision_count_=0;last_decision_={};decision_dropped_=0;acquisition_samples_=0;picked_=moved_=dropped_=lost_=queries_=samples_=callbacks_=0;native_presses_=physical_presses_=0;
         velocity_=reinterpret_cast<Velocity>(base+velocity_rva);instance_=this;
+        contact_.write_blocked=[this](std::uintptr_t entity,bool guard) {return contact_write_blocked(entity,guard);};
         contact_.install(file.parent_path()/L"native-hand-contact.csv");contact_.inline_discovery=false;clock_.calibrate();
         const auto target=reinterpret_cast<void*>(base+rva);
         if(!original_ && MH_CreateHook(target,reinterpret_cast<void*>(&dispatch),reinterpret_cast<void**>(&original_))!=MH_OK) throw std::runtime_error("Cannot create native grab callback");
@@ -1021,7 +1053,7 @@ public:
         if(enabled_) {if(MH_DisableHook(reinterpret_cast<void*>(base_+rva))!=MH_OK) return false;enabled_=false;}
         const auto deadline=GetTickCount64()+5000;while(depth_ && GetTickCount64()<deadline) Sleep(1);if(depth_) return false;
         std::array<unsigned char,32> code{};const bool restored=!original_ || (read_(base_+rva,code.data(),code.size()) && code==dispatch_code);
-        try {std::lock_guard<std::mutex> lock(mutex_);for(unsigned side=0;side<2;++side) {auto& lane=lanes_[side];if(lane.held && lane.corpse) corpse_diag_.note_release(side,ReleaseReason::lifecycle);lane.grab.release(false);lane.end_hold();}log_.close();acquisitions_.close();mass_probe_out_.close();mass_probe_=false;} catch(...) {return false;}
+        try {std::lock_guard<std::mutex> lock(mutex_);for(unsigned side=0;side<2;++side) {auto& lane=lanes_[side];if(lane.held && lane.corpse) corpse_diag_.note_release(side,ReleaseReason::lifecycle);lane.grab.release(false);lane.end_hold();}publish_snapshot_locked();log_.close();acquisitions_.close();mass_probe_out_.close();mass_probe_=false;} catch(...) {return false;}
         return restored;
     }
     bool enabled() const noexcept {return active_.load(std::memory_order_acquire);}

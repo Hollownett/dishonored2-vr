@@ -5,7 +5,10 @@
 #include "../src/native_grab.hpp"
 #include <cmath>
 #include <fstream>
+#include <filesystem>
 #include <functional>
+#include <future>
+#include <chrono>
 #include <sstream>
 #include <cstdio>
 #include <iostream>
@@ -65,6 +68,7 @@ void build_guard(std::uintptr_t npc,std::uint32_t id,std::uintptr_t list,std::ui
         rig::Transform t{};t.f[0]=t.f[5]=t.f[10]=t.f[15]=1;t.f[12]=static_cast<float>(x0+bone*.2);
         const auto record=record_of(first,bone);
         put(record,t);put(record+0x40,motion_slot(first_motion,bone));put(record+0x44,std::uint32_t{0x82});put(record+0x70,handle);put(record+0x74,handle);
+        put(motion_at(first_motion,bone)+0x28,motion_slot(first_motion,bone));   // the entry's attached body id
         put(motion_at(first_motion,bone)+0x26,std::uint16_t{0x3f00});   // inverse 0.5: plausible only for the class values
         put(motion_at(first_motion,bone)+0x40,std::array<float,3>{0,0,0});put(motion_at(first_motion,bone)+0x50,std::array<float,3>{0,0,0});
     }
@@ -80,7 +84,7 @@ void build_prop(float extent) {
     const auto record=pool+prop_index*0xb0;put(record,t);put(record+0x44,std::uint32_t{130});put(record+0x40,prop_motion);put(record+0x70,handle);put(record+0x74,handle);
     const float h=extent*.5f;   // bounds around the body: extent^3 * 350 kg/m3
     put(model+0x1840,std::array<float,8>{prop_x-h,-h,-h,0,prop_x+h,h,h,0});put(model+0x1860,std::array<float,3>{prop_x,0,0});
-    put(motions+prop_motion*0x80+0x26,std::uint16_t{0x3f00});put(motions+prop_motion*0x80+0x40,std::array<float,3>{0,0,0});
+    put(motions+prop_motion*0x80+0x28,prop_motion);put(motions+prop_motion*0x80+0x26,std::uint16_t{0x3f00});put(motions+prop_motion*0x80+0x40,std::array<float,3>{0,0,0});
 }
 void fixture(unsigned char state_a=0x08,unsigned char state_b=0x08,bool with_prop=true,float prop_extent=.18f) {
     bytes.clear();writes.clear();fault_next_write=false;FaultLatch::reset_for_tests();
@@ -105,13 +109,15 @@ void fixture(unsigned char state_a=0x08,unsigned char state_b=0x08,bool with_pro
 namespace d2vr {
 struct NativeGrabCheck {
     static void setup(NativeGrab& grab) {grab.active_=true;grab.base_=base;grab.read_=read;grab.logic_=logic;grab.original_=original;grab.velocity_=velocity;}
-    static void consume(NativeGrab& grab,unsigned side,UINT64 now,std::uintptr_t w=world) {std::lock_guard<std::mutex> lock(grab.mutex_);grab.update_lane(side,w,now);}
+    static void consume(NativeGrab& grab,unsigned side,UINT64 now,std::uintptr_t w=world) {std::lock_guard<std::mutex> lock(grab.mutex_);grab.update_lane(side,w,now);grab.publish_snapshot_locked();}
     static void collar(NativeGrab& grab,bool on) {grab.collar_grab_=on;}
     static bool corpse(NativeGrab& grab,unsigned side) {std::lock_guard<std::mutex> lock(grab.mutex_);return grab.lanes_[side].corpse;}
     static bool capped(NativeGrab& grab,unsigned side) {std::lock_guard<std::mutex> lock(grab.mutex_);return grab.lanes_[side].capped;}
     static int bone(NativeGrab& grab,unsigned side) {std::lock_guard<std::mutex> lock(grab.mutex_);return grab.lanes_[side].held?grab.lanes_[side].held->bone:-99;}
     static double mass(NativeGrab& grab,unsigned side) {std::lock_guard<std::mutex> lock(grab.mutex_);return grab.lanes_[side].mass;}
     static void tune(NativeGrab& grab,const GrabTuning& t) {grab.tuning_=t;}
+    static bool contact_blocked(NativeGrab& grab,std::uintptr_t entity,bool guard) {return grab.contact_write_blocked(entity,guard);}
+    static std::mutex& mutex(NativeGrab& grab) {return grab.mutex_;}
     static std::string source() {std::ifstream f("src/native_grab.hpp");std::stringstream ss;ss<<f.rdbuf();return ss.str();}
 };
 }
@@ -302,10 +308,10 @@ void fault_latch_blocks_further_ragdoll_writes() {
     r.step(0,other,0,1500);r.step(0,other,0);
     r.grasp(0,other);r.step(0,other+Vec3{.3,0,0},.9f,100);r.step(0,other+Vec3{.6,0,0},.9f,100);
     CHECK(writes.empty());
-    // prop writes still work
+    // a capped prop lane honours the tripped latch too: it holds, then ends as a fault on its first tick, and writes nothing
     const Vec3 at{prop_x,0,0};
-    REQUIRE(r.grasp(0,at));r.step(0,at+Vec3{.05,0,0},.9f,100);
-    CHECK(!writes.empty() && writes.back().handle==handle_of(prop_index,0));
+    r.grasp(0,at);r.step(0,at+Vec3{.05,0,0},.9f,100);r.step(0,at+Vec3{.1,0,0},.9f,100);
+    CHECK(writes.empty() && !r.grab.holding(0));
 }
 void readback_garbage_drops_hold_without_write() {
     struct Garbage {const char* name;std::function<void()> apply;std::function<void()> undo;};
@@ -321,6 +327,7 @@ void readback_garbage_drops_hold_without_write() {
         c.apply();r.step(0,wrist+Vec3{.1,0,0},.9f);
         if(!(!r.grab.holding(0) && writes.size()==before)) std::printf("case %s\n",c.name);
         CHECK(!r.grab.holding(0) && writes.size()==before);
+        if(std::string(c.name)!="recycled") CHECK(has(r.json(),"\"fault\":[1,0]") && has(r.json(),"\"runaway\":0"));   // untrusted memory is a fault
         c.undo();
     }
     {   // a motion array that is simply gone: unknown velocity, counted; the hold steps from rest and still writes
@@ -424,12 +431,105 @@ void mass_hangs_on_a_lifted_limb() {
     const GrabTuning tuning;const double lifted=NativeGrabCheck::mass(r.grab,0);
     CHECK(lifted>flat+tuning.lift_fraction*(body_class_total_kg-ragdoll_class_kg[0])*.99-1e-9 || lifted>flat+10);
 }
+void contact_push_blocked_during_lockout_and_latch() {
+    fixture();Rig r;const Vec3 wrist{2,0,0};
+    CHECK(!NativeGrabCheck::contact_blocked(r.grab,guard_a,true));
+    REQUIRE(r.grasp(0,wrist));r.step(0,wrist+Vec3{.05,0,0},.9f);
+    put(motion_at(a_motion,0)+0x40,std::array<float,3>{13,0,0});
+    r.step(0,wrist+Vec3{.1,0,0},.9f);   // runaway: released and locked
+    CHECK(has(r.json(),"\"runaway\":1"));
+    CHECK(NativeGrabCheck::contact_blocked(r.grab,guard_a,true));       // the open hand must not push the locked guard
+    CHECK(!NativeGrabCheck::contact_blocked(r.grab,guard_b,true));      // another guard is free
+    CHECK(!NativeGrabCheck::contact_blocked(r.grab,prop,false));        // props are never the lockout's business
+    r.t+=1200;
+    FaultLatch::trip();   // a ragdoll write faulted anywhere: guards are left alone, props are not
+    CHECK(NativeGrabCheck::contact_blocked(r.grab,guard_b,true) && !NativeGrabCheck::contact_blocked(r.grab,prop,false));
+    FaultLatch::reset_for_tests();
+}
+void hold_anchor_never_waits_for_the_dispatcher_mutex() {
+    fixture();Rig r;
+    REQUIRE(r.grasp(0,{prop_x,0,0}));
+    const auto expected=r.grab.hold_anchor(0);CHECK(expected.active && expected.tick==r.t);
+    std::unique_lock<std::mutex> busy(NativeGrabCheck::mutex(r.grab));   // a dispatcher pass is in progress
+    auto got=std::async(std::launch::async,[&]{return r.grab.hold_anchor(0);});
+    const bool in_time=got.wait_for(std::chrono::milliseconds(500))==std::future_status::ready;
+    CHECK(in_time);
+    busy.unlock();
+    const auto view=got.get();CHECK(view.active && view.tick==expected.tick && view.anchor.x==expected.anchor.x);
+}
+void motion_slot_owner_and_baseline() {
+    {   // the same slot, but the entry now belongs to another body (an ABA recycle): no write, hold ends
+        fixture();Rig r;const Vec3 wrist{2,0,0};
+        REQUIRE(r.grasp(0,wrist));r.step(0,wrist+Vec3{.05,0,0},.9f);
+        const auto before=writes.size();
+        put(motion_at(a_motion,10)+0x28,std::uint32_t{999});
+        r.step(0,wrist+Vec3{.1,0,0},.9f);
+        CHECK(!r.grab.holding(0) && writes.size()==before && has(r.json(),"\"lifecycle\":[1,0]"));
+    }
+    {   // no baseline at the bind (the motion array was unreadable): the corpse hold is refused, nothing written; the array coming back does not adopt one
+        fixture();Rig r;const Vec3 wrist{2,0,0};
+        put(world+0x120,std::uintptr_t{0});
+        r.grasp(0,wrist);
+        put(world+0x120,motions);
+        const auto before=writes.size();
+        r.step(0,wrist+Vec3{.1,0,0},.9f);r.step(0,wrist+Vec3{.2,0,0},.9f);
+        CHECK(!r.grab.holding(0) && writes.size()==before);
+    }
+}
+void one_hand_lift_not_pinned_by_tow() {
+    fixture();Rig r;GrabTuning tuning;tuning.strength_scale=10;NativeGrabCheck::tune(r.grab,tuning);
+    const Vec3 foot{2.6,0,0};
+    REQUIRE(r.grasp(0,foot));
+    put(motion_at(a_motion,0)+0x40,std::array<float,3>{0,0,2});   // the pelvis is rising at 2 m/s (the body is being lifted)
+    for(int i=1;i<=4;++i) r.step(0,foot+Vec3{.02*i,0,0},.9f,50);
+    int pelvis_writes=0;
+    for(const auto& w:writes) if(w.handle==handle_of(a_first,0)) {++pelvis_writes;CHECK(std::fabs(w.linear[2]-2.f)<1e-5f);}   // vertical speed left as it was
+    CHECK(pelvis_writes>=1);
+}
+void two_hands_one_runaway_counts_once() {
+    fixture();Rig r;
+    const Vec3 left{2,0,0},right{3.2,0,0};
+    for(int i=0;i<18;++i) {r.step(0,left,0,20);r.step(1,right,0,20);r.grab.focus_point(0,r.t);r.grab.focus_point(1,r.t);}
+    r.step(0,left,.9f);r.step(1,right,.9f,1);
+    REQUIRE(r.grab.holding(0) && r.grab.holding(1));
+    put(motion_at(a_motion,0)+0x40,std::array<float,3>{13,0,0});
+    r.step(0,left,.9f,20);r.step(1,right,.9f,20);
+    CHECK(!r.grab.holding(0) && !r.grab.holding(1));
+    CHECK(has(r.json(),"\"runaway\":1") && has(r.json(),"\"runaway\":[1,0]") && has(r.json(),"\"lifecycle\":[0,1]"));
+}
+void install_knobs_load_and_switch() {
+    namespace fs=std::filesystem;
+    const auto root=fs::temp_directory_path()/"d2vr_corpse_knobs";fs::remove_all(root);fs::create_directories(root/"build");
+    {
+        const auto none=NativeGrab::corpse_knobs_from(root);
+        CHECK(none.options.enabled && !none.options.from_file && none.options.tuning.tow && none.options.tuning.strength_scale==3 && !none.kill.no_posts);
+    }
+    {std::ofstream f(root/"build"/"grab-tuning.cfg");f<<"strength_scale 5\ntow 0\naxial_n 250\n";}
+    {
+        const auto k=NativeGrab::corpse_knobs_from(root);
+        CHECK(k.options.from_file && k.options.tuning.strength_scale==5 && !k.options.tuning.tow && k.options.tuning.axial_n==250 && k.options.enabled);
+        NativeGrab grab;grab.configure_corpse(k.options);   // what install() does with it
+        CHECK(has(grab.corpse_diagnostics().json(),"\"tuning\":\"file\"") && has(grab.corpse_diagnostics().json(),"\"tow_enabled\":false"));
+    }
+    {std::ofstream f(root/"build"/"grab-tuning.cfg");f<<"strength_scale 99\n";}   // out of bounds: defaults and a message
+    {
+        const auto k=NativeGrab::corpse_knobs_from(root);
+        CHECK(!k.options.from_file && k.options.tuning.strength_scale==3 && !k.loaded.error.empty());
+    }
+    {std::ofstream f(root/"build"/"no-corpse-grab");}{std::ofstream f(root/"build"/"no-ragdoll-posts");}
+    {
+        const auto k=NativeGrab::corpse_knobs_from(root);
+        CHECK(!k.options.enabled && k.kill.no_posts && k.kill.no_corpse_grab);
+    }
+    fs::remove_all(root);
+}
 void source_routing() {
     const auto src=NativeGrabCheck::source();
     CHECK(!src.empty());
     auto count=[&](const std::string& piece) {int c=0;for(auto at=src.find(piece);at!=std::string::npos;at=src.find(piece,at+1)) ++c;return c;};
     // every velocity write of the capped lane goes through write(...); the fault latch trips in the fault branches only
-    CHECK(count("write_velocity(")==5);   // write(), tow(), apply_poke(), apply_contact() and the definition
+    CHECK(count("write_velocity(")==5);   // unchanged by the fix round
+    CHECK(count("corpse_knobs_from(root)")==1 && count("configure_corpse(knobs.options)")==1 && count("contact_.write_blocked=")==1);   // write(), tow(), apply_poke(), apply_contact() and the definition
     CHECK(count("FaultLatch::trip()")==1 && count("trip_fault_latch()")>=3);
     const auto lock=src.find("lockout_.locked(body.entity_id,now_s)"),motor=src.find("lane.grab.corpse_motor(");
     CHECK(lock!=std::string::npos && motor!=std::string::npos && lock<motor);
@@ -453,6 +553,12 @@ int main() {
     prop_hold_capped_old_release();
     tow_follows_and_limb_saturation_gates_it();
     mass_hangs_on_a_lifted_limb();
+    contact_push_blocked_during_lockout_and_latch();
+    hold_anchor_never_waits_for_the_dispatcher_mutex();
+    motion_slot_owner_and_baseline();
+    one_hand_lift_not_pinned_by_tow();
+    two_hands_one_runaway_counts_once();
+    install_knobs_load_and_switch();
     source_routing();
     if(failures) {std::printf("%d check(s) failed\n",failures);return 1;}
     std::printf("corpse_hold_check ok\n");

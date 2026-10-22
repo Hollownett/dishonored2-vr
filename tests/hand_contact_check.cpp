@@ -1187,6 +1187,14 @@ int main() {
             sweep(*c,60,9.70+.4*.011*100);
             assert(writes.empty());
         }
+        // write_blocked (NativeGrab: the runaway lockout, the fault latch): a blocked guard is not pushed; unblocked he is, and the write says it is a guard's
+        {
+            bone_flags(0x82);put(npc+0xd1,static_cast<unsigned char>(0x20));writes.clear();
+            auto c=make();c->write_blocked=[](std::uintptr_t,bool guard) {return guard;};sweep(*c,100,9.70);
+            assert(writes.empty() && c->pushes==0);
+            writes.clear();auto d=make();bool asked=false;d->write_blocked=[&](std::uintptr_t entity,bool guard) {asked=asked||(entity==npc && guard);return false;};
+            sweep(*d,100,9.70);assert(asked && writes.count(0x100000a) && d->last_write_ragdoll);
+        }
         // the keep-out: a guard lying against the player is never shoved
         {
             bone_flags(0x82);put(npc+0xd1,static_cast<unsigned char>(0x20));writes.clear();

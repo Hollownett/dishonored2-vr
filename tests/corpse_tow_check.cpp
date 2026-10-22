@@ -77,7 +77,7 @@ int main() {
         CHECK(!src.empty());
         auto count=[&](const std::string& n) {int c=0;for(std::size_t p=src.find(n);p!=std::string::npos;p=src.find(n,p+1)) ++c;return c;};
         CHECK(count("lane.tow=0")==0 && count("lane.reset_tow();")==3);   // the three bind sites; every release goes through Lane::end_hold, which resets it too
-        CHECK(count("bind_motion=0;anchor_view={};reset_tow();")==1);
+        CHECK(count("bind_motion=0;bind_owner.reset();anchor_view={};reset_tow();")==1);
         CHECK(count("void reset_tow() {tow=0;tow_recovery=0;last_tow=0;}")==1);
         CHECK(count("in.recovery_s=lane.tow_recovery;")==1 && count("lane.tow_recovery=plan.recovery_s;")==1);
     }

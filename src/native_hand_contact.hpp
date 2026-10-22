@@ -1,4 +1,5 @@
 #pragma once
+#include <functional>
 // Solid hands, engine side (hand_contact.hpp has the math). The render thread publishes each empty open hand's drawn pose, raw
 // tracked pose and finger curls; the physics-command callback (native_grab.hpp, after the dispatcher 0x89fb0) finds the loose
 // props near a hand, intersects the hand's sphere proxies with each, and raises the prop's linear velocity along the push
@@ -85,6 +86,10 @@ public:
         const double since=drag.since_write(now);
         return since>0?std::clamp(since,write_dt_min,write_dt_max):first_write_dt;
     }
+    // Task 10 fix round: NativeGrab sets write_blocked so a body under the runaway lockout (or any ragdoll after a ragdoll write fault) is not pushed;
+    // last_write_ragdoll says whether the write the callback is running is a guard's, so a faulted one trips the session latch.
+    std::function<bool(std::uintptr_t entity,bool guard)> write_blocked;
+    bool last_write_ragdoll=false;
     bool inline_discovery=true; // true: the registry scan runs inside service() (the unit tests); false: discover() runs it (native_grab.hpp)
     static constexpr std::uint64_t latch_services=150; // ~2 s of services with no discover() call at all: nobody calls it, the service scans after all
     HandContactConfig config{};
@@ -397,6 +402,7 @@ public:
             HandContactConfig contact_config=config;contact_config.heavy_kg=heavy;
             rig::HeldShape shape;
             try {shape=prop_shape(*n.body);} catch(const std::invalid_argument&) {continue;}
+            if(write_blocked && write_blocked(n.entity,guard)) continue; // lockout or latch: this body is left alone (it still counted as met above)
             Vec3 velocity=n.velocity,spin{};bool pushed=false;std::array<bool,2> capped{};
             const double dt=write_dt(n.drag,now);
             for(unsigned side=0;side<2;++side) {
@@ -420,7 +426,7 @@ public:
                 const std::array<float,3> linear{static_cast<float>(velocity.x),static_cast<float>(velocity.y),static_cast<float>(velocity.z)};
                 const std::array<float,3> turn{static_cast<float>(spin.x),static_cast<float>(spin.y),static_cast<float>(spin.z)};
                 const auto w0=std::chrono::steady_clock::now();
-                write(world,n.body->handle,linear,turn);++writes;++pushes;for(unsigned side=0;side<2;++side) if(capped[side]) ++capped_writes[side];n.velocity=velocity;n.drag.wrote(velocity,now);
+                last_write_ragdoll=guard;write(world,n.body->handle,linear,turn);++writes;++pushes;for(unsigned side=0;side<2;++side) if(capped[side]) ++capped_writes[side];n.velocity=velocity;n.drag.wrote(velocity,now);
                 const auto spent=micros(std::chrono::steady_clock::now()-w0);write_us+=spent;write_peak=std::max(write_peak,spent);
                 if(spent>50) ++slow_writes;
                 auto top=write_max_us.load();while(spent>top && !write_max_us.compare_exchange_weak(top,spent)) {}
