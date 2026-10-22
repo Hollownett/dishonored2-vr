@@ -79,7 +79,7 @@ From there you can set:
 - resolution scale
 - anti-aliasing: FSR Native, FSR Quality (renders at 77% and upscales), FSR Balanced (67% and upscales), Game TAA or Off. The displayed generation reflects the active backend. Your saved selection is preserved. Reduced input resolution is verified; headset FPS gains remain unmeasured.
   The FSR 3 Quality/Balanced modes upscale after the game's tonemapping, so the HUD stays sharp. Combine Quality with a higher resolution scale for a sharper image at the same cost
-- edge smoothing, SMAA (on by default; skipped automatically while FSR 3 is on, except in the experimental alternate-eye performance mode, which turns temporal AA off and always uses SMAA)
+- edge smoothing, SMAA (on by default; skipped automatically while FSR 3 is on, except in the alternate-eye performance mode (on by default since v602), which turns temporal AA off and always uses SMAA)
 - sharpening (off, low, medium, high, max; default medium)
 - HUD size (55%, 65% default, 75%, 85%, 100% = the game's own layout) and controls card on the left wrist (on/off)
 - monitor view: what the desktop game window shows while you play - right eye (default: copying one eye costs less render time than both), left eye, or both eyes side by side
@@ -207,15 +207,15 @@ The v199 build passed automated and actual-game simulated-controller checks.
 Headset appearance, combat feel, note readability and complete gameplay have not
 been accepted. See [the verification report](feedback-2026-10-10.md).
 
-## Performance mode (experimental, off by default)
-The launcher row "performance mode: one eye per frame (more fps; may shimmer on fast motion; anti-aliasing SMAA only)" (file `build/alternate-eye`)
+## Performance mode (on by default since v602)
+The launcher row "performance mode: one eye per frame (more fps; may shimmer on fast motion; anti-aliasing SMAA only)" (file `build/alternate-eye`, on by default since v602; untick it in the launcher Features page to go back to normal drawing)
 makes the game draw one eye per frame, alternating left and right, and the headset reprojects the other eye from its last image and pose. On the
 sim rig this took the frame interval from 13.5 ms to 10.4 ms. The costs:
 - fast motion (a head turn while strafing past a guard, a fast sword swing) can shimmer, because the two eyes show moments one frame apart;
 - anti-aliasing is SMAA only: temporal AA (FSR 3, FSR 4, Game TAA) is switched off while the mode is on, whatever the settings panel says;
 - menus, the settings panel, loading, takedowns and cutscenes are drawn normally (both eyes);
 - if the mode loses track of the engine's views it falls back to normal drawing for the rest of the session (and temporal AA stays off).
-Whether it is comfortable is only known in the headset: see the checklist in docs/VR-PERF-LAPTOP.md.
+The double-vision fix for this mode is not yet confirmed in a headset. A menu or cutscene of any length no longer turns the mode off for the session: only 180 consecutive one-view frames that cannot be matched do. Whether it is comfortable is only known in the headset: see the checklist in docs/VR-PERF-LAPTOP.md.
 
 ## Experiments (files in the build folder)
 These are on by default in the launcher (except where a line says otherwise). Switch them in the launcher (Windows) or with `d2vr-linux feature` (Linux); a knob file you create by hand for a feature the launcher has switched off is set aside at the next start. The file names below are what the mod reads.
