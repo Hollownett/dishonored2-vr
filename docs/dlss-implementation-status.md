@@ -1,52 +1,63 @@
 # DLSS implementation status
 
-Updated 2026-10-22. **DLSS and DLAA are not available rendering modes in this implementation.** The portable contract and typed SDK owner are implemented, but the native execution adapter and required input ownership are incomplete. Existing AA modes 0..6 and accepted FSR/native paths remain the production paths.
+Updated 2026-10-22. **DLSS and DLAA are not available rendering modes in the game.** The typed production NGX owner now passes a real RTX synthetic paired-DLAA check, and the standalone D3D11 state/query component passes real hardware checks. Native game input ownership and the execution adapter remain incomplete. Existing AA modes 0..6 and accepted FSR/native paths remain the production paths.
 
-This is an implementation checkpoint for the [design](superpowers/specs/2026-10-22-dlss-design.md) and [task plan](superpowers/plans/2026-10-22-dlss.md). It does not establish runtime or headset acceptance.
+This checkpoint tracks the [design](superpowers/specs/2026-10-22-dlss-design.md) and [task plan](superpowers/plans/2026-10-22-dlss.md). Standalone hardware results do not establish game or headset acceptance.
 
-## Completed source and offline evidence
+## Completed source and hardware evidence
 
-| Stage | Implemented scope | Evidence and limit |
+| Stage/component | Implemented scope | Evidence and limit |
 | --- | --- | --- |
-| T1 | SDK-independent immutable render receipts, strong input/list leases, staged split/sealed execution envelopes, ordered fallback nodes, explicit busy/defer result and GPU-retirement boundary | Scoped source review and CPU checks passed. Portable scheduling/lifetime checks do not implement the native adapter. Initial commits `ad9d130`, `0dc5c24`; subsequent portable extensions belong to partial T3. |
-| T2 | SDK-typed serialized NGX owner, independent eye feature/parameter histories, bounded retirement, partial-failure rollback, explicit provider validation and expected/observable loaded-module diagnostics | Scoped re-review passed at `81b0df8` after `97ef347`. Controller strict Windows-target CPU checks, typed SDK ABI compile/link and MinHook/production DLL cross compile/link passed without degraded allowances. Native MSVC and actual device/provider execution remain pending. |
-| T3 | Completed-Setup view/pair/projection metadata, exact native counter/owner correspondence, retained clear-context/resource/view diagnostics, portable mixed-node order, copy compatibility, pair outcome and retirement/quarantine contracts | Partial source only, initially `4aee87c`, with corrective commits `f10d411`, `4365eeb`, `bcaee8c`. Independent corrective reviews passed, including execution-result serialization. Final combined CPU and source-matched cross compile/link passed at candidate `6e4f59e`; native integration remains partial. |
+| T1 | Immutable render receipts, strong input/list leases, split/seal/execute phases, ordered fallback, explicit busy/defer and retirement contracts | Source review and CPU checks passed at `0dc5c24`, with later partial-T3 extensions. Native adapter integration remains open. |
+| T2 | SDK-typed serialized NGX owner, independent eye histories, bounded retirement, rollback, signed-provider/canonical-path validation | Corrective review passed at `81b0df8`; strict typed SDK cross compile/link and CPU checks passed. Actual production owner/provider execution passed in the standalone synthetic check below. Native Windows MSVC remains pending. |
+| Partial T3 metadata/contracts | Completed-Setup pair/projection metadata, exact counter/owner correspondence, optional clear diagnostics, ordered jobs, copy/pair/retirement contracts | Corrective reviews passed through `bcaee8c`; CPU/source gates passed. CPU metadata is not a GPU projection or depth-producer certificate. |
+| Partial T3 state/query component | Actual Device1/Context1 state swap/restoration and bounded EVENT-backed submission leases | `7b419d7`, independent source review and strict cross compile/link passed; real RTX/DXVK checks passed with ordinary and SINGLETHREADED devices. Native queue/module-stop integration remains open. |
+| Partial T3 native census | Default-off paired-Setup-armed binding/recording observer at the existing pinned POSTPROC/Dispatch seams | `9304fa7`, refusal/flush race corrected at `8a7af29`; independent source re-review, portable CPU, C# checks and Windows-target object/link passed. Final CPU-only Wine fixture passed at `8a7af29` (exit 0, 0.62s). No actual game census trace exists. |
+| Partial T7 standalone NGX | Production validation and SDK calls with synthetic paired DLAA inputs, output readback and full-generation GPU drain | `9d39531`, independently reviewed, strict object/static-SDK link passed; actual RTX/DXVK run passed four pairs/eight SDK evaluations. Native D2 inputs, Quality and recovery matrix remain unqualified. |
 
-T2 pins the NVIDIA SDK headers and static `/MD` library to commit `9981c6350dc58c0ce21f024fd65e31e851c31689`; [provenance](../third_party/dlss/source.json) and [notices](../THIRD_PARTY_NOTICES.md) are retained. The compile-only lane checks exact typed SDK APIs. Injected lifecycle tests make no real NGX/device calls. No provider was downloaded, bundled or initialized by this work.
+The NVIDIA SDK headers and static `/MD` library remain pinned to `9981c6350dc58c0ce21f024fd65e31e851c31689`; [provenance](../third_party/dlss/source.json) and [notices](../THIRD_PARTY_NOTICES.md) are retained. No provider was downloaded, copied or bundled. The standalone check used the existing Helldivers 2 `bin/nvngx_dlss.dll` in place (SHA-256 `8707e53b26c68c606b98bf31c223485ff30d310a261b1a36d48b2eaabc1507ec`). Production WinVerifyTrust and canonical expected/observed loaded-provider checks passed without a validation bypass.
 
-T2's final controller DLL hash was `421af86715e28dadf775a88bf6abeeae9e673e48f97e2a3352a59abba88a68e8`. That evidence covers the T2 snapshot. The final combined T3-corrected and aim candidate has separate evidence:
+Hardware environment: RTX 3070 Laptop 8 GiB, Vendor 10de/Device 249d, feature level 11_1, NVIDIA driver 615.71.09, Fedora 44, private Proton 10.0-4b prefix and DXVK 2.6.2. These were real GPU executions of Windows-target binaries under Proton, not native Windows/MSVC results.
 
-- Built source commit: `6e4f59e`; T3 corrective reviews and the scoped aim re-review passed.
-- Controller CPU lane: eight groups, sixteen build/run steps passed; affected native-shot/crosshair checks added four passing steps after the final cleanup correction.
-- Typed SDK ABI, MinHook and production DLL cross compile/link: three steps passed, `degraded=false`. No generated ABI or production artifact was executed.
-- DLL SHA-256: `8d1f5232a1fa462ae83f8f8e77052fbd153310da946a093af33c1a1247bfe368`.
-- Source archive: `20261022T192531.125906Z-229152b8`; source comparison confirmed `source_unchanged_during_build=true`.
-- Source provenance: `build/d2vr_render_probe_aim_candidate.dll.source.json`.
-
-These are offline source/CPU/cross-toolchain results. The DLL has not been run in the game or headset, and the native DLSS adapter remains incomplete.
+- State/query: both device flag variants passed six-stage/pipeline restoration after success, failure and exception, CB1 offsetting, EVENT completion, copy bytes, bounded leases/drain and callback facade teardown. Query-error/device-loss hardware injection remains untested. Evidence: `artifacts/dlss-implementation-20261022/rtx-hardware/state-query-7b419d7/result.json` (exit 0, 2.37s), with command and test log alongside.
+- NGX: four synthetic 1024×768 paired DLAA frames produced eight SDKSuccess evaluations, each with 786432 finite pixels, zero untouched sentinels and distinct left-red/right-green output. Frame 3 changed source textures and explicitly reset both histories. All submitted uses completed EVENT queries and generation cleanup passed. Master prepare/shutdown report provider_verified=1 and matching paths; per-eye evaluation status has default provider fields and reports SDK/eye results only, not a second trust check. Evidence: `artifacts/dlss-implementation-20261022/rtx-hardware/ngx-9d39531/result.json` (exit 0, 3.07s), with planned command and test log alongside.
+- Census CPU wrapper: `artifacts/dlss-implementation-20261022/native-temporal-census-cpu-wine-8a7af29-result.json`; no D3D device, GPU getters or provider initialization. Its invalid-output/open-failure/marker/reset/retry checks do not establish native capture.
 
 ## Partial T3 boundary
 
-Optional source diagnostics use an **internal capture flag defaulting false**. ABI availability does not enable capture; no user opt-in or settings mode has been added. While disabled, added metadata readers, receipt locks and diagnostic COM snapshots are gated. Existing cheap depth discovery and accepted FSR scheduling remain active. Future opt-in lifecycle/configuration work belongs to T5.
+The new **Capture graphics diagnostics** feature (`native-temporal-census`) defaults false. It is separate from the older internal temporal capture flag and does not enable FSR ClearSnapshot capture or a DLAA mode. With census disabled its observer callbacks are null and optional metadata/getter/retention work is inactive. When enabled, two completed, distinct paired-world Setup receipts must agree on counter/allocation/camera ownership before capture arms.
 
-The following native integration work is still unimplemented or unqualified:
+Capture is bounded to 120 admitted native passes, 4096 events, 128 canonical COM objects and 16 contexts. Admitted scopes drain after job admission closes; actual losses/capacity exhaustion mark output incomplete rather than overwriting lineage. Retained objects survive until controlled-thread output publication succeeds. Failed output blocks reset and permits retry; CSV files publish before the JSON completion marker. Recording/binding observations are not shader bytecode identity, depth-writer certification or GPU execution ordering. Luma's DownsampleDepth hash 27BD5265 remains a research lead only.
 
-- **Depth producer:** establish exact producing eye/frame/context/thread/resource/view and its ordered prefix. Heuristic depth selection and a captured clear are not a stereo producer certificate. Luma's DownsampleDepth resource binding is a research lead, not verified native stereo ownership.
-- **Projection consumption:** qualify rendered current/previous projection/jitter and GPU constant correspondence. Observing submitted projection against native current projection after Setup establishes CPU correspondence only.
-- **Callback ownership:** prove the immediate-owner, non-reentry and bounded deferred-retry contract. A portable busy result cannot safely become native-forward-on-miss. No configuration bypass certifies this boundary.
-- **Native state isolation:** implement supported Device1/Context1 context-state creation/swap/restoration with the actual device feature level/interface/threading flags. Existing compute-only state saving is not certified for NGX.
-- **Queue adapter:** connect real reserve/split/finished/execute operations through one ordered envelope for temporal and fallback-only nodes, preserving all native lists, restore flags, observer timing and existing FSR behavior. Production DLSS takeover remains unwired before any split or SDK evaluation.
-- **GPU retirement:** preallocate bounded event-query/fence resources, signal/poll at owned immediate points, retain old owners/scratch through real completion and stop/reset, quarantine failures, and connect completion to T1/T2 retirement. CPU completion is not GPU retirement.
-- **Native outputs and fallback:** allocate exact-format eye snapshots/intermediates, commit only successful results, implement supported crop/conversion where necessary, and connect ready FSR/spatial fallback plus coherent pair/history reset. Portable descriptor checks do not supply this adapter.
+The following native integration boundaries remain open:
 
-Production admission remains refused where these contracts are unknown. This is a partial source gate requiring corrective integration work, not runnable DLSS awaiting only visual testing.
+- **Depth producer and projection:** exact producing eye/frame/context/thread/resource/subresource and prefix ordering; rendered current/previous projection, jitter and GPU constant consumption. A heuristic depth selection, clear or CPU Setup correspondence cannot certify these.
+- **Callback and queue ownership:** immediate-owner/non-reentry/deferred-retry contract, real reserve/split/finished/execute envelope, restore flags, all native lists and FSR observer behavior. Production NGX takeover remains unwired.
+- **Native state and retirement integration:** wire the hardware-tested state/query primitive at the actual immediate seam, join completion to aggregate T1/T2 generations, and implement stop/reset/module-drain ownership. Standalone restoration/drain does not supply module-unload integration.
+- **Outputs and fallback:** exact-format eye-private snapshots/intermediates, commit-on-success, supported crop/conversion, ready FSR/spatial fallback, coherent pair/history resets and error recovery.
+
+Production admission remains refused where these contracts are unknown. Whole T3 remains partial.
+
+## Build provenance
+
+Historical T2 DLL SHA-256 `421af86715e28dadf775a88bf6abeeae9e673e48f97e2a3352a59abba88a68e8` covers its snapshot. Historical combined aim/T3 candidate `6e4f59e` passed eight CPU groups/sixteen build-run steps, affected cleanup checks and typed SDK/MinHook/production cross compile/link (`degraded=false`). Its DLL SHA-256 was `8d1f5232a1fa462ae83f8f8e77052fbd153310da946a093af33c1a1247bfe368`, archive `20261022T192531.125906Z-229152b8`, source unchanged during build. Historical provenance is retained at `build/d2vr_render_probe_aim_candidate.dll.source.json`. These older artifacts are not the new RTX/census checkpoint.
+
+Final combined census checkpoint at source `8a7af29`: MinHook and SDK-free production DLL cross compile/link both passed, `degraded=false`; production step 44.49s. Diagnostics were the three existing unused-global warnings and vendor LNK4099 missing-PDB warning. No SDK was linked and no NGX symbols were found in the map.
+
+- DLL: `build/d2vr_render_probe_temporal_census.dll`, SHA-256 `17561005344e4d4e1465cf6f79020f1b12ce161cec5bdf43fdaa973f5a7c2820`.
+- Provenance: `build/d2vr_render_probe_temporal_census.dll.source.json`, state complete, source_unchanged_during_build=true. It was built from the unchanged checkout matched to archive `20261022T210912.064417Z-dac98716`, not compiled directly from the archived snapshot (`compiled_from_frozen_snapshot=false`). Manifest SHA-256 `71c8d236eef1878978bd202e92d41d2596638ca5ddc1543a4c1cd39a2c4db9e2`.
+- Commands/results: `artifacts/dlss-implementation-20261022/census-build/production-command.json` and `build-result.json`.
+
+The final feature list has 33 entries and census defaults false. This production DLL has not executed in the game; the separately built state/query and NGX test binaries supply the standalone hardware evidence above.
 
 ## Remaining stages and acceptance
 
-- **T4:** DLSS-only paired 32-phase jitter, coherent native current/previous constants and reset/transition handling. Existing jitter remains in use for other paths.
-- **T5:** diagnostic fixed-dimension paired DLAA opt-in, qualified color/exposure/MV conventions, truthful requested/actual backend reporting and recovery. No opt-in exists yet.
-- **T6:** Quality optimal-settings dimensions, paired resize transaction and compatible preference migration/selectable modes, only after the DLAA runtime input gate passes.
-- **T7:** explicitly authorized Windows RTX input, provider-selection, recovery and GPU ownership validation; repeat for Quality. No such runtime validation has occurred.
-- **T8:** explicitly authorized headset acceptance and separate actual Proton/DXVK-NVAPI verification for both staged modes, plus release/legal prerequisites. No visual quality, comfort, complete gameplay or Proton success is established.
+- **T4:** paired 32-phase DLSS jitter and actual native current/previous constants/reset handling.
+- **T5:** fixed-dimension diagnostic paired DLAA in the renderer, qualified color/exposure/MV conventions and truthful requested/actual reporting. The census opt-in is not this mode.
+- **T6:** Quality optimal-settings dimensions, paired resize and compatible selectable preferences after the native DLAA input/recovery gate.
+- **T7:** native Windows RTX input, provider/failure/recovery and ownership matrix for DLAA, then Quality. Standalone synthetic DLAA is a completed subgate only; whole T7 remains unchecked.
+- **T8:** actual game Proton/DXVK-NVAPI verification and headset acceptance for both staged modes, including visual quality, comfort, performance and gameplay. No headset result is established.
 
-Native MSVC `/W4 /WX` remains pending; cross-toolchain compile/link results do not replace it. Final combined source review, CPU checks, cross compile/link and source-archive matching passed for the named `6e4f59e` candidate; later source changes require fresh verification. Game, VR, GPU/device/provider execution and headset validation remain restricted until explicitly authorized. Any future provider use follows the explicit user-supplied signed-provider lane; there is no provider download/copy automation or distribution authorization.
+The user has explicitly authorized GPU tests and game launch. The protected v605 baseline attempt failed at Steam AppError 5 / Family Sharing before game/proxy StartProbe; it establishes neither a game crash nor a mod runtime failure. Saves/config/installed DLL were restored and hash-verified, pending marker false. Actual native census capture awaits Steam availability. v605 remains a prior release, not a new DLSS release.
+
+Native MSVC `/W4 /WX` and the native integration/headset gates remain pending. Cross-toolchain and standalone Proton results do not replace them. Provider publication, SDK/license/notice/trademark obligations and any future distribution scope remain separate release prerequisites.
