@@ -14,6 +14,8 @@
 #include "fsr3_eye_upscaler.hpp"
 #include "fsr4_eye_upscaler.hpp"
 #include "taa_dispatch.hpp"
+#include "post_tonemap_pass.hpp"
+#include "temporal_eye_job.hpp"
 #include "gpu_pass_timer.hpp"
 #include "mod_gpu_timer.hpp"
 
@@ -21,7 +23,8 @@ namespace d2vr {
 // Replaces the native TAA dispatch of each eye with its own FSR 3.1 context (Luma's D2 map:
 // t1 UV motion vectors, t2 pre-TAA colour, u1 TAA result). Recorded on the game's deferred
 // context in command order, so this eye's scene depth (shared by both eyes, rendered just
-// before this pass) is current. The scene depth is learned from depth-stencil clears of the
+// before this pass) is sampled by the existing FSR heuristic. This is not DLSS producer proof.
+// The scene depth is learned from depth-stencil clears of the
 // TAA colour size; it is R24G8, so a tiny CS copies it to R32F for FSR.
 // Every device call (contexts, textures, views) happens in prepare() on the Present thread;
 // the job thread only records commands. Output overwrites u1 at the same size (native-
@@ -39,7 +42,33 @@ private:
         Fsr3EyeUpscaler fsr;Fsr4EyeUpscaler fsr4;Ref<ID3D11Texture2D> depth,reactive,colour_in,upscaled;Ref<ID3D11UnorderedAccessView> depth_uav,reactive_uav;
         LARGE_INTEGER last{};bool reset=true;GpuPassTimer timer;
     };
-    struct Candidate {ID3D11Resource* resource{};UINT w{},h{};DXGI_FORMAT srv{};std::uint64_t clears{};};
+    struct ClearSnapshot {
+        temporal_eye::DepthClearObservation event;
+        temporal_eye::Lease context,view,resource;
+        D3D11_TEXTURE2D_DESC resource_desc{};
+        D3D11_DEPTH_STENCIL_VIEW_DESC view_desc{};
+    };
+    struct Candidate {ID3D11Resource* resource{};UINT w{},h{};DXGI_FORMAT srv{};std::uint64_t clears{};std::shared_ptr<const ClearSnapshot> clear;};
+    std::mutex source_mutex_;
+    temporal_eye::NativePairBook source_pairs_;
+    struct MotionReceipt {
+        temporal_eye::Lease resource;
+        ID3D11Resource* pointer{};
+        D3D11_TEXTURE2D_DESC desc{};
+        std::optional<temporal_eye::ViewReceipt> view;
+        std::uint64_t capture_sequence{};
+    };
+    std::array<MotionReceipt,2> stamped_motion_{};
+    std::array<std::uint64_t,2> last_taa_setup_serial_{};
+    std::uint64_t source_capture_sequence_{};
+    std::shared_ptr<const ClearSnapshot> selected_clear_;
+    std::uint64_t depth_selection_generation_{};
+    std::atomic<std::uint64_t> clear_sequence_{};
+    template<class T> static temporal_eye::Lease retain_native(T* pointer) {
+        if(!pointer) return {};
+        pointer->AddRef();
+        return temporal_eye::Lease(pointer,[](const void* value) {const_cast<T*>(static_cast<const T*>(value))->Release();});
+    }
     std::mutex mutex_; // guards eyes_, depth views and config between prepare() and the job threads
     std::unique_ptr<std::array<Eye,2>> eyes_{std::make_unique<std::array<Eye,2>>()};
     Ref<ID3D11ComputeShader> copy_;Ref<ID3D11Resource> depth_resource_;Ref<ID3D11ShaderResourceView> depth_view_;
@@ -75,6 +104,49 @@ private:
         }
     };
 public:
+    // Source diagnostics are NOT an opt-in or a producer certificate. The three
+    // unresolved native boundaries keep production takeover before any split.
+    inline static constexpr unsigned dlss_unresolved_native_boundaries=7; // depth, projection consumption, callback contract
+    std::atomic<std::uint64_t> dlss_setup_receipts{},dlss_setup_rejected{},dlss_pass_receipts{},dlss_pass_rejected{},dlss_mv_matches{},dlss_mv_missing{},dlss_clear_events{},dlss_clear_capture_failed{},dlss_cpu_projection_matches{},dlss_cpu_projection_mismatches{};
+    std::atomic<unsigned> dlss_input_gate{static_cast<unsigned>(temporal_eye::Admission::missing_pair)};
+    std::atomic<std::uint64_t> dlss_depth_selection_generation{},dlss_mv_capture_sequence{};
+    void observe_dlss_setup(const temporal_eye::SetupObservation& setup) noexcept {
+        std::lock_guard<std::mutex> lock(source_mutex_);
+        if(source_pairs_.publish(setup)) {
+            ++dlss_setup_receipts;
+            if(setup.submitted_projection_present) {
+                if(setup.submitted_projection==setup.pass.projection) ++dlss_cpu_projection_matches;else ++dlss_cpu_projection_mismatches;
+            }
+        } else ++dlss_setup_rejected;
+    }
+    void invalidate_dlss_sources() noexcept {
+        std::lock_guard<std::mutex> lock(source_mutex_);source_pairs_.invalidate();stamped_motion_={};last_taa_setup_serial_={};
+        dlss_input_gate=static_cast<unsigned>(temporal_eye::Admission::missing_pair);
+    }
+    void observe_dlss_taa(unsigned eye,const TaaBindings& bindings,const std::optional<temporal_eye::NativePass>& metadata) noexcept {
+        if(eye>1) return;
+        try {
+            std::lock_guard<std::mutex> lock(source_mutex_);
+            auto& motion=stamped_motion_[eye];motion={};
+            if(!metadata) {++dlss_pass_rejected;dlss_input_gate=static_cast<unsigned>(temporal_eye::Admission::stale_pass);return;}
+            const auto view=source_pairs_.resolve(eye,*metadata);
+            if(!view || !bindings.res[1] || !bindings.is_tex[1]) {++dlss_pass_rejected;dlss_input_gate=static_cast<unsigned>(temporal_eye::Admission::missing_pair);return;}
+            if(last_taa_setup_serial_[eye]==view->serial) {++dlss_pass_rejected;dlss_input_gate=static_cast<unsigned>(temporal_eye::Admission::stale_pass);return;}
+            last_taa_setup_serial_[eye]=view->serial;
+            const auto capture=++source_capture_sequence_;
+            motion={retain_native(bindings.res[1]),bindings.res[1],bindings.tex[1],view,capture};++dlss_pass_receipts;dlss_mv_capture_sequence=capture;
+            // No native scope currently proves this consumer's selected depth producer.
+            dlss_input_gate=static_cast<unsigned>(temporal_eye::Admission::missing_depth_producer);
+        } catch(...) {++dlss_pass_rejected;}
+    }
+    bool dlss_post_motion_matches(unsigned eye,const std::optional<temporal_eye::NativePass>& metadata) noexcept {
+        std::lock_guard<std::mutex> lock(source_mutex_);
+        if(eye>1 || !metadata) {++dlss_mv_missing;return false;}
+        const auto current=source_pairs_.resolve(eye,*metadata);const auto& motion=stamped_motion_[eye];
+        if(!current || !motion.resource || !motion.view || current->serial!=motion.view->serial ||
+           current->pair!=motion.view->pair || current->owner_generation!=motion.view->owner_generation) {++dlss_mv_missing;return false;}
+        ++dlss_mv_matches;return true;
+    }
     std::atomic<std::uint64_t> replaced{},not_ready{},failures{},create_failures{};
     std::atomic<bool> enabled{false},ready{false};
     std::wstring dump_path; // diagnostics: one R32 depth dump of the left eye after dump_after replacements
@@ -127,6 +199,8 @@ public:
     }
     // Post-tonemap pass end (job thread): split after the upscale draw; FSR runs between prefix and remainder.
     void post_tonemap_end(int eye,ID3D11DeviceContext* c) {
+        // This match is diagnostic only; missing optional metadata must not alter FSR.
+        if(eye>=0 && eye<2) (void)dlss_post_motion_matches(static_cast<unsigned>(eye),PostTonemapPass::pass_metadata);
         Ref<ID3D11Resource> source,target;source.reset(pass_source_.p);target.reset(pass_target_.p);pass_source_.reset();pass_target_.reset();
         if(fraction.load()>=.999f || !enabled.load() || eye<0 || eye>1 || !c || !source.p || !target.p) return;
         if(!ready.load()) {++upscale_skipped;return;}
@@ -160,11 +234,27 @@ public:
     void configure(const Config& c) {std::lock_guard<std::mutex> lock(mutex_);config_=c;}
     void request_reset() {std::lock_guard<std::mutex> lock(mutex_);++reset_epoch_;for(auto& e:*eyes_) e.reset=true;}
     // Any thread, from depth-stencil clears: count clears per depth target (no device calls).
-    void observe_depth(ID3D11DepthStencilView* dsv) noexcept {
+    void observe_depth(ID3D11DepthStencilView* dsv,ID3D11DeviceContext* context=nullptr,UINT flags=0,FLOAT depth=0,UINT8 stencil=0) noexcept {
         if(!dsv || !enabled.load(std::memory_order_relaxed)) return;
         ID3D11Resource* r{};dsv->GetResource(&r);if(!r) return;
         std::lock_guard<std::mutex> lock(candidate_mutex_);
-        for(auto& c:candidates_) if(c.resource==r) {++c.clears;r->Release();return;}
+        std::shared_ptr<const ClearSnapshot> observed;
+        // Keep instrumentation bounded to an already discovered candidate of the
+        // current TAA size; shadow/unknown clears keep their existing cheap inventory path.
+        bool relevant=false;
+        const auto capture_w=wanted_w_.load(),capture_h=wanted_h_.load();
+        if(context && capture_w && capture_h) for(const auto& candidate:candidates_)
+            if(candidate.resource==r && candidate.w==capture_w && candidate.h==capture_h) relevant=true;
+        if(relevant) try {
+            auto value=std::make_shared<ClearSnapshot>();const auto sequence=++clear_sequence_;
+            value->event={{reinterpret_cast<std::uintptr_t>(context),sequence},{reinterpret_cast<std::uintptr_t>(dsv),sequence},
+                {reinterpret_cast<std::uintptr_t>(r),sequence},sequence,GetCurrentThreadId(),flags,depth,stencil};
+            value->context=retain_native(context);value->view=retain_native(dsv);value->resource=retain_native(r);dsv->GetDesc(&value->view_desc);
+            ID3D11Texture2D* texture{};
+            if(SUCCEEDED(r->QueryInterface(__uuidof(ID3D11Texture2D),reinterpret_cast<void**>(&texture))) && texture) {texture->GetDesc(&value->resource_desc);texture->Release();}
+            observed=std::move(value);++dlss_clear_events;
+        } catch(...) {++dlss_clear_capture_failed;}
+        for(auto& c:candidates_) if(c.resource==r) {++c.clears;if(observed)c.clear=std::move(observed);r->Release();return;}
         ID3D11Texture2D* t{};D3D11_TEXTURE2D_DESC d{};
         if(SUCCEEDED(r->QueryInterface(__uuidof(ID3D11Texture2D),reinterpret_cast<void**>(&t)))) {t->GetDesc(&d);t->Release();}
         const auto srv=depth_srv(d.Format);
@@ -172,7 +262,7 @@ public:
         auto* slot=&candidates_[0];
         for(auto& c:candidates_) if(!c.resource || c.clears<slot->clears) slot=&c;
         if(slot->resource) slot->resource->Release();
-        *slot={r,d.Width,d.Height,srv,1}; // keeps the reference
+        *slot={r,d.Width,d.Height,srv,1,std::move(observed)}; // keeps the reference
     }
     // Present thread: create or resize everything the job threads will record with.
     void prepare(ID3D11Device* device) noexcept {
@@ -194,7 +284,9 @@ public:
         }
         const float f=fraction.load();
         if(ready.load() && ready_w_==w && ready_h_==h && ready_fraction_==f && ready_native_format_==wanted_native_format_.load() && depth_resource_.p==best.resource &&
-           (!timing_enabled.load() || ((*eyes_)[0].timer.valid() && (*eyes_)[1].timer.valid()))) return;
+           (!timing_enabled.load() || ((*eyes_)[0].timer.valid() && (*eyes_)[1].timer.valid()))) {
+            std::lock_guard<std::mutex> lock(mutex_);selected_clear_=best.clear;return;
+        }
         std::lock_guard<std::mutex> lock(mutex_);
         ready=false;
         if(!copy_.p) {
@@ -216,6 +308,7 @@ public:
             ID3D11ShaderResourceView* view{};
             if(FAILED(device->CreateShaderResourceView(best.resource,&sd,&view))) {++create_failures;return;}
             depth_view_.adopt(view);depth_resource_.reset(best.resource);
+            selected_clear_=best.clear;dlss_depth_selection_generation=++depth_selection_generation_;
         }
         const bool upscale=f<.999f;
         const UINT rw=upscale?static_cast<UINT>(std::lround(w*f)):w,rh=upscale?static_cast<UINT>(std::lround(h*f)):h;
@@ -267,12 +360,13 @@ public:
         ready=true;
     }
     void clear() {
+        invalidate_dlss_sources();
         std::lock_guard<std::mutex> lock(mutex_);
         ready=false;++reset_epoch_;
         for(auto& e:*eyes_) {e.fsr.destroy();e.fsr4.destroy();e.timer.clear();e.depth.reset();e.depth_uav.reset();e.reactive.reset();e.reactive_uav.reset();e.colour_in.reset();e.upscaled.reset();}
         Fsr4EyeUpscaler::poll_retired();
         for(auto& m:motion_) m.reset();
-        depth_view_.reset();depth_resource_.reset();copy_.reset();ready_w_=ready_h_=0;wanted_w_=0;wanted_h_=0;ready_native_format_=DXGI_FORMAT_UNKNOWN;wanted_native_format_=DXGI_FORMAT_UNKNOWN;
+        selected_clear_.reset();dlss_depth_selection_generation=++depth_selection_generation_;depth_view_.reset();depth_resource_.reset();copy_.reset();ready_w_=ready_h_=0;wanted_w_=0;wanted_h_=0;ready_native_format_=DXGI_FORMAT_UNKNOWN;wanted_native_format_=DXGI_FORMAT_UNKNOWN;
         {std::lock_guard<std::mutex> jobs(jobs_mutex_);for(auto& r:recording_) {r.first=nullptr;r.second.reset();}queued_.clear();}
         std::lock_guard<std::mutex> lock2(candidate_mutex_);
         for(auto& c:candidates_) {if(c.resource) c.resource->Release();c={};}

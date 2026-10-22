@@ -897,6 +897,7 @@ static void flush_render_perf(bool final=false) noexcept {
     } catch(...) {render_perf_write_failed=true;}
 }
 
+std::optional<temporal_eye::NativePass> read_dlss_pass_metadata(std::uintptr_t view) noexcept;
 static std::array<std::atomic<std::uint32_t>,2> jitter_counter{};static std::atomic<UINT> taa_width{},taa_height{};
 static std::atomic<UINT64> jitter_same{},jitter_differ{};static bool projection_jitter=false;static std::atomic<bool> taa_live{false};static std::atomic<UINT> device_creation_flags{0xffffffffu};static std::array<std::atomic<float>,2> fsr_vfov{};static std::array<float,2> fsr_jitter_sign{-1,1};
 static std::array<float,4> taa_jitter_scale{1,1,1,1}; // build/taa-jitter-scale "px py vx vy": per-axis scale of projection jitter (p) and stored view+0x7850 vector (v); diagnostics
@@ -916,6 +917,11 @@ bool taa_dispatch_handler(ID3D11DeviceContext* c,int eye,UINT x,UINT y,UINT z,d2
                 taa_viewport_height[static_cast<unsigned>(eye)]=static_cast<UINT>(std::lround(viewport.Height));
             }
         }
+    }
+    if(taa && eye>=0 && eye<2) {
+        auto metadata=d2vr::TaaDispatchHook::pass_metadata;
+        if(metadata) {const auto current=read_dlss_pass_metadata(metadata->view);if(!current || !(*current==*metadata))metadata.reset();}
+        fsr_taa.observe_dlss_taa(static_cast<unsigned>(eye),b,metadata);
     }
     std::uint32_t counter{};read_self(image_base+d2vr::taa_history::frame_counter_rva,&counter,sizeof counter);
     if(taa) {++taa_dispatch_matches;if(taa_capture_csv.is_open() && GetTickCount64()>=taa_capture_after_tick) {taa_capture.record(c,eye,frames.load());taa_capture_b2.record(c,eye,frames.load());}} // keyed by Present count: drain compares with it
@@ -1182,7 +1188,10 @@ void prepare_head_view(void* view) noexcept;
 void restore_head_view() noexcept;
 // Forced views store their TAA jitter at view+0x7850 only when the engine code using it is this build's
 // (d2vr::engine_taa_jitter): Setup's cur->prev copy and the forced-projection branch that skips the write.
+static std::atomic<bool> dlss_view_metadata_abi{false};
 static bool view_jitter_abi=false;static std::atomic<UINT64> view_jitter_writes{};
+std::optional<temporal_eye::SetupObservation> begin_dlss_setup_observation(void* view) noexcept;
+void complete_dlss_setup_observation(const std::optional<temporal_eye::SetupObservation>& input,bool jitter_written) noexcept;
 void __fastcall setup_hook(void* view,int* window_rect,int* render_rect);
 // The registered trampoline survives stopped sessions. Select the current mode
 // on every call so a desktop run cannot leave VR using its observation callback.
@@ -1205,18 +1214,22 @@ void __fastcall view_setup_hook(void* view,int* window_rect,int* render_rect) {
             if(claimed && alternate_taa_setup_ready && !alternate_taa_runtime.seed(reinterpret_cast<std::uintptr_t>(view))) {
                 alternate_taa_runtime.failed=true;native_cvars.set(d2vr::NativeCvars::skip_temporal_aa,1);
             }
+            const auto dlss_setup_input=claimed?begin_dlss_setup_observation(view):std::optional<temporal_eye::SetupObservation>{};
+            bool dlss_jitter_written=false;
             original(view,window_rect,render_rect);setup_completed=true;
             if(claimed) alt_taa_trace(view);
             if(claimed && forced_view_jitter && view_jitter_abi) { // see d2vr::engine_taa_jitter
-                *reinterpret_cast<d2vr::TaaJitter*>(static_cast<std::byte*>(view)+0x7850)=*forced_view_jitter;forced_view_jitter.reset();++view_jitter_writes;
+                *reinterpret_cast<d2vr::TaaJitter*>(static_cast<std::byte*>(view)+0x7850)=*forced_view_jitter;forced_view_jitter.reset();++view_jitter_writes;dlss_jitter_written=true;
             }
             if(claimed && alternate_taa_setup_ready) {
                 alternate_taa_runtime.finish(reinterpret_cast<std::uintptr_t>(view));
                 if(alternate_taa_runtime.failed.load()) native_cvars.set(d2vr::NativeCvars::skip_temporal_aa,1);
             }
+            if(claimed) complete_dlss_setup_observation(dlss_setup_input,dlss_jitter_written);
         } else setup_hook(view,window_rect,render_rect);
     } __finally {
         if(claimed && alternate_taa_setup_ready && !setup_completed) alternate_taa_runtime.abort();
+        if(claimed && !setup_completed && head_requested) fsr_taa.invalidate_dlss_sources();
         if(claimed && head_requested) restore_head_view();
         head_depth.fetch_sub(1,std::memory_order_acq_rel);
         d2vr::crash_operation=previous_operation;
@@ -1254,7 +1267,9 @@ void __fastcall setup_hook(void* view,int* window_rect,int* render_rect) {
     std::array<std::byte,d2vr::camera_read_size> input{},rendered{};
     SIZE_T count{};
     bool input_read=sample && ReadProcessMemory(GetCurrentProcess(),view,input.data(),input.size(),&count) && count==input.size();
+    const auto dlss_setup_input=begin_dlss_setup_observation(view);
     original(view,window_rect,render_rect);
+    complete_dlss_setup_observation(dlss_setup_input,false);
     if(!input_read || !capturing.load()) return;
     auto address=reinterpret_cast<std::uintptr_t>(view);
     if(!ReadProcessMemory(GetCurrentProcess(),reinterpret_cast<void*>(address+render_copy_offset),rendered.data(),rendered.size(),&count) || count!=rendered.size()) return;
@@ -3583,6 +3598,43 @@ void observe_eye_setup(void* view) noexcept {
                              << ',' << eye << ",0,0\n";
         }
     } catch(...) {callback_failed=true;}
+}
+
+// Completion is published after original Setup and the supported forced-jitter
+// write. The pre-Setup eye classifier alone cannot certify the newly written stamp.
+std::optional<temporal_eye::NativePass> read_dlss_pass_metadata(std::uintptr_t view) noexcept {
+    if(!dlss_view_metadata_abi) return {};
+    try {return d2vr::taa_history::read_pass_metadata(&read_self,view);}catch(...) {return {};}
+}
+std::optional<temporal_eye::SetupObservation> begin_dlss_setup_observation(void* view) noexcept {
+    if(!dlss_view_metadata_abi || !view || !stereo_active.load() || alternate_on() || mono_view_state.load()==1) return {};
+    try {
+        temporal_eye::SetupObservation observation;observation.pass.view=reinterpret_cast<std::uintptr_t>(view);
+        std::lock_guard<std::mutex> lock(gpu_mutex);
+        const auto left=d2vr::PostTonemapPass::eye_views[0].load(),right=d2vr::PostTonemapPass::eye_views[1].load();
+        if(!left || left==right || (observation.pass.view!=left && observation.pass.view!=right)) return {};
+        observation.eye=observation.pass.view==left?0u:1u;
+        std::uintptr_t allocation{};const auto owner=d2vr::find_native_player_camera(read_self,image_base);
+        if(!owner || !read_self(image_base+d2vr::prepared_views_rva,&allocation,8) || allocation!=eye_view_allocation) return {};
+        const std::array<UINT64,3> identity{owner->player,owner->camera,static_cast<std::uint32_t>(owner->camera_identity.generation)};
+        if(identity!=eye_camera_owner) return {};
+        observation.allocation=allocation;observation.camera_owner=identity;
+        unsigned char forced{};
+        observation.submitted_projection_present=read_self(observation.pass.view+0x140,&forced,1) && forced &&
+            read_self(observation.pass.view+0x100,observation.submitted_projection.data(),sizeof observation.submitted_projection);
+        return observation;
+    } catch(...) {return {};}
+}
+void complete_dlss_setup_observation(const std::optional<temporal_eye::SetupObservation>& input,bool jitter_written) noexcept {
+    if(!input) return;
+    const auto verify=begin_dlss_setup_observation(reinterpret_cast<void*>(input->pass.view));
+    const auto pass=read_dlss_pass_metadata(input->pass.view);
+    if(!verify || !pass || verify->eye!=input->eye || verify->allocation!=input->allocation ||
+       verify->camera_owner!=input->camera_owner) {fsr_taa.invalidate_dlss_sources();return;}
+    auto completed=*input;completed.pass=*pass;completed.setup_completed=true;completed.forced_jitter_written=jitter_written;
+    // Submitted source versus native current7390 exposes CPU Setup correspondence.
+    // This does not prove later GPU constants or pixel consumption.
+    fsr_taa.observe_dlss_setup(completed);
 }
 
 void observe_eye_begin(void* view) noexcept {
@@ -6334,7 +6386,7 @@ void sample_stereo(IDXGISwapChain* chain,UINT64 number,const DXGI_SWAP_CHAIN_DES
                     install_glyph_hook(device.Get());
                     if(taa_history_installed && !d2vr::TaaDispatchHook::installed() && d2vr::TaaDispatchHook::install(device.Get())) {
                         d2vr::TaaDispatchHook::handler=&taa_dispatch_handler;
-                        d2vr::TaaDispatchHook::depth_observer=[](ID3D11DepthStencilView* v) {fsr_taa.observe_depth(v);};
+                        d2vr::TaaDispatchHook::depth_observer=[](ID3D11DeviceContext* c,ID3D11DepthStencilView* v,UINT f,FLOAT d,UINT8 stencil) {fsr_taa.observe_depth(v,c,f,d,stencil);};
                         d2vr::TaaDispatchHook::finish_observer=[](ID3D11DeviceContext* c,ID3D11CommandList* l) {fsr_taa.finished(c,l);world_ui_completion.finished(c,l);native_hud_art_capture.finished(c,l);render_perf_finished(nullptr,c,l);};
                         d2vr::TaaDispatchHook::execute_handler=[](ID3D11DeviceContext* callback_context,ID3D11CommandList* callback_list,BOOL callback_restore,d2vr::TaaDispatchHook::ExecuteFn callback_original) {
                             return render_perf_execute_scope(callback_context,callback_list,callback_restore,callback_original,[](ID3D11DeviceContext* c,ID3D11CommandList* l,BOOL r,d2vr::TaaDispatchHook::ExecuteFn o) {
@@ -8733,6 +8785,8 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
         if(setup_requested || head_requested || eye_boundary_requested) {
             setup_target=reinterpret_cast<void*>(image_base+setup_rva);
             view_jitter_abi=verify_view_jitter_abi();
+            dlss_view_metadata_abi=view_jitter_abi && d2vr::alternate_taa::verified_abi(&read_self,image_base);
+            taa_history.capture_metadata(dlss_view_metadata_abi);
             if(!read_self(image_base+setup_rva,setup_original_bytes.data(),setup_original_bytes.size()) || setup_original_bytes!=setup_expected_bytes)
                 throw std::runtime_error("Native view setup entry differs from supported executable");
             setup_csv.open(output/L"native-view-setup.csv",std::ios::trunc);
@@ -8944,6 +8998,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
         if(fs::exists(root/L"build"/L"bonelab-trace")) corpse_trace.start(output/L"native-corpse-trace.csv");
         if(fs::exists(root/L"build"/L"upscale-probe")) {std::lock_guard<std::mutex> l(upscale_probe_mutex);upscale_probe_rows=0;upscale_probe_csv.open(output/L"upscale-probe.csv",std::ios::trunc);upscale_probe_on=true;}
         d2vr::GlyphSwap::observer=&ps_bind_observer;
+        d2vr::PostTonemapPass::metadata_reader=&read_dlss_pass_metadata;
         d2vr::PostTonemapPass::pass_end=[](int eye,ID3D11DeviceContext* c) {try {fsr_taa.post_tonemap_end(eye,c);} catch(...) {}};
         {d2vr::FsrTaa::Config fc{};std::ifstream knob(root/L"build"/L"fsr");std::array<float*,3> fields{&fc.sharpness,&fc.mv_x,&fc.mv_y};for(auto* f:fields) {float v{};if(!(knob>>v)) break;*f=v;}fc.mv_full=fs::exists(root/L"build"/L"fsr-mv-full");fsr_taa.configure(fc);}
         cant_requested=symmetric_frustum_requested && headset_size_requested && fs::exists(root/L"build"/L"cant");
@@ -9344,7 +9399,11 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
                << ",\"world_ui_completed_immediate\":" << world_ui_completion.immediate_scopes.load()
                << ",\"world_ui_layers_by_kind\":[" << xr_world_ui_layers_by_kind[0] << ',' << xr_world_ui_layers_by_kind[1] << ',' << xr_world_ui_layers_by_kind[2] << ']'
                << ",\"beam_layers_by_hand\":[" << xr_beam_layers_by_hand[0] << ',' << xr_beam_layers_by_hand[1] << ']'
-               << feedback_status_json() << ",\"hud_rect_installed\":" << (hud_rect_installed?"true":"false") << ",\"hud_rect_calls\":" << d2vr::NativeHudRect::calls.load() << ",\"hud_rect_scaled\":" << d2vr::NativeHudRect::scaled.load() << ",\"hud_marker_unshrunk\":" << d2vr::NativeHudRect::unshrunk_writes.load() << ",\"hud_world_markers_unshrunk\":" << d2vr::NativeHudRect::unshrunk_markers.load() << ",\"hud_rect_size\":[" << d2vr::NativeHudRect::last_w.load() << ',' << d2vr::NativeHudRect::last_h.load() << "]" << ",\"takedown_sensors\":" << takedown_sensors.load() << ",\"takedown_choke_frames\":" << takedown_choke_frames.load() << ",\"takedown_kill_frames\":" << takedown_kill_frames.load() << ",\"takedown_drop_frames\":" << takedown_drop_frames.load() << ",\"takedown_gestures\":" << takedown_gestures.load() << ",\"wheel_dial_frames\":" << wheel_dial_frames.load() << ",\"combat\":{\"enabled\":" << (vr_combat_enabled?"true":"false") << ",\"thrusts\":" << combat_thrusts.load() << ",\"slashes\":" << combat_slashes.load() << ",\"overheads\":" << combat_overheads.load() << ",\"stealth_kills\":" << combat_stealth_kills.load() << ",\"drop_assists\":" << combat_drop_assists.load() << ",\"parries\":" << combat_parries.load() << ",\"choke_frames\":" << combat_choke_frames.load() << "}" << ",\"test_unlock_applied\":" << test_unlock_applied.load() << ",\"logic_mask\":" << published_logic.load() << ",\"published_move\":[" << published_move_x.load() << ',' << published_move_y.load() << ']' << ",\"menu_entry_patched\":" << d2vr::NativeMenuEntry::patched.load() << ",\"menu_entry_mismatched\":" << d2vr::NativeMenuEntry::mismatched.load() << ",\"menu_entry_clicks\":" << d2vr::NativeMenuEntry::clicks.load() << ",\"crouch_pulses\":" << crouch_pulses.load() << ",\"crouch_native_frames\":" << crouch_native_frames.load() << ",\"crouch_lift_frames\":" << crouch_lift_frames.load() << ",\"gesture_blocks\":" << gesture_blocks.load() << ",\"block\":[" << block_pose_frames.load() << ',' << block_wanted.load() << ',' << gesture_blocks.load() << ',' << block_not_free.load() << ',' << block_not_held.load() << ',' << (d2vr::NativeWeaponHands::block_keeps_gun()?1:0) << ']' << ",\"gesture_casts\":" << gesture_casts.load() << ",\"gesture_jumps\":" << gesture_jumps.load() << ",\"world_ui_hook_restored\":" << (world_ui_disabled?"true":"false") << ",\"world_ui_identified\":" << d2vr::NativeWorldUi::identified.load() << ",\"world_ui_native_scopes\":" << d2vr::NativeWorldUi::redirected.load() << ",\"world_ui_target_calls\":" << d2vr::NativeWorldUi::target_calls.load() << ",\"world_ui_target_redirected\":" << d2vr::NativeWorldUi::target_redirected.load() << ",\"world_ui_layers\":" << xr_world_ui_layers << ",\"world_ui_redirects\":" << world_ui_capture.redirects.load() << ",\"world_ui_scoped_draws\":" << world_ui_scoped_draws.load() << ",\"world_ui_layers_by_kind_draws\":[" << world_ui_draws[0].load() << ',' << world_ui_draws[1].load() << ',' << world_ui_draws[2].load() << ']' << ",\"world_ui_mismatches\":" << world_ui_mismatch.load() << ",\"world_ui_create_failures\":" << world_ui_capture.create_failures.load() << ",\"fsr_replaced\":" << fsr_taa.replaced.load() << ",\"fsr_taa_copies\":" << fsr_taa.taa_copies.load() << ",\"fsr_upscaled\":" << fsr_taa.upscaled.load() << ",\"fsr_upscale_skipped\":" << fsr_taa.upscale_skipped.load() << ",\"fsr_eye_dispatches\":[" << fsr_taa.eye_dispatches[0].load() << ',' << fsr_taa.eye_dispatches[1].load() << ']' << ",\"fsr_eye_resets\":[" << fsr_taa.eye_resets[0].load() << ',' << fsr_taa.eye_resets[1].load() << ']' << ",\"fsr_fallback_copies\":" << fsr_taa.fallback_copies.load() << ",\"fsr_stale_jobs\":" << fsr_taa.stale_jobs.load() << ",\"upscale_active\":" << (upscale_active?"true":"false") << ",\"taa_jitter_scale\":[" << taa_jitter_scale[0] << ',' << taa_jitter_scale[1] << ',' << taa_jitter_scale[2] << ',' << taa_jitter_scale[3] << ']' << ",\"jitter_same\":" << jitter_same.load() << ",\"jitter_differ\":" << jitter_differ.load() << ",\"projection_jitter\":" << (projection_jitter?"true":"false") << ",\"view_jitter_abi\":" << (view_jitter_abi?"true":"false") << ",\"view_jitter_writes\":" << view_jitter_writes.load() << ",\"fsr_not_ready\":" << fsr_taa.not_ready.load() << ",\"device_flags\":" << device_creation_flags.load() << ",\"fsr_failures\":" << fsr_taa.failures.load() << ",\"fsr_create_failures\":" << fsr_taa.create_failures.load() << ",\"taa_dispatch_marked\":" << d2vr::TaaDispatchHook::marked.load() << ",\"taa_mv_dejitter\":[" << taa_mv_dejitter.applied.load() << ',' << taa_mv_dejitter.skipped.load() << ',' << taa_mv_dejitter.failures.load() << ']' << ",\"taa_dispatch_matches\":" << taa_dispatch_matches.load()
+               << feedback_status_json() << ",\"hud_rect_installed\":" << (hud_rect_installed?"true":"false") << ",\"hud_rect_calls\":" << d2vr::NativeHudRect::calls.load() << ",\"hud_rect_scaled\":" << d2vr::NativeHudRect::scaled.load() << ",\"hud_marker_unshrunk\":" << d2vr::NativeHudRect::unshrunk_writes.load() << ",\"hud_world_markers_unshrunk\":" << d2vr::NativeHudRect::unshrunk_markers.load() << ",\"hud_rect_size\":[" << d2vr::NativeHudRect::last_w.load() << ',' << d2vr::NativeHudRect::last_h.load() << "]" << ",\"takedown_sensors\":" << takedown_sensors.load() << ",\"takedown_choke_frames\":" << takedown_choke_frames.load() << ",\"takedown_kill_frames\":" << takedown_kill_frames.load() << ",\"takedown_drop_frames\":" << takedown_drop_frames.load() << ",\"takedown_gestures\":" << takedown_gestures.load() << ",\"wheel_dial_frames\":" << wheel_dial_frames.load() << ",\"combat\":{\"enabled\":" << (vr_combat_enabled?"true":"false") << ",\"thrusts\":" << combat_thrusts.load() << ",\"slashes\":" << combat_slashes.load() << ",\"overheads\":" << combat_overheads.load() << ",\"stealth_kills\":" << combat_stealth_kills.load() << ",\"drop_assists\":" << combat_drop_assists.load() << ",\"parries\":" << combat_parries.load() << ",\"choke_frames\":" << combat_choke_frames.load() << "}" << ",\"test_unlock_applied\":" << test_unlock_applied.load() << ",\"logic_mask\":" << published_logic.load() << ",\"published_move\":[" << published_move_x.load() << ',' << published_move_y.load() << ']' << ",\"menu_entry_patched\":" << d2vr::NativeMenuEntry::patched.load() << ",\"menu_entry_mismatched\":" << d2vr::NativeMenuEntry::mismatched.load() << ",\"menu_entry_clicks\":" << d2vr::NativeMenuEntry::clicks.load() << ",\"crouch_pulses\":" << crouch_pulses.load() << ",\"crouch_native_frames\":" << crouch_native_frames.load() << ",\"crouch_lift_frames\":" << crouch_lift_frames.load() << ",\"gesture_blocks\":" << gesture_blocks.load() << ",\"block\":[" << block_pose_frames.load() << ',' << block_wanted.load() << ',' << gesture_blocks.load() << ',' << block_not_free.load() << ',' << block_not_held.load() << ',' << (d2vr::NativeWeaponHands::block_keeps_gun()?1:0) << ']' << ",\"gesture_casts\":" << gesture_casts.load() << ",\"gesture_jumps\":" << gesture_jumps.load() << ",\"world_ui_hook_restored\":" << (world_ui_disabled?"true":"false") << ",\"world_ui_identified\":" << d2vr::NativeWorldUi::identified.load() << ",\"world_ui_native_scopes\":" << d2vr::NativeWorldUi::redirected.load() << ",\"world_ui_target_calls\":" << d2vr::NativeWorldUi::target_calls.load() << ",\"world_ui_target_redirected\":" << d2vr::NativeWorldUi::target_redirected.load() << ",\"world_ui_layers\":" << xr_world_ui_layers << ",\"world_ui_redirects\":" << world_ui_capture.redirects.load() << ",\"world_ui_scoped_draws\":" << world_ui_scoped_draws.load() << ",\"world_ui_layers_by_kind_draws\":[" << world_ui_draws[0].load() << ',' << world_ui_draws[1].load() << ',' << world_ui_draws[2].load() << ']' << ",\"world_ui_mismatches\":" << world_ui_mismatch.load() << ",\"world_ui_create_failures\":" << world_ui_capture.create_failures.load() << ",\"dlss_input_sources\":{\"production_admission\":false,\"depth_producer_known\":false,\"projection_consumption_verified\":false,\"native_callback_contract_verified\":false,\"unresolved_native_boundaries\":" << d2vr::FsrTaa::dlss_unresolved_native_boundaries
+               << ",\"input_gate\":" << fsr_taa.dlss_input_gate.load() << ",\"setup_receipts\":" << fsr_taa.dlss_setup_receipts.load() << ",\"setup_rejected\":" << fsr_taa.dlss_setup_rejected.load()
+               << ",\"cpu_projection_matches\":" << fsr_taa.dlss_cpu_projection_matches.load() << ",\"cpu_projection_mismatches\":" << fsr_taa.dlss_cpu_projection_mismatches.load() << ",\"pass_receipts\":" << fsr_taa.dlss_pass_receipts.load() << ",\"pass_rejected\":" << fsr_taa.dlss_pass_rejected.load() << ",\"mv_view_matches\":" << fsr_taa.dlss_mv_matches.load()
+               << ",\"mv_capture_sequence\":" << fsr_taa.dlss_mv_capture_sequence.load() << ",\"mv_view_missing\":" << fsr_taa.dlss_mv_missing.load() << ",\"clear_events\":" << fsr_taa.dlss_clear_events.load() << ",\"depth_selection_generation\":" << fsr_taa.dlss_depth_selection_generation.load() << '}'
+               << ",\"fsr_replaced\":" << fsr_taa.replaced.load() << ",\"fsr_taa_copies\":" << fsr_taa.taa_copies.load() << ",\"fsr_upscaled\":" << fsr_taa.upscaled.load() << ",\"fsr_upscale_skipped\":" << fsr_taa.upscale_skipped.load() << ",\"fsr_eye_dispatches\":[" << fsr_taa.eye_dispatches[0].load() << ',' << fsr_taa.eye_dispatches[1].load() << ']' << ",\"fsr_eye_resets\":[" << fsr_taa.eye_resets[0].load() << ',' << fsr_taa.eye_resets[1].load() << ']' << ",\"fsr_fallback_copies\":" << fsr_taa.fallback_copies.load() << ",\"fsr_stale_jobs\":" << fsr_taa.stale_jobs.load() << ",\"upscale_active\":" << (upscale_active?"true":"false") << ",\"taa_jitter_scale\":[" << taa_jitter_scale[0] << ',' << taa_jitter_scale[1] << ',' << taa_jitter_scale[2] << ',' << taa_jitter_scale[3] << ']' << ",\"jitter_same\":" << jitter_same.load() << ",\"jitter_differ\":" << jitter_differ.load() << ",\"projection_jitter\":" << (projection_jitter?"true":"false") << ",\"view_jitter_abi\":" << (view_jitter_abi?"true":"false") << ",\"view_jitter_writes\":" << view_jitter_writes.load() << ",\"fsr_not_ready\":" << fsr_taa.not_ready.load() << ",\"device_flags\":" << device_creation_flags.load() << ",\"fsr_failures\":" << fsr_taa.failures.load() << ",\"fsr_create_failures\":" << fsr_taa.create_failures.load() << ",\"taa_dispatch_marked\":" << d2vr::TaaDispatchHook::marked.load() << ",\"taa_mv_dejitter\":[" << taa_mv_dejitter.applied.load() << ',' << taa_mv_dejitter.skipped.load() << ',' << taa_mv_dejitter.failures.load() << ']' << ",\"taa_dispatch_matches\":" << taa_dispatch_matches.load()
                << ",\"taa_history_installed\":" << (taa_history_installed?"true":"false") << ",\"taa_passes\":" << taa_history.passes()
                << ",\"alternate_native_taa_abi\":" << (alternate_native_taa_abi?"true":"false")
                << ",\"alternate_native_taa_failed\":" << (alternate_taa_runtime.failed.load()?"true":"false")

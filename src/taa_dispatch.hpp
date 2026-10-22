@@ -5,6 +5,7 @@
 #include <array>
 #include <optional>
 #include <atomic>
+#include "temporal_eye_job.hpp"
 
 namespace d2vr {
 // Deferred-context Dispatch hook for the native TAA dispatch. The engine records the post-process
@@ -49,13 +50,14 @@ public:
     inline static std::atomic<UINT64> marked{},replaced{};
     inline static thread_local int pass_eye=-1;
     inline static thread_local std::optional<std::array<float,4>> pass_jitter; // set by NativeTaaHistory around a planned eye pass
+    inline static thread_local std::optional<temporal_eye::NativePass> pass_metadata;
     inline static thread_local bool post_taa=false; // the TAA dispatch of this pass has been recorded
     inline static thread_local ID3D11DeviceContext* pass_context=nullptr; // deferred context seen at that dispatch
     // Called on the job thread when a marked pass returns (eye, its deferred context or null).
     inline static std::atomic<void (*)(int,ID3D11DeviceContext*)> pass_end{};
     // Depth-stencil clears (scene depth is cleared once per eye); any context, any thread.
     using ClearFn=void (STDMETHODCALLTYPE*)(ID3D11DeviceContext*,ID3D11DepthStencilView*,UINT,FLOAT,UINT8);
-    inline static std::atomic<void (*)(ID3D11DepthStencilView*)> depth_observer{};
+    inline static std::atomic<void (*)(ID3D11DeviceContext*,ID3D11DepthStencilView*,UINT,FLOAT,UINT8)> depth_observer{};
     // Command-list split (Luma's D2 pattern): FinishCommandList results of deferred contexts, and
     // ExecuteCommandList on the immediate context, which a handler may take over (returns true).
     using FinishFn=HRESULT (STDMETHODCALLTYPE*)(ID3D11DeviceContext*,BOOL,ID3D11CommandList**);
@@ -83,7 +85,7 @@ private:
     }
     inline static std::array<ClearFn,2> clear_original_{};inline static std::array<void*,2> clear_target_{};
     template<int I> static void STDMETHODCALLTYPE clear_hook(ID3D11DeviceContext* c,ID3D11DepthStencilView* v,UINT f,FLOAT d,UINT8 s) {
-        if(const auto o=depth_observer.load()) o(v);
+        if(const auto o=depth_observer.load()) o(c,v,f,d,s);
         clear_original_[I](c,v,f,d,s);
     }
     static void hook_clear(ID3D11DeviceContext* context,int i,void* replacement) noexcept {

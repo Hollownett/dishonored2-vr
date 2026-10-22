@@ -83,7 +83,7 @@ ExecutionInputs current() {
 struct Fake final : Executor {
     std::vector<std::string> events;
     std::vector<bool> restores;
-    bool depth_ok = true, evaluate_ok = true;
+    bool depth_ok = true, evaluate_ok = true, fallback_ok = true;
     RetainedJobs* queue{};
     List remainder{};
     ExecutionInputs* caller_state{};
@@ -113,9 +113,12 @@ struct Fake final : Executor {
         assert(r.identity.jitter.current_x == .25f && r.identity.motion_contract.scale_x == -90);
         return evaluate_ok;
     }
-    void fallback(const RenderInputs& r) noexcept override {
+    bool fallback_only(const Lease& owner) noexcept override {
+        assert(owner); events.push_back("legacy_fallback");return fallback_ok;
+    }
+    bool fallback(const RenderInputs& r) noexcept override {
         assert(r.colour.owner && r.output.owner);
-        events.push_back("fallback" + std::to_string(r.identity.key.eye));
+        events.push_back("fallback" + std::to_string(r.identity.key.eye));return fallback_ok;
     }
 };
 void expect(const Fake& f, std::initializer_list<const char*> wanted) {
@@ -486,7 +489,8 @@ void cross_chain_reentry() {
             events.push_back("evaluate" + std::to_string(depth));
             return true;
         }
-        void fallback(const RenderInputs&) noexcept override { assert(false); }
+        bool fallback_only(const Lease&) noexcept override { assert(false);return false; }
+        bool fallback(const RenderInputs&) noexcept override { assert(false);return false; }
     } f(q);
     auto first = q.execute(list(82), false, current(), f);
     assert(submitted(first) && f.depth == 0 && f.busy_lease_destroyed == 0);
@@ -502,6 +506,111 @@ void cross_chain_reentry() {
     assert(missed(q.execute(list(82), false, current(), f)));
     assert(missed(q.execute(list(92), false, current(), f)));
     assert(q.retire(first.submission) && q.retire(second.submission));
+}
+SetupObservation setup(unsigned eye,std::uint32_t counter) {
+    SetupObservation s;
+    s.pass.view=100+eye;s.pass.counter=counter;s.pass.jitter_uv={.1f,.2f,-.1f,-.2f};
+    s.pass.projection={1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1};
+    s.allocation=50;s.camera_owner={60,61,0};s.eye=eye;s.setup_completed=true;
+    s.submitted_projection_present=true;s.submitted_projection=s.pass.projection;
+    return s;
+}
+void native_pair_receipts() {
+    NativePairBook book;
+    auto left=setup(0,0),right=setup(1,0);
+    assert(book.publish(left) && !book.resolve(0,left.pass));
+    assert(book.publish(right));
+    const auto l=book.resolve(0,left.pass),r=book.resolve(1,right.pass);
+    assert(l && r && l->pair==r->pair && l->frame==r->frame && l->serial!=r->serial);
+    assert(l->setup.pass.counter==0); // Raw zero is not the missing-receipt sentinel.
+    auto torn=left.pass;++torn.counter;assert(!book.resolve(0,torn));
+    torn=left.pass;torn.projection[2]=1;assert(!book.resolve(0,torn));
+    torn=left.pass;torn.jitter_uv[2]=1;assert(!book.resolve(0,torn));
+    assert(!book.publish(left) && !book.resolve(1,right.pass)); // repeated Setup is ambiguous
+    left=setup(0,1);right=setup(1,1);assert(book.publish(left) && book.publish(right));
+    const auto next=book.resolve(0,left.pass);assert(next && next->pair>l->pair && next->owner_generation>l->owner_generation);
+    auto changed=setup(0,2);changed.camera_owner[2]=1;
+    assert(book.publish(changed) && !book.resolve(1,right.pass));
+    auto changed_right=setup(1,2);changed_right.camera_owner=changed.camera_owner;
+    assert(book.publish(changed_right) && book.resolve(0,changed.pass));
+    book.invalidate();left=setup(0,0xffffffffu);right=setup(1,0xffffffffu);
+    assert(book.publish(left) && book.publish(right));const auto generation=book.generation();
+    left=setup(0,0);right=setup(1,0);assert(book.publish(left) && book.publish(right));
+    assert(book.generation()==generation && book.resolve(0,left.pass)); // natural 32-bit wrap
+    auto incomplete=setup(0,1);incomplete.setup_completed=false;assert(!book.publish(incomplete));
+    book.invalidate();left=setup(0,9);right=setup(1,9);right.pass.view=left.pass.view;
+    assert(book.publish(left) && !book.publish(right));
+}
+void mixed_temporal_and_fallback_nodes() {
+    RetainedJobs q;
+    int destroyed=0;
+    auto first=q.reserve(id(1),lease(),inputs());
+    assert(first && q.split(first,list(201)));
+    // No invented eye/frame/device/resource receipt is required for legacy work.
+    auto second=q.reserve_fallback(id(1),lease(),lease(&destroyed));
+    assert(second && q.split(second,list(202)) && q.finished(id(1),list(203)));
+    assert(!q.reserve_fallback(id(2),lease(),{}));
+    Fake f;auto result=q.execute(list(203),true,current(),f);
+    assert(submitted(result) && result.pair_state==PairState::fallback);
+    expect(f,{"list201","depth0","evaluate0","list202","legacy_fallback","list203"});
+    assert(f.restores==std::vector<bool>({true,true,true}) && destroyed==0);
+    assert(q.retire(result.submission) && destroyed==1);
+    // Stale temporal input cannot discard the fallback-only/native part of a chain.
+    auto third=q.reserve_fallback(id(1),lease(),lease());assert(q.split(third,list(204)));
+    auto fourth=q.reserve(id(1),lease(),inputs(1));assert(q.split(fourth,list(205)) && q.finished(id(1),list(206)));
+    auto disabled=current();disabled.backend_enabled=false;
+    Fake stale;auto completed=q.execute(list(206),false,disabled,stale);
+    expect(stale,{"list204","legacy_fallback","list205","fallback1","list206"});
+    assert(completed.pair_state==PairState::fallback);
+    assert(q.retire(completed.submission));
+}
+void whole_resource_copy_contract() {
+    auto a=inputs().identity.colour;a.x=a.y=0;a.rect_width=a.width;a.rect_height=a.height;
+    auto b=a;assert(copy_compatible(a,b));
+    b.format=99;assert(!copy_compatible(a,b)); // Conversion must be explicit.
+    b=a;b.rect_width-=1;assert(!copy_compatible(a,b)); // CopyResource cannot crop.
+    b=a;b.sample_count=2;assert(!copy_compatible(a,b));
+    b=a;b.mip_levels=2;assert(!copy_compatible(a,b));
+    b=a;b.array_size=2;assert(!copy_compatible(a,b));
+}
+void completion_quarantine_and_pair_results() {
+    {
+        RetainedJobs q;int destroyed=0;
+        auto receipt=inputs();receipt.feature_owner=lease(&destroyed);
+        auto reservation=q.reserve(id(1),lease(),receipt);receipt={};
+        assert(q.split(reservation,list(301)) && q.finished(id(1),list(302)));
+        Fake f;auto submitted_work=q.execute(list(302),false,current(),f);
+        assert(submitted(submitted_work) && destroyed==0);
+        assert(!q.retire(submitted_work.submission,RetainedJobs::Completion::pending) && destroyed==0);
+        assert(!q.retire(submitted_work.submission,RetainedJobs::Completion::failed) && destroyed==0);
+        assert(!q.retire(submitted_work.submission,RetainedJobs::Completion::completed) && destroyed==0);
+        assert(q.retire(submitted_work.submission,RetainedJobs::Completion::device_abandoned) && destroyed==1);
+    }
+    for(int fail_eye=-1;fail_eye<2;++fail_eye) {
+        RetainedJobs q;
+        auto left=q.reserve(id(1),lease(),inputs(0)),right=q.reserve(id(2),lease(),inputs(1));
+        assert(q.split(left,list(311)) && q.finished(id(1),list(312)));
+        assert(q.split(right,list(321)) && q.finished(id(2),list(322)));
+        Fake f;f.evaluate_ok=fail_eye!=0;
+        auto a=q.execute(list(312),true,current(),f);
+        assert(a.pair_state==(fail_eye==0?PairState::fallback:PairState::incomplete));
+        f.evaluate_ok=fail_eye!=1;
+        auto b=q.execute(list(322),false,current(),f);
+        assert(b.pair_state==(fail_eye<0?PairState::coherent:PairState::fallback));
+        assert(q.retire(a.submission) && q.retire(b.submission));
+    }
+    {
+        RetainedJobs q;auto first=q.reserve(id(1),lease(),inputs(0));
+        assert(q.split(first,list(331)) && q.finished(id(1),list(332)));
+        Fake f;f.evaluate_ok=false;f.fallback_ok=false;
+        auto failed=q.execute(list(332),false,current(),f);
+        expect(f,{"list331","depth0","evaluate0","fallback0","list332"});
+        assert(failed.pair_state==PairState::failed && q.retire(failed.submission));
+    }
+    PairPublication ledger;auto left=inputs(0).identity,right=inputs(1).identity;
+    assert(ledger.observe(left,EyeOutcome::temporal)==PairState::incomplete);
+    ++right.generations.feature;
+    assert(ledger.observe(right,EyeOutcome::temporal)==PairState::fallback); // mixed feature generations
 }
 void reused_addresses() {
     RetainedJobs q;
@@ -533,6 +642,10 @@ int main() {
     texture_exposure_lease();
     allocation_failure_reentry();
     cross_chain_reentry();
+    native_pair_receipts();
+    mixed_temporal_and_fallback_nodes();
+    whole_resource_copy_contract();
+    completion_quarantine_and_pair_results();
     reused_addresses();
     std::cout << "temporal_eye_job_check: passed\n";
 }

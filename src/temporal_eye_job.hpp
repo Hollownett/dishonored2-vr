@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <utility>
 #include <vector>
 
@@ -19,6 +20,77 @@ struct Identity {
 inline bool operator==(Identity a, Identity b) noexcept {
     return a.address == b.address && a.incarnation == b.incarnation;
 }
+// Native diagnostics retain their source units. A view stamp of zero is valid;
+// optional presence, not raw-counter truthiness, distinguishes missing metadata.
+struct NativePass {
+    std::uintptr_t view{};
+    std::uint32_t counter{};
+    std::array<float,4> jitter_uv{};
+    std::array<float,16> projection{}; // Native current projection at the verified Setup output.
+};
+inline bool operator==(const NativePass& a, const NativePass& b) noexcept {
+    return a.view == b.view && a.counter == b.counter && a.jitter_uv == b.jitter_uv && a.projection == b.projection;
+}
+struct SetupObservation {
+    NativePass pass;
+    std::uintptr_t allocation{};
+    std::array<std::uint64_t,3> camera_owner{};
+    unsigned eye{};
+    bool setup_completed{}, forced_jitter_written{}, submitted_projection_present{};
+    std::array<float,16> submitted_projection{}; // Observed source input; not proof of consumption.
+};
+struct ViewReceipt {
+    SetupObservation setup;
+    std::uint64_t serial{}, owner_generation{}, pair{}, frame{};
+};
+class NativePairBook {
+    std::array<std::optional<ViewReceipt>,2> eyes_{};
+    std::uint64_t serial_{}, generation_{1}, pair_{}, frame_{};
+    std::uint32_t counter_{};
+    bool has_counter_{}, poisoned_{};
+public:
+    void invalidate() noexcept { eyes_ = {}; has_counter_ = false; poisoned_ = false; ++generation_; }
+    std::uint64_t generation() const noexcept { return generation_; }
+    bool publish(const SetupObservation& value) noexcept {
+        if (value.eye > 1 || !value.pass.view || !value.allocation || !value.camera_owner[0] ||
+            !value.camera_owner[1] || !value.setup_completed) return false;
+        for (float v : value.pass.jitter_uv) if (!std::isfinite(v)) return false;
+        for (float v : value.pass.projection) if (!std::isfinite(v)) return false;
+        if(value.submitted_projection_present) for (float v : value.submitted_projection) if (!std::isfinite(v)) return false;
+        if (has_counter_) {
+            const auto& previous = eyes_[0] ? eyes_[0] : eyes_[1];
+            if (previous && (previous->setup.allocation != value.allocation || previous->setup.camera_owner != value.camera_owner)) invalidate();
+        }
+        if (!has_counter_ || counter_ != value.pass.counter) {
+            if (has_counter_ && static_cast<std::uint32_t>(value.pass.counter - counter_) != 1u) ++generation_;
+            eyes_ = {}; poisoned_ = false; counter_ = value.pass.counter; has_counter_ = true;
+        }
+        if (poisoned_) return false;
+        if (eyes_[value.eye]) { eyes_ = {}; poisoned_ = true; ++generation_; return false; }
+        eyes_[value.eye] = ViewReceipt{value, ++serial_, generation_, 0, 0};
+        if (eyes_[0] && eyes_[1]) {
+            if (eyes_[0]->setup.pass.view == eyes_[1]->setup.pass.view) { eyes_ = {}; poisoned_ = true; ++generation_; return false; }
+            ++pair_; ++frame_;
+            for (auto& eye : eyes_) { eye->pair = pair_; eye->frame = frame_; }
+        }
+        return true;
+    }
+    std::optional<ViewReceipt> resolve(unsigned eye, const NativePass& pass) const noexcept {
+        if (eye > 1 || poisoned_ || !eyes_[0] || !eyes_[1] || !eyes_[eye]->pair ||
+            !(eyes_[eye]->setup.pass == pass)) return {};
+        return eyes_[eye];
+    }
+};
+enum class Admission { disabled, missing_pair, stale_pass, missing_motion, missing_depth_producer,
+    projection_consumption_unverified, native_callback_contract_unverified, unsupported_state, owner_unavailable, ready };
+// A discovered clear has no producing-eye field: a TAA consumer cannot certify it.
+struct DepthClearObservation {
+    Identity context, view, resource;
+    std::uint64_t sequence{}, thread{};
+    std::uint32_t flags{};
+    float depth{};
+    std::uint8_t stencil{};
+};
 struct List { Identity id; Lease owner; };
 struct EyeFrame {
     std::uint64_t frame{}, pair{};
@@ -53,6 +125,14 @@ inline bool operator==(Shape a, Shape b) noexcept {
            a.sample_count == b.sample_count && a.sample_quality == b.sample_quality &&
            a.usage == b.usage && a.bind_flags == b.bind_flags &&
            a.cpu_access_flags == b.cpu_access_flags && a.misc_flags == b.misc_flags;
+}
+// Whole-resource copies cannot crop, convert, change array/mips or sample layout.
+inline bool copy_compatible(const Shape& a, const Shape& b) noexcept {
+    return a.valid() && b.valid() && a.width == b.width && a.height == b.height && a.format == b.format &&
+        a.mip_levels == b.mip_levels && a.array_size == b.array_size &&
+        a.sample_count == b.sample_count && a.sample_quality == b.sample_quality &&
+        a.x == 0 && a.y == 0 && b.x == 0 && b.y == 0 &&
+        a.rect_width == a.width && a.rect_height == a.height && b.rect_width == b.width && b.rect_height == b.height;
 }
 struct Selection {
     Identity resource;
@@ -142,6 +222,36 @@ inline bool operator==(const InputIdentity& a, const InputIdentity& b) noexcept 
            a.depth_view == b.depth_view && a.jitter == b.jitter && a.motion_contract == b.motion_contract &&
            a.colour_contract == b.colour_contract && a.inverted_depth == b.inverted_depth;
 }
+enum class EyeOutcome { temporal, fallback, failed };
+enum class PairState { incomplete, coherent, fallback, failed };
+// One pending pair per immediate queue. Results from a displaced/older pair can
+// never complete a newer pair; caller resets histories on fallback/failed, not
+// merely while waiting for the second eye. No output is published by this ledger.
+class PairPublication {
+    std::optional<InputIdentity> contract_;
+    std::array<bool,2> seen_{},success_{};
+    PairState state_ = PairState::incomplete;
+public:
+    PairState observe(const InputIdentity& input,EyeOutcome outcome) noexcept {
+        if(!contract_ || input.key.pair>contract_->key.pair) {contract_=input;seen_={};success_={};state_=PairState::incomplete;}
+        if(input.key.eye>1 || input.key.pair!=contract_->key.pair ||
+           !(input.generations==contract_->generations) || !(input.device==contract_->device) ||
+           input.requested_mode!=contract_->requested_mode || input.selected_backend!=contract_->selected_backend ||
+           !(input.colour==contract_->colour) || !(input.depth==contract_->depth) ||
+           !(input.motion==contract_->motion) || !(input.output==contract_->output) ||
+           !(input.motion_contract==contract_->motion_contract) || !(input.colour_contract==contract_->colour_contract) ||
+           !(input.jitter==contract_->jitter) || input.inverted_depth!=contract_->inverted_depth) return state_=PairState::fallback;
+        const auto eye=input.key.eye;
+        if(seen_[eye]) return state_=PairState::fallback;
+        seen_[eye]=true;success_[eye]=outcome==EyeOutcome::temporal;
+        if(outcome==EyeOutcome::failed) return state_=PairState::failed;
+        if(outcome==EyeOutcome::fallback && state_!=PairState::failed) return state_=PairState::fallback;
+        if(state_==PairState::incomplete && seen_[0] && seen_[1] && success_[0] && success_[1]) state_=PairState::coherent;
+        return state_;
+    }
+    PairState fallback_only(bool succeeded) noexcept {if(state_==PairState::failed)return state_;return state_=succeeded?PairState::fallback:PairState::failed;}
+    PairState state() const noexcept {return state_;}
+};
 struct Resource {
     Identity id;
     Lease owner;
@@ -230,7 +340,9 @@ struct Executor {
     virtual void native(const List&, bool restore) noexcept = 0;
     virtual bool snapshot_depth(const RenderInputs&) noexcept = 0;
     virtual bool evaluate(const RenderInputs&) noexcept = 0;
-    virtual void fallback(const RenderInputs&) noexcept = 0;
+    virtual bool fallback(const RenderInputs&) noexcept = 0;
+    // Explicit legacy/native-only node: no qualified temporal receipt is implied.
+    virtual bool fallback_only(const Lease&) noexcept = 0;
 };
 class RetainedJobs {
 public:
@@ -249,14 +361,19 @@ public:
         Submission submission;
         List deferred; // Incoming work retained on busy OR miss; no native work consumed.
         bool restore{};
+        PairState pair_state = PairState::incomplete;
     };
+    enum class Completion { pending, completed, failed, device_abandoned };
 private:
+    enum class NodeKind { temporal, fallback_only };
     struct Node {
         RenderInputs inputs;
         List prefix;
         std::uint64_t serial{};
+        NodeKind kind = NodeKind::temporal;
+        Lease fallback_owner;
     };
-    enum class Phase { recording, sealed, executing, submitted };
+    enum class Phase { recording, sealed, executing, submitted, quarantined };
     struct Chain {
         Identity context;
         Lease context_owner;
@@ -269,6 +386,7 @@ private:
     std::mutex mutex_;
     std::array<std::shared_ptr<Chain>, capacity> slots_{};
     std::uint64_t serial_{};
+    PairPublication publication_;
     bool executing_{}; // One ordered immediate stream per queue, including callback reentry.
     std::uint64_t next() noexcept { return ++serial_; }
     Chain* find(Reservation r) noexcept {
@@ -293,7 +411,16 @@ public:
     // reserve copies inputs and allocates everything needed BEFORE any native split.
     // A false return means keep the original native dispatch; no work was consumed.
     Reservation reserve(Identity context, Lease context_owner, const RenderInputs& inputs) {
-        if (!context.valid() || !context_owner || !valid(inputs)) return {};
+        if (!valid(inputs)) return {};
+        return reserve_node(context, std::move(context_owner), Node{inputs, {}, 0, NodeKind::temporal, {}});
+    }
+    Reservation reserve_fallback(Identity context, Lease context_owner, Lease fallback_owner) {
+        if (!fallback_owner) return {};
+        return reserve_node(context, std::move(context_owner), Node{{}, {}, 0, NodeKind::fallback_only, std::move(fallback_owner)});
+    }
+private:
+    Reservation reserve_node(Identity context, Lease context_owner, Node node) {
+        if (!context.valid() || !context_owner) return {};
         std::lock_guard<std::mutex> lock(mutex_);
         std::shared_ptr<Chain>* free_slot = nullptr;
         Chain* chain = nullptr;
@@ -307,7 +434,8 @@ public:
             auto created = std::make_shared<Chain>();
             created->context = context;
             created->serial = next();
-            created->nodes.push_back(Node{inputs, {}, next()});
+            node.serial = next();
+            created->nodes.push_back(std::move(node));
             // Transfer the possibly sole lease only after the last throwing allocation.
             // On failure, the parameter is destroyed after the lock guard unwinds.
             created->context_owner = std::move(context_owner);
@@ -315,11 +443,13 @@ public:
             *free_slot = std::move(created);
             chain = free_slot->get();
         } else {
-            chain->nodes.push_back(Node{inputs, {}, next()});
+            node.serial = next();
+            chain->nodes.push_back(std::move(node));
             chain->pending = true;
         }
         return {chain->serial, chain->nodes.back().serial};
     }
+public:
     // Call only when FinishCommandList(TRUE) succeeded and ownership is retained.
     // TRUE restores deferred recording state; it is unrelated to execute restore.
     // No allocation occurs here. A failed native split must instead call cancel().
@@ -385,13 +515,20 @@ public:
             }
         }
         if (!chain) return {ExecuteStatus::miss, {}, std::move(incoming), restore};
+        bool fallback_only_seen=false,fallback_only_succeeded=true;
         for (const auto& n : chain->nodes) {
             executor.native(n.prefix, restore);
+            if (n.kind == NodeKind::fallback_only) {
+                fallback_only_seen=true;fallback_only_succeeded=executor.fallback_only(n.fallback_owner) && fallback_only_succeeded;
+                publication_.fallback_only(fallback_only_succeeded);continue;
+            }
             const auto& r = n.inputs;
             const auto eye = r.identity.key.eye;
             const bool fresh = current.backend_enabled && r.identity == current.expected[eye] &&
                 provenance(r.depth) == current.depth[eye] && provenance(r.motion) == current.motion[eye];
-            if (!fresh || !executor.snapshot_depth(r) || !executor.evaluate(r)) executor.fallback(r);
+            if (fresh && executor.snapshot_depth(r) && executor.evaluate(r)) publication_.observe(r.identity,EyeOutcome::temporal);
+            else publication_.observe(r.identity,executor.fallback(r)?EyeOutcome::fallback:EyeOutcome::failed);
+            if(fallback_only_seen)publication_.fallback_only(fallback_only_succeeded);
         }
         executor.native(chain->remainder, restore);
         {
@@ -399,16 +536,22 @@ public:
             chain->phase = Phase::submitted;
             executing_ = false;
         }
-        return {ExecuteStatus::submitted, {chain->serial}, {}, restore};
+        return {ExecuteStatus::submitted, {chain->serial}, {}, restore, publication_.state()};
     }
     // Adapter signals only AFTER fence/query completion (or proven device loss).
     // Until then queue owns every list/resource/context/feature even if token is lost.
     // Early/reentrant retirement while CPU submission is active is rejected.
-    bool retire(Submission submission) noexcept {
+    bool retire(Submission submission) noexcept {return retire(submission,Completion::completed);}
+    // Pending retains ownership; query/device errors quarantine it. A quarantined
+    // submission requires proven device abandonment, never a later CPU/timer guess.
+    bool retire(Submission submission,Completion proof) noexcept {
         std::shared_ptr<Chain> released;
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            for (auto& s : slots_) if (s && s->serial == submission.serial && s->phase == Phase::submitted) {
+            for (auto& s : slots_) if (s && s->serial == submission.serial && (s->phase == Phase::submitted || s->phase == Phase::quarantined)) {
+                if(proof==Completion::pending) return false;
+                if(proof==Completion::failed) {s->phase=Phase::quarantined;return false;}
+                if(s->phase==Phase::quarantined && proof!=Completion::device_abandoned) return false;
                 released = std::move(s);
                 break;
             }

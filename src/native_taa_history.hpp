@@ -104,19 +104,35 @@ inline std::array<std::uint64_t,2> assignment(const std::array<std::uint64_t,2>&
     return flip?std::array<std::uint64_t,2>{pair[1],pair[0]}:pair;
 }
 
+// Optional DLSS consumer diagnostics; failure never changes native pass planning.
+// Call only after the exact Setup/jitter ABI has been independently verified.
+template<class Read> std::optional<temporal_eye::NativePass> read_pass_metadata(Read read,std::uintptr_t view) {
+    temporal_eye::NativePass result;result.view=view;std::uint32_t after{};
+    if(!view || !read(view+alternate_taa::stamp_offset,&result.counter,4) ||
+       !read(view+alternate_taa::jitter_offset,result.jitter_uv.data(),8) ||
+       !read(view+alternate_taa::previous_jitter_offset,result.jitter_uv.data()+2,8) ||
+       !read(view+alternate_taa::current_matrix_offsets[0],result.projection.data(),sizeof result.projection) ||
+       !read(view+alternate_taa::stamp_offset,&after,4) || result.counter!=after) return {};
+    for(float value:result.jitter_uv) if(!std::isfinite(value)) return {};
+    for(float value:result.projection) if(!std::isfinite(value)) return {};
+    return result;
+}
 struct PassInputs {
     std::uintptr_t base{};std::array<std::uintptr_t,2> eye_views{};
     bool twins_ready{};std::array<ImageSnapshot,2> originals{},twins{};
     std::uintptr_t single_view{};std::optional<alternate_taa::Receipt> receipt;
+    bool capture_metadata{};
 };
 enum class PassResult {untracked,idle,fallback,rebuild,planned};
 struct PassPlan {
     int eye=-1;std::uint32_t counter{};bool write{};std::optional<std::array<float,4>> jitter;
+    std::optional<temporal_eye::NativePass> metadata;
     std::array<std::uintptr_t,2> slots{};std::array<std::uint64_t,2> engine{},replaced{};
 };
 // Pure planning against engine memory read through `read`. It never writes.
 template<class Read> PassResult plan_pass(Read read,const PassInputs& in,std::uintptr_t ctx,std::array<Alternation,2>& alternation,
                                          PassPlan& plan,std::vector<ParamEntry>& scratch) {
+    plan.metadata.reset();
     std::uintptr_t view{};
     if(!read(ctx+ctx_view,&view,sizeof view)) return PassResult::untracked;
     int eye=eye_of(view,in.eye_views[0],in.eye_views[1]);
@@ -129,6 +145,7 @@ template<class Read> PassResult plan_pass(Read read,const PassInputs& in,std::ui
             in.receipt->previous.jitter[0],in.receipt->previous.jitter[1]};
     }
     if(eye<0 || eye>1) return PassResult::untracked;
+    if(in.capture_metadata) plan.metadata=read_pass_metadata(read,view);
     std::uint8_t flags_a{},flags_b{};
     if(!read(view+view_flags_a,&flags_a,1) || !read(view+view_flags_b,&flags_b,1)) return PassResult::fallback;
     if(!temporal_runs(flags_a,flags_b)) return PassResult::idle;
@@ -218,7 +235,7 @@ class NativeTaaHistory {
     }};
     inline static NativeTaaHistory* instance_{};
     Pass original_{};Allocate allocate_{};Read read_{};std::uintptr_t base_{};bool enabled_{};alternate_taa::Runtime* alternate_{};
-    std::atomic<bool> active_{},ready_{},rebuild_{};std::atomic<unsigned> depth_{},in_flight_{};
+    std::atomic<bool> active_{},ready_{},rebuild_{},metadata_enabled_{};std::atomic<unsigned> depth_{},in_flight_{};
     std::array<std::atomic<std::uintptr_t>,2> eye_views_{},observed_{};
     std::array<taa_history::Alternation,2> alternation_{};
     // Changed only by maintain() while ready_==false and in_flight_==0.
@@ -238,6 +255,7 @@ class NativeTaaHistory {
             thread_local std::vector<taa_history::ParamEntry> scratch;
             // Snapshots are copied only after ready_ is observed (maintain() writes them before setting it).
             taa_history::PassInputs in{base_,{eye_views_[0].load(),eye_views_[1].load()}};
+            in.capture_metadata=metadata_enabled_.load();
             if(alternate_) {
                 in.single_view=alternate_->single_view.load();std::uintptr_t view{};
                 if(in.single_view && read_(reinterpret_cast<std::uintptr_t>(ctx)+taa_history::ctx_view,&view,8) && view==in.single_view)
@@ -259,12 +277,13 @@ class NativeTaaHistory {
 public:
     // Diagnostic observer, called on the pass's job thread after a planned eye pass is recorded.
     void (*after_pass)(void* ctx,int eye)=nullptr;
+    void capture_metadata(bool enabled) noexcept {metadata_enabled_=enabled;}
 private:
     unsigned long long run(void* ctx,const taa_history::PassPlan& plan) {
-        taa_history::apply_plan(plan);TaaDispatchHook::pass_jitter=plan.jitter;TaaDispatchHook::pass_eye=plan.eye;TaaDispatchHook::post_taa=false;TaaDispatchHook::pass_context=nullptr;
+        taa_history::apply_plan(plan);TaaDispatchHook::pass_metadata=plan.metadata;TaaDispatchHook::pass_jitter=plan.jitter;TaaDispatchHook::pass_eye=plan.eye;TaaDispatchHook::post_taa=false;TaaDispatchHook::pass_context=nullptr;
         __try {return original_(ctx);}
         __finally {
-            TaaDispatchHook::pass_eye=-1;TaaDispatchHook::pass_jitter.reset();taa_history::restore_plan(plan);
+            TaaDispatchHook::pass_eye=-1;TaaDispatchHook::pass_metadata.reset();TaaDispatchHook::pass_jitter.reset();taa_history::restore_plan(plan);
             if(const auto end=TaaDispatchHook::pass_end.load()) end(plan.eye,TaaDispatchHook::pass_context);
         }
     }

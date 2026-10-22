@@ -91,6 +91,31 @@ int main() {
 
         for(bool per_view:{false,true}) for(bool read_first:{false,true}) {simulate(per_view,read_first,true);simulate(per_view,read_first,false);}
 
+        // Optional actual-pass metadata: raw stamp zero is present, and reads
+        // must reject torn stamp/projection snapshots without changing legacy planning.
+        alignas(16) std::array<unsigned char,0xc000> metadata_view{};
+        const auto metadata_at=reinterpret_cast<std::uintptr_t>(metadata_view.data());
+        const std::array<float,4> resident_jitter{.1f,.2f,-.1f,-.2f};
+        const std::array<float,16> resident_projection{1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1};
+        std::memcpy(metadata_view.data()+d2vr::alternate_taa::jitter_offset,resident_jitter.data(),16);
+        std::memcpy(metadata_view.data()+d2vr::alternate_taa::current_matrix_offsets[0],resident_projection.data(),64);
+        const auto metadata=read_pass_metadata(read_memory,metadata_at);
+        require(metadata && metadata->counter==0 && metadata->jitter_uv==resident_jitter &&
+                metadata->projection==resident_projection,"Actual zero-stamp pass metadata retained resident projection/jitter");
+        unsigned stamp_reads{};
+        const auto torn=[&](std::uintptr_t address,void* out,std::size_t size) {
+            const bool result=read_memory(address,out,size);
+            if(address==metadata_at+d2vr::alternate_taa::stamp_offset && ++stamp_reads==1) {
+                const std::uint32_t changed=1;std::memcpy(metadata_view.data()+d2vr::alternate_taa::stamp_offset,&changed,4);
+            }
+            return result;
+        };
+        require(!read_pass_metadata(torn,metadata_at),"Changed native stamp rejects optional metadata");
+        const auto unreadable_projection=[&](std::uintptr_t address,void* out,std::size_t size) {
+            return address!=metadata_at+d2vr::alternate_taa::current_matrix_offsets[0] && read_memory(address,out,size);
+        };
+        require(!read_pass_metadata(unreadable_projection,metadata_at),"Unreadable projection rejects only metadata");
+
         // Plan, apply and restore against synthetic job/view/table memory.
         static FakeImage s0,s1,t0,t1;
         make_image(s0,26,0x5000);make_image(s1,26,0x6000);make_image(t0,26,0x7000);make_image(t1,26,0x8000);
@@ -113,6 +138,16 @@ int main() {
         in.twins_ready=true;
         require(plan_pass(read_memory,in,ctx_at,alternation,plan,scratch)==PassResult::planned && plan.eye==1 && plan.write,"Right eye planned");
         require(plan.replaced[0]==handle(t0) && plan.replaced[1]==handle(t1),"First right pass keeps engine roles");
+        auto metadata_input=in;metadata_input.capture_metadata=true;PassPlan optional_plan;
+        const auto fail_optional_stamp=[&](std::uintptr_t address,void* out,std::size_t size) {
+            return address!=view_at+d2vr::alternate_taa::stamp_offset && read_memory(address,out,size);
+        };
+        require(plan_pass(fail_optional_stamp,metadata_input,ctx_at,alternation,optional_plan,scratch)==PassResult::planned &&
+                !optional_plan.metadata && optional_plan.replaced==plan.replaced && optional_plan.eye==plan.eye,
+                "Missing optional metadata never changes existing history/FSR pass planning");
+        require(plan_pass(read_memory,metadata_input,ctx_at,alternation,optional_plan,scratch)==PassResult::planned &&
+                optional_plan.metadata && optional_plan.metadata->counter==0 && optional_plan.replaced==plan.replaced,
+                "Optional raw-zero metadata preserves native planning");
         apply_plan(plan);
         require(table[1].value==handle(t0) && table[2].value==handle(t1) && table[0].value==1,"Only history entries replaced");
         restore_plan(plan);

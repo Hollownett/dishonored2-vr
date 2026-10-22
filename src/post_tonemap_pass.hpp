@@ -5,6 +5,8 @@
 #include <array>
 #include <atomic>
 #include <cstdint>
+#include <optional>
+#include "temporal_eye_job.hpp"
 
 namespace d2vr {
 // ARK_RENDERPASS_POST_TONEMAP job callback (0x323E70, registered by 0x34FE00 next to POSTPROC
@@ -24,18 +26,26 @@ class PostTonemapPass {
             if(l!=r) eye=view==l?0:view==r?1:-1;
         }
         if(eye<0) return original_(ctx);
-        ++depth_;pass_eye=eye;pass_context=nullptr;
+        ++depth_;pass_eye=eye;pass_context=nullptr;pass_metadata.reset();
+        if(const auto reader=metadata_reader.load()) pass_metadata=reader(view);
         unsigned long long result{};
         __try {result=original_(ctx);}
         __finally {
             pass_eye=-1;
+            if(pass_metadata) if(const auto reader=metadata_reader.load()) {
+                const auto current=reader(view);if(!current || !(*current==*pass_metadata))pass_metadata.reset();
+            }
             if(const auto end=pass_end.load()) end(eye,pass_context);
+            pass_metadata.reset();
             --depth_;
         }
         return result;
     }
 public:
     inline static std::array<std::atomic<std::uintptr_t>,2> eye_views{}; // published per eye with the TAA history views
+    using MetadataReader=std::optional<temporal_eye::NativePass> (*)(std::uintptr_t);
+    inline static std::atomic<MetadataReader> metadata_reader{};
+    inline static thread_local std::optional<temporal_eye::NativePass> pass_metadata;
     inline static thread_local int pass_eye=-1;
     inline static thread_local ID3D11DeviceContext* pass_context=nullptr; // set by bind observers inside the pass
     inline static std::atomic<void (*)(int,ID3D11DeviceContext*)> pass_end{};
