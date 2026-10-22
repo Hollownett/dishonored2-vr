@@ -469,7 +469,9 @@ public:
         for(auto& e:wake_pending_) {
             if(!e.used) continue;
             const auto id=rig::value<std::uint32_t>(read,e.entity+0xa8);const auto state=rig::value<unsigned char>(read,e.entity+0xd1);
-            if(!id || *id!=e.id || !state || !(*state&0x28) || native_ragdoll_body(read,base,e.entity,0)) {post_budget.forget(e.id);e.used=false;continue;}
+            // The entity must still be the one the first post targeted: same registry slot and id (alive_entity), still dead/unconscious, and the primary body
+            // still not dynamic. Anything else (level load, recycled slot or id) drops the entry without a post.
+            if(!alive_entity(base,read,e.entity,e.id) || !id || *id!=e.id || !state || !(*state&0x28) || native_ragdoll_body(read,base,e.entity,0)) {post_budget.forget(e.id);e.used=false;continue;}
             if(now_ms<e.at_ms || now_ms-e.at_ms<1000) continue;
             switch(post_budget.request(e.id,false,seconds_from_ms(now_ms),wake_lockout?*wake_lockout:none)) {
             case PostDecision::allow: { // the one retry

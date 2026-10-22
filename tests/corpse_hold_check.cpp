@@ -9,6 +9,8 @@
 #include <filesystem>
 #include <functional>
 #include <future>
+#include <thread>
+#include <atomic>
 #include <chrono>
 #include <sstream>
 #include <cstdio>
@@ -597,6 +599,46 @@ void wake_stops_when_the_body_turns_dynamic() {
     for(int step=1;step<=30;++step) {fake_clock+=100;WakeBudgetCheck::retries(fake_clock);}
     CHECK(w.posts()==1 && !NativeWeaponHands::take_wake_refusal(0));
 }
+void retry_skips_recycled_entity() {
+    // The corpse's block stays mapped with its old id and state (a level change or a recycled registry slot), but the registry no longer
+    // points at it: the 1 s retry must drop the entry and post nothing, and a later squeeze starts a fresh budget entry.
+    WakeRig w;fake_clock=1200000;w.corpse(guard_a,0x120012,0,0,false);
+    WakeBudgetCheck::wake(0,{.2,0,.5});CHECK(w.posts()==1);
+    put(game+0x3130b0+(0x120012u>>16)*8,std::uintptr_t{0});                  // the slot was emptied / handed to another entity
+    for(int step=1;step<=30;++step) {fake_clock+=100;WakeBudgetCheck::retries(fake_clock);}
+    CHECK(w.posts()==1 && !NativeWeaponHands::take_wake_refusal(0));          // no retry post, no refusal haptic for an entity that is gone
+    put(game+0x3130b0+(0x120012u>>16)*8,guard_b);                              // another entity now owns the slot
+    WakeRig w2;fake_clock=1300000;w2.corpse(guard_a,0x130013,0,0,false);
+    WakeBudgetCheck::wake(0,{.2,0,.5});CHECK(w2.posts()==1);
+    put(game+0x3130b0+(0x130013u>>16)*8,guard_b);
+    for(int step=1;step<=30;++step) {fake_clock+=100;WakeBudgetCheck::retries(fake_clock);}
+    CHECK(w2.posts()==1);
+}
+void lockout_two_threads_stress() {
+    // Deterministic part: a locked entity suppresses the wake post through the real lockout while another thread churns the table.
+    EntityLockout lockout;
+    WakeRig w;fake_clock=1400000;w.corpse(guard_a,0x140014,0,0,false);
+    NativeWeaponHands::wake_lockout=&lockout;
+    const double t=seconds_from_ms(fake_clock);
+    CHECK(lockout.lock(0x140014,t) && lockout.locked(0x140014,t) && !lockout.locked(0x140014,t+EntityLockout::seconds+.01));
+    std::atomic<bool> stop{false};std::atomic<std::uint64_t> ops{};
+    std::thread writer([&]{                                                   // the physics thread: refresh the runaway lock, churn others
+        std::uint32_t other=1000;
+        while(!stop.load()) {lockout.lock(0x140014,t);lockout.lock(other++%40+1000,t);ops.fetch_add(1);}
+    });
+    std::atomic<int> torn{};
+    std::thread reader([&]{                                                   // a status / contact thread
+        for(int i=0;i<200000;++i) {if(!lockout.locked(0x140014,t+.5)) ++torn;(void)lockout.refused();}
+    });
+    for(int i=0;i<500;++i) {WakeBudgetCheck::wake(0,{.2,0,.5});if(i%50==0) WakeBudgetCheck::retries(fake_clock+1500);}   // the game thread
+    reader.join();stop=true;writer.join();
+    CHECK(torn==0);                                                           // a locked entity never reads as unlocked
+    CHECK(w.posts()==0);                                                      // and the wake/retry path never posted for it
+    CHECK(ops.load()>0);
+    // Deterministic interleaving: clear() racing with queries ends with everything unlocked.
+    lockout.clear();CHECK(!lockout.locked(0x140014,t) && lockout.refused()==0);
+    NativeWeaponHands::wake_lockout=nullptr;
+}
 void kill_switch_blocks_wake_and_legacy_yank_posts() {
     WakeRig w;fake_clock=900000;w.corpse(guard_a,0x90009,0,0,false);
     NativeWeaponHands::post_budget.disable(true);
@@ -710,6 +752,8 @@ int main() {
     kill_switch_blocks_wake_and_legacy_yank_posts();
     corpse_never_reposted_on_400ms_timer();
     ceiling_two_posts_per_second_across_entities();
+    retry_skips_recycled_entity();
+    lockout_two_threads_stress();
     lockout_never_evicts_active_and_yank_consults_it();
     source_routing();
     if(failures) {std::printf("%d check(s) failed\n",failures);return 1;}

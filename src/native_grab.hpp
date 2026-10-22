@@ -205,7 +205,7 @@ private:
     bool collar_grab_{};
     static constexpr float collar_fist_squeeze=.35f; // one threshold for offering the collar (discovery) and binding it: a full fist reserves the lane here
     // Corpse hold (Task 10). All of this is touched under mutex_ (the dispatcher callback, the render-thread accessors) except the atomics.
-    // corpse_enabled_: build/no-corpse-grab clears it; lockout_ and the dispatcher cost counters are dispatcher-thread only; no_posts_ is
+    // corpse_enabled_: build/no-corpse-grab clears it; lockout_ is internally locked (any thread); the dispatcher cost counters are dispatcher-thread only; no_posts_ is
     // build/no-ragdoll-posts, read at install for the wake path (Task 11).
     bool corpse_enabled_=true,no_posts_{};
     EntityLockout lockout_{};CorpseDiagnostics corpse_diag_{};CorpseTraceWriter* corpse_trace_{};
@@ -847,7 +847,8 @@ public:
     }
     bool corpse_enabled() {std::lock_guard<std::mutex> lock(mutex_);return corpse_enabled_;}
     bool no_ragdoll_posts() const noexcept {return no_posts_;} // build/no-ragdoll-posts, read at install; the wake path (Task 11) honours it
-    // The runaway lockout is dispatcher-thread only (EntityLockout is not thread-safe): Task 11's post budget reads it from the same callback.
+    // The runaway lockout is written on the physics thread (dispatcher) and read from the game thread (Task 11 wake/retry), the status thread and the contact pass;
+    // EntityLockout carries its own small mutex, so none of those readers touches mutex_.
     EntityLockout& lockout() noexcept {return lockout_;}
     std::uint64_t lock_refused() const noexcept {return lockout_.refused();}
     void attach_corpse_trace(CorpseTraceWriter* trace) {std::lock_guard<std::mutex> lock(mutex_);corpse_trace_=trace;}
@@ -1045,7 +1046,7 @@ public:
          }}
         acquisitions_<<std::setprecision(9)<<"tick_ms,side,hand_x,hand_y,hand_z,candidates,nearest_entity_id,contact_distance\n";
         log_<<std::setprecision(9)<<"tick_ms,side,entity_id,component,generation,handle,body_flags,release,x,y,z,target_x,target_y,target_z,vx,vy,vz,wx,wy,wz\n";
-        {std::lock_guard<std::mutex> lock(mutex_);advance_lifecycle_locked();lanes_={};lockout_={};}
+        {std::lock_guard<std::mutex> lock(mutex_);advance_lifecycle_locked();lanes_={};lockout_.clear();}
         decision_begin_=decision_count_=0;last_decision_={};decision_dropped_=0;acquisition_samples_=0;picked_=moved_=dropped_=lost_=queries_=samples_=callbacks_=0;native_presses_=physical_presses_=0;
         velocity_=reinterpret_cast<Velocity>(base+velocity_rva);instance_=this;
         contact_.write_blocked=[this](std::uintptr_t entity,bool guard) {return contact_write_blocked(entity,guard);};

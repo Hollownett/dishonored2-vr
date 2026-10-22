@@ -11,34 +11,43 @@
 #include <cstdint>
 #include <filesystem>
 #include <limits>
+#include <mutex>
 #include <optional>
 namespace d2vr {
 
 enum class PostDecision {allow,already_dynamic,retry_wait,ceiling,disabled,refused,locked};
 
 // UNITS: every `now` in this header is monotonic SECONDS. Callers on GetTickCount64() milliseconds convert with
-// seconds_from_ms. THREADING: EventPostBudget and EntityLockout are game-thread-only; only the counters and the
+// seconds_from_ms. THREADING: EventPostBudget is game-thread-only (EntityLockout is internally locked); only the counters and the
 // disabled flag may be read from another thread (relaxed atomics).
 inline double seconds_from_ms(std::uint64_t ms) noexcept {return static_cast<double>(ms)/1000.0;}
 
-// Blocks writes to an entity for `seconds` after a runaway. Game-thread-only.
+// Blocks writes to an entity for `seconds` after a runaway. THREAD-SAFE: the physics-thread dispatcher locks, the game-thread wake/retry path and
+// the status/render threads query. One small internal mutex guards the 16-slot table; every critical section is a bounded scan of 16 slots (no
+// allocation, no engine call, no other lock taken inside), so a caller never waits for anything long. Lock order: NativeGrab::mutex_ may be held when
+// this mutex is taken, never the reverse.
 class EntityLockout {
 public:
     static constexpr double seconds=1;
     // A lock never evicts a lock that is still active: with all 16 slots held by active locks, a new entity is NOT locked and the refusal is counted
     // (refused()), so a runaway body can never become grabbable again because other entities churned the table. Expired slots are reusable.
     bool lock(std::uint32_t entity_id,double now) noexcept {
+        std::lock_guard<std::mutex> guard(mutex_);
         for(auto& e:entries_) if(e.used&&e.id==entity_id) {e.until=now+seconds;return true;}
         for(auto& e:entries_) if(!e.used || e.until<=now) {e.used=true;e.id=entity_id;e.until=now+seconds;return true;}
         ++refused_;return false;
     }
-    std::uint64_t refused() const noexcept {return refused_;}
+    std::uint64_t refused() const noexcept {std::lock_guard<std::mutex> guard(mutex_);return refused_;}
     bool locked(std::uint32_t entity_id,double now) const noexcept {
+        std::lock_guard<std::mutex> guard(mutex_);
         for(const auto& e:entries_) if(e.used&&e.id==entity_id) return now<e.until;
         return false;
     }
+    // Level teardown: forget every lock and the refusal count.
+    void clear() noexcept {std::lock_guard<std::mutex> guard(mutex_);entries_={};refused_=0;}
 private:
     struct Entry {bool used{};std::uint32_t id{};double until{};};
+    mutable std::mutex mutex_;
     std::array<Entry,16> entries_{};std::uint64_t refused_{};
 };
 
