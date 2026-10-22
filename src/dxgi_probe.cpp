@@ -604,7 +604,7 @@ static d2vr::alternate_taa::Runtime alternate_taa_runtime;
 static bool alternate_native_taa_enabled=false,alternate_native_taa_abi=false;
 static thread_local bool alternate_taa_setup_ready=false;
 // Scripted-simulation diagnostic: per-eye TAA constants (current/previous matrices, jitter).
-static d2vr::TaaConstantsCapture taa_capture,taa_capture_b2{64,2};static std::ofstream taa_capture_csv,taa_capture_b2_csv;static ULONGLONG taa_capture_after_tick{};
+static d2vr::TaaConstantsCapture taa_capture,taa_capture_b2{64,2};static std::ofstream taa_capture_csv,taa_capture_b2_csv;static ULONGLONG taa_capture_after_tick{};static std::atomic<bool> taa_capture_dispatch_only{false};
 bool read_self(std::uintptr_t address,void* data,std::size_t size);
 UINT game_logic_mask();
 static d2vr::WorldUiCapture world_ui_capture;
@@ -1029,9 +1029,11 @@ void observe_taa_pass(void* ctx,int eye) {
         if(read_self(holder+o,&inner,sizeof inner) && d3d11_object(inner)) {candidate=inner;offset=o;}
     }
     if(!candidate) {taa_capture_context_offset.store(-3);dump_taa_view(ctx,eye);return;}
+    taa_capture_context_offset.store(offset);
+    // Census sessions reserve the bounded B1 budget for the actual dispatch handler.
+    if(taa_capture_dispatch_only.load(std::memory_order_relaxed)) return;
     ComPtr<ID3D11DeviceContext> context;
     if(FAILED(reinterpret_cast<IUnknown*>(candidate)->QueryInterface(IID_PPV_ARGS(&context)))) {taa_capture_context_offset.store(-4);return;}
-    taa_capture_context_offset.store(offset);
     taa_capture.record(context.Get(),eye,frames.load());
 }
 static d2vr::NativeAttachmentPose attachment_pose;
@@ -8395,6 +8397,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
         if(!d2vr::NativeTemporalCensus::process_owner().flush(output_directory,true))
             throw std::runtime_error("Prior native temporal census must drain and flush before activation");
         const bool census_requested=fs::exists(root/L"build"/L"native-temporal-census");
+        taa_capture_dispatch_only.store(census_requested,std::memory_order_relaxed);
         if(census_requested)fs::remove(output/L"native-temporal-census.json"); // no stale completion marker while new capture waits
         if(!d2vr::NativeTemporalCensus::process_owner().configure(census_requested,&read_self,&read_dlss_pass_metadata))
             throw std::runtime_error("Native temporal census callbacks have not drained");
