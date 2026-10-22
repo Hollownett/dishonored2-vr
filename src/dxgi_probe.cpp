@@ -235,6 +235,12 @@ void note_recoverable(const char* message) noexcept {
     if(++recoverable_faults>200) return;
     try {std::ofstream log(recovery_log_path,std::ios::app);log<<GetTickCount64()<<' '<<message<<'\n';} catch(...) {}
 }
+// Swapchain create/destroy and would-be-empty frame lines (game_xr.hpp rate limits them); a cap of their own so they never use up note_recoverable's 200.
+void note_xr_event(const char* message) noexcept {
+    static std::atomic<unsigned> lines{0};
+    if(++lines>300) return;
+    try {std::ofstream log(recovery_log_path,std::ios::app);log<<GetTickCount64()<<' '<<message<<'\n';} catch(...) {}
+}
 std::string callback_error_snapshot() {
     std::lock_guard<std::mutex> lock(callback_error_mutex);return callback_error;
 }
@@ -6604,7 +6610,7 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                 game_xr->observe_transfer=&capture_xr_transfer;
                                 game_xr->observe_settings=&capture_settings_transfer;
                                 game_xr->observe_wrist=&capture_wrist_hud;
-                                game_xr->observe_frame_rejection=[](const char* text) {note_recoverable(text);};
+                                game_xr->observe_frame_rejection=[](const char* text) {note_recoverable(text);};game_xr->observe_xr_event=[](const char* text) {note_xr_event(text);};
                                 game_xr->observe_wrist_failure=[](unsigned side,const char* reason) {
                                     note_recoverable(("Optional wrist HUD side "+std::to_string(side)+": "+reason).c_str());
                                 };
@@ -7158,7 +7164,7 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                      << ",\"native_arm_reach_clamps\":[" << arm_pose_clamps[0].load() << ',' << arm_pose_clamps[1].load() << ']'
                                      << ",\"native_controller_reads\":" << controller_bridge.reads()
                                      << ",\"native_virtual_controller_reads\":" << controller_bridge.virtual_reads()
-                                     << ",\"native_nonzero_controller_reads\":" << controller_bridge.nonzero_reads() << ",\"native_lb_reads\":" << controller_bridge.lb_reads() << ",\"wheel_frames\":" << wheel_frames << ",\"logic_mask\":" << published_logic.load() << ",\"published_move\":[" << published_move_x.load() << ',' << published_move_y.load() << ']' << ",\"hint_layers\":" << (game_xr?game_xr->hint_layers:0) << ',' << overlay_status_json() << ",\"layer_pose_repaired\":[" << (game_xr?game_xr->layer_pose_repaired[0]:0) << ',' << (game_xr?game_xr->layer_pose_repaired[1]:0) << ',' << (game_xr?game_xr->layer_pose_repaired[2]:0) << "],\"layer_pose_dropped\":[" << (game_xr?game_xr->layer_pose_dropped[0]:0) << ',' << (game_xr?game_xr->layer_pose_dropped[1]:0) << ',' << (game_xr?game_xr->layer_pose_dropped[2]:0) << "],\"layer_pose_no_submit\":" << (game_xr?game_xr->layer_pose_no_submit:0) << ",\"subrect_layers\":" << (game_xr?game_xr->subrect_layers:0) << ",\"swapchain_creates_in_frame\":" << (game_xr?game_xr->swapchain_creates_in_frame:0) << ",\"end_frame_rejections\":" << (game_xr?game_xr->end_frame_rejections:0) << ",\"layer_pose_last\":\"" << (game_xr?game_xr->layer_pose_last:std::string()) << '"' << ",\"lb_inputs\":" << controller_bridge.lb_inputs() << ",\"lb_published\":" << controller_bridge.lb_published() << ",\"wheel_logic\":" << wheel_logic << ",\"native_x_reads\":" << controller_bridge.x_reads()
+                                     << ",\"native_nonzero_controller_reads\":" << controller_bridge.nonzero_reads() << ",\"native_lb_reads\":" << controller_bridge.lb_reads() << ",\"wheel_frames\":" << wheel_frames << ",\"logic_mask\":" << published_logic.load() << ",\"published_move\":[" << published_move_x.load() << ',' << published_move_y.load() << ']' << ",\"hint_layers\":" << (game_xr?game_xr->hint_layers:0) << ',' << overlay_status_json() << ",\"layer_pose_repaired\":[" << (game_xr?game_xr->layer_pose_repaired[0]:0) << ',' << (game_xr?game_xr->layer_pose_repaired[1]:0) << ',' << (game_xr?game_xr->layer_pose_repaired[2]:0) << "],\"layer_pose_dropped\":[" << (game_xr?game_xr->layer_pose_dropped[0]:0) << ',' << (game_xr?game_xr->layer_pose_dropped[1]:0) << ',' << (game_xr?game_xr->layer_pose_dropped[2]:0) << "],\"layer_pose_no_submit\":" << (game_xr?game_xr->layer_pose_no_submit:0) << ",\"subrect_layers\":" << (game_xr?game_xr->subrect_layers:0) << ",\"swapchain_creates_in_frame\":" << (game_xr?game_xr->swapchain_creates_in_frame:0) << ",\"end_frame_rejections\":" << (game_xr?game_xr->end_frame_rejections:0) << ",\"frame_hardening\":{\"empty_frames\":" << (game_xr?game_xr->empty_frames_seen:0) << ",\"resubmit_last_projection\":" << (game_xr?game_xr->empty_fallback_projection:0) << ",\"black_quad\":" << (game_xr?game_xr->empty_fallback_black:0) << ",\"left_empty\":" << (game_xr?game_xr->empty_fallback_none:0) << ",\"chain_creates\":" << (game_xr?game_xr->chain_create_events:0) << ",\"chain_destroys\":" << (game_xr?game_xr->chain_destroy_events:0) << '}' << ",\"layer_pose_last\":\"" << (game_xr?game_xr->layer_pose_last:std::string()) << '"' << ",\"lb_inputs\":" << controller_bridge.lb_inputs() << ",\"lb_published\":" << controller_bridge.lb_published() << ",\"wheel_logic\":" << wheel_logic << ",\"native_x_reads\":" << controller_bridge.x_reads()
                                      << ",\"native_pause_button_reads\":" << controller_bridge.pause_reads()
                                      << ",\"native_joystick_focus_calls\":" << native_pad_focus.calls()
                                      << ",\"native_joystick_focus_overrides\":" << native_pad_focus.overrides()
