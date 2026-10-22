@@ -416,6 +416,10 @@ cl /nologo /std:c++17 /EHsc /W4 /WX /O2 /MT tests\physical_grab_check.cpp /Fo:bu
 if not "%errorlevel%"=="0" exit /b 1
 build\physical_grab_check.exe
 if not "%errorlevel%"=="0" exit /b 1
+cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT /Isrc tests\drawn_anchor_check.cpp /Fo:build\drawn_anchor_check.obj /Fe:build\drawn_anchor_check.exe
+if not "%errorlevel%"=="0" exit /b 1
+build\drawn_anchor_check.exe
+if not "%errorlevel%"=="0" exit /b 1
 cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT /Isrc tests\corpse_tow_check.cpp /Fo:build\corpse_tow_check.obj /Fe:build\corpse_tow_check.exe
 if not "%errorlevel%"=="0" exit /b 1
 build\corpse_tow_check.exe

@@ -52,10 +52,31 @@ def check_wake(hands: str, probe: str) -> None:
     assert "post_budget.disable(kill.no_posts)" in probe and "wake_lockout=&native_grab.lockout()" in probe
 
 
+def check_drawn(probe: str, grab: str, safety: str) -> None:
+    """Task 12: the drawn hand is moved after the clamp and its note_drawn, once per frame (inside the per_frame block), before publish_hand; it reads only
+    the hold_anchor snapshot and never the raw controller; build/no-prop-grasp-point is read with the other knobs."""
+    block = probe[probe.index("if(render_world_scene() && (tracked_arms_requested || native_weapon_attachment_requested) && per_frame) {"):]
+    seat = block.index("drawn_anchor.update(")
+    assert block.index("hand_clamp.update(") < block.index("hand_clamp.note_drawn(") < seat, "the override sits after the clamp and note_drawn"
+    publish = block.index("publish_hand(side,hands.grips[side],raw_grips[side])")
+    assert seat < publish, "the override precedes publish_hand"
+    region = block[block.rindex("Task 12 (user decision 6)", 0, seat):publish]
+    assert "native_grab.hold_anchor(side)" in region and "raw_grips" not in region, "the override reads only hold_anchor and never raw_grips"
+    assert "held_view.capped" in region and "native_grab.prop_grasp_point()" in region and "held_view.corpse ||" in region, "corpses always anchor; props follow the knob"
+    assert "drawn_anchor.reset(side)" in region
+    assert "note_anchor_gap(" in region and "prop_seat_gap_m" in region
+    assert '\\"prop_grasp_point\\":' in probe and '\\"prop_seat_gap_m\\":' in probe, "status fields"
+    assert "prop_grasp_point_=!kill.no_prop_grasp_point" in grab and "knob build/no-prop-grasp-point present" in grab, "the knob is read at install and logged"
+    assert 'build_dir/"no-prop-grasp-point"' in safety
+    assert "native_grab.holding(side)" in probe[probe.index("clamp_yields(side"):probe.index("clamp_yields(side") + 200], "native holds still yield the clamp"
+    assert "gate.grab_held=physical_grab_requested && (native_grab.holding(0) || native_grab.holding(1))" in probe, "a held corpse still keeps the hands busy for the attack gate"
+
+
 if __name__ == "__main__":
     root = Path(__file__).resolve().parents[1]
     check((root / "src" / "dxgi_probe.cpp").read_text(encoding="utf-8"))
     check_hold((root / "src" / "native_grab.hpp").read_text(encoding="utf-8"), (root / "src" / "dxgi_probe.cpp").read_text(encoding="utf-8"))
     check_wake((root / "src" / "native_weapon_hands.hpp").read_text(encoding="utf-8"), (root / "src" / "dxgi_probe.cpp").read_text(encoding="utf-8"))
+    check_drawn((root / "src" / "dxgi_probe.cpp").read_text(encoding="utf-8"), (root / "src" / "native_grab.hpp").read_text(encoding="utf-8"), (root / "src" / "ragdoll_safety.hpp").read_text(encoding="utf-8"))
     print("corpse_routing_check ok")
     sys.exit(0)

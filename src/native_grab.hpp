@@ -139,7 +139,7 @@ public:
 // tuning came from build/grab-tuning.cfg (status "tuning":"file"), so the shipped config is the tested config or visibly not.
 struct CorpseOptions {bool enabled=true;GrabTuning tuning{};bool from_file=false;};
 // The grasp point of the held body as of the last dispatcher tick (a prop or a corpse), for the drawn hand: a mutex-protected copy.
-struct HoldAnchorView {bool active{};Vec3 anchor{};std::uint64_t tick{};};
+struct HoldAnchorView {bool active{};Vec3 anchor{};std::uint64_t tick{};bool capped{},corpse{};}; // capped: a motor-held corpse or prop (a living guard's yank hold is active but not capped); corpse: a corpse limb or collar
 class NativeGrab {
     friend struct NativeGrabCheck;
 public:
@@ -207,7 +207,7 @@ private:
     // Corpse hold (Task 10). All of this is touched under mutex_ (the dispatcher callback, the render-thread accessors) except the atomics.
     // corpse_enabled_: build/no-corpse-grab clears it; lockout_ is internally locked (any thread); the dispatcher cost counters are dispatcher-thread only; no_posts_ is
     // build/no-ragdoll-posts, read at install for the wake path (Task 11).
-    bool corpse_enabled_=true,no_posts_{};
+    bool corpse_enabled_=true,no_posts_{},prop_grasp_point_=true;
     EntityLockout lockout_{};CorpseDiagnostics corpse_diag_{};CorpseTraceWriter* corpse_trace_{};
     UINT64 pass_cost_us_{};std::atomic<UINT64> corpse_cost_us_{},corpse_cost_max_us_{},velocity_unknown_{};
     // hold_anchor() must never wait for a dispatcher pass: the pass publishes a copy of each lane's anchor under this small mutex (held only for the copy).
@@ -484,7 +484,7 @@ private:
         lane.bound_at=now;if(lane.capped) lane.last_motor=0; // no write yet this hold: the first one measures its dt from the bind
         {const auto motion=read_motion_state(body);lane.bind_motion=motion.index;lane.bind_owner=motion.owner;}
         if(lane.corpse && body.bone>0) if(const auto pelvis=native_ragdoll_body(read_,base_,body.entity,0)) lane.bind_pelvis_z=pelvis->pose.position.z;
-        lane.anchor_view=HoldAnchorView{true,lane.grab.anchor(body.pose),now};
+        lane.anchor_view=HoldAnchorView{true,lane.grab.anchor(body.pose),now,lane.capped,lane.corpse};
         if(lane.corpse) corpse_diag_.note_bind(side,body.bone,ragdoll_body_mass(body.bone,std::nullopt,tuning_.use_measured_mass).source);
     }
     // A capped hold ends without a velocity write (a corpse never gets one; a prop only its release). The grab keeps the release reason, the
@@ -626,7 +626,7 @@ private:
                 return;
             }
             lane.held=*body;
-            lane.anchor_view=HoldAnchorView{true,lane.grab.anchor(body->pose),now};
+            lane.anchor_view=HoldAnchorView{true,lane.grab.anchor(body->pose),now,lane.capped,lane.corpse};
             if(!lane.capped && body->bone>=0 && corpse_enabled_ && ragdoll_pushable_state(read_,body->entity)) { // a held living guard died: the corpse envelope takes over
                 if(lockout_.locked(body->entity_id,seconds_from_ms(now))) { // ... unless he is locked out: no hold, no write
                     lane.grab.release(false,ReleaseReason::lifecycle);lane.end_hold();lane.pending_release=false;return;
@@ -846,6 +846,7 @@ public:
         std::lock_guard<std::mutex> lock(snapshot_mutex_);return snapshot_[side]; // never mutex_: the render thread does not wait for a dispatcher pass
     }
     bool corpse_enabled() {std::lock_guard<std::mutex> lock(mutex_);return corpse_enabled_;}
+    bool prop_grasp_point() const noexcept {return prop_grasp_point_;} // !build/no-prop-grasp-point, read at install; the drawn hand sits on a motor-held prop (Task 12)
     bool no_ragdoll_posts() const noexcept {return no_posts_;} // build/no-ragdoll-posts, read at install; the wake path (Task 11) honours it
     // The runaway lockout is written on the physics thread (dispatcher) and read from the game thread (Task 11 wake/retry), the status thread and the contact pass;
     // EntityLockout carries its own small mutex, so none of those readers touches mutex_.
@@ -1033,11 +1034,12 @@ public:
          if(collar_grab_) {std::ofstream note(loss_file_,std::ios::app);note<<"knob build/collar-grab present: chest/neck hold targets enabled (full fist only)\n";}
          // Corpse hold knobs and the tuning file, read once here so the shipped configuration is the one that was tested (valid file or the defaults).
          const auto knobs=corpse_knobs_from(root);const auto& kill=knobs.kill;const auto& loaded=knobs.loaded;
-         no_posts_=kill.no_posts;
+         no_posts_=kill.no_posts;prop_grasp_point_=!kill.no_prop_grasp_point;
          configure_corpse(knobs.options);
          {std::ofstream note(loss_file_,std::ios::app);
           if(kill.no_corpse_grab) note<<"knob build/no-corpse-grab present: corpse bodies are not grab candidates\n";
           if(kill.no_posts) note<<"knob build/no-ragdoll-posts present: no ragdoll event posts\n";
+          note<<(kill.no_prop_grasp_point?"knob build/no-prop-grasp-point present: the drawn hand stays at the controller on held props\n":"prop grasp point: the drawn hand sits on motor-held props (corpses always anchor)\n");
           if(!loaded.error.empty()) note<<"build/grab-tuning.cfg rejected, defaults in use: "<<loaded.error<<'\n';
           else if(loaded.source==TuningSource::file) note<<"build/grab-tuning.cfg loaded (tow "<<(loaded.value.tow?"on":"off")<<", strength_scale "<<loaded.value.strength_scale<<")\n";}
          if(std::filesystem::exists(root/L"build"/L"mass-probe",ec)) {
