@@ -242,6 +242,11 @@ class PairPublication {
 public:
     PairState observe(const InputIdentity& input,const Lease& feature_owner,EyeOutcome outcome) noexcept {
         if(!contract_ || input.key.pair>contract_->key.pair) {contract_=input;feature_owner_=feature_owner;seen_={};success_={};state_=PairState::incomplete;}
+        // Displaced work cannot mutate the newer pair's telemetry. For the
+        // current pair a failed final output dominates even an invalid contract
+        // or duplicate eye: validation must not hide the execution failure.
+        if(input.key.pair!=contract_->key.pair) return state_;
+        if(outcome==EyeOutcome::failed) return state_=PairState::failed;
         if(!feature_owner || feature_owner.owner_before(feature_owner_) || feature_owner_.owner_before(feature_owner) ||
            input.key.eye>1 || input.key.pair!=contract_->key.pair ||
            !(input.generations==contract_->generations) || !(input.device==contract_->device) ||
@@ -253,7 +258,6 @@ public:
         const auto eye=input.key.eye;
         if(seen_[eye]) return state_==PairState::failed?state_:state_=PairState::fallback;
         seen_[eye]=true;success_[eye]=outcome==EyeOutcome::temporal;
-        if(outcome==EyeOutcome::failed) return state_=PairState::failed;
         if(outcome==EyeOutcome::fallback && state_!=PairState::failed) return state_=PairState::fallback;
         if(state_==PairState::incomplete && seen_[0] && seen_[1] && success_[0] && success_[1]) state_=PairState::coherent;
         return state_;

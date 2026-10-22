@@ -628,6 +628,21 @@ void completion_quarantine_and_pair_results() {
         auto newer=left;++newer.key.pair;
         assert(sticky.observe(newer,owner,EyeOutcome::temporal)==PairState::incomplete);
     }
+    for(unsigned mismatch=0;mismatch<2;++mismatch) {
+        PairPublication final_failure;auto changed=right;
+        assert(final_failure.observe(left,owner,EyeOutcome::temporal)==PairState::incomplete);
+        if(mismatch==0) ++changed.generations.feature;
+        else changed.key.eye=left.key.eye;
+        assert(final_failure.observe(changed,owner,EyeOutcome::failed)==PairState::failed);
+        assert(final_failure.observe(right,owner,EyeOutcome::temporal)==PairState::failed);
+        auto newer=left;++newer.key.pair;
+        assert(final_failure.observe(newer,owner,EyeOutcome::temporal)==PairState::incomplete);
+        assert(final_failure.observe(changed,owner,EyeOutcome::failed)==PairState::incomplete);
+        assert(final_failure.observe(changed,owner,EyeOutcome::fallback)==PairState::incomplete);
+        auto newer_right=right;newer_right.key.pair=newer.key.pair;
+        assert(final_failure.observe(newer_right,owner,EyeOutcome::temporal)==PairState::coherent);
+        assert(final_failure.observe(changed,owner,EyeOutcome::failed)==PairState::coherent);
+    }
     ++right.generations.feature;
     assert(ledger.observe(right,owner,EyeOutcome::temporal)==PairState::fallback); // mixed feature generations
 }
