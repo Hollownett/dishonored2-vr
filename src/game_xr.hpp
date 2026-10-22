@@ -16,6 +16,7 @@
 #include "y_hold.hpp"
 #include "xr_continuity.hpp"
 #include "xr_layer_pose.hpp"
+#include "xr_frame_hardening.hpp"
 #include "eye_antialiasing.hpp"
 #include "eye_sharpen.hpp"
 #include "desktop_mirror.hpp"
@@ -38,6 +39,7 @@
 #include "vr_settings_native.hpp"
 #include <algorithm>
 #include <array>
+#include <utility>
 #include <cstring>
 #include <stdexcept>
 #include <string>
@@ -85,6 +87,12 @@ private:
     std::vector<XrSwapchainImageD3D11KHR> pointer_images_;
     XrSwapchain hint_chain_{};
     XrSwapchain dot_chain_{};std::vector<XrSwapchainImageD3D11KHR> dot_images_;std::vector<bool> dot_filled_;
+    // Frame-submission hardening (xr_frame_hardening.hpp): an opaque-black chain made between frames for the "never an empty frame" fallback.
+    static constexpr unsigned blank_texture_size=64;
+    XrSwapchain blank_chain_{};std::vector<XrSwapchainImageD3D11KHR> blank_images_;std::vector<bool> blank_filled_;
+    LastGoodProjection last_good_projection_;
+    EventLogLimiter chain_event_limiter_{120,40,10000},empty_event_limiter_{120,20,10000};
+    UINT64 present_count_{};
     // Locomotion comfort vignette: a head-locked quad showing a black ring texture, created by prepare_overlays between frames.
     static constexpr unsigned vignette_texture_size=96; // not a multiple of 64: the wrist test tells wrist canvases apart by width
     XrSwapchain vignette_chain_{};std::vector<XrSwapchainImageD3D11KHR> vignette_images_;std::vector<bool> vignette_filled_;
@@ -331,10 +339,28 @@ private:
     // SteamVR fails xrEndFrame for a swapchain created (or destroyed) inside a frame: every overlay chain is built by prepare_overlays()
     // between frames; a layer whose chain is missing or the wrong size shows nothing this frame.
     void count_chain_op() {if(frame_open_) ++swapchain_creates_in_frame;}
+    // Wall-clock stamps (UTC and local) so a vrserver.txt / driver_vrlink.txt line can be matched without offset arithmetic.
+    static std::pair<std::string,std::string> wall_stamps_() {
+        SYSTEMTIME utc{},local{};GetSystemTime(&utc);GetLocalTime(&local);
+        return {format_clock(utc.wHour,utc.wMinute,utc.wSecond,utc.wMilliseconds),format_clock(local.wHour,local.wMinute,local.wSecond,local.wMilliseconds)};
+    }
+    void log_chain_event_(bool create,const char* name,std::uint32_t width,std::uint32_t height,XrSwapchain chain) {
+        if(create) ++chain_create_events;else ++chain_destroy_events;
+        if(!observe_xr_event) return;
+        const auto decision=chain_event_limiter_.admit(GetTickCount64());if(!decision.emit) return;
+        if(decision.final_notice) {observe_xr_event("xr-event swapchain log cap reached; further create/destroy lines are counted in xr-live-status.json only");return;}
+        const auto [utc,local]=wall_stamps_();
+        observe_xr_event(format_chain_event(create,name,width,height,frame_open_,reinterpret_cast<std::uintptr_t>(chain),utc,local,decision.suppressed_before).c_str());
+    }
     void create_overlay_chain(const XrSwapchainCreateInfo& info,XrSwapchain& chain,const char* name) {
         count_chain_op();checked(api<PFN_xrCreateSwapchain>("xrCreateSwapchain",instance_)(session_,&info,&chain),name);chain_sizes_[chain]={info.width,info.height};chain_generations_[chain]=++chain_generation_counter_;
+        log_chain_event_(true,name,info.width,info.height,chain);
     }
-    void destroy_overlay_chain(XrSwapchain chain,const char* name) {count_chain_op();chain_sizes_.erase(chain);chain_generations_.erase(chain);checked(xrDestroySwapchain(chain),name);}
+    void destroy_overlay_chain(XrSwapchain chain,const char* name) {
+        count_chain_op();std::array<std::uint32_t,2> size{};if(const auto known=chain_sizes_.find(chain);known!=chain_sizes_.end()) size=known->second;
+        log_chain_event_(false,name,size[0],size[1],chain); // logged before the call: a destroy that hangs the runtime is still on record
+        chain_sizes_.erase(chain);chain_generations_.erase(chain);checked(xrDestroySwapchain(chain),name);
+    }
     // A quad/cylinder swapchain is exactly the size of what it shows (SteamVR rejects sub-rects): rebuilt here, between frames, when that size changes.
     void rebuild_overlay_chain(XrSwapchain& chain,std::vector<XrSwapchainImageD3D11KHR>& images,UINT& have_width,UINT& have_height,UINT width,UINT height,const std::string& label) {
         if(chain && have_width==width && have_height==height) return;
@@ -500,7 +526,7 @@ public:
     double menu_band=9.0/16.0;
     struct MenuView {float width,height;std::int32_t y,rows;double v0,vspan;};
     MenuView menu_view(bool cinematic=false) const {
-        const auto rows=static_cast<std::int32_t>(std::clamp(std::lround(width_*menu_band),1l,static_cast<long>(height_)));
+        const auto rows=menu_band_rows(width_,height_,menu_band);
         const auto y=static_cast<std::int32_t>((height_-rows)/2);
         const float width=cinematic?2.6f:1.4f;
         return {width,width*rows/static_cast<float>(width_),y,rows,static_cast<double>(y)/height_,static_cast<double>(rows)/height_};
@@ -701,7 +727,7 @@ private:
     void prepare_overlays() {
         if(frame_open_) return;
         ensure_small_chain(pointer_chain_,pointer_images_);ensure_settings_chain();ensure_hint_chain();ensure_dot_chain();ensure_vignette_chain();
-        ensure_world_ui_chain();ensure_hud_window_chain();ensure_menu_band_chain();
+        ensure_world_ui_chain();ensure_hud_window_chain();ensure_menu_band_chain();ensure_blank_chain();
         for(unsigned side=0;side<2;++side) prepare_wrist(side);
     }
     void ensure_hint_chain() {
@@ -761,6 +787,42 @@ private:
         layer.pose.position={static_cast<float>(centre.x),static_cast<float>(centre.y),static_cast<float>(centre.z)};
         layer.size={.2f,.15f};layer.subImage.swapchain=hint_chain_;layer.subImage.imageRect.extent={static_cast<int32_t>(width),static_cast<int32_t>(height)};
         return layer;
+    }
+    void ensure_blank_chain() {
+        if(blank_chain_) return;
+        XrSwapchainCreateInfo info{};info.type=XR_TYPE_SWAPCHAIN_CREATE_INFO;
+        info.usageFlags=XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT|XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT;
+        info.format=DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;info.width=info.height=blank_texture_size;
+        info.sampleCount=1;info.faceCount=1;info.arraySize=1;info.mipCount=1;
+        create_overlay_chain(info,blank_chain_,"Create black fallback quad");
+        auto enumerate=api<PFN_xrEnumerateSwapchainImages>("xrEnumerateSwapchainImages",instance_);uint32_t count{};
+        checked(enumerate(blank_chain_,0,&count,nullptr),"Count black fallback images");
+        blank_images_.resize(count);for(auto& image:blank_images_) image.type=XR_TYPE_SWAPCHAIN_IMAGE_D3D11_KHR;
+        checked(enumerate(blank_chain_,count,&count,reinterpret_cast<XrSwapchainImageBaseHeader*>(blank_images_.data())),"Read black fallback images");
+        if(blank_images_.empty()) throw std::runtime_error("XR black fallback has no images");
+        blank_filled_.assign(count,false);
+    }
+    // The black quad's image: every runtime image is filled with opaque black once, then re-released each time (acquire/wait/release is legal in a frame).
+    bool blank_ready_() const noexcept {return blank_chain_ && !blank_images_.empty() && context_;}
+    std::optional<XrCompositionLayerQuad> black_fallback_layer_() {
+        if(!blank_ready_()) return {};
+        XrSwapchainImageAcquireInfo acquire{};acquire.type=XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO;uint32_t index{};
+        if(XR_FAILED(xrAcquireSwapchainImage(blank_chain_,&acquire,&index)) || index>=blank_images_.size()) return {};
+        XrSwapchainImageWaitInfo wait{};wait.type=XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO;wait.timeout=100'000'000;
+        XrSwapchainImageReleaseInfo release{};release.type=XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO;
+        const auto ready=xrWaitSwapchainImage(blank_chain_,&wait);
+        if(XR_FAILED(ready) || ready==XR_TIMEOUT_EXPIRED) {xrReleaseSwapchainImage(blank_chain_,&release);return {};}
+        try {
+            if(!blank_filled_.at(index)) {
+                std::vector<std::uint8_t> opaque(blank_texture_size*blank_texture_size*4,0);for(std::size_t i=3;i<opaque.size();i+=4) opaque[i]=255;
+                context_->UpdateSubresource(blank_images_[index].texture,0,nullptr,opaque.data(),blank_texture_size*4,0);blank_filled_[index]=true;
+            }
+        } catch(...) {xrReleaseSwapchainImage(blank_chain_,&release);return {};}
+        if(XR_FAILED(xrReleaseSwapchainImage(blank_chain_,&release))) return {};
+        std::optional<XrPosef> head;if(views_valid_) head=views_[0].pose;
+        auto quad=make_black_quad(local_,blank_chain_,blank_texture_size,head?&*head:nullptr);
+        if(!black_quad_valid(quad,blank_texture_size)) return {};
+        return quad;
     }
     void ensure_dot_chain() {
         constexpr unsigned size=64;
@@ -1089,6 +1151,11 @@ public:
     UINT64 end_frame_rejections{};unsigned end_frame_rejected_run_{};void (*observe_frame_rejection)(const char*){}; // layer errors dropped as one frame
     UINT64 subrect_layers{}; // quad/cylinder layers submitted with a rect smaller than their swapchain; must stay 0
     UINT64 swapchain_creates_in_frame{}; // xrCreateSwapchain/xrDestroySwapchain between xrBeginFrame and xrEndFrame; must stay 0
+    // Frames that would have gone out with zero layers while the session shows frames (xr_frame_hardening.hpp), and what was sent instead.
+    UINT64 empty_frames_seen{},empty_fallback_projection{},empty_fallback_black{},empty_fallback_none{};
+    std::array<UINT64,static_cast<unsigned>(EmptyFrameReason::count)> empty_frames_by_reason{};
+    UINT64 chain_create_events{},chain_destroy_events{};
+    void (*observe_xr_event)(const char*){}; // timestamped swapchain / empty-frame lines for xr-recoveries.log (already rate limited here)
     std::array<UINT64,2> wrist_layers{};
     UINT64 wrist_failures{},wrist_timeouts{},wrist_target_creations{},wrist_retirement_waits{};
     HRESULT wrist_failure_hresult{S_OK},wrist_device_removed{S_OK};
@@ -1431,6 +1498,7 @@ public:
                 info.usageFlags=XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT|XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT;
                 info.format=format;info.width=width;info.height=height;info.sampleCount=1;info.faceCount=1;info.arraySize=1;info.mipCount=1;
                 checked(create_chain(session_,&info,&next[eye]),"Create game eye swapchain");
+                log_chain_event_(true,"Create game eye swapchain",width,height,next[eye]);
                 uint32_t count{};checked(enumerate_images(next[eye],0,&count,nullptr),"Get eye images");
                 images[eye].resize(count);for(auto& image:images[eye]) image.type=XR_TYPE_SWAPCHAIN_IMAGE_D3D11_KHR;
                 checked(enumerate_images(next[eye],count,&count,reinterpret_cast<XrSwapchainImageBaseHeader*>(images[eye].data())),"Read eye images");
@@ -1447,6 +1515,7 @@ public:
         try {
             drain_gpu_for_surface();
             for(auto& chain:chains_) if(chain) {
+                log_chain_event_(false,"Destroy replaced eye swapchain",width_,height_,chain);
                 chain_sizes_.erase(chain);checked(xrDestroySwapchain(chain),"Destroy replaced eye swapchain");chain=XR_NULL_HANDLE;
             }
         } catch(...) {for(auto chain:next) if(chain) xrDestroySwapchain(chain);throw;}
@@ -1456,6 +1525,8 @@ public:
             D3D11_TEXTURE2D_DESC actual{};images_[eye][0].texture->GetDesc(&actual);eye_texture_formats[eye]=actual.Format;
         }
         for(auto& size:swapchain_eye_sizes) size={static_cast<int32_t>(width),static_cast<int32_t>(height)};
+        last_good_projection_.reset(); // it references the replaced eye chains
+        if(context_) ensure_menu_band_chain(); // the band chain is rebuilt at its final size now, between frames, not on first use by a menu or authored frame
         return true;
     }
     const std::array<XrView,2>* tracking_views() const {
@@ -1576,6 +1647,8 @@ public:
         settings_images_.clear();
         if(settings_chain_ && xrDestroySwapchain) {xrDestroySwapchain(settings_chain_);settings_chain_=XR_NULL_HANDLE;}
         dot_images_.clear();dot_filled_.clear();wheel_cursor_.reset();
+        blank_images_.clear();blank_filled_.clear();last_good_projection_.reset();
+        if(blank_chain_ && xrDestroySwapchain) {xrDestroySwapchain(blank_chain_);blank_chain_=XR_NULL_HANDLE;}
         if(dot_chain_ && xrDestroySwapchain) {xrDestroySwapchain(dot_chain_);dot_chain_=XR_NULL_HANDLE;}
         vignette_images_.clear();vignette_filled_.clear();
         if(vignette_chain_ && xrDestroySwapchain) {xrDestroySwapchain(vignette_chain_);vignette_chain_=XR_NULL_HANDLE;}
@@ -1598,7 +1671,7 @@ public:
         if(!alternate_enabled && (alt_kept_[0] || alt_kept_[1])) {alt_kept_[0].Reset();alt_kept_[1].Reset();alt_records_={};} // fallen back: release the kept copies
         const bool world_scene=gameplay || world_ui_kind_!=0;
         last_world_ui_layer=false;
-        timing={};timing.start_ns=cpu_time_ns();
+        timing={};timing.start_ns=cpu_time_ns();++present_count_;
         if(tracked_pair_()) {
             timing.rendered_display_times=rendered_display_times_;
             timing.rendered_locate_cpu_times=rendered_locate_cpu_times_;
@@ -1832,8 +1905,9 @@ public:
         if(gameplay && !settings_.open()) menu_panel_.reset();
         const bool settings_world=gameplay && settings_.open();settings_in_world_=settings_world;
         std::optional<XrCompositionLayerQuad> settings_panel;
-        if(continuity_.usable() && left && right &&
-           (!world_scene || !tracked_gameplay_required_ || tracked_pair_()) && alt_kept_ok_(authored_camera || settings_.open())) {
+        EmptyFrameFacts gates;gates.should_render=frame_.shouldRender!=XR_FALSE;
+        if((gates.continuity_usable=continuity_.usable()) && (gates.have_sources=left && right) &&
+           (gates.tracked_ok=!world_scene || !tracked_gameplay_required_ || tracked_pair_()) && (gates.alternate_ok=alt_kept_ok_(authored_camera || settings_.open()))) {
             std::array<ID3D11Texture2D*,2> sources{left,right};bool menu_band_ready=false;
             if(settings_.open()) {update_settings_image(pointer);++settings_layers;}
             const auto sharpness=static_cast<float>(settings_.sharpness());
@@ -1908,7 +1982,7 @@ public:
                     }
                 }
                 if(mirror_rects[eye]) mirror_->draw(images_[eye].at(index).texture,*mirror_rects[eye]);}
-                if(eye==0 && !world_scene) menu_band_ready=copy_menu_band(images_[0].at(index).texture);
+                if(eye==0 && !world_scene) gates.band_ready=menu_band_ready=copy_menu_band(images_[0].at(index).texture);
                 layers[eye].subImage.swapchain=chains_[eye];
                 layers[eye].subImage.imageRect.extent={static_cast<int32_t>(width_),static_cast<int32_t>(height_)};
                     if(observe_transfer && !settings_.open()) {SpanClock span(xr_spans,XrSpan::transfer_observer);observe_transfer(eye,processed,images_[eye].at(index).texture,layers[eye],gameplay,tracked_pair_(),sources[eye]);}
@@ -1976,6 +2050,36 @@ public:
         for(size_t k=0;k<4;++k) {layer_pose_repaired[k]+=guard.repaired[k];layer_pose_dropped[k]+=guard.dropped[k];}
         if(guard.submit_none) ++layer_pose_no_submit;
         if(guard.bad_kind>=0) {char text[160];std::snprintf(text,sizeof(text),"%s q=(%g,%g,%g,%g) p=(%g,%g,%g)",kinds[guard.bad_kind],guard.bad_pose.orientation.x,guard.bad_pose.orientation.y,guard.bad_pose.orientation.z,guard.bad_pose.orientation.w,guard.bad_pose.position.x,guard.bad_pose.position.y,guard.bad_pose.position.z);layer_pose_last=text;}}
+        // Never an empty frame while the session shows frames (xr_frame_hardening.hpp): the runtime answers zero layers by rebuilding its direct-mode
+        // swap sets, and on Linux that was followed by "Couldn't find a backbuffer" / "Connection inactive". Re-send the last real projection (its own
+        // poses) or, with none, an opaque black quad. Every frame that would have been empty is counted and logged with a reason.
+        XrCompositionLayerQuad fallback_quad{};const XrCompositionLayerBaseHeader* fallback_layer=nullptr;
+        const unsigned real_layers=end.layerCount;
+        if(real_layers && end.layers[0]->type==XR_TYPE_COMPOSITION_LAYER_PROJECTION)
+            last_good_projection_.capture(*reinterpret_cast<const XrCompositionLayerProjection*>(end.layers[0]),GetTickCount64(),pose_epoch());
+        if(!real_layers) {
+            gates.layer_count=0;
+            const auto reason=classify_empty_frame(gates);
+            const auto now_ms=GetTickCount64();
+            auto choice=choose_frame_fallback({0,state,gates.should_render,reason,last_good_projection_.usable(chains_,now_ms,pose_epoch()),blank_ready_()});
+            if(choice==FrameFallback::last_projection) {
+                fallback_layer=last_good_projection_.header();end.layers=&fallback_layer;end.layerCount=1;
+            } else if(choice==FrameFallback::black_quad) {
+                if(const auto quad=black_fallback_layer_()) {
+                    fallback_quad=*quad;fallback_layer=reinterpret_cast<const XrCompositionLayerBaseHeader*>(&fallback_quad);end.layers=&fallback_layer;end.layerCount=1;
+                } else choice=FrameFallback::none;
+            }
+            ++empty_frames_seen;++empty_frames_by_reason[static_cast<unsigned>(reason)];
+            if(choice==FrameFallback::last_projection) ++empty_fallback_projection;else if(choice==FrameFallback::black_quad) ++empty_fallback_black;else ++empty_fallback_none;
+            if(observe_xr_event) {
+                const auto decision=empty_event_limiter_.admit(now_ms);
+                if(decision.final_notice) observe_xr_event("xr-event empty-frame log cap reached; further empty frames are counted in xr-live-status.json only");
+                else if(decision.emit) {
+                    const auto [utc,local]=wall_stamps_();
+                    observe_xr_event(format_empty_frame_event(present_count_,state,reason,choice,gates.should_render,gameplay,authored_camera,world_scene,gates.band_ready,utc,local,decision.suppressed_before).c_str());
+                }
+            }
+        }
         if(const auto ended=xrEndFrame(session_,&end);XR_FAILED(ended)) {
             // SteamVR fails single frames with layer errors ("compositor failed EndFrame()"): drop that frame instead of recreating the
             // session (the user sees SteamVR home); a run of 30 still recovers. The layer dump goes to xr-recoveries.log either way.
@@ -1990,11 +2094,11 @@ public:
         } else end_frame_rejected_run_=0;
         frame_open_=false;
         timing.submit_ns=cpu_time_ns()-stage_start;timing.end_ns=cpu_time_ns();
-        last_layer_submitted=end.layerCount!=0;last_menu_layer=last_layer_submitted && !world_scene;
+        last_layer_submitted=real_layers!=0;last_menu_layer=last_layer_submitted && !world_scene; // real mod layers only: a fallback frame is not content
         last_authored_camera_layer=last_layer_submitted && authored_camera && !settings_.open();
         if(last_authored_camera_layer) ++authored_camera_layers;
         rendered_mask_=0;
-        if(end.layerCount) {++submitted;if(!world_scene) ++menu_layers;}else ++dropped;
+        if(real_layers) {++submitted;if(!world_scene) ++menu_layers;}else ++dropped;
     }
 };
 } // namespace d2vr

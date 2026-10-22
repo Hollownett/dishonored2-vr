@@ -104,7 +104,7 @@ void check_result(const Policy::DistanceResult& output) {
         bool scaled=false;for(const auto at:Policy::offsets)if(offset>=at && offset<at+4)scaled=true;
         if(!scaled)assert(bytes[offset]==source[offset]);
     }
-    for(unsigned index=0;index<6;++index) {float value{};std::memcpy(&value,bytes+Policy::offsets[index],4);assert(value==Policy::shipped[index]*active->factor());}
+    for(unsigned index=0;index<6;++index) {float value{};std::memcpy(&value,bytes+Policy::offsets[index],4);assert(value==Policy::view_value(index,active->factor()));}
 }
 void __fastcall native_entry(std::uintptr_t value) {
     assert(value==sensor);++entry_calls;if(entry_action)entry_action();
@@ -146,6 +146,8 @@ int main() {
         []{put(declaration+0x90,1.f);},[]{logic_value=1;},[]{active->factor(1.6f);}}) {
         owners();logic_value=2;active->factor(1.5f);expect_view=false;distance_action=mutation;active->invoke_entry(sensor);distance_action={};clean();
     }
+    owners();logic_value=2;active->factor(.75f);expect_view=true;active->invoke_entry(sensor);clean(); // closer takedowns: the view shrinks distance/height only
+    active->factor(.4f);assert(active->factor()==.75f);active->factor(2.5f);assert(active->factor()==.75f);active->factor(NAN);assert(active->factor()==.75f);
     owners();logic_value=2;active->factor(1.5f);expect_view=true;
     distance_action=[] {throw std::runtime_error("distance");};bool caught=false;try {active->invoke_entry(sensor);}catch(const std::runtime_error&) {caught=true;}assert(caught);clean();
     distance_action=[] {RaiseException(0xe0424242,0,0,nullptr);};assert(native_exception());clean();distance_action={};

@@ -16,7 +16,7 @@ namespace d2vr {
 // Choke is a native BLOCK (RB) hold; lethal and drop kills are a MELEE (RT) press [inferred].
 struct TakedownState {bool choke{},kill{},drop{};std::uint32_t spawn{};
     bool offered{}; // GlobalAssassination +0x1d0 (the rule handler that passed, 0 = nothing offered): the exact 3 m / 1.7 m / unaware verdict, steady where the sensor target flickers // target spawn id (kill, else choke, else first drop candidate); 0 = none
-    std::uint32_t kill_spawn{},drop_spawn{};
+    std::uint32_t kill_spawn{},drop_spawn{},choke_spawn{};
     bool any() const noexcept {return choke || kill || drop;}};
 // Finds the three sensors (a component walk, done rarely); poll() then reads only their fields.
 class NativeTakedowns {
@@ -72,7 +72,7 @@ public:
         if(global_ && value<std::uintptr_t>(read,global_)==base+0x1b3f998 && value<std::uintptr_t>(read,global_+0x10)==player_)
             out.offered=value<std::uintptr_t>(read,global_+0x1d0).value_or(0)!=0;
         out.spawn=out.kill?kill_id:out.choke?choke_id:out.drop?drop_id:0;
-        out.kill_spawn=kill_id;out.drop_spawn=drop_id;
+        out.kill_spawn=kill_id;out.drop_spawn=drop_id;out.choke_spawn=choke_id;
         return out;
     }
     unsigned sensors() const noexcept {return (sensor_[0]?1u:0u)|(sensor_[1]?2u:0u)|(sensor_[2]?4u:0u);}
