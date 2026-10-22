@@ -306,9 +306,9 @@ cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT /Isrc tests\perf_meter_check.
 if not "%errorlevel%"=="0" exit /b 1
 cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT /Isrc tests\frame_split_check.cpp /Fo:build\frame_split_check.obj /Fe:build\frame_split_check.exe
 if not "%errorlevel%"=="0" exit /b 1
-cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT /Isrc tests\discovery_cadence_check.cpp /Fo:build\discovery_cadence_check.obj /Fe:build\discovery_cadence_check.exe
+cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT /Isrc tests\logic_mask_cache_check.cpp /Fo:build\logic_mask_cache_check.obj /Fe:build\logic_mask_cache_check.exe
 if not "%errorlevel%"=="0" exit /b 1
-build\discovery_cadence_check.exe
+build\logic_mask_cache_check.exe
 if not "%errorlevel%"=="0" exit /b 1
 cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT /Isrc tests\overlay_dirty_check.cpp /Fo:build\overlay_dirty_check.obj /Fe:build\overlay_dirty_check.exe
 if not "%errorlevel%"=="0" exit /b 1

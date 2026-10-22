@@ -36,6 +36,7 @@ assert "ui.recorded_tick" in probe and "panel.recorded_tick" in probe
 assert 'L"build"/L"no-overlay-skip"' in probe and 'L"build"/L"no-discovery-throttle"' in probe
 features = {f["file"] for f in json.loads((root / "tools/default_features.json").read_text())["features"]}
 assert {"no-overlay-skip", "no-discovery-throttle"} <= features
-# discovery: failures and epoch changes restart the cadence; later frames reuse the answer
-assert probe.count("discovery_throttle.restart()") >= 3 and "discovery_throttle.cadence.due(" in probe
+# discovery: the per-frame cache is the only path; validation stays a live lambda on every call; hooks share game_logic_mask
+assert "logic_mask_cache.get(discovery_throttle_enabled,frames.load(" in probe and "logic_mask_valid(game)" in probe
+assert "discovery_throttle." not in probe and "DiscoveryCadence" not in probe
 print("overlay_skip_routing_check ok")

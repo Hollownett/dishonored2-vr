@@ -52,7 +52,7 @@
 #include "comfort_vignette.hpp"
 #include "perf_meter.hpp"
 #include "frame_split.hpp"
-#include "discovery_cadence.hpp"
+#include "logic_mask_cache.hpp"
 #include "overlay_dirty.hpp"
 #include "mod_gpu_timer.hpp"
 #include "authored_view.hpp"
@@ -3200,20 +3200,15 @@ static void poll_test_commands() noexcept {
         for(const auto& l:lines) out<<now<<' '<<run_test_command(l)<<std::endl;
     } catch(...) {}
 }
-// Plan E task 4: the manager-table discovery below runs every frame until its answer has been unchanged for 120 frames, then every 8th
-// frame (the other frames return the last answer). A failed validation, a load (game state != 3) or a pose-epoch change brings back
-// every-frame reads. Knob build/no-discovery-throttle keeps the every-call read.
+// Plan E task 4 (fix round 1): one live read of the manager table per displayed frame answers every call of that frame (about 90 a frame,
+// from the render thread and from hooks); the game object and its state are validated live on every call. Knob build/no-discovery-throttle
+// reads on every call again. The logic is in logic_mask_cache.hpp and pinned by logic_mask_cache_check.
 static bool discovery_throttle_enabled=true;
-static struct DiscoveryThrottle {
-    std::mutex mutex;d2vr::DiscoveryCadence cadence;UINT mask{};bool have{},changed{},last_due{true};std::uint64_t epoch{},decided_frame{~0ull};
-    void restart() {cadence.invalidate();have=false;decided_frame=~0ull;}
-    std::atomic<UINT64> served_from_cache{},reads{};
-} discovery_throttle;
+static d2vr::LogicMaskCache logic_mask_cache;
 static std::string discovery_status_json() {
-    std::lock_guard<std::mutex> lock(discovery_throttle.mutex);
-    std::ostringstream o;o<<"{\"throttle\":"<<(discovery_throttle_enabled?"true":"false")<<",\"throttling\":"<<(discovery_throttle.cadence.throttling()?"true":"false")
-        <<",\"reads\":"<<discovery_throttle.reads.load()<<",\"served_from_cache\":"<<discovery_throttle.served_from_cache.load()
-        <<",\"invalidations\":"<<discovery_throttle.cadence.invalidations()<<'}';
+    std::ostringstream o;o<<"{\"per_frame_cache\":"<<(discovery_throttle_enabled?"true":"false")
+        <<",\"reads\":"<<logic_mask_cache.reads.load()<<",\"served_from_cache\":"<<logic_mask_cache.served.load()
+        <<",\"resets\":"<<logic_mask_cache.resets.load()<<'}';
     return o.str();
 }
 static std::string overlay_status_json() {
@@ -3226,42 +3221,17 @@ static std::string overlay_status_json() {
      <<",\"discovery\":"<<discovery_status_json();
     return o.str();
 }
-UINT game_logic_mask() {
-    CpuSpan discovery_span{logic_discovery_cpu_ns};
+static bool logic_mask_valid(std::uintptr_t& game) {
     // MIT headtracking profile, corroborated against the live engine manager.
     // Fresh reads make menus/loading visible without foreground-key heuristics.
-    std::uintptr_t game{},vtable{};int state{};
-    if(!read_self(image_base+0x39a5290,&game,8) || !game ||
-       !read_self(game,&vtable,8) || vtable!=image_base+0x1c940a8 ||
-       !read_self(game+0x341058,&state,4) || state!=3) {
-        if(discovery_throttle_enabled) {std::lock_guard<std::mutex> lock(discovery_throttle.mutex);discovery_throttle.restart();}
-        return 0;
-    }
-    if(discovery_throttle_enabled) {
-        std::lock_guard<std::mutex> lock(discovery_throttle.mutex);
-        const auto epoch=game_xr?game_xr->pose_epoch():0;
-        if(epoch!=discovery_throttle.epoch) {discovery_throttle.epoch=epoch;discovery_throttle.restart();}
-        const auto frame=frames.load(std::memory_order_relaxed);
-        if(frame!=discovery_throttle.decided_frame) { // the first call of a frame decides for the whole frame
-            discovery_throttle.last_due=discovery_throttle.cadence.due(frame,!discovery_throttle.changed);
-            discovery_throttle.changed=false;discovery_throttle.decided_frame=frame;
-        }
-        const bool due=discovery_throttle.last_due;
-        if(!due && discovery_throttle.have) {discovery_throttle.served_from_cache.fetch_add(1,std::memory_order_relaxed);return discovery_throttle.mask;}
-    }
-    const auto publish=[](UINT answer) {
-        if(!discovery_throttle_enabled) return answer;
-        std::lock_guard<std::mutex> lock(discovery_throttle.mutex);
-        if(!discovery_throttle.have || discovery_throttle.mask!=answer) discovery_throttle.changed=true;
-        discovery_throttle.mask=answer;discovery_throttle.have=true;discovery_throttle.reads.fetch_add(1,std::memory_order_relaxed);
-        return answer;
-    };
+    std::uintptr_t vtable{};int state{};
+    return read_self(image_base+0x39a5290,&game,8) && game && read_self(game,&vtable,8) && vtable==image_base+0x1c940a8 &&
+        read_self(game+0x341058,&state,4) && state==3;
+}
+static std::optional<UINT> logic_mask_read(std::uintptr_t game) {
     const auto manager=game+0x1f6ec8;
     std::array<std::uintptr_t,0x8b8/8> entries{};
-    if(!read_self(manager,entries.data(),sizeof(entries))) {
-        if(discovery_throttle_enabled) {std::lock_guard<std::mutex> lock(discovery_throttle.mutex);discovery_throttle.restart();}
-        return 0;
-    }
+    if(!read_self(manager,entries.data(),sizeof(entries))) return std::nullopt;
     // The manager mixes scalars and pointers. Validate ranges before discovery.
     // Keep slots that validated as logic entries and re-probe
     // everything only every 250 ms or when one of those slots changes.
@@ -3289,7 +3259,13 @@ UINT game_logic_mask() {
         std::memcpy(&backref,bytes.data()+8,8);std::memcpy(&id,bytes.data()+0x18,4);
         if(backref==manager && id>0 && id<17 && bytes[0x40]==std::byte{1}) mask|=1u<<id;
     }
-    return publish(mask);
+    return mask;
+}
+UINT game_logic_mask() {
+    CpuSpan discovery_span{logic_discovery_cpu_ns};
+    std::uintptr_t game{};
+    return logic_mask_cache.get(discovery_throttle_enabled,frames.load(std::memory_order_relaxed),GetTickCount64(),
+        [&]{return logic_mask_valid(game);},[&]{return logic_mask_read(game);});
 }
 
 void trace_avatar_fit(const char* reason,UINT64 present,const std::shared_ptr<const d2vr::rig::NativeArmBindingSnapshot>& rig) {

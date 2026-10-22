@@ -36,7 +36,7 @@ public:
     bool must_render(const OverlayKey& key,std::uint64_t now_ms,std::uint64_t max_hold_ms) const noexcept {
         if(!valid_ || key.chain==0) return true;
         if(key.chain!=key_.chain || key.epoch!=key_.epoch || key.content!=key_.content) return true;
-        if(max_hold_ms && (now_ms<rendered_ms_ || now_ms-rendered_ms_>=max_hold_ms)) return true;
+        if(max_hold_ms && now_ms-rendered_ms_>=max_hold_ms) return true;
         return false;
     }
     // After a successful xrReleaseSwapchainImage of a fully drawn image.

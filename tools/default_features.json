@@ -181,8 +181,8 @@
    "id": "discovery-throttle",
    "file": "no-discovery-throttle",
    "kind": "disable",
-   "label": "Check the game's screen state less often when nothing changes",
-   "help": "After about two seconds of an unchanged game state (playing, in a menu), the mod re-reads it every eighth frame instead of every frame. A change is noticed within eight frames. Turn off to read it every time.",
+   "label": "Read the game's screen state once per frame",
+   "help": "The mod asks the game which screen is up (playing, menu, wheel) about 90 times a frame; by default it looks once per frame and reuses the answer within that frame. Turn off to look on every ask as before.",
    "default": true
   },
   {
