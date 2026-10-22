@@ -87,12 +87,30 @@ int main() {
      require(limit_takedown_to_scale(m,base,offered_kill(),.75f).kill,"an unresolved kill target fails open");}
     {Mem m;world(m,9.f,0,0);TakedownState none;
      require(!limit_takedown_to_scale(m,base,none,.75f).any(),"no kill: nothing to limit");}
+    // intent-attack gate: an offered kill/choke beyond the scaled box suppresses the swing press
+    {Mem m;world(m,2.6f,0,0);
+     require(far_takedown_offered(m,base,offered_kill(),.75f),"2.6 m kill offer is far at .75: the swing press is withheld");
+     require(!far_takedown_offered(m,base,offered_kill(),1.f),"scale 1: never far");
+     require(!far_takedown_offered(m,base,offered_kill(),.9f),"2.6 m is inside the .9 box: press allowed");
+     TakedownState c;c.choke=true;c.choke_spawn=guard_spawn;
+     require(far_takedown_offered(m,base,c,.75f),"a far choke offer is far too");
+     require(!far_takedown_offered(m,base,TakedownState{},.75f),"nothing offered: nothing to suppress");}
+    {Mem m;world(m,2.f,0,0);
+     require(!far_takedown_offered(m,base,offered_kill(),.75f),"2 m kill offer is near: press allowed");}
+    {Mem m;world(m,1.f,0,1.5f);
+     require(far_takedown_offered(m,base,offered_kill(),.75f),"height beyond 1.7*S is far");}
+    {Mem m;require(!far_takedown_offered(m,base,offered_kill(),.75f),"unreadable memory fails open (press allowed)");}
+    {Mem m;world(m,9.f,0,0);m.put<uptr>(guard+0xa8,0u);
+     require(!far_takedown_offered(m,base,offered_kill(),.75f),"an unresolved target fails open");}
     // wiring pins (run from the repo root)
     auto slurp=[](const char* path) {std::ifstream in(path);return std::string((std::istreambuf_iterator<char>(in)),{});};
     const auto probe=slurp("src/dxgi_probe.cpp");
     if(!probe.empty()) {
         require(probe.find("takedown-range-scale")!=std::string::npos,"dxgi_probe reads the takedown-range-scale knob");
         require(probe.find("limit_takedown_to_scale(control_reader")!=std::string::npos,"the control poll is range-limited");
+        require(probe.find("far_takedown_offered(control_reader,image_base,raw_takedown")!=std::string::npos,"the raw poll feeds the far-takedown gate");
+        require(probe.find("if(far_block) ++attack_intent_suppressed_far;\n                                                else if(attack_press.start(f.now_ms,polls))")!=std::string::npos,"the swing press is withheld and counted when far");
+        require(probe.find("\\\"suppressed_far_takedown\\\":")!=std::string::npos,"attack_intent reports suppressed_far_takedown");
         require(probe.find("private-view-x1.5")==std::string::npos,"the x1.5 status label is gone");
         require(probe.find("takedown_range_scale_from_knob(text):1.f")!=std::string::npos,"takedown-range off means scale 1 (native)");
     }

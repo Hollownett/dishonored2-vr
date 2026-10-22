@@ -19,6 +19,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <string>
+#include <utility>
 
 namespace d2vr {
 inline constexpr float takedown_scale_default=.75f,takedown_scale_min=.5f,takedown_scale_max=1.f;
@@ -62,5 +63,24 @@ template<class Read> TakedownState limit_takedown_to_scale(Read& read,std::uintp
     const auto target=takedown_target(read,base,state.kill_spawn);
     if(!from || !target) return state;
     return kill_within_scaled_range(*from,target->origin,scale)?state:without_kill(state);
+}
+// The intent-attack gate: true when the engine currently offers a kill or a choke whose target lies beyond the scaled box (the same
+// kill_within_scaled_range box the prompt uses), so a swing must not press the native attack (its own reach is the full 3 m).
+// Fails open (false: press as before) whenever an origin cannot be read or the scale is native.
+template<class Read> bool far_takedown_offered(Read& read,std::uintptr_t base,const TakedownState& raw,float scale) {
+    if(!(scale<takedown_scale_max) || !(raw.kill || raw.choke)) return false;
+    using namespace rig;
+    const auto game=value<std::uintptr_t>(read,base+0x39a5290);
+    if(!game || !typed(read,base,*game,0x1c940a8)) return false;
+    const auto player=value<std::uintptr_t>(read,*game+0x3130b0);
+    if(!player || !typed(read,base,*player,0x1c5e428)) return false;
+    const auto from=value<std::array<float,3>>(read,*player+0x300);
+    if(!from) return false;
+    for(const auto [offered,spawn]:{std::pair<bool,std::uint32_t>{raw.kill,raw.kill_spawn},{raw.choke,raw.choke_spawn}}) {
+        if(!offered || !spawn) continue;
+        const auto target=takedown_target(read,base,spawn);
+        if(target && !kill_within_scaled_range(*from,target->origin,scale)) return true;
+    }
+    return false;
 }
 }

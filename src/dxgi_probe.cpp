@@ -433,7 +433,7 @@ static d2vr::CombatDecision combat_decision{};
 // and the engine decides the stealth kill. Controller thread only, except the atomics (status). reset at StartProbe.
 static d2vr::AttackIntent attack_intent;static d2vr::AttackPress attack_press;static d2vr::AttackHonour attack_honour;
 static bool legacy_sword_contact=false;static bool attack_intent_owns=false,attack_intent_rt=false,attack_intent_block_off=false,attack_intent_ran=false;
-static std::atomic<UINT64> attack_intent_pad_frames{};static std::atomic<bool> attack_intent_honour_read{};
+static std::atomic<UINT64> attack_intent_pad_frames{};static std::atomic<UINT64> attack_intent_suppressed_far{};static std::atomic<bool> attack_intent_honour_read{};
 static std::mutex combat_policy_mutex;
 static d2vr::CombatDecision combat_policy_observation{};
 static d2vr::CombatTargetMemory combat_target_memory;
@@ -2595,7 +2595,7 @@ static std::string combat_policy_status_json() {
         <<",\"policy_rt_edges\":"<<stats.dispatched<<"}"
         <<",\"attack_intent\":{\"presses\":"<<attack_intent.presses()<<",\"slash\":"<<attack_intent.slashes()<<",\"stab\":"<<attack_intent.stabs()<<",\"contact\":"<<attack_intent.contacts()
         <<",\"honoured\":"<<attack_honour.honoured()<<",\"not_honoured\":"<<attack_honour.not_honoured()
-        <<",\"pad_frames\":"<<attack_intent_pad_frames.load()<<",\"dropped\":"<<attack_press.dropped()
+        <<",\"pad_frames\":"<<attack_intent_pad_frames.load()<<",\"dropped\":"<<attack_press.dropped()<<",\"suppressed_far_takedown\":"<<attack_intent_suppressed_far.load()
         <<",\"legacy\":"<<(legacy_sword_contact?"true":"false")<<",\"honour_read\":"<<(attack_intent_honour_read.load()?"true":"false")<<"}"
         <<",\"sword_contact\":"<<d2vr::NativeInteractionAim::sword_contact_status_json();
     return output.str();
@@ -7284,9 +7284,9 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                 controller_bridge.set_game_window(desc.OutputWindow);
                                 const auto logic=game_logic_mask();
                                 auto input=game_xr->controller_input;
-                                d2vr::TakedownState control_takedown{};
+                                d2vr::TakedownState control_takedown{};bool far_takedown_now=false;
                                 auto control_reader=&read_self;
-                                if(logic==2) control_takedown=d2vr::limit_takedown_to_scale(control_reader,image_base,native_takedowns.poll(control_reader,image_base,GetTickCount64()),takedown_range_scale.load()); // closer takedowns: kill target beyond 3*S m is not offered
+                                if(logic==2) {const auto raw_takedown=native_takedowns.poll(control_reader,image_base,GetTickCount64());far_takedown_now=d2vr::far_takedown_offered(control_reader,image_base,raw_takedown,takedown_range_scale.load());control_takedown=d2vr::limit_takedown_to_scale(control_reader,image_base,raw_takedown,takedown_range_scale.load());} // closer takedowns: kill target beyond 3*S m is not offered
                                 if(control_takedown.kill) {kill_sensor_spawn=control_takedown.kill_spawn;kill_sensor_tick=GetTickCount64();}
                                 const auto control_machine=native_takedowns.machine(control_reader);
                                 const auto choke_owner=d2vr::native_player_state_lease(control_reader,image_base,control_machine);
@@ -7846,11 +7846,14 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                             attack_press.held(f.now_ms,polls); // advance first: a press that just finished frees the slot this frame
                                             if(!live) attack_press.reset();
                                             const bool press_free=!attack_press.active();
+                                            const bool far_block=live && far_takedown_now; // takedown range policy: an offer beyond the scaled box must not be lunged at
                                             if(contact_wanted && live && attack_intent.contact_press(now_s,drawn_now,press_free)) {
-                                                if(attack_press.start(f.now_ms,polls)) attack_honour.press(f.now_ms);}
+                                                if(far_block) ++attack_intent_suppressed_far; // far takedown offer: the press is withheld (and counted), not started
+                                                else if(attack_press.start(f.now_ms,polls)) attack_honour.press(f.now_ms);}
                                             if(attack_intent.update({now_s,to_vec(cf.pos),to_vec(cf.head_pos),live,to_vec(cf.aim),to_vec(cf.head_fwd)},crouch.crouched,drawn_now,
-                                                    press_free && !attack_press.active()) && live)
-                                                if(attack_press.start(f.now_ms,polls)) attack_honour.press(f.now_ms);
+                                                    press_free && !attack_press.active()) && live) {
+                                                if(far_block) ++attack_intent_suppressed_far;
+                                                else if(attack_press.start(f.now_ms,polls)) attack_honour.press(f.now_ms);}
                                             attack_intent_rt=live && attack_press.held(f.now_ms,polls);
                                             attack_intent_block_off=live && attack_press.block_released(f.now_ms);
                                             if(attack_intent_rt) ++attack_intent_pad_frames;
