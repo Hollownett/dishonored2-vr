@@ -294,6 +294,9 @@ if not errorlevel 0 goto build_failed
 python tests\live_session_tools_check.py
 if errorlevel 1 goto build_failed
 if not errorlevel 0 goto build_failed
+python tests\hand_body_re_doc_check.py
+if errorlevel 1 goto build_failed
+if not errorlevel 0 goto build_failed
 python tests\sim_saves_check.py
 if errorlevel 1 goto build_failed
 if not errorlevel 0 goto build_failed
