@@ -497,6 +497,38 @@ void retire_keeps_core() {
     assert(U::confirm_gpu_retirement(again)); again = {}; U::collect_retired();
     assert(f.handles.empty() && f.maps.empty() && f.shutdown_count == 1);
 }
+// The seam's session-end and owner-rebuild flows against the real registry: a retired pair whose EVENT ticket lease is
+// still held (D3D11TemporalOwner slot) is abandoned at session end but reclaimed only once that lease drops; an owner
+// rebuild drops the tickets with the owner, so abandonment frees the slot; repeated sessions never fill the 8 slots.
+void session_end_cycles() {
+    Fixture f; auto u = f.owner();
+    for (unsigned session = 1; session <= 10; ++session) {
+        auto d = Fixture::desc(); d.feature_generation = session;
+        assert(Fixture::prepare(u, d) && u.ready()); auto lease = u.lease(); auto in = f.eval(); in.feature_generation = session;
+        assert(U::evaluate(lease, in));                     // GPU work attempted: the pair is quarantined until proven complete
+        auto ticket = lease.retained_owner();               // the EVENT ticket's generation lease, held by the owner's slot
+        u.retire();                                         // session end on the stop thread: retire only, no NGX work
+        assert(U::confirm_gpu_retirement(lease));           // the ledger abandons the ticket (next executing-thread dispatch)
+        lease = {}; U::collect_retired();
+        assert(f.handles.size() == 2);                      // still held through the ticket lease: never reclaimed early
+        ticket.reset(); U::collect_retired();               // the owner polls (or is dropped): the ticket lease drops
+        assert(f.handles.empty() && f.maps.size() == 1);    // slot reclaimed only now; the capability map (Core) stays
+    }
+    assert(f.init_count == 1 && f.shutdown_count == 0);    // ten sessions, one NGX init, no registry_full
+    {   // owner rebuild (new device generation) with a pending ticket: the old Core is replaced once no pair holds it;
+        // the dropped owner releases its ticket lease; abandonment then frees the slot
+        auto d = Fixture::desc(); d.feature_generation = 11; ++d.device_generation;
+        assert(Fixture::prepare(u, d) && f.init_count == 2 && f.shutdown_count == 1);
+        auto lease = u.lease(); auto in = f.eval(); in.feature_generation = 11; in.device_generation = d.device_generation;
+        assert(U::evaluate(lease, in)); auto ticket = lease.retained_owner();
+        u.retire(); assert(U::confirm_gpu_retirement(lease)); lease = {}; U::collect_retired();
+        assert(f.handles.size() == 2);                      // the pending ticket still owns it
+        ticket.reset(); U::collect_retired(); assert(f.handles.empty());
+    }
+    auto d = Fixture::desc(); d.feature_generation = 12; d.device_generation = 2; // a later session still prepares: nothing stranded
+    assert(Fixture::prepare(u, d) && u.ready() && u.status().reason == U::Reason::none && f.init_count == 2);
+    u.disable(); assert(f.handles.empty() && f.maps.empty() && f.shutdown_count == 2);
+}
 void optimal_settings() {
     {   // Quality for a 1920x1080 output: 2/3 render size inside the dynamic range; the Core is shared with prepare.
         Fixture f; auto u = f.owner(); U::OptimalSettings out; NVSDK_NGX_Result result{};
@@ -564,6 +596,6 @@ int main() {
     static_assert(static_cast<int>(NVSDK_NGX_PerfQuality_Value_DLAA) == 5, "pinned SDK DLAA ABI");
     failure_cleanup(); reasons_and_validation(); histories_and_retirement();
     evaluation_failures_and_invalid_inputs(); bounded_quarantine(); shared_core_and_concurrency(); incompatible_shared_owner(); aliases_across_live_generations(); repeated_prepare_context_validation(); cleanup_failures_are_once();
-    retire_keeps_core(); optimal_settings(); quality_dimensions_and_subrects();
+    retire_keeps_core(); session_end_cycles(); optimal_settings(); quality_dimensions_and_subrects();
     std::cout << "dlss_lifecycle_check: passed (injected CPU calls only)\n";
 }

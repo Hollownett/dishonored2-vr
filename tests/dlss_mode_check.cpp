@@ -138,6 +138,30 @@ static void fallback_machine() {
         expect(!dlss_guarded([]{throw std::bad_alloc();},[&]{++fallbacks;}) && fallbacks==1,"bad_alloc routed to the fallback");
         expect(!dlss_guarded([]{throw 7;},[&]{++fallbacks;throw 8;}) && fallbacks==2,"a throwing fallback is contained too");
     }
+    {   // isolation policy: work never runs twice after a throw; unisolated only when the owner could not isolate
+        using d2vr::DlssIsolation;using d2vr::dlss_isolated_run;
+        int runs=0;
+        const auto counting=[&]{++runs;};
+        const auto isolate_ok=[&](auto& work) {work();return DlssIsolation::ok;};
+        expect(dlss_isolated_run(isolate_ok,counting) && runs==1,"isolated work runs once");
+        runs=0;
+        const auto isolate_unavailable=[&](auto&) {return DlssIsolation::unavailable;};
+        expect(dlss_isolated_run(isolate_unavailable,counting) && runs==1,"an owner that cannot isolate runs the work once, unisolated");
+        runs=0;
+        // the owner swallowed the work's exception (D3D11TemporalOwner::Recording::isolate -> callback_exception)
+        const auto isolate_swallowing=[&](auto& work) {try {work();return DlssIsolation::ok;} catch(...) {return DlssIsolation::failed;}};
+        const auto throwing=[&]{++runs;throw std::bad_alloc();};
+        expect(!dlss_isolated_run(isolate_swallowing,throwing) && runs==1,"work that threw inside the isolation is never re-run");
+        runs=0;
+        const auto isolate_failed=[&](auto&) {return DlssIsolation::failed;};
+        expect(!dlss_isolated_run(isolate_failed,counting) && runs==0,"a failed callback is never re-run");
+        runs=0;
+        expect(!dlss_isolated_run(isolate_unavailable,throwing) && runs==1,"a throw on the unisolated path is contained and reported");
+        runs=0;
+        const auto isolate_throwing=[&](auto&) -> DlssIsolation {throw 3;};
+        expect(!dlss_isolated_run(isolate_throwing,counting) && runs==0,"a throwing isolate is contained and the work is not re-run");
+        d2vr::DlssRetirementLedger reserved;expect(reserved.retired_count()==0 && d2vr::DlssRetirementLedger::reserve_count>=16,"the ledger reserves beyond the 8 pair slots");
+    }
 }
 
 static void provider_lookup() {

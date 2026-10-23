@@ -4316,7 +4316,7 @@ void prepare_head_view(void* view) noexcept {
             const bool dlss_owned=dlss_jitter_mode.load(std::memory_order_relaxed);jitter_owner_dlss[eye_slot]=dlss_owned;
             const auto j=d2vr::taa_sample_uv(counter,dlss_owned,static_cast<float>(taa_width.load()),static_cast<float>(taa_height.load()));
             auto pj=j;pj.x*=taa_jitter_scale[0];pj.y*=taa_jitter_scale[1];d2vr::apply_taa_jitter(*optical,pj);taa_view_jitter={j.x*taa_jitter_scale[2],j.y*taa_jitter_scale[3]};
-        }
+        } else jitter_owner_dlss[eye_slot]=false; // no forced jitter this frame: the TAA replacement must not assume the Halton pattern
         d2vr::Vec3 centre{
             ((*xr_views)[0].pose.position.x+(*xr_views)[1].pose.position.x)*.5,
             ((*xr_views)[0].pose.position.y+(*xr_views)[1].pose.position.y)*.5,

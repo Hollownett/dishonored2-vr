@@ -116,6 +116,8 @@ class DlssRetirementLedger {
     std::uint64_t active_=0,active_outstanding_=0;
     std::vector<std::pair<std::uint64_t,std::uint64_t>> retired_; // generation, outstanding tickets
 public:
+    static constexpr std::size_t reserve_count=16; // above the SDK owner's 8 pair slots: retire() never allocates in practice
+    DlssRetirementLedger() {retired_.reserve(reserve_count);}
     std::uint64_t active() const noexcept {return active_;}
     std::uint64_t active_outstanding() const noexcept {return active_outstanding_;}
     std::size_t retired_count() const noexcept {return retired_.size();}
@@ -149,6 +151,19 @@ public:
 // instead of std::terminate. Returns false when `on_exception` ran.
 template<class Work,class OnException> bool dlss_guarded(Work&& work,OnException&& on_exception) noexcept {
     try {work();return true;} catch(...) {try {on_exception();} catch(...) {} return false;}
+}
+
+// Outcome of asking the state owner to run work inside its pipeline isolation.
+enum class DlssIsolation {ok,failed,unavailable}; // ok: ran isolated; failed: the work threw or failed (never re-run); unavailable: could not isolate
+// Policy for NGX lifecycle work: run it isolated when the owner can; if the owner could not isolate (wrong thread,
+// state unavailable, busy) run it once unisolated under a guard; if it threw or failed inside the isolation it is
+// never run again. Returns true only when the work completed. Nothing escapes.
+template<class Isolate,class Work> bool dlss_isolated_run(Isolate&& isolate,Work&& work) noexcept {
+    DlssIsolation outcome=DlssIsolation::unavailable;
+    if(!dlss_guarded([&] {outcome=isolate(work);},[&] {outcome=DlssIsolation::failed;})) return false;
+    if(outcome==DlssIsolation::ok) return true;
+    if(outcome==DlssIsolation::failed) return false;
+    return dlss_guarded([&] {work();},[] {});
 }
 
 // Where the user's nvngx_dlss.dll is. The mod never bundles the provider: the mod home root is searched first, then

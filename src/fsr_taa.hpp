@@ -98,7 +98,9 @@ private:
     DlssRetirementLedger dlss_ledger_;
     DlssEyeUpscaler dlss_;                 // production owner: official SDK calls and signed-provider validation
     DlssEyeUpscaler::Lease dlss_lease_;    // the active pair; empty while off, pending or failed
-    std::vector<std::pair<std::uint64_t,DlssEyeUpscaler::Lease>> dlss_retired_leases_; // retired pairs until the ledger releases them
+    static std::vector<std::pair<std::uint64_t,DlssEyeUpscaler::Lease>> dlss_reserved_leases() {std::vector<std::pair<std::uint64_t,DlssEyeUpscaler::Lease>> v;v.reserve(DlssRetirementLedger::reserve_count);return v;}
+    std::vector<std::pair<std::uint64_t,DlssEyeUpscaler::Lease>> dlss_retired_leases_=dlss_reserved_leases(); // retired pairs until the ledger releases them (reserved: no allocation in practice)
+    std::array<DlssEyeUpscaler::Lease,2> dlss_orphans_{}; // non-allocating slots for a lease the vector could not take: confirmed on the next release, never stranded
     DlssEyeUpscaler::Desc dlss_desc_{};bool dlss_desc_valid_{};
     DlssEyeUpscaler::OptimalSettings dlss_optimal_{};UINT dlss_optimal_for_w_{},dlss_optimal_for_h_{};
     std::uint64_t dlss_device_generation_{},dlss_dimension_generation_{},dlss_feature_generation_{};
@@ -121,10 +123,17 @@ private:
         dlss_state=static_cast<unsigned>(dlss_fallback_.state());dlss_last_reason=dlss_fallback_.last_reason();dlss_last_result=dlss_fallback_.last_result();
     }
     // NGX lifecycle calls (create/release/optimal settings) record on the immediate context: isolate the game's
-    // pipeline state around them whenever the owner exists; without an owner nothing NGX runs anyway.
-    template<class Work> void dlss_isolated_locked(Work&& work) noexcept {
-        if(dlss_owner_ && dlss_owner_->isolate([&](ID3D11DeviceContext1*) {work();return true;})==D3D11TemporalOwner::Status::ok) return;
-        work();
+    // pipeline state around them whenever the owner can (dlss_isolated_run policy: a throw inside the isolation is
+    // never re-run; only wrong_thread/state_unavailable/busy fall back to one unisolated, guarded run). False: the
+    // work did not complete; the caller fails the session where that matters.
+    template<class Work> bool dlss_isolated_locked(Work&& work) noexcept {
+        return dlss_isolated_run([&](auto& isolated_work) {
+            if(!dlss_owner_) return DlssIsolation::unavailable;
+            const auto status=dlss_owner_->isolate([&](ID3D11DeviceContext1*) {isolated_work();return true;});
+            if(status==D3D11TemporalOwner::Status::ok) return DlssIsolation::ok;
+            if(status==D3D11TemporalOwner::Status::callback_exception || status==D3D11TemporalOwner::Status::callback_failed) return DlssIsolation::failed;
+            return DlssIsolation::unavailable;
+        },work);
     }
     // Releases every retired pair the ledger marks releasable (its last EVENT completed, or it was abandoned).
     void dlss_release_locked() noexcept {
@@ -135,8 +144,16 @@ private:
                     else ++r;
                 }
             }
+            for(auto& orphan:dlss_orphans_) if(orphan) {dlss_isolated_locked([&] {DlssEyeUpscaler::confirm_gpu_retirement(orphan);});orphan={};} // abandoned off the ledger: released, not stranded
             dlss_isolated_locked([] {DlssEyeUpscaler::collect_retired();});
         },[] {});
+    }
+    // Keeps a lease the vector could not take (allocation failure) in a non-allocating slot; a second orphan evicts
+    // the first into the other slot. Both are confirmed and released at the next release on the executing thread.
+    void dlss_orphan_locked(DlssEyeUpscaler::Lease lease) noexcept {
+        if(!dlss_orphans_[0]) {dlss_orphans_[0]=std::move(lease);return;}
+        if(!dlss_orphans_[1]) {dlss_orphans_[1]=std::move(lease);return;}
+        dlss_orphans_[1]=std::move(lease); // both held: the newest replaces the second (bounded; the first stays until released)
     }
     void dlss_fail_locked(DlssEyeUpscaler::Reason reason,NVSDK_NGX_Result result=NVSDK_NGX_Result_Success) noexcept {
         if(dlss_fallback_.wants_feature()) dlss_fallback_.note_prepare(false,static_cast<unsigned>(reason),static_cast<int>(result));
@@ -159,7 +176,7 @@ private:
         dlss_guarded([&] {
             if(dlss_lease_) {dlss_retired_leases_.push_back({dlss_lease_.generation(),dlss_lease_});dlss_lease_={};}
             dlss_ledger_.retire();
-        },[&] {dlss_lease_={};dlss_ledger_.abandon_outstanding();dlss_ledger_.retire();}); // no room to track it: abandon rather than strand
+        },[&] {if(dlss_lease_) dlss_orphan_locked(std::move(dlss_lease_));dlss_lease_={};dlss_ledger_.abandon_outstanding();dlss_ledger_.retire();}); // no room to track it: keep the lease to abandon, never strand
         dlss_isolated_locked([&] {dlss_.retire();}); // the NGX Core stays initialized for the next pair
         dlss_desc_valid_=false;dlss_scratch_.reset();
         dlss_release_locked();
@@ -177,14 +194,14 @@ private:
         dlss_guarded([&] {dlss_maintain_unguarded(immediate);},[&] {dlss_fail_locked(DlssEyeUpscaler::Reason::exception);});
     }
     void dlss_maintain_unguarded(ID3D11DeviceContext* immediate) {
-        if(dlss_facade_dirty_) {dlss_facade_dirty_=false;dlss_isolated_locked([&] {dlss_.retire();});dlss_release_locked();} // work deferred from an off-thread session end
+        if(dlss_facade_dirty_) {dlss_facade_dirty_=false;(void)dlss_isolated_locked([&] {dlss_.retire();});dlss_release_locked();} // work deferred from an off-thread session end
         dlss_poll_locked();
         const bool wanted=dlss_active.load() && !dlss_provider_directory.empty() && !dlss_cache_directory.empty() && immediate && immediate->GetType()==D3D11_DEVICE_CONTEXT_IMMEDIATE;
         if(dlss_fallback_.select(wanted) && !wanted) dlss_retire_locked();
         dlss_publish_state_locked();
         if(!dlss_fallback_.engaged()) {
             if(!wanted && dlss_lease_) dlss_retire_locked();
-            if(!wanted && dlss_core_live_ && !dlss_lease_ && dlss_retired_leases_.empty()) {dlss_isolated_locked([&] {dlss_.disable();});dlss_core_live_=false;} // nothing left: shut the NGX Core down here, on the owning thread
+            if(!wanted && dlss_core_live_ && !dlss_lease_ && dlss_retired_leases_.empty() && !dlss_orphans_[0] && !dlss_orphans_[1]) {(void)dlss_isolated_locked([&] {dlss_.disable();});dlss_core_live_=false;} // nothing left: shut the NGX Core down here, on the owning thread
             return;
         }
         if(!ready.load()) return;
@@ -214,9 +231,10 @@ private:
             // features only once the engine renders inside the accepted range (bounded by the fallback's wait budget).
             if(dlss_optimal_for_w_!=w || dlss_optimal_for_h_!=h) {
                 NVSDK_NGX_Result result{};DlssEyeUpscaler::OptimalSettings optimal{};
-                DlssEyeUpscaler::Reason reason{};
-                dlss_isolated_locked([&] {reason=dlss_.optimal_settings(device,immediate,paths,dlss_device_generation_,w,h,DlssEyeUpscaler::Quality::quality,optimal,&result);});
+                DlssEyeUpscaler::Reason reason{DlssEyeUpscaler::Reason::exception};
+                const bool queried=dlss_isolated_locked([&] {reason=dlss_.optimal_settings(device,immediate,paths,dlss_device_generation_,w,h,DlssEyeUpscaler::Quality::quality,optimal,&result);});
                 ++dlss_optimal_queries;dlss_core_live_=true;
+                if(!queried) {dlss_fail_locked(DlssEyeUpscaler::Reason::exception);return;}
                 if(reason!=DlssEyeUpscaler::Reason::none) {dlss_fail_locked(reason,result);return;}
                 const auto optimal_value=dlss_mode::optimal_fraction(w,h,optimal.optimal_width,optimal.optimal_height);
                 if(!optimal_value) {dlss_fail_locked(DlssEyeUpscaler::Reason::optimal_failed);return;} // an unusable render size is a failure, not a wait
@@ -224,7 +242,7 @@ private:
                 dlss_quality_fraction=*optimal_value;
             }
             if(!upscale || rw<dlss_optimal_.min_width || rw>dlss_optimal_.max_width || rh<dlss_optimal_.min_height || rh>dlss_optimal_.max_height) {
-                ++dlss_waiting;if(dlss_lease_) dlss_retire_locked();
+                ++dlss_waiting;if(dlss_lease_) {dlss_retire_locked();dlss_fallback_.note_rebuild();} // active -> pending: the wait budget covers this path too
                 if(dlss_fallback_.note_waiting()) dlss_fail_locked(DlssEyeUpscaler::Reason::pending_timeout);
                 return;
             }
@@ -254,7 +272,8 @@ private:
         dlss_retire_locked();
         d.dimension_generation=++dlss_dimension_generation_;d.feature_generation=++dlss_feature_generation_;
         bool created=false;
-        dlss_isolated_locked([&] {created=dlss_.prepare(device,immediate,d,paths);});
+        const bool attempted=dlss_isolated_locked([&] {created=dlss_.prepare(device,immediate,d,paths);});
+        if(!attempted) {++dlss_create_failures;dlss_core_live_=true;dlss_fail_locked(DlssEyeUpscaler::Reason::exception);return;}
         if(!created) {
             const auto status=dlss_.status();++dlss_create_failures;dlss_core_live_=true;dlss_fail_locked(status.reason,status.result);return;
         }
@@ -276,7 +295,7 @@ private:
         dlss_guarded([&] {
             if(dlss_lease_) {dlss_retired_leases_.push_back({dlss_lease_.generation(),dlss_lease_});dlss_lease_={};}
             dlss_ledger_.retire();dlss_ledger_.abandon_outstanding();
-        },[&] {dlss_lease_={};dlss_ledger_.retire();dlss_ledger_.abandon_outstanding();});
+        },[&] {if(dlss_lease_) dlss_orphan_locked(std::move(dlss_lease_));dlss_lease_={};dlss_ledger_.retire();dlss_ledger_.abandon_outstanding();}); // the orphan slot holds it until the next release
         dlss_desc_valid_=false;dlss_scratch_.reset();dlss_facade_dirty_=true;
         dlss_fallback_.session_end();dlss_refusals_=DlssRefusalStreak{};dlss_optimal_for_w_=dlss_optimal_for_h_=0;dlss_publish_state_locked();
     }
