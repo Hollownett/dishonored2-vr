@@ -1112,6 +1112,72 @@ bytes: 0x1c5e428 40 6e 8f 40 01 00 00 00 40 45 78 40 01 00 00 00  (.rdata)
 ```
 <!-- /PINS -->
 
+## B11 Route results (creation spike, Plan B task B11)
+
+Source: the creation spike `src/hand_body_spike.hpp` and `src/hand_body_spike_engine.hpp`, behind the dev knob `build/hand-body-spike` (sim
+only; absent knob: nothing installed). Three sim runs on the user's current save, `--lead 60 --seconds 120`, under `~/d2vr-test-builds/sim-runs/`.
+Run 1 was on 551d715; runs 2 and 3 on 88326b6. After each run the installed DLL was restored and verified (ff0daf65...) and no knob was left.
+
+| Route | Result |
+|---|---|
+| R1 | **Created, settled on the floor, pushed through the player with no drift, alive 60 s, destroyed cleanly, no crash** (runs 2 and 3). A world change during the body's life was not reached (see below) |
+| R2 | `return false`, no engine call, no hook (B6: spawned components never start; CreatePhysics/start by hand is unproven and fatal without a PhysicsShape). Not run in the sim: the code path makes no call |
+| R3 | `return false`, no engine call, no hook (B6: an attached body shares its host's motion; record 0x37 is printer-only). Not run in the sim |
+
+**G1 in the run (count-only hooks at 0x8ad260, 0x97bc0 and 0x945f0, plus the existing 0x89fb0 hook) [M].** The figures are the same in all
+three runs (run 2: 68 s of gameplay observed, 6962 frames, 6096 steps, 732330 dispatches):
+
+* 0x8ad260 ran on one thread, 376. Every 0x89fb0 dispatch ran on that same thread: 0 off the frame thread, 0 before the first frame. B7
+  found 376 to be the render/present thread, so in this build the game frame, the drain and the present share one thread.
+* Dispatches: 721702 outside the step (0x97bc0 depth 0); 10628 inside the step's 0x945f0 drain on the step thread; **0 overlapping the
+  step**.
+* 0x8a7820 read at 11442 sampled dispatches (every 64th) and at all 6096 step entries: **never true**. This closes the 0x7e7e10 writer
+  for these runs.
+* In-run verdict: pass. The doc's full G1 (five 120 s sessions including a level load and a save/load) is not claimed. That soak is B14's
+  gate before any default-on.
+
+**G2, owner (a) [M].** The owner was read from the player's query body (B7 chain):
+* userdata vtable 0x1b02768;
+* owner vtable 0x1c73268;
+* owner+0x10 is the player entity;
+* typenum 189, outside the live range 331..335.
+
+While the body lived (60 s in each run), the hooks counted **0 calls of 0x853220** with that owner (0 calls in total) and **0 calls of
+0x8527a0** for the hand's handle (0 in total), so owner (a) was kept. Two parts of G2 remain Tier C / outstanding: the guard-exposure part
+(vision, melee, alert, health; no guard in the save) and the attribution of 0x17d10 / 0x18cd00 callers.
+
+**The body [M]**, created with 0xc8e5b0(world, &id, cinfo, 1, 1) from the 0x89fb0 hook outside the step, on frame thread 376, with
+0x8a7820 re-read false. Its parts:
+* userdata 0x18cb90 in mod memory, `ud+8` = owner (a);
+* a sphere of radius 0.05 m built by 0xca6550, memSize 0;
+* cinfo 0xca65f0 with flags 0, filter `0x000885e4` (`hand_filter_word(false)`), motion type 2, mass 2 kg, props 0xffff.
+
+Results:
+* The handle was `0x02000888` in every run.
+* **The new body is asleep** [M]. Run 1 showed it hanging at its spawn height until the first velocity write: createBody's activation is
+  forced to 0 by `world+0x818` (Q3). One downward velocity write through 0xc85dc0 right after creation wakes it.
+* After that wake write (runs 2 and 3), it fell 0.30 m in under 1 s and came to rest at z 16.6087 on a floor at 16.5624. That is 0.046 m
+  above the floor, against the 0.05 m radius, which counts as resting on the floor.
+* The player's root is the query body's record translation (+0x30), which equals the entity's +0x300 here. Pressed at 0.5 m/s into that
+  root for 5 s, the sphere stopped there, inside the capsule. The **player moved 0.000 m**.
+* destroyBodies 0xc8f6b0(world, &id, 1, 0) at 60.0 s. Afterwards the slot holds the invalid id `0x02ffffff` at +0x70 and flags 0 at +0x44,
+  so the body is gone.
+* No fault, `native-exception-context.txt` empty, and the mod casts never hit the body (`cast_excluded_hits` 0).
+
+**Pause / world change [M].** Run 3 opened the pause menu during the body's life, at about 36 s after creation. While paused the 0x89fb0
+dispatcher did not run at all (no spike tick for about 2.7 s), so no destroy is possible at this point during a pause. The scripted A press
+was Resume, not a load, and after resuming the body was destroyed normally at 60 s. **A level load during the body's life is not
+scriptable in this rig** and stays a Tier C item. A load begun from the pause menu reaches the world change with the body still alive. The
+spike then abandons it (no engine call) and the engine tears the body down with its world: the userdata and the sphere are static mod
+memory, never freed. Whether that teardown calls owner (a)'s +0xa8 (0x8527a0) during the load is not observed.
+
+<!-- PINS -->
+```
+bytes: 0xc8f6b0 48 8b c4 48 83 ec 48 48 89 58 08 48 89 68 10 48
+bytes: 0xc85dc0 48 89 6c 24 18 48 89 74 24 20 89 54 24 10 57 48
+```
+<!-- /PINS -->
+
 ## Summary
 
 | Question | Verdict | Key RVAs | blocks route R1 | blocks route R2 | blocks route R3 |
