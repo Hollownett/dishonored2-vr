@@ -228,6 +228,54 @@ assert ',\\"hand_body\\":" << d2vr::HandBodyRuntime::status_json(hand_body_reque
 assert "python tests\\hand_body_routing_check.py" in build
 print("hand_body_routing_check ok")
 
+# 11. B14: the drive. Knob off stays no behaviour change: the render side only computes two local bit sets inside the clamp loop (written,
+# never read outside the knob-gated publication) and the drive runs only from the runtime's G1 tick.
+free_uses = [m.start() for m in re.finditer(r"hand_body_free_bits|hand_body_yield_bits", probe)]
+assert len(free_uses) == 6, len(free_uses)   # the declaration, one |= each in the clamp loop, the two reads in the publication
+publish_at = probe.index("d2vr::HandBodyRuntime::publish_hands(")
+publish_block, publish_start = enclosing_block(probe, publish_at)
+reads = [u for u in free_uses if publish_start <= u < publish_start + len(publish_block)]
+assert len(reads) == 2, "the bits are read only inside the knob-gated publication"
+assert "unsigned hand_body_free_bits{},hand_body_yield_bits{};" in probe
+assert "if(clamp_drew && clamped.state==d2vr::ClampState::free) hand_body_free_bits|=1u<<side;" in probe
+assert "if(clamp_yield) hand_body_yield_bits|=1u<<side;" in probe
+for line in ("hand_body_in.target=palm_grips;", "hand_body_in.free=hand_body_free_bits&hands.hands;", "hand_body_in.locomotion=",
+             "hand_body_in.player_root=r;"):
+    assert line in publish_block, line + " belongs to the knob-gated publication"
+assert "hand_body_in" not in probe[:publish_start] and "hand_body_in" not in probe[publish_start + len(publish_block):]
+# the drive: called only from the runtime's tick, after service(), once per side; spawn (create and snap) only where the clamp found it free
+assert runtime.count("body->drive(") == 1 and "body->drive(" in tick and tick.index("body->service(in,spawn,gate);") < tick.index("body->drive(")
+assert "->drive(" not in code_of(probe) and ".drive(" not in code_of(grab), "the drive runs only from the runtime tick"
+assert "HandBodyRuntime::drive" not in probe
+assert "const bool free=fresh && ((last_hands_.free>>side)&1u)!=0;" in tick
+assert "if(li.tracked && free && finite(last_hands_.palm[side])) spawn[side]=last_hands_.palm[side];" in tick
+assert "d.target_free=fresh && ((last_hands_.free>>side)&1u)!=0;" in tick
+assert "d.yield=!fresh || !tracked || ((last_hands_.yield>>side)&1u)!=0;" in tick
+drive_fn = function(body, "void drive(const DriveInput& in)")
+assert drive_fn.index("engine_.at_g1_point()") < drive_fn.index("const TickGuard guard(ticking_);") < drive_fn.index("engine_.motion(") < drive_fn.index("engine_.apply(")
+assert re.findall(r"engine_\.(\w+)\(", drive_fn) == ["at_g1_point", "world", "busy", "motion", "apply"], re.findall(r"engine_\.(\w+)\(", drive_fn)
+assert "hand_body::encode_set_velocity(s.handle,written,angular)" in drive_fn and "encode_set_transform" not in code_of(body + runtime + native)
+assert drive_fn.index("if(s.written_tick==tick_index_)") < drive_fn.index("engine_.apply("), "one velocity write per side per tick"
+assert drive_fn.index("s.written_tick=tick_index_;") < drive_fn.index("engine_.apply("), "the write is marked before it is attempted"
+assert drive_fn.index('latch(side,"read-back garbage') < drive_fn.index("servo_step("), "garbage never reaches the servo"
+assert "lock_guard" not in drive_fn and "unique_lock" not in drive_fn, "the drive never takes a lock"
+# the snap: destroy + recreate (no setBodyTransform 0xc85860 anywhere in production), only with a free spawn and never while busy
+snap = function(body, "void do_snap(")
+assert snap.index("if(busy)") < snap.index("do_destroy(") < snap.index("do_create("), snap
+assert snap.index("if(!spawn") < snap.index("do_destroy("), "only when the clamp shows the target free"
+for name, text in (("hand_body.hpp", body), ("hand_body_runtime.hpp", runtime), ("hand_body_native.hpp", native)):
+    assert "0xc85860" not in code_of(text), name + ": no setBodyTransform"
+# the read-back goes through the shared native_motion layout, no engine call; the velocity guard is the drive's own cap
+assert "native_motion_raw(read_,world,record)" in function(native, "static std::optional<BodyMotion> motion(")
+assert "length(v)>kHandWriteMaxSpeed || length(w)>kHandWriteMaxSpin" in function(native, "static bool velocity(")
+assert "e.motion=[](unsigned side,std::uint32_t handle)" in runtime
+# proof (d): the cost of every tick is measured where it lands (the dispatcher runs on the render thread)
+assert entry_fn.index("const auto t0=qpc_us();") < entry_fn.index("try {tick();}") < entry_fn.index("const auto t1=qpc_us();")
+for key in ('\\"cost_max_us\\":', '\\"player_drift_um\\":', '\\"contact_frames\\":', '\\"snaps\\":', '\\"drive\\":{',
+            '\\"tick_cost_max_us\\":', '\\"steady_tick_cost_max_us\\":', '\\"faults\\":', '\\"time_factor_verified\\":false'):
+    assert key in runtime, key
+print("hand_body_routing_check B14 ok")
+
 # 10. the B13 sim scenario compiles and fits a 120 s session with a 60 s lead
 import sys
 sys.path.insert(0, str(root / "linux"))
@@ -240,3 +288,7 @@ if sim is not None:
     sim.compile_script(segments, 120)
     assert max(s["end_ms"] for s in segments) <= 120000
     print("hand_body_pause scenario compiles")
+    soak = sim.scenario_segments("hand_body_soak", 45000)
+    sim.compile_script(soak, 120)
+    assert max(s["end_ms"] for s in soak) <= 120000 and len(soak) <= 128, (max(s["end_ms"] for s in soak), len(soak))
+    print("hand_body_soak scenario compiles")

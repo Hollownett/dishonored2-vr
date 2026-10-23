@@ -14,6 +14,9 @@ from pathlib import Path
 PROPS = ("oil_tank_drop", "oil_tank_throw")
 TANKS = ("tank_wall", "tank_drop", "tank_drop_cycles")  # Part 5A held-clamp scenarios S12-S14
 CARRY_FAULTS = ("failed_reads", "rejected_publishes", "bad_quat_reads")
+HAND_BODY = ("hand_body_soak",)  # Plan B B14: the driven hand bodies (proofs a, b, d), summed over sessions
+HAND_BODY_COST_US = 200          # proof (d): the drive's cost per tick, both hands summed
+HAND_BODY_DRIFT_UM = 1000        # proof (b): the player root's unexplained movement while a hand is pressed into the capsule
 
 
 def _pair(v):
@@ -38,6 +41,8 @@ def check(statuses, scenario):
     def info(text):
         out.append(("INFO", text))
 
+    if scenario in HAND_BODY:
+        return check_hand_body(statuses)
     corpse = [s.get("corpse") or {} for s in statuses]
     if not statuses or any(not c for c in corpse):
         return [("FAIL", "status has no corpse block")]
@@ -140,6 +145,50 @@ def check_tanks(statuses, scenario, corpse):
         faults = sum(c.get(k, 0) for c in carries if isinstance(c, dict) for k in CARRY_FAULTS if isinstance(c.get(k), int))
         # the status has end values only, so "no new" is checked as absolute zero (a start baseline is not recorded)
         add(faults == 0, f"carry fault counters {CARRY_FAULTS} == 0 (got {faults})")
+    return out
+
+
+def _num(v):
+    return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+
+def check_hand_body(statuses):
+    """B14 soak: every session's "hand_body" object. Faults summed == 0 (proof a), max player_drift_um <= 1000 (proof b), cost_max_us <= 200
+    in every session (proof d). An absent counter is a FAIL, never a zero; a session whose bodies were never created or driven FAILs (vacuous)."""
+    out = []
+
+    def add(ok, text):
+        out.append(("PASS" if ok else "FAIL", text))
+
+    if not statuses:
+        return [("FAIL", "no sessions")]
+    hb = [s.get("hand_body") if isinstance(s.get("hand_body"), dict) else {} for s in statuses]
+    if any(not h for h in hb):
+        return [("FAIL", "status has no hand_body block")]
+    for key in ("faults", "cost_max_us", "player_drift_um", "available", "hand_body_fault", "sides"):
+        add(all(key in h for h in hb), f"hand_body.{key} present in every session")
+    nums = ("faults", "cost_max_us", "player_drift_um")
+    if any(not all(_num(h.get(k)) for k in nums) or not isinstance(h.get("sides"), list) or len(h["sides"]) != 2 for h in hb):
+        out.append(("FAIL", "hand_body counters missing or not numbers (faults, cost_max_us, player_drift_um, sides[2])"))
+        return out
+    for i, h in enumerate(hb):
+        add(h.get("enabled") is True and h.get("installed") is True, f"session {i + 1}: hand body enabled and installed")
+        add(h.get("available") is True and h.get("hand_body_fault") is False, f"session {i + 1}: available, no HandBodyFault (why {h.get('why')!r})")
+        creates = [sd.get("creates", 0) for sd in h["sides"]]
+        writes = [(sd.get("drive") or {}).get("drive_writes", 0) for sd in h["sides"]]
+        add(all(c >= 1 for c in creates) and all(w >= 100 for w in writes),
+            f"session {i + 1}: both bodies created and driven (creates {creates}, drive_writes {writes})")
+        add(h["cost_max_us"] <= HAND_BODY_COST_US, f"session {i + 1}: cost_max_us {h['cost_max_us']} <= {HAND_BODY_COST_US} (drive, both hands per tick)")
+    faults = sum(h["faults"] for h in hb)
+    add(faults == 0, f"hand_body.faults summed over {len(hb)} sessions == 0 (got {faults})")
+    drift = max(h["player_drift_um"] for h in hb)
+    add(drift <= HAND_BODY_DRIFT_UM, f"player_drift_um max {drift} <= {HAND_BODY_DRIFT_UM}")
+    side = lambda h, k: [(sd.get("drive") or {}).get(k) for sd in h["sides"]]
+    out.append(("INFO", f"per session: gap_m {[h.get('gap_m') for h in hb]}, contact_frames {[h.get('contact_frames') for h in hb]}, "
+                f"snaps {[h.get('snaps') for h in hb]}, cost_us {[h.get('cost_us') for h in hb]}, cost_max_us {[h['cost_max_us'] for h in hb]}, "
+                f"tick_cost_max_us {[h.get('tick_cost_max_us') for h in hb]}, steady_tick_cost_max_us {[h.get('steady_tick_cost_max_us') for h in hb]}, "
+                f"player_drift_um {[h['player_drift_um'] for h in hb]}, abandons {[h.get('abandons') for h in hb]}, "
+                f"snap_blocked {[side(h, 'snap_blocked') for h in hb]}, yields {[side(h, 'yields') for h in hb]}"))
     return out
 
 

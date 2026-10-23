@@ -19,6 +19,7 @@
 #include "arm_ik.hpp"
 #include "hand_body_commands.hpp"
 #include "hand_body_lifecycle.hpp"
+#include "hand_servo.hpp"
 #include "tracked_pose.hpp"
 #include <array>
 #include <atomic>
@@ -26,6 +27,7 @@
 #include <cstdint>
 #include <cstring>
 #include <functional>
+#include <limits>
 #include <mutex>
 #include <optional>
 #include <stdexcept>
@@ -68,6 +70,32 @@ struct R1Recipe {
     static constexpr double wake_speed=.1;   // the one wake write right after creation, straight down (m/s)
 };
 static_assert(R1Recipe::filter==0x000885e4u,"R1 filter word (B11)");
+
+// ---- B14: the drive (Bonelab §2.1: the hand is a physical body pulled toward the controller by capped forces, with braking; §2.2: it lags
+// when blocked). B9's servo_step gives the capped velocity; one B8 type-9 velocity record per side per dispatcher tick carries it.
+struct HandDriveConfig {
+    double gravity=9.81;            // the R1 body keeps the dynamic preset's gravity factor 1 (Q4): the drive adds g*dt upward (Q4 option 3)
+    double max_write_speed=10;      // = HandServoConfig::max_speed; the write never exceeds kHandWriteMaxSpeed (native guard)
+    double max_write_spin=20;       // = HandServoConfig::max_spin
+    double contact_shortfall=.25;   // research §2.5 (contact without events): achieved short of commanded by more than 25%
+    double contact_min_speed=.1;    // commands slower than this are never judged (rest noise, the gravity term)
+    double far_snap_gap=1.;         // a gap this large (Blink, a teleport, a long yield) snaps at once when the target is free: never fly there
+    double garbage_speed=100;       // read-back speed or spin above this is garbage (native_motion's own bound)
+    double garbage_position=1e6;    // |position| above this is garbage
+    double capsule_radius=.4;       // "pressed into the capsule": the body within this horizontal distance of the player root (capsule + hand radius)
+    double capsule_height=1.95;     // ... and between the root (the feet) and this height above it
+};
+// The native velocity guard (hand_body_native.hpp) refuses anything above these; the drive stays under them.
+inline constexpr double kHandWriteMaxSpeed=10.5,kHandWriteMaxSpin=20.5;
+// The raw read-back of a body (record +0x30 translation; hknpMotion +0x40 velocity, +0x50 spin). Unfiltered: the manager judges garbage.
+struct BodyMotion {Vec3 position{},velocity{},spin{};};
+// yield: an authored animation owns the arm, the clamp yields (carry, physical hold), or tracking is lost: the body holds where it is.
+// target_free: the hand clamp's last palm cast found the target free (the snap and every create need it). player_root / locomotion: for
+// player_drift_um (the player's root moving with no locomotion input while this hand's body is pressed into the capsule).
+struct DriveInput {unsigned side{};WorldTrackedPose target{};double held_kg{};double now{};bool yield{};
+                   bool target_free{};std::optional<Vec3> player_root{};bool locomotion{};};
+struct DriveStatus {double gap_m{};double speed{};bool capped{};std::uint64_t contact_frames{},snaps{},cost_us{},cost_max_us{},player_drift_um{};
+                    double dt_s{};std::uint64_t drives{},drive_writes{},yields{},skipped{},snap_requests{},snap_blocked{},garbage{},second_drives{};};
 
 // ---- G1: thread and drain point (docs Gates for B11). Counted by the count-only hooks; judged here.
 struct G1Stats {
@@ -188,6 +216,8 @@ struct HandBodyEngine {
     std::function<bool(unsigned side,const hand_body::CommandRecord&)> apply;         // a write; throws HandBodyEngineFault
     std::function<void(unsigned side)> forget;                                        // abandon / lost: mod-side bookkeeping only, NEVER an engine call
     std::function<bool()> at_g1_point;                                                // write() is allowed only here (the dispatcher's G1 tick); absent: allowed
+    std::function<std::optional<BodyMotion>(unsigned side,std::uint32_t handle)> motion;  // B14 read-back; nullopt: not our body; throws HandBodyUnreadable
+    std::function<std::uint64_t()> now_us;                                            // B14 cost clock (microseconds); absent: costs read 0
 };
 
 // Gate state the runtime passes each tick (defaults: open, for the fakes).
@@ -227,6 +257,7 @@ public:
         const TickGuard guard(ticking_);   // an atomic flag, not a mutex: a re-entry from the same thread is a refusal, never UB
         if(!guard.owned) {reentries_.fetch_add(1,std::memory_order_relaxed);return;}
         ticks_.fetch_add(1,std::memory_order_relaxed);
+        ++tick_index_;tick_drive_cost_us_=0;   // B14: one velocity write per side per tick; the drive cost is summed over the tick's two drives
         if(HandBodyFault::tripped() && !latched_) latch(0,"HandBodyFault tripped elsewhere",false);
         if(gate.violated && !latched_) latch(0,gate.why && *gate.why?gate.why:"gate violated",false);
         std::uintptr_t world{};
@@ -269,6 +300,7 @@ public:
                 break;
             case BodyAction::none:
                 if(s.pending_destroy) {if(busy) count(side,&Counters::busy_waits);else do_destroy(side,world,busy);}
+                else if(s.snap_pending && life_.state(side)==BodyState::ready) do_snap(side,world,busy,spawn[side],li.now_ms);
                 else if(!s.woken && !busy && !latched_ && s.wake_tries<max_wake_tries && life_.state(side)==BodyState::ready) wake(side);
                 break;
             }
@@ -313,6 +345,101 @@ public:
         count(side,&Counters::writes);
         return true;
     }
+    // B14, dispatcher thread, after service() in the same G1 tick (the runtime's tick runs once per game frame): read the body back
+    // (position, velocity, spin), run B9's servo_step on the real interval since this side's last drive, and write one velocity record.
+    // At most one velocity write per side per service tick (a wake write that tick takes it). Garbage read-back latches HandBodyFault (no
+    // further write; the next service tick destroys the body once). yield: zero velocity plus the gravity term (the body holds). A snap
+    // request (servo: stuck; or the gap beyond far_snap_gap) is executed by the next idle service tick, only while the target is free.
+    void drive(const DriveInput& in) {
+        const unsigned side=in.side;
+        if(side>=sides) return;
+        bool at_point=true;
+        try {at_point=!engine_.at_g1_point || engine_.at_g1_point();} catch(...) {at_point=false;}
+        if(!at_point) {count(side,&Counters::misplaced_writes);return;}
+        const TickGuard guard(ticking_);
+        if(!guard.owned) {count(side,&Counters::reentrant_writes);return;}
+        const std::uint64_t t0=clock_us();
+        struct Cost {HandBody& hb;unsigned side;std::uint64_t t0;
+            ~Cost() {const std::uint64_t t1=hb.clock_us();const std::uint64_t us=t1>=t0?t1-t0:0;hb.note_cost(side,us);}} cost{*this,side,t0};
+        count(side,&Counters::drives);
+        Side& s=side_[side];
+        if(latched_ || !enabled_ || life_.state(side)!=BodyState::ready || s.pending_destroy) {count(side,&Counters::skipped);return;}
+        std::uintptr_t world{};
+        try {world=engine_.world?engine_.world():0;} catch(...) {world=0;}
+        bool busy=true;
+        try {busy=engine_.busy?engine_.busy():false;} catch(...) {busy=true;}
+        if(!world || world!=last_world_ || last_gen_!=s.gen || busy || !life_.can_write(side,world,s.handle) || !engine_.motion || !engine_.apply) {
+            count(side,&Counters::skipped);return;
+        }
+        if(s.written_tick==tick_index_) {   // this tick's write is taken (the wake, or a second drive in one tick): none here
+            if(s.drive_tick==tick_index_) count(side,&Counters::second_drives);
+            else if(std::isfinite(in.now)) s.last_drive_s=in.now;   // the wake write is the last command: the next dt runs from here
+            count(side,&Counters::skipped);return;
+        }
+        s.drive_tick=tick_index_;
+        std::optional<BodyMotion> m;
+        try {m=engine_.motion(side,s.handle);}
+        catch(const HandBodyUnreadable&) {count(side,&Counters::skipped);return;}            // a page gone for a moment: no write this tick
+        catch(const HandBodyEngineFault& f) {latch(side,f.what(),true);return;}
+        if(!m) {count(side,&Counters::skipped);return;}                                      // not our body: service()'s read-back handles it
+        const auto& dc=drive_cfg_;
+        if(!finite(m->position) || !finite(m->velocity) || !finite(m->spin) || length(m->position)>dc.garbage_position ||
+           length(m->velocity)>dc.garbage_speed || length(m->spin)>dc.garbage_speed) {   // Review Focus 3: never reaches the servo or a record
+            count(side,&Counters::garbage);latch(side,"read-back garbage (position/velocity/spin)",true);publish_pose(side,std::nullopt);return;
+        }
+        auto& c=counters_[side];
+        const double gap=length(in.target.position-m->position);
+        c.gap_m.store(std::isfinite(gap)?gap:-1,std::memory_order_relaxed);c.speed.store(length(m->velocity),std::memory_order_relaxed);
+        // The real interval since this side's last drive (not the dispatcher's 7-11k/s interval): the first drive after a create only starts it.
+        const double dt=in.now-s.last_drive_s;
+        if(std::isfinite(in.now)) s.last_drive_s=in.now;
+        if(!std::isfinite(dt) || !(dt>0)) {count(side,&Counters::skipped);s.has_cmd=false;return;}
+        c.dt_s.store(dt,std::memory_order_relaxed);
+        // contact without events (research §2.5): last tick's command achieved short by more than 25% along its own direction
+        if(s.has_cmd) {
+            const double want=length(s.last_cmd);
+            if(want>=dc.contact_min_speed && dot(m->velocity,s.last_cmd)/want<(1-dc.contact_shortfall)*want) count(side,&Counters::contact_frames);
+        }
+        note_drift(side,in,m->position);
+        Vec3 linear{},angular{};bool yielded=in.yield || !hand_servo_detail::finite_pose(in.target);
+        if(yielded) {s.servo={};count(side,&Counters::yields);c.capped.store(false,std::memory_order_relaxed);}
+        else {
+            WorldTrackedPose body;body.position=m->position;body.basis=in.target.basis;   // a sphere: no orientation to servo, the spin only brakes
+            const auto out=servo_step(s.servo,in.target,body,m->velocity,m->spin,in.held_kg,dt,std::numeric_limits<double>::quiet_NaN(),servo_cfg_,tuning_,!in.target_free);
+            c.capped.store(out.capped,std::memory_order_relaxed);
+            if(out.valid) {linear=out.linear;angular=out.angular;}   // invalid (a gap past max_gap, a bad target): hold, and the far gap snaps
+            if(out.snap || (std::isfinite(gap) && gap>dc.far_snap_gap)) {
+                if(in.target_free) {if(!s.snap_pending) count(side,&Counters::snap_requests);s.snap_pending=true;}
+                else count(side,&Counters::snap_blocked);
+            }
+        }
+        linear=hand_servo_detail::limited(linear,dc.max_write_speed);angular=hand_servo_detail::limited(angular,dc.max_write_spin);
+        s.last_cmd=linear;s.has_cmd=!yielded;
+        // gravity compensation (Q4 option 3): the step takes g*dt off, the write adds it back (dt as the servo uses it)
+        const Vec3 written=linear+Vec3{0,0,dc.gravity*std::min(dt,tuning_.dt_max)};
+        if(!finite(written) || !finite(angular) || length(written)>kHandWriteMaxSpeed || length(angular)>kHandWriteMaxSpin) {
+            count(side,&Counters::garbage);latch(side,"drive produced a non-finite or oversized command",true);return;
+        }
+        s.written_tick=tick_index_;   // attempted: never a second write this tick, whatever apply() says
+        bool ok=false;
+        try {ok=engine_.apply(side,hand_body::encode_set_velocity(s.handle,written,angular));}
+        catch(const HandBodyEngineFault& f) {latch(side,f.what(),true);return;}
+        catch(const std::invalid_argument&) {count(side,&Counters::garbage);latch(side,"drive record refused (non-finite)",true);return;}
+        if(!ok) {count(side,&Counters::refused_writes);s.has_cmd=false;return;}
+        s.woken=true;count(side,&Counters::writes);count(side,&Counters::drive_writes);
+    }
+    DriveStatus drive_status(unsigned side) const {
+        DriveStatus d;if(side>=sides) return d;
+        const auto& c=counters_[side];
+        d.gap_m=c.gap_m.load();d.speed=c.speed.load();d.capped=c.capped.load();d.contact_frames=c.contact_frames.load();d.snaps=c.snaps.load();
+        d.cost_us=c.cost_us.load();d.cost_max_us=c.cost_max_us.load();d.player_drift_um=c.player_drift_um.load();d.dt_s=c.dt_s.load();
+        d.drives=c.drives.load();d.drive_writes=c.drive_writes.load();d.yields=c.yields.load();d.skipped=c.skipped.load();
+        d.snap_requests=c.snap_requests.load();d.snap_blocked=c.snap_blocked.load();d.garbage=c.garbage.load();d.second_drives=c.second_drives.load();
+        return d;
+    }
+    // The largest drive cost of one tick, both hands summed (proof (d): <= 200 us), and the last tick's sum.
+    std::uint64_t drive_cost_max_us() const {return drive_cost_max_us_.load();}
+    std::uint64_t drive_cost_us() const {return drive_cost_us_.load();}
     HandBodyStatus status(unsigned side) const {
         HandBodyStatus st;if(side>=sides) return st;
         const auto& c=counters_[side];
@@ -339,6 +466,9 @@ private:
     struct Counters {
         std::atomic<std::uint64_t> creates{},destroys{},faults{},refused_writes{},abandons{},queued_destroys{},direct_destroys{},busy_waits{},
             wake_writes{},create_refusals{},writes{},releases{},lost{},unverified{},misplaced_writes{},reentrant_writes{};
+        std::atomic<std::uint64_t> contact_frames{},snaps{},cost_us{},cost_max_us{},player_drift_um{},drives{},drive_writes{},yields{},skipped{},
+            snap_requests{},snap_blocked{},garbage{},second_drives{};
+        std::atomic<double> gap_m{},speed{},dt_s{};std::atomic<bool> capped{};
         std::atomic<int> state{};std::atomic<std::uint32_t> handle{};
     };
     struct TickGuard {
@@ -347,8 +477,31 @@ private:
         ~TickGuard() {if(owned) flag.store(false,std::memory_order_release);}
         TickGuard(const TickGuard&)=delete;TickGuard& operator=(const TickGuard&)=delete;
     };
-    struct Side {std::uint32_t handle{},gen{};std::uintptr_t world{};bool pending_destroy{},woken{};unsigned attempts{},wake_tries{};std::uint64_t next_create_ms{};};
+    struct Side {std::uint32_t handle{},gen{};std::uintptr_t world{};bool pending_destroy{},woken{};unsigned attempts{},wake_tries{};std::uint64_t next_create_ms{};
+        // B14 drive state (dispatcher thread only)
+        HandServoState servo{};double last_drive_s{std::numeric_limits<double>::quiet_NaN()};std::uint64_t written_tick{~0ull};
+        std::uint64_t drive_tick{~0ull};bool snap_pending{},has_cmd{};Vec3 last_cmd{};std::optional<Vec3> press_root;};
     void count(unsigned side,std::atomic<std::uint64_t> Counters::* field) {(counters_[side].*field).fetch_add(1,std::memory_order_relaxed);}
+    std::uint64_t clock_us() const {try {return engine_.now_us?engine_.now_us():0;} catch(...) {return 0;}}
+    void note_cost(unsigned side,std::uint64_t us) {
+        auto& c=counters_[side];c.cost_us.store(us,std::memory_order_relaxed);
+        if(us>c.cost_max_us.load(std::memory_order_relaxed)) c.cost_max_us.store(us,std::memory_order_relaxed);
+        tick_drive_cost_us_+=us;drive_cost_us_.store(tick_drive_cost_us_,std::memory_order_relaxed);
+        if(tick_drive_cost_us_>drive_cost_max_us_.load(std::memory_order_relaxed)) drive_cost_max_us_.store(tick_drive_cost_us_,std::memory_order_relaxed);
+    }
+    // player_drift_um: the largest displacement of the player root inside one window where this hand's body is pressed into the capsule
+    // and there is no locomotion input. Reported, never clamped or acted on (the hand never moves the player: the filter word omits 6/7/8/18).
+    void note_drift(unsigned side,const DriveInput& in,Vec3 body) {
+        Side& s=side_[side];const auto& dc=drive_cfg_;
+        if(!in.player_root || !finite(*in.player_root) || in.locomotion) {s.press_root.reset();return;}
+        const Vec3 r=*in.player_root;const Vec3 d=body-r;
+        const bool pressed=std::sqrt(d.x*d.x+d.y*d.y)<=dc.capsule_radius && d.z>=-.05 && d.z<=dc.capsule_height;
+        if(!pressed) {s.press_root.reset();return;}
+        if(!s.press_root) {s.press_root=r;return;}
+        const double um=length(r-*s.press_root)*1e6;
+        auto& c=counters_[side].player_drift_um;
+        if(std::isfinite(um) && um>static_cast<double>(c.load(std::memory_order_relaxed))) c.store(static_cast<std::uint64_t>(um+.5),std::memory_order_relaxed);
+    }
     void latch(unsigned side,const char* why,bool counted) {
         latched_=true;latched_flag_.store(true,std::memory_order_release);HandBodyFault::trip();
         if(counted) count(side,&Counters::faults);
@@ -366,6 +519,7 @@ private:
         }
         if(!ok) {count(side,&Counters::create_refusals);s.next_create_ms=now_ms+create_retry_ms;return;}
         life_.created(side,world,handle);s.handle=handle;s.world=world;s.gen=last_gen_;s.attempts=0;s.pending_destroy=false;s.woken=false;s.wake_tries=0;
+        reset_drive(side);
         count(side,&Counters::creates);
         // The one wake write, right after the creation (B11 run 1: createBody's activation is forced to 0 and the body hangs asleep).
         // Refused (busy at the re-read): retried on the next idle ticks, at most max_wake_tries.
@@ -374,6 +528,7 @@ private:
             if(engine_.velocity && engine_.velocity(side,handle,Vec3{0,0,-R1Recipe::wake_speed})) {s.woken=true;count(side,&Counters::wake_writes);}
         } catch(const HandBodyEngineFault& f) {latch(side,f.what(),true);}
         catch(const HandBodyUnreadable&) {}
+        s.written_tick=tick_index_;   // the tick's one velocity write (attempted): the drive skips this tick
     }
     void wake(unsigned side) {
         Side& s=side_[side];++s.wake_tries;
@@ -381,6 +536,21 @@ private:
             if(engine_.velocity && engine_.velocity(side,s.handle,Vec3{0,0,-R1Recipe::wake_speed})) {s.woken=true;count(side,&Counters::wake_writes);}
         } catch(const HandBodyEngineFault& f) {latch(side,f.what(),true);}
         catch(const HandBodyUnreadable&) {}
+        s.written_tick=tick_index_;
+    }
+    // B14 snap (controller ruling): there is no setBodyTransform encoder (B8), so a snap is destroy + recreate at the controller pose, on an
+    // idle G1 tick, and only while the clamp's cast shows the target free (spawn is set only then). Busy: wait for the next idle tick. Blocked:
+    // dropped (counted), the body keeps servoing and the servo asks again.
+    void do_snap(unsigned side,std::uintptr_t world,bool busy,const std::optional<Vec3>& spawn,std::uint64_t now_ms) {
+        Side& s=side_[side];
+        if(busy) {count(side,&Counters::busy_waits);return;}
+        s.snap_pending=false;
+        if(!spawn || !finite(*spawn) || latched_ || shutdown_.load(std::memory_order_acquire)) {count(side,&Counters::snap_blocked);return;}
+        do_destroy(side,world,false);
+        if(life_.state(side)!=BodyState::absent || latched_) return;   // refused (retried as a plain destroy, then the normal create) or faulted
+        const auto before=counters_[side].creates.load(std::memory_order_relaxed);
+        do_create(side,world,*spawn,now_ms);
+        if(counters_[side].creates.load(std::memory_order_relaxed)>before) count(side,&Counters::snaps);
     }
     void do_destroy(unsigned side,std::uintptr_t world,bool busy) {
         Side& s=side_[side];
@@ -406,7 +576,10 @@ private:
             s.pending_destroy=true;return;
         }
     }
-    void finish(unsigned side) {Side& s=side_[side];life_.destroyed(side);s.handle=0;s.attempts=0;s.pending_destroy=false;}
+    void finish(unsigned side) {Side& s=side_[side];life_.destroyed(side);s.handle=0;s.attempts=0;s.pending_destroy=false;reset_drive(side);}
+    void reset_drive(unsigned side) {
+        Side& s=side_[side];s.servo={};s.last_drive_s=std::numeric_limits<double>::quiet_NaN();s.snap_pending=false;s.has_cmd=false;s.press_root.reset();
+    }
     void readback(unsigned side,std::uintptr_t world) {
         const Side& s=side_[side];
         if(life_.state(side)!=BodyState::ready || !life_.can_write(side,world,s.handle) || latched_) {publish_pose(side,std::nullopt);return;}
@@ -417,7 +590,9 @@ private:
         if(!p) {   // the record no longer holds our body in this world: gone without us (no engine call)
             count(side,&Counters::lost);if(engine_.forget) engine_.forget(side);finish(side);publish_pose(side,std::nullopt);return;
         }
-        if(!finite(*p)) {publish_pose(side,std::nullopt);return;}   // garbage never reaches a reader (B14 latches on it)
+        if(!finite(*p) || length(*p)>drive_cfg_.garbage_position) {   // B14 (Review Focus 3): garbage latches the hand body off; never published
+            count(side,&Counters::garbage);latch(side,"read-back garbage (position)",true);publish_pose(side,std::nullopt);return;
+        }
         WorldTrackedPose pose;pose.position=*p;pose.basis={Vec3{1,0,0},Vec3{0,1,0},Vec3{0,0,1}};   // a sphere: the position is the pose
         publish_pose(side,pose);
     }
@@ -429,6 +604,8 @@ private:
     HandBodyEngine engine_;bool enabled_;
     HandBodyLifecycle life_;std::array<Side,sides> side_{};std::array<Counters,sides> counters_{};std::array<HandBodyPoseSlot,sides> poses_{};
     std::atomic<bool> ticking_{};bool latched_{};std::atomic<bool> latched_flag_{},shutdown_{};
+    HandServoConfig servo_cfg_{};GrabTuning tuning_{};HandDriveConfig drive_cfg_{};
+    std::uint64_t tick_index_{},tick_drive_cost_us_{};std::atomic<std::uint64_t> drive_cost_max_us_{},drive_cost_us_{};
     std::uintptr_t last_world_{};std::uint32_t last_gen_{};
     mutable std::mutex why_mutex_;std::string why_;
     std::atomic<std::uint64_t> ticks_{},unreadable_ticks_{},reentries_{};

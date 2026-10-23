@@ -84,6 +84,7 @@ def main():
             assert r.returncode == code, (label, r.stdout, r.stderr)
             assert ("FAIL" in r.stdout) == (code == 1), r.stdout
     held_clamp_checks()
+    hand_body_checks()
     print("bonelab_scenarios_check ok")
 
 
@@ -144,6 +145,44 @@ def held_clamp_checks():
         b = tank_status(); mutate(b)
         assert "FAIL" in verdicts(b, "tank_drop_cycles")
     assert "FAIL" in {v for v, _ in brc.check([{**CLEAN}], "tank_wall")}  # no held_clamp block
+
+
+def hand_body_status(**over):
+    side = {"creates": 1, "destroys": 0, "faults": 0, "drive": {"drive_writes": 5000, "snaps": 0, "snap_blocked": 0, "yields": 0, "contact_frames": 40}}
+    hb = {"enabled": True, "installed": True, "available": True, "hand_body_fault": False, "why": "", "faults": 0, "cost_us": 20, "cost_max_us": 120,
+          "tick_cost_max_us": 400, "steady_tick_cost_max_us": 150, "player_drift_um": 0, "contact_frames": 80, "snaps": 0, "gap_m": [.01, .01],
+          "abandons": 0, "sides": [copy.deepcopy(side), copy.deepcopy(side)]}
+    hb.update(over)
+    return {"hand_body": hb}
+
+
+def hand_body_checks():
+    """Task B14: the soak compiles within a 120 s session at a 45 s lead, and the checker judges the hand_body fixtures (proofs a, b, d)."""
+    segments = sim.scenario_segments("hand_body_soak", 45000)
+    sim.compile_script(segments, 120)
+    assert max(s["end_ms"] for s in segments) <= 120000 and len(segments) <= 128
+    capsule = [s for s in segments if s.get("right_hand_offset") == [-0.18, -0.55, 0.4]]
+    assert capsule and max(s["end_ms"] - s["start_ms"] for s in capsule) >= 10000, "a pressed-into-capsule hold of >= 10 s"
+    assert all(not s["input"].get("move_y") and not s["input"].get("move_x") for s in capsule), "no locomotion while pressed"
+    five = [hand_body_status() for _ in range(5)]
+    assert all(v != "FAIL" for v, _ in brc.check(five, "hand_body_soak")), brc.check(five, "hand_body_soak")
+    for over in ({"faults": 1}, {"cost_max_us": 201}, {"player_drift_um": 1001}, {"available": False}, {"hand_body_fault": True},
+                 {"installed": False}):
+        bad = [hand_body_status() for _ in range(5)]
+        bad[3]["hand_body"].update(over)
+        assert "FAIL" in {v for v, _ in brc.check(bad, "hand_body_soak")}, over
+    vacuous = [hand_body_status() for _ in range(5)]
+    vacuous[1]["hand_body"]["sides"][0]["creates"] = 0
+    assert "FAIL" in {v for v, _ in brc.check(vacuous, "hand_body_soak")}, "a body never created"
+    undriven = [hand_body_status() for _ in range(5)]
+    undriven[2]["hand_body"]["sides"][1]["drive"]["drive_writes"] = 0
+    assert "FAIL" in {v for v, _ in brc.check(undriven, "hand_body_soak")}, "a body never driven"
+    for key in ("faults", "cost_max_us", "player_drift_um"):   # absent counters never default to 0
+        absent = [hand_body_status() for _ in range(5)]
+        del absent[0]["hand_body"][key]
+        assert "FAIL" in {v for v, _ in brc.check(absent, "hand_body_soak")}, key
+    assert "FAIL" in {v for v, _ in brc.check([{"corpse": {}}], "hand_body_soak")}, "no hand_body block"
+    assert "FAIL" in {v for v, _ in brc.check([], "hand_body_soak")}
 
 
 def bad_latch():

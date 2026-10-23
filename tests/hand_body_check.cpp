@@ -6,7 +6,9 @@
 #include "menu_tap.hpp"
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <functional>
+#include <limits>
 #include <string>
 #include <vector>
 using namespace d2vr;
@@ -491,6 +493,223 @@ static void b13_checks() {
     HandBodyFault::reset_for_tests();
 }
 
+// ======================= B14: the drive =======================
+namespace {
+// A 90 Hz fake world for the drive: one physics step per tick (gravity, then the written velocity integrates), an optional wall at x = wall_x
+// (the body never passes it; its velocity into the wall is removed), a microsecond clock that each engine call advances (cost), and
+// garbage injection for the read-back.
+struct FakeDrive {
+    static constexpr double dt=1./90;
+    std::uintptr_t world_id=0x1000;bool busy=false;
+    struct Body {bool alive{};std::uint32_t handle{};Vec3 pos{},vel{},spin{};};
+    std::array<Body,2> b{};std::uint32_t next=0x02000888;
+    double wall_x=1e9;double gravity=9.81;bool step_gravity=true;
+    int creates=0,destroys=0,velocities=0,applies=0,motions=0,steps=0;
+    std::array<int,2> applies_side{};std::array<Vec3,2> last_written{};std::array<int,2> creates_side{},destroys_side{};
+    std::uint64_t clock=0;std::uint64_t call_us=7;   // every engine call costs call_us microseconds of the fake clock
+    bool garbage_nan=false,garbage_huge=false,garbage_pos=false;
+    std::vector<std::string> log;
+    void step() {   // the physics step between two dispatcher ticks
+        ++steps;
+        for(auto& x:b) if(x.alive) {
+            if(step_gravity) x.vel.z-=gravity*dt;
+            const double before=x.pos.x;
+            x.pos=x.pos+x.vel*dt;
+            if(before<=wall_x-.05+1e-12 && x.pos.x>wall_x-.05) {x.pos.x=wall_x-.05;if(x.vel.x>0) x.vel.x=0;}   // a slab: stops what comes from the near side
+        }
+    }
+    HandBodyEngine engine() {
+        HandBodyEngine e;
+        e.world=[this]()->std::uintptr_t {return world_id;};
+        e.busy=[this] {return busy;};
+        e.create=[this](unsigned side,std::uintptr_t,Vec3 at,std::uint32_t& h) {clock+=call_us;++creates;++creates_side[side];log.push_back("create:"+std::to_string(side));b[side]={true,next++,at,{},{}};h=b[side].handle;return true;};
+        e.velocity=[this](unsigned side,std::uint32_t h,Vec3 v) {clock+=call_us;++velocities;log.push_back("wake:"+std::to_string(side));if(!b[side].alive || b[side].handle!=h) return false;b[side].vel=v;return true;};
+        e.destroy=[this](unsigned side,std::uint32_t h) {clock+=call_us;++destroys;++destroys_side[side];log.push_back("destroy:"+std::to_string(side));if(!b[side].alive || b[side].handle!=h) return DestroyOutcome::absent;b[side].alive=false;return DestroyOutcome::gone;};
+        e.position=[this](unsigned side,std::uint32_t h)->std::optional<Vec3> {clock+=call_us;if(!b[side].alive || b[side].handle!=h) return std::nullopt;return b[side].pos;};
+        e.motion=[this](unsigned side,std::uint32_t h)->std::optional<BodyMotion> {
+            clock+=call_us;++motions;
+            if(!b[side].alive || b[side].handle!=h) return std::nullopt;
+            BodyMotion m{b[side].pos,b[side].vel,b[side].spin};
+            if(garbage_nan) m.velocity.x=std::numeric_limits<double>::quiet_NaN();
+            if(garbage_huge) m.velocity.x=500;
+            if(garbage_pos) m.position.y=std::numeric_limits<double>::infinity();
+            return m;
+        };
+        e.apply=[this](unsigned side,const hand_body::CommandRecord& r) {
+            clock+=call_us;++applies;++applies_side[side];log.push_back("apply:"+std::to_string(side));
+            std::uint32_t h{};std::memcpy(&h,r.bytes.data()+8,4);float f[3]{};std::memcpy(f,r.bytes.data()+0x10,12);
+            if(!b[side].alive || b[side].handle!=h) return false;
+            b[side].vel={f[0],f[1],f[2]};last_written[side]=b[side].vel;return true;
+        };
+        e.forget=[](unsigned) {};
+        e.at_g1_point=[] {return true;};
+        e.now_us=[this] {return clock;};
+        return e;
+    }
+};
+WorldTrackedPose pose_at(Vec3 p) {WorldTrackedPose w;w.position=p;w.basis={Vec3{1,0,0},Vec3{0,1,0},Vec3{0,0,1}};return w;}
+// One dispatcher tick: service (spawn at the targets when free), then the drive for both sides, then the physics step.
+struct DriveRig {
+    FakeDrive w;HandBody hb{w.engine()};double t=10;std::uint64_t ms=1000;
+    std::array<Vec3,2> target{Vec3{.4,.2,1.2},Vec3{.4,-.2,1.2}};std::array<bool,2> free{true,true},yield{false,false};
+    std::optional<Vec3> root{};bool locomotion=false;bool gameplay=true;
+    void tick(int drives_per_side=1) {
+        std::array<std::optional<Vec3>,2> spawn{};
+        for(unsigned side=0;side<2;++side) if(free[side]) spawn[side]=target[side];
+        hb.service(gameplay_in(ms,gameplay),spawn);
+        for(int k=0;k<drives_per_side;++k) for(unsigned side=0;side<2;++side) {
+            DriveInput d;d.side=side;d.target=pose_at(target[side]);d.now=t;d.yield=yield[side];d.target_free=free[side];d.player_root=root;d.locomotion=locomotion;
+            hb.drive(d);
+        }
+        w.step();t+=FakeDrive::dt;ms+=11;
+    }
+};
+}
+
+static void b14_checks() {
+    {   // drive_writes_once_per_tick: the create tick's wake write is its one write; then exactly one drive write per side per tick, even when the
+        // dispatcher calls drive several times in a tick (it runs 7-11k/s); a second drive in one tick is counted and writes nothing
+        HandBodyFault::reset_for_tests();DriveRig r;
+        r.tick(3);
+        CHECK(r.w.creates==2);CHECK(r.w.velocities==2);CHECK(r.w.applies==0);   // the wake writes only
+        for(int i=0;i<50;++i) {const int before0=r.w.applies_side[0],before1=r.w.applies_side[1];r.tick(4);CHECK(r.w.applies_side[0]-before0<=1);CHECK(r.w.applies_side[1]-before1<=1);}
+        CHECK(r.w.applies_side[0]==50);CHECK(r.w.applies_side[1]==50);   // the create tick's drive only starts the dt clock (the wake was its write)
+        CHECK(r.hb.drive_status(0).second_drives==50*3);CHECK(r.hb.drive_status(0).drive_writes==50);
+        CHECK(r.w.velocities==2);   // never another wake write once driven
+    }
+    {   // drive_follows_target_within_1cm (no obstacles, 90 Hz, gravity on, gravity compensated): a 0.5 m reach, then hold
+        HandBodyFault::reset_for_tests();DriveRig r;
+        r.tick();   // created at the targets
+        const Vec3 start=r.target[0];
+        for(int i=0;i<90;++i) {r.target[0]=start+Vec3{.5*(i+1)/90.,0,-.3*(i+1)/90.};r.tick();}   // 0.58 m in 1 s
+        for(int i=0;i<45;++i) r.tick();   // 0.5 s hold
+        const double gap=length(r.w.b[0].pos-r.target[0]);
+        CHECK(gap<.01);CHECK(r.hb.drive_status(0).gap_m<.01);CHECK(length(r.w.b[1].pos-r.target[1])<.01);   // the idle hand hovers (gravity compensated)
+        CHECK(r.hb.drive_status(0).snaps==0);CHECK(r.hb.status(0).faults==0);CHECK(r.hb.drive_status(0).contact_frames==0);
+    }
+    {   // drive_stops_at_wall_and_reports_contact: the target 0.25 m beyond a wall; the body never passes it, contact frames rise, no snap
+        // while the target is blocked (the clamp's cast does not show it free)
+        HandBodyFault::reset_for_tests();DriveRig r;r.w.wall_x=.6;
+        r.tick();
+        r.target[0]=Vec3{.85,.2,1.2};r.free[0]=false;
+        double max_x=0;
+        for(int i=0;i<180;++i) {r.tick();max_x=std::max(max_x,r.w.b[0].pos.x);}
+        CHECK(max_x<=.6-.05+1e-9);CHECK(r.hb.drive_status(0).contact_frames>=100);CHECK(r.hb.drive_status(0).snaps==0);
+        CHECK(r.w.destroys==0);CHECK(r.hb.drive_status(0).snap_requests==0);CHECK(r.hb.drive_status(1).contact_frames==0);
+        CHECK(r.hb.drive_status(0).gap_m>.2);   // lags behind the controller (Bonelab §2.2), still driven
+    }
+    {   // snap = destroy + recreate at the controller pose, only when the target is free (ruling): the body is stuck behind a wall while the
+        // target (on the far side, per the clamp's cast) is free -> after 0.25 s stuck the next idle tick destroys and re-creates it there
+        HandBodyFault::reset_for_tests();DriveRig r;r.w.wall_x=.6;
+        r.tick();
+        r.target[0]=Vec3{1.0,.2,1.2};r.free[0]=true;
+        int ticks=0;while(r.hb.drive_status(0).snaps==0 && ticks<120) {r.tick();++ticks;}
+        CHECK(r.hb.drive_status(0).snaps==1);CHECK(ticks>=22 && ticks<=40);   // 0.25 s stuck (+ the approach)
+        CHECK(r.w.destroys_side[0]==1);CHECK(r.w.creates_side[0]==2);CHECK(length(r.w.b[0].pos-r.target[0])<.02);
+        CHECK(r.hb.status(0).destroys==1);CHECK(r.hb.ready(0));CHECK(r.w.destroys_side[1]==0);
+        // order in the log: the destroy, then the create, then the wake (re-wake after the recreate), in one tick
+        std::size_t d=0;for(std::size_t i=0;i<r.w.log.size();++i) if(r.w.log[i]=="destroy:0") d=i;
+        CHECK(d>0 && r.w.log[d+1]=="create:0" && r.w.log[d+2]=="wake:0");
+        // blocked: the same stuck body with the target not free never snaps; it keeps servoing (writes continue)
+        HandBodyFault::reset_for_tests();DriveRig b;b.w.wall_x=.6;b.tick();
+        b.target[0]=Vec3{1.0,.2,1.2};b.free[0]=false;
+        const int writes0=b.w.applies_side[0];
+        for(int i=0;i<180;++i) b.tick();
+        CHECK(b.hb.drive_status(0).snaps==0);CHECK(b.w.destroys==0);CHECK(b.w.applies_side[0]-writes0>=170);
+        // free when the request is made, blocked at the next tick: dropped (counted), no destroy
+        HandBodyFault::reset_for_tests();DriveRig c;c.w.wall_x=.6;c.tick();
+        c.target[0]=Vec3{1.0,.2,1.2};
+        while(c.hb.drive_status(0).snap_requests==0) {
+            std::array<std::optional<Vec3>,2> spawn{};   // drive says free, the next service sees it blocked
+            c.hb.service(gameplay_in(c.ms),spawn);
+            for(unsigned side=0;side<2;++side) {DriveInput dd;dd.side=side;dd.target=pose_at(c.target[side]);dd.now=c.t;dd.target_free=true;c.hb.drive(dd);}
+            c.w.step();c.t+=FakeDrive::dt;c.ms+=11;
+        }
+        c.free[0]=false;c.tick();
+        CHECK(c.w.destroys==0);CHECK(c.hb.drive_status(0).snaps==0);CHECK(c.hb.drive_status(0).snap_blocked>=1);
+        // busy at the snap tick: waits for an idle tick, never a direct destroy while busy
+        HandBodyFault::reset_for_tests();DriveRig q;q.w.wall_x=.6;q.tick();q.target[0]=Vec3{1.0,.2,1.2};
+        while(q.hb.drive_status(0).snap_requests==0) q.tick();
+        q.w.busy=true;for(int i=0;i<5;++i) q.tick();
+        CHECK(q.w.destroys==0);q.w.busy=false;q.tick();CHECK(q.hb.drive_status(0).snaps==1);
+        // a far gap (Blink, a teleport) snaps at once when free: never flies the body 5 m through the world
+        HandBodyFault::reset_for_tests();DriveRig f;f.tick();f.tick();
+        f.target[0]=f.target[0]+Vec3{5,0,0};f.tick();f.tick();
+        CHECK(f.hb.drive_status(0).snaps==1);CHECK(length(f.w.b[0].pos-f.target[0])<.02);
+    }
+    {   // create_waits_while_palm_blocked (ruling): no create while the clamp's cast does not show the palm free; created once it does
+        HandBodyFault::reset_for_tests();DriveRig r;r.free={false,true};
+        for(int i=0;i<60;++i) r.tick();
+        CHECK(r.w.creates_side[0]==0);CHECK(r.w.creates_side[1]==1);CHECK(!r.hb.ready(0));
+        r.free[0]=true;r.tick();CHECK(r.w.creates_side[0]==1);CHECK(r.hb.ready(0));
+    }
+    {   // drive_dt_is_real_interval: dt is the time since this side's last drive, not the dispatcher's interval; a clock that does not
+        // advance writes nothing; a long gap (a hitch) is clamped by the servo, not refused
+        HandBodyFault::reset_for_tests();DriveRig r;r.tick();r.tick();
+        const double t0=r.t;
+        auto drive_at=[&](double now) {r.hb.service(gameplay_in(r.ms+=11),{r.target[0],r.target[1]});DriveInput d;d.side=0;d.target=pose_at(r.target[0]);d.now=now;d.target_free=true;r.hb.drive(d);r.w.step();};
+        drive_at(t0+.007);CHECK(std::abs(r.hb.drive_status(0).dt_s-(t0+.007-(r.t-FakeDrive::dt)))<1e-9);
+        drive_at(t0+.007+.019);CHECK(std::abs(r.hb.drive_status(0).dt_s-.019)<1e-9);
+        const auto writes=r.hb.drive_status(0).drive_writes;
+        drive_at(t0+.007+.019);CHECK(r.hb.drive_status(0).drive_writes==writes);   // no time passed: no write
+        drive_at(t0+.5);CHECK(std::abs(r.hb.drive_status(0).dt_s-(.5-.026))<1e-9);CHECK(r.hb.drive_status(0).drive_writes==writes+1);
+        CHECK(length(r.w.last_written[0])<=HandDriveConfig{}.max_write_speed+HandDriveConfig{}.gravity/30+1e-9);   // the gravity term uses dt_max
+    }
+    {   // readback_garbage_latches_body_off (Review Focus 3): NaN velocity, huge velocity, non-finite position: HandBodyFault, no further
+        // write, available false; the body is then destroyed once
+        for(int kind=0;kind<3;++kind) {
+            HandBodyFault::reset_for_tests();DriveRig r;r.tick();r.tick();r.tick();
+            const int applies=r.w.applies;
+            if(kind==0) r.w.garbage_nan=true;else if(kind==1) r.w.garbage_huge=true;else r.w.garbage_pos=true;
+            r.tick();
+            CHECK(HandBodyFault::tripped());CHECK(!r.hb.status(0).available);CHECK(r.hb.status(0).faults+r.hb.status(1).faults>=1);
+            CHECK(r.hb.drive_status(0).garbage+r.hb.drive_status(1).garbage>=1);
+            const int after=r.w.applies;CHECK(after==applies);   // the garbage tick wrote nothing
+            for(int i=0;i<30;++i) r.tick();
+            CHECK(r.w.applies==after);CHECK(r.w.destroys==2);CHECK(!r.hb.any_alive());CHECK(r.w.creates==2);
+        }
+    }
+    {   // yield_writes_zero_velocity_and_holds: an authored arm / a lost track: zero velocity plus the gravity term, the body holds still
+        HandBodyFault::reset_for_tests();DriveRig r;r.tick();r.tick();
+        r.yield[0]=true;const Vec3 at=r.w.b[0].pos;r.target[0]=r.target[0]+Vec3{.3,0,0};
+        for(int i=0;i<90;++i) r.tick();
+        CHECK(length(r.w.b[0].pos-at)<.001);CHECK(std::abs(r.w.last_written[0].x)<1e-9 && std::abs(r.w.last_written[0].y)<1e-9);
+        CHECK(std::abs(r.w.last_written[0].z-9.81*FakeDrive::dt)<1e-6);CHECK(r.hb.drive_status(0).yields==90);CHECK(r.hb.drive_status(0).snaps==0);
+        r.yield[0]=false;for(int i=0;i<90;++i) r.tick();CHECK(length(r.w.b[0].pos-r.target[0])<.01);
+    }
+    {   // cost_budget_recorded: the fake clock advances 7 us per engine call; one drive = motion + apply = 14 us; summed over both hands 28
+        HandBodyFault::reset_for_tests();DriveRig r;r.tick();r.tick();r.tick();
+        CHECK(r.hb.drive_status(0).cost_us==14);CHECK(r.hb.drive_status(1).cost_us==14);CHECK(r.hb.drive_cost_us()==28);
+        r.w.call_us=150;r.tick();CHECK(r.hb.drive_status(0).cost_max_us==300);CHECK(r.hb.drive_cost_max_us()==600);
+        r.w.call_us=7;r.tick();CHECK(r.hb.drive_cost_max_us()==600);CHECK(r.hb.drive_cost_us()==28);
+    }
+    {   // player_drift_reported_not_clamped: the root moves 2 mm while the hand is pressed into the capsule and no locomotion input: reported
+        // as 2000 um (above the 1000 um proof bound: the metric is reported, never clamped); with locomotion input it is explained (not counted)
+        HandBodyFault::reset_for_tests();DriveRig r;r.root=Vec3{0,0,0};r.target[0]=Vec3{.1,.1,1.0};r.target[1]=Vec3{.6,-.2,1.2};r.tick();
+        for(int i=0;i<30;++i) r.tick();
+        CHECK(r.hb.drive_status(0).player_drift_um==0);
+        for(int i=0;i<20;++i) {r.root=Vec3{.0001*(i+1),0,0};r.tick();}
+        CHECK(r.hb.drive_status(0).player_drift_um==2000);CHECK(r.hb.drive_status(1).player_drift_um==0);   // hand 1 is outside the capsule
+        CHECK(length(r.w.b[0].pos-r.target[0])<.01);   // the drive was not altered by the metric
+        DriveRig l;l.root=Vec3{0,0,0};l.target[0]=Vec3{.1,.1,1.0};l.locomotion=true;l.tick();
+        for(int i=0;i<20;++i) {l.root=Vec3{.01*(i+1),0,0};l.tick();}
+        CHECK(l.hb.drive_status(0).player_drift_um==0);
+    }
+    {   // knob off: a disabled manager never drives
+        HandBodyFault::reset_for_tests();FakeDrive w;HandBody hb(w.engine(),false);
+        for(int i=0;i<10;++i) {hb.service(gameplay_in(1000+i*11),{Vec3{.4,.2,1.2},Vec3{.4,-.2,1.2}});DriveInput d;d.target=pose_at({.4,.2,1.2});d.now=1+i*.011;hb.drive(d);}
+        CHECK(w.creates==0);CHECK(w.applies==0);CHECK(w.motions==0);
+    }
+    {   // the drive refuses outside the G1 point and from inside service() (re-entry), like write()
+        HandBodyFault::reset_for_tests();DriveRig r;r.tick();r.tick();
+        bool point=false;auto e=r.w.engine();e.at_g1_point=[&] {return point;};HandBody hb(e);
+        hb.service(gameplay_in(1000),{Vec3{.4,.2,1.2},Vec3{.4,-.2,1.2}});
+        DriveInput d;d.target=pose_at({.4,.2,1.2});d.now=1;hb.drive(d);d.now=1.1;hb.drive(d);
+        CHECK(hb.drive_status(0).drives==0);CHECK(hb.status(0).misplaced_writes==2);
+    }
+    HandBodyFault::reset_for_tests();
+}
+
 int main() {
     {   // parse_spike_route
         CHECK(parse_spike_route("R1")==SpikeRoute::R1);CHECK(parse_spike_route(" R2\r\n")==SpikeRoute::R2);CHECK(parse_spike_route("R3\n")==SpikeRoute::R3);
@@ -690,6 +909,7 @@ int main() {
         CHECK(!hand_body::layers_collide(hand_body::hand_filter_word(false),0x0838c566u));
     }
     b13_checks();
+    b14_checks();
     std::printf("hand_body_check: all passed\n");
     return 0;
 }

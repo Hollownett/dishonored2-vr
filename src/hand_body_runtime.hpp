@@ -37,7 +37,11 @@
 namespace d2vr {
 
 // The render thread's per-frame facts for the hand bodies (outside the class: clang-cl needs its member initializers complete).
-struct HandBodyHandsInput {unsigned tracked{};std::array<Vec3,2> palm{};bool authored{};bool focused{};};
+// B14: target = the raw calibrated palm pose per side (C9: intent; the servo's target), free = the hand clamp's palm cast found it free this frame
+// (creates and snaps need it), yield = the clamp yields (an authored arm, a native carry, a physical hold), locomotion = the move stick is
+// published non-zero, player_root = the player entity's +0x300 (B11: equal to the query body's record translation).
+struct HandBodyHandsInput {unsigned tracked{};std::array<Vec3,2> palm{};bool authored{};bool focused{};
+    std::array<WorldTrackedPose,2> target{};unsigned free{};unsigned yield{};bool locomotion{};std::optional<Vec3> player_root{};};
 // One body's mod memory and identity (free: reusable; in_use: our body may exist; retired: never reused, the engine may still read it).
 struct HandBodySlot {enum State {free,in_use,retired} state{free};R1BodyStorage storage{};std::uintptr_t world{};std::uint32_t handle{0xffffffffu};};
 struct HandBodyEvent {std::uint64_t t_ms{};unsigned side{};const char* kind{""};std::uint32_t handle{};std::uintptr_t world{};std::uint32_t generation{};unsigned logic{};bool release{};};
@@ -77,6 +81,8 @@ public:
         auto* body=new HandBody(engine(),true);   // never freed: a render-thread reader may still hold the previous one (tiny, per install)
         body_.store(body,std::memory_order_release);
         for(auto& s:last_status_) s={};
+        for(auto& s:last_drive_) s={};
+        tick_changed_=false;tick_cost_us_.store(0);tick_cost_max_us_.store(0);steady_tick_cost_max_us_.store(0);
         start_writer();
         stop_requested_.store(false,std::memory_order_release);
         active_.store(true,std::memory_order_release);
@@ -169,11 +175,25 @@ public:
              <<",\"direct_destroys\":"<<st.direct_destroys<<",\"queued_destroys\":"<<st.queued_destroys<<",\"releases\":"<<st.releases<<",\"abandons\":"<<st.abandons
              <<",\"lost\":"<<st.lost<<",\"faults\":"<<st.faults<<",\"refused_writes\":"<<st.refused_writes<<",\"writes\":"<<st.writes<<",\"wake_writes\":"<<st.wake_writes
              <<",\"create_refusals\":"<<st.create_refusals<<",\"busy_waits\":"<<st.busy_waits
-             <<",\"misplaced_writes\":"<<st.misplaced_writes<<",\"reentrant_writes\":"<<st.reentrant_writes<<",\"pose\":";
+             <<",\"misplaced_writes\":"<<st.misplaced_writes<<",\"reentrant_writes\":"<<st.reentrant_writes;
+            const auto d=body->drive_status(side);
+            o<<",\"drive\":{\"gap_m\":"<<d.gap_m<<",\"speed\":"<<d.speed<<",\"capped\":"<<(d.capped?"true":"false")<<",\"contact_frames\":"<<d.contact_frames
+             <<",\"snaps\":"<<d.snaps<<",\"snap_requests\":"<<d.snap_requests<<",\"snap_blocked\":"<<d.snap_blocked<<",\"cost_us\":"<<d.cost_us
+             <<",\"cost_max_us\":"<<d.cost_max_us<<",\"player_drift_um\":"<<d.player_drift_um<<",\"dt_s\":"<<d.dt_s<<",\"drives\":"<<d.drives
+             <<",\"drive_writes\":"<<d.drive_writes<<",\"yields\":"<<d.yields<<",\"skipped\":"<<d.skipped<<",\"garbage\":"<<d.garbage
+             <<",\"second_drives\":"<<d.second_drives<<'}';
+            o<<",\"pose\":";
             if(p) o<<'['<<p->position.x<<','<<p->position.y<<','<<p->position.z<<']';else o<<"null";
             o<<'}';
         }
-        o<<"],\"abandons\":"<<(body->status(0).abandons+body->status(1).abandons)
+        const auto d0=body->drive_status(0),d1=body->drive_status(1);
+        o<<"],\"faults\":"<<(body->status(0).faults+body->status(1).faults)
+         <<",\"cost_us\":"<<body->drive_cost_us()<<",\"cost_max_us\":"<<body->drive_cost_max_us()   // drive, both hands summed per tick (proof d)
+         <<",\"tick_cost_us\":"<<tick_cost_us_.load()<<",\"tick_cost_max_us\":"<<tick_cost_max_us_.load()<<",\"steady_tick_cost_max_us\":"<<steady_tick_cost_max_us_.load()
+         <<",\"player_drift_um\":"<<std::max(d0.player_drift_um,d1.player_drift_um)<<",\"contact_frames\":"<<(d0.contact_frames+d1.contact_frames)
+         <<",\"snaps\":"<<(d0.snaps+d1.snaps)<<",\"gap_m\":["<<d0.gap_m<<','<<d1.gap_m<<']'
+         <<",\"time_factor\":1,\"time_factor_verified\":false,\"gravity_comp\":"<<HandDriveConfig{}.gravity
+         <<",\"abandons\":"<<(body->status(0).abandons+body->status(1).abandons)
          <<",\"release\":{\"holds\":"<<gate_holds_.load()<<",\"timeouts\":"<<gate_timeouts_.load()<<",\"intents\":"<<gate_intents_.load()
          <<",\"alive_outside_gameplay\":"<<alive_outside_gameplay_.load()<<'}'
          <<",\"stranded\":["<<(stranded_[0].load()?1:0)<<','<<(stranded_[1].load()?1:0)<<']'
@@ -212,7 +232,9 @@ private:
     static bool body_alive() {const auto* body=body_.load(std::memory_order_acquire);return body && body->any_alive();}
     inline static G2Counts g2_prev_{};inline static bool g2_watching_{};inline static std::atomic<std::uint64_t> g2_events_{};
     inline static std::atomic<std::uint64_t> storage_exhausted_{},retired_{};
-    inline static std::array<HandBodyStatus,2> last_status_{};
+    inline static std::array<HandBodyStatus,2> last_status_{};inline static std::array<DriveStatus,2> last_drive_{};
+    inline static bool tick_changed_{};
+    inline static std::atomic<std::uint64_t> tick_cost_us_{},tick_cost_max_us_{},steady_tick_cost_max_us_{};
     inline static std::atomic<std::uint32_t> tick_generation_{};inline static std::atomic<unsigned> tick_logic_{};inline static std::atomic<bool> tick_release_{};
 
     static Slot* slot_of(unsigned side) {return side<2 && current_[side]!=no_slot?&storage_[side][current_[side]]:nullptr;}
@@ -296,10 +318,21 @@ private:
         };
         e.forget=[](unsigned side) {release_slot(side,true,false);};   // abandoned with its world / lost: no engine call; the storage is retired
         e.at_g1_point=[] {return in_g1_tick_;};   // write() only from inside the dispatcher's G1 tick (B14's drive runs there)
+        e.motion=[](unsigned side,std::uint32_t handle)->std::optional<BodyMotion> {   // B14 read-back (raw; the manager judges garbage)
+            const Slot* s=slot_of(side);
+            if(!s) return std::nullopt;
+            return HandBodyNative::motion(HandBodyNative::world_now(),handle,s->storage);
+        };
+        e.now_us=[] {return qpc_us();};
         return e;
     }
 
     // ---- the 0x89fb0 entry (NativeGrab::invoke, after the original dispatcher)
+    static std::uint64_t qpc_us() {
+        static const std::int64_t freq=[] {LARGE_INTEGER f{};QueryPerformanceFrequency(&f);return f.QuadPart>0?f.QuadPart:1;}();
+        LARGE_INTEGER c{};QueryPerformanceCounter(&c);
+        return static_cast<std::uint64_t>(static_cast<double>(c.QuadPart)*1e6/static_cast<double>(freq));
+    }
     static void dispatch_entry(void*) {
         if(!active_.load(std::memory_order_acquire)) return;
         struct Inflight {Inflight() {dispatch_inflight_.fetch_add(1);} ~Inflight() {dispatch_inflight_.fetch_sub(1);}} inflight;
@@ -309,8 +342,13 @@ private:
         if(!lock.owns_lock() || point.frame==last_frame_) return;           // once per game frame
         last_frame_=point.frame;
         in_g1_tick_=true;
+        const auto t0=qpc_us();
         try {tick();} catch(...) {HandBodyFault::trip();note_event(0,"tick_exception",0);}
         in_g1_tick_=false;
+        // B14 proof (d): the whole tick (service + both drives) lands on the render thread (B11 G1: frame, drain and present share it)
+        const auto t1=qpc_us();const auto us=t1>=t0?t1-t0:0;
+        tick_cost_us_.store(us,std::memory_order_relaxed);if(us>tick_cost_max_us_.load(std::memory_order_relaxed)) tick_cost_max_us_.store(us,std::memory_order_relaxed);
+        if(!tick_changed_ && us>steady_tick_cost_max_us_.load(std::memory_order_relaxed)) steady_tick_cost_max_us_.store(us,std::memory_order_relaxed);
     }
     static const char* g1_violation_reason(const G1Stats& at_pass,const G1Stats& now) {
         if(now.dispatch_off_frame_thread!=at_pass.dispatch_off_frame_thread) return "G1 violated after the pass: a 0x89fb0 dispatch ran off the frame thread";
@@ -358,13 +396,26 @@ private:
             auto& li=in[side];
             li.world_generation=generation;li.gameplay=gameplay;li.focused=last_hands_.focused;
             li.tracked=((last_hands_.tracked>>side)&1u)!=0;li.shutdown=stop_requested_.load(std::memory_order_acquire);li.now_ms=now;
-            if(li.tracked && finite(last_hands_.palm[side])) spawn[side]=last_hands_.palm[side];
+            // B14 ruling: a body is created (and snapped) only where the clamp's last palm cast found the target free; otherwise it waits
+            const bool free=fresh && ((last_hands_.free>>side)&1u)!=0;
+            if(li.tracked && free && finite(last_hands_.palm[side])) spawn[side]=last_hands_.palm[side];
         }
         tick_generation_=generation;tick_logic_=logic;tick_release_=release;
         body->service(in,spawn,gate);
+        // B14: drive both hands in the same tick, once per game frame (this tick's cadence: the 0x89fb0 G1 point, first dispatch of each
+        // 0x8ad260 frame; ~100/s in the sim against 7-11k dispatches/s). The servo's dt is QPC time since that side's last drive.
+        const double now_s=static_cast<double>(qpc_us())*1e-6;
+        for(unsigned side=0;side<2;++side) {
+            DriveInput d;d.side=side;d.target=last_hands_.target[side];d.held_kg=0;d.now=now_s;   // held_kg: B16 feeds the held body
+            const bool tracked=((last_hands_.tracked>>side)&1u)!=0;
+            d.yield=!fresh || !tracked || ((last_hands_.yield>>side)&1u)!=0;
+            d.target_free=fresh && ((last_hands_.free>>side)&1u)!=0;
+            d.player_root=fresh?last_hands_.player_root:std::nullopt;d.locomotion=last_hands_.locomotion;
+            body->drive(d);
+        }
         g2_watching_=body->any_alive();
         if(!g2_watching_) g2_prev_=HandBodyNative::g2_now();
-        log_changes(*body);
+        tick_changed_=log_changes(*body);
     }
 
     // ---- the event log (hand-body-events.csv; a writer thread flushes once per second, the dispatcher only try_locks)
@@ -376,9 +427,17 @@ private:
         if(!lock.owns_lock() || events_.size()>=1024) {dropped_events_.fetch_add(1,std::memory_order_relaxed);return;}
         events_.push_back(ev);
     }
-    static void log_changes(const HandBody& body) {
+    // true: a create, destroy, abandon or fault happened this tick (not a steady tick for the cost)
+    static bool log_changes(const HandBody& body) {
+        bool changed=false;
         for(unsigned side=0;side<2;++side) {
             const auto now=body.status(side);auto& was=last_status_[side];
+            const auto drive=body.drive_status(side);auto& drive_was=last_drive_[side];
+            changed=changed || now.creates>was.creates || now.destroys>was.destroys || now.abandons>was.abandons || now.faults>was.faults || now.lost>was.lost;
+            if(drive.snaps>drive_was.snaps) note_event(side,"snap",now.handle);
+            if(drive.garbage>drive_was.garbage) note_event(side,"readback_garbage",was.handle);
+            if(drive.snap_blocked>drive_was.snap_blocked && drive_was.snap_blocked<16) note_event(side,"snap_blocked",now.handle);
+            drive_was=drive;
             if(now.creates>was.creates) note_event(side,"create",now.handle);
             if(now.wake_writes>was.wake_writes) note_event(side,"wake",now.handle);
             if(now.destroys>was.destroys) note_event(side,now.releases>was.releases?"destroy_release":"destroy",was.handle);
@@ -389,6 +448,7 @@ private:
             if(now.create_refusals>was.create_refusals && was.create_refusals<16) note_event(side,"create_refused",0);
             was=now;
         }
+        return changed;
     }
     inline static std::thread writer_;inline static std::mutex writer_mutex_;inline static std::condition_variable writer_wake_;inline static bool writer_quit_{};
     static void start_writer() {

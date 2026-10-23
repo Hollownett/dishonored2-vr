@@ -17,6 +17,7 @@
 #include "hand_body.hpp"
 #include "hand_body_probe.hpp"
 #include "native_hand_volume.hpp"
+#include "native_motion.hpp"
 #include "native_world_trace.hpp"
 #include "crash_observer.hpp"
 #include <array>
@@ -178,6 +179,16 @@ public:
         const auto t=rig::value<std::array<float,3>>(read_,record+0x30);if(!t) throw HandBodyUnreadable{};
         return Vec3{(*t)[0],(*t)[1],(*t)[2]};
     }
+    // B14: the body's raw read-back (translation +0x30; hknpMotion velocity and spin through native_motion_raw). nullopt: the slot no longer
+    // holds our body. Throws HandBodyUnreadable. Not filtered: the manager latches HandBodyFault on garbage (Review Focus 3).
+    static std::optional<BodyMotion> motion(std::uintptr_t world,std::uint32_t handle,const R1BodyStorage& s) {
+        std::uintptr_t record{};const auto own=own_state(world,handle,s,&record);
+        if(own==Own::unreadable) throw HandBodyUnreadable{};
+        if(own==Own::absent) return std::nullopt;
+        const auto t=rig::value<std::array<float,3>>(read_,record+0x30);if(!t) throw HandBodyUnreadable{};
+        const auto m=native_motion_raw(read_,world,record);if(!m) throw HandBodyUnreadable{};
+        return BodyMotion{Vec3{(*t)[0],(*t)[1],(*t)[2]},m->velocity,m->spin};
+    }
     // Raw words of a slot (handle +0x70, flags +0x44, userdata low half +0x90), index and count checked; for the logs.
     static std::optional<std::array<std::uint32_t,3>> slot_words(std::uintptr_t world,std::uint32_t handle) {
         const auto pool=rig::value<std::uintptr_t>(read_,world+0x28);const auto count=rig::value<std::uint32_t>(read_,world+0x30);
@@ -255,9 +266,11 @@ public:
         const auto after=own_state(world,handle,s);   // gone only when the slot is positively ours no more
         return after==Own::absent?DestroyOutcome::gone:after==Own::present?DestroyOutcome::still_present:DestroyOutcome::unknown;
     }
-    // 0xc85dc0 velocity on our own slot only, with 0x8a7820 re-read false right before it. false: refused, no call. Caps: 2 m/s, 20 rad/s.
+    // 0xc85dc0 velocity on our own slot only, with 0x8a7820 re-read false right before it. false: refused, no call. Caps (B14, the drive's
+    // servo limits plus the gravity term): kHandWriteMaxSpeed 10.5 m/s, kHandWriteMaxSpin 20.5 rad/s (the B11 spike's press was 0.5 m/s).
     static bool velocity(const R1BodyStorage& s,std::uintptr_t world,std::uintptr_t world_at_create,std::uint32_t handle,Vec3 v,Vec3 w) {
-        if(!world || world!=world_at_create || !finite(v) || !finite(w) || length(v)>2 || length(w)>20 || own_state(world,handle,s)!=Own::present) return false;
+        if(!world || world!=world_at_create || !finite(v) || !finite(w) || length(v)>kHandWriteMaxSpeed || length(w)>kHandWriteMaxSpin ||
+           own_state(world,handle,s)!=Own::present) return false;
         using Velocity=void (__fastcall*)(void*,UINT,const float*,const float*,int);
         const auto set_velocity=reinterpret_cast<Velocity>(base_+velocity_rva);
         alignas(16) const std::array<float,4> linear{static_cast<float>(v.x),static_cast<float>(v.y),static_cast<float>(v.z),0};
