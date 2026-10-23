@@ -43,7 +43,7 @@ sites = [
     'physical_grab_requested && per_frame &&',                                # physical grab
     'if(per_frame && controller_trace_csv.is_open())',
     'controller_aim_requested && per_frame)',
-    '(native_camera_trace_requested || native_left_aim_requested) && per_frame)',
+    '(native_camera_trace_requested || native_left_aim_requested || native_shot_aim_installed || native_crosshair_installed) && per_frame)',
     '(tracked_arms_requested || native_weapon_attachment_requested) && per_frame)',
     'if(per_frame && native_crosshair_installed)',
 ]

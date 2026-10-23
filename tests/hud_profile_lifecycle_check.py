@@ -16,7 +16,10 @@ ordered(disable, "cpu_profile=nullptr;", "MH_DisableHook(target_)",
 hook = draw[draw.index("    static std::uint32_t __fastcall hook("):draw.index("    static bool publish(")]
 ordered(hook, "++depth_;++calls;++nesting_;", "const auto profile=cpu_profile.load(",
         "if(profile)profile(0,nesting_);", "if(profile)profile(1,nesting_);",
-        "__try {if(!suppress)result=original_", "__finally {if(profile)profile(2,nesting_);",
+        # the live-crosshair fast path pairs its own callbacks and unwinds the depth in its __finally
+        "__try {result=original_(iggy,scaled", "__finally {if(profile){profile(2,nesting_);profile(3,nesting_);}--nesting_;--depth_;}",
+        "if(profile)profile(1,nesting_);", "__try {if(!suppress)result=original_",
+        "__finally {eye_layout_scale_=saved_eye_scale;", "if(profile)profile(2,nesting_);",
         "if(profile)profile(3,nesting_);--nesting_;--depth_;}")
 start = probe[probe.index('DWORD WINAPI StartProbe(void*) {'):]
 ordered(start,
