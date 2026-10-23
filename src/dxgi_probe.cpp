@@ -38,6 +38,7 @@
 #include "native_gameplay_aim.hpp"
 #include "weapon_pose_stabilizer.hpp"
 #include "aim_ray_receipt.hpp"
+#include "ranged_aim_gate.hpp"
 #include "native_temporal_census.hpp"
 #include <chrono>
 #include "native_turning.hpp"
@@ -4544,7 +4545,7 @@ void prepare_head_view(void* view) noexcept {
         // the snap-back guard) with this frame's clamp state: when the hands are published this frame it goes out once, after them (no stale
         // origin from last frame's planes in between); otherwise at once. pending_publish publishes it at the latest when this scope ends.
         std::optional<d2vr::AimRayReceipt> shared_aim_ray;
-        bool publish_left_camera=false;
+        bool publish_left_camera=false,aim_for_shots=false;
         const auto publish_left_aim=[&](d2vr::WorldTrackedPose left) {
             {std::lock_guard<std::mutex> hand_lock(hand_state_mutex);
              left.position=d2vr::guarded_shot_origin(released_shot,clamp_shot[0],0,left.position,GetTickCount64(),game_xr->pose_epoch());}
@@ -4552,6 +4553,7 @@ void prepare_head_view(void* view) noexcept {
                 per_frame_target,game_xr->pose_epoch(),game_xr->reference_epoch(),GetTickCount64());
             if(!receipt) {native_shot_aim.clear();native_crosshair.clear();return;}
             shared_aim_ray=receipt;left=receipt->hand(); // exact float round-trip for the native launch writer
+            if(!aim_for_shots) {native_shot_aim.clear();return;} // crosshair-only frame (attacking / gripping): no shot or power aim leaves the hand
             if(publish_left_camera && native_left_aim_requested) native_left_aim.publish(*body,left,receipt->pose_epoch,receipt->tick,true);
             if(publish_left_camera && native_blink_aim_installed) native_blink_aim.publish(left,game_xr->pose_epoch(),GetTickCount64(),true);
             if(native_shot_aim_installed) native_shot_aim.publish(left,game_xr->pose_epoch(),GetTickCount64(),true);
@@ -4573,20 +4575,31 @@ void prepare_head_view(void* view) noexcept {
             std::optional<d2vr::Vec3> swing_tip;
             {const auto now_aim=GetTickCount64();std::lock_guard<std::mutex> l(sword_tip_mutex);
              if(native_left_aim_requested && now_aim<swing_until_tick+300 && sword_tip_tick && now_aim-sword_tip_tick<=100 && !body->authored_view()) swing_tip=sword_tip;}
-            std::optional<d2vr::WorldTrackedPose> ranged_left;
-            if(!swing_tip && !authored_camera && game_xr->state==XR_SESSION_STATE_FOCUSED && game_xr->last_action_sync==XR_SUCCESS &&
-               (aim.locationFlags&required)==required && game_xr->controller_input.active && game_xr->controller_input.left_grip<.5f &&
-               GetTickCount64()>=holster_until.load() && GetTickCount64()>=swing_until_tick+500 && game_xr->controller_input.right_trigger<.3f) {
-                const auto& p=aim.pose;
-                auto left=d2vr::to_game_pose(d2vr::camera_relative_controller(
-                    {{p.position.x,p.position.y,p.position.z},{p.orientation.x,p.orientation.y,p.orientation.z,p.orientation.w}},hand_centre,head_origin.position),head_origin,anchor,1.0);
-                barrel_aim(left);aim_offset(left);smooth_aim(left,anchor,per_frame_target,game_xr->pose_epoch(),game_xr->reference_epoch());
-                {   // Very slight (<= 0.1 deg, 6 ms) micro-jitter filter on the one aim that shots, powers and the crosshair all read.
-                    static d2vr::WeaponPoseStabilizer aim_filter;
-                    const auto us=static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
-                    if(const auto steady=aim_filter.sample(left,{body->camera,game_xr->pose_epoch(),game_xr->reference_epoch(),static_cast<std::uint32_t>(body->camera_identity.generation),0},us,true)) left=*steady;
+            // One hand pose for the frame. Shots and powers (ranged_left) keep the strict rule; the crosshair only needs a valid pose and a view
+            // the game does not own, so it stays visible while the user attacks or grips (reticle_left).
+            std::optional<d2vr::WorldTrackedPose> ranged_left,reticle_left;
+            {
+                const auto now_gate=GetTickCount64();
+                d2vr::RangedAimInputs gate_in{};
+                gate_in.swing_tip=swing_tip.has_value();gate_in.authored_camera=authored_camera;gate_in.authored_view=body->authored_view();
+                gate_in.focused=game_xr->state==XR_SESSION_STATE_FOCUSED;gate_in.action_synced=game_xr->last_action_sync==XR_SUCCESS;
+                gate_in.pose_valid=(aim.locationFlags&required)==required;gate_in.controller_active=game_xr->controller_input.active;
+                gate_in.holster_clear=now_gate>=holster_until.load();gate_in.swing_clear=now_gate>=swing_until_tick+500;
+                gate_in.left_grip=game_xr->controller_input.left_grip;gate_in.right_trigger=game_xr->controller_input.right_trigger;
+                const auto gate=d2vr::ranged_aim_gate(gate_in);
+                if(gate.shots || (gate.reticle && native_crosshair_installed)) {
+                    const auto& p=aim.pose;
+                    auto left=d2vr::to_game_pose(d2vr::camera_relative_controller(
+                        {{p.position.x,p.position.y,p.position.z},{p.orientation.x,p.orientation.y,p.orientation.z,p.orientation.w}},hand_centre,head_origin.position),head_origin,anchor,1.0);
+                    barrel_aim(left);aim_offset(left);smooth_aim(left,anchor,per_frame_target,game_xr->pose_epoch(),game_xr->reference_epoch());
+                    {   // Very slight (<= 0.1 deg, 6 ms) micro-jitter filter on the one aim that shots, powers and the crosshair all read.
+                        static d2vr::WeaponPoseStabilizer aim_filter;
+                        const auto us=static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
+                        if(const auto steady=aim_filter.sample(left,{body->camera,game_xr->pose_epoch(),game_xr->reference_epoch(),static_cast<std::uint32_t>(body->camera_identity.generation),0},us,true)) left=*steady;
+                    }
+                    if(gate.shots) ranged_left=left;
+                    if(gate.reticle) reticle_left=left;
                 }
-                ranged_left=left;
             }
             if(swing_tip) {
                 d2vr::WorldTrackedPose sword_aim{};sword_aim.position={anchor.position[0],anchor.position[1],anchor.position[2]};
@@ -4615,10 +4628,12 @@ void prepare_head_view(void* view) noexcept {
                 native_left_aim.publish(*body,gaze,game_xr->pose_epoch(),GetTickCount64(),true);
             } else if(ranged_left) {
                 publish_left_camera=true;
-            } else {native_gameplay_aim_trace.clear();native_left_aim.clear();native_shot_aim.clear();native_crosshair.clear();native_weapon_attachment.clear();if(native_shot_aim_installed) native_shot_aim.clear();if(native_blink_aim_installed) native_blink_aim.clear();}
-            if(ranged_left) {
-                if(render_world_scene() && (tracked_arms_requested || native_weapon_attachment_requested)) pending_left_aim=*ranged_left;
-                else publish_left_aim(*ranged_left);
+            } else {native_gameplay_aim_trace.clear();native_left_aim.clear();native_shot_aim.clear();native_weapon_attachment.clear();if(native_shot_aim_installed) native_shot_aim.clear();if(native_blink_aim_installed) native_blink_aim.clear();}
+            if(ranged_left || reticle_left) {
+                aim_for_shots=ranged_left.has_value(); // false: only the crosshair reads this ray
+                const auto aim_pose=ranged_left?*ranged_left:*reticle_left;
+                if(render_world_scene() && (tracked_arms_requested || native_weapon_attachment_requested)) pending_left_aim=aim_pose;
+                else publish_left_aim(aim_pose);
             }
         }
         if(render_world_scene() && (tracked_arms_requested || native_weapon_attachment_requested) && per_frame) {

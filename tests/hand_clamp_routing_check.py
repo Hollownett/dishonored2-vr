@@ -120,17 +120,24 @@ def check(dxgi: str, aim: str) -> None:
     assert publish.index(origin) < publish.index('native_left_aim.publish(*body,left,') < publish.index('native_shot_aim.publish(left,') \
         < publish.index('native_gameplay_aim_trace.publish(*body,left,')
     assert 'left.basis' not in publish
-    branch = between(s, 'barrel_aim(left);aim_offset(left);', '}else{native_gameplay_aim_trace.clear();')
-    assert branch.index('left=*steady;') < branch.index('if(render_world_scene()&&(tracked_arms_requested||native_weapon_attachment_requested))pending_left_aim=left;//afterthehands') < branch.index('elsepublish_left_aim(left);')
-    assert 'native_shot_aim.publish(' not in branch and 'native_left_aim.publish(' not in branch
+    # The pose (barrel, offset, smoothing, jitter filter) is built once; shots/powers get it only through the strict gate, the crosshair
+    # through its own (valid pose, game-owned view) gate, so it stays visible while attacking or gripping.
+    branch = between(s, 'constautogate=d2vr::ranged_aim_gate(gate_in);', 'if(swing_tip){')
+    assert 'barrel_aim(left);aim_offset(left);' in branch and branch.index('left=*steady;') < branch.index('if(gate.shots)ranged_left=left;') < branch.index('if(gate.reticle)reticle_left=left;')
+    gate_in = between(s, 'd2vr::RangedAimInputsgate_in{};', 'constautogate=')
+    assert 'gate_in.right_trigger=game_xr->controller_input.right_trigger;' in gate_in and 'gate_in.left_grip=game_xr->controller_input.left_grip;' in gate_in
+    ranged_tail = between(s, 'if(ranged_left||reticle_left){', '}if(render_world_scene()&&(tracked_arms_requested||native_weapon_attachment_requested)&&per_frame)')
+    assert ranged_tail.index('aim_for_shots=ranged_left.has_value();') < ranged_tail.index('pending_left_aim=aim_pose;') < ranged_tail.index('elsepublish_left_aim(aim_pose);')
+    assert publish.index('d2vr::finalize_aim_ray(left,') > publish.index(origin) and publish.index('if(!aim_for_shots){native_shot_aim.clear();return;}') < publish.index('native_left_aim.publish(*body,left,')
+    assert 'native_shot_aim.publish(' not in branch and 'native_left_aim.publish(' not in branch and 'native_shot_aim.publish(' not in ranged_tail
     assert s.count('native_shot_aim.publish(') == 1
     flush = 'publish_hand(side,hands.grips[side],raw_grips[side]);}pending_publish.flush();'
     assert flush in s and s.index(flush) > s.index('hand_clamp_budget.note(d2vr::NativeInteractionAim::clamp_cast_us_.load(),clamp_now);')
     assert '~PendingLeftAim(){flush();}' in s and 'try{publish(left);}catch(...){}' in s
-    cross = between(s, 'barrel_aim(hand);aim_offset(hand);', 'native_crosshair.publish(')
-    assert cross.index('hand.position=d2vr::guarded_shot_origin(released_shot,clamp_shot[0],0,hand.position,GetTickCount64(),game_xr->pose_epoch());') \
-        < cross.index('constautotarget=hand.position+hand.basis[0]*30.0;')
-    assert 'hand.basis=' not in cross
+    # The reticle projects the exact finalized float ray (guarded origin included), flushed after the hands and before the projection.
+    cross = between(s, 'pending_publish.flush();//completeguardedfloatraybeforereticleprojection', 'native_crosshair.publish(')
+    assert 'shared_aim_ray->current(' in cross and 'constautotarget=shared_aim_ray->target(30.f);' in cross
+    assert publish.index(origin) < publish.index('shared_aim_ray=receipt;') and 'hand.basis=' not in cross
     # Ruling 1 (snap-back): the released guard reads last frame's slot 0 and tip-slot answers before the update, and after it posts its
     # eye -> hand sweep on the tip slot (unused by a released side); the shot origin uses it while the side is released.
     guard_read = '{std::lock_guard<std::mutex>hand_lock(hand_state_mutex);released_shot.read(side,slot0_answer,exclude_answer,now);}'
@@ -261,14 +268,17 @@ if __name__ == '__main__':
          'if(const auto kept=clamp_hold.hold(side,clamp_epoch,clamp_root,target.position,hand_clamp.config().snap_gap)) g.position=*kept;'),
         ('if(clamp_drew || !clamp_updated) clamp_hold.note(', 'if(clamp_drew) clamp_hold.note('),
         ('left.position=d2vr::guarded_shot_origin(released_shot,clamp_shot[0],0,left.position,GetTickCount64(),game_xr->pose_epoch());', ''),
-        ('pending_left_aim=left; // after the hands', 'publish_left_aim(left); // after the hands'),
+        ('pending_left_aim=aim_pose;', 'publish_left_aim(aim_pose);'),
         ('            pending_publish.flush(); // the left aim, with this frame\'s clamp state\n', ''),
         (',game_xr->pose_epoch(),&hand_clamp,side);', ',game_xr->pose_epoch());'),
         ('post_weapon_segment(side,d2vr::NativeInteractionAim::exclude_slot,eye_sweep->from', 'post_weapon_segment(side,d2vr::NativeInteractionAim::tip_slot,eye_sweep->from'),
         ('if(clamp_epoch!=budget_epoch || !clamp_live) {hand_clamp_budget.reset_window();', 'if(clamp_epoch!=budget_epoch) {'),
         ('if(d2vr::clamp_forgets_on(game_logic_mask())) forget_hand_clamp();', ''),
         ('    hand_clamp.reset(0);hand_clamp.reset(1);clamp_hold.clear(0);clamp_hold.clear(1);clamp_exclude={};', '    clamp_hold.clear(0);clamp_hold.clear(1);clamp_exclude={};'),
-        ('hand.position=d2vr::guarded_shot_origin(released_shot,clamp_shot[0],0,hand.position,GetTickCount64(),game_xr->pose_epoch());', ''),
+        ('const auto target=shared_aim_ray->target(30.f);', 'const auto target=world.position;'),
+        ('if(!aim_for_shots) {native_shot_aim.clear();return;}', ''),
+        ('if(gate.reticle) reticle_left=left;', ''),
+        ('if(gate.shots) ranged_left=left;', 'ranged_left=left;'),
         ('{std::lock_guard<std::mutex> hand_lock(hand_state_mutex);released_shot.read(side,slot0_answer,exclude_answer,now);}', ''),
         ('if(eye_sweep) {d2vr::NativeInteractionAim::post_weapon_segment(', 'if(false) {d2vr::NativeInteractionAim::post_weapon_segment('),
         ('clamp_state[side]=clamped.state;clamp_post=in.post;', 'clamp_state[side]=clamped.state;'),
