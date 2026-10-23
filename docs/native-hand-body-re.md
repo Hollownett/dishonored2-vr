@@ -1084,7 +1084,7 @@ the second part of G2 (no reader reaches the player through the hand) is B11's s
   record). Record types seen (u16 at `command+4`): 9 (91 %), 6, 30, 27, 31, 26, 22, 59. A frame therefore holds many engine
   records without any mod record: the servo does not have to queue its own record to get a tick. The hook cannot see a batch,
   so `callbacks_with_commands` is not measured.
-* Thread: every call ran on one thread (thread id 376, 0 changes), and that is the thread the GPU hooks are bound to (the
+* Thread (the runs above sampled the thread id and the busy flag on every call; since fix round 1 the probe samples every 64th call, counts the samples, and replaces the old `off_stage0_thread` column by `stage0_distinct_threads`): every sampled call ran on one thread (thread id 376, 0 changes), and that is the thread the GPU hooks are bound to (the
   render/present thread). So the dispatcher thread is the render thread in this build [M]. The Stage0 hook ran on varying
   threads (384, 388, 396, 404 and 376), so Stage0 is **not** a proxy for the drain thread.
 * Busy flag: 0x8a7820's three reads were false at every 0x89fb0 call (0 busy of 705,000 samples). At Stage0 it was true in
@@ -1093,6 +1093,10 @@ the second part of G2 (no reader reaches the player through the hand) is B11's s
   in the existing 0x89fb0 hook (at dispatch) and in the existing Stage0 hook. The 0x7e7e10 writer is therefore not closed by
   this run, and G1's "same thread at 0x8ad260 entry" is **not** shown: only "all dispatches on one thread, equal to the
   render thread" is.
+
+**Fix round 1 notes.** The prop scan now reads the entity registry in 2 KB chunks (no 128 KB copy). `player_cfg_filter` is emitted only
+when the second body resolves with the same word. The G1 statement above ("one thread, equal to the render thread") holds for the
+sampled calls; Stage0 evidence is a count of distinct Stage0 threads, not a same-thread proof.
 
 **Outstanding.**
 

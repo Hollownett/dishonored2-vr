@@ -239,6 +239,10 @@ private:
         } catch(...) {mass_probe_=false;}
     }
     std::mutex mutex_;std::array<Lane,2> lanes_{};
+    std::atomic<std::uintptr_t> last_published_camera_{};
+public:
+    std::uintptr_t last_published_camera() const {return last_published_camera_.load(std::memory_order_relaxed);}
+private:
     UINT64 lifecycle_revision_{1};
     bool contact_required_{};
     std::optional<Vec3> acquisition_contact(const Lane& lane,const NativeRigidBody& body,UINT64 now) const {
@@ -777,7 +781,7 @@ private:
     void invoke(void* manager,void* command) {
         // B7 probe (build/hand-body-probe, read-only): cadence of this hook, the record type, and the physics busy flag as the record is dispatched.
         if(HandBodyProbeCounters::enabled.load(std::memory_order_relaxed)) {
-            try {HandBodyProbeCounters::note_dispatch(read_,base_,reinterpret_cast<std::uintptr_t>(command),GetCurrentThreadId());} catch(...) {}
+            try {HandBodyProbeCounters::note_dispatch(read_,base_,reinterpret_cast<std::uintptr_t>(command),[] {return static_cast<std::uint32_t>(GetCurrentThreadId());});} catch(...) {}
         }
         original_(manager,command);
         try {apply_poke();} catch(...) {}
@@ -827,6 +831,7 @@ public:
     }
     void publish(unsigned side,const NativePlayerCamera& owner,const WorldTrackedPose& hand,float grip,UINT64 epoch,UINT64 tick,bool usable,bool occupied=false,UINT64 source_tick=0,
                  const std::optional<HandProxies>* proxies=nullptr,UINT64 geometry_tick=0) {
+        last_published_camera_.store(owner.camera,std::memory_order_relaxed); // lock-free copy for the read-only B7 probe
         std::lock_guard<std::mutex> lock(mutex_);auto& lane=lanes_.at(side);auto& p=lane.published;
         if(proxies && contact_required_) {lane.contact_proxies=*proxies;lane.contact_epoch=epoch;lane.contact_tick=geometry_tick;lane.focus_tick=0;}
         if(p.epoch!=epoch || !same_publisher_owner(p.owner,owner) || p.usable!=usable || p.occupied!=occupied)advance_lifecycle_locked();

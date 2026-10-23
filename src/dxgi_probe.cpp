@@ -1465,26 +1465,6 @@ static d2vr::GpuDispatchBindings<> gpu_bindings{d2vr::GpuDispatchBindings<>::Api
 static std::array<bool,7> gpu_deferred_methods_shared{};
 static ComPtr<IUnknown> gpu_bound_device_identity,gpu_bound_context_identity;
 static DWORD gpu_bound_thread{};
-static d2vr::HandBodyProbeRunner hand_body_probe_runner;   // B7: read-only hand-body research probe (build/hand-body-probe; one set per second, at most 120)
-static d2vr::HandBodyProbeRunner::Sample hand_body_probe_sample(std::uint64_t tick) {
-    d2vr::HandBodyProbeRunner::Sample sample;
-    // The camera: the config's address, or (if that does not resolve) the one NativeGrab's publishers hold. A diag row records both.
-    std::uintptr_t camera_used=camera_address,published_camera=0;
-    if(const auto lanes=native_grab.diagnostics()) for(const auto& lane:*lanes) if(!published_camera) published_camera=lane.publication_owner.camera;
-    if(!camera_used || !d2vr::native_player_camera(read_self,image_base,camera_used)) if(published_camera) camera_used=published_camera;
-    {d2vr::BodyProbeRow diag;diag.tick=tick;diag.what="diag_camera_sources";diag.userdata=camera_address;diag.userdata_plus8=published_camera;diag.entity=camera_used;sample.rows.push_back(diag);}
-    {auto bodies=d2vr::probe_player_bodies(read_self,image_base,tick,camera_used);sample.rows.insert(sample.rows.end(),bodies.begin(),bodies.end());}
-    sample.render_thread=gpu_bound_thread;   // the thread the GPU hooks were bound on (the present/render thread), for the G1 thread comparison
-    const auto game=d2vr::rig::value<std::uintptr_t>(read_self,image_base+0x39a5290);
-    const auto world=game?d2vr::rig::value<std::uintptr_t>(read_self,*game+0x60410):std::nullopt;
-    if(world) sample.world_filter_vtable_rva=d2vr::world_filter_vtable_rva(read_self,image_base,*world);
-    if(const auto camera=d2vr::native_player_camera(read_self,image_base,camera_used)) {   // the nearest loose prop within 2 m of the player, if any
-        const d2vr::Vec3 point{camera->aim_origin[0],camera->aim_origin[1],camera->aim_origin[2]};
-        if(const auto prop=d2vr::nearest_grab_body(read_self,image_base,point,2.0))
-            if(const auto row=d2vr::probe_prop_userdata(read_self,image_base,*prop,tick)) sample.rows.push_back(*row);
-    }
-    return sample;
-}
 static std::mutex gpu_hook_control_mutex;
 static std::atomic<UINT> gpu_phase{0},gpu_traced_frames{0},gpu_events{0},gpu_dropped{0};
 static std::atomic<UINT> gpu_callback_depth{0};
@@ -1494,6 +1474,26 @@ static std::atomic<ID3D11Device*> gpu_game_device{nullptr};
 static bool gpu_settled_started=false;
 static unsigned gpu_settled_passes{};
 static std::atomic<DWORD> gpu_render_thread{0};
+static d2vr::HandBodyProbeRunner hand_body_probe_runner;   // B7: read-only hand-body research probe (build/hand-body-probe; one set per second, at most 120)
+static d2vr::HandBodyProbeRunner::Sample hand_body_probe_sample(std::uint64_t tick) {
+    d2vr::HandBodyProbeRunner::Sample sample;
+    // The camera: the config's address, or (if that does not resolve) the one NativeGrab's publishers hold. A diag row records both.
+    std::uintptr_t camera_used=camera_address,published_camera=0;
+    published_camera=native_grab.last_published_camera();   // an atomic: the probe never takes NativeGrab's mutex
+    if(!camera_used || !d2vr::native_player_camera(read_self,image_base,camera_used)) if(published_camera) camera_used=published_camera;
+    {d2vr::BodyProbeRow diag;diag.tick=tick;diag.what="diag_camera_sources";diag.userdata=camera_address;diag.userdata_plus8=published_camera;diag.entity=camera_used;sample.rows.push_back(diag);}
+    {auto bodies=d2vr::probe_player_bodies(read_self,image_base,tick,camera_used);sample.rows.insert(sample.rows.end(),bodies.begin(),bodies.end());}
+    sample.render_thread=gpu_render_thread.load(std::memory_order_acquire);   // the thread the GPU hooks were bound on (the present/render thread), for the G1 thread comparison
+    const auto game=d2vr::rig::value<std::uintptr_t>(read_self,image_base+0x39a5290);
+    const auto world=game?d2vr::rig::value<std::uintptr_t>(read_self,*game+0x60410):std::nullopt;
+    if(world) sample.world_filter_vtable_rva=d2vr::world_filter_vtable_rva(read_self,image_base,*world);
+    if(const auto camera=d2vr::native_player_camera(read_self,image_base,camera_used)) {   // the nearest loose prop within 2 m of the player, if any
+        const d2vr::Vec3 point{camera->aim_origin[0],camera->aim_origin[1],camera->aim_origin[2]};
+        if(const auto prop=d2vr::probe_nearby_prop(read_self,image_base,point,2.0))
+            if(const auto row=d2vr::probe_prop_userdata(read_self,image_base,*prop,tick)) sample.rows.push_back(*row);
+    }
+    return sample;
+}
 static std::atomic<ID3D11DeviceContext*> gpu_game_context{nullptr};
 static std::mutex gpu_mutex;
 static std::ofstream gpu_csv;

@@ -3,7 +3,11 @@
 #include <cassert>
 #include <cstring>
 #include <iostream>
+#include <atomic>
+#include <chrono>
+#include <filesystem>
 #include <map>
+#include <thread>
 
 namespace {
 std::size_t commas(const std::string& text) {std::size_t n=0;for(const char c:text) if(c==',') ++n;return n;}
@@ -69,6 +73,24 @@ int main() {
         // A vtable outside the image reports RVA 0.
         m.put(userdata,std::uintptr_t{0x9000000});
         assert(probe_prop_userdata(m,base,body,5)->userdata_vtable_rva==0);
+        // Garbage owner vtable (not a user pointer / misaligned / page-crossing): the type is not decoded, nothing beyond is read.
+        for(const std::uintptr_t bad:{std::uintptr_t{0xffff800000001000},std::uintptr_t{0x9000004},std::uintptr_t{0x9000ffc}}) {
+            // Readable, well-formed bytes sit at the bad address, so only the pointer validation (not a failed read) can reject it.
+            {const std::uintptr_t stub=base+0x300000,typeinfo=base+0x400000;const std::int32_t rel=static_cast<std::int32_t>(typeinfo-(stub+7));
+             std::array<unsigned char,8> code{0x48,0x8d,0x05,0,0,0,0,0xc3};std::memcpy(&code[3],&rel,4);m.put(stub,code);m.put(typeinfo+0x60,std::uint32_t{0x120});
+             m.put(bad,stub);}
+            m.put(owner,bad); // owner vtable pointer = bad
+            const auto g=probe_prop_userdata(m,base,body,5);
+            assert(g && !g->typeinfo_decoded && g->entity==entity);
+        }
+        m.put(owner,base+0x1c74578);m.put(userdata,base+0x1aff038);
+        {   // a stub whose typeinfo is garbage
+            const std::uintptr_t stub=base+0x300000,typeinfo=base+0x400004;const std::int32_t rel=static_cast<std::int32_t>(typeinfo-(stub+7)); // misaligned typeinfo with readable bytes
+            m.put(typeinfo+0x60,std::uint32_t{0x120});m.put(base+0x39e8610,std::uint32_t{0x100});m.put(base+0x39e8614,std::uint32_t{0x1ff});
+            std::array<unsigned char,8> code{0x48,0x8d,0x05,0,0,0,0,0xc3};std::memcpy(&code[3],&rel,4);m.put(stub,code);m.put(base+0x1c74578,stub);
+            BodyProbeRow g;g.userdata=userdata;hand_body_probe_detail::fill_chain(m,base,g,0);
+            assert(!g.typeinfo_decoded);
+        }
         // Null userdata: a row of zeros, no crash.
         m.put(record+0x90,std::uintptr_t{0});
         const auto empty=probe_prop_userdata(m,base,body,5);
@@ -110,12 +132,16 @@ int main() {
         m.put(record+0x70,std::uint32_t{0x2000001});m.put(record+0x6c,std::uint32_t{0x00ff7fe6u});m.put(record+0x44,std::uint32_t{130});m.put(record+0x90,ud);
         m.put(ud,base+0x1b02768);m.put(ud+8,std::uintptr_t{0});
         const auto rows=probe_physics_bodies(m,base,world,physics,0x3000003u,9); // query handle 3 has no record: skipped
-        assert(rows.size()==2);
-        assert(std::string(rows[0].what)=="player_cfg_filter" && rows[0].filter==0x00ff7fe6u && FilterWord{rows[0].filter}.layer()==6);
-        assert(std::string(rows[1].what)=="player_proxy_body" && rows[1].handle==0x2000001 && rows[1].userdata_vtable_rva==0x1b02768 && rows[1].userdata_plus8==0);
+        assert(rows.size()==1); // the unconfirmed configured-filter word (+0x218) is not reported
+        assert(std::string(rows[0].what)=="player_proxy_body" && rows[0].handle==0x2000001 && rows[0].userdata_vtable_rva==0x1b02768 && rows[0].userdata_plus8==0);
+        // With a second body that carries the same word, the layout is confirmed and the cfg row appears.
+        m.put(physics+0x210,std::uint32_t{0x2000001});
+        {const auto confirmed=probe_physics_bodies(m,base,world,physics,0,9);
+         assert(confirmed.size()==3 && std::string(confirmed[0].what)=="player_second_body" && std::string(confirmed[1].what)=="player_cfg_filter" && FilterWord{confirmed[1].filter}.layer()==6);}
+        m.put(physics+0x210,std::uint32_t{0xffffffffu});
         // A recycled handle (record stores another) does not resolve.
         m.put(record+0x70,std::uint32_t{0x2000009});
-        assert(probe_physics_bodies(m,base,world,physics,0,9).size()==1);
+        assert(probe_physics_bodies(m,base,world,physics,0,9).empty());
         assert(probe_physics_bodies(m,base,0,physics,0,9).empty());
     }
     // world filter vtable and busy flag reads (no engine call).
@@ -132,11 +158,46 @@ int main() {
         HandBodyProbeCounters::reset();
         m.put(std::uintptr_t{0xa000004},std::uint16_t{9});
         HandBodyProbeCounters::note_stage0(m,base,11);
-        HandBodyProbeCounters::note_dispatch(m,base,0xa000000,12);
+        HandBodyProbeCounters::note_dispatch(m,base,0xa000000,[] {return std::uint32_t{12};});
         const auto q=HandBodyProbeCounters::snapshot();
-        assert(q.callbacks==1 && q.dispatch_samples==1 && q.dispatch_busy==1 && q.stage0_samples==1 && q.off_stage0_thread==1);
+        assert(q.callbacks==1 && q.dispatch_samples==1 && q.dispatch_busy==1 && q.stage0_samples==1 && q.stage0_distinct_threads==1 && q.dispatch_thread==12 && q.stage0_thread==11);
         assert(HandBodyProbeCounters::record_type_text()=="t9:1");
+        for(int i=0;i<127;++i) HandBodyProbeCounters::note_dispatch(m,base,0xa000000,[] {return std::uint32_t{12};});
+        {const auto r=HandBodyProbeCounters::snapshot();assert(r.callbacks==128 && r.dispatch_samples==2);} // the busy flag is read on every 64th call only
+        HandBodyProbeCounters::note_stage0(m,base,11);HandBodyProbeCounters::note_stage0(m,base,13);HandBodyProbeCounters::note_stage0(m,base,13);
+        assert(HandBodyProbeCounters::snapshot().stage0_distinct_threads==2);
         HandBodyProbeCounters::reset();
+    }
+    // The runner ends the hook counting on every exit: budget spent, throwing sampler, stop().
+    {
+        const auto dir=std::filesystem::temp_directory_path();
+        const auto wait_off=[] {for(int i=0;i<400 && HandBodyProbeCounters::enabled.load();++i) std::this_thread::sleep_for(std::chrono::milliseconds(5));return !HandBodyProbeCounters::enabled.load();};
+        {   // budget: 3 sets
+            HandBodyProbeRunner runner;std::atomic<int> calls{0};
+            assert(runner.start(dir,[&](std::uint64_t) {++calls;return HandBodyProbeRunner::Sample{};},5,3));
+            assert(HandBodyProbeCounters::enabled.load());
+            assert(wait_off() && calls.load()==3);
+            runner.stop();
+        }
+        {   // sampler throws
+            HandBodyProbeRunner runner;
+            assert(runner.start(dir,[](std::uint64_t)->HandBodyProbeRunner::Sample {throw 1;},5,3));
+            assert(wait_off());
+            runner.stop();
+        }
+        {   // stop() before the budget
+            HandBodyProbeRunner runner;
+            assert(runner.start(dir,[](std::uint64_t) {return HandBodyProbeRunner::Sample{};},50,100));
+            assert(HandBodyProbeCounters::enabled.load());
+            runner.stop();assert(!HandBodyProbeCounters::enabled.load());
+        }
+        // The prop scan reads the registry in 2 KB chunks, never the whole table.
+        Memory m;const std::uintptr_t game=0x1000000;
+        m.put(base+0x39a5290,game);m.put(game,base+0x1c940a8);
+        std::array<std::uintptr_t,256> zero{};
+        for(unsigned first=1;first<0x3fff;first+=256) m.put(game+0x3130b0+static_cast<std::uintptr_t>(first)*8,zero);
+        assert(!probe_nearby_prop(m,base,Vec3{0,0,0},2.0) && m.largest_read<=2048);
+        assert(!probe_nearby_prop(m,base,Vec3{0,0,0},2.5));
     }
     std::cout<<"hand_body_probe_check ok\n";
     return 0;

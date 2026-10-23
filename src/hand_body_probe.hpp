@@ -7,6 +7,7 @@
 #include "native_world_query_source.hpp"
 #include <array>
 #include <atomic>
+#include <algorithm>
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
@@ -40,7 +41,7 @@ struct BodyProbeRow {
 struct QueueProbe {
     std::uint64_t callbacks{},callbacks_with_commands{};bool busy_at_stage0{},busy_at_dispatch{};std::uintptr_t world_filter_vtable_rva{};
     // Extra (B7): counts behind the two booleans, and whether the 0x89fb0 hook ever ran off the Stage0 thread.
-    std::uint64_t dispatch_samples{},dispatch_busy{},stage0_samples{},stage0_busy{},off_stage0_thread{};
+    std::uint64_t dispatch_samples{},dispatch_busy{},stage0_samples{},stage0_busy{},stage0_distinct_threads{};
     // G1: thread ids seen by the existing hooks and the render thread (supplied by the sampler); changes counts how often the 0x89fb0 hook's thread differed from its previous call.
     std::uint32_t dispatch_thread{},stage0_thread{},render_thread{};std::uint64_t dispatch_thread_changes{};
 };
@@ -54,12 +55,14 @@ inline bool within_page(std::uintptr_t p,std::size_t size) {return (p&0xfff)+siz
 // Pointers and RVAs of the chain below a userdata pointer. A pointer that is not user space, is misaligned or whose first 16 bytes would cross a
 // page is not followed at all.
 template<class Read> void fill_type(Read& read,std::uintptr_t base,std::uintptr_t owner_vtable,BodyProbeRow& row) {
+    if(!user_pointer(owner_vtable) || !within_page(owner_vtable,8)) return;
     const auto stub=rig::value<std::uintptr_t>(read,owner_vtable);
     if(!stub || !user_pointer(*stub) || !within_page(*stub,8)) return;
     std::array<unsigned char,8> code{};
     if(!read(*stub,code.data(),code.size()) || code[0]!=0x48 || code[1]!=0x8d || code[2]!=0x05 || code[7]!=0xc3) return;
     std::int32_t rel{};std::memcpy(&rel,&code[3],4);
     const std::uintptr_t typeinfo=*stub+7+static_cast<std::intptr_t>(rel);
+    if(!user_pointer(typeinfo) || !within_page(typeinfo+0x60,4)) return;
     const auto number=rig::value<std::uint32_t>(read,typeinfo+0x60);
     const auto lo=rig::value<std::uint32_t>(read,base+0x39e8610),hi=rig::value<std::uint32_t>(read,base+0x39e8614);
     if(!number || !lo || !hi) return;
@@ -78,8 +81,8 @@ template<class Read> void fill_chain(Read& read,std::uintptr_t base,BodyProbeRow
     const auto entity=rig::value<std::uintptr_t>(read,owner+0x10);
     if(!vtable || !entity) return;
     row.owner_vtable_rva=rva_of(base,*vtable);
-    fill_type(read,base,*vtable,row);
-    if(!user_pointer(*entity)) return;
+    if(user_pointer(*vtable)) fill_type(read,base,*vtable,row);
+    if(!user_pointer(*entity) || !within_page(*entity,8) || !within_page(*entity+0xa8,4)) return;
     row.entity=*entity;row.owner_is_player=player && *entity==player;
     if(const auto entity_vtable=rig::value<std::uintptr_t>(read,*entity)) row.entity_vtable_rva=rva_of(base,*entity_vtable);
     if(const auto id=rig::value<std::uint32_t>(read,*entity+0xa8)) row.entity_id=*id;
@@ -104,11 +107,11 @@ inline std::string body_probe_csv_row(const BodyProbeRow& r) {
      <<",0x"<<std::hex<<r.userdata<<",0x"<<r.userdata_plus8<<",0x"<<r.userdata_vtable_rva<<",0x"<<r.owner_vtable_rva<<",0x"<<r.entity<<",0x"<<r.entity_vtable_rva<<std::dec<<','<<r.entity_id<<','<<r.owner_typenum<<','<<r.type_range_lo<<','<<r.type_range_hi<<','<<(r.type_in_range?1:0)<<','<<(r.owner_is_player?1:0)<<','<<(r.typeinfo_decoded?1:0);
     return o.str();
 }
-inline std::string queue_probe_csv_header() {return "tick,callbacks,callbacks_per_s,callbacks_with_commands,busy_at_stage0,busy_at_dispatch,dispatch_samples,dispatch_busy,stage0_samples,stage0_busy,off_stage0_thread,dispatch_thread,stage0_thread,render_thread,dispatch_thread_changes,world_filter_vtable_rva,record_types";}
+inline std::string queue_probe_csv_header() {return "tick,callbacks,callbacks_per_s,callbacks_with_commands,busy_at_stage0,busy_at_dispatch,dispatch_samples,dispatch_busy,stage0_samples,stage0_busy,stage0_distinct_threads,dispatch_thread,stage0_thread,render_thread,dispatch_thread_changes,world_filter_vtable_rva,record_types";}
 inline std::string queue_probe_csv_row(std::uint64_t tick,const QueueProbe& q,std::uint64_t per_second,const std::string& record_types) {
     std::ostringstream o;
     o<<tick<<','<<q.callbacks<<','<<per_second<<','<<q.callbacks_with_commands<<','<<(q.busy_at_stage0?1:0)<<','<<(q.busy_at_dispatch?1:0)<<','<<q.dispatch_samples<<','<<q.dispatch_busy
-     <<','<<q.stage0_samples<<','<<q.stage0_busy<<','<<q.off_stage0_thread<<','<<q.dispatch_thread<<','<<q.stage0_thread<<','<<q.render_thread<<','<<q.dispatch_thread_changes<<",0x"<<std::hex<<q.world_filter_vtable_rva<<std::dec<<','<<record_types;
+     <<','<<q.stage0_samples<<','<<q.stage0_busy<<','<<q.stage0_distinct_threads<<','<<q.dispatch_thread<<','<<q.stage0_thread<<','<<q.render_thread<<','<<q.dispatch_thread_changes<<",0x"<<std::hex<<q.world_filter_vtable_rva<<std::dec<<','<<record_types;
     return o.str();
 }
 
@@ -130,16 +133,17 @@ template<class Read> std::optional<BodyProbeRow> probe_body_handle(Read& read,st
 template<class Read> std::vector<BodyProbeRow> probe_physics_bodies(Read& read,std::uintptr_t base,std::uintptr_t world,std::uintptr_t physics,std::uint32_t query_handle,std::uint64_t tick,std::uintptr_t player=0) {
     std::vector<BodyProbeRow> rows;
     if(!rig::pointer(world) || !rig::pointer(physics)) return rows;
-    if(const auto cfg=rig::value<std::uint32_t>(read,physics+0x218)) {
-        BodyProbeRow row;row.tick=tick;row.filter=*cfg;row.what="player_cfg_filter";
-        row.flags=rig::value<std::uint32_t>(read,physics+0x21c).value_or(0); // material word of the same cinfo
-        rows.push_back(row);
-    }
     const auto push=[&](std::optional<std::uint32_t> handle,const char* what) {
         if(!handle) return;
         if(const auto row=probe_body_handle(read,base,world,*handle,tick,what,player)) rows.push_back(*row);
     };
     push(rig::value<std::uint32_t>(read,physics+0x210),"player_second_body");
+    // The configured filter word (+0x218) is reported only when the layout is confirmed: the second body resolved and carries exactly that word.
+    if(!rows.empty()) if(const auto cfg=rig::value<std::uint32_t>(read,physics+0x218); cfg && *cfg==rows.back().filter) {
+        BodyProbeRow row;row.tick=tick;row.filter=*cfg;row.what="player_cfg_filter";
+        row.flags=rig::value<std::uint32_t>(read,physics+0x21c).value_or(0);
+        rows.push_back(row);
+    }
     std::optional<std::uint32_t> proxy;
     if(const auto object=rig::value<std::uintptr_t>(read,physics+0x148); object && rig::pointer(*object)) proxy=rig::value<std::uint32_t>(read,*object+0x38);
     if(!proxy) proxy=rig::value<std::uint32_t>(read,physics+0x214);
@@ -179,6 +183,26 @@ template<class Read> std::optional<BodyProbeRow> probe_prop_userdata(Read& read,
     hand_body_probe_detail::fill_chain(read,base,row);
     return row;
 }
+// First loose prop within `radius` (<= 2 m) of `point`: the entity registry is read in chunks of 256 entries (2 KB), never the whole 128 KB table, and the scan stops at the first hit.
+template<class Read> std::optional<NativeRigidBody> probe_nearby_prop(Read& read,std::uintptr_t base,Vec3 point,double radius) {
+    const auto game=rig::value<std::uintptr_t>(read,base+0x39a5290);
+    if(!game || !rig::typed(read,base,*game,0x1c940a8) || !finite(point) || !std::isfinite(radius) || radius<=0 || radius>2) return {};
+    constexpr unsigned total=0x3fff,chunk=256;
+    std::array<std::uintptr_t,chunk> entries{};
+    for(unsigned first=1;first<total;first+=chunk) {
+        const unsigned count=std::min(chunk,total-first);
+        if(!read(*game+0x3130b0+static_cast<std::uintptr_t>(first)*8,entries.data(),count*8)) continue;
+        for(unsigned i=0;i<count;++i) {
+            const auto at=entries[i];if(!rig::pointer(at)) continue;
+            const auto id=rig::value<std::uint32_t>(read,at+0xa8);
+            if(!id || (*id>>16)!=first+i) continue;
+            const auto pos=rig::value<std::array<float,3>>(read,at+0x300);
+            if(!pos || !finite(Vec3{(*pos)[0],(*pos)[1],(*pos)[2]}) || length(Vec3{(*pos)[0],(*pos)[1],(*pos)[2]}-point)>radius+3) continue;
+            if(const auto body=native_rigid_body(read,base,at); body && body->contact_distance(point)<=radius) return body;
+        }
+    }
+    return {};
+}
 // world+0x470: the filter object the world installs (Q7); returns the RVA of its vtable, 0 when outside the image or unreadable.
 template<class Read> std::uintptr_t world_filter_vtable_rva(Read& read,std::uintptr_t base,std::uintptr_t world) {
     if(!rig::pointer(world)) return 0;
@@ -204,19 +228,21 @@ template<class Read> std::optional<bool> physics_busy_flag(Read& read,std::uintp
 struct HandBodyProbeCounters {
     static constexpr std::size_t record_type_slots=64;
     inline static std::atomic<bool> enabled{false};
-    inline static std::atomic<std::uint64_t> callbacks{},dispatch_samples{},dispatch_busy{},stage0_samples{},stage0_busy{},off_stage0_thread{};
+    inline static std::atomic<std::uint64_t> callbacks{},dispatch_samples{},dispatch_busy{},stage0_samples{},stage0_busy{},stage0_distinct_threads{};
+    static constexpr std::uint64_t sample_period=64; // thread id and busy flag are taken on every 64th 0x89fb0 call
+    inline static std::array<std::atomic<std::uint32_t>,16> stage0_threads{};
     inline static std::atomic<bool> last_dispatch_busy{},last_stage0_busy{};
     inline static std::atomic<std::uint32_t> stage0_thread{},dispatch_thread{};
     inline static std::atomic<std::uint64_t> dispatch_thread_changes{};
     inline static std::array<std::atomic<std::uint64_t>,record_type_slots> record_types{};
     // callbacks_with_commands: 0x89fb0 is called once per queued record, so the hook cannot see a "batch"; it is not counted (the record type histogram replaces it).
-    template<class Read> static void note_dispatch(Read& read,std::uintptr_t base,std::uintptr_t command,std::uint32_t thread_id) {
-        callbacks.fetch_add(1,std::memory_order_relaxed);
+    template<class Read,class ThreadId> static void note_dispatch(Read& read,std::uintptr_t base,std::uintptr_t command,ThreadId&& thread_id) {
+        const auto n=callbacks.fetch_add(1,std::memory_order_relaxed);
         if(const auto type=rig::value<std::uint16_t>(read,command+4); type && *type<record_type_slots) record_types[*type].fetch_add(1,std::memory_order_relaxed);
-        const auto previous=dispatch_thread.exchange(thread_id,std::memory_order_relaxed);
-        if(previous && previous!=thread_id) dispatch_thread_changes.fetch_add(1,std::memory_order_relaxed);
-        const auto known=stage0_thread.load(std::memory_order_relaxed);
-        if(known && known!=thread_id) off_stage0_thread.fetch_add(1,std::memory_order_relaxed);
+        if(n%sample_period) return;
+        const std::uint32_t id=thread_id();
+        const auto previous=dispatch_thread.exchange(id,std::memory_order_relaxed);
+        if(previous && previous!=id) dispatch_thread_changes.fetch_add(1,std::memory_order_relaxed);
         if(const auto busy=physics_busy_flag(read,base)) {
             dispatch_samples.fetch_add(1,std::memory_order_relaxed);last_dispatch_busy.store(*busy,std::memory_order_relaxed);
             if(*busy) dispatch_busy.fetch_add(1,std::memory_order_relaxed);
@@ -224,6 +250,12 @@ struct HandBodyProbeCounters {
     }
     template<class Read> static void note_stage0(Read& read,std::uintptr_t base,std::uint32_t thread_id) {
         stage0_thread.store(thread_id,std::memory_order_relaxed);
+        for(auto& slot:stage0_threads) {
+            auto seen=slot.load(std::memory_order_relaxed);
+            if(seen==thread_id) break;
+            if(!seen && slot.compare_exchange_strong(seen,thread_id)) {stage0_distinct_threads.fetch_add(1,std::memory_order_relaxed);break;}
+            if(seen==thread_id) break;
+        }
         if(const auto busy=physics_busy_flag(read,base)) {
             stage0_samples.fetch_add(1,std::memory_order_relaxed);last_stage0_busy.store(*busy,std::memory_order_relaxed);
             if(*busy) stage0_busy.fetch_add(1,std::memory_order_relaxed);
@@ -232,7 +264,7 @@ struct HandBodyProbeCounters {
     static QueueProbe snapshot() {
         QueueProbe q;q.callbacks=callbacks.load();q.busy_at_stage0=last_stage0_busy.load();q.busy_at_dispatch=last_dispatch_busy.load();
         q.dispatch_samples=dispatch_samples.load();q.dispatch_busy=dispatch_busy.load();q.stage0_samples=stage0_samples.load();q.stage0_busy=stage0_busy.load();
-        q.off_stage0_thread=off_stage0_thread.load();q.dispatch_thread=dispatch_thread.load();q.stage0_thread=stage0_thread.load();q.dispatch_thread_changes=dispatch_thread_changes.load();return q;
+        q.stage0_distinct_threads=stage0_distinct_threads.load();q.dispatch_thread=dispatch_thread.load();q.stage0_thread=stage0_thread.load();q.dispatch_thread_changes=dispatch_thread_changes.load();return q;
     }
     static std::string record_type_text() {
         std::ostringstream o;bool first=true;
@@ -240,7 +272,8 @@ struct HandBodyProbeCounters {
         return first?"none":o.str();
     }
     static void reset() {
-        callbacks=dispatch_samples=dispatch_busy=stage0_samples=stage0_busy=off_stage0_thread=0;last_dispatch_busy=last_stage0_busy=false;stage0_thread=0;dispatch_thread=0;dispatch_thread_changes=0;
+        callbacks=dispatch_samples=dispatch_busy=stage0_samples=stage0_busy=stage0_distinct_threads=0;
+        for(auto& slot:stage0_threads) slot=0;last_dispatch_busy=last_stage0_busy=false;stage0_thread=0;dispatch_thread=0;dispatch_thread_changes=0;
         for(auto& slot:record_types) slot=0;
     }
 };
@@ -252,13 +285,13 @@ public:
     using Sampler=std::function<Sample(std::uint64_t tick)>;
     static constexpr unsigned max_sets=120;
     ~HandBodyProbeRunner() {stop();}
-    bool start(const std::filesystem::path& directory,Sampler sampler) {
+    bool start(const std::filesystem::path& directory,Sampler sampler,unsigned period_ms=1000,unsigned sets=max_sets) {
         stop();
         bodies_.open(directory/L"hand-body-probe.csv",std::ios::trunc);queue_.open(directory/L"hand-body-queue.csv",std::ios::trunc);
         if(!bodies_ || !queue_) {bodies_.close();queue_.close();return false;}
         bodies_<<body_probe_csv_header()<<'\n';queue_<<queue_probe_csv_header()<<'\n';bodies_.flush();queue_.flush();
         HandBodyProbeCounters::reset();HandBodyProbeCounters::enabled.store(true);
-        sampler_=std::move(sampler);{std::lock_guard<std::mutex> lock(mutex_);quit_=false;}
+        period_ms_=period_ms;sets_=std::min(sets,max_sets);sampler_=std::move(sampler);{std::lock_guard<std::mutex> lock(mutex_);quit_=false;}
         worker_=std::thread([this] {run();});
         return true;
     }
@@ -271,9 +304,10 @@ public:
     }
 private:
     void run() {
+        struct Disable {~Disable() {HandBodyProbeCounters::enabled.store(false);}} disable;   // every exit (budget spent, exception, stop) ends the hook counting
         std::uint64_t previous=0;
-        for(unsigned set=0;set<max_sets;++set) {
-            {std::unique_lock<std::mutex> lock(mutex_);if(wake_.wait_for(lock,std::chrono::seconds(1),[this] {return quit_;})) return;}
+        for(unsigned set=0;set<sets_;++set) {
+            {std::unique_lock<std::mutex> lock(mutex_);if(wake_.wait_for(lock,std::chrono::milliseconds(period_ms_),[this] {return quit_;})) return;}
             const std::uint64_t tick=set+1;
             try {
                 const auto sample=sampler_?sampler_(tick):Sample{};
@@ -284,6 +318,6 @@ private:
             } catch(...) {return;}
         }
     }
-    std::ofstream bodies_,queue_;Sampler sampler_;std::thread worker_;std::mutex mutex_;std::condition_variable wake_;bool quit_{};
+    std::ofstream bodies_,queue_;Sampler sampler_;std::thread worker_;std::mutex mutex_;std::condition_variable wake_;bool quit_{};unsigned period_ms_{1000},sets_{max_sets};
 };
 }
