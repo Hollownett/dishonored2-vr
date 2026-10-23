@@ -12,10 +12,10 @@ Vec3 rot(Vec3 v,Vec3 axis,double a) {   // Rodrigues, axis unit
     return v*c+cross(axis,v)*s+axis*(dot(axis,v)*(1-c));
 }
 struct Sim {
-    HandServoState st;WorldTrackedPose target,body;Vec3 v{},w{};double held=0,tf=1,dt=1./90;bool blocked=false;
+    HandServoState st;WorldTrackedPose target,body;Vec3 v{},w{};double held=0,tf=1,dt=1./90;bool blocked=false;double lever=kDefaultHeldLever;
     HandServoConfig cfg;GrabTuning tun;
     HandServoOutput step() {
-        auto o=servo_step(st,target,body,v,w,held,dt,tf,cfg,tun,blocked);
+        auto o=servo_step(st,target,body,v,w,held,dt,tf,cfg,tun,blocked,lever);
         v=o.linear;w=o.angular;
         body.position=body.position+v*std::min(dt,tun.dt_max);
         double a=length(w)*std::min(dt,tun.dt_max);
@@ -192,6 +192,28 @@ int main() {
             }
 
         }
+    }
+    {   // angular overshoot <= 2 degrees at 0/5/20 kg, 90 degrees and 0.5 rad, 45-120 Hz; settles
+        for(double hz:{45.,72.,90.,120.}) for(double held:{0.,5.,20.}) for(double ang:{1.5707963267948966,.5}) {
+            Sim s;s.body=pose({});s.target=pose({});s.dt=1/hz;s.held=held;
+            s.target.basis={Vec3{std::cos(ang),std::sin(ang),0},Vec3{-std::sin(ang),std::cos(ang),0},Vec3{0,0,1}};
+            double peak=0;
+            for(int i=0;i<static_cast<int>(hz*8);++i) {s.step();peak=std::max(peak,std::atan2(s.body.basis[0].y,s.body.basis[0].x));}
+            CHECK(peak<=ang+.0349066);
+            CHECK(std::fabs(std::atan2(s.body.basis[0].y,s.body.basis[0].x)-ang)<.0175);
+        }
+    }
+    {   // held_lever is per call: a longer lever lags more; garbage falls back to the default
+        Sim a,b,c,d;a.body=b.body=c.body=d.body=pose({});a.target=b.target=c.target=d.target=pose({});
+        a.target.basis=b.target.basis=c.target.basis=d.target.basis={Vec3{0,1,0},Vec3{-1,0,0},Vec3{0,0,1}};
+        a.held=b.held=c.held=d.held=20;b.lever=.6;c.lever=nan_value;d.lever=-1;
+        double wa=length(a.step().angular),wb=length(b.step().angular),wc=length(c.step().angular),wd=length(d.step().angular);
+        CHECK(wb<wa&&wc==wa&&wd==wa);
+    }
+    {   // 45 Hz stuck snap lands within one tick of the window
+        HandServoState st;WorldTrackedPose t=pose({.4,0,0}),b=pose({});double first=-1;
+        for(int i=1;i<=90;++i) if(servo_step(st,t,b,{},{},0,1./45,1,HandServoConfig{},GrabTuning{},false).snap) {first=i/45.;break;}
+        CHECK(first>=.24&&first<=.26+1./45);
     }
     {   // a heavy hold lags in rotation (held inertia is in the torque cap); the bare hand does not
         Sim a,b;a.body=b.body=pose({});a.target=b.target=pose({});

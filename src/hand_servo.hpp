@@ -5,12 +5,17 @@
 // then a low-pass on the commanded acceleration. hand_kg and dt_max come from GrabTuning (no duplicate config).
 // X-9: the hand uses UNSCALED caps (strength_scale forced to 1: the corpse scale must never reach the hand) and no mass floor (the 0.5 kg floor would
 // double count on top of hand_kg), whatever the passed GrabTuning says.
+// The hand's lag behind a fast-moving controller (about 0.65 m at 6 m/s) is by design: the visible hand's closeness to the raw controller is owned by B15/B16.
+// held_lever: per-call (default kDefaultHeldLever, 0.3 m = arm length): the held body is a point mass that far from the hand for the torque cap's inertia.
+// B16 can pass the held body's real extent later; a non-finite or negative value falls back to the default.
+// Snap timing is tick quantised: the snap lands within one tick of snap_seconds.
 #include "grab_force_cap.hpp"
 #include <algorithm>
 #include <cmath>
 
 namespace d2vr {
-struct HandServoConfig {double gain=18,max_speed=10,max_spin=20,brake_accel=40,jerk_tau=.02,snap_gap=.35,snap_seconds=.25,hand_radius=.08,held_lever=.3,max_gap=50,max_body_speed=100,snap_closing_mps=.5,tf_min=.05;};
+constexpr double kDefaultHeldLever=.3;
+struct HandServoConfig {double gain=18,max_speed=10,max_spin=20,brake_accel=40,jerk_tau=.02,snap_gap=.35,snap_seconds=.25,hand_radius=.08,max_gap=50,max_body_speed=100,snap_closing_mps=.5,tf_min=.05;};
 struct HandServoState {Vec3 filtered_accel{};double gap_time{};bool has{};};
 struct HandServoOutput {Vec3 linear{},angular{};bool capped{};bool snap{};double gap{};bool valid{};};
 
@@ -52,7 +57,7 @@ inline Vec3 limited(Vec3 v,double m) {double n=length(v);return n>m?v*(m/n):v;}
 }
 
 inline HandServoOutput servo_step(HandServoState& st,const WorldTrackedPose& target,const WorldTrackedPose& body,Vec3 body_velocity,Vec3 body_spin,
-    double held_kg,double dt,double time_factor,const HandServoConfig& cfg,const GrabTuning& tuning,bool target_blocked) {
+    double held_kg,double dt,double time_factor,const HandServoConfig& cfg,const GrabTuning& tuning,bool target_blocked,double held_lever=kDefaultHeldLever) {
     using namespace hand_servo_detail;
     HandServoOutput out;
     Vec3 error=target.position-body.position;
@@ -90,10 +95,16 @@ inline HandServoOutput servo_step(HandServoState& st,const WorldTrackedPose& tar
     // angular: desired spin
     Vec3 rot=rotation_error(body,target);
     double angle=length(rot);
-    Vec3 want_w=angle>0?rot*(std::min({angle*cfg.gain,cfg.max_spin,std::sqrt(2*cfg.brake_accel*angle)})/angle):Vec3{};
-    // Torque cap inertia: the hand as a solid sphere plus the held body as a point mass at held_lever (arm length) from the hand. The hand alone is
-    // light enough that the 30 N m cap is effectively uncapped (spin set by gain/max_spin); a heavy hold lags in rotation.
-    double inertia=bone_inertia(t.hand_kg,cfg.hand_radius)+std::min(kg,t.mass_ceiling_kg)*cfg.held_lever*cfg.held_lever;
+    // Torque cap inertia: the hand as a solid sphere plus the held body as a point mass at held_lever from the hand. The hand alone is light enough
+    // that the 30 N m cap is effectively uncapped (spin set by gain/max_spin); a heavy hold lags in rotation.
+    if(!std::isfinite(held_lever)||held_lever<0) held_lever=kDefaultHeldLever;
+    double inertia=bone_inertia(t.hand_kg,cfg.hand_radius)+std::min(kg,t.mass_ceiling_kg)*held_lever*held_lever;
+    // Angular braking uses the deceleration the torque cap can deliver for this inertia (0.6 margin, like the linear side), on the angle left after
+    // one tick of the current closing spin.
+    double adecel=std::min(cfg.brake_accel,.6*t.torque_cap()/inertia);
+    double aclosing=angle>1e-9?std::max(0.,dot(body_spin,rot)/angle):0.;
+    double aleft=std::max(0.,angle-aclosing*dt);
+    Vec3 want_w=angle>0?rot*(std::min({angle*cfg.gain,cfg.max_spin,std::sqrt(2*adecel*aleft)})/angle):Vec3{};
     CappedStep step=cap_velocity_step(body_velocity,body_spin,want,want_w,axis,kg,inertia,dt,t);
     // jerk filter on the commanded acceleration
     Vec3 accel=(step.linear-body_velocity)*(1/dt);
