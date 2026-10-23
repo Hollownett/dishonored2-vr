@@ -10,12 +10,18 @@
 #include <cmath>
 
 namespace d2vr {
-struct HandServoConfig {double gain=18,max_speed=10,max_spin=20,brake_accel=40,jerk_tau=.02,snap_gap=.35,snap_seconds=.25,hand_radius=.08,max_gap=50;};
+struct HandServoConfig {double gain=18,max_speed=10,max_spin=20,brake_accel=40,jerk_tau=.02,snap_gap=.35,snap_seconds=.25,hand_radius=.08,held_lever=.3,max_gap=50,max_body_speed=100,snap_closing_mps=.5,tf_min=.05;};
 struct HandServoState {Vec3 filtered_accel{};double gap_time{};bool has{};};
 struct HandServoOutput {Vec3 linear{},angular{};bool capped{};bool snap{};double gap{};bool valid{};};
 
 namespace hand_servo_detail {
-inline bool finite_pose(const WorldTrackedPose& p) {return finite(p.position)&&finite(p.basis[0])&&finite(p.basis[1])&&finite(p.basis[2]);}
+// Finite, unit-length (+-2%), mutually orthogonal (+-0.02) and right handed basis.
+inline bool finite_pose(const WorldTrackedPose& p) {
+    if(!finite(p.position)) return false;
+    for(const Vec3& b:p.basis) if(!finite(b)||std::fabs(length(b)-1)>.02) return false;
+    return std::fabs(dot(p.basis[0],p.basis[1]))<=.02&&std::fabs(dot(p.basis[0],p.basis[2]))<=.02&&std::fabs(dot(p.basis[1],p.basis[2]))<=.02&&
+           dot(cross(p.basis[0],p.basis[1]),p.basis[2])>0;
+}
 // Rotation vector (axis*angle) of R = sum_i t_i b_i^T, the rotation taking the body frame to the target frame.
 inline Vec3 rotation_error(const WorldTrackedPose& body,const WorldTrackedPose& target) {
     double m[3][3]{};
@@ -36,9 +42,11 @@ inline Vec3 rotation_error(const WorldTrackedPose& body,const WorldTrackedPose& 
         Vec3 axis{a[0],a[1],a[2]};
         double n=length(axis);
         if(!(n>1e-9)) return {};
-        return axis*(3.14159265358979323846/n);
+        axis=axis*(1/n);
+        if(sl>1e-12&&dot(axis,s)<0) axis=axis*-1;   // same sign as the shortest-rotation axis just outside this band: no flip at the boundary
+        return axis*3.14159265358979323846;
     }
-    return s*(std::acos(cosv)/sl);
+    return s*(std::atan2(sl/2,cosv)/sl);
 }
 inline Vec3 limited(Vec3 v,double m) {double n=length(v);return n>m?v*(m/n):v;}
 }
@@ -49,14 +57,18 @@ inline HandServoOutput servo_step(HandServoState& st,const WorldTrackedPose& tar
     HandServoOutput out;
     Vec3 error=target.position-body.position;
     if(!(dt>0)||!std::isfinite(dt)||!finite_pose(target)||!finite_pose(body)||!finite(body_velocity)||!finite(body_spin)||!std::isfinite(held_kg)||
-       !(length(error)<=cfg.max_gap)) {
+       !(length(body_velocity)<=cfg.max_body_speed)||!(length(body_spin)<=cfg.max_body_speed)||!(length(error)<=cfg.max_gap)) {
         st.gap_time=0;
         return out;
     }
     GrabTuning t=tuning;   // X-9: unscaled caps, no extra mass floor
     t.strength_scale=1;t.mass_floor_kg=0;
-    dt=std::min(dt,t.dt_max);
-    if(!std::isfinite(time_factor)||time_factor<0) time_factor=1;
+    dt=std::min(dt,t.dt_max);   // also the snap timer's dt: a 0.5 s hitch counts as dt_max toward snap_seconds (fails safe)
+    // time_factor: unknown (NaN, <=0) is 1; otherwise [tf_min,1]. The loop runs in real-time units: the read-back velocities are divided by tf
+    // (the body moves at the scaled velocity we wrote) and only the commanded output is multiplied by it.
+    if(!std::isfinite(time_factor)||time_factor<=0) time_factor=1;
+    time_factor=std::clamp(time_factor,cfg.tf_min,1.);
+    body_velocity=body_velocity*(1/time_factor);body_spin=body_spin*(1/time_factor);
     double gap=length(error);
     out.valid=true;out.gap=gap;
     // linear: desired velocity
@@ -64,15 +76,24 @@ inline HandServoOutput servo_step(HandServoState& st,const WorldTrackedPose& tar
     // Braking profile on the distance left after the jerk filter's lag (the body keeps moving while the filtered deceleration builds up).
     double closing=gap>1e-9?std::max(0.,dot(body_velocity,error)/gap):0.;
     double left=std::max(0.,gap-closing*(cfg.jerk_tau+dt));
-    want=limited(want,std::sqrt(2*cfg.brake_accel*left));
     double kg=std::max(held_kg,0.);
     Vec3 axis=target.basis[0];
     double mass=t.hand_kg+std::min(kg,t.mass_ceiling_kg);
+    // Braking uses the deceleration the force cap can actually deliver along the error direction (axial/lateral ellipse), never more than brake_accel.
+    double decel=cfg.brake_accel;
+    if(gap>1e-9) {
+        double ca=std::min(1.,std::fabs(dot(error,axis))/gap);
+        double inv=ca*ca/(t.axial_n*t.axial_n)+(1-ca*ca)/(t.lateral_n*t.lateral_n);
+        decel=std::min(decel,.6/std::sqrt(inv)/mass);   // 0.6: margin for the discrete step and filter lag
+    }
+    want=limited(want,std::sqrt(2*decel*left));
     // angular: desired spin
     Vec3 rot=rotation_error(body,target);
     double angle=length(rot);
     Vec3 want_w=angle>0?rot*(std::min({angle*cfg.gain,cfg.max_spin,std::sqrt(2*cfg.brake_accel*angle)})/angle):Vec3{};
-    double inertia=bone_inertia(mass,cfg.hand_radius);
+    // Torque cap inertia: the hand as a solid sphere plus the held body as a point mass at held_lever (arm length) from the hand. The hand alone is
+    // light enough that the 30 N m cap is effectively uncapped (spin set by gain/max_spin); a heavy hold lags in rotation.
+    double inertia=bone_inertia(t.hand_kg,cfg.hand_radius)+std::min(kg,t.mass_ceiling_kg)*cfg.held_lever*cfg.held_lever;
     CappedStep step=cap_velocity_step(body_velocity,body_spin,want,want_w,axis,kg,inertia,dt,t);
     // jerk filter on the commanded acceleration
     Vec3 accel=(step.linear-body_velocity)*(1/dt);
@@ -87,10 +108,11 @@ inline HandServoOutput servo_step(HandServoState& st,const WorldTrackedPose& tar
     }
     Vec3 lin=limited(body_velocity+st.filtered_accel*dt,cfg.max_speed);
     out.linear=lin*time_factor;
-    out.angular=step.angular*time_factor;
+    out.angular=limited(step.angular,cfg.max_spin)*time_factor;
     out.capped=step.linear_capped||step.angular_capped;
     // snap request: the gap stays beyond snap_gap for snap_seconds; never while the target is blocked (inside geometry)
-    if(target_blocked||!(gap>cfg.snap_gap)) st.gap_time=0;
+    // and not while the hand is still closing on it (a fast sweep has a big steady lag but is not stuck): closing speed >= snap_closing_mps resets the timer.
+    if(target_blocked||!(gap>cfg.snap_gap)||closing>=cfg.snap_closing_mps) st.gap_time=0;
     else {
         st.gap_time+=dt;
         out.snap=st.gap_time>=cfg.snap_seconds-1e-9;

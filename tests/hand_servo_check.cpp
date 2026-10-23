@@ -73,7 +73,7 @@ int main() {
     }
     {   // snap_hysteresis
         Sim a;a.body=pose({});a.target=pose({.34,0,0});
-        for(int i=0;i<450;++i) {a.st.has=false;auto o=servo_step(a.st,a.target,a.body,{},{},0,1./90,1,a.cfg,a.tun,false);CHECK(!o.snap);}
+        for(int i=0;i<450;++i) {auto o=servo_step(a.st,a.target,a.body,{},{},0,1./90,1,a.cfg,a.tun,false);CHECK(!o.snap);}
         HandServoState st;WorldTrackedPose t=pose({.36,0,0}),b=pose({});
         double first=-1;
         for(int i=1;i<=90;++i) {
@@ -96,10 +96,102 @@ int main() {
         for(int i=0;i<40;++i) snapped=servo_step(st,t,b,{},{},0,1./90,1,HandServoConfig{},GrabTuning{},false).snap||snapped;
         CHECK(snapped);
     }
-    {   // jerk_filter_smooths: a target step ramps the commanded acceleration monotonically
-        Sim s;s.body=pose({});s.target=pose({.3,0,0});
-        double prev=0;
-        for(int i=0;i<3;++i) {s.step();double a=s.st.filtered_accel.x;CHECK(a>prev);prev=a;}
+    {   // jerk_filter_smooths: body held at rest under a target step; the commanded acceleration ramps up strictly, then saturates at the cap
+        HandServoState st;WorldTrackedPose t=pose({.3,0,0}),b=pose({});
+        double prev=0,top=0;
+        for(int i=0;i<12;++i) {
+            auto o=servo_step(st,t,b,{},{},0,1./90,1,HandServoConfig{},GrabTuning{},false);
+            double a=o.linear.x*90;
+            CHECK(a>=prev-1e-9);if(i<4) CHECK(a>prev);
+            prev=a;top=std::max(top,a);
+        }
+        CHECK(top>140&&top<=150+1e-6);   // approaches cap/mass = 300/2, unscaled
+    }
+    {   // step response at several rates, unheld and 20 kg held, tf 1/.5/.25
+        for(double hz:{20.,45.,72.,90.,120.}) for(double held:{0.,20.}) for(double tf:{1.,.5,.25}) {
+            if(held>0&&tf<1) continue;
+            Sim s;s.body=pose({});s.target=pose({.3,0,0});s.dt=1/hz;s.held=held;s.tf=tf;
+            double peak=0,pv=0;
+            for(int i=0;i<static_cast<int>(hz*(held>0?8:4)/tf);++i) {s.step();peak=std::max(peak,s.body.position.x);pv=std::max(pv,length(s.v));}
+            CHECK(peak<=.3+(held>0?.005:.001));
+            CHECK(pv<=s.cfg.max_speed+1e-9);
+            CHECK(std::fabs(s.body.position.x-.3)<.01);
+        }
+    }
+    {   // time_factor above 1 behaves as 1; 0 / negative / NaN mean unknown (1)
+        Sim a,b;a.body=b.body=pose({});a.target=b.target=pose({.3,.2,0});b.tf=2;
+        for(int i=0;i<20;++i) {auto oa=a.step();auto ob=b.step();CHECK(oa.linear.x==ob.linear.x&&oa.linear.y==ob.linear.y);}
+        for(double tf:{0.,-1.,nan_value}) {
+            Sim c,d;c.body=d.body=pose({});c.target=d.target=pose({.3,0,0});d.tf=tf;
+            CHECK(c.step().linear.x==d.step().linear.x);
+        }
+    }
+    {   // garbage read-back never reaches the output
+        for(Vec3 bad:{Vec3{1e300,0,0},Vec3{101,0,0},Vec3{nan_value,0,0}}) {
+            HandServoState st;
+            auto o1=servo_step(st,pose({.3,0,0}),pose({}),bad,{},0,1./90,1,HandServoConfig{},GrabTuning{},false);
+            auto o2=servo_step(st,pose({.3,0,0}),pose({}),{},bad,0,1./90,1,HandServoConfig{},GrabTuning{},false);
+            CHECK(!o1.valid&&!o2.valid&&length(o1.linear)==0&&length(o2.angular)==0&&length(o2.linear)==0);
+        }
+        HandServoState st;   // NaN / negative held mass does not poison the output
+        for(double kg:{nan_value,-5.}) {
+            auto o=servo_step(st,pose({.3,0,0}),pose({}),{},{},kg,1./90,1,HandServoConfig{},GrabTuning{},false);
+            CHECK(kg>0||!std::isnan(kg)?o.valid&&std::isfinite(o.linear.x):!o.valid);
+        }
+    }
+    {   // moving target: 2 m/s tracked closely, 2 and 6 m/s never snap
+        for(double speed:{2.,6.}) {
+            Sim s;s.body=pose({});s.target=pose({.1,0,0});double worst=0;
+            for(int i=0;i<450;++i) {
+                s.target.position.x+=speed/90;
+                auto o=s.step();
+                CHECK(!o.snap);
+                if(i>45) worst=std::max(worst,o.gap);
+            }
+            if(speed==2.) CHECK(worst<.2);
+        }
+    }
+    {   // a stuck body (zero velocity, target 0.4 m away) does snap, in the window
+        HandServoState st;WorldTrackedPose t=pose({.4,0,0}),b=pose({});
+        double first=-1;
+        for(int i=1;i<=90;++i) if(servo_step(st,t,b,{},{},0,1./90,1,HandServoConfig{},GrabTuning{},false).snap) {first=i/90.;break;}
+        CHECK(first>=.24&&first<=.26);
+    }
+    {   // hitch: a 0.5 s dt counts as dt_max (1/30) toward the snap window
+        HandServoState st;WorldTrackedPose t=pose({.5,0,0}),b=pose({});
+        for(int i=0;i<7;++i) CHECK(!servo_step(st,t,b,{},{},0,.5,1,HandServoConfig{},GrabTuning{},false).snap);
+        CHECK(servo_step(st,t,b,{},{},0,.5,1,HandServoConfig{},GrabTuning{},false).snap);
+    }
+    {   // degenerate / non-unit / left-handed basis rejected
+        HandServoState st;
+        WorldTrackedPose z=pose({}),big=pose({}),lh=pose({});
+        z.basis={Vec3{},Vec3{},Vec3{}};big.basis[0]={2,0,0};lh.basis={Vec3{1,0,0},Vec3{0,1,0},Vec3{0,0,-1}};
+        for(const auto* bad:{&z,&big,&lh}) {
+            auto o1=servo_step(st,*bad,pose({}),{},{},0,1./90,1,HandServoConfig{},GrabTuning{},false);
+            auto o2=servo_step(st,pose({.3,0,0}),*bad,{},{},0,1./90,1,HandServoConfig{},GrabTuning{},false);
+            CHECK(!o1.valid&&!o2.valid&&length(o1.angular)==0&&length(o2.linear)==0);
+        }
+    }
+    {   // near 180 degrees: spin axis is continuous across the branch boundary
+
+        for(double d:{-3e-3,-1e-3,-3e-4,0.,3e-4,1e-3,3e-3}) {
+            WorldTrackedPose t=pose({}),b=pose({});
+            double ang=3.14159265358979323846+d;   // rotate about Z, slightly off pi
+            t.basis={Vec3{std::cos(ang),std::sin(ang),0},Vec3{-std::sin(ang),std::cos(ang),0},Vec3{0,0,1}};
+            HandServoState st;
+            auto o=servo_step(st,t,b,{},{},0,1./90,1,HandServoConfig{},GrabTuning{},false);
+            CHECK(o.valid&&std::fabs(length(o.angular)-std::sqrt(2*40*3.14159265))<.05);   // brake-limited spin
+            if(d!=0) {   // shortest rotation: sign follows d (ang just past pi means rotating the other way round, -z)
+                CHECK((d>0)==(o.angular.z<0));
+            }
+
+        }
+    }
+    {   // a heavy hold lags in rotation (held inertia is in the torque cap); the bare hand does not
+        Sim a,b;a.body=b.body=pose({});a.target=b.target=pose({});
+        a.target.basis=b.target.basis={Vec3{0,1,0},Vec3{-1,0,0},Vec3{0,0,1}};b.held=20;
+        auto oa=a.step();auto ob=b.step();
+        CHECK(length(ob.angular)<length(oa.angular)*.5);
     }
     {   // x9_corpse_scale_and_floor_do_not_reach_the_hand
         Sim a,b;a.body=b.body=pose({});a.target=b.target=pose({.3,.2,0});
