@@ -521,6 +521,10 @@ build\native_taa_history_check.exe
 if not "%errorlevel%"=="0" exit /b 1
 cl /nologo /std:c++17 /EHsc /W4 /WX /O2 /MT tests\native_rigid_body_check.cpp /Fo:build\native_rigid_body_check.obj /Fe:build\native_rigid_body_check.exe
 if not "%errorlevel%"=="0" exit /b 1
+cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT /Isrc tests\hand_body_commands_check.cpp /Fo:build\hand_body_commands_check.obj /Fe:build\hand_body_commands_check.exe
+if not "%errorlevel%"=="0" exit /b 1
+build\hand_body_commands_check.exe
+if not "%errorlevel%"=="0" exit /b 1
 build\native_rigid_body_check.exe
 if not "%errorlevel%"=="0" exit /b 1
 cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT /Isrc tests\guard_probe_check.cpp /Fo:build\guard_probe_check.obj /Fe:build\guard_probe_check.exe
