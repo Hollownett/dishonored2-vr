@@ -4232,6 +4232,9 @@ void prepare_head_view(void* view) noexcept {
         const UINT64 per_frame_target=frames.load()+1;
         const bool per_frame=alt_eye>=0?alt_per_frame_done!=per_frame_target:eye==0;
         if(alt_eye>=0) alt_per_frame_done=per_frame_target;
+        // crosshair/HUD ownership is validated against the engine once per displayed frame
+        if(per_frame) native_crosshair.begin_frame(per_frame_target);
+        if(per_frame) d2vr::NativeHudChildDraw::begin_frame(per_frame_target);
         std::array<float,16> projection{};std::memcpy(projection.data(),bytes.data()+0x100,64);
         const XrView mono_xr_eye=mono?d2vr::GameXr::mono_centre_view(*xr_views):XrView{};
         const auto& xr_eye=alt_eye>=0?(*xr_views)[static_cast<std::size_t>(alt_eye)]:mono?mono_xr_eye:(*xr_views)[eye]; // alternate-eye: the parity eye's own pose and FOV, not the centre

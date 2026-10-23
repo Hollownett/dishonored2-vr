@@ -137,11 +137,35 @@ public:
 private:
     struct EyeBinding {std::uintptr_t node,file;NativeCrosshair::Binding owner;};
     inline static EyeBinding eye_binding_{};
+    // Per displayed frame the exact-eye node is validated against the live engine once (the owner binding, the file/iggy back-links and the
+    // tree walk are many engine reads), and every further child draw of that frame is answered from eye_ok_. begin_frame(0) (the default) turns
+    // the cache off. Publishing or clearing the binding, or an answer older than eye_ok_max_age_ms, drops it.
+    inline static std::atomic<UINT64> frame_{},eye_gen_{},eye_ok_frame_{},eye_ok_gen_{},eye_ok_tick_{},eye_validations_{},eye_cache_hits_{};
+    inline static std::atomic<std::uintptr_t> eye_ok_iggy_{},eye_ok_node_{};
+    inline static constexpr UINT64 eye_ok_max_age_ms=50;
     static std::uintptr_t live_eye_node(void* iggy) noexcept {
         if(!active_.load() || !read_ || !mutex_.try_lock())return 0;
         const auto b=eye_binding_;mutex_.unlock();
+        if(!b.node || b.owner.iggy!=reinterpret_cast<std::uintptr_t>(iggy))return 0;
+        const auto frame=frame_.load(std::memory_order_relaxed);const auto tick=GetTickCount64();
+        if(frame && eye_ok_frame_.load(std::memory_order_acquire)==frame && eye_ok_gen_.load(std::memory_order_relaxed)==eye_gen_.load(std::memory_order_acquire) &&
+           eye_ok_iggy_.load(std::memory_order_relaxed)==b.owner.iggy && tick>=eye_ok_tick_.load(std::memory_order_relaxed) &&
+           tick-eye_ok_tick_.load(std::memory_order_relaxed)<=eye_ok_max_age_ms) {
+            ++eye_cache_hits_;return eye_ok_node_.load(std::memory_order_relaxed);
+        }
+        const auto generation=eye_gen_.load(std::memory_order_acquire);
+        ++eye_validations_;
+        const auto node=validated_eye_node(b,tick);
+        if(frame) { // publish the answer, frame last
+            eye_ok_node_.store(node,std::memory_order_relaxed);eye_ok_iggy_.store(b.owner.iggy,std::memory_order_relaxed);
+            eye_ok_gen_.store(generation,std::memory_order_relaxed);eye_ok_tick_.store(tick,std::memory_order_relaxed);
+            eye_ok_frame_.store(frame,std::memory_order_release);
+        }
+        return node;
+    }
+    static std::uintptr_t validated_eye_node(const EyeBinding& b,UINT64 tick) noexcept {
         const auto live=eye_live.load();
-        if(!b.node || b.owner.iggy!=reinterpret_cast<std::uintptr_t>(iggy) || !live || !live(b.owner,GetTickCount64()))return 0;
+        if(!live || !live(b.owner,tick))return 0;
         try {
             if(!wrist_hud_file_owned(read_,base_,b.file) || rig::value<std::uintptr_t>(read_,b.file+0x1608)!=b.owner.iggy ||
                rig::value<std::uintptr_t>(read_,b.owner.iggy+0x78)!=b.file || !NativeHudArtProbe::in_tree(read_,b.owner.iggy,b.node))return 0;
@@ -152,11 +176,15 @@ public:
     static bool publish_eye(std::uintptr_t node,const NativeCrosshair::Binding& owner) noexcept {
         std::uintptr_t file{};
         if(!node || !read_ || !owner.iggy || !read_(owner.iggy+0x78,&file,8) || !file)return false;
-        {std::lock_guard<std::mutex> lock(mutex_);eye_binding_={node,file,owner};eye_node=node;}
+        {std::lock_guard<std::mutex> lock(mutex_);eye_binding_={node,file,owner};eye_node=node;eye_gen_.fetch_add(1,std::memory_order_release);}
         if(live_eye_node(reinterpret_cast<void*>(owner.iggy))==node)return true;
         clear_eye();return false;
     }
-    static void clear_eye() noexcept {std::lock_guard<std::mutex> lock(mutex_);eye_binding_={};eye_node=0;}
+    static void clear_eye() noexcept {std::lock_guard<std::mutex> lock(mutex_);eye_binding_={};eye_node=0;eye_gen_.fetch_add(1,std::memory_order_release);}
+    // Render thread, once per displayed frame (0 = no caching).
+    static void begin_frame(UINT64 frame) noexcept {frame_.store(frame,std::memory_order_relaxed);}
+    static UINT64 eye_validations() noexcept {return eye_validations_.load();}
+    static UINT64 eye_cache_hits() noexcept {return eye_cache_hits_.load();}
     inline static std::atomic<UINT64> overlay_draws{}; // full-screen overlays (damage vignette) not drawn
     inline static std::atomic<bool> prompt_world{};
     inline static thread_local bool holder_eye_{},holder_eye_hit_{};
@@ -446,7 +474,7 @@ public:
         }
         if(!free)return reject();*free={kind,geometry.file,geometry.iggy,geometry.display_node,owner,epoch,tick};free->target=target;++publish_accepts;return true;
     }
-    static void clear() {std::lock_guard<std::mutex> lock(mutex_);eye_binding_={};eye_node=0;bindings_={};prompt_roots_={};prompt_target_={};prompt_target_tick_=0;prompt_talk_=false;takedown_={};takedown_tick_=0;widget_nodes_={};widget_iggy_={};widget_count_=widget_next_=0;}
+    static void clear() {std::lock_guard<std::mutex> lock(mutex_);eye_binding_={};eye_node=0;eye_gen_.fetch_add(1,std::memory_order_release);bindings_={};prompt_roots_={};prompt_target_={};prompt_target_tick_=0;prompt_talk_=false;takedown_={};takedown_tick_=0;widget_nodes_={};widget_iggy_={};widget_count_=widget_next_=0;}
     // Producer: the NPC the native takedown sensor qualified this frame (empty = none).
     static void set_takedown(NativeInteractionTargetIdentity target,UINT64 tick) {std::lock_guard<std::mutex> lock(mutex_);takedown_=target;takedown_tick_=target?tick:0;}
     inline static std::atomic<UINT64> takedown_hints{};

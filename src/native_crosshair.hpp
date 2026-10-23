@@ -113,8 +113,39 @@ private:
     std::atomic<UINT> depth_{};
     std::atomic<UINT64> calls_{},applied_{},rejected_{},skipped_{},latch_clears_{},latch_failures_{},samples_{};
     std::mutex mutex_;Publication publication_;Binding binding_;std::ofstream log_;
+    // Per displayed frame, binding() validates the element against the live engine once and answers every further call of that frame from
+    // this cache (the HUD child draw asks per panel child). frame_==0 (no begin_frame yet) means no caching. generation_ moves whenever the
+    // remembered binding changes or is cleared, so a teardown seen by place() is never answered from the cache. The render thread only ever
+    // try_locks: a busy lock means "no ownership this call" and is not cached.
+    std::atomic<std::uint64_t> frame_{},generation_{};
+    std::atomic<std::uint64_t> validations_{},cache_hits_{};
+    struct Validated {std::uint64_t frame{},generation{},tick{};std::optional<Binding> result;};
+    std::mutex cache_mutex_;Validated cache_;
+    inline static constexpr std::uint64_t cache_max_age_ms=50; // a stalled frame counter can never serve an old answer
+    static bool same_identity(const Binding& a,const Binding& b) noexcept {
+        return a.element==b.element && a.movie==b.movie && a.iggy==b.iggy && a.list==b.list && a.count==b.count && a.record==b.record;
+    }
     std::atomic<bool> placed_{false},failed_{false};
     inline static const std::byte zero_byte{};
+
+    struct Validation {std::optional<Binding> binding;bool cacheable{};};
+    // The engine reads. Never blocks: when the update thread holds mutex_ there is no snapshot to judge, so nothing is owned (and nothing cached).
+    Validation validate(std::uint64_t now) noexcept {
+        try {
+            if(logic_()!=2) return {{},true};
+            Binding out;
+            if(!mutex_.try_lock()) return {};
+            out=binding_;mutex_.unlock();
+            if(!out.element || !out.tick || now<out.tick || now-out.tick>250) return {{},true};
+            Binding current{out.element,0,0,0,0,out.tick};
+            if(!read_(out.element+movie_offset,&current.movie,8) || current.movie!=out.movie || !current.movie ||
+               !read_(out.element+object_offset+8,&current.iggy,8) || current.iggy!=out.iggy ||
+               !read_(out.element+object_offset+as3_data_offset,&current.list,8) || current.list!=out.list ||
+               !read_(out.element+object_offset+as3_count_offset,&current.count,4) || current.count!=out.count ||
+               !read_(out.list+((out.count&as3_count_mask)-1)*0x28,current.record.data(),current.record.size()) || current.record!=out.record) return {{},true};
+            return {out,true};
+        } catch(...) {return {};}
+    }
 
     static bool executable(std::uintptr_t at) {
         return native_executable_cached(at);
@@ -131,13 +162,15 @@ private:
             std::uintptr_t movie{};
             // The engine's own guard, and its teardown signal: while the movie is
             // null the AS3 object has been released and the engine touches neither.
-            if(!read_(at+movie_offset,&movie,sizeof movie) || !movie) {std::lock_guard<std::mutex> lock(mutex_);binding_={};return;}
+            if(!read_(at+movie_offset,&movie,sizeof movie) || !movie) {std::lock_guard<std::mutex> lock(mutex_);binding_={};generation_.fetch_add(1,std::memory_order_release);return;}
             Binding live{at,movie,0,0,0,now};
             if(!read_(at+object_offset+8,&live.iggy,8) || !live.iggy ||
                !read_(at+object_offset+as3_data_offset,&live.list,8) || !live.list ||
                !read_(at+object_offset+as3_count_offset,&live.count,4) || !(live.count&as3_count_mask) || (live.count&as3_count_mask)>16 ||
                !read_(live.list+((live.count&as3_count_mask)-1)*0x28,live.record.data(),live.record.size())) live={};
-            {std::lock_guard<std::mutex> lock(mutex_);binding_=live;}
+            {std::lock_guard<std::mutex> lock(mutex_);
+             if(!same_identity(binding_,live)) generation_.fetch_add(1,std::memory_order_release);
+             binding_=live;}
             const auto owns=!failed_.load(std::memory_order_acquire) && route_.load(std::memory_order_acquire) && logic_()==2 && publication.active &&
                 publication.epoch && now>=publication.tick && now-publication.tick<=freshness_ms;
             if(!owns) {
@@ -197,19 +230,27 @@ public:
     void publish(float ndc_x,float ndc_y,std::uint64_t epoch,std::uint64_t tick,bool active) {
         std::lock_guard<std::mutex> lock(mutex_);publication_={ndc_x,ndc_y,epoch,tick,active};
     }
-    void clear() {std::lock_guard<std::mutex> lock(mutex_);publication_={};binding_={};}
+    void clear() {std::lock_guard<std::mutex> lock(mutex_);publication_={};binding_={};generation_.fetch_add(1,std::memory_order_release);}
+    // Render thread, once per displayed frame: binding() validates at most once until the next call. 0 turns the cache off.
+    void begin_frame(std::uint64_t frame) noexcept {frame_.store(frame,std::memory_order_relaxed);}
+    UINT64 validations() const {return validations_.load();}
+    UINT64 cache_hits() const {return cache_hits_.load();}
     std::optional<Binding> binding(std::uint64_t now) noexcept {
         try {
-            if(!active_.load() || !route_.load() || failed_.load() || !logic_ || logic_()!=2) return {};
-            Binding out;{std::lock_guard<std::mutex> lock(mutex_);out=binding_;}
-            if(!out.element || !out.tick || now<out.tick || now-out.tick>250) return {};
-            Binding current{out.element,0,0,0,0,out.tick};
-            if(!read_(out.element+movie_offset,&current.movie,8) || current.movie!=out.movie || !current.movie ||
-               !read_(out.element+object_offset+8,&current.iggy,8) || current.iggy!=out.iggy ||
-               !read_(out.element+object_offset+as3_data_offset,&current.list,8) || current.list!=out.list ||
-               !read_(out.element+object_offset+as3_count_offset,&current.count,4) || current.count!=out.count ||
-               !read_(out.list+((out.count&as3_count_mask)-1)*0x28,current.record.data(),current.record.size()) || current.record!=out.record) return {};
-            return out;
+            if(!active_.load() || !route_.load() || failed_.load() || !logic_) return {};
+            const auto frame=frame_.load(std::memory_order_relaxed);
+            const auto generation=generation_.load(std::memory_order_acquire);
+            if(frame && cache_mutex_.try_lock()) {
+                const bool hit=cache_.frame==frame && cache_.generation==generation && now>=cache_.tick && now-cache_.tick<=cache_max_age_ms;
+                const auto cached=hit?cache_.result:std::nullopt;
+                cache_mutex_.unlock();
+                if(hit) {++cache_hits_;return cached;}
+            }
+            ++validations_;
+            const auto result=validate(now);
+            if(!result.cacheable) return {};
+            if(frame && cache_mutex_.try_lock()) {cache_={frame,generation,now,result.binding};cache_mutex_.unlock();}
+            return result.binding;
         } catch(...) {return {};}
     }
     bool owns(const Binding& candidate,std::uint64_t now) noexcept {
@@ -239,7 +280,7 @@ public:
         log_.open(file,std::ios::trunc);
         if(!log_) throw std::runtime_error("Cannot open native crosshair log");
         log_<<std::setprecision(9)<<"tick_ms,thread,element,applied,ndc_x,ndc_y,epoch,age_ms,stage_x,stage_y\n";
-        {std::lock_guard<std::mutex> lock(mutex_);publication_={};binding_={};}
+        {std::lock_guard<std::mutex> lock(mutex_);publication_={};binding_={};generation_.fetch_add(1,std::memory_order_release);}
         calls_=applied_=rejected_=skipped_=latch_clears_=latch_failures_=samples_=0;failed_=false;route_=route;instance_=this;
         const auto target=reinterpret_cast<void*>(base_+update_rva);
         if(!original_ && MH_CreateHook(target,reinterpret_cast<void*>(&update),reinterpret_cast<void**>(&original_))!=MH_OK)
@@ -259,7 +300,7 @@ public:
         if(depth_) return false;
         std::array<std::byte,32> code{};
         const bool restored=!original_ || (read_(base_+update_rva,code.data(),code.size()) && code==expected);
-        try {std::lock_guard<std::mutex> lock(mutex_);log_.close();publication_={};binding_={};} catch(...) {return false;}
+        try {std::lock_guard<std::mutex> lock(mutex_);log_.close();publication_={};binding_={};generation_.fetch_add(1,std::memory_order_release);} catch(...) {return false;}
         return restored;
     }
     UINT64 calls() const {return calls_.load();}

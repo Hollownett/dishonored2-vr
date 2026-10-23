@@ -13,7 +13,8 @@ const char fixture_path[]="ui/hud.iggy";
 unsigned originals{},before{},after{},begins{},ends{};
 float* fixture_matrix{};bool changed{},capture_enabled{},eye_owner_ok=true;float expect_x=-1.f,glyph_factor=-1.f;
 d2vr::NativeHudChildKind last_kind{};UINT64 last_epoch{},last_tick{};std::uintptr_t last_owner{};bool last_talk_offer{},last_talk_glyph{};
-bool read(std::uintptr_t at,void* out,std::size_t size){SIZE_T n{};return ReadProcessMemory(GetCurrentProcess(),reinterpret_cast<void*>(at),out,size,&n) && n==size;}
+unsigned read_count{},eye_live_calls{};
+bool read(std::uintptr_t at,void* out,std::size_t size){++read_count;SIZE_T n{};return ReadProcessMemory(GetCurrentProcess(),reinterpret_cast<void*>(at),out,size,&n) && n==size;}
 std::uint32_t __fastcall original(void* iggy,float* matrix,void* node,void* aux,void* p5,void* p6,std::uint32_t clip,float depth){
     ++originals;assert(iggy==fixture_iggy.data() && node==fixture_node.data() && aux==reinterpret_cast<void*>(1) && p5==reinterpret_cast<void*>(2) && p6==reinterpret_cast<void*>(3) && clip==123 && depth==4.5f);
     if(glyph_factor>=0.f) {
@@ -250,6 +251,7 @@ int main(){
     matrix={1,.2f,-.3f,1,100,200};const auto saved_matrix=matrix;
     NativeHudChildDraw::begin=nullptr;NativeHudChildDraw::end=nullptr;NativeHudChildDraw::transform=nullptr;
     NativeHudChildDraw::eye_live=+[](const NativeCrosshair::Binding& b,UINT64 now) noexcept {
+        ++eye_live_calls;
         return eye_owner_ok && b.element==99 && b.movie==88 && b.iggy==reinterpret_cast<std::uintptr_t>(fixture_iggy.data()) &&
             b.tick && now>=b.tick && now-b.tick<=250;
     };
@@ -265,6 +267,39 @@ int main(){
     NativeHudChildDraw::hud_scale=.65f;
     eye_owner_ok=false;assert(call()==456); // stale update/owner, even if the raw hint still matches
     eye_owner_ok=true;
+    // Per displayed frame the exact-eye node is validated once (owner, file/iggy back-links, tree walk); the other child draws of the frame
+    // are answered from that. Dropped by a new frame, a changed binding, a teardown, or a stale answer.
+    {
+        const auto drawn=[&](unsigned n) {for(unsigned i=0;i<n;++i)assert(call()==456);};
+        glyph_factor=.65f*.65f; // the validated eye node is drawn through the glyph scale (hud_scale .65)
+        NativeHudChildDraw::begin_frame(0);
+        auto live_before=eye_live_calls;auto reads_before=read_count;
+        drawn(40);
+        const auto uncached_live=eye_live_calls-live_before,uncached_reads=read_count-reads_before;
+        assert(uncached_live==40); // no frame number: every child draw validates (old behaviour)
+        NativeHudChildDraw::begin_frame(11);
+        live_before=eye_live_calls;reads_before=read_count;auto validations=NativeHudChildDraw::eye_validations();
+        drawn(1);
+        const auto first_reads=read_count-reads_before;
+        assert(eye_live_calls-live_before==1 && NativeHudChildDraw::eye_validations()==validations+1);
+        live_before=eye_live_calls;reads_before=read_count;
+        drawn(39);
+        assert(eye_live_calls==live_before && NativeHudChildDraw::eye_validations()==validations+1);
+        // the 39 cached draws still read the glyph matrix (a draw's own work) but none of the ownership reads
+        assert(first_reads==uncached_reads/40 && read_count-reads_before==39);
+        std::cout<<"native_hud_child_draw engine reads for 40 eye draws: "<<uncached_reads<<" uncached, "<<(first_reads+(read_count-reads_before))<<" with the frame cache; ownership checks "<<uncached_live<<" -> 1\n";
+        // a new displayed frame validates again
+        NativeHudChildDraw::begin_frame(12);live_before=eye_live_calls;drawn(3);assert(eye_live_calls==live_before+1);
+        // a stale owner inside the frame: re-publishing drops the cache, so the loss is seen at once
+        eye_owner_ok=false;
+        assert(NativeHudChildDraw::publish_eye(node,eye_binding)==false);
+        eye_owner_ok=true;assert(NativeHudChildDraw::publish_eye(node,eye_binding));
+        live_before=eye_live_calls;drawn(2);assert(eye_live_calls==live_before); // publishing validated it for this frame already
+        // clearing the binding drops the cache
+        NativeHudChildDraw::clear_eye();NativeHudChildDraw::eye_node=node;glyph_factor=-1.f;live_before=eye_live_calls;drawn(2);assert(eye_live_calls==live_before);
+        assert(NativeHudChildDraw::publish_eye(node,eye_binding));
+        NativeHudChildDraw::begin_frame(0);glyph_factor=-1.f;
+    }
     std::memcpy(fixture_file.data()+0x1608,&replaced_iggy,8);assert(call()==456);
     std::memcpy(fixture_file.data()+0x1608,&iggy,8);
     std::memcpy(fixture_node.data()+0x80,&cycle,8);assert(call()==456); // no longer in live movie tree

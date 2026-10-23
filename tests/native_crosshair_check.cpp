@@ -41,7 +41,9 @@ extern "C" MH_STATUS WINAPI MH_CreateHook(LPVOID,LPVOID hook,LPVOID* out) {
 extern "C" MH_STATUS WINAPI MH_EnableHook(LPVOID) {++enables;return enables==fail_enable?MH_ERROR_NOT_EXECUTABLE:MH_OK;}
 extern "C" MH_STATUS WINAPI MH_DisableHook(LPVOID) {++disables;return MH_OK;}
 
+static unsigned read_count{};
 static bool read(std::uintptr_t at,void* out,std::size_t size) {
+    ++read_count;
     if(bad_read && at==base+update_rva) return false;
     std::memcpy(out,reinterpret_cast<const void*>(at),size);return true;
 }
@@ -165,6 +167,44 @@ int main() {
         std::memcpy(element.bytes.data()+movie_offset,&changed_movie,8);
         require(!crosshair.owns(*binding,GetTickCount64()),"Replaced movie never inherits old crosshair binding");
         std::memcpy(element.bytes.data()+movie_offset,&binding->movie,8);
+
+        // Per displayed frame the engine is read once: forty HUD child draws asking "who owns the crosshair" cost the reads of one
+        // validation, not forty. A new frame validates again; a teardown the update thread saw is never answered from the cache.
+        call(element.bytes.data());
+        {
+            const auto fresh=GetTickCount64();
+            crosshair.begin_frame(0);
+            const auto base_validations=crosshair.validations();
+            auto reads_before=read_count;
+            for(unsigned i=0;i<40;++i) require(crosshair.binding(fresh).has_value(),"Uncached binding stays live");
+            const auto uncached_reads=read_count-reads_before;
+            require(crosshair.validations()-base_validations==40 && uncached_reads>=40*5,"Without a frame number every call validates (old behaviour)");
+            crosshair.begin_frame(7);
+            reads_before=read_count;
+            const auto one=crosshair.binding(fresh);require(one.has_value(),"First call of a frame validates");
+            const auto first_reads=read_count-reads_before;
+            reads_before=read_count;
+            for(unsigned i=0;i<39;++i) require(crosshair.binding(fresh).has_value() && crosshair.owns(*one,fresh),"Cached answer is the validated binding");
+            require(read_count==reads_before,"Later calls of the same frame read nothing from the engine");
+            require(first_reads*40==uncached_reads && crosshair.cache_hits()>=39,"One validation per frame instead of forty");
+            std::cout<<"native_crosshair engine reads per 40 queries: "<<uncached_reads<<" uncached, "<<first_reads<<" with the frame cache\n";
+            crosshair.begin_frame(8);
+            reads_before=read_count;
+            require(crosshair.binding(fresh).has_value() && read_count>reads_before,"The next displayed frame validates again");
+            // Teardown within the frame: the engine update sees a null movie, the cached answer must not outlive it.
+            const std::uintptr_t no_movie=0;
+            std::memcpy(element.bytes.data()+movie_offset,&no_movie,8);
+            call(element.bytes.data());
+            require(!crosshair.binding(fresh),"A torn-down element is never answered from the cache");
+            std::memcpy(element.bytes.data()+movie_offset,&binding->movie,8);
+            call(element.bytes.data());
+            require(crosshair.binding(GetTickCount64()).has_value(),"A rebuilt element is validated afresh");
+            // An answer is never older than cache_max_age_ms even if the frame counter stalls.
+            crosshair.begin_frame(9);require(crosshair.binding(GetTickCount64()).has_value(),"Validates");
+            Sleep(80);call(element.bytes.data());
+            reads_before=read_count;require(crosshair.binding(GetTickCount64()).has_value() && read_count>reads_before,"A stalled frame counter cannot serve an old answer");
+            crosshair.begin_frame(0);
+        }
 
 
         setter_calls=0;set_latch(element,std::byte{1});
