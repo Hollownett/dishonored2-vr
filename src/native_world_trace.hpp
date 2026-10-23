@@ -172,14 +172,19 @@ inline NativeClosestCollector make_closest_collector(std::uint64_t vtable) {
     for(float& v:c.limit) {const std::uint32_t bits=0x5f7ffff0;std::memcpy(&v,&bits,4);}
     return c;
 }
-// Plan B B11 (dev knob build/hand-body-spike only): the spike's hand body is DEBRIS (layer 4), which kWorldOccluderLayers includes, so every
-// mod cast would report it. While it exists its full handle is here and a closest hit on it is discarded (reported as no hit) and counted;
-// a surface behind it is not seen in that frame. 0xffffffff (the default, knob off) never matches.
-inline std::atomic<std::uint32_t> cast_excluded_body{0xffffffffu};
+// Plan B B11/B13 (dev knobs build/hand-body-spike, build/hand-body): a hand body is DEBRIS (layer 4), which kWorldOccluderLayers includes, so
+// every mod cast would report it. While a hand body exists its full handle is in its slot (the spike uses slot 0; the production hand body
+// slot 0 for the left hand and 1 for the right; the two never run together) and a closest hit on it is discarded (reported as no hit) and
+// counted; a surface behind it is not seen in that frame. 0xffffffff (the default, knobs off) never matches.
+inline std::atomic<std::uint32_t> cast_excluded_bodies[2]{0xffffffffu,0xffffffffu};
 inline std::atomic<std::uint64_t> cast_excluded_hits{0};
+inline bool cast_excluded(std::uint32_t body) {
+    for(const auto& slot:cast_excluded_bodies) if(const auto excluded=slot.load(std::memory_order_relaxed); excluded!=0xffffffffu && body==excluded) return true;
+    return false;
+}
 inline std::optional<WorldTraceHit> convert_world_hit(const NativeClosestCollector& c,Vec3 from,Vec3 to,std::uintptr_t entity) {
     if(!c.hit_count) return {};
-    if(const auto excluded=cast_excluded_body.load(std::memory_order_relaxed); excluded!=0xffffffffu && c.body==excluded) {cast_excluded_hits.fetch_add(1,std::memory_order_relaxed);return {};}
+    if(cast_excluded(c.body)) {cast_excluded_hits.fetch_add(1,std::memory_order_relaxed);return {};}
     const double f=c.fraction;
     if(!std::isfinite(f) || f<0 || f>1.0001) return {};
     const Vec3 point{c.position[0],c.position[1],c.position[2]},raw{c.normal[0],c.normal[1],c.normal[2]};

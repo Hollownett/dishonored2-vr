@@ -537,6 +537,8 @@ build\hand_body_check.exe
 if not "%errorlevel%"=="0" exit /b 1
 python tests\hand_body_spike_routing_check.py
 if not "%errorlevel%"=="0" exit /b 1
+python tests\hand_body_routing_check.py
+if not "%errorlevel%"=="0" exit /b 1
 build\hand_servo_check.exe
 if not "%errorlevel%"=="0" exit /b 1
 build\native_rigid_body_check.exe

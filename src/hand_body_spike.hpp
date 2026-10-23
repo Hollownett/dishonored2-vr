@@ -8,6 +8,7 @@
 // Order of a session: G1 observation (count-only hooks) -> G1 verdict -> owner choice (G2 static part) -> create -> settle -> press -> hold
 // -> destroy. A world change abandons (no engine call). A fault latches HandBodyFault and stops.
 #include "arm_ik.hpp"
+#include "hand_body.hpp"   // B13: HandBodyFault, the engine fault types, G1, owner (a) and G2 live there now (shared, not duplicated)
 #include "hand_body_commands.hpp"
 #include "hand_body_lifecycle.hpp"
 #include <algorithm>
@@ -44,27 +45,10 @@ inline const char* spike_route_refusal(SpikeRoute r) {
     return nullptr;
 }
 
-// Session-wide latch for the hand body (plan A's FaultLatch pattern, a separate flag): any SEH fault on a hand-body engine call trips it;
-// the hand body stays off until restart.
-class HandBodyFault {
-public:
-    static void trip() noexcept {flag().store(true,std::memory_order_relaxed);}
-    static bool tripped() noexcept {return flag().load(std::memory_order_relaxed);}
-#ifdef D2VR_TESTING
-    static void reset_for_tests() noexcept {flag().store(false,std::memory_order_relaxed);}
-#endif
-private:
-    static std::atomic<bool>& flag() noexcept {static std::atomic<bool> f{false};return f;}
-};
-
-// An engine call faulted (the real engine turns a failed guarded_call into this). The spike latches HandBodyFault and stops. handle: a body the
-// faulting call may still have left in the world (a createBody that faulted after inserting its record); it then gets the one destroy attempt.
-struct SpikeFault : std::runtime_error {
-    explicit SpikeFault(const char* what,std::uint32_t body=0xffffffffu):std::runtime_error(what),handle(body) {}
-    std::uint32_t handle;
-};
-// A read could not be made this tick (an unreadable pool, a page gone for a moment): not "the body is gone". The tick is skipped.
-struct SpikeUnreadable {};
+// HandBodyFault, HandBodyEngineFault and HandBodyUnreadable are in hand_body.hpp (shared with the production hand body); the spike's names
+// for the last two stay as aliases.
+using SpikeFault=HandBodyEngineFault;
+using SpikeUnreadable=HandBodyUnreadable;
 
 // The seam. create/destroy/position/flags/busy are the brief's interface; world, player, push and gameplay are added (the spike needs a
 // world identity for the stale-world rule, the player root for the drift, a velocity write for the press, and gameplay for the lifecycle).
@@ -82,10 +66,10 @@ struct SpikeEngine {
 };
 
 struct SpikeConfig {
-    double radius=.05;            // 5 cm sphere
+    double radius=R1Recipe::radius;   // 5 cm sphere (the R1 recipe)
     double drop_height=.30;       // created this far above the floor
     double settle_min_s=.3,settle_window_s=.5,settle_eps_m=.002,settle_max_s=4;
-    double wake_speed=.1;         // one downward velocity write right after creation: createBody's activation is forced to 0 when world+0x818
+    double wake_speed=R1Recipe::wake_speed;   // one downward velocity write right after creation: createBody's activation is forced to 0 when world+0x818
                                   // is 0 (Q3), and a sleeping body does not fall (sim 20261023T231836: z unchanged until the first write)
     double moved_min_m=.01;       // "settled" needs the body to have fallen at least this far first (a body that never moved has not settled)
     double floor_tol_m=.03;       // settle_z within this of floor + radius counts as resting on the floor
@@ -266,59 +250,18 @@ inline SpikeReport run_spike(SpikeEngine& e,SpikeRoute route,Vec3 at,double floo
     return runner.report();
 }
 
-// ---- G1: thread and drain point (docs Gates for B11). Counted by the count-only hooks; judged here.
-struct G1Stats {
-    double observed_s{};                         // gameplay seconds observed so far
-    std::uint64_t frames{},steps{},step_busy{};  // 0x8ad260 entries; 0x97bc0 entries and how many found 0x8a7820 true
-    std::uint64_t dispatches{},dispatch_busy_samples{},dispatch_busy{};
-    std::uint64_t dispatch_outside_step{},dispatch_step_drain{},dispatch_overlap{},dispatch_off_frame_thread{},dispatch_before_frame{};
-    std::uint64_t frame_threads{};               // distinct threads that entered 0x8ad260
-    std::uint32_t frame_thread{},dispatch_thread{};
-};
-struct G1Verdict {bool decided{},pass{};const char* reason{""};};
-// The create/destroy point is a 0x89fb0 dispatch outside the step (0x97bc0 depth 0) on the 0x8ad260 thread. It passes only if, over at least
-// min_s of observation: frames, steps and such dispatches exist; every dispatch ran on the frame thread; 0x8ad260 ran on one thread; no
-// dispatch overlapped the step from another thread or outside its 0x945f0 drain; 0x8a7820 was readable and false at every sampled dispatch
-// and at every step entry (which closes the 0x7e7e10 writer for this run). This is the in-run G1 of the B11 ruling; the doc's full G1 (five
-// 120 s sessions with a level load and a save/load) is not claimed by it.
-inline G1Verdict judge_g1(const G1Stats& s,double min_s) {
-    if(s.observed_s<min_s) return {false,false,"observing"};
-    if(!s.frames) return {true,false,"no 0x8ad260 frame seen"};
-    if(!s.steps) return {true,false,"no 0x97bc0 step seen"};
-    if(!s.dispatch_outside_step) return {true,false,"no 0x89fb0 dispatch outside the step"};
-    if(s.frame_threads!=1) return {true,false,"0x8ad260 ran on more than one thread"};
-    if(s.dispatch_off_frame_thread) return {true,false,"a 0x89fb0 dispatch ran off the frame thread"};
-    if(s.dispatch_overlap) return {true,false,"a 0x89fb0 dispatch overlapped the step"};
-    if(!s.dispatch_busy_samples) return {true,false,"0x8a7820 never readable at a 0x89fb0 dispatch"};
-    if(s.dispatch_busy) return {true,false,"0x8a7820 true at a 0x89fb0 dispatch"};
-    if(s.step_busy) return {true,false,"0x8a7820 true at 0x97bc0 entry"};
-    return {true,true,"pass"};
-}
-// After the pass the same counters must not grow (checked every tick; a violation stops the spike, which destroys at the next allowed tick).
-inline bool g1_still_holds(const G1Stats& at_pass,const G1Stats& now) {
-    return now.dispatch_off_frame_thread==at_pass.dispatch_off_frame_thread && now.dispatch_overlap==at_pass.dispatch_overlap &&
-           now.step_busy==at_pass.step_busy && now.frame_threads==at_pass.frame_threads && now.dispatch_busy==at_pass.dispatch_busy;
-}
+// ---- G1 (G1Stats, judge_g1, g1_still_holds): hand_body.hpp.
 
 // ---- G2: owner. (a) the player's userdata owner, (b) a mod-spawned prop's rigid-body component.
 enum class SpikeOwner {none,player_a,prop_b};
 inline const char* spike_owner_name(SpikeOwner o) {return o==SpikeOwner::player_a?"a_player":o==SpikeOwner::prop_b?"b_prop":"none";}
-struct OwnerEvidence {
-    bool a_resolved{},a_userdata_is_player{},a_entity_is_player{},a_type_decoded{},a_type_in_range{};   // the B7 owner chain, read live
-    bool b_available{};const char* b_reason{""};
-};
+// OwnerEvidence, owner_a_static_ok, G2Counts and g2_rejects: hand_body.hpp.
 struct OwnerDecision {SpikeOwner owner{};const char* reason{""};};
-inline bool owner_a_static_ok(const OwnerEvidence& e) {
-    return e.a_resolved && e.a_userdata_is_player && e.a_entity_is_player && e.a_type_decoded && !e.a_type_in_range;
-}
 inline OwnerDecision choose_owner(const OwnerEvidence& e) {
     if(owner_a_static_ok(e)) return {SpikeOwner::player_a,"a: arkPlayerUserData owner, owner+0x10 is the player, typenum outside the live wake range"};
     if(e.b_available) return {SpikeOwner::prop_b,"b: owner (a) failed its static G2 checks"};
     return {SpikeOwner::none,"NO-GO: owner (a) failed its static G2 checks and owner (b) is unavailable"};
 }
-// The runtime half of G2 for a probe body: 0x853220 calls with the hand's owner and 0x8527a0 calls for the hand's handle, counted from creation.
-struct G2Counts {std::uint64_t wake_owner{},exit_hand{};};
-inline bool g2_rejects(const G2Counts& since_create) {return since_create.wake_owner || since_create.exit_hand;}
 inline OwnerDecision owner_after_g2_reject(SpikeOwner rejected,const OwnerEvidence& e) {
     if(rejected==SpikeOwner::player_a && e.b_available) return {SpikeOwner::prop_b,"b: G2 rejected (a) at run time"};
     return {SpikeOwner::none,"NO-GO: G2 rejected the owner at run time and no fallback owner is available"};

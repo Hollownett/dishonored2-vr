@@ -787,6 +787,8 @@ private:
         original_(manager,command);
         // B11 spike (build/hand-body-spike, sim only): set only when the knob installed it; otherwise one relaxed load.
         if(const auto spike=hand_body_spike_dispatch.load(std::memory_order_relaxed)) {try {spike(manager);} catch(...) {}}
+        // B13 hand body (build/hand-body, default off): set only when the knob installed it; otherwise one relaxed load.
+        if(const auto hand_body=hand_body_dispatch.load(std::memory_order_relaxed)) {try {hand_body(manager);} catch(...) {}}
         try {apply_poke();} catch(...) {}
         try {apply_release_depen();} catch(...) {}
         try {apply_contact(reinterpret_cast<std::uintptr_t>(manager));} catch(...) {++contact_.faults;}
