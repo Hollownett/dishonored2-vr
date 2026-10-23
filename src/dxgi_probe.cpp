@@ -1465,6 +1465,21 @@ static d2vr::GpuDispatchBindings<> gpu_bindings{d2vr::GpuDispatchBindings<>::Api
 static std::array<bool,7> gpu_deferred_methods_shared{};
 static ComPtr<IUnknown> gpu_bound_device_identity,gpu_bound_context_identity;
 static DWORD gpu_bound_thread{};
+static d2vr::HandBodyProbeRunner hand_body_probe_runner;   // B7: read-only hand-body research probe (build/hand-body-probe; one set per second, at most 120)
+static d2vr::HandBodyProbeRunner::Sample hand_body_probe_sample(std::uint64_t tick) {
+    d2vr::HandBodyProbeRunner::Sample sample;
+    sample.rows=d2vr::probe_player_bodies(read_self,image_base,tick,camera_address);
+    sample.render_thread=gpu_bound_thread;   // the thread the GPU hooks were bound on (the present/render thread), for the G1 thread comparison
+    const auto game=d2vr::rig::value<std::uintptr_t>(read_self,image_base+0x39a5290);
+    const auto world=game?d2vr::rig::value<std::uintptr_t>(read_self,*game+0x60410):std::nullopt;
+    if(world) sample.world_filter_vtable_rva=d2vr::world_filter_vtable_rva(read_self,image_base,*world);
+    if(const auto camera=d2vr::native_player_camera(read_self,image_base,camera_address)) {   // the nearest loose prop within 2 m of the player, if any
+        const d2vr::Vec3 point{camera->aim_origin[0],camera->aim_origin[1],camera->aim_origin[2]};
+        if(const auto prop=d2vr::nearest_grab_body(read_self,image_base,point,2.0))
+            if(const auto row=d2vr::probe_prop_userdata(read_self,image_base,*prop,tick)) sample.rows.push_back(*row);
+    }
+    return sample;
+}
 static std::mutex gpu_hook_control_mutex;
 static std::atomic<UINT> gpu_phase{0},gpu_traced_frames{0},gpu_events{0},gpu_dropped{0};
 static std::atomic<UINT> gpu_callback_depth{0};
@@ -9082,8 +9097,9 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
             d2vr::NativeMenuEntry::owned_movie_patch=&d2vr::patch_vr_native_art_movie;
             d2vr::NativeMenuEntry::install(image_base);
         }
-        corpse_trace.stop();carry_trace.stop();
+        hand_body_probe_runner.stop();corpse_trace.stop();carry_trace.stop();
         if(fs::exists(root/L"build"/L"carry-trace")) carry_trace.start(output/L"native-carry-trace.csv");
+        if(fs::exists(root/L"build"/L"hand-body-probe")) hand_body_probe_runner.start(output,&hand_body_probe_sample);   // dev knob, off by default; read-only
         {std::lock_guard<std::mutex> trace_file_lock(frame_split_trace_file_mutex);
          if(!frame_split_trace_file.is_open() && fs::exists(root/L"build"/L"frame-split-trace")) {
              frame_split_trace_file.open(output/L"native-frame-split-trace.csv",std::ios::trunc);
@@ -9359,7 +9375,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
                 failure << "xr_close_complete=" << xr_close_complete.load() << " headset_size_restored=" << headset_size_restored.load()
                         << " cached_output_restored=" << cached_output_restored.load() << " controller_import_restored=" << controller_import_restored
                         << " native_resize_hresult=" << native_resize_result.load() << " last_output=" << width.load() << 'x' << height.load() << '\n';
-                corpse_trace.stop();carry_trace.stop();
+                hand_body_probe_runner.stop();corpse_trace.stop();carry_trace.stop();
                 return 1;
             }
         }
@@ -9373,7 +9389,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
         const bool world_ui_disabled=d2vr::NativeWorldUi::disable();world_ui_installed=false;
         if(!world_ui_disabled) throw std::runtime_error("Native world UI scope did not restore or drain");
         restore_hud_scale();remove_glyph_hook();d2vr::GlyphSwap::disable();d2vr::SamplerLodBias::disable();
-        corpse_trace.stop();carry_trace.stop();d2vr::NativeHeldObject::disable();held_object_installed=false;d2vr::NativeCallTrace::disable();d2vr::NativeSimInvulnerable::disable();d2vr::NativeSwarmKillGuard::disable();
+        hand_body_probe_runner.stop();corpse_trace.stop();carry_trace.stop();d2vr::NativeHeldObject::disable();held_object_installed=false;d2vr::NativeCallTrace::disable();d2vr::NativeSimInvulnerable::disable();d2vr::NativeSwarmKillGuard::disable();
         const bool audio_disabled=native_audio_listener.disable();
         const bool left_aim_disabled=native_left_aim.disable() && native_crosshair.disable() && native_fire_seam_trace.disable() && native_shot_aim.disable() && native_blink_aim.disable() &&
             native_hud_census.disable() && native_marker_probe.disable() && d2vr::NativeHudChildDraw::disable() && d2vr::NativeWristHud::disable();
@@ -9778,7 +9794,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
         bool arm_restore_deferred=false;
         const bool arm_upload_disabled=disable_arm_upload_hook(&arm_restore_deferred);
         restore_hud_scale();remove_glyph_hook();d2vr::GlyphSwap::disable();d2vr::SamplerLodBias::disable();
-        corpse_trace.stop();carry_trace.stop();d2vr::NativeHeldObject::disable();held_object_installed=false;d2vr::NativeCallTrace::disable();d2vr::NativeSimInvulnerable::disable();d2vr::NativeSwarmKillGuard::disable();
+        hand_body_probe_runner.stop();corpse_trace.stop();carry_trace.stop();d2vr::NativeHeldObject::disable();held_object_installed=false;d2vr::NativeCallTrace::disable();d2vr::NativeSimInvulnerable::disable();d2vr::NativeSwarmKillGuard::disable();
         const bool audio_disabled=native_audio_listener.disable();
         const bool left_aim_disabled=native_left_aim.disable() && native_crosshair.disable() && native_fire_seam_trace.disable() && native_shot_aim.disable() &&
             native_hud_census.disable() && native_marker_probe.disable() && d2vr::NativeHudChildDraw::disable() && d2vr::NativeWristHud::disable();
@@ -9851,7 +9867,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
         } catch(...) {}
         return 1;
     } catch(...) {
-        corpse_trace.stop();carry_trace.stop();
+        hand_body_probe_runner.stop();corpse_trace.stop();carry_trace.stop();
         flush_synchronized(true);
         flush_render_perf();
         flush_grab_decisions(true);

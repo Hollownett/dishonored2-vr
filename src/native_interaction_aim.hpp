@@ -365,6 +365,7 @@ class NativeInteractionAim {
     template<unsigned Index> static void __fastcall stage(void* sensor) {
         auto* self=instance_;StageFrame frame{context_,retrieved_,lean_context_,lean_transaction_,crash_operation};
         if constexpr(Index==0) self->stage0_thread_id_.store(GetCurrentThreadId(),std::memory_order_relaxed); // the game thread (frame split telemetry)
+        if constexpr(Index==0) if(HandBodyProbeCounters::enabled.load(std::memory_order_relaxed)) HandBodyProbeCounters::note_stage0(self->read_,self->base_,GetCurrentThreadId()); // B7 probe, read-only (guarded reads only; no try here: the function holds SEH)
         ++self->depth_;++self->stage_calls_;context_=nullptr;retrieved_={};lean_context_=nullptr;lean_transaction_=nullptr;
         __try {stage_body<Index>(sensor,frame);}
         __finally {

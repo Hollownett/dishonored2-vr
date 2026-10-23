@@ -7,6 +7,7 @@
 #include "release_depen.hpp"
 #include "native_hand_contact.hpp"
 #include "mass_probe.hpp"
+#include "hand_body_probe.hpp"
 #include "full_hand_contact.hpp"
 #include "native_player_camera.hpp"
 #include "crash_observer.hpp"
@@ -774,6 +775,10 @@ private:
         },[this] {return clock_.micros();});
     }
     void invoke(void* manager,void* command) {
+        // B7 probe (build/hand-body-probe, read-only): cadence of this hook, the record type, and the physics busy flag as the record is dispatched.
+        if(HandBodyProbeCounters::enabled.load(std::memory_order_relaxed)) {
+            try {HandBodyProbeCounters::note_dispatch(read_,base_,reinterpret_cast<std::uintptr_t>(command),GetCurrentThreadId());} catch(...) {}
+        }
         original_(manager,command);
         try {apply_poke();} catch(...) {}
         try {apply_release_depen();} catch(...) {}

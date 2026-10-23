@@ -51,6 +51,12 @@ if not errorlevel 0 goto build_failed
 cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT tests\native_world_query_source_check.cpp /Fo:build\native_world_query_source_check.obj /Fe:build\native_world_query_source_check.exe
 if errorlevel 1 goto build_failed
 if not errorlevel 0 goto build_failed
+cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT /Isrc tests\hand_body_probe_check.cpp /Fo:build\hand_body_probe_check.obj /Fe:build\hand_body_probe_check.exe
+if errorlevel 1 goto build_failed
+if not errorlevel 0 goto build_failed
+build\hand_body_probe_check.exe
+if errorlevel 1 goto build_failed
+if not errorlevel 0 goto build_failed
 build\native_world_query_source_check.exe
 if errorlevel 1 goto build_failed
 if not errorlevel 0 goto build_failed
