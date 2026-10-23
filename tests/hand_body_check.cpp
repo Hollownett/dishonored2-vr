@@ -78,7 +78,8 @@ namespace {
 // Two hand bodies in a fake hknp world. Every engine call is counted and logged in order; forget() is mod-side bookkeeping, not an engine call.
 struct FakeHands {
     std::uintptr_t world_id=0x1000;bool busy=false;bool world_unreadable=false;
-    struct Body {bool alive{};std::uint32_t handle{};Vec3 pos{},vel{};};
+    struct Body {bool alive{};std::uint32_t handle{};Vec3 pos{},vel{};bool foreign{};};   // foreign: not ours (a world rebuilt at the same address)
+    int foreign_touched=0;
     std::array<Body,2> b{};std::uint32_t next=0x02000888;
     int creates=0,destroys=0,velocities=0,applies=0,positions=0,forgets=0,creates_while_busy=0,destroys_while_busy=0,calls_on_dead_world=0,create_world_mismatch=0;
     bool at_point=true;std::function<void()> on_position;   // on_position: runs inside service() (an engine callback), e.g. a re-entrant write
@@ -102,6 +103,7 @@ struct FakeHands {
         };
         e.velocity=[this](unsigned side,std::uint32_t h,Vec3 v) {
             ++velocities;log.push_back("velocity:"+std::to_string(side)+":"+std::to_string(v.z));
+            if(b[side].foreign && b[side].handle==h) ++foreign_touched;
             if(fault_wake) throw HandBodyEngineFault("fake wake fault");
             if(refuse_wakes>0) {--refuse_wakes;return false;}
             if(!b[side].alive || b[side].handle!=h) return false;
@@ -109,6 +111,7 @@ struct FakeHands {
         };
         e.destroy=[this](unsigned side,std::uint32_t h) {
             ++destroys;if(busy) ++destroys_while_busy;log.push_back("destroy:"+std::to_string(side));
+            if(b[side].alive && b[side].foreign && b[side].handle==h) {++foreign_touched;b[side].alive=false;return DestroyOutcome::gone;}
             if(fault_destroy) throw HandBodyEngineFault("fake destroy fault");
             if(refuse_destroys>0) {--refuse_destroys;return DestroyOutcome::refused;}
             if(!b[side].alive || b[side].handle!=h) return DestroyOutcome::absent;
@@ -117,7 +120,7 @@ struct FakeHands {
             b[side].alive=false;return DestroyOutcome::gone;
         };
         e.position=[this](unsigned side,std::uint32_t h)->std::optional<Vec3> {
-            ++positions;if(on_position) on_position();if(!b[side].alive || b[side].handle!=h) return std::nullopt;return b[side].pos;
+            ++positions;if(on_position) on_position();if(b[side].foreign && b[side].handle==h) ++foreign_touched;if(!b[side].alive || b[side].handle!=h) return std::nullopt;return b[side].pos;
         };
         e.apply=[this](unsigned side,const hand_body::CommandRecord&) {
             ++applies;log.push_back("apply:"+std::to_string(side));
@@ -225,11 +228,12 @@ static void b13_checks() {
         hb.service(gameplay_in(t,false),kPalms);t+=16;   // not gameplay in the new world: no create either
         CHECK(f.engine_calls()==calls);CHECK(f.forgets==2);CHECK(hb.status(0).abandons==1);CHECK(hb.status(1).abandons==1);
         CHECK(hb.status(0).destroys==0);CHECK(!hb.any_alive());CHECK(!hb.pose(0));CHECK(hb.status(0).available);
-        // a load-generation change at the same world address is NOT an abandon (review P2-1): the destroy gets its chance first
+        // a load-generation change at the same world address abandons too (review round 2: the old handle may name another body)
         FakeHands g;HandBody hb2(g.engine());
         for(int i=0;i<30;++i,t+=16) hb2.service(gameplay_in(t),kPalms);
+        const int calls2=g.engine_calls();
         hb2.service(gameplay_in(t,false,7),kPalms);
-        CHECK(g.destroys==2);CHECK(hb2.status(0).abandons==0);CHECK(g.forgets==0);CHECK(hb2.status(0).load_releases==1);
+        CHECK(g.engine_calls()==calls2);CHECK(hb2.status(0).abandons==1);CHECK(g.forgets==2);
         // an unreadable world is not a change: nothing decided, nothing abandoned
         FakeHands u;HandBody hb3(u.engine());
         for(int i=0;i<30;++i,t+=16) hb3.service(gameplay_in(t),kPalms);
@@ -423,30 +427,47 @@ static void b13_checks() {
         for(int i=0;i<5;++i) g.step(false);
         CHECK(g.body.status(0).abandons==1);
     }
-    {   // load_start_destroys_not_abandons (review P2-1): the generation bumps at loading START, before any destroy, world unchanged:
-        // a same-world loss of gameplay, destroyed directly (or queued when busy), never abandoned
+    {   // load_start_destroys_not_abandons: loading starts in the same world (logic 1<<15, generation unchanged) while the dispatcher still
+        // ticks: a same-world loss of gameplay, destroyed directly (or queued when busy) BEFORE the generation bumps at loading exit
         HandBodyFault::reset_for_tests();FakeGame g;
         for(int i=0;i<100;++i) g.step(false);
         CHECK(g.body.any_alive());
-        const int calls=g.world.engine_calls();
-        g.loading=true;++g.gen;g.step(false);   // this tick: the new generation and (not yet) the release; the world pointer is the same
+        g.loading=true;g.step(false);g.step(false);   // Present publishes the release; the next dispatcher tick destroys
         CHECK(g.world.destroys==2);CHECK(g.destroy_frame==g.last_dispatch);CHECK(g.body.status(0).abandons==0);CHECK(g.body.status(1).abandons==0);
-        CHECK(g.body.status(0).load_releases==1);CHECK(g.world.forgets==0);CHECK(!g.body.any_alive());CHECK(g.world.engine_calls()>calls);
-        g.world.change_world();g.paused=true;for(int i=0;i<20;++i) g.step(false);   // the real replacement happens with no body alive
-        g.paused=false;g.loading=false;g.start_published=false;for(int i=0;i<120;++i) g.step(false);
+        CHECK(g.world.forgets==0);CHECK(!g.body.any_alive());CHECK(g.body.status(0).releases==1);
+        g.paused=true;g.paused_logic=1u<<15;g.world.change_world();for(int i=0;i<20;++i) g.step(false);   // the load: no dispatcher
+        ++g.gen;g.paused=false;g.loading=false;g.start_published=false;for(int i=0;i<120;++i) g.step(false);   // loading exit: the bump
         CHECK(g.world.creates==4);CHECK(g.body.status(0).abandons==0);CHECK(g.world.calls_on_dead_world==0);
-        // busy at the bump: queued, drained at the first idle tick, still no abandon
+        // busy at loading start: queued, drained at the first idle tick, then the bump finds no body: still no abandon
         HandBodyFault::reset_for_tests();FakeHands f;HandBody hb(f.engine());std::uint64_t t=1000;
         for(int i=0;i<10;++i,t+=16) hb.service(gameplay_in(t),kPalms);
-        f.busy=true;for(int i=0;i<4;++i,t+=16) hb.service(gameplay_in(t,true,5),kPalms);
+        f.busy=true;for(int i=0;i<4;++i,t+=16) hb.service(gameplay_in(t,false),kPalms);
         CHECK(f.destroys==0);CHECK(hb.status(0).queued_destroys==1);CHECK(hb.any_alive());
-        f.busy=false;hb.service(gameplay_in(t,true,5),kPalms);t+=16;
-        CHECK(f.destroys==2);CHECK(hb.status(0).abandons==0);CHECK(!hb.any_alive());
-        for(int i=0;i<10;++i,t+=16) hb.service(gameplay_in(t,true,5),kPalms);   // the new generation then gets fresh bodies
-        CHECK(f.creates==4);CHECK(hb.ready(0));
-        // writes are refused from the moment the generation changed
+        f.busy=false;hb.service(gameplay_in(t,false),kPalms);t+=16;
+        CHECK(f.destroys==2);CHECK(!hb.any_alive());
+        for(int i=0;i<10;++i,t+=16) hb.service(gameplay_in(t,true,5),kPalms);   // after the bump: fresh bodies, no abandon
+        CHECK(hb.status(0).abandons==0);CHECK(f.creates==4);CHECK(hb.ready(0));
+        // a generation change with a body alive: abandoned, and writes refused from then on
         const auto h=hb.status(0).handle;CHECK(hb.write(0,velocity_record(h)));
-        hb.service(gameplay_in(t,true,6),kPalms);t+=16;CHECK(!hb.write(0,velocity_record(h)));
+        hb.service(gameplay_in(t,true,6),kPalms);t+=16;CHECK(!hb.write(0,velocity_record(h)));CHECK(hb.status(0).abandons==1);
+    }
+    {   // body_alive_at_loading_exit_abandons (review round 2): the dispatcher does not tick during the load, the world is rebuilt at the
+        // same address and a DIFFERENT body now holds the same full handle: no engine call at all, abandon counted, the other body untouched
+        HandBodyFault::reset_for_tests();FakeGame g;
+        for(int i=0;i<100;++i) g.step(false);
+        CHECK(g.body.any_alive());
+        const auto h0=g.body.status(0).handle,h1=g.body.status(1).handle;
+        g.paused=true;g.paused_logic=1u<<15;g.loading=true;   // loading begins with no dispatcher tick (B11: it stops while paused)
+        for(int i=0;i<20;++i) g.step(false);
+        CHECK(g.body.any_alive());
+        for(auto& x:g.world.b) {x.alive=true;x.foreign=true;}   // the rebuilt world at the same address: foreign bodies, same handles
+        CHECK(g.world.b[0].handle==h0);CHECK(g.world.b[1].handle==h1);
+        const int calls=g.world.engine_calls();
+        ++g.gen;g.paused=false;g.loading=false;g.start_published=false;g.step(false);   // loading exit: the generation bumps
+        CHECK(g.world.engine_calls()==calls);CHECK(g.world.foreign_touched==0);CHECK(g.world.b[0].alive && g.world.b[1].alive);
+        CHECK(g.body.status(0).abandons==1);CHECK(g.body.status(1).abandons==1);CHECK(g.world.forgets==2);CHECK(g.body.status(0).destroys==0);
+        for(int i=0;i<120;++i) g.step(false);
+        CHECK(g.world.foreign_touched==0);
     }
     {   // real_world_change_still_abandons: the world pointer itself changed with the bodies alive: abandon, no engine call
         HandBodyFault::reset_for_tests();FakeGame g;
@@ -454,7 +475,6 @@ static void b13_checks() {
         const int calls=g.world.engine_calls();
         g.world.change_world();g.loading=true;++g.gen;g.step(false);
         CHECK(g.body.status(0).abandons==1);CHECK(g.body.status(1).abandons==1);CHECK(g.world.engine_calls()==calls);CHECK(g.world.forgets==2);
-        CHECK(g.body.status(0).load_releases==0);
     }
     {   // write() only at the G1 point and never from inside service() (review P3-2): refused and counted, no UB
         HandBodyFault::reset_for_tests();FakeHands f;HandBody hb(f.engine());std::uint64_t t=1000;

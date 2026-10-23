@@ -196,7 +196,7 @@ struct HandBodyGate {bool g1_pass{true};bool violated{};const char* why{""};};
 struct HandBodyStatus {
     bool available{};BodyState state{};std::uint32_t handle{};std::uint64_t creates{},destroys{},faults{},refused_writes{};
     std::uint64_t abandons{},queued_destroys{},direct_destroys{},busy_waits{},wake_writes{},create_refusals{},writes{},releases{},lost{},unverified{};
-    std::uint64_t load_releases{},misplaced_writes{},reentrant_writes{};
+    std::uint64_t misplaced_writes{},reentrant_writes{};
 };
 
 // The last read-back pose for the render thread: the dispatcher publishes with try_lock (never waits), readers copy under the lock.
@@ -245,15 +245,10 @@ public:
             li.enabled=li.enabled && enabled_ && gate.g1_pass;
             last_gen_=li.world_generation;
             Side& s=side_[side];
-            const BodyState was=life_.state(side);
-            if((was==BodyState::ready || was==BodyState::destroying) && world==s.world && li.world_generation!=s.gen) {
-                // Review P2-1: a new load generation while the world pointer is unchanged (loading has begun, or the world came back at the same
-                // address): a same-world loss of gameplay first. The destroy gets its chance (directly when idle, else queued; own_state makes it
-                // a no-op if the slot is no longer ours); only a real world-pointer change abandons. The lifecycle sees the body's own
-                // generation until the body is gone.
-                li.world_generation=s.gen;li.gameplay=false;
-                if(!s.gen_hold) {s.gen_hold=true;count(side,&Counters::load_releases);}
-            }
+            // Review rounds 1-2: the load generation bumps on loading EXIT (runtime). Loading START is a same-world loss of gameplay (logic != 2,
+            // the generation unchanged) and destroys through the lifecycle, directly or queued. ANY generation change with a body alive or
+            // destroying is an abandon (no engine call, a pending destroy cancelled): a world rebuilt at the same address allocates handles
+            // deterministically, so the old full handle may name another body, which own_state cannot tell from ours.
             const BodyAction action=life_.update(side,li);
             switch(action) {
             case BodyAction::abandon:            // the world changed under a live body: no engine call at all, counted (last resort)
@@ -327,7 +322,7 @@ public:
         st.abandons=c.abandons.load();st.queued_destroys=c.queued_destroys.load();st.direct_destroys=c.direct_destroys.load();
         st.busy_waits=c.busy_waits.load();st.wake_writes=c.wake_writes.load();st.create_refusals=c.create_refusals.load();
         st.writes=c.writes.load();st.releases=c.releases.load();st.lost=c.lost.load();st.unverified=c.unverified.load();
-        st.load_releases=c.load_releases.load();st.misplaced_writes=c.misplaced_writes.load();st.reentrant_writes=c.reentrant_writes.load();
+        st.misplaced_writes=c.misplaced_writes.load();st.reentrant_writes=c.reentrant_writes.load();
         return st;
     }
     // Session end: the next service() tick destroys every body (the lifecycle's shutdown input is forced on).
@@ -343,7 +338,7 @@ public:
 private:
     struct Counters {
         std::atomic<std::uint64_t> creates{},destroys{},faults{},refused_writes{},abandons{},queued_destroys{},direct_destroys{},busy_waits{},
-            wake_writes{},create_refusals{},writes{},releases{},lost{},unverified{},load_releases{},misplaced_writes{},reentrant_writes{};
+            wake_writes{},create_refusals{},writes{},releases{},lost{},unverified{},misplaced_writes{},reentrant_writes{};
         std::atomic<int> state{};std::atomic<std::uint32_t> handle{};
     };
     struct TickGuard {
@@ -352,7 +347,7 @@ private:
         ~TickGuard() {if(owned) flag.store(false,std::memory_order_release);}
         TickGuard(const TickGuard&)=delete;TickGuard& operator=(const TickGuard&)=delete;
     };
-    struct Side {std::uint32_t handle{},gen{};std::uintptr_t world{};bool pending_destroy{},woken{},gen_hold{};unsigned attempts{},wake_tries{};std::uint64_t next_create_ms{};};
+    struct Side {std::uint32_t handle{},gen{};std::uintptr_t world{};bool pending_destroy{},woken{};unsigned attempts{},wake_tries{};std::uint64_t next_create_ms{};};
     void count(unsigned side,std::atomic<std::uint64_t> Counters::* field) {(counters_[side].*field).fetch_add(1,std::memory_order_relaxed);}
     void latch(unsigned side,const char* why,bool counted) {
         latched_=true;latched_flag_.store(true,std::memory_order_release);HandBodyFault::trip();
@@ -370,7 +365,7 @@ private:
             latch(side,f.what(),true);return;
         }
         if(!ok) {count(side,&Counters::create_refusals);s.next_create_ms=now_ms+create_retry_ms;return;}
-        life_.created(side,world,handle);s.handle=handle;s.world=world;s.gen=last_gen_;s.attempts=0;s.pending_destroy=false;s.woken=false;s.wake_tries=0;s.gen_hold=false;
+        life_.created(side,world,handle);s.handle=handle;s.world=world;s.gen=last_gen_;s.attempts=0;s.pending_destroy=false;s.woken=false;s.wake_tries=0;
         count(side,&Counters::creates);
         // The one wake write, right after the creation (B11 run 1: createBody's activation is forced to 0 and the body hangs asleep).
         // Refused (busy at the re-read): retried on the next idle ticks, at most max_wake_tries.

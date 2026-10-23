@@ -136,8 +136,9 @@ public:
         if(signals.logic!=2 && alive) alive_outside_gameplay_.fetch_add(1,std::memory_order_relaxed);   // the game left gameplay with a body alive
         // Load generation (review P2-1): every load is a new world even when the world object comes back at the same address. It is bumped
         // when a loading state (logic 0 or 1<<15: the loading screen, a death reload) ENDS, i.e. after the dispatcher had its chance to destroy
-        // the bodies in the old world (loading itself is a same-world loss of gameplay: `release`). HandBody also destroys first on a
-        // generation-only change with the world pointer unchanged; only a real world-pointer change abandons.
+        // the bodies in the old world (loading itself is a same-world loss of gameplay: `release`). A body still alive at the bump (the
+        // dispatcher did not tick during the load) is abandoned: no engine call, since the old handle may name another body in a world
+        // rebuilt at the same address.
         const bool loading=signals.logic==0 || signals.logic==(1u<<15);
         if(loading) loading_.store(true);
         else if(loading_.exchange(false)) generation_.fetch_add(1,std::memory_order_acq_rel);   // on loading EXIT
@@ -167,7 +168,7 @@ public:
             o<<(side?",":"")<<"{\"state\":"<<static_cast<int>(st.state)<<",\"handle\":"<<st.handle<<",\"creates\":"<<st.creates<<",\"destroys\":"<<st.destroys
              <<",\"direct_destroys\":"<<st.direct_destroys<<",\"queued_destroys\":"<<st.queued_destroys<<",\"releases\":"<<st.releases<<",\"abandons\":"<<st.abandons
              <<",\"lost\":"<<st.lost<<",\"faults\":"<<st.faults<<",\"refused_writes\":"<<st.refused_writes<<",\"writes\":"<<st.writes<<",\"wake_writes\":"<<st.wake_writes
-             <<",\"create_refusals\":"<<st.create_refusals<<",\"busy_waits\":"<<st.busy_waits<<",\"load_releases\":"<<st.load_releases
+             <<",\"create_refusals\":"<<st.create_refusals<<",\"busy_waits\":"<<st.busy_waits
              <<",\"misplaced_writes\":"<<st.misplaced_writes<<",\"reentrant_writes\":"<<st.reentrant_writes<<",\"pose\":";
             if(p) o<<'['<<p->position.x<<','<<p->position.y<<','<<p->position.z<<']';else o<<"null";
             o<<'}';

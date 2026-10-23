@@ -177,13 +177,15 @@ entry_fn = function(runtime, "static void dispatch_entry(")
 assert entry_fn.index("in_g1_tick_=true;") < entry_fn.index("try {tick();}") < entry_fn.index("in_g1_tick_=false;")
 assert "inline static thread_local bool in_g1_tick_{};" in runtime
 
-# review P2-1: the load generation is bumped on loading EXIT; a generation-only change with the world pointer unchanged destroys first
+# review P2-1 / round 2: the load generation is bumped on loading EXIT (after loading start's same-world destroy had its chance); ANY
+# generation change with a body alive is an abandon: HandBody passes the generation to the B10 lifecycle untouched (no destroy path for it)
 gate_fn = function(runtime, "static ReleaseOutput release_gate(")
 assert "if(loading) loading_.store(true);" in gate_fn
 assert "else if(loading_.exchange(false)) generation_.fetch_add(1,std::memory_order_acq_rel);" in gate_fn
 assert "if(loading && !loading_.exchange(true)) generation_" not in runtime
-hold = service[service.index("const BodyState was=life_.state(side);"):service.index("const BodyAction action=life_.update(side,li);")]
-assert "world==s.world && li.world_generation!=s.gen" in hold and "li.world_generation=s.gen;li.gameplay=false;" in hold
+loop = service[service.index("LifecycleInput li=per_side[side];"):service.index("const BodyAction action=life_.update(side,li);")]
+assert "li.world_generation" not in loop.replace("last_gen_=li.world_generation;", ""), "the generation reaches the lifecycle untouched"
+assert "gen_hold" not in body
 
 # review P3-1: the create runs in the tick's world snapshot (no re-read in the runtime's create)
 create_lambda = runtime[runtime.index("e.create=[](unsigned side,std::uintptr_t world,Vec3 at,std::uint32_t& handle)"):runtime.index("e.velocity=[]")]
