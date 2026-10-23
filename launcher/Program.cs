@@ -49,6 +49,10 @@ sealed class MainForm : Form
     // settings: the Features view (default-on features, each switchable; changes are written at once)
     readonly CheckList featList = new();
     readonly ArtButton featToggle = new("Features", Look.Secondary), restore = new("Restore defaults", Look.Secondary);
+    readonly ArtButton dlssButton = new(DlssProvider.Prompt, Look.Secondary);
+    static readonly (string text, object val)[] AaBase = { ("Off", 0), ("Game TAA", 1), ("FSR 3 - native", 2), ("FSR 3 - quality (77%)", 3), ("FSR 3 - balanced (67%)", 4), ("FSR 4 - native", 5), ("FSR 4 - quality (77%)", 6) };
+    static readonly (string text, object val)[] AaDlss = { ("DLAA (NVIDIA DLSS)", 7), ("DLSS - quality (NVIDIA DLSS)", 8) };
+    const string AaHelp = "FSR 3 native is the accepted default. Quality/balanced render fewer pixels for speed. FSR 4 is the newer upscaler.";
     IReadOnlyList<Feature> features = Array.Empty<Feature>();
     string? featuresError; bool showFeatures, loadingFeatures;
     Control settingsLast = null!;  // the last button of the row; the message line sits to its right
@@ -86,8 +90,8 @@ sealed class MainForm : Form
         // ---- Settings page
         res = new Option("Resolution", "Render scale per eye, 0.50 to 2.00. Higher is sharper but heavier on the GPU.")
         { IsSlider = true, Min = 50, Max = 200, Step = 5, Page = 25, Format = v => (v / 100.0).ToString("0.00", CultureInfo.InvariantCulture) + "x" };
-        aa = new Option("Anti-aliasing", "FSR 3 native is the accepted default. Quality/balanced render fewer pixels for speed. FSR 4 is the newer upscaler.",
-            ("Off", 0), ("Game TAA", 1), ("FSR 3 - native", 2), ("FSR 3 - quality (77%)", 3), ("FSR 3 - balanced (67%)", 4), ("FSR 4 - native", 5), ("FSR 4 - quality (77%)", 6));
+        aa = new Option("Anti-aliasing", AaHelp, AaBase);
+        RefreshDlssChoices();
         sharp = new Option("Sharpening", "Contrast-adaptive sharpening after upscaling.", ("Off", 0.0), ("Low", .25), ("Medium", .5), ("High", .75), ("Max", 1.0));
         hud = new Option("HUD size", "How large the game HUD is drawn around the centre of your view.", ("55% (centre)", 55), ("65% (default)", 65), ("75%", 75), ("85%", 85), ("100% (game layout)", 100));
         mirror = new Option("Monitor view", "What the desktop window mirrors while you play in VR.", ("Right eye", 0), ("Left eye", 1), ("Both eyes", 2), ("Off (fastest)", 3));
@@ -114,7 +118,8 @@ sealed class MainForm : Form
         featList.Visible = false; restore.Visible = false; featToggle.Enabled = featuresError == null;
         featToggle.Click += (_, _) => ShowFeatures(!showFeatures);
         restore.Click += (_, _) => RestoreFeatureDefaults();
-        pages[1].Controls.AddRange(new Control[] { options, featList, save, reload, restore, featToggle });
+        dlssButton.Click += (_, _) => PickDlssProvider();
+        pages[1].Controls.AddRange(new Control[] { options, featList, save, reload, restore, featToggle, dlssButton });
         pages[1].Painter = PaintSettings;
 
         // ---- Tools page
@@ -333,7 +338,34 @@ sealed class MainForm : Form
         save.Bounds = new Rectangle(-S(6), y, Math.Max(S(150), save.Natural), btnH);
         reload.Bounds = new Rectangle(save.Right + S(6), y + (btnH - S(40)) / 2, Math.Max(S(120), reload.Natural), S(40));
         featToggle.Bounds = new Rectangle(reload.Right + S(10), reload.Top, Math.Max(S(150), featToggle.Natural), S(40));
-        settingsLast = featToggle;
+        dlssButton.Bounds = new Rectangle(featToggle.Right + S(10), reload.Top, Math.Max(S(150), Math.Min(dlssButton.Natural, w - featToggle.Right - S(10))), S(40));
+        settingsLast = dlssButton;
+    }
+
+    /// <summary>The DLAA/DLSS Quality rows exist only while an NVIDIA driver and the user's nvngx_dlss.dll are present; the option keeps the user's value.</summary>
+    void RefreshDlssChoices()
+    {
+        var current = aa.Items.Count > 0 ? aa.Items[aa.Index].Val : 2;
+        var offered = DlssProvider.Available(env.Root);
+        aa.Items.Clear();
+        foreach (var (t, v) in AaBase) aa.Items.Add(new Item(t, v));
+        if (offered) foreach (var (t, v) in AaDlss) aa.Items.Add(new Item(t, v));
+        aa.Help = offered ? AaHelp + " " + DlssProvider.Attribution : AaHelp; // the attribution the DLSS licence asks for, where the modes are offered
+        Select(aa, current, $"Mode {current}");
+        options.Invalidate();
+    }
+
+    void PickDlssProvider()
+    {
+        using var dialog = new OpenFileDialog { Title = DlssProvider.Prompt, Filter = DlssProvider.DllName + "|" + DlssProvider.DllName, FileName = DlssProvider.DllName, CheckFileExists = true };
+        if (dialog.ShowDialog(this) != DialogResult.OK) return;
+        try
+        {
+            var found = DlssProvider.Configure(env.Root, dialog.FileName);
+            RefreshDlssChoices();
+            SetSettingsMsg($"DLSS provider recorded: {found.Path}. {DlssProvider.Attribution} Applies the next time VR starts.", Ui.Good);
+        }
+        catch (Exception ex) { SetSettingsMsg("DLSS provider not changed: " + ex.Message, Ui.Bad); }
     }
 
     void LayoutTools()
@@ -604,7 +636,7 @@ sealed class MainForm : Form
     void ShowFeatures(bool on)
     {
         showFeatures = on;
-        options.Visible = !on; save.Visible = !on; reload.Visible = !on; featList.Visible = on; restore.Visible = on;
+        options.Visible = !on; save.Visible = !on; reload.Visible = !on; featList.Visible = on; restore.Visible = on; dlssButton.Visible = !on;
         featToggle.Text = on ? "Back to options" : "Features";
         if (on) LoadFeatures(); else SetSettingsMsg("", Ui.Dim);
         LayoutSettings(); pages[1].Invalidate(true);
@@ -665,8 +697,9 @@ sealed class MainForm : Form
             Select(turn, prefs.Mode, $"Mode {prefs.Mode}"); Select(snap, prefs.SnapDeg, $"{prefs.SnapDeg} degrees"); Select(smooth, prefs.SmoothDps, $"{prefs.SmoothDps} deg/s");
             Select(mirror, prefs.Mirror, $"Mode {prefs.Mirror}"); Select(sharp, prefs.Sharpness, $"{prefs.Sharpness:0.##}");
             Select(hint, prefs.Hint != 0 ? 1 : 0, "");
+            RefreshDlssChoices();
             options.Invalidate();
-            SetSettingsMsg(File.Exists(env.SettingsFile) ? "Loaded build\\vr-settings.cfg. Changes apply the next time VR starts." : "No saved file yet; showing defaults.", Ui.Dim);
+            SetSettingsMsg((File.Exists(env.SettingsFile) ? "Loaded build\\vr-settings.cfg. Changes apply the next time VR starts. " : "No saved file yet; showing defaults. ") + DlssProvider.Status(env.Root), Ui.Dim);
         }
         catch (Exception ex) { SetSettingsMsg(ex.Message, Ui.Bad); }
         LoadFeatures();

@@ -452,7 +452,8 @@ public sealed record Item(string Text, object Val);
 /// <summary>One settings row: a list of choices cycled with the arrows, or an integer slider.</summary>
 sealed class Option
 {
-    public readonly string Name, Help;
+    public readonly string Name;
+    public string Help;
     public readonly List<Item> Items = new();
     public int Index;
     public bool IsSlider; public int Value, Min, Max, Step = 1, Page = 1;

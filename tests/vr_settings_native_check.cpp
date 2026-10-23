@@ -25,6 +25,16 @@ int main() {
     expect(c.turning && s.turning().mode==TurnControl::Mode::native,"stepper sets turning");
     expect(c.antialiasing && s.antialiasing() && c.sharpness && s.sharpness()==1 && c.mirror && s.mirror()==MirrorMode::right_eye,"toggles and steppers apply");
     v[ns::resolution]=999;v[ns::hud]=99;expect(!ns::apply(s,v).resolution && !ns::apply(s,v).hud_percent,"out-of-range values are ignored");
+    {   // DLAA/DLSS Quality rows (with the NVIDIA attribution) appear only while DLSS is offered.
+        s.dlss_available(true);const auto offered=ns::rows(s);
+        expect(offered[ns::temporal].values.size()==9 && offered[ns::temporal].values[7]=="DLAA (NVIDIA DLSS)" && offered[ns::temporal].values[8]=="DLSS Quality (NVIDIA)" &&
+            offered[ns::temporal].description.find("NVIDIA DLSS")!=std::string::npos,"DLSS rows and attribution when offered");
+        std::vector<int> w;for(const auto& r:offered) w.push_back(r.kind==NativeOptionsPage::Kind::action?-1:r.value);
+        w[ns::temporal]=8;expect(ns::apply(s,w).temporal_aa && s.temporal_aa()==8,"DLSS Quality applies when offered");
+        s.dlss_available(false);const auto hidden=ns::rows(s);
+        expect(hidden[ns::temporal].values.size()==7 && hidden[ns::temporal].value==6 && hidden[ns::temporal].description.find("NVIDIA")==std::string::npos,"a saved DLSS mode shows as the last offered row without DLSS");
+        s.set_temporal_aa(2);w[ns::temporal]=7;expect(!ns::apply(s,w).temporal_aa && s.temporal_aa()==2,"DLSS modes are ignored when not offered");
+    }
     const auto cal=ns::action(s,ns::calibrate);
     expect(cal.calibrate && s.open() && s.calibration_page(),"calibrate opens the calibration page");
     ControllerInput in{};in.active=true;s.update(in,false,true);in.b=true;s.update(in,false,true);

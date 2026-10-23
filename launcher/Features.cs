@@ -315,3 +315,64 @@ public static class Features
         return set;
     }
 }
+
+/// <summary>The user's own nvngx_dlss.dll (never bundled): &lt;mod home&gt;\nvngx_dlss.dll first, then the file or folder named in
+/// build\dlss-dll-path (src/dlss_mode.hpp resolve_dlss_provider reads the same knob). DLAA/DLSS Quality are offered only with an
+/// NVIDIA driver present and a provider found.</summary>
+public static class DlssProvider
+{
+    public const string DllName = "nvngx_dlss.dll", KnobName = "dlss-dll-path";
+    public const string Attribution = "DLAA and DLSS Quality are powered by NVIDIA DLSS. NVIDIA DLSS is a trademark of NVIDIA Corporation; nvngx_dlss.dll is not included: point the launcher to a copy from one of your games.";
+    public const string Prompt = "DLSS: point to nvngx_dlss.dll from one of your games";
+    public sealed record Location(string Path, string Source);
+
+    public static string KnobPath(string root) => System.IO.Path.Combine(root, "build", KnobName);
+    static bool IsProviderName(string path) => string.Equals(System.IO.Path.GetFileName(path), DllName, StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>The knob's text as a candidate DLL path: trimmed of whitespace and quotes; a folder names its nvngx_dlss.dll.</summary>
+    public static string? Configured(string root)
+    {
+        var knob = KnobPath(root);
+        if (!File.Exists(knob)) return null;
+        string text;
+        try { text = File.ReadAllText(knob, Encoding.UTF8); } catch (IOException) { return null; } catch (UnauthorizedAccessException) { return null; }
+        var line = text.Split('\n')[0].Trim().Trim('"', '\'').Trim();
+        if (line == "") return null;
+        if (!IsProviderName(line)) line = System.IO.Path.Combine(line, DllName);
+        return System.IO.Path.IsPathRooted(line) ? line : null;
+    }
+
+    public static Location? Resolve(string root)
+    {
+        var home = System.IO.Path.Combine(root, DllName);
+        if (File.Exists(home)) return new Location(home, "mod home");
+        var configured = Configured(root);
+        return configured != null && File.Exists(configured) ? new Location(configured, "configured") : null;
+    }
+
+    /// <summary>Records the user's DLL in build\dlss-dll-path (full path, one line). Only an existing nvngx_dlss.dll is accepted; nothing is copied.</summary>
+    public static Location Configure(string root, string dllPath)
+    {
+        if (!IsProviderName(dllPath)) throw new InvalidDataException("Pick the file called " + DllName + " (from a game that ships DLSS).");
+        var full = System.IO.Path.GetFullPath(dllPath);
+        if (!File.Exists(full)) throw new FileNotFoundException(DllName + " was not found at " + full);
+        var knob = KnobPath(root);
+        Directory.CreateDirectory(System.IO.Path.GetDirectoryName(knob)!);
+        var tmp = knob + ".tmp";
+        File.WriteAllText(tmp, full + "\n", new UTF8Encoding(false));
+        File.Move(tmp, knob, true);
+        return new Location(full, "configured");
+    }
+
+    /// <summary>An NVIDIA driver installs nvapi64.dll in System32 (dxvk-nvapi does the same in a Proton prefix).</summary>
+    public static bool NvidiaDriverPresent() => File.Exists(System.IO.Path.Combine(Environment.SystemDirectory, "nvapi64.dll"));
+    public static bool Available(string root) => Resolve(root) != null && NvidiaDriverPresent();
+
+    public static string Status(string root)
+    {
+        var found = Resolve(root);
+        if (found == null) return "DLSS: no " + DllName + " found; DLAA and DLSS Quality are hidden. " + Prompt + ".";
+        var driver = NvidiaDriverPresent() ? "" : " No NVIDIA driver detected: the modes stay hidden.";
+        return $"DLSS: {found.Path} ({found.Source}).{driver}";
+    }
+}

@@ -57,6 +57,7 @@ class VrSettings {
     bool aa_{};
     int temporal_aa_{2};
     unsigned upscaler_generation_{3}; // Actual runtime backend; preferences retain the existing quality modes.
+    bool dlss_available_{}; // NVIDIA GPU and a usable nvngx_dlss.dll: the DLAA/DLSS Quality rows are offered only then
     int hud_percent_{65};
     bool controls_hint_{true};
     TurnControl::Config turning_;
@@ -174,15 +175,19 @@ public:
     bool antialiasing() const noexcept {return aa_;}
     int temporal_aa() const noexcept {return temporal_aa_;}
     void upscaler_generation(unsigned value) noexcept {upscaler_generation_=value;}
+    void dlss_available(bool value) noexcept {dlss_available_=value;}
+    bool dlss_available() const noexcept {return dlss_available_;}
     int hud_percent() const noexcept {return hud_percent_;}
     bool controls_hint() const noexcept {return controls_hint_;}
     TurnControl::Config turning() const noexcept {return turning_;}
     MirrorMode mirror() const noexcept {return mirror_;}
     double sharpness() const noexcept {return sharpness_;}
     const wchar_t* temporal_aa_text() const noexcept {
-        // FSR 4 modes say when the GPU/provider fell back to FSR 3 (upscaler generation 3).
+        // FSR 4 and DLSS modes say when the GPU/provider fell back to FSR 3 (upscaler generation 3).
         if(temporal_aa_==5) return upscaler_generation_==3?L"Anti-aliasing: FSR 4 Native (unavailable, FSR 3)":L"Anti-aliasing: FSR 4 Native";
         if(temporal_aa_==6) return upscaler_generation_==3?L"Anti-aliasing: FSR 4 Quality (unavailable, FSR 3)":L"Anti-aliasing: FSR 4 Quality (77%)";
+        if(temporal_aa_==7) return upscaler_generation_==5?L"Anti-aliasing: DLAA":L"Anti-aliasing: DLAA (unavailable, FSR 3)";
+        if(temporal_aa_==8) return upscaler_generation_==5?L"Anti-aliasing: DLSS Quality":L"Anti-aliasing: DLSS Quality (unavailable, FSR 3)";
         switch(temporal_aa_) {
             case 1:return L"Anti-aliasing: Game TAA";
             case 2:return L"Anti-aliasing: FSR 3 Native";
@@ -238,7 +243,13 @@ public:
     void open_calibration_from_native() noexcept {open_=calibration_page_=true;measurements_page_=false;leave_hand_fit();selected_=8;controls_valid_=false;stick_held_=false;native_calibration_=true;}
     void set_requested(double v) noexcept {requested_=std::clamp(v,.5,2.);}
     void set_antialiasing(bool v) noexcept {aa_=v;}
-    void set_temporal_aa(int v) noexcept {temporal_aa_=std::clamp(v,0,6);}
+    void set_temporal_aa(int v) noexcept {temporal_aa_=std::clamp(v,0,8);}
+    int temporal_aa_choices() const noexcept {return dlss_available_?9:7;} // modes 0..6, plus 7/8 when DLSS is available
+    // Cycling never lands on a DLSS mode that is not offered; a saved one steps off it like the last FSR 4 mode.
+    void cycle_temporal_aa(int direction) noexcept {
+        const int n=temporal_aa_choices();const int current=std::min(temporal_aa_,n-1);
+        temporal_aa_=(current+(direction<0?n-1:1))%n;
+    }
     void set_mirror(MirrorMode v) noexcept {mirror_=v;}
     void set_sharpness(double v) noexcept {sharpness_=std::clamp(v,0.,1.);}
     void set_hud_percent(int v) noexcept {hud_percent_=v;}
@@ -348,7 +359,7 @@ public:
             const double py=p.v*560-64;const int row=py<0?-1:static_cast<int>(py/36);
             if(row>=0 && row<10 && py-36*row<=32) switch(row) {
                 case 0:selected_=0;horizontal=p.u<.5?-1:1;break;
-                case 1:selected_=1;temporal_aa_=(temporal_aa_+1)%7;out.temporal_aa=temporal_aa_;break;
+                case 1:selected_=1;cycle_temporal_aa(1);out.temporal_aa=temporal_aa_;break;
                 case 2:selected_=2;aa_=!aa_;out.antialiasing=aa_;break;
                 case 3:selected_=3;cycle_mirror(1);out.mirror=mirror_;break;
                 case 4:selected_=4;cycle_sharpness(1);out.sharpness=sharpness_;break;
@@ -360,7 +371,7 @@ public:
             }
         } else if(selected_==0 && horizontal) {
             // Handled below; A does not silently raise resolution.
-        } else if(selected_==1 && (horizontal || a)) {temporal_aa_=(temporal_aa_+(horizontal<0?6:1))%7;out.temporal_aa=temporal_aa_;}
+        } else if(selected_==1 && (horizontal || a)) {cycle_temporal_aa(horizontal);out.temporal_aa=temporal_aa_;}
         else if(selected_==2 && (horizontal || a)) {aa_=!aa_;out.antialiasing=aa_;}
         else if(selected_==3 && (horizontal || a)) {cycle_mirror(horizontal?horizontal:1);out.mirror=mirror_;}
         else if(selected_==4 && (horizontal || a)) {cycle_sharpness(horizontal?horizontal:1);out.sharpness=sharpness_;}

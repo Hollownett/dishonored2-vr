@@ -20,6 +20,32 @@ int main() {
             require(std::wstring(backend.temporal_aa_text())==L"Anti-aliasing: FSR 4 Quality (unavailable, FSR 3)","FSR4 fallback label wrong");
             VrSettings fsr3;fsr3.initialize(1,true,{},MirrorMode::both_eyes,.5,4);fsr3.upscaler_generation(3);
             require(std::wstring(fsr3.temporal_aa_text())==L"Anti-aliasing: FSR 3 Balanced (67%)","FSR3 label wrong");
+            // DLSS modes (7 DLAA, 8 DLSS Quality) report the NGX backend (generation 5) or the FSR 3 fallback.
+            VrSettings dlss;dlss.initialize(1,true,{},MirrorMode::both_eyes,.5,7);
+            require(std::wstring(dlss.temporal_aa_text())==L"Anti-aliasing: DLAA (unavailable, FSR 3)","DLAA fallback label wrong");
+            dlss.upscaler_generation(5);require(std::wstring(dlss.temporal_aa_text())==L"Anti-aliasing: DLAA","DLAA label wrong");
+            dlss.set_temporal_aa(8);require(std::wstring(dlss.temporal_aa_text())==L"Anti-aliasing: DLSS Quality","DLSS Quality label wrong");
+            dlss.upscaler_generation(3);require(std::wstring(dlss.temporal_aa_text())==L"Anti-aliasing: DLSS Quality (unavailable, FSR 3)","DLSS Quality fallback label wrong");
+            require(dlss.temporal_aa()==8,"Runtime backend changed the saved DLSS mode");
+            // The rows cycle through 7/8 only when DLSS is offered; a saved DLSS mode steps off like the last FSR 4 row otherwise.
+            require(!dlss.dlss_available() && dlss.temporal_aa_choices()==7,"DLSS offered by default");
+            dlss.set_temporal_aa(6);dlss.cycle_temporal_aa(1);require(dlss.temporal_aa()==0,"Unavailable DLSS was offered after FSR 4 Quality");
+            dlss.set_temporal_aa(8);dlss.cycle_temporal_aa(1);require(dlss.temporal_aa()==0,"Saved DLSS mode did not wrap to Off without DLSS");
+            dlss.set_temporal_aa(7);dlss.cycle_temporal_aa(-1);require(dlss.temporal_aa()==5,"Saved DLSS mode did not step back to FSR 4 Native without DLSS");
+            dlss.dlss_available(true);require(dlss.temporal_aa_choices()==9,"DLSS rows not offered when available");
+            dlss.set_temporal_aa(6);dlss.cycle_temporal_aa(1);require(dlss.temporal_aa()==7,"DLAA not offered after FSR 4 Quality");
+            dlss.cycle_temporal_aa(1);require(dlss.temporal_aa()==8,"DLSS Quality not offered after DLAA");
+            dlss.cycle_temporal_aa(1);require(dlss.temporal_aa()==0,"DLSS Quality did not wrap to Off");
+            dlss.cycle_temporal_aa(-1);require(dlss.temporal_aa()==8,"Stepping back from Off did not reach DLSS Quality");
+            dlss.set_temporal_aa(9);require(dlss.temporal_aa()==8,"set_temporal_aa accepted 9");
+            {   // The panel row itself: A on row 1 cycles through the offered modes.
+                ControllerInput idle{};idle.active=true;dlss.open_from_menu();dlss.update(idle,false,true);
+                ControllerInput down=idle;down.move_y=-1;dlss.update(down,false,true);dlss.update(idle,false,true);
+                require(dlss.selected()==1,"Row 1 not selected");
+                dlss.set_temporal_aa(8);ControllerInput a=idle;a.a=true;
+                const auto change=dlss.update(a,false,true);
+                require(change.temporal_aa && *change.temporal_aa==0 && dlss.temporal_aa()==0,"A on the row did not wrap DLSS Quality to Off");
+            }
         }
         {   // open_from_gameplay_opens_page_zero / closes_on_y_press_after_open_from_gameplay
             VrSettings held;ControllerInput idle{};idle.active=true;
@@ -372,7 +398,7 @@ int main() {
         {VrPreferences d;require(d.antialiasing && d.temporal_aa==2 && d.hud_percent==65 && d.controls_hint && d.sharpness==.5 && d.mirror==MirrorMode::right_eye,"VrPreferences defaults differ");}
         const auto preference_file=std::filesystem::path("build/vr-settings-test.cfg");
         save_preferences(preference_file,{1.3,true,{TurnControl::Mode::smooth,45,120},MirrorMode::left_eye,.75,0,65,true});
-        {std::ifstream raw(preference_file);int version{};raw>>version;require(version==7,"Saved preferences are not version 7");}
+        {std::ifstream raw(preference_file);int version{};raw>>version;require(version==8,"Saved preferences are not version 8");}
         const auto saved=load_preferences(preference_file);
         require(saved && saved->resolution==1.3 && saved->antialiasing && saved->turning.mode==TurnControl::Mode::smooth &&
             saved->turning.smooth_degrees_per_second==120 && saved->mirror==MirrorMode::left_eye && saved->sharpness==.75 && !saved->temporal_aa &&
@@ -406,6 +432,28 @@ int main() {
             VrPreferences measured=*saved;measured.player_measurements={1.72,.43,.47,{.55,.62}};
             {auto fsr4=measured;fsr4.temporal_aa=5;save_preferences(preference_file,fsr4); // FSR 4 saved from the menu loads back
              require(load_preferences(preference_file)->temporal_aa==5,"FSR 4 preference did not round trip");}
+            {   // DLSS modes: version 8 round-trips 7/8; version 7 files never carried them; 9 is out of range.
+                auto dlss=measured;dlss.temporal_aa=7;save_preferences(preference_file,dlss);
+                require(load_preferences(preference_file)->temporal_aa==7,"DLAA preference did not round trip");
+                dlss.temporal_aa=8;save_preferences(preference_file,dlss);require(load_preferences(preference_file)->temporal_aa==8,"DLSS Quality preference did not round trip");
+                {std::ifstream raw(preference_file);int version{};raw>>version;require(version==8,"DLSS preference saved with an old version");}
+                bool refused=false;dlss.temporal_aa=9;try {save_preferences(preference_file,dlss);} catch(const std::invalid_argument&) {refused=true;}
+                require(refused && load_preferences(preference_file)->temporal_aa==8,"Out-of-range DLSS mode was saved");
+                {std::ofstream version7(preference_file);version7<<"7 1.3 1 2 45 120 1 0.25 7 65 1 0 0 0 0 0\n";}
+                refused=false;try {load_preferences(preference_file);} catch(const std::runtime_error&) {refused=true;}
+                require(refused,"A version 7 file with a DLSS mode loaded");
+                {std::ofstream version8(preference_file);version8<<"8 1.3 1 2 45 120 1 0.25 8 65 1 0 0 0 0 0\n";}
+                require(load_preferences(preference_file)->temporal_aa==8,"Version 8 DLSS Quality did not load");
+                {std::ofstream version8(preference_file);version8<<"8 1.3 1 2 45 120 1 0.25 9 65 1 0 0 0 0 0\n";}
+                refused=false;try {load_preferences(preference_file);} catch(const std::runtime_error&) {refused=true;}
+                require(refused,"Version 8 accepted mode 9");
+                {std::ofstream version8(preference_file);version8<<"8 1.3 1 2 45 120 1 0.25 6 65 1 1.7 .4 .45 .55 .62\n";}
+                const auto kept=load_preferences(preference_file);
+                require(kept && kept->temporal_aa==6 && kept->player_measurements.shoulder_span_metres==.4,"Version 8 kept the FSR 4 mode and measurements");
+                {std::ofstream version9(preference_file);version9<<"9 1.3 1 2 45 120 1 0.25 2 65 1 0 0 0 0 0\n";}
+                refused=false;try {load_preferences(preference_file);} catch(const std::runtime_error&) {refused=true;}
+                require(refused,"A future version loaded");
+            }
             save_preferences(preference_file,measured);const auto roundtrip=load_preferences(preference_file);require(roundtrip.has_value(),"Measured preference round trip missing");
             const auto& m=roundtrip->player_measurements;
             require(m.standing_eye_height_metres==1.72 && m.shoulder_span_metres==.43 && m.torso_width_metres==.47 &&

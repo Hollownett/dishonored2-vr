@@ -7,7 +7,7 @@ using Microsoft.Win32;
 
 namespace DishonoredVR;
 
-/// <summary>Saved settings, byte-compatible with src/vr_preferences.hpp (version 7). Measurement tokens are preserved.</summary>
+/// <summary>Saved settings, byte-compatible with src/vr_preferences.hpp (version 8). Measurement tokens are preserved.</summary>
 public sealed class Prefs
 {
     public double Resolution = 1, Sharpness = .5, SnapDeg = 45, SmoothDps = 90;
@@ -20,8 +20,8 @@ public sealed class Prefs
         if (!File.Exists(file)) return p;
         var t = File.ReadAllText(file).Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
         var inv = CultureInfo.InvariantCulture;
-        if (t.Length < 6 || !int.TryParse(t[0], out var v) || v < 1 || v > 7)
-            throw new InvalidDataException("Saved settings file is not a recognised version (1-7). It was left untouched.");
+        if (t.Length < 6 || !int.TryParse(t[0], out var v) || v < 1 || v > 8)
+            throw new InvalidDataException("Saved settings file is not a recognised version (1-8). It was left untouched.");
         double D(int i) => double.Parse(t[i], inv);
         int I(int i) => int.Parse(t[i], inv);
         p.Resolution = D(1); p.Aa = I(2); p.Mode = I(3); p.SnapDeg = D(4); p.SmoothDps = D(5);
@@ -38,7 +38,7 @@ public sealed class Prefs
         if (Mirror is < 0 or > 3) return "Monitor view must be right, left, both eyes or off.";
         if (Sharpness < 0 || Sharpness > 1) return "Sharpening must be 0 to 1.";
         if (Hud < 50 || Hud > 100) return "HUD size must be 50 to 100 percent.";
-        if (TemporalAa is < 0 or > 6) return "Anti-aliasing mode must be 0 to 6.";
+        if (TemporalAa is < 0 or > 8) return "Anti-aliasing mode must be 0 to 8.";
         if (Mode is < 0 or > 2) return "Turning mode must be native, snap or smooth.";
         if (SmoothDps < 15 || SmoothDps > 360) return "Smooth turn speed must be 15 to 360 degrees/s.";
         return "";
@@ -49,7 +49,7 @@ public sealed class Prefs
         var e = Validate(); if (e != "") throw new InvalidDataException(e);
         var inv = CultureInfo.InvariantCulture;
         string F(double d) => d.ToString("R", inv);
-        var head = new[] { "7", F(Resolution), Aa.ToString(), Mode.ToString(), F(SnapDeg), F(SmoothDps), Mirror.ToString(), F(Sharpness),
+        var head = new[] { "8", F(Resolution), Aa.ToString(), Mode.ToString(), F(SnapDeg), F(SmoothDps), Mirror.ToString(), F(Sharpness),
             TemporalAa.ToString(), Hud.ToString(), Hint.ToString() };
         var line = string.Join(' ', head.Concat(Measurements)) + "\n";
         Directory.CreateDirectory(Path.GetDirectoryName(file)!);

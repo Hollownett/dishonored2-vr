@@ -328,5 +328,31 @@ string StateText(string d) => File.ReadAllText(Path.Combine(d, "launcher-feature
         Check("start_state_zero_return_is_ended_not_failure", ProxyInstall.ReadStart("StartProbe begin d\nStartProbe returned 0\n", out _, out _) == ProxyInstall.StartState.Ended); }
     Check("fallback_and_default_seconds", ProxyInstall.DefaultStartSeconds == 20 && ProxyInstall.FallbackDelaySeconds == 45);
 }
+{   // DLSS provider: the user's own nvngx_dlss.dll, mod home first, then build\dlss-dll-path; nothing is copied or bundled.
+    var root = Path.Combine(Path.GetTempPath(), "d2vrdlss-" + Guid.NewGuid().ToString("N")); Directory.CreateDirectory(Path.Combine(root, "build"));
+    Check("dlss_nothing_found", DlssProvider.Resolve(root) == null && DlssProvider.Configured(root) == null && DlssProvider.Status(root).Contains("hidden"));
+    var game = Path.Combine(root, "games", "bin"); Directory.CreateDirectory(game);
+    var dll = Path.Combine(game, DlssProvider.DllName);
+    bool threw = false; try { DlssProvider.Configure(root, dll); } catch (FileNotFoundException) { threw = true; }
+    Check("dlss_configure_requires_existing_dll", threw && !File.Exists(DlssProvider.KnobPath(root)));
+    File.WriteAllBytes(dll, new byte[] { 1, 2, 3 });
+    threw = false; try { DlssProvider.Configure(root, Path.Combine(game, "other.dll")); } catch (InvalidDataException) { threw = true; }
+    Check("dlss_configure_rejects_other_names", threw);
+    var located = DlssProvider.Configure(root, dll);
+    Check("dlss_configure_writes_knob", located.Source == "configured" && File.ReadAllText(DlssProvider.KnobPath(root)) == Path.GetFullPath(dll) + "\n" && !Directory.GetFiles(Path.Combine(root, "build"), "*.tmp").Any());
+    Check("dlss_resolve_configured", DlssProvider.Resolve(root) is { Source: "configured" } r1 && r1.Path == Path.GetFullPath(dll));
+    File.WriteAllText(DlssProvider.KnobPath(root), "  \"" + game + "\"\r\n");
+    Check("dlss_knob_folder_and_quotes", DlssProvider.Resolve(root) is { } r2 && r2.Path == dll);
+    File.WriteAllText(DlssProvider.KnobPath(root), "relative\\" + DlssProvider.DllName + "\n");
+    Check("dlss_knob_relative_refused", DlssProvider.Configured(root) == null && DlssProvider.Resolve(root) == null);
+    File.WriteAllText(DlssProvider.KnobPath(root), "\n");
+    Check("dlss_knob_blank_ignored", DlssProvider.Resolve(root) == null);
+    File.WriteAllText(DlssProvider.KnobPath(root), dll + "\n");
+    File.WriteAllBytes(Path.Combine(root, DlssProvider.DllName), new byte[] { 4 });
+    Check("dlss_mod_home_wins", DlssProvider.Resolve(root) is { Source: "mod home" } r3 && r3.Path == Path.Combine(root, DlssProvider.DllName));
+    Check("dlss_status_names_provider", DlssProvider.Status(root).Contains(DlssProvider.DllName) && DlssProvider.Status(root).Contains("mod home"));
+    Check("dlss_attribution_present", DlssProvider.Attribution.Contains("NVIDIA DLSS") && DlssProvider.Prompt.Contains(DlssProvider.DllName));
+    Check("dlss_available_needs_driver", DlssProvider.Available(root) == DlssProvider.NvidiaDriverPresent());
+}
 Console.WriteLine(failures == 0 ? "ALL PASS" : failures + " FAILED");
 return failures == 0 ? 0 : 1;
