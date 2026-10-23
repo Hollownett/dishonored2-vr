@@ -32,7 +32,17 @@ int main() {
         std::vector<int> w;for(const auto& r:offered) w.push_back(r.kind==NativeOptionsPage::Kind::action?-1:r.value);
         w[ns::temporal]=8;expect(ns::apply(s,w).temporal_aa && s.temporal_aa()==8,"DLSS Quality applies when offered");
         s.dlss_available(false);const auto hidden=ns::rows(s);
-        expect(hidden[ns::temporal].values.size()==7 && hidden[ns::temporal].value==6 && hidden[ns::temporal].description.find("NVIDIA")==std::string::npos,"a saved DLSS mode shows as the last offered row without DLSS");
+        expect(hidden[ns::temporal].values.size()==8 && hidden[ns::temporal].value==7 && hidden[ns::temporal].values[7]=="DLSS Quality (unavailable, FSR 3)" &&
+            hidden[ns::temporal].description.find("NVIDIA")==std::string::npos,"a saved DLSS mode shows as its own unavailable entry without DLSS");
+        // Applying the page's own current values (the user changed another row) never rewrites the saved DLSS mode.
+        std::vector<int> current;for(const auto& r:hidden) current.push_back(r.kind==NativeOptionsPage::Kind::action?-1:r.value);
+        current[ns::hud]=0;const auto other=ns::apply(s,current);
+        expect(!other.temporal_aa && s.temporal_aa()==8 && other.hud_percent,"changing another row keeps a saved unoffered DLSS mode");
+        s.set_temporal_aa(7);const auto dlaa=ns::rows(s);
+        expect(dlaa[ns::temporal].values.size()==8 && dlaa[ns::temporal].value==7 && dlaa[ns::temporal].values[7]=="DLAA (unavailable, FSR 3)","saved DLAA shows its own entry");
+        current[ns::temporal]=7;expect(!ns::apply(s,current).temporal_aa && s.temporal_aa()==7,"re-applying the unavailable entry keeps DLAA");
+        current[ns::temporal]=6;expect(ns::apply(s,current).temporal_aa && s.temporal_aa()==6,"stepping onto an offered row is the user's change");
+        expect(ns::rows(s)[ns::temporal].values.size()==7,"no unavailable entry once an offered mode is saved");
         s.set_temporal_aa(2);w[ns::temporal]=7;expect(!ns::apply(s,w).temporal_aa && s.temporal_aa()==2,"DLSS modes are ignored when not offered");
     }
     const auto cal=ns::action(s,ns::calibrate);

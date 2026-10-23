@@ -30,6 +30,9 @@ inline int hud_index(int percent) {
     for(int i=0;i<static_cast<int>(hud_choices.size());++i) if(hud_choices[static_cast<std::size_t>(i)]==percent) return i;
     return 1;
 }
+// The stepper index shown for the saved anti-aliasing mode: a DLSS mode that is not offered sits on its own
+// "(unavailable)" entry at index 7 instead of being clamped onto FSR 4 Quality.
+inline int temporal_shown(const VrSettings& s) {return !s.dlss_available() && s.temporal_aa()>=7?7:s.temporal_aa();}
 inline std::vector<NativeOptionsPage::Row> rows(const VrSettings& s) {
     using K=NativeOptionsPage::Kind;std::vector<NativeOptionsPage::Row> r(count);
     r[resolution]={K::slider,"Resolution","Sets how many pixels each eye renders (percent). Higher is sharper but slower; the mod caps it to what the GPU can hold.",
@@ -39,7 +42,8 @@ inline std::vector<NativeOptionsPage::Row> rows(const VrSettings& s) {
     std::vector<std::string> aa_modes{"Off","Game TAA","FSR 3 Native","FSR 3 Quality (77%)","FSR 3 Balanced (67%)","FSR 4 Native","FSR 4 Quality (77%)"};
     std::string aa_help="Smooths shimmering edges over time. Game TAA is the original; FSR Native uses full resolution; Quality and Balanced render fewer pixels and upscale.";
     if(s.dlss_available()) {aa_modes.push_back("DLAA (NVIDIA DLSS)");aa_modes.push_back("DLSS Quality (NVIDIA)");aa_help+=" DLAA and DLSS Quality are powered by NVIDIA DLSS.";}
-    r[temporal]={K::stepper,"Anti-aliasing",aa_help,0,0,1,std::min(s.temporal_aa(),static_cast<int>(aa_modes.size())-1),2,aa_modes};
+    else if(s.temporal_aa()>=7) aa_modes.push_back(s.temporal_aa()==7?"DLAA (unavailable, FSR 3)":"DLSS Quality (unavailable, FSR 3)"); // the saved choice, shown truthfully and never rewritten by the page
+    r[temporal]={K::stepper,"Anti-aliasing",aa_help,0,0,1,temporal_shown(s),2,aa_modes};
     r[edge_aa]={K::toggle,"Edge anti-aliasing (SMAA)","SMAA Ultra cleans up jagged edges that the temporal pass misses.",0,0,1,s.antialiasing()?1:0,0,{}};
     r[mirror]={K::stepper,"Monitor view","Chooses what the desktop monitor mirrors. It does not change the headset image.",
         0,0,1,static_cast<int>(s.mirror()),static_cast<int>(MirrorMode::both_eyes),{"Right eye","Left eye","Both eyes","Off"}};
@@ -60,7 +64,9 @@ inline VrSettings::Changes apply(VrSettings& s,const std::vector<int>& v) {
     VrSettings::Changes c{};
     const auto at=[&](int row) {return row<static_cast<int>(v.size())?v[static_cast<std::size_t>(row)]:-1;};
     if(const int x=at(resolution);x>=50 && x<=200 && std::lround(s.requested()*100)!=x) {s.set_requested(x/100.);c.resolution=s.requested();}
-    if(const int x=at(temporal);x>=0 && x<=(s.dlss_available()?8:6) && x!=s.temporal_aa()) {s.set_temporal_aa(x);c.temporal_aa=x;}
+    // Compared against the displayed index: an unoffered saved DLSS mode (shown as the index-7 "(unavailable)" entry)
+    // only changes when the user steps onto an offered row; the page never rewrites it on its own.
+    if(const int x=at(temporal);x>=0 && x<=(s.dlss_available()?8:temporal_shown(s)==7?7:6) && x!=temporal_shown(s)) {s.set_temporal_aa(x);c.temporal_aa=x;}
     if(const int x=at(edge_aa);x>=0 && (x!=0)!=s.antialiasing()) {s.set_antialiasing(x!=0);c.antialiasing=x!=0;}
     if(const int x=at(mirror);x>=0 && x<=3 && x!=static_cast<int>(s.mirror())) {s.set_mirror(static_cast<MirrorMode>(x));c.mirror=s.mirror();}
     if(const int x=at(sharpening);x>=0 && x<=4 && x!=std::lround(s.sharpness()*4)) {s.set_sharpness(x/4.);c.sharpness=s.sharpness();}

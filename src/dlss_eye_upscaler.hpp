@@ -96,13 +96,13 @@ public:
         cache_unwritable, provider_selection_unverified, coexistence_unsupported, invalid_context, wrong_device, invalid_dimensions, invalid_conventions,
         registry_full, owner_conflict, retry_suppressed, init_failed, capability_failed, capability_query_failed,
         unavailable, driver_update, allocate_failed, create_failed, duplicate_history, invalid_resource,
-        stale_generation, retired, evaluate_failed, optimal_unsupported, optimal_failed, count };
+        stale_generation, retired, evaluate_failed, optimal_unsupported, optimal_failed, exception, owner_full, pending_timeout, count };
     static const char* reason_name(Reason reason) noexcept {
         static constexpr const char* names[] = {"none", "disabled", "invalid_calls", "invalid_paths", "missing_provider", "provider_signature",
             "cache_unwritable", "provider_selection_unverified", "coexistence_unsupported", "invalid_context", "wrong_device", "invalid_dimensions", "invalid_conventions",
             "registry_full", "owner_conflict", "retry_suppressed", "init_failed", "capability_failed", "capability_query_failed",
             "unavailable", "driver_update", "allocate_failed", "create_failed", "duplicate_history", "invalid_resource",
-            "stale_generation", "retired", "evaluate_failed", "optimal_unsupported", "optimal_failed"};
+            "stale_generation", "retired", "evaluate_failed", "optimal_unsupported", "optimal_failed", "exception", "owner_full", "pending_timeout"};
         static_assert(sizeof names / sizeof names[0] == static_cast<unsigned>(Reason::count), "reason names");
         const auto index = static_cast<unsigned>(reason);
         return index < static_cast<unsigned>(Reason::count) ? names[index] : "unknown";

@@ -322,7 +322,7 @@ public static class Features
 public static class DlssProvider
 {
     public const string DllName = "nvngx_dlss.dll", KnobName = "dlss-dll-path";
-    public const string Attribution = "DLAA and DLSS Quality are powered by NVIDIA DLSS. NVIDIA DLSS is a trademark of NVIDIA Corporation; nvngx_dlss.dll is not included: point the launcher to a copy from one of your games.";
+    public const string Attribution = "DLAA and DLSS Quality are powered by NVIDIA DLSS. NVIDIA DLSS is a trademark of NVIDIA Corporation; nvngx_dlss.dll is not included: point the launcher to a copy from one of your games. The mod re-checks for an NVIDIA GPU and the DLL when VR starts and otherwise renders the mode with FSR 3.";
     public const string Prompt = "DLSS: point to nvngx_dlss.dll from one of your games";
     public sealed record Location(string Path, string Source);
 
@@ -372,7 +372,7 @@ public static class DlssProvider
     {
         var found = Resolve(root);
         if (found == null) return "DLSS: no " + DllName + " found; DLAA and DLSS Quality are hidden. " + Prompt + ".";
-        var driver = NvidiaDriverPresent() ? "" : " No NVIDIA driver detected: the modes stay hidden.";
+        var driver = NvidiaDriverPresent() ? " The mod re-checks the GPU when VR starts." : " No NVIDIA driver detected: the modes stay hidden.";
         return $"DLSS: {found.Path} ({found.Source}).{driver}";
     }
 }

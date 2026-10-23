@@ -90,21 +90,25 @@ private:
     std::atomic<DXGI_FORMAT> wanted_native_format_{DXGI_FORMAT_UNKNOWN};
     std::atomic<std::uint64_t> reset_epoch_{};
     Config config_;
-    // DLSS backend state, guarded by mutex_. One feature pair (both eyes) per render/output size and format.
+    // DLSS backend state, guarded by mutex_. One feature pair (both eyes) per render/output size and format. Every
+    // function below is a noexcept boundary: an escaping exception becomes the FSR 3 fallback (dlss_guarded), never
+    // std::terminate inside the game's command stream.
     DlssFallback dlss_fallback_;
+    DlssRefusalStreak dlss_refusals_;
+    DlssRetirementLedger dlss_ledger_;
     DlssEyeUpscaler dlss_;                 // production owner: official SDK calls and signed-provider validation
     DlssEyeUpscaler::Lease dlss_lease_;    // the active pair; empty while off, pending or failed
+    std::vector<std::pair<std::uint64_t,DlssEyeUpscaler::Lease>> dlss_retired_leases_; // retired pairs until the ledger releases them
     DlssEyeUpscaler::Desc dlss_desc_{};bool dlss_desc_valid_{};
     DlssEyeUpscaler::OptimalSettings dlss_optimal_{};UINT dlss_optimal_for_w_{},dlss_optimal_for_h_{};
-    std::uint64_t dlss_device_generation_{},dlss_dimension_generation_{},dlss_feature_generation_{},dlss_outstanding_{};
+    std::uint64_t dlss_device_generation_{},dlss_dimension_generation_{},dlss_feature_generation_{};
     std::shared_ptr<int> dlss_scratch_;    // this generation's scratch owner (the SDK owner's lease contract)
     std::array<std::uint64_t,2> dlss_frame_{};
     std::array<std::array<float,2>,2> dlss_previous_jitter_{};
     ID3D11Device* dlss_device_{};ID3D11DeviceContext* dlss_immediate_{}; // identities only; the owner below holds the references
     std::optional<D3D11TemporalOwner> dlss_owner_;D3D11TemporalOwner::DrainOwner dlss_drain_;
+    bool dlss_facade_dirty_{},dlss_core_live_{}; // facade still owns a pair retired off-thread; an NGX Core is initialized
     struct DlssUse {std::uint64_t generation{};};   // EVENT ticket payload: which pair's GPU work it proves complete
-    struct DlssRetired {DlssEyeUpscaler::Lease lease;std::uint64_t outstanding{};};
-    std::vector<DlssRetired> dlss_retired_; // retired pairs waiting for their last EVENT before NGX release
     static std::optional<DlssEyeUpscaler::Format> dlss_format(DXGI_FORMAT f) noexcept {
         switch(f) {
         case DXGI_FORMAT_R16G16B16A16_FLOAT:return DlssEyeUpscaler::Format::rgba16_float;
@@ -116,56 +120,84 @@ private:
     void dlss_publish_state_locked() noexcept {
         dlss_state=static_cast<unsigned>(dlss_fallback_.state());dlss_last_reason=dlss_fallback_.last_reason();dlss_last_result=dlss_fallback_.last_result();
     }
+    // NGX lifecycle calls (create/release/optimal settings) record on the immediate context: isolate the game's
+    // pipeline state around them whenever the owner exists; without an owner nothing NGX runs anyway.
+    template<class Work> void dlss_isolated_locked(Work&& work) noexcept {
+        if(dlss_owner_ && dlss_owner_->isolate([&](ID3D11DeviceContext1*) {work();return true;})==D3D11TemporalOwner::Status::ok) return;
+        work();
+    }
+    // Releases every retired pair the ledger marks releasable (its last EVENT completed, or it was abandoned).
+    void dlss_release_locked() noexcept {
+        dlss_guarded([&] {
+            for(const auto generation:dlss_ledger_.take_releasable()) {
+                for(auto r=dlss_retired_leases_.begin();r!=dlss_retired_leases_.end();) {
+                    if(r->first==generation) {dlss_isolated_locked([&] {DlssEyeUpscaler::confirm_gpu_retirement(r->second);});r=dlss_retired_leases_.erase(r);}
+                    else ++r;
+                }
+            }
+            dlss_isolated_locked([] {DlssEyeUpscaler::collect_retired();});
+        },[] {});
+    }
     void dlss_fail_locked(DlssEyeUpscaler::Reason reason,NVSDK_NGX_Result result=NVSDK_NGX_Result_Success) noexcept {
         if(dlss_fallback_.wants_feature()) dlss_fallback_.note_prepare(false,static_cast<unsigned>(reason),static_cast<int>(result));
         else if(dlss_fallback_.should_evaluate()) dlss_fallback_.note_evaluate(false,static_cast<unsigned>(reason),static_cast<int>(result));
         else dlss_fallback_.note_device_lost(static_cast<unsigned>(reason),static_cast<int>(result));
-        dlss_retire_locked();dlss_publish_state_locked();
+        dlss_publish_state_locked();
+        dlss_guarded([&] {dlss_retire_locked();},[&] {dlss_publish_state_locked();});
     }
-    // Completed EVENT tickets release their pair's GPU-busy count; a retired pair with none outstanding is released.
+    // Completed EVENT tickets release their pair's GPU-busy count through the ledger.
     void dlss_poll_locked() noexcept {
         if(!dlss_owner_) return;
         if(dlss_drain_.poll()!=D3D11TemporalOwner::Status::ok) return;
         while(auto done=dlss_drain_.take_completed()) {
             const auto* use=static_cast<const DlssUse*>(done->payload.get());
-            const auto generation=use?use->generation:0;
-            if(dlss_lease_ && generation==dlss_lease_.generation()) {if(dlss_outstanding_) --dlss_outstanding_;continue;}
-            for(auto& r:dlss_retired_) if(r.lease.generation()==generation && r.outstanding) {--r.outstanding;break;}
+            dlss_ledger_.completed(use?use->generation:0);
         }
-        for(auto r=dlss_retired_.begin();r!=dlss_retired_.end();) {
-            if(r->outstanding) {++r;continue;}
-            DlssEyeUpscaler::confirm_gpu_retirement(r->lease);r=dlss_retired_.erase(r);
-        }
-        DlssEyeUpscaler::collect_retired();
+        dlss_release_locked();
     }
     void dlss_retire_locked() noexcept {
-        if(dlss_lease_) {dlss_retired_.push_back({dlss_lease_,dlss_outstanding_});dlss_lease_={};}
-        dlss_.retire();dlss_outstanding_=0;dlss_desc_valid_=false;dlss_scratch_.reset(); // the NGX Core stays initialized for the next pair
-        for(auto r=dlss_retired_.begin();r!=dlss_retired_.end();) {
-            if(r->outstanding) {++r;continue;}
-            DlssEyeUpscaler::confirm_gpu_retirement(r->lease);r=dlss_retired_.erase(r);
-        }
-        DlssEyeUpscaler::collect_retired();
+        dlss_guarded([&] {
+            if(dlss_lease_) {dlss_retired_leases_.push_back({dlss_lease_.generation(),dlss_lease_});dlss_lease_={};}
+            dlss_ledger_.retire();
+        },[&] {dlss_lease_={};dlss_ledger_.abandon_outstanding();dlss_ledger_.retire();}); // no room to track it: abandon rather than strand
+        dlss_isolated_locked([&] {dlss_.retire();}); // the NGX Core stays initialized for the next pair
+        dlss_desc_valid_=false;dlss_scratch_.reset();
+        dlss_release_locked();
     }
+    // Device/context change or session end: outstanding EVENTs are abandoned (the GPU work is dead or long submitted)
+    // so every retired pair is released now and none strands the SDK owner's registry.
+    void dlss_abandon_locked() noexcept {dlss_ledger_.abandon_outstanding();dlss_release_locked();}
     // Executing thread (inside the ExecuteCommandList hook, i.e. whichever game thread owns the immediate context right
     // now; the game uses more than one, one at a time), before this eye's dispatch: keep the NGX feature pair matching
     // the current render/output size, formats and conventions, or retire it when DLSS is deselected or has failed this
-    // session. Every NGX and context call (create, evaluate, state swap, EVENT End/GetData) happens here under mutex_;
-    // the Present thread only publishes the mode. The state/query owner is therefore used without thread affinity.
+    // session. Every NGX and context call (create, evaluate, state swap, EVENT End/GetData) happens here under mutex_,
+    // after the caller saved the game's compute state and inside the owner's pipeline-state isolation; the Present
+    // thread only publishes the mode. The state/query owner is therefore used without thread affinity.
     void dlss_maintain_locked(ID3D11DeviceContext* immediate) noexcept {
+        dlss_guarded([&] {dlss_maintain_unguarded(immediate);},[&] {dlss_fail_locked(DlssEyeUpscaler::Reason::exception);});
+    }
+    void dlss_maintain_unguarded(ID3D11DeviceContext* immediate) {
+        if(dlss_facade_dirty_) {dlss_facade_dirty_=false;dlss_isolated_locked([&] {dlss_.retire();});dlss_release_locked();} // work deferred from an off-thread session end
         dlss_poll_locked();
         const bool wanted=dlss_active.load() && !dlss_provider_directory.empty() && !dlss_cache_directory.empty() && immediate && immediate->GetType()==D3D11_DEVICE_CONTEXT_IMMEDIATE;
         if(dlss_fallback_.select(wanted) && !wanted) dlss_retire_locked();
         dlss_publish_state_locked();
-        if(!dlss_fallback_.engaged()) {if(!wanted && dlss_lease_) dlss_retire_locked();return;}
+        if(!dlss_fallback_.engaged()) {
+            if(!wanted && dlss_lease_) dlss_retire_locked();
+            if(!wanted && dlss_core_live_ && !dlss_lease_ && dlss_retired_leases_.empty()) {dlss_isolated_locked([&] {dlss_.disable();});dlss_core_live_=false;} // nothing left: shut the NGX Core down here, on the owning thread
+            return;
+        }
         if(!ready.load()) return;
         Ref<ID3D11Device> device_ref;immediate->GetDevice(&device_ref.p);
         ID3D11Device* const device=device_ref.p;
         if(!device) {dlss_fail_locked(DlssEyeUpscaler::Reason::wrong_device);return;}
         if(dlss_device_!=device || dlss_immediate_!=immediate || !dlss_owner_) {
             // One state/query owner per immediate context, kept across sessions (the registry refuses a second one). A new
-            // device/context is a new NGX device generation; pairs still waiting for an EVENT on the old one stay quarantined.
-            if(dlss_device_!=device || dlss_immediate_!=immediate) {if(dlss_owner_) ++dlss_owner_rebuilds;dlss_retire_locked();dlss_owner_.reset();dlss_drain_={};++dlss_device_generation_;}
+            // device/context is a new NGX device generation; the old one's GPU work is dead, so its tickets are abandoned.
+            if(dlss_device_!=device || dlss_immediate_!=immediate) {
+                if(dlss_owner_) ++dlss_owner_rebuilds;
+                dlss_retire_locked();dlss_abandon_locked();dlss_owner_.reset();dlss_drain_={};++dlss_device_generation_;
+            }
             D3D11TemporalOwner::Result result;
             dlss_owner_=D3D11TemporalOwner::prepare(device,immediate,result,false);dlss_owner_status=static_cast<unsigned>(result.status);
             if(!dlss_owner_) {dlss_fail_locked(DlssEyeUpscaler::Reason::invalid_context);return;}
@@ -179,22 +211,30 @@ private:
         const bool quality=dlss_quality.load() || rw<w || rh<h;
         if(quality) {
             // NGX decides the render size for this output: publish it as the engine fraction and create the
-            // features only once the engine renders inside the accepted range.
+            // features only once the engine renders inside the accepted range (bounded by the fallback's wait budget).
             if(dlss_optimal_for_w_!=w || dlss_optimal_for_h_!=h) {
                 NVSDK_NGX_Result result{};DlssEyeUpscaler::OptimalSettings optimal{};
-                const auto reason=dlss_.optimal_settings(device,immediate,paths,dlss_device_generation_,w,h,DlssEyeUpscaler::Quality::quality,optimal,&result);
-                ++dlss_optimal_queries;
+                DlssEyeUpscaler::Reason reason{};
+                dlss_isolated_locked([&] {reason=dlss_.optimal_settings(device,immediate,paths,dlss_device_generation_,w,h,DlssEyeUpscaler::Quality::quality,optimal,&result);});
+                ++dlss_optimal_queries;dlss_core_live_=true;
                 if(reason!=DlssEyeUpscaler::Reason::none) {dlss_fail_locked(reason,result);return;}
+                const auto optimal_value=dlss_mode::optimal_fraction(w,h,optimal.optimal_width,optimal.optimal_height);
+                if(!optimal_value) {dlss_fail_locked(DlssEyeUpscaler::Reason::optimal_failed);return;} // an unusable render size is a failure, not a wait
                 dlss_optimal_=optimal;dlss_optimal_for_w_=w;dlss_optimal_for_h_=h;dlss_optimal_width=optimal.optimal_width;dlss_optimal_height=optimal.optimal_height;
-                if(const auto optimal_value=dlss_mode::optimal_fraction(w,h,optimal.optimal_width,optimal.optimal_height)) dlss_quality_fraction=*optimal_value;
+                dlss_quality_fraction=*optimal_value;
             }
             if(!upscale || rw<dlss_optimal_.min_width || rw>dlss_optimal_.max_width || rh<dlss_optimal_.min_height || rh>dlss_optimal_.max_height) {
-                ++dlss_waiting;if(dlss_lease_) dlss_retire_locked();return;
+                ++dlss_waiting;if(dlss_lease_) dlss_retire_locked();
+                if(dlss_fallback_.note_waiting()) dlss_fail_locked(DlssEyeUpscaler::Reason::pending_timeout);
+                return;
             }
         }
         DlssEyeUpscaler::Desc d{};
         d.width=w;d.height=h;d.render_width=rw;d.render_height=rh;d.quality=quality?DlssEyeUpscaler::Quality::quality:DlssEyeUpscaler::Quality::dlaa;
         d.colour=d.output=*colour_format;
+        // Motion vectors: the engine renders colour, depth and motion into the top-left render subrect of its full-size
+        // targets (dynamic resolution), so the motion field is render-sized content in a display-sized texture; the
+        // scale is the FSR one (UV times the render size) and the Quality feature reads it as low-resolution motion.
         const float mw=upscale?(config_.mv_full?static_cast<float>(w):static_cast<float>(rw)):static_cast<float>(w),mh=upscale?(config_.mv_full?static_cast<float>(h):static_cast<float>(rh)):static_cast<float>(h);
         d.motion={config_.mv_x*mw,config_.mv_y*mh,true,temporal_eye::MotionDirection::current_to_previous,temporal_eye::MotionUnits::uv,temporal_eye::MotionResolution::active_render};
         // Native: linear HDR scene colour with NGX AutoExposure. Upscale: the game's tonemapped LDR gamma image, where
@@ -213,10 +253,13 @@ private:
         }
         dlss_retire_locked();
         d.dimension_generation=++dlss_dimension_generation_;d.feature_generation=++dlss_feature_generation_;
-        if(!dlss_.prepare(device,immediate,d,paths)) {
-            const auto status=dlss_.status();++dlss_create_failures;dlss_fail_locked(status.reason,status.result);return;
+        bool created=false;
+        dlss_isolated_locked([&] {created=dlss_.prepare(device,immediate,d,paths);});
+        if(!created) {
+            const auto status=dlss_.status();++dlss_create_failures;dlss_core_live_=true;dlss_fail_locked(status.reason,status.result);return;
         }
-        dlss_lease_=dlss_.lease();dlss_desc_=d;dlss_desc_valid_=true;dlss_scratch_=std::make_shared<int>(0);dlss_frame_={};dlss_previous_jitter_={};
+        dlss_lease_=dlss_.lease();dlss_ledger_.activate(dlss_lease_.generation());dlss_core_live_=true;
+        dlss_desc_=d;dlss_desc_valid_=true;dlss_scratch_=std::make_shared<int>(0);dlss_frame_={};dlss_previous_jitter_={};
         for(auto& e:*eyes_) e.reset=true;
         ++dlss_features_created;dlss_fallback_.note_prepare(true);dlss_publish_state_locked();
     }
@@ -225,7 +268,18 @@ private:
             a.quality==b.quality && a.colour==b.colour && a.output==b.output && a.device_generation==b.device_generation &&
             a.motion==b.motion && a.colour_contract==b.colour_contract && a.inverted_depth==b.inverted_depth && a.mv_low_resolution==b.mv_low_resolution;
     }
-    void dlss_session_end_locked() noexcept {dlss_retire_locked();dlss_fallback_.session_end();dlss_optimal_for_w_=dlss_optimal_for_h_=0;dlss_publish_state_locked();}
+    // Session end (stop thread, hooks drained): NO NGX or context call may happen here, the game's render thread
+    // still owns the immediate context (releasing features from this thread faulted DXVK's submission thread in a real
+    // run). Outstanding EVENTs are abandoned and every pair queues for release on the next executing-thread dispatch,
+    // where the NGX Core follows once nothing is left; until then their VRAM stays allocated (bounded: one pair).
+    void dlss_session_end_locked() noexcept {
+        dlss_guarded([&] {
+            if(dlss_lease_) {dlss_retired_leases_.push_back({dlss_lease_.generation(),dlss_lease_});dlss_lease_={};}
+            dlss_ledger_.retire();dlss_ledger_.abandon_outstanding();
+        },[&] {dlss_lease_={};dlss_ledger_.retire();dlss_ledger_.abandon_outstanding();});
+        dlss_desc_valid_=false;dlss_scratch_.reset();dlss_facade_dirty_=true;
+        dlss_fallback_.session_end();dlss_refusals_=DlssRefusalStreak{};dlss_optimal_for_w_=dlss_optimal_for_h_=0;dlss_publish_state_locked();
+    }
     static DXGI_FORMAT depth_srv(DXGI_FORMAT f) noexcept {
         switch(f) {
         case DXGI_FORMAT_R24G8_TYPELESS:case DXGI_FORMAT_D24_UNORM_S8_UINT:return DXGI_FORMAT_R24_UNORM_X8_TYPELESS;
@@ -345,6 +399,7 @@ public:
         }
     }
     std::array<std::atomic<UINT>,2> eye_fsr4_failure{},eye_colour_width{},eye_colour_height{},eye_colour_format{},eye_colour_mips{};
+    std::array<std::atomic<UINT>,2> eye_motion_width{},eye_motion_height{}; // the motion texture DLSS consumed (full-size target holding the render subrect)
     // Post-tonemap pass, job thread: the game's upscale draw binds the tonemapped image and the eye target.
     // The pass holds one draw (measured: tonemapped R8G8B8A8 source -> sRGB eye target, full viewport);
     // the last bind seen wins.
@@ -609,8 +664,23 @@ private:
     // Immediate context, under mutex_: one NGX evaluate for this eye, isolated from the game's pipeline state and
     // tracked by an EVENT ticket. False leaves the eye to the FSR path; a failed evaluate parks DLSS for the session.
     bool dlss_dispatch_locked(ID3D11DeviceContext* c,const Job& job,Eye& e,const Fsr3EyeUpscaler::Inputs& in,float dt,unsigned previous_generation) noexcept {
+        bool evaluated=false;
+        dlss_guarded([&] {evaluated=dlss_dispatch_unguarded(c,job,e,in,dt,previous_generation);},[&] {evaluated=false;e.reset=true;dlss_fail_locked(DlssEyeUpscaler::Reason::exception);});
+        return evaluated;
+    }
+    bool dlss_dispatch_unguarded(ID3D11DeviceContext* c,const Job& job,Eye& e,const Fsr3EyeUpscaler::Inputs& in,float dt,unsigned previous_generation) {
         if(!dlss_owner_ || !dlss_lease_ || c!=dlss_immediate_) {++dlss_owner_refusals;return false;}
         const auto eye_index=static_cast<std::size_t>(job.eye);
+        // The motion texture must be the colour texture's size: both are the engine's full-size targets holding the
+        // render subrect, which is what the feature's scale and MVLowRes flag describe. Anything else is unknown input.
+        {
+            Ref<ID3D11Texture2D> motion_texture,colour_texture;D3D11_TEXTURE2D_DESC md{},cd{};
+            if(!job.motion.p || FAILED(job.motion.p->QueryInterface(__uuidof(ID3D11Texture2D),reinterpret_cast<void**>(&motion_texture.p))) ||
+               !job.colour.p || FAILED(job.colour.p->QueryInterface(__uuidof(ID3D11Texture2D),reinterpret_cast<void**>(&colour_texture.p)))) {dlss_fail_locked(DlssEyeUpscaler::Reason::invalid_resource);return false;}
+            motion_texture.p->GetDesc(&md);colour_texture.p->GetDesc(&cd);
+            eye_motion_width[eye_index]=md.Width;eye_motion_height[eye_index]=md.Height;
+            if(md.Width!=cd.Width || md.Height!=cd.Height || md.Width<dlss_desc_.render_width || md.Height<dlss_desc_.render_height) {dlss_fail_locked(DlssEyeUpscaler::Reason::invalid_resource);return false;}
+        }
         DlssEyeUpscaler::Eval ev{};
         ev.eye=static_cast<unsigned>(job.eye);ev.frame=ev.pair=++dlss_frame_[eye_index];
         ev.device_generation=dlss_desc_.device_generation;ev.dimension_generation=dlss_desc_.dimension_generation;ev.feature_generation=dlss_desc_.feature_generation;
@@ -625,9 +695,17 @@ private:
         ev.frame_time_ms=dt;ev.discontinuity=e.reset || previous_generation!=dlss_mode::generation;ev.scratch_owner=dlss_scratch_;
         auto use=std::make_shared<DlssUse>();use->generation=dlss_lease_.generation();
         D3D11TemporalOwner::Status status;
-        const auto dlss_ticket=dlss_owner_->reserve(use,dlss_lease_.retained_owner(),status);
-        if(!dlss_ticket) {++dlss_owner_refusals;dlss_owner_status=static_cast<unsigned>(status);return false;}
-        ++dlss_outstanding_;
+        auto dlss_ticket=dlss_owner_->reserve(use,dlss_lease_.retained_owner(),status);
+        if(!dlss_ticket && status==D3D11TemporalOwner::Status::full) { // GPU latency may have freed a slot since the last poll
+            dlss_poll_locked();dlss_ticket=dlss_owner_->reserve(use,dlss_lease_.retained_owner(),status);
+        }
+        if(!dlss_ticket) {
+            ++dlss_owner_refusals;dlss_owner_status=static_cast<unsigned>(status);
+            if(dlss_refusals_.note(true)) {e.reset=true;dlss_fail_locked(DlssEyeUpscaler::Reason::owner_full);} // persistent refusal: FSR 3 for the session, logged
+            return false;
+        }
+        dlss_refusals_.note(false);
+        dlss_ledger_.reserved();
         DlssEyeUpscaler::Status result{};bool evaluated=false;
         const auto recorded=dlss_owner_->record(*dlss_ticket,[&](D3D11TemporalOwner::Recording& recording) {
             return recording.isolate([&](ID3D11DeviceContext1*) {evaluated=DlssEyeUpscaler::evaluate(dlss_lease_,ev,&result);return evaluated;})==D3D11TemporalOwner::Status::ok;
@@ -649,7 +727,6 @@ private:
         if(job.epoch!=reset_epoch_.load() || job.fraction!=ready_fraction_ || job.width!=ready_w_ || job.height!=ready_h_) {
             ++stale_jobs;fallback();return;
         }
-        dlss_maintain_locked(c); // DLSS features live on the thread that executes the lists
         auto& e=(*eyes_)[static_cast<std::size_t>(job.eye)];
         const UINT w=ready_w_,h=ready_h_;
         if(job.upscale && (!e.colour_in.p || !e.upscaled.p)) {++failures;return;}
@@ -657,6 +734,7 @@ private:
         const int ticket=timing_enabled.load()?e.timer.begin(c):-1;
         ModGpuScope mod_scope(c,job.eye==0?ModSpan::fsr_eye0:ModSpan::fsr_eye1); // task 3b: the mod's FSR GPU time per eye
         CsState saved;saved.save(c);
+        dlss_maintain_locked(c); // DLSS features live on the thread that executes the lists, inside the state save/restore
         ID3D11ShaderResourceView* null_srv[16]{};ID3D11UnorderedAccessView* null_uav[8]{};
         c->CSSetShaderResources(0,16,null_srv);c->CSSetUnorderedAccessViews(0,8,null_uav,nullptr);
         ID3D11UnorderedAccessView* outs[2]{e.depth_uav.p,e.reactive_uav.p};

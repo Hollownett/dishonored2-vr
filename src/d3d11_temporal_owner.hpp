@@ -238,6 +238,14 @@ public:
         } catch(...) {result={Status::unsupported,E_OUTOFMEMORY};return {};}
     }
     DrainOwner drain_owner() const {return DrainOwner(state_);}
+    // Pipeline-state isolation for lifecycle work that may record on the immediate context (feature create/release)
+    // outside an EVENT ticket; the caller accounts for GPU completion itself where it matters.
+    template<class Work> Status isolate(Work&& work) noexcept {
+        const auto state=state_;
+        if(access(*state)!=Status::ok)return Status::wrong_thread;
+        Recording recording(*state);
+        return recording.isolate(std::forward<Work>(work));
+    }
     D3D_FEATURE_LEVEL feature_level() const noexcept {return state_->level;}
     UINT context_state_flags() const noexcept {return state_->flags;}
     Status close() noexcept {return D3D11TemporalOwner::close(*state_);}

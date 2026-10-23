@@ -89,6 +89,7 @@ static void run(ID3D11Device* device,ID3D11DeviceContext* context,float fraction
     d2vr::GpuPassTimer timer;check(timer.prepare(device),"GPU timestamp queries");
     Ptr<ID3D11Query> completed;
     if(!provider.empty() || !dlss.empty()) {D3D11_QUERY_DESC q{};q.Query=D3D11_QUERY_EVENT;check(SUCCEEDED(device->CreateQuery(&q,&completed)),"Diagnostic completion query");}
+    BOOL execute_restore=FALSE; // TRUE while the state pin below measures the whole prefix/DLSS/remainder split
     const auto pair=[&](unsigned frame) {
         for(int side=0;side<2;++side) {
             deferred->ClearDepthStencilView(dsv.Get(),D3D11_CLEAR_DEPTH,.05f,0);
@@ -101,7 +102,7 @@ static void run(ID3D11Device* device,ID3D11DeviceContext* context,float fraction
                 fsr->observe_post_tonemap_bind(deferred.Get(),&srv,1);fsr->post_tonemap_end(side,deferred.Get());
             }
             Ptr<ID3D11CommandList> list;check(SUCCEEDED(deferred->FinishCommandList(TRUE,&list)),"finish split remainder");
-            fsr->finished(deferred.Get(),list.Get());check(fsr->execute(context,list.Get(),FALSE,&execute),"execute native-prefix/FSR/remainder");
+            fsr->finished(deferred.Get(),list.Get());check(fsr->execute(context,list.Get(),execute_restore,&execute),"execute native-prefix/FSR/remainder");
         }
     };
     const auto settle_pair=[&]() {
@@ -111,8 +112,41 @@ static void run(ID3D11Device* device,ID3D11DeviceContext* context,float fraction
             while(context->GetData(completed.Get(),nullptr,0,D3D11_ASYNC_GETDATA_DONOTFLUSH)==S_FALSE && GetTickCount64()<deadline) Sleep(1);
             check(context->GetData(completed.Get(),nullptr,0,D3D11_ASYNC_GETDATA_DONOTFLUSH)==S_OK,"Diagnostic GPU completion timeout");}
     };
-    for(unsigned i=0;i<8;++i) {pair(i);settle_pair();if(!i) std::puts("first eye pair executed");}
 #ifndef D2VR_FSR_BASELINE
+    // State pin: distinctive immediate-context state must survive the split that creates and evaluates the NGX
+    // features (ExecuteCommandList(TRUE) restores around each list, so anything left over came from the mod's dispatch).
+    D3D11_VIEWPORT pin_viewport{7,11,123,45,.25f,.75f};Ptr<ID3D11Buffer> pin_cb;Ptr<ID3D11ShaderResourceView> pin_srv;Ptr<ID3D11BlendState> pin_blend;
+    const auto pin_state=[&]() {
+        if(!pin_cb) {D3D11_BUFFER_DESC bd{};bd.ByteWidth=64;bd.BindFlags=D3D11_BIND_CONSTANT_BUFFER;check(SUCCEEDED(device->CreateBuffer(&bd,nullptr,&pin_cb)),"pin constant buffer");}
+        if(!pin_srv) check(SUCCEEDED(device->CreateShaderResourceView(tonemapped.Get(),&tone_desc,&pin_srv)),"pin shader resource");
+        if(!pin_blend) {D3D11_BLEND_DESC bl{};bl.RenderTarget[0].BlendEnable=TRUE;bl.RenderTarget[0].SrcBlend=D3D11_BLEND_SRC_ALPHA;bl.RenderTarget[0].DestBlend=D3D11_BLEND_INV_SRC_ALPHA;bl.RenderTarget[0].BlendOp=D3D11_BLEND_OP_ADD;
+            bl.RenderTarget[0].SrcBlendAlpha=D3D11_BLEND_ONE;bl.RenderTarget[0].DestBlendAlpha=D3D11_BLEND_ZERO;bl.RenderTarget[0].BlendOpAlpha=D3D11_BLEND_OP_ADD;bl.RenderTarget[0].RenderTargetWriteMask=D3D11_COLOR_WRITE_ENABLE_ALL;
+            check(SUCCEEDED(device->CreateBlendState(&bl,&pin_blend)),"pin blend state");}
+        context->RSSetViewports(1,&pin_viewport);
+        auto* cb=pin_cb.Get();context->CSSetConstantBuffers(7,1,&cb);context->VSSetConstantBuffers(5,1,&cb);
+        auto* srv=pin_srv.Get();context->PSSetShaderResources(3,1,&srv);
+        const float factor[4]{.1f,.2f,.3f,.4f};context->OMSetBlendState(pin_blend.Get(),factor,0x5);
+    };
+    const auto check_pin=[&](const char* phase) {
+        UINT n=1;D3D11_VIEWPORT vp{};context->RSGetViewports(&n,&vp);
+        ID3D11Buffer* cb{};context->CSGetConstantBuffers(7,1,&cb);ID3D11Buffer* vcb{};context->VSGetConstantBuffers(5,1,&vcb);
+        ID3D11ShaderResourceView* srv{};context->PSGetShaderResources(3,1,&srv);
+        ID3D11BlendState* blend{};float factor[4]{};UINT mask{};context->OMGetBlendState(&blend,factor,&mask);
+        const bool same=n==1 && vp.TopLeftX==7 && vp.TopLeftY==11 && vp.Width==123 && vp.Height==45 && vp.MinDepth==.25f && vp.MaxDepth==.75f &&
+            cb==pin_cb.Get() && vcb==pin_cb.Get() && srv==pin_srv.Get() && blend==pin_blend.Get() && factor[0]==.1f && factor[3]==.4f && mask==0x5;
+        if(cb) cb->Release();if(vcb) vcb->Release();if(srv) srv->Release();if(blend) blend->Release();
+        std::printf("state pin %s: %s\n",phase,same?"preserved":"CHANGED");
+        check(same,"immediate-context state leaked through the DLSS split");
+    };
+    if(!dlss.empty()) {execute_restore=TRUE;pin_state();}
+#endif
+    for(unsigned i=0;i<8;++i) {pair(i);settle_pair();if(!i) std::puts("first eye pair executed");
+#ifndef D2VR_FSR_BASELINE
+        if(!dlss.empty() && i<2) check_pin(i?"second pair (steady evaluate)":"first pair (NGX init/create/evaluate)");
+#endif
+    }
+#ifndef D2VR_FSR_BASELINE
+    if(!dlss.empty()) {execute_restore=FALSE;ID3D11ShaderResourceView* none{};context->PSSetShaderResources(3,1,&none);ID3D11Buffer* nocb{};context->CSSetConstantBuffers(7,1,&nocb);context->VSSetConstantBuffers(5,1,&nocb);context->OMSetBlendState(nullptr,nullptr,0xffffffff);}
     if(!dlss.empty()) {
         // The first dispatch on the executing thread created the features (Quality: after NGX's optimal settings) and
         // every warm-up eye already went through NGX; the EVENT tickets are polled on that same thread.
@@ -128,6 +162,12 @@ static void run(ID3D11Device* device,ID3D11DeviceContext* context,float fraction
         check(fsr->dlss_state.load()==static_cast<unsigned>(d2vr::DlssFallback::State::active),"NGX features created for the production seam");
         if(fraction<.999f) check(fsr->dlss_optimal_width.load()<w && fsr->dlss_optimal_height.load()<h,"DLSS Quality optimal render size below the output");
         check(fsr->dlss_evaluations==16 && fsr->dlss_evaluate_failures==0 && fsr->dlss_fallbacks==0,"every warm-up eye was an NGX evaluation");
+        // The motion texture is the engine's full (display-sized) target; in Quality its content is the render subrect
+        // the feature reads as low-resolution motion with the render-size scale (the FSR contract).
+        std::printf("DLSS motion texture=%ux%u colour=%ux%u render=%ux%u display=%ux%u\n",fsr->eye_motion_width[0].load(),fsr->eye_motion_height[0].load(),
+            fsr->eye_colour_width[0].load(),fsr->eye_colour_height[0].load(),fsr->eye_render_width[0].load(),fsr->eye_render_height[0].load(),w,h);
+        check(fsr->eye_motion_width[0]==w && fsr->eye_motion_height[0]==h && fsr->eye_motion_width[1]==w,"DLSS consumed the display-sized motion texture");
+        if(fraction<.999f) check(fsr->eye_render_width[0]<w && fsr->eye_render_height[0]<h,"Quality rendered the subrect below the display size");
     }
 #endif
 #if defined(D2VR_FSR4_COMPUTE_TIMING) && !defined(D2VR_FSR_BASELINE)
@@ -221,9 +261,10 @@ static void run(ID3D11Device* device,ID3D11DeviceContext* context,float fraction
     if(!dlss.empty()) {
         // Deselecting retires the pair; a resize and a mode switch must recreate cleanly and the fallback must stay FSR 3.
         const auto created=fsr->dlss_features_created.load();
-        fsr->dlss_active=false;pair(60);settle_pair();
+        execute_restore=TRUE;pin_state();
+        fsr->dlss_active=false;pair(60);settle_pair();check_pin("deselect (feature release)");
         check(fsr->dlss_state.load()==static_cast<unsigned>(d2vr::DlssFallback::State::off) && fsr->eye_upscaler_generation[0]==3,"deselected DLSS hands the eye back to FSR 3");
-        fsr->dlss_active=true;pair(61);settle_pair();
+        fsr->dlss_active=true;pair(61);settle_pair();check_pin("reselect (feature create)");execute_restore=FALSE;
         check(fsr->dlss_features_created==created+1 && fsr->eye_upscaler_generation[0]==d2vr::dlss_mode::generation && fsr->dlss_evaluate_failures==0,"re-selected DLSS recreates its features");
         std::printf("DLSS reselect: features_created=%llu evaluations=%llu\n",static_cast<unsigned long long>(fsr->dlss_features_created.load()),static_cast<unsigned long long>(fsr->dlss_evaluations.load()));
     }

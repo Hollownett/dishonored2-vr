@@ -909,9 +909,12 @@ static std::array<float,4> taa_jitter_scale{1,1,1,1}; // build/taa-jitter-scale 
 // lets the forced projection and the view's stored vector agree. Latched once per Present so the eye views' Setup and
 // the TAA replacement of the same frame read one value.
 static std::atomic<bool> dlss_jitter_mode{false};
+// Per eye: the owner the forced projection actually used this frame (set with jitter_counter in prepare_head_view),
+// so the TAA replacement of the same frame derives its jitter from the same pattern whatever Present latched since.
+static std::array<std::atomic<bool>,2> jitter_owner_dlss{};
 // The user's nvngx_dlss.dll (never bundled): found in the mod home or through build/dlss-dll-path at session start.
 static bool dlss_provider_found=false;static int dlss_provider_source=0;static std::string dlss_provider_utf8;
-static std::atomic<unsigned> present_adapter_vendor{};static bool dlss_fallback_noted=false;
+static std::atomic<unsigned> present_adapter_vendor{},present_adapter_attempts{};static bool dlss_fallback_noted=false;
 static bool dlss_offered() noexcept {return dlss_provider_found && present_adapter_vendor.load(std::memory_order_relaxed)==0x10de;}
 // The engine's TAA jitter (d2vr::engine_taa_pattern, 1/16 px; dlss_jitter.hpp taa_sample_px selects it or the DLSS
 // Halton sequence). FSR's jitter convention (NDC offset (2jx/W,-2jy/H)) is (-x,+y) of the engine's frustum shift,
@@ -949,7 +952,8 @@ bool taa_dispatch_handler(ID3D11DeviceContext* c,int eye,UINT x,UINT y,UINT z,d2
            cache[0]!=expected || cache[1]!=expected || !native_cvars.matches(3,1)) {++upscale_guard_skips;return false;}
     }
     if(taa && fsr_taa.enabled.load()) {
-        const auto j=d2vr::taa_sample_px(counter,dlss_jitter_mode.load(std::memory_order_relaxed)); // render pixels, engine sign
+        const bool dlss_owned=eye>=0 && eye<2 && jitter_owner_dlss[static_cast<std::size_t>(eye)].load(std::memory_order_relaxed);
+        const auto j=d2vr::taa_sample_px(counter,dlss_owned); // render pixels, engine sign; the pattern this eye's projection used
         if(eye>=0 && eye<2) {
             fsr_taa.last_jitter_x[static_cast<std::size_t>(eye)]=fsr_jitter_sign[0]*j[0]*taa_jitter_scale[0];fsr_taa.last_jitter_y[static_cast<std::size_t>(eye)]=fsr_jitter_sign[1]*j[1]*taa_jitter_scale[1];
             fsr_taa.last_vfov[static_cast<std::size_t>(eye)]=fsr_vfov[static_cast<std::size_t>(eye)].load();
@@ -1330,7 +1334,8 @@ static LONG saved_temporal_aa{};
 static constexpr std::uintptr_t temporal_aa_value_rva=0x397bbf8;
 static bool full_scale_requested=false,full_scale_written=false,full_scale_restored=true;static LONG render_fraction_bits=0x3f800000;
 // FSR upscaling: the engine renders each eye at upscale_fraction (its own forced dynamic-resolution path).
-inline float aa_mode_fraction(int mode) noexcept {return d2vr::dlss_mode::render_fraction(mode,fsr_taa.dlss_quality_fraction.load());} // DLSS Quality follows the NGX optimal settings
+// DLSS Quality follows the NGX optimal settings while engaged (offered, not failed); otherwise its fallback is FSR 3 Native.
+inline float aa_mode_fraction(int mode) noexcept {return d2vr::dlss_mode::render_fraction(mode,fsr_taa.dlss_quality_fraction.load(),dlss_offered() && !fsr_taa.dlss_failed());}
 static float upscale_fraction=1;
 // Dynamic resolution (src/vr_perf_governor.hpp): only in the scaled AA modes the player chose (FSR Quality/Balanced),
 // never in native modes; it steps the render fraction down when display slots are missed. Off by default (headset:
@@ -4308,7 +4313,8 @@ void prepare_head_view(void* view) noexcept {
             std::uint32_t counter{};read_self(image_base+d2vr::taa_history::frame_counter_rva,&counter,sizeof counter);
             if(alternate_taa_phase) counter=*alternate_taa_phase;
             jitter_counter[eye_slot]=counter;
-            const auto j=d2vr::taa_sample_uv(counter,dlss_jitter_mode.load(std::memory_order_relaxed),static_cast<float>(taa_width.load()),static_cast<float>(taa_height.load()));
+            const bool dlss_owned=dlss_jitter_mode.load(std::memory_order_relaxed);jitter_owner_dlss[eye_slot]=dlss_owned;
+            const auto j=d2vr::taa_sample_uv(counter,dlss_owned,static_cast<float>(taa_width.load()),static_cast<float>(taa_height.load()));
             auto pj=j;pj.x*=taa_jitter_scale[0];pj.y*=taa_jitter_scale[1];d2vr::apply_taa_jitter(*optical,pj);taa_view_jitter={j.x*taa_jitter_scale[2],j.y*taa_jitter_scale[3]};
         }
         d2vr::Vec3 centre{
@@ -5882,6 +5888,7 @@ std::string feedback_status_json() {
             << ",\"fsr4_compute_gpu_total_ms\":" << fsr_taa.eye_fsr4_compute_gpu_total_ms[side].load()
             << ",\"fsr4_compute_gpu_samples\":" << fsr_taa.eye_fsr4_compute_gpu_samples[side].load()
             << ",\"native_colour\":[" << fsr_taa.eye_colour_width[side].load() << ',' << fsr_taa.eye_colour_height[side].load() << ',' << fsr_taa.eye_colour_format[side].load() << ',' << fsr_taa.eye_colour_mips[side].load()
+            << "],\"dlss_motion\":[" << fsr_taa.eye_motion_width[side].load() << ',' << fsr_taa.eye_motion_height[side].load()
             << "],\"native_world_viewport\":[" << geometry_w << ',' << geometry_h
             << "],\"native_world_fraction\":[" << geometry_x << ',' << geometry_y << "],\"native_world_sequence\":" << geometry_sequence
             << ",\"native_world_tick\":" << geometry_tick << ",\"native_world_frame\":" << geometry_frame << ",\"native_world_mode\":" << geometry_mode
@@ -7148,20 +7155,21 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                             acknowledge_native_hud_art();
                             if(taa_capture_csv.is_open()) {taa_capture.drain(context.Get(),frames.load(),taa_capture_csv);taa_capture_b2.drain(context.Get(),frames.load(),taa_capture_b2_csv);}
                             if(d2vr::GlyphSwap::enabled.load()) d2vr::GlyphSwap::process(context.Get());
-                            if(!present_adapter_vendor.load(std::memory_order_relaxed)) { // once: DLSS is offered on NVIDIA adapters only (license supplement 1)
+                            if(!present_adapter_vendor.load(std::memory_order_relaxed)) { // DLSS is offered on NVIDIA adapters only (license supplement 1); a failed query retries next Present
                                 ComPtr<IDXGIDevice> dxgi_device;ComPtr<IDXGIAdapter> dxgi_adapter;DXGI_ADAPTER_DESC adapter_desc{};
                                 if(SUCCEEDED(chain->GetDevice(IID_PPV_ARGS(&dxgi_device))) && SUCCEEDED(dxgi_device->GetAdapter(&dxgi_adapter)) && SUCCEEDED(dxgi_adapter->GetDesc(&adapter_desc)) && adapter_desc.VendorId)
-                                    present_adapter_vendor=adapter_desc.VendorId;
-                                else present_adapter_vendor=1; // unknown: never NVIDIA
+                                    present_adapter_vendor=adapter_desc.VendorId; // only a real vendor id is cached
+                                else if(++present_adapter_attempts>=600) present_adapter_vendor=1; // persistent failure (about ten seconds): never NVIDIA
                             }
                             {   // DLSS: offered to the menus, selected from the live mode, and it owns the jitter while engaged.
                                 const int live_mode=temporal_live_mode.load();
                                 game_xr->dlss_available(dlss_offered());
                                 fsr_taa.dlss_quality=d2vr::dlss_mode::is_quality(live_mode);
                                 fsr_taa.dlss_active=d2vr::dlss_mode::active(live_mode) && dlss_offered();
-                                dlss_jitter_mode=fsr_taa.dlss_active.load() && fsr_taa.dlss_engaged() && view_jitter_abi;
+                                dlss_jitter_mode=fsr_taa.dlss_active.load() && fsr_taa.dlss_engaged() && view_jitter_abi && projection_jitter;
                                 if(fsr_taa.dlss_failed() && !dlss_fallback_noted) {
                                     dlss_fallback_noted=true;
+                                    upscale_fraction=aa_mode_fraction(live_mode);apply_upscale(upscale_fraction); // DLSS Quality's fallback renders native: FSR 3 Native now
                                     const auto dlss_reason=static_cast<d2vr::DlssEyeUpscaler::Reason>(fsr_taa.dlss_last_reason.load());
                                     std::ostringstream dlss_note;dlss_note<<"DLSS unavailable ("<<d2vr::DlssEyeUpscaler::reason_name(dlss_reason)<<", NGX 0x"<<std::hex<<static_cast<unsigned>(fsr_taa.dlss_last_result.load())<<std::dec<<"): FSR 3 for this session";
                                     note_recoverable(dlss_note.str().c_str());
@@ -9146,7 +9154,8 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
             }
             fsr_taa.dlss_evaluations=0;fsr_taa.dlss_evaluate_failures=0;fsr_taa.dlss_create_failures=0;fsr_taa.dlss_fallbacks=0;fsr_taa.dlss_owner_refusals=0;
             fsr_taa.dlss_features_created=0;fsr_taa.dlss_optimal_queries=0;fsr_taa.dlss_waiting=0;fsr_taa.dlss_owner_rebuilds=0;fsr_taa.dlss_quality_fraction=d2vr::dlss_mode::default_quality_fraction;
-            dlss_fallback_noted=false;present_adapter_vendor=0;dlss_jitter_mode=false;
+            dlss_fallback_noted=false;present_adapter_vendor=0;present_adapter_attempts=0;dlss_jitter_mode=false;for(auto& owner:jitter_owner_dlss) owner=false;
+            for(unsigned side=0;side<2;++side) {fsr_taa.eye_motion_width[side]=0;fsr_taa.eye_motion_height[side]=0;}
         }
         native_prompt_probe_calls=0;native_prompt_probe.configure(image_base,&read_self);d2vr::NativeWristHud::observer=&native_hud_call_observer;
         fsr_taa.timing_enabled=!native_gpu_requested && !render_perf_requested.load();
