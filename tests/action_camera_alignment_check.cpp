@@ -17,9 +17,17 @@ int main() {
     auto second=context.sample(10,key,false);assert(second.accepted && !second.advance && !second.changed);
     auto duplicate=context.sample(10,key,true);assert(duplicate.accepted && !duplicate.advance);
     auto changed=key;++changed.camera;
-    assert(!context.sample(10,changed,false).accepted);
-    assert(!context.sample(10,changed,true).accepted); // repeated first cannot split the frame either
-    assert(context.sample(10,key,false).accepted); // the original frozen context stays intact
+    // The context flips between the eyes of one frame: the second eye is still drawn, and with the FIRST eye's decision (never native on
+    // one eye and head-owned on the other).
+    for(bool authored_first: {false,true}) {
+        ActionCameraContext c;auto k0=key;k0.authored=authored_first;auto k1=k0;k1.authored=!authored_first;++k1.camera;++k1.generation;
+        const auto e0=c.sample(20,k0,true);assert(e0.accepted && e0.key==k0);
+        const auto e1=c.sample(20,k1,false);
+        assert(e1.accepted && !e1.advance && !e1.changed && e1.key==k0 && e1.key.authored==authored_first && e1.history_epoch==e0.history_epoch);
+        const auto again=c.sample(20,k1,true);assert(again.accepted && again.key==k0 && !again.advance); // a repeated first cannot split it either
+        const auto next_frame=c.sample(21,k1,true);assert(next_frame.changed && next_frame.key==k1); // the new context begins on the next frame
+    }
+    assert(context.sample(10,changed,false).key==key && context.sample(10,key,false).accepted); // the original frozen context stays intact
     auto next=context.sample(11,changed,true);assert(next.advance && next.changed && next.history_epoch!=step.history_epoch);
     // Each native owner component, XR reference/pose, and action handoff re-enters heading
     // and discards inherited height lag even with a native change below the teleport/snap limits.

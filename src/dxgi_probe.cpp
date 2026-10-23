@@ -4240,18 +4240,20 @@ void prepare_head_view(void* view) noexcept {
         if(!body) {body=d2vr::find_native_player_camera(read_self,image_base);if(body) head_body_camera=body->camera;}
         if(!body) {native_audio_listener.clear();native_left_aim.clear();native_shot_aim.clear();native_crosshair.clear();native_weapon_attachment.clear();head_body_anchor.clear();return;}
         const auto action=native_action_camera.poll(read_self,image_base,body->player,GetTickCount64());
-        const bool authored_camera=action.owns_camera(body->authored_view(),
+        const bool authored_camera_seen=action.owns_camera(body->authored_view(),
             (body->mode==7 || body->target_mode==7) && !body->tracked_shadow_walk());
         d2vr::ActionCameraStep action_camera_step{};
         if(action_camera_alignment_enabled) {
             action_camera_step=action_camera_context.sample(frames.load(),
-                {body->player,body->camera,body->camera_identity.generation,head_pose_epoch,game_xr->reference_epoch(),authored_camera},per_frame);
+                {body->player,body->camera,body->camera_identity.generation,head_pose_epoch,game_xr->reference_epoch(),authored_camera_seen},per_frame);
             if(!action_camera_step.accepted) {native_audio_listener.clear();native_left_aim.clear();native_shot_aim.clear();native_crosshair.clear();native_weapon_attachment.clear();return;}
             if(action_camera_step.changed) {
                 anchor_smoother.reset();anchor_smooth_frame=~0ull;
                 head_body_anchor.clear();authored_camera_anchor.clear();
             }
         }
+        // The owner of the view is decided once per displayed frame, at its first view; the second eye renders with that decision.
+        const bool authored_camera=action_camera_alignment_enabled?action_camera_step.key.authored:authored_camera_seen;
         d2vr::NativeInteractionAim::publish_sword_pose_epoch(game_xr->pose_epoch());
         d2vr::EyeFov render_fov{xr_eye.fov.angleLeft,xr_eye.fov.angleRight,xr_eye.fov.angleUp,xr_eye.fov.angleDown};
         if(symmetric_frustum_requested) {

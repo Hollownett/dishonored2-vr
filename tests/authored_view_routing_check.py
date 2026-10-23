@@ -28,7 +28,10 @@ def check(probe: str, features: str) -> None:
     assert body.index("head_offset.y=std::clamp(head_offset.y+crouch_lift_now") < offset
     assert "action_camera_alignment_enabled?action_camera_physical_offset:d2vr::Vec3{}" in body
     assert "action_camera_step=action_camera_context.sample(frames.load()," in body
-    assert "body->camera_identity.generation,head_pose_epoch,game_xr->reference_epoch(),authored_camera},per_frame)" in body
+    assert "body->camera_identity.generation,head_pose_epoch,game_xr->reference_epoch(),authored_camera_seen},per_frame)" in body
+    # the owner of the view is the first view's decision, used by both eyes (no native eye next to a head-owned one)
+    assert "const bool authored_camera=action_camera_alignment_enabled?action_camera_step.key.authored:authored_camera_seen;" in body
+    assert body.index("const bool authored_camera=")>body.index("if(!action_camera_step.accepted)") and body.count("const bool authored_camera=")==1
     reject = body.index("if(!action_camera_step.accepted)")
     assert reject < body.index("auto source_anchor=*input;")
     assert "if(action_camera_step.changed) {\n                anchor_smoother.reset();anchor_smooth_frame=~0ull;" in body
