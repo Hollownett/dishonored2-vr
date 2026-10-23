@@ -5,6 +5,7 @@
 #include <cstring>
 #include <iostream>
 #include <iterator>
+#include <map>
 #include <set>
 #include <thread>
 #include <vector>
@@ -28,6 +29,15 @@ struct Fixture {
     NVSDK_NGX_Parameter* external_map{};
     NVSDK_NGX_Handle* external_handle{};
     std::string external_at;
+    // Parameter map contents for the optimal-settings callback (per map, per key).
+    std::map<std::pair<NVSDK_NGX_Parameter*,std::string>,long long> values;
+    bool no_optimal_callback{}, optimal_fails{}, optimal_zero{};
+    unsigned optimal_calls{};
+    // Expected create parameters (DLAA at 64x64 unless a test changes them).
+    unsigned expect_render_w = 64, expect_render_h = 64, expect_target_w = 64, expect_target_h = 64;
+    NVSDK_NGX_PerfQuality_Value expect_quality = NVSDK_NGX_PerfQuality_Value_DLAA;
+    int expect_flags = NVSDK_NGX_DLSS_Feature_Flags_IsHDR | NVSDK_NGX_DLSS_Feature_Flags_DepthInverted | NVSDK_NGX_DLSS_Feature_Flags_AutoExposure;
+    unsigned expect_subrect_w = 64, expect_subrect_h = 64;
     std::atomic<int> entries{0};
     struct Guard {
         Fixture& f;
@@ -123,11 +133,10 @@ struct Fixture {
     static NVSDK_NGX_Result create(ID3D11DeviceContext* c, NVSDK_NGX_Handle** out,
         NVSDK_NGX_Parameter* p, NVSDK_NGX_DLSS_Create_Params* create) {
         Guard g("create"); auto& f = *fixture; const auto eye = f.creation++ % 2;
-        assert(c && f.maps.count(p) && create->Feature.InWidth == 64 && create->Feature.InHeight == 64);
-        assert(create->Feature.InTargetWidth == 64 && create->Feature.InTargetHeight == 64);
-        assert(create->Feature.InPerfQualityValue == NVSDK_NGX_PerfQuality_Value_DLAA && !create->InEnableOutputSubrects);
-        assert(create->InFeatureCreateFlags == (NVSDK_NGX_DLSS_Feature_Flags_IsHDR |
-            NVSDK_NGX_DLSS_Feature_Flags_DepthInverted | NVSDK_NGX_DLSS_Feature_Flags_AutoExposure));
+        assert(c && f.maps.count(p) && create->Feature.InWidth == f.expect_render_w && create->Feature.InHeight == f.expect_render_h);
+        assert(create->Feature.InTargetWidth == f.expect_target_w && create->Feature.InTargetHeight == f.expect_target_h);
+        assert(create->Feature.InPerfQualityValue == f.expect_quality && !create->InEnableOutputSubrects);
+        assert(create->InFeatureCreateFlags == f.expect_flags);
         const bool failure = f.fails("create" + std::to_string(eye));
         if ((!failure && !f.null_on_success && f.null_operation != "create" + std::to_string(eye)) || (failure && f.out_on_failure)) {
             if (f.external_at == "create" + std::to_string(eye)) *out = f.external_handle;
@@ -147,7 +156,7 @@ struct Fixture {
         assert(e->Feature.pInColor && e->Feature.pInOutput != e->Feature.pInColor && e->pInDepth && e->pInMotionVectors);
         assert(e->InJitterOffsetX == .25f && e->InJitterOffsetY == -.25f);
         assert(e->InMVScaleX == -64 && e->InMVScaleY == -64);
-        assert(e->InRenderSubrectDimensions.Width == 64 && e->InRenderSubrectDimensions.Height == 64);
+        assert(e->InRenderSubrectDimensions.Width == f.expect_subrect_w && e->InRenderSubrectDimensions.Height == f.expect_subrect_h);
         assert(e->InPreExposure == 1 && e->InExposureScale == 1 && !e->pInExposureTexture);
         assert(!e->pInTransparencyMask && !e->pInBiasCurrentColorMask && !e->pInMotionVectors3D);
         assert(e->InColorSubrectBase.X == 0 && e->InOutputSubrectBase.Y == 0);
@@ -163,7 +172,37 @@ struct Fixture {
     static NVSDK_NGX_Result NVSDK_CONV shutdown(ID3D11Device* p) {
         Guard g("shutdown"); auto& f = *fixture; assert(p); ++f.shutdown_count; return f.fails("shutdown") ? bad : ok;
     }
-    U::Calls calls() { return {init, capability, allocate, get_i, create, evaluate, release, destroy, shutdown}; }
+    static void NVSDK_CONV set_ui(NVSDK_NGX_Parameter* p, const char* key, unsigned value) {
+        Guard g("set_ui"); auto& f = *fixture; assert(f.maps.count(p)); f.values[{p, key}] = value;
+    }
+    static void NVSDK_CONV set_i(NVSDK_NGX_Parameter* p, const char* key, int value) {
+        Guard g("set_i"); auto& f = *fixture; assert(f.maps.count(p)); f.values[{p, key}] = value;
+    }
+    static NVSDK_NGX_Result NVSDK_CONV get_ui(NVSDK_NGX_Parameter* p, const char* key, unsigned* out) {
+        Guard g("get_ui"); auto& f = *fixture; assert(f.maps.count(p));
+        const auto found = f.values.find({p, key}); if (found == f.values.end()) { *out = 0; return bad; }
+        *out = static_cast<unsigned>(found->second); return ok;
+    }
+    // The SDK's optimal-settings callback: Quality renders at 2/3, DLAA at the output size; dynamic range 1/2..1.
+    static NVSDK_NGX_Result NVSDK_CONV optimal_callback(NVSDK_NGX_Parameter* p) {
+        auto& f = *fixture; ++f.optimal_calls; assert(f.maps.count(p));
+        const auto w = f.values.at({p, NVSDK_NGX_Parameter_Width}), h = f.values.at({p, NVSDK_NGX_Parameter_Height});
+        const auto q = f.values.at({p, NVSDK_NGX_Parameter_PerfQualityValue});
+        assert(f.values.at({p, NVSDK_NGX_Parameter_RTXValue}) == 0);
+        if (f.optimal_fails) return bad;
+        const bool dlaa = q == NVSDK_NGX_PerfQuality_Value_DLAA;
+        const long long ow = f.optimal_zero ? 0 : dlaa ? w : w * 2 / 3, oh = f.optimal_zero ? 0 : dlaa ? h : h * 2 / 3;
+        f.values[{p, NVSDK_NGX_Parameter_OutWidth}] = ow; f.values[{p, NVSDK_NGX_Parameter_OutHeight}] = oh;
+        f.values[{p, NVSDK_NGX_Parameter_DLSS_Get_Dynamic_Max_Render_Width}] = w; f.values[{p, NVSDK_NGX_Parameter_DLSS_Get_Dynamic_Max_Render_Height}] = h;
+        f.values[{p, NVSDK_NGX_Parameter_DLSS_Get_Dynamic_Min_Render_Width}] = w / 2; f.values[{p, NVSDK_NGX_Parameter_DLSS_Get_Dynamic_Min_Render_Height}] = h / 2;
+        return ok;
+    }
+    static NVSDK_NGX_Result NVSDK_CONV get_void_pointer(NVSDK_NGX_Parameter* p, const char* key, void** out) {
+        Guard g("get_void_pointer"); auto& f = *fixture; assert(f.maps.count(p));
+        assert(std::strcmp(key, NVSDK_NGX_Parameter_DLSSOptimalSettingsCallback) == 0);
+        *out = f.no_optimal_callback ? nullptr : reinterpret_cast<void*>(&optimal_callback); return ok;
+    }
+    U::Calls calls() { return {init, capability, allocate, get_i, create, evaluate, release, destroy, shutdown, set_ui, set_i, get_ui, get_void_pointer}; }
     U owner() { return U::injected_for_cpu_tests(calls(), validation); }
     U::Eval eval(unsigned eye = 0, std::uintptr_t device_number = 11) {
         U::Eval e;
@@ -443,10 +482,88 @@ void cleanup_failures_are_once() {
         assert(u.status().cleanup_result == bad); u.disable(); assert(f.shutdown_count == 1);
     }
 }
+void retire_keeps_core() {
+    Fixture f; auto u = f.owner(); assert(Fixture::prepare(u)); auto lease = u.lease(); auto in = f.eval();
+    assert(U::evaluate(lease, in));
+    u.retire(); // a mode switch or resize: the pair retires, NGX stays initialized
+    assert(!u.ready() && f.shutdown_count == 0 && f.handles.size() == 2);
+    assert(U::confirm_gpu_retirement(lease)); lease = {}; U::collect_retired();
+    assert(f.handles.empty() && f.shutdown_count == 0 && f.init_count == 1);
+    auto d = Fixture::desc(); ++d.feature_generation;
+    assert(Fixture::prepare(u, d) && u.ready() && f.init_count == 1 && f.handles.size() == 2); // no re-init, no coexistence refusal
+    auto again = u.lease(); in.feature_generation = d.feature_generation; ++in.frame; ++in.pair;
+    assert(U::evaluate(again, in) && f.resets.back() == 1);
+    u.disable(); assert(f.shutdown_count == 0); // the live job lease still owns the Core
+    assert(U::confirm_gpu_retirement(again)); again = {}; U::collect_retired();
+    assert(f.handles.empty() && f.maps.empty() && f.shutdown_count == 1);
+}
+void optimal_settings() {
+    {   // Quality for a 1920x1080 output: 2/3 render size inside the dynamic range; the Core is shared with prepare.
+        Fixture f; auto u = f.owner(); U::OptimalSettings out; NVSDK_NGX_Result result{};
+        assert(u.optimal_settings(opaque<ID3D11Device>(11), opaque<ID3D11DeviceContext>(21), Fixture::paths(), 1, 1920, 1080, U::Quality::quality, out, &result) == U::Reason::none);
+        assert(out.optimal_width == 1280 && out.optimal_height == 720 && out.max_width == 1920 && out.min_width == 960 && out.min_height == 540);
+        assert(f.optimal_calls == 1 && f.init_count == 1 && result == ok);
+        assert(u.optimal_settings(opaque<ID3D11Device>(11), opaque<ID3D11DeviceContext>(21), Fixture::paths(), 1, 1920, 1080, U::Quality::dlaa, out) == U::Reason::none);
+        assert(out.optimal_width == 1920 && out.optimal_height == 1080 && f.init_count == 1);
+        assert(Fixture::prepare(u) && f.init_count == 1); // no second init for the same device
+        u.disable(); assert(f.shutdown_count == 1);
+    }
+    {   // Provider without the callback, a failing callback and a zero optimal size are distinct, feature-free failures.
+        for (int which = 0; which < 3; ++which) {
+            Fixture f; auto u = f.owner(); U::OptimalSettings out;
+            if (which == 0) f.no_optimal_callback = true;
+            if (which == 1) f.optimal_fails = true;
+            if (which == 2) f.optimal_zero = true;
+            const auto reason = u.optimal_settings(opaque<ID3D11Device>(11), opaque<ID3D11DeviceContext>(21), Fixture::paths(), 1, 1920, 1080, U::Quality::quality, out);
+            assert(reason == (which == 0 ? U::Reason::optimal_unsupported : U::Reason::optimal_failed));
+            assert(f.handles.empty() && !u.ready());
+            u.disable(); assert(f.shutdown_count == 1);
+        }
+        Fixture f; auto u = f.owner(); U::OptimalSettings out;
+        assert(u.optimal_settings(opaque<ID3D11Device>(11), nullptr, Fixture::paths(), 1, 1920, 1080, U::Quality::quality, out) == U::Reason::invalid_context);
+        assert(u.optimal_settings(opaque<ID3D11Device>(11), opaque<ID3D11DeviceContext>(21), Fixture::paths(), 1, 0, 1080, U::Quality::quality, out) == U::Reason::invalid_dimensions);
+        f.validation->path_reason = U::Reason::missing_provider;
+        assert(u.optimal_settings(opaque<ID3D11Device>(11), opaque<ID3D11DeviceContext>(21), Fixture::paths(), 1, 1920, 1080, U::Quality::quality, out) == U::Reason::missing_provider);
+        assert(f.init_count == 0);
+    }
+}
+void quality_dimensions_and_subrects() {
+    {   // A Quality feature renders 48x48 into 64x64 with render-resolution, jittered motion vectors.
+        Fixture f; auto u = f.owner(); auto d = Fixture::desc();
+        d.render_width = d.render_height = 48; d.quality = U::Quality::quality; d.mv_low_resolution = true; d.motion.jittered = true;
+        f.expect_render_w = f.expect_render_h = 48; f.expect_quality = NVSDK_NGX_PerfQuality_Value_MaxQuality;
+        f.expect_flags |= NVSDK_NGX_DLSS_Feature_Flags_MVLowRes | NVSDK_NGX_DLSS_Feature_Flags_MVJittered;
+        f.expect_subrect_w = f.expect_subrect_h = 48;
+        assert(Fixture::prepare(u, d)); auto lease = u.lease();
+        // Inputs may be the engine's larger textures with the render subrect at the top left; the output must match exactly.
+        auto in = f.eval(); in.motion_contract = d.motion;
+        f.validation->resources[0].shape.width = f.validation->resources[0].shape.height = 64; // colour 64 >= 48
+        assert(U::evaluate(lease, in) && f.eval_count == 1);
+        f.validation->resources[3].shape.width = 72; // output larger than the target
+        assert(!U::evaluate(lease, in) && f.eval_count == 1);
+        f.validation->resources[3].shape.width = 64; f.validation->resources[1].shape.width = 40; // depth smaller than the render size
+        assert(!U::evaluate(lease, in) && f.eval_count == 1);
+        u.disable(); assert(U::confirm_gpu_retirement(lease)); lease = {}; U::collect_retired();
+    }
+    for (int which = 0; which < 4; ++which) { // inconsistent dimension contracts never reach the SDK
+        Fixture f; auto u = f.owner(); auto d = Fixture::desc();
+        if (which == 0) { d.render_width = 48; } // DLAA must render at the output size
+        if (which == 1) { d.quality = U::Quality::quality; } // Quality must render below it
+        if (which == 2) { d.render_width = 80; d.quality = U::Quality::quality; } // never above it
+        if (which == 3) { d.width = 48; d.height = 16; } // below the 64x32 output minimum
+        assert(!Fixture::prepare(u, d) && u.status().reason == U::Reason::invalid_dimensions && f.init_count == 0);
+    }
+    {   // An incomplete call table (missing parameter access) is refused before any SDK call.
+        Fixture f; auto partial = f.calls(); partial.get_void_pointer = nullptr;
+        auto u = U::injected_for_cpu_tests(partial, f.validation);
+        assert(!Fixture::prepare(u) && u.status().reason == U::Reason::invalid_calls && f.init_count == 0);
+    }
+}
 }
 int main() {
     static_assert(static_cast<int>(NVSDK_NGX_PerfQuality_Value_DLAA) == 5, "pinned SDK DLAA ABI");
     failure_cleanup(); reasons_and_validation(); histories_and_retirement();
     evaluation_failures_and_invalid_inputs(); bounded_quarantine(); shared_core_and_concurrency(); incompatible_shared_owner(); aliases_across_live_generations(); repeated_prepare_context_validation(); cleanup_failures_are_once();
+    retire_keeps_core(); optimal_settings(); quality_dimensions_and_subrects();
     std::cout << "dlss_lifecycle_check: passed (injected CPU calls only)\n";
 }

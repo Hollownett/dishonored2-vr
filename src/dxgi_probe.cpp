@@ -90,6 +90,7 @@
 #include "native_taa_history.hpp"
 #include "taa_dispatch.hpp"
 #include "fsr_taa.hpp"
+#include "dlss_jitter.hpp"
 #include "taa_mv_dejitter.hpp"
 #include "vr_combat.hpp"
 #include "attack_intent.hpp"
@@ -904,9 +905,17 @@ std::optional<temporal_eye::NativePass> read_dlss_pass_metadata(std::uintptr_t v
 static std::array<std::atomic<std::uint32_t>,2> jitter_counter{};static std::atomic<UINT> taa_width{},taa_height{};
 static std::atomic<UINT64> jitter_same{},jitter_differ{};static bool projection_jitter=false;static std::atomic<bool> taa_live{false};static std::atomic<UINT> device_creation_flags{0xffffffffu};static std::array<std::atomic<float>,2> fsr_vfov{};static std::array<float,2> fsr_jitter_sign{-1,1};
 static std::array<float,4> taa_jitter_scale{1,1,1,1}; // build/taa-jitter-scale "px py vx vy": per-axis scale of projection jitter (p) and stored view+0x7850 vector (v); diagnostics
-// The engine's TAA jitter (d2vr::engine_taa_pattern, 1/16 px). FSR's jitter convention (NDC offset
-// (2jx/W,-2jy/H)) is (-x,+y) of the engine's frustum shift, hence fsr_jitter_sign {-1,1} (Luma D2 agrees).
-static constexpr auto& engine_jitter=d2vr::engine_taa_pattern;
+// DLSS owns the sub-pixel jitter (32-phase Halton, dlss_jitter.hpp) while a DLSS mode is engaged and the view jitter ABI
+// lets the forced projection and the view's stored vector agree. Latched once per Present so the eye views' Setup and
+// the TAA replacement of the same frame read one value.
+static std::atomic<bool> dlss_jitter_mode{false};
+// The user's nvngx_dlss.dll (never bundled): found in the mod home or through build/dlss-dll-path at session start.
+static bool dlss_provider_found=false;static int dlss_provider_source=0;static std::string dlss_provider_utf8;
+static std::atomic<unsigned> present_adapter_vendor{};static bool dlss_fallback_noted=false;
+static bool dlss_offered() noexcept {return dlss_provider_found && present_adapter_vendor.load(std::memory_order_relaxed)==0x10de;}
+// The engine's TAA jitter (d2vr::engine_taa_pattern, 1/16 px; dlss_jitter.hpp taa_sample_px selects it or the DLSS
+// Halton sequence). FSR's jitter convention (NDC offset (2jx/W,-2jy/H)) is (-x,+y) of the engine's frustum shift,
+// hence fsr_jitter_sign {-1,1} (Luma D2 agrees); DLSS receives the same values (UE passes one TemporalJitterPixels to both).
 // Forced-projection Setup calls: the jitter vector to store at view+0x7850 once Setup returns.
 static thread_local std::optional<d2vr::TaaJitter> forced_view_jitter;
 bool taa_dispatch_handler(ID3D11DeviceContext* c,int eye,UINT x,UINT y,UINT z,d2vr::TaaDispatchHook::Fn original) {
@@ -940,12 +949,12 @@ bool taa_dispatch_handler(ID3D11DeviceContext* c,int eye,UINT x,UINT y,UINT z,d2
            cache[0]!=expected || cache[1]!=expected || !native_cvars.matches(3,1)) {++upscale_guard_skips;return false;}
     }
     if(taa && fsr_taa.enabled.load()) {
-        const auto& j=engine_jitter[counter%8];
+        const auto j=d2vr::taa_sample_px(counter,dlss_jitter_mode.load(std::memory_order_relaxed)); // render pixels, engine sign
         if(eye>=0 && eye<2) {
-            fsr_taa.last_jitter_x[static_cast<std::size_t>(eye)]=fsr_jitter_sign[0]*j[0]/16.f*taa_jitter_scale[0];fsr_taa.last_jitter_y[static_cast<std::size_t>(eye)]=fsr_jitter_sign[1]*j[1]/16.f*taa_jitter_scale[1];
+            fsr_taa.last_jitter_x[static_cast<std::size_t>(eye)]=fsr_jitter_sign[0]*j[0]*taa_jitter_scale[0];fsr_taa.last_jitter_y[static_cast<std::size_t>(eye)]=fsr_jitter_sign[1]*j[1]*taa_jitter_scale[1];
             fsr_taa.last_vfov[static_cast<std::size_t>(eye)]=fsr_vfov[static_cast<std::size_t>(eye)].load();
         }
-        try {if(fsr_taa.replace(c,eye,b,fsr_vfov[static_cast<std::size_t>(eye)].load(),fsr_jitter_sign[0]*j[0]/16.f*taa_jitter_scale[0],fsr_jitter_sign[1]*j[1]/16.f*taa_jitter_scale[1])) return true;}
+        try {if(fsr_taa.replace(c,eye,b,fsr_vfov[static_cast<std::size_t>(eye)].load(),fsr_jitter_sign[0]*j[0]*taa_jitter_scale[0],fsr_jitter_sign[1]*j[1]*taa_jitter_scale[1])) return true;}
         catch(...) {}
     }
     std::lock_guard<std::mutex> lock(taa_dispatch_mutex);
@@ -1321,14 +1330,14 @@ static LONG saved_temporal_aa{};
 static constexpr std::uintptr_t temporal_aa_value_rva=0x397bbf8;
 static bool full_scale_requested=false,full_scale_written=false,full_scale_restored=true;static LONG render_fraction_bits=0x3f800000;
 // FSR upscaling: the engine renders each eye at upscale_fraction (its own forced dynamic-resolution path).
-inline float aa_mode_fraction(int mode) noexcept {return mode==3 || mode==6?.77f:mode==4?.67f:1.f;}
+inline float aa_mode_fraction(int mode) noexcept {return d2vr::dlss_mode::render_fraction(mode,fsr_taa.dlss_quality_fraction.load());} // DLSS Quality follows the NGX optimal settings
 static float upscale_fraction=1;
 // Dynamic resolution (src/vr_perf_governor.hpp): only in the scaled AA modes the player chose (FSR Quality/Balanced),
 // never in native modes; it steps the render fraction down when display slots are missed. Off by default (headset:
 // streaming/compositor hitches, not GPU load, kept flooring FSR Quality at 0.6); build/governor enables it.
 static d2vr::PerfGovernor perf_governor;static bool perf_governor_enabled=true,perf_governor_active=false;static std::uint64_t perf_prev_start_ns{},perf_prev_display{};
 static void reset_perf_governor(int mode) {
-    const float f=aa_mode_fraction(mode);perf_governor_active=perf_governor_enabled && mode>=2 && f<.999f;
+    const float f=aa_mode_fraction(mode);perf_governor_active=perf_governor_enabled && d2vr::dlss_mode::governor_eligible(mode,f); // DLSS features are fixed-size
     d2vr::PerfGovernorConfig c;c.start_scale=f;c.max_scale=std::min(.95f,f+.15f);c.busy_high=1.02f;c.min_scale=std::min(.6f,f); // busy_high: missed slots stay the main down signal
     perf_governor=d2vr::PerfGovernor(c);perf_prev_start_ns=perf_prev_display=0;frame_split_prev_enter_ns.store(0);
     fsr_taa.max_fraction=perf_governor_active?c.max_scale:0.f; // governor steps reuse the FSR contexts
@@ -4299,7 +4308,7 @@ void prepare_head_view(void* view) noexcept {
             std::uint32_t counter{};read_self(image_base+d2vr::taa_history::frame_counter_rva,&counter,sizeof counter);
             if(alternate_taa_phase) counter=*alternate_taa_phase;
             jitter_counter[eye_slot]=counter;
-            const auto j=d2vr::engine_taa_jitter(counter,static_cast<float>(taa_width.load()),static_cast<float>(taa_height.load()));
+            const auto j=d2vr::taa_sample_uv(counter,dlss_jitter_mode.load(std::memory_order_relaxed),static_cast<float>(taa_width.load()),static_cast<float>(taa_height.load()));
             auto pj=j;pj.x*=taa_jitter_scale[0];pj.y*=taa_jitter_scale[1];d2vr::apply_taa_jitter(*optical,pj);taa_view_jitter={j.x*taa_jitter_scale[2],j.y*taa_jitter_scale[3]};
         }
         d2vr::Vec3 centre{
@@ -5880,7 +5889,16 @@ std::string feedback_status_json() {
     }
     out << "],\"fsr4_requested\":" << (fsr_taa.fsr4_provider_path.empty()?"false":"true")
         << ",\"fsr4_create_failures\":" << fsr_taa.fsr4_create_failures.load() << ",\"fsr4_dispatches\":" << fsr_taa.fsr4_dispatches.load()
-        << ",\"fsr4_fallbacks\":" << fsr_taa.fsr4_fallbacks.load() << "},\"wrist_hud\":{\"samples\":" << d2vr::NativeWristHud::samples.load()
+        << ",\"fsr4_fallbacks\":" << fsr_taa.fsr4_fallbacks.load()
+        << ",\"dlss\":{\"provider_found\":" << (dlss_provider_found?"true":"false") << ",\"provider_source\":" << dlss_provider_source << ",\"provider\":\"" << dlss_provider_utf8
+        << "\",\"offered\":" << (dlss_offered()?"true":"false") << ",\"adapter_vendor\":" << present_adapter_vendor.load() << ",\"active\":" << (fsr_taa.dlss_active.load()?"true":"false")
+        << ",\"quality\":" << (fsr_taa.dlss_quality.load()?"true":"false") << ",\"state\":" << fsr_taa.dlss_state.load() << ",\"jitter_owner\":" << (dlss_jitter_mode.load()?"true":"false")
+        << ",\"evaluations\":" << fsr_taa.dlss_evaluations.load() << ",\"evaluate_failures\":" << fsr_taa.dlss_evaluate_failures.load() << ",\"create_failures\":" << fsr_taa.dlss_create_failures.load()
+        << ",\"fallbacks\":" << fsr_taa.dlss_fallbacks.load() << ",\"owner_refusals\":" << fsr_taa.dlss_owner_refusals.load() << ",\"owner_status\":" << fsr_taa.dlss_owner_status.load()
+        << ",\"features_created\":" << fsr_taa.dlss_features_created.load() << ",\"optimal_queries\":" << fsr_taa.dlss_optimal_queries.load() << ",\"waiting\":" << fsr_taa.dlss_waiting.load() << ",\"owner_rebuilds\":" << fsr_taa.dlss_owner_rebuilds.load()
+        << ",\"optimal\":[" << fsr_taa.dlss_optimal_width.load() << ',' << fsr_taa.dlss_optimal_height.load() << "],\"quality_fraction\":" << fsr_taa.dlss_quality_fraction.load()
+        << ",\"last_reason\":\"" << d2vr::DlssEyeUpscaler::reason_name(static_cast<d2vr::DlssEyeUpscaler::Reason>(fsr_taa.dlss_last_reason.load())) << "\",\"last_result\":" << fsr_taa.dlss_last_result.load() << '}'
+        << "},\"wrist_hud\":{\"samples\":" << d2vr::NativeWristHud::samples.load()
         << ",\"rejected\":" << d2vr::NativeWristHud::rejected.load() << ",\"layers\":[" << xr_wrist_layers[0] << ',' << xr_wrist_layers[1]
         << "],\"optional_failures\":" << (game_xr?game_xr->wrist_failures:0) << ",\"wait_timeouts\":" << (game_xr?game_xr->wrist_timeouts:0)
         << ",\"target_creations\":" << (game_xr?game_xr->wrist_target_creations:0) << ",\"last_hresult\":" << (game_xr?game_xr->wrist_failure_hresult:0)
@@ -7105,7 +7123,10 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                 if(panel.texture) ui_dump(L"hud",panel.texture.Get());
                             }
                             const auto now_status=GetTickCount64();
-                            if(now_status-upscale_verify_tick>=100) {apply_upscale(upscale_fraction);upscale_verify_tick=now_status;}
+                            if(now_status-upscale_verify_tick>=100) {
+                                if(d2vr::dlss_mode::is_quality(temporal_live_mode.load())) upscale_fraction=aa_mode_fraction(temporal_live_mode.load()); // NGX optimal render size, once known
+                                apply_upscale(upscale_fraction);upscale_verify_tick=now_status;
+                            }
                             if(gameplay && now_status-wrist_refresh_tick>=100) {
                                 wrist_latest=d2vr::NativeWristHud::snapshot();game_xr->wrist_hud(wrist_latest);wrist_refresh_tick=now_status;
                             } else if(!gameplay) game_xr->wrist_hud({});
@@ -7127,6 +7148,25 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                             acknowledge_native_hud_art();
                             if(taa_capture_csv.is_open()) {taa_capture.drain(context.Get(),frames.load(),taa_capture_csv);taa_capture_b2.drain(context.Get(),frames.load(),taa_capture_b2_csv);}
                             if(d2vr::GlyphSwap::enabled.load()) d2vr::GlyphSwap::process(context.Get());
+                            if(!present_adapter_vendor.load(std::memory_order_relaxed)) { // once: DLSS is offered on NVIDIA adapters only (license supplement 1)
+                                ComPtr<IDXGIDevice> dxgi_device;ComPtr<IDXGIAdapter> dxgi_adapter;DXGI_ADAPTER_DESC adapter_desc{};
+                                if(SUCCEEDED(chain->GetDevice(IID_PPV_ARGS(&dxgi_device))) && SUCCEEDED(dxgi_device->GetAdapter(&dxgi_adapter)) && SUCCEEDED(dxgi_adapter->GetDesc(&adapter_desc)) && adapter_desc.VendorId)
+                                    present_adapter_vendor=adapter_desc.VendorId;
+                                else present_adapter_vendor=1; // unknown: never NVIDIA
+                            }
+                            {   // DLSS: offered to the menus, selected from the live mode, and it owns the jitter while engaged.
+                                const int live_mode=temporal_live_mode.load();
+                                game_xr->dlss_available(dlss_offered());
+                                fsr_taa.dlss_quality=d2vr::dlss_mode::is_quality(live_mode);
+                                fsr_taa.dlss_active=d2vr::dlss_mode::active(live_mode) && dlss_offered();
+                                dlss_jitter_mode=fsr_taa.dlss_active.load() && fsr_taa.dlss_engaged() && view_jitter_abi;
+                                if(fsr_taa.dlss_failed() && !dlss_fallback_noted) {
+                                    dlss_fallback_noted=true;
+                                    const auto dlss_reason=static_cast<d2vr::DlssEyeUpscaler::Reason>(fsr_taa.dlss_last_reason.load());
+                                    std::ostringstream dlss_note;dlss_note<<"DLSS unavailable ("<<d2vr::DlssEyeUpscaler::reason_name(dlss_reason)<<", NGX 0x"<<std::hex<<static_cast<unsigned>(fsr_taa.dlss_last_result.load())<<std::dec<<"): FSR 3 for this session";
+                                    note_recoverable(dlss_note.str().c_str());
+                                }
+                            }
                             if(fsr_taa.enabled.load()) {ComPtr<ID3D11Device> fsr_device;context->GetDevice(&fsr_device);if(fsr_device) {device_creation_flags=fsr_device->GetCreationFlags();fsr_taa.prepare(fsr_device.Get());}}
                             {ComPtr<ID3D11Device> d;context->GetDevice(&d);if(d) taa_mv_dejitter.prepare(d.Get());}
                             if(simulated_gameplay_script_requested && authored_camera && owner->mode!=0 && pair_ready &&
@@ -7297,7 +7337,7 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                 native_cvars.set(d2vr::NativeCvars::skip_temporal_aa,1);temporal_live_mode=0;taa_live=false;
                                 note_recoverable("Alternate native TAA ownership failed; using spatial AA for this session");
                             }
-                            if(auto requested_temporal=game_xr->take_temporal_request()) {alternate_taa_runtime.invalidate();taa_history.reset_histories();const int request_mode=d2vr::alternate_effective_temporal(alternate_on(),*requested_temporal,alternate_native_taa_allowed());const int* request=&request_mode;temporal_live_mode=*request;native_cvars.set(d2vr::NativeCvars::skip_temporal_aa,*request?0:1);taa_live=*request!=0;fsr_taa.enabled=*request>=2;fsr_taa.fsr4_active=*request>=5;if(*request>=2) fsr_taa.request_reset();upscale_fraction=aa_mode_fraction(*request);reset_perf_governor(*request);apply_upscale(upscale_fraction);}
+                            if(auto requested_temporal=game_xr->take_temporal_request()) {alternate_taa_runtime.invalidate();taa_history.reset_histories();const int request_mode=d2vr::alternate_effective_temporal(alternate_on(),*requested_temporal,alternate_native_taa_allowed());const int* request=&request_mode;temporal_live_mode=*request;native_cvars.set(d2vr::NativeCvars::skip_temporal_aa,*request?0:1);taa_live=*request!=0;fsr_taa.enabled=*request>=2;fsr_taa.fsr4_active=d2vr::dlss_mode::fsr4(*request);fsr_taa.dlss_quality=d2vr::dlss_mode::is_quality(*request);fsr_taa.dlss_active=d2vr::dlss_mode::active(*request) && dlss_offered();if(*request>=2) fsr_taa.request_reset();upscale_fraction=aa_mode_fraction(*request);reset_perf_governor(*request);apply_upscale(upscale_fraction);}
                             if(const auto request=game_xr->take_turning_request()) {
                                 turning_config=*request;if(!turn_ramp_enabled) turning_config.ramp_s=0;native_turning.configure(turning_config);
                                 native_turning_requested=request->mode!=d2vr::TurnControl::Mode::native;
@@ -9086,6 +9126,28 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
          fsr_taa.fsr4_provider_path=fs::exists(provider) && !fs::exists(root/L"build"/L"fsr4.off")?provider.wstring():std::wstring{};}
         fsr_taa.fsr4_create_failures=0;fsr_taa.fsr4_dispatches=0;fsr_taa.fsr4_fallbacks=0;
         for(unsigned side=0;side<2;++side) {fsr_taa.eye_upscaler_generation[side]=0;fsr_taa.eye_fsr4_version[side]=0;}
+        {   // DLSS provider: the user's nvngx_dlss.dll in the mod home, else build/dlss-dll-path (the DLL or its folder). Never bundled.
+            std::string knob_bytes;{std::ifstream knob(root/L"build"/L"dlss-dll-path",std::ios::binary);std::getline(knob,knob_bytes);}
+            std::wstring knob_text;
+            if(!knob_bytes.empty()) {
+                const int length=MultiByteToWideChar(CP_UTF8,0,knob_bytes.data(),static_cast<int>(knob_bytes.size()),nullptr,0);
+                if(length>0) {knob_text.resize(static_cast<std::size_t>(length));MultiByteToWideChar(CP_UTF8,0,knob_bytes.data(),static_cast<int>(knob_bytes.size()),knob_text.data(),length);}
+            }
+            const auto provider=d2vr::resolve_dlss_provider(root,knob_text,[](const fs::path& candidate) {std::error_code ec;return fs::is_regular_file(candidate,ec);});
+            dlss_provider_found=provider.has_value();dlss_provider_source=provider?(provider->source==d2vr::DlssProvider::Source::mod_home?1:2):0;
+            fsr_taa.dlss_provider_directory=provider?provider->directory.wstring():std::wstring{};
+            fsr_taa.dlss_cache_directory=(output/L"ngx").wstring();
+            dlss_provider_utf8.clear();
+            if(provider) {
+                const auto wide=(provider->directory/L"nvngx_dlss.dll").wstring();
+                const int length=WideCharToMultiByte(CP_UTF8,0,wide.c_str(),-1,nullptr,0,nullptr,nullptr);
+                if(length>1) {dlss_provider_utf8.resize(static_cast<std::size_t>(length-1));WideCharToMultiByte(CP_UTF8,0,wide.c_str(),-1,dlss_provider_utf8.data(),length,nullptr,nullptr);}
+                for(auto& ch:dlss_provider_utf8) if(ch=='"' || ch=='\\' || static_cast<unsigned char>(ch)<32) ch='/';
+            }
+            fsr_taa.dlss_evaluations=0;fsr_taa.dlss_evaluate_failures=0;fsr_taa.dlss_create_failures=0;fsr_taa.dlss_fallbacks=0;fsr_taa.dlss_owner_refusals=0;
+            fsr_taa.dlss_features_created=0;fsr_taa.dlss_optimal_queries=0;fsr_taa.dlss_waiting=0;fsr_taa.dlss_owner_rebuilds=0;fsr_taa.dlss_quality_fraction=d2vr::dlss_mode::default_quality_fraction;
+            dlss_fallback_noted=false;present_adapter_vendor=0;dlss_jitter_mode=false;
+        }
         native_prompt_probe_calls=0;native_prompt_probe.configure(image_base,&read_self);d2vr::NativeWristHud::observer=&native_hud_call_observer;
         fsr_taa.timing_enabled=!native_gpu_requested && !render_perf_requested.load();
         fsr_taa.fsr4_compute_timing_enabled=render_perf_requested.load() || fs::exists(root/L"build"/L"fsr4-compute-timing");
@@ -9100,15 +9162,23 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
                 fsr_taa.configure(fc);if(taa_preference<2) taa_preference=2;
             }
         }
+        {   // diagnostics: build/dlss-jitter-sign "x y" (each +1 or -1) flips the jitter DLSS receives per axis; FSR keeps its own.
+            std::ifstream sign_knob(root/L"build"/L"dlss-jitter-sign");float sign_x{},sign_y{};
+            if(sign_knob>>sign_x>>sign_y && std::abs(sign_x)==1.f && std::abs(sign_y)==1.f) {
+                d2vr::FsrTaa::Config fc{};std::ifstream fsr_knob(root/L"build"/L"fsr");
+                std::array<float*,3> field_list{&fc.sharpness,&fc.mv_x,&fc.mv_y};for(auto* field:field_list) {float value{};if(!(fsr_knob>>value)) break;*field=value;}
+                fc.mv_full=fs::exists(root/L"build"/L"fsr-mv-full");fc.dlss_jitter_x=sign_x;fc.dlss_jitter_y=sign_y;fsr_taa.configure(fc);
+            }
+        }
         if(fs::exists(root/L"build"/L"force-taa") && !taa_preference) taa_preference=1;
-        {std::ifstream knob(root/L"build"/L"aa-mode");int mode=-1;if(knob>>mode && mode>=0 && mode<=6) taa_preference=mode;} // diagnostics: 0 off, 1 TAA, 2-4 FSR 3, 5-6 FSR 4
+        {std::ifstream knob(root/L"build"/L"aa-mode");int mode=-1;if(knob>>mode && mode>=0 && mode<=d2vr::dlss_mode::last) taa_preference=mode;} // diagnostics: 0 off, 1 TAA, 2-4 FSR 3, 5-6 FSR 4, 7 DLAA, 8 DLSS Quality
         if(fs::exists(root/L"build"/L"fsr4") && taa_preference>=2 && taa_preference<=3) taa_preference+=3; // legacy knob: FSR 4 at the same scale
         alternate_native_taa_enabled=!fs::exists(root/L"build"/L"no-alternate-native-taa");
         alternate_native_taa_abi=alternate_native_taa_enabled && d2vr::alternate_taa::verified_abi(&read_self,image_base) && verify_view_jitter_abi();
         alternate_taa_runtime.configure(&read_self,&write_taa_state);
         const bool alternate_taa_requested=alternate_native_taa_abi && !fs::exists(root/L"build"/L"no-per-eye-taa") && !fs::exists(root/L"build"/L"no-projection-jitter");
         taa_preference=d2vr::alternate_effective_temporal(alternate_on(),taa_preference,alternate_taa_requested);
-        fsr_taa.fsr4_active=taa_preference>=5;
+        fsr_taa.fsr4_active=d2vr::dlss_mode::fsr4(taa_preference);fsr_taa.dlss_quality=d2vr::dlss_mode::is_quality(taa_preference);fsr_taa.dlss_active=false; // DLSS engages in the Present loop once the adapter is known
         temporal_live_mode=taa_preference;
         upscale_fraction=aa_mode_fraction(taa_preference);
         perf_governor_enabled=fs::exists(root/L"build"/L"governor");reset_perf_governor(taa_preference);

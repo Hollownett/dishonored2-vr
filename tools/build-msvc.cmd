@@ -14,6 +14,10 @@ cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MD /Isrc tests\dlss_lifecycle_ch
 if errorlevel 1 goto build_failed
 build\dlss_lifecycle_check.exe
 if errorlevel 1 goto build_failed
+cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MD /Isrc tests\dlss_mode_check.cpp /Fo:build\dlss_mode_check.obj /Fe:build\dlss_mode_check.exe
+if errorlevel 1 goto build_failed
+build\dlss_mode_check.exe
+if errorlevel 1 goto build_failed
 cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MD tests\audio_listener_pose_check.cpp /Fo:build\audio_listener_pose_check.obj /Fe:build\audio_listener_pose_check.exe
 if errorlevel 1 goto build_failed
 if not errorlevel 0 goto build_failed
@@ -1035,13 +1039,15 @@ cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT tests\gpu_pass_timer_check.cp
 if not "%errorlevel%"=="0" exit /b 1
 build\gpu_pass_timer_check.exe
 if not "%errorlevel%"=="0" exit /b 1
-cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MD /Ithird_party\minhook\include /Ithird_party\fidelityfx tests\fsr_taa_gpu_check.cpp /Fo:build\fsr_taa_gpu_check.obj /Fe:build\fsr_taa_gpu_check.exe /link d3d11.lib dxgi.lib d3dcompiler.lib third_party\fidelityfx\libs\ffx_backend_dx11_x64.lib third_party\fidelityfx\libs\ffx_fsr3_x64.lib third_party\fidelityfx\libs\ffx_fsr3upscaler_x64.lib third_party\fidelityfx\libs\ffx_frameinterpolation_x64.lib third_party\fidelityfx\libs\ffx_opticalflow_x64.lib
+cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MD /Ithird_party\minhook\include /Ithird_party\fidelityfx tests\fsr_taa_gpu_check.cpp /Fo:build\fsr_taa_gpu_check.obj /Fe:build\fsr_taa_gpu_check.exe /link d3d11.lib dxgi.lib d3dcompiler.lib advapi32.lib user32.lib uuid.lib third_party\dlss\lib\nvsdk_ngx_d.lib third_party\fidelityfx\libs\ffx_backend_dx11_x64.lib third_party\fidelityfx\libs\ffx_fsr3_x64.lib third_party\fidelityfx\libs\ffx_fsr3upscaler_x64.lib third_party\fidelityfx\libs\ffx_frameinterpolation_x64.lib third_party\fidelityfx\libs\ffx_opticalflow_x64.lib
 if not "%errorlevel%"=="0" exit /b 1
 build\fsr_taa_gpu_check.exe
 if not "%errorlevel%"=="0" exit /b 1
 build\fsr_taa_gpu_check.exe --fsr4
 if not "%errorlevel%"=="0" exit /b 1
 build\fsr_taa_gpu_check.exe --fsr4-missing
+if not "%errorlevel%"=="0" exit /b 1
+build\fsr_taa_gpu_check.exe --dlss-env
 if not "%errorlevel%"=="0" exit /b 1
 cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MD /Ithird_party\fidelityfx tests\fsr4_eye_upscaler_check.cpp /Fo:build\fsr4_eye_upscaler_check.obj /Fe:build\fsr4_eye_upscaler_check.exe /link d3d11.lib dxgi.lib
 if not "%errorlevel%"=="0" exit /b 1

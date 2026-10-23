@@ -57,6 +57,7 @@ private:
         std::array<Slot,capacity> slots;
         std::mutex mutex;
         DWORD thread{};
+        bool thread_affine=true; // false: the caller serializes every call on whichever thread owns the immediate context now
         D3D_FEATURE_LEVEL level{};
         UINT flags{};
         std::uint64_t identity{},serial{};
@@ -69,7 +70,7 @@ private:
     static auto& registry_mutex() {static std::mutex value;return value;}
     std::shared_ptr<State> state_;
     explicit D3D11TemporalOwner(std::shared_ptr<State> state):state_(std::move(state)) {}
-    static Status access(const State& s) noexcept {return GetCurrentThreadId()==s.thread?Status::ok:Status::wrong_thread;}
+    static Status access(const State& s) noexcept {return !s.thread_affine || GetCurrentThreadId()==s.thread?Status::ok:Status::wrong_thread;}
     static Slot* find(State& s,Ticket ticket) noexcept {
         if(!ticket || ticket.owner!=s.identity)return nullptr;
         for(auto& slot:s.slots)if(slot.phase!=Phase::free && slot.ticket.serial==ticket.serial)return &slot;
@@ -194,11 +195,14 @@ public:
     D3D11TemporalOwner& operator=(const D3D11TemporalOwner&)=delete;
     D3D11TemporalOwner(D3D11TemporalOwner&&)=default;
     D3D11TemporalOwner& operator=(D3D11TemporalOwner&&)=default;
-    static std::optional<D3D11TemporalOwner> prepare(ID3D11Device* device,ID3D11DeviceContext* immediate,Result& result) noexcept {
+    // thread_affine=true (the standalone checks): every later call must come from this thread. false (the renderer):
+    // the game executes its command lists from more than one thread, one at a time, and the caller makes every call
+    // from the thread that owns the immediate context at that moment, under its own lock.
+    static std::optional<D3D11TemporalOwner> prepare(ID3D11Device* device,ID3D11DeviceContext* immediate,Result& result,bool thread_affine=true) noexcept {
         result={Status::unsupported,E_INVALIDARG};
         if(!device || !immediate)return {};
         try {
-            auto state=std::make_shared<State>();state->thread=GetCurrentThreadId();
+            auto state=std::make_shared<State>();state->thread=GetCurrentThreadId();state->thread_affine=thread_affine;
             Ptr<ID3D11Device> actual_device;immediate->GetDevice(&actual_device);
             Ptr<ID3D11DeviceContext> canonical;device->GetImmediateContext(&canonical);
             Ptr<IUnknown> actual_device_id,canonical_id;

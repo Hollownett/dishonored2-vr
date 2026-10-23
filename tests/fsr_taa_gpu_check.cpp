@@ -30,9 +30,11 @@ static void settle(d2vr::GpuPassTimer& timer,ID3D11DeviceContext* context,std::u
     while(timer.stats().samples+timer.stats().disjoint<count && GetTickCount64()<deadline) {timer.poll(context);Sleep(1);}
     check(timer.stats().samples+timer.stats().disjoint>=count,"GPU query completion timed out");
 }
+// dlss: a directory holding the user's nvngx_dlss.dll. The production seam then runs the NGX backend (DLAA at
+// fraction 1, DLSS Quality below it) with the same synthetic inputs; every eye dispatch must be an NGX evaluation.
 static void run(ID3D11Device* device,ID3D11DeviceContext* context,float fraction,const std::wstring& provider={},bool expect_fsr4=false,
     DXGI_FORMAT native_colour=DXGI_FORMAT_R8G8B8A8_UNORM,UINT native_mips=1,bool actual100=false,const std::string& output_path={},
-    DXGI_FORMAT output_format=DXGI_FORMAT_R8G8B8A8_UNORM) {
+    DXGI_FORMAT output_format=DXGI_FORMAT_R8G8B8A8_UNORM,const std::wstring& dlss={}) {
     const UINT w=actual100?2112:2496,h=actual100?2304:2688;
     std::vector<DirectX::PackedVector::HALF> hdr(size_t(w)*h*4),motion(size_t(w)*h*2,0);
     std::vector<unsigned char> ldr(size_t(w)*h*4);
@@ -73,15 +75,20 @@ static void run(ID3D11Device* device,ID3D11DeviceContext* context,float fraction
 #endif
 #ifndef D2VR_FSR_BASELINE
     fsr->fsr4_provider_path=provider;
+    if(!dlss.empty()) {
+        fsr->dlss_provider_directory=dlss;fsr->dlss_cache_directory=std::filesystem::absolute(L"build/ngx-cache").wstring();
+        fsr->dlss_active=true;fsr->dlss_quality=fraction<.999f;
+    }
 #else
-    check(provider.empty(),"The archived baseline has no FSR4 backend");
+    check(provider.empty() && dlss.empty(),"The archived baseline has no FSR4 or DLSS backend");
 #endif
     std::printf("fraction %.2f resources created\n",fraction);
     fsr->observe_depth(dsv.Get());check(!fsr->replace(deferred.Get(),0,b,1.6f,0,0),"unprepared pass keeps native TAA");fsr->prepare(device);
     check(fsr->ready,"FSR prepared");d2vr::TaaDispatchHook::finish_original=&finish;std::puts("contexts prepared");
+
     d2vr::GpuPassTimer timer;check(timer.prepare(device),"GPU timestamp queries");
     Ptr<ID3D11Query> completed;
-    if(!provider.empty()) {D3D11_QUERY_DESC q{};q.Query=D3D11_QUERY_EVENT;check(SUCCEEDED(device->CreateQuery(&q,&completed)),"Diagnostic completion query");}
+    if(!provider.empty() || !dlss.empty()) {D3D11_QUERY_DESC q{};q.Query=D3D11_QUERY_EVENT;check(SUCCEEDED(device->CreateQuery(&q,&completed)),"Diagnostic completion query");}
     const auto pair=[&](unsigned frame) {
         for(int side=0;side<2;++side) {
             deferred->ClearDepthStencilView(dsv.Get(),D3D11_CLEAR_DEPTH,.05f,0);
@@ -105,6 +112,24 @@ static void run(ID3D11Device* device,ID3D11DeviceContext* context,float fraction
             check(context->GetData(completed.Get(),nullptr,0,D3D11_ASYNC_GETDATA_DONOTFLUSH)==S_OK,"Diagnostic GPU completion timeout");}
     };
     for(unsigned i=0;i<8;++i) {pair(i);settle_pair();if(!i) std::puts("first eye pair executed");}
+#ifndef D2VR_FSR_BASELINE
+    if(!dlss.empty()) {
+        // The first dispatch on the executing thread created the features (Quality: after NGX's optimal settings) and
+        // every warm-up eye already went through NGX; the EVENT tickets are polled on that same thread.
+        std::printf("DLSS state=%u features_created=%llu optimal=%ux%u quality_fraction=%.4f create_failures=%llu reason=%s result=%d owner_status=%u rebuilds=%llu\n",
+            fsr->dlss_state.load(),static_cast<unsigned long long>(fsr->dlss_features_created.load()),fsr->dlss_optimal_width.load(),fsr->dlss_optimal_height.load(),
+            fsr->dlss_quality_fraction.load(),static_cast<unsigned long long>(fsr->dlss_create_failures.load()),
+            d2vr::DlssEyeUpscaler::reason_name(static_cast<d2vr::DlssEyeUpscaler::Reason>(fsr->dlss_last_reason.load())),fsr->dlss_last_result.load(),fsr->dlss_owner_status.load(),
+            static_cast<unsigned long long>(fsr->dlss_owner_rebuilds.load()));
+        std::printf("DLSS warm-up evaluations=%llu failures=%llu fallbacks=%llu owner_refusals=%llu generation=[%u,%u]\n",
+            static_cast<unsigned long long>(fsr->dlss_evaluations.load()),static_cast<unsigned long long>(fsr->dlss_evaluate_failures.load()),
+            static_cast<unsigned long long>(fsr->dlss_fallbacks.load()),static_cast<unsigned long long>(fsr->dlss_owner_refusals.load()),
+            fsr->eye_upscaler_generation[0].load(),fsr->eye_upscaler_generation[1].load());
+        check(fsr->dlss_state.load()==static_cast<unsigned>(d2vr::DlssFallback::State::active),"NGX features created for the production seam");
+        if(fraction<.999f) check(fsr->dlss_optimal_width.load()<w && fsr->dlss_optimal_height.load()<h,"DLSS Quality optimal render size below the output");
+        check(fsr->dlss_evaluations==16 && fsr->dlss_evaluate_failures==0 && fsr->dlss_fallbacks==0,"every warm-up eye was an NGX evaluation");
+    }
+#endif
 #if defined(D2VR_FSR4_COMPUTE_TIMING) && !defined(D2VR_FSR_BASELINE)
     fsr->poll_fsr4_gpu_timing();
     std::array<std::uint64_t,2> compute_start_samples{};std::array<double,2> compute_start_ms{};
@@ -143,6 +168,13 @@ static void run(ID3D11Device* device,ID3D11DeviceContext* context,float fraction
     const auto dispatches=2ull*(8+samples);
     check(measured.samples==samples && measured.disjoint==0 && fsr->failures==0 && fsr->create_failures==0 && fsr->replaced==dispatches,"successful measured eye dispatches");
 #ifndef D2VR_FSR_BASELINE
+    if(!dlss.empty()) {
+        check(fsr->dlss_evaluations==dispatches && fsr->dlss_evaluate_failures==0 && fsr->dlss_fallbacks==0 && fsr->dlss_create_failures==0,"every measured eye was an NGX evaluation");
+        check(fsr->eye_upscaler_generation[0]==d2vr::dlss_mode::generation && fsr->eye_upscaler_generation[1]==d2vr::dlss_mode::generation,"both eyes report the DLSS backend");
+        std::printf("DLSS per-eye evaluations=%llu over %llu dispatches, owner_refusals=%llu, features_created=%llu\n",
+            static_cast<unsigned long long>(fsr->dlss_evaluations.load()),static_cast<unsigned long long>(dispatches),
+            static_cast<unsigned long long>(fsr->dlss_owner_refusals.load()),static_cast<unsigned long long>(fsr->dlss_features_created.load()));
+    }
     if(expect_fsr4) {
         check(fsr->fsr4_create_failures==0 && fsr->fsr4_fallbacks==0 && fsr->fsr4_dispatches==dispatches,"All per-eye jobs must use the genuine FSR4 provider");
         check(fsr->eye_upscaler_generation[0]==4 && fsr->eye_upscaler_generation[1]==4 && fsr->eye_fsr4_version[0] && fsr->eye_fsr4_version[1],"Both eyes must report actual FSR4 provider identities");
@@ -154,7 +186,7 @@ static void run(ID3D11Device* device,ID3D11DeviceContext* context,float fraction
     }
 #endif
 #ifndef D2VR_FSR_BASELINE
-    if(fraction<.999f && !actual100) {
+    if(fraction<.999f && !actual100 && dlss.empty()) {
         // Governor steps: a smaller (then the original) fraction reuses the contexts, a larger one rebuilds once.
         const auto builds=fsr->context_builds.load(),replaced=fsr->replaced.load(),ml_before=fsr->fsr4_dispatches.load();
         for(const float f:{fraction-.07f,fraction}) {fsr->fraction=f;fsr->prepare(device);check(fsr->ready,"resized FSR ready");pair(40);settle_pair();pair(41);settle_pair();}
@@ -185,6 +217,17 @@ static void run(ID3D11Device* device,ID3D11DeviceContext* context,float fraction
     }
     context->Unmap(readback.Get(),0);
     check(std::isfinite(red) && red>.4f && red<.6f,"FSR colour result valid");
+#ifndef D2VR_FSR_BASELINE
+    if(!dlss.empty()) {
+        // Deselecting retires the pair; a resize and a mode switch must recreate cleanly and the fallback must stay FSR 3.
+        const auto created=fsr->dlss_features_created.load();
+        fsr->dlss_active=false;pair(60);settle_pair();
+        check(fsr->dlss_state.load()==static_cast<unsigned>(d2vr::DlssFallback::State::off) && fsr->eye_upscaler_generation[0]==3,"deselected DLSS hands the eye back to FSR 3");
+        fsr->dlss_active=true;pair(61);settle_pair();
+        check(fsr->dlss_features_created==created+1 && fsr->eye_upscaler_generation[0]==d2vr::dlss_mode::generation && fsr->dlss_evaluate_failures==0,"re-selected DLSS recreates its features");
+        std::printf("DLSS reselect: features_created=%llu evaluations=%llu\n",static_cast<unsigned long long>(fsr->dlss_features_created.load()),static_cast<unsigned long long>(fsr->dlss_evaluations.load()));
+    }
+#endif
     std::printf("fraction=%.2f render=%ux%u display=%ux%u samples=%llu GPU_pair_mean_ms=%.6f max_ms=%.6f output_red=%.4f\n",fraction,static_cast<UINT>(std::lround(w*fraction)),static_cast<UINT>(std::lround(h*fraction)),w,h,static_cast<unsigned long long>(measured.samples),measured.total_ms/static_cast<double>(measured.samples),measured.max_ms,red);
     if(actual100) std::printf("GPU_pair_total_ms=%.6f CPU_pair_submit_total_ms=%.6f CPU_pair_submit_mean_ms=%.6f pixel_fnv1a64=%016llx pixel_bytes=%llu\n",
         measured.total_ms,cpu_total_ms,cpu_total_ms/samples,static_cast<unsigned long long>(pixel_hash),static_cast<unsigned long long>(w)*h*4);
@@ -207,7 +250,7 @@ int main(int argc,char** argv) {
 #else
         std::puts("FSR wrapper candidate: cropped input copy and active-size depth work");
 #endif
-        std::wstring provider;
+        std::wstring provider,dlss;
         bool ml=false,missing=false,actual100=false;std::string output_path;
         DXGI_FORMAT output_format=DXGI_FORMAT_R8G8B8A8_UNORM;
         for(int i=1;i<argc;++i) {
@@ -220,7 +263,21 @@ int main(int argc,char** argv) {
                 output_format=arg=="--output-srgb"?DXGI_FORMAT_R8G8B8A8_UNORM_SRGB:DXGI_FORMAT_R8G8B8A8_TYPELESS;
             }
             else if(arg=="--output" && i+1<argc) output_path=argv[++i];
+            else if(arg=="--dlss" && i+1<argc) {const std::string narrow=argv[++i];dlss.assign(narrow.begin(),narrow.end());}
+            else if(arg=="--dlss-env") {
+                // The harness lane: the provider directory comes from D2VR_DLSS_PROVIDER_DIR; without it the lane is a skip.
+                wchar_t value[1024]{};const auto n=GetEnvironmentVariableW(L"D2VR_DLSS_PROVIDER_DIR",value,1024);
+                if(!n || n>=1024) {std::puts("DLSS provider not configured (D2VR_DLSS_PROVIDER_DIR): skipped");return 0;}
+                dlss.assign(value,n);
+            }
             else check(false,"Unknown GPU check argument");
+        }
+        if(!dlss.empty()) {
+            check(!ml && !missing && !actual100,"The DLSS lane runs alone");
+            std::wprintf(L"DLSS provider directory %ls\n",dlss.c_str());
+            run(device.Get(),context.Get(),1.f,{},false,DXGI_FORMAT_R8G8B8A8_UNORM,1,false,{},DXGI_FORMAT_R8G8B8A8_UNORM,dlss);
+            run(device.Get(),context.Get(),.67f,{},false,DXGI_FORMAT_R8G8B8A8_UNORM,1,false,{},DXGI_FORMAT_R8G8B8A8_UNORM,dlss);
+            std::puts("PASS: DLAA and DLSS Quality NGX evaluations through the production FsrTaa seam; synthetic scene, not game-frame quality");return 0;
         }
         check(!(ml && missing),"Select one FSR provider");
         check(output_path.empty() || actual100,"Pixel dump requires --100-percent");

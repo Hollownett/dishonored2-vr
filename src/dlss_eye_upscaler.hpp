@@ -63,13 +63,21 @@ public:
         decltype(&NVSDK_NGX_D3D11_ReleaseFeature) release{};
         decltype(&NVSDK_NGX_D3D11_DestroyParameters) destroy{};
         decltype(&NVSDK_NGX_D3D11_Shutdown1) shutdown{};
+        // Parameter map access for the optimal-settings callback (the SDK's NGX_DLSS_GET_OPTIMAL_SETTINGS helper
+        // is not in the pinned header closure; the same calls are made here).
+        decltype(&NVSDK_NGX_Parameter_SetUI) set_ui{};
+        decltype(&NVSDK_NGX_Parameter_SetI) set_i{};
+        decltype(&NVSDK_NGX_Parameter_GetUI) get_ui{};
+        decltype(&NVSDK_NGX_Parameter_GetVoidPointer) get_void_pointer{};
         bool same_as(const Calls& other) const noexcept {
             return init == other.init && capability == other.capability && allocate == other.allocate &&
                 get_i == other.get_i && create == other.create && evaluate == other.evaluate &&
-                release == other.release && destroy == other.destroy && shutdown == other.shutdown;
+                release == other.release && destroy == other.destroy && shutdown == other.shutdown &&
+                set_ui == other.set_ui && set_i == other.set_i && get_ui == other.get_ui && get_void_pointer == other.get_void_pointer;
         }
         bool complete() const noexcept {
-            return init && capability && allocate && get_i && create && evaluate && release && destroy && shutdown;
+            return init && capability && allocate && get_i && create && evaluate && release && destroy && shutdown &&
+                set_ui && set_i && get_ui && get_void_pointer;
         }
 #ifdef _WIN32
         static Calls production() noexcept {
@@ -77,15 +85,30 @@ public:
                 &NVSDK_NGX_D3D11_AllocateParameters, &NVSDK_NGX_Parameter_GetI,
                 &NGX_D3D11_CREATE_DLSS_EXT, &NGX_D3D11_EVALUATE_DLSS_EXT,
                 &NVSDK_NGX_D3D11_ReleaseFeature, &NVSDK_NGX_D3D11_DestroyParameters,
-                &NVSDK_NGX_D3D11_Shutdown1};
+                &NVSDK_NGX_D3D11_Shutdown1, &NVSDK_NGX_Parameter_SetUI, &NVSDK_NGX_Parameter_SetI,
+                &NVSDK_NGX_Parameter_GetUI, &NVSDK_NGX_Parameter_GetVoidPointer};
         }
 #endif
     };
+    // The SDK's optimal-settings callback signature (nvsdk_ngx_helpers.h PFN_NVSDK_NGX_DLSS_GetOptimalSettingsCallback).
+    using OptimalSettingsCallback = NVSDK_NGX_Result(NVSDK_CONV*)(NVSDK_NGX_Parameter*);
     enum class Reason { none, disabled, invalid_calls, invalid_paths, missing_provider, provider_signature,
         cache_unwritable, provider_selection_unverified, coexistence_unsupported, invalid_context, wrong_device, invalid_dimensions, invalid_conventions,
         registry_full, owner_conflict, retry_suppressed, init_failed, capability_failed, capability_query_failed,
         unavailable, driver_update, allocate_failed, create_failed, duplicate_history, invalid_resource,
-        stale_generation, retired, evaluate_failed };
+        stale_generation, retired, evaluate_failed, optimal_unsupported, optimal_failed, count };
+    static const char* reason_name(Reason reason) noexcept {
+        static constexpr const char* names[] = {"none", "disabled", "invalid_calls", "invalid_paths", "missing_provider", "provider_signature",
+            "cache_unwritable", "provider_selection_unverified", "coexistence_unsupported", "invalid_context", "wrong_device", "invalid_dimensions", "invalid_conventions",
+            "registry_full", "owner_conflict", "retry_suppressed", "init_failed", "capability_failed", "capability_query_failed",
+            "unavailable", "driver_update", "allocate_failed", "create_failed", "duplicate_history", "invalid_resource",
+            "stale_generation", "retired", "evaluate_failed", "optimal_unsupported", "optimal_failed"};
+        static_assert(sizeof names / sizeof names[0] == static_cast<unsigned>(Reason::count), "reason names");
+        const auto index = static_cast<unsigned>(reason);
+        return index < static_cast<unsigned>(Reason::count) ? names[index] : "unknown";
+    }
+    enum class Quality { dlaa, quality }; // NVSDK_NGX_PerfQuality_Value_DLAA / _MaxQuality
+    struct OptimalSettings { unsigned optimal_width{}, optimal_height{}, max_width{}, max_height{}, min_width{}, min_height{}; };
     struct Status {
         Reason reason = Reason::disabled;
         NVSDK_NGX_Result result = NVSDK_NGX_Result_Success;
@@ -99,7 +122,9 @@ public:
     };
     enum class Format { rgba16_float, rgba8_unorm, r11g11b10_float, r32_float, rg16_float };
     struct Desc {
-        unsigned width{}, height{}; // T2 exposes fixed-size DLAA only. Quality arrives in T6.
+        unsigned width{}, height{};               // output (display) size of each eye
+        unsigned render_width{}, render_height{}; // input size; 0 = same as the output (DLAA)
+        Quality quality = Quality::dlaa;          // DLAA needs render == output; Quality takes the optimal-settings render size
         Format colour = Format::rgba16_float, output = Format::rgba16_float;
         std::uint64_t device_generation{}, dimension_generation{}, feature_generation{}, retry_generation{};
         temporal_eye::JitterContract jitter;
@@ -226,10 +251,13 @@ private:
     ID3D11Device* last_device_{};
     ID3D11DeviceContext* last_context_{};
     bool attempted_{};
+    static unsigned render_w(const Desc& d) noexcept { return d.render_width ? d.render_width : d.width; }
+    static unsigned render_h(const Desc& d) noexcept { return d.render_height ? d.render_height : d.height; }
     static bool same(const Desc& a, const Desc& b) noexcept {
         // Phase/jitter values change each rendered frame; the create contract uses
         // the sequence generation supplied through feature_generation, not phase.
         return a.width == b.width && a.height == b.height && a.colour == b.colour && a.output == b.output &&
+            render_w(a) == render_w(b) && render_h(a) == render_h(b) && a.quality == b.quality &&
             a.device_generation == b.device_generation && a.dimension_generation == b.dimension_generation &&
             a.feature_generation == b.feature_generation && a.retry_generation == b.retry_generation &&
             a.motion == b.motion && a.colour_contract == b.colour_contract &&
@@ -248,7 +276,11 @@ private:
             c.auto_exposure == (c.exposure == temporal_eye::ExposureSource::automatic);
     }
     static bool dimensions(const Desc& d) noexcept {
-        return d.width && d.height && d.width <= 16384 && d.height <= 16384 &&
+        const unsigned rw = render_w(d), rh = render_h(d);
+        // Guide: the output must be at least 64x32; DLAA renders at the output size, Quality below it.
+        return d.width >= 64 && d.height >= 32 && d.width <= 16384 && d.height <= 16384 &&
+            rw && rh && rw <= d.width && rh <= d.height &&
+            (d.quality == Quality::dlaa ? (rw == d.width && rh == d.height) : (rw < d.width || rh < d.height)) &&
             d.device_generation && d.dimension_generation && d.feature_generation &&
             (d.colour == Format::rgba16_float || d.colour == Format::rgba8_unorm || d.colour == Format::r11g11b10_float) &&
             (d.output == Format::rgba16_float || d.output == Format::rgba8_unorm || d.output == Format::r11g11b10_float);
@@ -282,6 +314,59 @@ private:
         status_.reason = reason; status_.result = result; status_.eye = eye;
         cached_status_ = status_; return false;
     }
+    // Finds or initializes the NGX Core for this device/context/paths (shared by prepare and optimal_settings). A
+    // Core that fails capability checks is destroyed here (capability map, then shutdown) and never retained.
+    Reason acquire_core_locked(ID3D11Device* device, ID3D11DeviceContext* context, const Paths& paths, std::uint64_t device_generation, NVSDK_NGX_Result& result) {
+        result = NVSDK_NGX_Result_Success;
+        if (core_ && (core_->device != device || core_->context != context || core_->device_generation != device_generation)) core_.reset();
+        if (core_) {
+            if (core_->paths.provider_directory != paths.provider_directory || core_->paths.cache_directory != paths.cache_directory) return Reason::owner_conflict;
+            return Reason::none;
+        }
+        std::weak_ptr<Core>* free_core = nullptr;
+        for (auto& weak : cores()) {
+            auto existing = weak.lock();
+            if (!existing) { if (!free_core) free_core = &weak; continue; }
+            if (existing->device == device) {
+                // Do not initialize/shutdown an already owned device through another table/context/path.
+                if (existing->context != context || existing->device_generation != device_generation || !existing->calls.same_as(calls_) ||
+                    existing->validation.get() != validation_.get() || existing->paths.provider_directory != paths.provider_directory ||
+                    existing->paths.cache_directory != paths.cache_directory) return Reason::owner_conflict;
+                core_ = std::move(existing); return Reason::none;
+            }
+        }
+        if (!free_core) return Reason::registry_full;
+        const auto foreign = validation_->before_init(paths);
+        if (foreign != Reason::none) return foreign;
+        auto c = std::make_shared<Core>();
+        c->calls = calls_; c->validation = validation_; c->device = device; c->context = context; c->paths = paths;
+        c->device_generation = device_generation;
+        c->device_lease = validation_->hold_device(device); c->context_lease = validation_->hold_context(context);
+        if (!c->device_lease || !c->context_lease) return Reason::wrong_device;
+        c->search[0] = c->paths.provider_directory.c_str();
+        c->common.PathListInfo.Path = c->search; c->common.PathListInfo.Length = 1;
+        result = calls_.init("d1c5ea6c-f92c-48f9-898d-df8cc7d5f3b4", NVSDK_NGX_ENGINE_TYPE_CUSTOM,
+            "dishonored2-vr-dlss-1", c->paths.cache_directory.c_str(), device, &c->common, NVSDK_NGX_Version_API);
+        if (ngx_failed(result) || result != NVSDK_NGX_Result_Success) return Reason::init_failed;
+        c->initialized = true;
+        result = calls_.capability(&c->capability);
+        const bool duplicate_capability = map_owned(c->capability);
+        if (duplicate_capability) c->capability = nullptr;
+        if (duplicate_capability && result == NVSDK_NGX_Result_Success) return Reason::duplicate_history;
+        if (ngx_failed(result) || result != NVSDK_NGX_Result_Success || !c->capability) return Reason::capability_failed;
+        int available = 0, driver = 0;
+        result = calls_.get_i(c->capability, NVSDK_NGX_Parameter_SuperSampling_Available, &available);
+        if (ngx_failed(result) || result != NVSDK_NGX_Result_Success) return Reason::capability_query_failed;
+        result = calls_.get_i(c->capability, NVSDK_NGX_Parameter_SuperSampling_NeedsUpdatedDriver, &driver);
+        if (ngx_failed(result) || result != NVSDK_NGX_Result_Success) return Reason::capability_query_failed;
+        status_.driver_major_result = calls_.get_i(c->capability, NVSDK_NGX_Parameter_SuperSampling_MinDriverVersionMajor, &status_.driver_major);
+        status_.driver_minor_result = calls_.get_i(c->capability, NVSDK_NGX_Parameter_SuperSampling_MinDriverVersionMinor, &status_.driver_minor);
+        status_.feature_init_query_result = calls_.get_i(c->capability, NVSDK_NGX_Parameter_SuperSampling_FeatureInitResult, &status_.feature_init_result);
+        if (driver) return Reason::driver_update;
+        if (!available) return Reason::unavailable;
+        c->status = status_; core_ = c; *free_core = c;
+        return Reason::none;
+    }
     static int flags(const Desc& d) noexcept {
         int f{};
         if (d.colour_contract.hdr) f |= NVSDK_NGX_DLSS_Feature_Flags_IsHDR;
@@ -291,9 +376,11 @@ private:
         if (d.mv_low_resolution) f |= NVSDK_NGX_DLSS_Feature_Flags_MVLowRes;
         return f;
     }
+    // Inputs may be larger than the render size (the engine renders a dynamic-resolution subrect at the top left and
+    // DLSS reads InRenderSubrectDimensions); the output must match the feature's target size exactly.
     static bool matches(Core& c, ID3D11Resource* resource, unsigned w, unsigned h, Format f, bool output = false) noexcept {
         Surface s;
-        return resource && c.validation->surface(c.device, resource, s) && s.width == w && s.height == h &&
+        return resource && c.validation->surface(c.device, resource, s) && (output ? (s.width == w && s.height == h) : (s.width >= w && s.height >= h)) &&
             s.mip_levels == 1 && s.array_size == 1 && s.sample_count == 1 && s.sample_quality == 0 &&
             s.format == f && (!output || s.unordered_access);
     }
@@ -308,6 +395,12 @@ public:
     void disable() noexcept {
         std::lock_guard<std::mutex> lock(mutex());
         retire_active_locked(); core_.reset(); status_.reason = Reason::disabled; attempted_ = false;
+    }
+    // Retires the active pair (its features are released after GPU retirement) but keeps the initialized Core for
+    // the next prepare on this device: mode switches and resizes neither shut NGX down nor re-initialize it.
+    void retire() noexcept {
+        std::lock_guard<std::mutex> lock(mutex());
+        retire_active_locked(); status_.reason = Reason::disabled; attempted_ = false;
     }
     Status status() const {
         std::lock_guard<std::mutex> lock(mutex()); auto result = status_;
@@ -349,55 +442,10 @@ public:
         std::shared_ptr<Pair>* slot = nullptr;
         for (auto& p : pairs()) if (!p && !slot) slot = &p;
         if (!slot) return fail(Reason::registry_full);
-        if (core_ && (core_->device != device || core_->context != context || core_->device_generation != desc.device_generation)) core_.reset();
-        if (!core_) {
-            std::weak_ptr<Core>* free_core = nullptr;
-            for (auto& weak : cores()) {
-                auto existing = weak.lock();
-                if (!existing) { if (!free_core) free_core = &weak; continue; }
-                if (existing->device == device) {
-                    // Do not initialize/shutdown an already owned device through another table/context/path.
-                    if (existing->context != context || existing->device_generation != desc.device_generation || !existing->calls.same_as(calls_) ||
-                        existing->validation.get() != validation_.get() || existing->paths.provider_directory != paths.provider_directory ||
-                        existing->paths.cache_directory != paths.cache_directory) return fail(Reason::owner_conflict);
-                    core_ = std::move(existing); break;
-                }
-            }
-            if (!core_) {
-                if (!free_core) return fail(Reason::registry_full);
-                const auto foreign = validation_->before_init(paths);
-                if (foreign != Reason::none) return fail(foreign);
-                auto c = std::make_shared<Core>();
-                c->calls = calls_; c->validation = validation_; c->device = device; c->context = context; c->paths = paths;
-                c->device_generation = desc.device_generation;
-                c->device_lease = validation_->hold_device(device); c->context_lease = validation_->hold_context(context);
-                if (!c->device_lease || !c->context_lease) return fail(Reason::wrong_device);
-                c->search[0] = c->paths.provider_directory.c_str();
-                c->common.PathListInfo.Path = c->search; c->common.PathListInfo.Length = 1;
-                auto result = calls_.init("d1c5ea6c-f92c-48f9-898d-df8cc7d5f3b4", NVSDK_NGX_ENGINE_TYPE_CUSTOM,
-                    "dishonored2-vr-dlss-1", c->paths.cache_directory.c_str(), device, &c->common, NVSDK_NGX_Version_API);
-                if (ngx_failed(result) || result != NVSDK_NGX_Result_Success) return fail(Reason::init_failed, result);
-                c->initialized = true;
-                result = calls_.capability(&c->capability);
-                const bool duplicate_capability = map_owned(c->capability);
-                if (duplicate_capability) c->capability = nullptr;
-                if (duplicate_capability && result == NVSDK_NGX_Result_Success)
-                    return fail(Reason::duplicate_history, result);
-                if (ngx_failed(result) || result != NVSDK_NGX_Result_Success || !c->capability) return fail(Reason::capability_failed, result);
-                int available = 0, driver = 0;
-                result = calls_.get_i(c->capability, NVSDK_NGX_Parameter_SuperSampling_Available, &available);
-                if (ngx_failed(result) || result != NVSDK_NGX_Result_Success) return fail(Reason::capability_query_failed, result);
-                result = calls_.get_i(c->capability, NVSDK_NGX_Parameter_SuperSampling_NeedsUpdatedDriver, &driver);
-                if (ngx_failed(result) || result != NVSDK_NGX_Result_Success) return fail(Reason::capability_query_failed, result);
-                status_.driver_major_result = calls_.get_i(c->capability, NVSDK_NGX_Parameter_SuperSampling_MinDriverVersionMajor, &status_.driver_major);
-                status_.driver_minor_result = calls_.get_i(c->capability, NVSDK_NGX_Parameter_SuperSampling_MinDriverVersionMinor, &status_.driver_minor);
-                status_.feature_init_query_result = calls_.get_i(c->capability, NVSDK_NGX_Parameter_SuperSampling_FeatureInitResult, &status_.feature_init_result);
-                if (driver) return fail(Reason::driver_update);
-                if (!available) return fail(Reason::unavailable);
-                c->status = status_; core_ = c; *free_core = c;
-            }
-        } else if (core_->paths.provider_directory != paths.provider_directory || core_->paths.cache_directory != paths.cache_directory) {
-            return fail(Reason::owner_conflict);
+        {
+            NVSDK_NGX_Result core_result = NVSDK_NGX_Result_Success;
+            const auto core_reason = acquire_core_locked(device, context, paths, desc.device_generation, core_result);
+            if (core_reason != Reason::none) return fail(core_reason, core_result);
         }
         auto pair = std::make_shared<Pair>(); pair->core = core_; pair->desc = desc; pair->serial = next_serial();
         auto abort_pair = [&](Reason reason, NVSDK_NGX_Result result, int eye) {
@@ -415,9 +463,9 @@ public:
                 return abort_pair(duplicate_map && result == NVSDK_NGX_Result_Success ? Reason::duplicate_history : Reason::allocate_failed,
                                   result, static_cast<int>(eye));
             NVSDK_NGX_DLSS_Create_Params create{};
-            create.Feature.InWidth = create.Feature.InTargetWidth = desc.width;
-            create.Feature.InHeight = create.Feature.InTargetHeight = desc.height;
-            create.Feature.InPerfQualityValue = NVSDK_NGX_PerfQuality_Value_DLAA;
+            create.Feature.InWidth = render_w(desc); create.Feature.InHeight = render_h(desc);
+            create.Feature.InTargetWidth = desc.width; create.Feature.InTargetHeight = desc.height;
+            create.Feature.InPerfQualityValue = desc.quality == Quality::dlaa ? NVSDK_NGX_PerfQuality_Value_DLAA : NVSDK_NGX_PerfQuality_Value_MaxQuality;
             create.InFeatureCreateFlags = flags(desc);
             result = calls_.create(context, &e.handle, e.parameters, &create);
             const bool duplicate_handle = handle_owned(e.handle, pair.get(), &e);
@@ -433,6 +481,47 @@ public:
         pair->status.reason = Reason::none;
         *slot = pair; active_ = std::move(pair); status_.reason = Reason::none; cached_status_ = status_;
         return true;
+    }
+    // Serialized optimal-settings query for an output size (the SDK's NGX_DLSS_GET_OPTIMAL_SETTINGS on the capability
+    // map). Initializes the Core like prepare but creates no feature and leaves the cached prepare status alone.
+    Reason optimal_settings(ID3D11Device* device, ID3D11DeviceContext* context, const Paths& paths, std::uint64_t device_generation,
+                            unsigned output_width, unsigned output_height, Quality quality, OptimalSettings& out, NVSDK_NGX_Result* result_out = nullptr) {
+        std::lock_guard<std::mutex> lock(mutex());
+        out = {};
+        NVSDK_NGX_Result result = NVSDK_NGX_Result_Success;
+        const auto done = [&](Reason reason) { if (result_out) *result_out = result; return reason; };
+        if (!calls_.complete() || !validation_) return done(Reason::invalid_calls);
+        if (!output_width || !output_height) return done(Reason::invalid_dimensions);
+        const auto context_reason = validation_->context(device, context);
+        if (context_reason != Reason::none) return done(context_reason);
+        if (core_ && core_->device == device && core_->context != context) return done(Reason::invalid_context);
+        const auto path_reason = validation_->paths(paths);
+        if (path_reason != Reason::none) return done(path_reason);
+        const auto core_reason = acquire_core_locked(device, context, paths, device_generation, result);
+        if (core_reason != Reason::none) return done(core_reason);
+        void* callback = nullptr;
+        result = calls_.get_void_pointer(core_->capability, NVSDK_NGX_Parameter_DLSSOptimalSettingsCallback, &callback);
+        if (ngx_failed(result) || result != NVSDK_NGX_Result_Success || !callback) return done(Reason::optimal_unsupported);
+        calls_.set_ui(core_->capability, NVSDK_NGX_Parameter_Width, output_width);
+        calls_.set_ui(core_->capability, NVSDK_NGX_Parameter_Height, output_height);
+        calls_.set_i(core_->capability, NVSDK_NGX_Parameter_PerfQualityValue,
+            static_cast<int>(quality == Quality::dlaa ? NVSDK_NGX_PerfQuality_Value_DLAA : NVSDK_NGX_PerfQuality_Value_MaxQuality));
+        calls_.set_i(core_->capability, NVSDK_NGX_Parameter_RTXValue, 0);
+        result = reinterpret_cast<OptimalSettingsCallback>(callback)(core_->capability);
+        if (ngx_failed(result) || result != NVSDK_NGX_Result_Success) return done(Reason::optimal_failed);
+        unsigned* fields[] = {&out.optimal_width, &out.optimal_height, &out.max_width, &out.max_height, &out.min_width, &out.min_height};
+        const char* keys[] = {NVSDK_NGX_Parameter_OutWidth, NVSDK_NGX_Parameter_OutHeight,
+            NVSDK_NGX_Parameter_DLSS_Get_Dynamic_Max_Render_Width, NVSDK_NGX_Parameter_DLSS_Get_Dynamic_Max_Render_Height,
+            NVSDK_NGX_Parameter_DLSS_Get_Dynamic_Min_Render_Width, NVSDK_NGX_Parameter_DLSS_Get_Dynamic_Min_Render_Height};
+        for (unsigned i = 0; i < 6; ++i) {
+            result = calls_.get_ui(core_->capability, keys[i], fields[i]);
+            if (ngx_failed(result) || result != NVSDK_NGX_Result_Success) return done(Reason::optimal_failed);
+        }
+        // Guide: a zero optimal size means the quality mode is unsupported for this output size.
+        if (!out.optimal_width || !out.optimal_height || out.optimal_width > output_width || out.optimal_height > output_height ||
+            out.min_width > out.optimal_width || out.min_height > out.optimal_height ||
+            out.max_width < out.optimal_width || out.max_height < out.optimal_height) return done(Reason::optimal_failed);
+        return done(Reason::none);
     }
     // Job lease retains Pair/Core/device/maps and generation scratch even across
     // disable/resize. Retired generations refuse evaluation but remain GPU-owned.
@@ -455,11 +544,12 @@ public:
             !std::isfinite(in.jitter.previous_x) || !std::isfinite(in.jitter.previous_y) ||
             !in.jitter.phase_count || in.jitter.phase >= in.jitter.phase_count ||
             !std::isfinite(in.frame_time_ms) || in.frame_time_ms <= 0 || !in.scratch_owner) return fail_eval(Reason::invalid_conventions);
+        const unsigned rw = render_w(p.desc), rh = render_h(p.desc);
         if (in.colour == in.output || in.depth == in.output || in.motion == in.output ||
-            !matches(c, in.colour, p.desc.width, p.desc.height, p.desc.colour) ||
+            !matches(c, in.colour, rw, rh, p.desc.colour) ||
             !matches(c, in.output, p.desc.width, p.desc.height, p.desc.output, true) ||
-            !matches(c, in.depth, p.desc.width, p.desc.height, Format::r32_float) ||
-            !matches(c, in.motion, p.desc.width, p.desc.height, Format::rg16_float) ||
+            !matches(c, in.depth, rw, rh, Format::r32_float) ||
+            !matches(c, in.motion, rw, rh, Format::rg16_float) ||
             (in.colour_contract.exposure == temporal_eye::ExposureSource::texture && !matches(c, in.exposure, 1, 1, Format::r32_float)) ||
             (in.colour_contract.exposure != temporal_eye::ExposureSource::texture && in.exposure)) return fail_eval(Reason::invalid_resource);
         if (p.scratch_owner && (p.scratch_owner.owner_before(in.scratch_owner) ||
@@ -470,7 +560,7 @@ public:
         eval.Feature.pInColor = in.colour; eval.Feature.pInOutput = in.output;
         eval.pInDepth = in.depth; eval.pInMotionVectors = in.motion;
         eval.InJitterOffsetX = in.jitter.current_x; eval.InJitterOffsetY = in.jitter.current_y;
-        eval.InRenderSubrectDimensions = {p.desc.width, p.desc.height};
+        eval.InRenderSubrectDimensions = {rw, rh};
         eval.InReset = eye.reset || in.discontinuity || in.jitter.reset_history ||
             (eye.frame && (in.frame != eye.frame + 1 || in.pair != eye.pair + 1));
         eval.InMVScaleX = in.motion_contract.scale_x; eval.InMVScaleY = in.motion_contract.scale_y;
@@ -561,9 +651,18 @@ private:
             if (scan_end != ERROR_NO_MORE_FILES) return L"?";
             return count > 1 ? L"?" : found;
         }
-        Reason before_init(const Paths&) noexcept override {
-            try { return loaded_provider().empty() ? Reason::none : Reason::coexistence_unsupported; }
-            catch (...) { return Reason::coexistence_unsupported; }
+        Reason before_init(const Paths& paths) noexcept override {
+            try {
+                const auto loaded = loaded_provider();
+                if (loaded.empty()) return Reason::none;
+                if (loaded == L"?") return Reason::coexistence_unsupported;
+                // Our own provider stays loaded after an earlier initialization in this process; another integration's does not pass.
+                std::error_code ec;
+                const auto expected = std::filesystem::canonical(std::filesystem::path(paths.provider_directory) / L"nvngx_dlss.dll", ec);
+                if (ec) return Reason::coexistence_unsupported;
+                const auto actual = std::filesystem::canonical(loaded, ec);
+                return !ec && _wcsicmp(expected.c_str(), actual.c_str()) == 0 ? Reason::none : Reason::coexistence_unsupported;
+            } catch (...) { return Reason::coexistence_unsupported; }
         }
         Reason observed_provider(const Paths& paths, std::wstring& observed) noexcept override {
             try {
