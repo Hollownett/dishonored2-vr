@@ -85,6 +85,9 @@ struct SpikeConfig {
     double radius=.05;            // 5 cm sphere
     double drop_height=.30;       // created this far above the floor
     double settle_min_s=.3,settle_window_s=.5,settle_eps_m=.002,settle_max_s=4;
+    double wake_speed=.1;         // one downward velocity write right after creation: createBody's activation is forced to 0 when world+0x818
+                                  // is 0 (Q3), and a sleeping body does not fall (sim 20261023T231836: z unchanged until the first write)
+    double moved_min_m=.01;       // "settled" needs the body to have fallen at least this far first (a body that never moved has not settled)
     double floor_tol_m=.03;       // settle_z within this of floor + radius counts as resting on the floor
     double press_s=5,press_speed=.5;
     double life_s=20;             // the body is destroyed this long after its creation
@@ -93,7 +96,7 @@ struct SpikeConfig {
 struct SpikeReport {
     SpikeRoute route{};bool created{},collided_with_floor{},destroyed{},faulted{};double settle_z{},player_drift_m{};std::uint64_t ticks{};
     // Extras for the run log.
-    bool refused{},abandoned{},destroy_attempted{},settled{},stop_requested{};
+    bool refused{},abandoned{},destroy_attempted{},settled{},stop_requested{},woke{},moved{};double spawn_z{};
     std::uint32_t handle{};std::optional<std::uint32_t> flags_after_destroy;
     double floor_z{std::numeric_limits<double>::quiet_NaN()},created_at_s{-1},destroyed_at_s{-1};
     std::uint64_t busy_waits{},pushes{},create_calls{},destroy_calls{},destroy_refusals{},unreadable_ticks{};
@@ -210,8 +213,16 @@ private:
         }
         const double t=now_s-report_.created_at_s;
         if(stage_==Stage::settle) {
+            if(!report_.woke) {   // the wake write: once, straight down, before any settle judgement
+                report_.woke=true;report_.spawn_z=p->z;
+                if(e.push && life_.can_write(0,w,report_.handle)) {
+                    try {if(e.push(report_.handle,Vec3{0,0,-config_.wake_speed})) ++report_.pushes;} catch(const SpikeFault&) {fault("wake write faulted");return;} catch(const SpikeUnreadable&) {}
+                }
+                return;
+            }
+            if(report_.spawn_z-p->z>=config_.moved_min_m) report_.moved=true;
             if(!std::isfinite(settle_ref_z_) || std::abs(p->z-settle_ref_z_)>config_.settle_eps_m) {settle_ref_z_=p->z;settle_ref_t_=now_s;}
-            const bool still=t>=config_.settle_min_s && now_s-settle_ref_t_>=config_.settle_window_s;
+            const bool still=report_.moved && t>=config_.settle_min_s && now_s-settle_ref_t_>=config_.settle_window_s;
             if(still || t>=config_.settle_max_s) {
                 report_.settled=still;report_.settle_z=p->z;
                 report_.collided_with_floor=still && std::isfinite(report_.floor_z) &&

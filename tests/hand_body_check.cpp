@@ -13,6 +13,7 @@ struct FakeWorld {
     Vec3 player{0,0,0};
     int tick=0,busy_until=-1,world_change_at=-1,player_push_at=-1,fault_create=0,fault_push_at=-1,fault_destroy=0,refuse_destroys=0,unreadable_from=-1,unreadable_to=-1;
     bool create_fault_leaves_body=false;
+    bool sleeps=false,asleep=false;   // a body created asleep does not move until a velocity write wakes it (createBody activation forced to 0)
     bool busy_now=false;
     int creates=0,destroys=0,pushes=0,reads=0,creates_while_busy=0,destroys_while_busy=0,calls_after_change=0;
     bool changed=false;
@@ -22,7 +23,7 @@ struct FakeWorld {
             ++tick;busy_now=tick<busy_until;
             if(world_change_at>=0 && tick>=world_change_at && !changed) {changed=true;world_id=0x2000;alive=false;}
             if(player_push_at>=0 && tick==player_push_at) player.x+=.003;
-            if(alive) {   // integrate: gravity, floor contact, the pushed horizontal velocity
+            if(alive && !asleep) {   // integrate: gravity, floor contact, the pushed velocity
                 const double dt=1./60;vel.z-=9.81*dt;pos=pos+vel*dt;
                 if(pos.z<=radius) {pos.z=radius;vel.z=0;}
             }
@@ -35,7 +36,7 @@ struct FakeWorld {
                 if(create_fault_leaves_body) {alive=true;handle=next;pos=at;vel={};radius=r;throw SpikeFault("fake create fault after insert",handle);}
                 throw SpikeFault("fake create fault");
             }
-            alive=true;handle=next;pos=at;vel={};radius=r;h=handle;return true;
+            alive=true;handle=next;pos=at;vel={};radius=r;h=handle;asleep=sleeps;return true;
         };
         e.destroy=[this](std::uint32_t h) {
             ++destroys;if(busy_now) ++destroys_while_busy;if(changed) ++calls_after_change;
@@ -51,7 +52,7 @@ struct FakeWorld {
             ++pushes;if(changed) ++calls_after_change;
             if(fault_push_at>=0 && tick>=fault_push_at) throw SpikeFault("fake push fault");
             if(!alive || h!=handle) return false;
-            vel.x=v.x;vel.y=v.y;return true;
+            vel=v;asleep=false;return true;
         };
         return e;
     }
@@ -77,6 +78,17 @@ int main() {
         CHECK(r.created);CHECK(r.settled);CHECK(std::abs(r.settle_z-.05)<=.01);CHECK(r.collided_with_floor);
         CHECK(r.destroyed);CHECK(!r.faulted);CHECK(f.creates==1);CHECK(f.destroys==1);CHECK(!f.alive);CHECK(!r.flags_after_destroy);
         CHECK(r.pushes>200);CHECK(r.player_drift_m==0);CHECK(r.destroyed_at_s>=12);CHECK(!HandBodyFault::tripped());
+    }
+    {   // a body created asleep: the wake write makes it fall; settling is never judged on a body that has not moved
+        FakeWorld f;f.sleeps=true;auto e=f.engine();
+        const auto r=run_spike(e,SpikeRoute::R1,kAt,0,12);
+        CHECK(r.woke);CHECK(r.moved);CHECK(r.settled);CHECK(std::abs(r.settle_z-.05)<=.01);CHECK(r.collided_with_floor);CHECK(r.destroyed);
+    }
+    {   // a body that never moves (no wake effect): not settled, no floor claim
+        FakeWorld f;f.sleeps=true;auto e=f.engine();e.push=[](std::uint32_t,Vec3) {return true;};   // writes accepted but the body stays asleep
+        SpikeConfig c;c.life_s=6;SpikeRunner run(SpikeRoute::R1,kAt,0,c);double t=0;
+        for(;t<5 && !run.done();t+=1./60) run.tick(e,t);
+        CHECK(run.report().created);CHECK(!run.report().moved);CHECK(!run.report().settled);CHECK(!run.report().collided_with_floor);
     }
     {   // floor not where the body rests: no collision claimed
         FakeWorld f;auto e=f.engine();const auto r=run_spike(e,SpikeRoute::R1,kAt,-.5,8);

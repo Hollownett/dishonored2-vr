@@ -512,6 +512,7 @@ private:
         o<<"},\"floor_z\":"<<(std::isfinite(s.floor_z)?s.floor_z:-1e9)<<",\"player\":\""<<fmt(s.player)<<"\",\"body\":\""<<fmt(s.body)<<'"';
         if(s.report) {const auto& r=*s.report;
             o<<",\"spike\":{\"stage\":"<<s.stage<<",\"created\":"<<(r.created?"true":"false")<<",\"handle\":"<<r.handle<<",\"created_at_s\":"<<r.created_at_s
+             <<",\"woke\":"<<(r.woke?"true":"false")<<",\"moved\":"<<(r.moved?"true":"false")<<",\"spawn_z\":"<<r.spawn_z
              <<",\"settled\":"<<(r.settled?"true":"false")<<",\"settle_z\":"<<r.settle_z<<",\"collided_with_floor\":"<<(r.collided_with_floor?"true":"false")
              <<",\"player_drift_m\":"<<r.player_drift_m<<",\"pushes\":"<<r.pushes<<",\"busy_waits\":"<<r.busy_waits<<",\"destroy_attempted\":"<<(r.destroy_attempted?"true":"false")
              <<",\"destroyed\":"<<(r.destroyed?"true":"false")<<",\"destroyed_at_s\":"<<r.destroyed_at_s<<",\"flags_after_destroy\":"<<(r.flags_after_destroy?static_cast<long long>(*r.flags_after_destroy):-1)
