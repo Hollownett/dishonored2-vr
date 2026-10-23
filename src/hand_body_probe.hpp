@@ -148,15 +148,27 @@ template<class Read> std::vector<BodyProbeRow> probe_physics_bodies(Read& read,s
     return rows;
 }
 // Player bodies that resolve: needs the camera address (the interface of the brief has no camera, so it is a defaulted fourth argument; 0 gives no rows).
+// When a stage fails a "diag_*" row says which (userdata column = the address or pointer involved), so a run with no player rows is still informative.
+// If the strict query source is refused, the camera's own physics object and the controller handle are used instead (the same reads, fewer cross-checks).
 template<class Read> std::vector<BodyProbeRow> probe_player_bodies(Read& read,std::uintptr_t base,std::uint64_t tick,std::uintptr_t camera_address=0) {
-    if(!camera_address) return {};
+    std::vector<BodyProbeRow> rows;
+    if(!camera_address) return rows;
+    const auto diag=[&](const char* what,std::uintptr_t detail) {BodyProbeRow row;row.tick=tick;row.what=what;row.userdata=detail;rows.push_back(row);};
     const auto game=rig::value<std::uintptr_t>(read,base+0x39a5290);
-    if(!game) return {};
+    if(!game) {diag("diag_no_game",0);return rows;}
     const auto world=rig::value<std::uintptr_t>(read,*game+0x60410);
-    if(!world) return {};
+    if(!world) {diag("diag_no_world",*game);return rows;}
     const auto source=native_world_query_source(read,base,camera_address,*world);
-    if(!source) return {};
-    return probe_physics_bodies(read,base,*world,source->physics,source->handle,tick,source->player);
+    if(source) return probe_physics_bodies(read,base,*world,source->physics,source->handle,tick,source->player);
+    const auto camera=native_player_camera(read,base,camera_address);
+    if(!camera) {diag("diag_no_camera",camera_address);return rows;}
+    diag("diag_no_query_source",camera_address);
+    std::uint32_t query_handle=0;
+    if(const auto controller=rig::value<std::uintptr_t>(read,camera->heading_delegate+0x148); controller && rig::pointer(*controller))
+        query_handle=rig::value<std::uint32_t>(read,*controller+0x38).value_or(0);
+    auto fallback=probe_physics_bodies(read,base,*world,camera->physics,query_handle,tick,camera->player);
+    rows.insert(rows.end(),fallback.begin(),fallback.end());
+    return rows;
 }
 template<class Read> std::optional<BodyProbeRow> probe_prop_userdata(Read& read,std::uintptr_t base,const NativeRigidBody& body,std::uint64_t tick) {
     if(!rig::pointer(body.record)) return {};

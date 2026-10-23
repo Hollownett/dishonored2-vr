@@ -97,7 +97,8 @@ int main() {
     // probe_player_bodies_skips_unresolved
     {
         Memory empty;
-        assert(probe_player_bodies(empty,base,1,0x1000).empty());
+        {const auto rows=probe_player_bodies(empty,base,1,0x1000); // unreadable memory: no body row, one diag row that names the failed stage
+         assert(rows.size()==1 && std::string(rows[0].what)=="diag_no_game" && rows[0].handle==0 && rows[0].filter==0);}
         assert(probe_player_bodies(empty,base,1).empty());
         Memory m;
         const std::uintptr_t physics=0x8000000,proxy_object=0x8100000,ud=0x7000000;
