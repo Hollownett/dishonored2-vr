@@ -126,6 +126,12 @@ int main() {
             CHECK(c.step().linear.x==d.step().linear.x);
         }
     }
+    {   // read-back is in written (scaled) units: tf .5 with half the velocity is the same loop as tf 1, output halved
+        Vec3 V{1.5,.7,0};HandServoState s1,s2;
+        auto o1=servo_step(s1,pose({.3,.1,0}),pose({}),V,{},0,1./90,1,HandServoConfig{},GrabTuning{},false);
+        auto o2=servo_step(s2,pose({.3,.1,0}),pose({}),V*.5,{},0,1./90,.5,HandServoConfig{},GrabTuning{},false);
+        CHECK(std::fabs(o2.linear.x-.5*o1.linear.x)<1e-12&&std::fabs(o2.linear.y-.5*o1.linear.y)<1e-12);
+    }
     {   // garbage read-back never reaches the output
         for(Vec3 bad:{Vec3{1e300,0,0},Vec3{101,0,0},Vec3{nan_value,0,0}}) {
             HandServoState st;
