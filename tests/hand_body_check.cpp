@@ -592,16 +592,20 @@ static void b14_checks() {
         CHECK(gap<.01);CHECK(r.hb.drive_status(0).gap_m<.01);CHECK(length(r.w.b[1].pos-r.target[1])<.01);   // the idle hand hovers (gravity compensated)
         CHECK(r.hb.drive_status(0).snaps==0);CHECK(r.hb.status(0).faults==0);CHECK(r.hb.drive_status(0).contact_frames==0);
     }
-    {   // drive_stops_at_wall_and_reports_contact: the target 0.25 m beyond a wall; the body never passes it, contact frames rise, no snap
+    {   // drive_stops_at_wall_and_reports_contact: the target 0.35 m beyond a wall; the body never passes it, contact frames rise, no snap
         // while the target is blocked (the clamp's cast does not show it free)
         HandBodyFault::reset_for_tests();DriveRig r;r.w.wall_x=.6;
         r.tick();
-        r.target[0]=Vec3{.85,.2,1.2};r.free[0]=false;
+        r.target[0]=Vec3{.95,.2,1.2};r.free[0]=false;   // 0.4 m past the wall: past the servo's snap gap
         double max_x=0;
         for(int i=0;i<180;++i) {r.tick();max_x=std::max(max_x,r.w.b[0].pos.x);}
         CHECK(max_x<=.6-.05+1e-9);CHECK(r.hb.drive_status(0).contact_frames>=100);CHECK(r.hb.drive_status(0).snaps==0);
         CHECK(r.w.destroys==0);CHECK(r.hb.drive_status(0).snap_requests==0);CHECK(r.hb.drive_status(1).contact_frames==0);
         CHECK(r.hb.drive_status(0).gap_m>.2);   // lags behind the controller (Bonelab §2.2), still driven
+        CHECK(r.hb.drive_status(0).snap_blocked==0);   // the servo is told the target is blocked: it never even asks for a snap
+        // a blocked far gap (the target 1.4 m away inside geometry): no snap request at all, counted as blocked, never a destroy
+        r.target[0]=Vec3{2.0,.2,1.2};for(int i=0;i<10;++i) r.tick();
+        CHECK(r.hb.drive_status(0).snap_requests==0);CHECK(r.hb.drive_status(0).snap_blocked>=9);CHECK(r.w.destroys==0);
     }
     {   // snap = destroy + recreate at the controller pose, only when the target is free (ruling): the body is stuck behind a wall while the
         // target (on the far side, per the clamp's cast) is free -> after 0.25 s stuck the next idle tick destroys and re-creates it there
