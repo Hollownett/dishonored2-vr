@@ -57,12 +57,13 @@ def _parser():
     s.add_argument("--mod-home", type=Path, help="mod home directory")
     s.add_argument("--candidate-dll", type=Path, metavar="PATH",
                    help="run this DLL instead of the installed one: the installed DLL is backed up, swapped for the run and restored (verified by SHA-256)")
-    s.add_argument("--knob", action="append", metavar="NAME", default=[],
-                   help="write an empty build/NAME dev knob for this run (repeatable; [a-z0-9-]+); removed afterwards whatever happens")
+    s.add_argument("--knob", action="append", metavar="NAME[=VALUE]", default=[],
+                   help="write build/NAME (empty, or VALUE plus a newline) as a dev knob for this run (repeatable; [a-z0-9-]+); "
+                        "removed afterwards whatever happens. E.g. dlss-dll-path=Z:\\...\\nvngx_dlss.dll")
     s.add_argument("--probe-mode", choices=list(sim.PROBE_MODES), default="xr",
                    help="xr (default, simulated headset) or the flat diagnostic modes paired / single (no XR, for the single-view measurement)")
     s.add_argument("--vr-setting", action="append", metavar="KEY=VALUE", default=[],
-                   help="VR setting for this run only (repeatable): temporal_aa 0-6, resolution 0.5-2.0, mirror 2. Your vr-settings.cfg is never read or changed")
+                   help="VR setting for this run only (repeatable): temporal_aa 0-8 (7 DLAA, 8 DLSS quality), resolution 0.5-2.0, mirror 2. Your vr-settings.cfg is never read or changed")
     s.add_argument("--game-cvar", action="append", metavar="NAME=VALUE", default=[],
                    help="append NAME \"VALUE\" to the game config for this run only (repeatable); the verified restore puts your config back")
     s.add_argument("--env", action="append", metavar="KEY=VALUE", default=[],

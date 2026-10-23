@@ -1185,12 +1185,53 @@ class Knobs(FullRun):
         self.assertFalse((self.mod_home / "build/aa-mode").exists())
 
     def test_vr_setting_values_validated(self):
-        for bad in ("temporal_aa=7", "temporal_aa=-1", "temporal_aa=x", "resolution=0.4", "resolution=2.5", "resolution=nan",
+        for bad in ("temporal_aa=9", "temporal_aa=-1", "temporal_aa=x", "resolution=0.4", "resolution=2.5", "resolution=nan",
                     "mirror=3", "mirror=0", "sharpness=1", "resolution", "temporal_aa=1.5"):
             env, seen = self.watched()
             rc, out, err = self.run_cli("--vr-setting", bad, env=env)
             self.assertEqual(rc, 1, bad)
             self.assertNotIn("files", seen)
+
+    def test_vr_setting_dlaa_accepted(self):
+        env, seen = self.watched()
+        rc, out, err = self.run_cli("--vr-setting", "temporal_aa=7", env=env)
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(seen["contents"]["aa-mode"], "7\n")
+        self.assertFalse((self.mod_home / "build/aa-mode").exists())
+
+    def test_vr_setting_dlss_quality_accepted(self):
+        env, seen = self.watched()
+        rc, out, err = self.run_cli("--vr-setting", "temporal_aa=8", env=env)
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(seen["contents"]["aa-mode"], "8\n")
+
+    def test_knob_value_written_and_removed(self):
+        env, seen = self.watched()
+        rc, out, err = self.run_cli("--knob", "dlss-dll-path=Z:\\games\\bin\\nvngx_dlss.dll", "--knob", "native-gpu-timing", env=env)
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(seen["contents"]["dlss-dll-path"], "Z:\\games\\bin\\nvngx_dlss.dll\n")
+        self.assertEqual(seen["contents"]["native-gpu-timing"], "")
+        self.assertFalse((self.mod_home / "build/dlss-dll-path").exists())
+        self.assertFalse((self.mod_home / "build/native-gpu-timing").exists())
+        info = json.loads((next(self.runs.glob("*")) / "run-info.json").read_text())
+        self.assertEqual(info["rig_knobs"], ["dlss-dll-path", "native-gpu-timing"])
+
+    def test_knob_value_validated(self):
+        for bad in ("dlss-dll-path=", "dlss-dll-path=a\nb", "dlss-dll-path=" + "x" * 1025, "Bad=1"):
+            env, seen = self.watched()
+            rc, out, err = self.run_cli("--knob", bad, env=env)
+            self.assertEqual(rc, 1, repr(bad))
+            self.assertIn("--knob", err)
+            self.assertNotIn("files", seen)
+        env, seen = self.watched()
+        self.assertEqual(self.run_cli("--knob", "dlss-dll-path=a", "--knob", "dlss-dll-path=b", env=env)[0], 1)
+        self.assertNotIn("files", seen)
+
+    def test_dry_run_lists_knob_value(self):
+        rc, out, err = self.run_cli("--dry-run", "--knob", "dlss-dll-path=Z:\\games\\bin")
+        self.assertEqual(rc, 0, err)
+        self.assertIn("knob build/dlss-dll-path = Z:\\games\\bin", out)
+        self.assertEqual(sorted(p.name for p in (self.mod_home / "build").iterdir()), ["d2vr_render_probe_arm_v600.dll", "dxgi-probe.cfg"])
 
     def test_vr_setting_conflicts_refused(self):
         env, seen = self.watched()

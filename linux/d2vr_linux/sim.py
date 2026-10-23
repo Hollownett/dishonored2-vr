@@ -36,7 +36,9 @@ KNOBS_NAME = "linux-sim-knobs"  # JSON record of every file the run wrote (relat
 RESERVED_KNOBS = (KNOBS_NAME, AUTOCONTINUE_NAME, SETTLE_NAME, "linux-probe-override", "simulated-gameplay-script")
 RENDER_KNOB_RE = re.compile(r"(aa-|fsr|governor|no-governor|native-gpu|no-mip|force-taa|taa-|upscale|render-|resolution|sharp|no-vr-cvar)")
 NOT_KNOBS = ("dxgi-probe.cfg", "vr-settings.cfg")
-AA_MODE_KNOB = "aa-mode"  # the probe reads build/aa-mode (0..6) as the temporal AA preference
+AA_MODE_KNOB = "aa-mode"  # the probe reads build/aa-mode (0..8) as the temporal AA preference
+AA_MODE_MAX = 8  # vr_preferences.hpp: 0 off .. 6 FSR 4 quality, 7 DLAA, 8 DLSS quality
+KNOB_VALUE_RE = re.compile(r"[\x20-\x7e]{1,1024}")  # one printable line; written with a trailing newline
 KNOB_RE = re.compile(r"[a-z0-9-]+")
 PROBE_MODES = {"xr": 6, "paired": 3, "single": 2}  # dxgi_probe.cpp stereo_flag: 2 single eye, 3 paired (both flat, no XR), 6 head-tracked XR
 ENV_KEYS = ("DXVK_HUD", "DXVK_LOG_LEVEL", "__GL_THREADED_OPTIMIZATIONS")
@@ -542,12 +544,29 @@ def sim_probe_config(seconds, simulated=2, gameplay_script=1, probe_mode="xr", r
 
 
 def parse_knobs(names):
+    """--knob NAME or --knob NAME=VALUE -> the names, in order (values through parse_knob_values)."""
     out = []
     for n in names or ():
-        if not KNOB_RE.fullmatch(n):
-            raise SimError(f"--knob {n!r} must match [a-z0-9-]+ (a file name under build/, no path)")
-        if n not in out:
-            out.append(n)
+        name, _, _ = n.partition("=")
+        if not KNOB_RE.fullmatch(name):
+            raise SimError(f"--knob {n!r} must match [a-z0-9-]+ (a file name under build/, no path), optionally =VALUE")
+        if name not in out:
+            out.append(name)
+    return out
+
+
+def parse_knob_values(names):
+    """--knob NAME=VALUE -> {name: value}; the file gets VALUE plus a newline (e.g. dlss-dll-path=Z:\\...\\nvngx_dlss.dll)."""
+    out = {}
+    for n in names or ():
+        name, eq, value = n.partition("=")
+        if not eq:
+            continue
+        if not KNOB_VALUE_RE.fullmatch(value):
+            raise SimError(f"--knob {name}: the value must be one printable line of at most 1024 characters")
+        if name in out and out[name] != value:
+            raise SimError(f"--knob {name} was given two different values")
+        out[name] = value
     return out
 
 
@@ -600,12 +619,12 @@ def parse_vr_settings(pairs):
                     raise ValueError
                 out[key] = num
             else:
-                if not re.fullmatch(r"[0-9]+", value) or int(value) > (6 if key == "temporal_aa" else 2):
+                if not re.fullmatch(r"[0-9]+", value) or int(value) > (AA_MODE_MAX if key == "temporal_aa" else 2):
                     raise ValueError
                 out[key] = int(value)
         except ValueError:
             raise SimError(f"--vr-setting {item!r}: " + {"resolution": "resolution must be 0.5 to 2.0",
-                           "temporal_aa": "temporal_aa must be an integer 0 to 6",
+                           "temporal_aa": f"temporal_aa must be an integer 0 to {AA_MODE_MAX}",
                            "mirror": "mirror must be 0 (right eye), 1 (left eye) or 2 (both)"}[key])
     if out.get("mirror", 2) != 2:
         raise SimError("--vr-setting mirror: a simulated run cannot apply a mirror mode (the probe reads it only from saved "
@@ -1030,6 +1049,7 @@ def run_sim(a, home, env):
 
 def _run_sim(a, home, env):
     knobs = parse_knobs(getattr(a, "knob", None))
+    knob_values = parse_knob_values(getattr(a, "knob", None))
     launch_env = parse_env(getattr(a, "env", None))
     settings = parse_vr_settings(getattr(a, "vr_setting", None))
     game_cvars = parse_game_cvars(getattr(a, "game_cvar", None))
@@ -1051,7 +1071,8 @@ def _run_sim(a, home, env):
         env.out(f"[sim] script: {script_cfg.splitlines()[0]}")
         env.out(f"[sim] probe mode {probe_mode}")
         for n in knobs:
-            env.out(f"[sim] knob build/{n}" + (f" = {settings['temporal_aa']}" if n == AA_MODE_KNOB and "temporal_aa" in settings else " (empty)"))
+            env.out(f"[sim] knob build/{n}" + (f" = {settings['temporal_aa']}" if n == AA_MODE_KNOB and "temporal_aa" in settings
+                                               else f" = {knob_values[n]}" if n in knob_values else " (empty)"))
         for k, v in launch_env.items():
             env.out(f"[sim] env {k}={v}")
         for n, v in game_cvars:
@@ -1096,7 +1117,8 @@ def _run_sim(a, home, env):
         if a.settle is not None:
             planned[build / SETTLE_NAME] = (str(a.settle) + "\n").encode()
         for n in knobs:
-            planned[build / n] = (f"{settings['temporal_aa']}\n" if n == AA_MODE_KNOB and "temporal_aa" in settings else "").encode()
+            planned[build / n] = (f"{settings['temporal_aa']}\n" if n == AA_MODE_KNOB and "temporal_aa" in settings
+                                  else f"{knob_values[n]}\n" if n in knob_values else "").encode()
         # the record first (a hard kill skips the guard): path -> sha256 of the bytes about to be written
         record = {str(p.relative_to(mod_home)): hashlib.sha256(d).hexdigest() for p, d in planned.items()}
         guard.write(build / KNOBS_NAME, json.dumps({"version": 1, "files": record}, indent=1) + "\n")
