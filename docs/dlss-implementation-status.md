@@ -15,7 +15,8 @@ This checkpoint tracks the [design](superpowers/specs/2026-10-22-dlss-design.md)
   version 8 (`src/vr_preferences.hpp`); version 7 files never carried 7/8 and are migrated unchanged. The VR panel, the
   native options page and the launcher offer the two rows only when the adapter is NVIDIA and a usable provider was
   found, with the NVIDIA DLSS attribution in their help text; a saved DLSS mode on another machine renders with FSR 3
-  and its label says "(unavailable, FSR 3)". The launcher writes version 8 and validates 0..8.
+  and its label says "(unavailable, FSR 3)". The launcher writes version 8 and validates 0..8. Release note: an older
+  DLL rejects a version-8 preferences file and runs on defaults; the file is kept; ship the launcher and DLL together.
 - **Provider.** `resolve_dlss_provider`: `<mod home>\nvngx_dlss.dll`, then `build/dlss-dll-path` (DLL or folder;
   launcher Settings button "DLSS: point to nvngx_dlss.dll from one of your games"). Nothing is copied or bundled;
   the signed DLL is loaded in place through NGX `PathListInfo`, Authenticode-verified by the typed owner.
@@ -67,6 +68,16 @@ This checkpoint tracks the [design](superpowers/specs/2026-10-22-dlss-design.md)
   (per-eye latch). The motion texture DLSS consumes is asserted to be the colour target's size: the engine renders
   colour, depth and motion into the top-left render subrect of its full-size targets, so the Quality feature reads
   render-sized motion content (MVLowRes, FSR scale) from a display-sized texture, exactly as FSR 3 Quality does.
+- **Fix round 2 (2026-10-23, after the re-review).** `dlss_isolated_run` is the isolation policy for NGX lifecycle
+  work: a throw or failure inside the owner's isolation is never re-run and nothing escapes the noexcept frame; only an
+  owner that cannot isolate (wrong thread, state unavailable, busy) falls back to one guarded unisolated run (pure,
+  tested with throwing work and a throwing isolate). A lease the retirement vector cannot take (the vector and the
+  ledger reserve above the SDK's 8 pair slots, so this is theoretical) goes to a non-allocating orphan slot and is
+  confirmed at the next release, never stranded. The Quality waiting branch marks an active pair pending, so the wait
+  budget (`pending_timeout`) covers a resize while active. The jitter-owner latch is written false when a frame has no
+  forced jitter. A CPU lifecycle test (`session_end_cycles`) drives the SDK owner through ten session ends with a held
+  ticket lease (slot reclaimed only after the lease drops), an owner rebuild with a pending ticket and a later session,
+  without `registry_full`.
 - **Default path unchanged.** With no DLSS mode selected nothing new runs: `fsr_taa_gpu_check --100-percent` built
   from the pre-change source (`7ebbd7e`) and from this change produce byte-identical FSR 3 output on the synthetic
   scene (pixel FNV-1a `85c60569fba48b7f`, RGBA sha256 `327d52d8…`, stable run to run;
