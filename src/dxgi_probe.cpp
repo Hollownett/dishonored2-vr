@@ -46,6 +46,7 @@
 #include "native_pad_focus.hpp"
 #include "native_interaction_aim.hpp"
 #include "native_grab.hpp"
+#include "hand_body_spike_engine.hpp"
 #include "finger_ik.hpp"
 #include "finger_snapshot.hpp"
 #include "prop_watch.hpp"
@@ -1475,6 +1476,24 @@ static bool gpu_settled_started=false;
 static unsigned gpu_settled_passes{};
 static std::atomic<DWORD> gpu_render_thread{0};
 static d2vr::HandBodyProbeRunner hand_body_probe_runner;   // B7: read-only hand-body research probe (build/hand-body-probe; one set per second, at most 120)
+// B11: the hand-body creation spike (build/hand-body-spike, content R1/R2/R3, read once at start, logged to hand-body-spike.txt; sim only).
+// Absent knob: nothing is installed (no hook, no counter, no thread). It needs NativeGrab's 0x89fb0 hook (its tick runs there).
+static std::uintptr_t hand_body_spike_camera() {
+    auto camera=camera_address;
+    if(!camera || !d2vr::native_player_camera(read_self,image_base,camera)) camera=native_grab.last_published_camera();
+    return camera;
+}
+static void start_hand_body_spike(const fs::path& root,const fs::path& output) {
+    std::string text;{std::ifstream knob(root/L"build"/L"hand-body-spike");std::getline(knob,text,'\0');}
+    std::ofstream note(output/L"hand-body-spike.txt",std::ios::trunc);
+    note<<"knob build/hand-body-spike read once: \""<<text.substr(0,64)<<"\"\n";
+    const auto route=d2vr::parse_spike_route(text);
+    if(!route) {note<<"invalid route (expected R1, R2 or R3): spike off\n";return;}
+    if(!native_grab.enabled()) {note<<"physical grab (the 0x89fb0 hook) is not installed: spike off\n";return;}
+    std::string why;
+    const bool ok=d2vr::HandBodySpikeEngine::install(image_base,&read_self,&game_logic_mask,&hand_body_spike_camera,*route,output,why);
+    note<<"route "<<d2vr::spike_route_name(*route)<<(ok?": installed":": off")<<(why.empty()?"":" - ")<<why<<'\n';
+}
 static d2vr::HandBodyProbeRunner::Sample hand_body_probe_sample(std::uint64_t tick) {
     d2vr::HandBodyProbeRunner::Sample sample;
     // The camera: the config's address, or (if that does not resolve) the one NativeGrab's publishers hold. A diag row records both.
@@ -9102,9 +9121,10 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
             d2vr::NativeMenuEntry::owned_movie_patch=&d2vr::patch_vr_native_art_movie;
             d2vr::NativeMenuEntry::install(image_base);
         }
-        hand_body_probe_runner.stop();corpse_trace.stop();carry_trace.stop();
+        hand_body_probe_runner.stop();d2vr::HandBodySpikeEngine::stop();corpse_trace.stop();carry_trace.stop();
         if(fs::exists(root/L"build"/L"carry-trace")) carry_trace.start(output/L"native-carry-trace.csv");
         if(fs::exists(root/L"build"/L"hand-body-probe")) hand_body_probe_runner.start(output,&hand_body_probe_sample);   // dev knob, off by default; read-only
+        if(fs::exists(root/L"build"/L"hand-body-spike")) start_hand_body_spike(root,output);   // dev knob, off by default; B11 spike (sim only)
         {std::lock_guard<std::mutex> trace_file_lock(frame_split_trace_file_mutex);
          if(!frame_split_trace_file.is_open() && fs::exists(root/L"build"/L"frame-split-trace")) {
              frame_split_trace_file.open(output/L"native-frame-split-trace.csv",std::ios::trunc);
@@ -9344,6 +9364,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
             {std::lock_guard<std::mutex> material_lock(full_body_material_mutex);body_material_restored=!full_body_material.restoration_pending();}
             if(!body_material_restored) Sleep(10);
         } while(!body_material_restored && GetTickCount64()<body_restore_deadline);
+        d2vr::HandBodySpikeEngine::stop();   // B11: asks the game thread to destroy the spike body (waits up to 3 s) before any hook goes
         native_output_size.clear();
         cached_output_restored=cached_output_size.restore();
         capturing=false;
@@ -9380,7 +9401,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
                 failure << "xr_close_complete=" << xr_close_complete.load() << " headset_size_restored=" << headset_size_restored.load()
                         << " cached_output_restored=" << cached_output_restored.load() << " controller_import_restored=" << controller_import_restored
                         << " native_resize_hresult=" << native_resize_result.load() << " last_output=" << width.load() << 'x' << height.load() << '\n';
-                hand_body_probe_runner.stop();corpse_trace.stop();carry_trace.stop();
+                hand_body_probe_runner.stop();d2vr::HandBodySpikeEngine::stop();corpse_trace.stop();carry_trace.stop();
                 return 1;
             }
         }
@@ -9394,7 +9415,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
         const bool world_ui_disabled=d2vr::NativeWorldUi::disable();world_ui_installed=false;
         if(!world_ui_disabled) throw std::runtime_error("Native world UI scope did not restore or drain");
         restore_hud_scale();remove_glyph_hook();d2vr::GlyphSwap::disable();d2vr::SamplerLodBias::disable();
-        hand_body_probe_runner.stop();corpse_trace.stop();carry_trace.stop();d2vr::NativeHeldObject::disable();held_object_installed=false;d2vr::NativeCallTrace::disable();d2vr::NativeSimInvulnerable::disable();d2vr::NativeSwarmKillGuard::disable();
+        hand_body_probe_runner.stop();d2vr::HandBodySpikeEngine::stop();corpse_trace.stop();carry_trace.stop();d2vr::NativeHeldObject::disable();held_object_installed=false;d2vr::NativeCallTrace::disable();d2vr::NativeSimInvulnerable::disable();d2vr::NativeSwarmKillGuard::disable();
         const bool audio_disabled=native_audio_listener.disable();
         const bool left_aim_disabled=native_left_aim.disable() && native_crosshair.disable() && native_fire_seam_trace.disable() && native_shot_aim.disable() && native_blink_aim.disable() &&
             native_hud_census.disable() && native_marker_probe.disable() && d2vr::NativeHudChildDraw::disable() && d2vr::NativeWristHud::disable();
@@ -9777,6 +9798,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
             pad_disabled && controller_import_restored && left_weapon_receipt_drained && assassination_receipt_drained && (!assassination_receipt_requested || !d2vr::NativeAssassinationReceipt::process_owner().failed()) && !d2vr::LeftWeaponRenderReceipt::process_owner().failed() && (!controller_requested || (xr_controller_samples && controller_bridge.virtual_reads())) ? 0 : 4;
     } catch(const std::exception& error) {
         flush_synchronized(true);
+        d2vr::HandBodySpikeEngine::stop();
         flush_render_perf();
         flush_grab_decisions(true);
         flush_frame_timing(true);
@@ -9799,7 +9821,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
         bool arm_restore_deferred=false;
         const bool arm_upload_disabled=disable_arm_upload_hook(&arm_restore_deferred);
         restore_hud_scale();remove_glyph_hook();d2vr::GlyphSwap::disable();d2vr::SamplerLodBias::disable();
-        hand_body_probe_runner.stop();corpse_trace.stop();carry_trace.stop();d2vr::NativeHeldObject::disable();held_object_installed=false;d2vr::NativeCallTrace::disable();d2vr::NativeSimInvulnerable::disable();d2vr::NativeSwarmKillGuard::disable();
+        hand_body_probe_runner.stop();d2vr::HandBodySpikeEngine::stop();corpse_trace.stop();carry_trace.stop();d2vr::NativeHeldObject::disable();held_object_installed=false;d2vr::NativeCallTrace::disable();d2vr::NativeSimInvulnerable::disable();d2vr::NativeSwarmKillGuard::disable();
         const bool audio_disabled=native_audio_listener.disable();
         const bool left_aim_disabled=native_left_aim.disable() && native_crosshair.disable() && native_fire_seam_trace.disable() && native_shot_aim.disable() &&
             native_hud_census.disable() && native_marker_probe.disable() && d2vr::NativeHudChildDraw::disable() && d2vr::NativeWristHud::disable();
@@ -9872,7 +9894,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
         } catch(...) {}
         return 1;
     } catch(...) {
-        hand_body_probe_runner.stop();corpse_trace.stop();carry_trace.stop();
+        hand_body_probe_runner.stop();d2vr::HandBodySpikeEngine::stop();corpse_trace.stop();carry_trace.stop();
         flush_synchronized(true);
         flush_render_perf();
         flush_grab_decisions(true);

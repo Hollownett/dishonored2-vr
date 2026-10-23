@@ -1,4 +1,5 @@
 #pragma once
+#include <atomic>
 // Typed adapter for the native synchronous physics-world shape cast (RVA 0xc89bc0)
 // with a closest-hit collector. Evidence and unverified items: docs/native-world-trace.md.
 #include "native_hand_volume.hpp"
@@ -171,8 +172,14 @@ inline NativeClosestCollector make_closest_collector(std::uint64_t vtable) {
     for(float& v:c.limit) {const std::uint32_t bits=0x5f7ffff0;std::memcpy(&v,&bits,4);}
     return c;
 }
+// Plan B B11 (dev knob build/hand-body-spike only): the spike's hand body is DEBRIS (layer 4), which kWorldOccluderLayers includes, so every
+// mod cast would report it. While it exists its full handle is here and a closest hit on it is discarded (reported as no hit) and counted;
+// a surface behind it is not seen in that frame. 0xffffffff (the default, knob off) never matches.
+inline std::atomic<std::uint32_t> cast_excluded_body{0xffffffffu};
+inline std::atomic<std::uint64_t> cast_excluded_hits{0};
 inline std::optional<WorldTraceHit> convert_world_hit(const NativeClosestCollector& c,Vec3 from,Vec3 to,std::uintptr_t entity) {
     if(!c.hit_count) return {};
+    if(const auto excluded=cast_excluded_body.load(std::memory_order_relaxed); excluded!=0xffffffffu && c.body==excluded) {cast_excluded_hits.fetch_add(1,std::memory_order_relaxed);return {};}
     const double f=c.fraction;
     if(!std::isfinite(f) || f<0 || f>1.0001) return {};
     const Vec3 point{c.position[0],c.position[1],c.position[2]},raw{c.normal[0],c.normal[1],c.normal[2]};

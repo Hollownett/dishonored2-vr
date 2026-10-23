@@ -8,6 +8,7 @@
 #include "native_hand_contact.hpp"
 #include "mass_probe.hpp"
 #include "hand_body_probe.hpp"
+#include "hand_body_spike.hpp"
 #include "full_hand_contact.hpp"
 #include "native_player_camera.hpp"
 #include "crash_observer.hpp"
@@ -784,6 +785,8 @@ private:
             try {HandBodyProbeCounters::note_dispatch(read_,base_,reinterpret_cast<std::uintptr_t>(command),[] {return static_cast<std::uint32_t>(GetCurrentThreadId());});} catch(...) {}
         }
         original_(manager,command);
+        // B11 spike (build/hand-body-spike, sim only): set only when the knob installed it; otherwise one relaxed load.
+        if(const auto spike=hand_body_spike_dispatch.load(std::memory_order_relaxed)) {try {spike(manager);} catch(...) {}}
         try {apply_poke();} catch(...) {}
         try {apply_release_depen();} catch(...) {}
         try {apply_contact(reinterpret_cast<std::uintptr_t>(manager));} catch(...) {++contact_.faults;}
