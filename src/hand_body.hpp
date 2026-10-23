@@ -84,6 +84,8 @@ struct HandDriveConfig {
     double garbage_position=1e6;    // |position| above this is garbage
     double capsule_radius=.4;       // "pressed into the capsule": the body within this horizontal distance of the player root (capsule + hand radius)
     double capsule_height=1.95;     // ... and between the root (the feet) and this height above it
+    double root_jump=.2;            // the root moving more than this in one drive tick is Blink / a teleport / a platform, not a push: new window
+    unsigned max_unreadable_motion=90;   // this many drives in a row with an unreadable motion (a bad motion index) latch HandBodyFault (~1 s)
 };
 // The native velocity guard (hand_body_native.hpp) refuses anything above these; the drive stays under them.
 inline constexpr double kHandWriteMaxSpeed=10.5,kHandWriteMaxSpin=20.5;
@@ -95,7 +97,7 @@ struct BodyMotion {Vec3 position{},velocity{},spin{};};
 struct DriveInput {unsigned side{};WorldTrackedPose target{};double held_kg{};double now{};bool yield{};
                    bool target_free{};std::optional<Vec3> player_root{};bool locomotion{};};
 struct DriveStatus {double gap_m{};double speed{};bool capped{};std::uint64_t contact_frames{},snaps{},cost_us{},cost_max_us{},player_drift_um{};
-                    double dt_s{};std::uint64_t drives{},drive_writes{},yields{},skipped{},snap_requests{},snap_blocked{},garbage{},second_drives{};};
+                    double dt_s{};std::uint64_t drives{},drive_writes{},yields{},skipped{},snap_requests{},snap_blocked{},garbage{},second_drives{},root_jumps{};};
 
 // ---- G1: thread and drain point (docs Gates for B11). Counted by the count-only hooks; judged here.
 struct G1Stats {
@@ -336,9 +338,10 @@ public:
         try {world=engine_.world?engine_.world():0;} catch(...) {world=0;}
         bool busy=true;
         try {busy=engine_.busy?engine_.busy():false;} catch(...) {busy=true;}
-        const Side& s=side_[side];
+        Side& s=side_[side];
         if(latched_ || !enabled_ || !world || world!=last_world_ || last_gen_!=s.gen || busy || s.pending_destroy || !life_.can_write(side,world,handle) ||
-           !engine_.apply) {count(side,&Counters::refused_writes);return false;}
+           !engine_.apply || s.written_tick==tick_index_) {count(side,&Counters::refused_writes);return false;}   // B14: one write per side per tick
+        s.written_tick=tick_index_;
         try {
             if(!engine_.apply(side,record)) {count(side,&Counters::refused_writes);return false;}
         } catch(const HandBodyEngineFault& f) {latch(side,f.what(),true);return false;}
@@ -371,15 +374,19 @@ public:
         if(!world || world!=last_world_ || last_gen_!=s.gen || busy || !life_.can_write(side,world,s.handle) || !engine_.motion || !engine_.apply) {
             count(side,&Counters::skipped);return;
         }
-        if(s.written_tick==tick_index_) {   // this tick's write is taken (the wake, or a second drive in one tick): none here
-            if(s.drive_tick==tick_index_) count(side,&Counters::second_drives);
-            else if(std::isfinite(in.now)) s.last_drive_s=in.now;   // the wake write is the last command: the next dt runs from here
+        const bool second=s.drive_tick==tick_index_;s.drive_tick=tick_index_;
+        if(second) count(side,&Counters::second_drives);   // every further drive call in one tick (the hook runs 7-11k/s)
+        if(s.written_tick==tick_index_) {   // this tick's write is taken (the wake, or an earlier drive): none here
+            if(!second && std::isfinite(in.now)) s.last_drive_s=in.now;   // the wake write is the last command: the next dt runs from here
             count(side,&Counters::skipped);return;
         }
-        s.drive_tick=tick_index_;
         std::optional<BodyMotion> m;
-        try {m=engine_.motion(side,s.handle);}
-        catch(const HandBodyUnreadable&) {count(side,&Counters::skipped);return;}            // a page gone for a moment: no write this tick
+        try {m=engine_.motion(side,s.handle);s.unreadable_motion=0;}
+        catch(const HandBodyUnreadable&) {   // a page gone for a moment: no write this tick; a motion that never reads (bad index) latches
+            count(side,&Counters::skipped);
+            if(++s.unreadable_motion>=drive_cfg_.max_unreadable_motion) latch(side,"motion read-back unreadable for 1 s",true);
+            return;
+        }
         catch(const HandBodyEngineFault& f) {latch(side,f.what(),true);return;}
         if(!m) {count(side,&Counters::skipped);return;}                                      // not our body: service()'s read-back handles it
         const auto& dc=drive_cfg_;
@@ -434,7 +441,7 @@ public:
         d.gap_m=c.gap_m.load();d.speed=c.speed.load();d.capped=c.capped.load();d.contact_frames=c.contact_frames.load();d.snaps=c.snaps.load();
         d.cost_us=c.cost_us.load();d.cost_max_us=c.cost_max_us.load();d.player_drift_um=c.player_drift_um.load();d.dt_s=c.dt_s.load();
         d.drives=c.drives.load();d.drive_writes=c.drive_writes.load();d.yields=c.yields.load();d.skipped=c.skipped.load();
-        d.snap_requests=c.snap_requests.load();d.snap_blocked=c.snap_blocked.load();d.garbage=c.garbage.load();d.second_drives=c.second_drives.load();
+        d.snap_requests=c.snap_requests.load();d.snap_blocked=c.snap_blocked.load();d.garbage=c.garbage.load();d.second_drives=c.second_drives.load();d.root_jumps=c.root_jumps.load();
         return d;
     }
     // The largest drive cost of one tick, both hands summed (proof (d): <= 200 us), and the last tick's sum.
@@ -467,7 +474,7 @@ private:
         std::atomic<std::uint64_t> creates{},destroys{},faults{},refused_writes{},abandons{},queued_destroys{},direct_destroys{},busy_waits{},
             wake_writes{},create_refusals{},writes{},releases{},lost{},unverified{},misplaced_writes{},reentrant_writes{};
         std::atomic<std::uint64_t> contact_frames{},snaps{},cost_us{},cost_max_us{},player_drift_um{},drives{},drive_writes{},yields{},skipped{},
-            snap_requests{},snap_blocked{},garbage{},second_drives{};
+            snap_requests{},snap_blocked{},garbage{},second_drives{},root_jumps{};
         std::atomic<double> gap_m{},speed{},dt_s{};std::atomic<bool> capped{};
         std::atomic<int> state{};std::atomic<std::uint32_t> handle{};
     };
@@ -480,7 +487,7 @@ private:
     struct Side {std::uint32_t handle{},gen{};std::uintptr_t world{};bool pending_destroy{},woken{};unsigned attempts{},wake_tries{};std::uint64_t next_create_ms{};
         // B14 drive state (dispatcher thread only)
         HandServoState servo{};double last_drive_s{std::numeric_limits<double>::quiet_NaN()};std::uint64_t written_tick{~0ull};
-        std::uint64_t drive_tick{~0ull};bool snap_pending{},has_cmd{};Vec3 last_cmd{};std::optional<Vec3> press_root;};
+        std::uint64_t drive_tick{~0ull};bool snap_pending{},has_cmd{};Vec3 last_cmd{};std::optional<Vec3> press_root,last_root;unsigned unreadable_motion{};};
     void count(unsigned side,std::atomic<std::uint64_t> Counters::* field) {(counters_[side].*field).fetch_add(1,std::memory_order_relaxed);}
     std::uint64_t clock_us() const {try {return engine_.now_us?engine_.now_us():0;} catch(...) {return 0;}}
     void note_cost(unsigned side,std::uint64_t us) {
@@ -493,11 +500,13 @@ private:
     // and there is no locomotion input. Reported, never clamped or acted on (the hand never moves the player: the filter word omits 6/7/8/18).
     void note_drift(unsigned side,const DriveInput& in,Vec3 body) {
         Side& s=side_[side];const auto& dc=drive_cfg_;
-        if(!in.player_root || !finite(*in.player_root) || in.locomotion) {s.press_root.reset();return;}
+        if(!in.player_root || !finite(*in.player_root) || in.locomotion) {s.press_root.reset();s.last_root.reset();return;}
         const Vec3 r=*in.player_root;const Vec3 d=body-r;
         const bool pressed=std::sqrt(d.x*d.x+d.y*d.y)<=dc.capsule_radius && d.z>=-.05 && d.z<=dc.capsule_height;
-        if(!pressed) {s.press_root.reset();return;}
-        if(!s.press_root) {s.press_root=r;return;}
+        if(!pressed) {s.press_root.reset();s.last_root.reset();return;}
+        if(!s.press_root) {s.press_root=r;s.last_root=r;return;}
+        if(s.last_root && length(r-*s.last_root)>dc.root_jump) {count(side,&Counters::root_jumps);s.press_root=r;s.last_root=r;return;}   // Blink, a teleport
+        s.last_root=r;
         const double um=length(r-*s.press_root)*1e6;
         auto& c=counters_[side].player_drift_um;
         if(std::isfinite(um) && um>static_cast<double>(c.load(std::memory_order_relaxed))) c.store(static_cast<std::uint64_t>(um+.5),std::memory_order_relaxed);
@@ -578,7 +587,7 @@ private:
     }
     void finish(unsigned side) {Side& s=side_[side];life_.destroyed(side);s.handle=0;s.attempts=0;s.pending_destroy=false;reset_drive(side);}
     void reset_drive(unsigned side) {
-        Side& s=side_[side];s.servo={};s.last_drive_s=std::numeric_limits<double>::quiet_NaN();s.snap_pending=false;s.has_cmd=false;s.press_root.reset();
+        Side& s=side_[side];s.servo={};s.last_drive_s=std::numeric_limits<double>::quiet_NaN();s.snap_pending=false;s.has_cmd=false;s.press_root.reset();s.last_root.reset();s.unreadable_motion=0;
     }
     void readback(unsigned side,std::uintptr_t world) {
         const Side& s=side_[side];

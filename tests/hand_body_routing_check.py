@@ -237,7 +237,12 @@ publish_block, publish_start = enclosing_block(probe, publish_at)
 reads = [u for u in free_uses if publish_start <= u < publish_start + len(publish_block)]
 assert len(reads) == 2, "the bits are read only inside the knob-gated publication"
 assert "unsigned hand_body_free_bits{},hand_body_yield_bits{};" in probe
-assert "if(clamp_drew && clamped.state==d2vr::ClampState::free) hand_body_free_bits|=1u<<side;" in probe
+free_gate = probe[probe.index("const bool answered_free="):probe.index("if(hand_body_free_streak[side]>=3) hand_body_free_bits|=1u<<side;")]
+for need in ("clamp_drew", "clamped.state==d2vr::ClampState::free", "!clamped.reacquired", "!clamped.held", "!clamped.contact", "!reach_clamped",
+             "!palm_unanswered", "clamped.drawn.position-palm.position"):
+    assert need in free_gate, need + ": the free bit needs an answered free palm cast to the palm itself (DeepSeek P1/P2)"
+# DeepSeek P1: the tracked-arm frame's source tick and epoch stay real code (an edit once swallowed them into a comment)
+assert "hands.tick=GetTickCount64();hands.source_tick=game_xr->grip_pose_tick();hands.epoch=game_xr->pose_epoch();" in code_of(probe)
 assert "if(clamp_yield) hand_body_yield_bits|=1u<<side;" in probe
 for line in ("hand_body_in.target=palm_grips;", "hand_body_in.free=hand_body_free_bits&hands.hands;", "hand_body_in.locomotion=",
              "hand_body_in.player_root=r;"):
@@ -247,9 +252,9 @@ assert "hand_body_in" not in probe[:publish_start] and "hand_body_in" not in pro
 assert runtime.count("body->drive(") == 1 and "body->drive(" in tick and tick.index("body->service(in,spawn,gate);") < tick.index("body->drive(")
 assert "->drive(" not in code_of(probe) and ".drive(" not in code_of(grab), "the drive runs only from the runtime tick"
 assert "HandBodyRuntime::drive" not in probe
-assert "const bool free=fresh && ((last_hands_.free>>side)&1u)!=0;" in tick
+assert "const bool free=fresh && now-last_hands_tick_<=free_fresh_ms && ((last_hands_.free>>side)&1u)!=0;" in tick
 assert "if(li.tracked && free && finite(last_hands_.palm[side])) spawn[side]=last_hands_.palm[side];" in tick
-assert "d.target_free=fresh && ((last_hands_.free>>side)&1u)!=0;" in tick
+assert "d.target_free=fresh && now-last_hands_tick_<=free_fresh_ms && ((last_hands_.free>>side)&1u)!=0;" in tick
 assert "d.yield=!fresh || !tracked || ((last_hands_.yield>>side)&1u)!=0;" in tick
 drive_fn = function(body, "void drive(const DriveInput& in)")
 assert drive_fn.index("engine_.at_g1_point()") < drive_fn.index("const TickGuard guard(ticking_);") < drive_fn.index("engine_.motion(") < drive_fn.index("engine_.apply(")

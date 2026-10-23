@@ -166,7 +166,7 @@ def hand_body_checks():
     assert all(not s["input"].get("move_y") and not s["input"].get("move_x") for s in capsule), "no locomotion while pressed"
     five = [hand_body_status() for _ in range(5)]
     assert all(v != "FAIL" for v, _ in brc.check(five, "hand_body_soak")), brc.check(five, "hand_body_soak")
-    for over in ({"faults": 1}, {"cost_max_us": 201}, {"player_drift_um": 1001}, {"available": False}, {"hand_body_fault": True},
+    for over in ({"faults": 1}, {"cost_max_us": 201}, {"steady_tick_cost_max_us": 201}, {"steady_tick_cost_max_us": None}, {"player_drift_um": 1001}, {"available": False}, {"hand_body_fault": True},
                  {"installed": False}):
         bad = [hand_body_status() for _ in range(5)]
         bad[3]["hand_body"].update(over)

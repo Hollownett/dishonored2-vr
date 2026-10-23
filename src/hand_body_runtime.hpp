@@ -53,6 +53,7 @@ public:
     using Camera=std::uintptr_t (*)();
     static constexpr double g1_min_s=8;                     // gameplay seconds of count-only observation before the first create (in-run G1)
     static constexpr std::uint64_t fresh_ms=250;            // the render publication older than this means "not gameplay" (no create, destroy)
+    static constexpr std::uint64_t free_fresh_ms=50;        // B14: the clamp's free bit counts for a create / snap only while this fresh
     static constexpr unsigned storage_per_side=8;           // storage abandoned with its world is never reused; when all are retired the side stays off
 
     using HandsInput=HandBodyHandsInput;
@@ -181,7 +182,7 @@ public:
              <<",\"snaps\":"<<d.snaps<<",\"snap_requests\":"<<d.snap_requests<<",\"snap_blocked\":"<<d.snap_blocked<<",\"cost_us\":"<<d.cost_us
              <<",\"cost_max_us\":"<<d.cost_max_us<<",\"player_drift_um\":"<<d.player_drift_um<<",\"dt_s\":"<<d.dt_s<<",\"drives\":"<<d.drives
              <<",\"drive_writes\":"<<d.drive_writes<<",\"yields\":"<<d.yields<<",\"skipped\":"<<d.skipped<<",\"garbage\":"<<d.garbage
-             <<",\"second_drives\":"<<d.second_drives<<'}';
+             <<",\"second_drives\":"<<d.second_drives<<",\"root_jumps\":"<<d.root_jumps<<'}';
             o<<",\"pose\":";
             if(p) o<<'['<<p->position.x<<','<<p->position.y<<','<<p->position.z<<']';else o<<"null";
             o<<'}';
@@ -397,7 +398,7 @@ private:
             li.world_generation=generation;li.gameplay=gameplay;li.focused=last_hands_.focused;
             li.tracked=((last_hands_.tracked>>side)&1u)!=0;li.shutdown=stop_requested_.load(std::memory_order_acquire);li.now_ms=now;
             // B14 ruling: a body is created (and snapped) only where the clamp's last palm cast found the target free; otherwise it waits
-            const bool free=fresh && ((last_hands_.free>>side)&1u)!=0;
+            const bool free=fresh && now-last_hands_tick_<=free_fresh_ms && ((last_hands_.free>>side)&1u)!=0;
             if(li.tracked && free && finite(last_hands_.palm[side])) spawn[side]=last_hands_.palm[side];
         }
         tick_generation_=generation;tick_logic_=logic;tick_release_=release;
@@ -409,7 +410,7 @@ private:
             DriveInput d;d.side=side;d.target=last_hands_.target[side];d.held_kg=0;d.now=now_s;   // held_kg: B16 feeds the held body
             const bool tracked=((last_hands_.tracked>>side)&1u)!=0;
             d.yield=!fresh || !tracked || ((last_hands_.yield>>side)&1u)!=0;
-            d.target_free=fresh && ((last_hands_.free>>side)&1u)!=0;
+            d.target_free=fresh && now-last_hands_tick_<=free_fresh_ms && ((last_hands_.free>>side)&1u)!=0;
             d.player_root=fresh?last_hands_.player_root:std::nullopt;d.locomotion=last_hands_.locomotion;
             body->drive(d);
         }

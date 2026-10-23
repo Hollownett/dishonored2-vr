@@ -4714,8 +4714,8 @@ void prepare_head_view(void* view) noexcept {
         }
         if(render_world_scene() && (tracked_arms_requested || native_weapon_attachment_requested) && per_frame) {
             const bool reverse_sword=sword_reversed.load();
-            d2vr::rig::ArmTrackingFrame hands{};std::array<d2vr::WorldTrackedPose,2> raw_grips{},palm_grips{};std::array<std::uintptr_t,2> cast_entities{};hands.tick=GetTickCount64();
-            unsigned hand_body_free_bits{},hand_body_yield_bits{};   // B14: read only by the knob-gated hand-body publication belowhands.source_tick=game_xr->grip_pose_tick();hands.epoch=game_xr->pose_epoch();
+            d2vr::rig::ArmTrackingFrame hands{};std::array<d2vr::WorldTrackedPose,2> raw_grips{},palm_grips{};std::array<std::uintptr_t,2> cast_entities{};hands.tick=GetTickCount64();hands.source_tick=game_xr->grip_pose_tick();hands.epoch=game_xr->pose_epoch();
+            unsigned hand_body_free_bits{},hand_body_yield_bits{};   // B14: read only by the knob-gated hand-body publication below
             hands.curls={std::clamp(game_xr->controller_input.left_grip,0.f,1.f),std::clamp(game_xr->controller_input.right_grip,0.f,1.f)};
             // A hand holding a prop closes around it rather than through it: an apple keeps the fist, a crate leaves it half open.
             if(physical_grab_requested) for(unsigned side=0;side<2;++side) if(const auto size=native_grab.held_size(side))
@@ -4878,7 +4878,7 @@ void prepare_head_view(void* view) noexcept {
                         refresh_clamp_probes(side,palm);
                         const auto& probes=clamp_probes[side];
                         clamp_motion[side].sample(target.position,clamp_now);const auto velocity=clamp_motion[side].velocity();
-                        d2vr::ClampOutput clamped{};const bool clamp_updated=clamp_live || clamp_yield;bool clamp_post=false;
+                        d2vr::ClampOutput clamped{};const bool clamp_updated=clamp_live || clamp_yield;bool clamp_post=false;bool palm_unanswered=false;
                         if(clamp_updated) {
                             d2vr::ClampInput in{};in.now=clamp_now;in.epoch=clamp_epoch;in.root=clamp_root;in.target=target;in.chest=chest;in.yield=clamp_yield;
                             in.post=d2vr::clamp_posts(clamp_alternate,hand_clamp_frame,side);in.tip_enabled=clamp_tip_on;
@@ -4887,7 +4887,8 @@ void prepare_head_view(void* view) noexcept {
                             const auto answer=[&](unsigned answer_slot)->std::optional<d2vr::ClampHit> {
                                 const auto h=d2vr::NativeInteractionAim::weapon_hit(side,answer_slot,now);if(!h) return std::nullopt;return d2vr::to_clamp_hit(*h);
                             };
-                            if(clamp_posted[side] && d2vr::NativeInteractionAim::weapon_serial(side,0)<=clamp_posted_scope[side]) ++status.unanswered;
+                            palm_unanswered=clamp_posted[side] && d2vr::NativeInteractionAim::weapon_serial(side,0)<=clamp_posted_scope[side];
+                            if(palm_unanswered) ++status.unanswered;
                             const auto slot0_answer=answer(0),exclude_answer=answer(d2vr::NativeInteractionAim::exclude_slot);
                             {std::lock_guard<std::mutex> hand_lock(hand_state_mutex);released_shot.read(side,slot0_answer,exclude_answer,now);} // a released side's chest and eye sweeps
                             d2vr::route_clamp_hits(in,clamp_state[side],slot0_answer,answer(d2vr::NativeInteractionAim::tip_slot),answer(d2vr::NativeInteractionAim::wall_tip_slot),exclude_answer);
@@ -4942,7 +4943,15 @@ void prepare_head_view(void* view) noexcept {
                         // Every update is followed by the clamp's own hand (the next sweep starts there; a yield or an invalid target is ignored).
                         if(clamp_updated) hand_clamp.note_drawn(side,clamp_root,composed.noted);
                         const bool clamp_drew=clamp_updated && clamped.valid && !clamp_yield;
-                        if(clamp_drew && clamped.state==d2vr::ClampState::free) hand_body_free_bits|=1u<<side;   // B14: the palm cast found the target free
+                        {   // B14 (DeepSeek P1/P2): the palm is free only after three frames in a row of answered, unblocked palm casts to this very
+                            // target: never on a re-acquire (free before its sweep answers), a held jump, a contact, an unanswered post, or a
+                            // reach-clamped target (the cast then tested a nearer point than the palm the body is created at)
+                            static std::array<unsigned,2> hand_body_free_streak{};
+                            const bool answered_free=clamp_drew && clamped.state==d2vr::ClampState::free && !clamped.reacquired && !clamped.held &&
+                                !clamped.contact && !reach_clamped && !palm_unanswered && d2vr::length(clamped.drawn.position-palm.position)<.005;
+                            hand_body_free_streak[side]=answered_free?std::min(hand_body_free_streak[side]+1,1000u):0u;
+                            if(hand_body_free_streak[side]>=3) hand_body_free_bits|=1u<<side;
+                        }
                         if(clamp_yield) hand_body_yield_bits|=1u<<side;
                         if(clamp_drew || !clamp_updated) clamp_hold.note(side,clamp_epoch,clamp_root,g.position);
                         // I2: while clamped, shots and the crosshair leave from the drawn barrel (read next frame by the aim publication).

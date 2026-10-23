@@ -507,7 +507,7 @@ struct FakeDrive {
     int creates=0,destroys=0,velocities=0,applies=0,motions=0,steps=0;
     std::array<int,2> applies_side{};std::array<Vec3,2> last_written{};std::array<int,2> creates_side{},destroys_side{};
     std::uint64_t clock=0;std::uint64_t call_us=7;   // every engine call costs call_us microseconds of the fake clock
-    bool garbage_nan=false,garbage_huge=false,garbage_pos=false;
+    bool garbage_nan=false,garbage_huge=false,garbage_pos=false,position_garbage=false,motion_unreadable=false;
     std::vector<std::string> log;
     void step() {   // the physics step between two dispatcher ticks
         ++steps;
@@ -525,9 +525,14 @@ struct FakeDrive {
         e.create=[this](unsigned side,std::uintptr_t,Vec3 at,std::uint32_t& h) {clock+=call_us;++creates;++creates_side[side];log.push_back("create:"+std::to_string(side));b[side]={true,next++,at,{},{}};h=b[side].handle;return true;};
         e.velocity=[this](unsigned side,std::uint32_t h,Vec3 v) {clock+=call_us;++velocities;log.push_back("wake:"+std::to_string(side));if(!b[side].alive || b[side].handle!=h) return false;b[side].vel=v;return true;};
         e.destroy=[this](unsigned side,std::uint32_t h) {clock+=call_us;++destroys;++destroys_side[side];log.push_back("destroy:"+std::to_string(side));if(!b[side].alive || b[side].handle!=h) return DestroyOutcome::absent;b[side].alive=false;return DestroyOutcome::gone;};
-        e.position=[this](unsigned side,std::uint32_t h)->std::optional<Vec3> {clock+=call_us;if(!b[side].alive || b[side].handle!=h) return std::nullopt;return b[side].pos;};
+        e.position=[this](unsigned side,std::uint32_t h)->std::optional<Vec3> {
+            clock+=call_us;if(!b[side].alive || b[side].handle!=h) return std::nullopt;
+            if(position_garbage) return Vec3{b[side].pos.x,std::numeric_limits<double>::quiet_NaN(),b[side].pos.z};
+            return b[side].pos;
+        };
         e.motion=[this](unsigned side,std::uint32_t h)->std::optional<BodyMotion> {
             clock+=call_us;++motions;
+            if(motion_unreadable) throw HandBodyUnreadable{};
             if(!b[side].alive || b[side].handle!=h) return std::nullopt;
             BodyMotion m{b[side].pos,b[side].vel,b[side].spin};
             if(garbage_nan) m.velocity.x=std::numeric_limits<double>::quiet_NaN();
@@ -574,7 +579,7 @@ static void b14_checks() {
         CHECK(r.w.creates==2);CHECK(r.w.velocities==2);CHECK(r.w.applies==0);   // the wake writes only
         for(int i=0;i<50;++i) {const int before0=r.w.applies_side[0],before1=r.w.applies_side[1];r.tick(4);CHECK(r.w.applies_side[0]-before0<=1);CHECK(r.w.applies_side[1]-before1<=1);}
         CHECK(r.w.applies_side[0]==50);CHECK(r.w.applies_side[1]==50);   // the create tick's drive only starts the dt clock (the wake was its write)
-        CHECK(r.hb.drive_status(0).second_drives==50*3);CHECK(r.hb.drive_status(0).drive_writes==50);
+        CHECK(r.hb.drive_status(0).second_drives==50*3+2);   // every further call in a tick, the create tick includedCHECK(r.hb.drive_status(0).drive_writes==50);
         CHECK(r.w.velocities==2);   // never another wake write once driven
     }
     {   // drive_follows_target_within_1cm (no obstacles, 90 Hz, gravity on, gravity compensated): a 0.5 m reach, then hold
@@ -657,10 +662,10 @@ static void b14_checks() {
     }
     {   // readback_garbage_latches_body_off (Review Focus 3): NaN velocity, huge velocity, non-finite position: HandBodyFault, no further
         // write, available false; the body is then destroyed once
-        for(int kind=0;kind<3;++kind) {
+        for(int kind=0;kind<4;++kind) {   // 3: the service read-back's position only (DeepSeek: that path was not exercised)
             HandBodyFault::reset_for_tests();DriveRig r;r.tick();r.tick();r.tick();
             const int applies=r.w.applies;
-            if(kind==0) r.w.garbage_nan=true;else if(kind==1) r.w.garbage_huge=true;else r.w.garbage_pos=true;
+            if(kind==0) r.w.garbage_nan=true;else if(kind==1) r.w.garbage_huge=true;else if(kind==2) r.w.garbage_pos=true;else r.w.position_garbage=true;
             r.tick();
             CHECK(HandBodyFault::tripped());CHECK(!r.hb.status(0).available);CHECK(r.hb.status(0).faults+r.hb.status(1).faults>=1);
             CHECK(r.hb.drive_status(0).garbage+r.hb.drive_status(1).garbage>=1);
@@ -694,6 +699,27 @@ static void b14_checks() {
         DriveRig l;l.root=Vec3{0,0,0};l.target[0]=Vec3{.1,.1,1.0};l.locomotion=true;l.tick();
         for(int i=0;i<20;++i) {l.root=Vec3{.01*(i+1),0,0};l.tick();}
         CHECK(l.hb.drive_status(0).player_drift_um==0);
+        // a root jump (Blink, a teleport: 1 m in one tick, no stick) opens a new window, it is not drift (DeepSeek P2); counted
+        DriveRig j;j.root=Vec3{0,0,0};j.target[0]=Vec3{.1,.1,1.0};j.tick();for(int i=0;i<5;++i) j.tick();
+        j.root=Vec3{.3,0,0};j.tick();for(int i=0;i<5;++i) j.tick();   // 0.3 m in one tick, the body still inside the capsule
+        CHECK(j.hb.drive_status(0).player_drift_um==0);CHECK(j.hb.drive_status(0).root_jumps==1);
+    }
+    {   // write() shares the one-write-per-tick rule with the drive (DeepSeek P3): a write after this tick's drive write is refused
+        HandBodyFault::reset_for_tests();DriveRig r;r.tick();r.tick();
+        const auto h=r.hb.status(0).handle;const int applies=r.w.applies;
+        r.hb.service(gameplay_in(r.ms),{r.target[0],r.target[1]});
+        DriveInput d;d.side=0;d.target=pose_at(r.target[0]);d.now=r.t;d.target_free=true;r.hb.drive(d);
+        CHECK(r.w.applies==applies+1);
+        CHECK(!r.hb.write(0,velocity_record(h)));CHECK(r.w.applies==applies+1);
+        r.hb.service(gameplay_in(r.ms+11),{r.target[0],r.target[1]});CHECK(r.hb.write(0,velocity_record(h)));   // a new tick
+        d.now=r.t+.011;r.hb.drive(d);CHECK(r.w.applies==applies+2);   // ... and the drive in that tick then writes nothing
+    }
+    {   // a motion that never reads (a bad motion index) latches after max_unreadable_motion drives; a short gap does not
+        HandBodyFault::reset_for_tests();DriveRig r;r.tick();r.tick();
+        r.w.motion_unreadable=true;for(int i=0;i<10;++i) r.tick();
+        CHECK(!HandBodyFault::tripped());r.w.motion_unreadable=false;r.tick();CHECK(r.hb.status(0).available);
+        r.w.motion_unreadable=true;for(int i=0;i<static_cast<int>(HandDriveConfig{}.max_unreadable_motion);++i) r.tick();
+        CHECK(HandBodyFault::tripped());CHECK(!r.hb.status(0).available);
     }
     {   // knob off: a disabled manager never drives
         HandBodyFault::reset_for_tests();FakeDrive w;HandBody hb(w.engine(),false);

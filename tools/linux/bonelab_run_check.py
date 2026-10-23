@@ -179,6 +179,8 @@ def check_hand_body(statuses):
         add(all(c >= 1 for c in creates) and all(w >= 100 for w in writes),
             f"session {i + 1}: both bodies created and driven (creates {creates}, drive_writes {writes})")
         add(h["cost_max_us"] <= HAND_BODY_COST_US, f"session {i + 1}: cost_max_us {h['cost_max_us']} <= {HAND_BODY_COST_US} (drive, both hands per tick)")
+        steady = h.get("steady_tick_cost_max_us")   # DeepSeek P2: the whole tick (service + both drives) on ticks with no create/destroy
+        add(_num(steady) and steady <= HAND_BODY_COST_US, f"session {i + 1}: steady_tick_cost_max_us {steady} <= {HAND_BODY_COST_US} (whole tick)")
     faults = sum(h["faults"] for h in hb)
     add(faults == 0, f"hand_body.faults summed over {len(hb)} sessions == 0 (got {faults})")
     drift = max(h["player_drift_um"] for h in hb)
