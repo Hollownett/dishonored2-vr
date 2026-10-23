@@ -93,7 +93,7 @@ def tank_status(**over):
     clamp.update(over.pop("clamp", {}))
     status = copy.deepcopy(CLEAN)
     status.update({"held_clamp": clamp, "layer": {"restores": 1, "pending": 0},
-                   "release_watch": {"count": 1, "z_at_release": 27.3, "z_min": 27.2, "z_last": 27.22, "floor_z": None}})
+                   "release_watch": {"count": 2, "z_at_release": 27.3, "z_min": 27.2, "z_last": 27.22, "floor_z": None}})
     status["carry"] = {"holds": 1, "failed_reads": 0, "rejected_publishes": 0, "bad_quat_reads": 0}
     status.update(over)
     return status
@@ -109,7 +109,8 @@ def held_clamp_checks():
     cycles = sim.scenario_segments("tank_drop_cycles", 28000)
     assert len([s for s in cycles if s["input"].get("right_trigger", 0) > 0]) == 25
     drop = sim.scenario_segments("tank_drop", 28000)
-    assert max(s["end_ms"] for s in drop) - max(s["start_ms"] for s in drop if s["input"].get("right_grip")) >= 5000, "5 s wait after the last release"
+    last_grip = max(s["end_ms"] for s in drop if s["input"].get("right_grip"))  # the release is the first non-grip segment after it
+    assert max(s["end_ms"] for s in drop) - last_grip >= 5000, "5 s wait measured from the release"
     assert any(s["input"].get("move_y") for s in sim.scenario_segments("tank_wall", 28000))
     assert "FAIL" not in verdicts(tank_status(), "tank_wall")
     assert "FAIL" not in verdicts(tank_status(), "tank_drop")
@@ -118,7 +119,22 @@ def held_clamp_checks():
     assert "FAIL" in verdicts(tank_status(clamp={"release_overlap_unresolved": 1}), "tank_drop")
     assert "FAIL" in verdicts(tank_status(clamp={"release_overlap_unresolved": 1}), "tank_drop_cycles")
     assert "FAIL" in verdicts(tank_status(clamp={"layer_at_release": None}), "tank_drop")
-    assert "FAIL" in verdicts(tank_status(release_watch={"count": 1, "z_at_release": 27.3, "z_last": 20.0}), "tank_drop")
+    assert "FAIL" in verdicts(tank_status(clamp={"layer_at_release": -1}), "tank_drop")
+    assert "FAIL" in verdicts(tank_status(release_watch={"count": 2, "z_at_release": 27.3, "z_min": 27.2, "z_last": 27.1}), "tank_drop")  # 0.2 m below
+    assert "FAIL" in verdicts(tank_status(release_watch={"count": 1, "z_at_release": 27.3, "z_min": 27.2, "z_last": 27.3}), "tank_drop")
+    assert "FAIL" in verdicts(tank_status(clamp={"releases": 1}), "tank_drop")
+    for key in ("release_overlap_unresolved", "releases"):  # absent counters never default to 0
+        for name in ("tank_drop", "tank_drop_cycles"):
+            absent = tank_status(); del absent["held_clamp"][key]
+            assert "FAIL" in verdicts(absent, name), (key, name)
+    absent = tank_status(); del absent["carry"]
+    assert "FAIL" in verdicts(absent, "tank_drop_cycles")
+    absent = tank_status(); del absent["carry"]["bad_quat_reads"]
+    assert "FAIL" in verdicts(absent, "tank_drop_cycles")
+    for key in ("sweeps", "hits", "clamped_frames"):
+        absent = tank_status(); del absent["held_clamp"][key]
+        assert "FAIL" in verdicts(absent, "tank_wall"), key
+    assert "FAIL" in verdicts(tank_status(release_watch={"count": 2, "z_at_release": 27.3, "z_last": 27.3}), "tank_drop")  # z_min absent
     assert "FAIL" in verdicts(tank_status(release_watch={"count": 0}), "tank_drop")
     four = [tank_status() for _ in range(4)]
     assert all(v != "FAIL" for v, _ in brc.check(four, "tank_drop_cycles")), brc.check(four, "tank_drop_cycles")

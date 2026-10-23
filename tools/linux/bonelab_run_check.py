@@ -94,11 +94,18 @@ def check_tanks(statuses, scenario, corpse):
     clamps = [s.get("held_clamp") or {} for s in statuses]
     if any(not c for c in clamps):
         return [("FAIL", "status has no held_clamp block")]
-    total = lambda key: sum(c.get(key, 0) or 0 for c in clamps)
+    missing = lambda key: [i for i, c in enumerate(clamps) if not isinstance(c.get(key), (int, float)) or isinstance(c.get(key), bool)]
+    total = lambda key: sum(c.get(key) or 0 for c in clamps)
+    needs = ("sweeps", "hits", "clamped_frames") if scenario == "tank_wall" else ("release_overlap_unresolved", "releases")
+    for key in needs:  # an absent counter is a FAIL, never a zero
+        add(not missing(key), f"held_clamp.{key} present in every session")
+    if any(missing(k) for k in needs):
+        return out
     sweeps, hits, clamped = total("sweeps"), total("hits"), total("clamped_frames")
     unresolved = total("release_overlap_unresolved")
+    cast_max = max((c.get("cast_us_max") or 0) for c in clamps)
     out.append(("INFO", f"sweeps {sweeps}, hits {hits}, clamped_frames {clamped}, releases {total('releases')}, "
-                f"cast_us {[c.get('cast_us') for c in clamps]}, cast_us_max {max(c.get('cast_us_max', 0) or 0 for c in clamps)}, "
+                f"cast_us {[c.get('cast_us') for c in clamps]}, cast_us_max {cast_max}, "
                 f"layer_at_release {[c.get('layer_at_release') for c in clamps]}, depen_frames {total('release_depen_frames')}"))
     layers = [s.get("layer") or {} for s in statuses]
     out.append(("INFO", f"layer restores {[l.get('restores') for l in layers]}, pending {[l.get('pending') for l in layers]}"))
@@ -109,19 +116,29 @@ def check_tanks(statuses, scenario, corpse):
     else:
         add(unresolved == 0, f"release_overlap_unresolved == 0 (got {unresolved})")
     if scenario == "tank_drop":
-        add(all(c.get("layer_at_release") is not None for c in clamps), f"layer_at_release recorded ({[c.get('layer_at_release') for c in clamps]})")
+        add(total("releases") >= 2, f"held_clamp.releases >= 2 for the two S13 releases (got {total('releases')})")
+        layer_ok = all(isinstance(c.get("layer_at_release"), int) and not isinstance(c.get("layer_at_release"), bool)
+                       and c["layer_at_release"] >= 0 for c in clamps)  # the writer starts at -1 = never recorded
+        add(layer_ok, f"layer_at_release recorded, >= 0 (got {[c.get('layer_at_release') for c in clamps]})")
         watch = statuses[-1].get("release_watch") or {}
-        count = watch.get("count", 0) or 0
-        add(count >= 1, f"release_watch.count >= 1 (got {count})")
-        if count >= 1:
-            z0, last = watch.get("z_at_release"), watch.get("z_last")
-            ok = isinstance(z0, (int, float)) and isinstance(last, (int, float)) and last >= z0 - 0.5
-            add(ok, f"tank rest z_last {last} not more than 0.5 m below z_at_release {z0} (read 5 s after the last release)")
+        count = watch.get("count")
+        add(isinstance(count, int) and count >= 2, f"release_watch.count >= 2 (got {count})")
+        # release_watch keeps only the LAST release (pressed into the floor, 3 s window, z0 = height at the layer restore); the
+        # 1.5 m drop is not judged here, only by the headset Tier C item. The writer emits no age/sample field, so a watch that
+        # ended early (stale z_last) cannot be detected.
+        z0, last, zmin = watch.get("z_at_release"), watch.get("z_last"), watch.get("z_min")
+        nums = all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in (z0, last, zmin))
+        add(nums and last >= z0 - 0.15 and zmin >= z0 - 0.5,
+            f"last (floor-pressed) release rests near its release height over the 3 s watch: z_last {last} >= z_at_release {z0} - 0.15, z_min {zmin} >= z_at_release - 0.5")
     if scenario == "tank_drop_cycles":
         releases = total("releases")
         add(releases >= 100, f"releases >= 100 over {len(statuses)} sessions (got {releases})")
         add(not any(c.get("fault_latch") for c in corpse), "corpse.fault_latch == false")
-        faults = sum((s.get("carry") or {}).get(k, 0) or 0 for s in statuses for k in CARRY_FAULTS)
+        carries = [s.get("carry") for s in statuses]
+        present = all(isinstance(c, dict) and all(isinstance(c.get(k), int) for k in CARRY_FAULTS) for c in carries)
+        add(present, f"carry block with {CARRY_FAULTS} present in every session")
+        faults = sum(c.get(k, 0) for c in carries if isinstance(c, dict) for k in CARRY_FAULTS if isinstance(c.get(k), int))
+        # the status has end values only, so "no new" is checked as absolute zero (a start baseline is not recorded)
         add(faults == 0, f"carry fault counters {CARRY_FAULTS} == 0 (got {faults})")
     return out
 

@@ -1,7 +1,8 @@
-"""S13 (held clamp): drop a tank from about 1.5 m, then drop another pressed into the floor; wait 5 s after the last release.
+"""S13 (held clamp): drop a tank from about 1.5 m, then drop another pressed into the floor; wait over 5 s after the last release (measured from the open hand).
 
 Same save as oil_tank_drop.py. Pass: release_overlap_unresolved == 0, layer_at_release recorded, and the tank's rest height from
-release_watch (z_last) is not below the release height minus the 1.5 m drop plus a margin, read after the 5 s wait.
+release_watch keeps only the LAST release (the floor-pressed one): its z_last must be within 0.15 m of z_at_release (3 s watch).
+The 1.5 m drop itself is judged only by the headset Tier C item.
 """
 import importlib.util
 from pathlib import Path

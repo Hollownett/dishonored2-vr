@@ -16,7 +16,7 @@ build under test with the held clamp on (no `build/no-held-clamp` file) and agai
    down onto the floor. Expect: the tank stops at the surface and does not jitter through it; the drawn hand stays within about
    0.35 m of your real hand; no ejection when you let go. Save `held_clamp` (sweeps, hits and clamped_frames above 0).
 2. **Drop from chest height.** Lift the tank to chest height and open the hand. Expect: it falls and lands once, comes to rest on
-   the floor, no pop or launch. Save `held_clamp` and `release_watch` (z_last near z_at_release minus the drop).
+   the floor, no pop or launch. This 1.5 m drop is judged only here: the sim's `release_watch` keeps just the last release. Save `held_clamp`.
 3. **Drop while pressed to the floor.** Push the held tank into the floor so the clamp holds it, then release. Expect: it
    settles out of the floor within about half a second at a gentle speed (at most 1.5 m/s), never fired away.
    `release_overlap_unresolved` stays 0. Save `held_clamp`.
