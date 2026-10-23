@@ -172,7 +172,46 @@ void menu_cancellation_and_legacy() {
     assert(!short_release.pause && !short_release.settings && !short_release.suppress_y);
 }
 
+// I4: a Talk offer / wheel that appears on the fire frame (after the previous controls pass said "free") cancels the press: no fire, no
+// Start, Y not suppressed, so the game's Talk still sees the press; the next press is free again.
+void ownership_on_fire_frame_cancels() {
+    using Screen=YHoldMenu::Screen;
+    YHold h;
+    bool owned=false;unsigned asked=0;
+    auto probe=[&]{++asked;return owned;};
+    for(double t=0;t<.6-1e-9;t+=step) {const auto r=h.update(true,false,t,probe);assert(!r.fire && !r.suppress_y);}
+    assert(asked==0); // only the would-fire frame asks
+    owned=true;
+    auto r=h.update(true,false,.62,probe);
+    assert(asked==1 && !r.fire && !r.suppress_y);
+    owned=false;
+    for(double t=.64;t<2.0;t+=step) {r=h.update(true,false,t,probe);assert(!r.fire && !r.suppress_y);} // stays cancelled for this press
+    assert(asked==1);
+    (void)h.update(false,false,2.1,probe);
+    (void)h.update(true,false,3.0,probe);
+    assert(h.update(true,false,3.61,probe).fire);
+
+    YHoldMenu menu;
+    owned=true;
+    menu.update(false,false,Screen::gameplay,false,false,0,probe);
+    menu.update(true,false,Screen::gameplay,false,false,1,probe);
+    auto m=menu.update(true,false,Screen::gameplay,false,false,1.61,probe);
+    assert(!m.pause && !m.settings && !m.suppress_y);
+    m=menu.update(true,false,Screen::gameplay,false,false,2.5,probe);
+    assert(!m.pause && !m.suppress_y);
+    menu.update(false,false,Screen::gameplay,false,false,2.6,probe);
+    owned=false;
+    menu.update(true,false,Screen::gameplay,false,false,3,probe);
+    assert(menu.update(true,false,Screen::gameplay,false,false,3.61,probe).pause);
+    // The paused screen never asks: a Talk offer does not exist there.
+    YHoldMenu pause;owned=true;asked=0;
+    pause.update(false,false,Screen::pause,false,false,0,probe);
+    pause.update(true,false,Screen::pause,false,false,1,probe);
+    assert(pause.update(true,false,Screen::pause,false,false,1.61,probe).suppress_y && asked==0);
+}
+
 int main() {
+    ownership_on_fire_frame_cancels();
     short_press_never_fires();
     hold_fires_once();
     release_then_new_press_fires_again();

@@ -1201,6 +1201,8 @@ public:
     // Hold left Y in gameplay opens native Pause; a fresh hold in Pause opens settings. The game thread sets y_hold_blocked while a Talk prompt is
     // offered to Y or the wheel owns it; build/no-hold-y-menu clears y_hold_enabled.
     std::atomic<bool> y_hold_blocked{false};
+    // Asked on the fire frame of a gameplay hold: does a Talk offer or the wheel own Y right now (this frame, not the last controls pass)?
+    std::atomic<bool (*)()> y_hold_owned_now{nullptr};
     bool y_hold_enabled=true,legacy_hold_y_settings=false;
     std::atomic<UINT64> y_hold_fires{0},y_hold_blocked_presses{0},y_hold_last_ms{0};
     void avatar_measurements(NativeAvatarMeasurements value) {
@@ -1762,7 +1764,8 @@ public:
             hold_gameplay?YHoldMenu::Screen::gameplay:
             !gameplay && settings_available && settings_enabled_?YHoldMenu::Screen::pause:YHoldMenu::Screen::unavailable;
         const auto hold=y_hold_menu_.update(controller_input.y,y_hold_blocked.load(),hold_screen,settings_.open(),legacy_hold_y_settings,
-            std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count());
+            std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count(),
+            [&]() {const auto owned=y_hold_owned_now.load();return controller_input.menu_modifier || (owned && owned());});
         if(hold.blocked_press) ++y_hold_blocked_presses;
         if(hold.pause || hold.settings) {++y_hold_fires;y_hold_last_ms=static_cast<UINT64>(hold.held_s*1000);}
         controller_input.pause_request=hold.pause;

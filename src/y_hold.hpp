@@ -19,7 +19,11 @@ public:
     YHold() = default;
     explicit YHold(Config config) noexcept : config_(config) {}
     void reset() noexcept {clear();have_time_=false;}
-    Result update(bool y,bool blocked,double now_s) noexcept {
+    Result update(bool y,bool blocked,double now_s) noexcept {return update(y,blocked,now_s,[]() noexcept {return false;});}
+    // owned_now() is asked once, on the frame the hold would fire, for the CURRENT frame's Talk offer / wheel / modifier ownership (`blocked`
+    // is the previous controls pass). If it answers true the press belongs to that owner: the hold is cancelled for this press, nothing
+    // fires and Y is not suppressed, so the game still sees the press.
+    template<class Owned> Result update(bool y,bool blocked,double now_s,Owned&& owned_now) {
         if(!std::isfinite(now_s) || now_s<0) {clear();have_time_=false;return {};}
         if(have_time_ && now_s<last_) clear(); // time went backwards: forget the press, then treat this call as a fresh sample
         have_time_=true;last_=now_s;
@@ -27,7 +31,10 @@ public:
         if(!down_) {down_=true;start_=now_s;cancelled_=blocked;fired_=false;}
         else if(blocked) cancelled_=true;
         Result out{};
-        if(!cancelled_ && !fired_ && now_s-start_>=config_.hold_s) {fired_=true;out.fire=true;}
+        if(!cancelled_ && !fired_ && now_s-start_>=config_.hold_s) {
+            if(owned_now()) cancelled_=true;
+            else {fired_=true;out.fire=true;}
+        }
         out.suppress_y=fired_;
         return out;
     }
@@ -46,6 +53,10 @@ private:
     double press_start_{};
 public:
     Result update(bool y,bool blocked,Screen screen,bool settings_open,bool legacy,double now_s) noexcept {
+        return update(y,blocked,screen,settings_open,legacy,now_s,[]() noexcept {return false;});
+    }
+    // owned_now: see YHold::update; asked only on the fire frame of a gameplay hold.
+    template<class Owned> Result update(bool y,bool blocked,Screen screen,bool settings_open,bool legacy,double now_s,Owned&& owned_now) {
         if(screen!=screen_) {hold_.reset();wait_release_=y;screen_=screen;}
         const bool eligible=screen!=Screen::unavailable && !settings_open && !(legacy && screen==Screen::pause);
         if(!eligible) {hold_.reset();wait_release_=y;raw_was_=y;return {};}
@@ -54,7 +65,7 @@ public:
         Result out{};
         if(y && !raw_was_) {press_start_=now_s;out.blocked_press=blocked;}
         raw_was_=y;
-        const auto held=hold_.update(y,blocked,now_s);
+        const auto held=hold_.update(y,blocked,now_s,[&]{return screen==Screen::gameplay && owned_now();});
         if(held.fire) {
             out.pause=screen==Screen::gameplay && !legacy;
             out.settings=!out.pause;

@@ -6782,6 +6782,9 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                     simulated_vr_requested?&d2vr::simxr::dispatch:nullptr,mirror_mode_requested,sharpness_requested,taa_preference,hud_preference,hint_preference,player_measurements_requested);
                                 game_xr->wheel_native_pointer=!fs::exists(output_directory.parent_path()/L"build"/L"wheel-no-pointer");
                                 game_xr->y_hold_enabled=hold_y_menu_enabled;game_xr->legacy_hold_y_settings=legacy_hold_y_settings;
+                                game_xr->y_hold_owned_now=+[]() noexcept -> bool { // current-frame Talk offer (either hand) or wheel, for the hold-Y fire frame
+                                    try {const auto now=GetTickCount64();return x_wheel.wheel() || native_interaction_aim.talk_target(0,now) || native_interaction_aim.talk_target(1,now);}
+                                    catch(...) {return true;}};
                                 game_xr->observe_transfer=&capture_xr_transfer;
                                 game_xr->observe_settings=&capture_settings_transfer;
                                 game_xr->observe_wrist=&capture_wrist_hud;

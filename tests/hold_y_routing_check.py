@@ -19,6 +19,10 @@ def check(probe: str, game_xr: str, settings: str, features: str) -> None:
     # a Talk offer or the wheel owns the press
     assert "game_xr->y_hold_blocked=talk_target.has_value() || talk_route.owned || x_wheel.wheel()" in probe
     assert "game_xr->y_hold_enabled=hold_y_menu_enabled;" in probe
+    # the fire frame asks the CURRENT frame's Talk offer (either hand) and wheel before it may fire
+    assert "game_xr->y_hold_owned_now=+[]() noexcept -> bool" in probe
+    assert "x_wheel.wheel() || native_interaction_aim.talk_target(0,now) || native_interaction_aim.talk_target(1,now)" in probe
+    assert "controller_input.menu_modifier || (owned && owned());" in game_xr
     assert "if(game_xr->y_hold_blocked.load()) input.pause_request=false;" in probe
     # Only an opening settings update sees held Y; Pause consumes Y on its fire frame.
     assert "if(hold.suppress_y && !hold.settings)" in game_xr
