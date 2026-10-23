@@ -3,15 +3,20 @@
 // Decides, per side, when the caller must create or destroy the hand's physics body and when writes to it are allowed.
 // Bonelab's hand body is a long-lived physical object that is rebuilt with the level; ours must never outlive its world.
 // Rules: create only when enabled, gameplay, focused, tracked, physics idle, world known, the state is absent and no fault is latched.
-// A world or world_generation change, loss of gameplay, disable, shutdown or fault destroys at once; loss of focus or tracking destroys
+// A world or world_generation change returns `abandon` (ready or destroying): the body died with its world, so the caller drops the handle and makes NO
+// engine call; the state goes straight to absent (faulted if latched) and a pending destroy is cancelled. Loss of gameplay with the same world, disable,
+// shutdown or fault destroys at once; loss of focus or tracking destroys
 // after kFocusGraceMs (a menu blink does not churn). destroy_queued means "physics is busy: a direct destroy is not allowed, use the
 // 0x89fb0 command queue" (docs/native-hand-body-re.md Q8). After update() asks for a destroy the state is `destroying` and update() returns
 // none until the caller reports destroyed(side); create can never be returned while a destroy is pending. A fault latches the side off.
+// Caller contract: after destroy/destroy_queued the caller calls destroyed(side) once the body is gone. If the destroy fails it reports `fault` on the
+// next update and then calls destroyed(); it never re-issues the destroy on its own. After abandon no destroyed() call is needed (one is harmless).
+// update() must come before created() in the same frame: created() captures the generation seen by the latest update().
 #include <cstdint>
 
 namespace d2vr {
 enum class BodyState {absent,ready,destroying,faulted};
-enum class BodyAction {none,create,destroy,destroy_queued};
+enum class BodyAction {none,create,destroy,destroy_queued,abandon};
 struct LifecycleInput {std::uintptr_t world{};std::uint32_t world_generation{};bool gameplay{};bool focused{};bool tracked{};bool physics_busy{};bool shutdown{};bool fault{};bool enabled{true};std::uint64_t now_ms{};};
 
 class HandBodyLifecycle {
@@ -21,7 +26,13 @@ public:
         if(side>=2) return BodyAction::none;
         Side& s=sides_[side];
         if(in.fault) s.latched=true;
-       s.last_gen=in.world_generation;
+        s.last_gen=in.world_generation;
+        if((s.state==BodyState::ready||s.state==BodyState::destroying)&&(in.world!=s.world||in.world_generation!=s.gen)) {
+            // The body went away with its world: any engine call on it would write to a stale or freed world. Drop the handle, cancel a pending destroy.
+            s.world=0;s.handle=0;s.lost=false;
+            s.state=s.latched?BodyState::faulted:BodyState::absent;
+            return BodyAction::abandon;
+        }
         if(s.state==BodyState::faulted||s.state==BodyState::destroying) return BodyAction::none;
         if(s.state==BodyState::absent) {
             if(s.latched) {s.state=BodyState::faulted;return BodyAction::none;}
@@ -29,7 +40,7 @@ public:
             return BodyAction::none;
         }
         // ready
-        bool now_bad=in.shutdown||s.latched||!in.enabled||!in.gameplay||in.world!=s.world||in.world_generation!=s.gen;
+        bool now_bad=in.shutdown||s.latched||!in.enabled||!in.gameplay;
         if(!now_bad) {
             if(in.focused&&in.tracked) s.lost=false;
             else {

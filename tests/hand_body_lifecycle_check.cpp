@@ -26,12 +26,29 @@ int main() {
         i=good(0);CHECK(l.update(0,i)==BodyAction::none);
         CHECK(l.update(0,good())==BodyAction::create);
     }
-    {   // world_change_destroys (and generation change)
+    {   // world_change_abandons_never_destroys
         HandBodyLifecycle l;make_ready(l,0);
         CHECK(l.update(0,good(0x1000))==BodyAction::none);
-        CHECK(l.update(0,good(0x2000))==BodyAction::destroy);CHECK(l.state(0)==BodyState::destroying);
+        auto i=good(0x2000);i.physics_busy=true;
+        CHECK(l.update(0,i)==BodyAction::abandon);CHECK(l.state(0)==BodyState::absent);
+        i.physics_busy=false;CHECK(l.update(0,i)==BodyAction::create);   // nothing to wait for
+        HandBodyLifecycle k;make_ready(k,0);i=good(0);CHECK(k.update(0,i)==BodyAction::abandon);   // world vanished
+    }
+    {   // generation_change_abandons
         HandBodyLifecycle m;make_ready(m,0);
-        CHECK(m.update(0,good(0x1000,2))==BodyAction::destroy);
+        CHECK(m.update(0,good(0x1000,2))==BodyAction::abandon);CHECK(m.state(0)==BodyState::absent);
+        CHECK(m.update(0,good(0x1000,2))==BodyAction::create);
+    }
+    {   // pending_destroy_cancelled_by_world_change
+        HandBodyLifecycle l;make_ready(l,0);
+        auto i=good();i.shutdown=true;CHECK(l.update(0,i)==BodyAction::destroy);
+        CHECK(l.update(0,good(0x2000))==BodyAction::abandon);CHECK(l.state(0)==BodyState::absent);
+        CHECK(l.update(0,good(0x2000))==BodyAction::create);
+        HandBodyLifecycle m;make_ready(m,0);i=good();i.gameplay=false;m.update(0,i);
+        CHECK(m.update(0,good(0x1000,3))==BodyAction::abandon);m.destroyed(0);CHECK(m.state(0)==BodyState::absent);
+        // fault latch survives an abandon
+        HandBodyLifecycle f;make_ready(f,0);i=good();i.fault=true;f.update(0,i);
+        CHECK(f.update(0,good(0x2000))==BodyAction::abandon);CHECK(f.state(0)==BodyState::faulted);CHECK(f.update(0,good(0x2000))==BodyAction::none);
     }
     {   // stale_world_never_writes: false the instant update sees the change, before destroyed()
         HandBodyLifecycle l;make_ready(l,0,0x1000,7);
@@ -106,19 +123,19 @@ int main() {
         auto i=good();i.shutdown=true;i.physics_busy=true;
         CHECK(l.update(0,i)==BodyAction::destroy_queued);CHECK(!l.can_write(0,0x1000,0x01000005));
         HandBodyLifecycle m;make_ready(m,0);i.physics_busy=false;CHECK(m.update(0,i)==BodyAction::destroy);
-        HandBodyLifecycle n;make_ready(n,0);i=good(0x2000);i.physics_busy=true;CHECK(n.update(0,i)==BodyAction::destroy_queued);
+        HandBodyLifecycle n;make_ready(n,0);i=good();i.enabled=false;i.physics_busy=true;CHECK(n.update(0,i)==BodyAction::destroy_queued);
     }
     {   // pending destroy never returns create until destroyed(); not re-issued either
         HandBodyLifecycle l;make_ready(l,0);
-        auto i=good(0x2000);i.physics_busy=true;CHECK(l.update(0,i)==BodyAction::destroy_queued);
+        auto i=good();i.gameplay=false;i.physics_busy=true;CHECK(l.update(0,i)==BodyAction::destroy_queued);
         i.physics_busy=false;
         for(int k=0;k<3;++k) CHECK(l.update(0,i)==BodyAction::none);
         CHECK(l.state(0)==BodyState::destroying);
-        l.destroyed(0);CHECK(l.update(0,i)==BodyAction::create);
+        l.destroyed(0);i.gameplay=true;CHECK(l.update(0,i)==BodyAction::create);
     }
     {   // after a world change, create returns once gameplay, focus, tracking and idle are back
         HandBodyLifecycle l;make_ready(l,0);
-        CHECK(l.update(0,good(0x2000))==BodyAction::destroy);l.destroyed(0);
+        CHECK(l.update(0,good(0x2000))==BodyAction::abandon);
         auto i=good(0x2000);i.gameplay=false;CHECK(l.update(0,i)==BodyAction::none);
         i=good(0x2000);i.tracked=false;CHECK(l.update(0,i)==BodyAction::none);
         CHECK(l.update(0,good(0x2000))==BodyAction::create);
