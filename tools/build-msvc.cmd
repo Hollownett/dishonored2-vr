@@ -527,6 +527,10 @@ build\hand_body_commands_check.exe
 if not "%errorlevel%"=="0" exit /b 1
 cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT /Isrc tests\hand_servo_check.cpp /Fo:build\hand_servo_check.obj /Fe:build\hand_servo_check.exe
 if not "%errorlevel%"=="0" exit /b 1
+cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT /Isrc tests\hand_body_lifecycle_check.cpp /Fo:build\hand_body_lifecycle_check.obj /Fe:build\hand_body_lifecycle_check.exe
+if not "%errorlevel%"=="0" exit /b 1
+build\hand_body_lifecycle_check.exe
+if not "%errorlevel%"=="0" exit /b 1
 build\hand_servo_check.exe
 if not "%errorlevel%"=="0" exit /b 1
 build\native_rigid_body_check.exe
