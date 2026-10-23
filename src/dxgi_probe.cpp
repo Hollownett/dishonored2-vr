@@ -5083,13 +5083,13 @@ void prepare_head_view(void* view) noexcept {
                 }
                 for(unsigned side=0;side<2;++side) if(hands.hands&(1u<<side)) publish_hand(side,hands.grips[side],raw_grips[side]);
             }
+            pending_publish.flush(); // the left aim, with this frame's clamp state
             if(hand_body_requested.load(std::memory_order_relaxed)) {   // B13: the hand bodies' per-frame facts (C9: created at the calibrated palm)
                 d2vr::HandBodyRuntime::HandsInput hand_body_in{};hand_body_in.tracked=hands.hands&3u;hand_body_in.palm={palm_grips[0].position,palm_grips[1].position};
                 hand_body_in.authored=authored_camera;   // a death clip, a takedown, a cutscene: the arms are the game's, the bodies go
                 hand_body_in.focused=game_xr->state==XR_SESSION_STATE_FOCUSED && game_xr->last_action_sync==XR_SUCCESS;
                 d2vr::HandBodyRuntime::publish_hands(hand_body_in,GetTickCount64());
             }
-            pending_publish.flush(); // the left aim, with this frame's clamp state
             {std::lock_guard<std::mutex> origin_lock(arm_origin_mutex);
              hands.model_origin=arm_model_origin;hands.has_model_origin=arm_model_origin_frame!=0;
              if(arm_origin_csv.is_open()) arm_origin_csv << "publish," << frames.load() << ",2," << anchor.position[0] << ',' << anchor.position[1] << ',' << anchor.position[2] << '\n';}
