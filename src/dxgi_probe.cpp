@@ -1502,8 +1502,10 @@ static std::atomic<bool> hand_body_requested{false};
 static void start_hand_body(const fs::path& root,const fs::path& output) {
     std::ofstream note(output/L"hand-body.txt",std::ios::trunc);
     note<<"knobs read once: build/hand-body present, build/no-hand-body absent\n";
-    if(fs::exists(root/L"build"/L"hand-body-spike")) {note<<"build/hand-body-spike exists (the spike owns the shared hooks): hand body off\n";hand_body_requested=false;return;}
-    if(!native_grab.enabled()) {note<<"physical grab (the 0x89fb0 hook) is not installed: hand body off\n";hand_body_requested=false;return;}
+    if(fs::exists(root/L"build"/L"hand-body-spike")) {note<<"build/hand-body-spike exists (the spike owns the shared hooks): hand body off\n";
+        d2vr::HandBodyRuntime::note_install_failure("build/hand-body-spike exists");hand_body_requested=false;return;}
+    if(!native_grab.enabled()) {note<<"physical grab (the 0x89fb0 hook) is not installed: hand body off\n";
+        d2vr::HandBodyRuntime::note_install_failure("physical grab (the 0x89fb0 hook) is not installed");hand_body_requested=false;return;}
     std::string why;
     const bool ok=d2vr::HandBodyRuntime::install(image_base,&read_self,&game_logic_mask,&hand_body_camera,output,why);
     note<<(ok?"installed":"off")<<(why.empty()?"":" - ")<<why<<'\n';

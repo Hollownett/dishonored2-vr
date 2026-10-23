@@ -6,6 +6,7 @@
 #include "menu_tap.hpp"
 #include <cstdio>
 #include <cstdlib>
+#include <functional>
 #include <string>
 #include <vector>
 using namespace d2vr;
@@ -79,7 +80,8 @@ struct FakeHands {
     std::uintptr_t world_id=0x1000;bool busy=false;bool world_unreadable=false;
     struct Body {bool alive{};std::uint32_t handle{};Vec3 pos{},vel{};};
     std::array<Body,2> b{};std::uint32_t next=0x02000888;
-    int creates=0,destroys=0,velocities=0,applies=0,positions=0,forgets=0,creates_while_busy=0,destroys_while_busy=0,calls_on_dead_world=0;
+    int creates=0,destroys=0,velocities=0,applies=0,positions=0,forgets=0,creates_while_busy=0,destroys_while_busy=0,calls_on_dead_world=0,create_world_mismatch=0;
+    bool at_point=true;std::function<void()> on_position;   // on_position: runs inside service() (an engine callback), e.g. a re-entrant write
     bool fault_create=false,create_leaves_body=false,fault_wake=false,fault_apply=false,refuse_create=false,destroy_still_present=false,fault_destroy=false,destroy_unknown=false;int refuse_destroys=0,refuse_wakes=0;
     std::vector<std::string> log;
     std::uintptr_t dead_world=0;   // a world that changed: any engine call naming it is counted
@@ -89,8 +91,8 @@ struct FakeHands {
         HandBodyEngine e;
         e.world=[this]()->std::uintptr_t {return world_unreadable?0:world_id;};
         e.busy=[this] {return busy;};
-        e.create=[this](unsigned side,Vec3 at,std::uint32_t& h) {
-            ++creates;if(busy) ++creates_while_busy;log.push_back("create:"+std::to_string(side));
+        e.create=[this](unsigned side,std::uintptr_t w,Vec3 at,std::uint32_t& h) {
+            ++creates;if(busy) ++creates_while_busy;if(w!=world_id) ++create_world_mismatch;log.push_back("create:"+std::to_string(side));
             if(refuse_create) return false;
             if(fault_create) {
                 if(create_leaves_body) {b[side]={true,next,at,{}};throw HandBodyEngineFault("fake create fault after insert",next++);}
@@ -115,7 +117,7 @@ struct FakeHands {
             b[side].alive=false;return DestroyOutcome::gone;
         };
         e.position=[this](unsigned side,std::uint32_t h)->std::optional<Vec3> {
-            ++positions;if(!b[side].alive || b[side].handle!=h) return std::nullopt;return b[side].pos;
+            ++positions;if(on_position) on_position();if(!b[side].alive || b[side].handle!=h) return std::nullopt;return b[side].pos;
         };
         e.apply=[this](unsigned side,const hand_body::CommandRecord&) {
             ++applies;log.push_back("apply:"+std::to_string(side));
@@ -123,6 +125,7 @@ struct FakeHands {
             return b[side].alive;
         };
         e.forget=[this](unsigned side) {++forgets;log.push_back("forget:"+std::to_string(side));};
+        e.at_g1_point=[this] {return at_point;};
         return e;
     }
 };
@@ -142,7 +145,7 @@ struct FakeGame {
     FakeHands world;HandBodyEngine e=world.engine();HandBody body{e};HandBodyReleaseGate gate;MenuTap tap;
     bool paused=false,start_published=false,release_pub=true;std::uint32_t gen=0;unsigned paused_logic=4;
     int frame=0,last_dispatch=-1,pause_frame=-1,destroy_frame=-1,busy_from=-1,busy_to=-1;
-    bool authored=false;bool pause_request=false;
+    bool authored=false;bool pause_request=false;bool loading=false;
     std::uint64_t now() const {return static_cast<std::uint64_t>(frame)*16;}
     // menu: the raw menu button this frame (the user's hand).
     void step(bool menu) {
@@ -156,7 +159,7 @@ struct FakeGame {
             last_dispatch=frame;
             if(world.destroys>before && destroy_frame<0) destroy_frame=frame;
         }
-        ReleaseSignals sig;sig.logic=paused?paused_logic:2;sig.menu=menu;sig.pause_request=pause_request;sig.authored=authored;
+        ReleaseSignals sig;sig.logic=paused?paused_logic:loading?(1u<<15):2;sig.menu=menu;sig.pause_request=pause_request;sig.authored=authored;
         const auto out=gate.update(sig,body.any_alive(),now());
         release_pub=out.release || authored;
         start_published=tap.update(out.menu,true,now()) || out.pause_request;
@@ -168,7 +171,7 @@ static void b13_checks() {
     {   // creates_once_per_world: one body per hand, created once, woken once, alive for the whole stay in one world
         HandBodyFault::reset_for_tests();FakeHands f;HandBody hb(f.engine());
         for(int i=0;i<600;++i) hb.service(gameplay_in(1000+i*16),kPalms);
-        CHECK(f.creates==2);CHECK(hb.status(0).creates==1);CHECK(hb.status(1).creates==1);CHECK(hb.ready(0));CHECK(hb.ready(1));
+        CHECK(f.creates==2);CHECK(f.create_world_mismatch==0);   // review P3-1: created in the tick's world snapshotCHECK(hb.status(0).creates==1);CHECK(hb.status(1).creates==1);CHECK(hb.ready(0));CHECK(hb.ready(1));
         CHECK(hb.status(0).wake_writes==1);CHECK(hb.status(1).wake_writes==1);CHECK(f.destroys==0);CHECK(hb.any_alive());
         CHECK(hb.pose(0) && std::abs(hb.pose(0)->position.x-.3)<1e-9);CHECK(hb.status(0).available);
         // no spawn (untracked palm): no create
@@ -222,12 +225,11 @@ static void b13_checks() {
         hb.service(gameplay_in(t,false),kPalms);t+=16;   // not gameplay in the new world: no create either
         CHECK(f.engine_calls()==calls);CHECK(f.forgets==2);CHECK(hb.status(0).abandons==1);CHECK(hb.status(1).abandons==1);
         CHECK(hb.status(0).destroys==0);CHECK(!hb.any_alive());CHECK(!hb.pose(0));CHECK(hb.status(0).available);
-        // a load-generation change at the same world address abandons too
+        // a load-generation change at the same world address is NOT an abandon (review P2-1): the destroy gets its chance first
         FakeHands g;HandBody hb2(g.engine());
         for(int i=0;i<30;++i,t+=16) hb2.service(gameplay_in(t),kPalms);
-        const int calls2=g.engine_calls();
         hb2.service(gameplay_in(t,false,7),kPalms);
-        CHECK(g.engine_calls()==calls2);CHECK(hb2.status(0).abandons==1);CHECK(g.forgets==2);
+        CHECK(g.destroys==2);CHECK(hb2.status(0).abandons==0);CHECK(g.forgets==0);CHECK(hb2.status(0).load_releases==1);
         // an unreadable world is not a change: nothing decided, nothing abandoned
         FakeHands u;HandBody hb3(u.engine());
         for(int i=0;i<30;++i,t+=16) hb3.service(gameplay_in(t),kPalms);
@@ -420,6 +422,51 @@ static void b13_checks() {
         g.world.change_world();++g.gen;g.paused=false;g.start_published=false;
         for(int i=0;i<5;++i) g.step(false);
         CHECK(g.body.status(0).abandons==1);
+    }
+    {   // load_start_destroys_not_abandons (review P2-1): the generation bumps at loading START, before any destroy, world unchanged:
+        // a same-world loss of gameplay, destroyed directly (or queued when busy), never abandoned
+        HandBodyFault::reset_for_tests();FakeGame g;
+        for(int i=0;i<100;++i) g.step(false);
+        CHECK(g.body.any_alive());
+        const int calls=g.world.engine_calls();
+        g.loading=true;++g.gen;g.step(false);   // this tick: the new generation and (not yet) the release; the world pointer is the same
+        CHECK(g.world.destroys==2);CHECK(g.destroy_frame==g.last_dispatch);CHECK(g.body.status(0).abandons==0);CHECK(g.body.status(1).abandons==0);
+        CHECK(g.body.status(0).load_releases==1);CHECK(g.world.forgets==0);CHECK(!g.body.any_alive());CHECK(g.world.engine_calls()>calls);
+        g.world.change_world();g.paused=true;for(int i=0;i<20;++i) g.step(false);   // the real replacement happens with no body alive
+        g.paused=false;g.loading=false;g.start_published=false;for(int i=0;i<120;++i) g.step(false);
+        CHECK(g.world.creates==4);CHECK(g.body.status(0).abandons==0);CHECK(g.world.calls_on_dead_world==0);
+        // busy at the bump: queued, drained at the first idle tick, still no abandon
+        HandBodyFault::reset_for_tests();FakeHands f;HandBody hb(f.engine());std::uint64_t t=1000;
+        for(int i=0;i<10;++i,t+=16) hb.service(gameplay_in(t),kPalms);
+        f.busy=true;for(int i=0;i<4;++i,t+=16) hb.service(gameplay_in(t,true,5),kPalms);
+        CHECK(f.destroys==0);CHECK(hb.status(0).queued_destroys==1);CHECK(hb.any_alive());
+        f.busy=false;hb.service(gameplay_in(t,true,5),kPalms);t+=16;
+        CHECK(f.destroys==2);CHECK(hb.status(0).abandons==0);CHECK(!hb.any_alive());
+        for(int i=0;i<10;++i,t+=16) hb.service(gameplay_in(t,true,5),kPalms);   // the new generation then gets fresh bodies
+        CHECK(f.creates==4);CHECK(hb.ready(0));
+        // writes are refused from the moment the generation changed
+        const auto h=hb.status(0).handle;CHECK(hb.write(0,velocity_record(h)));
+        hb.service(gameplay_in(t,true,6),kPalms);t+=16;CHECK(!hb.write(0,velocity_record(h)));
+    }
+    {   // real_world_change_still_abandons: the world pointer itself changed with the bodies alive: abandon, no engine call
+        HandBodyFault::reset_for_tests();FakeGame g;
+        for(int i=0;i<100;++i) g.step(false);
+        const int calls=g.world.engine_calls();
+        g.world.change_world();g.loading=true;++g.gen;g.step(false);
+        CHECK(g.body.status(0).abandons==1);CHECK(g.body.status(1).abandons==1);CHECK(g.world.engine_calls()==calls);CHECK(g.world.forgets==2);
+        CHECK(g.body.status(0).load_releases==0);
+    }
+    {   // write() only at the G1 point and never from inside service() (review P3-2): refused and counted, no UB
+        HandBodyFault::reset_for_tests();FakeHands f;HandBody hb(f.engine());std::uint64_t t=1000;
+        for(int i=0;i<10;++i,t+=16) hb.service(gameplay_in(t),kPalms);
+        const auto h=hb.status(0).handle;
+        f.at_point=false;CHECK(!hb.write(0,velocity_record(h)));CHECK(hb.status(0).misplaced_writes==1);CHECK(f.applies==0);
+        f.at_point=true;
+        bool inner=true;f.on_position=[&] {inner=hb.write(0,velocity_record(h));};
+        hb.service(gameplay_in(t),kPalms);t+=16;
+        CHECK(!inner);CHECK(hb.status(0).reentrant_writes>=1);CHECK(f.applies==0);
+        f.on_position=nullptr;CHECK(hb.write(0,velocity_record(h)));CHECK(f.applies==1);
+        CHECK(hb.status(0).refused_writes==hb.status(0).misplaced_writes+hb.status(0).reentrant_writes);
     }
     HandBodyFault::reset_for_tests();
 }

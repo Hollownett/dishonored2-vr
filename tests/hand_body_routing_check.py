@@ -166,8 +166,34 @@ note = function(runtime, "static void note_event(")
 assert "std::try_to_lock" in note and "lock_guard" not in note
 slot = function(body, "bool publish(const std::optional<WorldTrackedPose>& pose)")
 assert "std::try_to_lock" in slot
-assert "std::unique_lock<std::mutex> lock(tick_mutex_,std::try_to_lock);" in service
-assert "std::unique_lock<std::mutex> lock(tick_mutex_,std::try_to_lock);" in function(body, "bool write(unsigned side,const hand_body::CommandRecord& record)")
+# review P3-2: service() and write() share an atomic re-entry guard (never a std::mutex try_lock from the owning thread), and write() is
+# refused outside the dispatcher's G1 tick
+write_fn = function(body, "bool write(unsigned side,const hand_body::CommandRecord& record)")
+assert "const TickGuard guard(ticking_);" in service and "const TickGuard guard(ticking_);" in write_fn
+assert "tick_mutex_" not in body
+assert write_fn.index("engine_.at_g1_point()") < write_fn.index("const TickGuard guard(ticking_);") < write_fn.index("engine_.apply(")
+assert "e.at_g1_point=[] {return in_g1_tick_;};" in runtime
+entry_fn = function(runtime, "static void dispatch_entry(")
+assert entry_fn.index("in_g1_tick_=true;") < entry_fn.index("try {tick();}") < entry_fn.index("in_g1_tick_=false;")
+assert "inline static thread_local bool in_g1_tick_{};" in runtime
+
+# review P2-1: the load generation is bumped on loading EXIT; a generation-only change with the world pointer unchanged destroys first
+gate_fn = function(runtime, "static ReleaseOutput release_gate(")
+assert "if(loading) loading_.store(true);" in gate_fn
+assert "else if(loading_.exchange(false)) generation_.fetch_add(1,std::memory_order_acq_rel);" in gate_fn
+assert "if(loading && !loading_.exchange(true)) generation_" not in runtime
+hold = service[service.index("const BodyState was=life_.state(side);"):service.index("const BodyAction action=life_.update(side,li);")]
+assert "world==s.world && li.world_generation!=s.gen" in hold and "li.world_generation=s.gen;li.gameplay=false;" in hold
+
+# review P3-1: the create runs in the tick's world snapshot (no re-read in the runtime's create)
+create_lambda = runtime[runtime.index("e.create=[](unsigned side,std::uintptr_t world,Vec3 at,std::uint32_t& handle)"):runtime.index("e.velocity=[]")]
+assert "world_now()" not in create_lambda
+assert "engine_.create(side,world,at,handle)" in function(body, "void do_create(")
+
+# review P3-3 / P3-4: the G1 violation reason and the install failure reason reach the status
+assert '",\\"g1_violation\\":"' in runtime and 'note_event(0,"g1_violated",0);' in runtime
+assert '",\\"install_why\\":"' in runtime
+assert start.count("HandBodyRuntime::note_install_failure(") == 2
 
 # 7. the bodies are destroyed before NativeGrab's hook goes, in every shutdown path
 for disable in ("const bool grab_disabled=native_grab.disable();", "const bool grab_disabled=interaction_disabled && native_grab.disable();",

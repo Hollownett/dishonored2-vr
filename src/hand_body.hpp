@@ -181,12 +181,13 @@ enum class DestroyOutcome {
 struct HandBodyEngine {
     std::function<std::uintptr_t()> world;                                            // the live world; 0 when unreadable this tick
     std::function<bool()> busy;                                                       // 0x8a7820 (an unreadable flag counts as busy)
-    std::function<bool(unsigned side,Vec3 at,std::uint32_t& handle)> create;          // R1 createBody; throws HandBodyEngineFault
+    std::function<bool(unsigned side,std::uintptr_t world,Vec3 at,std::uint32_t& handle)> create;   // R1 createBody in THIS tick's world; throws HandBodyEngineFault
     std::function<bool(unsigned side,std::uint32_t handle,Vec3 linear)> velocity;     // 0xc85dc0 (the wake write); throws HandBodyEngineFault
     std::function<DestroyOutcome(unsigned side,std::uint32_t handle)> destroy;        // direct 0xc8f6b0; throws HandBodyEngineFault
     std::function<std::optional<Vec3>(unsigned side,std::uint32_t handle)> position;  // nullopt: the record no longer holds our body; throws HandBodyUnreadable
     std::function<bool(unsigned side,const hand_body::CommandRecord&)> apply;         // a write; throws HandBodyEngineFault
     std::function<void(unsigned side)> forget;                                        // abandon / lost: mod-side bookkeeping only, NEVER an engine call
+    std::function<bool()> at_g1_point;                                                // write() is allowed only here (the dispatcher's G1 tick); absent: allowed
 };
 
 // Gate state the runtime passes each tick (defaults: open, for the fakes).
@@ -195,6 +196,7 @@ struct HandBodyGate {bool g1_pass{true};bool violated{};const char* why{""};};
 struct HandBodyStatus {
     bool available{};BodyState state{};std::uint32_t handle{};std::uint64_t creates{},destroys{},faults{},refused_writes{};
     std::uint64_t abandons{},queued_destroys{},direct_destroys{},busy_waits{},wake_writes{},create_refusals{},writes{},releases{},lost{},unverified{};
+    std::uint64_t load_releases{},misplaced_writes{},reentrant_writes{};
 };
 
 // The last read-back pose for the render thread: the dispatcher publishes with try_lock (never waits), readers copy under the lock.
@@ -222,8 +224,8 @@ public:
     // Dispatcher tick (the G1 point, idle or not): run the lifecycle per side, then create / destroy / drain the queue / read back.
     // spawn: where a new body is created (the calibrated palm, world space); no spawn, no create. gate: the runtime's G1/G2 state.
     void service(const std::array<LifecycleInput,sides>& per_side,const std::array<std::optional<Vec3>,sides>& spawn={},const HandBodyGate& gate={}) {
-        std::unique_lock<std::mutex> lock(tick_mutex_,std::try_to_lock);
-        if(!lock.owns_lock()) {reentries_.fetch_add(1,std::memory_order_relaxed);return;}
+        const TickGuard guard(ticking_);   // an atomic flag, not a mutex: a re-entry from the same thread is a refusal, never UB
+        if(!guard.owned) {reentries_.fetch_add(1,std::memory_order_relaxed);return;}
         ticks_.fetch_add(1,std::memory_order_relaxed);
         if(HandBodyFault::tripped() && !latched_) latch(0,"HandBodyFault tripped elsewhere",false);
         if(gate.violated && !latched_) latch(0,gate.why && *gate.why?gate.why:"gate violated",false);
@@ -242,8 +244,17 @@ public:
             li.world=world;li.physics_busy=busy;li.fault=latched_;li.shutdown=li.shutdown || shutdown_.load(std::memory_order_acquire);
             li.enabled=li.enabled && enabled_ && gate.g1_pass;
             last_gen_=li.world_generation;
-            const BodyAction action=life_.update(side,li);
             Side& s=side_[side];
+            const BodyState was=life_.state(side);
+            if((was==BodyState::ready || was==BodyState::destroying) && world==s.world && li.world_generation!=s.gen) {
+                // Review P2-1: a new load generation while the world pointer is unchanged (loading has begun, or the world came back at the same
+                // address): a same-world loss of gameplay first. The destroy gets its chance (directly when idle, else queued; own_state makes it
+                // a no-op if the slot is no longer ours); only a real world-pointer change abandons. The lifecycle sees the body's own
+                // generation until the body is gone.
+                li.world_generation=s.gen;li.gameplay=false;
+                if(!s.gen_hold) {s.gen_hold=true;count(side,&Counters::load_releases);}
+            }
+            const BodyAction action=life_.update(side,li);
             switch(action) {
             case BodyAction::abandon:            // the world changed under a live body: no engine call at all, counted (last resort)
                 s.pending_destroy=false;s.handle=0;s.attempts=0;
@@ -283,10 +294,14 @@ public:
     std::optional<WorldTrackedPose> pose(unsigned side) const {return side<sides?poses_[side].read():std::nullopt;}
     // Dispatcher thread only. Refused (counted) unless the lifecycle allows writes to this body in this world and load generation, physics
     // is idle and the record names the body's own full handle.
+    // Called outside the dispatcher's G1 tick, or from inside service() (an engine callback): refused and counted.
     bool write(unsigned side,const hand_body::CommandRecord& record) {
         if(side>=sides) return false;
-        std::unique_lock<std::mutex> lock(tick_mutex_,std::try_to_lock);
-        if(!lock.owns_lock()) {count(side,&Counters::refused_writes);return false;}
+        bool at_point=true;
+        try {at_point=!engine_.at_g1_point || engine_.at_g1_point();} catch(...) {at_point=false;}
+        if(!at_point) {count(side,&Counters::misplaced_writes);count(side,&Counters::refused_writes);return false;}
+        const TickGuard guard(ticking_);
+        if(!guard.owned) {count(side,&Counters::reentrant_writes);count(side,&Counters::refused_writes);return false;}
         std::uint32_t handle{};
         if(record.size<0x10 || record.size>record.bytes.size()) {count(side,&Counters::refused_writes);return false;}
         std::memcpy(&handle,record.bytes.data()+8,sizeof handle);
@@ -312,6 +327,7 @@ public:
         st.abandons=c.abandons.load();st.queued_destroys=c.queued_destroys.load();st.direct_destroys=c.direct_destroys.load();
         st.busy_waits=c.busy_waits.load();st.wake_writes=c.wake_writes.load();st.create_refusals=c.create_refusals.load();
         st.writes=c.writes.load();st.releases=c.releases.load();st.lost=c.lost.load();st.unverified=c.unverified.load();
+        st.load_releases=c.load_releases.load();st.misplaced_writes=c.misplaced_writes.load();st.reentrant_writes=c.reentrant_writes.load();
         return st;
     }
     // Session end: the next service() tick destroys every body (the lifecycle's shutdown input is forced on).
@@ -327,10 +343,16 @@ public:
 private:
     struct Counters {
         std::atomic<std::uint64_t> creates{},destroys{},faults{},refused_writes{},abandons{},queued_destroys{},direct_destroys{},busy_waits{},
-            wake_writes{},create_refusals{},writes{},releases{},lost{},unverified{};
+            wake_writes{},create_refusals{},writes{},releases{},lost{},unverified{},load_releases{},misplaced_writes{},reentrant_writes{};
         std::atomic<int> state{};std::atomic<std::uint32_t> handle{};
     };
-    struct Side {std::uint32_t handle{},gen{};std::uintptr_t world{};bool pending_destroy{},woken{};unsigned attempts{},wake_tries{};std::uint64_t next_create_ms{};};
+    struct TickGuard {
+        std::atomic<bool>& flag;bool owned;
+        explicit TickGuard(std::atomic<bool>& f):flag(f),owned(!f.exchange(true,std::memory_order_acq_rel)) {}
+        ~TickGuard() {if(owned) flag.store(false,std::memory_order_release);}
+        TickGuard(const TickGuard&)=delete;TickGuard& operator=(const TickGuard&)=delete;
+    };
+    struct Side {std::uint32_t handle{},gen{};std::uintptr_t world{};bool pending_destroy{},woken{},gen_hold{};unsigned attempts{},wake_tries{};std::uint64_t next_create_ms{};};
     void count(unsigned side,std::atomic<std::uint64_t> Counters::* field) {(counters_[side].*field).fetch_add(1,std::memory_order_relaxed);}
     void latch(unsigned side,const char* why,bool counted) {
         latched_=true;latched_flag_.store(true,std::memory_order_release);HandBodyFault::trip();
@@ -342,13 +364,13 @@ private:
         Side& s=side_[side];
         std::uint32_t handle=0;bool ok=false;
         if(shutdown_.load(std::memory_order_acquire)) return;   // a stop that began during this tick: no new body (stop re-checks after the drain)
-        try {ok=engine_.create && engine_.create(side,at,handle);}
+        try {ok=engine_.create && engine_.create(side,world,at,handle);}
         catch(const HandBodyEngineFault& f) {
             if(f.handle!=0xffffffffu) {life_.created(side,world,f.handle);s.handle=f.handle;s.world=world;s.gen=last_gen_;}   // tracked: its one destroy comes next tick
             latch(side,f.what(),true);return;
         }
         if(!ok) {count(side,&Counters::create_refusals);s.next_create_ms=now_ms+create_retry_ms;return;}
-        life_.created(side,world,handle);s.handle=handle;s.world=world;s.gen=last_gen_;s.attempts=0;s.pending_destroy=false;s.woken=false;s.wake_tries=0;
+        life_.created(side,world,handle);s.handle=handle;s.world=world;s.gen=last_gen_;s.attempts=0;s.pending_destroy=false;s.woken=false;s.wake_tries=0;s.gen_hold=false;
         count(side,&Counters::creates);
         // The one wake write, right after the creation (B11 run 1: createBody's activation is forced to 0 and the body hangs asleep).
         // Refused (busy at the re-read): retried on the next idle ticks, at most max_wake_tries.
@@ -411,7 +433,7 @@ private:
     }
     HandBodyEngine engine_;bool enabled_;
     HandBodyLifecycle life_;std::array<Side,sides> side_{};std::array<Counters,sides> counters_{};std::array<HandBodyPoseSlot,sides> poses_{};
-    std::mutex tick_mutex_;bool latched_{};std::atomic<bool> latched_flag_{},shutdown_{};
+    std::atomic<bool> ticking_{};bool latched_{};std::atomic<bool> latched_flag_{},shutdown_{};
     std::uintptr_t last_world_{};std::uint32_t last_gen_{};
     mutable std::mutex why_mutex_;std::string why_;
     std::atomic<std::uint64_t> ticks_{},unreadable_ticks_{},reentries_{};

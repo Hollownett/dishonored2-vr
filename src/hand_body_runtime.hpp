@@ -54,12 +54,16 @@ public:
     using HandsInput=HandBodyHandsInput;
 
     // Verifies the pins, installs the count-only hooks and arms the dispatcher entry. false (with why) leaves everything off.
+    // The reason a requested hand body is off (review P3-4: kept for the status). Control thread.
+    static void note_install_failure(const std::string& why) {std::lock_guard<std::mutex> lock(install_mutex_);install_why_=why;}
     static bool install(std::uintptr_t base,Read read,Logic logic,Camera camera,const std::filesystem::path& output,std::string& why) {
-        if(!stop()) {why="a previous hand body is still alive";return false;}
+        note_install_failure("");
+        if(!stop()) {why="a previous hand body is still alive";note_install_failure(why);return false;}
         base_=base;read_=read;logic_=logic;camera_=camera;output_=output;
-        if(HandBodyFault::tripped()) {why="HandBodyFault latched";return false;}
-        if(!HandBodyNative::verify(base,read,why)) return false;
-        if(!HandBodyNative::install_hooks(base,read,why)) return false;
+        if(HandBodyFault::tripped()) {why="HandBodyFault latched";note_install_failure(why);return false;}
+        if(!HandBodyNative::verify(base,read,why)) {note_install_failure(why);return false;}
+        if(!HandBodyNative::install_hooks(base,read,why)) {note_install_failure(why);return false;}
+        g1_violation_.store(nullptr);
         for(auto& side:storage_) for(auto& slot:side) if(slot.state==Slot::in_use) slot.state=Slot::retired;   // none after a clean stop; retired stays retired
         for(auto& s:current_) s=no_slot;
         {std::lock_guard<std::mutex> lock(hands_mutex_);hands_={};hands_tick_=0;}
@@ -130,11 +134,13 @@ public:
         sig.authored=sig.authored || (authored_.load(std::memory_order_relaxed) && authored_at && now_ms>=authored_at && now_ms-authored_at<=fresh_ms);
         {std::lock_guard<std::mutex> lock(gate_mutex_);out=gate_.update(sig,alive,now_ms);gate_holds_=gate_.holds();gate_timeouts_=gate_.timeouts();gate_intents_=gate_.intents();}
         if(signals.logic!=2 && alive) alive_outside_gameplay_.fetch_add(1,std::memory_order_relaxed);   // the game left gameplay with a body alive
-        // Load generation: every entry into a loading state (logic 0 or 1<<15: the loading screen, a death reload) is a new world even when
-        // the world object comes back at the same address; the lifecycle then abandons a body that somehow survived to it.
+        // Load generation (review P2-1): every load is a new world even when the world object comes back at the same address. It is bumped
+        // when a loading state (logic 0 or 1<<15: the loading screen, a death reload) ENDS, i.e. after the dispatcher had its chance to destroy
+        // the bodies in the old world (loading itself is a same-world loss of gameplay: `release`). HandBody also destroys first on a
+        // generation-only change with the world pointer unchanged; only a real world-pointer change abandons.
         const bool loading=signals.logic==0 || signals.logic==(1u<<15);
-        if(loading && !loading_.exchange(true)) generation_.fetch_add(1,std::memory_order_acq_rel);
-        else if(!loading) loading_.store(false);
+        if(loading) loading_.store(true);
+        else if(loading_.exchange(false)) generation_.fetch_add(1,std::memory_order_acq_rel);   // on loading EXIT
         release_.store(out.release,std::memory_order_release);release_tick_.store(now_ms,std::memory_order_release);
         return out;
     }
@@ -146,20 +152,23 @@ public:
         std::ostringstream o;o<<std::setprecision(6);
         const auto* body=body_.load(std::memory_order_acquire);
         o<<"{\"enabled\":"<<(enabled?"true":"false");
-        if(!enabled || !body) {o<<",\"installed\":"<<(active()?"true":"false")<<'}';return o.str();}
         const auto str=[](const std::string& v) {std::string out="\"";for(char ch:v) {if(ch=='"' || ch=='\\') out+='\\';out+=(ch=='\n' || static_cast<unsigned char>(ch)<32?' ':ch);}return out+"\"";};
+        std::string install_why;{std::lock_guard<std::mutex> lock(install_mutex_);install_why=install_why_;}
+        if(!install_why.empty()) o<<",\"install_why\":"<<str(install_why);
+        if(!enabled || !body) {o<<",\"installed\":"<<(active()?"true":"false")<<'}';return o.str();}
         const int g1state=g1_state_.load();const char* g1reason=g1_reason_.load();
         const std::string g1why=g1state==0?std::string("observing"):g1state==1?std::string("pass"):std::string("failed: ")+(g1reason?g1reason:"");
         o<<",\"installed\":"<<(active()?"true":"false")<<",\"available\":"<<(body->status(0).available?"true":"false")
          <<",\"hand_body_fault\":"<<(HandBodyFault::tripped()?"true":"false")<<",\"why\":"<<str(body->why())<<",\"g1\":"<<str(g1why)
-         <<",\"ticks\":"<<body->ticks()<<",\"unreadable_ticks\":"<<body->unreadable_ticks()<<",\"reentries\":"<<body->reentries()<<",\"pose_skips\":"<<body->pose_skips()
+         <<",\"g1_violation\":"<<str(g1_violation_.load()?g1_violation_.load():"")<<",\"ticks\":"<<body->ticks()<<",\"unreadable_ticks\":"<<body->unreadable_ticks()<<",\"reentries\":"<<body->reentries()<<",\"pose_skips\":"<<body->pose_skips()
          <<",\"sides\":[";
         for(unsigned side=0;side<HandBody::sides;++side) {
             const auto st=body->status(side);const auto p=body->pose(side);
             o<<(side?",":"")<<"{\"state\":"<<static_cast<int>(st.state)<<",\"handle\":"<<st.handle<<",\"creates\":"<<st.creates<<",\"destroys\":"<<st.destroys
              <<",\"direct_destroys\":"<<st.direct_destroys<<",\"queued_destroys\":"<<st.queued_destroys<<",\"releases\":"<<st.releases<<",\"abandons\":"<<st.abandons
              <<",\"lost\":"<<st.lost<<",\"faults\":"<<st.faults<<",\"refused_writes\":"<<st.refused_writes<<",\"writes\":"<<st.writes<<",\"wake_writes\":"<<st.wake_writes
-             <<",\"create_refusals\":"<<st.create_refusals<<",\"busy_waits\":"<<st.busy_waits<<",\"pose\":";
+             <<",\"create_refusals\":"<<st.create_refusals<<",\"busy_waits\":"<<st.busy_waits<<",\"load_releases\":"<<st.load_releases
+             <<",\"misplaced_writes\":"<<st.misplaced_writes<<",\"reentrant_writes\":"<<st.reentrant_writes<<",\"pose\":";
             if(p) o<<'['<<p->position.x<<','<<p->position.y<<','<<p->position.z<<']';else o<<"null";
             o<<'}';
         }
@@ -187,6 +196,9 @@ private:
     inline static std::mutex hands_mutex_;inline static HandsInput hands_{};inline static std::uint64_t hands_tick_{};
     inline static HandsInput last_hands_{};inline static std::uint64_t last_hands_tick_{};   // dispatcher's copy
     inline static std::atomic<bool> release_{true};inline static std::atomic<std::uint64_t> release_tick_{};
+    inline static thread_local bool in_g1_tick_{};
+    inline static std::atomic<const char*> g1_violation_{nullptr};
+    inline static std::mutex install_mutex_;inline static std::string install_why_;   // control / status threads only (never the dispatcher)
     inline static std::atomic<bool> loading_{};inline static std::atomic<std::uint32_t> generation_{};
     inline static std::mutex gate_mutex_;inline static HandBodyReleaseGate gate_{};
     inline static std::atomic<std::uint64_t> gate_holds_{},gate_timeouts_{},gate_intents_{},alive_outside_gameplay_{};
@@ -228,12 +240,11 @@ private:
         HandBodyEngine e;
         e.world=[] {return HandBodyNative::world_now();};
         e.busy=[] {return HandBodyNative::busy_now();};
-        e.create=[](unsigned side,Vec3 at,std::uint32_t& handle) {
+        e.create=[](unsigned side,std::uintptr_t world,Vec3 at,std::uint32_t& handle) {   // world: the tick's snapshot (never re-read)
             if(side>=2 || current_[side]!=no_slot) return false;
             unsigned pick=no_slot;
             for(unsigned i=0;i<storage_per_side;++i) if(storage_[side][i].state==Slot::free) {pick=i;break;}
             if(pick==no_slot) {storage_exhausted_.fetch_add(1,std::memory_order_relaxed);return false;}
-            const auto world=HandBodyNative::world_now();
             const auto owner=world?owner_now(world):std::nullopt;
             if(!owner) return false;
             HandBodyNative::watch_owner(*owner);
@@ -283,6 +294,7 @@ private:
             return HandBodyNative::velocity(s->storage,HandBodyNative::world_now(),s->world,handle,Vec3{f[0],f[1],f[2]},Vec3{f[3],f[4],f[5]});
         };
         e.forget=[](unsigned side) {release_slot(side,true,false);};   // abandoned with its world / lost: no engine call; the storage is retired
+        e.at_g1_point=[] {return in_g1_tick_;};   // write() only from inside the dispatcher's G1 tick (B14's drive runs there)
         return e;
     }
 
@@ -295,7 +307,17 @@ private:
         std::unique_lock<std::mutex> lock(tick_mutex_,std::try_to_lock);
         if(!lock.owns_lock() || point.frame==last_frame_) return;           // once per game frame
         last_frame_=point.frame;
+        in_g1_tick_=true;
         try {tick();} catch(...) {HandBodyFault::trip();note_event(0,"tick_exception",0);}
+        in_g1_tick_=false;
+    }
+    static const char* g1_violation_reason(const G1Stats& at_pass,const G1Stats& now) {
+        if(now.dispatch_off_frame_thread!=at_pass.dispatch_off_frame_thread) return "G1 violated after the pass: a 0x89fb0 dispatch ran off the frame thread";
+        if(now.dispatch_overlap!=at_pass.dispatch_overlap) return "G1 violated after the pass: a 0x89fb0 dispatch overlapped the step";
+        if(now.step_busy!=at_pass.step_busy) return "G1 violated after the pass: 0x8a7820 true at 0x97bc0 entry";
+        if(now.frame_threads!=at_pass.frame_threads) return "G1 violated after the pass: 0x8ad260 ran on another thread";
+        if(now.dispatch_busy!=at_pass.dispatch_busy) return "G1 violated after the pass: 0x8a7820 true at a 0x89fb0 dispatch";
+        return "G1 violated after the pass";
     }
     static void tick() {
         auto* body=body_.load(std::memory_order_acquire);
@@ -313,7 +335,10 @@ private:
                            note_event(0,v.pass?"g1_pass":"g1_fail",0);}
         }
         gate.g1_pass=g1_decided_ && g1_passed_;
-        if(gate.g1_pass && !g1_still_holds(g1_pass_,g1_)) {gate.violated=true;gate.why="G1 violated after the pass";}
+        if(gate.g1_pass && !g1_still_holds(g1_pass_,g1_)) {   // safe: the bodies are destroyed once and the hand body stays off (review P3-3: logged once, reason in the status)
+            gate.violated=true;gate.why=g1_violation_reason(g1_pass_,g1_);
+            if(!g1_violation_.load()) {g1_violation_.store(gate.why);note_event(0,"g1_violated",0);}
+        }
         // G2: an owner (a) wake or a broadphase exit for a hand handle while a body lives rejects owner (a); no fallback owner: off.
         const auto g2=HandBodyNative::g2_now();
         if(g2_watching_ && (g2.wake_owner>g2_prev_.wake_owner || g2.exit_hand>g2_prev_.exit_hand)) {
