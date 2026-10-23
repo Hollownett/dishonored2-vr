@@ -176,6 +176,7 @@ enum class DestroyOutcome {
     refused,        // no engine call was made (busy at the re-read, unreadable pool): retry at the next idle tick
     absent,         // no engine call: the slot no longer held our body before the call (removed or recycled): never destroy someone else's
     still_present,  // destroyBodies returned but the slot still holds our body: the state is unknown, latch
+    unknown,        // destroyBodies returned but the slot could not be read afterwards: tracked no longer, its storage never reused
 };
 struct HandBodyEngine {
     std::function<std::uintptr_t()> world;                                            // the live world; 0 when unreadable this tick
@@ -193,7 +194,7 @@ struct HandBodyGate {bool g1_pass{true};bool violated{};const char* why{""};};
 
 struct HandBodyStatus {
     bool available{};BodyState state{};std::uint32_t handle{};std::uint64_t creates{},destroys{},faults{},refused_writes{};
-    std::uint64_t abandons{},queued_destroys{},direct_destroys{},busy_waits{},wake_writes{},create_refusals{},writes{},releases{},lost{};
+    std::uint64_t abandons{},queued_destroys{},direct_destroys{},busy_waits{},wake_writes{},create_refusals{},writes{},releases{},lost{},unverified{};
 };
 
 // The last read-back pose for the render thread: the dispatcher publishes with try_lock (never waits), readers copy under the lock.
@@ -215,6 +216,7 @@ public:
     static constexpr unsigned sides=2;
     static constexpr std::uint64_t create_retry_ms=1000;   // after a refused create, wait before the next attempt (owner resolution is not free)
     static constexpr unsigned max_destroy_retries=240;     // a queued destroy refused this many times latches the fault
+    static constexpr unsigned max_wake_tries=30;           // a refused wake write (busy, unreadable) is retried on the next ticks, this many times
     explicit HandBody(HandBodyEngine engine,bool enabled=true):engine_(std::move(engine)),enabled_(enabled) {}
 
     // Dispatcher tick (the G1 point, idle or not): run the lifecycle per side, then create / destroy / drain the queue / read back.
@@ -261,6 +263,7 @@ public:
                 break;
             case BodyAction::none:
                 if(s.pending_destroy) {if(busy) count(side,&Counters::busy_waits);else do_destroy(side,world,busy);}
+                else if(!s.woken && !busy && !latched_ && s.wake_tries<max_wake_tries && life_.state(side)==BodyState::ready) wake(side);
                 break;
             }
             readback(side,world);
@@ -308,7 +311,7 @@ public:
         st.creates=c.creates.load();st.destroys=c.destroys.load();st.faults=c.faults.load();st.refused_writes=c.refused_writes.load();
         st.abandons=c.abandons.load();st.queued_destroys=c.queued_destroys.load();st.direct_destroys=c.direct_destroys.load();
         st.busy_waits=c.busy_waits.load();st.wake_writes=c.wake_writes.load();st.create_refusals=c.create_refusals.load();
-        st.writes=c.writes.load();st.releases=c.releases.load();st.lost=c.lost.load();
+        st.writes=c.writes.load();st.releases=c.releases.load();st.lost=c.lost.load();st.unverified=c.unverified.load();
         return st;
     }
     // Session end: the next service() tick destroys every body (the lifecycle's shutdown input is forced on).
@@ -324,30 +327,41 @@ public:
 private:
     struct Counters {
         std::atomic<std::uint64_t> creates{},destroys{},faults{},refused_writes{},abandons{},queued_destroys{},direct_destroys{},busy_waits{},
-            wake_writes{},create_refusals{},writes{},releases{},lost{};
+            wake_writes{},create_refusals{},writes{},releases{},lost{},unverified{};
         std::atomic<int> state{};std::atomic<std::uint32_t> handle{};
     };
-    struct Side {std::uint32_t handle{},gen{};std::uintptr_t world{};bool pending_destroy{};unsigned attempts{};std::uint64_t next_create_ms{};};
+    struct Side {std::uint32_t handle{},gen{};std::uintptr_t world{};bool pending_destroy{},woken{};unsigned attempts{},wake_tries{};std::uint64_t next_create_ms{};};
     void count(unsigned side,std::atomic<std::uint64_t> Counters::* field) {(counters_[side].*field).fetch_add(1,std::memory_order_relaxed);}
     void latch(unsigned side,const char* why,bool counted) {
         latched_=true;latched_flag_.store(true,std::memory_order_release);HandBodyFault::trip();
         if(counted) count(side,&Counters::faults);
-        std::lock_guard<std::mutex> lock(why_mutex_);if(why_.empty() && why) why_=why;
+        std::unique_lock<std::mutex> lock(why_mutex_,std::try_to_lock);   // the dispatcher never waits on a status reader
+        if(lock.owns_lock() && why_.empty() && why) why_=why;
     }
     void do_create(unsigned side,std::uintptr_t world,Vec3 at,std::uint64_t now_ms) {
         Side& s=side_[side];
         std::uint32_t handle=0;bool ok=false;
+        if(shutdown_.load(std::memory_order_acquire)) return;   // a stop that began during this tick: no new body (stop re-checks after the drain)
         try {ok=engine_.create && engine_.create(side,at,handle);}
         catch(const HandBodyEngineFault& f) {
             if(f.handle!=0xffffffffu) {life_.created(side,world,f.handle);s.handle=f.handle;s.world=world;s.gen=last_gen_;}   // tracked: its one destroy comes next tick
             latch(side,f.what(),true);return;
         }
         if(!ok) {count(side,&Counters::create_refusals);s.next_create_ms=now_ms+create_retry_ms;return;}
-        life_.created(side,world,handle);s.handle=handle;s.world=world;s.gen=last_gen_;s.attempts=0;s.pending_destroy=false;
+        life_.created(side,world,handle);s.handle=handle;s.world=world;s.gen=last_gen_;s.attempts=0;s.pending_destroy=false;s.woken=false;s.wake_tries=0;
         count(side,&Counters::creates);
         // The one wake write, right after the creation (B11 run 1: createBody's activation is forced to 0 and the body hangs asleep).
+        // Refused (busy at the re-read): retried on the next idle ticks, at most max_wake_tries.
         try {
-            if(engine_.velocity && engine_.velocity(side,handle,Vec3{0,0,-R1Recipe::wake_speed})) count(side,&Counters::wake_writes);
+            ++s.wake_tries;
+            if(engine_.velocity && engine_.velocity(side,handle,Vec3{0,0,-R1Recipe::wake_speed})) {s.woken=true;count(side,&Counters::wake_writes);}
+        } catch(const HandBodyEngineFault& f) {latch(side,f.what(),true);}
+        catch(const HandBodyUnreadable&) {}
+    }
+    void wake(unsigned side) {
+        Side& s=side_[side];++s.wake_tries;
+        try {
+            if(engine_.velocity && engine_.velocity(side,s.handle,Vec3{0,0,-R1Recipe::wake_speed})) {s.woken=true;count(side,&Counters::wake_writes);}
         } catch(const HandBodyEngineFault& f) {latch(side,f.what(),true);}
         catch(const HandBodyUnreadable&) {}
     }
@@ -366,6 +380,8 @@ private:
             count(side,&Counters::destroys);count(side,&Counters::direct_destroys);finish(side);return;
         case DestroyOutcome::absent:
             count(side,&Counters::lost);if(engine_.forget) engine_.forget(side);finish(side);return;
+        case DestroyOutcome::unknown:   // the call returned cleanly; the slot could not be confirmed empty: never reused (runtime), counted
+            count(side,&Counters::destroys);count(side,&Counters::direct_destroys);count(side,&Counters::unverified);finish(side);return;
         case DestroyOutcome::still_present:
             latch(side,"destroyBodies returned but the body is still there",true);finish(side);return;
         case DestroyOutcome::refused:

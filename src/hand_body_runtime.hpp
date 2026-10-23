@@ -64,8 +64,10 @@ public:
         for(auto& s:current_) s=no_slot;
         {std::lock_guard<std::mutex> lock(hands_mutex_);hands_={};hands_tick_=0;}
         last_hands_={};last_hands_tick_=0;release_.store(true);release_tick_.store(0);
-        g1_={};g1_pass_={};g1_decided_=false;g1_passed_=false;g1_why_="observing";gameplay_since_ms_=0;last_frame_=0;
-        g2_prev_={};g2_watching_=false;g2_events_.store(0);gate_={};
+        g1_={};g1_pass_={};g1_decided_=false;g1_passed_=false;g1_state_.store(0);g1_reason_.store("observing");gameplay_since_ms_=0;last_frame_=0;
+        g2_prev_={};g2_watching_=false;g2_events_.store(0);
+        {std::lock_guard<std::mutex> lock(gate_mutex_);gate_.reset();}
+        for(auto& st:stranded_) st.store(false);authored_.store(false);authored_tick_.store(0);
         alive_outside_gameplay_.store(0);storage_exhausted_.store(0);retired_.store(0);
         {std::lock_guard<std::mutex> lock(events_mutex_);events_.clear();dropped_events_=0;}
         auto* body=new HandBody(engine(),true);   // never freed: a render-thread reader may still hold the previous one (tiny, per install)
@@ -77,35 +79,44 @@ public:
         hand_body_dispatch.store(&dispatch_entry,std::memory_order_release);
         return true;
     }
-    // Session end: the next dispatcher tick destroys every body; wait up to 3 s. A body still alive keeps the hooks and the cast exclusion
-    // (count-only, harmless) and latches HandBodyFault; then false.
+    // Session end: the next dispatcher tick destroys every body; wait up to 3 s. The dispatcher entry is then cut and the in-flight tick
+    // drained BEFORE the final check, so a body created by a tick that began before the stop is seen (and the entry restored to destroy
+    // it). A body still alive at the deadline (the game paused: no dispatcher) is stranded: the entry is cut, HandBodyFault latches (no
+    // re-install), and its cast exclusion is kept; it then goes with its world (the abandon case). false in that case.
     static bool stop() {
         if(!active_.load(std::memory_order_acquire)) {stop_writer();return true;}
         stop_requested_.store(true,std::memory_order_release);
         if(auto* body=body_.load(std::memory_order_acquire)) body->shutdown();
         const auto deadline=GetTickCount64()+3000;
-        while(any_alive() && GetTickCount64()<deadline) Sleep(10);
-        if(any_alive()) {
-            note_event(0,"stop_timeout_alive",0);
-            HandBodyFault::trip();stop_writer();return false;
+        bool alive=true;
+        for(;;) {
+            while(body_alive() && GetTickCount64()<deadline) Sleep(10);
+            hand_body_dispatch.store(nullptr,std::memory_order_release);
+            const auto drain=GetTickCount64()+2000;
+            while(dispatch_inflight_.load() && GetTickCount64()<drain) Sleep(1);
+            alive=body_alive() || dispatch_inflight_.load();
+            if(!alive || GetTickCount64()>=deadline) break;
+            hand_body_dispatch.store(&dispatch_entry,std::memory_order_release);   // a late create: let the dispatcher destroy it
         }
-        hand_body_dispatch.store(nullptr,std::memory_order_release);
         active_.store(false,std::memory_order_release);
         const bool unhooked=HandBodyNative::disable_hooks();
-        const auto drain=GetTickCount64()+2000;
-        while(dispatch_inflight_.load() && GetTickCount64()<drain) Sleep(1);
-        for(auto& slot:cast_excluded_bodies) slot.store(0xffffffffu,std::memory_order_relaxed);
+        for(unsigned side=0;side<2;++side) {
+            const bool keep=alive || stranded_[side].load();
+            if(!keep) cast_excluded_bodies[side].store(0xffffffffu,std::memory_order_relaxed);
+        }
+        if(alive) {note_event(0,"stop_timeout_alive",0);HandBodyFault::trip();stop_writer();return false;}
         note_event(0,unhooked?"stopped":"stopped_hooks_kept",0);
         stop_writer();
         return unhooked;
     }
     static bool active() {return active_.load(std::memory_order_acquire);}
     // A body exists or is being destroyed (any thread).
-    static bool any_alive() {const auto* body=body_.load(std::memory_order_acquire);return active() && body && body->any_alive();}
+    static bool any_alive() {return active() && body_alive();}
 
     // ---- render thread
     static void publish_hands(const HandsInput& in,std::uint64_t now_ms) {
         if(!active()) return;
+        authored_.store(in.authored,std::memory_order_relaxed);authored_tick_.store(now_ms,std::memory_order_release);
         std::lock_guard<std::mutex> lock(hands_mutex_);hands_=in;hands_tick_=now_ms;
     }
     // Once per frame where the controller input is composed: returns the menu button / pause event to publish (Start waits for the destroy)
@@ -114,7 +125,10 @@ public:
         ReleaseOutput out;out.menu=signals.menu;out.pause_request=signals.pause_request;
         if(!active()) return out;
         const bool alive=any_alive();
-        {std::lock_guard<std::mutex> lock(gate_mutex_);out=gate_.update(signals,alive,now_ms);gate_holds_=gate_.holds();gate_timeouts_=gate_.timeouts();gate_intents_=gate_.intents();}
+        ReleaseSignals sig=signals;   // the authored camera (a death clip, a takedown) comes from the head-view publication
+        const auto authored_at=authored_tick_.load(std::memory_order_acquire);
+        sig.authored=sig.authored || (authored_.load(std::memory_order_relaxed) && authored_at && now_ms>=authored_at && now_ms-authored_at<=fresh_ms);
+        {std::lock_guard<std::mutex> lock(gate_mutex_);out=gate_.update(sig,alive,now_ms);gate_holds_=gate_.holds();gate_timeouts_=gate_.timeouts();gate_intents_=gate_.intents();}
         if(signals.logic!=2 && alive) alive_outside_gameplay_.fetch_add(1,std::memory_order_relaxed);   // the game left gameplay with a body alive
         // Load generation: every entry into a loading state (logic 0 or 1<<15: the loading screen, a death reload) is a new world even when
         // the world object comes back at the same address; the lifecycle then abandons a body that somehow survived to it.
@@ -134,7 +148,8 @@ public:
         o<<"{\"enabled\":"<<(enabled?"true":"false");
         if(!enabled || !body) {o<<",\"installed\":"<<(active()?"true":"false")<<'}';return o.str();}
         const auto str=[](const std::string& v) {std::string out="\"";for(char ch:v) {if(ch=='"' || ch=='\\') out+='\\';out+=(ch=='\n' || static_cast<unsigned char>(ch)<32?' ':ch);}return out+"\"";};
-        std::string g1why;{std::lock_guard<std::mutex> lock(g1_mutex_);g1why=g1_why_;}
+        const int g1state=g1_state_.load();const char* g1reason=g1_reason_.load();
+        const std::string g1why=g1state==0?std::string("observing"):g1state==1?std::string("pass"):std::string("failed: ")+(g1reason?g1reason:"");
         o<<",\"installed\":"<<(active()?"true":"false")<<",\"available\":"<<(body->status(0).available?"true":"false")
          <<",\"hand_body_fault\":"<<(HandBodyFault::tripped()?"true":"false")<<",\"why\":"<<str(body->why())<<",\"g1\":"<<str(g1why)
          <<",\"ticks\":"<<body->ticks()<<",\"unreadable_ticks\":"<<body->unreadable_ticks()<<",\"reentries\":"<<body->reentries()<<",\"pose_skips\":"<<body->pose_skips()
@@ -151,6 +166,8 @@ public:
         o<<"],\"abandons\":"<<(body->status(0).abandons+body->status(1).abandons)
          <<",\"release\":{\"holds\":"<<gate_holds_.load()<<",\"timeouts\":"<<gate_timeouts_.load()<<",\"intents\":"<<gate_intents_.load()
          <<",\"alive_outside_gameplay\":"<<alive_outside_gameplay_.load()<<'}'
+         <<",\"stranded\":["<<(stranded_[0].load()?1:0)<<','<<(stranded_[1].load()?1:0)<<']'
+         <<",\"unverified\":"<<(body->status(0).unverified+body->status(1).unverified)
          <<",\"g2_events\":"<<g2_events_.load()<<",\"storage_retired\":"<<retired_.load()<<",\"storage_exhausted\":"<<storage_exhausted_.load()
          <<",\"cast_excluded_hits\":"<<cast_excluded_hits.load()<<",\"dropped_events\":"<<dropped_events_.load()<<'}';
         return o.str();
@@ -176,7 +193,10 @@ private:
     // dispatcher state
     inline static std::mutex tick_mutex_;inline static std::uint64_t last_frame_{};
     inline static G1Stats g1_{},g1_pass_{};inline static bool g1_decided_{},g1_passed_{};inline static std::uint64_t gameplay_since_ms_{};
-    inline static std::mutex g1_mutex_;inline static std::string g1_why_{"observing"};
+    inline static std::atomic<int> g1_state_{};inline static std::atomic<const char*> g1_reason_{"observing"};   // 0 observing, 1 pass, 2 failed (judge_g1's literal)
+    inline static std::array<std::atomic<bool>,2> stranded_{};   // a body that may still exist and that we can no longer destroy (kept excluded)
+    inline static std::atomic<bool> authored_{};inline static std::atomic<std::uint64_t> authored_tick_{};
+    static bool body_alive() {const auto* body=body_.load(std::memory_order_acquire);return body && body->any_alive();}
     inline static G2Counts g2_prev_{};inline static bool g2_watching_{};inline static std::atomic<std::uint64_t> g2_events_{};
     inline static std::atomic<std::uint64_t> storage_exhausted_{},retired_{};
     inline static std::array<HandBodyStatus,2> last_status_{};
@@ -242,9 +262,10 @@ private:
             if(!s) return DestroyOutcome::absent;
             DestroyOutcome r=DestroyOutcome::refused;
             try {r=HandBodyNative::destroy(s->storage,HandBodyNative::world_now(),s->world,handle);}
-            catch(const HandBodyEngineFault&) {release_slot(side,true,true);throw;}   // unknown: retired, still excluded
+            catch(const HandBodyEngineFault&) {stranded_[side].store(true);release_slot(side,true,true);throw;}   // unknown: retired, still excluded
             if(r==DestroyOutcome::gone) release_slot(side,false,false);
-            else if(r==DestroyOutcome::still_present) release_slot(side,true,true);
+            else if(r==DestroyOutcome::still_present) {stranded_[side].store(true);release_slot(side,true,true);}
+            else if(r==DestroyOutcome::unknown) release_slot(side,true,true);   // most likely gone: retired, excluded until this side's next body
             return r;   // absent: the manager calls forget(); refused: retried at the next idle tick
         };
         e.position=[](unsigned side,std::uint32_t handle)->std::optional<Vec3> {
@@ -288,7 +309,7 @@ private:
         g1_=HandBodyNative::g1_now(gameplay_since_ms_?static_cast<double>(now-gameplay_since_ms_)/1000.:0.);
         if(!g1_decided_) {
             const auto v=judge_g1(g1_,g1_min_s);
-            if(v.decided) {g1_decided_=true;g1_passed_=v.pass;g1_pass_=g1_;set_g1_why(v.pass?"pass":std::string("failed: ")+v.reason);
+            if(v.decided) {g1_decided_=true;g1_passed_=v.pass;g1_pass_=g1_;g1_reason_.store(v.reason);g1_state_.store(v.pass?1:2);
                            note_event(0,v.pass?"g1_pass":"g1_fail",0);}
         }
         gate.g1_pass=g1_decided_ && g1_passed_;
@@ -319,7 +340,6 @@ private:
         if(!g2_watching_) g2_prev_=HandBodyNative::g2_now();
         log_changes(*body);
     }
-    static void set_g1_why(const std::string& why) {std::lock_guard<std::mutex> lock(g1_mutex_);g1_why_=why;}
 
     // ---- the event log (hand-body-events.csv; a writer thread flushes once per second, the dispatcher only try_locks)
     inline static std::mutex events_mutex_;inline static std::vector<HandBodyEvent> events_;inline static std::atomic<std::uint64_t> dropped_events_{};

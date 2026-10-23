@@ -80,7 +80,7 @@ struct FakeHands {
     struct Body {bool alive{};std::uint32_t handle{};Vec3 pos{},vel{};};
     std::array<Body,2> b{};std::uint32_t next=0x02000888;
     int creates=0,destroys=0,velocities=0,applies=0,positions=0,forgets=0,creates_while_busy=0,destroys_while_busy=0,calls_on_dead_world=0;
-    bool fault_create=false,create_leaves_body=false,fault_wake=false,fault_apply=false,refuse_create=false,destroy_still_present=false;int refuse_destroys=0;
+    bool fault_create=false,create_leaves_body=false,fault_wake=false,fault_apply=false,refuse_create=false,destroy_still_present=false,fault_destroy=false,destroy_unknown=false;int refuse_destroys=0,refuse_wakes=0;
     std::vector<std::string> log;
     std::uintptr_t dead_world=0;   // a world that changed: any engine call naming it is counted
     int engine_calls() const {return creates+destroys+velocities+applies+positions;}
@@ -101,14 +101,17 @@ struct FakeHands {
         e.velocity=[this](unsigned side,std::uint32_t h,Vec3 v) {
             ++velocities;log.push_back("velocity:"+std::to_string(side)+":"+std::to_string(v.z));
             if(fault_wake) throw HandBodyEngineFault("fake wake fault");
+            if(refuse_wakes>0) {--refuse_wakes;return false;}
             if(!b[side].alive || b[side].handle!=h) return false;
             b[side].vel=v;return true;
         };
         e.destroy=[this](unsigned side,std::uint32_t h) {
             ++destroys;if(busy) ++destroys_while_busy;log.push_back("destroy:"+std::to_string(side));
+            if(fault_destroy) throw HandBodyEngineFault("fake destroy fault");
             if(refuse_destroys>0) {--refuse_destroys;return DestroyOutcome::refused;}
             if(!b[side].alive || b[side].handle!=h) return DestroyOutcome::absent;
             if(destroy_still_present) return DestroyOutcome::still_present;
+            if(destroy_unknown) {b[side].alive=false;return DestroyOutcome::unknown;}
             b[side].alive=false;return DestroyOutcome::gone;
         };
         e.position=[this](unsigned side,std::uint32_t h)->std::optional<Vec3> {
@@ -184,6 +187,13 @@ static void b13_checks() {
         FakeHands g;g.refuse_create=true;HandBody hb2(g.engine());
         for(int i=0;i<60;++i) hb2.service(gameplay_in(1000+i*16),kPalms);
         CHECK(g.velocities==0);CHECK(g.creates==2);CHECK(hb2.status(0).create_refusals==1);
+        // a refused wake (busy at the re-read) is retried on the next idle tick, then never again (DeepSeek P3: no body left asleep)
+        FakeHands r;r.refuse_wakes=2;HandBody hb3(r.engine());
+        for(int i=0;i<60;++i) hb3.service(gameplay_in(1000+i*16),kPalms);
+        CHECK(hb3.status(0).wake_writes==1);CHECK(hb3.status(1).wake_writes==1);CHECK(r.velocities==4);
+        FakeHands n;n.refuse_wakes=1000;HandBody hb4(n.engine());
+        for(int i=0;i<200;++i) hb4.service(gameplay_in(1000+i*16),kPalms);
+        CHECK(n.velocities==2*static_cast<int>(HandBody::max_wake_tries));CHECK(hb4.status(0).wake_writes==0);
     }
     {   // never a create while physics is busy (the lifecycle and the manager both refuse)
         HandBodyFault::reset_for_tests();FakeHands f;f.busy=true;HandBody hb(f.engine());
@@ -267,6 +277,12 @@ static void b13_checks() {
         for(int i=0;i<10;++i,t+=16) hb4.service(gameplay_in(t),kPalms);
         d.destroy_still_present=true;for(int i=0;i<20;++i,t+=16) hb4.service(gameplay_in(t,false),kPalms);
         CHECK(d.destroys==2);CHECK(HandBodyFault::tripped());CHECK(!hb4.status(0).available);   // one attempt per side, never retried
+        // a faulted destroy: latched, one attempt per side, never retried
+        HandBodyFault::reset_for_tests();FakeHands fd;HandBody hb8(fd.engine());
+        for(int i=0;i<10;++i,t+=16) hb8.service(gameplay_in(t),kPalms);
+        fd.fault_destroy=true;for(int i=0;i<60;++i,t+=16) hb8.service(gameplay_in(t,false),kPalms);
+        CHECK(fd.destroys==2);CHECK(HandBodyFault::tripped());CHECK(hb8.status(0).faults==1);CHECK(hb8.status(0).state==BodyState::faulted);
+        CHECK(hb8.status(0).destroys==0);   // never reported destroyed
         // HandBodyFault tripped elsewhere: no create at all
         FakeHands e2;HandBody hb5(e2.engine());for(int i=0;i<20;++i,t+=16) hb5.service(gameplay_in(t),kPalms);
         CHECK(e2.creates==0);
@@ -311,6 +327,16 @@ static void b13_checks() {
         HandBodyFault::reset_for_tests();FakeHands f;HandBody hb(f.engine(),hand_body_knob_enabled(true,true));
         for(int i=0;i<300;++i) hb.service(gameplay_in(1000+i*16),kPalms);
         CHECK(f.engine_calls()==0);CHECK(!hb.status(0).available);CHECK(!hb.write(0,velocity_record(0x02000888)));
+    }
+    {   // a destroy whose slot cannot be read afterwards: counted unverified, no longer tracked, never retried
+        HandBodyFault::reset_for_tests();FakeHands f;f.destroy_unknown=true;HandBody hb(f.engine());std::uint64_t t=1000;
+        for(int i=0;i<10;++i,t+=16) hb.service(gameplay_in(t),kPalms);
+        for(int i=0;i<10;++i,t+=16) hb.service(gameplay_in(t,false),kPalms);
+        CHECK(f.destroys==2);CHECK(hb.status(0).unverified==1);CHECK(!hb.any_alive());CHECK(hb.status(0).available);
+        // shutdown requested before the tick: no create in it (the stop drains the tick and re-checks)
+        FakeHands g;HandBody hb2(g.engine());hb2.shutdown();
+        for(int i=0;i<10;++i,t+=16) hb2.service(gameplay_in(t),kPalms);
+        CHECK(g.creates==0);
     }
     {   // shutdown: the next tick destroys both bodies; nothing is created afterwards
         HandBodyFault::reset_for_tests();FakeHands f;HandBody hb(f.engine());std::uint64_t t=1000;

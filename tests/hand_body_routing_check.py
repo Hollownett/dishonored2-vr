@@ -82,7 +82,10 @@ assert "inline bool hand_body_knob_enabled(bool hand_body_file,bool no_hand_body
 
 # 2. knob off: no hook, no dispatch entry, no thread, no engine call outside install(); the render-side calls are behind the knob
 install = function(runtime, "static bool install(")
-assert runtime.count("hand_body_dispatch.store(&dispatch_entry") == 1 and "hand_body_dispatch.store(&dispatch_entry" in install
+stop_fn = function(runtime, "static bool stop()")
+assert runtime.count("hand_body_dispatch.store(&dispatch_entry") == 2 and "hand_body_dispatch.store(&dispatch_entry" in install
+assert "hand_body_dispatch.store(&dispatch_entry" in stop_fn, "the only other store: stop() restoring the entry to destroy a late body"
+assert stop_fn.index("if(!active_.load(std::memory_order_acquire)) {stop_writer();return true;}") < stop_fn.index("hand_body_dispatch.store(&dispatch_entry")
 assert runtime.count("HandBodyNative::install_hooks(") == 1 and "HandBodyNative::install_hooks(" in install
 assert install.index("HandBodyNative::verify(") < install.index("HandBodyNative::install_hooks("), "pins before hooks"
 assert install.index("HandBodyNative::install_hooks(") < install.index("hand_body_dispatch.store(&dispatch_entry")
@@ -173,9 +176,18 @@ for disable in ("const bool grab_disabled=native_grab.disable();", "const bool g
     before = probe.rfind("HandBodyRuntime::stop();", 0, at)
     assert before != -1 and at - before < 6000, "hand body stop must precede " + disable
 assert probe.count("d2vr::HandBodySpikeEngine::stop();d2vr::HandBodyRuntime::stop();") == probe.count("d2vr::HandBodySpikeEngine::stop();")
-stop = function(runtime, "static bool stop()")
+stop = stop_fn
 assert stop.index("body->shutdown()") < stop.index("HandBodyNative::disable_hooks()"), "the destroy request comes before the unhook"
-assert stop.index("if(any_alive())") < stop.index("hand_body_dispatch.store(nullptr"), "a body still alive keeps the hooks"
+# DeepSeek P1: the in-flight tick is drained before the final check, so a body created by a tick that began before the stop is seen
+assert stop.index("hand_body_dispatch.store(nullptr") < stop.index("while(dispatch_inflight_.load()") < stop.index("alive=body_alive() || dispatch_inflight_.load();")
+assert "const bool keep=alive || stranded_[side].load();" in stop, "an exclusion stays while its body may exist"
+assert "if(shutdown_.load(std::memory_order_acquire)) return;" in function(body, "void do_create("), "no create once the stop began"
+# DeepSeek P1: gone only when the slot is positively not ours; unreadable after the call is `unknown` (storage retired)
+assert "return after==Own::absent?DestroyOutcome::gone:after==Own::present?DestroyOutcome::still_present:DestroyOutcome::unknown;" in native
+assert "else if(r==DestroyOutcome::unknown) release_slot(side,true,true);" in runtime
+# DeepSeek P3: the dispatcher's fault path never waits on the status reader
+assert "std::unique_lock<std::mutex> lock(why_mutex_,std::try_to_lock);" in function(body, "void latch(")
+assert "g1_mutex_" not in runtime
 
 # 8. cast exclusion: both production hand handles
 assert "cast_excluded_bodies[side].store(handle,std::memory_order_relaxed);" in function(runtime, "static void exclude(")

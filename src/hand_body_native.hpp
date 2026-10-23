@@ -252,8 +252,8 @@ public:
         CrashOperation operation("hand body destroyBodies");
         if(busy_now()) return DestroyOutcome::refused;     // 0x8a7820 re-read immediately before the call
         if(!guarded_call(call)) throw HandBodyEngineFault("destroyBodies faulted");
-        const auto after=own_state(world,handle,s);
-        return after==Own::present?DestroyOutcome::still_present:DestroyOutcome::gone;   // unreadable after a clean return: gone (logged by the owner)
+        const auto after=own_state(world,handle,s);   // gone only when the slot is positively ours no more
+        return after==Own::absent?DestroyOutcome::gone:after==Own::present?DestroyOutcome::still_present:DestroyOutcome::unknown;
     }
     // 0xc85dc0 velocity on our own slot only, with 0x8a7820 re-read false right before it. false: refused, no call. Caps: 2 m/s, 20 rad/s.
     static bool velocity(const R1BodyStorage& s,std::uintptr_t world,std::uintptr_t world_at_create,std::uint32_t handle,Vec3 v,Vec3 w) {
