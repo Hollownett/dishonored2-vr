@@ -170,13 +170,16 @@ component whose `+0x10` is a real entity.** Then every consumer sees objects of 
    engine ctor (pure stores, no allocation). Keep the base vtable 0x1aff038: all of its slots are stubs. Never free it
    while the body exists. Call the dtor 0x18cbd0 only after `destroyBodies`.
 2. **Owner.** Call 0x694c20(ud, owner) with a real component, for example:
-   * **(a) the player's own userdata owner.** Read it live as `*(*(body+0x90)+8)` of the player's second body.
+   * **(a) the player's own userdata owner: the first candidate to *probe*, not to adopt.** Create a hand body under it
+     only if gate G2 (Route table) shows that no reader reaches the player through it. Read it live as
+     `*(*(body+0x90)+8)` of the player's second body.
      0x1b6ec0 stores that body's handle at `arkPhysicsPlayer+0x210` (`param_1[0x84]`), and its userdata is
      `arkPhysicsPlayer+0x160`.
      * The pair filter, the query consumers and Bend Time then see the player. 0x99710 then automatically skips the
        hand in queries whose source owner is the player [V].
      * Side effects: AI vision or melee that reaches the hand counts as reaching the player [U]; the bit-19 wake
-       0x853220 on the player's component [U].
+       0x853220 on the player's component [U]. The player owner's type is itself [I] (traced only as the second
+       argument of 0x1b2290). Any of these, observed, rejects (a).
    * **(b) the rigid-body component of a mod-spawned, inert prop** (see R2).
 3. **Flags.** `cinfo+8` = 0: no bit 6, 7, 19 or 22. The owner's event slots +0x90/+0x98/+0xa0 are then never called
    for the hand. `+0xa8` (broadphase exit) and `vtbl[0]` (bit-19 mismatch) can still be called.
@@ -309,7 +312,7 @@ refcount.
   `vtbl+0x10`, which frees memSize bytes through the Havok allocator. For the sphere that slot is 0xa9e2e0.
 * The constructor's `0x0001ffff` means memSize `0xffff`, refcount 1.
 
-**Bodies do hold a reference [V mechanism, I gate value].**
+**Bodies do hold a reference [V] mechanism, [I] gate value.**
 
 * Body shape set 0xca6910 does `addRef(new)` / `removeRef(old)` when the global byte at 0x23edfb1 is non-zero. That
   byte is `01` in the image, and it has only two readers and no static writer xref (`D2HandBodyQ x:0x23edfb1`). Its
@@ -384,7 +387,8 @@ What it does, in order:
 
 **There is no queued createBody [V].** The dispatcher 0x89fb0 has no case 0. The debug printer 0x8a730 names case 0
 "createBody" but nothing dispatches it, and the same holds for 0x37 "createAttachedBody". So `createBody` must be
-called directly, on the game thread, with 0x8a7820 false (see Q8). `destroyBodies` can be queued (command 2).
+called directly, on the game thread, at a drain point, with 0x8a7820 false (see Q8). **Gated:** no direct
+`createBody` until B11 passes gate G1 (Route table), which confirms the thread and the drain point at run time. `destroyBodies` can be queued (command 2).
 
 **Add modes [V]** (`D2HandBodyQ d:0xc8e930`, `a:0xcafcb0,8`, `d:0xc8f000`):
 
@@ -409,7 +413,7 @@ called directly, on the game thread, with 0x8a7820 false (see Q8). `destroyBodie
 | 0x73b420 / 0x73b5b0 / 0x73b740 | 0 | 0 | 0 static | |
 | 0x852560 ark world helper | 0 | 1 | | |
 
-**cinfo layout (`hknpBodyCinfo`, at least 0x98 bytes) [V unless tagged].** Default ctor 0xca65f0; consumers 0xca6810,
+**cinfo layout (`hknpBodyCinfo`, at least 0x98 bytes) [V] unless tagged.** Default ctor 0xca65f0; consumers 0xca6810,
 0xcaf730, 0xcb9680, 0xcaf5c0, 0xca6e30.
 
 | Offset | Field | Default | Evidence |
@@ -448,7 +452,8 @@ called directly, on the game thread, with 0x8a7820 false (see Q8). `destroyBodie
 | `+0x70` | 2.0 (`HandContactConfig::strength_kg`) |
 | `+0x80` | per Q4 |
 
-Then call `createBody(world, &id, &cinfo, 1, 1)` directly when not busy (add now, active). `addMode` 2 also works, but
+After gate G1 has passed, call `createBody(world, &id, &cinfo, 1, 1)` directly from the confirmed drain point when not
+busy (add now, active). `addMode` 2 also works, but
 the body only appears at the next `commitAddBodies`.
 
 Excerpts: `D2HandBodyQ d:0xc8e5b0`, `d:0xc92be0`, `d:0xc8e930`, `d:0xcafcb0`, `d:0xc8f000`, `d:0xca65f0`,
@@ -637,7 +642,9 @@ else 0x91b50(game+0x60300, world, ownId, otherId);
 
 * At grab, disable (hand, held) once. At release, enable it once, **before** either body is destroyed or its handle
   changes.
-* Do it directly when not busy and on the game thread. Otherwise push record 0x3a, exactly as above.
+* Until gate G1 (Route table) has passed, **always push record 0x3a**: the dispatcher runs it on the drain thread, so no
+  direct call is needed. After G1, the direct call 0x91b50 / 0x91e20 is allowed only from the confirmed drain point
+  when not busy, exactly like 0x808180.
 * A disable left behind is a stale hash entry that cannot match a recycled handle until the 8-bit generation wraps
   [I].
 
@@ -701,7 +708,7 @@ Verdict: [V]
 * A hand body without it never has its owner's +0x98 called. Touching a prop still runs the prop's +0x98 (the
   normal impact path: FX, sound, AI noise), as any prop-on-prop touch does today.
 
-**Bit 19, `0x00080000` [V mechanism, I name].**
+**Bit 19, `0x00080000` [V] mechanism, [I] name.**
 
 * It is toggled only by 0x853300(arkPhysLocal, id, on) (callers 0x852730, 0x76d280, 0x80b4b0):
   * **on:** it enables the flag (0xc878d0) and subscribes "arkPhysicsWorldLocal::OnBodyActivate" 0x852730 to that
@@ -867,9 +874,11 @@ with all three flags clear.** The scan also found one more writer of the `+0xc34
 not traced, [U]); B7 should log 0x8a7820 at step entry to close it. So "not busy" means
 "the game thread is not in an update window", not "no other thread is stepping".
 
-**Rule for B11 [V].** Make every direct hknp call on the game-frame thread at a drain point. Inside the mod's existing
-0x89fb0 hook (known, `src/native_grab.hpp:197`) is one such point. Use the queue (records 2, 6, 9, 0x11, 0x13, 0x1a,
-0x3a) otherwise. Never call from the render thread or an OpenXR thread.
+**Rule for B11 [V] rule, [U] thread.** A direct hknp call must run on the game-frame thread at a drain point. The mod's
+existing 0x89fb0 hook (known, `src/native_grab.hpp:197`) is the candidate point, but which thread it runs on is [I].
+**No direct call (`createBody`, direct `destroyBodies`, 0x91b50 / 0x91e20, direct 0x97600) is allowed until gate G1
+(Route table) passes.** Until then, use the queue (records 2, 6, 9, 0x11, 0x13, 0x1a, 0x3a) only, which also means no
+hand body can be created, because `createBody` has no record. Never call from the render thread or an OpenXR thread.
 
 **Thread identity [I].** The drains run on whatever thread runs 0x8ad260 (callers 0x8acdf0 → …), which is the
 game-frame thread; the exact OS thread was not traced.
@@ -894,7 +903,9 @@ bytes: 0x89ea0 44 0f b7 02 e9 f7 07 07 00 cc cc cc cc cc cc cc
 bytes: 0x89eb0 40 53 57 41 54 41 55 48 83 ec 28 8b 41 08 48 8b
 bytes: 0x89fb0 48 83 ec 68 48 c7 44 24 30 fe ff ff ff 4c 8b d2
 bytes: 0x90fb0 48 81 c1 88 82 14 00 e9 e4 8e ff ff cc cc cc cc
+bytes: 0x91b50 44 89 4c 24 20 44 89 44 24 18 55 41 56 48 83 ec
 bytes: 0x91d80 48 8b 91 90 01 00 00 48 81 c1 88 82 14 00 e9 1d
+bytes: 0x91e20 44 89 4c 24 20 44 89 44 24 18 53 55 56 57 41 57
 bytes: 0x945f0 48 8b c4 57 41 56 41 57 48 83 ec 70 48 c7 40 98
 bytes: 0x94700 40 53 57 41 55 48 83 ec 30 8b 81 78 83 14 00 48
 bytes: 0x97600 48 83 ec 48 80 7c 24 70 00 41 0f b6 c1 74 3a 84
@@ -934,21 +945,72 @@ settles it. Everything else is resolved above.
 | Route | What it is | Static blockers | Resolved by this document |
 |---|---|---|---|
 | R1 | The mod calls `createBody` with engine-shaped userdata | **Q1 owner choice [U]:** the query consumers (at least 54 functions) need a real owner and entity. A pure fake owner or entity is not provable. Creation cannot be queued, so the call must be direct, on the game thread, at a drain point, not busy (Q3, Q8) | Userdata layout and ctor; sphere storage, marker and refcount (Q2); cinfo, add modes, mass, motion props (Q3, Q4); flags (Q6); filter word and pair API (Q5, Q7); drain timing (Q8) |
-| R2 | Repurpose an engine-spawned prop: 0x8ae9b0 spawn (`NativeWeaponHands::spawn_def`, `src/native_weapon_hands.hpp:670`), then rewrite its layer through 0x97600 | Spawned components never start (sim v407/v413 [M], `src/native_weapon_hands.hpp:11-13`). Statically, 0x8ae9b0 creates the entity through `game->vtbl+0x1c0`, sets pose, owner and velocities, then registers it with 0x8aecc0 (entity table, name, 0x8ab180). Whether 0x8ab180 leads to a component start is [U]. The body is created only by the component's own `CreatePhysics` (0x808ea0 via 0x4c7930) and start (0x809d80). Calling those by hand on an unstarted component is [U], and fatal without a PhysicsShape. A prop body also carries bit 7 (FX/AI noise) and decl mass/gravity, and the entity may be saved [U] | If it ever has a body, its userdata contract is the engine's own (Q1); bit 7 can be cleared with command 0x1b (Q6); pairing (Q5) |
+| R2 | Repurpose an engine-spawned prop: 0x8ae9b0 spawn (`NativeWeaponHands::spawn_def`, defined at `src/native_weapon_hands.hpp:670`, its 0x8ae9b0 call at `:677`; the brief's
+`:524` is stale), then rewrite its layer through 0x97600 | Spawned components never start (sim v407/v413 [M], `src/native_weapon_hands.hpp:11-13`). Statically, 0x8ae9b0 creates the entity through `game->vtbl+0x1c0`, sets pose, owner and velocities, then registers it with 0x8aecc0 (entity table, name, 0x8ab180). Whether 0x8ab180 leads to a component start is [U]. The body is created only by the component's own `CreatePhysics` (0x808ea0 via 0x4c7930) and start (0x809d80). Calling those by hand on an unstarted component is [U], and fatal without a PhysicsShape. A prop body also carries bit 7 (FX/AI noise) and decl mass/gravity, and the entity may be saved [U] | If it ever has a body, its userdata contract is the engine's own (Q1); bit 7 can be cleared with command 0x1b (Q6); pairing (Q5) |
 | R3 | A body attached to an engine motion with 0xc8e7c0 (`createAttachedBody`: `(world, outId, cinfo, targetId, rebuildMass, addMode, activation)`) | It shares the target body's motion, so it cannot have its own mass, gravity or velocity (Q4). There is no engine motion that follows the hand (the player's second body shares the proxy's motion; a hand on it would move with the capsule). It still needs userdata (Q1). It is not queueable (0x37 is printer-only, Q3) | The same cinfo and userdata findings as R1 |
 
-**Recommendation: B11 tries R1 first**, as a dynamic sphere:
+### Gates for B11
+
+Both gates must pass before the first production `createBody`. Each names what B7 (read-only, live) or B11 (sim
+probes) must observe.
+
+* **G1, thread and drain point (blocks every direct hknp call; Q3, Q5, Q8).**
+  * B7: log `GetCurrentThreadId()` at 0x8ad260 entry and inside the 0x89fb0 hook; they must be equal on every call.
+  * B7: log 0x8a7820 at 0x97bc0 entry (closes the 0x7e7e10 writer [U]) and count 0x89fb0 calls per frame without
+    mod records.
+  * B11: set a flag on entry of the hknp step 0xc8e0a0 and clear it after 0x94700 returns (count-only hooks, frame
+    thread). The 0x89fb0 hook must never observe the flag set, and 0x8a7820 must be false at every call it would make.
+  * Pass: zero mismatches over at least 5 sim sessions of 120 s, including a level load and a save/load.
+* **G2, owner (blocks the owner choice; Q1, Q6).**
+  * B7: read owner (a), `*(*(body+0x90)+8)` of the player's second body; check that `owner+0x10` is the player entity;
+    read `owner->vtbl[0]()` → `typeinfo+0x60` and the live range at VA 0x1439e8610 / 0x1439e8614. In range rejects
+    (a), because the bit-19 wake 0x853220 would reach the player component.
+  * B11 (sim only, never in a headset build): a probe hand body under the candidate owner, with count-only hooks.
+    Pass needs all of: zero 0x853220 calls with that owner; zero 0x8527a0 calls for the hand; every caller of
+    0x17d10 / 0x18cd00 that sees the hand's handle is in the §1.2 table; and, with only the hand exposed to a guard
+    (vision and melee), no change in player health and no alert raised.
+  * (a) is adopted only if both parts pass. Otherwise (b) is probed the same way.
+
+**Recommendation: B11 tries R1 first**, as a dynamic sphere, behind gates G1 and G2:
 
 * userdata constructed with 0x18cb90 in mod memory;
-* owner candidate (a), the player's own userdata owner, first, because every reader then sees objects it already
-  handles. Candidate (b), a spawned inert prop's rigid-body component, comes second;
+* owner: (a), the player's own userdata owner, is the first candidate *to probe* under G2 and is used only if G2
+  shows no reader reaching the player through it; candidate (b), a spawned inert prop's rigid-body component, is
+  probed next;
 * flags 0, filter `0x000887e4`, mass 2 kg, gravity-0 props through 0xca5600;
-* created directly with addMode 1, activation 1, from the 0x89fb0 hook when not busy;
-* driven by command 9 records;
+* created with addMode 1, activation 1, directly from the drain point that G1 confirmed, when not busy;
+* driven by command 9 records; pair changes through record 0x3a until G1 passes;
 * destroyed with command 2 before any world change.
 
-R1's runtime probe (Q1) comes first and decides between owner (a) and owner (b). R2 is only worth a spike if R1's probe
-shows that both owner candidates are harmful. R3 is dead for a force-driven hand.
+G1 and G2 come first. R2 is only worth a spike if G2 rejects both owner candidates. R3 is dead for a force-driven hand.
+
+<!-- PINS -->
+**Pins.** The first 16 file bytes at every RVA cited in this section (`.text` unless marked).
+
+```
+bytes: 0x17d10 48 8b 81 90 00 00 00 c3 cc cc cc cc cc cc cc cc
+bytes: 0x89fb0 48 83 ec 68 48 c7 44 24 30 fe ff ff ff 4c 8b d2
+bytes: 0x94700 40 53 57 41 55 48 83 ec 30 8b 81 78 83 14 00 48
+bytes: 0x97600 48 83 ec 48 80 7c 24 70 00 41 0f b6 c1 74 3a 84
+bytes: 0x97bc0 48 8b c4 55 53 56 57 41 54 41 55 41 56 41 57 48
+bytes: 0x18cb90 0f 57 c0 33 d2 48 8d 05 9c 24 97 01 48 89 01 48
+bytes: 0x18cd00 44 8b 01 48 8b 42 28 41 81 e0 ff ff ff 00 4d 69
+bytes: 0x4c7930 40 53 48 81 ec 80 00 00 00 48 8b d9 e8 5f 15 34
+bytes: 0x7e7e10 48 8b c4 48 89 48 08 56 57 41 55 41 56 41 57 48
+bytes: 0x808ea0 48 8b c4 55 53 56 57 41 54 41 55 41 56 41 57 48
+bytes: 0x809d80 48 8b c4 55 56 57 41 54 41 55 41 56 41 57 48 8d
+bytes: 0x8527a0 48 89 5c 24 08 57 48 83 ec 20 48 8b fa 48 8b 12
+bytes: 0x853220 48 89 5c 24 08 48 89 74 24 10 57 48 83 ec 30 48
+bytes: 0x8a7820 80 b9 21 71 33 00 00 75 1c 80 b9 22 71 33 00 00
+bytes: 0x8ab180 40 57 48 83 ec 30 48 c7 44 24 20 fe ff ff ff 48
+bytes: 0x8ad260 40 57 48 83 ec 50 48 c7 44 24 20 fe ff ff ff 48
+bytes: 0x8ae9b0 40 57 41 56 41 57 48 83 ec 40 48 c7 44 24 20 fe
+bytes: 0x8aecc0 40 55 56 57 48 83 ec 30 48 c7 44 24 20 fe ff ff
+bytes: 0xc8e0a0 48 89 5c 24 08 48 89 6c 24 10 48 89 74 24 18 57
+bytes: 0xc8e7c0 48 89 5c 24 08 48 89 6c 24 10 48 89 74 24 18 44
+bytes: 0xca5600 40 57 41 56 41 57 48 83 ec 20 41 83 38 00 49 8b
+```
+<!-- /PINS -->
 
 ## Second opinion
 
@@ -979,14 +1041,14 @@ saved decompile excerpts. Its points and how each was resolved:
 
 | Question | Verdict | Key RVAs | blocks route R1 | blocks route R2 | blocks route R3 |
 |---|---|---|---|---|---|
-| Q1 userdata contract | [U] | 0x93a40, 0x8527e0, 0x94700, 0x18cb90, 0x694c20 | yes: owner choice needs the runtime probe | no: the engine's own userdata | yes: same as R1 |
-| Q2 shape | [V] | 0xca6550, 0xa9e180, 0xca6910 | no | no | no |
-| Q3 createBody | [V] | 0xc8e5b0, 0xc8e930, 0xc8f000 | no: direct call at a drain point | no | yes: not queueable, needs a target motion |
-| Q4 motion | [V] | 0xcb9680, 0xc87140, 0xca5600 | no | no | yes: the motion is shared |
-| Q5 pairing | [V] | 0x91b50, 0x91e20, 0x808180 | no | no | no |
-| Q6 flags | [V] | 0x8527e0, 0x853300 | no: keep the bits clear | no: clear bit 7 with command 0x1b | no |
-| Q7 world filter | [V] | 0x932d0, 0xfb1610, 0x992c0 | no | no | no |
-| Q8 queue drain | [I] | 0x89eb0, 0x945f0, 0x8ad260 | no: queue a record per tick | no | no |
+| Q1 userdata contract | [U] (inner [V] reader map, [I] player owner type) | 0x93a40, 0x8527e0, 0x94700, 0x18cb90, 0x694c20 | yes: gate G2 (owner) | no: the engine's own userdata | yes: same as R1 |
+| Q2 shape | [V] + [I]: gate byte 0x23edfb1 runtime value; box and capsule ctors | 0xca6550, 0xa9e180, 0xca6910 | no (memSize-0 rule holds whatever the gate byte) | no | no |
+| Q3 createBody | [V] + [I]: motion type 2 = dynamic, velocity field names; [U]: cinfo +0x0c, +0x8c, +0x90 | 0xc8e5b0, 0xc8e930, 0xc8f000, 0xc8e7c0 | yes until gate G1 (direct call only) | no | yes: not queueable, needs a target motion |
+| Q4 motion | [V] + [I]: props id 2 = keyframed preset | 0xcb9680, 0xc87140, 0xca5600 | no (use the [V] 0xca5600 path) | no | yes: the motion is shared |
+| Q5 pairing | [V] + [I]: stale-entry generation wrap | 0x91b50, 0x91e20, 0x808180 | no (record 0x3a until gate G1) | no | no |
+| Q6 flags | [V] + [I]: the bit-19 name | 0x8527e0, 0x853300 | no: keep the bits clear | no: clear bit 7 with command 0x1b | no |
+| Q7 world filter | [V] + [I]: cloth-step filter identity; [U]: combined filter +0x30/+0x38 checks | 0x932d0, 0xfb1610, 0x992c0 | no | no | no |
+| Q8 queue drain | [I] + [U]: OS thread, engine records per frame, 0x7e7e10 writer | 0x89eb0, 0x945f0, 0x8ad260 | yes until gate G1 | no | no |
 
 ## Reproduce
 
