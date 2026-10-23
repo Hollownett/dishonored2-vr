@@ -1,8 +1,72 @@
 # DLSS implementation status
 
-Updated 2026-10-22. **DLSS and DLAA are not available rendering modes in the game.** The typed production NGX owner now passes a real RTX synthetic paired-DLAA check, and the standalone D3D11 state/query component passes real hardware checks. Native game input ownership and the execution adapter remain incomplete. Existing AA modes 0..6 and accepted FSR/native paths remain the production paths.
+Updated 2026-10-23. **DLAA (anti-aliasing mode 7) and DLSS Quality (mode 8) are selectable rendering modes** on NVIDIA
+GPUs once the user supplies `nvngx_dlss.dll`. They run at the same per-eye seam as FSR 3 (`src/fsr_taa.hpp`), with the
+same colour, depth copy, motion-vector, jitter, reset and exposure inputs, and fall back to FSR 3 for the session on any
+NGX failure. Existing AA modes 0..6 are unchanged. Headset visual acceptance (comfort, quality in the headset) remains
+pending as for every mode; the evidence below is standalone RTX hardware and simulated game runs.
 
-This checkpoint tracks the [design](superpowers/specs/2026-10-22-dlss-design.md) and [task plan](superpowers/plans/2026-10-22-dlss.md). Standalone hardware results do not establish game or headset acceptance.
+This checkpoint tracks the [design](superpowers/specs/2026-10-22-dlss-design.md) and [task plan](superpowers/plans/2026-10-22-dlss.md), whose 2026-10-23 ruling wires DLSS at the FSR 3 seam and supersedes the T3 native-census gates for this version.
+
+## 2026-10-23: production seam wiring (first shippable version)
+
+- **Modes and preferences.** `src/dlss_mode.hpp`: 7 = DLAA (render = output), 8 = DLSS Quality (render size from
+  `NGX_DLSS_GET_OPTIMAL_SETTINGS`, published as the engine render fraction; 2/3 until NGX answers). Preferences are
+  version 8 (`src/vr_preferences.hpp`); version 7 files never carried 7/8 and are migrated unchanged. The VR panel, the
+  native options page and the launcher offer the two rows only when the adapter is NVIDIA and a usable provider was
+  found, with the NVIDIA DLSS attribution in their help text; a saved DLSS mode on another machine renders with FSR 3
+  and its label says "(unavailable, FSR 3)". The launcher writes version 8 and validates 0..8.
+- **Provider.** `resolve_dlss_provider`: `<mod home>\nvngx_dlss.dll`, then `build/dlss-dll-path` (DLL or folder;
+  launcher Settings button "DLSS: point to nvngx_dlss.dll from one of your games"). Nothing is copied or bundled;
+  the signed DLL is loaded in place through NGX `PathListInfo`, Authenticode-verified by the typed owner.
+- **Seam.** `FsrTaa` keeps the FSR 3 contexts built as the fallback and adds `DlssEyeUpscaler` (one pair of features for
+  both eyes per render/output size and format). Features are created/retired in `prepare()` on the Present thread with
+  the immediate context (`D3D11TemporalOwner` state isolation); each eye's evaluate in `dispatch()` runs inside an EVENT
+  ticket so a retired pair releases its NGX features only after its GPU work is proven complete. Inputs: colour
+  (native R11G11B10/RGBA16F pre-TAA, or the tonemapped R8G8B8A8 copy in Quality), the R32F depth copy (DepthInverted),
+  the engine's R16G16F motion vectors with the FSR scale (`mv_x*render_w`, `mv_y*render_h`: current-to-previous, UV,
+  jittered; MVLowRes in Quality), the FSR-convention jitter, `InReset` from the per-eye reset/epoch/cut flags, and
+  AutoExposure on the linear HDR native input (DLAA) or a fixed unit exposure on the tonemapped LDR input (Quality); no
+  exposure texture. Sharpening: DLSS has none; the mod's own sharpening slider stays optional.
+- **Jitter.** While a DLSS mode is engaged and the view-jitter ABI is verified, the forced projection and the view's
+  stored jitter vector carry a 32-phase Halton(2,3) sample (`src/dlss_jitter.hpp`) instead of the engine's eight-phase
+  pattern, same phase for both eyes; the TAA replacement reads the same latched choice, so FSR 3 and DLSS receive the
+  jitter the frame was rendered with. The DLSS jitter sign equals the FSR one (`build/dlss-jitter-sign "x y"` flips it
+  per axis for diagnostics).
+- **Fallback.** `DlssFallback` (off / pending / active / failed): init, capability, create, evaluate and device-loss
+  failures park the session on FSR 3 (sticky until the session ends; logged once in `xr-recoveries.log` with the NGX
+  reason). The alternate-eye performance mode forces temporal AA off (`alternate_effective_temporal`), so DLSS is never
+  used there. The dynamic governor never steps DLSS modes.
+- **Counters** (`dxgi-probe-result.json` `feedback_render.dlss`): provider, offered, state, evaluations,
+  evaluate_failures, create_failures, fallbacks, owner_refusals, features_created, optimal size and fraction, last
+  reason/result.
+- **Tests.** `tests/dlss_mode_check.cpp` (jitter, mode rules, fallback machine, provider lookup),
+  `tests/dlss_lifecycle_check.cpp` (typed owner incl. optimal settings, Quality dimensions, subrect inputs, `retire()`
+  keeping the Core), `tests/vr_settings_check.cpp` / `tests/vr_settings_native_check.cpp` (migration, cycling, labels,
+  rows), `tests/launcher_features` (provider lookup/knob), `linux/tests` (rig `temporal_aa` 0..8 and `--knob NAME=VALUE`),
+  and the production-seam hardware lane `fsr_taa_gpu_check --dlss <dir>` (`--dlss-env` in the harness).
+- **RTX hardware (standalone, Proton 10 / DXVK, RTX 3070 Laptop, Helldivers 2 provider in place).**
+  `fsr_taa_gpu_check --dlss`: DLAA at 2496x2688 and DLSS Quality (NGX optimal 1664x1792) each 80/80 eye dispatches
+  evaluated, 0 failures, 0 fallbacks, 0 owner refusals; deselect/reselect recreates the pair without re-initializing
+  NGX. Log: `artifacts/dlss-wiring-20261023/rtx-seam/test.log`.
+- **Default path unchanged.** With no DLSS mode selected nothing new runs: `fsr_taa_gpu_check --100-percent` built
+  from the pre-change source (`7ebbd7e`) and from this change produce byte-identical FSR 3 output on the synthetic
+  scene (pixel FNV-1a `85c60569fba48b7f`, RGBA sha256 `327d52d8…`, stable run to run;
+  `artifacts/dlss-wiring-20261023/byte-identical/`), and the FSR 3 Native game run with the new DLL matches the
+  morning's installed-DLL run (interval p50 13.05 vs 13.13 ms, 0 DLSS activity, provider not configured).
+- **Simulated game runs** (rig `sim --scenario oil_tank_drop --knob native-gpu-timing`, 120 s, 1912x1046 per eye, the
+  Helldivers 2 provider referenced in place through `--knob dlss-dll-path=...`; `artifacts/dlss-wiring-20261023/runs.md`).
+  Two DLAA attempts first showed that the game executes command lists from more than one thread (the thread-affine
+  state/query owner refused with `wrong_thread`, image intact through the FSR 3 fallback); the owner is now used without
+  thread affinity, under `FsrTaa`'s mutex, on whichever thread executes. Then: DLAA 9968/9968 eye dispatches evaluated
+  by NGX (0 failures, 0 fallbacks, 0 refusals, generation 5 both eyes, Halton jitter owner on), frame interval p50
+  12.63 ms (FSR 3 Native 13.13 ms the same morning, same scenario); DLSS Quality 10666/10666 and 10350/10350 (two runs),
+  NGX optimal 1275x697 applied as the engine fraction, p50 11.55 / 11.90 ms (FSR 3 Quality at 1472x805: 11.49 ms). The
+  `dxgi-stereo.rgba` captures are clean (no doubled image, no garbage); the Quality capture carries the dithered-LDR
+  speckle that FSR 3 Quality also shows (sky mid-frequency residual 1.12 vs 0.89 FSR 3 Quality vs 0.47 DLAA), unchanged by
+  the exposure mode. After every run the installed DLL hash was verified (`ff0daf65…bc927`) and no rig knob was left.
+
+## Earlier checkpoint (2026-10-22, standalone lanes)
 
 ## Completed source and hardware evidence
 

@@ -157,20 +157,28 @@ loader/upscaler DLLs, this file and the license files listed above (`third_party
 and writes them to the user's mod home (`%LOCALAPPDATA%\DishonoredVR`). It contains no Dishonored 2 assets: game art is
 read from the user's own install at runtime.
 
-## NVIDIA DLSS SDK (optional paired-eye backend, not yet integrated)
+## NVIDIA DLSS SDK (DLAA and DLSS Quality anti-aliasing modes)
 
-Four unmodified public headers and the license are retained from NVIDIA/DLSS,
-commit `9981c6350dc58c0ce21f024fd65e31e851c31689` (310.9.16). Exact source
-paths, URLs, SHA-256 and Git blob hashes are recorded in
-`third_party/dlss/source.json`; the upstream terms remain in
+This application uses NVIDIA DLSS. The anti-aliasing modes "DLAA" and "DLSS
+Quality" are powered by NVIDIA DLSS; NVIDIA DLSS and NVIDIA are trademarks of
+NVIDIA Corporation. Four unmodified public headers and the license are retained
+from NVIDIA/DLSS, commit `9981c6350dc58c0ce21f024fd65e31e851c31689`
+(310.9.16). Exact source paths, URLs, SHA-256 and Git blob hashes are recorded
+in `third_party/dlss/source.json`; the upstream terms remain in
 `third_party/dlss/LICENSE.txt` and the original header notices are unchanged.
-The x64 `/MD` SDK static library `nvsdk_ngx_d.lib` is an explicitly pinned,
-local build dependency and is intentionally excluded from Git. No DLSS provider
-DLL is downloaded, bundled, copied, installed or distributed by this change.
+The mod DLL statically links the x64 `/MD` SDK library `nvsdk_ngx_d.lib`, an
+explicitly pinned local build dependency that is intentionally excluded from
+Git.
 
-SDK static linkage has release obligations even when the provider is supplied
-by the user. Publication terms, license compatibility, notices, attribution,
-trademarks and any other applicable SDK/RTX supplement obligations remain
-pending separate release review; this implementation grants no shipping approval.
-Windows/Proton provider discovery and signature behavior, actual per-eye inputs,
-GPU retirement and headset quality remain runtime acceptance gates.
+The DLSS provider `nvngx_dlss.dll` is NOT downloaded, bundled, copied,
+installed or distributed by this project. The user supplies their own copy
+(from a game that ships DLSS, under that game's and NVIDIA's terms): the mod
+looks for `nvngx_dlss.dll` in its mod home, then at the file or folder named in
+`build/dlss-dll-path` (the launcher's "DLSS: point to nvngx_dlss.dll from one
+of your games"). The DLL is loaded in place; its NVIDIA Authenticode signature
+is verified before use. The DLSS modes are offered only on NVIDIA GPUs; on any
+NGX failure the session falls back to FSR 3.
+
+Publication, trademark-use and notification obligations under the SDK license
+and its RTX supplement remain release prerequisites reviewed separately; this
+notice does not itself grant shipping approval.
