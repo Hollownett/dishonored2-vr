@@ -1037,18 +1037,89 @@ saved decompile excerpts. Its points and how each was resolved:
 8. **Q8, drain list not exhaustive (accepted).** The phase-0 drain (before 0x8ab380) and the phase-5 drain (before the
    step) are added. The "step runs with the busy flags clear" claim was confirmed by the reviewer.
 
+## Runtime findings (Plan B, task B7)
+
+Source: three read-only sim runs on the user's current save (`oil_tank_drop`, 100 s each, `build/hand-body-probe` on, candidate
+DLL `d2vr_render_probe_arm_v600.dll` built from this branch (the probe commit plus its camera-fallback fix); stamps 20261023T194031,
+20261023T194422, 20261023T194811 under `~/d2vr-test-builds/sim-runs/`). The probe only reads (guarded `read_self`); it adds
+no engine write, no engine call and no new hook. Rows: `artifacts/hand-body-probe.csv`, `artifacts/hand-body-queue.csv`.
+Runs 1 and 2 produced no player rows: the config camera address was 0 in that process, which the third run's `diag_camera_sources`
+rows showed. Run 3 took the camera from NativeGrab's publisher (from tick 34 on). The sim save has no tank next to the player,
+so no prop row was produced.
+
+**Player bodies (run 3, 67 sets).**
+
+| Body | Handle | Filter word | Layer | Mask (word >> 5) |
+|---|---|---|---|---|
+| query-source body (camera controller +0x38) | 0x01001cc5 | 0x0838c566 | 6 (PLAYER) | 0x0041c62b |
+
+* The mask lists layers 0, 1, 3, 5, 9, 10, 14, 15, 16 and 22. It does **not** list 4 (DEBRIS), 6, 7, 8 or 18. So the
+  recommended hand word (layer 4, mask without 6, 7, 8, 18) never pairs with this body, by either side of the mutual
+  test [V arithmetic on a live word]. This is the query-source body only; see the outstanding items.
+* Flags 262 (a few sets 270).
+* **Not located: the arkPhysicsPlayer second body and the proxy body.** The `physics` object the camera reports is not
+  the 0x1b6ec0 layout at +0x210 / +0x214 / +0x218 (+0x218 read as the float 0.2, the row `player_cfg_filter` is therefore
+  void). Their filter words are outstanding.
+
+**Owner chain of the query-source body [I] (the second body was not reached).**
+
+| Link | Value |
+|---|---|
+| userdata (`body+0x90`) vtable | 0x1b02768, `arkPlayerUserData`, as Q1 §1.1 says |
+| owner (`ud+8`) vtable | 0x1c73268 |
+| `owner+0x10` | an entity whose vtable is 0x1c5e428 and whose id (`entity+0xa8`) is 1; it equals the player entity of the query source |
+| `owner->vtbl[0]` | decoded without calling it (a `lea rax,[rip+rel]; ret` stub) to a typeinfo with `+0x60` = 189 |
+| live range at 0x1439e8610 / 0x1439e8614 | 331 .. 335; 189 is **outside** it |
+
+G2 reading: for this body `owner+0x10` **is** the player entity, and its type number is not in the live range, so the
+range test does not reject owner (a). Whether the *second* body shares this owner is [U] (its handle was not found);
+the second part of G2 (no reader reaches the player through the hand) is B11's sim probe and is untouched here.
+
+**World filter (Q7).** `world+0x470` points to an object with vtable 0x1ad4c08 (`arkCollisionFilter`), in every one of
+101 sets. It is the plain filter, not the combined one (0x1ad4d98). This matches the static creation path [V].
+
+**0x89fb0 cadence and threads (Q8, G1).**
+
+* About 705,000 calls in 100 s: 7,000 to 11,000 per second on average, with every engine record (the hook runs once per
+  record). Record types seen (u16 at `command+4`): 9 (91 %), 6, 30, 27, 31, 26, 22, 59. A frame therefore holds many engine
+  records without any mod record: the servo does not have to queue its own record to get a tick. The hook cannot see a batch,
+  so `callbacks_with_commands` is not measured.
+* Thread: every call ran on one thread (thread id 376, 0 changes), and that is the thread the GPU hooks are bound to (the
+  render/present thread). So the dispatcher thread is the render thread in this build [M]. The Stage0 hook ran on varying
+  threads (384, 388, 396, 404 and 376), so Stage0 is **not** a proxy for the drain thread.
+* Busy flag: 0x8a7820's three reads were false at every 0x89fb0 call (0 busy of 705,000 samples). At Stage0 it was true in
+  every sample (6,633 of 6,633): Stage0 always runs inside a busy window.
+* Where the busy flag was sampled: there is no hook at 0x97bc0 (step entry) or 0x8ad260, and none was added. The flag was read
+  in the existing 0x89fb0 hook (at dispatch) and in the existing Stage0 hook. The 0x7e7e10 writer is therefore not closed by
+  this run, and G1's "same thread at 0x8ad260 entry" is **not** shown: only "all dispatches on one thread, equal to the
+  render thread" is.
+
+**Outstanding.**
+
+* Second body and proxy body filter words (locate the real arkPhysicsPlayer object; the camera's `physics` is another object).
+* A prop's userdata row and its vtable (needs a save next to a tank or any loose prop within 2 m of the camera).
+* 0x8a7820 at 0x97bc0 entry, and the thread at 0x8ad260 entry (need count-only hooks; B11 sim probe).
+* Per-frame call counts (the probe counts per second, not per frame).
+
+<!-- PINS -->
+```
+bytes: 0x1c73268 80 e2 90 40 01 00 00 00 f0 ca 7f 40 01 00 00 00  (.rdata)
+bytes: 0x1c5e428 40 6e 8f 40 01 00 00 00 40 45 78 40 01 00 00 00  (.rdata)
+```
+<!-- /PINS -->
+
 ## Summary
 
 | Question | Verdict | Key RVAs | blocks route R1 | blocks route R2 | blocks route R3 |
 |---|---|---|---|---|---|
-| Q1 userdata contract | [U] (inner [V] reader map, [I] player owner type) | 0x93a40, 0x8527e0, 0x94700, 0x18cb90, 0x694c20 | yes: gate G2 (owner) | no: the engine's own userdata | yes: same as R1 |
+| Q1 userdata contract | [U] (inner [V] reader map, [I] player owner type; runtime: query body owner is the player entity, see Runtime findings) | 0x93a40, 0x8527e0, 0x94700, 0x18cb90, 0x694c20 | yes: gate G2 (owner) | no: the engine's own userdata | yes: same as R1 |
 | Q2 shape | [V] + [I]: gate byte 0x23edfb1 runtime value; box and capsule ctors | 0xca6550, 0xa9e180, 0xca6910 | no (memSize-0 rule holds whatever the gate byte) | no | no |
 | Q3 createBody | [V] + [I]: motion type 2 = dynamic, velocity field names; [U]: cinfo +0x0c, +0x8c, +0x90 | 0xc8e5b0, 0xc8e930, 0xc8f000, 0xc8e7c0 | yes until gate G1 (direct call only) | no | yes: not queueable, needs a target motion |
 | Q4 motion | [V] + [I]: props id 2 = keyframed preset | 0xcb9680, 0xc87140, 0xca5600 | no (use the [V] 0xca5600 path) | no | yes: the motion is shared |
 | Q5 pairing | [V] + [I]: stale-entry generation wrap | 0x91b50, 0x91e20, 0x808180 | no (record 0x3a until gate G1) | no | no |
 | Q6 flags | [V] + [I]: the bit-19 name | 0x8527e0, 0x853300 | no: keep the bits clear | no: clear bit 7 with command 0x1b | no |
-| Q7 world filter | [V] + [I]: cloth-step filter identity; [U]: combined filter +0x30/+0x38 checks | 0x932d0, 0xfb1610, 0x992c0 | no | no | no |
-| Q8 queue drain | [I] + [U]: OS thread, engine records per frame, 0x7e7e10 writer | 0x89eb0, 0x945f0, 0x8ad260 | yes until gate G1 | no | no |
+| Q7 world filter | [V] + [I]: cloth-step filter identity; [U]: combined filter +0x30/+0x38 checks; runtime: world+0x470 is the plain arkCollisionFilter | 0x932d0, 0xfb1610, 0x992c0 | no | no | no |
+| Q8 queue drain | [I] + [U]: OS thread, engine records per frame, 0x7e7e10 writer; runtime: all dispatches on the render thread, see Runtime findings | 0x89eb0, 0x945f0, 0x8ad260 | yes until gate G1 | no | no |
 
 ## Reproduce
 
