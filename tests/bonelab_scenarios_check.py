@@ -83,7 +83,51 @@ def main():
             r = subprocess.run([sys.executable, str(ROOT / "tools/linux/bonelab_run_check.py"), str(d.parent), "--scenario", "corpse_drag"], capture_output=True, text=True)
             assert r.returncode == code, (label, r.stdout, r.stderr)
             assert ("FAIL" in r.stdout) == (code == 1), r.stdout
+    held_clamp_checks()
     print("bonelab_scenarios_check ok")
+
+
+def tank_status(**over):
+    clamp = {"sweeps": 100, "hits": 20, "clamped_frames": 10, "releases": 25, "release_overlap_unresolved": 0, "layer_at_release": 3,
+             "cast_us": 19, "cast_us_max": 80, "release_depen_frames": 0}
+    clamp.update(over.pop("clamp", {}))
+    status = copy.deepcopy(CLEAN)
+    status.update({"held_clamp": clamp, "layer": {"restores": 1, "pending": 0},
+                   "release_watch": {"count": 1, "z_at_release": 27.3, "z_min": 27.2, "z_last": 27.22, "floor_z": None}})
+    status["carry"] = {"holds": 1, "failed_reads": 0, "rejected_publishes": 0, "bad_quat_reads": 0}
+    status.update(over)
+    return status
+
+
+def held_clamp_checks():
+    """Task B5: S12-S14 compile within the session and the run checker judges the held_clamp fixtures."""
+    for name in ("tank_wall", "tank_drop", "tank_drop_cycles"):
+        segments = sim.scenario_segments(name, 28000)
+        sim.compile_script(segments, 120)
+        assert max(s["end_ms"] for s in segments) <= 120000, name
+        assert len(segments) <= 128, (name, len(segments))
+    cycles = sim.scenario_segments("tank_drop_cycles", 28000)
+    assert len([s for s in cycles if s["input"].get("right_trigger", 0) > 0]) == 25
+    drop = sim.scenario_segments("tank_drop", 28000)
+    assert max(s["end_ms"] for s in drop) - max(s["start_ms"] for s in drop if s["input"].get("right_grip")) >= 5000, "5 s wait after the last release"
+    assert any(s["input"].get("move_y") for s in sim.scenario_segments("tank_wall", 28000))
+    assert "FAIL" not in verdicts(tank_status(), "tank_wall")
+    assert "FAIL" not in verdicts(tank_status(), "tank_drop")
+    for key in ("sweeps", "hits", "clamped_frames"):
+        assert "FAIL" in verdicts(tank_status(clamp={key: 0}), "tank_wall"), key
+    assert "FAIL" in verdicts(tank_status(clamp={"release_overlap_unresolved": 1}), "tank_drop")
+    assert "FAIL" in verdicts(tank_status(clamp={"release_overlap_unresolved": 1}), "tank_drop_cycles")
+    assert "FAIL" in verdicts(tank_status(clamp={"layer_at_release": None}), "tank_drop")
+    assert "FAIL" in verdicts(tank_status(release_watch={"count": 1, "z_at_release": 27.3, "z_last": 20.0}), "tank_drop")
+    assert "FAIL" in verdicts(tank_status(release_watch={"count": 0}), "tank_drop")
+    four = [tank_status() for _ in range(4)]
+    assert all(v != "FAIL" for v, _ in brc.check(four, "tank_drop_cycles")), brc.check(four, "tank_drop_cycles")
+    four[2]["held_clamp"]["releases"] = 0
+    assert "FAIL" in {v for v, _ in brc.check(four, "tank_drop_cycles")}  # 75 < 100
+    for mutate in (lambda s: s["corpse"].update(fault_latch=True), lambda s: s["carry"].update(failed_reads=1)):
+        b = tank_status(); mutate(b)
+        assert "FAIL" in verdicts(b, "tank_drop_cycles")
+    assert "FAIL" in {v for v, _ in brc.check([{**CLEAN}], "tank_wall")}  # no held_clamp block
 
 
 def bad_latch():

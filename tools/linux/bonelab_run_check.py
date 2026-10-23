@@ -12,6 +12,8 @@ import sys
 from pathlib import Path
 
 PROPS = ("oil_tank_drop", "oil_tank_throw")
+TANKS = ("tank_wall", "tank_drop", "tank_drop_cycles")  # Part 5A held-clamp scenarios S12-S14
+CARRY_FAULTS = ("failed_reads", "rejected_publishes", "bad_quat_reads")
 
 
 def _pair(v):
@@ -39,6 +41,8 @@ def check(statuses, scenario):
     corpse = [s.get("corpse") or {} for s in statuses]
     if not statuses or any(not c for c in corpse):
         return [("FAIL", "status has no corpse block")]
+    if scenario in TANKS:
+        return check_tanks(statuses, scenario, corpse)
     prop_scenario = scenario in PROPS
     add(not any(c.get("fault_latch") for c in corpse), "corpse.fault_latch == false")
     add(sum(c.get("runaway", 0) for c in corpse) == 0, "corpse.runaway == 0")
@@ -77,6 +81,48 @@ def check(statuses, scenario):
     if prop_scenario:
         gap = max(float(s.get("prop_seat_gap_m", 0) or 0) for s in statuses)
         info(f"prop_grasp_point {statuses[-1].get('prop_grasp_point')}, prop_seat_gap_m {gap:.3g}, corpse holds {holds} (a native HoldObject tank is not a lane)")
+    return out
+
+
+def check_tanks(statuses, scenario, corpse):
+    """S12 tank_wall, S13 tank_drop, S14 tank_drop_cycles (summed over sessions) against the held_clamp status block."""
+    out = []
+
+    def add(ok, text):
+        out.append(("PASS" if ok else "FAIL", text))
+
+    clamps = [s.get("held_clamp") or {} for s in statuses]
+    if any(not c for c in clamps):
+        return [("FAIL", "status has no held_clamp block")]
+    total = lambda key: sum(c.get(key, 0) or 0 for c in clamps)
+    sweeps, hits, clamped = total("sweeps"), total("hits"), total("clamped_frames")
+    unresolved = total("release_overlap_unresolved")
+    out.append(("INFO", f"sweeps {sweeps}, hits {hits}, clamped_frames {clamped}, releases {total('releases')}, "
+                f"cast_us {[c.get('cast_us') for c in clamps]}, cast_us_max {max(c.get('cast_us_max', 0) or 0 for c in clamps)}, "
+                f"layer_at_release {[c.get('layer_at_release') for c in clamps]}, depen_frames {total('release_depen_frames')}"))
+    layers = [s.get("layer") or {} for s in statuses]
+    out.append(("INFO", f"layer restores {[l.get('restores') for l in layers]}, pending {[l.get('pending') for l in layers]}"))
+    if scenario == "tank_wall":
+        add(sweeps > 0, f"held_clamp.sweeps > 0 (got {sweeps})")
+        add(hits > 0, f"held_clamp.hits > 0 (got {hits})")
+        add(clamped > 0, f"held_clamp.clamped_frames > 0 (got {clamped})")
+    else:
+        add(unresolved == 0, f"release_overlap_unresolved == 0 (got {unresolved})")
+    if scenario == "tank_drop":
+        add(all(c.get("layer_at_release") is not None for c in clamps), f"layer_at_release recorded ({[c.get('layer_at_release') for c in clamps]})")
+        watch = statuses[-1].get("release_watch") or {}
+        count = watch.get("count", 0) or 0
+        add(count >= 1, f"release_watch.count >= 1 (got {count})")
+        if count >= 1:
+            z0, last = watch.get("z_at_release"), watch.get("z_last")
+            ok = isinstance(z0, (int, float)) and isinstance(last, (int, float)) and last >= z0 - 0.5
+            add(ok, f"tank rest z_last {last} not more than 0.5 m below z_at_release {z0} (read 5 s after the last release)")
+    if scenario == "tank_drop_cycles":
+        releases = total("releases")
+        add(releases >= 100, f"releases >= 100 over {len(statuses)} sessions (got {releases})")
+        add(not any(c.get("fault_latch") for c in corpse), "corpse.fault_latch == false")
+        faults = sum((s.get("carry") or {}).get(k, 0) or 0 for s in statuses for k in CARRY_FAULTS)
+        add(faults == 0, f"carry fault counters {CARRY_FAULTS} == 0 (got {faults})")
     return out
 
 
