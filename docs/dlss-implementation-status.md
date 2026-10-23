@@ -49,6 +49,24 @@ This checkpoint tracks the [design](superpowers/specs/2026-10-22-dlss-design.md)
   `fsr_taa_gpu_check --dlss`: DLAA at 2496x2688 and DLSS Quality (NGX optimal 1664x1792) each 80/80 eye dispatches
   evaluated, 0 failures, 0 fallbacks, 0 owner refusals; deselect/reselect recreates the pair without re-initializing
   NGX. Log: `artifacts/dlss-wiring-20261023/rtx-seam/test.log`.
+- **Fix round 1 (2026-10-23, after review).** NGX create/release/optimal-settings calls run inside the owner's
+  pipeline-state isolation and after the seam's compute-state save (the GPU lane pins viewport, blend, VS/CS constant
+  buffers and a PS resource across the split and asserts them preserved); feature retirement is a ledger
+  (`DlssRetirementLedger`): EVENT tickets gate release; a device/context change abandons outstanding tickets and
+  releases every pair (the old GPU work is dead); the session end abandons them too but performs NO context or NGX call
+  (a first attempt released from the stop thread and faulted DXVK's submission thread, see runs.md run A): the pairs
+  queue for release on the next executing-thread dispatch, which also shuts the NGX Core down once DLSS is off and
+  nothing is left. No pair strands the SDK owner's registry; between sessions one pair's VRAM may stay allocated; every
+  DLSS entry point is a `noexcept` boundary that routes exceptions into the FSR 3 fallback (`dlss_guarded`);
+  `DlssRefusalStreak::threshold` consecutive EVENT-slot refusals (after one extra poll) and a pending Quality request
+  that waits `DlssFallback::waiting_budget` dispatches, or an unusable optimal size, become logged session failures.
+  DLSS Quality that is not engaged (not offered, or failed) renders at fraction 1 (FSR 3 Native), re-applied on the
+  failure transition; the native options page shows an unoffered saved DLSS mode as its own "(unavailable, FSR 3)"
+  entry and never rewrites it; a UTF-8 BOM in `build/dlss-dll-path` is ignored; the adapter query retries until a real
+  vendor id is known; the TAA replacement derives its jitter from the pattern the eye's projection actually used
+  (per-eye latch). The motion texture DLSS consumes is asserted to be the colour target's size: the engine renders
+  colour, depth and motion into the top-left render subrect of its full-size targets, so the Quality feature reads
+  render-sized motion content (MVLowRes, FSR scale) from a display-sized texture, exactly as FSR 3 Quality does.
 - **Default path unchanged.** With no DLSS mode selected nothing new runs: `fsr_taa_gpu_check --100-percent` built
   from the pre-change source (`7ebbd7e`) and from this change produce byte-identical FSR 3 output on the synthetic
   scene (pixel FNV-1a `85c60569fba48b7f`, RGBA sha256 `327d52d8…`, stable run to run;
