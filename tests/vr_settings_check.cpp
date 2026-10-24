@@ -45,6 +45,10 @@ int main() {
                 dlss.set_temporal_aa(8);ControllerInput a=idle;a.a=true;
                 const auto change=dlss.update(a,false,true);
                 require(change.temporal_aa && *change.temporal_aa==0 && dlss.temporal_aa()==0,"A on the row did not wrap DLSS Quality to Off");
+                require(dlss.aa_chosen(),"panel_aa_change_marks_chosen: A on row 1 did not mark the AA choice");
+                VrSettings fresh;require(!fresh.aa_chosen() && fresh.crosshair(),"Fresh VrSettings: aa_chosen/crosshair defaults differ");
+                fresh.initialize(1,true,{},MirrorMode::right_eye,.5,2,65,true,{},true,false);require(fresh.aa_chosen() && !fresh.crosshair(),"initialize did not take aa_chosen/crosshair");
+                fresh.set_crosshair(true);require(fresh.crosshair(),"set_crosshair did not apply");
             }
         }
         {   // open_from_gameplay_opens_page_zero / closes_on_y_press_after_open_from_gameplay
@@ -398,7 +402,7 @@ int main() {
         {VrPreferences d;require(d.antialiasing && d.temporal_aa==2 && d.hud_percent==65 && d.controls_hint && d.sharpness==.5 && d.mirror==MirrorMode::right_eye,"VrPreferences defaults differ");}
         const auto preference_file=std::filesystem::path("build/vr-settings-test.cfg");
         save_preferences(preference_file,{1.3,true,{TurnControl::Mode::smooth,45,120},MirrorMode::left_eye,.75,0,65,true});
-        {std::ifstream raw(preference_file);int version{};raw>>version;require(version==8,"Saved preferences are not version 8");}
+        {std::ifstream raw(preference_file);int version{};raw>>version;require(version==9,"Saved preferences are not version 9");}
         const auto saved=load_preferences(preference_file);
         require(saved && saved->resolution==1.3 && saved->antialiasing && saved->turning.mode==TurnControl::Mode::smooth &&
             saved->turning.smooth_degrees_per_second==120 && saved->mirror==MirrorMode::left_eye && saved->sharpness==.75 && !saved->temporal_aa &&
@@ -436,7 +440,7 @@ int main() {
                 auto dlss=measured;dlss.temporal_aa=7;save_preferences(preference_file,dlss);
                 require(load_preferences(preference_file)->temporal_aa==7,"DLAA preference did not round trip");
                 dlss.temporal_aa=8;save_preferences(preference_file,dlss);require(load_preferences(preference_file)->temporal_aa==8,"DLSS Quality preference did not round trip");
-                {std::ifstream raw(preference_file);int version{};raw>>version;require(version==8,"DLSS preference saved with an old version");}
+                {std::ifstream raw(preference_file);int version{};raw>>version;require(version>=8,"DLSS preference saved with an old version");}
                 bool refused=false;dlss.temporal_aa=9;try {save_preferences(preference_file,dlss);} catch(const std::invalid_argument&) {refused=true;}
                 require(refused && load_preferences(preference_file)->temporal_aa==8,"Out-of-range DLSS mode was saved");
                 {std::ofstream version7(preference_file);version7<<"7 1.3 1 2 45 120 1 0.25 7 65 1 0 0 0 0 0\n";}
@@ -450,7 +454,25 @@ int main() {
                 {std::ofstream version8(preference_file);version8<<"8 1.3 1 2 45 120 1 0.25 6 65 1 1.7 .4 .45 .55 .62\n";}
                 const auto kept=load_preferences(preference_file);
                 require(kept && kept->temporal_aa==6 && kept->player_measurements.shoulder_span_metres==.4,"Version 8 kept the FSR 4 mode and measurements");
-                {std::ofstream version9(preference_file);version9<<"9 1.3 1 2 45 120 1 0.25 2 65 1 0 0 0 0 0\n";}
+                { // prefs_v8_defaults / prefs_v9_roundtrip / prefs_v9_fixture / prefs_v10_rejected
+                    {std::ofstream version8(preference_file);version8<<"8 1.3 1 2 45 120 1 0.25 6 65 1 0 0 0 0 0\n";}
+                    const auto v8=load_preferences(preference_file);require(v8 && !v8->aa_chosen && v8->crosshair,"A v8 file did not default to aa_chosen=false, crosshair=true");
+                    {VrPreferences d;require(!d.aa_chosen && d.crosshair,"VrPreferences defaults for the v9 fields differ");}
+                    for(const bool chosen:{false,true}) for(const bool cross:{false,true}) {
+                        auto v9=dlss;v9.temporal_aa=7;v9.aa_chosen=chosen;v9.crosshair=cross;save_preferences(preference_file,v9);
+                        {std::ifstream header(preference_file);int version{};header>>version;require(version==9,"save_preferences did not write version 9");}
+                        const auto back=load_preferences(preference_file);require(back && back->aa_chosen==chosen && back->crosshair==cross && back->temporal_aa==7,"v9 fields did not round trip");
+                    }
+                    const auto fixture=load_preferences(std::filesystem::path(__FILE__).parent_path()/"fixtures"/"vr-settings-v9.cfg");
+                    require(fixture && fixture->temporal_aa==7 && fixture->hud_percent==150 && fixture->aa_chosen && !fixture->crosshair,"v9 fixture did not parse");
+                    {std::ofstream v9bad(preference_file);v9bad<<"9 1.3 1 2 45 120 1 0.25 2 65 1 0 0 0 0 0 2 1\n";}
+                    refused=false;try {load_preferences(preference_file);} catch(const std::runtime_error&) {refused=true;}
+                    require(refused,"A v9 file with a marker of 2 loaded");
+                    {std::ofstream v9short(preference_file);v9short<<"9 1.3 1 2 45 120 1 0.25 2 65 1 0 0 0 0 0\n";}
+                    refused=false;try {load_preferences(preference_file);} catch(const std::runtime_error&) {refused=true;}
+                    require(refused,"A v9 file without the new tokens loaded");
+                }
+                {std::ofstream version10(preference_file);version10<<"10 1.3 1 2 45 120 1 0.25 2 65 1 0 0 0 0 0 0 1\n";}
                 refused=false;try {load_preferences(preference_file);} catch(const std::runtime_error&) {refused=true;}
                 require(refused,"A future version loaded");
             }

@@ -56,6 +56,7 @@ class VrSettings {
     double requested_=1;
     bool aa_{};
     int temporal_aa_{2};
+    bool aa_chosen_{},crosshair_{true}; // v609: persisted AA-chosen marker and the aim crosshair switch
     unsigned upscaler_generation_{3}; // Actual runtime backend; preferences retain the existing quality modes.
     bool dlss_available_{}; // NVIDIA GPU and a usable nvngx_dlss.dll: the DLAA/DLSS Quality rows are offered only then
     int hud_percent_{65};
@@ -95,9 +96,9 @@ public:
                    bool recenter{},consume{},opened{},calibrate{},player_measurements{},test_unlock{};
                    std::optional<PalmOffsetChange> palm_offset;};
     void initialize(double scale,bool aa,TurnControl::Config turning={},MirrorMode mirror=MirrorMode::right_eye,double sharpness=.5,int temporal_aa=2,
-        int hud_percent=65,bool controls_hint=true,AvatarPlayerMeasurements player_measurements={}) {
+        int hud_percent=65,bool controls_hint=true,AvatarPlayerMeasurements player_measurements={},bool aa_chosen=false,bool crosshair=true) {
         requested_=scale;aa_=aa;turning_=turning;mirror_=mirror;sharpness_=sharpness;temporal_aa_=temporal_aa;
-        hud_percent_=hud_percent;controls_hint_=controls_hint;player_measurements_=player_measurements;
+        hud_percent_=hud_percent;controls_hint_=controls_hint;player_measurements_=player_measurements;aa_chosen_=aa_chosen;crosshair_=crosshair;
     }
     bool open() const noexcept {return open_;}
     bool calibration_page() const noexcept {return calibration_page_;}
@@ -174,6 +175,9 @@ public:
     double requested() const noexcept {return requested_;}
     bool antialiasing() const noexcept {return aa_;}
     int temporal_aa() const noexcept {return temporal_aa_;}
+    bool aa_chosen() const noexcept {return aa_chosen_;}
+    bool crosshair() const noexcept {return crosshair_;}
+    void set_crosshair(bool v) noexcept {crosshair_=v;}
     void upscaler_generation(unsigned value) noexcept {upscaler_generation_=value;}
     void dlss_available(bool value) noexcept {dlss_available_=value;}
     bool dlss_available() const noexcept {return dlss_available_;}
@@ -243,12 +247,13 @@ public:
     void open_calibration_from_native() noexcept {open_=calibration_page_=true;measurements_page_=false;leave_hand_fit();selected_=8;controls_valid_=false;stick_held_=false;native_calibration_=true;}
     void set_requested(double v) noexcept {requested_=std::clamp(v,.5,2.);}
     void set_antialiasing(bool v) noexcept {aa_=v;}
-    void set_temporal_aa(int v) noexcept {temporal_aa_=std::clamp(v,0,8);}
+    void set_temporal_aa(int v) noexcept {temporal_aa_=std::clamp(v,0,8);aa_chosen_=true;}
+    void mark_aa_chosen() noexcept {aa_chosen_=true;}
     int temporal_aa_choices() const noexcept {return dlss_available_?9:7;} // modes 0..6, plus 7/8 when DLSS is available
     // Cycling never lands on a DLSS mode that is not offered; a saved one steps off it like the last FSR 4 mode.
     void cycle_temporal_aa(int direction) noexcept {
         const int n=temporal_aa_choices();const int current=std::min(temporal_aa_,n-1);
-        temporal_aa_=(current+(direction<0?n-1:1))%n;
+        temporal_aa_=(current+(direction<0?n-1:1))%n;aa_chosen_=true; // any panel change is a choice
     }
     void set_mirror(MirrorMode v) noexcept {mirror_=v;}
     void set_sharpness(double v) noexcept {sharpness_=std::clamp(v,0.,1.);}

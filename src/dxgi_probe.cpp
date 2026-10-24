@@ -11,6 +11,7 @@
 #include "game_camera.hpp"
 #include "game_stereo.hpp"
 #include "game_xr.hpp"
+#include "aa_first_start.hpp"
 #include "xr_present_pacing.hpp"
 #include "render_scale_transaction.hpp"
 #include "native_wrist_hud.hpp"
@@ -203,6 +204,9 @@ static bool eye_antialiasing_requested=false;
 static d2vr::MirrorMode mirror_mode_requested=d2vr::MirrorMode::both_eyes;
 static double sharpness_requested=.5;
 static int taa_preference=2,hud_preference=65;static bool hint_preference=true;
+// v609: the saved AA-chosen marker, whether a settings file existed, and the one-time first-start AA decision (made at Present once the adapter vendor is known)
+static bool preferences_file_existed=false,aa_chosen_preference=false,crosshair_preference=true,first_start_pending=false,crosshair_migrated=false;
+static const char* first_start_state="none";static std::vector<std::string> first_start_removed;
 static UINT64 xr_antialiased_eyes{};
 static UINT64 xr_settings_layers{},xr_resolution_changes{},xr_world_ui_layers{};
 static std::array<UINT64,2> xr_beam_layers_by_hand{},xr_wrist_layers{};
@@ -6192,6 +6196,9 @@ std::string feedback_status_json() {
         << ",\"features_created\":" << fsr_taa.dlss_features_created.load() << ",\"optimal_queries\":" << fsr_taa.dlss_optimal_queries.load() << ",\"waiting\":" << fsr_taa.dlss_waiting.load() << ",\"owner_rebuilds\":" << fsr_taa.dlss_owner_rebuilds.load()
         << ",\"optimal\":[" << fsr_taa.dlss_optimal_width.load() << ',' << fsr_taa.dlss_optimal_height.load() << "],\"quality_fraction\":" << fsr_taa.dlss_quality_fraction.load()
         << ",\"last_reason\":\"" << d2vr::DlssEyeUpscaler::reason_name(static_cast<d2vr::DlssEyeUpscaler::Reason>(fsr_taa.dlss_last_reason.load())) << "\",\"last_result\":" << fsr_taa.dlss_last_result.load() << '}'
+        << ",\"aa_first_start\":{\"state\":\"" << first_start_state << "\",\"removed\":[";
+    for(std::size_t removed_index=0;removed_index<first_start_removed.size();++removed_index) out << (removed_index?",":"") << '"' << first_start_removed[removed_index] << '"';
+    out << "],\"crosshair_migrated\":" << (crosshair_migrated?"true":"false") << "}"
         << "},\"wrist_hud\":{\"samples\":" << d2vr::NativeWristHud::samples.load()
         << ",\"rejected\":" << d2vr::NativeWristHud::rejected.load() << ",\"layers\":[" << xr_wrist_layers[0] << ',' << xr_wrist_layers[1]
         << "],\"optional_failures\":" << (game_xr?game_xr->wrist_failures:0) << ",\"wait_timeouts\":" << (game_xr?game_xr->wrist_timeouts:0)
@@ -7095,7 +7102,7 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                     desc.BufferDesc.Format,openxr_loader_path().c_str(),controller_requested,head_requested,eye_antialiasing_requested,
                                     controller_requested && head_requested,requested_resolution_multiplier,
                                     turning_config,saved_settings_requested?output_directory.parent_path()/L"build"/L"vr-settings.cfg":fs::path{},native_menu_mode==2,
-                                    simulated_vr_requested?&d2vr::simxr::dispatch:nullptr,mirror_mode_requested,sharpness_requested,taa_preference,hud_preference,hint_preference,player_measurements_requested);
+                                    simulated_vr_requested?&d2vr::simxr::dispatch:nullptr,mirror_mode_requested,sharpness_requested,taa_preference,hud_preference,hint_preference,player_measurements_requested,aa_chosen_preference,crosshair_preference);
                                 game_xr->wheel_native_pointer=!fs::exists(output_directory.parent_path()/L"build"/L"wheel-no-pointer");
                                 game_xr->y_hold_enabled=hold_y_menu_enabled;game_xr->legacy_hold_y_settings=legacy_hold_y_settings;
                                 game_xr->y_hold_owned_now=+[]() noexcept -> bool { // current-frame Talk offer (either hand) or wheel, for the hold-Y fire frame
@@ -7455,6 +7462,14 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                             {   // DLSS: offered to the menus, selected from the live mode, and it owns the jitter while engaged.
                                 const int live_mode=temporal_live_mode.load();
                                 game_xr->dlss_available(dlss_offered());
+                                if(first_start_pending && present_adapter_vendor.load(std::memory_order_relaxed)) { // v609: once per session, only with a known vendor
+                                    const auto decision=d2vr::first_start_aa(aa_chosen_preference,preferences_file_existed,present_adapter_vendor.load(),dlss_offered());
+                                    if(decision!=d2vr::FirstStartAa::wait) {
+                                        first_start_pending=false;
+                                        game_xr->adopt_first_start_aa(decision==d2vr::FirstStartAa::dlaa?std::optional<int>(7):decision==d2vr::FirstStartAa::fsr3_native?std::optional<int>(2):std::nullopt);
+                                        first_start_state=decision==d2vr::FirstStartAa::dlaa?"dlaa":decision==d2vr::FirstStartAa::fsr3_native?"fsr3_native":"keep";
+                                    }
+                                }
                                 fsr_taa.dlss_quality=d2vr::dlss_mode::is_quality(live_mode);
                                 fsr_taa.dlss_active=d2vr::dlss_mode::active(live_mode) && dlss_offered();
                                 dlss_jitter_mode=fsr_taa.dlss_active.load() && fsr_taa.dlss_engaged() && view_jitter_abi && projection_jitter;
@@ -8944,6 +8959,21 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
         player_measurements_requested={};
         if(saved_settings_requested) {
             const auto preferences=d2vr::load_preferences(root/L"build"/L"vr-settings.cfg");
+            preferences_file_existed=preferences.has_value();aa_chosen_preference=preferences && preferences->aa_chosen;crosshair_preference=!preferences || preferences->crosshair;
+            first_start_state="none";first_start_removed.clear();crosshair_migrated=false;first_start_pending=!aa_chosen_preference;
+            if(first_start_pending) { // v609 migration, before the knob reads below so a stale knob cannot block the switch; sim runs (no saved settings) never get here
+                first_start_state="wait";
+                for(const auto& knob:d2vr::remove_legacy_aa_knobs(root/L"build")) {
+                    std::string value=knob.value;for(auto& ch:value) if(ch=='"' || ch=='\\' || static_cast<unsigned char>(ch)<32) ch='/';
+                    first_start_removed.push_back(knob.name+"="+value);
+                    note_recoverable(("v609 AA migration: removed build/"+knob.name+" ("+value+")").c_str());
+                }
+                std::error_code legacy_ec;
+                if(fs::exists(root/L"build"/L"no-hand-crosshair",legacy_ec)) {
+                    crosshair_preference=false;crosshair_migrated=true;fs::remove(root/L"build"/L"no-hand-crosshair",legacy_ec);
+                    note_recoverable("v609 crosshair migration: build/no-hand-crosshair moved into the saved settings");
+                }
+            }
             if(preferences) {
                 requested_resolution_multiplier=preferences->resolution;eye_antialiasing_requested=preferences->antialiasing;
                 mirror_mode_requested=preferences->mirror;sharpness_requested=preferences->sharpness;taa_preference=preferences->temporal_aa;hud_preference=preferences->hud_percent;hint_preference=preferences->controls_hint;
@@ -9252,7 +9282,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
             native_weapon_attachment.install(image_base,&read_self,&game_logic_mask,output/L"native-weapon-attachment.csv");
         }
         if(native_left_aim_requested) native_left_aim.install(image_base,&read_self,&game_logic_mask,&write_self_aim,output/L"native-left-aim.csv",true);
-        if(native_left_aim_requested && controller_aim_requested && !fs::exists(root/L"build"/L"no-hand-crosshair")) {
+        if(native_left_aim_requested && controller_aim_requested && crosshair_preference && !fs::exists(root/L"build"/L"no-hand-crosshair")) {
             try {native_crosshair.install(image_base,&read_self,&write_self_aim,&game_logic_mask,output/L"native-crosshair.csv",true);native_crosshair_installed=true;d2vr::NativeHudChildDraw::eye_live=+[](const d2vr::NativeCrosshair::Binding& b,UINT64 now) noexcept {return native_crosshair.owns(b,now);};}
             catch(const std::exception& error) {note_recoverable((std::string("Native crosshair disabled: ")+error.what()).c_str());}
         }
