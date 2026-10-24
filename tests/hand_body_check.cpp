@@ -596,6 +596,8 @@ static void b14_checks() {
         const double gap=length(r.w.b[0].pos-r.target[0]);
         CHECK(gap<.01);CHECK(r.hb.drive_status(0).gap_m<.01);CHECK(length(r.w.b[1].pos-r.target[1])<.01);   // the idle hand hovers (gravity compensated)
         CHECK(r.hb.drive_status(0).snaps==0);CHECK(r.hb.status(0).faults==0);CHECK(r.hb.drive_status(0).contact_frames==0);
+        CHECK(!r.hb.drive_status(0).contact_now);   // B15: no contact signal in free air at rest
+        {const auto before=r.hb.pose_stamped(0);r.tick();const auto after=r.hb.pose_stamped(0);CHECK(before.second<after.second && after.first);}   // B15: every tick stamps a new pose
     }
     {   // drive_stops_at_wall_and_reports_contact: the target 0.35 m beyond a wall; the body never passes it, contact frames rise, no snap
         // while the target is blocked (the clamp's cast does not show it free)
@@ -606,6 +608,7 @@ static void b14_checks() {
         for(int i=0;i<180;++i) {r.tick();max_x=std::max(max_x,r.w.b[0].pos.x);}
         CHECK(max_x<=.6-.05+1e-9);CHECK(r.hb.drive_status(0).contact_frames>=100);CHECK(r.hb.drive_status(0).snaps==0);
         CHECK(r.w.destroys==0);CHECK(r.hb.drive_status(0).snap_requests==0);CHECK(r.hb.drive_status(1).contact_frames==0);
+        CHECK(r.hb.drive_status(0).contact_now && !r.hb.drive_status(1).contact_now);   // B15: short of the command for two ticks in a row
         CHECK(r.hb.drive_status(0).gap_m>.2);   // lags behind the controller (Bonelab §2.2), still driven
         CHECK(r.hb.drive_status(0).snap_blocked==0);   // the servo is told the target is blocked: it never even asks for a snap
         // a blocked far gap (the target 1.4 m away inside geometry): no snap request at all, counted as blocked, never a destroy

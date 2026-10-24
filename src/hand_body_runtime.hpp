@@ -154,6 +154,10 @@ public:
         return out;
     }
     static std::optional<WorldTrackedPose> pose(unsigned side) {const auto* body=body_.load(std::memory_order_acquire);return active() && body?body->pose(side):std::nullopt;}
+    // B15: the pose with its publication serial (the visible hand judges a pose that stopped updating) and the drive's contact signal
+    static std::pair<std::optional<WorldTrackedPose>,std::uint64_t> pose_stamped(unsigned side) {const auto* body=body_.load(std::memory_order_acquire);
+        return active() && body?body->pose_stamped(side):std::pair<std::optional<WorldTrackedPose>,std::uint64_t>{std::nullopt,0};}
+    static bool contact_now(unsigned side) {const auto* body=body_.load(std::memory_order_acquire);return active() && body && body->drive_status(side).contact_now;}
     static bool ready(unsigned side) {const auto* body=body_.load(std::memory_order_acquire);return active() && body && body->ready(side);}
     static HandBodyStatus status(unsigned side) {const auto* body=body_.load(std::memory_order_acquire);return body?body->status(side):HandBodyStatus{};}
     // The status object for xr-live-status.json (`"hand_body":`). Knob off: {"enabled":false}.
@@ -179,7 +183,7 @@ public:
              <<",\"create_refusals\":"<<st.create_refusals<<",\"busy_waits\":"<<st.busy_waits
              <<",\"misplaced_writes\":"<<st.misplaced_writes<<",\"reentrant_writes\":"<<st.reentrant_writes;
             const auto d=body->drive_status(side);
-            o<<",\"drive\":{\"gap_m\":"<<d.gap_m<<",\"speed\":"<<d.speed<<",\"capped\":"<<(d.capped?"true":"false")<<",\"contact_frames\":"<<d.contact_frames
+            o<<",\"drive\":{\"gap_m\":"<<d.gap_m<<",\"speed\":"<<d.speed<<",\"capped\":"<<(d.capped?"true":"false")<<",\"contact_frames\":"<<d.contact_frames<<",\"contact_now\":"<<(d.contact_now?"true":"false")
              <<",\"snaps\":"<<d.snaps<<",\"snap_requests\":"<<d.snap_requests<<",\"snap_blocked\":"<<d.snap_blocked<<",\"cost_us\":"<<d.cost_us
              <<",\"cost_max_us\":"<<d.cost_max_us<<",\"player_drift_um\":"<<d.player_drift_um<<",\"dt_s\":"<<d.dt_s<<",\"drives\":"<<d.drives
              <<",\"drive_writes\":"<<d.drive_writes<<",\"yields\":"<<d.yields<<",\"skipped\":"<<d.skipped<<",\"garbage\":"<<d.garbage

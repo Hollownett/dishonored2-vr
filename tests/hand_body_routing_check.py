@@ -231,12 +231,12 @@ print("hand_body_routing_check ok")
 # 11. B14: the drive. Knob off stays no behaviour change: the render side only computes two local bit sets inside the clamp loop (written,
 # never read outside the knob-gated publication) and the drive runs only from the runtime's G1 tick.
 free_uses = [m.start() for m in re.finditer(r"hand_body_free_bits|hand_body_yield_bits", probe)]
-assert len(free_uses) == 6, len(free_uses)   # the declaration, one |= each in the clamp loop, the two reads in the publication
+assert len(free_uses) == 7, len(free_uses)   # the declaration, one |= each in the clamp loop, the two reads in the publication, B15's yield read
 publish_at = probe.index("d2vr::HandBodyRuntime::publish_hands(")
 publish_block, publish_start = enclosing_block(probe, publish_at)
 reads = [u for u in free_uses if publish_start <= u < publish_start + len(publish_block)]
 assert len(reads) == 2, "the bits are read only inside the knob-gated publication"
-assert "unsigned hand_body_free_bits{},hand_body_yield_bits{};" in probe
+assert "unsigned hand_body_free_bits{},hand_body_yield_bits{},hand_visual_contact_bits{};" in probe
 free_gate = probe[probe.index("const bool answered_free="):probe.index("if(hand_body_free_streak[side]>=3) hand_body_free_bits|=1u<<side;")]
 for need in ("clamp_updated && clamped.valid && !clamp_yield", "clamped.state==d2vr::ClampState::free", "!clamped.reacquired", "!clamped.held", "!clamped.contact", "!reach_clamped",
              "!palm_unanswered", "clamped.drawn.position-palm.position"):
@@ -293,6 +293,36 @@ for key in ('\\"timing\\":', '\\"cpu_available\\":', '\\"over_wall\\":', '\\"ove
     assert key in runtime, key
 assert drive_fn.index("const auto c0=cpu_now();") < drive_fn.index("engine_.motion(") and "cost.read=clock_us();" in drive_fn and "cost.write=clock_us();" in drive_fn
 print("hand_body_routing_check B14 ok")
+
+# 12. B15: which pose the visible hand is drawn at. Knob off (no build/hand-body, or no body) leaves hands.grips exactly as the clamp drew it;
+# the raw controller poses are not read on this path (they keep driving intent), and the intent paths do not read the drawn pose.
+visual_hdr = (src / "hand_visual_source.hpp").read_text(encoding="utf-8")
+assert "raw_grips" not in visual_hdr and "hand_body_native" not in visual_hdr and "HandBodyRuntime" not in visual_hdr, "the source selector is pure"
+assert "hand_visual_source_check.cpp" in build and build.index("hand_body_lifecycle_check.exe") < build.index("hand_visual_source_check.cpp")
+vstart = probe.index("// B15: which pose the visible hand is drawn at")
+vend = probe.index("// Task 12 (user decision 6)", vstart)
+vblock = probe[vstart:vend]
+assert "raw_grips" not in code_of(vblock), "B15 reads the palm pose (before the clamp), never the raw controller"
+assert "palm_grips[side]" in vblock and "hands.grips[side]" in vblock
+assert "if(hand_body_requested.load(std::memory_order_relaxed) && d2vr::HandBodyRuntime::active()) {" in vblock, "knob off: nothing below runs"
+assert vblock.index("visual[side].drawn=hands.grips[side];") < vblock.index("if(hand_body_requested"), "knob off: the passthrough is the clamp's pose"
+assert vblock.count("hands.grips[side]=visual[side].drawn;") == 1 and vblock.index("hand_visual_source.update(") < vblock.index("hands.grips[side]=visual[side].drawn;")
+assert "d2vr::HandBodyRuntime::contact_now(side)" in vblock and "d2vr::HandBodyRuntime::pose_stamped(side)" in vblock and "held_planes(side," in vblock
+assert probe.index("hand_clamp.note_drawn(") < vstart < probe.index("drawn_anchor.update(") < probe.index("publish_hand(side,hands.grips[side],raw_grips[side])")
+assert code_of(probe).count("resolve_drawn_grip(") == 1 and "const auto grip=d2vr::resolve_drawn_grip(visual[side],drawn);" in probe, "X-4: one function decides"
+res = function(visual_hdr, "inline DrawnGrip resolve_drawn_grip(")
+assert res.index("VisualSource::body") < res.index("VisualSource::controller") < res.index("anchor.weight>0"), "hand body > anchor; clamp last"
+# the drawn pose is read only by the publication, the anchor, the status and the held-clamp shift: never by an intent path
+for intent in ("intent.grips=raw_grips;", "note_grip(side,raw_grips[side],hands.curls[side]);", "const auto& p=raw_grips[side].position;reach_hands[side]="):
+    assert intent in probe, intent
+uses = [m.start() for m in re.finditer(r"hand_visual_source\.(?:update|reset)|visual\[side\]", probe)]
+assert uses and all(u >= vstart for u in uses), "the drawn-pose source is read nowhere before the B15 block (intent paths run earlier)"
+assert not any(vend + 4000 < u < probe.index("publish_hand(side,hands.grips[side],raw_grips[side])") for u in uses), "...and only the anchor block reads it afterwards"
+assert ',\\"hand_visual\\":" << hand_visual_stats.json()' in probe
+for key in ("body_frames", "clamp_frames", "controller_frames", "blends", "snaps"):
+    assert f'\\"{key}\\":' in visual_hdr, key
+assert 'contact_now' in body and 'short_streak>=dc.contact_ticks' in body and "pose_stamped" in runtime
+print("hand_body_routing_check B15 ok")
 
 # 10. the B13 sim scenario compiles and fits a 120 s session with a 60 s lead
 import sys

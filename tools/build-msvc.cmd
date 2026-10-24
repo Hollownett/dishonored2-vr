@@ -531,6 +531,10 @@ cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT /Isrc tests\hand_body_lifecyc
 if not "%errorlevel%"=="0" exit /b 1
 build\hand_body_lifecycle_check.exe
 if not "%errorlevel%"=="0" exit /b 1
+cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT /Isrc tests\hand_visual_source_check.cpp /Fo:build\hand_visual_source_check.obj /Fe:build\hand_visual_source_check.exe
+if not "%errorlevel%"=="0" exit /b 1
+build\hand_visual_source_check.exe
+if not "%errorlevel%"=="0" exit /b 1
 cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT /Isrc tests\hand_body_check.cpp /Fo:build\hand_body_check.obj /Fe:build\hand_body_check.exe
 if not "%errorlevel%"=="0" exit /b 1
 build\hand_body_check.exe

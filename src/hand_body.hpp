@@ -78,6 +78,7 @@ struct HandDriveConfig {
     double max_write_speed=10;      // = HandServoConfig::max_speed; the write never exceeds kHandWriteMaxSpeed (native guard)
     double max_write_spin=20;       // = HandServoConfig::max_spin
     double contact_shortfall=.25;   // research §2.5 (contact without events): achieved short of commanded by more than 25%
+    unsigned contact_ticks=2;       // B15: short of the command this many ticks in a row is `contact_now` (the visible hand then follows the body)
     double contact_min_speed=.1;    // commands slower than this are never judged (rest noise, the gravity term)
     double far_snap_gap=1.;         // a gap this large (Blink, a teleport, a long yield) snaps at once when the target is free: never fly there
     double garbage_speed=100;       // read-back speed or spin above this is garbage (native_motion's own bound)
@@ -96,7 +97,7 @@ struct BodyMotion {Vec3 position{},velocity{},spin{};};
 // player_drift_um (the player's root moving with no locomotion input while this hand's body is pressed into the capsule).
 struct DriveInput {unsigned side{};WorldTrackedPose target{};double held_kg{};double now{};bool yield{};
                    bool target_free{};std::optional<Vec3> player_root{};bool locomotion{};};
-struct DriveStatus {double gap_m{};double speed{};bool capped{};std::uint64_t contact_frames{},snaps{},cost_us{},cost_max_us{},player_drift_um{};
+struct DriveStatus {double gap_m{};double speed{};bool capped{},contact_now{};std::uint64_t contact_frames{},snaps{},cost_us{},cost_max_us{},player_drift_um{};
                     double dt_s{};std::uint64_t drives{},drive_writes{},yields{},skipped{},snap_requests{},snap_blocked{},garbage{},second_drives{},root_jumps{},pressed_ticks{};
                     // fix round 1: thread CPU time of this side's drive (QueryThreadCycleTime; 0 when unavailable), and the positive control for
                     // the drift proof: ticks where the root moved under locomotion input, and the largest such root travel in one locomotion window
@@ -253,12 +254,15 @@ public:
     bool publish(const std::optional<WorldTrackedPose>& pose) {
         std::unique_lock<std::mutex> lock(mutex_,std::try_to_lock);
         if(!lock.owns_lock()) {skipped_.fetch_add(1,std::memory_order_relaxed);return false;}
-        pose_=pose;return true;
+        pose_=pose;++seq_;return true;
     }
     std::optional<WorldTrackedPose> read() const {std::lock_guard<std::mutex> lock(mutex_);return pose_;}
+    // B15: the pose with its publication serial (bumps on every accepted publish, one per game frame while the body is alive): the render
+    // thread judges a stale pose (unchanged for more than two displayed frames) from it.
+    std::pair<std::optional<WorldTrackedPose>,std::uint64_t> read_stamped() const {std::lock_guard<std::mutex> lock(mutex_);return {pose_,seq_};}
     std::uint64_t skipped() const {return skipped_.load(std::memory_order_relaxed);}
 private:
-    mutable std::mutex mutex_;std::optional<WorldTrackedPose> pose_;std::atomic<std::uint64_t> skipped_{};
+    mutable std::mutex mutex_;std::optional<WorldTrackedPose> pose_;std::uint64_t seq_{};std::atomic<std::uint64_t> skipped_{};
 };
 
 class HandBody {
@@ -337,6 +341,8 @@ public:
         return false;
     }
     std::optional<WorldTrackedPose> pose(unsigned side) const {return side<sides?poses_[side].read():std::nullopt;}
+    std::pair<std::optional<WorldTrackedPose>,std::uint64_t> pose_stamped(unsigned side) const {
+        return side<sides?poses_[side].read_stamped():std::pair<std::optional<WorldTrackedPose>,std::uint64_t>{std::nullopt,0};}
     // Dispatcher thread only. Refused (counted) unless the lifecycle allows writes to this body in this world and load generation, physics
     // is idle and the record names the body's own full handle.
     // Called outside the dispatcher's G1 tick, or from inside service() (an engine callback): refused and counted.
@@ -423,8 +429,11 @@ public:
         // contact without events (research §2.5): last tick's command achieved short by more than 25% along its own direction
         if(had_cmd) {
             const double want=length(s.last_cmd);
-            if(want>=dc.contact_min_speed && dot(m->velocity,s.last_cmd)/want<(1-dc.contact_shortfall)*want) count(side,&Counters::contact_frames);
+            if(want>=dc.contact_min_speed && dot(m->velocity,s.last_cmd)/want<(1-dc.contact_shortfall)*want) {count(side,&Counters::contact_frames);++s.short_streak;}
+            else s.short_streak=0;
         }
+        else s.short_streak=0;
+        c.contact_now.store(s.short_streak>=dc.contact_ticks,std::memory_order_relaxed);   // B15: short of the command for two ticks in a row
         note_drift(side,in,m->position);
         Vec3 linear{},angular{};bool yielded=in.yield || !hand_servo_detail::finite_pose(in.target);
         if(yielded) {s.servo={};count(side,&Counters::yields);c.capped.store(false,std::memory_order_relaxed);}
@@ -458,7 +467,7 @@ public:
     DriveStatus drive_status(unsigned side) const {
         DriveStatus d;if(side>=sides) return d;
         const auto& c=counters_[side];
-        d.gap_m=c.gap_m.load();d.speed=c.speed.load();d.capped=c.capped.load();d.contact_frames=c.contact_frames.load();d.snaps=c.snaps.load();
+        d.gap_m=c.gap_m.load();d.speed=c.speed.load();d.capped=c.capped.load();d.contact_now=c.contact_now.load();d.contact_frames=c.contact_frames.load();d.snaps=c.snaps.load();
         d.cost_us=c.cost_us.load();d.cost_max_us=c.cost_max_us.load();d.player_drift_um=c.player_drift_um.load();d.dt_s=c.dt_s.load();
         d.drives=c.drives.load();d.drive_writes=c.drive_writes.load();d.yields=c.yields.load();d.skipped=c.skipped.load();
         d.snap_requests=c.snap_requests.load();d.snap_blocked=c.snap_blocked.load();d.garbage=c.garbage.load();d.second_drives=c.second_drives.load();d.root_jumps=c.root_jumps.load();d.pressed_ticks=c.pressed_ticks.load();
@@ -505,7 +514,7 @@ private:
             wake_writes{},create_refusals{},writes{},releases{},lost{},unverified{},misplaced_writes{},reentrant_writes{};
         std::atomic<std::uint64_t> contact_frames{},snaps{},cost_us{},cost_max_us{},player_drift_um{},drives{},drive_writes{},yields{},skipped{},
             snap_requests{},snap_blocked{},garbage{},second_drives{},root_jumps{},pressed_ticks{},cpu_us{},cpu_max_us{},root_moved_ticks{},root_travel_um{};
-        std::atomic<double> gap_m{},speed{},dt_s{};std::atomic<bool> capped{};
+        std::atomic<double> gap_m{},speed{},dt_s{};std::atomic<bool> capped{},contact_now{};
         std::atomic<int> state{};std::atomic<std::uint32_t> handle{};
     };
     struct TickGuard {
@@ -517,7 +526,7 @@ private:
     struct Side {std::uint32_t handle{},gen{};std::uintptr_t world{};bool pending_destroy{},woken{};unsigned attempts{},wake_tries{};std::uint64_t next_create_ms{};
         // B14 drive state (dispatcher thread only)
         HandServoState servo{};double last_drive_s{std::numeric_limits<double>::quiet_NaN()};std::uint64_t written_tick{~0ull};
-        std::uint64_t drive_tick{~0ull};bool snap_pending{},has_cmd{};Vec3 last_cmd{};std::optional<Vec3> press_root,last_root,loco_start,loco_last;unsigned unreadable_motion{};};
+        std::uint64_t drive_tick{~0ull};bool snap_pending{},has_cmd{};Vec3 last_cmd{};std::optional<Vec3> press_root,last_root,loco_start,loco_last;unsigned unreadable_motion{},short_streak{};};
     void count(unsigned side,std::atomic<std::uint64_t> Counters::* field) {(counters_[side].*field).fetch_add(1,std::memory_order_relaxed);}
     std::uint64_t clock_us() const {try {return engine_.now_us?engine_.now_us():0;} catch(...) {return 0;}}
     // CPU time is available only with a calibration and while every read succeeds (one failed read: unavailable for the session)
@@ -660,7 +669,7 @@ private:
     }
     void finish(unsigned side) {Side& s=side_[side];life_.destroyed(side);s.handle=0;s.attempts=0;s.pending_destroy=false;reset_drive(side);}
     void reset_drive(unsigned side) {
-        Side& s=side_[side];s.servo={};s.last_drive_s=std::numeric_limits<double>::quiet_NaN();s.snap_pending=false;s.has_cmd=false;s.press_root.reset();s.last_root.reset();s.loco_start.reset();s.loco_last.reset();s.unreadable_motion=0;
+        Side& s=side_[side];s.servo={};s.last_drive_s=std::numeric_limits<double>::quiet_NaN();s.snap_pending=false;s.has_cmd=false;s.press_root.reset();s.last_root.reset();s.loco_start.reset();s.loco_last.reset();s.unreadable_motion=0;s.short_streak=0;counters_[side].contact_now.store(false,std::memory_order_relaxed);
     }
     void readback(unsigned side,std::uintptr_t world) {
         const Side& s=side_[side];
