@@ -182,10 +182,10 @@ int main() {
         require(!menu.update(in,false,true,PanelPointer{.15,.143}).resolution,"Held trigger repeated click");
         {   // Back row: left half requests the test unlock and keeps the menu open; right half closes.
             VrSettings unlock;ControllerInput c{};c.active=true;unlock.update(c,false,true);c.y=true;unlock.update(c,false,true);c.y=false;unlock.update(c,false,true);
-            c.right_trigger=1;const auto request=unlock.update(c,false,true,PanelPointer{.25,(64+36*9+16)/560.});
+            c.right_trigger=1;const auto request=unlock.update(c,false,true,PanelPointer{.25,(64+33*10+15)/560.});
             require(request.test_unlock && unlock.open(),"Test unlock click did not request the unlock");
             c.right_trigger=0;unlock.update(c,false,true);c.right_trigger=1;
-            const auto close=unlock.update(c,false,true,PanelPointer{.75,(64+36*9+16)/560.});
+            const auto close=unlock.update(c,false,true,PanelPointer{.75,(64+33*10+15)/560.});
             require(!close.test_unlock && !unlock.open(),"Back half did not close settings");
         }
         in.right_trigger=0;menu.update(in,false,true);in.right_trigger=1;
@@ -204,23 +204,28 @@ int main() {
         require(sharp_click.sharpness && *sharp_click.sharpness==.75 && menu.sharpness()==.75,"Pointer did not cycle sharpening");
         require(!menu.update(in,false,true,PanelPointer{.5,.4}).sharpness,"Held trigger changed sharpening repeatedly");
         in.right_trigger=0;menu.update(in,false,true);in.right_trigger=1;
-        const auto reticle_click=menu.update(in,false,true,PanelPointer{.5,.464});
+        const auto reticle_click=menu.update(in,false,true,PanelPointer{.5,.4357});
         require(reticle_click.hud_percent && *reticle_click.hud_percent==75 && menu.hud_percent()==75,"Pointer did not cycle the HUD size");
-        require(!menu.update(in,false,true,PanelPointer{.5,.464}).hud_percent,"Held trigger changed the HUD size repeatedly");
+        require(!menu.update(in,false,true,PanelPointer{.5,.4357}).hud_percent,"Held trigger changed the HUD size repeatedly");
         in.right_trigger=0;menu.update(in,false,true);in.right_trigger=1;
-        const auto hint_click=menu.update(in,false,true,PanelPointer{.5,.529});
+        const auto hint_click=menu.update(in,false,true,PanelPointer{.5,.4946});
         require(hint_click.controls_hint && !*hint_click.controls_hint && !menu.controls_hint(),"Pointer did not toggle the controls hint");
-        require(!menu.update(in,false,true,PanelPointer{.5,.529}).controls_hint,"Held trigger changed the controls hint repeatedly");
+        require(!menu.update(in,false,true,PanelPointer{.5,.4946}).controls_hint,"Held trigger changed the controls hint repeatedly");
         in.right_trigger=0;menu.update(in,false,true);in.right_trigger=1;
-        const auto turn=menu.update(in,false,true,PanelPointer{.5,.593});
+        {const bool before=menu.crosshair();
+         const auto cross=menu.update(in,false,true,PanelPointer{.5,.5536}); // row 7: (64+33*7+15)/560
+         require(cross.crosshair && *cross.crosshair==!before && menu.crosshair()==!before,"Pointer did not toggle the crosshair");
+         require(!menu.update(in,false,true,PanelPointer{.5,.5536}).crosshair,"Held trigger toggled the crosshair repeatedly");
+         in.right_trigger=0;menu.update(in,false,true);in.right_trigger=1;}
+        const auto turn=menu.update(in,false,true,PanelPointer{.5,.6125});
         require(turn.turning && turn.turning->mode==TurnControl::Mode::snap && turn.turning->snap_degrees==90,"Turning preset did not advance");
-        require(!menu.update(in,false,true,PanelPointer{.5,.593}).turning,"Held trigger changed turning repeatedly");
+        require(!menu.update(in,false,true,PanelPointer{.5,.6125}).turning,"Held trigger changed turning repeatedly");
         in.right_trigger=0;menu.update(in,false,true);in.right_trigger=1;
-        require(menu.update(in,false,true,PanelPointer{.5,.657}).recenter,"Recenter action did not fire");
-        require(!menu.update(in,false,true,PanelPointer{.5,.657}).recenter,"Held trigger repeatedly recentered");
+        require(menu.update(in,false,true,PanelPointer{.5,.6714}).recenter,"Recenter action did not fire");
+        require(!menu.update(in,false,true,PanelPointer{.5,.6714}).recenter,"Held trigger repeatedly recentered");
         in.right_trigger=0;menu.update(in,false,true);in.right_trigger=1;
-        require(menu.update(in,false,true,PanelPointer{.25,.657}).calibrate && menu.calibration_page(),"Avatar calibration page did not open");
-        require(!menu.update(in,false,true,PanelPointer{.25,.657}).calibrate,"Held trigger restarted calibration");
+        require(menu.update(in,false,true,PanelPointer{.25,.6714}).calibrate && menu.calibration_page(),"Avatar calibration page did not open");
+        require(!menu.update(in,false,true,PanelPointer{.25,.6714}).calibrate,"Held trigger restarted calibration");
         menu.calibration_status(AvatarCalibrationState::hold_pose);in.a=true;
         require(!menu.update(in,false,true).calibrate,"Stable pose capture restarted from A");in.a=false;menu.update(in,false,true);
         menu.calibration_status(AvatarCalibrationState::hold_pose,.5);
@@ -300,13 +305,21 @@ int main() {
             press(0,-1);
             const auto hint_stick=press(1,0);
             require(hint_stick.controls_hint && !*hint_stick.controls_hint && !rows.controls_hint(),"Stick did not toggle the controls hint");
+            press(0,-1);
+            const bool crosshair_before=rows.crosshair();
+            const auto crosshair_stick=press(1,0);
+            require(crosshair_stick.crosshair && *crosshair_stick.crosshair==!crosshair_before && rows.crosshair()==!crosshair_before,"Stick did not toggle the crosshair");
+            stick.a=true;const auto crosshair_a=rows.update(stick,false,true);stick.a=false;rows.update(stick,false,true);
+            require(crosshair_a.crosshair && *crosshair_a.crosshair==crosshair_before && rows.crosshair()==crosshair_before,"A did not toggle the crosshair");
             const auto rows_image=settings_panel_image(rows,1.2,3722,3850,{});
-            for(unsigned row=0;row<10;++row) {   // every row bar sits inside the bitmap and is drawn dark or as the pale highlight
-                const auto shade=pixel(rows_image,24,64+36*row+16,0);
+            for(unsigned row=0;row<settings_row_count;++row) {   // every row bar sits inside the bitmap, above the description plate, drawn dark or as the pale highlight
+                const unsigned y=settings_row_top+settings_row_pitch*row+15;
+                require(y<428,"A settings row bar reaches the description plate");
+                const auto shade=pixel(rows_image,24,y,0);
                 require(shade<60 || shade>150,"A settings row fell outside the panel bitmap");
             }
-            // Wrapping upwards from the controls hint row reaches the last, whose A closes.
-            press(0,1);press(0,1);press(0,1);press(0,1);press(0,1);press(0,1);press(0,1);
+            // Wrapping upwards from the crosshair row reaches the last, whose A closes.
+            for(unsigned k=0;k<8;++k) press(0,1);
             stick.a=true;const auto back=rows.update(stick,false,true);stick.a=false;
             require(back.consume && !rows.open(),"Wrapped vertical navigation did not reach the back row");
         }
@@ -360,7 +373,7 @@ int main() {
             const std::array<TrackedPose,2> hands{{{{-.8,1.48,0},{}},{{.8,1.48,0},{}}}};
             wizard.update(controls,false,true);controls.y=true;wizard.update(controls,false,true);
             controls.y=false;wizard.update(controls,false,true);controls.right_trigger=1;
-            require(wizard.update(controls,false,true,PanelPointer{.25,.657}).calibrate,"Lifecycle test did not enter wizard");
+            require(wizard.update(controls,false,true,PanelPointer{.25,.6714}).calibrate,"Lifecycle test did not enter wizard");
             capture.begin(1,{1.5,.3});
             for(unsigned i=0;i<10;++i) capture.observe(head,hands,3,true,true,i*25,1);
             wizard.calibration_status(capture.state());controls.right_trigger=0;

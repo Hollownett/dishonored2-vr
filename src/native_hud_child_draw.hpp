@@ -75,6 +75,11 @@ inline bool native_crosshair_glyph_scale(std::array<float,6>& matrix,float hud_s
     for(float v:out)if(!std::isfinite(v))return false;
     matrix=out;return true;
 }
+// The hidden crosshair: zero linear part, translation kept. The original still draws, invisibly, so the engine's own bookkeeping is untouched.
+inline bool native_crosshair_hide(std::array<float,6>& m) noexcept {
+    for(unsigned i=0;i<4;++i)m[i]=0.f;
+    return true;
+}
 // Undo the known flat-HUD ancestor scale before sizing the eye-space reticle.
 // Its native x/y already name the aim point; inherited panel layout must not move it.
 inline bool native_crosshair_unlayout(std::array<float,6>& matrix,float k,const std::array<float,2>& centre) noexcept {
@@ -132,6 +137,26 @@ public:
     // so it is drawn natively into the eye (on the panel it was offset from the hand). prompt_world: a hand points at
     // the prompt's object, so the prompt is captured as world art beside that hand instead of joining the panel.
     inline static std::atomic<std::uintptr_t> eye_node{}; // Hint only; never ownership proof.
+    // The in-game Crosshair switch: the eye node is still drawn (and placed), with a zero linear part. Set every frame by the render thread.
+    inline static std::atomic<bool> crosshair_hidden{};
+    // Paired stereo draws the UI once per eye (left first): the callback answers the glyph's extra translation for the n-th eye-node draw
+    // of the frame (n counts from 0 after begin_frame), nullopt for none.
+    using EyeShift=std::optional<std::array<float,2>> (*)(unsigned eye_draw_index) noexcept;
+    inline static std::atomic<EyeShift> eye_shift{};
+    inline static std::atomic<UINT64> crosshair_hidden_draws{},crosshair_eye_shifts{},crosshair_unlayouts{};
+    // The movie root (scale, tx, ty) as last seen at the top of the HUD movie, readable from any thread.
+    inline static std::atomic<float> root_scale_pub{},root_tx_pub{},root_ty_pub{};
+    inline static void publish_root(const std::array<float,6>& m) noexcept {
+        if(!(m[0]>0.f) || !std::isfinite(m[0]) || !std::isfinite(m[4]) || !std::isfinite(m[5]))return;
+        root_scale_pub.store(m[0],std::memory_order_relaxed);root_tx_pub.store(m[4],std::memory_order_relaxed);root_ty_pub.store(m[5],std::memory_order_relaxed);
+    }
+    static float root_scale() noexcept {return root_scale_pub.load(std::memory_order_relaxed);}
+    // The eye target size in pixels from the movie root (it fits the 1920x1080 stage by width and centres it): {0,0} when unknown.
+    static std::array<float,2> target_size() noexcept {
+        const float s=root_scale_pub.load(std::memory_order_relaxed),tx=root_tx_pub.load(std::memory_order_relaxed),ty=root_ty_pub.load(std::memory_order_relaxed);
+        if(!(s>0.f))return {0.f,0.f};
+        return {1920.f*s+2.f*tx,1080.f*s+2.f*ty};
+    }
     using EyeLive=bool (*)(const NativeCrosshair::Binding&,UINT64) noexcept;
     inline static std::atomic<EyeLive> eye_live{};
 private:
@@ -140,6 +165,7 @@ private:
     // Per displayed frame the exact-eye node is validated against the live engine once (the owner binding, the file/iggy back-links and the
     // tree walk are many engine reads), and every further child draw of that frame is answered from eye_ok_. begin_frame(0) (the default) turns
     // the cache off. Publishing or clearing the binding, or an answer older than eye_ok_max_age_ms, drops it.
+    inline static std::atomic<unsigned> eye_draws_{};
     inline static std::atomic<UINT64> frame_{},eye_gen_{},eye_ok_frame_{},eye_ok_gen_{},eye_ok_tick_{},eye_validations_{},eye_cache_hits_{};
     inline static std::atomic<std::uintptr_t> eye_ok_iggy_{},eye_ok_node_{};
     inline static constexpr UINT64 eye_ok_max_age_ms=50;
@@ -182,7 +208,7 @@ public:
     }
     static void clear_eye() noexcept {std::lock_guard<std::mutex> lock(mutex_);eye_binding_={};eye_node=0;eye_gen_.fetch_add(1,std::memory_order_release);}
     // Render thread, once per displayed frame (0 = no caching).
-    static void begin_frame(UINT64 frame) noexcept {frame_.store(frame,std::memory_order_relaxed);}
+    static void begin_frame(UINT64 frame) noexcept {frame_.store(frame,std::memory_order_relaxed);eye_draws_.store(0,std::memory_order_relaxed);}
     static UINT64 eye_validations() noexcept {return eye_validations_.load();}
     static UINT64 eye_cache_hits() noexcept {return eye_cache_hits_.load();}
     inline static std::atomic<UINT64> overlay_draws{}; // full-screen overlays (damage vignette) not drawn
@@ -364,8 +390,13 @@ private:
            reinterpret_cast<std::uintptr_t>(node)==live_eye_node(iggy)) {
             alignas(16) std::array<float,6> glyph{};
             bool scaled=matrix && read_(reinterpret_cast<std::uintptr_t>(matrix),glyph.data(),sizeof glyph);
-            if(scaled && eye_layout_scale_!=1.f)scaled=native_crosshair_unlayout(glyph,eye_layout_scale_,eye_layout_centre_);
+            if(scaled && eye_layout_scale_!=1.f) {scaled=native_crosshair_unlayout(glyph,eye_layout_scale_,eye_layout_centre_);if(scaled)++crosshair_unlayouts;}
             if(scaled)scaled=native_crosshair_glyph_scale(glyph,hud_scale.load(std::memory_order_relaxed));
+            const unsigned eye_draw=eye_draws_.fetch_add(1,std::memory_order_relaxed);
+            if(crosshair_hidden.load(std::memory_order_relaxed)) {native_crosshair_hide(glyph);scaled=true;++crosshair_hidden_draws;} // read failed: a zero matrix is invisible too
+            else if(scaled)
+                if(const auto shift=eye_shift.load(std::memory_order_relaxed))
+                    if(const auto extra=shift(eye_draw)) {glyph[4]+=(*extra)[0];glyph[5]+=(*extra)[1];++crosshair_eye_shifts;}
             std::uint32_t result{};
             if(profile)profile(1,nesting_);
             __try {result=original_(iggy,scaled?glyph.data():matrix,node,aux,p5,p6,clip,depth);}
@@ -392,11 +423,11 @@ private:
         if(window && matrix && nesting_==1)
             if(const auto is_hud=hud_movie.load(std::memory_order_relaxed),is_tutorial=tutorial_movie.load(std::memory_order_relaxed),extra=panel_movie.load(std::memory_order_relaxed);
                ((is_hud && is_hud(iggy)) || (is_tutorial && is_tutorial(iggy)) || (extra && extra(iggy))) && read_(reinterpret_cast<std::uintptr_t>(matrix),laid.data(),sizeof(laid)))
-                {stage_centre_={laid[4]+laid[0]*960.f,laid[5]+laid[3]*540.f};root_={laid[0],laid[4],laid[5]};} // panel children are fitted from this root
+                {stage_centre_={laid[4]+laid[0]*960.f,laid[5]+laid[3]*540.f};root_={laid[0],laid[4],laid[5]};publish_root(laid);} // panel children are fitted from this root
         if(const float k=hud_scale.load(std::memory_order_relaxed);!window && k<.999f && matrix && nesting_<=2)
             if(const auto is_hud=hud_movie.load(std::memory_order_relaxed),is_tutorial=tutorial_movie.load(std::memory_order_relaxed);
                ((is_hud && is_hud(iggy)) || (is_tutorial && is_tutorial(iggy))) && read_(reinterpret_cast<std::uintptr_t>(matrix),laid.data(),sizeof(laid))) {
-                if(nesting_==1) stage_centre_={laid[4]+laid[0]*960.f,laid[5]+laid[3]*540.f};
+                if(nesting_==1) {stage_centre_={laid[4]+laid[0]*960.f,laid[5]+laid[3]*540.f};publish_root(laid);}
                 else {
                     const auto qualifies=hud_layout_node.load(std::memory_order_relaxed);const auto tutorial=tutorial_movie.load(std::memory_order_relaxed);
                     if(((qualifies && qualifies(iggy,node)) || (tutorial && tutorial(iggy))) && stage_centre_[0]>0.f && stage_centre_[1]>0.f) {
@@ -407,6 +438,8 @@ private:
                     }
                 }
             }
+        if(!window && matrix && nesting_==1 && hud_scale.load(std::memory_order_relaxed)>=.999f) // the crosshair needs the eye target size at any HUD size
+            if(const auto is_hud=hud_movie.load(std::memory_order_relaxed);is_hud && is_hud(iggy) && read_(reinterpret_cast<std::uintptr_t>(matrix),laid.data(),sizeof(laid)))publish_root(laid);
         auto scope=tutorial_child(iggy,node,matrix);if(scope.kind==NativeHudChildKind::none)scope=identify(iggy,node,matrix);
         if(window && scope.kind==NativeHudChildKind::none)scope=takedown_child(iggy,node,matrix);
         if(window) {
@@ -504,7 +537,7 @@ public:
         const auto status=MH_EnableHook(target_);active_=status==MH_OK || status==MH_ERROR_ENABLED;return active_.load();
     }
     static bool disable() noexcept {
-        cpu_profile=nullptr;eye_live=nullptr;clear_eye();active_=false;transform=nullptr;begin=nullptr;end=nullptr;observer=nullptr;hud_movie=nullptr;tutorial_movie=nullptr;panel_movie=nullptr;tutorial_epoch=0;hud_layout_node=nullptr;hud_scale=1.f;panel_active=false;panel_generic=false;hud_file=0;eye_node=0;prompt_world=false;
+        cpu_profile=nullptr;eye_live=nullptr;eye_shift=nullptr;crosshair_hidden=false;root_scale_pub=0.f;clear_eye();active_=false;transform=nullptr;begin=nullptr;end=nullptr;observer=nullptr;hud_movie=nullptr;tutorial_movie=nullptr;panel_movie=nullptr;tutorial_epoch=0;hud_layout_node=nullptr;hud_scale=1.f;panel_active=false;panel_generic=false;hud_file=0;eye_node=0;prompt_world=false;
         if(!target_)return true;const auto result=MH_DisableHook(target_);if(result!=MH_OK && result!=MH_ERROR_DISABLED)return false;
         const auto until=GetTickCount64()+2000;while(depth_ && GetTickCount64()<until)Sleep(1);if(depth_)return false;clear();return true;
     }

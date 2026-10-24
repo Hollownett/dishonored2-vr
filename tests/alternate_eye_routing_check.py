@@ -45,7 +45,7 @@ sites = [
     'controller_aim_requested && per_frame)',
     '(native_camera_trace_requested || native_left_aim_requested || native_shot_aim_installed || native_crosshair_installed) && per_frame)',
     '(tracked_arms_requested || native_weapon_attachment_requested) && per_frame)',
-    'if(per_frame && native_crosshair_installed)',
+    'if(native_crosshair_installed) {', # G4: the per-eye NDC store runs for every view; placement, hiding and the cast stay under per_frame inside
     'if(per_frame) native_crosshair.begin_frame(per_frame_target);',
     'if(per_frame) d2vr::NativeHudChildDraw::begin_frame(per_frame_target);',
 ]

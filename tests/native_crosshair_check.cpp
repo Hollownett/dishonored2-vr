@@ -102,6 +102,26 @@ int main() {
         const auto world=project_to_ndc(projection.data(),std::array<float,3>{-1.0f,2.0f,-8.0f}.data());
         require(world && crosshair_stage_position((*world)[0],(*world)[1],1920.0f,1080.0f)==std::array<float,2>{-120.0f,-135.0f},"World point to stage placement");
 
+        {   // fitted-stage mapping (G4): the visible stage is stage_x wide and stage_x*eye_h/eye_w tall
+            for(const float nx:{-1.f,-.5f,0.f,.5f,1.f}) for(const float ny:{-1.f,-.5f,0.f,.5f,1.f}) {
+                const auto fitted=crosshair_fitted_stage_position(nx,ny,1920.f,1920.f,1080.f),engine=crosshair_stage_position(nx,ny,1920.f,1080.f);
+                require(std::abs(fitted[0]-engine[0])<1e-4f && std::abs(fitted[1]-engine[1])<1e-4f,"fitted_matches_engine_on_16_9");
+            }
+            const auto square=crosshair_fitted_stage_position(.5f,.5f,1920.f,2000.f,2000.f);
+            require(std::abs(square[0]-480.f)<1e-3f && std::abs(square[1]+480.f)<1e-3f,"fitted_square_eye");
+            const auto tall=crosshair_fitted_stage_position(0.f,1.f,1920.f,1832.f,1920.f);
+            require(std::abs(tall[1]+1006.11f)<.01f,"fitted_tall_eye");
+            const auto nan=std::numeric_limits<float>::quiet_NaN();
+            for(const auto bad:{std::array<float,2>{0.f,0.f},{-1.f,1080.f},{1920.f,0.f},{nan,1080.f},{1920.f,std::numeric_limits<float>::infinity()}}) {
+                const auto fallback=crosshair_fitted_stage_position(.5f,-.25f,1920.f,bad[0],bad[1]),engine=crosshair_stage_position(.5f,-.25f,1920.f,1080.f);
+                require(fallback==engine,"fitted_bad_size_falls_back");
+            }
+            const auto shift=crosshair_eye_shift_px({120.f,-40.f},{100.f,-50.f},1.5f);
+            require(std::abs(shift[0]-30.f)<1e-4f && std::abs(shift[1]-15.f)<1e-4f,"eye_shift_px");
+            require(std::abs(crosshair_distance(.1)-3.f)<1e-4f && crosshair_distance(.001)==.5f && crosshair_distance(std::nullopt)==30.f &&
+                    crosshair_distance(2.)==30.f,"distance_from_cast");
+        }
+
         base=reinterpret_cast<std::uintptr_t>(VirtualAlloc(nullptr,module_size,MEM_COMMIT|MEM_RESERVE,PAGE_EXECUTE_READWRITE));
         require(base!=0,"Module allocation");
         bytes_at(base+update_rva,"488bc44889702055488d68a84881ec500100004883b99800000000488bf10f84");
@@ -157,6 +177,13 @@ int main() {
         require(set_members[0]==element.bytes.data()+x_member_offset && std::abs(set_values[0]-480.0f)<1e-3f,"x uses member +0x660");
         require(set_members[1]==element.bytes.data()+y_member_offset && std::abs(set_values[1]-135.0f)<1e-3f,"y uses member +0x670");
         require(latch(element)==std::byte{1},"The active correction does not change the native centred latch");
+        {   // a known eye target size scales y by its aspect (1000x2000: the stage is 1920 x 3840 tall)
+            crosshair.target_size=+[]() noexcept {return std::array<float,2>{1000.f,2000.f};};
+            setter_calls=0;call(element.bytes.data());
+            require(std::abs(set_values[0]-480.0f)<1e-3f && std::abs(set_values[1]-0.5f*0.25f*1920.f*2.f)<1e-2f,"place() uses the fitted stage of the eye target");
+            crosshair.target_size=nullptr;setter_calls=0;call(element.bytes.data());
+            require(std::abs(set_values[1]-135.0f)<1e-3f,"no target size: the 16:9 stage");
+        }
         const auto binding=crosshair.binding(GetTickCount64());
         require(binding && crosshair.owns(*binding,GetTickCount64()),"Live element/movie/list identity is owned");
         require(!crosshair.binding(binding->tick+251),"Old element updates cannot authorize permanent draw ownership");
@@ -224,7 +251,7 @@ int main() {
         setter_calls=0;
         crosshair.publish(2.0f,-2.0f,3,GetTickCount64(),true);
         call(element.bytes.data());
-        require(setter_calls==2 && std::abs(set_values[0]-500.0f)<1e-3f && std::abs(set_values[1]-1000.0f)<1e-3f,"Off-screen NDC parks on the stage edge");
+        require(setter_calls==2 && std::abs(set_values[0]-500.0f)<1e-3f && std::abs(set_values[1]-281.25f)<1e-3f,"Off-screen NDC parks on the stage edge (y from the 16:9 fallback of stage_x)");
         const auto rejected_before=crosshair.rejected();setter_calls=0;
         crosshair.publish(std::numeric_limits<float>::quiet_NaN(),0.0f,4,GetTickCount64(),true);
         call(element.bytes.data());

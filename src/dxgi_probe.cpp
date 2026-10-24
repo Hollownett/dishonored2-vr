@@ -435,6 +435,23 @@ static std::atomic<std::int64_t> frame_split_prev_enter_ns{}; // Present thread 
 static d2vr::FrameSplitTrace frame_split_trace;static std::mutex frame_split_trace_file_mutex;static std::ofstream frame_split_trace_file;
 static std::string frame_split_adapter_json; // written once from the swap chain's adapter; guarded by frame_split_mutex
 static d2vr::PerfMeter perf_meter;static std::mutex perf_meter_mutex; // fed on the render thread, read by the status writer
+// G4 crosshair: each prepared view's NDC of the shared aim ray target (render thread writes in prepare_head_view, the HUD draw hook reads for the
+// per-eye shift of the second UI draw), the placed (per_frame) eye slot, and the cast distance. crosshair_receipt keeps the per_frame view's receipt for the other view.
+struct CrosshairEyeNdc {float x{},y{};std::uint64_t frame{};};
+static std::mutex crosshair_eye_mutex;static std::array<CrosshairEyeNdc,2> crosshair_eye_ndc{};static unsigned crosshair_placed_slot=0;
+static std::optional<d2vr::AimRayReceipt> crosshair_receipt;
+static float crosshair_distance_m=30.f;static std::uint64_t crosshair_cast_posts=0,crosshair_cast_hits=0;static bool crosshair_visible_now=true;
+// The n-th eye-node draw of a frame is the n-th eye's UI pass (paired stereo, left first): draw 1 moves by the parallax between the eyes' stage positions.
+static std::optional<std::array<float,2>> crosshair_eye_shift(unsigned eye_draw_index) noexcept {
+    if(eye_draw_index!=1) return std::nullopt;
+    std::unique_lock<std::mutex> lock(crosshair_eye_mutex,std::try_to_lock);if(!lock) return std::nullopt;
+    const auto placed=crosshair_eye_ndc[crosshair_placed_slot&1u],other=crosshair_eye_ndc[(crosshair_placed_slot&1u)^1u];
+    if(!placed.frame || placed.frame!=other.frame) return std::nullopt; // not published for both eyes this frame (alternate-eye, or no aim): no shift
+    const auto size=d2vr::NativeHudChildDraw::target_size();const float root_s=d2vr::NativeHudChildDraw::root_scale();
+    if(!(root_s>0.f)) return std::nullopt;
+    const auto stage=[&](const CrosshairEyeNdc& v) {return d2vr::crosshair_fitted_stage_position(std::clamp(v.x,-1.f,1.f),std::clamp(v.y,-1.f,1.f),1920.f,size[0],size[1]);};
+    return d2vr::crosshair_eye_shift_px(stage(other),stage(placed),root_s);
+}
 static d2vr::AimSmoother aim_smoother;static bool aim_smoothing_enabled=true; // plan H2: build/no-aim-smoothing; build/aim-smoothing "min_cutoff beta d_cutoff". Render thread only (prepare_head_view), once per displayed frame, shared by the gameplay aim and the crosshair
 static d2vr::AnchorSmoother anchor_smoother;static bool camera_smoothing_enabled=true;static std::uint64_t anchor_smooth_frame=~0ull;static double anchor_smooth_z=0,anchor_smooth_t=0; // build/no-camera-smoothing; render thread only (prepare_head_view). The z smoothed for anchor_smooth_frame, shared by both eyes, the authored view and the audio listener.
 static d2vr::ComfortVignette comfort_vignette;static bool turn_ramp_enabled=true;static std::atomic<float> published_turn_rate_rad_s{},published_stick_speed_mps{}; // build/no-comfort-vignette, build/comfort-vignette (strength), build/no-turn-ramp; the vignette is fed on the render thread under comfort_mutex, the stick turn rate by the controller thread
@@ -5650,26 +5667,42 @@ void prepare_head_view(void* view) noexcept {
         if(!(engine_projection && symmetric_frustum_requested)) {std::memcpy(bytes.data()+0x100,optical->data(),64);bytes[0x140]=std::byte{1};forced_view_jitter=taa_view_jitter;
             {std::lock_guard<std::mutex> l(eye_jitter_mutex);auto& e=eye_jitter[eye_slot];e={taa_view_jitter.x,taa_view_jitter.y,e[0],e[1]};}}
         pending_publish.flush(); // complete guarded float ray before reticle projection
-        if(per_frame && !shared_aim_ray) {native_shot_aim.clear();native_crosshair.clear();}
-        if(per_frame && native_crosshair_installed) {
+        if(per_frame && !shared_aim_ray) {native_shot_aim.clear();native_crosshair.clear();crosshair_receipt.reset();}
+        if(per_frame && shared_aim_ray) crosshair_receipt=shared_aim_ray;
+        if(native_crosshair_installed) {
             // Keep accepted one-eye placement. The target uses the exact finalized launch floats.
             bool published=false;
-            if(shared_aim_ray && shared_aim_ray->current({body->player,body->camera,body->camera_identity.generation},
-                    per_frame_target,game_xr->pose_epoch(),game_xr->reference_epoch())) {
-                const auto target=shared_aim_ray->target(30.f);
+            const auto* aim=per_frame?(shared_aim_ray?&*shared_aim_ray:nullptr):(crosshair_receipt?&*crosshair_receipt:nullptr);
+            if(per_frame) {
+                // The in-game switch hides the element (still placed, so turning it on is immediate) and stops the distance cast.
+                crosshair_visible_now=game_xr?game_xr->crosshair_visible():crosshair_preference;
+                d2vr::NativeHudChildDraw::crosshair_hidden.store(!crosshair_visible_now,std::memory_order_relaxed);
+                const bool current=aim && aim->current({body->player,body->camera,body->camera_identity.generation},per_frame_target,game_xr->pose_epoch(),game_xr->reference_epoch());
+                std::optional<double> fraction;
+                if(current && crosshair_visible_now && hand_clamp_budget.tip_enabled() && !hand_clamp_budget.alternate()) {
+                    // The reticle distance is the weapon-segment cast along the aim ray (<= 30 m), read from the previous posts; outside the budget it stays 30 m.
+                    if(const auto hit=d2vr::NativeInteractionAim::weapon_hit(0,d2vr::NativeInteractionAim::crosshair_slot,GetTickCount64(),d2vr::NativeInteractionAim::producer_crosshair)) {fraction=hit->fraction;++crosshair_cast_hits;}
+                    d2vr::NativeInteractionAim::post_weapon_segment(0,d2vr::NativeInteractionAim::crosshair_slot,aim->target(0.f),aim->target(30.f),.02,0,-1,0,d2vr::NativeInteractionAim::producer_crosshair);++crosshair_cast_posts;
+                }
+                crosshair_distance_m=d2vr::crosshair_distance(fraction);
+                {std::lock_guard<std::mutex> l(crosshair_eye_mutex);crosshair_placed_slot=static_cast<unsigned>(eye_slot&1u);crosshair_eye_ndc={};}
+            }
+            if(aim && aim->current({body->player,body->camera,body->camera_identity.generation},per_frame_target,game_xr->pose_epoch(),game_xr->reference_epoch())) {
+                const auto target=aim->target(crosshair_distance_m);
                 const auto d=target-world.position;
                 const double depth=d2vr::dot(d,world.basis[0]);
                 if(depth>.1) {
                     const double tx=-d2vr::dot(d,world.basis[1])/depth,ty=d2vr::dot(d,world.basis[2])/depth;
                     const double l=std::tan(render_fov.left),r=std::tan(render_fov.right),u=std::tan(render_fov.up),dn=std::tan(render_fov.down);
                     const double nx=(2*tx-(r+l))/(r-l),ny=(2*ty-(u+dn))/(u-dn);
-                    if(std::abs(nx)<1.2 && std::abs(ny)<1.2) {
+                    {std::lock_guard<std::mutex> l2(crosshair_eye_mutex);crosshair_eye_ndc[eye_slot&1u]={static_cast<float>(nx),static_cast<float>(ny),per_frame_target};}
+                    if(per_frame && std::abs(nx)<1.2 && std::abs(ny)<1.2) {
                         native_crosshair.publish(static_cast<float>(nx),static_cast<float>(ny),game_xr->pose_epoch(),GetTickCount64(),true);published=true;
                     }
                 }
             }
-            if(!published) native_crosshair.clear();
-            {d2vr::Vec3 tip{};UINT64 tick{};{std::lock_guard<std::mutex> l(sword_tip_mutex);tip=sword_tip;tick=sword_tip_tick;}
+            if(per_frame && !published) native_crosshair.clear();
+            if(per_frame) {d2vr::Vec3 tip{};UINT64 tick{};{std::lock_guard<std::mutex> l(sword_tip_mutex);tip=sword_tip;tick=sword_tip_tick;}
              if(tick && GetTickCount64()-tick<=100) { // diagnostic: where the collision/melee blade tip falls in the left eye
                 const auto d=tip-world.position;const double depth=d2vr::dot(d,world.basis[0]);
                 if(depth>.05) {const double tx=-d2vr::dot(d,world.basis[1])/depth,ty=d2vr::dot(d,world.basis[2])/depth;
@@ -7758,7 +7791,11 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                      << ",\"frame_timing_dropped\":"<<frame_timing_queue.dropped()
                                      << ",\"frame_timing_write_failed\":"<<(frame_timing_write_failed.load()?"true":"false")
                                      << ",\"xr_status_write_failed\":"<<(xr_status_write_failed.load()?"true":"false")
-                                     << ",\"crosshair\":{\"installed\":" << native_crosshair_installed << ",\"applied\":" << native_crosshair.applied() << ",\"rejected\":" << native_crosshair.rejected() << ",\"failed\":" << (native_crosshair.failed()?"true":"false") << '}'
+                                     << ",\"crosshair\":{\"installed\":" << native_crosshair_installed << ",\"applied\":" << native_crosshair.applied() << ",\"rejected\":" << native_crosshair.rejected() << ",\"failed\":" << (native_crosshair.failed()?"true":"false")
+                                     << ",\"visible\":" << (crosshair_visible_now?"true":"false") << ",\"hidden_draws\":" << d2vr::NativeHudChildDraw::crosshair_hidden_draws.load()
+                                     << ",\"eye_shifts\":" << d2vr::NativeHudChildDraw::crosshair_eye_shifts.load() << ",\"unlayouts\":" << d2vr::NativeHudChildDraw::crosshair_unlayouts.load()
+                                     << ",\"cast_posts\":" << crosshair_cast_posts << ",\"cast_hits\":" << crosshair_cast_hits << ",\"distance_m\":" << crosshair_distance_m
+                                     << ",\"target\":[" << d2vr::NativeHudChildDraw::target_size()[0] << ',' << d2vr::NativeHudChildDraw::target_size()[1] << "],\"stage_x\":" << [&]{float x{};return image_base && read_self(image_base+0x3989eac,&x,sizeof x) && std::isfinite(x)?x:0.f;}() << '}'
                                      << ",\"shot_aim\":{\"installed\":" << native_shot_aim_installed << ",\"calls\":" << native_shot_aim.calls()
                                      << ",\"routed\":" << native_shot_aim.routed() << ",\"rejected\":" << native_shot_aim.rejected() << ",\"last_reason\":" << native_shot_aim.last_reason() << '}'
                                      << ",\"blink_aim\":" << native_blink_aim.status_json()
@@ -9282,8 +9319,8 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
             native_weapon_attachment.install(image_base,&read_self,&game_logic_mask,output/L"native-weapon-attachment.csv");
         }
         if(native_left_aim_requested) native_left_aim.install(image_base,&read_self,&game_logic_mask,&write_self_aim,output/L"native-left-aim.csv",true);
-        if(native_left_aim_requested && controller_aim_requested && crosshair_preference && !fs::exists(root/L"build"/L"no-hand-crosshair")) {
-            try {native_crosshair.install(image_base,&read_self,&write_self_aim,&game_logic_mask,output/L"native-crosshair.csv",true);native_crosshair_installed=true;d2vr::NativeHudChildDraw::eye_live=+[](const d2vr::NativeCrosshair::Binding& b,UINT64 now) noexcept {return native_crosshair.owns(b,now);};}
+        if(native_left_aim_requested && controller_aim_requested) { // installed whatever the setting: Off hides the element (G4); build/no-hand-crosshair is migrated into the saved setting
+            try {native_crosshair.install(image_base,&read_self,&write_self_aim,&game_logic_mask,output/L"native-crosshair.csv",true);native_crosshair_installed=true;native_crosshair.target_size=&d2vr::NativeHudChildDraw::target_size;d2vr::NativeHudChildDraw::eye_shift=&crosshair_eye_shift;d2vr::NativeHudChildDraw::eye_live=+[](const d2vr::NativeCrosshair::Binding& b,UINT64 now) noexcept {return native_crosshair.owns(b,now);};}
             catch(const std::exception& error) {note_recoverable((std::string("Native crosshair disabled: ")+error.what()).c_str());}
         }
         if(native_left_aim_requested && controller_aim_requested && !fs::exists(root/L"build"/L"no-hand-shots") && !fs::exists(root/L"build"/L"fire-probe")) {

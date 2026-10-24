@@ -37,7 +37,7 @@ assert 'const bool mono=mono_view_state.load()==1 && stereo_active.load() && !(a
 assert 'native.size()!=(mono?1u:2u)' in head and 'difference<.001f' in head
 assert 'GameXr::mono_centre_view(*xr_views)' in head
 # eye 0 guarded per-frame sites still run once: the single view is eye 0
-assert 'if(per_frame) { // comfort telemetry' in head and 'if(per_frame && native_crosshair_installed)' in head # plan F task 2: first view of the displayed frame
+assert 'if(per_frame) { // comfort telemetry' in head and 'if(native_crosshair_installed) {' in head # plan F task 2 (G4: the per-eye NDC store runs for every prepared view, the placement itself stays per_frame): first view of the displayed frame
 # both eyes record the same data so rendered_mask_ reaches 3
 rec = between(head, 'if(mono) { // the one image serves both', '} else game_xr->record_rendered_eye(')
 assert 'record_rendered_eye(0,fov,&rendered_orientation,&xr_eye.pose.position)' in rec

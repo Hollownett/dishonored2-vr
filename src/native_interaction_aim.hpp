@@ -669,7 +669,8 @@ class NativeInteractionAim {
     // across a prop the hand targets, from its two sides. 11-13: the hand clamp's leading fingertip, wall tip and exclusion sweeps
     // (hand_clamp.hpp; with slot 0 at most 4 a hand, timed together as clamp_cast_us_, C14). 14: the hand body's free probe (final review P3-1,
     // knob build/hand-body only: posted only while a create or a snap may need it), cast with kHandBodyFreeLayers (WORLD_LOW 0 included).
-    inline static constexpr unsigned weapon_slots=15;
+    // 15: the crosshair's 30 m aim-ray cast (producer_crosshair; the reticle distance, G4).
+    inline static constexpr unsigned weapon_slots=16;
     inline static std::mutex weapon_mutex_;static std::array<std::array<WeaponSegment,weapon_slots>,2> weapon_req_; // defined after the class: clang-cl needs WeaponSegment's member initializers complete
     inline static std::array<std::array<std::optional<WorldTraceHit>,weapon_slots>,2> weapon_hit_{};inline static std::array<std::array<std::uint64_t,weapon_slots>,2> weapon_tick_{},weapon_serial_{};inline static std::array<std::array<std::uint8_t,weapon_slots>,2> weapon_producer_{};
 public:
@@ -677,6 +678,7 @@ public:
     static constexpr unsigned probe_slots=9;   // the finger probes: slots 3-8 (the palm's own and the weapon's come first)
     static constexpr unsigned profile_slot=9;  // and 10
     static constexpr unsigned tip_slot=11,wall_tip_slot=12,exclude_slot=13;   // the hand clamp's (slot 0 is its palm)
+    static constexpr unsigned crosshair_slot=15;
     static constexpr unsigned hand_body_free_slot=14;   // the hand body's create / snap free probe (P3-1)
     static constexpr bool clamp_slot(unsigned slot) {return slot==0 || slot==tip_slot || slot==wall_tip_slot || slot==exclude_slot;}
     inline static std::atomic<std::uint64_t> weapon_casts_{},weapon_cast_ticks_{},weapon_cast_count_{}; // QPC ticks and number of sphere casts run on the game thread
@@ -690,7 +692,7 @@ public:
     // producer: who asked (producer_clamp 0: the hand clamp, the weapon and the finger probes; producer_held: the held object's clamp sweeps; producer_release:
     // the safe-release probes). The slots are shared, the answer carries the producer of the request it answers, and a reader asks for its own: another
     // producer's request that overwrote its own before the game thread copied it is never read as its answer.
-    static constexpr std::uint8_t producer_clamp=0,producer_held=1,producer_release=2;
+    static constexpr std::uint8_t producer_clamp=0,producer_held=1,producer_release=2,producer_crosshair=3;
     static void post_weapon_segment(unsigned side,unsigned slot,Vec3 from,Vec3 to,double radius,std::uintptr_t exclude=0,int exclude_bone=-1,std::uint32_t exclude_handle=0,std::uint8_t producer=producer_clamp) {
         if(side>1 || slot>=weapon_slots) return;std::lock_guard<std::mutex> guard(weapon_mutex_);weapon_req_[side][slot]={from,to,radius,true,exclude,exclude_bone,exclude_handle,producer};
     }

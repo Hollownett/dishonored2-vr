@@ -1919,7 +1919,7 @@ public:
                 }
                 antialiasing_enabled_=*changes.antialiasing;
             }
-            if(!preferences_file_.empty() && (changes.resolution || changes.antialiasing || changes.turning || changes.mirror || changes.sharpness || changes.temporal_aa || changes.hud_percent || changes.controls_hint || changes.player_measurements))
+            if(!preferences_file_.empty() && (changes.resolution || changes.antialiasing || changes.turning || changes.mirror || changes.sharpness || changes.temporal_aa || changes.hud_percent || changes.controls_hint || changes.crosshair || changes.player_measurements))
                 save_preferences(preferences_file_,{settings_.requested(),settings_.antialiasing(),settings_.turning(),settings_.mirror(),settings_.sharpness(),settings_.temporal_aa(),settings_.hud_percent(),settings_.controls_hint(),settings_.player_measurements(),settings_.aa_chosen(),settings_.crosshair()});
             // Includes squeeze: holding the calibration pose must not open the native weapon selector.
             if(changes.consume) {controller_input={};settings_consumed=true;}

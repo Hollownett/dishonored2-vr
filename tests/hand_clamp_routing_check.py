@@ -136,7 +136,7 @@ def check(dxgi: str, aim: str) -> None:
     assert '~PendingLeftAim(){flush();}' in s and 'try{publish(left);}catch(...){}' in s
     # The reticle projects the exact finalized float ray (guarded origin included), flushed after the hands and before the projection.
     cross = between(s, 'pending_publish.flush();//completeguardedfloatraybeforereticleprojection', 'native_crosshair.publish(')
-    assert 'shared_aim_ray->current(' in cross and 'constautotarget=shared_aim_ray->target(30.f);' in cross
+    assert 'aim->current(' in cross and 'constautotarget=aim->target(crosshair_distance_m);' in cross and 'crosshair_receipt=shared_aim_ray;' in s # G4: the cast distance (30 m without a hit) replaces the fixed 30 m
     assert publish.index(origin) < publish.index('shared_aim_ray=receipt;') and 'hand.basis=' not in cross
     # Ruling 1 (snap-back): the released guard reads last frame's slot 0 and tip-slot answers before the update, and after it posts its
     # eye -> hand sweep on the tip slot (unused by a released side); the shot origin uses it while the side is released.
@@ -217,7 +217,7 @@ def check(dxgi: str, aim: str) -> None:
 
     # native_interaction_aim.hpp: slots, exclusion mapping, timing.
     a = compact(aim)
-    for need in ('inlinestaticconstexprunsignedweapon_slots=15;', 'staticconstexprunsignedtip_slot=11,wall_tip_slot=12,exclude_slot=13;', 'staticconstexprunsignedhand_body_free_slot=14;',
+    for need in ('inlinestaticconstexprunsignedweapon_slots=16;', 'staticconstexprunsignedtip_slot=11,wall_tip_slot=12,exclude_slot=13;', 'staticconstexprunsignedhand_body_free_slot=14;',
                  'returnslot==0||slot==tip_slot||slot==wall_tip_slot||slot==exclude_slot;',
                  'weapon_req_[side][slot]={from,to,radius,true,exclude,exclude_bone,exclude_handle,producer};'):
         assert need in a, need
@@ -275,7 +275,7 @@ if __name__ == '__main__':
         ('if(clamp_epoch!=budget_epoch || !clamp_live) {hand_clamp_budget.reset_window();', 'if(clamp_epoch!=budget_epoch) {'),
         ('if(d2vr::clamp_forgets_on(game_logic_mask())) forget_hand_clamp();', ''),
         ('    hand_clamp.reset(0);hand_clamp.reset(1);clamp_hold.clear(0);clamp_hold.clear(1);clamp_exclude={};', '    clamp_hold.clear(0);clamp_hold.clear(1);clamp_exclude={};'),
-        ('const auto target=shared_aim_ray->target(30.f);', 'const auto target=world.position;'),
+        ('const auto target=aim->target(crosshair_distance_m);', 'const auto target=world.position;'),
         ('if(!aim_for_shots) {native_shot_aim.clear();return;}', ''),
         ('if(gate.reticle) reticle_left=left;', ''),
         ('if(gate.shots) ranged_left=left;', 'ranged_left=left;'),
@@ -292,7 +292,7 @@ if __name__ == '__main__':
         ('clamp_wall_tip{d2vr::default_clamp_wall_tip(),d2vr::default_clamp_wall_tip()};', 'clamp_wall_tip{};'),
     )
     aim_mutations = (
-        ('weapon_slots=15;', 'weapon_slots=12;'),
+        ('weapon_slots=16;', 'weapon_slots=12;'),
         ('if(clamp_slot(slot)) {clamp_ticks+=', 'if(slot==0) {clamp_ticks+='),
         ('hits[side][slot]=cast(&*exclusion);', 'hits[side][slot]=cast(nullptr);'),
         ('kWorldOccluderRequired,exclusion,clamp_slot(slot));', 'kWorldOccluderRequired,exclusion);'),

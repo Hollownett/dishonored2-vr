@@ -11,14 +11,14 @@ alignas(8) std::array<std::byte,0xe0> fixture_node{};
 alignas(8) std::array<std::byte,0x100> fixture_iggy{};
 const char fixture_path[]="ui/hud.iggy";
 unsigned originals{},before{},after{},begins{},ends{};
-float* fixture_matrix{};bool changed{},capture_enabled{},eye_owner_ok=true;float expect_x=-1.f,glyph_factor=-1.f;
+float eye_dx{},eye_dy{};float* fixture_matrix{};bool changed{},capture_enabled{},eye_owner_ok=true;float expect_x=-1.f,glyph_factor=-1.f;
 d2vr::NativeHudChildKind last_kind{};UINT64 last_epoch{},last_tick{};std::uintptr_t last_owner{};bool last_talk_offer{},last_talk_glyph{};
 unsigned read_count{},eye_live_calls{};
 bool read(std::uintptr_t at,void* out,std::size_t size){++read_count;SIZE_T n{};return ReadProcessMemory(GetCurrentProcess(),reinterpret_cast<void*>(at),out,size,&n) && n==size;}
 std::uint32_t __fastcall original(void* iggy,float* matrix,void* node,void* aux,void* p5,void* p6,std::uint32_t clip,float depth){
     ++originals;assert(iggy==fixture_iggy.data() && node==fixture_node.data() && aux==reinterpret_cast<void*>(1) && p5==reinterpret_cast<void*>(2) && p6==reinterpret_cast<void*>(3) && clip==123 && depth==4.5f);
     if(glyph_factor>=0.f) {
-        assert(matrix!=fixture_matrix && matrix[4]==fixture_matrix[4] && matrix[5]==fixture_matrix[5]);
+        assert(matrix!=fixture_matrix && std::fabs(matrix[4]-(fixture_matrix[4]+eye_dx))<1e-4f && std::fabs(matrix[5]-(fixture_matrix[5]+eye_dy))<1e-4f);
         for(unsigned i=0;i<4;++i)assert(std::fabs(matrix[i]-fixture_matrix[i]*glyph_factor)<1e-6f);
     }
     else if(changed)assert(matrix!=fixture_matrix && matrix[4]==103);
@@ -299,6 +299,38 @@ int main(){
         NativeHudChildDraw::clear_eye();NativeHudChildDraw::eye_node=node;glyph_factor=-1.f;live_before=eye_live_calls;drawn(2);assert(eye_live_calls==live_before);
         assert(NativeHudChildDraw::publish_eye(node,eye_binding));
         NativeHudChildDraw::begin_frame(0);glyph_factor=-1.f;
+    }
+    {   // G4: the in-game switch hides the eye node live; paired stereo's second UI draw is shifted by the per-eye callback
+        assert(NativeHudChildDraw::publish_eye(node,eye_binding));
+        NativeHudChildDraw::hud_scale=.65f;
+        // crosshair_hidden_matrix_zero_linear
+        {std::array<float,6> m{1,.2f,-.3f,1,100,200};assert(native_crosshair_hide(m) && m[0]==0.f && m[1]==0.f && m[2]==0.f && m[3]==0.f && m[4]==100.f && m[5]==200.f);}
+        // layout_undo_is_identity: the draw path compensates the HUD layout scale itself, so placement must not pre-scale
+        for(const float k:{.55f,.65f,.85f}) {
+            const std::array<float,6> in{.9f,.1f,-.2f,1.1f,310.f,-140.f};auto m=in;const std::array<float,2> centre{960.f,540.f};
+            assert(native_hud_panel_relayout(m,centre,k) && native_crosshair_unlayout(m,k,centre));
+            for(unsigned i=0;i<6;++i)assert(std::fabs(m[i]-in[i])<1e-4f);
+        }
+        // crosshair_toggle_live
+        NativeHudChildDraw::begin_frame(40);
+        NativeHudChildDraw::crosshair_hidden=true;glyph_factor=0.f;assert(call()==456);
+        const auto hidden_draws=NativeHudChildDraw::crosshair_hidden_draws.load();assert(hidden_draws>=1);
+        NativeHudChildDraw::crosshair_hidden=false;glyph_factor=.65f*.65f;assert(call()==456);
+        assert(NativeHudChildDraw::crosshair_hidden_draws.load()==hidden_draws);
+        // second_eye_draw_shifted
+        NativeHudChildDraw::eye_shift=+[](unsigned index) noexcept->std::optional<std::array<float,2>> {
+            return index==1?std::optional<std::array<float,2>>(std::array<float,2>{30.f,15.f}):std::nullopt;};
+        const auto shifts=NativeHudChildDraw::crosshair_eye_shifts.load();
+        NativeHudChildDraw::begin_frame(41);
+        eye_dx=0.f;eye_dy=0.f;assert(call()==456);
+        eye_dx=30.f;eye_dy=15.f;assert(call()==456);
+        assert(NativeHudChildDraw::crosshair_eye_shifts.load()==shifts+1);
+        NativeHudChildDraw::begin_frame(42);
+        eye_dx=0.f;eye_dy=0.f;assert(call()==456 && NativeHudChildDraw::crosshair_eye_shifts.load()==shifts+1); // a new frame's first draw is unshifted
+        // target_size: the movie root fits 1920x1080 by width and centres it
+        NativeHudChildDraw::publish_root({1.43f,0,0,1.43f,0,706});
+        {const auto size=NativeHudChildDraw::target_size();assert(std::fabs(size[0]-1920*1.43f)<1e-2f && std::fabs(size[1]-(1080*1.43f+2*706))<1e-2f);}
+        NativeHudChildDraw::eye_shift=nullptr;NativeHudChildDraw::begin_frame(0);glyph_factor=-1.f;eye_dx=eye_dy=0.f;
     }
     std::memcpy(fixture_file.data()+0x1608,&replaced_iggy,8);assert(call()==456);
     std::memcpy(fixture_file.data()+0x1608,&iggy,8);

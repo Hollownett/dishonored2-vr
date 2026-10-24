@@ -129,7 +129,7 @@ inline std::vector<unsigned char> settings_panel_image(const VrSettings& setting
     else if(turning.mode==TurnControl::Mode::smooth) turn<<L"Smooth "<<turning.smooth_degrees_per_second<<L" deg/s";
     else turn<<L"Native game";
     const auto hud_fraction=(settings.hud_percent()-55)/45.;
-    const std::array<Row,10> rows{{
+    const std::array<Row,settings_row_count> rows{{
         {L"Resolution",scale.str(),(settings.requested()-.5)/1.5,L"Sets how many pixels each eye renders. Higher is sharper but slower; the mod caps it to what the GPU can hold. Now "+size.str()+L"."},
         split(settings.temporal_aa_text(),-1,settings.dlss_available()?
             L"Smooths shimmering edges over time. Game TAA is the original; FSR Native and DLAA use full resolution; Quality and Balanced render fewer pixels and upscale. DLAA and DLSS Quality are powered by NVIDIA DLSS. The label shows the active backend.":
@@ -139,6 +139,7 @@ inline std::vector<unsigned char> settings_panel_image(const VrSettings& setting
         split(settings.sharpness_text(),settings.sharpness(),L"Contrast sharpening applied after anti-aliasing. Raise it if the image looks soft, lower it if edges crawl."),
         split(settings.hud_text(),hud_fraction,L"Scales the HUD and on-screen prompts shown in VR. 55% sits in the centre of your view; 100% keeps the original game layout."),
         split(settings.controls_hint_text(),-1,L"Shows controller button hints in the world during play. Turn it off once you know the controls."),
+        split(settings.crosshair_text(),-1,L"Shows the game's crosshair where your gun or power aims. Off hides it."),
         {L"Turning",turn.str(),-1,L"Native game uses the original stick turn. Snap rotates in fixed steps and is comfortable; Smooth turns continuously at a set speed."},
         {L"Calibrate avatar",L"",-1,L"Measure shoulders, then arm reach. Enter chest width separately in Measurements. Recenter re-aligns the view to where you face now."},
         {L"Back to game menu",L"",-1,L"Test unlock (left): 100 runes for every power, infinite coins and every Black Market item. Back (right) closes this menu."}}};
@@ -255,13 +256,13 @@ inline std::vector<unsigned char> settings_panel_image(const VrSettings& setting
     } else {
         text(L"VR Settings",24,2,400,58,44,rgb(140,144,162),1,DT_LEFT|DT_VCENTER|DT_SINGLELINE);
         if(divider) put(divider,20,50,420,62,.9);
-        for(int i=0;i<10;++i) {
-            const int top=64+36*i,bot=top+32;const auto& r=rows[static_cast<std::size_t>(i)];const bool sel=i==selected;
+        for(int i=0;i<settings_row_count;++i) {
+            const int top=settings_row_top+settings_row_pitch*i,bot=top+settings_row_height;const auto& r=rows[static_cast<std::size_t>(i)];const bool sel=i==selected;
             if(sel && brush) {GdiFlush();blit_art_band(px,W,H,*brush,36,12.*S,(top-3.)*S,628.*S,(bot+3.)*S);}
             else if(sel) band(18,top-2,622,bot+2,static_cast<unsigned>(i)+3);
             else {fill(20,top,620,bot,rgb(21,22,31));fill(20,top,620,top+1,rgb(44,46,58));fill(20,bot-1,620,bot,rgb(15,16,23));}
             const COLORREF label=sel?ink:rgb(206,210,220);
-            if(i==8) {   // two actions share the row: calibrate (left) and recenter (right)
+            if(i==9) {   // two actions share the row: calibrate (left) and recenter (right)
                 const bool fit_notice=settings.calibration_required() || settings.calibration_runtime_notice();
                 text(L"Calibrate avatar",24,top,316,fit_notice?top+22:bot,17,label);
                 if(fit_notice) {
@@ -273,14 +274,14 @@ inline std::vector<unsigned char> settings_panel_image(const VrSettings& setting
                 text(L"Recenter view",324,top,616,bot,17,label);
                 continue;
             }
-            if(i==9) {   // test unlock (left) and close (right)
+            if(i==10) {   // test unlock (left) and close (right)
                 text(L"Test: unlock all",24,top,316,bot,17,label);
                 line(320,top+5,320,bot-5,.8,sel?rgb(120,124,130):rgb(56,58,72));
                 text(r.name,324,top,616,bot,17,label);continue;
             }
             text(r.name,34,top,262,bot,17,label,0,DT_LEFT|DT_VCENTER|DT_SINGLELINE);
             const COLORREF arrow=sel?rgb(246,248,248):rgb(176,180,192),edge=sel?rgb(50,52,64):rgb(70,72,86);
-            const int cy=top+16;
+            const int cy=top+15;
             const COLORREF value_colour=sel && frame_art?ink:white; // the game's frame is open: dark ink on the brush stroke
             if(arrow_l && arrow_r) {const std::uint32_t t=sel?0x181a24u:0xffffffu; // dark ink on the brush stroke
                 put(arrow_l,270,cy-10,284,cy+10,1,true,t);put(arrow_r,602,cy-10,616,cy+10,1,true,t);}
@@ -307,7 +308,7 @@ inline std::vector<unsigned char> settings_panel_image(const VrSettings& setting
         }
         // Description plate for the selected row, titled with the setting's name.
         fill(20,428,620,500,rgb(17,18,26));fill(20,428,620,429,rgb(52,54,68));fill(20,499,620,500,rgb(10,11,16));
-        const auto& cur=rows[static_cast<std::size_t>(std::min(selected,9))];
+        const auto& cur=rows[static_cast<std::size_t>(std::min(selected,settings_row_count-1))];
         text(cur.name,24,430,616,458,22,rgb(220,224,232),1);
         if(divider) put(divider,170,452,470,462,.9);else line(180,456,460,456,.7,rgb(70,74,92));
         text(cur.help,36,459,604,498,13,rgb(176,181,196),0,DT_LEFT|DT_TOP|DT_WORDBREAK);

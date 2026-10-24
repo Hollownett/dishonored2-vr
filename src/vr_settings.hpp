@@ -22,6 +22,8 @@ inline std::optional<PanelPointer> panel_pointer(const TrackedPose& aim,const Tr
     PanelPointer p{hit.x/width+.5,.5-hit.y/height};
     return p.u>=0 && p.u<=1 && p.v>=0 && p.v<=1?std::optional<PanelPointer>(p):std::nullopt;
 }
+// Settings panel rows (settings_panel_image.hpp draws them, the pointer hit test reads them): 640x560 bitmap, row i at settings_row_top+settings_row_pitch*i.
+constexpr int settings_row_top=64,settings_row_pitch=33,settings_row_height=30,settings_row_count=11;
 class VrSettings {
     bool previous_y_{},previous_a_{},previous_b_{},previous_x_{},previous_trigger_{},previous_left_trigger_{},stick_held_{};
     bool controls_valid_{};
@@ -92,7 +94,7 @@ public:
     }
     struct PalmOffsetChange {unsigned side{};PalmOffset value{};};
     struct Changes {std::optional<double> resolution;std::optional<bool> antialiasing;std::optional<int> temporal_aa;std::optional<TurnControl::Config> turning;
-                   std::optional<MirrorMode> mirror;std::optional<double> sharpness;std::optional<int> hud_percent;std::optional<bool> controls_hint;
+                   std::optional<MirrorMode> mirror;std::optional<double> sharpness;std::optional<int> hud_percent;std::optional<bool> controls_hint;std::optional<bool> crosshair;
                    bool recenter{},consume{},opened{},calibrate{},player_measurements{},test_unlock{};
                    std::optional<PalmOffsetChange> palm_offset;};
     void initialize(double scale,bool aa,TurnControl::Config turning={},MirrorMode mirror=MirrorMode::right_eye,double sharpness=.5,int temporal_aa=2,
@@ -219,6 +221,7 @@ public:
         hud_percent_=choices[(current+direction+n)%n];
     }
     const wchar_t* controls_hint_text() const noexcept {return controls_hint_?L"Controls hint: On":L"Controls hint: Off";}
+    const wchar_t* crosshair_text() const noexcept {return crosshair_?L"Crosshair: On":L"Crosshair: Off";}
     const wchar_t* mirror_text() const noexcept {
         switch(mirror_) {
             case MirrorMode::right_eye:return L"Monitor view: Right eye";
@@ -244,7 +247,7 @@ public:
     bool gameplay_panel_open() const noexcept {return gameplay_open_ && open_;}
     static constexpr double latch_timeout_s=1.5;
     // The game's own options page (vr_settings_native.hpp) sets values directly; the panel shows only calibration then.
-    void open_calibration_from_native() noexcept {open_=calibration_page_=true;measurements_page_=false;leave_hand_fit();selected_=8;controls_valid_=false;stick_held_=false;native_calibration_=true;}
+    void open_calibration_from_native() noexcept {open_=calibration_page_=true;measurements_page_=false;leave_hand_fit();selected_=9;controls_valid_=false;stick_held_=false;native_calibration_=true;}
     void set_requested(double v) noexcept {requested_=std::clamp(v,.5,2.);}
     void set_antialiasing(bool v) noexcept {aa_=v;}
     void set_temporal_aa(int v) noexcept {temporal_aa_=std::clamp(v,0,8);aa_chosen_=true;}
@@ -292,7 +295,7 @@ public:
         const bool left_trigger=in.left_trigger>.55f,left_click=left_trigger&&!previous_left_trigger_;
         previous_y_=in.y;previous_a_=in.a;previous_b_=in.b;previous_x_=in.x;previous_trigger_=trigger;previous_left_trigger_=left_trigger;
         if(!gameplay && calibration_runtime_==AvatarFitRuntimeStatus::recalibration_required && !calibration_prompted_) {
-            calibration_prompted_=true;open_=calibration_page_=true;selected_=8;
+            calibration_prompted_=true;open_=calibration_page_=true;selected_=9;
             out.opened=out.consume=true;return out;
         }
         if(open_ && calibration_page_ && hand_fit_page_ && y) {out.consume=true;return out;} // Y has no meaning on the hand-fit page
@@ -355,14 +358,14 @@ public:
         if(magnitude<.3) stick_held_=false;
         if(magnitude>.65 && !stick_held_) {
             stick_held_=true;
-            if(std::abs(in.move_y)>std::abs(in.move_x)) selected_=static_cast<unsigned>((static_cast<int>(selected_)+(in.move_y>0?9:1))%10);
+            if(std::abs(in.move_y)>std::abs(in.move_x)) selected_=static_cast<unsigned>((static_cast<int>(selected_)+(in.move_y>0?settings_row_count-1:1))%settings_row_count);
             else horizontal=in.move_x>0?1:-1;
         }
         if(pointer && click) {
             const auto& p=*pointer;
-            // Rows mirror settings_panel_image.hpp: 640x560 panel, row i at y=64+36i, 32 px tall.
-            const double py=p.v*560-64;const int row=py<0?-1:static_cast<int>(py/36);
-            if(row>=0 && row<10 && py-36*row<=32) switch(row) {
+            // Rows mirror settings_panel_image.hpp: 640x560 panel, row i at y=settings_row_top+settings_row_pitch*i, settings_row_height px tall.
+            const double py=p.v*560-settings_row_top;const int row=py<0?-1:static_cast<int>(py/settings_row_pitch);
+            if(row>=0 && row<settings_row_count && py-settings_row_pitch*row<=settings_row_height) switch(row) {
                 case 0:selected_=0;horizontal=p.u<.5?-1:1;break;
                 case 1:selected_=1;cycle_temporal_aa(1);out.temporal_aa=temporal_aa_;break;
                 case 2:selected_=2;aa_=!aa_;out.antialiasing=aa_;break;
@@ -370,9 +373,10 @@ public:
                 case 4:selected_=4;cycle_sharpness(1);out.sharpness=sharpness_;break;
                 case 5:selected_=5;cycle_hud(1);out.hud_percent=hud_percent_;break;
                 case 6:selected_=6;controls_hint_=!controls_hint_;out.controls_hint=controls_hint_;break;
-                case 7:selected_=7;cycle_turning(1);out.turning=turning_;break;
-                case 8:selected_=8;if(p.u<.5) {calibration_page_=true;out.calibrate=true;} else out.recenter=true;break;
-                default:selected_=9;if(p.u<.5) out.test_unlock=true;else open_=false;break; // test unlock (left) | close (right)
+                case 7:selected_=7;crosshair_=!crosshair_;out.crosshair=crosshair_;break;
+                case 8:selected_=8;cycle_turning(1);out.turning=turning_;break;
+                case 9:selected_=9;if(p.u<.5) {calibration_page_=true;out.calibrate=true;} else out.recenter=true;break;
+                default:selected_=10;if(p.u<.5) out.test_unlock=true;else open_=false;break; // test unlock (left) | close (right)
             }
         } else if(selected_==0 && horizontal) {
             // Handled below; A does not silently raise resolution.
@@ -382,11 +386,12 @@ public:
         else if(selected_==4 && (horizontal || a)) {cycle_sharpness(horizontal?horizontal:1);out.sharpness=sharpness_;}
         else if(selected_==5 && (horizontal || a)) {cycle_hud(horizontal?horizontal:1);out.hud_percent=hud_percent_;}
         else if(selected_==6 && (horizontal || a)) {controls_hint_=!controls_hint_;out.controls_hint=controls_hint_;}
-        else if(selected_==7 && (horizontal || a)) {cycle_turning(horizontal?horizontal:1);out.turning=turning_;}
-        else if(selected_==8 && a) {calibration_page_=true;out.calibrate=true;}
-        else if(selected_==8 && horizontal) {if(horizontal<0) {calibration_page_=true;out.calibrate=true;} else out.recenter=true;}
-        else if(selected_==9 && horizontal<0) out.test_unlock=true;
-        else if(selected_==9 && a) open_=false;
+        else if(selected_==7 && (horizontal || a)) {crosshair_=!crosshair_;out.crosshair=crosshair_;}
+        else if(selected_==8 && (horizontal || a)) {cycle_turning(horizontal?horizontal:1);out.turning=turning_;}
+        else if(selected_==9 && a) {calibration_page_=true;out.calibrate=true;}
+        else if(selected_==9 && horizontal) {if(horizontal<0) {calibration_page_=true;out.calibrate=true;} else out.recenter=true;}
+        else if(selected_==10 && horizontal<0) out.test_unlock=true;
+        else if(selected_==10 && a) open_=false;
         if(selected_==0 && horizontal) {
             const auto next=std::clamp(std::round((requested_+horizontal*.1)*10)/10,.5,2.);
             if(next!=requested_) {requested_=next;out.resolution=next;}

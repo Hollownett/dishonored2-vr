@@ -28,6 +28,21 @@ namespace d2vr {
 inline std::array<float,2> crosshair_stage_position(float ndc_x,float ndc_y,float stage_x,float stage_y) {
     return {0.5f*ndc_x*stage_x,-0.5f*ndc_y*stage_y};
 }
+// The HUD movie is width-fitted and centred in the eye target (native_hud_stage_fit), so the visible stage is stage_x wide and
+// stage_x*eye_h/eye_w tall. An unknown or non-finite eye size falls back to the 16:9 stage the engine formula assumes.
+inline std::array<float,2> crosshair_fitted_stage_position(float ndc_x,float ndc_y,float stage_x,float eye_w,float eye_h) noexcept {
+    if(!(eye_w>0.f) || !(eye_h>0.f) || !std::isfinite(eye_w) || !std::isfinite(eye_h)) return crosshair_stage_position(ndc_x,ndc_y,stage_x,stage_x*9.f/16.f);
+    return {0.5f*ndc_x*stage_x,-0.5f*ndc_y*stage_x*eye_h/eye_w};
+}
+// Paired stereo draws the UI once per eye: the second draw moves by (eye-placed) stage pixels, times the movie root scale.
+inline std::array<float,2> crosshair_eye_shift_px(std::array<float,2> stage_eye,std::array<float,2> stage_placed,float root_s) noexcept {
+    return {(stage_eye[0]-stage_placed[0])*root_s,(stage_eye[1]-stage_placed[1])*root_s};
+}
+// Distance to the reticle target: the weapon-segment cast's hit fraction along `length` (clamped to .5 m), else `length`.
+inline float crosshair_distance(std::optional<double> hit_fraction,double length=30.) noexcept {
+    if(!hit_fraction || !std::isfinite(*hit_fraction)) return static_cast<float>(length);
+    return static_cast<float>(std::clamp(*hit_fraction*length,.5,length));
+}
 // Row-major with the column-vector convention game_stereo.hpp reads the native
 // projection with, so clip = M * (x,y,z,1). Returns nothing for a point on or
 // behind the eye plane (w <= 0), where the divide mirrors the reticle.
@@ -89,7 +104,8 @@ public:
         std::uintptr_t element{},movie{},iggy{},list{};std::uint32_t count{};std::uint64_t tick{};
         std::array<std::byte,0x28> record{};
     };
-    std::atomic<float> ndc_limit{1.f};
+    using TargetSize=std::array<float,2> (*)() noexcept; // the eye target size in pixels ({0,0} unknown); NativeHudChildDraw::target_size
+    std::atomic<TargetSize> target_size{};
 private:
     inline static constexpr std::uintptr_t movie_offset=0x98,object_offset=0x3a8;
     // arkIggyAS3Object layout (REA): +0x18 idList data pointer, +0x20 count in the low 24 bits. The setter writes through
@@ -187,13 +203,10 @@ private:
                std::isfinite(stage_x) && std::isfinite(stage_y) && stage_x>0 && stage_y>0 && stage_x<1e6f && stage_y<1e6f &&
                std::isfinite(publication.x) && std::isfinite(publication.y)) {
                 // A hand aimed off the screen edge parks the reticle on the edge
-                // rather than dropping the whole correction for that frame.
-                // ndc_limit>1 when the HUD is drawn shrunk about the centre (native_hud_rect.hpp):
-                // the caller pre-divides the aim point so the drawn reticle still lands on it.
-                const float requested_limit=ndc_limit.load(std::memory_order_relaxed);
-                const float limit=std::isfinite(requested_limit) && requested_limit>0 ? requested_limit : 1.f;
-                const auto stage=crosshair_stage_position(std::clamp(publication.x,-limit,limit),
-                    std::clamp(publication.y,-limit,limit),stage_x,stage_y);
+                // rather than dropping the whole correction for that frame. The HUD scale is compensated once,
+                // by native_crosshair_unlayout in the draw path, so nothing is pre-scaled here.
+                const auto size=target_size.load(std::memory_order_acquire);const auto eye=size?size():std::array<float,2>{};
+                const auto stage=crosshair_fitted_stage_position(std::clamp(publication.x,-1.f,1.f),std::clamp(publication.y,-1.f,1.f),stage_x,eye[0],eye[1]);
                 // The setter takes the ADDRESS of the cached object field and of the member handle fields.
                 // SEH-guarded: the AS3 object can be torn down under the engine during load/death, and catch(...) does not see an AV.
                 auto write_both=[&]{
