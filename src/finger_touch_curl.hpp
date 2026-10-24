@@ -1,0 +1,83 @@
+#pragma once
+#include "finger_ik.hpp"
+#include <algorithm>
+#include <array>
+#include <cmath>
+#include <cstdlib>
+#include <optional>
+#include <sstream>
+#include <stdexcept>
+#include <string>
+
+// Bonelab's finger curl from the controller's touch sensors (visual only: no intent reads it). The index rests at touch_rest while the trigger
+// is touched and adds the pull, slewed at index_slew; middle/ring/pinky follow the grip as grip*1.3-0.1; the thumb closes on any thumb
+// sensor, slewed at thumb_slew; every finger then steps toward that by clamp01(smooth_rate*dt); a held hand keeps held_floor at least.
+// A runtime without touch paths (or sensors silent for touch_silent_seconds while the trigger or grip move) gets today's mapping
+// (rig::finger_wants) untouched. Pure: no engine, no OpenXR. Curl order: thumb, index, middle, ring, pinky.
+namespace d2vr::rig {
+struct FingerTouchParams {
+    float touch_rest=.3f,index_slew=10.f,thumb_slew=25.f,smooth_rate=20.f,held_floor=.6f;
+    // "key=value" lines (blank lines and # comments allowed); any bad line -> nullopt; values clamped to sane ranges.
+    static std::optional<FingerTouchParams> parse(const std::string& text) {
+        FingerTouchParams p;std::istringstream in(text);std::string line;
+        const auto trim=[](std::string s) {const char* w=" \t\r\n";const auto a=s.find_first_not_of(w);if(a==std::string::npos) return std::string();return s.substr(a,s.find_last_not_of(w)-a+1);};
+        while(std::getline(in,line)) {
+            line=trim(line);if(line.empty() || line[0]=='#') continue;
+            const auto eq=line.find('=');if(eq==std::string::npos) return std::nullopt;
+            const auto key=trim(line.substr(0,eq)),text_value=trim(line.substr(eq+1));
+            if(text_value.empty()) return std::nullopt;
+            char* end=nullptr;const float v=std::strtof(text_value.c_str(),&end);
+            if(end!=text_value.c_str()+text_value.size() || !std::isfinite(v)) return std::nullopt;
+            if(key=="touch_rest") p.touch_rest=std::clamp(v,0.f,1.f);
+            else if(key=="index_slew") p.index_slew=std::clamp(v,1.f,100.f);
+            else if(key=="thumb_slew") p.thumb_slew=std::clamp(v,1.f,100.f);
+            else if(key=="smooth_rate") p.smooth_rate=std::clamp(v,1.f,100.f);
+            else if(key=="held_floor") p.held_floor=std::clamp(v,0.f,1.f);
+            else return std::nullopt;
+        }
+        return p;
+    }
+};
+struct FingerTouchInput {float trigger{},grip{};bool trigger_touch{},thumb_touch{};bool touch_available{};};
+enum class CurlMapping {touch,legacy};
+struct FingerTouchOutput {std::array<float,5> curl{};CurlMapping mapping{CurlMapping::legacy};bool floor_active{};bool touch_silent{};};
+inline constexpr double touch_silent_seconds=10.;
+inline constexpr float touch_in_use=.1f,touch_moved=.01f; // a trigger or grip above/changing by this counts as the hand using the controller
+class FingerTouchCurl {
+public:
+    FingerTouchOutput update(unsigned side,const FingerTouchInput& in,double dt,bool held,const FingerTouchParams& p) {
+        if(side>1) throw std::invalid_argument("Invalid finger touch side");
+        auto& s=side_[side];
+        const float trigger=unit(in.trigger),grip=unit(in.grip);
+        if(!in.touch_available) {s=State{};s.last.curl=finger_wants(held,grip,trigger);return s.last;} // legacy: finger_wants verbatim, no state
+        if(!std::isfinite(dt) || dt<=0) return s.last;
+        const float step=static_cast<float>(dt);
+        // Bonelab targets, slewed: the index's touch rest and the thumb's open/shut.
+        s.sim=toward(s.sim,in.trigger_touch?p.touch_rest:0.f,p.index_slew*step);
+        s.thumb=toward(s.thumb,in.thumb_touch?1.f:0.f,p.thumb_slew*step);
+        const float grip_curl=std::clamp(grip*1.3f-.1f,0.f,1.f);
+        const std::array<float,5> target{s.thumb,std::min(1.f,trigger+s.sim),grip_curl,grip_curl,grip_curl};
+        const float k=std::clamp(p.smooth_rate*step,0.f,1.f);
+        for(unsigned f=0;f<5;++f) s.smooth[f]=std::clamp(s.smooth[f]+(target[f]-s.smooth[f])*k,0.f,1.f);
+        // Silent sensors: the timer runs only while the trigger or grip is in use or moving, and any touch resets it.
+        const bool active=trigger>touch_in_use || grip>touch_in_use || std::abs(trigger-s.last_trigger)>touch_moved || std::abs(grip-s.last_grip)>touch_moved;
+        s.last_trigger=trigger;s.last_grip=grip;
+        if(in.trigger_touch || in.thumb_touch) s.silent_time=0;
+        else if(active) s.silent_time+=dt;
+        FingerTouchOutput out;
+        out.touch_silent=s.silent_time>=touch_silent_seconds;
+        if(out.touch_silent) {out.mapping=CurlMapping::legacy;out.curl=finger_wants(held,grip,trigger);}
+        else {
+            out.mapping=CurlMapping::touch;out.curl=s.smooth;
+            if(held) {out.floor_active=true;for(auto& c:out.curl) c=std::max(c,p.held_floor);}
+        }
+        s.last=out;return out;
+    }
+    void reset(unsigned side) {if(side>1) throw std::invalid_argument("Invalid finger touch side");side_[side]=State{};}
+private:
+    struct State {float sim{},thumb{},last_trigger{},last_grip{};std::array<float,5> smooth{};double silent_time{};FingerTouchOutput last{};};
+    static float unit(float v) {return std::isfinite(v)?std::clamp(v,0.f,1.f):0.f;}
+    static float toward(float v,float target,float max_move) {return v+std::clamp(target-v,-max_move,max_move);}
+    std::array<State,2> side_{};
+};
+}
