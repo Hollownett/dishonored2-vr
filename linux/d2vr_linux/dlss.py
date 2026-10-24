@@ -85,11 +85,27 @@ def wine_path(p: Path) -> str:
     return "Z:" + str(p).replace("/", "\\")
 
 
+def _knob_target_exists(knob: Path) -> bool:
+    """True unless the knob names a Z:\\ file or folder that is gone (a stale knob may be replaced; anything else is the user's)."""
+    try:
+        text = knob.read_text(encoding="utf-8", errors="replace").split("\n")[0].strip().strip("\"'").strip()
+    except OSError:
+        return True
+    if not text:
+        return False
+    if not text[:3].upper() == "Z:\\":
+        return True  # another drive or a relative path: cannot judge, leave it
+    target = Path("/" + text[3:].replace("\\", "/"))
+    if target.name.lower() != DLL_NAME:
+        target = target / DLL_NAME
+    return target.exists()
+
+
 def find_and_configure(mod_home: Path, libs):
-    """Returns ("exists", None) when the mod home already has a provider or knob, (dll, game) after writing the knob, else (None, None)."""
+    """Returns ("exists", None) when the mod home already has a provider or knob, (dll, game) after writing the knob (a knob whose Z:\\ target is missing counts as stale and is replaced), else (None, None)."""
     mod_home = Path(mod_home)
     knob = mod_home / "build" / KNOB
-    if (mod_home / DLL_NAME).exists() or knob.exists():
+    if (mod_home / DLL_NAME).exists() or (knob.exists() and _knob_target_exists(knob)):
         return "exists", None
     dll = best(candidates(libs))
     if dll is None:

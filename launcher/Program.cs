@@ -165,7 +165,7 @@ sealed class MainForm : Form
                 catch (Exception ex) { Append(log, "Features not applied: " + ex.Message, Ui.Bad); }
             artState = Ui.Art.Present || noArt ? null : Env.FindGameDir() == null ? "needs Dishonored 2 installed" : "not imported yet";
             await RefreshChecks(); LoadSettings();
-            _ = AutoFindDlss();
+            if (shotFile == null && !exitAfterShot) _ = AutoFindDlss();  // review runs must not write a knob into a real mod home
             // First start (or art missing): import it from the user's own install; the calibration poses follow, and are
             // rendered alone when only they are missing. Review screenshots wait for it.
             var import = artState == "not imported yet" ? ImportArt(false)
@@ -182,7 +182,7 @@ sealed class MainForm : Form
             if (launching && MessageBox.Show("VR is running from this launcher. Closing it leaves VR running (reopen the launcher to stop it), " +
                 "but this session's launch record and run archive will not be written.\nClose anyway?", Text, MessageBoxButtons.YesNo) != DialogResult.Yes) ev.Cancel = true;
         };
-        FormClosed += (_, _) => { poll.Dispose(); Ui.Art.Dispose(); Ui.Backdrop?.Dispose(); Ui.Backdrop = null; };
+        FormClosed += (_, _) => { dlssCts?.Cancel(); poll.Dispose(); Ui.Art.Dispose(); Ui.Backdrop?.Dispose(); Ui.Backdrop = null; };
     }
 
     // ---------- window, DPI, art
@@ -366,14 +366,15 @@ sealed class MainForm : Form
     }
 
     /// <summary>At start, only when no nvngx_dlss.dll resolves and an NVIDIA driver is present: look through the user's own Steam games (off the UI thread, 5 s budget) and record the best one. Manual picking still wins.</summary>
+    CancellationTokenSource? dlssCts;
     async Task AutoFindDlss()
     {
         try
         {
             if (DlssProvider.Resolve(env.Root) != null || !DlssProvider.NvidiaDriverPresent()) return;
-            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+            var cts = dlssCts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
             var found = await Task.Run(() => DlssFinder.FindAndConfigure(env.Root, DlssFinder.SteamRoot(), cts.Token));
-            if (found == null) return;
+            if (found == null || IsDisposed || Disposing || !IsHandleCreated) return;
             RefreshDlssChoices();
             SetSettingsMsg($"DLSS found in {found.Source["auto: ".Length..]}: {found.Path}. {DlssProvider.Attribution} Applies the next time VR starts.", Ui.Good);
         }

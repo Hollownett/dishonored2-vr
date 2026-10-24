@@ -102,7 +102,10 @@ def _cmd_install(a, home, proc_root, urlopen):
     print("Changed files:" if changed else "Already up to date.")
     for c in changed:
         print(f"  {c}")
-    _print_dlss(dlss.find_and_configure(modhome.mod_home_dir(inst.prefix), inst.libraries or dlss.libraries(home, a.steam_root)), quiet_missing=True)
+    try:
+        _print_dlss(dlss.find_and_configure(modhome.mod_home_dir(inst.prefix), inst.libraries or dlss.libraries(home, a.steam_root)), quiet_missing=True)
+    except OSError as e:  # DLSS is optional: never fail a finished install over it
+        print(f"Warning: DLSS auto-find skipped: {e}", file=sys.stderr)
     line = _gpu_launch_line(proc_root)
     if line:
         print("Steam launch options:")

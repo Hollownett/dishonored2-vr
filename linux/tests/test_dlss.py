@@ -40,16 +40,48 @@ class FinderTests(test_modhome.Case):
     def test_dlss_find_respects_existing(self):
         self.game(self.f.library, "A")
         (self.home / "build").mkdir(parents=True)
-        (self.home / "build/dlss-dll-path").write_text("Z:\\mine\\nvngx_dlss.dll\n")
+        mine = fake_dll(self.tmp / "mine/nvngx_dlss.dll")
+        mine_knob = dlss.wine_path(mine) + "\n"
+        (self.home / "build/dlss-dll-path").write_text(mine_knob)
         rc, out, err = test_cli.run(["dlss-find", "--mod-home", str(self.home)], home=self.f.home)
         self.assertEqual(rc, 0, err)
-        self.assertEqual((self.home / "build/dlss-dll-path").read_text(), "Z:\\mine\\nvngx_dlss.dll\n")
+        self.assertEqual((self.home / "build/dlss-dll-path").read_text(), mine_knob)
         self.assertIn("already", out)
         (self.home / "build/dlss-dll-path").unlink()
         fake_dll(self.home / "nvngx_dlss.dll")
         rc, out, err = test_cli.run(["dlss-find", "--mod-home", str(self.home)], home=self.f.home)
         self.assertEqual(rc, 0, err)
         self.assertFalse((self.home / "build/dlss-dll-path").exists())
+
+    def test_stale_knob_is_replaced_live_knob_is_not(self):
+        dll = self.game(self.f.library, "A")
+        (self.home / "build").mkdir(parents=True)
+        knob = self.home / "build/dlss-dll-path"
+        knob.write_text("Z:\\gone\\nvngx_dlss.dll\n")
+        rc, out, err = test_cli.run(["dlss-find", "--mod-home", str(self.home)], home=self.f.home)
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(knob.read_text(), dlss.wine_path(dll) + "\n")
+        keep = dlss.wine_path(self.game(self.f.library, "Other")) + "\n"
+        knob.write_text(keep)
+        test_cli.run(["dlss-find", "--mod-home", str(self.home)], home=self.f.home)
+        self.assertEqual(knob.read_text(), keep)
+        knob.write_text("D:\\elsewhere\\nvngx_dlss.dll\n")
+        test_cli.run(["dlss-find", "--mod-home", str(self.home)], home=self.f.home)
+        self.assertEqual(knob.read_text(), "D:\\elsewhere\\nvngx_dlss.dll\n")
+
+    def test_install_survives_dlss_failure(self):
+        from unittest import mock
+        self.game(self.f.library, "A")
+        t = test_cli.InstallTests("test_install_then_uninstall_roundtrip")
+        t.tmp, t.f, t.home, t.work, t.zip, t.proxy, t.oxr_zip, t.src = self.tmp, self.f, self.home, self.work, self.zip, self.proxy, self.oxr_zip, self.src
+        import json
+        t.src_json = self.work / "source.json"; t.src_json.write_text(json.dumps(self.src))
+        (self.work / "LICENSE").write_text("lic")
+        t.proc = self.tmp / "proc"
+        with t.patched(), mock.patch.object(dlss, "find_and_configure", side_effect=PermissionError("build is read-only")):
+            rc, out, err = test_cli.run(t.argv(), home=self.f.home, proc_root=t.proc)
+        self.assertEqual(rc, 0, err)
+        self.assertIn("DLSS auto-find skipped", err)
 
     def test_searches_every_library_and_prefers_higher_version(self):
         lo = self.game(self.f.steam_root, "Old", (3, 1, 0, 0))
