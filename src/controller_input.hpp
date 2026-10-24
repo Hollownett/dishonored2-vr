@@ -17,6 +17,8 @@ struct ControllerInput {
     bool active{};
     float move_x{},move_y{},turn_x{},turn_y{},left_trigger{},right_trigger{},left_grip{},right_grip{};
     bool a{},b{},x{},y{},left_click{},right_click{},menu{};
+    bool left_trigger_touch{},right_trigger_touch{},left_thumb_touch{},right_thumb_touch{}; // capacitive sensors (visual finger curl only); thumb = any of stick/face buttons/thumbrest
+    bool touch_bound{}; // the runtime accepted the touch binding suggestion
     bool journal{},suppress_pause{},menu_modifier{};
     bool pause_request{}; // one qualified hold-Y event; the composer makes the native Start pulse pollable
     bool native_y_quick_action{};

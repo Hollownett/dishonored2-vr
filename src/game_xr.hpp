@@ -246,6 +246,10 @@ private:
     XrActionSet action_set_{XR_NULL_HANDLE};
     std::array<XrAction,InputCount> actions_{};
     XrAction haptic_action_{XR_NULL_HANDLE};
+    // Optional capacitive-touch booleans (visual finger curl). Any failure leaves them null/unbound and the controls above untouched.
+    enum TouchAction : UINT {TriggerTouch,ThumbstickTouch,FirstTouch,SecondTouch,ThumbrestTouch,TouchCount};
+    std::array<XrAction,TouchCount> touch_actions_{};
+    bool touch_bound_{},touch_create_failed_{};
     std::array<XrPath,2> hand_paths_{};
     std::array<std::array<XrSpace,2>,2> hand_spaces_{};
     bool controller_enabled_{};
@@ -988,10 +992,35 @@ private:
             bindings.push_back({haptic_action_,path("/user/hand/left/output/haptic")});
             bindings.push_back({haptic_action_,path("/user/hand/right/output/haptic")});
         }
+        // Touch actions are optional: a failure to create them or bind them never costs an existing control.
+        std::vector<XrActionSuggestedBinding> touch_bindings;
+        try {
+            constexpr std::array<const char*,TouchCount> touch_names{"trigger_touch","thumbstick_touch","first_touch","second_touch","thumbrest_touch"};
+            for(UINT index=0;index<TouchCount;++index) {
+                XrActionCreateInfo action{};action.type=XR_TYPE_ACTION_CREATE_INFO;action.actionType=XR_ACTION_TYPE_BOOLEAN_INPUT;
+                action.countSubactionPaths=2;action.subactionPaths=hand_paths_.data();
+                strcpy_s(action.actionName,touch_names[index]);strcpy_s(action.localizedActionName,touch_names[index]);
+                checked(xrCreateAction(action_set_,&action,&touch_actions_[index]),"Create touch action");
+                for(UINT side=0;side<2;++side) {
+                    const char* component=index==TriggerTouch?"trigger/touch":index==ThumbstickTouch?"thumbstick/touch":
+                        index==ThumbrestTouch?"thumbrest/touch":index==FirstTouch?(side?"a/touch":"x/touch"):(side?"b/touch":"y/touch");
+                    const auto binding=std::string(side?"/user/hand/right/input/":"/user/hand/left/input/")+component;
+                    touch_bindings.push_back({touch_actions_[index],path(binding.c_str())});
+                }
+            }
+        } catch(...) {touch_actions_={};touch_bindings.clear();touch_create_failed_=true;}
+        // OpenXR keeps only the latest suggestion per profile, so exactly one call may succeed: today's list plus touch first, today's list alone if the runtime refuses.
         XrInteractionProfileSuggestedBinding suggest{};suggest.type=XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING;
         suggest.interactionProfile=path("/interaction_profiles/oculus/touch_controller");
-        suggest.countSuggestedBindings=static_cast<uint32_t>(bindings.size());suggest.suggestedBindings=bindings.data();
-        checked(xrSuggestInteractionProfileBindings(instance_,&suggest),"Bind Quest controls");
+        if(!touch_bindings.empty()) {
+            auto combined=bindings;combined.insert(combined.end(),touch_bindings.begin(),touch_bindings.end());
+            suggest.countSuggestedBindings=static_cast<uint32_t>(combined.size());suggest.suggestedBindings=combined.data();
+            touch_bound_=XR_SUCCEEDED(xrSuggestInteractionProfileBindings(instance_,&suggest));
+        }
+        if(!touch_bound_) {
+            suggest.countSuggestedBindings=static_cast<uint32_t>(bindings.size());suggest.suggestedBindings=bindings.data();
+            checked(xrSuggestInteractionProfileBindings(instance_,&suggest),"Bind Quest controls");
+        }
         XrSessionActionSetsAttachInfo attach{};attach.type=XR_TYPE_SESSION_ACTION_SETS_ATTACH_INFO;
         attach.countActionSets=1;attach.actionSets=&action_set_;
         checked(xrAttachSessionActionSets(session_,&attach),"Attach game controls");
@@ -1101,9 +1130,23 @@ private:
         controller_input.y=button(SecondButton,0);controller_input.b=button(SecondButton,1);
         controller_input.left_click=button(StickClick,0);controller_input.right_click=button(StickClick,1);
         controller_input.menu=button(Menu,0);controller_input.active=active_input_hands!=0;
+        {   // Touch never marks a hand active and never throws: an absent, inactive or failing action reads false.
+            auto touch=[&](UINT action,UINT side) {
+                if(!touch_actions_[action]) return false;
+                XrActionStateGetInfo info{};info.type=XR_TYPE_ACTION_STATE_GET_INFO;info.action=touch_actions_[action];info.subactionPath=hand_paths_[side];
+                XrActionStateBoolean value{};value.type=XR_TYPE_ACTION_STATE_BOOLEAN;
+                return XR_SUCCEEDED(xrGetActionStateBoolean(session_,&info,&value)) && value.isActive && value.currentState;
+            };
+            controller_input.left_trigger_touch=touch(TriggerTouch,0);controller_input.right_trigger_touch=touch(TriggerTouch,1);
+            controller_input.left_thumb_touch=touch(ThumbstickTouch,0)||touch(FirstTouch,0)||touch(SecondTouch,0)||touch(ThumbrestTouch,0);
+            controller_input.right_thumb_touch=touch(ThumbstickTouch,1)||touch(FirstTouch,1)||touch(SecondTouch,1)||touch(ThumbrestTouch,1);
+            controller_input.touch_bound=touch_bound_;
+        }
         if(controller_input.active) ++controller_samples;
     }
 public:
+    struct TouchStatus {bool bound;bool create_failed;};
+    TouchStatus touch_status() const noexcept {return {touch_bound_,touch_create_failed_};}
     // Development harness aims a simulated controller through the real panel
     // geometry. The resulting pose still uses normal XR ray/click processing.
     TrackedPose simulated_native_menu_ray(double u,double v) {

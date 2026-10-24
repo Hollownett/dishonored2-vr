@@ -36,6 +36,7 @@ struct Control {
     bool should_render=true,poses_valid=true,scripted=false;
     float scripted_pitch{};
     unsigned hands=3;
+    std::array<std::array<bool,5>,2> touch{}; // [side][trigger,thumbstick,first,second,thumbrest] capacitive sensors
     XrDuration period=11'111'111;
     XrDuration advance=11'111'111;
 };
@@ -65,6 +66,9 @@ inline bool color_scale_enabled=true; // the simulated instance offers XR_KHR_co
 inline std::map<XrSwapchain,std::unique_ptr<Chain>> chains;
 inline std::map<std::string,XrPath> paths;
 inline std::map<XrAction,std::string> actions;
+struct Suggestion {std::string profile;std::vector<std::pair<std::string,std::string>> bindings;bool accepted{};}; // (action name, binding path)
+inline std::vector<Suggestion> suggestions;
+inline bool reject_touch{},fail_touch_create{}; // test switches: refuse any /touch binding path; fail creating the *_touch actions
 inline XrResult invalid() {++summary.protocol_errors;return XR_ERROR_CALL_ORDER_INVALID;}
 inline void configure(ID3D11Device* source,bool scripted=false) {
     if(instantiated || session_created || !spaces.empty() || !chains.empty()) throw std::runtime_error("Simulator still owns XR resources");
@@ -72,7 +76,7 @@ inline void configure(ID3D11Device* source,bool scripted=false) {
     if(FAILED(source->QueryInterface(IID_PPV_ARGS(&dxgi))) || FAILED(dxgi->GetAdapter(&adapter)) || FAILED(adapter->GetDesc(&desc)))
         throw std::runtime_error("Cannot select simulator device");
     luid=desc.AdapterLuid;control={};control.input.active=true;control.scripted=scripted;summary={};
-    display_time=1'000'000'000;state=XR_SESSION_STATE_UNKNOWN;events.clear();paths.clear();actions.clear();
+    display_time=1'000'000'000;state=XR_SESSION_STATE_UNKNOWN;events.clear();paths.clear();actions.clear();suggestions.clear();reject_touch=fail_touch_create=false;
     running=waited=begun=false;
 }
 inline void push_state(XrSessionState value) {
@@ -264,9 +268,20 @@ inline XrResult XRAPI_CALL path_to_string(XrInstance,XrPath path,uint32_t capaci
 inline XrResult XRAPI_CALL create_actionset(XrInstance,const XrActionSetCreateInfo*,XrActionSet* out) {*out=actionset;return XR_SUCCESS;}
 inline XrResult XRAPI_CALL destroy_actionset(XrActionSet) {actions.clear();return XR_SUCCESS;}
 inline XrResult XRAPI_CALL create_action(XrActionSet,const XrActionCreateInfo* info,XrAction* out) {
-    *out=reinterpret_cast<XrAction>(static_cast<std::uintptr_t>(actions.size()+1));actions.emplace(*out,info->actionName);return XR_SUCCESS;
+    const std::string name=info->actionName;
+    if(fail_touch_create && name.size()>6 && name.compare(name.size()-6,6,"_touch")==0) return XR_ERROR_RUNTIME_FAILURE;
+    *out=reinterpret_cast<XrAction>(static_cast<std::uintptr_t>(actions.size()+1));actions.emplace(*out,name);return XR_SUCCESS;
 }
-inline XrResult XRAPI_CALL suggest(XrInstance,const XrInteractionProfileSuggestedBinding*) {return XR_SUCCESS;}
+inline std::string path_name(XrPath path) {for(const auto& [name,value]:paths) if(value==path) return name;return {};}
+inline XrResult XRAPI_CALL suggest(XrInstance,const XrInteractionProfileSuggestedBinding* info) {
+    Suggestion call{path_name(info->interactionProfile),{},true};
+    for(uint32_t i=0;i<info->countSuggestedBindings;++i) {
+        const auto binding=path_name(info->suggestedBindings[i].binding);
+        call.bindings.emplace_back(actions.at(info->suggestedBindings[i].action),binding);
+        if(reject_touch && binding.size()>6 && binding.compare(binding.size()-6,6,"/touch")==0) call.accepted=false;
+    }
+    suggestions.push_back(call);return call.accepted?XR_SUCCESS:XR_ERROR_PATH_UNSUPPORTED;
+}
 inline XrResult XRAPI_CALL attach(XrSession,const XrSessionActionSetsAttachInfo*) {return XR_SUCCESS;}
 inline int hand(XrPath path) {return path==paths.at("/user/hand/left")?0:1;}
 inline XrResult XRAPI_CALL action_space(XrSession,const XrActionSpaceCreateInfo* info,XrSpace* out) {
@@ -305,10 +320,20 @@ inline XrResult XRAPI_CALL vector_action(XrSession,const XrActionStateGetInfo* i
     const int side=hand(info->subactionPath);out->isActive=control.input.active?XR_TRUE:XR_FALSE;
     out->currentState=side?XrVector2f{control.input.turn_x,control.input.turn_y}:XrVector2f{control.input.move_x,control.input.move_y};return XR_SUCCESS;
 }
+inline bool touch_suggested() { // like a real runtime, a touch action with no accepted binding is inactive
+    for(auto call=suggestions.rbegin();call!=suggestions.rend();++call) if(call->accepted) {
+        for(const auto& binding:call->bindings) if(binding.second.size()>6 && binding.second.compare(binding.second.size()-6,6,"/touch")==0) return true;
+        return false;
+    }
+    return false;
+}
 inline XrResult XRAPI_CALL bool_action(XrSession,const XrActionStateGetInfo* info,XrActionStateBoolean* out) {
     const int side=hand(info->subactionPath);const auto& name=actions.at(info->action);out->isActive=control.input.active?XR_TRUE:XR_FALSE;
+    if(name.size()>6 && name.compare(name.size()-6,6,"_touch")==0 && !touch_suggested()) out->isActive=XR_FALSE;
     out->currentState=(name=="first_button"?(side?control.input.a:control.input.x):name=="second_button"?(side?control.input.b:control.input.y):
-        name=="stick_click"?(side?control.input.right_click:control.input.left_click):control.input.menu)?XR_TRUE:XR_FALSE;return XR_SUCCESS;
+        name=="stick_click"?(side?control.input.right_click:control.input.left_click):
+        name=="trigger_touch"?control.touch[side][0]:name=="thumbstick_touch"?control.touch[side][1]:name=="first_touch"?control.touch[side][2]:
+        name=="second_touch"?control.touch[side][3]:name=="thumbrest_touch"?control.touch[side][4]:control.input.menu)?XR_TRUE:XR_FALSE;return XR_SUCCESS;
 }
 inline unsigned haptic_pulses{};
 inline XrResult XRAPI_CALL haptic(XrSession,const XrHapticActionInfo*,const XrHapticBaseHeader*) {++haptic_pulses;return XR_SUCCESS;}

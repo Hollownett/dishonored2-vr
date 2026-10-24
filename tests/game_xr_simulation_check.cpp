@@ -10,6 +10,7 @@
 #include <iostream>
 #include <fstream>
 #include <sstream>
+#include <set>
 
 using Microsoft::WRL::ComPtr;
 namespace sim=d2vr::simxr;
@@ -297,6 +298,102 @@ int main() {
     }
     assert(!sim::instantiated && !sim::session_created && sim::spaces.empty() && sim::chains.empty());
     assert(sim::summary.protocol_errors==0 && sim::summary.subrect_layers==0 && sim::summary.waits==sim::summary.ends);
+    {   // Optional touch actions (finger curl): fail soft, never cost an existing control.
+        auto session=[&](auto&& body) {
+            sim::configure(device.Get());
+            d2vr::GameXr xr(device.Get(),64,64,DXGI_FORMAT_R8G8B8A8_UNORM_SRGB,nullptr,true,true,true,true,1,{}, {},true,&sim::dispatch);
+            auto frame=[&]() {
+                if(xr.tracking_views()) {const auto& views=*xr.tracking_views();xr.record_rendered_eye(0,views[0].fov);xr.record_rendered_eye(1,views[1].fov);}
+                xr.present(left.Get(),right.Get(),1.6f,1.6f,true,false,true);
+            };
+            frame();frame();frame();body(xr,frame);
+        };
+        auto existing_work=[&](d2vr::GameXr& xr,auto& frame) { // every pre-existing action still reaches ControllerInput, poses and haptic included
+            sim::control.input={};sim::control.input.active=true;
+            sim::control.input.left_trigger=.7f;sim::control.input.right_grip=.6f;sim::control.input.a=true;sim::control.input.b=true;sim::control.input.x=true;sim::control.input.left_click=true;
+            sim::control.input.menu=true;sim::control.input.move_x=.5f;sim::control.input.turn_y=-.4f;frame();
+            const auto& in=xr.controller_input;
+            assert(in.active && in.left_trigger==.7f && in.right_grip==.6f && in.a && in.b && in.x && in.left_click && in.menu && in.move_x==.5f && in.turn_y==-.4f);
+            assert(!in.right_click && in.right_trigger==0);
+            assert(xr.grip_tracked_hands==3);
+            const auto pulses=sim::haptic_pulses;xr.pulse(0,1.f,.1f);assert(sim::haptic_pulses==pulses+1);
+        };
+        // touch_actions_report_booleans: each scripted sensor reaches ControllerInput; the thumb is the OR of its four sensors per side.
+        session([&](d2vr::GameXr& xr,auto& frame) {
+            assert(xr.touch_status().bound && !xr.touch_status().create_failed);
+            assert(sim::suggestions.size()==1 && sim::suggestions[0].profile=="/interaction_profiles/oculus/touch_controller" && sim::suggestions[0].accepted);
+            frame();assert(xr.controller_input.touch_bound && !xr.controller_input.left_trigger_touch && !xr.controller_input.right_trigger_touch &&
+                !xr.controller_input.left_thumb_touch && !xr.controller_input.right_thumb_touch);
+            sim::control.touch[0][0]=true;frame();
+            assert(xr.controller_input.left_trigger_touch && !xr.controller_input.right_trigger_touch && !xr.controller_input.left_thumb_touch);
+            sim::control.touch={};sim::control.touch[1][0]=true;frame();assert(!xr.controller_input.left_trigger_touch && xr.controller_input.right_trigger_touch);
+            for(unsigned sensor=1;sensor<5;++sensor) for(unsigned side=0;side<2;++side) {
+                sim::control.touch={};sim::control.touch[side][sensor]=true;frame();
+                assert(xr.controller_input.left_thumb_touch==(side==0) && xr.controller_input.right_thumb_touch==(side==1));
+                assert(!xr.controller_input.left_trigger_touch && !xr.controller_input.right_trigger_touch && xr.controller_input.touch_bound);
+            }
+            sim::control.touch={};sim::control.touch[0][1]=sim::control.touch[0][4]=sim::control.touch[1][2]=sim::control.touch[1][3]=true;frame();
+            assert(xr.controller_input.left_thumb_touch && xr.controller_input.right_thumb_touch);
+            sim::control.input.active=false;frame(); // inactive actions read false
+            assert(!xr.controller_input.left_thumb_touch && !xr.controller_input.right_thumb_touch);
+            sim::control.touch={};existing_work(xr,frame);
+        });
+        // rejected_touch_bindings_keep_controls: a runtime refusing /touch paths gets today's list on a second, accepted call.
+        {
+            sim::configure(device.Get());sim::reject_touch=true;
+            d2vr::GameXr xr(device.Get(),64,64,DXGI_FORMAT_R8G8B8A8_UNORM_SRGB,nullptr,true,true,true,true,1,{}, {},true,&sim::dispatch);
+            auto frame=[&]() {
+                if(xr.tracking_views()) {const auto& views=*xr.tracking_views();xr.record_rendered_eye(0,views[0].fov);xr.record_rendered_eye(1,views[1].fov);}
+                xr.present(left.Get(),right.Get(),1.6f,1.6f,true,false,true);
+            };
+            frame();frame();frame();
+            assert(sim::suggestions.size()==2 && !sim::suggestions[0].accepted && sim::suggestions[1].accepted);
+            for(const auto& [action,binding]:sim::suggestions[1].bindings) assert(binding.find("/touch")==std::string::npos);
+            assert(sim::suggestions[1].bindings.size()+10==sim::suggestions[0].bindings.size());
+            assert(!xr.touch_status().bound && !xr.touch_status().create_failed);
+            sim::control.touch[0][0]=sim::control.touch[0][1]=true;existing_work(xr,frame);
+            assert(!xr.controller_input.touch_bound && !xr.controller_input.left_trigger_touch && !xr.controller_input.left_thumb_touch);
+        }
+        // touch_action_create_failure_is_soft: touch actions skipped, today's list suggested once, everything else works.
+        {
+            sim::configure(device.Get());sim::fail_touch_create=true;
+            d2vr::GameXr xr(device.Get(),64,64,DXGI_FORMAT_R8G8B8A8_UNORM_SRGB,nullptr,true,true,true,true,1,{}, {},true,&sim::dispatch);
+            auto frame=[&]() {
+                if(xr.tracking_views()) {const auto& views=*xr.tracking_views();xr.record_rendered_eye(0,views[0].fov);xr.record_rendered_eye(1,views[1].fov);}
+                xr.present(left.Get(),right.Get(),1.6f,1.6f,true,false,true);
+            };
+            frame();frame();frame();
+            assert(xr.touch_status().create_failed && !xr.touch_status().bound);
+            assert(sim::suggestions.size()==1 && sim::suggestions[0].accepted);
+            for(const auto& [handle,name]:sim::actions) assert(name.find("_touch")==std::string::npos);
+            sim::control.touch[0][0]=sim::control.touch[1][1]=true;existing_work(xr,frame);
+            assert(!xr.controller_input.touch_bound && !xr.controller_input.left_trigger_touch && !xr.controller_input.right_thumb_touch);
+        }
+        // existing_bindings_unchanged: the non-touch suggestion is exactly the list at BASE c57d40d, in order, and the action names are the same.
+        session([&](d2vr::GameXr&,auto&) {
+            const std::vector<std::pair<std::string,std::string>> base{
+                {"grip_pose","/user/hand/left/input/grip/pose"},{"grip_pose","/user/hand/right/input/grip/pose"},
+                {"aim_pose","/user/hand/left/input/aim/pose"},{"aim_pose","/user/hand/right/input/aim/pose"},
+                {"stick","/user/hand/left/input/thumbstick"},{"stick","/user/hand/right/input/thumbstick"},
+                {"trigger","/user/hand/left/input/trigger/value"},{"trigger","/user/hand/right/input/trigger/value"},
+                {"squeeze","/user/hand/left/input/squeeze/value"},{"squeeze","/user/hand/right/input/squeeze/value"},
+                {"first_button","/user/hand/left/input/x/click"},{"first_button","/user/hand/right/input/a/click"},
+                {"second_button","/user/hand/left/input/y/click"},{"second_button","/user/hand/right/input/b/click"},
+                {"stick_click","/user/hand/left/input/thumbstick/click"},{"stick_click","/user/hand/right/input/thumbstick/click"},
+                {"menu","/user/hand/left/input/menu/click"},
+                {"haptic","/user/hand/left/output/haptic"},{"haptic","/user/hand/right/output/haptic"}};
+            assert(sim::suggestions.size()==1 && sim::suggestions[0].profile=="/interaction_profiles/oculus/touch_controller");
+            std::vector<std::pair<std::string,std::string>> non_touch;
+            for(const auto& entry:sim::suggestions[0].bindings) if(entry.second.size()<6 || entry.second.compare(entry.second.size()-6,6,"/touch")!=0) non_touch.push_back(entry);
+            assert(non_touch==base);
+            assert(sim::suggestions[0].bindings.size()==base.size()+10);
+            std::set<std::string> names;for(const auto& [handle,name]:sim::actions) names.insert(name);
+            const std::set<std::string> expected{"grip_pose","aim_pose","stick","trigger","squeeze","first_button","second_button","stick_click","menu","haptic",
+                "trigger_touch","thumbstick_touch","first_touch","second_touch","thumbrest_touch"};
+            assert(names==expected);
+        });
+        ++scenarios;
+    }
     std::ofstream report("artifacts/simulated-vr-check.json");
     report << "{\"simulated_vr\":true,\"bridge\":\"production GameXr\",\"device\":\"D3D11 WARP\",\"scenarios\":" << scenarios
            << ",\"xr_frames\":" << sim::summary.ends << ",\"protocol_errors\":0,\"resource_cleanup_verified\":true,\"native_game_interaction_verified\":false,\"headset_acceptance\":false}\n";
