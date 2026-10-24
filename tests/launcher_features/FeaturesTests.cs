@@ -354,6 +354,41 @@ string StateText(string d) => File.ReadAllText(Path.Combine(d, "launcher-feature
     Check("dlss_attribution_present", DlssProvider.Attribution.Contains("NVIDIA DLSS") && DlssProvider.Prompt.Contains(DlssProvider.DllName));
     Check("dlss_available_needs_driver", DlssProvider.Available(root) == DlssProvider.NvidiaDriverPresent());
 }
+{   // DlssFinder: auto-find the user's own DLL in installed Steam games (temp trees only).
+    string Tmp() { var d = Path.Combine(Path.GetTempPath(), "d2vrfind-" + Guid.NewGuid().ToString("N")); Directory.CreateDirectory(d); return d; }
+    string Dll(string lib, string rel, byte b = 4) { var f = Path.Combine(lib, "steamapps", "common", rel, DlssProvider.DllName); Directory.CreateDirectory(Path.GetDirectoryName(f)!); File.WriteAllBytes(f, new[] { b }); return f; }
+    var steam = Tmp(); Directory.CreateDirectory(Path.Combine(steam, "steamapps"));
+    var lib2 = Tmp(); var lib3 = Tmp();
+    File.WriteAllText(Path.Combine(steam, "steamapps", "libraryfolders.vdf"), "\"libraryfolders\"\n{\n\t\"0\"\n\t{\n\t\t\"path\"\t\t\"" + steam.Replace("\\", "\\\\") + "\"\n\t}\n\t\"1\"\n\t{\n\t\t\"path\"\t\t\"" + lib2.Replace("\\", "\\\\") + "\"\n\t\t\"label\"\t\t\"\"\n\t}\n\t\"2\"\n\t{\n\t\t\"path\"\t\t\"" + lib3.Replace("\\", "\\\\") + "\"\n\t}\n}\n");
+    var libs = DlssFinder.SteamLibraries(steam);
+    Check("vdf_parses_library_paths", libs.SequenceEqual(new[] { steam, lib2, lib3 }));
+    var winVdf = Tmp(); Directory.CreateDirectory(Path.Combine(winVdf, "steamapps"));
+    File.WriteAllText(Path.Combine(winVdf, "steamapps", "libraryfolders.vdf"), "\"libraryfolders\" { \"1\" { \"path\" \"D:\\\\SteamLibrary\" } \"2\" { \"path\" \"E:\\\\Games\\\\Steam Lib\" } }");
+    Check("vdf_escaped_backslashes", DlssFinder.SteamLibraries(winVdf).Skip(1).SequenceEqual(new[] { @"D:\SteamLibrary", @"E:\Games\Steam Lib" }));
+    File.WriteAllText(Path.Combine(winVdf, "steamapps", "libraryfolders.vdf"), "\"libraryfolders\" { \"path\" \"unterminated \\\\ ");
+    Check("vdf_garbled_returns_root_only", DlssFinder.SteamLibraries(winVdf).SequenceEqual(new[] { winVdf }) && DlssFinder.SteamLibraries(Path.Combine(winVdf, "nope")).Count == 1);
+    var deep = Tmp(); var near = Dll(deep, "A"); var edge = Dll(deep, "B/1/2/3/4"); Dll(deep, "C/1/2/3/4/5");
+    var cands = DlssFinder.Candidates(new[] { deep });
+    Check("candidates_depth_limited", cands.Count == 2 && cands.Contains(near) && cands.Contains(edge));
+    var many = Tmp(); for (int i = 0; i < 8; i++) Dll(many, "g" + i);
+    Check("candidates_capped", DlssFinder.Candidates(new[] { many }, 5, 3).Count == 3 && DlssFinder.Candidates(new[] { many }).Count == 8 && DlssFinder.Candidates(new[] { Path.Combine(many, "missing") }).Count == 0);
+    var link = Tmp(); var real = Tmp(); Dll(real, "Linked");
+    try { Directory.CreateSymbolicLink(Path.Combine(link, "steamapps-x"), Path.Combine(real, "steamapps", "common")); Directory.CreateDirectory(Path.Combine(link, "steamapps", "common")); Directory.CreateSymbolicLink(Path.Combine(link, "steamapps", "common", "Linked"), Path.Combine(real, "steamapps", "common", "Linked"));
+        Check("candidates_skip_reparse_points", DlssFinder.Candidates(new[] { link }).Count == 0); } catch (Exception) { Check("candidates_skip_reparse_points", true); }
+    var pick = Tmp(); var old = Dll(pick, "Old"); var fresh = Dll(pick, "New/deeper"); File.SetLastWriteTimeUtc(old, new DateTime(2022, 1, 1)); File.SetLastWriteTimeUtc(fresh, new DateTime(2024, 1, 1));
+    Check("best_prefers_higher_version_else_newer", DlssFinder.Best(new[] { old, fresh }) == fresh && DlssFinder.Best(new[] { fresh, old }) == fresh && DlssFinder.Best(Array.Empty<string>()) == null);
+    var tie = Tmp(); var s1 = Dll(tie, "Z"); var s2 = Dll(tie, "A/long/er"); var when = new DateTime(2023, 5, 5); File.SetLastWriteTimeUtc(s1, when); File.SetLastWriteTimeUtc(s2, when);
+    Check("best_tie_shortest_path", DlssFinder.Best(new[] { s2, s1 }) == s1);
+    var rootOk = Tmp(); Directory.CreateDirectory(Path.Combine(rootOk, "build"));
+    var gotit = DlssFinder.FindAndConfigure(rootOk, tie);
+    Check("find_configures_best_with_game_source", gotit is { } g && g.Path == s1 && g.Source == "auto: Z" && File.ReadAllText(DlssProvider.KnobPath(rootOk)) == s1 + "\n" && DlssProvider.Resolve(rootOk)?.Path == s1);
+    var rootHome = Tmp(); Directory.CreateDirectory(Path.Combine(rootHome, "build")); File.WriteAllBytes(Path.Combine(rootHome, DlssProvider.DllName), new byte[] { 1 });
+    Check("find_skips_when_provider_exists", DlssFinder.FindAndConfigure(rootHome, tie) == null && !File.Exists(DlssProvider.KnobPath(rootHome)));
+    var rootKnob = Tmp(); Directory.CreateDirectory(Path.Combine(rootKnob, "build")); DlssProvider.Configure(rootKnob, old);
+    Check("find_does_not_override_manual_knob", DlssFinder.FindAndConfigure(rootKnob, tie) == null && File.ReadAllText(DlssProvider.KnobPath(rootKnob)) == old + "\n");
+    var rootNone = Tmp(); Directory.CreateDirectory(Path.Combine(rootNone, "build"));
+    Check("find_nothing_is_null_and_writes_nothing", DlssFinder.FindAndConfigure(rootNone, Tmp()) == null && DlssFinder.FindAndConfigure(rootNone, null) == null && !File.Exists(DlssProvider.KnobPath(rootNone)));
+}
 Check("crosshair_row_moved_to_settings", !list.Any(x => x.Id == "hand-crosshair" || x.File == "no-hand-crosshair"));
 {
     var dc = NewBuild(); File.WriteAllText(Path.Combine(dc, "no-hand-crosshair"), "");

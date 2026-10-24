@@ -84,6 +84,7 @@ while paused opens settings. These routing changes still need headset verificati
 From there you can set:
 - resolution scale
 - anti-aliasing: FSR Native, FSR Quality (renders at 77% and upscales), FSR Balanced (67% and upscales), Game TAA or Off. The displayed generation reflects the active backend. Your saved selection is preserved. Reduced input resolution is verified; headset FPS gains remain unmeasured.
+- DLAA and DLSS Quality (NVIDIA only): the launcher looks once at start through your installed Steam games for your own `nvngx_dlss.dll` and records the newest one in `build/dlss-dll-path` (nothing is copied or downloaded; a path you pick yourself with "DLSS: point to nvngx_dlss.dll" wins). On Linux, `d2vr-linux install` and `d2vr-linux dlss-find` do the same search and write a `Z:\...` path; neither touches an existing `nvngx_dlss.dll` or `build/dlss-dll-path`.
   The FSR 3 Quality/Balanced modes upscale after the game's tonemapping, so the HUD stays sharp. Combine Quality with a higher resolution scale for a sharper image at the same cost
 - edge smoothing, SMAA (on by default; skipped automatically while FSR 3 is on, except in the alternate-eye performance mode (on by default since v602), which turns temporal AA off and always uses SMAA)
 - sharpening (off, low, medium, high, max; default medium)

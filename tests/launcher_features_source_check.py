@@ -20,4 +20,14 @@ for f in features:
     assert f'L"build"/L"{f["file"]}"' in source, f'{f["id"]}: knob {f["file"]} is not read in src/dxgi_probe.cpp'
 csproj = (root / "launcher/DishonoredVRLauncher.csproj").read_text(encoding="utf-8")
 assert re.search(r'EmbeddedResource Include="[^"]*default_features\.json"[^>]*LogicalName="features\.json"', csproj), "launcher does not embed default_features.json"
+# Task 12: WinForms common dialogs need an STA thread; top-level statements run MTA and OpenFileDialog.ShowDialog threw ThreadStateException.
+program = (root / "launcher/Program.cs").read_text(encoding="utf-8")
+assert re.search(r"\[STAThread\]\s*static\s+int\s+Main\s*\(", program), "launcher entry point must be [STAThread] static int Main"
+assert not re.search(r"^Application\.Run\(", program, re.M), "launcher must not use top-level statements (MTA)"
+pick = program[program.index("void PickDlssProvider()"):]
+pick = pick[:pick.index("\n    }\n")]
+try_at, dialog_at = pick.find("try"), pick.find(".ShowDialog(")
+assert 0 <= try_at < dialog_at, "ShowDialog in PickDlssProvider must be inside the try"
+assert "OpenFileDialog" in pick and pick.find("OpenFileDialog") > try_at, "the dialog must be created inside the try"
+assert (root / "launcher/DlssFinder.cs").is_file() and "DlssFinder.cs" in (root / "tests/launcher_features/LauncherFeaturesTests.csproj").read_text(encoding="utf-8"), "DlssFinder must be compiled into the tests"
 print("launcher_features_source_check ok:", len(features), "features")

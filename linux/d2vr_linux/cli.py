@@ -4,7 +4,7 @@ import sys
 import urllib.request
 from pathlib import Path
 
-from . import doctor, modhome, sim, steam
+from . import dlss, doctor, modhome, sim, steam
 
 
 class CliError(Exception):
@@ -23,6 +23,8 @@ def _parser():
     s = sub.add_parser("doctor", help="check the host, prefix and install")
     s.add_argument("--fix-openxr", action="store_true", help="set SteamVR as the host OpenXR runtime")
     s.add_argument("--mod-home", type=Path, help="mod home directory to check")
+    s = sub.add_parser("dlss-find", help="find your own nvngx_dlss.dll in your Steam games and record it for the mod (nothing is copied)")
+    s.add_argument("--mod-home", type=Path, help="mod home directory (default: from the game's Proton prefix)")
     sub.add_parser("launch-options", help="print the Steam launch options line")
     for name, text in (("start", "ask the running game to start VR"), ("stop", "ask the running game to stop VR")):
         s = sub.add_parser(name, help=text)
@@ -100,10 +102,27 @@ def _cmd_install(a, home, proc_root, urlopen):
     print("Changed files:" if changed else "Already up to date.")
     for c in changed:
         print(f"  {c}")
+    _print_dlss(dlss.find_and_configure(modhome.mod_home_dir(inst.prefix), inst.libraries or dlss.libraries(home, a.steam_root)), quiet_missing=True)
     line = _gpu_launch_line(proc_root)
     if line:
         print("Steam launch options:")
         print(line)
+    return 0
+
+
+def _print_dlss(result, quiet_missing=False):
+    dll, game = result
+    if dll == "exists":
+        print("DLSS: nvngx_dlss.dll or build/dlss-dll-path already set; left as is.")
+    elif dll:
+        print(f"DLSS found in {game}: {dll} (recorded in build/{dlss.KNOB}; not copied)")
+    elif not quiet_missing:
+        print("DLSS: no nvngx_dlss.dll found in your Steam libraries; install a game that ships DLSS or set build/dlss-dll-path yourself.")
+
+
+def _cmd_dlss_find(a, home):
+    mod_home = a.mod_home or modhome.mod_home_dir(steam.locate(home, a.steam_root).prefix)
+    _print_dlss(dlss.find_and_configure(mod_home, dlss.libraries(home, a.steam_root)))
     return 0
 
 
@@ -193,6 +212,8 @@ def main(argv=None, *, home=None, proc_root=Path("/proc"), icd_dirs=None, urlope
             return _cmd_doctor(args, home, proc_root, icd_dirs)
         if args.command == "launch-options":
             return _cmd_launch_options(proc_root)
+        if args.command == "dlss-find":
+            return _cmd_dlss_find(args, home)
         if args.command == "feature":
             return _cmd_feature(args, home)
         if args.command == "sim":

@@ -5,24 +5,32 @@ using System.Globalization;
 using System.Runtime.InteropServices;
 using DishonoredVR;
 
-// ApplicationConfiguration.Initialize() minus EnableVisualStyles (app.manifest enables Common Controls 6 instead; see there).
-Application.SetHighDpiMode(HighDpiMode.PerMonitorV2);
-Application.SetCompatibleTextRenderingDefault(false);
-// Review flags: --page play|settings|tools, --screenshot <png> (PrintWindow of the client area, window shown without activation), --exit, --no-art.
-string? Flag(string name) { int i = Array.IndexOf(args, name); return i >= 0 && i + 1 < args.Length ? args[i + 1] : null; }
-// Headless art check: extract into a temp folder (or --out <dir>) and compare with a tools/extract_game_art.py output folder (exit code 0 = match).
-if (Flag("--check-art") is string reference) return ArtImport.Check(reference, Flag("--out"), Console.Out);
-// Headless calibration-pose render (PoseRender) into <dir>, plus poses_sheet.png for review.
-if (Flag("--render-poses") is string poseDir) return PoseRender.Check(poseDir, Console.Out);
-// Headless probe check (no game access): probe configuration and launch record against an inject_probe.py headset record, DLL exports.
-if (Flag("--check-probe") is string record) return Probe.Check(record, Flag("--dll"), Console.Out);
-// Developer mode uses the repo the exe was built in; a copy anywhere else is standalone and works in %LOCALAPPDATA%\DishonoredVR
-// (or --home <dir>).
-var root = Env.FindRoot(args);
-var env = root != null ? new Env(root) : new Env(Path.GetFullPath(Flag("--home") ?? ModHome.Dir)) { Standalone = true };
-int startPage = Math.Max(0, Array.IndexOf(new[] { "play", "settings", "tools" }, (Flag("--page") ?? "play").ToLowerInvariant()));
-Application.Run(new MainForm(env, startPage, Flag("--screenshot"), args.Contains("--exit"), args.Contains("--no-art")));
-return 0;
+static class Program
+{
+    // [STAThread]: WinForms common dialogs (OpenFileDialog etc.), Clipboard and drag-drop need a single-threaded apartment; top-level statements run MTA and ShowDialog threw ThreadStateException.
+    [STAThread]
+    static int Main(string[] args)
+    {
+        // ApplicationConfiguration.Initialize() minus EnableVisualStyles (app.manifest enables Common Controls 6 instead; see there).
+        Application.SetHighDpiMode(HighDpiMode.PerMonitorV2);
+        Application.SetCompatibleTextRenderingDefault(false);
+        // Review flags: --page play|settings|tools, --screenshot <png> (PrintWindow of the client area, window shown without activation), --exit, --no-art.
+        string? Flag(string name) { int i = Array.IndexOf(args, name); return i >= 0 && i + 1 < args.Length ? args[i + 1] : null; }
+        // Headless art check: extract into a temp folder (or --out <dir>) and compare with a tools/extract_game_art.py output folder (exit code 0 = match).
+        if (Flag("--check-art") is string reference) return ArtImport.Check(reference, Flag("--out"), Console.Out);
+        // Headless calibration-pose render (PoseRender) into <dir>, plus poses_sheet.png for review.
+        if (Flag("--render-poses") is string poseDir) return PoseRender.Check(poseDir, Console.Out);
+        // Headless probe check (no game access): probe configuration and launch record against an inject_probe.py headset record, DLL exports.
+        if (Flag("--check-probe") is string record) return Probe.Check(record, Flag("--dll"), Console.Out);
+        // Developer mode uses the repo the exe was built in; a copy anywhere else is standalone and works in %LOCALAPPDATA%\DishonoredVR
+        // (or --home <dir>).
+        var root = Env.FindRoot(args);
+        var env = root != null ? new Env(root) : new Env(Path.GetFullPath(Flag("--home") ?? ModHome.Dir)) { Standalone = true };
+        int startPage = Math.Max(0, Array.IndexOf(new[] { "play", "settings", "tools" }, (Flag("--page") ?? "play").ToLowerInvariant()));
+        Application.Run(new MainForm(env, startPage, Flag("--screenshot"), args.Contains("--exit"), args.Contains("--no-art")));
+        return 0;
+    }
+}
 
 sealed class MainForm : Form
 {
@@ -157,6 +165,7 @@ sealed class MainForm : Form
                 catch (Exception ex) { Append(log, "Features not applied: " + ex.Message, Ui.Bad); }
             artState = Ui.Art.Present || noArt ? null : Env.FindGameDir() == null ? "needs Dishonored 2 installed" : "not imported yet";
             await RefreshChecks(); LoadSettings();
+            _ = AutoFindDlss();
             // First start (or art missing): import it from the user's own install; the calibration poses follow, and are
             // rendered alone when only they are missing. Review screenshots wait for it.
             var import = artState == "not imported yet" ? ImportArt(false)
@@ -356,12 +365,27 @@ sealed class MainForm : Form
         options.Invalidate();
     }
 
-    void PickDlssProvider()
+    /// <summary>At start, only when no nvngx_dlss.dll resolves and an NVIDIA driver is present: look through the user's own Steam games (off the UI thread, 5 s budget) and record the best one. Manual picking still wins.</summary>
+    async Task AutoFindDlss()
     {
-        using var dialog = new OpenFileDialog { Title = DlssProvider.Prompt, Filter = DlssProvider.DllName + "|" + DlssProvider.DllName, FileName = DlssProvider.DllName, CheckFileExists = true };
-        if (dialog.ShowDialog(this) != DialogResult.OK) return;
         try
         {
+            if (DlssProvider.Resolve(env.Root) != null || !DlssProvider.NvidiaDriverPresent()) return;
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+            var found = await Task.Run(() => DlssFinder.FindAndConfigure(env.Root, DlssFinder.SteamRoot(), cts.Token));
+            if (found == null) return;
+            RefreshDlssChoices();
+            SetSettingsMsg($"DLSS found in {found.Source["auto: ".Length..]}: {found.Path}. {DlssProvider.Attribution} Applies the next time VR starts.", Ui.Good);
+        }
+        catch (Exception) { }  // best effort: manual picking stays available
+    }
+
+    void PickDlssProvider()
+    {
+        try
+        {
+            using var dialog = new OpenFileDialog { Title = DlssProvider.Prompt, Filter = DlssProvider.DllName + "|" + DlssProvider.DllName, FileName = DlssProvider.DllName, CheckFileExists = true };
+            if (dialog.ShowDialog(this) != DialogResult.OK) return;
             var found = DlssProvider.Configure(env.Root, dialog.FileName);
             RefreshDlssChoices();
             SetSettingsMsg($"DLSS provider recorded: {found.Path}. {DlssProvider.Attribution} Applies the next time VR starts.", Ui.Good);
