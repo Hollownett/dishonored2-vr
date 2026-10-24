@@ -279,6 +279,19 @@ assert entry_fn.index("const auto t0=qpc_us();") < entry_fn.index("try {tick();}
 for key in ('\\"cost_max_us\\":', '\\"player_drift_um\\":', '\\"contact_frames\\":', '\\"snaps\\":', '\\"drive\\":{',
             '\\"tick_cost_max_us\\":', '\\"pressed_ticks\\":', '\\"steady_tick_cost_max_us\\":', '\\"faults\\":', '\\"time_factor_verified\\":false'):
     assert key in runtime, key
+# fix round 1: no assertion or statement may hide in a // comment (two line joins swallowed CHECKs once: review P2-3)
+checks_src = (root / "tests/hand_body_check.cpp").read_text(encoding="utf-8")
+assert not re.search(r"//[^\n]*\bCHECK\(", checks_src), "a CHECK( inside a // comment in tests/hand_body_check.cpp"
+for name, text in (("hand_body.hpp", body), ("hand_body_runtime.hpp", runtime), ("hand_body_native.hpp", native)):
+    assert not re.search(r"//[^\n]*[a-z)\]][a-z_]+(\.|->)[a-z_]+(=|\()[^\n]*;", text), name + ": code swallowed into a comment?"
+assert not re.search(r"//[^\n]*[a-z]hands\.(source_tick|epoch)=", probe)
+# fix round 1: proof (d) instrumentation: CPU time from QueryThreadCycleTime (calibrated at install, availability reported), wall histogram,
+# over-budget counts and the slowest tick's phases in the status
+assert code_of(runtime).count("QueryThreadCycleTime(") == 3 and "QueryThreadCycleTime" not in code_of(body)
+assert install.index("cycles_per_us_=calibrate_cycles_per_us();") < install.index("new HandBody(engine(),true)")
+for key in ('\\"timing\\":', '\\"cpu_available\\":', '\\"over_wall\\":', '\\"over_cpu\\":', '\\"hist\\":[', '\\"slow\\":{', '\\"root_moved_ticks\\":'):
+    assert key in runtime, key
+assert drive_fn.index("const auto c0=cpu_now();") < drive_fn.index("engine_.motion(") and "cost.read=clock_us();" in drive_fn and "cost.write=clock_us();" in drive_fn
 print("hand_body_routing_check B14 ok")
 
 # 10. the B13 sim scenario compiles and fits a 120 s session with a 60 s lead

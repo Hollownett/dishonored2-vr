@@ -151,7 +151,11 @@ def hand_body_status(**over):
     side = {"creates": 1, "destroys": 0, "faults": 0, "drive": {"drive_writes": 5000, "snaps": 0, "snap_blocked": 0, "yields": 0, "contact_frames": 40}}
     hb = {"enabled": True, "installed": True, "available": True, "hand_body_fault": False, "why": "", "faults": 0, "cost_us": 20, "cost_max_us": 120,
           "tick_cost_max_us": 400, "steady_tick_cost_max_us": 150, "player_drift_um": 0, "pressed_ticks": 2600, "contact_frames": 80, "snaps": 0, "gap_m": [.01, .01],
-          "abandons": 0, "sides": [copy.deepcopy(side), copy.deepcopy(side)]}
+          "abandons": 0, "g1": "pass", "g1_violation": "", "root_moved_ticks": 300, "root_travel_um": 900000,
+          "timing": {"cpu_available": True, "cycles_per_us": 3000, "ticks": 7000, "over_wall": 1, "over_cpu": 0, "wall_max_us": 269, "cpu_max_us": 60,
+                     "hist_edges_us": [10, 20, 50, 100, 150, 200, 300, 500, 1000], "hist": [6000, 900, 80, 15, 4, 0, 1, 0, 0, 0],
+                     "slow": {"wall_us": 269, "cpu_us": 40, "read_us": 5, "servo_us": 3, "write_us": 255, "other_us": 6}},
+          "sides": [copy.deepcopy(side), copy.deepcopy(side)]}
     hb.update(over)
     return {"hand_body": hb}
 
@@ -166,11 +170,40 @@ def hand_body_checks():
     assert all(not s["input"].get("move_y") and not s["input"].get("move_x") for s in capsule), "no locomotion while pressed"
     five = [hand_body_status() for _ in range(5)]
     assert all(v != "FAIL" for v, _ in brc.check(five, "hand_body_soak")), brc.check(five, "hand_body_soak")
-    for over in ({"faults": 1}, {"cost_max_us": 201}, {"steady_tick_cost_max_us": 201}, {"steady_tick_cost_max_us": None}, {"pressed_ticks": 99}, {"pressed_ticks": None}, {"player_drift_um": 1001}, {"available": False}, {"hand_body_fault": True},
-                 {"installed": False}):
+    # fix round 1: the wall max (269 us above) and the old max-only cost fields are reported, not judged; proof (d) is CPU max AND wall p99.9
+    for over in ({"cost_max_us": 269}, {"steady_tick_cost_max_us": 278}):
+        ok = [hand_body_status() for _ in range(5)]
+        ok[3]["hand_body"].update(over)
+        assert all(v != "FAIL" for v, _ in brc.check(ok, "hand_body_soak")), over
+    timing = lambda **t: {"timing": {**hand_body_status()["hand_body"]["timing"], **t}}
+    for over in ({"faults": 1}, {"pressed_ticks": 999}, {"pressed_ticks": None}, {"root_moved_ticks": 0}, {"root_moved_ticks": None}, {"player_drift_um": 1001},
+                 {"available": False}, {"hand_body_fault": True}, {"installed": False}, {"g1": "failed: x"}, {"g1_violation": "G1 violated"}, {"timing": None},
+                 timing(cpu_available=False), timing(cpu_max_us=201), timing(hist=[1, 2, 3]),
+                 timing(hist_edges_us=[10, 20])):
         bad = [hand_body_status() for _ in range(5)]
         bad[3]["hand_body"].update(over)
         assert "FAIL" in {v for v, _ in brc.check(bad, "hand_body_soak")}, over
+    slow = [hand_body_status(**timing(hist=[6000, 900, 80, 15, 4, 0, 8, 0, 0, 0])) for _ in range(5)]   # 40 of 35035 ticks over budget: p99.9 > 200
+    assert "FAIL" in {v for v, _ in brc.check(slow, "hand_body_soak")}
+    # p99.9 is judged on the summed histogram: 35 over-budget ticks in 35000 is exactly 0.1 % -> still <= 200; 36 is not
+    edge = [hand_body_status() for _ in range(5)]
+    for h in edge:
+        h["hand_body"]["timing"]["hist"] = [6993, 0, 0, 0, 0, 0, 7, 0, 0, 0]
+    assert all(v != "FAIL" for v, _ in brc.check(edge, "hand_body_soak")), brc.check(edge, "hand_body_soak")
+    edge[0]["hand_body"]["timing"]["hist"] = [6992, 0, 0, 0, 0, 0, 8, 0, 0, 0]
+    assert "FAIL" in {v for v, _ in brc.check(edge, "hand_body_soak")}
+    assert brc.wall_percentile_upper_us([0, 0, 0], [10, 20], .999) is None
+    assert brc.wall_percentile_upper_us([0, 0, 1], [10, 20], .999) == float("inf")
+    assert brc.wall_percentile_upper_us([999, 1, 0], [10, 20], .999) == 10 and brc.wall_percentile_upper_us([998, 2, 0], [10, 20], .999) == 20
+    # --proofs a: older sessions (no timing block, no positive control) are judged for proof (a) only
+    old = [hand_body_status() for _ in range(3)]
+    for h in old:
+        for key in ("timing", "root_moved_ticks", "pressed_ticks"):
+            del h["hand_body"][key]
+    assert all(v != "FAIL" for v, _ in brc.check(old, "hand_body_soak", ("a",))), brc.check(old, "hand_body_soak", ("a",))
+    assert "FAIL" in {v for v, _ in brc.check(old, "hand_body_soak")}
+    old[1]["hand_body"]["faults"] = 1
+    assert "FAIL" in {v for v, _ in brc.check(old, "hand_body_soak", ("a",))}
     stopped = [hand_body_status() for _ in range(5)]   # a snapshot after the session-end stop: installed false, bodies destroyed
     for sd in stopped[4]["hand_body"]["sides"]:
         sd.update(state=0, destroys=1, abandons=0, lost=0)
@@ -189,7 +222,7 @@ def hand_body_checks():
     undriven = [hand_body_status() for _ in range(5)]
     undriven[2]["hand_body"]["sides"][1]["drive"]["drive_writes"] = 0
     assert "FAIL" in {v for v, _ in brc.check(undriven, "hand_body_soak")}, "a body never driven"
-    for key in ("faults", "cost_max_us", "player_drift_um"):   # absent counters never default to 0
+    for key in ("faults", "player_drift_um", "timing", "root_moved_ticks"):   # absent counters never default to 0
         absent = [hand_body_status() for _ in range(5)]
         del absent[0]["hand_body"][key]
         assert "FAIL" in {v for v, _ in brc.check(absent, "hand_body_soak")}, key

@@ -16,7 +16,7 @@ TANKS = ("tank_wall", "tank_drop", "tank_drop_cycles")  # Part 5A held-clamp sce
 CARRY_FAULTS = ("failed_reads", "rejected_publishes", "bad_quat_reads")
 HAND_BODY = ("hand_body_soak",)  # Plan B B14: the driven hand bodies (proofs a, b, d), summed over sessions
 HAND_BODY_COST_US = 200          # proof (d): the drive's cost per tick, both hands summed
-HAND_BODY_PRESSED_TICKS = 100   # about 1 s of a body inside the capsule per session (the scripted segment holds 14 s)
+HAND_BODY_PRESSED_TICKS = 1000  # review P3-5: about 5 s per hand inside the capsule per session (the scripted segment holds 14 s; ~2100 seen)
 HAND_BODY_DRIFT_UM = 1000        # proof (b): the player root's unexplained movement while a hand is pressed into the capsule
 
 
@@ -32,7 +32,7 @@ def _sum_pairs(statuses, getter):
     return out
 
 
-def check(statuses, scenario):
+def check(statuses, scenario, proofs=("a", "b", "d")):
     """statuses: one parsed xr-live-status.json per session. -> list of (verdict, text); verdict PASS/FAIL/INFO."""
     out = []
 
@@ -43,7 +43,7 @@ def check(statuses, scenario):
         out.append(("INFO", text))
 
     if scenario in HAND_BODY:
-        return check_hand_body(statuses)
+        return check_hand_body(statuses, proofs)
     corpse = [s.get("corpse") or {} for s in statuses]
     if not statuses or any(not c for c in corpse):
         return [("FAIL", "status has no corpse block")]
@@ -153,9 +153,26 @@ def _num(v):
     return isinstance(v, (int, float)) and not isinstance(v, bool)
 
 
-def check_hand_body(statuses):
-    """B14 soak: every session's "hand_body" object. Faults summed == 0 (proof a), max player_drift_um <= 1000 (proof b), cost_max_us <= 200
-    in every session (proof d). An absent counter is a FAIL, never a zero; a session whose bodies were never created or driven FAILs (vacuous)."""
+def wall_percentile_upper_us(hist, edges, q):
+    """The upper edge of the histogram bin holding the q-quantile (conservative); inf when it falls in the open last bin; None if empty."""
+    total = sum(hist)
+    if not total:
+        return None
+    need, run = q * total, 0
+    for i, n in enumerate(hist):
+        run += n
+        if run >= need:
+            return edges[i] if i < len(edges) else float("inf")
+    return float("inf")
+
+
+def check_hand_body(statuses, proofs=("a", "b", "d")):
+    """B14 soak: every session's "hand_body" object. Proof (a): faults summed == 0, available, bodies created and driven, a clean or live
+    install. Proof (b): max player_drift_um <= 1000, pressed_ticks >= 1000 per session, and the positive control root_moved_ticks > 0 (the
+    root is seen to move under locomotion input, so a stale root cannot pass with 0 um). Proof (d), fix-round-1 criteria set before the
+    re-run: per-tick drive CPU time max <= 200 us (both hands; CPU time must be available) AND the wall-time p99.9 (from the summed
+    histogram, conservative bin edge) <= 200 us; the wall max is reported only. An absent counter is a FAIL, never a zero.
+    clean_stop (below) was added after run 20261024T022440 wrote its status after the session-end stop; reviewed (task-B14-review P3-4)."""
     out = []
 
     def add(ok, text):
@@ -166,11 +183,12 @@ def check_hand_body(statuses):
     hb = [s.get("hand_body") if isinstance(s.get("hand_body"), dict) else {} for s in statuses]
     if any(not h for h in hb):
         return [("FAIL", "status has no hand_body block")]
-    for key in ("faults", "cost_max_us", "player_drift_um", "available", "hand_body_fault", "sides"):
+    for key in ("faults", "available", "hand_body_fault", "sides") + (("player_drift_um", "pressed_ticks", "root_moved_ticks") if "b" in proofs else ()) + (("timing",) if "d" in proofs else ()):
         add(all(key in h for h in hb), f"hand_body.{key} present in every session")
-    nums = ("faults", "cost_max_us", "player_drift_um")
-    if any(not all(_num(h.get(k)) for k in nums) or not isinstance(h.get("sides"), list) or len(h["sides"]) != 2 for h in hb):
-        out.append(("FAIL", "hand_body counters missing or not numbers (faults, cost_max_us, player_drift_um, sides[2])"))
+    nums = ("faults",) + (("player_drift_um", "pressed_ticks", "root_moved_ticks") if "b" in proofs else ())
+    if any(not all(_num(h.get(k)) for k in nums) or not isinstance(h.get("sides"), list) or len(h["sides"]) != 2 for h in hb) or \
+            ("d" in proofs and any(not isinstance(h.get("timing"), dict) for h in hb)):
+        out.append(("FAIL", f"hand_body counters missing or not numbers ({', '.join(nums)}, sides[2]{', timing' if 'd' in proofs else ''})"))
         return out
     for i, h in enumerate(hb):
         # The status file may be written after the session-end stop(): installed is then false, which is fine only after a clean stop
@@ -180,24 +198,43 @@ def check_hand_body(statuses):
         add(h.get("enabled") is True and (h.get("installed") is True or clean_stop),
             f"session {i + 1}: hand body enabled and installed (or cleanly stopped before the snapshot: installed {h.get('installed')})")
         add(h.get("available") is True and h.get("hand_body_fault") is False, f"session {i + 1}: available, no HandBodyFault (why {h.get('why')!r})")
+        add(h.get("g1") == "pass" and not h.get("g1_violation"), f"session {i + 1}: G1 pass, no violation (g1 {h.get('g1')!r})")
         creates = [sd.get("creates", 0) for sd in h["sides"]]
         writes = [(sd.get("drive") or {}).get("drive_writes", 0) for sd in h["sides"]]
         add(all(c >= 1 for c in creates) and all(w >= 100 for w in writes),
             f"session {i + 1}: both bodies created and driven (creates {creates}, drive_writes {writes})")
-        pressed = h.get("pressed_ticks")   # proof (b) is not vacuous: the bodies sat in the capsule with no locomotion input
-        add(_num(pressed) and pressed >= HAND_BODY_PRESSED_TICKS, f"session {i + 1}: pressed_ticks {pressed} >= {HAND_BODY_PRESSED_TICKS} (the drift window was entered)")
-        add(h["cost_max_us"] <= HAND_BODY_COST_US, f"session {i + 1}: cost_max_us {h['cost_max_us']} <= {HAND_BODY_COST_US} (drive, both hands per tick)")
-        steady = h.get("steady_tick_cost_max_us")   # DeepSeek P2: the whole tick (service + both drives) on ticks with no create/destroy
-        add(_num(steady) and steady <= HAND_BODY_COST_US, f"session {i + 1}: steady_tick_cost_max_us {steady} <= {HAND_BODY_COST_US} (whole tick)")
+        if "b" in proofs:
+            add(h["pressed_ticks"] >= HAND_BODY_PRESSED_TICKS, f"session {i + 1}: pressed_ticks {h['pressed_ticks']} >= {HAND_BODY_PRESSED_TICKS} (the drift window was entered)")
+            add(h["root_moved_ticks"] > 0, f"session {i + 1}: root_moved_ticks {h['root_moved_ticks']} > 0 (positive control: the root moves under locomotion, travel {h.get('root_travel_um')} um)")
     faults = sum(h["faults"] for h in hb)
     add(faults == 0, f"hand_body.faults summed over {len(hb)} sessions == 0 (got {faults})")
-    drift = max(h["player_drift_um"] for h in hb)
-    add(drift <= HAND_BODY_DRIFT_UM, f"player_drift_um max {drift} <= {HAND_BODY_DRIFT_UM}")
+    if "b" in proofs:
+        drift = max(h["player_drift_um"] for h in hb)
+        add(drift <= HAND_BODY_DRIFT_UM, f"player_drift_um max {drift} <= {HAND_BODY_DRIFT_UM}")
+    if "d" in proofs:
+        tm = [h["timing"] for h in hb]
+        edges = tm[0].get("hist_edges_us")
+        ok_shape = all(isinstance(t.get("hist"), list) and t.get("hist_edges_us") == edges and isinstance(edges, list)
+                       and len(t["hist"]) == len(edges) + 1 for t in tm)
+        add(ok_shape, "timing.hist present with the same edges in every session")
+        if ok_shape:
+            summed = [sum(t["hist"][k] for t in tm) for k in range(len(edges) + 1)]
+            p999 = wall_percentile_upper_us(summed, edges, 0.999)
+            add(p999 is not None and p999 <= HAND_BODY_COST_US,
+                f"wall p99.9 (conservative bin edge, {sum(summed)} ticks over {len(tm)} sessions) {p999} <= {HAND_BODY_COST_US} us")
+        cpu_ok = all(t.get("cpu_available") is True for t in tm)
+        cpu_max = max((t.get("cpu_max_us") or 0) for t in tm)
+        add(cpu_ok and cpu_max <= HAND_BODY_COST_US,
+            f"CPU time per tick max {cpu_max if cpu_ok else 'UNMEASURED'} <= {HAND_BODY_COST_US} us (cpu_available {[t.get('cpu_available') for t in tm]})")
+        out.append(("INFO", f"wall max us {[t.get('wall_max_us') for t in tm]}, over_wall {[t.get('over_wall') for t in tm]}, ticks {[t.get('ticks') for t in tm]}, "
+                    f"slowest tick {[t.get('slow') for t in tm]}, hist {[t.get('hist') for t in tm]}"))
     side = lambda h, k: [(sd.get("drive") or {}).get(k) for sd in h["sides"]]
-    out.append(("INFO", f"per session: gap_m {[h.get('gap_m') for h in hb]}, contact_frames {[h.get('contact_frames') for h in hb]}, "
-                f"snaps {[h.get('snaps') for h in hb]}, cost_us {[h.get('cost_us') for h in hb]}, cost_max_us {[h['cost_max_us'] for h in hb]}, "
+    cast = [((s.get("hand_clamp") or {}).get("cast_us"), (s.get("hand_clamp") or {}).get("cast_us_max")) for s in statuses]
+    out.append(("INFO", f"per session: gap_m {[h.get('gap_m') for h in hb]}, contact_frames (a diagnostic, not contact evidence) {[h.get('contact_frames') for h in hb]}, "
+                f"snaps {[h.get('snaps') for h in hb]}, cost_us {[h.get('cost_us') for h in hb]}, cost_max_us {[h.get('cost_max_us') for h in hb]}, "
                 f"tick_cost_max_us {[h.get('tick_cost_max_us') for h in hb]}, steady_tick_cost_max_us {[h.get('steady_tick_cost_max_us') for h in hb]}, "
-                f"player_drift_um {[h['player_drift_um'] for h in hb]}, abandons {[h.get('abandons') for h in hb]}, "
+                f"hand_clamp cast_us/cast_us_max {cast}, player_drift_um {[h.get('player_drift_um') for h in hb]}, pressed_ticks {[h.get('pressed_ticks') for h in hb]}, "
+                f"root_moved_ticks {[h.get('root_moved_ticks') for h in hb]}, abandons {[h.get('abandons') for h in hb]}, "
                 f"snap_blocked {[side(h, 'snap_blocked') for h in hb]}, yields {[side(h, 'yields') for h in hb]}"))
     return out
 
@@ -206,6 +243,7 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("run_dirs", nargs="+")
     ap.add_argument("--scenario", required=True)
+    ap.add_argument("--proofs", default="abd", help="hand_body_soak only: the proofs to judge (a, b, d); e.g. --proofs a over sessions without the timing block")
     args = ap.parse_args(argv)
     statuses = []
     for d in args.run_dirs:
@@ -215,7 +253,7 @@ def main(argv=None):
         except (OSError, ValueError) as e:
             print(f"FAIL  cannot read {f}: {e}")
             return 1
-    rows = check(statuses, args.scenario)
+    rows = check(statuses, args.scenario, tuple(args.proofs))
     for verdict, text in rows:
         print(f"{verdict:4}  {text}")
     return 1 if any(v == "FAIL" for v, _ in rows) else 0

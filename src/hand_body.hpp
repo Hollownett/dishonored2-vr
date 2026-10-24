@@ -97,7 +97,21 @@ struct BodyMotion {Vec3 position{},velocity{},spin{};};
 struct DriveInput {unsigned side{};WorldTrackedPose target{};double held_kg{};double now{};bool yield{};
                    bool target_free{};std::optional<Vec3> player_root{};bool locomotion{};};
 struct DriveStatus {double gap_m{};double speed{};bool capped{};std::uint64_t contact_frames{},snaps{},cost_us{},cost_max_us{},player_drift_um{};
-                    double dt_s{};std::uint64_t drives{},drive_writes{},yields{},skipped{},snap_requests{},snap_blocked{},garbage{},second_drives{},root_jumps{},pressed_ticks{};};
+                    double dt_s{};std::uint64_t drives{},drive_writes{},yields{},skipped{},snap_requests{},snap_blocked{},garbage{},second_drives{},root_jumps{},pressed_ticks{};
+                    // fix round 1: thread CPU time of this side's drive (QueryThreadCycleTime; 0 when unavailable), and the positive control for
+                    // the drift proof: ticks where the root moved under locomotion input, and the largest such root travel in one locomotion window
+                    std::uint64_t cpu_us{},cpu_max_us{},root_moved_ticks{},root_travel_um{};};
+// Fix round 1 (proof d, controller ruling): per-tick drive cost (both hands summed) as wall time (QPC) and thread CPU time, a fixed wall
+// histogram, the ticks over budget, and the phase split of the slowest tick (read-back, servo, write, the rest). hist edges in us:
+// [0,10) [10,20) [20,50) [50,100) [100,150) [150,200) [200,300) [300,500) [500,1000) [1000,inf).
+inline constexpr std::array<std::uint64_t,9> kDriveHistEdgesUs{{10,20,50,100,150,200,300,500,1000}};
+struct DriveTiming {
+    bool cpu_available{};double cycles_per_us{};
+    std::uint64_t ticks{},over_wall{},over_cpu{},wall_max_us{},cpu_max_us{};
+    std::array<std::uint64_t,kDriveHistEdgesUs.size()+1> hist{};
+    std::uint64_t slow_wall_us{},slow_cpu_us{},slow_read_us{},slow_servo_us{},slow_write_us{},slow_other_us{};
+};
+inline constexpr std::uint64_t kDriveBudgetUs=200;
 
 // ---- G1: thread and drain point (docs Gates for B11). Counted by the count-only hooks; judged here.
 struct G1Stats {
@@ -220,6 +234,8 @@ struct HandBodyEngine {
     std::function<bool()> at_g1_point;                                                // write() is allowed only here (the dispatcher's G1 tick); absent: allowed
     std::function<std::optional<BodyMotion>(unsigned side,std::uint32_t handle)> motion;  // B14 read-back; nullopt: not our body; throws HandBodyUnreadable
     std::function<std::uint64_t()> now_us;                                            // B14 cost clock (microseconds); absent: costs read 0
+    std::function<std::optional<std::uint64_t>()> cpu_cycles;                         // fix round 1: this thread's CPU cycles (QueryThreadCycleTime); nullopt: unavailable
+    double cycles_per_us{};                                                           // the calibration (cycles per microsecond); <= 0: CPU time unavailable
 };
 
 // Gate state the runtime passes each tick (defaults: open, for the fakes).
@@ -259,7 +275,7 @@ public:
         const TickGuard guard(ticking_);   // an atomic flag, not a mutex: a re-entry from the same thread is a refusal, never UB
         if(!guard.owned) {reentries_.fetch_add(1,std::memory_order_relaxed);return;}
         ticks_.fetch_add(1,std::memory_order_relaxed);
-        ++tick_index_;tick_drive_cost_us_=0;   // B14: one velocity write per side per tick; the drive cost is summed over the tick's two drives
+        ++tick_index_;file_tick_timing();   // B14: one velocity write per side per tick; the drive cost is summed over the tick's two drives
         if(HandBodyFault::tripped() && !latched_) latch(0,"HandBodyFault tripped elsewhere",false);
         if(gate.violated && !latched_) latch(0,gate.why && *gate.why?gate.why:"gate violated",false);
         std::uintptr_t world{};
@@ -361,11 +377,12 @@ public:
         if(!at_point) {count(side,&Counters::misplaced_writes);return;}
         const TickGuard guard(ticking_);
         if(!guard.owned) {count(side,&Counters::reentrant_writes);return;}
-        const std::uint64_t t0=clock_us();
-        struct Cost {HandBody& hb;unsigned side;std::uint64_t t0;
-            ~Cost() {const std::uint64_t t1=hb.clock_us();const std::uint64_t us=t1>=t0?t1-t0:0;hb.note_cost(side,us);}} cost{*this,side,t0};
+        const std::uint64_t t0=clock_us();const auto c0=cpu_now();
+        struct Cost {HandBody& hb;unsigned side;std::uint64_t t0;std::optional<std::uint64_t> c0;std::uint64_t read{},servo{},write{};   // phase end marks (0: not reached)
+            ~Cost() {hb.note_cost(side,t0,c0,read,servo,write);}} cost{*this,side,t0,c0};
         count(side,&Counters::drives);
         Side& s=side_[side];
+        const bool had_cmd=s.has_cmd;s.has_cmd=false;   // review P3-3: a command older than the last drive is never compared (metric only)
         if(latched_ || !enabled_ || life_.state(side)!=BodyState::ready || s.pending_destroy) {count(side,&Counters::skipped);return;}
         std::uintptr_t world{};
         try {world=engine_.world?engine_.world():0;} catch(...) {world=0;}
@@ -388,6 +405,7 @@ public:
             return;
         }
         catch(const HandBodyEngineFault& f) {latch(side,f.what(),true);return;}
+        cost.read=clock_us();
         if(!m) {count(side,&Counters::skipped);return;}                                      // not our body: service()'s read-back handles it
         const auto& dc=drive_cfg_;
         if(!finite(m->position) || !finite(m->velocity) || !finite(m->spin) || length(m->position)>dc.garbage_position ||
@@ -400,10 +418,10 @@ public:
         // The real interval since this side's last drive (not the dispatcher's 7-11k/s interval): the first drive after a create only starts it.
         const double dt=in.now-s.last_drive_s;
         if(std::isfinite(in.now)) s.last_drive_s=in.now;
-        if(!std::isfinite(dt) || !(dt>0)) {count(side,&Counters::skipped);s.has_cmd=false;return;}
+        if(!std::isfinite(dt) || !(dt>0)) {count(side,&Counters::skipped);return;}
         c.dt_s.store(dt,std::memory_order_relaxed);
         // contact without events (research §2.5): last tick's command achieved short by more than 25% along its own direction
-        if(s.has_cmd) {
+        if(had_cmd) {
             const double want=length(s.last_cmd);
             if(want>=dc.contact_min_speed && dot(m->velocity,s.last_cmd)/want<(1-dc.contact_shortfall)*want) count(side,&Counters::contact_frames);
         }
@@ -421,18 +439,20 @@ public:
             }
         }
         linear=hand_servo_detail::limited(linear,dc.max_write_speed);angular=hand_servo_detail::limited(angular,dc.max_write_spin);
-        s.last_cmd=linear;s.has_cmd=!yielded;
+        s.last_cmd=linear;
         // gravity compensation (Q4 option 3): the step takes g*dt off, the write adds it back (dt as the servo uses it)
         const Vec3 written=linear+Vec3{0,0,dc.gravity*std::min(dt,tuning_.dt_max)};
         if(!finite(written) || !finite(angular) || length(written)>kHandWriteMaxSpeed || length(angular)>kHandWriteMaxSpin) {
             count(side,&Counters::garbage);latch(side,"drive produced a non-finite or oversized command",true);return;
         }
         s.written_tick=tick_index_;   // attempted: never a second write this tick, whatever apply() says
+        cost.servo=clock_us();
         bool ok=false;
-        try {ok=engine_.apply(side,hand_body::encode_set_velocity(s.handle,written,angular));}
+        try {ok=engine_.apply(side,hand_body::encode_set_velocity(s.handle,written,angular));cost.write=clock_us();}
         catch(const HandBodyEngineFault& f) {latch(side,f.what(),true);return;}
         catch(const std::invalid_argument&) {count(side,&Counters::garbage);latch(side,"drive record refused (non-finite)",true);return;}
         if(!ok) {count(side,&Counters::refused_writes);s.has_cmd=false;return;}
+        s.has_cmd=!yielded;
         s.woken=true;count(side,&Counters::writes);count(side,&Counters::drive_writes);
     }
     DriveStatus drive_status(unsigned side) const {
@@ -442,11 +462,21 @@ public:
         d.cost_us=c.cost_us.load();d.cost_max_us=c.cost_max_us.load();d.player_drift_um=c.player_drift_um.load();d.dt_s=c.dt_s.load();
         d.drives=c.drives.load();d.drive_writes=c.drive_writes.load();d.yields=c.yields.load();d.skipped=c.skipped.load();
         d.snap_requests=c.snap_requests.load();d.snap_blocked=c.snap_blocked.load();d.garbage=c.garbage.load();d.second_drives=c.second_drives.load();d.root_jumps=c.root_jumps.load();d.pressed_ticks=c.pressed_ticks.load();
+        d.cpu_us=c.cpu_us.load();d.cpu_max_us=c.cpu_max_us.load();d.root_moved_ticks=c.root_moved_ticks.load();d.root_travel_um=c.root_travel_um.load();
         return d;
     }
     // The largest drive cost of one tick, both hands summed (proof (d): <= 200 us), and the last tick's sum.
     std::uint64_t drive_cost_max_us() const {return drive_cost_max_us_.load();}
     std::uint64_t drive_cost_us() const {return drive_cost_us_.load();}
+    DriveTiming drive_timing() const {
+        DriveTiming t;t.cpu_available=cpu_available();t.cycles_per_us=engine_.cycles_per_us;
+        t.ticks=timing_ticks_.load();t.over_wall=over_wall_.load();t.over_cpu=over_cpu_.load();t.wall_max_us=drive_cost_max_us_.load();t.cpu_max_us=cpu_tick_max_us_.load();
+        for(std::size_t i=0;i<t.hist.size();++i) t.hist[i]=hist_[i].load();
+        t.slow_wall_us=slow_[0].load();t.slow_cpu_us=slow_[1].load();t.slow_read_us=slow_[2].load();t.slow_servo_us=slow_[3].load();t.slow_write_us=slow_[4].load();t.slow_other_us=slow_[5].load();
+        return t;
+    }
+    // The tick sums are filed into the histogram at the next service() (both drives are in by then); this files the last one (tests, stop).
+    void file_drive_tick() {const TickGuard guard(ticking_);if(guard.owned) file_tick_timing();}
     HandBodyStatus status(unsigned side) const {
         HandBodyStatus st;if(side>=sides) return st;
         const auto& c=counters_[side];
@@ -474,7 +504,7 @@ private:
         std::atomic<std::uint64_t> creates{},destroys{},faults{},refused_writes{},abandons{},queued_destroys{},direct_destroys{},busy_waits{},
             wake_writes{},create_refusals{},writes{},releases{},lost{},unverified{},misplaced_writes{},reentrant_writes{};
         std::atomic<std::uint64_t> contact_frames{},snaps{},cost_us{},cost_max_us{},player_drift_um{},drives{},drive_writes{},yields{},skipped{},
-            snap_requests{},snap_blocked{},garbage{},second_drives{},root_jumps{},pressed_ticks{};
+            snap_requests{},snap_blocked{},garbage{},second_drives{},root_jumps{},pressed_ticks{},cpu_us{},cpu_max_us{},root_moved_ticks{},root_travel_um{};
         std::atomic<double> gap_m{},speed{},dt_s{};std::atomic<bool> capped{};
         std::atomic<int> state{};std::atomic<std::uint32_t> handle{};
     };
@@ -487,19 +517,61 @@ private:
     struct Side {std::uint32_t handle{},gen{};std::uintptr_t world{};bool pending_destroy{},woken{};unsigned attempts{},wake_tries{};std::uint64_t next_create_ms{};
         // B14 drive state (dispatcher thread only)
         HandServoState servo{};double last_drive_s{std::numeric_limits<double>::quiet_NaN()};std::uint64_t written_tick{~0ull};
-        std::uint64_t drive_tick{~0ull};bool snap_pending{},has_cmd{};Vec3 last_cmd{};std::optional<Vec3> press_root,last_root;unsigned unreadable_motion{};};
+        std::uint64_t drive_tick{~0ull};bool snap_pending{},has_cmd{};Vec3 last_cmd{};std::optional<Vec3> press_root,last_root,loco_start,loco_last;unsigned unreadable_motion{};};
     void count(unsigned side,std::atomic<std::uint64_t> Counters::* field) {(counters_[side].*field).fetch_add(1,std::memory_order_relaxed);}
     std::uint64_t clock_us() const {try {return engine_.now_us?engine_.now_us():0;} catch(...) {return 0;}}
-    void note_cost(unsigned side,std::uint64_t us) {
-        auto& c=counters_[side];c.cost_us.store(us,std::memory_order_relaxed);
-        if(us>c.cost_max_us.load(std::memory_order_relaxed)) c.cost_max_us.store(us,std::memory_order_relaxed);
-        tick_drive_cost_us_+=us;drive_cost_us_.store(tick_drive_cost_us_,std::memory_order_relaxed);
-        if(tick_drive_cost_us_>drive_cost_max_us_.load(std::memory_order_relaxed)) drive_cost_max_us_.store(tick_drive_cost_us_,std::memory_order_relaxed);
+    // CPU time is available only with a calibration and while every read succeeds (one failed read: unavailable for the session)
+    bool cpu_available() const {return engine_.cpu_cycles && engine_.cycles_per_us>0 && !cpu_failed_.load(std::memory_order_relaxed);}
+    std::optional<std::uint64_t> cpu_now() {
+        if(!cpu_available()) return std::nullopt;
+        std::optional<std::uint64_t> c;
+        try {c=engine_.cpu_cycles();} catch(...) {c.reset();}
+        if(!c) cpu_failed_.store(true,std::memory_order_relaxed);
+        return c;
+    }
+    static void store_max(std::atomic<std::uint64_t>& a,std::uint64_t v) {if(v>a.load(std::memory_order_relaxed)) a.store(v,std::memory_order_relaxed);}
+    void note_cost(unsigned side,std::uint64_t t0,const std::optional<std::uint64_t>& c0,std::uint64_t read,std::uint64_t servo,std::uint64_t write) {
+        const std::uint64_t t1=clock_us();const std::uint64_t us=t1>=t0?t1-t0:0;
+        auto& c=counters_[side];c.cost_us.store(us,std::memory_order_relaxed);store_max(c.cost_max_us,us);
+        std::uint64_t cpu_us=0;
+        if(c0) if(const auto c1=cpu_now(); c1 && *c1>=*c0) cpu_us=static_cast<std::uint64_t>(static_cast<double>(*c1-*c0)/engine_.cycles_per_us+.5);
+        c.cpu_us.store(cpu_us,std::memory_order_relaxed);store_max(c.cpu_max_us,cpu_us);
+        // phases of this drive (a mark of 0: that phase was not reached; the time then counts as "other")
+        const auto span=[](std::uint64_t a,std::uint64_t b) {return a && b>=a?b-a:0;};
+        const std::uint64_t r=read?span(t0,read):0,sv=read && servo?span(read,servo):0,w=servo && write?span(servo,write):0;
+        tick_drive_cost_us_+=us;tick_cpu_us_+=cpu_us;tick_read_us_+=r;tick_servo_us_+=sv;tick_write_us_+=w;tick_drove_=true;
+        drive_cost_us_.store(tick_drive_cost_us_,std::memory_order_relaxed);
+        store_max(cpu_tick_max_us_,tick_cpu_us_);
+        if(tick_drive_cost_us_>drive_cost_max_us_.load(std::memory_order_relaxed)) {   // the slowest tick so far (sums of both drives once both are in)
+            drive_cost_max_us_.store(tick_drive_cost_us_,std::memory_order_relaxed);
+            const std::uint64_t known=tick_read_us_+tick_servo_us_+tick_write_us_;
+            slow_[0].store(tick_drive_cost_us_);slow_[1].store(tick_cpu_us_);slow_[2].store(tick_read_us_);slow_[3].store(tick_servo_us_);slow_[4].store(tick_write_us_);
+            slow_[5].store(tick_drive_cost_us_>=known?tick_drive_cost_us_-known:0);
+        }
+    }
+    // Called at the start of each service() tick for the previous tick's two drives.
+    void file_tick_timing() {
+        if(!tick_drove_) return;
+        timing_ticks_.fetch_add(1,std::memory_order_relaxed);
+        std::size_t bin=0;while(bin<kDriveHistEdgesUs.size() && tick_drive_cost_us_>=kDriveHistEdgesUs[bin]) ++bin;
+        hist_[bin].fetch_add(1,std::memory_order_relaxed);
+        if(tick_drive_cost_us_>kDriveBudgetUs) over_wall_.fetch_add(1,std::memory_order_relaxed);
+        if(cpu_available() && tick_cpu_us_>kDriveBudgetUs) over_cpu_.fetch_add(1,std::memory_order_relaxed);
+        tick_drove_=false;tick_drive_cost_us_=tick_cpu_us_=tick_read_us_=tick_servo_us_=tick_write_us_=0;
     }
     // player_drift_um: the largest displacement of the player root inside one window where this hand's body is pressed into the capsule
     // and there is no locomotion input. Reported, never clamped or acted on (the hand never moves the player: the filter word omits 6/7/8/18).
     void note_drift(unsigned side,const DriveInput& in,Vec3 body) {
         Side& s=side_[side];const auto& dc=drive_cfg_;
+        // review P2-2 (positive control): the root must be seen to move under locomotion input, or a stale root would also read 0 drift
+        if(in.locomotion && in.player_root && finite(*in.player_root)) {
+            const Vec3 r=*in.player_root;
+            if(s.loco_last && length(r-*s.loco_last)>1e-4 && length(r-*s.loco_last)<=dc.root_jump) count(side,&Counters::root_moved_ticks);
+            if(!s.loco_start) s.loco_start=r;
+            s.loco_last=r;
+            const double um=length(r-*s.loco_start)*1e6;
+            if(std::isfinite(um)) store_max(counters_[side].root_travel_um,static_cast<std::uint64_t>(um+.5));
+        } else {s.loco_start.reset();s.loco_last.reset();}
         if(!in.player_root || !finite(*in.player_root) || in.locomotion) {s.press_root.reset();s.last_root.reset();return;}
         const Vec3 r=*in.player_root;const Vec3 d=body-r;
         const bool pressed=std::sqrt(d.x*d.x+d.y*d.y)<=dc.capsule_radius && d.z>=-.05 && d.z<=dc.capsule_height;
@@ -588,7 +660,7 @@ private:
     }
     void finish(unsigned side) {Side& s=side_[side];life_.destroyed(side);s.handle=0;s.attempts=0;s.pending_destroy=false;reset_drive(side);}
     void reset_drive(unsigned side) {
-        Side& s=side_[side];s.servo={};s.last_drive_s=std::numeric_limits<double>::quiet_NaN();s.snap_pending=false;s.has_cmd=false;s.press_root.reset();s.last_root.reset();s.unreadable_motion=0;
+        Side& s=side_[side];s.servo={};s.last_drive_s=std::numeric_limits<double>::quiet_NaN();s.snap_pending=false;s.has_cmd=false;s.press_root.reset();s.last_root.reset();s.loco_start.reset();s.loco_last.reset();s.unreadable_motion=0;
     }
     void readback(unsigned side,std::uintptr_t world) {
         const Side& s=side_[side];
@@ -615,7 +687,9 @@ private:
     HandBodyLifecycle life_;std::array<Side,sides> side_{};std::array<Counters,sides> counters_{};std::array<HandBodyPoseSlot,sides> poses_{};
     std::atomic<bool> ticking_{};bool latched_{};std::atomic<bool> latched_flag_{},shutdown_{};
     HandServoConfig servo_cfg_{};GrabTuning tuning_{};HandDriveConfig drive_cfg_{};
-    std::uint64_t tick_index_{},tick_drive_cost_us_{};std::atomic<std::uint64_t> drive_cost_max_us_{},drive_cost_us_{};
+    std::uint64_t tick_index_{},tick_drive_cost_us_{},tick_cpu_us_{},tick_read_us_{},tick_servo_us_{},tick_write_us_{};bool tick_drove_{};
+    std::atomic<std::uint64_t> drive_cost_max_us_{},drive_cost_us_{},cpu_tick_max_us_{},timing_ticks_{},over_wall_{},over_cpu_{};
+    std::array<std::atomic<std::uint64_t>,kDriveHistEdgesUs.size()+1> hist_{};std::array<std::atomic<std::uint64_t>,6> slow_{};std::atomic<bool> cpu_failed_{};
     std::uintptr_t last_world_{};std::uint32_t last_gen_{};
     mutable std::mutex why_mutex_;std::string why_;
     std::atomic<std::uint64_t> ticks_{},unreadable_ticks_{},reentries_{};

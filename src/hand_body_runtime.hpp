@@ -79,6 +79,7 @@ public:
         for(auto& st:stranded_) st.store(false);authored_.store(false);authored_tick_.store(0);
         alive_outside_gameplay_.store(0);storage_exhausted_.store(0);retired_.store(0);
         {std::lock_guard<std::mutex> lock(events_mutex_);events_.clear();dropped_events_=0;}
+        cycles_per_us_=calibrate_cycles_per_us();
         auto* body=new HandBody(engine(),true);   // never freed: a render-thread reader may still hold the previous one (tiny, per install)
         body_.store(body,std::memory_order_release);
         for(auto& s:last_status_) s={};
@@ -182,7 +183,8 @@ public:
              <<",\"snaps\":"<<d.snaps<<",\"snap_requests\":"<<d.snap_requests<<",\"snap_blocked\":"<<d.snap_blocked<<",\"cost_us\":"<<d.cost_us
              <<",\"cost_max_us\":"<<d.cost_max_us<<",\"player_drift_um\":"<<d.player_drift_um<<",\"dt_s\":"<<d.dt_s<<",\"drives\":"<<d.drives
              <<",\"drive_writes\":"<<d.drive_writes<<",\"yields\":"<<d.yields<<",\"skipped\":"<<d.skipped<<",\"garbage\":"<<d.garbage
-             <<",\"second_drives\":"<<d.second_drives<<",\"root_jumps\":"<<d.root_jumps<<",\"pressed_ticks\":"<<d.pressed_ticks<<'}';
+             <<",\"second_drives\":"<<d.second_drives<<",\"root_jumps\":"<<d.root_jumps<<",\"pressed_ticks\":"<<d.pressed_ticks
+             <<",\"cpu_us\":"<<d.cpu_us<<",\"cpu_max_us\":"<<d.cpu_max_us<<",\"root_moved_ticks\":"<<d.root_moved_ticks<<",\"root_travel_um\":"<<d.root_travel_um<<'}';
             o<<",\"pose\":";
             if(p) o<<'['<<p->position.x<<','<<p->position.y<<','<<p->position.z<<']';else o<<"null";
             o<<'}';
@@ -193,6 +195,16 @@ public:
          <<",\"tick_cost_us\":"<<tick_cost_us_.load()<<",\"tick_cost_max_us\":"<<tick_cost_max_us_.load()<<",\"steady_tick_cost_max_us\":"<<steady_tick_cost_max_us_.load()
          <<",\"player_drift_um\":"<<std::max(d0.player_drift_um,d1.player_drift_um)<<",\"pressed_ticks\":"<<(d0.pressed_ticks+d1.pressed_ticks)<<",\"contact_frames\":"<<(d0.contact_frames+d1.contact_frames)
          <<",\"snaps\":"<<(d0.snaps+d1.snaps)<<",\"gap_m\":["<<d0.gap_m<<','<<d1.gap_m<<']'
+         <<",\"root_moved_ticks\":"<<(d0.root_moved_ticks+d1.root_moved_ticks)<<",\"root_travel_um\":"<<std::max(d0.root_travel_um,d1.root_travel_um)
+         <<",\"timing\":"<<[&] {
+             const auto t=body->drive_timing();std::ostringstream v;
+             v<<"{\"cpu_available\":"<<(t.cpu_available?"true":"false")<<",\"cycles_per_us\":"<<t.cycles_per_us<<",\"ticks\":"<<t.ticks
+              <<",\"over_wall\":"<<t.over_wall<<",\"over_cpu\":"<<t.over_cpu<<",\"wall_max_us\":"<<t.wall_max_us<<",\"cpu_max_us\":"<<t.cpu_max_us<<",\"hist_edges_us\":[";
+             for(std::size_t i=0;i<kDriveHistEdgesUs.size();++i) v<<(i?",":"")<<kDriveHistEdgesUs[i];
+             v<<"],\"hist\":[";for(std::size_t i=0;i<t.hist.size();++i) v<<(i?",":"")<<t.hist[i];
+             v<<"],\"slow\":{\"wall_us\":"<<t.slow_wall_us<<",\"cpu_us\":"<<t.slow_cpu_us<<",\"read_us\":"<<t.slow_read_us<<",\"servo_us\":"<<t.slow_servo_us
+              <<",\"write_us\":"<<t.slow_write_us<<",\"other_us\":"<<t.slow_other_us<<"}}";
+             return v.str();}()
          <<",\"time_factor\":1,\"time_factor_verified\":false,\"gravity_comp\":"<<HandDriveConfig{}.gravity
          <<",\"abandons\":"<<(body->status(0).abandons+body->status(1).abandons)
          <<",\"release\":{\"holds\":"<<gate_holds_.load()<<",\"timeouts\":"<<gate_timeouts_.load()<<",\"intents\":"<<gate_intents_.load()
@@ -236,6 +248,7 @@ private:
     inline static std::array<HandBodyStatus,2> last_status_{};inline static std::array<DriveStatus,2> last_drive_{};
     inline static bool tick_changed_{};
     inline static std::atomic<std::uint64_t> tick_cost_us_{},tick_cost_max_us_{},steady_tick_cost_max_us_{};
+    inline static double cycles_per_us_{};   // fix round 1: QueryThreadCycleTime calibration (set by install before the manager exists)
     inline static std::atomic<std::uint32_t> tick_generation_{};inline static std::atomic<unsigned> tick_logic_{};inline static std::atomic<bool> tick_release_{};
 
     static Slot* slot_of(unsigned side) {return side<2 && current_[side]!=no_slot?&storage_[side][current_[side]]:nullptr;}
@@ -325,10 +338,28 @@ private:
             return HandBodyNative::motion(HandBodyNative::world_now(),handle,s->storage);
         };
         e.now_us=[] {return qpc_us();};
+        // Fix round 1: thread CPU time. QueryThreadCycleTime returns FALSE (0 cycles) under Wine 11 and Proton Experimental 11.0-100 (probed
+        // 2026-10-24): then cycles_per_us is 0 and the status says cpu_available:false; on Windows it is calibrated at install.
+        e.cpu_cycles=[]()->std::optional<std::uint64_t> {ULONG64 c{};if(!QueryThreadCycleTime(GetCurrentThread(),&c)) return std::nullopt;return static_cast<std::uint64_t>(c);};
+        e.cycles_per_us=cycles_per_us_;
         return e;
     }
 
     // ---- the 0x89fb0 entry (NativeGrab::invoke, after the original dispatcher)
+    // Cycles per microsecond of QueryThreadCycleTime against QPC: three 10 ms spins on the control thread, the highest rate kept (a spin that
+    // was preempted counts fewer cycles, so the highest is the least disturbed; a low rate would overstate CPU time, never hide it). 0: unavailable.
+    static double calibrate_cycles_per_us() {
+        double best=0;
+        for(int k=0;k<3;++k) {
+            ULONG64 c0{},c1{};
+            if(!QueryThreadCycleTime(GetCurrentThread(),&c0)) return 0;
+            const auto t0=qpc_us();std::uint64_t t1=t0;
+            while((t1=qpc_us())-t0<10000) {}
+            if(!QueryThreadCycleTime(GetCurrentThread(),&c1) || c1<=c0 || t1<=t0) return 0;
+            best=std::max(best,static_cast<double>(c1-c0)/static_cast<double>(t1-t0));
+        }
+        return best;
+    }
     static std::uint64_t qpc_us() {
         static const std::int64_t freq=[] {LARGE_INTEGER f{};QueryPerformanceFrequency(&f);return f.QuadPart>0?f.QuadPart:1;}();
         LARGE_INTEGER c{};QueryPerformanceCounter(&c);

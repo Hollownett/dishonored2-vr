@@ -176,7 +176,8 @@ static void b13_checks() {
     {   // creates_once_per_world: one body per hand, created once, woken once, alive for the whole stay in one world
         HandBodyFault::reset_for_tests();FakeHands f;HandBody hb(f.engine());
         for(int i=0;i<600;++i) hb.service(gameplay_in(1000+i*16),kPalms);
-        CHECK(f.creates==2);CHECK(f.create_world_mismatch==0);   // review P3-1: created in the tick's world snapshotCHECK(hb.status(0).creates==1);CHECK(hb.status(1).creates==1);CHECK(hb.ready(0));CHECK(hb.ready(1));
+        CHECK(f.creates==2);CHECK(f.create_world_mismatch==0);   // review P3-1: created in the tick's world snapshot
+        CHECK(hb.status(0).creates==1);CHECK(hb.status(1).creates==1);CHECK(hb.ready(0));CHECK(hb.ready(1));
         CHECK(hb.status(0).wake_writes==1);CHECK(hb.status(1).wake_writes==1);CHECK(f.destroys==0);CHECK(hb.any_alive());
         CHECK(hb.pose(0) && std::abs(hb.pose(0)->position.x-.3)<1e-9);CHECK(hb.status(0).available);
         // no spawn (untracked palm): no create
@@ -507,6 +508,8 @@ struct FakeDrive {
     int creates=0,destroys=0,velocities=0,applies=0,motions=0,steps=0;
     std::array<int,2> applies_side{};std::array<Vec3,2> last_written{};std::array<int,2> creates_side{},destroys_side{};
     std::uint64_t clock=0;std::uint64_t call_us=7;   // every engine call costs call_us microseconds of the fake clock
+    std::uint64_t cpu=0;bool cpu_ok=true;std::uint64_t preempt_us=0;   // fix round 1: the thread's CPU clock; preempt_us: wall time with no CPU (in apply)
+    void spend() {clock+=call_us;cpu+=call_us;}
     bool garbage_nan=false,garbage_huge=false,garbage_pos=false,position_garbage=false,motion_unreadable=false;
     std::vector<std::string> log;
     void step() {   // the physics step between two dispatcher ticks
@@ -522,16 +525,16 @@ struct FakeDrive {
         HandBodyEngine e;
         e.world=[this]()->std::uintptr_t {return world_id;};
         e.busy=[this] {return busy;};
-        e.create=[this](unsigned side,std::uintptr_t,Vec3 at,std::uint32_t& h) {clock+=call_us;++creates;++creates_side[side];log.push_back("create:"+std::to_string(side));b[side]={true,next++,at,{},{}};h=b[side].handle;return true;};
-        e.velocity=[this](unsigned side,std::uint32_t h,Vec3 v) {clock+=call_us;++velocities;log.push_back("wake:"+std::to_string(side));if(!b[side].alive || b[side].handle!=h) return false;b[side].vel=v;return true;};
-        e.destroy=[this](unsigned side,std::uint32_t h) {clock+=call_us;++destroys;++destroys_side[side];log.push_back("destroy:"+std::to_string(side));if(!b[side].alive || b[side].handle!=h) return DestroyOutcome::absent;b[side].alive=false;return DestroyOutcome::gone;};
+        e.create=[this](unsigned side,std::uintptr_t,Vec3 at,std::uint32_t& h) {spend();++creates;++creates_side[side];log.push_back("create:"+std::to_string(side));b[side]={true,next++,at,{},{}};h=b[side].handle;return true;};
+        e.velocity=[this](unsigned side,std::uint32_t h,Vec3 v) {spend();++velocities;log.push_back("wake:"+std::to_string(side));if(!b[side].alive || b[side].handle!=h) return false;b[side].vel=v;return true;};
+        e.destroy=[this](unsigned side,std::uint32_t h) {spend();++destroys;++destroys_side[side];log.push_back("destroy:"+std::to_string(side));if(!b[side].alive || b[side].handle!=h) return DestroyOutcome::absent;b[side].alive=false;return DestroyOutcome::gone;};
         e.position=[this](unsigned side,std::uint32_t h)->std::optional<Vec3> {
-            clock+=call_us;if(!b[side].alive || b[side].handle!=h) return std::nullopt;
+            spend();if(!b[side].alive || b[side].handle!=h) return std::nullopt;
             if(position_garbage) return Vec3{b[side].pos.x,std::numeric_limits<double>::quiet_NaN(),b[side].pos.z};
             return b[side].pos;
         };
         e.motion=[this](unsigned side,std::uint32_t h)->std::optional<BodyMotion> {
-            clock+=call_us;++motions;
+            spend();++motions;
             if(motion_unreadable) throw HandBodyUnreadable{};
             if(!b[side].alive || b[side].handle!=h) return std::nullopt;
             BodyMotion m{b[side].pos,b[side].vel,b[side].spin};
@@ -541,7 +544,7 @@ struct FakeDrive {
             return m;
         };
         e.apply=[this](unsigned side,const hand_body::CommandRecord& r) {
-            clock+=call_us;++applies;++applies_side[side];log.push_back("apply:"+std::to_string(side));
+            clock+=preempt_us;spend();++applies;++applies_side[side];log.push_back("apply:"+std::to_string(side));
             std::uint32_t h{};std::memcpy(&h,r.bytes.data()+8,4);float f[3]{};std::memcpy(f,r.bytes.data()+0x10,12);
             if(!b[side].alive || b[side].handle!=h) return false;
             b[side].vel={f[0],f[1],f[2]};last_written[side]=b[side].vel;return true;
@@ -549,6 +552,7 @@ struct FakeDrive {
         e.forget=[](unsigned) {};
         e.at_g1_point=[] {return true;};
         e.now_us=[this] {return clock;};
+        e.cpu_cycles=[this]()->std::optional<std::uint64_t> {if(!cpu_ok) return std::nullopt;return cpu*3;};e.cycles_per_us=3;   // 3 cycles per us
         return e;
     }
 };
@@ -579,7 +583,8 @@ static void b14_checks() {
         CHECK(r.w.creates==2);CHECK(r.w.velocities==2);CHECK(r.w.applies==0);   // the wake writes only
         for(int i=0;i<50;++i) {const int before0=r.w.applies_side[0],before1=r.w.applies_side[1];r.tick(4);CHECK(r.w.applies_side[0]-before0<=1);CHECK(r.w.applies_side[1]-before1<=1);}
         CHECK(r.w.applies_side[0]==50);CHECK(r.w.applies_side[1]==50);   // the create tick's drive only starts the dt clock (the wake was its write)
-        CHECK(r.hb.drive_status(0).second_drives==50*3+2);   // every further call in a tick, the create tick includedCHECK(r.hb.drive_status(0).drive_writes==50);
+        CHECK(r.hb.drive_status(0).second_drives==50*3+2);   // every further call in a tick, the create tick included
+        CHECK(r.hb.drive_status(0).drive_writes==50);
         CHECK(r.w.velocities==2);   // never another wake write once driven
     }
     {   // drive_follows_target_within_1cm (no obstacles, 90 Hz, gravity on, gravity compensated): a 0.5 m reach, then hold
@@ -708,6 +713,36 @@ static void b14_checks() {
         DriveRig j;j.root=Vec3{0,0,0};j.target[0]=Vec3{.1,.1,1.0};j.tick();for(int i=0;i<5;++i) j.tick();
         j.root=Vec3{.3,0,0};j.tick();for(int i=0;i<5;++i) j.tick();   // 0.3 m in one tick, the body still inside the capsule
         CHECK(j.hb.drive_status(0).player_drift_um==0);CHECK(j.hb.drive_status(0).root_jumps==1);
+    }
+    {   // fix round 1 (proof d instrumentation): CPU time and wall time per drive, a tick histogram, over-budget counts and the slowest tick's
+        // phase split. A preemption (wall time with no CPU time) inside the write shows as wall over budget, CPU under it, and lands in "write".
+        HandBodyFault::reset_for_tests();DriveRig r;r.tick();r.tick();r.tick();
+        CHECK(r.hb.drive_status(0).cpu_us==14);CHECK(r.hb.drive_status(1).cpu_us==14);
+        for(int i=0;i<20;++i) r.tick();
+        r.w.preempt_us=300;r.tick();r.w.preempt_us=0;r.tick();r.hb.file_drive_tick();
+        const auto t=r.hb.drive_timing();
+        CHECK(t.cpu_available);CHECK(t.cycles_per_us==3);
+        CHECK(t.over_wall==1);CHECK(t.over_cpu==0);CHECK(t.cpu_max_us==28);CHECK(t.wall_max_us==628);   // both sides preempted in that tick
+        CHECK(t.slow_wall_us==628);CHECK(t.slow_cpu_us==28);CHECK(t.slow_read_us==14);CHECK(t.slow_write_us==614);CHECK(t.slow_servo_us==0);CHECK(t.slow_other_us==0);
+        CHECK(t.hist[2]>=20);CHECK(t.hist[8]==1);   // 28 us ticks in [20,50); the preempted 628 us tick in [500,1000)
+        CHECK(t.ticks==t.hist[0]+t.hist[1]+t.hist[2]+t.hist[3]+t.hist[4]+t.hist[5]+t.hist[6]+t.hist[7]+t.hist[8]+t.hist[9]);
+        CHECK(r.hb.drive_status(0).cpu_max_us==14);CHECK(r.hb.drive_status(0).cost_max_us==314);
+        // real CPU work over budget counts as CPU over budget
+        r.w.call_us=120;r.tick();r.w.call_us=7;r.tick();r.hb.file_drive_tick();
+        CHECK(r.hb.drive_timing().over_cpu==1);CHECK(r.hb.drive_timing().cpu_max_us==480);
+        // CPU time unavailable (QueryThreadCycleTime fails under Wine): reported as such, never counted as zero-cost CPU over budget
+        HandBodyFault::reset_for_tests();DriveRig u;u.w.cpu_ok=false;u.tick();u.tick();u.w.call_us=150;u.tick();u.hb.file_drive_tick();
+        CHECK(!u.hb.drive_timing().cpu_available);CHECK(u.hb.drive_timing().over_cpu==0);CHECK(u.hb.drive_status(0).cpu_us==0);CHECK(u.hb.drive_timing().over_wall==1);
+    }
+    {   // review P2-2: the drift proof's positive control: the root moving under locomotion input is counted (and its travel), a root that
+        // never changes under locomotion is not (a stale root fails the soak checker's root_moved_ticks > 0)
+        HandBodyFault::reset_for_tests();DriveRig r;r.root=Vec3{0,0,0};r.tick();r.tick();
+        r.locomotion=true;for(int i=0;i<30;++i) {r.root=Vec3{.01*(i+1),0,0};r.tick();}
+        CHECK(r.hb.drive_status(0).root_moved_ticks>=29);CHECK(r.hb.drive_status(0).root_travel_um>=290000);
+        DriveRig z;z.root=Vec3{0,0,0};z.tick();z.locomotion=true;for(int i=0;i<30;++i) z.tick();
+        CHECK(z.hb.drive_status(0).root_moved_ticks==0);CHECK(z.hb.drive_status(0).root_travel_um==0);
+        DriveRig j;j.root=Vec3{0,0,0};j.tick();j.locomotion=true;j.tick();j.root=Vec3{5,0,0};j.tick();   // a Blink under locomotion: not "moved"
+        CHECK(j.hb.drive_status(0).root_moved_ticks==0);
     }
     {   // write() shares the one-write-per-tick rule with the drive (DeepSeek P3): a write after this tick's drive write is refused
         HandBodyFault::reset_for_tests();DriveRig r;r.tick();r.tick();
