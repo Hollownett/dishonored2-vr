@@ -8,6 +8,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 using namespace d2vr;
 #define CHECK(x) do{if(!(x)){std::printf("FAIL %d: %s\n",__LINE__,#x);std::exit(1);}}while(0)
 namespace {
@@ -46,6 +47,18 @@ struct Answers {
 FilterKeeperInput corpse_hold(double now,std::uintptr_t entity) {
     FilterKeeperInput in{};in.now=now;in.body_ready=true;in.body_generation=3;in.held_layer=hand_body::layer_npc_body_ragdoll;in.held_entity=entity;in.held_corpse=true;return in;
 }
+// The hand body moved by B9's real servo (B14's drive law, no gravity: the drive compensates it), free air: the lag of a fast sweep is real.
+struct ServoBody {
+    HandServoState st{};Vec3 pos{},vel{};HandServoConfig cfg{};GrabTuning tuning{};
+    void step(Vec3 target,double dt) {
+        WorldTrackedPose b;b.position=pos;b.basis={Vec3{1,0,0},Vec3{0,1,0},Vec3{0,0,1}};
+        const auto o=servo_step(st,pose_at(target),b,vel,Vec3{},0,dt,std::numeric_limits<double>::quiet_NaN(),cfg,tuning,false);
+        if(o.valid) vel=o.linear;
+        pos=pos+vel*dt;
+    }
+};
+// A 6 m/s back-and-forth sweep (a triangle: the controller reverses at once at +-amplitude).
+struct Sweep {double amplitude{1};double x{},dir{1};double next() {x+=dir*6*dt90;if(x>amplitude) {x=amplitude;dir=-1;} if(x<-amplitude) {x=-amplitude;dir=1;} return x;}};
 // One native hold, frame by frame, exactly as publish_held_object runs it. The drawn grip is the controller (+grip_offset) unless use_b15 runs
 // B15's HandVisualSource (then the grip is B15's drawn hand and the weight its body_weight); the clamp sweeps the controller's request while the
 // body is drawn (B4's own request otherwise); couple_native gives the target, the body's servo target and the raw-gap release; the hand body is a
@@ -54,7 +67,7 @@ struct NativeRig {
     HeldClamp clamp;HoldCoupling coupling;HandVisualSource b15;std::optional<HeldProxies> proxies;
     double wall=1e9,now=100;std::array<std::optional<ClampHit>,held_proxy_capacity> hits{};
     Vec3 body{0,0,1};WorldTrackedPose controller=pose_at(0);Vec3 offset{.3,0,0},grip_offset{};
-    bool body_on=true,use_b15=false,wedged=false,contact=false,dropped=false;double weight=1;std::uint64_t seq=1;
+    bool body_on=true,use_b15=false,wedged=false,contact=false,dropped=false,real_servo=false;double weight=1;std::uint64_t seq=1;ServoBody servo{};
     CouplingOutput last{};WorldTrackedPose target{};
     NativeRig() {HeldProxies p;p.count=1;p.sphere[0]={{0,0,0},.1};proxies=p;}
     WorldTrackedPose step(double dt=dt90) {
@@ -75,7 +88,8 @@ struct NativeRig {
         if(body_on) {last=couple_native(coupling,0,clamp,proxies,request,controller,pose_at(body),true,coupled,in.requested,out.target,now);if(coupled) target=last.target;}
         clamp.note_published(target);
         dropped=clamp.should_release() || (body_on && last.release);
-        if(body_on && !wedged) {
+        if(body_on && !wedged && real_servo) {servo.pos=body;servo.step(last.body_target?*last.body_target:controller.position,dt);body=servo.pos;}
+        else if(body_on && !wedged) {
             const Vec3 goal=last.body_target?*last.body_target:controller.position;const Vec3 e=goal-body;const double l=length(e);
             if(l>1e-12) body=body+e*(std::min(std::min(l*12,10.)*dt,l)/l);
             body.x=std::min(body.x,wall-.05);   // the 5 cm hand sphere meets the wall too
@@ -316,6 +330,36 @@ int main() {
         NativeRig w;w.wall=.35;w.controller=pose_at(-.2);w.body={-.2,0,1};w.approach(0);w.wedged=true;w.controller.position.x=.05;
         int planes=0;for(int i=0;i<90;++i) {w.step();if(w.clamp.project(pose_at(.3),w.proxies)) ++planes;}
         CHECK(planes>=89);
+    }
+    {   // fast_free_air_swing_never_drops_corpse (fix round 3, N-2): a 6 m/s free-air sweep with B9's real servo; the body lags past 0.5 m but keeps
+        // closing on the controller, so it is not stuck: no release over 3 s (B15 weight -> coupling, nothing injected)
+        HandVisualSource src;HoldCoupling c;ServoBody body;body.pos={0,0,1};double now=10,max_lag=0;std::uint64_t seq=1;bool released=false;
+        Sweep sweep{1.3};
+        for(int i=0;i<270;++i) {
+            now+=dt90;const Vec3 hand{sweep.next(),0,1};   // 6 m/s back and forth over 2.6 m: it reverses at once while the body still runs away
+            body.step(hand,dt90);
+            VisualInput vi{};vi.now=now;vi.body_ready=true;vi.body=pose_at(body.pos);vi.body_seq=++seq;vi.clamp=pose_at(hand);vi.controller=pose_at(hand);
+            const auto v=src.update(0,vi);
+            CouplingInput in{};in.kind=HoldKind::corpse;in.body_ready=true;in.body=pose_at(body.pos);in.controller=pose_at(hand);in.now=now;in.body_weight=v.body_weight;
+            const auto o=c.update(0,in);released=released || o.release;max_lag=std::max(max_lag,o.lag_m);
+        }
+        CHECK(max_lag>HoldCoupling::lag_release_m);   // not vacuous: the body really lagged beyond the corpse threshold
+        CHECK(!released);
+        // the same sweep with the closing condition ignored would have dropped it (the control the ruling asks for)
+        ServoBody b2;b2.pos={0,0,1};Sweep s2{1.3};double over=0,longest=0;
+        for(int i=0;i<270;++i) {const Vec3 hand{s2.next(),0,1};b2.step(hand,dt90);over=length(hand-b2.pos)>HoldCoupling::lag_release_m?over+dt90:0;longest=std::max(longest,over);}
+        CHECK(longest>0);   // the far-only rule would at least start its dwell here (the closing condition is what keeps it from firing)
+    }
+    {   // fast_free_air_swing_never_drops_native_hold (fix round 3, N-2): the full native rig with B15 and the real servo, a 6 m/s free-air sweep: the
+        // body lags past 0.35 m, the hold is never dropped (neither HeldClamp's rule nor the raw-gap release)
+        NativeRig r;r.use_b15=true;r.real_servo=true;r.body={0,0,1};double max_lag=0;bool dropped=false;
+        Sweep sweep{1.0};
+        for(int i=0;i<270;++i) {r.controller.position.x=sweep.next();r.step();dropped=dropped || r.dropped;max_lag=std::max(max_lag,r.last.lag_m);}
+        CHECK(max_lag>HoldCoupling::native_release_m);CHECK(!dropped);
+        // stuck still releases with the real servo: the body wedged, the controller held 0.45 m away
+        NativeRig s;s.use_b15=true;s.real_servo=true;s.contact=true;s.wedged=true;bool gone=false;
+        for(int i=0;i<120 && !gone;++i) {s.controller.position.x=std::min(.45,s.controller.position.x+1.*dt90);s.step();gone=s.dropped;}
+        CHECK(gone);
     }
     {   // HeldClamp::project: the planes applied with nothing changed; equal to update()'s own push-out for the same request
         NativeRig a,b;a.wall=b.wall=.35;a.body_on=b.body_on=false;

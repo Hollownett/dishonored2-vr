@@ -290,6 +290,7 @@ public:
     static constexpr unsigned max_destroy_retries=240;     // a queued destroy refused this many times latches the fault
     static constexpr unsigned max_wake_tries=30;           // a refused wake write (busy, unreadable) is retried on the next ticks, this many times
     static constexpr unsigned max_filter_misses=5;         // B16 fix round 2: a filter word not read back as written this many ticks in a row latches
+                                                           // HandBodyFault: both hand bodies go and stay off for the session (the fallback is B4, review N-1)
     explicit HandBody(HandBodyEngine engine,bool enabled=true):engine_(std::move(engine)),enabled_(enabled) {}
 
     // Dispatcher tick (the G1 point, idle or not): run the lifecycle per side, then create / destroy / drain the queue / read back.
@@ -403,7 +404,7 @@ public:
             if(got && *got==word) {s.filter=word;s.filter_misses=0;counters_[side].filter.store(word,std::memory_order_release);return true;}
             count(side,&Counters::filter_readback_mismatches);
             if(got) {s.filter=*got;counters_[side].filter.store(*got,std::memory_order_release);}   // the status shows the word the body really carries
-            if(++s.filter_misses>=max_filter_misses) latch(side,"filter word not read back as written",true);   // destroyed next tick; HandBodyFault
+            if(++s.filter_misses>=max_filter_misses) latch(side,"filter word not read back as written",true);   // session-wide fallback: destroyed next tick, none re-created
             return false;
         }
         return true;

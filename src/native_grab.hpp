@@ -905,6 +905,7 @@ public:
 private:
     std::mutex coupling_mutex_;std::array<Lane::Coupling,2> coupling_pub_{};std::uint64_t hold_serials_{};
     bool coupling_on_{};   // B16 review P3-2: build/hand-body (and no build/no-hand-body), read once at install before the hook runs; off: no B16 work
+                           // (review N-3: a hand-body install that fails later leaves it on: the same behaviour, nothing is ever published to it)
 public:
     static NativeGrab* instance() noexcept {return instance_;}
     // The entity whose ragdoll limb this hand holds (0 if none or a prop).

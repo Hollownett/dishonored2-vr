@@ -408,8 +408,11 @@ cn = function(coupling, "inline CouplingOutput couple_native(")
 assert "WorldTrackedPose carried=request;" in cn and "body->" not in cn, "a native target never reads the body: it follows the drawn grip"
 assert "in.clamped_native=clamped_controller;" in cn and cn.index("in.clamped_native=clamped_controller;") < cn.index("if(drawn && HoldCoupling::usable(body_ready,body))"), "not drawn: B4's output"
 hc_upd = function(coupling, "CouplingOutput update(unsigned side,const CouplingInput& in)")
-assert "if(!use) {s.lag.reset();s.native.reset();return out;}" in hc_upd, "no usable body: today's pose, no release"
-assert "const double gap=length(in.controller.position-in.body->position);" in hc_upd and hc_upd.count("gap>") == 3, "the release judges the RAW gap (fix round 2)"
+assert "if(!use) {s.lag.reset();s.native.reset();s.has_body=false;s.body_v={};return out;}" in hc_upd, "no usable body: today's pose, no release"
+# fix round 3 (review N-2): a lag release needs STUCK (B9): far AND closing slower than 0.5 m/s, for corpses and native holds
+assert "out.release=s.native.update(gap>native_release_m && slow,dt);" in hc_upd and "out.release=s.lag.update(gap>lag_release_m && slow,dt);" in hc_upd
+assert "stuck_closing_mps=HandServoConfig{}.snap_closing_mps" in coupling
+assert "const double gap=length(in.controller.position-in.body->position);" in hc_upd and len(re.findall(r"\bgap>(lag_release_m|prop_release_m|native_release_m)", hc_upd)) == 3, "the release judges the RAW gap (fix round 2)"
 assert "if(w>0) {" in hc_upd, "the drawn weight only places the target"
 assert "out.body_weight=s.body_w;" in visual_hdr
 assert "native_grab.couple(" not in code_of(probe[:b16_at]) and code_of(grab).count("void couple(") == 1
