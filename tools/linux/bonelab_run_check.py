@@ -18,6 +18,8 @@ HAND_BODY = ("hand_body_soak",)  # Plan B B14: the driven hand bodies (proofs a,
 HAND_BODY_COST_US = 200          # proof (d): the drive's cost per tick, both hands summed
 HAND_BODY_PRESSED_TICKS = 1000  # review P3-5: about 5 s per hand inside the capsule per session (the scripted segment holds 14 s; ~2100 seen)
 HAND_BODY_DRIFT_UM = 1000        # proof (b): the player root's unexplained movement while a hand is pressed into the capsule
+TANK_HAND_BODY = ("tank_hand_body",)  # Plan B B16 S15: the tank carried by the hand body (run with --knob hand-body and --knob no-hand-body)
+HAND_FILTER_DEFAULT = 0x000885E4  # R1Recipe::filter: the hand body's word whenever it holds nothing through the body
 
 
 def _pair(v):
@@ -44,6 +46,8 @@ def check(statuses, scenario, proofs=("a", "b", "d")):
 
     if scenario in HAND_BODY:
         return check_hand_body(statuses, proofs)
+    if scenario in TANK_HAND_BODY:
+        return check_tank_hand_body(statuses)
     corpse = [s.get("corpse") or {} for s in statuses]
     if not statuses or any(not c for c in corpse):
         return [("FAIL", "status has no corpse block")]
@@ -153,6 +157,78 @@ def _num(v):
     return isinstance(v, (int, float)) and not isinstance(v, bool)
 
 
+def check_hold_coupling(statuses):
+    """B16, every session's "hold_coupling" object (and the hand body's own filter word): idle-correct (a side that held nothing never used the
+    body), and no layer left swapped at the end (the keeper's word and the body's word are the R1 default on both sides, every swap came back
+    through SafeRelease or with a new body, and the held-object layer ledger has nothing pending). An absent block or counter is a FAIL."""
+    out = []
+
+    def add(ok, text):
+        out.append(("PASS" if ok else "FAIL", text))
+
+    keys = ("frames", "uses_body", "native", "motor", "corpse", "word", "swaps", "restores", "unresolved", "body_resets")
+    for i, s in enumerate(statuses):
+        hc = s.get("hold_coupling")
+        sides = hc.get("sides") if isinstance(hc, dict) else None
+        if not isinstance(sides, list) or len(sides) != 2 or not all(isinstance(sd, dict) and all(_num(sd.get(k)) for k in keys) for sd in sides):
+            add(False, f"session {i + 1}: hold_coupling block with sides[2] {keys}")
+            continue
+        for k, sd in enumerate(sides):
+            if sd["frames"] == 0:
+                add(sd["uses_body"] == 0, f"session {i + 1} side {k}: no hold, so the body was never used (uses_body {sd['uses_body']})")
+            add(sd["uses_body"] <= sd["frames"], f"session {i + 1} side {k}: uses_body {sd['uses_body']} <= hold frames {sd['frames']}")
+            add(sd["word"] == HAND_FILTER_DEFAULT, f"session {i + 1} side {k}: the hand's filter word is the default at the end ({sd['word']:#x})")
+            add(sd["swaps"] == sd["restores"] + sd["body_resets"],
+                f"session {i + 1} side {k}: every swap came back (swaps {sd['swaps']} == restores {sd['restores']} + body_resets {sd['body_resets']})")
+        hb = s.get("hand_body") if isinstance(s.get("hand_body"), dict) else {}
+        if hb.get("enabled") is True and isinstance(hb.get("sides"), list):
+            words = [sd.get("filter") for sd in hb["sides"]]
+            add(all(w == HAND_FILTER_DEFAULT for w in words) and len(words) == 2, f"session {i + 1}: the hand bodies' own filter words are the default ({words})")
+        layer = s.get("layer") if isinstance(s.get("layer"), dict) else {}
+        add(layer.get("pending") == 0, f"session {i + 1}: the held-object layer ledger has nothing pending (got {layer.get('pending')})")
+    return out
+
+
+def check_tank_hand_body(statuses):
+    """S15: the tank carried by the hand body, in both knob states. The last (floor-pressed) release rests near its release height,
+    release_overlap_unresolved == 0, the held clamp released at least twice, hand_body.faults == 0 (knob on), no layer left swapped; knob on: the
+    native hold used the body and the body touched the world (contact_frames > 0); knob off: the body was never used."""
+    out = []
+
+    def add(ok, text):
+        out.append(("PASS" if ok else "FAIL", text))
+
+    if not statuses:
+        return [("FAIL", "no sessions")]
+    for i, s in enumerate(statuses):
+        clamp = s.get("held_clamp") if isinstance(s.get("held_clamp"), dict) else {}
+        hb = s.get("hand_body") if isinstance(s.get("hand_body"), dict) else None
+        if hb is None:
+            add(False, f"session {i + 1}: status has no hand_body block")
+            continue
+        on = hb.get("enabled") is True
+        for key in ("release_overlap_unresolved", "releases"):
+            add(_num(clamp.get(key)), f"session {i + 1}: held_clamp.{key} present")
+        add(clamp.get("release_overlap_unresolved") == 0, f"session {i + 1}: release_overlap_unresolved == 0 (got {clamp.get('release_overlap_unresolved')})")
+        add(_num(clamp.get("releases")) and clamp["releases"] >= 2, f"session {i + 1}: held_clamp.releases >= 2 (got {clamp.get('releases')})")
+        watch = s.get("release_watch") if isinstance(s.get("release_watch"), dict) else {}
+        z0, last, zmin = watch.get("z_at_release"), watch.get("z_last"), watch.get("z_min")
+        add(_num(watch.get("count")) and watch["count"] >= 2, f"session {i + 1}: release_watch.count >= 2 (got {watch.get('count')})")
+        add(all(_num(v) for v in (z0, last, zmin)) and last >= z0 - 0.15 and zmin >= z0 - 0.5,
+            f"session {i + 1}: the floor-pressed tank rests above the floor after 5 s: z_last {last} >= z_at_release {z0} - 0.15, z_min {zmin} >= z_at_release - 0.5")
+        sides = (s.get("hold_coupling") or {}).get("sides") if isinstance(s.get("hold_coupling"), dict) else None
+        native = sum(sd.get("native", 0) for sd in sides) if isinstance(sides, list) else None
+        used = sum(sd.get("uses_body", 0) for sd in sides) if isinstance(sides, list) else None
+        if on:
+            add(_num(hb.get("faults")) and hb["faults"] == 0, f"session {i + 1}: hand_body.faults == 0 (got {hb.get('faults')})")
+            add(hb.get("available") is True and hb.get("hand_body_fault") is False, f"session {i + 1}: hand body available, no HandBodyFault")
+            add(_num(hb.get("contact_frames")) and hb["contact_frames"] > 0, f"session {i + 1}: hand_body.contact_frames > 0 (got {hb.get('contact_frames')})")
+            add(_num(native) and native > 0 and _num(used) and used > 0, f"session {i + 1}: the tank's native hold was coupled to the body (native frames {native}, uses_body {used})")
+        else:
+            add(used == 0, f"session {i + 1}: knob off: the body was never used (uses_body {used})")
+    return out + check_hold_coupling(statuses)
+
+
 def wall_percentile_upper_us(hist, edges, q):
     """The upper edge of the histogram bin holding the q-quantile (conservative); inf when it falls in the open last bin; None if empty."""
     total = sum(hist)
@@ -228,6 +304,10 @@ def check_hand_body(statuses, proofs=("a", "b", "d")):
             f"CPU time per tick max {cpu_max if cpu_ok else 'UNMEASURED'} <= {HAND_BODY_COST_US} us (cpu_available {[t.get('cpu_available') for t in tm]})")
         out.append(("INFO", f"wall max us {[t.get('wall_max_us') for t in tm]}, over_wall {[t.get('over_wall') for t in tm]}, ticks {[t.get('ticks') for t in tm]}, "
                     f"slowest tick {[t.get('slow') for t in tm]}, hist {[t.get('hist') for t in tm]}"))
+    if all("hold_coupling" in s for s in statuses):   # B16 builds: the coupling is idle-correct and no layer is left swapped
+        out += check_hold_coupling(statuses)
+    elif any("hold_coupling" in s for s in statuses):
+        out.append(("FAIL", "hold_coupling present in some sessions only"))
     side = lambda h, k: [(sd.get("drive") or {}).get(k) for sd in h["sides"]]
     cast = [((s.get("hand_clamp") or {}).get("cast_us"), (s.get("hand_clamp") or {}).get("cast_us_max")) for s in statuses]
     out.append(("INFO", f"per session: gap_m {[h.get('gap_m') for h in hb]}, contact_frames (a diagnostic, not contact evidence) {[h.get('contact_frames') for h in hb]}, "

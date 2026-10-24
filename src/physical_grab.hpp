@@ -160,8 +160,9 @@ public:
     }
     // `reason`: open_fist only for a grip-open, lag for a blocked-carry release, lifecycle for a handoff or tracking loss (default).
     // Bookkeeping only happens when a hold actually ends, so releasing an idle lane keeps the cooldown, reason and anchor.
-    GrabMotor release(bool throw_velocity,ReleaseReason reason=ReleaseReason::lifecycle) {
-        if(held_) note_release(reason,false);
+    // forced (B16: a coupled corpse let go for hand lag): the regrab cooldown runs, as this class's own lag release does.
+    GrabMotor release(bool throw_velocity,ReleaseReason reason=ReleaseReason::lifecycle,bool forced=false) {
+        if(held_) note_release(reason,forced);
         held_=false;return {throw_velocity && valid_sample_?velocity_:Vec3{}, {},true};
     }
     GrabMotor release_sample(const WorldTrackedPose& hand,float grip,bool usable,std::uint64_t epoch,std::uint64_t tick,bool throw_velocity,ReleaseReason reason=ReleaseReason::lifecycle) {

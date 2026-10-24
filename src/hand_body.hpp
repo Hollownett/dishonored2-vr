@@ -71,6 +71,16 @@ struct R1Recipe {
     static constexpr double wake_speed=.1;   // the one wake write right after creation, straight down (m/s)
 };
 static_assert(R1Recipe::filter==0x000885e4u,"R1 filter word (B11)");
+// B16: the only filter words a hand body may be given (type 0x1a, setBodyCollisionFilterInfo): its own DEBRIS layer and a collides-with mask
+// inside the R1 mask that keeps every world layer (0, 1, 2, 5). Never a player layer (6, 7, 8, 18): the mutual test 0x992c0 then never pairs
+// the hand with the player whatever word it carries.
+inline constexpr bool hand_filter_word_allowed(std::uint32_t word) {
+    constexpr std::uint32_t r1=hand_body::word_mask(R1Recipe::filter);
+    constexpr std::uint32_t world=hand_body::layer_bit(hand_body::layer_world_low)|hand_body::layer_bit(hand_body::layer_world_low_high)|
+        hand_body::layer_bit(hand_body::layer_world_high)|hand_body::layer_bit(hand_body::layer_mover);
+    return hand_body::word_layer(word)==hand_body::layer_debris && (hand_body::word_mask(word)&~r1)==0 && (hand_body::word_mask(word)&world)==world;
+}
+static_assert(hand_filter_word_allowed(R1Recipe::filter) && !hand_filter_word_allowed(hand_body::hand_filter_word(true)),"the DEBRIS bit stays out");
 
 // ---- B14: the drive (Bonelab §2.1: the hand is a physical body pulled toward the controller by capped forces, with braking; §2.2: it lags
 // when blocked). B9's servo_step gives the capped velocity; one B8 type-9 velocity record per side per dispatcher tick carries it.
@@ -247,6 +257,7 @@ struct HandBodyStatus {
     bool available{};BodyState state{};std::uint32_t handle{};std::uint64_t creates{},destroys{},faults{},refused_writes{};
     std::uint64_t abandons{},queued_destroys{},direct_destroys{},busy_waits{},wake_writes{},create_refusals{},writes{},releases{},lost{},unverified{};
     std::uint64_t misplaced_writes{},reentrant_writes{};
+    std::uint32_t filter{};std::uint64_t filter_writes{},filter_refused{};   // B16: the body's filter word as last written (R1 default at create)
 };
 
 // The last read-back pose for the render thread: the dispatcher publishes with try_lock (never waits), readers copy under the lock.
@@ -306,7 +317,7 @@ public:
             const BodyAction action=life_.update(side,li);
             switch(action) {
             case BodyAction::abandon:            // the world changed under a live body: no engine call at all, counted (last resort)
-                s.pending_destroy=false;s.handle=0;s.attempts=0;
+                s.pending_destroy=false;s.handle=0;s.attempts=0;reset_filter(side);
                 count(side,&Counters::abandons);
                 if(engine_.forget) engine_.forget(side);
                 break;
@@ -357,20 +368,38 @@ public:
         std::uint32_t handle{};
         if(record.size<0x10 || record.size>record.bytes.size()) {count(side,&Counters::refused_writes);return false;}
         std::memcpy(&handle,record.bytes.data()+8,sizeof handle);
+        // The allow-list (B13: velocity; B16: the filter word): a type-9 velocity record of its own size, or a type-0x1a filter record of its own
+        // size carrying an allowed hand word. Anything else is refused before any read of the engine.
+        std::uint16_t type{};std::memcpy(&type,record.bytes.data()+4,sizeof type);
+        std::uint32_t word{};std::memcpy(&word,record.bytes.data()+0xc,sizeof word);
+        const bool velocity_record=type==9 && record.size==0x30,filter_record=type==0x1a && record.size==0x20;
+        if(!velocity_record && !filter_record) {count(side,&Counters::refused_writes);return false;}
+        if(filter_record && !hand_filter_word_allowed(word)) {count(side,&Counters::filter_refused);count(side,&Counters::refused_writes);return false;}
         std::uintptr_t world{};
         try {world=engine_.world?engine_.world():0;} catch(...) {world=0;}
         bool busy=true;
         try {busy=engine_.busy?engine_.busy():false;} catch(...) {busy=true;}
         Side& s=side_[side];
+        // B14: one velocity write per side per tick; B16: one filter write per side per tick, apart (a filter word never takes the drive's slot)
+        std::uint64_t& slot=filter_record?s.filter_tick:s.written_tick;
         if(latched_ || !enabled_ || !world || world!=last_world_ || last_gen_!=s.gen || busy || s.pending_destroy || !life_.can_write(side,world,handle) ||
-           !engine_.apply || s.written_tick==tick_index_) {count(side,&Counters::refused_writes);return false;}   // B14: one write per side per tick
-        s.written_tick=tick_index_;
+           !engine_.apply || slot==tick_index_) {count(side,&Counters::refused_writes);if(filter_record) count(side,&Counters::filter_refused);return false;}
+        slot=tick_index_;
         try {
-            if(!engine_.apply(side,record)) {count(side,&Counters::refused_writes);return false;}
+            if(!engine_.apply(side,record)) {count(side,&Counters::refused_writes);if(filter_record) count(side,&Counters::filter_refused);return false;}
         } catch(const HandBodyEngineFault& f) {latch(side,f.what(),true);return false;}
         count(side,&Counters::writes);
+        if(filter_record) {s.filter=word;counters_[side].filter.store(word,std::memory_order_release);count(side,&Counters::filter_writes);}
         return true;
     }
+    // B16: give this side's body `word` (an allowed hand word) through write(): dispatcher thread, at the G1 point, after service(). false:
+    // no body, already that word, or refused (counted); the caller asks again on a later tick.
+    bool write_filter(unsigned side,std::uint32_t word) {
+        if(side>=sides || life_.state(side)!=BodyState::ready || side_[side].filter==word) return false;
+        return write(side,hand_body::encode_set_filter(side_[side].handle,word));
+    }
+    // The word this side's body carries as far as the manager knows (the R1 default from its creation until a filter write lands). Any thread.
+    std::uint32_t filter_word(unsigned side) const {return side<sides?counters_[side].filter.load(std::memory_order_acquire):R1Recipe::filter;}
     // B14, dispatcher thread, after service() in the same G1 tick (the runtime's tick runs once per game frame): read the body back
     // (position, velocity, spin), run B9's servo_step on the real interval since this side's last drive, and write one velocity record.
     // At most one velocity write per side per service tick (a wake write that tick takes it). Garbage read-back latches HandBodyFault (no
@@ -497,6 +526,7 @@ public:
         st.busy_waits=c.busy_waits.load();st.wake_writes=c.wake_writes.load();st.create_refusals=c.create_refusals.load();
         st.writes=c.writes.load();st.releases=c.releases.load();st.lost=c.lost.load();st.unverified=c.unverified.load();
         st.misplaced_writes=c.misplaced_writes.load();st.reentrant_writes=c.reentrant_writes.load();
+        st.filter=c.filter.load(std::memory_order_acquire);st.filter_writes=c.filter_writes.load();st.filter_refused=c.filter_refused.load();
         return st;
     }
     // Session end: the next service() tick destroys every body (the lifecycle's shutdown input is forced on).
@@ -512,7 +542,8 @@ public:
 private:
     struct Counters {
         std::atomic<std::uint64_t> creates{},destroys{},faults{},refused_writes{},abandons{},queued_destroys{},direct_destroys{},busy_waits{},
-            wake_writes{},create_refusals{},writes{},releases{},lost{},unverified{},misplaced_writes{},reentrant_writes{};
+            wake_writes{},create_refusals{},writes{},releases{},lost{},unverified{},misplaced_writes{},reentrant_writes{},filter_writes{},filter_refused{};
+        std::atomic<std::uint32_t> filter{R1Recipe::filter};   // B16: the body's filter word as last written (the R1 default from each creation)
         std::atomic<std::uint64_t> contact_frames{},snaps{},cost_us{},cost_max_us{},player_drift_um{},drives{},drive_writes{},yields{},skipped{},
             snap_requests{},snap_blocked{},garbage{},second_drives{},root_jumps{},pressed_ticks{},cpu_us{},cpu_max_us{},root_moved_ticks{},root_travel_um{};
         std::atomic<double> gap_m{},speed{},dt_s{};std::atomic<bool> capped{},contact_now{};std::atomic<std::uint64_t> contact_ms{};
@@ -527,6 +558,7 @@ private:
     static constexpr std::uint64_t contact_fresh_ms=50;   // contact_now older than this (the drive stopped judging) reads false
     static std::uint64_t steady_ms() {return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());}
     struct Side {std::uint32_t handle{},gen{};std::uintptr_t world{};bool pending_destroy{},woken{};unsigned attempts{},wake_tries{};std::uint64_t next_create_ms{};
+        std::uint32_t filter{R1Recipe::filter};std::uint64_t filter_tick{~0ull};   // B16: the word this body carries; one filter write per tick
         // B14 drive state (dispatcher thread only)
         HandServoState servo{};double last_drive_s{std::numeric_limits<double>::quiet_NaN()};std::uint64_t written_tick{~0ull};
         std::uint64_t drive_tick{~0ull};bool snap_pending{},has_cmd{};Vec3 last_cmd{};std::optional<Vec3> press_root,last_root,loco_start,loco_last;unsigned unreadable_motion{},short_streak{};};
@@ -613,6 +645,7 @@ private:
         }
         if(!ok) {count(side,&Counters::create_refusals);s.next_create_ms=now_ms+create_retry_ms;return;}
         life_.created(side,world,handle);s.handle=handle;s.world=world;s.gen=last_gen_;s.attempts=0;s.pending_destroy=false;s.woken=false;s.wake_tries=0;
+        reset_filter(side);   // B16: a new body always starts with the R1 default word (createBody's cinfo carries it)
         reset_drive(side);
         count(side,&Counters::creates);
         // The one wake write, right after the creation (B11 run 1: createBody's activation is forced to 0 and the body hangs asleep).
@@ -670,7 +703,8 @@ private:
             s.pending_destroy=true;return;
         }
     }
-    void finish(unsigned side) {Side& s=side_[side];life_.destroyed(side);s.handle=0;s.attempts=0;s.pending_destroy=false;reset_drive(side);}
+    void finish(unsigned side) {Side& s=side_[side];life_.destroyed(side);s.handle=0;s.attempts=0;s.pending_destroy=false;reset_filter(side);reset_drive(side);}
+    void reset_filter(unsigned side) {side_[side].filter=R1Recipe::filter;counters_[side].filter.store(R1Recipe::filter,std::memory_order_release);}
     void reset_drive(unsigned side) {
         Side& s=side_[side];s.servo={};s.last_drive_s=std::numeric_limits<double>::quiet_NaN();s.snap_pending=false;s.has_cmd=false;s.press_root.reset();s.last_root.reset();s.loco_start.reset();s.loco_last.reset();s.unreadable_motion=0;s.short_streak=0;counters_[side].contact_now.store(false,std::memory_order_relaxed);
     }

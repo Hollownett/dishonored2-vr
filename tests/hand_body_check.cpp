@@ -578,6 +578,46 @@ struct DriveRig {
 };
 }
 
+// ======================= B16: the filter record (type 0x1a) =======================
+static void b16_checks() {
+    {   // write()'s allow-list: a velocity record (9, 0x30) and a filter record (0x1a, 0x20) carrying an allowed hand word; nothing else
+        HandBodyFault::reset_for_tests();FakeHands f;HandBody hb(f.engine());std::uint64_t t=1000;
+        for(int i=0;i<10;++i,t+=16) hb.service(gameplay_in(t),kPalms);
+        const auto h=hb.status(0).handle;CHECK(hb.ready(0));CHECK(hb.filter_word(0)==R1Recipe::filter);CHECK(hb.status(0).filter==R1Recipe::filter);
+        const std::uint32_t held=hand_body::filter_word(hand_body::layer_debris,hand_body::word_mask(R1Recipe::filter)&~hand_body::layer_bit(hand_body::layer_npc_body_ragdoll));
+        CHECK(hand_filter_word_allowed(held));
+        int applies=f.applies;
+        CHECK(hb.write(0,hand_body::encode_set_filter(h,held)));CHECK(f.applies==applies+1);CHECK(hb.filter_word(0)==held);CHECK(hb.status(0).filter_writes==1);
+        // the filter write did not take the tick's velocity slot: a velocity write in the same tick still goes; a second filter write does not
+        CHECK(hb.write(0,velocity_record(h)));CHECK(!hb.write(0,hand_body::encode_set_filter(h,R1Recipe::filter)));CHECK(hb.filter_word(0)==held);
+        hb.service(gameplay_in(t),kPalms);t+=16;
+        // refused words: DEBRIS in the mask, a player layer, a world layer missing, another layer than DEBRIS; refused sizes and types
+        applies=f.applies;const auto refused=hb.status(0).filter_refused;
+        for(const std::uint32_t bad:{hand_body::hand_filter_word(true),hand_body::filter_word(hand_body::layer_debris,hand_body::word_mask(R1Recipe::filter)|hand_body::layer_bit(hand_body::layer_player)),
+                                     hand_body::filter_word(hand_body::layer_debris,hand_body::word_mask(R1Recipe::filter)&~hand_body::layer_bit(hand_body::layer_world_high)),
+                                     hand_body::filter_word(hand_body::layer_rigid_body,hand_body::word_mask(R1Recipe::filter)),0u,0xffffffffu})
+            CHECK(!hb.write(0,hand_body::encode_set_filter(h,bad)));
+        CHECK(hb.status(0).filter_refused==refused+6);
+        auto wrong_size=hand_body::encode_set_filter(h,R1Recipe::filter);wrong_size.size=0x30;CHECK(!hb.write(0,wrong_size));
+        auto other=velocity_record(h);std::uint16_t six=6;std::memcpy(other.bytes.data()+4,&six,2);CHECK(!hb.write(0,other));   // setBodyTransform: never
+        CHECK(f.applies==applies);CHECK(hb.filter_word(0)==held);
+        // the lifecycle guards hold for the filter record too: busy, outside the G1 point, not our handle
+        f.busy=true;CHECK(!hb.write_filter(0,R1Recipe::filter));f.busy=false;
+        f.at_point=false;CHECK(!hb.write_filter(0,R1Recipe::filter));f.at_point=true;
+        CHECK(!hb.write(0,hand_body::encode_set_filter(h+1,R1Recipe::filter)));CHECK(f.applies==applies);
+        // write_filter: no call when the body already carries the word
+        CHECK(!hb.write_filter(0,held));CHECK(f.applies==applies);
+        CHECK(hb.write_filter(0,R1Recipe::filter));CHECK(hb.filter_word(0)==R1Recipe::filter);
+        // a recreated body always starts with the default word (destroy on a lost gameplay frame, then a new create)
+        hb.service(gameplay_in(t),kPalms);t+=16;CHECK(hb.write_filter(0,held));CHECK(hb.filter_word(0)==held);
+        hb.service(gameplay_in(t,false),kPalms);t+=16;CHECK(!hb.ready(0));CHECK(hb.filter_word(0)==R1Recipe::filter);
+        for(int i=0;i<60;++i,t+=16) hb.service(gameplay_in(t),kPalms);
+        CHECK(hb.ready(0));CHECK(hb.status(0).creates==2);CHECK(hb.filter_word(0)==R1Recipe::filter);
+        // an abandoned body's word is forgotten with it
+        hb.service(gameplay_in(t),kPalms);t+=16;CHECK(hb.write_filter(1,held));f.change_world();hb.service(gameplay_in(t,false),kPalms);
+        CHECK(hb.status(1).abandons==1);CHECK(hb.filter_word(1)==R1Recipe::filter);
+    }
+}
 static void b14_checks() {
     {   // drive_writes_once_per_tick: the create tick's wake write is its one write; then exactly one drive write per side per tick, even when the
         // dispatcher calls drive several times in a tick (it runs 7-11k/s); a second drive in one tick is counted and writes nothing
@@ -1006,6 +1046,7 @@ int main() {
     }
     b13_checks();
     b14_checks();
+    b16_checks();
     std::printf("hand_body_check: all passed\n");
     return 0;
 }

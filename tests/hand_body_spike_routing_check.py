@@ -71,10 +71,15 @@ assert stop.index("stop_requested_.store(true") < stop.index("HandBodyNative::di
 #    live in the shared native header; the spike makes none of its own.
 assert not re.findall(r"reinterpret_cast<[\w:]+>\(base_\+(\w+_rva)\)", engine), "the spike calls the engine only through HandBodyNative"
 called = set(re.findall(r"reinterpret_cast<[\w:]+>\(base_\+(\w+_rva)\)", native))
-assert called == {"userdata_rva", "sphere_rva", "cinfo_rva", "create_rva", "destroy_rva", "velocity_rva"}, called
+# B16 adds 0x97600 setBodyCollisionFilterInfo (filter_rva) to the shared header for the production hand body only (the global call list); the
+# spike never reaches it
+assert called == {"userdata_rva", "sphere_rva", "cinfo_rva", "create_rva", "destroy_rva", "velocity_rva", "filter_rva"}, called
+assert "set_filter" not in engine, "the spike never writes a filter word"
 for text in (engine, native):
     code = re.sub(r'"(?:[^"\\\n]|\\.)*"', '""', re.sub(r"//[^\n]*", "", text))   # comments and string literals removed
     for rva in ("0x91b50", "0x91e20", "0xc85860", "0xc90de0", "0x8ae9b0", "0x883f60", "0x97600", "0xc8e7c0", "0x808ea0", "0x809d80"):
+        if rva == "0x97600" and text is native:
+            continue
         assert rva not in code, rva
 for call in ("create_body(reinterpret_cast<void*>(world),&id,s.cinfo.data(),1,1)", "destroy_bodies(reinterpret_cast<void*>(world),ids,1,0)",
              "set_velocity(reinterpret_cast<void*>(world),handle,linear.data(),angular.data(),0)"):

@@ -40,8 +40,10 @@ namespace d2vr {
 // B14: target = the raw calibrated palm pose per side (C9: intent; the servo's target), free = the hand clamp's palm cast found it free this frame
 // (creates and snaps need it), yield = the clamp yields (an authored arm, a native carry, a physical hold), locomotion = the move stick is
 // published non-zero, player_root = the player entity's +0x300 (B11: equal to the query body's record translation).
+// B16: filter = the word each side's body should carry (HandFilterKeeper, render thread: the R1 default unless a coupled hold takes a layer out).
 struct HandBodyHandsInput {unsigned tracked{};std::array<Vec3,2> palm{};bool authored{};bool focused{};
-    std::array<WorldTrackedPose,2> target{};unsigned free{};unsigned yield{};bool locomotion{};std::optional<Vec3> player_root{};};
+    std::array<WorldTrackedPose,2> target{};unsigned free{};unsigned yield{};bool locomotion{};std::optional<Vec3> player_root{};
+    std::array<std::uint32_t,2> filter{{R1Recipe::filter,R1Recipe::filter}};};
 // One body's mod memory and identity (free: reusable; in_use: our body may exist; retired: never reused, the engine may still read it).
 struct HandBodySlot {enum State {free,in_use,retired} state{free};R1BodyStorage storage{};std::uintptr_t world{};std::uint32_t handle{0xffffffffu};};
 struct HandBodyEvent {std::uint64_t t_ms{};unsigned side{};const char* kind{""};std::uint32_t handle{};std::uintptr_t world{};std::uint32_t generation{};unsigned logic{};bool release{};};
@@ -181,7 +183,8 @@ public:
              <<",\"direct_destroys\":"<<st.direct_destroys<<",\"queued_destroys\":"<<st.queued_destroys<<",\"releases\":"<<st.releases<<",\"abandons\":"<<st.abandons
              <<",\"lost\":"<<st.lost<<",\"faults\":"<<st.faults<<",\"refused_writes\":"<<st.refused_writes<<",\"writes\":"<<st.writes<<",\"wake_writes\":"<<st.wake_writes
              <<",\"create_refusals\":"<<st.create_refusals<<",\"busy_waits\":"<<st.busy_waits
-             <<",\"misplaced_writes\":"<<st.misplaced_writes<<",\"reentrant_writes\":"<<st.reentrant_writes;
+             <<",\"misplaced_writes\":"<<st.misplaced_writes<<",\"reentrant_writes\":"<<st.reentrant_writes
+             <<",\"filter\":"<<st.filter<<",\"filter_writes\":"<<st.filter_writes<<",\"filter_refused\":"<<st.filter_refused;
             const auto d=body->drive_status(side);
             o<<",\"drive\":{\"gap_m\":"<<d.gap_m<<",\"speed\":"<<d.speed<<",\"capped\":"<<(d.capped?"true":"false")<<",\"contact_frames\":"<<d.contact_frames<<",\"contact_now\":"<<(d.contact_now?"true":"false")
              <<",\"snaps\":"<<d.snaps<<",\"snap_requests\":"<<d.snap_requests<<",\"snap_blocked\":"<<d.snap_blocked<<",\"cost_us\":"<<d.cost_us
@@ -216,7 +219,8 @@ public:
          <<",\"stranded\":["<<(stranded_[0].load()?1:0)<<','<<(stranded_[1].load()?1:0)<<']'
          <<",\"unverified\":"<<(body->status(0).unverified+body->status(1).unverified)
          <<",\"g2_events\":"<<g2_events_.load()<<",\"storage_retired\":"<<retired_.load()<<",\"storage_exhausted\":"<<storage_exhausted_.load()
-         <<",\"cast_excluded_hits\":"<<cast_excluded_hits.load()<<",\"dropped_events\":"<<dropped_events_.load()<<'}';
+         <<",\"cast_excluded_hits\":"<<cast_excluded_hits.load()<<",\"dropped_events\":"<<dropped_events_.load()
+         <<",\"filter_readback_mismatches\":"<<HandBodyNative::filter_readback_mismatches.load()<<'}';
         return o.str();
     }
 
@@ -326,9 +330,14 @@ private:
             return HandBodyNative::position(HandBodyNative::world_now(),handle,s->storage);
         };
         e.apply=[](unsigned side,const hand_body::CommandRecord& record) {
-            // B13 applies only the B8 velocity record (type 9), directly (the manager has checked: idle, our body, this world). Others: refused.
+            // The B8 velocity record (type 9) and, B16, the filter record (type 0x1a), directly (the manager has checked: the allow-list, idle,
+            // our body, this world). Others: refused.
             std::uint16_t type{};std::memcpy(&type,record.bytes.data()+4,2);
             const Slot* s=slot_of(side);
+            if(s && type==0x1a && record.size==0x20) {
+                std::uint32_t handle{},filter{};std::memcpy(&handle,record.bytes.data()+8,4);std::memcpy(&filter,record.bytes.data()+0xc,4);
+                return HandBodyNative::set_filter(s->storage,HandBodyNative::world_now(),s->world,handle,filter);
+            }
             if(!s || type!=9 || record.size!=0x30) return false;
             std::uint32_t handle{};std::memcpy(&handle,record.bytes.data()+8,4);
             float f[6]{};std::memcpy(f,record.bytes.data()+0x10,12);std::memcpy(f+3,record.bytes.data()+0x20,12);
@@ -438,6 +447,13 @@ private:
         }
         tick_generation_=generation;tick_logic_=logic;tick_release_=release;
         body->service(in,spawn,gate);
+        // B16: the filter word the render thread's HandFilterKeeper asks for (a coupled hold of a corpse limb or a rigid prop: the mask without
+        // its layer; otherwise the R1 default, which returns only through the keeper's SafeRelease or with a new body). Only from a fresh
+        // publication (a stale one means no gameplay: the body is going anyway), one filter write per side per tick, idle only (write() refuses).
+        if(fresh) for(unsigned side=0;side<2;++side) {
+            const std::uint32_t want=last_hands_.filter[side];
+            if(body->ready(side) && body->filter_word(side)!=want && hand_filter_word_allowed(want)) body->write_filter(side,want);
+        }
         // B14: drive both hands in the same tick, once per game frame (this tick's cadence: the 0x89fb0 G1 point, first dispatch of each
         // 0x8ad260 frame; ~100/s in the sim against 7-11k dispatches/s). The servo's dt is QPC time since that side's last drive.
         const double now_s=static_cast<double>(qpc_us())*1e-6;
@@ -482,6 +498,7 @@ private:
             if(now.lost>was.lost) note_event(side,"lost",was.handle);
             if(now.faults>was.faults) note_event(side,"fault",was.handle);
             if(now.create_refusals>was.create_refusals && was.create_refusals<16) note_event(side,"create_refused",0);
+            if(now.filter_writes>was.filter_writes) note_event(side,now.filter==R1Recipe::filter?"filter_default":"filter_held",now.handle);
             was=now;
         }
         return changed;

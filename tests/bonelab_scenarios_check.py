@@ -85,6 +85,7 @@ def main():
             assert ("FAIL" in r.stdout) == (code == 1), r.stdout
     held_clamp_checks()
     hand_body_checks()
+    hold_coupling_checks()
     print("bonelab_scenarios_check ok")
 
 
@@ -228,6 +229,73 @@ def hand_body_checks():
         assert "FAIL" in {v for v, _ in brc.check(absent, "hand_body_soak")}, key
     assert "FAIL" in {v for v, _ in brc.check([{"corpse": {}}], "hand_body_soak")}, "no hand_body block"
     assert "FAIL" in {v for v, _ in brc.check([], "hand_body_soak")}
+
+
+def coupling_block(**side_over):
+    side = {"frames": 0, "uses_body": 0, "motor": 0, "corpse": 0, "native": 0, "releases": 0, "lag_m": 0, "word": brc.HAND_FILTER_DEFAULT,
+            "swaps": 0, "restores": 0, "unresolved": 0, "body_resets": 0, "overlap_frames": 0}
+    side.update(side_over)
+    return {"sides": [dict(side), dict(side)], "default_word": brc.HAND_FILTER_DEFAULT}
+
+
+def tank_hand_body_status(on=True, **over):
+    status = tank_status()
+    hb = hand_body_status()["hand_body"] if on else {"enabled": False, "installed": False}
+    if on:
+        for sd in hb["sides"]:
+            sd["filter"] = brc.HAND_FILTER_DEFAULT
+    status["hand_body"] = hb
+    status["hold_coupling"] = coupling_block(frames=900, native=900, uses_body=900 if on else 0)
+    for key, value in over.items():
+        if isinstance(value, dict) and isinstance(status.get(key), dict):
+            status[key].update(value)
+        else:
+            status[key] = value
+    return status
+
+
+def hold_coupling_checks():
+    """Task B16: S15 tank_hand_body compiles (idle before the grab, 5 s after the last release) and the checker judges the coupling fixtures."""
+    segments = sim.scenario_segments("tank_hand_body", 45000)
+    sim.compile_script(segments, 120)
+    assert max(s["end_ms"] for s in segments) <= 120000 and len(segments) <= 128
+    first_fist = min(s["start_ms"] for s in segments if s["input"].get("right_trigger"))
+    assert first_fist - 45000 >= 12000, "the hand bodies exist before the grab (G1 8 s, then the creates)"
+    last_grip = max(s["end_ms"] for s in segments if s["input"].get("right_grip"))
+    assert max(s["end_ms"] for s in segments) - last_grip >= 5000, "5 s after the last release"
+    assert any(s["input"].get("move_y") for s in segments), "the tank is walked into the wall"
+    for on in (True, False):
+        assert "FAIL" not in verdicts(tank_hand_body_status(on), "tank_hand_body"), (on, brc.check([tank_hand_body_status(on)], "tank_hand_body"))
+    side = lambda **o: coupling_block(frames=900, native=900, uses_body=900, **o)
+    for over in ({"held_clamp": {"release_overlap_unresolved": 1}}, {"held_clamp": {"releases": 1}},
+                 {"release_watch": {"count": 2, "z_at_release": 27.3, "z_min": 27.2, "z_last": 27.1}},
+                 {"hand_body": {"faults": 1}}, {"hand_body": {"contact_frames": 0}}, {"hand_body": {"available": False}},
+                 {"hold_coupling": coupling_block(frames=900, native=900, uses_body=0)},          # the tank never followed the body
+                 {"hold_coupling": side(word=0x85E4)},                                            # a stripped word left behind
+                 {"hold_coupling": side(swaps=2, restores=1)},                                    # a swap that never came back
+                 {"hold_coupling": coupling_block(frames=0, uses_body=5)},                        # idle, yet the body was used
+                 {"layer": {"pending": 1}}, {"hold_coupling": None}):
+        assert "FAIL" in verdicts(tank_hand_body_status(True, **over), "tank_hand_body"), over
+    stripped = tank_hand_body_status(True)
+    stripped["hand_body"]["sides"][1]["filter"] = 0x85E4
+    assert "FAIL" in verdicts(stripped, "tank_hand_body"), "the body's own word left stripped"
+    assert "FAIL" in verdicts(tank_hand_body_status(False, hold_coupling=coupling_block(frames=900, native=900, uses_body=3)), "tank_hand_body")
+    absent = tank_hand_body_status(True)
+    del absent["hold_coupling"]["sides"][0]["swaps"]
+    assert "FAIL" in verdicts(absent, "tank_hand_body")
+    # the soak (no hold): idle-correct coupling passes; a used body with no hold, or a word left stripped, fails
+    soak = [{**hand_body_status(), "hold_coupling": coupling_block(), "layer": {"pending": 0}} for _ in range(5)]
+    for s in soak:
+        for sd in s["hand_body"]["sides"]:
+            sd["filter"] = brc.HAND_FILTER_DEFAULT
+    assert all(v != "FAIL" for v, _ in brc.check(soak, "hand_body_soak")), brc.check(soak, "hand_body_soak")
+    for bad in (coupling_block(uses_body=1), coupling_block(word=0x85E4), coupling_block(swaps=1)):
+        b = [dict(s) for s in soak]
+        b[2] = {**soak[2], "hold_coupling": bad}
+        assert "FAIL" in {v for v, _ in brc.check(b, "hand_body_soak")}, bad
+    mixed = [dict(s) for s in soak]
+    mixed[0] = {k: v for k, v in soak[0].items() if k != "hold_coupling"}
+    assert "FAIL" in {v for v, _ in brc.check(mixed, "hand_body_soak")}
 
 
 def bad_latch():

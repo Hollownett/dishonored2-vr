@@ -107,39 +107,8 @@ public:
         }
 
         // Push the request out along the planes: low rank first, the world last, so the stronger plane wins where they disagree.
-        Vec3 p=in.requested.position;
-        struct Row {Vec3 normal;double bound;unsigned char rank;};
-        std::array<Row,plane_capacity> rows{};
-        for(std::size_t k=0;k<plane_count_;++k) {
-            const Plane& plane=planes_[k];
-            double b=-std::numeric_limits<double>::infinity();
-            for(std::size_t i=0;i<n;++i) {
-                const Vec3 offset=clamp_detail::rotate(in.requested.basis,proxies.sphere[i].local);
-                b=std::max(b,dot(plane.normal,plane.point)+proxies.sphere[i].radius+cfg_.skin-dot(plane.normal,offset));
-            }
-            rows[k]={plane.normal,b,plane.rank};
-        }
-        const auto worst=[&](Vec3 x) {
-            double w=0;
-            for(std::size_t k=0;k<plane_count_;++k) w=std::max(w,rows[k].bound-dot(rows[k].normal,x));
-            return w;
-        };
-        bool moved=false;
-        if(worst(p)>0) {
-            for(unsigned pass=0;pass<max_passes;++pass) {
-                for(unsigned char level=0;level<3;++level)
-                    for(std::size_t k=0;k<plane_count_;++k) {
-                        if(rows[k].rank!=level) continue;
-                        const double d=dot(rows[k].normal,p)-rows[k].bound;
-                        if(d<0) p=p-rows[k].normal*d;
-                    }
-                if(worst(p)<=converged) break;
-            }
-            // Planes that cannot all be met (two walls closer than the object): stay at the last published, known clear pose.
-            if(worst(p)>fallback_tolerance && published_) p=published_->position;
-            moved=true;
-        }
-        if(moved && finite(p)) {out.target.position=p;out.clamped=true;out.shift=p-in.requested.position;}
+        const Pushed pushed=push_out(in.requested,proxies);
+        if(pushed.moved && finite(pushed.position)) {out.target.position=pushed.position;out.clamped=true;out.shift=pushed.position-in.requested.position;}
         out.gap_m=length(in.requested.position-out.target.position);
 
         released_=dwell_.update(out.gap_m>cfg_.release_gap,dt);
@@ -174,7 +143,52 @@ public:
         has_=false;epoch_=0;last_now_=0;plane_count_=0;published_.reset();released_=false;last_slid_=false;
         dwell_=DwellTimer{cfg_.release_seconds,0};
     }
+    // B16: the planes this clamp holds now, applied to another request with nothing changed (the hand body's target for a native hold: the
+    // controller's request pushed out exactly as update() pushes its own). nullopt: no plane held, no proxies, a non-finite request.
+    std::optional<Vec3> project(const WorldTrackedPose& requested,const std::optional<HeldProxies>& proxies) const {
+        if(!has_ || !plane_count_ || !proxies || !proxies->count || !clamp_detail::finite_pose(requested)) return std::nullopt;
+        const Pushed pushed=push_out(requested,*proxies);
+        return pushed.moved && finite(pushed.position)?pushed.position:requested.position;
+    }
 private:
+    struct Pushed {Vec3 position{};bool moved{};};
+    // The request's position pushed out of every held plane (update() and project() share it).
+    Pushed push_out(const WorldTrackedPose& requested,const HeldProxies& proxies) const {
+        const std::size_t n=std::min(proxies.count,held_proxy_capacity);
+        Vec3 p=requested.position;
+        struct Row {Vec3 normal;double bound;unsigned char rank;};
+        std::array<Row,plane_capacity> rows{};
+        for(std::size_t k=0;k<plane_count_;++k) {
+            const Plane& plane=planes_[k];
+            double b=-std::numeric_limits<double>::infinity();
+            for(std::size_t i=0;i<n;++i) {
+                const Vec3 offset=clamp_detail::rotate(requested.basis,proxies.sphere[i].local);
+                b=std::max(b,dot(plane.normal,plane.point)+proxies.sphere[i].radius+cfg_.skin-dot(plane.normal,offset));
+            }
+            rows[k]={plane.normal,b,plane.rank};
+        }
+        const auto worst=[&](Vec3 x) {
+            double w=0;
+            for(std::size_t k=0;k<plane_count_;++k) w=std::max(w,rows[k].bound-dot(rows[k].normal,x));
+            return w;
+        };
+        bool moved=false;
+        if(worst(p)>0) {
+            for(unsigned pass=0;pass<max_passes;++pass) {
+                for(unsigned char level=0;level<3;++level)
+                    for(std::size_t k=0;k<plane_count_;++k) {
+                        if(rows[k].rank!=level) continue;
+                        const double d=dot(rows[k].normal,p)-rows[k].bound;
+                        if(d<0) p=p-rows[k].normal*d;
+                    }
+                if(worst(p)<=converged) break;
+            }
+            // Planes that cannot all be met (two walls closer than the object): stay at the last published, known clear pose.
+            if(worst(p)>fallback_tolerance && published_) p=published_->position;
+            moved=true;
+        }
+        return Pushed{p,moved};
+    }
     struct Plane {Vec3 point{},normal{};double age{};unsigned char rank{2};};
     static constexpr std::size_t plane_capacity=8;
     static constexpr unsigned max_passes=12;

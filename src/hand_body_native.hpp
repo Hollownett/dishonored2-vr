@@ -9,7 +9,8 @@
 // 0x945f0 the step's drain (depth), 0x853220 owner wake (calls with the hand's owner), 0x8527a0 OnExitedBroadPhase (calls for a hand's handle).
 // Engine calls (all pinned, all through guarded_call, each with 0x8a7820 re-read false immediately before it, from the 0x89fb0 G1 point):
 //   0x18cb90 userdata ctor and 0xca6550 sphere ctor (pure stores into mod memory, Q1 1.4 / Q2), 0xca65f0 cinfo ctor, 0xc8e5b0 createBody
-//   (addMode 1, activation 1), 0xc85dc0 velocity, 0xc8f6b0 destroyBodies (mode 0, as every engine caller passes).
+//   (addMode 1, activation 1), 0xc85dc0 velocity, 0xc8f6b0 destroyBodies (mode 0, as every engine caller passes), and (B16) 0x97600
+//   setBodyCollisionFilterInfo on our own body only, with an allowed hand word (hand_filter_word_allowed), busy 0: the direct path.
 // Never called: 0x91b50 / 0x91e20 (no pair is ever disabled), 0xc85860, 0xc90de0, any spawn, any queue record the B8 encoders leave out.
 #include "native_guarded_call.hpp"
 #include <windows.h>
@@ -44,7 +45,7 @@ public:
     struct Pin {std::uintptr_t rva;std::array<unsigned char,16> code;};
     // First 16 file bytes at every called or hooked RVA (Dishonored2.exe b671f824...; docs/native-hand-body-re.md pins, 0xc8f6b0 and 0xc85dc0
     // read from the exe for B11). The sphere ctor is pinned over its whole 113 bytes by NativeHandVolume::constructor_code.
-    static constexpr std::array<Pin,11> pins{{
+    static constexpr std::array<Pin,12> pins{{
         {0x8ad260,{0x40,0x57,0x48,0x83,0xec,0x50,0x48,0xc7,0x44,0x24,0x20,0xfe,0xff,0xff,0xff,0x48}},
         {0x97bc0,{0x48,0x8b,0xc4,0x55,0x53,0x56,0x57,0x41,0x54,0x41,0x55,0x41,0x56,0x41,0x57,0x48}},
         {0x945f0,{0x48,0x8b,0xc4,0x57,0x41,0x56,0x41,0x57,0x48,0x83,0xec,0x70,0x48,0xc7,0x40,0x98}},
@@ -56,9 +57,10 @@ public:
         {0x18cb90,{0x0f,0x57,0xc0,0x33,0xd2,0x48,0x8d,0x05,0x9c,0x24,0x97,0x01,0x48,0x89,0x01,0x48}},
         {0x8a7820,{0x80,0xb9,0x21,0x71,0x33,0x00,0x00,0x75,0x1c,0x80,0xb9,0x22,0x71,0x33,0x00,0x00}},
         {0xc85dc0,{0x48,0x89,0x6c,0x24,0x18,0x48,0x89,0x74,0x24,0x20,0x89,0x54,0x24,0x10,0x57,0x48}},
+        {0x97600,{0x48,0x83,0xec,0x48,0x80,0x7c,0x24,0x70,0x00,0x41,0x0f,0xb6,0xc1,0x74,0x3a,0x84}},   // B16 (docs/native-hand-body-re.md Q5 pins)
     }};
     static constexpr std::uintptr_t frame_rva=0x8ad260,step_rva=0x97bc0,drain_rva=0x945f0,wake_rva=0x853220,exit_rva=0x8527a0,
-        create_rva=0xc8e5b0,cinfo_rva=0xca65f0,destroy_rva=0xc8f6b0,userdata_rva=0x18cb90,velocity_rva=0xc85dc0,sphere_rva=0xca6550,
+        create_rva=0xc8e5b0,cinfo_rva=0xca65f0,destroy_rva=0xc8f6b0,userdata_rva=0x18cb90,velocity_rva=0xc85dc0,sphere_rva=0xca6550,filter_rva=0x97600,
         userdata_vtable_rva=0x1aff038,userdata_dtor_rva=0x801380,player_userdata_vtable_rva=0x1b02768,sphere_vtable_rva=0x1ec1e78;
     static constexpr std::uint32_t no_handle=0xffffffffu;
 
@@ -278,6 +280,26 @@ public:
         auto call=[&] {set_velocity(reinterpret_cast<void*>(world),handle,linear.data(),angular.data(),0);};
         if(busy_now()) return false;                       // 0x8a7820 re-read immediately before the call
         if(!guarded_call(call)) throw HandBodyEngineFault("velocity write faulted");
+        return true;
+    }
+    // B16: 0x97600 setBodyCollisionFilterInfo, the engine's own filter writer (0x808310 m_collideWithSword and native_held_object.hpp call it
+    // as 97600(game+0x60280, handle, filter, 1, busy)), on our own slot only, in the body's own world, with an allowed hand word, and with
+    // 0x8a7820 re-read false right before it (busy 0: the direct path, no queued record). false: refused, no call. The record's word (+0x6c) is
+    // read back afterwards and a mismatch is only counted (filter_readback_mismatches): the manager never re-sends the same word in a loop.
+    inline static std::atomic<std::uint64_t> filter_readback_mismatches{};
+    static bool set_filter(const R1BodyStorage& s,std::uintptr_t world,std::uintptr_t world_at_create,std::uint32_t handle,std::uint32_t filter) {
+        if(!world || world!=world_at_create || !hand_filter_word_allowed(filter) || own_state(world,handle,s)!=Own::present) return false;
+        const auto game=rig::value<std::uintptr_t>(read_,base_+0x39a5290);
+        if(!game || !rig::pointer(*game) || rig::value<std::uintptr_t>(read_,*game+0x60410)!=world) return false;
+        using SetFilter=void (__fastcall*)(std::uintptr_t,std::uint32_t,std::uint32_t,char,char);
+        const auto set_filter_info=reinterpret_cast<SetFilter>(base_+filter_rva);
+        const std::uintptr_t system=*game+0x60280;
+        auto call=[&] {set_filter_info(system,handle,filter,1,0);};
+        CrashOperation operation("hand body setBodyCollisionFilterInfo");
+        if(busy_now()) return false;                       // 0x8a7820 re-read immediately before the call
+        if(!guarded_call(call)) throw HandBodyEngineFault("filter write faulted");
+        std::uintptr_t record{};
+        if(own_state(world,handle,s,&record)!=Own::present || rig::value<std::uint32_t>(read_,record+0x6c)!=filter) filter_readback_mismatches.fetch_add(1,std::memory_order_relaxed);
         return true;
     }
     // Owner (a)'s static G2 evidence from B7's chain on the player's query body (read live by probe_body_handle).

@@ -115,15 +115,15 @@ for name in ("hand_body.hpp", "hand_body_runtime.hpp", "hand_body_native.hpp", "
              "hand_body_commands.hpp", "hand_body_lifecycle.hpp", "dxgi_probe.cpp", "native_grab.hpp"):
     assert "0xc90de0" not in code_of((src / name).read_text(encoding="utf-8")), name + ": createConstraint stays out"
 calls = re.findall(r"reinterpret_cast<[\w:]+>\(base_\+(\w+_rva)\)", native)
-assert set(calls) == {"userdata_rva", "sphere_rva", "cinfo_rva", "create_rva", "destroy_rva", "velocity_rva"}, calls
+assert set(calls) == {"userdata_rva", "sphere_rva", "cinfo_rva", "create_rva", "destroy_rva", "velocity_rva", "filter_rva"}, calls   # B16: 0x97600
 for engine_call in ("create_body(reinterpret_cast<void*>(world),&id,s.cinfo.data(),1,1)", "destroy_bodies(reinterpret_cast<void*>(world),ids,1,0)",
-                    "set_velocity(reinterpret_cast<void*>(world),handle,linear.data(),angular.data(),0)"):
+                    "set_velocity(reinterpret_cast<void*>(world),handle,linear.data(),angular.data(),0)", "set_filter_info(system,handle,filter,1,0)"):
     assert native.count(engine_call) == 1
     lam = re.search(r"auto call=\[&\] \{[^}]*" + re.escape(engine_call), native)
     assert lam, engine_call + " must be a guarded lambda"
     rest = native[lam.end():]
     assert "guarded_call(call)" in rest[:rest.index("\n    }\n")], engine_call + " must run inside guarded_call"
-for name in ("static bool create(R1BodyStorage& s,", "static DestroyOutcome destroy(", "static bool velocity("):
+for name in ("static bool create(R1BodyStorage& s,", "static DestroyOutcome destroy(", "static bool velocity(", "static bool set_filter("):
     fn = function(native, name)
     at = fn.index("guarded_call(call)")
     checks = list(re.finditer(r"if\(busy_now\(\)\) return [\w:]+;", fn[:at]))
@@ -335,6 +335,92 @@ for line in body.splitlines():
         assert not re.search(r"//.*\b(d|c)\.\w+=", line), "a statement swallowed by a comment: " + line.strip()[:80]
 print("hand_body_routing_check B15 ok")
 
+# 13. B16: held things follow the hand body (src/hold_coupling.hpp). Knob off (or no ready body) is today's behaviour by construction; the
+# hand's filter word is written only by the hand body (allow-listed in write(), 0x97600 only in hand_body_native.hpp) and restored only through
+# HandFilterKeeper's SafeRelease or a new body; no pair API; nothing swallowed into a comment.
+coupling = (src / "hold_coupling.hpp").read_text(encoding="utf-8")
+held_obj = (src / "native_held_object.hpp").read_text(encoding="utf-8")
+assert "hold_coupling_check.cpp" in build and build.index("hand_visual_source_check.exe") < build.index("hold_coupling_check.cpp")
+# layer_restore_only_via_safe_release: no filter writer outside the held-object swap (native_held_object.hpp) and the hand body's own files
+writers = re.compile(r"\bset_filter\(|encode_set_filter\(|0x97600|filter_rva|setBodyCollisionFilterInfo")
+allowed = {"native_held_object.hpp", "hand_body.hpp", "hand_body_native.hpp", "hand_body_runtime.hpp", "hand_body_commands.hpp"}
+for f in sorted(src.iterdir()):
+    if f.suffix not in (".hpp", ".cpp", ".h"):
+        continue
+    if writers.search(code_of(f.read_text(encoding="utf-8", errors="replace"))):
+        assert f.name in allowed, f.name + " writes a filter word (only the held-object swap and the hand body may)"
+assert not writers.search(code_of(probe)) and not writers.search(code_of(coupling)) and not writers.search(code_of(grab))
+assert "0x91b50" not in code_of(native + runtime + body + coupling) and "0x91e20" not in code_of(native + runtime + body + coupling), "no pair API"
+assert "0x3a" not in code_of((src / "hand_body_commands.hpp").read_text(encoding="utf-8")), "no record 0x3a"
+# write(): the allow-list (9 / 0x30, 0x1a / 0x20 with an allowed word), before any engine read; a filter write has its own one-per-tick slot
+assert "const bool velocity_record=type==9 && record.size==0x30,filter_record=type==0x1a && record.size==0x20;" in write_fn
+assert write_fn.index("if(!velocity_record && !filter_record)") < write_fn.index("engine_.world") and write_fn.index("hand_filter_word_allowed(word)") < write_fn.index("engine_.world")
+assert "std::uint64_t& slot=filter_record?s.filter_tick:s.written_tick;" in write_fn
+for need in ("engine_.at_g1_point()", "const TickGuard guard(ticking_);", "!life_.can_write(side,world,handle)", "busy", "s.pending_destroy"):
+    assert need in write_fn, need + ": the G1 point and the lifecycle guards hold for the filter record"
+assert "inline constexpr bool hand_filter_word_allowed(std::uint32_t word)" in body
+# a new body starts with the default word: create, finish (destroy / lost / gone) and abandon reset it
+assert "reset_filter(side);" in function(body, "void do_create(") and "reset_filter(side);" in function(body, "void finish(")
+assert "reset_filter(side);" in service[service.index("case BodyAction::abandon:"):service.index("case BodyAction::create:")]
+# the native filter call: our own slot, the body's world, an allowed word, busy re-read right before guarded_call (checked in section 3 too)
+setf = function(native, "static bool set_filter(")
+assert "hand_filter_word_allowed(filter)" in setf and "own_state(world,handle,s)!=Own::present" in setf and "world!=world_at_create" in setf
+assert "{0x97600,{0x48,0x83,0xec,0x48,0x80,0x7c,0x24,0x70,0x00,0x41,0x0f,0xb6,0xc1,0x74,0x3a,0x84}}" in native, "0x97600 byte-pinned (verify())"
+# the runtime: the type-0x1a apply goes to HandBodyNative::set_filter; the wanted word comes only from a fresh publication, after service()
+assert "return HandBodyNative::set_filter(s->storage,HandBodyNative::world_now(),s->world,handle,filter);" in runtime
+assert tick.index("body->service(in,spawn,gate);") < tick.index("body->write_filter(side,want);") < tick.index("body->drive(")
+assert "if(fresh) for(unsigned side=0;side<2;++side) {" in tick and "const std::uint32_t want=last_hands_.filter[side];" in tick
+assert runtime.count("write_filter(") == 1 and "write_filter(" not in code_of(probe)
+# the keeper: the default word returns only in the SafeRelease restore branch, with a new body, or with no body
+keeper = function(coupling, "FilterKeeperOutput update(unsigned side,const FilterKeeperInput& in)")
+assert keeper.count("s.word=default_word;") == 2, "the default word is set in exactly two places"
+restore_at = keeper.index("if(o.restore_layer) {s.phase=Phase::idle;s.word=default_word;")
+recreate_at = keeper.index("if(s.has_gen && in.body_generation!=s.gen && s.phase==Phase::releasing)")
+assert keeper.index("s.word=default_word;") > recreate_at and keeper.rindex("s.word=default_word;") > restore_at
+ended = keeper[keeper.index("} else if(s.phase==Phase::holding)"):keeper.index("if(s.phase==Phase::releasing) {")]
+assert "default_word" not in ended, "the hold's end itself never restores (SafeRelease decides)"
+assert "const auto o=s.safe.update(r);" in keeper and "SafeRelease safe{}" in coupling
+# dxgi: knob off is no behaviour change. The B16 block is knob-gated; everything it sets has today's value when it does not run.
+b16_at = probe.index("// B16: held things follow the hand body (Bonelab")
+b16_block, _ = enclosing_block(probe, probe.index("const double couple_now="))
+assert probe[b16_at:probe.index(b16_block)].rstrip().endswith("if(hand_body_requested.load(std::memory_order_relaxed) && d2vr::HandBodyRuntime::active())")
+assert "for(auto& body_view:hold_body_view) body_view={};" in probe[b16_at:probe.index(b16_block)], "the views are cleared every frame before the gate"
+assert "unsigned hold_coupled_bits{};std::array<std::uint32_t,2> hand_filter_words{{d2vr::R1Recipe::filter,d2vr::R1Recipe::filter}};" in probe
+assert b16_at < vstart, "B16 decides before B15 draws"
+for name, pattern in (("hold_coupled_bits", r"hold_coupled_bits\|="), ("hand_filter_words", r"hand_filter_words\[side\]="), ("native_grab.couple", r"native_grab\.couple\(")):
+    for m in re.finditer(pattern, probe):
+        assert probe.index(b16_block) <= m.start() < probe.index(b16_block) + len(b16_block), name + " is set only inside the knob-gated block"
+assert "native_grab.couple(" not in code_of(probe[:b16_at]) and code_of(grab).count("void couple(") == 1
+assert "in.yield=(((hand_body_yield_bits&~hold_coupled_bits)|authored_hands)>>side)&1u;" in vblock
+for line in ("hand_body_in.yield=(hand_body_yield_bits&~hold_coupled_bits)|authored_hands;", "hand_body_in.filter=hand_filter_words;",
+             "hand_body_in.target[side].position=native_body_target[side].position;"):
+    assert line in publish_block, line
+# publish_held_object: coupled only with a ready view; otherwise B4's request, origin and shift exactly
+pho = function(probe, "static void publish_held_object(")
+assert "const auto& body_view=hold_body_view[side&1u];const bool coupled=body_view.ready;" in pho
+assert "in.requested=coupled?d2vr::HoldCoupling::controller_request(request,grip.position,palm_pose.position):request;" in pho
+assert "if(out.clamped) {origin=out.target.position;++held_clamp_status.clamped_frames;}" in pho and "d2vr::Vec3 shift=out.clamped?out.shift:d2vr::Vec3{};" in pho
+cpl = pho[pho.index("if(coupled) {   // B16"):pho.index("} else native_body_target[side&1u].valid=false;")]
+assert "d2vr::couple_native(" in cpl and "origin=co.target.position;" in cpl
+assert "if(L.clamp.should_release() && !L.drop_sent)" in pho, "the drop rule stays B4's"
+# NativeGrab: the coupled hand only while a capped hold is held, fresh, and published after this hold's bind (C9: selection never sees it)
+ul = function(grab, "void update_lane(unsigned side,std::uintptr_t world,UINT64 now)")
+assert "const bool coupled=lane.held && lane.capped && coupling_fresh(lane,now) && finite(lane.coupling.offset);" in ul
+assert ul.index("lane.sample_hand=p.hand;") < ul.index("lane.grab.sample(lane.sample_hand,")
+assert "lane.coupling.tick>=lane.bound_at" in function(grab, "static bool coupling_fresh(")
+assert "lane.coupling={};" in function(grab, "void begin_hold(") and "coupling={};" in grab[grab.index("void end_hold() {"):grab.index("void end_hold() {") + 300]
+rel = ul[ul.index("if(lane.capped && coupled && lane.coupling.release && !lane.pending_release)"):ul.index("if(lane.capped) {")]
+assert "end_capped_hold(lane,side,ReleaseReason::lag,true);" in rel and "lane.coupling.release=false;" in rel
+# the comment-swallow guard (three line joins on this plan swallowed statements): no code-shaped text inside a // comment
+check_src = (root / "tests/hold_coupling_check.cpp").read_text(encoding="utf-8")
+assert not re.search(r"//[^\n]*\bCHECK\(", check_src), "a CHECK( inside a // comment in tests/hold_coupling_check.cpp"
+for name, text in (("hold_coupling.hpp", coupling), ("hand_body.hpp", body), ("hand_body_runtime.hpp", runtime), ("hand_body_native.hpp", native)):
+    assert not re.search(r"//[^\n]*[a-z)\]][a-z_]+(\.|->)[a-z_]+(=|\()[^\n]*;", text), name + ": code swallowed into a comment?"
+for line in b16_block.splitlines() + cpl.splitlines():
+    if "//" in line:
+        assert not re.search(r"//.*\b[a-z_]+(\.|->|\[)[\w\]\[]*=[^=]", line), "a statement swallowed by a comment: " + line.strip()[:90]
+print("hand_body_routing_check B16 ok")
+
 # 10. the B13 sim scenario compiles and fits a 120 s session with a 60 s lead
 import sys
 sys.path.insert(0, str(root / "linux"))
@@ -351,3 +437,7 @@ if sim is not None:
     sim.compile_script(soak, 120)
     assert max(s["end_ms"] for s in soak) <= 120000 and len(soak) <= 128, (max(s["end_ms"] for s in soak), len(soak))
     print("hand_body_soak scenario compiles")
+    tank = sim.scenario_segments("tank_hand_body", 45000)
+    sim.compile_script(tank, 120)
+    assert max(s["end_ms"] for s in tank) <= 120000 and len(tank) <= 128
+    print("tank_hand_body scenario compiles")
