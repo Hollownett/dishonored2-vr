@@ -238,7 +238,7 @@ reads = [u for u in free_uses if publish_start <= u < publish_start + len(publis
 assert len(reads) == 2, "the bits are read only inside the knob-gated publication"
 assert "unsigned hand_body_free_bits{},hand_body_yield_bits{};" in probe
 free_gate = probe[probe.index("const bool answered_free="):probe.index("if(hand_body_free_streak[side]>=3) hand_body_free_bits|=1u<<side;")]
-for need in ("clamp_drew", "clamped.state==d2vr::ClampState::free", "!clamped.reacquired", "!clamped.held", "!clamped.contact", "!reach_clamped",
+for need in ("clamp_updated && clamped.valid && !clamp_yield", "clamped.state==d2vr::ClampState::free", "!clamped.reacquired", "!clamped.held", "!clamped.contact", "!reach_clamped",
              "!palm_unanswered", "clamped.drawn.position-palm.position"):
     assert need in free_gate, need + ": the free bit needs an answered free palm cast to the palm itself (DeepSeek P1/P2)"
 # DeepSeek P1: the tracked-arm frame's source tick and epoch stay real code (an edit once swallowed them into a comment)
