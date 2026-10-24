@@ -699,10 +699,11 @@ static void b14_checks() {
         CHECK(r.hb.drive_status(0).player_drift_um==0);
         for(int i=0;i<20;++i) {r.root=Vec3{.0001*(i+1),0,0};r.tick();}
         CHECK(r.hb.drive_status(0).player_drift_um==2000);CHECK(r.hb.drive_status(1).player_drift_um==0);   // hand 1 is outside the capsule
+        CHECK(r.hb.drive_status(0).pressed_ticks>=45);CHECK(r.hb.drive_status(1).pressed_ticks==0);
         CHECK(length(r.w.b[0].pos-r.target[0])<.01);   // the drive was not altered by the metric
         DriveRig l;l.root=Vec3{0,0,0};l.target[0]=Vec3{.1,.1,1.0};l.locomotion=true;l.tick();
         for(int i=0;i<20;++i) {l.root=Vec3{.01*(i+1),0,0};l.tick();}
-        CHECK(l.hb.drive_status(0).player_drift_um==0);
+        CHECK(l.hb.drive_status(0).player_drift_um==0);CHECK(l.hb.drive_status(0).pressed_ticks==0);   // locomotion: not a pressed tick
         // a root jump (Blink, a teleport: 1 m in one tick, no stick) opens a new window, it is not drift (DeepSeek P2); counted
         DriveRig j;j.root=Vec3{0,0,0};j.target[0]=Vec3{.1,.1,1.0};j.tick();for(int i=0;i<5;++i) j.tick();
         j.root=Vec3{.3,0,0};j.tick();for(int i=0;i<5;++i) j.tick();   // 0.3 m in one tick, the body still inside the capsule

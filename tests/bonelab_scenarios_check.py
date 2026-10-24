@@ -150,7 +150,7 @@ def held_clamp_checks():
 def hand_body_status(**over):
     side = {"creates": 1, "destroys": 0, "faults": 0, "drive": {"drive_writes": 5000, "snaps": 0, "snap_blocked": 0, "yields": 0, "contact_frames": 40}}
     hb = {"enabled": True, "installed": True, "available": True, "hand_body_fault": False, "why": "", "faults": 0, "cost_us": 20, "cost_max_us": 120,
-          "tick_cost_max_us": 400, "steady_tick_cost_max_us": 150, "player_drift_um": 0, "contact_frames": 80, "snaps": 0, "gap_m": [.01, .01],
+          "tick_cost_max_us": 400, "steady_tick_cost_max_us": 150, "player_drift_um": 0, "pressed_ticks": 2600, "contact_frames": 80, "snaps": 0, "gap_m": [.01, .01],
           "abandons": 0, "sides": [copy.deepcopy(side), copy.deepcopy(side)]}
     hb.update(over)
     return {"hand_body": hb}
@@ -166,7 +166,7 @@ def hand_body_checks():
     assert all(not s["input"].get("move_y") and not s["input"].get("move_x") for s in capsule), "no locomotion while pressed"
     five = [hand_body_status() for _ in range(5)]
     assert all(v != "FAIL" for v, _ in brc.check(five, "hand_body_soak")), brc.check(five, "hand_body_soak")
-    for over in ({"faults": 1}, {"cost_max_us": 201}, {"steady_tick_cost_max_us": 201}, {"steady_tick_cost_max_us": None}, {"player_drift_um": 1001}, {"available": False}, {"hand_body_fault": True},
+    for over in ({"faults": 1}, {"cost_max_us": 201}, {"steady_tick_cost_max_us": 201}, {"steady_tick_cost_max_us": None}, {"pressed_ticks": 99}, {"pressed_ticks": None}, {"player_drift_um": 1001}, {"available": False}, {"hand_body_fault": True},
                  {"installed": False}):
         bad = [hand_body_status() for _ in range(5)]
         bad[3]["hand_body"].update(over)

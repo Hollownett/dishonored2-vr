@@ -16,6 +16,7 @@ TANKS = ("tank_wall", "tank_drop", "tank_drop_cycles")  # Part 5A held-clamp sce
 CARRY_FAULTS = ("failed_reads", "rejected_publishes", "bad_quat_reads")
 HAND_BODY = ("hand_body_soak",)  # Plan B B14: the driven hand bodies (proofs a, b, d), summed over sessions
 HAND_BODY_COST_US = 200          # proof (d): the drive's cost per tick, both hands summed
+HAND_BODY_PRESSED_TICKS = 100   # about 1 s of a body inside the capsule per session (the scripted segment holds 14 s)
 HAND_BODY_DRIFT_UM = 1000        # proof (b): the player root's unexplained movement while a hand is pressed into the capsule
 
 
@@ -178,6 +179,8 @@ def check_hand_body(statuses):
         writes = [(sd.get("drive") or {}).get("drive_writes", 0) for sd in h["sides"]]
         add(all(c >= 1 for c in creates) and all(w >= 100 for w in writes),
             f"session {i + 1}: both bodies created and driven (creates {creates}, drive_writes {writes})")
+        pressed = h.get("pressed_ticks")   # proof (b) is not vacuous: the bodies sat in the capsule with no locomotion input
+        add(_num(pressed) and pressed >= HAND_BODY_PRESSED_TICKS, f"session {i + 1}: pressed_ticks {pressed} >= {HAND_BODY_PRESSED_TICKS} (the drift window was entered)")
         add(h["cost_max_us"] <= HAND_BODY_COST_US, f"session {i + 1}: cost_max_us {h['cost_max_us']} <= {HAND_BODY_COST_US} (drive, both hands per tick)")
         steady = h.get("steady_tick_cost_max_us")   # DeepSeek P2: the whole tick (service + both drives) on ticks with no create/destroy
         add(_num(steady) and steady <= HAND_BODY_COST_US, f"session {i + 1}: steady_tick_cost_max_us {steady} <= {HAND_BODY_COST_US} (whole tick)")

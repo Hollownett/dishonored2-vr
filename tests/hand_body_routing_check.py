@@ -277,7 +277,7 @@ assert "e.motion=[](unsigned side,std::uint32_t handle)" in runtime
 # proof (d): the cost of every tick is measured where it lands (the dispatcher runs on the render thread)
 assert entry_fn.index("const auto t0=qpc_us();") < entry_fn.index("try {tick();}") < entry_fn.index("const auto t1=qpc_us();")
 for key in ('\\"cost_max_us\\":', '\\"player_drift_um\\":', '\\"contact_frames\\":', '\\"snaps\\":', '\\"drive\\":{',
-            '\\"tick_cost_max_us\\":', '\\"steady_tick_cost_max_us\\":', '\\"faults\\":', '\\"time_factor_verified\\":false'):
+            '\\"tick_cost_max_us\\":', '\\"pressed_ticks\\":', '\\"steady_tick_cost_max_us\\":', '\\"faults\\":', '\\"time_factor_verified\\":false'):
     assert key in runtime, key
 print("hand_body_routing_check B14 ok")
 

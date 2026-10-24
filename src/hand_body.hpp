@@ -97,7 +97,7 @@ struct BodyMotion {Vec3 position{},velocity{},spin{};};
 struct DriveInput {unsigned side{};WorldTrackedPose target{};double held_kg{};double now{};bool yield{};
                    bool target_free{};std::optional<Vec3> player_root{};bool locomotion{};};
 struct DriveStatus {double gap_m{};double speed{};bool capped{};std::uint64_t contact_frames{},snaps{},cost_us{},cost_max_us{},player_drift_um{};
-                    double dt_s{};std::uint64_t drives{},drive_writes{},yields{},skipped{},snap_requests{},snap_blocked{},garbage{},second_drives{},root_jumps{};};
+                    double dt_s{};std::uint64_t drives{},drive_writes{},yields{},skipped{},snap_requests{},snap_blocked{},garbage{},second_drives{},root_jumps{},pressed_ticks{};};
 
 // ---- G1: thread and drain point (docs Gates for B11). Counted by the count-only hooks; judged here.
 struct G1Stats {
@@ -441,7 +441,7 @@ public:
         d.gap_m=c.gap_m.load();d.speed=c.speed.load();d.capped=c.capped.load();d.contact_frames=c.contact_frames.load();d.snaps=c.snaps.load();
         d.cost_us=c.cost_us.load();d.cost_max_us=c.cost_max_us.load();d.player_drift_um=c.player_drift_um.load();d.dt_s=c.dt_s.load();
         d.drives=c.drives.load();d.drive_writes=c.drive_writes.load();d.yields=c.yields.load();d.skipped=c.skipped.load();
-        d.snap_requests=c.snap_requests.load();d.snap_blocked=c.snap_blocked.load();d.garbage=c.garbage.load();d.second_drives=c.second_drives.load();d.root_jumps=c.root_jumps.load();
+        d.snap_requests=c.snap_requests.load();d.snap_blocked=c.snap_blocked.load();d.garbage=c.garbage.load();d.second_drives=c.second_drives.load();d.root_jumps=c.root_jumps.load();d.pressed_ticks=c.pressed_ticks.load();
         return d;
     }
     // The largest drive cost of one tick, both hands summed (proof (d): <= 200 us), and the last tick's sum.
@@ -474,7 +474,7 @@ private:
         std::atomic<std::uint64_t> creates{},destroys{},faults{},refused_writes{},abandons{},queued_destroys{},direct_destroys{},busy_waits{},
             wake_writes{},create_refusals{},writes{},releases{},lost{},unverified{},misplaced_writes{},reentrant_writes{};
         std::atomic<std::uint64_t> contact_frames{},snaps{},cost_us{},cost_max_us{},player_drift_um{},drives{},drive_writes{},yields{},skipped{},
-            snap_requests{},snap_blocked{},garbage{},second_drives{},root_jumps{};
+            snap_requests{},snap_blocked{},garbage{},second_drives{},root_jumps{},pressed_ticks{};
         std::atomic<double> gap_m{},speed{},dt_s{};std::atomic<bool> capped{};
         std::atomic<int> state{};std::atomic<std::uint32_t> handle{};
     };
@@ -504,6 +504,7 @@ private:
         const Vec3 r=*in.player_root;const Vec3 d=body-r;
         const bool pressed=std::sqrt(d.x*d.x+d.y*d.y)<=dc.capsule_radius && d.z>=-.05 && d.z<=dc.capsule_height;
         if(!pressed) {s.press_root.reset();s.last_root.reset();return;}
+        count(side,&Counters::pressed_ticks);   // proof (b) is not vacuous: the body really sat in the capsule with no locomotion input
         if(!s.press_root) {s.press_root=r;s.last_root=r;return;}
         if(s.last_root && length(r-*s.last_root)>dc.root_jump) {count(side,&Counters::root_jumps);s.press_root=r;s.last_root=r;return;}   // Blink, a teleport
         s.last_root=r;

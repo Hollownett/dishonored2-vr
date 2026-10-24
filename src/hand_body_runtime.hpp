@@ -182,7 +182,7 @@ public:
              <<",\"snaps\":"<<d.snaps<<",\"snap_requests\":"<<d.snap_requests<<",\"snap_blocked\":"<<d.snap_blocked<<",\"cost_us\":"<<d.cost_us
              <<",\"cost_max_us\":"<<d.cost_max_us<<",\"player_drift_um\":"<<d.player_drift_um<<",\"dt_s\":"<<d.dt_s<<",\"drives\":"<<d.drives
              <<",\"drive_writes\":"<<d.drive_writes<<",\"yields\":"<<d.yields<<",\"skipped\":"<<d.skipped<<",\"garbage\":"<<d.garbage
-             <<",\"second_drives\":"<<d.second_drives<<",\"root_jumps\":"<<d.root_jumps<<'}';
+             <<",\"second_drives\":"<<d.second_drives<<",\"root_jumps\":"<<d.root_jumps<<",\"pressed_ticks\":"<<d.pressed_ticks<<'}';
             o<<",\"pose\":";
             if(p) o<<'['<<p->position.x<<','<<p->position.y<<','<<p->position.z<<']';else o<<"null";
             o<<'}';
@@ -191,7 +191,7 @@ public:
         o<<"],\"faults\":"<<(body->status(0).faults+body->status(1).faults)
          <<",\"cost_us\":"<<body->drive_cost_us()<<",\"cost_max_us\":"<<body->drive_cost_max_us()   // drive, both hands summed per tick (proof d)
          <<",\"tick_cost_us\":"<<tick_cost_us_.load()<<",\"tick_cost_max_us\":"<<tick_cost_max_us_.load()<<",\"steady_tick_cost_max_us\":"<<steady_tick_cost_max_us_.load()
-         <<",\"player_drift_um\":"<<std::max(d0.player_drift_um,d1.player_drift_um)<<",\"contact_frames\":"<<(d0.contact_frames+d1.contact_frames)
+         <<",\"player_drift_um\":"<<std::max(d0.player_drift_um,d1.player_drift_um)<<",\"pressed_ticks\":"<<(d0.pressed_ticks+d1.pressed_ticks)<<",\"contact_frames\":"<<(d0.contact_frames+d1.contact_frames)
          <<",\"snaps\":"<<(d0.snaps+d1.snaps)<<",\"gap_m\":["<<d0.gap_m<<','<<d1.gap_m<<']'
          <<",\"time_factor\":1,\"time_factor_verified\":false,\"gravity_comp\":"<<HandDriveConfig{}.gravity
          <<",\"abandons\":"<<(body->status(0).abandons+body->status(1).abandons)
