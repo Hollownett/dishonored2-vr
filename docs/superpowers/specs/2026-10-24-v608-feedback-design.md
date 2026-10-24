@@ -40,6 +40,10 @@ The user's words, 2026-10-24:
   - DLSS modes stay offered only where supported.
   - The in-game VR menu is the source of truth, and the launcher always shows and keeps what the game saved.
 - **G6 Corpses.** Dragging a corpse feels 2.5× lighter than v608.
+- **G7 Thin held items.** Holding a paper, note, stamp or other thin pickup, the fingers stop on the item instead of
+  closing through it (user, 2026-10-24: "my hand renders through such objects"; the fingers pass through).
+- **G8 Empty-hand fist.** In a full fist with an empty hand, the fingertips rest on the palm and never sink into it
+  (user, 2026-10-24: "fingertips sink in", empty-hand fist only; weapon fists are fine).
 
 ## Non-goals
 
@@ -191,6 +195,35 @@ Measurement already available:
   535-538) and `tools/corpse_drag_lab.cpp` (44).
 - `build/grab-tuning.cfg` can override it, within bounds .5..10.
 
+### R7 Thin held items (G7)
+
+- **Where the held shapes come from.** The `shapes` passed to `finger_contact` (`dxgi_probe.cpp` ~5337-5368) come from the
+  mesh world AABB at `model+0x1840`. It feeds:
+  - `classify_held` on the physical-grab motor path;
+  - `held_cylinder` / `seat_held` on the native carry path, which is almost certainly the one papers and stamps use.
+
+  The world-probe source skips the held item.
+- **What happens to a flat sheet.** Its axis-aligned AABB has a thickness of about 0, so `held_cylinder` throws "Invalid
+  held bounds" (`finger_ik.hpp` ~742). The throw is caught (~3333, counted in `held_cylinder_errors`), and then:
+  - there is no cylinder;
+  - `holding` stays false, so there are no shapes and `reach=1`;
+  - the fingers close to a full fist (curl 1.0) through the item.
+
+  The physical-grab path throws the same way (`classify_held` ~688), and its catch (~5417) drops back to plain controller
+  curls.
+- **Thin items that don't throw** fall to a 4 mm ball seated at palm depth (`held_radius_floor`, `fit_cylinder` ~765),
+  away from where the fingers close.
+- **No test covers it.** No test or scenario covers a zero-thickness held item on the native carry path.
+- **Visible in status.** `finger_ik.hold.held_cylinder_errors` rising and `avg_shapes` ≈ 0 while holding.
+
+### R8 Empty-hand fist (G8)
+
+- The touch mapping (and the legacy mapping at full grip and trigger) asks for curl 1.0 on every finger. `finger_turns`
+  at curl 1 bends each finger to its full path. Nothing stops a fingertip at the palm surface on a free hand: the contact
+  solver has no palm shape, and free fingers take the `count || fold` free path.
+- Weapon fists use the game's captured native pose, so they are unaffected. (This is inferred from the code and the
+  user's report, not measured.)
+
 ## Decisions (the user's)
 
 - One plan for G1–G6. Small objects come later, in their own design.
@@ -253,6 +286,21 @@ Measurement already available:
 - **G6.** `kCorpseStrengthScale` = 15 (6 × 2.5), for corpses only (the corpse motor and the tow). Props and the hand servo
   keep their scales. The cfg bound rises to .5..25. Tests and the lab pins follow. `build/legacy-corpse-strength` still
   restores 3.
+- **G7** (my call):
+  - A minimum thickness on the thin axis only (about 5 mm) in `held_cylinder`, `classify_held` and `fit_cylinder`,
+    instead of throwing. Existing flat-prop tests (plates, books) must keep their axis choice.
+  - If no cylinder can be made, a box fallback from the clamped AABB is pushed into `shapes`.
+  - Any native hold (`hand_holding_object && holder==side`) counts as holding, even with no shape, so the curl is capped
+    at `held_curl` (0.8), never a full fist.
+  - No per-class pinch pose: nothing in the repo identifies papers or notes yet.
+  - Test: a zero-thickness AABB held on the native path gives at least one shape, no throw, and every fingertip outside
+    the item.
+- **G8** (my call):
+  - The free (empty-hand) finger solve gets a palm stop: no fingertip may pass the palm surface.
+  - Preferred: give `finger_contact` a palm slab for free hands, so the existing solver stops tips on it.
+  - Fallback: a per-finger maximum curl derived from the hand geometry in a Tier A lab.
+  - Both the touch mapping and the legacy mapping are covered. The weapon native fist is untouched.
+  - Test: at full fist, every fingertip's distance to the palm surface is ≥ 0, on both hands and both mappings.
 - **G1, if the sim can't reproduce it** (my call). Ship the measured fixes, each behind its own off-switch knob. Add the
   running trace fields to the status block and to the Tier C checklist, so the headset run gives ground truth. Don't block
   on a headset trace.
@@ -276,7 +324,9 @@ Measurement already available:
   - fist with an empty hand: no draw; over-shoulder draw still works; block and choke still work;
   - crosshair on the gun and two powers at near and far targets; turn it off and on in-game;
   - fresh-install AA on the RTX laptop (expect DLAA); change AA in-game, then open the launcher (it shows the same);
-  - drag a corpse (2.5× lighter, still controlled).
+  - drag a corpse (2.5× lighter, still controlled);
+  - pick up a paper, a note and a stamp: the fingers stop on the item;
+  - make a full fist with an empty hand: the fingertips rest on the palm.
 
 ## Left to the builder
 
