@@ -1214,6 +1214,27 @@ int main() {
         assert(rejects([&] {(void)r::held_cylinder(id,{{-4,-4,0},{4,4,0}});}));
         assert(rejects([&] {(void)r::classify_held(upright,d2vr::NativeGrabBounds{{-4,-4,0},{4,4,0}},-1,h.palm);}));
     }
+    // G8: an empty fist rests on the palm (palm_stop_slab): the tips stop on the skin plane, an open hand is untouched, the knuckles lie outside it.
+    for(bool right:{false,true}) {
+        const auto h=real_hand(right);const auto& g=h.geometry;const auto n=d2vr::unit(r::palm_normal(h.palm,g));const Vec3 skin=h.palm.position+n*r::held_palm_depth;
+        const auto slab=r::palm_stop_slab(g,h.palm);
+        for(const auto& wants:{r::finger_wants(false,1.f,1.f),std::array<float,5>{1,1,1,1,1}}) {
+            r::FingerIkState st{};const auto c=r::finger_contact(g,h.palm,&slab,1,0,st,1.f,r::finger_solve_all,&wants);
+            for(unsigned f=0;f<5;++f) {
+                const auto a=r::finger_pose_angles(f,wants[f],c.pose[f]);const auto tip=world_of(h,r::finger_points(g.finger[f],r::finger_turns_of(g.finger[f],a))[3]);
+                const double above=d2vr::dot(tip-skin,n);
+                assert(above>=0);
+            }
+            r::FingerIkState bare{};const auto free_fist=r::finger_contact(g,h.palm,nullptr,0,0,bare,1.f,r::finger_solve_all,&wants);double lowest=1e9; // control: with no slab a tip sinks below the skin
+            for(unsigned f=1;f<5;++f) {const auto a=r::finger_pose_angles(f,wants[f],free_fist.pose[f]);lowest=std::min(lowest,d2vr::dot(world_of(h,r::finger_points(g.finger[f],r::finger_turns_of(g.finger[f],a))[3])-skin,n));}
+            assert(lowest<0);
+        }
+        const std::array<float,5> open{};r::FingerIkState a{},b{};
+        const auto with=r::finger_contact(g,h.palm,&slab,1,0,a,1.f,r::finger_solve_all,&open),without=r::finger_contact(g,h.palm,nullptr,0,0,b,1.f,r::finger_solve_all,&open);
+        for(unsigned f=0;f<5;++f) {const auto x=r::finger_pose_angles(f,0.f,with.pose[f]),y=r::finger_pose_angles(f,0.f,without.pose[f]);for(unsigned s=0;s<3;++s) assert(std::abs(x[s]-y[s])<1e-6);} // an open hand asks no curl: the slab leaves its angles alone
+        for(unsigned f=1;f<5;++f) assert(r::shape_distance(slab,world_of(h,g.finger[f].pivot))>0);
+        assert(with.resting==0 && without.resting==0); // the stop under the palm is no surface: an empty hand takes no resting curl from it
+    }
     std::cout<<"finger_ik_check passed"<<std::endl;
     return 0;
 }

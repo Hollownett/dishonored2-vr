@@ -5379,13 +5379,14 @@ void prepare_head_view(void* view) noexcept {
                                 const auto touch=held_touch_of(held,held_cylinder_now->second);
                                 {const auto pieces=d2vr::rig::seat_held(held_cylinder_now->second,seat,d2vr::rig::palm_normal(seat,*geometry),{},touch.along,touch.roll,0,held_grip?held_grip->shift:-1.,held_grip?held_grip->slide:0.,touch.mode);
                                  if(held_box_now && held_box_now->entity==held && held_extents && d2vr::rig::held_is_thin(*held_extents)) { // paper, a note, a stamp: the fingers stop on the sheet, not on a cylinder through it
-                                     shapes[count++]=d2vr::rig::held_slab(pieces.axes,pieces.shape.frame.position,*held_extents);kinds[count-1]="thin";++finger_thin_holds;
+                                     if(count<d2vr::rig::max_contact_shapes) {shapes[count++]=d2vr::rig::held_slab(pieces.axes,pieces.shape.frame.position,*held_extents);kinds[count-1]="thin";++finger_thin_holds;}
                                  } else for(unsigned k=0;k<pieces.count && count<d2vr::rig::max_contact_shapes;++k) {shapes[count++]=pieces.shapes[k];kinds[count-1]="held";}
                                  holding=true;}
                             } else if(!holding && native_hold && held_box_now && held_box_now->entity==held) { // no cylinder for it (yet): its clamped world box
                                 d2vr::rig::HeldShape box{};box.frame.position=(held_box_now->box.minimum+held_box_now->box.maximum)*.5;box.frame.basis={{{1,0,0},{0,1,0},{0,0,1}}};box.half=(held_box_now->box.maximum-held_box_now->box.minimum)*.5;box.radius=0;
-                                shapes[count++]=box;kinds[count-1]="box";++finger_box_holds;holding=true;
+                                if(count<d2vr::rig::max_contact_shapes) {shapes[count++]=box;kinds[count-1]="box";++finger_box_holds;}holding=true;
                             }
+                            if(!holding && holder!=side && !((fk_weapon_bits>>side)&1u) && !(hands.native_hands>>side&1u) && count<d2vr::rig::max_contact_shapes) {shapes[count++]=d2vr::rig::palm_stop_slab(*geometry,palm);kinds[count-1]="palm";} // G8: an empty fist rests on the palm
                             // What the probes found: their hits persist 100 ms in the mailbox (surfaces stay put; bodies are re-read by their bounds).
                             std::array<std::uintptr_t,d2vr::NativeInteractionAim::probe_slots> seen{};unsigned seen_count=0;
                             for(unsigned slot=3;slot<d2vr::NativeInteractionAim::probe_slots && count<d2vr::rig::max_contact_shapes;++slot)

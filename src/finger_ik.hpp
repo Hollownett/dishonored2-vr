@@ -78,7 +78,7 @@ struct HandGeometry {
 // whose ends differ: the local frustum of a profiled shaft, finger_ik.hpp seat_held): a capsule with `radius_end` >= 0, the radius at
 // +basis[0] (`radius` is the one at -basis[0]).
 // rim >= 0: a flat-ended cylinder (a cup, a can, a bottle's body): radius `radius` about basis[0], half.x long, its rim rounded by `rim` (no round caps beyond its ends).
-struct HeldShape {WorldTrackedPose frame{};Vec3 half{};double radius{};double radius_end{-1};double rim{-1};};
+struct HeldShape {WorldTrackedPose frame{};Vec3 half{};double radius{};double radius_end{-1};double rim{-1};bool fingers_only{};}; // fingers_only: the four long fingers meet it, the thumb does not (palm_stop_slab)
 struct FingerCurls {
     std::array<float,5> finger{};                // the curl the shapes leave each finger, its least closed joint's (1 = unconstrained): the scalar consumers
     std::array<std::array<float,3>,5> pose{};    // joint angles (rad) the finger can close to against the shapes: its contact pose (0: none)
@@ -87,7 +87,7 @@ struct FingerCurls {
 };
 inline constexpr unsigned max_contact_shapes=8;
 // A shape in the palm's own frame: a held object moves with the palm, so it is the same shape in this frame every frame the hand carries it.
-struct PalmShape {Vec3 position{};std::array<Vec3,3> basis{};Vec3 half{};double radius{};double radius_end{-1};double rim{-1};};
+struct PalmShape {Vec3 position{};std::array<Vec3,3> basis{};Vec3 half{};double radius{};double radius_end{-1};double rim{-1};bool fingers_only{};};
 // What one finger was last solved against (the shapes it reached, in the palm's frame) and what it answered: the same inputs, the same answer.
 // The thumb also sees the folded index and middle fingers (two phalanges each) as shapes: `thumb_fold_shapes` more than the world's.
 inline constexpr unsigned thumb_fold_shapes=4,max_memo_shapes=max_contact_shapes+thumb_fold_shapes;
@@ -373,6 +373,22 @@ inline FingerCurls free_curls(float reach=1.f) {
 // palm skin's gap to the set and the palm's speed give the resting curl of a hand lying on a surface. Contact poses fall at once and rise with finger_ik_tau, so a finger never crosses a
 // surface the frame it arrives. Deterministic; dt in seconds.
 inline constexpr double contact_tolerance=.004;
+// The empty hand's palm stop: a thin box lying under the palm skin (outer face at held_palm_depth+contact_tolerance along the palm normal, .01 thick behind it),
+// spanning the index-to-pinky pivots +-1 cm across and, along the fingers, from 1 cm short of the nearest pivot back 8 cm toward the wrist: a fist closes
+// onto the palm and stops on it, its tips never sinking in. The knuckles lie outside it. Basis rows: across, along, normal; radius 0.
+inline HeldShape palm_stop_slab(const HandGeometry& hand,const WorldTrackedPose& palm) noexcept {
+    const Vec3 n=unit(hand.palm_in);Vec3 reach{};for(unsigned f=1;f<5;++f) reach=reach+hand.finger[f].bone[0];
+    Vec3 across=hand.finger[4].pivot-hand.finger[1].pivot;across=unit(across-n*dot(across,n));
+    const Vec3 along=unit(cross(n,across)),lined=unit(reach-n*dot(reach,n));const Vec3 fwd=dot(along,lined)<0?along*-1:along;
+    double lo_x=1e9,hi_x=-1e9,lo_y=1e9,hi_y=-1e9;
+    for(unsigned f=1;f<5;++f) {const double x=dot(hand.finger[f].pivot,across),y=dot(hand.finger[f].pivot,fwd);lo_x=std::min(lo_x,x);hi_x=std::max(hi_x,x);lo_y=std::min(lo_y,y);hi_y=std::max(hi_y,y);}
+    const double x0=(lo_x+hi_x)*.5,hx=(hi_x-lo_x)*.5+.01,y1=lo_y-.01,y0=y1-.08,depth=held_palm_depth+contact_tolerance;
+    const Vec3 local=across*x0+fwd*((y0+y1)*.5)+n*(depth-.01);
+    HeldShape shape{};shape.frame.position=palm.position+palm.basis[0]*local.x+palm.basis[1]*local.y+palm.basis[2]*local.z;
+    const auto w=[&](Vec3 v) {return palm.basis[0]*v.x+palm.basis[1]*v.y+palm.basis[2]*v.z;};
+    shape.frame.basis={unit(w(across)),unit(w(fwd)),unit(w(n))};shape.half={hx,(y1-y0)*.5,.01};shape.radius=0;shape.fingers_only=true; // the thumb's root already lies on the palm skin: it keeps its own folding
+    return shape;
+}
 // The same shape twice, for the memo: two millimetres of position, size and rounding, a hundredth of basis (a held shaft's end moves ~2 mm).
 inline constexpr double memo_length_tolerance=.002,memo_basis_tolerance=.01;
 inline constexpr unsigned finger_solve_all=5;
@@ -430,14 +446,14 @@ inline FingerCurls finger_contact(const HandGeometry& hand,const WorldTrackedPos
         for(unsigned i=0;i<count;++i) {
             const auto& s=shapes[i];const auto d=s.frame.position-palm.position;
             const auto into=[&](Vec3 v) {return Vec3{dot(v,palm.basis[0]),dot(v,palm.basis[1]),dot(v,palm.basis[2])};};
-            local[i]={into(d),{into(s.frame.basis[0]),into(s.frame.basis[1]),into(s.frame.basis[2])},s.half,s.radius,s.radius_end,s.rim};
+            local[i]={into(d),{into(s.frame.basis[0]),into(s.frame.basis[1]),into(s.frame.basis[2])},s.half,s.radius,s.radius_end,s.rim,s.fingers_only};
         }
         // The shapes this finger can reach (its whole length from the knuckle plus its thickness); the rest cost nothing.
         std::array<const PalmShape*,max_memo_shapes> within_reach{};std::array<unsigned,max_memo_shapes> reach_index{};unsigned reachable=0;
         const auto distance=[&](Vec3 p) {double d=1e9;for(unsigned i=0;i<reachable;++i) d=std::min(d,palm_shape_distance(*within_reach[i],p));return d;};
         const auto reach_of=[&](const FingerSegments& g,unsigned f) {
             reachable=0;double length_sum=hand.thickness[f];for(const auto& b:g.bone) length_sum+=length(b);
-            for(unsigned i=0;i<count;++i) if(length(local[i].position-g.pivot)<=length(local[i].half)+std::max(local[i].radius,local[i].radius_end)+length_sum) {reach_index[reachable]=i;within_reach[reachable++]=&local[i];}
+            for(unsigned i=0;i<count;++i) if(!(f==0 && local[i].fingers_only) && length(local[i].position-g.pivot)<=length(local[i].half)+std::max(local[i].radius,local[i].radius_end)+length_sum) {reach_index[reachable]=i;within_reach[reachable++]=&local[i];}
             return reachable>0;
         };
         // Largest u in [0,1] before the first ENTRY into a shape, for a clearance `at(u,stop)`: lying on a surface (up to contact_tolerance
@@ -570,7 +586,7 @@ inline FingerCurls finger_contact(const HandGeometry& hand,const WorldTrackedPos
         }
         // Resting: the palm skin's gap to the nearest shape, slow hand.
         const auto skin_point=palm.position+palm_normal(palm,hand)*held_palm_depth;
-        double gap=1e9;for(unsigned i=0;i<count;++i) gap=std::min(gap,shape_distance(shapes[i],skin_point));
+        double gap=1e9;for(unsigned i=0;i<count;++i) if(!shapes[i].fingers_only) gap=std::min(gap,shape_distance(shapes[i],skin_point)); // (the palm stop under the skin is no surface the hand lies on)
         rest_target=static_cast<float>(std::clamp((resting_gap_far-gap)/(resting_gap_far-resting_gap_near),0.,1.))*resting_curl;
     }
     const double k=dt>0?1-std::exp(-dt/finger_ik_tau):0;
