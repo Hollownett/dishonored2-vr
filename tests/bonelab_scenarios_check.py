@@ -171,6 +171,18 @@ def hand_body_checks():
         bad = [hand_body_status() for _ in range(5)]
         bad[3]["hand_body"].update(over)
         assert "FAIL" in {v for v, _ in brc.check(bad, "hand_body_soak")}, over
+    stopped = [hand_body_status() for _ in range(5)]   # a snapshot after the session-end stop: installed false, bodies destroyed
+    for sd in stopped[4]["hand_body"]["sides"]:
+        sd.update(state=0, destroys=1, abandons=0, lost=0)
+    stopped[4]["hand_body"]["installed"] = False
+    assert all(v != "FAIL" for v, _ in brc.check(stopped, "hand_body_soak")), brc.check(stopped, "hand_body_soak")
+    for bad_stop in ({"destroys": 0}, {"abandons": 1}, {"lost": 1}, {"state": 1}):
+        b = [hand_body_status() for _ in range(5)]
+        b[0]["hand_body"]["installed"] = False
+        for sd in b[0]["hand_body"]["sides"]:
+            sd.update(state=0, destroys=1, abandons=0, lost=0)
+        b[0]["hand_body"]["sides"][1].update(bad_stop)
+        assert "FAIL" in {v for v, _ in brc.check(b, "hand_body_soak")}, bad_stop
     vacuous = [hand_body_status() for _ in range(5)]
     vacuous[1]["hand_body"]["sides"][0]["creates"] = 0
     assert "FAIL" in {v for v, _ in brc.check(vacuous, "hand_body_soak")}, "a body never created"

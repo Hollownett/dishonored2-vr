@@ -173,7 +173,12 @@ def check_hand_body(statuses):
         out.append(("FAIL", "hand_body counters missing or not numbers (faults, cost_max_us, player_drift_um, sides[2])"))
         return out
     for i, h in enumerate(hb):
-        add(h.get("enabled") is True and h.get("installed") is True, f"session {i + 1}: hand body enabled and installed")
+        # The status file may be written after the session-end stop(): installed is then false, which is fine only after a clean stop
+        # (every side absent, each created body destroyed by us, nothing abandoned or lost).
+        clean_stop = all(sd.get("state") == 0 and sd.get("destroys", 0) >= sd.get("creates", 0) >= 1 and sd.get("abandons", 1) == 0
+                         and sd.get("lost", 1) == 0 for sd in h["sides"])
+        add(h.get("enabled") is True and (h.get("installed") is True or clean_stop),
+            f"session {i + 1}: hand body enabled and installed (or cleanly stopped before the snapshot: installed {h.get('installed')})")
         add(h.get("available") is True and h.get("hand_body_fault") is False, f"session {i + 1}: available, no HandBodyFault (why {h.get('why')!r})")
         creates = [sd.get("creates", 0) for sd in h["sides"]]
         writes = [(sd.get("drive") or {}).get("drive_writes", 0) for sd in h["sides"]]
