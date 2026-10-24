@@ -86,7 +86,66 @@ def main():
     held_clamp_checks()
     hand_body_checks()
     hold_coupling_checks()
+    finger_touch_checks()
     print("bonelab_scenarios_check ok")
+
+
+def finger_sample(curl, mapping="touch"):
+    return {"profile": "oculus/touch_controller", "mapping": [mapping, mapping], "touch_available": [True, True], "touch_silent": [False, False],
+            "raw": {"trigger_touch": [False, False], "thumb_touch": [False, False]}, "curl": [[0.0] * 5, list(curl)], "floor_active": [False, False],
+            "action_create_failed": False, "touch_bound": True}
+
+
+REST, POINT, THUMBS, FIST, OPEN = ([0, 0.3, 0, 0, 0], [1, 0.02, 1, 1, 1], [0.0, 0.3, 1, 1, 1], [1, 1, 1, 1, 1], [0, 0.02, 0, 0, 0])
+
+
+def finger_status(samples=(REST, POINT, THUMBS, FIST, OPEN), **over):
+    status = {"fingers": finger_sample(OPEN), "finger_segments": [finger_sample(c) for c in samples]}
+    status["fingers"].update(over)
+    return status
+
+
+def finger_touch_checks():
+    """Plan C Task 4: S10 compiles (v7 touch columns, 5 poses of >= 2 s, the last five segments), older scripts still compile, and the checker judges fixtures."""
+    segments = sim.scenario_segments("finger_touch", 45000)
+    text, transport = sim.compile_script(segments, 120)
+    assert transport.splitlines()[0].startswith("D2VR_GAMEPLAY_SCRIPT 7 120000 "), transport.splitlines()[0]
+    poses = segments[-5:]
+    assert all(s["end_ms"] - s["start_ms"] >= 2000 for s in poses) and poses[0]["start_ms"] == 45000 and poses[-1]["end_ms"] <= 120000
+    assert all("touch" in s for s in poses) and not any("touch" in s for s in segments[:-5])
+    assert poses[0]["touch"] == {"right_trigger": True} and "right_trigger" not in poses[1]["touch"] and poses[1]["input"]["right_grip"] == 1.0
+    assert not any(k.startswith("right_thumb") or k in ("right_first", "right_second") for k in poses[2]["touch"]) and poses[2]["touch"]
+    assert poses[3]["input"]["right_trigger"] == 1.0 and poses[3]["input"]["right_grip"] == 1.0 and not poses[4]["touch"]
+    assert sim.compile_script(sim.scenario_segments("corpse_drag", 45000), 120)[1].splitlines()[0].startswith("D2VR_GAMEPLAY_SCRIPT 6 "), "older scenarios keep their version"
+    verdict = lambda status, **kw: [(v, t) for v, t in brc.check([status], "finger_touch", **kw)]  # noqa: E731
+    ok = verdict(finger_status())
+    assert not any(v == "FAIL" for v, _ in ok), ok
+    assert sum(1 for v, t in ok if v == "INFO") == 5 and any("fist: all fingers" in t for v, t in ok)
+    legacy = finger_status(samples=(REST, POINT, THUMBS, FIST, OPEN))
+    legacy["finger_segments"] = [finger_sample(c, "legacy") for c in (REST, POINT, THUMBS, FIST, OPEN)]
+    assert any(v == "FAIL" and "mapping touch" in t for v, t in verdict(legacy))
+    stuck_thumb = finger_status(samples=(REST, POINT, [1, 0.3, 1, 1, 1], FIST, OPEN))
+    assert any(v == "FAIL" and "thumb" in t for v, t in verdict(stuck_thumb))
+    legacy_curls = finger_status(samples=([0, 0, 0, 0, 0], [1, 1, 1, 1, 1], [1, 1, 1, 1, 1], FIST, OPEN))  # a controller-value mapping: no rest bend, point curls the index
+    f = [t for v, t in verdict(legacy_curls) if v == "FAIL"]
+    assert any("rest: index" in t for t in f) and any("point: index" in t for t in f), f
+    for bad in (finger_status(samples=(REST, POINT, THUMBS, [1, 1, 1, 0.5, 1], OPEN)), finger_status(samples=(REST, POINT, THUMBS, FIST, [0, 0, 0.5, 0, 0]))):
+        assert "FAIL" in {v for v, _ in verdict(bad)}
+    assert "FAIL" in {v for v, _ in verdict(finger_status(samples=(REST, POINT)))}, "too few samples"
+    unbound = finger_status(touch_bound=False)
+    assert any(v == "FAIL" and "touch_bound == true" in t for v, t in verdict(unbound))
+    rejected = finger_status(touch_bound=False, mapping=["legacy", "legacy"])
+    assert not any(v == "FAIL" for v, _ in verdict(rejected, reject_touch=True)), verdict(rejected, reject_touch=True)
+    assert "FAIL" in {v for v, _ in verdict(finger_status(), reject_touch=True)}, "the reject run must report touch_bound false"
+    assert "FAIL" in {v for v, _ in brc.check([{}], "finger_touch")}
+    with tempfile.TemporaryDirectory() as tmp:  # the command line reads the jsonl beside the status
+        for label, samples, code in (("good", (REST, POINT, THUMBS, FIST, OPEN), 0), ("legacy", ([0] * 5, [1] * 5, [1] * 5, FIST, OPEN), 1)):
+            d = Path(tmp) / label / "artifacts"
+            d.mkdir(parents=True)
+            (d / "xr-live-status.json").write_text(json.dumps({"fingers": finger_sample(OPEN)}))
+            (d / "finger-touch-segments.jsonl").write_text("".join(json.dumps({"segment": i, "elapsed_ms": 1000 * i, "fingers": finger_sample(c)}) + "\n" for i, c in enumerate(samples)))
+            r = subprocess.run([sys.executable, str(ROOT / "tools/linux/bonelab_run_check.py"), str(d.parent), "--scenario", "finger_touch"], capture_output=True, text=True)
+            assert r.returncode == code, (label, r.stdout, r.stderr)
 
 
 def tank_status(**over):

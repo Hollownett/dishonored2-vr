@@ -104,7 +104,7 @@ int main() {
     assert(rejects("D2VR_GAMEPLAY_SCRIPT 5 10000 1\n1000 2000"+zeros+" 1 0 1.65 0 0 0")); // truncated pose
     assert(rejects("D2VR_GAMEPLAY_SCRIPT 5 10000 1\n1000 2000"+zeros)); // no mask
     assert(rejects("D2VR_GAMEPLAY_SCRIPT 5 10000 4097"));
-    assert(rejects("D2VR_GAMEPLAY_SCRIPT 7 10000 1"));
+    assert(rejects("D2VR_GAMEPLAY_SCRIPT 8 10000 1"));
     assert(rejects("D2VR_GAMEPLAY_SCRIPT 6 10000 1\n1000 2000"+zeros+" 0")); // v6 requires when after the mask
     assert(rejects("D2VR_GAMEPLAY_SCRIPT 6 10000 1\n1000 2000"+zeros+" 0 3")); // when out of range
     assert(rejects("D2VR_GAMEPLAY_SCRIPT 6 10000 1\n1000 2000"+zeros+" 0 -1"));
@@ -116,6 +116,17 @@ int main() {
      assert(when.sample(3500,false,true).a && when.sample(3500,true,true).a); // always
      assert(!when.sample(5500,false,true).a && when.sample(5500,true,true).a); // gameplay only
      assert(!when.sample(1500,false,false).active && !when.sample(3500,true,false).a);} // unfocused stays neutral
+    {std::string z;for(int i=0;i<26;++i) z+=" 0"; // version 7: ten touch flags (left then right) after when; older versions read no touch
+     d2vr::SimulatedGameplayScript touch;std::istringstream tsrc("D2VR_GAMEPLAY_SCRIPT 7 10000 2\n1000 2000"+z+" 0 0 0 0 0 0 0 1 0 0 0 0\n3000 4000"+z+" 0 0 0 1 0 0 0 0 0 0 0 0\n");
+     touch.load(tsrc,10);
+     assert(touch.touch(1500)[1][0] && !touch.touch(1500)[0][0] && !touch.touch(1500)[1][1]); // right trigger touch
+     assert(touch.touch(3500)[0][1] && !touch.touch(3500)[1][0]); // left thumbstick touch
+     assert(!touch.touch(2500)[0][0] && !touch.touch(2500)[1][0]); // between segments: all clear
+     d2vr::SimulatedGameplayScript old;std::istringstream osrc("D2VR_GAMEPLAY_SCRIPT 6 10000 1\n1000 2000"+z+" 0 2\n");old.load(osrc,10);
+     for(unsigned side=0;side<2;++side) for(unsigned k=0;k<5;++k) assert(!old.touch(1500)[side][k]); // a v6 script has no touch
+     assert(rejects("D2VR_GAMEPLAY_SCRIPT 7 10000 1\n1000 2000"+z+" 0 0 0 0 0 0 0 0 0 0 0 2")); // touch flag not 0/1
+     assert(rejects("D2VR_GAMEPLAY_SCRIPT 7 10000 1\n1000 2000"+z+" 0 0 0 0 0 0 0 0 0 0 0")); // truncated touch row
+    }
     {d2vr::SimulatedGameplayScript many;std::string text="D2VR_GAMEPLAY_SCRIPT 5 10000 1000\n";
      for(int i=0;i<1000;++i) text+=std::to_string(i*10)+" "+std::to_string(i*10+10)+zeros+" 0\n";
      std::istringstream many_source(text);many.load(many_source,10);assert(many.size()==1000);} // more than 128 segments only from version 5

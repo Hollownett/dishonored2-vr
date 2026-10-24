@@ -10,12 +10,12 @@
 namespace d2vr {
 // Developer commands only. Native pad composition still applies its release gates.
 class SimulatedGameplayScript {
-    struct Segment {UINT64 start{},end{};ControllerInput input{};float head_pitch_degrees{},hand_pitch_degrees{};std::array<float,9> offsets{};unsigned mask{};std::array<std::array<float,7>,3> poses{};unsigned when{};};
+    struct Segment {UINT64 start{},end{};ControllerInput input{};float head_pitch_degrees{},hand_pitch_degrees{};std::array<float,9> offsets{};unsigned mask{};std::array<std::array<float,7>,3> poses{};unsigned when{};unsigned touch{};};
     std::vector<Segment> segments_;
 public:
     void load(std::istream& source,unsigned seconds) {
         std::string magic;unsigned version{},duration{},count{};
-        if(!(source>>magic>>version>>duration>>count) || magic!="D2VR_GAMEPLAY_SCRIPT" || (version<1 || version>6) ||
+        if(!(source>>magic>>version>>duration>>count) || magic!="D2VR_GAMEPLAY_SCRIPT" || (version<1 || version>7) ||
            seconds<10 || seconds>120 || duration!=seconds*1000 || count==0 || count>(version>=5?4096u:128u))
             throw std::invalid_argument("Invalid gameplay script header");
         std::vector<Segment> parsed;UINT64 previous{};
@@ -51,6 +51,8 @@ public:
             }
             // Version 6: when the segment applies: 0 gameplay only (earlier versions), 1 menus/non-gameplay only, 2 always.
             if(version>=6 && (!(source>>s.when) || s.when>2)) throw std::invalid_argument("Invalid gameplay script when");
+            // Version 7: ten capacitive-touch flags, left then right, each [trigger,thumbstick,first,second,thumbrest] (visual finger curl tests; the buttons above are untouched).
+            if(version>=7) for(unsigned k=0;k<10;++k) {int value{};if(!(source>>value) || value<0 || value>1) throw std::invalid_argument("Invalid gameplay script touch");s.touch|=static_cast<unsigned>(value)<<k;}
             parsed.push_back(s);previous=s.end;
         }
         std::string extra;if(source>>extra) throw std::invalid_argument("Trailing gameplay script data");
@@ -75,6 +77,11 @@ public:
     std::array<float,9> offsets(UINT64 elapsed) const noexcept {
         for(const auto& s:segments_) if(elapsed>=s.start && elapsed<s.end) return s.offsets;
         return {};
+    }
+    std::array<std::array<bool,5>,2> touch(UINT64 elapsed) const noexcept {
+        std::array<std::array<bool,5>,2> out{};
+        for(const auto& s:segments_) if(elapsed>=s.start && elapsed<s.end) {for(unsigned k=0;k<10;++k) out[k/5][k%5]=(s.touch>>k&1u)!=0;break;}
+        return out;
     }
     float hand_pitch(UINT64 elapsed) const noexcept {
         for(const auto& s:segments_) if(elapsed>=s.start && elapsed<s.end) return s.hand_pitch_degrees;

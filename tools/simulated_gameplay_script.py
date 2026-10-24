@@ -6,6 +6,7 @@ from pathlib import Path
 AXES=('move_x','move_y','turn_x','turn_y','left_trigger','right_trigger','left_grip','right_grip')
 BUTTONS=('a','b','x','y','left_click','right_click','menu')
 WHEN={'gameplay':0,'menu':1,'always':2}  # version 6: when a segment applies (menu = outside gameplay, e.g. title screen A presses)
+TOUCH=tuple(side+'_'+name for side in ('left','right') for name in ('trigger','thumbstick','first','second','thumbrest'))  # version 7: capacitive-touch booleans per segment (key 'touch')
 POSE_KEYS=('head_pose','left_hand_pose','right_hand_pose')  # version 5: absolute [x,y,z,qx,qy,qz,qw] in tracking space (trace replay)
 
 
@@ -34,12 +35,12 @@ def compile_script(path,root,seconds):
     if not isinstance(data,dict) or set(data)!={'segments'} or not isinstance(data['segments'],list) or not 1<=len(data['segments'])<=4096:
         raise ValueError('Script requires only segments, with 1..128 entries (4096 with absolute poses)')
     POSES=('head_offset','left_hand_offset','right_hand_offset')
-    version=6 if any(isinstance(s,dict) and s.get('when','gameplay')!='gameplay' for s in data['segments']) else 5 if any(isinstance(s,dict) and set(POSE_KEYS)&set(s) for s in data['segments']) else 4 if any(isinstance(s,dict) and 'hand_pitch_degrees' in s for s in data['segments']) else 3 if any(isinstance(s,dict) and set(POSES)&set(s) for s in data['segments']) else 2 if any(isinstance(s,dict) and 'head_pitch_degrees' in s for s in data['segments']) else 1
+    version=7 if any(isinstance(s,dict) and 'touch' in s for s in data['segments']) else 6 if any(isinstance(s,dict) and s.get('when','gameplay')!='gameplay' for s in data['segments']) else 5 if any(isinstance(s,dict) and set(POSE_KEYS)&set(s) for s in data['segments']) else 4 if any(isinstance(s,dict) and 'hand_pitch_degrees' in s for s in data['segments']) else 3 if any(isinstance(s,dict) and set(POSES)&set(s) for s in data['segments']) else 2 if any(isinstance(s,dict) and 'head_pitch_degrees' in s for s in data['segments']) else 1
     if version<5 and (len(data['segments'])>128 or path.stat().st_size>65536):
         raise ValueError('Scripts over 128 segments or 64 KiB need absolute poses')
     duration=seconds*1000;lines=[f'D2VR_GAMEPLAY_SCRIPT {version} {duration} {len(data["segments"])}'];previous=0
     for segment in data['segments']:
-        if not isinstance(segment,dict) or not {'start_ms','end_ms','input'}<=set(segment) or set(segment)-{'start_ms','end_ms','input','head_pitch_degrees','head_offset','left_hand_offset','right_hand_offset','hand_pitch_degrees','when',*POSE_KEYS}:
+        if not isinstance(segment,dict) or not {'start_ms','end_ms','input'}<=set(segment) or set(segment)-{'start_ms','end_ms','input','head_pitch_degrees','head_offset','left_hand_offset','right_hand_offset','hand_pitch_degrees','when','touch',*POSE_KEYS}:
             raise ValueError('Each segment requires start_ms, end_ms, input and optional head_pitch_degrees')
         pitch=segment.get('head_pitch_degrees',0)
         if type(pitch) not in (int,float) or not -80<=pitch<=80 or not math.isfinite(pitch):
@@ -80,5 +81,10 @@ def compile_script(path,root,seconds):
             when=segment.get('when','gameplay')
             if when not in WHEN:raise ValueError("when requires 'gameplay', 'menu' or 'always'")
             fields.append(WHEN[when])
+        if version>=7:
+            touch=segment.get('touch',{})
+            if not isinstance(touch,dict) or set(touch)-set(TOUCH) or any(type(v)!=bool for v in touch.values()):
+                raise ValueError('touch requires a dict of known left_/right_ trigger, thumbstick, first, second, thumbrest booleans')
+            fields.extend(int(touch.get(name,False)) for name in TOUCH)
         lines.append(' '.join(map(str,fields)));previous=end
     return text,'\n'.join(lines)+'\n'

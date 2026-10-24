@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Check a sim run of a Part 1 corpse/prop scenario against its assertions.
 
-usage: bonelab_run_check.py RUN_DIR [RUN_DIR ...] --scenario NAME
+usage: bonelab_run_check.py RUN_DIR [RUN_DIR ...] --scenario NAME [--reject-touch]
 RUN_DIR is a ~/d2vr-test-builds/sim-runs/<stamp> folder (reads RUN_DIR/artifacts/xr-live-status.json). Several run dirs are
 one scenario's sessions (S5 runs four of 50 cycles): counters are summed, binds >= 40 is required per session.
 Prints PASS/FAIL/INFO per assertion; exit 1 on any FAIL. Side-pair fields are [left, right].
@@ -11,6 +11,10 @@ import json
 import sys
 from pathlib import Path
 
+FINGERS = ("finger_touch",)  # Plan C S10: scripted touch poses; the DLL's per-segment `fingers` samples ride in status["finger_segments"]
+FINGER_POSES = ("rest", "point", "thumbs_up", "fist", "open")
+FINGER_NAMES = ("thumb", "index", "middle", "ring", "pinky")
+SIDE = 1  # the scenario drives the right hand
 PROPS = ("oil_tank_drop", "oil_tank_throw")
 TANKS = ("tank_wall", "tank_drop", "tank_drop_cycles")  # Part 5A held-clamp scenarios S12-S14
 CARRY_FAULTS = ("failed_reads", "rejected_publishes", "bad_quat_reads")
@@ -34,7 +38,7 @@ def _sum_pairs(statuses, getter):
     return out
 
 
-def check(statuses, scenario, proofs=("a", "b", "d")):
+def check(statuses, scenario, proofs=("a", "b", "d"), reject_touch=False):
     """statuses: one parsed xr-live-status.json per session. -> list of (verdict, text); verdict PASS/FAIL/INFO."""
     out = []
 
@@ -48,6 +52,8 @@ def check(statuses, scenario, proofs=("a", "b", "d")):
         return check_hand_body(statuses, proofs)
     if scenario in TANK_HAND_BODY:
         return check_tank_hand_body(statuses)
+    if scenario in FINGERS:
+        return check_fingers(statuses, reject_touch)
     corpse = [s.get("corpse") or {} for s in statuses]
     if not statuses or any(not c for c in corpse):
         return [("FAIL", "status has no corpse block")]
@@ -91,6 +97,47 @@ def check(statuses, scenario, proofs=("a", "b", "d")):
     if prop_scenario:
         gap = max(float(s.get("prop_seat_gap_m", 0) or 0) for s in statuses)
         info(f"prop_grasp_point {statuses[-1].get('prop_grasp_point')}, prop_seat_gap_m {gap:.3g}, corpse holds {holds} (a native HoldObject tank is not a lane)")
+    return out
+
+
+def check_fingers(statuses, reject_touch=False):
+    """S10: the right hand's curl at the end of each of the last five segments (rest, point, thumbs-up, fist, open). With the reject switch
+    the runtime refuses the touch paths: the check then only needs touch_bound == false and the legacy mapping."""
+    out = []
+
+    def add(ok, text):
+        out.append(("PASS" if ok else "FAIL", text))
+
+    if not statuses or any(not isinstance(s.get("fingers"), dict) for s in statuses):
+        return [("FAIL", "status has no fingers block")]
+    for n, status in enumerate(statuses):
+        tag = f"session {n + 1}: " if len(statuses) > 1 else ""
+        final = status["fingers"]
+        bound = bool(final.get("touch_bound"))
+        if reject_touch:
+            add(not bound, f"{tag}touch_bound == false with the reject switch (got {bound})")
+            add((final.get("mapping") or [None, None])[SIDE] == "legacy", f"{tag}mapping legacy under reject (got {final.get('mapping')})")
+            continue
+        add(bound, f"{tag}touch_bound == true (got {bound})")
+        add(final.get("action_create_failed") is False, f"{tag}action_create_failed == false (got {final.get('action_create_failed')})")
+        samples = status.get("finger_segments") or []
+        add(len(samples) >= len(FINGER_POSES), f"{tag}>= {len(FINGER_POSES)} per-segment finger samples (got {len(samples)})")
+        if len(samples) < len(FINGER_POSES):
+            continue
+        by = dict(zip(FINGER_POSES, samples[-len(FINGER_POSES):]))
+        curl = {}
+        for pose, sample in by.items():
+            row = ((sample or {}).get("curl") or [[], []])[SIDE]
+            curl[pose] = [float(v) for v in row] if len(row) == 5 else [float("nan")] * 5
+            add((sample.get("mapping") or [None, None])[SIDE] == "touch", f"{tag}{pose}: mapping touch (got {sample.get('mapping')})")
+        pr = lambda pose: ", ".join(f"{n}={v:.2f}" for n, v in zip(FINGER_NAMES, curl[pose]))  # noqa: E731
+        add(abs(curl["rest"][1] - 0.3) <= 0.1, f"{tag}rest: index ~ 0.3 (got {curl['rest'][1]:.3f})")
+        add(curl["point"][1] < 0.1, f"{tag}point: index < 0.1 (got {curl['point'][1]:.3f})")
+        add(curl["thumbs_up"][0] < 0.1, f"{tag}thumbs_up: thumb < 0.1 (got {curl['thumbs_up'][0]:.3f})")
+        add(all(v > 0.9 for v in curl["fist"]), f"{tag}fist: all fingers > 0.9 ({pr('fist')})")
+        add(all(v < 0.1 for v in curl["open"]), f"{tag}open: all fingers < 0.1 ({pr('open')})")
+        for pose in FINGER_POSES:
+            out.append(("INFO", f"{tag}curl at the end of {pose}: {pr(pose)}"))
     return out
 
 
@@ -328,6 +375,7 @@ def main(argv=None):
     ap.add_argument("run_dirs", nargs="+")
     ap.add_argument("--scenario", required=True)
     ap.add_argument("--proofs", default="abd", help="hand_body_soak only: the proofs to judge (a, b, d); e.g. --proofs a over sessions without the timing block")
+    ap.add_argument("--reject-touch", action="store_true", help="finger_touch only: the run used the reject switch, so touch_bound must be false")
     args = ap.parse_args(argv)
     statuses = []
     for d in args.run_dirs:
@@ -337,7 +385,15 @@ def main(argv=None):
         except (OSError, ValueError) as e:
             print(f"FAIL  cannot read {f}: {e}")
             return 1
-    rows = check(statuses, args.scenario, tuple(args.proofs))
+    if args.scenario in FINGERS and not args.reject_touch:  # the per-segment samples the DLL logged beside the status
+        for d, status in zip(args.run_dirs, statuses):
+            f = Path(d) / "artifacts" / "finger-touch-segments.jsonl"
+            try:
+                status["finger_segments"] = [(json.loads(line) or {}).get("fingers") or {} for line in f.read_text(encoding="utf-8").splitlines() if line.strip()]
+            except (OSError, ValueError) as e:
+                print(f"FAIL  cannot read {f}: {e}")
+                return 1
+    rows = check(statuses, args.scenario, tuple(args.proofs), args.reject_touch)
     for verdict, text in rows:
         print(f"{verdict:4}  {text}")
     return 1 if any(v == "FAIL" for v, _ in rows) else 0

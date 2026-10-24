@@ -75,6 +75,19 @@ class GameplayScriptProfileCheck(unittest.TestCase):
             with self.subTest(when=str(bad)),self.assertRaises(ValueError):
                 self.compile({'segments':[seg(0,when=bad)]})
 
+    def test_touch_v7(self):
+        seg=lambda i,**k:dict({'start_ms':i*10,'end_ms':i*10+10,'input':{'a':True}},**k)
+        _,old=self.compile({'segments':[seg(0,when='menu')]})
+        self.assertEqual(old.splitlines()[0],'D2VR_GAMEPLAY_SCRIPT 6 10000 1')  # no touch key: the older version, loads as before
+        _,transport=self.compile({'segments':[seg(0),seg(1,touch={'right_trigger':True,'left_thumbrest':True})]})
+        rows=transport.splitlines();self.assertEqual(rows[0],'D2VR_GAMEPLAY_SCRIPT 7 10000 2')
+        self.assertEqual(rows[1].split()[-10:],['0']*10)
+        self.assertEqual(rows[2].split()[-10:],['0','0','0','0','1','1','0','0','0','0'])
+        self.assertEqual(len(rows[2].split()),40)
+        for bad in ({'right_pinky':True},{'right_trigger':1},{'right_trigger':None},[],'x'):
+            with self.subTest(touch=str(bad)),self.assertRaises(ValueError):
+                self.compile({'segments':[seg(0,touch=bad)]})
+
     def test_absolute_poses_v5_and_trace_conversion(self):
         pose=[0,1.65,0,0,0,0,1]
         seg=lambda i,**k:dict({'start_ms':i*10,'end_ms':i*10+10,'input':{'x':True},'head_pose':pose,'right_hand_pose':[1,2,3,0,0,0,1]},**k)
