@@ -354,5 +354,12 @@ string StateText(string d) => File.ReadAllText(Path.Combine(d, "launcher-feature
     Check("dlss_attribution_present", DlssProvider.Attribution.Contains("NVIDIA DLSS") && DlssProvider.Prompt.Contains(DlssProvider.DllName));
     Check("dlss_available_needs_driver", DlssProvider.Available(root) == DlssProvider.NvidiaDriverPresent());
 }
+Check("crosshair_row_moved_to_settings", !list.Any(x => x.Id == "hand-crosshair" || x.File == "no-hand-crosshair"));
+{
+    var dc = NewBuild(); File.WriteAllText(Path.Combine(dc, "no-hand-crosshair"), "");
+    Features.Apply(dc, list);
+    Check("leftover_no_hand_crosshair_untouched", Has(dc, "no-hand-crosshair"));
+}
+PrefsTests.Run(Check);
 Console.WriteLine(failures == 0 ? "ALL PASS" : failures + " FAILED");
 return failures == 0 ? 0 : 1;

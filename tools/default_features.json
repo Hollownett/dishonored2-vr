@@ -58,14 +58,6 @@
    "default": true
   },
   {
-   "id": "hand-crosshair",
-   "file": "no-hand-crosshair",
-   "kind": "disable",
-   "label": "Hand crosshair",
-   "help": "Shows the aiming crosshair where your hand points.",
-   "default": true
-  },
-  {
    "id": "hand-shots",
    "file": "no-hand-shots",
    "kind": "disable",

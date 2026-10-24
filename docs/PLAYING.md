@@ -239,7 +239,7 @@ These are on by default in the launcher (except where a line says otherwise). Sw
 - `no-physical-crouch`: turn off crouching by sitting down. Full arms are currently disabled regardless of `no-full-arms`.
 - `power-gestures`: cast the equipped left-hand power with gestures (open-palm push, clap, palm at the temple; while aiming Blink, flick the hand toward you to blink). Off by default until tested; the launcher lists it as "new, untested" and does not enable it for you.
 - `fsr` containing `sharpness mvx mvy jitterx jittery` (default `0.3 -1 -1 1 -1`): FSR 3 tuning. `no-fsr-reactive`: turn off the hand/weapon ghosting guard.
-- `no-hand-crosshair`, `no-hand-shots`: switch off the crosshair move or hand-aimed shots.
+- `no-hand-shots`: switches off hand-aimed shots. The crosshair is now the launcher's Crosshair setting (the old `no-hand-crosshair` file is migrated once by the DLL).
 - `no-hand-blink`: Blink (the teleport power) aims along the left hand's pointing direction while the left trigger is held, like the other left-hand powers; this switches it back to the head. Status `blink_aim` shows the hook (`routed`, `last_reason`, `last_dest`), and `native_left_aim` the left-aim counters.
 - `no-vr-glyphs`: keep the Xbox button pictures in prompts instead of the Quest control labels.
 - `slash-speed` containing 1-2 (default 1.7): play rate of the game's own sword attack. `no-slash-speed`: the game's speed.
