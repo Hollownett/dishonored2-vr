@@ -16,7 +16,7 @@
 namespace d2vr {
 constexpr double kDefaultHeldLever=.3;
 struct HandServoConfig {double gain=18,max_speed=10,max_spin=20,brake_accel=40,jerk_tau=.02,snap_gap=.35,snap_seconds=.25,hand_radius=.08,max_gap=50,max_body_speed=100,snap_closing_mps=.5,tf_min=.05;};
-struct HandServoState {Vec3 filtered_accel{};double gap_time{};bool has{};Vec3 prev_ff{},tgt_prev{},tgt_vel{};double tgt_acc{},tgt_dt{};bool tgt_has{},tgt_vel_ok{};};   // prev_ff/tgt_*: Fix B's stop handling
+struct HandServoState {Vec3 filtered_accel{};double gap_time{};bool has{};Vec3 prev_ff{},tgt_prev{},tgt_vel{};double tgt_acc{},tgt_dt{};unsigned tgt_still{};bool tgt_has{},tgt_vel_ok{};};   // prev_ff/tgt_*: Fix B's stop handling
 struct HandServoOutput {Vec3 linear{},angular{};bool capped{};bool snap{};double gap{};bool valid{};};
 
 namespace hand_servo_detail {
@@ -82,13 +82,13 @@ inline HandServoOutput servo_step(HandServoState& st,const WorldTrackedPose& tar
     // feedforward falls, that same velocity is dropped from the body at once, symmetric to adding it (the reference is the larger of the old and new).
     // No pose is smoothed: the target and the written pose are untouched.
     if(!finite(feedforward)||length(feedforward)>cfg.max_body_speed) feedforward={};
-    if(!st.tgt_has) {st.tgt_prev=target.position;st.tgt_has=true;st.tgt_acc=0;st.tgt_vel={};st.tgt_vel_ok=false;st.tgt_dt=0;}
+    if(!st.tgt_has) {st.tgt_prev=target.position;st.tgt_has=true;st.tgt_acc=0;st.tgt_vel={};st.tgt_vel_ok=false;st.tgt_dt=0;st.tgt_still=0;}
     else {
         st.tgt_acc+=dt;   // the dispatcher ticks faster than the target updates: the velocity is over the interval between target changes
         const Vec3 d=target.position-st.tgt_prev;
         if(d.x!=0||d.y!=0||d.z!=0) {st.tgt_vel=d*(1/st.tgt_acc);st.tgt_prev=target.position;st.tgt_dt=std::max(std::min(st.tgt_acc,.05),st.tgt_dt*.9);   // the longest recent update interval (decaying): a jittery frame is not a stop
-            st.tgt_acc=0;st.tgt_vel_ok=true;}
-        else if(st.tgt_acc>=st.tgt_dt) {st.tgt_vel={};st.tgt_vel_ok=true;}   // a whole update interval with no change: the target stopped
+            st.tgt_acc=0;st.tgt_still=0;st.tgt_vel_ok=true;}
+        else if(++st.tgt_still>=2&&st.tgt_acc>=1.5*st.tgt_dt) {st.tgt_vel={};st.tgt_vel_ok=true;}   // 2+ unchanged ticks and 1.5 intervals: the target stopped (one repeated frame or a tracking hitch is not a stop)
     }
     if(feedforward.x!=0||feedforward.y!=0||feedforward.z!=0) {
         const double f2=dot(feedforward,feedforward);

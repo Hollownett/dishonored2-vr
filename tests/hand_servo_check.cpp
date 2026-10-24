@@ -37,7 +37,22 @@ int main() {
         }
         CHECK(gap_with<=.02);CHECK(gap_without>=.2);
     }
-    {   // sudden_stop_bounded: 2 s at V along x then a hard stop; peak body position past the stopped target <= .05 m, no sign reversal after the stop
+    {   // repeated_target_frame_bounded: 6 m/s at 90 Hz with a repeated target frame (a hitch) every 30 or every 10 ticks: a single unchanged tick is not a stop
+        for(const int every:{30,10}) {
+            Sim s;s.body=pose({});s.target=pose({});s.ff={6,0,0};
+            double maxgap=0,sum=0;int n=0;
+            for(int i=1;i<=270;++i) {
+                if(i%every!=0) s.target.position.x=6.*i/90;   // a repeated frame keeps the last pose; the next one catches up
+                auto o=s.step();
+                if(i>90) {maxgap=std::max(maxgap,o.gap);sum+=o.gap;++n;}
+            }
+            std::printf("repeat every %d: max gap %.4f mean gap %.4f\n",every,maxgap,sum/n);
+            CHECK(maxgap<=.07);CHECK(sum/n<=(every==30?.01:.02));   // every 10: the repeated frame alone costs .016 (the same with no gate at all), so .02
+        }
+    }
+    {   // sudden_stop_bounded: 2 s at V along x then a hard stop, no sign reversal after it. RAW peak body position past the stopped target (window estimator):
+        // .062 m at 3 m/s, .125 m at 6 m/s (instant ff: .033 / .067); of that .033 / .067 is the body's already-travelled lead from the last running tick (the sim
+        // moves the body after the target) and .029 / .058 is the extra tick a stop needs to read as a stop (2 unchanged ticks, so a repeated frame is not one). Old behaviour 0, unfixed Fix B .110 / .255 excess
         for(const double V:{3.,6.}) for(const bool window:{false,true}) {
             Sim s;s.body=pose({});s.target=pose({});s.ff={V,0,0};
             std::vector<std::pair<int,double>> hist;   // the 0.2 s window estimator of the player's velocity (V until it has a baseline)
@@ -63,7 +78,7 @@ int main() {
                 }
             }
             std::printf("stop V=%g window=%d gap_run=%.4f peak=%.4f lead=%.4f flips=%d final=%.4f\n",V,window,gap_run,peak,lead,flips,last_err);
-            CHECK(gap_run<=.02);CHECK(peak-lead<=.05);CHECK(flips==0);CHECK(std::fabs(last_err)<.01);
+            CHECK(gap_run<=.02);CHECK(peak<=.13);CHECK(peak-lead<=.06);CHECK(flips==0);CHECK(std::fabs(last_err)<.01);
         }
     }
     {   // zero_feedforward_identical: bit-identical to the call without the argument over a 500-step random sequence

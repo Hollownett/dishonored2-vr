@@ -5660,6 +5660,14 @@ void prepare_head_view(void* view) noexcept {
                         for(unsigned side=0;side<2;++side) locomotion_csv << ',' << static_cast<unsigned>(loco_view[side].source);
                         locomotion_csv << ',' << hand_visual_stats.blends(0)+hand_visual_stats.blends(1);
                         for(unsigned side=0;side<2;++side) locomotion_csv << ',' << ((locomotion_contact_bits>>side)&1u);
+                        {   // direction check for Fix B: dot(player velocity, palm travel velocity) averaged over both palms; positive while running forward with the hands held out
+                            static std::array<d2vr::Vec3,2> prev_palm{};static double prev_palm_s=0;static bool have_prev_palm=false;
+                            double dotv=0;const double dtp=seconds-prev_palm_s;
+                            if(have_prev_palm&&dtp>1e-4&&dtp<.1) for(unsigned side=0;side<2;++side) dotv+=d2vr::dot(velocity,(palm_grips[side].position-prev_palm[side])*(1/dtp))/2;
+                            for(unsigned side=0;side<2;++side) prev_palm[side]=palm_grips[side].position;
+                            prev_palm_s=seconds;have_prev_palm=true;
+                            locomotion_csv << ',' << dotv;
+                        }
                         locomotion_csv << '\n';
                         if(++locomotion_rows%120==0) locomotion_csv.flush();
                     }
@@ -9140,7 +9148,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
             std::lock_guard<std::mutex> trace_lock(locomotion_mutex);locomotion_csv.close();locomotion_rows=0;locomotion_roots.clear();
             if(fs::exists(root/L"build"/L"locomotion-trace")) {
                 locomotion_csv.open(output/L"locomotion-hands.csv",std::ios::trunc);locomotion_start=std::chrono::steady_clock::now();
-                locomotion_csv << std::setprecision(6) << "elapsed_ms,speed_mps,root_gap_m,root_gap_valid,palm_residual_l,palm_residual_r,drawn_residual_l,drawn_residual_r,visual_gap_l,visual_gap_r,source_l,source_r,blends,contact_l,contact_r\n";
+                locomotion_csv << std::setprecision(6) << "elapsed_ms,speed_mps,root_gap_m,root_gap_valid,palm_residual_l,palm_residual_r,drawn_residual_l,drawn_residual_r,visual_gap_l,visual_gap_r,source_l,source_r,blends,contact_l,contact_r,ff_dot_target\n";
             }
         }
         simulated_gameplay_script={};simulated_gameplay_last_index=-2;simulated_gameplay_rows=0;
