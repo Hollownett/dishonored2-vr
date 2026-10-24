@@ -23,15 +23,18 @@ namespace d2vr {
 // torque caps together (and the tow's pelvis pull, which uses the same cap law), so every force limit doubles and the lab's hand lead at the cap halves.
 // What stays put on purpose: the 10 m/s / 5 rad/s motor limits, the catch-up ramp (hitch / fling protection), the 4 m/s tow limit, the lag release, RunawayDetector,
 // EntityLockout and the fault releases. The 3.0 below is the pre-H1 value: build/legacy-corpse-strength restores it.
-constexpr double kLegacyCorpseStrengthScale=3.,kCorpseStrengthScale=2*kLegacyCorpseStrengthScale;
-struct GrabTuning {double axial_n=300,lateral_n=90,torque_nm=30,strength_scale=kCorpseStrengthScale,hand_kg=2,mass_floor_kg=.5,mass_ceiling_kg=60,
+// v609 G6 (headset feedback: corpses still too heavy): the corpse strength_scale is 2.5x the v608 value, 6 -> 15. Props keep the v608 value through prop_strength_scale
+// (native_grab routes capped prop lanes through prop_view()), so only corpses get lighter.
+constexpr double kLegacyCorpseStrengthScale=3.,kV608CorpseStrengthScale=6.,kCorpseStrengthScale=15.;
+struct GrabTuning {double axial_n=300,lateral_n=90,torque_nm=30,strength_scale=kCorpseStrengthScale,prop_strength_scale=kV608CorpseStrengthScale,hand_kg=2,mass_floor_kg=.5,mass_ceiling_kg=60,
     lift_fraction=.25,dt_max=1./30,
     stale_dt_s=.1,        // a frame is STALE (a game-thread hitch; enters recovery) only when its raw dt exceeds this; sustained low fps (dt 0.04) is not a hitch
     catch_up_mps=1.,      // recovery: the error-closure speed (not the hand's own feed) starts capped here ...
     catch_up_ramp_mps2=4.;   // ... and the cap rises by this per second, so recovery ends without a step (when the cap reaches the normal limit: 10 m/s linear, 4 m/s tow) or the lag is under 5 cm
     // The angular closure is capped at half the linear cap (the normal limits are 5 rad/s and 10 m/s), so it also ramps up to its normal limit with no jump.
     bool tow=true,use_measured_mass=false;   // tow ON: NativeGrab feeds plan_tow with limb_saturated from CorpseMotor.capped (Task 10); the lab judges this shipped default
-    double axial_cap() const {return axial_n*strength_scale;} double lateral_cap() const {return lateral_n*strength_scale;} double torque_cap() const {return torque_nm*strength_scale;}};
+    double axial_cap() const {return axial_n*strength_scale;} double lateral_cap() const {return lateral_n*strength_scale;} double torque_cap() const {return torque_nm*strength_scale;}
+    GrabTuning prop_view() const noexcept {GrabTuning p=*this;p.strength_scale=prop_strength_scale;return p;}};
 enum class TuningSource {defaults,file};
 struct TuningLoad {GrabTuning value;TuningSource source{TuningSource::defaults};std::string error;};
 
@@ -85,7 +88,8 @@ inline TuningLoad load_grab_tuning(const std::filesystem::path& file) noexcept {
             if(key=="axial_n") ok=ranged(t.axial_n,50,600);
             else if(key=="lateral_n") ok=ranged(t.lateral_n,20,300);
             else if(key=="torque_nm") ok=ranged(t.torque_nm,5,60);
-            else if(key=="strength_scale") ok=ranged(t.strength_scale,.5,10);
+            else if(key=="strength_scale") ok=ranged(t.strength_scale,.5,25);
+            else if(key=="prop_strength_scale") ok=ranged(t.prop_strength_scale,.5,10);
             else if(key=="lift_fraction") ok=ranged(t.lift_fraction,0,1);
             else if(key=="mass_floor_kg") ok=ranged(t.mass_floor_kg,.1,5);
             else if(key=="mass_ceiling_kg") ok=ranged(t.mass_ceiling_kg,10,200);

@@ -696,6 +696,8 @@ python tests\manual_equip_routing_check.py
 if not "%errorlevel%"=="0" exit /b 1
 python tests\physical_grip_routing_check.py
 if not "%errorlevel%"=="0" exit /b 1
+python tests\corpse_strength_routing_check.py
+if not "%errorlevel%"=="0" exit /b 1
 python tests\native_turning_lock_routing_check.py
 if not "%errorlevel%"=="0" exit /b 1
 python tests\diagnostic_isolation_routing_check.py

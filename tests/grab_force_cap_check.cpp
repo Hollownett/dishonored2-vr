@@ -31,37 +31,43 @@ void expect_defaults_with_error(const char* name,const std::string& text) {
 int main() {
     {   // lab_tuned_defaults_pinned (tools/corpse_drag_lab.cpp, Task 9)
         const GrabTuning t;
-        CHECK(t.strength_scale==6 && t.axial_n==300 && t.lateral_n==90 && t.torque_nm==30 && t.hand_kg==2 && t.mass_floor_kg==.5 && t.mass_ceiling_kg==60);
+        CHECK(t.strength_scale==15 && t.axial_n==300 && t.lateral_n==90 && t.torque_nm==30 && t.hand_kg==2 && t.mass_floor_kg==.5 && t.mass_ceiling_kg==60);
         CHECK(t.lift_fraction==.25 && t.tow && !t.use_measured_mass && near(t.dt_max,1./30) && t.catch_up_mps==1 && t.catch_up_ramp_mps2==4 && t.stale_dt_s==.1);
     }
-    // corpse_caps_twice_pre_h1 (plan H1): every cap the corpse motor and the tow use is exactly 2x the pre-H1 value (strength_scale 3 -> 6); the legacy value is restorable.
+    // corpse_caps_v609 (plan v609 G6): the corpse caps are 2.5x the v608 value (strength_scale 6 -> 15); the legacy value is still restorable.
     {
-        const GrabTuning now;GrabTuning old;old.strength_scale=kLegacyCorpseStrengthScale;
-        CHECK(kLegacyCorpseStrengthScale==3 && now.strength_scale==2*old.strength_scale);
-        CHECK(now.axial_cap()==2*old.axial_cap() && now.lateral_cap()==2*old.lateral_cap() && now.torque_cap()==2*old.torque_cap());
-        CHECK(now.axial_cap()==1800 && now.lateral_cap()==540 && old.axial_cap()==900);
-        // the velocity step a capped body may take per tick doubles too, linear and angular
-        auto a=cap_velocity_step(zero,zero,X*10,zero,X,10,1,.01,now),b=cap_velocity_step(zero,zero,X*10,zero,X,10,1,.01,old);
-        CHECK(near(a.linear.x,2*b.linear.x) && near(a.implied_force_n,2*b.implied_force_n));
-        auto w=cap_velocity_step(zero,zero,zero,Y*100,X,10,1,.01,now),w0=cap_velocity_step(zero,zero,zero,Y*100,X,10,1,.01,old);
-        CHECK(near(length(w.angular),2*length(w0.angular)));
+        const GrabTuning now;GrabTuning v608;v608.strength_scale=kV608CorpseStrengthScale;GrabTuning old;old.strength_scale=kLegacyCorpseStrengthScale;
+        CHECK(kLegacyCorpseStrengthScale==3 && kV608CorpseStrengthScale==6 && kCorpseStrengthScale==15);
+        CHECK(now.strength_scale==2.5*kV608CorpseStrengthScale);
+        CHECK(now.axial_cap()==4500 && now.lateral_cap()==1350 && old.axial_cap()==900);
+        // the velocity step a capped body may take per tick is 2.5x v608's, linear and angular, and so is the implied force
+        auto a=cap_velocity_step(zero,zero,X*10,zero,X,10,1,.01,now),b=cap_velocity_step(zero,zero,X*10,zero,X,10,1,.01,v608);
+        CHECK(near(a.linear.x,2.5*b.linear.x) && near(a.implied_force_n,2.5*b.implied_force_n));
+        auto w=cap_velocity_step(zero,zero,zero,Y*100,X,10,1,.01,now),w0=cap_velocity_step(zero,zero,zero,Y*100,X,10,1,.01,v608);
+        CHECK(near(length(w.angular),2.5*length(w0.angular)));
         // what must NOT move: the hitch / fling protection and the mass model
-        CHECK(now.catch_up_mps==old.catch_up_mps && now.catch_up_ramp_mps2==old.catch_up_ramp_mps2 && now.stale_dt_s==old.stale_dt_s && now.dt_max==old.dt_max);
-        CHECK(now.hand_kg==old.hand_kg && now.lift_fraction==old.lift_fraction && now.mass_floor_kg==old.mass_floor_kg && now.mass_ceiling_kg==old.mass_ceiling_kg);
+        CHECK(now.catch_up_mps==v608.catch_up_mps && now.catch_up_ramp_mps2==v608.catch_up_ramp_mps2 && now.stale_dt_s==v608.stale_dt_s && now.dt_max==v608.dt_max);
+        CHECK(now.hand_kg==v608.hand_kg && now.lift_fraction==v608.lift_fraction && now.mass_floor_kg==v608.mass_floor_kg && now.mass_ceiling_kg==v608.mass_ceiling_kg);
+    }
+    // prop_caps_unchanged (plan v609 G6): props keep the v608 scale through prop_view(); the corpse scale does not reach them
+    {
+        const GrabTuning t;const GrabTuning p=t.prop_view();
+        CHECK(p.strength_scale==6 && p.axial_cap()==1800 && p.lateral_cap()==540);
+        CHECK(t.prop_strength_scale==6 && p.axial_n==t.axial_n && p.hand_kg==t.hand_kg && p.lift_fraction==t.lift_fraction);
     }
     // axial_cap_300n
     {
         auto c=cap_velocity_step(zero,zero,X*10,zero,X,10,1,.01,scale1());
         CHECK(near(c.linear.x,300*.01/12) && near(c.linear.y,0) && c.linear_capped);
         auto d=cap_velocity_step(zero,zero,X*10,zero,X,10,1,.01,GrabTuning{});
-        CHECK(near(d.linear.x,1800*.01/12) && d.linear_capped);
+        CHECK(near(d.linear.x,4500*.01/12) && d.linear_capped);
     }
     // lateral_cap_90n
     {
         auto c=cap_velocity_step(zero,zero,Y*10,zero,X,10,1,.01,scale1());
         CHECK(near(length(c.linear),90*.01/12) && c.linear_capped);
         auto d=cap_velocity_step(zero,zero,Y*10,zero,X,10,1,.01,GrabTuning{});
-        CHECK(near(length(d.linear),540*.01/12));
+        CHECK(near(length(d.linear),1350*.01/12));
     }
     // light_limb_follows
     {
@@ -159,7 +165,7 @@ int main() {
         expect_defaults_with_error("d2vr_gt_novalue.cfg","axial_n 250\ntow\n");
         expect_defaults_with_error("d2vr_gt_big.cfg",std::string(5000,'#'));
         struct B {const char* k;double lo,hi;};
-        const B bounds[]={{"axial_n",50,600},{"lateral_n",20,300},{"torque_nm",5,60},{"strength_scale",.5,10},
+        const B bounds[]={{"axial_n",50,600},{"lateral_n",20,300},{"torque_nm",5,60},{"strength_scale",.5,25},{"prop_strength_scale",.5,10},
                           {"lift_fraction",0,1},{"mass_floor_kg",.1,5},{"mass_ceiling_kg",10,200},{"hand_kg",.1,20},{"dt_max",.005,.1},
                           {"stale_dt_s",.034,1},{"catch_up_mps",.2,10},{"catch_up_ramp_mps2",.5,100}};
         for(auto& b:bounds) {

@@ -592,7 +592,7 @@ private:
         }
         const double kg=mass.kg+hanging;lane.mass=kg;
         CorpseMotorInput in;in.body_velocity=motion.velocity;in.body_spin=motion.spin;in.velocity_known=motion.status==MotionStatus::ok;in.corpse=corpse;
-        in.object_kg=kg;in.inertia_kgm2=bone_inertia(kg,radius);in.dt=dt;in.tuning=&tuning_;
+        in.object_kg=kg;in.inertia_kgm2=bone_inertia(kg,radius);in.dt=dt;in.tuning=corpse?&tuning_:&prop_tuning_;
         const auto& other=lanes_[1-side].held;in.share=other && other->entity==body.entity?.5:1.; // two hands on one body: each takes half the mass
         if(!in.velocity_known) ++velocity_unknown_;
         const auto result=lane.grab.corpse_motor(body.pose,motor_usable,now,p.source_tick,in);
@@ -941,11 +941,12 @@ public:
     inline static std::mutex thrown_mutex_;inline static std::optional<Thrown> thrown_{};
     std::atomic<UINT64> pokes_{},tows_{},tow_unreadable_{};
     GrabTuning tuning_{}; // the shipped defaults (tow ON); install() replaces them with build/grab-tuning.cfg when that file is valid
+    GrabTuning prop_tuning_{tuning_.prop_view()}; // v609 G6: the capped prop lanes' tuning (prop_strength_scale), refreshed wherever tuning_ is set
     // Corpse hold (Task 10). configure_corpse runs before the first update (install() calls it with the build/ knobs); the options replace the
     // enable flag and the tuning at once. corpse_diagnostics() is the F4 block of the status line (dxgi_probe.cpp reads it).
     void configure_corpse(const CorpseOptions& options) {
         std::lock_guard<std::mutex> lock(mutex_);
-        corpse_enabled_=options.enabled;tuning_=options.tuning;corpse_diag_.set_tuning(options.from_file,options.tuning.tow);
+        corpse_enabled_=options.enabled;tuning_=options.tuning;prop_tuning_=tuning_.prop_view();corpse_diag_.set_tuning(options.from_file,options.tuning.tow);
     }
     CorpseDiagnostics& corpse_diagnostics() noexcept {return corpse_diag_;}
     // The grasp point of what this hand holds as of the last dispatcher tick (render thread; a corpse or a prop). active=false when nothing is held.

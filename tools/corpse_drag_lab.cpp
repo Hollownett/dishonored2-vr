@@ -39,9 +39,9 @@ double kHitchV=.3,kSwingRamp=.8,kHang=1.9,kSwingV=2.5,kSwingR=1.2,kLiftV=1.0,kBr
 // toward the feet) with the shoulder kShoulderZ metres up. The motor's cap is strong along this axis and weak across it.
 double kLinDamp=.2,kJointDamp=3;   // CORPSE_LAB_LIN_DAMP / _JOINT_DAMP (1/s)
 constexpr double kFrame=1./90,kG=9.81,kMu=.5,kSub=8;
-// Pinned expectations, independent of the tunable production defaults: 3 x (300 axial, 90 lateral). A mutation of the production
+// Pinned expectations, independent of the tunable production defaults: 15 x (300 axial, 90 lateral). A mutation of the production
 // constants must move the lab's judgement, so these are literals here.
-constexpr double kPinnedAxial=1800,kPinnedLateral=540;   // plan H1: doubled from 900/270 (strength_scale 3 -> 6)
+constexpr double kPinnedAxial=4500,kPinnedLateral=1350;   // v609 G6: 2.5x the v608 1800/540 (strength_scale 6 -> 15)
 std::string fmt(const char* f,...) {char b[512];va_list a;va_start(a,f);std::vsnprintf(b,sizeof b,f,a);va_end(a);return b;}
 std::string quote(const std::string& s) {std::string o="\"";for(char c:s){if(c=='"'||c=='\\')o+='\\';o+=c;}return o+"\"";}
 std::string jnum(double v) {return std::isfinite(v)?fmt("%.6g",v):"null";}
@@ -402,7 +402,7 @@ std::vector<Scenario> scenarios(const GrabTuning& base) {
         s.duration=2.5;s.lift_probe=true;
         s.judge=[=](const Scenario& sc,const Metrics& m) {double worst=0;
             for(const auto& fr:sc.frames) worst=std::max(worst,fr.force);
-            return std::vector<Check>{below("combined reported implied_force_n vs 2 x pinned envelope hypot(1800,540)",worst/(2*std::hypot(kPinnedAxial,kPinnedLateral)),1.01),dv_check(m),
+            return std::vector<Check>{below("combined reported implied_force_n vs 2 x pinned envelope hypot(4500,1350)",worst/(2*std::hypot(kPinnedAxial,kPinnedLateral)),1.01),dv_check(m),
                 truth("both hands write on >= 90% of the held ticks",m.held_ticks>0 && m.all_hands_write_ticks>=.9*m.held_ticks,fmt("%u of %u held ticks",m.all_hands_write_ticks,m.held_ticks)),
                 truth("the body lifts >= 0.5 m (the lower of the two held limbs; margin is thin, reported not retuned)",m.min_hand_lift>=.5,fmt("%.3f m",m.min_hand_lift))};};
         all.push_back(s);
@@ -465,6 +465,9 @@ std::vector<Scenario> scenarios(const GrabTuning& base) {
         // Plan H1 before/after: the same brisk lift at the pre-H1 strength_scale (kLegacyCorpseStrengthScale); main() compares it with the shipped one.
         auto old=one;old.name="h1_brisk_lift_legacy";old.title="Brisk ankle lift, one hand, pre-H1 strength (comparison)";old.tuning.strength_scale=kLegacyCorpseStrengthScale;
         all.push_back(old);
+        // v609 G6: the v608 strength (kV608CorpseStrengthScale) for the same brisk lift; main() checks the shipped lift leads the hand by at most 0.45 of it.
+        auto v6=one;v6.name="v608_brisk_lift";v6.title="Brisk ankle lift, one hand, v608 strength (comparison)";v6.tuning.strength_scale=kV608CorpseStrengthScale;
+        all.push_back(v6);
         auto two=make("two_hands_faster","Brisk lift of both ankles","two hands reach 0.5 m no later than one (H1: one hand already keeps up), without lag release");
         two.hands={lift_hand(13,.5,kBrisk,0,.5,kHang),lift_hand(16,.5,kBrisk,0,.5,kHang)};two.hang_z=kHang;two.pins={13,16};two.duration=2.5;two.lift_probe=true;
         two.judge=[=](const Scenario&,const Metrics& m) {return std::vector<Check>{
@@ -604,6 +607,34 @@ int main(int argc,char** argv) {
             const bool easier=n.max_lag<=o.max_lag*.5+1e-9 && !std::isnan(n.lift_time) && (std::isnan(o.lift_time) || n.lift_time<=o.lift_time+1e-9) && !n.released;
             std::printf("h1_easier: brisk lift hand lead %.3f m (legacy %.3f m), lift %.3f s (legacy %.3f s) -> %s\n",n.max_lag,o.max_lag,n.lift_time,o.lift_time,easier?"at most half the lead":"NOT easier");
             if(!easier) ++failed;
+        }
+        {   // v609 G6: the one lab lift the cap binds in at strength 6 (forgiving_lift_coupled, INFO model, cap binding in over half its written frames):
+            // the shipped strength (2.5x v608) leads the hand by at most 0.45 of the v608 lead, releases nothing and lifts no slower
+            std::size_t now_i=0;for(std::size_t i=0;i<list.size();++i){if(list[i].name=="forgiving_lift_coupled")now_i=i;}
+            Scenario v6=list[now_i];v6.tuning.strength_scale=kV608CorpseStrengthScale;v6.frames.clear();simulate(v6);
+            const auto& n=list[now_i].m;const auto& o=v6.m;
+            const bool lighter=n.max_lag<=o.max_lag*.45+1e-9 && !std::isnan(n.lift_time) && (std::isnan(o.lift_time) || n.lift_time<=o.lift_time+1e-9) && !n.released;
+            std::printf("v609_lighter: coupled lift hand lead %.3f m (v608 %.3f m), lift %.3f s (v608 %.3f s), release %d -> %s\n",n.max_lag,o.max_lag,n.lift_time,o.lift_time,int(n.released),lighter?"lighter, no lag release":"NOT lighter");
+            if(!lighter) ++failed;
+        }
+        {   // INFO only: the brisk pair (cap not binding at 6; the lead floors at the same value), and the share of written frames the cap binds at 6 vs 15
+            std::size_t b15=0,b6=0;for(std::size_t i=0;i<list.size();++i){if(list[i].name=="lift_brisk_one_hand")b15=i;if(list[i].name=="v608_brisk_lift")b6=i;}
+            std::printf("INFO brisk lift (not judged): hand lead %.3f m at 15, %.3f m at 6; lift %.3f s at 15, %.3f s at 6\n",list[b15].m.max_lag,list[b6].m.max_lag,list[b15].m.lift_time,list[b6].m.lift_time);
+        }
+        {   // cap share: the fraction of written frames where the capped step is smaller than the uncapped one, each corpse scenario at 6 and at 15 (INFO),
+            // with the peak hand lead and any release, so a lag comparison can be read against the cap share
+            struct Run {double share,lag;bool released;};
+            const auto run=[](const Scenario& src,double scale) {Scenario c=src;c.tuning.strength_scale=scale;c.frames.clear();simulate(c);
+                unsigned w=0,k=0;for(const auto& fr:c.frames) if(fr.written){++w;if(fr.capped) ++k;}
+                return Run{w?double(k)/w:std::nan(""),c.m.max_lag,c.m.released};};
+            std::string csv="scenario,cap_share_at_6,cap_share_at_15,max_lag_at_6,max_lag_at_15,released_at_6,released_at_15\n";
+            std::printf("\ncap share (written frames where the cap binds), lag and release, INFO\n%-30s %8s %8s %9s %9s %s\n","scenario","cap@6","cap@15","lag@6","lag@15","release 6/15");
+            for(const auto& sc:list) {
+                const Run r6=run(sc,kV608CorpseStrengthScale),r15=run(sc,kCorpseStrengthScale);
+                std::printf("%-30s %7.1f%% %7.1f%% %8.3f %8.3f %d/%d\n",sc.name.c_str(),100*r6.share,100*r15.share,r6.lag,r15.lag,r6.released,r15.released);
+                csv+=sc.name+","+jnum(r6.share)+","+jnum(r15.share)+","+jnum(r6.lag)+","+jnum(r15.lag)+","+std::to_string(r6.released)+","+std::to_string(r15.released)+"\n";
+            }
+            std::ofstream(dir/"cap_share.csv")<<csv;
         }
         std::printf("corpse_drag_lab: %zu scenarios, %u failed\n",list.size(),failed);
         return failed?1:0;
