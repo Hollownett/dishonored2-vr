@@ -299,29 +299,40 @@ print("hand_body_routing_check B14 ok")
 visual_hdr = (src / "hand_visual_source.hpp").read_text(encoding="utf-8")
 assert "raw_grips" not in visual_hdr and "hand_body_native" not in visual_hdr and "HandBodyRuntime" not in visual_hdr, "the source selector is pure"
 assert "hand_visual_source_check.cpp" in build and build.index("hand_body_lifecycle_check.exe") < build.index("hand_visual_source_check.cpp")
+anchor_at = probe.index("anchors[side]=drawn;")                       # the Task 12 block computes the anchor from the clamp pose first
 vstart = probe.index("// B15: which pose the visible hand is drawn at")
-vend = probe.index("// Task 12 (user decision 6)", vstart)
-vblock = probe[vstart:vend]
-assert "raw_grips" not in code_of(vblock), "B15 reads the palm pose (before the clamp), never the raw controller"
-assert "palm_grips[side]" in vblock and "hands.grips[side]" in vblock
+final_stmt = "for(unsigned side=0;side<2;++side) if(hands.hands&(1u<<side)) hands.grips[side]=d2vr::resolve_drawn_grip(visual[side],anchors[side]).pose;"
+final_at = probe.index(final_stmt)
+vblock = probe[vstart:final_at + len(final_stmt)]
+assert probe.index("hand_clamp.note_drawn(") < anchor_at < vstart < final_at < probe.index("held_clamp_live.applied[side]={}") < probe.index("publish_hand(side,hands.grips[side],raw_grips[side])")
+assert "raw_grips" not in code_of(vblock) and "raw_grips" not in code_of(probe[anchor_at - 900:anchor_at + 700]), "B15 and the anchor read the palm pose, never the raw controller"
+assert "palm_grips[side]" in vblock and "in.clamp=hands.grips[side];" in vblock and "in.anchor=anchors[side].position;" in vblock
 assert "if(hand_body_requested.load(std::memory_order_relaxed) && d2vr::HandBodyRuntime::active()) {" in vblock, "knob off: nothing below runs"
 assert vblock.index("visual[side].drawn=hands.grips[side];") < vblock.index("if(hand_body_requested"), "knob off: the passthrough is the clamp's pose"
-assert vblock.count("hands.grips[side]=visual[side].drawn;") == 1 and vblock.index("hand_visual_source.update(") < vblock.index("hands.grips[side]=visual[side].drawn;")
-assert "d2vr::HandBodyRuntime::contact_now(side)" in vblock and "d2vr::HandBodyRuntime::pose_stamped(side)" in vblock and "held_planes(side," in vblock
-assert probe.index("hand_clamp.note_drawn(") < vstart < probe.index("drawn_anchor.update(") < probe.index("publish_hand(side,hands.grips[side],raw_grips[side])")
-assert code_of(probe).count("resolve_drawn_grip(") == 1 and "const auto grip=d2vr::resolve_drawn_grip(visual[side],drawn);" in probe, "X-4: one function decides"
+assert "hands.grips[side]=visual[side]" not in code_of(vblock), "the gated block never writes the drawn pose itself: the one function below does"
+assert vblock.index("hand_visual_source.update(") < vblock.index(final_stmt)
+for need in ("d2vr::HandBodyRuntime::contact_now(side)", "d2vr::HandBodyRuntime::pose_stamped(side)", "held_planes(side,", "world_hit_near_body(", "behind_held_planes("):
+    assert need in vblock, need
+assert code_of(probe).count("resolve_drawn_grip(") == 1, "X-4: one function decides"
+# the drawn pose and the visual source are read only inside the block (intent code earlier in the frame never sees them); every use is listed
+assert [m.group(0) for m in re.finditer(r"hand_visual_source\.\w+|hand_visual_stats\.\w+", probe)] == ["hand_visual_source.hpp", "hand_visual_source.reset", "hand_visual_source.update", "hand_visual_stats.note", "hand_visual_stats.json"]
+assert all(vstart <= m.start() <= final_at + len(final_stmt) for m in re.finditer(r"visual\[side\]", probe)), "visual[] lives only in the B15 block"
 res = function(visual_hdr, "inline DrawnGrip resolve_drawn_grip(")
-assert res.index("VisualSource::body") < res.index("VisualSource::controller") < res.index("anchor.weight>0"), "hand body > anchor; clamp last"
-# the drawn pose is read only by the publication, the anchor, the status and the held-clamp shift: never by an intent path
+assert "VisualSource::clamp" in res and "anchor.weight>0" in res
+pick = function(visual_hdr, "static VisualSource pick(")
+assert pick.index("yield") < pick.index("body_elected") < pick.index("anchor_active"), "yield, then body, then anchor, then clamp"
+upd = function(visual_hdr, "VisualOutput update(unsigned side")
+assert "VisualSource::anchor" in upd and "contact_gap" in upd and "world_hit_near" in upd and "stale_floor_s" in upd
 for intent in ("intent.grips=raw_grips;", "note_grip(side,raw_grips[side],hands.curls[side]);", "const auto& p=raw_grips[side].position;reach_hands[side]="):
     assert intent in probe, intent
-uses = [m.start() for m in re.finditer(r"hand_visual_source\.(?:update|reset)|visual\[side\]", probe)]
-assert uses and all(u >= vstart for u in uses), "the drawn-pose source is read nowhere before the B15 block (intent paths run earlier)"
-assert not any(vend + 4000 < u < probe.index("publish_hand(side,hands.grips[side],raw_grips[side])") for u in uses), "...and only the anchor block reads it afterwards"
 assert ',\\"hand_visual\\":" << hand_visual_stats.json()' in probe
-for key in ("body_frames", "clamp_frames", "controller_frames", "blends", "snaps"):
+for key in ("body_frames", "clamp_frames", "controller_frames", "anchor_frames", "blends", "snaps"):
     assert f'\\"{key}\\":' in visual_hdr, key
-assert 'contact_now' in body and 'short_streak>=dc.contact_ticks' in body and "pose_stamped" in runtime
+# the contact signal: shortfall on an uncapped command, fresh within 50 ms; pose serial; no statement may hide in a comment on those lines
+assert 'contact_now' in body and 'short_streak>=dc.contact_ticks' in body and "pose_stamped" in runtime and "!c.capped.load(" in body and "contact_fresh_ms" in body
+for line in body.splitlines():
+    if "contact_now" in line or "contact_frames" in line:
+        assert not re.search(r"//.*\b(d|c)\.\w+=", line), "a statement swallowed by a comment: " + line.strip()[:80]
 print("hand_body_routing_check B15 ok")
 
 # 10. the B13 sim scenario compiles and fits a 120 s session with a 60 s lead

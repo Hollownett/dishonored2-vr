@@ -22,6 +22,7 @@
 #include "hand_servo.hpp"
 #include "tracked_pose.hpp"
 #include <array>
+#include <chrono>
 #include <atomic>
 #include <cmath>
 #include <cstdint>
@@ -428,12 +429,12 @@ public:
         c.dt_s.store(dt,std::memory_order_relaxed);
         // contact without events (research §2.5): last tick's command achieved short by more than 25% along its own direction
         if(had_cmd) {
-            const double want=length(s.last_cmd);
-            if(want>=dc.contact_min_speed && dot(m->velocity,s.last_cmd)/want<(1-dc.contact_shortfall)*want) {count(side,&Counters::contact_frames);++s.short_streak;}
+            const double want=length(s.last_cmd);   // B15: a cap-limited command (c.capped) is not judged
+            if(!c.capped.load(std::memory_order_relaxed) && want>=dc.contact_min_speed && dot(m->velocity,s.last_cmd)/want<(1-dc.contact_shortfall)*want) {count(side,&Counters::contact_frames);++s.short_streak;}
             else s.short_streak=0;
         }
         else s.short_streak=0;
-        c.contact_now.store(s.short_streak>=dc.contact_ticks,std::memory_order_relaxed);   // B15: short of the command for two ticks in a row
+        c.contact_now.store(s.short_streak>=dc.contact_ticks,std::memory_order_relaxed);c.contact_ms.store(steady_ms(),std::memory_order_relaxed);   // B15: short of the command for two ticks in a row
         note_drift(side,in,m->position);
         Vec3 linear{},angular{};bool yielded=in.yield || !hand_servo_detail::finite_pose(in.target);
         if(yielded) {s.servo={};count(side,&Counters::yields);c.capped.store(false,std::memory_order_relaxed);}
@@ -467,7 +468,7 @@ public:
     DriveStatus drive_status(unsigned side) const {
         DriveStatus d;if(side>=sides) return d;
         const auto& c=counters_[side];
-        d.gap_m=c.gap_m.load();d.speed=c.speed.load();d.capped=c.capped.load();d.contact_now=c.contact_now.load();d.contact_frames=c.contact_frames.load();d.snaps=c.snaps.load();
+        d.gap_m=c.gap_m.load();d.speed=c.speed.load();d.capped=c.capped.load();d.contact_now=c.contact_now.load() && steady_ms()-c.contact_ms.load()<=contact_fresh_ms;d.contact_frames=c.contact_frames.load();d.snaps=c.snaps.load();
         d.cost_us=c.cost_us.load();d.cost_max_us=c.cost_max_us.load();d.player_drift_um=c.player_drift_um.load();d.dt_s=c.dt_s.load();
         d.drives=c.drives.load();d.drive_writes=c.drive_writes.load();d.yields=c.yields.load();d.skipped=c.skipped.load();
         d.snap_requests=c.snap_requests.load();d.snap_blocked=c.snap_blocked.load();d.garbage=c.garbage.load();d.second_drives=c.second_drives.load();d.root_jumps=c.root_jumps.load();d.pressed_ticks=c.pressed_ticks.load();
@@ -514,7 +515,7 @@ private:
             wake_writes{},create_refusals{},writes{},releases{},lost{},unverified{},misplaced_writes{},reentrant_writes{};
         std::atomic<std::uint64_t> contact_frames{},snaps{},cost_us{},cost_max_us{},player_drift_um{},drives{},drive_writes{},yields{},skipped{},
             snap_requests{},snap_blocked{},garbage{},second_drives{},root_jumps{},pressed_ticks{},cpu_us{},cpu_max_us{},root_moved_ticks{},root_travel_um{};
-        std::atomic<double> gap_m{},speed{},dt_s{};std::atomic<bool> capped{},contact_now{};
+        std::atomic<double> gap_m{},speed{},dt_s{};std::atomic<bool> capped{},contact_now{};std::atomic<std::uint64_t> contact_ms{};
         std::atomic<int> state{};std::atomic<std::uint32_t> handle{};
     };
     struct TickGuard {
@@ -523,6 +524,8 @@ private:
         ~TickGuard() {if(owned) flag.store(false,std::memory_order_release);}
         TickGuard(const TickGuard&)=delete;TickGuard& operator=(const TickGuard&)=delete;
     };
+    static constexpr std::uint64_t contact_fresh_ms=50;   // contact_now older than this (the drive stopped judging) reads false
+    static std::uint64_t steady_ms() {return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());}
     struct Side {std::uint32_t handle{},gen{};std::uintptr_t world{};bool pending_destroy{},woken{};unsigned attempts{},wake_tries{};std::uint64_t next_create_ms{};
         // B14 drive state (dispatcher thread only)
         HandServoState servo{};double last_drive_s{std::numeric_limits<double>::quiet_NaN()};std::uint64_t written_tick{~0ull};

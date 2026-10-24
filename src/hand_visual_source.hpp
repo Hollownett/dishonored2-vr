@@ -21,18 +21,20 @@
 #include <string>
 
 namespace d2vr {
-enum class VisualSource {controller,clamp,body};
+enum class VisualSource {controller,clamp,body,anchor};
 struct VisualInput {
     double now{};                         // seconds, monotonic
     bool body_ready{};
     std::optional<WorldTrackedPose> body; // the body's published pose (a sphere: only the position is used; the orientation is the clamp's)
-    std::uint64_t body_seq{};             // the pose's publication serial: unchanged for more than two displayed frames means stale
+    std::uint64_t body_seq{};             // the pose's publication serial: unchanged for more than two frame intervals (floor 25 ms) is stale
     WorldTrackedPose clamp{};             // the phase-1 drawn pose
     WorldTrackedPose controller{};        // the palm pose before the clamp (what a yielding hand draws)
     bool clamp_contact{};
-    bool body_contact{};                  // the drive's contact signal (achieved < 75% of commanded for two ticks) OR clamp_contact
+    bool body_contact{};                  // the drive's contact signal: achieved < 75% of an uncapped command for two ticks
+    bool world_hit_near{};                // a fresh world hit (a plane the clamp holds) within 0.08 m of the body: confirms body_contact
     bool yield{};
     bool body_behind_surface{};           // the clamp's tunnelling guard: the body is behind a plane the clamp holds
+    std::optional<Vec3> anchor;           // the plan A DrawnAnchor's drawn position while its weight is above zero (already eased by its own 0.25 s)
 };
 struct VisualOutput {WorldTrackedPose drawn{};VisualSource source{VisualSource::clamp};bool snapped{};double gap_m{};bool changed{};bool blending{};};
 
@@ -42,11 +44,25 @@ inline bool behind_held_planes(Vec3 body,const ClampHit* planes,std::size_t coun
     for(std::size_t i=0;i<count;++i) if(finite(planes[i].point) && finite(planes[i].normal) && dot(body-planes[i].point,planes[i].normal)<-margin) return true;
     return false;
 }
+// True when any held plane (a world hit the clamp made or re-hit lately) lies within `reach` of the body centre, on either side.
+inline bool world_hit_near_body(Vec3 body,const ClampHit* planes,std::size_t count,double reach=.08) {
+    if(!finite(body)) return false;
+    for(std::size_t i=0;i<count;++i) if(finite(planes[i].point) && finite(planes[i].normal) && std::fabs(dot(body-planes[i].point,planes[i].normal))<=reach) return true;
+    return false;
+}
 
 class HandVisualSource {
 public:
-    static constexpr double blend_seconds=.15,snap_gap=.35,snap_seconds=.25,agree_gap=.02,regain_gap=.30;
-    static constexpr unsigned stale_frames=2;   // the body pose may be unchanged for this many displayed frames
+    static constexpr double blend_seconds=.15,snap_gap=.35,snap_seconds=.25,regain_gap=.30;
+    static constexpr double agree_gap=.02,agree_leave=.03;          // within this of the clamp pose the body is drawn without contact
+    static constexpr double contact_gap=.10,contact_leave=.12;      // contact elects the body only while it is this close to the clamp pose (hysteresis)
+    static constexpr double stale_floor_s=.025;                     // a pose unchanged for more than max(this, 2 measured pose intervals) is stale
+    // X-4, the single precedence: yield = controller; else the hand body (when elected) > the grasp anchor > the clamp output.
+    static VisualSource pick(bool yield,bool body_elected,bool anchor_active) {
+        if(yield) return VisualSource::controller;
+        if(body_elected) return VisualSource::body;
+        return anchor_active?VisualSource::anchor:VisualSource::clamp;
+    }
     VisualOutput update(unsigned side,const VisualInput& in) {
         VisualOutput out;out.drawn=in.clamp;
         if(side>=2) return out;
@@ -56,50 +72,63 @@ public:
         if(!(dt>=0) || dt>.5) dt=0;   // a clock that went backwards or a long hitch starts the timers over rather than counting as dwell
         s.time=in.now;s.has_time=true;
         const bool present=in.body_ready && in.body && finite(in.body->position);
-        bool latched=false;
+        const bool anchor_active=in.anchor && finite(*in.anchor);
+        bool latched=false,stale=false;
         if(present) {
-            if(!s.has_seq || in.body_seq!=s.seq) {s.seq=in.body_seq;s.has_seq=true;s.unchanged=0;} else ++s.unchanged;
+            if(!s.has_seq || in.body_seq!=s.seq) {
+                if(s.has_seq) {const double delta=std::min(in.now-s.seq_time,.1);s.interval=s.interval>0?.7*s.interval+.3*delta:delta;}
+                s.seq=in.body_seq;s.has_seq=true;s.seq_time=in.now;
+            }
+            stale=in.now-s.seq_time>std::max(stale_floor_s,2*s.interval)+1e-4;
             const double lead_gap=length(in.body->position-in.controller.position);
             if(std::isfinite(lead_gap) && lead_gap>snap_gap) s.far_s+=dt;else s.far_s=0;
             if(!s.distrusted && s.far_s>=snap_seconds-1e-9) {s.distrusted=true;latched=true;}
             else if(s.distrusted && std::isfinite(lead_gap) && lead_gap<=regain_gap) {s.distrusted=false;s.far_s=0;}
-        } else {s.has_seq=false;s.unchanged=0;s.far_s=0;s.distrusted=false;}
-        const bool stale=present && s.unchanged>stale_frames;
-        const bool sane=present && !stale && !s.distrusted && !in.body_behind_surface && clamp_detail::finite_pose(in.clamp);
+        } else {s.has_seq=false;s.interval=0;s.far_s=0;s.distrusted=false;}
+        const bool sane=present && !stale && !s.distrusted && !in.body_behind_surface;
         const double gap=present?length(in.body->position-in.clamp.position):0;
         out.gap_m=std::isfinite(gap)?gap:0;
-        const bool contact=in.body_contact || in.clamp_contact;
-        VisualSource want=VisualSource::clamp;
-        if(present && in.yield) want=VisualSource::controller;
-        else if(sane && (contact || out.gap_m<=agree_gap)) want=VisualSource::body;
+        const bool was_body=s.has_source && s.source==VisualSource::body;
+        const bool contact=(in.body_contact && in.world_hit_near) || in.clamp_contact;
+        // contact never elects a body farther than 10 cm (leaves at 12 cm) from the clamp pose: a lagging body must not drag the hand back
+        const bool elected=sane && ((contact && out.gap_m<=(was_body?contact_leave:contact_gap)) || out.gap_m<=(was_body?agree_leave:agree_gap));
         out.snapped=latched || (present && in.body_behind_surface);
+        const VisualSource want=pick(present && in.yield,elected,anchor_active);
         WorldTrackedPose target=in.clamp;
         if(want==VisualSource::controller) target=clamp_detail::finite_pose(in.controller)?in.controller:in.clamp;
         else if(want==VisualSource::body) target.position=in.body->position;   // the orientation stays the clamp's (a sphere has none)
-        if(!s.has_source) {s.has_source=true;s.source=want;s.elapsed=blend_seconds;}
-        else if(want!=s.source) {s.from=s.last;s.source=want;s.elapsed=0;out.changed=true;}
-        else s.elapsed+=dt;
+        else if(want==VisualSource::anchor) target.position=*in.anchor;
+        if(!s.has_source || !present) {   // no body in play: phase 1 exactly (the clamp, or the anchor override), nothing to blend
+            s.has_source=true;s.source=want;s.elapsed=blend_seconds;s.offset={};
+        } else if(want!=s.source) {   // the hand is carried along by the offset it had at the change, which decays over the blend
+            // measured against where the new source was LAST frame, so the offset is the gap between the sources and never a frame of travel
+            const auto idx=static_cast<std::size_t>(want);
+            s.offset=s.last.position-(s.have[idx]?s.cand[idx]:target.position);s.source=want;s.elapsed=0;out.changed=true;
+        } else s.elapsed+=dt;
         const double w=s.elapsed>=blend_seconds-1e-9?1.:s.elapsed/blend_seconds;
-        if(w>=1) out.drawn=target;   // a finished blend is the target exactly (bit-exact phase 1 when the clamp is the source)
-        else {out.drawn=target;out.drawn.position=s.from.position+(target.position-s.from.position)*w;out.blending=true;}
+        out.drawn=target;
+        if(w<1) {out.drawn.position=target.position+s.offset*(1-w);out.blending=true;}
         out.source=want;s.last=out.drawn;
+        s.cand[static_cast<std::size_t>(VisualSource::clamp)]=in.clamp.position;s.have[static_cast<std::size_t>(VisualSource::clamp)]=true;
+        s.cand[static_cast<std::size_t>(VisualSource::controller)]=target_of_controller(in);s.have[static_cast<std::size_t>(VisualSource::controller)]=true;
+        s.have[static_cast<std::size_t>(VisualSource::body)]=present;if(present) s.cand[static_cast<std::size_t>(VisualSource::body)]=in.body->position;
+        s.have[static_cast<std::size_t>(VisualSource::anchor)]=anchor_active;if(anchor_active) s.cand[static_cast<std::size_t>(VisualSource::anchor)]=*in.anchor;
         return out;
     }
     void reset(unsigned side) {if(side<2) state_[side]=State{};}
 private:
-    struct State {bool has_time{},has_source{},has_seq{},distrusted{};double time{},far_s{},elapsed{};VisualSource source{VisualSource::clamp};
-                  WorldTrackedPose from{},last{};std::uint64_t seq{};unsigned unchanged{};};
+    static Vec3 target_of_controller(const VisualInput& in) {return clamp_detail::finite_pose(in.controller)?in.controller.position:in.clamp.position;}
+    struct State {bool has_time{},has_source{},has_seq{},distrusted{};double time{},far_s{},elapsed{},seq_time{},interval{};VisualSource source{VisualSource::clamp};
+                  Vec3 offset{};WorldTrackedPose last{};std::array<Vec3,4> cand{};std::array<bool,4> have{};std::uint64_t seq{};};
     std::array<State,2> state_{};
 };
 
-// X-4, the drawn-grip precedence in one place: the hand body (when the rules above selected it) > the plan A DrawnAnchor grasp anchor of a
-// motor hold > the clamp output. A yielding hand is the controller (the anchor does not apply). `visual.drawn` is the clamp output (or its
-// blend) unless the body or the controller was chosen.
+// The knob-off (and no-body-in-play) path of the same precedence: the visual output is the clamp pose and the anchor, when it has weight, is
+// applied here exactly as plan A did. When the source already chose (body, controller, anchor) the drawn pose is final.
 struct DrawnGrip {WorldTrackedPose pose{};const char* owner{"clamp"};bool anchored{};};
 inline DrawnGrip resolve_drawn_grip(const VisualOutput& visual,const DrawnAnchor::Result& anchor) {
     DrawnGrip g;g.pose=visual.drawn;
-    if(visual.source==VisualSource::body) {g.owner="body";return g;}
-    if(visual.source==VisualSource::controller) {g.owner="controller";return g;}
+    if(visual.source!=VisualSource::clamp) {g.owner=visual.source==VisualSource::body?"body":visual.source==VisualSource::anchor?"anchor":"controller";g.anchored=visual.source==VisualSource::anchor;return g;}
     if(anchor.weight>0) {g.pose.position=anchor.position;g.owner="anchor";g.anchored=true;}
     return g;
 }
@@ -110,7 +139,7 @@ public:
     void note(unsigned side,const VisualOutput& v) {
         if(side>=2) return;
         auto& c=c_[side];
-        (v.source==VisualSource::body?c.body:v.source==VisualSource::controller?c.controller:c.clamp).fetch_add(1,std::memory_order_relaxed);
+        (v.source==VisualSource::body?c.body:v.source==VisualSource::controller?c.controller:v.source==VisualSource::anchor?c.anchor:c.clamp).fetch_add(1,std::memory_order_relaxed);
         if(v.changed) c.blends.fetch_add(1,std::memory_order_relaxed);
         if(v.snapped) c.snaps.fetch_add(1,std::memory_order_relaxed);
         c.gap_m.store(v.gap_m,std::memory_order_relaxed);
@@ -118,12 +147,12 @@ public:
     std::string json() const {
         std::ostringstream o;o<<"{\"sides\":[";
         for(unsigned i=0;i<2;++i) {const auto& c=c_[i];
-            o<<(i?",":"")<<"{\"body_frames\":"<<c.body.load()<<",\"clamp_frames\":"<<c.clamp.load()<<",\"controller_frames\":"<<c.controller.load()
+            o<<(i?",":"")<<"{\"body_frames\":"<<c.body.load()<<",\"clamp_frames\":"<<c.clamp.load()<<",\"controller_frames\":"<<c.controller.load()<<",\"anchor_frames\":"<<c.anchor.load()
              <<",\"blends\":"<<c.blends.load()<<",\"snaps\":"<<c.snaps.load()<<",\"gap_m\":"<<c.gap_m.load()<<'}';}
         o<<"]}";return o.str();
     }
 private:
-    struct C {std::atomic<std::uint64_t> body{},clamp{},controller{},blends{},snaps{};std::atomic<double> gap_m{};};
+    struct C {std::atomic<std::uint64_t> body{},clamp{},controller{},anchor{},blends{},snaps{};std::atomic<double> gap_m{};};
     std::array<C,2> c_{};
 };
 }

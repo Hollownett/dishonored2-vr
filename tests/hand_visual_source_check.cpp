@@ -21,7 +21,7 @@ struct Rig {
 }
 int main() {
     {   // body_wins_when_sane: in contact, near the clamp pose and the controller
-        Rig r;r.in.body=pose_at(.01);r.in.clamp=pose_at(0);r.in.controller=pose_at(0);r.in.body_contact=true;
+        Rig r;r.in.body=pose_at(.01);r.in.clamp=pose_at(0);r.in.controller=pose_at(0);r.in.body_contact=true;r.in.world_hit_near=true;
         const auto o=r.run(.5);
         CHECK(o.source==VisualSource::body && near(o.drawn.position.x,.01) && !o.snapped);
         CHECK(near(o.drawn.basis[0].x,1) && near(o.drawn.basis[2].z,1));   // the orientation stays the clamp's
@@ -34,40 +34,40 @@ int main() {
         Rig r;r.in.clamp=pose_at(.123456789,-.5,.25);r.in.controller=pose_at(1);
         r.in.body_ready=false;r.in.body=std::nullopt;
         for(int i=0;i<200;++i) {const auto o=r.step();CHECK(o.source==VisualSource::clamp && bit_equal(o.drawn,r.in.clamp) && !o.blending && !o.changed);}
-        r.in.body_ready=false;r.in.body=pose_at(0);r.in.body_contact=true;
+        r.in.body_ready=false;r.in.body=pose_at(0);r.in.body_contact=true;r.in.world_hit_near=true;
         for(int i=0;i<10;++i) {const auto o=r.step();CHECK(bit_equal(o.drawn,r.in.clamp) && o.source==VisualSource::clamp);}
         r.in.body_ready=true;r.in.body=std::nullopt;r.in.yield=true;   // no pose: nothing to yield from the body's side, the phase-1 pose stays
         for(int i=0;i<10;++i) {const auto o=r.step();CHECK(bit_equal(o.drawn,r.in.clamp));}
         // a body that existed and went away: back to the clamp, exact after the blend
-        Rig q;q.in.body=pose_at(0);q.in.body_contact=true;q.run(.5);
+        Rig q;q.in.body=pose_at(0);q.in.body_contact=true;q.in.world_hit_near=true;q.run(.5);
         q.in.body=std::nullopt;q.in.clamp=pose_at(.2);auto o=q.run(.2);CHECK(bit_equal(o.drawn,q.in.clamp) && o.source==VisualSource::clamp);
     }
     {   // yield_gives_controller: native animation owns the arm; and with no body the phase-1 pose is untouched
-        Rig r;r.in.body=pose_at(0);r.in.body_contact=true;r.in.clamp=pose_at(0);r.in.controller=pose_at(.2);r.in.yield=true;
+        Rig r;r.in.body=pose_at(0);r.in.body_contact=true;r.in.world_hit_near=true;r.in.clamp=pose_at(0);r.in.controller=pose_at(.2);r.in.yield=true;
         const auto o=r.run(.5);CHECK(o.source==VisualSource::controller && near(o.drawn.position.x,.2));
         Rig q;q.in.body=std::nullopt;q.in.body_ready=false;q.in.yield=true;q.in.controller=pose_at(.2);q.in.clamp=pose_at(.1);
         const auto p=q.run(.5);CHECK(bit_equal(p.drawn,q.in.clamp));
     }
     {   // blend_over_150ms: contact starts; the drawn pose goes from the clamp to the body over 0.15 s, linearly, exactly at the end
-        Rig r;r.in.body=pose_at(.1);r.in.clamp=pose_at(0);r.in.controller=pose_at(0);
+        Rig r;r.in.body=pose_at(.08);r.in.clamp=pose_at(0);r.in.controller=pose_at(0);
         r.run(.5);CHECK(r.step().source==VisualSource::clamp);
-        r.in.body_contact=true;
+        r.in.body_contact=true;r.in.world_hit_near=true;
         auto o=r.step();CHECK(o.changed && o.source==VisualSource::body && near(o.drawn.position.x,0,1e-9) && o.blending);   // the change frame starts at the old pose
         double t=0;
         while(t<.075-1e-9) {o=r.step();t+=dt60;}
-        CHECK(near(o.drawn.position.x,.05,.008));
+        CHECK(near(o.drawn.position.x,.04,.008));
         while(t<.15-1e-9) {o=r.step();t+=dt60;}
-        CHECK(near(o.drawn.position.x,.1,1e-9) && !o.blending);
-        o=r.step();CHECK(near(o.drawn.position.x,.1) && !o.changed);
+        CHECK(near(o.drawn.position.x,.08,1e-9) && !o.blending);
+        o=r.step();CHECK(near(o.drawn.position.x,.08) && !o.changed);
         CHECK(HandVisualSource::blend_seconds==.15);
         // and back: every source change blends
-        r.in.body_contact=false;o=r.step();CHECK(o.changed && o.blending && o.source==VisualSource::clamp);
+        r.in.body_contact=false;r.in.world_hit_near=false;o=r.step();CHECK(o.changed && o.blending && o.source==VisualSource::clamp);
         o=r.run(.16);CHECK(near(o.drawn.position.x,0) && !o.blending);
     }
     {   // far_body_snaps_after_quarter_second: 0.34 m from the controller for 5 s never; 0.36 m snaps between 0.24 and 0.26 s
-        Rig r;r.in.controller=pose_at(0);r.in.body=pose_at(.34);r.in.clamp=pose_at(.34);r.in.body_contact=true;
+        Rig r;r.in.controller=pose_at(0);r.in.body=pose_at(.34);r.in.clamp=pose_at(.34);r.in.body_contact=true;r.in.world_hit_near=true;
         for(int i=0;i<300;++i) {const auto o=r.step();CHECK(!o.snapped && o.source==VisualSource::body);}
-        Rig q;q.in.controller=pose_at(0);q.in.body=pose_at(.36);q.in.clamp=pose_at(.36);q.in.body_contact=true;
+        Rig q;q.in.controller=pose_at(0);q.in.body=pose_at(.36);q.in.clamp=pose_at(.36);q.in.body_contact=true;q.in.world_hit_near=true;
         double t=0;bool snapped=false;double at=-1;
         q.step();   // the first frame has no dt
         for(int i=0;i<60 && !snapped;++i) {const auto o=q.step();t+=dt60;if(o.snapped) {snapped=true;at=t;CHECK(o.source==VisualSource::clamp);}}
@@ -79,7 +79,7 @@ int main() {
         CHECK(q.step().source==VisualSource::body);
     }
     {   // behind_surface_distrusted: the clamp's tunnelling guard
-        Rig r;r.in.body=pose_at(.01);r.in.body_contact=true;r.run(.3);
+        Rig r;r.in.body=pose_at(.01);r.in.body_contact=true;r.in.world_hit_near=true;r.run(.3);
         CHECK(r.step().source==VisualSource::body);
         r.in.body_behind_surface=true;auto o=r.run(.3);CHECK(o.source==VisualSource::clamp && o.snapped && bit_equal(o.drawn,r.in.clamp));
         r.in.body_behind_surface=false;o=r.run(.3);CHECK(o.source==VisualSource::body);
@@ -89,7 +89,7 @@ int main() {
         CHECK(!behind_held_planes({std::nan(""),0,0},&wall,1) && !behind_held_planes({.6,0,0},&wall,0));
     }
     {   // non_finite_body_ignored
-        Rig r;r.in.body=pose_at(.01);r.in.body_contact=true;r.run(.3);
+        Rig r;r.in.body=pose_at(.01);r.in.body_contact=true;r.in.world_hit_near=true;r.run(.3);
         r.in.body=pose_at(std::nan(""));auto o=r.run(.3);CHECK(o.source==VisualSource::clamp && bit_equal(o.drawn,r.in.clamp));
         r.in.body=pose_at(std::numeric_limits<double>::infinity());o=r.run(.3);CHECK(bit_equal(o.drawn,r.in.clamp));
         r.in.body=pose_at(.01);r.in.clamp=pose_at(std::nan(""));o=r.step();CHECK(o.source==VisualSource::clamp);   // a bad clamp pose: reset, the input comes back
@@ -105,7 +105,7 @@ int main() {
         CHECK(src.update(2,a).source==VisualSource::clamp);   // an out-of-range side is the clamp pose
     }
     {   // no_flicker_on_threshold_noise: the gap alternates 0.349 / 0.351 each frame for 2 s: at most one source change
-        Rig r;r.in.body_contact=true;r.in.controller=pose_at(0);int changes=0;VisualSource last=VisualSource::clamp;bool first=true;
+        Rig r;r.in.body_contact=true;r.in.world_hit_near=true;r.in.controller=pose_at(0);int changes=0;VisualSource last=VisualSource::clamp;bool first=true;
         for(int i=0;i<120;++i) {const double g=(i&1)?.351:.349;r.in.body=pose_at(g);r.in.clamp=pose_at(g);const auto o=r.step();
             if(!first && o.source!=last) ++changes;first=false;last=o.source;}
         CHECK(changes<=1);
@@ -113,7 +113,7 @@ int main() {
     {   // free_air_fast_sweep_draws_clamp: a 6 m/s sweep, no contact, the body lagging 0.6 m: the clamp pose is drawn every frame (no trailing)
         Rig r;double x=0;double worst=0;int body_frames=0;
         for(int i=0;i<180;++i) {   // 2 s at 90 Hz
-            x+=6./90;r.in.controller=pose_at(x);r.in.clamp=pose_at(x);r.in.body=pose_at(x-.6<0?0:x-.6);r.in.body_contact=false;r.in.clamp_contact=false;
+            x+=6./90;r.in.controller=pose_at(x);r.in.clamp=pose_at(x);r.in.body=pose_at(x-.6<0?0:x-.6);r.in.body_contact=false;r.in.world_hit_near=false;r.in.clamp_contact=false;
             const auto o=r.step(0,true,1./90);worst=std::max(worst,length(o.drawn.position-r.in.clamp.position));if(o.source==VisualSource::body) ++body_frames;
             CHECK(bit_equal(o.drawn,r.in.clamp));
         }
@@ -124,7 +124,7 @@ int main() {
     {   // contact_draws_body: pressing into a wall (clamp at the wall, the controller 0.1 m through it), the body stopped 0.05 m short of the clamp
         Rig r;r.in.controller=pose_at(.5);r.in.clamp=pose_at(.4);r.in.body=pose_at(.35);
         r.run(.5);CHECK(r.step().source==VisualSource::clamp);   // before the contact signal the clamp pose is drawn
-        r.in.body_contact=true;VisualOutput o;double t=0;
+        r.in.body_contact=true;r.in.world_hit_near=true;VisualOutput o;double t=0;
         for(;t<=.15+1e-9;t+=dt60) o=r.step();   // the change frame is t=0: 0.15 s later the blend is done
         CHECK(o.source==VisualSource::body && near(o.drawn.position.x,.35,1e-9));
         // the clamp's own contact is enough as well
@@ -132,18 +132,79 @@ int main() {
         o=q.run(.2);CHECK(o.source==VisualSource::body && near(o.drawn.position.x,.35,1e-9));
     }
     {   // stale body pose: unchanged for more than two displayed frames is not sane; two frames still are; a fresh pose recovers
-        Rig r;r.in.body=pose_at(.01);r.in.body_contact=true;r.run(.3);
+        Rig r;r.in.body=pose_at(.01);r.in.body_contact=true;r.in.world_hit_near=true;r.run(.3);
         auto o=r.step(0,false);CHECK(o.source==VisualSource::body);   // unchanged 1
         o=r.step(0,false);CHECK(o.source==VisualSource::body);        // unchanged 2
         o=r.step(0,false);CHECK(o.source==VisualSource::clamp);       // unchanged 3: stale
         o=r.run(.3,0);CHECK(o.source==VisualSource::body);            // advancing again
-        Rig q;q.in.body=pose_at(.01);q.in.body_contact=true;q.run(.3);for(int i=0;i<10;++i) q.step(0,false);
+        Rig q;q.in.body=pose_at(.01);q.in.body_contact=true;q.in.world_hit_near=true;q.run(.3);for(int i=0;i<10;++i) q.step(0,false);
         o=q.step(0,false);CHECK(o.source==VisualSource::clamp);
         o=q.run(.2,0);CHECK(o.source==VisualSource::body);
+    }
+    {   // anchor_transition_blends_from_body / _to_body / clamp->anchor: the anchor is a source; no source change ever steps the hand
+        const double limit=.3*dt60/HandVisualSource::blend_seconds+1e-6;   // the blend-limited per-frame step for a 0.25 m offset
+        Rig r;r.in.body=pose_at(.05);r.in.clamp=pose_at(0);r.in.controller=pose_at(0);r.in.anchor=Vec3{.3,0,0};
+        r.in.body_contact=true;r.in.world_hit_near=true;r.run(.5);
+        auto o=r.step();CHECK(o.source==VisualSource::body && near(o.drawn.position.x,.05));   // the body outranks the anchor
+        r.in.body_contact=false;r.in.world_hit_near=false;   // contact releases: body -> anchor
+        double prev=o.drawn.position.x;bool changed=false;
+        for(int i=0;i<20;++i) {o=r.step();CHECK(std::fabs(o.drawn.position.x-prev)<=limit);prev=o.drawn.position.x;changed=changed || o.changed;if(i==0) CHECK(near(o.drawn.position.x,.05));}
+        CHECK(changed && o.source==VisualSource::anchor && near(o.drawn.position.x,.3) && !o.blending);
+        r.in.body_contact=true;r.in.world_hit_near=true;   // anchor -> body
+        for(int i=0;i<20;++i) {o=r.step();CHECK(std::fabs(o.drawn.position.x-prev)<=limit);prev=o.drawn.position.x;}
+        CHECK(o.source==VisualSource::body && near(o.drawn.position.x,.05));
+        // clamp -> anchor (a hold begins with the body not elected)
+        Rig q;q.in.body=pose_at(.5);q.in.clamp=pose_at(0);q.in.controller=pose_at(0);q.run(.5);
+        q.in.anchor=Vec3{.3,0,0};prev=0;
+        for(int i=0;i<20;++i) {o=q.step();CHECK(std::fabs(o.drawn.position.x-prev)<=limit);prev=o.drawn.position.x;}
+        CHECK(o.source==VisualSource::anchor && near(o.drawn.position.x,.3));
+        // no body in play: the anchor override is phase 1 exactly (no blend, bit-exact), and the knob-off path applies it the same way
+        Rig n;n.in.body_ready=false;n.in.body=std::nullopt;n.in.anchor=Vec3{.3,.1,0};o=n.step();
+        WorldTrackedPose want=n.in.clamp;want.position=*n.in.anchor;CHECK(bit_equal(o.drawn,want));
+        VisualOutput passthrough;passthrough.drawn=n.in.clamp;DrawnAnchor::Result ar;ar.weight=.5;ar.position={.3,.1,0};
+        CHECK(bit_equal(resolve_drawn_grip(passthrough,ar).pose,want));
+    }
+    {   // contact needs a world hit near the body: a shortfall alone (time dilation, a capsule push) is no contact; the clamp's own contact is
+        Rig r;r.in.body=pose_at(.05);r.in.body_contact=true;r.in.world_hit_near=false;
+        auto o=r.run(.5);CHECK(o.source==VisualSource::clamp && bit_equal(o.drawn,r.in.clamp));
+        r.in.world_hit_near=true;o=r.run(.5);CHECK(o.source==VisualSource::body);
+        Rig q;q.in.body=pose_at(.05);q.in.clamp_contact=true;o=q.run(.5);CHECK(o.source==VisualSource::body);
+        // the world-hit test itself: a held plane within 8 cm of the body, either side
+        const ClampHit wall{Vec3{.5,0,0},Vec3{-1,0,0}};
+        CHECK(world_hit_near_body({.45,0,0},&wall,1) && world_hit_near_body({.55,0,0},&wall,1) && !world_hit_near_body({.3,0,0},&wall,1) && !world_hit_near_body({.45,0,0},&wall,0));
+    }
+    {   // the contact gap bound: contact elects the body only within 10 cm of the clamp pose (leaves at 12 cm)
+        Rig r;r.in.clamp_contact=true;r.in.body=pose_at(.11);auto o=r.run(.5);CHECK(o.source==VisualSource::clamp);
+        r.in.body=pose_at(.09);o=r.run(.3);CHECK(o.source==VisualSource::body);
+        r.in.body=pose_at(.115);o=r.run(.3);CHECK(o.source==VisualSource::body);    // hysteresis: stays until 12 cm
+        r.in.body=pose_at(.125);o=r.run(.3);CHECK(o.source==VisualSource::clamp);
+        r.in.body=pose_at(.105);o=r.run(.3);CHECK(o.source==VisualSource::clamp);   // and does not come back until 10 cm
+    }
+    {   // grazing_fast_sweep_never_trails_more_than_10cm: a sweep grazes a wall (clamp_contact true all the way) while the body lags more and more
+        Rig r;double x=0,worst=0,worst_body_gap=0;
+        for(int i=0;i<180;++i) {
+            x+=6./90;const double lag=std::min(.65,i*.004);
+            r.in.controller=pose_at(x);r.in.clamp=pose_at(x);r.in.body=pose_at(x-lag);r.in.clamp_contact=true;r.in.body_contact=true;r.in.world_hit_near=true;
+            const auto o=r.step(0,true,1./90);worst=std::max(worst,length(o.drawn.position-r.in.clamp.position));
+            if(o.source==VisualSource::body) worst_body_gap=std::max(worst_body_gap,o.gap_m);
+        }
+        CHECK(worst_body_gap<=HandVisualSource::contact_leave+1e-9);   // the body is drawn only inside the hysteresis band
+        CHECK(worst<=HandVisualSource::contact_leave+1e-9);            // and the hand never trails the clamp pose by more than that, blends included
+        const auto o=r.step(0,true,1./90);CHECK(o.source==VisualSource::clamp);
+    }
+    {   // stale in time: 25 ms floor, and a slow pose cadence (30 Hz) is not stale at 90 Hz display
+        Rig r;r.in.body=pose_at(.01);r.in.body_contact=true;r.in.world_hit_near=true;
+        VisualOutput o;for(int i=0;i<60;++i) {if(i%3==0) ++r.seq;r.now+=1./90;r.in.now=r.now;r.in.body_seq=r.seq;o=r.src.update(0,r.in);}
+        CHECK(o.source==VisualSource::body);
+        for(int i=0;i<2;++i) {r.now+=1./90;r.in.now=r.now;o=r.src.update(0,r.in);}   // 2 display frames without a new pose: still fresh
+        CHECK(o.source==VisualSource::body);
+        for(int i=0;i<3;++i) {r.now+=1./90;r.in.now=r.now;o=r.src.update(0,r.in);}
+        CHECK(o.source==VisualSource::clamp);
     }
     {   // X-4: the hand body > the grasp anchor > the clamp output; a yielding hand is the controller
         VisualOutput v;v.drawn=pose_at(1);DrawnAnchor::Result a;a.weight=1;a.position={2,0,0};
         v.source=VisualSource::body;auto g=resolve_drawn_grip(v,a);CHECK(near(g.pose.position.x,1) && !g.anchored);
+        CHECK(HandVisualSource::pick(false,true,true)==VisualSource::body && HandVisualSource::pick(false,false,true)==VisualSource::anchor && HandVisualSource::pick(false,false,false)==VisualSource::clamp && HandVisualSource::pick(true,true,true)==VisualSource::controller);
         v.source=VisualSource::clamp;g=resolve_drawn_grip(v,a);CHECK(near(g.pose.position.x,2) && g.anchored);
         a.weight=0;g=resolve_drawn_grip(v,a);CHECK(bit_equal(g.pose,v.drawn) && !g.anchored);
         a.weight=1;v.source=VisualSource::controller;g=resolve_drawn_grip(v,a);CHECK(near(g.pose.position.x,1) && !g.anchored);
@@ -151,7 +212,7 @@ int main() {
     {   // counters
         HandVisualStats st;VisualOutput v;v.source=VisualSource::body;v.changed=true;st.note(0,v);v.source=VisualSource::clamp;v.changed=false;v.snapped=true;st.note(0,v);st.note(1,v);st.note(5,v);
         const auto j=st.json();
-        CHECK(j.find("\"body_frames\":1,\"clamp_frames\":1,\"controller_frames\":0,\"blends\":1,\"snaps\":1")!=std::string::npos);
+        CHECK(j.find("\"body_frames\":1,\"clamp_frames\":1,\"controller_frames\":0,\"anchor_frames\":0,\"blends\":1,\"snaps\":1")!=std::string::npos);
         CHECK(j.find("\"body_frames\":0,\"clamp_frames\":1")!=std::string::npos);
     }
     std::puts("hand_visual_source_check ok");

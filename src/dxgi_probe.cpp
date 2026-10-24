@@ -5076,6 +5076,22 @@ void prepare_head_view(void* view) noexcept {
                     reset_clamp_state(); // incl. clamp_shot / released_shot (the aim and the crosshair would otherwise reuse the last clamped offset) and clamp_state
                     for(auto& status:hand_clamp_status) status.active.store(false);
                 }
+                // Task 12 (user decision 6): the drawn hand and the arm IK target ease onto the grasp point of a motor-held corpse or prop over 0.25 s,
+                // never more than 0.35 m from where the hand is drawn (hold_anchor is the dispatcher's snapshot; the tracked controller
+                // pose stays the intent copy kept above). Native HoldObject items are not lanes (palm-seated already) and living guards' yank holds are not capped.
+                std::array<d2vr::DrawnAnchor::Result,2> anchors{};   // B15: computed from the clamp pose; the source selector and the final pick below both read them
+                {const double drawn_now=std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+                 for(unsigned side=0;side<2;++side) {
+                     if(!(hands.hands&(1u<<side)) || !physical_grab_requested) {drawn_anchor.reset(side);continue;}
+                     const auto held_view=native_grab.hold_anchor(side);
+                     const bool seat=held_view.active && held_view.capped && (held_view.corpse || native_grab.prop_grasp_point());
+                     const auto drawn=drawn_anchor.update(side,seat,hands.grips[side].position,held_view.anchor,drawn_now);
+                     anchors[side]=drawn;
+                     if(drawn.weight>0) {
+                         if(held_view.corpse) corpse_diagnostics.note_anchor_gap(side,drawn.gap_m);
+                         else if(seat) {double peak=prop_seat_gap_m.load();while(drawn.gap_m>peak && !prop_seat_gap_m.compare_exchange_weak(peak,drawn.gap_m));}
+                     }
+                 }}
                 // B15: which pose the visible hand is drawn at: the hand body while it is in contact (or already at the clamp pose), else the clamp output
                 // (phase 1, unchanged), the palm pose while the hand yields. Knob off (no hand body): hands.grips is left exactly as the clamp drew it.
                 // The raw controller poses are not read here: they keep driving intent (C9).
@@ -5089,30 +5105,16 @@ void prepare_head_view(void* view) noexcept {
                         const auto stamped=d2vr::HandBodyRuntime::pose_stamped(side);in.body=stamped.first;in.body_seq=stamped.second;
                         in.clamp=hands.grips[side];in.controller=palm_grips[side];
                         in.clamp_contact=(hand_visual_contact_bits>>side)&1u;
-                        in.body_contact=in.clamp_contact || d2vr::HandBodyRuntime::contact_now(side);
+                        in.body_contact=d2vr::HandBodyRuntime::contact_now(side);   // the drive's shortfall on an uncapped command
+                        if(anchors[side].weight>0) in.anchor=anchors[side].position;
                         in.yield=((hand_body_yield_bits|authored_hands)>>side)&1u;
-                        if(in.body) {std::array<d2vr::ClampHit,d2vr::HandClamp::max_held_planes> planes{};
-                            in.body_behind_surface=d2vr::behind_held_planes(in.body->position,planes.data(),hand_clamp.held_planes(side,planes));}
+                        if(in.body) {std::array<d2vr::ClampHit,d2vr::HandClamp::max_held_planes> planes{};const auto held=hand_clamp.held_planes(side,planes);
+                            in.body_behind_surface=d2vr::behind_held_planes(in.body->position,planes.data(),held);
+                            in.world_hit_near=d2vr::world_hit_near_body(in.body->position,planes.data(),held);}
                         visual[side]=hand_visual_source.update(side,in);hand_visual_stats.note(side,visual[side]);
-                        hands.grips[side]=visual[side].drawn;
                     }
                 }
-                // Task 12 (user decision 6): the drawn hand and the arm IK target ease onto the grasp point of a motor-held corpse or prop over 0.25 s,
-                // never more than 0.35 m from where the hand is drawn (hold_anchor is the dispatcher's snapshot; the tracked controller
-                // pose stays the intent copy kept above). Native HoldObject items are not lanes (palm-seated already) and living guards' yank holds are not capped.
-                {const double drawn_now=std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
-                 for(unsigned side=0;side<2;++side) {
-                     if(!(hands.hands&(1u<<side)) || !physical_grab_requested) {drawn_anchor.reset(side);continue;}
-                     const auto held_view=native_grab.hold_anchor(side);
-                     const bool seat=held_view.active && held_view.capped && (held_view.corpse || native_grab.prop_grasp_point());
-                     const auto drawn=drawn_anchor.update(side,seat,hands.grips[side].position,held_view.anchor,drawn_now);
-                     const auto grip=d2vr::resolve_drawn_grip(visual[side],drawn);   // X-4: hand body > the grasp anchor > the clamp output
-                     hands.grips[side]=grip.pose;
-                     if(drawn.weight>0 && grip.anchored) {
-                         if(held_view.corpse) corpse_diagnostics.note_anchor_gap(side,drawn.gap_m);
-                         else if(seat) {double peak=prop_seat_gap_m.load();while(drawn.gap_m>peak && !prop_seat_gap_m.compare_exchange_weak(peak,drawn.gap_m));}
-                     }
-                 }}
+                for(unsigned side=0;side<2;++side) if(hands.hands&(1u<<side)) hands.grips[side]=d2vr::resolve_drawn_grip(visual[side],anchors[side]).pose;   // X-4 in one function
                 // Part 5A: a native hold stopped by the world takes the hand with it (last frame's shift, bounded to DrawnAnchor::bound_m). Last in the drawn-grip
                 // precedence (hand body, then the grasp anchor of a motor hold, then the clamp output): native holds have no anchor, and no hand body exists yet.
                 for(unsigned side=0;side<2;++side) {
