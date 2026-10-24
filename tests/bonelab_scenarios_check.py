@@ -99,8 +99,15 @@ def finger_sample(curl, mapping="touch"):
 REST, POINT, THUMBS, FIST, OPEN = ([0, 0.3, 0, 0, 0], [1, 0.02, 1, 1, 1], [0.0, 0.3, 1, 1, 1], [1, 1, 1, 1, 1], [0, 0.02, 0, 0, 0])
 
 
+POSES_AT = [{"index": 27 + i, "end_ms": 47500 + 2500 * i} for i in range(5)]  # as the run checker derives them from the compiled script
+
+
+def finger_samples(curls, mapping="touch"):
+    return [{"segment": 27 + i, "elapsed_ms": 47500 + 2500 * i + 6, "fingers": finger_sample(c, mapping)} for i, c in enumerate(curls)]
+
+
 def finger_status(samples=(REST, POINT, THUMBS, FIST, OPEN), **over):
-    status = {"fingers": finger_sample(OPEN), "finger_segments": [finger_sample(c) for c in samples]}
+    status = {"fingers": finger_sample(OPEN), "finger_segments": finger_samples(samples), "finger_poses": POSES_AT}
     status["fingers"].update(over)
     return status
 
@@ -121,8 +128,8 @@ def finger_touch_checks():
     ok = verdict(finger_status())
     assert not any(v == "FAIL" for v, _ in ok), ok
     assert sum(1 for v, t in ok if v == "INFO") == 5 and any("fist: all fingers" in t for v, t in ok)
-    legacy = finger_status(samples=(REST, POINT, THUMBS, FIST, OPEN))
-    legacy["finger_segments"] = [finger_sample(c, "legacy") for c in (REST, POINT, THUMBS, FIST, OPEN)]
+    legacy = finger_status()
+    legacy["finger_segments"] = finger_samples((REST, POINT, THUMBS, FIST, OPEN), "legacy")
     assert any(v == "FAIL" and "mapping touch" in t for v, t in verdict(legacy))
     stuck_thumb = finger_status(samples=(REST, POINT, [1, 0.3, 1, 1, 1], FIST, OPEN))
     assert any(v == "FAIL" and "thumb" in t for v, t in verdict(stuck_thumb))
@@ -131,7 +138,22 @@ def finger_touch_checks():
     assert any("rest: index" in t for t in f) and any("point: index" in t for t in f), f
     for bad in (finger_status(samples=(REST, POINT, THUMBS, [1, 1, 1, 0.5, 1], OPEN)), finger_status(samples=(REST, POINT, THUMBS, FIST, [0, 0, 0.5, 0, 0]))):
         assert "FAIL" in {v for v, _ in verdict(bad)}
-    assert "FAIL" in {v for v, _ in verdict(finger_status(samples=(REST, POINT)))}, "too few samples"
+    short = finger_status()
+    short["finger_segments"] = short["finger_segments"][:4]  # the run ended before the open segment's end tick
+    assert any(v == "FAIL" and t.startswith("open: a sample") for v, t in verdict(short)), verdict(short)
+    lead_only = finger_status()
+    lead_only["finger_segments"] = [{"segment": i, "elapsed_ms": 1000 * i, "fingers": finger_sample(OPEN)} for i in range(20)]  # only lead-in samples
+    assert "FAIL" in {v for v, _ in verdict(lead_only)}
+    blip = finger_status()  # a focus or loading blip: an unsettled sample inside segment 28 (before its end) and a late duplicate of the earlier segment, in order
+    blip["finger_segments"].insert(2, {"segment": 28, "elapsed_ms": 50000 + 300, "fingers": finger_sample([0, 0, 0, 0, 0])})
+    blip["finger_segments"].insert(1, {"segment": 27, "elapsed_ms": 47500 - 900, "fingers": finger_sample([1, 1, 1, 1, 1])})
+    assert not any(v == "FAIL" for v, _ in verdict(blip)), verdict(blip)
+    early = finger_status()  # a sample stamped before the segment's end never counts
+    early["finger_segments"][3]["elapsed_ms"] = 52500 + 2500 + 100 - 2600
+    assert any(v == "FAIL" and t.startswith("fist: a sample") for v, t in verdict(early))
+    no_script = finger_status()
+    no_script["finger_poses"] = []
+    assert any(v == "FAIL" and "touch pose segments" in t for v, t in verdict(no_script))
     unbound = finger_status(touch_bound=False)
     assert any(v == "FAIL" and "touch_bound == true" in t for v, t in verdict(unbound))
     rejected = finger_status(touch_bound=False, mapping=["legacy", "legacy"])
@@ -143,7 +165,9 @@ def finger_touch_checks():
             d = Path(tmp) / label / "artifacts"
             d.mkdir(parents=True)
             (d / "xr-live-status.json").write_text(json.dumps({"fingers": finger_sample(OPEN)}))
-            (d / "finger-touch-segments.jsonl").write_text("".join(json.dumps({"segment": i, "elapsed_ms": 1000 * i, "fingers": finger_sample(c)}) + "\n" for i, c in enumerate(samples)))
+            (d / "simulated-gameplay-script.json").write_text(json.dumps({"segments": segments}))
+            first = len(segments) - 5  # the pose segments are the last five; one sample per segment, at its end tick
+            (d / "finger-touch-segments.jsonl").write_text("".join(json.dumps({"segment": first + i, "elapsed_ms": segments[first + i]["end_ms"] + 5, "fingers": finger_sample(c)}) + "\n" for i, c in enumerate(samples)))
             r = subprocess.run([sys.executable, str(ROOT / "tools/linux/bonelab_run_check.py"), str(d.parent), "--scenario", "finger_touch"], capture_output=True, text=True)
             assert r.returncode == code, (label, r.stdout, r.stderr)
 

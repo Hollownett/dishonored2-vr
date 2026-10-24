@@ -7225,7 +7225,7 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                         for(bool value:{command.a,command.b,command.x,command.y,command.left_click,command.right_click,command.menu}) simulated_gameplay_csv<<','<<value;
                                         simulated_gameplay_csv<<','<<head_pitch_degrees<<'\n';simulated_gameplay_csv.flush();
                                         if(!simulated_gameplay_csv) throw std::runtime_error("Cannot save simulated gameplay commands");
-                                        if(index!=simulated_gameplay_last_index && simulated_gameplay_last_index>=0) { // the finger scenarios judge the curl each segment's end (the first tick of the next one)
+                                        if(simulated_gameplay_script.uses_touch() && index!=simulated_gameplay_last_index && simulated_gameplay_last_index>=0) { // the finger scenarios judge the curl each segment's end (the first tick of the next one)
                                             std::ofstream seg(simulated_gameplay_output/L"finger-touch-segments.jsonl",std::ios::app);seg<<"{\"segment\":"<<simulated_gameplay_last_index<<",\"elapsed_ms\":"<<elapsed<<",\"fingers\":"<<finger_touch_status_json(game_xr->touch_status().bound,game_xr->touch_status().create_failed)<<"}\n";}
                                         ++simulated_gameplay_rows;simulated_gameplay_last_index=index;
                                         simulated_gameplay_last_gameplay=gameplay;simulated_gameplay_last_focused=focused;
@@ -8997,7 +8997,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
         if(simulated_gameplay_script_requested) {
             std::ifstream source(root/L"build"/L"simulated-gameplay-script.cfg");
             simulated_gameplay_script.load(source,static_cast<unsigned>(duration_seconds));
-            simulated_gameplay_output=output;{std::ofstream clear(output/L"finger-touch-segments.jsonl",std::ios::trunc);}
+            simulated_gameplay_output=output;if(simulated_gameplay_script.uses_touch()) {std::ofstream clear(output/L"finger-touch-segments.jsonl",std::ios::trunc);}
             simulated_gameplay_csv.open(output/L"simulated-gameplay-commands.csv",std::ios::trunc);
             if(!simulated_gameplay_csv) throw std::runtime_error("Cannot log simulated gameplay commands");
             simulated_gameplay_csv<<std::setprecision(9)<<"elapsed_ms,segment,gameplay,focused,move_x,move_y,turn_x,turn_y,left_trigger,right_trigger,left_grip,right_grip,a,b,x,y,left_click,right_click,menu,head_pitch_degrees\n";

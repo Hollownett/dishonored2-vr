@@ -119,11 +119,12 @@ int main() {
     {std::string z;for(int i=0;i<26;++i) z+=" 0"; // version 7: ten touch flags (left then right) after when; older versions read no touch
      d2vr::SimulatedGameplayScript touch;std::istringstream tsrc("D2VR_GAMEPLAY_SCRIPT 7 10000 2\n1000 2000"+z+" 0 0 0 0 0 0 0 1 0 0 0 0\n3000 4000"+z+" 0 0 0 1 0 0 0 0 0 0 0 0\n");
      touch.load(tsrc,10);
+     assert(touch.uses_touch());
      assert(touch.touch(1500)[1][0] && !touch.touch(1500)[0][0] && !touch.touch(1500)[1][1]); // right trigger touch
      assert(touch.touch(3500)[0][1] && !touch.touch(3500)[1][0]); // left thumbstick touch
      assert(!touch.touch(2500)[0][0] && !touch.touch(2500)[1][0]); // between segments: all clear
      d2vr::SimulatedGameplayScript old;std::istringstream osrc("D2VR_GAMEPLAY_SCRIPT 6 10000 1\n1000 2000"+z+" 0 2\n");old.load(osrc,10);
-     for(unsigned side=0;side<2;++side) for(unsigned k=0;k<5;++k) assert(!old.touch(1500)[side][k]); // a v6 script has no touch
+     assert(!old.uses_touch());for(unsigned side=0;side<2;++side) for(unsigned k=0;k<5;++k) assert(!old.touch(1500)[side][k]); // a v6 script has no touch
      assert(rejects("D2VR_GAMEPLAY_SCRIPT 7 10000 1\n1000 2000"+z+" 0 0 0 0 0 0 0 0 0 0 0 2")); // touch flag not 0/1
      assert(rejects("D2VR_GAMEPLAY_SCRIPT 7 10000 1\n1000 2000"+z+" 0 0 0 0 0 0 0 0 0 0 0")); // truncated touch row
     }

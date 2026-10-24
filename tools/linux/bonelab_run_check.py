@@ -120,14 +120,19 @@ def check_fingers(statuses, reject_touch=False):
             continue
         add(bound, f"{tag}touch_bound == true (got {bound})")
         add(final.get("action_create_failed") is False, f"{tag}action_create_failed == false (got {final.get('action_create_failed')})")
-        samples = status.get("finger_segments") or []
-        add(len(samples) >= len(FINGER_POSES), f"{tag}>= {len(FINGER_POSES)} per-segment finger samples (got {len(samples)})")
-        if len(samples) < len(FINGER_POSES):
+        samples, poses = status.get("finger_segments") or [], status.get("finger_poses") or []
+        add(len(poses) == len(FINGER_POSES), f"{tag}the script has {len(FINGER_POSES)} touch pose segments (got {len(poses)})")
+        by = {}
+        for pose, seg in zip(FINGER_POSES, poses):  # the last sample of each pose's own segment, taken at or after its end (a blip sample mid-segment is superseded)
+            mine = [s for s in samples if s.get("segment") == seg.get("index") and s.get("elapsed_ms", -1) >= seg.get("end_ms", 1 << 60)]
+            add(bool(mine), f"{tag}{pose}: a sample at the end of segment {seg.get('index')} (got {len([s for s in samples if s.get('segment') == seg.get('index')])} before its end)")
+            if mine:
+                by[pose] = mine[-1].get("fingers") or {}
+        if len(by) < len(FINGER_POSES):
             continue
-        by = dict(zip(FINGER_POSES, samples[-len(FINGER_POSES):]))
         curl = {}
         for pose, sample in by.items():
-            row = ((sample or {}).get("curl") or [[], []])[SIDE]
+            row = (sample.get("curl") or [[], []])[SIDE]
             curl[pose] = [float(v) for v in row] if len(row) == 5 else [float("nan")] * 5
             add((sample.get("mapping") or [None, None])[SIDE] == "touch", f"{tag}{pose}: mapping touch (got {sample.get('mapping')})")
         pr = lambda pose: ", ".join(f"{n}={v:.2f}" for n, v in zip(FINGER_NAMES, curl[pose]))  # noqa: E731
@@ -389,9 +394,11 @@ def main(argv=None):
         for d, status in zip(args.run_dirs, statuses):
             f = Path(d) / "artifacts" / "finger-touch-segments.jsonl"
             try:
-                status["finger_segments"] = [(json.loads(line) or {}).get("fingers") or {} for line in f.read_text(encoding="utf-8").splitlines() if line.strip()]
-            except (OSError, ValueError) as e:
-                print(f"FAIL  cannot read {f}: {e}")
+                status["finger_segments"] = [json.loads(line) for line in f.read_text(encoding="utf-8").splitlines() if line.strip()]
+                script = json.loads((Path(d) / "artifacts" / "simulated-gameplay-script.json").read_text(encoding="utf-8-sig"))["segments"]
+                status["finger_poses"] = [{"index": i, "end_ms": s["end_ms"]} for i, s in enumerate(script) if "touch" in s]
+            except (OSError, ValueError, KeyError) as e:
+                print(f"FAIL  cannot read the finger samples or script in {d}: {e}")
                 return 1
     rows = check(statuses, args.scenario, tuple(args.proofs), args.reject_touch)
     for verdict, text in rows:

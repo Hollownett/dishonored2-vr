@@ -107,6 +107,7 @@ public:
         }
         return {};
     }
+    bool uses_touch() const noexcept {for(const auto& s:segments_) if(s.touch) return true;return false;}
     std::size_t size() const noexcept {return segments_.size();}
     // OpenXR -Z forward: negative rotation about +X looks down, as scripted_pitch does.
     static std::array<float,4> pitch_orientation(float degrees) noexcept {
