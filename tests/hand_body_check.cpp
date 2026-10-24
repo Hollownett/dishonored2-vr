@@ -1,6 +1,8 @@
 // Plan B task B11: the hand-body creation spike against a fake engine. B13: the production HandBody manager and its release gate against a
 // fake engine and a fake game that stops dispatching while paused (B11 run 3).
 #define D2VR_TESTING
+#include <thread>
+#include <chrono>
 #include "hand_body_spike.hpp"
 #include "hand_body.hpp"
 #include "menu_tap.hpp"
@@ -617,6 +619,8 @@ static void b14_checks() {
         r.target[0]=Vec3{.60,.2,1.2};r.free[0]=false;
         int contact_ticks=0;for(int i=0;i<90;++i) {r.tick();if(r.hb.drive_status(0).contact_now) ++contact_ticks;}
         CHECK(contact_ticks>=60);CHECK(r.hb.drive_status(0).contact_frames>=60);CHECK(!r.hb.drive_status(1).contact_now);
+        CHECK(r.hb.drive_status(0).contact_now);std::this_thread::sleep_for(std::chrono::milliseconds(80));
+        CHECK(!r.hb.drive_status(0).contact_now);   // the drive stopped judging (paused, skipped): the signal does not latch
         HandBodyFault::reset_for_tests();DriveRig h;h.w.wall_x=.6;h.tick();
         h.target[0]=Vec3{.65,.2,1.2};h.free[0]=false;
         for(int i=0;i<90;++i) h.tick();
