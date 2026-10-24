@@ -6,7 +6,9 @@
 // Threads:
 // * Dispatcher (the 0x89fb0 hook, NativeGrab::invoke after the original dispatcher): only at the G1 point (outside the step, on the
 //   0x8ad260 thread), once per game frame. It runs HandBody::service and nothing else touches the engine. It never waits on a lock the
-//   render thread holds: the render publication and the event log are taken with try_lock (the last copy is used when it fails).
+//   render thread holds: the render publication and the event log are taken with try_lock (the last copy is used when it fails), and the
+//   game logic is the atomic the render thread publishes with the release gate (final review P3-2: game_logic_mask() locks; `logic` given to
+//   install() is never called on the dispatcher).
 // * Render (Present / the head view): publish_hands() once per frame (tracked bits, calibrated palms, authored camera, load generation),
 //   release_gate() once per frame where the controller input is composed (menu / pause event / settings panel / logic), pose() and
 //   status_json(). All of them are cheap and none calls the engine.
@@ -44,7 +46,8 @@ namespace d2vr {
 struct HandBodyHandsInput {unsigned tracked{};std::array<Vec3,2> palm{};bool authored{};bool focused{};
     std::array<WorldTrackedPose,2> target{};unsigned free{};unsigned yield{};bool locomotion{};std::optional<Vec3> player_root{};
     std::array<std::uint32_t,2> filter{{R1Recipe::filter,R1Recipe::filter}};
-    unsigned holding{};};   // B16 fix round 2: sides that hold something (B14's snaps are suppressed for them)
+    unsigned holding{};     // B16 fix round 2: sides that hold something (B14's snaps are suppressed for them) ...
+    unsigned hold_snap_ok{};};   // final review P2-1: ... except a native hold whose object is free (a snag on the hand alone: the stuck snap runs)
 // One body's mod memory and identity (free: reusable; in_use: our body may exist; retired: never reused, the engine may still read it).
 struct HandBodySlot {enum State {free,in_use,retired} state{free};R1BodyStorage storage{};std::uintptr_t world{};std::uint32_t handle{0xffffffffu};};
 struct HandBodyEvent {std::uint64_t t_ms{};unsigned side{};const char* kind{""};std::uint32_t handle{};std::uintptr_t world{};std::uint32_t generation{};unsigned logic{};bool release{};};
@@ -75,7 +78,7 @@ public:
         for(auto& side:storage_) for(auto& slot:side) if(slot.state==Slot::in_use) slot.state=Slot::retired;   // none after a clean stop; retired stays retired
         for(auto& s:current_) s=no_slot;
         {std::lock_guard<std::mutex> lock(hands_mutex_);hands_={};hands_tick_=0;}
-        last_hands_={};last_hands_tick_=0;release_.store(true);release_tick_.store(0);
+        last_hands_={};last_hands_tick_=0;release_.store(true);release_tick_.store(0);logic_published_.store(0);
         g1_={};g1_pass_={};g1_decided_=false;g1_passed_=false;g1_state_.store(0);g1_reason_.store("observing");gameplay_since_ms_=0;last_frame_=0;
         g2_prev_={};g2_watching_=false;g2_events_.store(0);
         {std::lock_guard<std::mutex> lock(gate_mutex_);gate_.reset();}
@@ -153,6 +156,7 @@ public:
         const bool loading=signals.logic==0 || signals.logic==(1u<<15);
         if(loading) loading_.store(true);
         else if(loading_.exchange(false)) generation_.fetch_add(1,std::memory_order_acq_rel);   // on loading EXIT
+        logic_published_.store(signals.logic,std::memory_order_relaxed);   // P3-2: the dispatcher's copy (published by the release_tick_ store below)
         release_.store(out.release,std::memory_order_release);release_tick_.store(now_ms,std::memory_order_release);
         return out;
     }
@@ -220,7 +224,8 @@ public:
          <<",\"stranded\":["<<(stranded_[0].load()?1:0)<<','<<(stranded_[1].load()?1:0)<<']'
          <<",\"unverified\":"<<(body->status(0).unverified+body->status(1).unverified)
          <<",\"g2_events\":"<<g2_events_.load()<<",\"storage_retired\":"<<retired_.load()<<",\"storage_exhausted\":"<<storage_exhausted_.load()
-         <<",\"cast_excluded_hits\":"<<cast_excluded_hits.load()<<",\"dropped_events\":"<<dropped_events_.load()
+         <<",\"cast_excluded_hits\":"<<cast_excluded_hits.load()<<",\"cast_continuations\":"<<cast_continuations.load()
+         <<",\"cast_continuation_exhausted\":"<<cast_continuation_exhausted.load()<<",\"dropped_events\":"<<dropped_events_.load()
          <<",\"filter_readback_mismatches\":"<<(body->status(0).filter_readback_mismatches+body->status(1).filter_readback_mismatches)<<'}';
         return o.str();
     }
@@ -230,6 +235,7 @@ private:
     static constexpr unsigned no_slot=0xffffffffu;
     inline static std::array<std::array<Slot,storage_per_side>,2> storage_{};
     inline static std::array<unsigned,2> current_{{no_slot,no_slot}};   // dispatcher thread only
+    inline static std::array<unsigned,2> last_pick_{{storage_per_side-1,storage_per_side-1}};   // P3-4: the storage last created into (dispatcher thread)
     inline static std::atomic<HandBody*> body_{nullptr};
     inline static std::atomic<bool> active_{},stop_requested_{};
     inline static std::atomic<unsigned> dispatch_inflight_{};
@@ -239,6 +245,7 @@ private:
     inline static std::mutex hands_mutex_;inline static HandsInput hands_{};inline static std::uint64_t hands_tick_{};
     inline static HandsInput last_hands_{};inline static std::uint64_t last_hands_tick_{};   // dispatcher's copy
     inline static std::atomic<bool> release_{true};inline static std::atomic<std::uint64_t> release_tick_{};
+    inline static std::atomic<unsigned> logic_published_{0};   // P3-2: game_logic_mask() as release_gate saw it (render thread writes, dispatcher reads)
     inline static thread_local bool in_g1_tick_{};
     inline static std::atomic<const char*> g1_violation_{nullptr};
     inline static std::mutex install_mutex_;inline static std::string install_why_;   // control / status threads only (never the dispatcher)
@@ -288,8 +295,10 @@ private:
         e.busy=[] {return HandBodyNative::busy_now();};
         e.create=[](unsigned side,std::uintptr_t world,Vec3 at,std::uint32_t& handle) {   // world: the tick's snapshot (never re-read)
             if(side>=2 || current_[side]!=no_slot) return false;
+            // final review P3-4: round-robin from the slot after the last one used, so storage a destroy (a snap) just freed rests while the others
+            // are free (the engine never sees the same userdata rebuilt right after its body went)
             unsigned pick=no_slot;
-            for(unsigned i=0;i<storage_per_side;++i) if(storage_[side][i].state==Slot::free) {pick=i;break;}
+            for(unsigned k=1;k<=storage_per_side;++k) {const unsigned i=(last_pick_[side]+k)%storage_per_side;if(storage_[side][i].state==Slot::free) {pick=i;break;}}
             if(pick==no_slot) {storage_exhausted_.fetch_add(1,std::memory_order_relaxed);return false;}
             const auto owner=world?owner_now(world):std::nullopt;
             if(!owner) return false;
@@ -299,13 +308,13 @@ private:
             try {
                 if(!HandBodyNative::create(s.storage,world,*owner,at,R1Recipe::radius,handle,&g2)) return false;
             } catch(const HandBodyEngineFault& f) {
-                current_[side]=pick;s.state=Slot::in_use;s.world=world;s.handle=f.handle;
+                current_[side]=pick;last_pick_[side]=pick;s.state=Slot::in_use;s.world=world;s.handle=f.handle;
                 if(f.handle!=HandBodyNative::no_handle) exclude(side,f.handle);   // a record holding our userdata exists: it gets its one destroy
                 else release_slot(side,true,false);                             // nothing found: retire the storage (the state is unknown)
                 g2_prev_=g2;g2_watching_=true;
                 throw;
             }
-            current_[side]=pick;s.state=Slot::in_use;s.world=world;s.handle=handle;
+            current_[side]=pick;last_pick_[side]=pick;s.state=Slot::in_use;s.world=world;s.handle=handle;
             exclude(side,handle);
             g2_prev_=g2;g2_watching_=true;   // an owner wake or broadphase exit inside createBody counts
             return true;
@@ -413,7 +422,10 @@ private:
         auto* body=body_.load(std::memory_order_acquire);
         if(!body) return;
         const auto now=GetTickCount64();
-        const unsigned logic=logic_?logic_():0;
+        // final review P3-2: the game logic as the render thread published it with the release gate (game_logic_mask() takes blocking locks, so
+        // the dispatcher never calls it); a publication older than fresh_ms reads as "not gameplay"
+        const auto logic_tick=release_tick_.load(std::memory_order_acquire);
+        const unsigned logic=logic_tick && now>=logic_tick && now-logic_tick<=fresh_ms?logic_published_.load(std::memory_order_relaxed):0u;
         const bool gameplay_logic=logic==2;
         if(gameplay_logic && !gameplay_since_ms_) gameplay_since_ms_=now;
         // G1: in-run observation before the first create; after the pass, any growth of a violation counter latches the hand body off.
@@ -469,7 +481,8 @@ private:
             d.yield=!fresh || !tracked || ((last_hands_.yield>>side)&1u)!=0;
             d.target_free=fresh && now-last_hands_tick_<=free_fresh_ms && ((last_hands_.free>>side)&1u)!=0;
             d.player_root=fresh?last_hands_.player_root:std::nullopt;d.locomotion=last_hands_.locomotion;
-            d.holding=fresh && ((last_hands_.holding>>side)&1u)!=0;   // B16 fix round 2: no snap while this hand holds something
+            d.holding=fresh && ((last_hands_.holding>>side)&1u)!=0;   // B16 fix round 2: no snap while this hand holds something ...
+            d.hold_snap_ok=fresh && ((last_hands_.hold_snap_ok>>side)&1u)!=0;   // ... unless the held object is free (P2-1)
             body->drive(d);
         }
         g2_watching_=body->any_alive();

@@ -496,10 +496,11 @@ static void flush_grab_decisions(bool final=false) noexcept {
 static bool physical_grab_requested=false;
 static d2vr::HandVisualSource hand_visual_source;static d2vr::HandVisualStats hand_visual_stats;   // B15: the visible hand's pose source (render thread; knob build/hand-body)
 // B16: held things follow the hand body (render thread; knob build/hand-body). hold_body_view: this frame's usable hand-body pose per side (ready, the
-// pose published within 50 ms); native_body_target: a coupled native hold's servo target for the body, published with the next frame's hands.
+// pose published within 50 ms); native_body_target: a coupled native hold's servo target for the body, published with the next frame's hands, and
+// whether the held object itself is free (final review P2-1: then a stuck hand body may snap; a stuck object is the hold's release instead).
 static d2vr::HoldCoupling hold_coupling;static d2vr::HandFilterKeeper hand_filter_keeper;static d2vr::HoldCouplingStats hold_coupling_stats;
 struct HoldBodyView {bool ready{};std::optional<d2vr::WorldTrackedPose> body;d2vr::HoldAnchorView held{};double weight{};};static std::array<HoldBodyView,2> hold_body_view{};
-struct NativeBodyTarget {d2vr::Vec3 position{};UINT64 tick{};bool valid{};};static std::array<NativeBodyTarget,2> native_body_target{};
+struct NativeBodyTarget {d2vr::Vec3 position{};UINT64 tick{};bool valid{};bool object_free{};};static std::array<NativeBodyTarget,2> native_body_target{};
 static d2vr::DrawnAnchor drawn_anchor;static std::atomic<double> prop_seat_gap_m{0}; // Task 12: the drawn hand on a motor-held body (render thread, once per displayed frame); the largest |drawn hand - grasp point| over prop holds
 static std::optional<d2vr::NativeRigidBody> simulated_grab_target;
 static d2vr::SimulatedGrabClock simulated_grab_clock;
@@ -3198,7 +3199,10 @@ static void held_clamp_release_step() {
         if(serial>L.release_scope && serial!=L.last_serial) {
             L.last_serial=serial;in.sweep_answered=true;
             const auto hits=d2vr::NativeInteractionAim::held_hits(L.side,now_ms,d2vr::NativeInteractionAim::producer_release);
-            for(std::size_t i=0;i<proxies.count && i<hits.size();++i) if(hits[i]) {
+            // final review P1-1: a probe that could not see past a hand body (hand_body: blocked) says nothing about the world, and its normal is the
+            // hand's: the frame is unanswered (SafeRelease waits, then restores counted unresolved), never a push away from the hand. Knob off: never.
+            for(std::size_t i=0;i<proxies.count && i<hits.size();++i) if(hits[i] && hits[i]->hand_body) in.sweep_answered=false;
+            if(in.sweep_answered) for(std::size_t i=0;i<proxies.count && i<hits.size();++i) if(hits[i]) {
                 const auto depth=d2vr::release_probe_depth(L.release_sweeps[i],*hits[i]);   // a hit along the probe or a start inside geometry; a resting contact is clear
                 if(depth && (!in.overlap || *depth>in.depth)) {in.overlap=d2vr::to_clamp_hit(*hits[i]);in.depth=*depth;}
             }
@@ -3354,6 +3358,7 @@ static void publish_held_object(unsigned side,const d2vr::WorldTrackedPose& grip
                 const auto raw_hits=d2vr::NativeInteractionAim::held_hits(side,GetTickCount64());
                 for(std::size_t i=0;i<L.proxies->count && i<raw_hits.size();++i) if(raw_hits[i]) {
                     if(raw_hits[i]->entity==*e) {++held_clamp_status.self_hits;continue;}   // the object's own body is never a surface (the exclusion should have skipped it)
+                    if(raw_hits[i]->hand_body) continue;   // P1-1: the carrying hand (nothing seen past it) is never a surface for what it carries
                     in.hits[i]=d2vr::to_clamp_hit(*raw_hits[i]);++held_clamp_status.hits;}
             }
         }
@@ -3374,14 +3379,15 @@ static void publish_held_object(unsigned side,const d2vr::WorldTrackedPose& grip
                 const auto co=d2vr::couple_native(hold_coupling,side&1u,L.clamp,L.proxies,request,palm_pose,body_view.body,true,coupled,in.requested,out.target,in.now);
                 hold_coupling_stats.note(side&1u,d2vr::HoldKind::native,co);
                 if(coupled) {origin=co.target.position;shift=origin-request.position;}
-                native_body_target[side&1u]={co.body_target?*co.body_target:palm_pose.position,GetTickCount64(),true};
-                coupled_release=co.release;   // fix round 2: the raw body gap 0.35 m for 0.25 s (spec 5A)
+                native_body_target[side&1u]={co.body_target?*co.body_target:palm_pose.position,GetTickCount64(),true,!co.object_blocked};
+                coupled_release=co.release;   // final review P2-1: the held object stuck (its request pushed out 0.35 m for 0.25 s, not closing), never the body's gap
             } else if(body_knob) native_body_target[side&1u].valid=false;
             L.pose={origin,{X,Y,Z}};L.clamp.note_published(L.pose);
             const double shift_len=d2vr::length(shift);
             if(shift_len>d2vr::DrawnAnchor::bound_m) shift=shift*(d2vr::DrawnAnchor::bound_m/shift_len);
             L.shift[side&1u]=shift;held_clamp_status.drawn_hand_gap_m.store(d2vr::length(shift));
-            if((L.clamp.should_release() || coupled_release) && !L.drop_sent) {L.drop_sent=true;held_clamp_drop_request.store(GetTickCount64());}
+            // P2-1: with the body in play the coupling's stuck-object rule is the drop (B4's numbers plus "not closing"); otherwise B4's own, exactly
+            if((body_on?coupled_release:L.clamp.should_release()) && !L.drop_sent) {L.drop_sent=true;held_clamp_drop_request.store(GetTickCount64());}
             const double cast_us=d2vr::NativeInteractionAim::clamp_cast_us_.load();held_clamp_status.cast_us.store(cast_us);
             if(cast_us>held_clamp_status.cast_us_max.load()) held_clamp_status.cast_us_max.store(cast_us);
         }
@@ -4744,6 +4750,7 @@ void prepare_head_view(void* view) noexcept {
             const bool reverse_sword=sword_reversed.load();
             d2vr::rig::ArmTrackingFrame hands{};std::array<d2vr::WorldTrackedPose,2> raw_grips{},palm_grips{};std::array<std::uintptr_t,2> cast_entities{};hands.tick=GetTickCount64();hands.source_tick=game_xr->grip_pose_tick();hands.epoch=game_xr->pose_epoch();
             unsigned hand_body_free_bits{},hand_body_yield_bits{},hand_visual_contact_bits{};   // B14: read only by the knob-gated hand-body publication below
+            unsigned hand_body_probe_free_bits{};   // P3-1: the free bits the hand body uses (the clamp's and its own probe's); set only with the knob on
             unsigned hold_coupled_bits{},hold_holding_bits{};std::array<std::uint32_t,2> hand_filter_words{{d2vr::R1Recipe::filter,d2vr::R1Recipe::filter}};   // B16: set only by the knob-gated block before B15
             std::array<double,2> drawn_body_weight{};   // B16 fix round 1: how much of the drawn hand is the body (B15's blend); 0 knob off / free air
             hands.curls={std::clamp(game_xr->controller_input.left_grip,0.f,1.f),std::clamp(game_xr->controller_input.right_grip,0.f,1.f)};
@@ -4979,6 +4986,32 @@ void prepare_head_view(void* view) noexcept {
                                 !clamped.contact && !reach_clamped && !palm_unanswered && d2vr::length(clamped.drawn.position-palm.position)<.005;
                             hand_body_free_streak[side]=answered_free?std::min(hand_body_free_streak[side]+1,1000u):0u;
                             if(hand_body_free_streak[side]>=3) hand_body_free_bits|=1u<<side;
+                            // Final review P3-1 / P2-1 (knob build/hand-body only): the create / snap free check also needs the hand body's own probe, a
+                            // 5 cm sphere at the palm cast with kHandBodyFreeLayers (WORLD_LOW 0 included, which the clamp's sweeps do not see), answered and
+                            // clear three posts in a row. It is posted only while it can matter (no ready body, or the body 0.25 m or more from the palm: a
+                            // snap may come), at most one cast a side a frame. A native hold excludes its own item (DEBRIS: the hand never collides with
+                            // it) and is free on the probe alone (the clamp yields while carrying); a motor hold never posts (its snaps wait: a recreated
+                            // body would be born inside the held body with the default word).
+                            if(hand_body_requested.load(std::memory_order_relaxed) && d2vr::HandBodyRuntime::active()) {
+                                static std::array<unsigned,2> probe_streak{};static std::array<bool,2> probe_posted{};static std::array<std::uint64_t,2> probe_scope{};
+                                constexpr unsigned probe_slot=d2vr::NativeInteractionAim::hand_body_free_slot;
+                                if(probe_posted[side]) {
+                                    if(d2vr::NativeInteractionAim::weapon_serial(side,probe_slot)>probe_scope[side])
+                                        probe_streak[side]=d2vr::NativeInteractionAim::weapon_hit(side,probe_slot,now)?0u:std::min(probe_streak[side]+1,1000u);
+                                    else probe_streak[side]=0;   // unanswered: never free on an old answer
+                                }
+                                probe_posted[side]=false;
+                                const bool native_hold_here=held_clamp_enabled && held_clamp_live.holding && held_clamp_live.side==side;
+                                const bool motor_hold_here=physical_grab_requested && native_grab.holding(side);
+                                const auto body_at=d2vr::HandBodyRuntime::pose(side);
+                                const bool wanted=!d2vr::HandBodyRuntime::ready(side) || !body_at || d2vr::length(body_at->position-palm.position)>=.25;
+                                if(clamp_updated && wanted && !motor_hold_here && d2vr::finite(palm.position)) {
+                                    d2vr::NativeInteractionAim::post_weapon_segment(side,probe_slot,palm.position+d2vr::Vec3{0,0,.01},palm.position,d2vr::R1Recipe::radius,
+                                        native_hold_here?held_clamp_live.entity:0);
+                                    probe_posted[side]=true;probe_scope[side]=d2vr::NativeInteractionAim::weapon_casts_.load();
+                                } else probe_streak[side]=0;
+                                if(probe_streak[side]>=3 && (((hand_body_free_bits>>side)&1u) || native_hold_here)) hand_body_probe_free_bits|=1u<<side;
+                            }
                         }
                         if(clamp_yield) hand_body_yield_bits|=1u<<side;
                         if(clamp_updated && clamped.valid && !clamp_yield && clamped.state==d2vr::ClampState::contact) hand_visual_contact_bits|=1u<<side;   // B15: the clamp holds a surface
@@ -5225,11 +5258,13 @@ void prepare_head_view(void* view) noexcept {
                 hand_body_in.authored=authored_camera;   // a death clip, a takedown, a cutscene: the arms are the game's, the bodies go
                 hand_body_in.focused=game_xr->state==XR_SESSION_STATE_FOCUSED && game_xr->last_action_sync==XR_SUCCESS;
                 // B14: the servo's target (the raw calibrated palm pose, C9 intent), the clamp's free / yield bits, locomotion and the player root
-                hand_body_in.target=palm_grips;hand_body_in.free=hand_body_free_bits&hands.hands;hand_body_in.yield=(hand_body_yield_bits&~hold_coupled_bits)|authored_hands;
+                hand_body_in.target=palm_grips;hand_body_in.free=hand_body_probe_free_bits&hands.hands;hand_body_in.yield=(hand_body_yield_bits&~hold_coupled_bits)|authored_hands;
                 hand_body_in.filter=hand_filter_words;   // B16: HandFilterKeeper's word per side (the R1 default unless a coupled hold took a layer out)
-                hand_body_in.holding=hold_holding_bits;   // B16 fix round 2: B14's snaps wait while a hand holds something
-                for(unsigned side=0;side<2;++side) if(((hold_coupled_bits>>side)&1u) && native_body_target[side].valid && GetTickCount64()-native_body_target[side].tick<=50)
+                hand_body_in.holding=hold_holding_bits;   // B16 fix round 2: B14's snaps wait while a hand holds something ...
+                for(unsigned side=0;side<2;++side) if(((hold_coupled_bits>>side)&1u) && native_body_target[side].valid && GetTickCount64()-native_body_target[side].tick<=50) {
                     hand_body_in.target[side].position=native_body_target[side].position;   // B16: a coupled native hold: the controller's request pushed out by the clamp
+                    if(native_body_target[side].object_free) hand_body_in.hold_snap_ok|=1u<<side;   // ... except a native hold whose object is free (P2-1)
+                }
                 hand_body_in.locomotion=std::fabs(published_move_x.load())>.05f || std::fabs(published_move_y.load())>.05f;
                 {std::array<float,3> root{};if(body->player && read_self(body->player+0x300,root.data(),sizeof root)) {
                     const d2vr::Vec3 r{root[0],root[1],root[2]};if(d2vr::finite(r)) hand_body_in.player_root=r;}}

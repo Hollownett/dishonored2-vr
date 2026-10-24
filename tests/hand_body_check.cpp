@@ -568,13 +568,14 @@ WorldTrackedPose pose_at(Vec3 p) {WorldTrackedPose w;w.position=p;w.basis={Vec3{
 struct DriveRig {
     FakeDrive w;HandBody hb{w.engine()};double t=10;std::uint64_t ms=1000;
     std::array<Vec3,2> target{Vec3{.4,.2,1.2},Vec3{.4,-.2,1.2}};std::array<bool,2> free{true,true},yield{false,false};
-    std::optional<Vec3> root{};bool locomotion=false;bool gameplay=true;std::array<bool,2> holding{false,false};
+    std::optional<Vec3> root{};bool locomotion=false;bool gameplay=true;std::array<bool,2> holding{false,false},hold_snap_ok{false,false};
     void tick(int drives_per_side=1) {
+        w.log.push_back("tick");
         std::array<std::optional<Vec3>,2> spawn{};
         for(unsigned side=0;side<2;++side) if(free[side]) spawn[side]=target[side];
         hb.service(gameplay_in(ms,gameplay),spawn);
         for(int k=0;k<drives_per_side;++k) for(unsigned side=0;side<2;++side) {
-            DriveInput d;d.side=side;d.target=pose_at(target[side]);d.now=t;d.yield=yield[side];d.target_free=free[side];d.player_root=root;d.locomotion=locomotion;d.holding=holding[side];
+            DriveInput d;d.side=side;d.target=pose_at(target[side]);d.now=t;d.yield=yield[side];d.target_free=free[side];d.player_root=root;d.locomotion=locomotion;d.holding=holding[side];d.hold_snap_ok=hold_snap_ok[side];
             hb.drive(d);
         }
         w.step();t+=FakeDrive::dt;ms+=11;
@@ -726,9 +727,12 @@ static void b14_checks() {
         CHECK(r.hb.drive_status(0).snaps==1);CHECK(ticks>=22 && ticks<=40);   // 0.25 s stuck (+ the approach)
         CHECK(r.w.destroys_side[0]==1);CHECK(r.w.creates_side[0]==2);CHECK(length(r.w.b[0].pos-r.target[0])<.02);
         CHECK(r.hb.status(0).destroys==1);CHECK(r.hb.ready(0));CHECK(r.w.destroys_side[1]==0);
-        // order in the log: the destroy, then the create, then the wake (re-wake after the recreate), in one tick
+        // order in the log (final review P3-4): the destroy on one tick, the create (and its wake) on a LATER one, never the same tick
         std::size_t d=0;for(std::size_t i=0;i<r.w.log.size();++i) if(r.w.log[i]=="destroy:0") d=i;
-        CHECK(d>0 && r.w.log[d+1]=="create:0" && r.w.log[d+2]=="wake:0");
+        std::size_t next_tick=d,create=d;
+        while(next_tick<r.w.log.size() && r.w.log[next_tick]!="tick") ++next_tick;
+        for(std::size_t i=d;i<r.w.log.size();++i) if(r.w.log[i]=="create:0") {create=i;break;}
+        CHECK(d>0 && next_tick<create && create+1<r.w.log.size() && r.w.log[create+1]=="wake:0");
         // blocked: the same stuck body with the target not free never snaps; it keeps servoing (writes continue)
         HandBodyFault::reset_for_tests();DriveRig b;b.w.wall_x=.6;b.tick();
         b.target[0]=Vec3{1.0,.2,1.2};b.free[0]=false;
@@ -750,11 +754,17 @@ static void b14_checks() {
         HandBodyFault::reset_for_tests();DriveRig q;q.w.wall_x=.6;q.tick();q.target[0]=Vec3{1.0,.2,1.2};
         while(q.hb.drive_status(0).snap_requests==0) q.tick();
         q.w.busy=true;for(int i=0;i<5;++i) q.tick();
-        CHECK(q.w.destroys==0);q.w.busy=false;q.tick();CHECK(q.hb.drive_status(0).snaps==1);
+        CHECK(q.w.destroys==0);q.w.busy=false;q.tick();CHECK(q.w.destroys_side[0]==1 && q.w.creates_side[0]==1 && q.hb.drive_status(0).snaps==0);   // destroyed now ...
+        q.tick();CHECK(q.w.creates_side[0]==2 && q.hb.drive_status(0).snaps==1);                                                                // ... recreated next tick
         // a far gap (Blink, a teleport) snaps at once when free: never flies the body 5 m through the world
         HandBodyFault::reset_for_tests();DriveRig f;f.tick();f.tick();
-        f.target[0]=f.target[0]+Vec3{5,0,0};f.tick();f.tick();
+        f.target[0]=f.target[0]+Vec3{5,0,0};f.tick();f.tick();f.tick();
         CHECK(f.hb.drive_status(0).snaps==1);CHECK(length(f.w.b[0].pos-f.target[0])<.02);
+        // P3-4: gameplay lost between the snap's destroy and its recreate: the later create is the ordinary one, not a snap
+        HandBodyFault::reset_for_tests();DriveRig g;g.tick();g.tick();
+        g.target[0]=g.target[0]+Vec3{5,0,0};g.tick();g.tick();CHECK(g.w.destroys_side[0]==1 && g.hb.drive_status(0).snaps==0);
+        g.gameplay=false;g.tick();g.gameplay=true;for(int i=0;i<3;++i) g.tick();
+        CHECK(g.w.creates_side[0]==2 && g.hb.drive_status(0).snaps==0);
     }
     {   // snap_suppressed_while_holding_resumes_after (B16 fix round 2 ruling): the same stuck body (free target) while the hand holds something never
         // snaps nor asks for one, however long (the hold's lag release owns that case); after the release the stuck rule runs again and snaps
@@ -766,7 +776,25 @@ static void b14_checks() {
         CHECK(h.hb.drive_status(0).snaps==0);
         h.target[0]=far;h.holding[0]=false;   // released
         int ticks=0;while(h.hb.drive_status(0).snaps==0 && ticks<120) {h.tick();++ticks;}
-        CHECK(h.hb.drive_status(0).snaps==1 && ticks>=20 && ticks<=40);   // 0.25 s stuck again, counted from the release
+        CHECK(h.hb.drive_status(0).snaps==1 && ticks>=20 && ticks<=41);   // 0.25 s stuck again, counted from the release
+    }
+    {   // hand_snag_on_crate_does_not_drop_tank_snaps_instead (final review P2-1): a native hold whose tank is free (hold_snap_ok) with the hand body
+        // stuck: the stuck snap runs as for an empty hand (0.25 s stuck, the target free); with the object stuck too (no hold_snap_ok) it waits
+        HandBodyFault::reset_for_tests();DriveRig h;h.w.wall_x=.6;h.tick();
+        h.target[0]=Vec3{1.0,.2,1.2};h.free[0]=true;h.holding[0]=true;h.hold_snap_ok[0]=true;
+        int ticks=0;while(h.hb.drive_status(0).snaps==0 && ticks<120) {h.tick();++ticks;}
+        CHECK(h.hb.drive_status(0).snaps==1 && ticks>=22 && ticks<=41 && h.w.destroys_side[0]==1 && length(h.w.b[0].pos-h.target[0])<.02);
+        CHECK(h.hb.drive_status(0).held_ticks>0);
+        // the target not free: no snap even then (the free probe still gates it)
+        HandBodyFault::reset_for_tests();DriveRig b;b.w.wall_x=.6;b.tick();
+        b.target[0]=Vec3{1.0,.2,1.2};b.free[0]=false;b.holding[0]=true;b.hold_snap_ok[0]=true;
+        for(int i=0;i<180;++i) b.tick();
+        CHECK(b.hb.drive_status(0).snaps==0 && b.w.destroys==0);
+        // the other side's flag never applies to this side
+        HandBodyFault::reset_for_tests();DriveRig o;o.w.wall_x=.6;o.tick();
+        o.target[0]=Vec3{1.0,.2,1.2};o.free[0]=true;o.holding[0]=true;o.hold_snap_ok[1]=true;
+        for(int i=0;i<180;++i) o.tick();
+        CHECK(o.hb.drive_status(0).snaps==0 && o.hb.drive_status(0).snap_requests==0);
     }
     {   // create_waits_while_palm_blocked (ruling): no create while the clamp's cast does not show the palm free; created once it does
         HandBodyFault::reset_for_tests();DriveRig r;r.free={false,true};

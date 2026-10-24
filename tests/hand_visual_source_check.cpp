@@ -209,6 +209,34 @@ int main() {
         a.weight=0;g=resolve_drawn_grip(v,a);CHECK(bit_equal(g.pose,v.drawn) && !g.anchored);
         a.weight=1;v.source=VisualSource::controller;g=resolve_drawn_grip(v,a);CHECK(near(g.pose.position.x,1) && !g.anchored);
     }
+    {   // corpse_hold_keeps_limb_seating_in_free_air (final review P2-2, X-4 amended): a motor or corpse hold, the clamp yielding (its pose is the
+        // palm), the body driven onto the palm and agreeing within 0.02 m: the grasp anchor (Task 12's seated limb) is drawn, not the body, and the
+        // hand never flips between the two as the body's lag crosses 0.02-0.03 m; contact still elects the body
+        Rig r;r.in.clamp=pose_at(0);r.in.controller=pose_at(0);r.in.anchor=Vec3{.25,0,0};r.in.body=pose_at(.005);
+        VisualOutput o;unsigned changes=0;
+        for(int i=0;i<120;++i) {r.in.body=pose_at(i%20<10?.005:.035);o=r.step();if(i>0 && o.changed) ++changes;
+            CHECK(o.source==VisualSource::anchor && near(o.drawn.position.x,.25) && o.body_weight==0);}
+        CHECK(changes==0);
+        // the bare hand (no anchor) keeps the agreement rule
+        Rig bare;bare.in.body=pose_at(.005);o=bare.run(.3);CHECK(o.source==VisualSource::body);
+        // contact (in reach of the clamp pose) still outranks the anchor
+        r.in.body=pose_at(.05);r.in.body_contact=true;r.in.world_hit_near=true;o=r.run(.3);CHECK(o.source==VisualSource::body && near(o.drawn.position.x,.05));
+    }
+    {   // body_leaving_blends (final review P3-3): the body drawn in contact 0.11 m from the clamp pose disappears (a menu press, a fault latch, a
+        // destroy): the hand eases to the clamp pose over the blend, never a 0.11 m pop, and is exact afterwards
+        Rig r;r.in.body=pose_at(.09);r.in.body_contact=true;r.in.world_hit_near=true;r.run(.5);
+        r.in.body=pose_at(.11);auto o=r.run(.3);CHECK(o.source==VisualSource::body && near(o.drawn.position.x,.11));
+        r.in.body_ready=false;r.in.body=std::nullopt;
+        const double limit=.11*dt60/HandVisualSource::blend_seconds+1e-6;double prev=o.drawn.position.x;bool blended=false;
+        for(int i=0;i<12;++i) {o=r.step();CHECK(std::fabs(o.drawn.position.x-prev)<=limit);prev=o.drawn.position.x;blended=blended || o.blending;}
+        CHECK(blended && o.source==VisualSource::clamp && bit_equal(o.drawn,r.in.clamp) && !o.blending);
+        // the same with an anchor taking over (a hold), and a body that never was the source leaves nothing to blend
+        Rig a;a.in.body=pose_at(.09);a.in.body_contact=true;a.in.world_hit_near=true;a.in.anchor=Vec3{.3,0,0};a.run(.5);
+        a.in.body_ready=false;a.in.body=std::nullopt;prev=.09;
+        for(int i=0;i<12;++i) {o=a.step();CHECK(std::fabs(o.drawn.position.x-prev)<=.21*dt60/HandVisualSource::blend_seconds+1e-6);prev=o.drawn.position.x;}
+        CHECK(o.source==VisualSource::anchor && near(o.drawn.position.x,.3) && !o.blending);
+        Rig n;n.in.body=pose_at(.5);n.run(.3);n.in.body_ready=false;n.in.body=std::nullopt;o=n.step();CHECK(bit_equal(o.drawn,n.in.clamp) && !o.blending);
+    }
     {   // counters
         HandVisualStats st;VisualOutput v;v.source=VisualSource::body;v.changed=true;st.note(0,v);v.source=VisualSource::clamp;v.changed=false;v.snapped=true;st.note(0,v);st.note(1,v);st.note(5,v);
         const auto j=st.json();

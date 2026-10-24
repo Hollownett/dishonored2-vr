@@ -56,7 +56,9 @@ assert "cast_excluded_bodies[0].store(handle" in engine, "the spike excludes its
 convert = function(trace, "inline std::optional<WorldTraceHit> convert_world_hit(")
 excluded = function(trace, "inline bool cast_excluded(")
 assert "excluded!=0xffffffffu && body==excluded" in excluded
-assert "if(cast_excluded(c.body)) {cast_excluded_hits.fetch_add" in convert
+# final review P1-1: the conversion never discards; the closest path counts a hand-body hit and continues past it (never "no hit")
+assert "cast_excluded" not in convert
+assert "if(cast_excluded(collector.body)) {   // P1-1" in trace and "return continue_past_hand_body(" in trace
 
 # 3. the spike stops (destroying on the game thread) before NativeGrab is disabled, in every shutdown path
 for disable in ("const bool grab_disabled=native_grab.disable();", "const bool grab_disabled=interaction_disabled && native_grab.disable();",

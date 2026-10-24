@@ -162,6 +162,11 @@ assert "li.gameplay=gameplay;" in tick
 # 6. concurrency: the dispatcher never waits on a lock the render thread holds; the render reads a copy
 assert "std::unique_lock<std::mutex> hands_lock(hands_mutex_,std::try_to_lock);" in tick
 assert "lock_guard" not in tick and "lock_guard" not in function(runtime, "static void dispatch_entry(")
+# final review P3-2: the dispatcher never calls game_logic_mask() (it locks); it reads the logic the render thread published with the release gate
+assert "logic_(" not in code_of(tick) and "logic_published_.load(std::memory_order_relaxed)" in tick
+assert "now-logic_tick<=fresh_ms" in tick, "a stale publication reads as not gameplay"
+gate_src = function(runtime, "static ReleaseOutput release_gate(")
+assert gate_src.index("logic_published_.store(signals.logic,std::memory_order_relaxed);") < gate_src.index("release_tick_.store(now_ms,std::memory_order_release);")
 note = function(runtime, "static void note_event(")
 assert "std::try_to_lock" in note and "lock_guard" not in note
 slot = function(body, "bool publish(const std::optional<WorldTrackedPose>& pose)")
@@ -219,9 +224,33 @@ assert "g1_mutex_" not in runtime
 
 # 8. cast exclusion: both production hand handles
 assert "cast_excluded_bodies[side].store(handle,std::memory_order_relaxed);" in function(runtime, "static void exclude(")
-convert = function(trace, "inline std::optional<WorldTraceHit> convert_world_hit(")
-assert "if(cast_excluded(c.body))" in convert
 assert "for(const auto& slot:cast_excluded_bodies)" in function(trace, "inline bool cast_excluded(")
+# final review P1-1: a hit on a hand body is never "no hit": the cast continues past it (at most kMaxCastContinuations casts, counted), and
+# with no hand body alive the path is the old one exactly: the continuation is reached only behind the hand-body test, which reads the two
+# slots (0xffffffff by default never matches), so no extra cast, read or counter runs
+assert "cast_excluded" not in function(trace, "inline std::optional<WorldTraceHit> convert_world_hit("), "the conversion never discards a hit"
+query = function(trace, "static WorldTraceQueryResult sphere_query_checked(")
+cont = function(trace, "static WorldTraceQueryResult continue_past_hand_body(")
+assert code_of(trace).count("continue_past_hand_body(") == 2, "its definition and one call"
+call_at = query.index("return continue_past_hand_body(")
+guard = query[query.rindex("if(cast_excluded(collector.body)) {", 0, call_at):call_at]
+assert guard.startswith("if(cast_excluded(collector.body)) {") and guard.count(";") == 1 and "cast_excluded_hits.fetch_add(1,std::memory_order_relaxed);" in guard, guard
+assert len(re.findall(r"(?<![\w])cast\(", code_of(query))) == 1, "sphere_query_checked itself casts once"
+assert query.index("if(collector.hit_count!=1)return {};") < query.index("if(cast_excluded(collector.body)) {") < query.index("std::uintptr_t entity{};"), \
+    "the hand-body test sits where the old discard was; the rest of the path is unchanged"
+assert query.count("if(cast_excluded(contact->body)) {cast_excluded_hits.fetch_add(1,std::memory_order_relaxed);continue;}") == 2, "the all-contact collectors skip hand contacts"
+cont_code = code_of(cont)
+assert len(re.findall(r"(?<![\w])cast\(", cont_code)) == 2 and cont_code.count("cast_continuations.fetch_add(1,std::memory_order_relaxed);") == 2, "each continuation cast counted"
+assert "inline constexpr unsigned kMaxCastContinuations=2;" in trace and "if(used>=kMaxCastContinuations) return blocked(last);" in cont
+assert cont.index("if(!source && !exclude) if(const auto hand=body_exclusion(read,world,first.body)) {") < cont.index("NativeRegularContactCollector all{};")
+assert "hit->entity=0;hit->hand_body=true;hit->body_class=BodyClass::dynamic;" in cont and "cast_continuation_exhausted.fetch_add(1" in cont, "blocked, never no hit"
+assert "if(cast_excluded(contact->body)) continue;" in cont
+for key in ("cast_continuations", "cast_continuation_exhausted"):
+    assert '\\"%s\\":' % key in runtime, key
+# P3-1: the hand body's free probe sees WORLD_LOW 0; only its own slot uses that mask
+aim_src = (src / "native_interaction_aim.hpp").read_text(encoding="utf-8")
+assert "inline constexpr std::uint32_t kHandBodyFreeLayers=kWorldOccluderLayers|1u;" in trace
+assert code_of(aim_src).count("kHandBodyFreeLayers") == 1 and "slot==hand_body_free_slot?kHandBodyFreeLayers:kWorldOccluderLayers," in aim_src
 
 # 9. status key and registration
 assert ',\\"hand_body\\":" << d2vr::HandBodyRuntime::status_json(hand_body_requested.load())' in probe
@@ -235,7 +264,19 @@ assert len(free_uses) == 7, len(free_uses)   # the declaration, one |= each in t
 publish_at = probe.index("d2vr::HandBodyRuntime::publish_hands(")
 publish_block, publish_start = enclosing_block(probe, publish_at)
 reads = [u for u in free_uses if publish_start <= u < publish_start + len(publish_block)]
-assert len(reads) == 2, "the bits are read only inside the knob-gated publication"
+assert len(reads) == 1, "the yield bits are read in the knob-gated publication (P3-1: the free bits through the hand body's probe)"
+# final review P3-1: the free bits reach the hand body only through its own probe block, knob-gated; the probe is posted only there
+probe_at = probe.index("constexpr unsigned probe_slot=d2vr::NativeInteractionAim::hand_body_free_slot;")
+probe_block, probe_start = enclosing_block(probe, probe_at)
+assert probe[probe_start - 120:probe_start].rstrip().endswith("if(hand_body_requested.load(std::memory_order_relaxed) && d2vr::HandBodyRuntime::active())")
+assert [u for u in free_uses if probe[u:u + 19] == "hand_body_free_bits" and probe_start <= u < probe_start + len(probe_block)], "the clamp's free bit feeds the probe gate"
+for m in re.finditer(r"hand_body_probe_free_bits", probe):
+    assert (probe_start <= m.start() < probe_start + len(probe_block)) or (publish_start <= m.start() < publish_start + len(publish_block)) or \
+        probe[m.start():m.start() + 30].startswith("hand_body_probe_free_bits{}"), "set only in the probe block, read only in the publication"
+assert code_of(probe).count("hand_body_free_slot") == 1 and probe.count("post_weapon_segment(side,probe_slot,") == 1
+for need in ("probe_streak[side]>=3 && (((hand_body_free_bits>>side)&1u) || native_hold_here)", "if(clamp_updated && wanted && !motor_hold_here && d2vr::finite(palm.position)) {",
+             "native_hold_here?held_clamp_live.entity:0", "else probe_streak[side]=0;   // unanswered: never free on an old answer", "d2vr::R1Recipe::radius"):
+    assert need in probe_block, need
 assert "unsigned hand_body_free_bits{},hand_body_yield_bits{},hand_visual_contact_bits{};" in probe
 free_gate = probe[probe.index("const bool answered_free="):probe.index("if(hand_body_free_streak[side]>=3) hand_body_free_bits|=1u<<side;")]
 for need in ("clamp_updated && clamped.valid && !clamp_yield", "clamped.state==d2vr::ClampState::free", "!clamped.reacquired", "!clamped.held", "!clamped.contact", "!reach_clamped",
@@ -244,7 +285,7 @@ for need in ("clamp_updated && clamped.valid && !clamp_yield", "clamped.state==d
 # DeepSeek P1: the tracked-arm frame's source tick and epoch stay real code (an edit once swallowed them into a comment)
 assert "hands.tick=GetTickCount64();hands.source_tick=game_xr->grip_pose_tick();hands.epoch=game_xr->pose_epoch();" in code_of(probe)
 assert "if(clamp_yield) hand_body_yield_bits|=1u<<side;" in probe
-for line in ("hand_body_in.target=palm_grips;", "hand_body_in.free=hand_body_free_bits&hands.hands;", "hand_body_in.locomotion=",
+for line in ("hand_body_in.target=palm_grips;", "hand_body_in.free=hand_body_probe_free_bits&hands.hands;", "hand_body_in.locomotion=",
              "hand_body_in.player_root=r;"):
     assert line in publish_block, line + " belongs to the knob-gated publication"
 assert "hand_body_in" not in probe[:publish_start] and "hand_body_in" not in probe[publish_start + len(publish_block):]
@@ -266,7 +307,11 @@ assert drive_fn.index('latch(side,"read-back garbage') < drive_fn.index("servo_s
 assert "lock_guard" not in drive_fn and "unique_lock" not in drive_fn, "the drive never takes a lock"
 # the snap: destroy + recreate (no setBodyTransform 0xc85860 anywhere in production), only with a free spawn and never while busy
 snap = function(body, "void do_snap(")
-assert snap.index("if(busy)") < snap.index("do_destroy(") < snap.index("do_create("), snap
+# final review P3-4: the snap destroys on this tick; the recreate is a later tick's ordinary create (counted as the snap); storage is round-robin
+assert snap.index("if(busy)") < snap.index("do_destroy(") < snap.index("s.snap_recreate=true;") and "do_create(" not in snap, snap
+assert "if(s.snap_recreate && counters_[side].creates.load(std::memory_order_relaxed)>before) {s.snap_recreate=false;count(side,&Counters::snaps);}" in service
+assert "if(!li.gameplay || !li.tracked || (action!=BodyAction::create && action!=BodyAction::none)) s.snap_recreate=false;" in service
+assert "const unsigned i=(last_pick_[side]+k)%storage_per_side;" in create_lambda and "current_[side]=pick;last_pick_[side]=pick;" in create_lambda
 assert snap.index("if(!spawn") < snap.index("do_destroy("), "only when the clamp shows the target free"
 for name, text in (("hand_body.hpp", body), ("hand_body_runtime.hpp", runtime), ("hand_body_native.hpp", native)):
     assert "0xc85860" not in code_of(text), name + ": no setBodyTransform"
@@ -408,11 +453,14 @@ cn = function(coupling, "inline CouplingOutput couple_native(")
 assert "WorldTrackedPose carried=request;" in cn and "body->" not in cn, "a native target never reads the body: it follows the drawn grip"
 assert "in.clamped_native=clamped_controller;" in cn and cn.index("in.clamped_native=clamped_controller;") < cn.index("if(drawn && HoldCoupling::usable(body_ready,body))"), "not drawn: B4's output"
 hc_upd = function(coupling, "CouplingOutput update(unsigned side,const CouplingInput& in)")
-assert "if(!use) {s.lag.reset();s.native.reset();s.has_body=false;s.body_v={};return out;}" in hc_upd, "no usable body: today's pose, no release"
-# fix round 3 (review N-2): a lag release needs STUCK (B9): far AND closing slower than 0.5 m/s, for corpses and native holds
-assert "out.release=s.native.update(gap>native_release_m && slow,dt);" in hc_upd and "out.release=s.lag.update(gap>lag_release_m && slow,dt);" in hc_upd
+assert "if(!use) {s.native.reset();s.has_push=false;s.push_closing=0;return out;}" in hc_upd, "no usable body: today's pose, no release"
+# final review P2-1 (amends fix rounds 2-3): a coupled hold releases on the HELD OBJECT stuck (a native hold: the clamp's push of the object's
+# request over 0.35 m for 0.25 s, not closing faster than 0.5 m/s), never on the hand body's gap; a motor hold: PhysicalGrab's own rule
+assert code_of(hc_upd).count("out.release=") == 1 and "out.release=s.native.update(out.object_blocked && slow,dt);" in hc_upd
+assert "out.object_blocked=push>native_release_m;" in hc_upd and "const bool slow=!(s.push_closing>=stuck_closing_mps);" in hc_upd
 assert "stuck_closing_mps=HandServoConfig{}.snap_closing_mps" in coupling
-assert "const double gap=length(in.controller.position-in.body->position);" in hc_upd and len(re.findall(r"\bgap>(lag_release_m|prop_release_m|native_release_m)", hc_upd)) == 3, "the release judges the RAW gap (fix round 2)"
+assert "out.lag_m=length(in.controller.position-in.body->position);" in hc_upd and not re.search(r"lag_m\s*>", code_of(hc_upd)), "the body gap is status only"
+assert not re.search(r"\b(lag_release_m|prop_release_m)\b", code_of(hc_upd)), "no body-gap rule for motor holds"
 assert "if(w>0) {" in hc_upd, "the drawn weight only places the target"
 assert "out.body_weight=s.body_w;" in visual_hdr
 assert "native_grab.couple(" not in code_of(probe[:b16_at]) and code_of(grab).count("void couple(") == 1
@@ -432,7 +480,8 @@ assert "in.requested=coupled?d2vr::HoldCoupling::controller_request(request,grip
 assert "if(out.clamped) {origin=out.target.position;++held_clamp_status.clamped_frames;}" in pho and "d2vr::Vec3 shift=out.clamped?out.shift:d2vr::Vec3{};" in pho
 cpl = pho[pho.index("if(body_on) {   // B16"):pho.index("} else if(body_knob) native_body_target[side&1u].valid=false;")]
 assert "d2vr::couple_native(" in cpl and "if(coupled) {origin=co.target.position;shift=origin-request.position;}" in cpl and "coupled_release=co.release;" in cpl
-assert "if((L.clamp.should_release() || coupled_release) && !L.drop_sent)" in pho, "B4's drop rule plus the raw-gap native release"
+assert "if((body_on?coupled_release:L.clamp.should_release()) && !L.drop_sent)" in pho, "P2-1: the stuck-object rule with the body in play, else B4's exactly"
+assert "native_body_target[side&1u]={co.body_target?*co.body_target:palm_pose.position,GetTickCount64(),true,!co.object_blocked};" in cpl
 # review P3-2: knob off adds no work: the held-clamp begin/end additions are knob-gated
 assert "if(hand_body_requested.load(std::memory_order_relaxed)) native_body_target[L.side&1u].valid=false;" in function(probe, "static void held_clamp_end(")
 assert "if(hand_body_requested.load(std::memory_order_relaxed)) {hold_coupling.reset(side&1u);" in function(probe, "static void held_clamp_begin(")
@@ -457,14 +506,27 @@ rel = ul[ul.index("if(lane.capped && coupled_release && !lane.pending_release)")
 assert "end_capped_hold(lane,side,ReleaseReason::lag,true);" in rel and "lane.coupling.release=false;" in rel
 # fix round 2: the snap waits while holding; the filter word is the engine's read-back, retried, then latched
 assert "d.holding=fresh && ((last_hands_.holding>>side)&1u)!=0;" in tick
-assert "!in.target_free || in.holding" in drive_fn and "if(in.holding) {s.snap_pending=false;" in drive_fn
+# final review P2-1: a native hold whose object is free lets B14's stuck snap run (a snag on the hand alone); a motor hold never does
+assert "d.hold_snap_ok=fresh && ((last_hands_.hold_snap_ok>>side)&1u)!=0;" in tick
+assert "const bool hold_waits=in.holding && !in.hold_snap_ok;" in drive_fn and "!in.target_free || hold_waits" in drive_fn and "if(hold_waits) s.snap_pending=false;" in drive_fn
+assert "if(native_body_target[side].object_free) hand_body_in.hold_snap_ok|=1u<<side;" in publish_block and code_of(probe).count("hold_snap_ok|=") == 1
 assert "if(++s.filter_misses>=max_filter_misses) latch(side," in write_fn and "static constexpr unsigned max_filter_misses=5;" in body
 assert "if(got) {s.filter=*got;" in write_fn and "e.filter=[](unsigned side,std::uint32_t handle)" in runtime
 # the comment-swallow guard (three line joins on this plan swallowed statements): no code-shaped text inside a // comment
 check_src = (root / "tests/hold_coupling_check.cpp").read_text(encoding="utf-8")
 assert not re.search(r"//[^\n]*\bCHECK\(", check_src), "a CHECK( inside a // comment in tests/hold_coupling_check.cpp"
-for name, text in (("hold_coupling.hpp", coupling), ("hand_body.hpp", body), ("hand_body_runtime.hpp", runtime), ("hand_body_native.hpp", native)):
+for name, text in (("hold_coupling.hpp", coupling), ("hand_body.hpp", body), ("hand_body_runtime.hpp", runtime), ("hand_body_native.hpp", native),
+                   ("native_world_trace.hpp", trace), ("hand_visual_source.hpp", visual_hdr)):
     assert not re.search(r"//[^\n]*[a-z)\]][a-z_]+(\.|->)[a-z_]+(=|\()[^\n]*;", text), name + ": code swallowed into a comment?"
+for name in ("native_world_trace_check.cpp", "hand_visual_source_check.cpp", "native_world_query_source_check.cpp"):
+    assert not re.search(r"//[^\n]*\b(CHECK|assert)\(", (root / "tests" / name).read_text(encoding="utf-8")), "a CHECK inside a // comment in " + name
+for line in probe_block.splitlines():
+    if "//" in line:
+        assert not re.search(r"//.*\b[a-z_]+(\.|->|\[)[\w\]\[]*=[^=]", line), "a statement swallowed by a comment: " + line.strip()[:90]
+# P2-2 (X-4 amended): with a grasp anchor active the body is elected only on contact; P3-3: a body that leaves while drawn is blended away
+vis_upd = function(visual_hdr, "VisualOutput update(unsigned side")
+assert "const bool agrees=!anchor_active && out.gap_m<=(was_body?agree_leave:agree_gap);" in vis_upd and "|| agrees);" in vis_upd
+assert "const bool body_left=!present && s.has_source && s.source==VisualSource::body;" in vis_upd and "(!present && !body_left && !leaving)" in vis_upd
 for line in b16_block.splitlines() + cpl.splitlines():
     if "//" in line:
         assert not re.search(r"//.*\b[a-z_]+(\.|->|\[)[\w\]\[]*=[^=]", line), "a statement swallowed by a comment: " + line.strip()[:90]

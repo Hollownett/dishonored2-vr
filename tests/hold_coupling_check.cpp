@@ -87,7 +87,7 @@ struct NativeRig {
         target=out.target;
         if(body_on) {last=couple_native(coupling,0,clamp,proxies,request,controller,pose_at(body),true,coupled,in.requested,out.target,now);if(coupled) target=last.target;}
         clamp.note_published(target);
-        dropped=clamp.should_release() || (body_on && last.release);
+        dropped=body_on?last.release:clamp.should_release();   // dxgi_probe.cpp: the coupling's stuck-object rule while the body is in play, else B4's
         if(body_on && !wedged && real_servo) {servo.pos=body;servo.step(last.body_target?*last.body_target:controller.position,dt);body=servo.pos;}
         else if(body_on && !wedged) {
             const Vec3 goal=last.body_target?*last.body_target:controller.position;const Vec3 e=goal-body;const double l=length(e);
@@ -165,23 +165,23 @@ int main() {
             CHECK(o.uses_body && near(o.target.position.x,.5) && near(o.lag_m,.3,1e-12));
         }
     }
-    {   // lag_release_after_quarter_second (plan A's corpse rule, the DwellTimer clock): 0.6 m for 0.24 s no; 0.26 s release
-        HoldCoupling c;double now=5;bool fired=false;double held=0;
-        CouplingInput in{};in.kind=HoldKind::corpse;in.body_ready=true;in.body=pose_at(0);in.controller=pose_at(.6);
-        in.now=now;CHECK(!c.update(0,in).release);   // the first frame starts the clock
-        for(int i=0;i<24;++i) {now+=.01;held+=.01;in.now=now;fired=c.update(0,in).release;CHECK(!fired);}
-        CHECK(near(held,.24,1e-9));
-        now+=.02;in.now=now;CHECK(c.update(0,in).release);   // 0.26 s
-        // the clock restarts when the lag drops; a hitch counts at most max_dt (Review Focus 4: a 0.5 s pause never releases at once)
-        HoldCoupling h;double t=5;in.now=t;h.update(0,in);
-        t+=.5;in.now=t;CHECK(!h.update(0,in).release);
-        in.body=pose_at(.3);for(int i=0;i<100;++i) {t+=.01;in.now=t;CHECK(!h.update(0,in).release);}
-        // props keep their 1.5 m rule: no dwell, 1.4 m never, 1.6 m at once
-        HoldCoupling p;CouplingInput q{};q.kind=HoldKind::motor_prop;q.body_ready=true;q.body=pose_at(0);q.controller=pose_at(1.4);
-        for(int i=0;i<100;++i) {q.now=1+i*.01;CHECK(!p.update(0,q).release);}
-        q.controller=pose_at(1.6);q.now=3;CHECK(p.update(0,q).release);
-        // the corpse rule equals plan A's PhysicalGrab numbers (X-3)
+    {   // motor_hold_never_released_by_body_gap (final review P2-1): a corpse or a prop held while the hand body is stuck 0.6 m / 1.6 m from the
+        // controller: no release from the coupling however long (PhysicalGrab's own rule judges the held body against its target); the numbers
+        // the status and that rule use stay plan A's (X-3)
+        for(const HoldKind kind:{HoldKind::corpse,HoldKind::motor_prop}) {
+            HoldCoupling c;CouplingInput in{};in.kind=kind;in.body_ready=true;in.body=pose_at(0);
+            for(const double x:{.6,1.6}) {in.controller=pose_at(x);for(int i=0;i<300;++i) {in.now=5+i*.01;const auto o=c.update(0,in);CHECK(!o.release && near(o.lag_m,x,1e-12) && !o.object_blocked);}}
+        }
         CHECK(HoldCoupling::lag_release_m==PhysicalGrab::lag_release_m && HoldCoupling::lag_release_s==PhysicalGrab::lag_release_s);
+        // the native stuck rule's dwell: the object pushed 0.36 m off its target, still: 0.24 s no, 0.26 s release; a hitch counts at most max_dt
+        HoldCoupling n;double now=5,held=0;CouplingInput q{};q.kind=HoldKind::native;q.body_ready=true;q.body=pose_at(0);q.controller=pose_at(0);
+        q.controller_request=pose_at(.66);q.clamped_controller=pose_at(.30);q.clamped_native=pose_at(.30);
+        q.now=now;CHECK(!n.update(0,q).release);   // the first frame starts the clock
+        for(int i=0;i<24;++i) {now+=.01;held+=.01;q.now=now;const auto o=n.update(0,q);CHECK(!o.release && o.object_blocked && near(o.object_gap_m,.36,1e-12));}
+        CHECK(near(held,.24,1e-9));
+        now+=.02;q.now=now;CHECK(n.update(0,q).release);
+        HoldCoupling h;double t=5;q.now=t;h.update(0,q);t+=.5;q.now=t;CHECK(!h.update(0,q).release);   // Review Focus 4: a 0.5 s pause never releases at once
+        q.clamped_controller=pose_at(.40);for(int i=0;i<100;++i) {t+=.01;q.now=t;CHECK(!h.update(0,q).release);}   // 0.26 m: never
     }
     {   // native_target_is_clamped_pose: the target is the body-carried request pushed out of the wall; the body's own target is the hand pose of the
         // clamped controller request; free air: the body's target is the controller palm exactly
@@ -202,6 +202,7 @@ int main() {
         for(int i=0;i<90;++i) {d.step();CHECK(!d.clamp.should_release());}          // 0.255 m past the clamped pose
         d.approach(.42);bool dropped=false;for(int i=0;i<40 && !dropped;++i) {d.step();dropped=d.clamp.should_release();}
         CHECK(dropped);
+        for(int i=0;i<30 && !d.dropped;++i) d.step();CHECK(d.dropped && d.last.object_blocked);   // and the coupling's stuck-object rule drops it too
     }
     {   // no_drift_controller_still_10s (feedback ruling): the controller holds still for 10 s; the target stays within 1 mm, in free air and
         // pressed into a wall, and hand, body and object agree
@@ -281,55 +282,66 @@ int main() {
         }
         CHECK(r.last.uses_body==false && !r.last.release);
     }
-    {   // corpse_stuck_releases_at_half_metre (fix round 2, through the chain): a corpse held by a hand body wedged on geometry while the controller pulls
-        // away at 1 m/s; B15 stops drawing the body beyond 0.12 m (the weight falls to 0, the corpse follows the controller), and the RAW gap releases at
-        // 0.5 m held for 0.25 s
-        HandVisualSource src;HoldCoupling c;double now=10,over_at=-1,released_at=-1,weight_at_release=1;std::uint64_t seq=1;const Vec3 body{0,0,1};Vec3 hand{0,0,1};
-        for(int i=0;i<150 && released_at<0;++i) {
+    {   // hand_snag_does_not_drop_corpse (final review P2-1, through the chain): a corpse held by a hand body snagged on a crate while the controller
+        // pulls away at 1 m/s to 0.9 m; B15 stops drawing the far body (the weight falls to 0, the corpse follows the controller): never released here
+        HandVisualSource src;HoldCoupling c;double now=10;std::uint64_t seq=1;const Vec3 body{0,0,1};Vec3 hand{0,0,1};double max_lag=0;
+        for(int i=0;i<300;++i) {
             now+=dt90;hand.x=std::min(.9,hand.x+1.*dt90);
             VisualInput vi{};vi.now=now;vi.body_ready=true;vi.body=pose_at(body);vi.body_seq=++seq;vi.clamp=pose_at(hand);vi.controller=pose_at(hand);vi.body_contact=vi.world_hit_near=true;
             const auto v=src.update(0,vi);
             CouplingInput in{};in.kind=HoldKind::corpse;in.body_ready=true;in.body=pose_at(body);in.controller=pose_at(hand);in.now=now;in.body_weight=v.body_weight;
-            const auto o=c.update(0,in);
-            if(over_at<0 && o.lag_m>HoldCoupling::lag_release_m) over_at=now;
-            if(o.release) {released_at=now;weight_at_release=v.body_weight;}
-            if(!o.release && hand.x>.2) CHECK(o.target.position.x>=hand.x-.12-1e-9);   // the corpse is pulled toward the controller once B15 lets go
+            const auto o=c.update(0,in);CHECK(!o.release);max_lag=std::max(max_lag,o.lag_m);
+            if(hand.x>.2) CHECK(o.target.position.x>=hand.x-.12-1e-9);   // the corpse is pulled toward the controller once B15 lets go
         }
-        CHECK(released_at>0 && over_at>0 && released_at-over_at>=HoldCoupling::lag_release_s-dt90-1e-9 && released_at-over_at<=HoldCoupling::lag_release_s+dt90+1e-9);
-        CHECK(weight_at_release==0);   // the release fired with B15 drawing the controller: the raw gap, not the drawn one
+        CHECK(max_lag>HoldCoupling::lag_release_m);   // not vacuous: the old raw-gap rule would have dropped it
     }
-    {   // prop_keeps_1_5m_rule (fix round 2, through the chain): a wedged hand body, the controller 1.4 m away: no release however long; 1.6 m: at once
+    {   // prop_not_dropped_by_hand_snag: a wedged hand body, the controller 1.6 m away: the coupling never releases (the 1.5 m rule is PhysicalGrab's,
+        // on the prop's own gap to the controller it now follows)
         HandVisualSource src;HoldCoupling c;double now=10;std::uint64_t seq=1;const Vec3 body{0,0,1};
-        const auto run=[&](double x,int frames) {
-            bool any=false;
-            for(int i=0;i<frames;++i) {
-                now+=dt90;const Vec3 hand{x,0,1};
-                VisualInput vi{};vi.now=now;vi.body_ready=true;vi.body=pose_at(body);vi.body_seq=++seq;vi.clamp=pose_at(hand);vi.controller=pose_at(hand);
-                const auto v=src.update(0,vi);
-                CouplingInput in{};in.kind=HoldKind::motor_prop;in.body_ready=true;in.body=pose_at(body);in.controller=pose_at(hand);in.now=now;in.body_weight=v.body_weight;
-                const auto o=c.update(0,in);any=any || o.release;
-                if(i>20) CHECK(bit_equal(o.target,pose_at(hand)) && !o.uses_body);   // not drawn: the controller, B4's pose
-            }
-            return any;
-        };
-        CHECK(!run(1.4,180));CHECK(run(1.6,1));
-    }
-    {   // native_hold_stuck_releases (fix round 2, through the chain): the hand body wedged, the controller 0.45 m away in free air (the clamp sees no
-        // wall, so HeldClamp never drops it); the object follows the drawn hand (B15 lets go of the far body) and the raw gap drops the hold after 0.25 s
-        NativeRig r;r.use_b15=true;r.wedged=true;r.contact=true;r.body={0,0,1};
-        double over_at=-1,dropped_at=-1;
-        for(int i=0;i<200 && dropped_at<0;++i) {
-            r.controller.position.x=std::min(.45,r.controller.position.x+1.*dt90);r.step();
-            CHECK(!r.clamp.should_release());
-            if(over_at<0 && r.last.lag_m>HoldCoupling::native_release_m) over_at=r.now;
-            if(r.dropped) dropped_at=r.now;
+        for(int i=0;i<180;++i) {
+            now+=dt90;const Vec3 hand{1.6,0,1};
+            VisualInput vi{};vi.now=now;vi.body_ready=true;vi.body=pose_at(body);vi.body_seq=++seq;vi.clamp=pose_at(hand);vi.controller=pose_at(hand);
+            const auto v=src.update(0,vi);
+            CouplingInput in{};in.kind=HoldKind::motor_prop;in.body_ready=true;in.body=pose_at(body);in.controller=pose_at(hand);in.now=now;in.body_weight=v.body_weight;
+            const auto o=c.update(0,in);CHECK(!o.release);
+            if(i>20) CHECK(bit_equal(o.target,pose_at(hand)) && !o.uses_body);   // not drawn: the controller, B4's pose
         }
-        CHECK(dropped_at>0 && dropped_at-over_at>=HoldCoupling::native_release_s-dt90-1e-9 && dropped_at-over_at<=HoldCoupling::native_release_s+dt90+1e-9);
+    }
+    {   // hand_snag_on_crate_does_not_drop_tank (final review P2-1): the hand body wedged on a crate, the controller carrying the tank 0.45 m on in free
+        // air (the tank does not even collide with the hand): never dropped, and the object is free, so B14's stuck snap may run (object_blocked false)
+        NativeRig r;r.use_b15=true;r.wedged=true;r.contact=true;r.body={0,0,1};double max_lag=0;
+        for(int i=0;i<300;++i) {
+            r.controller.position.x=std::min(.45,r.controller.position.x+1.*dt90);r.step();
+            CHECK(!r.dropped && !r.clamp.should_release() && !r.last.object_blocked && r.last.object_gap_m==0);max_lag=std::max(max_lag,r.last.lag_m);
+        }
+        CHECK(max_lag>HoldCoupling::native_release_m);   // the old raw-gap rule would have dropped it
         CHECK(r.weight==0 && near(r.target.position.x,r.controller.position.x+.3,1e-9));   // B15 draws the controller; the object follows it
         // a wedged body near the wall keeps its planes: the clamp keeps sweeping the controller's request (review P3-4)
         NativeRig w;w.wall=.35;w.controller=pose_at(-.2);w.body={-.2,0,1};w.approach(0);w.wedged=true;w.controller.position.x=.05;
         int planes=0;for(int i=0;i<90;++i) {w.step();if(w.clamp.project(pose_at(.3),w.proxies)) ++planes;}
         CHECK(planes>=89);
+    }
+    {   // object_stuck_releases (final review P2-1): the tank pushed into a wall 0.45 m past where it can go and held there: dropped 0.25 s after its
+        // push passed 0.35 m (the hand body following it, not wedged); pulling it back out fast is closing, never a drop on the way
+        NativeRig r;r.use_b15=true;r.contact=true;r.wall=.35;r.controller=pose_at(-.2);r.body={-.2,0,1};
+        r.approach(0);double over_at=-1,dropped_at=-1;
+        for(int i=0;i<200 && dropped_at<0;++i) {
+            r.controller.position.x=std::min(.40,r.controller.position.x+1.*dt90);r.step();
+            if(over_at<0 && r.last.object_gap_m>HoldCoupling::native_release_m) over_at=r.now;
+            if(r.dropped) dropped_at=r.now;
+        }
+        CHECK(over_at>0 && dropped_at>0 && dropped_at-over_at>=HoldCoupling::native_release_s-dt90-1e-9 && dropped_at-over_at<=HoldCoupling::native_release_s+2*dt90+1e-9);
+        // shoved 1 m into the wall in 0.17 s, then drawn back out at 1 m/s: the push stays beyond 0.35 m for longer than the dwell, but it is closing
+        // all the way: kept. The same shove held still is dropped (the control).
+        NativeRig b,still;double beyond=0;bool dropped=false,still_dropped=false;
+        for(NativeRig* x:{&b,&still}) {x->use_b15=true;x->contact=true;x->wall=.35;x->controller=pose_at(-.2);x->body={-.2,0,1};x->approach(0);}
+        for(int i=0;i<15;++i) {b.controller.position.x+=6.*dt90;b.step();dropped=dropped || b.dropped;still.controller.position.x+=6.*dt90;still.step();}
+        for(int i=0;i<90;++i) {
+            b.controller.position.x-=1.*dt90;b.step();dropped=dropped || b.dropped;if(b.last.object_gap_m>HoldCoupling::native_release_m) beyond+=dt90;
+            still.step();still_dropped=still_dropped || still.dropped;
+        }
+        CHECK(beyond>HoldCoupling::native_release_s && !dropped);
+        CHECK(still_dropped);
     }
     {   // fast_free_air_swing_never_drops_corpse (fix round 3, N-2): a 6 m/s free-air sweep with B9's real servo; the body lags past 0.5 m but keeps
         // closing on the controller, so it is not stuck: no release over 3 s (B15 weight -> coupling, nothing injected)
@@ -358,10 +370,13 @@ int main() {
             over=r.last.lag_m>HoldCoupling::native_release_m?over+dt90:0;longest=std::max(longest,over);}
         CHECK(longest>HoldCoupling::native_release_s);   // far for longer than the dwell: only the closing condition keeps the hold
         CHECK(max_lag>HoldCoupling::native_release_m);CHECK(!dropped);
-        // stuck still releases with the real servo: the body wedged, the controller held 0.45 m away
-        NativeRig s;s.use_b15=true;s.real_servo=true;s.contact=true;s.wedged=true;bool gone=false;
-        for(int i=0;i<120 && !gone;++i) {s.controller.position.x=std::min(.45,s.controller.position.x+1.*dt90);s.step();gone=s.dropped;}
+        // a stuck OBJECT still releases with the real servo: the tank held 0.4 m into a wall; a wedged hand alone never does (P2-1)
+        NativeRig s;s.use_b15=true;s.real_servo=true;s.contact=true;s.wall=.35;s.controller=pose_at(-.2);s.body={-.2,0,1};s.approach(0);bool gone=false;
+        for(int i=0;i<120 && !gone;++i) {s.controller.position.x=std::min(.40,s.controller.position.x+1.*dt90);s.step();gone=s.dropped;}
         CHECK(gone);
+        NativeRig k;k.use_b15=true;k.real_servo=true;k.contact=true;k.wedged=true;bool kept=true;
+        for(int i=0;i<180;++i) {k.controller.position.x=std::min(.45,k.controller.position.x+1.*dt90);k.step();kept=kept && !k.dropped;}
+        CHECK(kept);
     }
     {   // HeldClamp::project: the planes applied with nothing changed; equal to update()'s own push-out for the same request
         NativeRig a,b;a.wall=b.wall=.35;a.body_on=b.body_on=false;

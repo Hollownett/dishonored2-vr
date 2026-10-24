@@ -185,6 +185,16 @@ int main() {
     assert(initial_hit.initial->hits[0].entity==kHitEntity && initial_hit.initial->hits[0].contact.body==kHitHandle &&
         initial_hit.initial->hits[0].contact.source_body==kHandle && initial_hit.initial->hits[0].contact.shape_key==0x1234 &&
         initial_hit.initial->hits[0].contact.signed_separation==-.02f && initial_hit.initial->hits[0].contact.normal.x==-1);
+    {   // final review P1-1: a hand body's own contacts (initial and regular) are skipped and counted; they never fail the whole query (which
+        // blinded full-hand contact, anatomical contact and door ingress while a body existed) and the rest stays the answer
+        const auto skipped_before=cast_excluded_hits.load();cast_excluded_bodies[1].store(kHitHandle);
+        const auto skipped=source_query(memory,*source);
+        cast_excluded_bodies[1].store(0xffffffffu);
+        assert(skipped.complete && skipped.initial && skipped.initial->count==0 && skipped.regular && skipped.regular->count==0 && !skipped.hit);
+        assert(cast_excluded_hits.load()==skipped_before+3);
+        const auto again=source_query(memory,*source);   // nothing armed: the same contacts are the answer again
+        assert(again.complete && again.initial->count==2 && again.regular->count==1 && again.hit && cast_excluded_hits.load()==skipped_before+3);
+    }
     source_hit_enabled=false;source_initial_count=0;
     const auto empty_initial=source_query(memory,*source);
     assert(empty_initial.complete && !empty_initial.hit && empty_initial.initial && !empty_initial.initial->count);

@@ -6,8 +6,9 @@
 // The body lags the controller (about 0.11 m at 2 m/s, 0.65 m at 6 m/s), so "the body wins whenever it is sane" would make the visible hand
 // trail in free air. The body is therefore drawn only while it is in contact (the drive's shortfall signal or the clamp's own contact) or
 // when it already sits within 0.02 m of the clamp pose; otherwise the clamp output is drawn, i.e. exactly the phase-1 pose. Every source
-// change blends over 0.15 s. The body is distrusted (the clamp wins) when it is farther than 0.35 m from the controller for 0.25 s, when it
-// lies behind a surface the clamp holds, or when its pose stopped updating for more than two displayed frames.
+// change blends over 0.15 s (a body that disappears while drawn too). While a grasp anchor is active the body is drawn only in contact. The
+// body is distrusted (the clamp wins) when it is farther than 0.35 m from the controller for 0.25 s, when it lies behind a surface the clamp
+// holds, or when its pose stopped updating for more than two displayed frames.
 // Pure: no engine access, one render-thread caller. Counters are atomics for the status thread.
 #include "hand_clamp.hpp"
 #include "drawn_anchor.hpp"
@@ -92,15 +93,22 @@ public:
         out.gap_m=std::isfinite(gap)?gap:0;
         const bool was_body=s.has_source && s.source==VisualSource::body;
         const bool contact=(in.body_contact && in.world_hit_near) || in.clamp_contact;
-        // contact never elects a body farther than 10 cm (leaves at 12 cm) from the clamp pose: a lagging body must not drag the hand back
-        const bool elected=sane && ((contact && out.gap_m<=(was_body?contact_leave:contact_gap)) || out.gap_m<=(was_body?agree_leave:agree_gap));
+        // contact never elects a body farther than 10 cm (leaves at 12 cm) from the clamp pose: a lagging body must not drag the hand back.
+        // Final review P2-2 (X-4 amended): while a grasp anchor is active (a motor or corpse hold, Task 12's seated grip) the body outranks it only
+        // on contact; the 0.02 m agreement rule is for bare hands (it would draw the controller and let the limb hang off the hand in free air).
+        const bool agrees=!anchor_active && out.gap_m<=(was_body?agree_leave:agree_gap);
+        const bool elected=sane && ((contact && out.gap_m<=(was_body?contact_leave:contact_gap)) || agrees);
         out.snapped=latched || (present && in.body_behind_surface);
         const VisualSource want=pick(present && in.yield,elected,anchor_active);
         WorldTrackedPose target=in.clamp;
         if(want==VisualSource::controller) target=clamp_detail::finite_pose(in.controller)?in.controller:in.clamp;
         else if(want==VisualSource::body) target.position=in.body->position;   // the orientation stays the clamp's (a sphere has none)
         else if(want==VisualSource::anchor) target.position=*in.anchor;
-        if(!s.has_source || !present) {   // no body in play: phase 1 exactly (the clamp, or the anchor override), nothing to blend
+        // Final review P3-3: a body that was the source and disappears (a menu press, a fault latch, a destroy, a snap) is blended away from
+        // where the hand was drawn, like any source change, and that blend runs to its end; otherwise no body in play is phase 1 exactly.
+        const bool body_left=!present && s.has_source && s.source==VisualSource::body;
+        const bool leaving=!present && s.has_source && want==s.source && s.elapsed<blend_seconds-1e-9;
+        if(!s.has_source || (!present && !body_left && !leaving)) {   // no body in play: phase 1 exactly (the clamp, or the anchor override), nothing to blend
             s.has_source=true;s.source=want;s.elapsed=blend_seconds;s.offset={};
         } else if(want!=s.source) {   // the hand is carried along by the offset it had at the change, which decays over the blend
             // measured against where the new source was LAST frame, so the offset is the gap between the sources and never a frame of travel

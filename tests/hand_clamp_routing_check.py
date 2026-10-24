@@ -217,7 +217,7 @@ def check(dxgi: str, aim: str) -> None:
 
     # native_interaction_aim.hpp: slots, exclusion mapping, timing.
     a = compact(aim)
-    for need in ('inlinestaticconstexprunsignedweapon_slots=14;', 'staticconstexprunsignedtip_slot=11,wall_tip_slot=12,exclude_slot=13;',
+    for need in ('inlinestaticconstexprunsignedweapon_slots=15;', 'staticconstexprunsignedtip_slot=11,wall_tip_slot=12,exclude_slot=13;', 'staticconstexprunsignedhand_body_free_slot=14;',
                  'returnslot==0||slot==tip_slot||slot==wall_tip_slot||slot==exclude_slot;',
                  'weapon_req_[side][slot]={from,to,radius,true,exclude,exclude_bone,exclude_handle,producer};'):
         assert need in a, need
@@ -292,7 +292,7 @@ if __name__ == '__main__':
         ('clamp_wall_tip{d2vr::default_clamp_wall_tip(),d2vr::default_clamp_wall_tip()};', 'clamp_wall_tip{};'),
     )
     aim_mutations = (
-        ('weapon_slots=14;', 'weapon_slots=12;'),
+        ('weapon_slots=15;', 'weapon_slots=12;'),
         ('if(clamp_slot(slot)) {clamp_ticks+=', 'if(slot==0) {clamp_ticks+='),
         ('hits[side][slot]=cast(&*exclusion);', 'hits[side][slot]=cast(nullptr);'),
         ('kWorldOccluderRequired,exclusion,clamp_slot(slot));', 'kWorldOccluderRequired,exclusion);'),

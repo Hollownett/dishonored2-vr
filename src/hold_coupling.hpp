@@ -8,15 +8,17 @@
 // * Motor holds (a prop or a corpse limb driven by PhysicalGrab): the pose the grab pulls the object toward is the controller moved toward the
 //   hand body by body_weight (the body's position, the controller's orientation: a sphere has none), so the held body trails a hand the world
 //   stopped.
-// * Release (fix round 2 ruling): judged on the RAW gap between the hand body and the controller while a body is in play, whatever B15 draws:
-//   a corpse at 0.5 m for 0.25 s (plan A's corpse rule on the same DwellTimer class, X-3), a prop at 1.5 m (PhysicalGrab's prop rule, no dwell),
-//   a native hold at 0.35 m for 0.25 s (spec 5A). Fix round 3: corpses and native holds release only when STUCK (B9's definition: the body
-//   also closes on the controller slower than 0.5 m/s all along), never in a hard free-air swing. Props keep 1.5 m with no dwell. B14's snaps
-//   wait while a hand holds something, so this release owns a stuck hand.
+// * Release (final review P2-1 ruling, amending fix rounds 2-3): a coupled hold is let go only when the HELD OBJECT is stuck, never on the
+//   hand body's own gap: a hand snagged on a crate or a guard's arm while the object moves freely must not drop it (the native item does not
+//   even collide with the hand). A native hold: the object's request pushed out by the HeldClamp more than 0.35 m for 0.25 s while that gap is
+//   not closing faster than 0.5 m/s (B9's stuck definition, on the object); this replaces B4's own drop rule while the body is in play. A motor
+//   hold (a prop or a corpse limb): PhysicalGrab's own rule, which judges the held body against the (coupled) target it is pulled to (corpse
+//   0.5 m for 0.25 s, prop 1.5 m), so no second release is made here. A stuck hand body whose object is free is B14's stuck snap's case (the
+//   snap is allowed while a native hold's object is free: CouplingOutput::object_blocked).
 // * Native holds (HoldObject keyframes the item toward the mod's target, spec deviation 4; the HeldClamp stays the collision mechanism): the
 //   target is the request computed from the drawn grip (B15 already draws it at the body while it selects the body, blended), pushed out by the
 //   HeldClamp's planes (HeldClamp::project): it never reads the body itself. The clamp
-//   itself keeps sweeping and judging the controller's request (HeldClamp::update, B4's sweeps, planes and 0.35 m / 0.25 s drop rule): a
+//   itself keeps sweeping and judging the controller's request (HeldClamp::update, B4's sweeps and planes; the drop is the stuck rule above): a
 //   body-carried request resting against a wall would sweep nothing, its plane would lapse after 0.1 s and the body would cycle. The body's own
 //   servo target is NOT the clamped object pose (the body would be fed its own pose plus the offset every frame: a runaway) and NOT the hand
 //   pose of the clamped carried object (the body would be handed its own position: a stall). It is the clamped controller request expressed
@@ -52,13 +54,16 @@ struct CouplingInput {HoldKind kind{};bool body_ready{};std::optional<WorldTrack
     // native only: the request re-based on the controller palm (HoldCoupling::controller_request) and HeldClamp::update's output for it
     std::optional<WorldTrackedPose> controller_request,clamped_controller;
     double body_weight{1.};};   // motor holds: B15's VisualOutput::body_weight (how much of the drawn hand is the body); 0: today's controller pose
+// lag_m: the raw hand-body gap (status only, it releases nothing); object_gap_m: the held object's gap to its own target (native: the clamp's push of
+// the controller's request); object_blocked: that gap is beyond the kind's threshold now (B14's snap waits for the release instead).
 struct CouplingOutput {WorldTrackedPose target{};bool uses_body{};double lag_m{};bool release{};
-    std::optional<Vec3> body_target;};   // native, body in use: the hand body's servo target (none: B14's, the controller palm)
+    std::optional<Vec3> body_target;   // native, body in use: the hand body's servo target (none: B14's, the controller palm)
+    double object_gap_m{};bool object_blocked{};};
 
 class HoldCoupling {
 public:
-    static constexpr double lag_release_m=.5,lag_release_s=.25;   // plan A's corpse rule (spec 266/671, ruling B-26), kept equal
-    static constexpr double prop_release_m=1.5;                    // props keep PhysicalGrab's 1.5 m rule
+    static constexpr double lag_release_m=.5,lag_release_s=.25;   // plan A's corpse rule (spec 266/671, ruling B-26): PhysicalGrab's, on the held body
+    static constexpr double prop_release_m=1.5;                    // props keep PhysicalGrab's 1.5 m rule (the held body to its target)
     static constexpr double max_dt=.05;                            // a hitch never counts as more dwell than this (Review Focus 4)
     static bool same_point(Vec3 a,Vec3 b) {return a.x==b.x && a.y==b.y && a.z==b.z;}
     // A usable body pose: ready and finite.
@@ -68,14 +73,12 @@ public:
         WorldTrackedPose out=request;out.position=request.position+(controller-grip);return out;
     }
 
-    // Fix round 2 ruling: the lag release judges the RAW gap between the hand body and the controller while a body is in play, whatever B15
-    // draws (B15 stops drawing a body farther than 0.12 m, so a drawn-weight gap could never reach 0.5 m): corpses 0.5 m for 0.25 s, motor props
-    // 1.5 m, native holds 0.35 m for 0.25 s (spec 5A). The drawn weight only places the target. No usable body: today's behaviour, no release.
+    // Final review P2-1: the native release is the HELD OBJECT stuck (its request pushed out by more than native_release_m for native_release_s,
+    // the push not closing faster than stuck_closing_mps), 0.35 m / 0.25 s as spec 5A and HeldClamp; a motor hold is released by PhysicalGrab's
+    // own object-lag rule (lag_release_m for lag_release_s for a corpse, prop_release_m for a prop, on the coupled target). No usable body: today's
+    // behaviour, no release here.
     static constexpr double native_release_m=.35,native_release_s=.25;
-    // Fix round 3 ruling (review N-2): a lag release needs STUCK, not just far: B9's definition, the gap beyond the threshold for the dwell AND
-    // the body closing on the controller slower than 0.5 m/s all along (a hard free-air swing lags 0.64-0.70 m but keeps closing fast). The body's
-    // velocity is estimated from its published poses (smoothed over velocity_tau_s; a repeated pose waits for the next one).
-    static constexpr double stuck_closing_mps=HandServoConfig{}.snap_closing_mps,velocity_tau_s=.03;
+    static constexpr double stuck_closing_mps=HandServoConfig{}.snap_closing_mps,closing_tau_s=.03;   // the push's closing rate, smoothed
     CouplingOutput update(unsigned side,const CouplingInput& in) {
         CouplingOutput out;out.target=in.controller;
         if(side>=2) return out;
@@ -87,30 +90,25 @@ public:
         const bool use=usable(in.body_ready,in.body) && clamp_detail::finite_pose(in.controller);
         const double w=std::isfinite(in.body_weight)?std::clamp(in.body_weight,0.,1.):0.;
         if(in.kind==HoldKind::native && in.clamped_native && clamp_detail::finite_pose(*in.clamped_native)) out.target=*in.clamped_native;   // the clamp's output
-        if(!use) {s.lag.reset();s.native.reset();s.has_body=false;s.body_v={};return out;}   // today's behaviour: the controller pose (or B4's clamp output), no release
-        const double gap=length(in.controller.position-in.body->position);   // the raw hand lag: what the release judges
-        out.lag_m=gap;
-        if(s.has_body && !same_point(in.body->position,s.body_at) && std::isfinite(in.now) && in.now>s.body_t) {
-            const double bdt=in.now-s.body_t;const Vec3 v=(in.body->position-s.body_at)*(1/bdt);
-            if(finite(v)) {const double a=std::min(1.,bdt/(velocity_tau_s+bdt));s.body_v=s.body_v+(v-s.body_v)*a;}
-        }
-        if(!s.has_body || !same_point(in.body->position,s.body_at)) {s.body_at=in.body->position;s.body_t=in.now;s.has_body=true;}
-        const double closing=gap>1e-9?dot(s.body_v,in.controller.position-in.body->position)/gap:0.;
-        const bool slow=!(closing>=stuck_closing_mps);   // the body is not catching up
+        if(!use) {s.native.reset();s.has_push=false;s.push_closing=0;return out;}   // today's behaviour: the controller pose (or B4's clamp output), no release
+        out.lag_m=length(in.controller.position-in.body->position);   // the raw hand lag (status only)
         if(in.kind==HoldKind::native) {
-            s.lag.reset();
             out.uses_body=w>0;   // the object follows the body only as far as B15 draws it (couple_native passes the drawn target)
-            Vec3 shift{};double push=0;   // the clamp's push of the controller's request
+            Vec3 shift{};double push=0;   // the clamp's push of the controller's request: how far the world holds the object off its target
             if(in.controller_request && in.clamped_controller && finite(in.controller_request->position) && finite(in.clamped_controller->position)) {
                 shift=in.clamped_controller->position-in.controller_request->position;push=length(shift);
             }
+            if(!std::isfinite(push)) push=0;
             out.body_target=push>0?in.controller.position+shift:in.controller.position;   // free air: the controller palm itself, exactly
-            out.release=s.native.update(gap>native_release_m && slow,dt);
+            if(s.has_push && dt>0) {const double rate=(s.push-push)/dt,a=std::min(1.,dt/(closing_tau_s+dt));s.push_closing+=(rate-s.push_closing)*a;}
+            else if(!s.has_push) s.push_closing=0;
+            s.push=push;s.has_push=true;
+            const bool slow=!(s.push_closing>=stuck_closing_mps);   // the object is not coming back toward its target
+            out.object_gap_m=push;out.object_blocked=push>native_release_m;
+            out.release=s.native.update(out.object_blocked && slow,dt);
             return out;
         }
-        s.native.reset();
-        if(in.kind==HoldKind::corpse) out.release=s.lag.update(gap>lag_release_m && slow,dt);
-        else {s.lag.reset();out.release=gap>prop_release_m;}
+        s.native.reset();s.has_push=false;s.push_closing=0;
         if(w>0) {   // the orientation stays the controller's
             out.uses_body=true;
             out.target.position=w>=1?in.body->position:in.controller.position+(in.body->position-in.controller.position)*w;
@@ -119,8 +117,8 @@ public:
     }
     void reset(unsigned side) {if(side<2) state_[side]=State{};}
 private:
-    struct State {DwellTimer lag{lag_release_s},native{native_release_s};double time{};bool has_time{};
-                  Vec3 body_at{},body_v{};double body_t{};bool has_body{};};   // the body's velocity estimate (fix round 3)
+    struct State {DwellTimer native{native_release_s};double time{};bool has_time{};
+                  double push{},push_closing{};bool has_push{};};   // the native object's push and its closing rate (P2-1)
     std::array<State,2> state_{};
 };
 static_assert(HoldCoupling::native_release_m==HeldClampConfig{}.release_gap && HoldCoupling::native_release_s==HeldClampConfig{}.release_seconds,"spec 5A's numbers");

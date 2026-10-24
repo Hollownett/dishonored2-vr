@@ -106,16 +106,18 @@ struct BodyMotion {Vec3 position{},velocity{},spin{};};
 // yield: an authored animation owns the arm, the clamp yields (carry, physical hold), or tracking is lost: the body holds where it is.
 // target_free: the hand clamp's last palm cast found the target free (the snap and every create need it). player_root / locomotion: for
 // player_drift_um (the player's root moving with no locomotion input while this hand's body is pressed into the capsule).
-// holding (B16 fix round 2): this hand holds something; B14's stuck snap and far snap are suppressed (the hold's lag release owns that case) and
-// resume after the release.
+// holding (B16 fix round 2): this hand holds something; B14's stuck snap and far snap are suppressed and resume after the release, unless
+// hold_snap_ok (final review P2-1): a native hold whose held object is free, so a hand stuck alone (a snag on a crate, a guard's arm) is
+// snapped back as an empty hand is (the target still has to be free), while a stuck object is the hold's own release. A motor hold never sets
+// it: a recreated body would be born inside the held prop or limb with the R1 default word (its layer back in the mask).
 struct DriveInput {unsigned side{};WorldTrackedPose target{};double held_kg{};double now{};bool yield{};
-                   bool target_free{};std::optional<Vec3> player_root{};bool locomotion{};bool holding{};};
+                   bool target_free{};std::optional<Vec3> player_root{};bool locomotion{};bool holding{};bool hold_snap_ok{};};
 struct DriveStatus {double gap_m{};double speed{};bool capped{},contact_now{};std::uint64_t contact_frames{},snaps{},cost_us{},cost_max_us{},player_drift_um{};
                     double dt_s{};std::uint64_t drives{},drive_writes{},yields{},skipped{},snap_requests{},snap_blocked{},garbage{},second_drives{},root_jumps{},pressed_ticks{};
                     // fix round 1: thread CPU time of this side's drive (QueryThreadCycleTime; 0 when unavailable), and the positive control for
                     // the drift proof: ticks where the root moved under locomotion input, and the largest such root travel in one locomotion window
                     std::uint64_t cpu_us{},cpu_max_us{},root_moved_ticks{},root_travel_um{};
-                    std::uint64_t held_ticks{};};   // B16: drive ticks while holding (snaps suppressed)
+                    std::uint64_t held_ticks{};};   // B16: drive ticks while holding (snaps suppressed unless a native hold's object is free, P2-1)
 // Fix round 1 (proof d, controller ruling): per-tick drive cost (both hands summed) as wall time (QPC) and thread CPU time, a fixed wall
 // histogram, the ticks over budget, and the phase split of the slowest tick (read-back, servo, write, the rest). hist edges in us:
 // [0,10) [10,20) [20,50) [50,100) [100,150) [150,200) [200,300) [300,500) [500,1000) [1000,inf).
@@ -323,6 +325,7 @@ public:
             // destroying is an abandon (no engine call, a pending destroy cancelled): a world rebuilt at the same address allocates handles
             // deterministically, so the old full handle may name another body, which own_state cannot tell from ours.
             const BodyAction action=life_.update(side,li);
+            if(!li.gameplay || !li.tracked || (action!=BodyAction::create && action!=BodyAction::none)) s.snap_recreate=false;   // gameplay lost before the recreate: not a snap
             switch(action) {
             case BodyAction::abandon:            // the world changed under a live body: no engine call at all, counted (last resort)
                 s.pending_destroy=false;s.handle=0;s.attempts=0;note_filter_unconfirmed(side);reset_filter(side);
@@ -330,7 +333,11 @@ public:
                 if(engine_.forget) engine_.forget(side);
                 break;
             case BodyAction::create:
-                if(!busy && !latched_ && spawn[side] && finite(*spawn[side]) && li.now_ms>=s.next_create_ms) do_create(side,world,*spawn[side],li.now_ms);
+                if(!busy && !latched_ && spawn[side] && finite(*spawn[side]) && li.now_ms>=s.next_create_ms) {
+                    const auto before=counters_[side].creates.load(std::memory_order_relaxed);
+                    do_create(side,world,*spawn[side],li.now_ms);
+                    if(s.snap_recreate && counters_[side].creates.load(std::memory_order_relaxed)>before) {s.snap_recreate=false;count(side,&Counters::snaps);}
+                }
                 break;
             case BodyAction::destroy:
                 if(!li.gameplay) count(side,&Counters::releases);
@@ -486,12 +493,14 @@ public:
         if(yielded) {s.servo={};count(side,&Counters::yields);c.capped.store(false,std::memory_order_relaxed);}
         else {
             WorldTrackedPose body;body.position=m->position;body.basis=in.target.basis;   // a sphere: no orientation to servo, the spin only brakes
-            // B16 fix round 2: while holding, the stuck timer never runs (target_blocked resets it) and no snap is asked for: the hold's lag
-            // release owns a stuck hand; the rules resume once the hold ends
-            const auto out=servo_step(s.servo,in.target,body,m->velocity,m->spin,in.held_kg,dt,std::numeric_limits<double>::quiet_NaN(),servo_cfg_,tuning_,!in.target_free || in.holding);
+            // B16 fix round 2: while holding, the stuck timer never runs (target_blocked resets it) and no snap is asked for; the rules resume once
+            // the hold ends. Final review P2-1: a native hold whose object is free snaps a stuck hand like an empty one (hold_snap_ok)
+            const bool hold_waits=in.holding && !in.hold_snap_ok;
+            const auto out=servo_step(s.servo,in.target,body,m->velocity,m->spin,in.held_kg,dt,std::numeric_limits<double>::quiet_NaN(),servo_cfg_,tuning_,!in.target_free || hold_waits);
             c.capped.store(out.capped,std::memory_order_relaxed);
             if(out.valid) {linear=out.linear;angular=out.angular;}   // invalid (a gap past max_gap, a bad target): hold, and the far gap snaps
-            if(in.holding) {s.snap_pending=false;count(side,&Counters::held_ticks);}
+            if(in.holding) count(side,&Counters::held_ticks);
+            if(hold_waits) s.snap_pending=false;
             else if(out.snap || (std::isfinite(gap) && gap>dc.far_snap_gap)) {
                 if(in.target_free) {if(!s.snap_pending) count(side,&Counters::snap_requests);s.snap_pending=true;}
                 else count(side,&Counters::snap_blocked);
@@ -581,7 +590,7 @@ private:
         std::uint32_t filter{R1Recipe::filter};std::uint64_t filter_tick{~0ull};unsigned filter_misses{};   // B16: the word this body carries; one filter write per tick
         // B14 drive state (dispatcher thread only)
         HandServoState servo{};double last_drive_s{std::numeric_limits<double>::quiet_NaN()};std::uint64_t written_tick{~0ull};
-        std::uint64_t drive_tick{~0ull};bool snap_pending{},has_cmd{};Vec3 last_cmd{};std::optional<Vec3> press_root,last_root,loco_start,loco_last;unsigned unreadable_motion{},short_streak{};};
+        std::uint64_t drive_tick{~0ull};bool snap_pending{},snap_recreate{},has_cmd{};Vec3 last_cmd{};std::optional<Vec3> press_root,last_root,loco_start,loco_last;unsigned unreadable_motion{},short_streak{};};
     void count(unsigned side,std::atomic<std::uint64_t> Counters::* field) {(counters_[side].*field).fetch_add(1,std::memory_order_relaxed);}
     std::uint64_t clock_us() const {try {return engine_.now_us?engine_.now_us():0;} catch(...) {return 0;}}
     // CPU time is available only with a calibration and while every read succeeds (one failed read: unavailable for the session)
@@ -687,17 +696,18 @@ private:
     }
     // B14 snap (controller ruling): there is no setBodyTransform encoder (B8), so a snap is destroy + recreate at the controller pose, on an
     // idle G1 tick, and only while the clamp's cast shows the target free (spawn is set only then). Busy: wait for the next idle tick. Blocked:
-    // dropped (counted), the body keeps servoing and the servo asks again.
-    void do_snap(unsigned side,std::uintptr_t world,bool busy,const std::optional<Vec3>& spawn,std::uint64_t now_ms) {
+    // dropped (counted), the body keeps servoing and the servo asks again. Final review P3-4: the destroy runs on this tick and the recreate on
+    // a LATER one (the lifecycle's ordinary create, which again needs the palm free), so nothing is rebuilt in the same tick in which the engine
+    // may still hold a contact or event entry for the old body; the runtime also picks the next storage slot round-robin. The recreate is the
+    // snap's (counted in snaps) unless gameplay is lost first.
+    void do_snap(unsigned side,std::uintptr_t world,bool busy,const std::optional<Vec3>& spawn,std::uint64_t) {
         Side& s=side_[side];
         if(busy) {count(side,&Counters::busy_waits);return;}
         s.snap_pending=false;
         if(!spawn || !finite(*spawn) || latched_ || shutdown_.load(std::memory_order_acquire)) {count(side,&Counters::snap_blocked);return;}
         do_destroy(side,world,false);
         if(life_.state(side)!=BodyState::absent || latched_) return;   // refused (retried as a plain destroy, then the normal create) or faulted
-        const auto before=counters_[side].creates.load(std::memory_order_relaxed);
-        do_create(side,world,*spawn,now_ms);
-        if(counters_[side].creates.load(std::memory_order_relaxed)>before) count(side,&Counters::snaps);
+        s.snap_recreate=true;   // the next tick's create completes the snap
     }
     void do_destroy(unsigned side,std::uintptr_t world,bool busy) {
         Side& s=side_[side];

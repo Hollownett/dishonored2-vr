@@ -106,6 +106,10 @@ inline constexpr std::array<float,12> native_cast_identity{1,0,0,0, 0,1,0,0, 0,0
 // excludes the player's own layer is INFERRED, not observed.
 inline constexpr std::uint32_t kWorldOccluderLayers=0xc43e;   // 0x3b7b90, required bits 0
 inline constexpr std::uint32_t kWorldOccluderRequired=0;
+// Final review P3-1: the hand body's create / snap free probe also sees WORLD_LOW 0, which the hand body collides with (hand_body_commands.hpp
+// mask 0x442f) and kWorldOccluderLayers does not include. Only the hand body's own probe uses it (NativeInteractionAim::hand_body_free_slot).
+inline constexpr std::uint32_t kHandBodyFreeLayers=kWorldOccluderLayers|1u;
+static_assert(kHandBodyFreeLayers==0xc43fu,"0xc43e plus WORLD_LOW 0");
 // Not for our use (AI/entity probes, semantics unknown): 0x2f/0x22f(0x638800), 0x2e/0x800(0x83c860),
 // 0x200/0x40(0x83a510), 0x22b/0x40(0x44bd90), 0x2b/0x40(0x3a2730).
 
@@ -129,6 +133,7 @@ struct WorldTraceHit {
     std::uint32_t body_handle{0xffffff};
     std::uint32_t shape_key{0xffffffffu};
     BodyClass body_class{BodyClass::world};   // read from the hit body when the cast answered (HandClamp ranks planes by it)
+    bool hand_body{};   // P1-1: a hand body reported because no continuation could see past it (blocked, never "no hit"; entity 0, dynamic)
 };
 struct WorldTraceInitialHit {
     NativeInitialContact contact{};
@@ -174,17 +179,22 @@ inline NativeClosestCollector make_closest_collector(std::uint64_t vtable) {
 }
 // Plan B B11/B13 (dev knobs build/hand-body-spike, build/hand-body): a hand body is DEBRIS (layer 4), which kWorldOccluderLayers includes, so
 // every mod cast would report it. While a hand body exists its full handle is in its slot (the spike uses slot 0; the production hand body
-// slot 0 for the left hand and 1 for the right; the two never run together) and a closest hit on it is discarded (reported as no hit) and
-// counted; a surface behind it is not seen in that frame. 0xffffffff (the default, knobs off) never matches.
+// slot 0 for the left hand and 1 for the right; the two never run together). A hit on it is counted (cast_excluded_hits) and is never the
+// answer, and never "no hit" either (final review P1-1): the cast continues past it (NativeWorldTrace::continue_past_hand_body, at most
+// kMaxCastContinuations casts, counted in cast_continuations), so a wall, a floor or a table behind or under the hand is still reported.
+// 0xffffffff (the default, knobs off) never matches: with no hand body alive no continuation runs and the path is the old one.
 inline std::atomic<std::uint32_t> cast_excluded_bodies[2]{0xffffffffu,0xffffffffu};
 inline std::atomic<std::uint64_t> cast_excluded_hits{0};
+// P1-1: continuation casts run past a hand body; continuations that could not see past it (the limit, an unreadable record, an overfull
+// collector): the hand-body hit itself was reported as the answer (blocked, never "no hit").
+inline std::atomic<std::uint64_t> cast_continuations{0},cast_continuation_exhausted{0};
+inline constexpr unsigned kMaxCastContinuations=2;
 inline bool cast_excluded(std::uint32_t body) {
     for(const auto& slot:cast_excluded_bodies) if(const auto excluded=slot.load(std::memory_order_relaxed); excluded!=0xffffffffu && body==excluded) return true;
     return false;
 }
 inline std::optional<WorldTraceHit> convert_world_hit(const NativeClosestCollector& c,Vec3 from,Vec3 to,std::uintptr_t entity) {
     if(!c.hit_count) return {};
-    if(cast_excluded(c.body)) {cast_excluded_hits.fetch_add(1,std::memory_order_relaxed);return {};}
     const double f=c.fraction;
     if(!std::isfinite(f) || f<0 || f>1.0001) return {};
     const Vec3 point{c.position[0],c.position[1],c.position[2]},raw{c.normal[0],c.normal[1],c.normal[2]};
@@ -351,36 +361,41 @@ public:
         // notify an optional registry for heap objects, so they are intentionally skipped for stack objects.
         WorldTraceQueryResult result{true,{}};
         if(collect_initial) {
-            result.initial.emplace();result.initial->count=initial_collector->count;
+            // P1-1: these collectors report every contact, so a hand body's own contacts are skipped (counted) and the rest is the answer.
+            // No hand body alive: nothing is skipped and the counts are the collectors' own.
+            result.initial.emplace();unsigned kept=0;
             for(unsigned index=0;index<initial_collector->count;++index) {
                 const auto contact=initial_collector->contact(index);
                 if(!contact || contact->source_body!=source->handle || contact->body==source->handle)return {};
+                if(cast_excluded(contact->body)) {cast_excluded_hits.fetch_add(1,std::memory_order_relaxed);continue;}
                 const auto entity=checked_entity_of(read,*source,contact->body);
                 if(!entity)return {};
-                result.initial->hits[index]={*contact,*entity};
+                result.initial->hits[kept++]={*contact,*entity};
             }
+            result.initial->count=kept;
             if(!native_world_query_source_current(read,*source))return {};
-            result.regular.emplace();result.regular->count=regular_collector->count();
+            result.regular.emplace();kept=0;
             for(unsigned index=0;index<regular_collector->count();++index) {
                 const auto contact=regular_collector->contact(index);
                 if(!contact || contact->source_body!=source->handle || contact->body==source->handle)return {};
+                if(cast_excluded(contact->body)) {cast_excluded_hits.fetch_add(1,std::memory_order_relaxed);continue;}
                 const auto entity=checked_entity_of(read,*source,contact->body);
                 if(!entity)return {};
-                NativeClosestCollector record{};record.hit_count=1;record.fraction=contact->fraction;
-                record.body=contact->body;record.body_key=contact->material;record.shape_key=contact->shape_key;
-                const double point[3]{contact->point.x,contact->point.y,contact->point.z};
-                const double normal[3]{contact->normal.x,contact->normal.y,contact->normal.z};
-                for(unsigned axis=0;axis<3;++axis) {record.position[axis]=static_cast<float>(point[axis]);record.normal[axis]=static_cast<float>(normal[axis]);}
-                auto hit=convert_world_hit(record,from,to,*entity);if(!hit)return {};
+                auto hit=convert_world_hit(contact_record(*contact),from,to,*entity);if(!hit)return {};
                 if(classify)hit->body_class=body_class_of(read,world,hit->body_handle,hit->entity);
-                hit->static_support=false;result.regular->hits[index]=*hit;
+                hit->static_support=false;result.regular->hits[kept++]=*hit;
                 if(!result.hit || hit->fraction<result.hit->fraction)result.hit=*hit;
             }
+            result.regular->count=kept;
             if(!native_world_query_source_current(read,*source))return {};
             return result;
         }
         if(!collector.hit_count)return result;
         if(collector.hit_count!=1)return {};
+        if(cast_excluded(collector.body)) {   // P1-1: a hand body is never the answer and never "no hit": look past it
+            cast_excluded_hits.fetch_add(1,std::memory_order_relaxed);
+            return continue_past_hand_body(base,read,cast,world,*request,collector,from,to,source,exclude,classify);
+        }
         std::uintptr_t entity{};
         if(source) {
             if(collector.body==source->handle)return {};
@@ -398,6 +413,91 @@ public:
             std::uintptr_t world,Vec3 from,Vec3 to,double radius,
             std::uint32_t layers=kWorldOccluderLayers,std::uint32_t required=kWorldOccluderRequired,const NativeCastExclusion* exclude=nullptr,bool classify=true) {
         return sphere_query_checked(base,read,cast,construct,world,from,to,radius,layers,required,nullptr,false,exclude,classify).hit;
+    }
+    // A regular contact as the closest collector would have stored it (convert_world_hit's input).
+    static NativeClosestCollector contact_record(const NativeRegularContact& contact) {
+        NativeClosestCollector record{};record.hit_count=1;record.fraction=contact.fraction;
+        record.body=contact.body;record.body_key=contact.material;record.shape_key=contact.shape_key;
+        const double point[3]{contact.point.x,contact.point.y,contact.point.z};
+        const double normal[3]{contact.normal.x,contact.normal.y,contact.normal.z};
+        for(unsigned axis=0;axis<3;++axis) {record.position[axis]=static_cast<float>(point[axis]);record.normal[axis]=static_cast<float>(normal[axis]);}
+        return record;
+    }
+    // A body's pool record checked the way body_class_of checks it (index below the count, the record's own full handle), and its collision
+    // filter word (+0x6c; 0 unreadable), for the engine's source-body exclusion (NativeCastExclusion's fields).
+    static std::optional<NativeCastExclusion> body_exclusion(Read read,std::uintptr_t world,std::uint32_t handle) {
+        const std::uint32_t index=handle&0xffffffu;
+        if(handle==0xffffffffu || index==0xffffffu) return {};
+        std::uintptr_t pool{};std::uint32_t count{},stored{},info{};
+        if(!read(world+body_pool_offset,&pool,sizeof(pool)) || !rig::pointer(pool) || !read(world+0x30,&count,sizeof(count)) || !count || count>0x1000000u || index>=count) return {};
+        const auto record=pool+static_cast<std::uintptr_t>(index)*0xb0u;
+        if(!rig::pointer(record) || !read(record+0x70,&stored,sizeof(stored)) || stored!=handle) return {};
+        if(!read(record+0x6c,&info,sizeof(info))) info=0;
+        return NativeCastExclusion{record,handle,info};
+    }
+    // Final review P1-1 (controller ruling): the closest hit was a hand body. The cast looks past it with at most kMaxCastContinuations more
+    // casts of the same sweep (same shape, layers and caller exclusion), each counted in cast_continuations:
+    // * the caller's exclusion slot free (no source lease, no excluded body): the native closest cast again with the hand body met as the
+    //   request's source body (the engine's own exclusion; B4's sims: walls report through it, the excluded body never does);
+    // * the slot taken (a held object's sweeps, the player lease), or that cast met the other hand: the mod's non-pruning all-hits collector
+    //   (native_regular_contact.hpp) over the sweep, every hand body's contact skipped, the nearest other contact the answer (none: clear).
+    // Both sweep from the original start: nothing lies nearer than the closest hit, so this is the continuation from the hit over the remaining
+    // length, and a start inside geometry keeps the engine's initial-overlap label. When nothing could be seen past the hand (the limit, an
+    // overfull or malformed collector) the hand-body hit itself is the answer (hand_body, entity 0, dynamic): blocked, never "no hit", counted
+    // in cast_continuation_exhausted. Only reached through cast_excluded(), i.e. only while a hand body is alive.
+    static WorldTraceQueryResult continue_past_hand_body(std::uintptr_t base,Read read,Cast cast,std::uintptr_t world,const NativeCastRequest& original,
+            const NativeClosestCollector& first,Vec3 from,Vec3 to,const NativeWorldQuerySource* source,const NativeCastExclusion* exclude,bool classify) {
+        const auto blocked=[&](const NativeClosestCollector& hand)->WorldTraceQueryResult {
+            cast_continuation_exhausted.fetch_add(1,std::memory_order_relaxed);
+            auto hit=convert_world_hit(hand,from,to,0);
+            if(!hit) return {};
+            hit->entity=0;hit->hand_body=true;hit->body_class=BodyClass::dynamic;hit->static_support=false;
+            WorldTraceQueryResult blocked_result{true,{}};blocked_result.hit=std::move(hit);return blocked_result;
+        };
+        alignas(16) const auto rotation=native_cast_identity;
+        unsigned used=0;NativeClosestCollector last=first;
+        if(!source && !exclude) if(const auto hand=body_exclusion(read,world,first.body)) {
+            NativeCastRequest request=original;request.source_body=hand->record;request.query_id=hand->filter_info;
+            auto collector=make_closest_collector(base+collector_vtable_rva);
+            ++used;cast_continuations.fetch_add(1,std::memory_order_relaxed);
+            cast(reinterpret_cast<void*>(world),&request,rotation.data(),&collector,0);
+            if(!collector.hit_count) return WorldTraceQueryResult{true,{}};   // clear past the hand
+            if(collector.hit_count!=1) return {};                             // malformed, as a first cast's
+            if(!cast_excluded(collector.body)) {                              // what lies behind the hand, reported as a first cast's hit is
+                auto hit=convert_world_hit(collector,from,to,entity_of(read,world,collector.body));
+                if(!hit) return {};
+                if(classify) hit->body_class=body_class_of(read,world,hit->body_handle,hit->entity);
+                WorldTraceQueryResult result{true,{}};result.hit=std::move(hit);return result;
+            }
+            cast_excluded_hits.fetch_add(1,std::memory_order_relaxed);last=collector;   // the other hand (or the exclusion did not apply)
+        }
+        if(used>=kMaxCastContinuations) return blocked(last);
+        NativeRegularContactCollector all{};NativeInitialContactTable table{};
+        if(!NativeRegularContactCollector::initialize(all,table,base,read) || !all.begin()) return blocked(last);
+        ++used;cast_continuations.fetch_add(1,std::memory_order_relaxed);
+        cast(reinterpret_cast<void*>(world),&original,rotation.data(),reinterpret_cast<NativeClosestCollector*>(all.native()),0);
+        if(!all.finish()) return blocked(last);
+        if(source && !native_world_query_source_current(read,*source)) return {};
+        WorldTraceQueryResult result{true,{}};
+        for(unsigned index=0;index<all.count();++index) {
+            const auto contact=all.contact(index);
+            if(!contact) return blocked(last);
+            if(cast_excluded(contact->body)) continue;   // a hand body, either side
+            std::uintptr_t entity{};
+            if(source) {   // the player lease: checked as its own collectors are
+                if(contact->source_body!=source->handle || contact->body==source->handle) return {};
+                const auto resolved=checked_entity_of(read,*source,contact->body);
+                if(!resolved) return {};
+                entity=*resolved;
+            } else entity=entity_of(read,world,contact->body);
+            auto hit=convert_world_hit(contact_record(*contact),from,to,entity);
+            if(!hit) return {};
+            if(classify) hit->body_class=body_class_of(read,world,hit->body_handle,hit->entity);
+            if(source) hit->static_support=false;
+            if(!result.hit || hit->fraction<result.hit->fraction) result.hit=*hit;
+        }
+        if(source && !native_world_query_source_current(read,*source)) return {};
+        return result;
     }
 };
 

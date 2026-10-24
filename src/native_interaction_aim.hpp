@@ -484,7 +484,7 @@ class NativeInteractionAim {
                         const auto cast=[&](const NativeCastExclusion* exclusion) {
                             return NativeWorldTrace::sphere_cast(self->base_,self->read_,reinterpret_cast<NativeWorldTrace::Cast>(self->base_+NativeWorldTrace::cast_rva),
                                 reinterpret_cast<NativeWorldTrace::Construct>(self->base_+NativeWorldTrace::sphere_ctor_rva),*world,seg.from,seg.to,seg.radius,
-                                kWorldOccluderLayers,kWorldOccluderRequired,exclusion,clamp_slot(slot));   // only the clamp's slots are ranked by body class
+                                slot==hand_body_free_slot?kHandBodyFreeLayers:kWorldOccluderLayers,kWorldOccluderRequired,exclusion,clamp_slot(slot));   // only the clamp's slots are ranked by body class
                         };
                         if(seg.exclude) {
                             ++clamp_exclude_casts_;
@@ -667,8 +667,9 @@ class NativeInteractionAim {
     // past the tip), 3 the palm sweep and 4-8 one closing-fingertip sweep per finger (finger_ik.hpp: what each finger could touch; one
     // posted per frame, the others' hits persist <=100 ms). 9 and 10: the profile casts (dxgi_probe.cpp profile_step, radius_profile.hpp):
     // across a prop the hand targets, from its two sides. 11-13: the hand clamp's leading fingertip, wall tip and exclusion sweeps
-    // (hand_clamp.hpp; with slot 0 at most 4 a hand, timed together as clamp_cast_us_, C14).
-    inline static constexpr unsigned weapon_slots=14;
+    // (hand_clamp.hpp; with slot 0 at most 4 a hand, timed together as clamp_cast_us_, C14). 14: the hand body's free probe (final review P3-1,
+    // knob build/hand-body only: posted only while a create or a snap may need it), cast with kHandBodyFreeLayers (WORLD_LOW 0 included).
+    inline static constexpr unsigned weapon_slots=15;
     inline static std::mutex weapon_mutex_;static std::array<std::array<WeaponSegment,weapon_slots>,2> weapon_req_; // defined after the class: clang-cl needs WeaponSegment's member initializers complete
     inline static std::array<std::array<std::optional<WorldTraceHit>,weapon_slots>,2> weapon_hit_{};inline static std::array<std::array<std::uint64_t,weapon_slots>,2> weapon_tick_{},weapon_serial_{};inline static std::array<std::array<std::uint8_t,weapon_slots>,2> weapon_producer_{};
 public:
@@ -676,6 +677,7 @@ public:
     static constexpr unsigned probe_slots=9;   // the finger probes: slots 3-8 (the palm's own and the weapon's come first)
     static constexpr unsigned profile_slot=9;  // and 10
     static constexpr unsigned tip_slot=11,wall_tip_slot=12,exclude_slot=13;   // the hand clamp's (slot 0 is its palm)
+    static constexpr unsigned hand_body_free_slot=14;   // the hand body's create / snap free probe (P3-1)
     static constexpr bool clamp_slot(unsigned slot) {return slot==0 || slot==tip_slot || slot==wall_tip_slot || slot==exclude_slot;}
     inline static std::atomic<std::uint64_t> weapon_casts_{},weapon_cast_ticks_{},weapon_cast_count_{}; // QPC ticks and number of sphere casts run on the game thread
     // The hand clamp's casts (slots 0, 11-13, both hands) in the last game-thread scope: cost (us) and count; serial: one more per scope.
