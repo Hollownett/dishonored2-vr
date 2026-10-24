@@ -371,15 +371,17 @@ assert "return HandBodyNative::set_filter(s->storage,HandBodyNative::world_now()
 assert tick.index("body->service(in,spawn,gate);") < tick.index("body->write_filter(side,want);") < tick.index("body->drive(")
 assert "if(fresh) for(unsigned side=0;side<2;++side) {" in tick and "const std::uint32_t want=last_hands_.filter[side];" in tick
 assert runtime.count("write_filter(") == 1 and "write_filter(" not in code_of(probe)
-# the keeper: the default word returns only in the SafeRelease restore branch, with a new body, or with no body
-keeper = function(coupling, "FilterKeeperOutput update(unsigned side,const FilterKeeperInput& in)")
-assert keeper.count("s.word=default_word;") == 2, "the default word is set in exactly two places"
-restore_at = keeper.index("if(o.restore_layer) {s.phase=Phase::idle;s.word=default_word;")
-recreate_at = keeper.index("if(s.has_gen && in.body_generation!=s.gen && s.phase==Phase::releasing)")
-assert keeper.index("s.word=default_word;") > recreate_at and keeper.rindex("s.word=default_word;") > restore_at
-ended = keeper[keeper.index("} else if(s.phase==Phase::holding)"):keeper.index("if(s.phase==Phase::releasing) {")]
-assert "default_word" not in ended, "the hold's end itself never restores (SafeRelease decides)"
-assert "const auto o=s.safe.update(r);" in keeper and "SafeRelease safe{}" in coupling
+# the keeper: a layer returns only when the object that took it out ended its own SafeRelease check, or the body went (a new body is born with the
+# default word); the hold's end only starts that object's check (DeepSeek P2: one check per released object)
+keeper = function(coupling, "template<class Overlap> FilterKeeperOutput update(unsigned side,const FilterKeeperInput& in,Overlap overlap)")
+ended = keeper[keeper.index("if(s.holding && (!hold || in.held_entity!=s.held.entity)) {"):keeper.index("if(hold && !s.holding) {")]
+assert "s.rel[s.count]=s.held;s.rel[s.count].safe.reset();++s.count;s.holding=false;" in ended and "default" not in ended.replace("max_releases", "")
+assert "if(o.restore_layer) {++out.restored;if(o.unresolved) ++out.unresolved;drop(s,i);} else ++i;" in keeper
+assert keeper.count("drop(s,") == 3, "drop: the restore, a regrab of the same object, and a full table (counted unresolved)"
+assert "for(std::size_t i=0;i<s.count;++i) mask&=hand_body::word_mask(holding_word(s.rel[i].layer));" in keeper, "every running check keeps its layer out"
+assert "default_word" not in keeper[keeper.index("if(hold) s.held.layer"):keeper.index("std::uint32_t mask=default_mask;")]
+assert "const auto o=e.safe.update(r);" in keeper and "SafeRelease safe{}" in coupling
+assert "HandOverlap out;out.answered=count>0;" in coupling, "nothing read is no answer"
 # dxgi: knob off is no behaviour change. The B16 block is knob-gated; everything it sets has today's value when it does not run.
 b16_at = probe.index("// B16: held things follow the hand body (Bonelab")
 b16_block, _ = enclosing_block(probe, probe.index("const double couple_now="))
@@ -407,7 +409,13 @@ assert "if(L.clamp.should_release() && !L.drop_sent)" in pho, "the drop rule sta
 ul = function(grab, "void update_lane(unsigned side,std::uintptr_t world,UINT64 now)")
 assert "const bool coupled=lane.held && lane.capped && coupling_fresh(lane,now) && finite(lane.coupling.offset);" in ul
 assert ul.index("lane.sample_hand=p.hand;") < ul.index("lane.grab.sample(lane.sample_hand,")
-assert "lane.coupling.tick>=lane.bound_at" in function(grab, "static bool coupling_fresh(")
+assert "lane.coupling.serial==lane.hold_serial" in function(grab, "static bool coupling_fresh("), "a coupling reaches only the hold it names"
+assert "lane.hold_serial=++hold_serials_;" in function(grab, "void begin_hold(") and "v.serial=lane.hold_serial;" in grab
+cpl_fn = function(grab, "void couple(unsigned side,std::uint64_t serial,")
+assert "std::lock_guard<std::mutex> lock(coupling_mutex_);" in cpl_fn and "mutex_)" not in cpl_fn.replace("coupling_mutex_)", ""), "never NativeGrab's pass mutex"
+upd = function(grab, "void update(std::uintptr_t dispatcher)")
+assert "std::unique_lock<std::mutex> pub(coupling_mutex_,std::try_to_lock);" in upd and upd.index("coupling_mutex_") < upd.index("update_lane(side,*world,now)")
+assert "lane.grab.rebase(lane.sample_hand);" in ul and ul.index("lane.grab.rebase(") < ul.index("lane.grab.sample(lane.sample_hand,"), "a coupling edge rebases before the sample"
 assert "lane.coupling={};" in function(grab, "void begin_hold(") and "coupling={};" in grab[grab.index("void end_hold() {"):grab.index("void end_hold() {") + 300]
 rel = ul[ul.index("if(lane.capped && coupled && lane.coupling.release && !lane.pending_release)"):ul.index("if(lane.capped) {")]
 assert "end_capped_hold(lane,side,ReleaseReason::lag,true);" in rel and "lane.coupling.release=false;" in rel

@@ -616,6 +616,15 @@ static void b16_checks() {
         // an abandoned body's word is forgotten with it
         hb.service(gameplay_in(t),kPalms);t+=16;CHECK(hb.write_filter(1,held));f.change_world();hb.service(gameplay_in(t,false),kPalms);
         CHECK(hb.status(1).abandons==1);CHECK(hb.filter_word(1)==R1Recipe::filter);
+        CHECK(hb.status(1).filter_stranded==1);CHECK(hb.status(0).filter_stranded==0);   // DeepSeek P3: an untracked body with a stripped word is reported
+        // a destroy the engine could not confirm (unknown) with a stripped word is reported too; a confirmed one is not
+        HandBodyFault::reset_for_tests();FakeHands u;HandBody hu(u.engine());std::uint64_t tu=1000;
+        for(int i=0;i<10;++i,tu+=16) hu.service(gameplay_in(tu),kPalms);
+        CHECK(hu.write_filter(0,held));CHECK(hu.write_filter(1,held));
+        u.destroy_unknown=true;hu.service(gameplay_in(tu,false),kPalms);
+        CHECK(hu.status(0).filter_stranded==1 && hu.status(1).filter_stranded==1 && hu.filter_word(0)==R1Recipe::filter);
+        FakeHands c;HandBody hc(c.engine());for(int i=0;i<10;++i,tu+=16) hc.service(gameplay_in(tu),kPalms);
+        CHECK(hc.write_filter(0,held));hc.service(gameplay_in(tu,false),kPalms);CHECK(hc.status(0).filter_stranded==0 && hc.status(0).destroys==1);
     }
 }
 static void b14_checks() {

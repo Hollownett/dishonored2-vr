@@ -31,6 +31,21 @@ std::array<std::optional<ClampHit>,held_proxy_capacity> answer(const HeldClampOu
     }
     return hits;
 }
+// The release checks' answers per released object (HandFilterKeeper's overlap callback): clear unless told otherwise.
+struct Answers {
+    std::array<std::pair<std::uintptr_t,int>,8> state{};   // 0 clear, 1 inside, 2 unanswered
+    int of(std::uintptr_t e) const {for(const auto& s:state) if(s.first==e) return s.second;return 0;}
+    void set(std::uintptr_t e,int v) {for(auto& s:state) if(s.first==e || !s.first) {s={e,v};return;}}
+    void clear(std::uintptr_t e) {set(e,0);}void inside(std::uintptr_t e) {set(e,1);}void unanswered(std::uintptr_t e) {set(e,2);}
+    HandOverlap operator()(std::uintptr_t e,bool) const {
+        HandOverlap o;const int v=of(e);o.answered=v!=2;
+        if(v==1) {ClampHit h;h.point={0,0,1};h.normal={0,0,1};h.entity=e;o.hit=h;o.depth=.02;}
+        return o;
+    }
+};
+FilterKeeperInput corpse_hold(double now,std::uintptr_t entity) {
+    FilterKeeperInput in{};in.now=now;in.body_ready=true;in.body_generation=3;in.held_layer=hand_body::layer_npc_body_ragdoll;in.held_entity=entity;in.held_corpse=true;return in;
+}
 // One native hold, frame by frame, exactly as publish_held_object runs it (grip = the controller palm here): the clamp sweeps the controller's
 // request, couple_native carries the object on the body; the hand body is a capped first-order servo toward its target, stopped by the wall.
 // feed_body_request: the feedback-loop shape (the clamp fed the body-carried request instead), for the controls.
@@ -188,6 +203,27 @@ int main() {
         for(int i=0;i<900;++i) cyc.step();
         CHECK(length(cyc.target.position-(cyc.body+cyc.offset))>.01);
     }
+    {   // DeepSeek P2: the carried native item trails the controller side by at most the drawn hand's 0.35 m bound, so the hand drawn holding it
+        // (shift = target - request, bounded to the same 0.35 m) always reaches it; within the bound it is exactly body + offset
+        const auto req=pose_at(.3,0,1);
+        const auto far=HoldCoupling::native_request(req,{0,0,1},pose_at(-.6,0,1),true);
+        CHECK(near(far.position.x,.3-.35,1e-12) && near(length(far.position-req.position),DrawnAnchor::bound_m,1e-12));
+        const auto close=HoldCoupling::native_request(req,{0,0,1},pose_at(-.2,.1,1),true);
+        CHECK(near(close.position.x,.1,1e-12) && near(close.position.y,.1,1e-12));
+    }
+    {   // DeepSeek P2: a coupling edge (the body becomes ready or is lost, a snap) moves the hand a grab samples by a known step; without the rebase a
+        // step over 0.5 m drops the press, with it the hold goes on and the step is not thrown
+        const auto bind=[](PhysicalGrab& g) {
+            std::uint64_t tick=1000;
+            g.sample(pose_at(0),0.f,true,1,tick);tick+=11;g.sample(pose_at(0),1.f,true,1,tick);tick+=11;
+            CHECK(g.pressed() && g.bind(pose_at(.1),Vec3{.05,0,1}));return tick;
+        };
+        PhysicalGrab plain;auto tick=bind(plain);
+        CHECK(!plain.sample(pose_at(.6),1.f,true,1,tick) && !plain.pressed());               // a 0.6 m step: read as a discontinuity
+        PhysicalGrab rebased;tick=bind(rebased);
+        rebased.rebase(pose_at(.6));CHECK(rebased.sample(pose_at(.6),1.f,true,1,tick) && rebased.pressed() && rebased.held());
+        tick+=11;rebased.sample(pose_at(.6),1.f,true,1,tick);CHECK(length(rebased.velocity())<.5);   // the step is not motion
+    }
     {   // HeldClamp::project: the planes applied with nothing changed; equal to update()'s own push-out for the same request
         NativeRig a,b;a.wall=b.wall=.35;a.body_on=b.body_on=false;
         for(int i=0;i<120;++i) {
@@ -209,12 +245,12 @@ int main() {
         CHECK(!layers_collide(hand,filter_word(layer_debris,all)));
         CHECK(layers_collide(hand,filter_word(layer_rigid_body,all)));                 // the tank back on RIGID_BODY after SafeRelease's restore
         // a corpse limb on NPC_BODY_RAGDOLL 14: the keeper's word while held, the default after the restore
-        HandFilterKeeper k;FilterKeeperInput in{};in.now=1;in.body_ready=true;in.body_generation=1;in.held_layer=layer_npc_body_ragdoll;
-        const auto held=k.update(0,in);
-        CHECK(held.stripped && held.swapped && held.word==0x000085e4u && HandFilterKeeper::allowed(held.word) && hand_filter_word_allowed(held.word));
+        Answers clear;HandFilterKeeper k;FilterKeeperInput in=corpse_hold(1,0xc0);
+        const auto held=k.update(0,in,clear);
+        CHECK(held.stripped && held.swapped==1 && held.word==0x000085e4u && HandFilterKeeper::allowed(held.word) && hand_filter_word_allowed(held.word));
         CHECK(!layers_collide(held.word,filter_word(layer_npc_body_ragdoll,all)));
-        in.held_layer.reset();in.now=1.1;in.overlap_answered=true;const auto back=k.update(0,in);   // let go, the hand clear of it
-        CHECK(back.restored && !back.unresolved && back.word==hand && layers_collide(back.word,filter_word(layer_npc_body_ragdoll,all)));
+        in.held_layer.reset();in.now=1.1;const auto back=k.update(0,in,clear);   // let go, the hand clear of it
+        CHECK(back.restored==1 && !back.unresolved && back.word==hand && layers_collide(back.word,filter_word(layer_npc_body_ragdoll,all)));
         // a motor-held prop on RIGID_BODY 3: the same
         CHECK(!layers_collide(HandFilterKeeper::holding_word(layer_rigid_body),filter_word(layer_rigid_body,all)));
         // whatever it holds the hand still meets the world and other things, and never the player
@@ -229,30 +265,49 @@ int main() {
         CHECK(!HandFilterKeeper::allowed(hand_filter_word(true)) && !HandFilterKeeper::allowed(filter_word(layer_debris,hand_collides_with(false)|layer_bit(layer_player))));
         CHECK(!HandFilterKeeper::allowed(filter_word(layer_debris,hand_collides_with(false)&~layer_bit(layer_world_low))) && !HandFilterKeeper::allowed(filter_word(layer_rigid_body,hand_collides_with(false))));
     }
-    {   // layer_restore_only_via_safe_release: the default word comes back only when SafeRelease says the hand is clear (or 0.5 s: unresolved), or
-        // with a new body; never on the hold's end itself, never on an unanswered check
-        HandFilterKeeper k;FilterKeeperInput in{};in.now=10;in.body_ready=true;in.body_generation=3;in.held_layer=hand_body::layer_npc_body_ragdoll;
-        CHECK(k.update(0,in).stripped);
-        in.held_layer.reset();in.now+=dt90;
-        auto o=k.update(0,in);CHECK(o.stripped && o.releasing && !o.restored);       // the hold ended, unanswered: kept
-        ClampHit inside;inside.point={0,0,1};inside.normal={0,0,1};
-        for(int i=0;i<30;++i) {in.now+=dt90;in.overlap_answered=true;in.overlap=inside;in.depth=.02;o=k.update(0,in);CHECK(o.stripped && !o.restored);}   // still inside
-        in.now+=dt90;in.overlap.reset();o=k.update(0,in);CHECK(o.restored && !o.stripped && o.word==HandFilterKeeper::default_word && !o.unresolved);
+    {   // layer_restore_only_via_safe_release: the default word comes back only when SafeRelease says the hand is clear of that object (or 0.5 s:
+        // unresolved), or with a new body; never on the hold's end itself, never on an unanswered check
+        Answers w;HandFilterKeeper k;FilterKeeperInput in=corpse_hold(10,0xa1);
+        CHECK(k.update(0,in,w).stripped);
+        in.held_layer.reset();in.now+=dt90;w.unanswered(0xa1);
+        auto o=k.update(0,in,w);CHECK(o.stripped && o.releasing && !o.restored);       // the hold ended, unanswered: kept
+        w.inside(0xa1);
+        for(int i=0;i<30;++i) {in.now+=dt90;o=k.update(0,in,w);CHECK(o.stripped && !o.restored && o.overlap);}   // still inside
+        w.clear(0xa1);in.now+=dt90;o=k.update(0,in,w);CHECK(o.restored==1 && !o.stripped && o.word==HandFilterKeeper::default_word && !o.unresolved);
         // never clear: restored anyway after 0.5 s and counted (B2's rule)
-        HandFilterKeeper u;in.held_layer=hand_body::layer_npc_body_ragdoll;in.now=20;u.update(0,in);in.held_layer.reset();
-        bool restored=false;double since=in.now;
-        while(!restored && in.now<since+1) {in.now+=dt90;in.overlap=inside;in.overlap_answered=true;o=u.update(0,in);restored=o.restored;if(!restored) CHECK(o.stripped);}
-        CHECK(restored && o.unresolved && in.now-since>=SafeRelease::max_seconds-1e-9 && in.now-since<SafeRelease::max_seconds+.05);
+        HandFilterKeeper u;in=corpse_hold(20,0xa2);u.update(0,in,w);in.held_layer.reset();w.inside(0xa2);
+        bool restored=false;const double since=in.now;
+        while(!restored && in.now<since+1) {in.now+=dt90;o=u.update(0,in,w);restored=o.restored>0;if(!restored) CHECK(o.stripped);}
+        CHECK(restored && o.unresolved==1 && in.now-since>=SafeRelease::max_seconds-1e-9 && in.now-since<SafeRelease::max_seconds+.05);
         // a new body (a snap, a recreate) while releasing starts from the default word; no body at all: the default
-        HandFilterKeeper g;in.held_layer=hand_body::layer_npc_body_ragdoll;in.now=30;in.overlap.reset();in.overlap_answered=false;g.update(0,in);
-        in.held_layer.reset();g.update(0,in);in.body_generation=4;o=g.update(0,in);CHECK(o.recreated && !o.stripped && !o.restored);
-        HandFilterKeeper n;in.held_layer=hand_body::layer_npc_body_ragdoll;n.update(0,in);in.body_ready=false;o=n.update(0,in);CHECK(o.recreated && o.word==HandFilterKeeper::default_word);
+        HandFilterKeeper g;in=corpse_hold(30,0xa3);w.unanswered(0xa3);g.update(0,in,w);
+        in.held_layer.reset();g.update(0,in,w);in.body_generation=4;o=g.update(0,in,w);CHECK(o.recreated==1 && !o.stripped && !o.restored);
+        HandFilterKeeper n;in=corpse_hold(31,0xa3);n.update(0,in,w);in.body_ready=false;o=n.update(0,in,w);CHECK(o.recreated==1 && o.word==HandFilterKeeper::default_word);
         // a new body DURING the hold is stripped again (it was born with the default word; the hold still needs the strip)
-        HandFilterKeeper h;in.body_ready=true;in.held_layer=hand_body::layer_npc_body_ragdoll;h.update(0,in);in.body_generation=5;o=h.update(0,in);CHECK(o.stripped && !o.swapped);
-        // a regrab while releasing keeps the word stripped with no new swap
-        HandFilterKeeper rg;rg.update(0,in);in.held_layer.reset();rg.update(0,in);in.held_layer=hand_body::layer_npc_body_ragdoll;o=rg.update(0,in);CHECK(o.stripped && !o.swapped && !o.releasing);
+        HandFilterKeeper h;in=corpse_hold(32,0xa3);h.update(0,in,w);in.body_generation=5;o=h.update(0,in,w);CHECK(o.stripped && !o.swapped);
+        // a regrab of the same object while its check runs continues that entry: stripped, no new swap, its check dropped
+        HandFilterKeeper rg;in=corpse_hold(33,0xa3);rg.update(0,in,w);in.held_layer.reset();rg.update(0,in,w);in=corpse_hold(33.1,0xa3);
+        o=rg.update(0,in,w);CHECK(o.stripped && !o.swapped && !o.releasing);
         // DEBRIS (a native item) and the world are never stripped: nothing to restore
-        HandFilterKeeper d;in.held_layer=hand_body::layer_debris;o=d.update(0,in);CHECK(!o.stripped && !o.swapped && o.word==HandFilterKeeper::default_word);
+        HandFilterKeeper d;in=corpse_hold(34,0xa4);in.held_layer=hand_body::layer_debris;o=d.update(0,in,w);CHECK(!o.stripped && !o.swapped && o.word==HandFilterKeeper::default_word);
+    }
+    {   // DeepSeek P2: a new hold while an earlier object's check still runs keeps that object's layer out until ITS check clears (two objects,
+        // two layers, two checks)
+        Answers w;HandFilterKeeper k;FilterKeeperInput in=corpse_hold(40,0xb1);k.update(0,in,w);
+        in.held_layer.reset();w.inside(0xb1);in.now+=dt90;k.update(0,in,w);                 // corpse A let go while the hand is inside it
+        in.held_layer=hand_body::layer_rigid_body;in.held_entity=0xb2;in.held_corpse=false;in.now+=dt90;   // grab prop B (RIGID_BODY 3)
+        auto o=k.update(0,in,w);
+        const std::uint32_t both=hand_body::filter_word(hand_body::layer_debris,HandFilterKeeper::default_mask&~hand_body::layer_bit(hand_body::layer_npc_body_ragdoll)&~hand_body::layer_bit(hand_body::layer_rigid_body));
+        CHECK(o.word==both && o.swapped==1 && o.releasing);                                  // 14 stays out while A overlaps; 3 out for B
+        for(int i=0;i<10;++i) {in.now+=dt90;o=k.update(0,in,w);CHECK(o.word==both);}
+        w.clear(0xb1);in.now+=dt90;o=k.update(0,in,w);CHECK(o.restored==1 && o.word==HandFilterKeeper::holding_word(hand_body::layer_rigid_body));
+        // corpse A then corpse C, both layer 14: 14 returns only when both checks cleared
+        HandFilterKeeper c;in=corpse_hold(50,0xc1);c.update(0,in,w);in.held_layer.reset();w.inside(0xc1);c.update(0,in,w);
+        in=corpse_hold(50.1,0xc2);c.update(0,in,w);in.held_layer.reset();w.clear(0xc2);o=c.update(0,in,w);   // C let go clear, A still inside
+        CHECK(o.restored==1 && o.stripped && o.word==HandFilterKeeper::holding_word(hand_body::layer_npc_body_ragdoll));
+        w.clear(0xc1);in.now+=dt90;o=c.update(0,in,w);CHECK(o.restored==1 && o.word==HandFilterKeeper::default_word);
+        // unreadable is not clear: an object that cannot be read keeps its check waiting (then 0.5 s, unresolved)
+        NativeRigidBody none[1]{};CHECK(!hand_overlap({0,0,1},R1Recipe::radius,none,0).answered);
     }
     {   // released_inside_geometry_keeps_layer (B2's behaviour with the body on): a native item released inside the floor keeps DEBRIS until its probes
         // read clear (or 0.5 s); the coupling never arms or skips that restore. A corpse limb released around the hand keeps the hand's word the same way.
@@ -262,14 +317,16 @@ int main() {
         SafeReleaseInput in{};in.released=true;
         for(int i=0;i<20;++i) {t+=dt90;in.now=t;in.overlap=floor;in.sweep_answered=true;in.depth=.03;r.step();const auto o=safe.update(in);CHECK(!o.restore_layer && o.write);}
         t+=dt90;in.now=t;in.overlap.reset();const auto o=safe.update(in);CHECK(o.restore_layer && !o.unresolved);
-        HandFilterKeeper k;FilterKeeperInput f{};f.now=1;f.body_ready=true;f.held_layer=hand_body::layer_npc_body_ragdoll;k.update(0,f);
+        HandFilterKeeper k;FilterKeeperInput f=corpse_hold(1,0xd1);Answers w;k.update(0,f,w);
         f.held_layer.reset();const NativeRigidBody limb=[] {NativeRigidBody b;b.pose=pose_at(0,0,1);b.bounds=NativeGrabBounds{{-.06,-.06,.94},{.06,.06,1.06}};b.bone=7;return b;}();
+        Vec3 hand{.08,0,1};   // the hand sphere 0.02 m from the limb box: inside 0.05 + 0.01
+        const auto geometry=[&](std::uintptr_t,bool) {return hand_overlap(hand,R1Recipe::radius,&limb,1);};
         for(int i=0;i<10;++i) {
-            f.now+=dt90;const auto ov=hand_overlap({.08,0,1},R1Recipe::radius,&limb,1);   // the hand sphere 0.02 m from the limb box: inside 0.05 + 0.01
-            CHECK(ov.answered && ov.hit && near(ov.depth,.04,1e-12));f.overlap_answered=true;f.overlap=ov.hit;f.depth=ov.depth;CHECK(k.update(0,f).stripped);
+            f.now+=dt90;const auto ov=geometry(0,true);
+            CHECK(ov.answered && ov.hit && near(ov.depth,.04,1e-12));CHECK(k.update(0,f,geometry).stripped);
         }
-        const auto clear=hand_overlap({.2,0,1},R1Recipe::radius,&limb,1);CHECK(clear.answered && !clear.hit);
-        f.now+=dt90;f.overlap.reset();CHECK(k.update(0,f).restored);
+        hand={.2,0,1};CHECK(geometry(0,true).answered && !geometry(0,true).hit);
+        f.now+=dt90;CHECK(k.update(0,f,geometry).restored==1);
     }
     {   // the visible hand while holding (X-4, B15): a coupled hold is not a yield, so the precedence body > grasp anchor > clamp holds; the old
         // yield would have drawn the bare controller over the grasp anchor

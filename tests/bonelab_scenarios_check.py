@@ -243,7 +243,8 @@ def tank_hand_body_status(on=True, **over):
     hb = hand_body_status()["hand_body"] if on else {"enabled": False, "installed": False}
     if on:
         for sd in hb["sides"]:
-            sd["filter"] = brc.HAND_FILTER_DEFAULT
+            sd.update(filter=brc.HAND_FILTER_DEFAULT, filter_stranded=0)
+        hb["filter_readback_mismatches"] = 0
     status["hand_body"] = hb
     status["hold_coupling"] = coupling_block(frames=900, native=900, uses_body=900 if on else 0)
     for key, value in over.items():
@@ -279,6 +280,10 @@ def hold_coupling_checks():
     stripped = tank_hand_body_status(True)
     stripped["hand_body"]["sides"][1]["filter"] = 0x85E4
     assert "FAIL" in verdicts(stripped, "tank_hand_body"), "the body's own word left stripped"
+    for mutate in (lambda s: s["hand_body"]["sides"][0].update(filter_stranded=1), lambda s: s["hand_body"].update(filter_readback_mismatches=2),
+                   lambda s: s["hand_body"]["sides"][0].pop("filter_stranded"), lambda s: s["hand_body"].pop("filter_readback_mismatches")):
+        b = tank_hand_body_status(True); mutate(b)
+        assert "FAIL" in verdicts(b, "tank_hand_body")
     assert "FAIL" in verdicts(tank_hand_body_status(False, hold_coupling=coupling_block(frames=900, native=900, uses_body=3)), "tank_hand_body")
     absent = tank_hand_body_status(True)
     del absent["hold_coupling"]["sides"][0]["swaps"]
@@ -286,8 +291,9 @@ def hold_coupling_checks():
     # the soak (no hold): idle-correct coupling passes; a used body with no hold, or a word left stripped, fails
     soak = [{**hand_body_status(), "hold_coupling": coupling_block(), "layer": {"pending": 0}} for _ in range(5)]
     for s in soak:
+        s["hand_body"]["filter_readback_mismatches"] = 0
         for sd in s["hand_body"]["sides"]:
-            sd["filter"] = brc.HAND_FILTER_DEFAULT
+            sd.update(filter=brc.HAND_FILTER_DEFAULT, filter_stranded=0)
     assert all(v != "FAIL" for v, _ in brc.check(soak, "hand_body_soak")), brc.check(soak, "hand_body_soak")
     for bad in (coupling_block(uses_body=1), coupling_block(word=0x85E4), coupling_block(swaps=1)):
         b = [dict(s) for s in soak]

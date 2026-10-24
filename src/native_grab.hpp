@@ -144,7 +144,7 @@ public:
 struct CorpseOptions {bool enabled=true;GrabTuning tuning{};bool from_file=false;};
 // The grasp point of the held body as of the last dispatcher tick (a prop or a corpse), for the drawn hand: a mutex-protected copy.
 struct HoldAnchorView {bool active{};Vec3 anchor{};std::uint64_t tick{};bool capped{},corpse{}; // capped: a motor-held corpse or prop (a living guard's yank hold is active but not capped); corpse: a corpse limb or collar
-    std::uintptr_t entity{};int bone{-1},layer{-1};};   // B16: what is held (a corpse's limb bone, -1 for a prop) and its collision layer (pool record +0x6c & 0x1f; -1 unreadable)
+    std::uintptr_t entity{};int bone{-1},layer{-1};std::uint64_t serial{};};   // B16: what is held (a corpse's limb bone, -1 for a prop), its collision layer (pool record +0x6c & 0x1f; -1 unreadable) and this hold's serial
 class NativeGrab {
     friend struct NativeGrabCheck;
 public:
@@ -185,13 +185,15 @@ private:
         bool corpse{},capped{},last_capped{},near_noted{},mass_noted{};
         double mass{},bind_pelvis_z{std::numeric_limits<double>::quiet_NaN()};std::uint32_t bind_motion{};std::optional<std::uint32_t> bind_owner;UINT64 bound_at{};
         HoldAnchorView anchor_view{};
-        // B16 (render thread -> dispatcher, under mutex_): the hand body's lag behind the palm while this capped hold is coupled to the body, and
-        // the coupling's release (a corpse: 0.5 m of lag for 0.25 s; a prop: 1.5 m). Read only while fresh (coupling_fresh_ms).
-        struct Coupling {Vec3 offset{};bool release{};UINT64 tick{};bool active{};} coupling{};
+        // B16 (render thread -> dispatcher, copied from coupling_pub_ each pass): the hand body's lag behind the palm while this capped hold is
+        // coupled to the body, and the coupling's release (a corpse: 0.5 m of lag for 0.25 s; a prop: 1.5 m). Used only while fresh and only for the
+        // hold it names (serial: the render thread saw this very hold; a coupling meant for an earlier hold never reaches a new one).
+        struct Coupling {Vec3 offset{};bool release{};UINT64 tick{};bool active{};std::uint64_t serial{};} coupling{};
         WorldTrackedPose sample_hand{};   // the hand the grab sampled this pass (the controller, or the coupled body pose)
+        std::uint64_t hold_serial{};bool was_coupled{};Vec3 last_offset{};   // B16: this hold's serial; the coupling edge rebases the grab
         void end_hold() {
             held.reset();corpse=capped=last_capped=near_noted=mass_noted=false;mass=0;bind_pelvis_z=std::numeric_limits<double>::quiet_NaN();
-            bind_motion=0;bind_owner.reset();anchor_view={};reset_tow();coupling={};
+            bind_motion=0;bind_owner.reset();anchor_view={};reset_tow();coupling={};was_coupled=false;last_offset={};
         }
         Gate gate=Gate::none;float raw_grip{};UINT64 decision_tick{};bool decision_usable{};
         UINT64 consumed{},last_motor{},last_tow{},last_acquisition{},owner_epoch{},grip_epoch{};
@@ -492,14 +494,15 @@ private:
     // The anchor view the render thread reads (B16: plus what is held and its layer, for the hand body's filter word).
     HoldAnchorView anchor_view_of(const Lane& lane,const NativeRigidBody& body,UINT64 now) const {
         HoldAnchorView v{true,lane.grab.anchor(body.pose),now,lane.capped,lane.corpse};
-        v.entity=body.entity;v.bone=body.bone;
+        v.entity=body.entity;v.bone=body.bone;v.serial=lane.hold_serial;
         if(body.record) if(const auto word=rig::value<std::uint32_t>(read_,body.record+0x6c)) v.layer=static_cast<int>(*word&0x1fu);
         return v;
     }
     static constexpr UINT64 coupling_fresh_ms=50;   // B16: a coupling older than this is ignored (the render thread publishes every frame)
-    // fresh, and published after this hold's bind (a coupling meant for the previous hold never reaches a new one)
+    static constexpr double coupling_step_m=.25;    // B16: a coupled offset that jumps more than this in one pass (a body snap) rebases the grab
+    // fresh, and published for this very hold (its serial: the render thread read this hold's anchor view; never the previous hold's)
     static bool coupling_fresh(const Lane& lane,UINT64 now) {
-        return lane.coupling.active && lane.coupling.tick && lane.coupling.tick>=lane.bound_at && now>=lane.coupling.tick && now-lane.coupling.tick<=coupling_fresh_ms;
+        return lane.coupling.active && lane.coupling.serial==lane.hold_serial && lane.coupling.tick && now>=lane.coupling.tick && now-lane.coupling.tick<=coupling_fresh_ms;
     }
     // The hold begins (every bind site, mutex_ held): classify it, remember where the pelvis was and which motion slot the body uses.
     void begin_hold(Lane& lane,unsigned side,const NativeRigidBody& body,UINT64 now) {
@@ -507,7 +510,7 @@ private:
         lane.capped=lane.corpse || body.bone<0;
         lane.last_capped=false;lane.near_noted=lane.mass_noted=false;lane.mass=0;lane.bind_pelvis_z=std::numeric_limits<double>::quiet_NaN();
         lane.bound_at=now;if(lane.capped) lane.last_motor=0; // no write yet this hold: the first one measures its dt from the bind
-        lane.coupling={};   // B16: the render thread couples the new hold afresh
+        lane.coupling={};lane.hold_serial=++hold_serials_;lane.was_coupled=false;lane.last_offset={};   // B16: the render thread couples the new hold afresh
         {const auto motion=read_motion_state(body);lane.bind_motion=motion.index;lane.bind_owner=motion.owner;}
         if(lane.corpse && body.bone>0) if(const auto pelvis=native_ragdoll_body(read_,base_,body.entity,0)) lane.bind_pelvis_z=pelvis->pose.position.z;
         lane.anchor_view=anchor_view_of(lane,body,now);
@@ -641,6 +644,10 @@ private:
         // Never while not holding: selection and the bind read the raw controller (C9). Not coupled or stale: the controller, as before.
         const bool coupled=lane.held && lane.capped && coupling_fresh(lane,now) && finite(lane.coupling.offset);
         lane.sample_hand=p.hand;if(coupled) lane.sample_hand.position=p.hand.position+lane.coupling.offset;
+        // DeepSeek P2: a coupling edge (the body became ready or was lost, the render stalled) or a body snap moves the sampled hand by a known step;
+        // the grab continues from it instead of reading it as motion (its 0.5 m discontinuity rule would drop the hold, the step would be thrown)
+        if(lane.held && lane.capped && (coupled!=lane.was_coupled || (coupled && length(lane.coupling.offset-lane.last_offset)>coupling_step_m))) {lane.grab.rebase(lane.sample_hand);++coupling_rebases_;}
+        lane.was_coupled=coupled;lane.last_offset=coupled?lane.coupling.offset:Vec3{};
         const bool sample=lane.held && lane.pending_release?false:lane.grab.sample(lane.sample_hand,p.grip,
             usable && (physical_usable || (!lane.held && p.grip<.35f)) && (!lane.held || same_owner),p.epoch,p.tick);
         if(!lane.grab.pressed()) {lane.attempted=lane.acquired=false;if(!lane.owner.physical() && !lane.held) lane.candidates.clear();}
@@ -742,6 +749,8 @@ private:
         if(!world || !game || !rig::typed(read_,base_,*game,0x1c940a8) || rig::value<std::uintptr_t>(read_,*game+0x60410)!=world) return;
         const auto now=GetTickCount64();
         pass_cost_us_=0;
+        {std::unique_lock<std::mutex> pub(coupling_mutex_,std::try_to_lock);   // B16: the render thread's couplings (never waited for)
+         if(pub.owns_lock()) for(unsigned side=0;side<2;++side) if(coupling_pub_[side].serial!=lanes_[side].coupling.serial || coupling_pub_[side].tick!=lanes_[side].coupling.tick) lanes_[side].coupling=coupling_pub_[side];}
         for(unsigned side=0;side<2;++side) update_lane(side,*world,now);
         publish_snapshot_locked();
         if(pass_cost_us_) { // the capped hold's game-thread time for both hands in this callback (budget 0.2 ms)
@@ -875,14 +884,18 @@ public:
     }
     void clear() {{std::lock_guard<std::mutex> lock(mutex_);advance_lifecycle_locked();for(auto& lane:lanes_) {lane.published.usable=false;lane.contact_proxies.reset();lane.obstruction.reset();++lane.published.serial;lane.focus.reset();lane.focus_tick=0;}}contact_.clear();}
     bool holding(unsigned side) {std::lock_guard<std::mutex> lock(mutex_);return lanes_.at(side).held.has_value();}
-    // B16, render thread: this side's capped hold follows the hand body (offset: the body minus the palm, world metres) or not (nullopt: the
-    // controller, as before); release: HoldCoupling's lag rule fired. The dispatcher reads it under the same mutex (try_lock there).
-    void couple(unsigned side,const std::optional<Vec3>& offset,bool release,UINT64 tick) {
+    // B16, render thread: the capped hold `serial` (HoldAnchorView::serial) follows the hand body (offset: the body minus the palm, world metres)
+    // or not (nullopt: the controller, as before); release: HoldCoupling's lag rule fired. Its own small mutex, held only for the copy (DeepSeek
+    // P2: never mutex_, which a dispatcher pass holds for its whole run); the dispatcher copies it with try_lock at the start of each pass.
+    void couple(unsigned side,std::uint64_t serial,const std::optional<Vec3>& offset,bool release,UINT64 tick) {
         if(side>=2) return;
-        std::lock_guard<std::mutex> lock(mutex_);auto& c=lanes_[side].coupling;
-        c.active=offset.has_value();c.offset=offset?*offset:Vec3{};c.release=offset.has_value() && release;c.tick=tick;
+        std::lock_guard<std::mutex> lock(coupling_mutex_);auto& c=coupling_pub_[side];
+        c.active=offset.has_value();c.offset=offset?*offset:Vec3{};c.release=offset.has_value() && release;c.tick=tick;c.serial=serial;
     }
-    std::atomic<UINT64> coupled_releases_{};   // B16: capped holds let go by the hand-lag rule
+    std::atomic<UINT64> coupled_releases_{},coupling_rebases_{};   // B16: capped holds let go by the hand-lag rule; grabs rebased on a coupling edge
+private:
+    std::mutex coupling_mutex_;std::array<Lane::Coupling,2> coupling_pub_{};std::uint64_t hold_serials_{};
+public:
     static NativeGrab* instance() noexcept {return instance_;}
     // The entity whose ragdoll limb this hand holds (0 if none or a prop).
     std::uintptr_t held_ragdoll(unsigned side) {

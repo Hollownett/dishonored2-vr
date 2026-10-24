@@ -184,7 +184,7 @@ public:
              <<",\"lost\":"<<st.lost<<",\"faults\":"<<st.faults<<",\"refused_writes\":"<<st.refused_writes<<",\"writes\":"<<st.writes<<",\"wake_writes\":"<<st.wake_writes
              <<",\"create_refusals\":"<<st.create_refusals<<",\"busy_waits\":"<<st.busy_waits
              <<",\"misplaced_writes\":"<<st.misplaced_writes<<",\"reentrant_writes\":"<<st.reentrant_writes
-             <<",\"filter\":"<<st.filter<<",\"filter_writes\":"<<st.filter_writes<<",\"filter_refused\":"<<st.filter_refused;
+             <<",\"filter\":"<<st.filter<<",\"filter_writes\":"<<st.filter_writes<<",\"filter_refused\":"<<st.filter_refused<<",\"filter_stranded\":"<<st.filter_stranded;
             const auto d=body->drive_status(side);
             o<<",\"drive\":{\"gap_m\":"<<d.gap_m<<",\"speed\":"<<d.speed<<",\"capped\":"<<(d.capped?"true":"false")<<",\"contact_frames\":"<<d.contact_frames<<",\"contact_now\":"<<(d.contact_now?"true":"false")
              <<",\"snaps\":"<<d.snaps<<",\"snap_requests\":"<<d.snap_requests<<",\"snap_blocked\":"<<d.snap_blocked<<",\"cost_us\":"<<d.cost_us

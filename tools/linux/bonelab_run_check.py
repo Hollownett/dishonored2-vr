@@ -184,6 +184,10 @@ def check_hold_coupling(statuses):
         if hb.get("enabled") is True and isinstance(hb.get("sides"), list):
             words = [sd.get("filter") for sd in hb["sides"]]
             add(all(w == HAND_FILTER_DEFAULT for w in words) and len(words) == 2, f"session {i + 1}: the hand bodies' own filter words are the default ({words})")
+            stranded = [sd.get("filter_stranded") for sd in hb["sides"]]
+            add(all(v == 0 for v in stranded), f"session {i + 1}: no untracked body may still carry a stripped word (filter_stranded {stranded})")
+            add(hb.get("filter_readback_mismatches") == 0,
+                f"session {i + 1}: every filter write read back as written (filter_readback_mismatches {hb.get('filter_readback_mismatches')})")
         layer = s.get("layer") if isinstance(s.get("layer"), dict) else {}
         add(layer.get("pending") == 0, f"session {i + 1}: the held-object layer ledger has nothing pending (got {layer.get('pending')})")
     return out

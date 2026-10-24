@@ -130,6 +130,12 @@ public:
            length(hand.position-previous_.position)>.5) return;
         tick_=tick;previous_=hand;velocity_origin_=hand.position;velocity_tick_=tick;
     }
+    // B16: the hand this grab samples moved by a known step (a coupling to the hand body began or ended, the body snapped): continue from it
+    // without reading the step as hand motion (no 0.5 m discontinuity release, no throw velocity from it); the press, the hold and the clock stay.
+    void rebase(const WorldTrackedPose& hand) {
+        if(!valid_sample_ || !grab_pose_valid(hand)) return;
+        previous_=hand;velocity_origin_=hand.position;
+    }
     bool bind(const WorldTrackedPose& object) {return bind(object,object.position);}
     bool bind(const WorldTrackedPose& object,Vec3 contact,double maximum_contact=.3) {
         // A hand clock that went backwards (stale rebase) keeps the cooldown running until it passes the release tick again.

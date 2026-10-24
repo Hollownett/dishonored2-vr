@@ -258,6 +258,7 @@ struct HandBodyStatus {
     std::uint64_t abandons{},queued_destroys{},direct_destroys{},busy_waits{},wake_writes{},create_refusals{},writes{},releases{},lost{},unverified{};
     std::uint64_t misplaced_writes{},reentrant_writes{};
     std::uint32_t filter{};std::uint64_t filter_writes{},filter_refused{};   // B16: the body's filter word as last written (R1 default at create)
+    std::uint64_t filter_stranded{};   // B16: a body we stopped tracking (abandoned, destroy unconfirmed or faulted) may still carry a stripped word
 };
 
 // The last read-back pose for the render thread: the dispatcher publishes with try_lock (never waits), readers copy under the lock.
@@ -317,7 +318,7 @@ public:
             const BodyAction action=life_.update(side,li);
             switch(action) {
             case BodyAction::abandon:            // the world changed under a live body: no engine call at all, counted (last resort)
-                s.pending_destroy=false;s.handle=0;s.attempts=0;reset_filter(side);
+                s.pending_destroy=false;s.handle=0;s.attempts=0;note_filter_unconfirmed(side);reset_filter(side);
                 count(side,&Counters::abandons);
                 if(engine_.forget) engine_.forget(side);
                 break;
@@ -526,7 +527,7 @@ public:
         st.busy_waits=c.busy_waits.load();st.wake_writes=c.wake_writes.load();st.create_refusals=c.create_refusals.load();
         st.writes=c.writes.load();st.releases=c.releases.load();st.lost=c.lost.load();st.unverified=c.unverified.load();
         st.misplaced_writes=c.misplaced_writes.load();st.reentrant_writes=c.reentrant_writes.load();
-        st.filter=c.filter.load(std::memory_order_acquire);st.filter_writes=c.filter_writes.load();st.filter_refused=c.filter_refused.load();
+        st.filter=c.filter.load(std::memory_order_acquire);st.filter_writes=c.filter_writes.load();st.filter_refused=c.filter_refused.load();st.filter_stranded=c.filter_stranded.load();
         return st;
     }
     // Session end: the next service() tick destroys every body (the lifecycle's shutdown input is forced on).
@@ -542,7 +543,7 @@ public:
 private:
     struct Counters {
         std::atomic<std::uint64_t> creates{},destroys{},faults{},refused_writes{},abandons{},queued_destroys{},direct_destroys{},busy_waits{},
-            wake_writes{},create_refusals{},writes{},releases{},lost{},unverified{},misplaced_writes{},reentrant_writes{},filter_writes{},filter_refused{};
+            wake_writes{},create_refusals{},writes{},releases{},lost{},unverified{},misplaced_writes{},reentrant_writes{},filter_writes{},filter_refused{},filter_stranded{};
         std::atomic<std::uint32_t> filter{R1Recipe::filter};   // B16: the body's filter word as last written (the R1 default from each creation)
         std::atomic<std::uint64_t> contact_frames{},snaps{},cost_us{},cost_max_us{},player_drift_um{},drives{},drive_writes{},yields{},skipped{},
             snap_requests{},snap_blocked{},garbage{},second_drives{},root_jumps{},pressed_ticks{},cpu_us{},cpu_max_us{},root_moved_ticks{},root_travel_um{};
@@ -688,23 +689,26 @@ private:
         }
         DestroyOutcome r=DestroyOutcome::refused;
         try {r=engine_.destroy?engine_.destroy(side,s.handle):DestroyOutcome::refused;}
-        catch(const HandBodyEngineFault& f) {latch(side,f.what(),true);finish(side);return;}   // final: never retried; the engine keeps it excluded
+        catch(const HandBodyEngineFault& f) {latch(side,f.what(),true);note_filter_unconfirmed(side);finish(side);return;}   // final: never retried; the engine keeps it excluded
         switch(r) {
         case DestroyOutcome::gone:
             count(side,&Counters::destroys);count(side,&Counters::direct_destroys);finish(side);return;
         case DestroyOutcome::absent:
             count(side,&Counters::lost);if(engine_.forget) engine_.forget(side);finish(side);return;
         case DestroyOutcome::unknown:   // the call returned cleanly; the slot could not be confirmed empty: never reused (runtime), counted
-            count(side,&Counters::destroys);count(side,&Counters::direct_destroys);count(side,&Counters::unverified);finish(side);return;
+            count(side,&Counters::destroys);count(side,&Counters::direct_destroys);count(side,&Counters::unverified);note_filter_unconfirmed(side);finish(side);return;
         case DestroyOutcome::still_present:
-            latch(side,"destroyBodies returned but the body is still there",true);finish(side);return;
+            latch(side,"destroyBodies returned but the body is still there",true);note_filter_unconfirmed(side);finish(side);return;
         case DestroyOutcome::refused:
-            if(++s.attempts>=max_destroy_retries) {latch(side,"destroy refused repeatedly",true);finish(side);return;}
+            if(++s.attempts>=max_destroy_retries) {latch(side,"destroy refused repeatedly",true);note_filter_unconfirmed(side);finish(side);return;}
             s.pending_destroy=true;return;
         }
     }
     void finish(unsigned side) {Side& s=side_[side];life_.destroyed(side);s.handle=0;s.attempts=0;s.pending_destroy=false;reset_filter(side);reset_drive(side);}
     void reset_filter(unsigned side) {side_[side].filter=R1Recipe::filter;counters_[side].filter.store(R1Recipe::filter,std::memory_order_release);}
+    // DeepSeek P3: the manager forgets a body that may still exist (abandoned with its world, a destroy it could not confirm): if that body carried a
+    // stripped word, say so (status filter_stranded) instead of letting the status read the default.
+    void note_filter_unconfirmed(unsigned side) {if(side_[side].filter!=R1Recipe::filter) count(side,&Counters::filter_stranded);}
     void reset_drive(unsigned side) {
         Side& s=side_[side];s.servo={};s.last_drive_s=std::numeric_limits<double>::quiet_NaN();s.snap_pending=false;s.has_cmd=false;s.press_root.reset();s.last_root.reset();s.loco_start.reset();s.loco_last.reset();s.unreadable_motion=0;s.short_streak=0;counters_[side].contact_now.store(false,std::memory_order_relaxed);
     }

@@ -5118,8 +5118,7 @@ void prepare_head_view(void* view) noexcept {
                 // through SafeRelease or with a new body). Knob off, or no ready body: nothing here runs and every hold is exactly B4's / plan A's.
                 for(auto& body_view:hold_body_view) body_view={};
                 if(hand_body_requested.load(std::memory_order_relaxed) && d2vr::HandBodyRuntime::active()) {
-                    static std::array<std::uint64_t,2> pose_seq{};static std::array<double,2> pose_seq_at{};
-                    static std::array<std::uintptr_t,2> coupled_entity{};static std::array<bool,2> filter_corpse{};static std::array<std::uintptr_t,2> filter_entity{};
+                    static std::array<std::uint64_t,2> pose_seq{};static std::array<double,2> pose_seq_at{};static std::array<std::uint64_t,2> coupled_serial{};
                     const double couple_now=std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();const UINT64 couple_ms=GetTickCount64();
                     auto reader=&read_self;
                     for(unsigned side=0;side<2;++side) {
@@ -5131,32 +5130,38 @@ void prepare_head_view(void* view) noexcept {
                         const auto held=physical_grab_requested?native_grab.hold_anchor(side):d2vr::HoldAnchorView{};
                         const bool motor=held.active && held.capped;
                         if(motor) {
-                            if(held.entity!=coupled_entity[side]) {hold_coupling.reset(side);coupled_entity[side]=held.entity;}
+                            if(held.serial!=coupled_serial[side]) {hold_coupling.reset(side);coupled_serial[side]=held.serial;}   // a new hold (a regrab of the same body too)
                             d2vr::CouplingInput in{};in.kind=held.corpse?d2vr::HoldKind::corpse:d2vr::HoldKind::motor_prop;in.body_ready=body_view.ready;in.body=body_view.body;
                             in.controller=palm_grips[side];in.now=couple_now;
                             const auto out=hold_coupling.update(side,in);hold_coupling_stats.note(side,in.kind,out);
-                            if(out.uses_body) {hold_coupled_bits|=1u<<side;native_grab.couple(side,out.target.position-palm_grips[side].position,out.release,couple_ms);}
-                            else native_grab.couple(side,std::nullopt,false,couple_ms);
+                            // the body's lag behind the palm, applied by NativeGrab to the controller grip it samples (the hand frame stays rigid: at no lag the
+                            // grab sees exactly the controller it was bound to)
+                            if(out.uses_body) {hold_coupled_bits|=1u<<side;native_grab.couple(side,held.serial,out.target.position-palm_grips[side].position,out.release,couple_ms);}
+                            else native_grab.couple(side,held.serial,std::nullopt,false,couple_ms);
                         } else {
-                            if(coupled_entity[side]) {hold_coupling.reset(side);coupled_entity[side]=0;native_grab.couple(side,std::nullopt,false,couple_ms);}
+                            if(coupled_serial[side]) {hold_coupling.reset(side);coupled_serial[side]=0;native_grab.couple(side,0,std::nullopt,false,couple_ms);}
                             if(held_clamp_enabled && held_clamp_live.holding && held_clamp_live.side==side && body_view.ready) hold_coupled_bits|=1u<<side;   // a native hold carried by the body
                         }
                         // The hand never collides with what it holds: a held DEBRIS item needs nothing (the hand mask omits DEBRIS); a coupled motor hold of a
-                        // body on a layer the mask includes (a corpse limb 14, a rigid prop 3) takes that layer out until SafeRelease sees the hand clear of it.
+                        // body on a layer the mask includes (a corpse limb 14, a rigid prop 3) takes that layer out until that object's own release check
+                        // (SafeRelease) sees the hand clear of it.
                         d2vr::FilterKeeperInput fk{};fk.now=couple_now;fk.body_ready=d2vr::HandBodyRuntime::ready(side);fk.body_generation=d2vr::HandBodyRuntime::status(side).creates;
                         if(motor && ((hold_coupled_bits>>side)&1u)) {
                             fk.held_layer=held.layer>=0?static_cast<unsigned>(held.layer):held.corpse?d2vr::hand_body::layer_npc_body_ragdoll:d2vr::hand_body::layer_rigid_body;   // unreadable: assume the solid one
-                            filter_entity[side]=held.entity;filter_corpse[side]=held.corpse;
+                            fk.held_entity=held.entity;fk.held_corpse=held.corpse;
                         }
-                        if(hand_filter_keeper.releasing(side) && body_view.body && filter_entity[side]) {   // the release check: the hand sphere against what it let go
+                        const auto hand_at=body_view.body;
+                        const auto fo=hand_filter_keeper.update(side,fk,[&](std::uintptr_t entity,bool corpse) {   // one released object's check
+                            if(!hand_at) return d2vr::HandOverlap{};   // no fresh hand pose this frame: no answer
                             std::array<d2vr::NativeRigidBody,17> parts{};std::size_t count=0;
-                            if(filter_corpse[side]) {for(int bone=0;bone<17;++bone) if(const auto b=d2vr::native_ragdoll_body(reader,image_base,filter_entity[side],bone)) parts[count++]=*b;}
-                            else if(const auto b=d2vr::native_rigid_body(reader,image_base,filter_entity[side])) parts[count++]=*b;
-                            const auto overlap=d2vr::hand_overlap(body_view.body->position,d2vr::R1Recipe::radius,parts.data(),count);
-                            fk.overlap_answered=overlap.answered;fk.overlap=overlap.hit;fk.depth=overlap.depth;
-                        }
-                        const auto fo=hand_filter_keeper.update(side,fk);hand_filter_words[side]=fo.word;hold_coupling_stats.note_filter(side,fo,fk.overlap.has_value());
-                        if(!fo.stripped && !fo.releasing) filter_entity[side]=0;
+                            if(corpse) {for(int bone=0;bone<17;++bone) if(const auto b=d2vr::native_ragdoll_body(reader,image_base,entity,bone)) parts[count++]=*b;}
+                            else if(const auto b=d2vr::native_rigid_body(reader,image_base,entity)) parts[count++]=*b;
+                            auto overlap=d2vr::hand_overlap(hand_at->position,d2vr::R1Recipe::radius,parts.data(),count);
+                            if(!count && !d2vr::NativeHeldObject::live_entity(image_base,reader,entity)) overlap.answered=true;   // gone: nothing to overlap
+                            return overlap;
+                        });
+                        hand_filter_words[side]=fo.word;
+                        hold_coupling_stats.note_filter(side,fo);
                     }
                 }
                 // B15: which pose the visible hand is drawn at: the hand body while it is in contact (or already at the clamp pose), else the clamp output

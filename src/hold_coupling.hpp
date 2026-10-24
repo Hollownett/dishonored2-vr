@@ -23,6 +23,7 @@
 //   prop on RIGID_BODY 3) makes HandFilterKeeper ask for the hand's word without that layer. The default word returns only through SafeRelease
 //   (the released object no longer overlaps the hand body, or 0.5 s passed: counted unresolved), or with a new body (a destroy or a recreate
 //   always starts from the R1 default word).
+#include "drawn_anchor.hpp"
 #include "dwell_timer.hpp"
 #include "hand_body_commands.hpp"
 #include "held_clamp.hpp"
@@ -51,6 +52,10 @@ public:
     static constexpr double lag_release_m=.5,lag_release_s=.25;   // plan A's corpse rule (spec 266/671, ruling B-26), kept equal
     static constexpr double prop_release_m=1.5;                    // props keep PhysicalGrab's 1.5 m rule
     static constexpr double max_dt=.05;                            // a hitch never counts as more dwell than this (Review Focus 4)
+    // A carried native item trails the controller side by at most the drawn hand's own bound (Global: the drawn hand within 0.35 m of the
+    // controller), so the hand drawn holding it can always reach it (DeepSeek P2: a 0.65 m body lag at 6 m/s outran the bounded drawn shift).
+    static constexpr double native_max_lag_m=.35;
+    static_assert(native_max_lag_m==DrawnAnchor::bound_m,"the drawn-hand bound");
     static_assert(lag_release_m==PhysicalGrab::lag_release_m && lag_release_s==PhysicalGrab::lag_release_s,"the corpse rule is plan A's");
 
     // A usable body pose: ready and finite.
@@ -59,7 +64,9 @@ public:
     // from this frame's controller-side request, never from the body or a past frame) applied at the body: the object is carried by the hand body.
     static WorldTrackedPose native_request(const WorldTrackedPose& request,Vec3 grip,const std::optional<WorldTrackedPose>& body,bool body_ready) {
         if(!usable(body_ready,body) || !finite(grip)) return request;
-        WorldTrackedPose out=request;out.position=body->position+(request.position-grip);
+        Vec3 lag=body->position-grip;const double l=length(lag);
+        if(l>native_max_lag_m) lag=lag*(native_max_lag_m/l);
+        WorldTrackedPose out=request;out.position=request.position+lag;   // = body + (request - grip) while the lag is within the bound
         return finite(out.position)?out:request;
     }
     // Native: the same request moved from the grip to the controller palm (what B4 would request with the hand exactly at the controller).
@@ -117,21 +124,26 @@ inline CouplingOutput couple_native(HoldCoupling& coupling,unsigned side,const H
 }
 
 // ---- the hand body's filter word while it holds something (B16 ruling: no pair API, no 0x91b50 / record 0x3a)
+// The release check after a hold that took a layer out of the mask: does the hand body still overlap the released object? answered false: the
+// object could not be read this frame (SafeRelease waits); answered with no hit: clear (or the object is gone).
+struct HandOverlap {bool answered{};std::optional<ClampHit> hit;double depth{};};
 struct FilterKeeperInput {
     double now{};
     bool body_ready{};                    // a hand body exists on this side (no body: nothing to keep)
     std::uint64_t body_generation{};      // the side's create count: a new body (a snap, a recreate) starts with the R1 default word
     std::optional<unsigned> held_layer;   // the layer of what this hand holds through the body now (none: nothing, or not coupled)
-    // The release check after a hold that took a layer out of the mask: does the hand body still overlap the released object?
-    bool overlap_answered{};std::optional<ClampHit> overlap;double depth{};
+    std::uintptr_t held_entity{};bool held_corpse{};   // what is held (each released object gets its own release check)
 };
-struct FilterKeeperOutput {std::uint32_t word{};bool stripped{},releasing{},swapped{},restored{},unresolved{},recreated{};};
+// Counts per update (the status sums them): swaps = stripping holds begun, restores = releases SafeRelease ended (unresolved: after 0.5 s
+// still overlapping), body_resets = releases ended because the body went or was recreated (it carries the default word).
+struct FilterKeeperOutput {std::uint32_t word{};bool stripped{},releasing{},overlap{};unsigned swapped{},restored{},unresolved{},recreated{};};
 class HandFilterKeeper {
 public:
     static constexpr std::uint32_t default_word=hand_body::hand_filter_word(false);
     static constexpr std::uint32_t default_mask=hand_body::word_mask(default_word);
     static constexpr std::uint32_t world_mask=hand_body::layer_bit(hand_body::layer_world_low)|hand_body::layer_bit(hand_body::layer_world_low_high)|
         hand_body::layer_bit(hand_body::layer_world_high)|hand_body::layer_bit(hand_body::layer_mover);
+    static constexpr std::size_t max_releases=4;   // objects let go whose release check is still running, per side
     // A layer the hand would collide with that is not the world's (the world stays solid whatever the hand holds).
     static constexpr bool strippable(unsigned layer) {return layer<27 && (default_mask&hand_body::layer_bit(layer))!=0 && (world_mask&hand_body::layer_bit(layer))==0;}
     static constexpr std::uint32_t holding_word(unsigned layer) {
@@ -141,33 +153,49 @@ public:
     static constexpr bool allowed(std::uint32_t word) {
         return hand_body::word_layer(word)==hand_body::layer_debris && (hand_body::word_mask(word)&~default_mask)==0 && (hand_body::word_mask(word)&world_mask)==world_mask;
     }
-    FilterKeeperOutput update(unsigned side,const FilterKeeperInput& in) {
+    // overlap(entity, corpse) -> HandOverlap: the release check of one released object (called only for objects whose release is running).
+    // The word is the default mask without the held layer and without the layer of every object still in its release check: a layer returns
+    // only when the last object of that layer cleared its own SafeRelease (or the body went: a new body is born with the default word).
+    template<class Overlap> FilterKeeperOutput update(unsigned side,const FilterKeeperInput& in,Overlap overlap) {
         FilterKeeperOutput out;out.word=default_word;
         if(side>=2) return out;
         State& s=state_[side];
-        if(!in.body_ready) {out.recreated=s.word!=default_word;s=State{};return out;}   // no body: its word went with it; a new one starts at the default
-        if(s.has_gen && in.body_generation!=s.gen && s.phase==Phase::releasing) {   // a new body after the hold: it is born with the default word
-            s.phase=Phase::idle;s.word=default_word;s.safe.reset();out.recreated=true;
-        }
+        if(!in.body_ready) {out.recreated=s.count+(s.holding?1u:0u);s=State{};return out;}   // no body: its word went with it
+        if(s.has_gen && in.body_generation!=s.gen && s.count) {out.recreated=static_cast<unsigned>(s.count);s.count=0;}   // a new body: born with the default
         s.gen=in.body_generation;s.has_gen=true;
         const bool hold=in.held_layer && strippable(*in.held_layer);
-        if(hold) {
-            out.swapped=s.phase==Phase::idle;   // default -> stripped (a regrab while releasing keeps the stripped word: no new swap)
-            s.phase=Phase::holding;s.word=holding_word(*in.held_layer);s.safe.reset();
-        } else if(s.phase==Phase::holding) {s.phase=Phase::releasing;s.safe.reset();}   // the hold ended: SafeRelease decides when the default returns
-        if(s.phase==Phase::releasing) {
-            SafeReleaseInput r{};r.now=in.now;r.released=true;r.overlap=in.overlap;r.sweep_answered=in.overlap_answered;r.depth=in.depth;
-            const auto o=s.safe.update(r);
-            if(o.restore_layer) {s.phase=Phase::idle;s.word=default_word;s.safe.reset();out.restored=true;out.unresolved=o.unresolved;}
+        if(s.holding && (!hold || in.held_entity!=s.held.entity)) {   // the hold ended (or moved to another object): its release check starts
+            if(s.count==max_releases) {++out.unresolved;++out.restored;drop(s,0);}   // no room: the oldest check gives up (counted unresolved)
+            s.rel[s.count]=s.held;s.rel[s.count].safe.reset();++s.count;s.holding=false;
         }
-        out.word=s.word;out.stripped=s.word!=default_word;out.releasing=s.phase==Phase::releasing;
+        if(hold && !s.holding) {
+            bool resumed=false;   // a regrab of an object still in its release check continues that entry (no new swap)
+            for(std::size_t i=0;i<s.count;++i) if(s.rel[i].entity==in.held_entity) {s.held=s.rel[i];drop(s,i);resumed=true;break;}
+            if(!resumed) {s.held=Entry{};s.held.entity=in.held_entity;s.held.corpse=in.held_corpse;++out.swapped;}
+            s.holding=true;
+        }
+        if(hold) s.held.layer=*in.held_layer;
+        for(std::size_t i=0;i<s.count;) {
+            Entry& e=s.rel[i];
+            const HandOverlap ov=overlap(e.entity,e.corpse);
+            out.overlap=out.overlap || ov.hit.has_value();
+            SafeReleaseInput r{};r.now=in.now;r.released=true;r.overlap=ov.hit;r.sweep_answered=ov.answered;r.depth=ov.depth;
+            const auto o=e.safe.update(r);
+            if(o.restore_layer) {++out.restored;if(o.unresolved) ++out.unresolved;drop(s,i);} else ++i;
+        }
+        std::uint32_t mask=default_mask;
+        if(s.holding) mask&=hand_body::word_mask(holding_word(s.held.layer));
+        for(std::size_t i=0;i<s.count;++i) mask&=hand_body::word_mask(holding_word(s.rel[i].layer));
+        out.word=mask==default_mask?default_word:hand_body::filter_word(hand_body::layer_debris,mask);
+        out.stripped=out.word!=default_word;out.releasing=s.count>0;
         return out;
     }
-    bool releasing(unsigned side) const {return side<2 && state_[side].phase==Phase::releasing;}
+    bool releasing(unsigned side) const {return side<2 && state_[side].count>0;}
     void reset(unsigned side) {if(side<2) state_[side]=State{};}
 private:
-    enum class Phase {idle,holding,releasing};
-    struct State {Phase phase{Phase::idle};std::uint32_t word{default_word};SafeRelease safe{};std::uint64_t gen{};bool has_gen{};};
+    struct Entry {std::uintptr_t entity{};bool corpse{};unsigned layer{};SafeRelease safe{};};
+    struct State {Entry held{};bool holding{};std::array<Entry,max_releases> rel{};std::size_t count{};std::uint64_t gen{};bool has_gen{};};
+    static void drop(State& s,std::size_t i) {for(std::size_t k=i+1;k<s.count;++k) s.rel[k-1]=s.rel[k];--s.count;s.rel[s.count]=Entry{};}
     std::array<State,2> state_{};
 };
 static_assert(HandFilterKeeper::default_word==0x000885e4u,"the R1 word");
@@ -177,10 +205,10 @@ static_assert(!HandFilterKeeper::strippable(hand_body::layer_world_low) && !Hand
 static_assert(HandFilterKeeper::allowed(HandFilterKeeper::default_word) && HandFilterKeeper::allowed(HandFilterKeeper::holding_word(hand_body::layer_rigid_body)),"");
 
 // The hand body overlaps a released object: its sphere (radius + margin) reaches the object's bounds (a corpse: any of its 17 limb spheres).
-// Pure geometry over what the caller read; the answer feeds HandFilterKeeper's SafeRelease.
-struct HandOverlap {bool answered{};std::optional<ClampHit> hit;double depth{};};
+// Pure geometry over what the caller read; the answer feeds HandFilterKeeper's SafeRelease. Nothing read (count 0) is no answer: the caller
+// answers "clear" itself only when it knows the object is gone.
 inline HandOverlap hand_overlap(Vec3 hand,double hand_radius,const NativeRigidBody* bodies,std::size_t count,double margin=.01) {
-    HandOverlap out;out.answered=true;
+    HandOverlap out;out.answered=count>0;
     if(!finite(hand)) {out.answered=false;return out;}
     for(std::size_t i=0;i<count;++i) {
         const auto contact=bodies[i].contact(hand);
@@ -205,14 +233,12 @@ public:
         if(o.release) c.releases.fetch_add(1,std::memory_order_relaxed);
         c.lag_m.store(o.lag_m,std::memory_order_relaxed);
     }
-    void note_filter(unsigned side,const FilterKeeperOutput& f,bool overlap) {
+    void note_filter(unsigned side,const FilterKeeperOutput& f) {
         if(side>=2) return;
         auto& c=c_[side];c.word.store(f.word,std::memory_order_relaxed);
-        if(f.swapped) c.swaps.fetch_add(1,std::memory_order_relaxed);
-        if(f.restored) c.restores.fetch_add(1,std::memory_order_relaxed);
-        if(f.unresolved) c.unresolved.fetch_add(1,std::memory_order_relaxed);
-        if(f.recreated) c.recreated.fetch_add(1,std::memory_order_relaxed);
-        if(f.releasing && overlap) c.overlap_frames.fetch_add(1,std::memory_order_relaxed);
+        c.swaps.fetch_add(f.swapped,std::memory_order_relaxed);c.restores.fetch_add(f.restored,std::memory_order_relaxed);
+        c.unresolved.fetch_add(f.unresolved,std::memory_order_relaxed);c.recreated.fetch_add(f.recreated,std::memory_order_relaxed);
+        if(f.overlap) c.overlap_frames.fetch_add(1,std::memory_order_relaxed);
     }
     std::string json() const {
         std::ostringstream o;o<<"{\"sides\":[";

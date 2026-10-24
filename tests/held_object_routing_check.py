@@ -12,7 +12,7 @@ assert 'hand_holding_object=state->carry.hold_object();hand_hold_state=state->ca
 assert 'hand_holding_object=state->carry.active[0]'not in source
 assert 'hand_hold_state=state->carry.states[0]'not in source
 context=source.index('NativeHeldPlacement::process_owner().context(hands.epoch,')
-publication=source.index('publish_held_object(side,requested_grip,raw_grips[side],state,hands.epoch,hands.tick,hands.reference_epoch,acquisition)',context)
+publication=source.index('publish_held_object(side,requested_grip,raw_grips[side],palm_grips[side],state,hands.epoch,hands.tick,hands.reference_epoch,acquisition)',context)
 context_block=source[context:source.index(');',context)+2]
 for condition in ('held_object_installed','full_body_requested','tracked_arms_requested','!full_body_stopping.load()',
                   'avatar_pose_gate.load()','!authored_camera','game_logic_mask()==2','XR_SESSION_STATE_FOCUSED','XR_SUCCESS'):
