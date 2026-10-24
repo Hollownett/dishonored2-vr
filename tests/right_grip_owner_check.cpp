@@ -50,5 +50,11 @@ int main() {
         g.sample(hp,.9f,false,1,100);g.sample(hp,.9f,true,1,110);assert(!g.pressed()); // squeezed while the game owned it
         g.arm();g.sample(hp,.9f,true,1,120);assert(g.pressed() && g.bind(hp)); // handed over mid-press: latches and binds
     }
-    std::cout<<"PASS: pre-RB reservation, latched native/physical choice, contact change, menus/focus, occupied-hand revoke, fresh release and native pad mapping\n";
+    {   // empty_fist_never_presses_native_rb: the native RB is pressed only with something in hand (a hold, a carry, a held or drawn sword); the full 16-row table
+        for(int mask=0;mask<16;++mask) assert(d2vr::fist_may_press_native_rb(mask&1,mask&2,mask&4,mask&8)==(mask!=0));
+        assert(!d2vr::fist_may_press_native_rb(false,false,false,false));
+        assert(d2vr::fist_may_press_native_rb(true,false,false,false) && d2vr::fist_may_press_native_rb(false,true,false,false));
+        assert(d2vr::fist_may_press_native_rb(false,false,true,false) && d2vr::fist_may_press_native_rb(false,false,false,true));
+    }
+    std::cout<<"PASS: pre-RB reservation, latched native/physical choice, contact change, menus/focus, occupied-hand revoke, fresh release, native pad mapping and empty-fist RB gate\n";
 }

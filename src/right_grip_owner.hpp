@@ -1,6 +1,9 @@
 #pragma once
 #include <cmath>
 namespace d2vr {
+// v609 G3: an empty fist never presses the native RB. The physical right grip reaches the native shoulder only when something is in the hand:
+// a hold, a carry, a held sword (blocks) or a drawn sword (chokes). Pure, so the routing is tested on its own.
+inline bool fist_may_press_native_rb(bool physical_hold,bool native_carry,bool sword_held,bool sword_drawn) noexcept {return physical_hold || native_carry || sword_held || sword_drawn;}
 class RightGripOwner {
 public:
     enum class Role {release,ready,native,physical};

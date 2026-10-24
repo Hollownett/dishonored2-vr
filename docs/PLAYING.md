@@ -50,8 +50,8 @@ headset listening validation is still required. See [audio evidence and checks](
 | Right stick down (flick) | Crouch / stand |
 | Sit or crouch down in real life | The character crouches; stand up to stand. The view keeps your real head height |
 | Grip alone (about 45% squeeze, v620 candidate) | Use offered doors, keyholes, ammo, loot and levers, or the offered body carry; it fires about 55 ms sooner when the trigger finger stays off the trigger and the game is asked for the target while you squeeze. In the v548 test candidate, an actual native choke hint gives the right grip a nonlethal choke hold instead; being behind an NPC alone does not |
-| Full fist (grip + trigger, grip about 45%) | Grab physically: a body by a limb, a bottle, a glass, an ashtray, any loose prop. The fingers wrap whatever the hand holds. Once held, the grip alone keeps it |
-| Right grip over your right shoulder | Draw the sword. It stays in your hand only while you keep squeezing (see *Weapons in your hands*) |
+| Full fist (grip + trigger, grip about 45%) | Grab physically: a body by a limb, a bottle, a glass, an ashtray, any loose prop. The fingers wrap whatever the hand holds. Once held, the grip alone keeps it. An empty fist never presses the game's right shoulder: it does not draw the sword. A fist still blocks with a held sword and still chokes when the game offers it |
+| Right grip over your right shoulder | Draw the sword. Reach over the right shoulder and squeeze: a fist at your side does not draw it. It stays in your hand only while you keep squeezing (see *Weapons in your hands*) |
 | Left grip at your left hip | Draw the pistol or crossbow. It stays in your hand only while you keep squeezing |
 | Y on an offered Talk prompt | Talk to that exact NPC or open the shop; the prompt shows Y. Grip no longer commits that Talk offer |
 | Y held for 0.6 s (no Talk offer or wheel) | Open the game pause menu. Release, then hold Y again while paused for VR settings |
@@ -160,7 +160,7 @@ Weapons are held like real objects: a weapon stays in your hand only while you s
   or when you are 12 m away.
 - **How you hold the hilt decides the grip.** At the shoulder, a fist pointing up draws the blade above the fist (normal grip),
   a fist pointing down draws it below the fist (reverse grip). Picking a sword up from the floor, a hand pointing along the
-  blade gives a normal grip, against the blade a reverse grip. There is no button for it.
+  blade gives a normal grip, against the blade a reverse grip. There is no button for it. A fist never draws the sword: reach over the right shoulder and squeeze to draw. A fist still blocks with a held sword and still chokes when the game offers it.
 - **Pistol and crossbow (on your left hip).** The Quick Access Wheel puts the gun in your left hand; it stays there until you
   grip it. From then on it is held while you squeeze the left grip, and goes back to the hip when you let go. Squeeze the left
   grip at your left hip to draw it again. The trigger fires only a gun in the hand: an empty left hand's trigger does not pull

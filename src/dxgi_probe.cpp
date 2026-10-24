@@ -8204,9 +8204,12 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                     // Right grip without a prop stays native RB (block / choke).
                                     // A trigger's Use never holds the grip back; only a grip that is itself deciding a carry does.
                                     const bool right_physical=grip_intent_out[1].fist || native_grab.holding(1);
+                                    bool right_carrying{},right_sword_drawn{};   // v609 G3: what the right hand is holding or has drawn, read under one lock
+                                    {std::lock_guard<std::mutex> hand_lock(hand_state_mutex);right_carrying=hand_carrying_bits!=0 || hand_holding_object;right_sword_drawn=(hand_weapon_bits&2u)!=0;}
+                                    const bool right_fist_rb=d2vr::fist_may_press_native_rb(native_grab.holding(1),right_carrying,sword_grip.held(),right_sword_drawn);
                                     const float right_native=native_grab.filter_native_grip(1,right_physical?physical_right_grip:0.f,game_xr->pose_epoch(),GetTickCount64(),logic==2,grab_focus,grab_use || sword_owns || choke_route.consume_use || (grip_use[1] && right_interaction.interact),
                                         grip_use[1] && interaction.consume_trigger[1] && !right_interaction.interact);
-                                    if(right_physical) input.right_grip=right_native;
+                                    if(right_physical) input.right_grip=right_fist_rb?right_native:0.f;
                                     (void)native_grab.filter_native_grip(0,grip_intent_out[0].fist || native_grab.holding(0)?physical_left_grip:0.f,game_xr->pose_epoch(),GetTickCount64(),logic==2,grab_focus,grab_use || gun_owns || (grip_use[0] && left_interaction.interact),
                                         grip_use[0] && interaction.consume_trigger[0] && !left_interaction.interact);
                                 }
