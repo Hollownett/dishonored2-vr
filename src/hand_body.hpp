@@ -111,7 +111,8 @@ struct BodyMotion {Vec3 position{},velocity{},spin{};};
 // snapped back as an empty hand is (the target still has to be free), while a stuck object is the hold's own release. A motor hold never sets
 // it: a recreated body would be born inside the held prop or limb with the R1 default word (its layer back in the mask).
 struct DriveInput {unsigned side{};WorldTrackedPose target{};double held_kg{};double now{};bool yield{};
-                   bool target_free{};std::optional<Vec3> player_root{};bool locomotion{};bool holding{};bool hold_snap_ok{};};
+                   bool target_free{};std::optional<Vec3> player_root{};bool locomotion{};bool holding{};bool hold_snap_ok{};
+                   Vec3 player_velocity{};};   // Fix B: the player's horizontal velocity (m/s), the servo's feedforward: the target rides on the player
 struct DriveStatus {double gap_m{};double speed{};bool capped{},contact_now{};std::uint64_t contact_frames{},snaps{},cost_us{},cost_max_us{},player_drift_um{};
                     double dt_s{};std::uint64_t drives{},drive_writes{},yields{},skipped{},snap_requests{},snap_blocked{},garbage{},second_drives{},root_jumps{},pressed_ticks{};
                     // fix round 1: thread CPU time of this side's drive (QueryThreadCycleTime; 0 when unavailable), and the positive control for
@@ -496,7 +497,7 @@ public:
             // B16 fix round 2: while holding, the stuck timer never runs (target_blocked resets it) and no snap is asked for; the rules resume once
             // the hold ends. Final review P2-1: a native hold whose object is free snaps a stuck hand like an empty one (hold_snap_ok)
             const bool hold_waits=in.holding && !in.hold_snap_ok;
-            const auto out=servo_step(s.servo,in.target,body,m->velocity,m->spin,in.held_kg,dt,std::numeric_limits<double>::quiet_NaN(),servo_cfg_,tuning_,!in.target_free || hold_waits);
+            const auto out=servo_step(s.servo,in.target,body,m->velocity,m->spin,in.held_kg,dt,std::numeric_limits<double>::quiet_NaN(),servo_cfg_,tuning_,!in.target_free || hold_waits,kDefaultHeldLever,in.player_velocity);
             c.capped.store(out.capped,std::memory_order_relaxed);
             if(out.valid) {linear=out.linear;angular=out.angular;}   // invalid (a gap past max_gap, a bad target): hold, and the far gap snaps
             if(in.holding) count(side,&Counters::held_ticks);

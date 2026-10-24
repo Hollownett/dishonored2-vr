@@ -568,14 +568,14 @@ WorldTrackedPose pose_at(Vec3 p) {WorldTrackedPose w;w.position=p;w.basis={Vec3{
 struct DriveRig {
     FakeDrive w;HandBody hb{w.engine()};double t=10;std::uint64_t ms=1000;
     std::array<Vec3,2> target{Vec3{.4,.2,1.2},Vec3{.4,-.2,1.2}};std::array<bool,2> free{true,true},yield{false,false};
-    std::optional<Vec3> root{};bool locomotion=false;bool gameplay=true;std::array<bool,2> holding{false,false},hold_snap_ok{false,false};
+    std::optional<Vec3> root{};Vec3 player_velocity{};bool locomotion=false;bool gameplay=true;std::array<bool,2> holding{false,false},hold_snap_ok{false,false};
     void tick(int drives_per_side=1) {
         w.log.push_back("tick");
         std::array<std::optional<Vec3>,2> spawn{};
         for(unsigned side=0;side<2;++side) if(free[side]) spawn[side]=target[side];
         hb.service(gameplay_in(ms,gameplay),spawn);
         for(int k=0;k<drives_per_side;++k) for(unsigned side=0;side<2;++side) {
-            DriveInput d;d.side=side;d.target=pose_at(target[side]);d.now=t;d.yield=yield[side];d.target_free=free[side];d.player_root=root;d.locomotion=locomotion;d.holding=holding[side];d.hold_snap_ok=hold_snap_ok[side];
+            DriveInput d;d.side=side;d.target=pose_at(target[side]);d.now=t;d.yield=yield[side];d.target_free=free[side];d.player_root=root;d.locomotion=locomotion;d.player_velocity=player_velocity;d.holding=holding[side];d.hold_snap_ok=hold_snap_ok[side];
             hb.drive(d);
         }
         w.step();t+=FakeDrive::dt;ms+=11;
@@ -801,6 +801,16 @@ static void b14_checks() {
         for(int i=0;i<60;++i) r.tick();
         CHECK(r.w.creates_side[0]==0);CHECK(r.w.creates_side[1]==1);CHECK(!r.hb.ready(0));
         r.free[0]=true;r.tick();CHECK(r.w.creates_side[0]==1);CHECK(r.hb.ready(0));
+    }
+    {   // drive_passes_player_velocity: the targets ride a player running at 6 m/s along x; with the velocity as feedforward the body keeps up, without it it lags
+        double gap_with=0,gap_without=0;
+        for(const bool use:{true,false}) {
+            HandBodyFault::reset_for_tests();DriveRig r;r.tick();r.tick();
+            if(use) r.player_velocity=Vec3{6,0,0};
+            for(int i=0;i<150;++i) {r.target[0].x+=6*FakeDrive::dt;r.target[1].x+=6*FakeDrive::dt;r.tick();}
+            (use?gap_with:gap_without)=r.hb.drive_status(0).gap_m;   // the gap the last drive saw
+        }
+        CHECK(gap_with<=.03);CHECK(gap_without>=.15);
     }
     {   // drive_dt_is_real_interval: dt is the time since this side's last drive, not the dispatcher's interval; a clock that does not
         // advance writes nothing; a long gap (a hitch) is clamped by the servo, not refused

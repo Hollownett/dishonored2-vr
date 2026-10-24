@@ -26,8 +26,10 @@ HAND_BODY_PRESSED_TICKS = 1000  # review P3-5: about 5 s per hand inside the cap
 HAND_BODY_DRIFT_UM = 1000        # proof (b): the player root's unexplained movement while a hand is pressed into the capsule
 TANK_HAND_BODY = ("tank_hand_body",)  # Plan B B16 S15: the tank carried by the hand body (run with --knob hand-body and --knob no-hand-body)
 RUNS = ("run_hands", "run_hands_sword")  # G1a: the running-hands scenarios, judged from artifacts/locomotion-hands.csv (knob build/locomotion-trace)
-RUN_MIN_ROWS, STAND_SPEED, RUN_SPEED, BURST_SPEED, BURST_WINDOW_MS = 200, 0.3, 2.5, 1.0, 1000
-LOCOMOTION_COLUMNS = ("elapsed_ms", "speed_mps", "root_gap_m", "palm_residual_l", "palm_residual_r", "drawn_residual_l", "drawn_residual_r",
+# Running rows >= 60: the spawn corridor (~20 m of straight) limits how long the run can last (1-3 s at >= 2.5 m/s, 72-124 rows in Task 8's runs); standing keeps 200.
+RUN_MIN_ROWS, STAND_MIN_ROWS, STAND_SPEED, RUN_SPEED, BURST_SPEED, BURST_WINDOW_MS = 60, 200, 0.3, 2.5, 1.0, 1000
+RUN_RESIDUAL_MARGIN = 0.015  # Task 9 acceptance: a side's running median drawn_residual may exceed its standing median by at most this (m)
+LOCOMOTION_COLUMNS = ("elapsed_ms", "speed_mps", "root_gap_m", "root_gap_valid", "palm_residual_l", "palm_residual_r", "drawn_residual_l", "drawn_residual_r",
                       "visual_gap_l", "visual_gap_r", "source_l", "source_r", "blends", "contact_l", "contact_r")
 HAND_FILTER_DEFAULT = 0x000885E4  # R1Recipe::filter: the hand body's word whenever it holds nothing through the body
 
@@ -137,8 +139,8 @@ def blend_bursts(rows):
 
 
 def check_run(statuses):
-    """G1a run_hands / run_hands_sword: bin the trace (standing speed < 0.3, running speed >= 2.5), FAIL only when it is missing or too short,
-    and print the numbers (INFO) Task 9 turns into acceptance lines."""
+    """G1a/G1b run_hands / run_hands_sword: bin the trace (standing speed < 0.3, running speed >= 2.5; rows with root_gap_valid 0 ignored). FAIL when it is
+    missing or too short, when a side's running median drawn_residual exceeds standing by more than 1.5 cm, or on a free-air blend burst."""
     out = []
     for n, status in enumerate(statuses):
         tag = f"session {n + 1}: " if len(statuses) > 1 else ""
@@ -146,9 +148,11 @@ def check_run(statuses):
         if not rows:
             out.append(("FAIL", f"{tag}locomotion-hands.csv is missing or empty (run with --knob locomotion-trace)"))
             continue
-        stand = [r for r in rows if r["speed_mps"] < STAND_SPEED]
-        run = [r for r in rows if r["speed_mps"] >= RUN_SPEED]
-        out.append(("PASS" if len(stand) >= RUN_MIN_ROWS else "FAIL", f"{tag}standing rows >= {RUN_MIN_ROWS} (got {len(stand)})"))
+        # rows where the anchor root or an arm-upload root was unknown (root_gap_valid 0) say nothing about the carry: the bins ignore them
+        valid = [r for r in rows if r["root_gap_valid"]]
+        stand = [r for r in valid if r["speed_mps"] < STAND_SPEED]
+        run = [r for r in valid if r["speed_mps"] >= RUN_SPEED]
+        out.append(("PASS" if len(stand) >= STAND_MIN_ROWS else "FAIL", f"{tag}standing rows >= {STAND_MIN_ROWS} (got {len(stand)})"))
         out.append(("PASS" if len(run) >= RUN_MIN_ROWS else "FAIL", f"{tag}running rows (speed >= {RUN_SPEED} m/s) >= {RUN_MIN_ROWS} (got {len(run)})"))
         out.append(("INFO", f"{tag}rows {len(rows)}, top speed {max(r['speed_mps'] for r in rows):.2f} m/s"))
         med = lambda rs, k: statistics.median(r[k] for r in rs) if rs else float("nan")  # noqa: E731
@@ -157,10 +161,14 @@ def check_run(statuses):
                 k = f"{what}_{side}"
                 out.append(("INFO", f"{tag}{k} median: standing {med(stand, k):.4f} m, running {med(run, k):.4f} m"))
             share = sum(1 for r in run if r[f"source_{side}"] == 2) / len(run) if run else float("nan")
+            if stand and run:  # acceptance: the drawn hand does not drift off the controller while running
+                delta = med(run, f"drawn_residual_{side}") - med(stand, f"drawn_residual_{side}")
+                out.append(("PASS" if delta <= RUN_RESIDUAL_MARGIN + 1e-9 else "FAIL",
+                            f"{tag}drawn_residual_{side} running median <= standing + {RUN_RESIDUAL_MARGIN * 100:.1f} cm (delta {delta * 100:+.2f} cm)"))
             out.append(("INFO", f"{tag}source_{side} == body share of running frames: {share:.3f}"))
         out.append(("INFO", f"{tag}root_gap_m median running: {med(run, 'root_gap_m'):.4f} m"))
         bursts, worst = blend_bursts(rows)
-        out.append(("INFO", f"{tag}free-air blend bursts: {bursts} (most increments in any 1 s window: {worst})"))
+        out.append(("PASS" if bursts == 0 else "FAIL", f"{tag}free-air blend bursts == 0 (got {bursts}; most increments in any 1 s window: {worst})"))
     return out or [("FAIL", "no sessions")]
 
 

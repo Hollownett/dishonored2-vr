@@ -20,6 +20,27 @@ struct Rig {
 };
 }
 int main() {
+    {   // moving_free_air_draws_clamp: speed 3, the body agrees with the clamp pose (gap .01) but nothing touches: the clamp output is drawn
+        Rig r;r.in.body=pose_at(.01);r.in.player_speed=3;const auto o=r.run(.5);
+        CHECK(o.source==VisualSource::clamp && bit_equal(o.drawn,r.in.clamp));
+    }
+    {   // moving_contact_still_elects_body: the contact rules are unchanged
+        Rig r;r.in.body=pose_at(.05);r.in.player_speed=3;r.in.body_contact=true;r.in.world_hit_near=true;
+        CHECK(r.run(.5).source==VisualSource::body);
+        Rig q;q.in.body=pose_at(.05);q.in.player_speed=3;q.in.clamp_contact=true;CHECK(q.run(.5).source==VisualSource::body);
+    }
+    {   // standing_agreement_unchanged: speed 0 (and below the 1.0 entry) elects the agreeing body as before
+        Rig r;r.in.body=pose_at(.01);r.in.player_speed=0;CHECK(r.run(.5).source==VisualSource::body);
+        Rig q;q.in.body=pose_at(.01);q.in.player_speed=.9;CHECK(q.run(.5).source==VisualSource::body);
+    }
+    {   // moving_hysteresis_no_chatter: .8 <-> 1.1 m/s every 0.1 s for 3 s: entering at 1.0 and leaving at 0.6 means one change at most
+        Rig r;r.in.body=pose_at(.01);int changes=0;
+        for(int i=0;i<180;++i) {r.in.player_speed=(i/6)%2?1.1:.8;changes+=r.step().changed?1:0;}
+        CHECK(changes<=1);
+        Rig q;q.in.body=pose_at(.01);q.in.player_speed=3;q.run(.3);   // and a moving hand returns to the agreeing body only below 0.6 m/s
+        q.in.player_speed=.7;CHECK(q.run(.3).source==VisualSource::clamp);
+        q.in.player_speed=.5;CHECK(q.run(.3).source==VisualSource::body);
+    }
     {   // body_wins_when_sane: in contact, near the clamp pose and the controller
         Rig r;r.in.body=pose_at(.01);r.in.clamp=pose_at(0);r.in.controller=pose_at(0);r.in.body_contact=true;r.in.world_hit_near=true;
         const auto o=r.run(.5);

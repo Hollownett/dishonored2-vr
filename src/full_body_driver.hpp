@@ -14,6 +14,7 @@
 #include <chrono>
 #include <cstring>
 #include <mutex>
+#include <optional>
 #include <memory>
 
 namespace d2vr::fullbody {
@@ -145,6 +146,8 @@ struct Diagnostic {
     DrawnPalmSource palm_source[2]{};
     WorldTrackedPose current_root{};bool current_root_valid{};
     double root_gap_m{};      // horizontal distance at publish between the render-thread anchor root and the last arm-upload root (diagnostic only)
+    bool root_gap_valid{};    // the gap above was measured: both the anchor root and an arm-upload root were known at publish
+    std::uint64_t root_gap_publishes{};   // publishes with root_gap_m > 1e-6 (cumulative since the driver was built; clear() keeps it)
     Tracking tracking{};
     std::uint64_t revision{},solved_revision{},fit_revision{},callback_serial{},body_callback{},arm_callback[2]{};
     double wall_dt{},consumed_dt{},substep_dt{},output_age_seconds{};
@@ -307,12 +310,18 @@ public:
             eye_speed_=std::hypot(t.eye.p.x-track_.eye.p.x,t.eye.p.y-track_.eye.p.y)/std::max(dt,1e-3);
         } else eye_speed_=0;
         // Player root at this publication: uploads later carry the solved pose by the root motion since.
-        diag_.root_gap_m=0;
-        if(t.anchor_root_valid && have_root_last_) try {const auto a=frame_of(t.anchor_root).rigid.p;diag_.root_gap_m=std::hypot(a.x-root_last_.p.x,a.y-root_last_.p.y);} catch(...) {}
-        root_at_publish_=root_last_;have_root_at_publish_=have_root_last_;
+        // Fix A: the root the solve's eye belongs to is the render thread's anchor root (what the camera was placed with), not the last arm upload's:
+        // that one is a frame (or more) stale at speed, and the whole gap rode on the hands as a lag. build/legacy-arm-root-carry keeps the old start.
+        diag_.root_gap_m=0;diag_.root_gap_valid=false;
+        std::optional<Xf> anchor;
+        if(t.anchor_root_valid) try {anchor=frame_of(t.anchor_root).rigid;} catch(...) {}
+        if(anchor && have_root_last_) {diag_.root_gap_m=std::hypot(anchor->p.x-root_last_.p.x,anchor->p.y-root_last_.p.y);diag_.root_gap_valid=true;if(diag_.root_gap_m>1e-6)++root_gap_publishes_;}
+        if(anchor && !legacy_root_carry_) {root_at_publish_=*anchor;have_root_at_publish_=true;}
+        else {root_at_publish_=root_last_;have_root_at_publish_=have_root_last_;}
         track_=t;own_=own;have_track_=true;++revision_;diag_.body_valid=false;diag_.arm_valid[0]=diag_.arm_valid[1]=false;published_=std::chrono::steady_clock::now();
         if(!(track_.seconds>0)) track_.seconds=std::chrono::duration<double>(published_.time_since_epoch()).count();
     }
+    void legacy_root_carry(bool on) {std::lock_guard<std::mutex> lock(mutex_);legacy_root_carry_=on;}   // build/legacy-arm-root-carry
     void clear() {std::lock_guard<std::mutex> lock(mutex_);contact_model_.reset();have_track_=have_out_=have_native_body_=false;have_root_last_=have_root_at_publish_=have_root_solved_=false;
         have_native_arm_[0]=have_native_arm_[1]=false;native_={};last_={};solved_track_={};diag_={};solver_.reset();}
     void clear_calibration() {
@@ -448,7 +457,7 @@ public:
     // before a newer publication (skew past tolerance), 3 the track is older than the freshness window, 4 no solution, 5 stale revision.
     unsigned arm_why(unsigned side) const {std::lock_guard<std::mutex> lock(mutex_);return side<2?arm_why_[side]:0u;}
     Diagnostic diagnostic() const {
-        std::lock_guard<std::mutex> lock(mutex_);auto d=diag_;
+        std::lock_guard<std::mutex> lock(mutex_);auto d=diag_;d.root_gap_publishes=root_gap_publishes_;
         if(have_root_last_)d.current_root={root_last_.p,{rotated(root_last_.q,{1,0,0}),rotated(root_last_.q,{0,1,0}),rotated(root_last_.q,{0,0,1})}};
         d.current_root_valid=have_root_last_;
         d.tracking=track_;d.revision=revision_;d.solved_revision=solved_revision_;d.fit_revision=fit_revision_;d.fit=fit_;
@@ -509,6 +518,7 @@ private:
         if(!have_root_solved_ || !have_root_last_) return f;
         f.rigid=body::mul(body::mul(root_solved_,body::inverse(root_last_)),f.rigid);return f;
     }
+    bool legacy_root_carry_{};std::uint64_t root_gap_publishes_{};
     Xf root_last_{},root_at_publish_{},root_solved_{};bool have_root_last_{},have_root_at_publish_{},have_root_solved_{};
     // Engine frame (present index) whose solution every upload of that frame reuses: the render
     // thread publishes tracking concurrently with the next frame's animation uploads, so without

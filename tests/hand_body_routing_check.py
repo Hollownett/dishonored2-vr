@@ -531,7 +531,7 @@ for line in probe_block.splitlines():
         assert not re.search(r"//.*\b[a-z_]+(\.|->|\[)[\w\]\[]*=[^=]", line), "a statement swallowed by a comment: " + line.strip()[:90]
 # P2-2 (X-4 amended): with a grasp anchor active the body is elected only on contact; P3-3: a body that leaves while drawn is blended away
 vis_upd = function(visual_hdr, "VisualOutput update(unsigned side")
-assert "const bool agrees=!anchor_active && out.gap_m<=(was_body?agree_leave:agree_gap);" in vis_upd and "|| agrees);" in vis_upd
+assert "const bool agrees=!anchor_active && !s.moving && out.gap_m<=(was_body?agree_leave:agree_gap);" in vis_upd and "|| agrees);" in vis_upd
 assert "const bool body_left=!present && s.has_source && s.source==VisualSource::body;" in vis_upd and "(!present && !body_left && !leaving)" in vis_upd
 for line in b16_block.splitlines() + cpl.splitlines():
     if "//" in line:

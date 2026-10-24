@@ -35,6 +35,7 @@ struct VisualInput {
     bool world_hit_near{};                // a fresh world hit (a plane the clamp holds) within 0.08 m of the body: confirms body_contact
     bool yield{};
     bool body_behind_surface{};           // the clamp's tunnelling guard: the body is behind a plane the clamp holds
+    double player_speed{};                // Fix C: the player's horizontal speed (m/s); 0 with build/no-moving-controller-visual
     std::optional<Vec3> anchor;           // the plan A DrawnAnchor's drawn position while its weight is above zero (already eased by its own 0.25 s)
 };
 // body_weight (B16): how much of the drawn hand is the body, 0..1, ramped linearly over blend_seconds with the source (1 while the body is the
@@ -59,6 +60,7 @@ public:
     static constexpr double blend_seconds=.15,snap_gap=.35,snap_seconds=.25,regain_gap=.30;
     static constexpr double agree_gap=.02,agree_leave=.03;          // within this of the clamp pose the body is drawn without contact
     static constexpr double contact_gap=.10,contact_leave=.12;      // contact elects the body only while it is this close to the clamp pose (hysteresis)
+    static constexpr double moving_speed=1.0,moving_leave=.6;      // Fix C: moving from 1.0 m/s, until it falls under 0.6 (hysteresis); free air then draws the clamp output
     static constexpr double stale_floor_s=.025;                     // a pose unchanged for more than max(this, 2 measured pose intervals) is stale
     // X-4, the single precedence: yield = controller; else the hand body (when elected) > the grasp anchor > the clamp output.
     static VisualSource pick(bool yield,bool body_elected,bool anchor_active) {
@@ -96,7 +98,11 @@ public:
         // contact never elects a body farther than 10 cm (leaves at 12 cm) from the clamp pose: a lagging body must not drag the hand back.
         // Final review P2-2 (X-4 amended): while a grasp anchor is active (a motor or corpse hold, Task 12's seated grip) the body outranks it only
         // on contact; the 0.02 m agreement rule is for bare hands (it would draw the controller and let the limb hang off the hand in free air).
-        const bool agrees=!anchor_active && out.gap_m<=(was_body?agree_leave:agree_gap);
+        // Fix C: while the player moves, the body is drawn only in contact. Its small gap to the clamp pose in free air is the lag of a body that
+        // follows the controller (about 0.11 m at 2 m/s): agreement there is a coincidence that ends the moment the hand speeds up, and each flip is a blend.
+        const double speed=std::isfinite(in.player_speed)?in.player_speed:0;
+        s.moving=s.moving?speed>=moving_leave:speed>=moving_speed;
+        const bool agrees=!anchor_active && !s.moving && out.gap_m<=(was_body?agree_leave:agree_gap);
         const bool elected=sane && ((contact && out.gap_m<=(was_body?contact_leave:contact_gap)) || agrees);
         out.snapped=latched || (present && in.body_behind_surface);
         const VisualSource want=pick(present && in.yield,elected,anchor_active);
@@ -131,7 +137,7 @@ public:
     void reset(unsigned side) {if(side<2) state_[side]=State{};}
 private:
     static Vec3 target_of_controller(const VisualInput& in) {return clamp_detail::finite_pose(in.controller)?in.controller.position:in.clamp.position;}
-    struct State {bool has_time{},has_source{},has_seq{},distrusted{};double time{},far_s{},elapsed{},seq_time{},interval{};VisualSource source{VisualSource::clamp};
+    struct State {bool has_time{},has_source{},has_seq{},distrusted{},moving{};double time{},far_s{},elapsed{},seq_time{},interval{};VisualSource source{VisualSource::clamp};
                   Vec3 offset{};WorldTrackedPose last{};std::array<Vec3,4> cand{};std::array<bool,4> have{};std::uint64_t seq{};double body_w{};};
     std::array<State,2> state_{};
 };

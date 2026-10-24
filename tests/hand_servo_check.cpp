@@ -2,6 +2,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 using namespace d2vr;
 #define CHECK(x) do{if(!(x)){std::printf("FAIL %d: %s\n",__LINE__,#x);std::exit(1);}}while(0)
 namespace {
@@ -12,10 +13,10 @@ Vec3 rot(Vec3 v,Vec3 axis,double a) {   // Rodrigues, axis unit
     return v*c+cross(axis,v)*s+axis*(dot(axis,v)*(1-c));
 }
 struct Sim {
-    HandServoState st;WorldTrackedPose target,body;Vec3 v{},w{};double held=0,tf=1,dt=1./90;bool blocked=false;double lever=kDefaultHeldLever;
+    HandServoState st;WorldTrackedPose target,body;Vec3 v{},w{};double held=0,tf=1,dt=1./90;bool blocked=false;double lever=kDefaultHeldLever;Vec3 ff{};
     HandServoConfig cfg;GrabTuning tun;
     HandServoOutput step() {
-        auto o=servo_step(st,target,body,v,w,held,dt,tf,cfg,tun,blocked,lever);
+        auto o=servo_step(st,target,body,v,w,held,dt,tf,cfg,tun,blocked,lever,ff);
         v=o.linear;w=o.angular;
         body.position=body.position+v*std::min(dt,tun.dt_max);
         double a=length(w)*std::min(dt,tun.dt_max);
@@ -25,6 +26,28 @@ struct Sim {
 };
 }
 int main() {
+    {   // feedforward_holds_running_hand: the target moves at 6 m/s along x for 2 s at 90 Hz from a matched start
+        double gap_with=0,gap_without=0;
+        for(const bool use:{true,false}) {
+            Sim s;s.body=pose({});s.target=pose({});if(use) s.ff={6,0,0};
+            HandServoOutput o;
+            for(int i=0;i<180;++i) {s.target.position.x+=6./90;o=s.step();}
+            (use?gap_with:gap_without)=o.gap;   // the gap the servo sees at the last tick
+        }
+        CHECK(gap_with<=.02);CHECK(gap_without>=.2);
+    }
+    {   // zero_feedforward_identical: bit-identical to the call without the argument over a 500-step random sequence
+        unsigned seed=12345;auto rnd=[&]{seed=seed*1664525u+1013904223u;return ((seed>>8)&0xffff)/65535.-.5;};
+        HandServoState a,b;HandServoConfig cfg;GrabTuning tun;
+        for(int i=0;i<500;++i) {
+            WorldTrackedPose t=pose({rnd(),rnd(),rnd()}),bd=pose({rnd()*.3,rnd()*.3,rnd()*.3});
+            Vec3 v{rnd()*4,rnd()*4,rnd()*4},w{rnd(),rnd(),rnd()};double kg=i%7?0:rnd()+.5;
+            auto o1=servo_step(a,t,bd,v,w,kg,1./90,1,cfg,tun,i%11==0);
+            auto o2=servo_step(b,t,bd,v,w,kg,1./90,1,cfg,tun,i%11==0,kDefaultHeldLever,Vec3{});
+            CHECK(std::memcmp(&o1.linear,&o2.linear,sizeof o1.linear)==0&&std::memcmp(&o1.angular,&o2.angular,sizeof o1.angular)==0);
+            CHECK(o1.valid==o2.valid&&o1.snap==o2.snap&&o1.capped==o2.capped&&std::memcmp(&o1.gap,&o2.gap,sizeof o1.gap)==0);
+        }
+    }
     {   // step_response_no_overshoot
         Sim s;s.body=pose({});s.target=pose({.3,0,0});
         double peak=0;bool reached=false;

@@ -1141,6 +1141,20 @@ static std::ofstream arm_origin_csv;
 static std::mutex locomotion_mutex;static std::ofstream locomotion_csv;static UINT64 locomotion_rows{};static std::chrono::steady_clock::time_point locomotion_start;   // build/locomotion-trace: artifacts/locomotion-hands.csv
 static std::array<d2vr::VisualOutput,2> loco_view{};static unsigned locomotion_contact_bits{};   // render thread: this frame's hand_visual result for the trace
 static std::deque<std::array<double,3>> locomotion_roots;   // render thread: {seconds, x, y} of the anchor root, for the 0.2 s speed
+// Task 9 (running fixes): the player's horizontal motion from the anchor root over the last 0.2 s (render thread; read one frame late by the hand code), and the three
+// off-knobs, read once per session start and logged to running-knobs.txt. build/legacy-arm-root-carry: arms carry from the last arm-upload root (Fix A);
+// build/no-hand-body-feedforward: the hand body's servo gets no player velocity (Fix B); build/no-moving-controller-visual: the visible hand may be the agreeing body
+// in free air while moving (Fix C).
+static d2vr::Vec3 player_velocity{};static double player_speed=0;static bool no_hand_body_feedforward=false,no_moving_controller_visual=false;
+static void start_running_knobs(const fs::path& root,const fs::path& output) {
+    const bool legacy_carry=fs::exists(root/L"build"/L"legacy-arm-root-carry");
+    no_hand_body_feedforward=fs::exists(root/L"build"/L"no-hand-body-feedforward");no_moving_controller_visual=fs::exists(root/L"build"/L"no-moving-controller-visual");
+    full_body.legacy_root_carry(legacy_carry);player_velocity={};player_speed=0;
+    std::ofstream note(output/L"running-knobs.txt",std::ios::trunc);
+    note<<"knob build/legacy-arm-root-carry "<<(legacy_carry?"present: arms carry from the last arm-upload root\n":"absent: arms carry from the anchor's root\n");
+    note<<"knob build/no-hand-body-feedforward "<<(no_hand_body_feedforward?"present: the hand body's servo gets no player velocity\n":"absent: the hand body's servo feeds forward the player velocity\n");
+    note<<"knob build/no-moving-controller-visual "<<(no_moving_controller_visual?"present: the agreeing body may be drawn in free air while moving\n":"absent: while moving, free air draws the clamp output\n");
+}
 // Last tracked palette per side (model space): a brief tracked-pose gap reuses
 // it instead of flashing the native arm animation for a frame.
 static std::atomic<UINT> arm_upload_depth{0};
@@ -5274,6 +5288,7 @@ void prepare_head_view(void* view) noexcept {
                         in.clamp=hands.grips[side];in.controller=palm_grips[side];
                         in.clamp_contact=(hand_visual_contact_bits>>side)&1u;
                         in.body_contact=d2vr::HandBodyRuntime::contact_now(side);   // the drive's shortfall on an uncapped command
+                        in.player_speed=no_moving_controller_visual?0.:player_speed;   // Fix C
                         if(anchors[side].weight>0) in.anchor=anchors[side].position;
                         in.yield=(((hand_body_yield_bits&~hold_coupled_bits)|authored_hands)>>side)&1u;   // B16: a coupled hold is not a yield (X-4 holds while holding)
                         if(in.body) {std::array<d2vr::ClampHit,d2vr::HandClamp::max_held_planes> planes{};const auto held=hand_clamp.held_planes(side,planes);
@@ -5331,6 +5346,7 @@ void prepare_head_view(void* view) noexcept {
                     hand_body_in.target[side].position=native_body_target[side].position;   // B16: a coupled native hold: the controller's request pushed out by the clamp
                     if(native_body_target[side].object_free) hand_body_in.hold_snap_ok|=1u<<side;   // ... except a native hold whose object is free (P2-1)
                 }
+                if(!no_hand_body_feedforward) hand_body_in.player_velocity=player_velocity;   // Fix B: the servo's feedforward
                 hand_body_in.locomotion=std::fabs(published_move_x.load())>.05f || std::fabs(published_move_y.load())>.05f;
                 {std::array<float,3> root{};if(body->player && read_self(body->player+0x300,root.data(),sizeof root)) {
                     const d2vr::Vec3 r{root[0],root[1],root[2]};if(d2vr::finite(r)) hand_body_in.player_root=r;}}
@@ -5621,19 +5637,21 @@ void prepare_head_view(void* view) noexcept {
                     auto reader=&read_self;if(const auto source_owner=d2vr::weapon_source_owner(reader,image_base,owned->arms[0]))t.native_frame=source_owner->second;
                 }
                 full_body.publish(t,native_ownership);
-                if(locomotion_csv.is_open()) {   // G1a: one row per displayed frame (build/locomotion-trace); diagnostic only, changes nothing
+                {   // Task 9: the player's horizontal velocity from the anchor root over 0.2 s (the hand body's feedforward and the visible hand's moving flag); G1a: one trace row per displayed frame
                     std::lock_guard<std::mutex> trace_lock(locomotion_mutex);
+                    const auto trace_now=std::chrono::steady_clock::now();const double seconds=std::chrono::duration<double>(trace_now.time_since_epoch()).count();
+                    double speed=0;d2vr::Vec3 velocity{};
+                    if(t.anchor_root_valid) try {
+                        const auto p=d2vr::fullbody::frame_of(t.anchor_root).rigid.p;locomotion_roots.push_back({seconds,p.x,p.y});
+                        while(locomotion_roots.size()>1 && locomotion_roots[1][0]<=seconds-.2) locomotion_roots.pop_front();
+                        const auto& a=locomotion_roots.front();const double dt=seconds-a[0];
+                        if(dt>.05) {velocity={(p.x-a[1])/dt,(p.y-a[2])/dt,0};speed=std::hypot(velocity.x,velocity.y);}
+                        if(!(speed<=10.)) {speed=0;velocity={};locomotion_roots.clear();}   // a blink or a respawn is not a run: the feedforward never carries one
+                    } catch(...) {speed=0;velocity={};} else locomotion_roots.clear();
+                    player_speed=speed;player_velocity=velocity;
                     if(locomotion_csv.is_open()) {
-                        const auto trace_now=std::chrono::steady_clock::now();const double seconds=std::chrono::duration<double>(trace_now.time_since_epoch()).count();
-                        double speed=0;
-                        if(t.anchor_root_valid) try {
-                            const auto p=d2vr::fullbody::frame_of(t.anchor_root).rigid.p;locomotion_roots.push_back({seconds,p.x,p.y});
-                            while(locomotion_roots.size()>1 && locomotion_roots[1][0]<=seconds-.2) locomotion_roots.pop_front();
-                            const auto& a=locomotion_roots.front();const double dt=seconds-a[0];
-                            if(dt>.05) speed=std::hypot(p.x-a[1],p.y-a[2])/dt;
-                        } catch(...) {} else locomotion_roots.clear();
                         const auto diag=full_body.diagnostic();
-                        locomotion_csv << static_cast<long long>(std::chrono::duration<double,std::milli>(trace_now-locomotion_start).count()) << ',' << speed << ',' << diag.root_gap_m;
+                        locomotion_csv << static_cast<long long>(std::chrono::duration<double,std::milli>(trace_now-locomotion_start).count()) << ',' << speed << ',' << diag.root_gap_m << ',' << (diag.root_gap_valid?1:0);
                         for(unsigned side=0;side<2;++side) locomotion_csv << ',' << diag.palm_residual[side];
                         for(unsigned side=0;side<2;++side) locomotion_csv << ',' << drawn_palm_residual[side].magnitude();
                         for(unsigned side=0;side<2;++side) locomotion_csv << ',' << d2vr::length(loco_view[side].drawn.position-palm_grips[side].position);
@@ -6422,7 +6440,7 @@ std::string feedback_status_json() {
         << ",\"grip\":" << [&]{std::ostringstream o;const auto g=full_body.grip_state();o<<'[';for(unsigned i=0;i<2;++i) {o<<(i?",":"")<<"{\"reverse\":"<<(g[i].reversed?"true":"false")<<",\"attach_in_fist\":["<<g[i].attach_in_fist[0]<<','<<g[i].attach_in_fist[1]<<','<<g[i].attach_in_fist[2]<<"],\"hilt_miss_m\":"<<g[i].hilt_miss<<'}';}o<<']';return o.str();}()
         << ",\"finger_inputs\":" << [&]{std::ostringstream o;const auto m=full_body.finger_inputs();o<<'[';for(unsigned i=0;i<2;++i) {o<<(i?",":"")<<'['<<m[i][0]<<','<<m[i][1]<<']';}o<<']';return o.str();}()
         << ",\"solver_failures\":" << full_body.failures() << ",\"owned\":[" << full_body.owned(0) << ',' << full_body.owned(1)
-        << ',' << full_body.owned(2) << ',' << full_body.owned(3) << "],\"root_gap_m\":" << full_body.diagnostic().root_gap_m << "}"
+        << ',' << full_body.owned(2) << ',' << full_body.owned(3) << "],\"root_gap_m\":" << full_body.diagnostic().root_gap_m << ",\"root_gap_valid\":" << (full_body.diagnostic().root_gap_valid?"true":"false") << ",\"root_gap_publishes\":" << full_body.diagnostic().root_gap_publishes << "}"
         << ",\"native_body_upload\":{\"accepted\":" << body_upload_seen.load()
         << ",\"rejected\":" << body_upload_rejected.load() << ",\"palette_replaced\":false,\"wheel_hidden_uploads\":" << wheel_avatar_hidden.load() << '}';
     return out.str();
@@ -9120,7 +9138,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
             std::lock_guard<std::mutex> trace_lock(locomotion_mutex);locomotion_csv.close();locomotion_rows=0;locomotion_roots.clear();
             if(fs::exists(root/L"build"/L"locomotion-trace")) {
                 locomotion_csv.open(output/L"locomotion-hands.csv",std::ios::trunc);locomotion_start=std::chrono::steady_clock::now();
-                locomotion_csv << std::setprecision(6) << "elapsed_ms,speed_mps,root_gap_m,palm_residual_l,palm_residual_r,drawn_residual_l,drawn_residual_r,visual_gap_l,visual_gap_r,source_l,source_r,blends,contact_l,contact_r\n";
+                locomotion_csv << std::setprecision(6) << "elapsed_ms,speed_mps,root_gap_m,root_gap_valid,palm_residual_l,palm_residual_r,drawn_residual_l,drawn_residual_r,visual_gap_l,visual_gap_r,source_l,source_r,blends,contact_l,contact_r\n";
             }
         }
         simulated_gameplay_script={};simulated_gameplay_last_index=-2;simulated_gameplay_rows=0;
@@ -9640,6 +9658,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
         discovery_throttle_enabled=!fs::exists(root/L"build"/L"no-discovery-throttle"); // plan E task 4: discovery every 8th frame once stable
         d2vr::GameXr::overlay_skip_enabled=!fs::exists(root/L"build"/L"no-overlay-skip");  // plan E task 4: unchanged overlays re-submit their last image
         d2vr::NativeHeldObject::legacy_throw.store(fs::exists(root/L"build"/L"legacy-throw"));
+        start_running_knobs(root,output);   // Task 9: build/legacy-arm-root-carry, build/no-hand-body-feedforward, build/no-moving-controller-visual (logged to running-knobs.txt)
         start_finger_touch_knobs(root,output);   // plan C: build/finger-touch.cfg, build/legacy-finger-curl (read once, logged to finger-touch.txt)
         held_clamp_enabled=!fs::exists(root/L"build"/L"no-held-clamp");   // Part 5A: the carried object stops at surfaces (A/B)
         {   // locomotion comfort vignette: on unless build/no-comfort-vignette; build/comfort-vignette may hold a 0..1 strength

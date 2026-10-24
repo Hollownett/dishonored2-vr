@@ -45,6 +45,7 @@ namespace d2vr {
 // B16: filter = the word each side's body should carry (HandFilterKeeper, render thread: the R1 default unless a coupled hold takes a layer out).
 struct HandBodyHandsInput {unsigned tracked{};std::array<Vec3,2> palm{};bool authored{};bool focused{};
     std::array<WorldTrackedPose,2> target{};unsigned free{};unsigned yield{};bool locomotion{};std::optional<Vec3> player_root{};
+    Vec3 player_velocity{};   // Fix B: the player's horizontal velocity, the drive's feedforward (zero with build/no-hand-body-feedforward)
     std::array<std::uint32_t,2> filter{{R1Recipe::filter,R1Recipe::filter}};
     unsigned holding{};     // B16 fix round 2: sides that hold something (B14's snaps are suppressed for them) ...
     unsigned hold_snap_ok{};};   // final review P2-1: ... except a native hold whose object is free (a snag on the hand alone: the stuck snap runs)
@@ -480,7 +481,7 @@ private:
             const bool tracked=((last_hands_.tracked>>side)&1u)!=0;
             d.yield=!fresh || !tracked || ((last_hands_.yield>>side)&1u)!=0;
             d.target_free=fresh && now-last_hands_tick_<=free_fresh_ms && ((last_hands_.free>>side)&1u)!=0;
-            d.player_root=fresh?last_hands_.player_root:std::nullopt;d.locomotion=last_hands_.locomotion;
+            d.player_root=fresh?last_hands_.player_root:std::nullopt;d.locomotion=last_hands_.locomotion;d.player_velocity=fresh?last_hands_.player_velocity:Vec3{};
             d.holding=fresh && ((last_hands_.holding>>side)&1u)!=0;   // B16 fix round 2: no snap while this hand holds something ...
             d.hold_snap_ok=fresh && ((last_hands_.hold_snap_ok>>side)&1u)!=0;   // ... unless the held object is free (P2-1)
             body->drive(d);

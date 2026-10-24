@@ -235,6 +235,9 @@ These are on by default in the launcher (except where a line says otherwise). Sw
 - `hud-scale` containing e.g. `0.75`: how far the HUD is pulled towards the centre (1 = the game's own layout, default 0.65).
 - `legacy-sword-contact`: bring back the older sword routing: the swing recogniser's press plus the calm-contact hold that makes the mod itself finish a stealth kill. Without it, a drawn-sword swing or crouched stab only presses the game's attack and the game alone decides; a guard who has not noticed you takes no contact damage (the press settles it first), and a calm touch does nothing. `xr-live-status.json` shows `attack_intent` (presses, slash, stab, honoured, not_honoured).
 - `legacy-action-camera-alignment`: restore the pre-H5 action offset and camera-history behavior.
+- `legacy-arm-root-carry`: while you run, arms and held weapons are carried from the root the camera was placed with; this knob restores the older carry from the last arm upload's root (which trails at speed).
+- `no-hand-body-feedforward`: with the hand body on, its drive normally knows how fast you are running so it keeps up with the controller; this knob turns that off.
+- `no-moving-controller-visual`: while you move, the visible hand in free air is the controller-driven pose and the hand body is drawn only in contact; this knob lets the body be drawn in free air again.
 - `legacy-authored-camera`: during takedowns and scripted scenes use the game's camera rotation again instead of your head's (and its +5% wider field of view).
 - `no-physical-crouch`: turn off crouching by sitting down. Full arms are currently disabled regardless of `no-full-arms`.
 - `power-gestures`: cast the equipped left-hand power with gestures (open-palm push, clap, palm at the temple; while aiming Blink, flick the hand toward you to blink). Off by default until tested; the launcher lists it as "new, untested" and does not enable it for you.

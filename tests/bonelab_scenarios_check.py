@@ -392,14 +392,15 @@ def hold_coupling_checks():
     assert "FAIL" in {v for v, _ in brc.check(mixed, "hand_body_soak")}
 
 
-def locomotion_rows(stand=300, run=300, running_residual=0.01, blends_at=(), contact=0, run_speed=3.0):
-    """Fixture trace: `stand` rows at speed 0, then `run` rows at run_speed, 11 ms apart; blends steps at the elapsed_ms values in blends_at."""
+def locomotion_rows(stand=300, run=300, running_residual=0.01, blends_at=(), contact=0, run_speed=3.0, valid=1):
+    """Fixture trace: `stand` rows at speed 0, then `run` rows at run_speed, 11 ms apart; blends steps at the elapsed_ms values in blends_at.
+    Standing residual is 0.01 m. `valid` is the root_gap_valid column of the running rows."""
     rows, blends = [], 0
     for i in range(stand + run):
         t = i * 11
         blends += sum(1 for b in blends_at if t - 11 < b <= t)
         moving = i >= stand
-        rows.append({"elapsed_ms": t, "speed_mps": run_speed if moving else 0.0, "root_gap_m": 0.03 if moving else 0.0,
+        rows.append({"elapsed_ms": t, "speed_mps": run_speed if moving else 0.0, "root_gap_m": 0.03 if moving else 0.0, "root_gap_valid": valid if moving else 1,
                      "palm_residual_l": running_residual if moving else 0.01, "palm_residual_r": running_residual if moving else 0.01,
                      "drawn_residual_l": running_residual if moving else 0.01, "drawn_residual_r": running_residual if moving else 0.01,
                      "visual_gap_l": 0.02, "visual_gap_r": 0.02, "source_l": 2 if moving else 1, "source_r": 1, "blends": blends,
@@ -424,11 +425,19 @@ def run_hands_checks():
         assert {v for v, _ in rows} == {"PASS", "INFO"}, rows
         text = "\n".join(t for v, t in rows if v == "INFO")
         assert "drawn_residual_l median: standing 0.0100 m, running 0.0100 m" in text and "root_gap_m median running: 0.0300 m" in text, text
-        assert "source_l == body share of running frames: 1.000" in text and "top speed 3.00" in text and "free-air blend bursts: 0" in text, text
+        assert "source_l == body share of running frames: 1.000" in text and "top speed 3.00" in text and "free-air blend bursts == 0 (got 0" in "\n".join(t for _, t in rows), text
     assert "FAIL" in verdicts({"locomotion_rows": None}, "run_hands") and "FAIL" in verdicts({}, "run_hands_sword")  # a missing trace
-    assert "FAIL" in verdicts({"locomotion_rows": locomotion_rows(run=150)}, "run_hands")  # fewer than 200 running rows
+    assert "FAIL" in verdicts({"locomotion_rows": locomotion_rows(run=50)}, "run_hands")  # fewer than 60 running rows (the spawn corridor limits the run)
+    assert {v for v, _ in brc.check([{"locomotion_rows": locomotion_rows(run=60)}], "run_hands")} == {"PASS", "INFO"}  # exactly 60 is enough
     assert "FAIL" in verdicts({"locomotion_rows": locomotion_rows(stand=150)}, "run_hands")  # fewer than 200 standing rows
     assert "FAIL" in verdicts({"locomotion_rows": locomotion_rows(run_speed=2.0)}, "run_hands")  # never reached 2.5 m/s
+    # acceptance: a running median drawn_residual more than 1.5 cm over standing (0.01 m) FAILs, +1 cm passes
+    assert "FAIL" not in verdicts({"locomotion_rows": locomotion_rows(running_residual=0.02)}, "run_hands")
+    assert "FAIL" in verdicts({"locomotion_rows": locomotion_rows(running_residual=0.03)}, "run_hands")
+    assert "FAIL" in verdicts({"locomotion_rows": locomotion_rows(blends_at=(3500, 3900))}, "run_hands")  # a free-air blend burst
+    assert "FAIL" in verdicts({"locomotion_rows": locomotion_rows(valid=0)}, "run_hands")  # rows with root_gap_valid 0 are ignored: no running rows left
+    bad = locomotion_rows(running_residual=0.5, valid=0) + locomotion_rows()  # invalid running rows with a huge residual do not count
+    assert "FAIL" not in verdicts({"locomotion_rows": bad}, "run_hands")
     assert brc.blend_bursts(locomotion_rows(blends_at=(3500, 3900))) == (1, 2)  # two increments inside 1 s, free air
     assert brc.blend_bursts(locomotion_rows(blends_at=(3500, 3900), contact=1)) == (0, 0)  # contact is not free air
     assert brc.blend_bursts(locomotion_rows(blends_at=(3500, 4700))) == (0, 1)  # more than 1 s apart

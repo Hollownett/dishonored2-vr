@@ -317,9 +317,32 @@ int main() {
         gap_tracking.anchor_root=at55;gap_tracking.anchor_root_valid=true;
         gap_driver.publish(stamp(gap_tracking),{});
         assert(std::abs(gap_driver.diagnostic().root_gap_m-.055)<1e-6);
+        assert(gap_driver.diagnostic().root_gap_valid && gap_driver.diagnostic().root_gap_publishes==1);   // root_gap_valid: both roots known; the counter: gap > 1e-6
         gap_tracking.anchor_root_valid=false;++gap_tracking.tick;
         gap_driver.publish(stamp(gap_tracking),{});
-        assert(gap_driver.diagnostic().root_gap_m==0);
+        assert(gap_driver.diagnostic().root_gap_m==0 && !gap_driver.diagnostic().root_gap_valid && gap_driver.diagnostic().root_gap_publishes==1);
+        {Driver fresh;fresh.tune(0,1);gap_tracking.anchor_root_valid=true;++gap_tracking.tick;fresh.publish(stamp(gap_tracking),{});   // no arm upload yet: no measured gap
+         assert(!fresh.diagnostic().root_gap_valid && fresh.diagnostic().root_gap_publishes==0);}
+    }
+    {   // Fix A: the arm carry starts from the anchor's root (the one the solve's eye was sampled with), not from a stale arm-upload root
+        const auto root_at=[](double x){return std::array<float,15>{static_cast<float>(x),0,0,1,0,0,0,1,0,0,0,1,1,1,1};};
+        const double speed=5.,t0=2.;   // m/s; the last note_root is 11 ms stale at publish, the upload comes 5 ms after it
+        for(const bool legacy:{false,true}) {
+            Driver carry;carry.tune(0,1);carry.legacy_root_carry(legacy);
+            for(unsigned side=0;side<2;++side)(void)carry.arm(side,native_arm[side],identity);
+            auto ct=tracking;ct.tick=5000;ct.source_tick=4990;ct.seconds=1.;ct.tracking_revision=1;ct.pose_epoch=1;ct.reference_epoch=2;ct.mapping_revision=3;ct.tracked_hands=3;
+            carry.note_root(root_at(speed*(t0-.011)));
+            ct.anchor_root=root_at(speed*t0);ct.anchor_root_valid=true;
+            carry.publish(ct,{});
+            carry.note_root(root_at(speed*(t0+.005)));
+            assert(carry.body(native_body,root_at(speed*(t0+.005)),91));
+            assert(carry.arm_frozen(0,native_arm[0],root_at(speed*(t0+.005)),5000,91));
+            const auto d=carry.diagnostic();assert(d.palm_source[0].valid);
+            const double moved=speed*.005;   // the root's travel since publish
+            const auto wanted=ct.grip[0].p+Vec3{moved,0,0};
+            const double grip_error=length(d.palm_source[0].grip.position-wanted);
+            if(!legacy) assert(grip_error<=.001);else assert(grip_error>=.04);
+        }
     }
     std::cout<<"PASS: full-body verified palm mapping construction, accepted fit validation and native model/world roundtrip\n";
 }

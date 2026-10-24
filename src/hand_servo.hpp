@@ -57,7 +57,7 @@ inline Vec3 limited(Vec3 v,double m) {double n=length(v);return n>m?v*(m/n):v;}
 }
 
 inline HandServoOutput servo_step(HandServoState& st,const WorldTrackedPose& target,const WorldTrackedPose& body,Vec3 body_velocity,Vec3 body_spin,
-    double held_kg,double dt,double time_factor,const HandServoConfig& cfg,const GrabTuning& tuning,bool target_blocked,double held_lever=kDefaultHeldLever) {
+    double held_kg,double dt,double time_factor,const HandServoConfig& cfg,const GrabTuning& tuning,bool target_blocked,double held_lever=kDefaultHeldLever,Vec3 feedforward={}) {
     using namespace hand_servo_detail;
     HandServoOutput out;
     Vec3 error=target.position-body.position;
@@ -74,6 +74,12 @@ inline HandServoOutput servo_step(HandServoState& st,const WorldTrackedPose& tar
     if(!std::isfinite(time_factor)||time_factor<=0) time_factor=1;
     time_factor=std::clamp(time_factor,cfg.tf_min,1.);
     body_velocity=body_velocity*(1/time_factor);body_spin=body_spin*(1/time_factor);
+    // Fix B (running): the target rides on the player, so it moves at the player's velocity with no error at all. The desired velocity is that
+    // feedforward plus the existing error law; the law itself runs on the velocity relative to it (the body at the player's speed is not
+    // "closing" on a target that moves with it), and the speed limit becomes max_speed+|feedforward|. Zero (or non-finite) feedforward is the old law, bit for bit.
+    if(!finite(feedforward)||length(feedforward)>cfg.max_body_speed) feedforward={};
+    const bool ff=feedforward.x!=0||feedforward.y!=0||feedforward.z!=0;
+    if(ff) body_velocity=body_velocity-feedforward;
     double gap=length(error);
     out.valid=true;out.gap=gap;
     // linear: desired velocity
@@ -118,6 +124,7 @@ inline HandServoOutput servo_step(HandServoState& st,const WorldTrackedPose& tar
         if(!(dd>1e-24)||dot(f,d)>dd) {st.filtered_accel=dd>1e-24?accel:Vec3{};f=st.filtered_accel*dt;}
     }
     Vec3 lin=limited(body_velocity+st.filtered_accel*dt,cfg.max_speed);
+    if(ff) lin=lin+feedforward;   // the relative velocity was limited to max_speed above: the written one to max_speed+|feedforward|
     out.linear=lin*time_factor;
     out.angular=limited(step.angular,cfg.max_spin)*time_factor;
     out.capped=step.linear_capped||step.angular_capped;
