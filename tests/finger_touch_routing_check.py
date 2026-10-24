@@ -15,13 +15,15 @@ def check(probe: str, build: str, features: str) -> None:
     assert "finger_touch_curl.update(side," in b and "finger_touch_params" in b
     assert "touch_curl=touch_side && " in b and "touch_out.mapping==d2vr::rig::CurlMapping::touch" in b
     assert "const auto wants=touch_curl?touch_wants:wants_legacy;" in b
-    assert "d2vr::rig::finger_contact(*geometry,palm,shapes.data(),count,fdt,finger_ik[side],holding?d2vr::rig::held_curl:1.f,finger_solve_budget,&wants)" in b
+    assert "d2vr::rig::finger_contact(*geometry,palm,shapes.data(),count,fdt,finger_ik[side],held_hand?d2vr::rig::held_curl:1.f,finger_solve_budget,&wants)" in b
     assert b.index("finger_touch_curl.update(") < b.index("d2vr::rig::finger_contact(")
+    # a native hold (holder==side) counts as held even with no shape measured: held_curl, never a full fist
+    assert "const bool native_hold=holder==side;" in probe and "const bool held_hand=holding || native_hold;" in probe
     # held hands: held=true in the update, fingers 1-4 capped at held_curl, thumb not
-    assert "finger_touch_curl.update(side,touch_in,fdt,holding,finger_touch_params)" in b
+    assert "finger_touch_curl.update(side,touch_in,fdt,held_hand,finger_touch_params)" in b
     assert "for(unsigned f=1;f<5;++f) touch_wants[f]=std::min(touch_wants[f],d2vr::rig::held_curl);" in b
     # the visible hand's per-finger turns and the legacy arm's scalars take the touch wants too
-    assert "touch_curl?d2vr::rig::finger_turns(*geometry,contact,wants):d2vr::rig::finger_turns(*geometry,contact,hands.curls[side],hands.index_curls[side],holding)" in b
+    assert "touch_curl?d2vr::rig::finger_turns(*geometry,contact,wants):d2vr::rig::finger_turns(*geometry,contact,hands.curls[side],hands.index_curls[side],held_hand)" in b
     assert "touch_curl?d2vr::rig::grip_curls(contact,touch_wants):d2vr::rig::grip_curls(contact," in b
     # weapon_hand_keeps_native_fist: a weapon hand or a native-animated hand gets no touch curl (and drops its state)
     assert "const bool touch_side=!legacy_finger_curl && game_xr->touch_status().bound && !(hands.native_hands>>side&1u) && !((fk_weapon_bits>>side)&1u);" in b
@@ -33,7 +35,7 @@ def check(probe: str, build: str, features: str) -> None:
     assert "if(!finger_touch_live[side&1u]) finger_touch_curl.seed(side,wants_legacy);finger_touch_live[side&1u]=true;" in b
     assert "finger_touch_status.curl[side]=touch_side?touch_out.curl:wants_legacy;" in b
     # legacy_knob_restores_finger_wants: the legacy wants are the old finger_wants call, verbatim
-    assert "const auto wants_legacy=d2vr::rig::finger_wants(holding,hands.curls[side],hands.index_curls[side]);" in b
+    assert "const auto wants_legacy=d2vr::rig::finger_wants(held_hand,hands.curls[side],hands.index_curls[side]);" in b
     assert 'L"legacy-finger-curl"' in probe and "legacy_finger_curl=fs::exists(" in probe
     assert 'L"finger-touch.cfg"' in probe and "FingerTouchParams::parse(" in probe
     assert 'finger-touch.txt' in probe

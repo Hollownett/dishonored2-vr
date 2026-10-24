@@ -1177,6 +1177,43 @@ int main() {
             assert(!r::held_mesh_centre_valid({0,std::numeric_limits<double>::infinity(),0},severed_limb));
         }
     }
+    // A sheet (paper, a note, a stamp) has an AABB of no thickness: it still has a shape, a thin slab the fingers stop on.
+    {
+        const std::array<Vec3,3> id{{{1,0,0},{0,1,0},{0,0,1}}};
+        const d2vr::NativeGrabBounds sheet{{-.1,-.15,0},{.1,.15,0}};
+        assert(d2vr::length(r::held_clamped_extents({.1,.15,0})-Vec3{.1,.15,.0025})<1e-12 && r::held_clamped_extents({.1,-.1,std::nan("")}).y==-.1 && std::isnan(r::held_clamped_extents({.1,-.1,std::nan("")}).z));
+        const auto e=(sheet.maximum-sheet.minimum)*.5;
+        assert(!rejects([&] {(void)r::held_cylinder(id,sheet);}));
+        const auto local=r::held_local_extents(id,r::held_clamped_extents(e));
+        assert(local && r::held_is_thin(*local) && !r::held_is_thin({.05,.05,.05}) && !r::held_is_thin({.1,.15,.02}));
+        const auto slab=r::held_slab(id,{},*local);
+        assert(slab.radius==0 && d2vr::length(slab.half-Vec3{.1,.15,.0025})<1e-12);
+        for(float mirror:{-1.f,1.f}) {
+            const auto h=synthetic_hand(mirror);
+            auto seated=r::held_slab(id,{0,.1,-mirror*(.0025+.01)},*local);
+            for(const float reach:{r::held_curl,1.f}) {
+                r::FingerIkState st{};const std::array<float,5> wants{1.f,reach,reach,reach,reach};
+                const auto c=r::finger_contact(h.geometry,h.palm,&seated,1,0.,st,reach,r::finger_solve_all,&wants);
+                for(unsigned f=1;f<5;++f) assert(c.touching[f] && c.finger[f]<1.f);
+                assert(long_clearance(h,c,seated)>=-r::contact_tolerance);
+            }
+        }
+        // A physical grab of the same sheet: a box with its clamped thickness (no throw).
+        const d2vr::WorldTrackedPose upright{{0,0,0},{{{1,0,0},{0,1,0},{0,0,1}}}};
+        const auto h=synthetic_hand(1);
+        r::HeldShape grabbed{};
+        assert(!rejects([&] {grabbed=r::classify_held(upright,sheet,-1,h.palm);}));
+        assert(grabbed.radius==0 && grabbed.half.z==.0025);
+        // Turned 30 degrees about X: the engine's box of the sheet is still thin once solved back to local extents.
+        const double c30=std::cos(30*deg),s30=std::sin(30*deg);
+        const std::array<Vec3,3> turned{{{1,0,0},{0,c30,s30},{0,-s30,c30}}};
+        const Vec3 aabb{.1,.15*c30+.0025*s30,.15*s30+.0025*c30};
+        const auto tl=r::held_local_extents(turned,aabb);
+        assert(tl && r::held_is_thin(*tl) && std::abs(tl->z-.0025)<1e-6);
+        // Oversized bounds still reject.
+        assert(rejects([&] {(void)r::held_cylinder(id,{{-4,-4,0},{4,4,0}});}));
+        assert(rejects([&] {(void)r::classify_held(upright,d2vr::NativeGrabBounds{{-4,-4,0},{4,4,0}},-1,h.palm);}));
+    }
     std::cout<<"finger_ik_check passed"<<std::endl;
     return 0;
 }

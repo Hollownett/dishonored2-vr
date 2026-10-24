@@ -659,6 +659,23 @@ inline BoundsFit fit_cylinder(const std::array<Vec3,3>& axes,Vec3 e) {
     return best;
 }
 
+// A sheet (paper, a note, a stamp) has a zero or hair-thin AABB: a finite component >= 0 is raised to 5 mm half thickness (a negative or non-finite one stays, still
+// rejected), so it neither throws nor vanishes; under 8 mm thick (and a quarter of its middle side) it is thin and the fingers stop on it as a slab, not a cylinder.
+inline constexpr double held_min_half_thickness=.0025,held_thin_half=.004;
+inline Vec3 held_clamped_extents(Vec3 e) noexcept {
+    const auto up=[](double v) {return std::isfinite(v) && v>=0?std::max(v,held_min_half_thickness):v;};
+    return {up(e.x),up(e.y),up(e.z)};
+}
+inline bool held_is_thin(Vec3 local_half) noexcept {
+    const double lo=std::min({local_half.x,local_half.y,local_half.z}),hi=std::max({local_half.x,local_half.y,local_half.z}),mid=local_half.x+local_half.y+local_half.z-lo-hi;
+    return lo<=held_thin_half && lo<=.25*mid;
+}
+// The oriented box of a thin prop in its model axes (rows), a hair thicker than the mesh by the clamp: radius 0, so a fingertip never lies inside it.
+inline HeldShape held_slab(const std::array<Vec3,3>& axes,Vec3 centre,Vec3 local_half) noexcept {
+    HeldShape shape{};shape.frame.position=centre;shape.frame.basis={unit(axes[0]),unit(axes[1]),unit(axes[2])};
+    shape.half=held_clamped_extents(local_half);shape.radius=0;
+    return shape;
+}
 // What a hand holds, from what the mod reads. A ragdoll limb (bone>=0) is a
 // capsule of the bone's radius across the palm. A prop's world AABB becomes the
 // cylinder along the body axis that explains it (bottle, pipe, severed arm, at any
@@ -681,8 +698,8 @@ inline HeldShape classify_held(const WorldTrackedPose& body,const std::optional<
     }
     if(!bounds) {shape.radius=.1;return shape;}
     if(!finite(bounds->minimum) || !finite(bounds->maximum)) throw std::invalid_argument("Invalid held bounds");
-    const auto e=(bounds->maximum-bounds->minimum)*.5;
-    if(e.x<=0 || e.y<=0 || e.z<=0 || length(e)>3) throw std::invalid_argument("Invalid held bounds");
+    const auto raw=(bounds->maximum-bounds->minimum)*.5;const auto e=held_clamped_extents(raw);
+    if(!(std::max({raw.x,raw.y,raw.z})>0) || e.x<=0 || e.y<=0 || e.z<=0 || length(e)>3) throw std::invalid_argument("Invalid held bounds");
     shape.frame.position=(bounds->maximum+bounds->minimum)*.5;
     const auto fit=fit_cylinder(body.basis,e);
     if(fit.residual<=.1 && fit.radius>0 && fit.half>=0) {
@@ -737,8 +754,8 @@ inline unsigned held_axis_of(const double (&h)[3]) {
 inline HeldCylinder held_cylinder(const std::array<Vec3,3>& axes,const NativeGrabBounds& bounds,std::optional<Vec3>* latch=nullptr) {
     for(const auto& a:axes) if(!finite(a)) throw std::invalid_argument("Invalid held axes");
     if(!finite(bounds.minimum) || !finite(bounds.maximum)) throw std::invalid_argument("Invalid held bounds");
-    const auto e=(bounds.maximum-bounds.minimum)*.5;
-    if(e.x<=0 || e.y<=0 || e.z<=0 || length(e)>3) throw std::invalid_argument("Invalid held bounds");
+    const auto raw=(bounds.maximum-bounds.minimum)*.5;const auto e=held_clamped_extents(raw);
+    if(!(std::max({raw.x,raw.y,raw.z})>0) || e.x<=0 || e.y<=0 || e.z<=0 || length(e)>3) throw std::invalid_argument("Invalid held bounds");
     HeldCylinder c{};
     std::optional<Vec3> local=latch?*latch:std::nullopt;
     if(!local) {local=held_local_extents(axes,e);if(local && latch) *latch=local;}
