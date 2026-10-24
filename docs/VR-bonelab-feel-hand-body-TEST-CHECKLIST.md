@@ -87,8 +87,25 @@ Each item below says which of these to watch. A crash, a freeze, or the player b
     off, nothing physical happens to the hands, the tank still stops at walls and floors through the carried-object clamp.
     Delete the file afterwards.
 
+### E. Final review fixes (re-run with the hand-body row on, then off)
+
+15. **Casts past the hand (P1-1).** Repeat items 7, 9, 10 and 12 with the row on and again with it off, and add a door:
+    open, push and close it with the palm. Press the heel of the palm and a fist into a table. Pass: the visible hand
+    stops on the table (never drawn inside it), `hand_clamp` contact frames are similar with the row on and off, and
+    `hand_body.cast_continuations` rises while you press (it stays 0 with the row off). `cast_continuation_exhausted`
+    should stay near 0. Save `hand_body`, `hand_clamp`.
+16. **A snagged hand does not drop what it carries (P2-1).** Carry the tank and brush your hand past a crate edge or a
+    guard's arm while the tank moves freely. Pass: the tank is not dropped; the hand may snap back to your controller
+    (`snaps` rises). Push the tank itself hard into a wall and hold it there: it is dropped after about a quarter
+    second. Carry a corpse past a crate the same way: it is not dropped by the hand catching. Save `hand_body`,
+    `hold_coupling`, `held_clamp`.
+17. **Corpse grip stays seated (P2-2).** Carry a corpse and hold still, then move slowly and quickly. Pass: the hand
+    stays on the limb it holds (no flicking between the limb and your controller). Save `hand_visual`.
+18. **No pop when the body goes (P3-3).** Open the menu while pressing a hand into a wall. Pass: the hand eases back,
+    it does not jump. Save `hand_visual`.
+
 ## Pass
 
 Items 1 to 5 are the gate for turning the default on: all must pass with `faults` 0, no crash, and
-`filter_readback_mismatches` 0. Items 6 to 14 are feel findings. Anything off is a finding, not a skip. Keep the saved
+`filter_readback_mismatches` 0. Items 6 to 18 are feel findings. Anything off is a finding, not a skip. Keep the saved
 blocks and send them back with a note for each item: pass, fail or unsure.

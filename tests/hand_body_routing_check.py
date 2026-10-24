@@ -482,6 +482,12 @@ cpl = pho[pho.index("if(body_on) {   // B16"):pho.index("} else if(body_knob) na
 assert "d2vr::couple_native(" in cpl and "if(coupled) {origin=co.target.position;shift=origin-request.position;}" in cpl and "coupled_release=co.release;" in cpl
 assert "if((body_on?coupled_release:L.clamp.should_release()) && !L.drop_sent)" in pho, "P2-1: the stuck-object rule with the body in play, else B4's exactly"
 assert "native_body_target[side&1u]={co.body_target?*co.body_target:palm_pose.position,GetTickCount64(),true,!co.object_blocked};" in cpl
+# final review P1-1: a held or release sweep that could not see past a hand body (hand_body: blocked) is never a surface for the carried object,
+# and a release probe that met one is unanswered for that frame (never a SafeRelease push along the hand's normal)
+rel_step = function(probe, "static void held_clamp_release_step(")
+assert "for(std::size_t i=0;i<proxies.count && i<hits.size();++i) if(hits[i] && hits[i]->hand_body) in.sweep_answered=false;" in rel_step
+assert rel_step.index("in.sweep_answered=false;") < rel_step.index("if(in.sweep_answered) for(") < rel_step.index("release_probe_depth(")
+assert "if(raw_hits[i]->hand_body) continue;" in pho and pho.index("if(raw_hits[i]->hand_body) continue;") < pho.index("in.hits[i]=d2vr::to_clamp_hit(*raw_hits[i]);")
 # review P3-2: knob off adds no work: the held-clamp begin/end additions are knob-gated
 assert "if(hand_body_requested.load(std::memory_order_relaxed)) native_body_target[L.side&1u].valid=false;" in function(probe, "static void held_clamp_end(")
 assert "if(hand_body_requested.load(std::memory_order_relaxed)) {hold_coupling.reset(side&1u);" in function(probe, "static void held_clamp_begin(")
