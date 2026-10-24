@@ -26,7 +26,7 @@ std::array<std::optional<ClampHit>,held_proxy_capacity> answer(const HeldClampOu
     for(std::size_t i=0;i<n;++i) {
         const auto& s=out.sweeps[i];if(!s.valid) continue;
         ClampHit h;h.normal={-1,0,0};
-        if(s.from.x+s.radius>=w) {h.point={w,s.from.y,s.from.z};h.initial_overlap=true;hits[i]=h;}
+        if(s.from.x+s.radius>w) {h.point={w,s.from.y,s.from.z};h.initial_overlap=true;hits[i]=h;}   // touching is not inside
         else if(s.to.x+s.radius>w) {h.point={w,s.to.y,s.to.z};hits[i]=h;}
     }
     return hits;
@@ -48,12 +48,11 @@ FilterKeeperInput corpse_hold(double now,std::uintptr_t entity) {
 }
 // One native hold, frame by frame, exactly as publish_held_object runs it (grip = the controller palm here): the clamp sweeps the controller's
 // request, couple_native carries the object on the body; the hand body is a capped first-order servo toward its target, stopped by the wall.
-// feed_body_request: the feedback-loop shape (the clamp fed the body-carried request instead), for the controls.
 struct NativeRig {
     HeldClamp clamp;HoldCoupling coupling;std::optional<HeldProxies> proxies;
     double wall=1e9,now=100;std::array<std::optional<ClampHit>,held_proxy_capacity> hits{};
     Vec3 body{0,0,1};WorldTrackedPose controller=pose_at(0);Vec3 offset{.3,0,0};
-    bool body_on=true,feed_body_request=false;CouplingOutput last{};WorldTrackedPose target{};
+    bool body_on=true;CouplingOutput last{};WorldTrackedPose target{};
     NativeRig() {HeldProxies p;p.count=1;p.sphere[0]={{0,0,0},.1};proxies=p;}
     WorldTrackedPose step(double dt=dt90) {
         now+=dt;
@@ -61,7 +60,6 @@ struct NativeRig {
         const Vec3 grip=controller.position;
         HeldClampInput in{};in.now=now;in.epoch=1;in.proxies=proxies;in.hits=hits;
         in.requested=body_on?HoldCoupling::controller_request(request,grip,controller.position):request;
-        if(body_on && feed_body_request) in.requested=HoldCoupling::native_request(request,grip,pose_at(body),true);
         const auto out=clamp.update(in);
         hits=answer(out,proxies->count,wall);
         target=out.target;
@@ -104,11 +102,12 @@ int main() {
                 CHECK(bit_equal(o.target,kind==HoldKind::native?*in.clamped_native:in.controller));
             }
         }
-        // the native request helpers: no usable body, the request itself, bit-exact
-        const auto req=tilted({.4,.1,1.1});
-        CHECK(bit_equal(HoldCoupling::native_request(req,{.1,0,1},std::nullopt,true),req));
-        CHECK(bit_equal(HoldCoupling::native_request(req,{.1,0,1},pose_at(0),false),req));
-        CHECK(bit_equal(HoldCoupling::native_request(req,{.1,0,1},pose_at(std::nan("")),true),req));
+        // fix round 1: a ready body that B15 does not draw (body_weight 0, free air) is today's controller pose too, bit-exact
+        for(const HoldKind kind:{HoldKind::motor_prop,HoldKind::corpse}) {
+            HoldCoupling c;CouplingInput in{};in.kind=kind;in.body_ready=true;in.body=pose_at(.4);in.controller=tilted({.1,.2,1.3});in.body_weight=0;
+            for(int i=0;i<100;++i) {in.now=1+i*dt90;in.controller.position.x+=.02;const auto o=c.update(0,in);CHECK(bit_equal(o.target,in.controller) && !o.uses_body && !o.release);}
+            in.body_weight=std::nan("");CHECK(!c.update(0,in).uses_body);
+        }
         // couple_native without a ready body publishes the clamp's own output for the controller request
         NativeRig r;r.body_on=false;r.wall=.35;HeldClamp b4;std::array<std::optional<ClampHit>,held_proxy_capacity> b4_hits{};double t=r.now;
         for(int i=0;i<300;++i) {
@@ -193,23 +192,46 @@ int main() {
             if(wall<1e8) CHECK(r.target.position.x+.1<=wall+1e-9);                    // never inside the wall
             else CHECK(length(r.body-r.controller.position)<=1e-3);                   // free air: the body is at the controller
         }
-        // controls (the shapes the ruling warns about): the body chasing the clamped object pose runs away (the target moves far more than 1 mm with
-        // the controller still); the clamp fed the body-carried request settles the body half way (hand and object disagree by half the press)
-        NativeRig run;for(int i=0;i<90;++i) run.step();const Vec3 run_at=run.target.position;
-        for(int i=0;i<90;++i) {run.step();run.body=run.target.position;}             // body target = the clamped object pose
-        CHECK(length(run.target.position-run_at)>.1);
-        NativeRig cyc;cyc.wall=.35;cyc.feed_body_request=true;cyc.controller=pose_at(-.2);cyc.body={-.2,0,1};for(int i=0;i<10;++i) cyc.step();
-        cyc.approach(0);for(int i=0;i<90;++i) cyc.step();
-        for(int i=0;i<900;++i) cyc.step();
-        CHECK(length(cyc.target.position-(cyc.body+cyc.offset))>.01);
+        // no loop is possible: the native target never reads the body (shove the body 0.2 m: the target does not move)
+        NativeRig shove;for(int i=0;i<90;++i) shove.step();const Vec3 shove_at=shove.target.position;
+        for(int i=0;i<30;++i) {shove.body=shove.body+Vec3{.2,.1,0};shove.step();CHECK(length(shove.target.position-shove_at)<=1e-12);}
     }
-    {   // DeepSeek P2: the carried native item trails the controller side by at most the drawn hand's 0.35 m bound, so the hand drawn holding it
-        // (shift = target - request, bounded to the same 0.35 m) always reaches it; within the bound it is exactly body + offset
-        const auto req=pose_at(.3,0,1);
-        const auto far=HoldCoupling::native_request(req,{0,0,1},pose_at(-.6,0,1),true);
-        CHECK(near(far.position.x,.3-.35,1e-12) && near(length(far.position-req.position),DrawnAnchor::bound_m,1e-12));
-        const auto close=HoldCoupling::native_request(req,{0,0,1},pose_at(-.2,.1,1),true);
-        CHECK(near(close.position.x,.1,1e-12) && near(close.position.y,.1,1e-12));
+    {   // free_air_swing_object_tracks_controller (fix round 1): a 2 m/s swing with no contact; the body lags (~0.17 m), B15 does not draw it, so the
+        // held object's target stays within 1 cm of the B4 target throughout: motor holds (B15 + HoldCoupling) and native holds (the full rig)
+        HandVisualSource src;HoldCoupling c;double now=10,worst=0;Vec3 body{0,0,1},hand{0,0,1};std::uint64_t seq=1;
+        for(int i=0;i<180;++i) {
+            now+=dt90;hand.x=.4*std::sin(5.*i*dt90);hand.y=.2*std::cos(5.*i*dt90);   // ~2 m/s peak
+            const Vec3 e=hand-body;const double l=length(e);if(l>1e-12) body=body+e*(std::min(l*12*dt90,l)/l);
+            VisualInput vi{};vi.now=now;vi.body_ready=true;vi.body=pose_at(body);vi.body_seq=++seq;vi.clamp=pose_at(hand);vi.controller=pose_at(hand);
+            const auto v=src.update(0,vi);
+            CouplingInput in{};in.kind=HoldKind::corpse;in.body_ready=true;in.body=pose_at(body);in.controller=pose_at(hand);in.now=now;in.body_weight=v.body_weight;
+            const auto o=c.update(0,in);worst=std::max(worst,length(o.target.position-hand));CHECK(!o.release);
+        }
+        CHECK(worst<=.01);
+        NativeRig coupled,b4;b4.body_on=false;double worst_native=0,lag=0;
+        for(int i=0;i<180;++i) {
+            const double x=.4*std::sin(5.*i*dt90);coupled.controller.position.x=b4.controller.position.x=x;
+            coupled.step();b4.step();worst_native=std::max(worst_native,length(coupled.target.position-b4.target.position));
+            lag=std::max(lag,length(coupled.body-coupled.controller.position));
+        }
+        CHECK(worst_native<=.01);CHECK(lag>.05);   // the body really lagged
+    }
+    {   // coupling_edge_blends_no_step (fix round 1): contact makes B15 draw the body; the coupled target eases from the controller to the body over
+        // B15's 0.15 s and back when contact ends: no frame steps more than the blend's own rate
+        HandVisualSource src;HoldCoupling c;double now=10;std::uint64_t seq=1;const Vec3 hand{0,0,1},body{.08,0,1};
+        VisualInput vi{};vi.body_ready=true;vi.body=pose_at(body);vi.clamp=pose_at(hand);vi.controller=pose_at(hand);
+        Vec3 last=hand;double worst_step=0;int frames_to_body=-1;
+        for(int i=0;i<120;++i) {
+            now+=dt90;vi.now=now;vi.body_seq=++seq;vi.body_contact=vi.world_hit_near=i>=20 && i<70;
+            const auto v=src.update(0,vi);
+            CouplingInput in{};in.kind=HoldKind::motor_prop;in.body_ready=true;in.body=pose_at(body);in.controller=pose_at(hand);in.now=now;in.body_weight=v.body_weight;
+            const auto o=c.update(0,in);
+            worst_step=std::max(worst_step,length(o.target.position-last));last=o.target.position;
+            if(frames_to_body<0 && length(o.target.position-body)<1e-9) frames_to_body=i-20;
+        }
+        CHECK(worst_step<=.08*dt90/HandVisualSource::blend_seconds+1e-6);   // 5.9 mm a frame at 90 Hz for an 8 cm gap
+        CHECK(frames_to_body>=13 && frames_to_body<=15);                    // the full body after the 0.15 s blend
+        CHECK(length(last-hand)<1e-9);                                       // back on the controller after contact
     }
     {   // DeepSeek P2: a coupling edge (the body becomes ready or is lost, a snap) moves the hand a grab samples by a known step; without the rebase a
         // step over 0.5 m drops the press, with it the hold goes on and the step is not thrown

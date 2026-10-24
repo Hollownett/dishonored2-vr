@@ -36,7 +36,9 @@ struct VisualInput {
     bool body_behind_surface{};           // the clamp's tunnelling guard: the body is behind a plane the clamp holds
     std::optional<Vec3> anchor;           // the plan A DrawnAnchor's drawn position while its weight is above zero (already eased by its own 0.25 s)
 };
-struct VisualOutput {WorldTrackedPose drawn{};VisualSource source{VisualSource::clamp};bool snapped{};double gap_m{};bool changed{};bool blending{};};
+// body_weight (B16): how much of the drawn hand is the body, 0..1, ramped linearly over blend_seconds with the source (1 while the body is the
+// settled source, 0 in free air or with no body): held things follow the drawn hand, so they follow the body only as far as it is drawn.
+struct VisualOutput {WorldTrackedPose drawn{};VisualSource source{VisualSource::clamp};bool snapped{};double gap_m{};bool changed{};bool blending{};double body_weight{};};
 
 // True when the body centre is behind any held plane by more than `margin` (the planes' normals point toward free space).
 inline bool behind_held_planes(Vec3 body,const ClampHit* planes,std::size_t count,double margin=.02) {
@@ -109,6 +111,9 @@ public:
         out.drawn=target;
         if(w<1) {out.drawn.position=target.position+s.offset*(1-w);out.blending=true;}
         out.source=want;s.last=out.drawn;
+        if(!present) s.body_w=0;   // no body in play: phase 1 exactly
+        else {const double goal=want==VisualSource::body?1.:0.,step=dt/blend_seconds;s.body_w=s.body_w<goal?std::min(goal,s.body_w+step):std::max(goal,s.body_w-step);}
+        out.body_weight=s.body_w;
         s.cand[static_cast<std::size_t>(VisualSource::clamp)]=in.clamp.position;s.have[static_cast<std::size_t>(VisualSource::clamp)]=true;
         s.cand[static_cast<std::size_t>(VisualSource::controller)]=target_of_controller(in);s.have[static_cast<std::size_t>(VisualSource::controller)]=true;
         s.have[static_cast<std::size_t>(VisualSource::body)]=present;if(present) s.cand[static_cast<std::size_t>(VisualSource::body)]=in.body->position;
@@ -119,7 +124,7 @@ public:
 private:
     static Vec3 target_of_controller(const VisualInput& in) {return clamp_detail::finite_pose(in.controller)?in.controller.position:in.clamp.position;}
     struct State {bool has_time{},has_source{},has_seq{},distrusted{};double time{},far_s{},elapsed{},seq_time{},interval{};VisualSource source{VisualSource::clamp};
-                  Vec3 offset{};WorldTrackedPose last{};std::array<Vec3,4> cand{};std::array<bool,4> have{};std::uint64_t seq{};};
+                  Vec3 offset{};WorldTrackedPose last{};std::array<Vec3,4> cand{};std::array<bool,4> have{};std::uint64_t seq{};double body_w{};};
     std::array<State,2> state_{};
 };
 

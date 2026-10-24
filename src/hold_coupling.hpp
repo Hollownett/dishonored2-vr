@@ -2,13 +2,16 @@
 // Plan B task B16: held things follow the hand body (Bonelab §1.2: the held object is a dynamic body hanging on the hand's joint, so it is
 // pulled behind the hand; §2.2: the hand lags when the world stops it). Pure: no engine access; the render thread is the only caller.
 //
-// * Motor holds (a prop or a corpse limb driven by PhysicalGrab): while the hand body is ready, the pose the grab pulls the object toward is the
-//   hand body's (its position, the controller's orientation: a sphere has none) instead of the controller's, so the held body trails a hand the
-//   world already stopped. Release: a corpse at 0.5 m of hand lag held for 0.25 s (plan A's corpse rule, PhysicalGrab's own numbers, the same
+// * Held things follow the DRAWN hand (fix round 1 ruling): the body only as far as B15's HandVisualSource draws it (body_weight: 1 while the
+//   body is the settled source, i.e. in contact within 0.10/0.12 m of the clamp pose or agreeing within 0.02 m; ramped over B15's 0.15 s blend;
+//   0 in free air). In free air every hold is exactly B4's / plan A's; a free-air throw keeps the controller's velocity.
+// * Motor holds (a prop or a corpse limb driven by PhysicalGrab): the pose the grab pulls the object toward is the controller moved toward the
+//   hand body by body_weight (the body's position, the controller's orientation: a sphere has none), so the held body trails a hand the world
+//   stopped. Release: a corpse at 0.5 m of hand lag held for 0.25 s (plan A's corpse rule, PhysicalGrab's own numbers, the same
 //   DwellTimer clock, X-3); a prop at 1.5 m (PhysicalGrab's prop rule, no dwell).
 // * Native holds (HoldObject keyframes the item toward the mod's target, spec deviation 4; the HeldClamp stays the collision mechanism): the
-//   target is the request carried by the body (the hold offset, request minus the grip it was computed from, so it comes from the controller
-//   side and never from the body or last frame, applied at the body), pushed out by the HeldClamp's planes (HeldClamp::project). The clamp
+//   target is the request computed from the drawn grip (B15 already draws it at the body while it selects the body, blended), pushed out by the
+//   HeldClamp's planes (HeldClamp::project): it never reads the body itself. The clamp
 //   itself keeps sweeping and judging the controller's request (HeldClamp::update, B4's sweeps, planes and 0.35 m / 0.25 s drop rule): a
 //   body-carried request resting against a wall would sweep nothing, its plane would lapse after 0.1 s and the body would cycle. The body's own
 //   servo target is NOT the clamped object pose (the body would be fed its own pose plus the offset every frame: a runaway) and NOT the hand
@@ -23,7 +26,6 @@
 //   prop on RIGID_BODY 3) makes HandFilterKeeper ask for the hand's word without that layer. The default word returns only through SafeRelease
 //   (the released object no longer overlaps the hand body, or 0.5 s passed: counted unresolved), or with a new body (a destroy or a recreate
 //   always starts from the R1 default word).
-#include "drawn_anchor.hpp"
 #include "dwell_timer.hpp"
 #include "hand_body_commands.hpp"
 #include "held_clamp.hpp"
@@ -43,7 +45,8 @@ enum class HoldKind {motor_prop,corpse,native};
 struct CouplingInput {HoldKind kind{};bool body_ready{};std::optional<WorldTrackedPose> body;WorldTrackedPose controller{};
     std::optional<WorldTrackedPose> clamped_native;double now{};
     // native only: the request re-based on the controller palm (HoldCoupling::controller_request) and HeldClamp::update's output for it
-    std::optional<WorldTrackedPose> controller_request,clamped_controller;};
+    std::optional<WorldTrackedPose> controller_request,clamped_controller;
+    double body_weight{1.};};   // motor holds: B15's VisualOutput::body_weight (how much of the drawn hand is the body); 0: today's controller pose
 struct CouplingOutput {WorldTrackedPose target{};bool uses_body{};double lag_m{};bool release{};
     std::optional<Vec3> body_target;};   // native, body in use: the hand body's servo target (none: B14's, the controller palm)
 
@@ -52,23 +55,8 @@ public:
     static constexpr double lag_release_m=.5,lag_release_s=.25;   // plan A's corpse rule (spec 266/671, ruling B-26), kept equal
     static constexpr double prop_release_m=1.5;                    // props keep PhysicalGrab's 1.5 m rule
     static constexpr double max_dt=.05;                            // a hitch never counts as more dwell than this (Review Focus 4)
-    // A carried native item trails the controller side by at most the drawn hand's own bound (Global: the drawn hand within 0.35 m of the
-    // controller), so the hand drawn holding it can always reach it (DeepSeek P2: a 0.65 m body lag at 6 m/s outran the bounded drawn shift).
-    static constexpr double native_max_lag_m=.35;
-    static_assert(native_max_lag_m==DrawnAnchor::bound_m,"the drawn-hand bound");
-    static_assert(lag_release_m==PhysicalGrab::lag_release_m && lag_release_s==PhysicalGrab::lag_release_s,"the corpse rule is plan A's");
-
     // A usable body pose: ready and finite.
     static bool usable(bool body_ready,const std::optional<WorldTrackedPose>& body) {return body_ready && body && finite(body->position);}
-    // Native: the body-carried request. Without a usable body it is `request` itself (bit-exact); with one, the hold offset (request - grip,
-    // from this frame's controller-side request, never from the body or a past frame) applied at the body: the object is carried by the hand body.
-    static WorldTrackedPose native_request(const WorldTrackedPose& request,Vec3 grip,const std::optional<WorldTrackedPose>& body,bool body_ready) {
-        if(!usable(body_ready,body) || !finite(grip)) return request;
-        Vec3 lag=body->position-grip;const double l=length(lag);
-        if(l>native_max_lag_m) lag=lag*(native_max_lag_m/l);
-        WorldTrackedPose out=request;out.position=request.position+lag;   // = body + (request - grip) while the lag is within the bound
-        return finite(out.position)?out:request;
-    }
     // Native: the same request moved from the grip to the controller palm (what B4 would request with the hand exactly at the controller).
     static WorldTrackedPose controller_request(const WorldTrackedPose& request,Vec3 grip,Vec3 controller) {
         WorldTrackedPose out=request;out.position=request.position+(controller-grip);return out;
@@ -95,10 +83,11 @@ public:
             out.body_target=gap>0?in.controller.position+shift:in.controller.position;   // free air: the controller palm itself, exactly
             return out;   // release: HeldClamp::should_release() on the controller's request (B4's rule, unchanged)
         }
-        if(!use) {s.lag.reset();return out;}   // today's behaviour: the controller pose, untouched
-        out.uses_body=true;
-        out.target.position=in.body->position;                    // the orientation stays the controller's
-        out.lag_m=length(in.controller.position-in.body->position);
+        const double w=std::isfinite(in.body_weight)?std::clamp(in.body_weight,0.,1.):0.;
+        if(!use || !(w>0)) {s.lag.reset();return out;}   // today's behaviour (no body, or not drawn: free air): the controller pose, untouched
+        out.uses_body=true;   // the orientation stays the controller's
+        out.target.position=w>=1?in.body->position:in.controller.position+(in.body->position-in.controller.position)*w;
+        out.lag_m=length(in.controller.position-out.target.position);
         if(in.kind==HoldKind::corpse) out.release=s.lag.update(out.lag_m>lag_release_m,dt);
         else {s.lag.reset();out.release=out.lag_m>prop_release_m;}
         return out;
@@ -110,14 +99,15 @@ private:
 };
 
 // One native-hold frame with the hand body in use, after `clamp.update(controller_request)` gave `clamped_controller` (dxgi_probe.cpp's
-// publish_held_object and the checks run exactly this): the body-carried request pushed out by the same planes is the target, and the body's
-// servo target is the clamped controller request as a hand pose. request: today's (B4) request, computed from `grip`.
+// publish_held_object and the checks run exactly this): the drawn-grip request pushed out by the same planes is the target, and the body's
+// servo target is the clamped controller request as a hand pose. request: today's (B4) request, computed from `grip` (the drawn hand).
 inline CouplingOutput couple_native(HoldCoupling& coupling,unsigned side,const HeldClamp& clamp,const std::optional<HeldProxies>& proxies,
                                     const WorldTrackedPose& request,Vec3 grip,const WorldTrackedPose& controller,const std::optional<WorldTrackedPose>& body,
                                     bool body_ready,const WorldTrackedPose& controller_request,const WorldTrackedPose& clamped_controller,double now) {
     CouplingInput in{};in.kind=HoldKind::native;in.body_ready=body_ready;in.body=body;in.controller=controller;in.now=now;
     in.controller_request=controller_request;in.clamped_controller=clamped_controller;
-    WorldTrackedPose carried=HoldCoupling::native_request(request,grip,body,body_ready);
+    (void)grip;   // the request already comes from the drawn grip: the object follows the drawn hand, never the raw body
+    WorldTrackedPose carried=request;
     if(const auto pushed=clamp.project(carried,proxies)) carried.position=*pushed;
     in.clamped_native=HoldCoupling::usable(body_ready,body)?carried:clamped_controller;
     return coupling.update(side,in);

@@ -389,9 +389,22 @@ assert probe[b16_at:probe.index(b16_block)].rstrip().endswith("if(hand_body_requ
 assert "for(auto& body_view:hold_body_view) body_view={};" in probe[b16_at:probe.index(b16_block)], "the views are cleared every frame before the gate"
 assert "unsigned hold_coupled_bits{};std::array<std::uint32_t,2> hand_filter_words{{d2vr::R1Recipe::filter,d2vr::R1Recipe::filter}};" in probe
 assert b16_at < vstart, "B16 decides before B15 draws"
-for name, pattern in (("hold_coupled_bits", r"hold_coupled_bits\|="), ("hand_filter_words", r"hand_filter_words\[side\]="), ("native_grab.couple", r"native_grab\.couple\(")):
+for name, pattern in (("hold_coupled_bits", r"hold_coupled_bits\|="), ("hand_filter_words", r"hand_filter_words\[side\]=")):
     for m in re.finditer(pattern, probe):
         assert probe.index(b16_block) <= m.start() < probe.index(b16_block) + len(b16_block), name + " is set only inside the knob-gated block"
+# fix round 1: part 2, after B15's single pick, couples motor holds to the DRAWN hand (B15's body_weight); knob-gated; the only couple() calls
+p2_at = probe.index("// B16 part 2 (fix round 1 ruling)")
+p2_block, _ = enclosing_block(probe, probe.index("static std::array<std::uint64_t,2> coupled_serial{};"))
+assert final_at < p2_at < probe.index(p2_block) and probe[p2_at:probe.index(p2_block)].rstrip().endswith("if(hand_body_requested.load(std::memory_order_relaxed) && d2vr::HandBodyRuntime::active())")
+for m in re.finditer(r"native_grab\.couple\(", probe):
+    assert probe.index(p2_block) <= m.start() < probe.index(p2_block) + len(p2_block), "couple() only in part 2"
+assert "drawn_body_weight[side]=visual[side].body_weight;" in vblock and "std::array<double,2> drawn_body_weight{};" in probe
+assert code_of(probe).count("drawn_body_weight[side]") == 2, "written by B15, read by part 2 only"
+cn = function(coupling, "inline CouplingOutput couple_native(")
+assert "WorldTrackedPose carried=request;" in cn and "body->" not in cn and "body_weight" not in cn, "a native target never reads the body: it follows the drawn grip"
+hc_upd = function(coupling, "CouplingOutput update(unsigned side,const CouplingInput& in)")
+assert "if(!use || !(w>0)) {s.lag.reset();return out;}" in hc_upd, "not drawn (free air): today's pose"
+assert "out.body_weight=s.body_w;" in visual_hdr
 assert "native_grab.couple(" not in code_of(probe[:b16_at]) and code_of(grab).count("void couple(") == 1
 assert "in.yield=(((hand_body_yield_bits&~hold_coupled_bits)|authored_hands)>>side)&1u;" in vblock
 for line in ("hand_body_in.yield=(hand_body_yield_bits&~hold_coupled_bits)|authored_hands;", "hand_body_in.filter=hand_filter_words;",
