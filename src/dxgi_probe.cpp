@@ -498,7 +498,7 @@ static d2vr::HandVisualSource hand_visual_source;static d2vr::HandVisualStats ha
 // B16: held things follow the hand body (render thread; knob build/hand-body). hold_body_view: this frame's usable hand-body pose per side (ready, the
 // pose published within 50 ms); native_body_target: a coupled native hold's servo target for the body, published with the next frame's hands.
 static d2vr::HoldCoupling hold_coupling;static d2vr::HandFilterKeeper hand_filter_keeper;static d2vr::HoldCouplingStats hold_coupling_stats;
-struct HoldBodyView {bool ready{};std::optional<d2vr::WorldTrackedPose> body;};static std::array<HoldBodyView,2> hold_body_view{};
+struct HoldBodyView {bool ready{};std::optional<d2vr::WorldTrackedPose> body;d2vr::HoldAnchorView held{};double weight{};};static std::array<HoldBodyView,2> hold_body_view{};
 struct NativeBodyTarget {d2vr::Vec3 position{};UINT64 tick{};bool valid{};};static std::array<NativeBodyTarget,2> native_body_target{};
 static d2vr::DrawnAnchor drawn_anchor;static std::atomic<double> prop_seat_gap_m{0}; // Task 12: the drawn hand on a motor-held body (render thread, once per displayed frame); the largest |drawn hand - grasp point| over prop holds
 static std::optional<d2vr::NativeRigidBody> simulated_grab_target;
@@ -3164,7 +3164,8 @@ static double held_clamp_seconds() {return std::chrono::duration<double>(std::ch
 static void held_clamp_end() {
     auto& L=held_clamp_live;
     if(!L.holding) return;
-    L.holding=false;L.shift[L.side&1u]={};L.clamp.reset();native_body_target[L.side&1u].valid=false;
+    L.holding=false;L.shift[L.side&1u]={};L.clamp.reset();
+    if(hand_body_requested.load(std::memory_order_relaxed)) native_body_target[L.side&1u].valid=false;   // B16 (knob off: nothing)
     if(!held_clamp_enabled || !L.proxies) return;
     L.releasing=true;L.safe.reset();L.release_posted=false;L.overlap_seen=false;L.last_serial=0;
     d2vr::NativeHeldObject::begin_safe_release();
@@ -3176,7 +3177,7 @@ static void held_clamp_begin(unsigned side,std::uintptr_t entity,std::uint32_t i
     auto& L=held_clamp_live;
     if(L.releasing) {L.releasing=false;d2vr::NativeHeldObject::cancel_safe_release();}
     native_grab.cancel_release_depen();   // a push asked for the previous hold's object never reaches a re-grabbed (or any new) one
-    hold_coupling.reset(side&1u);native_body_target[side&1u].valid=false;   // B16: a new native hold starts its own coupling
+    if(hand_body_requested.load(std::memory_order_relaxed)) {hold_coupling.reset(side&1u);native_body_target[side&1u].valid=false;}   // B16: a new native hold starts its own coupling
     L.clamp.reset();L.safe.reset();L.proxies.reset();L.holding=true;L.drop_sent=false;held_clamp_drop_request.store(0);L.posted=false;L.last_serial=0;L.side=side&1u;L.entity=entity;L.entity_id=id;
 }
 static void held_clamp_release_step() {
@@ -3339,7 +3340,11 @@ static void publish_held_object(unsigned side,const d2vr::WorldTrackedPose& grip
         }
         // B16: with the hand body ready the clamp sweeps and judges the controller's request (B4's planes, sweeps and drop rule) and the target is the
         // body-carried request pushed out by the same planes (couple_native below); else B4's request, bit-exact
-        const auto& body_view=hold_body_view[side&1u];const bool coupled=body_view.ready;
+        // fix round 2 (review P3-3): the body is in play only with the knob on and a ready view; the object follows it only while B15 draws it
+        // (weight > 0); weight 0 is B4 exactly (B4's request, B4's clamp output), the raw-gap release still judged
+        const bool body_knob=hand_body_requested.load(std::memory_order_relaxed);
+        const auto& body_view=hold_body_view[side&1u];const bool body_on=body_knob && d2vr::HandBodyRuntime::active() && body_view.ready;
+        const bool coupled=body_on && body_view.weight>0;
         const d2vr::WorldTrackedPose request{origin,{X,Y,Z}};
         d2vr::HeldClampInput in{};in.now=held_clamp_seconds();in.epoch=pose_epoch^(reference_epoch<<32);in.requested=coupled?d2vr::HoldCoupling::controller_request(request,grip.position,palm_pose.position):request;in.proxies=L.proxies;
         if(L.posted && L.proxies) { // last frame's answers, only once the game thread has run a scope since the post (the slots keep older results for 100 ms)
@@ -3363,18 +3368,20 @@ static void publish_held_object(unsigned side,const d2vr::WorldTrackedPose& grip
             }
             if(out.clamped) {origin=out.target.position;++held_clamp_status.clamped_frames;}
             d2vr::Vec3 shift=out.clamped?out.shift:d2vr::Vec3{};
-            if(coupled) {   // B16: the object is carried by the body (pushed out by the clamp's planes) and the hand is drawn holding it there; the body's own
-                // servo target is the clamped controller request as a hand pose (a function of the controller and the world: no feedback through the body)
-                const auto co=d2vr::couple_native(hold_coupling,side&1u,L.clamp,L.proxies,request,grip.position,palm_pose,body_view.body,coupled,in.requested,out.target,in.now);
+            bool coupled_release=false;
+            if(body_on) {   // B16: drawn: the object follows the drawn grip (pushed out by the clamp's planes); not drawn: B4's output. The body's own servo
+                // target is the clamped request as a hand pose (a function of the controller and the world: no feedback through the body)
+                const auto co=d2vr::couple_native(hold_coupling,side&1u,L.clamp,L.proxies,request,palm_pose,body_view.body,true,coupled,in.requested,out.target,in.now);
                 hold_coupling_stats.note(side&1u,d2vr::HoldKind::native,co);
-                origin=co.target.position;shift=origin-request.position;
+                if(coupled) {origin=co.target.position;shift=origin-request.position;}
                 native_body_target[side&1u]={co.body_target?*co.body_target:palm_pose.position,GetTickCount64(),true};
-            } else native_body_target[side&1u].valid=false;
+                coupled_release=co.release;   // fix round 2: the raw body gap 0.35 m for 0.25 s (spec 5A)
+            } else if(body_knob) native_body_target[side&1u].valid=false;
             L.pose={origin,{X,Y,Z}};L.clamp.note_published(L.pose);
             const double shift_len=d2vr::length(shift);
             if(shift_len>d2vr::DrawnAnchor::bound_m) shift=shift*(d2vr::DrawnAnchor::bound_m/shift_len);
             L.shift[side&1u]=shift;held_clamp_status.drawn_hand_gap_m.store(d2vr::length(shift));
-            if(L.clamp.should_release() && !L.drop_sent) {L.drop_sent=true;held_clamp_drop_request.store(GetTickCount64());}
+            if((L.clamp.should_release() || coupled_release) && !L.drop_sent) {L.drop_sent=true;held_clamp_drop_request.store(GetTickCount64());}
             const double cast_us=d2vr::NativeInteractionAim::clamp_cast_us_.load();held_clamp_status.cast_us.store(cast_us);
             if(cast_us>held_clamp_status.cast_us_max.load()) held_clamp_status.cast_us_max.store(cast_us);
         }
@@ -4737,7 +4744,7 @@ void prepare_head_view(void* view) noexcept {
             const bool reverse_sword=sword_reversed.load();
             d2vr::rig::ArmTrackingFrame hands{};std::array<d2vr::WorldTrackedPose,2> raw_grips{},palm_grips{};std::array<std::uintptr_t,2> cast_entities{};hands.tick=GetTickCount64();hands.source_tick=game_xr->grip_pose_tick();hands.epoch=game_xr->pose_epoch();
             unsigned hand_body_free_bits{},hand_body_yield_bits{},hand_visual_contact_bits{};   // B14: read only by the knob-gated hand-body publication below
-            unsigned hold_coupled_bits{};std::array<std::uint32_t,2> hand_filter_words{{d2vr::R1Recipe::filter,d2vr::R1Recipe::filter}};   // B16: set only by the knob-gated block before B15
+            unsigned hold_coupled_bits{},hold_holding_bits{};std::array<std::uint32_t,2> hand_filter_words{{d2vr::R1Recipe::filter,d2vr::R1Recipe::filter}};   // B16: set only by the knob-gated block before B15
             std::array<double,2> drawn_body_weight{};   // B16 fix round 1: how much of the drawn hand is the body (B15's blend); 0 knob off / free air
             hands.curls={std::clamp(game_xr->controller_input.left_grip,0.f,1.f),std::clamp(game_xr->controller_input.right_grip,0.f,1.f)};
             // A hand holding a prop closes around it rather than through it: an apple keeps the fist, a crate leaves it half open.
@@ -5114,30 +5121,33 @@ void prepare_head_view(void* view) noexcept {
                      }
                  }}
                 // B16: held things follow the hand body (Bonelab §1.2, §2.2; src/hold_coupling.hpp). Part 1, before B15: a hold with a ready body drives
-                // the body instead of yielding it; the hand body's filter word drops the held body's layer while it holds (HandFilterKeeper, restored only
-                // through SafeRelease or with a new body). Part 2, after B15: held things follow the DRAWN hand (the body only as far as B15 draws it).
-                // Knob off, or no ready body: nothing here runs and every hold is exactly B4's / plan A's.
-                for(auto& body_view:hold_body_view) body_view={};
+                // the body instead of yielding it; B14's snaps are suppressed while a hand holds something; the hand body's filter word drops the held
+                // body's layer while it holds (HandFilterKeeper, restored only through SafeRelease or with a new body). Part 2, after B15: held things
+                // follow the DRAWN hand (the body only as far as B15 draws it); the lag release judges the raw body gap. Knob off: nothing here runs.
                 if(hand_body_requested.load(std::memory_order_relaxed) && d2vr::HandBodyRuntime::active()) {
                     static std::array<std::uint64_t,2> pose_seq{};static std::array<double,2> pose_seq_at{};
                     const double couple_now=std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
                     auto reader=&read_self;
                     for(unsigned side=0;side<2;++side) {
-                        auto& body_view=hold_body_view[side];
+                        auto& body_view=hold_body_view[side];body_view=HoldBodyView{};
                         const auto stamped=d2vr::HandBodyRuntime::pose_stamped(side);
                         if(stamped.second!=pose_seq[side]) {pose_seq[side]=stamped.second;pose_seq_at[side]=couple_now;}
-                        body_view.ready=d2vr::HandBodyRuntime::ready(side) && stamped.first.has_value() && ((hands.hands>>side)&1u) && couple_now-pose_seq_at[side]<=.05;
+                        const bool body_exists=d2vr::HandBodyRuntime::ready(side);
+                        body_view.ready=body_exists && stamped.first.has_value() && ((hands.hands>>side)&1u) && couple_now-pose_seq_at[side]<=.05;
                         if(body_view.ready) body_view.body=stamped.first;
-                        const auto held=physical_grab_requested?native_grab.hold_anchor(side):d2vr::HoldAnchorView{};
+                        body_view.held=physical_grab_requested?native_grab.hold_anchor(side):d2vr::HoldAnchorView{};   // once per side per frame (part 2 reuses it)
+                        const auto& held=body_view.held;
                         const bool motor=held.active && held.capped;
+                        const bool native_hold=held_clamp_enabled && held_clamp_live.holding && held_clamp_live.side==side;
+                        if(held.active || native_hold) hold_holding_bits|=1u<<side;   // B14's snaps wait while this hand holds something
                         // a coupled hold drives the body instead of yielding it (the object follows the drawn hand: part 2 below, after B15)
-                        if(motor && body_view.ready) hold_coupled_bits|=1u<<side;
-                        if(!motor && held_clamp_enabled && held_clamp_live.holding && held_clamp_live.side==side && body_view.ready) hold_coupled_bits|=1u<<side;   // a native hold
-                        // The hand never collides with what it holds: a held DEBRIS item needs nothing (the hand mask omits DEBRIS); a coupled motor hold of a
+                        if((motor || native_hold) && body_view.ready) hold_coupled_bits|=1u<<side;
+                        // The hand never collides with what it holds: a held DEBRIS item needs nothing (the hand mask omits DEBRIS); a capped motor hold of a
                         // body on a layer the mask includes (a corpse limb 14, a rigid prop 3) takes that layer out until that object's own release check
-                        // (SafeRelease) sees the hand clear of it.
-                        d2vr::FilterKeeperInput fk{};fk.now=couple_now;fk.body_ready=d2vr::HandBodyRuntime::ready(side);fk.body_generation=d2vr::HandBodyRuntime::status(side).creates;
-                        if(motor && ((hold_coupled_bits>>side)&1u)) {
+                        // (SafeRelease) sees the hand clear of it. Review P3-1: the hold is judged on the body existing, not on a fresh pose; a stale pose
+                        // only freezes the running checks.
+                        d2vr::FilterKeeperInput fk{};fk.now=couple_now;fk.body_ready=body_exists;fk.body_generation=d2vr::HandBodyRuntime::status(side).creates;fk.pose_fresh=body_view.ready;
+                        if(motor && body_exists) {
                             fk.held_layer=held.layer>=0?static_cast<unsigned>(held.layer):held.corpse?d2vr::hand_body::layer_npc_body_ragdoll:d2vr::hand_body::layer_rigid_body;   // unreadable: assume the solid one
                             fk.held_entity=held.entity;fk.held_corpse=held.corpse;
                         }
@@ -5180,22 +5190,22 @@ void prepare_head_view(void* view) noexcept {
                 }
                 for(unsigned side=0;side<2;++side) if(hands.hands&(1u<<side)) hands.grips[side]=d2vr::resolve_drawn_grip(visual[side],anchors[side]).pose;   // X-4 in one function
                 // B16 part 2 (fix round 1 ruling): a capped motor hold follows the DRAWN hand: the controller moved toward the hand body by B15's body_weight
-                // (1 while B15 draws the body: contact within 0.10/0.12 m or agreement within 0.02 m; ramped over its 0.15 s blend; 0 in free air). No weight:
-                // no coupling is published and the grab samples the controller exactly as plan A does (a free-air throw keeps its velocity). Knob off: nothing.
+                // (1 while B15 draws the body: contact within 0.10/0.12 m or agreement within 0.02 m; ramped over its 0.15 s blend; 0 in free air): no weight,
+                // no offset published and the grab samples the controller exactly as plan A does (a free-air throw keeps its velocity). Fix round 2: the lag
+                // release judges the RAW gap between the body and the controller (corpse 0.5 m / 0.25 s, prop 1.5 m) and is published either way. Knob off: nothing.
                 if(hand_body_requested.load(std::memory_order_relaxed) && d2vr::HandBodyRuntime::active()) {
                     static std::array<std::uint64_t,2> coupled_serial{};
                     const double couple_now=std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();const UINT64 couple_ms=GetTickCount64();
                     for(unsigned side=0;side<2;++side) {
-                        const auto held=physical_grab_requested?native_grab.hold_anchor(side):d2vr::HoldAnchorView{};
+                        auto& body_view=hold_body_view[side];body_view.weight=drawn_body_weight[side];   // publish_held_object reads it for a native hold
+                        const auto& held=body_view.held;
                         if(held.active && held.capped) {
                             if(held.serial!=coupled_serial[side]) {hold_coupling.reset(side);coupled_serial[side]=held.serial;}   // a new hold (a regrab of the same body too)
-                            const auto& body_view=hold_body_view[side];
                             d2vr::CouplingInput in{};in.kind=held.corpse?d2vr::HoldKind::corpse:d2vr::HoldKind::motor_prop;in.body_ready=body_view.ready;in.body=body_view.body;
-                            in.controller=palm_grips[side];in.now=couple_now;in.body_weight=drawn_body_weight[side];
+                            in.controller=palm_grips[side];in.now=couple_now;in.body_weight=body_view.weight;
                             const auto out=hold_coupling.update(side,in);hold_coupling_stats.note(side,in.kind,out);
                             // the drawn hand's offset from the palm, applied by NativeGrab to the controller grip it samples (the hand frame stays rigid)
-                            if(out.uses_body) native_grab.couple(side,held.serial,out.target.position-palm_grips[side].position,out.release,couple_ms);
-                            else native_grab.couple(side,held.serial,std::nullopt,false,couple_ms);
+                            native_grab.couple(side,held.serial,out.uses_body?std::optional<d2vr::Vec3>(out.target.position-palm_grips[side].position):std::nullopt,out.release,couple_ms);
                         } else if(coupled_serial[side]) {hold_coupling.reset(side);coupled_serial[side]=0;native_grab.couple(side,0,std::nullopt,false,couple_ms);}
                     }
                 }
@@ -5217,6 +5227,7 @@ void prepare_head_view(void* view) noexcept {
                 // B14: the servo's target (the raw calibrated palm pose, C9 intent), the clamp's free / yield bits, locomotion and the player root
                 hand_body_in.target=palm_grips;hand_body_in.free=hand_body_free_bits&hands.hands;hand_body_in.yield=(hand_body_yield_bits&~hold_coupled_bits)|authored_hands;
                 hand_body_in.filter=hand_filter_words;   // B16: HandFilterKeeper's word per side (the R1 default unless a coupled hold took a layer out)
+                hand_body_in.holding=hold_holding_bits;   // B16 fix round 2: B14's snaps wait while a hand holds something
                 for(unsigned side=0;side<2;++side) if(((hold_coupled_bits>>side)&1u) && native_body_target[side].valid && GetTickCount64()-native_body_target[side].tick<=50)
                     hand_body_in.target[side].position=native_body_target[side].position;   // B16: a coupled native hold: the controller's request pushed out by the clamp
                 hand_body_in.locomotion=std::fabs(published_move_x.load())>.05f || std::fabs(published_move_y.load())>.05f;

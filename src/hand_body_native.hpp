@@ -284,9 +284,8 @@ public:
     }
     // B16: 0x97600 setBodyCollisionFilterInfo, the engine's own filter writer (0x808310 m_collideWithSword and native_held_object.hpp call it
     // as 97600(game+0x60280, handle, filter, 1, busy)), on our own slot only, in the body's own world, with an allowed hand word, and with
-    // 0x8a7820 re-read false right before it (busy 0: the direct path, no queued record). false: refused, no call. The record's word (+0x6c) is
-    // read back afterwards and a mismatch is only counted (filter_readback_mismatches): the manager never re-sends the same word in a loop.
-    inline static std::atomic<std::uint64_t> filter_readback_mismatches{};
+    // 0x8a7820 re-read false right before it (busy 0: the direct path, no queued record). false: refused, no call. The manager reads the word
+    // back (filter_word below) and retries a miss a bounded number of ticks before it latches the hand body off.
     static bool set_filter(const R1BodyStorage& s,std::uintptr_t world,std::uintptr_t world_at_create,std::uint32_t handle,std::uint32_t filter) {
         if(!world || world!=world_at_create || !hand_filter_word_allowed(filter) || own_state(world,handle,s)!=Own::present) return false;
         const auto game=rig::value<std::uintptr_t>(read_,base_+0x39a5290);
@@ -298,9 +297,13 @@ public:
         CrashOperation operation("hand body setBodyCollisionFilterInfo");
         if(busy_now()) return false;                       // 0x8a7820 re-read immediately before the call
         if(!guarded_call(call)) throw HandBodyEngineFault("filter write faulted");
-        std::uintptr_t record{};
-        if(own_state(world,handle,s,&record)!=Own::present || rig::value<std::uint32_t>(read_,record+0x6c)!=filter) filter_readback_mismatches.fetch_add(1,std::memory_order_relaxed);
         return true;
+    }
+    // B16 fix round 2: the filter word the body's pool record holds (+0x6c), our own slot only. nullopt: not ours or unreadable.
+    static std::optional<std::uint32_t> filter_word(std::uintptr_t world,std::uint32_t handle,const R1BodyStorage& s) {
+        std::uintptr_t record{};
+        if(own_state(world,handle,s,&record)!=Own::present) return std::nullopt;
+        return rig::value<std::uint32_t>(read_,record+0x6c);
     }
     // Owner (a)'s static G2 evidence from B7's chain on the player's query body (read live by probe_body_handle).
     static OwnerEvidence owner_a_evidence(const std::optional<BodyProbeRow>& row) {

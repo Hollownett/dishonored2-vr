@@ -106,13 +106,16 @@ struct BodyMotion {Vec3 position{},velocity{},spin{};};
 // yield: an authored animation owns the arm, the clamp yields (carry, physical hold), or tracking is lost: the body holds where it is.
 // target_free: the hand clamp's last palm cast found the target free (the snap and every create need it). player_root / locomotion: for
 // player_drift_um (the player's root moving with no locomotion input while this hand's body is pressed into the capsule).
+// holding (B16 fix round 2): this hand holds something; B14's stuck snap and far snap are suppressed (the hold's lag release owns that case) and
+// resume after the release.
 struct DriveInput {unsigned side{};WorldTrackedPose target{};double held_kg{};double now{};bool yield{};
-                   bool target_free{};std::optional<Vec3> player_root{};bool locomotion{};};
+                   bool target_free{};std::optional<Vec3> player_root{};bool locomotion{};bool holding{};};
 struct DriveStatus {double gap_m{};double speed{};bool capped{},contact_now{};std::uint64_t contact_frames{},snaps{},cost_us{},cost_max_us{},player_drift_um{};
                     double dt_s{};std::uint64_t drives{},drive_writes{},yields{},skipped{},snap_requests{},snap_blocked{},garbage{},second_drives{},root_jumps{},pressed_ticks{};
                     // fix round 1: thread CPU time of this side's drive (QueryThreadCycleTime; 0 when unavailable), and the positive control for
                     // the drift proof: ticks where the root moved under locomotion input, and the largest such root travel in one locomotion window
-                    std::uint64_t cpu_us{},cpu_max_us{},root_moved_ticks{},root_travel_um{};};
+                    std::uint64_t cpu_us{},cpu_max_us{},root_moved_ticks{},root_travel_um{};
+                    std::uint64_t held_ticks{};};   // B16: drive ticks while holding (snaps suppressed)
 // Fix round 1 (proof d, controller ruling): per-tick drive cost (both hands summed) as wall time (QPC) and thread CPU time, a fixed wall
 // histogram, the ticks over budget, and the phase split of the slowest tick (read-back, servo, write, the rest). hist edges in us:
 // [0,10) [10,20) [20,50) [50,100) [100,150) [150,200) [200,300) [300,500) [500,1000) [1000,inf).
@@ -245,6 +248,7 @@ struct HandBodyEngine {
     std::function<void(unsigned side)> forget;                                        // abandon / lost: mod-side bookkeeping only, NEVER an engine call
     std::function<bool()> at_g1_point;                                                // write() is allowed only here (the dispatcher's G1 tick); absent: allowed
     std::function<std::optional<BodyMotion>(unsigned side,std::uint32_t handle)> motion;  // B14 read-back; nullopt: not our body; throws HandBodyUnreadable
+    std::function<std::optional<std::uint32_t>(unsigned side,std::uint32_t handle)> filter;  // B16: the body's filter word as the engine holds it; nullopt: unreadable
     std::function<std::uint64_t()> now_us;                                            // B14 cost clock (microseconds); absent: costs read 0
     std::function<std::optional<std::uint64_t>()> cpu_cycles;                         // fix round 1: this thread's CPU cycles (QueryThreadCycleTime); nullopt: unavailable
     double cycles_per_us{};                                                           // the calibration (cycles per microsecond); <= 0: CPU time unavailable
@@ -259,6 +263,7 @@ struct HandBodyStatus {
     std::uint64_t misplaced_writes{},reentrant_writes{};
     std::uint32_t filter{};std::uint64_t filter_writes{},filter_refused{};   // B16: the body's filter word as last written (R1 default at create)
     std::uint64_t filter_stranded{};   // B16: a body we stopped tracking (abandoned, destroy unconfirmed or faulted) may still carry a stripped word
+    std::uint64_t filter_readback_mismatches{};   // B16 fix round 2: filter writes the engine did not read back as written (retried, then the latch)
 };
 
 // The last read-back pose for the render thread: the dispatcher publishes with try_lock (never waits), readers copy under the lock.
@@ -284,6 +289,7 @@ public:
     static constexpr std::uint64_t create_retry_ms=1000;   // after a refused create, wait before the next attempt (owner resolution is not free)
     static constexpr unsigned max_destroy_retries=240;     // a queued destroy refused this many times latches the fault
     static constexpr unsigned max_wake_tries=30;           // a refused wake write (busy, unreadable) is retried on the next ticks, this many times
+    static constexpr unsigned max_filter_misses=5;         // B16 fix round 2: a filter word not read back as written this many ticks in a row latches
     explicit HandBody(HandBodyEngine engine,bool enabled=true):engine_(std::move(engine)),enabled_(enabled) {}
 
     // Dispatcher tick (the G1 point, idle or not): run the lifecycle per side, then create / destroy / drain the queue / read back.
@@ -390,7 +396,16 @@ public:
             if(!engine_.apply(side,record)) {count(side,&Counters::refused_writes);if(filter_record) count(side,&Counters::filter_refused);return false;}
         } catch(const HandBodyEngineFault& f) {latch(side,f.what(),true);return false;}
         count(side,&Counters::writes);
-        if(filter_record) {s.filter=word;counters_[side].filter.store(word,std::memory_order_release);count(side,&Counters::filter_writes);}
+        if(filter_record) {   // fix round 2 ruling: the word is what the engine reads back; a miss is retried (<= max_filter_misses ticks), then latched
+            count(side,&Counters::filter_writes);
+            std::optional<std::uint32_t> got=word;
+            if(engine_.filter) {try {got=engine_.filter(side,handle);} catch(...) {got.reset();}}
+            if(got && *got==word) {s.filter=word;s.filter_misses=0;counters_[side].filter.store(word,std::memory_order_release);return true;}
+            count(side,&Counters::filter_readback_mismatches);
+            if(got) {s.filter=*got;counters_[side].filter.store(*got,std::memory_order_release);}   // the status shows the word the body really carries
+            if(++s.filter_misses>=max_filter_misses) latch(side,"filter word not read back as written",true);   // destroyed next tick; HandBodyFault
+            return false;
+        }
         return true;
     }
     // B16: give this side's body `word` (an allowed hand word) through write(): dispatcher thread, at the G1 point, after service(). false:
@@ -470,10 +485,13 @@ public:
         if(yielded) {s.servo={};count(side,&Counters::yields);c.capped.store(false,std::memory_order_relaxed);}
         else {
             WorldTrackedPose body;body.position=m->position;body.basis=in.target.basis;   // a sphere: no orientation to servo, the spin only brakes
-            const auto out=servo_step(s.servo,in.target,body,m->velocity,m->spin,in.held_kg,dt,std::numeric_limits<double>::quiet_NaN(),servo_cfg_,tuning_,!in.target_free);
+            // B16 fix round 2: while holding, the stuck timer never runs (target_blocked resets it) and no snap is asked for: the hold's lag
+            // release owns a stuck hand; the rules resume once the hold ends
+            const auto out=servo_step(s.servo,in.target,body,m->velocity,m->spin,in.held_kg,dt,std::numeric_limits<double>::quiet_NaN(),servo_cfg_,tuning_,!in.target_free || in.holding);
             c.capped.store(out.capped,std::memory_order_relaxed);
             if(out.valid) {linear=out.linear;angular=out.angular;}   // invalid (a gap past max_gap, a bad target): hold, and the far gap snaps
-            if(out.snap || (std::isfinite(gap) && gap>dc.far_snap_gap)) {
+            if(in.holding) {s.snap_pending=false;count(side,&Counters::held_ticks);}
+            else if(out.snap || (std::isfinite(gap) && gap>dc.far_snap_gap)) {
                 if(in.target_free) {if(!s.snap_pending) count(side,&Counters::snap_requests);s.snap_pending=true;}
                 else count(side,&Counters::snap_blocked);
             }
@@ -502,7 +520,7 @@ public:
         d.cost_us=c.cost_us.load();d.cost_max_us=c.cost_max_us.load();d.player_drift_um=c.player_drift_um.load();d.dt_s=c.dt_s.load();
         d.drives=c.drives.load();d.drive_writes=c.drive_writes.load();d.yields=c.yields.load();d.skipped=c.skipped.load();
         d.snap_requests=c.snap_requests.load();d.snap_blocked=c.snap_blocked.load();d.garbage=c.garbage.load();d.second_drives=c.second_drives.load();d.root_jumps=c.root_jumps.load();d.pressed_ticks=c.pressed_ticks.load();
-        d.cpu_us=c.cpu_us.load();d.cpu_max_us=c.cpu_max_us.load();d.root_moved_ticks=c.root_moved_ticks.load();d.root_travel_um=c.root_travel_um.load();
+        d.cpu_us=c.cpu_us.load();d.cpu_max_us=c.cpu_max_us.load();d.root_moved_ticks=c.root_moved_ticks.load();d.root_travel_um=c.root_travel_um.load();d.held_ticks=c.held_ticks.load();
         return d;
     }
     // The largest drive cost of one tick, both hands summed (proof (d): <= 200 us), and the last tick's sum.
@@ -527,7 +545,7 @@ public:
         st.busy_waits=c.busy_waits.load();st.wake_writes=c.wake_writes.load();st.create_refusals=c.create_refusals.load();
         st.writes=c.writes.load();st.releases=c.releases.load();st.lost=c.lost.load();st.unverified=c.unverified.load();
         st.misplaced_writes=c.misplaced_writes.load();st.reentrant_writes=c.reentrant_writes.load();
-        st.filter=c.filter.load(std::memory_order_acquire);st.filter_writes=c.filter_writes.load();st.filter_refused=c.filter_refused.load();st.filter_stranded=c.filter_stranded.load();
+        st.filter=c.filter.load(std::memory_order_acquire);st.filter_writes=c.filter_writes.load();st.filter_refused=c.filter_refused.load();st.filter_stranded=c.filter_stranded.load();st.filter_readback_mismatches=c.filter_readback_mismatches.load();
         return st;
     }
     // Session end: the next service() tick destroys every body (the lifecycle's shutdown input is forced on).
@@ -543,10 +561,10 @@ public:
 private:
     struct Counters {
         std::atomic<std::uint64_t> creates{},destroys{},faults{},refused_writes{},abandons{},queued_destroys{},direct_destroys{},busy_waits{},
-            wake_writes{},create_refusals{},writes{},releases{},lost{},unverified{},misplaced_writes{},reentrant_writes{},filter_writes{},filter_refused{},filter_stranded{};
+            wake_writes{},create_refusals{},writes{},releases{},lost{},unverified{},misplaced_writes{},reentrant_writes{},filter_writes{},filter_refused{},filter_stranded{},filter_readback_mismatches{};
         std::atomic<std::uint32_t> filter{R1Recipe::filter};   // B16: the body's filter word as last written (the R1 default from each creation)
         std::atomic<std::uint64_t> contact_frames{},snaps{},cost_us{},cost_max_us{},player_drift_um{},drives{},drive_writes{},yields{},skipped{},
-            snap_requests{},snap_blocked{},garbage{},second_drives{},root_jumps{},pressed_ticks{},cpu_us{},cpu_max_us{},root_moved_ticks{},root_travel_um{};
+            snap_requests{},snap_blocked{},garbage{},second_drives{},root_jumps{},pressed_ticks{},cpu_us{},cpu_max_us{},root_moved_ticks{},root_travel_um{},held_ticks{};
         std::atomic<double> gap_m{},speed{},dt_s{};std::atomic<bool> capped{},contact_now{};std::atomic<std::uint64_t> contact_ms{};
         std::atomic<int> state{};std::atomic<std::uint32_t> handle{};
     };
@@ -559,7 +577,7 @@ private:
     static constexpr std::uint64_t contact_fresh_ms=50;   // contact_now older than this (the drive stopped judging) reads false
     static std::uint64_t steady_ms() {return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());}
     struct Side {std::uint32_t handle{},gen{};std::uintptr_t world{};bool pending_destroy{},woken{};unsigned attempts{},wake_tries{};std::uint64_t next_create_ms{};
-        std::uint32_t filter{R1Recipe::filter};std::uint64_t filter_tick{~0ull};   // B16: the word this body carries; one filter write per tick
+        std::uint32_t filter{R1Recipe::filter};std::uint64_t filter_tick{~0ull};unsigned filter_misses{};   // B16: the word this body carries; one filter write per tick
         // B14 drive state (dispatcher thread only)
         HandServoState servo{};double last_drive_s{std::numeric_limits<double>::quiet_NaN()};std::uint64_t written_tick{~0ull};
         std::uint64_t drive_tick{~0ull};bool snap_pending{},has_cmd{};Vec3 last_cmd{};std::optional<Vec3> press_root,last_root,loco_start,loco_last;unsigned unreadable_motion{},short_streak{};};
@@ -705,7 +723,7 @@ private:
         }
     }
     void finish(unsigned side) {Side& s=side_[side];life_.destroyed(side);s.handle=0;s.attempts=0;s.pending_destroy=false;reset_filter(side);reset_drive(side);}
-    void reset_filter(unsigned side) {side_[side].filter=R1Recipe::filter;counters_[side].filter.store(R1Recipe::filter,std::memory_order_release);}
+    void reset_filter(unsigned side) {side_[side].filter=R1Recipe::filter;side_[side].filter_misses=0;counters_[side].filter.store(R1Recipe::filter,std::memory_order_release);}
     // DeepSeek P3: the manager forgets a body that may still exist (abandoned with its world, a destroy it could not confirm): if that body carried a
     // stripped word, say so (status filter_stranded) instead of letting the status read the default.
     void note_filter_unconfirmed(unsigned side) {if(side_[side].filter!=R1Recipe::filter) count(side,&Counters::filter_stranded);}

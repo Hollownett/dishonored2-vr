@@ -386,10 +386,10 @@ assert "HandOverlap out;out.answered=count>0;" in coupling, "nothing read is no 
 b16_at = probe.index("// B16: held things follow the hand body (Bonelab")
 b16_block, _ = enclosing_block(probe, probe.index("const double couple_now="))
 assert probe[b16_at:probe.index(b16_block)].rstrip().endswith("if(hand_body_requested.load(std::memory_order_relaxed) && d2vr::HandBodyRuntime::active())")
-assert "for(auto& body_view:hold_body_view) body_view={};" in probe[b16_at:probe.index(b16_block)], "the views are cleared every frame before the gate"
-assert "unsigned hold_coupled_bits{};std::array<std::uint32_t,2> hand_filter_words{{d2vr::R1Recipe::filter,d2vr::R1Recipe::filter}};" in probe
+assert "auto& body_view=hold_body_view[side];body_view=HoldBodyView{};" in b16_block, "the views are rebuilt every frame inside the gate"
+assert "unsigned hold_coupled_bits{},hold_holding_bits{};std::array<std::uint32_t,2> hand_filter_words{{d2vr::R1Recipe::filter,d2vr::R1Recipe::filter}};" in probe
 assert b16_at < vstart, "B16 decides before B15 draws"
-for name, pattern in (("hold_coupled_bits", r"hold_coupled_bits\|="), ("hand_filter_words", r"hand_filter_words\[side\]=")):
+for name, pattern in (("hold_coupled_bits", r"hold_coupled_bits\|="), ("hand_filter_words", r"hand_filter_words\[side\]="), ("hold_holding_bits", r"hold_holding_bits\|=")):
     for m in re.finditer(pattern, probe):
         assert probe.index(b16_block) <= m.start() < probe.index(b16_block) + len(b16_block), name + " is set only inside the knob-gated block"
 # fix round 1: part 2, after B15's single pick, couples motor holds to the DRAWN hand (B15's body_weight); knob-gated; the only couple() calls
@@ -400,38 +400,61 @@ for m in re.finditer(r"native_grab\.couple\(", probe):
     assert probe.index(p2_block) <= m.start() < probe.index(p2_block) + len(p2_block), "couple() only in part 2"
 assert "drawn_body_weight[side]=visual[side].body_weight;" in vblock and "std::array<double,2> drawn_body_weight{};" in probe
 assert code_of(probe).count("drawn_body_weight[side]") == 2, "written by B15, read by part 2 only"
+assert "in.body_weight=body_view.weight;" in p2_block and "body_view.weight=drawn_body_weight[side];" in p2_block
+# fix round 2 (review P3-2): the anchor view is fetched once per side per frame (part 1), part 2 reuses it
+assert code_of(probe).count("native_grab.hold_anchor(") == 2, "the Task 12 block and B16 part 1 only"
+assert "native_grab.hold_anchor(" in b16_block and "native_grab.hold_anchor(" not in p2_block
 cn = function(coupling, "inline CouplingOutput couple_native(")
-assert "WorldTrackedPose carried=request;" in cn and "body->" not in cn and "body_weight" not in cn, "a native target never reads the body: it follows the drawn grip"
+assert "WorldTrackedPose carried=request;" in cn and "body->" not in cn, "a native target never reads the body: it follows the drawn grip"
+assert "in.clamped_native=clamped_controller;" in cn and cn.index("in.clamped_native=clamped_controller;") < cn.index("if(drawn && HoldCoupling::usable(body_ready,body))"), "not drawn: B4's output"
 hc_upd = function(coupling, "CouplingOutput update(unsigned side,const CouplingInput& in)")
-assert "if(!use || !(w>0)) {s.lag.reset();return out;}" in hc_upd, "not drawn (free air): today's pose"
+assert "if(!use) {s.lag.reset();s.native.reset();return out;}" in hc_upd, "no usable body: today's pose, no release"
+assert "const double gap=length(in.controller.position-in.body->position);" in hc_upd and hc_upd.count("gap>") == 3, "the release judges the RAW gap (fix round 2)"
+assert "if(w>0) {" in hc_upd, "the drawn weight only places the target"
 assert "out.body_weight=s.body_w;" in visual_hdr
 assert "native_grab.couple(" not in code_of(probe[:b16_at]) and code_of(grab).count("void couple(") == 1
 assert "in.yield=(((hand_body_yield_bits&~hold_coupled_bits)|authored_hands)>>side)&1u;" in vblock
 for line in ("hand_body_in.yield=(hand_body_yield_bits&~hold_coupled_bits)|authored_hands;", "hand_body_in.filter=hand_filter_words;",
-             "hand_body_in.target[side].position=native_body_target[side].position;"):
+             "hand_body_in.target[side].position=native_body_target[side].position;", "hand_body_in.holding=hold_holding_bits;"):
     assert line in publish_block, line
-# publish_held_object: coupled only with a ready view; otherwise B4's request, origin and shift exactly
+# review P3-1: the keeper's hold is judged on the body existing, not on a fresh pose; a stale pose freezes the checks
+assert "if(motor && body_exists) {" in b16_block and "fk.pose_fresh=body_view.ready;" in b16_block
+kp = function(coupling, "template<class Overlap> FilterKeeperOutput update(unsigned side,const FilterKeeperInput& in,Overlap overlap)")
+assert "for(std::size_t i=0;i<s.count && !s.frozen;)" in kp and "r.now=in.now-s.frozen_total;" in kp
+# publish_held_object: the body only with the knob on and a ready view; drawn (weight > 0) or B4's request, origin and shift exactly
 pho = function(probe, "static void publish_held_object(")
-assert "const auto& body_view=hold_body_view[side&1u];const bool coupled=body_view.ready;" in pho
+assert "const bool body_knob=hand_body_requested.load(std::memory_order_relaxed);" in pho
+assert "const bool body_on=body_knob && d2vr::HandBodyRuntime::active() && body_view.ready;" in pho and "const bool coupled=body_on && body_view.weight>0;" in pho
 assert "in.requested=coupled?d2vr::HoldCoupling::controller_request(request,grip.position,palm_pose.position):request;" in pho
 assert "if(out.clamped) {origin=out.target.position;++held_clamp_status.clamped_frames;}" in pho and "d2vr::Vec3 shift=out.clamped?out.shift:d2vr::Vec3{};" in pho
-cpl = pho[pho.index("if(coupled) {   // B16"):pho.index("} else native_body_target[side&1u].valid=false;")]
-assert "d2vr::couple_native(" in cpl and "origin=co.target.position;" in cpl
-assert "if(L.clamp.should_release() && !L.drop_sent)" in pho, "the drop rule stays B4's"
-# NativeGrab: the coupled hand only while a capped hold is held, fresh, and published after this hold's bind (C9: selection never sees it)
+cpl = pho[pho.index("if(body_on) {   // B16"):pho.index("} else if(body_knob) native_body_target[side&1u].valid=false;")]
+assert "d2vr::couple_native(" in cpl and "if(coupled) {origin=co.target.position;shift=origin-request.position;}" in cpl and "coupled_release=co.release;" in cpl
+assert "if((L.clamp.should_release() || coupled_release) && !L.drop_sent)" in pho, "B4's drop rule plus the raw-gap native release"
+# review P3-2: knob off adds no work: the held-clamp begin/end additions are knob-gated
+assert "if(hand_body_requested.load(std::memory_order_relaxed)) native_body_target[L.side&1u].valid=false;" in function(probe, "static void held_clamp_end(")
+assert "if(hand_body_requested.load(std::memory_order_relaxed)) {hold_coupling.reset(side&1u);" in function(probe, "static void held_clamp_begin(")
+# NativeGrab (review P3-2): every B16 addition behind coupling_on_, read once at install from the knob files
+assert grab.count("coupling_on_=") == 1 and 'coupling_on_=hand_body_knob_enabled(std::filesystem::exists(root/L"build"/L"hand-body",ec),std::filesystem::exists(root/L"build"/L"no-hand-body",ec));' in grab
+avo = function(grab, "HoldAnchorView anchor_view_of(")
+assert avo.index("if(coupling_on_) {") < avo.index("body.record+0x6c"), "the layer read only with the knob"
 ul = function(grab, "void update_lane(unsigned side,std::uintptr_t world,UINT64 now)")
-assert "const bool coupled=lane.held && lane.capped && coupling_fresh(lane,now) && finite(lane.coupling.offset);" in ul
-assert ul.index("lane.sample_hand=p.hand;") < ul.index("lane.grab.sample(lane.sample_hand,")
-assert "lane.coupling.serial==lane.hold_serial" in function(grab, "static bool coupling_fresh("), "a coupling reaches only the hold it names"
-assert "lane.hold_serial=++hold_serials_;" in function(grab, "void begin_hold(") and "v.serial=lane.hold_serial;" in grab
+cg = ul[ul.index("if(coupling_on_) {"):ul.index("const bool sample=")]
+for need in ("coupling_current(lane,now)", "lane.sample_hand=p.hand;", "lane.grab.rebase(lane.sample_hand);", "coupled_release=current && lane.coupling.release;"):
+    assert need in cg, need + " runs only with the knob"
+assert "lane.grab.sample(coupling_on_?lane.sample_hand:p.hand," in ul and "release_sample(coupling_on_?lane.sample_hand:p.hand," in grab
+assert "lane.coupling.serial==lane.hold_serial" in function(grab, "static bool coupling_current("), "a coupling reaches only the hold it names"
+assert "if(coupling_on_) {lane.hold_serial=++hold_serials_;" in function(grab, "void begin_hold(") and "v.serial=lane.hold_serial;" in avo
 cpl_fn = function(grab, "void couple(unsigned side,std::uint64_t serial,")
 assert "std::lock_guard<std::mutex> lock(coupling_mutex_);" in cpl_fn and "mutex_)" not in cpl_fn.replace("coupling_mutex_)", ""), "never NativeGrab's pass mutex"
 upd = function(grab, "void update(std::uintptr_t dispatcher)")
-assert "std::unique_lock<std::mutex> pub(coupling_mutex_,std::try_to_lock);" in upd and upd.index("coupling_mutex_") < upd.index("update_lane(side,*world,now)")
-assert "lane.grab.rebase(lane.sample_hand);" in ul and ul.index("lane.grab.rebase(") < ul.index("lane.grab.sample(lane.sample_hand,"), "a coupling edge rebases before the sample"
-assert "lane.coupling={};" in function(grab, "void begin_hold(") and "coupling={};" in grab[grab.index("void end_hold() {"):grab.index("void end_hold() {") + 300]
-rel = ul[ul.index("if(lane.capped && coupled && lane.coupling.release && !lane.pending_release)"):ul.index("if(lane.capped) {")]
+assert "if(coupling_on_) {std::unique_lock<std::mutex> pub(coupling_mutex_,std::try_to_lock);" in upd and upd.index("coupling_mutex_") < upd.index("update_lane(side,*world,now)")
+rel = ul[ul.index("if(lane.capped && coupled_release && !lane.pending_release)"):ul.index("if(lane.capped) {")]
 assert "end_capped_hold(lane,side,ReleaseReason::lag,true);" in rel and "lane.coupling.release=false;" in rel
+# fix round 2: the snap waits while holding; the filter word is the engine's read-back, retried, then latched
+assert "d.holding=fresh && ((last_hands_.holding>>side)&1u)!=0;" in tick
+assert "!in.target_free || in.holding" in drive_fn and "if(in.holding) {s.snap_pending=false;" in drive_fn
+assert "if(++s.filter_misses>=max_filter_misses) latch(side," in write_fn and "static constexpr unsigned max_filter_misses=5;" in body
+assert "if(got) {s.filter=*got;" in write_fn and "e.filter=[](unsigned side,std::uint32_t handle)" in runtime
 # the comment-swallow guard (three line joins on this plan swallowed statements): no code-shaped text inside a // comment
 check_src = (root / "tests/hold_coupling_check.cpp").read_text(encoding="utf-8")
 assert not re.search(r"//[^\n]*\bCHECK\(", check_src), "a CHECK( inside a // comment in tests/hold_coupling_check.cpp"

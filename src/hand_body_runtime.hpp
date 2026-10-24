@@ -43,7 +43,8 @@ namespace d2vr {
 // B16: filter = the word each side's body should carry (HandFilterKeeper, render thread: the R1 default unless a coupled hold takes a layer out).
 struct HandBodyHandsInput {unsigned tracked{};std::array<Vec3,2> palm{};bool authored{};bool focused{};
     std::array<WorldTrackedPose,2> target{};unsigned free{};unsigned yield{};bool locomotion{};std::optional<Vec3> player_root{};
-    std::array<std::uint32_t,2> filter{{R1Recipe::filter,R1Recipe::filter}};};
+    std::array<std::uint32_t,2> filter{{R1Recipe::filter,R1Recipe::filter}};
+    unsigned holding{};};   // B16 fix round 2: sides that hold something (B14's snaps are suppressed for them)
 // One body's mod memory and identity (free: reusable; in_use: our body may exist; retired: never reused, the engine may still read it).
 struct HandBodySlot {enum State {free,in_use,retired} state{free};R1BodyStorage storage{};std::uintptr_t world{};std::uint32_t handle{0xffffffffu};};
 struct HandBodyEvent {std::uint64_t t_ms{};unsigned side{};const char* kind{""};std::uint32_t handle{};std::uintptr_t world{};std::uint32_t generation{};unsigned logic{};bool release{};};
@@ -191,7 +192,7 @@ public:
              <<",\"cost_max_us\":"<<d.cost_max_us<<",\"player_drift_um\":"<<d.player_drift_um<<",\"dt_s\":"<<d.dt_s<<",\"drives\":"<<d.drives
              <<",\"drive_writes\":"<<d.drive_writes<<",\"yields\":"<<d.yields<<",\"skipped\":"<<d.skipped<<",\"garbage\":"<<d.garbage
              <<",\"second_drives\":"<<d.second_drives<<",\"root_jumps\":"<<d.root_jumps<<",\"pressed_ticks\":"<<d.pressed_ticks
-             <<",\"cpu_us\":"<<d.cpu_us<<",\"cpu_max_us\":"<<d.cpu_max_us<<",\"root_moved_ticks\":"<<d.root_moved_ticks<<",\"root_travel_um\":"<<d.root_travel_um<<'}';
+             <<",\"cpu_us\":"<<d.cpu_us<<",\"cpu_max_us\":"<<d.cpu_max_us<<",\"root_moved_ticks\":"<<d.root_moved_ticks<<",\"root_travel_um\":"<<d.root_travel_um<<",\"held_ticks\":"<<d.held_ticks<<'}';
             o<<",\"pose\":";
             if(p) o<<'['<<p->position.x<<','<<p->position.y<<','<<p->position.z<<']';else o<<"null";
             o<<'}';
@@ -220,7 +221,7 @@ public:
          <<",\"unverified\":"<<(body->status(0).unverified+body->status(1).unverified)
          <<",\"g2_events\":"<<g2_events_.load()<<",\"storage_retired\":"<<retired_.load()<<",\"storage_exhausted\":"<<storage_exhausted_.load()
          <<",\"cast_excluded_hits\":"<<cast_excluded_hits.load()<<",\"dropped_events\":"<<dropped_events_.load()
-         <<",\"filter_readback_mismatches\":"<<HandBodyNative::filter_readback_mismatches.load()<<'}';
+         <<",\"filter_readback_mismatches\":"<<(body->status(0).filter_readback_mismatches+body->status(1).filter_readback_mismatches)<<'}';
         return o.str();
     }
 
@@ -343,6 +344,11 @@ private:
             float f[6]{};std::memcpy(f,record.bytes.data()+0x10,12);std::memcpy(f+3,record.bytes.data()+0x20,12);
             return HandBodyNative::velocity(s->storage,HandBodyNative::world_now(),s->world,handle,Vec3{f[0],f[1],f[2]},Vec3{f[3],f[4],f[5]});
         };
+        e.filter=[](unsigned side,std::uint32_t handle)->std::optional<std::uint32_t> {   // B16 fix round 2: the word the engine holds
+            const Slot* s=slot_of(side);
+            if(!s) return std::nullopt;
+            return HandBodyNative::filter_word(HandBodyNative::world_now(),handle,s->storage);
+        };
         e.forget=[](unsigned side) {release_slot(side,true,false);};   // abandoned with its world / lost: no engine call; the storage is retired
         e.at_g1_point=[] {return in_g1_tick_;};   // write() only from inside the dispatcher's G1 tick (B14's drive runs there)
         e.motion=[](unsigned side,std::uint32_t handle)->std::optional<BodyMotion> {   // B14 read-back (raw; the manager judges garbage)
@@ -463,6 +469,7 @@ private:
             d.yield=!fresh || !tracked || ((last_hands_.yield>>side)&1u)!=0;
             d.target_free=fresh && now-last_hands_tick_<=free_fresh_ms && ((last_hands_.free>>side)&1u)!=0;
             d.player_root=fresh?last_hands_.player_root:std::nullopt;d.locomotion=last_hands_.locomotion;
+            d.holding=fresh && ((last_hands_.holding>>side)&1u)!=0;   // B16 fix round 2: no snap while this hand holds something
             body->drive(d);
         }
         g2_watching_=body->any_alive();

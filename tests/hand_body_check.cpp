@@ -90,6 +90,7 @@ struct FakeHands {
     bool fault_create=false,create_leaves_body=false,fault_wake=false,fault_apply=false,refuse_create=false,destroy_still_present=false,fault_destroy=false,destroy_unknown=false;int refuse_destroys=0,refuse_wakes=0;
     std::vector<std::string> log;
     std::uintptr_t dead_world=0;   // a world that changed: any engine call naming it is counted
+    bool model_filter=false,filter_takes=true;std::array<std::uint32_t,2> filt{{R1Recipe::filter,R1Recipe::filter}};   // B16 fix round 2: the engine's word
     int engine_calls() const {return creates+destroys+velocities+applies+positions;}
     void change_world() {dead_world=world_id;world_id+=0x1000;for(auto& x:b) x.alive=false;}   // the bodies died with their world
     HandBodyEngine engine() {
@@ -103,7 +104,7 @@ struct FakeHands {
                 if(create_leaves_body) {b[side]={true,next,at,{}};throw HandBodyEngineFault("fake create fault after insert",next++);}
                 throw HandBodyEngineFault("fake create fault");
             }
-            b[side]={true,next++,at,{}};h=b[side].handle;return true;
+            b[side]={true,next++,at,{}};h=b[side].handle;filt[side]=R1Recipe::filter;return true;
         };
         e.velocity=[this](unsigned side,std::uint32_t h,Vec3 v) {
             ++velocities;log.push_back("velocity:"+std::to_string(side)+":"+std::to_string(v.z));
@@ -126,13 +127,16 @@ struct FakeHands {
         e.position=[this](unsigned side,std::uint32_t h)->std::optional<Vec3> {
             ++positions;if(on_position) on_position();if(b[side].foreign && b[side].handle==h) ++foreign_touched;if(!b[side].alive || b[side].handle!=h) return std::nullopt;return b[side].pos;
         };
-        e.apply=[this](unsigned side,const hand_body::CommandRecord&) {
+        e.apply=[this](unsigned side,const hand_body::CommandRecord& r) {
             ++applies;log.push_back("apply:"+std::to_string(side));
             if(fault_apply) throw HandBodyEngineFault("fake apply fault");
+            std::uint16_t type{};std::memcpy(&type,r.bytes.data()+4,2);
+            if(type==0x1a && b[side].alive && filter_takes) std::memcpy(&filt[side],r.bytes.data()+0xc,4);   // the engine applied the word (or not)
             return b[side].alive;
         };
         e.forget=[this](unsigned side) {++forgets;log.push_back("forget:"+std::to_string(side));};
         e.at_g1_point=[this] {return at_point;};
+        if(model_filter) e.filter=[this](unsigned side,std::uint32_t h)->std::optional<std::uint32_t> {if(!b[side].alive || b[side].handle!=h) return std::nullopt;return filt[side];};
         return e;
     }
 };
@@ -564,13 +568,13 @@ WorldTrackedPose pose_at(Vec3 p) {WorldTrackedPose w;w.position=p;w.basis={Vec3{
 struct DriveRig {
     FakeDrive w;HandBody hb{w.engine()};double t=10;std::uint64_t ms=1000;
     std::array<Vec3,2> target{Vec3{.4,.2,1.2},Vec3{.4,-.2,1.2}};std::array<bool,2> free{true,true},yield{false,false};
-    std::optional<Vec3> root{};bool locomotion=false;bool gameplay=true;
+    std::optional<Vec3> root{};bool locomotion=false;bool gameplay=true;std::array<bool,2> holding{false,false};
     void tick(int drives_per_side=1) {
         std::array<std::optional<Vec3>,2> spawn{};
         for(unsigned side=0;side<2;++side) if(free[side]) spawn[side]=target[side];
         hb.service(gameplay_in(ms,gameplay),spawn);
         for(int k=0;k<drives_per_side;++k) for(unsigned side=0;side<2;++side) {
-            DriveInput d;d.side=side;d.target=pose_at(target[side]);d.now=t;d.yield=yield[side];d.target_free=free[side];d.player_root=root;d.locomotion=locomotion;
+            DriveInput d;d.side=side;d.target=pose_at(target[side]);d.now=t;d.yield=yield[side];d.target_free=free[side];d.player_root=root;d.locomotion=locomotion;d.holding=holding[side];
             hb.drive(d);
         }
         w.step();t+=FakeDrive::dt;ms+=11;
@@ -580,6 +584,28 @@ struct DriveRig {
 
 // ======================= B16: the filter record (type 0x1a) =======================
 static void b16_checks() {
+    {   // fix round 2 ruling: the word is what the engine reads back; a miss is retried (<= max_filter_misses ticks), the status shows the real word,
+        // and a spent budget latches HandBodyFault: the body is destroyed (never a silently stripped hand)
+        HandBodyFault::reset_for_tests();FakeHands f;f.model_filter=true;HandBody hb(f.engine());std::uint64_t t=1000;
+        for(int i=0;i<10;++i,t+=16) hb.service(gameplay_in(t),kPalms);
+        const std::uint32_t held=hand_body::filter_word(hand_body::layer_debris,hand_body::word_mask(R1Recipe::filter)&~hand_body::layer_bit(hand_body::layer_npc_body_ragdoll));
+        CHECK(hb.write_filter(0,held) && hb.filter_word(0)==held && f.filt[0]==held && hb.status(0).filter_readback_mismatches==0);
+        hb.service(gameplay_in(t),kPalms);t+=16;
+        f.filter_takes=false;   // from here the engine ignores the write
+        CHECK(!hb.write_filter(0,R1Recipe::filter));CHECK(hb.filter_word(0)==held && hb.status(0).filter==held);   // the real word, not the wanted one
+        CHECK(hb.status(0).filter_readback_mismatches==1 && hb.status(0).available);
+        for(unsigned k=1;k<HandBody::max_filter_misses;++k) {hb.service(gameplay_in(t),kPalms);t+=16;CHECK(!hb.write_filter(0,R1Recipe::filter));}
+        CHECK(hb.status(0).filter_readback_mismatches==HandBody::max_filter_misses);CHECK(!hb.status(0).available);CHECK(HandBodyFault::tripped());
+        hb.service(gameplay_in(t),kPalms);t+=16;CHECK(!hb.ready(0) && hb.status(0).destroys==1 && hb.filter_word(0)==R1Recipe::filter);   // destroyed once
+        // a miss that clears within the budget resets the count (the retry worked)
+        HandBodyFault::reset_for_tests();FakeHands g;g.model_filter=true;HandBody hg(g.engine());
+        for(int i=0;i<10;++i,t+=16) hg.service(gameplay_in(t),kPalms);
+        g.filter_takes=false;CHECK(!hg.write_filter(1,held));hg.service(gameplay_in(t),kPalms);t+=16;
+        g.filter_takes=true;CHECK(hg.write_filter(1,held) && hg.filter_word(1)==held && hg.status(1).available);
+        for(unsigned k=0;k<HandBody::max_filter_misses+2;++k) {hg.service(gameplay_in(t),kPalms);t+=16;}
+        CHECK(hg.status(1).available && hg.ready(1));
+        HandBodyFault::reset_for_tests();
+    }
     {   // write()'s allow-list: a velocity record (9, 0x30) and a filter record (0x1a, 0x20) carrying an allowed hand word; nothing else
         HandBodyFault::reset_for_tests();FakeHands f;HandBody hb(f.engine());std::uint64_t t=1000;
         for(int i=0;i<10;++i,t+=16) hb.service(gameplay_in(t),kPalms);
@@ -729,6 +755,18 @@ static void b14_checks() {
         HandBodyFault::reset_for_tests();DriveRig f;f.tick();f.tick();
         f.target[0]=f.target[0]+Vec3{5,0,0};f.tick();f.tick();
         CHECK(f.hb.drive_status(0).snaps==1);CHECK(length(f.w.b[0].pos-f.target[0])<.02);
+    }
+    {   // snap_suppressed_while_holding_resumes_after (B16 fix round 2 ruling): the same stuck body (free target) while the hand holds something never
+        // snaps nor asks for one, however long (the hold's lag release owns that case); after the release the stuck rule runs again and snaps
+        HandBodyFault::reset_for_tests();DriveRig h;h.w.wall_x=.6;h.tick();
+        h.target[0]=Vec3{1.0,.2,1.2};h.free[0]=true;h.holding[0]=true;
+        for(int i=0;i<180;++i) h.tick();   // 2 s stuck while holding
+        CHECK(h.hb.drive_status(0).snaps==0 && h.hb.drive_status(0).snap_requests==0 && h.w.destroys==0 && h.hb.drive_status(0).held_ticks>=170);
+        const Vec3 far=h.target[0];h.target[0]=far+Vec3{5,0,0};for(int i=0;i<5;++i) h.tick();   // a far gap while holding: no snap either
+        CHECK(h.hb.drive_status(0).snaps==0);
+        h.target[0]=far;h.holding[0]=false;   // released
+        int ticks=0;while(h.hb.drive_status(0).snaps==0 && ticks<120) {h.tick();++ticks;}
+        CHECK(h.hb.drive_status(0).snaps==1 && ticks>=20 && ticks<=40);   // 0.25 s stuck again, counted from the release
     }
     {   // create_waits_while_palm_blocked (ruling): no create while the clamp's cast does not show the palm free; created once it does
         HandBodyFault::reset_for_tests();DriveRig r;r.free={false,true};
