@@ -309,5 +309,17 @@ int main() {
         const auto bind=body::mul(body::inverse(to_xf(denied->joints[parent])),to_xf(denied->joints[attachment]));
         assert(angle(bind.q,retained.q)>.5);
     }
+    {   // root_gap_m: the render-thread anchor root against the root the last arm upload carried (a stale upload root at speed)
+        Driver gap_driver;gap_driver.tune(0,1);
+        const std::array<float,15> at0{0,0,0,1,0,0,0,1,0,0,0,1,1,1,1},at55{.055f,0,0,1,0,0,0,1,0,0,0,1,1,1,1};
+        gap_driver.note_root(at0);
+        Tracking gap_tracking=tracking;gap_tracking.tick=20000;gap_tracking.epoch=7;
+        gap_tracking.anchor_root=at55;gap_tracking.anchor_root_valid=true;
+        gap_driver.publish(stamp(gap_tracking),{});
+        assert(std::abs(gap_driver.diagnostic().root_gap_m-.055)<1e-6);
+        gap_tracking.anchor_root_valid=false;++gap_tracking.tick;
+        gap_driver.publish(stamp(gap_tracking),{});
+        assert(gap_driver.diagnostic().root_gap_m==0);
+    }
     std::cout<<"PASS: full-body verified palm mapping construction, accepted fit validation and native model/world roundtrip\n";
 }

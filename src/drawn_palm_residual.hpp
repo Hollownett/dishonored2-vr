@@ -1,5 +1,6 @@
 #pragma once
 #include "tracked_pose.hpp"
+#include <cmath>
 #include <cstdint>
 
 namespace d2vr {
@@ -32,6 +33,8 @@ public:
         for(unsigned axis=0;axis<3;++axis)local_[axis]=dot(residual,source.context.root.basis[axis]);
         source_=source;have_=true;
     }
+    // Diagnostics: the stored palm-minus-grip offset's length (0 without one).
+    double magnitude() const noexcept {return have_?std::sqrt(local_[0]*local_[0]+local_[1]*local_[1]+local_[2]*local_[2]):0;}
     // Diagnostics: how old the arm-solve sample behind the residual is, only while frame() applies it (<=500 ms); -1 otherwise.
     std::int64_t age_ms(std::uint64_t now) const noexcept {
         if(!have_ || !fresh(source_.tick,now,500) || !fresh(source_.source_tick,now,500)) return -1;

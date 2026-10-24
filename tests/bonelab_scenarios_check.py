@@ -87,6 +87,7 @@ def main():
     hand_body_checks()
     hold_coupling_checks()
     finger_touch_checks()
+    run_hands_checks()
     print("bonelab_scenarios_check ok")
 
 
@@ -389,6 +390,60 @@ def hold_coupling_checks():
     mixed = [dict(s) for s in soak]
     mixed[0] = {k: v for k, v in soak[0].items() if k != "hold_coupling"}
     assert "FAIL" in {v for v, _ in brc.check(mixed, "hand_body_soak")}
+
+
+def locomotion_rows(stand=300, run=300, running_residual=0.01, blends_at=(), contact=0, run_speed=3.0):
+    """Fixture trace: `stand` rows at speed 0, then `run` rows at run_speed, 11 ms apart; blends steps at the elapsed_ms values in blends_at."""
+    rows, blends = [], 0
+    for i in range(stand + run):
+        t = i * 11
+        blends += sum(1 for b in blends_at if t - 11 < b <= t)
+        moving = i >= stand
+        rows.append({"elapsed_ms": t, "speed_mps": run_speed if moving else 0.0, "root_gap_m": 0.03 if moving else 0.0,
+                     "palm_residual_l": running_residual if moving else 0.01, "palm_residual_r": running_residual if moving else 0.01,
+                     "drawn_residual_l": running_residual if moving else 0.01, "drawn_residual_r": running_residual if moving else 0.01,
+                     "visual_gap_l": 0.02, "visual_gap_r": 0.02, "source_l": 2 if moving else 1, "source_r": 1, "blends": blends,
+                     "contact_l": contact, "contact_r": contact})
+    return rows
+
+
+def run_hands_checks():
+    for name in ("run_hands", "run_hands_sword"):
+        segments = sim.scenario_segments(name, LEAD)
+        sim.compile_script(segments, 120)
+        assert max(s["end_ms"] for s in segments) <= 120000, name
+        inputs = [s["input"] for s in segments if s["start_ms"] >= LEAD]
+        assert any(i.get("move_y") == 1.0 and i.get("left_click") for i in inputs), name  # the sprint
+        assert any(i.get("move_y") == 0.5 for i in inputs), name  # the walk
+    sword = [s for s in sim.scenario_segments("run_hands_sword", LEAD) if s["start_ms"] >= LEAD]
+    assert sword[0]["right_hand_offset"] == [-0.03, 0.25, 0.50] and sword[0]["hand_pitch_degrees"] == 60
+    assert all(s["input"].get("right_grip") == 1.0 for s in sword[1:]), "the grip is held through the whole timeline"
+    assert not any("right_grip" in s["input"] for s in sim.scenario_segments("run_hands", LEAD))
+    for name in ("run_hands", "run_hands_sword"):  # a stand/run trace with equal residuals: PASS rows and INFO numbers
+        rows = brc.check([{"locomotion_rows": locomotion_rows()}], name)
+        assert {v for v, _ in rows} == {"PASS", "INFO"}, rows
+        text = "\n".join(t for v, t in rows if v == "INFO")
+        assert "drawn_residual_l median: standing 0.0100 m, running 0.0100 m" in text and "root_gap_m median running: 0.0300 m" in text, text
+        assert "source_l == body share of running frames: 1.000" in text and "top speed 3.00" in text and "free-air blend bursts: 0" in text, text
+    assert "FAIL" in verdicts({"locomotion_rows": None}, "run_hands") and "FAIL" in verdicts({}, "run_hands_sword")  # a missing trace
+    assert "FAIL" in verdicts({"locomotion_rows": locomotion_rows(run=150)}, "run_hands")  # fewer than 200 running rows
+    assert "FAIL" in verdicts({"locomotion_rows": locomotion_rows(stand=150)}, "run_hands")  # fewer than 200 standing rows
+    assert "FAIL" in verdicts({"locomotion_rows": locomotion_rows(run_speed=2.0)}, "run_hands")  # never reached 2.5 m/s
+    assert brc.blend_bursts(locomotion_rows(blends_at=(3500, 3900))) == (1, 2)  # two increments inside 1 s, free air
+    assert brc.blend_bursts(locomotion_rows(blends_at=(3500, 3900), contact=1)) == (0, 0)  # contact is not free air
+    assert brc.blend_bursts(locomotion_rows(blends_at=(3500, 4700))) == (0, 1)  # more than 1 s apart
+    assert brc.blend_bursts(locomotion_rows(blends_at=(1000, 1100))) == (0, 0)  # standing (speed < 1.0)
+    parsed = brc.parse_locomotion(",".join(brc.LOCOMOTION_COLUMNS) + "\n" + ",".join("1" for _ in brc.LOCOMOTION_COLUMNS) + "\nbad,row\n")
+    assert len(parsed) == 1 and parsed[0]["blends"] == 1.0
+    with tempfile.TemporaryDirectory() as tmp:  # the command line reads artifacts/locomotion-hands.csv
+        for label, rows, code in (("ok", locomotion_rows(), 0), ("short", locomotion_rows(run=10), 1), ("none", None, 1)):
+            d = Path(tmp) / label / "artifacts"
+            d.mkdir(parents=True)
+            (d / "xr-live-status.json").write_text("{}")
+            if rows:
+                (d / "locomotion-hands.csv").write_text(",".join(brc.LOCOMOTION_COLUMNS) + "\n" + "\n".join(",".join(str(r[k]) for k in brc.LOCOMOTION_COLUMNS) for r in rows) + "\n")
+            r = subprocess.run([sys.executable, str(ROOT / "tools/linux/bonelab_run_check.py"), str(d.parent), "--scenario", "run_hands"], capture_output=True, text=True)
+            assert r.returncode == code, (label, r.stdout, r.stderr)
 
 
 def bad_latch():

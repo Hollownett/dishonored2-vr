@@ -157,6 +157,7 @@ public:
         if(v.snapped) c.snaps.fetch_add(1,std::memory_order_relaxed);
         c.gap_m.store(v.gap_m,std::memory_order_relaxed);
     }
+    std::uint64_t blends(unsigned side) const {return side<2?c_[side].blends.load(std::memory_order_relaxed):0;}
     std::string json() const {
         std::ostringstream o;o<<"{\"sides\":[";
         for(unsigned i=0;i<2;++i) {const auto& c=c_[i];

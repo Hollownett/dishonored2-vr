@@ -360,7 +360,7 @@ for need in ("d2vr::HandBodyRuntime::contact_now(side)", "d2vr::HandBodyRuntime:
     assert need in vblock, need
 assert code_of(probe).count("resolve_drawn_grip(") == 1, "X-4: one function decides"
 # the drawn pose and the visual source are read only inside the block (intent code earlier in the frame never sees them); every use is listed
-assert [m.group(0) for m in re.finditer(r"hand_visual_source\.\w+|hand_visual_stats\.\w+", probe)] == ["hand_visual_source.hpp", "hand_visual_source.reset", "hand_visual_source.update", "hand_visual_stats.note", "hand_visual_stats.json"]
+assert [m.group(0) for m in re.finditer(r"hand_visual_source\.\w+|hand_visual_stats\.\w+", probe)] == ["hand_visual_source.hpp", "hand_visual_source.reset", "hand_visual_source.update", "hand_visual_stats.note", "hand_visual_stats.blends", "hand_visual_stats.blends", "hand_visual_stats.json"]  # the two blends reads are the locomotion trace (G1a)
 assert all(vstart <= m.start() <= final_at + len(final_stmt) for m in re.finditer(r"visual\[side\]", probe)), "visual[] lives only in the B15 block"
 res = function(visual_hdr, "inline DrawnGrip resolve_drawn_grip(")
 assert "VisualSource::clamp" in res and "anchor.weight>0" in res

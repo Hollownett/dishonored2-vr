@@ -127,6 +127,7 @@ struct Tracking {
     unsigned tracked_hands{};
     Xf raw_grip[2]{};
     unsigned raw_grip_hands{};
+    std::array<float,15> anchor_root{};bool anchor_root_valid{}; // the body model frame (player+0xf0 -> +0x1860) read on the render thread beside the camera anchor
 };
 
 enum class ArmGate {ready,no_solution,stale_revision,stale_age};
@@ -143,6 +144,7 @@ struct ArmPose {
 struct Diagnostic {
     DrawnPalmSource palm_source[2]{};
     WorldTrackedPose current_root{};bool current_root_valid{};
+    double root_gap_m{};      // horizontal distance at publish between the render-thread anchor root and the last arm-upload root (diagnostic only)
     Tracking tracking{};
     std::uint64_t revision{},solved_revision{},fit_revision{},callback_serial{},body_callback{},arm_callback[2]{};
     double wall_dt{},consumed_dt{},substep_dt{},output_age_seconds{};
@@ -305,6 +307,8 @@ public:
             eye_speed_=std::hypot(t.eye.p.x-track_.eye.p.x,t.eye.p.y-track_.eye.p.y)/std::max(dt,1e-3);
         } else eye_speed_=0;
         // Player root at this publication: uploads later carry the solved pose by the root motion since.
+        diag_.root_gap_m=0;
+        if(t.anchor_root_valid && have_root_last_) try {const auto a=frame_of(t.anchor_root).rigid.p;diag_.root_gap_m=std::hypot(a.x-root_last_.p.x,a.y-root_last_.p.y);} catch(...) {}
         root_at_publish_=root_last_;have_root_at_publish_=have_root_last_;
         track_=t;own_=own;have_track_=true;++revision_;diag_.body_valid=false;diag_.arm_valid[0]=diag_.arm_valid[1]=false;published_=std::chrono::steady_clock::now();
         if(!(track_.seconds>0)) track_.seconds=std::chrono::duration<double>(published_.time_since_epoch()).count();

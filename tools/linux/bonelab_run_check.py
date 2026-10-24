@@ -7,7 +7,9 @@ one scenario's sessions (S5 runs four of 50 cycles): counters are summed, binds 
 Prints PASS/FAIL/INFO per assertion; exit 1 on any FAIL. Side-pair fields are [left, right].
 """
 import argparse
+import csv
 import json
+import statistics
 import sys
 from pathlib import Path
 
@@ -23,6 +25,10 @@ HAND_BODY_COST_US = 200          # proof (d): the drive's cost per tick, both ha
 HAND_BODY_PRESSED_TICKS = 1000  # review P3-5: about 5 s per hand inside the capsule per session (the scripted segment holds 14 s; ~2100 seen)
 HAND_BODY_DRIFT_UM = 1000        # proof (b): the player root's unexplained movement while a hand is pressed into the capsule
 TANK_HAND_BODY = ("tank_hand_body",)  # Plan B B16 S15: the tank carried by the hand body (run with --knob hand-body and --knob no-hand-body)
+RUNS = ("run_hands", "run_hands_sword")  # G1a: the running-hands scenarios, judged from artifacts/locomotion-hands.csv (knob build/locomotion-trace)
+RUN_MIN_ROWS, STAND_SPEED, RUN_SPEED, BURST_SPEED, BURST_WINDOW_MS = 200, 0.3, 2.5, 1.0, 1000
+LOCOMOTION_COLUMNS = ("elapsed_ms", "speed_mps", "root_gap_m", "palm_residual_l", "palm_residual_r", "drawn_residual_l", "drawn_residual_r",
+                      "visual_gap_l", "visual_gap_r", "source_l", "source_r", "blends", "contact_l", "contact_r")
 HAND_FILTER_DEFAULT = 0x000885E4  # R1Recipe::filter: the hand body's word whenever it holds nothing through the body
 
 
@@ -48,6 +54,8 @@ def check(statuses, scenario, proofs=("a", "b", "d"), reject_touch=False):
     def info(text):
         out.append(("INFO", text))
 
+    if scenario in RUNS:
+        return check_run(statuses)
     if scenario in HAND_BODY:
         return check_hand_body(statuses, proofs)
     if scenario in TANK_HAND_BODY:
@@ -98,6 +106,62 @@ def check(statuses, scenario, proofs=("a", "b", "d"), reject_touch=False):
         gap = max(float(s.get("prop_seat_gap_m", 0) or 0) for s in statuses)
         info(f"prop_grasp_point {statuses[-1].get('prop_grasp_point')}, prop_seat_gap_m {gap:.3g}, corpse holds {holds} (a native HoldObject tank is not a lane)")
     return out
+
+
+def parse_locomotion(text):
+    """locomotion-hands.csv text -> a list of float rows keyed by LOCOMOTION_COLUMNS; a short or non-numeric row is dropped."""
+    rows = []
+    for rec in csv.DictReader(text.splitlines()):
+        try:
+            rows.append({k: float(rec[k]) for k in LOCOMOTION_COLUMNS})
+        except (KeyError, TypeError, ValueError):
+            continue
+    return rows
+
+
+def blend_bursts(rows):
+    """Free-air hand_visual blends: rows with speed >= 1.0 and no contact. A burst is >= 2 increments of `blends` inside a 1 s window.
+    -> (bursts counted without overlap, the most increments seen in any 1 s window)."""
+    events = []
+    for prev, row in zip(rows, rows[1:]):
+        if row["speed_mps"] >= BURST_SPEED and not row["contact_l"] and not row["contact_r"] and row["blends"] > prev["blends"]:
+            events.append((row["elapsed_ms"], row["blends"] - prev["blends"]))
+    bursts, worst, i, end = 0, 0, 0, -1
+    for i, (t, _) in enumerate(events):
+        n = sum(d for u, d in events[i:] if u - t <= BURST_WINDOW_MS)
+        worst = max(worst, n)
+        if n >= 2 and t > end:
+            bursts += 1
+            end = t + BURST_WINDOW_MS
+    return bursts, worst
+
+
+def check_run(statuses):
+    """G1a run_hands / run_hands_sword: bin the trace (standing speed < 0.3, running speed >= 2.5), FAIL only when it is missing or too short,
+    and print the numbers (INFO) Task 9 turns into acceptance lines."""
+    out = []
+    for n, status in enumerate(statuses):
+        tag = f"session {n + 1}: " if len(statuses) > 1 else ""
+        rows = status.get("locomotion_rows")
+        if not rows:
+            out.append(("FAIL", f"{tag}locomotion-hands.csv is missing or empty (run with --knob locomotion-trace)"))
+            continue
+        stand = [r for r in rows if r["speed_mps"] < STAND_SPEED]
+        run = [r for r in rows if r["speed_mps"] >= RUN_SPEED]
+        out.append(("PASS" if len(stand) >= RUN_MIN_ROWS else "FAIL", f"{tag}standing rows >= {RUN_MIN_ROWS} (got {len(stand)})"))
+        out.append(("PASS" if len(run) >= RUN_MIN_ROWS else "FAIL", f"{tag}running rows (speed >= {RUN_SPEED} m/s) >= {RUN_MIN_ROWS} (got {len(run)})"))
+        out.append(("INFO", f"{tag}rows {len(rows)}, top speed {max(r['speed_mps'] for r in rows):.2f} m/s"))
+        med = lambda rs, k: statistics.median(r[k] for r in rs) if rs else float("nan")  # noqa: E731
+        for side in "lr":
+            for what in ("drawn_residual", "palm_residual", "visual_gap"):
+                k = f"{what}_{side}"
+                out.append(("INFO", f"{tag}{k} median: standing {med(stand, k):.4f} m, running {med(run, k):.4f} m"))
+            share = sum(1 for r in run if r[f"source_{side}"] == 2) / len(run) if run else float("nan")
+            out.append(("INFO", f"{tag}source_{side} == body share of running frames: {share:.3f}"))
+        out.append(("INFO", f"{tag}root_gap_m median running: {med(run, 'root_gap_m'):.4f} m"))
+        bursts, worst = blend_bursts(rows)
+        out.append(("INFO", f"{tag}free-air blend bursts: {bursts} (most increments in any 1 s window: {worst})"))
+    return out or [("FAIL", "no sessions")]
 
 
 def check_fingers(statuses, reject_touch=False):
@@ -390,6 +454,12 @@ def main(argv=None):
         except (OSError, ValueError) as e:
             print(f"FAIL  cannot read {f}: {e}")
             return 1
+    if args.scenario in RUNS:
+        for d, status in zip(args.run_dirs, statuses):
+            try:
+                status["locomotion_rows"] = parse_locomotion((Path(d) / "artifacts" / "locomotion-hands.csv").read_text(encoding="utf-8"))
+            except OSError:
+                status["locomotion_rows"] = None
     if args.scenario in FINGERS and not args.reject_touch:  # the per-segment samples the DLL logged beside the status
         for d, status in zip(args.run_dirs, statuses):
             f = Path(d) / "artifacts" / "finger-touch-segments.jsonl"

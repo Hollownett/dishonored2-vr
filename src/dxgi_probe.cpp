@@ -1138,6 +1138,9 @@ static std::array<std::atomic<UINT64>,2> arm_copy_calls{},arm_pose_calls{},arm_p
 // Latest arm model origin seen at a native upload, with the Present count.
 static std::mutex arm_origin_mutex;static d2vr::Vec3 arm_model_origin{};static UINT64 arm_model_origin_frame{};
 static std::ofstream arm_origin_csv;
+static std::mutex locomotion_mutex;static std::ofstream locomotion_csv;static UINT64 locomotion_rows{};static std::chrono::steady_clock::time_point locomotion_start;   // build/locomotion-trace: artifacts/locomotion-hands.csv
+static std::array<d2vr::VisualOutput,2> loco_view{};static unsigned locomotion_contact_bits{};   // render thread: this frame's hand_visual result for the trace
+static std::deque<std::array<double,3>> locomotion_roots;   // render thread: {seconds, x, y} of the anchor root, for the 0.2 s speed
 // Last tracked palette per side (model space): a brief tracked-pose gap reuses
 // it instead of flashing the native arm animation for a frame.
 static std::atomic<UINT> arm_upload_depth{0};
@@ -5280,6 +5283,10 @@ void prepare_head_view(void* view) noexcept {
                         drawn_body_weight[side]=visual[side].body_weight;   // B16 fix round 1: held things follow the drawn hand
                     }
                 }
+                if(locomotion_csv.is_open()) {   // G1a trace inputs (diagnostic only)
+                    loco_view=visual;locomotion_contact_bits=hand_visual_contact_bits;
+                    if(hand_body_requested.load(std::memory_order_relaxed) && d2vr::HandBodyRuntime::active()) for(unsigned side=0;side<2;++side) if(d2vr::HandBodyRuntime::contact_now(side)) locomotion_contact_bits|=1u<<side;
+                }
                 for(unsigned side=0;side<2;++side) if(hands.hands&(1u<<side)) hands.grips[side]=d2vr::resolve_drawn_grip(visual[side],anchors[side]).pose;   // X-4 in one function
                 // B16 part 2 (fix round 1 ruling): a capped motor hold follows the DRAWN hand: the controller moved toward the hand body by B15's body_weight
                 // (1 while B15 draws the body: contact within 0.10/0.12 m or agreement within 0.02 m; ramped over its 0.15 s blend; 0 in free air): no weight,
@@ -5520,6 +5527,11 @@ void prepare_head_view(void* view) noexcept {
                     if(!full_body_material.restoration_pending()) full_body_restore_requested=false;
                 }
                 d2vr::fullbody::Tracking t{};
+                if(const auto root_binding=arm_binding_cache.load()) {   // G1a: the body model frame as of this render thread read, beside the camera anchor
+                    std::array<float,15> anchor_root{};
+                    if(const auto body_model=d2vr::rig::value<std::uintptr_t>(read_self,root_binding->arms[0].player+0xf0);
+                       body_model && d2vr::rig::pointer(*body_model) && read_self(*body_model+0x1860,anchor_root.data(),sizeof(anchor_root))) {t.anchor_root=anchor_root;t.anchor_root_valid=true;}
+                }
                 const auto eye_world=d2vr::to_game_pose({head_origin.position+head_offset,centre_pose.orientation},head_origin,anchor,1.0);
                 t.eye=d2vr::fullbody::from_basis(eye_world.position,eye_world.basis[0],eye_world.basis[1],eye_world.basis[2]);
                 for(unsigned side=0;side<2;++side) {
@@ -5609,6 +5621,29 @@ void prepare_head_view(void* view) noexcept {
                     auto reader=&read_self;if(const auto source_owner=d2vr::weapon_source_owner(reader,image_base,owned->arms[0]))t.native_frame=source_owner->second;
                 }
                 full_body.publish(t,native_ownership);
+                if(locomotion_csv.is_open()) {   // G1a: one row per displayed frame (build/locomotion-trace); diagnostic only, changes nothing
+                    std::lock_guard<std::mutex> trace_lock(locomotion_mutex);
+                    if(locomotion_csv.is_open()) {
+                        const auto trace_now=std::chrono::steady_clock::now();const double seconds=std::chrono::duration<double>(trace_now.time_since_epoch()).count();
+                        double speed=0;
+                        if(t.anchor_root_valid) try {
+                            const auto p=d2vr::fullbody::frame_of(t.anchor_root).rigid.p;locomotion_roots.push_back({seconds,p.x,p.y});
+                            while(locomotion_roots.size()>1 && locomotion_roots[1][0]<=seconds-.2) locomotion_roots.pop_front();
+                            const auto& a=locomotion_roots.front();const double dt=seconds-a[0];
+                            if(dt>.05) speed=std::hypot(p.x-a[1],p.y-a[2])/dt;
+                        } catch(...) {} else locomotion_roots.clear();
+                        const auto diag=full_body.diagnostic();
+                        locomotion_csv << static_cast<long long>(std::chrono::duration<double,std::milli>(trace_now-locomotion_start).count()) << ',' << speed << ',' << diag.root_gap_m;
+                        for(unsigned side=0;side<2;++side) locomotion_csv << ',' << diag.palm_residual[side];
+                        for(unsigned side=0;side<2;++side) locomotion_csv << ',' << drawn_palm_residual[side].magnitude();
+                        for(unsigned side=0;side<2;++side) locomotion_csv << ',' << d2vr::length(loco_view[side].drawn.position-palm_grips[side].position);
+                        for(unsigned side=0;side<2;++side) locomotion_csv << ',' << static_cast<unsigned>(loco_view[side].source);
+                        locomotion_csv << ',' << hand_visual_stats.blends(0)+hand_visual_stats.blends(1);
+                        for(unsigned side=0;side<2;++side) locomotion_csv << ',' << ((locomotion_contact_bits>>side)&1u);
+                        locomotion_csv << '\n';
+                        if(++locomotion_rows%120==0) locomotion_csv.flush();
+                    }
+                }
                 if(synchronized_observer.enabled()) {
                     d2vr::SynchronizedTracking raw{};raw.tick=hands.tick;raw.revision=t.tracking_revision;raw.source_tick=hands.source_tick;
                     raw.native_frame=t.native_frame;raw.present=frames.load();raw.pose_epoch=hands.epoch;raw.reference_epoch=hands.reference_epoch;
@@ -6387,7 +6422,7 @@ std::string feedback_status_json() {
         << ",\"grip\":" << [&]{std::ostringstream o;const auto g=full_body.grip_state();o<<'[';for(unsigned i=0;i<2;++i) {o<<(i?",":"")<<"{\"reverse\":"<<(g[i].reversed?"true":"false")<<",\"attach_in_fist\":["<<g[i].attach_in_fist[0]<<','<<g[i].attach_in_fist[1]<<','<<g[i].attach_in_fist[2]<<"],\"hilt_miss_m\":"<<g[i].hilt_miss<<'}';}o<<']';return o.str();}()
         << ",\"finger_inputs\":" << [&]{std::ostringstream o;const auto m=full_body.finger_inputs();o<<'[';for(unsigned i=0;i<2;++i) {o<<(i?",":"")<<'['<<m[i][0]<<','<<m[i][1]<<']';}o<<']';return o.str();}()
         << ",\"solver_failures\":" << full_body.failures() << ",\"owned\":[" << full_body.owned(0) << ',' << full_body.owned(1)
-        << ',' << full_body.owned(2) << ',' << full_body.owned(3) << "]}"
+        << ',' << full_body.owned(2) << ',' << full_body.owned(3) << "],\"root_gap_m\":" << full_body.diagnostic().root_gap_m << "}"
         << ",\"native_body_upload\":{\"accepted\":" << body_upload_seen.load()
         << ",\"rejected\":" << body_upload_rejected.load() << ",\"palette_replaced\":false,\"wheel_hidden_uploads\":" << wheel_avatar_hidden.load() << '}';
     return out.str();
@@ -9081,6 +9116,13 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
             std::lock_guard<std::mutex> origin_lock(arm_origin_mutex);
             arm_origin_csv.open(output/L"arm-origin-trace.csv",std::ios::trunc);arm_origin_csv << std::setprecision(10) << "kind,present,side,x,y,z\n";
         }
+        {   // G1a: build/locomotion-trace -> artifacts/locomotion-hands.csv, one row per displayed frame
+            std::lock_guard<std::mutex> trace_lock(locomotion_mutex);locomotion_csv.close();locomotion_rows=0;locomotion_roots.clear();
+            if(fs::exists(root/L"build"/L"locomotion-trace")) {
+                locomotion_csv.open(output/L"locomotion-hands.csv",std::ios::trunc);locomotion_start=std::chrono::steady_clock::now();
+                locomotion_csv << std::setprecision(6) << "elapsed_ms,speed_mps,root_gap_m,palm_residual_l,palm_residual_r,drawn_residual_l,drawn_residual_r,visual_gap_l,visual_gap_r,source_l,source_r,blends,contact_l,contact_r\n";
+            }
+        }
         simulated_gameplay_script={};simulated_gameplay_last_index=-2;simulated_gameplay_rows=0;
         simulated_gameplay_last_gameplay=simulated_gameplay_last_focused=false;
         if(simulated_gameplay_script_requested) {
@@ -9793,6 +9835,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
         eye_boundary_csv.close();
         if(setup_disabled) {head_anchor_csv.close();authored_camera_csv.close();}
         {std::lock_guard<std::mutex> origin_lock(arm_origin_mutex);arm_origin_csv.close();arm_model_origin_frame=0;}
+        {std::lock_guard<std::mutex> trace_lock(locomotion_mutex);locomotion_csv.close();}
         taa_history.after_pass=nullptr;
         if(taa_capture_csv.is_open()) taa_capture_csv << "# context_offset," << taa_capture_context_offset.load() << "\n";
         taa_capture_csv.close();taa_capture_b2_csv.close();
