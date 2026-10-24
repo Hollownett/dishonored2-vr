@@ -601,22 +601,24 @@ inline FingerCurls finger_contact(const HandGeometry& hand,const WorldTrackedPos
 }
 // Squeeze/trigger fingers as arm_tracking.hpp builds them, clamped by the contact. The four fingers of a hand lying on a surface want at
 // least the resting curl (a contact still caps them).
-inline std::array<float,5> grip_curls(const FingerCurls& contact,float squeeze,float index) {
-    if(!std::isfinite(squeeze) || squeeze<0 || squeeze>1 || !std::isfinite(index) || index<0 || index>1) throw std::invalid_argument("Invalid controller finger curl");
-    const std::array<float,5> wanted{std::max(squeeze,.5f*index),index,squeeze,squeeze,squeeze};
+inline std::array<float,5> grip_curls(const FingerCurls& contact,const std::array<float,5>& wanted) { // the wants given per finger (the touch curl's)
+    for(float w:wanted) if(!std::isfinite(w) || w<0 || w>1) throw std::invalid_argument("Invalid controller finger curl");
     std::array<float,5> out{};
     for(unsigned f=0;f<5;++f) out[f]=std::min(f?std::max(wanted[f],contact.resting):wanted[f],contact.finger[f]);
     return out;
+}
+inline std::array<float,5> grip_curls(const FingerCurls& contact,float squeeze,float index) {
+    if(!std::isfinite(squeeze) || squeeze<0 || squeeze>1 || !std::isfinite(index) || index<0 || index>1) throw std::invalid_argument("Invalid controller finger curl");
+    return grip_curls(contact,std::array<float,5>{std::max(squeeze,.5f*index),index,squeeze,squeeze,squeeze});
 }
 // The hinge turn (rad, over the rest pose) of every chain joint, for a pose that bends joints by angle (BodySolver). Each finger takes
 // one wanted curl and every joint follows its own path (finger_angles: their limits and coupling) up to the angle the contact left it
 // (the finger wraps: finger_contact), less the bend the rest pose has. A held hand wants every finger shut to held_curl (the grip alone
 // holds it; the index is not a trigger finger then; HIGGS's minimum openness 0.2 keeps a finger that touches nothing from overcurling);
 // a free finger wants at least a relaxed curl, or the resting curl of a hand on a surface, which a surface still caps.
-inline std::array<std::array<float,3>,5> finger_turns(const HandGeometry& hand,const FingerCurls& contact,float squeeze,float index,bool held) {
+inline std::array<std::array<float,3>,5> finger_turns(const HandGeometry& hand,const FingerCurls& contact,const std::array<float,5>& wanted) {
     require_hand(hand);
-    if(!std::isfinite(squeeze) || squeeze<0 || squeeze>1 || !std::isfinite(index) || index<0 || index>1) throw std::invalid_argument("Invalid controller finger curl");
-    const auto wanted=finger_wants(held,squeeze,index);
+    for(float w:wanted) if(!std::isfinite(w) || w<0 || w>1) throw std::invalid_argument("Invalid controller finger curl");
     std::array<std::array<float,3>,5> turn{};
     for(unsigned f=0;f<5;++f) {
         const float floor_share=f?std::max(relaxed_share,contact.resting):relaxed_share;
@@ -626,6 +628,10 @@ inline std::array<std::array<float,3>,5> finger_turns(const HandGeometry& hand,c
         for(unsigned s=0;s<3;++s) turn[f][s]=static_cast<float>(t[s]);
     }
     return turn;
+}
+inline std::array<std::array<float,3>,5> finger_turns(const HandGeometry& hand,const FingerCurls& contact,float squeeze,float index,bool held) {
+    if(!std::isfinite(squeeze) || squeeze<0 || squeeze>1 || !std::isfinite(index) || index<0 || index>1) {require_hand(hand);throw std::invalid_argument("Invalid controller finger curl");}
+    return finger_turns(hand,contact,finger_wants(held,squeeze,index));
 }
 
 // The cylinder that best explains a world AABB (half extents e) for a body with these axes: e_j = h|a_j| + r sqrt(1-a_j^2),

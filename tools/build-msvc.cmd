@@ -730,6 +730,8 @@ python tests\hand_clamp_routing_check.py
 if not "%errorlevel%"=="0" exit /b 1
 python tests\held_clamp_routing_check.py
 if not "%errorlevel%"=="0" exit /b 1
+python tests\finger_touch_routing_check.py
+if not "%errorlevel%"=="0" exit /b 1
 python tests\full_hand_query_routing_check.py
 if not "%errorlevel%"=="0" exit /b 1
 python tests\full_hand_launch_check.py

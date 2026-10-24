@@ -91,6 +91,16 @@ int main() {
         for(int i=0;i<90*20;++i) o=d.update(0,t,1/90.,false,P);
         assert(o.mapping==r::CurlMapping::touch);
     }
+    {   // silent_timer_stall_capped: one long frame adds at most 0.25 s, so a stall can't trip touch_silent
+        r::FingerTouchCurl c;In u;u.touch_available=true;u.trigger=.8f;u.grip=.8f; // in use, no touch
+        auto o=c.update(0,u,100.,false,P);assert(o.mapping==r::CurlMapping::touch && !o.touch_silent);
+        o=c.update(0,u,1e9,false,P);assert(!o.touch_silent);
+        // real time still trips it: 10 s of normal frames
+        for(int i=0;i<90*11;++i) o=c.update(0,u,1/90.,false,P);assert(o.touch_silent && o.mapping==r::CurlMapping::legacy);
+        // forty stalls (each capped at .25 s) need 10 s of accumulated capped time, not one frame
+        r::FingerTouchCurl d;for(int i=0;i<39;++i) o=d.update(0,u,5.,false,P);assert(!o.touch_silent);
+        o=d.update(0,u,5.,false,P);assert(o.touch_silent);
+    }
     {   // hitch_and_bad_dt_safe
         r::FingerTouchCurl c;const auto base=settle(c,0,touched(.5f,.5f,true));
         const auto big=c.update(0,touched(1,1,true),.5,false,P);
@@ -135,7 +145,10 @@ int main() {
         settle(c,1,touched(0,0));c.reset(0);
         const auto fresh=c.update(0,touched(0,0),1/90.,false,P);assert(fresh.curl[2]==0.f && fresh.curl[0]==0.f);
         assert(near(settle(c,1,touched(0,0)).curl[1],.3f));
-        bool threw=false;try {(void)c.update(2,touched(0,0),1/90.,false,P);} catch(const std::invalid_argument&) {threw=true;}assert(threw);
+        // A bad side never throws: update gives the legacy mapping verbatim, reset is a no-op.
+        const auto bad=c.update(2,touched(.4f,.7f,true),1/90.,true,P);assert(bad.mapping==r::CurlMapping::legacy && bad.curl==r::finger_wants(true,.7f,.4f));
+        const auto bad_free=c.update(7,touched(.4f,.7f),1/90.,false,P);assert(bad_free.mapping==r::CurlMapping::legacy && bad_free.curl==r::finger_wants(false,.7f,.4f));
+        c.reset(2);c.reset(99);assert(near(settle(c,1,touched(0,0)).curl[1],.3f));
     }
     std::cout<<"finger_touch_curl_check ok\n";
 }

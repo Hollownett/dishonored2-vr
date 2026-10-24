@@ -6,7 +6,6 @@
 #include <cstdlib>
 #include <optional>
 #include <sstream>
-#include <stdexcept>
 #include <string>
 
 // Bonelab's finger curl from the controller's touch sensors (visual only: no intent reads it). The index rests at touch_rest while the trigger
@@ -41,14 +40,16 @@ struct FingerTouchParams {
 struct FingerTouchInput {float trigger{},grip{};bool trigger_touch{},thumb_touch{};bool touch_available{};};
 enum class CurlMapping {touch,legacy};
 struct FingerTouchOutput {std::array<float,5> curl{};CurlMapping mapping{CurlMapping::legacy};bool floor_active{};bool touch_silent{};};
-inline constexpr double touch_silent_seconds=10.;
+inline constexpr double touch_silent_seconds=10.,max_silent_step=.25; // one frame adds at most .25 s to the silent timer: a stall is not silence
 inline constexpr float touch_in_use=.1f,touch_moved=.01f; // a trigger or grip above/changing by this counts as the hand using the controller
 class FingerTouchCurl {
 public:
     FingerTouchOutput update(unsigned side,const FingerTouchInput& in,double dt,bool held,const FingerTouchParams& p) {
-        if(side>1) throw std::invalid_argument("Invalid finger touch side");
-        auto& s=side_[side];
         const float trigger=unit(in.trigger),grip=unit(in.grip);
+        if(side>1) { // no such hand: today's mapping, no state, never a throw
+            FingerTouchOutput legacy;legacy.curl=finger_wants(held,grip,trigger);return legacy;
+        }
+        auto& s=side_[side];
         if(!in.touch_available) {s=State{};s.last.curl=finger_wants(held,grip,trigger);return s.last;} // legacy: finger_wants verbatim, no state
         if(!std::isfinite(dt) || dt<=0) return s.last;
         const float step=static_cast<float>(dt);
@@ -63,7 +64,7 @@ public:
         const bool active=trigger>touch_in_use || grip>touch_in_use || std::abs(trigger-s.last_trigger)>touch_moved || std::abs(grip-s.last_grip)>touch_moved;
         s.last_trigger=trigger;s.last_grip=grip;
         if(in.trigger_touch || in.thumb_touch) s.silent_time=0;
-        else if(active) s.silent_time+=dt;
+        else if(active) s.silent_time+=std::min(dt,max_silent_step); // a stall adds at most max_silent_step
         FingerTouchOutput out;
         out.touch_silent=s.silent_time>=touch_silent_seconds;
         if(out.touch_silent) {out.mapping=CurlMapping::legacy;out.curl=finger_wants(held,grip,trigger);}
@@ -73,7 +74,7 @@ public:
         }
         s.last=out;return out;
     }
-    void reset(unsigned side) {if(side>1) throw std::invalid_argument("Invalid finger touch side");side_[side]=State{};}
+    void reset(unsigned side) {if(side<2) side_[side]=State{};}
 private:
     struct State {float sim{},thumb{},last_trigger{},last_grip{};std::array<float,5> smooth{};double silent_time{};FingerTouchOutput last{};};
     static float unit(float v) {return std::isfinite(v)?std::clamp(v,0.f,1.f):0.f;}

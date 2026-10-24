@@ -442,6 +442,13 @@ int main() {
             for(unsigned s=0;s<3;++s) assert(std::abs(angles_of(1,grip_only[1])[s]-relaxed_angles[s])<1e-5);
             assert(flexion_share(angles_of(2,grip_only[2]))>flexion_share(angles_of(1,grip_only[1])));
             assert(r::finger_turns(g,free_hand,0.f,0.f,false)[3][0]>0.f);
+            // The per-finger overloads (the touch curl's wants) give the scalar forms' answers for the wants those forms derive.
+            for(const bool held:{false,true}) for(const float sq:{0.f,.4f,1.f}) for(const float ix:{0.f,.7f}) {
+                const auto a=r::finger_turns(g,free_hand,sq,ix,held),b=r::finger_turns(g,free_hand,r::finger_wants(held,sq,ix));
+                for(unsigned f=0;f<5;++f) for(unsigned s=0;s<3;++s) assert(a[f][s]==b[f][s]);
+            }
+            assert(r::grip_curls(free_hand,.6f,.3f)==r::grip_curls(free_hand,std::array<float,5>{std::max(.6f,.15f),.3f,.6f,.6f,.6f}));
+            {bool threw=false;try {(void)r::grip_curls(free_hand,std::array<float,5>{0,0,2.f,0,0});} catch(const std::invalid_argument&) {threw=true;}assert(threw);}
             // Holding wants every finger shut (to HIGGS's minimum openness 0.2: curl 0.8) whatever the trigger does: the index follows the
             // middle finger and stops at the surface.
             const auto bottle2=across_palm(h,mirror,.035,.01);

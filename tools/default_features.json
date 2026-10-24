@@ -42,6 +42,14 @@
    "default": true
   },
   {
+   "id": "finger-touch",
+   "file": "legacy-finger-curl",
+   "kind": "disable",
+   "label": "Fingers follow the controller's touch sensors",
+   "help": "Your fingers rest on the trigger and lift off the thumb buttons the way the sensors on Touch controllers see them (needs a runtime that supports touch sensing). Turn off to curl the fingers from the trigger and grip values alone.",
+   "default": true
+  },
+  {
    "id": "hand-blink",
    "file": "no-hand-blink",
    "kind": "disable",
