@@ -123,11 +123,11 @@ def check_fingers(statuses, reject_touch=False):
         samples, poses = status.get("finger_segments") or [], status.get("finger_poses") or []
         add(len(poses) == len(FINGER_POSES), f"{tag}the script has {len(FINGER_POSES)} touch pose segments (got {len(poses)})")
         by = {}
-        for pose, seg in zip(FINGER_POSES, poses):  # the last sample of each pose's own segment, taken at or after its end (a blip sample mid-segment is superseded)
+        for pose, seg in zip(FINGER_POSES, poses):  # the first sample of each pose's own segment at or after its end (the boundary tick; later post-end samples are unsettled)
             mine = [s for s in samples if s.get("segment") == seg.get("index") and s.get("elapsed_ms", -1) >= seg.get("end_ms", 1 << 60)]
             add(bool(mine), f"{tag}{pose}: a sample at the end of segment {seg.get('index')} (got {len([s for s in samples if s.get('segment') == seg.get('index')])} before its end)")
             if mine:
-                by[pose] = mine[-1].get("fingers") or {}
+                by[pose] = min(mine, key=lambda s: s["elapsed_ms"]).get("fingers") or {}
         if len(by) < len(FINGER_POSES):
             continue
         curl = {}

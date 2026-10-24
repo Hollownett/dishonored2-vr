@@ -144,8 +144,12 @@ def finger_touch_checks():
     lead_only = finger_status()
     lead_only["finger_segments"] = [{"segment": i, "elapsed_ms": 1000 * i, "fingers": finger_sample(OPEN)} for i in range(20)]  # only lead-in samples
     assert "FAIL" in {v for v, _ in verdict(lead_only)}
-    blip = finger_status()  # a focus or loading blip: an unsettled sample inside segment 28 (before its end) and a late duplicate of the earlier segment, in order
-    blip["finger_segments"].insert(2, {"segment": 28, "elapsed_ms": 50000 + 300, "fingers": finger_sample([0, 0, 0, 0, 0])})
+    late = finger_status()  # an unsettled sample AFTER the settled boundary sample of segment 28 (end 50000): the first one at/after the end is judged
+    late["finger_segments"].insert(2, {"segment": 28, "elapsed_ms": 50300, "fingers": finger_sample([1, 0.5, 1, 1, 1])})
+    assert not any(v == "FAIL" for v, _ in verdict(late)), verdict(late)
+    assert "FAIL" in {v for v, _ in verdict(finger_status(samples=(REST, [1, 0.5, 1, 1, 1], THUMBS, FIST, OPEN)))}, "the boundary sample itself is judged"
+    blip = finger_status()  # a genuine in-segment blip (focus loss): bad curls stamped before the segment's end are ignored
+    blip["finger_segments"].insert(2, {"segment": 28, "elapsed_ms": 50000 - 700, "fingers": finger_sample([0, 0.9, 0, 0, 0])})
     blip["finger_segments"].insert(1, {"segment": 27, "elapsed_ms": 47500 - 900, "fingers": finger_sample([1, 1, 1, 1, 1])})
     assert not any(v == "FAIL" for v, _ in verdict(blip)), verdict(blip)
     early = finger_status()  # a sample stamped before the segment's end never counts
