@@ -38,6 +38,11 @@ assert 'native.size()!=(mono?1u:2u)' in head and 'difference<.001f' in head
 assert 'GameXr::mono_centre_view(*xr_views)' in head
 # eye 0 guarded per-frame sites still run once: the single view is eye 0
 assert 'if(per_frame) { // comfort telemetry' in head and 'if(native_crosshair_installed) {' in head # plan F task 2 (G4: the per-eye NDC store runs for every prepared view, the placement itself stays per_frame): first view of the displayed frame
+# G4: the crosshair placement/publish and the hide + cast stay once-per-frame (the single view is eye 0)
+for site in ('if(per_frame && std::abs(nx)<1.2 && std::abs(ny)<1.2) {', 'if(per_frame && !published) native_crosshair.clear();', 'if(per_frame && shared_aim_ray) crosshair_receipt=shared_aim_ray;',
+             'if(per_frame) {\n                // The in-game switch hides the element', 'hand_clamp_budget.tip_enabled() && !hand_clamp_budget.alternate()', 'producer_crosshair);++crosshair_cast_posts;'):
+    assert head.count(site) == 1, site
+    assert head.replace(site, site.replace('per_frame && ', '', 1).replace('if(per_frame) {', 'if(true) {', 1).replace('!hand_clamp_budget.alternate()', 'true', 1).replace('producer_crosshair', 'producer_clamp', 1)).count(site) == 0, site
 # both eyes record the same data so rendered_mask_ reaches 3
 rec = between(head, 'if(mono) { // the one image serves both', '} else game_xr->record_rendered_eye(')
 assert 'record_rendered_eye(0,fov,&rendered_orientation,&xr_eye.pose.position)' in rec

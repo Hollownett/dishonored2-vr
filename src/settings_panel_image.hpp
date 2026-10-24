@@ -19,7 +19,7 @@ namespace d2vr {
 // panel, brush highlight, arrows, slider, divider, character portraits), else procedurally in the same style; then
 // box-downsampled.
 // Layout is fixed at 640x560 (game_xr.hpp owns the swapchain size); row i occupies
-// y=64+36i, height 32 - vr_settings.hpp pointer hit-testing uses the same rows.
+// y=settings_row_top+settings_row_pitch*i, height settings_row_height (vr_settings.hpp constants) - vr_settings.hpp pointer hit-testing uses the same rows.
 inline std::vector<unsigned char> settings_panel_image(const VrSettings& settings,double effective,
     unsigned width,unsigned height,std::optional<PanelPointer> pointer) {
     constexpr int w=640,h=560,S=3,W=w*S,H=h*S;

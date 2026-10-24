@@ -437,10 +437,11 @@ static std::string frame_split_adapter_json; // written once from the swap chain
 static d2vr::PerfMeter perf_meter;static std::mutex perf_meter_mutex; // fed on the render thread, read by the status writer
 // G4 crosshair: each prepared view's NDC of the shared aim ray target (render thread writes in prepare_head_view, the HUD draw hook reads for the
 // per-eye shift of the second UI draw), the placed (per_frame) eye slot, and the cast distance. crosshair_receipt keeps the per_frame view's receipt for the other view.
+bool read_self(std::uintptr_t address,void* data,std::size_t size);
 struct CrosshairEyeNdc {float x{},y{};std::uint64_t frame{};};
 static std::mutex crosshair_eye_mutex;static std::array<CrosshairEyeNdc,2> crosshair_eye_ndc{};static unsigned crosshair_placed_slot=0;
 static std::optional<d2vr::AimRayReceipt> crosshair_receipt;
-static float crosshair_distance_m=30.f;static std::uint64_t crosshair_cast_posts=0,crosshair_cast_hits=0;static bool crosshair_visible_now=true;
+static std::atomic<float> crosshair_distance_m{30.f};static std::atomic<std::uint64_t> crosshair_cast_posts{0},crosshair_cast_hits{0};static std::atomic<bool> crosshair_visible_now{true}; // render thread writes, the status thread reads
 // The n-th eye-node draw of a frame is the n-th eye's UI pass (paired stereo, left first): draw 1 moves by the parallax between the eyes' stage positions.
 static std::optional<std::array<float,2>> crosshair_eye_shift(unsigned eye_draw_index) noexcept {
     if(eye_draw_index!=1) return std::nullopt;
@@ -449,7 +450,9 @@ static std::optional<std::array<float,2>> crosshair_eye_shift(unsigned eye_draw_
     if(!placed.frame || placed.frame!=other.frame) return std::nullopt; // not published for both eyes this frame (alternate-eye, or no aim): no shift
     const auto size=d2vr::NativeHudChildDraw::target_size();const float root_s=d2vr::NativeHudChildDraw::root_scale();
     if(!(root_s>0.f)) return std::nullopt;
-    const auto stage=[&](const CrosshairEyeNdc& v) {return d2vr::crosshair_fitted_stage_position(std::clamp(v.x,-1.f,1.f),std::clamp(v.y,-1.f,1.f),1920.f,size[0],size[1]);};
+    float stage_x{};// the same live engine stage width NativeCrosshair::place() maps with: placed position and shift share one scale
+    if(!image_base || !read_self(image_base+0x3989eac,&stage_x,sizeof stage_x) || !std::isfinite(stage_x) || !(stage_x>0.f) || stage_x>=1e6f) return std::nullopt;
+    const auto stage=[&](const CrosshairEyeNdc& v) {return d2vr::crosshair_fitted_stage_position(std::clamp(v.x,-1.f,1.f),std::clamp(v.y,-1.f,1.f),stage_x,size[0],size[1]);};
     return d2vr::crosshair_eye_shift_px(stage(other),stage(placed),root_s);
 }
 static d2vr::AimSmoother aim_smoother;static bool aim_smoothing_enabled=true; // plan H2: build/no-aim-smoothing; build/aim-smoothing "min_cutoff beta d_cutoff". Render thread only (prepare_head_view), once per displayed frame, shared by the gameplay aim and the crosshair

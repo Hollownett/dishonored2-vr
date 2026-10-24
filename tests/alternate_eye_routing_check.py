@@ -51,6 +51,22 @@ sites = [
 ]
 for site in sites:
     assert head.count(site) == 1, site
+# G4 crosshair: the block runs for every prepared view (per-eye NDC), so each effect that must happen once per displayed frame keeps its own per_frame guard
+crosshair_sites = [
+    'if(per_frame && !shared_aim_ray) {native_shot_aim.clear();native_crosshair.clear();crosshair_receipt.reset();}',
+    'if(per_frame && shared_aim_ray) crosshair_receipt=shared_aim_ray;',
+    'if(per_frame) {\n                // The in-game switch hides the element',
+    'if(current && crosshair_visible_now && hand_clamp_budget.tip_enabled() && !hand_clamp_budget.alternate()) {',
+    'd2vr::NativeInteractionAim::producer_crosshair);++crosshair_cast_posts;',
+    'if(per_frame && std::abs(nx)<1.2 && std::abs(ny)<1.2) {',
+    'if(per_frame && !published) native_crosshair.clear();',
+]
+for site in crosshair_sites:
+    assert head.count(site) == 1, site
+# mutation: dropping the per_frame guard (or the budget condition) from any pinned site must change the source so its pin no longer matches
+for site in crosshair_sites:
+    mutated = site.replace('per_frame && ', '', 1).replace('if(per_frame) {', 'if(true) {', 1).replace('hand_clamp_budget.tip_enabled() && !hand_clamp_budget.alternate()', 'true', 1).replace('producer_crosshair', 'producer_clamp', 1)
+    assert mutated != site and head.replace(site, mutated).count(site) == 0, site
 listener = between(head, 'head_wrote=true;SIZE_T written{};', 'constexpr auto tracked_head=')
 assert 'if(per_frame) {' in listener  # audio listener
 
