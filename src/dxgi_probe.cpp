@@ -389,7 +389,7 @@ static bool action_camera_alignment_enabled=true; // build/legacy-action-camera-
 static d2vr::ActionCameraContext action_camera_context;
 // Bonelab touch-sensor finger curl (plan C, visual only: no intent consumer reads it). The finger block (render thread) updates it and publishes the
 // status; the status writer reads. Knobs read once at start: build/finger-touch.cfg (tuning), build/legacy-finger-curl (today's mapping), logged to finger-touch.txt.
-static d2vr::rig::FingerTouchCurl finger_touch_curl;static d2vr::rig::FingerTouchParams finger_touch_params;static bool legacy_finger_curl=false;
+static d2vr::rig::FingerTouchCurl finger_touch_curl;static d2vr::rig::FingerTouchParams finger_touch_params;static bool legacy_finger_curl=false;static bool finger_touch_live[2]{}; // a side that ran the touch curl last frame (else its first touch frame is seeded from the legacy wants)
 static std::mutex finger_touch_status_mutex;
 static struct FingerTouchStatus {std::array<bool,2> touch{},silent{},floor{},trigger_touch{},thumb_touch{};std::array<std::array<float,5>,2> curl{};} finger_touch_status;
 static void start_finger_touch_knobs(const fs::path& root,const fs::path& output) {
@@ -5368,18 +5368,19 @@ void prepare_head_view(void* view) noexcept {
                             LARGE_INTEGER c0{},c1{},cf{};QueryPerformanceCounter(&c0);
                             const auto wants_legacy=d2vr::rig::finger_wants(holding,hands.curls[side],hands.index_curls[side]);
                             // Bonelab's touch curl on an empty or held hand; a weapon hand or a hand the game animates keeps the native fist (no touch curl at all).
-                            const bool touch_side=!legacy_finger_curl && game_xr->controller_input.touch_bound && !(hands.native_hands>>side&1u) && !((fk_weapon_bits>>side)&1u);
+                            const bool touch_side=!legacy_finger_curl && game_xr->touch_status().bound && !(hands.native_hands>>side&1u) && !((fk_weapon_bits>>side)&1u);
                             d2vr::rig::FingerTouchOutput touch_out{};
                             if(touch_side) {
                                 const auto& ci=game_xr->controller_input;
+                                if(!finger_touch_live[side&1u]) finger_touch_curl.seed(side,wants_legacy);finger_touch_live[side&1u]=true;
                                 const d2vr::rig::FingerTouchInput touch_in{hands.index_curls[side],hands.curls[side],side?ci.right_trigger_touch:ci.left_trigger_touch,side?ci.right_thumb_touch:ci.left_thumb_touch,true};
                                 touch_out=finger_touch_curl.update(side,touch_in,fdt,holding,finger_touch_params);touch_wants=touch_out.curl;
                                 if(holding) for(unsigned f=1;f<5;++f) touch_wants[f]=std::min(touch_wants[f],d2vr::rig::held_curl); // as today: a hold shuts the fingers to held_curl, the thumb free
-                            } else finger_touch_curl.reset(side);
+                            } else {finger_touch_curl.reset(side);finger_touch_live[side&1u]=false;}
                             {std::lock_guard<std::mutex> l(finger_touch_status_mutex);
                              finger_touch_status.touch[side]=touch_side && touch_out.mapping==d2vr::rig::CurlMapping::touch;finger_touch_status.silent[side]=touch_out.touch_silent;finger_touch_status.floor[side]=touch_out.floor_active;
                              finger_touch_status.trigger_touch[side]=touch_side && (side?game_xr->controller_input.right_trigger_touch:game_xr->controller_input.left_trigger_touch);
-                             finger_touch_status.thumb_touch[side]=touch_side && (side?game_xr->controller_input.right_thumb_touch:game_xr->controller_input.left_thumb_touch);finger_touch_status.curl[side]=touch_out.curl;}
+                             finger_touch_status.thumb_touch[side]=touch_side && (side?game_xr->controller_input.right_thumb_touch:game_xr->controller_input.left_thumb_touch);finger_touch_status.curl[side]=touch_side?touch_out.curl:wants_legacy;}
                             touch_curl=touch_side && touch_out.mapping==d2vr::rig::CurlMapping::touch;
                             const auto wants=touch_curl?touch_wants:wants_legacy;
                             {contact=d2vr::rig::finger_contact(*geometry,palm,shapes.data(),count,fdt,finger_ik[side],holding?d2vr::rig::held_curl:1.f,finger_solve_budget,&wants);}

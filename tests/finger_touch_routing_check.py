@@ -24,9 +24,14 @@ def check(probe: str, build: str, features: str) -> None:
     assert "touch_curl?d2vr::rig::finger_turns(*geometry,contact,wants):d2vr::rig::finger_turns(*geometry,contact,hands.curls[side],hands.index_curls[side],holding)" in b
     assert "touch_curl?d2vr::rig::grip_curls(contact,touch_wants):d2vr::rig::grip_curls(contact," in b
     # weapon_hand_keeps_native_fist: a weapon hand or a native-animated hand gets no touch curl (and drops its state)
-    assert "const bool touch_side=!legacy_finger_curl && game_xr->controller_input.touch_bound && !(hands.native_hands>>side&1u) && !((fk_weapon_bits>>side)&1u);" in b
+    assert "const bool touch_side=!legacy_finger_curl && game_xr->touch_status().bound && !(hands.native_hands>>side&1u) && !((fk_weapon_bits>>side)&1u);" in b
     assert "{hand_weapon_bits" not in b and "fk_weapon_bits=hand_weapon_bits;" in probe
-    assert "else finger_touch_curl.reset(side);" in b
+    assert "else {finger_touch_curl.reset(side);finger_touch_live[side&1u]=false;}" in b
+    # availability is the session property, not the per-frame controller_input (sample_input zeroes that on unfocused / failed frames)
+    assert "controller_input.touch_bound" not in b
+    # the first touch frame after a reset starts from the legacy wants, and the status shows the curls actually requested
+    assert "if(!finger_touch_live[side&1u]) finger_touch_curl.seed(side,wants_legacy);finger_touch_live[side&1u]=true;" in b
+    assert "finger_touch_status.curl[side]=touch_side?touch_out.curl:wants_legacy;" in b
     # legacy_knob_restores_finger_wants: the legacy wants are the old finger_wants call, verbatim
     assert "const auto wants_legacy=d2vr::rig::finger_wants(holding,hands.curls[side],hands.index_curls[side]);" in b
     assert 'L"legacy-finger-curl"' in probe and "legacy_finger_curl=fs::exists(" in probe
@@ -48,6 +53,26 @@ def check(probe: str, build: str, features: str) -> None:
         in_status = "finger_touch_status_json(" in line
         declared = "std::array<float,5> touch_wants{};bool touch_curl=false;" in line
         assert in_block or in_globals or in_status or declared, (number, line[:120])
+    # hands.finger_curls / touch_curl readers are drawn-side only. Allowed: the finger block itself (in_block above), the arm pose in arm_tracking.hpp
+    # (validation + drawn fingers), and the solid-hand push collider proxies (native_hand_contact publish: drawn-hand physics, which legacy curl
+    # already fed). Nothing else, and in particular no grab / Use / attack / aim / gesture / Blink code, may read them.
+    allowed_curl_readers = {
+        "src/dxgi_probe.cpp": ("hands.finger_curls[side]=touch_curl?", "solid_hands.publish(side,can_push,hands.grips[side],palm_grips[side],hands.has_finger_curls?hands.finger_curls[side]:"),
+        "src/arm_tracking.hpp": ("frame.finger_curls", "frame.has_finger_curls"),
+    }
+    src = Path(__file__).resolve().parents[1] / "src"
+    for path in sorted(src.glob("*.[ch]pp")):
+        rel = f"src/{path.name}"
+        text = path.read_text(encoding="utf-8", errors="replace")
+        for number, line in enumerate(text.splitlines(), 1):
+            if line.lstrip().startswith(("#include", "//")) or not re.search(r"\bfinger_curls\b|\btouch_curl\b", line):
+                continue
+            if rel == "src/dxgi_probe.cpp" and ("touch_curl" in line and "finger_curls" not in line):
+                continue  # the finger block's own touch_curl uses are pinned by the names scan above
+            if rel == "src/arm_tracking.hpp" and "finger_curls{}" in line:
+                continue  # the declaration
+            ok = any(token in line for token in allowed_curl_readers.get(rel, ()))
+            assert ok or (rel == "src/dxgi_probe.cpp" and "hands.has_finger_curls=" in line), (rel, number, line.strip()[:120])
     for fn in allowed_funcs:
         assert f"static void {fn}(" in probe or f"static std::string {fn}(" in probe, fn
     # status_block_present

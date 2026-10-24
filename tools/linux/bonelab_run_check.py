@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check a sim run of a Part 1 corpse/prop scenario against its assertions.
+"""Check a sim run of a Part 1 corpse/prop scenario or the finger_touch scenario against its assertions.
 
 usage: bonelab_run_check.py RUN_DIR [RUN_DIR ...] --scenario NAME [--reject-touch]
 RUN_DIR is a ~/d2vr-test-builds/sim-runs/<stamp> folder (reads RUN_DIR/artifacts/xr-live-status.json). Several run dirs are

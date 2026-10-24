@@ -1,6 +1,8 @@
 #include "../src/finger_touch_curl.hpp"
 #include <cassert>
+#include <clocale>
 #include <cstdint>
+#include <locale>
 #include <cstring>
 #include <iostream>
 #include <limits>
@@ -149,6 +151,25 @@ int main() {
         const auto bad=c.update(2,touched(.4f,.7f,true),1/90.,true,P);assert(bad.mapping==r::CurlMapping::legacy && bad.curl==r::finger_wants(true,.7f,.4f));
         const auto bad_free=c.update(7,touched(.4f,.7f),1/90.,false,P);assert(bad_free.mapping==r::CurlMapping::legacy && bad_free.curl==r::finger_wants(false,.7f,.4f));
         c.reset(2);c.reset(99);assert(near(settle(c,1,touched(0,0)).curl[1],.3f));
+    }
+    {   // seed_starts_smoothed_curls: the first touch frame continues from the seeded curls, not from open; bad side is a no-op
+        r::FingerTouchCurl c;const std::array<float,5> from{.2f,.9f,.8f,.8f,.8f};c.seed(0,from);
+        const auto o=c.update(0,touched(0,0),1/90.,false,P);
+        for(unsigned f=0;f<5;++f) assert(o.curl[f]>from[f]-.25f*from[f]-1e-3f); // one frame moves smooth_rate*dt (22%) toward the target
+        assert(o.curl[2]>.6f);
+        r::FingerTouchCurl d;const auto fresh=d.update(0,touched(0,0),1/90.,false,P);assert(fresh.curl[2]==0.f);
+        c.seed(2,from);c.seed(99,from);assert(c.update(1,touched(0,0),1/90.,false,P).curl[2]==0.f);
+        r::FingerTouchCurl e;e.seed(0,{9.f,-1.f,std::numeric_limits<float>::quiet_NaN(),.5f,.5f});
+        for(float v:e.update(0,touched(0,0),1/90.,false,P).curl) assert(std::isfinite(v) && v>=0 && v<=1);
+    }
+    {   // params_parse_locale_independent: a comma-decimal C locale or global C++ locale still reads ".4" and rejects "0,4"
+        struct Comma:std::numpunct<char> {char do_decimal_point() const override {return ',';}};
+        const auto old=std::locale::global(std::locale(std::locale::classic(),new Comma));
+        const bool c_locale=std::setlocale(LC_NUMERIC,"de_DE.UTF-8")||std::setlocale(LC_NUMERIC,"de_DE")||std::setlocale(LC_NUMERIC,"fr_FR.UTF-8");
+        const auto v=r::FingerTouchParams::parse("touch_rest=.4\nheld_floor=0.5");
+        assert(v && v->touch_rest==.4f && v->held_floor==.5f);
+        assert(!r::FingerTouchParams::parse("touch_rest=0,4"));
+        std::setlocale(LC_NUMERIC,"C");std::locale::global(old);(void)c_locale;
     }
     std::cout<<"finger_touch_curl_check ok\n";
 }

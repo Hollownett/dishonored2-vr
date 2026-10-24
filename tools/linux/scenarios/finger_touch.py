@@ -2,7 +2,7 @@
 
 Tier B scenario, needs no props and no special save (the hand stays empty, held at eye height ahead of the player).
 The DLL logs the `fingers` status at each segment's end (finger-touch-segments.jsonl); the five pose segments are the last five of the script,
-so bonelab_run_check.py judges the last five samples. Touch columns need the version 7 gameplay script.
+so bonelab_run_check.py selects each pose by its segment (the first sample at/after the segment end). Touch columns need the version 7 gameplay script.
 build(lead_ms) -> segments.
 """
 import importlib.util

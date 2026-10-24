@@ -3,7 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
-#include <cstdlib>
+#include <locale>
 #include <optional>
 #include <sstream>
 #include <string>
@@ -25,8 +25,8 @@ struct FingerTouchParams {
             const auto eq=line.find('=');if(eq==std::string::npos) return std::nullopt;
             const auto key=trim(line.substr(0,eq)),text_value=trim(line.substr(eq+1));
             if(text_value.empty()) return std::nullopt;
-            char* end=nullptr;const float v=std::strtof(text_value.c_str(),&end);
-            if(end!=text_value.c_str()+text_value.size() || !std::isfinite(v)) return std::nullopt;
+            std::istringstream num(text_value);num.imbue(std::locale::classic()); // the C locale's decimal comma must not make ".4" malformed
+            float v=0;num>>v;if(num.fail() || num.peek()!=std::char_traits<char>::eof() || !std::isfinite(v)) return std::nullopt;
             if(key=="touch_rest") p.touch_rest=std::clamp(v,0.f,1.f);
             else if(key=="index_slew") p.index_slew=std::clamp(v,1.f,100.f);
             else if(key=="thumb_slew") p.thumb_slew=std::clamp(v,1.f,100.f);
@@ -75,6 +75,8 @@ public:
         s.last=out;return out;
     }
     void reset(unsigned side) {if(side<2) side_[side]=State{};}
+    // Start a side's smoothed curls at these (the mapping it just left), so the first touch frame doesn't snap the hand open. No-op for no such side.
+    void seed(unsigned side,const std::array<float,5>& curls) {if(side<2) for(unsigned f=0;f<5;++f) side_[side].smooth[f]=unit(curls[f]);}
 private:
     struct State {float sim{},thumb{},last_trigger{},last_grip{};std::array<float,5> smooth{};double silent_time{};FingerTouchOutput last{};};
     static float unit(float v) {return std::isfinite(v)?std::clamp(v,0.f,1.f):0.f;}
