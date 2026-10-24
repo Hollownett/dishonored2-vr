@@ -336,7 +336,7 @@ int main() {
         HandVisualSource src;HoldCoupling c;ServoBody body;body.pos={0,0,1};double now=10,max_lag=0;std::uint64_t seq=1;bool released=false;
         Sweep sweep{1.3};
         for(int i=0;i<270;++i) {
-            now+=dt90;const Vec3 hand{sweep.next(),0,1};   // 6 m/s back and forth over 2.6 m: it reverses at once while the body still runs away
+            now+=dt90;const Vec3 hand{0,sweep.next(),1};   // 6 m/s across the arm axis (the 90 N lateral cap) over 2.6 m, reversing at once
             body.step(hand,dt90);
             VisualInput vi{};vi.now=now;vi.body_ready=true;vi.body=pose_at(body.pos);vi.body_seq=++seq;vi.clamp=pose_at(hand);vi.controller=pose_at(hand);
             const auto v=src.update(0,vi);
@@ -347,14 +347,16 @@ int main() {
         CHECK(!released);
         // the same sweep with the closing condition ignored would have dropped it (the control the ruling asks for)
         ServoBody b2;b2.pos={0,0,1};Sweep s2{1.3};double over=0,longest=0;
-        for(int i=0;i<270;++i) {const Vec3 hand{s2.next(),0,1};b2.step(hand,dt90);over=length(hand-b2.pos)>HoldCoupling::lag_release_m?over+dt90:0;longest=std::max(longest,over);}
-        CHECK(longest>0);   // the far-only rule would at least start its dwell here (the closing condition is what keeps it from firing)
+        for(int i=0;i<270;++i) {const Vec3 hand{0,s2.next(),1};b2.step(hand,dt90);over=length(hand-b2.pos)>HoldCoupling::lag_release_m?over+dt90:0;longest=std::max(longest,over);}
+        CHECK(longest>HoldCoupling::lag_release_s);   // far for longer than the dwell: only the closing condition keeps it from releasing
     }
     {   // fast_free_air_swing_never_drops_native_hold (fix round 3, N-2): the full native rig with B15 and the real servo, a 6 m/s free-air sweep: the
         // body lags past 0.35 m, the hold is never dropped (neither HeldClamp's rule nor the raw-gap release)
         NativeRig r;r.use_b15=true;r.real_servo=true;r.body={0,0,1};double max_lag=0;bool dropped=false;
-        Sweep sweep{1.0};
-        for(int i=0;i<270;++i) {r.controller.position.x=sweep.next();r.step();dropped=dropped || r.dropped;max_lag=std::max(max_lag,r.last.lag_m);}
+        Sweep sweep{1.3};double over=0,longest=0;
+        for(int i=0;i<270;++i) {r.controller.position.y=sweep.next();r.step();dropped=dropped || r.dropped;max_lag=std::max(max_lag,r.last.lag_m);
+            over=r.last.lag_m>HoldCoupling::native_release_m?over+dt90:0;longest=std::max(longest,over);}
+        CHECK(longest>HoldCoupling::native_release_s);   // far for longer than the dwell: only the closing condition keeps the hold
         CHECK(max_lag>HoldCoupling::native_release_m);CHECK(!dropped);
         // stuck still releases with the real servo: the body wedged, the controller held 0.45 m away
         NativeRig s;s.use_b15=true;s.real_servo=true;s.contact=true;s.wedged=true;bool gone=false;
