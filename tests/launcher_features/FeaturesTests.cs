@@ -24,12 +24,12 @@ Check("list_has_no_unwanted_rows", !list.Any(f => f.Id is "corpse-grab") && list
     }
     ok &= Ids(d, "seeded").OrderBy(x => x).SequenceEqual(list.Select(f => f.Id).OrderBy(x => x));
     Check("fresh_home_enables_every_default", ok && Has(d, "full-body") && !Has(d, "no-hand-blink"));
-    Check("default_false_row_not_created", !F("power-gestures").Default && !Has(d, "power-gestures"));
-    Check("default_false_row_reports_off_and_set_on_creates", !Features.State(d, list)["power-gestures"].On && Features.State(d, list)["full-body"].On);
-    Features.Set(d, F("power-gestures"), true);
-    Check("set_on_creates_default_false_row", Has(d, "power-gestures") && Features.State(d, list)["power-gestures"].On);
+    Check("default_false_row_not_created", !F("native-temporal-census").Default && !Has(d, "native-temporal-census"));
+    Check("default_false_row_reports_off_and_set_on_creates", !Features.State(d, list)["native-temporal-census"].On && Features.State(d, list)["full-body"].On);
+    Features.Set(d, F("native-temporal-census"), true);
+    Check("set_on_creates_default_false_row", Has(d, "native-temporal-census") && Features.State(d, list)["native-temporal-census"].On);
     Features.Apply(d, list);
-    Check("default_false_row_survives_apply_after_set", Has(d, "power-gestures"));
+    Check("default_false_row_survives_apply_after_set", Has(d, "native-temporal-census"));
 }
 {   // apply_is_idempotent
     var d = NewBuild(); Features.Apply(d, list); var a = Listing(d); int n = Features.Apply(d, list);
@@ -52,9 +52,9 @@ Check("list_has_no_unwanted_rows", !list.Any(f => f.Id is "corpse-grab") && list
     Check("handmade_negative_knob_is_adopted", Has(d, "no-stealth-contact") && !st.On && st.Adopted && Ids(d, "off").Contains("stealth-contact"));
 }
 {   // handmade_positive_knob_is_kept
-    var d = NewBuild(); File.WriteAllText(Path.Combine(d, "power-gestures"), "");
+    var d = NewBuild(); File.WriteAllText(Path.Combine(d, "native-temporal-census"), "");
     Features.Apply(d, list);
-    Check("handmade_positive_knob_is_kept", Has(d, "power-gestures") && Features.State(d, list)["power-gestures"].On);
+    Check("handmade_positive_knob_is_kept", Has(d, "native-temporal-census") && Features.State(d, list)["native-temporal-census"].On);
 }
 {   // unknown_files_untouched
     var d = NewBuild(); File.WriteAllText(Path.Combine(d, "hud-scale"), "0.75"); File.WriteAllBytes(Path.Combine(d, "fsr4.off"), Array.Empty<byte>());
@@ -254,18 +254,18 @@ string StateText(string d) => File.ReadAllText(Path.Combine(d, "launcher-feature
         File.WriteAllText(P("full-body"), "0.5 0.2");
         Features.Set(d, list, "full-body", false);       // tuning set aside as a saved copy
         Features.Set(d, list, "hand-blink", false);
-        Features.Set(d, list, "power-gestures", true);   // default-off row switched on by the user
+        Features.Set(d, list, "native-temporal-census", true);   // default-off row switched on by the user
         File.WriteAllText(P("hud-scale"), "0.75");
         bool setAside = File.ReadAllText(P("full-body.off-by-launcher")) == "0.5 0.2" && !Has(d, "full-body");
         Features.RestoreDefaults(d, list);
         var st = Features.State(d, list);
         Check("restore_defaults_restores_saved_tuning", setAside && File.ReadAllText(P("full-body")) == "0.5 0.2" && !Has(d, "full-body.off-by-launcher"));
-        Check("restore_defaults_matches_defaults", list.All(f => st[f.Id].On == f.Default) && !Has(d, "no-hand-blink") && !Has(d, "power-gestures") && Ids(d, "off").OrderBy(x => x, StringComparer.Ordinal).SequenceEqual(list.Where(f => !f.Default).Select(f => f.Id).OrderBy(x => x, StringComparer.Ordinal)));
+        Check("restore_defaults_matches_defaults", list.All(f => st[f.Id].On == f.Default) && !Has(d, "no-hand-blink") && !Has(d, "native-temporal-census") && Ids(d, "off").OrderBy(x => x, StringComparer.Ordinal).SequenceEqual(list.Where(f => !f.Default).Select(f => f.Id).OrderBy(x => x, StringComparer.Ordinal)));
         Check("restore_defaults_leaves_unknown_files", File.ReadAllText(P("hud-scale")) == "0.75");
         var again = Listing(d); Features.RestoreDefaults(d, list);
         Check("restore_defaults_is_idempotent", Listing(d) == again);
-        Features.Set(d, list, "power-gestures", true); Features.RestoreDefaults(d, list);
-        Check("restore_defaults_switches_default_off_row_off", !Has(d, "power-gestures") && !Features.State(d, list)["power-gestures"].On);
+        Features.Set(d, list, "native-temporal-census", true); Features.RestoreDefaults(d, list);
+        Check("restore_defaults_switches_default_off_row_off", !Has(d, "native-temporal-census") && !Features.State(d, list)["native-temporal-census"].On);
     }
     {   // restore_defaults_aborts_on_unreadable_state
         var d = NewBuild(); Directory.CreateDirectory(Path.Combine(d, "launcher-features.json"));

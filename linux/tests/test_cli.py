@@ -114,7 +114,7 @@ class FeatureCliTests(test_modhome.Case):
         rc, out, err = self.go("list")
         self.assertEqual(rc, 0, err)
         self.assertRegex(out, r"full-body\s+on\s+Full body")
-        self.assertRegex(out, r"power-gestures\s+off\s")
+        self.assertRegex(out, r"native-temporal-census\s+off\s")
         rc, out, err = self.go("off", "full-body")
         self.assertEqual(rc, 0, err)
         self.assertFalse((self.home / "build/full-body").exists())
@@ -123,8 +123,8 @@ class FeatureCliTests(test_modhome.Case):
         self.assertFalse((self.home / "build/full-body").exists())
         self.assertEqual(self.go("on", "full-body")[0], 0)
         self.assertTrue((self.home / "build/full-body").exists())
-        self.assertEqual(self.go("on", "power-gestures")[0], 0)
-        self.assertTrue((self.home / "build/power-gestures").exists())
+        self.assertEqual(self.go("on", "native-temporal-census")[0], 0)
+        self.assertTrue((self.home / "build/native-temporal-census").exists())
 
     def test_unknown_id_and_missing_home(self):
         self.install()

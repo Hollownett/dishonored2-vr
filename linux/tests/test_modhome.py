@@ -287,7 +287,7 @@ class FeatureTests(Case):
             self.assertEqual((b / f["file"]).exists(), want, f["id"])
         self.assertTrue((b / "launcher-features.json").is_file())
         self.assertTrue((b / "full-body").exists())
-        self.assertFalse((b / "power-gestures").exists())  # default false: not created
+        self.assertFalse((b / "native-temporal-census").exists())  # default false: not created
         self.assertFalse((b / "no-hand-blink").exists())
         self.assertEqual(set(json.loads((b / "launcher-features.json").read_text())["seeded"]),
                          {f["id"] for f in self.features()})
@@ -316,10 +316,10 @@ class FeatureTests(Case):
     def test_handmade_enable_knob_and_unknown_files_kept(self):
         b = self.home / "build"
         b.mkdir(parents=True)
-        (b / "power-gestures").write_bytes(b"")
+        (b / "native-temporal-census").write_bytes(b"")
         (b / "hud-scale").write_text("0.75")
         self.install()
-        self.assertTrue((b / "power-gestures").exists())
+        self.assertTrue((b / "native-temporal-census").exists())
         self.assertEqual((b / "hud-scale").read_text(), "0.75")
         self.assertTrue((b / "fsr4.off").exists())
 

@@ -2,11 +2,14 @@
 
 Status: not run. The sim proved logic and crash safety only (no crash in about 818 s of driven sessions, the player never
 moved, drive cost within budget). Feel, comfort, and anything that needs a level load or a save/load can only be judged here.
-The hand body stays off by default until this list passes.
+Since v607 the hand body is on by default (user decision 2026-10-24), before this list has passed. If anything here fails,
+switch it off in the launcher (Features) or with `build/no-hand-body` and report the item.
 
 ## Turn it on
 
-- Launcher: Features, switch on "Physical hand bodies (experimental, headset test)". Or create an empty file `build/hand-body`.
+- A fresh install has it on. An existing install keeps its earlier feature choices: in the launcher press Features, then
+  Restore defaults (turns every feature to its default, all on), or switch on "Physical hand bodies (experimental, headset test)".
+  Or create an empty file `build/hand-body`.
 - Hard off switch: an empty file `build/no-hand-body` always wins and turns it off. Use it for item 12.
 - Leave the other hand features at their defaults: hand reach clamp and weapon collision must stay on (the body is never
   created without them). Leave the carried-object clamp (`held-clamp`) on too.

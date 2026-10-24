@@ -285,7 +285,7 @@ public static class Features
         Set(buildDir, f, on);
     }
 
-    /// <summary>The launcher's "Restore defaults": every feature goes to its Default (a default-off row such as power-gestures is switched off, not on).
+    /// <summary>The launcher's "Restore defaults": every feature goes to its Default (a default-off row such as native-temporal-census is switched off, not on).
     /// Nothing is deleted: a valued knob file turned off is set aside as a saved copy and comes back when the feature is switched on again.
     /// Then Apply seeds anything not yet recorded. Throws FeaturesStateException like Apply.</summary>
     public static void RestoreDefaults(string buildDir, IReadOnlyList<Feature> list, IReadOnlySet<string>? knownKnobs = null, Action<string>? log = null)
