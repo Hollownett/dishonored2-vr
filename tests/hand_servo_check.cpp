@@ -3,6 +3,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <vector>
 using namespace d2vr;
 #define CHECK(x) do{if(!(x)){std::printf("FAIL %d: %s\n",__LINE__,#x);std::exit(1);}}while(0)
 namespace {
@@ -35,6 +36,35 @@ int main() {
             (use?gap_with:gap_without)=o.gap;   // the gap the servo sees at the last tick
         }
         CHECK(gap_with<=.02);CHECK(gap_without>=.2);
+    }
+    {   // sudden_stop_bounded: 2 s at V along x then a hard stop; peak body position past the stopped target <= .05 m, no sign reversal after the stop
+        for(const double V:{3.,6.}) for(const bool window:{false,true}) {
+            Sim s;s.body=pose({});s.target=pose({});s.ff={V,0,0};
+            std::vector<std::pair<int,double>> hist;   // the 0.2 s window estimator of the player's velocity (V until it has a baseline)
+            double gap_run=0,peak=-1e9,last_err=0,lead=0;int flips=0;
+            for(int i=0;i<180+90;++i) {
+                const bool run=i<180;
+                if(run) s.target.position.x+=V/90;
+                hist.push_back({i,s.target.position.x});
+                if(window) {
+                    size_t j=0;while(j+1<hist.size()&&hist[j+1].first<=i-18) ++j;   // 0.2 s back
+                    const double dt=(i-hist[j].first)/90.;
+                    s.ff=dt>.05?Vec3{(s.target.position.x-hist[j].second)/dt,0,0}:Vec3{V,0,0};
+                } else s.ff=run?Vec3{V,0,0}:Vec3{};
+                // the body as the tick starts (the drive reads it before writing): the last running tick's own feedforward step is the sim's ordering, not an overshoot
+                const double err=s.body.position.x-s.target.position.x;   // > 0: past the stopped target
+                auto o=s.step();
+                if(i==179) gap_run=o.gap;
+                if(!run) {
+                    if(i==180) lead=err;   // the body's committed lead from the last running tick
+                    peak=std::max(peak,err);
+                    if(i>180&&std::fabs(err)>1e-4&&std::fabs(last_err)>1e-4&&(err>0)!=(last_err>0)) ++flips;
+                    last_err=err;
+                }
+            }
+            std::printf("stop V=%g window=%d gap_run=%.4f peak=%.4f lead=%.4f flips=%d final=%.4f\n",V,window,gap_run,peak,lead,flips,last_err);
+            CHECK(gap_run<=.02);CHECK(peak-lead<=.05);CHECK(flips==0);CHECK(std::fabs(last_err)<.01);
+        }
     }
     {   // zero_feedforward_identical: bit-identical to the call without the argument over a 500-step random sequence
         unsigned seed=12345;auto rnd=[&]{seed=seed*1664525u+1013904223u;return ((seed>>8)&0xffff)/65535.-.5;};

@@ -16,7 +16,7 @@
 namespace d2vr {
 constexpr double kDefaultHeldLever=.3;
 struct HandServoConfig {double gain=18,max_speed=10,max_spin=20,brake_accel=40,jerk_tau=.02,snap_gap=.35,snap_seconds=.25,hand_radius=.08,max_gap=50,max_body_speed=100,snap_closing_mps=.5,tf_min=.05;};
-struct HandServoState {Vec3 filtered_accel{};double gap_time{};bool has{};};
+struct HandServoState {Vec3 filtered_accel{};double gap_time{};bool has{};Vec3 prev_ff{},tgt_prev{},tgt_vel{};double tgt_acc{},tgt_dt{};bool tgt_has{},tgt_vel_ok{};};   // prev_ff/tgt_*: Fix B's stop handling
 struct HandServoOutput {Vec3 linear{},angular{};bool capped{};bool snap{};double gap{};bool valid{};};
 
 namespace hand_servo_detail {
@@ -63,7 +63,7 @@ inline HandServoOutput servo_step(HandServoState& st,const WorldTrackedPose& tar
     Vec3 error=target.position-body.position;
     if(!(dt>0)||!std::isfinite(dt)||!finite_pose(target)||!finite_pose(body)||!finite(body_velocity)||!finite(body_spin)||!std::isfinite(held_kg)||
        !(length(body_velocity)<=cfg.max_body_speed)||!(length(body_spin)<=cfg.max_body_speed)||!(length(error)<=cfg.max_gap)) {
-        st.gap_time=0;
+        st.gap_time=0;st.prev_ff={};st.tgt_has=false;
         return out;
     }
     GrabTuning t=tuning;   // X-9: unscaled caps, no extra mass floor
@@ -77,9 +77,27 @@ inline HandServoOutput servo_step(HandServoState& st,const WorldTrackedPose& tar
     // Fix B (running): the target rides on the player, so it moves at the player's velocity with no error at all. The desired velocity is that
     // feedforward plus the existing error law; the law itself runs on the velocity relative to it (the body at the player's speed is not
     // "closing" on a target that moves with it), and the speed limit becomes max_speed+|feedforward|. Zero (or non-finite) feedforward is the old law, bit for bit.
+    // Stop handling (the estimator lags a stop by 0.1-0.2 s, and a body at full speed with no gap would coast on the decel cap): the feedforward is
+    // gated by the target's own observed velocity (the component of it along the feedforward, 0..1 of it: a stopped target carries none), and when the
+    // feedforward falls, that same velocity is dropped from the body at once, symmetric to adding it (the reference is the larger of the old and new).
+    // No pose is smoothed: the target and the written pose are untouched.
     if(!finite(feedforward)||length(feedforward)>cfg.max_body_speed) feedforward={};
-    const bool ff=feedforward.x!=0||feedforward.y!=0||feedforward.z!=0;
-    if(ff) body_velocity=body_velocity-feedforward;
+    if(!st.tgt_has) {st.tgt_prev=target.position;st.tgt_has=true;st.tgt_acc=0;st.tgt_vel={};st.tgt_vel_ok=false;st.tgt_dt=0;}
+    else {
+        st.tgt_acc+=dt;   // the dispatcher ticks faster than the target updates: the velocity is over the interval between target changes
+        const Vec3 d=target.position-st.tgt_prev;
+        if(d.x!=0||d.y!=0||d.z!=0) {st.tgt_vel=d*(1/st.tgt_acc);st.tgt_prev=target.position;st.tgt_dt=std::max(std::min(st.tgt_acc,.05),st.tgt_dt*.9);   // the longest recent update interval (decaying): a jittery frame is not a stop
+            st.tgt_acc=0;st.tgt_vel_ok=true;}
+        else if(st.tgt_acc>=st.tgt_dt) {st.tgt_vel={};st.tgt_vel_ok=true;}   // a whole update interval with no change: the target stopped
+    }
+    if(feedforward.x!=0||feedforward.y!=0||feedforward.z!=0) {
+        const double f2=dot(feedforward,feedforward);
+        feedforward=st.tgt_vel_ok?feedforward*std::clamp(dot(st.tgt_vel,feedforward)/f2,0.,1.):Vec3{};
+    }
+    const Vec3 ff_ref=length(st.prev_ff)>length(feedforward)?st.prev_ff:feedforward;
+    st.prev_ff=feedforward;
+    const bool ff=ff_ref.x!=0||ff_ref.y!=0||ff_ref.z!=0;
+    if(ff) body_velocity=body_velocity-ff_ref;
     double gap=length(error);
     out.valid=true;out.gap=gap;
     // linear: desired velocity

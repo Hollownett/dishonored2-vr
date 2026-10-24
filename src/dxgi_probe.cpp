@@ -5642,7 +5642,9 @@ void prepare_head_view(void* view) noexcept {
                     const auto trace_now=std::chrono::steady_clock::now();const double seconds=std::chrono::duration<double>(trace_now.time_since_epoch()).count();
                     double speed=0;d2vr::Vec3 velocity{};
                     if(t.anchor_root_valid) try {
-                        const auto p=d2vr::fullbody::frame_of(t.anchor_root).rigid.p;locomotion_roots.push_back({seconds,p.x,p.y});
+                        const auto p=d2vr::fullbody::frame_of(t.anchor_root).rigid.p;
+                        if(!locomotion_roots.empty() && std::hypot(p.x-locomotion_roots.back()[1],p.y-locomotion_roots.back()[2])>.5) locomotion_roots.clear();   // a blink or a respawn within one frame (> .5 m) resets the estimator
+                        locomotion_roots.push_back({seconds,p.x,p.y});
                         while(locomotion_roots.size()>1 && locomotion_roots[1][0]<=seconds-.2) locomotion_roots.pop_front();
                         const auto& a=locomotion_roots.front();const double dt=seconds-a[0];
                         if(dt>.05) {velocity={(p.x-a[1])/dt,(p.y-a[2])/dt,0};speed=std::hypot(velocity.x,velocity.y);}
