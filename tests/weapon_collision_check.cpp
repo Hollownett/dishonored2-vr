@@ -86,6 +86,24 @@ int main() {
             CHECK(std::abs(visible_tip.x-.99)<1e-9 && visible_tip.y>0);
         }
     }
+    { // G2 blade_axis_one_convention: align_weapon_blade(...,true) lines -basis[0] up with the target, exactly sword_blade_axis(g,true)
+        const Vec3 target=unit(Vec3{.3,-.8,.5});
+        WorldTrackedPose g{{.5,0,0},{{Vec3{1,0,0},Vec3{0,1,0},Vec3{0,0,1}}}};
+        CHECK(length(sword_blade_axis(g,false)-g.basis[0])==0 && length(sword_blade_axis(g,true)+g.basis[0])==0);
+        CHECK(align_weapon_blade(g,target,true) && length(sword_blade_axis(g,true)-target)<1e-9 && length(g.basis[0]+target)<1e-9);
+        CHECK(align_weapon_blade(g,target,false) && length(sword_blade_axis(g,false)-target)<1e-9);
+        CHECK(blade_axis_gap_deg({1,0,0},{1,0,0})<1e-9 && std::abs(blade_axis_gap_deg({1,0,0},{0,1,0})-90)<1e-9 && std::abs(blade_axis_gap_deg({1,0,0},{-1,0,0})-180)<1e-9);
+        CHECK(blade_axis_gap_deg({},{1,0,0})==180);
+    }
+    { // G2 blade_self_hit_rejected: the player's own entity, or a point in the body column around the root
+        const Vec3 root{10,5,2};
+        CHECK(blade_hit_is_self(77,{50,50,50},77,root));                 // the player entity, wherever the point is
+        CHECK(blade_hit_is_self(5,{10.2,5,3.0},77,root));                // .2 m from the root, 1 m up
+        CHECK(!blade_hit_is_self(5,{11,5,3.0},77,root));                 // 1 m away
+        CHECK(!blade_hit_is_self(5,{10.2,5,1.9},77,root) && !blade_hit_is_self(5,{10.2,5,4.0},77,root)); // below the feet, above the head
+        CHECK(blade_hit_is_self(5,{10.2,5,2.0},77,root) && blade_hit_is_self(5,{10.2,5,3.9},77,root));
+        CHECK(!blade_hit_is_self(0,{50,50,50},0,root));                  // no player: an entity 0 hit is not "the player"
+    }
     const auto h=bisect_segment({0,0,0},{2,0,0},[](Vec3,Vec3 b){return b.x>=1;},12);
     CHECK(h&&std::abs(h->point.x-1)<1e-3&&h->normal.x<0);
     CHECK(!bisect_segment({0,0,0},{.5,0,0},[](Vec3,Vec3 b){return b.x>=1;}));

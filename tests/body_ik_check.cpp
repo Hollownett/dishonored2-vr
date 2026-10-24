@@ -230,13 +230,15 @@ static int run(int argc,char** argv) {
         for(int n=0;n<90;++n) sock(60);
         const auto drifted=sock(60);
         expect(angle_between(drifted.q,base.q)>50*deg,"slow steady attachment change adopted");
-        expect(angle_between(sock(60,true).q,drifted.q)>179*deg,"reverse grip flips the socket 180 degrees");
+        Xf flipped;for(int n=0;n<12;++n) flipped=sock(60,true); // the reverse blends in over 0.1 s (G2)
+        expect(angle_between(flipped.q,drifted.q)>179*deg,"reverse grip flips the socket 180 degrees");
         {   // the flip reverses the blade about the fist (headset v559, 2026-10-19: flipped about the palm centre the sword sat 9 cm off the fist):
             // the hilt line keeps passing through the wrap centre of the curled fingers and the same handle point stays there (tests/reverse_grip_check.cpp
             // covers the same on the rig fixture without clips)
             const auto grip=[&](bool reverse,Vec3& point,Vec3& blade,double& miss) {
                 const auto n=swung(60);in.native_arm[1]=&n;in.reverse_grip[1]=reverse;in.hand_empty[1]=false;
-                const auto out=sol.solve(in);const auto& a=out.arm[1];
+                Output out;for(int frame=0;frame<(reverse?12:1);++frame) out=sol.solve(in); // the reverse blends in over 0.1 s (G2)
+                const auto& a=out.arm[1];
                 Vec3 sum{};for(const char* f:{"index","medium","ring","pinky"}) for(const char* k:{"02","03","04"}) sum=sum+a[right.find(std::string("right_")+f+"_"+k+"_jnt")].p*(1./12);
                 blade=rotated(a[at].q,{1,0,0});const auto d=sum-a[at].p;
                 point=a[at].p+blade*dot(d,blade);miss=out.hilt_miss[1];

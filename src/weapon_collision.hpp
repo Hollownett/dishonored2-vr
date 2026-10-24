@@ -3,6 +3,7 @@
 // docs/weapon-collision-integration.md); nothing here touches the engine. The hand itself stops at surfaces in hand_clamp.hpp
 // (physical hands phase 1): the blade sweeps from the grip the hand clamp drew.
 #include "tracked_pose.hpp"
+#include "sword_blade_axis.hpp"
 #include <cstdint>
 #include <optional>
 
@@ -29,14 +30,14 @@ struct CollisionResult {
     std::optional<CollisionHaptic> haptic;
 };
 
-// Collision returns the visible blade axis; reverse grip negates the controller's forward axis.
+// Collision returns the visible blade axis; the grip's blade axis is sword_blade_axis (reverse grip negates the controller's forward axis).
 inline bool align_weapon_blade(WorldTrackedPose& pose,Vec3 blade_direction,bool reversed=false) noexcept {
     const double target_length=length(blade_direction);
     if(!finite(blade_direction) || !(target_length>1e-9))return false;
     for(const auto axis:pose.basis)if(!finite(axis) || std::abs(dot(axis,axis)-1)>1e-5)return false;
     if(std::abs(dot(pose.basis[0],pose.basis[1]))>1e-5 || std::abs(dot(pose.basis[0],pose.basis[2]))>1e-5 ||
        dot(cross(pose.basis[0],pose.basis[1]),pose.basis[2])<1-1e-5)return false;
-    const auto from=pose.basis[0]*(reversed?-1.:1.),to=blade_direction*(1/target_length);
+    const auto from=sword_blade_axis(pose,reversed),to=blade_direction*(1/target_length);
     const auto turn=cross(from,to);const double sine=length(turn),cosine=std::clamp(dot(from,to),-1.,1.);
     if(sine<=1e-12 && cosine>=0)return true;
     const auto axis=sine>1e-12?turn*(1/sine):pose.basis[1];

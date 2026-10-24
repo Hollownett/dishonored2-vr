@@ -88,6 +88,7 @@ def main():
     hold_coupling_checks()
     finger_touch_checks()
     run_hands_checks()
+    sword_regrab_checks()
     print("bonelab_scenarios_check ok")
 
 
@@ -452,6 +453,65 @@ def run_hands_checks():
             if rows:
                 (d / "locomotion-hands.csv").write_text(",".join(brc.LOCOMOTION_COLUMNS) + "\n" + "\n".join(",".join(str(r[k]) for k in brc.LOCOMOTION_COLUMNS) for r in rows) + "\n")
             r = subprocess.run([sys.executable, str(ROOT / "tools/linux/bonelab_run_check.py"), str(d.parent), "--scenario", "run_hands"], capture_output=True, text=True)
+            assert r.returncode == code, (label, r.stdout, r.stderr)
+
+
+def sword_rows(reversed_seq=(False, True, False, True), flip_at=None, hidden_rise_at=None, self_hit_at=None, miss=0.005, blend=True, hold_ms=3000, gap_ms=1000):
+    """Fixture trace: one hold per entry of reversed_seq, 11 ms rows, `gap_ms` of nothing held between them. reverse_weight ramps 0 -> 1 over the first 350 ms
+    of a reversed hold. flip_at / hidden_rise_at / self_hit_at: a (hold index, ms into the hold) fault; blend=False leaves the weight at 0.5."""
+    rows, t, hidden, hits = [], 0, 0, 0
+    for k, rev in enumerate(reversed_seq):
+        for _ in range(gap_ms // 11):
+            rows.append({"elapsed_ms": t, "held": 0, "reversed": 0, "reverse_weight": 0.0, "hilt_miss": 0.5, "weapon_hidden_frames": hidden, "blade_axis_gap_deg": 90.0, "blade_self_hits": hits})
+            t += 11
+        for i in range(hold_ms // 11):
+            ms = i * 11
+            flipped = flip_at is not None and flip_at[0] == k and ms >= flip_at[1]
+            if hidden_rise_at is not None and hidden_rise_at[0] == k and ms // 11 == hidden_rise_at[1] // 11:
+                hidden += 1
+            if self_hit_at is not None and self_hit_at[0] == k and ms // 11 == self_hit_at[1] // 11:
+                hits += 1
+            weight = (min(1.0, ms / 350.0) if blend else 0.5) if rev else 0.0
+            rows.append({"elapsed_ms": t, "held": 1, "reversed": int(rev != flipped), "reverse_weight": weight, "hilt_miss": miss if ms >= 700 else 0.3,
+                         "weapon_hidden_frames": hidden, "blade_axis_gap_deg": 4.0 if ms >= 350 else 60.0, "blade_self_hits": hits})
+            t += 11
+    return rows
+
+
+def sword_regrab_checks():
+    segments = sim.scenario_segments("sword_regrab", LEAD)
+    sim.compile_script(segments, 120)
+    assert max(s["end_ms"] for s in segments) <= 120000
+    run = [s for s in segments if s["start_ms"] >= LEAD]
+    assert all(s["end_ms"] - s["start_ms"] > 0 for s in run)
+    grips = [(s["start_ms"], s["end_ms"], s["input"].get("right_grip", 0), s.get("hand_pitch_degrees", 0), s["right_hand_offset"]) for s in run]
+    edges = [g for prev, g in zip([(0, 0, 0, 0, None)] + grips, grips) if g[2] and not prev[2]]
+    assert [e[3] for e in edges][:4] == [60, -60, 60, -60] and all(e[4] == [-0.03, 0.25, 0.50] for e in edges[:4]), edges  # F, R, F, R at the zone
+    assert len(edges) == 4, "exactly four grips: the sweeps hold the grip through"
+    assert all(e[1] - e[0] >= 2000 for e in edges)
+    rows = brc.check([{"sword_rows": sword_rows()}], "sword_regrab")
+    assert {v for v, _ in rows} == {"PASS", "INFO"}, rows
+    assert "max blade_axis_gap_deg 60.0 (after 350 ms 4.0)" in "\n".join(t for v, t in rows if v == "INFO")
+    assert "FAIL" in verdicts({"sword_rows": None}, "sword_regrab") and "FAIL" in verdicts({}, "sword_regrab")  # a missing trace
+    assert "FAIL" in verdicts({"sword_rows": sword_rows((False, True, False))}, "sword_regrab")  # fewer than 4 holds
+    assert "FAIL" in verdicts({"sword_rows": sword_rows((False, False, True, True))}, "sword_regrab")  # not F, R, F, R
+    assert "FAIL" in verdicts({"sword_rows": sword_rows(flip_at=(1, 1500))}, "sword_regrab")  # `reversed` flips mid-hold
+    assert "FAIL" in verdicts({"sword_rows": sword_rows(hidden_rise_at=(2, 1000))}, "sword_regrab")  # weapon_hidden_frames rises after +0.35 s
+    assert "FAIL" not in verdicts({"sword_rows": sword_rows(hidden_rise_at=(2, 100))}, "sword_regrab")  # ... but before it is fine (the blend window)
+    assert "FAIL" in verdicts({"sword_rows": sword_rows(self_hit_at=(0, 2000))}, "sword_regrab")  # a blade self hit
+    assert "FAIL" in verdicts({"sword_rows": sword_rows(miss=0.03)}, "sword_regrab")  # the hilt leaves the fist
+    assert "FAIL" in verdicts({"sword_rows": sword_rows(blend=False)}, "sword_regrab")  # the blend never finishes
+    assert "FAIL" in verdicts({"sword_rows": sword_rows(hold_ms=300)}, "sword_regrab")  # holds shorter than the settle time
+    parsed = brc.parse_sword_trace(",".join(brc.SWORD_COLUMNS) + "\n" + ",".join("1" for _ in brc.SWORD_COLUMNS) + "\nbad,row\n")
+    assert len(parsed) == 1 and parsed[0]["held"] == 1.0
+    with tempfile.TemporaryDirectory() as tmp:  # the command line reads artifacts/sword-grip-trace.csv
+        for label, rows, code in (("ok", sword_rows(), 0), ("flip", sword_rows(flip_at=(1, 1500)), 1), ("none", None, 1)):
+            d = Path(tmp) / label / "artifacts"
+            d.mkdir(parents=True)
+            (d / "xr-live-status.json").write_text("{}")
+            if rows:
+                (d / "sword-grip-trace.csv").write_text(",".join(brc.SWORD_COLUMNS) + "\n" + "\n".join(",".join(str(r[k]) for k in brc.SWORD_COLUMNS) for r in rows) + "\n")
+            r = subprocess.run([sys.executable, str(ROOT / "tools/linux/bonelab_run_check.py"), str(d.parent), "--scenario", "sword_regrab"], capture_output=True, text=True)
             assert r.returncode == code, (label, r.stdout, r.stderr)
 
 

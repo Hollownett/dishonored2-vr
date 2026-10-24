@@ -404,7 +404,9 @@ public:
         if(in.copy && !in.drawn) settled_=true;else if(!in.copy) settled_=false;
         if(!in.gameplay) {if(!pressed) held_=false;out.reversed=reversed_;return out;} // a menu or the wheel never drops it
         if(edge && !in.busy) {
-            if(in.copy && (in.zone || in.copy_reach)) {out.action=Action::pickup;reversed_=in.zone?in.draw_dot<-.2:in.pickup_dot<0;held_=true;pending_=in.now;}
+            if(in.copy && (in.zone || in.copy_reach)) {out.action=Action::pickup;
+                const double dot=in.zone?in.draw_dot:in.pickup_dot;if(std::abs(dot)>pickup_dead_band) reversed_=dot<0; // a hand across the blade keeps the last grip
+                held_=true;pending_=in.now;}
             else if(in.zone && !in.drawn) {out.action=Action::draw;reversed_=in.draw_dot<-.2;held_=true;pending_=in.now;}
         } else if(released && held_) {
             held_=false;
@@ -424,6 +426,7 @@ public:
         return out;
     }
     bool held() const noexcept {return held_;}
+    static constexpr double pickup_dead_band=.35; // |dot| a pickup needs before it changes the grip; `reversed_` changes only on a draw or pickup edge
 private:
     bool down_{},held_{},reversed_{},settled_{};std::uint64_t pending_{},drawn_since_{},sheathe_sent_{},recall_sent_{},dropped_{},stow_sent_{};
 };

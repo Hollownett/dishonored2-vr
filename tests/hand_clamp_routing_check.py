@@ -171,7 +171,7 @@ def check(dxgi: str, aim: str) -> None:
     assert s.count('clamp_shot[side]=') == 1 and 'clamp_shot[side]=' in clamped_part and s.count('released_shot.posted(') == 1
     for raw_route in ('publish_hand(side,hands.grips[side],raw_grips[side]);', 'note_grip(side,raw_grips[side],', 'constauto&p=raw_grips[side].position;reach_hands'):
         assert raw_route in s and raw_route not in loop, raw_route   # after the per-side branches: the same in both modes
-    assert loop.index('constautorel=raw.position+raw.basis[0]*') < loop.index('if(!hand_clamp_enabled){')   # swing speed raw in both modes
+    assert loop.index('constautorel=raw.position+d2vr::sword_blade_axis(raw,') < loop.index('if(!hand_clamp_enabled){')   # swing speed raw in both modes
     # M4 (C9 selection): sword pickup reach and the wake/yank press read the controller; the sword drop position stays drawn.
     for need in ('in.copy_distance=d2vr::length(at-hand_raw.position);', 'in.pickup_dot=d2vr::dot(hand_raw.basis[0],', 'hand_raw=hand_raw_world[1];',
                  'w=hand_raw_world[h];v=hand_velocity[h];', 'r.pos={fl(hand_w.position.x),fl(hand_w.position.y),fl(hand_w.position.z)};'):
@@ -188,7 +188,7 @@ def check(dxgi: str, aim: str) -> None:
     for gone in ('r.event->', 'if(r.event)', 'if(r.haptic)'):
         assert gone not in clamp, gone
     # Swing speed (C9: attack detection) from the raw controller.
-    assert 'constautorel=raw.position+raw.basis[0]*(side==1&&reverse_sword?-blade:blade)-' in loop
+    assert 'constautorel=raw.position+d2vr::sword_blade_axis(raw,side==1&&reverse_sword)*blade-' in loop
     # C14: the clamp's cast cost is noted once per game-thread scope; the hands alternate / drop the tip by CastBudget.
     after = clamp[clamp.index('hand_clamp_budget.note('):]
     assert 'clamp_cast_serial_.load();' in clamp and 'hand_clamp_budget.note(d2vr::NativeInteractionAim::clamp_cast_us_.load(),clamp_now);' in clamp
@@ -260,7 +260,7 @@ if __name__ == '__main__':
         ('in.post=d2vr::clamp_posts(clamp_alternate,hand_clamp_frame,side);', 'in.post=true;'),
         ('hand_clamp_budget.note(d2vr::NativeInteractionAim::clamp_cast_us_.load(),clamp_now);', ''),
         ('hand_clamp=d2vr::HandClamp{};hand_clamp_budget.reset();', ''),
-        ('const auto rel=raw.position+raw.basis[0]*', 'const auto rel=g.position+g.basis[0]*'),
+        ('const auto rel=raw.position+d2vr::sword_blade_axis(raw,', 'const auto rel=g.position+d2vr::sword_blade_axis(raw,'),
         ('if(clamped.reacquired) if(const auto kept=', 'if(false) if(const auto kept='),
         ('const bool clamp_updated=clamp_live || clamp_yield;', 'const bool clamp_updated=true;'),
         ('const bool clamp_live=game_logic_mask()==2;', 'const bool clamp_live=true;'),

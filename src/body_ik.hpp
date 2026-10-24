@@ -7,6 +7,7 @@
 // export multiplies rotations by `scale` for skinning. No game calls or writes.
 #include "arm_body.hpp"
 #include "hand_reach.hpp"
+#include "sword_blade_axis.hpp"
 #include <algorithm>
 #include <string>
 #include <vector>
@@ -157,7 +158,7 @@ struct Output {
     std::vector<Xf> body,arm[2];Xf arm_frame[2];
     // Held-item grip diagnostics per hand: the attachment joint in the drawn-fist frame (origin = wrap centre of the posed finger joints,
     // axes = the wrist's; metres), how far that wrap centre sits off the hilt line (the attachment's X axis), and whether the reverse flip was applied.
-    double fist_attach[2][3]{},hilt_miss[2]{};bool grip_reversed[2]{};
+    double fist_attach[2][3]{},hilt_miss[2]{},reverse_weight[2]{},blade_axis_gap_deg[2]{};bool grip_reversed[2]{},sneak_flip[2]{}; // reverse_weight: the 0..1 blend of the reverse flip; sneak_flip: the sneak-stance socket correction is on
     double scale=1;bool hand_reached[2]{};Vec3 feet[2];bool stepping[2]{};
     double owned[4]{}; // eased native weights: legs, torso, left arm, right arm
     double phase[2]{};Vec3 swing_from[2]{},swing_to[2]{};
@@ -177,11 +178,11 @@ struct ArmReachState {Vec3 shoulder{};double full{};Xf hand_to_wrist{};bool vali
 class BodySolver {
     struct ArmState {
         Vec3 pole{};
-        double roll{},hold_steady{},thumb_applied[3]{};
+        double roll{},hold_steady{},thumb_applied[3]{},reverse_weight{};
         Xf hold{},hold_prev{};
         Vec3 wrap{}; // wrap centre of the native curled fingers in the attachment's parent frame, followed like hold
         std::uint64_t socket_token{};
-        bool has_pole{},has_roll{},has_hold{};
+        bool has_pole{},has_roll{},has_hold{},sneak_flip{},hold_calibrated{};
         int finger_mode{};
         ArmReachState reach{};
     };
@@ -539,7 +540,11 @@ public:
                 out.fist_attach[i][0]=local.x;out.fist_attach[i][1]=local.y;out.fist_attach[i][2]=local.z;
                 const auto blade=rotated(at.q,{1,0,0}),off=centre-at.p;
                 out.hilt_miss[i]=length(off-blade*dot(off,blade));
-                out.grip_reversed[i]=in.reverse_grip[i] && arm_state_[i].has_hold;
+                out.grip_reversed[i]=in.reverse_grip[i] && arm_state_[i].has_hold;out.reverse_weight[i]=arm_state_[i].reverse_weight;
+                {   // the drawn blade (attachment X) against the one convention applied to the controller hand: a held-sword diagnostic, 0 when nothing is held
+                    const Xf& h=in.hand[i];const WorldTrackedPose hand_pose{h.p,{rotated(h.q,{1,0,0}),rotated(h.q,{0,1,0}),rotated(h.q,{0,0,1})}};
+                    out.blade_axis_gap_deg[i]=arm_state_[i].has_hold?d2vr::blade_axis_gap_deg(rotated(at.q,{1,0,0}),d2vr::sword_blade_axis(hand_pose,in.reverse_grip[i])):0.;
+                }out.sneak_flip[i]=arm_state_[i].sneak_flip;
             }
             out.finger_mode[i]=arm_state_[i].finger_mode;for(int s2=0;s2<3;++s2) out.thumb_applied[i][s2]=arm_state_[i].thumb_applied[s2];
             const auto& na=native && source->arm[i].size()==out.arm[i].size()?source->arm[i]:std::vector<Xf>{};
@@ -868,38 +873,45 @@ private:
         }
         const auto* native=in.native_arm[i] && in.native_arm[i]->size()==s.local.size()?in.native_arm[i]:nullptr;
         const bool procedural=!native || in.hand_empty[i];
-        if(state.socket_token!=in.native_socket_token[i]) {state.has_hold=false;state.socket_token=in.native_socket_token[i];}
+        if(state.socket_token!=in.native_socket_token[i]) {state.has_hold=false;state.hold_calibrated=false;state.reverse_weight=0;state.sneak_flip=false;state.socket_token=in.native_socket_token[i];}
         const bool native_socket=native && (!procedural || in.native_socket_token[i]);
         state.finger_mode=procedural?(in.has_finger[i]?1:2):3;
         // Held item: the native attachment local is rotated by authored attack/block/equip clips, so
         // the socket keeps the last steady value (<20 deg/s, <5 cm/s for 0.25 s) and the player owns the grip.
-        if(!native_socket) state.has_hold=false;
+        if(!native_socket) {state.has_hold=false;state.hold_calibrated=false;state.reverse_weight=0;state.sneak_flip=false;}
         else {
             auto n=mul(inverse((*native)[s.parent[attach_[i]]]),(*native)[attach_[i]]);n.p=n.p*scale_;
             // Sneak stance holds the sword reversed: attachment Y along -wrist Z in every sword sneak clip,
             // +Z in every forward clip (2026-10-12 clip scan). The player keeps the forward grip: turned back and moved to
             // the standing clips' socket (sword_idle T -.0148 -.0916 .0262 vs sneak .0305 -.0654 .025, native units;
             // keeping the sneak offset put the fist on the blade above the handle, headset v346).
-            if(i==1 && rotated(n.q,{0,1,0}).z<-.5) {n.q=mul(n.q,axis_angle({0,0,1},kPi));n.p=n.p+Vec3{-.0453,-.0262,.0012}*scale_;}
+            if(i==1) {const double sneak_z=rotated(n.q,{0,1,0}).z;if(sneak_z<-.5) state.sneak_flip=true;else if(sneak_z>-.2) state.sneak_flip=false;} // hysteresis: a clip blend through -.5 does not flap the socket
+            if(i==1 && state.sneak_flip) {n.q=mul(n.q,axis_angle({0,0,1},kPi));n.p=n.p+Vec3{-.0453,-.0262,.0012}*scale_;}
             const auto wrap=wrap_in_parent(i,*native,scale_);
-            if(!state.has_hold) {state.hold=state.hold_prev=n;state.wrap=wrap;state.hold_steady=0;state.has_hold=true;}
+            if(!state.has_hold) {state.hold=state.hold_prev=n;state.wrap=wrap;state.hold_steady=0;state.has_hold=true;state.hold_calibrated=false;}
             else if(dt>0) {
                 const double ang=2*std::acos(std::min(1.,std::abs(n.q.x*state.hold_prev.q.x+n.q.y*state.hold_prev.q.y+n.q.z*state.hold_prev.q.z+n.q.w*state.hold_prev.q.w)));
                 const bool calm=ang/dt<20*kPi/180 && length(n.p-state.hold_prev.p)/dt<.05;
                 state.hold_steady=calm?state.hold_steady+dt:0;state.hold_prev=n;
+                if(state.hold_steady>=.25) state.hold_calibrated=true;
                 if(state.hold_steady>=.25) {const double k=std::min(1.,dt*8);state.hold={nlerp(state.hold.q,n.q,k),state.hold.p+(n.p-state.hold.p)*k};state.wrap=state.wrap+(wrap-state.wrap)*k;}
             }
+        }
+        {   // The reverse blends in over 0.1 s, and only once the hold has calibrated (the socket's authored pose has settled): never a flip of a hold that is still moving.
+            const double target=native_socket && in.reverse_grip[i]?1.:0.,step=10*std::max(dt,0.);
+            if(target>state.reverse_weight) {if(state.hold_calibrated) state.reverse_weight=std::min(target,state.reverse_weight+step);}
+            else state.reverse_weight=std::max(target,state.reverse_weight-step);
         }
         const auto hand_local=[&](int j) {
             if(j==attach_[i] && native_socket) {
                 auto h=state.hold;
-                if(in.reverse_grip[i]) {
+                if(state.reverse_weight>0) {
                     // Half a turn about attachment Z (the finger axis in the hold, perpendicular to both the blade = attachment X and the palm = attachment Y,
                     // so it reverses the blade instead of rolling it) through the hilt point nearest the wrap centre of the curled fingers: the pivot lies on the hilt
                     // line, which therefore maps onto itself and keeps passing through the fist.
                     const auto n=palm_attach_[i],blade=rotated(h.q,{1,0,0}),axis=rotated(h.q,n);
                     const auto pivot=h.p+blade*dot(state.wrap-h.p,blade),d=h.p-pivot;
-                    h.p=pivot+axis*(2.*dot(d,axis))-d;h.q=mul(h.q,axis_angle(n,kPi));
+                    const double turn=kPi*state.reverse_weight;h.p=pivot+rotated(axis_angle(axis,turn),d);h.q=mul(h.q,axis_angle(n,turn));
                 }
                 return h;
             }

@@ -101,6 +101,43 @@ int main() {
         expect(length(s_rev.socket.p-rev.socket.p)<.002,"sneak + reverse is one flip of the standing grip, not two (offset)");
         expect(dot(s_rev.blade,s_fwd.blade)<-.99,"sneak + reverse points the blade away from the sneak forward grip");
     }
+    {   // G2 sneak_flip_hysteresis: the sneak socket correction enters at attachment-Y z < -.5 and leaves at > -.2
+        const auto l=mul(inverse(native[par]),native[at]);
+        const auto z_of=[&](double phi) {return rotated(mul(l.q,axis_angle({1,0,0},phi)),{0,1,0}).z;};
+        const auto native_z=[&](double z) { // the idle attachment turned about its blade axis until its Y has the given z in the wrist frame
+            double lo=0,hi=kPi;for(int n=0;n<60;++n) {const double mid=(lo+hi)/2;(z_of(mid)>z?lo:hi)=mid;}
+            auto out=native;out[at]=mul(out[par],{mul(l.q,axis_angle({1,0,0},(lo+hi)/2)),l.p});return out;
+        };
+        expect(z_of(0)>.9,"hysteresis fixture: the idle attachment Y is along the palm normal");
+        BodySolver sol(body,left,right,{eye_height,span});
+        const bool want[5]{true,true,true,false,false};const double zs[5]{-.6,-.4,-.3,-.1,-.3};
+        for(int k=0;k<5;++k) {
+            const auto nat=native_z(zs[k]);Inputs in;in.eye={rot_z(0),eye};in.hand_valid[0]=false;in.hand[1]=hand_at(eye,near_hand);
+            in.native_arm[1]=&nat;in.dt=1/90.;in.grip[1]=.45;in.trigger[1]=.25;
+            Output out;for(int n=0;n<5;++n) out=sol.solve(in);
+            expect(out.sneak_flip[1]==want[k],"sneak flip hysteresis step "+std::to_string(k)+" (z "+std::to_string(zs[k])+")");
+        }
+    }
+    {   // G2 reverse_waits_for_calibrated_hold / reverse_blends_in_0_1s: weight 0 until hold_steady >= .25 s, then 1 in 9-10 frames at 90 Hz, hilt in the fist throughout
+        BodySolver sol(body,left,right,{eye_height,span});
+        Inputs in;in.eye={rot_z(0),eye};in.hand_valid[0]=false;in.hand[1]=hand_at(eye,near_hand);
+        in.native_arm[1]=&native;in.reverse_grip[1]=true;in.dt=1/90.;in.grip[1]=.45;in.trigger[1]=.25;
+        int first=-1,full=-1;double worst_miss=0;
+        for(int f=0;f<80;++f) {
+            const auto out=sol.solve(in);const double w=out.reverse_weight[1];
+            if(first<0 && w>0) first=f;
+            if(first>=0 && full<0) {worst_miss=std::max(worst_miss,out.hilt_miss[1]);if(w>=1) full=f;}
+            if(f<20) expect(w==0,"reverse weight stays 0 before the hold has calibrated (frame "+std::to_string(f)+")");
+        }
+        expect(first>=22 && first<=26,"the reverse starts when hold_steady reaches .25 s (frame "+std::to_string(first)+")");
+        expect(full>=0 && full-first+1>=9 && full-first+1<=10,"the reverse blend takes 9-10 frames at 90 Hz (took "+std::to_string(full-first+1)+")");
+        // the fixture hand rests 13.9 mm off the hilt line even in the forward grip (the .015 cases above); the blend must add nothing to that
+        expect(worst_miss<=fwd.miss+.001,"the hilt stays in the fist during the blend (worst miss "+std::to_string(worst_miss)+", forward "+std::to_string(fwd.miss)+")");
+        in.reverse_grip[1]=false;Output out=sol.solve(in);expect(out.reverse_weight[1]<1 && out.reverse_weight[1]>0,"the weight falls back at the same rate");
+        for(int f=0;f<12;++f) out=sol.solve(in);expect(out.reverse_weight[1]==0,"and reaches 0");
+        in.reverse_grip[1]=true;in.native_socket_token[1]=7;out=sol.solve(in);expect(out.reverse_weight[1]==0,"a token change resets the weight to 0");
+        for(int f=0;f<10;++f) {out=sol.solve(in);expect(out.reverse_weight[1]==0,"and it waits for the new hold to calibrate");}
+    }
     if(failures) {std::cerr<<failures<<" failure(s)\n";return 1;}
     std::puts("reverse grip check ok");return 0;
 }

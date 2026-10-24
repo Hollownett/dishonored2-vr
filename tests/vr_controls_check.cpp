@@ -507,6 +507,38 @@ std::printf("PASS: X wheel open/close/cancel/no-reopen/late-press, "
         in.gameplay=false;in.grip=0;assert(step(10100).action==A::none);in.gameplay=true;
         {const auto o=step(10200);assert(o.action==A::sheathe && !s.held());}           // let go inside the wheel: put away, not thrown
     }
+    { // G2 regrab: the pickup dead band, and the grip changes only on a draw or pickup edge.
+        using A=d2vr::SwordGrip::Action;static_assert(d2vr::SwordGrip::pickup_dead_band==.35);
+        { // pickup_dead_band_keeps_previous: a reversed draw, a drop, then a floor pickup at pickup_dot .2 is still reversed
+            d2vr::SwordGrip s;d2vr::SwordGrip::In in{};in.gameplay=true;auto step=[&](std::uint64_t t){in.now=t;return s.update(in);};
+            in.zone=true;in.grip=1;in.draw_dot=-.8;{const auto o=step(10);assert(o.action==A::draw && o.reversed);}
+            in.zone=false;in.drawn=true;step(400);
+            in.grip=0;assert(step(2000).action==A::drop);
+            in.drawn=false;in.copy=true;in.copy_distance=1;in.copy_reach=true;step(2500);
+            in.pickup_dot=.2;in.grip=1;{const auto o=step(3000);assert(o.action==A::pickup && o.reversed);}
+            in.pickup_dot=-.2;in.grip=0;in.copy=in.copy_reach=false;in.drawn=true;step(3400);in.grip=0;step(3500);
+        }
+        { // first_pickup_in_dead_band_is_forward
+            d2vr::SwordGrip s;d2vr::SwordGrip::In in{};in.gameplay=true;auto step=[&](std::uint64_t t){in.now=t;return s.update(in);};
+            in.copy=true;in.copy_reach=true;in.copy_distance=1;in.pickup_dot=-.3;in.grip=1;{const auto o=step(100);assert(o.action==A::pickup && !o.reversed);}
+            d2vr::SwordGrip z;in={};in.gameplay=true;in.copy=true;in.zone=true;in.draw_dot=.3;in.grip=1;in.now=100;{const auto o=z.update(in);assert(o.action==A::pickup && !o.reversed);}
+        }
+        { // perpendicular_regrab_keeps_previous: pickup_dot alternating +-.2 over 50 frames of one hold never changes `reversed`
+            for(const bool first_reversed:{false,true}) {
+                d2vr::SwordGrip s;d2vr::SwordGrip::In in{};in.gameplay=true;auto step=[&](std::uint64_t t){in.now=t;return s.update(in);};
+                in.copy=true;in.copy_reach=true;in.copy_distance=1;in.pickup_dot=first_reversed?-.8:.8;in.grip=1;assert(step(10).reversed==first_reversed);
+                in.grip=0;in.drawn=true;in.copy=in.copy_reach=false;step(100);in.drawn=false;in.copy=true;in.copy_reach=true;step(2000);
+                in.grip=1;for(int f=0;f<50;++f) {in.pickup_dot=f%2?.2:-.2;const auto o=step(3000+f*11);assert(o.reversed==first_reversed);}
+            }
+        }
+        { // reverse_changes_only_on_edges: while held, draw_dot / pickup_dot sweeping -1..1 leaves `reversed` unchanged
+            for(const bool rev:{false,true}) {
+                d2vr::SwordGrip s;d2vr::SwordGrip::In in{};in.gameplay=true;auto step=[&](std::uint64_t t){in.now=t;return s.update(in);};
+                in.zone=true;in.grip=1;in.draw_dot=rev?-.8:.8;assert(step(10).reversed==rev);in.drawn=true;
+                for(int f=0;f<=40;++f) {in.draw_dot=in.pickup_dot=-1+f*.05;in.zone=f%3==0;in.copy=f%4==0;in.copy_reach=in.copy;assert(step(100+f*11).reversed==rev);}
+            }
+        }
+    }
     { // Full-grip gun: the wheel's gun stays until gripped; let go anywhere: holster; squeeze at the hip: draw.
         using A=d2vr::GunGrip::Action;d2vr::GunGrip g;d2vr::GunGrip::In in{};in.gameplay=true;
         auto step=[&](std::uint64_t t){in.now=t;return g.update(in);};
