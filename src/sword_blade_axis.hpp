@@ -15,10 +15,12 @@ inline double blade_axis_gap_deg(Vec3 a,Vec3 b) noexcept {
     if(!finite(a) || !finite(b) || !(la>1e-9) || !(lb>1e-9)) return 180.;
     return std::acos(std::clamp(dot(a,b)/(la*lb),-1.,1.))*180./3.14159265358979323846;
 }
-// A blade cast that meets the player's own body (its entity, or a point inside the body column around the root) is not a surface.
+// A blade cast that meets the player's own body is not a surface: the player's entity always; a hit with no known entity (0) also when its point lies
+// inside the body column (.15 m around the root, from .15 m above the feet to 1.9 m). A known non-player entity (wall, guard, floor) is a real hit.
 inline bool blade_hit_is_self(std::uintptr_t hit_entity,Vec3 hit_point,std::uintptr_t player,Vec3 player_root) noexcept {
     if(player && hit_entity==player) return true;
-    return std::hypot(hit_point.x-player_root.x,hit_point.y-player_root.y)<.30 && hit_point.z>=player_root.z && hit_point.z<=player_root.z+1.9;
+    if(hit_entity) return false;
+    return std::hypot(hit_point.x-player_root.x,hit_point.y-player_root.y)<.15 && hit_point.z>=player_root.z+.15 && hit_point.z<=player_root.z+1.9;
 }
 
 } // namespace d2vr

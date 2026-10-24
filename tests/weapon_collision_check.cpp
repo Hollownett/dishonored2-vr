@@ -98,11 +98,12 @@ int main() {
     { // G2 blade_self_hit_rejected: the player's own entity, or a point in the body column around the root
         const Vec3 root{10,5,2};
         CHECK(blade_hit_is_self(77,{50,50,50},77,root));                 // the player entity, wherever the point is
-        CHECK(blade_hit_is_self(5,{10.2,5,3.0},77,root));                // .2 m from the root, 1 m up
-        CHECK(!blade_hit_is_self(5,{11,5,3.0},77,root));                 // 1 m away
-        CHECK(!blade_hit_is_self(5,{10.2,5,1.9},77,root) && !blade_hit_is_self(5,{10.2,5,4.0},77,root)); // below the feet, above the head
-        CHECK(blade_hit_is_self(5,{10.2,5,2.0},77,root) && blade_hit_is_self(5,{10.2,5,3.9},77,root));
-        CHECK(!blade_hit_is_self(0,{50,50,50},0,root));                  // no player: an entity 0 hit is not "the player"
+        CHECK(!blade_hit_is_self(5,{10.28,5,3.4},77,root));              // a wall .28 m away at chest height: a real hit
+        CHECK(!blade_hit_is_self(5,{10.05,5,2.0},77,root));              // the floor at the feet, known entity: a real hit
+        CHECK(!blade_hit_is_self(5,{10.05,5,3.0},77,root));              // any known non-player entity inside the column
+        CHECK(blade_hit_is_self(0,{10.1,5,3.0},77,root));                // unknown entity inside the column (.1 m, 1 m up)
+        CHECK(!blade_hit_is_self(0,{11,5,3.0},77,root) && !blade_hit_is_self(0,{10.1,5,2.1},77,root) && !blade_hit_is_self(0,{10.1,5,4.0},77,root));
+        CHECK(!blade_hit_is_self(0,{50,50,50},0,root));                  // no player: entity 0 far away is not self
     }
     const auto h=bisect_segment({0,0,0},{2,0,0},[](Vec3,Vec3 b){return b.x>=1;},12);
     CHECK(h&&std::abs(h->point.x-1)<1e-3&&h->normal.x<0);

@@ -118,25 +118,27 @@ int main() {
             expect(out.sneak_flip[1]==want[k],"sneak flip hysteresis step "+std::to_string(k)+" (z "+std::to_string(zs[k])+")");
         }
     }
-    {   // G2 reverse_waits_for_calibrated_hold / reverse_blends_in_0_1s: weight 0 until hold_steady >= .25 s, then 1 in 9-10 frames at 90 Hz, hilt in the fist throughout
+    {   // G2 reverse_applies_at_hold_start: a hold that starts with the reverse requested is reversed from its first frame, hilt in the fist
         BodySolver sol(body,left,right,{eye_height,span});
         Inputs in;in.eye={rot_z(0),eye};in.hand_valid[0]=false;in.hand[1]=hand_at(eye,near_hand);
-        in.native_arm[1]=&native;in.reverse_grip[1]=true;in.dt=1/90.;in.grip[1]=.45;in.trigger[1]=.25;
-        int first=-1,full=-1;double worst_miss=0;
-        for(int f=0;f<80;++f) {
-            const auto out=sol.solve(in);const double w=out.reverse_weight[1];
-            if(first<0 && w>0) first=f;
-            if(first>=0 && full<0) {worst_miss=std::max(worst_miss,out.hilt_miss[1]);if(w>=1) full=f;}
-            if(f<20) expect(w==0,"reverse weight stays 0 before the hold has calibrated (frame "+std::to_string(f)+")");
-        }
-        expect(first>=22 && first<=26,"the reverse starts when hold_steady reaches .25 s (frame "+std::to_string(first)+")");
-        expect(full>=0 && full-first+1>=9 && full-first+1<=10,"the reverse blend takes 9-10 frames at 90 Hz (took "+std::to_string(full-first+1)+")");
-        // the fixture hand rests 13.9 mm off the hilt line even in the forward grip (the .015 cases above); the blend must add nothing to that
+        in.native_arm[1]=&native;in.reverse_grip[1]=true;in.native_socket_token[1]=3;in.dt=1/90.;in.grip[1]=.45;in.trigger[1]=.25;
+        double worst_miss=0;
+        for(int f=0;f<30;++f) {const auto out=sol.solve(in);expect(out.reverse_weight[1]==1,"reverse weight is 1 from the first frame of the hold (frame "+std::to_string(f)+")");worst_miss=std::max(worst_miss,out.hilt_miss[1]);}
+        expect(worst_miss<=fwd.miss+.001,"the hilt stays in the fist from the first frame (worst miss "+std::to_string(worst_miss)+", forward "+std::to_string(fwd.miss)+")");
+        in.reverse_grip[1]=false;in.native_socket_token[1]=4;{const auto out=sol.solve(in);expect(out.reverse_weight[1]==0,"a new forward hold is forward at once");}
+    }
+    {   // G2 mid-hold change: the reverse blends in over 0.1 s (9-10 frames at 90 Hz) and back out at the same rate, hilt in the fist throughout
+        BodySolver sol(body,left,right,{eye_height,span});
+        Inputs in;in.eye={rot_z(0),eye};in.hand_valid[0]=false;in.hand[1]=hand_at(eye,near_hand);
+        in.native_arm[1]=&native;in.native_socket_token[1]=3;in.dt=1/90.;in.grip[1]=.45;in.trigger[1]=.25;
+        for(int f=0;f<30;++f) expect(sol.solve(in).reverse_weight[1]==0,"forward hold stays at weight 0");
+        in.reverse_grip[1]=true;int frames=0;double worst_miss=0;Output out;
+        do {out=sol.solve(in);++frames;worst_miss=std::max(worst_miss,out.hilt_miss[1]);} while(out.reverse_weight[1]<1 && frames<30);
+        expect(frames>=9 && frames<=10,"a mid-hold reverse blends in over 9-10 frames at 90 Hz (took "+std::to_string(frames)+")");
         expect(worst_miss<=fwd.miss+.001,"the hilt stays in the fist during the blend (worst miss "+std::to_string(worst_miss)+", forward "+std::to_string(fwd.miss)+")");
-        in.reverse_grip[1]=false;Output out=sol.solve(in);expect(out.reverse_weight[1]<1 && out.reverse_weight[1]>0,"the weight falls back at the same rate");
+        in.reverse_grip[1]=false;out=sol.solve(in);expect(out.reverse_weight[1]<1 && out.reverse_weight[1]>0,"the weight falls back at the same rate");
         for(int f=0;f<12;++f) out=sol.solve(in);expect(out.reverse_weight[1]==0,"and reaches 0");
-        in.reverse_grip[1]=true;in.native_socket_token[1]=7;out=sol.solve(in);expect(out.reverse_weight[1]==0,"a token change resets the weight to 0");
-        for(int f=0;f<10;++f) {out=sol.solve(in);expect(out.reverse_weight[1]==0,"and it waits for the new hold to calibrate");}
+        in.reverse_grip[1]=true;in.native_socket_token[1]=7;out=sol.solve(in);expect(out.reverse_weight[1]==1,"a token change with the reverse requested applies it at once");
     }
     if(failures) {std::cerr<<failures<<" failure(s)\n";return 1;}
     std::puts("reverse grip check ok");return 0;

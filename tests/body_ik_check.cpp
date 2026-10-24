@@ -237,7 +237,7 @@ static int run(int argc,char** argv) {
             // covers the same on the rig fixture without clips)
             const auto grip=[&](bool reverse,Vec3& point,Vec3& blade,double& miss) {
                 const auto n=swung(60);in.native_arm[1]=&n;in.reverse_grip[1]=reverse;in.hand_empty[1]=false;
-                Output out;for(int frame=0;frame<(reverse?12:1);++frame) out=sol.solve(in); // the reverse blends in over 0.1 s (G2)
+                Output out;for(int frame=0;frame<12;++frame) out=sol.solve(in); // a mid-hold reverse change blends over 0.1 s (G2): 12 frames settle both directions
                 const auto& a=out.arm[1];
                 Vec3 sum{};for(const char* f:{"index","medium","ring","pinky"}) for(const char* k:{"02","03","04"}) sum=sum+a[right.find(std::string("right_")+f+"_"+k+"_jnt")].p*(1./12);
                 blade=rotated(a[at].q,{1,0,0});const auto d=sum-a[at].p;

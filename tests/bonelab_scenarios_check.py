@@ -491,7 +491,7 @@ def sword_regrab_checks():
     assert all(e[1] - e[0] >= 2000 for e in edges)
     rows = brc.check([{"sword_rows": sword_rows()}], "sword_regrab")
     assert {v for v, _ in rows} == {"PASS", "INFO"}, rows
-    assert "max blade_axis_gap_deg 60.0 (after 350 ms 4.0)" in "\n".join(t for v, t in rows if v == "INFO")
+    assert "max blade_axis_gap_deg 60.0 (from +350 ms 4.0;" in "\n".join(t for v, t in rows if v == "INFO")
     assert "FAIL" in verdicts({"sword_rows": None}, "sword_regrab") and "FAIL" in verdicts({}, "sword_regrab")  # a missing trace
     assert "FAIL" in verdicts({"sword_rows": sword_rows((False, True, False))}, "sword_regrab")  # fewer than 4 holds
     assert "FAIL" in verdicts({"sword_rows": sword_rows((False, False, True, True))}, "sword_regrab")  # not F, R, F, R

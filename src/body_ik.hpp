@@ -878,6 +878,7 @@ private:
         state.finger_mode=procedural?(in.has_finger[i]?1:2):3;
         // Held item: the native attachment local is rotated by authored attack/block/equip clips, so
         // the socket keeps the last steady value (<20 deg/s, <5 cm/s for 0.25 s) and the player owns the grip.
+        bool fresh_hold=false;
         if(!native_socket) {state.has_hold=false;state.hold_calibrated=false;state.reverse_weight=0;state.sneak_flip=false;}
         else {
             auto n=mul(inverse((*native)[s.parent[attach_[i]]]),(*native)[attach_[i]]);n.p=n.p*scale_;
@@ -888,7 +889,7 @@ private:
             if(i==1) {const double sneak_z=rotated(n.q,{0,1,0}).z;if(sneak_z<-.5) state.sneak_flip=true;else if(sneak_z>-.2) state.sneak_flip=false;} // hysteresis: a clip blend through -.5 does not flap the socket
             if(i==1 && state.sneak_flip) {n.q=mul(n.q,axis_angle({0,0,1},kPi));n.p=n.p+Vec3{-.0453,-.0262,.0012}*scale_;}
             const auto wrap=wrap_in_parent(i,*native,scale_);
-            if(!state.has_hold) {state.hold=state.hold_prev=n;state.wrap=wrap;state.hold_steady=0;state.has_hold=true;state.hold_calibrated=false;}
+            if(!state.has_hold) {state.hold=state.hold_prev=n;state.wrap=wrap;state.hold_steady=0;state.has_hold=true;state.hold_calibrated=false;fresh_hold=true;}
             else if(dt>0) {
                 const double ang=2*std::acos(std::min(1.,std::abs(n.q.x*state.hold_prev.q.x+n.q.y*state.hold_prev.q.y+n.q.z*state.hold_prev.q.z+n.q.w*state.hold_prev.q.w)));
                 const bool calm=ang/dt<20*kPi/180 && length(n.p-state.hold_prev.p)/dt<.05;
@@ -897,9 +898,11 @@ private:
                 if(state.hold_steady>=.25) {const double k=std::min(1.,dt*8);state.hold={nlerp(state.hold.q,n.q,k),state.hold.p+(n.p-state.hold.p)*k};state.wrap=state.wrap+(wrap-state.wrap)*k;}
             }
         }
-        {   // The reverse blends in over 0.1 s, and only once the hold has calibrated (the socket's authored pose has settled): never a flip of a hold that is still moving.
+        {   // A new hold takes the requested reverse at once (the drawn blade must agree with the collision axis from the first frame); only a change
+            // asked for mid-hold blends, over 0.1 s. hold_calibrated no longer gates it: it only marks the hold easing.
             const double target=native_socket && in.reverse_grip[i]?1.:0.,step=10*std::max(dt,0.);
-            if(target>state.reverse_weight) {if(state.hold_calibrated) state.reverse_weight=std::min(target,state.reverse_weight+step);}
+            if(fresh_hold) state.reverse_weight=target;
+            else if(target>state.reverse_weight) state.reverse_weight=std::min(target,state.reverse_weight+step);
             else state.reverse_weight=std::max(target,state.reverse_weight-step);
         }
         const auto hand_local=[&](int j) {

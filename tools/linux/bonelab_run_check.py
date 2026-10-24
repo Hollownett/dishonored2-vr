@@ -33,9 +33,9 @@ LOCOMOTION_COLUMNS = ("elapsed_ms", "speed_mps", "root_gap_m", "root_gap_valid",
                       "visual_gap_l", "visual_gap_r", "source_l", "source_r", "blends", "contact_l", "contact_r")
 REGRAB = ("sword_regrab",)  # G2: judged from artifacts/sword-grip-trace.csv (knob build/sword-grip-trace)
 SWORD_COLUMNS = ("elapsed_ms", "held", "reversed", "reverse_weight", "hilt_miss", "weapon_hidden_frames", "blade_axis_gap_deg", "blade_self_hits")
-# Brief values: settle 350 ms, hilt_miss <= 0.01 m. Measured in the sim (Task 10 report): the native token arrives ~30 ms after the hold starts, so a reverse
-# (0.25 s calibration + 0.1 s blend) is done at ~380 ms; the forward grip's own hilt_miss is 13.5-15.2 mm (the rig's geometry, also 13.9 mm on the fixture); a
-# DRAW (hold 1) displaces the hilt for ~570 ms while the equip clip settles. So hilt_miss and reverse_weight are judged from REGRAB_FIT_MS with the bound below.
+# Brief values: settle 350 ms, hilt_miss <= 0.01 m. Measured in the sim (Task 10 report): the forward grip's own hilt_miss is 13.5-15.2 mm (the rig's geometry,
+# 13.9 mm on the fixture), and a DRAW (hold 1) displaces the hilt for ~570 ms while the equip clip settles (hold easing). So hilt_miss is judged from REGRAB_FIT_MS with
+# the bound below; the reverse applies at hold start, so reverse_weight is judged from REGRAB_SETTLE_MS.
 REGRAB_MIN_HOLDS, REGRAB_PATTERN, REGRAB_SETTLE_MS, REGRAB_FIT_MS, REGRAB_HILT_MISS = 4, (False, True, False, True), 350, 700, 0.02
 HAND_FILTER_DEFAULT = 0x000885E4  # R1Recipe::filter: the hand body's word whenever it holds nothing through the body
 
@@ -205,7 +205,7 @@ def sword_holds(rows):
 
 def check_regrab(statuses):
     """G2 sword_regrab: >= 4 holds whose `reversed` run F, R, F, R. From each hold's start + 0.35 s to its end: `reversed` constant, weapon_hidden_frames and
-    blade_self_hits do not increase; from + 0.7 s (see REGRAB_FIT_MS): hilt_miss <= 2 cm and reverse_weight is 0 or 1 (the blend is done). INFO: the worst blade_axis_gap_deg."""
+    blade_self_hits do not increase; reverse_weight is 0 or 1; from + 0.7 s (see REGRAB_FIT_MS): hilt_miss <= 2 cm. INFO: the worst blade_axis_gap_deg."""
     out = []
     for n, status in enumerate(statuses):
         tag = f"session {n + 1}: " if len(statuses) > 1 else ""
@@ -232,9 +232,9 @@ def check_regrab(statuses):
             out.append(("PASS" if hidden == 0 else "FAIL", f"{name}: weapon_hidden_frames increase 0 (got {hidden:.0f})"))
             selfhit = window[-1]["blade_self_hits"] - window[0]["blade_self_hits"]
             out.append(("PASS" if selfhit == 0 else "FAIL", f"{name}: blade_self_hits increase 0 (got {selfhit:.0f})"))
-            mid = [r["reverse_weight"] for r in fit if 1e-6 < r["reverse_weight"] < 1 - 1e-6]
-            out.append(("PASS" if not mid else "FAIL", f"{name}: reverse_weight is 0 or 1 after {REGRAB_FIT_MS} ms (blend done; {len(mid)} rows in between)"))
-            out.append(("INFO", f"{name}: reversed {bool(window[0]['reversed'])}, max blade_axis_gap_deg {max(r['blade_axis_gap_deg'] for r in hold):.1f} (after {REGRAB_SETTLE_MS} ms {max(r['blade_axis_gap_deg'] for r in window):.1f})"))
+            mid = [r["reverse_weight"] for r in window if 1e-6 < r["reverse_weight"] < 1 - 1e-6]
+            out.append(("PASS" if not mid else "FAIL", f"{name}: reverse_weight is 0 or 1 after {REGRAB_SETTLE_MS} ms ( {len(mid)} rows in between)"))
+            out.append(("INFO", f"{name}: reversed {bool(window[0]['reversed'])}, max blade_axis_gap_deg {max(r['blade_axis_gap_deg'] for r in hold):.1f} (from +{REGRAB_SETTLE_MS} ms {max(r['blade_axis_gap_deg'] for r in window):.1f}; the forward grip's own offset is ~17)"))
         if len(holds) >= REGRAB_MIN_HOLDS:
             seen = tuple(bool(w[0]["reversed"]) if w else None for w in settled[:REGRAB_MIN_HOLDS])
             out.append(("PASS" if seen == REGRAB_PATTERN else "FAIL", f"{tag}reversed per hold F, R, F, R (got {''.join('?' if v is None else 'R' if v else 'F' for v in seen)})"))
