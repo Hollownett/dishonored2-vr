@@ -16,7 +16,7 @@ All three fixes shipped, each with an off switch:
 
 - `build/legacy-arm-root-carry`: restores the old root carry for the arms.
 - `build/no-hand-body-feedforward`: turns off the feedforward on the hand body. A sudden stop can then leave the body a few centimetres short, but never more than the old path.
-- `build/no-moving-controller-visual`: keeps the drawn controller on the sensor pose while moving.
+- `build/no-moving-controller-visual`: turns off the free-air clamp. The fix keeps the drawn hand on the controller (clamp) pose in free air while moving; with this knob the agreeing hand body may be drawn in free air while moving again.
 
 The diagnostic trace is `build/locomotion-trace`. It writes `artifacts/locomotion-hands.csv`. Watch these columns: `root_gap_valid` (1 when the root gap was measured, 0 when it was not, so a 0 gap from an unmeasured frame is not a true zero) and `ff_dot_target` (the feedforward direction against the target).
 
@@ -24,7 +24,7 @@ The diagnostic trace is `build/locomotion-trace`. It writes `artifacts/locomotio
 
 1. **Run and sprint with empty hands, the sword and the gun.** Watch for lag, shake and drift of the hands and weapons while moving. Create `build/locomotion-trace`, do a run and a sprint in each hand state, then save `artifacts/locomotion-hands.csv`. Record which of the three knobs shipped in your build. An A/B with each knob is optional. Expect: hands and weapons stay on the controllers while running, with no bursts on a sudden stop.
 
-2. **Regrab the sword the other way round, five times.** Include grabs across the blade. Create `build/sword-grip-trace`. Expect: a reversed regrab shows reversed from the first frame, with no settle and no spin. Save the trace. A forward draw still settles for about 0.5 s; this is pre-existing. Tell me if you see it, and whether it is distracting.
+2. **Regrab the sword the other way round, five times.** Include grabs across the blade. Create `build/sword-grip-trace`. Expect: a reversed regrab shows reversed from the first frame, with the same hold settling as a forward grip, and no spin. Save the trace. A forward draw still settles for about 0.5 s; this is pre-existing. Tell me if you see it, and whether it is distracting.
 
 3. **Fist with an empty hand.** Expect: no draw from a fist. The over-shoulder draw still works. Block and choke still work.
 
@@ -37,6 +37,12 @@ The diagnostic trace is `build/locomotion-trace`. It writes `artifacts/locomotio
 7. **Pick up a paper, a note and a stamp.** Expect the fingers to stop on the item. Save the `finger_ik.hold` block, with `thin_holds` and `box_holds`.
 
 8. **Make a full fist with an empty hand.** Expect the fingertips to rest on the palm, not through it.
+
+9. **DLSS DLL, Windows launcher, manual pick.** Point the launcher to `nvngx_dlss.dll` by hand. Expect: no crash.
+
+10. **Fresh RTX install with no DLSS configured.** Expect: the launcher finds a DLSS DLL from an installed game and shows "DLSS found in <game>". DLAA appears in the AA list and is picked on the first VR start.
+
+11. **DLSS DLL, Linux.** Run `linux/d2vr-linux dlss-find` (and the install). Expect: `build/dlss-dll-path` is written with a `Z:\` path, and DLSS works under Proton.
 
 ## Report
 

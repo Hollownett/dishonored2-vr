@@ -8,7 +8,15 @@ def check(probe: str, xr: str) -> None:
     migrate = probe.index("remove_legacy_aa_knobs(", load)
     crosshair = probe.index('L"no-hand-crosshair",legacy_ec', migrate)
     pending = probe.rfind("if(first_start_pending)", load, migrate)
-    assert pending != -1 and load < pending < migrate < crosshair, "migration must be gated on the missing AA marker after the preferences load"
+    assert pending != -1 and load < pending < migrate < crosshair, "AA migration must be gated on the missing AA marker after the preferences load"
+    assert probe.rfind("if(first_start_pending)", load, crosshair) == pending, "the crosshair migration must not be gated on the AA marker"
+    cross_block = probe[crosshair:probe.index("if(preferences) {", crosshair)]
+    assert "fs::remove" not in cross_block and "crosshair_legacy_file=" in cross_block, "migration may only remember the file, not delete it"
+    persist = probe.index("game_xr->persist_preferences()")
+    removal = probe.index("fs::remove(crosshair_legacy_file", persist - 200)
+    assert persist < removal and probe.count("fs::remove(crosshair_legacy_file") == 1, "the legacy file is deleted only after a successful save"
+    assert re.search(r"if\(game_xr->persist_preferences\(\)\) fs::remove\(crosshair_legacy_file", probe), "delete must be conditional on the save succeeding"
+    assert "if(log_note) log_note(" in xr and "log_note=&note_recoverable" in probe, "a failed first-start save must be logged"
     assert "first_start_pending=!aa_chosen_preference" in probe, "the pending flag must come from the saved marker"
     end = probe.index("native_menu_mode=0;config>>native_menu_mode;", gate)
     assert crosshair < end, "migration must sit inside the saved-settings block"
@@ -42,6 +50,9 @@ mutations = (
     (probe.replace("if(first_start_pending && present_adapter_vendor.load(std::memory_order_relaxed))", "if(present_adapter_vendor.load(std::memory_order_relaxed))", 1), xr),
     (probe.replace("first_start_pending=false;\n                                        game_xr->adopt", "game_xr->adopt", 1), xr),
     (probe, xr.replace("settings_.aa_chosen(),settings_.crosshair()});", "false,true});", 1)),
+    (probe.replace("{   // v609 crosshair migration, whatever", "if(first_start_pending) {   // v609 crosshair migration, whatever",1), xr),
+    (probe.replace("if(game_xr->persist_preferences()) fs::remove(crosshair_legacy_file,legacy_ec);", "{game_xr->persist_preferences();fs::remove(crosshair_legacy_file,legacy_ec);}",1), xr),
+    (probe, xr.replace("if(log_note) log_note(", "if(false) log_note(",1)),
     (probe.replace('std::ifstream knob(root/L"build"/L"aa-mode")', 'std::ifstream knob(root/L"build"/L"aa-mode-gone")', 1), xr),
 )
 for index, (mutated_probe, mutated_xr) in enumerate(mutations):

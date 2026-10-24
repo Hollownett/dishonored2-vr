@@ -1310,9 +1310,14 @@ public:
     // v609 first-start AA: the decided mode (none = keep the saved one) goes out as a temporal request, the marker is set and the file is written once.
     void adopt_first_start_aa(std::optional<int> mode) {
         if(mode) {settings_.set_temporal_aa(*mode);temporal_change_=settings_.temporal_aa();} else settings_.mark_aa_chosen();
-        if(preferences_file_.empty()) return;
-        try {save_preferences(preferences_file_,{settings_.requested(),settings_.antialiasing(),settings_.turning(),settings_.mirror(),settings_.sharpness(),settings_.temporal_aa(),settings_.hud_percent(),settings_.controls_hint(),settings_.player_measurements(),settings_.aa_chosen(),settings_.crosshair()});}
-        catch(const std::exception&) {} // the marker stays unsaved; the next start decides again
+        persist_preferences();
+    }
+    void(*log_note)(const char*) noexcept=nullptr; // the host's recoverable-fault log, set from Present
+    // Writes the saved settings; false when there is no file or the save failed (logged), so callers can keep legacy knobs until it works.
+    bool persist_preferences() {
+        if(preferences_file_.empty()) return false;
+        try {save_preferences(preferences_file_,{settings_.requested(),settings_.antialiasing(),settings_.turning(),settings_.mirror(),settings_.sharpness(),settings_.temporal_aa(),settings_.hud_percent(),settings_.controls_hint(),settings_.player_measurements(),settings_.aa_chosen(),settings_.crosshair()});return true;}
+        catch(const std::exception&) {if(log_note) log_note("v609 first-start save failed: the settings stay unsaved and the next start decides again");return false;}
     }
     std::optional<int> take_temporal_request() noexcept {const auto request=temporal_change_;temporal_change_.reset();return request;}
     std::optional<TurnControl::Config> take_turning_request() noexcept {const auto request=turning_change_;turning_change_.reset();return request;}

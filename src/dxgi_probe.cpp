@@ -206,6 +206,7 @@ static double sharpness_requested=.5;
 static int taa_preference=2,hud_preference=65;static bool hint_preference=true;
 // v609: the saved AA-chosen marker, whether a settings file existed, and the one-time first-start AA decision (made at Present once the adapter vendor is known)
 static bool preferences_file_existed=false,aa_chosen_preference=false,crosshair_preference=true,first_start_pending=false,crosshair_migrated=false;
+static fs::path crosshair_legacy_file; // set while build/no-hand-crosshair awaits its first successful save
 static const char* first_start_state="none";static std::vector<std::string> first_start_removed;
 static UINT64 xr_antialiased_eyes{};
 static UINT64 xr_settings_layers{},xr_resolution_changes{},xr_world_ui_layers{};
@@ -7595,7 +7596,7 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                             }
                             {   // DLSS: offered to the menus, selected from the live mode, and it owns the jitter while engaged.
                                 const int live_mode=temporal_live_mode.load();
-                                game_xr->dlss_available(dlss_offered());
+                                game_xr->dlss_available(dlss_offered());game_xr->log_note=&note_recoverable;
                                 if(first_start_pending && present_adapter_vendor.load(std::memory_order_relaxed)) { // v609: once per session, only with a known vendor
                                     const auto decision=d2vr::first_start_aa(aa_chosen_preference,preferences_file_existed,present_adapter_vendor.load(),dlss_offered());
                                     if(decision!=d2vr::FirstStartAa::wait) {
@@ -7603,6 +7604,12 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                         game_xr->adopt_first_start_aa(decision==d2vr::FirstStartAa::dlaa?std::optional<int>(7):decision==d2vr::FirstStartAa::fsr3_native?std::optional<int>(2):std::nullopt);
                                         first_start_state=decision==d2vr::FirstStartAa::dlaa?"dlaa":decision==d2vr::FirstStartAa::fsr3_native?"fsr3_native":"keep";
                                     }
+                                }
+                                if(!crosshair_legacy_file.empty()) { // v609: delete the legacy knob only after the crosshair=false preference is on disk; one try per session
+                                    std::error_code legacy_ec;
+                                    if(game_xr->persist_preferences()) fs::remove(crosshair_legacy_file,legacy_ec);
+                                    else note_recoverable("v609 crosshair migration: saving the settings failed, build/no-hand-crosshair kept for the next start");
+                                    crosshair_legacy_file.clear();
                                 }
                                 fsr_taa.dlss_quality=d2vr::dlss_mode::is_quality(live_mode);
                                 fsr_taa.dlss_active=d2vr::dlss_mode::active(live_mode) && dlss_offered();
@@ -9099,7 +9106,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
         if(saved_settings_requested) {
             const auto preferences=d2vr::load_preferences(root/L"build"/L"vr-settings.cfg");
             preferences_file_existed=preferences.has_value();aa_chosen_preference=preferences && preferences->aa_chosen;crosshair_preference=!preferences || preferences->crosshair;
-            first_start_state="none";first_start_removed.clear();crosshair_migrated=false;first_start_pending=!aa_chosen_preference;
+            first_start_state="none";first_start_removed.clear();crosshair_migrated=false;crosshair_legacy_file.clear();first_start_pending=!aa_chosen_preference;
             if(first_start_pending) { // v609 migration, before the knob reads below so a stale knob cannot block the switch; sim runs (no saved settings) never get here
                 first_start_state="wait";
                 for(const auto& knob:d2vr::remove_legacy_aa_knobs(root/L"build")) {
@@ -9107,10 +9114,12 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
                     first_start_removed.push_back(knob.name+"="+value);
                     note_recoverable(("v609 AA migration: removed build/"+knob.name+" ("+value+")").c_str());
                 }
+            }
+            {   // v609 crosshair migration, whatever the AA marker says: the file is deleted only after a save carrying crosshair=false succeeds (Present)
                 std::error_code legacy_ec;
                 if(fs::exists(root/L"build"/L"no-hand-crosshair",legacy_ec)) {
-                    crosshair_preference=false;crosshair_migrated=true;fs::remove(root/L"build"/L"no-hand-crosshair",legacy_ec);
-                    note_recoverable("v609 crosshair migration: build/no-hand-crosshair moved into the saved settings");
+                    crosshair_preference=false;crosshair_migrated=true;crosshair_legacy_file=root/L"build"/L"no-hand-crosshair";
+                    note_recoverable("v609 crosshair migration: build/no-hand-crosshair moves into the saved settings once they save");
                 }
             }
             if(preferences) {
