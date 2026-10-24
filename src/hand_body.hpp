@@ -174,7 +174,7 @@ struct G2Counts {std::uint64_t wake_owner{},exit_hand{};};
 inline bool g2_rejects(const G2Counts& since_create) {return since_create.wake_owner || since_create.exit_hand;}
 
 // ---- knobs
-// B13 (default off until B17): the hand body runs when build/hand-body exists and build/no-hand-body does not. After B17: unless no-hand-body.
+// B13/B17: opt-in. The hand body runs only when build/hand-body exists (launcher row) and build/no-hand-body (hard off) does not.
 inline bool hand_body_knob_enabled(bool hand_body_file,bool no_hand_body_file) {return hand_body_file && !no_hand_body_file;}
 
 // ---- the render-side release gate

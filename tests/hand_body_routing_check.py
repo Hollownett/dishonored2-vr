@@ -471,6 +471,20 @@ for line in b16_block.splitlines() + cpl.splitlines():
 print("hand_body_routing_check B16 ok")
 
 # 10. the B13 sim scenario compiles and fits a 120 s session with a 60 s lead
+# B17: the default stays OFF (opt-in), no-hand-body is the hard off switch, and the spike is dev-only (not a launcher row)
+import json
+assert "hand_body_knob_enabled(bool hand_body_file,bool no_hand_body_file) {return hand_body_file && !no_hand_body_file;}" in body, \
+    "default off: needs build/hand-body; no-hand-body beats hand-body"
+launcher_rows = json.loads((root / "tools/default_features.json").read_text(encoding="utf-8"))["features"]
+hb_rows = [r for r in launcher_rows if r["id"] == "hand-body"]
+assert len(hb_rows) == 1 and hb_rows[0]["file"] == "hand-body" and hb_rows[0]["kind"] == "enable" and hb_rows[0]["default"] is False, \
+    "launcher row: opt-in enable, default off, writes build/hand-body"
+assert "Physical hand bodies (experimental, headset test)" == hb_rows[0]["label"]
+assert not any("spike" in r["id"] or "spike" in r["file"] or "no-hand-body" in (r["id"], r["file"]) for r in launcher_rows), \
+    "hand-body-spike and no-hand-body are not exposed in the launcher"
+print("hand body default off, launcher row opt-in, spike dev-only")
+
+
 import sys
 sys.path.insert(0, str(root / "linux"))
 try:

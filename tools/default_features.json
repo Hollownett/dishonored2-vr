@@ -18,6 +18,14 @@
    "default": false
   },
   {
+   "id": "hand-body",
+   "file": "hand-body",
+   "kind": "enable",
+   "label": "Physical hand bodies (experimental, headset test)",
+   "help": "Gives each hand a physical body that pushes against props and walls and lags when blocked; it never moves you. Experimental: not yet tested in a headset. The no-hand-body file always turns it off.",
+   "default": false
+  },
+  {
    "id": "hand-clamp",
    "file": "no-hand-clamp",
    "kind": "disable",
