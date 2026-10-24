@@ -446,6 +446,8 @@ assert "lane.coupling.serial==lane.hold_serial" in function(grab, "static bool c
 assert "if(coupling_on_) {lane.hold_serial=++hold_serials_;" in function(grab, "void begin_hold(") and "v.serial=lane.hold_serial;" in avo
 cpl_fn = function(grab, "void couple(unsigned side,std::uint64_t serial,")
 assert "std::lock_guard<std::mutex> lock(coupling_mutex_);" in cpl_fn and "mutex_)" not in cpl_fn.replace("coupling_mutex_)", ""), "never NativeGrab's pass mutex"
+assert "c.release=release;" in cpl_fn, "fix round 2: the raw-gap release travels even when B15 does not draw the body (no offset)"
+assert "native_grab.couple(side,held.serial,out.uses_body?std::optional<d2vr::Vec3>(out.target.position-palm_grips[side].position):std::nullopt,out.release,couple_ms);" in p2_block
 upd = function(grab, "void update(std::uintptr_t dispatcher)")
 assert "if(coupling_on_) {std::unique_lock<std::mutex> pub(coupling_mutex_,std::try_to_lock);" in upd and upd.index("coupling_mutex_") < upd.index("update_lane(side,*world,now)")
 rel = ul[ul.index("if(lane.capped && coupled_release && !lane.pending_release)"):ul.index("if(lane.capped) {")]
