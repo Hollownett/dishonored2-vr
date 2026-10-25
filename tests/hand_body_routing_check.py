@@ -556,6 +556,14 @@ print("hand body launcher row default on, DLL needs build/hand-body, spike dev-o
 
 import sys
 sys.path.insert(0, str(root / "linux"))
+# v613 item 6 (running sync): the render thread stamps the published targets (QPC) and the drive passes their age to the servo; build/legacy-run-gate
+# restores v612's tick-counted gate.
+assert "hands_.target_time_s=static_cast<double>(qpc_us())*1e-6" in runtime
+assert "d.target_time_s=last_hands_.target_time_s;" in runtime
+assert "in.now-in.target_time_s" in body and "in.player_velocity,\n" in body
+assert 'd2vr::hand_servo_legacy_gate.store(legacy_run_gate)' in probe and 'L"legacy-run-gate"' in probe
+print("running sync wiring ok")
+
 try:
     from d2vr_linux import sim
 except Exception:   # the Linux rig is not importable everywhere (Windows cl runs): the wiring above is the gate

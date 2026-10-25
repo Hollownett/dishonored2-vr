@@ -413,7 +413,7 @@ def locomotion_rows(stand=300, run=300, running_residual=0.01, blends_at=(), con
 
 
 def run_hands_checks():
-    for name in ("run_hands", "run_hands_sword"):
+    for name in ("run_hands", "run_hands_sword", "run_hands_open"):
         segments = sim.scenario_segments(name, LEAD)
         sim.compile_script(segments, 120)
         assert max(s["end_ms"] for s in segments) <= 120000, name
@@ -442,6 +442,16 @@ def run_hands_checks():
     assert "FAIL" in verdicts({"locomotion_rows": locomotion_rows(valid=0)}, "run_hands")  # rows with root_gap_valid 0 are ignored: no running rows left
     bad = locomotion_rows(running_residual=0.5, valid=0) + locomotion_rows()  # invalid running rows with a huge residual do not count
     assert "FAIL" not in verdicts({"locomotion_rows": bad}, "run_hands")
+    # v613 item 6: a sprint bin (>= 4.5 m/s) with the same 1.5 cm acceptance, and a periodic residual swing > 3 cm in 0.5 s fails the run
+    assert not any("sprint" in t and v == "FAIL" for v, t in brc.check([{"locomotion_rows": locomotion_rows(run_speed=5.0)}], "run_hands"))
+    assert any("sprint" in t and v == "PASS" for v, t in brc.check([{"locomotion_rows": locomotion_rows(run_speed=5.0)}], "run_hands"))
+    assert any("sprint" in t and v == "INFO" for v, t in brc.check([{"locomotion_rows": locomotion_rows(run_speed=3.0)}], "run_hands"))
+    wobble = locomotion_rows(run_speed=5.0)
+    for i, r in enumerate(wobble):
+        if r["speed_mps"] > 4:
+            r["drawn_residual_l"] = 0.01 + (0.05 if (i // 20) % 2 else 0.0)   # 5 cm square wave, ~0.22 s half-period
+    assert "FAIL" in verdicts({"locomotion_rows": wobble}, "run_hands")
+    assert brc.residual_swing(locomotion_rows(run_speed=5.0)) == 0
     assert brc.blend_bursts(locomotion_rows(blends_at=(3500, 3900))) == (1, 2)  # two increments inside 1 s, free air
     assert brc.blend_bursts(locomotion_rows(blends_at=(3500, 3900), contact=1)) == (0, 0)  # contact is not free air
     assert brc.blend_bursts(locomotion_rows(blends_at=(3500, 4700))) == (0, 1)  # more than 1 s apart

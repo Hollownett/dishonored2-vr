@@ -1296,9 +1296,11 @@ static void start_running_knobs(const fs::path& root,const fs::path& output) {
     const bool legacy_carry=fs::exists(root/L"build"/L"legacy-arm-root-carry");
     no_hand_body_feedforward=fs::exists(root/L"build"/L"no-hand-body-feedforward");no_moving_controller_visual=fs::exists(root/L"build"/L"no-moving-controller-visual");
     full_body.legacy_root_carry(legacy_carry);player_velocity={};player_speed=0;
+    const bool legacy_run_gate=fs::exists(root/L"build"/L"legacy-run-gate");d2vr::hand_servo_legacy_gate.store(legacy_run_gate);   // v613 item 6
     std::ofstream note(output/L"running-knobs.txt",std::ios::trunc);
     note<<"knob build/legacy-arm-root-carry "<<(legacy_carry?"present: arms carry from the last arm-upload root\n":"absent: arms carry from the anchor's root\n");
     note<<"knob build/no-hand-body-feedforward "<<(no_hand_body_feedforward?"present: the hand body's servo gets no player velocity\n":"absent: the hand body's servo feeds forward the player velocity\n");
+    note<<"knob build/legacy-run-gate "<<(legacy_run_gate?"present: the hand body's feedforward gate measures the target over tick-counted intervals (v612)\n":"absent: the gate measures the target on the publication timeline\n");
     note<<"knob build/no-moving-controller-visual "<<(no_moving_controller_visual?"present: the agreeing body may be drawn in free air while moving\n":"absent: while moving, free air draws the clamp output\n");
 }
 // Last tracked palette per side (model space): a brief tracked-pose gap reuses

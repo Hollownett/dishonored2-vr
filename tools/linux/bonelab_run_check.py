@@ -28,9 +28,10 @@ HAND_BODY_COST_US = 200          # proof (d): the drive's cost per tick, both ha
 HAND_BODY_PRESSED_TICKS = 1000  # review P3-5: about 5 s per hand inside the capsule per session (the scripted segment holds 14 s; ~2100 seen)
 HAND_BODY_DRIFT_UM = 1000        # proof (b): the player root's unexplained movement while a hand is pressed into the capsule
 TANK_HAND_BODY = ("tank_hand_body",)  # Plan B B16 S15: the tank carried by the hand body (run with --knob hand-body and --knob no-hand-body)
-RUNS = ("run_hands", "run_hands_sword")  # G1a: the running-hands scenarios, judged from artifacts/locomotion-hands.csv (knob build/locomotion-trace)
+RUNS = ("run_hands", "run_hands_sword", "run_hands_open")  # G1a: the running-hands scenarios, judged from artifacts/locomotion-hands.csv (knob build/locomotion-trace)
 # Running rows >= 60: the spawn corridor (~20 m of straight) limits how long the run can last (1-3 s at >= 2.5 m/s, 72-124 rows in Task 8's runs); standing keeps 200.
 RUN_MIN_ROWS, STAND_MIN_ROWS, STAND_SPEED, RUN_SPEED, BURST_SPEED, BURST_WINDOW_MS = 60, 200, 0.3, 2.5, 1.0, 1000
+SPRINT_SPEED, SPRINT_MIN_ROWS, OSCILLATION_WINDOW_MS, OSCILLATION_MAX_M = 4.5, 30, 500, 0.03   # v613 item 6: the sprint bin and the periodic-lag bound
 RUN_RESIDUAL_MARGIN = 0.015  # Task 9 acceptance: a side's running median drawn_residual may exceed its standing median by at most this (m)
 LOCOMOTION_COLUMNS = ("elapsed_ms", "speed_mps", "root_gap_m", "root_gap_valid", "palm_residual_l", "palm_residual_r", "drawn_residual_l", "drawn_residual_r",
                       "visual_gap_l", "visual_gap_r", "source_l", "source_r", "blends", "contact_l", "contact_r")
@@ -499,6 +500,21 @@ def blend_bursts(rows):
     return bursts, worst
 
 
+def residual_swing(rows):
+    """The largest max-min of either hand's drawn_residual inside any OSCILLATION_WINDOW_MS window of consecutive rows (a hand that lags, catches up and lags
+    again swings; a constant offset does not). 0 for fewer than two rows."""
+    worst, lo, hi, head = 0.0, 0, 0, 0
+    for side in "lr":
+        k = f"drawn_residual_{side}"
+        for i, r in enumerate(rows):
+            while rows[i]["elapsed_ms"] - rows[head]["elapsed_ms"] > OSCILLATION_WINDOW_MS:
+                head += 1
+            win = [x[k] for x in rows[head:i + 1]]
+            worst = max(worst, max(win) - min(win))
+        head = 0
+    return worst
+
+
 def check_run(statuses):
     """G1a/G1b run_hands / run_hands_sword: bin the trace (standing speed < 0.3, running speed >= 2.5; rows with root_gap_valid 0 ignored). FAIL when it is
     missing or too short, when a side's running median drawn_residual exceeds standing by more than 1.5 cm, or on a free-air blend burst."""
@@ -528,6 +544,17 @@ def check_run(statuses):
                             f"{tag}drawn_residual_{side} running median <= standing + {RUN_RESIDUAL_MARGIN * 100:.1f} cm (delta {delta * 100:+.2f} cm)"))
             out.append(("INFO", f"{tag}source_{side} == body share of running frames: {share:.3f}"))
         out.append(("INFO", f"{tag}root_gap_m median running: {med(run, 'root_gap_m'):.4f} m"))
+        sprint = [r for r in valid if r["speed_mps"] >= SPRINT_SPEED]
+        if len(sprint) >= SPRINT_MIN_ROWS and stand:   # v613 item 6: sprint speed holds the same acceptance as the run
+            for side in "lr":
+                delta = med(sprint, f"drawn_residual_{side}") - med(stand, f"drawn_residual_{side}")
+                out.append(("PASS" if delta <= RUN_RESIDUAL_MARGIN + 1e-9 else "FAIL",
+                            f"{tag}sprint (>= {SPRINT_SPEED} m/s, {len(sprint)} rows) drawn_residual_{side} median <= standing + {RUN_RESIDUAL_MARGIN * 100:.1f} cm (delta {delta * 100:+.2f} cm)"))
+        else:
+            out.append(("INFO", f"{tag}sprint rows (>= {SPRINT_SPEED} m/s) {len(sprint)} (< {SPRINT_MIN_ROWS}: the sprint bin is not judged)"))
+        swing = residual_swing(run)
+        out.append(("PASS" if swing <= OSCILLATION_MAX_M + 1e-9 else "FAIL",
+                    f"{tag}no periodic drawn_residual oscillation: largest {OSCILLATION_WINDOW_MS} ms swing while running {swing * 100:.2f} cm <= {OSCILLATION_MAX_M * 100:.0f} cm"))
         bursts, worst = blend_bursts(rows)
         out.append(("PASS" if bursts == 0 else "FAIL", f"{tag}free-air blend bursts == 0 (got {bursts}; most increments in any 1 s window: {worst})"))
     return out or [("FAIL", "no sessions")]

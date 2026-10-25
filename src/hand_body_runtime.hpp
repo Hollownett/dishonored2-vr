@@ -46,6 +46,7 @@ namespace d2vr {
 struct HandBodyHandsInput {unsigned tracked{};std::array<Vec3,2> palm{};bool authored{};bool focused{};
     std::array<WorldTrackedPose,2> target{};unsigned free{};unsigned yield{};bool locomotion{};std::optional<Vec3> player_root{};
     Vec3 player_velocity{};   // Fix B: the player's horizontal velocity, the drive's feedforward (zero with build/no-hand-body-feedforward)
+    double target_time_s{std::numeric_limits<double>::quiet_NaN()};   // v613 item 6: QPC seconds when the render thread published the targets (set by publish_hands)
     std::array<std::uint32_t,2> filter{{R1Recipe::filter,R1Recipe::filter}};
     unsigned holding{};     // B16 fix round 2: sides that hold something (B14's snaps are suppressed for them) ...
     unsigned hold_snap_ok{};};   // final review P2-1: ... except a native hold whose object is free (a snag on the hand alone: the stuck snap runs)
@@ -136,7 +137,7 @@ public:
     static void publish_hands(const HandsInput& in,std::uint64_t now_ms) {
         if(!active()) return;
         authored_.store(in.authored,std::memory_order_relaxed);authored_tick_.store(now_ms,std::memory_order_release);
-        std::lock_guard<std::mutex> lock(hands_mutex_);hands_=in;hands_tick_=now_ms;
+        std::lock_guard<std::mutex> lock(hands_mutex_);hands_=in;hands_.target_time_s=static_cast<double>(qpc_us())*1e-6;hands_tick_=now_ms;
     }
     // Once per frame where the controller input is composed: returns the menu button / pause event to publish (Start waits for the destroy)
     // and publishes `release` for the dispatcher. Knob off: the caller does not call this at all.
@@ -481,7 +482,7 @@ private:
             const bool tracked=((last_hands_.tracked>>side)&1u)!=0;
             d.yield=!fresh || !tracked || ((last_hands_.yield>>side)&1u)!=0;
             d.target_free=fresh && now-last_hands_tick_<=free_fresh_ms && ((last_hands_.free>>side)&1u)!=0;
-            d.player_root=fresh?last_hands_.player_root:std::nullopt;d.locomotion=last_hands_.locomotion;d.player_velocity=fresh?last_hands_.player_velocity:Vec3{};
+            d.player_root=fresh?last_hands_.player_root:std::nullopt;d.locomotion=last_hands_.locomotion;d.player_velocity=fresh?last_hands_.player_velocity:Vec3{};d.target_time_s=last_hands_.target_time_s;
             d.holding=fresh && ((last_hands_.holding>>side)&1u)!=0;   // B16 fix round 2: no snap while this hand holds something ...
             d.hold_snap_ok=fresh && ((last_hands_.hold_snap_ok>>side)&1u)!=0;   // ... unless the held object is free (P2-1)
             body->drive(d);
