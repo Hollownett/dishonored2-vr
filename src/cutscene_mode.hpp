@@ -1,6 +1,6 @@
 #pragma once
-// G3 cutscene comfort setting: VR comfort (default), VR full, or Theater (the flat screen). For now the dev knob build/cutscene-mode
-// holds the text (absent or unknown = vr_comfort); a later task makes the VR settings row the source.
+// G3 cutscene comfort setting: VR comfort (default), VR full, or Theater (the flat screen). The VR settings row is the source (saved as
+// cutscene_mode in vr-settings.cfg); the dev knob build/cutscene-mode holds the same text and overrides it while present.
 #include <optional>
 #include <string_view>
 

@@ -1,10 +1,12 @@
 #pragma once
 #include "turn_control.hpp"
 #include "avatar_calibration.hpp"
+#include "cutscene_mode.hpp"
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
 #include <optional>
+#include <string>
 #include <windows.h>
 
 namespace d2vr {
@@ -21,6 +23,8 @@ struct VrPreferences {
     AvatarPlayerMeasurements player_measurements{};
     bool aa_chosen=false; // v609: an AA mode was picked (by the user or the one-time first-start default); false lets Present decide it once
     bool crosshair=true; // v609: the aim crosshair is drawn
+    bool scripted_recenter=true; // v610 (file version 10): re-aim the view on scripted moments
+    CutsceneMode cutscene_mode=CutsceneMode::vr_comfort; // v610: stored as vr_comfort | vr_full | theater
 };
 inline void validate_preferences(const VrPreferences& p) {
     if(!std::isfinite(p.resolution) || p.resolution<.5 || p.resolution>2)
@@ -43,7 +47,7 @@ inline std::optional<VrPreferences> load_preferences(const std::filesystem::path
     if(std::filesystem::file_size(file)>512) throw std::runtime_error("VR preferences exceed the format limit");
     std::ifstream in(file);VrPreferences p;int version{},aa{},mode{},mirror{};
     if(!(in>>version>>p.resolution>>aa>>mode>>p.turning.snap_degrees>>p.turning.smooth_degrees_per_second) ||
-       (version<1 || version>9) || (aa!=0 && aa!=1) || mode<0 || mode>2)
+       (version<1 || version>10) || (aa!=0 && aa!=1) || mode<0 || mode>2)
         throw std::runtime_error("Invalid VR preferences; the saved file was preserved");
     // Version 2 predates the mirror/sharpness rows.
     if(version>=2) {
@@ -79,18 +83,22 @@ inline std::optional<VrPreferences> load_preferences(const std::filesystem::path
         int chosen{},cross{};if(!(in>>chosen>>cross) || (chosen!=0 && chosen!=1) || (cross!=0 && cross!=1)) throw std::runtime_error("Invalid VR preferences; the saved file was preserved");
         p.aa_chosen=chosen!=0;p.crosshair=cross!=0;
     }
+    if(version>=10) { // unknown values fall back to the defaults rather than refusing the whole file
+        std::string recenter,mode_text;if(!(in>>recenter>>mode_text)) throw std::runtime_error("Invalid VR preferences; the saved file was preserved");
+        p.scripted_recenter=recenter!="0";p.cutscene_mode=parse_cutscene_mode(mode_text).value_or(CutsceneMode::vr_comfort);
+    }
     in>>std::ws;if(!in.eof()) throw std::runtime_error("Unexpected VR preference fields");
     p.antialiasing=version>=3?aa==1:true;p.turning.mode=static_cast<TurnControl::Mode>(mode);validate_preferences(p);return p;
 }
 inline void save_preferences(const std::filesystem::path& file,const VrPreferences& p) {
     validate_preferences(p);auto temporary=file;temporary+=L".tmp";
     {std::ofstream out(temporary,std::ios::trunc);
-     out<<std::setprecision(17)<<9<<' '<<p.resolution<<' '<<p.antialiasing<<' '<<static_cast<int>(p.turning.mode)<<' '
+     out<<std::setprecision(17)<<10<<' '<<p.resolution<<' '<<p.antialiasing<<' '<<static_cast<int>(p.turning.mode)<<' '
         <<p.turning.snap_degrees<<' '<<p.turning.smooth_degrees_per_second<<' '<<static_cast<int>(p.mirror)<<' '<<p.sharpness<<' '
         <<p.temporal_aa<<' '<<p.hud_percent<<' '<<p.controls_hint<<' '
         <<p.player_measurements.standing_eye_height_metres.value_or(0)<<' '<<p.player_measurements.shoulder_span_metres.value_or(0)<<' '
         <<p.player_measurements.torso_width_metres.value_or(0)<<' '<<p.player_measurements.arm_reach_metres[0].value_or(0)<<' '
-        <<p.player_measurements.arm_reach_metres[1].value_or(0)<<' '<<p.aa_chosen<<' '<<p.crosshair<<'\n';
+        <<p.player_measurements.arm_reach_metres[1].value_or(0)<<' '<<p.aa_chosen<<' '<<p.crosshair<<' '<<p.scripted_recenter<<' '<<to_string(p.cutscene_mode)<<'\n';
      out.flush();if(!out) throw std::runtime_error("Cannot save VR preferences; previous settings retained");}
     if(!MoveFileExW(temporary.c_str(),file.c_str(),MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH))
         throw std::runtime_error("Cannot publish VR preferences; previous settings retained");

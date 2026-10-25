@@ -51,7 +51,7 @@ sealed class MainForm : Form
 
     // settings
     readonly OptionList options = new();
-    readonly Option res, aa, hud, turn, snap, smooth, mirror, sharp, hint, crosshair;
+    readonly Option res, aa, hud, turn, snap, smooth, mirror, sharp, hint, crosshair, recenter, cutscenes;
     readonly ArtButton save = new("Save", Look.Primary), reload = new("Reload", Look.Secondary);
     string settingsMsg = ""; Color settingsMsgColor = Ui.Dim;
     // settings: the Features view (default-on features, each switchable; changes are written at once)
@@ -105,10 +105,12 @@ sealed class MainForm : Form
         mirror = new Option("Monitor view", "What the desktop window mirrors while you play in VR.", ("Right eye", 0), ("Left eye", 1), ("Both eyes", 2), ("Off (fastest)", 3));
         hint = new Option("Controls hint", "Shows the controller guide image in VR.", ("Off", 0), ("On", 1));
         crosshair = new Option("Crosshair", "Shows the game's crosshair where your gun or power aims. Off hides it.", ("On (default)", 1), ("Off", 0));
+        recenter = new Option("Recenter on scripted moments", "When the game turns or moves you in a scripted moment, re-aim the view so you keep facing the action. Off leaves the view where you were.", ("On (default)", 1), ("Off", 0));
+        cutscenes = new Option("Cutscenes", "VR comfort plays cutscenes around you with comfort limits on camera motion. VR full follows the camera exactly. Theater shows them on a flat screen in front of you.", ("VR comfort (default)", "vr_comfort"), ("VR full", "vr_full"), ("Theater", "theater"));
         turn = new Option("Turning", "Right stick turning style. Snap is the comfort-friendly choice.", ("Native (game default)", 0), ("Snap turn", 1), ("Smooth turn", 2));
         snap = new Option("Snap angle", "Degrees per snap step (used by Snap turn).", ("30 degrees", 30.0), ("45 degrees", 45.0), ("90 degrees", 90.0)) { Active = () => Equals(Val<int>(turn), 1) };
         smooth = new Option("Smooth speed", "Turn speed for Smooth turn.", ("45 deg/s (slow)", 45.0), ("90 deg/s", 90.0), ("120 deg/s (fast)", 120.0)) { Active = () => Equals(Val<int>(turn), 2) };
-        options.Rows.AddRange(new object[] { "DISPLAY", res, aa, sharp, hud, mirror, hint, crosshair, "TURNING", turn, snap, smooth });
+        options.Rows.AddRange(new object[] { "DISPLAY", res, aa, sharp, hud, mirror, hint, crosshair, "TURNING", turn, snap, smooth, "CUTSCENES", recenter, cutscenes });
         options.Selected = 1;
         options.SelectionChanged += () => pages[1].Invalidate(new Rectangle(0, options.Bottom, pages[1].Width, pages[1].Height - options.Bottom));
         save.Click += (_, _) => SaveSettings(); reload.Click += (_, _) => LoadSettings();
@@ -728,6 +730,8 @@ sealed class MainForm : Form
         if (Take(Val<double>(sharp), b.Sharpness)) Select(sharp, d.Sharpness, $"{d.Sharpness:0.##}");
         if (Take(Val<int>(hint), b.Hint != 0 ? 1 : 0)) Select(hint, d.Hint != 0 ? 1 : 0, "");
         if (Take(Val<int>(crosshair), b.Crosshair != 0 ? 1 : 0)) Select(crosshair, d.Crosshair != 0 ? 1 : 0, "");
+        if (Take(Val<int>(recenter), b.ScriptedRecenter != 0 ? 1 : 0)) Select(recenter, d.ScriptedRecenter != 0 ? 1 : 0, "");
+        if (Take(Val<string>(cutscenes), b.CutsceneMode)) Select(cutscenes, d.CutsceneMode, "");
         RefreshDlssChoices();
         options.Invalidate();
     }
@@ -749,7 +753,7 @@ sealed class MainForm : Form
     protected override void OnActivated(EventArgs e)
     {
         base.OnActivated(e);
-        if (options == null || res == null || crosshair == null) return;
+        if (options == null || res == null || crosshair == null || recenter == null || cutscenes == null) return;
         try { var d = Prefs.Load(env.SettingsFile); ApplyToForm(d, prefs); prefs = d; }
         catch (Exception ex) { SetSettingsMsg(ex.Message, Ui.Bad); }
     }
@@ -760,6 +764,7 @@ sealed class MainForm : Form
         e.Resolution = res.Value / 100.0; e.TemporalAa = Val<int>(aa); e.Hud = Val<int>(hud); e.Mode = Val<int>(turn);
         e.SnapDeg = Val<double>(snap); e.SmoothDps = Val<double>(smooth); e.Mirror = Val<int>(mirror); e.Sharpness = Val<double>(sharp);
         e.Hint = Val<int>(hint); e.Crosshair = Val<int>(crosshair);
+        e.ScriptedRecenter = Val<int>(recenter); e.CutsceneMode = Val<string>(cutscenes);
         return e;
     }
 

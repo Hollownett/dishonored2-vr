@@ -10,13 +10,32 @@ public static class PrefsTests
 
         var rt = new Prefs { Resolution = 1.25, TemporalAa = 5, Hud = 150, Hint = 0, AaChosen = 1, Crosshair = 0, Measurements = new[] { "1", "2", "3", "4", "5" } };
         var f1 = Tmp(); rt.Save(f1); var back = Prefs.Load(f1);
-        check("prefs_v9_roundtrip", File.ReadAllText(f1).StartsWith("9 ") && back.Resolution == 1.25 && back.TemporalAa == 5 && back.Hud == 150 && back.Hint == 0
-            && back.AaChosen == 1 && back.Crosshair == 0 && string.Join(",", back.Measurements) == "1,2,3,4,5");
+        check("prefs_v10_roundtrip", File.ReadAllText(f1).StartsWith("10 ") && back.Resolution == 1.25 && back.TemporalAa == 5 && back.Hud == 150 && back.Hint == 0
+            && back.AaChosen == 1 && back.Crosshair == 0 && back.ScriptedRecenter == 1 && back.CutsceneMode == "vr_comfort" && string.Join(",", back.Measurements) == "1,2,3,4,5");
 
         var v8 = LoadText("8 1.3 1 2 45 120 1 0.25 7 150 1 0 0 0 0 0\n");
         check("prefs_v8_loads_marker_off_crosshair_on", v8.TemporalAa == 7 && v8.Hud == 150 && v8.AaChosen == 0 && v8.Crosshair == 1);
-        check("prefs_rejects_v10", Throws("10 1.3 1 2 45 120 1 0.25 7 150 1 0 0 0 0 0 1 0\n"));
+        check("prefs_rejects_v11", Throws("11 1.3 1 2 45 120 1 0.25 7 150 1 0 0 0 0 0 1 0 1 vr_full\n"));
         check("prefs_rejects_short_or_bad_v9", Throws("9 1.3 1 2 45 120 1 0.25 7 150 1 0 0 0 0 0 1\n") && Throws("9 1.3 1 2 45 120 1 0.25 7 150 1 0 0 0 0 0 2 0\n"));
+
+        var v9 = LoadText("9 1.3 1 2 45 120 1 0.25 7 150 1 0 0 0 0 0 1 0\n");
+        check("prefs_v9_migrates_keeping_keys_with_new_defaults", v9.TemporalAa == 7 && v9.Hud == 150 && v9.AaChosen == 1 && v9.Crosshair == 0 && v9.ScriptedRecenter == 1 && v9.CutsceneMode == "vr_comfort");
+        var f10 = Tmp(); v9.Save(f10);
+        check("prefs_v9_resave_is_v10_and_keeps_keys", File.ReadAllText(f10).StartsWith("10 ") && Prefs.Load(f10).Crosshair == 0 && Prefs.Load(f10).Hud == 150);
+        foreach (var mode in Prefs.CutsceneModes)
+        {
+            var f = Tmp(); new Prefs { ScriptedRecenter = 0, CutsceneMode = mode }.Save(f); var r = Prefs.Load(f);
+            check("prefs_v10_cutscene_roundtrip_" + mode, r.ScriptedRecenter == 0 && r.CutsceneMode == mode);
+        }
+        check("prefs_v10_unknown_mode_is_default", LoadText("10 1.3 1 2 45 120 1 0.25 7 150 1 0 0 0 0 0 1 0 0 bogus\n").CutsceneMode == "vr_comfort");
+        check("prefs_rejects_short_v10", Throws("10 1.3 1 2 45 120 1 0.25 7 150 1 0 0 0 0 0 1 0\n"));
+        var fx10 = Prefs.Load(Path.Combine(AppContext.BaseDirectory, "vr-settings-v10.cfg"));
+        check("prefs_reads_shared_v10_fixture", fx10.TemporalAa == 7 && fx10.Crosshair == 0 && fx10.ScriptedRecenter == 0 && fx10.CutsceneMode == "theater");
+        check("validate_rejects_bad_cutscene_settings", new Prefs { CutsceneMode = "imax" }.Validate() != "" && new Prefs { ScriptedRecenter = 2 }.Validate() != "");
+        var mc = Prefs.Merge(new Prefs(), new Prefs { Hud = 100 }, new Prefs { CutsceneMode = "theater", ScriptedRecenter = 0 });
+        check("merge_keeps_game_cutscene_mode", mc.CutsceneMode == "theater" && mc.ScriptedRecenter == 0 && mc.Hud == 100);
+        var mu = Prefs.Merge(new Prefs(), new Prefs { CutsceneMode = "vr_full" }, new Prefs { CutsceneMode = "theater" });
+        check("merge_takes_user_cutscene_edit", mu.CutsceneMode == "vr_full");
 
         var fx = Path.Combine(AppContext.BaseDirectory, "vr-settings-v9.cfg");
         var p = Prefs.Load(fx);
@@ -34,7 +53,8 @@ public static class PrefsTests
         var m2 = Prefs.Merge(new Prefs { TemporalAa = 2 }, new Prefs { TemporalAa = 4 }, new Prefs { TemporalAa = 7, Measurements = new[] { "9", "9", "9", "9", "9" } });
         check("merge_takes_user_aa_edit_and_marks_chosen", m2.TemporalAa == 4 && m2.AaChosen == 1 && string.Join(",", m2.Measurements) == "9,9,9,9,9");
 
-        var f2 = Tmp(); Prefs.Merge(p, Prefs.Load(fx), Prefs.Load(fx)).Save(f2);
-        check("merge_without_edits_equals_disk", File.ReadAllBytes(f2).SequenceEqual(File.ReadAllBytes(fx)));
+        var fx10p = Path.Combine(AppContext.BaseDirectory, "vr-settings-v10.cfg");
+        var f2 = Tmp(); Prefs.Merge(fx10, Prefs.Load(fx10p), Prefs.Load(fx10p)).Save(f2);
+        check("merge_without_edits_equals_disk", File.ReadAllBytes(f2).SequenceEqual(File.ReadAllBytes(fx10p)));
     }
 }

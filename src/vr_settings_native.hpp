@@ -92,6 +92,9 @@ inline void merge(VrSettings::Changes& into,const VrSettings::Changes& c) {
     if(c.sharpness) into.sharpness=c.sharpness;
     if(c.hud_percent) into.hud_percent=c.hud_percent;
     if(c.controls_hint) into.controls_hint=c.controls_hint;
+    if(c.crosshair) into.crosshair=c.crosshair;
+    if(c.scripted_recenter) into.scripted_recenter=c.scripted_recenter;
+    if(c.cutscene_mode) into.cutscene_mode=c.cutscene_mode;
     into.recenter|=c.recenter;into.consume|=c.consume;into.opened|=c.opened;into.calibrate|=c.calibrate;
     into.player_measurements|=c.player_measurements;into.test_unlock|=c.test_unlock;
 }

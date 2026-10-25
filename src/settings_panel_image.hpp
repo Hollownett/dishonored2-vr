@@ -141,6 +141,8 @@ inline std::vector<unsigned char> settings_panel_image(const VrSettings& setting
         split(settings.controls_hint_text(),-1,L"Shows controller button hints in the world during play. Turn it off once you know the controls."),
         split(settings.crosshair_text(),-1,L"Shows the game's crosshair where your gun or power aims. Off hides it."),
         {L"Turning",turn.str(),-1,L"Native game uses the original stick turn. Snap rotates in fixed steps and is comfortable; Smooth turns continuously at a set speed."},
+        split(settings.scripted_recenter_text(),-1,L"When the game turns or moves you in a scripted moment, re-aim the view so you keep facing the action. Off leaves the view where you were."),
+        split(settings.cutscene_mode_text(),-1,L"VR comfort plays cutscenes around you with comfort limits on camera motion. VR full follows the camera exactly. Theater shows them on a flat screen in front of you."),
         {L"Calibrate avatar",L"",-1,L"Measure shoulders, then arm reach. Enter chest width separately in Measurements. Recenter re-aligns the view to where you face now."},
         {L"Back to game menu",L"",-1,L"Test unlock (left): 100 runes for every power, infinite coins and every Black Market item. Back (right) closes this menu."}}};
     const auto strip=[](std::wstring v) {const auto at=v.find(L" (");return at==std::wstring::npos?v:v.substr(0,at);};
@@ -262,7 +264,7 @@ inline std::vector<unsigned char> settings_panel_image(const VrSettings& setting
             else if(sel) band(18,top-2,622,bot+2,static_cast<unsigned>(i)+3);
             else {fill(20,top,620,bot,rgb(21,22,31));fill(20,top,620,top+1,rgb(44,46,58));fill(20,bot-1,620,bot,rgb(15,16,23));}
             const COLORREF label=sel?ink:rgb(206,210,220);
-            if(i==9) {   // two actions share the row: calibrate (left) and recenter (right)
+            if(i==11) {   // two actions share the row: calibrate (left) and recenter (right)
                 const bool fit_notice=settings.calibration_required() || settings.calibration_runtime_notice();
                 text(L"Calibrate avatar",24,top,316,fit_notice?top+22:bot,17,label);
                 if(fit_notice) {
@@ -274,14 +276,14 @@ inline std::vector<unsigned char> settings_panel_image(const VrSettings& setting
                 text(L"Recenter view",324,top,616,bot,17,label);
                 continue;
             }
-            if(i==10) {   // test unlock (left) and close (right)
+            if(i==12) {   // test unlock (left) and close (right)
                 text(L"Test: unlock all",24,top,316,bot,17,label);
                 line(320,top+5,320,bot-5,.8,sel?rgb(120,124,130):rgb(56,58,72));
                 text(r.name,324,top,616,bot,17,label);continue;
             }
             text(r.name,34,top,262,bot,17,label,0,DT_LEFT|DT_VCENTER|DT_SINGLELINE);
             const COLORREF arrow=sel?rgb(246,248,248):rgb(176,180,192),edge=sel?rgb(50,52,64):rgb(70,72,86);
-            const int cy=top+15;
+            const int cy=top+14;
             const COLORREF value_colour=sel && frame_art?ink:white; // the game's frame is open: dark ink on the brush stroke
             if(arrow_l && arrow_r) {const std::uint32_t t=sel?0x181a24u:0xffffffu; // dark ink on the brush stroke
                 put(arrow_l,270,cy-10,284,cy+10,1,true,t);put(arrow_r,602,cy-10,616,cy+10,1,true,t);}
@@ -307,11 +309,12 @@ inline std::vector<unsigned char> settings_panel_image(const VrSettings& setting
             } else {box(vl,vr);text(r.value,vl+10,top+3,vr-10,bot-3,14,value_colour);}
         }
         // Description plate for the selected row, titled with the setting's name.
-        fill(20,428,620,500,rgb(17,18,26));fill(20,428,620,429,rgb(52,54,68));fill(20,499,620,500,rgb(10,11,16));
+        const int pt=settings_plate_top;
+        fill(20,pt,620,pt+96,rgb(17,18,26));fill(20,pt,620,pt+1,rgb(52,54,68));fill(20,pt+95,620,pt+96,rgb(10,11,16));
         const auto& cur=rows[static_cast<std::size_t>(std::min(selected,settings_row_count-1))];
-        text(cur.name,24,430,616,458,22,rgb(220,224,232),1);
-        if(divider) put(divider,170,452,470,462,.9);else line(180,456,460,456,.7,rgb(70,74,92));
-        text(cur.help,36,459,604,498,13,rgb(176,181,196),0,DT_LEFT|DT_TOP|DT_WORDBREAK);
+        text(cur.name,24,pt+2,616,pt+30,22,rgb(220,224,232),1);
+        if(divider) put(divider,170,pt+24,470,pt+34,.9);else line(180,pt+28,460,pt+28,.7,rgb(70,74,92));
+        text(cur.help,36,pt+31,604,pt+92,13,rgb(176,181,196),0,DT_LEFT|DT_TOP|DT_WORDBREAK);
         text(L"In play: hold Menu for Journal; Menu + right stick for shortcuts",20,540,420,558,12,muted,0,DT_LEFT|DT_VCENTER|DT_SINGLELINE);
         footer(true);
     }

@@ -32,9 +32,9 @@ def check(probe: str, xr: str) -> None:
     assert probe.count("adopt_first_start_aa(") == 1, "only one adopt call site"
     assert re.search(r"first_start_pending=false;\s*game_xr->adopt_first_start_aa\(", probe), "the pending flag must clear before adopting"
     assert "decision!=d2vr::FirstStartAa::wait" in probe, "wait must retry next Present"
-    assert "settings_.aa_chosen(),settings_.crosshair()}" in xr, "every GameXr save must pass both new fields"
-    assert xr.count("save_preferences(") == 2 and xr.count("settings_.aa_chosen(),settings_.crosshair()}") == 2, "both GameXr saves must carry the new fields"
-    assert "aa_chosen_preference,crosshair_preference);" in probe, "GameXr must be constructed with the saved marker and crosshair"
+    assert "settings_.aa_chosen(),settings_.crosshair(),settings_.scripted_recenter(),settings_.cutscene_mode()}" in xr, "every GameXr save must pass both new fields"
+    assert xr.count("save_preferences(") == 2 and xr.count("settings_.aa_chosen(),settings_.crosshair(),settings_.scripted_recenter(),settings_.cutscene_mode()}") == 2, "both GameXr saves must carry the new fields"
+    assert "aa_chosen_preference,crosshair_preference,scripted_recenter_preference,static_cast<d2vr::CutsceneMode>(cutscene_mode_setting.load()));" in probe, "GameXr must be constructed with the saved marker and crosshair"
     assert '"aa_first_start":{' in probe.replace('\\"', '"'), "status must report aa_first_start"
     # the sim's --vr-setting temporal_aa writes build/aa-mode; the diagnostic reads stay
     assert 'std::ifstream knob(root/L"build"/L"aa-mode")' in probe and 'L"force-taa"' in probe and 'L"build"/L"fsr4")' in probe
@@ -49,7 +49,7 @@ mutations = (
     (probe.replace("first_start_pending=!aa_chosen_preference", "first_start_pending=true", 1), xr),
     (probe.replace("if(first_start_pending && present_adapter_vendor.load(std::memory_order_relaxed))", "if(present_adapter_vendor.load(std::memory_order_relaxed))", 1), xr),
     (probe.replace("first_start_pending=false;\n                                        game_xr->adopt", "game_xr->adopt", 1), xr),
-    (probe, xr.replace("settings_.aa_chosen(),settings_.crosshair()});", "false,true});", 1)),
+    (probe, xr.replace("settings_.aa_chosen(),settings_.crosshair(),settings_.scripted_recenter(),settings_.cutscene_mode()});", "false,true});", 1)),
     (probe.replace("{   // v609 crosshair migration, whatever", "if(first_start_pending) {   // v609 crosshair migration, whatever",1), xr),
     (probe.replace("if(game_xr->persist_preferences()) fs::remove(crosshair_legacy_file,legacy_ec);", "{game_xr->persist_preferences();fs::remove(crosshair_legacy_file,legacy_ec);}",1), xr),
     (probe, xr.replace("if(log_note) log_note(", "if(false) log_note(",1)),

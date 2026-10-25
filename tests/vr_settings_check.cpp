@@ -10,6 +10,7 @@ void require(bool value,const char* message) {if(!value) throw std::runtime_erro
 int main() {
     try {
         using namespace d2vr;
+        const auto rowv=[](int row) {return (settings_row_top+settings_row_pitch*row+14)/560.;}; // middle of settings row `row`
         {
             VrSettings backend;
             backend.initialize(1,true,{},MirrorMode::both_eyes,.5,6);
@@ -177,55 +178,75 @@ int main() {
         require(increase.consume && increase.resolution && std::abs(*increase.resolution-1.3)<1e-6,"Right stick navigation did not increase scale once");
         require(!menu.update(in,false,true).resolution,"Held stick repeatedly increased scale");
         in.move_x=0;menu.update(in,false,true);in.right_trigger=1;
-        const auto decrease=menu.update(in,false,true,PanelPointer{.15,.143});
+        const auto decrease=menu.update(in,false,true,PanelPointer{.15,rowv(0)});
         require(decrease.resolution && std::abs(*decrease.resolution-1.2)<1e-6,"Pointer minus click failed");
-        require(!menu.update(in,false,true,PanelPointer{.15,.143}).resolution,"Held trigger repeated click");
+        require(!menu.update(in,false,true,PanelPointer{.15,rowv(0)}).resolution,"Held trigger repeated click");
         {   // Back row: left half requests the test unlock and keeps the menu open; right half closes.
             VrSettings unlock;ControllerInput c{};c.active=true;unlock.update(c,false,true);c.y=true;unlock.update(c,false,true);c.y=false;unlock.update(c,false,true);
-            c.right_trigger=1;const auto request=unlock.update(c,false,true,PanelPointer{.25,(64+33*10+15)/560.});
+            c.right_trigger=1;const auto request=unlock.update(c,false,true,PanelPointer{.25,rowv(12)});
             require(request.test_unlock && unlock.open(),"Test unlock click did not request the unlock");
             c.right_trigger=0;unlock.update(c,false,true);c.right_trigger=1;
-            const auto close=unlock.update(c,false,true,PanelPointer{.75,(64+33*10+15)/560.});
+            const auto close=unlock.update(c,false,true,PanelPointer{.75,rowv(12)});
             require(!close.test_unlock && !unlock.open(),"Back half did not close settings");
         }
         in.right_trigger=0;menu.update(in,false,true);in.right_trigger=1;
-        const auto taa_toggle=menu.update(in,false,true,PanelPointer{.5,.207});
+        const auto taa_toggle=menu.update(in,false,true,PanelPointer{.5,rowv(1)});
         require(taa_toggle.temporal_aa && *taa_toggle.temporal_aa && menu.temporal_aa(),"Pointer did not toggle temporal AA");
-        require(!menu.update(in,false,true,PanelPointer{.5,.207}).temporal_aa,"Held trigger changed temporal AA repeatedly");
+        require(!menu.update(in,false,true,PanelPointer{.5,rowv(1)}).temporal_aa,"Held trigger changed temporal AA repeatedly");
         in.right_trigger=0;menu.update(in,false,true);in.right_trigger=1;
-        const auto toggle=menu.update(in,false,true,PanelPointer{.5,.271});
+        const auto toggle=menu.update(in,false,true,PanelPointer{.5,rowv(2)});
         require(toggle.antialiasing && !*toggle.antialiasing,"Pointer did not toggle AA");
         in.right_trigger=0;menu.update(in,false,true);in.right_trigger=1;
-        const auto mirror_click=menu.update(in,false,true,PanelPointer{.5,.336});
+        const auto mirror_click=menu.update(in,false,true,PanelPointer{.5,rowv(3)});
         require(mirror_click.mirror && *mirror_click.mirror==MirrorMode::left_eye && menu.mirror()==MirrorMode::left_eye,"Pointer did not cycle monitor view");
-        require(!menu.update(in,false,true,PanelPointer{.5,.336}).mirror,"Held trigger changed monitor view repeatedly");
+        require(!menu.update(in,false,true,PanelPointer{.5,rowv(3)}).mirror,"Held trigger changed monitor view repeatedly");
         in.right_trigger=0;menu.update(in,false,true);in.right_trigger=1;
-        const auto sharp_click=menu.update(in,false,true,PanelPointer{.5,.4});
+        const auto sharp_click=menu.update(in,false,true,PanelPointer{.5,rowv(4)});
         require(sharp_click.sharpness && *sharp_click.sharpness==.75 && menu.sharpness()==.75,"Pointer did not cycle sharpening");
-        require(!menu.update(in,false,true,PanelPointer{.5,.4}).sharpness,"Held trigger changed sharpening repeatedly");
+        require(!menu.update(in,false,true,PanelPointer{.5,rowv(4)}).sharpness,"Held trigger changed sharpening repeatedly");
         in.right_trigger=0;menu.update(in,false,true);in.right_trigger=1;
-        const auto reticle_click=menu.update(in,false,true,PanelPointer{.5,.4357});
+        const auto reticle_click=menu.update(in,false,true,PanelPointer{.5,rowv(5)});
         require(reticle_click.hud_percent && *reticle_click.hud_percent==75 && menu.hud_percent()==75,"Pointer did not cycle the HUD size");
-        require(!menu.update(in,false,true,PanelPointer{.5,.4357}).hud_percent,"Held trigger changed the HUD size repeatedly");
+        require(!menu.update(in,false,true,PanelPointer{.5,rowv(5)}).hud_percent,"Held trigger changed the HUD size repeatedly");
         in.right_trigger=0;menu.update(in,false,true);in.right_trigger=1;
-        const auto hint_click=menu.update(in,false,true,PanelPointer{.5,.4946});
+        const auto hint_click=menu.update(in,false,true,PanelPointer{.5,rowv(6)});
         require(hint_click.controls_hint && !*hint_click.controls_hint && !menu.controls_hint(),"Pointer did not toggle the controls hint");
-        require(!menu.update(in,false,true,PanelPointer{.5,.4946}).controls_hint,"Held trigger changed the controls hint repeatedly");
+        require(!menu.update(in,false,true,PanelPointer{.5,rowv(6)}).controls_hint,"Held trigger changed the controls hint repeatedly");
         in.right_trigger=0;menu.update(in,false,true);in.right_trigger=1;
         {const bool before=menu.crosshair();
-         const auto cross=menu.update(in,false,true,PanelPointer{.5,.5536}); // row 7: (64+33*7+15)/560
+         const auto cross=menu.update(in,false,true,PanelPointer{.5,rowv(7)});
          require(cross.crosshair && *cross.crosshair==!before && menu.crosshair()==!before,"Pointer did not toggle the crosshair");
-         require(!menu.update(in,false,true,PanelPointer{.5,.5536}).crosshair,"Held trigger toggled the crosshair repeatedly");
+         require(!menu.update(in,false,true,PanelPointer{.5,rowv(7)}).crosshair,"Held trigger toggled the crosshair repeatedly");
          in.right_trigger=0;menu.update(in,false,true);in.right_trigger=1;}
-        const auto turn=menu.update(in,false,true,PanelPointer{.5,.6125});
+        {   // the two rows added in v610: scripted-recenter toggle and cutscene mode cycle, each by pointer; the shifted calibrate/close rows are covered below
+            const bool before=menu.scripted_recenter();
+            const auto sr=menu.update(in,false,true,PanelPointer{.5,rowv(9)});
+            require(sr.scripted_recenter && *sr.scripted_recenter==!before && menu.scripted_recenter()==!before,"Pointer did not toggle recenter on scripted moments");
+            require(!menu.update(in,false,true,PanelPointer{.5,rowv(9)}).scripted_recenter,"Held trigger toggled recenter repeatedly");
+            in.right_trigger=0;menu.update(in,false,true);in.right_trigger=1;
+            const auto cm=menu.update(in,false,true,PanelPointer{.5,rowv(10)});
+            require(cm.cutscene_mode && *cm.cutscene_mode==CutsceneMode::vr_full && menu.cutscene_mode()==CutsceneMode::vr_full,"Pointer did not cycle the cutscene mode");
+            require(!menu.update(in,false,true,PanelPointer{.5,rowv(10)}).cutscene_mode,"Held trigger cycled the cutscene mode repeatedly");
+            in.right_trigger=0;menu.update(in,false,true);in.right_trigger=1;
+            menu.set_cutscene_mode(CutsceneMode::vr_comfort);menu.set_scripted_recenter(true);
+            VrSettings d;require(d.scripted_recenter() && d.cutscene_mode()==CutsceneMode::vr_comfort,"New settings defaults differ");
+            require(std::wstring(d.scripted_recenter_text())==L"Recenter on scripted moments: On" && std::wstring(d.cutscene_mode_text())==L"Cutscenes: VR comfort","Default row texts differ");
+            d.set_scripted_recenter(false);d.set_cutscene_mode(CutsceneMode::vr_full);
+            require(std::wstring(d.scripted_recenter_text())==L"Recenter on scripted moments: Off" && std::wstring(d.cutscene_mode_text())==L"Cutscenes: VR full","Row texts differ");
+            d.set_cutscene_mode(CutsceneMode::theater);require(std::wstring(d.cutscene_mode_text())==L"Cutscenes: Theater","Theater text differs");
+            VrSettings init;init.initialize(1,true,{},MirrorMode::right_eye,.5,2,65,true,{},true,true,false,CutsceneMode::theater);
+            require(!init.scripted_recenter() && init.cutscene_mode()==CutsceneMode::theater,"initialize did not take the new settings");
+            in.right_trigger=0;menu.update(in,false,true);in.right_trigger=1;
+        }
+        const auto turn=menu.update(in,false,true,PanelPointer{.5,rowv(8)});
         require(turn.turning && turn.turning->mode==TurnControl::Mode::snap && turn.turning->snap_degrees==90,"Turning preset did not advance");
-        require(!menu.update(in,false,true,PanelPointer{.5,.6125}).turning,"Held trigger changed turning repeatedly");
+        require(!menu.update(in,false,true,PanelPointer{.5,rowv(8)}).turning,"Held trigger changed turning repeatedly");
         in.right_trigger=0;menu.update(in,false,true);in.right_trigger=1;
-        require(menu.update(in,false,true,PanelPointer{.5,.6714}).recenter,"Recenter action did not fire");
-        require(!menu.update(in,false,true,PanelPointer{.5,.6714}).recenter,"Held trigger repeatedly recentered");
+        require(menu.update(in,false,true,PanelPointer{.5,rowv(11)}).recenter,"Recenter action did not fire");
+        require(!menu.update(in,false,true,PanelPointer{.5,rowv(11)}).recenter,"Held trigger repeatedly recentered");
         in.right_trigger=0;menu.update(in,false,true);in.right_trigger=1;
-        require(menu.update(in,false,true,PanelPointer{.25,.6714}).calibrate && menu.calibration_page(),"Avatar calibration page did not open");
-        require(!menu.update(in,false,true,PanelPointer{.25,.6714}).calibrate,"Held trigger restarted calibration");
+        require(menu.update(in,false,true,PanelPointer{.25,rowv(11)}).calibrate && menu.calibration_page(),"Avatar calibration page did not open");
+        require(!menu.update(in,false,true,PanelPointer{.25,rowv(11)}).calibrate,"Held trigger restarted calibration");
         menu.calibration_status(AvatarCalibrationState::hold_pose);in.a=true;
         require(!menu.update(in,false,true).calibrate,"Stable pose capture restarted from A");in.a=false;menu.update(in,false,true);
         menu.calibration_status(AvatarCalibrationState::hold_pose,.5);
@@ -311,15 +332,30 @@ int main() {
             require(crosshair_stick.crosshair && *crosshair_stick.crosshair==!crosshair_before && rows.crosshair()==!crosshair_before,"Stick did not toggle the crosshair");
             stick.a=true;const auto crosshair_a=rows.update(stick,false,true);stick.a=false;rows.update(stick,false,true);
             require(crosshair_a.crosshair && *crosshair_a.crosshair==crosshair_before && rows.crosshair()==crosshair_before,"A did not toggle the crosshair");
+            press(0,-1);press(0,-1);   // turning (8), then the scripted-recenter row (9)
+            require(rows.scripted_recenter(),"scripted_recenter must default on");
+            const auto recenter_stick=press(1,0);
+            require(recenter_stick.scripted_recenter && !*recenter_stick.scripted_recenter && !rows.scripted_recenter(),"Stick did not toggle recenter on scripted moments");
+            stick.a=true;const auto recenter_a=rows.update(stick,false,true);stick.a=false;rows.update(stick,false,true);
+            require(recenter_a.scripted_recenter && *recenter_a.scripted_recenter && rows.scripted_recenter(),"A did not toggle recenter on scripted moments");
+            press(0,-1);   // cutscenes (10): right steps forward, left back
+            require(rows.cutscene_mode()==CutsceneMode::vr_comfort,"cutscene mode must default to vr_comfort");
+            const auto full_stick=press(1,0);
+            require(full_stick.cutscene_mode && *full_stick.cutscene_mode==CutsceneMode::vr_full && rows.cutscene_mode()==CutsceneMode::vr_full,"Stick right did not step to VR full");
+            require(press(1,0).cutscene_mode==CutsceneMode::theater && rows.cutscene_mode()==CutsceneMode::theater,"Stick right did not step to Theater");
+            require(press(1,0).cutscene_mode==CutsceneMode::vr_comfort,"Cutscene mode did not wrap forward");
+            require(press(-1,0).cutscene_mode==CutsceneMode::theater,"Stick left did not wrap backward");
+            stick.a=true;const auto cut_a=rows.update(stick,false,true);stick.a=false;rows.update(stick,false,true);
+            require(cut_a.cutscene_mode==CutsceneMode::vr_comfort && rows.cutscene_mode()==CutsceneMode::vr_comfort,"A did not cycle the cutscene mode forward");
             const auto rows_image=settings_panel_image(rows,1.2,3722,3850,{});
             for(unsigned row=0;row<settings_row_count;++row) {   // every row bar sits inside the bitmap, above the description plate, drawn dark or as the pale highlight
-                const unsigned y=settings_row_top+settings_row_pitch*row+15;
-                require(y<428,"A settings row bar reaches the description plate");
+                const unsigned y=settings_row_top+settings_row_pitch*row+14;
+                require(y+settings_row_height/2<settings_plate_top && settings_row_top+settings_row_pitch*(settings_row_count-1)+settings_row_height<=560,"A settings row bar reaches the description plate");
                 const auto shade=pixel(rows_image,24,y,0);
                 require(shade<60 || shade>150,"A settings row fell outside the panel bitmap");
             }
-            // Wrapping upwards from the crosshair row reaches the last, whose A closes.
-            for(unsigned k=0;k<8;++k) press(0,1);
+            // Wrapping upwards from the cutscene row (10) eleven times reaches the last row (12), whose A closes.
+            for(unsigned k=0;k<11;++k) press(0,1);
             stick.a=true;const auto back=rows.update(stick,false,true);stick.a=false;
             require(back.consume && !rows.open(),"Wrapped vertical navigation did not reach the back row");
         }
@@ -373,7 +409,7 @@ int main() {
             const std::array<TrackedPose,2> hands{{{{-.8,1.48,0},{}},{{.8,1.48,0},{}}}};
             wizard.update(controls,false,true);controls.y=true;wizard.update(controls,false,true);
             controls.y=false;wizard.update(controls,false,true);controls.right_trigger=1;
-            require(wizard.update(controls,false,true,PanelPointer{.25,.6714}).calibrate,"Lifecycle test did not enter wizard");
+            require(wizard.update(controls,false,true,PanelPointer{.25,rowv(11)}).calibrate,"Lifecycle test did not enter wizard");
             capture.begin(1,{1.5,.3});
             for(unsigned i=0;i<10;++i) capture.observe(head,hands,3,true,true,i*25,1);
             wizard.calibration_status(capture.state());controls.right_trigger=0;
@@ -415,7 +451,7 @@ int main() {
         {VrPreferences d;require(d.antialiasing && d.temporal_aa==2 && d.hud_percent==65 && d.controls_hint && d.sharpness==.5 && d.mirror==MirrorMode::right_eye,"VrPreferences defaults differ");}
         const auto preference_file=std::filesystem::path("build/vr-settings-test.cfg");
         save_preferences(preference_file,{1.3,true,{TurnControl::Mode::smooth,45,120},MirrorMode::left_eye,.75,0,65,true});
-        {std::ifstream raw(preference_file);int version{};raw>>version;require(version==9,"Saved preferences are not version 9");}
+        {std::ifstream raw(preference_file);int version{};raw>>version;require(version==10,"Saved preferences are not version 10");}
         const auto saved=load_preferences(preference_file);
         require(saved && saved->resolution==1.3 && saved->antialiasing && saved->turning.mode==TurnControl::Mode::smooth &&
             saved->turning.smooth_degrees_per_second==120 && saved->mirror==MirrorMode::left_eye && saved->sharpness==.75 && !saved->temporal_aa &&
@@ -473,7 +509,7 @@ int main() {
                     {VrPreferences d;require(!d.aa_chosen && d.crosshair,"VrPreferences defaults for the v9 fields differ");}
                     for(const bool chosen:{false,true}) for(const bool cross:{false,true}) {
                         auto v9=dlss;v9.temporal_aa=7;v9.aa_chosen=chosen;v9.crosshair=cross;save_preferences(preference_file,v9);
-                        {std::ifstream header(preference_file);int version{};header>>version;require(version==9,"save_preferences did not write version 9");}
+                        {std::ifstream header(preference_file);int version{};header>>version;require(version==10,"save_preferences did not write version 10");}
                         const auto back=load_preferences(preference_file);require(back && back->aa_chosen==chosen && back->crosshair==cross && back->temporal_aa==7,"v9 fields did not round trip");
                     }
                     const auto fixture=load_preferences(std::filesystem::path(__FILE__).parent_path()/"fixtures"/"vr-settings-v9.cfg");
@@ -485,7 +521,27 @@ int main() {
                     refused=false;try {load_preferences(preference_file);} catch(const std::runtime_error&) {refused=true;}
                     require(refused,"A v9 file without the new tokens loaded");
                 }
-                {std::ofstream version10(preference_file);version10<<"10 1.3 1 2 45 120 1 0.25 2 65 1 0 0 0 0 0 0 1\n";}
+                { // v10: scripted_recenter + cutscene_mode; a v9 file keeps every key and takes the defaults; an unknown mode falls back to the default
+                    {VrPreferences d;require(d.scripted_recenter && d.cutscene_mode==CutsceneMode::vr_comfort,"VrPreferences defaults for the v10 fields differ");}
+                    {std::ofstream v9(preference_file);v9<<"9 1.3 1 2 45 120 1 0.25 7 150 1 0 0 0 0 0 1 0\n";}
+                    const auto old=load_preferences(preference_file);
+                    require(old && old->temporal_aa==7 && old->hud_percent==150 && old->aa_chosen && !old->crosshair && old->scripted_recenter && old->cutscene_mode==CutsceneMode::vr_comfort,"A v9 file lost a key or missed the v10 defaults");
+                    for(const auto mode:{CutsceneMode::vr_comfort,CutsceneMode::vr_full,CutsceneMode::theater}) for(const bool recenter:{false,true}) {
+                        auto v10=dlss;v10.temporal_aa=7;v10.scripted_recenter=recenter;v10.cutscene_mode=mode;save_preferences(preference_file,v10);
+                        const auto back=load_preferences(preference_file);
+                        require(back && back->scripted_recenter==recenter && back->cutscene_mode==mode,"v10 fields did not round trip");
+                    }
+                    {std::ofstream bad(preference_file);bad<<"10 1.3 1 2 45 120 1 0.25 2 65 1 0 0 0 0 0 1 1 1 bogus\n";}
+                    const auto unknown=load_preferences(preference_file);require(unknown && unknown->cutscene_mode==CutsceneMode::vr_comfort && unknown->scripted_recenter,"An unknown cutscene mode did not fall back to the default");
+                    {std::ofstream bad(preference_file);bad<<"10 1.3 1 2 45 120 1 0.25 2 65 1 0 0 0 0 0 1 1 0 theater\n";}
+                    const auto fixed=load_preferences(preference_file);require(fixed && !fixed->scripted_recenter && fixed->cutscene_mode==CutsceneMode::theater,"v10 tokens did not parse");
+                    {std::ofstream bad(preference_file);bad<<"10 1.3 1 2 45 120 1 0.25 2 65 1 0 0 0 0 0 1 1\n";}
+                    refused=false;try {load_preferences(preference_file);} catch(const std::runtime_error&) {refused=true;}
+                    require(refused,"A v10 file without the new tokens loaded");
+                    const auto fixture10=load_preferences(std::filesystem::path(__FILE__).parent_path()/"fixtures"/"vr-settings-v10.cfg");
+                    require(fixture10 && fixture10->temporal_aa==7 && !fixture10->crosshair && !fixture10->scripted_recenter && fixture10->cutscene_mode==CutsceneMode::theater,"v10 fixture did not parse");
+                }
+                {std::ofstream version11(preference_file);version11<<"11 1.3 1 2 45 120 1 0.25 2 65 1 0 0 0 0 0 0 1 1 vr_full\n";}
                 refused=false;try {load_preferences(preference_file);} catch(const std::runtime_error&) {refused=true;}
                 require(refused,"A future version loaded");
             }

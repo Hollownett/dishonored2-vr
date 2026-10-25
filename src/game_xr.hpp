@@ -1308,6 +1308,8 @@ public:
     std::optional<double> take_resolution_request() noexcept {const auto request=resolution_change_;resolution_change_.reset();return request;}
     std::optional<int> take_hud_request() noexcept {const auto request=hud_change_;hud_change_.reset();return request;}
     bool crosshair_visible() const noexcept {return settings_.crosshair();}
+    bool scripted_recenter() const noexcept {return settings_.scripted_recenter();}
+    CutsceneMode cutscene_mode() const noexcept {return settings_.cutscene_mode();}
     // v609 first-start AA: the decided mode (none = keep the saved one) goes out as a temporal request, the marker is set and the file is written once.
     void adopt_first_start_aa(std::optional<int> mode) {
         if(mode) {settings_.set_temporal_aa(*mode);temporal_change_=settings_.temporal_aa();} else settings_.mark_aa_chosen();
@@ -1317,7 +1319,7 @@ public:
     // Writes the saved settings; false when there is no file or the save failed (logged), so callers can keep legacy knobs until it works.
     bool persist_preferences() {
         if(preferences_file_.empty()) return false;
-        try {save_preferences(preferences_file_,{settings_.requested(),settings_.antialiasing(),settings_.turning(),settings_.mirror(),settings_.sharpness(),settings_.temporal_aa(),settings_.hud_percent(),settings_.controls_hint(),settings_.player_measurements(),settings_.aa_chosen(),settings_.crosshair()});return true;}
+        try {save_preferences(preferences_file_,{settings_.requested(),settings_.antialiasing(),settings_.turning(),settings_.mirror(),settings_.sharpness(),settings_.temporal_aa(),settings_.hud_percent(),settings_.controls_hint(),settings_.player_measurements(),settings_.aa_chosen(),settings_.crosshair(),settings_.scripted_recenter(),settings_.cutscene_mode()});return true;}
         catch(const std::exception&) {if(log_note) log_note("v609 first-start save failed: the settings stay unsaved and the next start decides again");return false;}
     }
     std::optional<int> take_temporal_request() noexcept {const auto request=temporal_change_;temporal_change_.reset();return request;}
@@ -1429,12 +1431,12 @@ public:
     bool exit_requested=false;
     GameXr(ID3D11Device* device,UINT width,UINT height,DXGI_FORMAT format,const wchar_t* loader,bool controllers=false,bool tracked_gameplay=false,bool edge_antialiasing=false,bool settings=false,double multiplier=1,
         TurnControl::Config turning={},std::filesystem::path preferences_file={},bool native_pointer=false,PFN_xrGetInstanceProcAddr simulated_dispatch=nullptr,
-        MirrorMode mirror=MirrorMode::right_eye,double sharpness=.5,int temporal_aa=2,int hud_percent=65,bool controls_hint=true,AvatarPlayerMeasurements player_measurements={},bool aa_chosen=false,bool crosshair=true)
+        MirrorMode mirror=MirrorMode::right_eye,double sharpness=.5,int temporal_aa=2,int hud_percent=65,bool controls_hint=true,AvatarPlayerMeasurements player_measurements={},bool aa_chosen=false,bool crosshair=true,bool scripted_recenter=true,CutsceneMode cutscene_mode=CutsceneMode::vr_comfort)
         :graphics_state_(device),settings_enabled_(settings),native_pointer_enabled_(native_pointer),controller_enabled_(controllers),tracked_gameplay_required_(tracked_gameplay) {
         ContextState::Scope graphics_scope(graphics_state_);
         try {
             if(edge_antialiasing) antialiasing_=std::make_unique<EyeAntialiasing>(device);
-            antialiasing_enabled_=edge_antialiasing;settings_.initialize(multiplier,edge_antialiasing,turning,mirror,sharpness,temporal_aa,hud_percent,controls_hint,player_measurements,aa_chosen,crosshair);
+            antialiasing_enabled_=edge_antialiasing;settings_.initialize(multiplier,edge_antialiasing,turning,mirror,sharpness,temporal_aa,hud_percent,controls_hint,player_measurements,aa_chosen,crosshair,scripted_recenter,cutscene_mode);
             preferences_file_=std::move(preferences_file);
             if(!preferences_file_.empty()) {
                 palm_file_=preferences_file_.parent_path()/L"vr-palm-offsets.txt";
@@ -1938,8 +1940,8 @@ public:
                 }
                 antialiasing_enabled_=*changes.antialiasing;
             }
-            if(!preferences_file_.empty() && (changes.resolution || changes.antialiasing || changes.turning || changes.mirror || changes.sharpness || changes.temporal_aa || changes.hud_percent || changes.controls_hint || changes.crosshair || changes.player_measurements))
-                save_preferences(preferences_file_,{settings_.requested(),settings_.antialiasing(),settings_.turning(),settings_.mirror(),settings_.sharpness(),settings_.temporal_aa(),settings_.hud_percent(),settings_.controls_hint(),settings_.player_measurements(),settings_.aa_chosen(),settings_.crosshair()});
+            if(!preferences_file_.empty() && (changes.resolution || changes.antialiasing || changes.turning || changes.mirror || changes.sharpness || changes.temporal_aa || changes.hud_percent || changes.controls_hint || changes.crosshair || changes.scripted_recenter || changes.cutscene_mode || changes.player_measurements))
+                save_preferences(preferences_file_,{settings_.requested(),settings_.antialiasing(),settings_.turning(),settings_.mirror(),settings_.sharpness(),settings_.temporal_aa(),settings_.hud_percent(),settings_.controls_hint(),settings_.player_measurements(),settings_.aa_chosen(),settings_.crosshair(),settings_.scripted_recenter(),settings_.cutscene_mode()});
             // Includes squeeze: holding the calibration pose must not open the native weapon selector.
             if(changes.consume) {controller_input={};settings_consumed=true;}
             if(changes.test_unlock) test_unlock_requested=true;

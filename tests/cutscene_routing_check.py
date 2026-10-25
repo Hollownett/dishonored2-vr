@@ -52,7 +52,7 @@ def check(probe: str, xr: str) -> None:
     # Task 6 (cutscene_view.hpp): the cutscene state the head view reads is the once-per-frame view decision, the provisional origin and the
     # comfort vignette's scene speed; nothing else (no policy, no hold, no knob file)
     assert "cutscene_policy" not in head and "cutscene_hold" not in head and "refresh_cutscene_knobs" not in head
-    assert "cutscene_view_now=cutscene_view_tracker.step(cutscene_view,static_cast<d2vr::CutsceneMode>(cutscene_mode_state.load()),frames.load()," in head
+    assert "cutscene_view_now=cutscene_view_tracker.step(cutscene_view,static_cast<d2vr::CutsceneMode>(cutscene_mode_effective()),frames.load()," in head
     assert "const bool cutscene_view=cutscene_scene_render() && authored_camera && !legacy_authored_camera;" in head
     assert head.index("cutscene_view_tracker.step(") < head.index("if(camera_smoothing_enabled) {")  # the raw pose, and a cut resets the smoother first
     assert "if(cutscene_view_now.cut.cut) { // a hard cut: the vertical smoothing must not glide across it\n                anchor_smoother.reset();" in head
@@ -138,7 +138,7 @@ def check(probe: str, xr: str) -> None:
     assert "fs::exists" not in knobs and "ifstream" not in knobs
     reader = fn(probe, "void read_cutscene_knobs(const fs::path& build) noexcept {")
     assert 'cutscene_knob_off=fs::exists(build/L"no-vr-cutscenes",ignored);' in reader and 'std::ifstream knob(build/L"cutscene-mode");' in reader
-    assert "d2vr::parse_cutscene_mode(text).value_or(d2vr::CutsceneMode::vr_comfort)" in reader
+    assert "cutscene_mode_override=parsed?static_cast<int>(*parsed):-1;" in reader and "d2vr::parse_cutscene_mode(text)" in reader
     assert probe.count("read_cutscene_knobs(") == 3  # the definition, the worker, StartProbe
     status = fn(probe, "std::string cutscene_status_json() {")
     for field in ("mode", "immersive_frames", "theater_frames", "last_fallback", "cutscenes"):
