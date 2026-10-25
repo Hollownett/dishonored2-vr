@@ -1253,8 +1253,16 @@ int main() {
             const auto a=r::finger_turns(g,c,w),b=r::finger_turns_of_angles(g,c,r::finger_want_angles(c,w));
             for(unsigned f=0;f<5;++f) for(unsigned s=0;s<3;++s) assert(std::abs(a[f][s]-b[f][s])<1e-5f);
         }
-        double lever=0;for(unsigned f=1;f<5;++f) {double l=g.thickness[f];for(const auto& bone:g.finger[f].bone) l+=d2vr::length(bone);lever=std::max(lever,l);}
+        // the lag bound: every joint may lag at once, so a tip errs by at most the tolerance (the sum of each joint's lever to the tip)
+        double lever=0;for(unsigned f=1;f<5;++f) {double sum=0;for(unsigned s=0;s<3;++s) {double l=g.thickness[f];for(unsigned k=s;k<3;++k) l+=d2vr::length(g.finger[f].bone[k]);sum+=l;}lever=std::max(lever,sum);}
         assert(std::abs(r::finger_open_lag(g,.005)-.005/lever)<1e-12 && rejects([&] {(void)r::finger_open_lag(g,-1);}));
+        {   const double lag=r::finger_open_lag(g,.005);
+            for(unsigned f=1;f<5;++f) {
+                const std::array<double,3> base{.3,.4,.3},lagged{.3+lag,.4+lag,.3+lag};
+                const auto a=r::finger_points(g.finger[f],r::finger_turns_of(g.finger[f],base))[3],b=r::finger_points(g.finger[f],r::finger_turns_of(g.finger[f],lagged))[3];
+                assert(d2vr::length(a-b)<=.005+1e-6);
+            }
+        }
         assert(rejects([&] {r::FingerIkState s3{};(void)r::finger_contact(g,h.palm,&bottle,1,0,s3,1.f,r::finger_solve_all,&wants,true,-1);}));
     }
     // G5 (plan Task 11): the solver stops an extended finger. A flat hand pressed on a table stays flat: an extended finger already inside a shape
@@ -1346,6 +1354,40 @@ int main() {
             const auto scalar=r::grip_curls(c,open);
             for(unsigned f=1;f<5;++f) assert(scalar[f]>=std::min(c.finger[f],c.min_curl[f])-1e-6f);
         }
+    }
+    // G5 thumb_closes_off_table: the player's rig over a table 2 cm under the palm point: the thumb (on the palm side, no hyperextension) closes across
+    // the palm until it is out of the table; without the stop it lies in it.
+    for(bool right:{false,true}) {
+        const auto h=real_hand(right);const auto& g=h.geometry;const Vec3 n=d2vr::unit(r::palm_normal(h.palm,g));
+        const auto table=r::slab_shape(h.palm.position+n*.02,n*-1.);const std::array<float,5> open{0,0,0,0,0};
+        const auto thumb_tip=[&](const r::FingerCurls& c) {const auto t=r::finger_turns(g,c,open);
+            return r::shape_distance(table,world_of(h,r::finger_points(g.finger[0],{t[0][0],t[0][1],t[0][2]})[3]))-g.thickness[0];};
+        r::FingerIkState a{},b{};
+        const auto stopped=r::finger_contact(g,h.palm,&table,1,0,a,1.f,r::finger_solve_all,&open,false,0,true);
+        const auto old=r::finger_contact(g,h.palm,&table,1,0,b,1.f,r::finger_solve_all,&open);
+        assert(thumb_tip(old)<-.005 && thumb_tip(stopped)>=-.001 && stopped.min_curl[0]>0 && stopped.touching[0] && !stopped.hyperextended[0]);
+        assert(r::grip_curls(stopped,open)[0]>=std::min(stopped.min_curl[0],stopped.finger[0])-1e-6f);
+    }
+    // G5 (plan Task 12) current_pose_sweep_reaches_past_tip: the fingertip probe follows the finger's CURRENT pose: a flat hand's sweep runs from its
+    // knuckle along the finger and ends 2 cm past the tip; a curled finger's along its curl; the free hand's palm cast reaches 8 cm.
+    for(float mirror:{-1.f,1.f}) {
+        const auto h=synthetic_hand(mirror);const auto& g=h.geometry;
+        for(unsigned f=0;f<5;++f) {
+            const std::array<float,3> flat{0,0,0};
+            const auto sw=r::finger_sweep(g,h.palm,f,flat);
+            const auto p=r::finger_points(g.finger[f],{0,0,0});
+            const Vec3 knuckle=world_of(h,p[0]),tip=world_of(h,p[3]),dir=d2vr::unit(tip-world_of(h,p[2]));
+            assert(d2vr::length(sw.from-knuckle)<1e-9 && d2vr::length(sw.to-(tip+dir*.02))<1e-9);
+            assert(d2vr::dot(d2vr::unit(sw.to-sw.from),d2vr::unit(tip-knuckle))>.999); // along the finger, not toward the palm
+            const auto old=r::finger_sweep(g,h.palm,f);assert(f==0 || d2vr::length(old.to-sw.to)>.01); // not the fixed curl-0.5 probe
+            const std::array<float,3> curled{static_cast<float>(r::finger_angles(f,.6)[0]),static_cast<float>(r::finger_angles(f,.6)[1]),static_cast<float>(r::finger_angles(f,.6)[2])};
+            const auto cs=r::finger_sweep(g,h.palm,f,curled,.03);const auto cp=r::finger_points(g.finger[f],r::finger_turns_of(g.finger[f],{curled[0],curled[1],curled[2]}));
+            assert(d2vr::length(cs.to-(world_of(h,cp[3])+d2vr::unit(world_of(h,cp[3])-world_of(h,cp[2]))*.03))<1e-9);
+            assert(rejects([&] {(void)r::finger_sweep(g,h.palm,f,flat,-.01);}) && rejects([&] {(void)r::finger_sweep(g,h.palm,5,flat);}));
+        }
+        const auto ps=r::palm_sweep(g,h.palm,r::free_palm_reach);
+        assert(r::free_palm_reach==.08 && std::abs(d2vr::dot(ps.to-ps.from,d2vr::unit(r::palm_normal(h.palm,g)))-.09)<1e-9);
+        assert(r::slab_shape({0,0,0},{0,0,1}).half.x==.12); // the slab stays 24 cm (ruling H10)
     }
     // G8: an empty fist rests on the palm (palm_stop_slab): the tips stop on the skin plane, an open hand is untouched, the knuckles lie outside it.
     for(bool right:{false,true}) {

@@ -50,6 +50,14 @@ Write lines to `artifacts/vr-command.txt` while the mod runs; answers go to `art
   owner with its origin, end point, sweep shape and the cast's hits in the order 3b7b90 walks them, the blocking hit first
   (`docs/native-use-los-3b7b90.md`); it installs a hook on the collector sort 0xc85470 only while the knob is on. `/home` was full during that work: `--out-root` on another disk keeps
   the snapshots off it.
+- **Free fingers on a table (G5, small-objects plan Task 12).** `linux/d2vr-linux sim --scenario hand_on_table --knob sim-invulnerable --lead 45
+  --seconds 90`: at loot_reach's desk spot, crouched, each hand palm down pressed 3 cm into the desk, still, then slid slowly and fast. Status
+  `finger_ik.tip_pen` per hand = [frames with a probe shape within 3 cm of a tip, long-finger frames deeper than the tolerance (5 mm under
+  0.3 m/s, 15 mm faster), long-finger deepest slow / fast (mm), mean (mm), thumb deepest (mm), palm skin deepest (mm), frames with a finger
+  blocked at the 15 degree limit, frames with one hyperextended]; also `probe_hits_world`, `probe_hits_thin`, `blocked`, `hyperextended`,
+  `stuck_frames`, `probe_casts`, `surface`, `ease_active`. Knobs: `build/no-finger-surface` (v609 finger probes, budget and TTL),
+  `build/finger-probe-3` (three casts; the default after the budget run), `build/legacy-finger-ease` (no grip blend, hover shape, wants stack
+  or eased opening). In this save the left arm does not reach the desk (hand clamp `reach_clamped`), so the numbers are the right hand's.
 
 ## Keys
 `python tools/game_keys.py 0x0D 0x1B` sends Enter, Esc to the game window; `--hold-focus` keeps it focused

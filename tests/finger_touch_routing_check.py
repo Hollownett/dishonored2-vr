@@ -25,7 +25,7 @@ def check(probe: str, build: str, features: str) -> None:
     assert "loot && loot->kind==d2vr::PalmKind::loot) note_finger_take(h,loot->id,controls_now);" in probe
     assert "if(fk_now-take_seen[side]>100 || fk_now-take_consumed[side]>1000) take_close[side].gone(fk_t);" in b
     # G4 (plan Task 9): the reach follows the grip pose blend (legacy-finger-ease: the old flip), the eased opening rides along
-    assert "d2vr::rig::finger_contact(*geometry,palm,shapes.data(),count,fdt,finger_ik[side],legacy_finger_ease?(held_hand?d2vr::rig::held_curl:1.f):reach,finger_solve_budget,&wants,ease_opening,open_lag)" in b
+    assert "d2vr::rig::finger_contact(*geometry,palm,shapes.data(),count,fdt,finger_ik[side],legacy_finger_ease?(held_hand?d2vr::rig::held_curl:1.f):reach,budget,&wants,ease_opening,open_lag,free_hand)" in b
     assert "const float reach=!held_hand?1.f:blending?static_cast<float>(1.+(d2vr::rig::held_curl-1.)*grip_pose_blend[side].weight(fk_t)):d2vr::rig::held_curl;" in b
     # the blend wraps the WANTED angles and the contact clamp comes after it (ruling H7: surface contact is the last stage)
     assert "const auto blended=grip_pose_blend[side].apply(d2vr::rig::finger_want_angles(contact,wants),fk_t);" in b
