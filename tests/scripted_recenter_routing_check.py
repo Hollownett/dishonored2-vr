@@ -15,7 +15,11 @@ def check(probe: str, vignette: str, action: str) -> None:
     assert start < heading < update < end, "recenter update must follow authored_heading.update inside the per_frame block"
     block = body[start:end]
     # knobs and paused/menu frames bypass the helper; paused frames keep the offset (no reset on logic != 2)
-    assert "const bool scripted_view_live=scripted_recenter_enabled && scripted_recenter_setting.load() && !legacy_authored_camera;" in block
+    assert "const bool scripted_view_live=d2vr::scripted_recenter_live(scripted_recenter_enabled && scripted_recenter_setting.load() && !legacy_authored_camera," in block
+    # Ruling 15: switching it off mid-moment waits for the fold (authored, the exit step, or a residual ease still open)
+    assert "scripted_live_prev,authored_camera || scripted_was_authored || scripted_residual_prev);" in block
+    assert block.index("static bool scripted_was_authored{};") < block.index("const bool scripted_view_live=")
+    assert "scripted_offset_now=scripted.offset_rad;scripted_residual_prev=scripted.residual_easing;" in block
     guard = block[:block.index("scripted_recenter.update(")]
     guard = guard[guard.rindex("if(scripted_view_live"):]
     assert guard.startswith("if(scripted_view_live && (scripted_logic || scripted_exit) && (!action_camera_alignment_enabled || action_camera_step.advance)) {")

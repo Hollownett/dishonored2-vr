@@ -37,7 +37,7 @@ def check(probe: str, xr: str) -> None:
     assert probe.count("render_scene_frame()") == 5, probe.count("render_scene_frame()")  # the definition + 4 sites
     # the definition and render_scene_frame(); Task 6: prepare_head_view's authored scene camera, view decision, provisional origin and
     # comfort-meter skip, and the present thread's cutscene vignette
-    assert probe.count("cutscene_scene_render()") == 9, probe.count("cutscene_scene_render()")  # + the Ruling 12 adoption guard and clear
+    assert probe.count("cutscene_scene_render()") == 4, probe.count("cutscene_scene_render()")  # definition, render_scene_frame, the per-frame latch, the vignette
     assert probe.count("cutscene_gates_allowed=") == 2  # the present thread + StartProbe reset
     stereo = fn(probe, "void sample_stereo(IDXGISwapChain* chain,UINT64 number,const DXGI_SWAP_CHAIN_DESC& desc) {")
     assert "if(xr_requested && !render_scene_frame() && !cinematic_probe_keeps_stereo()) {" in stereo
@@ -48,24 +48,27 @@ def check(probe: str, xr: str) -> None:
     # the identity / allocation / N->N+1 checks are kept for the cutscene's eyes too
     assert "identity!=eye_camera_owner" in setup and "eye=eye_sources.match(address,frame-1,GetCurrentThreadId(),gpu_render_thread.load());" in begin
     head = fn(probe, "void prepare_head_view(void* view) noexcept {")
+    # Ruling 15: prepare_head_view reads the cutscene state once per displayed frame and uses that latch everywhere
+    assert head.count("cutscene_scene_render()") == 1 and "if(cutscene_frame_of!=frames.load()) {cutscene_frame_latched=cutscene_scene_render();" in head
+    assert head.index("const bool cutscene_frame=cutscene_frame_latched;") < head.index("const bool authored_camera_seen=")
     assert head.count("render_scene_frame()") == 1 and "if(!render_scene_frame()) {native_audio_listener.clear();" in head
     # Task 6 (cutscene_view.hpp): the cutscene state the head view reads is the once-per-frame view decision, the provisional origin and the
     # comfort vignette's scene speed; nothing else (no policy, no hold, no knob file)
     assert "cutscene_policy" not in head and "cutscene_hold" not in head and "refresh_cutscene_knobs" not in head
     assert "cutscene_view_now=cutscene_view_tracker.step(cutscene_view,static_cast<d2vr::CutsceneMode>(cutscene_mode_effective()),frames.load()," in head
-    assert "const bool cutscene_view=cutscene_scene_render() && authored_camera && !legacy_authored_camera;" in head
+    assert "const bool cutscene_view=cutscene_frame && authored_camera && !legacy_authored_camera;" in head
     assert head.index("cutscene_view_tracker.step(") < head.index("if(camera_smoothing_enabled) {")  # the raw pose, and a cut resets the smoother first
     assert "if(cutscene_view_now.cut.cut) { // a hard cut: the vertical smoothing must not glide across it\n                anchor_smoother.reset();" in head
-    assert "(cutscene_scene_render() && body->authored_view()); // G3:" in head
+    assert "(cutscene_frame && body->authored_view()); // G3:" in head
     # the room origin is never first-calibrated by a cutscene frame
     assert "const bool room_held=head_calibration.holds(game_xr->reference_epoch()," in head
-    assert "const bool provisional_origin=cutscene_scene_render() && !room_held;" in head
+    assert "const bool provisional_origin=cutscene_frame && !room_held;" in head
     assert "const auto calibration=(provisional_origin?cutscene_calibration:head_calibration).get(" in head
     # Ruling 12: the first gameplay frame of the same owner adopts the provisional origin (position and yaw) before the room origin is read
     adopt = head.index("head_calibration.adopt(*provisional,game_xr->reference_epoch(),body->player,body->camera,body->camera_identity.generation)")
-    assert "if(!cutscene_scene_render() && !room_held && cutscene_calibration.holds(" in head
+    assert "if(!cutscene_frame && !room_held && cutscene_calibration.holds(" in head
     assert adopt < head.index("const auto calibration=(provisional_origin?cutscene_calibration:head_calibration).get(")
-    clear = head.index("if(!cutscene_scene_render()) cutscene_calibration.clear();")  # a never-adopted provisional origin does not outlive gameplay
+    clear = head.index("if(!cutscene_frame) cutscene_calibration.clear();")  # a never-adopted provisional origin does not outlive gameplay
     assert adopt < clear < head.index("const auto calibration=(provisional_origin?cutscene_calibration:head_calibration).get(")
     assert "scripted_recenter.rebase(" not in head and "dropped_folds" not in probe
     # Ruling 14: the view lasts through the authored camera's logic-2 tail
@@ -76,7 +79,7 @@ def check(probe: str, xr: str) -> None:
     assert "native_eye=d2vr::cutscene_full_view(source_anchor,centre_pose,eye_pose,composed_origin,1.0,authored_physical_offset);" in head
     assert head.index("cutscene_full_view(") < head.index("native_eye=d2vr::authored_head_view(")
     # the comfort meter is gameplay telemetry
-    assert "if(!cutscene_scene_render()) { // gameplay telemetry" in head and head.index("if(!cutscene_scene_render()) { // gameplay telemetry") < head.index("comfort_meter.feed(")
+    assert "if(!cutscene_frame) { // gameplay telemetry" in head and head.index("if(!cutscene_frame) { // gameplay telemetry") < head.index("comfort_meter.feed(")
     # every side effect after the early return stays on raw logic 2 or the unchanged render_world_scene()
     for gate in ("if(per_frame && game_logic_mask()==2) {physical_drop=-head_offset.y;",
                  "if(per_frame && game_logic_mask()==2 && !authored_camera) {",                      # HUD world frame
@@ -103,7 +106,7 @@ def check(probe: str, xr: str) -> None:
                  "game_xr && game_xr->rendered_pair_ready();",
                  "frame.eyes_distinct=completed_left.Get()!=completed_right.Get() && views.size()==2 &&",
                  "separated(views[0].pose->position,views[1].pose->position) && rendered_distinct;",
-                 "frame.camera_readable=owner && owner->view;",
+                 "frame.camera_readable=owner && owner->view && owner->authored_view();",  # Ruling 15: camera mode 10 only
                  "frame.fault=recoverable_faults.load()>cutscene_fault_base;",
                  "cutscene_immersive=cutscene_policy.immersive(frame,mode,knob_off);",
                  "if(gates_were_open) cutscene_flush_presents=3;",
@@ -133,7 +136,8 @@ def check(probe: str, xr: str) -> None:
     # --- the knobs, live, and the status section
     # Ruling 10b: the present thread only requests a re-read (500 ms with the cinematic bit, 5 s otherwise); a worker touches the files
     knobs = fn(probe, "void refresh_cutscene_knobs(UINT64 now,bool cinematic) {")
-    assert "now-cutscene_knob_tick<(cinematic?500u:5000u)) return;" in knobs and "if(cinematic && !cutscene_knob_cinematic) cutscene_knob_tick=0;" in knobs
+    assert "now-cutscene_knob_tick<500u) return;" in knobs and "if(cinematic && !cutscene_knob_cinematic) cutscene_knob_tick=0;" in knobs
+    assert knobs.index("if(!cinematic) return;") < knobs.index("std::thread(")  # Ruling 15: no worker in gameplay
     assert "if(cutscene_knob_reading.exchange(true)) return;" in knobs and ").detach();" in knobs
     assert "fs::exists" not in knobs and "ifstream" not in knobs
     reader = fn(probe, "void read_cutscene_knobs(const fs::path& build) noexcept {")
@@ -179,7 +183,8 @@ def check(probe: str, xr: str) -> None:
     assert "const auto scene_hold_now=scene_hold;const auto hold_scene=scene_id;scene_hold=SceneHold::none;" in present
     loop_end = present.index("if(mirror_rects[0] || mirror_rects[1]) {mirror_->end(desktop);++mirrored_frames;}")
     reset = present.index("last_good_projection_.reset();last_good_scene_=0;")
-    assert present.index("checked(xrReleaseSwapchainImage(chains_[eye],&release),\"Release game eye\");") < loop_end < reset < present.index("if(!world_scene) {\n                // Native menus")
+    quad = present.index("if(!world_scene) {\n                // A quad frame copied")
+    assert present.index("checked(xrReleaseSwapchainImage(chains_[eye],&release),\"Release game eye\");") < loop_end < quad < reset  # Ruling 15: quad frames only
     assert present.count("last_good_projection_.reset();") == 1 and present.count("last_good_projection_.capture(") == 1
     capture = present.index("last_good_projection_.capture(")
     assert reset < capture and "last_good_scene_=authored_scene_render?scene_id:0;" in present[capture:capture + 300]
@@ -215,6 +220,8 @@ def check(probe: str, xr: str) -> None:
         """frames: (kind, scene, hold) with kind projection|asr|quad|held. Returns, per held frame, what it showed."""
         tag, valid, shown = 0, False, []
         for kind, scene, hold in frames:
+            if kind == "dropped":  # Ruling 15: a scene frame whose projection the guard dropped keeps the previous projection and its tag
+                continue
             if kind in ("projection", "asr", "quad"):
                 valid, tag = kind != "quad", scene if kind == "asr" else 0
             else:
@@ -229,6 +236,11 @@ def check(probe: str, xr: str) -> None:
     assert replays([("quad", 0, None), ("quad", 0, None), ("held", 1, "black")]) == [("black", 0)]
     # Ruling 9: a tolerated miss right after this cutscene's immersive frame re-shows that layer; twice in a row still that layer
     assert replays([("asr", 2, None), ("held", 2, "replay"), ("held", 2, "replay")]) == [("replay", 2), ("replay", 2)]
+    # Ruling 15: a gameplay frame whose projection was dropped (a non-finite pose) replays the previous stereo projection, not black;
+    # a dropped cutscene frame keeps its scene's tag; a quad in between still blocks every replay
+    assert replays([("projection", 0, None), ("dropped", 0, None), ("held", 0, "none")]) == [("replay", 0)]
+    assert replays([("asr", 2, None), ("dropped", 2, None), ("held", 2, "replay")]) == [("replay", 2)]
+    assert replays([("projection", 0, None), ("quad", 0, None), ("dropped", 0, None), ("held", 0, "none")]) == [("black", 0)]
     # a replay hold never shows gameplay's projection or another cutscene's layer
     assert replays([("projection", 0, None), ("held", 2, "replay")]) == [("black", 0)]
     assert replays([("asr", 1, None), ("held", 2, "replay")]) == [("black", 0)]

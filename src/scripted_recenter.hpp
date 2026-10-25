@@ -33,6 +33,10 @@ struct ScriptedRecenterOutput {
 // About +Y (tracking up), the convention HeadCalibration stores.
 inline Quaternion yaw_quaternion(double yaw) noexcept {return {0,std::sin(yaw*.5),0,std::cos(yaw*.5)};}
 
+// Ruling 15: whether the helper runs this frame. Switching it off (the VR row or the knob) while a moment is open (authored, or folding, or
+// easing out a residual) waits until that moment has folded, so the offset is never dropped unfolded (a view jump); switching it on is at once.
+inline bool scripted_recenter_live(bool wanted,bool was_live,bool moment_open) noexcept {return wanted || (was_live && moment_open);}
+
 class ScriptedRecenter {
     static constexpr double pi=3.14159265358979323846;
     bool in_{},ease_{},entry_pending_{}; // entry_pending_: entered with no usable gaze, the next valid frame inside the moment starts the turn

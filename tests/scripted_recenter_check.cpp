@@ -144,5 +144,29 @@ int main(){
      auto o=r.update(in(0,true,deg(50),1.0,0,1,{},true));assert(near(o.offset_rad,deg(50)) && !o.easing);}
     {ScriptedRecenter r; // reset
      r.update(in(0,true,deg(40),1.0));r.reset();assert(r.update(in(1,false)).offset_rad==0);}
+    {   // Ruling 15: switching the recenter off mid-moment waits for the fold; the view never jumps (the probe's per-frame rule, replayed)
+        assert(scripted_recenter_live(true,false,false) && !scripted_recenter_live(false,false,true) && scripted_recenter_live(false,true,true) &&
+               !scripted_recenter_live(false,true,false));
+        for(const double off_at:{1.1,1.6,2.05}) { // during the ease, after it, on the exit frame
+            ScriptedRecenter r;bool live_prev=true,was_auth=false,res=false;double origin=0,offset=0,prev_view=0;bool have=false;int live_frames_after_off=0;
+            const double hmd=deg(40),body=0,heading=0;
+            for(int i=0;i<=300;++i) {
+                const double t=i*.01;const bool authored=t>=1 && t<2;const bool wanted=t<off_at;
+                const bool live=scripted_recenter_live(wanted,live_prev,authored || was_auth || res);live_prev=live;
+                if(!wanted && live) ++live_frames_after_off;
+                if(live) {
+                    const auto o=r.update(in(t,authored,wrap_test(hmd-origin-offset),authored?std::optional<double>(heading):std::nullopt,0,1,
+                        authored?std::optional<double>():std::optional<double>(body)));
+                    if(o.fold_rad) origin+=*o.fold_rad;
+                    offset=o.offset_rad;was_auth=authored;res=o.residual_easing;
+                } else {r.reset();offset=0;was_auth=false;res=false;}
+                const double view=authored?heading+hmd-origin-offset:body+hmd-origin;
+                if(have) assert(std::fabs(wrap_test(view-prev_view))<=1.5*deg(40)/.4*.01+1e-9); // never more than the ease's peak step
+                prev_view=view;have=true;
+            }
+            assert(!live_prev && offset==0); // off in the end
+            if(off_at<2) assert(live_frames_after_off>0); // the disable was deferred to the fold
+        }
+    }
     std::cout<<"PASS: scripted recenter ease, dead zone, re-aim, exit fold, epoch drop, wrap and instant\n";
 }

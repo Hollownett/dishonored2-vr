@@ -38,6 +38,8 @@ Do each item in each mode: VR comfort, VR full and Theater (the Cutscenes row).
 15. **Comfort vignette strength while the cutscene camera moves** (VR comfort). Say whether it is right, too strong or too weak.
 16. **VR full:** are the scene's motion and its end tilt comfortable? (VR full has no vignette.)
 17. **Back to normal.** After each cutscene, the hands, HUD and aiming work as before.
+18. **A mission-intro (pre-rendered) video** in each cutscene mode. Expect: it shows the video, not the 3D scene behind it.
+19. **Subtitles and the hold-to-skip prompt** in VR comfort and VR full. Expect: both are visible. If either is missing, note it; Theater keeps them. Also say whether the cinematic's black letterbox bars (top and bottom, fixed to your view) bother you in VR.
 
 ## Report
 

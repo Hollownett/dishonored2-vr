@@ -2061,10 +2061,12 @@ public:
                 {SpanClock span(xr_spans,XrSpan::release);checked(xrReleaseSwapchainImage(chains_[eye],&release),"Release game eye");}
             }
             if(mirror_rects[0] || mirror_rects[1]) {mirror_->end(desktop);++mirrored_frames;}
-            // The eye chains now hold THIS frame's images (a quad frame copies its duplicated mono image into both): an older projection
-            // replayed later would show them with its own stereo poses. Only this frame's own projection, captured below, may be replayed.
-            last_good_projection_.reset();last_good_scene_=0;
             if(!world_scene) {
+                // A quad frame copied its duplicated mono image into both eye chains: an older projection replayed later would show that mono
+                // image with its own stereo poses, so it is dropped here (Ruling 15: only after quad frames). A scene frame keeps the previous
+                // projection until its own is captured below, so a frame whose projection the guard drops (a non-finite pose) still replays
+                // stereo (the chains hold this frame's stereo images); a cutscene hold replays only its own scene's layer (last_good_scene_).
+                last_good_projection_.reset();last_good_scene_=0;
                 // Native menus use a pointer-enabled panel; cutscenes play on a larger, farther "TV".
                 const auto& pose=cinematic?panel_pose(authored_panel_):native_menu_pose();
                 const auto view=menu_view(cinematic);
