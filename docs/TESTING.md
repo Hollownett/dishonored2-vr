@@ -25,6 +25,12 @@ Write lines to `artifacts/vr-command.txt` while the mod runs; answers go to `art
 - Damage: `--scenario damage --damage bullet_regular_npc` hurts the player every 3 s through the engine's `damage player1 <decl>` (god mode is switched off first). Timed eye frames (`xr-t*-left.rgba` in the run folder) show the damage vignette; HUD screen dumps are in `ui-dump-png`. Decl names are in `base/game1.index` (`damage/...`).
 - Teleport: `--teleport X Y Z` on `vr_selftest.py`, or `console setviewpos`. Known spots in `campaign/dunwall/escape/streets`:
   water `60.5 -79 -8.5`, save start `-91.5 -92.7 4.95`.
+- Linux sim teleport (no `vr-command.txt` timing needed): gameplay script version 8 gives a segment a `"console"` line, which the DLL queues once
+  through the same `console` path, at the first script tick at or after the segment's start while in gameplay (a line scheduled during a load waits
+  for gameplay; lines fire in order). Use `scenario_lib.console(t_ms, scenario_lib.setviewpos(x, y, z, yaw))` in a scenario under
+  `tools/linux/scenarios/` (a 1-frame segment). The line is at most 200 chars from `[A-Za-z0-9 ._-]` and starts with a letter (no `;`); the
+  transport token is percent-encoded (`%20` space). Each request is logged in `artifacts/simulated-gameplay-console.txt` (`elapsed_ms line`)
+  and the queue result (`console: queued ...`) in `vr-command-result.txt`. Example: `tools/linux/scenarios/authored_turn.py`.
 - `console god` toggles player invulnerability (cvar `ark_god_player`). There is no `noclip`/`give`/`spawn` console command in this build.
 
 ## Keys

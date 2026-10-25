@@ -9,6 +9,7 @@ Prints PASS/FAIL/INFO per assertion; exit 1 on any FAIL. Side-pair fields are [l
 import argparse
 import csv
 import json
+import math
 import statistics
 import sys
 from pathlib import Path
@@ -37,6 +38,13 @@ SWORD_COLUMNS = ("elapsed_ms", "held", "reversed", "reverse_weight", "hilt_miss"
 # 13.9 mm on the fixture), and a DRAW (hold 1) displaces the hilt for ~570 ms while the equip clip settles (hold easing). So hilt_miss is judged from REGRAB_FIT_MS with
 # the bound below; the reverse applies at hold start, so reverse_weight is judged from REGRAB_SETTLE_MS.
 REGRAB_MIN_HOLDS, REGRAB_PATTERN, REGRAB_SETTLE_MS, REGRAB_FIT_MS, REGRAB_HILT_MISS = 4, (False, True, False, True), 350, 700, 0.02
+AUTHORED = ("authored_turn",)  # G1 scripted moments (camera plan Task 3): judged from artifacts/scripted-view.csv (knob build/scripted-view-trace)
+SCRIPTED_COLUMNS = ("t", "authored", "state_index", "hmd_rel_deg", "rel_composed_deg", "heading_deg", "offset_deg", "fold_deg", "body_deg", "view_yaw_deg")
+# src/scripted_recenter.hpp: an entry turn eases the offset over 0.4 s with smoothstep (peak rate 1.5 x delta / 0.4 s) and skips a delta under 10 deg.
+# The ease runs on a clock that credits at most 1/30 s per frame, so the end is read AUTHORED_EASE_S + AUTHORED_EASE_SLACK_S after the aim.
+AUTHORED_EASE_S, AUTHORED_EASE_SLACK_S, AUTHORED_DEAD_ZONE_DEG, AUTHORED_RESIDUAL_DEG, AUTHORED_STEP_SLACK_DEG, AUTHORED_EXIT_WINDOW_S = 0.4, 0.05, 10.0, 3.0, 1.0, 0.5
+STATE_NAMES = {8: "Mantle", 9: "Vault", 13: "Assassination", 33: "SyncAnim", 38: "NpcFatality", 41: "Choke", 42: "DropChoke", 55: "BloodthirstyFatality",
+               83: "KillCam", 39: "combat 39", 44: "combat 44"}  # docs/full-body-research.md 6b
 HAND_FILTER_DEFAULT = 0x000885E4  # R1Recipe::filter: the hand body's word whenever it holds nothing through the body
 
 
@@ -64,6 +72,8 @@ def check(statuses, scenario, proofs=("a", "b", "d"), reject_touch=False):
 
     if scenario in RUNS:
         return check_run(statuses)
+    if scenario in AUTHORED:
+        return check_authored(statuses)
     if scenario in REGRAB:
         return check_regrab(statuses)
     if scenario in HAND_BODY:
@@ -116,6 +126,113 @@ def check(statuses, scenario, proofs=("a", "b", "d"), reject_touch=False):
         gap = max(float(s.get("prop_seat_gap_m", 0) or 0) for s in statuses)
         info(f"prop_grasp_point {statuses[-1].get('prop_grasp_point')}, prop_seat_gap_m {gap:.3g}, corpse holds {holds} (a native HoldObject tank is not a lane)")
     return out
+
+
+def parse_scripted_view(text):
+    """scripted-view.csv text -> a list of float rows keyed by SCRIPTED_COLUMNS (NaN kept: heading_deg is NaN while no heading); short rows dropped."""
+    rows = []
+    for rec in csv.DictReader(text.splitlines()):
+        try:
+            rows.append({k: float(rec[k]) for k in SCRIPTED_COLUMNS})
+        except (KeyError, TypeError, ValueError):
+            continue
+    return rows
+
+
+def _wrap_deg(a):
+    return (a + 180.0) % 360.0 - 180.0
+
+
+def scripted_entries(rows):
+    """Authored scenes in the trace -> list of dicts: entry/aim/exit row indices. The aim is the first authored row with a finite heading (a late
+    heading starts the entry turn there, src/scripted_recenter.hpp entry_pending_); delta is the gaze against the composed origin at the aim."""
+    scenes, i = [], 0
+    while i < len(rows):
+        if rows[i]["authored"] and (i == 0 or not rows[i - 1]["authored"]):
+            j = i
+            while j + 1 < len(rows) and rows[j + 1]["authored"]:
+                j += 1
+            aim = next((k for k in range(i, j + 1) if math.isfinite(rows[k]["heading_deg"])), None)
+            scene = {"entry": i, "aim": aim, "last": j, "exit": j + 1 if j + 1 < len(rows) else None, "state": int(rows[i]["state_index"])}
+            if aim is not None:
+                before = rows[aim - 1]["offset_deg"] if aim > 0 else 0.0
+                scene["delta"] = _wrap_deg(rows[aim]["hmd_rel_deg"] - before)
+            scenes.append(scene)
+            i = j + 1
+        else:
+            i += 1
+    return scenes
+
+
+def check_authored(statuses):
+    """G1 authored_turn: per authored scene in scripted-view.csv (an entry = authored 0 -> 1).
+    - Residual: an entry whose delta |hmd_rel| >= 10 deg ends its ease (0.4 s after the aim, + 0.05 s for the frame-capped clock) with
+      |rel_composed - (the head's own yaw change since the aim)| < 3 deg.
+    - Steps: around entry (the row before it through the ease end) and exit (the last authored row through 0.5 s after), no frame-to-frame view_yaw
+      step exceeds the ease's peak rate (1.5 x |delta| / 0.4 s, x the frame's dt) plus the head's own yaw change that frame (hmd_rel change
+      plus that frame's fold), plus 1 deg. Between two
+      authored rows the native camera's own heading change is the scene's animation, not the recenter's, so it is taken out of the step.
+    - At least one entry observed. INFO per entry: state_index, delta, residual."""
+    out = []
+    for n, status in enumerate(statuses):
+        tag = f"session {n + 1}: " if len(statuses) > 1 else ""
+        rows = status.get("scripted_rows")
+        if not rows:
+            out.append(("FAIL", f"{tag}scripted-view.csv is missing or empty (run with --knob scripted-view-trace)"))
+            continue
+        scenes = scripted_entries(rows)
+        out.append(("PASS" if scenes else "FAIL", f"{tag}authored entries observed >= 1 (got {len(scenes)}; trace rows {len(rows)}{', capped at 4096' if len(rows) >= 4096 else ''})"))
+        for k, sc in enumerate(scenes):
+            name = f"{tag}entry {k + 1} (state_index {sc['state']} {STATE_NAMES.get(sc['state'], '?')}, t {rows[sc['entry']]['t']:.2f})"
+            if sc["aim"] is None:
+                out.append(("INFO", f"{name}: no heading in the scene (no authored view drawn, no aim)"))
+                continue
+            aim = rows[sc["aim"]]
+            delta = sc["delta"]
+            end_t = aim["t"] + AUTHORED_EASE_S + AUTHORED_EASE_SLACK_S
+            end = next((m for m in range(sc["aim"], sc["last"] + 1) if rows[m]["t"] >= end_t), None)
+            residual = None
+            if end is not None:
+                head = _wrap_deg(rows[end]["hmd_rel_deg"] - aim["hmd_rel_deg"])
+                residual = _wrap_deg(rows[end]["rel_composed_deg"] - head)
+            dur = rows[sc["last"]]["t"] - rows[sc["entry"]]["t"]
+            res_text = "n/a (scene ended before the ease)" if residual is None else f"{residual:+.2f} deg"
+            off_text = "n/a" if end is None else f"{rows[end]['offset_deg']:+.2f} deg"
+            out.append(("INFO", f"{name}: delta {delta:+.2f} deg, aim +{aim['t'] - rows[sc['entry']]['t']:.3f} s, scene {dur:.2f} s, "
+                                f"residual {res_text}, offset at the ease end {off_text}"))
+            if abs(delta) >= AUTHORED_DEAD_ZONE_DEG:
+                if residual is None:
+                    out.append(("INFO", f"{name}: residual not judged: the scene ended {aim['t'] + AUTHORED_EASE_S - rows[sc['last']]['t']:.2f} s before the ease"))
+                else:
+                    out.append(("PASS" if abs(residual) < AUTHORED_RESIDUAL_DEG else "FAIL", f"{name}: |residual| < {AUTHORED_RESIDUAL_DEG:g} deg at the ease end (got {residual:+.2f})"))
+            peak = 1.5 * abs(delta) / AUTHORED_EASE_S if abs(delta) >= AUTHORED_DEAD_ZONE_DEG else 0.0
+            stop = end if end is not None else sc["last"]
+            windows = [("entry", max(sc["entry"] - 1, 0), stop)]
+            if sc["exit"] is not None:
+                exit_end = sc["exit"]
+                while exit_end + 1 < len(rows) and rows[exit_end + 1]["t"] <= rows[sc["exit"]]["t"] + AUTHORED_EXIT_WINDOW_S and not rows[exit_end + 1]["authored"]:
+                    exit_end += 1
+                windows.append(("exit", sc["last"], exit_end))
+            for label, a0, a1 in windows:
+                worst, worst_at = 0.0, None
+                for m in range(a0 + 1, a1 + 1):
+                    prev, row = rows[m - 1], rows[m]
+                    dt = max(row["t"] - prev["t"], 0.0)
+                    step = _wrap_deg(row["view_yaw_deg"] - prev["view_yaw_deg"])
+                    if prev["authored"] and row["authored"] and math.isfinite(prev["heading_deg"]) and math.isfinite(row["heading_deg"]):
+                        step = _wrap_deg(step - _wrap_deg(row["heading_deg"] - prev["heading_deg"]))
+                    # the head's own motion: hmd_rel is read after this frame's fold, which turns the origin (hmd_rel drops by fold_deg)
+                    head_motion = abs(_wrap_deg(row["hmd_rel_deg"] - prev["hmd_rel_deg"] + row["fold_deg"]))
+                    allowed = peak * dt + head_motion + AUTHORED_STEP_SLACK_DEG
+                    excess = abs(step) - allowed
+                    if worst_at is None or excess > worst:
+                        worst, worst_at = excess, (m, step, allowed)
+                if worst_at is None:
+                    continue
+                m, step, allowed = worst_at
+                out.append(("PASS" if worst <= 1e-9 else "FAIL", f"{name}: {label} view_yaw steps within ease rate + head motion + {AUTHORED_STEP_SLACK_DEG:g} deg "
+                                                               f"(worst step {step:+.2f} deg vs allowed {allowed:.2f} at t {rows[m]['t']:.3f})"))
+    return out or [("FAIL", "no sessions")]
 
 
 def parse_locomotion(text):
@@ -537,6 +654,12 @@ def main(argv=None):
                 status["locomotion_rows"] = parse_locomotion((Path(d) / "artifacts" / "locomotion-hands.csv").read_text(encoding="utf-8"))
             except OSError:
                 status["locomotion_rows"] = None
+    if args.scenario in AUTHORED:
+        for d, status in zip(args.run_dirs, statuses):
+            try:
+                status["scripted_rows"] = parse_scripted_view((Path(d) / "artifacts" / "scripted-view.csv").read_text(encoding="utf-8"))
+            except OSError:
+                status["scripted_rows"] = None
     if args.scenario in REGRAB:
         for d, status in zip(args.run_dirs, statuses):
             try:

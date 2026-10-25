@@ -128,6 +128,30 @@ int main() {
      assert(rejects("D2VR_GAMEPLAY_SCRIPT 7 10000 1\n1000 2000"+z+" 0 0 0 0 0 0 0 0 0 0 0 2")); // touch flag not 0/1
      assert(rejects("D2VR_GAMEPLAY_SCRIPT 7 10000 1\n1000 2000"+z+" 0 0 0 0 0 0 0 0 0 0 0")); // truncated touch row
     }
+    {std::string z;for(int i=0;i<26;++i) z+=" 0"; // version 8: one console token after the touch flags; fired once when its segment begins
+     const std::string t=" 0 0 0 0 0 0 0 0 0 0";
+     d2vr::SimulatedGameplayScript con;std::istringstream csrc("D2VR_GAMEPLAY_SCRIPT 8 10000 4\n1000 1001"+z+" 0 0"+t+" setviewpos%201.5%20-2.25%200.5%2090\n"
+         "1001 2000"+z+" 0 0"+t+" -\n3000 3001"+z+" 0 2"+t+" god%20player\n5000 5001"+z+" 0 0"+t+" god\n");
+     con.load(csrc,10);assert(con.size()==4);
+     assert(con.take_console(999,true).empty()); // not yet
+     assert(con.take_console(1500,false).empty()); // its gameplay segment waits for gameplay (a load), it is not dropped
+     {const auto due=con.take_console(1500,true);assert(due.size()==1 && due[0]=="setviewpos 1.5 -2.25 0.5 90");} // the 1 ms segment fires after it ended
+     assert(con.take_console(1600,true).empty()); // once only; '-' is none
+     {const auto due=con.take_console(3500,false);assert(due.size()==1 && due[0]=="god player");} // 'always'
+     {const auto due=con.take_console(9999,true);assert(due.size()==1 && due[0]=="god");}
+     assert(con.take_console(9999,true).empty());
+     std::istringstream again("D2VR_GAMEPLAY_SCRIPT 8 10000 1\n1000 1001"+z+" 0 0"+t+" god\n");con.load(again,10);
+     assert(con.take_console(5000,true).size()==1); // a new load starts the console cursor again
+    }
+    {std::string z;for(int i=0;i<26;++i) z+=" 0";const std::string t=" 0 0 0 0 0 0 0 0 0 0";
+     auto row=[&](const std::string& token){return "D2VR_GAMEPLAY_SCRIPT 8 10000 1\n1000 2000"+z+" 0 0"+t+" "+token+"\n";};
+     assert(!rejects(row("-")) && !rejects(row("setviewpos%201%202%203")) && !rejects(row("a"+std::string(199,'b'))));
+     assert(rejects(row("a"+std::string(200,'b')))); // 201 chars
+     assert(rejects(row("god%3Bquit")) && rejects(row("god;quit")) && rejects(row("echo%20a%25b"))); // ';' and '%' are outside [A-Za-z0-9 ._-]
+     assert(rejects(row("%20god")) && rejects(row("1god")) && rejects(row("god%2"))); // starts with a letter; only %20 / %25
+     assert(rejects("D2VR_GAMEPLAY_SCRIPT 8 10000 1\n1000 2000"+z+" 0 0"+t+"\n")); // missing token
+     assert(rejects("D2VR_GAMEPLAY_SCRIPT 7 10000 1\n1000 2000"+z+" 0 0"+t+" god\n")); // a v7 script with the token: trailing data
+    }
     {d2vr::SimulatedGameplayScript many;std::string text="D2VR_GAMEPLAY_SCRIPT 5 10000 1000\n";
      for(int i=0;i<1000;++i) text+=std::to_string(i*10)+" "+std::to_string(i*10+10)+zeros+" 0\n";
      std::istringstream many_source(text);many.load(many_source,10);assert(many.size()==1000);} // more than 128 segments only from version 5

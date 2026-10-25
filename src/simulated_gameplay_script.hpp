@@ -10,12 +10,13 @@
 namespace d2vr {
 // Developer commands only. Native pad composition still applies its release gates.
 class SimulatedGameplayScript {
-    struct Segment {UINT64 start{},end{};ControllerInput input{};float head_pitch_degrees{},hand_pitch_degrees{};std::array<float,9> offsets{};unsigned mask{};std::array<std::array<float,7>,3> poses{};unsigned when{};unsigned touch{};};
+    struct Segment {UINT64 start{},end{};ControllerInput input{};float head_pitch_degrees{},hand_pitch_degrees{};std::array<float,9> offsets{};unsigned mask{};std::array<std::array<float,7>,3> poses{};unsigned when{};unsigned touch{};std::string console;};
     std::vector<Segment> segments_;
+    std::size_t console_next_{}; // version 8: the first segment whose console line has not been taken yet
 public:
     void load(std::istream& source,unsigned seconds) {
         std::string magic;unsigned version{},duration{},count{};
-        if(!(source>>magic>>version>>duration>>count) || magic!="D2VR_GAMEPLAY_SCRIPT" || (version<1 || version>7) ||
+        if(!(source>>magic>>version>>duration>>count) || magic!="D2VR_GAMEPLAY_SCRIPT" || (version<1 || version>8) ||
            seconds<10 || seconds>120 || duration!=seconds*1000 || count==0 || count>(version>=5?4096u:128u))
             throw std::invalid_argument("Invalid gameplay script header");
         std::vector<Segment> parsed;UINT64 previous{};
@@ -53,10 +54,13 @@ public:
             if(version>=6 && (!(source>>s.when) || s.when>2)) throw std::invalid_argument("Invalid gameplay script when");
             // Version 7: ten capacitive-touch flags, left then right, each [trigger,thumbstick,first,second,thumbrest] (visual finger curl tests; the buttons above are untouched).
             if(version>=7) for(unsigned k=0;k<10;++k) {int value{};if(!(source>>value) || value<0 || value>1) throw std::invalid_argument("Invalid gameplay script touch");s.touch|=static_cast<unsigned>(value)<<k;}
+            // Version 8: one token, '-' or a percent-encoded engine console line ('%20' space, '%25' percent; decoded at most 200 chars from
+            // [A-Za-z0-9 ._-], starting with a letter), fired once when the segment begins (take_console).
+            if(version>=8) {std::string token;if(!(source>>token) || !decode_console(token,s.console)) throw std::invalid_argument("Invalid gameplay script console line");}
             parsed.push_back(s);previous=s.end;
         }
         std::string extra;if(source>>extra) throw std::invalid_argument("Trailing gameplay script data");
-        segments_=std::move(parsed);
+        segments_=std::move(parsed);console_next_=0;
     }
     ControllerInput sample(UINT64 elapsed,bool gameplay,bool focused,int* index=nullptr,float* head_pitch_degrees=nullptr) const noexcept {
         if(index) *index=-1;
@@ -106,6 +110,32 @@ public:
             return out;
         }
         return {};
+    }
+    // Version 8 console lines due at `elapsed`, in segment order, each exactly once: a line is taken at the first call at or after its
+    // segment's start on which the segment's `when` holds (`gameplay`: the caller passes logic 2 only), so a 1-frame segment between two ticks
+    // still fires and a teleport scheduled during a load waits for gameplay. A line waiting for its state holds back the later ones.
+    std::vector<std::string> take_console(UINT64 elapsed,bool gameplay) {
+        std::vector<std::string> out;
+        for(;console_next_<segments_.size();++console_next_) {
+            const auto& s=segments_[console_next_];
+            if(s.start>elapsed) break;
+            if(s.console.empty()) continue;
+            if(!((s.when==0 && gameplay) || (s.when==1 && !gameplay) || s.when==2)) break;
+            out.push_back(s.console);
+        }
+        return out;
+    }
+    static bool decode_console(const std::string& token,std::string& line) {
+        line.clear();if(token=="-") return true;
+        for(std::size_t i=0;i<token.size();++i) {
+            if(token[i]!='%') {line+=token[i];continue;}
+            if(token.compare(i,3,"%20")==0) line+=' ';else if(token.compare(i,3,"%25")==0) line+='%';else return false;
+            i+=2;
+        }
+        const auto letter=[](char c){return (c>='A' && c<='Z') || (c>='a' && c<='z');}; // ASCII only, whatever the locale
+        if(line.empty() || line.size()>200 || !letter(line[0])) return false;
+        for(const char c:line) if(!(letter(c) || (c>='0' && c<='9') || c==' ' || c=='.' || c=='_' || c=='-')) return false;
+        return true;
     }
     bool uses_touch() const noexcept {for(const auto& s:segments_) if(s.touch) return true;return false;}
     std::size_t size() const noexcept {return segments_.size();}

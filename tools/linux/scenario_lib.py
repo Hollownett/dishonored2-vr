@@ -11,6 +11,7 @@ CHEST = [-0.1, -0.2, -0.2]   # lifted to the chest
 FLOOR = [-0.2, -1.15, -0.3]  # hand about 0.1 m above the floor
 HEAD_PITCH = -50
 PRESS_FIRST_MS, PRESS_EVERY_MS, PRESS_MS = 8000, 3000, 200
+FRAME_MS = 11  # one 90 Hz frame
 
 
 def lerp(a, b, k):
@@ -64,3 +65,15 @@ def lead_in(lead_ms):
     if cursor < lead_ms:
         out.append({"start_ms": cursor, "end_ms": lead_ms, "head_pitch_degrees": 0, "input": dict(NEUTRAL)})
     return out
+
+
+def console(t_ms, line):
+    """A 1-frame segment carrying an engine console line (gameplay script v8). The DLL fires it once, at the first script tick at or
+    after t_ms while in gameplay (a teleport scheduled during a load waits for gameplay), through the 'console' test-command path."""
+    return {"start_ms": t_ms, "end_ms": t_ms + FRAME_MS, "input": dict(NEUTRAL), "console": line}
+
+
+def setviewpos(x, y, z, yaw_deg, pitch_deg=None):
+    """The engine teleport (docs/native-console.md): x y z is the EYE position in game units (metres, z up), yaw in degrees."""
+    line = "setviewpos %.3f %.3f %.3f %.1f" % (x, y, z, yaw_deg)
+    return line if pitch_deg is None else line + " %.1f" % pitch_deg

@@ -7430,6 +7430,10 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                     d2vr::simxr::control.aims=d2vr::simxr::control.grips;
                                     d2vr::simxr::control.touch=simulated_gameplay_script.touch(elapsed); // v7 capacitive touch (left, right)
                                     if(gameplay || x_wheel.wheel() || scripted_ui || !focused || index>=0) input=command; // index>=0 outside gameplay only for version 6 menu/always segments; Native pad gameplay remains gated; UI tests use the actual controller pointer.
+                                    // v8: a segment's engine console line (the sim teleport, e.g. setviewpos) goes once through the 'console' test-command path;
+                                    // the queue result follows in vr-command-result.txt, the request is logged in simulated-gameplay-console.txt.
+                                    for(const auto& line:simulated_gameplay_script.take_console(elapsed,gameplay)) {d2vr::NativeInteractionAim::request_console(line);
+                                        std::ofstream(simulated_gameplay_output/L"simulated-gameplay-console.txt",std::ios::app)<<elapsed<<' '<<line<<'\n';}
                                     if(index!=simulated_gameplay_last_index || gameplay!=simulated_gameplay_last_gameplay || focused!=simulated_gameplay_last_focused) {
                                         simulated_gameplay_csv<<elapsed<<','<<index<<','<<gameplay<<','<<focused;
                                         for(float value:{command.move_x,command.move_y,command.turn_x,command.turn_y,command.left_trigger,command.right_trigger,command.left_grip,command.right_grip}) simulated_gameplay_csv<<','<<value;
@@ -9268,7 +9272,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
         if(simulated_gameplay_script_requested) {
             std::ifstream source(root/L"build"/L"simulated-gameplay-script.cfg");
             simulated_gameplay_script.load(source,static_cast<unsigned>(duration_seconds));
-            simulated_gameplay_output=output;{std::ofstream clear(output/L"finger-touch-segments.jsonl",std::ios::trunc);}
+            simulated_gameplay_output=output;{std::ofstream clear(output/L"finger-touch-segments.jsonl",std::ios::trunc);}{std::ofstream clear(output/L"simulated-gameplay-console.txt",std::ios::trunc);}
             simulated_gameplay_csv.open(output/L"simulated-gameplay-commands.csv",std::ios::trunc);
             if(!simulated_gameplay_csv) throw std::runtime_error("Cannot log simulated gameplay commands");
             simulated_gameplay_csv<<std::setprecision(9)<<"elapsed_ms,segment,gameplay,focused,move_x,move_y,turn_x,turn_y,left_trigger,right_trigger,left_grip,right_grip,a,b,x,y,left_click,right_click,menu,head_pitch_degrees\n";

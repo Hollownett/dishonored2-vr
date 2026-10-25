@@ -6,6 +6,12 @@
 
 namespace d2vr {
 struct NativeCameraState {unsigned index;std::uintptr_t vtable;bool combat;};
+// Player FSM index -> state (names: docs/full-body-research.md 6b, read live with tools/player_states.py):
+//   8 Mantle (G1 sim 2026-10-25, scenario authored_turn: a jump at a ~1 m ledge enters state_index 8, a ~0.75 s scene, the native
+//     heading on the walk/gaze direction), 9 Vault, 13 Assassination (the lethal takedown), 33 SyncAnim, 38 NpcFatality,
+//   41 Choke (the nonlethal grip takedown), 42 DropChoke, 55 BloodthirstyFatality, 83 KillCam; combat: 39, 44 (unnamed).
+//   Only 8 is confirmed in the sim: the takedown (13/41) was offered but never started there (the guard turns, the player dies),
+//   so its index is from the docs, not measured. Ledger: .superpowers/sdd/2026-10-25-camera-recenter-vr-cutscenes/g1-sim.md.
 inline constexpr std::array<NativeCameraState,11> native_action_camera_states{{
     {8,0x1c82f68,false},{9,0x1c86e18,false},{13,0x1c83468,false},
     {33,0x1c3e568,false},{38,0x1c3d878,false},{41,0x1c77c18,false},
