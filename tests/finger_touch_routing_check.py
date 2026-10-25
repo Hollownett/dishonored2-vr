@@ -14,7 +14,16 @@ def check(probe: str, build: str, features: str) -> None:
     # wants_from_touch_curl: the wanted array finger_contact gets comes from FingerTouchCurl::update (empty and held hands), finger_contact stays last
     assert "finger_touch_curl.update(side," in b and "finger_touch_params" in b
     assert "touch_curl=touch_side && " in b and "touch_out.mapping==d2vr::rig::CurlMapping::touch" in b
-    assert "const auto wants=touch_curl?touch_wants:wants_legacy;" in b
+    # G4 (plan Task 10): the wants come from the composed stack (touch < hover pre-curl/pinch < take close < held), finger_contact caps them after
+    assert "stack.touch=touch_curl?touch_wants:wants_legacy;stack.held=held_hand;stack.squeeze=hands.curls[side];" in b
+    assert "const auto wants=legacy_finger_ease?stack.touch:d2vr::rig::compose_finger_wants(stack);" in b
+    assert b.index("d2vr::rig::compose_finger_wants(stack)") < b.index("d2vr::rig::finger_contact(")
+    # weapon and native-animated hands get no hover pre-curl and no take close
+    assert "if(!legacy_finger_ease && !(hands.native_hands>>side&1u) && !((fk_weapon_bits>>side)&1u)) {" in b
+    # the take edge: a fist take's first frame or a Use press on a loot target_bounds; the item is gone after 100 ms off target (or 1 s)
+    assert "if((fist_take[h] && !fist_take_was[h]) || grip_intent_out[h].use_started)" in probe
+    assert "loot && loot->kind==d2vr::PalmKind::loot) note_finger_take(h,loot->id,controls_now);" in probe
+    assert "if(fk_now-take_seen[side]>100 || fk_now-take_consumed[side]>1000) take_close[side].gone(fk_t);" in b
     # G4 (plan Task 9): the reach follows the grip pose blend (legacy-finger-ease: the old flip), the eased opening rides along
     assert "d2vr::rig::finger_contact(*geometry,palm,shapes.data(),count,fdt,finger_ik[side],legacy_finger_ease?(held_hand?d2vr::rig::held_curl:1.f):reach,finger_solve_budget,&wants,ease_opening,open_lag)" in b
     assert "const float reach=!held_hand?1.f:blending?static_cast<float>(1.+(d2vr::rig::held_curl-1.)*grip_pose_blend[side].weight(fk_t)):d2vr::rig::held_curl;" in b

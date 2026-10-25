@@ -53,6 +53,7 @@
 #include "finger_snapshot.hpp"
 #include "finger_touch_curl.hpp"
 #include "grip_pose_blend.hpp"
+#include "finger_wants_stack.hpp"
 #include "prop_watch.hpp"
 #include "carry_diagnostics.hpp"
 #include "anchor_smoother.hpp"
@@ -408,6 +409,10 @@ static std::array<std::atomic<bool>,2> grip_pose_blend_request{};
 // Seam (Track G Task 14, a living hold): start this hand's 0.25 s grip pose blend (GripPoseBlend::start from the pose its fingers have now) on
 // the next finger frame. Any thread; a hold the finger block sees as a hold (native_grab.held, the native holder) starts it on its own edge.
 [[maybe_unused]] static void grip_pose_blend_start(unsigned side) {if(side<2) grip_pose_blend_request[side]=true;}
+// G4 loot take close (plan Task 10): the controls path notes the squeeze that takes loot (a fist take's first frame, or a Use press on a loot
+// target_bounds) as the owner and a tick; the finger block closes that hand over 0.1 s and reopens it 0.25 s after the owner stops being its target.
+static std::array<std::atomic<UINT64>,2> finger_take_owner{},finger_take_tick{};
+static void note_finger_take(unsigned side,UINT64 owner,UINT64 now) {if(side<2 && owner) {finger_take_owner[side]=owner;finger_take_tick[side]=now;}}
 static std::mutex finger_touch_status_mutex;
 static struct FingerTouchStatus {std::array<bool,2> touch{},silent{},floor{},trigger_touch{},thumb_touch{};std::array<std::array<float,5>,2> curl{};} finger_touch_status;
 static void start_finger_touch_knobs(const fs::path& root,const fs::path& output) {
@@ -5753,6 +5758,7 @@ void prepare_head_view(void* view) noexcept {
                 static std::array<bool,2> snap_holding{};static std::array<UINT64,2> snap_tick{};
                 // G4: was this hand holding last frame (the hold edge starts the grip pose blend), when its hold began, the held shape's
                 // source last frame (a change re-arms the eased opening for 0.3 s: the fitter's shape replacing the hover shape), until when.
+                static std::array<d2vr::rig::TakeClose,2> take_close{};static std::array<UINT64,2> take_owner{},take_seen{},take_consumed{};
                 static std::array<bool,2> finger_was_held{};static std::array<UINT64,2> finger_hold_start{};static std::array<std::string,2> held_shape_sig{};static std::array<double,2> ease_until{};
                 const double fk_t=std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
                 constexpr unsigned finger_solve_budget=1; // fingers solved per hand per frame (finger_ik.hpp: the rest keep a memo or wait their turn)
@@ -5837,7 +5843,24 @@ void prepare_head_view(void* view) noexcept {
                              finger_touch_status.trigger_touch[side]=touch_side && (side?game_xr->controller_input.right_trigger_touch:game_xr->controller_input.left_trigger_touch);
                              finger_touch_status.thumb_touch[side]=touch_side && (side?game_xr->controller_input.right_thumb_touch:game_xr->controller_input.left_thumb_touch);finger_touch_status.curl[side]=touch_side?touch_out.curl:wants_legacy;}
                             touch_curl=touch_side && touch_out.mapping==d2vr::rig::CurlMapping::touch;
-                            const auto wants=touch_curl?touch_wants:wants_legacy;
+                            // G4 the wants stack (finger_wants_stack.hpp): touch curl < hover pre-curl/pinch < take close < held wrap; the contact caps them all.
+                            d2vr::rig::WantsInput stack{};stack.touch=touch_curl?touch_wants:wants_legacy;stack.held=held_hand;stack.squeeze=hands.curls[side];
+                            if(!legacy_finger_ease && !(hands.native_hands>>side&1u) && !((fk_weapon_bits>>side)&1u)) {
+                                const auto& hover=finger_hover_latch[side];
+                                if(!held_hand && hover.second && fk_now-hover.second<=100 && hover.first.bounds) {
+                                    const auto& box=*hover.first.bounds;stack.hover_distance=d2vr::length(box.closest(palm.position)-palm.position);
+                                    const auto half=(box.maximum-box.minimum)*.5;stack.hover_radius_bounds=std::max({half.x,half.y,half.z});
+                                }
+                                if(const UINT64 at=finger_take_tick[side].load();at && at!=take_consumed[side]) { // a new take press
+                                    take_consumed[side]=at;take_owner[side]=finger_take_owner[side].load();take_seen[side]=fk_now;take_close[side].press(fk_t);
+                                }
+                                if(take_close[side].pressed()) { // the item is gone once its owner is not this hand's target for 100 ms (or 1 s after the press)
+                                    if(const auto t=native_interaction_aim.target_bounds(static_cast<int>(side),fk_now);t && t->id==take_owner[side]) take_seen[side]=fk_now;
+                                    if(fk_now-take_seen[side]>100 || fk_now-take_consumed[side]>1000) take_close[side].gone(fk_t);
+                                }
+                                stack.take_weight=take_close[side].weight(fk_t);
+                            }
+                            const auto wants=legacy_finger_ease?stack.touch:d2vr::rig::compose_finger_wants(stack);
                             // G4: the hold edge starts the 0.25 s grip pose blend from the drawn pose (so does the seam); the release edge stops it.
                             if((grip_pose_blend_request[side].exchange(false) || (hold_edge && !legacy_finger_ease)) && finger_drawn_valid[side]) grip_pose_blend[side].start(finger_drawn_angles[side],fk_t);
                             if(!held_hand && finger_was_held[side]) grip_pose_blend[side].stop();
@@ -8802,6 +8825,14 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                 std::array<bool,2> fist_take{};
                                 for(unsigned h=0;h<2;++h) if(grip_intent_out[h].fist && !native_grab.holding(h))
                                     if(native_interaction_aim.grip_use_target(static_cast<int>(h),controls_now)) {fist_take[h]=true;++fist_takes;}
+                                {   // G4: the take edge for the fingers' take close (a fist take's first frame, or a Use press on loot)
+                                    static std::array<bool,2> fist_take_was{};
+                                    for(unsigned h=0;h<2;++h) {
+                                        if((fist_take[h] && !fist_take_was[h]) || grip_intent_out[h].use_started)
+                                            if(const auto loot=native_interaction_aim.target_bounds(static_cast<int>(h),controls_now);loot && loot->kind==d2vr::PalmKind::loot) note_finger_take(h,loot->id,controls_now);
+                                        fist_take_was[h]=fist_take[h];
+                                    }
+                                }
                                 const std::array<float,2> use_input{gun_owns || hip_draw_reserved || talk_targets[0] || !(grip_intent_out[0].use || fist_take[0])?0.f:1.f,
                                     sword_owns || talk_targets[1] || choke_route.consume_use || !(grip_intent_out[1].use || fist_take[1])?0.f:1.f};
                                 if(logic==2) input.right_grip=0;
