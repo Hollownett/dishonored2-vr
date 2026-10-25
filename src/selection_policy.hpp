@@ -101,6 +101,9 @@ template<class Targets> PalmPick pick_by_palm(const PalmProbe& probe,const Targe
     else out.runner_up=0;
     return out;
 }
+// What a hand's physical lane picked (NativeGrab::focus_score, plan Task 5): its raw palm cost, the runner-up's cost and the distance from the
+// palm point. Read by the grip-alone decision (Task 6) and the grab_focus status block.
+struct FocusScore {std::uint64_t id{};PalmKind kind{};double cost{},runner_up{},distance{};};
 // Per-hand owner of the hysteresis state plus the counters.
 class PalmSelection {
 public:

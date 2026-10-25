@@ -1,0 +1,70 @@
+#include "../src/grip_decision.hpp"
+#include <cassert>
+#include <iostream>
+using namespace d2vr;
+namespace {
+// The palm at the origin facing +x (palm axis +z): palm point (0,0,0.015), uncalibrated arm (0.65 m).
+PalmProbe probe() {PalmProbe p;p.palm={0,0,0};p.forward={0,0,1};p.direction={1,0,0};p.valid=true;return p;}
+PalmTarget box(std::uint64_t id,PalmKind kind,Vec3 centre,double half,const GrabTuning& t) {
+    PalmTarget x;x.id=id;x.kind=kind;x.priority=t.priority(kind);x.minimum=centre-Vec3{half,half,half};x.maximum=centre+Vec3{half,half,half};return x;
+}
+// The physical lane's score of a prop or bone, computed with the same probe (as NativeGrab::focus_score reports it).
+FocusScore physical(const PalmTarget& t) {const auto s=palm_cost(probe(),t,.25,grab_retain_distance);assert(s);return {t.id,t.kind,s->cost,0,s->distance};}
+GripAloneInput input(std::optional<PalmTarget> native,std::optional<FocusScore> phys,std::uint64_t at=1000) {
+    GripAloneInput in;in.native=native;in.physical=phys;in.probe=probe();in.native_fresh=true;in.since_ms=1000;in.now_ms=at;return in;
+}
+}
+int main() {
+    const GrabTuning t;const double hover=t.hover_radius_m;
+    {   // loot_wins_use: a coin the palm is on (0.03 m, loot 0.8) against a prop 0.08 m ahead
+        const auto coin=box(1,PalmKind::loot,{.06,0,.015},.01,t);const auto prop=physical(box(2,PalmKind::prop,{.13,0,.015},.05,t));
+        assert(std::abs(prop.distance-.08)<1e-9);
+        assert(decide_grip_alone(input(coin,prop),t,hover)==GripAloneChoice::use);
+    }
+    {   // door_wins_use: a door leaf faced at 0.03 m against a prop beside the hand at 0.10 m
+        const auto door=box(3,PalmKind::usable,{.53,0,.015},.5,t);const auto prop=physical(box(4,PalmKind::prop,{0,.15,.015},.05,t));
+        assert(std::abs(prop.distance-.10)<1e-9);
+        assert(decide_grip_alone(input(door,prop),t,hover)==GripAloneChoice::use);
+    }
+    {   // prop_on_palm_wins_grab: a prop under the palm (0.02 m, faced) against the table shell 0.2 m below
+        const auto table=box(5,PalmKind::usable,{0,0,-.685},.5,t);const auto prop=physical(box(6,PalmKind::prop,{.07,0,.015},.05,t));
+        assert(std::abs(prop.distance-.02)<1e-9 && palm_cost(probe(),table,hover,grab_acquire_distance)->distance>.19);
+        assert(decide_grip_alone(input(table,prop),t,hover)==GripAloneChoice::grab);
+        auto living=prop;living.kind=PalmKind::living;   // ruling H6: an awake NPC's bone is a grab too
+        assert(decide_grip_alone(input(table,living),t,hover)==GripAloneChoice::grab);
+    }
+    {   // prop_at_013_is_not_grip_alone: 0.13 m is outside the 0.12 m gate (a fist's 0.45 m gate takes it); nothing else: the H1 buffer, then use
+        const auto prop=physical(box(7,PalmKind::prop,{.18,0,.015},.05,t));assert(std::abs(prop.distance-.13)<1e-9);
+        assert(decide_grip_alone(input(std::nullopt,prop,1050),t,hover)==GripAloneChoice::pending);
+        assert(decide_grip_alone(input(std::nullopt,prop,1150),t,hover)==GripAloneChoice::use);
+        const auto on=physical(box(8,PalmKind::prop,{.165,0,.015},.05,t));   // H1: a prop reaching 0.10 m inside the window is caught
+        assert(decide_grip_alone(input(std::nullopt,on,1120),t,hover)==GripAloneChoice::grab);
+        GrabTuning off=t;off.grab_buffer_ms=0;assert(decide_grip_alone(input(std::nullopt,prop,1000),off,hover)==GripAloneChoice::use);
+    }
+    {   // block_next_to_table_stays_use: a table shell usable at 0.2 m and no prop within 0.12 m
+        const auto table=box(9,PalmKind::usable,{0,0,-.685},.5,t);const auto prop=physical(box(10,PalmKind::prop,{.265,0,.015},.05,t));
+        assert(prop.distance>.12 && decide_grip_alone(input(table,prop),t,hover)==GripAloneChoice::use);
+        assert(decide_grip_alone(input(table,std::nullopt),t,hover)==GripAloneChoice::use);
+    }
+    const auto on_palm=physical(box(11,PalmKind::prop,{.07,0,.015},.05,t));
+    {   // choke_offer_wins and takedown_offer_wins: chokes and takedowns keep priority over a prop on the palm
+        auto in=input(std::nullopt,on_palm);in.choke_owns=true;assert(decide_grip_alone(in,t,hover)==GripAloneChoice::use);
+        in=input(std::nullopt,on_palm);in.takedown_offered=true;assert(decide_grip_alone(in,t,hover)==GripAloneChoice::use);
+    }
+    {   // waits_for_fresh_native_up_to_100: pending at 99 ms, decided at 100 ms (never longer)
+        auto in=input(std::nullopt,on_palm,1099);in.native_fresh=false;assert(decide_grip_alone(in,t,hover)==GripAloneChoice::pending);
+        in.now_ms=1100;assert(decide_grip_alone(in,t,hover)==GripAloneChoice::grab);
+        in=input(std::nullopt,on_palm,1000);assert(decide_grip_alone(in,t,hover)==GripAloneChoice::grab);   // ruling H2: a fresh "none" decides now
+    }
+    {   // occupied_hand_never_grabs
+        auto in=input(std::nullopt,on_palm);in.occupied=true;assert(decide_grip_alone(in,t,hover)==GripAloneChoice::use);
+    }
+    {   // a native target beyond the palm's 0.45 m gate (a gaze Use) beats nothing, but a prop on the palm beats it; a tie goes to Use
+        const auto far_door=box(12,PalmKind::usable,{2,0,0},.1,t);
+        assert(decide_grip_alone(input(far_door,std::nullopt),t,hover)==GripAloneChoice::use);
+        assert(decide_grip_alone(input(far_door,on_palm),t,hover)==GripAloneChoice::grab);
+        auto twin=box(13,PalmKind::usable,{.07,0,.015},.05,t);auto tie=physical(box(14,PalmKind::prop,{.07,0,.015},.05,t));
+        assert(decide_grip_alone(input(twin,tie),t,hover)==GripAloneChoice::use);
+    }
+    std::cout<<"PASS: grip-alone one-list decision (loot/door Use, prop on palm grabs, 0.12 m gate, block stays Use, choke/takedown/occupied, 100 ms fresh wait, H1 buffer)\n";
+}

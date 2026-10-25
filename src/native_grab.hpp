@@ -136,8 +136,6 @@ inline std::optional<NativeRigidBody> grab_focus_candidate(const std::vector<Nat
     if(!pick.index) return {};
     return eligible[*pick.index];
 }
-// What the palm picked for this hand, for the grip-alone decision (Task 6) and the grab_focus status block.
-struct FocusScore {std::uint64_t id{};PalmKind kind{};double cost{},runner_up{},distance{};};
 // Bounded nearby cache. Registry discovery never grants a native Use action;
 // each consumer revalidates the full dynamic-body lifetime before using it.
 class NativeGrabDiscovery {
@@ -1055,6 +1053,8 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);return {lanes_[side].buffer.buffered(),lanes_[side].buffer.expired()};
     }
     bool legacy_palm_select() const noexcept {return legacy_palm_select_;}
+    // The palm probe last published for this hand (the one its physical pick was scored with), for the grip-alone decision (Task 6).
+    PalmProbe published_palm(unsigned side) {if(side>=2) return {};std::lock_guard<std::mutex> lock(mutex_);return lanes_[side].published.palm;}
     // Status block "grab_focus" (plan Task 5): per hand {id,kind,cost,runner_up,switches_10s,hysteresis_held,scoring_fallback,buffered_grabs,
     // buffer_expired,palm_dot}. try_lock: the status thread never waits for a dispatcher pass (null when busy).
     std::string grab_focus_json(UINT64 now) {
