@@ -92,6 +92,8 @@ From there you can set:
 - monitor view: what the desktop game window shows while you play - right eye (default: copying one eye costs less render time than both), left eye, or both eyes side by side
 - turning (snap or smooth)
 - recenter
+- Recenter on scripted moments (on by default): in a climb, takedown or similar scripted action, the view eases gently to put the action in front of you, then hands the view back with no jump. Off keeps the old behaviour.
+- Cutscenes: VR comfort (default; a 3D scene with a comfort vignette when the camera moves), VR full (the scene's camera moves you with no vignette) or Theater (the flat screen in front of you). The first moment of a cutscene is black while the 3D picture forms.
 - legacy avatar calibration; it is not required by the current hands-only mode
 
 Settings are saved for the next session.
@@ -181,7 +183,7 @@ Weapons are held like real objects: a weapon stays in your hand only while you s
   Squeeze the left grip to move the menu to where you are looking.
 - Menus with tabs (Options > Controls, Visuals, Gameplay): each grip squeeze changes the tab once. The right grip goes
   to the next tab, the left grip to the previous one (and also re-places the menu).
-- Cutscenes play on a large screen in front of you.
+- Cutscenes play in 3D around you (VR comfort by default) or on a large screen in front of you (Theater); see the Cutscenes setting.
 - Hands and equipped items remain tracked during ordinary sword attacks and
   blocking. Arm and forearm geometry is hidden; full arm tracking and its
   calibration are deferred. Verified authored full-body actions retain native

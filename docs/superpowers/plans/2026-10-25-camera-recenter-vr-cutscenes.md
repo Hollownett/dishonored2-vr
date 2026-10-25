@@ -362,7 +362,7 @@ If the takedown cannot be triggered in the sim, the mantle alone is the gate. Re
 ### Task 8: Checklist, full verification
 
 **Files:**
-- Create: `docs/VR-v610-TEST-CHECKLIST.md` (this plan's Tier C lines; the hands plan appends its own)
+- Create: `docs/VR-v610-TEST-CHECKLIST.md` (this plan's Tier C lines; the hands plan writes its own v611 checklist)
 - Modify: `docs/PLAYING.md` (the two settings, one line each)
 
 - [ ] **Step 1: Write the checklist.** Use the spec's Tier C lines, plus: "pause and Recenter view during a climb: no
