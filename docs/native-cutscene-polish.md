@@ -21,3 +21,12 @@ Status JSON `cutscene.bink`, `cutscene.skip_hold`, `cutscene.letterbox_hidden`, 
    to 0.5 s after the last immersive frame (`holding()` -> SceneHold::replay shows the cutscene's last layer, no Theater flash). Past
    0.5 s, or with the pause bit, the old rule applies. Back on exact 32 the pair has the entry-grace number of frames (30) to re-form
    before incomplete_pair, instead of 2.
+
+## Sim evidence (two runs of cutscene_skip / cutscene_skip_long, loadgame 22, void_01 opening; runs 20261025T135531 and the next)
+- Bink hooks installed (`installed:true`); the startup video opened once, BinkDoFrameAsync counted 667 frames (BinkDoFrame itself is
+  not what the game calls, so BinkDoFrameAsync and BinkNextFrame are hooked too). No theater fallback in the cutscene (`last_fallback:none`).
+- Letterbox: `letterbox_hidden` 2084 over 1185 immersive frames (about two bars per eye pair), no scene geometry loss seen in status.
+- Skip: `skip_hold` 1 (A held, X injected for 3.4 s and for about 7 s in the long variant `cutscene_skip_long`), but the void_01 opening
+  was NOT shortened (1185 and 1177 immersive frames, the whole 10 s). Either that opening is not skippable or the game needs something
+  else; the injection itself is only proven at the counter. Treat C2 as unverified on a real skippable cutscene (headset item).
+- Mixed-mask hold was not exercised (no dialog choice in the scenario); covered by the policy unit tests only.

@@ -34,8 +34,9 @@ public:
             {"BinkOpenWithOptions",reinterpret_cast<void*>(&open_options_hook),reinterpret_cast<void**>(&open_options_)},
             {"BinkClose",reinterpret_cast<void*>(&close_hook),reinterpret_cast<void**>(&close_)},
             {"BinkDoFrame",reinterpret_cast<void*>(&frame_hook),reinterpret_cast<void**>(&do_frame_)},
-            {"BinkNextFrame",reinterpret_cast<void*>(&next_hook),reinterpret_cast<void**>(&next_)}};
-        void* targets[5]{};unsigned n=0;
+            {"BinkNextFrame",reinterpret_cast<void*>(&next_hook),reinterpret_cast<void**>(&next_)},
+            {"BinkDoFrameAsync",reinterpret_cast<void*>(&async_hook),reinterpret_cast<void**>(&async_)}};
+        void* targets[6]{};unsigned n=0;
         for(const auto& e:entries) {
             void* target=reinterpret_cast<void*>(GetProcAddress(module,e.name));
             if(!target || MH_CreateHook(target,e.detour,e.original)!=MH_OK) return false;   // fail soft: nothing enabled
@@ -52,6 +53,7 @@ private:
     inline static void (__fastcall *close_)(void*){};
     inline static std::intptr_t (__fastcall *do_frame_)(void*){};
     inline static void (__fastcall *next_)(void*){};
+    inline static std::intptr_t (__fastcall *async_)(void*,void*,void*){};
     static void* __fastcall open_hook(void* a,void* b,void* c,void* d) {
         void* h=open_(a,b,c,d);{std::lock_guard<std::mutex> l(mutex_);tracker_.open(reinterpret_cast<std::uintptr_t>(h),GetTickCount64());}++opens;return h;
     }
@@ -65,7 +67,10 @@ private:
         {std::lock_guard<std::mutex> l(mutex_);tracker_.frame(reinterpret_cast<std::uintptr_t>(h),GetTickCount64());}++frames;return do_frame_(h);
     }
     static void __fastcall next_hook(void* h) {
-        {std::lock_guard<std::mutex> l(mutex_);tracker_.frame(reinterpret_cast<std::uintptr_t>(h),GetTickCount64());}next_(h);
+        {std::lock_guard<std::mutex> l(mutex_);tracker_.frame(reinterpret_cast<std::uintptr_t>(h),GetTickCount64());}++frames;next_(h);
+    }
+    static std::intptr_t __fastcall async_hook(void* h,void* b,void* c) {   // BinkDoFrameAsync(HBINK, thread, flags): at most three register arguments
+        {std::lock_guard<std::mutex> l(mutex_);tracker_.frame(reinterpret_cast<std::uintptr_t>(h),GetTickCount64());}++frames;return async_(h,b,c);
     }
 };
 } // namespace d2vr

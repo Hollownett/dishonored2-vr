@@ -22,6 +22,12 @@ origin / forward into the fields above, run the native sensor, restore every fie
 left-hand game aim that powers and the crosshair use (`publish_left_aim` in dxgi_probe.cpp, `aim_for_shots` frames). Status JSON `gadget_aim`
 {placement [calls, swapped], throw_hit [calls, swapped], stale, bad_pointer}.
 
+## Gating (found in the sim)
+Both sensors run EVERY frame, even with no gadget (sim run 20261025T135531: 9795 calls each). The hook therefore acts only when the
+sensor's own enable byte (+0x38) is set AND the left trigger is held (the pose is only published then, fresh for 100 ms). Sim run
+20261025T143x: Placement swapped 0 of 9609 idle calls (enable byte clear); ThrowHit's enable byte is set 81% of frames, so the trigger
+gate is what keeps it off the idle ones. No mine/grenade was equipped in the sim saves, so the re-aim itself is untested.
+
 ## Not verified
 What `[s+0x48]` is (a decl-like object whose +0x2C is a direction) and whether the Placement ray start at `[s+0x40]+0xD8` is the eye
 rather than a body-relative point were not traced further; headset / sim must show the ghost following the hand (swapped counter > 0).

@@ -2873,6 +2873,7 @@ static std::optional<d2vr::Vec3> hip_xr_position;static UINT64 hip_pose_tick{},h
 static std::atomic<float> right_hand_peak{},sword_release_speed{}; // diagnostics: peak right-hand speed (decays), hand speed at the last drop
 static bool gadget_hand_aim_enabled=false; // Track T B: installed, and build/no-hand-mine-aim absent
 static void publish_gadget_aim(const d2vr::WorldTrackedPose& left) noexcept {
+    if(!game_xr || game_xr->controller_input.left_trigger<.1f) return; // gadgets / powers are used with the left trigger held; the ThrowHit sensor runs every frame and must not be re-aimed otherwise (sim: 81% of frames)
     d2vr::GadgetAimPose gadget{};
     gadget.origin={static_cast<float>(left.position.x),static_cast<float>(left.position.y),static_cast<float>(left.position.z)};
     gadget.forward={static_cast<float>(left.basis[0].x),static_cast<float>(left.basis[0].y),static_cast<float>(left.basis[0].z)};

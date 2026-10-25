@@ -73,6 +73,8 @@ private:
     static std::uintptr_t run(unsigned which,void* sensor) {
         const bool placement=which==0;
         ++(placement?placement_calls:throw_calls);
+        unsigned char enabled{};   // the sensor's own enable byte (+0x38, tested first by both bodies): idle sensors run every frame and are left alone
+        if(!rd(reinterpret_cast<std::uintptr_t>(sensor)+0x38,enabled) || !enabled) return original_[which](sensor);
         GadgetAimPose pose{};{std::lock_guard<std::mutex> l(mutex_);pose=pose_;}
         if(!gadget_aim_fresh(pose,GetTickCount64())) {++stale;return original_[which](sensor);}
         float *start{},*dir{},*origin{};
