@@ -131,8 +131,12 @@ def check(dxgi: str, aim: str) -> None:
     assert publish.index('d2vr::finalize_aim_ray(left,') > publish.index(origin) and publish.index('if(!aim_for_shots){native_shot_aim.clear();return;}') < publish.index('native_left_aim.publish(*body,left,')
     assert 'native_shot_aim.publish(' not in branch and 'native_left_aim.publish(' not in branch and 'native_shot_aim.publish(' not in ranged_tail
     assert s.count('native_shot_aim.publish(') == 1
-    flush = 'publish_hand(side,hands.grips[side],raw_grips[side]);}pending_publish.flush();'
-    assert flush in s and s.index(flush) > s.index('hand_clamp_budget.note(d2vr::NativeInteractionAim::clamp_cast_us_.load(),clamp_now);')
+    # The hands publish, then (after the H16 clamped-palm publication) the pending left aim flushes, all after the clamp budget note.
+    hand_publish = 'publish_hand(side,hands.grips[side],raw_grips[side]);'
+    flush = 'pending_publish.flush();//theleftaim,withthisframe\'sclampstate'
+    assert hand_publish in s and flush in s and s.index(hand_publish) < s.index(flush)
+    assert s.index(flush) > s.index('hand_clamp_budget.note(d2vr::NativeInteractionAim::clamp_cast_us_.load(),clamp_now);')
+    assert s.index(hand_publish) < s.index('hand_clamped_palm[side]=') < s.index(flush)
     assert '~PendingLeftAim(){flush();}' in s and 'try{publish(left);}catch(...){}' in s
     # The reticle projects the exact finalized float ray (guarded origin included), flushed after the hands and before the projection.
     cross = between(s, 'pending_publish.flush();//completeguardedfloatraybeforereticleprojection', 'native_crosshair.publish(')
