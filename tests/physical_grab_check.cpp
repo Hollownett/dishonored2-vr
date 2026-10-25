@@ -404,9 +404,9 @@ int main() {
                 for(unsigned i=0;i<200;++i) {auto r=g.corpse_motor(b,true,0,0,in(.01));assert(r && !r->motor.release && g.held());if(!i) first_lag=r->lag_m;last_lag=r->lag_m;}
                 assert(first_lag>.8 && last_lag<first_lag-.1);
             }
-            {   PhysicalGrab g;auto b=id;auto hnd=id;hnd.position.x=.3;assert(make(g,b,{.3,0,0},hnd));   // a hand beyond 0.45 m of the body still drops at 0.25 s
+            {   PhysicalGrab g;auto b=id;auto hnd=id;hnd.position.x=.3;assert(make(g,b,{.3,0,0},hnd));   // a hand beyond 0.45 m (+ the 0.3 m hold offset) of the grasped bone still drops at 0.25 s
                 for(unsigned i=0;i<30;++i) g.corpse_motor(b,true,0,0,in(.01));
-                walk(g,hnd,-.6);
+                walk(g,hnd,1.0);   // lag 0.7 m, hand 1.0 m from the bone origin
                 auto r=lag_release(g,b);assert(r && r->reason==ReleaseReason::lag);
             }
         }
