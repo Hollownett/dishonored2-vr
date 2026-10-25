@@ -1653,6 +1653,7 @@ public:
         return view;
     }
     std::int64_t locate_cpu_time() const noexcept {return locate_cpu_time_;}
+    bool rendered_pair_ready() const {return tracked_pair_();} // both eyes have a recorded rendered view for this Present (an authored scene requires it)
     XrView recorded_rendered_view(UINT eye) const {return rendered_views_[eye];} // diagnostic (alt-pose-trace): what the layer of `eye` will carry
     void record_rendered_view(UINT eye,const XrView& view,XrTime display_time,std::int64_t locate_cpu) {
         rendered_views_[eye]=view;rendered_mask_|=1u<<eye;
@@ -1725,10 +1726,15 @@ public:
     // Tracked frames use the pose/FOV recorded by the native Setup hook. Menu or
     // untracked frames retain the native symmetric FOV presentation.
     // desktop: the game's backbuffer; in gameplay it receives the processed eyes per the monitor-view setting.
+    // authored_scene_render (docs/native-authored-scene-presentation.md section 5): an immersive authored scene outside gameplay (an exact
+    // Cinematic32 frame the probe certified). It renders like the gameplay scene (projection layers, a mandatory tracked eye pair) but only with
+    // the authored camera; the native menu pointer is off and the raw trigger passes. Raw gameplay keeps the settings/calibration semantics.
     void present(ID3D11Texture2D* left,ID3D11Texture2D* right,float hfov,float vfov,bool gameplay=true,bool authored_camera=false,bool settings_available=false,
-        ID3D11Texture2D* desktop=nullptr,std::array<UINT,2> desktop_view={},bool cinematic=false) {
+        ID3D11Texture2D* desktop=nullptr,std::array<UINT,2> desktop_view={},bool cinematic=false,bool authored_scene_render=false) {
         if(!alternate_enabled && (alt_kept_[0] || alt_kept_[1])) {alt_kept_[0].Reset();alt_kept_[1].Reset();alt_records_={};} // fallen back: release the kept copies
-        const bool world_scene=gameplay || world_ui_kind_!=0;
+        authored_scene_render=authored_scene_render && authored_camera && !gameplay;
+        const bool scene_render=gameplay || authored_scene_render;
+        const bool world_scene=scene_render || world_ui_kind_!=0;
         last_world_ui_layer=false;
         timing={};timing.start_ns=cpu_time_ns();++present_count_;
         if(tracked_pair_()) {
@@ -1745,7 +1751,7 @@ public:
         last_pointer_layer=false;
         last_layer_submitted=false;last_menu_layer=false;last_authored_camera_layer=false;
         native_object_art_masks_={};native_wrist_art_shown_={};
-        authored_camera=gameplay && authored_camera;
+        authored_camera=scene_render && authored_camera;
         if(!authored_camera) authored_panel_.reset();
         XrEventDataBuffer event{};event.type=XR_TYPE_EVENT_DATA_BUFFER;
         XrResult result{};
@@ -1831,7 +1837,7 @@ public:
         const bool raw_both_grips_held=controller_input.left_grip>=.8f && controller_input.right_grip>=.8f;
         // In menus a left-grip squeeze re-places the menu where the user is looking.
         const bool menu_grip=controller_input.left_grip>=.6f;
-        if(menu_grip && !menu_grip_was_ && (!gameplay || settings_.open()) && controller_input.right_grip<.5f) {
+        if(menu_grip && !menu_grip_was_ && (!scene_render || settings_.open()) && controller_input.right_grip<.5f) {
             menu_panel_.summon();
         }
         menu_grip_was_=menu_grip;
@@ -1933,7 +1939,7 @@ public:
         }
         // Notes (2) get no pointer: pointer input switches the game to keyboard glyphs ("Esc Close") and a note has nothing to click.
         // The wheel keeps it: its sector selection runs through the native pointer (without it the wheel ignored the cursor).
-        if(native_pointer_enabled_ && world_ui_kind_!=2 && (world_ui_kind_!=1 || wheel_native_pointer) && (world_ui_kind_==0 || world_ui_source_) && !gameplay && !cinematic && !settings_.open() && continuity_.usable() && state==XR_SESSION_STATE_FOCUSED && controller_input.active) {
+        if(native_pointer_enabled_ && world_ui_kind_!=2 && (world_ui_kind_!=1 || wheel_native_pointer) && (world_ui_kind_==0 || world_ui_source_) && !scene_render && !cinematic && !settings_.open() && continuity_.usable() && state==XR_SESSION_STATE_FOCUSED && controller_input.active) {
             constexpr XrSpaceLocationFlags valid_pose=XR_SPACE_LOCATION_ORIENTATION_VALID_BIT|XR_SPACE_LOCATION_POSITION_VALID_BIT;
             const auto& aim=aim_locations[menu_pointer_hand&1];
             if((aim.locationFlags&valid_pose)==valid_pose) {
@@ -1944,7 +1950,7 @@ public:
                     ((menu_pointer_hand&1)?controller_input.right_trigger:controller_input.left_trigger)>.55f};
             }
         }
-        controller_input.right_trigger=menu_trigger_gate_.update(raw_right_trigger,!gameplay || settings_.open() || settings_consumed,raw_input_active);
+        controller_input.right_trigger=menu_trigger_gate_.update(raw_right_trigger,!scene_render || settings_.open() || settings_consumed,raw_input_active);
         timing.locate_input_ns=cpu_time_ns()-stage_start;stage_start=cpu_time_ns();
         XrCompositionLayerProjection projection{};projection.type=XR_TYPE_COMPOSITION_LAYER_PROJECTION;
         XrCompositionLayerQuad menu{};menu.type=XR_TYPE_COMPOSITION_LAYER_QUAD;
@@ -1957,12 +1963,12 @@ public:
         XrFrameEndInfo end{};end.type=XR_TYPE_FRAME_END_INFO;end.displayTime=frame_.predictedDisplayTime;
         end.environmentBlendMode=XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
         const XrCompositionLayerBaseHeader* layer=reinterpret_cast<const XrCompositionLayerBaseHeader*>(&projection);
-        if(gameplay && !settings_.open()) menu_panel_.reset();
+        if(scene_render && !settings_.open()) menu_panel_.reset();
         const bool settings_world=gameplay && settings_.open();settings_in_world_=settings_world;
         std::optional<XrCompositionLayerQuad> settings_panel;
         EmptyFrameFacts gates;gates.should_render=frame_.shouldRender!=XR_FALSE;
         if((gates.continuity_usable=continuity_.usable()) && (gates.have_sources=left && right) &&
-           (gates.tracked_ok=!world_scene || !tracked_gameplay_required_ || tracked_pair_()) && (gates.alternate_ok=alt_kept_ok_(authored_camera || settings_.open()))) {
+           (gates.tracked_ok=!world_scene || (!tracked_gameplay_required_ && !authored_scene_render) || tracked_pair_()) && (gates.alternate_ok=alt_kept_ok_(authored_camera || settings_.open()))) {
             std::array<ID3D11Texture2D*,2> sources{left,right};bool menu_band_ready=false;
             if(settings_.open()) {update_settings_image(pointer);++settings_layers;}
             const auto sharpness=static_cast<float>(settings_.sharpness());

@@ -64,7 +64,7 @@ def check(probe: str) -> None:
     # the stereo experiment only bypasses the restore for exact 32; the probe row is taken before it
     stereo = fn(probe, "void sample_stereo(IDXGISwapChain* chain,UINT64 number,const DXGI_SWAP_CHAIN_DESC& desc) {")
     assert stereo.index("cinematic_probe_present(chain,number,desc);") < stereo.index(
-        "if(xr_requested && !render_world_scene() && !cinematic_probe_keeps_stereo()) {")
+        "if(xr_requested && !render_scene_frame() && !cinematic_probe_keeps_stereo()) {")  # Task 5: an open cutscene keeps stereo too
     assert probe.count("cinematic_probe_keeps_stereo()") == 2
     # the shipping gates are untouched: render_world_scene still admits only logic 2 and world UI
     assert "inline bool render_world_scene() {const auto logic=game_logic_mask();return logic==2 || d2vr::world_ui_logic(logic)!=d2vr::WorldUiKind::none;}" in probe

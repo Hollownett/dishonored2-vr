@@ -147,7 +147,7 @@ def check(dxgi: str, aim: str) -> None:
     assert 'if(eye_sweep){d2vr::NativeInteractionAim::post_weapon_segment(side,d2vr::NativeInteractionAim::exclude_slot,eye_sweep->from,eye_sweep->to,eye_sweep->radius);' in clamped_part  # N7
     # N4: an epoch change or a world-UI pause restarts the C14 window. N6: a load forgets the clamp (non-world frames of prepare_head_view).
     assert '{staticstd::uint64_tbudget_epoch{};if(clamp_epoch!=budget_epoch||!clamp_live){hand_clamp_budget.reset_window();budget_epoch=clamp_epoch;}}' in clamp
-    nonworld = between(s, 'if(!render_world_scene()){native_audio_listener.clear();', 'return;}')
+    nonworld = between(s, 'if(!render_scene_frame()){native_audio_listener.clear();', 'return;}')  # cutscene Task 5: an open exact-32 cutscene also renders
     assert 'if(d2vr::clamp_forgets_on(game_logic_mask()))forget_hand_clamp();' in nonworld
     forget = between(s, 'staticvoidforget_hand_clamp()noexcept{', 'staticvoidrefresh_clamp_probes(')
     assert 'reset_clamp_state();' in forget and 'hand_clamp_budget.reset_window();' in forget

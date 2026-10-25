@@ -27,7 +27,7 @@ def check(probe: str, game_xr: str, settings: str, features: str) -> None:
     # Only an opening settings update sees held Y; Pause consumes Y on its fire frame.
     assert "if(hold.suppress_y && !hold.settings)" in game_xr
     assert "menu_panel_.reset();" in game_xr
-    assert "if(gameplay && !settings_.open()) menu_panel_.reset();" in game_xr
+    assert "if(scene_render && !settings_.open()) menu_panel_.reset();" in game_xr  # scene_render = gameplay || an authored scene (cutscene Task 5)
     assert "menu_panel_.hold(head_pose_now())" in game_xr and "settings_layer()" in game_xr and "ensure_settings_chain();" in game_xr
     assert "if(settings_.open() && !gameplay) {" in game_xr
     assert "game_xr->y_hold_blocked=false;" in probe

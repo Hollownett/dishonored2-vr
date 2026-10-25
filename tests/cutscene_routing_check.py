@@ -1,0 +1,161 @@
+"""G2 VR cutscenes (camera plan Task 5): routing of an immersive Cinematic32 frame.
+
+- Only the render-only gates admit an open exact-32 cutscene (sample_stereo's restore, observe_eye_setup/begin, prepare_head_view's
+  early return); every side effect stays on raw logic 2 / render_world_scene(), and render_world_scene() itself is unchanged.
+- The present thread classifies each Present with CutscenePolicy (complete distinct native pair, camera, no fault) and passes it to
+  GameXr::present as authored_scene_render, with raw gameplay; nothing new is shown while the pair forms or after a fallback.
+- GameXr::present: an immersive frame submits projection layers with a mandatory tracked pair, the native menu pointer is off, the raw
+  trigger passes, the controls block forwards the raw buttons (skip), and pause or any other mask gives the menu quad again.
+The boolean routing in GameXr::present is also evaluated here for the immersive, theater, pause and gameplay cases."""
+import re
+from pathlib import Path
+
+
+def fn(text: str, signature: str) -> str:
+    body = text[text.index(signature):]
+    return body[:body.index("\n}\n")]
+
+
+def cpp_bool(expr: str, names: dict) -> bool:
+    """Evaluate a C++ boolean expression of the given names (&&, ||, !, ==, !=, parentheses)."""
+    py = expr
+    for name in sorted(names, key=len, reverse=True):
+        py = py.replace(name, f" __{abs(hash(name))} ")
+    py = py.replace("&&", " and ").replace("||", " or ")
+    py = re.sub(r"!(?!=)", " not ", py)
+    env = {f"__{abs(hash(k))}": v for k, v in names.items()}
+    assert re.fullmatch(r"[\s()a-z_0-9!=]*", py), py
+    return bool(eval(py, {"__builtins__": {}}, env))  # noqa: S307 - the expression is our own source
+
+
+def check(probe: str, xr: str) -> None:
+    # --- the gates: render-only sites admit the open exact-32 cutscene; render_world_scene() is unchanged
+    assert "inline bool render_world_scene() {const auto logic=game_logic_mask();return logic==2 || d2vr::world_ui_logic(logic)!=d2vr::WorldUiKind::none;}" in probe
+    assert "inline bool cutscene_scene_render() {return cutscene_gates_allowed.load(std::memory_order_acquire) && game_logic_mask()==d2vr::cinematic_logic_mask;}" in probe
+    assert "inline bool render_scene_frame() {return render_world_scene() || cutscene_scene_render();}" in probe
+    assert "static std::atomic<bool> cutscene_gates_allowed{false};" in probe
+    assert probe.count("render_scene_frame()") == 5, probe.count("render_scene_frame()")  # the definition + 4 sites
+    assert probe.count("cutscene_scene_render()") == 2 and probe.count("cutscene_gates_allowed=") == 2  # the present thread + StartProbe reset
+    stereo = fn(probe, "void sample_stereo(IDXGISwapChain* chain,UINT64 number,const DXGI_SWAP_CHAIN_DESC& desc) {")
+    assert "if(xr_requested && !render_scene_frame() && !cinematic_probe_keeps_stereo()) {" in stereo
+    setup = fn(probe, "void observe_eye_setup(void* view) noexcept {")
+    assert "if(!render_scene_frame()) {eye_sources.invalidate();native_eye_pair.reset();return;}" in setup
+    begin = fn(probe, "void observe_eye_begin(void* view) noexcept {")
+    assert "if(!render_scene_frame()) {eye_sources.invalidate();native_eye_pair.reset();}" in begin
+    # the identity / allocation / N->N+1 checks are kept for the cutscene's eyes too
+    assert "identity!=eye_camera_owner" in setup and "eye=eye_sources.match(address,frame-1,GetCurrentThreadId(),gpu_render_thread.load());" in begin
+    head = fn(probe, "void prepare_head_view(void* view) noexcept {")
+    assert head.count("render_scene_frame()") == 1 and "if(!render_scene_frame()) {native_audio_listener.clear();" in head
+    assert "cutscene_" not in head  # no cutscene state reaches the head view: it renders like any authored view
+    # every side effect after the early return stays on raw logic 2 or the unchanged render_world_scene()
+    for gate in ("if(per_frame && game_logic_mask()==2) {physical_drop=-head_offset.y;",
+                 "if(per_frame && game_logic_mask()==2 && !authored_camera) {",                      # HUD world frame
+                 "if(native_turning_requested && per_frame && game_logic_mask()==2)",                  # turning
+                 "if(game_logic_mask()==2 && physical_grab_requested && per_frame",                    # physical grab
+                 "if(game_logic_mask()==2 && controller_aim_requested && per_frame) {",               # controller aim
+                 "if(game_logic_mask()==2 && (native_camera_trace_requested || native_left_aim_requested || native_shot_aim_installed || native_crosshair_installed) && per_frame) {",
+                 "if(render_world_scene() && (tracked_arms_requested || native_weapon_attachment_requested) && per_frame) {",  # arms, attachment
+                 "if(listener && game_logic_mask()==2 && game_xr->state==XR_SESSION_STATE_FOCUSED &&",  # the native listener is left alone under 32
+                 "const bool scripted_logic=game_logic_mask()==2;"):                                  # the G1 clock
+        assert gate in head, gate
+    assert head.count("render_world_scene()") == 3, head.count("render_world_scene()")  # the two arm/attachment sites + the left-aim hand-off
+    # --- the present block: classification, hold, the present call
+    block = probe[probe.index("const auto gameplay=game_logic_mask()==2;\n                        const bool cutscene_logic="):]
+    block = block[:block.index("if(alternate_on()) {\n                                if(game_xr->alternate_error)")]
+    assert "if(!owner && (gameplay || cutscene_logic)) owner=d2vr::find_native_player_camera(read_self,image_base);" in block
+    assert "const bool authored_camera=gameplay && owner && native_action_camera.poll(" in block  # raw gameplay keeps its authored camera
+    cls = block[block.index("bool cutscene_immersive=false,cutscene_hold=false;"):block.index("cutscene_present_immersive=cutscene_immersive;")]
+    for need in ("if(!(cutscene_mask&d2vr::cinematic_logic_mask)) {",
+                 "if(cutscene_policy.active()) cutscene_policy.end();",
+                 "const bool exact=cutscene_mask==d2vr::cinematic_logic_mask;",
+                 "if(exact && !cutscene_paired_path() && !knob_off && mode!=d2vr::CutsceneMode::theater) cutscene_policy.reject(d2vr::CutsceneFallback::incomplete_pair);",
+                 "frame.paired_complete=pair_ready && !mono_path && native_eye_capture_requested && views.size()==2 && completed_left && completed_right &&",
+                 "game_xr && game_xr->rendered_pair_ready();",
+                 "frame.eyes_distinct=completed_left.Get()!=completed_right.Get() && views.size()==2 &&",
+                 "separated(views[0].pose->position,views[1].pose->position) && rendered_distinct;",
+                 "frame.camera_readable=owner && owner->view;",
+                 "frame.fault=recoverable_faults.load()>cutscene_fault_base;",
+                 "cutscene_immersive=cutscene_policy.immersive(frame,mode,knob_off);",
+                 "if(gates_were_open) cutscene_flush_presents=3;",
+                 "if(exact && !cutscene_immersive) cutscene_hold=cutscene_policy.pending() || cutscene_flush_presents>0;",
+                 "cutscene_gates_allowed=d2vr::cutscene_gates_open(mode,knob_off,cutscene_policy.reason(),cutscene_paired_path());"):
+        assert need in cls, need
+    assert "if(cutscene_hold) {completed_left.Reset();completed_right.Reset();}" in block
+    # the pair readiness and textures are decided before the classification; the hold comes after it
+    assert block.index("if(pair_ready) {completed_left=mono_path?paired_backbuffer:paired_left;completed_right=paired_backbuffer;}") < block.index("bool cutscene_immersive=false")
+    assert block.index("record_rendered_view(slot_eye,") < block.index("bool cutscene_immersive=false")
+    assert "bool cutscene_paired_path() noexcept {return xr_requested && paired_requested && eye_boundary_requested && native_eye_capture_requested && mono_view_state.load()!=1;}" in probe
+    call = block[block.index("game_xr->present(completed_left.Get(),completed_right.Get(),"):]
+    call = call[:call.index(";")]
+    assert "gameplay,authored_camera || cutscene_immersive,game_logic_mask()==4," in call and call.endswith("game_logic_mask()==32,cutscene_immersive)"), call
+    # the raw native buttons (skip) still pass: the controls block forwards the XR input whatever the cutscene; its pointer is GameXr's
+    controls = probe[probe.index("if(controller_requested) {\n                                CpuSpan controls_span{controls_cpu_ns};"):]
+    controls = controls[:controls.index("const auto chord=menu_chord.update(")]
+    assert "auto input=game_xr->controller_input;" in controls and "cutscene" not in controls
+    assert "native_menu.publish(game_xr->native_menu_input,width.load(),height.load());" in controls
+    # --- the knobs, live, and the status section
+    knobs = fn(probe, "void refresh_cutscene_knobs(UINT64 now) {")
+    assert "now-cutscene_knob_tick<500) return;" in knobs
+    assert 'cutscene_knob_off=fs::exists(build/L"no-vr-cutscenes",ignored);' in knobs and 'std::ifstream knob(build/L"cutscene-mode");' in knobs
+    assert "d2vr::parse_cutscene_mode(text).value_or(d2vr::CutsceneMode::vr_comfort)" in knobs
+    status = fn(probe, "std::string cutscene_status_json() {")
+    for field in ("mode", "immersive_frames", "theater_frames", "last_fallback", "cutscenes"):
+        assert f'\\"{field}\\":' in status, field
+    assert '<<",\\"cutscene\\":"<<cutscene_status_json()<<\'}\';return o.str();}()' in probe  # inside scripted_view
+    assert "cutscene_policy=d2vr::CutscenePolicy{};cutscene_gates_allowed=false;cutscene_knob_tick=0;" in probe  # StartProbe
+    # --- GameXr::present (docs/native-authored-scene-presentation.md section 5)
+    present = xr[xr.index("    void present(ID3D11Texture2D* left,ID3D11Texture2D* right,float hfov,float vfov,"):]
+    present = present[:present.index("\n    }\n")]
+    assert "ID3D11Texture2D* desktop=nullptr,std::array<UINT,2> desktop_view={},bool cinematic=false,bool authored_scene_render=false) {" in present
+    lines = {
+        "asr": "authored_scene_render=authored_scene_render && authored_camera && !gameplay;",
+        "scene": "const bool scene_render=gameplay || authored_scene_render;",
+        "world": "const bool world_scene=scene_render || world_ui_kind_!=0;",
+        "authored": "authored_camera=scene_render && authored_camera;",
+        "pointer": "&& !scene_render && !cinematic && !settings_.open() && continuity_.usable() && state==XR_SESSION_STATE_FOCUSED && controller_input.active) {",
+        "trigger": "controller_input.right_trigger=menu_trigger_gate_.update(raw_right_trigger,!scene_render || settings_.open() || settings_consumed,raw_input_active);",
+        "tracked": "(gates.tracked_ok=!world_scene || (!tracked_gameplay_required_ && !authored_scene_render) || tracked_pair_()) &&",
+        "menu_reset": "if(scene_render && !settings_.open()) menu_panel_.reset();",
+        "summon": "if(menu_grip && !menu_grip_was_ && (!scene_render || settings_.open()) && controller_input.right_grip<.5f) {",
+    }
+    for key, line in lines.items():
+        assert present.count(line) == 1, key
+    order = [present.index(lines[k]) for k in ("asr", "scene", "world", "authored")]
+    assert order == sorted(order) and present.index(lines["world"]) < present.index("XrEventDataBuffer event{}")
+    # raw gameplay keeps the settings, calibration and Y-hold semantics; overlays (HUD, wrist, vignette, art) stay off for an authored view
+    for raw in ("settings_.update(settings_input,gameplay,state==XR_SESSION_STATE_FOCUSED,pointer,settings_available,palm_fit_dt_);",
+                "const bool hold_gameplay=gameplay && !authored_camera && continuity_.usable() && views_valid_ &&",
+                "!gameplay && settings_available && settings_enabled_?YHoldMenu::Screen::pause:YHoldMenu::Screen::unavailable;",
+                "if(world_scene && !authored_camera) {", "if(gameplay && !authored_camera && tracked_pair_()) {",
+                "if(settings_requested.exchange(false) && !gameplay) {settings_.open_from_menu();}"):
+        assert raw in present, raw
+    assert "bool rendered_pair_ready() const {return tracked_pair_();}" in xr
+
+    # --- the boolean routing, evaluated: immersive cutscene, theater/pending cutscene, pause, gameplay
+    def route(gameplay: bool, authored: bool, asr: bool, cinematic: bool, settings_open=False, world_ui=0, required=True, pair=True):
+        asr = cpp_bool(lines["asr"].split("=", 1)[1].rstrip(";"), {"authored_scene_render": asr, "authored_camera": authored, "gameplay": gameplay})
+        scene = cpp_bool("gameplay || authored_scene_render", {"gameplay": gameplay, "authored_scene_render": asr})
+        world = cpp_bool("scene_render || world_ui_kind_!=0", {"scene_render": scene, "world_ui_kind_": world_ui})
+        pointer = cpp_bool("!scene_render && !cinematic && !settings_.open()", {"scene_render": scene, "cinematic": cinematic, "settings_.open()": settings_open})
+        menu_trigger = cpp_bool("!scene_render || settings_.open()", {"scene_render": scene, "settings_.open()": settings_open})
+        tracked_ok = cpp_bool("!world_scene || (!tracked_gameplay_required_ && !authored_scene_render) || tracked_pair_()",
+                              {"world_scene": world, "tracked_gameplay_required_": required, "authored_scene_render": asr, "tracked_pair_()": pair})
+        return {"projection": world, "pointer": pointer, "menu_trigger": menu_trigger, "tracked_ok": tracked_ok, "asr": asr}
+    immersive = route(False, True, True, True)
+    assert immersive == {"projection": True, "pointer": False, "menu_trigger": False, "tracked_ok": True, "asr": True}
+    assert not route(False, True, True, True, pair=False)["tracked_ok"]                 # no tracked pair: no scene, even without the gameplay requirement
+    assert not route(False, True, True, True, required=False, pair=False)["tracked_ok"]
+    assert not route(False, False, True, True)["asr"] and not route(False, False, True, True)["projection"]  # never without the authored camera
+    theater = route(False, False, False, True)
+    assert not theater["projection"] and not theater["pointer"] and theater["menu_trigger"]  # the TV quad, no pointer in a cutscene
+    pause = route(False, False, False, False)
+    assert not pause["projection"] and pause["pointer"] and pause["menu_trigger"]             # back to pause: the menu quad and its pointer
+    for authored in (False, True):  # gameplay is unchanged by the new argument (it is never an authored scene render)
+        assert route(True, authored, False, False) == {**route(True, authored, True, False), "asr": False}
+        assert route(True, authored, False, False)["projection"] and not route(True, authored, False, False)["pointer"]
+
+
+if __name__ == "__main__":
+    root = Path(__file__).resolve().parents[1]
+    check((root / "src/dxgi_probe.cpp").read_text(encoding="utf-8"), (root / "src/game_xr.hpp").read_text(encoding="utf-8"))
+    print("cutscene_routing_check ok")
