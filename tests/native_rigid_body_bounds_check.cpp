@@ -44,6 +44,7 @@ int main() {
         assert(!accept_bounds(paper,{1,0,0},{.72,0,.025},&why) && why==BodyReject::bounds_centre);
         assert(!accept_bounds(paper,{1,0,0},{.68,0,0},&why) && why==BodyReject::bounds_centre);   // 2 cm past the end
         assert(accept_bounds(paper,{.9,0,0},{.68,0,0},&why));                                     // a small offset (0.22 m) keeps the old rule
+        assert(!accept_bounds(paper,{2,0,0},{1,0,0},&why) && why==BodyReject::bounds_centre);     // a stale render (its centre off its box) stays refused
     }
     {   // size_limits_unchanged: 1 mm to 3 m diagonal, ordered and finite, body within 0.5 m of the box
         assert(!accept_bounds({{0,0,0},{.0005,0,0}},{0,0,0},{0,0,0},&why) && why==BodyReject::bounds_size);

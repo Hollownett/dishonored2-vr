@@ -49,7 +49,10 @@ inline bool accept_bounds(const NativeGrabBounds& bounds,Vec3 rendered_origin,Ve
     if(!(diagonal>.001) || !(diagonal<=3)) return fail(BodyReject::bounds_size);
     const double gap=length(bounds.closest(pose)-pose);
     if(!(gap<=.5)) return fail(BodyReject::bounds_centre);
-    if(!(length(rendered_origin-pose)<=.25) && !(gap<=.001)) return fail(BodyReject::bounds_centre);
+    // thin props: the offset alone is forgiven when the pose is inside the box AND the rendered centre is inside its own box (within 1 cm): an
+    // off-centre pivot. A rendered centre outside the box is a stale render after the body moved (native_rigid_body_check), never accepted.
+    const double centre_gap=length(bounds.closest(rendered_origin)-rendered_origin);
+    if(!(length(rendered_origin-pose)<=.25) && (!(gap<=.001) || !(centre_gap<=.01))) return fail(BodyReject::bounds_centre);
     if(why) *why=BodyReject::ok;
     return true;
 }
