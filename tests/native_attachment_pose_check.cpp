@@ -20,6 +20,7 @@ alignas(16) std::array<std::byte,0x300> fixture_animation{};
 alignas(16) std::array<std::byte,64> fixture_states{};
 alignas(16) std::array<std::byte,0x1900> fixture_model{};
 alignas(16) std::array<d2vr::rig::Transform,69> fixture_native{};
+alignas(16) std::array<d2vr::rig::Transform,69> fixture_moved{}; // v613: the same state-3 block after the animation moved it
 std::array<short,69> fixture_remap{};
 bool read(std::uintptr_t address,void* out,std::size_t size){SIZE_T n{};return ReadProcessMemory(GetCurrentProcess(),reinterpret_cast<void*>(address),out,size,&n) && n==size;}
 template<class T>void put(std::byte* address,const T& value){std::memcpy(address,&value,sizeof(value));}
@@ -215,6 +216,27 @@ struct NativeAttachmentPoseCheck {
         assert(pose.around(animation,3,59,[&]{++originals;assert(fixture_native[60].f[12]==0);return UINT64{29};})==29);
         assert(!pose.sides_[1].animation && !publish()); // Same animation generation/allocation, changed map.
         fixture_remap[59]=59;assert(call(false)==17);assert(publish());assert(call(true)==17);
+        {   // v613 (headset: the sword out of the hand for a frame after a catch; the pistol on holster -> draw): the animation moves its whole
+            // contiguous state-3 block about 10 frames into an equip clip. The model-space palette still holds per joint: the substitution
+            // follows the moved block (left arm and right arm alike) instead of revoking and letting the reader take the native joint.
+            const auto moved_block=reinterpret_cast<std::uintptr_t>(fixture_moved.data());
+            for(auto& joint:fixture_moved) joint=fixture_native[0];
+            for(const unsigned arm:{0u,1u}) {
+                put(fixture_animation.data()+0x2d8,native);pose.clear(1-arm); // the fixture's arms share one animation: one side at a time
+                assert(pose.publish(arm,animation,native,tracked,source));
+                const auto rebased=pose.rebases();
+                put(fixture_animation.data()+0x2d8,moved_block);
+                for(int frame=0;frame<2;++frame) // the first call follows the move, later calls stay on it
+                    assert(pose.around(animation,3,59,[&]{assert(fixture_moved[59].f[12]==.4f && fixture_native[59].f[12]==0);return UINT64{31};})==31);
+                assert(fixture_moved[59].f[12]==0 && pose.rebases()==rebased+1 && pose.sides_[arm].animation); // restored, palette kept
+                // A moved block that is not the contiguous 69-joint map still revokes.
+                fixture_remap[59]=60;
+                assert(pose.around(animation,3,59,[&]{assert(fixture_moved[60].f[12]==0 && fixture_moved[59].f[12]==0);return UINT64{37};})==37);
+                assert(!pose.sides_[arm].animation);
+                fixture_remap[59]=59;put(fixture_animation.data()+0x2d8,native);
+            }
+            assert(publish());assert(call(true)==17);
+        }
         // Only cuff/origin joints admit intentional bounded positive affine fit.
         const auto ordinary=tracked;
         for(const float width:{.6f,1.4f,2.f}) {

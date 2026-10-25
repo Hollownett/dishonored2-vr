@@ -118,6 +118,8 @@ struct Tracking {
     bool hand_empty[2]{};     // hand holds nothing: fingers curl from grip/trigger
     std::uint64_t native_socket_token[2]{};
     bool reverse_grip[2]{};   // held item: flip the socket 180 deg about the palm normal
+    std::uint64_t item_key[2]{}; // which item each hand holds (body::Inputs::item_key)
+    bool weapon_incoming[2]{};   // a draw/pickup the mod asked for is about to fill this hand (body::Inputs::weapon_incoming)
     float finger_turn[2][5][3]{};bool has_finger[2]{}; // per-joint finger turns (finger_ik.hpp), see body::Inputs
     float finger_axis[2][5][3][3]{};bool has_finger_axis[2]{}; // the hinges they turn about (finger_ik.hpp hinge_axes), see body::Inputs
     std::uint64_t tick{},native_frame{},tracking_revision{}; // tick: monotonic milliseconds
@@ -477,10 +479,11 @@ public:
     std::array<std::array<std::uint64_t,4>,2> finger_modes() const {std::lock_guard<std::mutex> lock(mutex_);return finger_modes_;}
     std::array<std::array<std::uint64_t,2>,2> finger_inputs() const {std::lock_guard<std::mutex> lock(mutex_);return finger_inputs_;}
     // Held-item grip per hand (status JSON full_body.grip): attachment joint in the drawn-fist frame (metres), wrap centre's distance from the hilt line, reverse flip applied.
-    struct GripState {std::array<double,3> attach_in_fist{};double hilt_miss{},reverse_weight{},blade_axis_gap_deg{};bool reversed{};};
+    struct GripState {std::array<double,3> attach_in_fist{};double hilt_miss{},reverse_weight{},blade_axis_gap_deg{},hold_native_deg{},hold_native_m{};bool reversed{},has_hold{};int finger_mode{};};
     std::array<GripState,2> grip_state() const {
         std::lock_guard<std::mutex> lock(mutex_);std::array<GripState,2> out{};
-        for(unsigned i=0;i<2;++i) {for(unsigned j=0;j<3;++j) out[i].attach_in_fist[j]=out_.fist_attach[i][j];out[i].hilt_miss=out_.hilt_miss[i];out[i].reversed=out_.grip_reversed[i];out[i].reverse_weight=out_.reverse_weight[i];out[i].blade_axis_gap_deg=out_.blade_axis_gap_deg[i];}
+        for(unsigned i=0;i<2;++i) {for(unsigned j=0;j<3;++j) out[i].attach_in_fist[j]=out_.fist_attach[i][j];out[i].hilt_miss=out_.hilt_miss[i];out[i].reversed=out_.grip_reversed[i];out[i].reverse_weight=out_.reverse_weight[i];out[i].blade_axis_gap_deg=out_.blade_axis_gap_deg[i];
+            out[i].hold_native_deg=out_.hold_native_deg[i];out[i].hold_native_m=out_.hold_native_m[i];out[i].has_hold=out_.has_hold[i];out[i].finger_mode=out_.finger_mode[i];}
         return out;
     }
     // Degrees the last solve turned each thumb joint by (CMC, MCP, IP), per hand.
@@ -600,7 +603,7 @@ private:
             in.raw_hand_valid[i]=track_.grip_valid[i] && (track_.raw_grip_hands & track_.tracked_hands & (1u<<i))!=0 && body::valid_pose(track_.raw_grip[i]);
             if(in.raw_hand_valid[i])in.raw_hand[i]=hand_target(i,track_.raw_grip[i]);
             in.grip[i]=track_.grip_value[i];in.trigger[i]=track_.trigger[i];
-            in.hand_empty[i]=track_.hand_empty[i];in.native_socket_token[i]=track_.native_socket_token[i];in.reverse_grip[i]=track_.reverse_grip[i];
+            in.hand_empty[i]=track_.hand_empty[i];in.native_socket_token[i]=track_.native_socket_token[i];in.reverse_grip[i]=track_.reverse_grip[i];in.item_key[i]=track_.item_key[i];in.weapon_incoming[i]=track_.weapon_incoming[i];
             in.has_finger[i]=track_.has_finger[i];std::memcpy(in.finger_turn[i],track_.finger_turn[i],sizeof(in.finger_turn[i]));
             in.has_finger_axis[i]=track_.has_finger_axis[i];std::memcpy(in.finger_axis[i],track_.finger_axis[i],sizeof(in.finger_axis[i]));
             in.native_arm[i]=have_native_arm_[i]?&native_.arm[i]:nullptr;

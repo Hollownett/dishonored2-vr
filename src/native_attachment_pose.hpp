@@ -62,6 +62,7 @@ class NativeAttachmentPose {
     std::mutex mutex_;std::array<Side,2> sides_{};
     unsigned allowed_{};std::uint64_t policy_epoch_{},policy_tick_{},policy_revision_{},policy_reference_epoch_{},policy_mapping_revision_{};
     std::atomic<std::uint64_t> substitutions_{},calls_{};
+    std::atomic<std::uint64_t> rebases_{}; // substitutions that followed a moved contiguous state-3 block (status arm_flicker.publish.rebases)
     static constexpr std::uint64_t freshness_ms=tracked_pose_freshness_ms;
 public:
     static constexpr std::uint64_t publish_grace_ms=100;
@@ -212,8 +213,18 @@ private:
                 frame.observed_stage=3;frame.unlock();return frame.call();
             }
         }
-        if(!slot(anim,state,joint,frame.at) || frame.at!=side->first_slot+static_cast<std::uintptr_t>(joint)*64) {
+        if(!slot(anim,state,joint,frame.at)) {
             frame.observed_stage=4;*side={};frame.unlock();return frame.call(); // Changed state-3 mapping revokes the retained palette.
+        }
+        if(const auto offset=static_cast<std::uintptr_t>(joint)*64;frame.at!=side->first_slot+offset) {
+            // v613: the animation moved its whole state-3 block between our upload and this read (sim 20261025T164524: once per equip,
+            // ~10 frames after a catch and ~1 s into a draw). The palette is model-space per joint, so it still holds for the moved block
+            // when that block is again the contiguous 69-joint map. Revoking here let this read and every later one in the frame take the
+            // native joint: the sword drawn out of the hand for a frame after a catch (headset v612). A non-contiguous map still revokes.
+            if(frame.at<offset || !palette_slots_current(anim,frame.at-offset)) {
+                frame.observed_stage=4;*side={};frame.unlock();return frame.call();
+            }
+            side->first_slot=frame.at-offset;++rebases_;
         }
         frame.tracked=side->joints[static_cast<unsigned>(joint)];
         if(!read_(frame.at,frame.saved.data(),64)) {frame.observed_stage=5;frame.unlock();return frame.call();}
@@ -327,5 +338,6 @@ public:
     }
     std::uint64_t substitutions() const {return substitutions_.load();}
     std::uint64_t calls() const {return calls_.load();}
+    std::uint64_t rebases() const {return rebases_.load();}
 };
 } // namespace d2vr

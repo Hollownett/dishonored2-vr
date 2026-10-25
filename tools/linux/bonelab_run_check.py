@@ -40,6 +40,11 @@ SWORD_COLUMNS = ("elapsed_ms", "held", "reversed", "reverse_weight", "hilt_miss"
 # 13.9 mm on the fixture), and a DRAW (hold 1) displaces the hilt for ~570 ms while the equip clip settles (hold easing). So hilt_miss is judged from REGRAB_FIT_MS with
 # the bound below; the reverse applies at hold start, so reverse_weight is judged from REGRAB_SETTLE_MS.
 REGRAB_MIN_HOLDS, REGRAB_PATTERN, REGRAB_SETTLE_MS, REGRAB_FIT_MS, REGRAB_HILT_MISS = 4, (False, True, False, True), 350, 700, 0.02
+HOLSTER_DRAW = ("holster_draw",)  # v613 (v612 feedback 7, 3): draws and catches, judged from sword-grip-trace.csv's hold columns (knob build/sword-grip-trace)
+HOLD_COLUMNS = ("has_hold", "finger_mode", "hold_native_deg", "hold_native_m", "attach_rebases")  # appended by v613; optional for older traces
+# Each hold of the game's sword (has_hold runs): the game's hand (finger_mode 3) and the hilt in the fist (<= HOLSTER_HILT_MISS) from its FIRST row; the
+# last HOLSTER_TAIL_ROWS rows (the sheathe clip, the frame the hand empties) are not judged. Before v613 a draw opened the hand for ~0.45 s (7.7 cm).
+HOLSTER_MIN_HOLDS, HOLSTER_HILT_MISS, HOLSTER_TAIL_ROWS = 4, 0.02, 3
 AUTHORED = ("authored_turn",)  # G1 scripted moments (camera plan Task 3): judged from artifacts/scripted-view.csv (knob build/scripted-view-trace)
 SCRIPTED_COLUMNS = ("t", "authored", "state_index", "hmd_rel_deg", "rel_composed_deg", "heading_deg", "offset_deg", "fold_deg", "body_deg", "view_yaw_deg")
 # src/scripted_recenter.hpp: an entry turn eases the offset over 0.4 s with smoothstep (peak rate 1.5 x delta / 0.4 s) and skips a delta under 10 deg.
@@ -86,6 +91,8 @@ def check(statuses, scenario, proofs=("a", "b", "d"), reject_touch=False):
         return check_authored(statuses)
     if scenario in REGRAB:
         return check_regrab(statuses)
+    if scenario in HOLSTER_DRAW:
+        return check_holster_draw(statuses)
     if scenario in HAND_BODY:
         return check_hand_body(statuses, proofs)
     if scenario in TANK_HAND_BODY:
@@ -538,7 +545,11 @@ def parse_sword_trace(text):
     rows = []
     for rec in csv.DictReader(text.splitlines()):
         try:
-            rows.append({k: float(rec[k]) for k in SWORD_COLUMNS})
+            row = {k: float(rec[k]) for k in SWORD_COLUMNS}
+            for k in HOLD_COLUMNS:
+                if rec.get(k) not in (None, ""):
+                    row[k] = float(rec[k])
+            rows.append(row)
         except (KeyError, TypeError, ValueError):
             continue
     return rows
@@ -591,6 +602,41 @@ def check_regrab(statuses):
         if len(holds) >= REGRAB_MIN_HOLDS:
             seen = tuple(bool(w[0]["reversed"]) if w else None for w in settled[:REGRAB_MIN_HOLDS])
             out.append(("PASS" if seen == REGRAB_PATTERN else "FAIL", f"{tag}reversed per hold F, R, F, R (got {''.join('?' if v is None else 'R' if v else 'F' for v in seen)})"))
+    return out or [("FAIL", "no sessions")]
+
+
+def check_holster_draw(statuses):
+    """v613 holster_draw: >= HOLSTER_MIN_HOLDS holds of the game's sword (runs of has_hold == 1: draws, catches); in each, from its first row to its last
+    HOLSTER_TAIL_ROWS: finger_mode == 3 and hilt_miss <= HOLSTER_HILT_MISS. INFO: the worst hold_native_deg (how far the equip clip swung the native socket the
+    drawn hold kept still) and attach_rebases (reads that followed a moved state-3 block instead of falling back to the native joint)."""
+    out = []
+    for n, status in enumerate(statuses):
+        tag = f"session {n + 1}: " if len(statuses) > 1 else ""
+        rows = status.get("sword_rows")
+        if not rows or "has_hold" not in rows[0]:
+            out.append(("FAIL", f"{tag}sword-grip-trace.csv with the v613 hold columns is missing (run with --knob sword-grip-trace)"))
+            continue
+        holds, cur = [], []
+        for r in rows:
+            if r.get("has_hold"):
+                cur.append(r)
+            elif cur:
+                holds.append(cur)
+                cur = []
+        holds += [cur] if cur else []
+        out.append(("PASS" if len(holds) >= HOLSTER_MIN_HOLDS else "FAIL", f"{tag}holds >= {HOLSTER_MIN_HOLDS} (got {len(holds)})"))
+        for k, hold in enumerate(holds):
+            judged = hold[:-HOLSTER_TAIL_ROWS] if len(hold) > HOLSTER_TAIL_ROWS else []
+            name = f"{tag}hold {k + 1} (start {hold[0]['elapsed_ms']:.0f} ms, {len(hold)} rows)"
+            if not judged:
+                out.append(("INFO", f"{name}: too short to judge"))
+                continue
+            miss = max(r["hilt_miss"] for r in judged)
+            out.append(("PASS" if miss <= HOLSTER_HILT_MISS + 1e-9 else "FAIL", f"{name}: hilt_miss <= {HOLSTER_HILT_MISS} m from the first frame (max {miss:.4f})"))
+            other = sum(1 for r in judged if r.get("finger_mode") != 3)
+            out.append(("PASS" if other == 0 else "FAIL", f"{name}: the game's hand closed on the hilt every frame ({other} rows with another finger mode)"))
+            out.append(("INFO", f"{name}: native socket swing kept out of the hand {max(r.get('hold_native_deg', 0) for r in hold):.0f} deg"))
+        out.append(("INFO", f"{tag}attach_rebases {rows[-1].get('attach_rebases', 0):.0f}"))
     return out or [("FAIL", "no sessions")]
 
 
@@ -900,7 +946,7 @@ def main(argv=None):
                 status["scripted_rows"] = parse_scripted_view((Path(d) / "artifacts" / "scripted-view.csv").read_text(encoding="utf-8"))
             except OSError:
                 status["scripted_rows"] = None
-    if args.scenario in REGRAB:
+    if args.scenario in REGRAB + HOLSTER_DRAW:
         for d, status in zip(args.run_dirs, statuses):
             try:
                 status["sword_rows"] = parse_sword_trace((Path(d) / "artifacts" / "sword-grip-trace.csv").read_text(encoding="utf-8"))
