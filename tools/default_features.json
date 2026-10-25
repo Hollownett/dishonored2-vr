@@ -266,6 +266,14 @@
    "default": true
   },
   {
+   "id": "right-eye-upscaler-at-start",
+   "file": "legacy-right-eye-taa-wait",
+   "kind": "disable",
+   "label": "Right eye gets FSR/DLSS from the first frame",
+   "help": "FSR and DLSS run on the right eye as soon as a level starts. Before, the right eye could fall back to the game's own TAA over the left eye's history until a private copy of that history was made: ghosting in the right eye for up to a minute. Turn off to restore the old wait.",
+   "default": true
+  },
+  {
    "id": "grip-alone-grab",
    "file": "no-grip-alone-grab",
    "kind": "disable",

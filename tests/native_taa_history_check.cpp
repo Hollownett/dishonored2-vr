@@ -130,6 +130,11 @@ int main() {
         PassInputs in{base,{0x1234,view_at},false,{},{}};
         std::array<Alternation,2> alternation;std::vector<ParamEntry> scratch;PassPlan plan;
         require(plan_pass(read_memory,in,ctx_at,alternation,plan,scratch)==PassResult::rebuild,"Right eye waits for twins");
+        // v613: FSR/DLSS own the TAA dispatch, so the right eye is marked from its first pass on the untouched engine pair.
+        in.upscaler_owns_taa=true;
+        require(plan_pass(read_memory,in,ctx_at,alternation,plan,scratch)==PassResult::planned && plan.eye==1 && plan.twins_pending &&
+                !plan.write && plan.replaced==plan.engine && plan.engine[0]==handle(s0) && plan.engine[1]==handle(s1),"Upscaler right eye planned without twins");
+        in.upscaler_owns_taa=false;
         require(snapshot(read_memory,reinterpret_cast<std::uintptr_t>(s0.bytes.data()),in.originals[0]) &&
                 snapshot(read_memory,reinterpret_cast<std::uintptr_t>(s1.bytes.data()),in.originals[1]) &&
                 snapshot(read_memory,reinterpret_cast<std::uintptr_t>(t0.bytes.data()),in.twins[0]) &&
@@ -138,6 +143,12 @@ int main() {
         in.twins_ready=true;
         require(plan_pass(read_memory,in,ctx_at,alternation,plan,scratch)==PassResult::planned && plan.eye==1 && plan.write,"Right eye planned");
         require(plan.replaced[0]==handle(t0) && plan.replaced[1]==handle(t1),"First right pass keeps engine roles");
+        require(!plan.twins_pending,"Ready twins are used");
+        in.upscaler_owns_taa=true;
+        require(plan_pass(read_memory,in,ctx_at,alternation,plan,scratch)==PassResult::planned && !plan.twins_pending &&
+                plan.replaced[0]!=handle(s0),"Upscaler right eye keeps ready twins");
+        in.upscaler_owns_taa=false;alternation[1].reset();
+        require(plan_pass(read_memory,in,ctx_at,alternation,plan,scratch)==PassResult::planned && plan.replaced[0]==handle(t0) && plan.replaced[1]==handle(t1),"Right pass after reset keeps engine roles");
         unsigned optional_reads=0;
         const auto count_optional=[&](std::uintptr_t address,void* out,std::size_t size) {
             if(address==view_at+d2vr::alternate_taa::stamp_offset ||
@@ -205,6 +216,9 @@ int main() {
         view[view_flags_b]=0;in.eye_views={0x1234,view_at};
         std::uint32_t wider=2400;std::memcpy(s0.bytes.data()+image_desc+8,&wider,4);
         require(plan_pass(read_memory,in,ctx_at,alternation,plan,scratch)==PassResult::rebuild,"Resized original forces rebuild");
+        in.upscaler_owns_taa=true;
+        require(plan_pass(read_memory,in,ctx_at,alternation,plan,scratch)==PassResult::planned && plan.twins_pending && !plan.write,"Upscaler right eye survives a resized original");
+        in.upscaler_owns_taa=false;
         std::uint32_t bad=0;std::memcpy(ctx.data()+ctx_param_count,&bad,4);
         require(plan_pass(read_memory,in,ctx_at,alternation,plan,scratch)==PassResult::fallback,"Empty table falls back");
         std::cout<<"native TAA history checks passed\n";

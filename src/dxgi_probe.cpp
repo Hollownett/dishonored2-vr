@@ -1274,7 +1274,7 @@ static std::string arm_flicker_json() {
         ",\"rejects_source\":"+std::to_string(c.rejects_source)+",\"rejects_other\":"+std::to_string(c.rejects_other)+",\"rebases\":"+std::to_string(attachment_pose.rebases())+"}}";
     return text;
 }
-static bool taa_history_requested=false,taa_history_installed=false;
+static bool taa_history_requested=false,taa_history_installed=false,right_eye_taa_wait_legacy=false;
 static unsigned native_cvar_overrides{};
 static bool comfort_requested=false,comfort_applied=false,comfort_restored=true;
 static d2vr::rig::NativeArmBindingCache arm_binding_cache;
@@ -10742,6 +10742,10 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
         taa_history_requested=native_eye_capture_requested && head_requested && !fs::exists(root/L"build"/L"no-per-eye-taa");
         taa_history_installed=false;
         taa_history.alternate_runtime(alternate_native_taa_abi?&alternate_taa_runtime:nullptr);
+        // v613 (headset: "first minute of DLSS/FSR the right eye ghosts"): FSR/DLSS mark the right eye's pass without waiting for its native
+        // history twins; build/legacy-right-eye-taa-wait restores the wait (right eye on native TAA over the shared pair until the twins exist).
+        right_eye_taa_wait_legacy=fs::exists(root/L"build"/L"legacy-right-eye-taa-wait");
+        taa_history.upscaler_owns_taa(right_eye_taa_wait_legacy?nullptr:&fsr_taa.enabled);
         if(taa_history_requested) {
             try {taa_history.install(image_base,&read_self);taa_history_installed=true;
                 if(simulated_gameplay_script_requested) {
@@ -11022,7 +11026,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
                << ",\"alternate_native_taa_rejected\":" << alternate_taa_runtime.rejected.load()
                << ",\"taa_right_swaps\":" << taa_history.right_swaps() << ",\"taa_left_flips\":" << taa_history.left_flips()
                << ",\"taa_fallbacks\":" << taa_history.fallbacks() << ",\"taa_rebuild_waits\":" << taa_history.rebuild_waits()
-               << ",\"taa_idle\":" << taa_history.idle() << ",\"taa_rebuilds\":" << taa_history.rebuilds() << ",\"taa_failures\":" << taa_history.failures()
+               << ",\"taa_idle\":" << taa_history.idle() << ",\"taa_rebuilds\":" << taa_history.rebuilds() << ",\"taa_failures\":" << taa_history.failures() << ",\"taa_right_shared\":" << taa_history.right_shared() << ",\"right_eye_taa_wait_legacy\":" << (right_eye_taa_wait_legacy?"true":"false")
                << ",\"attachment_substitutions\":" << attachment_pose.substitutions() << ",\"attachment_calls\":" << attachment_pose.calls()
                << ",\"xr_recoveries\":" << xr_recoveries << ",\"recoverable_faults\":" << recoverable_faults.load()
                << ",\"arm_upload_requested\":" << (arm_upload_requested?"true":"false")

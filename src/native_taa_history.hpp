@@ -123,17 +123,22 @@ struct PassInputs {
     bool twins_ready{};std::array<ImageSnapshot,2> originals{},twins{};
     std::uintptr_t single_view{};std::optional<alternate_taa::Receipt> receipt;
     bool capture_metadata{};
+    // FSR/DLSS replace the TAA dispatch of both eyes and keep their own per-eye history, so the native history pair is
+    // not read: the right eye needs no twins to be marked (v613; before, it ran native TAA on the left eye's shared pair,
+    // without the upscaler, until maintain() found a frame with no pass in flight).
+    bool upscaler_owns_taa{};
 };
 enum class PassResult {untracked,idle,fallback,rebuild,planned};
 struct PassPlan {
     int eye=-1;std::uint32_t counter{};bool write{};std::optional<std::array<float,4>> jitter;
     std::optional<temporal_eye::NativePass> metadata;
     std::array<std::uintptr_t,2> slots{};std::array<std::uint64_t,2> engine{},replaced{};
+    bool twins_pending{}; // right eye planned on the engine pair (upscaler_owns_taa) while its twins are missing or stale
 };
 // Pure planning against engine memory read through `read`. It never writes.
 template<class Read> PassResult plan_pass(Read read,const PassInputs& in,std::uintptr_t ctx,std::array<Alternation,2>& alternation,
                                          PassPlan& plan,std::vector<ParamEntry>& scratch) {
-    plan.metadata.reset();
+    plan.metadata.reset();plan.twins_pending=false;
     std::uintptr_t view{};
     if(!read(ctx+ctx_view,&view,sizeof view)) return PassResult::untracked;
     int eye=eye_of(view,in.eye_views[0],in.eye_views[1]);
@@ -168,15 +173,18 @@ template<class Read> PassResult plan_pass(Read read,const PassInputs& in,std::ui
     if(!read(in.base+frame_counter_rva,&counter,sizeof counter)) return PassResult::fallback;
     auto pair=engine;
     if(eye==1) {
-        if(!in.twins_ready) return PassResult::rebuild;
-        for(int k=0;k<2;++k) {
+        bool twins=in.twins_ready;
+        for(int k=0;twins && k<2;++k) {
             ImageSnapshot current{};
-            if(!snapshot(read,static_cast<std::uintptr_t>(engine[k]-image_handle),current) || current!=in.originals[k]) return PassResult::rebuild;
-            pair[k]=in.twins[k].image+image_handle;
+            if(!snapshot(read,static_cast<std::uintptr_t>(engine[k]-image_handle),current) || current!=in.originals[k]) twins=false;
         }
+        if(!twins && !in.upscaler_owns_taa) return PassResult::rebuild;
+        if(twins) for(int k=0;k<2;++k) pair[k]=in.twins[k].image+image_handle;
+        else plan.twins_pending=true;
     }
     plan.eye=eye;plan.counter=counter;plan.engine=engine;
-    plan.replaced=assignment(pair,alternation[static_cast<std::size_t>(eye)].flip(counter));
+    // Without twins the engine pair is left exactly as the engine set it (no role flip, no write).
+    plan.replaced=plan.twins_pending?engine:assignment(pair,alternation[static_cast<std::size_t>(eye)].flip(counter));
     for(int k=0;k<2;++k) plan.slots[k]=table+static_cast<std::uintptr_t>(slots.index[k])*sizeof(ParamEntry)+offsetof(ParamEntry,value);
     plan.write=plan.replaced!=plan.engine;
     return PassResult::planned;
@@ -236,13 +244,13 @@ class NativeTaaHistory {
     }};
     inline static NativeTaaHistory* instance_{};
     Pass original_{};Allocate allocate_{};Read read_{};std::uintptr_t base_{};bool enabled_{};alternate_taa::Runtime* alternate_{};
-    std::atomic<bool> active_{},ready_{},rebuild_{},metadata_enabled_{};std::atomic<unsigned> depth_{},in_flight_{};
+    std::atomic<bool> active_{},ready_{},rebuild_{},metadata_enabled_{};const std::atomic<bool>* upscaler_owns_{};std::atomic<unsigned> depth_{},in_flight_{};
     std::array<std::atomic<std::uintptr_t>,2> eye_views_{},observed_{};
     std::array<taa_history::Alternation,2> alternation_{};
     // Changed only by maintain() while ready_==false and in_flight_==0.
     std::array<taa_history::ImageSnapshot,2> originals_{},twins_{};
     std::mutex maintain_mutex_;
-    std::atomic<UINT64> passes_{},right_swaps_{},left_flips_{},fallbacks_{},rebuild_waits_{},idle_{},rebuilds_{},failures_{};
+    std::atomic<UINT64> passes_{},right_swaps_{},left_flips_{},fallbacks_{},rebuild_waits_{},idle_{},rebuilds_{},failures_{},right_shared_{};
 
     bool verify_sites() const {
         for(const auto& site:sites) {
@@ -263,11 +271,13 @@ class NativeTaaHistory {
                     in.receipt=alternate_->resolve(view);
             }
             if(ready_.load()) {in.twins_ready=true;in.originals=originals_;in.twins=twins_;}
+            in.upscaler_owns_taa=upscaler_owns_ && upscaler_owns_->load(std::memory_order_relaxed);
             const auto result=taa_history::plan_pass(read_,in,reinterpret_cast<std::uintptr_t>(ctx),alternation_,plan,scratch);
             if(result==taa_history::PassResult::idle) ++idle_;
             if(result==taa_history::PassResult::fallback) ++fallbacks_;
             if(result==taa_history::PassResult::rebuild) {rebuild_=true;alternation_[1].reset();++rebuild_waits_;}
             if(result==taa_history::PassResult::planned) {
+                if(plan.twins_pending) {rebuild_=true;++right_shared_;} // maintain() still builds the twins for native TAA
                 // Publish the shared images seen this frame for maintain().
                 for(int k=0;k<2;++k) observed_[k]=static_cast<std::uintptr_t>(plan.engine[k]-taa_history::image_handle);
                 return true;
@@ -333,6 +343,8 @@ private:
     }
 public:
     void alternate_runtime(alternate_taa::Runtime* runtime) noexcept {alternate_=runtime;}
+    // The FSR/DLSS replacement's enabled flag (nullptr: the right eye always waits for its twins, the pre-v613 behaviour).
+    void upscaler_owns_taa(const std::atomic<bool>* flag) noexcept {upscaler_owns_=flag;}
     void reset_histories() noexcept {alternation_[0].reset();alternation_[1].reset();if(base_) request_reset();}
     // Stable native view objects from qualified Setup calls; 0 clears an eye.
     void publish_eye_view(unsigned eye,std::uintptr_t view) noexcept {if(eye<2) eye_views_[eye]=view;}
@@ -366,7 +378,7 @@ public:
         if(!verify_sites()) throw std::runtime_error("Native TAA history ABI differs");
         allocate_=reinterpret_cast<Allocate>(base+taa_history::allocate_rva);instance_=this;
         ready_=false;rebuild_=false;clear_eye_views();observed_[0]=0;observed_[1]=0;
-        passes_=right_swaps_=left_flips_=fallbacks_=rebuild_waits_=idle_=rebuilds_=failures_=0;
+        passes_=right_swaps_=left_flips_=fallbacks_=rebuild_waits_=idle_=rebuilds_=failures_=right_shared_=0;
         const auto target=reinterpret_cast<void*>(base+taa_history::pass_rva);
         if(!original_ && MH_CreateHook(target,reinterpret_cast<void*>(&dispatch),reinterpret_cast<void**>(&original_))!=MH_OK)
             throw std::runtime_error("Cannot create native TAA history hook");
@@ -388,5 +400,6 @@ public:
     UINT64 left_flips() const {return left_flips_.load();}UINT64 fallbacks() const {return fallbacks_.load();}
     UINT64 rebuild_waits() const {return rebuild_waits_.load();}UINT64 idle() const {return idle_.load();}
     UINT64 rebuilds() const {return rebuilds_.load();}UINT64 failures() const {return failures_.load();}
+    UINT64 right_shared() const {return right_shared_.load();} // right-eye passes the upscaler took before its twins existed
 };
 } // namespace d2vr
