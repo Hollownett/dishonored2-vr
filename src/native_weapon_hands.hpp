@@ -88,7 +88,10 @@ class NativeWeaponHands {
     friend struct NativeWeaponExchangeFixture;
     friend struct WakeBudgetCheck;
 public:
-    enum class Op : unsigned {draw,sheathe,drop,pickup,recall,stow,gun_draw,gun_holster,shove,ragdoll,yank,wake};
+    enum class Op : unsigned {draw,sheathe,drop,pickup,recall,stow,gun_draw,gun_holster,shove,ragdoll,yank,wake,living_start,living_pull};
+    // G6 (plan Task 14): the hold of a living NPC pulls him (the existing teleport 0x87d1e0, horizontal steps toward the hand) only when the guard_probe
+    // experiments (plan Task 13, docs/BONELAB-FEEL-GUARD-PULL-RE.md) showed no snap-back and no yaw pop. Set from that verdict.
+    static constexpr bool living_pull_enabled=false;
     // shove: the game's TakeDamage on target (an arkNPC) with damage decl `decl` (a name under the damage type), from pos
     // along vel (the push direction), amount 0 = the decl's own.
     struct Request {Op op{};std::array<float,3> pos{},vel{},spin{};std::array<float,9> axis{1,0,0,0,1,0,0,0,1};std::uintptr_t target{};const char* decl{};float amount{};unsigned side{};bool free_look{};std::uint64_t manual_generation{},manual_xr_epoch{};NativePlayerStateLease manual_owner;};
@@ -176,6 +179,8 @@ public:
             case Op::ragdoll: ok=ragdoll(base,read,r.target,r.vel);break;
             case Op::yank: ok=yank(base,read,r);break;
             case Op::wake: ok=wake(base,read,r);break;
+            case Op::living_start: ok=living_start(base,read,r);break;
+            case Op::living_pull: ok=living_pull(base,read,r);break;
             }
             if(!ok) ++failures;
         }
@@ -382,7 +387,9 @@ private:
     template<class Read> static bool yank(std::uintptr_t base,Read& read,const Request& r) {
         const Vec3 hand{r.pos[0],r.pos[1],r.pos[2]};const auto side=r.side&1u;
         std::uintptr_t best{};
-        if(grabbed_[side] && GetTickCount64()-grabbed_at_[side]<=2000 && living(read,grabbed_[side])) {
+        // G6 (Task 14): a hard pull out of a living hold names him: the hold's NPC ragdolls, wherever the hand now is.
+        if(r.target && rig::pointer(r.target) && rig::typed(read,base,r.target,NativeMelee::npc_vtable_rva) && living(read,r.target)) best=r.target;
+        else if(grabbed_[side] && GetTickCount64()-grabbed_at_[side]<=2000 && living(read,grabbed_[side])) {
             const auto model=rig::value<std::uintptr_t>(read,grabbed_[side]+0xf0);
             const auto at=model && rig::pointer(*model)?rig::value<std::array<float,3>>(read,*model+0x1860):std::nullopt;
             if(at && std::hypot(hand.x-(*at)[0],hand.y-(*at)[1])<1.6) best=grabbed_[side];
@@ -399,6 +406,24 @@ private:
         if(ok) {++yanks;NativeGrab::yanked(r.side,best,GetTickCount64()+1500);} // the squeezing hand keeps hold of him
         return ok;
     }
+    // G6 (Task 14): a living hold starts with today's shove (shove_damage, no damage): the stagger and, as measured, the alert. Never START_RAGDOLL
+    // and never a velocity: his bodies are keyframed. r.target is the held NPC, r.vel the direction he is shoved from (the hand's side).
+    template<class Read> static bool living_start(std::uintptr_t base,Read& read,const Request& r) {
+        if(!r.target || !rig::pointer(r.target) || !rig::typed(read,base,r.target,NativeMelee::npc_vtable_rva) || !living(read,r.target)) return false;
+        Request s=r;s.op=Op::shove;s.decl="components/base/damage/shove_damage.damage";s.amount=0;
+        const bool ok=shove(base,read,s);if(ok) ++living_shoves;return ok;
+    }
+    // A pull step (r.pos: his new feet position, at most 5 cm per 100 ms and horizontal, LivingHold) through the existing teleport; only with
+    // living_pull_enabled (the Task 13 verdict), never on a dead or recycled NPC. The orientation is kept as read (the probe's yaw-pop check).
+    template<class Read> static bool living_pull(std::uintptr_t base,Read& read,const Request& r) {
+        if(!living_pull_enabled || !r.target || !rig::pointer(r.target) || !rig::typed(read,base,r.target,NativeMelee::npc_vtable_rva) || !living(read,r.target)) return false;
+        const auto axis=rig::value<std::array<float,9>>(read,r.target+0x30c);
+        if(!axis) return false;
+        teleport<Read>(base,r.target,r.pos,*axis);return true;
+    }
+public:
+    inline static std::atomic<unsigned> living_shoves{};
+private:
     // Task 14 dev probe (build/guard-probe, off by default, read once at start by arm_guard_probe): the next full-fist squeeze at a living guard runs ONE
     // lever experiment instead of the pull (shove alone, a named damage decl, or horizontal teleport steps toward the hand; never START_RAGDOLL or a
     // velocity), samples him every 50 ms for 6 s into artifacts/guard-probe.csv, and deletes the knob file. The engine calls are the existing ones.

@@ -1,6 +1,7 @@
 #pragma once
 #include "game_rig.hpp"
 #include "physical_grab.hpp"
+#include "living_npc_hold.hpp"
 #include <cstring>
 #include <limits>
 namespace d2vr {
@@ -186,6 +187,44 @@ template<class Read> std::optional<NativeRigidBody> native_ragdoll_body(Read& re
        value<std::uint32_t>(read,record+0x70)!=handle || value<std::uintptr_t>(read,*game+0x3130b0+(*id>>16)*8)!=entity) return {};
     return result;
 }
+// G6 (plan Task 14): a LIVING NPC's bone, for the hand to hold him by the collar or an arm. His bodies are keyframed to the animation ((flags&7)==6):
+// only the position and the radius are read; never a NativeRigidBody, so nothing can ever write a velocity to it. Living: !(npc+0xd1 & 0x28).
+template<class Read> std::optional<LivingBone> living_bone(Read& read,std::uintptr_t base,std::uintptr_t entity,int bone) {
+    using namespace rig;
+    if(bone<0 || bone>=17) return {};
+    const auto game=value<std::uintptr_t>(read,base+0x39a5290);
+    if(!game || !typed(read,base,*game,0x1c940a8) || !typed(read,base,entity,0x1c5e108)) return {};
+    const auto state=value<unsigned char>(read,entity+0xd1);
+    if(!state || (*state&0x28)) return {};
+    const auto id=value<std::uint32_t>(read,entity+0xa8);
+    if(!id || *id==0x3fff0010 || (*id>>16)>=0x3fff || value<std::uintptr_t>(read,*game+0x3130b0+(*id>>16)*8)!=entity) return {};
+    const auto entries=list(read,entity+0x268,256);
+    if(!entries) return {};
+    std::uintptr_t component{};
+    for(unsigned i=0;i<entries->packed_count && !component;++i) {
+        const auto at=value<std::uintptr_t>(read,entries->data+i*8);
+        if(at && typed(read,base,*at,0x1c54008)) component=*at;
+    }
+    if(!component) return {};
+    const auto handles=value<std::uintptr_t>(read,component+0x100);
+    if(!handles || !pointer(*handles)) return {};
+    const auto data=value<std::uintptr_t>(read,*handles+0x28);
+    if(!data || !pointer(*data) || value<std::uint32_t>(read,*handles+0x30)!=17u) return {};
+    const auto handle=value<std::uint32_t>(read,*data+bone*4);
+    const auto world=value<std::uintptr_t>(read,*game+0x60410);
+    if(!handle || !*handle || !world || !pointer(*world)) return {};
+    const auto pool=value<std::uintptr_t>(read,*world+0x28);const auto count=value<std::uint32_t>(read,*world+0x30);
+    const auto index=*handle&0xffffff;
+    if(!pool || !pointer(*pool) || !count || *count>0x100000 || index==0xffffff || index>=*count) return {};
+    const auto record=*pool+index*0xb0;
+    const auto flags=value<std::uint32_t>(read,record+0x44);const auto transform=value<Transform>(read,record);
+    if(!flags || (*flags&7)!=6 || !transform || !valid(*transform) || value<std::uint32_t>(read,record+0x70)!=handle) return {};
+    const Vec3 at{transform->f[12],transform->f[13],transform->f[14]};
+    if(!finite(at) || value<std::uint32_t>(read,*data+bone*4)!=handle) return {};
+    return LivingBone{entity,*id,bone,at,ragdoll_bone_radius[static_cast<std::size_t>(bone)]};
+}
+// The living bones a hand may hold (spec G6): the collar (chest 2, neck 3), the upper arms (5, 8) and the forearms (6, 9).
+inline constexpr bool living_hold_bone(int bone) {return bone==2 || bone==3 || bone==5 || bone==6 || bone==8 || bone==9;}
 // The grabbable limb of this body nearest the hand (with allow_collar: the chest and neck too, dead or unconscious guards only).
 template<class Read> std::optional<NativeRigidBody> nearest_ragdoll_body(Read& read,std::uintptr_t base,std::uintptr_t entity,Vec3 hand,bool allow_collar=false) {
     std::optional<NativeRigidBody> best;
