@@ -116,8 +116,16 @@ static void target_gating() {
     assert(!vignette_target_allowed(true,false,true,false));   // menu / wheel
     assert(!vignette_target_allowed(true,false,false,true));   // settings panel
 }
+static void authored_easing_allows_vignette() { // G1: the 0.4 s scripted-moment ease lifts the authored inhibit, nothing else
+    assert(vignette_target_allowed(true,true,false,false,true));    // authored and easing
+    assert(!vignette_target_allowed(true,true,false,false,false));  // authored, not easing
+    assert(!vignette_target_allowed(true,true,true,false,true));    // menu open
+    assert(!vignette_target_allowed(true,true,false,true,true));    // settings panel
+    assert(!vignette_target_allowed(false,true,false,false,true));  // not gameplay
+}
 
 int main() {
+    authored_easing_allows_vignette();
     vignette_zero_at_rest();
     vignette_rises_with_stick_speed();
     vignette_falls_slowly();

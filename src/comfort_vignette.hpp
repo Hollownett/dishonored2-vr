@@ -42,9 +42,10 @@ public:
 };
 
 // The vignette only has a non-zero target during free gameplay: not in authored scenes (takedowns, cutscenes), menus or the
-// settings panel, nor while loading (gameplay false).
-inline bool vignette_target_allowed(bool gameplay,bool authored,bool menu_open,bool settings_open) noexcept {
-    return gameplay && !authored && !menu_open && !settings_open;
+// settings panel, nor while loading (gameplay false). recenter_easing: the 0.4 s scripted-moment turn (G1) lifts the authored
+// inhibit for the ease only.
+inline bool vignette_target_allowed(bool gameplay,bool authored,bool menu_open,bool settings_open,bool recenter_easing=false) noexcept {
+    return gameplay && (!authored || recenter_easing) && !menu_open && !settings_open;
 }
 
 // Knob file `comfort-vignette`: a strength 0..1. Anything unreadable keeps the default.

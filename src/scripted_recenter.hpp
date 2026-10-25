@@ -12,7 +12,7 @@ struct ScriptedRecenterParams {double dead_zone_rad=0.17453292519943295,ease_s=0
 struct ScriptedRecenterInput {
     double t;                          // seconds, monotonic
     bool authored;                     // authored_camera this frame
-    std::optional<double> hmd_rel_yaw; // tracked_yaw(centre_pose, head_origin), wrapped; nullopt if not finite
+    std::optional<double> hmd_rel_yaw; // tracked_yaw(centre_pose, head_origin) minus last frame's offset (against the composed origin), wrapped; nullopt if not finite
     std::optional<double> heading;     // AuthoredHeading result this frame
     std::uint64_t heading_snaps;       // AuthoredHeading::snaps()
     std::uint64_t epoch;               // reference epoch ^ player/camera/generation identity hash

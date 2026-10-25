@@ -16,21 +16,21 @@ int main() {
     state(13,assassin,0x1c83468,1);state(39,attack,0x1c85d28,0);state(44,block,0x1c81a68,0);
     d2vr::NativeActionCameraReader reader;
     auto action=reader.poll(memory,base_address,player_address,100);
-    assert(action.scripted && !action.combat && action.owns_camera(false));
+    assert(action.scripted && !action.combat && action.owns_camera(false) && action.state_index==13);
     memory.put(assassin+0x20,static_cast<unsigned char>(0));memory.put(block+0x20,static_cast<unsigned char>(1));
     action=reader.poll(memory,base_address,player_address,101);
-    assert(!action.scripted && action.combat && !action.owns_camera(true));
+    assert(!action.scripted && action.combat && !action.owns_camera(true) && action.state_index==44);
     assert(action.owns_camera(true,true));
     memory.put(block+0x20,static_cast<unsigned char>(0));memory.put(attack+0x20,static_cast<unsigned char>(1));
     action=reader.poll(memory,base_address,player_address,102);
-    assert(!action.scripted && action.combat && !action.owns_camera(true));
+    assert(!action.scripted && action.combat && !action.owns_camera(true) && action.state_index==39);
     // A silent assassination overrides an overlapping sword state; both flags
     // may legitimately be active during a native transition.
     memory.put(assassin+0x20,static_cast<unsigned char>(1));
     action=reader.poll(memory,base_address,player_address,103);
-    assert(action.scripted && action.combat && action.owns_camera(true));
+    assert(action.scripted && action.combat && action.owns_camera(true) && action.state_index==13); // the first active entry in table order
     memory.put(assassin+0x10,player_address);action=reader.poll(memory,base_address,player_address,104);
-    assert(!action.scripted);memory.put(assassin+0x10,machine);
+    assert(!action.scripted && action.state_index==39);memory.put(assassin+0x10,machine);
     bool changed=false;
     auto racing=[&](std::uintptr_t at,void* out,size_t size) {
         const bool ok=memory(at,out,size);
@@ -38,6 +38,6 @@ int main() {
         return ok;
     };
     action=reader.poll(racing,base_address,player_address,105);
-    assert(changed && !action.scripted && !action.combat); // reject mixed active-state snapshot
+    assert(changed && !action.scripted && !action.combat && action.state_index==-1); // reject mixed active-state snapshot
     std::cout<<"PASS: silent assassination owns camera, ordinary block/attack remain tracked, overlap priority, foreign and racing FSM rejection\n";
 }

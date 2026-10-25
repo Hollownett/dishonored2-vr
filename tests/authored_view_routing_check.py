@@ -17,13 +17,13 @@ def check(probe: str, features: str) -> None:
     # the recenter origin and the failure handling are part of the call
     call = body[body.index("native_eye=d2vr::authored_head_view("):]
     call = call[:call.index("native_eye.reset();")]
-    assert "head_origin.orientation" in call and "catch(const std::invalid_argument&)" in call
+    assert "composed_origin" in call and "catch(const std::invalid_argument&)" in call  # G1: yaw(offset) * head_origin
     # the audio listener follows the head-owned view in authored scenes, the native camera only under the knob
-    assert "listener_view=d2vr::authored_head_view(source_anchor,*authored_heading_now,centre_pose,centre_pose,1.0,head_origin.orientation,authored_physical_offset)" in body
+    assert "listener_view=d2vr::authored_head_view(source_anchor,*authored_heading_now,centre_pose,centre_pose,1.0,composed_origin,authored_physical_offset)" in body
     assert "legacy_authored_camera?&source_anchor:&*listener_view" in body
     assert "authored_camera?&source_anchor:nullptr" not in body
     # The same bounded/crouch-compensated offset reaches both eyes and the listener.
-    assert body.count("head_origin.orientation,authored_physical_offset)") == 2
+    assert body.count("composed_origin,authored_physical_offset)") == 2
     offset = body.index("action_camera_physical_offset=head_offset;")
     assert body.index("head_offset.y=std::clamp(head_offset.y+crouch_lift_now") < offset
     assert "action_camera_alignment_enabled?action_camera_physical_offset:d2vr::Vec3{}" in body

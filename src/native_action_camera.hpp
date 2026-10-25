@@ -15,6 +15,7 @@ inline constexpr std::array<NativeCameraState,11> native_action_camera_states{{
 // A nearby takedown candidate is not evidence that a finisher is running.
 struct NativeActionCamera {
     bool scripted{},combat{};
+    int state_index=-1; // diagnostics: the first active scripted/combat FSM index in table order, -1 when none
     bool owns_camera(bool native_camera_mode,bool force_native=false) const noexcept {
         return scripted || force_native || (native_camera_mode && !combat);
     }
@@ -58,6 +59,7 @@ public:
             receipts[receipt_count++]={entry,*state,*active};
             if(*active==1) {
                 if(entry.combat) out.combat=true;else out.scripted=true;
+                if(out.state_index<0) out.state_index=static_cast<int>(entry.index);
             }
         }
         // Ownership must come from one stable native FSM snapshot; a pool or
