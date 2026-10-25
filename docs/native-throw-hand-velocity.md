@@ -32,3 +32,8 @@ before the call, so rewriting it inside the setter is the final velocity. [rsp+0
 ## Not validated
 Gain, window and cap are unvalidated on a headset (the source mod only tested them on a mock runtime). The game launches about 0.3 s
 after the release, so the spawn point is the hand's position at launch (the grenade stays drawn in the hand until then).
+
+## Provenance of the tuning constants
+The tuning constants (gain 1.5, cap 17 m/s, window 0.10 s, max age 1.5 s, teleport 12 m/s, spawn offset 0x20) come from the measurements
+summarised in `.superpowers/sdd/2026-10-25-small-objects-fingers/mines-grenades-research.md`: the documented values of an external
+GPL-3.0 mod. Only those numbers and the facts about the game were used; no code was copied. They are unvalidated on a headset.

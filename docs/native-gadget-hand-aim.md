@@ -17,10 +17,10 @@ Each sensor body embeds its own profile string, so the identity is the exe's own
 
 ## What the hook does
 `src/native_gadget_aim.hpp`: MinHook on both. While the left aim pose published by the Present thread is fresh (<= 100 ms), write its
-origin / forward into the fields above, run the native sensor, restore every field (`FieldSwap`, `src/gadget_aim.hpp`, tested by
+origin / forward into the fields above, run the native sensor, restore each field only if it still equals the value we wrote, so an engine write-back during the native call is kept and counted (`FieldSwap`, `src/gadget_aim.hpp`, tested by
 `tests/gadget_aim_check.cpp`). Stale pose, unreadable pointer or prologue mismatch = untouched sensor. The pose is the same
 left-hand game aim that powers and the crosshair use (`publish_left_aim` in dxgi_probe.cpp, `aim_for_shots` frames). Status JSON `gadget_aim`
-{placement [calls, swapped], throw_hit [calls, swapped], stale, bad_pointer}.
+{placement [calls, swapped], throw_hit [calls, swapped], stale, bad_pointer, restore_skipped}.
 
 ## Gating (found in the sim)
 Both sensors run EVERY frame, even with no gadget (sim run 20261025T135531: 9795 calls each). The hook therefore acts only when the
@@ -32,3 +32,8 @@ gate is what keeps it off the idle ones. No mine/grenade was equipped in the sim
 What `[s+0x48]` is (a decl-like object whose +0x2C is a direction) and whether the Placement ray start at `[s+0x40]+0xD8` is the eye
 rather than a body-relative point were not traced further; headset / sim must show the ghost following the hand (swapped counter > 0).
 Placement needs a gadget equipped: check `placement[0]` in the sim status.
+
+## Provenance of the tuning constants
+The tuning constants (gain 1.5, cap 17 m/s, window 0.10 s, max age 1.5 s, teleport 12 m/s, spawn offset 0x20) come from the measurements
+summarised in `.superpowers/sdd/2026-10-25-small-objects-fingers/mines-grenades-research.md`: the documented values of an external
+GPL-3.0 mod. Only those numbers and the facts about the game were used; no code was copied. They are unvalidated on a headset.

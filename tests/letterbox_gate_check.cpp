@@ -10,6 +10,11 @@ int main() {
         expect(!g.skip(true,1,bar),"a third matching draw in the frame is not");
         expect(g.skip(true,2,bar),"next frame starts again");
     }
+    {   // the cap is per eye pass: a UI drawn once per eye in one frame loses its bars in both eyes
+        LetterboxGate g;
+        g.begin_pass();expect(g.skip(true,7,bar) && g.skip(true,7,bar) && !g.skip(true,7,bar),"eye 0: two bars, then capped");
+        g.begin_pass();expect(g.skip(true,7,bar) && g.skip(true,7,bar) && !g.skip(true,7,bar),"eye 1 (same frame): two bars again");
+    }
     {   LetterboxGate g;
         expect(!g.skip(false,1,bar),"inactive (not an immersive cutscene, or the knob): never");
         expect(!g.skip(true,1,{38,1,true,false}) && !g.skip(true,1,{40,1,true,false}),"only 39 indices");

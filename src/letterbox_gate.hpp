@@ -2,7 +2,7 @@
 // Track T C3: the two black letterbox bars the game paints in an immersive (stereo projection) cutscene are two DrawIndexed calls of 39
 // indices (Scaleform vertex shader, untextured pixel shader; the external mod identifies them by the DXBC hash 7ACC1A9A27C4D9E2). This gate
 // decides, from facts the draw hook can read cheaply, whether a draw is one of them: exactly 39 indices, one instance, triangle list,
-// nothing bound at pixel-shader texture slot 0, at most two per frame. The shader hash itself is not read (no CreateVertexShader
+// nothing bound at pixel-shader texture slot 0, at most two per eye pass (per frame when no pass boundary is reported). The shader hash itself is not read (no CreateVertexShader
 // hook exists in this mod); the combination is narrow enough, and the knob build/no-letterbox-hide turns it off.
 #include <cstdint>
 
@@ -13,6 +13,8 @@ class LetterboxGate {
 public:
     static constexpr unsigned indices=39,per_frame=2;
     // `active`: an immersive cutscene scene frame with the knob absent. Returns true when this draw is to be skipped.
+    // Called at each eye pass's begin: the cap is per eye pass, so a UI drawn once per eye loses both bars in both eyes.
+    void begin_pass() noexcept {seen_=0;}
     bool skip(bool active,std::uint64_t frame,const LetterboxDraw& draw) noexcept {
         if(!active || draw.indices!=indices || draw.instances!=1 || !draw.triangle_list || draw.textured) return false;
         if(frame!=frame_) {frame_=frame;seen_=0;}

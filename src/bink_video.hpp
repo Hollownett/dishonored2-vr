@@ -22,7 +22,8 @@ public:
         *oldest={h,now,true};
     }
     void close(std::uintptr_t h) noexcept {if(auto* s=find(h)) *s={};}
-    void frame(std::uintptr_t h,std::uint64_t now) noexcept {if(auto* s=find(h)) s->frame_ms=now;}
+    // A frame of a handle we never saw opened (bink2w64.dll loaded after the game's BinkOpen, so the open was missed) is adopted: that video is playing.
+    void frame(std::uintptr_t h,std::uint64_t now) noexcept {if(auto* s=find(h)) s->frame_ms=now;else open(h,now);}
     bool playing(std::uint64_t now) const noexcept {
         for(const auto& s:slots_) if(s.used && now>=s.frame_ms && now-s.frame_ms<=active_ms) return true;
         return false;

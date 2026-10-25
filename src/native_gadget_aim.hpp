@@ -28,7 +28,7 @@ namespace d2vr {
 class NativeGadgetAim {
 public:
     static constexpr std::uintptr_t placement_rva=0x3c1e40,throw_hit_rva=0x3cec30;
-    inline static std::atomic<std::uint64_t> placement_calls{},placement_swapped{},throw_calls{},throw_swapped{},stale{},bad_pointer{};
+    inline static std::atomic<std::uint64_t> placement_calls{},placement_swapped{},throw_calls{},throw_swapped{},stale{},bad_pointer{},restore_skipped{};
     static void publish(const GadgetAimPose& pose) noexcept {std::lock_guard<std::mutex> l(mutex_);pose_=pose;}
     static bool installed() noexcept {return targets_[0]!=nullptr;}
     static bool install(std::uintptr_t base) noexcept {
@@ -85,7 +85,10 @@ private:
         swap.put(dir,pose.forward,!placement);
         if(origin) swap.put(origin,pose.origin);
         ++(placement?placement_swapped:throw_swapped);
-        return original_[which](sensor);   // ~FieldSwap puts every field back
+        const auto result=original_[which](sensor);
+        swap.restore();   // a field the engine rewrote during the call keeps its value
+        if(const auto skipped=swap.skipped()) restore_skipped+=skipped;
+        return result;
     }
     static std::uintptr_t __fastcall placement_hook(void* sensor) {return run(0,sensor);}
     static std::uintptr_t __fastcall throw_hook(void* sensor) {return run(1,sensor);}

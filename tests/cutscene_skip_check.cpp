@@ -28,6 +28,16 @@ int main() {
         o=s.update(false,true,false,5300);expect(!o.mask_a,"a fresh press afterwards is normal");
         expect(s.leaks_stopped()==1,"counted");
     }
+    {   // the scene ends under a press that began inside it but is not yet 0.6 s old: latched until released, never leaks
+        SkipHold s;s.update(true,false,true,0);
+        auto o=s.update(false,false,true,200);expect(!o.inject_x && o.mask_x && o.mask_a,"short press, scene ended: masked");
+        o=s.update(false,false,true,900);expect(o.mask_x,"still masked past 0.6 s");
+        o=s.update(true,false,true,1500);expect(o.mask_x && !o.inject_x,"a new scene does not re-arm it");
+        o=s.update(false,false,false,1600);expect(!o.mask_x,"released");
+        expect(s.leaks_stopped()==1,"counted once");
+        // a press that began outside any scene is never latched by the scene ending
+        SkipHold t;t.update(false,true,false,0);auto p=t.update(false,true,false,50);expect(!p.mask_a,"outside press untouched");
+    }
     {   // a press that began before the scene (the confirm that opened it) is not a skip
         SkipHold s;s.update(false,true,false,0);
         auto o=s.update(true,true,false,100);expect(!o.inject_x,"short");

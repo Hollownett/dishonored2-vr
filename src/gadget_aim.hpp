@@ -23,8 +23,8 @@ inline bool gadget_aim_fresh(const GadgetAimPose& pose,std::uint64_t now) noexce
 // Overwrites up to three float3 fields (null = skipped) and puts them back on destruction. `xy_only` fields (the throw-hit sensor builds a
 // horizontal direction from x,y only) take the hand's x,y and keep their own z.
 class FieldSwap {
-    struct Slot {float* at{};float saved[3]{};bool xy_only{};};
-    std::array<Slot,3> slots_{};unsigned count_{};
+    struct Slot {float* at{};float saved[3]{};float written[3]{};bool xy_only{};};
+    std::array<Slot,3> slots_{};unsigned count_{},skipped_{};
 public:
     FieldSwap() = default;
     FieldSwap(const FieldSwap&) = delete;FieldSwap& operator=(const FieldSwap&) = delete;
@@ -32,9 +32,19 @@ public:
         if(!at || count_>=slots_.size()) return;
         auto& s=slots_[count_++];s.at=at;s.xy_only=xy_only;std::memcpy(s.saved,at,12);
         at[0]=value[0];at[1]=value[1];if(!xy_only) at[2]=value[2];
+        std::memcpy(s.written,at,12);
     }
-    void restore() noexcept {for(unsigned i=0;i<count_;++i) std::memcpy(slots_[i].at,slots_[i].saved,12);count_=0;}
+    // Puts a field back only when it still holds exactly what put() wrote: if the engine wrote the field during the native call, that
+    // write is kept (and counted in skipped()). An xy_only field only ever owned x,y; its z is never touched.
+    void restore() noexcept {
+        for(unsigned i=0;i<count_;++i) {
+            auto& s=slots_[i];const std::size_t bytes=s.xy_only?8:12;
+            if(std::memcmp(s.at,s.written,bytes)==0) std::memcpy(s.at,s.saved,bytes);else ++skipped_;
+        }
+        count_=0;
+    }
     unsigned size() const noexcept {return count_;}
+    unsigned skipped() const noexcept {return skipped_;}
     ~FieldSwap() {restore();}
 };
 } // namespace d2vr

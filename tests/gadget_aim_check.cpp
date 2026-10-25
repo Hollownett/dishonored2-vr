@@ -24,6 +24,16 @@ int main() {
         FieldSwap s;s.put(start,p.origin);s.restore();s.restore();
         expect(start[0]==10 && start[1]==20,"explicit restore is idempotent");
     }
+    {   // an engine write-back during the native call is kept; untouched fields still restore; mismatches are counted
+        float a[3]{1,1,1},b[3]{2,2,2},c[3]{3,3,3};
+        FieldSwap s;s.put(a,p.origin);s.put(b,p.forward);s.put(c,p.forward,true);
+        b[1]=9.f;c[2]=8.f;   // engine rewrote b (counts) and c's z (not ours: no mismatch, kept)
+        s.restore();
+        expect(a[0]==1 && a[1]==1 && a[2]==1,"unchanged field restored");
+        expect(b[1]==9.f && b[0]==0.f,"rewritten field kept as the engine left it");
+        expect(c[0]==3 && c[1]==3 && c[2]==8.f,"xy_only field restores x,y and never touches z");
+        expect(s.skipped()==1,"one mismatch counted");
+    }
     std::printf(failures?"gadget_aim_check FAILED\n":"gadget_aim_check ok\n");
     return failures?1:0;
 }

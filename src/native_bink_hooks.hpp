@@ -10,6 +10,7 @@ typedef enum MH_STATUS {MH_UNKNOWN=-1,MH_OK=0,MH_ERROR_ALREADY_INITIALIZED,MH_ER
 extern "C" MH_STATUS WINAPI MH_CreateHook(LPVOID,LPVOID,LPVOID*);
 extern "C" MH_STATUS WINAPI MH_EnableHook(LPVOID);
 extern "C" MH_STATUS WINAPI MH_DisableHook(LPVOID);
+extern "C" MH_STATUS WINAPI MH_RemoveHook(LPVOID);
 #endif
 #include "bink_video.hpp"
 #include <atomic>
@@ -36,17 +37,23 @@ public:
             {"BinkDoFrame",reinterpret_cast<void*>(&frame_hook),reinterpret_cast<void**>(&do_frame_)},
             {"BinkNextFrame",reinterpret_cast<void*>(&next_hook),reinterpret_cast<void**>(&next_)},
             {"BinkDoFrameAsync",reinterpret_cast<void*>(&async_hook),reinterpret_cast<void**>(&async_)}};
-        void* targets[6]{};unsigned n=0;
+        unsigned n=0;
         for(const auto& e:entries) {
             void* target=reinterpret_cast<void*>(GetProcAddress(module,e.name));
-            if(!target || MH_CreateHook(target,e.detour,e.original)!=MH_OK) return false;   // fail soft: nothing enabled
-            targets[n++]=target;
+            if(!target || MH_CreateHook(target,e.detour,e.original)!=MH_OK) {disable();return false;}   // fail soft: nothing enabled
+            targets_[n++]=target;
         }
-        for(unsigned i=0;i<n;++i) {const auto s=MH_EnableHook(targets[i]);if(s!=MH_OK && s!=MH_ERROR_ENABLED) return false;}
+        for(unsigned i=0;i<n;++i) {const auto s=MH_EnableHook(targets_[i]);if(s!=MH_OK && s!=MH_ERROR_ENABLED) {disable();return false;}}
         installed_flag=true;return true;
+    }
+    // Disables and removes every Bink detour (both stop() paths); safe when nothing was installed. The module stays "tried": no reinstall in this process.
+    static void disable() noexcept {
+        for(auto& t:targets_) if(t) {MH_DisableHook(t);MH_RemoveHook(t);t=nullptr;}
+        installed_flag=false;
     }
 private:
     inline static bool tried_{};
+    inline static void* targets_[6]{};
     inline static std::mutex mutex_;inline static BinkTracker tracker_;
     inline static void* (__fastcall *open_)(void*,void*,void*,void*){};
     inline static void* (__fastcall *open_options_)(void*,void*,void*,void*){};
