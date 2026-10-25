@@ -91,6 +91,7 @@
 #include "vr_controls.hpp"
 #include "play_controls.hpp"
 #include "native_crosshair.hpp"
+#include "gun_equip_name.hpp"
 #include "aim_smoother.hpp"
 #include "native_fire_seam_trace.hpp"
 #include "native_shot_aim.hpp"
@@ -2913,8 +2914,8 @@ static std::optional<d2vr::Vec3> hip_xr_position;static UINT64 hip_pose_tick{},h
 static std::atomic<float> right_hand_peak{},sword_release_speed{}; // diagnostics: peak right-hand speed (decays), hand speed at the last drop
 static bool gadget_hand_aim_enabled=false; // Track T B: installed, and build/no-hand-mine-aim absent
 static void publish_gadget_aim(const d2vr::WorldTrackedPose& left) noexcept {
-    if(!game_xr || game_xr->controller_input.left_trigger<.1f) return; // gadgets / powers are used with the left trigger held; the ThrowHit sensor runs every frame and must not be re-aimed otherwise (sim: 81% of frames)
-    d2vr::GadgetAimPose gadget{};
+    if(!game_xr) return; // the placement sensor is re-aimed whenever it is enabled (v613: the ghost must sit on the crosshair); the ThrowHit sensor runs on most frames and is re-aimed only with the trigger (sim: 81% of frames)
+    d2vr::GadgetAimPose gadget{};gadget.trigger=game_xr->controller_input.left_trigger>=.1f;
     gadget.origin={static_cast<float>(left.position.x),static_cast<float>(left.position.y),static_cast<float>(left.position.z)};
     gadget.forward={static_cast<float>(left.basis[0].x),static_cast<float>(left.basis[0].y),static_cast<float>(left.basis[0].z)};
     gadget.tick=GetTickCount64();d2vr::NativeGadgetAim::publish(gadget);
@@ -3029,6 +3030,14 @@ static int gun_owner_of(std::uintptr_t item) noexcept {
     std::string n(text.data());for(auto& c:n) c=static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
     if(n.find("weapon")==std::string::npos && n.find("gun")==std::string::npos && n.find("crossbow")==std::string::npos) return -1;
     return n.find("emily")!=std::string::npos?1:0;
+}
+// The inventory item's weapon entity decl name says gun/pistol/crossbow (any case): independent of the equip pose name, which a weapon swap can spell differently.
+static bool item_is_gun(std::uintptr_t item) noexcept {
+    std::uint32_t id{};std::uintptr_t game{},entity{},decl{},name{};std::array<char,128> text{};
+    if(!read_self(item+8,&id,4) || id==0x3fff0010 || (id>>16)>=0x3fff || !read_self(image_base+0x39a5290,&game,8) || !d2vr::rig::pointer(game) ||
+       !read_self(game+0x3130b0+(id>>16)*8,&entity,8) || !d2vr::rig::pointer(entity) || !read_self(entity+0x2e8,&decl,8) || !d2vr::rig::pointer(decl) ||
+       !read_self(decl+0x48,&name,8) || !d2vr::rig::pointer(name) || !read_self(name,text.data(),text.size()-1)) return false;
+    return d2vr::is_gun_equip_name(text.data());
 }
 // Aim direction = the barrel; the position stays the hand (the bore passes a few cm away: ~0.2 deg at the 30 m crosshair).
 template<class P> static bool barrel_aim(P& p) noexcept {
@@ -8206,7 +8215,7 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                         {char name[32]{};if(state->equip_name_texts[0] && read_self(state->equip_name_texts[0],name,sizeof(name)-1)) std::memcpy(left_equip_name,name,sizeof(name));}
                                         // Guns only (pistol "Gun", crossbow): the Heart and grenades are not aimed along their model.
                                         {const std::string_view n(left_equip_name);
-                                         left_gun_model=!state->carrying && state->slots[0] && (n=="Gun" || n.find("rossbow")!=n.npos)?gun_model_of(state->slots[0]):0;
+                                         left_gun_model=!state->carrying && state->slots[0] && (d2vr::is_gun_equip_name(n) || item_is_gun(state->slots[0]))?gun_model_of(state->slots[0]):0; // v613: a swap can spell the equip pose differently; the item's own decl name decides too
                                          if(left_gun_model) if(const int gun_owner=gun_owner_of(state->slots[0]);gun_owner>=0) hip_owner=gun_owner;}
                                         hand_state_tick=now;
                                     }
