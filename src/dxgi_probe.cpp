@@ -9703,6 +9703,9 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
                 scripted_view_csv << std::setprecision(9) << "t,authored,state_index,hmd_rel_deg,rel_composed_deg,heading_deg,offset_deg,fold_deg,body_deg,view_yaw_deg\n";
             }
         }
+        // G1 loot measurement (hands plan Task 1): build/loot-reach-trace -> artifacts/native-loot-reach.csv (+ native-loot-reach-owners.csv),
+        // opened after the native interaction hooks install below; read-only, <= 8192 rows (src/native_interaction_aim.hpp loot_trace_*)
+        const bool loot_reach_trace_requested=fs::exists(root/L"build"/L"loot-reach-trace");
         {   // G2 spike (camera plan Task 4): build/cinematic-probe -> artifacts/cinematic-probe.csv; the knob text may name the sim-only experiments
             std::lock_guard<std::mutex> trace_lock(cinematic_probe_mutex);cinematic_probe_csv.close();cinematic_probe_rows=0;cinematic_probe_mode=0;
             cinematic_probe_writes=0;cinematic_probe_restores=0;cinematic_probe_captures=0;cinematic_probe_frames32=0;cinematic_probe_last_logic=~0u;
@@ -10055,6 +10058,8 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
         }
         native_interaction_aim.attach_physical_grab(physical_grab_requested?&native_grab:nullptr);
         if(native_interaction_requested) native_interaction_aim.install(image_base,&read_self,&game_logic_mask,controller_aim_requested,output/L"native-interaction-rays.csv",native_camera_trace_requested,native_camera_trace_requested);
+        if(native_interaction_requested && loot_reach_trace_requested && !native_interaction_aim.loot_reach_trace(output/L"native-loot-reach.csv"))
+            throw std::runtime_error("Cannot open the loot reach trace (build/loot-reach-trace)");
         if(native_interaction_requested && controller_requested && !d2vr::NativeManualEquipRuntime::process_owner().install(image_base,&read_self))
             throw std::runtime_error("Native manual weapon ownership hooks did not install cleanly");
         if(physical_grab_requested) {

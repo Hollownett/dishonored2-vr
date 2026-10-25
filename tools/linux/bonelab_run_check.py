@@ -2,6 +2,7 @@
 """Check a sim run of a Part 1 corpse/prop scenario or the finger_touch scenario against its assertions.
 
 usage: bonelab_run_check.py RUN_DIR [RUN_DIR ...] --scenario NAME [--reject-touch]
+       bonelab_run_check.py RUN_DIR --scenario loot_reach --coin X Y Z [--case table|floor|drawer]
 RUN_DIR is a ~/d2vr-test-builds/sim-runs/<stamp> folder (reads RUN_DIR/artifacts/xr-live-status.json). Several run dirs are
 one scenario's sessions (S5 runs four of 50 cycles): counters are summed, binds >= 40 is required per session.
 Prints PASS/FAIL/INFO per assertion; exit 1 on any FAIL. Side-pair fields are [left, right].
@@ -48,6 +49,10 @@ AUTHORED_EASE_S, AUTHORED_EASE_SLACK_S, AUTHORED_DEAD_ZONE_DEG, AUTHORED_RESIDUA
 AUTHORED_SNAP_DEG = 29.9
 STATE_NAMES = {8: "Mantle", 9: "Vault", 13: "Assassination", 33: "SyncAnim", 38: "NpcFatality", 41: "Choke", 42: "DropChoke", 55: "BloodthirstyFatality",
                83: "KillCam", 39: "combat 39", 44: "combat 44"}  # docs/full-body-research.md 6b
+LOOT = ("loot_reach",)  # G1 loot measurement (hands plan Task 1): artifacts/native-loot-reach.csv (+ -owners.csv), knob build/loot-reach-trace
+LOOT_COLUMNS = ("t", "side", "palm_x", "palm_y", "palm_z", "dir_x", "dir_y", "dir_z", "owner", "spawn", "takeable", "set_count", "rank",
+                "los_called", "los_blocked", "selected_owner", "prompt_owner")
+LOOT_GATE_M, LOOT_COIN_MATCH_M, LOOT_TAKE_MS = 0.45, 0.25, 1000  # frames judged: the coin within 0.45 m of the palm; the coin = the takeable owner whose bounds are nearest --coin
 HAND_FILTER_DEFAULT = 0x000885E4  # R1Recipe::filter: the hand body's word whenever it holds nothing through the body
 
 
@@ -262,6 +267,125 @@ def check_authored(statuses):
                 out.append(("PASS" if worst <= 1e-9 else "FAIL", f"{name}: {label} view_yaw steps within ease rate + head motion + {AUTHORED_STEP_SLACK_DEG:g} deg "
                                                                f"(worst step {step:+.2f} deg vs allowed {allowed:.2f} at t {rows[m]['t']:.3f})"))
     return out or [("FAIL", "no sessions")]
+
+
+def parse_loot_reach(text):
+    """native-loot-reach.csv text -> a list of rows (ints for ids/counts, floats for the palm); short or non-numeric rows dropped."""
+    rows = []
+    for rec in csv.DictReader(text.splitlines()):
+        try:
+            row = {k: int(rec[k]) for k in ("t", "side", "owner", "spawn", "takeable", "set_count", "rank", "los_called", "los_blocked", "selected_owner", "prompt_owner")}
+            row.update({k: float(rec[k]) for k in ("palm_x", "palm_y", "palm_z", "dir_x", "dir_y", "dir_z")})
+        except (KeyError, TypeError, ValueError):
+            continue
+        rows.append(row)
+    return rows
+
+
+def parse_loot_owners(text):
+    """native-loot-reach-owners.csv text -> {owner: {takeable, pos, min, max}}; missing bounds/position are None."""
+    out = {}
+    for rec in csv.DictReader(text.splitlines()):
+        try:
+            owner = int(rec["owner"])
+            vec = lambda *ks: [float(rec[k]) for k in ks] if all(rec.get(k) not in (None, "") for k in ks) else None  # noqa: E731
+            out[owner] = {"takeable": rec.get("takeable") == "1", "pos": vec("pos_x", "pos_y", "pos_z"),
+                          "min": vec("min_x", "min_y", "min_z"), "max": vec("max_x", "max_y", "max_z")}
+        except (KeyError, TypeError, ValueError):
+            continue
+    return out
+
+
+def _box_distance(point, info):
+    """Distance from point to the owner's bounds (its position when the bounds are unreadable); inf when neither."""
+    if info.get("min") and info.get("max"):
+        return math.dist(point, [min(max(p, lo), hi) for p, lo, hi in zip(point, info["min"], info["max"])])
+    return math.dist(point, info["pos"]) if info.get("pos") else math.inf
+
+
+def loot_frames(rows):
+    """Rows -> one frame per routed stage-0 cycle (the consecutive rows of one (t, side)): palm, side, {owner: row}, selected, prompt."""
+    frames, key = [], None
+    for r in rows:
+        if (r["t"], r["side"]) != key:
+            key = (r["t"], r["side"])
+            frames.append({"t": r["t"], "side": r["side"], "palm": (r["palm_x"], r["palm_y"], r["palm_z"]), "set": {},
+                           "selected": r["selected_owner"], "prompt": r["prompt_owner"]})
+        if r["owner"]:
+            frames[-1]["set"][r["owner"]] = r
+    return frames
+
+
+def loot_classify(in_set, rank0, los_called, los_blocked, selected):
+    """The brief's classification, first match in order."""
+    if selected >= 0.8:
+        return "PASS"
+    if in_set >= 0.8 and rank0 < 0.5:
+        return "ORDER"
+    if in_set >= 0.8 and rank0 >= 0.5 and los_called < 0.2:
+        return "ELIGIBILITY"
+    if in_set < 0.2:
+        return "NOT_IN_SET"
+    if los_blocked >= 0.8:
+        return "LOS"
+    return "MIXED"
+
+
+def check_loot(status, coin, case=None):
+    """G1 loot measurement. The coin is the takeable owner (native-loot-reach-owners.csv) whose bounds are nearest `coin` (within 0.25 m;
+    none: the coin never entered a result set). Over the frames (routed stage-0 cycles) whose palm is within 0.45 m of the coin:
+    in_set_rate, rank0_rate (rank 0 after order_native_use_hits), los_called_rate (of the rank-0 frames, 3b7b90 asked about the coin),
+    los_blocked_rate (of the frames where it was asked, blocked), selected_rate (native-selected owner = the coin); then one classification:
+    PASS selected >= 0.8; ORDER in set >= 0.8 but rank0 < 0.5; ELIGIBILITY in set >= 0.8, rank0 >= 0.5, LOS asked < 0.2 (the native
+    permission / 3b80a0 checks rejected it first); NOT_IN_SET in set < 0.2; LOS blocked >= 0.8; MIXED otherwise.
+    A take ends the measurement: when the coin was the native-selected owner within 1 s before its last appearance in any result set
+    and the trace goes on after it, the frames after that appearance are dropped (the coin is gone, not missed)."""
+    tag = f"{case}: " if case else ""
+    rows, owners = status.get("loot_rows"), status.get("loot_owners") or {}
+    if not rows:
+        return [("FAIL", f"{tag}native-loot-reach.csv is missing or empty (run with --knob loot-reach-trace)")]
+    out = []
+    matches = sorted((_box_distance(coin, info), owner) for owner, info in owners.items() if info["takeable"])
+    coin_owner = matches[0][1] if matches and matches[0][0] <= LOOT_COIN_MATCH_M else None
+    info = owners.get(coin_owner) if coin_owner else {"pos": list(coin)}
+    out.append(("INFO", f"{tag}coin {coin_owner if coin_owner else 'not seen in any result set'}"
+                        + (f" ({matches[0][0]:.3f} m from --coin)" if coin_owner else f" (nearest takeable {matches[0][0]:.2f} m)" if matches else "")))
+    frames = loot_frames(rows)
+    seen = [f["t"] for f in frames if coin_owner and coin_owner in f["set"]]
+    if seen and frames[-1]["t"] > seen[-1] and any(seen[-1] - LOOT_TAKE_MS <= f["t"] <= seen[-1] and f["selected"] == coin_owner for f in frames):
+        late = sum(1 for f in frames if f["t"] > seen[-1] and _box_distance(f["palm"], info) <= LOOT_GATE_M)
+        out.append(("INFO", f"{tag}coin taken at t {seen[-1]} (selected before it left the result sets): {late} later frames near it dropped"))
+        frames = [f for f in frames if f["t"] <= seen[-1]]
+    frames = [f for f in frames if _box_distance(f["palm"], info) <= LOOT_GATE_M]
+    out.append(("PASS" if frames else "FAIL", f"{tag}frames with the coin within {LOOT_GATE_M} m of the palm >= 1 (got {len(frames)}: "
+                                              f"left {sum(1 for f in frames if f['side'] == 0)}, right {sum(1 for f in frames if f['side'] == 1)}; trace rows {len(rows)}"
+                                              f"{', capped at 8192' if len(rows) >= 8192 else ''})"))
+    if not frames:
+        return out
+    n = len(frames)
+    hit = [f["set"].get(coin_owner) if coin_owner else None for f in frames]
+    in_set = sum(1 for h in hit if h) / n
+    at0 = [h for h in hit if h and h["rank"] == 0]
+    rank0 = len(at0) / n
+    los_called = sum(1 for h in at0 if h["los_called"]) / len(at0) if at0 else 0.0
+    asked = [h for h in hit if h and h["los_called"]]
+    los_blocked = sum(1 for h in asked if h["los_blocked"]) / len(asked) if asked else 0.0
+    selected = sum(1 for f in frames if coin_owner and f["selected"] == coin_owner) / n
+    prompted = sum(1 for f in frames if coin_owner and f["prompt"] == coin_owner) / n
+    out.append(("INFO", f"{tag}in_set_rate {in_set:.3f}, rank0_rate {rank0:.3f}, los_called_rate {los_called:.3f} (of {len(at0)} rank-0 frames), "
+                        f"los_blocked_rate {los_blocked:.3f} (of {len(asked)} asked), selected_rate {selected:.3f}, prompt_rate {prompted:.3f} over {n} frames"))
+    for side, name in ((1, "right"), (0, "left")):
+        fs = [(f, h) for f, h in zip(frames, hit) if f["side"] == side]
+        if fs:
+            others = {}
+            for f, _ in fs:
+                if f["selected"] and f["selected"] != coin_owner:
+                    others[f["selected"]] = others.get(f["selected"], 0) + 1
+            out.append(("INFO", f"{tag}{name}: {len(fs)} frames, in set {sum(1 for _, h in fs if h) / len(fs):.3f}, rank 0 {sum(1 for _, h in fs if h and h['rank'] == 0) / len(fs):.3f}, "
+                                f"selected {sum(1 for f, _ in fs if coin_owner and f['selected'] == coin_owner) / len(fs):.3f}, mean set {sum(len(f['set']) for f, _ in fs) / len(fs):.2f} owners"
+                                + (f", other selected {sorted(others.items(), key=lambda kv: -kv[1])[:2]}" if others else "")))
+    out.append(("INFO", f"{tag}classification: {loot_classify(in_set, rank0, los_called, los_blocked, selected)}"))
+    return out
 
 
 def parse_locomotion(text):
@@ -668,7 +792,11 @@ def main(argv=None):
     ap.add_argument("--scenario", required=True)
     ap.add_argument("--proofs", default="abd", help="hand_body_soak only: the proofs to judge (a, b, d); e.g. --proofs a over sessions without the timing block")
     ap.add_argument("--reject-touch", action="store_true", help="finger_touch only: the run used the reject switch, so touch_bound must be false")
+    ap.add_argument("--coin", type=float, nargs=3, metavar=("X", "Y", "Z"), help="loot_reach only: the coin's world position (game units)")
+    ap.add_argument("--case", choices=("table", "floor", "drawer"), help="loot_reach only: the case label")
     args = ap.parse_args(argv)
+    if args.scenario in LOOT and (not args.coin or len(args.run_dirs) != 1):
+        ap.error("loot_reach needs one RUN_DIR and --coin X Y Z")
     statuses = []
     for d in args.run_dirs:
         f = Path(d) / "artifacts" / "xr-live-status.json"
@@ -705,7 +833,16 @@ def main(argv=None):
             except (OSError, ValueError, KeyError) as e:
                 print(f"FAIL  cannot read the finger samples or script in {d}: {e}")
                 return 1
-    rows = check(statuses, args.scenario, tuple(args.proofs), args.reject_touch)
+    if args.scenario in LOOT:
+        art = Path(args.run_dirs[0]) / "artifacts"
+        try:
+            statuses[0]["loot_rows"] = parse_loot_reach((art / "native-loot-reach.csv").read_text(encoding="utf-8"))
+            statuses[0]["loot_owners"] = parse_loot_owners((art / "native-loot-reach-owners.csv").read_text(encoding="utf-8"))
+        except OSError:
+            statuses[0]["loot_rows"] = None
+        rows = check_loot(statuses[0], tuple(args.coin), args.case)
+    else:
+        rows = check(statuses, args.scenario, tuple(args.proofs), args.reject_touch)
     for verdict, text in rows:
         print(f"{verdict:4}  {text}")
     return 1 if any(v == "FAIL" for v, _ in rows) else 0

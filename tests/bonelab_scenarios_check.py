@@ -91,6 +91,7 @@ def main():
     sword_regrab_checks()
     authored_turn_checks()
     cutscene_checks()
+    loot_reach_checks()
     print("bonelab_scenarios_check ok")
 
 
@@ -623,6 +624,95 @@ def cutscene_checks():
             assert seg["input"] == {"move_x": 0.0} and "when" not in seg, seg
     starts = sorted((s["start_ms"], s["end_ms"]) for s in segments)
     assert starts[0][0] == 0 and all(a[1] == b[0] for a, b in zip(starts, starts[1:])), "contiguous, no gaps"
+
+
+COIN, COIN_OWNER, SHELF = (1.0, 2.0, 0.85), 9001, 9002
+LOOT_OWNERS = "owner,spawn,takeable,pos_x,pos_y,pos_z,min_x,min_y,min_z,max_x,max_y,max_z\n" \
+              "9001,11,1,1.0,2.0,0.85,0.98,1.98,0.85,1.02,2.02,0.86\n9002,12,0,1.2,2.0,0.8,0.9,1.7,0.0,1.5,2.3,0.85\n9003,13,1,4,4,1,,,,,,\n"
+
+
+def loot_trace(frames):
+    """frames: list of dicts (side, palm, coin=None or (rank, los_called, los_blocked), selected, prompt) -> native-loot-reach.csv text."""
+    lines = [",".join(brc.LOOT_COLUMNS)]
+    for i, f in enumerate(frames):
+        members = [(SHELF, 0 if not f.get("coin") or f["coin"][0] else 1, 1, 0, 0)]
+        if f.get("coin"):
+            members.append((COIN_OWNER, *f["coin"]))
+        for owner, rank, called, blocked in [(m[0], m[1], m[2], m[3]) for m in members]:
+            lines.append(",".join(str(v) for v in (1000 + 11 * i, f.get("side", 1), *f.get("palm", (1.0, 2.0, 0.95)), 1, 0, 0, owner, 11, int(owner == COIN_OWNER),
+                                                   len(members), rank, called, blocked, f.get("selected", 0), f.get("prompt", 0))))
+    return "\n".join(lines) + "\n"
+
+
+def loot_judge(frames, coin=COIN):
+    status = {"loot_rows": brc.parse_loot_reach(loot_trace(frames)), "loot_owners": brc.parse_loot_owners(LOOT_OWNERS)}
+    out = brc.check_loot(status, coin, "table")
+    cls = [t.split("classification: ")[1] for v, t in out if "classification: " in t]
+    return out, cls[0] if cls else None
+
+
+def loot_reach_checks():
+    """Hands plan Task 1: loot_reach compiles as script v8 (three teleports), fits --lead 45 --seconds 120, sweeps both palms
+    before each case's squeezes, and the checker classifies fixtures (PASS, ORDER, ELIGIBILITY, NOT_IN_SET, LOS, MIXED, the 0.45 m gate,
+    a take, a missing trace)."""
+    segments = sim.scenario_segments("loot_reach", 45000)
+    _, transport = sim.compile_script(segments, 120)
+    assert transport.splitlines()[0].startswith("D2VR_GAMEPLAY_SCRIPT 8 120000 "), transport.splitlines()[0]
+    lines = [s["console"] for s in segments if "console" in s]
+    assert [l.split()[0] for l in lines] == ["setviewpos"] * 3, lines  # the player is kept alive by --knob sim-invulnerable, not god/buddha
+    assert all(s["start_ms"] >= 45000 for s in segments if "console" in s)
+    end = max(s["end_ms"] for s in segments)
+    assert end <= 120000 - 6000, end  # the rig adds 6 s; the session cap is 120 s
+    after = [s for s in segments if s["start_ms"] >= 45000 and "console" not in s]
+    assert all(s.get("head_pitch_degrees") == -35.0 and "right_hand_pose" in s and "left_hand_pose" in s for s in after)
+    for side in ("right", "left"):
+        squeezes = [s for s in after if s["input"].get(side + "_grip")]
+        assert len(squeezes) == 3 and all(s["end_ms"] - s["start_ms"] == 600 for s in squeezes), (side, squeezes)
+    first_squeeze = min(s["start_ms"] for s in after if s["input"].get("right_grip"))
+    left_moves = [s for s in after if s["start_ms"] < first_squeeze and s["left_hand_pose"][:3] != [-0.2, 1.3, -0.4]]
+    assert left_moves, "the left sweep comes before the first squeeze"
+    # the table case's lowest palm-down keyframe sits 5 cm above the coin (tracking y = height above the feet - 0.05)
+    lr = sim._load_tool("d2vr_scenario_loot_reach", ROOT / "tools/linux/scenarios/loot_reach.py")
+    name, coin, stand, crouch, lift = lr.CASES[0]
+    yaw = lr.yaw_to(stand, coin)
+    assert name == "table" and crouch == lift == 0 and \
+        lr.to_tracking((coin[0], coin[1], coin[2] + 0.05), stand, yaw) == [0.0, round(coin[2] + 0.05 - stand[2] - 0.05, 4), round(-0.6 + lr.PALM_AHEAD_M, 4)]
+    assert [c[0] for c in lr.CASES] == ["table", "floor", "drawer"] and all(c[3] <= 0.7 for c in lr.CASES)  # the head offset clamps at -0.7
+    drawer = sim.scenario_segments("loot_reach_drawer", 45000)
+    sim.compile_script(drawer, 120)
+    assert [s["console"] for s in drawer if "console" in s] == [l for l in lines if l.startswith("setviewpos -13.230")], "the drawer case alone"
+    near = {"palm": (1.0, 2.0, 0.95)}
+    ok, cls = loot_judge([dict(near, coin=(0, 1, 0), selected=COIN_OWNER, prompt=COIN_OWNER)] * 10)
+    assert cls == "PASS" and any(v == "PASS" and "got 10" in t for v, t in ok), ok
+    assert loot_judge([dict(near, coin=(1, 0, 0), selected=SHELF)] * 10)[1] == "ORDER"
+    assert loot_judge([dict(near, coin=(0, 0, 0), selected=SHELF)] * 10)[1] == "ELIGIBILITY"
+    assert loot_judge([dict(near, selected=SHELF)] * 10)[1] == "NOT_IN_SET"
+    assert loot_judge([dict(near, coin=(0, 1, 1), selected=SHELF)] * 10)[1] == "LOS"
+    assert loot_judge([dict(near, coin=(0, 1, 0), selected=SHELF)] * 5 + [dict(near, coin=(0, 1, 0), selected=COIN_OWNER)] * 5)[1] == "MIXED"
+    # boundaries: selected 0.8 passes, 0.7 does not; rank0 exactly 0.5 is not ORDER
+    assert loot_judge([dict(near, coin=(0, 1, 0), selected=COIN_OWNER)] * 8 + [dict(near, coin=(0, 1, 0), selected=SHELF)] * 2)[1] == "PASS"
+    assert loot_judge([dict(near, coin=(0, 1, 0), selected=COIN_OWNER)] * 7 + [dict(near, coin=(0, 1, 0), selected=SHELF)] * 3)[1] == "MIXED"
+    assert loot_judge([dict(near, coin=(0, 0, 0))] * 5 + [dict(near, coin=(2, 0, 0))] * 5)[1] == "ELIGIBILITY"
+    # the 0.45 m gate: far frames do not count
+    far = [dict(palm=(1.0, 2.0, 1.5), selected=SHELF)] * 30
+    out, cls = loot_judge(far + [dict(near, coin=(0, 1, 0), selected=COIN_OWNER)] * 10)
+    assert cls == "PASS" and any("got 10" in t for _, t in out), out
+    out, cls = loot_judge(far)
+    assert cls is None and any(v == "FAIL" and "got 0" in t for v, t in out), out
+    # a take: selected, then gone from every set while the trace goes on -> the later frames are dropped, not NOT_IN_SET
+    out, cls = loot_judge([dict(near, coin=(0, 1, 0), selected=COIN_OWNER)] * 10 + [dict(near, selected=SHELF)] * 20)
+    assert cls == "PASS" and any("coin taken" in t for _, t in out), out
+    # gone without being selected first is a miss, not a take
+    out, cls = loot_judge([dict(near, coin=(0, 1, 0), selected=SHELF)] * 10 + [dict(near, selected=SHELF)] * 20)
+    assert cls == "MIXED" and not any("coin taken" in t for _, t in out), out
+    # an unseen coin: nearest takeable too far -> NOT_IN_SET over the frames near --coin
+    out, cls = loot_judge([dict(near, selected=SHELF)] * 10, coin=(1.0, 2.0, 0.85))
+    assert cls == "NOT_IN_SET", out
+    out, cls = loot_judge([dict(palm=(7.0, 7.0, 1.0), selected=SHELF)] * 10, coin=(7.0, 7.0, 0.9))
+    assert cls == "NOT_IN_SET" and any("not seen" in t for _, t in out), out
+    assert any(v == "FAIL" for v, _ in brc.check_loot({"loot_rows": [], "loot_owners": {}}, COIN))
+    assert brc.parse_loot_owners(LOOT_OWNERS)[9003]["min"] is None and brc.parse_loot_owners(LOOT_OWNERS)[9003]["pos"] == [4.0, 4.0, 1.0]
+    assert len(brc.parse_loot_reach(loot_trace([near]) + "1,2\n")) == 1  # a short row is dropped
 
 
 if __name__ == "__main__":

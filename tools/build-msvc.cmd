@@ -457,6 +457,8 @@ python tests\simulated_gameplay_script_profile_check.py
 if not "%errorlevel%"=="0" exit /b 1
 python tests\simulated_gameplay_script_console_check.py
 if not "%errorlevel%"=="0" exit /b 1
+python tests\loot_reach_trace_check.py
+if not "%errorlevel%"=="0" exit /b 1
 cl /nologo /std:c++17 /EHsc /W4 /WX /O2 /MT tests\simulated_gameplay_script_check.cpp /Fo:build\simulated_gameplay_script_check.obj /Fe:build\simulated_gameplay_script_check.exe /link user32.lib
 if not "%errorlevel%"=="0" exit /b 1
 build\simulated_gameplay_script_check.exe

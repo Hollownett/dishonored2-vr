@@ -223,6 +223,87 @@ class NativeInteractionAim {
     std::ofstream targets_;
     std::ofstream ranking_log_;unsigned ranking_rows_{};std::array<std::uint32_t,2> ranking_first_{};
     UINT64 target_samples_{};
+    // G1 loot measurement (knob build/loot-reach-trace -> artifacts/native-loot-reach.csv, opened by loot_reach_trace()). Per routed stage-0
+    // cycle that retrieved its hand-volume result set: one row per owner in the set (or one owner-0 row for an empty set) with its rank after
+    // order_native_use_hits, the 3b7b90 LOS calls / blocked results on it in this cycle, the native-selected owner (target()) and the
+    // prompt owner (prompt_target()). Strictly read-only: every value is read AFTER the original call it describes; the trace never writes
+    // a hit record, a return value or an out byte. <= 8192 rows, flushed every 64; native-loot-reach-owners.csv: each owner once, with bounds.
+    struct LootReachCandidate {std::uintptr_t owner{};unsigned spawn{};bool takeable{},sorted{};int rank{-1};unsigned los_called{},los_blocked{};};
+    struct LootReachCycle {bool open{},fetched{};unsigned count{};std::uintptr_t selected{};std::array<LootReachCandidate,64> set{};};
+    static thread_local LootReachCycle loot_cycle_; // game thread (stage 0); defined after the class like retrieved_
+    static constexpr unsigned loot_reach_row_cap=8192,loot_reach_flush_rows=64,loot_reach_owner_cap=1024;
+    std::atomic<bool> loot_reach_on_{};std::mutex loot_reach_mutex_;std::ofstream loot_reach_csv_,loot_reach_owners_csv_;
+    unsigned loot_reach_rows_{};std::vector<std::uintptr_t> loot_reach_owners_seen_;
+    std::atomic<std::uintptr_t> loot_prompt_owner_{};std::atomic<std::uint64_t> loot_prompt_tick_{};
+    LootReachCandidate* loot_candidate(std::uintptr_t owner) noexcept {
+        for(unsigned i=0;i<loot_cycle_.count;++i) if(loot_cycle_.set[i].owner==owner) return &loot_cycle_.set[i];
+        return nullptr;
+    }
+    // After the original 0x92630 retrieval returned: the result set's owners in record order (a single hit is rank 0; a multiple
+    // set gets its ranks from the sort below). Reads the caller's output array only.
+    void loot_trace_set(std::uintptr_t output,std::uintptr_t result,std::uintptr_t world) {
+        auto& c=loot_cycle_;if(!c.open) return;
+        const auto data=rig::value<std::uintptr_t>(read_,output);const auto count=rig::value<int>(read_,output+8);const auto capacity=rig::value<unsigned>(read_,output+12);
+        if(!data || !count || !capacity) return;
+        const auto outcome=native_use_query_outcome(result,*data,*count,*capacity);
+        if(outcome!=NativeUseQueryOutcome::empty && outcome!=NativeUseQueryOutcome::single && outcome!=NativeUseQueryOutcome::multiple) return;
+        c.fetched=true;
+        const auto n=static_cast<unsigned>(*count);if(!n) return;
+        std::array<NativeUseHit,64> hits{};
+        if(!read_(*data,hits.data(),n*sizeof(NativeUseHit))) return;
+        for(unsigned i=0;i<n;++i) {
+            const auto owner=hit_owner(hits[i],world);
+            if(auto* known=loot_candidate(owner)) {if(!known->sorted) known->rank=std::min(known->rank,static_cast<int>(i));continue;}
+            if(c.count>=c.set.size()) break;
+            LootReachCandidate e{};e.owner=owner;e.rank=static_cast<int>(i);e.sorted=n==1;
+            if(owner) {e.spawn=rig::value<unsigned>(read_,owner+0xa8).value_or(0);e.takeable=takeable(owner);}
+            c.set[c.count++]=e;
+        }
+    }
+    // After the original sort and the mod's re-order were both written: each owner's rank = its first index in the final buffer.
+    void loot_trace_ranks(std::uintptr_t at,unsigned count,std::uintptr_t world) {
+        if(!loot_cycle_.open || !count || count>64) return;
+        std::array<NativeUseHit,64> hits{};
+        if(!read_(at,hits.data(),count*sizeof(NativeUseHit))) return;
+        std::array<bool,64> seen{};
+        for(unsigned i=0;i<count;++i) {
+            auto* e=loot_candidate(hit_owner(hits[i],world));if(!e) continue;
+            const auto slot=static_cast<std::size_t>(e-loot_cycle_.set.data());if(seen[slot]) continue;
+            seen[slot]=true;e->rank=e->sorted?std::min(e->rank,static_cast<int>(i)):static_cast<int>(i);e->sorted=true;
+        }
+    }
+    // After target() and the whole native stage-0 call: the cycle's rows. Owners are listed once (with bounds) in the owners file.
+    void loot_trace_cycle(const Context& scope) noexcept {
+        try {
+            auto& c=loot_cycle_;if(!c.open || !c.fetched || scope.side<0) return;
+            const auto now=GetTickCount64();const auto prompt_tick=loot_prompt_tick_.load(std::memory_order_relaxed);
+            const auto prompt=prompt_tick && now>=prompt_tick && now-prompt_tick<=250?loot_prompt_owner_.load(std::memory_order_relaxed):0;
+            const auto palm=scope.hand.volume_centre;const auto dir=scope.hand.hand.basis[0];
+            std::lock_guard<std::mutex> lock(loot_reach_mutex_);
+            if(!loot_reach_csv_.is_open()) return;
+            for(unsigned i=0;i<c.count;++i) {
+                const auto& e=c.set[i];
+                if(!e.owner || loot_reach_owners_seen_.size()>=loot_reach_owner_cap ||
+                   std::find(loot_reach_owners_seen_.begin(),loot_reach_owners_seen_.end(),e.owner)!=loot_reach_owners_seen_.end()) continue;
+                loot_reach_owners_seen_.push_back(e.owner);
+                const auto pos=rig::value<std::array<float,3>>(read_,e.owner+0x78);
+                const auto model=rig::value<std::uintptr_t>(read_,e.owner+0xf0);
+                const auto box=model && rig::typed(read_,base_,*model,0x1b0dd88)?rig::value<std::array<float,8>>(read_,*model+0x1840):std::nullopt;
+                loot_reach_owners_csv_<<e.owner<<','<<e.spawn<<','<<(e.takeable?1:0);
+                for(unsigned k=0;k<3;++k) {loot_reach_owners_csv_<<',';if(pos) loot_reach_owners_csv_<<(*pos)[k];} // empty: unreadable
+                for(unsigned k:{0u,1u,2u,4u,5u,6u}) {loot_reach_owners_csv_<<',';if(box) loot_reach_owners_csv_<<(*box)[k];}
+                loot_reach_owners_csv_<<'\n';loot_reach_owners_csv_.flush();
+            }
+            const LootReachCandidate none{};
+            for(unsigned i=0;i<(c.count?c.count:1u) && loot_reach_rows_<loot_reach_row_cap;++i) {
+                const auto& e=c.count?c.set[i]:none;
+                loot_reach_csv_<<now<<','<<scope.side<<','<<palm.x<<','<<palm.y<<','<<palm.z<<','<<dir.x<<','<<dir.y<<','<<dir.z<<','
+                    <<e.owner<<','<<e.spawn<<','<<(e.takeable?1:0)<<','<<c.count<<','<<e.rank<<','<<e.los_called<<','<<e.los_blocked<<','
+                    <<c.selected<<','<<prompt<<'\n';
+                if(++loot_reach_rows_%loot_reach_flush_rows==0 || loot_reach_rows_==loot_reach_row_cap) loot_reach_csv_.flush();
+            }
+        } catch(...) {}
+    }
 
     template<class Invoke> static auto counted_callback(NativeInteractionAim* self,Invoke&& invoke)->decltype(invoke()) {
         const auto previous_operation=crash_operation;++self->depth_;
@@ -409,6 +490,8 @@ class NativeInteractionAim {
         }
         if(scope) {frame.owned=true;if(self->owned_depth_.fetch_add(1)>0)++self->overlap_;}
         if constexpr(Index==0) {std::lock_guard<std::mutex> guard(self->mutex_);self->contact_anchor_={};}
+        if constexpr(Index==0) {loot_cycle_.open=scope && scope->side>=0 && self->loot_reach_on_.load(std::memory_order_relaxed);
+            loot_cycle_.fetched=false;loot_cycle_.count=0;loot_cycle_.selected=0;}
         self->stages_[Index](sensor);
         if(lean_scope) {
             const auto after=native_lean_query_snapshot(self->read_,self->base_,lean_scope->sensor);
@@ -429,6 +512,7 @@ class NativeInteractionAim {
             try {self->service_anatomical_contact(*scope);} catch(...) {self->clear_anatomical_contact();}
             try {self->service_door_contact(*scope);} catch(...) {self->clear_door_contact();}
             self->target(*scope);
+            self->loot_trace_cycle(*scope);loot_cycle_.open=false; // G1 trace: after the native stage and target(), read-only
             try {if(self->physical_grab_ && self->physical_occlusion_) self->physical_grab_->service_obstruction(scope->camera,GetTickCount64(),[&](const NativeGrab::ObstructionRequest& obstruction_request)->std::optional<bool> {
                 const auto identity=sensor_identity;
                 const auto filter=rig::value<std::uint64_t>(self->read_,scope->sensor+0x48);
@@ -903,6 +987,7 @@ private:
             const auto direct_owner=link && rig::pointer(*link)?rig::value<std::uintptr_t>(read_,*link+0x10):std::nullopt;
             const auto selected_object=object; // before the candidate check (target log)
             if(!candidate && (!direct_owner || *direct_owner!=owner)) object=0;
+            if(loot_cycle_.open) loot_cycle_.selected=object?owner:0; // G1 trace: the native-selected owner (thread-local, read-only)
             const auto talk_offer=object && spawn && generation?native_talk_offer(read_,base_,scope.sensor,scope.camera.player,
                 object,static_cast<std::uint32_t>(*generation),owner,*spawn):std::nullopt;
             std::lock_guard<std::mutex> lock(mutex_);
@@ -1088,6 +1173,7 @@ private:
                 else if(outcome==NativeUseQueryOutcome::rejected)++self->ranking_rejected_;
             }
         } catch(...) {++self->ranking_rejected_;}
+        try {if(owned && scope && scope==context_ && loot_cycle_.open) self->loot_trace_set(reinterpret_cast<std::uintptr_t>(output),result,world);} catch(...) {} // G1 trace, read-only
         return result;
     }
     static void __fastcall sort(void* data,unsigned first,int last,unsigned char mode) {
@@ -1124,6 +1210,11 @@ private:
                 }
             }
         } catch(...) {++self->ranking_rejected_;}
+        try { // G1 trace: the final order, read after self->sort_ and the re-order memcpy (read-only)
+            const auto scope=retrieved_;const auto at=reinterpret_cast<std::uintptr_t>(data);
+            if(loot_cycle_.open && caller==self->base_+0x3b8878 && scope.scope && scope.scope==context_ && at==scope.data && first==0 &&
+               last==static_cast<int>(scope.count)-1 && mode==0) self->loot_trace_ranks(at,scope.count,scope.world);
+        } catch(...) {}
     }
     std::optional<bool> character_type(std::uintptr_t entity) const {
         // Native stage0 calls entity vtable[0] and compares typeInfo+60 with
@@ -1194,6 +1285,11 @@ private:
             }
         }catch(...) {}
         const auto result=occlusion_(sensor,entity,origin,axis,point,range,output); // original once, raw return preserved
+        try { // G1 trace: this candidate's stage-0 LOS call and its raw result (read-only: neither the return value nor the out byte is touched)
+            if(loot_cycle_.open && observed_scope && observed_scope==context_ && observed_scope->stage==0 && range==0 &&
+               (caller==base_+0x3b8b05 || caller==base_+0x3b87b5))
+                if(auto* candidate=loot_candidate(reinterpret_cast<std::uintptr_t>(entity))) {++candidate->los_called;if((result&0xffu)!=0)++candidate->los_blocked;}
+        } catch(...) {}
         try {
             std::array<float,3> after{};
             if(observed && (result&0xffu)==0 && context_==observed_scope &&
@@ -1665,6 +1761,11 @@ public:
         return {};
     }
     std::optional<QualifiedTarget> prompt_target(std::uint64_t now) {
+        auto out=prompt_target_select(now);
+        if(loot_reach_on_.load(std::memory_order_relaxed)) {loot_prompt_owner_.store(out?out->owner:0,std::memory_order_relaxed);loot_prompt_tick_.store(now,std::memory_order_relaxed);} // G1 trace
+        return out;
+    }
+    std::optional<QualifiedTarget> prompt_target_select(std::uint64_t now) {
         if(const auto live=qualified_target(now))return live;
         std::lock_guard<std::mutex> lock(mutex_);
         if(const auto held=newest_held_locked(now))return held;
@@ -1684,6 +1785,17 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);return target_point_locked(static_cast<unsigned>(side),now);
     }
 
+    // G1 loot measurement: dxgi_probe opens it after install() only when build/loot-reach-trace exists (off by default); disable() closes it.
+    bool loot_reach_trace(const std::filesystem::path& file) {
+        std::lock_guard<std::mutex> lock(loot_reach_mutex_);
+        loot_reach_csv_.close();loot_reach_owners_csv_.close();loot_reach_rows_=0;loot_reach_owners_seen_.clear();
+        loot_reach_csv_.open(file,std::ios::trunc);loot_reach_owners_csv_.open(file.parent_path()/L"native-loot-reach-owners.csv",std::ios::trunc);
+        if(!loot_reach_csv_ || !loot_reach_owners_csv_) {loot_reach_csv_.close();loot_reach_owners_csv_.close();return false;}
+        loot_reach_csv_<<std::setprecision(6)<<"t,side,palm_x,palm_y,palm_z,dir_x,dir_y,dir_z,owner,spawn,takeable,set_count,rank,los_called,los_blocked,selected_owner,prompt_owner\n";
+        loot_reach_owners_csv_<<std::setprecision(7)<<"owner,spawn,takeable,pos_x,pos_y,pos_z,min_x,min_y,min_z,max_x,max_y,max_z\n";
+        loot_reach_csv_.flush();loot_reach_owners_csv_.flush();
+        loot_reach_on_.store(true,std::memory_order_release);return true;
+    }
     void attach_physical_grab(NativeGrab* grab) {
         if(door_installed_)throw std::runtime_error("Native door owner must stop before changing physical grab");
         physical_grab_=grab;if(grab)grab->require_obstruction();
@@ -1833,6 +1945,7 @@ public:
         }
         for(unsigned i=0;i<3;++i) if(i==0?fetch_!=nullptr:i==1?sort_!=nullptr:occlusion_!=nullptr) restored=restored && ranking_profile(i);
         if(range_origin_) {std::array<unsigned char,8> getter{};restored=restored && read_(base_+0x417820,getter.data(),getter.size()) && getter==range_origin_code;}
+        try {loot_reach_on_=false;std::lock_guard<std::mutex> loot(loot_reach_mutex_);loot_reach_csv_.close();loot_reach_owners_csv_.close();} catch(...) {return false;}
         try {std::lock_guard<std::mutex> lock(mutex_);log_.close();targets_.close();ranking_log_.close();hands_={};published_={false,false};if(observe_lean_ && !lean_trace_.close()) restored=false;} catch(...) {return false;}
         if(restored) {
             try {
@@ -1981,6 +2094,7 @@ public:
     bool lean_lifetime_failed() const {return lean_lifetime_.failed();}
 };
 inline thread_local NativeInteractionAim::Retrieved NativeInteractionAim::retrieved_{};
+inline thread_local NativeInteractionAim::LootReachCycle NativeInteractionAim::loot_cycle_{};
 inline std::array<std::array<NativeInteractionAim::WeaponSegment,NativeInteractionAim::weapon_slots>,2> NativeInteractionAim::weapon_req_{};
 inline NativeInteractionAim::SwordContactObservation NativeInteractionAim::sword_last_contact_;
 #endif
