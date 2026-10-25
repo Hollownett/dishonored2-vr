@@ -294,7 +294,7 @@ public:
 private:
     Kind kind_{Kind::none};bool g_{},t_{},grip_first_{},carry_confirmed_{};std::uint64_t since_{},use_until_{},tap_until_{},carry_since_{},drop_until_{};
 public:
-    static constexpr std::uint64_t carry_use_timeout_ms=500;   // v613 item 4: the carry's Use press is held at most this long (the interaction query takes 100-250 ms) if the game never starts the carry
+    static constexpr std::uint64_t carry_use_timeout_ms=1500;   // v613 item 4: the carry's Use press is held at most this long (sim: query lock + press took ~0.55 s; 500 ms was too short) if the game never starts the carry
     Kind kind() const noexcept {return kind_;}
     // The grip edge of the press being decided, for decide_grip_alone (the press that starts on this frame: now).
     std::uint64_t decision_since(std::uint64_t now) const noexcept {return kind_==Kind::deciding?since_:now;}
@@ -322,6 +322,7 @@ public:
             }
             else if(one_list && grip_first_ && g) {
                 if(choice==GripAloneChoice::grab) {kind_=Kind::grab;out.grab_started=true;}
+                else if(choice==GripAloneChoice::none) kind_=Kind::drain;   // V1: a corpse with no bone in reach: no Use, no grab, until the grip is released
                 else if(choice==GripAloneChoice::use || now-since_>=std::max(window,pending_max)) {kind_=Kind::use;out.use_started=true;}
             }
             else if(now-since_>=window || (grip_first_ && g && trigger<.05f && now-since_>=quick)) {kind_=g?Kind::use:Kind::trigger;out.use_started=g;}

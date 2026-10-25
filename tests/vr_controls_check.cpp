@@ -203,15 +203,16 @@ int main() {
         o=upd(i,now+=20,1.f,true,false);assert(o.use && !o.use_started);
         o=upd(i,now+=20,1.f,false,true);assert(!o.use && !o.drop_started);                  // the carry started: the Use press ends
         o=upd(i,now+=20,0.f,false,true);assert(o.drop_started && !o.use);                    // release of the confirmed carry: drop
-        // the game never starts the carry: the Use is held 500 ms, then dropped; a later release does nothing
+        // the game never starts the carry: the Use is held 1.5 s, then dropped; a later release does nothing
         d2vr::GripIntent j;now=5000;upd(j,now,1.f,false,false);upd(j,now+=20,1.f,true,false);assert(j.kind()==K::carry);
-        o=upd(j,now+=400,1.f,false,false);assert(o.use);o=upd(j,now+=200,1.f,false,false);assert(!o.use && !o.drop_started);
+        o=upd(j,now+=1400,1.f,false,false);assert(o.use);o=upd(j,now+=200,1.f,false,false);assert(!o.use && !o.drop_started);
         o=upd(j,now+=20,0.f,false,false);assert(!o.drop_started);
         // released inside the state lag: the carry shows up 200 ms later and is dropped then, once
         d2vr::GripIntent k;now=9000;upd(k,now,1.f,false,false);upd(k,now+=20,1.f,true,false);
         o=upd(k,now+=100,0.f,false,false);assert(!o.drop_started);o=upd(k,now+=100,0.f,false,true);assert(o.drop_started);o=upd(k,now+=20,0.f,false,true);assert(!o.drop_started);
         // released with no carry and the wait over: nothing; never a carry while one is running
-        d2vr::GripIntent m;now=12000;upd(m,now,1.f,false,false);upd(m,now+=20,1.f,true,false);o=upd(m,now+=700,0.f,false,false);o=upd(m,now+=20,0.f,false,true);assert(!o.drop_started);
+        d2vr::GripIntent m;now=12000;upd(m,now,1.f,false,false);upd(m,now+=20,1.f,true,false);o=upd(m,now+=1600,0.f,false,false);o=upd(m,now+=20,0.f,false,true);assert(!o.drop_started);
+        d2vr::GripIntent z;now=20000;o=z.update(1.f,0.f,now,true,100,false,400,40,Choice::none,true,150);assert(z.kind()==K::drain && !o.use && !o.grab);   // V1: a corpse with nothing in reach: no Use, no grab
         d2vr::GripIntent n;now=15000;upd(n,now,1.f,false,false);upd(n,now+=20,1.f,true,true);assert(n.kind()==K::grab);
     }
     {   // GripIntent: grip alone = Use after 40 ms (trigger finger off the trigger; else 100 ms), grip + trigger = fist, trigger first is held back, taps survive

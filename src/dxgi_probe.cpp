@@ -2892,6 +2892,8 @@ static std::atomic<unsigned> scabbard_entries{},holster_fires{}; // the right ha
 // Full-grip sword (vr_controls.hpp SwordGrip, native_weapon_hands.hpp): requests per action (draw, sheathe, drop, pickup, recall).
 static d2vr::SwordGrip sword_grip;static bool sword_owns{};static std::array<std::atomic<unsigned>,7> sword_actions{};
 // Full-grip gun at the left hip (vr_controls.hpp GunGrip): actions (draw, holster); the hip holds a gun once one was drawn.
+static std::ofstream carry_handoff_csv;static unsigned carry_handoff_rows{};
+static std::array<bool,2> grip_corpse_gate{};static std::array<std::uint64_t,2> grip_corpse_entity{};   // V1: the corpse the press began on (the native query lock is released while the hand holds, so the handoff cannot re-read the target)   // Ruling V1: this hand's grip-alone press is on a corpse: the physical grab uses the fist gate (0.45 m)
 static bool legacy_corpse_carry=false;static UINT64 corpse_drop_press_until{};   // v613 item 4: build/legacy-corpse-carry; the Use pulse that drops a shoulder-carried body
 static std::array<d2vr::GripIntent,2> grip_intent;static std::array<d2vr::GripIntent::Out,2> grip_intent_out{}; // input thread
 static std::atomic<unsigned> fist_hands{},grab_hands{};static std::atomic<int> trace_lock_side{-1};static std::atomic<UINT64> fist_takes{}; // fist frames that are the game's pickup // the hand a grip Use locked (controller trace)
@@ -5187,8 +5189,12 @@ void prepare_head_view(void* view) noexcept {
                     note_targeted_prop(static_cast<unsigned>(side),native_interaction_aim.target_owner(side,now));
                     if(native_interaction_aim.has_target(side,now))
                         if(const auto point=native_interaction_aim.target_point(side,now)) target=d2vr::world_to_xr_controller(*point,head_origin,frame,1.0,hand_centre,head_origin.position);
-                    if(!target && physical_grab_requested)
-                        if(const auto point=native_grab.focus_point(side,now,game_xr->controller_input.menu || game_xr->controller_input.y))
+                    // Ruling V1: the palm pick must be scored while the native target is a corpse too (its carry is not offered to a grip alone; the grab decision needs the bone pick)
+                    bool corpse_target=false;
+                    if(target && physical_grab_requested && !legacy_corpse_carry)
+                        if(const auto nt=native_interaction_aim.target_bounds(side,now); nt && nt->kind!=d2vr::PalmKind::loot) corpse_target=native_grab.is_corpse_entity(nt->id);
+                    if((!target || corpse_target) && physical_grab_requested)
+                        if(const auto point=native_grab.focus_point(side,now,game_xr->controller_input.menu || game_xr->controller_input.y); point && !target)
                             target=d2vr::world_to_xr_controller(*point,head_origin,frame,1.0,hand_centre,head_origin.position);
                     game_xr->interaction_target(side,target);
                 }
@@ -8849,6 +8855,7 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                         // loot and usables still win the game's Use. One list per hand: the native Use target and the physical pick, scored with
                                         // the same palm probe (decide_grip_alone). Chokes, takedowns and an occupied hand keep today's path.
                                         const bool one_list=physical_grab_requested && !no_grip_alone_grab;
+                                        if(!one_list) grip_corpse_gate={};
                                         std::array<d2vr::GripAloneChoice,2> grip_choice{d2vr::GripAloneChoice::use,d2vr::GripAloneChoice::use};
                                         if(one_list) {
                                             unsigned carry_bits{},holding_side{};bool holding_native{};
@@ -8860,6 +8867,8 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                                 in.probe=native_grab.published_palm(h);
                                                 in.native_fresh=!controller_aim_requested || native_interaction_aim.query_ready(static_cast<int>(h),now_gi); // ruling H2: target OR none
                                                 in.since_ms=grip_intent[h].decision_since(now_gi);in.now_ms=now_gi;
+                                                in.native_corpse=!legacy_corpse_carry && in.native && in.native->kind!=d2vr::PalmKind::loot && native_grab.is_corpse_entity(in.native->id);   // Ruling V1
+                                                if(grip_intent[h].kind()==d2vr::GripIntent::Kind::none || grip_intent[h].kind()==d2vr::GripIntent::Kind::deciding) {grip_corpse_gate[h]=in.native_corpse;grip_corpse_entity[h]=in.native_corpse?in.native->id:0;}   // fixed for the press once decided
                                                 in.choke_owns=h==1 && (choke_offer.has_value() || control_active_choke!=0);
                                                 in.takedown_offered=control_takedown.any();
                                                 // I2: the left hand at the hip (the gun draw) or with a gun out is a fast native action: Use at the edge, never the 150 ms wait
@@ -8881,8 +8890,9 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                              d2vr::CarryHandoffInput ci;ci.corpse_hold=hold.has_value();ci.legacy=legacy_corpse_carry;ci.grip_held=(h?rc.right_grip:rc.left_grip)>=.35f;ci.occupied=occupied_now;
                                              if(hold) {ci.bone=hold->bone;ci.held_ms=hold->held_ms;
                                                  const auto target=controller_aim_requested?native_interaction_aim.target_bounds(static_cast<int>(h),now_gi):std::nullopt;
-                                                 ci.native_is_corpse=target && hold->entity && target->id==hold->entity;}   // the game's Use is on THIS body (its own carry)
+                                                 ci.native_is_corpse=hold->entity && ((target && target->id==hold->entity) || (grip_corpse_gate[h] && grip_corpse_entity[h]==hold->entity));}   // the game's Use is on THIS body (its own carry)
                                              carry_handoff_now[h]=d2vr::carry_handoff(ci);
+                                             if(hold && carry_handoff_csv.is_open() && carry_handoff_rows<4000) {++carry_handoff_rows;carry_handoff_csv<<now_gi<<','<<h<<','<<ci.bone<<','<<ci.held_ms<<','<<(ci.grip_held?1:0)<<','<<(ci.native_is_corpse?1:0)<<','<<(ci.occupied?1:0)<<','<<(carry_handoff_now[h]?1:0)<<','<<static_cast<int>(grip_intent[h].kind())<<','<<(body_carry_active?1:0)<<'\n';}
                                          }}
                                         grip_intent_out={grip_intent[0].update(rc.left_grip,rc.left_trigger,now_gi,!gun_owns && !left_consumed,100,idle(0),400,40,grip_choice[0],one_list,pending_max,carry_handoff_now[0],body_carry_active),
                                                          grip_intent[1].update(rc.right_grip,rc.right_trigger,now_gi,
@@ -9257,11 +9267,11 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                     {std::lock_guard<std::mutex> hand_lock(hand_state_mutex);right_carrying=hand_carrying_bits!=0 || hand_holding_object;right_sword_drawn=(hand_weapon_bits&2u)!=0;}
                                     const bool right_fist_rb=d2vr::fist_may_press_native_rb(native_grab.holding(1),right_carrying,sword_grip.held(),right_sword_drawn);
                                     const float right_native=native_grab.filter_native_grip(1,right_physical?physical_right_grip:0.f,game_xr->pose_epoch(),GetTickCount64(),logic==2,grab_focus,grab_use || sword_owns || choke_route.consume_use || (grip_use[1] && right_interaction.interact),
-                                        grip_use[1] && interaction.consume_trigger[1] && !right_interaction.interact,grip_intent_out[1].grab && !grip_intent_out[1].fist,
+                                        grip_use[1] && interaction.consume_trigger[1] && !right_interaction.interact,grip_intent_out[1].grab && !grip_intent_out[1].fist && !grip_corpse_gate[1],
                                         sword_grip.held() || right_sword_drawn);   // I2: the sword hand decides at the edge (the RB block is not delayed by the fist buffer)
                                     if(right_physical) input.right_grip=right_fist_rb?right_native:0.f;
                                     (void)native_grab.filter_native_grip(0,(grip_intent_out[0].fist || grip_intent_out[0].grab || native_grab.holding(0)) && grip_intent[0].kind()!=d2vr::GripIntent::Kind::carry?physical_left_grip:0.f,game_xr->pose_epoch(),GetTickCount64(),logic==2,grab_focus,grab_use || gun_owns || (grip_use[0] && left_interaction.interact),
-                                        grip_use[0] && interaction.consume_trigger[0] && !left_interaction.interact,grip_intent_out[0].grab && !grip_intent_out[0].fist);
+                                        grip_use[0] && interaction.consume_trigger[0] && !left_interaction.interact,grip_intent_out[0].grab && !grip_intent_out[0].fist && !grip_corpse_gate[0]);
                                 }
                                 // Consume native button output only. The physics lane sees
                                 // the observed grip, including while native Use is pending.
@@ -10068,6 +10078,8 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
             std::lock_guard<std::mutex> origin_lock(arm_origin_mutex);
             arm_origin_csv.open(output/L"arm-origin-trace.csv",std::ios::trunc);arm_origin_csv << std::setprecision(10) << "kind,present,side,x,y,z\n";
         }
+        if(fs::exists(root/L"build"/L"carry-handoff-trace")) {carry_handoff_csv.open(output/L"carry-handoff.csv",std::ios::trunc);carry_handoff_rows=0;
+            carry_handoff_csv<<"tick_ms,hand,bone,held_ms,grip,native_is_corpse,occupied,handoff,kind,carry_active\n";}   // v613 item 4 diagnostic
         {   // G1a: build/locomotion-trace -> artifacts/locomotion-hands.csv, one row per displayed frame
             std::lock_guard<std::mutex> trace_lock(locomotion_mutex);locomotion_csv.close();locomotion_rows=0;locomotion_roots.clear();
             if(fs::exists(root/L"build"/L"locomotion-trace")) {

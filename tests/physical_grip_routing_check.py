@@ -29,8 +29,8 @@ def check(source: str) -> None:
     publish = re.search(r"native_grab\.publish\(side,\*body,hand,\(\(fist_hands\.load\(\)\|grab_hands\.load\(\)\)&\(1u<<side\)\) \|\| native_grab\.holding\(side\)\?squeeze:0\.f,", source)
     assert publish, "the squeeze is published for a fist or a grip-alone grab"
     # the grip-alone flag reaches each filter (the 0.12 m gate), and build/no-grip-alone-grab turns the one-list decision off
-    assert re.search(r"filter_native_grip\(1,.*?grip_intent_out\[1\]\.grab && !grip_intent_out\[1\]\.fist,\s*sword_grip\.held\(\) \|\| right_sword_drawn\);", source, re.S)   # I2: the sword hand skips the fist buffer
-    assert re.search(r"filter_native_grip\(0,.*?grip_intent_out\[0\]\.grab && !grip_intent_out\[0\]\.fist\);", source, re.S)
+    assert re.search(r"filter_native_grip\(1,.*?grip_intent_out\[1\]\.grab && !grip_intent_out\[1\]\.fist && !grip_corpse_gate\[1\],\s*sword_grip\.held\(\) \|\| right_sword_drawn\);", source, re.S)   # I2: the sword hand skips the fist buffer
+    assert re.search(r"filter_native_grip\(0,.*?grip_intent_out\[0\]\.grab && !grip_intent_out\[0\]\.fist && !grip_corpse_gate\[0\]\);", source, re.S)
     # fix round 1: fast native actions never wait the 150 ms, and the palm pick used by grip-alone is at most 100 ms old
     assert "in.fast_native=left_gun_model.load()!=0 || gun_owns ||" in source and "d2vr::length(d2vr::Vec3{(*hands[0])[0],(*hands[0])[1],(*hands[0])[2]}-*hip_xr_position)<=.17);}" in source
     assert "in.physical=native_grab.focus_score(h,now_gi,100);" in source
@@ -43,6 +43,8 @@ def check(source: str) -> None:
     assert "carry_handoff_now[0],body_carry_active" in source and "carry_handoff_now[1],body_carry_active" in source
     assert "ci.native_is_corpse=" in source and "grip_intent[1].kind()!=d2vr::GripIntent::Kind::carry" in source and "grip_intent[0].kind()!=d2vr::GripIntent::Kind::carry" in source
     assert "if(now_l<corpse_drop_press_until) input.x=true;" in source
+    assert "(!target || corpse_target) && physical_grab_requested" in source
+    assert "in.native_corpse=!legacy_corpse_carry" in source and "native_grab.is_corpse_entity(in.native->id)" in source
     assert "in.choke_owns=h==1 && (choke_offer.has_value() || control_active_choke!=0);" in source
     assert "in.takedown_offered=control_takedown.any();" in source
     gate = source.index("const bool right_fist_rb=d2vr::fist_may_press_native_rb(native_grab.holding(1),right_carrying,sword_grip.held(),right_sword_drawn);")

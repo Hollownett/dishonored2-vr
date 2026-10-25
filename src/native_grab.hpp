@@ -1117,6 +1117,8 @@ public:
         return h->bounds?length(h->bounds->maximum-h->bounds->minimum):.3;
     }
     // v613 item 4: a live corpse hold of this hand: the ragdoll bone and how long it has been held (ms), for the torso-hold handoff to the native carry.
+    // Ruling V1: the entity is a dead or unconscious body (the game's carry target); input thread, under the lock like the other reads.
+    bool is_corpse_entity(std::uintptr_t entity) {if(!entity) return false;std::lock_guard<std::mutex> lock(mutex_);return corpse_enabled_ && ragdoll_pushable_state(read_,entity);}
     struct CorpseHoldAge {int bone{-1};std::uint64_t held_ms{};std::uintptr_t entity{};};
     std::optional<CorpseHoldAge> corpse_hold(unsigned side,UINT64 now) {
         if(side>=2) return {};
