@@ -4763,8 +4763,8 @@ void prepare_head_view(void* view) noexcept {
         if(!cutscene_scene_render() && !room_held && cutscene_calibration.holds(game_xr->reference_epoch(),body->player,body->camera,body->camera_identity.generation)) {
             if(const auto provisional=cutscene_calibration.get(centre_pose,game_xr->reference_epoch(),body->player,body->camera,body->camera_identity.generation,true);
                provisional && head_calibration.adopt(*provisional,game_xr->reference_epoch(),body->player,body->camera,body->camera_identity.generation)) ++cutscene_provisional_adoptions;
-            cutscene_calibration.clear();
         }
+        if(!cutscene_scene_render()) cutscene_calibration.clear(); // adopted above, or another owner's (or epoch's) never adopted: a provisional origin lives until the first gameplay frame
         const auto calibration=(provisional_origin?cutscene_calibration:head_calibration).get(centre_pose,game_xr->reference_epoch(),body->player,body->camera,body->camera_identity.generation,true);
         if(provisional_origin && per_frame) ++cutscene_provisional_frames;
         if(!calibration) {native_audio_listener.clear();native_left_aim.clear();native_shot_aim.clear();native_crosshair.clear();native_weapon_attachment.clear();return;}

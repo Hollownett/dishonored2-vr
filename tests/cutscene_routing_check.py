@@ -37,7 +37,7 @@ def check(probe: str, xr: str) -> None:
     assert probe.count("render_scene_frame()") == 5, probe.count("render_scene_frame()")  # the definition + 4 sites
     # the definition and render_scene_frame(); Task 6: prepare_head_view's authored scene camera, view decision, provisional origin and
     # comfort-meter skip, and the present thread's cutscene vignette
-    assert probe.count("cutscene_scene_render()") == 8, probe.count("cutscene_scene_render()")  # + the Ruling 12 adoption guard
+    assert probe.count("cutscene_scene_render()") == 9, probe.count("cutscene_scene_render()")  # + the Ruling 12 adoption guard and clear
     assert probe.count("cutscene_gates_allowed=") == 2  # the present thread + StartProbe reset
     stereo = fn(probe, "void sample_stereo(IDXGISwapChain* chain,UINT64 number,const DXGI_SWAP_CHAIN_DESC& desc) {")
     assert "if(xr_requested && !render_scene_frame() && !cinematic_probe_keeps_stereo()) {" in stereo
@@ -65,6 +65,8 @@ def check(probe: str, xr: str) -> None:
     adopt = head.index("head_calibration.adopt(*provisional,game_xr->reference_epoch(),body->player,body->camera,body->camera_identity.generation)")
     assert "if(!cutscene_scene_render() && !room_held && cutscene_calibration.holds(" in head
     assert adopt < head.index("const auto calibration=(provisional_origin?cutscene_calibration:head_calibration).get(")
+    clear = head.index("if(!cutscene_scene_render()) cutscene_calibration.clear();")  # a never-adopted provisional origin does not outlive gameplay
+    assert adopt < clear < head.index("const auto calibration=(provisional_origin?cutscene_calibration:head_calibration).get(")
     assert "scripted_recenter.rebase(" not in head and "dropped_folds" not in probe
     # Ruling 14: the view lasts through the authored camera's logic-2 tail
     assert "const bool cutscene_tail=game_logic_mask()==2 && authored_camera && !legacy_authored_camera;" in head

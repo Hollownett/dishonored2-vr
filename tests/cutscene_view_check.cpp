@@ -155,7 +155,8 @@ int main(){
         HeadCalibration room,provisional;const std::uint64_t ep=3;const std::uintptr_t pl=0x10,ca=0x20;const std::int32_t ge=7;
         const auto choose=[&](bool cutscene,const TrackedPose& head) { // the probe's choice (prepare_head_view)
             const bool held=room.holds(ep,pl,ca,ge);
-            if(!cutscene && !held && provisional.holds(ep,pl,ca,ge)) {room.adopt(*provisional.get(head,ep,pl,ca,ge,true),ep,pl,ca,ge);provisional.clear();}
+            if(!cutscene && !held && provisional.holds(ep,pl,ca,ge)) room.adopt(*provisional.get(head,ep,pl,ca,ge,true),ep,pl,ca,ge);
+            if(!cutscene) provisional.clear();
             return *(cutscene && !held?provisional:room).get(head,ep,pl,ca,ge,true);
         };
         const TrackedPose start{{.2,1.6,-.1},about_y(.5)};
@@ -171,6 +172,9 @@ int main(){
         HeadCalibration fresh; // what a fresh capture would have done: a position and a yaw step
         const auto f=*fresh.get(later,ep,pl,ca,ge,true);
         assert(length((later.position-f.position)-off_cut)>.1 && std::fabs(tracked_yaw(later.orientation,f.orientation)-yaw_cut)>.5);
+        // a provisional origin of another owner is never adopted and does not outlive the first gameplay frame
+        provisional.get(start,ep,pl+1,ca,ge,true);assert(provisional.holds(ep,pl+1,ca,ge));
+        const auto g2=choose(false,later);assert(!provisional.holds(ep,pl+1,ca,ge) && length(g2.position-g.position)<1e-12);
         HeadCalibration other;assert(!other.adopt({{0,0,0},{.1,0,0,1}},ep,pl,ca,ge) && !other.adopt(start,0,pl,ca,ge) && !other.holds(ep,pl,ca,ge));
     }
     {   // Ruling 14: a VR full view lasts through the authored camera's tail at logic 2, and ends with it; a tail never starts a view

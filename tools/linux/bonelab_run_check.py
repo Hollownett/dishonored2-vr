@@ -43,6 +43,9 @@ SCRIPTED_COLUMNS = ("t", "authored", "state_index", "hmd_rel_deg", "rel_composed
 # src/scripted_recenter.hpp: an entry turn eases the offset over 0.4 s with smoothstep (peak rate 1.5 x delta / 0.4 s) and skips a delta under 10 deg.
 # The ease runs on a clock that credits at most 1/30 s per frame, so the end is read AUTHORED_EASE_S + AUTHORED_EASE_SLACK_S after the aim.
 AUTHORED_EASE_S, AUTHORED_EASE_SLACK_S, AUTHORED_DEAD_ZONE_DEG, AUTHORED_RESIDUAL_DEG, AUTHORED_STEP_SLACK_DEG, AUTHORED_EXIT_WINDOW_S = 0.4, 0.05, 10.0, 3.0, 1.0, 0.5
+# AuthoredHeading's re-aim: the held heading jumps by at least 30 deg (src/authored_view.hpp snap_rad); a smaller change between two authored
+# rows is a re-latch of the scene's own heading (taken out of the step as the scene's animation).
+AUTHORED_SNAP_DEG = 29.9
 STATE_NAMES = {8: "Mantle", 9: "Vault", 13: "Assassination", 33: "SyncAnim", 38: "NpcFatality", 41: "Choke", 42: "DropChoke", 55: "BloodthirstyFatality",
                83: "KillCam", 39: "combat 39", 44: "combat 44"}  # docs/full-body-research.md 6b
 HAND_FILTER_DEFAULT = 0x000885E4  # R1Recipe::filter: the hand body's word whenever it holds nothing through the body
@@ -177,6 +180,11 @@ def check_authored(statuses):
       view really turns since 4c7d222 starts the offset at the last gameplay view; 0 inside the 10 deg dead zone) plus the head's own yaw change that frame (hmd_rel change
       plus that frame's fold), plus 1 deg. Between two
       authored rows the native camera's own heading change is the scene's animation, not the recenter's, so it is taken out of the step.
+    - Re-aims (Ruling 11, continuous re-aim): a heading snap (a change of at least 30 deg between two authored rows) is NOT the scene's
+      animation: the helper absorbs it, so the view must stay continuous on the snap frame (the snap counts as zero heading change), then
+      eases to the new heading. Each snap gets a window (the row before it through 0.4 s + slack after) whose allowance adds that ease's
+      peak rate (1.5 x |turn| / 0.4 s x dt; turn = wrap(new heading - the view before the snap), 0 inside the dead zone); the same allowance
+      applies to the entry and exit windows while that ease runs.
     - At least one entry observed. INFO per entry: state_index, delta, residual."""
     out = []
     for n, status in enumerate(statuses):
@@ -212,23 +220,39 @@ def check_authored(statuses):
                     out.append(("PASS" if abs(residual) < AUTHORED_RESIDUAL_DEG else "FAIL", f"{name}: |residual| < {AUTHORED_RESIDUAL_DEG:g} deg at the ease end (got {residual:+.2f})"))
             peak = 1.5 * abs(turn) / AUTHORED_EASE_S if abs(turn) >= AUTHORED_DEAD_ZONE_DEG else 0.0  # no ease = no allowance beyond head + 1 deg
             stop = end if end is not None else sc["last"]
-            windows = [("entry", max(sc["entry"] - 1, 0), stop)]
+            windows = [("entry", max(sc["entry"] - 1, 0), stop, peak)]
+            # Ruling 11: the snaps of this scene, each a re-aim ease from the last view
+            snaps, reaim_allow = [], {}
+            for m in range(sc["entry"] + 1, sc["last"] + 1):
+                prev, row = rows[m - 1], rows[m]
+                if prev["authored"] and row["authored"] and math.isfinite(prev["heading_deg"]) and math.isfinite(row["heading_deg"]) and \
+                        abs(_wrap_deg(row["heading_deg"] - prev["heading_deg"])) >= AUTHORED_SNAP_DEG:
+                    snaps.append(m)
+                    rturn = _wrap_deg(row["heading_deg"] - prev["view_yaw_deg"])
+                    rpeak = 1.5 * abs(rturn) / AUTHORED_EASE_S if abs(rturn) >= AUTHORED_DEAD_ZONE_DEG else 0.0
+                    s_end = m
+                    while s_end + 1 < len(rows) and rows[s_end + 1]["t"] <= row["t"] + AUTHORED_EASE_S + AUTHORED_EASE_SLACK_S:
+                        s_end += 1
+                    for q in range(m, s_end + 1):
+                        reaim_allow[q] = reaim_allow.get(q, 0.0) + rpeak
+                    windows.append((f"re-aim {len(snaps)}", m - 1, min(s_end, sc["last"]), 0.0))
             if sc["exit"] is not None:
                 exit_end = sc["exit"]
                 while exit_end + 1 < len(rows) and rows[exit_end + 1]["t"] <= rows[sc["exit"]]["t"] + AUTHORED_EXIT_WINDOW_S and not rows[exit_end + 1]["authored"]:
                     exit_end += 1
-                windows.append(("exit", sc["last"], exit_end))
-            for label, a0, a1 in windows:
+                windows.append(("exit", sc["last"], exit_end, 0.0))
+            snap_rows = set(snaps)
+            for label, a0, a1, base in windows:
                 worst, worst_at = 0.0, None
                 for m in range(a0 + 1, a1 + 1):
                     prev, row = rows[m - 1], rows[m]
                     dt = max(row["t"] - prev["t"], 0.0)
                     step = _wrap_deg(row["view_yaw_deg"] - prev["view_yaw_deg"])
-                    if prev["authored"] and row["authored"] and math.isfinite(prev["heading_deg"]) and math.isfinite(row["heading_deg"]):
+                    if m not in snap_rows and prev["authored"] and row["authored"] and math.isfinite(prev["heading_deg"]) and math.isfinite(row["heading_deg"]):
                         step = _wrap_deg(step - _wrap_deg(row["heading_deg"] - prev["heading_deg"]))
                     # the head's own motion: hmd_rel is read after this frame's fold, which turns the origin (hmd_rel drops by fold_deg)
                     head_motion = abs(_wrap_deg(row["hmd_rel_deg"] - prev["hmd_rel_deg"] + row["fold_deg"]))
-                    allowed = peak * dt + head_motion + AUTHORED_STEP_SLACK_DEG
+                    allowed = (base + reaim_allow.get(m, 0.0)) * dt + head_motion + AUTHORED_STEP_SLACK_DEG
                     excess = abs(step) - allowed
                     if worst_at is None or excess > worst:
                         worst, worst_at = excess, (m, step, allowed)
