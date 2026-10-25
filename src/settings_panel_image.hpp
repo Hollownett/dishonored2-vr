@@ -141,8 +141,8 @@ inline std::vector<unsigned char> settings_panel_image(const VrSettings& setting
         split(settings.controls_hint_text(),-1,L"Shows controller button hints in the world during play. Turn it off once you know the controls."),
         split(settings.crosshair_text(),-1,L"Shows the game's crosshair where your gun or power aims. Off hides it."),
         {L"Turning",turn.str(),-1,L"Native game uses the original stick turn. Snap rotates in fixed steps and is comfortable; Smooth turns continuously at a set speed."},
-        split(settings.scripted_recenter_text(),-1,L"When the game turns or moves you in a scripted moment, re-aim the view so you keep facing the action. Off leaves the view where you were."),
-        split(settings.cutscene_mode_text(),-1,L"VR comfort plays cutscenes around you with comfort limits on camera motion. VR full follows the camera exactly. Theater shows them on a flat screen in front of you."),
+        split(settings.scripted_recenter_text(),-1,L"Re-aims the view at scripted moments so you keep facing the action. Off leaves it where it was."),
+        split(settings.cutscene_mode_text(),-1,L"VR comfort limits camera motion; VR full follows the camera exactly; Theater uses a flat screen."),
         {L"Calibrate avatar",L"",-1,L"Measure shoulders, then arm reach. Enter chest width separately in Measurements. Recenter re-aligns the view to where you face now."},
         {L"Back to game menu",L"",-1,L"Test unlock (left): 100 runes for every power, infinite coins and every Black Market item. Back (right) closes this menu."}}};
     const auto strip=[](std::wstring v) {const auto at=v.find(L" (");return at==std::wstring::npos?v:v.substr(0,at);};
@@ -151,9 +151,9 @@ inline std::vector<unsigned char> settings_panel_image(const VrSettings& setting
         int right=624;
         const auto key=[&](const wchar_t* k,const wchar_t* label,int kw,int lw) {
             const int lx=right-lw,kx=lx-kw-6;
-            fill(kx-3,508,right+4,538,rgb(14,15,22));
-            fill(kx,512,kx+kw,534,rgb(46,48,60));fill(kx+1,513,kx+kw-1,533,rgb(26,27,36));
-            text(k,kx,512,kx+kw,534,13,white);text(label,lx,510,right,536,17,white,1);right=kx-18;};
+            fill(kx-3,settings_footer_top,right+4,settings_footer_top+settings_footer_height,rgb(14,15,22));
+            fill(kx,settings_footer_top+4,kx+kw,settings_footer_top+26,rgb(46,48,60));fill(kx+1,settings_footer_top+5,kx+kw-1,settings_footer_top+25,rgb(26,27,36));
+            text(k,kx,settings_footer_top+4,kx+kw,settings_footer_top+26,13,white);text(label,lx,settings_footer_top+2,right,settings_footer_top+28,17,white,1);right=kx-18;};
         key(L"B",L"Back",20,40);if(change) key(L"A / Trigger",L"Change",84,56);
     };
     if(settings.calibration_page() && settings.measurements_page()) {
@@ -310,12 +310,13 @@ inline std::vector<unsigned char> settings_panel_image(const VrSettings& setting
         }
         // Description plate for the selected row, titled with the setting's name.
         const int pt=settings_plate_top;
-        fill(20,pt,620,pt+96,rgb(17,18,26));fill(20,pt,620,pt+1,rgb(52,54,68));fill(20,pt+95,620,pt+96,rgb(10,11,16));
+        const int pb=pt+settings_plate_height;
+        fill(20,pt,620,pb,rgb(17,18,26));fill(20,pt,620,pt+1,rgb(52,54,68));fill(20,pb-1,620,pb,rgb(10,11,16));
         const auto& cur=rows[static_cast<std::size_t>(std::min(selected,settings_row_count-1))];
         text(cur.name,24,pt+2,616,pt+30,22,rgb(220,224,232),1);
         if(divider) put(divider,170,pt+24,470,pt+34,.9);else line(180,pt+28,460,pt+28,.7,rgb(70,74,92));
-        text(cur.help,36,pt+31,604,pt+92,13,rgb(176,181,196),0,DT_LEFT|DT_TOP|DT_WORDBREAK);
-        text(L"In play: hold Menu for Journal; Menu + right stick for shortcuts",20,540,420,558,12,muted,0,DT_LEFT|DT_VCENTER|DT_SINGLELINE);
+        text(cur.help,36,pt+31,604,pb-2,13,rgb(176,181,196),0,DT_LEFT|DT_TOP|DT_WORDBREAK);
+        text(L"In play: hold Menu for Journal; Menu + right stick for shortcuts",20,settings_footer_top+2,420,settings_footer_top+settings_footer_height,12,muted,0,DT_LEFT|DT_VCENTER|DT_SINGLELINE);
         footer(true);
     }
     if(pointer) {

@@ -4,6 +4,7 @@
 #include "../src/vr_settings.hpp"
 #include "../src/settings_panel_image.hpp"
 #include "../src/vr_preferences.hpp"
+#include <cstdlib>
 #include <fstream>
 #include <iostream>
 void require(bool value,const char* message) {if(!value) throw std::runtime_error(message);}
@@ -332,6 +333,8 @@ int main() {
             require(crosshair_stick.crosshair && *crosshair_stick.crosshair==!crosshair_before && rows.crosshair()==!crosshair_before,"Stick did not toggle the crosshair");
             stick.a=true;const auto crosshair_a=rows.update(stick,false,true);stick.a=false;rows.update(stick,false,true);
             require(crosshair_a.crosshair && *crosshair_a.crosshair==crosshair_before && rows.crosshair()==crosshair_before,"A did not toggle the crosshair");
+            require(settings_row_top+settings_row_pitch*(settings_row_count-1)+settings_row_height<settings_plate_top,"Last row overlaps the plate");
+            require(settings_plate_top+settings_plate_height<=settings_footer_top && settings_footer_top+settings_footer_height<=560,"Plate/footer layout leaves the bitmap or overlaps");
             press(0,-1);press(0,-1);   // turning (8), then the scripted-recenter row (9)
             require(rows.scripted_recenter(),"scripted_recenter must default on");
             const auto recenter_stick=press(1,0);
@@ -347,6 +350,11 @@ int main() {
             require(press(-1,0).cutscene_mode==CutsceneMode::theater,"Stick left did not wrap backward");
             stick.a=true;const auto cut_a=rows.update(stick,false,true);stick.a=false;rows.update(stick,false,true);
             require(cut_a.cutscene_mode==CutsceneMode::vr_comfort && rows.cutscene_mode()==CutsceneMode::vr_comfort,"A did not cycle the cutscene mode forward");
+            char dump[512]{};
+            if(GetEnvironmentVariableA("D2VR_PANEL_DUMP",dump,sizeof dump)>0) {   // optional: raw RGBA (640x560) of the recenter, cutscene and close rows for visual review
+                const auto save=[&](const char* name) {std::ofstream o(std::string(dump)+"/panel-"+name+".rgba",std::ios::binary);const auto img=settings_panel_image(rows,1.2,3722,3850,{});o.write(reinterpret_cast<const char*>(img.data()),static_cast<std::streamsize>(img.size()));};
+                save("cutscene");press(0,1);save("recenter");press(0,-1);press(0,-1);press(0,-1);save("close");press(0,1);press(0,1);
+            }
             const auto rows_image=settings_panel_image(rows,1.2,3722,3850,{});
             for(unsigned row=0;row<settings_row_count;++row) {   // every row bar sits inside the bitmap, above the description plate, drawn dark or as the pale highlight
                 const unsigned y=settings_row_top+settings_row_pitch*row+14;
