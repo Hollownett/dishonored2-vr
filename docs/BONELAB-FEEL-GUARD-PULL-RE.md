@@ -35,27 +35,33 @@ Alert is not read from `state_d1`. The engine's own stealth test `NativeMelee::u
 
 ## The probe
 
-Dev knob `build/guard-probe` (absent by default, nothing is read or run). Its text is one of `shove`, `shove_decl <name>` (name under `components/base/damage/`, `[a-z0-9_]{1,64}`), `teleport_step <metres> <count>` (step 0 < m <= 0.5, count 1..20). It is read once at start. The next pull (`yank` request: a full fist at a living guard's upper body, then the hand faster than 2.2 m/s) runs that one experiment **instead of** the shove-plus-ragdoll, deletes the knob file, and writes `artifacts/guard-probe.csv` (`tick_ms,entity_id,x,y,z,state_d1,unaware,bodies_dynamic,read_ok,unaware_ok`) plus, for the shove experiments, `artifacts/guard-probe-result.txt` (decl, whether the shove applied, `last_shove`) so a silent no-op is visible once before and then every 50 ms for 6 s. The probe itself posts no `START_RAGDOLL` or velocity (a source check pins this). The shove, however, goes through `TakeDamage`, whose own reaction can still ragdoll or post events (`docs/native-melee-damage.md`): `bodies_dynamic` is the measurement, not an assumption. `teleport_step` moves `npc+0x300` by `step_m` toward the hand (horizontal only) every 100 ms with the **identity axis**, which is a world-aligned basis, not "no orientation": it can reset his yaw, a confound (the arkNPC basis offset is not documented in the repo, so the current axis cannot be preserved). Read the `teleport_step` result as a rotation-reset test as much as a displacement test. Each step first re-checks the guard's id and class, and stops if the slot was reused. Scenario: `tools/linux/scenarios/guard_probe.py`. Tests: `tests/guard_probe_check.cpp`, `tests/bonelab_scenarios_check.py`.
+Dev knob `build/guard-probe` (absent by default, nothing is read or run). Its text is one of `shove`, `shove_decl <name>` (name under `components/base/damage/`, `[a-z0-9_]{1,64}`), `teleport_step <metres> <count>` (step 0 < m <= 0.5, count 1..20). It is read once at start. The next pull (`yank` request: a full fist at a living guard's upper body, then the hand faster than 2.2 m/s) runs that one experiment **instead of** the shove-plus-ragdoll, deletes the knob file, and writes `artifacts/guard-probe.csv` (`tick_ms,entity_id,x,y,z,state_d1,unaware,bodies_dynamic,read_ok,unaware_ok,yaw_deg`) plus, for the shove experiments, `artifacts/guard-probe-result.txt` (decl, whether the shove applied, `last_shove`) so a silent no-op is visible once before and then every 50 ms for 6 s. The probe itself posts no `START_RAGDOLL` or velocity (a source check pins this). The shove, however, goes through `TakeDamage`, whose own reaction can still ragdoll or post events (`docs/native-melee-damage.md`): `bodies_dynamic` is the measurement, not an assumption. `teleport_step` moves `npc+0x300` by `step_m` toward the hand (horizontal only) every 100 ms with the **identity axis**, which is a world-aligned basis, not "no orientation": it can reset his yaw, a confound (the arkNPC basis offset is not documented in the repo, so the current axis cannot be preserved). Read the `teleport_step` result as a rotation-reset test as much as a displacement test. Each step first re-checks the guard's id and class, and stops if the slot was reused. Scenario: `tools/linux/scenarios/guard_probe.py`. Tests: `tests/guard_probe_check.cpp`, `tests/bonelab_scenarios_check.py`.
 
-## Live experiments (all: needs test save: player standing within reach of an unaware guard)
+## Live experiments (hands plan Task 13, 2026-10-25; ledger `.superpowers/sdd/2026-10-25-small-objects-fingers/g6-probe.md`)
 
-For each, record: displacement toward/away from the hand, whether `unaware` went false and after how long, whether `bodies_dynamic` stayed false, the `state_d1` byte over time, whether he returned to his old position within 2 s, any crash.
+Save: the user's latest (Continue), `campaign/institute/institute_p_highchaos`. Guard `guard_male_small_01.def_9276`, alive, alone (no other living
+guard within 10 m), standing at (11.69, 46.90, 20.01), reference-frame row 0 (0.635, 0.772). Teleport `setviewpos 11.309 46.437 21.710 50.6` (eye
+0.6 m BEHIND him, facing him; the player lands at (11.39, 46.24), 0.23 m off). In front of him he sees the player at once; behind is where camera Task 3
+got the game's choke offer. He still reacts to the landing: still for ~0.3 s, then he turns and steps 1.1-1.6 m away and walks off (read-only entity
+log, 8 samples). So the fist closes 150 ms after landing at his back (0.15 m behind his spine, ~1.58 m above his model origin) and snatches 0.45 m in
+0.15 s. Candidate `b200ba4a...` (installed name), `--knob sim-invulnerable --lead 45 --seconds 120`. The `yaw_deg` column (model axes +0x186c row 0) is new.
 
-| Experiment | Result |
-| --- | --- |
-| `shove` | needs test save |
-| `shove_decl <each candidate name>` | needs test save, and a candidate list (unresolved above) |
-| `teleport_step 0.1 5` | needs test save |
-
-## Lever decision table (provisional)
-
-| Need | Lever | Status |
+| Experiment | Run | Result |
 | --- | --- | --- |
-| stagger | "shove default" (`shove_damage`) is the only decl known to work without damage; whether it staggers without ragdolling is unmeasured | unresolved: needs test save |
-| alert | unproven: the shove's inflictor is the player, not the sword entity the docs require for the AI attention source; confirm `unaware==0` (with `unaware_ok==1`) within N ms, else fall back to an explicit alert lever (not yet identified) | unresolved: needs test save |
-| pull | `teleport_step` is the only candidate; behaviour on a live arkNPC unknown (snap-back risk, no facing) | unresolved: needs test save; if it snaps back or breaks the AI the decision is `none` and Task 15 ships stagger and alert only |
+| `shove` | 20261025T121742 | Fired (`applied=1 last_shove=0`). `bodies_dynamic` 0 in all 121 samples over 6 s (no ragdoll); max z drop 0.014 m; moved 2.04 m (final 1.95 m) - but his own step-away reaction had already begun before the shove, so the displacement is not the shove's alone. `unaware` was already 0 (`unaware_ok` 1) on the pre-shove row: he had noticed the landing, so the shove's alert cannot be separated. `state_d1` 0x80 -> 0xc0. |
+| `teleport_step 0.05 5` | 20261025T122047 | Fired. The first step reset his yaw 50.55 deg -> 0.00 deg (the identity axis, as predicted); the largest sample-to-sample yaw change is 50.4 deg (> 10 deg: a yaw pop). Displacement 0.47 m at 0.6 s, 1.1 m at 1 s, 0.68 m at 2 s: his own walking dominates, steps not separable. No ragdoll. |
+| `shove_decl <name>` | not run | no candidate list (unchanged) |
 
-Task 15 can plan against these three levers with the table as it stands, but must not ship pull until `teleport_step` is measured.
+## Lever decision table (Task 13 verdict)
+
+| Need | Lever | Verdict |
+| --- | --- | --- |
+| stagger | `shove` (`shove_damage`, no damage) | **usable** by the rule (no `bodies_dynamic` for 6 s, moved >= 2 cm, z drop <= 0.3 m); the move is confounded by his own reaction, so the felt stagger is a headset item. It never ragdolls him. |
+| alert | the shove | **unproven**: he was already aware (unaware 0) before the shove fired, so "unaware goes 0 within 1000 ms" could not be observed as a transition. Ship as "stagger only; he notices you by himself" in the notes. |
+| pull | `teleport_step` | **none**: a 50 deg yaw pop on the first step (identity axis). `NativeWeaponHands::living_pull_enabled=false`; the hold keeps the hand on him with the tether only. |
+
+The living hold (hands plan Task 14) therefore ships the conservative levers: the hand seats on his bone, the shove at the start, the 0.35 m / 0.2 s
+tether, the hard pull (> 2.2 m/s away) as today's yank, no pull. Marked for the headset run in the checklist.
 
 ## Second opinion (DeepSeek, 2026-10-22) and what was done
 
