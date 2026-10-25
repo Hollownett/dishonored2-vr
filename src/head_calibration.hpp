@@ -21,6 +21,12 @@ class HeadCalibration {
 public:
     void clear() noexcept {origin_.reset();}
     std::uint64_t captures() const noexcept {return captures_;}
+    // Yaw-only turn of the held origin (+ = tracked_yaw increases); keeps identity, position and capture count.
+    void rotate_origin(double yaw_rad) noexcept {
+        if(!origin_ || !std::isfinite(yaw_rad)) return;
+        const Quaternion r{0,std::sin(yaw_rad*.5),0,std::cos(yaw_rad*.5)};
+        origin_->orientation=normalized(multiplied(r,origin_->orientation));
+    }
     std::optional<TrackedPose> get(const TrackedPose& current,std::uint64_t epoch,
         std::uintptr_t player,std::uintptr_t camera,std::int32_t generation,bool gameplay) {
         if(!gameplay) return {};

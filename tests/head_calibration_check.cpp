@@ -1,4 +1,5 @@
 #include "../src/head_calibration.hpp"
+#include "../src/head_locomotion.hpp"
 #include "../src/xr_continuity.hpp"
 #include <cassert>
 #include <iostream>
@@ -41,5 +42,15 @@ int main() {
     persistent.get(moved,continuity.reference_epoch(),0x10000,0x20000,1,true);assert(persistent.captures()==1);
     continuity.advance(true,true,true,500);persistent.get(moved,continuity.reference_epoch(),0x10000,0x20000,1,true);
     assert(persistent.captures()==2);
+    {HeadCalibration h; // rotate_origin_keeps_identity
+     const TrackedPose t{{.3,1.5,-.2},{0,std::sin(.25),0,std::cos(.25)}};
+     h.rotate_origin(.3);assert(!h.get(t,1,0x10000,0x20000,1,false) && h.captures()==0); // no origin yet: no-op
+     const auto o=*h.get(t,1,0x10000,0x20000,1,true);h.rotate_origin(.3);
+     const auto r=h.get(moved,1,0x10000,0x20000,1,true);
+     assert(r && h.captures()==1 && length(r->position-o.position)<1e-9);
+     assert(std::fabs(tracked_yaw(r->orientation,o.orientation)-.3)<1e-9);
+     h.rotate_origin(-.3);assert(std::fabs(tracked_yaw(h.get(moved,1,0x10000,0x20000,1,true)->orientation,o.orientation))<1e-9);
+     h.rotate_origin(std::nan(""));assert(std::fabs(tracked_yaw(h.get(moved,1,0x10000,0x20000,1,true)->orientation,o.orientation))<1e-9); // non-finite ignored
+     h.rotate_origin(.1);assert(!h.get(moved,2,0x10000,0x20000,1,true) || h.captures()==2);}
     std::cout<<"PASS: stable room calibration across pause/transient logic, explicit reference and native-owner resets, canted/antipodal eye centre and invalid pose rejection\n";
 }

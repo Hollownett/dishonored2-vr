@@ -403,6 +403,10 @@ build\layer_pose_sync_check.exe
 if not "%errorlevel%"=="0" exit /b 1
 cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT /Isrc tests\authored_view_check.cpp /Fo:build\authored_view_check.obj /Fe:build\authored_view_check.exe
 if not "%errorlevel%"=="0" exit /b 1
+cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT /Isrc tests\scripted_recenter_check.cpp /Fo:build\scripted_recenter_check.obj /Fe:build\scripted_recenter_check.exe
+if not "%errorlevel%"=="0" exit /b 1
+build\scripted_recenter_check.exe
+if not "%errorlevel%"=="0" exit /b 1
 build\authored_view_check.exe
 if not "%errorlevel%"=="0" exit /b 1
 cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT /Isrc tests\action_camera_alignment_check.cpp /Fo:build\action_camera_alignment_check.obj /Fe:build\action_camera_alignment_check.exe
