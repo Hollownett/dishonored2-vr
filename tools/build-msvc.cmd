@@ -722,6 +722,8 @@ python tests\authored_view_routing_check.py
 if not "%errorlevel%"=="0" exit /b 1
 python tests\scripted_recenter_routing_check.py
 if not "%errorlevel%"=="0" exit /b 1
+python tests\cinematic_probe_check.py
+if not "%errorlevel%"=="0" exit /b 1
 python tests\launcher_features_source_check.py
 if not "%errorlevel%"=="0" exit /b 1
 python tests\stealth_session_report_check.py

@@ -90,6 +90,7 @@ def main():
     run_hands_checks()
     sword_regrab_checks()
     authored_turn_checks()
+    cutscene_checks()
     print("bonelab_scenarios_check ok")
 
 
@@ -584,6 +585,29 @@ def authored_turn_checks():
     assert any(v == "FAIL" and "observed" in t for v, t in judge([r for r in scripted_trace() if not r["authored"]]))
     assert brc.parse_scripted_view("t,authored,state_index,hmd_rel_deg,rel_composed_deg,heading_deg,offset_deg,fold_deg,body_deg,view_yaw_deg\n"
                                    "1,1,8,40,40,nan,0,0,-130,-90\n1,2\n")[0]["state_index"] == 8.0
+
+
+
+def cutscene_checks():
+    """Camera plan Task 4: the cutscene scenario compiles, fits --lead 45 --seconds 120, and presses nothing a cinematic could take as a
+    skip: menu-only A pulses during the first 24 s of the lead, then neutral input only (no button, stick, trigger or grip); one
+    console line at the lead's end loads the cutscene slot."""
+    segments = sim.scenario_segments("cutscene", 45000)
+    _, transport = sim.compile_script(segments, 120)
+    assert transport.splitlines()[0].startswith("D2VR_GAMEPLAY_SCRIPT 8 120000 "), transport.splitlines()[0]
+    lines = [s["console"] for s in segments if "console" in s]
+    assert len(lines) == 1 and lines[0].startswith("loadgame ") and lines[0].split()[1].isdigit(), lines  # the cutscene slot, at the lead's end
+    assert [s["start_ms"] for s in segments if "console" in s] == [45000]
+    end = max(s["end_ms"] for s in segments)
+    assert end <= 120000 - 6000, end  # the rig adds 6 s; the session cap is 120 s
+    assert end >= 45000 + 60000, end  # a minute of watching after the lead
+    pulses = [s for s in segments if s["input"].get("a")]
+    assert pulses and all(s.get("when") == "menu" and s["end_ms"] <= 24000 for s in pulses), pulses
+    for seg in segments:
+        if seg["start_ms"] >= 24000 or not seg["input"].get("a"):
+            assert seg["input"] == {"move_x": 0.0} and "when" not in seg, seg
+    starts = sorted((s["start_ms"], s["end_ms"]) for s in segments)
+    assert starts[0][0] == 0 and all(a[1] == b[0] for a, b in zip(starts, starts[1:])), "contiguous, no gaps"
 
 
 if __name__ == "__main__":
