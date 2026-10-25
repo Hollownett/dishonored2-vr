@@ -102,15 +102,6 @@ inline std::optional<NativeRigidBody> grab_focus_candidate(const std::vector<Nat
     if(preferred && (!best || preferred->contact_distance(hand)<=distance+grab_switch_margin)) return preferred;
     return best;
 }
-// G2/G3 (plan Task 5): a physical candidate as a palm-cost target. One id per entity (its entity id): a corpse's bone can change under the
-// palm, and the one 0.86 hysteresis (PalmSelection) then holds the body. The priority comes from build/grab-tuning.cfg and is applied once,
-// as the target's field (ruling H5: props 1, limbs 1, torso and pelvis 1.1). A body without bounds is its origin point.
-inline std::uint64_t palm_body_id(const NativeRigidBody& b) noexcept {return b.entity_id?b.entity_id:static_cast<std::uint64_t>(b.entity);}
-inline PalmTarget palm_body_target(const NativeRigidBody& b,const GrabTuning& tuning) {
-    PalmTarget t;t.id=palm_body_id(b);t.kind=b.bone>=0?PalmKind::bone:PalmKind::prop;t.priority=tuning.priority(t.kind,b.bone);
-    if(b.bounds) {t.minimum=b.bounds->minimum;t.maximum=b.bounds->maximum;} else t.minimum=t.maximum=b.pose.position;
-    return t;
-}
 // The palm picks the prop or bone (the G2 cost, the same one that orders loot): what the palm faces and is near wins, ties to the lower id.
 // `gate` is the acquire distance (0.45 m); the current pick is kept out to 0.55 m at x 0.86 (PalmSelection, the only hysteresis). The other
 // hand's body (its focus or held body; entity, and handle when given) is no candidate. legacy_nearest is build/legacy-palm-select: the v611
@@ -217,6 +208,7 @@ private:
         // G2/G3 (Task 5): the palm's pick (the one 0.86 hysteresis), its score, and the grab buffer of this press (buffer_used: started once per press;
         // catch_tick: the catch edge, for press-to-held, ruling H4).
         PalmSelection selection;std::optional<FocusScore> score;double palm_dot{};GrabIntentBuffer buffer;bool buffer_used{};UINT64 catch_tick{};
+        std::uint32_t reject_id{};BodyReject reject{};   // G3 thin props (Task 7): the last prop near this hand whose body or bounds were refused, and why
         bool pending_release{},release_throw{},attempted{},acquired{},decision_deferred{};
         double tow{},tow_recovery{}; // a dragged body's pelvis follows its grabbed limb at this distance (set on the first motor write); tow_recovery: plan_tow's stale-frame recovery time
         void reset_tow() {tow=0;tow_recovery=0;last_tow=0;}
@@ -335,6 +327,7 @@ private:
     }
     std::atomic<UINT64> native_presses_{},physical_presses_{};
     std::ofstream log_;std::filesystem::path loss_file_;std::atomic<UINT64> picked_{},moved_{},dropped_{},lost_{},queries_{},samples_{},callbacks_{};
+    void note_reject(unsigned side,std::uint32_t id,BodyReject why) {auto& lane=lanes_[side];lane.reject_id=id;lane.reject=why;}
     // A press's distance to its candidate: from the palm point (the G2 cost's distance) or, with no palm score, from the hand.
     static std::optional<double> focus_gap(const Lane& lane,const NativeRigidBody& body) {
         if(lane.score && lane.score->id==palm_body_id(body)) return lane.score->distance;
@@ -356,6 +349,12 @@ private:
         const bool collar=collar_grab_ && lane.raw_grip>=collar_fist_squeeze;
         const auto game=rig::value<std::uintptr_t>(read_,base_+0x39a5290);
         if(!game || !rig::typed(read_,base_,*game,0x1c940a8)) {lane.discovery.reset();lane.focus.reset();return {};}
+        // G3 (Task 7): a corpse offers every bone with a known radius, picked by the palm; without a palm probe (or build/legacy-palm-select) the v611 limbs.
+        const bool palm_bones=!legacy_palm_select_ && p.palm.valid;
+        const auto corpse=[&](std::uintptr_t entity)->std::optional<NativeRigidBody> {
+            if(!corpse_enabled_) return {};
+            return palm_bones?corpse_candidate(read_,base_,entity,p.palm,tuning_,collar):corpse_candidate(read_,base_,entity,p.hand.position,collar);
+        };
         const auto& candidates=lane.discovery.advance(p.hand.position,p.tick,[&](unsigned index)->std::optional<NativeRigidBody> {
             const auto entity=rig::value<std::uintptr_t>(read_,*game+0x3130b0+index*8);
             const bool guard=entity && rig::typed(read_,base_,*entity,0x1c5e108); // a corpse or knocked-out guard: drag by a limb
@@ -365,11 +364,13 @@ private:
             if(!id || (*id>>16)!=index || !pos)return {};
             const Vec3 point{(*pos)[0],(*pos)[1],(*pos)[2]};
             if(!finite(point) || length(point-p.hand.position)>grab_retain_distance+3)return {};
-            if(guard) return corpse_enabled_?corpse_candidate(read_,base_,*entity,p.hand.position,collar):std::optional<NativeRigidBody>{};
-            return native_rigid_body(read_,base_,*entity);
+            if(guard) return corpse(*entity);
+            BodyReject why{};auto body=native_rigid_body(read_,base_,*entity,false,&why);
+            if(why!=BodyReject::ok && why!=BodyReject::not_prop) note_reject(side,*id,why);   // the thin-prop line of the grab_focus block
+            return body;
         },[&](const NativeRigidBody& body)->std::optional<NativeRigidBody> {
             if(body.bone<0) return native_rigid_body(read_,base_,body.entity);
-            return corpse_enabled_?corpse_candidate(read_,base_,body.entity,p.hand.position,collar):std::optional<NativeRigidBody>{};
+            return corpse(body.entity);
         });
         if(!refresh && lane.focus_tick && now>=lane.focus_tick && now-lane.focus_tick<100 &&
            length(p.hand.position-lane.focus_hand)<.05 && lane.focus_excluded==excluded) {
@@ -776,7 +777,7 @@ private:
         } else if(const auto yanked=yanked_entity_[side].load();yanked && now<yanked_until_[side].load() && sample && physical_usable && lane.grab.pressed()) {
             // The guard this hand just yanked into ragdoll (NativeWeaponHands::yank): the hand had his collar or arm, so it takes
             // his nearest limb and pulls it into the fist (bound as if the limb's contact point were at the hand).
-            if(const auto limb=nearest_ragdoll_body(read_,base_,yanked,p.hand.position);limb && limb->world==world &&
+            if(const auto limb=!legacy_palm_select_ && p.palm.valid?nearest_ragdoll_body(read_,base_,yanked,p.palm,tuning_):nearest_ragdoll_body(read_,base_,yanked,p.hand.position);limb && limb->world==world &&
                !lockout_.locked(limb->entity_id,seconds_from_ms(now))) { // a runaway guard is not yanked back into a hold inside his lockout
                 auto at_hand=limb->pose;at_hand.position=at_hand.position+(p.hand.position-limb->contact(p.hand.position));
                 if(lane.grab.bind(at_hand,p.hand.position,grab_acquire_distance)) {
@@ -1070,7 +1071,8 @@ public:
             o<<",\"cost\":"<<(fresh?lane.score->cost:0.)<<",\"runner_up\":"<<(fresh?lane.score->runner_up:0.)
              <<",\"switches_10s\":"<<lane.selection.switches_10s(now)<<",\"hysteresis_held\":"<<lane.selection.hysteresis_held()
              <<",\"scoring_fallback\":"<<lane.selection.scoring_fallback()<<",\"buffered_grabs\":"<<lane.buffer.buffered()
-             <<",\"buffer_expired\":"<<lane.buffer.expired()<<",\"palm_dot\":"<<(fresh?lane.palm_dot:0.)<<'}';
+             <<",\"buffer_expired\":"<<lane.buffer.expired()<<",\"palm_dot\":"<<(fresh?lane.palm_dot:0.)
+             <<",\"thin_prop\":{\"id\":"<<lane.reject_id<<",\"result\":\""<<body_reject_name(lane.reject)<<"\"}}";
         }
         o<<']';return o.str();
     }

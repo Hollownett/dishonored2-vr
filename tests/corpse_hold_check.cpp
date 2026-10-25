@@ -131,9 +131,11 @@ struct Rig {
     Rig() {NativeGrabCheck::setup(grab);const auto found=native_player_camera(read,base,camera);if(!found) {std::printf("no owner camera\n");std::exit(3);}owner=*found;}
     WorldTrackedPose pose(Vec3 p) const {return WorldTrackedPose{p,{{{1,0,0},{0,1,0},{0,0,1}}}};}
     // One hand sample: publish, decide (grip filter), run the dispatcher tick. raw>0 is a full fist (the physical lane sees nothing for a grip alone).
+    PalmProbe palm{};   // G3 (Task 7): the palm probe published with each step (invalid: the v611 path, as before)
     void step(unsigned side,Vec3 hand,float raw,UINT64 dt_ms=100,std::uintptr_t w=world) {
         t+=dt_ms;
-        grab.publish(side,owner,pose(hand),raw,1,t,true,false,t);
+        PalmProbe at=palm;if(at.valid) at.palm=hand-at.forward*palm_axis_push;   // the palm point sits at `hand`
+        grab.publish(side,owner,pose(hand),raw,1,t,true,false,t,nullptr,0,at);
         grab.filter_native_grip(side,raw,1,t,true,true,false);
         NativeGrabCheck::consume(grab,side,t,w);
     }
@@ -344,6 +346,51 @@ void readback_garbage_drops_hold_without_write() {
         r.step(0,wrist+Vec3{.2,0,0},.9f);
         CHECK(r.grab.velocity_unknown()>=1 && r.grab.holding(0) && writes.size()==before+1);
     }
+}
+// G3 (plan Task 7): the palm picks among every bone with a known radius. Guard a's bones are moved: the ones a case uses near the origin,
+// the rest 3 m away (beyond every gate, still inside the 3.5 m discovery radius of the guard's origin).
+void place(int bone,Vec3 at) {rig::Transform t{};t.f[0]=t.f[5]=t.f[10]=t.f[15]=1;t.f[12]=static_cast<float>(at.x);t.f[13]=static_cast<float>(at.y);
+    t.f[14]=static_cast<float>(at.z);put(record_of(a_first,bone),t);}
+void scatter() {for(int bone=0;bone<17;++bone) place(bone,{0,3,.1*bone});}
+PalmProbe facing(Vec3 direction) {PalmProbe p;p.forward={1,0,0};p.direction=direction*(1/length(direction));p.valid=true;return p;}
+std::optional<NativeRigidBody> palm_pick(Vec3 palm_point,Vec3 direction,bool collar=false,GrabTuning tuning={}) {
+    auto probe=facing(direction);probe.palm=palm_point-probe.forward*palm_axis_push;
+    return corpse_candidate(read,base,guard_a,probe,tuning,collar);
+}
+void torso_reach_catches() {
+    fixture(0x08,0x08,false);scatter();place(1,{0,0,0});   // the spine (radius 0.13): the palm 5 cm over it, facing down
+    const auto pick=palm_pick({0,0,.18},{0,0,-1});CHECK(pick && pick->bone==1);
+    const auto old=corpse_candidate(read,base,guard_a,Vec3{0,0,.18},false);CHECK(old && old->bone!=1);   // the v611 limb set never offered the torso
+    Rig r;r.palm=facing({0,0,-1});
+    REQUIRE(r.grasp(0,{0,0,.18}));
+    CHECK(NativeGrabCheck::bone(r.grab,0)==1 && NativeGrabCheck::corpse(r.grab,0) && NativeGrabCheck::capped(r.grab,0));   // the collar's physical hold
+    fixture(0x08,0x08,false);scatter();place(0,{0,0,0});place(11,{.3,.3,0});   // the pelvis and a thigh catch too
+    CHECK(palm_pick({0,0,.19},{0,0,-1})->bone==0);CHECK(palm_pick({.3,.3,.13},{0,0,-1})->bone==11);
+}
+void forearm_preferred_over_torso_at_equal_distance() {
+    // The spine 0.12 m below the palm point and the forearm 0.12 m beside it, both 45 degrees off the palm: equal cost but the torso's 1.1
+    fixture(0x08,0x08,false);scatter();place(1,{0,0,0});place(6,{0,-.17,.25});
+    const Vec3 point{0,0,.25},dir{0,-1,-1};
+    CHECK(palm_pick(point,dir)->bone==6);
+    GrabTuning flat;flat.priority_torso=.9;CHECK(palm_pick(point,dir,false,flat)->bone==1);   // the priority decides it
+}
+void head_is_candidate_with_known_radius() {
+    // Ruling H10 (spec: "every ragdoll bone with a known radius"): the head (radius 0.11) is a candidate, at limb priority
+    fixture(0x08,0x08,false);scatter();place(4,{0,0,0});
+    const auto pick=palm_pick({0,0,.16},{0,0,-1});CHECK(pick && pick->bone==4);
+    CHECK(corpse_palm_bone(4,false) && !corpse_palm_bone(2,false) && !corpse_palm_bone(3,false) && corpse_palm_bone(2,true) && !corpse_palm_bone(17,true));
+    for(int bone=0;bone<17;++bone) CHECK(corpse_palm_bone(bone,true));
+}
+void collar_needs_squeeze_rule() {
+    fixture(0x08,0x08,false);scatter();place(2,{0,0,0});   // the chest under the palm: offered only with the collar rule
+    CHECK(palm_pick({0,0,.2},{0,0,-1},false)->bone!=2);CHECK(palm_pick({0,0,.2},{0,0,-1},true)->bone==2);   // (a far bone keeps the body cached)
+    {Rig r;r.palm=facing({0,0,-1});CHECK(!r.grasp(0,{0,0,.2}));}   // build/collar-grab off: no chest hold
+    {fixture(0x08,0x08,false);scatter();place(2,{0,0,0});Rig r;r.palm=facing({0,0,-1});NativeGrabCheck::collar(r.grab,true);
+     REQUIRE(r.grasp(0,{0,0,.2}));CHECK(NativeGrabCheck::bone(r.grab,0)==2);}
+    {fixture(0x80,0x08,false);scatter();place(1,{0,0,0});CHECK(!palm_pick({0,0,.18},{0,0,-1}));}   // awake (ragdolling): never a corpse candidate
+    {fixture(0x08,0x08,false);scatter();place(6,{0,0,0});   // nothing in the gate: the nearest bone is returned (discovery keeps him) and the selection refuses it
+     const auto distant=palm_pick({0,0,1.5},{0,0,-1});CHECK(distant && distant->bone==6);
+     Rig r;r.palm=facing({0,0,-1});CHECK(!r.grasp(0,{0,0,1.5}));}
 }
 void kill_switch_disables_corpse_candidates() {
     fixture();Rig r;CorpseOptions off;off.enabled=false;r.grab.configure_corpse(off);
@@ -748,6 +795,7 @@ int main() {
     readback_garbage_drops_hold_without_write();
     kill_switch_disables_corpse_candidates();
     two_hands_two_limbs_independent();
+    torso_reach_catches();forearm_preferred_over_torso_at_equal_distance();head_is_candidate_with_known_radius();collar_needs_squeeze_rule();
     prop_hold_capped_old_release();
     tow_follows_and_limb_saturation_gates_it();
     mass_hangs_on_a_lifted_limb();

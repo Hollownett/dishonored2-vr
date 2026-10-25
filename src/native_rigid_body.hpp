@@ -2,6 +2,7 @@
 #include "game_rig.hpp"
 #include "physical_grab.hpp"
 #include <cstring>
+#include <limits>
 namespace d2vr {
 struct NativeGrabBounds {
     Vec3 minimum{},maximum{};
@@ -19,17 +20,53 @@ struct NativeRigidBody {
     Vec3 contact(Vec3 hand) const {return bounds?bounds->closest(hand):pose.position;}
     double contact_distance(Vec3 hand) const {return length(contact(hand)-hand);}
 };
+// G2/G3 (plan Task 5): a physical candidate as a palm-cost target. One id per entity (its entity id): a corpse's bone can change under the
+// palm, and the one 0.86 hysteresis (PalmSelection) then holds the body. The priority comes from build/grab-tuning.cfg and is applied once,
+// as the target's field (ruling H5: props 1, limbs 1, torso and pelvis 1.1). A body without bounds is its origin point.
+inline std::uint64_t palm_body_id(const NativeRigidBody& b) noexcept {return b.entity_id?b.entity_id:static_cast<std::uint64_t>(b.entity);}
+inline PalmTarget palm_body_target(const NativeRigidBody& b,const GrabTuning& tuning) {
+    PalmTarget t;t.id=palm_body_id(b);t.kind=b.bone>=0?PalmKind::bone:PalmKind::prop;t.priority=tuning.priority(t.kind,b.bone);
+    if(b.bounds) {t.minimum=b.bounds->minimum;t.maximum=b.bounds->maximum;} else t.minimum=t.maximum=b.pose.position;
+    return t;
+}
+// Why native_rigid_body refused a body, or (bounds_*) why it fell back from its model bounds to its origin point (the body is still returned).
+enum class BodyReject : unsigned char {ok,not_prop,pickable,no_component,not_dynamic,no_model,bounds_size,bounds_centre};
+inline const char* body_reject_name(BodyReject r) noexcept {
+    switch(r) {case BodyReject::ok: return "ok";case BodyReject::not_prop: return "not_prop";case BodyReject::pickable: return "pickable";
+        case BodyReject::no_component: return "no_component";case BodyReject::not_dynamic: return "not_dynamic";case BodyReject::no_model: return "no_model";
+        case BodyReject::bounds_size: return "bounds_size";case BodyReject::bounds_centre: return "bounds_centre";}
+    return "unknown";
+}
+// The model AABB is used for the grab distance when it is sane: finite, ordered, a diagonal of 1 mm to 3 m, the rendered origin within 0.25 m
+// of the body and the body within 0.5 m of the box. G3 thin props (plan Task 7): when the ONLY failing limit is the rendered-origin offset and
+// the body's pose lies inside the box (closest(pose)==pose within 1 mm, e.g. an off-centre paper stack), the box is accepted anyway.
+inline bool accept_bounds(const NativeGrabBounds& bounds,Vec3 rendered_origin,Vec3 pose,BodyReject* why=nullptr) noexcept {
+    const auto fail=[&](BodyReject r) {if(why) *why=r;return false;};
+    if(!finite(bounds.minimum) || !finite(bounds.maximum) || !finite(rendered_origin) || !finite(pose) ||
+       bounds.minimum.x>bounds.maximum.x || bounds.minimum.y>bounds.maximum.y || bounds.minimum.z>bounds.maximum.z) return fail(BodyReject::bounds_size);
+    const double diagonal=length(bounds.maximum-bounds.minimum);
+    if(!(diagonal>.001) || !(diagonal<=3)) return fail(BodyReject::bounds_size);
+    const double gap=length(bounds.closest(pose)-pose);
+    if(!(gap<=.5)) return fail(BodyReject::bounds_centre);
+    if(!(length(rendered_origin-pose)<=.25) && !(gap<=.001)) return fail(BodyReject::bounds_centre);
+    if(why) *why=BodyReject::ok;
+    return true;
+}
 // carryable: also native carryables (bottles, glasses), for a hand that pushes them without grabbing (native_hand_contact.hpp).
-template<class Read> std::optional<NativeRigidBody> native_rigid_body(Read& read,std::uintptr_t base,std::uintptr_t entity,bool carryable=false) {
+// why (G3, plan Task 7): the reason a body was refused (or ok), for the grab_focus status block's thin-prop line. Never changes the result.
+template<class Read> std::optional<NativeRigidBody> native_rigid_body(Read& read,std::uintptr_t base,std::uintptr_t entity,bool carryable=false,BodyReject* why=nullptr) {
     using namespace rig;
+    BodyReject scratch{};BodyReject& reason=why?*why:scratch;reason=BodyReject::not_prop;
     const auto game=value<std::uintptr_t>(read,base+0x39a5290);
     // Exact pinned RTTI: base idEntity can own a standalone dynamic prop too.
     if(!game || !typed(read,base,*game,0x1c940a8) ||
        !(typed(read,base,entity,0x1c886a8) || typed(read,base,entity,0x1c87d58) || typed(read,base,entity,0x1c5de18)) || value<std::uintptr_t>(read,*game+0x3130b0)==entity) return {}; // 0x1c5de18 arkMovable
     const auto id=value<std::uint32_t>(read,entity+0xa8);
     if(!id || *id==0x3fff0010 || (*id>>16)>=0x3fff || value<std::uintptr_t>(read,*game+0x3130b0+(*id>>16)*8)!=entity) return {};
+    reason=BodyReject::no_model;
     const auto model=value<std::uintptr_t>(read,entity+0xf0);
     if(!model || !typed(read,base,*model,0x1b0dd88)) return {}; // Rendered static-mesh prop, not an invisible physics helper.
+    reason=BodyReject::no_component;
     const auto entries=list(read,entity+0x268,256);
     if(!entries) return {};
     std::uintptr_t component{};
@@ -38,7 +75,7 @@ template<class Read> std::optional<NativeRigidBody> native_rigid_body(Read& read
         // Native carryables (bottles, glasses: arkCpntPickable_Simple 0x1c5a3b8) belong to the game's own Use (HoldObject), which
         // the mod puts in the tracked hand (native_held_object.hpp). Grabbed physically they fought the native carry, floated or
         // were lost (sim 2026-10-13: picked, moved 75 frames, ownership lost).
-        if(!carryable && at && typed(read,base,*at,0x1c5a3b8)) return {};
+        if(!carryable && at && typed(read,base,*at,0x1c5a3b8)) {reason=BodyReject::pickable;return {};}
         if(at && (typed(read,base,*at,0x1c745c8) || typed(read,base,*at,0x1b64b68))) {
             if(component) return {};component=*at;
         }
@@ -55,10 +92,12 @@ template<class Read> std::optional<NativeRigidBody> native_rigid_body(Read& read
     const auto record=*pool+index*0xb0;
     const auto flags=value<std::uint32_t>(read,record+0x44),motion=value<std::uint32_t>(read,record+0x40);
     const auto transform=value<Transform>(read,record);
+    if(flags && (*flags&7)!=2) {reason=BodyReject::not_dynamic;return {};}   // reported, never forced (a settled body that is not dynamic)
     // Only a standalone dynamic primary body: no static/keyframed/compound,
     // native carry parent, or existing temporary activation lease.
     // Bit 8 is the native active-body flag, set by c85dc0/c88dd0 when waking
     // a previously sleeping prop. It is independent of motion type bits 1/2/4.
+    reason=BodyReject::not_dynamic;
     if(!flags || (*flags&7)!=2 || !motion || !*motion || *motion>=0x100000 || !transform || !valid(*transform) ||
        value<std::uint32_t>(read,record+0x70)!=handle || value<std::uint32_t>(read,record+0x74)!=handle ||
        value<std::uintptr_t>(read,component+0xc8)!=0 || value<unsigned char>(read,component+0xd2)!=0) return {};
@@ -73,18 +112,16 @@ template<class Read> std::optional<NativeRigidBody> native_rigid_body(Read& read
     // world AABB; 1bd8b0 reads the same cache for the native model centre.
     const auto box=value<std::array<float,8>>(read,*model+0x1840);
     const auto origin=value<std::array<float,3>>(read,*model+0x1860);
+    BodyReject bounds_result=BodyReject::ok;
     if(box && origin) {
         const NativeGrabBounds bounds{{(*box)[0],(*box)[1],(*box)[2]},{(*box)[4],(*box)[5],(*box)[6]}};
         const Vec3 rendered{(*origin)[0],(*origin)[1],(*origin)[2]};
-        if(finite(bounds.minimum) && finite(bounds.maximum) && finite(rendered) &&
-           bounds.minimum.x<=bounds.maximum.x && bounds.minimum.y<=bounds.maximum.y && bounds.minimum.z<=bounds.maximum.z &&
-           length(bounds.maximum-bounds.minimum)>.001 && length(bounds.maximum-bounds.minimum)<=3 &&
-           length(rendered-result.pose.position)<=.25 && length(bounds.closest(result.pose.position)-result.pose.position)<=.5)
-            result.bounds=bounds;
+        if(accept_bounds(bounds,rendered,result.pose.position,&bounds_result)) result.bounds=bounds;
     }
     if(value<Identity>(read,component+0x18)!=identity || value<std::uint32_t>(read,component+0xf8)!=handle ||
        value<std::uint32_t>(read,entity+0xa8)!=id || value<std::uintptr_t>(read,entity+0xf0)!=model || value<std::uint32_t>(read,record+0x70)!=handle ||
-       value<std::uintptr_t>(read,*game+0x3130b0+(*id>>16)*8)!=entity) return {};
+       value<std::uintptr_t>(read,*game+0x3130b0+(*id>>16)*8)!=entity) {reason=BodyReject::not_prop;return {};}
+    reason=bounds_result;
     return result;
 }
 // Guard bodies (sim v399, read live): every arkNPC (0x1c5e108) owns 17 consecutive hknp ragdoll bodies. Their handles sit at
@@ -159,6 +196,35 @@ template<class Read> std::optional<NativeRigidBody> nearest_ragdoll_body(Read& r
     }
     return best;
 }
+// G2/G3 (plan Task 7): the bone the palm picks among `allowed` bones (the shared palm cost; 0.45 m gate from the palm point, ruling H10; the
+// per-bone priority from the tuning: torso and pelvis 1.1, limbs 1.0, so a palm on a forearm still prefers the forearm). Ties: the lower bone.
+// With no bone inside the gate it returns the allowed bone nearest the palm point, as the v611 pick did: discovery keeps the body cached while the
+// hand approaches, and the selection (pick_by_palm, the same gate) still refuses it.
+template<class Read,class Allowed> std::optional<NativeRigidBody> palm_ragdoll_body(Read& read,std::uintptr_t base,std::uintptr_t entity,
+        const PalmProbe& probe,const GrabTuning& tuning,Allowed allowed) {
+    std::optional<NativeRigidBody> best,nearest;double best_cost=std::numeric_limits<double>::infinity(),nearest_gap=best_cost;
+    const Vec3 point=palm_point(probe);
+    for(int bone=0;bone<17;++bone) {
+        if(!allowed(bone)) continue;
+        const auto body=native_ragdoll_body(read,base,entity,bone);
+        if(!body) continue;
+        const auto s=palm_cost(probe,palm_body_target(*body,tuning),tuning.hover_radius_m,grab_acquire_distance);
+        if(s && s->cost<best_cost) {best_cost=s->cost;best=body;}
+        const double gap=body->contact_distance(point);
+        if(gap<nearest_gap) {nearest_gap=gap;nearest=body;}
+    }
+    return best?best:nearest;
+}
+// The grabbable limb the palm picks (a yank's hold: the same limb set as nearest_ragdoll_body, ranked by the palm cost).
+template<class Read> std::optional<NativeRigidBody> nearest_ragdoll_body(Read& read,std::uintptr_t base,std::uintptr_t entity,const PalmProbe& probe,
+        const GrabTuning& tuning,bool allow_collar=false) {
+    return palm_ragdoll_body(read,base,entity,probe,tuning,[&](int bone) {return allow_collar?ragdoll_hold_bone(bone):ragdoll_grab_bone(bone);});
+}
+// Every ragdoll bone with a known radius is a corpse candidate (spec G3, ruling H10: the head included), so reaching for the body's middle
+// catches the torso, pelvis or a thigh. The collar bones (chest 2, neck 3) keep their rule: only with allow_collar (build/collar-grab and a fist).
+inline bool corpse_palm_bone(int bone,bool allow_collar) noexcept {
+    return bone>=0 && bone<17 && ragdoll_bone_radius[static_cast<std::size_t>(bone)]>0 && ((bone!=2 && bone!=3) || allow_collar);
+}
 // Only a dead (entity+0xd1 bit 0x08) or unconscious (0x20) guard may be pushed by a hand (C2). Bit 0x80 alone (an awake guard ragdolling
 // after a yank, native_ragdoll_body accepts him) is not enough: he gets up and fights.
 template<class Read> bool ragdoll_pushable_state(Read& read,std::uintptr_t entity) {
@@ -167,9 +233,16 @@ template<class Read> bool ragdoll_pushable_state(Read& read,std::uintptr_t entit
 }
 // Discovery branch for a guard: a candidate only when he is dead or unconscious (an awake guard, even one ragdolling after a yank, gives none;
 // living guards are the pull-and-stagger path). The collar bones are offered only when allow_collar (the build/collar-grab knob).
+// The Vec3 form is the v611 pick (8 limbs + collar, nearest): build/legacy-palm-select, or no valid palm probe this frame.
 template<class Read> std::optional<NativeRigidBody> corpse_candidate(Read& read,std::uintptr_t base,std::uintptr_t entity,Vec3 hand,bool allow_collar) {
     if(!ragdoll_pushable_state(read,entity)) return {};
     return nearest_ragdoll_body(read,base,entity,hand,allow_collar);
+}
+// G3 (plan Task 7): all bones with a known radius (corpse_palm_bone), picked by the palm cost.
+template<class Read> std::optional<NativeRigidBody> corpse_candidate(Read& read,std::uintptr_t base,std::uintptr_t entity,const PalmProbe& probe,
+        const GrabTuning& tuning,bool allow_collar) {
+    if(!probe.valid || !ragdoll_pushable_state(read,entity)) return {};
+    return palm_ragdoll_body(read,base,entity,probe,tuning,[&](int bone) {return corpse_palm_bone(bone,allow_collar);});
 }
 // A body the hands may push is also not carried (component +0xc8 native parent, +0xd2 temporary lease: the check of native_rigid_body for a
 // prop) and belongs to this guard the way NativeWorldTrace::inspect_hit_body proves a hit body's owner: record +0x90 userdata -> +8 component ->
