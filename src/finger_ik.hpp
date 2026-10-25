@@ -99,7 +99,7 @@ struct FingerIkState {
     unsigned solved{};                       // fingers the last call solved (the rest took their memo or waited for their turn)
     unsigned thumb_waited{};                 // calls the thumb has waited for a turn behind the fingers
 };
-inline constexpr double finger_ik_tau=.06; // s: fingers settle onto a shape in ~3 tau; opening (a shape arriving) is immediate
+inline constexpr double finger_ik_tau=.06; // s: fingers settle onto a shape in ~3 tau; opening (a shape arriving) is immediate unless eased (finger_contact ease_opening)
 // A hand lying on a surface (research recommendation 10): the palm skin within resting_gap_far of one and slower than resting_speed_fast
 // raises the four fingers' wanted curl toward resting_curl (a contact still caps it). Full strength inside resting_gap_near / resting_speed_slow.
 inline constexpr float resting_curl=.35f;
@@ -426,10 +426,16 @@ inline std::array<float,5> finger_wants(bool held,float squeeze,float index) {
     return held?std::array<float,5>{1.f,held_curl,held_curl,held_curl,held_curl}:std::array<float,5>{std::max(squeeze,.5f*index),index,squeeze,squeeze,squeeze};
 }
 inline constexpr float thumb_fold_curl=.4f; // a finger asking for less is not folded: the thumb has nothing to lie on
+// The memo keys on the reach in 0.05 steps (G4: the reach blends 1 -> held_curl over the grip ease; a step of a hundredth must not solve every finger again).
+inline constexpr float memo_reach_step=.05f;
+inline float memo_reach_key(float reach) noexcept {return std::round(reach/memo_reach_step)*memo_reach_step;}
+// ease_opening (G4 the fitter's shape replacing the hover shape; G5 a free hand on a surface): a contact pose that falls (the finger must open)
+// eases down with finger_ik_tau instead of at once, never more than max_open_lag_rad above the new target (the surface tolerance over the lever).
 inline FingerCurls finger_contact(const HandGeometry& hand,const WorldTrackedPose& palm,const HeldShape* shapes,unsigned count,double dt,FingerIkState& state,float reach=1.f,
-    unsigned budget=finger_solve_all,const std::array<float,5>* wanted=nullptr) {
+    unsigned budget=finger_solve_all,const std::array<float,5>* wanted=nullptr,bool ease_opening=false,double max_open_lag_rad=0) {
     require_hand(hand);require_frame(palm,"Invalid finger palm frame",true);
     if(!std::isfinite(dt) || dt<0 || dt>1) throw std::invalid_argument("Invalid finger contact step");
+    if(!std::isfinite(max_open_lag_rad) || max_open_lag_rad<0) throw std::invalid_argument("Invalid finger opening lag");
     if(count>max_contact_shapes || (count && !shapes)) throw std::invalid_argument("Invalid finger contact set");
     for(unsigned i=0;i<count;++i) require_shape(shapes[i]);
     auto pose_target=free_curls(reach);
@@ -540,15 +546,16 @@ inline FingerCurls finger_contact(const HandGeometry& hand,const WorldTrackedPos
             auto& memo=state.memo[f];
             if(reachable==0) {memo.valid=false;return;}
             picked_count[f]=reachable;for(unsigned k=0;k<reachable;++k) picked[f][k]=reach_index[k];
-            bool same=memo.valid && memo.reach==reach && memo.count==reachable;
+            const float reach_key=memo_reach_key(reach);
+            bool same=memo.valid && memo.reach==reach_key && memo.count==reachable;
             for(unsigned k=0;same && k<reachable;++k) same=near_palm_shape(memo.shapes[k],local[reach_index[k]]);
             if(same) {pose_target.pose[f]=memo.pose;touching[f]=memo.touching;}
-            else {stale[f]=true;drifted[f]=memo.valid && memo.reach==reach && memo.count==reachable;} // drifted: the same shapes, moved more than the memo allows
+            else {stale[f]=true;drifted[f]=memo.valid && memo.reach==reach_key && memo.count==reachable;} // drifted: the same shapes, moved more than the memo allows
         };
         const auto run_finger=[&](unsigned f) {
             reachable=picked_count[f];for(unsigned k=0;k<reachable;++k) {reach_index[k]=picked[f][k];within_reach[k]=&local[picked[f][k]];}
             touching[f]=solve(hand.finger[f],f,pose_target.pose[f]);
-            auto& memo=state.memo[f];memo.valid=true;memo.reach=reach;memo.count=reachable;memo.pose=pose_target.pose[f];memo.touching=touching[f];
+            auto& memo=state.memo[f];memo.valid=true;memo.reach=memo_reach_key(reach);memo.count=reachable;memo.pose=pose_target.pose[f];memo.touching=touching[f];
             for(unsigned k=0;k<reachable;++k) memo.shapes[k]=local[picked[f][k]];
             stale[f]=false;++state.solved;
         };
@@ -595,7 +602,11 @@ inline FingerCurls finger_contact(const HandGeometry& hand,const WorldTrackedPos
     state.palm=palm.position;state.palm_valid=true;
     const float slow=static_cast<float>(std::clamp((resting_speed_fast-state.speed)/(resting_speed_fast-resting_speed_slow),0.,1.));
     rest_target*=slow;
-    const auto follow=[&](float& c,float t) {c=state.valid?std::min(t,static_cast<float>(c+(t-c)*k)):t;};
+    const auto follow=[&](float& c,float t) {
+        if(!state.valid) {c=t;return;}
+        if(t>=c || !ease_opening) {c=std::min(t,static_cast<float>(c+(t-c)*k));return;}
+        c=static_cast<float>(std::max(static_cast<double>(t),std::min(c+(t-c)*k,t+max_open_lag_rad))); // eased opening, bounded lag
+    };
     const auto ease=[&](float& c,float t) {c=state.valid?static_cast<float>(c+(t-c)*k):t;};
     FingerCurls out{};out.touching=touching;
     // The scalar a consumer that knows no joints takes (the legacy arm, the hand's push shape): the least closed joint's curl.
@@ -644,6 +655,45 @@ inline std::array<std::array<float,3>,5> finger_turns(const HandGeometry& hand,c
         for(unsigned s=0;s<3;++s) turn[f][s]=static_cast<float>(t[s]);
     }
     return turn;
+}
+// G4 (the grip pose blend wraps the WANTED angles, the contact clamp stays last: ruling H7): the angles each finger wants before any contact
+// (finger_turns' floors included), and the turns of wanted angles once the contact pose clamps them. finger_turns is the two in one.
+using FingerAngles=std::array<std::array<float,3>,5>;
+inline FingerAngles finger_want_angles(const FingerCurls& contact,const std::array<float,5>& wanted) {
+    for(float w:wanted) if(!std::isfinite(w) || w<0 || w>1) throw std::invalid_argument("Invalid controller finger curl");
+    FingerAngles out{};
+    for(unsigned f=0;f<5;++f) {
+        const float floor_share=f?std::max(relaxed_share,contact.resting):relaxed_share;
+        const auto a=finger_angles(f,std::max(wanted[f],floor_share));
+        for(unsigned s=0;s<3;++s) out[f][s]=static_cast<float>(a[s]);
+    }
+    return out;
+}
+inline FingerAngles finger_clamped_angles(const FingerCurls& contact,const FingerAngles& wanted) {
+    FingerAngles out{};
+    for(unsigned f=0;f<5;++f) for(unsigned s=0;s<3;++s) {
+        if(!std::isfinite(wanted[f][s])) throw std::invalid_argument("Invalid wanted finger angle");
+        out[f][s]=std::min(wanted[f][s],contact.pose[f][s]);
+    }
+    return out;
+}
+inline FingerAngles finger_turns_of_angles(const HandGeometry& hand,const FingerCurls& contact,const FingerAngles& wanted) {
+    require_hand(hand);
+    const auto a=finger_clamped_angles(contact,wanted);FingerAngles turn{};
+    for(unsigned f=0;f<5;++f) {
+        const auto t=finger_turns_of(hand.finger[f],{a[f][0],a[f][1],a[f][2]});
+        for(unsigned s=0;s<3;++s) turn[f][s]=static_cast<float>(t[s]);
+    }
+    return turn;
+}
+// The most a joint may lag behind an opening target (rad) for a fingertip error of `tolerance` metres: over the longest finger's lever (knuckle to tip,
+// plus its thickness), so no long finger's tip errs by more (G5 surface tolerance: 5 mm still or slow, 15 mm sliding fast).
+inline double finger_open_lag(const HandGeometry& hand,double tolerance) {
+    require_hand(hand);
+    if(!std::isfinite(tolerance) || tolerance<0) throw std::invalid_argument("Invalid finger tolerance");
+    double lever=0;
+    for(unsigned f=1;f<5;++f) {double l=hand.thickness[f];for(const auto& b:hand.finger[f].bone) l+=length(b);lever=std::max(lever,l);}
+    return lever>1e-6?tolerance/lever:0.;
 }
 inline std::array<std::array<float,3>,5> finger_turns(const HandGeometry& hand,const FingerCurls& contact,float squeeze,float index,bool held) {
     if(!std::isfinite(squeeze) || squeeze<0 || squeeze>1 || !std::isfinite(index) || index<0 || index>1) {require_hand(hand);throw std::invalid_argument("Invalid controller finger curl");}

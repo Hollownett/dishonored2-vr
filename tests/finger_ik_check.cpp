@@ -1214,6 +1214,49 @@ int main() {
         assert(rejects([&] {(void)r::held_cylinder(id,{{-4,-4,0},{4,4,0}});}));
         assert(rejects([&] {(void)r::classify_held(upright,d2vr::NativeGrabBounds{{-4,-4,0},{4,4,0}},-1,h.palm);}));
     }
+    // G4 eased_opening_bounded_lag: a shape (the fitter's, after the hover shape) that opens the contact pose by 20 degrees or more: with ease_opening
+    // the pose follows with finger_ik_tau, never lagging the target by more than max_open_lag_rad; without it, the opening is immediate (as above).
+    for(float mirror:{-1.f,1.f}) {
+        const auto h=synthetic_hand(mirror);const auto& g=h.geometry;
+        const auto bottle=across_palm(h,mirror,.035,.01);const std::array<float,5> wants{1,1,1,1,1};
+        r::FingerIkState free_state{};const auto shut=r::finger_contact(g,h.palm,nullptr,0,0,free_state,1.f,r::finger_solve_all,&wants);
+        r::FingerIkState target_state{};const auto target=r::finger_contact(g,h.palm,&bottle,1,0,target_state,1.f,r::finger_solve_all,&wants);
+        double opened=0;for(unsigned f=1;f<5;++f) for(unsigned s=0;s<3;++s) opened=std::max(opened,static_cast<double>(shut.pose[f][s]-target.pose[f][s]));
+        assert(opened>=20*deg);
+        constexpr double lag=.1,dt=1/72.;
+        r::FingerIkState st=free_state;bool eased=false;
+        for(unsigned i=0;i<72;++i) {
+            const auto c=r::finger_contact(g,h.palm,&bottle,1,dt,st,1.f,r::finger_solve_all,&wants,true,lag);
+            for(unsigned f=0;f<5;++f) for(unsigned s=0;s<3;++s) {
+                assert(c.pose[f][s]>=target.pose[f][s]-1e-6f && c.pose[f][s]<=target.pose[f][s]+lag+1e-6);
+                eased=eased || c.pose[f][s]>target.pose[f][s]+1e-4f;
+            }
+            if(i==71) for(unsigned f=0;f<5;++f) for(unsigned s=0;s<3;++s) assert(std::abs(c.pose[f][s]-target.pose[f][s])<1e-3f);
+        }
+        assert(eased);
+        r::FingerIkState immediate=free_state;const auto now=r::finger_contact(g,h.palm,&bottle,1,dt,immediate,1.f,r::finger_solve_all,&wants);
+        assert(now.pose==target.pose);
+    }
+    // G4 memo_stable_under_reach_blend: the reach blends 1 -> held_curl over the grip ease; a step from 0.81 to 0.80 keys the same memo (0.05 steps).
+    {
+        const auto h=synthetic_hand(1.f);const auto& g=h.geometry;
+        const auto bottle=across_palm(h,1.f,.035,.01);const std::array<float,5> wants{1,.81f,.81f,.81f,.81f};
+        r::FingerIkState st{};(void)r::finger_contact(g,h.palm,&bottle,1,1/72.,st,.81f,r::finger_solve_all,&wants);
+        assert(st.solved==5);
+        (void)r::finger_contact(g,h.palm,&bottle,1,1/72.,st,.80f,r::finger_solve_all,&wants);
+        assert(st.solved==0);
+        (void)r::finger_contact(g,h.palm,&bottle,1,1/72.,st,.7f,r::finger_solve_all,&wants);
+        assert(st.solved==5); // a real change of reach still solves again
+        // The blend's split of finger_turns: wanted angles (floors included), then the contact clamp: the same turns as finger_turns.
+        r::FingerIkState s2{};const auto c=r::finger_contact(g,h.palm,&bottle,1,0,s2,1.f,r::finger_solve_all,&wants);
+        for(const auto& w:{wants,std::array<float,5>{0,0,0,0,0},std::array<float,5>{1,1,1,1,1}}) {
+            const auto a=r::finger_turns(g,c,w),b=r::finger_turns_of_angles(g,c,r::finger_want_angles(c,w));
+            for(unsigned f=0;f<5;++f) for(unsigned s=0;s<3;++s) assert(std::abs(a[f][s]-b[f][s])<1e-5f);
+        }
+        double lever=0;for(unsigned f=1;f<5;++f) {double l=g.thickness[f];for(const auto& bone:g.finger[f].bone) l+=d2vr::length(bone);lever=std::max(lever,l);}
+        assert(std::abs(r::finger_open_lag(g,.005)-.005/lever)<1e-12 && rejects([&] {(void)r::finger_open_lag(g,-1);}));
+        assert(rejects([&] {r::FingerIkState s3{};(void)r::finger_contact(g,h.palm,&bottle,1,0,s3,1.f,r::finger_solve_all,&wants,true,-1);}));
+    }
     // G8: an empty fist rests on the palm (palm_stop_slab): the tips stop on the skin plane, an open hand is untouched, the knuckles lie outside it.
     for(bool right:{false,true}) {
         const auto h=real_hand(right);const auto& g=h.geometry;const auto n=d2vr::unit(r::palm_normal(h.palm,g));const Vec3 skin=h.palm.position+n*r::held_palm_depth;

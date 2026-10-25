@@ -10,12 +10,13 @@
 
 // Bonelab's finger curl from the controller's touch sensors (visual only: no intent reads it). The index rests at touch_rest while the trigger
 // is touched and adds the pull, slewed at index_slew; middle/ring/pinky follow the grip as grip*1.3-0.1; the thumb closes on any thumb
-// sensor, slewed at thumb_slew; every finger then steps toward that by clamp01(smooth_rate*dt); a held hand keeps held_floor at least.
+// sensor, slewed at thumb_slew; a held hand's target is held_floor at least (G4: before the filter); every finger then steps toward that by clamp01(smooth_rate*dt).
 // A runtime without touch paths (or sensors silent for touch_silent_seconds while the trigger or grip move) gets today's mapping
 // (rig::finger_wants) untouched. Pure: no engine, no OpenXR. Curl order: thumb, index, middle, ring, pinky.
 namespace d2vr::rig {
 struct FingerTouchParams {
     float touch_rest=.3f,index_slew=10.f,thumb_slew=25.f,smooth_rate=20.f,held_floor=.6f;
+    bool floor_after_smoothing=false; // build/legacy-finger-ease (not a file key): the pre-G4 order, the floor clamped after the filter (an open hand jumps to it)
     // "key=value" lines (blank lines and # comments allowed); any bad line -> nullopt; values clamped to sane ranges.
     static std::optional<FingerTouchParams> parse(const std::string& text) {
         FingerTouchParams p;std::istringstream in(text);std::string line;
@@ -57,7 +58,9 @@ public:
         s.sim=toward(s.sim,in.trigger_touch?p.touch_rest:0.f,p.index_slew*step);
         s.thumb=toward(s.thumb,in.thumb_touch?1.f:0.f,p.thumb_slew*step);
         const float grip_curl=std::clamp(grip*1.3f-.1f,0.f,1.f);
-        const std::array<float,5> target{s.thumb,std::min(1.f,trigger+s.sim),grip_curl,grip_curl,grip_curl};
+        std::array<float,5> target{s.thumb,std::min(1.f,trigger+s.sim),grip_curl,grip_curl,grip_curl};
+        // G4: a held hand's floor goes into the target, so it rises through the 50 ms filter (Bonelab clamp01(20*dt)) instead of in one frame.
+        if(held && !p.floor_after_smoothing) for(auto& c:target) c=std::max(c,p.held_floor);
         const float k=std::clamp(p.smooth_rate*step,0.f,1.f);
         for(unsigned f=0;f<5;++f) s.smooth[f]=std::clamp(s.smooth[f]+(target[f]-s.smooth[f])*k,0.f,1.f);
         // Silent sensors: the timer runs only while the trigger or grip is in use or moving, and any touch resets it.
@@ -70,7 +73,7 @@ public:
         if(out.touch_silent) {out.mapping=CurlMapping::legacy;out.curl=finger_wants(held,grip,trigger);}
         else {
             out.mapping=CurlMapping::touch;out.curl=s.smooth;
-            if(held) {out.floor_active=true;for(auto& c:out.curl) c=std::max(c,p.held_floor);}
+            if(held) {out.floor_active=true;if(p.floor_after_smoothing) for(auto& c:out.curl) c=std::max(c,p.held_floor);}
         }
         s.last=out;return out;
     }

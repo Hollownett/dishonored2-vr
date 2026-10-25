@@ -65,6 +65,22 @@ int main() {
         const auto up=settle(c,0,touched(1,1,true),true);for(float v:up.curl) assert(near(v,1.f)); // the floor never lowers
         const auto free=settle(c,0,in,false);assert(!free.floor_active && free.curl[2]<1e-3f);
     }
+    {   // held_floor_rises_through_filter (G4: floor before smoothing): an open hand that starts holding rises to the 0.6 floor through the 50 ms
+        // filter, never in one frame: frame 1 <= 0.6*k, >= 0.59 after 0.3 s, no step above 0.6*20*dt.
+        r::FingerTouchCurl c;In in;in.touch_available=true;const double dt=1/72.;
+        (void)settle(c,0,in,false,1,72); // open and free first
+        std::array<float,5> last{};
+        for(int i=1;i<=static_cast<int>(.3*72)+1;++i) {
+            const auto o=c.update(0,in,dt,true,P);
+            for(unsigned f=0;f<5;++f) {
+                if(i==1) assert(o.curl[f]<=.6f*(20.f/72.f)+1e-6f);
+                assert(o.curl[f]-last[f]<=.6f*20.f*static_cast<float>(dt)+1e-6f);
+                last[f]=o.curl[f];
+            }
+            assert(o.floor_active);
+        }
+        for(float v:last) assert(v>=.59f);
+    }
     {   // legacy_when_touch_unavailable: finger_wants bit-exact
         r::FingerTouchCurl c;
         for(bool held:{false,true}) for(float t:{0.f,.2f,.5f,1.f}) for(float g:{0.f,.3f,.9f,1.f}) {

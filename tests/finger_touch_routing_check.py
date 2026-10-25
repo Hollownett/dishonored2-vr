@@ -15,7 +15,23 @@ def check(probe: str, build: str, features: str) -> None:
     assert "finger_touch_curl.update(side," in b and "finger_touch_params" in b
     assert "touch_curl=touch_side && " in b and "touch_out.mapping==d2vr::rig::CurlMapping::touch" in b
     assert "const auto wants=touch_curl?touch_wants:wants_legacy;" in b
-    assert "d2vr::rig::finger_contact(*geometry,palm,shapes.data(),count,fdt,finger_ik[side],held_hand?d2vr::rig::held_curl:1.f,finger_solve_budget,&wants)" in b
+    # G4 (plan Task 9): the reach follows the grip pose blend (legacy-finger-ease: the old flip), the eased opening rides along
+    assert "d2vr::rig::finger_contact(*geometry,palm,shapes.data(),count,fdt,finger_ik[side],legacy_finger_ease?(held_hand?d2vr::rig::held_curl:1.f):reach,finger_solve_budget,&wants,ease_opening,open_lag)" in b
+    assert "const float reach=!held_hand?1.f:blending?static_cast<float>(1.+(d2vr::rig::held_curl-1.)*grip_pose_blend[side].weight(fk_t)):d2vr::rig::held_curl;" in b
+    # the blend wraps the WANTED angles and the contact clamp comes after it (ruling H7: surface contact is the last stage)
+    assert "const auto blended=grip_pose_blend[side].apply(d2vr::rig::finger_want_angles(contact,wants),fk_t);" in b
+    assert "finger_turn[side]=d2vr::rig::finger_turns_of_angles(*geometry,contact,blended);" in b
+    assert b.index("d2vr::rig::finger_contact(") < b.index("grip_pose_blend[side].apply(")
+    # the hold edge (or the seam) starts it from the drawn pose; the release edge stops it; the knob keeps v611
+    assert "(grip_pose_blend_request[side].exchange(false) || (hold_edge && !legacy_finger_ease)) && finger_drawn_valid[side]) grip_pose_blend[side].start(finger_drawn_angles[side],fk_t);" in b
+    assert "if(!held_hand && finger_was_held[side]) grip_pose_blend[side].stop();" in b
+    assert 'legacy_finger_ease=fs::exists(root/L"build"/L"legacy-finger-ease");finger_touch_params.floor_after_smoothing=legacy_finger_ease;' in probe
+    assert "finger_touch_params=*parsed;finger_touch_params.floor_after_smoothing=legacy_finger_ease;" in probe
+    assert "static void grip_pose_blend_start(unsigned side) {if(side<2) grip_pose_blend_request[side]=true;}" in probe
+    assert '\\"ease_active\\":[' in probe
+    # the hover shape seats the hover candidate (ONE accessor) as the held cylinder will be, only while nothing is measured
+    assert "static std::optional<FingerHover> hover_candidate_for_fingers(unsigned side,UINT64 now)" in probe
+    assert probe.count("hover_candidate_for_fingers(") == 2
     assert b.index("finger_touch_curl.update(") < b.index("d2vr::rig::finger_contact(")
     # a native hold (holder==side) counts as held even with no shape measured: held_curl, never a full fist
     assert "const bool native_hold=holder==side;" in probe and "const bool held_hand=holding || native_hold;" in probe
