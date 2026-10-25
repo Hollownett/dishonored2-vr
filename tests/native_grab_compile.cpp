@@ -82,6 +82,27 @@ int main() {
     assert(d2vr::grab_focus_candidate({old_target,challenger},{0,0,0},0,false,4)->entity==5);
     old_target.pose.position={.56,0,0};
     assert(!d2vr::grab_focus_candidate({old_target},{0,0,0},0,false,4)); // Beyond retention margin.
+    {   // G3 (plan Task 5): the palm picks the physical candidate. In clutter the box the palm faces wins over an overlapping box listed
+        // first that is nearer (under the knuckles): the nearest-AABB pick above (build/legacy-palm-select) takes the nearer one.
+        d2vr::PalmProbe probe;probe.palm={0,0,0};probe.forward={0,0,1};probe.direction={1,0,0};probe.valid=true;   // palm point (0,0,.015)
+        d2vr::NativeRigidBody under{},faced{};
+        under.entity=10;under.entity_id=0x10010;under.pose.position={0,0,-.1};under.bounds=d2vr::NativeGrabBounds{{-.3,-.1,-.3},{.3,.1,-.015}};
+        faced.entity=11;faced.entity_id=0x20011;faced.pose.position={.15,0,0};faced.bounds=d2vr::NativeGrabBounds{{.05,-.1,-.1},{.3,.1,.1}};
+        assert(under.bounds->maximum.x>faced.bounds->minimum.x && under.bounds->maximum.z>faced.bounds->minimum.z);   // the boxes overlap
+        const std::vector<d2vr::NativeRigidBody> clutter{under,faced};
+        assert(under.contact_distance({0,0,.015})<faced.contact_distance({0,0,.015}));
+        d2vr::GrabTuning tuning;d2vr::PalmSelection selection;d2vr::PalmPick pick;
+        const auto palm=d2vr::grab_focus_candidate(clutter,probe,selection,tuning,0,0,d2vr::grab_acquire_distance,false,100,&pick);
+        assert(palm && palm->entity==11 && pick.index && selection.current()==0x20011);
+        d2vr::PalmSelection legacy_selection;
+        const auto nearest=d2vr::grab_focus_candidate(clutter,probe,legacy_selection,tuning,0,0,d2vr::grab_acquire_distance,true);
+        assert(nearest && nearest->entity==10);   // legacy_nearest: the v611 nearest-AABB pick
+        assert(d2vr::grab_focus_candidate(clutter,probe,selection,tuning,11,0,d2vr::grab_acquire_distance)->entity==10);   // the other hand's
+        d2vr::PalmSelection invalid;d2vr::PalmProbe bad=probe;bad.valid=false;   // an invalid probe: nothing new, scoring_fallback counted
+        assert(!d2vr::grab_focus_candidate(clutter,bad,invalid,tuning,0,0,d2vr::grab_acquire_distance) && invalid.scoring_fallback()==1);
+        const d2vr::PalmTarget bone=d2vr::palm_body_target([]{d2vr::NativeRigidBody b{};b.entity_id=7;b.bone=1;b.pose.position={1,2,3};return b;}(),tuning);
+        assert(bone.kind==d2vr::PalmKind::bone && bone.priority==tuning.priority_torso && bone.id==7 && bone.minimum.x==1 && bone.maximum.z==3);
+    }
     // An inactive/unusable lane needs no owner memory query; diagnostics still
     // distinguish future/missing source age from a real zero-age publication.
     grab.publish(1,owner,hand,.2f,1,400,false,false);

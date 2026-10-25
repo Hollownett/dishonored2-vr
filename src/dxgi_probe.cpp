@@ -546,7 +546,7 @@ static void flush_grab_decisions(bool final=false) noexcept {
     try {
         static constexpr const char* gates[]={"none","occupied","deferred","inactive","pose_unusable","invalid_grip","not_gameplay","unfocused",
             "native_use","epoch_mismatch","source_missing","source_future","source_stale","owner_invalid","authored_view",
-            "awaiting_release","release_armed","native_no_candidate","native_locked","physical_reserved","physical_held","pending_release","obstruction_pending","obstruction_blocked"};
+            "awaiting_release","release_armed","native_no_candidate","native_locked","physical_reserved","physical_held","pending_release","obstruction_pending","obstruction_blocked","buffer_pending"};
         for(unsigned i=0;i<(final?256u:32u);++i) {
             const auto record=native_grab.pop_decision();if(!record)break;
             const auto& r=*record;const auto gate=static_cast<unsigned>(r.gate);
@@ -4983,12 +4983,21 @@ void prepare_head_view(void* view) noexcept {
                     hand=d2vr::to_game_pose(d2vr::camera_relative_controller(
                         {{p.position.x,p.position.y,p.position.z},{p.orientation.x,p.orientation.y,p.orientation.z,p.orientation.w}},hand_centre,head_origin.position),head_origin,anchor,1.0);
                 }
-                bool occupied{};{std::lock_guard<std::mutex> hand_lock(hand_state_mutex);
-                    occupied=hand_state_tick && GetTickCount64()-hand_state_tick<=300 && (hand_carrying_bits&(1u<<side));}
+                bool occupied{};d2vr::Vec3 grab_velocity{};const auto grab_now=GetTickCount64();
+                {std::lock_guard<std::mutex> hand_lock(hand_state_mutex);
+                    occupied=hand_state_tick && grab_now-hand_state_tick<=300 && (hand_carrying_bits&(1u<<side));
+                    if(hand_tick[side] && grab_now>=hand_tick[side] && grab_now-hand_tick[side]<=200) grab_velocity=hand_velocity[side];}
+                // G2/G3 (plan Task 5): the palm probe that ranks this hand's props and corpse bones: the same palm_probe as the native Use order
+                // (Task 3): the RAW grip pose (C9/C10) plus the palm fit, the calibrated arm reach (0.65 m uncalibrated) and the controller velocity.
+                d2vr::PalmProbe grab_palm{};
+                if(tracked) try {
+                    const double arm=avatar_fit_arm_reach[side].load(std::memory_order_relaxed);
+                    grab_palm=d2vr::palm_probe(side,hand,game_xr->palm_offset(side),arm>0?std::optional<double>{arm}:std::nullopt,grab_velocity);
+                } catch(...) {grab_palm={};}
                 // The physical lane sees a squeeze only from a full fist (grip + trigger); the grip alone is the game's Use.
                 const float squeeze=side?game_xr->controller_input.right_grip:game_xr->controller_input.left_grip;
                 native_grab.publish(side,*body,hand,(fist_hands.load()&(1u<<side)) || native_grab.holding(side)?squeeze:0.f,
-                    game_xr->pose_epoch(),GetTickCount64(),tracked,occupied,game_xr->grip_pose_tick());
+                    game_xr->pose_epoch(),grab_now,tracked,occupied,game_xr->grip_pose_tick(),nullptr,0,grab_palm);
             }
         }
         if(per_frame && controller_trace_csv.is_open()) {
@@ -6790,7 +6799,7 @@ std::string feedback_status_json() {
              <<",\"exclusion\":{\"casts\":"<<d2vr::NativeInteractionAim::clamp_exclude_casts_.load()<<",\"hits\":"<<d2vr::NativeInteractionAim::clamp_exclude_hits_.load()
              <<",\"self_hits\":"<<d2vr::NativeInteractionAim::clamp_exclude_self_hits_.load()<<",\"unmapped\":"<<d2vr::NativeInteractionAim::clamp_exclude_unmapped_.load()
              <<",\"info_zero\":"<<(d2vr::NativeInteractionAim::clamp_exclude_info_zero_.load()?"true":"false")<<'}';
-            return o.str();}() << "}" << ",\"corpse\":" << corpse_diagnostics.json() << ",\"perf\":" << [&]{std::lock_guard<std::mutex> l(perf_meter_mutex);return perf_meter.json();}() << ",\"frame_split\":" << frame_split_status_json()
+            return o.str();}() << "}"  << ",\"corpse\":" << corpse_diagnostics.json() << ",\"grab_focus\":" << native_grab.grab_focus_json(GetTickCount64()) << ",\"perf\":" << [&]{std::lock_guard<std::mutex> l(perf_meter_mutex);return perf_meter.json();}() << ",\"frame_split\":" << frame_split_status_json()
                << ",\"mono_view\":\"" << (mono_view_state.load()==1?"on":mono_view_state.load()==2?"fallback":"off") << "\",\"mono_view_frames\":" << mono_view_frames.load()
                << ",\"alternate_eye\":{\"state\":\"" << (alt_eye_state.load()==1?"on":alt_eye_state.load()==2?"fallback":"off") << "\",\"alternated\":" << alt_alternated.load()
                << ",\"paired\":" << alt_paired.load() << ",\"fallbacks\":" << alt_fallbacks.load() << '}'

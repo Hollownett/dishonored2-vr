@@ -104,8 +104,10 @@ template<class Targets> PalmPick pick_by_palm(const PalmProbe& probe,const Targe
 // Per-hand owner of the hysteresis state plus the counters.
 class PalmSelection {
 public:
-    PalmPick update(const PalmProbe& probe,const std::vector<PalmTarget>& targets,double hover_radius,std::uint64_t now_ms) {
-        PalmPick pick=pick_by_palm(probe,targets,current_,hover_radius);
+    // acquire/retain: the gates (0.45/0.55 m; a caller with a tighter acquire gate passes it, the retain stays at least 0.55 m).
+    PalmPick update(const PalmProbe& probe,const std::vector<PalmTarget>& targets,double hover_radius,std::uint64_t now_ms,
+            double acquire=grab_acquire_distance,double retain=grab_retain_distance) {
+        PalmPick pick=pick_by_palm(probe,targets,current_,hover_radius,acquire,retain);
         if(pick.fallback) {++fallback_;return pick;}
         const std::uint64_t next=pick.index?targets[*pick.index].id:0;
         if(pick.hysteresis_held) ++held_;
