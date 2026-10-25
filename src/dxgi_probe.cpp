@@ -2872,6 +2872,12 @@ static std::optional<d2vr::Vec3> hand_clamped_palm[2]{};static UINT64 hand_clamp
 static std::optional<d2vr::Vec3> hip_xr_position;static UINT64 hip_pose_tick{},hip_pose_epoch{};
 static std::atomic<float> right_hand_peak{},sword_release_speed{}; // diagnostics: peak right-hand speed (decays), hand speed at the last drop
 static bool gadget_hand_aim_enabled=false; // Track T B: installed, and build/no-hand-mine-aim absent
+static void publish_gadget_aim(const d2vr::WorldTrackedPose& left) noexcept {
+    d2vr::GadgetAimPose gadget{};
+    gadget.origin={static_cast<float>(left.position.x),static_cast<float>(left.position.y),static_cast<float>(left.position.z)};
+    gadget.forward={static_cast<float>(left.basis[0].x),static_cast<float>(left.basis[0].y),static_cast<float>(left.basis[0].z)};
+    gadget.tick=GetTickCount64();d2vr::NativeGadgetAim::publish(gadget);
+}
 static bool grenade_hand_throw_enabled=false; // Track T A: installed, and build/no-hand-grenade-throw absent
 static void publish_hand(unsigned side,const d2vr::WorldTrackedPose& drawn,const d2vr::WorldTrackedPose& raw) {
     // Throw velocity = the hand's displacement over the last ~60 ms. A per-frame difference aliases: positions arrive at the
@@ -5123,12 +5129,7 @@ void prepare_head_view(void* view) noexcept {
             if(!receipt) {native_shot_aim.clear();native_crosshair.clear();return;}
             shared_aim_ray=receipt;left=receipt->hand(); // exact float round-trip for the native launch writer
             if(!aim_for_shots) {native_shot_aim.clear();return;} // crosshair-only frame (attacking / gripping): no shot or power aim leaves the hand
-            if(gadget_hand_aim_enabled) { // Track T B: mines / spring razors / the throw preview aim from this same left-hand pose
-                d2vr::GadgetAimPose gadget{};
-                gadget.origin={static_cast<float>(left.position.x),static_cast<float>(left.position.y),static_cast<float>(left.position.z)};
-                gadget.forward={static_cast<float>(left.basis[0].x),static_cast<float>(left.basis[0].y),static_cast<float>(left.basis[0].z)};
-                gadget.tick=GetTickCount64();d2vr::NativeGadgetAim::publish(gadget);
-            }
+            if(gadget_hand_aim_enabled) publish_gadget_aim(left); // Track T B: mines / spring razors / the throw preview aim from this same left-hand pose
             if(publish_left_camera && native_left_aim_requested) native_left_aim.publish(*body,left,receipt->pose_epoch,receipt->tick,true);
             if(publish_left_camera && native_blink_aim_installed) native_blink_aim.publish(left,game_xr->pose_epoch(),GetTickCount64(),true);
             if(native_shot_aim_installed) native_shot_aim.publish(left,game_xr->pose_epoch(),GetTickCount64(),true);
@@ -10515,7 +10516,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
         const bool world_ui_disabled=d2vr::NativeWorldUi::disable();world_ui_installed=false;
         if(!world_ui_disabled) throw std::runtime_error("Native world UI scope did not restore or drain");
         restore_hud_scale();remove_glyph_hook();d2vr::GlyphSwap::disable();d2vr::SamplerLodBias::disable();
-        hand_body_probe_runner.stop();d2vr::HandBodySpikeEngine::stop();d2vr::HandBodyRuntime::stop();corpse_trace.stop();carry_trace.stop();d2vr::NativeGadgetAim::disable();gadget_hand_aim_enabled=false;d2vr::NativeGrenadeThrow::disable();grenade_hand_throw_enabled=false;d2vr::NativeHeldObject::disable();held_object_installed=false;d2vr::NativeCallTrace::disable();d2vr::NativeSimInvulnerable::disable();d2vr::NativeSwarmKillGuard::disable();
+        hand_body_probe_runner.stop();d2vr::HandBodySpikeEngine::stop();d2vr::HandBodyRuntime::stop();corpse_trace.stop();carry_trace.stop();d2vr::NativeHeldObject::disable();held_object_installed=false;d2vr::NativeGadgetAim::disable();gadget_hand_aim_enabled=false;d2vr::NativeGrenadeThrow::disable();grenade_hand_throw_enabled=false;d2vr::NativeCallTrace::disable();d2vr::NativeSimInvulnerable::disable();d2vr::NativeSwarmKillGuard::disable();
         const bool audio_disabled=native_audio_listener.disable();
         const bool left_aim_disabled=native_left_aim.disable() && native_crosshair.disable() && native_fire_seam_trace.disable() && native_shot_aim.disable() && native_blink_aim.disable() &&
             native_hud_census.disable() && native_marker_probe.disable() && d2vr::NativeHudChildDraw::disable() && d2vr::NativeWristHud::disable();
@@ -10923,7 +10924,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
         bool arm_restore_deferred=false;
         const bool arm_upload_disabled=disable_arm_upload_hook(&arm_restore_deferred);
         restore_hud_scale();remove_glyph_hook();d2vr::GlyphSwap::disable();d2vr::SamplerLodBias::disable();
-        hand_body_probe_runner.stop();d2vr::HandBodySpikeEngine::stop();d2vr::HandBodyRuntime::stop();corpse_trace.stop();carry_trace.stop();d2vr::NativeGadgetAim::disable();gadget_hand_aim_enabled=false;d2vr::NativeGrenadeThrow::disable();grenade_hand_throw_enabled=false;d2vr::NativeHeldObject::disable();held_object_installed=false;d2vr::NativeCallTrace::disable();d2vr::NativeSimInvulnerable::disable();d2vr::NativeSwarmKillGuard::disable();
+        hand_body_probe_runner.stop();d2vr::HandBodySpikeEngine::stop();d2vr::HandBodyRuntime::stop();corpse_trace.stop();carry_trace.stop();d2vr::NativeHeldObject::disable();held_object_installed=false;d2vr::NativeGadgetAim::disable();gadget_hand_aim_enabled=false;d2vr::NativeGrenadeThrow::disable();grenade_hand_throw_enabled=false;d2vr::NativeCallTrace::disable();d2vr::NativeSimInvulnerable::disable();d2vr::NativeSwarmKillGuard::disable();
         const bool audio_disabled=native_audio_listener.disable();
         const bool left_aim_disabled=native_left_aim.disable() && native_crosshair.disable() && native_fire_seam_trace.disable() && native_shot_aim.disable() &&
             native_hud_census.disable() && native_marker_probe.disable() && d2vr::NativeHudChildDraw::disable() && d2vr::NativeWristHud::disable();

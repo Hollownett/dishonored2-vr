@@ -37,7 +37,7 @@ def check(probe: str, xr: str) -> None:
     assert probe.count("render_scene_frame()") == 5, probe.count("render_scene_frame()")  # the definition + 4 sites
     # the definition and render_scene_frame(); Task 6: prepare_head_view's authored scene camera, view decision, provisional origin and
     # comfort-meter skip, and the present thread's cutscene vignette
-    assert probe.count("cutscene_scene_render()") == 4, probe.count("cutscene_scene_render()")  # definition, render_scene_frame, the per-frame latch, the vignette
+    assert probe.count("cutscene_scene_render()") == 5, probe.count("cutscene_scene_render()")  # definition, render_scene_frame, the per-frame latch, the vignette, the letterbox draw gate (Track T C3)
     assert probe.count("cutscene_gates_allowed=") == 2  # the present thread + StartProbe reset
     stereo = fn(probe, "void sample_stereo(IDXGISwapChain* chain,UINT64 number,const DXGI_SWAP_CHAIN_DESC& desc) {")
     assert "if(xr_requested && !render_scene_frame() && !cinematic_probe_keeps_stereo()) {" in stereo
@@ -131,7 +131,10 @@ def check(probe: str, xr: str) -> None:
     # the raw native buttons (skip) still pass: the controls block forwards the XR input whatever the cutscene; its pointer is GameXr's
     controls = probe[probe.index("if(controller_requested) {\n                                CpuSpan controls_span{controls_cpu_ns};"):]
     controls = controls[:controls.index("const auto chord=menu_chord.update(")]
-    assert "auto input=game_xr->controller_input;" in controls and "cutscene" not in controls
+    # Track T C2: the only cutscene-aware step in the controls block is the skip hold (A/X held 0.6 s -> held Interact, masked until released)
+    skip_start, skip_end = controls.index("// Track T C2"), controls.index("d2vr::TakedownState control_takedown{}")
+    assert "auto input=game_xr->controller_input;" in controls and "cutscene" not in (controls[:skip_start] + controls[skip_end:])
+    assert "cutscene_skip.update(skip_context,input.a,input.x," in controls
     assert "native_menu.publish(game_xr->native_menu_input,width.load(),height.load());" in controls
     # --- the knobs, live, and the status section
     # Ruling 10b: the present thread only requests a re-read (500 ms with the cinematic bit, 5 s otherwise); a worker touches the files
