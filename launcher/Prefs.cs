@@ -67,7 +67,8 @@ public sealed class Prefs
         if (edited.Crosshair != baseline.Crosshair) m.Crosshair = edited.Crosshair;
         if (edited.ScriptedRecenter != baseline.ScriptedRecenter) m.ScriptedRecenter = edited.ScriptedRecenter;
         if (edited.CutsceneMode != baseline.CutsceneMode) m.CutsceneMode = edited.CutsceneMode;
-        if (edited.TemporalAa != baseline.TemporalAa) { m.TemporalAa = edited.TemporalAa; m.AaChosen = 1; }
+        if (edited.TemporalAa != baseline.TemporalAa) m.TemporalAa = edited.TemporalAa;
+        m.AaChosen = 1; // v613: any launcher save records the AA row it shows as the player's choice (the game's one-time DLAA default must not override it); an in-game change later still wins and the launcher mirrors it
         return m;
     }
 

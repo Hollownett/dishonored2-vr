@@ -37,3 +37,10 @@ Placement needs a gadget equipped: check `placement[0]` in the sim status.
 The tuning constants (gain 1.5, cap 17 m/s, window 0.10 s, max age 1.5 s, teleport 12 m/s, spawn offset 0x20) come from the measurements
 summarised in `.superpowers/sdd/2026-10-25-small-objects-fingers/mines-grenades-research.md`: the documented values of an external
 GPL-3.0 mod. Only those numbers and the facts about the game were used; no code was copied. They are unvalidated on a headset.
+
+## v613 (headset: "mines same crosshair misplacement")
+The crosshair is drawn on the left-hand ray whenever a hand pose is valid, but the hook used to re-aim BOTH sensors only while the left
+trigger was held, so a mine's placement ghost sat on the head ray until the trigger was pressed. The pose now carries a `trigger` flag:
+the Placement sensor (enable byte +0x38 clear when no mine is equipped, so idle calls are still untouched) uses the fresh pose without the
+trigger; ThrowHit (enable byte set on most frames) still needs it. `gadget_aim_wanted` in `src/gadget_aim.hpp`, test `tests/gadget_aim_check.cpp`.
+Headset-unverified: the sim has no mine save.

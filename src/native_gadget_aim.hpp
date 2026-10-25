@@ -76,7 +76,7 @@ private:
         unsigned char enabled{};   // the sensor's own enable byte (+0x38, tested first by both bodies): idle sensors run every frame and are left alone
         if(!rd(reinterpret_cast<std::uintptr_t>(sensor)+0x38,enabled) || !enabled) return original_[which](sensor);
         GadgetAimPose pose{};{std::lock_guard<std::mutex> l(mutex_);pose=pose_;}
-        if(!gadget_aim_fresh(pose,GetTickCount64())) {++stale;return original_[which](sensor);}
+        if(!gadget_aim_fresh(pose,GetTickCount64()) || !gadget_aim_wanted(pose,placement)) {++stale;return original_[which](sensor);}
         float *start{},*dir{},*origin{};
         resolve(reinterpret_cast<std::uintptr_t>(sensor),placement,start,dir,origin);
         if(!start || !dir || (!placement && !origin)) {++bad_pointer;return original_[which](sensor);}
