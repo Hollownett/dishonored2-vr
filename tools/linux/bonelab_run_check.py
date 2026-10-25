@@ -157,6 +157,10 @@ def scripted_entries(rows):
             if aim is not None:
                 before = rows[aim - 1]["offset_deg"] if aim > 0 else 0.0
                 scene["delta"] = _wrap_deg(rows[aim]["hmd_rel_deg"] - before)
+                # The turn the view makes (4c7d222): the offset starts at wrap(heading - body before entry), so the first authored view is the
+                # last gameplay view, and eases to the gaze; only target - start is turned. Heading on the gaze (a mantle) = no turn.
+                start = _wrap_deg(rows[aim]["heading_deg"] - rows[i - 1]["body_deg"]) if i > 0 else 0.0
+                scene["turn"] = _wrap_deg(scene["delta"] - start)
             scenes.append(scene)
             i = j + 1
         else:
@@ -169,7 +173,8 @@ def check_authored(statuses):
     - Residual: an entry whose delta |hmd_rel| >= 10 deg ends its ease (0.4 s after the aim, + 0.05 s for the frame-capped clock) with
       |rel_composed - (the head's own yaw change since the aim)| < 3 deg.
     - Steps: around entry (the row before it through the ease end) and exit (the last authored row through 0.5 s after), no frame-to-frame view_yaw
-      step exceeds the ease's peak rate (1.5 x |delta| / 0.4 s, x the frame's dt) plus the head's own yaw change that frame (hmd_rel change
+      step exceeds the ease's peak rate (1.5 x |turn| / 0.4 s, x the frame's dt; turn = delta - wrap(heading - body before entry), the part the
+      view really turns since 4c7d222 starts the offset at the last gameplay view; 0 inside the 10 deg dead zone) plus the head's own yaw change that frame (hmd_rel change
       plus that frame's fold), plus 1 deg. Between two
       authored rows the native camera's own heading change is the scene's animation, not the recenter's, so it is taken out of the step.
     - At least one entry observed. INFO per entry: state_index, delta, residual."""
@@ -188,7 +193,7 @@ def check_authored(statuses):
                 out.append(("INFO", f"{name}: no heading in the scene (no authored view drawn, no aim)"))
                 continue
             aim = rows[sc["aim"]]
-            delta = sc["delta"]
+            delta, turn = sc["delta"], sc["turn"]
             end_t = aim["t"] + AUTHORED_EASE_S + AUTHORED_EASE_SLACK_S
             end = next((m for m in range(sc["aim"], sc["last"] + 1) if rows[m]["t"] >= end_t), None)
             residual = None
@@ -198,14 +203,14 @@ def check_authored(statuses):
             dur = rows[sc["last"]]["t"] - rows[sc["entry"]]["t"]
             res_text = "n/a (scene ended before the ease)" if residual is None else f"{residual:+.2f} deg"
             off_text = "n/a" if end is None else f"{rows[end]['offset_deg']:+.2f} deg"
-            out.append(("INFO", f"{name}: delta {delta:+.2f} deg, aim +{aim['t'] - rows[sc['entry']]['t']:.3f} s, scene {dur:.2f} s, "
+            out.append(("INFO", f"{name}: delta {delta:+.2f} deg, turn {turn:+.2f} deg, aim +{aim['t'] - rows[sc['entry']]['t']:.3f} s, scene {dur:.2f} s, "
                                 f"residual {res_text}, offset at the ease end {off_text}"))
             if abs(delta) >= AUTHORED_DEAD_ZONE_DEG:
                 if residual is None:
                     out.append(("INFO", f"{name}: residual not judged: the scene ended {aim['t'] + AUTHORED_EASE_S - rows[sc['last']]['t']:.2f} s before the ease"))
                 else:
                     out.append(("PASS" if abs(residual) < AUTHORED_RESIDUAL_DEG else "FAIL", f"{name}: |residual| < {AUTHORED_RESIDUAL_DEG:g} deg at the ease end (got {residual:+.2f})"))
-            peak = 1.5 * abs(delta) / AUTHORED_EASE_S if abs(delta) >= AUTHORED_DEAD_ZONE_DEG else 0.0
+            peak = 1.5 * abs(turn) / AUTHORED_EASE_S if abs(turn) >= AUTHORED_DEAD_ZONE_DEG else 0.0  # no ease = no allowance beyond head + 1 deg
             stop = end if end is not None else sc["last"]
             windows = [("entry", max(sc["entry"] - 1, 0), stop)]
             if sc["exit"] is not None:

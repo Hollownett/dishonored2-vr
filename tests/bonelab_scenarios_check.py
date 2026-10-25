@@ -523,11 +523,16 @@ def bad_latch():
 
 
 
-def scripted_trace(heading_offset=0.0, residual=0.0, exit_jump=0.0, hmd=40.0, body=-130.0, end_s=3.0, fps=90):
-    """A scripted-view.csv fixture: gameplay, then a scene from t 1.0 to end_s with the head held at `hmd` deg; the offset eases to
-    the delta over 0.4 s (smoothstep) and stops `residual` short. heading = body + heading_offset (0: the spec's case, a continuous entry)."""
+def scripted_trace(heading_offset=0.0, residual=0.0, exit_jump=0.0, hmd=40.0, body=-130.0, end_s=3.0, fps=90, old_start=False, entry_jump=0.0):
+    """A scripted-view.csv fixture: gameplay, then a scene from t 1.0 to end_s with the head held at `hmd` deg. heading = body + heading_offset.
+    As 4c7d222: the offset starts at heading_offset (the last gameplay view) and eases (0.4 s smoothstep) to the gaze, stopping `residual`
+    short; inside the 10 deg dead zone it holds at the start. old_start: the pre-4c7d222 helper (start 0, a one-frame jump of heading_offset).
+    entry_jump: an extra view jump on the entry frame only."""
     rows, dt = [], 1.0 / fps
-    ease = lambda t: (hmd - residual) * (lambda u: u * u * (3 - 2 * u))(min(max((t - 1.0) / 0.4, 0.0), 1.0))  # noqa: E731
+    start = 0.0 if old_start else heading_offset
+    target = hmd - residual
+    turns = abs(target - start) >= 10.0
+    ease = lambda t: start + ((target - start) * (lambda u: u * u * (3 - 2 * u))(min(max((t - 1.0) / 0.4, 0.0), 1.0)) if turns else 0.0)  # noqa: E731
     last = max(i * dt for i in range(int(4.0 * fps)) if 1.0 <= i * dt < end_s)
     fold = ease(last) - heading_offset  # the exit folds offset + wrap(body - heading) into the head origin
     for i in range(int(4.0 * fps)):
@@ -537,7 +542,7 @@ def scripted_trace(heading_offset=0.0, residual=0.0, exit_jump=0.0, hmd=40.0, bo
         heading = body + heading_offset if auth else float("nan")
         head = hmd - fold if t >= end_s else hmd
         rel = hmd - off if auth else head
-        view = heading + rel if auth else body + head + (exit_jump if t >= end_s else 0.0)
+        view = heading + rel + (entry_jump if 1.0 <= t < 1.0 + dt else 0.0) if auth else body + head + (exit_jump if t >= end_s else 0.0)
         rows.append({"t": 100.0 + t, "authored": 1.0 if auth else 0.0, "state_index": 8.0 if auth else -1.0, "hmd_rel_deg": head,
                      "rel_composed_deg": rel, "heading_deg": heading, "offset_deg": off, "fold_deg": fold if end_s <= t < end_s + dt else 0.0, "body_deg": body, "view_yaw_deg": view})
     return rows
@@ -564,7 +569,14 @@ def authored_turn_checks():
     assert any(v == "INFO" and "state_index 8 Mantle" in t and "delta +40.00" in t for v, t in ok), ok
     assert any(v == "FAIL" and "residual" in t for v, t in judge(scripted_trace(residual=5.0)))
     assert not any(v == "FAIL" for v, _ in judge(scripted_trace(residual=2.0)))
-    assert any(v == "FAIL" and "entry view_yaw" in t for v, t in judge(scripted_trace(heading_offset=40.0)))  # the native heading on the gaze: a 40 deg entry jump
+    assert any(v == "FAIL" and "entry view_yaw" in t for v, t in judge(scripted_trace(heading_offset=40.0, old_start=True)))  # pre-4c7d222: a 40 deg entry jump
+    gaze = judge(scripted_trace(heading_offset=40.0))  # the mantle in the sim: native heading on the gaze, so no turn is needed
+    assert not any(v == "FAIL" for v, _ in gaze) and any("turn +0.00" in t for _, t in gaze), gaze
+    for fps in (30, 72, 90):  # a real one-frame jump over 3.1 deg fails whatever the frame rate, eased or not
+        assert any(v == "FAIL" and "entry view_yaw" in t for v, t in judge(scripted_trace(heading_offset=40.0, entry_jump=3.2, fps=fps))), fps
+        assert any(v == "FAIL" and "entry view_yaw" in t for v, t in judge(scripted_trace(heading_offset=10.0, entry_jump=3.2 + 1.5 * 30 / 0.4 / fps, fps=fps))), fps
+        assert not any(v == "FAIL" for v, _ in judge(scripted_trace(heading_offset=10.0, fps=fps))), fps
+    assert any(v == "FAIL" and "residual" in t for v, t in judge(scripted_trace(residual=3.0)))  # a residual of exactly 3 deg fails
     assert any(v == "FAIL" and "exit view_yaw" in t for v, t in judge(scripted_trace(exit_jump=10.0)))
     short = judge(scripted_trace(end_s=1.3))  # a scene shorter than the ease: residual not judged, still observed
     assert not any(v == "FAIL" for v, _ in short) and any("not judged" in t for _, t in short), short
