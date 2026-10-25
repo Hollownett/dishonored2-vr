@@ -21,7 +21,7 @@ namespace d2vr {
 // Layout is fixed at 640x560 (game_xr.hpp owns the swapchain size); row i occupies
 // y=settings_row_top+settings_row_pitch*i, height settings_row_height (vr_settings.hpp constants) - vr_settings.hpp pointer hit-testing uses the same rows.
 inline std::vector<unsigned char> settings_panel_image(const VrSettings& settings,double effective,
-    unsigned width,unsigned height,std::optional<PanelPointer> pointer) {
+    unsigned width,unsigned height,std::optional<PanelPointer> pointer,int* help_overflow=nullptr) {
     constexpr int w=640,h=560,S=3,W=w*S,H=h*S;
     struct Bitmap {
         HDC dc{};HBITMAP bitmap{};HGDIOBJ previous{};void* bits{};
@@ -87,6 +87,12 @@ inline std::vector<unsigned char> settings_panel_image(const VrSettings& setting
         RECT rect{left*S,top*S,right*S,bottom*S};DrawTextW(dc,value.c_str(),-1,&rect,flags);
         SelectObject(dc,previous);DeleteObject(font);
     };
+    // Height in px (of the 640x560 panel) the wrapped text needs in a column from `left` to `right`.
+    const auto measure=[&](const std::wstring& value,int left,int right,int size) {
+        auto font=CreateFontW(-size*S,0,0,0,FW_NORMAL,TRUE,FALSE,FALSE,DEFAULT_CHARSET,OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,ANTIALIASED_QUALITY,DEFAULT_PITCH,serif);
+        auto previous=SelectObject(dc,font);RECT rect{left*S,0,right*S,0};DrawTextW(dc,value.c_str(),-1,&rect,DT_LEFT|DT_TOP|DT_WORDBREAK|DT_CALCRECT);
+        SelectObject(dc,previous);DeleteObject(font);return (rect.bottom-rect.top+S-1)/S;
+    };
     const COLORREF white=rgb(236,241,245),muted=rgb(160,168,184),cyan=rgb(93,211,233),ink=rgb(24,26,36);
     // Faint diagonal hairlines and glass shards, as on the native menu ground.
     if(!ink_panel) for(const auto& l:{std::array<int,4>{0,150,260,0},{0,330,300,110},{380,560,640,300},{470,0,640,120},{250,560,420,420},{560,560,640,470},{0,470,70,380}})
@@ -132,7 +138,7 @@ inline std::vector<unsigned char> settings_panel_image(const VrSettings& setting
     const std::array<Row,settings_row_count> rows{{
         {L"Resolution",scale.str(),(settings.requested()-.5)/1.5,L"Sets how many pixels each eye renders. Higher is sharper but slower; the mod caps it to what the GPU can hold. Now "+size.str()+L"."},
         split(settings.temporal_aa_text(),-1,settings.dlss_available()?
-            L"Smooths shimmering edges over time. Game TAA is the original; FSR Native and DLAA use full resolution; Quality and Balanced render fewer pixels and upscale. DLAA and DLSS Quality are powered by NVIDIA DLSS. The label shows the active backend.":
+            L"Smooths shimmering edges over time. Game TAA is the original; FSR Native and DLAA use full resolution; Quality and Balanced render fewer pixels and upscale. DLAA and DLSS Quality use NVIDIA DLSS. The label shows the active backend.":
             L"Smooths shimmering edges over time. Game TAA is the original; FSR Native uses full resolution; Quality and Balanced render fewer pixels and upscale. The label shows the active backend."),
         {L"Edge anti-aliasing",settings.antialiasing()?L"SMAA Ultra":L"Native only",-1,L"SMAA Ultra cleans up jagged edges that the temporal pass misses. Native only keeps the game's own edge handling."},
         split(settings.mirror_text(),-1,L"Chooses what the desktop monitor mirrors: both eyes side by side, one eye alone, or off (the fastest). It does not change the headset image."),
@@ -283,7 +289,7 @@ inline std::vector<unsigned char> settings_panel_image(const VrSettings& setting
             }
             text(r.name,34,top,262,bot,17,label,0,DT_LEFT|DT_VCENTER|DT_SINGLELINE);
             const COLORREF arrow=sel?rgb(246,248,248):rgb(176,180,192),edge=sel?rgb(50,52,64):rgb(70,72,86);
-            const int cy=top+14;
+            const int cy=top+13;
             const COLORREF value_colour=sel && frame_art?ink:white; // the game's frame is open: dark ink on the brush stroke
             if(arrow_l && arrow_r) {const std::uint32_t t=sel?0x181a24u:0xffffffu; // dark ink on the brush stroke
                 put(arrow_l,270,cy-10,284,cy+10,1,true,t);put(arrow_r,602,cy-10,616,cy+10,1,true,t);}
@@ -315,6 +321,7 @@ inline std::vector<unsigned char> settings_panel_image(const VrSettings& setting
         const auto& cur=rows[static_cast<std::size_t>(std::min(selected,settings_row_count-1))];
         text(cur.name,24,pt+2,616,pt+30,22,rgb(220,224,232),1);
         if(divider) put(divider,170,pt+24,470,pt+34,.9);else line(180,pt+28,460,pt+28,.7,rgb(70,74,92));
+        if(help_overflow) {*help_overflow=0;for(const auto& r:rows) if(measure(r.help,36,604,13)>pb-2-(pt+31)) ++*help_overflow;} // test hook: rows whose help does not fit the plate
         text(cur.help,36,pt+31,604,pb-2,13,rgb(176,181,196),0,DT_LEFT|DT_TOP|DT_WORDBREAK);
         text(L"In play: hold Menu for Journal; Menu + right stick for shortcuts",20,settings_footer_top+2,420,settings_footer_top+settings_footer_height,12,muted,0,DT_LEFT|DT_VCENTER|DT_SINGLELINE);
         footer(true);

@@ -11,7 +11,7 @@ void require(bool value,const char* message) {if(!value) throw std::runtime_erro
 int main() {
     try {
         using namespace d2vr;
-        const auto rowv=[](int row) {return (settings_row_top+settings_row_pitch*row+14)/560.;}; // middle of settings row `row`
+        const auto rowv=[](int row) {return (settings_row_top+settings_row_pitch*row+13)/560.;}; // middle of settings row `row`
         {
             VrSettings backend;
             backend.initialize(1,true,{},MirrorMode::both_eyes,.5,6);
@@ -335,6 +335,11 @@ int main() {
             require(crosshair_a.crosshair && *crosshair_a.crosshair==crosshair_before && rows.crosshair()==crosshair_before,"A did not toggle the crosshair");
             require(settings_row_top+settings_row_pitch*(settings_row_count-1)+settings_row_height<settings_plate_top,"Last row overlaps the plate");
             require(settings_plate_top+settings_plate_height<=settings_footer_top && settings_footer_top+settings_footer_height<=560,"Plate/footer layout leaves the bitmap or overlaps");
+            for(const bool dlss_offered:{false,true}) {   // every row's description fits the plate's text rect (three 13 px lines), with the longest resolution note
+                VrSettings fit;fit.initialize(1.5,true,{TurnControl::Mode::smooth,45,120},MirrorMode::both_eyes,.5,dlss_offered?8:6);fit.dlss_available(dlss_offered);fit.upscaler_generation(dlss_offered?5:3);
+                int overflow=-1;settings_panel_image(fit,1.23,3722,3850,{},&overflow);
+                require(overflow==0,"A settings row description does not fit the description plate");
+            }
             press(0,-1);press(0,-1);   // turning (8), then the scripted-recenter row (9)
             require(rows.scripted_recenter(),"scripted_recenter must default on");
             const auto recenter_stick=press(1,0);
@@ -353,11 +358,19 @@ int main() {
             char dump[512]{};
             if(GetEnvironmentVariableA("D2VR_PANEL_DUMP",dump,sizeof dump)>0) {   // optional: raw RGBA (640x560) of the recenter, cutscene and close rows for visual review
                 const auto save=[&](const char* name) {std::ofstream o(std::string(dump)+"/panel-"+name+".rgba",std::ios::binary);const auto img=settings_panel_image(rows,1.2,3722,3850,{});o.write(reinterpret_cast<const char*>(img.data()),static_cast<std::streamsize>(img.size()));};
+                for(const bool dlss_offered:{false,true}) for(const unsigned row:{0u,1u}) {   // resolution and anti-aliasing rows, both DLSS variants
+                    VrSettings v;ControllerInput c{};c.active=true;v.initialize(1.5,true,{TurnControl::Mode::snap,45,90},MirrorMode::both_eyes,.5,dlss_offered?8:6);
+                    v.dlss_available(dlss_offered);v.upscaler_generation(dlss_offered?5:3);
+                    v.update(c,false,true);c.y=true;v.update(c,false,true);c.y=false;v.update(c,false,true);
+                    if(row) {c.move_y=-1;v.update(c,false,true);c.move_y=0;v.update(c,false,true);}
+                    const auto img=settings_panel_image(v,1.23,3722,3850,{});
+                    std::ofstream o(std::string(dump)+(row?"/panel-aa-":"/panel-resolution-")+(dlss_offered?"dlss":"nodlss")+".rgba",std::ios::binary);o.write(reinterpret_cast<const char*>(img.data()),static_cast<std::streamsize>(img.size()));
+                }
                 save("cutscene");press(0,1);save("recenter");press(0,-1);press(0,-1);press(0,-1);save("close");press(0,1);press(0,1);
             }
             const auto rows_image=settings_panel_image(rows,1.2,3722,3850,{});
             for(unsigned row=0;row<settings_row_count;++row) {   // every row bar sits inside the bitmap, above the description plate, drawn dark or as the pale highlight
-                const unsigned y=settings_row_top+settings_row_pitch*row+14;
+                const unsigned y=settings_row_top+settings_row_pitch*row+13;
                 require(y+settings_row_height/2<settings_plate_top && settings_row_top+settings_row_pitch*(settings_row_count-1)+settings_row_height<=560,"A settings row bar reaches the description plate");
                 const auto shade=pixel(rows_image,24,y,0);
                 require(shade<60 || shade>150,"A settings row fell outside the panel bitmap");

@@ -24,11 +24,11 @@ inline std::optional<PanelPointer> panel_pointer(const TrackedPose& aim,const Tr
     return p.u>=0 && p.u<=1 && p.v>=0 && p.v<=1?std::optional<PanelPointer>(p):std::nullopt;
 }
 // Settings panel rows (settings_panel_image.hpp draws them, the pointer hit test reads them): 640x560 bitmap, row i at settings_row_top+settings_row_pitch*i.
-// 13 rows end at y=451. Below them: the description plate (settings_plate_top, settings_plate_height, help text from +31 to the plate bottom: two lines of
-// 13 px) and then the footer band (key boxes B / A, the "In play" hint) at settings_footer_top, settings_footer_height tall. The plate bottom is
+// 13 rows end at y=425. Below them: the description plate (settings_plate_top, settings_plate_height, help text from +31 to 2 px above the plate bottom: three lines of
+// 13 px, checked by vr_settings_check for every row) and then the footer band (key boxes B / A, the "In play" hint) at settings_footer_top, settings_footer_height tall. The plate bottom is
 // 524, the footer top 528 and its bottom 558, all inside the 560 px bitmap.
-constexpr int settings_plate_top=456,settings_plate_height=68,settings_footer_top=528,settings_footer_height=30;
-constexpr int settings_row_top=64,settings_row_pitch=30,settings_row_height=27,settings_row_count=13;
+constexpr int settings_plate_top=430,settings_plate_height=94,settings_footer_top=528,settings_footer_height=30;
+constexpr int settings_row_top=64,settings_row_pitch=28,settings_row_height=25,settings_row_count=13;
 class VrSettings {
     bool previous_y_{},previous_a_{},previous_b_{},previous_x_{},previous_trigger_{},previous_left_trigger_{},stick_held_{};
     bool controls_valid_{};
