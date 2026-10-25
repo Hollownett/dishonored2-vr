@@ -18,12 +18,23 @@ def check(probe: str, vignette: str, action: str) -> None:
     assert "const bool scripted_view_live=scripted_recenter_enabled && !legacy_authored_camera;" in block
     guard = block[:block.index("scripted_recenter.update(")]
     guard = guard[guard.rindex("if(scripted_view_live"):]
-    assert guard.startswith("if(scripted_view_live && game_logic_mask()==2 && (!action_camera_alignment_enabled || action_camera_step.advance)) {")
+    assert guard.startswith("if(scripted_view_live && (scripted_logic || scripted_exit) && (!action_camera_alignment_enabled || action_camera_step.advance)) {")
+    assert "const bool scripted_logic=game_logic_mask()==2;" in block
+    # fix 2: only the authored -> not-authored transition (the fold) steps off logic 2; entry/aim and the clock stay gated
+    assert "const bool scripted_exit=scripted_was_authored && !authored_camera;" in block
+    assert "scripted_was_authored=authored_camera;" in block[block.index("if(scripted_view_live && (scripted_logic"):]
+    # fix 1: prev_t advances on every per-frame pass (before the gate), one pass credits at most 1/30 s, and only on logic 2
+    clock = block.index("const double scripted_dt=comfort_t-scripted_prev_t;scripted_prev_t=comfort_t;")
+    credit = block.index("const double scripted_credit=scripted_logic && scripted_dt>0?std::fmin(scripted_dt,1./30):0.;scripted_clock+=scripted_credit;")
+    assert clock < credit < block.index("if(scripted_view_live && (scripted_logic")
+    assert block.count("scripted_clock+=") == 1 and block.count("scripted_prev_t=") == 1
     assert "else if(!scripted_view_live) {scripted_recenter.reset();scripted_offset_now=0;" in block
     assert block.count("scripted_offset_now=0") == 1, "only the bypass zeroes the offset; a paused frame keeps it"
     # the inputs: HMD yaw against the composed origin, this frame's heading and snaps, the identity epoch, the levelled body yaw
     assert "const double hmd_rel=d2vr::tracked_yaw(centre_pose.orientation,head_origin.orientation);" in block
     assert "const double rel_composed=scripted_wrap(hmd_rel-scripted_offset_now);" in block
+    # fix 3: no heading (no authored view drawn) = no aim, so an unseen scene accrues and folds nothing
+    assert "scripted_recenter.update({scripted_clock,authored_camera,heading_now && std::isfinite(rel_composed)?std::optional<double>(rel_composed):std::nullopt," in block
     assert "scripted_recenter.update({scripted_clock,authored_camera," in block  # live-frame clock: a pause does not finish the ease
     assert "authored_heading.snaps()" in guard + block[block.index("scripted_recenter.update("):]
     assert "scripted_recenter_epoch(game_xr->reference_epoch(),body->player,body->camera,body->camera_identity.generation)" in block

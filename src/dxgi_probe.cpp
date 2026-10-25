@@ -4577,11 +4577,20 @@ void prepare_head_view(void* view) noexcept {
             const bool comfort_turning=native_turning_requested && comfort_t-comfort_turn_t<.15;
             if(!legacy_authored_camera && (!action_camera_alignment_enabled || action_camera_step.advance)) {authored_heading_now=authored_heading.update(source_anchor,authored_camera,action_camera_alignment_enabled?action_camera_step.history_epoch:head_pose_epoch);authored_heading_frame=frames.load();}
             // G1 scripted moments: one step per displayed gameplay frame, right after the heading it reads. A paused or menu frame (logic != 2)
-            // takes no step and keeps the offset. Every fold (the exit fold and the residual deltas after it) turns HeadCalibration's origin
-            // HERE, before anything below reads head_origin: the gameplay view, the meter, the hands and eye 2 (its own get() returns the
-            // turned origin) all see it on the fold frame itself, so the frame-to-frame view yaw has no one-frame jump.
+            // takes no step and keeps the offset, EXCEPT the authored -> not-authored transition: the exit fold runs whatever the logic, so a
+            // scene that ends under a menu is not shown unfolded and folded later (a double jump). Every fold (the exit fold and the residual
+            // deltas after it) turns HeadCalibration's origin HERE, before anything below reads head_origin: the gameplay view, the meter, the
+            // hands and eye 2 (its own get() returns the turned origin) all see it on the fold frame itself, so the view yaw has no one-frame jump.
             const bool scripted_view_live=scripted_recenter_enabled && !legacy_authored_camera;
-            if(scripted_view_live && game_logic_mask()==2 && (!action_camera_alignment_enabled || action_camera_step.advance)) {
+            const bool scripted_logic=game_logic_mask()==2;
+            // The helper's clock: prev_t advances on EVERY per-frame pass (skipped ones too) and one pass credits at most 1/30 s, so neither a
+            // pause nor a stall is ever credited to the ease at once; only live gameplay frames (logic 2) advance it.
+            static double scripted_prev_t{},scripted_clock{};static bool scripted_was_authored{};
+            const double scripted_dt=comfort_t-scripted_prev_t;scripted_prev_t=comfort_t;
+            const double scripted_credit=scripted_logic && scripted_dt>0?std::fmin(scripted_dt,1./30):0.;scripted_clock+=scripted_credit;
+            const bool scripted_exit=scripted_was_authored && !authored_camera; // the fold step, allowed off logic 2
+            if(scripted_view_live && (scripted_logic || scripted_exit) && (!action_camera_alignment_enabled || action_camera_step.advance)) {
+                scripted_was_authored=authored_camera;
                 constexpr double scripted_pi=3.14159265358979323846,to_deg=180/scripted_pi;
                 const auto scripted_wrap=[&](double a) {return std::remainder(a,2*scripted_pi);};
                 const double scripted_body_yaw=std::atan2(static_cast<double>(anchor.basis[1]),static_cast<double>(anchor.basis[0])); // the levelled anchor yaw the meter gets
@@ -4589,16 +4598,14 @@ void prepare_head_view(void* view) noexcept {
                 const double rel_composed=scripted_wrap(hmd_rel-scripted_offset_now); // the gaze against the composed origin: 0 = on the action
                 const auto heading_now=authored_heading_now; // advanced just above, under a superset of this guard: this frame's heading
                 const double previous_offset=scripted_offset_now;
-                static double scripted_prev_t{},scripted_clock{}; // the helper's clock counts live gameplay frames only: a pause mid-ease resumes the ease, not snaps to its end
-                const double scripted_dt=comfort_t-scripted_prev_t;scripted_prev_t=comfort_t;
-                const bool scripted_step=scripted_dt>0 && scripted_dt<=.25;if(scripted_step) scripted_clock+=scripted_dt;
-                const auto scripted=scripted_recenter.update({scripted_clock,authored_camera,std::isfinite(rel_composed)?std::optional<double>(rel_composed):std::nullopt,
+                // no heading this frame = no authored view was drawn: no aim, so no offset accrues (and none folds) for a scene the player never saw
+                const auto scripted=scripted_recenter.update({scripted_clock,authored_camera,heading_now && std::isfinite(rel_composed)?std::optional<double>(rel_composed):std::nullopt,
                     heading_now,authored_heading.snaps(),scripted_recenter_epoch(game_xr->reference_epoch(),body->player,body->camera,body->camera_identity.generation),
                     authored_camera || !std::isfinite(scripted_body_yaw)?std::nullopt:std::optional<double>(scripted_body_yaw),false});
                 scripted_offset_now=scripted.offset_rad;
                 if(scripted.fold_rad) {head_calibration.rotate_origin(*scripted.fold_rad);
                     if(const auto folded=head_calibration.get(centre_pose,game_xr->reference_epoch(),body->player,body->camera,body->camera_identity.generation,true)) head_origin=*folded;}
-                scripted_ease_rate_rad_s=static_cast<float>(scripted.easing && scripted_step?std::fabs(scripted.offset_rad-previous_offset)/scripted_dt:0.);
+                scripted_ease_rate_rad_s=static_cast<float>(scripted.easing && scripted_credit>0?std::fabs(scripted.offset_rad-previous_offset)/scripted_credit:0.);
                 scripted_ease_tick=scripted.easing?GetTickCount64():0;
                 {std::lock_guard<std::mutex> status_lock(comfort_mutex);auto& status=scripted_view_status;
                  if(scripted.entries>status.entries) status.last_state_index=action.state_index; // the state index at entry
@@ -4614,7 +4621,7 @@ void prepare_head_view(void* view) noexcept {
                         << ',' << scripted_body_yaw*to_deg << ',' << scripted_wrap(view_base+rel_after)*to_deg << '\n';
                     if(++scripted_view_rows%64==0) scripted_view_csv.flush();
                 }
-            } else if(!scripted_view_live) {scripted_recenter.reset();scripted_offset_now=0;scripted_ease_tick=0;scripted_ease_rate_rad_s=0.f;}
+            } else if(!scripted_view_live) {scripted_recenter.reset();scripted_offset_now=0;scripted_ease_tick=0;scripted_ease_rate_rad_s=0.f;scripted_was_authored=false;}
             std::lock_guard<std::mutex> comfort_lock(comfort_mutex);
             comfort_meter.set_authored_snaps(authored_heading.snaps());comfort_meter.set_smoother_resets(anchor_smoother.resets());
             comfort_meter.feed({static_cast<double>(comfort_now.QuadPart)/static_cast<double>(comfort_freq.QuadPart),

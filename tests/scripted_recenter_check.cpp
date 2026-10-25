@@ -102,6 +102,9 @@ int main(){
      ScriptedRecenter a,b;a.update(in(0,true,kPi,1.0));b.update(in(0,true,-kPi,1.0));
      assert(near(a.update(in(1,true,0,1.0)).offset_rad,kPi) && near(b.update(in(1,true,0,1.0)).offset_rad,kPi));
      ScriptedRecenter c;c.update(in(0,true,deg(190),1.0));assert(near(c.update(in(1,true,0,1.0)).offset_rad,deg(-170)));}
+    {ScriptedRecenter r; // unseen_scene_folds_nothing: no heading, the caller passes no hmd (no view drawn), so the exit folds nothing
+     for(int i=0;i<=60;++i){auto o=r.update(in(.01*i,true,std::nullopt,std::nullopt));assert(o.offset_rad==0 && !o.easing);}
+     auto o=r.update(in(1,false,{},{},0,1,1.2));assert(!o.fold_rad && o.folds==0 && o.entries==1 && !o.residual_easing);}
     {ScriptedRecenter r; // instant_applies_full
      auto o=r.update(in(0,true,deg(50),1.0,0,1,{},true));assert(near(o.offset_rad,deg(50)) && !o.easing);}
     {ScriptedRecenter r; // reset
