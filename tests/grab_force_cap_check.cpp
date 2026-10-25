@@ -164,10 +164,23 @@ int main() {
         expect_defaults_with_error("d2vr_gt_nan.cfg","axial_n 250\nlateral_n nan\n");
         expect_defaults_with_error("d2vr_gt_novalue.cfg","axial_n 250\ntow\n");
         expect_defaults_with_error("d2vr_gt_big.cfg",std::string(5000,'#'));
+        {   // palm-selection keys: defaults, a good file, a mixed good+bad file falls back to ALL defaults
+            const GrabTuning d;
+            CHECK(d.grab_buffer_ms==150 && d.grip_alone_gate_m==.12 && d.hover_radius_m==.25 && d.priority_loot==.8 && d.priority_usable==1 &&
+                  d.priority_prop==1 && d.priority_limb==1 && d.priority_torso==1.1 && d.priority_living==1);
+            CHECK(d.priority(PalmKind::loot)==.8 && d.priority(PalmKind::bone,0)==1.1 && d.priority(PalmKind::bone,1)==1.1 &&
+                  d.priority(PalmKind::bone,2)==1 && d.priority(PalmKind::bone)==1 && d.priority(PalmKind::living)==1);
+            auto ok=load_grab_tuning(write_file("d2vr_gt_palm.cfg","grab_buffer_ms 0\nhover_radius_m .3\npriority_loot .6\npriority_torso 1.5\n"));
+            CHECK(ok.source==TuningSource::file && ok.value.grab_buffer_ms==0 && ok.value.hover_radius_m==.3 && ok.value.priority(PalmKind::loot)==.6 &&
+                  ok.value.priority(PalmKind::bone,1)==1.5 && ok.value.axial_n==300);
+            expect_defaults_with_error("d2vr_gt_palm_bad.cfg","priority_loot .6\ngrip_alone_gate_m .3\n");
+        }
         struct B {const char* k;double lo,hi;};
         const B bounds[]={{"axial_n",50,600},{"lateral_n",20,300},{"torque_nm",5,60},{"strength_scale",.5,25},{"prop_strength_scale",.5,10},
                           {"lift_fraction",0,1},{"mass_floor_kg",.1,5},{"mass_ceiling_kg",10,200},{"hand_kg",.1,20},{"dt_max",.005,.1},
-                          {"stale_dt_s",.034,1},{"catch_up_mps",.2,10},{"catch_up_ramp_mps2",.5,100}};
+                          {"stale_dt_s",.034,1},{"catch_up_mps",.2,10},{"catch_up_ramp_mps2",.5,100},
+                          {"grab_buffer_ms",0,300},{"grip_alone_gate_m",.05,.25},{"hover_radius_m",.1,.45},{"priority_loot",.5,2},{"priority_usable",.5,2},
+                          {"priority_prop",.5,2},{"priority_limb",.5,2},{"priority_torso",.5,2},{"priority_living",.5,2}};
         for(auto& b:bounds) {
             for(double v:{b.lo-(b.hi-b.lo)*.01-1e-6,b.hi+(b.hi-b.lo)*.01+1e-6}) {
                 char buf[96];std::snprintf(buf,sizeof buf,"axial_n 250\n%s %.9g\n",b.k,v);

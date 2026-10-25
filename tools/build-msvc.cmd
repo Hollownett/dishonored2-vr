@@ -507,6 +507,10 @@ cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT /Isrc tests\corpse_tow_check.
 if not "%errorlevel%"=="0" exit /b 1
 build\corpse_tow_check.exe
 if not "%errorlevel%"=="0" exit /b 1
+cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT /Isrc tests\palm_scoring_check.cpp /Fo:build\palm_scoring_check.obj /Fe:build\palm_scoring_check.exe
+if not "%errorlevel%"=="0" exit /b 1
+build\palm_scoring_check.exe
+if not "%errorlevel%"=="0" exit /b 1
 cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT /Isrc tests\aim_smoother_check.cpp /Fo:build\aim_smoother_check.obj /Fe:build\aim_smoother_check.exe
 if not "%errorlevel%"=="0" exit /b 1
 build\aim_smoother_check.exe

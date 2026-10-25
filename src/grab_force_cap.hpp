@@ -8,6 +8,7 @@
 // narrow window around it, a property of the lab model); tow is ON by default since Task 10 wired CorpseMotor.capped into limb_saturated.
 // The lab model is optimistic (point masses, a stiff written velocity, no rotation, no Havok solver) and whether this FEELS right is a headset question
 // (Tier C), not something the lab proves; catch_up_mps 1.0 ramping at catch_up_ramp_mps2 (see the lab) holds a 0.5 s hitch to 3.9 m/s (0.8 m/s drag) and 5.9 m/s (1.2 m/s drag) in the lab, against 11.9 and 16.6 with only the per-frame dt_max/dt scaling. The headset session retunes them in build/grab-tuning.cfg.
+#include "selection_policy.hpp"
 #include "tracked_pose.hpp"
 #include <algorithm>
 #include <cmath>
@@ -32,6 +33,12 @@ struct GrabTuning {double axial_n=300,lateral_n=90,torque_nm=30,strength_scale=k
     catch_up_mps=1.,      // recovery: the error-closure speed (not the hand's own feed) starts capped here ...
     catch_up_ramp_mps2=4.;   // ... and the cap rises by this per second, so recovery ends without a step (when the cap reaches the normal limit: 10 m/s linear, 4 m/s tow) or the lag is under 5 cm
     // The angular closure is capped at half the linear cap (the normal limits are 5 rad/s and 10 m/s), so it also ramps up to its normal limit with no jump.
+    // Palm selection (Task 2, G2): grab buffer, grip-alone gate, hover sphere radius and the per-kind cost priorities (lower wins).
+    double grab_buffer_ms=150,grip_alone_gate_m=.12,hover_radius_m=.25,priority_loot=.8,priority_usable=1,priority_prop=1,priority_limb=1,priority_torso=1.1,priority_living=1;
+    double priority(PalmKind kind,int bone=-1) const noexcept {
+        switch(kind) {case PalmKind::loot: return priority_loot; case PalmKind::usable: return priority_usable; case PalmKind::prop: return priority_prop;
+            case PalmKind::bone: return bone==0||bone==1?priority_torso:priority_limb; case PalmKind::living: return priority_living;}
+        return 1;}
     bool tow=true,use_measured_mass=false;   // tow ON: NativeGrab feeds plan_tow with limb_saturated from CorpseMotor.capped (Task 10); the lab judges this shipped default
     double axial_cap() const {return axial_n*strength_scale;} double lateral_cap() const {return lateral_n*strength_scale;} double torque_cap() const {return torque_nm*strength_scale;}
     GrabTuning prop_view() const noexcept {GrabTuning p=*this;p.strength_scale=prop_strength_scale;return p;}};
@@ -98,6 +105,15 @@ inline TuningLoad load_grab_tuning(const std::filesystem::path& file) noexcept {
             else if(key=="stale_dt_s") ok=ranged(t.stale_dt_s,.034,1);
             else if(key=="catch_up_mps") ok=ranged(t.catch_up_mps,.2,10);
             else if(key=="catch_up_ramp_mps2") ok=ranged(t.catch_up_ramp_mps2,.5,100);
+            else if(key=="grab_buffer_ms") ok=ranged(t.grab_buffer_ms,0,300);
+            else if(key=="grip_alone_gate_m") ok=ranged(t.grip_alone_gate_m,.05,.25);
+            else if(key=="hover_radius_m") ok=ranged(t.hover_radius_m,.1,.45);
+            else if(key=="priority_loot") ok=ranged(t.priority_loot,.5,2);
+            else if(key=="priority_usable") ok=ranged(t.priority_usable,.5,2);
+            else if(key=="priority_prop") ok=ranged(t.priority_prop,.5,2);
+            else if(key=="priority_limb") ok=ranged(t.priority_limb,.5,2);
+            else if(key=="priority_torso") ok=ranged(t.priority_torso,.5,2);
+            else if(key=="priority_living") ok=ranged(t.priority_living,.5,2);
             else if(key=="tow") {ok=v==0||v==1;if(ok) t.tow=v==1;}
             else if(key=="use_measured_mass") {ok=v==0||v==1;if(ok) t.use_measured_mass=v==1;}
             else return fail("unknown key: "+key+where);
