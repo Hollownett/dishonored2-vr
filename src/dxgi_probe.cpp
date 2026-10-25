@@ -6744,7 +6744,7 @@ std::string feedback_status_json() {
                 write_event(record.lookup);value<<",\"destruction\":";write_event(record.destruction);value<<'}';
             }
             value<<"]}}";return value.str();}()
-        << ",\"ranked_results\":" << native_interaction_aim.ranked_results() << ",\"ranking_rejected\":" << native_interaction_aim.ranking_rejected()
+        << ",\"ranked_results\":" << native_interaction_aim.ranked_results() << ",\"ranking_rejected\":" << native_interaction_aim.ranking_rejected() << ",\"palm_beam_fallbacks\":" << native_interaction_aim.palm_beam_fallbacks()
         << ",\"direct_shortcuts_filtered\":" << native_interaction_aim.direct_shortcuts_filtered()
         << ",\"occluded_scan_continued\":" << native_interaction_aim.occluded_scan_continued()
         << ",\"outcomes\":{\"incomplete\":" << query_outcomes[0] << ",\"empty\":" << query_outcomes[1] << ",\"single\":" << query_outcomes[2]

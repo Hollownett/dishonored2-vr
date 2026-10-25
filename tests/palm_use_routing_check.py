@@ -1,7 +1,7 @@
 """G1 palm-ordered native Use (hands plan Task 3): source routing of the palm probe into order_native_use_hits.
 
 Pins, in src/native_interaction_aim.hpp and src/dxgi_probe.cpp:
-- sort_body orders the hand-volume hits with the published palm probe (`scope.scope->hand.palm`), the other hand's pick, the owner's
+- after_sort (noinline, called by sort_body for the outermost native sort call only: the native sort recurses into its hooked entry) orders the hand-volume hits with the published palm probe (`scope.scope->hand.palm`), the other hand's pick, the owner's
   model bounds and the loot test, and passes the legacy flag as the last argument;
 - the legacy flag is build/legacy-palm-select OR the gaze/reach aim mode (ruling H7: gaze/reach keeps the v610 beam), and the legacy
   path gets the old inputs (the hand volume_centre and the aim ray's forward axis);
@@ -42,20 +42,31 @@ def problems(header, probe):
         if not ok:
             out.append(what)
 
-    sort = body(header, "static void sort_body(", "std::optional<bool> character_type(")
-    need(bool(sort), "sort_body found")
-    need("PalmProbe probe=scope.scope->hand.palm;" in sort, "sort_body starts from the published palm probe (scope.scope->hand.palm)")
-    need("const bool legacy=select.legacy || scope.scope->hand.reach;" in sort, "legacy = build/legacy-palm-select OR gaze/reach mode (H7)")
-    need("if(legacy) probe=legacy_beam_probe(scope.scope->hand.volume_centre,scope.scope->hand.hand.basis[0]);" in sort,
-         "the legacy path gets the v610 inputs (volume_centre, aim forward axis)")
-    call = re.search(r"order_native_use_hits\(hits\.data\(\),scope\.count,probe,scope\.preferred,scope\.other_hand,(.*?)\)\) throw", sort, re.S)
+    # fix round 1: the native sort recurses into its own hooked entry, so sort_body keeps a small frame; the re-order (its record arrays and
+    # the order call) lives in the noinline after_sort, reached only from the outermost call
+    sort_only = body(header, "static void sort_body(", "struct AfterSortScratch {")
+    need(bool(sort_only), "sort_body found, followed by the after_sort scratch")
+    need("self->sort_(data,first,last,mode);" in sort_only and
+         "if(first==0 && mode==0 && caller==self->base_+0x3b8878 && retrieved_.scope) self->after_sort(data,first,last,mode,caller);" in sort_only,
+         "sort_body: the native sort, then after_sort only for the outermost call")
+    need("NativeUseHit" not in sort_only and "order_native_use_hits" not in sort_only and "std::array" not in sort_only, "sort_body holds no record arrays")
+    need("__declspec(noinline) void after_sort(void* data,unsigned first,int last,unsigned char mode,std::uintptr_t caller) {" in header, "after_sort is noinline")
+    need("static thread_local AfterSortScratch after_sort_scratch_;" in header and
+         "inline thread_local NativeInteractionAim::AfterSortScratch NativeInteractionAim::after_sort_scratch_{};" in header, "after_sort's record arrays are thread-local")
+    sort = body(header, "__declspec(noinline) void after_sort(", "std::optional<bool> character_type(")
+    need(bool(sort), "after_sort found")
+    need("const auto use=native_use_order_probe(scope.scope->hand.palm,select.legacy,scope.scope->hand.reach,scope.scope->hand.volume_centre,scope.scope->hand.hand.basis[0]);" in sort,
+         "after_sort starts from the published palm probe (scope.scope->hand.palm); legacy = the knob OR gaze/reach (H7), with the v610 inputs")
+    need("if(use.beam_fallback) ++self->palm_beam_fallbacks_;" in sort, "an invalid palm probe falls back to the beam and is counted")
+    need('"palm_beam_fallbacks\\":" << native_interaction_aim.palm_beam_fallbacks()' in probe, "the fallback count is in the status")
+    call = re.search(r"order_native_use_hits\(hits\.data\(\),scope\.count,use\.probe,scope\.preferred,scope\.other_hand,(.*?)\)\) throw", sort, re.S)
     need(call is not None, "order_native_use_hits gets the probe, the preferred owner and the other hand's owner")
     if call:
         args = call.group(1)
         need("self->hit_owner(hit,scope.world)" in args, "owner: hit_owner")
         need("self->takeable(e)" in args, "loot: takeable")
         need("self->owner_bounds(e)" in args, "bounds: owner_bounds (model+0x1840)")
-        need(args.rstrip().endswith("select.tuning,legacy"), "tuning, then the legacy flag as the last argument")
+        need(args.rstrip().endswith("select.tuning,use.legacy"), "tuning, then the legacy flag as the last argument")
     need(len(re.findall(r"order_native_use_hits\(", header)) == 1, "one ordering call in the header")
 
     # the knob: build/legacy-palm-select -> palm_select(..., legacy) -> select.legacy
@@ -103,8 +114,12 @@ def main():
     mutations = {
         "drawn hands feed the probes": (header, probe.replace("d2vr::palm_probe(side,*grip_poses[side],", "d2vr::palm_probe(side,hands.grips[side],", 1)),
         "knob ignored": (header, probe.replace('fs::exists(root/L"build"/L"legacy-palm-select")', "false", 1)),
-        "reach mode loses the old beam": (header.replace("const bool legacy=select.legacy || scope.scope->hand.reach;", "const bool legacy=select.legacy;", 1), probe),
-        "volume centre instead of the palm": (header.replace("PalmProbe probe=scope.scope->hand.palm;", "PalmProbe probe=legacy_beam_probe(scope.scope->hand.volume_centre,{});", 1), probe),
+        "reach mode loses the old beam": (header.replace("select.legacy,scope.scope->hand.reach,", "select.legacy,false,", 1), probe),
+        "volume centre instead of the palm": (header.replace("native_use_order_probe(scope.scope->hand.palm,", "native_use_order_probe(legacy_beam_probe(scope.scope->hand.volume_centre,{}),", 1), probe),
+        "fallback not counted": (header.replace("if(use.beam_fallback) ++self->palm_beam_fallbacks_;", "", 1), probe),
+        "after_sort inlinable": (header.replace("__declspec(noinline) void after_sort(", "void after_sort(", 1), probe),
+        "records back on the recursion frame": (header.replace("self->sort_(data,first,last,mode); // Native sort runs once, including recursion.\n",
+                                                                "self->sort_(data,first,last,mode); // Native sort runs once, including recursion.\n        std::array<NativeUseHit,64> spill{};(void)spill;\n", 1), probe),
         "occupancy gate changed": (header, probe.replace("&& !(physical_grab_requested && native_grab.holding(1)) && !holding_object}", "&& !holding_object}", 1)),
         "other hand dropped": (header.replace("scope.preferred,scope.other_hand,", "scope.preferred,0,", 1), probe),
     }

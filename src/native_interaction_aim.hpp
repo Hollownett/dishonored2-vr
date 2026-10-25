@@ -201,6 +201,7 @@ class NativeInteractionAim {
     std::atomic<UINT64> stage_calls_{},rays_{},routed_{},rejected_{},samples_{},overlap_{};
     std::atomic<UINT> owned_depth_{};
     std::atomic<UINT64> volume_requests_{},volume_rejected_{},ranked_{},ranking_rejected_{},direct_shortcuts_filtered_{},occluded_scan_continued_{};
+    std::atomic<UINT64> palm_beam_fallbacks_{}; // hand-mode cycles ordered by the v610 beam because the palm probe was invalid
     std::atomic<UINT64> hand_range_origins_{};
     std::atomic<UINT64> character_gaze_admitted_{},character_gaze_declined_{};
     std::array<std::atomic<UINT64>,static_cast<unsigned>(NativeUseQueryOutcome::count)> query_outcomes_{};
@@ -1197,24 +1198,31 @@ private:
     static void sort_body(void* data,unsigned first,int last,unsigned char mode,std::uintptr_t caller) {
         auto* self=instance_;
         self->sort_(data,first,last,mode); // Native sort runs once, including recursion.
+        // The native sort recurses into its own hooked entry, so every level re-enters this frame: keep it small. Only the outermost call (the
+        // whole retrieved set, from 0x3b8878) is re-ordered, in the noinline after_sort with its scratch (plan Task 3 fix round 1).
+        if(first==0 && mode==0 && caller==self->base_+0x3b8878 && retrieved_.scope) self->after_sort(data,first,last,mode,caller);
+    }
+    struct AfterSortScratch {std::array<NativeUseHit,64> hits{},before{},current{};};
+    static thread_local AfterSortScratch after_sort_scratch_; // game thread (stage 0), defined after the class; never re-entered (the reads below call no hook)
+    __declspec(noinline) void after_sort(void* data,unsigned first,int last,unsigned char mode,std::uintptr_t caller) {
+        auto* self=this;
         try {
             const auto scope=retrieved_;const auto at=reinterpret_cast<std::uintptr_t>(data);
             if(self->active_.load(std::memory_order_acquire) && caller==self->base_+0x3b8878 && scope.scope==context_ && scope.scope && at==scope.data &&
                first==0 && last==static_cast<int>(scope.count)-1 && mode==0 && self->fresh(*scope.scope,GetTickCount64())) {
-                std::array<NativeUseHit,64> hits{},before{};
+                auto& hits=after_sort_scratch_.hits;auto& before=after_sort_scratch_.before;auto& current=after_sort_scratch_.current;
                 if(!self->read_(at,hits.data(),scope.count*sizeof(NativeUseHit))) throw std::runtime_error("Native Use results unreadable");
                 before=hits;
                 // G1: the palm cost orders the hits (plan Task 3). Ruling H7: gaze/reach mode and build/legacy-palm-select keep the v610 forward beam
-                // with its v610 inputs (the hand volume centre and the aim ray's forward axis).
+                // with its v610 inputs (the hand volume centre and the aim ray's forward axis); so does a hand-mode cycle without a valid palm probe
+                // (no raw grip pose, palm_probe threw, a non-finite input), counted in palm_beam_fallbacks.
                 const auto select=self->palm_select_config();
-                PalmProbe probe=scope.scope->hand.palm;
-                const bool legacy=select.legacy || scope.scope->hand.reach;
-                if(legacy) probe=legacy_beam_probe(scope.scope->hand.volume_centre,scope.scope->hand.hand.basis[0]);
-                if(!order_native_use_hits(hits.data(),scope.count,probe,scope.preferred,scope.other_hand,
+                const auto use=native_use_order_probe(scope.scope->hand.palm,select.legacy,scope.scope->hand.reach,scope.scope->hand.volume_centre,scope.scope->hand.hand.basis[0]);
+                if(use.beam_fallback) ++self->palm_beam_fallbacks_;
+                if(!order_native_use_hits(hits.data(),scope.count,use.probe,scope.preferred,scope.other_hand,
                     [&](const NativeUseHit& hit){return self->hit_owner(hit,scope.world);},
                     [&](std::uintptr_t e){return self->takeable(e);},
-                    [&](std::uintptr_t e){return self->owner_bounds(e);},select.tuning,legacy)) throw std::runtime_error("Native Use result point invalid");
-                std::array<NativeUseHit,64> current{};
+                    [&](std::uintptr_t e){return self->owner_bounds(e);},select.tuning,use.legacy)) throw std::runtime_error("Native Use result point invalid");
                 if(!self->read_(at,current.data(),scope.count*sizeof(NativeUseHit)) || current!=before) throw std::runtime_error("Native Use results changed");
                 std::memcpy(data,hits.data(),scope.count*sizeof(NativeUseHit));retrieved_.ranked=true;++self->ranked_;
                 std::uint32_t first_handle{};std::memcpy(&first_handle,hits[0].data()+0x48,4);
@@ -1914,7 +1922,7 @@ public:
         log_<<"tick_ms,thread,stage,sensor,camera,routed";
         for(const auto* prefix:{"native","effective"}) for(unsigned i=0;i<12;++i) log_<<','<<prefix<<i;log_<<'\n';
         for(auto& count:query_outcomes_)count=0;
-        stage_calls_=rays_=routed_=rejected_=samples_=overlap_=volume_requests_=volume_rejected_=ranked_=ranking_rejected_=direct_shortcuts_filtered_=occluded_scan_continued_=0;instance_=this;
+        stage_calls_=rays_=routed_=rejected_=samples_=overlap_=volume_requests_=volume_rejected_=ranked_=ranking_rejected_=direct_shortcuts_filtered_=occluded_scan_continued_=0;palm_beam_fallbacks_=0;instance_=this;
         hand_range_origins_=0;
         const std::array<void*,6> hooks{reinterpret_cast<void*>(&stage<0>),reinterpret_cast<void*>(&stage<1>),reinterpret_cast<void*>(&stage<2>),
             reinterpret_cast<void*>(&direct),reinterpret_cast<void*>(&queue<0>),reinterpret_cast<void*>(&queue<1>)};
@@ -2122,6 +2130,7 @@ public:
     }
     UINT64 ranked_results() const {return ranked_.load();}
     UINT64 ranking_rejected() const {return ranking_rejected_.load();}
+    UINT64 palm_beam_fallbacks() const {return palm_beam_fallbacks_.load();}
     UINT64 direct_shortcuts_filtered() const {return direct_shortcuts_filtered_.load();}
     UINT64 volume_requests() const {return volume_requests_.load();}
     UINT64 volume_rejected() const {return volume_rejected_.load();}
@@ -2147,6 +2156,7 @@ public:
     bool lean_lifetime_failed() const {return lean_lifetime_.failed();}
 };
 inline thread_local NativeInteractionAim::Retrieved NativeInteractionAim::retrieved_{};
+inline thread_local NativeInteractionAim::AfterSortScratch NativeInteractionAim::after_sort_scratch_{};
 inline thread_local NativeInteractionAim::LootReachCycle NativeInteractionAim::loot_cycle_{};
 inline std::array<std::array<NativeInteractionAim::WeaponSegment,NativeInteractionAim::weapon_slots>,2> NativeInteractionAim::weapon_req_{};
 inline NativeInteractionAim::SwordContactObservation NativeInteractionAim::sword_last_contact_;

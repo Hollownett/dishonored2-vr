@@ -170,6 +170,16 @@ using NativeUseHit=std::array<std::byte,112>;
 struct GrabTuning;   // grab_force_cap.hpp (it includes this header): the per-kind priority and the hover radius
 // The v610 path's inputs as a probe: the hand point (volume_centre) and the beam axis (the aim ray's forward; zero: plain distance).
 inline PalmProbe legacy_beam_probe(Vec3 hand,Vec3 axis) {PalmProbe p;p.palm=hand;p.forward=axis;p.valid=finite(hand);return p;}
+// Which probe orders a hand's native Use hits this cycle. legacy: build/legacy-palm-select or gaze/reach mode (ruling H7). A hand-mode cycle
+// whose palm probe is invalid (no raw grip pose, palm_probe threw, a non-finite input) also takes the v610 beam for that cycle, never the
+// native sweep-fraction order (which cannot rank initial overlaps); beam_fallback says so, for the caller's counter (Task 3 fix round 1).
+struct NativeUseOrderProbe {PalmProbe probe{};bool legacy{},beam_fallback{};};
+inline NativeUseOrderProbe native_use_order_probe(const PalmProbe& palm,bool legacy_knob,bool reach,Vec3 volume_centre,Vec3 aim_forward) {
+    NativeUseOrderProbe out;out.legacy=legacy_knob || reach;
+    if(!out.legacy && !palm.valid) {out.legacy=true;out.beam_fallback=true;}
+    out.probe=out.legacy?legacy_beam_probe(volume_centre,aim_forward):palm;
+    return out;
+}
 // Orders the native hand-volume Use hits; downstream native permission and LOS checks still decide, in this order. Records are only
 // permuted, never altered; a non-finite or far (>1000 m) hit point rejects the whole buffer (false, unchanged).
 // Hand mode (G1, plan Task 3): Task 2's palm cost. Each hit is scored as its owner's model bounds (bounds(owner) -> optional<pair<min,max>>;
@@ -177,19 +187,28 @@ inline PalmProbe legacy_beam_probe(Vec3 hand,Vec3 axis) {PalmProbe p;p.palm=hand
 // replaces the 6 cm bonus). pick_by_palm chooses the winner (the 0.45 m acquire gate, 0.55 m retain gate and the ONE 0.86 hysteresis on
 // `preferred`, ruling H5) and every hit of the winner leads. Then the other in-gate hits by raw cost, then the hits beyond the gate by
 // today's fallback (distance + 1), then `other_hand`'s owner (the other hand's pick) last. An unresolved owner (0) is scored as a usable.
-// A non-finite palm (probe.valid false) keeps the old pick: `preferred`'s hits lead and the rest keep the native order.
+// A non-finite palm (probe.valid false) keeps the old pick: `preferred`'s hits lead and the rest keep the native order (the live hook never
+// gets here: native_use_order_probe sends such a cycle to the legacy beam).
+// Scratch is thread-local (the native sort hook's stack stays small); the function never re-enters itself (owner/loot/bounds only read).
 // legacy_beam (build/legacy-palm-select, gaze/reach mode, ruling H7): the v610 forward beam, unchanged: probe.palm is the hand point,
 // probe.forward the beam axis (legacy_beam_probe), a 2 cm preference for `preferred` and the 6 cm loot bonus; other_hand plays no part.
 template<class Owner,class Loot,class Bounds,class Tuning=GrabTuning>
 bool order_native_use_hits(NativeUseHit* hits,unsigned count,const PalmProbe& probe,std::uintptr_t preferred,std::uintptr_t other_hand,
         Owner owner,Loot loot,Bounds bounds,const Tuning& tuning,bool legacy_beam=false) {
     if(!hits || count>64) return false;
-    std::array<Vec3,64> point{};
+    struct Known {std::uintptr_t owner{};bool loot{};std::optional<std::pair<Vec3,Vec3>> box;};
+    struct Scratch {
+        std::array<Vec3,64> point;std::array<double,64> cost;std::array<unsigned char,64> tier;std::array<unsigned,64> order,eligible_hit;
+        std::array<std::uintptr_t,64> owners;std::array<PalmTarget,64> targets,eligible;std::array<Known,64> known;std::array<NativeUseHit,64> copy;
+    };
+    static thread_local Scratch scratch;
+    auto& point=scratch.point;auto& cost=scratch.cost;auto& tier=scratch.tier;auto& order=scratch.order;auto& eligible_hit=scratch.eligible_hit;
+    auto& owners=scratch.owners;auto& targets=scratch.targets;auto& eligible=scratch.eligible;auto& known=scratch.known;auto& copy=scratch.copy;
+    for(unsigned i=0;i<count;++i) {cost[i]=0;tier[i]=0;}
     for(unsigned i=0;i<count;++i) {
         std::array<float,3> xyz{};std::memcpy(xyz.data(),hits[i].data(),12);
         point[i]={xyz[0],xyz[1],xyz[2]};if(!finite(point[i])) return false;
     }
-    std::array<double,64> cost{};std::array<unsigned char,64> tier{};std::array<unsigned,64> order{};
     if(legacy_beam) {
         const Vec3 hand=probe.palm;Vec3 axis=probe.forward;
         if(!finite(hand)) return false;
@@ -208,9 +227,7 @@ bool order_native_use_hits(NativeUseHit* hits,unsigned count,const PalmProbe& pr
         const Vec3 origin=palm_point(probe);
         if(probe.valid) for(unsigned i=0;i<count;++i) {const double d=length(point[i]-origin);if(!std::isfinite(d) || d>1000) return false;}
         // One target per hit; the owner's kind and bounds are read once per distinct owner.
-        std::array<std::uintptr_t,64> owners{};std::array<PalmTarget,64> targets{};
-        struct Known {std::uintptr_t owner{};bool loot{};std::optional<std::pair<Vec3,Vec3>> box;};
-        std::array<Known,64> known{};unsigned known_count=0;
+        unsigned known_count=0;
         const auto valid_box=[](const std::pair<Vec3,Vec3>& b) {
             return finite(b.first) && finite(b.second) && b.first.x<=b.second.x && b.first.y<=b.second.y && b.first.z<=b.second.z;};
         for(unsigned i=0;i<count;++i) {
@@ -225,13 +242,13 @@ bool order_native_use_hits(NativeUseHit* hits,unsigned count,const PalmProbe& pr
                     k=&fresh;
                 }
             }
-            PalmTarget& t=targets[i];
+            PalmTarget& t=targets[i];t=PalmTarget{};
             t.id=o?static_cast<std::uint64_t>(o):(std::uint64_t{1}<<63)+i;   // an unresolved owner: a unique id that never matches preferred
             t.kind=k->loot?PalmKind::loot:PalmKind::usable;t.priority=tuning.priority(t.kind);
             t.minimum=k->box?k->box->first:point[i];t.maximum=k->box?k->box->second:point[i];
         }
         // The other hand's pick never enters the choice.
-        std::array<PalmTarget,64> eligible{};std::array<unsigned,64> eligible_hit{};unsigned eligible_count=0;
+        unsigned eligible_count=0;
         for(unsigned i=0;i<count;++i) {
             if(other_hand && owners[i]==other_hand) {tier[i]=3;continue;}
             eligible_hit[eligible_count]=i;eligible[eligible_count++]=targets[i];
@@ -252,7 +269,7 @@ bool order_native_use_hits(NativeUseHit* hits,unsigned count,const PalmProbe& pr
     }
     for(unsigned i=0;i<count;++i) order[i]=i;
     std::stable_sort(order.begin(),order.begin()+count,[&](unsigned a,unsigned b){return tier[a]!=tier[b]?tier[a]<tier[b]:cost[a]<cost[b];});
-    std::array<NativeUseHit,64> copy{};for(unsigned i=0;i<count;++i) copy[i]=hits[order[i]];
+    for(unsigned i=0;i<count;++i) copy[i]=hits[order[i]];
     for(unsigned i=0;i<count;++i) hits[i]=copy[i];return true;
 }
 // Native LOS failure remains a failure. This permits only scanning the next

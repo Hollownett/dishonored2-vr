@@ -12,6 +12,7 @@ NativeUseHit hit(float x,unsigned id,float fraction=0) {
     for(unsigned i=0x50;i<112;++i)h[i]=std::byte{static_cast<unsigned char>(id)};return h;
 }
 std::uintptr_t owner(const NativeUseHit& h) {unsigned id{};std::memcpy(&id,h.data()+0x48,4);return id;}
+bool same(Vec3 a,Vec3 b) {return a.x==b.x && a.y==b.y && a.z==b.z;}
 int main() {
     assert(native_use_query_outcome(0x123456789abcde01ull,123,2,2)==NativeUseQueryOutcome::multiple);
     assert(native_use_query_outcome(0x123456789abcde00ull,0,-1,0)==NativeUseQueryOutcome::incomplete);
@@ -153,6 +154,28 @@ int main() {
         records={hit(.1f,1),hit(.2f,2),hit(.3f,3)};
         assert(order_native_use_hits(records.data(),3,bad,3,0,owner,no_loot,no_bounds,tuning));
         assert(owner(records[0])==3 && owner(records[1])==1 && owner(records[2])==2);
+    }
+    {   // invalid_palm_falls_back_to_beam (fix round 1): a hand-mode cycle without a valid palm probe (no raw grip pose, palm_probe threw or got
+        // a non-finite input) is ordered by the v610 beam from the volume centre along the aim axis, never by the native sweep-fraction order.
+        const auto at=[](float x,float y,unsigned id){auto h=hit(x,id);std::memcpy(h.data()+4,&y,4);return h;};
+        const std::array<NativeUseHit,3> start{at(.05f,.12f,1),at(.40f,.01f,2),at(.20f,.30f,3)};
+        const Vec3 centre{0,0,0},aim{2,0,0};
+        WorldTrackedPose nan_grip{};nan_grip.position={NAN,0,0};nan_grip.basis={Vec3{1,0,0},Vec3{0,1,0},Vec3{0,0,1}};
+        for(const PalmProbe& bad:{PalmProbe{},palm_probe(1,nan_grip,default_palm_offset(1),std::nullopt,{})}) {
+            assert(!bad.valid);
+            const auto use=native_use_order_probe(bad,false,false,centre,aim);
+            assert(use.legacy && use.beam_fallback && same(use.probe.palm,centre) && same(use.probe.forward,aim));
+            auto r=start;
+            assert(order_native_use_hits(r.data(),3,use.probe,0,0,owner,no_loot,no_bounds,tuning,use.legacy) && owner(r[0])==2 && owner(r[1])==1);
+            r=start; // what the hand-mode path alone would do with that probe: the native order (the reason for the fallback)
+            assert(order_native_use_hits(r.data(),3,bad,0,0,owner,no_loot,no_bounds,tuning) && r==start);
+        }
+        const auto good=native_use_order_probe(facing_x,false,false,centre,aim);
+        assert(!good.legacy && !good.beam_fallback && same(good.probe.palm,facing_x.palm) && same(good.probe.direction,facing_x.direction));
+        for(const auto& [knob,reach]:{std::pair{true,false},std::pair{false,true},std::pair{true,true}}) {
+            const auto use=native_use_order_probe(facing_x,knob,reach,centre,aim);   // the knob and gaze/reach: the beam, not a fallback
+            assert(use.legacy && !use.beam_fallback && same(use.probe.palm,centre) && same(use.probe.forward,aim));
+        }
     }
     {   // legacy_beam_knob_keeps_old_order (build/legacy-palm-select, and gaze/reach mode): the v610 forward beam, 2 cm preference and 6 cm loot bonus.
         records={hit(.11f,1),hit(.10f,2),hit(.3f,3)};
