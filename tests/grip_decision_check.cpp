@@ -90,5 +90,14 @@ int main() {
         in=input(std::nullopt,on_palm);in.fast_native=true;assert(decide_grip_alone(in,t,hover)==GripAloneChoice::use);
         in=input(std::nullopt,std::nullopt,1000);assert(decide_grip_alone(in,t,hover)==GripAloneChoice::pending);   // without it the H1 buffer still runs
     }
+    {   // v613 item 4: the torso hold of 0.5 s hands off to the native carry; limbs, head, collar (neck), a quick hold and the legacy knob never do
+        CarryHandoffInput in;in.corpse_hold=true;in.grip_held=true;in.held_ms=corpse_carry_hold_ms;
+        for(int bone=0;bone<17;++bone) {in.bone=bone;assert(carry_handoff(in)==(bone<=2));}   // pelvis, spine, chest only
+        in.bone=1;in.held_ms=corpse_carry_hold_ms-1;assert(!carry_handoff(in));                   // a quick torso grab stays the drag
+        in.held_ms=corpse_carry_hold_ms;in.grip_held=false;assert(!carry_handoff(in));
+        in.grip_held=true;in.corpse_hold=false;assert(!carry_handoff(in));                         // a prop or nothing
+        in.corpse_hold=true;in.legacy=true;assert(!carry_handoff(in));                             // build/legacy-corpse-carry
+        in.legacy=false;in.bone=-1;assert(!carry_handoff(in));
+    }
     std::cout<<"PASS: grip-alone one-list decision (corpse self-carry yields the grab),  (loot/door Use, prop on palm grabs, 0.12 m gate, block stays Use, choke/takedown/occupied, 100 ms fresh wait, H1 buffer)\n";
 }

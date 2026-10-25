@@ -2890,6 +2890,7 @@ static std::atomic<unsigned> scabbard_entries{},holster_fires{}; // the right ha
 // Full-grip sword (vr_controls.hpp SwordGrip, native_weapon_hands.hpp): requests per action (draw, sheathe, drop, pickup, recall).
 static d2vr::SwordGrip sword_grip;static bool sword_owns{};static std::array<std::atomic<unsigned>,7> sword_actions{};
 // Full-grip gun at the left hip (vr_controls.hpp GunGrip): actions (draw, holster); the hip holds a gun once one was drawn.
+static bool legacy_corpse_carry=false;static UINT64 corpse_drop_press_until{};   // v613 item 4: build/legacy-corpse-carry; the Use pulse that drops a shoulder-carried body
 static std::array<d2vr::GripIntent,2> grip_intent;static std::array<d2vr::GripIntent::Out,2> grip_intent_out{}; // input thread
 static std::atomic<unsigned> fist_hands{},grab_hands{};static std::atomic<int> trace_lock_side{-1};static std::atomic<UINT64> fist_takes{}; // fist frames that are the game's pickup // the hand a grip Use locked (controller trace)
 static std::array<std::atomic<unsigned>,10> use_diag{}; // grip Use: use_started L/R, fist_started L/R, locked L/R, ready while locked, target while locked, intent not free L/R // bit per hand: a full fist (grip + trigger) owns the physical grab this press
@@ -8869,12 +8870,23 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                             }
                                         }
                                         const auto pending_max=static_cast<std::uint64_t>(grip_tuning.grab_buffer_ms);   // ruling H1: the buffer may hold the decision to 150 ms
-                                        grip_intent_out={grip_intent[0].update(rc.left_grip,rc.left_trigger,now_gi,!gun_owns && !left_consumed,100,idle(0),400,40,grip_choice[0],one_list,pending_max),
+                                        // v613 item 4: a physical torso hold kept 0.5 s hands off to the native carry (grip_decision.hpp carry_handoff); the hand's carry bit drops it on release
+                                        std::array<bool,2> carry_handoff_now{},carrying_now{};
+                                        {unsigned carry_bits{};{std::lock_guard<std::mutex> hand_lock(hand_state_mutex);if(hand_state_tick && now_gi-hand_state_tick<=300) carry_bits=hand_carrying_bits;}
+                                         for(unsigned h=0;h<2;++h) {
+                                             carrying_now[h]=(carry_bits&(1u<<h))!=0;
+                                             const auto hold=physical_grab_requested?native_grab.corpse_hold(h,now_gi):std::nullopt;
+                                             d2vr::CarryHandoffInput ci;ci.corpse_hold=hold.has_value();ci.legacy=legacy_corpse_carry;ci.grip_held=(h?rc.right_grip:rc.left_grip)>=.35f;
+                                             if(hold) {ci.bone=hold->bone;ci.held_ms=hold->held_ms;}
+                                             carry_handoff_now[h]=d2vr::carry_handoff(ci);
+                                         }}
+                                        grip_intent_out={grip_intent[0].update(rc.left_grip,rc.left_trigger,now_gi,!gun_owns && !left_consumed,100,idle(0),400,40,grip_choice[0],one_list,pending_max,carry_handoff_now[0],carrying_now[0]),
                                                          grip_intent[1].update(rc.right_grip,rc.right_trigger,now_gi,
                                                              !sword_owns || choke_offer.has_value() || control_active_choke!=0,
-                                                             100,idle(1) && !choke_offer && !control_active_choke,400,40,grip_choice[1],one_list,pending_max)};
+                                                             100,idle(1) && !choke_offer && !control_active_choke,400,40,grip_choice[1],one_list,pending_max,carry_handoff_now[1],carrying_now[1])};
                                         fist_hands=(grip_intent_out[0].fist?1u:0u)|(grip_intent_out[1].fist?2u:0u);
                                         grab_hands=(grip_intent_out[0].grab?1u:0u)|(grip_intent_out[1].grab?2u:0u);
+                                        for(unsigned h=0;h<2;++h) if(grip_intent_out[h].drop_started) corpse_drop_press_until=now_gi+160;
                                         for(unsigned h=0;h<2;++h) {if(grip_intent_out[h].use_started) ++use_diag[h];if(grip_intent_out[h].fist_started) ++use_diag[2+h];
                                             if(grip_intent[h].kind()==d2vr::GripIntent::Kind::drain && (h?rc.right_grip:rc.left_grip)>.55f) ++use_diag[8+h];}
                                     }
@@ -9513,6 +9525,7 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                         }
                                         if(look_use_at && now_l>=look_use_at && now_l<gaze_ray_until.load() && native_interaction_aim.has_target(look_side,now_l)) {
                                             look_press_until=now_l+160;look_use_at=0;++look_hits;}
+                                        if(now_l<corpse_drop_press_until) input.x=true;   // v613 item 4: release of a shoulder carry = the native Use, which drops the body
                                         if(now_l<look_press_until && !native_interaction_aim.talk_target(0,now_l) && !native_interaction_aim.talk_target(1,now_l)) input.x=true;
                                     }
                                     if(grab_guard[0]) input.left_trigger=0;
@@ -10423,6 +10436,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
         native_interaction_aim.palm_select(d2vr::load_grab_tuning(root/L"build"/L"grab-tuning.cfg").value,fs::exists(root/L"build"/L"legacy-palm-select")); // G1: per-kind priority; the v610 beam knob
         grip_tuning=d2vr::load_grab_tuning(root/L"build"/L"grab-tuning.cfg").value;
         no_grip_alone_grab=fs::exists(root/L"build"/L"no-grip-alone-grab");
+        legacy_corpse_carry=fs::exists(root/L"build"/L"legacy-corpse-carry");   // v613 item 4: present restores v612 (a torso hold never hands off to the shoulder carry)
         native_grab.living_pull(d2vr::NativeWeaponHands::living_pull_enabled);   // G6: the hold pulls him only when the Task 13 verdict allows it
         if(native_interaction_requested) native_interaction_aim.install(image_base,&read_self,&game_logic_mask,controller_aim_requested,output/L"native-interaction-rays.csv",native_camera_trace_requested,native_camera_trace_requested);
         if(native_interaction_requested && loot_reach_trace_requested && !native_interaction_aim.loot_reach_trace(output/L"native-loot-reach.csv"))

@@ -45,4 +45,14 @@ inline GripAloneChoice decide_grip_alone(const GripAloneInput& in,const GrabTuni
     if(tuning.grab_buffer_ms>0 && static_cast<double>(elapsed)<tuning.grab_buffer_ms) return GripAloneChoice::pending;
     return GripAloneChoice::use;
 }
+// Item 4 (v613, the user's decision 2026-10-25): a corpse goes onto the shoulder (the game's native body carry) only when the player holds a TORSO
+// bone and keeps the grip for corpse_carry_hold_ms. Ragdoll bones (grab_mass.hpp): 0 pelvis, 1 spine, 2 chest, 3 neck, 4 head, 5.. limbs. The torso is the
+// pelvis (the body's centre bone, where a person grabs to lift), the spine and the chest; the neck (collar), the head and every limb stay the physical
+// drag. A quick torso grab (released or shorter than 0.5 s) is still the hand drag. build/legacy-corpse-carry (legacy) restores v612: never hands off.
+inline constexpr std::uint64_t corpse_carry_hold_ms=500;
+inline constexpr bool torso_bone(int bone) noexcept {return bone>=0 && bone<=2;}
+struct CarryHandoffInput {bool corpse_hold{},grip_held{},legacy{};int bone{-1};std::uint64_t held_ms{};};
+inline bool carry_handoff(const CarryHandoffInput& in) noexcept {
+    return !in.legacy && in.corpse_hold && in.grip_held && torso_bone(in.bone) && in.held_ms>=corpse_carry_hold_ms;
+}
 } // namespace d2vr

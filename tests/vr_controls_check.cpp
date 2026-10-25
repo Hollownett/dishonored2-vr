@@ -193,6 +193,22 @@ int main() {
         reserved.update(.45f,0,1220,true);
         assert(reserved.update(.45f,0,1320,true).use_started);
     }
+    {   // v613 item 4: a physical grab hands off to the carry (Use) when told, keeps Use while held, and a release while carrying asks for the drop press
+        using K=d2vr::GripIntent::Kind;using Choice=d2vr::GripAloneChoice;
+        d2vr::GripIntent i;std::uint64_t now=1000;
+        auto step=[&](float grip,bool handoff,bool carrying){now+=20;return i.update(grip,0.f,now,true,100,false,400,40,Choice::grab,true,150,handoff,carrying);};
+        auto o=step(1.f,false,false);assert(o.grab_started && i.kind()==K::grab);
+        o=step(1.f,false,false);assert(o.grab && !o.use);                                  // a drag: no Use
+        o=step(1.f,true,false);assert(i.kind()==K::carry && o.use_started && o.use && !o.grab);   // handed off
+        o=step(1.f,true,false);assert(o.use && !o.use_started && !o.drop_started);
+        o=step(1.f,false,true);assert(o.use && !o.drop_started);                           // carrying, grip held
+        o=step(0.f,false,true);assert(o.drop_started && !o.use);                           // release while carrying: drop
+        o=step(0.f,false,false);assert(!o.drop_started && i.kind()==K::none);
+        d2vr::GripIntent j;now=5000;                                                        // released before the carry began: nothing to drop
+        j.update(1.f,0.f,now,true,100,false,400,40,Choice::grab,true,150);
+        auto q=j.update(1.f,0.f,now+40,true,100,false,400,40,Choice::grab,true,150,true,false);assert(j.kind()==K::carry);
+        q=j.update(0.f,0.f,now+60,true,100,false,400,40,Choice::grab,true,150,false,false);assert(!q.drop_started);
+    }
     {   // GripIntent: grip alone = Use after 40 ms (trigger finger off the trigger; else 100 ms), grip + trigger = fist, trigger first is held back, taps survive
         using K=d2vr::GripIntent::Kind;
         d2vr::GripIntent a;auto o=a.update(1,0,1000,true);assert(!o.use && !o.fist && a.kind()==K::deciding);

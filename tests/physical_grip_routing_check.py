@@ -37,6 +37,11 @@ def check(source: str) -> None:
     assert "const bool one_list=physical_grab_requested && !no_grip_alone_grab;" in source
     assert 'no_grip_alone_grab=fs::exists(root/L"build"/L"no-grip-alone-grab");' in source
     assert "grip_choice[h]=d2vr::decide_grip_alone(in,grip_tuning,grip_tuning.hover_radius_m);" in source
+    # v613 item 4: the torso-hold handoff to the native carry, its knob and the drop press
+    assert 'legacy_corpse_carry=fs::exists(root/L"build"/L"legacy-corpse-carry");' in source
+    assert "d2vr::carry_handoff(ci)" in source and "native_grab.corpse_hold(h,now_gi)" in source
+    assert "carry_handoff_now[0],carrying_now[0]" in source and "carry_handoff_now[1],carrying_now[1]" in source
+    assert "if(now_l<corpse_drop_press_until) input.x=true;" in source
     assert "in.choke_owns=h==1 && (choke_offer.has_value() || control_active_choke!=0);" in source
     assert "in.takedown_offered=control_takedown.any();" in source
     gate = source.index("const bool right_fist_rb=d2vr::fist_may_press_native_rb(native_grab.holding(1),right_carrying,sword_grip.held(),right_sword_drawn);")
@@ -79,3 +84,4 @@ if __name__ == "__main__":
             continue
         raise AssertionError(f"Unsafe production mutation {index} was accepted")
     print("PASS physical/native right grip split, reserved-owner isolation, and negative source mutations")
+

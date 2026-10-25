@@ -289,8 +289,8 @@ public:
 };
 class GripIntent {
 public:
-    enum class Kind {none,deciding,use,fist,trigger,drain,grab};   // grab (G3, plan Task 6): a grip alone that grabs what the palm is on
-    struct Out {bool use{},fist{},pass_trigger{true},tap_trigger{},use_started{},fist_started{},pending_use{},grab{},grab_started{};};
+    enum class Kind {none,deciding,use,fist,trigger,drain,grab,carry};   // grab (G3, plan Task 6): a grip alone that grabs what the palm is on
+    struct Out {bool use{},fist{},pass_trigger{true},tap_trigger{},use_started{},fist_started{},pending_use{},grab{},grab_started{},drop_started{};};
 private:
     Kind kind_{Kind::none};bool g_{},t_{},grip_first_{};std::uint64_t since_{},use_until_{},tap_until_{};
 public:
@@ -305,7 +305,7 @@ public:
     // for this hand each frame) instead of the 40 ms quick Use: use -> Use, grab -> Kind::grab, pending -> keep deciding, until `pending_max`
     // (at least the window; the caller's grab buffer may ask longer, ruling H1), then Use. A trigger joining while deciding is still a fist.
     Out update(float grip,float trigger,std::uint64_t now,bool free,std::uint64_t window=100,bool use_idle=false,std::uint64_t late=400,std::uint64_t quick=40,
-               GripAloneChoice choice=GripAloneChoice::use,bool one_list=false,std::uint64_t pending_max=0) noexcept {
+               GripAloneChoice choice=GripAloneChoice::use,bool one_list=false,std::uint64_t pending_max=0,bool handoff=false,bool carrying=false) noexcept {
         const bool g=grip>=(g_?.35f:.45f),t=trigger>=(t_?.35f:.55f),edge=(g && !g_) || (t && !t_);
         g_=g;t_=t;Out out{};
         if(!free) {kind_=g || t?Kind::drain:Kind::none;use_until_=tap_until_=0;return out;}
@@ -322,13 +322,15 @@ public:
             }
             else if(now-since_>=window || (grip_first_ && g && trigger<.05f && now-since_>=quick)) {kind_=g?Kind::use:Kind::trigger;out.use_started=g;}
         }
+        else if(kind_==Kind::carry && !g) {kind_=Kind::drain;out.drop_started=carrying;}   // v613 item 4: letting go of a shoulder carry drops the body
+        else if(kind_==Kind::grab && g && handoff) {kind_=Kind::carry;out.use_started=true;}   // v613 item 4: a torso hold of 0.5 s hands off to the native carry
         else if(kind_!=Kind::none && !g && !t) kind_=Kind::none;
         else if(kind_==Kind::use && g && t && use_idle && now-since_<window+late) {kind_=Kind::fist;out.fist_started=true;}
         else if(kind_==Kind::use && !g) kind_=Kind::drain;      // a trigger still held after the Use is not a cast
         else if(kind_==Kind::grab && !g) kind_=Kind::drain;     // nor after a grab
         else if(kind_==Kind::trigger && !t) kind_=Kind::drain;  // nor a grip still held after a cast a Use
         out.pending_use=kind_==Kind::deciding && grip_first_ && g;
-        out.use=kind_==Kind::use || now<use_until_;
+        out.use=kind_==Kind::use || kind_==Kind::carry || now<use_until_;
         out.fist=kind_==Kind::fist;
         out.grab=kind_==Kind::grab;
         out.tap_trigger=now<tap_until_;
