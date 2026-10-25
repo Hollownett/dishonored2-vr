@@ -741,7 +741,7 @@ sealed class MainForm : Form
         try
         {
             var d = Prefs.Load(env.SettingsFile);
-            prefs = d;
+            prefs = d; aa.Touched = false;
             ApplyToForm(d, null);
             SetSettingsMsg((File.Exists(env.SettingsFile) ? "Loaded build\\vr-settings.cfg. The in-game VR menu wins: the launcher shows what the game saved. Changes apply the next time VR starts. " : "No saved file yet; showing defaults. ") + DlssProvider.Status(env.Root), Ui.Dim);
         }
@@ -761,7 +761,7 @@ sealed class MainForm : Form
     Prefs ReadForm()
     {
         var e = new Prefs { Measurements = prefs.Measurements, Aa = prefs.Aa, AaChosen = prefs.AaChosen };
-        e.Resolution = res.Value / 100.0; e.TemporalAa = Val<int>(aa); e.Hud = Val<int>(hud); e.Mode = Val<int>(turn);
+        e.Resolution = res.Value / 100.0; e.TemporalAa = Val<int>(aa); e.AaTouched = aa.Touched; e.Hud = Val<int>(hud); e.Mode = Val<int>(turn);
         e.SnapDeg = Val<double>(snap); e.SmoothDps = Val<double>(smooth); e.Mirror = Val<int>(mirror); e.Sharpness = Val<double>(sharp);
         e.Hint = Val<int>(hint); e.Crosshair = Val<int>(crosshair);
         e.ScriptedRecenter = Val<int>(recenter); e.CutsceneMode = Val<string>(cutscenes);
@@ -774,7 +774,7 @@ sealed class MainForm : Form
         {
             var merged = Prefs.Merge(prefs, ReadForm(), Prefs.Load(env.SettingsFile));
             merged.Save(env.SettingsFile);
-            prefs = merged;
+            prefs = merged; aa.Touched = false;
             ApplyToForm(merged, null);
             SetSettingsMsg("Saved. " + (Env.Game() != null ? "Restart VR (Stop, then Launch) to apply." : "Applies on next launch."), Ui.Good);
         }

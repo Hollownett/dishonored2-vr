@@ -14,6 +14,8 @@ public sealed class Prefs
     public int ScriptedRecenter = 1;
     public string CutsceneMode = "vr_comfort";
     public static readonly string[] CutsceneModes = { "vr_comfort", "vr_full", "theater" };
+    /// <summary>Form-only (never saved): the user moved the anti-aliasing row by hand, so the pick counts as a choice even if it equals the saved value (otherwise the game's one-time DLAA default overrides it).</summary>
+    public bool AaTouched;
     public string[] Measurements = { "0", "0", "0", "0", "0" };
 
     public static Prefs Load(string file)
@@ -67,7 +69,7 @@ public sealed class Prefs
         if (edited.Crosshair != baseline.Crosshair) m.Crosshair = edited.Crosshair;
         if (edited.ScriptedRecenter != baseline.ScriptedRecenter) m.ScriptedRecenter = edited.ScriptedRecenter;
         if (edited.CutsceneMode != baseline.CutsceneMode) m.CutsceneMode = edited.CutsceneMode;
-        if (edited.TemporalAa != baseline.TemporalAa) { m.TemporalAa = edited.TemporalAa; m.AaChosen = 1; }
+        if (edited.TemporalAa != baseline.TemporalAa || edited.AaTouched) { m.TemporalAa = edited.TemporalAa; m.AaChosen = 1; }
         return m;
     }
 
