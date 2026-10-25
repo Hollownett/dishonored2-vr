@@ -160,7 +160,8 @@ int main() {
         if(fault==3)rejected.physical_reserved=true;if(fault==4)rejected.native_object=true;if(fault==5)rejected.epoch=0;
         assert(!Socket::capture(base_address,memory,snapshot,rejected,1000));assert(!Socket::current(memory,*lease,rejected,1000));
     }
-    memory=original;assert(!Socket::current(memory,*lease,availability,1101));
+    memory=original;assert(Socket::current(memory,*lease,availability,1000+d2vr::tracked_pose_freshness_ms));
+    memory=original;assert(!Socket::current(memory,*lease,availability,1001+d2vr::tracked_pose_freshness_ms));
     assert(!Socket::current(memory,*lease,availability,999));auto epoch=availability;epoch.epoch=8;
     assert(!Socket::current(memory,*lease,epoch,1000));
     const auto reject=[&](auto address,auto value) {

@@ -93,7 +93,7 @@ int main() {
         assert(!owner.refresh(binding_snapshot,epochs,denied));assert(!owner.current(current));
         const auto next=publish();assert(next>current);current=next;
     }
-    context.tick=1101;assert(!owner.current(current));context.tick=1000;current=publish();
+    context.tick=1001+d2vr::tracked_pose_freshness_ms;assert(!owner.current(current));context.tick=1000;current=publish();
     auto changed_epochs=epochs;++changed_epochs.pose;
     assert(!owner.refresh(binding_snapshot,changed_epochs,availability));assert(!owner.current(current));current=publish();
     ++changed_epochs.reference;const auto next_epoch=owner.publish(acquire_lease(),binding_snapshot,changed_epochs,availability);

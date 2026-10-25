@@ -2,6 +2,7 @@
 #include "native_equipment_ownership.hpp"
 #include "native_carry_snapshot.hpp"
 #include "native_held_placement.hpp"
+#include "tracked_pose_lifetime.hpp"
 
 namespace d2vr {
 class NativeLeftWeaponSocket {
@@ -29,7 +30,7 @@ private:
         bool operator()(std::uintptr_t address,void* output,std::size_t size) {return safe(input,address,output,size);}
     };
     static bool available(const Availability& value,std::uint64_t now) noexcept {
-        return value.valid && value.focused && value.epoch && value.tick && now>=value.tick && now-value.tick<=100 &&
+        return value.valid && value.focused && value.epoch && value.tick && now>=value.tick && now-value.tick<=tracked_pose_freshness_ms && // same window as the arm solve: a 100-250 ms stall must not drop the gun to the native pose
             !value.physical_held && !value.physical_reserved && !value.native_object;
     }
     static bool carry_allowed(const rig::NativeCarrySnapshot& carry,const Availability& availability,std::uint64_t now) {
