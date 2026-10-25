@@ -906,9 +906,10 @@ public:
     static std::uint64_t weapon_serial(unsigned side,unsigned slot,std::uint8_t producer=producer_clamp) {
         if(side>1 || slot>=weapon_slots) return 0;std::lock_guard<std::mutex> guard(weapon_mutex_);return weapon_producer_[side][slot]==producer?weapon_serial_[side][slot]:0;
     }
-    static std::optional<WorldTraceHit> weapon_hit(unsigned side,unsigned slot,std::uint64_t now,std::uint8_t producer=producer_clamp) {
+    // ttl_ms: how old an answer may be (100; the free hand's finger slots read with 150, G5: finger_probe_cache.hpp).
+    static std::optional<WorldTraceHit> weapon_hit(unsigned side,unsigned slot,std::uint64_t now,std::uint8_t producer=producer_clamp,std::uint64_t ttl_ms=100) {
         if(side>1 || slot>=weapon_slots) return {};std::lock_guard<std::mutex> guard(weapon_mutex_);
-        const auto t=weapon_tick_[side][slot];return t && now>=t && now-t<=100 && weapon_producer_[side][slot]==producer?weapon_hit_[side][slot]:std::nullopt;
+        const auto t=weapon_tick_[side][slot];return t && now>=t && now-t<=ttl_ms && weapon_producer_[side][slot]==producer?weapon_hit_[side][slot]:std::nullopt;
     }
     // The held object's sweeps (held_clamp.hpp, Part 5A): up to 4 sphere casts a frame on the holding hand's clamp slots (0, tip, wall tip, exclude), the
     // hand clamp itself being yielded to the carry. exclude: the held entity (its body must not report itself). Hits come back by proxy index, <=100 ms old.

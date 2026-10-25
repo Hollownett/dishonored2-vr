@@ -970,6 +970,14 @@ public:
         if(!focus_point(side,now)) return 0;
         std::lock_guard<std::mutex> lock(mutex_);const auto& f=lanes_[side].focus;return f?f->entity:0;
     }
+    // The fingers' hover candidate (G4 pre-curl and hover shape: dxgi_probe.cpp hover_candidate_for_fingers): the lane's focus as the last
+    // focus_point refresh left it (no discovery, no engine read here), when that refresh is at most 150 ms old.
+    std::optional<NativeRigidBody> focus_cached(unsigned side,UINT64 now) {
+        if(side>=2) return {};
+        std::lock_guard<std::mutex> lock(mutex_);const auto& lane=lanes_[side];
+        if(!lane.focus || !lane.focus_tick || now<lane.focus_tick || now-lane.focus_tick>150) return {};
+        return lane.focus;
+    }
     std::optional<Vec3> focus_point(unsigned side,UINT64 now,bool native_use=false) {
         if(side>=2) return {};
         std::lock_guard<std::mutex> lock(mutex_);auto& lane=lanes_[side];const auto& p=lane.published;

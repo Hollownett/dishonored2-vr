@@ -686,6 +686,17 @@ def loot_reach_checks():
     sim.compile_script(floor, 120)
     assert [s["console"] for s in floor if "console" in s] == [l for l in lines if l.startswith("setviewpos -24.860")], "the floor case alone"
     assert sum(1 for s in floor if s["input"].get("right_grip")) == sum(1 for s in floor if s["input"].get("left_grip")) == 1, "the floor squeezes"
+    # G5 hand_on_table (Task 12): the table case's teleport, each hand palm down pressed 3 cm into the desk top, no squeeze, fits a 90 s session
+    table = sim.scenario_segments("hand_on_table", 45000)
+    sim.compile_script(table, 90)
+    assert [s["console"] for s in table if "console" in s] == [l for l in lines if l.startswith("setviewpos -2.690")], "the table spot"
+    assert not any(s["input"].get("right_grip") or s["input"].get("left_grip") for s in table), "nothing is squeezed"
+    top = round(lr.CASES[0][1][2] - lr.CASES[0][2][2] - 0.05 - lr.CROUCH_LIFT_M, 4)   # crouched: the arm reaches the desk
+    assert min(s["head_pose"][1] for s in table if "head_pose" in s) == round(lr.HEAD_Y - lr.CROUCH_M, 4)
+    for side in ("right", "left"):
+        ys = [s[side + "_hand_pose"][1] for s in table if side + "_hand_pose" in s and s[side + "_hand_pose"][:3] != list(lr.DEFAULT[side])]
+        assert ys and abs(min(ys) - (top - 0.03)) < 1e-6 and max(ys) <= top + 0.2 + 1e-6, (side, min(ys), max(ys))
+    assert table[-1]["end_ms"] + 6000 <= 90000
     near = {"palm": (1.0, 2.0, 0.95)}
     ok, cls = loot_judge([dict(near, coin=(0, 1, 0), selected=COIN_OWNER, prompt=COIN_OWNER)] * 10)
     assert cls == "PASS" and any(v == "PASS" and "got 10" in t for v, t in ok), ok
