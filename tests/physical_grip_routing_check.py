@@ -29,8 +29,11 @@ def check(source: str) -> None:
     publish = re.search(r"native_grab\.publish\(side,\*body,hand,\(\(fist_hands\.load\(\)\|grab_hands\.load\(\)\)&\(1u<<side\)\) \|\| native_grab\.holding\(side\)\?squeeze:0\.f,", source)
     assert publish, "the squeeze is published for a fist or a grip-alone grab"
     # the grip-alone flag reaches each filter (the 0.12 m gate), and build/no-grip-alone-grab turns the one-list decision off
-    assert re.search(r"filter_native_grip\(1,.*?grip_intent_out\[1\]\.grab && !grip_intent_out\[1\]\.fist\);", source, re.S)
+    assert re.search(r"filter_native_grip\(1,.*?grip_intent_out\[1\]\.grab && !grip_intent_out\[1\]\.fist,\s*sword_grip\.held\(\) \|\| right_sword_drawn\);", source, re.S)   # I2: the sword hand skips the fist buffer
     assert re.search(r"filter_native_grip\(0,.*?grip_intent_out\[0\]\.grab && !grip_intent_out\[0\]\.fist\);", source, re.S)
+    # fix round 1: fast native actions never wait the 150 ms, and the palm pick used by grip-alone is at most 100 ms old
+    assert "in.fast_native=left_gun_model.load()!=0 || gun_owns ||" in source and "d2vr::length(d2vr::Vec3{(*hands[0])[0],(*hands[0])[1],(*hands[0])[2]}-*hip_xr_position)<=.17);}" in source
+    assert "in.physical=native_grab.focus_score(h,now_gi,100);" in source
     assert "const bool one_list=physical_grab_requested && !no_grip_alone_grab;" in source
     assert 'no_grip_alone_grab=fs::exists(root/L"build"/L"no-grip-alone-grab");' in source
     assert "grip_choice[h]=d2vr::decide_grip_alone(in,grip_tuning,grip_tuning.hover_radius_m);" in source

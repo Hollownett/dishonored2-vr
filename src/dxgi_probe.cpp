@@ -8596,11 +8596,17 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                             for(unsigned h=0;h<2;++h) {
                                                 d2vr::GripAloneInput in;
                                                 if(controller_aim_requested) in.native=native_interaction_aim.target_bounds(static_cast<int>(h),now_gi);
-                                                in.physical=native_grab.focus_score(h,now_gi);in.probe=native_grab.published_palm(h);
+                                                in.physical=native_grab.focus_score(h,now_gi,100);   // fix round 1: a palm pick no older than 100 ms decides a grip-alone press
+                                                in.probe=native_grab.published_palm(h);
                                                 in.native_fresh=!controller_aim_requested || native_interaction_aim.query_ready(static_cast<int>(h),now_gi); // ruling H2: target OR none
                                                 in.since_ms=grip_intent[h].decision_since(now_gi);in.now_ms=now_gi;
                                                 in.choke_owns=h==1 && (choke_offer.has_value() || control_active_choke!=0);
                                                 in.takedown_offered=control_takedown.any();
+                                                // I2: the left hand at the hip (the gun draw) or with a gun out is a fast native action: Use at the edge, never the 150 ms wait
+                                                if(h==0) {std::lock_guard<std::mutex> hip_lock(hand_state_mutex);
+                                                    in.fast_native=left_gun_model.load()!=0 || gun_owns || (logic==2 && hands[0] && hip_xr_position && hip_pose_epoch==game_xr->pose_epoch() &&
+                                                        now_gi>=hip_pose_tick && now_gi-hip_pose_tick<=250 &&
+                                                        d2vr::length(d2vr::Vec3{(*hands[0])[0],(*hands[0])[1],(*hands[0])[2]}-*hip_xr_position)<=.17);}
                                                 in.occupied=(carry_bits&(1u<<h))!=0 || (holding_native && holding_side==h) || native_grab.holding(h);
                                                 grip_choice[h]=d2vr::decide_grip_alone(in,grip_tuning,grip_tuning.hover_radius_m);
                                             }
@@ -8970,7 +8976,8 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                     {std::lock_guard<std::mutex> hand_lock(hand_state_mutex);right_carrying=hand_carrying_bits!=0 || hand_holding_object;right_sword_drawn=(hand_weapon_bits&2u)!=0;}
                                     const bool right_fist_rb=d2vr::fist_may_press_native_rb(native_grab.holding(1),right_carrying,sword_grip.held(),right_sword_drawn);
                                     const float right_native=native_grab.filter_native_grip(1,right_physical?physical_right_grip:0.f,game_xr->pose_epoch(),GetTickCount64(),logic==2,grab_focus,grab_use || sword_owns || choke_route.consume_use || (grip_use[1] && right_interaction.interact),
-                                        grip_use[1] && interaction.consume_trigger[1] && !right_interaction.interact,grip_intent_out[1].grab && !grip_intent_out[1].fist);
+                                        grip_use[1] && interaction.consume_trigger[1] && !right_interaction.interact,grip_intent_out[1].grab && !grip_intent_out[1].fist,
+                                        sword_grip.held() || right_sword_drawn);   // I2: the sword hand decides at the edge (the RB block is not delayed by the fist buffer)
                                     if(right_physical) input.right_grip=right_fist_rb?right_native:0.f;
                                     (void)native_grab.filter_native_grip(0,grip_intent_out[0].fist || grip_intent_out[0].grab || native_grab.holding(0)?physical_left_grip:0.f,game_xr->pose_epoch(),GetTickCount64(),logic==2,grab_focus,grab_use || gun_owns || (grip_use[0] && left_interaction.interact),
                                         grip_use[0] && interaction.consume_trigger[0] && !left_interaction.interact,grip_intent_out[0].grab && !grip_intent_out[0].fist);

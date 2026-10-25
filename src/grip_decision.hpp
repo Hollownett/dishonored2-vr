@@ -14,26 +14,32 @@ enum class GripAloneChoice {pending,use,grab};
 // since_ms: the grip edge (GripIntent::decision_since). choke_owns / takedown_offered: chokes and takedowns keep priority. occupied: the hand
 // carries or holds something (native carry, a held object, a physical hold).
 struct GripAloneInput {std::optional<PalmTarget> native;std::optional<FocusScore> physical;PalmProbe probe;
-    bool native_fresh{};std::uint64_t since_ms{},now_ms{};bool choke_owns{},takedown_offered{},occupied{};};
+    bool native_fresh{};std::uint64_t since_ms{},now_ms{};bool choke_owns{},takedown_offered{},occupied{};
+    bool fast_native{};};   // fast_native (fix round 1, I2): the left hand is in the hip-draw zone or a gun is drawn: a native action that must not wait the 150 ms
 inline constexpr std::uint64_t grip_alone_fresh_wait_ms=100;   // the existing 100 ms intent window, never longer (spec G3)
 // Rules, in order:
 //  1. an occupied hand, a choke that owns the squeeze or an offered takedown: use (today's path);
 //  2. the physical pick counts only within grip_alone_gate_m (0.12 m: the hand is on it; a right-hand block next to a table still blocks);
 //  3. no fresh native verdict yet and under 100 ms since the edge: pending;
-//  4. the native target IS the physical pick's entity (a corpse's own carry): grab. Else both scored with the same probe, the lower cost wins: loot or usable -> use, prop, bone or living (ruling H6) -> grab; a tie goes to Use;
+//  4. (a corpse only; a living NPC's own native target is Use) the native target IS the physical pick's entity (a corpse's own carry): grab. Else both scored with the same probe, the lower cost wins: loot or usable -> use, prop, bone or living (ruling H6) -> grab; a tie goes to Use;
 //     a native target beyond the palm's 0.45 m gate (a gaze Use) still wins over nothing;
 //  5. nothing in reach (ruling H1): pending while the grab buffer runs (grab_buffer_ms from the edge, 0.12 m gate), then use (today's role).
 inline GripAloneChoice decide_grip_alone(const GripAloneInput& in,const GrabTuning& tuning,double hover_radius) noexcept {
-    if(in.occupied || in.choke_owns || in.takedown_offered) return GripAloneChoice::use;
+    if(in.occupied || in.choke_owns || in.takedown_offered || in.fast_native) return GripAloneChoice::use;
     const bool physical=in.physical && (in.physical->kind==PalmKind::prop || in.physical->kind==PalmKind::bone || in.physical->kind==PalmKind::living) &&
         std::isfinite(in.physical->distance) && in.physical->distance>=0 && in.physical->distance<=tuning.grip_alone_gate_m && std::isfinite(in.physical->cost);
     const std::uint64_t elapsed=in.now_ms>=in.since_ms?in.now_ms-in.since_ms:0;
     if(!in.native_fresh && elapsed<grip_alone_fresh_wait_ms) return GripAloneChoice::pending;
+    // I1: a living NPC's native targets (choke, talk, knock-out prompt) are on HIM and win Use; his hold waits for a current verdict (ruling H2).
+    if(physical && in.physical->kind==PalmKind::living && !in.native_fresh)
+        return tuning.grab_buffer_ms>0 && static_cast<double>(elapsed)<tuning.grab_buffer_ms?GripAloneChoice::pending:GripAloneChoice::use;
     std::optional<double> native_cost;
     if(in.native) if(const auto s=palm_cost(in.probe,*in.native,hover_radius,grab_acquire_distance)) native_cost=s->cost;
-    // A corpse (or prop) whose OWN native Use (the game's carry) is the native target: its whole-body box holds the palm, so it would always win on
-    // cost; the user's decision is that grip alone grabs corpses and props, so the physical hold of that same entity wins (sim, Track G acceptance).
-    if(physical && in.native && in.physical->entity && in.native->id==in.physical->entity) return GripAloneChoice::grab;
+    // A corpse whose OWN native Use (the game's carry) is the native target: its whole-body box holds the palm, so it would always win on
+    // cost; the user's decision is that grip alone grabs corpses, so the physical hold of that same entity wins (sim, Track G acceptance).
+    // Only a corpse (PalmKind::bone): a living NPC's native target (choke, talk, knock-out) is Use (I1).
+    if(physical && in.native && in.physical->kind==PalmKind::bone && in.physical->entity && in.native->id==in.physical->entity) return GripAloneChoice::grab;
+    if(physical && in.native && in.physical->kind==PalmKind::living && in.physical->entity && in.native->id==in.physical->entity) return GripAloneChoice::use;
     if(physical && (!native_cost || in.physical->cost<*native_cost)) return GripAloneChoice::grab;
     if(in.native) return GripAloneChoice::use;
     if(tuning.grab_buffer_ms>0 && static_cast<double>(elapsed)<tuning.grab_buffer_ms) return GripAloneChoice::pending;

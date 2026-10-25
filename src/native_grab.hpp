@@ -1164,10 +1164,10 @@ public:
     UINT64 corpse_cost_us() const {return corpse_cost_us_.load();}UINT64 corpse_cost_max_us() const {return corpse_cost_max_us_.load();}
     bool waiting_native_query(unsigned side) {std::lock_guard<std::mutex> lock(mutex_);return lanes_.at(side).decision_deferred;}
     // G2/G3 (Task 5): this hand's palm pick (fresh within 250 ms of its last scoring), for the grip-alone decision (Task 6) and the status block.
-    std::optional<FocusScore> focus_score(unsigned side,UINT64 now) {
+    std::optional<FocusScore> focus_score(unsigned side,UINT64 now,UINT64 max_age_ms=250) {
         if(side>=2) return {};
         std::lock_guard<std::mutex> lock(mutex_);const auto& lane=lanes_[side];
-        if(!lane.focus || !lane.score || !lane.focus_tick || now<lane.focus_tick || now-lane.focus_tick>250) return {};
+        if(!lane.focus || !lane.score || !lane.focus_tick || now<lane.focus_tick || now-lane.focus_tick>max_age_ms) return {};
         return lane.score;
     }
     // {buffered_grabs, buffer_expired} of this hand since install.
@@ -1242,8 +1242,9 @@ public:
     // Returns the squeeze left for the native button (0 while the grip grabs).
     // Caller-supplied native carrying/action occupancy returns the raw squeeze;
     // the physical role is revoked and never re-reserved during that press.
+    // no_buffer (fix round 1, I2): the right hand holds or has drawn the sword: decide at the edge (the RB block must not wait 150 ms).
     // grip_alone (Task 6): a grip-alone grab press; its candidate must be within the grip-alone gate (0.12 m) at the decision and in the buffer.
-    float filter_native_grip(unsigned side,float raw,UINT64 epoch,UINT64 now,bool gameplay,bool focused,bool use,bool defer_decision=false,bool grip_alone=false) {
+    float filter_native_grip(unsigned side,float raw,UINT64 epoch,UINT64 now,bool gameplay,bool focused,bool use,bool defer_decision=false,bool grip_alone=false,bool no_buffer=false) {
         std::lock_guard<std::mutex> lock(mutex_);
         auto& lane=lanes_.at(side);auto& p=lane.published;lane.decision_deferred=false;
         lane.raw_grip=raw;lane.decision_tick=now;lane.gate=Gate::none;lane.decision_usable=false;
@@ -1320,7 +1321,7 @@ public:
         }
         // G3: a press with nothing in reach starts the buffer (once per press) instead of latching native; build/legacy-palm-select or
         // grab_buffer_ms 0 keep today's single-frame decision.
-        const bool buffer=deciding && usable && !lane.pending_release && !eligible && !lane.buffer_used && !legacy_palm_select_ && tuning_.grab_buffer_ms>0;
+        const bool buffer=deciding && usable && !lane.pending_release && !eligible && !lane.buffer_used && !legacy_palm_select_ && !no_buffer && tuning_.grab_buffer_ms>0;
         const auto role_before=lane.owner.role();float native=0;
         if(buffer) {lane.owner.begin_pending();lane.buffer.start(now,static_cast<std::uint64_t>(tuning_.grab_buffer_ms),gate);lane.buffer_used=true;}
         else native=lane.owner.filter(raw,focused,eligible);
@@ -1443,10 +1444,11 @@ public:
          if(collar_grab_) {std::ofstream note(loss_file_,std::ios::app);note<<"knob build/collar-grab present: chest/neck hold targets enabled (full fist only)\n";}
          // Corpse hold knobs and the tuning file, read once here so the shipped configuration is the one that was tested (valid file or the defaults).
          const auto knobs=corpse_knobs_from(root);const auto& kill=knobs.kill;const auto& loaded=knobs.loaded;
-         no_posts_=kill.no_posts;prop_grasp_point_=!kill.no_prop_grasp_point;
+         no_posts_=kill.no_posts;prop_grasp_point_=!kill.no_prop_grasp_point;for(auto& l:lanes_) l.grab.set_legacy_lag_release(kill.legacy_corpse_lag_release);
          configure_corpse(knobs.options);
          {std::ofstream note(loss_file_,std::ios::app);
           if(kill.no_corpse_grab) note<<"knob build/no-corpse-grab present: corpse bodies are not grab candidates\n";
+          if(kill.legacy_corpse_lag_release) note<<"knob build/legacy-corpse-lag-release present: corpse holds drop at 0.5 m lag / 0.25 s, no grasp slide or slip\n";
           if(kill.no_posts) note<<"knob build/no-ragdoll-posts present: no ragdoll event posts\n";
           note<<(kill.no_prop_grasp_point?"knob build/no-prop-grasp-point present: the drawn hand stays at the controller on held props\n":"prop grasp point: the drawn hand sits on motor-held props (corpses always anchor)\n");
           if(!loaded.error.empty()) note<<"build/grab-tuning.cfg rejected, defaults in use: "<<loaded.error<<'\n';

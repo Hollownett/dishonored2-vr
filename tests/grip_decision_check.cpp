@@ -75,5 +75,20 @@ int main() {
         auto far_bone=bone;far_bone.entity=0x9000;far_bone.distance=.2;assert(decide_grip_alone(input(body,far_bone,1200),t,hover)==GripAloneChoice::use);   // not on it
         auto in=input(body,bone);bone.entity=0x9000;in.physical=bone;in.choke_owns=true;assert(decide_grip_alone(in,t,hover)==GripAloneChoice::use);
     }
+    {   // I1: a living NPC's native target on HIM (choke, talk, knock-out) is Use; a corpse's own carry stays grab. His hold waits for a current verdict.
+        const auto npc_box=box(0x9100,PalmKind::usable,{.07,0,.015},.3,t);auto bone=physical(box(16,PalmKind::living,{.07,0,.015},.05,t));
+        bone.entity=0x9100;assert(decide_grip_alone(input(npc_box,bone),t,hover)==GripAloneChoice::use);
+        bone.kind=PalmKind::bone;assert(decide_grip_alone(input(npc_box,bone),t,hover)==GripAloneChoice::grab);
+        bone.kind=PalmKind::living;
+        auto in=input(std::nullopt,bone,1050);in.native_fresh=false;assert(decide_grip_alone(in,t,hover)==GripAloneChoice::pending);   // stale verdict: pending
+        in.now_ms=1120;assert(decide_grip_alone(in,t,hover)==GripAloneChoice::pending);   // past the 100 ms fresh wait, inside the 150 ms window: still pending for a living NPC
+        in.now_ms=1160;assert(decide_grip_alone(in,t,hover)==GripAloneChoice::use);        // window over: native, never an unverified living hold
+        in=input(std::nullopt,bone,1000);assert(decide_grip_alone(in,t,hover)==GripAloneChoice::grab);   // fresh "none": the hold
+    }
+    {   // I2: the left hand at the hip or with a gun out is Use at the edge (no 150 ms buffer), even for a prop on the palm or nothing in reach
+        auto in=input(std::nullopt,std::nullopt,1000);in.fast_native=true;assert(decide_grip_alone(in,t,hover)==GripAloneChoice::use);
+        in=input(std::nullopt,on_palm);in.fast_native=true;assert(decide_grip_alone(in,t,hover)==GripAloneChoice::use);
+        in=input(std::nullopt,std::nullopt,1000);assert(decide_grip_alone(in,t,hover)==GripAloneChoice::pending);   // without it the H1 buffer still runs
+    }
     std::cout<<"PASS: grip-alone one-list decision (corpse self-carry yields the grab),  (loot/door Use, prop on palm grabs, 0.12 m gate, block stays Use, choke/takedown/occupied, 100 ms fresh wait, H1 buffer)\n";
 }

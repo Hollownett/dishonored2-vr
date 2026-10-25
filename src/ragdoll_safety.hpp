@@ -172,7 +172,7 @@ private:
 };
 
 struct KillSwitches {
-    bool no_posts{},no_corpse_grab{},no_prop_grasp_point{},legacy_corpse_strength{}; // no_prop_grasp_point (Task 12) restores the old prop drawing; fail-closed means the old drawing too
+    bool no_posts{},no_corpse_grab{},no_prop_grasp_point{},legacy_corpse_strength{},legacy_corpse_lag_release{}; // no_prop_grasp_point (Task 12) restores the old prop drawing; fail-closed means the old drawing too
     static KillSwitches read(const std::filesystem::path& build_dir) {
         return read(build_dir,[](const std::filesystem::path& p,std::error_code& ec) {return std::filesystem::exists(p,ec);});
     }
@@ -184,6 +184,7 @@ struct KillSwitches {
         k.no_corpse_grab=present(build_dir/"no-corpse-grab",exists);
         k.no_prop_grasp_point=present(build_dir/"no-prop-grasp-point",exists);
         k.legacy_corpse_strength=present(build_dir/"legacy-corpse-strength",exists);
+        k.legacy_corpse_lag_release=present(build_dir/"legacy-corpse-lag-release",exists);
         return k;
     }
 private:

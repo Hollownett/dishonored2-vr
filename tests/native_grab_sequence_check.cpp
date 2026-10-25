@@ -104,6 +104,7 @@ int main() {
         assert(early.holding(0) && early.physical_presses()==1 && early.native_presses()==0);
         assert(early.buffer_counts(0).first==1 && early.buffer_counts(0).second==0);
         const auto score=early.focus_score(0,3110);assert(score && score->kind==PalmKind::prop && score->distance<.45);
+        assert(early.focus_score(0,3110+90,100) && !early.focus_score(0,3110+110,100) && early.focus_score(0,3110+110));   // fix round 1: grip-alone takes <= 100 ms, the default stays 250
     }
     {   // a press with nothing reached in 150 ms resolves native once, and the squeeze then passes as today
         NativeGrab late;NativeGrabCheck::setup(late);
@@ -117,6 +118,12 @@ int main() {
         }
         assert(passed==.9f && late.native_presses()==1 && late.physical_presses()==0 && !late.holding(0));
         assert(late.buffer_counts(0).first==0 && late.buffer_counts(0).second==1);
+        {   // I2: the sword hand (no_buffer) decides at the edge: the squeeze passes native on the press frame, no 150 ms wait
+            NativeGrab sword;NativeGrabCheck::setup(sword);
+            sword.publish(0,*owner,away,0,1,4000,true,false,4000,nullptr,0,probe_at({-1,0,0}));sword.filter_native_grip(0,0,1,4000,true,true,false);
+            sword.publish(0,*owner,away,.9f,1,4010,true,false,4010,nullptr,0,probe_at({-1,0,0}));
+            assert(sword.filter_native_grip(0,.9f,1,4010,true,true,false,false,false,true)==.9f && sword.native_presses()==1 && sword.buffer_counts(0).first==0);
+        }
         NativeGrab off;NativeGrabCheck::setup(off);NativeGrabCheck::buffer_ms(off,0);   // grab_buffer_ms 0: today's single-frame decision
         off.publish(0,*owner,away,0,1,4000,true,false,4000,nullptr,0,probe_at({-1,0,0}));off.filter_native_grip(0,0,1,4000,true,true,false);
         off.publish(0,*owner,away,.9f,1,4010,true,false,4010,nullptr,0,probe_at({-1,0,0}));
