@@ -20,7 +20,7 @@ inline constexpr std::uint64_t grip_alone_fresh_wait_ms=100;   // the existing 1
 //  1. an occupied hand, a choke that owns the squeeze or an offered takedown: use (today's path);
 //  2. the physical pick counts only within grip_alone_gate_m (0.12 m: the hand is on it; a right-hand block next to a table still blocks);
 //  3. no fresh native verdict yet and under 100 ms since the edge: pending;
-//  4. both scored with the same probe, the lower cost wins: loot or usable -> use, prop, bone or living (ruling H6) -> grab; a tie goes to Use;
+//  4. the native target IS the physical pick's entity (a corpse's own carry): grab. Else both scored with the same probe, the lower cost wins: loot or usable -> use, prop, bone or living (ruling H6) -> grab; a tie goes to Use;
 //     a native target beyond the palm's 0.45 m gate (a gaze Use) still wins over nothing;
 //  5. nothing in reach (ruling H1): pending while the grab buffer runs (grab_buffer_ms from the edge, 0.12 m gate), then use (today's role).
 inline GripAloneChoice decide_grip_alone(const GripAloneInput& in,const GrabTuning& tuning,double hover_radius) noexcept {
@@ -31,6 +31,9 @@ inline GripAloneChoice decide_grip_alone(const GripAloneInput& in,const GrabTuni
     if(!in.native_fresh && elapsed<grip_alone_fresh_wait_ms) return GripAloneChoice::pending;
     std::optional<double> native_cost;
     if(in.native) if(const auto s=palm_cost(in.probe,*in.native,hover_radius,grab_acquire_distance)) native_cost=s->cost;
+    // A corpse (or prop) whose OWN native Use (the game's carry) is the native target: its whole-body box holds the palm, so it would always win on
+    // cost; the user's decision is that grip alone grabs corpses and props, so the physical hold of that same entity wins (sim, Track G acceptance).
+    if(physical && in.native && in.physical->entity && in.native->id==in.physical->entity) return GripAloneChoice::grab;
     if(physical && (!native_cost || in.physical->cost<*native_cost)) return GripAloneChoice::grab;
     if(in.native) return GripAloneChoice::use;
     if(tuning.grab_buffer_ms>0 && static_cast<double>(elapsed)<tuning.grab_buffer_ms) return GripAloneChoice::pending;

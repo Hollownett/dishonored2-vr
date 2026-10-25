@@ -165,5 +165,22 @@ int main() {
             assert(off.hover_los().requests==0 && !off.hover_los().required && g.hover_los().required);
         }
     }
-    std::cout<<"PASS: hover LOS verdicts (used at the press, stale or moved re-asked, rate limited); owned original stage0/wrapper ordering, no mailbox lock during native call, arbitrary dynamic prop clear/blocked, A-clear-B-dispatch motor ownership, epoch/body/sensor/authored/motion/focus/release invalidation and replaced source rejection\n";
+    {   // buffered_catch_through_los_binds: a fist squeezed with nothing in reach (pending), the prop then reaches the gate: the catch needs a LOS query
+        // (no hover verdict) and must still bind when the query clears it (acceptance sim T124714: caught a corpse, LOS cleared, never bound)
+        fixture();NativeGrab g;NativeGrabCheck::setup(g);g.require_obstruction();
+        const auto o=*native_player_camera(read,fixture_base,fixture_camera);
+        auto pose=fixture_hand;pose.position.x=-.6;
+        UINT64 t=GetTickCount64();g.publish(0,o,pose,0,1,t,true,false,t);g.filter_native_grip(0,0,1,t,true,true,false);NativeGrabCheck::consume(g,t);
+        Sleep(2);t=GetTickCount64();g.publish(0,o,pose,.9f,1,t,true,false,t);
+        assert(g.filter_native_grip(0,.9f,1,t,true,true,false)==0);NativeGrabCheck::consume(g,t);
+        assert((*g.diagnostics())[0].gate==NativeGrab::Gate::buffer_pending);
+        for(double x=-.5;x<=0.01;x+=.1) {   // the hand arrives
+            Sleep(10);t=GetTickCount64();pose.position.x=x;g.publish(0,o,pose,.9f,1,t,true,false,t);g.filter_native_grip(0,.9f,1,t,true,true,false);NativeGrabCheck::consume(g,t);
+            if((*g.diagnostics())[0].gate==NativeGrab::Gate::obstruction_pending) break;
+        }
+        assert((*g.diagnostics())[0].gate==NativeGrab::Gate::obstruction_pending && g.buffer_counts(0).first==1);
+        unsigned asked=0;g.service_obstruction(o,GetTickCount64(),[&](const NativeGrab::ObstructionRequest&)->std::optional<bool>{++asked;return true;});
+        assert(asked==1 && g.holding(0) && g.physical_presses()==1);
+    }
+    std::cout<<"PASS: buffered catch through a LOS query binds; hover LOS verdicts (used at the press, stale or moved re-asked, rate limited); owned original stage0/wrapper ordering, no mailbox lock during native call, arbitrary dynamic prop clear/blocked, A-clear-B-dispatch motor ownership, epoch/body/sensor/authored/motion/focus/release invalidation and replaced source rejection\n";
 }

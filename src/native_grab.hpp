@@ -416,21 +416,21 @@ private:
             if(living_pick) {
                 const auto& target=living_targets[*living_pick];lane.living_focus=living_bones[*living_pick];
                 if(const auto s=palm_cost(p.palm,target,tuning_.hover_radius_m,grab_retain_distance)) {
-                    lane.score=FocusScore{target.id,target.kind,s->cost,std::isfinite(pick.runner_up)?pick.runner_up:0.,s->distance};
+                    lane.score=FocusScore{target.id,target.kind,s->cost,std::isfinite(pick.runner_up)?pick.runner_up:0.,s->distance,lane.living_focus->entity};
                     const auto to=s->point-palm_point(p.palm);lane.palm_dot=length(to)>1e-9?dot(p.palm.direction,to*(1/length(to))):1.;
                 }
             }
             if(lane.focus) {
                 const auto target=palm_body_target(*lane.focus,tuning_);
                 if(const auto s=palm_cost(p.palm,target,tuning_.hover_radius_m,grab_retain_distance)) {
-                    lane.score=FocusScore{target.id,target.kind,s->cost,std::isfinite(pick.runner_up)?pick.runner_up:0.,s->distance};
+                    lane.score=FocusScore{target.id,target.kind,s->cost,std::isfinite(pick.runner_up)?pick.runner_up:0.,s->distance,lane.focus->entity};
                     const auto to=s->point-palm_point(p.palm);lane.palm_dot=length(to)>1e-9?dot(p.palm.direction,to*(1/length(to))):1.;
                 }
             }
         } else {   // build/legacy-palm-select, or no valid palm probe this frame (counted as scoring_fallback): the v611 nearest-AABB pick
             if(!legacy_palm_select_) (void)lane.selection.update(p.palm,{},tuning_.hover_radius_m,now);
             lane.focus=grab_focus_candidate(list,p.hand.position,excluded,false,preferred,excluded_handle);
-            if(lane.focus) lane.score=FocusScore{palm_body_id(*lane.focus),lane.focus->bone>=0?PalmKind::bone:PalmKind::prop,0.,0.,lane.focus->contact_distance(p.hand.position)};
+            if(lane.focus) lane.score=FocusScore{palm_body_id(*lane.focus),lane.focus->bone>=0?PalmKind::bone:PalmKind::prop,0.,0.,lane.focus->contact_distance(p.hand.position),lane.focus->entity};
         }
         lane.focus_tick=now;lane.focus_hand=p.hand.position;lane.focus_excluded=excluded;
         return lane.focus;
@@ -1292,7 +1292,9 @@ public:
             const auto candidate=focus_body(side,now,true);
             const auto gap=candidate?focus_gap(lane,*candidate):std::nullopt;
             const auto step=lane.buffer.step(now,gap,candidate?candidate->entity_id:0);
-            if(step==GrabIntentBuffer::Step::caught) {lane.owner.catch_pending();caught=true;lane.catch_tick=now;}
+            // caught: re-arm the press latch now (the dispatcher sampled this squeeze as not ours while it was pending), so the bind works whether the press
+            // is decided below or after a LOS query (service_obstruction samples and binds; acceptance sim T124714 caught a corpse but never bound it)
+            if(step==GrabIntentBuffer::Step::caught) {lane.owner.catch_pending();caught=true;lane.catch_tick=now;lane.grab.arm();}
             else if(step!=GrabIntentBuffer::Step::waiting) {
                 const auto role_before=lane.owner.role();lane.owner.resolve_pending(false);note_role_change_locked(role_before,lane);++native_presses_;
             }

@@ -66,5 +66,14 @@ int main() {
         auto twin=box(13,PalmKind::usable,{.07,0,.015},.05,t);auto tie=physical(box(14,PalmKind::prop,{.07,0,.015},.05,t));
         assert(decide_grip_alone(input(twin,tie),t,hover)==GripAloneChoice::use);
     }
-    std::cout<<"PASS: grip-alone one-list decision (loot/door Use, prop on palm grabs, 0.12 m gate, block stays Use, choke/takedown/occupied, 100 ms fresh wait, H1 buffer)\n";
+    {   // corpse_own_carry_yields_grab: the corpse's own native carry (its whole-body box holds the palm: always cheaper) against its bone on the
+        // palm: the user's decision (grip alone grabs corpses) -> grab. Another entity's usable with the same geometry still wins Use.
+        const auto body=box(0x9000,PalmKind::usable,{.07,0,.015},.3,t);auto bone=physical(box(15,PalmKind::bone,{.07,0,.015},.05,t));
+        assert(palm_cost(probe(),body,hover,grab_acquire_distance)->cost<bone.cost);
+        bone.entity=0x9000;assert(decide_grip_alone(input(body,bone),t,hover)==GripAloneChoice::grab);
+        bone.entity=0x9001;assert(decide_grip_alone(input(body,bone),t,hover)==GripAloneChoice::use);
+        auto far_bone=bone;far_bone.entity=0x9000;far_bone.distance=.2;assert(decide_grip_alone(input(body,far_bone,1200),t,hover)==GripAloneChoice::use);   // not on it
+        auto in=input(body,bone);bone.entity=0x9000;in.physical=bone;in.choke_owns=true;assert(decide_grip_alone(in,t,hover)==GripAloneChoice::use);
+    }
+    std::cout<<"PASS: grip-alone one-list decision (corpse self-carry yields the grab),  (loot/door Use, prop on palm grabs, 0.12 m gate, block stays Use, choke/takedown/occupied, 100 ms fresh wait, H1 buffer)\n";
 }
