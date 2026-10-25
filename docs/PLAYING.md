@@ -92,7 +92,7 @@ From there you can set:
 - monitor view: what the desktop game window shows while you play - right eye (default: copying one eye costs less render time than both), left eye, or both eyes side by side
 - turning (snap or smooth)
 - recenter
-- Recenter on scripted moments (on by default): in a climb, takedown or similar scripted action, the view eases gently to put the action in front of you, then hands the view back with no jump. Off keeps the old behaviour.
+- Recenter on scripted moments (on by default): in a climb, takedown or similar scripted action, the view eases gently to put the action in front of you, then hands the view back without a jump (confirmed only for a climb in the simulator; not yet confirmed in the headset). Off keeps the old behaviour.
 - Cutscenes: VR comfort (default; a 3D scene with a comfort vignette when the camera moves), VR full (the scene's camera moves you with no vignette) or Theater (the flat screen in front of you). The first moment of a cutscene is black while the 3D picture forms.
 - legacy avatar calibration; it is not required by the current hands-only mode
 
