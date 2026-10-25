@@ -32,6 +32,9 @@ def check(probe: str, xr: str) -> None:
     assert probe.count("adopt_first_start_aa(") == 1, "only one adopt call site"
     assert re.search(r"first_start_pending=false;\s*game_xr->adopt_first_start_aa\(", probe), "the pending flag must clear before adopting"
     assert "decision!=d2vr::FirstStartAa::wait" in probe, "wait must retry next Present"
+    late = probe.index("xr_gameplay_frames>0) {", guard)
+    assert guard < late < adopt and 'first_start_state="late"' in probe[late:adopt], "v613: the first-start pass must never switch AA once a level has rendered"
+    assert "fsr4_supported(chain)" in probe[guard:adopt] and "write_aa_gpu_caps(fsr4)" in probe[guard:adopt], "v613: FSR 4 support and the launcher caps file come from the Present pass"
     assert "settings_.aa_chosen(),settings_.crosshair(),settings_.scripted_recenter(),settings_.cutscene_mode()}" in xr, "every GameXr save must pass both new fields"
     assert xr.count("save_preferences(") == 2 and xr.count("settings_.aa_chosen(),settings_.crosshair(),settings_.scripted_recenter(),settings_.cutscene_mode()}") == 2, "both GameXr saves must carry the new fields"
     assert "aa_chosen_preference,crosshair_preference,scripted_recenter_preference,static_cast<d2vr::CutsceneMode>(cutscene_mode_setting.load()));" in probe, "GameXr must be constructed with the saved marker and crosshair"
@@ -54,6 +57,7 @@ mutations = (
     (probe.replace("if(game_xr->persist_preferences()) fs::remove(crosshair_legacy_file,legacy_ec);", "{game_xr->persist_preferences();fs::remove(crosshair_legacy_file,legacy_ec);}",1), xr),
     (probe, xr.replace("if(log_note) log_note(", "if(false) log_note(",1)),
     (probe.replace('std::ifstream knob(root/L"build"/L"aa-mode")', 'std::ifstream knob(root/L"build"/L"aa-mode-gone")', 1), xr),
+    (probe.replace("xr_gameplay_frames>0) {", "false) {", 1), xr),
 )
 for index, (mutated_probe, mutated_xr) in enumerate(mutations):
     assert (mutated_probe, mutated_xr) != (probe, xr), f"Mutation {index} did not reach its production target"

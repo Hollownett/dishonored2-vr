@@ -127,6 +127,12 @@ inline std::vector<unsigned char> settings_panel_image(const VrSettings& setting
     struct Row {std::wstring name,value;double slider;std::wstring help;};
     const auto split=[&](const std::wstring& all,double slider,const wchar_t* help) {
         const auto at=all.find(L": ");return Row{all.substr(0,at),at==std::wstring::npos?L"":all.substr(at+2),slider,help};};
+    const auto aa_row=[](Row r,bool performance) {   // v613: performance mode (one eye per frame) uses SMAA in place of FSR/DLSS; say so
+        if(!performance) return r;
+        const auto at=r.value.find(L" (");if(at!=std::wstring::npos) r.value.resize(at);
+        r.value+=L" (SMAA in perf. mode)";
+        r.help=L"Performance mode draws one eye per frame and uses SMAA; turn performance mode off to use FSR/DLSS. The in-game choice is kept for then.";
+        return r;};
     std::wostringstream scale;scale<<std::fixed<<std::setprecision(1)<<settings.requested()<<L"x";
     std::wostringstream size;size<<width<<L" x "<<height<<L" per eye";
     if(effective+.01<settings.requested()) size<<L" ("<<std::fixed<<std::setprecision(2)<<effective<<L"x limit)";
@@ -137,9 +143,9 @@ inline std::vector<unsigned char> settings_panel_image(const VrSettings& setting
     const auto hud_fraction=(settings.hud_percent()-55)/45.;
     const std::array<Row,settings_row_count> rows{{
         {L"Resolution",scale.str(),(settings.requested()-.5)/1.5,L"Sets how many pixels each eye renders. Higher is sharper but slower; the mod caps it to what the GPU can hold. Now "+size.str()+L"."},
-        split(settings.temporal_aa_text(),-1,settings.dlss_available()?
+        aa_row(split(settings.temporal_aa_text(),-1,settings.dlss_available()?
             L"Smooths shimmering edges over time. Game TAA is the original; FSR Native and DLAA use full resolution; Quality and Balanced render fewer pixels and upscale. DLAA and DLSS Quality use NVIDIA DLSS. The label shows the active backend.":
-            L"Smooths shimmering edges over time. Game TAA is the original; FSR Native uses full resolution; Quality and Balanced render fewer pixels and upscale. The label shows the active backend."),
+            L"Smooths shimmering edges over time. Game TAA is the original; FSR Native uses full resolution; Quality and Balanced render fewer pixels and upscale. The label shows the active backend."),settings.performance_mode_replaces_aa()),
         {L"Edge anti-aliasing",settings.antialiasing()?L"SMAA Ultra":L"Native only",-1,L"SMAA Ultra cleans up jagged edges that the temporal pass misses. Native only keeps the game's own edge handling."},
         split(settings.mirror_text(),-1,L"Chooses what the desktop monitor mirrors: both eyes side by side, one eye alone, or off (the fastest). It does not change the headset image."),
         split(settings.sharpness_text(),settings.sharpness(),L"Contrast sharpening applied after anti-aliasing. Raise it if the image looks soft, lower it if edges crawl."),

@@ -59,6 +59,23 @@ public static class PrefsTests
         var other = Prefs.Merge(new Prefs { TemporalAa = 2 }, new Prefs { TemporalAa = 2, Hud = 90 }, new Prefs { TemporalAa = 7, AaChosen = 1 });
         check("merge_save_keeps_in_game_aa_and_chosen", other.AaChosen == 1 && other.TemporalAa == 7 && other.Hud == 90);
 
+        // v613: the default AA follows the GPU (mirrors src/aa_first_start.hpp first_start_aa / default_aa_mode).
+        check("default_aa_nvidia_rtx_dlss_is_dlaa", Prefs.DefaultAa(false, 2, dlss: true, fsr4: false) == 7 && Prefs.DefaultAa(true, 0, dlss: true, fsr4: true) == 7);
+        check("default_aa_fsr4_gpu_is_fsr4_native", Prefs.DefaultAa(false, 2, dlss: false, fsr4: true) == 5 && Prefs.DefaultAa(true, 0, dlss: false, fsr4: true) == 5);
+        check("default_aa_other_gpu_is_fsr3_native", Prefs.DefaultAa(false, 2, dlss: false, fsr4: false) == 2);
+        check("default_aa_unchosen_old_file_keeps_mode_without_better_upscaler", Prefs.DefaultAa(true, 0, dlss: false, fsr4: false) == 0);
+        check("default_aa_never_overrides_a_choice", Prefs.WithDefaultAa(new Prefs { TemporalAa = 0, AaChosen = 1 }, true, true, true).TemporalAa == 0
+            && Prefs.WithDefaultAa(new Prefs(), false, true, false).TemporalAa == 7);
+        var shown = Prefs.WithDefaultAa(new Prefs(), false, false, true);
+        var savedDefault = Prefs.Merge(shown, shown, new Prefs());
+        check("merge_saves_the_shown_gpu_default_when_nothing_chosen", savedDefault.TemporalAa == 5 && savedDefault.AaChosen == 1);
+        check("aa_help_notes_performance_mode_only_when_on", Prefs.AaHelpFor("base", false) == "base" && Prefs.AaHelpFor("base", true).Contains("SMAA") && Prefs.AaHelpFor("base", true).EndsWith("base"));
+        var caps = Tmp(); Directory.CreateDirectory(Path.GetDirectoryName(caps)!);
+        File.WriteAllText(caps, "1 4098 0 1\n"); var capsYes = Prefs.Fsr4Supported(caps);
+        File.WriteAllText(caps, "1 4318 1 0\n"); var capsNo = Prefs.Fsr4Supported(caps);
+        File.WriteAllText(caps, "2 4098 0 1\n"); var capsFuture = Prefs.Fsr4Supported(caps);
+        check("fsr4_caps_file_read_from_dll", capsYes && !capsNo && !capsFuture && !Prefs.Fsr4Supported(caps + ".missing"));
+
         var fx10p = Path.Combine(AppContext.BaseDirectory, "vr-settings-v10.cfg");
         var f2 = Tmp(); Prefs.Merge(fx10, Prefs.Load(fx10p), Prefs.Load(fx10p)).Save(f2);
         check("merge_without_edits_equals_disk", File.ReadAllBytes(f2).SequenceEqual(File.ReadAllBytes(fx10p)));

@@ -67,9 +67,37 @@ public sealed class Prefs
         if (edited.Crosshair != baseline.Crosshair) m.Crosshair = edited.Crosshair;
         if (edited.ScriptedRecenter != baseline.ScriptedRecenter) m.ScriptedRecenter = edited.ScriptedRecenter;
         if (edited.CutsceneMode != baseline.CutsceneMode) m.CutsceneMode = edited.CutsceneMode;
-        if (edited.TemporalAa != baseline.TemporalAa) m.TemporalAa = edited.TemporalAa;
+        if (edited.TemporalAa != baseline.TemporalAa || disk.AaChosen == 0) m.TemporalAa = edited.TemporalAa; // v613: with no choice on disk the row shown (the GPU default or an edit) is what gets saved
         m.AaChosen = 1; // v613: any launcher save records the AA row it shows as the player's choice (the game's one-time DLAA default must not override it); an in-game change later still wins and the launcher mirrors it
         return m;
+    }
+
+    /// <summary>v613: performance mode (alternate-eye) draws one eye per frame and uses SMAA in place of FSR/DLSS (modes 2-8); the AA help says so while that feature row is on.</summary>
+    public const string PerformanceModeAaNote = "Performance mode is on: it draws one eye per frame and uses SMAA, so FSR/DLSS is not used. Turn performance mode off to use FSR/DLSS.";
+    public static string AaHelpFor(string help, bool performanceMode) => performanceMode ? PerformanceModeAaNote + " " + help : help;
+
+    /// <summary>v613: the default anti-aliasing follows the GPU, mirroring the DLL's first_start_aa (src/aa_first_start.hpp): DLSS offered -> DLAA (7);
+    /// FSR 4 runs on this GPU -> FSR 4 native (5); a fresh install -> FSR 3 native (2); a file saved without the AA-chosen flag keeps its mode otherwise.</summary>
+    public static int DefaultAa(bool fileExisted, int saved, bool dlss, bool fsr4) => dlss ? 7 : fsr4 ? 5 : !fileExisted ? 2 : saved;
+
+    /// <summary>The settings with the GPU default in place of an unchosen AA mode (a chosen one, in game or here, is kept).</summary>
+    public static Prefs WithDefaultAa(Prefs p, bool fileExisted, bool dlss, bool fsr4)
+    {
+        if (p.AaChosen == 0) p.TemporalAa = DefaultAa(fileExisted, p.TemporalAa, dlss, fsr4);
+        return p;
+    }
+
+    /// <summary>artifacts\aa-gpu-caps.txt, written by the DLL once it knows the game's adapter: "1 vendor dlss fsr4". True only when it says FSR 4 created
+    /// on that adapter (the FSR 4 backend's own check: signed AMD provider, D3D12 SM 6.6, a genuine FSR 4 version). No file yet (the game never ran) = false.</summary>
+    public static bool Fsr4Supported(string capsFile)
+    {
+        try
+        {
+            if (!File.Exists(capsFile)) return false;
+            var t = File.ReadAllText(capsFile).Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
+            return t.Length >= 4 && t[0] == "1" && t[3] == "1";
+        }
+        catch (Exception) { return false; }
     }
 
     public string Validate()

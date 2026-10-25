@@ -335,6 +335,16 @@ int main() {
             require(crosshair_a.crosshair && *crosshair_a.crosshair==crosshair_before && rows.crosshair()==crosshair_before,"A did not toggle the crosshair");
             require(settings_row_top+settings_row_pitch*(settings_row_count-1)+settings_row_height<settings_plate_top,"Last row overlaps the plate");
             require(settings_plate_top+settings_plate_height<=settings_footer_top && settings_footer_top+settings_footer_height<=560,"Plate/footer layout leaves the bitmap or overlaps");
+            {   // v613: performance mode is honest about SMAA replacing FSR/DLSS, and the help still fits the plate
+                VrSettings perf;perf.initialize(1.5,true,{TurnControl::Mode::smooth,45,120},MirrorMode::both_eyes,.5,6);perf.upscaler_generation(3);
+                require(!perf.performance_mode_replaces_aa(),"Performance mode flag must default off");
+                perf.performance_mode(true);require(perf.performance_mode_replaces_aa(),"Performance mode with FSR must replace the AA");
+                int overflow=-1;const auto on=settings_panel_image(perf,1.23,3722,3850,{},&overflow);
+                require(overflow==0,"The performance-mode AA help does not fit the description plate");
+                perf.performance_mode(false);const auto off=settings_panel_image(perf,1.23,3722,3850,{},&overflow);
+                require(on!=off,"The settings panel must differ in performance mode");
+                perf.set_temporal_aa(1);perf.performance_mode(true);require(!perf.performance_mode_replaces_aa(),"Game TAA is not replaced by SMAA");
+            }
             for(const bool dlss_offered:{false,true}) {   // every row's description fits the plate's text rect (three 13 px lines), with the longest resolution note
                 VrSettings fit;fit.initialize(1.5,true,{TurnControl::Mode::smooth,45,120},MirrorMode::both_eyes,.5,dlss_offered?8:6);fit.dlss_available(dlss_offered);fit.upscaler_generation(dlss_offered?5:3);
                 int overflow=-1;settings_panel_image(fit,1.23,3722,3850,{},&overflow);
