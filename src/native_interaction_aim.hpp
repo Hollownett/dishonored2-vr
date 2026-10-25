@@ -145,7 +145,8 @@ class NativeInteractionAim {
     using Logic=UINT (*)();
     // reach: the game's own Use distance along this ray (a gaze Use), not the grab-sized hand volume.
     struct Publication {std::uint64_t tick{},epoch{};std::uintptr_t player{},camera{};int generation{};WorldTrackedPose hand{};bool active{};Vec3 volume_centre{};bool reach{};std::optional<WorldTrackedPose> grip;std::optional<rig::NativeCarrySnapshot> carry;
-        PalmProbe palm{};};   // G1: the raw-controller palm probe (C9/C10) that orders this hand's native Use hits
+        PalmProbe palm{};     // G1: the raw-controller palm probe (C9/C10) that orders this hand's native Use hits
+        std::optional<Vec3> clamped_palm;};   // H16: the drawn, world-clamped palm (dxgi_probe: valid clamp output, fresh); the loot LOS origin
     struct Contact {
         std::uintptr_t owner{},sensor{},world{},component{};unsigned spawn{};
         rig::Identity sensor_identity{},camera_identity{},component_identity{};
@@ -186,6 +187,7 @@ class NativeInteractionAim {
     RangeOrigin range_origin_{};bool range_origin_enabled_{};
     inline static constexpr std::array<unsigned char,8> range_origin_code{0x48,0x8d,0x81,0xd8,0,0,0,0xc3};
     inline static thread_local std::array<float,4> hand_range_origin_{};
+    inline static thread_local std::array<float,4> loot_los_origin_{};   // H16: the clamped palm handed to 3b7b90 as its origin (game thread)
     inline static constexpr std::array<std::uintptr_t,3> ranking_rvas{0x92630,0x3a37f0,0x3b7b90};
     inline static constexpr std::array<const char*,3> ranking_code{"488954241048894c240857415541564883ec508b024c8db180820000498bf844","44884c242044894424188954241048894c2408535556574881ec880000004863","488bc4554154415541564157488da8f8faffff4881ece005000048c745e0feff"};
     Read read_{};Logic logic_{};std::uintptr_t base_{};
@@ -202,6 +204,7 @@ class NativeInteractionAim {
     std::atomic<UINT> owned_depth_{};
     std::atomic<UINT64> volume_requests_{},volume_rejected_{},ranked_{},ranking_rejected_{},direct_shortcuts_filtered_{},occluded_scan_continued_{};
     std::atomic<UINT64> loot_prompt_lingers_dropped_{}; // H14: loot prompt lingers ended by the hand's own cycle
+    std::atomic<UINT64> loot_hand_los_{},loot_eye_los_{}; // H16: stage-0 loot LOS calls swept from the clamped palm / left at the eye (no clamped palm)
     std::atomic<UINT64> palm_beam_fallbacks_{}; // hand-mode cycles ordered by the v610 beam because the palm probe was invalid
     std::atomic<UINT64> hand_range_origins_{};
     std::atomic<UINT64> character_gaze_admitted_{},character_gaze_declined_{};
@@ -292,7 +295,7 @@ class NativeInteractionAim {
     }
     // After the original 3b7b90 returned (the out byte is read, never written): the row for this call.
     void loot_los_row(int side,std::uintptr_t sensor,std::uintptr_t owner,std::uintptr_t caller,std::uintptr_t origin,std::uintptr_t point,
-            unsigned range,std::uintptr_t result,std::uintptr_t output) noexcept {
+            unsigned range,std::uintptr_t result,std::uintptr_t output,bool hand_origin) noexcept {
         try {
             const auto& c=loot_los_capture_;
             const auto from=rig::value<std::array<float,3>>(read_,origin);const auto to=rig::value<std::array<float,3>>(read_,point);
@@ -323,7 +326,7 @@ class NativeInteractionAim {
             std::lock_guard<std::mutex> lock(loot_reach_mutex_);
             if(!loot_los_csv_.is_open() || loot_los_rows_>=loot_reach_row_cap) return;
             auto& o=loot_los_csv_;
-            o<<GetTickCount64()<<','<<side<<','<<owner<<','<<std::hex<<(caller-base_)<<std::dec<<','<<(result&0xffu)<<','<<(out?static_cast<int>(*out):-1);
+            o<<GetTickCount64()<<','<<side<<','<<owner<<','<<std::hex<<(caller-base_)<<std::dec<<','<<(result&0xffu)<<','<<(out?static_cast<int>(*out):-1)<<','<<(hand_origin?1:0);
             for(unsigned k=0;k<3;++k) {o<<',';if(from) o<<(*from)[k];}
             for(unsigned k=0;k<3;++k) {o<<',';if(to) o<<(*to)[k];}
             o<<','<<std::hex<<(shape_vt && *shape_vt>=base_?*shape_vt-base_:0)<<std::dec<<',';if(shape_radius) o<<*shape_radius;
@@ -1389,6 +1392,21 @@ private:
             rig::value<int>(read_,scope.camera.camera+0x25200)==0 && rig::value<int>(read_,scope.camera.camera+0x25204)==0 &&
             rig::value<unsigned char>(read_,scope.camera.camera+0x251b9)==0 && rig::value<unsigned char>(read_,scope.camera.camera+0x25260)==0;
     }
+    // H16 (fix round 1): 3b7b90's origin for this call. A takeable owner's stage-0 LOS (callers 0x3b8b05 / 0x3b87b5, range 0, the routed
+    // hand's fresh publication, hand mode) sweeps from the hand's clamped palm: the original is handed a pointer to a thread-local copy, exactly
+    // as range_origin() hands the 3b80a0 range check one; nothing in the game is written. Everything else keeps the native eye pointer.
+    const void* loot_los_origin(const Context* scope,void* sensor,void* entity,const void* point,unsigned range,std::uintptr_t caller,const void* native) noexcept {
+        try {
+            if(!active_.load(std::memory_order_acquire) || !scope || scope!=context_ || scope->stage!=0 || scope->side<0 || range!=0 ||
+               (caller!=base_+0x3b8b05 && caller!=base_+0x3b87b5) || reinterpret_cast<std::uintptr_t>(sensor)!=scope->sensor ||
+               !fresh(*scope,GetTickCount64()) || !takeable(reinterpret_cast<std::uintptr_t>(entity))) return native;
+            const auto end=rig::value<std::array<float,3>>(read_,reinterpret_cast<std::uintptr_t>(point));
+            const auto hand=end?loot_los_hand_origin(true,!scope->hand.reach,scope->hand.clamped_palm,Vec3{(*end)[0],(*end)[1],(*end)[2]}):std::nullopt;
+            if(!hand) {++loot_eye_los_;return native;}
+            loot_los_origin_={static_cast<float>(hand->x),static_cast<float>(hand->y),static_cast<float>(hand->z),0.f};++loot_hand_los_;
+            return loot_los_origin_.data();
+        } catch(...) {return native;}
+    }
     static std::uintptr_t __fastcall occlusion(void* sensor,void* entity,const void* origin,const void* axis,
             const void* point,unsigned range,unsigned char* output) {
         return instance_->occlusion_result(sensor,entity,origin,axis,point,range,output,reinterpret_cast<std::uintptr_t>(_ReturnAddress()));
@@ -1425,10 +1443,11 @@ private:
                (caller==base_+0x3b8b05 || caller==base_+0x3b87b5) && reinterpret_cast<std::uintptr_t>(sensor)==observed_scope->sensor)
                 if(const auto* candidate=loot_candidate(reinterpret_cast<std::uintptr_t>(entity));candidate && candidate->takeable) loot_los_capture_.armed=true;
         } catch(...) {}
-        const auto result=occlusion_(sensor,entity,origin,axis,point,range,output); // original once, raw return preserved
+        const auto* los_origin=loot_los_origin(observed_scope,sensor,entity,point,range,caller,origin); // H16: the clamped palm for loot, else origin
+        const auto result=occlusion_(sensor,entity,los_origin,axis,point,range,output); // original once, raw return preserved
         const bool loot_los_armed=loot_los_capture_.armed;loot_los_capture_.armed=false;
         if(loot_los_armed) loot_los_row(observed_scope->side,reinterpret_cast<std::uintptr_t>(sensor),reinterpret_cast<std::uintptr_t>(entity),caller,
-            reinterpret_cast<std::uintptr_t>(origin),reinterpret_cast<std::uintptr_t>(point),range,result,reinterpret_cast<std::uintptr_t>(output));
+            reinterpret_cast<std::uintptr_t>(los_origin),reinterpret_cast<std::uintptr_t>(point),range,result,reinterpret_cast<std::uintptr_t>(output),los_origin!=origin);
         try { // G1 trace: this candidate's stage-0 LOS call and its raw result (read-only: neither the return value nor the out byte is touched)
             if(loot_cycle_.open && observed_scope && observed_scope==context_ && observed_scope->stage==0 && range==0 &&
                (caller==base_+0x3b8b05 || caller==base_+0x3b87b5))
@@ -1745,7 +1764,8 @@ public:
     // native eligibility is lost. An opposite grip always overrides this dwell.
     void publish_hands(const NativePlayerCamera& camera,std::array<std::optional<WorldTrackedPose>,2> hands,
             std::uint64_t epoch,std::uint64_t tick,std::array<std::optional<Vec3>,2> grip_centres={},std::array<bool,2> reach={},
-            std::array<std::optional<WorldTrackedPose>,2> grips={},std::optional<rig::NativeCarrySnapshot> carry={},std::array<PalmProbe,2> palms={}) {
+            std::array<std::optional<WorldTrackedPose>,2> grips={},std::optional<rig::NativeCarrySnapshot> carry={},std::array<PalmProbe,2> palms={},
+            std::array<std::optional<Vec3>,2> clamped_palms={}) {
         std::lock_guard<std::mutex> lock(mutex_);epoch_hint_=epoch;
         for(unsigned side=0;side<2;++side) if(hands_[side].active!=hands[side].has_value() || (hands_[side].active && (hands_[side].epoch!=epoch ||
             hands_[side].player!=camera.player || hands_[side].camera!=camera.camera ||
@@ -1768,6 +1788,7 @@ public:
             if(published_[side] && grips[side] && grab_pose_valid(*grips[side]))hands_[side].grip=grips[side];
             if(published_[side])hands_[side].carry=carry;
             if(published_[side])hands_[side].palm=palms[side];
+            if(published_[side] && clamped_palms[side] && finite(*clamped_palms[side]))hands_[side].clamped_palm=clamped_palms[side];
         }
         routing_.next(published_,tick,qualified_selected(tick),moving);if(revision!=routing_.revision()) invalidate_selection();
     }
@@ -1973,7 +1994,7 @@ public:
         // Task 4 LOS trace: the sibling file, and the collector-sort hook that copies 3b7b90's hits (only while this trace is on).
         loot_los_csv_.close();loot_los_rows_=0;loot_los_csv_.open(file.parent_path()/L"native-loot-los.csv",std::ios::trunc);
         if(!loot_los_csv_) {loot_reach_csv_.close();loot_reach_owners_csv_.close();return false;}
-        loot_los_csv_<<std::setprecision(7)<<"t,side,owner,caller,result,out,origin_x,origin_y,origin_z,point_x,point_y,point_z,shape_vt,shape_radius,any_hit,hits,target_hit,block_hit";
+        loot_los_csv_<<std::setprecision(7)<<"t,side,owner,caller,result,out,hand_origin,origin_x,origin_y,origin_z,point_x,point_y,point_z,shape_vt,shape_radius,any_hit,hits,target_hit,block_hit";
         for(const char* p:{"block","h0","h1","h2","h3"}) for(const char* f:{"frac","x","y","z","nx","ny","nz","entity","spawn","vt","body","motion","target","transparent"}) loot_los_csv_<<','<<p<<'_'<<f;
         loot_los_csv_<<'\n';loot_los_csv_.flush();
         if(!loot_los_sort_enabled_ && route_ && occlusion_) {
@@ -2049,7 +2070,7 @@ public:
         log_<<"tick_ms,thread,stage,sensor,camera,routed";
         for(const auto* prefix:{"native","effective"}) for(unsigned i=0;i<12;++i) log_<<','<<prefix<<i;log_<<'\n';
         for(auto& count:query_outcomes_)count=0;
-        stage_calls_=rays_=routed_=rejected_=samples_=overlap_=volume_requests_=volume_rejected_=ranked_=ranking_rejected_=direct_shortcuts_filtered_=occluded_scan_continued_=0;palm_beam_fallbacks_=0;loot_prompt_lingers_dropped_=0;instance_=this;
+        stage_calls_=rays_=routed_=rejected_=samples_=overlap_=volume_requests_=volume_rejected_=ranked_=ranking_rejected_=direct_shortcuts_filtered_=occluded_scan_continued_=0;palm_beam_fallbacks_=0;loot_prompt_lingers_dropped_=0;loot_hand_los_=0;loot_eye_los_=0;instance_=this;
         hand_range_origins_=0;
         const std::array<void*,6> hooks{reinterpret_cast<void*>(&stage<0>),reinterpret_cast<void*>(&stage<1>),reinterpret_cast<void*>(&stage<2>),
             reinterpret_cast<void*>(&direct),reinterpret_cast<void*>(&queue<0>),reinterpret_cast<void*>(&queue<1>)};
@@ -2263,9 +2284,11 @@ public:
     UINT64 ranking_rejected() const {return ranking_rejected_.load();}
     UINT64 palm_beam_fallbacks() const {return palm_beam_fallbacks_.load();}
     UINT64 loot_prompt_lingers_dropped() const {return loot_prompt_lingers_dropped_.load();}
-    // Hands plan Task 4 interface (Task 15 grab_focus): 'A' / 'B' when a floor/drawer loot fix branch is active, 0 when none is. None is:
-    // the floor coin's LOS blocker is the cot's hull, not its support (docs/native-use-los-3b7b90.md); the drawer was closed.
-    static constexpr char loot_fix_branch() noexcept {return 0;}
+    UINT64 loot_hand_los() const {return loot_hand_los_.load();}
+    UINT64 loot_eye_los() const {return loot_eye_los_.load();}
+    // Hands plan Task 4 interface (Task 15 grab_focus): the active floor/drawer loot fix branch. 'H' (fix round 1, ruling H16): loot LOS is
+    // swept from the clamped palm (the floor coin under a cot's rail was blocked by the cot's hull from the eye; docs/native-use-los-3b7b90.md).
+    static constexpr char loot_fix_branch() noexcept {return 'H';}
     UINT64 direct_shortcuts_filtered() const {return direct_shortcuts_filtered_.load();}
     UINT64 volume_requests() const {return volume_requests_.load();}
     UINT64 volume_rejected() const {return volume_rejected_.load();}

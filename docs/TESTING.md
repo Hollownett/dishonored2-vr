@@ -47,7 +47,7 @@ Write lines to `artifacts/vr-command.txt` while the mod runs; answers go to `art
   H14): `prompt lies` (a loot prompt sample that no hand's latest cycle before it selected) and, per grip-Use press in the case window (lock
   starts in `native-interaction-targets.csv`), the owner that left every set within 500 ms must equal the prompt at the press and must have
   had a clear LOS on some frame. Task 4 adds `native-loot-los.csv` under the same knob: one row per stage-0 3b7b90 LOS call on a takeable set
-  owner with its origin, end point, sweep shape and the cast's hits in the order 3b7b90 walks them, the blocking hit first
+  owner with its origin (`hand_origin` 1: swept from the clamped palm, fix round 1 / H16), end point, sweep shape and the cast's hits in the order 3b7b90 walks them, the blocking hit first
   (`docs/native-use-los-3b7b90.md`); it installs a hook on the collector sort 0xc85470 only while the knob is on. `/home` was full during that work: `--out-root` on another disk keeps
   the snapshots off it.
 

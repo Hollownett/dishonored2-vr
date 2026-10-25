@@ -279,6 +279,18 @@ bool order_native_use_hits(NativeUseHit* hits,unsigned count,const PalmProbe& pr
 inline bool held_prompt_survives_cycle(std::uintptr_t held_owner,bool held_loot,std::uintptr_t cycle_owner) noexcept {
     return !held_owner || !held_loot || cycle_owner==held_owner;
 }
+// User decision 2026-10-25 / ruling H16 (hands plan Task 4 fix round 1): loot line of sight is judged FROM THE HAND. The native Use LOS
+// (0x3b7b90, docs/native-use-los-3b7b90.md) sweeps from the camera eye to the loot's hit point; for a takeable owner in hand mode it sweeps
+// from the CLAMPED palm instead: the drawn hand that the phase-1 hand clamp (or the hand body) kept out of the world, never the raw
+// controller, so a controller pushed through a wall cannot take what is behind it. No clamped palm this cycle (no clamp, a yield, a
+// re-acquire, stale), not loot, gaze/reach mode, or a palm implausibly far from the hit point: the eye (nullopt). Walls, closed drawers
+// and doors between the hand and the item still block: the same sweep, filter and walk, only its start moves.
+inline constexpr double loot_hand_los_max_m=1.0;   // the hand-volume gate is 0.45/0.55 m from the palm; a farther palm is not this hand's
+inline std::optional<Vec3> loot_los_hand_origin(bool takeable,bool hand_mode,const std::optional<Vec3>& clamped_palm,Vec3 point) noexcept {
+    if(!takeable || !hand_mode || !clamped_palm || !finite(*clamped_palm) || !finite(point)) return std::nullopt;
+    if(length(*clamped_palm-point)>loot_hand_los_max_m) return std::nullopt;
+    return *clamped_palm;
+}
 // Native LOS failure remains a failure. This permits only scanning the next
 // object candidate; character obstruction metadata has different semantics.
 inline bool continue_native_use_scan(std::uintptr_t native_result,unsigned char native_flag,

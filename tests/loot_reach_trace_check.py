@@ -68,7 +68,7 @@ def problems(header, probe):
     need(fetch.rstrip().endswith("return result;\n    }") and fetch.count("return result;") == 1, "fetch: the original result returned unchanged")
     # LOS: counted after the original 3b7b90 call; the return value and *output are untouched by the trace
     los = body(header, "std::uintptr_t occlusion_result_body(", "bool idle_character_publication(")
-    i_orig = los.find("const auto result=occlusion_(sensor,entity,origin,axis,point,range,output);")
+    i_orig = los.find("const auto result=occlusion_(sensor,entity,los_origin,axis,point,range,output);")
     i_los = los.find("++candidate->los_called;")
     need(i_orig >= 0 and i_los > i_orig, "LOS: counted after the original call")
     los_trace = body(los, "try { // G1 trace: this candidate's stage-0 LOS call", "} catch(...) {}")
@@ -120,7 +120,7 @@ def main():
     moved = header[:i] + header[j:]
     moved = moved.replace(sort_call, header[i:j] + sort_call)
     assert problems(moved, probe), "a row write moved before self->sort_(...) must fail"
-    los_call = "        const auto result=occlusion_(sensor,entity,origin,axis,point,range,output); // original once, raw return preserved\n"
+    los_call = "        const auto result=occlusion_(sensor,entity,los_origin,axis,point,range,output); // original once, raw return preserved\n"
     k = header.index("        try { // G1 trace: this candidate's stage-0 LOS call")
     m = header.index("} catch(...) {}\n", k) + len("} catch(...) {}\n")
     early = header[:k] + header[m:]

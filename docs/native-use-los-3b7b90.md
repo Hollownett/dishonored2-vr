@@ -68,3 +68,42 @@ armed by the stage-0 hook; the sort's first 16 bytes are verified before hooking
   corner, which pokes out in front of that plane.
 - Lifting the end point to the coin's bounds top-centre + 1 cm (ruling H15 fix C1) would not clear it: that point is behind the same plane.
 - Drawer: the commode's door usable blocks, as a closed drawer should.
+
+## Fix round 1: loot LOS from the hand (user decision 2026-10-25, ruling H16)
+
+For a takeable owner in hand mode the sweep starts at the hand's **clamped palm** instead of the eye. The rest is unchanged: the same sweep,
+shape, filter, target walk and verdict. Walls, closed drawers and doors between the hand and the item still block.
+
+- **Seam.** It is the existing `0x3b7b90` hook (`occlusion_result_body`). `loot_los_origin()` returns a pointer to a thread-local
+  `float[4]` copy of the palm, and the original is called once with it as `origin`. This is the same technique as the range-origin hook
+  (`0x417820`), which hands the 3b80a0 range check a thread-local pointer. Nothing in the game is written: no camera field and no request.
+  Gate: stage 0, range 0, caller `0x3b8b05` or `0x3b87b5`, the scope's own sensor, a fresh routed publication, a `takeable()` owner and
+  hand mode (not gaze or reach). `loot_los_hand_origin()` (`selection_policy.hpp`) then needs a finite clamped palm within 1 m of the end
+  point. When any of these is missing, the native eye pointer is used.
+- **Clamped palm.** `dxgi_probe.cpp` publishes the hand clamp's own drawn palm (`g.position` after the clamp and the meet), not the final
+  visual pose. It does so only when that side's clamp output this frame is valid, swept (`clamp_live`), not a yield, not a re-acquire
+  (drawn unswept) and not released (drawn = the controller), with the clamp enabled (`build/no-hand-clamp` gives none). The palm reaches
+  `publish_hands` only if it is at most 100 ms old. The raw controller is never used, so a controller pushed through a wall gives the
+  palm the clamp held in front of it.
+- **Hand body.** The hand body (debris layer 4, inside `0xc43e`) is never hit by a sweep that starts inside it. Run
+  `20261025T105909` (`--knob hand-body`): 2826 blocked calls, all `idWorldspawn`, none on the player's own hand.
+- **Trace.** The trace gains a `hand_origin` column (1 = swept from the palm). The status gains `loot_hand_los` / `loot_eye_los`.
+
+Re-measure (runs under `/mnt/steamssd/d2vr-sim-runs`):
+- floor cot coin: `20261025T105613` (`loot_reach_floor`), `20261025T105909` (`loot_reach_floor` with `--knob hand-body`), `20261025T110505` (`loot_reach`);
+- drawer: `20261025T110210` (`loot_reach_drawer`);
+- table: `20261025T110505`.
+
+| case | selected | LOS blocked | blocker | note |
+|---|---|---|---|---|
+| floor cot coin (T105613) | 0.258 | 0.738 | `idWorldspawn` (the cot) | left hand 0.511, right 0.000 |
+| floor + hand body (T105909) | 0.191 | 0.805 | `idWorldspawn` | left 0.351, right 0.000 |
+| floor (T110505) | 0.254 | 0.744 | `idWorldspawn` | left 0.496, right 0.000 |
+| drawer, closed commode (T110210) | 0.000 | 1.000 | `arkUsable` (the commode door) 1341, `idWorldspawn` 36 | still blocked from the hand, as required |
+| table (T110505) | 0.970 | 0.000 | none | PASS; the take matched the prompt |
+
+Why the floor stays under 0.8 in the sim: the arm-reach clamp. The drawn palm, which is the LOS origin, is held 0.70-0.76 m from the coin
+(median 0.735). The raw palm, at the coin, is 0.19 m from it (median). `hand_clamp.reach_clamped` fired on 1212 / 1276 frames. The stand
+point is 0.8 m from the coin; closer points land on the cot. From the reach-clamped palm on the +y side (right hand), the path to the coin
+crosses the cot's hull. From the -y side (left hand) it reaches the coin's exposed corner about half the time. A hand that can really
+reach under the rail would start at the coin; this scenario's avatar arm cannot.

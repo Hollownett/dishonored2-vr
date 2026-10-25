@@ -2844,6 +2844,9 @@ static std::atomic<int> gaze_ray_side{-1};static std::atomic<UINT64> gaze_ray_un
 // The right hand in the world after weapon collision (render thread), with its velocity: where a dropped sword starts.
 static d2vr::WorldTrackedPose hand_world[2]{};static d2vr::Vec3 hand_velocity[2]{};static UINT64 hand_tick[2]{}; // under hand_state_mutex
 static d2vr::WorldTrackedPose hand_raw_world[2]{}; // the controller's pose (C9 selection: sword pickup reach, wake/yank press), under hand_state_mutex
+// H16 (hands plan Task 4 fix round 1): the drawn palm while the hand clamp produced it this frame (a valid, non-yield, swept output in
+// gameplay; never on a re-acquire, which draws the controller unswept), else none: loot line of sight starts there. Under hand_state_mutex.
+static std::optional<d2vr::Vec3> hand_clamped_palm[2]{};static UINT64 hand_clamped_tick[2]{};
 static std::optional<d2vr::Vec3> hip_xr_position;static UINT64 hip_pose_tick{},hip_pose_epoch{};
 static std::atomic<float> right_hand_peak{},sword_release_speed{}; // diagnostics: peak right-hand speed (decays), hand speed at the last drop
 static void publish_hand(unsigned side,const d2vr::WorldTrackedPose& drawn,const d2vr::WorldTrackedPose& raw) {
@@ -5056,7 +5059,11 @@ void prepare_head_view(void* view) noexcept {
                         palms[side]=d2vr::palm_probe(side,*grip_poses[side],game_xr->palm_offset(side),arm>0?std::optional<double>{arm}:std::nullopt,velocity[side]);
                     } catch(...) {palms[side]={};}
                 }
-                native_interaction_aim.publish_hands(*body,hand_rays,game_xr->pose_epoch(),character_tick,grip_centres,reach,grip_poses,character_carry,palms);
+                std::array<std::optional<d2vr::Vec3>,2> clamped_palms{};   // H16: the drawn, world-clamped palms (<= 100 ms old), the loot LOS origin
+                {std::lock_guard<std::mutex> hand_lock(hand_state_mutex);
+                 for(unsigned side=0;side<2;++side) if(hand_clamped_palm[side] && hand_clamped_tick[side] && character_tick>=hand_clamped_tick[side] &&
+                    character_tick-hand_clamped_tick[side]<=100) clamped_palms[side]=hand_clamped_palm[side];}
+                native_interaction_aim.publish_hands(*body,hand_rays,game_xr->pose_epoch(),character_tick,grip_centres,reach,grip_poses,character_carry,palms,clamped_palms);
                 d2vr::WorldTrackedPose frame{};
                 frame.position={anchor.position[0],anchor.position[1],anchor.position[2]};
                 for(unsigned axis=0;axis<3;++axis) frame.basis[axis]={anchor.basis[axis*3],anchor.basis[axis*3+1],anchor.basis[axis*3+2]};
@@ -5170,6 +5177,7 @@ void prepare_head_view(void* view) noexcept {
         }
         if(render_world_scene() && (tracked_arms_requested || native_weapon_attachment_requested) && per_frame) {
             const bool reverse_sword=sword_reversed.load();
+            std::array<std::optional<d2vr::Vec3>,2> clamp_palm_swept{};   // H16: this frame's clamp-drawn palm when the clamp output is valid (see hand_clamped_palm)
             d2vr::rig::ArmTrackingFrame hands{};std::array<d2vr::WorldTrackedPose,2> raw_grips{},palm_grips{};std::array<std::uintptr_t,2> cast_entities{};hands.tick=GetTickCount64();hands.source_tick=game_xr->grip_pose_tick();hands.epoch=game_xr->pose_epoch();
             unsigned hand_body_free_bits{},hand_body_yield_bits{},hand_visual_contact_bits{};   // B14: read only by the knob-gated hand-body publication below
             unsigned hand_body_probe_free_bits{};   // P3-1: the free bits the hand body uses (the clamp's and its own probe's); set only with the knob on
@@ -5389,6 +5397,9 @@ void prepare_head_view(void* view) noexcept {
                             if(clamped.reacquired) if(const auto kept=clamp_hold.hold(side,clamp_epoch,clamp_root,target.position,hand_clamp.config().snap_gap)) {g.position=*kept;++status.reacquire_holds;}
                         } else {clamp_exclude[side].reset();clamp_hold.clear(side);}
                         cast_entities[side]=held_by;
+                        // H16: a world-clamped drawn palm: not a yield (the controller drawn), a re-acquire (unswept) or a released side (drawn = the controller)
+                        // The clamp's own drawn palm (the meet applied), not the final visual pose: B15 may draw the controller palm while the hand body yields.
+                        if(clamp_live && clamped.valid && !clamp_yield && !clamped.reacquired && clamped.state!=d2vr::ClampState::released) clamp_palm_swept[side]=g.position;
                         if(clamp_yield) ++status.yields;
                         if(reach_clamped) ++status.reach_clamped;
                         // The blade sweeps from the drawn grip and eases its own push (a blade pushed straight into a surface moves the hand back); the
@@ -5680,6 +5691,11 @@ void prepare_head_view(void* view) noexcept {
                     if(d2vr::finite(shift) && d2vr::length(shift)>1e-6) {hands.grips[side].position=hands.grips[side].position+shift;held_clamp_live.applied[side]=shift;}
                 }
                 for(unsigned side=0;side<2;++side) if(hands.hands&(1u<<side)) publish_hand(side,hands.grips[side],raw_grips[side]);
+                {std::lock_guard<std::mutex> clamped_lock(hand_state_mutex);   // H16: the loot LOS origin (never the raw controller)
+                 for(unsigned side=0;side<2;++side) {
+                     hand_clamped_palm[side]=hand_clamp_enabled && clamp_palm_swept[side] && (hands.hands&(1u<<side)) && d2vr::finite(*clamp_palm_swept[side])?
+                         clamp_palm_swept[side]:std::nullopt;
+                     hand_clamped_tick[side]=hand_clamped_palm[side]?GetTickCount64():0;}}
             }
             pending_publish.flush(); // the left aim, with this frame's clamp state
             if(hand_body_requested.load(std::memory_order_relaxed)) {   // B13: the hand bodies' per-frame facts (C9: created at the calibrated palm)
@@ -6744,7 +6760,7 @@ std::string feedback_status_json() {
                 write_event(record.lookup);value<<",\"destruction\":";write_event(record.destruction);value<<'}';
             }
             value<<"]}}";return value.str();}()
-        << ",\"ranked_results\":" << native_interaction_aim.ranked_results() << ",\"ranking_rejected\":" << native_interaction_aim.ranking_rejected() << ",\"palm_beam_fallbacks\":" << native_interaction_aim.palm_beam_fallbacks() << ",\"loot_prompt_lingers_dropped\":" << native_interaction_aim.loot_prompt_lingers_dropped()
+        << ",\"ranked_results\":" << native_interaction_aim.ranked_results() << ",\"ranking_rejected\":" << native_interaction_aim.ranking_rejected() << ",\"palm_beam_fallbacks\":" << native_interaction_aim.palm_beam_fallbacks() << ",\"loot_prompt_lingers_dropped\":" << native_interaction_aim.loot_prompt_lingers_dropped() << ",\"loot_hand_los\":" << native_interaction_aim.loot_hand_los() << ",\"loot_eye_los\":" << native_interaction_aim.loot_eye_los()
         << ",\"direct_shortcuts_filtered\":" << native_interaction_aim.direct_shortcuts_filtered()
         << ",\"occluded_scan_continued\":" << native_interaction_aim.occluded_scan_continued()
         << ",\"outcomes\":{\"incomplete\":" << query_outcomes[0] << ",\"empty\":" << query_outcomes[1] << ",\"single\":" << query_outcomes[2]

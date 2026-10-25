@@ -87,12 +87,12 @@ def problems(header, probe):
     need("avatar_fit_arm_reach[side].load(" in pub, "the calibrated arm reach")
     need("hand_velocity[side]" in pub, "the controller velocity")
     need("hands.grips" not in pub and "palm_grips" not in pub and "hand_world" not in pub, "never the drawn hands")
-    need("native_interaction_aim.publish_hands(*body,hand_rays,game_xr->pose_epoch(),character_tick,grip_centres,reach,grip_poses,character_carry,palms);" in probe,
-         "publish_hands receives the probes")
+    need("native_interaction_aim.publish_hands(*body,hand_rays,game_xr->pose_epoch(),character_tick,grip_centres,reach,grip_poses,character_carry,palms,clamped_palms);" in probe,
+         "publish_hands receives the probes (and, Task 4 fix round 1, the clamped palms for the loot LOS)")
     need(len(re.findall(r"native_interaction_aim\.publish_hands\(", probe)) == 1, "one publish_hands call")
-    need("std::array<PalmProbe,2> palms={}) {" in body(header, "void publish_hands(", ") {") + ") {", "publish_hands takes the per-side probes")
+    need("std::array<PalmProbe,2> palms={},\n            std::array<std::optional<Vec3>,2> clamped_palms={}) {" in body(header, "void publish_hands(", ") {") + ") {", "publish_hands takes the per-side probes")
     need("if(published_[side])hands_[side].palm=palms[side];" in header, "each published hand keeps its probe")
-    need("PalmProbe palm{};};" in body(header, "struct Publication {", "struct Contact {"), "Publication carries the probe")
+    need("PalmProbe palm{};" in body(header, "struct Publication {", "struct Contact {"), "Publication carries the probe")
 
     # arm reach: present thread -> render thread through atomics, set from the active fit, reset with it
     need("static std::array<std::atomic<double>,2> avatar_fit_arm_reach{};" in probe, "arm reach atomics declared")
