@@ -1,5 +1,6 @@
 #pragma once
-// Climbs/takedowns: ease the world (0.4 s) so the action lands in front of the player's current gaze, then fold
+// Climbs/takedowns: the offset starts where the last gameplay view was (wrap(heading - body at entry)), eases (0.4 s) so the
+// action lands in front of the player's current gaze, then folds
 // the offset into HeadCalibration at exit so the view stays continuous. Pure state machine; the caller composes
 // origin' = yaw(offset) * head_origin and applies fold_rad via HeadCalibration::rotate_origin.
 #include "tracked_pose.hpp"
@@ -37,6 +38,7 @@ class ScriptedRecenter {
     bool have_heading_{};
     bool res_pending_{},res_started_{};
     double res_err_{},res_t0_{},res_applied_{},res_heading_{};
+    bool have_body_{},have_entry_body_{};double body_{},entry_body_{}; // the last gameplay body yaw (this owner), and the one latched at entry
     static double wrap(double a) noexcept {const double r=std::remainder(a,2*pi);return r<=-pi?r+2*pi:r;} // (-pi,pi]
     void aim(double t,double delta,const ScriptedRecenterParams& p,bool instant) noexcept {
         if(std::fabs(delta)<p.dead_zone_rad) {++skipped_;return;}
@@ -48,18 +50,26 @@ public:
         std::optional<double> fold;
         const bool finite_t=std::isfinite(in.t);
         if((in_ || ease_ || res_pending_ || offset_!=0) && in.epoch!=epoch_) {in_=ease_=entry_pending_=false;offset_=0;have_heading_=false;res_pending_=false;} // new owner: drop
+        if(in.epoch!=epoch_) have_body_=false; // another owner's body yaw is no continuity reference
         epoch_=in.epoch;
+        if(!in.authored && in.body_yaw && std::isfinite(*in.body_yaw)) {body_=*in.body_yaw;have_body_=true;}
         if(in.authored) {
             res_pending_=false;
             const std::optional<double> rel=in.hmd_rel_yaw && std::isfinite(*in.hmd_rel_yaw) && finite_t ?
                 std::optional<double>(wrap(*in.hmd_rel_yaw)) : std::nullopt;
-            if(!in_) {
-                in_=true;++entries_;snaps_=in.heading_snaps;
-                if(rel) aim(in.t,*rel,p,in.instant);else entry_pending_=true;
-            } else if(in.heading_snaps>snaps_) {
-                snaps_=in.heading_snaps;
-                if(rel) {if(entry_pending_) entry_pending_=false;else ++reaims_;aim(in.t,*rel,p,in.instant);} // a snap while pending is the entry aim
-            } else if(entry_pending_ && rel) {entry_pending_=false;aim(in.t,*rel,p,in.instant);} // late entry turn: dead zone and ease as usual
+            // Entry (on the entry frame, or the first later frame with a gaze): the offset STARTS at wrap(heading - body at entry), so the
+            // first authored view equals the last gameplay view, then eases from there to the gaze (target = offset + rel, rel against the
+            // composed origin). The dead zone applies to |target - start|: inside it the offset holds at start (no turn, no jump).
+            const auto enter=[&](double r) {
+                const double target=offset_+r;
+                if(have_entry_body_ && in.heading && std::isfinite(*in.heading)) offset_=wrap(*in.heading-entry_body_);
+                entry_pending_=false;aim(in.t,wrap(target-offset_),p,in.instant);
+            };
+            const bool snap=in_ && in.heading_snaps>snaps_;
+            if(!in_) {in_=true;++entries_;snaps_=in.heading_snaps;entry_pending_=true;have_entry_body_=have_body_;entry_body_=body_;}
+            if(snap) snaps_=in.heading_snaps;
+            if(entry_pending_) {if(rel) enter(*rel);} // a snap while pending is the entry aim; a late entry uses the body latched at entry
+            else if(snap && rel) {++reaims_;aim(in.t,*rel,p,in.instant);}
             if(in.heading && std::isfinite(*in.heading)) {heading_=*in.heading;have_heading_=true;}
         } else if(in_) {
             in_=false;entry_pending_=false;

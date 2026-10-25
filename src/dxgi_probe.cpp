@@ -4605,7 +4605,9 @@ void prepare_head_view(void* view) noexcept {
                 scripted_offset_now=scripted.offset_rad;
                 if(scripted.fold_rad) {head_calibration.rotate_origin(*scripted.fold_rad);
                     if(const auto folded=head_calibration.get(centre_pose,game_xr->reference_epoch(),body->player,body->camera,body->camera_identity.generation,true)) head_origin=*folded;}
-                scripted_ease_rate_rad_s=static_cast<float>(scripted.easing && scripted_credit>0?std::fabs(scripted.offset_rad-previous_offset)/scripted_credit:0.);
+                static bool scripted_was_easing{}; // an ease's first frame may set the continuity start (a jump of the offset, not of the view): no rate from it
+                scripted_ease_rate_rad_s=static_cast<float>(scripted.easing && scripted_was_easing && scripted_credit>0?std::fabs(scripted.offset_rad-previous_offset)/scripted_credit:0.);
+                scripted_was_easing=scripted.easing;
                 scripted_ease_tick=scripted.easing?GetTickCount64():0;
                 {std::lock_guard<std::mutex> status_lock(comfort_mutex);auto& status=scripted_view_status;
                  if(scripted.entries>status.entries) status.last_state_index=action.state_index; // the state index at entry

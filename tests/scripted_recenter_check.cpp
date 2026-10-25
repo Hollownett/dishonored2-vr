@@ -16,6 +16,26 @@ int main(){
     static_assert(ScriptedRecenterParams{}.dead_zone_rad==0.17453292519943295 && ScriptedRecenterParams{}.ease_s==0.4,"tuned constants");
     {const auto q=yaw_quaternion(.7); // matches HeadCalibration's yaw convention (about +Y, left turn +)
      assert(near(tracked_yaw(q,{0,0,0,1}),.7) && near(q.y,std::sin(.35)) && near(q.w,std::cos(.35)));}
+    {ScriptedRecenter r; // entry_starts_continuous (sim mantle, state 8): the latched heading is already the gaze, so the start is the target
+     auto o=r.update(in(0,false,{},{},0,1,deg(-130)));assert(o.offset_rad==0 && o.entries==0);
+     o=r.update(in(.01,true,deg(40),deg(-90)));
+     assert(near(o.offset_rad,deg(40)) && !o.easing && o.entries==1 && o.skipped_small==1);
+     const double gameplay_view=deg(-130)+deg(40),authored_view=deg(-90)+(deg(40)-o.offset_rad);assert(near(gameplay_view,authored_view)); // view continuous
+     o=r.update(in(.5,true,deg(40)-o.offset_rad,deg(-90)));assert(near(o.offset_rad,deg(40)) && !o.easing);}
+    {ScriptedRecenter r; // entry_eases_from_start: body == heading, start 0, ease 0 -> 40 over 0.4 s
+     r.update(in(0,false,{},{},0,1,0));auto o=r.update(in(1,true,deg(40),0.));assert(near(o.offset_rad,0) && o.easing);
+     o=r.update(in(1.2,true,deg(40),0.));assert(near(o.offset_rad,deg(20)));o=r.update(in(1.401,true,deg(40),0.));assert(near(o.offset_rad,deg(40)) && !o.easing);}
+    {ScriptedRecenter r; // entry_heading_differs_from_body_and_gaze: start 60 (continuity), ease to the gaze 20
+     r.update(in(0,false,{},{},0,1,0));auto o=r.update(in(1,true,deg(20),deg(60)));
+     assert(near(o.offset_rad,deg(60)) && o.easing && near(deg(60)+deg(20)-o.offset_rad,0+deg(20))); // the entry view is the gameplay view
+     o=r.update(in(1.2,true,0,deg(60)));assert(near(o.offset_rad,deg(40)));
+     o=r.update(in(1.401,true,0,deg(60)));assert(near(o.offset_rad,deg(20)) && !o.easing);
+     ScriptedRecenter l;l.update(in(0,false,{},{},0,1,0)); // a late entry starts from the body latched at entry
+     l.update(in(.1,true,std::nullopt,std::nullopt));l.update(in(.2,true,std::nullopt,std::nullopt));
+     o=l.update(in(.3,true,deg(20),deg(60)));assert(near(o.offset_rad,deg(60)) && o.easing && o.entries==1);
+     o=l.update(in(.701,true,0,deg(60)));assert(near(o.offset_rad,deg(20)));
+     ScriptedRecenter e;e.update(in(0,false,{},{},0,1,0)); // another owner's body is no reference: start 0
+     o=e.update(in(.1,true,deg(20),deg(60),0,2));assert(near(o.offset_rad,0) && o.easing);}
     {ScriptedRecenter r; // entry_eases_to_delta
      double prev=-1;
      auto o=r.update(in(10,true,deg(40),1.0));assert(near(o.offset_rad,0) && o.easing && o.entries==1);
