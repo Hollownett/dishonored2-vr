@@ -109,6 +109,7 @@
 #include "native_grenade_throw.hpp"
 #include "native_gadget_aim.hpp"
 #include "native_bink_hooks.hpp"
+#include "cutscene_skip.hpp"
 #include "vr_perf_governor.hpp"
 #include "vr_gestures.hpp"
 #include "native_hud_rect.hpp"
@@ -8516,6 +8517,15 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                 controller_bridge.set_game_window(desc.OutputWindow);
                                 const auto logic=game_logic_mask();
                                 auto input=game_xr->controller_input;
+                                { // Track T C2: hold A or X 0.6 s in an exact cutscene or a Bink video = the game's skip (held Interact); the press is masked until released
+                                    static d2vr::SkipHold cutscene_skip;
+                                    const bool skip_context=!cutscene_no_skip_hold.load() && input.active && (logic==d2vr::cinematic_logic_mask || d2vr::NativeBinkHooks::playing());
+                                    const bool was_injecting=cutscene_skip.injecting();
+                                    const auto skip=cutscene_skip.update(skip_context,input.a,input.x,GetTickCount64());
+                                    if(skip.mask_a) input.a=false;
+                                    if(skip.mask_x) input.x=false;
+                                    if(skip.inject_x) {input.x=true;if(!was_injecting) ++cutscene_skip_holds;}
+                                }
                                 d2vr::TakedownState control_takedown{};bool far_takedown_now=false;
                                 auto control_reader=&read_self;
                                 if(logic==2) {const auto raw_takedown=native_takedowns.poll(control_reader,image_base,GetTickCount64());far_takedown_now=d2vr::far_takedown_offered(control_reader,image_base,raw_takedown,takedown_range_scale.load());control_takedown=d2vr::limit_takedown_to_scale(control_reader,image_base,raw_takedown,takedown_range_scale.load());} // closer takedowns: kill target beyond 3*S m is not offered
