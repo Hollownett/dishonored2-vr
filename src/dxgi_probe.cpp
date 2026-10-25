@@ -1270,7 +1270,7 @@ static std::string arm_flicker_json() {
     auto text=arm_flicker.json(c.clears);
     text.pop_back();
     text+=",\"publish\":{\"grace_accepts\":"+std::to_string(c.grace_accepts)+",\"rejects_policy\":"+std::to_string(c.rejects_policy)+
-        ",\"rejects_source\":"+std::to_string(c.rejects_source)+",\"rejects_other\":"+std::to_string(c.rejects_other)+"}}";
+        ",\"rejects_source\":"+std::to_string(c.rejects_source)+",\"rejects_other\":"+std::to_string(c.rejects_other)+",\"rebases\":"+std::to_string(attachment_pose.rebases())+"}}";
     return text;
 }
 static bool taa_history_requested=false,taa_history_installed=false;
@@ -2889,6 +2889,9 @@ static std::atomic<UINT64> holster_until{}; // holster hold running: aim up, no 
 static std::atomic<unsigned> scabbard_entries{},holster_fires{}; // the right hand reaching the sword holster behind the shoulder; B holster holds
 // Full-grip sword (vr_controls.hpp SwordGrip, native_weapon_hands.hpp): requests per action (draw, sheathe, drop, pickup, recall).
 static d2vr::SwordGrip sword_grip;static bool sword_owns{};static std::array<std::atomic<unsigned>,7> sword_actions{};
+// v613: a sword draw or pickup the mod just asked for: until then (GetTickCount64), or until the game reports the sword in the hand, the
+// right hand takes its remembered sword grip (body::Inputs::weapon_incoming), so the sword appears in a closed hand on its first frame.
+static std::atomic<UINT64> sword_incoming_until{};static constexpr UINT64 sword_incoming_ms=500;
 // Full-grip gun at the left hip (vr_controls.hpp GunGrip): actions (draw, holster); the hip holds a gun once one was drawn.
 static std::array<d2vr::GripIntent,2> grip_intent;static std::array<d2vr::GripIntent::Out,2> grip_intent_out{}; // input thread
 static std::atomic<unsigned> fist_hands{},grab_hands{};static std::atomic<int> trace_lock_side{-1};static std::atomic<UINT64> fist_takes{}; // fist frames that are the game's pickup // the hand a grip Use locked (controller trace)
@@ -6178,6 +6181,12 @@ void prepare_head_view(void* view) noexcept {
                 {std::lock_guard<std::mutex> hand_lock(hand_state_mutex);
                     const bool fresh=hand_state_tick && GetTickCount64()-hand_state_tick<=300;
                     for(unsigned side=0;side<2;++side) t.hand_empty[side]=fresh && ((hand_empty_bits>>side)&1u);
+                    // Which item each hand holds, for the remembered grip (body::Inputs::item_key): the right hand only ever holds the sword.
+                    t.item_key[1]=0x53574f5244ull;
+                    {const std::string_view n(left_equip_name,strnlen(left_equip_name,sizeof(left_equip_name)));std::uint64_t h=1469598103934665603ull;
+                     for(const char c:n) {h^=static_cast<unsigned char>(c);h*=1099511628211ull;}
+                     t.item_key[0]=n.empty() || n=="Empty"?0:h;}
+                    if(fresh && t.hand_empty[1] && !hand_holding_object && GetTickCount64()<sword_incoming_until.load()) {t.weapon_incoming[1]=true;t.hand_empty[1]=false;}
                     // Holding a native object: both hands are the player's (no native weapon clip); the holder's fingers close on it.
                     if(fresh && hand_holding_object) for(unsigned side=0;side<2;++side) {t.hand_empty[side]=true;
                         if(side==hand_hold_side) t.grip_value[side]=std::max(t.grip_value[side],.8);}}
@@ -6283,7 +6292,8 @@ void prepare_head_view(void* view) noexcept {
                     if(sword_trace_csv.is_open()) {
                         const auto grip=full_body.grip_state()[1];
                         sword_trace_csv << static_cast<long long>(std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-sword_trace_start).count()) << ',' << (sword_held_now.load()?1:0) << ',' << (sword_reversed.load()?1:0)
-                                        << ',' << grip.reverse_weight << ',' << grip.hilt_miss << ',' << arm_flicker.weapon_hidden_frames() << ',' << grip.blade_axis_gap_deg << ',' << blade_self_hits.load() << '\n';
+                                        << ',' << grip.reverse_weight << ',' << grip.hilt_miss << ',' << arm_flicker.weapon_hidden_frames() << ',' << grip.blade_axis_gap_deg << ',' << blade_self_hits.load()
+                                        << ',' << (grip.has_hold?1:0) << ',' << grip.finger_mode << ',' << grip.hold_native_deg << ',' << grip.hold_native_m << ',' << attachment_pose.rebases() << '\n';
                         if(++sword_trace_rows%120==0) sword_trace_csv.flush();
                     }
                 }
@@ -8833,7 +8843,8 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                                 r.pos={fl(hand_w.position.x),fl(hand_w.position.y),fl(hand_w.position.z)};r.vel={fl(v.x),fl(v.y),fl(v.z)};
                                                 r.axis={fl(bx.x),fl(bx.y),fl(bx.z),fl(b[1].x*k),fl(b[1].y*k),fl(b[1].z*k),fl(b[2].x),fl(b[2].y),fl(b[2].z)};
                                             }
-                                            d2vr::NativeWeaponHands::request(r);++sword_actions[static_cast<unsigned>(o.action)];
+                                            const bool queued=d2vr::NativeWeaponHands::request(r);++sword_actions[static_cast<unsigned>(o.action)];
+                                            sword_incoming_until=queued && (o.action==A::draw || o.action==A::pickup)?now_s+sword_incoming_ms:0;
                                             if(o.action!=A::recall && o.action!=A::stow) game_xr->pulse(1,o.action==A::drop?.25f:.4f,.05f);
                                         }
                                     }
@@ -10087,7 +10098,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
             std::lock_guard<std::mutex> trace_lock(sword_trace_mutex);sword_trace_csv.close();sword_trace_rows=0;
             if(fs::exists(root/L"build"/L"sword-grip-trace")) {
                 sword_trace_csv.open(output/L"sword-grip-trace.csv",std::ios::trunc);sword_trace_start=std::chrono::steady_clock::now();
-                sword_trace_csv << std::setprecision(6) << "elapsed_ms,held,reversed,reverse_weight,hilt_miss,weapon_hidden_frames,blade_axis_gap_deg,blade_self_hits\n";
+                sword_trace_csv << std::setprecision(6) << "elapsed_ms,held,reversed,reverse_weight,hilt_miss,weapon_hidden_frames,blade_axis_gap_deg,blade_self_hits,has_hold,finger_mode,hold_native_deg,hold_native_m,attach_rebases\n";
             }
         }
         simulated_gameplay_script={};simulated_gameplay_last_index=-2;simulated_gameplay_rows=0;

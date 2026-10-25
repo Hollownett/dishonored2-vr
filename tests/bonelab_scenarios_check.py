@@ -89,6 +89,7 @@ def main():
     finger_touch_checks()
     run_hands_checks()
     sword_regrab_checks()
+    holster_draw_checks()
     authored_turn_checks()
     cutscene_checks()
     loot_reach_checks()
@@ -479,6 +480,42 @@ def sword_rows(reversed_seq=(False, True, False, True), flip_at=None, hidden_ris
                          "weapon_hidden_frames": hidden, "blade_axis_gap_deg": 4.0 if ms >= 350 else 60.0, "blade_self_hits": hits})
             t += 11
     return rows
+
+
+def holster_draw_checks():
+    segments = sim.scenario_segments("holster_draw", LEAD)
+    sim.compile_script(segments, 120)
+    assert max(s["end_ms"] for s in segments) <= 120000
+    run = [s for s in segments if s["start_ms"] >= LEAD]
+    assert all(s["end_ms"] - s["start_ms"] > 0 for s in run)
+    assert sum(1 for p, s in zip(run, run[1:]) if s["input"].get("b") and not p["input"].get("b")) == 3  # three B toggles
+    zone = [s for s in run if s["right_hand_offset"] == [-0.03, 0.25, 0.50]]
+    assert sum(1 for p, s in zip(zone, zone[1:]) if s["input"].get("right_grip") and not p["input"].get("right_grip") and p["end_ms"] == s["start_ms"]) == 2  # two zone draws
+    releases = [s for p, s in zip(run, run[1:]) if p["input"].get("right_grip") and not s["input"].get("right_grip") and s["right_hand_offset"] != [-0.03, 0.25, 0.50]]
+    assert len(releases) == 2 and all(s["end_ms"] - s["start_ms"] == 450 for s in releases)  # two tosses, caught 0.45 s later
+
+    def rows(miss_first=0.015, finger=3, holds=4):
+        out, t = [], 0
+        for _ in range(holds):
+            for _ in range(20):
+                out.append({"elapsed_ms": t, "held": 0, "reversed": 0, "reverse_weight": 0.0, "hilt_miss": 0.07, "weapon_hidden_frames": 0, "blade_axis_gap_deg": 0.0,
+                            "blade_self_hits": 0, "has_hold": 0.0, "finger_mode": 1.0, "hold_native_deg": 0.0, "hold_native_m": 0.0, "attach_rebases": 1.0})
+                t += 11
+            for i in range(100):
+                out.append({"elapsed_ms": t, "held": 1, "reversed": 0, "reverse_weight": 0.0, "hilt_miss": miss_first if i < 40 else 0.014, "weapon_hidden_frames": 0,
+                            "blade_axis_gap_deg": 16.5, "blade_self_hits": 0, "has_hold": 1.0, "finger_mode": finger if i == 5 else 3.0, "hold_native_deg": 160.0 if i < 40 else 0.0,
+                            "hold_native_m": 0.0, "attach_rebases": 1.0})
+                t += 11
+        return out
+
+    assert {v for v, _ in brc.check([{"sword_rows": rows()}], "holster_draw")} == {"PASS", "INFO"}
+    assert "FAIL" in verdicts({"sword_rows": rows(miss_first=0.077)}, "holster_draw")  # the draw clip opens the hand (pre-v613)
+    assert "FAIL" in verdicts({"sword_rows": rows(finger=1)}, "holster_draw")  # a frame of the open (empty) hand while the sword is held
+    assert "FAIL" in verdicts({"sword_rows": rows(holds=3)}, "holster_draw")
+    old = [{k: v for k, v in r.items() if k not in brc.HOLD_COLUMNS} for r in rows()]
+    assert "FAIL" in verdicts({"sword_rows": old}, "holster_draw")  # a pre-v613 trace has no hold columns
+    parsed = brc.parse_sword_trace(",".join(brc.SWORD_COLUMNS + brc.HOLD_COLUMNS) + "\n" + ",".join("1" for _ in brc.SWORD_COLUMNS + brc.HOLD_COLUMNS) + "\n")
+    assert parsed[0]["has_hold"] == 1.0 and parsed[0]["finger_mode"] == 1.0
 
 
 def sword_regrab_checks():

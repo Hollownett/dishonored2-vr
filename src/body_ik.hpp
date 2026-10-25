@@ -135,6 +135,11 @@ struct Inputs {
     // Empty hand: fingers curl from grip/trigger instead of copying the native (flat) pose.
     bool hand_empty[2]{};
     std::uint64_t native_socket_token[2]{};
+    // Which item the hand holds (0 unknown): a hold remembered for the same key starts the next hold of that item (see ArmState::memo).
+    std::uint64_t item_key[2]{};
+    // The mod has just asked the game to put this hand's weapon in it (a draw or a pickup): the hand takes the remembered grip of
+    // item_key at once, so the weapon appears in a closed hand on its first frame (the game reports the slot a frame or two later).
+    bool weapon_incoming[2]{};
     // Per-joint finger hinge turns (rad over the bind pose; finger_ik.hpp finger_turns): thumb 01-03, other fingers 02-04. An empty hand
     // with them closes by contact and by what it holds instead of grip/trigger; the metacarpals stay on the bind pose (the contact
     // planned the fingers from it: a metacarpal that moved would move their knuckles and hinges).
@@ -166,6 +171,8 @@ struct Output {
     // How each hand's fingers were posed this solve: 0 not posed, 1 the contact turns (finger_ik.hpp), 2 grip and trigger alone, 3 the game's own
     // fingers (a hand that holds an authored item: a sword, a pistol).
     int finger_mode[2]{};
+    // Diagnostic per hand: has_hold, and how far the drawn item-hold local is from this frame's native attachment local (degrees, metres).
+    bool has_hold[2]{};double hold_native_deg[2]{},hold_native_m[2]{};
     double thumb_applied[2][3]{}; // degrees each thumb joint was turned by this solve (what finger_local applied of the contact's turn)
     std::vector<Xf> raw_arm[2];
     bool raw_hand_reached[2]{};
@@ -184,6 +191,14 @@ class BodySolver {
         std::uint64_t socket_token{};
         bool has_pole{},has_roll{},has_hold{},sneak_flip{},hold_calibrated{};
         int finger_mode{};
+        double hold_native_deg{},hold_native_m{}; // diagnostic: the drawn hold local against this frame's native attachment local
+        // The held item's fingers (hand-subtree locals, attachment excluded): like the socket they follow the native pose only while it is
+        // steady, so an equip clip (draw, fast pickup) does not open the hand around the hilt (sim 20261025T155808: hilt_miss 1.3 -> 7.7 cm
+        // for 0.45 s after every draw).
+        std::vector<Xf> fingers;bool has_fingers{};
+        // The last calibrated hold of item memo_key (socket, wrap centre, fingers), kept across holster/drop: the next hold of the same item
+        // starts from it instead of from the first frame of the equip clip.
+        Xf memo_hold{};Vec3 memo_wrap{};std::vector<Xf> memo_fingers;std::uint64_t memo_key{};bool has_memo{};
         ArmReachState reach{};
     };
 public:
@@ -546,7 +561,8 @@ public:
                     out.blade_axis_gap_deg[i]=arm_state_[i].has_hold?d2vr::blade_axis_gap_deg(rotated(at.q,{1,0,0}),d2vr::sword_blade_axis(hand_pose,in.reverse_grip[i])):0.;
                 }out.sneak_flip[i]=arm_state_[i].sneak_flip;
             }
-            out.finger_mode[i]=arm_state_[i].finger_mode;for(int s2=0;s2<3;++s2) out.thumb_applied[i][s2]=arm_state_[i].thumb_applied[s2];
+            out.finger_mode[i]=arm_state_[i].finger_mode;
+            out.has_hold[i]=arm_state_[i].has_hold;out.hold_native_deg[i]=arm_state_[i].hold_native_deg;out.hold_native_m[i]=arm_state_[i].hold_native_m;for(int s2=0;s2<3;++s2) out.thumb_applied[i][s2]=arm_state_[i].thumb_applied[s2];
             const auto& na=native && source->arm[i].size()==out.arm[i].size()?source->arm[i]:std::vector<Xf>{};
             if(!na.empty() && (weight(2+i)>0 || weight(4+i)>0)) {
                 const auto& a=sk_[1+i];
@@ -872,15 +888,18 @@ private:
                   carried[upper_[i]].p+outward*(.05*scale_)-up*(.55*scale_)};
         }
         const auto* native=in.native_arm[i] && in.native_arm[i]->size()==s.local.size()?in.native_arm[i]:nullptr;
-        const bool procedural=!native || in.hand_empty[i];
+        const bool remembered=state.has_memo && state.memo_key==in.item_key[i];
+        const bool procedural=!native || (in.weapon_incoming[i]?!remembered:in.hand_empty[i]);
         if(state.socket_token!=in.native_socket_token[i]) {state.has_hold=false;state.hold_calibrated=false;state.reverse_weight=0;state.sneak_flip=false;state.socket_token=in.native_socket_token[i];}
         const bool native_socket=native && (!procedural || in.native_socket_token[i]);
         state.finger_mode=procedural?(in.has_finger[i]?1:2):3;
         // Held item: the native attachment local is rotated by authored attack/block/equip clips, so
         // the socket keeps the last steady value (<20 deg/s, <5 cm/s for 0.25 s) and the player owns the grip.
         bool fresh_hold=false;
-        if(!native_socket) {state.has_hold=false;state.hold_calibrated=false;state.reverse_weight=0;state.sneak_flip=false;}
+        state.hold_native_deg=state.hold_native_m=0;
+        if(!native_socket) {state.has_hold=false;state.hold_calibrated=false;state.reverse_weight=0;state.sneak_flip=false;state.has_fingers=false;}
         else {
+            const auto native_local=[&](std::size_t j) {auto l=mul(inverse((*native)[s.parent[j]]),(*native)[j]);l.p=l.p*scale_;return l;};
             auto n=mul(inverse((*native)[s.parent[attach_[i]]]),(*native)[attach_[i]]);n.p=n.p*scale_;
             // Sneak stance holds the sword reversed: attachment Y along -wrist Z in every sword sneak clip,
             // +Z in every forward clip (2026-10-12 clip scan). The player keeps the forward grip: turned back and moved to
@@ -889,14 +908,30 @@ private:
             if(i==1) {const double sneak_z=rotated(n.q,{0,1,0}).z;if(sneak_z<-.5) state.sneak_flip=true;else if(sneak_z>-.2) state.sneak_flip=false;} // hysteresis: a clip blend through -.5 does not flap the socket
             if(i==1 && state.sneak_flip) {n.q=mul(n.q,axis_angle({0,0,1},kPi));n.p=n.p+Vec3{-.0453,-.0262,.0012}*scale_;}
             const auto wrap=wrap_in_parent(i,*native,scale_);
-            if(!state.has_hold) {state.hold=state.hold_prev=n;state.wrap=wrap;state.hold_steady=0;state.has_hold=true;state.hold_calibrated=false;fresh_hold=true;}
+            if(!state.has_hold) {
+                // A new hold of a remembered item starts from its last calibrated grip (v612 feedback 7 and 3: the draw clip's first frame
+                // left the socket 2 cm off and the fingers open; the clip itself is never steady, so the remembered grip holds through it).
+                if(remembered) {state.hold=state.memo_hold;state.wrap=state.memo_wrap;state.fingers=state.memo_fingers;}
+                else {
+                    state.hold=n;state.wrap=wrap;state.fingers.assign(s.local.size(),Xf{});
+                    for(std::size_t j=0;j<s.local.size();++j) if(s.parent[j]>=0) state.fingers[j]=native_local(j);
+                }
+                state.hold_prev=n;state.hold_steady=0;state.has_hold=true;state.hold_calibrated=false;fresh_hold=true;
+                state.has_fingers=state.fingers.size()==s.local.size();
+            }
             else if(dt>0) {
                 const double ang=2*std::acos(std::min(1.,std::abs(n.q.x*state.hold_prev.q.x+n.q.y*state.hold_prev.q.y+n.q.z*state.hold_prev.q.z+n.q.w*state.hold_prev.q.w)));
                 const bool calm=ang/dt<20*kPi/180 && length(n.p-state.hold_prev.p)/dt<.05;
                 state.hold_steady=calm?state.hold_steady+dt:0;state.hold_prev=n;
                 if(state.hold_steady>=.25) state.hold_calibrated=true;
-                if(state.hold_steady>=.25) {const double k=std::min(1.,dt*8);state.hold={nlerp(state.hold.q,n.q,k),state.hold.p+(n.p-state.hold.p)*k};state.wrap=state.wrap+(wrap-state.wrap)*k;}
+                if(state.hold_steady>=.25) {const double k=std::min(1.,dt*8);state.hold={nlerp(state.hold.q,n.q,k),state.hold.p+(n.p-state.hold.p)*k};state.wrap=state.wrap+(wrap-state.wrap)*k;
+                    if(state.has_fingers) for(std::size_t j=0;j<s.local.size();++j) if(s.parent[j]>=0) {
+                        const auto l=native_local(j);auto& f=state.fingers[j];f={nlerp(f.q,l.q,k),f.p+(l.p-f.p)*k};}
+                }
             }
+            if(state.hold_calibrated && !procedural) {state.memo_hold=state.hold;state.memo_wrap=state.wrap;state.memo_fingers=state.fingers;state.memo_key=in.item_key[i];state.has_memo=state.has_fingers;}
+            state.hold_native_deg=2*std::acos(std::min(1.,std::abs(n.q.x*state.hold.q.x+n.q.y*state.hold.q.y+n.q.z*state.hold.q.z+n.q.w*state.hold.q.w)))*180/kPi;
+            state.hold_native_m=length(n.p-state.hold.p);
         }
         {   // A new hold takes the requested reverse at once (the drawn blade must agree with the collision axis from the first frame); only a change
             // asked for mid-hold blends, over 0.1 s. hold_calibrated no longer gates it: it only marks the hold easing.
@@ -919,6 +954,7 @@ private:
                 return h;
             }
             if(procedural) return finger_local(i,j,in.grip[i],in.trigger[i],state,in.has_finger[i]?in.finger_turn[i]:nullptr,in.has_finger[i] && in.has_finger_axis[i]?in.finger_axis[i]:nullptr);
+            if(native_socket && state.has_fingers) return state.fingers[static_cast<std::size_t>(j)];
             auto l=mul(inverse((*native)[s.parent[j]]),(*native)[j]);
             l.p=l.p*scale_;
             return l;

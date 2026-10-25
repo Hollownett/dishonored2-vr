@@ -58,6 +58,12 @@ Write lines to `artifacts/vr-command.txt` while the mod runs; answers go to `art
   `stuck_frames`, `probe_casts`, `surface`, `ease_active`. Knobs: `build/no-finger-surface` (v609 finger probes, budget and TTL),
   `build/finger-probe-3` (three casts; the default after the budget run), `build/legacy-finger-ease` (no grip blend, hover shape, wants stack
   or eased opening). In this save the left arm does not reach the desk (hand clamp `reach_clamped`), so the numbers are the right hand's.
+- **Holster -> unholster and a caught sword (v613, v612 feedback 7 and 3).** `linux/d2vr-linux sim --scenario holster_draw --knob sword-grip-trace
+  --knob sim-invulnerable --lead 45 --seconds 120`: three B toggles, two sheathe/draw cycles at the scabbard zone (the hand brought into view
+  during the draw clip), two tosses caught 0.45 s later. `tools/linux/bonelab_run_check.py RUN --scenario holster_draw` judges each hold of the
+  game's sword from `sword-grip-trace.csv`'s v613 columns (`has_hold`, `finger_mode`, `hold_native_deg`, `hold_native_m`, `attach_rebases`):
+  the game's hand (finger mode 3) and the hilt within 2 cm of the fist from the hold's first row. Status `arm_flicker.publish.rebases` counts
+  attachment reads that followed a moved state-3 block instead of falling back to the native joint (one per equip clip in the sim).
 
 ## Keys
 `python tools/game_keys.py 0x0D 0x1B` sends Enter, Esc to the game window; `--hold-focus` keeps it focused
