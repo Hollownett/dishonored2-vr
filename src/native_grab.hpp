@@ -138,8 +138,10 @@ public:
     Diagnostics diagnostics() const {return {cursor_,static_cast<unsigned>(bodies_.size()),tick_,slices_,lifetime_rejections_};}
     unsigned cursor() const {return cursor_;}
     void reset() {cursor_=1;tick_=0;bodies_.clear();}
+    // hints (G3, plan Task 8): registry indices near this hand (its stage-0 Use hit owners, its probe hits), looked up every tick before the
+    // slice, so the object just reached is cached the same tick (Bonelab: "the scan runs every physics step"). At most 8; 0 is skipped.
     template<class Lookup,class Validate> const std::vector<NativeRigidBody>& advance(
-            Vec3 hand,std::uint64_t tick,Lookup lookup,Validate validate) {
+            Vec3 hand,std::uint64_t tick,Lookup lookup,Validate validate,const std::array<unsigned,8>* hints=nullptr) {
         if(!finite(hand) || !tick) {reset();return bodies_;}
         if(tick==tick_)return bodies_;
         tick_=tick;++slices_;
@@ -151,17 +153,21 @@ public:
                body->model!=it->model || body->contact_distance(hand)>grab_retain_distance+3) {++lifetime_rejections_;it=bodies_.erase(it);}
             else {*it=*body;++it;}
         }
-        for(unsigned scanned=0;scanned<slice_size;++scanned) {
-            const auto index=cursor_;if(++cursor_==registry_size)cursor_=1;
+        const auto consider=[&](unsigned index) {
             const auto body=lookup(index);
-            if(!body || body->contact_distance(hand)>grab_retain_distance+3)continue;
+            if(!body || body->contact_distance(hand)>grab_retain_distance+3)return;
             const auto found=std::find_if(bodies_.begin(),bodies_.end(),[&](const auto& b){return b.entity==body->entity;});
-            if(found!=bodies_.end()) {*found=*body;continue;}
+            if(found!=bodies_.end()) {*found=*body;return;}
             if(bodies_.size()<capacity)bodies_.push_back(*body);
             else {
                 const auto farthest=std::max_element(bodies_.begin(),bodies_.end(),[&](const auto& a,const auto& b){return a.contact_distance(hand)<b.contact_distance(hand);});
                 if(body->contact_distance(hand)<farthest->contact_distance(hand))*farthest=*body;
             }
+        };
+        if(hints) for(const auto index:*hints) if(index && index<registry_size) consider(index);
+        for(unsigned scanned=0;scanned<slice_size;++scanned) {
+            const auto index=cursor_;if(++cursor_==registry_size)cursor_=1;
+            consider(index);
         }
         return bodies_;
     }
@@ -189,9 +195,10 @@ public:
     struct ObstructionRequest {
         unsigned side{};UINT64 token{},epoch{},tick{},source_tick{};NativePlayerCamera owner{};
         WorldTrackedPose hand{};NativeRigidBody body{};
+        bool hover{};   // G3 (Task 8): asked at hover (grip under 0.35) so the press can use the verdict; never decides or binds by itself
     };
 private:
-    struct Obstruction {ObstructionRequest request{};std::optional<bool> clear;};
+    struct Obstruction {ObstructionRequest request{};std::optional<bool> clear;UINT64 verdict_tick{};};
     using Read=bool (*)(std::uintptr_t,void*,std::size_t);
     using Logic=UINT (*)();
     using Dispatch=void (__fastcall*)(void*,void*);
@@ -208,7 +215,8 @@ private:
         // G2/G3 (Task 5): the palm's pick (the one 0.86 hysteresis), its score, and the grab buffer of this press (buffer_used: started once per press;
         // catch_tick: the catch edge, for press-to-held, ruling H4).
         PalmSelection selection;std::optional<FocusScore> score;double palm_dot{};GrabIntentBuffer buffer;bool buffer_used{};UINT64 catch_tick{};
-        std::uint32_t reject_id{};BodyReject reject{};   // G3 thin props (Task 7): the last prop near this hand whose body or bounds were refused, and why
+        std::uint32_t reject_id{};BodyReject reject{};
+        std::array<unsigned,8> hints{};UINT64 hint_tick{},hover_request_tick{};   // G3 (Task 8): discovery hints; the last hover LOS request   // G3 thin props (Task 7): the last prop near this hand whose body or bounds were refused, and why
         bool pending_release{},release_throw{},attempted{},acquired{},decision_deferred{};
         double tow{},tow_recovery{}; // a dragged body's pelvis follows its grabbed limb at this distance (set on the first motor write); tow_recovery: plan_tow's stale-frame recovery time
         void reset_tow() {tow=0;tow_recovery=0;last_tow=0;}
@@ -355,6 +363,7 @@ private:
             if(!corpse_enabled_) return {};
             return palm_bones?corpse_candidate(read_,base_,entity,p.palm,tuning_,collar):corpse_candidate(read_,base_,entity,p.hand.position,collar);
         };
+        const bool hinted=lane.hint_tick && now>=lane.hint_tick && now-lane.hint_tick<=250;
         const auto& candidates=lane.discovery.advance(p.hand.position,p.tick,[&](unsigned index)->std::optional<NativeRigidBody> {
             const auto entity=rig::value<std::uintptr_t>(read_,*game+0x3130b0+index*8);
             const bool guard=entity && rig::typed(read_,base_,*entity,0x1c5e108); // a corpse or knocked-out guard: drag by a limb
@@ -371,7 +380,7 @@ private:
         },[&](const NativeRigidBody& body)->std::optional<NativeRigidBody> {
             if(body.bone<0) return native_rigid_body(read_,base_,body.entity);
             return corpse(body.entity);
-        });
+        },hinted?&lane.hints:nullptr);
         if(!refresh && lane.focus_tick && now>=lane.focus_tick && now-lane.focus_tick<100 &&
            length(p.hand.position-lane.focus_hand)<.05 && lane.focus_excluded==excluded) {
             if(!lane.focus) return {};
@@ -419,16 +428,42 @@ private:
             now>=r.tick && now-r.tick<=grab_pose_freshness_ms &&
             (!r.source_tick || (now>=r.source_tick && now-r.source_tick<=grab_pose_freshness_ms));
     }
+    // G3 (Task 8): a hover request stays askable across publications while the same hand owner and epoch hold it, the hand is within 2 cm of
+    // where it asked and the request is fresh.
+    static constexpr UINT64 hover_verdict_ms=100,hover_request_every_ms=100;static constexpr double hover_hand_m=.02,hover_contact_m=.01;
+    static bool hover_request_live(const ObstructionRequest& r,const Publication& p,UINT64 now) {
+        return r.hover && p.usable && !p.occupied && p.epoch==r.epoch && p.owner.player==r.owner.player && p.owner.camera==r.owner.camera &&
+            p.owner.camera_identity==r.owner.camera_identity && now>=r.tick && now-r.tick<=grab_pose_freshness_ms && length(p.hand.position-r.hand.position)<=hover_hand_m;
+    }
+    // A hover verdict still answers the press: <= 100 ms old, the hand moved <= 2 cm since, the same body, its contact point moved <= 1 cm.
+    static bool hover_verdict_current(const Obstruction& o,const Publication& p,const NativeRigidBody& body,UINT64 now) {
+        const auto& r=o.request;
+        return r.hover && o.verdict_tick && now>=o.verdict_tick && now-o.verdict_tick<=hover_verdict_ms && p.usable && !p.occupied && p.epoch==r.epoch &&
+            p.owner.player==r.owner.player && p.owner.camera==r.owner.camera && p.owner.camera_identity==r.owner.camera_identity &&
+            length(p.hand.position-r.hand.position)<=hover_hand_m && same_body(r.body,body) &&
+            length(body.contact(r.hand.position)-r.body.contact(r.hand.position))<=hover_contact_m;
+    }
     bool cleared(Lane& lane,const NativeRigidBody& body,UINT64 now) {
-        return !obstruction_required_ || (lane.obstruction && lane.obstruction->clear.value_or(false) &&
-            request_current(lane.obstruction->request,lane.published,now) && same_body(lane.obstruction->request.body,body) &&
-            length(lane.obstruction->request.body.contact(lane.published.hand.position)-body.contact(lane.published.hand.position))<.001);
+        if(!obstruction_required_) return true;
+        if(!lane.obstruction || !lane.obstruction->clear.value_or(false)) return false;
+        if(lane.obstruction->request.hover) return hover_verdict_current(*lane.obstruction,lane.published,body,now);
+        return request_current(lane.obstruction->request,lane.published,now) && same_body(lane.obstruction->request.body,body) &&
+            length(lane.obstruction->request.body.contact(lane.published.hand.position)-body.contact(lane.published.hand.position))<.001;
     }
-    void request_obstruction(unsigned side,const NativeRigidBody& body) {
+    void request_obstruction(unsigned side,const NativeRigidBody& body,bool hover=false) {
         auto& lane=lanes_[side];const auto& p=lane.published;
-        if(lane.obstruction && request_current(lane.obstruction->request,p,p.tick) && same_body(lane.obstruction->request.body,body)) return;
-        lane.obstruction=Obstruction{{side,++obstruction_token_,p.epoch,p.tick,p.source_tick,p.owner,p.hand,body},{}};
+        if(!hover && lane.obstruction && !lane.obstruction->request.hover && request_current(lane.obstruction->request,p,p.tick) && same_body(lane.obstruction->request.body,body)) return;
+        lane.obstruction=Obstruction{{side,++obstruction_token_,p.epoch,p.tick,p.source_tick,p.owner,p.hand,body,hover},{},0};
     }
+    // The hover cue's candidate gets its LOS asked now (at most once per hand per 100 ms, never over a press request), so the press binds at once.
+    void request_hover_obstruction(unsigned side,const NativeRigidBody& body,UINT64 now) {
+        auto& lane=lanes_[side];const auto& p=lane.published;
+        if(!obstruction_required_ || p.grip>=.35f || lane.raw_grip>=.35f || lane.held || lane.decision_deferred) return;
+        if(lane.obstruction && !lane.obstruction->request.hover) return;
+        if(lane.hover_request_tick && now>=lane.hover_request_tick && now-lane.hover_request_tick<hover_request_every_ms) return;
+        request_obstruction(side,body,true);lane.hover_request_tick=now;++hover_requests_;
+    }
+    std::atomic<UINT64> hover_requests_{},hover_used_{},hover_verdicts_{};
     enum class VelocityWrite {written,rejected,faulted};
     // The native velocity setter validates nothing (a stale world or handle can fault, a NaN reaches the simulation), and /EHsc
     // does not turn an access violation into a C++ exception, so the call runs under an SEH guard and non-finite input never
@@ -963,7 +998,9 @@ public:
         if(p.epoch!=epoch || !same_publisher_owner(p.owner,owner) || p.usable!=usable || p.occupied!=occupied)advance_lifecycle_locked();
         if(p.epoch!=epoch || p.owner.player!=owner.player || p.owner.camera!=owner.camera ||
            p.owner.camera_identity!=owner.camera_identity || !usable || occupied) {lane.focus.reset();lane.focus_tick=0;lane.discovery.reset();}
-        if(p.tick!=tick || p.source_tick!=source_tick || p.epoch!=epoch || p.owner.camera_identity!=owner.camera_identity || !usable || occupied) lane.obstruction.reset();
+        // A hover LOS request/verdict (Task 8) outlives a new frame of the same hand owner; a press request is per publication, as before.
+        const bool keep_hover=lane.obstruction && lane.obstruction->request.hover && p.epoch==epoch && p.owner.camera_identity==owner.camera_identity && usable && !occupied;
+        if((p.tick!=tick || p.source_tick!=source_tick || p.epoch!=epoch || p.owner.camera_identity!=owner.camera_identity || !usable || occupied) && !keep_hover) lane.obstruction.reset();
         if(p.epoch!=epoch || !usable || occupied) lane.selection.reset();   // a new pose epoch or a lost hand starts the palm's pick afresh
         p={owner,hand,grip,epoch,tick,p.serial+1,usable,occupied,source_tick,palm};
     }
@@ -1054,6 +1091,11 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);return {lanes_[side].buffer.buffered(),lanes_[side].buffer.expired()};
     }
     bool legacy_palm_select() const noexcept {return legacy_palm_select_;}
+    // G3 (Task 8): the stage-0 hit owners' registry indices for this hand's discovery (taken within 250 ms), from NativeInteractionAim::hint_indices.
+    void hints(unsigned side,const std::array<unsigned,8>& indices,UINT64 tick) {if(side>=2) return;std::lock_guard<std::mutex> lock(mutex_);lanes_[side].hints=indices;lanes_[side].hint_tick=tick;}
+    // Status: is the LOS (obstruction) query required (on whenever the physical grab is attached to the interaction aim), and the hover LOS counters.
+    struct HoverLos {bool required{};UINT64 requests{},verdicts{},used{};};
+    HoverLos hover_los() {bool required{};{std::lock_guard<std::mutex> lock(mutex_);required=obstruction_required_;}return {required,hover_requests_.load(),hover_verdicts_.load(),hover_used_.load()};}
     // The palm probe last published for this hand (the one its physical pick was scored with), for the grip-alone decision (Task 6).
     PalmProbe published_palm(unsigned side) {if(side>=2) return {};std::lock_guard<std::mutex> lock(mutex_);return lanes_[side].published.palm;}
     // Status block "grab_focus" (plan Task 5): per hand {id,kind,cost,runner_up,switches_10s,hysteresis_held,scoring_fallback,buffered_grabs,
@@ -1093,6 +1135,7 @@ public:
                 lane.focus.reset();lane.focus_tick=0;return {};
             }
             const auto body=focus_body(side,now,false);
+            if(body) request_hover_obstruction(side,*body,now);
             return body?std::optional<Vec3>(body->contact(p.hand.position)):std::nullopt;
         } catch(...) {lane.focus.reset();lane.focus_tick=0;return {};}
     }
@@ -1164,6 +1207,7 @@ public:
             lane.candidates.clear();
             if(candidate) {
                 lane.candidates.push_back(*candidate);
+                if(obstruction_required_ && lane.obstruction && lane.obstruction->request.hover && cleared(lane,*candidate,now)) ++hover_used_;
                 if(obstruction_required_ && !cleared(lane,*candidate,now)) {
                     request_obstruction(side,*candidate);lane.gate=Gate::obstruction_pending;
                     lane.decision_deferred=true;p.grip=raw;++p.serial;return 0;
@@ -1206,7 +1250,8 @@ public:
             std::optional<ObstructionRequest> obstruction_request;
             {std::lock_guard<std::mutex> lock(mutex_);const auto& lane=lanes_[side];
                 if(active_ && obstruction_required_ && lane.obstruction && !lane.obstruction->clear &&
-                   request_current(lane.obstruction->request,lane.published,now) && lane.published.grip>=.35f &&
+                   (lane.obstruction->request.hover?hover_request_live(lane.obstruction->request,lane.published,now):
+                    request_current(lane.obstruction->request,lane.published,now) && lane.published.grip>=.35f) &&
                    camera.player==lane.published.owner.player && camera.camera==lane.published.owner.camera &&
                    camera.camera_identity==lane.published.owner.camera_identity && !camera.authored_view()) obstruction_request=lane.obstruction->request;
             }
@@ -1218,18 +1263,27 @@ public:
                length(body->contact(obstruction_request->hand.position)-obstruction_request->body.contact(obstruction_request->hand.position))>=.001)continue;
             {std::lock_guard<std::mutex> lock(mutex_);const auto& lane=lanes_[side];
                 if(!active_ || !lane.obstruction || lane.obstruction->request.token!=obstruction_request->token ||
-                   !request_current(*obstruction_request,lane.published,GetTickCount64()))continue;
+                   !(obstruction_request->hover?hover_request_live(*obstruction_request,lane.published,GetTickCount64()):
+                     request_current(*obstruction_request,lane.published,GetTickCount64())))continue;
             }
             const auto verdict=query(*obstruction_request);
             const auto after=native_grab_body(read_,base_,obstruction_request->body);
             const auto after_owner=native_player_camera(read_,base_,obstruction_request->owner.camera);
             std::lock_guard<std::mutex> lock(mutex_);auto& lane=lanes_[side];auto& p=lane.published;
+            if(obstruction_request->hover) {   // a hover verdict is recorded for the press; it decides and binds nothing (Task 8)
+                if(!active_ || !lane.obstruction || lane.obstruction->request.token!=obstruction_request->token ||
+                   !hover_request_live(*obstruction_request,p,GetTickCount64()) || p.occupied || lane.held ||
+                   !after || !same_body(*after,obstruction_request->body) || !after_owner || after_owner->authored_view() ||
+                   after_owner->camera_identity!=obstruction_request->owner.camera_identity || logic_()!=2 ||
+                   length(after->contact(obstruction_request->hand.position)-obstruction_request->body.contact(obstruction_request->hand.position))>=hover_contact_m || !verdict) continue;
+                lane.obstruction->clear=*verdict;lane.obstruction->verdict_tick=GetTickCount64();++hover_verdicts_;continue;
+            }
             if(!active_ || !lane.obstruction || lane.obstruction->request.token!=obstruction_request->token ||
                !request_current(*obstruction_request,p,GetTickCount64()) || p.grip<.35f || p.occupied || lane.held ||
                !after || !same_body(*after,obstruction_request->body) || !after_owner || after_owner->authored_view() ||
                after_owner->camera_identity!=obstruction_request->owner.camera_identity || logic_()!=2 ||
                length(after->contact(obstruction_request->hand.position)-obstruction_request->body.contact(obstruction_request->hand.position))>=.001 || !verdict)continue;
-            lane.obstruction->clear=*verdict;lane.decision_deferred=false;
+            lane.obstruction->clear=*verdict;lane.obstruction->verdict_tick=GetTickCount64();lane.decision_deferred=false;
             if(lane.owner.deciding(p.grip,true)) {
                 const auto role_before=lane.owner.role();lane.owner.filter(p.grip,true,*verdict);note_role_change_locked(role_before,lane);lane.attempted=*verdict;lane.acquired=false;
                 if(*verdict)++physical_presses_;else ++native_presses_;

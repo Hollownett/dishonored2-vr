@@ -5001,6 +5001,8 @@ void prepare_head_view(void* view) noexcept {
                 const float squeeze=side?game_xr->controller_input.right_grip:game_xr->controller_input.left_grip;
                 native_grab.publish(side,*body,hand,((fist_hands.load()|grab_hands.load())&(1u<<side)) || native_grab.holding(side)?squeeze:0.f,
                     game_xr->pose_epoch(),grab_now,tracked,occupied,game_xr->grip_pose_tick(),nullptr,0,grab_palm);
+                // G3 (plan Task 8): discovery looks where the hand is: its stage-0 Use hit owners (the probe hits of plan Task 12 join at the merge).
+                if(controller_aim_requested) native_grab.hints(side,native_interaction_aim.hint_indices(static_cast<int>(side),grab_now),grab_now);
             }
         }
         if(per_frame && controller_trace_csv.is_open()) {
@@ -6802,7 +6804,9 @@ std::string feedback_status_json() {
              <<",\"exclusion\":{\"casts\":"<<d2vr::NativeInteractionAim::clamp_exclude_casts_.load()<<",\"hits\":"<<d2vr::NativeInteractionAim::clamp_exclude_hits_.load()
              <<",\"self_hits\":"<<d2vr::NativeInteractionAim::clamp_exclude_self_hits_.load()<<",\"unmapped\":"<<d2vr::NativeInteractionAim::clamp_exclude_unmapped_.load()
              <<",\"info_zero\":"<<(d2vr::NativeInteractionAim::clamp_exclude_info_zero_.load()?"true":"false")<<'}';
-            return o.str();}() << "}"  << ",\"corpse\":" << corpse_diagnostics.json() << ",\"grab_focus\":" << native_grab.grab_focus_json(GetTickCount64()) << ",\"perf\":" << [&]{std::lock_guard<std::mutex> l(perf_meter_mutex);return perf_meter.json();}() << ",\"frame_split\":" << frame_split_status_json()
+            return o.str();}() << "}"  << ",\"corpse\":" << corpse_diagnostics.json() << ",\"grab_focus\":" << native_grab.grab_focus_json(GetTickCount64())
+               << [&]{const auto los=native_grab.hover_los();std::ostringstream o;o<<",\"grab_los\":{\"obstruction_required\":"<<(los.required?"true":"false")
+                   <<",\"hover_requests\":"<<los.requests<<",\"hover_verdicts\":"<<los.verdicts<<",\"hover_used\":"<<los.used<<'}';return o.str();}() << ",\"perf\":" << [&]{std::lock_guard<std::mutex> l(perf_meter_mutex);return perf_meter.json();}() << ",\"frame_split\":" << frame_split_status_json()
                << ",\"mono_view\":\"" << (mono_view_state.load()==1?"on":mono_view_state.load()==2?"fallback":"off") << "\",\"mono_view_frames\":" << mono_view_frames.load()
                << ",\"alternate_eye\":{\"state\":\"" << (alt_eye_state.load()==1?"on":alt_eye_state.load()==2?"fallback":"off") << "\",\"alternated\":" << alt_alternated.load()
                << ",\"paired\":" << alt_paired.load() << ",\"fallbacks\":" << alt_fallbacks.load() << '}'
