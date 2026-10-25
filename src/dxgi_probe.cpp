@@ -65,6 +65,7 @@
 #include "authored_view.hpp"
 #include "scripted_recenter.hpp"
 #include "cutscene_policy.hpp"
+#include "cutscene_view.hpp"
 #include <thread>
 #include "action_camera_alignment.hpp"
 #include "corpse_diagnostics.hpp"
@@ -773,6 +774,18 @@ static std::atomic<bool> cutscene_present_immersive{false}; // this Present's cl
 static std::atomic<UINT64> cutscene_immersive_frames{},cutscene_theater_frames{},cutscene_pending_frames{},cutscene_held_frames{},cutscene_projection_layers{},cutscene_quad_layers{},cutscene_count{};
 static std::atomic<int> cutscene_last_fallback{static_cast<int>(d2vr::CutsceneFallback::none)};
 static UINT64 cutscene_capture_start{},cutscene_capture_next{};static unsigned cutscene_captures{};static bool cutscene_capture_left{}; // sim eye captures (capture_xr_transfer)
+// G3 cutscene views (cutscene_view.hpp, Task 6), render thread only (prepare_head_view under log_mutex): the once-per-displayed-frame decision
+// both eyes share (cutscene_view_now, valid for cutscene_view_frame), the provisional head origin a cutscene renders against while no room
+// origin exists for this owner (the room origin is never first-calibrated by a cutscene: it is captured by the next gameplay frame, as after
+// any load, and on that frame the scripted offset is rebased onto it, so the view and the exit fold carry over; a fold made while still on the
+// provisional origin is dropped), the snaps AuthoredHeading made during VR full frames (they never
+// re-aim), and the scene camera's speed for the comfort vignette (published with a tick; stale after 100 ms).
+static d2vr::CutsceneViewTracker cutscene_view_tracker;static d2vr::CutsceneViewStep cutscene_view_now{};static UINT64 cutscene_view_frame=~0ull;
+static d2vr::HeadCalibration cutscene_calibration;static std::optional<d2vr::TrackedPose> cutscene_provisional_used;static std::uint64_t cutscene_provisional_owner{};static bool scripted_provisional{};static std::uint64_t cutscene_suppressed_snaps{};
+static d2vr::SceneMotion cutscene_scene_motion;static std::atomic<float> cutscene_scene_speed_mps{};static std::atomic<UINT64> cutscene_motion_tick{};
+static bool cutscene_motion_live(UINT64 now) noexcept {const UINT64 t=cutscene_motion_tick.load(std::memory_order_relaxed);return t && now>=t && now-t<=100;}
+static std::atomic<UINT64> cutscene_cuts{},cutscene_comfort_views{},cutscene_full_views{},cutscene_provisional_frames{},cutscene_provisional_rebases{},cutscene_dropped_folds{};
+static std::atomic<float> cutscene_last_cut_m{},cutscene_last_cut_deg{},cutscene_speed_peak_mps{},cutscene_view_scene_max_deg{};
 // Dev knobs (Controller Ruling 2; a later task makes the VR settings row the source): build/cutscene-mode holds vr_comfort | vr_full |
 // theater (absent or unknown = vr_comfort); build/no-vr-cutscenes turns immersive cutscenes off (CutsceneFallback::knob_off). StartProbe
 // reads them once; afterwards the present thread only REQUESTS a re-read (Ruling 10b): at most every 500 ms while the mask carries the
@@ -802,7 +815,11 @@ std::string cutscene_status_json() {
      <<",\"immersive_frames\":"<<cutscene_immersive_frames.load()<<",\"theater_frames\":"<<cutscene_theater_frames.load()<<",\"pending_frames\":"<<cutscene_pending_frames.load()<<",\"held_frames\":"<<cutscene_held_frames.load()
      <<",\"projection_layers\":"<<cutscene_projection_layers.load()<<",\"quad_layers\":"<<cutscene_quad_layers.load()
      <<",\"last_fallback\":\""<<d2vr::to_string(static_cast<d2vr::CutsceneFallback>(cutscene_last_fallback.load()))<<"\",\"cutscenes\":"<<cutscene_count.load()
-     <<",\"gates_open\":"<<(cutscene_gates_allowed.load()?"true":"false")<<'}';
+     <<",\"gates_open\":"<<(cutscene_gates_allowed.load()?"true":"false")
+     <<",\"cuts\":"<<cutscene_cuts.load()<<",\"last_cut_m\":"<<cutscene_last_cut_m.load()<<",\"last_cut_deg\":"<<cutscene_last_cut_deg.load()
+     <<",\"comfort_views\":"<<cutscene_comfort_views.load()<<",\"full_views\":"<<cutscene_full_views.load()
+     <<",\"provisional_origin_frames\":"<<cutscene_provisional_frames.load()<<",\"provisional_rebases\":"<<cutscene_provisional_rebases.load()<<",\"dropped_folds\":"<<cutscene_dropped_folds.load()
+     <<",\"scene_speed_peak_mps\":"<<cutscene_speed_peak_mps.load()<<",\"view_scene_max_deg\":"<<cutscene_view_scene_max_deg.load()<<'}';
     return o.str();
 }
 
@@ -4609,7 +4626,8 @@ void prepare_head_view(void* view) noexcept {
         if(!body) {native_audio_listener.clear();native_left_aim.clear();native_shot_aim.clear();native_crosshair.clear();native_weapon_attachment.clear();head_body_anchor.clear();return;}
         const auto action=native_action_camera.poll(read_self,image_base,body->player,GetTickCount64());
         const bool authored_camera_seen=action.owns_camera(body->authored_view(),
-            (body->mode==7 || body->target_mode==7) && !body->tracked_shadow_walk());
+            (body->mode==7 || body->target_mode==7) && !body->tracked_shadow_walk()) ||
+            (cutscene_scene_render() && body->authored_view()); // G3: the open cutscene's camera (mode 10) is the scene camera, even after a combat state
         d2vr::ActionCameraStep action_camera_step{};
         if(action_camera_alignment_enabled) {
             action_camera_step=action_camera_context.sample(frames.load(),
@@ -4694,6 +4712,19 @@ void prepare_head_view(void* view) noexcept {
             if(!frozen) {native_audio_listener.clear();native_left_aim.clear();native_shot_aim.clear();native_crosshair.clear();native_weapon_attachment.clear();return;}
             source_anchor=*frozen;
         } else authored_camera_anchor.clear();
+        if(cutscene_view_frame!=frames.load()) { // G3 (cutscene_view.hpp): once per displayed frame, on every scene frame (a cutscene's first
+            // frame is compared with the last gameplay one), the raw scene pose; both eyes share the decision
+            const bool cutscene_view=cutscene_scene_render() && authored_camera && !legacy_authored_camera;
+            cutscene_view_now=cutscene_view_tracker.step(cutscene_view,static_cast<d2vr::CutsceneMode>(cutscene_mode_state.load()),frames.load(),
+                scripted_recenter_epoch(game_xr->reference_epoch(),body->player,body->camera,body->camera_identity.generation),source_anchor);
+            cutscene_view_frame=frames.load();
+            if(cutscene_view_now.kind!=d2vr::CutsceneViewKind::none) ++(cutscene_view_now.kind==d2vr::CutsceneViewKind::full?cutscene_full_views:cutscene_comfort_views);
+            if(cutscene_view_now.cut.cut) { // a hard cut: the vertical smoothing must not glide across it
+                anchor_smoother.reset();++cutscene_cuts;
+                cutscene_last_cut_m=static_cast<float>(cutscene_view_now.cut.jump_m);cutscene_last_cut_deg=static_cast<float>(cutscene_view_now.cut.jump_yaw_rad*180/3.14159265358979323846);
+            }
+        }
+        const d2vr::CutsceneViewStep cutscene_step=cutscene_view_frame==frames.load()?cutscene_view_now:d2vr::CutsceneViewStep{};
         const std::array<float,3> raw_anchor_position{source_anchor.position[0],source_anchor.position[1],source_anchor.position[2]};
         if(camera_smoothing_enabled) { // vertical only, once per frame: both eyes, the authored view and the listener share the value
             if(anchor_smooth_frame!=frames.load()) {
@@ -4720,9 +4751,23 @@ void prepare_head_view(void* view) noexcept {
         const auto centre_pose=d2vr::eye_centre_pose(
             {{left_pose.position.x,left_pose.position.y,left_pose.position.z},{left_pose.orientation.x,left_pose.orientation.y,left_pose.orientation.z,left_pose.orientation.w}},
             {{right_pose.position.x,right_pose.position.y,right_pose.position.z},{right_pose.orientation.x,right_pose.orientation.y,right_pose.orientation.z,right_pose.orientation.w}});
-        const auto calibration=head_calibration.get(centre_pose,game_xr->reference_epoch(),body->player,body->camera,body->camera_identity.generation,true);
+        // G3: a cutscene frame never first-calibrates the room origin. With none held for this owner (the owner changes on every load, and a
+        // mission's opening cutscene follows its load), it renders against a provisional origin of its own; the room origin is captured by the
+        // next gameplay frame, exactly as after any load, and the scripted offset is rebased onto it there (scripted_provisional).
+        const bool provisional_origin=cutscene_scene_render() &&
+            !head_calibration.holds(game_xr->reference_epoch(),body->player,body->camera,body->camera_identity.generation);
+        const auto calibration=(provisional_origin?cutscene_calibration:head_calibration).get(centre_pose,game_xr->reference_epoch(),body->player,body->camera,body->camera_identity.generation,true);
+        if(provisional_origin && per_frame) ++cutscene_provisional_frames;
         if(!calibration) {native_audio_listener.clear();native_left_aim.clear();native_shot_aim.clear();native_crosshair.clear();native_weapon_attachment.clear();return;}
         head_origin=*calibration;
+        const std::uint64_t view_owner=scripted_recenter_epoch(game_xr->reference_epoch(),body->player,body->camera,body->camera_identity.generation);
+        if(provisional_origin) {cutscene_provisional_used=*calibration;cutscene_provisional_owner=view_owner;}
+        else if(per_frame && scripted_provisional && cutscene_provisional_used && cutscene_provisional_owner==view_owner) { // the first frame against the room origin after a provisional
+            // cutscene: the scripted offset absorbs the origin change, so the view (and the exit fold's continuity) carries over unchanged
+            const double delta=d2vr::tracked_yaw(cutscene_provisional_used->orientation,head_origin.orientation);
+            if(std::isfinite(delta)) {scripted_recenter.rebase(delta);scripted_offset_now+=delta;++cutscene_provisional_rebases;}
+            scripted_provisional=false;cutscene_provisional_used.reset();
+        } else if(per_frame && !provisional_origin && scripted_provisional) {scripted_provisional=false;cutscene_provisional_used.reset();} // another owner: its offset is dropped anyway
         if(per_frame) { // comfort telemetry: raw engine anchor (before any smoothing), levelled body heading, HMD yaw
             static LARGE_INTEGER comfort_freq{};if(!comfort_freq.QuadPart) QueryPerformanceFrequency(&comfort_freq);
             LARGE_INTEGER comfort_now{};QueryPerformanceCounter(&comfort_now);
@@ -4732,14 +4777,24 @@ void prepare_head_view(void* view) noexcept {
             const double comfort_t=static_cast<double>(comfort_now.QuadPart)/static_cast<double>(comfort_freq.QuadPart);
             if(const UINT64 comfort_count=native_turning.applied();comfort_count!=comfort_last_turns) {comfort_last_turns=comfort_count;comfort_turn_t=comfort_t;}
             const bool comfort_turning=native_turning_requested && comfort_t-comfort_turn_t<.15;
-            if(!legacy_authored_camera && (!action_camera_alignment_enabled || action_camera_step.advance)) {authored_heading_now=authored_heading.update(source_anchor,authored_camera,action_camera_alignment_enabled?action_camera_step.history_epoch:head_pose_epoch);authored_heading_frame=frames.load();}
+            const std::uint64_t snaps_before=authored_heading.snaps();bool heading_advanced=false;
+            if(!legacy_authored_camera && (!action_camera_alignment_enabled || action_camera_step.advance)) {authored_heading_now=authored_heading.update(source_anchor,authored_camera,action_camera_alignment_enabled?action_camera_step.history_epoch:head_pose_epoch);authored_heading_frame=frames.load();heading_advanced=true;}
+            // G3 VR comfort: a hard cut hands the heading to the new shot (counted as a snap: the re-aim below is instant). VR full: the scene's
+            // rotation drives the view; the heading follows the scene's level yaw every frame (so the scene's last frames, the exit fold and any
+            // authored gameplay frames after it share one yaw) and its snaps never re-aim (they are held back from the helper's count).
+            if(cutscene_step.kind==d2vr::CutsceneViewKind::comfort && cutscene_step.cut.cut && heading_advanced && authored_heading.snaps()==snaps_before)
+                authored_heading_now=authored_heading.cut_to(source_anchor);
+            if(cutscene_step.kind==d2vr::CutsceneViewKind::full) {
+                if(heading_advanced) authored_heading_now=authored_heading.cut_to(source_anchor,false);
+                cutscene_suppressed_snaps+=authored_heading.snaps()-snaps_before;
+            }
             // G1 scripted moments: one step per displayed gameplay frame, right after the heading it reads. A paused or menu frame (logic != 2)
             // takes no step and keeps the offset, EXCEPT the authored -> not-authored transition: the exit fold runs whatever the logic, so a
             // scene that ends under a menu is not shown unfolded and folded later (a double jump). Every fold (the exit fold and the residual
             // deltas after it) turns HeadCalibration's origin HERE, before anything below reads head_origin: the gameplay view, the meter, the
             // hands and eye 2 (its own get() returns the turned origin) all see it on the fold frame itself, so the view yaw has no one-frame jump.
             const bool scripted_view_live=scripted_recenter_enabled && !legacy_authored_camera;
-            const bool scripted_logic=game_logic_mask()==2;
+            const bool scripted_logic=game_logic_mask()==2 || cutscene_step.kind!=d2vr::CutsceneViewKind::none; // G3: an open cutscene view steps (and clocks) too
             // The helper's clock: prev_t advances on EVERY per-frame pass (skipped ones too) and one pass credits at most 1/30 s, so neither a
             // pause nor a stall is ever credited to the ease at once; only live gameplay frames (logic 2) advance it.
             static double scripted_prev_t{},scripted_clock{};static bool scripted_was_authored{};
@@ -4753,14 +4808,19 @@ void prepare_head_view(void* view) noexcept {
                 const double scripted_body_yaw=std::atan2(static_cast<double>(anchor.basis[1]),static_cast<double>(anchor.basis[0])); // the levelled anchor yaw the meter gets
                 const double hmd_rel=d2vr::tracked_yaw(centre_pose.orientation,head_origin.orientation);
                 const double rel_composed=scripted_wrap(hmd_rel-scripted_offset_now); // the gaze against the composed origin: 0 = on the action
-                const auto heading_now=authored_heading_now; // advanced just above, under a superset of this guard: this frame's heading
+                const auto heading_now=authored_heading_now; // advanced just above, under a superset of this guard: this frame's heading (VR full: the scene's live yaw)
                 const double previous_offset=scripted_offset_now;
                 // no heading this frame = no authored view was drawn: no aim, so no offset accrues (and none folds) for a scene the player never saw
+                // G3: a cutscene view aligns like G1 (instant on a cut or an entry from a load or menu), and VR comfort's 30 degree re-aims inside a
+                // continuous shot ease from the last view (continuous_reaim)
+                d2vr::ScriptedRecenterParams scripted_params{};scripted_params.continuous_reaim=cutscene_step.kind==d2vr::CutsceneViewKind::comfort;
+                if(provisional_origin && cutscene_step.kind!=d2vr::CutsceneViewKind::none) scripted_provisional=true;
                 const auto scripted=scripted_recenter.update({scripted_clock,authored_camera,heading_now && std::isfinite(rel_composed)?std::optional<double>(rel_composed):std::nullopt,
-                    heading_now,authored_heading.snaps(),scripted_recenter_epoch(game_xr->reference_epoch(),body->player,body->camera,body->camera_identity.generation),
-                    authored_camera || !std::isfinite(scripted_body_yaw)?std::nullopt:std::optional<double>(scripted_body_yaw),false});
+                    heading_now,authored_heading.snaps()-cutscene_suppressed_snaps,scripted_recenter_epoch(game_xr->reference_epoch(),body->player,body->camera,body->camera_identity.generation),
+                    authored_camera || !std::isfinite(scripted_body_yaw)?std::nullopt:std::optional<double>(scripted_body_yaw),cutscene_step.instant},scripted_params);
                 scripted_offset_now=scripted.offset_rad;
-                if(scripted.fold_rad) {head_calibration.rotate_origin(*scripted.fold_rad);
+                if(scripted.fold_rad && scripted_provisional) ++cutscene_dropped_folds; // the offset was against the provisional origin, not the room's
+                else if(scripted.fold_rad) {head_calibration.rotate_origin(*scripted.fold_rad);
                     if(const auto folded=head_calibration.get(centre_pose,game_xr->reference_epoch(),body->player,body->camera,body->camera_identity.generation,true)) head_origin=*folded;}
                 static bool scripted_was_easing{}; // an ease's first frame may set the continuity start (a jump of the offset, not of the view): no rate from it
                 scripted_ease_rate_rad_s=static_cast<float>(scripted.easing && scripted_was_easing && scripted_credit>0?std::fabs(scripted.offset_rad-previous_offset)/scripted_credit:0.);
@@ -4780,14 +4840,21 @@ void prepare_head_view(void* view) noexcept {
                         << ',' << scripted_body_yaw*to_deg << ',' << scripted_wrap(view_base+rel_after)*to_deg << '\n';
                     if(++scripted_view_rows%64==0) scripted_view_csv.flush();
                 }
-            } else if(!scripted_view_live) {scripted_recenter.reset();scripted_offset_now=0;scripted_ease_tick=0;scripted_ease_rate_rad_s=0.f;scripted_was_authored=false;}
-            std::lock_guard<std::mutex> comfort_lock(comfort_mutex);
-            comfort_meter.set_authored_snaps(authored_heading.snaps());comfort_meter.set_smoother_resets(anchor_smoother.resets());
-            comfort_meter.feed({static_cast<double>(comfort_now.QuadPart)/static_cast<double>(comfort_freq.QuadPart),
-                {raw_anchor_position[0],raw_anchor_position[1],raw_anchor_position[2]},
-                std::atan2(static_cast<double>(anchor.basis[1]),static_cast<double>(anchor.basis[0])),
-                d2vr::tracked_yaw(centre_pose.orientation,head_origin.orientation),authored_camera,comfort_turning,
-                {source_anchor.position[0],source_anchor.position[1],source_anchor.position[2]},true});
+            } else if(!scripted_view_live) {scripted_recenter.reset();scripted_offset_now=0;scripted_ease_tick=0;scripted_ease_rate_rad_s=0.f;scripted_was_authored=false;scripted_provisional=false;}
+            if(cutscene_step.kind==d2vr::CutsceneViewKind::comfort) { // G3: the comfort vignette follows the scene camera's translation (cuts excluded)
+                const double speed=cutscene_scene_motion.update(raw_anchor_position,comfort_t,cutscene_step.cut.cut);
+                cutscene_scene_speed_mps=static_cast<float>(speed);cutscene_motion_tick=GetTickCount64();
+                if(speed>cutscene_speed_peak_mps.load()) cutscene_speed_peak_mps=static_cast<float>(speed);
+            } else {cutscene_scene_motion.reset();cutscene_motion_tick=0;cutscene_scene_speed_mps=0.f;}
+            if(!cutscene_scene_render()) { // gameplay telemetry: cutscene frames are not counted (authored time, entries, yaw events)
+                std::lock_guard<std::mutex> comfort_lock(comfort_mutex);
+                comfort_meter.set_authored_snaps(authored_heading.snaps());comfort_meter.set_smoother_resets(anchor_smoother.resets());
+                comfort_meter.feed({static_cast<double>(comfort_now.QuadPart)/static_cast<double>(comfort_freq.QuadPart),
+                    {raw_anchor_position[0],raw_anchor_position[1],raw_anchor_position[2]},
+                    std::atan2(static_cast<double>(anchor.basis[1]),static_cast<double>(anchor.basis[0])),
+                    d2vr::tracked_yaw(centre_pose.orientation,head_origin.orientation),authored_camera,comfort_turning,
+                    {source_anchor.position[0],source_anchor.position[1],source_anchor.position[2]},true});
+            }
         }
         // G1: origin' = yaw(offset) * head_origin, the same for both eyes and the listener (offset decided at this frame's first view)
         const d2vr::Quaternion composed_origin=d2vr::normalized(d2vr::multiplied(d2vr::yaw_quaternion(scripted_offset_now),head_origin.orientation));
@@ -5950,6 +6017,10 @@ void prepare_head_view(void* view) noexcept {
             const d2vr::TrackedPose eye_pose{{xr_eye.pose.position.x,xr_eye.pose.position.y,xr_eye.pose.position.z},orientation};
             std::optional<d2vr::GameCameraPose> native_eye;
             if(legacy_authored_camera) native_eye=d2vr::authored_eye_camera(source_anchor,centre_pose,eye_pose);
+            else if(cutscene_step.kind==d2vr::CutsceneViewKind::full) { // G3 VR full: the scene's full rotation with the head on top
+                try {native_eye=d2vr::cutscene_full_view(source_anchor,centre_pose,eye_pose,composed_origin,1.0,authored_physical_offset);}
+                catch(const std::invalid_argument&) {native_eye.reset();}
+            }
             else if(authored_heading_now && authored_heading_frame==frames.load()) { // eye 1 never reuses a previous frame's heading
                 try {native_eye=d2vr::authored_head_view(source_anchor,*authored_heading_now,centre_pose,eye_pose,1.0,composed_origin,authored_physical_offset);}
                 catch(const std::invalid_argument&) {native_eye.reset();}
@@ -5960,6 +6031,11 @@ void prepare_head_view(void* view) noexcept {
             }
             world.position={native_eye->position[0],native_eye->position[1],native_eye->position[2]};
             for(unsigned i=0;i<3;++i) world.basis[i]={native_eye->basis[i*3],native_eye->basis[i*3+1],native_eye->basis[i*3+2]};
+            if(per_frame && cutscene_step.kind!=d2vr::CutsceneViewKind::none) { // G3 diagnostic: how far the written view's forward is from the scene's
+                const double c=world.basis[0].x*source_anchor.basis[0]+world.basis[0].y*source_anchor.basis[1]+world.basis[0].z*source_anchor.basis[2];
+                const float a=static_cast<float>(std::acos(std::clamp(c,-1.,1.))*180/3.14159265358979323846);
+                if(a>cutscene_view_scene_max_deg.load()) cutscene_view_scene_max_deg=a;
+            }
         }
         if(native_camera_trace_requested && head_anchor_samples<8000 && frames.load()%6==0) {
             head_anchor_csv << frames.load() << ',' << GetTickCount64() << ',' << eye << ',' << head_pose_epoch
@@ -7495,10 +7571,16 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                             const double dt=vignette_last_ns?static_cast<double>(now_ns-vignette_last_ns)*1e-9:0;vignette_last_ns=now_ns;
                             const bool recenter_easing=scripted_recenter_easing_live(GetTickCount64()); // G1: the scripted-moment ease lifts the authored inhibit
                             const bool allowed=d2vr::vignette_target_allowed(gameplay && owner,authored_camera,x_wheel.wheel(),game_xr && game_xr->settings_open(),recenter_easing);
+                            // G3 VR comfort cutscene (published by prepare_head_view only for a comfort view): the scene camera's translation above the
+                            // locomotion onset, and the alignment ease; never in VR full or theater
+                            const bool cutscene_motion=!gameplay && cutscene_scene_render() && cutscene_motion_live(GetTickCount64()) && !(game_xr && game_xr->settings_open());
+                            const double move=allowed?published_stick_speed_mps.load():cutscene_motion?d2vr::cutscene_vignette_speed(cutscene_scene_speed_mps.load()):0.;
+                            const double turn=allowed?(recenter_easing?std::max(published_turn_rate_rad_s.load(),scripted_ease_rate_rad_s.load()):published_turn_rate_rad_s.load()):
+                                cutscene_motion && recenter_easing?scripted_ease_rate_rad_s.load():0.;
                             float opacity{};
                             {std::lock_guard<std::mutex> comfort_lock(comfort_mutex);
                              if(!(dt>=0 && dt<=.25)) comfort_vignette.reset(); // a gap (pause, load, stall): start from nothing instead of jumping
-                             opacity=comfort_vignette.update({allowed?published_stick_speed_mps.load():0.,allowed?(recenter_easing?std::max(published_turn_rate_rad_s.load(),scripted_ease_rate_rad_s.load()):published_turn_rate_rad_s.load()):0.,dt>0 && dt<=.25?dt:0});}
+                             opacity=comfort_vignette.update({move,turn,dt>0 && dt<=.25?dt:0});}
                             if(game_xr) game_xr->vignette_opacity.store(opacity,std::memory_order_relaxed);
                         }
                         // alternate-eye: authored / settings state is read here, at this Present (the plan lags a frame); a one-view frame in it is dropped
@@ -9360,7 +9442,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
         xr_recommended_eye_sizes={};xr_swapchain_eye_sizes={};xr_eye_texture_formats={};
         gpu_render_thread.store(0,std::memory_order_release);gpu_game_context.store(nullptr,std::memory_order_release);
         gpu_game_device.store(nullptr,std::memory_order_release);gpu_draw_samples={};gpu_vertex_draw_samples={};gpu_hand_draw_counts={};
-        head_calibration={};scripted_recenter.reset();scripted_offset_now=0;scripted_ease_tick=0;head_setup_seen=0;head_matched=0;head_writes=0;head_restores=0;xr_present_thread=0;head_pose_epoch=0;
+        head_calibration={};scripted_recenter.reset();scripted_offset_now=0;cutscene_calibration={};cutscene_provisional_used.reset();scripted_provisional=false;cutscene_view_tracker.reset();cutscene_view_frame=~0ull;cutscene_scene_motion.reset();scripted_ease_tick=0;head_setup_seen=0;head_matched=0;head_writes=0;head_restores=0;xr_present_thread=0;head_pose_epoch=0;
         head_body_anchor.clear();authored_camera_anchor.clear();head_body_camera=0;authored_camera_rows=0;
         native_hud_art_capture.clear();native_hud_fallback.clear();native_hud_art_bounds={};native_hud_compact_art={};native_hud_art_saved={};native_hud_art_queue_ticks={};native_hud_art_queued_serials={};native_hud_art_queue_cursor=0;
         native_hud_art_queued_scopes={};native_hud_flat_fallbacks=native_hud_flat_failures=0;
@@ -10115,10 +10197,11 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
         projection_jitter=!fs::exists(root/L"build"/L"no-projection-jitter");
         hold_y_menu_enabled=!fs::exists(root/L"build"/L"no-hold-y-menu");
         legacy_hold_y_settings=fs::exists(root/L"build"/L"legacy-hold-y-settings");
-        legacy_authored_camera=fs::exists(root/L"build"/L"legacy-authored-camera");authored_heading.reset();authored_heading_now.reset();
+        legacy_authored_camera=fs::exists(root/L"build"/L"legacy-authored-camera");authored_heading.reset();authored_heading_now.reset();cutscene_suppressed_snaps=0;
         scripted_recenter_enabled=!fs::exists(root/L"build"/L"no-scripted-recenter");scripted_recenter.reset();scripted_offset_now=0;scripted_ease_tick=0; // G1 (default on)
         cutscene_policy=d2vr::CutscenePolicy{};cutscene_gates_allowed=false;cutscene_flush_presents=0;cutscene_present_immersive=false; // G2
         read_cutscene_knobs(root/L"build");cutscene_knob_tick=GetTickCount64();cutscene_knob_cinematic=false; // the knobs at start; later re-reads run off the present thread
+        cutscene_cuts=0;cutscene_comfort_views=0;cutscene_full_views=0;cutscene_provisional_frames=0;cutscene_provisional_rebases=0;cutscene_dropped_folds=0;cutscene_last_cut_m=0.f;cutscene_last_cut_deg=0.f;cutscene_speed_peak_mps=0.f;cutscene_view_scene_max_deg=0.f;cutscene_motion_tick=0;
         cutscene_immersive_frames=0;cutscene_theater_frames=0;cutscene_pending_frames=0;cutscene_held_frames=0;cutscene_projection_layers=0;cutscene_quad_layers=0;cutscene_count=0;
         cutscene_last_fallback=static_cast<int>(d2vr::CutsceneFallback::none);cutscene_capture_start=0;cutscene_capture_next=0;cutscene_captures=0;cutscene_capture_left=false;
         action_camera_alignment_enabled=!fs::exists(root/L"build"/L"legacy-action-camera-alignment");action_camera_context.reset();action_camera_physical_offset={};

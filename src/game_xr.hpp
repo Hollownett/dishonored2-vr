@@ -2111,6 +2111,13 @@ public:
                 }
                 end.layers=menu_layers_with_pointer.data();
                 overlay_stats.end_frame();
+            } else if(scene_render && authored_camera && (vignette_panel=vignette_layer())) {
+                // An authored scene (a G1 scripted moment's 0.4 s ease, a VR comfort cutscene's moving camera) shows no HUD panels, only
+                // the comfort ring over the projection; the probe keeps its opacity 0 everywhere else.
+                end.layerCount=0;menu_layers_with_pointer[end.layerCount++]=layer;
+                menu_layers_with_pointer[end.layerCount++]=reinterpret_cast<const XrCompositionLayerBaseHeader*>(&*vignette_panel);++vignette_layers;
+                end.layers=menu_layers_with_pointer.data();
+                overlay_stats.end_frame();
             }
         }
         timing.transfer_ns=cpu_time_ns()-stage_start;stage_start=cpu_time_ns();
@@ -2170,7 +2177,7 @@ public:
         frame_open_=false;
         timing.submit_ns=cpu_time_ns()-stage_start;timing.end_ns=cpu_time_ns();
         last_layer_submitted=real_layers!=0;last_menu_layer=last_layer_submitted && !world_scene; // real mod layers only: a fallback frame is not content
-        last_authored_camera_layer=last_layer_submitted && authored_camera && !settings_.open();
+        last_authored_camera_layer=last_layer_submitted && authored_camera && !authored_scene_render && !settings_.open(); // gameplay's authored camera; a cutscene counts apart
         if(last_authored_camera_layer) ++authored_camera_layers;
         rendered_mask_=0;
         if(real_layers) {++submitted;if(!world_scene) ++menu_layers;}else ++dropped;

@@ -35,7 +35,10 @@ def check(probe: str, xr: str) -> None:
     assert "inline bool render_scene_frame() {return render_world_scene() || cutscene_scene_render();}" in probe
     assert "static std::atomic<bool> cutscene_gates_allowed{false};" in probe
     assert probe.count("render_scene_frame()") == 5, probe.count("render_scene_frame()")  # the definition + 4 sites
-    assert probe.count("cutscene_scene_render()") == 2 and probe.count("cutscene_gates_allowed=") == 2  # the present thread + StartProbe reset
+    # the definition and render_scene_frame(); Task 6: prepare_head_view's authored scene camera, view decision, provisional origin and
+    # comfort-meter skip, and the present thread's cutscene vignette
+    assert probe.count("cutscene_scene_render()") == 7, probe.count("cutscene_scene_render()")
+    assert probe.count("cutscene_gates_allowed=") == 2  # the present thread + StartProbe reset
     stereo = fn(probe, "void sample_stereo(IDXGISwapChain* chain,UINT64 number,const DXGI_SWAP_CHAIN_DESC& desc) {")
     assert "if(xr_requested && !render_scene_frame() && !cinematic_probe_keeps_stereo()) {" in stereo
     setup = fn(probe, "void observe_eye_setup(void* view) noexcept {")
@@ -46,7 +49,28 @@ def check(probe: str, xr: str) -> None:
     assert "identity!=eye_camera_owner" in setup and "eye=eye_sources.match(address,frame-1,GetCurrentThreadId(),gpu_render_thread.load());" in begin
     head = fn(probe, "void prepare_head_view(void* view) noexcept {")
     assert head.count("render_scene_frame()") == 1 and "if(!render_scene_frame()) {native_audio_listener.clear();" in head
-    assert "cutscene_" not in head  # no cutscene state reaches the head view: it renders like any authored view
+    # Task 6 (cutscene_view.hpp): the cutscene state the head view reads is the once-per-frame view decision, the provisional origin and the
+    # comfort vignette's scene speed; nothing else (no policy, no hold, no knob file)
+    assert "cutscene_policy" not in head and "cutscene_hold" not in head and "refresh_cutscene_knobs" not in head
+    assert "cutscene_view_now=cutscene_view_tracker.step(cutscene_view,static_cast<d2vr::CutsceneMode>(cutscene_mode_state.load()),frames.load()," in head
+    assert "const bool cutscene_view=cutscene_scene_render() && authored_camera && !legacy_authored_camera;" in head
+    assert head.index("cutscene_view_tracker.step(") < head.index("if(camera_smoothing_enabled) {")  # the raw pose, and a cut resets the smoother first
+    assert "if(cutscene_view_now.cut.cut) { // a hard cut: the vertical smoothing must not glide across it\n                anchor_smoother.reset();" in head
+    assert "(cutscene_scene_render() && body->authored_view()); // G3:" in head
+    # the room origin is never first-calibrated by a cutscene frame
+    assert "const bool provisional_origin=cutscene_scene_render() &&\n            !head_calibration.holds(" in head
+    assert "const auto calibration=(provisional_origin?cutscene_calibration:head_calibration).get(" in head
+    assert head.count("head_calibration.get(") == 1 and head.count("cutscene_calibration") == 1  # the post-fold refresh; the one origin choice
+    # the first frame against the room origin after a provisional cutscene rebases the scripted offset (same owner only), before the step
+    rebase = head.index("scripted_recenter.rebase(delta);scripted_offset_now+=delta;")
+    assert head.index("head_origin=*calibration;") < rebase < head.index("scripted_recenter.update(")
+    assert "cutscene_provisional_owner==view_owner" in head
+    # VR comfort: a cut re-latches the heading; VR full: the scene's full rotation with the head on top
+    assert "authored_heading_now=authored_heading.cut_to(source_anchor);" in head and "authored_heading_now=authored_heading.cut_to(source_anchor,false);" in head
+    assert "native_eye=d2vr::cutscene_full_view(source_anchor,centre_pose,eye_pose,composed_origin,1.0,authored_physical_offset);" in head
+    assert head.index("cutscene_full_view(") < head.index("native_eye=d2vr::authored_head_view(")
+    # the comfort meter is gameplay telemetry
+    assert "if(!cutscene_scene_render()) { // gameplay telemetry" in head and head.index("if(!cutscene_scene_render()) { // gameplay telemetry") < head.index("comfort_meter.feed(")
     # every side effect after the early return stays on raw logic 2 or the unchanged render_world_scene()
     for gate in ("if(per_frame && game_logic_mask()==2) {physical_drop=-head_offset.y;",
                  "if(per_frame && game_logic_mask()==2 && !authored_camera) {",                      # HUD world frame
@@ -56,7 +80,7 @@ def check(probe: str, xr: str) -> None:
                  "if(game_logic_mask()==2 && (native_camera_trace_requested || native_left_aim_requested || native_shot_aim_installed || native_crosshair_installed) && per_frame) {",
                  "if(render_world_scene() && (tracked_arms_requested || native_weapon_attachment_requested) && per_frame) {",  # arms, attachment
                  "if(listener && game_logic_mask()==2 && game_xr->state==XR_SESSION_STATE_FOCUSED &&",  # the native listener is left alone under 32
-                 "const bool scripted_logic=game_logic_mask()==2;"):                                  # the G1 clock
+                 "const bool scripted_logic=game_logic_mask()==2 || cutscene_step.kind!=d2vr::CutsceneViewKind::none;"):  # the G1 clock (+ the cutscene view)
         assert gate in head, gate
     assert head.count("render_world_scene()") == 3, head.count("render_world_scene()")  # the two arm/attachment sites + the left-aim hand-off
     # --- the present block: classification, hold, the present call
@@ -142,6 +166,9 @@ def check(probe: str, xr: str) -> None:
                 "if(settings_requested.exchange(false) && !gameplay) {settings_.open_from_menu();}"):
         assert raw in present, raw
     assert "bool rendered_pair_ready() const {return tracked_pair_();}" in xr
+    # Task 6: an authored scene (a G1 ease, a VR comfort cutscene) submits only the comfort ring over its projection
+    assert "} else if(scene_render && authored_camera && (vignette_panel=vignette_layer())) {" in present
+    assert "last_authored_camera_layer=last_layer_submitted && authored_camera && !authored_scene_render && !settings_.open();" in present
     # fix round 1: a hold submits black or this scene's own immersive layer, never a projection whose eye chains a quad frame has refilled
     assert "const auto scene_hold_now=scene_hold;const auto hold_scene=scene_id;scene_hold=SceneHold::none;" in present
     loop_end = present.index("if(mirror_rects[0] || mirror_rects[1]) {mirror_->end(desktop);++mirrored_frames;}")

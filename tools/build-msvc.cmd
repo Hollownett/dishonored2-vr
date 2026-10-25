@@ -409,6 +409,10 @@ build\scripted_recenter_check.exe
 if not "%errorlevel%"=="0" exit /b 1
 cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT /Isrc tests\cutscene_policy_check.cpp /Fo:build\cutscene_policy_check.obj /Fe:build\cutscene_policy_check.exe
 if not "%errorlevel%"=="0" exit /b 1
+cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT /Isrc tests\cutscene_view_check.cpp /Fo:build\cutscene_view_check.obj /Fe:build\cutscene_view_check.exe
+if not "%errorlevel%"=="0" exit /b 1
+build\cutscene_view_check.exe
+if not "%errorlevel%"=="0" exit /b 1
 build\cutscene_policy_check.exe
 if not "%errorlevel%"=="0" exit /b 1
 build\authored_view_check.exe

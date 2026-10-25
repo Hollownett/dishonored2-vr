@@ -45,6 +45,14 @@ public:
         if(yaw && !vertical && std::fabs(wrap(*yaw-held_))>=snap_rad) {held_=*yaw;++snaps_;}
         return held_;
     }
+    // A hard camera cut in a VR comfort cutscene (cutscene_view.hpp): the new shot's direction becomes the heading whatever the jump, and
+    // counts as a snap (ScriptedRecenter re-aims on it). VR full follows the scene's yaw every frame with snap=false (no re-aim, not counted).
+    // Only inside a latched scene; an unusable yaw keeps the held heading.
+    std::optional<double> cut_to(const GameCameraPose& native,bool snap=true) noexcept {
+        if(!in_) return {};
+        if(const auto yaw=native_yaw(native)) {held_=*yaw;if(snap) ++snaps_;}
+        return held_;
+    }
     void reset() noexcept {in_=false;snaps_=0;}
     std::uint64_t snaps() const {return snaps_;}
 };

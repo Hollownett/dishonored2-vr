@@ -19,7 +19,14 @@ def check(probe: str, vignette: str, action: str) -> None:
     guard = block[:block.index("scripted_recenter.update(")]
     guard = guard[guard.rindex("if(scripted_view_live"):]
     assert guard.startswith("if(scripted_view_live && (scripted_logic || scripted_exit) && (!action_camera_alignment_enabled || action_camera_step.advance)) {")
-    assert "const bool scripted_logic=game_logic_mask()==2;" in block
+    # G3 (Task 6): an open cutscene view (cutscene_view.hpp) steps and clocks like a gameplay frame; every other logic != 2 frame does not
+    assert "const bool scripted_logic=game_logic_mask()==2 || cutscene_step.kind!=d2vr::CutsceneViewKind::none;" in block
+    assert "heading_now,authored_heading.snaps()-cutscene_suppressed_snaps,scripted_recenter_epoch(" in block  # VR full never re-aims
+    assert "std::optional<double>(scripted_body_yaw),cutscene_step.instant},scripted_params);" in block  # a cut aligns at once
+    assert "scripted_params.continuous_reaim=cutscene_step.kind==d2vr::CutsceneViewKind::comfort;" in block
+    # a cutscene never first-calibrates the room origin: against a provisional one, its exit fold is dropped, not applied to the room
+    assert "if(scripted.fold_rad && scripted_provisional) ++cutscene_dropped_folds;" in block
+    assert block.index("if(scripted.fold_rad && scripted_provisional)") < block.index("else if(scripted.fold_rad) {head_calibration.rotate_origin(")
     # fix 2: only the authored -> not-authored transition (the fold) steps off logic 2; entry/aim and the clock stay gated
     assert "const bool scripted_exit=scripted_was_authored && !authored_camera;" in block
     assert "scripted_was_authored=authored_camera;" in block[block.index("if(scripted_view_live && (scripted_logic"):]

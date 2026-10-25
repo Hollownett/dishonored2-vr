@@ -9,7 +9,10 @@
 #include <optional>
 
 namespace d2vr {
-struct ScriptedRecenterParams {double dead_zone_rad=0.17453292519943295,ease_s=0.4;}; // 10 degrees
+// continuous_reaim (VR comfort cutscenes, Task 6): a NON-instant re-aim (a 30 deg heading snap inside a continuous shot) starts the
+// offset where the last view was (offset += the heading's jump), as an entry does, so the view eases instead of stepping by the snap.
+// Off for G1, which keeps its reviewed behaviour (the heading snap shows at once, the offset then eases to the gaze).
+struct ScriptedRecenterParams {double dead_zone_rad=0.17453292519943295,ease_s=0.4;bool continuous_reaim=false;}; // 10 degrees
 struct ScriptedRecenterInput {
     double t;                          // seconds, monotonic
     bool authored;                     // authored_camera this frame
@@ -69,7 +72,14 @@ public:
             if(!in_) {in_=true;++entries_;snaps_=in.heading_snaps;entry_pending_=true;have_entry_body_=have_body_;entry_body_=body_;}
             if(snap) snaps_=in.heading_snaps;
             if(entry_pending_) {if(rel) enter(*rel);} // a snap while pending is the entry aim; a late entry uses the body latched at entry
-            else if(snap && rel) {++reaims_;aim(in.t,*rel,p,in.instant);}
+            else if(snap && rel) {
+                ++reaims_;
+                if(p.continuous_reaim && !in.instant && have_heading_ && in.heading && std::isfinite(*in.heading)) {
+                    const double target=offset_+*rel; // the gaze lands on the new heading, as for any re-aim
+                    offset_+=wrap(*in.heading-heading_);ease_=false; // this frame's view = the last one (the snap is absorbed)
+                    aim(in.t,wrap(target-offset_),p,false);
+                } else aim(in.t,*rel,p,in.instant);
+            }
             if(in.heading && std::isfinite(*in.heading)) {heading_=*in.heading;have_heading_=true;}
         } else if(in_) {
             in_=false;entry_pending_=false;
@@ -94,6 +104,9 @@ public:
         }
         return {offset_,fold,ease_,entries_,reaims_,folds_,skipped_,res_pending_};
     }
+    // The origin the offset composes with changed by -delta (a VR cutscene rendered against a provisional origin; the room origin then
+    // captured by gameplay): the offset, and an ease in progress, shift by +delta so the composed origin (and the view) is unchanged.
+    void rebase(double delta) noexcept {if(!std::isfinite(delta)) return;offset_+=delta;from_+=delta;to_+=delta;}
     void reset() noexcept {*this=ScriptedRecenter{};}
 };
 } // namespace d2vr

@@ -21,6 +21,11 @@ class HeadCalibration {
 public:
     void clear() noexcept {origin_.reset();}
     std::uint64_t captures() const noexcept {return captures_;}
+    // An origin is held for exactly this owner (get() would return it without capturing). VR cutscenes use it to never first-calibrate
+    // the room (Task 6): with no room origin they render against a provisional one of their own.
+    bool holds(std::uint64_t epoch,std::uintptr_t player,std::uintptr_t camera,std::int32_t generation) const noexcept {
+        return origin_ && epoch && epoch_==epoch && player_==player && camera_==camera && generation_==generation;
+    }
     // Yaw-only turn of the held origin (+ = tracked_yaw increases); keeps identity, position and capture count.
     void rotate_origin(double yaw_rad) noexcept {
         if(!origin_ || !std::isfinite(yaw_rad)) return;
