@@ -94,14 +94,26 @@ int main(){
      assert(rel2>deg(20) && r.update(in(1,true,0,B,0,1,B)).entries==2);
      assert(worst1<=1.5*hmd/.4*dt+1e-6 && worst2<=1.5*rel2/.4*dt+1e-6);}
     {ScriptedRecenter r; // non_finite_hmd_no_turn
-     auto o=r.update(in(0,true,std::nullopt,1.0));o=r.update(in(1,true,deg(40),1.0));
-     assert(o.offset_rad==0 && !o.easing);
+     auto o=r.update(in(0,true,std::nullopt,1.0));o=r.update(in(1,true,deg(40),1.0)); // the first valid frame starts the pending entry turn
+     assert(o.offset_rad==0 && o.easing && o.entries==1 && o.reaims==0);o=r.update(in(1.5,true,deg(40),1.0));assert(near(o.offset_rad,deg(40)) && !o.easing);
      ScriptedRecenter q;o=q.update(in(0,true,NAN,1.0));o=q.update(in(1,true,NAN,1.0));assert(o.offset_rad==0);}
     {for(double d:{179.,-179.}){ScriptedRecenter r;r.update(in(0,true,deg(d),1.0));auto o=r.update(in(1,true,deg(d),1.0));
         assert(near(o.offset_rad,deg(d)) && std::fabs(o.offset_rad)<kPi);}
      ScriptedRecenter a,b;a.update(in(0,true,kPi,1.0));b.update(in(0,true,-kPi,1.0));
      assert(near(a.update(in(1,true,0,1.0)).offset_rad,kPi) && near(b.update(in(1,true,0,1.0)).offset_rad,kPi));
      ScriptedRecenter c;c.update(in(0,true,deg(190),1.0));assert(near(c.update(in(1,true,0,1.0)).offset_rad,deg(-170)));}
+    {ScriptedRecenter r; // late_heading_starts_entry_turn: 3 frames without a gaze, then 40 deg eases to 40 deg over 0.4 s from that frame
+     for(int i=0;i<3;++i){auto o=r.update(in(.01*i,true,std::nullopt,std::nullopt));assert(o.offset_rad==0 && !o.easing);}
+     auto o=r.update(in(.03,true,deg(40),1.0));assert(o.easing && near(o.offset_rad,0) && o.entries==1 && o.reaims==0);
+     o=r.update(in(.23,true,deg(40),1.0));assert(near(o.offset_rad,deg(20)) && o.easing);
+     o=r.update(in(.42,true,deg(40),1.0));assert(o.easing && o.offset_rad<deg(40));o=r.update(in(.431,true,deg(40),1.0));assert(near(o.offset_rad,deg(40)) && !o.easing && o.entries==1 && o.reaims==0 && o.skipped_small==0);
+     o=r.update(in(.6,true,deg(-60),1.0));assert(near(o.offset_rad,deg(40)) && !o.easing); // one-shot: no second turn without a snap
+     ScriptedRecenter s;s.update(in(0,true,std::nullopt,std::nullopt));o=s.update(in(.1,true,deg(5),1.0)); // a late small delta: the dead zone holds
+     assert(o.skipped_small==1 && !o.easing && o.offset_rad==0);
+     ScriptedRecenter q;q.update(in(0,true,std::nullopt,std::nullopt));o=q.update(in(.1,true,deg(35),1.5,1)); // a snap while pending is the entry aim
+     assert(o.easing && o.reaims==0);o=q.update(in(.6,true,0,1.5,1));assert(near(o.offset_rad,deg(35)));
+     ScriptedRecenter e;e.update(in(0,true,std::nullopt,std::nullopt));e.update(in(.1,false)); // exit clears pending
+     o=e.update(in(.2,false));o=e.update(in(.3,true,std::nullopt,1.0));o=e.update(in(.4,true,deg(30),1.0));assert(o.entries==2 && o.easing);}
     {ScriptedRecenter r; // unseen_scene_folds_nothing: no heading, the caller passes no hmd (no view drawn), so the exit folds nothing
      for(int i=0;i<=60;++i){auto o=r.update(in(.01*i,true,std::nullopt,std::nullopt));assert(o.offset_rad==0 && !o.easing);}
      auto o=r.update(in(1,false,{},{},0,1,1.2));assert(!o.fold_rad && o.folds==0 && o.entries==1 && !o.residual_easing);}

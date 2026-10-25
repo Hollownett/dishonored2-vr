@@ -31,7 +31,7 @@ inline Quaternion yaw_quaternion(double yaw) noexcept {return {0,std::sin(yaw*.5
 
 class ScriptedRecenter {
     static constexpr double pi=3.14159265358979323846;
-    bool in_{},ease_{};
+    bool in_{},ease_{},entry_pending_{}; // entry_pending_: entered with no usable gaze, the next valid frame inside the moment starts the turn
     std::uint64_t epoch_{},snaps_{},entries_{},reaims_{},folds_{},skipped_{};
     double offset_{},from_{},to_{},t0_{},heading_{};
     bool have_heading_{};
@@ -47,7 +47,7 @@ public:
     ScriptedRecenterOutput update(const ScriptedRecenterInput& in,const ScriptedRecenterParams& p={}) noexcept {
         std::optional<double> fold;
         const bool finite_t=std::isfinite(in.t);
-        if((in_ || ease_ || res_pending_ || offset_!=0) && in.epoch!=epoch_) {in_=ease_=false;offset_=0;have_heading_=false;res_pending_=false;} // new owner: drop
+        if((in_ || ease_ || res_pending_ || offset_!=0) && in.epoch!=epoch_) {in_=ease_=entry_pending_=false;offset_=0;have_heading_=false;res_pending_=false;} // new owner: drop
         epoch_=in.epoch;
         if(in.authored) {
             res_pending_=false;
@@ -55,14 +55,14 @@ public:
                 std::optional<double>(wrap(*in.hmd_rel_yaw)) : std::nullopt;
             if(!in_) {
                 in_=true;++entries_;snaps_=in.heading_snaps;
-                if(rel) aim(in.t,*rel,p,in.instant);
+                if(rel) aim(in.t,*rel,p,in.instant);else entry_pending_=true;
             } else if(in.heading_snaps>snaps_) {
                 snaps_=in.heading_snaps;
-                if(rel) {++reaims_;aim(in.t,*rel,p,in.instant);}
-            }
+                if(rel) {if(entry_pending_) entry_pending_=false;else ++reaims_;aim(in.t,*rel,p,in.instant);} // a snap while pending is the entry aim
+            } else if(entry_pending_ && rel) {entry_pending_=false;aim(in.t,*rel,p,in.instant);} // late entry turn: dead zone and ease as usual
             if(in.heading && std::isfinite(*in.heading)) {heading_=*in.heading;have_heading_=true;}
         } else if(in_) {
-            in_=false;
+            in_=false;entry_pending_=false;
             double f=offset_;
             if(in.body_yaw && std::isfinite(*in.body_yaw) && have_heading_) f+=wrap(*in.body_yaw-heading_);
             const bool known=in.body_yaw && std::isfinite(*in.body_yaw) && have_heading_;
