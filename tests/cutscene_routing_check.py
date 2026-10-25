@@ -37,7 +37,7 @@ def check(probe: str, xr: str) -> None:
     assert probe.count("render_scene_frame()") == 5, probe.count("render_scene_frame()")  # the definition + 4 sites
     # the definition and render_scene_frame(); Task 6: prepare_head_view's authored scene camera, view decision, provisional origin and
     # comfort-meter skip, and the present thread's cutscene vignette
-    assert probe.count("cutscene_scene_render()") == 7, probe.count("cutscene_scene_render()")
+    assert probe.count("cutscene_scene_render()") == 8, probe.count("cutscene_scene_render()")  # + the Ruling 12 adoption guard
     assert probe.count("cutscene_gates_allowed=") == 2  # the present thread + StartProbe reset
     stereo = fn(probe, "void sample_stereo(IDXGISwapChain* chain,UINT64 number,const DXGI_SWAP_CHAIN_DESC& desc) {")
     assert "if(xr_requested && !render_scene_frame() && !cinematic_probe_keeps_stereo()) {" in stereo
@@ -58,13 +58,17 @@ def check(probe: str, xr: str) -> None:
     assert "if(cutscene_view_now.cut.cut) { // a hard cut: the vertical smoothing must not glide across it\n                anchor_smoother.reset();" in head
     assert "(cutscene_scene_render() && body->authored_view()); // G3:" in head
     # the room origin is never first-calibrated by a cutscene frame
-    assert "const bool provisional_origin=cutscene_scene_render() &&\n            !head_calibration.holds(" in head
+    assert "const bool room_held=head_calibration.holds(game_xr->reference_epoch()," in head
+    assert "const bool provisional_origin=cutscene_scene_render() && !room_held;" in head
     assert "const auto calibration=(provisional_origin?cutscene_calibration:head_calibration).get(" in head
-    assert head.count("head_calibration.get(") == 1 and head.count("cutscene_calibration") == 1  # the post-fold refresh; the one origin choice
-    # the first frame against the room origin after a provisional cutscene rebases the scripted offset (same owner only), before the step
-    rebase = head.index("scripted_recenter.rebase(delta);scripted_offset_now+=delta;")
-    assert head.index("head_origin=*calibration;") < rebase < head.index("scripted_recenter.update(")
-    assert "cutscene_provisional_owner==view_owner" in head
+    # Ruling 12: the first gameplay frame of the same owner adopts the provisional origin (position and yaw) before the room origin is read
+    adopt = head.index("head_calibration.adopt(*provisional,game_xr->reference_epoch(),body->player,body->camera,body->camera_identity.generation)")
+    assert "if(!cutscene_scene_render() && !room_held && cutscene_calibration.holds(" in head
+    assert adopt < head.index("const auto calibration=(provisional_origin?cutscene_calibration:head_calibration).get(")
+    assert "scripted_recenter.rebase(" not in head and "dropped_folds" not in probe
+    # Ruling 14: the view lasts through the authored camera's logic-2 tail
+    assert "const bool cutscene_tail=game_logic_mask()==2 && authored_camera && !legacy_authored_camera;" in head
+    assert "source_anchor,cutscene_tail);" in head
     # VR comfort: a cut re-latches the heading; VR full: the scene's full rotation with the head on top
     assert "authored_heading_now=authored_heading.cut_to(source_anchor);" in head and "authored_heading_now=authored_heading.cut_to(source_anchor,false);" in head
     assert "native_eye=d2vr::cutscene_full_view(source_anchor,centre_pose,eye_pose,composed_origin,1.0,authored_physical_offset);" in head

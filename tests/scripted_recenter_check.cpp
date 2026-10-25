@@ -13,7 +13,7 @@ static ScriptedRecenterInput in(double t,bool authored,std::optional<double> rel
     return {t,authored,rel,heading,snaps,epoch,body,instant};
 }
 int main(){
-    static_assert(ScriptedRecenterParams{}.dead_zone_rad==0.17453292519943295 && ScriptedRecenterParams{}.ease_s==0.4,"tuned constants");
+    static_assert(ScriptedRecenterParams{}.dead_zone_rad==0.17453292519943295 && ScriptedRecenterParams{}.ease_s==0.4 && ScriptedRecenterParams{}.continuous_reaim,"tuned constants");
     {const auto q=yaw_quaternion(.7); // matches HeadCalibration's yaw convention (about +Y, left turn +)
      assert(near(tracked_yaw(q,{0,0,0,1}),.7) && near(q.y,std::sin(.35)) && near(q.w,std::cos(.35)));}
     {ScriptedRecenter r; // entry_starts_continuous (sim mantle, state 8): the latched heading is already the gaze, so the start is the target
@@ -55,9 +55,12 @@ int main(){
      o=r.update(in(.5,true,deg(5),1.0));assert(near(o.offset_rad,deg(40)));}
     {ScriptedRecenter r; // snap_reaims
      r.update(in(0,true,deg(40),1.0));auto o=r.update(in(1,true,0,1.0));assert(near(o.offset_rad,deg(40)) && o.reaims==0);
-     o=r.update(in(1.1,true,deg(35),1.5,1));assert(o.reaims==1 && o.easing && near(o.offset_rad,deg(40)));
-     o=r.update(in(1.5,true,0,1.5,1));assert(near(o.offset_rad,deg(75)) && o.reaims==1);
-     o=r.update(in(1.6,true,0,1.5,1));assert(o.reaims==1);}
+     o=r.update(in(1.1,true,deg(35),.5,1));assert(o.reaims==1 && o.easing && near(o.offset_rad,deg(40)-.5)); // Ruling 11: starts at the last view (+ the heading's -0.5 rad jump)
+     o=r.update(in(1.5,true,0,.5,1));assert(near(o.offset_rad,deg(75)) && o.reaims==1);
+     o=r.update(in(1.6,true,0,.5,1));assert(o.reaims==1);
+     ScriptedRecenter q; // after the continuity start the gaze is already within the dead zone of the new heading: no further turn
+     q.update(in(0,true,deg(40),1.0));q.update(in(1,true,0,1.0));
+     o=q.update(in(1.1,true,deg(35),1.5,1));assert(o.reaims==1 && !o.easing && near(o.offset_rad,deg(40)+.5) && o.skipped_small==1);}
     {ScriptedRecenter r; // exit_folds_with_continuity
      r.update(in(0,true,deg(40),1.0));auto o=r.update(in(1,true,0,1.0));
      o=r.update(in(1.1,false,{},{},0,1,1.2));

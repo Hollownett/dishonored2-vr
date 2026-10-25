@@ -23,10 +23,10 @@ def check(probe: str, vignette: str, action: str) -> None:
     assert "const bool scripted_logic=game_logic_mask()==2 || cutscene_step.kind!=d2vr::CutsceneViewKind::none;" in block
     assert "heading_now,authored_heading.snaps()-cutscene_suppressed_snaps,scripted_recenter_epoch(" in block  # VR full never re-aims
     assert "std::optional<double>(scripted_body_yaw),cutscene_step.instant},scripted_params);" in block  # a cut aligns at once
-    assert "scripted_params.continuous_reaim=cutscene_step.kind==d2vr::CutsceneViewKind::comfort;" in block
-    # a cutscene never first-calibrates the room origin: against a provisional one, its exit fold is dropped, not applied to the room
-    assert "if(scripted.fold_rad && scripted_provisional) ++cutscene_dropped_folds;" in block
-    assert block.index("if(scripted.fold_rad && scripted_provisional)") < block.index("else if(scripted.fold_rad) {head_calibration.rotate_origin(")
+    # Ruling 11: 30 degree re-aims ease from the last view for G1 and VR comfort alike (the default params, no per-call override)
+    assert "const d2vr::ScriptedRecenterParams scripted_params{};" in block and "scripted_params.continuous_reaim=" not in block
+    # Ruling 12: a fold on a provisional (cutscene) origin turns that origin; the room origin otherwise
+    assert "if(scripted.fold_rad) {auto& folding=provisional_origin?cutscene_calibration:head_calibration;" in block
     # fix 2: only the authored -> not-authored transition (the fold) steps off logic 2; entry/aim and the clock stay gated
     assert "const bool scripted_exit=scripted_was_authored && !authored_camera;" in block
     assert "scripted_was_authored=authored_camera;" in block[block.index("if(scripted_view_live && (scripted_logic"):]
@@ -48,7 +48,7 @@ def check(probe: str, vignette: str, action: str) -> None:
     assert "std::atan2(static_cast<double>(anchor.basis[1]),static_cast<double>(anchor.basis[0]))" in block
     # every fold (exit and residual deltas) rotates the calibration, and head_origin is refreshed the same frame,
     # before the comfort meter, the 6DoF offset and every gameplay consumer read it
-    fold = block.index("if(scripted.fold_rad) {head_calibration.rotate_origin(*scripted.fold_rad);")
+    fold = block.index("folding.rotate_origin(*scripted.fold_rad);")
     refresh = block.index("head_origin=*folded;", fold)
     assert fold < refresh < block.index("comfort_meter.feed(")
     assert body.index("head_origin=*folded;") < body.index("auto head_offset=centre-head_origin.position;")

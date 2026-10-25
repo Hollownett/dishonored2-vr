@@ -52,5 +52,14 @@ int main() {
      h.rotate_origin(-.3);assert(std::fabs(tracked_yaw(h.get(moved,1,0x10000,0x20000,1,true)->orientation,o.orientation))<1e-9);
      h.rotate_origin(std::nan(""));assert(std::fabs(tracked_yaw(h.get(moved,1,0x10000,0x20000,1,true)->orientation,o.orientation))<1e-9); // non-finite ignored
      h.rotate_origin(.1);assert(!h.get(moved,2,0x10000,0x20000,1,true) || h.captures()==2);}
+    {HeadCalibration h; // adopt_keeps_identity: a provisional (cutscene) origin taken as the room origin, no capture, no recapture
+     const TrackedPose o{{.3,1.5,-.2},{0,std::sin(.4),0,std::cos(.4)}},head{{.6,1.4,.1},{0,std::sin(-.2),0,std::cos(-.2)}};
+     assert(!h.holds(1,0x10000,0x20000,1) && h.adopt(o,1,0x10000,0x20000,1) && h.holds(1,0x10000,0x20000,1) && h.captures()==0);
+     const auto r=h.get(head,1,0x10000,0x20000,1,true);
+     assert(r && h.captures()==0 && length(r->position-o.position)<1e-12 && std::fabs(tracked_yaw(r->orientation,o.orientation))<1e-12);
+     assert(!h.adopt({{0,0,0},{.2,0,0,.98}},1,0x10000,0x20000,1) && !h.adopt(o,0,0x10000,0x20000,1) && !h.adopt(o,1,0,0x20000,1) &&
+            !h.adopt(o,1,0x10000,0x20000,-1) && !h.adopt({{std::nan(""),0,0},o.orientation},1,0x10000,0x20000,1));
+     assert(length(h.get(head,1,0x10000,0x20000,1,true)->position-o.position)<1e-12); // refused adopts change nothing
+     assert(h.get(head,2,0x10000,0x20000,1,true) && h.captures()==1);} // a new epoch still captures
     std::cout<<"PASS: stable room calibration across pause/transient logic, explicit reference and native-owner resets, canted/antipodal eye centre and invalid pose rejection\n";
 }

@@ -3,9 +3,11 @@
 // camera mode 10, g2-spike.md) in one of two styles:
 // - VR comfort: authored_head_view at the scene camera's position, AuthoredHeading for the heading and ScriptedRecenter for the
 //   alignment. On a hard camera cut (detect_cut) the heading takes the new shot and the re-aim is instant (ScriptedRecenter instant);
-//   a 30 deg drift inside a continuous shot re-aims with the 0.4 s ease (ScriptedRecenterParams::continuous_reaim). The comfort
+//   a 30 deg drift inside a continuous shot re-aims with the 0.4 s ease from the last view (ScriptedRecenterParams::continuous_reaim). The comfort
 //   vignette follows the scene camera's translation speed above the locomotion vignette's own onset (cutscene_vignette_speed).
 // - VR full: cutscene_full_view, the scene camera's full rotation with the head on top. Cuts show exactly as directed (no re-aim).
+// A cutscene view lasts until the authored camera ends: the camera-mode-10 frames the game still shows at logic 2 after the cinematic
+// (about 185 ms in void_01) keep the cutscene's view (authored_tail), so VR full never drops the scene's pitch and roll in one frame.
 // Both start aligned through ScriptedRecenter's entry (eased from the last gameplay view when the scene follows gameplay directly,
 // instant after a load or menu, or on a cut) and fold into the head origin at exit, so the direction is kept.
 // CutsceneViewTracker is the once-per-displayed-frame decision both eyes share. Pure; no allocation.
@@ -122,7 +124,9 @@ struct CutsceneViewStep {
 };
 
 // Fed once per displayed frame with the scene pose (the render view's centre), on every scene frame, gameplay included, so the first
-// cutscene frame is compared with the last gameplay frame. `cutscene` = an immersive cutscene frame drawn with the authored camera.
+// cutscene frame is compared with the last gameplay frame. `cutscene` = an immersive cutscene frame drawn with the authored camera;
+// `authored_tail` = a gameplay frame still drawn with the authored camera, which continues a cutscene view already in progress (never
+// starts one).
 class CutsceneViewTracker {
     bool have_{},in_{};
     std::uint64_t frame_{},epoch_{},cuts_{},entries_{};
@@ -132,10 +136,10 @@ class CutsceneViewTracker {
 public:
     static constexpr std::uint64_t max_frame_gap=2; // Presents between two views that still count as consecutive
     CutsceneViewStep step(bool cutscene,CutsceneMode mode,std::uint64_t frame,std::uint64_t epoch,const GameCameraPose& scene,
-        double units_per_metre=1) noexcept {
+        bool authored_tail=false,double units_per_metre=1) noexcept {
         const bool consecutive=have_ && epoch==epoch_ && frame>frame_ && frame-frame_<=max_frame_gap;
         CutsceneViewStep out{CutsceneViewKind::none,false,false,{false,0,0}}; // outside a cutscene nothing is compared (gameplay is untouched)
-        if(cutscene) {
+        if(cutscene || (in_ && authored_tail && epoch==epoch_)) {
             const CameraCut cut=consecutive?detect_cut(prev_,scene,units_per_metre):CameraCut{false,0,0};
             out.cut=cut;
             out.entry=!in_;

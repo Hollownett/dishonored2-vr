@@ -22,7 +22,7 @@ public:
     void clear() noexcept {origin_.reset();}
     std::uint64_t captures() const noexcept {return captures_;}
     // An origin is held for exactly this owner (get() would return it without capturing). VR cutscenes use it to never first-calibrate
-    // the room (Task 6): with no room origin they render against a provisional one of their own.
+    // the room (Task 6): with no room origin they render against a provisional one of their own, which the first gameplay frame adopts.
     bool holds(std::uint64_t epoch,std::uintptr_t player,std::uintptr_t camera,std::int32_t generation) const noexcept {
         return origin_ && epoch && epoch_==epoch && player_==player && camera_==camera && generation_==generation;
     }
@@ -31,6 +31,16 @@ public:
         if(!origin_ || !std::isfinite(yaw_rad)) return;
         const Quaternion r{0,std::sin(yaw_rad*.5),0,std::cos(yaw_rad*.5)};
         origin_->orientation=normalized(multiplied(r,origin_->orientation));
+    }
+    // Take `origin` (position and yaw) as this owner's origin without a capture (captures() unchanged): the first gameplay frame after a
+    // VR cutscene that rendered against a provisional origin (Ruling 12), so neither the head offset nor the view yaw steps. A non-yaw
+    // orientation or an unusable owner is refused (false, nothing changes).
+    bool adopt(const TrackedPose& origin,std::uint64_t epoch,std::uintptr_t player,std::uintptr_t camera,std::int32_t generation) noexcept {
+        if(!epoch || !player || !camera || generation==-1 || !finite(origin.position)) return false;
+        const auto& q=origin.orientation;
+        if(!std::isfinite(q.x+q.y+q.z+q.w) || std::abs(q.x)>1e-6 || std::abs(q.z)>1e-6 || std::abs(q.y*q.y+q.w*q.w-1)>1e-6) return false;
+        origin_=origin;epoch_=epoch;player_=player;camera_=camera;generation_=generation;
+        return true;
     }
     std::optional<TrackedPose> get(const TrackedPose& current,std::uint64_t epoch,
         std::uintptr_t player,std::uintptr_t camera,std::int32_t generation,bool gameplay) {

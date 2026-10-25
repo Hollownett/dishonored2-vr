@@ -9,10 +9,10 @@
 #include <optional>
 
 namespace d2vr {
-// continuous_reaim (VR comfort cutscenes, Task 6): a NON-instant re-aim (a 30 deg heading snap inside a continuous shot) starts the
-// offset where the last view was (offset += the heading's jump), as an entry does, so the view eases instead of stepping by the snap.
-// Off for G1, which keeps its reviewed behaviour (the heading snap shows at once, the offset then eases to the gaze).
-struct ScriptedRecenterParams {double dead_zone_rad=0.17453292519943295,ease_s=0.4;bool continuous_reaim=false;}; // 10 degrees
+// continuous_reaim (default on, Ruling 11): a NON-instant re-aim (a 30 deg heading snap in a G1 moment or inside a continuous cutscene
+// shot) starts the offset where the last view was (offset += the heading's jump), as an entry does, so the view eases instead of stepping
+// by the snap. A hard cut (instant) re-aims in full on its frame. false keeps the old step (the snap shows at once, then the ease).
+struct ScriptedRecenterParams {double dead_zone_rad=0.17453292519943295,ease_s=0.4;bool continuous_reaim=true;}; // 10 degrees
 struct ScriptedRecenterInput {
     double t;                          // seconds, monotonic
     bool authored;                     // authored_camera this frame
@@ -104,9 +104,6 @@ public:
         }
         return {offset_,fold,ease_,entries_,reaims_,folds_,skipped_,res_pending_};
     }
-    // The origin the offset composes with changed by -delta (a VR cutscene rendered against a provisional origin; the room origin then
-    // captured by gameplay): the offset, and an ease in progress, shift by +delta so the composed origin (and the view) is unchanged.
-    void rebase(double delta) noexcept {if(!std::isfinite(delta)) return;offset_+=delta;from_+=delta;to_+=delta;}
     void reset() noexcept {*this=ScriptedRecenter{};}
 };
 } // namespace d2vr

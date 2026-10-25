@@ -1,6 +1,7 @@
 #include "../src/cutscene_view.hpp"
 #include "../src/head_calibration.hpp"
 #include "../src/scripted_recenter.hpp"
+#include "../src/head_locomotion.hpp"
 #include <cassert>
 #include <cmath>
 #include <iostream>
@@ -109,8 +110,21 @@ int main(){
             eased|=o.easing;last_view=view;
         }
         assert(h.snaps()==1 && o.reaims==1 && eased);
-        ScriptedRecenter g; // G1 (continuous_reaim off) keeps its reviewed behaviour: the snap shows at once
-        g.update(in(0,true,0.,0.,0));const auto s1=g.update(in(.1,true,deg(20),deg(31),1));assert(s1.reaims==1 && near(s1.offset_rad,0));
+        // Ruling 11: G1 (default params) eases its 30 degree re-aims from the last view too: no per-frame view step above 2 degrees
+        static_assert(ScriptedRecenterParams{}.continuous_reaim,"continuous re-aim is the default");
+        ScriptedRecenter g; // the gaze is 20 degrees off the room forward; entry, ease done, then the native heading snaps by 31 degrees
+        auto go=g.update(in(0,true,deg(20),0.,0));go=g.update(in(.5,true,0.,0.,0));assert(near(go.offset_rad,deg(20)));
+        double g_last=0+(deg(20)-go.offset_rad);
+        for(int i=1;i<=60;++i) {
+            const double heading=deg(31);const double rel=deg(20)-go.offset_rad;
+            go=g.update(in(.5+i*.01,true,rel,heading,1));
+            const double view=heading+(deg(20)-go.offset_rad);
+            assert(std::fabs(view-g_last)<deg(2));g_last=view;
+        }
+        assert(go.reaims==1 && !go.easing && near(g_last,deg(31))); // the gaze ends on the new heading
+        ScriptedRecenter old; // the old step remains available (continuous_reaim=false): the snap shows at once
+        old.update(in(0,true,0.,0.,0));const auto s1=old.update(in(.1,true,deg(20),deg(31),1),{.17453292519943295,.4,false});
+        assert(s1.reaims==1 && near(s1.offset_rad,0));
     }
     {   // tracker: entry, mode latch, instant entry after a gap, cut only between consecutive frames of one owner
         CutsceneViewTracker t;
@@ -136,18 +150,38 @@ int main(){
         v=m.update({50.01f,0,0},2,false);assert(v==0); // a 1 s gap
         assert(cutscene_vignette_speed(.45)==0 && near(cutscene_vignette_speed(.46),.46) && cutscene_vignette_speed(std::nan(""))==0);
     }
-    {   // provisional_origin_rebase_keeps_the_view: the composed origin yaw (offset + origin) is the same after the room origin replaces the
-        // provisional one, mid-ease too, and the ease still ends on the same composed target
-        ScriptedRecenter r;r.update(in(0,false,{},{},0,0.));
-        auto o=r.update(in(1,true,deg(40),0.,0));assert(o.easing);
-        o=r.update(in(1.2,true,deg(40),0.,0));const double provisional=deg(25),room=deg(-15);
-        const double before=o.offset_rad+provisional;
-        r.rebase(provisional-room); // tracked_yaw(provisional, room)
-        o=r.update(in(1.2,true,0.,0.,0));assert(near(o.offset_rad+room,before) && o.easing);
-        o=r.update(in(1.5,true,0.,0.,0));assert(near(o.offset_rad+room,deg(40)+provisional) && !o.easing);
-        r.rebase(std::nan(""));o=r.update(in(1.6,true,0.,0.,0));assert(near(o.offset_rad+room,deg(40)+provisional));
-        // the exit fold after the rebase keeps the cutscene's last view: gameplay = body + hmd - (room + fold) = heading + hmd - composed
-        o=r.update(in(1.7,false,{},{},0,deg(70)));assert(o.fold_rad && near(room+*o.fold_rad,deg(40)+provisional+deg(70)));
+    {   // Ruling 12 model: an opening cutscene renders against a provisional origin; the first gameplay frame of the same owner ADOPTS it,
+        // folds made on the provisional origin turn it, so the head offset (centre - origin) and the view yaw do not step at the hand-off
+        HeadCalibration room,provisional;const std::uint64_t ep=3;const std::uintptr_t pl=0x10,ca=0x20;const std::int32_t ge=7;
+        const auto choose=[&](bool cutscene,const TrackedPose& head) { // the probe's choice (prepare_head_view)
+            const bool held=room.holds(ep,pl,ca,ge);
+            if(!cutscene && !held && provisional.holds(ep,pl,ca,ge)) {room.adopt(*provisional.get(head,ep,pl,ca,ge,true),ep,pl,ca,ge);provisional.clear();}
+            return *(cutscene && !held?provisional:room).get(head,ep,pl,ca,ge,true);
+        };
+        const TrackedPose start{{.2,1.6,-.1},about_y(.5)};
+        auto o=choose(true,start);assert(!room.holds(ep,pl,ca,ge) && provisional.captures()==1);
+        provisional.rotate_origin(.2); // a residual fold during the cutscene
+        const TrackedPose later{{.35,1.55,.05},about_y(-.3)}; // the player moved and turned during the cutscene
+        o=choose(true,later);
+        const Vec3 off_cut=later.position-o.position;const double yaw_cut=tracked_yaw(later.orientation,o.orientation);
+        const auto g=choose(false,later); // the first gameplay frame
+        assert(room.holds(ep,pl,ca,ge) && room.captures()==0 && !provisional.holds(ep,pl,ca,ge));
+        assert(length((later.position-g.position)-off_cut)<1e-12 && near(tracked_yaw(later.orientation,g.orientation),yaw_cut,1e-12));
+        assert(near(tracked_yaw(g.orientation,start.orientation),.2,1e-9)); // the fold carried over
+        HeadCalibration fresh; // what a fresh capture would have done: a position and a yaw step
+        const auto f=*fresh.get(later,ep,pl,ca,ge,true);
+        assert(length((later.position-f.position)-off_cut)>.1 && std::fabs(tracked_yaw(later.orientation,f.orientation)-yaw_cut)>.5);
+        HeadCalibration other;assert(!other.adopt({{0,0,0},{.1,0,0,1}},ep,pl,ca,ge) && !other.adopt(start,0,pl,ca,ge) && !other.holds(ep,pl,ca,ge));
+    }
+    {   // Ruling 14: a VR full view lasts through the authored camera's tail at logic 2, and ends with it; a tail never starts a view
+        CutsceneViewTracker t;
+        auto s=t.step(false,CutsceneMode::vr_full,1,5,scene(0),true);assert(s.kind==CutsceneViewKind::none); // G1 authored gameplay: no view
+        s=t.step(true,CutsceneMode::vr_full,2,5,scene(0));assert(s.kind==CutsceneViewKind::full && s.entry);
+        for(std::uint64_t f=3;f<20;++f) {s=t.step(false,CutsceneMode::vr_full,f,5,scene(0),true);assert(s.kind==CutsceneViewKind::full && !s.entry);}
+        s=t.step(false,CutsceneMode::vr_full,20,5,scene(0),false);assert(s.kind==CutsceneViewKind::none);
+        s=t.step(false,CutsceneMode::vr_full,21,5,scene(0),true);assert(s.kind==CutsceneViewKind::none);
+        CutsceneViewTracker o;o.step(true,CutsceneMode::vr_full,2,5,scene(0));
+        s=o.step(false,CutsceneMode::vr_full,3,6,scene(0),true);assert(s.kind==CutsceneViewKind::none); // another owner ends it
     }
     {   // VR full follows the scene's yaw every frame without counting snaps; a re-latch outside a scene does nothing
         AuthoredHeading h;h.update(scene(0),true,1);
