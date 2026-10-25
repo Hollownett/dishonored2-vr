@@ -101,11 +101,16 @@ template<class Targets> PalmPick pick_by_palm(const PalmProbe& probe,const Targe
     else out.runner_up=0;
     return out;
 }
+// What a hand's physical lane picked (NativeGrab::focus_score, plan Task 5): its raw palm cost, the runner-up's cost and the distance from the
+// palm point. Read by the grip-alone decision (Task 6) and the grab_focus status block.
+struct FocusScore {std::uint64_t id{};PalmKind kind{};double cost{},runner_up{},distance{};std::uintptr_t entity{};};   // entity: the picked body's entity
 // Per-hand owner of the hysteresis state plus the counters.
 class PalmSelection {
 public:
-    PalmPick update(const PalmProbe& probe,const std::vector<PalmTarget>& targets,double hover_radius,std::uint64_t now_ms) {
-        PalmPick pick=pick_by_palm(probe,targets,current_,hover_radius);
+    // acquire/retain: the gates (0.45/0.55 m; a caller with a tighter acquire gate passes it, the retain stays at least 0.55 m).
+    PalmPick update(const PalmProbe& probe,const std::vector<PalmTarget>& targets,double hover_radius,std::uint64_t now_ms,
+            double acquire=grab_acquire_distance,double retain=grab_retain_distance) {
+        PalmPick pick=pick_by_palm(probe,targets,current_,hover_radius,acquire,retain);
         if(pick.fallback) {++fallback_;return pick;}
         const std::uint64_t next=pick.index?targets[*pick.index].id:0;
         if(pick.hysteresis_held) ++held_;

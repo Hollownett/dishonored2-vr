@@ -20,11 +20,13 @@
 #include "corpse_diagnostics.hpp"
 #include "right_grip_owner.hpp"
 #include "selection_policy.hpp"
+#include "grab_intent_buffer.hpp"
 #include <atomic>
 #include <mutex>
 #include <fstream>
 #include <filesystem>
 #include <iomanip>
+#include <sstream>
 #include <chrono>
 #include <limits>
 #include <cmath>
@@ -100,6 +102,36 @@ inline std::optional<NativeRigidBody> grab_focus_candidate(const std::vector<Nat
     if(preferred && (!best || preferred->contact_distance(hand)<=distance+grab_switch_margin)) return preferred;
     return best;
 }
+// The palm picks the prop or bone (the G2 cost, the same one that orders loot): what the palm faces and is near wins, ties to the lower id.
+// `gate` is the acquire distance (0.45 m); the current pick is kept out to 0.55 m at x 0.86 (PalmSelection, the only hysteresis). The other
+// hand's body (its focus or held body; entity, and handle when given) is no candidate. legacy_nearest is build/legacy-palm-select: the v611
+// nearest-AABB pick from the probe's palm. An invalid probe picks nothing new (PalmSelection counts scoring_fallback).
+inline std::optional<NativeRigidBody> grab_focus_candidate(const std::vector<NativeRigidBody>& candidates,const PalmProbe& probe,
+        PalmSelection& selection,const GrabTuning& tuning,std::uintptr_t other_entity,std::uint32_t other_handle,double gate,
+        bool legacy_nearest=false,std::uint64_t now_ms=0,PalmPick* out=nullptr,const std::vector<PalmTarget>* extra=nullptr,std::optional<std::size_t>* extra_pick=nullptr) {
+    // extra (G6, Task 14): more targets in the same ONE list (a living NPC's bones); a winner among them is returned through extra_pick.
+    if(extra_pick) extra_pick->reset();
+    std::vector<NativeRigidBody> eligible;std::vector<PalmTarget> targets;eligible.reserve(candidates.size());targets.reserve(candidates.size());
+    for(const auto& body:candidates) {
+        if(other_entity && body.entity==other_entity && (!other_handle || body.handle==other_handle)) continue;
+        const auto t=palm_body_target(body,tuning);
+        if(!palm_target_valid(t)) continue;
+        eligible.push_back(body);targets.push_back(t);
+    }
+    if(legacy_nearest) {
+        if(!finite(probe.palm)) return {};
+        std::uintptr_t preferred=0;
+        for(std::size_t i=0;i<targets.size();++i) if(selection.current() && targets[i].id==selection.current()) preferred=eligible[i].entity;
+        return grab_focus_candidate(eligible,probe.palm,0,false,preferred,0);
+    }
+    const std::size_t bodies=targets.size();
+    if(extra) for(const auto& t:*extra) targets.push_back(t);
+    const auto pick=selection.update(probe,targets,tuning.hover_radius_m,now_ms,gate,std::max(gate,grab_retain_distance));
+    if(out) *out=pick;
+    if(!pick.index) return {};
+    if(*pick.index>=bodies) {if(extra_pick) *extra_pick=*pick.index-bodies;return {};}
+    return eligible[*pick.index];
+}
 // Bounded nearby cache. Registry discovery never grants a native Use action;
 // each consumer revalidates the full dynamic-body lifetime before using it.
 class NativeGrabDiscovery {
@@ -111,8 +143,10 @@ public:
     Diagnostics diagnostics() const {return {cursor_,static_cast<unsigned>(bodies_.size()),tick_,slices_,lifetime_rejections_};}
     unsigned cursor() const {return cursor_;}
     void reset() {cursor_=1;tick_=0;bodies_.clear();}
+    // hints (G3, plan Task 8): registry indices near this hand (its stage-0 Use hit owners, its probe hits), looked up every tick before the
+    // slice, so the object just reached is cached the same tick (Bonelab: "the scan runs every physics step"). At most 8; 0 is skipped.
     template<class Lookup,class Validate> const std::vector<NativeRigidBody>& advance(
-            Vec3 hand,std::uint64_t tick,Lookup lookup,Validate validate) {
+            Vec3 hand,std::uint64_t tick,Lookup lookup,Validate validate,const std::array<unsigned,8>* hints=nullptr) {
         if(!finite(hand) || !tick) {reset();return bodies_;}
         if(tick==tick_)return bodies_;
         tick_=tick;++slices_;
@@ -124,17 +158,21 @@ public:
                body->model!=it->model || body->contact_distance(hand)>grab_retain_distance+3) {++lifetime_rejections_;it=bodies_.erase(it);}
             else {*it=*body;++it;}
         }
-        for(unsigned scanned=0;scanned<slice_size;++scanned) {
-            const auto index=cursor_;if(++cursor_==registry_size)cursor_=1;
+        const auto consider=[&](unsigned index) {
             const auto body=lookup(index);
-            if(!body || body->contact_distance(hand)>grab_retain_distance+3)continue;
+            if(!body || body->contact_distance(hand)>grab_retain_distance+3)return;
             const auto found=std::find_if(bodies_.begin(),bodies_.end(),[&](const auto& b){return b.entity==body->entity;});
-            if(found!=bodies_.end()) {*found=*body;continue;}
+            if(found!=bodies_.end()) {*found=*body;return;}
             if(bodies_.size()<capacity)bodies_.push_back(*body);
             else {
                 const auto farthest=std::max_element(bodies_.begin(),bodies_.end(),[&](const auto& a,const auto& b){return a.contact_distance(hand)<b.contact_distance(hand);});
                 if(body->contact_distance(hand)<farthest->contact_distance(hand))*farthest=*body;
             }
+        };
+        if(hints) for(const auto index:*hints) if(index && index<registry_size) consider(index);
+        for(unsigned scanned=0;scanned<slice_size;++scanned) {
+            const auto index=cursor_;if(++cursor_==registry_size)cursor_=1;
+            consider(index);
         }
         return bodies_;
     }
@@ -144,13 +182,14 @@ public:
 struct CorpseOptions {bool enabled=true;GrabTuning tuning{};bool from_file=false;};
 // The grasp point of the held body as of the last dispatcher tick (a prop or a corpse), for the drawn hand: a mutex-protected copy.
 struct HoldAnchorView {bool active{};Vec3 anchor{};std::uint64_t tick{};bool capped{},corpse{}; // capped: a motor-held corpse or prop (a living guard's yank hold is active but not capped); corpse: a corpse limb or collar
-    std::uintptr_t entity{};int bone{-1},layer{-1};std::uint64_t serial{};};   // B16: what is held (a corpse's limb bone, -1 for a prop), its collision layer (pool record +0x6c & 0x1f; -1 unreadable) and this hold's serial
+    std::uintptr_t entity{};int bone{-1},layer{-1};std::uint64_t serial{};bool living{};};   // living (G6, Task 14): the hand seats on a living NPC's bone. B16: what is held (a corpse's limb bone, -1 for a prop), its collision layer (pool record +0x6c & 0x1f; -1 unreadable) and this hold's serial
 class NativeGrab {
     friend struct NativeGrabCheck;
 public:
     enum class Gate : unsigned {none,occupied,deferred,inactive,pose_unusable,invalid_grip,not_gameplay,unfocused,
         native_use,epoch_mismatch,source_missing,source_future,source_stale,owner_invalid,authored_view,
-        awaiting_release,release_armed,native_no_candidate,native_locked,physical_reserved,physical_held,pending_release,obstruction_pending,obstruction_blocked};
+        awaiting_release,release_armed,native_no_candidate,native_locked,physical_reserved,physical_held,pending_release,obstruction_pending,obstruction_blocked,
+        buffer_pending};   // buffer_pending (G3, Task 5): a squeeze with nothing in reach waits up to grab_buffer_ms for a candidate
     struct Decision {
         unsigned side{};UINT64 tick{},epoch{},serial{},publication_tick{},source_tick{},publication_age_ms{},source_age_ms{};
         float raw_grip{};Gate gate=Gate::none;RightGripOwner::Role role=RightGripOwner::Role::release;
@@ -161,14 +200,16 @@ public:
     struct ObstructionRequest {
         unsigned side{};UINT64 token{},epoch{},tick{},source_tick{};NativePlayerCamera owner{};
         WorldTrackedPose hand{};NativeRigidBody body{};
+        bool hover{};   // G3 (Task 8): asked at hover (grip under 0.35) so the press can use the verdict; never decides or binds by itself
     };
 private:
-    struct Obstruction {ObstructionRequest request{};std::optional<bool> clear;};
+    struct Obstruction {ObstructionRequest request{};std::optional<bool> clear;UINT64 verdict_tick{};};
     using Read=bool (*)(std::uintptr_t,void*,std::size_t);
     using Logic=UINT (*)();
     using Dispatch=void (__fastcall*)(void*,void*);
     using Velocity=void (__fastcall*)(void*,UINT,const float*,const float*,int);
-    struct Publication {NativePlayerCamera owner{};WorldTrackedPose hand{};float grip{};UINT64 epoch{},tick{},serial{};bool usable{};bool occupied{};UINT64 source_tick{};};
+    // palm: the G2 palm probe (raw controller grip + palm fit, C9/C10), the same one that orders the hand's native Use hits (Task 3).
+    struct Publication {NativePlayerCamera owner{};WorldTrackedPose hand{};float grip{};UINT64 epoch{},tick{},serial{};bool usable{};bool occupied{};UINT64 source_tick{};PalmProbe palm{};};
     // One independent lane per hand. Either hand may hold one dynamic body.
     // The caller marks native carrying/action occupancy. Equipped weapons do
     // not prevent either tracked hand from acquiring a loose physics object.
@@ -176,6 +217,16 @@ private:
         Publication published{};std::optional<Obstruction> obstruction;PhysicalGrab grab{};std::optional<NativeRigidBody> held;RightGripOwner owner{};
         std::vector<NativeRigidBody> candidates;NativeGrabDiscovery discovery;
         std::optional<NativeRigidBody> focus;UINT64 focus_tick{};Vec3 focus_hand{};std::uintptr_t focus_excluded{};
+        // G2/G3 (Task 5): the palm's pick (the one 0.86 hysteresis), its score, and the grab buffer of this press (buffer_used: started once per press;
+        // catch_tick: the catch edge, for press-to-held, ruling H4).
+        PalmSelection selection;std::optional<FocusScore> score;double palm_dot{};GrabIntentBuffer buffer;bool buffer_used{};UINT64 catch_tick{};
+        std::uint32_t reject_id{};BodyReject reject{};
+        std::array<unsigned,8> hints{};UINT64 hint_tick{},hover_request_tick{};   // G3 (Task 8): discovery hints; the last hover LOS request
+        // G6 (Task 14): living NPCs seen near this hand (entity, id, last seen; at most 8 within 3 m), the bone the palm picked among theirs, the press's
+        // candidate, the hold (no `held` body: nothing is ever written to him), the choke/takedown reservation and the events for the game thread.
+        struct LivingSeen {std::uintptr_t entity{};std::uint32_t id{};UINT64 seen{};};std::vector<LivingSeen> living_npcs;
+        std::optional<LivingBone> living_focus,living_candidate,living_started,hard_pull;std::optional<LivingHold> living;UINT64 living_tick{};
+        std::optional<std::pair<std::uintptr_t,std::array<float,3>>> pull_request;std::uint32_t reserved_npc{};UINT64 reserved_tick{};   // G3 thin props (Task 7): the last prop near this hand whose body or bounds were refused, and why
         bool pending_release{},release_throw{},attempted{},acquired{},decision_deferred{};
         double tow{},tow_recovery{}; // a dragged body's pelvis follows its grabbed limb at this distance (set on the first motor write); tow_recovery: plan_tow's stale-frame recovery time
         void reset_tow() {tow=0;tow_recovery=0;last_tow=0;}
@@ -219,6 +270,7 @@ private:
     // corpse_enabled_: build/no-corpse-grab clears it; lockout_ is internally locked (any thread); the dispatcher cost counters are dispatcher-thread only; no_posts_ is
     // build/no-ragdoll-posts, read at install for the wake path (Task 11).
     bool corpse_enabled_=true,no_posts_{},prop_grasp_point_=true;
+    bool legacy_palm_select_{};   // build/legacy-palm-select (read at install): the nearest-AABB pick and no grab buffer (plan Task 5)
     EntityLockout lockout_{};CorpseDiagnostics corpse_diag_{};CorpseTraceWriter* corpse_trace_{};
     UINT64 pass_cost_us_{};std::atomic<UINT64> corpse_cost_us_{},corpse_cost_max_us_{},velocity_unknown_{};
     // hold_anchor() must never wait for a dispatcher pass: the pass publishes a copy of each lane's anchor under this small mutex (held only for the copy).
@@ -293,8 +345,18 @@ private:
     }
     std::atomic<UINT64> native_presses_{},physical_presses_{};
     std::ofstream log_;std::filesystem::path loss_file_;std::atomic<UINT64> picked_{},moved_{},dropped_{},lost_{},queries_{},samples_{},callbacks_{};
+    void note_reject(unsigned side,std::uint32_t id,BodyReject why) {auto& lane=lanes_[side];lane.reject_id=id;lane.reject=why;}
+    // A press's distance to its candidate: from the palm point (the G2 cost's distance) or, with no palm score, from the hand.
+    static std::optional<double> focus_gap(const Lane& lane,const NativeRigidBody& body) {
+        if(lane.score && lane.score->id==palm_body_id(body)) return lane.score->distance;
+        const auto d=body.contact_distance(lane.published.hand.position);
+        return std::isfinite(d)?std::optional<double>{d}:std::nullopt;
+    }
     std::optional<NativeRigidBody> focus_body(unsigned side,UINT64 now,bool refresh) {
-        auto& lane=lanes_[side];const auto& p=lane.published;const auto& other=lanes_[1-side].held;
+        auto& lane=lanes_[side];const auto& p=lane.published;const auto& other_lane=lanes_[1-side];
+        // The other hand's held body, else its fresh focus, is not offered to this hand (no two hands on one body's same handle, no ping-pong).
+        const auto& other=other_lane.held?other_lane.held:
+            (other_lane.focus && other_lane.focus_tick && now>=other_lane.focus_tick && now-other_lane.focus_tick<=250?other_lane.focus:std::optional<NativeRigidBody>{});
         struct Cost {
             Lane& lane;std::chrono::steady_clock::time_point start=std::chrono::steady_clock::now();
             ~Cost() {const auto us=static_cast<UINT64>(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now()-start).count());
@@ -305,6 +367,13 @@ private:
         const bool collar=collar_grab_ && lane.raw_grip>=collar_fist_squeeze;
         const auto game=rig::value<std::uintptr_t>(read_,base_+0x39a5290);
         if(!game || !rig::typed(read_,base_,*game,0x1c940a8)) {lane.discovery.reset();lane.focus.reset();return {};}
+        // G3 (Task 7): a corpse offers every bone with a known radius, picked by the palm; without a palm probe (or build/legacy-palm-select) the v611 limbs.
+        const bool palm_bones=!legacy_palm_select_ && p.palm.valid;
+        const auto corpse=[&](std::uintptr_t entity)->std::optional<NativeRigidBody> {
+            if(!corpse_enabled_) return {};
+            return palm_bones?corpse_candidate(read_,base_,entity,p.palm,tuning_,collar):corpse_candidate(read_,base_,entity,p.hand.position,collar);
+        };
+        const bool hinted=lane.hint_tick && now>=lane.hint_tick && now-lane.hint_tick<=250;
         const auto& candidates=lane.discovery.advance(p.hand.position,p.tick,[&](unsigned index)->std::optional<NativeRigidBody> {
             const auto entity=rig::value<std::uintptr_t>(read_,*game+0x3130b0+index*8);
             const bool guard=entity && rig::typed(read_,base_,*entity,0x1c5e108); // a corpse or knocked-out guard: drag by a limb
@@ -314,12 +383,17 @@ private:
             if(!id || (*id>>16)!=index || !pos)return {};
             const Vec3 point{(*pos)[0],(*pos)[1],(*pos)[2]};
             if(!finite(point) || length(point-p.hand.position)>grab_retain_distance+3)return {};
-            if(guard) return corpse_enabled_?corpse_candidate(read_,base_,*entity,p.hand.position,collar):std::optional<NativeRigidBody>{};
-            return native_rigid_body(read_,base_,*entity);
+            if(guard) {
+                if(living_enabled_ && palm_bones && !ragdoll_pushable_state(read_,*entity) && length(point-p.hand.position)<=living_seen_m) note_living(lane,*entity,*id,now);
+                return corpse(*entity);
+            }
+            BodyReject why{};auto body=native_rigid_body(read_,base_,*entity,false,&why);
+            if(why!=BodyReject::ok && why!=BodyReject::not_prop) note_reject(side,*id,why);   // the thin-prop line of the grab_focus block
+            return body;
         },[&](const NativeRigidBody& body)->std::optional<NativeRigidBody> {
             if(body.bone<0) return native_rigid_body(read_,base_,body.entity);
-            return corpse_enabled_?corpse_candidate(read_,base_,body.entity,p.hand.position,collar):std::optional<NativeRigidBody>{};
-        });
+            return corpse(body.entity);
+        },hinted?&lane.hints:nullptr);
         if(!refresh && lane.focus_tick && now>=lane.focus_tick && now-lane.focus_tick<100 &&
            length(p.hand.position-lane.focus_hand)<.05 && lane.focus_excluded==excluded) {
             if(!lane.focus) return {};
@@ -331,8 +405,86 @@ private:
         const auto preferred=lane.focus && (!refresh || lane.focus->contact_distance(p.hand.position)<=grab_acquire_distance)?lane.focus->entity:0;
         std::vector<NativeRigidBody> touching;
         if(contact_required_)for(const auto& candidate:candidates)if(acquisition_contact(lane,candidate,now))touching.push_back(candidate);
-        lane.focus=grab_focus_candidate(contact_required_?touching:candidates,p.hand.position,excluded,false,preferred,excluded_handle);lane.focus_tick=now;lane.focus_hand=p.hand.position;lane.focus_excluded=excluded;
+        const auto& list=contact_required_?touching:candidates;
+        PalmPick pick{};lane.score.reset();lane.palm_dot=0;
+        lane.living_focus.reset();
+        if(!legacy_palm_select_ && p.palm.valid) {
+            std::vector<PalmTarget> living_targets;std::vector<LivingBone> living_bones;std::optional<std::size_t> living_pick;
+            if(living_enabled_) living_candidates(side,now,living_targets,living_bones);
+            lane.focus=grab_focus_candidate(list,p.palm,lane.selection,tuning_,excluded,excluded_handle,grab_acquire_distance,false,now,&pick,
+                living_targets.empty()?nullptr:&living_targets,&living_pick);
+            if(living_pick) {
+                const auto& target=living_targets[*living_pick];lane.living_focus=living_bones[*living_pick];
+                if(const auto s=palm_cost(p.palm,target,tuning_.hover_radius_m,grab_retain_distance)) {
+                    lane.score=FocusScore{target.id,target.kind,s->cost,std::isfinite(pick.runner_up)?pick.runner_up:0.,s->distance,lane.living_focus->entity};
+                    const auto to=s->point-palm_point(p.palm);lane.palm_dot=length(to)>1e-9?dot(p.palm.direction,to*(1/length(to))):1.;
+                }
+            }
+            if(lane.focus) {
+                const auto target=palm_body_target(*lane.focus,tuning_);
+                if(const auto s=palm_cost(p.palm,target,tuning_.hover_radius_m,grab_retain_distance)) {
+                    lane.score=FocusScore{target.id,target.kind,s->cost,std::isfinite(pick.runner_up)?pick.runner_up:0.,s->distance,lane.focus->entity};
+                    const auto to=s->point-palm_point(p.palm);lane.palm_dot=length(to)>1e-9?dot(p.palm.direction,to*(1/length(to))):1.;
+                }
+            }
+        } else {   // build/legacy-palm-select, or no valid palm probe this frame (counted as scoring_fallback): the v611 nearest-AABB pick
+            if(!legacy_palm_select_) (void)lane.selection.update(p.palm,{},tuning_.hover_radius_m,now);
+            lane.focus=grab_focus_candidate(list,p.hand.position,excluded,false,preferred,excluded_handle);
+            if(lane.focus) lane.score=FocusScore{palm_body_id(*lane.focus),lane.focus->bone>=0?PalmKind::bone:PalmKind::prop,0.,0.,lane.focus->contact_distance(p.hand.position),lane.focus->entity};
+        }
+        lane.focus_tick=now;lane.focus_hand=p.hand.position;lane.focus_excluded=excluded;
         return lane.focus;
+    }
+    // ---- G6 (plan Task 14): living NPCs ----------------------------------------------------------------------------------------------------
+    static constexpr double living_seen_m=3.;static constexpr UINT64 living_seen_ms=500,reserve_ms=250;
+    bool living_enabled_=true,living_pull_enabled_{};   // build/no-living-hold clears living_enabled_ (install); the pull follows NativeWeaponHands::living_pull_enabled
+    std::atomic<UINT64> living_holds_{},living_hard_pulls_{},living_releases_{};
+    void note_living(Lane& lane,std::uintptr_t entity,std::uint32_t id,UINT64 now) {
+        for(auto& n:lane.living_npcs) if(n.entity==entity) {n.id=id;n.seen=now;return;}
+        if(lane.living_npcs.size()<8) {lane.living_npcs.push_back({entity,id,now});return;}
+        auto oldest=std::min_element(lane.living_npcs.begin(),lane.living_npcs.end(),[](const auto& a,const auto& b){return a.seen<b.seen;});
+        *oldest={entity,id,now};
+    }
+    // A choke or takedown offered for this NPC (either hand, fresh within 250 ms) keeps priority: he is no hold candidate and a hold on him ends.
+    bool npc_reserved(std::uint32_t id,UINT64 now) const {
+        for(const auto& lane:lanes_) if(id && lane.reserved_npc==id && lane.reserved_tick && now>=lane.reserved_tick && now-lane.reserved_tick<=reserve_ms) return true;
+        return false;
+    }
+    // One target per nearby living NPC: of his collar, upper arms and forearms, the bone the palm prefers (palm cost, 0.45 m gate; the grip-alone
+    // 0.12 m gate is the decision's). Priority living (1.0). The other hand's held NPC and a reserved one are skipped.
+    void living_candidates(unsigned side,UINT64 now,std::vector<PalmTarget>& targets,std::vector<LivingBone>& bones) {
+        auto& lane=lanes_[side];const auto& p=lane.published;const auto& other=lanes_[1-side];
+        lane.living_npcs.erase(std::remove_if(lane.living_npcs.begin(),lane.living_npcs.end(),[&](const auto& n){return now<n.seen || now-n.seen>living_seen_ms;}),lane.living_npcs.end());
+        for(const auto& n:lane.living_npcs) {
+            if(npc_reserved(n.id,now) || (other.living && other.living->grasp().entity==n.entity)) continue;
+            std::optional<PalmTarget> best;std::optional<LivingBone> best_bone;double best_cost=std::numeric_limits<double>::infinity();
+            for(int bone=0;bone<17;++bone) {
+                if(!living_hold_bone(bone)) continue;
+                const auto b=living_bone(read_,base_,n.entity,bone);
+                if(!b || b->entity_id!=n.id) continue;
+                PalmTarget t;t.id=b->entity_id;t.kind=PalmKind::living;t.priority=tuning_.priority(PalmKind::living);
+                t.minimum=b->position-Vec3{b->radius,b->radius,b->radius};t.maximum=b->position+Vec3{b->radius,b->radius,b->radius};
+                const auto c=palm_cost(p.palm,t,tuning_.hover_radius_m,grab_acquire_distance);
+                if(c && c->cost<best_cost) {best_cost=c->cost;best=t;best_bone=b;}
+            }
+            if(best) {targets.push_back(*best);bones.push_back(*best_bone);}
+        }
+    }
+    // One tick of a living hold (dispatcher, mutex_ held). No velocity, no `held` body: the hold only reads his bone and publishes the anchor.
+    void living_tick(Lane& lane,UINT64 now,bool usable) {
+        const auto grasp=lane.living->grasp();const auto& p=lane.published;
+        const auto bone=living_bone(read_,base_,grasp.entity,grasp.bone);
+        LivingTick t;t.controller=p.hand.position;t.bone=bone?bone->position:grasp.position;t.hand_velocity=p.palm.velocity;t.grip=p.grip;
+        t.dt=lane.living_tick && now>lane.living_tick?static_cast<double>(now-lane.living_tick)/1000.:0.;t.epoch=p.epoch;
+        t.alive=bone && bone->entity_id==grasp.entity_id && usable && !npc_reserved(grasp.entity_id,now);
+        lane.living_tick=now;
+        const auto step=lane.living->tick(t);
+        if(step.hard_pull) {lane.hard_pull=grasp;++living_hard_pulls_;}
+        if(step.pull_step && living_pull_enabled_ && !step.release)
+            if(const auto at=rig::value<std::array<float,3>>(read_,grasp.entity+0x300))
+                lane.pull_request=std::make_pair(grasp.entity,std::array<float,3>{static_cast<float>((*at)[0]+step.pull_step->x),static_cast<float>((*at)[1]+step.pull_step->y),(*at)[2]});
+        if(step.release) {lane.living.reset();lane.anchor_view={};if(!step.hard_pull) ++living_releases_;return;}
+        lane.anchor_view=HoldAnchorView{true,step.anchor,now,false,false,grasp.entity,grasp.bone,-1,0,true};
     }
     static bool same_body(const NativeRigidBody& a,const NativeRigidBody& b) {
         // Generation only: a held prop's component flag word can change once it moves (headset v447: the ashtray was lost 30 ms
@@ -351,16 +503,42 @@ private:
             now>=r.tick && now-r.tick<=grab_pose_freshness_ms &&
             (!r.source_tick || (now>=r.source_tick && now-r.source_tick<=grab_pose_freshness_ms));
     }
+    // G3 (Task 8): a hover request stays askable across publications while the same hand owner and epoch hold it, the hand is within 2 cm of
+    // where it asked and the request is fresh.
+    static constexpr UINT64 hover_verdict_ms=100,hover_request_every_ms=100;static constexpr double hover_hand_m=.02,hover_contact_m=.01;
+    static bool hover_request_live(const ObstructionRequest& r,const Publication& p,UINT64 now) {
+        return r.hover && p.usable && !p.occupied && p.epoch==r.epoch && p.owner.player==r.owner.player && p.owner.camera==r.owner.camera &&
+            p.owner.camera_identity==r.owner.camera_identity && now>=r.tick && now-r.tick<=grab_pose_freshness_ms && length(p.hand.position-r.hand.position)<=hover_hand_m;
+    }
+    // A hover verdict still answers the press: <= 100 ms old, the hand moved <= 2 cm since, the same body, its contact point moved <= 1 cm.
+    static bool hover_verdict_current(const Obstruction& o,const Publication& p,const NativeRigidBody& body,UINT64 now) {
+        const auto& r=o.request;
+        return r.hover && o.verdict_tick && now>=o.verdict_tick && now-o.verdict_tick<=hover_verdict_ms && p.usable && !p.occupied && p.epoch==r.epoch &&
+            p.owner.player==r.owner.player && p.owner.camera==r.owner.camera && p.owner.camera_identity==r.owner.camera_identity &&
+            length(p.hand.position-r.hand.position)<=hover_hand_m && same_body(r.body,body) &&
+            length(body.contact(r.hand.position)-r.body.contact(r.hand.position))<=hover_contact_m;
+    }
     bool cleared(Lane& lane,const NativeRigidBody& body,UINT64 now) {
-        return !obstruction_required_ || (lane.obstruction && lane.obstruction->clear.value_or(false) &&
-            request_current(lane.obstruction->request,lane.published,now) && same_body(lane.obstruction->request.body,body) &&
-            length(lane.obstruction->request.body.contact(lane.published.hand.position)-body.contact(lane.published.hand.position))<.001);
+        if(!obstruction_required_) return true;
+        if(!lane.obstruction || !lane.obstruction->clear.value_or(false)) return false;
+        if(lane.obstruction->request.hover) return hover_verdict_current(*lane.obstruction,lane.published,body,now);
+        return request_current(lane.obstruction->request,lane.published,now) && same_body(lane.obstruction->request.body,body) &&
+            length(lane.obstruction->request.body.contact(lane.published.hand.position)-body.contact(lane.published.hand.position))<.001;
     }
-    void request_obstruction(unsigned side,const NativeRigidBody& body) {
+    void request_obstruction(unsigned side,const NativeRigidBody& body,bool hover=false) {
         auto& lane=lanes_[side];const auto& p=lane.published;
-        if(lane.obstruction && request_current(lane.obstruction->request,p,p.tick) && same_body(lane.obstruction->request.body,body)) return;
-        lane.obstruction=Obstruction{{side,++obstruction_token_,p.epoch,p.tick,p.source_tick,p.owner,p.hand,body},{}};
+        if(!hover && lane.obstruction && !lane.obstruction->request.hover && request_current(lane.obstruction->request,p,p.tick) && same_body(lane.obstruction->request.body,body)) return;
+        lane.obstruction=Obstruction{{side,++obstruction_token_,p.epoch,p.tick,p.source_tick,p.owner,p.hand,body,hover},{},0};
     }
+    // The hover cue's candidate gets its LOS asked now (at most once per hand per 100 ms, never over a press request), so the press binds at once.
+    void request_hover_obstruction(unsigned side,const NativeRigidBody& body,UINT64 now) {
+        auto& lane=lanes_[side];const auto& p=lane.published;
+        if(!obstruction_required_ || p.grip>=.35f || lane.raw_grip>=.35f || lane.held || lane.decision_deferred) return;
+        if(lane.obstruction && !lane.obstruction->request.hover) return;
+        if(lane.hover_request_tick && now>=lane.hover_request_tick && now-lane.hover_request_tick<hover_request_every_ms) return;
+        request_obstruction(side,body,true);lane.hover_request_tick=now;++hover_requests_;
+    }
+    std::atomic<UINT64> hover_requests_{},hover_used_{},hover_verdicts_{};
     enum class VelocityWrite {written,rejected,faulted};
     // The native velocity setter validates nothing (a stale world or handle can fault, a NaN reaches the simulation), and /EHsc
     // does not turn an access violation into a C++ exception, so the call runs under an SEH guard and non-finite input never
@@ -639,6 +817,16 @@ private:
             const auto role_before=lane.owner.role();lane.owner.claim_physical();note_role_change_locked(role_before,lane);lane.grab.arm(); // the yank/wake target takes the squeeze already held
         }
         const bool physical_usable=usable && !p.occupied && lane.owner.physical();
+        if(lane.living) {living_tick(lane,now,physical_usable);return;}   // G6: a living hold writes nothing; NativeGrab::write is never reached from here
+        if(lane.living_candidate && physical_usable && p.grip>=.35f && !lane.held) {   // G6: a grip-alone press on a living NPC's collar or arm
+            const auto c=*lane.living_candidate;lane.living_candidate.reset();
+            const auto bone=living_bone(read_,base_,c.entity,c.bone);
+            if(bone && bone->entity_id==c.entity_id && !npc_reserved(c.entity_id,now) && length(bone->position-p.hand.position)<=grab_acquire_distance+bone->radius) {
+                lane.living.emplace(*bone,p.hand.position,p.epoch,living_pull_enabled_);lane.living_tick=now;lane.living_started=*bone;lane.acquired=true;++living_holds_;
+                lane.anchor_view=HoldAnchorView{true,bone->position,now,false,false,bone->entity,bone->bone,-1,0,true};
+            }
+            return;
+        }
         if(lane.held && !physical_usable && !lane.pending_release) {lane.pending_release=true;lane.release_throw=false;revoke_owner_locked(lane);}
         const bool same_owner=lane.owner_player==p.owner.player && lane.owner_camera==p.owner.camera &&
             lane.owner_generation==p.owner.camera_identity.generation && lane.owner_epoch==p.epoch;
@@ -709,7 +897,7 @@ private:
         } else if(const auto yanked=yanked_entity_[side].load();yanked && now<yanked_until_[side].load() && sample && physical_usable && lane.grab.pressed()) {
             // The guard this hand just yanked into ragdoll (NativeWeaponHands::yank): the hand had his collar or arm, so it takes
             // his nearest limb and pulls it into the fist (bound as if the limb's contact point were at the hand).
-            if(const auto limb=nearest_ragdoll_body(read_,base_,yanked,p.hand.position);limb && limb->world==world &&
+            if(const auto limb=!legacy_palm_select_ && p.palm.valid?nearest_ragdoll_body(read_,base_,yanked,p.palm,tuning_):nearest_ragdoll_body(read_,base_,yanked,p.hand.position);limb && limb->world==world &&
                !lockout_.locked(limb->entity_id,seconds_from_ms(now))) { // a runaway guard is not yanked back into a hold inside his lockout
                 auto at_hand=limb->pose;at_hand.position=at_hand.position+(p.hand.position-limb->contact(p.hand.position));
                 if(lane.grab.bind(at_hand,p.hand.position,grab_acquire_distance)) {
@@ -723,6 +911,7 @@ private:
             lane.last_acquisition=now;
             const auto& other=lanes_[1-side].held;
             std::optional<NativeRigidBody> body;double distance=2.;
+            std::vector<NativeRigidBody> valid;std::vector<PalmTarget> targets;
             for(const auto& cached:lane.candidates) {
                 if(other && other->entity==cached.entity && other->handle==cached.handle) continue;
                 const auto current=native_grab_body(read_,base_,cached);
@@ -733,6 +922,12 @@ private:
                 if(!hold_bone_allowed(current->bone,p.grip)) continue;
                 const auto d=current->contact_distance(p.hand.position);
                 if(d<distance) {distance=d;body=current;}
+                valid.push_back(*current);targets.push_back(palm_body_target(*current,tuning_));
+            }
+            // G2 (Task 5): the same palm cost ranks the bind (the one hysteresis: the lane's current pick at x 0.86); no palm probe: the nearest, as before.
+            if(valid.size()>1 && !legacy_palm_select_ && p.palm.valid) {
+                const auto pick=pick_by_palm(p.palm,targets,lane.selection.current(),tuning_.hover_radius_m);
+                if(pick.index) {body=valid[*pick.index];distance=body->contact_distance(p.hand.position);}
             }
             if(acquisition_samples_++<1000) {
                 acquisitions_<<now<<','<<side<<','<<p.hand.position.x<<','<<p.hand.position.y<<','<<p.hand.position.z<<','
@@ -881,15 +1076,18 @@ public:
         lane.contact_proxies=std::move(proxies);lane.contact_epoch=epoch;lane.contact_tick=tick;lane.focus_tick=0;
     }
     void publish(unsigned side,const NativePlayerCamera& owner,const WorldTrackedPose& hand,float grip,UINT64 epoch,UINT64 tick,bool usable,bool occupied=false,UINT64 source_tick=0,
-                 const std::optional<HandProxies>* proxies=nullptr,UINT64 geometry_tick=0) {
+                 const std::optional<HandProxies>* proxies=nullptr,UINT64 geometry_tick=0,const PalmProbe& palm=PalmProbe{}) {
         last_published_camera_.store(owner.camera,std::memory_order_relaxed); // lock-free copy for the read-only B7 probe
         std::lock_guard<std::mutex> lock(mutex_);auto& lane=lanes_.at(side);auto& p=lane.published;
         if(proxies && contact_required_) {lane.contact_proxies=*proxies;lane.contact_epoch=epoch;lane.contact_tick=geometry_tick;lane.focus_tick=0;}
         if(p.epoch!=epoch || !same_publisher_owner(p.owner,owner) || p.usable!=usable || p.occupied!=occupied)advance_lifecycle_locked();
         if(p.epoch!=epoch || p.owner.player!=owner.player || p.owner.camera!=owner.camera ||
            p.owner.camera_identity!=owner.camera_identity || !usable || occupied) {lane.focus.reset();lane.focus_tick=0;lane.discovery.reset();}
-        if(p.tick!=tick || p.source_tick!=source_tick || p.epoch!=epoch || p.owner.camera_identity!=owner.camera_identity || !usable || occupied) lane.obstruction.reset();
-        p={owner,hand,grip,epoch,tick,p.serial+1,usable,occupied,source_tick};
+        // A hover LOS request/verdict (Task 8) outlives a new frame of the same hand owner; a press request is per publication, as before.
+        const bool keep_hover=lane.obstruction && lane.obstruction->request.hover && p.epoch==epoch && p.owner.camera_identity==owner.camera_identity && usable && !occupied;
+        if((p.tick!=tick || p.source_tick!=source_tick || p.epoch!=epoch || p.owner.camera_identity!=owner.camera_identity || !usable || occupied) && !keep_hover) lane.obstruction.reset();
+        if(p.epoch!=epoch || !usable || occupied) lane.selection.reset();   // a new pose epoch or a lost hand starts the palm's pick afresh
+        p={owner,hand,grip,epoch,tick,p.serial+1,usable,occupied,source_tick,palm};
     }
     void clear() {{std::lock_guard<std::mutex> lock(mutex_);advance_lifecycle_locked();for(auto& lane:lanes_) {lane.published.usable=false;lane.contact_proxies.reset();lane.obstruction.reset();++lane.published.serial;lane.focus.reset();lane.focus_tick=0;}}contact_.clear();}
     bool holding(unsigned side) {std::lock_guard<std::mutex> lock(mutex_);return lanes_.at(side).held.has_value();}
@@ -965,6 +1163,59 @@ public:
     UINT64 velocity_unknown() const {return velocity_unknown_.load();}
     UINT64 corpse_cost_us() const {return corpse_cost_us_.load();}UINT64 corpse_cost_max_us() const {return corpse_cost_max_us_.load();}
     bool waiting_native_query(unsigned side) {std::lock_guard<std::mutex> lock(mutex_);return lanes_.at(side).decision_deferred;}
+    // G2/G3 (Task 5): this hand's palm pick (fresh within 250 ms of its last scoring), for the grip-alone decision (Task 6) and the status block.
+    std::optional<FocusScore> focus_score(unsigned side,UINT64 now,UINT64 max_age_ms=250) {
+        if(side>=2) return {};
+        std::lock_guard<std::mutex> lock(mutex_);const auto& lane=lanes_[side];
+        if(!lane.focus || !lane.score || !lane.focus_tick || now<lane.focus_tick || now-lane.focus_tick>max_age_ms) return {};
+        return lane.score;
+    }
+    // {buffered_grabs, buffer_expired} of this hand since install.
+    std::pair<std::uint64_t,std::uint64_t> buffer_counts(unsigned side) {
+        if(side>=2) return {};
+        std::lock_guard<std::mutex> lock(mutex_);return {lanes_[side].buffer.buffered(),lanes_[side].buffer.expired()};
+    }
+    bool legacy_palm_select() const noexcept {return legacy_palm_select_;}
+    // G6 (Task 14). living_held: this hand holds a living NPC. reserve_npc: a choke or takedown is offered for this NPC (entity id), fed every input
+    // frame before filter_native_grip. The take_* events are consumed by the input thread (NativeWeaponHands requests): the hold's start (the shove,
+    // the finger blend), a hard pull (the yank on him), a pull step (the teleport, only with the verdict's pull).
+    bool living_held(unsigned side) {if(side>=2) return false;std::lock_guard<std::mutex> lock(mutex_);return lanes_[side].living.has_value();}
+    std::optional<LivingBone> living_grasp(unsigned side) {if(side>=2) return {};std::lock_guard<std::mutex> lock(mutex_);const auto& l=lanes_[side].living;return l?std::optional<LivingBone>(l->grasp()):std::nullopt;}
+    void reserve_npc(unsigned side,std::uint32_t entity_id,UINT64 now) {if(side>=2) return;std::lock_guard<std::mutex> lock(mutex_);lanes_[side].reserved_npc=entity_id;lanes_[side].reserved_tick=entity_id?now:0;}
+    std::optional<LivingBone> take_living_start(unsigned side) {if(side>=2) return {};std::lock_guard<std::mutex> lock(mutex_);auto v=lanes_[side].living_started;lanes_[side].living_started.reset();return v;}
+    std::optional<LivingBone> take_hard_pull(unsigned side) {if(side>=2) return {};std::lock_guard<std::mutex> lock(mutex_);auto v=lanes_[side].hard_pull;lanes_[side].hard_pull.reset();return v;}
+    std::optional<std::pair<std::uintptr_t,std::array<float,3>>> take_living_pull(unsigned side) {if(side>=2) return {};std::lock_guard<std::mutex> lock(mutex_);auto v=lanes_[side].pull_request;lanes_[side].pull_request.reset();return v;}
+    void living_pull(bool enabled) {std::lock_guard<std::mutex> lock(mutex_);living_pull_enabled_=enabled;}
+    bool living_enabled() {std::lock_guard<std::mutex> lock(mutex_);return living_enabled_;}
+    struct LivingCounters {UINT64 holds{},hard_pulls{},releases{};};
+    LivingCounters living_counters() const {return {living_holds_.load(),living_hard_pulls_.load(),living_releases_.load()};}
+    // G3 (Task 8): the stage-0 hit owners' registry indices for this hand's discovery (taken within 250 ms), from NativeInteractionAim::hint_indices.
+    void hints(unsigned side,const std::array<unsigned,8>& indices,UINT64 tick) {if(side>=2) return;std::lock_guard<std::mutex> lock(mutex_);lanes_[side].hints=indices;lanes_[side].hint_tick=tick;}
+    // Status: is the LOS (obstruction) query required (on whenever the physical grab is attached to the interaction aim), and the hover LOS counters.
+    struct HoverLos {bool required{};UINT64 requests{},verdicts{},used{};};
+    HoverLos hover_los() {bool required{};{std::lock_guard<std::mutex> lock(mutex_);required=obstruction_required_;}return {required,hover_requests_.load(),hover_verdicts_.load(),hover_used_.load()};}
+    // The palm probe last published for this hand (the one its physical pick was scored with), for the grip-alone decision (Task 6).
+    PalmProbe published_palm(unsigned side) {if(side>=2) return {};std::lock_guard<std::mutex> lock(mutex_);return lanes_[side].published.palm;}
+    // Status block "grab_focus" (plan Task 5): per hand {id,kind,cost,runner_up,switches_10s,hysteresis_held,scoring_fallback,buffered_grabs,
+    // buffer_expired,palm_dot}. try_lock: the status thread never waits for a dispatcher pass (null when busy).
+    std::string grab_focus_json(UINT64 now) {
+        std::unique_lock<std::mutex> lock(mutex_,std::try_to_lock);if(!lock.owns_lock()) return "null";
+        static constexpr const char* kinds[]={"loot","usable","prop","bone","living"};
+        std::ostringstream o;o<<std::setprecision(6)<<'[';
+        for(unsigned side=0;side<2;++side) {
+            const auto& lane=lanes_[side];
+            const bool fresh=lane.focus && lane.score && lane.focus_tick && now>=lane.focus_tick && now-lane.focus_tick<=250;
+            if(side) o<<',';
+            o<<"{\"id\":"<<(fresh?lane.score->id:0)<<",\"kind\":";
+            if(fresh) o<<'"'<<kinds[static_cast<unsigned>(lane.score->kind)%5]<<'"';else o<<"null";
+            o<<",\"cost\":"<<(fresh?lane.score->cost:0.)<<",\"runner_up\":"<<(fresh?lane.score->runner_up:0.)
+             <<",\"switches_10s\":"<<lane.selection.switches_10s(now)<<",\"hysteresis_held\":"<<lane.selection.hysteresis_held()
+             <<",\"scoring_fallback\":"<<lane.selection.scoring_fallback()<<",\"buffered_grabs\":"<<lane.buffer.buffered()
+             <<",\"buffer_expired\":"<<lane.buffer.expired()<<",\"palm_dot\":"<<(fresh?lane.palm_dot:0.)
+             <<",\"thin_prop\":{\"id\":"<<lane.reject_id<<",\"result\":\""<<body_reject_name(lane.reject)<<"\"}}";
+        }
+        o<<']';return o.str();
+    }
     // Entity of the physics prop this hand would grab, 0 if none.
     std::uintptr_t focus_entity(unsigned side,UINT64 now) {
         if(!focus_point(side,now)) return 0;
@@ -981,7 +1232,7 @@ public:
     std::optional<Vec3> focus_point(unsigned side,UINT64 now,bool native_use=false) {
         if(side>=2) return {};
         std::lock_guard<std::mutex> lock(mutex_);auto& lane=lanes_[side];const auto& p=lane.published;
-        if(native_use || !active_ || !p.usable || p.occupied || lane.held || lane.pending_release || !p.epoch ||
+        if(native_use || !active_ || !p.usable || p.occupied || lane.held || lane.living || lane.pending_release || !p.epoch ||
            now<p.tick || now-p.tick>grab_pose_freshness_ms ||
            (p.source_tick && (now<p.source_tick || now-p.source_tick>grab_pose_freshness_ms)) || !logic_ || logic_()!=2) {lane.focus.reset();lane.focus_tick=0;return {};}
         try {
@@ -990,6 +1241,7 @@ public:
                 lane.focus.reset();lane.focus_tick=0;return {};
             }
             const auto body=focus_body(side,now,false);
+            if(body) request_hover_obstruction(side,*body,now);
             return body?std::optional<Vec3>(body->contact(p.hand.position)):std::nullopt;
         } catch(...) {lane.focus.reset();lane.focus_tick=0;return {};}
     }
@@ -998,7 +1250,9 @@ public:
     // Returns the squeeze left for the native button (0 while the grip grabs).
     // Caller-supplied native carrying/action occupancy returns the raw squeeze;
     // the physical role is revoked and never re-reserved during that press.
-    float filter_native_grip(unsigned side,float raw,UINT64 epoch,UINT64 now,bool gameplay,bool focused,bool use,bool defer_decision=false) {
+    // no_buffer (fix round 1, I2): the right hand holds or has drawn the sword: decide at the edge (the RB block must not wait 150 ms).
+    // grip_alone (Task 6): a grip-alone grab press; its candidate must be within the grip-alone gate (0.12 m) at the decision and in the buffer.
+    float filter_native_grip(unsigned side,float raw,UINT64 epoch,UINT64 now,bool gameplay,bool focused,bool use,bool defer_decision=false,bool grip_alone=false,bool no_buffer=false) {
         std::lock_guard<std::mutex> lock(mutex_);
         auto& lane=lanes_.at(side);auto& p=lane.published;lane.decision_deferred=false;
         lane.raw_grip=raw;lane.decision_tick=now;lane.gate=Gate::none;lane.decision_usable=false;
@@ -1006,7 +1260,7 @@ public:
         if(epoch!=lane.grip_epoch || p.owner.player!=lane.grip_player || p.owner.camera!=lane.grip_camera ||
            p.owner.camera_identity.generation!=lane.grip_generation) {
             if(lane.owner.role()!=RightGripOwner::Role::release)advance_lifecycle_locked();
-            lane.owner={};
+            lane.owner={};lane.buffer.cancel();lane.buffer_used=false;
             if(lane.held) {lane.pending_release=true;lane.release_throw=false;}
             lane.grip_epoch=epoch;lane.grip_player=p.owner.player;lane.grip_camera=p.owner.camera;lane.grip_generation=p.owner.camera_identity.generation;
         }
@@ -1014,7 +1268,7 @@ public:
             lane.gate=Gate::occupied;
             if(lane.held && !lane.pending_release) {lane.pending_release=true;lane.release_throw=true;} // item took the hand: throw with hand velocity, never a dead drop
             const auto role_before=lane.owner.role();const float native=lane.owner.filter(raw,focused,false,true);note_role_change_locked(role_before,lane);
-            p.grip=raw;++p.serial;return native;
+            lane.buffer.cancel();p.grip=raw;++p.serial;return native;
         }
         if(defer_decision && !lane.held && raw>=.35f && !lane.owner.physical()) {
             lane.gate=Gate::deferred;lane.decision_deferred=true;p.grip=raw;++p.serial;return 0;
@@ -1040,13 +1294,32 @@ public:
         }
         if(!usable) {revoke_owner_locked(lane);lane.obstruction.reset();}
         bool eligible=false;
+        const double gate=grip_alone?tuning_.grip_alone_gate_m:grab_acquire_distance;
+        // G3 (Task 5): a buffered press looks again each frame. A candidate inside the gate is caught: the press is decided again below, on
+        // this frame, as a normal press. The window's end resolves it native (the squeeze then passes as today), counted once.
+        if(lane.owner.pending() && usable && !lane.pending_release && focused && std::isfinite(raw) && raw>=.35f) {
+            const auto candidate=focus_body(side,now,true);
+            const auto gap=candidate?focus_gap(lane,*candidate):std::nullopt;
+            const auto step=lane.buffer.step(now,gap,candidate?candidate->entity_id:0);
+            // caught: re-arm the press latch now (the dispatcher sampled this squeeze as not ours while it was pending), so the bind works whether the press
+            // is decided below or after a LOS query (service_obstruction samples and binds; acceptance sim T124714 caught a corpse but never bound it)
+            if(step==GrabIntentBuffer::Step::caught) {lane.owner.catch_pending();lane.catch_tick=now;lane.grab.arm();}
+            else if(step!=GrabIntentBuffer::Step::waiting) {
+                const auto role_before=lane.owner.role();lane.owner.resolve_pending(false);note_role_change_locked(role_before,lane);++native_presses_;
+            }
+        }
         const bool deciding=lane.owner.deciding(raw,focused);
         if(deciding && usable && !lane.pending_release) {
             // Use the same bounded surface target as the hover cue.
-            ++queries_;const auto candidate=focus_body(side,now,true);
-            lane.candidates.clear();
+            ++queries_;auto candidate=focus_body(side,now,true);
+            if(candidate) {const auto gap=focus_gap(lane,*candidate);if(!gap || *gap>gate) candidate.reset();}
+            lane.candidates.clear();lane.living_candidate.reset();
+            // G6 (Task 14): only a grip-alone press holds a living NPC (the fist keeps today's yank); his bone within the grip-alone gate
+            if(!candidate && grip_alone && living_enabled_ && lane.living_focus && lane.score && lane.score->kind==PalmKind::living &&
+               lane.score->distance<=gate && !npc_reserved(lane.living_focus->entity_id,now)) {lane.living_candidate=lane.living_focus;eligible=true;}
             if(candidate) {
                 lane.candidates.push_back(*candidate);
+                if(obstruction_required_ && lane.obstruction && lane.obstruction->request.hover && cleared(lane,*candidate,now)) ++hover_used_;
                 if(obstruction_required_ && !cleared(lane,*candidate,now)) {
                     request_obstruction(side,*candidate);lane.gate=Gate::obstruction_pending;
                     lane.decision_deferred=true;p.grip=raw;++p.serial;return 0;
@@ -1054,9 +1327,19 @@ public:
                 eligible=true;
             }
         }
-        const auto role_before=lane.owner.role();const float native=lane.owner.filter(raw,focused,eligible);note_role_change_locked(role_before,lane);
-        if(deciding) {if(lane.owner.physical()) ++physical_presses_;else ++native_presses_;}
-        if(deciding && lane.owner.physical()) {lane.attempted=true;lane.acquired=false;lane.pending_release=false;}
+        // G3: a press with nothing in reach starts the buffer (once per press) instead of latching native; build/legacy-palm-select or
+        // grab_buffer_ms 0 keep today's single-frame decision.
+        const bool buffer=deciding && usable && !lane.pending_release && !eligible && !lane.buffer_used && !legacy_palm_select_ && !no_buffer && tuning_.grab_buffer_ms>0;
+        const auto role_before=lane.owner.role();float native=0;
+        if(buffer) {lane.owner.begin_pending();lane.buffer.start(now,static_cast<std::uint64_t>(tuning_.grab_buffer_ms),gate);lane.buffer_used=true;}
+        else native=lane.owner.filter(raw,focused,eligible);
+        note_role_change_locked(role_before,lane);
+        if(!lane.owner.pending()) lane.buffer.cancel();   // released, unfocused, occupied or resolved: the buffer ends with the pending role
+        if(deciding && !lane.owner.pending()) {if(lane.owner.physical()) ++physical_presses_;else ++native_presses_;}
+        // A press granted physical arms the latch: `deciding` already required an observed release (role ready), and a squeeze that reaches the lane at
+        // once (a grip-alone grab publishes the grip only after its decision; a buffered catch) may have been sampled as not ours just before (sim T125301).
+        if(deciding && lane.owner.physical()) {lane.attempted=true;lane.acquired=false;lane.pending_release=false;lane.grab.arm();}
+        if(!std::isfinite(raw) || raw<.35f) lane.buffer_used=false;
         // Arm only after a real observed release. This is controller math;
         // the renderer does not bind bodies or call the velocity ABI.
         if(!lane.held && usable && raw<.35f) lane.grab.sample(p.hand,raw,true,p.epoch,p.tick);
@@ -1065,6 +1348,7 @@ public:
             else if(lane.held) lane.gate=Gate::physical_held;
             else if(raw<.35f) lane.gate=Gate::release_armed;
             else if(lane.owner.physical()) lane.gate=Gate::physical_reserved;
+            else if(lane.owner.pending()) lane.gate=Gate::buffer_pending;
             else if(deciding) lane.gate=Gate::native_no_candidate;
             else if(lane.owner.role()==RightGripOwner::Role::native) lane.gate=Gate::native_locked;
             else lane.gate=Gate::awaiting_release;
@@ -1080,7 +1364,8 @@ public:
             std::optional<ObstructionRequest> obstruction_request;
             {std::lock_guard<std::mutex> lock(mutex_);const auto& lane=lanes_[side];
                 if(active_ && obstruction_required_ && lane.obstruction && !lane.obstruction->clear &&
-                   request_current(lane.obstruction->request,lane.published,now) && lane.published.grip>=.35f &&
+                   (lane.obstruction->request.hover?hover_request_live(lane.obstruction->request,lane.published,now):
+                    request_current(lane.obstruction->request,lane.published,now) && lane.published.grip>=.35f) &&
                    camera.player==lane.published.owner.player && camera.camera==lane.published.owner.camera &&
                    camera.camera_identity==lane.published.owner.camera_identity && !camera.authored_view()) obstruction_request=lane.obstruction->request;
             }
@@ -1092,20 +1377,30 @@ public:
                length(body->contact(obstruction_request->hand.position)-obstruction_request->body.contact(obstruction_request->hand.position))>=.001)continue;
             {std::lock_guard<std::mutex> lock(mutex_);const auto& lane=lanes_[side];
                 if(!active_ || !lane.obstruction || lane.obstruction->request.token!=obstruction_request->token ||
-                   !request_current(*obstruction_request,lane.published,GetTickCount64()))continue;
+                   !(obstruction_request->hover?hover_request_live(*obstruction_request,lane.published,GetTickCount64()):
+                     request_current(*obstruction_request,lane.published,GetTickCount64())))continue;
             }
             const auto verdict=query(*obstruction_request);
             const auto after=native_grab_body(read_,base_,obstruction_request->body);
             const auto after_owner=native_player_camera(read_,base_,obstruction_request->owner.camera);
             std::lock_guard<std::mutex> lock(mutex_);auto& lane=lanes_[side];auto& p=lane.published;
+            if(obstruction_request->hover) {   // a hover verdict is recorded for the press; it decides and binds nothing (Task 8)
+                if(!active_ || !lane.obstruction || lane.obstruction->request.token!=obstruction_request->token ||
+                   !hover_request_live(*obstruction_request,p,GetTickCount64()) || p.occupied || lane.held ||
+                   !after || !same_body(*after,obstruction_request->body) || !after_owner || after_owner->authored_view() ||
+                   after_owner->camera_identity!=obstruction_request->owner.camera_identity || logic_()!=2 ||
+                   length(after->contact(obstruction_request->hand.position)-obstruction_request->body.contact(obstruction_request->hand.position))>=hover_contact_m || !verdict) continue;
+                lane.obstruction->clear=*verdict;lane.obstruction->verdict_tick=GetTickCount64();++hover_verdicts_;continue;
+            }
             if(!active_ || !lane.obstruction || lane.obstruction->request.token!=obstruction_request->token ||
                !request_current(*obstruction_request,p,GetTickCount64()) || p.grip<.35f || p.occupied || lane.held ||
                !after || !same_body(*after,obstruction_request->body) || !after_owner || after_owner->authored_view() ||
                after_owner->camera_identity!=obstruction_request->owner.camera_identity || logic_()!=2 ||
                length(after->contact(obstruction_request->hand.position)-obstruction_request->body.contact(obstruction_request->hand.position))>=.001 || !verdict)continue;
-            lane.obstruction->clear=*verdict;lane.decision_deferred=false;
+            lane.obstruction->clear=*verdict;lane.obstruction->verdict_tick=GetTickCount64();lane.decision_deferred=false;
             if(lane.owner.deciding(p.grip,true)) {
                 const auto role_before=lane.owner.role();lane.owner.filter(p.grip,true,*verdict);note_role_change_locked(role_before,lane);lane.attempted=*verdict;lane.acquired=false;
+                if(lane.owner.physical()) lane.grab.arm();   // the press is ours from here (see filter_native_grip)
                 if(*verdict)++physical_presses_;else ++native_presses_;
             }
             if(!*verdict)revoke_owner_locked(lane);
@@ -1149,14 +1444,19 @@ public:
         mass_probe_=false;mass_probe_rows_=0;mass_probe_out_.close();
         {std::error_code ec;const auto root=file.parent_path().parent_path();
          collar_grab_=std::filesystem::exists(root/L"build"/L"collar-grab",ec);
+         legacy_palm_select_=std::filesystem::exists(root/L"build"/L"legacy-palm-select",ec);
+         living_enabled_=!std::filesystem::exists(root/L"build"/L"no-living-hold",ec);
+         if(!living_enabled_) {std::ofstream note(loss_file_,std::ios::app);note<<"knob build/no-living-hold present: living NPCs are no hold candidates (the fist yank stays)\n";}
+         if(legacy_palm_select_) {std::ofstream note(loss_file_,std::ios::app);note<<"knob build/legacy-palm-select present: nearest-AABB grab pick, no grab buffer\n";}
          coupling_on_=hand_body_knob_enabled(std::filesystem::exists(root/L"build"/L"hand-body",ec),std::filesystem::exists(root/L"build"/L"no-hand-body",ec));
          if(collar_grab_) {std::ofstream note(loss_file_,std::ios::app);note<<"knob build/collar-grab present: chest/neck hold targets enabled (full fist only)\n";}
          // Corpse hold knobs and the tuning file, read once here so the shipped configuration is the one that was tested (valid file or the defaults).
          const auto knobs=corpse_knobs_from(root);const auto& kill=knobs.kill;const auto& loaded=knobs.loaded;
-         no_posts_=kill.no_posts;prop_grasp_point_=!kill.no_prop_grasp_point;
+         no_posts_=kill.no_posts;prop_grasp_point_=!kill.no_prop_grasp_point;for(auto& l:lanes_) l.grab.set_legacy_lag_release(kill.legacy_corpse_lag_release);
          configure_corpse(knobs.options);
          {std::ofstream note(loss_file_,std::ios::app);
           if(kill.no_corpse_grab) note<<"knob build/no-corpse-grab present: corpse bodies are not grab candidates\n";
+          if(kill.legacy_corpse_lag_release) note<<"knob build/legacy-corpse-lag-release present: corpse holds drop at 0.5 m lag / 0.25 s, no grasp slide or slip\n";
           if(kill.no_posts) note<<"knob build/no-ragdoll-posts present: no ragdoll event posts\n";
           note<<(kill.no_prop_grasp_point?"knob build/no-prop-grasp-point present: the drawn hand stays at the controller on held props\n":"prop grasp point: the drawn hand sits on motor-held props (corpses always anchor)\n");
           if(!loaded.error.empty()) note<<"build/grab-tuning.cfg rejected, defaults in use: "<<loaded.error<<'\n';

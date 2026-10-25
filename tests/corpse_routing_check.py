@@ -68,6 +68,7 @@ def check_drawn(probe: str, grab: str, safety: str) -> None:
     assert '\\"prop_grasp_point\\":' in probe and '\\"prop_seat_gap_m\\":' in probe, "status fields"
     assert "prop_grasp_point_=!kill.no_prop_grasp_point" in grab and "knob build/no-prop-grasp-point present" in grab, "the knob is read at install and logged"
     assert 'build_dir/"no-prop-grasp-point"' in safety
+    assert 'build_dir/"legacy-corpse-lag-release"' in safety and "set_legacy_lag_release(kill.legacy_corpse_lag_release)" in grab, "fix round 1: the lag-release knob is read at install"
     assert "native_grab.holding(side)" in probe[probe.index("clamp_yields(side"):probe.index("clamp_yields(side") + 200], "native holds still yield the clamp"
     assert "gate.grab_held=physical_grab_requested && (native_grab.holding(0) || native_grab.holding(1))" in probe, "a held corpse still keeps the hands busy for the attack gate"
 

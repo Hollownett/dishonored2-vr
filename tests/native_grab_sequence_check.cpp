@@ -39,11 +39,28 @@ void fixture() {
     rig::Transform transform{};transform.f[0]=transform.f[5]=transform.f[10]=transform.f[15]=1;transform.f[12]=.1f;
     const auto record=fixture_pool+2*0xb0;put(record,transform);put(record+0x44,std::uint32_t{130});put(record+0x40,std::uint32_t{1});put(record+0x70,handle);put(record+0x74,handle);
 }
+// A second loose prop (registry index 2, pool record 1) for the two-hand case.
+constexpr std::uintptr_t second_entity=0x3300000,second_component=0x3400000,second_entries=0x3500000,second_model=0x3600000;
+void second_prop(std::array<float,3> at) {
+    using namespace d2vr;
+    put(fixture_game+0x3130b0+2*8,second_entity);put(second_entity,fixture_base+0x1c886a8);put(second_entity+0xa8,std::uint32_t{0x20002});
+    put(second_entity+0x300,at);put(second_entity+0x268,rig::List{second_entries,1,1<<8});put(second_entries,second_component);
+    put(second_entity+0xf0,second_model);put(second_model,fixture_base+0x1b0dd88);put(second_component,fixture_base+0x1c745c8);
+    put(second_component+0x10,second_entity);put(second_component+0x18,rig::Identity{8,10});put(second_component+0xe8,fixture_base+0x1c74798);
+    constexpr std::uint32_t handle=0x1000001;put(second_component+0xf8,handle);put(second_component+0xc8,std::uintptr_t{});put(second_component+0xd2,static_cast<unsigned char>(0));
+    rig::Transform transform{};transform.f[0]=transform.f[5]=transform.f[10]=transform.f[15]=1;transform.f[12]=at[0];transform.f[13]=at[1];transform.f[14]=at[2];
+    const auto record=fixture_pool+1*0xb0;put(record,transform);put(record+0x44,std::uint32_t{130});put(record+0x40,std::uint32_t{2});put(record+0x70,handle);put(record+0x74,handle);
+}
+// The palm at `palm` facing +x (palm axis +z): the probe dxgi_probe builds from the raw grip and the palm fit.
+d2vr::PalmProbe probe_at(d2vr::Vec3 palm,d2vr::Vec3 facing={1,0,0}) {
+    d2vr::PalmProbe p;p.palm=palm;p.forward={0,0,1};p.direction=facing;p.valid=true;return p;
+}
 }
 namespace d2vr {
 struct NativeGrabCheck {
     static void setup(NativeGrab& grab) {grab.active_=true;grab.base_=fixture_base;grab.read_=read;grab.logic_=logic;}
-    static void consume(NativeGrab& grab,UINT64 now) {std::lock_guard<std::mutex> lock(grab.mutex_);grab.update_lane(0,fixture_world,now);}
+    static void consume(NativeGrab& grab,UINT64 now,unsigned side=0) {std::lock_guard<std::mutex> lock(grab.mutex_);grab.update_lane(side,fixture_world,now);}
+    static void buffer_ms(NativeGrab& grab,double ms) {grab.tuning_.grab_buffer_ms=ms;}
 };
 }
 int main() {
@@ -67,5 +84,65 @@ int main() {
     returned.publish(0,*owner,hand,0,2,2300,true,false,2300);returned.filter_native_grip(0,0,2,2300,true,true,false);
     returned.publish(0,*owner,hand,.9f,2,2310,true,false,2310);returned.filter_native_grip(0,.9f,2,2310,true,true,false);
     NativeGrabCheck::consume(returned,2310);assert(returned.holding(0));
+    {   // G3 (plan Task 5): a fist squeezed 100 ms before the hand reaches the prop binds on arrival (the 150 ms buffer)
+        NativeGrab early;NativeGrabCheck::setup(early);
+        const auto at=[](double x) {return WorldTrackedPose{{x,0,0},{{{1,0,0},{0,1,0},{0,0,1}}}};};
+        early.publish(0,*owner,at(-.8),0,1,3000,true,false,3000,nullptr,0,probe_at({-.8,0,0}));early.filter_native_grip(0,0,1,3000,true,true,false);
+        NativeGrabCheck::consume(early,3000);
+        early.publish(0,*owner,at(-.8),.9f,1,3010,true,false,3010,nullptr,0,probe_at({-.8,0,0}));
+        assert(early.filter_native_grip(0,.9f,1,3010,true,true,false)==0);   // nothing within 0.45 m: pending, nothing to the game
+        NativeGrabCheck::consume(early,3010);assert(!early.holding(0));
+        {const auto d=early.diagnostics(3010);assert(d && (*d)[0].gate==NativeGrab::Gate::buffer_pending && (*d)[0].role==RightGripOwner::Role::pending);}
+        assert(early.native_presses()==0 && early.physical_presses()==0);
+        for(UINT64 t=3030;t<=3110;t+=20) {   // the hand arrives at 5 m/s: in the 0.45 m gate at +100 ms (x -0.3), bound on that tick (the
+            // fixture has no velocity setter, so the hold is checked on its bind tick only)
+            const double x=-.8+static_cast<double>(t-3010)*.005;
+            early.publish(0,*owner,at(x),.9f,1,t,true,false,t,nullptr,0,probe_at({x,0,0}));
+            assert(early.filter_native_grip(0,.9f,1,t,true,true,false)==0);NativeGrabCheck::consume(early,t);
+            assert(early.holding(0)==(t>=3110));
+        }
+        assert(early.holding(0) && early.physical_presses()==1 && early.native_presses()==0);
+        assert(early.buffer_counts(0).first==1 && early.buffer_counts(0).second==0);
+        const auto score=early.focus_score(0,3110);assert(score && score->kind==PalmKind::prop && score->distance<.45);
+        assert(early.focus_score(0,3110+90,100) && !early.focus_score(0,3110+110,100) && early.focus_score(0,3110+110));   // fix round 1: grip-alone takes <= 100 ms, the default stays 250
+    }
+    {   // a press with nothing reached in 150 ms resolves native once, and the squeeze then passes as today
+        NativeGrab late;NativeGrabCheck::setup(late);
+        const WorldTrackedPose away{{-1,0,0},{{{1,0,0},{0,1,0},{0,0,1}}}};
+        late.publish(0,*owner,away,0,1,4000,true,false,4000,nullptr,0,probe_at({-1,0,0}));late.filter_native_grip(0,0,1,4000,true,true,false);
+        float passed=0;
+        for(UINT64 t=4010;t<=4200;t+=10) {
+            late.publish(0,*owner,away,.9f,1,t,true,false,t,nullptr,0,probe_at({-1,0,0}));
+            passed=late.filter_native_grip(0,.9f,1,t,true,true,false);NativeGrabCheck::consume(late,t);
+            if(t<4160) assert(passed==0 && late.native_presses()==0);
+        }
+        assert(passed==.9f && late.native_presses()==1 && late.physical_presses()==0 && !late.holding(0));
+        assert(late.buffer_counts(0).first==0 && late.buffer_counts(0).second==1);
+        {   // I2: the sword hand (no_buffer) decides at the edge: the squeeze passes native on the press frame, no 150 ms wait
+            NativeGrab sword;NativeGrabCheck::setup(sword);
+            sword.publish(0,*owner,away,0,1,4000,true,false,4000,nullptr,0,probe_at({-1,0,0}));sword.filter_native_grip(0,0,1,4000,true,true,false);
+            sword.publish(0,*owner,away,.9f,1,4010,true,false,4010,nullptr,0,probe_at({-1,0,0}));
+            assert(sword.filter_native_grip(0,.9f,1,4010,true,true,false,false,false,true)==.9f && sword.native_presses()==1 && sword.buffer_counts(0).first==0);
+        }
+        NativeGrab off;NativeGrabCheck::setup(off);NativeGrabCheck::buffer_ms(off,0);   // grab_buffer_ms 0: today's single-frame decision
+        off.publish(0,*owner,away,0,1,4000,true,false,4000,nullptr,0,probe_at({-1,0,0}));off.filter_native_grip(0,0,1,4000,true,true,false);
+        off.publish(0,*owner,away,.9f,1,4010,true,false,4010,nullptr,0,probe_at({-1,0,0}));
+        assert(off.filter_native_grip(0,.9f,1,4010,true,true,false)==.9f && off.native_presses()==1);
+    }
+    {   // two_hands_same_body_no_ping_pong: the left hand's focus is X; the right hand, with the same palm, gets its runner-up Y, and
+        // after 200 frames neither lane's focus has changed (each hand excludes the other's focus and held body).
+        second_prop({.1f,.12f,0});
+        NativeGrab both;NativeGrabCheck::setup(both);
+        const WorldTrackedPose palm{{0,0,0},{{{1,0,0},{0,1,0},{0,0,1}}}};
+        for(UINT64 frame=0;frame<200;++frame) {
+            const UINT64 t=5000+frame*11;
+            for(unsigned side=0;side<2;++side) both.publish(side,*owner,palm,0,1,t,true,false,t,nullptr,0,probe_at({0,0,0}));
+            assert(both.focus_entity(0,t)==fixture_entity);
+            assert(both.focus_entity(1,t)==second_entity);
+        }
+        const auto left=both.focus_score(0,5000+199*11),right=both.focus_score(1,5000+199*11);
+        assert(left && right && left->id==0x10001 && right->id==0x20002);
+    }
+    std::cout<<"PASS: G3 grab buffer (early squeeze binds on arrival, nothing in 150 ms goes native once, 0 disables), two hands never ping-pong; ";
     std::cout<<"PASS: real NativeGrab publication/filter/dispatcher caller order: one released epoch sample permits acquisition; held epoch/focus return stays disarmed\n";
 }

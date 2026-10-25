@@ -207,6 +207,22 @@ int main() {
         grab.publish(0,owner,hand,.9f,1,held,true,false,held);grab.filter_native_grip(0,.9f,1,held,true,true,false);
         NativeGrabCheck::dispatch(grab);assert(!grab.holding(0) && fixture_writes==0);
     }
-    std::cout<<"PASS: original native dispatcher completes before retained-body validation; entity ID reuse, world/pool recreation and started-identity replacement emit no motor/throw, require release before reacquisition; retained prop/limb classification survives optional reset\n";
+    {   // G3 (plan Task 8): discovery looks where the hand is. A hinted registry index (this hand's stage-0 hit owners, its probe hits) is looked up
+        // every tick before the slice, so a body there is cached the same tick even with the cursor far away; at most 8 hints.
+        d2vr::NativeGrabDiscovery discovery;unsigned lookups=0;std::vector<unsigned> asked;
+        d2vr::NativeRigidBody book{};book.entity=0x5000;book.entity_id=(9000u<<16)|1u;book.pose.position={.2,0,0};
+        const auto lookup=[&](unsigned index)->std::optional<d2vr::NativeRigidBody> {++lookups;asked.push_back(index);return index==9000?std::optional<d2vr::NativeRigidBody>{book}:std::nullopt;};
+        const auto validate=[&](const d2vr::NativeRigidBody& b)->std::optional<d2vr::NativeRigidBody> {return b;};
+        assert(discovery.advance({},1,lookup,validate).empty() && discovery.cursor()==1025);   // hint_found_same_tick: the cursor is far from 9000
+        const std::array<unsigned,8> hints{9000,0,0,0,0,0,0,0};
+        const auto& found=discovery.advance({},2,lookup,validate,&hints);
+        assert(found.size()==1 && found[0].entity==book.entity && asked[1024]==9000 && discovery.cursor()==2049);
+        assert(discovery.advance({},2,lookup,validate,&hints).size()==1 && lookups==2048+1);   // one pass per tick
+        discovery.advance({},3,lookup,validate,&hints);assert(discovery.advance({},3,lookup,validate).size()==1);   // no duplicate entry
+        // hints_bounded_to_8: eight indices plus the slice per tick; index 0 (the player) and out-of-range indices are skipped
+        const std::array<unsigned,8> many{1,2,3,4,5,6,7,0x3fff};lookups=0;
+        discovery.advance({},4,lookup,validate,&many);assert(lookups==1024+7);
+    }
+    std::cout<<"PASS: discovery hints (same tick, 8 at most); original native dispatcher completes before retained-body validation; entity ID reuse, world/pool recreation and started-identity replacement emit no motor/throw, require release before reacquisition; retained prop/limb classification survives optional reset\n";
 }
 

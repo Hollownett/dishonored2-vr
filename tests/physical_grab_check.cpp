@@ -370,6 +370,39 @@ int main() {
             while(h.position.x<x-1e-12) {h.position.x=std::min(x,h.position.x+.25);g.sample(h,1,true,1,t);}};
         auto lag_release=[&](PhysicalGrab& g,WorldTrackedPose& b,double dt=.01) {
             std::optional<CorpseMotor> r;for(unsigned i=0;i<60 && !(r && r->motor.release);++i) r=g.corpse_motor(b,true,0,0,in(dt));return r;};
+        {   // fix round 1 (corpse hold stability): the grasp offset slides to ~0 over 0.25 s, a blocked body slips and keeps the hold, a lag over 0.9 m releases
+            const auto offset=[&](PhysicalGrab& g,const WorldTrackedPose& hand,const WorldTrackedPose& body) {return length(g.anchor(g.target())-hand.position);(void)body;};
+            {   PhysicalGrab g;auto b=id;auto hnd=id;assert(make(g,b,{.3,0,0}));
+                assert(std::abs(offset(g,hnd,b)-.3)<1e-9);
+                for(unsigned i=0;i<13;++i) g.corpse_motor(b,true,0,0,in(.01));
+                assert(offset(g,hnd,b)<.3*.55 && offset(g,hnd,b)>.3*.45);   // half way at 0.12 s
+                for(unsigned i=0;i<14;++i) {auto r=g.corpse_motor(b,true,0,0,in(.01));assert(r && !r->motor.release);}
+                assert(offset(g,hnd,b)<1e-9);   // the body comes to the palm
+                PhysicalGrab old;old.set_legacy_lag_release(true);auto b2=id;assert(make(old,b2,{.3,0,0}));
+                for(unsigned i=0;i<30;++i) old.corpse_motor(b2,true,0,0,in(.01));
+                assert(std::abs(offset(old,hnd,b2)-.3)<1e-9);   // the knob keeps the old stored offset
+            }
+            const auto walk=[&](PhysicalGrab& g,WorldTrackedPose& h,double x) {   // the hand moves in <= 0.4 m samples (a larger step is a discontinuity)
+                while(std::abs(h.position.x-x)>1e-12) {h.position.x+=std::clamp(x-h.position.x,-.4,.4);g.sample(h,1,true,1,1030);}};
+            {   PhysicalGrab g;auto b=id;auto hnd=id;hnd.position.x=.5;assert(make(g,b,{.5,0,0},hnd));   // grasp 0.5 m out on the body
+                for(unsigned i=0;i<30;++i) g.corpse_motor(b,true,0,0,in(.01));   // slid: the hand is on the grasp point
+                walk(g,hnd,-.45);   // blocked body: the goal runs 0.95 m away... (lag > 0.9 releases once the 0.25 s dwell has passed)
+                auto r=lag_release(g,b);assert(r && r->motor.release && r->reason==ReleaseReason::lag && r->lag_m>.9);
+            }
+            {   PhysicalGrab g;auto b=id;auto hnd=id;hnd.position.x=.3;assert(make(g,b,{.3,0,0},hnd));
+                for(unsigned i=0;i<30;++i) g.corpse_motor(b,true,0,0,in(.01));
+                walk(g,hnd,-.4);   // the hand is 0.4 m from the body origin, the grasp 0.7 m from the hand: lag 0.7 m
+                double first_lag=0,last_lag=0;
+                for(unsigned i=0;i<200;++i) {auto r=g.corpse_motor(b,true,0,0,in(.01));assert(r && !r->motor.release && g.held());if(!i) first_lag=r->lag_m;last_lag=r->lag_m;}
+                assert(first_lag>.69 && last_lag<first_lag - .1);   // 2 s later: held, and the goal re-seated toward the body at <= 0.15 m/s
+                assert(first_lag-last_lag<=.15*2.0+1e-6);
+            }
+            {   PhysicalGrab g;auto b=id;auto hnd=id;hnd.position.x=.3;assert(make(g,b,{.3,0,0},hnd));   // a hand beyond 0.45 m of the body still drops at 0.25 s
+                for(unsigned i=0;i<30;++i) g.corpse_motor(b,true,0,0,in(.01));
+                walk(g,hnd,-.6);
+                auto r=lag_release(g,b);assert(r && r->reason==ReleaseReason::lag);
+            }
+        }
         {   // 1: release(false) on an idle lane keeps cooldown, reason, anchor; a fresh lane has no anchor
             PhysicalGrab fresh;fresh.release(false);assert(!fresh.released_anchor(0) && fresh.release_reason()==ReleaseReason::none);
             PhysicalGrab g;auto b=id;assert(make(g,b,{}));auto h=id;reach(g,h,.9,1030);

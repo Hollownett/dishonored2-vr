@@ -4,6 +4,7 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include "grip_decision.hpp"
 
 namespace d2vr {
 // Physical Quest X owns the native weapon/power wheel: the caller turns a held
@@ -288,17 +289,23 @@ public:
 };
 class GripIntent {
 public:
-    enum class Kind {none,deciding,use,fist,trigger,drain};
-    struct Out {bool use{},fist{},pass_trigger{true},tap_trigger{},use_started{},fist_started{},pending_use{};};
+    enum class Kind {none,deciding,use,fist,trigger,drain,grab};   // grab (G3, plan Task 6): a grip alone that grabs what the palm is on
+    struct Out {bool use{},fist{},pass_trigger{true},tap_trigger{},use_started{},fist_started{},pending_use{},grab{},grab_started{};};
 private:
     Kind kind_{Kind::none};bool g_{},t_{},grip_first_{};std::uint64_t since_{},use_until_{},tap_until_{};
 public:
     Kind kind() const noexcept {return kind_;}
+    // The grip edge of the press being decided, for decide_grip_alone (the press that starts on this frame: now).
+    std::uint64_t decision_since(std::uint64_t now) const noexcept {return kind_==Kind::deciding?since_:now;}
     // use_idle: the Use has nothing to act on (no game target for this hand). A trigger then joining within `late` ms after the
     // window still makes the fist (user's headset log 2026-10-14: 12 of 96 fists had the trigger more than 200 ms after the grip).
     // A grip with the trigger finger still off the trigger (< .05, headset traces v555-v562: 97% of fists show it moved one 47 ms
     // sample after the grip, 1% of grip-alone presses) commits to Use after `quick` ms instead of the full window.
-    Out update(float grip,float trigger,std::uint64_t now,bool free,std::uint64_t window=100,bool use_idle=false,std::uint64_t late=400,std::uint64_t quick=40) noexcept {
+    // one_list (G3, plan Task 6; build/no-grip-alone-grab clears it): a grip alone is decided by `choice` (decide_grip_alone, computed by the caller
+    // for this hand each frame) instead of the 40 ms quick Use: use -> Use, grab -> Kind::grab, pending -> keep deciding, until `pending_max`
+    // (at least the window; the caller's grab buffer may ask longer, ruling H1), then Use. A trigger joining while deciding is still a fist.
+    Out update(float grip,float trigger,std::uint64_t now,bool free,std::uint64_t window=100,bool use_idle=false,std::uint64_t late=400,std::uint64_t quick=40,
+               GripAloneChoice choice=GripAloneChoice::use,bool one_list=false,std::uint64_t pending_max=0) noexcept {
         const bool g=grip>=(g_?.35f:.45f),t=trigger>=(t_?.35f:.55f),edge=(g && !g_) || (t && !t_);
         g_=g;t_=t;Out out{};
         if(!free) {kind_=g || t?Kind::drain:Kind::none;use_until_=tap_until_=0;return out;}
@@ -309,15 +316,21 @@ public:
                 kind_=Kind::none;
                 if(grip_first_) {use_until_=now+250;out.use_started=true;} else tap_until_=now+60;
             }
+            else if(one_list && grip_first_ && g) {
+                if(choice==GripAloneChoice::grab) {kind_=Kind::grab;out.grab_started=true;}
+                else if(choice==GripAloneChoice::use || now-since_>=std::max(window,pending_max)) {kind_=Kind::use;out.use_started=true;}
+            }
             else if(now-since_>=window || (grip_first_ && g && trigger<.05f && now-since_>=quick)) {kind_=g?Kind::use:Kind::trigger;out.use_started=g;}
         }
         else if(kind_!=Kind::none && !g && !t) kind_=Kind::none;
         else if(kind_==Kind::use && g && t && use_idle && now-since_<window+late) {kind_=Kind::fist;out.fist_started=true;}
         else if(kind_==Kind::use && !g) kind_=Kind::drain;      // a trigger still held after the Use is not a cast
+        else if(kind_==Kind::grab && !g) kind_=Kind::drain;     // nor after a grab
         else if(kind_==Kind::trigger && !t) kind_=Kind::drain;  // nor a grip still held after a cast a Use
         out.pending_use=kind_==Kind::deciding && grip_first_ && g;
         out.use=kind_==Kind::use || now<use_until_;
         out.fist=kind_==Kind::fist;
+        out.grab=kind_==Kind::grab;
         out.tap_trigger=now<tap_until_;
         out.pass_trigger=kind_==Kind::trigger || kind_==Kind::none || out.tap_trigger;
         return out;

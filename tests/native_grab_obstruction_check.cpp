@@ -126,5 +126,72 @@ int main() {
     grab.publish(0,owner,fixture_hand,.9f,1,fresh,true,false,fresh);grab.filter_native_grip(0,.9f,1,fresh,true,true,false);
     grab.service_obstruction(owner,fresh,[&](const NativeGrab::ObstructionRequest&)->std::optional<bool>{++calls;return {};});
     assert(calls==1 && !grab.holding(0) && (*grab.diagnostics())[0].role==RightGripOwner::Role::ready);
-    std::cout<<"PASS: owned original stage0/wrapper ordering, no mailbox lock during native call, arbitrary dynamic prop clear/blocked, A-clear-B-dispatch motor ownership, epoch/body/sensor/authored/motion/focus/release invalidation and replaced source rejection\n";
+    {   // G3 (plan Task 8): the LOS is asked at hover, not at press. A hover verdict (<= 100 ms old, the hand within 2 cm, the same body, its contact
+        // within 1 cm) binds on the press tick with no new request; a stale one is asked again (today's path); hover requests are rate limited.
+        const auto hover_then_press=[&](UINT64 wait_ms,double move_m,unsigned& calls)->bool {
+            fixture();NativeGrab g;NativeGrabCheck::setup(g);g.require_obstruction();
+            const auto o=*native_player_camera(read,fixture_base,fixture_camera);const auto t0=GetTickCount64();
+            g.publish(0,o,fixture_hand,0,1,t0,true,false,t0);g.filter_native_grip(0,0,1,t0,true,true,false);
+            assert(g.focus_point(0,t0));   // the hover cue picks the prop and asks for its LOS
+            assert(g.hover_los().requests==1);
+            g.service_obstruction(o,GetTickCount64(),[&](const NativeGrab::ObstructionRequest& r)->std::optional<bool>{assert(r.hover);++calls;return true;});
+            assert(calls==1);
+            const auto until=GetTickCount64()+wait_ms;while(GetTickCount64()<until) Sleep(1);
+            auto moved=fixture_hand;moved.position.x=move_m;const auto t1=GetTickCount64();
+            g.publish(0,o,moved,0,1,t1,true,false,t1);g.filter_native_grip(0,0,1,t1,true,true,false);
+            g.publish(0,o,moved,.9f,1,t1,true,false,t1);const float passed=g.filter_native_grip(0,.9f,1,t1,true,true,false);
+            assert(passed==0);NativeGrabCheck::consume(g,t1);
+            const auto d=g.diagnostics();assert(d);
+            if(g.holding(0)) {assert(g.hover_los().used==1 && g.hover_los().requests==1 && (*d)[0].gate==NativeGrab::Gate::physical_reserved);return true;}   // bound on the press tick, no new request
+            assert((*d)[0].gate==NativeGrab::Gate::obstruction_pending && g.hover_los().used==0);   // asked again at the press
+            unsigned press_calls=0;
+            g.service_obstruction(o,GetTickCount64(),[&](const NativeGrab::ObstructionRequest& r)->std::optional<bool>{assert(!r.hover);++press_calls;return true;});
+            assert(press_calls==1 && g.holding(0));
+            return false;
+        };
+        unsigned hover_calls=0;
+        assert(hover_then_press(20,0,hover_calls));          // hover_verdict_used_at_press
+        hover_calls=0;assert(hover_then_press(0,.019,hover_calls)); // 1.9 cm: still used
+        hover_calls=0;assert(!hover_then_press(120,0,hover_calls)); // stale_hover_verdict_requeried: older than 100 ms
+        hover_calls=0;assert(!hover_then_press(0,.021,hover_calls)); // the hand moved 2.1 cm
+        {   // hover_requests_rate_limited: a hover cue every frame asks at most once per 100 ms
+            fixture();NativeGrab g;NativeGrabCheck::setup(g);g.require_obstruction();
+            const auto o=*native_player_camera(read,fixture_base,fixture_camera);
+            const auto start=GetTickCount64();UINT64 t=start;
+            while((t=GetTickCount64())<start+250) {g.publish(0,o,fixture_hand,0,1,t,true,false,t);g.filter_native_grip(0,0,1,t,true,true,false);g.focus_point(0,t);Sleep(5);}
+            const auto asked=g.hover_los().requests;assert(asked>=2 && asked<=3);
+            NativeGrab off;NativeGrabCheck::setup(off);   // obstruction not required: no hover requests at all
+            off.publish(0,o,fixture_hand,0,1,t,true,false,t);off.filter_native_grip(0,0,1,t,true,true,false);off.focus_point(0,t);
+            assert(off.hover_los().requests==0 && !off.hover_los().required && g.hover_los().required);
+        }
+    }
+    {   // buffered_catch_through_los_binds: a fist squeezed with nothing in reach (pending), the prop then reaches the gate: the catch needs a LOS query
+        // (no hover verdict) and must still bind when the query clears it (acceptance sim T124714: caught a corpse, LOS cleared, never bound)
+        fixture();NativeGrab g;NativeGrabCheck::setup(g);g.require_obstruction();
+        const auto o=*native_player_camera(read,fixture_base,fixture_camera);
+        auto pose=fixture_hand;pose.position.x=-.6;
+        UINT64 t=GetTickCount64();g.publish(0,o,pose,0,1,t,true,false,t);g.filter_native_grip(0,0,1,t,true,true,false);NativeGrabCheck::consume(g,t);
+        Sleep(2);t=GetTickCount64();g.publish(0,o,pose,.9f,1,t,true,false,t);
+        assert(g.filter_native_grip(0,.9f,1,t,true,true,false)==0);NativeGrabCheck::consume(g,t);
+        assert((*g.diagnostics())[0].gate==NativeGrab::Gate::buffer_pending);
+        for(double x=-.5;x<=0.01;x+=.1) {   // the hand arrives
+            Sleep(10);t=GetTickCount64();pose.position.x=x;g.publish(0,o,pose,.9f,1,t,true,false,t);g.filter_native_grip(0,.9f,1,t,true,true,false);NativeGrabCheck::consume(g,t);
+            if((*g.diagnostics())[0].gate==NativeGrab::Gate::obstruction_pending) break;
+        }
+        assert((*g.diagnostics())[0].gate==NativeGrab::Gate::obstruction_pending && g.buffer_counts(0).first==1);
+        unsigned asked=0;g.service_obstruction(o,GetTickCount64(),[&](const NativeGrab::ObstructionRequest&)->std::optional<bool>{++asked;return true;});
+        assert(asked==1 && g.holding(0) && g.physical_presses()==1);
+    }
+    {   // grip_jump_after_decision_binds: the squeeze reaches the lane at once (0 -> 0.9, a grip-alone grab's decision) and the dispatcher samples it
+        // before the filter decides; the LOS then clears and the press must still bind (sim T125301: the grip-alone corpse grab never bound)
+        fixture();NativeGrab g;NativeGrabCheck::setup(g);g.require_obstruction();
+        const auto o=*native_player_camera(read,fixture_base,fixture_camera);
+        UINT64 t=GetTickCount64();g.publish(0,o,fixture_hand,0,1,t,true,false,t);g.filter_native_grip(0,0,1,t,true,true,false);NativeGrabCheck::consume(g,t);
+        Sleep(2);t=GetTickCount64();g.publish(0,o,fixture_hand,.9f,1,t,true,false,t);NativeGrabCheck::consume(g,t);   // sampled before the decision
+        g.filter_native_grip(0,.9f,1,t,true,true,false,false,true);
+        assert((*g.diagnostics())[0].gate==NativeGrab::Gate::obstruction_pending);
+        g.service_obstruction(o,GetTickCount64(),[&](const NativeGrab::ObstructionRequest&)->std::optional<bool>{return true;});
+        assert(g.holding(0));
+    }
+    std::cout<<"PASS: grip jump after the decision binds; buffered catch through a LOS query binds; hover LOS verdicts (used at the press, stale or moved re-asked, rate limited); owned original stage0/wrapper ordering, no mailbox lock during native call, arbitrary dynamic prop clear/blocked, A-clear-B-dispatch motor ownership, epoch/body/sensor/authored/motion/focus/release invalidation and replaced source rejection\n";
 }

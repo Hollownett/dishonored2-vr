@@ -81,6 +81,9 @@ class PhysicalGrab {
     bool forced_release_=false,has_released_=false;
     std::uint64_t release_tick_{};
     Vec3 last_anchor_{};
+    // Corpse hold stability (fix round 1): after a bind the hand-to-grasp offset slides to ~0 (the body comes to the palm); r0_/o0_ are the bind-time
+    // hand-frame object origin and grasp offset, slide_s_ the time since. A blocked body slips instead of dropping (reseat_) unless legacy_lag_.
+    Vec3 slide_r0_{},slide_o0_{};double slide_s_=0;bool slide_done_=true,legacy_lag_=false;
     double recovery_s_=0;   // time spent in stale-frame recovery (s, > 0 while recovering; 0 = normal play). Reset on bind and release.
     void note_release(ReleaseReason reason,bool forced) {
         recovery_s_=0;reason_=reason;forced_release_=forced;release_tick_=tick_;has_released_=true;
@@ -89,6 +92,10 @@ public:
     // Corpse lag rule (Bonelab's hand lags a blocked body, then lets go): the grasp point trailing its target by more than
     // lag_release_m for lag_release_s releases; a forced release blocks a regrab for regrab_cooldown_s (a flapping grip).
     static constexpr double lag_release_m=.5,lag_release_s=.25,regrab_cooldown_s=.3,anchor_blend_s=.25;
+    // Corpse slide and slip (fix round 1): anchor_slide_s to bring the grasp point to the palm; a lag over lag_release_m for lag_release_s re-seats the goal toward
+    // the body at slip_mps while the hand is within slip_hand_m of it; only a lag over lag_hard_release_m (or a hand beyond slip_hand_m) lets go.
+    static constexpr double anchor_slide_s=.25,slip_mps=.15,slip_hand_m=.45,lag_hard_release_m=.9;
+    void set_legacy_lag_release(bool on) noexcept {legacy_lag_=on;}   // build/legacy-corpse-lag-release: no slide, the hard 0.5 m / 0.25 s drop
     bool pressed() const {return pressed_;}
     // A squeeze the game owned at its press, handed to the physics hand mid-press (a yanked or woken body under it): the
     // grip already held latches on the next valid sample, as if pressed fresh.
@@ -146,6 +153,7 @@ public:
         relative_.position=grab_local(previous_,object.position-previous_.position);
         for(unsigned i=0;i<3;++i) relative_.basis[i]=grab_local(previous_,object.basis[i]);
         contact_local_=grab_local(object,contact-object.position);
+        slide_r0_=relative_.position;slide_o0_=relative_.position+grab_local(previous_,grab_world(object,contact_local_));slide_s_=0;slide_done_=legacy_lag_;
         recovery_s_=0;lag_timer_.reset();has_released_=false;forced_release_=false;reason_=ReleaseReason::none;last_anchor_=contact;
         held_=true;return true;
     }
@@ -212,9 +220,22 @@ public:
         // One validated, clamped dt feeds both the lag timer and the cap; an unusable dt writes nothing this frame.
         if(!(in.dt>0) || !std::isfinite(in.dt)) {CorpseMotor idle;idle.write=false;return idle;}
         const double dt=std::min(in.dt,tuning.dt_max);
-        const auto goal=target();const auto error=goal.position-object.position;
-        const auto lag=length(anchor(goal)-anchor(object));
-        if(in.corpse) {if(lag_timer_.update(lag>lag_release_m,dt)) return finish(ReleaseReason::lag,true,false,lag);}
+        if(in.corpse && !legacy_lag_ && !slide_done_) {   // the body comes to the palm: the grasp offset (hand frame) shrinks linearly to 0
+            relative_.position=slide_r0_-slide_o0_*(slide_s_/anchor_slide_s);   // the first frame after the bind stays at the stored offset (a zero command)
+            if(slide_s_>=anchor_slide_s) slide_done_=true;else slide_s_=std::min(anchor_slide_s,slide_s_+dt);
+        }
+        auto goal=target();auto error=goal.position-object.position;
+        auto lag=length(anchor(goal)-anchor(object));
+        if(in.corpse) {
+            if(lag_timer_.update(lag>lag_release_m,dt)) {
+                // A blocked body (a floor, a wall under the goal) slips instead of dropping: re-seat the goal toward the body while the hand is still on it.
+                const bool slip=!legacy_lag_ && lag<=lag_hard_release_m && length(previous_.position-object.position)<=slip_hand_m;
+                if(!slip) return finish(ReleaseReason::lag,true,false,lag);
+                const auto toward=anchor(object)-anchor(goal);const auto n=length(toward);
+                if(n>1e-9) relative_.position=relative_.position+grab_local(previous_,toward*(std::min(slip_mps*dt,n)/n));
+                goal=target();error=goal.position-object.position;lag=length(anchor(goal)-anchor(object));
+            }
+        }
         else if(length(error)>1.5) return finish(ReleaseReason::lag,false,pressed_,lag);
         const auto spin=grab_rotation_error(object,goal);
         const auto source=source_tick?std::min(source_tick,tick_):tick_;

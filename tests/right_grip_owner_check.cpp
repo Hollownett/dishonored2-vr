@@ -56,5 +56,25 @@ int main() {
         assert(d2vr::fist_may_press_native_rb(true,false,false,false) && d2vr::fist_may_press_native_rb(false,true,false,false));
         assert(d2vr::fist_may_press_native_rb(false,false,true,false) && d2vr::fist_may_press_native_rb(false,false,false,true));
     }
+    {   // G3 (plan Task 5): the 150 ms grab buffer. A pending press returns 0 (no native RB, no physical latch), then resolves to physical
+        // or native exactly once; a release, focus loss, an occupied hand or a revoke ends it.
+        d2vr::RightGripOwner o;o.filter(0,true,false);assert(o.deciding(.9f,true));
+        o.begin_pending();assert(o.role()==Role::pending && o.pending() && !o.physical() && !o.deciding(.9f,true));
+        assert(o.filter(.9f,true,true)==0 && o.pending());   // eligibility seen by filter() never resolves it: only the buffer does
+        assert(o.filter(.9f,true,false)==0 && o.pending());
+        assert(o.resolve_pending(true) && o.physical() && !o.resolve_pending(false) && o.physical());
+        d2vr::RightGripOwner n;n.filter(0,true,false);n.begin_pending();
+        assert(n.resolve_pending(false) && n.role()==Role::native && !n.resolve_pending(true) && n.role()==Role::native);
+        assert(n.filter(.9f,true,false)==.9f);   // expired: the squeeze passes as today
+        d2vr::RightGripOwner c;c.filter(0,true,false);c.begin_pending();c.catch_pending();   // caught: decided again on the same frame
+        assert(c.role()==Role::ready && c.deciding(.9f,true) && c.filter(.9f,true,true)==0 && c.physical());
+        d2vr::RightGripOwner r;r.filter(0,true,false);r.begin_pending();
+        assert(r.filter(.2f,true,false)==.2f && r.role()==Role::ready && !r.resolve_pending(true));   // released inside the window
+        d2vr::RightGripOwner f;f.filter(0,true,false);f.begin_pending();assert(f.filter(.9f,false,true)==0 && f.role()==Role::release);
+        d2vr::RightGripOwner u;u.filter(0,true,false);u.begin_pending();assert(u.filter(.9f,true,true,true)==.9f && u.role()==Role::release);
+        d2vr::RightGripOwner v;v.filter(0,true,false);v.begin_pending();v.revoke();assert(v.role()==Role::release && !v.resolve_pending(true));
+        d2vr::RightGripOwner w;w.begin_pending();assert(w.role()==Role::release);   // only a ready (released) press can buffer
+        d2vr::RightGripOwner y;y.filter(0,true,false);y.begin_pending();y.claim_physical();assert(y.physical());   // a yank takes it over
+    }
     std::cout<<"PASS: pre-RB reservation, latched native/physical choice, contact change, menus/focus, occupied-hand revoke, fresh release, native pad mapping and empty-fist RB gate\n";
 }

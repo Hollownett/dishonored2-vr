@@ -217,6 +217,36 @@ int main() {
         d2vr::GripIntent f;o=f.update(1,0,0,true);o=f.update(1,.6f,30,true);assert(o.fist && !o.use);
         d2vr::GripIntent w;o=w.update(1,1,0,false);assert(!o.fist && !o.use && o.pass_trigger);o=w.update(1,1,10,true);assert(!o.fist && w.kind()==K::drain); // weapon hand
     }
+    {   // G3 (plan Task 6): the one-list decision replaces the 40 ms quick Use. grab -> Kind::grab (no trigger passed, ends on release); use -> Use
+        // at once; pending keeps deciding, then Use after the window; a trigger joining while deciding is still a fist; one_list=false is today.
+        using K=d2vr::GripIntent::Kind;using C=d2vr::GripAloneChoice;d2vr::GripIntent::Out o;
+        d2vr::GripIntent g;assert(g.decision_since(500)==500);
+        o=g.update(1,0,1000,true,100,false,400,40,C::grab,true);
+        assert(g.kind()==K::grab && o.grab && o.grab_started && !o.use && !o.fist && !o.pass_trigger && g.decision_since(1010)==1010);
+        o=g.update(1,0,1010,true,100,false,400,40,C::use,true);assert(o.grab && !o.grab_started && !o.use);   // decided once
+        o=g.update(1,1,1050,true,100,false,400,40,C::grab,true);assert(o.grab && !o.fist && !o.pass_trigger);   // a trigger during a grab is not a cast
+        o=g.update(0,1,1100,true,100,false,400,40,C::grab,true);assert(!o.grab && g.kind()==K::drain && !o.pass_trigger);
+        o=g.update(0,0,1150,true,100,false,400,40,C::grab,true);assert(g.kind()==K::none && o.pass_trigger);
+        d2vr::GripIntent u;o=u.update(1,0,0,true,100,false,400,40,C::use,true);assert(o.use && o.use_started && u.kind()==K::use && !o.grab);
+        d2vr::GripIntent p;o=p.update(1,0,0,true,100,false,400,40,C::pending,true);assert(p.kind()==K::deciding && o.pending_use && !o.use && !o.grab);
+        assert(p.decision_since(50)==0);
+        o=p.update(1,0,60,true,100,false,400,40,C::pending,true);assert(!o.use && p.kind()==K::deciding);   // no 40 ms quick Use with one_list
+        o=p.update(1,0,99,true,100,false,400,40,C::pending,true);assert(!o.use);
+        o=p.update(1,0,100,true,100,false,400,40,C::pending,true);assert(o.use && o.use_started && p.kind()==K::use);   // 100 ms: pending -> use
+        d2vr::GripIntent b;o=b.update(1,0,0,true,100,false,400,40,C::pending,true,250);   // the H1 buffer: the caller allows pending to 250 ms
+        o=b.update(1,0,120,true,100,false,400,40,C::pending,true,250);assert(b.kind()==K::deciding && !o.use);
+        o=b.update(1,0,130,true,100,false,400,40,C::grab,true,250);assert(o.grab_started && b.kind()==K::grab);
+        d2vr::GripIntent c;o=c.update(1,0,250,true,100,false,400,40,C::pending,true,250);o=c.update(1,0,500,true,100,false,400,40,C::pending,true,250);
+        assert(o.use_started);
+        d2vr::GripIntent f;o=f.update(1,0,0,true,100,false,400,40,C::pending,true);o=f.update(1,1,60,true,100,false,400,40,C::pending,true);
+        assert(o.fist && o.fist_started && !o.use && !o.grab);   // a trigger at 60 ms makes the fist
+        d2vr::GripIntent l;o=l.update(1,0,0,true,100,true,400,40,C::use,true);assert(o.use);   // the late fist is unchanged
+        o=l.update(1,1,300,true,100,true,400,40,C::use,true);assert(o.fist && o.fist_started && !o.use);
+        d2vr::GripIntent t;o=t.update(0,1,0,true,100,false,400,40,C::grab,true);assert(!o.pass_trigger && t.kind()==K::deciding);   // trigger first: today
+        o=t.update(0,1,100,true,100,false,400,40,C::grab,true);assert(t.kind()==K::trigger && !o.grab);
+        d2vr::GripIntent legacy;o=legacy.update(1,0,0,true,100,false,400,40,C::grab,false);o=legacy.update(1,0,40,true,100,false,400,40,C::grab,false);
+        assert(o.use_started && !o.grab && legacy.kind()==K::use);   // one_list=false (build/no-grip-alone-grab): the 40 ms quick Use, no grab
+    }
     {
         d2vr::XWheelOwner x;
         x.update(false,true);

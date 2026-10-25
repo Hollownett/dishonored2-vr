@@ -229,6 +229,7 @@ class NativeInteractionAim {
     std::ofstream log_;
     std::ofstream targets_;
     std::ofstream ranking_log_;unsigned ranking_rows_{};std::array<std::uint32_t,2> ranking_first_{};
+    std::array<std::array<unsigned,8>,2> hint_index_{};std::array<std::uint64_t,2> hint_tick_{};   // G3 (plan Task 8): stage-0 hit owners per hand, under mutex_
     UINT64 target_samples_{};
     // G1 loot measurement (knob build/loot-reach-trace -> artifacts/native-loot-reach.csv, opened by loot_reach_trace()). Per routed stage-0
     // cycle that retrieved its hand-volume result set: one row per owner in the set (or one owner-0 row for an empty set) with its rank after
@@ -1336,7 +1337,18 @@ private:
                 if(!self->read_(at,current.data(),scope.count*sizeof(NativeUseHit)) || current!=before) throw std::runtime_error("Native Use results changed");
                 std::memcpy(data,hits.data(),scope.count*sizeof(NativeUseHit));retrieved_.ranked=true;++self->ranked_;
                 std::uint32_t first_handle{};std::memcpy(&first_handle,hits[0].data()+0x48,4);
+                // G3 (plan Task 8): the hit owners' registry indices (entity id >> 16), in this final order, at most 8: the physical grab's discovery
+                // looks them up every tick (read-only; NativeGrab::hints).
+                std::array<unsigned,8> hint{};unsigned hinted=0;
+                for(unsigned i=0;i<scope.count && hinted<hint.size();++i) {
+                    const auto owner=self->hit_owner(hits[i],scope.world);if(!owner) continue;
+                    const auto id=rig::value<std::uint32_t>(self->read_,owner+0xa8);
+                    if(!id || *id==0x3fff0010u || !(*id>>16) || (*id>>16)>=0x3fff) continue;
+                    const unsigned index=*id>>16;
+                    if(std::find(hint.begin(),hint.begin()+hinted,index)==hint.begin()+hinted) hint[hinted++]=index;
+                }
                 std::lock_guard<std::mutex> lock(self->mutex_);
+                if(scope.scope->side>=0 && scope.scope->side<2) {self->hint_index_[static_cast<unsigned>(scope.scope->side)]=hint;self->hint_tick_[static_cast<unsigned>(scope.scope->side)]=GetTickCount64();}
                 if(self->ranking_rows_<512 && self->ranking_first_[scope.scope->side]!=first_handle) {
                     self->ranking_first_[scope.scope->side]=first_handle;
                     for(unsigned i=0;i<scope.count && self->ranking_rows_<512;++i) {
@@ -1851,6 +1863,13 @@ public:
             if(!live_target(at,now) || target_owner_[at]!=owner || !palm_target_valid(t)) return {};
             return t;
         } catch(...) {return {};}
+    }
+    // G3 (plan Task 8): this hand's stage-0 Use hit owners as registry indices (at most 8, the last ranked cycle, at most 250 ms old; zeros otherwise).
+    std::array<unsigned,8> hint_indices(int side,std::uint64_t now) {
+        if(side<0 || side>1) return {};
+        std::lock_guard<std::mutex> lock(mutex_);const auto at=static_cast<unsigned>(side);
+        if(!hint_tick_[at] || now<hint_tick_[at] || now-hint_tick_[at]>250) return {};
+        return hint_index_[at];
     }
     // build/grab-tuning.cfg (priorities, hover radius) and build/legacy-palm-select (the v610 forward beam in hand mode). Set at install.
     void palm_select(const GrabTuning& tuning,bool legacy) {std::lock_guard<std::mutex> lock(palm_select_mutex_);palm_select_.tuning=tuning;palm_select_.legacy=legacy;}

@@ -14,13 +14,20 @@
 #include <string>
 
 namespace d2vr {
-struct GuardSample {std::uint64_t tick{};std::uint32_t entity_id{};Vec3 position{};unsigned char state_d1{};bool unaware{};bool bodies_dynamic{};bool read_ok{};bool unaware_ok{};};
-inline std::string guard_sample_csv_header() {return "tick_ms,entity_id,x,y,z,state_d1,unaware,bodies_dynamic,read_ok,unaware_ok";}
+// yaw_deg (plan Task 13): the guard's heading, atan2 of the model axes' row 0 (model +0x186c) in the ground plane, for the "no yaw pop" rule.
+struct GuardSample {std::uint64_t tick{};std::uint32_t entity_id{};Vec3 position{};unsigned char state_d1{};bool unaware{};bool bodies_dynamic{};bool read_ok{};bool unaware_ok{};
+    double yaw_deg{};};
+inline std::string guard_sample_csv_header() {return "tick_ms,entity_id,x,y,z,state_d1,unaware,bodies_dynamic,read_ok,unaware_ok,yaw_deg";}
 inline std::string guard_sample_csv_row(const GuardSample& s) {
-    char b[176];
-    std::snprintf(b,sizeof b,"%llu,%u,%.4f,%.4f,%.4f,%u,%d,%d,%d,%d",static_cast<unsigned long long>(s.tick),s.entity_id,s.position.x,s.position.y,s.position.z,
-        static_cast<unsigned>(s.state_d1),s.unaware?1:0,s.bodies_dynamic?1:0,s.read_ok?1:0,s.unaware_ok?1:0);
+    char b[192];
+    std::snprintf(b,sizeof b,"%llu,%u,%.4f,%.4f,%.4f,%u,%d,%d,%d,%d,%.2f",static_cast<unsigned long long>(s.tick),s.entity_id,s.position.x,s.position.y,s.position.z,
+        static_cast<unsigned>(s.state_d1),s.unaware?1:0,s.bodies_dynamic?1:0,s.read_ok?1:0,s.unaware_ok?1:0,s.yaw_deg);
     return b;
+}
+// The size of a heading change in degrees (0..180), across the -180/180 wrap: -179 -> 179 is 2.
+inline double guard_yaw_change(double from_deg,double to_deg) noexcept {
+    double d=std::fmod(std::abs(to_deg-from_deg),360.);
+    return d>180?360-d:d;
 }
 enum class GuardExperiment {none,shove,shove_decl,teleport_step};
 struct GuardProbePlan {GuardExperiment experiment{};std::string decl;double step_m{};unsigned steps{};};
@@ -67,6 +74,8 @@ template<class Read,class Unaware> GuardSample sample_guard(Read& read,std::uint
     const auto at=model && rig::pointer(*model)?rig::value<std::array<float,3>>(read,*model+0x1860):std::nullopt;
     if(!id || !state || !at || !std::isfinite((*at)[0]) || !std::isfinite((*at)[1]) || !std::isfinite((*at)[2])) return s;
     s.entity_id=*id;s.state_d1=*state;s.position={(*at)[0],(*at)[1],(*at)[2]};
+    if(const auto axes=rig::value<std::array<float,9>>(read,*model+0x186c);axes && std::isfinite((*axes)[0]) && std::isfinite((*axes)[1]) &&
+       std::hypot((*axes)[0],(*axes)[1])>1e-6) s.yaw_deg=std::atan2((*axes)[1],(*axes)[0])*180/3.14159265358979323846;
     s.bodies_dynamic=native_ragdoll_body(read,base,npc,0).has_value();
     if(const std::optional<bool> a=unaware(npc)) {s.unaware=*a;s.unaware_ok=true;} // a stealth test that did not run is not "alerted"
     s.read_ok=true;
