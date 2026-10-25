@@ -598,6 +598,8 @@ static std::optional<double> current_avatar_torso_width;
 static std::shared_ptr<const d2vr::NativeTorsoFitToken> current_avatar_torso;
 static std::optional<d2vr::NativeTorsoFitToken> last_verified_avatar_torso;
 static double avatar_calibration_arm_scale=0,avatar_calibration_shoulder_drop=0;
+// G1 palm probes (render thread, prepare_head_view) read the accepted fit's arm reach; avatar_fit_reuse lives on the present thread. 0: uncalibrated.
+static std::array<std::atomic<double>,2> avatar_fit_arm_reach{};
 static d2vr::rig::AvatarFitReuse avatar_fit_reuse;
 static d2vr::rig::AvatarFitEvents avatar_fit_events;
 static std::ofstream avatar_fit_events_csv;
@@ -5043,7 +5045,18 @@ void prepare_head_view(void* view) noexcept {
                 {std::lock_guard<std::mutex> hand_lock(hand_state_mutex);
                     if(hand_state_tick && character_tick>=hand_state_tick && character_tick-hand_state_tick<=300 && controls_carry_snapshot &&
                        controls_carry_snapshot->player==body->player && controls_carry_snapshot->body==body->body)character_carry=controls_carry_snapshot;}
-                native_interaction_aim.publish_hands(*body,hand_rays,game_xr->pose_epoch(),character_tick,grip_centres,reach,grip_poses,character_carry);
+                // G1 (plan Task 3, C9/C10): the palm probes that order each hand's native Use hits read the RAW controller grip (grip_poses, not the
+                // drawn hands) plus the palm fit, the calibrated arm reach (0.65 m uncalibrated) and the controller velocity.
+                std::array<d2vr::PalmProbe,2> palms{};
+                {   std::array<d2vr::Vec3,2> velocity{};
+                    {std::lock_guard<std::mutex> hand_lock(hand_state_mutex);
+                     for(unsigned side=0;side<2;++side) if(hand_tick[side] && character_tick>=hand_tick[side] && character_tick-hand_tick[side]<=200) velocity[side]=hand_velocity[side];}
+                    for(unsigned side=0;side<2;++side) if(grip_poses[side]) try {
+                        const double arm=avatar_fit_arm_reach[side].load(std::memory_order_relaxed);
+                        palms[side]=d2vr::palm_probe(side,*grip_poses[side],game_xr->palm_offset(side),arm>0?std::optional<double>{arm}:std::nullopt,velocity[side]);
+                    } catch(...) {palms[side]={};}
+                }
+                native_interaction_aim.publish_hands(*body,hand_rays,game_xr->pose_epoch(),character_tick,grip_centres,reach,grip_poses,character_carry,palms);
                 d2vr::WorldTrackedPose frame{};
                 frame.position={anchor.position[0],anchor.position[1],anchor.position[2]};
                 for(unsigned axis=0;axis<3;++axis) frame.basis[axis]={anchor.basis[axis*3],anchor.basis[axis*3+1],anchor.basis[axis*3+2]};
@@ -8018,11 +8031,14 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                     }
                                 }
                                 avatar_calibration_applied=false;
+                                std::array<double,2> arm{};
                                 if(const auto active=avatar_fit_reuse.active_fit()) {
                                     arm_tracking.configure_calibration(*active);full_body.configure_calibration(*active,current_avatar_torso_width);avatar_calibration_applied=true;
                                     avatar_calibration_arm_scale=active->arm_scale;
                                     avatar_calibration_shoulder_drop=active->eye_to_shoulder_metres;
+                                    for(unsigned side=0;side<2;++side) arm[side]=active->arm_reach_metres[side].value_or(0);
                                 }
+                                for(unsigned side=0;side<2;++side) avatar_fit_arm_reach[side].store(arm[side],std::memory_order_relaxed);
                                 // Hands need only a verified rig; a measured fit refines the hidden shoulder.
                                 avatar_pose_gate.store(rig && current_avatar_template && !avatar_resource_validation_pending,std::memory_order_release);
                                 trace_avatar_fit("pose_gate_updated",number,rig);
@@ -9655,6 +9671,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
         avatar_calibration_applied=false;current_avatar_torso_width.reset();
         std::atomic_store(&current_avatar_torso,std::shared_ptr<const d2vr::NativeTorsoFitToken>{});last_verified_avatar_torso.reset();
         avatar_calibration_arm_scale=avatar_calibration_shoulder_drop=0;
+        for(unsigned side=0;side<2;++side) avatar_fit_arm_reach[side].store(0,std::memory_order_relaxed);
         menu_chord={};
         menu_chord_epoch=0;
         lean_snapshot_missing=lean_keyboard_inactive=lean_keyboard_active=lean_output_y=0;
@@ -10057,6 +10074,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
             d2vr::NativeWeaponHands::wake_diag=&corpse_diagnostics;d2vr::NativeWeaponHands::wake_lockout=&native_grab.lockout();
         }
         native_interaction_aim.attach_physical_grab(physical_grab_requested?&native_grab:nullptr);
+        native_interaction_aim.palm_select(d2vr::load_grab_tuning(root/L"build"/L"grab-tuning.cfg").value,fs::exists(root/L"build"/L"legacy-palm-select")); // G1: per-kind priority; the v610 beam knob
         if(native_interaction_requested) native_interaction_aim.install(image_base,&read_self,&game_logic_mask,controller_aim_requested,output/L"native-interaction-rays.csv",native_camera_trace_requested,native_camera_trace_requested);
         if(native_interaction_requested && loot_reach_trace_requested && !native_interaction_aim.loot_reach_trace(output/L"native-loot-reach.csv"))
             throw std::runtime_error("Cannot open the loot reach trace (build/loot-reach-trace)");

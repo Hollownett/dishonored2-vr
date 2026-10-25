@@ -7,6 +7,7 @@
 #include <cstring>
 #include <limits>
 #include <optional>
+#include <utility>
 #include <vector>
 namespace d2vr {
 inline constexpr double grab_acquire_distance=.45;
@@ -154,7 +155,7 @@ std::optional<NativeUseVolumeFocus> native_use_volume_focus(const Candidates& ca
 // Native stage0 uses 112-byte hit records; fraction at +20 is a sweep
 // fraction, which cannot rank initial overlaps by hand proximity. Preserve
 // complete records; downstream native permissions and obstruction tests decide
-// eligibility. The preferred body receives only a 2cm hysteresis allowance.
+// eligibility.
 enum class NativeUseQueryOutcome : unsigned { incomplete,empty,single,multiple,rejected,count };
 inline NativeUseQueryOutcome native_use_query_outcome(std::uintptr_t result,std::uintptr_t data,
         int count,unsigned capacity) noexcept {
@@ -166,25 +167,91 @@ inline NativeUseQueryOutcome native_use_query_outcome(std::uintptr_t result,std:
     return count==0?NativeUseQueryOutcome::empty:count==1?NativeUseQueryOutcome::single:NativeUseQueryOutcome::multiple;
 }
 using NativeUseHit=std::array<std::byte,112>;
-template<class Owner,class Loot=NoLoot>
-bool order_native_use_hits(NativeUseHit* hits,unsigned count,Vec3 hand,std::uintptr_t preferred,Owner owner,Vec3 axis={},Loot loot={}) {
-    if(!hits || count>64 || !finite(hand)) return false;
-    const double axis_length=finite(axis)?length(axis):0;const bool beam=axis_length>1e-6;
-    if(beam) axis=axis*(1/axis_length);
-    std::array<double,64> distance{};std::array<unsigned,64> order{};
+struct GrabTuning;   // grab_force_cap.hpp (it includes this header): the per-kind priority and the hover radius
+// The v610 path's inputs as a probe: the hand point (volume_centre) and the beam axis (the aim ray's forward; zero: plain distance).
+inline PalmProbe legacy_beam_probe(Vec3 hand,Vec3 axis) {PalmProbe p;p.palm=hand;p.forward=axis;p.valid=finite(hand);return p;}
+// Orders the native hand-volume Use hits; downstream native permission and LOS checks still decide, in this order. Records are only
+// permuted, never altered; a non-finite or far (>1000 m) hit point rejects the whole buffer (false, unchanged).
+// Hand mode (G1, plan Task 3): Task 2's palm cost. Each hit is scored as its owner's model bounds (bounds(owner) -> optional<pair<min,max>>;
+// missing or bad bounds: the hit point as a zero-size box), kind loot when loot(owner) else usable, priority from the tuning (loot 0.8
+// replaces the 6 cm bonus). pick_by_palm chooses the winner (the 0.45 m acquire gate, 0.55 m retain gate and the ONE 0.86 hysteresis on
+// `preferred`, ruling H5) and every hit of the winner leads. Then the other in-gate hits by raw cost, then the hits beyond the gate by
+// today's fallback (distance + 1), then `other_hand`'s owner (the other hand's pick) last. An unresolved owner (0) is scored as a usable.
+// A non-finite palm (probe.valid false) keeps the old pick: `preferred`'s hits lead and the rest keep the native order.
+// legacy_beam (build/legacy-palm-select, gaze/reach mode, ruling H7): the v610 forward beam, unchanged: probe.palm is the hand point,
+// probe.forward the beam axis (legacy_beam_probe), a 2 cm preference for `preferred` and the 6 cm loot bonus; other_hand plays no part.
+template<class Owner,class Loot,class Bounds,class Tuning=GrabTuning>
+bool order_native_use_hits(NativeUseHit* hits,unsigned count,const PalmProbe& probe,std::uintptr_t preferred,std::uintptr_t other_hand,
+        Owner owner,Loot loot,Bounds bounds,const Tuning& tuning,bool legacy_beam=false) {
+    if(!hits || count>64) return false;
+    std::array<Vec3,64> point{};
     for(unsigned i=0;i<count;++i) {
         std::array<float,3> xyz{};std::memcpy(xyz.data(),hits[i].data(),12);
-        const Vec3 point{xyz[0],xyz[1],xyz[2]};if(!finite(point)) return false;
-        distance[i]=length(point-hand);if(!std::isfinite(distance[i]) || distance[i]>1000) return false;
-        if(beam) {
-            const double along=dot(point-hand,axis),across=length(point-hand-axis*along);
-            distance[i]=along>=-.05 && across<=grab_beam_radius?across+grab_beam_range_weight*std::max(0.,along):distance[i]+1;
-        }
-        if(preferred && owner(hits[i])==preferred) distance[i]=std::max(0.,distance[i]-.02);
-        if(loot(owner(hits[i]))) distance[i]-=use_loot_bonus;
-        order[i]=i;
+        point[i]={xyz[0],xyz[1],xyz[2]};if(!finite(point[i])) return false;
     }
-    std::stable_sort(order.begin(),order.begin()+count,[&](unsigned a,unsigned b){return distance[a]<distance[b];});
+    std::array<double,64> cost{};std::array<unsigned char,64> tier{};std::array<unsigned,64> order{};
+    if(legacy_beam) {
+        const Vec3 hand=probe.palm;Vec3 axis=probe.forward;
+        if(!finite(hand)) return false;
+        const double axis_length=finite(axis)?length(axis):0;const bool beam=axis_length>1e-6;
+        if(beam) axis=axis*(1/axis_length);
+        for(unsigned i=0;i<count;++i) {
+            cost[i]=length(point[i]-hand);if(!std::isfinite(cost[i]) || cost[i]>1000) return false;
+            if(beam) {
+                const double along=dot(point[i]-hand,axis),across=length(point[i]-hand-axis*along);
+                cost[i]=along>=-.05 && across<=grab_beam_radius?across+grab_beam_range_weight*std::max(0.,along):cost[i]+1;
+            }
+            if(preferred && owner(hits[i])==preferred) cost[i]=std::max(0.,cost[i]-.02);
+            if(loot(owner(hits[i]))) cost[i]-=use_loot_bonus;
+        }
+    } else {
+        const Vec3 origin=palm_point(probe);
+        if(probe.valid) for(unsigned i=0;i<count;++i) {const double d=length(point[i]-origin);if(!std::isfinite(d) || d>1000) return false;}
+        // One target per hit; the owner's kind and bounds are read once per distinct owner.
+        std::array<std::uintptr_t,64> owners{};std::array<PalmTarget,64> targets{};
+        struct Known {std::uintptr_t owner{};bool loot{};std::optional<std::pair<Vec3,Vec3>> box;};
+        std::array<Known,64> known{};unsigned known_count=0;
+        const auto valid_box=[](const std::pair<Vec3,Vec3>& b) {
+            return finite(b.first) && finite(b.second) && b.first.x<=b.second.x && b.first.y<=b.second.y && b.first.z<=b.second.z;};
+        for(unsigned i=0;i<count;++i) {
+            const std::uintptr_t o=owner(hits[i]);owners[i]=o;
+            const Known unresolved{};const Known* k=&unresolved;   // owner 0: no kind or bounds to read
+            if(o) {
+                k=nullptr;
+                for(unsigned j=0;j<known_count;++j) if(known[j].owner==o) {k=&known[j];break;}
+                if(!k) {
+                    Known& fresh=known[known_count++];fresh={o,loot(o),{}};
+                    if(auto b=bounds(o);b && valid_box(*b)) fresh.box=*b;
+                    k=&fresh;
+                }
+            }
+            PalmTarget& t=targets[i];
+            t.id=o?static_cast<std::uint64_t>(o):(std::uint64_t{1}<<63)+i;   // an unresolved owner: a unique id that never matches preferred
+            t.kind=k->loot?PalmKind::loot:PalmKind::usable;t.priority=tuning.priority(t.kind);
+            t.minimum=k->box?k->box->first:point[i];t.maximum=k->box?k->box->second:point[i];
+        }
+        // The other hand's pick never enters the choice.
+        std::array<PalmTarget,64> eligible{};std::array<unsigned,64> eligible_hit{};unsigned eligible_count=0;
+        for(unsigned i=0;i<count;++i) {
+            if(other_hand && owners[i]==other_hand) {tier[i]=3;continue;}
+            eligible_hit[eligible_count]=i;eligible[eligible_count++]=targets[i];
+        }
+        struct Span {const PalmTarget* first;const PalmTarget* last;const PalmTarget* begin() const {return first;} const PalmTarget* end() const {return last;}};
+        const PalmPick pick=pick_by_palm(probe,Span{eligible.data(),eligible.data()+eligible_count},preferred,tuning.hover_radius_m);
+        const std::uint64_t winner=pick.index?eligible[*pick.index].id:0;
+        for(unsigned e=0;e<eligible_count;++e) {
+            const unsigned i=eligible_hit[e];
+            const bool held=preferred && owners[i]==preferred;
+            const auto s=probe.valid?palm_cost(probe,targets[i],tuning.hover_radius_m,held?std::max(grab_retain_distance,grab_acquire_distance):grab_acquire_distance):std::nullopt;
+            if(winner && targets[i].id==winner && (s || !probe.valid)) tier[i]=0;
+            else if(!probe.valid) tier[i]=1;   // cost 0: native order
+            else if(s) tier[i]=1;
+            else tier[i]=2;
+            cost[i]=s?s->cost:probe.valid?length(point[i]-origin)+1:0;
+        }
+    }
+    for(unsigned i=0;i<count;++i) order[i]=i;
+    std::stable_sort(order.begin(),order.begin()+count,[&](unsigned a,unsigned b){return tier[a]!=tier[b]?tier[a]<tier[b]:cost[a]<cost[b];});
     std::array<NativeUseHit,64> copy{};for(unsigned i=0;i<count;++i) copy[i]=hits[order[i]];
     for(unsigned i=0;i<count;++i) hits[i]=copy[i];return true;
 }

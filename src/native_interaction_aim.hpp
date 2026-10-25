@@ -27,6 +27,7 @@ extern "C" MH_STATUS WINAPI MH_DisableHook(LPVOID);
 #include <intrin.h>
 #include "native_player_camera.hpp"
 #include "native_grab.hpp"
+#include "grab_force_cap.hpp"
 #include "native_world_trace.hpp"
 #include "native_cast_exclusion.hpp"
 #include "anatomical_world_contact.hpp"
@@ -143,7 +144,8 @@ class NativeInteractionAim {
     using Read=bool (*)(std::uintptr_t,void*,std::size_t);
     using Logic=UINT (*)();
     // reach: the game's own Use distance along this ray (a gaze Use), not the grab-sized hand volume.
-    struct Publication {std::uint64_t tick{},epoch{};std::uintptr_t player{},camera{};int generation{};WorldTrackedPose hand{};bool active{};Vec3 volume_centre{};bool reach{};std::optional<WorldTrackedPose> grip;std::optional<rig::NativeCarrySnapshot> carry;};
+    struct Publication {std::uint64_t tick{},epoch{};std::uintptr_t player{},camera{};int generation{};WorldTrackedPose hand{};bool active{};Vec3 volume_centre{};bool reach{};std::optional<WorldTrackedPose> grip;std::optional<rig::NativeCarrySnapshot> carry;
+        PalmProbe palm{};};   // G1: the raw-controller palm probe (C9/C10) that orders this hand's native Use hits
     struct Contact {
         std::uintptr_t owner{},sensor{},world{},component{};unsigned spawn{};
         rig::Identity sensor_identity{},camera_identity{},component_identity{};
@@ -152,7 +154,7 @@ class NativeInteractionAim {
     struct Context {NativePlayerCamera camera;Publication hand;int side;unsigned stage;std::uintptr_t sensor;std::uint64_t revision;
         rig::Identity sensor_identity{};
         mutable std::array<Contact,6> contacts{};mutable unsigned contact_count{};mutable bool contacts_overflow{};std::uint64_t ownership_revision{};};
-    struct Retrieved {std::uintptr_t data{},world{};unsigned count{};std::uintptr_t preferred{};const Context* scope{};bool ranked{};};
+    struct Retrieved {std::uintptr_t data{},world{};unsigned count{};std::uintptr_t preferred{};const Context* scope{};bool ranked{};std::uintptr_t other_hand{};};
     static thread_local Retrieved retrieved_; // defined after the class: clang-cl needs Retrieved's member initializers complete
     inline static NativeInteractionAim* instance_{};
     inline static thread_local const Context* context_{};
@@ -1114,6 +1116,17 @@ public:
         return false;
     }
 private:
+    struct PalmSelectConfig {GrabTuning tuning{};bool legacy{};};
+    mutable std::mutex palm_select_mutex_;PalmSelectConfig palm_select_{};
+    PalmSelectConfig palm_select_config() const {std::lock_guard<std::mutex> lock(palm_select_mutex_);return palm_select_;}
+    // The other hand's pick (spec G1 "Both hands"): its last qualified target, remembered for held_grace_ms while that hand is published.
+    // Only one hand is routed at a time, so the other hand's choice is its held target. Under mutex_.
+    std::uintptr_t other_hand_owner_locked(int side,std::uint64_t now) const noexcept {
+        if(side<0 || side>1) return 0;
+        const auto other=static_cast<unsigned>(1-side);const auto& item=seen_[other];
+        if(!published_[other] || !item.tick || now<item.tick || now-item.tick>held_grace_ms) return 0;
+        return item.target.owner;
+    }
     std::uintptr_t hit_owner(const NativeUseHit& hit,std::uintptr_t world) const {
         std::uint32_t handle{};std::memcpy(&handle,hit.data()+0x48,4);
         const auto pool=rig::value<std::uintptr_t>(read_,world+0x28);const auto count=rig::value<unsigned>(read_,world+0x30);
@@ -1138,7 +1151,7 @@ private:
     }
     std::uintptr_t fetch_result_body(void* manager,void* id,void* output,std::uintptr_t caller) {
         auto* self=this;retrieved_={};const auto* scope=context_;
-        bool owned=false;std::uintptr_t world{},preferred{};
+        bool owned=false;std::uintptr_t world{},preferred{},other_hand{};
         try {
             if(self->active_.load(std::memory_order_acquire) && scope && scope->stage==0 && scope->side>=0 && caller==self->base_+0x3b885b && self->fresh(*scope,GetTickCount64())) {
                 const auto at=reinterpret_cast<std::uintptr_t>(id);const auto manager_at=reinterpret_cast<std::uintptr_t>(manager);
@@ -1157,6 +1170,7 @@ private:
                     owned=owned && ticket.sensor==scope->sensor && ticket.token==*token && ticket.side==scope->side && ticket.revision==scope->revision &&
                         ticket.revision==self->routing_.revision() && now>=ticket.tick && now-ticket.tick<=250;
                     if(self->qualified_selected(GetTickCount64())) preferred=rig::value<std::uintptr_t>(self->read_,self->target_object_[scope->side]+0x10).value_or(0);
+                    other_hand=self->other_hand_owner_locked(scope->side,GetTickCount64());
                 }
             }
         } catch(...) {}
@@ -1169,7 +1183,7 @@ private:
                 const auto outcome=(result&0xffu)==0?NativeUseQueryOutcome::incomplete:
                     data && count && capacity?native_use_query_outcome(result,*data,*count,*capacity):NativeUseQueryOutcome::rejected;
                 ++self->query_outcomes_[static_cast<unsigned>(outcome)];
-                if(outcome==NativeUseQueryOutcome::multiple) retrieved_={*data,world,static_cast<unsigned>(*count),preferred,scope};
+                if(outcome==NativeUseQueryOutcome::multiple) retrieved_={*data,world,static_cast<unsigned>(*count),preferred,scope,false,other_hand};
                 else if(outcome==NativeUseQueryOutcome::rejected)++self->ranking_rejected_;
             }
         } catch(...) {++self->ranking_rejected_;}
@@ -1190,9 +1204,16 @@ private:
                 std::array<NativeUseHit,64> hits{},before{};
                 if(!self->read_(at,hits.data(),scope.count*sizeof(NativeUseHit))) throw std::runtime_error("Native Use results unreadable");
                 before=hits;
-                if(!order_native_use_hits(hits.data(),scope.count,scope.scope->hand.volume_centre,scope.preferred,
-                    [&](const NativeUseHit& hit){return self->hit_owner(hit,scope.world);},scope.scope->hand.hand.basis[0],
-                    [&](std::uintptr_t e){return self->takeable(e);})) throw std::runtime_error("Native Use result point invalid");
+                // G1: the palm cost orders the hits (plan Task 3). Ruling H7: gaze/reach mode and build/legacy-palm-select keep the v610 forward beam
+                // with its v610 inputs (the hand volume centre and the aim ray's forward axis).
+                const auto select=self->palm_select_config();
+                PalmProbe probe=scope.scope->hand.palm;
+                const bool legacy=select.legacy || scope.scope->hand.reach;
+                if(legacy) probe=legacy_beam_probe(scope.scope->hand.volume_centre,scope.scope->hand.hand.basis[0]);
+                if(!order_native_use_hits(hits.data(),scope.count,probe,scope.preferred,scope.other_hand,
+                    [&](const NativeUseHit& hit){return self->hit_owner(hit,scope.world);},
+                    [&](std::uintptr_t e){return self->takeable(e);},
+                    [&](std::uintptr_t e){return self->owner_bounds(e);},select.tuning,legacy)) throw std::runtime_error("Native Use result point invalid");
                 std::array<NativeUseHit,64> current{};
                 if(!self->read_(at,current.data(),scope.count*sizeof(NativeUseHit)) || current!=before) throw std::runtime_error("Native Use results changed");
                 std::memcpy(data,hits.data(),scope.count*sizeof(NativeUseHit));retrieved_.ranked=true;++self->ranked_;
@@ -1465,20 +1486,31 @@ private:
         }
         return result;
     }
-    std::optional<Vec3> static_target_point_locked(unsigned side,std::uint64_t now) {
-        if(!live_target(side,now))return {};
+    // The owner's static-model world AABB (*(owner+0xf0) typed 0x1b0dd88, bounds at model+0x1840): finite, ordered, 1 mm..3 m across, the
+    // model link re-read after the bounds. Read-only; shared by the native target point and the palm ordering (G1).
+    std::optional<std::pair<Vec3,Vec3>> owner_bounds(std::uintptr_t owner) const {
+        if(!owner) return {};
         try {
-            const auto object=target_object_[side];const auto identity=rig::started(read_,object);
-            const auto owner=rig::value<std::uintptr_t>(read_,object+0x10);
-            const auto model=owner?rig::value<std::uintptr_t>(read_,*owner+0xf0):std::nullopt;
-            if(!identity || identity->generation!=target_generation_[side] || !model || !rig::typed(read_,base_,*model,0x1b0dd88)) return {};
+            const auto model=rig::value<std::uintptr_t>(read_,owner+0xf0);
+            if(!model || !rig::typed(read_,base_,*model,0x1b0dd88)) return {};
             const auto bounds=rig::value<std::array<float,8>>(read_,*model+0x1840);
             if(!bounds) return {};
             const Vec3 minimum{(*bounds)[0],(*bounds)[1],(*bounds)[2]},maximum{(*bounds)[4],(*bounds)[5],(*bounds)[6]};
             if(!finite(minimum) || !finite(maximum) || minimum.x>maximum.x || minimum.y>maximum.y || minimum.z>maximum.z ||
                length(maximum-minimum)>3 || length(maximum-minimum)<.001 ||
-               rig::started(read_,object)!=identity || rig::value<std::uintptr_t>(read_,object+0x10)!=owner ||
-               rig::value<std::uintptr_t>(read_,*owner+0xf0)!=model) return {};
+               rig::value<std::uintptr_t>(read_,owner+0xf0)!=model) return {};
+            return std::pair{minimum,maximum};
+        } catch(...) {return {};}
+    }
+    std::optional<Vec3> static_target_point_locked(unsigned side,std::uint64_t now) {
+        if(!live_target(side,now))return {};
+        try {
+            const auto object=target_object_[side];const auto identity=rig::started(read_,object);
+            const auto owner=rig::value<std::uintptr_t>(read_,object+0x10);
+            if(!identity || identity->generation!=target_generation_[side] || !owner) return {};
+            const auto box=owner_bounds(*owner);
+            if(!box || rig::started(read_,object)!=identity || rig::value<std::uintptr_t>(read_,object+0x10)!=owner) return {};
+            const auto& [minimum,maximum]=*box;
             const auto& hand=hands_[side].volume_centre;
             return Vec3{std::clamp(hand.x,minimum.x,maximum.x),std::clamp(hand.y,minimum.y,maximum.y),std::clamp(hand.z,minimum.z,maximum.z)};
         } catch(...) {return {};}
@@ -1590,7 +1622,7 @@ public:
     // native eligibility is lost. An opposite grip always overrides this dwell.
     void publish_hands(const NativePlayerCamera& camera,std::array<std::optional<WorldTrackedPose>,2> hands,
             std::uint64_t epoch,std::uint64_t tick,std::array<std::optional<Vec3>,2> grip_centres={},std::array<bool,2> reach={},
-            std::array<std::optional<WorldTrackedPose>,2> grips={},std::optional<rig::NativeCarrySnapshot> carry={}) {
+            std::array<std::optional<WorldTrackedPose>,2> grips={},std::optional<rig::NativeCarrySnapshot> carry={},std::array<PalmProbe,2> palms={}) {
         std::lock_guard<std::mutex> lock(mutex_);epoch_hint_=epoch;
         for(unsigned side=0;side<2;++side) if(hands_[side].active!=hands[side].has_value() || (hands_[side].active && (hands_[side].epoch!=epoch ||
             hands_[side].player!=camera.player || hands_[side].camera!=camera.camera ||
@@ -1612,6 +1644,7 @@ public:
             published_[side]=hands[side].has_value();
             if(published_[side] && grips[side] && grab_pose_valid(*grips[side]))hands_[side].grip=grips[side];
             if(published_[side])hands_[side].carry=carry;
+            if(published_[side])hands_[side].palm=palms[side];
         }
         routing_.next(published_,tick,qualified_selected(tick),moving);if(revision!=routing_.revision()) invalidate_selection();
     }
@@ -1656,6 +1689,26 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         return live_target(static_cast<unsigned>(side),now)?target_owner_[static_cast<unsigned>(side)]:0;
     }
+    // G1 (plan Task 3; Tasks 6 and 10 use it): this hand's live native Use target as a palm-cost target: id = the owner, kind loot when
+    // takeable() else usable (priority from build/grab-tuning.cfg), the owner's model bounds or, without them, the target point as a box.
+    std::optional<PalmTarget> target_bounds(int side,std::uint64_t now) {
+        if(side<0 || side>1) return {};
+        const auto tuning=palm_select_config().tuning;
+        std::lock_guard<std::mutex> lock(mutex_);
+        const auto at=static_cast<unsigned>(side);
+        if(!live_target(at,now)) return {};
+        try {
+            const auto owner=target_owner_[at];
+            PalmTarget t;t.id=owner;t.kind=takeable(owner)?PalmKind::loot:PalmKind::usable;t.priority=tuning.priority(t.kind);
+            if(const auto box=owner_bounds(owner)) {t.minimum=box->first;t.maximum=box->second;}
+            else if(const auto point=target_point_locked(at,now)) t.minimum=t.maximum=*point;
+            else return {};
+            if(!live_target(at,now) || target_owner_[at]!=owner || !palm_target_valid(t)) return {};
+            return t;
+        } catch(...) {return {};}
+    }
+    // build/grab-tuning.cfg (priorities, hover radius) and build/legacy-palm-select (the v610 forward beam in hand mode). Set at install.
+    void palm_select(const GrabTuning& tuning,bool legacy) {std::lock_guard<std::mutex> lock(palm_select_mutex_);palm_select_.tuning=tuning;palm_select_.legacy=legacy;}
     bool grip_use_target(int side,std::uint64_t now) noexcept {
         if(side<0 || side>1)return false;
         mutex_.lock();
