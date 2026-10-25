@@ -266,6 +266,94 @@
    "default": true
   },
   {
+   "id": "grip-alone-grab",
+   "file": "no-grip-alone-grab",
+   "kind": "disable",
+   "label": "Grab with the grip button alone",
+   "help": "Squeezing the grip next to something grabbable picks it up without the trigger; blocking, doors, levers, loot and drawing a gun from the hip still work as before. Turn off to need the old grip-and-trigger combination.",
+   "default": true
+  },
+  {
+   "id": "palm-select",
+   "file": "legacy-palm-select",
+   "kind": "disable",
+   "label": "Palm picks loot and props",
+   "help": "The hand picks what to grab, or which part of a body, by where your palm is, instead of the older nearest-object pick. Turn off for the older pick.",
+   "default": true
+  },
+  {
+   "id": "corpse-slip-release",
+   "file": "legacy-corpse-lag-release",
+   "kind": "disable",
+   "label": "Corpses slip instead of dropping",
+   "help": "A body you carry slips back toward your hand when it snags on something instead of being dropped at once. Turn off to drop it the old way after a hard snag.",
+   "default": true
+  },
+  {
+   "id": "living-hold",
+   "file": "no-living-hold",
+   "kind": "disable",
+   "label": "Hold living guards and civilians",
+   "help": "Grab a living guard or civilian: he stumbles and notices you, and a hard pull ragdolls him while you keep a limb. Chokes, takedowns and talking still take priority. Turn off to leave living people alone (the fist pull stays).",
+   "default": true
+  },
+  {
+   "id": "finger-surface",
+   "file": "no-finger-surface",
+   "kind": "disable",
+   "label": "Fingers stop on surfaces",
+   "help": "Your fingers rest on tables, shelves and paper instead of passing through them. Turn off to let them curl through.",
+   "default": true
+  },
+  {
+   "id": "finger-ease",
+   "file": "legacy-finger-ease",
+   "kind": "disable",
+   "label": "Grip eases in",
+   "help": "Your fingers ease into a grip over a moment instead of snapping shut. Turn off to snap straight to the grip pose.",
+   "default": true
+  },
+  {
+   "id": "hand-grenade-throw",
+   "file": "no-hand-grenade-throw",
+   "kind": "disable",
+   "label": "Throw grenades by hand swing",
+   "help": "A grenade leaves your left hand with the speed and direction of your swing. Turn off to throw it the game's normal way.",
+   "default": true
+  },
+  {
+   "id": "hand-mine-aim",
+   "file": "no-hand-mine-aim",
+   "kind": "disable",
+   "label": "Place mines and razors by left-hand aim",
+   "help": "Mines and spring razors are placed where your left hand points while the left trigger is held. Turn off to aim them with your head.",
+   "default": true
+  },
+  {
+   "id": "bink-theater",
+   "file": "no-bink-theater",
+   "kind": "disable",
+   "label": "Pre-rendered videos show flat at once",
+   "help": "Recorded videos go straight to the flat screen instead of a moment of black first. Turn off to wait the old way.",
+   "default": true
+  },
+  {
+   "id": "cutscene-skip-hold",
+   "file": "no-cutscene-skip-hold",
+   "kind": "disable",
+   "label": "Hold A or X to skip a cutscene",
+   "help": "Holding A or X for about 0.6 seconds skips a cutscene or video that can be skipped. Turn off for no skip shortcut.",
+   "default": true
+  },
+  {
+   "id": "letterbox-hide",
+   "file": "no-letterbox-hide",
+   "kind": "disable",
+   "label": "No black bars in 3D cutscenes",
+   "help": "Hides the black cinema bars the game draws in 3D cutscenes, in both eyes. Turn off to show them.",
+   "default": true
+  },
+  {
    "id": "native-temporal-census",
    "file": "native-temporal-census",
    "kind": "enable",

@@ -45,6 +45,13 @@ Check("list_has_no_unwanted_rows", !list.Any(f => f.Id is "corpse-grab") && list
     Features.Set(d, F("hand-blink"), true);
     Check("disable_kind_on_removes_no_file", !Has(d, "no-hand-blink") && Features.State(d, list)["hand-blink"].On && !Ids(d, "off").Contains("hand-blink"));
 }
+{   // fresh_install_has_every_feature_on_except_diagnostics
+    var d = NewBuild(); Features.Apply(d, list);
+    var st = Features.State(d, list);
+    var offIds = list.Where(f => !st[f.Id].On).Select(f => f.Id).ToArray();
+    var newIds = new[] { "grip-alone-grab", "palm-select", "corpse-slip-release", "living-hold", "finger-surface", "finger-ease", "hand-grenade-throw", "hand-mine-aim", "bink-theater", "cutscene-skip-hold", "letterbox-hide" };
+    Check("fresh_install_has_every_feature_on_except_diagnostics", offIds.SequenceEqual(new[] { "native-temporal-census" }) && newIds.All(i => st[i].On) && list.Where(f => !f.IsEnable).All(f => !Has(d, f.File)) && !list.Any(f => f.File == "finger-probe-3"));
+}
 {   // handmade_negative_knob_is_adopted
     var d = NewBuild(); File.WriteAllText(Path.Combine(d, "no-stealth-contact"), "");
     Features.Apply(d, list);
