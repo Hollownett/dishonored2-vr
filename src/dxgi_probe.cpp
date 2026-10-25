@@ -8431,7 +8431,7 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                             } else if(!gameplay) game_xr->wrist_hud({});
                             render_perf_publish_scope(context.Get(),gameplay,now_status);
                             {const auto left=fsr_taa.eye_upscaler_generation[0].load(),right=fsr_taa.eye_upscaler_generation[1].load();game_xr->upscaler_generation((left==right || mono_view_state.load()==1) && left?left:0);}
-                            game_xr->alternate_enabled=alternate_on();game_xr->alternate_fresh_eye=alt_fresh;game_xr->alternate_frame=number;
+                            game_xr->alternate_enabled=alternate_on();game_xr->performance_mode(alternate_on());game_xr->alternate_fresh_eye=alt_fresh;game_xr->alternate_frame=number;
                             game_xr->scene_hold=cutscene_hold;game_xr->scene_id=cutscene_count.load(); // G2: this cutscene's hold and its identity
                             game_xr->present(completed_left.Get(),completed_right.Get(),
                                 views.empty()?1.4f:views[0].pose->horizontal_fov,views.empty()?.88f:views[0].pose->vertical_fov,gameplay,authored_camera || cutscene_immersive,game_logic_mask()==4,

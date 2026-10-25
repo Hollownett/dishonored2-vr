@@ -1354,6 +1354,7 @@ public:
     XrTime tracking_prediction_time() const noexcept {return locate_display_time_;}
     XrViewStateFlags tracking_flags() const noexcept {return located_view_flags_;}
     void upscaler_generation(unsigned generation) noexcept {settings_.upscaler_generation(generation);}
+    void performance_mode(bool value) noexcept {settings_.performance_mode(value);} // alternate-eye is running: the Anti-aliasing row says SMAA is in use
     void dlss_available(bool value) noexcept {settings_.dlss_available(value);} // offers the DLAA/DLSS Quality rows (NVIDIA GPU + user's nvngx_dlss.dll)
     // Latest completed HUD window surface (or null to hide it); set each frame by the producer.
     // Same hold as world_ui: a frame without a fresh panel capture re-shows the last image (up to 400 ms)

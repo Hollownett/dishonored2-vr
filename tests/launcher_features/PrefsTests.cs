@@ -69,6 +69,7 @@ public static class PrefsTests
         var shown = Prefs.WithDefaultAa(new Prefs(), false, false, true);
         var savedDefault = Prefs.Merge(shown, shown, new Prefs());
         check("merge_saves_the_shown_gpu_default_when_nothing_chosen", savedDefault.TemporalAa == 5 && savedDefault.AaChosen == 1);
+        check("aa_help_notes_performance_mode_only_when_on", Prefs.AaHelpFor("base", false) == "base" && Prefs.AaHelpFor("base", true).Contains("SMAA") && Prefs.AaHelpFor("base", true).EndsWith("base"));
         var caps = Tmp(); Directory.CreateDirectory(Path.GetDirectoryName(caps)!);
         File.WriteAllText(caps, "1 4098 0 1\n"); var capsYes = Prefs.Fsr4Supported(caps);
         File.WriteAllText(caps, "1 4318 1 0\n"); var capsNo = Prefs.Fsr4Supported(caps);

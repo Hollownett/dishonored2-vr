@@ -362,7 +362,8 @@ sealed class MainForm : Form
         aa.Items.Clear();
         foreach (var (t, v) in AaBase) aa.Items.Add(new Item(t, v));
         if (offered) foreach (var (t, v) in AaDlss) aa.Items.Add(new Item(t, v));
-        aa.Help = offered ? AaHelp + " " + DlssProvider.Attribution : AaHelp; // the attribution the DLSS licence asks for, where the modes are offered
+        aaHelpBase = offered ? AaHelp + " " + DlssProvider.Attribution : AaHelp; // the attribution the DLSS licence asks for, where the modes are offered
+        RefreshAaNote();
         Select(aa, current, $"Mode {current}");
         options.Invalidate();
     }
@@ -675,6 +676,16 @@ sealed class MainForm : Form
 
     string FeatureBuild => env.P("build");
 
+    string aaHelpBase = AaHelp;
+
+    /// <summary>The Anti-aliasing help carries the performance-mode note while that feature row is on (performance mode replaces FSR/DLSS with SMAA).</summary>
+    void RefreshAaNote()
+    {
+        int pm = -1; for (int i = 0; i < features.Count; i++) if (features[i].Id == "performance-mode") pm = i;
+        aa.Help = Prefs.AaHelpFor(aaHelpBase, pm >= 0 && pm < featList.Rows.Count && featList.Rows[pm].Checked);
+        options.Invalidate();
+    }
+
     /// <summary>Reads the knob files into the check rows (no writes).</summary>
     void LoadFeatures()
     {
@@ -684,6 +695,7 @@ sealed class MainForm : Form
         {
             var st = Features.State(FeatureBuild, features);
             for (int i = 0; i < features.Count; i++) featList.Rows[i].SetSilently(st[features[i].Id].On);
+            RefreshAaNote();
             if (showFeatures) SetSettingsMsg("Each switch is saved at once. It applies the next time VR starts.", Ui.Dim);
         }
         catch (Exception ex) { SetSettingsMsg("Cannot read feature state: " + ex.Message, Ui.Bad); }
@@ -695,6 +707,7 @@ sealed class MainForm : Form
         try
         {
             Features.Set(FeatureBuild, f, row.Checked);
+            RefreshAaNote();
             SetSettingsMsg($"{f.Label}: {(row.Checked ? "on" : "off")}. Applies the next time VR starts.", Ui.Good);
         }
         catch (Exception ex)
