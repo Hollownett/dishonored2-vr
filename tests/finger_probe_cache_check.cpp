@@ -60,6 +60,15 @@ int main() {
         c.probed(5,std::nullopt,1010);c.probed(5,std::nullopt,1020);assert(c.shapes(1020,out)==7);
         c.clear();assert(c.shapes(1020,out)==0);
     }
+    {   // palm_slot_time_based: the palm (slot 0) is probed every frame; two missed frames (~28 ms) keep it, it drops once the last hit is 140 ms old
+        r::FingerProbeCache c;std::uint64_t t=1000;c.probed(0,table(),t);
+        for(unsigned i=0;i<2;++i) {t+=14;c.probed(0,std::nullopt,t);assert(live(c,t)==1);}
+        for(unsigned i=0;i<6;++i) {t+=14;c.probed(0,std::nullopt,t);assert(live(c,t)==1);} // 112 ms after the hit
+        t=1000+140;c.probed(0,std::nullopt,t);assert(live(c,t)==0);
+        c.probed(0,table(),t+14);assert(live(c,t+14)==1);
+        // a fingertip slot keeps its two-miss rule
+        r::FingerProbeCache d;d.probed(4,table(),1000);d.probed(4,std::nullopt,1014);d.probed(4,std::nullopt,1028);assert(live(d,1028)==0);
+    }
     std::cout<<"finger_probe_cache_check passed"<<std::endl;
     return 0;
 }

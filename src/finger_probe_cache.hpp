@@ -12,14 +12,19 @@
 namespace d2vr::rig {
 inline constexpr std::uint64_t finger_probe_hit_life_ms=150;
 inline constexpr unsigned finger_probe_cache_slots=8,finger_probe_sticky_misses=2;
+// The palm slot (0) is probed every frame, a fingertip slot every ~5th (~70 ms at 72 Hz): its misses count only once the last hit is this old (two fingertip cycles).
+inline constexpr std::uint64_t finger_palm_sticky_ms=140;
 class FingerProbeCache {
 public:
     // A probe of this slot answered: its hit as a shape, or nothing (a miss, or a hit that makes no shape).
     void probed(unsigned slot,std::optional<HeldShape> hit,std::uint64_t now) {
         if(slot>=finger_probe_cache_slots) return;
         auto& s=slots_[slot];s.answered=now;
-        if(hit) {s.has=true;s.shape=*hit;s.misses=0;}
-        else if(s.has && ++s.misses>=finger_probe_sticky_misses) s.has=false;
+        if(hit) {s.has=true;s.shape=*hit;s.misses=0;s.hit_at=now;}
+        else if(s.has) {
+            if(slot==0) {if(now>=s.hit_at && now-s.hit_at>=finger_palm_sticky_ms) s.has=false;} // time-based: the per-frame palm probe must not drop in 2 frames
+            else if(++s.misses>=finger_probe_sticky_misses) s.has=false;
+        }
     }
     // The live shapes (in slot order), how many.
     unsigned shapes(std::uint64_t now,std::array<HeldShape,8>& out) const {
@@ -29,7 +34,7 @@ public:
     }
     void clear() {slots_={};}
 private:
-    struct Slot {bool has{};HeldShape shape{};std::uint64_t answered{};unsigned misses{};};
+    struct Slot {bool has{};HeldShape shape{};std::uint64_t answered{},hit_at{};unsigned misses{};};
     std::array<Slot,finger_probe_cache_slots> slots_{};
 };
 }

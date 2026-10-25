@@ -32,7 +32,7 @@ def check(probe: str, build: str, features: str) -> None:
     assert "finger_turn[side]=d2vr::rig::finger_turns_of_angles(*geometry,contact,blended);" in b
     assert b.index("d2vr::rig::finger_contact(") < b.index("grip_pose_blend[side].apply(")
     # the hold edge (or the seam) starts it from the drawn pose; the release edge stops it; the knob keeps v611
-    assert "(grip_pose_blend_request[side].exchange(false) || (hold_edge && !legacy_finger_ease)) && finger_drawn_valid[side]) grip_pose_blend[side].start(finger_drawn_angles[side],fk_t);" in b
+    assert "(grip_pose_blend_request[side].exchange(false) || (hold_edge && !legacy_finger_ease)) grip_pose_blend[side].start(finger_drawn_valid[side]?finger_drawn_angles[side]:d2vr::rig::FingerAngles{},fk_t);" in b
     assert "if(!held_hand && finger_was_held[side]) grip_pose_blend[side].stop();" in b
     assert 'legacy_finger_ease=fs::exists(root/L"build"/L"legacy-finger-ease");finger_touch_params.floor_after_smoothing=legacy_finger_ease;' in probe
     assert "finger_touch_params=*parsed;finger_touch_params.floor_after_smoothing=legacy_finger_ease;" in probe

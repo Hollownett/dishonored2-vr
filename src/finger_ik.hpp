@@ -409,6 +409,9 @@ inline HeldShape palm_stop_slab(const HandGeometry& hand,const WorldTrackedPose&
 // The same shape twice, for the memo: two millimetres of position, size and rounding, a hundredth of basis (a held shaft's end moves ~2 mm).
 inline constexpr double memo_length_tolerance=.002,memo_basis_tolerance=.01;
 inline constexpr unsigned finger_solve_all=5;
+// A free hand sliding fast (>= 0.3 m/s) misses the memo on every finger: cap its solves a frame at 3 (the stale fingers keep their last pose).
+inline constexpr unsigned finger_fast_solve_cap=3;inline constexpr float finger_fast_hand_speed=.3f;
+inline unsigned finger_free_budget(float hand_speed,unsigned base) {return hand_speed>=finger_fast_hand_speed?std::min(base,finger_fast_solve_cap):base;}
 inline double palm_shape_distance(const PalmShape& shape,Vec3 point) {
     const auto d=point-shape.position;
     if(shape.rim>=0 && shape.half.x>0)

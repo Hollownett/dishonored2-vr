@@ -417,7 +417,7 @@ static void note_finger_take(unsigned side,UINT64 owner,UINT64 now) {if(side<2 &
 // G5 free fingers (plan Task 12): a free hand's probes (the palm-normal cast every frame and fingertip casts along the current pose, at most
 // finger_probe_casts a frame; build/finger-probe-3 forces 3), the sticky probe cache, every finger solved (finger_free_solve_budget), thin props as
 // slabs, extended fingers stopped (finger_contact stop_extended) and eased opening. build/no-finger-surface keeps v609's probes, budget and TTL.
-static constexpr unsigned finger_probe_casts_default=3;static unsigned finger_probe_casts=finger_probe_casts_default;static unsigned finger_free_solve_budget=5;
+static constexpr unsigned finger_probe_casts_default=2;static unsigned finger_probe_casts=finger_probe_casts_default;static unsigned finger_free_solve_budget=5;
 static bool finger_surface=true;
 static std::array<d2vr::rig::FingerProbeCache,2> probe_cache{};
 static std::atomic<UINT64> finger_probe_hits_world{},finger_probe_hits_thin{},finger_collider_thin{};
@@ -440,7 +440,7 @@ static void start_finger_touch_knobs(const fs::path& root,const fs::path& output
     std::ofstream note(output/L"finger-touch.txt",std::ios::trunc);
     note<<"knob build/legacy-finger-curl "<<(legacy_finger_curl?"present: fingers keep the controller-value mapping\n":"absent: fingers follow the touch sensors where the runtime has them\n");
     note<<"knob build/no-finger-surface "<<(finger_surface?"absent: free fingers rest on surfaces (G5), ":"present: v609 finger probes, budget and TTL, ")<<"finger_probe_casts "<<finger_probe_casts<<'\n';
-    note<<"knob build/legacy-finger-ease "<<(legacy_finger_ease?"present: no grip pose blend, hover shape or eased opening (v611)\n":"absent: the grip eases in over 0.25 s (G4)\n");
+    note<<"knob build/legacy-finger-ease "<<(legacy_finger_ease?"present: v611 hands (no grip pose blend, hover shape, eased opening or G5 free-hand probes/resting)\n":"absent: the grip eases in over 0.25 s (G4)\n");
     std::ifstream cfg(root/L"build"/L"finger-touch.cfg");
     if(!cfg) {note<<"knob build/finger-touch.cfg absent: defaults\n";return;}
     std::ostringstream text;text<<cfg.rdbuf();
@@ -5784,7 +5784,7 @@ void prepare_head_view(void* view) noexcept {
                 // G4: was this hand holding last frame (the hold edge starts the grip pose blend), when its hold began, the held shape's
                 // source last frame (a change re-arms the eased opening for 0.3 s: the fitter's shape replacing the hover shape), until when.
                 static std::array<d2vr::rig::TakeClose,2> take_close{};static std::array<UINT64,2> take_owner{},take_seen{},take_consumed{};
-                static std::array<bool,2> finger_was_held{};static std::array<UINT64,2> finger_hold_start{};static std::array<std::string,2> held_shape_sig{};static std::array<double,2> ease_until{};
+                static std::array<bool,2> finger_was_held{};static std::array<UINT64,2> finger_hold_start{};static std::array<std::uint64_t,2> held_shape_sig{};static std::array<double,2> ease_until{};
                 const double fk_t=std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
                 constexpr unsigned finger_solve_budget=1; // fingers solved per hand per frame (finger_ik.hpp: the rest keep a memo or wait their turn); a free hand: finger_free_solve_budget
                 static std::array<std::array<std::uint64_t,6>,2> probe_serial{}; // the scope that last answered each free-hand probe slot (3-8), as read
@@ -5835,7 +5835,7 @@ void prepare_head_view(void* view) noexcept {
                             }
                             if(!holding && !native_hold) {if(const auto hover=hover_candidate_for_fingers(side,fk_now)) finger_hover_latch[side]={*hover,fk_now};} // a free hand's candidate
                             if(!holding && holder!=side && !((fk_weapon_bits>>side)&1u) && !(hands.native_hands>>side&1u) && count<d2vr::rig::max_contact_shapes) {shapes[count++]=d2vr::rig::palm_stop_slab(*geometry,palm);kinds[count-1]="palm";} // G8: an empty fist rests on the palm
-                            free_hand=finger_surface && !holding && !native_hold && !((fk_weapon_bits>>side)&1u) && !(hands.native_hands>>side&1u);
+                            free_hand=finger_surface && !legacy_finger_ease && !holding && !native_hold && !((fk_weapon_bits>>side)&1u) && !(hands.native_hands>>side&1u);
                             if(free_hand) {
                                 // G5 free-hand probes: each answer of a probe slot (3: the palm, 4-8: the fingers) goes into the sticky cache once; the solver gets
                                 // the cache's live shapes (a hit lives 150 ms after its slot last answered and through one miss: ruling H10).
@@ -5921,19 +5921,21 @@ void prepare_head_view(void* view) noexcept {
                             }
                             const auto wants=legacy_finger_ease?stack.touch:d2vr::rig::compose_finger_wants(stack);
                             // G4: the hold edge starts the 0.25 s grip pose blend from the drawn pose (so does the seam); the release edge stops it.
-                            if((grip_pose_blend_request[side].exchange(false) || (hold_edge && !legacy_finger_ease)) && finger_drawn_valid[side]) grip_pose_blend[side].start(finger_drawn_angles[side],fk_t);
+                            if(grip_pose_blend_request[side].exchange(false) || (hold_edge && !legacy_finger_ease)) grip_pose_blend[side].start(finger_drawn_valid[side]?finger_drawn_angles[side]:d2vr::rig::FingerAngles{},fk_t); // no drawn pose yet: blend from the open hand, never skip the blend
                             if(!held_hand && finger_was_held[side]) grip_pose_blend[side].stop();
                             const bool blending=grip_pose_blend[side].active(fk_t);
                             // The reach moves with the blend (1 -> held_curl), not a flip; the memo keys on it in 0.05 steps.
                             const float reach=!held_hand?1.f:blending?static_cast<float>(1.+(d2vr::rig::held_curl-1.)*grip_pose_blend[side].weight(fk_t)):d2vr::rig::held_curl;
                             // Eased opening for 0.3 s after the held shape's source changes (the hover shape -> the measured cylinder -> the fitted seat).
-                            {const std::string sig=held_hand && count && kinds[0]?std::string(kinds[0])+(held_grip?std::to_string(held_grip->shift)+','+std::to_string(held_grip->slide):std::string()):std::string();
+                            {std::uint64_t sig=0; // FNV-1a of the first shape's kind and the grip's shift/slide: no heap allocation per held frame
+                             if(held_hand && count && kinds[0]) {sig=1469598103934665603ULL;for(const char* c=kinds[0];*c;++c) sig=(sig^static_cast<unsigned char>(*c))*1099511628211ULL;
+                                 if(held_grip) for(const double v:{held_grip->shift,held_grip->slide}) {std::uint64_t bits=0;std::memcpy(&bits,&v,sizeof bits);sig=(sig^bits)*1099511628211ULL;}}
                              if(held_hand && sig!=held_shape_sig[side]) ease_until[side]=fk_t+.3;held_shape_sig[side]=sig;}
                             // Eased opening: a free hand on a surface (G5: tolerance 5 mm still or slow under 0.3 m/s, 15 mm sliding fast), a hold's shape change (G4: 5 mm).
                             const bool held_ease=!legacy_finger_ease && held_hand && fk_t<ease_until[side];
-                            const bool ease_opening=held_ease || free_hand;
+                            const bool ease_opening=(held_ease || free_hand) && !legacy_finger_ease;
                             const double open_lag=!ease_opening?0.:d2vr::rig::finger_open_lag(*geometry,free_hand && finger_ik[side].speed>=.3f?.015:.005);
-                            const unsigned budget=free_hand?finger_free_solve_budget:finger_solve_budget;
+                            const unsigned budget=free_hand?d2vr::rig::finger_free_budget(finger_ik[side].speed,finger_free_solve_budget):finger_solve_budget;
                             {contact=d2vr::rig::finger_contact(*geometry,palm,shapes.data(),count,fdt,finger_ik[side],legacy_finger_ease?(held_hand?d2vr::rig::held_curl:1.f):reach,budget,&wants,ease_opening,open_lag,free_hand);}
                             {unsigned blocked_bits=0,hyper_bits=0;for(unsigned f=0;f<5;++f) {blocked_bits|=contact.blocked[f]?1u<<f:0u;hyper_bits|=contact.hyperextended[f]?1u<<f:0u;finger_stuck[side][f]=contact.stuck_frames[f];}
                              finger_blocked_bits[side]=blocked_bits;finger_hyper_bits[side]=hyper_bits;}

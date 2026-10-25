@@ -1410,6 +1410,10 @@ int main() {
         for(unsigned f=1;f<5;++f) assert(r::shape_distance(slab,world_of(h,g.finger[f].pivot))>0);
         assert(with.resting==0 && without.resting==0); // the stop under the palm is no surface: an empty hand takes no resting curl from it
     }
+    {   // fast_hand_solve_cap: a hand at >= 0.3 m/s solves at most 3 fingers a frame; a slow hand still solves all 5
+        assert(r::finger_free_budget(.3f,5)==3 && r::finger_free_budget(1.2f,5)==3 && r::finger_free_budget(.29f,5)==5 && r::finger_free_budget(0.f,5)==5);
+        assert(r::finger_free_budget(1.f,1)==1); // never raises a smaller budget
+    }
     std::cout<<"finger_ik_check passed"<<std::endl;
     return 0;
 }
