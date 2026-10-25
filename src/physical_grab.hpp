@@ -93,7 +93,7 @@ public:
     // lag_release_m for lag_release_s releases; a forced release blocks a regrab for regrab_cooldown_s (a flapping grip).
     static constexpr double lag_release_m=.5,lag_release_s=.25,regrab_cooldown_s=.3,anchor_blend_s=.25;
     // Corpse slide and slip (fix round 1): anchor_slide_s to bring the grasp point to the palm; a lag over lag_release_m for lag_release_s re-seats the goal toward
-    // the body at slip_mps while the hand is within slip_hand_m of it; only a lag over lag_hard_release_m (or a hand beyond slip_hand_m) lets go.
+    // the body at slip_mps while the hand is within slip_hand_m of the grasped bone (plus the hold's offset on it, H21); only a lag over lag_hard_release_m (or a hand beyond slip_hand_m) lets go.
     static constexpr double anchor_slide_s=.25,slip_mps=.15,slip_hand_m=.45,lag_hard_release_m=.9;
     void set_legacy_lag_release(bool on) noexcept {legacy_lag_=on;}   // build/legacy-corpse-lag-release: no slide, the hard 0.5 m / 0.25 s drop
     bool pressed() const {return pressed_;}
@@ -229,7 +229,7 @@ public:
         if(in.corpse) {
             if(lag_timer_.update(lag>lag_release_m,dt)) {
                 // A blocked body (a floor, a wall under the goal) slips instead of dropping: re-seat the goal toward the body while the hand is still on it.
-                const bool slip=!legacy_lag_ && lag<=lag_hard_release_m && length(previous_.position-object.position)<=slip_hand_m;
+                const bool slip=!legacy_lag_ && lag<=lag_hard_release_m && length(previous_.position-object.position)<=slip_hand_m+length(contact_local_);   // H21: measured from the GRASPED bone (its origin, allowing for where on it the hand holds)
                 if(!slip) return finish(ReleaseReason::lag,true,false,lag);
                 const auto toward=anchor(object)-anchor(goal);const auto n=length(toward);
                 if(n>1e-9) relative_.position=relative_.position+grab_local(previous_,toward*(std::min(slip_mps*dt,n)/n));

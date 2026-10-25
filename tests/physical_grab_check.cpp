@@ -397,6 +397,13 @@ int main() {
                 assert(first_lag>.69 && last_lag<first_lag - .1);   // 2 s later: held, and the goal re-seated toward the body at <= 0.15 m/s
                 assert(first_lag-last_lag<=.15*2.0+1e-6);
             }
+            {   PhysicalGrab g;auto b=id;auto hnd=id;hnd.position.x=.3;assert(make(g,b,{.3,0,0},hnd));   // H21: held by a point 0.3 m out on the bone, the hand 0.55 m from the bone origin (lag 0.85 m) still slips
+                for(unsigned i=0;i<30;++i) g.corpse_motor(b,true,0,0,in(.01));
+                walk(g,hnd,-.55);
+                double first_lag=0,last_lag=0;
+                for(unsigned i=0;i<200;++i) {auto r=g.corpse_motor(b,true,0,0,in(.01));assert(r && !r->motor.release && g.held());if(!i) first_lag=r->lag_m;last_lag=r->lag_m;}
+                assert(first_lag>.8 && last_lag<first_lag-.1);
+            }
             {   PhysicalGrab g;auto b=id;auto hnd=id;hnd.position.x=.3;assert(make(g,b,{.3,0,0},hnd));   // a hand beyond 0.45 m of the body still drops at 0.25 s
                 for(unsigned i=0;i<30;++i) g.corpse_motor(b,true,0,0,in(.01));
                 walk(g,hnd,-.6);
