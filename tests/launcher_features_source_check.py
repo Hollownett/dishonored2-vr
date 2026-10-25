@@ -7,6 +7,7 @@ from pathlib import Path
 root = Path(__file__).resolve().parents[1]
 features = json.loads((root / "tools/default_features.json").read_text())["features"]
 source = (root / "src/dxgi_probe.cpp").read_text(encoding="utf-8")
+all_src = "".join(p.read_text(encoding="utf-8", errors="replace") for p in sorted((root / "src").glob("*.[ch]pp")))   # a few knobs are read in a header (build_dir/"name")
 files = [f["file"] for f in features]
 assert len(files) == len(set(files)), "duplicate feature file"
 ids = [f["id"] for f in features]
@@ -17,7 +18,7 @@ for f in features:
             assert re.fullmatch(r"[a-z0-9-]+", f[key]), f"{f.get('id')}: bad {key} {f[key]!r}"
     if f.get("requires_dll_knob"):
         continue
-    assert f'L"build"/L"{f["file"]}"' in source, f'{f["id"]}: knob {f["file"]} is not read in src/dxgi_probe.cpp'
+    assert f'L"build"/L"{f["file"]}"' in source or f'"{f["file"]}"' in all_src, f'{f["id"]}: knob {f["file"]} is not read in src/'
 csproj = (root / "launcher/DishonoredVRLauncher.csproj").read_text(encoding="utf-8")
 assert re.search(r'EmbeddedResource Include="[^"]*default_features\.json"[^>]*LogicalName="features\.json"', csproj), "launcher does not embed default_features.json"
 # Task 12: WinForms common dialogs need an STA thread; top-level statements run MTA and OpenFileDialog.ShowDialog threw ThreadStateException.
