@@ -81,6 +81,56 @@ int main() {
             CHECK(gap_run<=.02);CHECK(peak<=.13);CHECK(peak-lead<=.06);CHECK(flips==0);CHECK(std::fabs(last_err)<.01);
         }
     }
+    {   // v613 item 6, running_beat_no_swing: the render thread publishes the target at 90 Hz and the dispatcher drives at another rate (the game frame, 60..144 Hz,
+        // QPC dt). v612's interval-quantised target velocity swung the body by up to 14 cm at 6 m/s at a 91 Hz drive (a 1 Hz beat: hands that lag, catch up, lag again);
+        // the windowed gate with the target's publication age holds the error to a constant. Error measured against the continuous target V*t.
+        for(const bool legacy:{false,true}) for(const double hz:{60.,72.,85.,89.,91.,100.,120.,144.}) for(const double V:{1.4,3.,6.}) {
+            hand_servo_legacy_gate=legacy;
+            HandServoState st;HandServoConfig cfg;GrabTuning tun;WorldTrackedPose body=pose({}),target=pose({});Vec3 v{};
+            const double Tr=1./90,Td=1./hz;double t=0,next_r=Tr,next_d=Td,pub=0,mn=1e9,mx=-1e9;
+            while(t<6) {
+                if(next_r<=next_d) {t=next_r;target.position.x=V*t;pub=t;next_r+=Tr;}
+                else {
+                    t=next_d;next_d+=Td;
+                    const auto o=servo_step(st,target,body,v,{},0,Td,1,cfg,tun,false,kDefaultHeldLever,Vec3{V,0,0},t-pub);
+                    v=o.linear;body.position=body.position+v*std::min(Td,tun.dt_max);
+                    if(t>2) {const double e=V*t-body.position.x;mn=std::min(mn,e);mx=std::max(mx,e);}
+                }
+            }
+            hand_servo_legacy_gate=false;
+            if(!legacy) CHECK(mx-mn<=.01);                                  // constant lag: no oscillation
+            else if(hz==91.&&V==6.) CHECK(mx-mn>=.08);                      // the v612 gate: the swing this test pins
+        }
+    }
+    {   // stamp-less drive (the fallback on the servo's own clock) still beats v612's swing at the worst rates
+        for(const double hz:{85.,89.,91.,100.}) {
+            HandServoState st;HandServoConfig cfg;GrabTuning tun;WorldTrackedPose body=pose({}),target=pose({});Vec3 v{};
+            const double V=6,Tr=1./90,Td=1./hz;double t=0,next_r=Tr,next_d=Td,mn=1e9,mx=-1e9;
+            while(t<6) {
+                if(next_r<=next_d) {t=next_r;target.position.x=V*t;next_r+=Tr;}
+                else {t=next_d;next_d+=Td;const auto o=servo_step(st,target,body,v,{},0,Td,1,cfg,tun,false,kDefaultHeldLever,Vec3{V,0,0});
+                    v=o.linear;body.position=body.position+v*std::min(Td,tun.dt_max);if(t>2) {const double e=V*t-body.position.x;mn=std::min(mn,e);mx=std::max(mx,e);}}
+            }
+            CHECK(mx-mn<=.07);
+        }
+    }
+    {   // a stop at a 100 Hz drive is still a stop (two unchanged publications to read it, the body-ahead cap fades the feedforward within 2 cm of overshoot, so the net overshoot is ~6 cm at 6 m/s, as for synchronous ticks) and one dropped render frame at 6 m/s is not
+        for(const bool stop:{true,false}) {
+            HandServoState st;HandServoConfig cfg;GrabTuning tun;WorldTrackedPose body=pose({}),target=pose({});Vec3 v{};
+            const double V=6,Tr=1./90,Td=1./100;double t=0,next_r=Tr,next_d=Td,pub=0,stop_at=3,peak=-1e9,frame=0,worst_gap=0;
+            while(t<5) {
+                if(next_r<=next_d) {t=next_r;++frame;const bool drop=!stop && std::fmod(frame,45.)==0;if(!drop) {target.position.x=V*std::min(t,stop?stop_at:1e9);pub=t;}next_r+=Tr;}   /* published every frame, a stopped hand included */
+                else {t=next_d;next_d+=Td;
+                    const bool moving=!stop||t<=stop_at;
+                    const auto o=servo_step(st,target,body,v,{},0,Td,1,cfg,tun,false,kDefaultHeldLever,moving?Vec3{V,0,0}:Vec3{V,0,0}*(t<stop_at+.1?1:0),t-pub);
+                    v=o.linear;body.position=body.position+v*std::min(Td,tun.dt_max);
+                    if(stop&&t>stop_at) peak=std::max(peak,body.position.x-target.position.x);
+                    if(!stop&&t>2) worst_gap=std::max(worst_gap,std::fabs(V*t-body.position.x));
+                }
+            }
+            if(stop) {CHECK(peak<=.13);CHECK(peak-V*Td<=.065);}   /* the body leads by its last committed tick (V*Td) in this sim's ordering */ else CHECK(worst_gap<=.12);          // a dropped frame costs at most ~1 frame of travel (6.7 cm) plus the usual lag
+        }
+    }
     {   // zero_feedforward_identical: bit-identical to the call without the argument over a 500-step random sequence
         unsigned seed=12345;auto rnd=[&]{seed=seed*1664525u+1013904223u;return ((seed>>8)&0xffff)/65535.-.5;};
         HandServoState a,b;HandServoConfig cfg;GrabTuning tun;

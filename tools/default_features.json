@@ -306,6 +306,14 @@
    "default": true
   },
   {
+   "id": "corpse-carry",
+   "file": "legacy-corpse-carry",
+   "kind": "disable",
+   "label": "Torso hold carries a body",
+   "help": "Holding a body by the torso for about half a second puts it on your shoulder (the game's carry); letting go drops it. Limbs, head and a quick grab still drag. Turn off to always drag.",
+   "default": true
+  },
+  {
    "id": "finger-ease",
    "file": "legacy-finger-ease",
    "kind": "disable",

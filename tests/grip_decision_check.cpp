@@ -90,5 +90,27 @@ int main() {
         in=input(std::nullopt,on_palm);in.fast_native=true;assert(decide_grip_alone(in,t,hover)==GripAloneChoice::use);
         in=input(std::nullopt,std::nullopt,1000);assert(decide_grip_alone(in,t,hover)==GripAloneChoice::pending);   // without it the H1 buffer still runs
     }
+    {   // v613 item 4: the torso hold of 0.5 s hands off to the native carry; limbs, head, collar (neck), a quick hold and the legacy knob never do
+        CarryHandoffInput in;in.corpse_hold=true;in.grip_held=true;in.native_is_corpse=true;in.held_ms=corpse_carry_hold_ms;
+        for(int bone=0;bone<17;++bone) {in.bone=bone;assert(carry_handoff(in)==(bone<=2));}   // pelvis, spine, chest only
+        in.bone=1;in.held_ms=corpse_carry_hold_ms-1;assert(!carry_handoff(in));                   // a quick torso grab stays the drag
+        in.held_ms=corpse_carry_hold_ms;in.grip_held=false;assert(!carry_handoff(in));
+        in.grip_held=true;in.corpse_hold=false;assert(!carry_handoff(in));                         // a prop or nothing
+        in.corpse_hold=true;in.legacy=true;assert(!carry_handoff(in));                             // build/legacy-corpse-carry
+        in.legacy=false;in.bone=-1;assert(!carry_handoff(in));
+        in.bone=1;assert(carry_handoff(in));in.native_is_corpse=false;assert(!carry_handoff(in));   // the Use target must be this body
+        in.native_is_corpse=true;in.occupied=true;assert(!carry_handoff(in));                      // never while carrying or holding something
+    }
+    {   // Ruling V1: a corpse as the native target never gets the carry Use from a grip alone: the physical grab at the fist gate (0.45 m), else nothing
+        const auto body=box(0x9300,PalmKind::usable,{.07,0,.015},.3,t);
+        auto bone=physical(box(1,PalmKind::bone,{.07,0,.015},.05,t));bone.entity=0x9300;
+        auto in=input(body,bone);in.native_corpse=true;assert(decide_grip_alone(in,t,hover)==GripAloneChoice::grab);
+        bone.distance=.3;in=input(body,bone);in.native_corpse=true;assert(decide_grip_alone(in,t,hover)==GripAloneChoice::grab);     // beyond 0.12 m, inside the fist gate
+        bone.distance=.5;in=input(body,bone,1000);in.native_corpse=true;assert(decide_grip_alone(in,t,hover)==GripAloneChoice::pending);   // not in reach yet: the buffer runs
+        in.now_ms=1000+static_cast<std::uint64_t>(t.grab_buffer_ms)+1;assert(decide_grip_alone(in,t,hover)==GripAloneChoice::none);     // then nothing, never Use
+        in=input(body,std::nullopt,1000);in.native_corpse=true;in.now_ms=1200;assert(decide_grip_alone(in,t,hover)==GripAloneChoice::none);
+        in=input(body,std::nullopt,1000);in.native_corpse=false;assert(decide_grip_alone(in,t,hover)==GripAloneChoice::use);           // doors/levers/loot unchanged
+        in=input(body,bone);in.native_corpse=true;in.occupied=true;assert(decide_grip_alone(in,t,hover)==GripAloneChoice::use);         // an occupied hand keeps today's path
+    }
     std::cout<<"PASS: grip-alone one-list decision (corpse self-carry yields the grab),  (loot/door Use, prop on palm grabs, 0.12 m gate, block stays Use, choke/takedown/occupied, 100 ms fresh wait, H1 buffer)\n";
 }

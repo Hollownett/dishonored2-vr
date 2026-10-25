@@ -1297,9 +1297,11 @@ static void start_running_knobs(const fs::path& root,const fs::path& output) {
     const bool legacy_carry=fs::exists(root/L"build"/L"legacy-arm-root-carry");
     no_hand_body_feedforward=fs::exists(root/L"build"/L"no-hand-body-feedforward");no_moving_controller_visual=fs::exists(root/L"build"/L"no-moving-controller-visual");
     full_body.legacy_root_carry(legacy_carry);player_velocity={};player_speed=0;
+    const bool legacy_run_gate=fs::exists(root/L"build"/L"legacy-run-gate");d2vr::hand_servo_legacy_gate.store(legacy_run_gate);   // v613 item 6
     std::ofstream note(output/L"running-knobs.txt",std::ios::trunc);
     note<<"knob build/legacy-arm-root-carry "<<(legacy_carry?"present: arms carry from the last arm-upload root\n":"absent: arms carry from the anchor's root\n");
     note<<"knob build/no-hand-body-feedforward "<<(no_hand_body_feedforward?"present: the hand body's servo gets no player velocity\n":"absent: the hand body's servo feeds forward the player velocity\n");
+    note<<"knob build/legacy-run-gate "<<(legacy_run_gate?"present: the hand body's feedforward gate measures the target over tick-counted intervals (v612)\n":"absent: the gate measures the target on the publication timeline\n");
     note<<"knob build/no-moving-controller-visual "<<(no_moving_controller_visual?"present: the agreeing body may be drawn in free air while moving\n":"absent: while moving, free air draws the clamp output\n");
 }
 // Last tracked palette per side (model space): a brief tracked-pose gap reuses
@@ -2894,6 +2896,9 @@ static d2vr::SwordGrip sword_grip;static bool sword_owns{};static std::array<std
 // right hand takes its remembered sword grip (body::Inputs::weapon_incoming), so the sword appears in a closed hand on its first frame.
 static std::atomic<UINT64> sword_incoming_until{};static constexpr UINT64 sword_incoming_ms=500;
 // Full-grip gun at the left hip (vr_controls.hpp GunGrip): actions (draw, holster); the hip holds a gun once one was drawn.
+static std::ofstream carry_handoff_csv;static unsigned carry_handoff_rows{};
+static std::array<bool,2> grip_corpse_gate{};static std::array<std::uint64_t,2> grip_corpse_entity{};   // V1: the corpse the press began on (the native query lock is released while the hand holds, so the handoff cannot re-read the target)   // Ruling V1: this hand's grip-alone press is on a corpse: the physical grab uses the fist gate (0.45 m)
+static bool legacy_corpse_carry=false;static UINT64 corpse_drop_press_until{};   // v613 item 4: build/legacy-corpse-carry; the Use pulse that drops a shoulder-carried body
 static std::array<d2vr::GripIntent,2> grip_intent;static std::array<d2vr::GripIntent::Out,2> grip_intent_out{}; // input thread
 static std::atomic<unsigned> fist_hands{},grab_hands{};static std::atomic<int> trace_lock_side{-1};static std::atomic<UINT64> fist_takes{}; // fist frames that are the game's pickup // the hand a grip Use locked (controller trace)
 static std::array<std::atomic<unsigned>,10> use_diag{}; // grip Use: use_started L/R, fist_started L/R, locked L/R, ready while locked, target while locked, intent not free L/R // bit per hand: a full fist (grip + trigger) owns the physical grab this press
@@ -5199,8 +5204,12 @@ void prepare_head_view(void* view) noexcept {
                     note_targeted_prop(static_cast<unsigned>(side),native_interaction_aim.target_owner(side,now));
                     if(native_interaction_aim.has_target(side,now))
                         if(const auto point=native_interaction_aim.target_point(side,now)) target=d2vr::world_to_xr_controller(*point,head_origin,frame,1.0,hand_centre,head_origin.position);
-                    if(!target && physical_grab_requested)
-                        if(const auto point=native_grab.focus_point(side,now,game_xr->controller_input.menu || game_xr->controller_input.y))
+                    // Ruling V1: the palm pick must be scored while the native target is a corpse too (its carry is not offered to a grip alone; the grab decision needs the bone pick)
+                    bool corpse_target=false;
+                    if(target && physical_grab_requested && !legacy_corpse_carry)
+                        if(const auto nt=native_interaction_aim.target_bounds(side,now); nt && nt->kind!=d2vr::PalmKind::loot) corpse_target=native_grab.is_corpse_entity(nt->id);
+                    if((!target || corpse_target) && physical_grab_requested)
+                        if(const auto point=native_grab.focus_point(side,now,game_xr->controller_input.menu || game_xr->controller_input.y); point && !target)
                             target=d2vr::world_to_xr_controller(*point,head_origin,frame,1.0,hand_centre,head_origin.position);
                     game_xr->interaction_target(side,target);
                 }
@@ -8877,6 +8886,7 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                         // loot and usables still win the game's Use. One list per hand: the native Use target and the physical pick, scored with
                                         // the same palm probe (decide_grip_alone). Chokes, takedowns and an occupied hand keep today's path.
                                         const bool one_list=physical_grab_requested && !no_grip_alone_grab;
+                                        if(!one_list) grip_corpse_gate={};
                                         std::array<d2vr::GripAloneChoice,2> grip_choice{d2vr::GripAloneChoice::use,d2vr::GripAloneChoice::use};
                                         if(one_list) {
                                             unsigned carry_bits{},holding_side{};bool holding_native{};
@@ -8888,6 +8898,8 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                                 in.probe=native_grab.published_palm(h);
                                                 in.native_fresh=!controller_aim_requested || native_interaction_aim.query_ready(static_cast<int>(h),now_gi); // ruling H2: target OR none
                                                 in.since_ms=grip_intent[h].decision_since(now_gi);in.now_ms=now_gi;
+                                                in.native_corpse=!legacy_corpse_carry && in.native && in.native->kind!=d2vr::PalmKind::loot && native_grab.is_corpse_entity(in.native->id);   // Ruling V1
+                                                if(grip_intent[h].kind()==d2vr::GripIntent::Kind::none || grip_intent[h].kind()==d2vr::GripIntent::Kind::deciding) {grip_corpse_gate[h]=in.native_corpse;grip_corpse_entity[h]=in.native_corpse?in.native->id:0;}   // fixed for the press once decided
                                                 in.choke_owns=h==1 && (choke_offer.has_value() || control_active_choke!=0);
                                                 in.takedown_offered=control_takedown.any();
                                                 // I2: the left hand at the hip (the gun draw) or with a gun out is a fast native action: Use at the edge, never the 150 ms wait
@@ -8900,12 +8912,26 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                             }
                                         }
                                         const auto pending_max=static_cast<std::uint64_t>(grip_tuning.grab_buffer_ms);   // ruling H1: the buffer may hold the decision to 150 ms
-                                        grip_intent_out={grip_intent[0].update(rc.left_grip,rc.left_trigger,now_gi,!gun_owns && !left_consumed,100,idle(0),400,40,grip_choice[0],one_list,pending_max),
+                                        // v613 item 4: a physical torso hold kept 0.5 s hands off to the native carry (grip_decision.hpp carry_handoff); the hand's carry bit drops it on release
+                                        std::array<bool,2> carry_handoff_now{};bool body_carry_active=false;
+                                        {bool occupied_now=false;{std::lock_guard<std::mutex> hand_lock(hand_state_mutex);
+                                            if(hand_state_tick && now_gi-hand_state_tick<=300) {body_carry_active=hand_carrying_bits!=0 && !hand_holding_object;occupied_now=hand_carrying_bits!=0 || hand_holding_object;}}
+                                         for(unsigned h=0;h<2;++h) {
+                                             const auto hold=physical_grab_requested?native_grab.corpse_hold(h,now_gi):std::nullopt;
+                                             d2vr::CarryHandoffInput ci;ci.corpse_hold=hold.has_value();ci.legacy=legacy_corpse_carry;ci.grip_held=(h?rc.right_grip:rc.left_grip)>=.35f;ci.occupied=occupied_now;
+                                             if(hold) {ci.bone=hold->bone;ci.held_ms=hold->held_ms;
+                                                 const auto target=controller_aim_requested?native_interaction_aim.target_bounds(static_cast<int>(h),now_gi):std::nullopt;
+                                                 ci.native_is_corpse=hold->entity && ((target && target->id==hold->entity) || (grip_corpse_gate[h] && grip_corpse_entity[h]==hold->entity));}   // the game's Use is on THIS body (its own carry)
+                                             carry_handoff_now[h]=d2vr::carry_handoff(ci);
+                                             if(hold && carry_handoff_csv.is_open() && carry_handoff_rows<4000) {++carry_handoff_rows;carry_handoff_csv<<now_gi<<','<<h<<','<<ci.bone<<','<<ci.held_ms<<','<<(ci.grip_held?1:0)<<','<<(ci.native_is_corpse?1:0)<<','<<(ci.occupied?1:0)<<','<<(carry_handoff_now[h]?1:0)<<','<<static_cast<int>(grip_intent[h].kind())<<','<<(body_carry_active?1:0)<<'\n';}
+                                         }}
+                                        grip_intent_out={grip_intent[0].update(rc.left_grip,rc.left_trigger,now_gi,!gun_owns && !left_consumed,100,idle(0),400,40,grip_choice[0],one_list,pending_max,carry_handoff_now[0],body_carry_active),
                                                          grip_intent[1].update(rc.right_grip,rc.right_trigger,now_gi,
                                                              !sword_owns || choke_offer.has_value() || control_active_choke!=0,
-                                                             100,idle(1) && !choke_offer && !control_active_choke,400,40,grip_choice[1],one_list,pending_max)};
+                                                             100,idle(1) && !choke_offer && !control_active_choke,400,40,grip_choice[1],one_list,pending_max,carry_handoff_now[1],body_carry_active)};
                                         fist_hands=(grip_intent_out[0].fist?1u:0u)|(grip_intent_out[1].fist?2u:0u);
                                         grab_hands=(grip_intent_out[0].grab?1u:0u)|(grip_intent_out[1].grab?2u:0u);
+                                        for(unsigned h=0;h<2;++h) if(grip_intent_out[h].drop_started) corpse_drop_press_until=now_gi+160;
                                         for(unsigned h=0;h<2;++h) {if(grip_intent_out[h].use_started) ++use_diag[h];if(grip_intent_out[h].fist_started) ++use_diag[2+h];
                                             if(grip_intent[h].kind()==d2vr::GripIntent::Kind::drain && (h?rc.right_grip:rc.left_grip)>.55f) ++use_diag[8+h];}
                                     }
@@ -9267,16 +9293,16 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                     {const std::uint32_t takedown_npc=control_takedown.any()?control_takedown.spawn:0u;
                                      native_grab.reserve_npc(1,choke_offer?choke_offer->spawn:control_active_choke?control_active_choke:takedown_npc,GetTickCount64());
                                      native_grab.reserve_npc(0,takedown_npc,GetTickCount64());}
-                                    const bool right_physical=grip_intent_out[1].fist || grip_intent_out[1].grab || native_grab.holding(1);
+                                    const bool right_physical=(grip_intent_out[1].fist || grip_intent_out[1].grab || native_grab.holding(1)) && grip_intent[1].kind()!=d2vr::GripIntent::Kind::carry;   // v613 item 4: a handed-off carry lets the physical hold go (grip 0 releases the lane)
                                     bool right_carrying{},right_sword_drawn{};   // v609 G3: what the right hand is holding or has drawn, read under one lock
                                     {std::lock_guard<std::mutex> hand_lock(hand_state_mutex);right_carrying=hand_carrying_bits!=0 || hand_holding_object;right_sword_drawn=(hand_weapon_bits&2u)!=0;}
                                     const bool right_fist_rb=d2vr::fist_may_press_native_rb(native_grab.holding(1),right_carrying,sword_grip.held(),right_sword_drawn);
                                     const float right_native=native_grab.filter_native_grip(1,right_physical?physical_right_grip:0.f,game_xr->pose_epoch(),GetTickCount64(),logic==2,grab_focus,grab_use || sword_owns || choke_route.consume_use || (grip_use[1] && right_interaction.interact),
-                                        grip_use[1] && interaction.consume_trigger[1] && !right_interaction.interact,grip_intent_out[1].grab && !grip_intent_out[1].fist,
+                                        grip_use[1] && interaction.consume_trigger[1] && !right_interaction.interact,grip_intent_out[1].grab && !grip_intent_out[1].fist && !grip_corpse_gate[1],
                                         sword_grip.held() || right_sword_drawn);   // I2: the sword hand decides at the edge (the RB block is not delayed by the fist buffer)
                                     if(right_physical) input.right_grip=right_fist_rb?right_native:0.f;
-                                    (void)native_grab.filter_native_grip(0,grip_intent_out[0].fist || grip_intent_out[0].grab || native_grab.holding(0)?physical_left_grip:0.f,game_xr->pose_epoch(),GetTickCount64(),logic==2,grab_focus,grab_use || gun_owns || (grip_use[0] && left_interaction.interact),
-                                        grip_use[0] && interaction.consume_trigger[0] && !left_interaction.interact,grip_intent_out[0].grab && !grip_intent_out[0].fist);
+                                    (void)native_grab.filter_native_grip(0,(grip_intent_out[0].fist || grip_intent_out[0].grab || native_grab.holding(0)) && grip_intent[0].kind()!=d2vr::GripIntent::Kind::carry?physical_left_grip:0.f,game_xr->pose_epoch(),GetTickCount64(),logic==2,grab_focus,grab_use || gun_owns || (grip_use[0] && left_interaction.interact),
+                                        grip_use[0] && interaction.consume_trigger[0] && !left_interaction.interact,grip_intent_out[0].grab && !grip_intent_out[0].fist && !grip_corpse_gate[0]);
                                 }
                                 // Consume native button output only. The physics lane sees
                                 // the observed grip, including while native Use is pending.
@@ -9544,6 +9570,7 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                         }
                                         if(look_use_at && now_l>=look_use_at && now_l<gaze_ray_until.load() && native_interaction_aim.has_target(look_side,now_l)) {
                                             look_press_until=now_l+160;look_use_at=0;++look_hits;}
+                                        if(now_l<corpse_drop_press_until) input.x=true;   // v613 item 4: release of a shoulder carry = the native Use, which drops the body
                                         if(now_l<look_press_until && !native_interaction_aim.talk_target(0,now_l) && !native_interaction_aim.talk_target(1,now_l)) input.x=true;
                                     }
                                     if(grab_guard[0]) input.left_trigger=0;
@@ -10082,6 +10109,8 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
             std::lock_guard<std::mutex> origin_lock(arm_origin_mutex);
             arm_origin_csv.open(output/L"arm-origin-trace.csv",std::ios::trunc);arm_origin_csv << std::setprecision(10) << "kind,present,side,x,y,z\n";
         }
+        if(fs::exists(root/L"build"/L"carry-handoff-trace")) {carry_handoff_csv.open(output/L"carry-handoff.csv",std::ios::trunc);carry_handoff_rows=0;
+            carry_handoff_csv<<"tick_ms,hand,bone,held_ms,grip,native_is_corpse,occupied,handoff,kind,carry_active\n";}   // v613 item 4 diagnostic
         {   // G1a: build/locomotion-trace -> artifacts/locomotion-hands.csv, one row per displayed frame
             std::lock_guard<std::mutex> trace_lock(locomotion_mutex);locomotion_csv.close();locomotion_rows=0;locomotion_roots.clear();
             if(fs::exists(root/L"build"/L"locomotion-trace")) {
@@ -10454,6 +10483,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
         native_interaction_aim.palm_select(d2vr::load_grab_tuning(root/L"build"/L"grab-tuning.cfg").value,fs::exists(root/L"build"/L"legacy-palm-select")); // G1: per-kind priority; the v610 beam knob
         grip_tuning=d2vr::load_grab_tuning(root/L"build"/L"grab-tuning.cfg").value;
         no_grip_alone_grab=fs::exists(root/L"build"/L"no-grip-alone-grab");
+        legacy_corpse_carry=fs::exists(root/L"build"/L"legacy-corpse-carry");   // v613 item 4: present restores v612 (a torso hold never hands off to the shoulder carry)
         native_grab.living_pull(d2vr::NativeWeaponHands::living_pull_enabled);   // G6: the hold pulls him only when the Task 13 verdict allows it
         if(native_interaction_requested) native_interaction_aim.install(image_base,&read_self,&game_logic_mask,controller_aim_requested,output/L"native-interaction-rays.csv",native_camera_trace_requested,native_camera_trace_requested);
         if(native_interaction_requested && loot_reach_trace_requested && !native_interaction_aim.loot_reach_trace(output/L"native-loot-reach.csv"))

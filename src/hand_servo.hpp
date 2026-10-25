@@ -11,12 +11,20 @@
 // Snap timing is tick quantised: the snap lands within one tick of snap_seconds.
 #include "grab_force_cap.hpp"
 #include <algorithm>
+#include <array>
+#include <atomic>
 #include <cmath>
+#include <limits>
 
 namespace d2vr {
 constexpr double kDefaultHeldLever=.3;
 struct HandServoConfig {double gain=18,max_speed=10,max_spin=20,brake_accel=40,jerk_tau=.02,snap_gap=.35,snap_seconds=.25,hand_radius=.08,max_gap=50,max_body_speed=100,snap_closing_mps=.5,tf_min=.05;};
-struct HandServoState {Vec3 filtered_accel{};double gap_time{};bool has{};Vec3 prev_ff{},tgt_prev{},tgt_vel{};double tgt_acc{},tgt_dt{};unsigned tgt_still{};bool tgt_has{},tgt_vel_ok{};};   // prev_ff/tgt_*: Fix B's stop handling
+// v613 item 6: the target's velocity for the feedforward gate is measured over a time window (win_*: the instants the target changed, on the servo's own
+// clock) instead of over the tick-quantised interval between two changes, which aliased with the render/dispatch beat (up to 14 cm of swing at 6 m/s).
+struct HandServoState {Vec3 filtered_accel{};double gap_time{};bool has{};Vec3 prev_ff{},tgt_prev{},tgt_vel{};double tgt_acc{},tgt_dt{};unsigned tgt_still{};bool tgt_has{},tgt_vel_ok{};   // prev_ff/tgt_*: Fix B's stop handling
+                       std::array<Vec3,12> win_p{};std::array<double,12> win_t{};unsigned win_n{};double clock{},latest{};};
+// build/legacy-run-gate (read once at install): the v612 interval-based target velocity and its proportional gate.
+inline std::atomic<bool> hand_servo_legacy_gate{false};
 struct HandServoOutput {Vec3 linear{},angular{};bool capped{};bool snap{};double gap{};bool valid{};};
 
 namespace hand_servo_detail {
@@ -57,7 +65,7 @@ inline Vec3 limited(Vec3 v,double m) {double n=length(v);return n>m?v*(m/n):v;}
 }
 
 inline HandServoOutput servo_step(HandServoState& st,const WorldTrackedPose& target,const WorldTrackedPose& body,Vec3 body_velocity,Vec3 body_spin,
-    double held_kg,double dt,double time_factor,const HandServoConfig& cfg,const GrabTuning& tuning,bool target_blocked,double held_lever=kDefaultHeldLever,Vec3 feedforward={}) {
+    double held_kg,double dt,double time_factor,const HandServoConfig& cfg,const GrabTuning& tuning,bool target_blocked,double held_lever=kDefaultHeldLever,Vec3 feedforward={},double target_age=std::numeric_limits<double>::quiet_NaN()) {
     using namespace hand_servo_detail;
     HandServoOutput out;
     Vec3 error=target.position-body.position;
@@ -82,17 +90,69 @@ inline HandServoOutput servo_step(HandServoState& st,const WorldTrackedPose& tar
     // feedforward falls, that same velocity is dropped from the body at once, symmetric to adding it (the reference is the larger of the old and new).
     // No pose is smoothed: the target and the written pose are untouched.
     if(!finite(feedforward)||length(feedforward)>cfg.max_body_speed) feedforward={};
-    if(!st.tgt_has) {st.tgt_prev=target.position;st.tgt_has=true;st.tgt_acc=0;st.tgt_vel={};st.tgt_vel_ok=false;st.tgt_dt=0;st.tgt_still=0;}
-    else {
-        st.tgt_acc+=dt;   // the dispatcher ticks faster than the target updates: the velocity is over the interval between target changes
-        const Vec3 d=target.position-st.tgt_prev;
-        if(d.x!=0||d.y!=0||d.z!=0) {st.tgt_vel=d*(1/st.tgt_acc);st.tgt_prev=target.position;st.tgt_dt=std::max(std::min(st.tgt_acc,.05),st.tgt_dt*.9);   // the longest recent update interval (decaying): a jittery frame is not a stop
-            st.tgt_acc=0;st.tgt_still=0;st.tgt_vel_ok=true;}
-        else if(++st.tgt_still>=2&&st.tgt_acc>=1.5*st.tgt_dt) {st.tgt_vel={};st.tgt_vel_ok=true;}   // 2+ unchanged ticks and 1.5 intervals: the target stopped (one repeated frame or a tracking hitch is not a stop)
+    const bool legacy_gate=hand_servo_legacy_gate.load(std::memory_order_relaxed);
+    constexpr double win_s=.05,min_win_s=.03,gate_knee=.6;
+    bool stopped=false;
+    // v612 (legacy_gate): the target's velocity over the interval between two changes, counted in dispatcher ticks (dt accumulates per tick).
+    if(legacy_gate) {
+        if(!st.tgt_has) {st.tgt_prev=target.position;st.tgt_has=true;st.tgt_acc=0;st.tgt_vel={};st.tgt_vel_ok=false;st.tgt_dt=0;st.tgt_still=0;}
+        else {
+            st.tgt_acc+=dt;   // the dispatcher ticks faster than the target updates: the velocity is over the interval between target changes
+            const Vec3 d=target.position-st.tgt_prev;
+            if(d.x!=0||d.y!=0||d.z!=0) {st.tgt_vel=d*(1/st.tgt_acc);st.tgt_prev=target.position;st.tgt_dt=std::max(std::min(st.tgt_acc,.05),st.tgt_dt*.9);   // the longest recent update interval (decaying): a jittery frame is not a stop
+                st.tgt_acc=0;st.tgt_still=0;st.tgt_vel_ok=true;}
+            else if(++st.tgt_still>=2&&st.tgt_acc>=1.5*st.tgt_dt) {st.tgt_vel={};st.tgt_vel_ok=true;}   // 2+ unchanged ticks and 1.5 intervals: the target stopped (one repeated frame or a tracking hitch is not a stop)
+        }
+    } else {
+        // v613 item 6: the same questions on the publication timeline. A sample is (publication time, pose) at each change; the publication time is the
+        // render thread's QPC stamp when the caller has one (target_age), else this tick's clock. So a target the dispatcher saw one tick late no longer
+        // reads as slower (the quantisation behind v612's swing), and the velocity is the net displacement over >= 50 ms of changes.
+        st.clock+=dt;
+        const double stamp=st.clock-(std::isfinite(target_age)?std::clamp(target_age,0.,.05):0.);
+        if(!st.tgt_has) {st.tgt_has=true;st.win_p[0]=target.position;st.win_t[0]=stamp;st.win_n=1;st.tgt_vel={};st.tgt_vel_ok=false;st.tgt_dt=0;st.tgt_still=0;st.latest=stamp;}
+        else {
+            const Vec3 d=target.position-st.win_p[st.win_n-1];
+            if(d.x!=0||d.y!=0||d.z!=0) {
+                const double interval=std::max(0.,stamp-st.win_t[st.win_n-1]);
+                st.tgt_dt=std::max(std::min(interval,.05),st.tgt_dt*.9);st.tgt_still=0;
+                if(st.win_n==st.win_p.size()) {for(unsigned i=1;i<st.win_n;++i) {st.win_p[i-1]=st.win_p[i];st.win_t[i-1]=st.win_t[i];}--st.win_n;}
+                st.win_p[st.win_n]=target.position;st.win_t[st.win_n]=stamp;++st.win_n;
+            } else ++st.tgt_still;
+            st.latest=std::max(st.latest,stamp);
+            const double last_t=st.win_t[st.win_n-1];
+            unsigned start=0;   // the newest change at or before the window's start (measured back from the last change), else the oldest kept
+            for(unsigned i=0;i<st.win_n;++i) if(last_t-st.win_t[i]>=win_s) start=i;
+            const double span=last_t-st.win_t[start];
+            if(span>=min_win_s) {st.tgt_vel=(st.win_p[st.win_n-1]-st.win_p[start])*(1/span);st.tgt_vel_ok=true;}
+            else {st.tgt_vel={};st.tgt_vel_ok=false;}
+            // a stop: the target unchanged for 1.5 of its longest recent change interval on the publication timeline (and two unchanged looks)
+            stopped=st.tgt_still>=2 && st.latest-last_t>=1.5*st.tgt_dt && st.tgt_dt>0;
+        }
     }
     if(feedforward.x!=0||feedforward.y!=0||feedforward.z!=0) {
         const double f2=dot(feedforward,feedforward);
-        feedforward=st.tgt_vel_ok?feedforward*std::clamp(dot(st.tgt_vel,feedforward)/f2,0.,1.):Vec3{};
+        if(!st.tgt_vel_ok || stopped) feedforward={};
+        else {
+            const double r=dot(st.tgt_vel,feedforward)/f2;
+            // legacy: the proportional factor everywhere. Now: full feedforward while the target keeps up with it (the window's quantisation noise lives above
+            // the knee), proportional below it (a stop or a hand swung against the run).
+            feedforward=legacy_gate?feedforward*std::clamp(r,0.,1.):(r>=gate_knee?feedforward:feedforward*std::clamp(r/gate_knee,0.,1.));
+        }
+    }
+    // v613 item 6: the target the servo sees is the controller as of the last render frame, up to one frame old on the servo's clock; the part of it that
+    // rides on the player has moved on by feedforward*age since (not smoothing: the servo's aim only, the target and the written pose are untouched).
+    // Without it the error carried a sawtooth of V*frame (6.7 cm at 6 m/s) that the error law chased at the render/dispatch beat.
+    if(!legacy_gate && st.win_n>0 && std::isfinite(target_age) && (feedforward.x!=0||feedforward.y!=0||feedforward.z!=0)) {
+        // target_age: the age from the render thread's publication stamp (QPC); without a stamp there is no lead
+        const double age=std::clamp(target_age,0.,.03);
+        error=error+feedforward*age;
+    }
+    // v613 item 6 (review): a body that is already AHEAD of the aim along the run (steady running leaves it behind, never ahead) means the target stopped or
+    // slowed before the stop test could read it (two unchanged publications): the feedforward fades out over the next 2 cm of overshoot, so a sprint stop
+    // overshoots by a few cm instead of travelling the whole detection latency.
+    if(!legacy_gate && std::isfinite(target_age) && (feedforward.x!=0||feedforward.y!=0||feedforward.z!=0)) {
+        const double fl=length(feedforward),ahead=-dot(error,feedforward)/fl;
+        if(ahead>.005) feedforward=feedforward*std::clamp(1-(ahead-.005)/.02,0.,1.);
     }
     const Vec3 ff_ref=length(st.prev_ff)>length(feedforward)?st.prev_ff:feedforward;
     st.prev_ff=feedforward;
