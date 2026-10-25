@@ -1864,6 +1864,28 @@ public:
             return t;
         } catch(...) {return {};}
     }
+    // Merge seam G<->F (plan Task 12 probe hits): the entities this hand's finger/palm probes hit join its discovery hints (entity id >> 16, same
+    // filter as the stage-0 owners, distinct, at most 8). Stale hints are dropped first; the hint clock is refreshed only when this call started it.
+    void add_probe_hints(int side,const std::uintptr_t* entities,unsigned count,std::uint64_t now) {
+        if(side<0 || side>1 || !entities || !count) return;
+        const auto at=static_cast<unsigned>(side);
+        std::array<unsigned,8> add{};unsigned n=0;
+        for(unsigned i=0;i<count && n<add.size();++i) {
+            if(!entities[i]) continue;
+            const auto id=rig::value<std::uint32_t>(read_,entities[i]+0xa8);
+            if(!id || *id==0x3fff0010u || !(*id>>16) || (*id>>16)>=0x3fff) continue;
+            const unsigned index=*id>>16;
+            if(std::find(add.begin(),add.begin()+n,index)==add.begin()+n) add[n++]=index;
+        }
+        if(!n) return;
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto& hint=hint_index_[at];
+        const bool fresh=hint_tick_[at] && now>=hint_tick_[at] && now-hint_tick_[at]<=250;
+        if(!fresh) {hint={};hint_tick_[at]=now;}
+        unsigned used=0;while(used<hint.size() && hint[used]) ++used;
+        for(unsigned i=0;i<n && used<hint.size();++i)
+            if(std::find(hint.begin(),hint.begin()+used,add[i])==hint.begin()+used) hint[used++]=add[i];
+    }
     // G3 (plan Task 8): this hand's stage-0 Use hit owners as registry indices (at most 8, the last ranked cycle, at most 250 ms old; zeros otherwise).
     std::array<unsigned,8> hint_indices(int side,std::uint64_t now) {
         if(side<0 || side>1) return {};

@@ -5918,6 +5918,12 @@ void prepare_head_view(void* view) noexcept {
                              d2vr::NativeInteractionAim::post_weapon_segment(side,4+f,sweep.from,sweep.to,.012);++finger_probe_posts;}
                             }
                         }
+                        {   // Merge seam G<->F: what this hand's finger/palm probes hit feeds the physical grab's discovery hints (Track G Task 8).
+                            std::array<std::uintptr_t,d2vr::NativeInteractionAim::probe_slots> hit_entities{};unsigned hit_count=0;
+                            for(unsigned slot=3;slot<d2vr::NativeInteractionAim::probe_slots;++slot)
+                                if(const auto hit=d2vr::NativeInteractionAim::weapon_hit(side,slot,fk_now); hit && hit->entity) hit_entities[hit_count++]=hit->entity;
+                            if(hit_count) native_interaction_aim.add_probe_hints(static_cast<int>(side),hit_entities.data(),hit_count,GetTickCount64());
+                        }
                         fk_shapes+=count;finger_route_hold[side].store(tracked && holding);
                         auto contact=d2vr::rig::free_curls();std::array<float,5> touch_wants{};bool touch_curl=false;
                         if(tracked) {
@@ -10354,6 +10360,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
             d2vr::NativeWeaponHands::wake_diag=&corpse_diagnostics;d2vr::NativeWeaponHands::wake_lockout=&native_grab.lockout();
         }
         native_interaction_aim.attach_physical_grab(physical_grab_requested?&native_grab:nullptr);
+        d2vr::grip_pose_blend_hook.store(+[](unsigned side,double,std::uint64_t) {grip_pose_blend_start(side);},std::memory_order_release); // merge seam G->F: a living hold starts the finger blend
         native_interaction_aim.palm_select(d2vr::load_grab_tuning(root/L"build"/L"grab-tuning.cfg").value,fs::exists(root/L"build"/L"legacy-palm-select")); // G1: per-kind priority; the v610 beam knob
         grip_tuning=d2vr::load_grab_tuning(root/L"build"/L"grab-tuning.cfg").value;
         no_grip_alone_grab=fs::exists(root/L"build"/L"no-grip-alone-grab");
