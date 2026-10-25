@@ -110,6 +110,7 @@
 #include "native_gadget_aim.hpp"
 #include "native_bink_hooks.hpp"
 #include "cutscene_skip.hpp"
+#include "letterbox_gate.hpp"
 #include "vr_perf_governor.hpp"
 #include "vr_gestures.hpp"
 #include "native_hud_rect.hpp"
@@ -1926,8 +1927,21 @@ void trace_draw(ID3D11DeviceContext* context,const char* event,UINT elements,UIN
         }
     } catch(...) {callback_failed=true;gpu_phase=0;}
 }
+// Track T C3: the two letterbox bars of an immersive 3D cutscene are not drawn (letterbox_gate.hpp). Immersive scene frames only; cheap reject first (39 indices).
+static d2vr::LetterboxGate letterbox_gate;
+static bool skip_letterbox_draw(ID3D11DeviceContext* context,UINT count) noexcept {
+    if(count!=d2vr::LetterboxGate::indices || cutscene_no_letterbox_hide.load(std::memory_order_relaxed) || !cutscene_scene_render()) return false;
+    try {
+        d2vr::LetterboxDraw draw{count,1,false,false};
+        D3D11_PRIMITIVE_TOPOLOGY topology{};context->IAGetPrimitiveTopology(&topology);draw.triangle_list=topology==D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
+        ComPtr<ID3D11ShaderResourceView> texture;context->PSGetShaderResources(0,1,texture.GetAddressOf());draw.textured=texture!=nullptr;
+        if(!letterbox_gate.skip(true,frames.load(std::memory_order_relaxed),draw)) return false;
+        ++cutscene_letterbox_hidden;return true;
+    } catch(...) {return false;}
+}
 template<unsigned Binding> void WINAPI draw_indexed_hook(ID3D11DeviceContext* context,UINT count,UINT start,INT base) {
     GpuCallbackDepth depth_guard;trace_draw(context,"draw_indexed",count,1,false,start,base);
+    if(skip_letterbox_draw(context,count)) return;
     reinterpret_cast<DrawIndexedFn>(gpu_bindings.original(3,Binding))(context,count,start,base);
 }
 template<unsigned Binding> void WINAPI draw_instanced_hook(ID3D11DeviceContext* context,UINT count,UINT instances,UINT start,INT base,UINT first) {
