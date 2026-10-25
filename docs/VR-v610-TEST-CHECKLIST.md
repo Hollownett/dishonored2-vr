@@ -36,9 +36,9 @@ Do each item in each mode: VR comfort, VR full and Theater (the Cutscenes row).
 13. **A cutscene right after loading a save** (the opening cutscene). Expect: the first gameplay frame after it has no jump.
 14. **Entry and exit direction.** Expect: you keep the direction you were facing going in, and keep it going out.
 15. **Comfort vignette strength while the cutscene camera moves** (VR comfort). Say whether it is right, too strong or too weak.
-17. **VR full:** are the scene's motion and its end tilt comfortable? (VR full has no vignette.)
-16. **Back to normal.** After each cutscene, the hands, HUD and aiming work as before.
+16. **VR full:** are the scene's motion and its end tilt comfortable? (VR full has no vignette.)
+17. **Back to normal.** After each cutscene, the hands, HUD and aiming work as before.
 
 ## Report
 
-For each item: pass or fail, the DLL hash, the runtime, and the `scripted_view` status block for any fail. For items 7 and 15, say whether the vignette strength is fine; for item 17, whether VR full is comfortable.
+For each item: pass or fail, the DLL hash, the runtime, and the `scripted_view` status block for any fail. For items 7 and 15, say whether the vignette strength is fine; for item 16, whether VR full is comfortable.
