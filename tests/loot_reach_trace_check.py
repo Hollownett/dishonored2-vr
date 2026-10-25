@@ -13,7 +13,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 HEADER = ROOT / "src/native_interaction_aim.hpp"
 PROBE = ROOT / "src/dxgi_probe.cpp"
-COLUMNS = "t,side,palm_x,palm_y,palm_z,dir_x,dir_y,dir_z,owner,spawn,takeable,set_count,rank,los_called,los_blocked,selected_owner,prompt_owner"
+COLUMNS = "t,side,palm_x,palm_y,palm_z,dir_x,dir_y,dir_z,owner,spawn,takeable,set_count,rank,los_called,los_blocked,selected_owner,prompt_owner,prompt_t"
 
 
 def body(text, start, end):
@@ -87,6 +87,24 @@ def problems(header, probe):
     select = body(header, "std::optional<QualifiedTarget> prompt_target_select(std::uint64_t now) {", "// The other hand's remembered target")
     need("if(const auto live=qualified_target(now))return live;" in select and "return native_selected_locked(now);" in select, "prompt selection unchanged")
     need("inline thread_local NativeInteractionAim::LootReachCycle NativeInteractionAim::loot_cycle_{};" in header, "cycle state is thread-local")
+    # Task 4 LOS trace (H15): armed before the original 3b7b90 call, written after it; the hit copy reads 3b7b90's collector after its sort
+    arm = los.find("try { // G1 LOS trace (Task 4): arm the hit copy")
+    need(0 <= arm < i_orig, "LOS trace: armed before the original call")
+    need(los.find("if(loot_los_armed) loot_los_row(") > i_orig >= 0, "LOS trace: the row is written after the original call")
+    detour = body(header, "static void __fastcall loot_los_sort(void* collector) {", "    void loot_los_copy(")
+    need(detour.count("self->loot_los_sort_(collector);") == 1 and detour.find("self->loot_los_sort_(collector);") < detour.find("self->loot_los_copy("),
+         "LOS trace: the collector sort runs once, before the copy")
+    need("caller>self->base_+loot_los_owner_rva && caller<self->base_+loot_los_owner_rva+loot_los_owner_size" in detour, "LOS trace: only 3b7b90's sort is copied")
+    los_code = body(header, "    void loot_los_copy(std::uintptr_t collector) noexcept {", "    LootReachCandidate* loot_candidate(")
+    need(los_code != "", "LOS trace helpers present")
+    for bad in ("*output", "output[", "write(", "*reinterpret_cast", "retrieved_=", "seen_["):
+        need(bad not in los_code, f"LOS trace helpers never touch {bad!r}")
+    opened = body(header, "bool loot_reach_trace(const std::filesystem::path& file) {", "void attach_physical_grab(")
+    need(header.count("MH_EnableHook(at)==MH_OK) loot_los_sort_enabled_=true;") == 1 and "MH_EnableHook(at)==MH_OK) loot_los_sort_enabled_=true;" in opened,
+         "LOS trace: the sort hook is enabled only when the trace opens")
+    need("code==loot_los_sort_code" in opened, "LOS trace: the sort's code bytes are verified before hooking")
+    need("MH_DisableHook(reinterpret_cast<void*>(base_+loot_los_sort_rva))" in body(header, "bool disable() noexcept {", "return restored;"), "disable() removes the sort hook")
+    need("inline thread_local NativeInteractionAim::LootLosCapture NativeInteractionAim::loot_los_capture_{};" in header, "LOS capture is thread-local")
     return out
 
 
@@ -117,6 +135,14 @@ def main():
     assert problems(header, ungated), "an open without the knob must fail"
     uncapped = header.replace("loot_reach_row_cap=8192", "loot_reach_row_cap=65536", 1)
     assert problems(uncapped, probe), "a different row cap must fail"
+    k2 = header.index("        try { // G1 LOS trace (Task 4): arm the hit copy")
+    m2 = header.index("} catch(...) {}\n", k2) + len("} catch(...) {}\n")
+    late_arm = (header[:k2] + header[m2:]).replace(los_call, los_call + header[k2:m2], 1)
+    assert problems(late_arm, probe), "arming after the original call must fail"
+    writes_out = header.replace("const auto out=rig::value<unsigned char>(read_,output);", "const auto out=rig::value<unsigned char>(read_,output);*reinterpret_cast<unsigned char*>(output)=1;", 1)
+    assert problems(writes_out, probe), "a LOS trace that writes the out byte must fail"
+    unhooked = header.replace("MH_DisableHook(reinterpret_cast<void*>(base_+loot_los_sort_rva))", "true", 1)
+    assert problems(unhooked, probe), "a sort hook left installed must fail"
     print("loot_reach_trace_check ok")
 
 

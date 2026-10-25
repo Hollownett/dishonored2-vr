@@ -8,6 +8,7 @@ one scenario's sessions (S5 runs four of 50 cycles): counters are summed, binds 
 Prints PASS/FAIL/INFO per assertion; exit 1 on any FAIL. Side-pair fields are [left, right].
 """
 import argparse
+import bisect
 import csv
 import json
 import math
@@ -51,7 +52,8 @@ STATE_NAMES = {8: "Mantle", 9: "Vault", 13: "Assassination", 33: "SyncAnim", 38:
                83: "KillCam", 39: "combat 39", 44: "combat 44"}  # docs/full-body-research.md 6b
 LOOT = ("loot_reach",)  # G1 loot measurement (hands plan Task 1): artifacts/native-loot-reach.csv (+ -owners.csv), knob build/loot-reach-trace
 LOOT_COLUMNS = ("t", "side", "palm_x", "palm_y", "palm_z", "dir_x", "dir_y", "dir_z", "owner", "spawn", "takeable", "set_count", "rank",
-                "los_called", "los_blocked", "selected_owner", "prompt_owner")
+                "los_called", "los_blocked", "selected_owner", "prompt_owner", "prompt_t")
+LOOT_PRESS_GAP_MS, LOOT_PRESS_TAKE_MS = 300, 500  # Task 4 step 5: a take is an owner that vanished within 500 ms of a grip-Use press (locked rows of one squeeze can be 140 ms apart)
 LOOT_GATE_M, LOOT_COIN_MATCH_M, LOOT_TAKE_MS = 0.45, 0.25, 1000  # frames judged: the coin within 0.45 m of the palm; the coin = the takeable owner whose bounds are nearest --coin
 HAND_FILTER_DEFAULT = 0x000885E4  # R1Recipe::filter: the hand body's word whenever it holds nothing through the body
 
@@ -278,8 +280,30 @@ def parse_loot_reach(text):
             row.update({k: float(rec[k]) for k in ("palm_x", "palm_y", "palm_z", "dir_x", "dir_y", "dir_z")})
         except (KeyError, TypeError, ValueError):
             continue
+        try:  # Task 4 (H14): the prompt sample's own tick (0: no prompt); None in older traces without the column
+            row["prompt_t"] = int(rec["prompt_t"]) if rec.get("prompt_t") not in (None, "") else None
+        except ValueError:
+            row["prompt_t"] = None
         rows.append(row)
     return rows
+
+
+def parse_loot_presses(text, gap_ms=LOOT_PRESS_GAP_MS):
+    """native-interaction-targets.csv text -> [(tick, side)] grip-Use presses: a row with locked >= 0 that starts a lock (the first, a
+    different locked side, or more than gap_ms (300) after the previous locked row; unlocked rows are only logged for the first 2000 cycles)."""
+    presses, last_tick, last_side = [], None, None
+    for rec in csv.DictReader(text.splitlines()):
+        try:
+            tick, locked = int(rec["tick_ms"]), int(rec["locked"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if locked < 0:
+            last_tick = last_side = None
+            continue
+        if last_tick is None or locked != last_side or tick - last_tick > gap_ms:
+            presses.append((tick, locked))
+        last_tick, last_side = tick, locked
+    return presses
 
 
 def parse_loot_owners(text):
@@ -310,7 +334,7 @@ def loot_frames(rows):
         if (r["t"], r["side"]) != key:
             key = (r["t"], r["side"])
             frames.append({"t": r["t"], "side": r["side"], "palm": (r["palm_x"], r["palm_y"], r["palm_z"]), "set": {},
-                           "selected": r["selected_owner"], "prompt": r["prompt_owner"]})
+                           "selected": r["selected_owner"], "prompt": r["prompt_owner"], "prompt_t": r.get("prompt_t")})
         if r["owner"]:
             frames[-1]["set"][r["owner"]] = r
     return frames
@@ -351,6 +375,7 @@ def check_loot(status, coin, case=None):
     out.append(("INFO", f"{tag}coin {coin_owner if coin_owner else 'not seen in any result set'}"
                         + (f" ({matches[0][0]:.3f} m from --coin)" if coin_owner else f" (nearest takeable {matches[0][0]:.2f} m)" if matches else "")))
     frames = loot_frames(rows)
+    all_frames = frames
     seen = [f["t"] for f in frames if coin_owner and coin_owner in f["set"]]
     if seen and frames[-1]["t"] > seen[-1] and any(seen[-1] - LOOT_TAKE_MS <= f["t"] <= seen[-1] and f["selected"] == coin_owner for f in frames):
         late = sum(1 for f in frames if f["t"] > seen[-1] and _box_distance(f["palm"], info) <= LOOT_GATE_M)
@@ -385,6 +410,64 @@ def check_loot(status, coin, case=None):
                                 f"selected {sum(1 for f, _ in fs if coin_owner and f['selected'] == coin_owner) / len(fs):.3f}, mean set {sum(len(f['set']) for f, _ in fs) / len(fs):.2f} owners"
                                 + (f", other selected {sorted(others.items(), key=lambda kv: -kv[1])[:2]}" if others else "")))
     out.append(("INFO", f"{tag}classification: {loot_classify(in_set, rank0, los_called, los_blocked, selected)}"))
+    out += loot_prompt_checks(all_frames, frames, owners, status.get("loot_presses"), tag)
+    return out
+
+
+def loot_prompt_checks(all_frames, frames, owners, presses, tag=""):
+    """Task 4 (ruling H14, brief step 5): the prompt equals the take.
+    prompt lie: a case frame whose prompt sample (prompt_owner at prompt_t) names a takeable owner that no hand's latest routed cycle
+    before prompt_t selected (a squeeze takes only the live native selection, so it could not take what the prompt shows). Traces
+    without prompt_t are skipped.
+    takes: for each grip-Use press inside the case's window, every takeable owner that left every result set within 500 ms after the
+    press (the trace going on after it) and that the pressing hand selected within 1 s before; the prompt owner of the last cycle at
+    or before the press must be that owner, and the owner's LOS must not have been blocked on every frame it was asked about."""
+    out = []
+    if not frames:
+        return out
+    cycles = {0: [], 1: []}
+    for f in all_frames:
+        if f["side"] in cycles:
+            cycles[f["side"]].append((f["t"], f["selected"]))
+    takeable = {o for o, info in owners.items() if info.get("takeable")}
+
+    def selected_before(owner, tick):
+        for side_cycles in cycles.values():
+            i = bisect.bisect_left(side_cycles, (tick, -1)) - 1  # the latest cycle strictly before tick
+            if i >= 0 and side_cycles[i][1] == owner:
+                return True
+        return False
+
+    if any(f.get("prompt_t") is not None for f in frames):
+        loot_prompts = [f for f in frames if f["prompt"] in takeable and f.get("prompt_t")]
+        lies = [f for f in loot_prompts if not selected_before(f["prompt"], f["prompt_t"])]
+        out.append(("PASS" if not lies else "FAIL", f"{tag}prompt lies 0 (got {len(lies)} of {len(loot_prompts)} loot-prompt frames: a loot prompt no hand's "
+                                                    f"latest cycle selected{', first t ' + str(lies[0]['t']) if lies else ''})"))
+    if presses is None:
+        out.append(("INFO", f"{tag}no native-interaction-targets.csv: takes not judged"))
+        return out
+    first, last = frames[0]["t"], frames[-1]["t"] + LOOT_TAKE_MS
+    last_seen, asked, blocked = {}, {}, {}
+    for f in all_frames:
+        for owner, r in f["set"].items():
+            last_seen[owner] = f["t"]
+            asked[owner] = asked.get(owner, 0) + (1 if r["los_called"] else 0)
+            blocked[owner] = blocked.get(owner, 0) + (1 if r["los_called"] and r["los_blocked"] else 0)
+    end = all_frames[-1]["t"] if all_frames else 0
+    takes = 0
+    for tick, side in presses:
+        if not first <= tick <= last:
+            continue
+        gone = [o for o in takeable if o in last_seen and tick <= last_seen[o] <= tick + LOOT_PRESS_TAKE_MS and end > last_seen[o]
+                and any(f["side"] == side and f["selected"] == o and last_seen[o] - LOOT_TAKE_MS <= f["t"] <= last_seen[o] for f in all_frames)]
+        at_press = [f for f in all_frames if f["t"] <= tick]
+        prompt = at_press[-1]["prompt"] if at_press else 0
+        for o in gone:
+            takes += 1
+            out.append(("PASS" if prompt == o else "FAIL", f"{tag}take at press t {tick} (side {side}): owner {o} gone at t {last_seen[o]}, prompt at the press {prompt}"))
+            out.append(("PASS" if asked.get(o, 0) and blocked.get(o, 0) < asked[o] else "FAIL",
+                        f"{tag}taken owner {o} had a clear LOS on some frame ({asked.get(o, 0) - blocked.get(o, 0)} clear of {asked.get(o, 0)} asked)"))
+    out.append(("INFO", f"{tag}{takes} take(s) judged over {sum(1 for t, _ in presses if first <= t <= last)} press(es) in the case window"))
     return out
 
 
@@ -840,6 +923,10 @@ def main(argv=None):
             statuses[0]["loot_owners"] = parse_loot_owners((art / "native-loot-reach-owners.csv").read_text(encoding="utf-8"))
         except OSError:
             statuses[0]["loot_rows"] = None
+        try:
+            statuses[0]["loot_presses"] = parse_loot_presses((art / "native-interaction-targets.csv").read_text(encoding="utf-8"))
+        except OSError:
+            statuses[0]["loot_presses"] = None
         rows = check_loot(statuses[0], tuple(args.coin), args.case)
     else:
         rows = check(statuses, args.scenario, tuple(args.proofs), args.reject_touch)

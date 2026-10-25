@@ -272,6 +272,13 @@ bool order_native_use_hits(NativeUseHit* hits,unsigned count,const PalmProbe& pr
     for(unsigned i=0;i<count;++i) copy[i]=hits[order[i]];
     for(unsigned i=0;i<count;++i) hits[i]=copy[i];return true;
 }
+// Ruling H14 (the prompt equals the take): a hand's remembered prompt target (the 500 ms held grace) that is loot survives that hand's
+// own routed stage-0 cycle only while the cycle still selects it. A squeeze takes only the live native selection, so a loot prompt the
+// hand's own native scan no longer selects would show a coin the squeeze cannot take. A routing flip to the other hand runs no cycle for
+// this hand, so the linger still bridges flips; non-loot targets keep the old grace.
+inline bool held_prompt_survives_cycle(std::uintptr_t held_owner,bool held_loot,std::uintptr_t cycle_owner) noexcept {
+    return !held_owner || !held_loot || cycle_owner==held_owner;
+}
 // Native LOS failure remains a failure. This permits only scanning the next
 // object candidate; character obstruction metadata has different semantics.
 inline bool continue_native_use_scan(std::uintptr_t native_result,unsigned char native_flag,

@@ -640,12 +640,13 @@ def loot_trace(frames):
             members.append((COIN_OWNER, *f["coin"]))
         for owner, rank, called, blocked in [(m[0], m[1], m[2], m[3]) for m in members]:
             lines.append(",".join(str(v) for v in (1000 + 11 * i, f.get("side", 1), *f.get("palm", (1.0, 2.0, 0.95)), 1, 0, 0, owner, 11, int(owner == COIN_OWNER),
-                                                   len(members), rank, called, blocked, f.get("selected", 0), f.get("prompt", 0))))
+                                                   len(members), rank, called, blocked, f.get("selected", 0), f.get("prompt", 0),
+                                                   (1000 + 11 * i + f["prompt_dt"]) if "prompt_dt" in f else "")))
     return "\n".join(lines) + "\n"
 
 
-def loot_judge(frames, coin=COIN):
-    status = {"loot_rows": brc.parse_loot_reach(loot_trace(frames)), "loot_owners": brc.parse_loot_owners(LOOT_OWNERS)}
+def loot_judge(frames, coin=COIN, presses=None):
+    status = {"loot_rows": brc.parse_loot_reach(loot_trace(frames)), "loot_owners": brc.parse_loot_owners(LOOT_OWNERS), "loot_presses": presses}
     out = brc.check_loot(status, coin, "table")
     cls = [t.split("classification: ")[1] for v, t in out if "classification: " in t]
     return out, cls[0] if cls else None
@@ -681,6 +682,10 @@ def loot_reach_checks():
     drawer = sim.scenario_segments("loot_reach_drawer", 45000)
     sim.compile_script(drawer, 120)
     assert [s["console"] for s in drawer if "console" in s] == [l for l in lines if l.startswith("setviewpos -13.230")], "the drawer case alone"
+    floor = sim.scenario_segments("loot_reach_floor", 45000)
+    sim.compile_script(floor, 120)
+    assert [s["console"] for s in floor if "console" in s] == [l for l in lines if l.startswith("setviewpos -24.860")], "the floor case alone"
+    assert sum(1 for s in floor if s["input"].get("right_grip")) == sum(1 for s in floor if s["input"].get("left_grip")) == 1, "the floor squeezes"
     near = {"palm": (1.0, 2.0, 0.95)}
     ok, cls = loot_judge([dict(near, coin=(0, 1, 0), selected=COIN_OWNER, prompt=COIN_OWNER)] * 10)
     assert cls == "PASS" and any(v == "PASS" and "got 10" in t for v, t in ok), ok
@@ -713,6 +718,47 @@ def loot_reach_checks():
     assert any(v == "FAIL" for v, _ in brc.check_loot({"loot_rows": [], "loot_owners": {}}, COIN))
     assert brc.parse_loot_owners(LOOT_OWNERS)[9003]["min"] is None and brc.parse_loot_owners(LOOT_OWNERS)[9003]["pos"] == [4.0, 4.0, 1.0]
     assert len(brc.parse_loot_reach(loot_trace([near]) + "1,2\n")) == 1  # a short row is dropped
+    loot_prompt_take_checks(near)
+
+
+def loot_prompt_take_checks(near):
+    """Hands plan Task 4 (ruling H14, brief step 5): no loot prompt that no hand's latest cycle selected; every take equals the prompt at its
+    press and comes from an owner with a clear LOS on some frame."""
+    sel = dict(near, coin=(0, 1, 0), selected=COIN_OWNER, prompt=COIN_OWNER, prompt_dt=5)
+    # the prompt sampled 5 ms after a cycle that selected the coin: not a lie
+    out, _ = loot_judge([sel] * 6)
+    assert any(v == "PASS" and "prompt lies 0" in t for v, t in out), out
+    # the hand's cycle no longer selects the coin, a later prompt sample still names it: a lie (the 500 ms linger, H14)
+    linger = dict(near, coin=(0, 1, 1), selected=0, prompt=COIN_OWNER, prompt_dt=5)
+    out, _ = loot_judge([sel] * 3 + [linger] * 3)
+    assert any(v == "FAIL" and "got 3 of 6" in t for v, t in out), out
+    # a sample taken before that cycle (prompt_t earlier than the cycle) is judged against the earlier, selecting cycle
+    out, _ = loot_judge([sel] * 3 + [dict(linger, prompt_dt=-3)] + [dict(linger, prompt=0)] * 2)
+    assert any(v == "PASS" and "prompt lies 0" in t for v, t in out), out
+    # the other hand's latest cycle still selects it: not a lie
+    out, _ = loot_judge([dict(sel, side=0), dict(linger, side=1)] * 3)
+    assert any(v == "PASS" and "prompt lies 0" in t for v, t in out), out
+    # older traces without prompt_t: no lie verdict
+    out, _ = loot_judge([dict(near, coin=(0, 1, 0), selected=COIN_OWNER, prompt=COIN_OWNER)] * 3)
+    assert not any("prompt lies" in t for _, t in out), out
+    # a take: pressed at frame 5 (t 1055) by the right hand, the coin last seen at frame 7 (t 1077, 22 ms later), the trace goes on
+    frames = [sel] * 8 + [dict(near, selected=0, prompt=0, prompt_dt=5)] * 10
+    out, _ = loot_judge(frames, presses=[(1055, 1)])
+    assert any(v == "PASS" and "take at press t 1055" in t and "prompt at the press 9001" in t for v, t in out), out
+    assert any(v == "PASS" and "clear LOS on some frame" in t for v, t in out) and any("1 take(s)" in t for _, t in out), out
+    # the prompt at the press named something else: FAIL
+    out, _ = loot_judge([dict(sel, prompt=SHELF)] * 8 + frames[8:], presses=[(1055, 1)])
+    assert any(v == "FAIL" and "take at press" in t and "prompt at the press 9002" in t for v, t in out), out
+    # a take from an owner whose LOS was blocked on every asked frame: FAIL
+    out, _ = loot_judge([dict(sel, coin=(0, 1, 1))] * 8 + frames[8:], presses=[(1055, 1)])
+    assert any(v == "FAIL" and "0 clear of 8 asked" in t for v, t in out), out
+    # the coin vanished more than 500 ms after the press: not this press's take
+    out, _ = loot_judge([sel] * 60 + frames[8:], presses=[(1000, 1)])  # last seen at t 1649, 649 ms after the press
+    assert not any("take at press" in t for _, t in out) and any("0 take(s) judged over 1 press" in t for _, t in out), out
+    # presses: lock starts in native-interaction-targets.csv (side change, or > 300 ms after the previous locked row; one squeeze's
+    # locked rows can be 140 ms apart)
+    targets = "tick_ms,locked\n10,-1\n20,1\n30,1\n40,0\n50,0\n190,0\n500,0\n510,-1\n520,1\n"
+    assert brc.parse_loot_presses(targets) == [(20, 1), (40, 0), (500, 0), (520, 1)]
 
 
 if __name__ == "__main__":

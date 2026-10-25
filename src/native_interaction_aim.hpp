@@ -201,6 +201,7 @@ class NativeInteractionAim {
     std::atomic<UINT64> stage_calls_{},rays_{},routed_{},rejected_{},samples_{},overlap_{};
     std::atomic<UINT> owned_depth_{};
     std::atomic<UINT64> volume_requests_{},volume_rejected_{},ranked_{},ranking_rejected_{},direct_shortcuts_filtered_{},occluded_scan_continued_{};
+    std::atomic<UINT64> loot_prompt_lingers_dropped_{}; // H14: loot prompt lingers ended by the hand's own cycle
     std::atomic<UINT64> palm_beam_fallbacks_{}; // hand-mode cycles ordered by the v610 beam because the palm probe was invalid
     std::atomic<UINT64> hand_range_origins_{};
     std::atomic<UINT64> character_gaze_admitted_{},character_gaze_declined_{};
@@ -237,7 +238,107 @@ class NativeInteractionAim {
     static constexpr unsigned loot_reach_row_cap=8192,loot_reach_flush_rows=64,loot_reach_owner_cap=1024;
     std::atomic<bool> loot_reach_on_{};std::mutex loot_reach_mutex_;std::ofstream loot_reach_csv_,loot_reach_owners_csv_;
     unsigned loot_reach_rows_{};std::vector<std::uintptr_t> loot_reach_owners_seen_;
-    std::atomic<std::uintptr_t> loot_prompt_owner_{};std::atomic<std::uint64_t> loot_prompt_tick_{};
+    std::atomic<std::uintptr_t> loot_prompt_owner_{};std::atomic<std::uint64_t> loot_prompt_tick_{};std::mutex loot_prompt_mutex_; // the owner and its tick are one sample (H14 prompt-vs-take check)
+    // G1 LOS trace (Task 4, ruling H15; same knob, sibling file native-loot-los.csv): one row per stage-0 3b7b90 LOS call on a takeable
+    // owner of the cycle's set, with its inputs (origin, end point, the range-0 sweep shape) and the cast's hits in the order 3b7b90 walks
+    // them (docs/native-use-los-3b7b90.md). The hits are copied from 3b7b90's all-hits collector right after its sort 0xc85470 returns
+    // (a hook installed only while this trace is on, original called once with its own argument); the blocking hit is the first one that
+    // is neither the target (nor its parent) nor LOS-transparent (0x878c70), before the first target hit. Read-only like the rest.
+    struct LootLosHit {std::array<float,3> position{},normal{};float fraction{};std::uint32_t body{},key{};};
+    struct LootLosCapture {bool armed{},captured{};int count{};unsigned any{};std::array<LootLosHit,16> hits{};};
+    static thread_local LootLosCapture loot_los_capture_; // the game thread's armed 3b7b90 call; defined after the class
+    using CollectorSort=void (__fastcall*)(void*);
+    inline static constexpr std::uintptr_t loot_los_sort_rva=0xc85470,loot_los_owner_rva=0x3b7b90,loot_los_owner_size=0x3b0;
+    inline static constexpr std::array<unsigned char,16> loot_los_sort_code{0x44,0x8b,0x41,0x38,0x33,0xc0,0x41,0x83,0xf8,0x01,0x7e,0x12,0x48,0x8b,0x49,0x30};
+    CollectorSort loot_los_sort_{};std::atomic<bool> loot_los_sort_enabled_{}; // set by loot_reach_trace(), read by the game-thread LOS hook
+    std::ofstream loot_los_csv_;unsigned loot_los_rows_{};
+    static void __fastcall loot_los_sort(void* collector) {
+        auto* self=instance_;const auto caller=reinterpret_cast<std::uintptr_t>(_ReturnAddress());
+        self->loot_los_sort_(collector); // original once, unchanged argument
+        if(loot_los_capture_.armed && caller>self->base_+loot_los_owner_rva && caller<self->base_+loot_los_owner_rva+loot_los_owner_size)
+            self->loot_los_copy(reinterpret_cast<std::uintptr_t>(collector));
+    }
+    // hknpAllHitsCollector (vtable 0x1ad2640): +0x0c any-hit word, +0x30 record array, +0x38 count; record 0x70: +0x00 position,
+    // +0x10 normal, +0x20 fraction, +0x48 body handle, +0x50 shape key (docs/native-world-trace.md). Reads only.
+    void loot_los_copy(std::uintptr_t collector) noexcept {
+        try {
+            auto& c=loot_los_capture_;c.captured=true;c.count=0;
+            const auto any=rig::value<unsigned>(read_,collector+0xc);const auto data=rig::value<std::uintptr_t>(read_,collector+0x30);
+            const auto count=rig::value<int>(read_,collector+0x38);
+            if(!any || !data || !count || *count<0) {c.count=-1;return;}
+            c.any=*any;const auto n=std::min<unsigned>(static_cast<unsigned>(*count),static_cast<unsigned>(c.hits.size()));
+            for(unsigned i=0;i<n;++i) {
+                std::array<std::byte,0x70> r{};
+                if(!read_(*data+i*0x70,r.data(),r.size())) {c.count=-1;return;}
+                auto& h=c.hits[i];std::memcpy(h.position.data(),r.data(),12);std::memcpy(h.normal.data(),r.data()+0x10,12);
+                std::memcpy(&h.fraction,r.data()+0x20,4);std::memcpy(&h.body,r.data()+0x48,4);std::memcpy(&h.key,r.data()+0x50,4);
+            }
+            c.count=*count;
+        } catch(...) {loot_los_capture_.count=-1;}
+    }
+    // 0x878c70 read-only: LOS-transparent iff +0x288 == 4, or (+0xd1 & 0x28) and a character type and (+0x368 & 0x20).
+    std::optional<bool> los_transparent(std::uintptr_t entity) const {
+        const auto kind=rig::value<int>(read_,entity+0x288);const auto flags=rig::value<unsigned char>(read_,entity+0xd1);
+        if(!kind || !flags) return {};
+        if(*kind==4) return true;
+        if((*flags&0x28)==0) return false;
+        const auto character=character_type(entity);const auto bits=rig::value<unsigned char>(read_,entity+0x368);
+        if(!character || !bits) return {};
+        return *character && (*bits&0x20)!=0;
+    }
+    std::uintptr_t los_parent(std::uintptr_t entity) const {
+        const auto link=rig::value<std::uintptr_t>(read_,entity+0x358);
+        return link && *link?rig::value<std::uintptr_t>(read_,*link+0x3c8).value_or(0):0;
+    }
+    // After the original 3b7b90 returned (the out byte is read, never written): the row for this call.
+    void loot_los_row(int side,std::uintptr_t sensor,std::uintptr_t owner,std::uintptr_t caller,std::uintptr_t origin,std::uintptr_t point,
+            unsigned range,std::uintptr_t result,std::uintptr_t output) noexcept {
+        try {
+            const auto& c=loot_los_capture_;
+            const auto from=rig::value<std::array<float,3>>(read_,origin);const auto to=rig::value<std::array<float,3>>(read_,point);
+            const auto out=rig::value<unsigned char>(read_,output);
+            const auto shape=rig::value<std::uintptr_t>(read_,sensor+0x48+range*8);
+            const auto shape_vt=shape && *shape?rig::value<std::uintptr_t>(read_,*shape):std::nullopt;
+            const auto shape_radius=shape && *shape?rig::value<float>(read_,*shape+0x28):std::nullopt;
+            const auto game=rig::value<std::uintptr_t>(read_,base_+0x39a5290);
+            const auto world=game?rig::value<std::uintptr_t>(read_,*game+0x60410).value_or(0):0;
+            struct Seen {std::uintptr_t entity{};unsigned spawn{};std::uintptr_t vt{};int target{-1},transparent{-1},motion{-1};};
+            std::array<Seen,16> seen{};int target_hit=-1,block_hit=-1;
+            const auto n=c.captured && c.count>0?std::min<int>(c.count,static_cast<int>(c.hits.size())):0;
+            for(int i=0;i<n;++i) {
+                auto& s=seen[i];const auto body=c.hits[i].body;
+                s.entity=world?NativeWorldTrace::entity_of(read_,world,body):0;
+                if(const auto index=body&0xffffff;world && index!=0xffffff) {
+                    const auto pool=rig::value<std::uintptr_t>(read_,world+0x28);const auto bodies=rig::value<unsigned>(read_,world+0x30);
+                    if(pool && bodies && index<*bodies) if(const auto f=rig::value<unsigned char>(read_,*pool+index*0xb0+0x44)) s.motion=*f;
+                }
+                if(!s.entity) continue;
+                s.spawn=rig::value<unsigned>(read_,s.entity+0xa8).value_or(0);
+                if(const auto vt=rig::value<std::uintptr_t>(read_,s.entity)) s.vt=*vt>=base_?*vt-base_:*vt;
+                s.target=s.entity==owner || los_parent(s.entity)==owner;
+                if(const auto t=los_transparent(s.entity)) s.transparent=*t;
+                if(s.target==1 && target_hit<0) target_hit=i;
+                if(target_hit<0 && block_hit<0 && s.target==0 && s.transparent==0) block_hit=i;
+            }
+            std::lock_guard<std::mutex> lock(loot_reach_mutex_);
+            if(!loot_los_csv_.is_open() || loot_los_rows_>=loot_reach_row_cap) return;
+            auto& o=loot_los_csv_;
+            o<<GetTickCount64()<<','<<side<<','<<owner<<','<<std::hex<<(caller-base_)<<std::dec<<','<<(result&0xffu)<<','<<(out?static_cast<int>(*out):-1);
+            for(unsigned k=0;k<3;++k) {o<<',';if(from) o<<(*from)[k];}
+            for(unsigned k=0;k<3;++k) {o<<',';if(to) o<<(*to)[k];}
+            o<<','<<std::hex<<(shape_vt && *shape_vt>=base_?*shape_vt-base_:0)<<std::dec<<',';if(shape_radius) o<<*shape_radius;
+            o<<','<<(c.captured?static_cast<int>(c.any):-1)<<','<<(c.captured?c.count:-2)<<','<<target_hit<<','<<block_hit;
+            const auto hit=[&](int i) {
+                if(i<0 || i>=n) {o<<",,,,,,,,,,,,,,";return;}
+                const auto& h=c.hits[i];const auto& s=seen[i];
+                o<<','<<h.fraction;for(float v:h.position) o<<','<<v;for(float v:h.normal) o<<','<<v;
+                o<<','<<s.entity<<','<<s.spawn<<','<<std::hex<<s.vt<<','<<h.body<<std::dec<<','<<s.motion<<','<<s.target<<','<<s.transparent;
+            };
+            hit(block_hit);for(int i=0;i<4;++i) hit(i);
+            o<<'\n';
+            if(++loot_los_rows_%loot_reach_flush_rows==0 || loot_los_rows_==loot_reach_row_cap) o.flush();
+        } catch(...) {}
+    }
     LootReachCandidate* loot_candidate(std::uintptr_t owner) noexcept {
         for(unsigned i=0;i<loot_cycle_.count;++i) if(loot_cycle_.set[i].owner==owner) return &loot_cycle_.set[i];
         return nullptr;
@@ -279,8 +380,9 @@ class NativeInteractionAim {
     void loot_trace_cycle(const Context& scope) noexcept {
         try {
             auto& c=loot_cycle_;if(!c.open || !c.fetched || scope.side<0) return;
-            const auto now=GetTickCount64();const auto prompt_tick=loot_prompt_tick_.load(std::memory_order_relaxed);
-            const auto prompt=prompt_tick && now>=prompt_tick && now-prompt_tick<=250?loot_prompt_owner_.load(std::memory_order_relaxed):0;
+            const auto now=GetTickCount64();std::uint64_t prompt_tick{};std::uintptr_t prompt_owner{};
+            {std::lock_guard<std::mutex> sample(loot_prompt_mutex_);prompt_tick=loot_prompt_tick_.load(std::memory_order_relaxed);prompt_owner=loot_prompt_owner_.load(std::memory_order_relaxed);}
+            const auto prompt=prompt_tick && now>=prompt_tick && now-prompt_tick<=250?prompt_owner:0;
             const auto palm=scope.hand.volume_centre;const auto dir=scope.hand.hand.basis[0];
             std::lock_guard<std::mutex> lock(loot_reach_mutex_);
             if(!loot_reach_csv_.is_open()) return;
@@ -302,7 +404,7 @@ class NativeInteractionAim {
                 const auto& e=c.count?c.set[i]:none;
                 loot_reach_csv_<<now<<','<<scope.side<<','<<palm.x<<','<<palm.y<<','<<palm.z<<','<<dir.x<<','<<dir.y<<','<<dir.z<<','
                     <<e.owner<<','<<e.spawn<<','<<(e.takeable?1:0)<<','<<c.count<<','<<e.rank<<','<<e.los_called<<','<<e.los_blocked<<','
-                    <<c.selected<<','<<prompt<<'\n';
+                    <<c.selected<<','<<prompt<<','<<(prompt?prompt_tick:0)<<'\n';
                 if(++loot_reach_rows_%loot_reach_flush_rows==0 || loot_reach_rows_==loot_reach_row_cap) loot_reach_csv_.flush();
             }
         } catch(...) {}
@@ -1015,6 +1117,10 @@ private:
                     }
                 }
                 target_generation_[scope.side]=generation.value_or(-1);target_owner_[scope.side]=object?owner:0;target_spawn_[scope.side]=object?spawn.value_or(0):0;
+                // H14: this hand's own cycle ended its loot selection -> no lingering loot prompt the squeeze could not take.
+                if(auto& held=seen_[scope.side];held.tick && !held_prompt_survives_cycle(held.target.owner,takeable(held.target.owner),target_owner_[scope.side])) {
+                    held={};++loot_prompt_lingers_dropped_;
+                }
             }
             else if(scope.side<0) {native_object_=object;native_tick_=now;}
             // The first 2000 cycles, then (up to 12000) every cycle while a grip Use holds a hand: what that hand's query selected.
@@ -1313,7 +1419,16 @@ private:
                 }
             }
         }catch(...) {}
+        try { // G1 LOS trace (Task 4): arm the hit copy for a takeable set owner's stage-0 LOS call (reads only)
+            loot_los_capture_.armed=false;loot_los_capture_.captured=false;loot_los_capture_.count=0;
+            if(loot_los_sort_enabled_ && loot_cycle_.open && observed_scope && observed_scope->stage==0 && range==0 &&
+               (caller==base_+0x3b8b05 || caller==base_+0x3b87b5) && reinterpret_cast<std::uintptr_t>(sensor)==observed_scope->sensor)
+                if(const auto* candidate=loot_candidate(reinterpret_cast<std::uintptr_t>(entity));candidate && candidate->takeable) loot_los_capture_.armed=true;
+        } catch(...) {}
         const auto result=occlusion_(sensor,entity,origin,axis,point,range,output); // original once, raw return preserved
+        const bool loot_los_armed=loot_los_capture_.armed;loot_los_capture_.armed=false;
+        if(loot_los_armed) loot_los_row(observed_scope->side,reinterpret_cast<std::uintptr_t>(sensor),reinterpret_cast<std::uintptr_t>(entity),caller,
+            reinterpret_cast<std::uintptr_t>(origin),reinterpret_cast<std::uintptr_t>(point),range,result,reinterpret_cast<std::uintptr_t>(output));
         try { // G1 trace: this candidate's stage-0 LOS call and its raw result (read-only: neither the return value nor the out byte is touched)
             if(loot_cycle_.open && observed_scope && observed_scope==context_ && observed_scope->stage==0 && range==0 &&
                (caller==base_+0x3b8b05 || caller==base_+0x3b87b5))
@@ -1823,7 +1938,7 @@ public:
     }
     std::optional<QualifiedTarget> prompt_target(std::uint64_t now) {
         auto out=prompt_target_select(now);
-        if(loot_reach_on_.load(std::memory_order_relaxed)) {loot_prompt_owner_.store(out?out->owner:0,std::memory_order_relaxed);loot_prompt_tick_.store(now,std::memory_order_relaxed);} // G1 trace
+        if(loot_reach_on_.load(std::memory_order_relaxed)) {std::lock_guard<std::mutex> sample(loot_prompt_mutex_);loot_prompt_owner_.store(out?out->owner:0,std::memory_order_relaxed);loot_prompt_tick_.store(now,std::memory_order_relaxed);} // G1 trace
         return out;
     }
     std::optional<QualifiedTarget> prompt_target_select(std::uint64_t now) {
@@ -1852,9 +1967,21 @@ public:
         loot_reach_csv_.close();loot_reach_owners_csv_.close();loot_reach_rows_=0;loot_reach_owners_seen_.clear();
         loot_reach_csv_.open(file,std::ios::trunc);loot_reach_owners_csv_.open(file.parent_path()/L"native-loot-reach-owners.csv",std::ios::trunc);
         if(!loot_reach_csv_ || !loot_reach_owners_csv_) {loot_reach_csv_.close();loot_reach_owners_csv_.close();return false;}
-        loot_reach_csv_<<std::setprecision(6)<<"t,side,palm_x,palm_y,palm_z,dir_x,dir_y,dir_z,owner,spawn,takeable,set_count,rank,los_called,los_blocked,selected_owner,prompt_owner\n";
+        loot_reach_csv_<<std::setprecision(6)<<"t,side,palm_x,palm_y,palm_z,dir_x,dir_y,dir_z,owner,spawn,takeable,set_count,rank,los_called,los_blocked,selected_owner,prompt_owner,prompt_t\n";
         loot_reach_owners_csv_<<std::setprecision(7)<<"owner,spawn,takeable,pos_x,pos_y,pos_z,min_x,min_y,min_z,max_x,max_y,max_z\n";
         loot_reach_csv_.flush();loot_reach_owners_csv_.flush();
+        // Task 4 LOS trace: the sibling file, and the collector-sort hook that copies 3b7b90's hits (only while this trace is on).
+        loot_los_csv_.close();loot_los_rows_=0;loot_los_csv_.open(file.parent_path()/L"native-loot-los.csv",std::ios::trunc);
+        if(!loot_los_csv_) {loot_reach_csv_.close();loot_reach_owners_csv_.close();return false;}
+        loot_los_csv_<<std::setprecision(7)<<"t,side,owner,caller,result,out,origin_x,origin_y,origin_z,point_x,point_y,point_z,shape_vt,shape_radius,any_hit,hits,target_hit,block_hit";
+        for(const char* p:{"block","h0","h1","h2","h3"}) for(const char* f:{"frac","x","y","z","nx","ny","nz","entity","spawn","vt","body","motion","target","transparent"}) loot_los_csv_<<','<<p<<'_'<<f;
+        loot_los_csv_<<'\n';loot_los_csv_.flush();
+        if(!loot_los_sort_enabled_ && route_ && occlusion_) {
+            std::array<unsigned char,16> code{};const auto at=reinterpret_cast<void*>(base_+loot_los_sort_rva);
+            if(read_(base_+loot_los_sort_rva,code.data(),code.size()) && code==loot_los_sort_code &&
+               (loot_los_sort_ || MH_CreateHook(at,reinterpret_cast<void*>(&loot_los_sort),reinterpret_cast<void**>(&loot_los_sort_))==MH_OK) &&
+               MH_EnableHook(at)==MH_OK) loot_los_sort_enabled_=true;   // otherwise rows carry hits=-2 (inputs only)
+        }
         loot_reach_on_.store(true,std::memory_order_release);return true;
     }
     void attach_physical_grab(NativeGrab* grab) {
@@ -1922,7 +2049,7 @@ public:
         log_<<"tick_ms,thread,stage,sensor,camera,routed";
         for(const auto* prefix:{"native","effective"}) for(unsigned i=0;i<12;++i) log_<<','<<prefix<<i;log_<<'\n';
         for(auto& count:query_outcomes_)count=0;
-        stage_calls_=rays_=routed_=rejected_=samples_=overlap_=volume_requests_=volume_rejected_=ranked_=ranking_rejected_=direct_shortcuts_filtered_=occluded_scan_continued_=0;palm_beam_fallbacks_=0;instance_=this;
+        stage_calls_=rays_=routed_=rejected_=samples_=overlap_=volume_requests_=volume_rejected_=ranked_=ranking_rejected_=direct_shortcuts_filtered_=occluded_scan_continued_=0;palm_beam_fallbacks_=0;loot_prompt_lingers_dropped_=0;instance_=this;
         hand_range_origins_=0;
         const std::array<void*,6> hooks{reinterpret_cast<void*>(&stage<0>),reinterpret_cast<void*>(&stage<1>),reinterpret_cast<void*>(&stage<2>),
             reinterpret_cast<void*>(&direct),reinterpret_cast<void*>(&queue<0>),reinterpret_cast<void*>(&queue<1>)};
@@ -1988,6 +2115,9 @@ public:
         for(unsigned i=0;i<3;++i) if(ranking_enabled_[i]) {
             if(MH_DisableHook(reinterpret_cast<void*>(base_+ranking_rvas[i]))==MH_OK) ranking_enabled_[i]=false;else restored=false;
         }
+        if(loot_los_sort_enabled_) {
+            if(MH_DisableHook(reinterpret_cast<void*>(base_+loot_los_sort_rva))==MH_OK) loot_los_sort_enabled_=false;else restored=false;
+        }
         const auto deadline=GetTickCount64()+5000;
         if(enabled_[0]) {
             if(MH_DisableHook(reinterpret_cast<void*>(base_+rvas[0]))==MH_OK) enabled_[0]=false;else restored=false;
@@ -2005,8 +2135,9 @@ public:
             restored=restored && read_(base_+rvas[i],bytes.data(),bytes.size()) && bytes==expected[i];
         }
         for(unsigned i=0;i<3;++i) if(i==0?fetch_!=nullptr:i==1?sort_!=nullptr:occlusion_!=nullptr) restored=restored && ranking_profile(i);
+        if(loot_los_sort_) {std::array<unsigned char,16> code{};restored=restored && read_(base_+loot_los_sort_rva,code.data(),code.size()) && code==loot_los_sort_code;}
         if(range_origin_) {std::array<unsigned char,8> getter{};restored=restored && read_(base_+0x417820,getter.data(),getter.size()) && getter==range_origin_code;}
-        try {loot_reach_on_=false;std::lock_guard<std::mutex> loot(loot_reach_mutex_);loot_reach_csv_.close();loot_reach_owners_csv_.close();} catch(...) {return false;}
+        try {loot_reach_on_=false;std::lock_guard<std::mutex> loot(loot_reach_mutex_);loot_reach_csv_.close();loot_reach_owners_csv_.close();loot_los_csv_.close();} catch(...) {return false;}
         try {std::lock_guard<std::mutex> lock(mutex_);log_.close();targets_.close();ranking_log_.close();hands_={};published_={false,false};if(observe_lean_ && !lean_trace_.close()) restored=false;} catch(...) {return false;}
         if(restored) {
             try {
@@ -2131,6 +2262,10 @@ public:
     UINT64 ranked_results() const {return ranked_.load();}
     UINT64 ranking_rejected() const {return ranking_rejected_.load();}
     UINT64 palm_beam_fallbacks() const {return palm_beam_fallbacks_.load();}
+    UINT64 loot_prompt_lingers_dropped() const {return loot_prompt_lingers_dropped_.load();}
+    // Hands plan Task 4 interface (Task 15 grab_focus): 'A' / 'B' when a floor/drawer loot fix branch is active, 0 when none is. None is:
+    // the floor coin's LOS blocker is the cot's hull, not its support (docs/native-use-los-3b7b90.md); the drawer was closed.
+    static constexpr char loot_fix_branch() noexcept {return 0;}
     UINT64 direct_shortcuts_filtered() const {return direct_shortcuts_filtered_.load();}
     UINT64 volume_requests() const {return volume_requests_.load();}
     UINT64 volume_rejected() const {return volume_rejected_.load();}
@@ -2158,6 +2293,7 @@ public:
 inline thread_local NativeInteractionAim::Retrieved NativeInteractionAim::retrieved_{};
 inline thread_local NativeInteractionAim::AfterSortScratch NativeInteractionAim::after_sort_scratch_{};
 inline thread_local NativeInteractionAim::LootReachCycle NativeInteractionAim::loot_cycle_{};
+inline thread_local NativeInteractionAim::LootLosCapture NativeInteractionAim::loot_los_capture_{};
 inline std::array<std::array<NativeInteractionAim::WeaponSegment,NativeInteractionAim::weapon_slots>,2> NativeInteractionAim::weapon_req_{};
 inline NativeInteractionAim::SwordContactObservation NativeInteractionAim::sword_last_contact_;
 #endif

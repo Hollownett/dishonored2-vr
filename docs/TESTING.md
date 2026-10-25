@@ -36,13 +36,19 @@ Write lines to `artifacts/vr-command.txt` while the mod runs; answers go to `art
   with god and buddha on. Use the dev knob `--knob sim-invulnerable` (`src/native_sim_invulnerable.hpp`, the player ignores damage).
 - G1 loot measurement (hands plan Task 1): knob `build/loot-reach-trace` writes `artifacts/native-loot-reach.csv` (strictly read-only, at most
   8192 rows, flushed every 64): one row per routed stage-0 cycle and owner in the hand-volume Use result set (one owner-0 row for an empty
-  set): `t,side,palm_x..z,dir_x..z,owner,spawn,takeable,set_count,rank,los_called,los_blocked,selected_owner,prompt_owner`. `rank` is the
+  set): `t,side,palm_x..z,dir_x..z,owner,spawn,takeable,set_count,rank,los_called,los_blocked,selected_owner,prompt_owner,prompt_t`
+  (`prompt_t`: the tick of that prompt sample, Task 4). `rank` is the
   first index after `order_native_use_hits`; `los_called`/`los_blocked` count this cycle's stage-0 3b7b90 calls on that owner (callers 3b8b05
   and 3b87b5) and blocked raw results; `set_count` is the number of distinct owners. `native-loot-reach-owners.csv` lists each owner once
   with its position and model bounds. Run `linux/d2vr-linux sim --scenario loot_reach --knob loot-reach-trace --knob sim-invulnerable
-  --lead 45 --seconds 120` (`loot_reach_drawer` runs the third case alone: the three cases overflow the row cap), then
+  --lead 45 --seconds 120` (`loot_reach_floor` / `loot_reach_drawer` run the second / third case alone: the three cases overflow the row cap), then
   `tools/linux/bonelab_run_check.py RUN --scenario loot_reach --coin X Y Z --case table|floor|drawer`. Spots and results:
-  `.superpowers/sdd/2026-10-25-small-objects-fingers/g1-measure.md`. `/home` was full during that work: `--out-root` on another disk keeps
+  `.superpowers/sdd/2026-10-25-small-objects-fingers/g1-measure.md`. The checker also judges the prompt against the take (Task 4, ruling
+  H14): `prompt lies` (a loot prompt sample that no hand's latest cycle before it selected) and, per grip-Use press in the case window (lock
+  starts in `native-interaction-targets.csv`), the owner that left every set within 500 ms must equal the prompt at the press and must have
+  had a clear LOS on some frame. Task 4 adds `native-loot-los.csv` under the same knob: one row per stage-0 3b7b90 LOS call on a takeable set
+  owner with its origin, end point, sweep shape and the cast's hits in the order 3b7b90 walks them, the blocking hit first
+  (`docs/native-use-los-3b7b90.md`); it installs a hook on the collector sort 0xc85470 only while the knob is on. `/home` was full during that work: `--out-root` on another disk keeps
   the snapshots off it.
 
 ## Keys
