@@ -40,6 +40,11 @@ touches, chooses and holds things. In v609, three things break that.
   Sliding the hand over a tabletop keeps the fingertips on the surface. Thin props (paper stacks, books, plates) stop the
   fingers too. This is visual only.
 
+- **G6 Living NPCs get a proper grab.** Guards and civilians who are awake can be grabbed by the collar, an upper arm or a
+  forearm, with grip alone or a fist, as reliably as a corpse (G2–G4 apply). While you squeeze, your hand holds him: the
+  hand stays on the grasp point, he stumbles and he becomes alerted. A hard pull throws him into a ragdoll, and your hand
+  keeps hold of a limb, as today's yank does. Letting go frees him.
+
 ## Non-goals
 
 - **Holding loot in the fingers.** No coin held between the fingers and no putting loot away by hand. The user's words:
@@ -50,6 +55,9 @@ touches, chooses and holds things. In v609, three things break that.
 - Finger physics that pushes props. Fingers stop on things. Only the hand moves or knocks things, as it does now.
 - New buttons. Grip alone now also grabs (see Decisions). Nothing else about the controls changes.
 - Changes to the throw, the sword, guns, powers, doors or the corpse weight from v609.
+- Changes to chokes and stealth takedowns. They work well today (user, v603) and keep priority over the new grab.
+- Dragging a living guard around the level while he stays standing. The pull moves him a little. Moving him far is
+  what the ragdoll yank is for.
 
 ## Anti-goals (failures even if it technically works)
 
@@ -68,6 +76,8 @@ touches, chooses and holds things. In v609, three things break that.
 - **Frame-rate loss.** The user's hard requirement is ≥72 fps stable on 8 GB-class GPUs. The game is CPU and engine bound
   on the laptop, so every new cast is counted against the existing budget.
 - **Mushy hands.** The ease-in is for the grip pose only. The hand position stays on the controller with no added lag.
+- **A grab that steals a choke or a takedown.** Reaching behind an unaware guard to choke him must still choke him.
+- **A guard who teleports, pops or slides.** If the pull lever makes him snap back or skate, it is not shipped.
 
 ## Constraints
 
@@ -178,6 +188,22 @@ Ranked suspects:
   solver already goes further. G5 follows the Alyx look (fingers rest on surfaces), and Bonelab numbers are used where
   they exist: 50 ms finger smoothing (study 323), the 0.6–1.0 held clamp (study 327) and the 0.25 s grab blend.
 
+### R5 Living guards (G6)
+
+- Today's only living-guard grab is the **yank** (`NativeWeaponHands::yank`, `native_weapon_hands.hpp` ~382; consumer
+  `native_grab.hpp` ~638 and ~709). A full fist at a living guard's upper body plus a hand speed above 2.2 m/s applies the
+  `shove_damage` decl and `START_RAGDOLL`, then the squeezing hand takes his nearest limb for 1.5 s (`NativeGrab::yanked`).
+  In sim v424 he was on the floor at 2 s and stood up at 4–6 s.
+- The levers for a non-ragdoll hold were analysed statically in `docs/BONELAB-FEEL-GUARD-PULL-RE.md` (plan A Task 14):
+  - **stagger**: `shove_damage` (no damage) is the candidate. Whether it staggers without ragdolling is unmeasured;
+  - **alert**: unproven. The shove's inflictor is the player. `NativeMelee::unaware` (`0x5bf560`) going false is the
+    measurement;
+  - **pull**: `teleport_step` (`0x87d1e0` on `npc+0x300`) is the only candidate. The snap-back and yaw-reset risk is
+    unmeasured.
+  - The dev probe `build/guard-probe` and the scenario `tools/linux/scenarios/guard_probe.py` exist. **No live experiment
+    has run**, because no save had an unaware guard in reach.
+- Living means `!(npc+0xd1 & 0x28)`.
+
 ## Decisions (the user's)
 
 - Loot goes straight to the inventory on squeeze. Nothing is held in the fingers in this phase.
@@ -189,6 +215,10 @@ Ranked suspects:
 - **Grip alone grabs physical props and corpses** (user, 2026-10-25, the Bonelab / Alyx way). Grip on loot or a usable
   thing (a door, a lever) still does the game's Use. The palm decides which one you meant. The fist (grip + trigger) still
   grabs too.
+- **Living NPCs: hold, then ragdoll on a hard pull** (user, 2026-10-25). This replaces the 2026-10-20 "pull + stagger,
+  never ragdoll" choice. Guards and civilians are both included.
+- The test save near an unaware guard is the builder's job, found with the entity tools and the sim teleport (user:
+  "you find one").
 
 ## Behaviour decisions (builder's calls, made here)
 
@@ -318,6 +348,32 @@ The order is: measure, then fix the cause the numbers show.
   and opening is eased (tau 60 ms) when free-hand contact is involved. Today opening is immediate.
 - **Weapon and native hands** stay as they are (the gun and the sword own their poses).
 
+### G6: living NPCs
+
+- **Candidates**: a living NPC's collar, upper arms and forearms join the G2 one-list palm cost, through the same bone
+  reader the corpse path uses (`nearest_ragdoll_body` style, on the keyframed skeleton; a keyframed body needs a bone
+  *position* read, not a dynamic body). Priority 1.0. The 0.12 m grip-alone gate applies.
+- **Choke and takedown first**: when that hand's native takedown or choke prompt is showing for this NPC, or the choke
+  route owns the squeeze (`choke_route`), the grab is not offered. This is asserted by a check.
+- **The hold**:
+  - The drawn hand seats on the grasp bone and follows it (the hand body is told that bone is its anchor), so the hand is
+    visibly on him. Fingers wrap with the G4 ease-in on a cylinder from the bone radius.
+  - At grab start: a `shove` (stagger) and the alert. If the measurement shows the shove does not alert him, the alert
+    lever is found or the hold ships with stagger only and says so in the notes.
+  - While held, if the controller is farther than 6 cm from the grasp point, `teleport_step` moves him toward it by at
+    most 5 cm per 100 ms, horizontally only, and only if the probe shows no snap-back and no yaw pop. Otherwise there is
+    no pull: the hand stays on him and the tether below applies.
+  - **The tether**: the hold breaks when the controller is more than 0.35 m from the grasp point for 0.2 s, or when the
+    grip is released. Then the hand returns to the controller with the usual 0.12 s ease.
+- **The hard pull**: while holding, a hand speed above **2.2 m/s** away from him (today's yank threshold) runs today's
+  yank: shove, `START_RAGDOLL`, the pull velocity, and the hand keeps his nearest limb as a ragdoll hold. The existing
+  `START_RAGDOLL` budget, kill-switch (`build/no-ragdoll-posts`) and runaway lockout stay. Today's fist yank without a
+  hold keeps working.
+- **Measure first**: plan the work so the `guard_probe` experiments (`shove`, `teleport_step 0.05 5`) run in the sim
+  before the hold is built on them. The results are recorded in `docs/BONELAB-FEEL-GUARD-PULL-RE.md`.
+- **If the sim cannot find a usable guard spot**: build the hold with the conservative levers only (the hand stays on him,
+  stagger and alert from the shove, no pull) and mark it for the headset run.
+
 ### Settled after the builder check (builder's calls)
 
 - **G5 covers static world geometry** (walls, door leaves, table tops, shelves), not only props, through the same world
@@ -382,6 +438,10 @@ The order is: measure, then fix the cause the numbers show.
   - `paper_grab`: a paper stack on a desk among props; press before contact (buffer), press on contact; first-try
     catch, no wrong pick;
   - `corpse_middle_grab`: reach to the torso; the grab catches;
+  - `guard_hold`: teleport within reach of an unaware guard (found with `tools/entities.py` / `vr_selftest.py --near`).
+    Grip on his collar: the hold starts, he staggers (no `bodies_dynamic`), and `unaware` goes false. A slow hand move
+    pulls him, or doesn't, as measured. A fast pull ragdolls him and the hand holds a limb. A release frees him.
+    Reaching behind him for a choke still chokes;
   - `hand_on_table`: a flat hand pressed on and slid over a table; no fingertip below the surface by more than 5 mm in the
     drawn pose, no `stuck_frames`, `finger_ik` cost within budget;
   - the existing corpse, `finger_touch`, `run_hands` and `sword_regrab` scenarios stay green;
@@ -396,6 +456,8 @@ The order is: measure, then fix the cause the numbers show.
     arriving;
   - grab with grip alone and with a fist; block with the right grip next to a table and a crate (it must block, not grab);
     open a door and pull a lever with grip alone (Use still wins);
+  - grab a guard and a civilian by the collar and by an arm: the hand stays on him, he stumbles and notices you; a hard
+    pull ragdolls him and you keep a limb; let go and he's free; a choke from behind still chokes;
   - watch a bottle grab: the fingers ease in, no snap;
   - press a flat hand on a table, slide it, reach onto a shelf, touch a paper stack: the fingers stay on the surfaces,
     with no jitter;
