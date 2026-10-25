@@ -1117,12 +1117,12 @@ public:
         return h->bounds?length(h->bounds->maximum-h->bounds->minimum):.3;
     }
     // v613 item 4: a live corpse hold of this hand: the ragdoll bone and how long it has been held (ms), for the torso-hold handoff to the native carry.
-    struct CorpseHoldAge {int bone{-1};std::uint64_t held_ms{};};
+    struct CorpseHoldAge {int bone{-1};std::uint64_t held_ms{};std::uintptr_t entity{};};
     std::optional<CorpseHoldAge> corpse_hold(unsigned side,UINT64 now) {
         if(side>=2) return {};
         std::lock_guard<std::mutex> lock(mutex_);const auto& lane=lanes_[side];
         if(!lane.held || !lane.corpse || lane.pending_release || lane.held->bone<0 || !lane.bound_at || now<lane.bound_at) return {};
-        return CorpseHoldAge{lane.held->bone,now-lane.bound_at};
+        return CorpseHoldAge{lane.held->bone,now-lane.bound_at,lane.held->entity};
     }
     NativeHandContact& hand_contact() {return contact_;}
     // Solid hands, discovery: the registry scan that finds the props near a palm, once a frame from the render thread after the hands are published

@@ -114,7 +114,7 @@ int main() {
             CHECK(mx-mn<=.07);
         }
     }
-    {   // a stop at a 100 Hz drive is still a stop (two unchanged publications to read it, so the overshoot is the sync case plus up to one drive tick: <= .26 at 6 m/s) and one dropped render frame at 6 m/s is not
+    {   // a stop at a 100 Hz drive is still a stop (two unchanged publications to read it, the body-ahead cap fades the feedforward within 2 cm of overshoot, so the net overshoot is ~6 cm at 6 m/s, as for synchronous ticks) and one dropped render frame at 6 m/s is not
         for(const bool stop:{true,false}) {
             HandServoState st;HandServoConfig cfg;GrabTuning tun;WorldTrackedPose body=pose({}),target=pose({});Vec3 v{};
             const double V=6,Tr=1./90,Td=1./100;double t=0,next_r=Tr,next_d=Td,pub=0,stop_at=3,peak=-1e9,frame=0,worst_gap=0;
@@ -128,7 +128,7 @@ int main() {
                     if(!stop&&t>2) worst_gap=std::max(worst_gap,std::fabs(V*t-body.position.x));
                 }
             }
-            if(stop) CHECK(peak<=.26); else CHECK(worst_gap<=.12);          // a dropped frame costs at most ~1 frame of travel (6.7 cm) plus the usual lag
+            if(stop) {CHECK(peak<=.13);CHECK(peak-V*Td<=.065);}   /* the body leads by its last committed tick (V*Td) in this sim's ordering */ else CHECK(worst_gap<=.12);          // a dropped frame costs at most ~1 frame of travel (6.7 cm) plus the usual lag
         }
     }
     {   // zero_feedforward_identical: bit-identical to the call without the argument over a 500-step random sequence

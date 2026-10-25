@@ -23,8 +23,8 @@ def check(source: str) -> None:
     for guard in ("grab_use", "sword_owns", "choke_route.consume_use", "grip_use[1] && right_interaction.interact"):
         assert guard in arguments, f"Missing right reservation: {guard}"
     # G3 (plan Task 6): a grip-alone grab (GripIntent::Kind::grab) is a physical press like the fist, on both hands, and its squeeze is published.
-    assert "const bool right_physical=grip_intent_out[1].fist || grip_intent_out[1].grab || native_grab.holding(1);" in source
-    assert "(void)native_grab.filter_native_grip(0,grip_intent_out[0].fist || grip_intent_out[0].grab || native_grab.holding(0)?physical_left_grip:0.f," in source
+    assert "const bool right_physical=(grip_intent_out[1].fist || grip_intent_out[1].grab || native_grab.holding(1)) && grip_intent[1].kind()!=d2vr::GripIntent::Kind::carry;" in source
+    assert "(void)native_grab.filter_native_grip(0,(grip_intent_out[0].fist || grip_intent_out[0].grab || native_grab.holding(0)) && grip_intent[0].kind()!=d2vr::GripIntent::Kind::carry?physical_left_grip:0.f," in source
     assert "grab_hands=(grip_intent_out[0].grab?1u:0u)|(grip_intent_out[1].grab?2u:0u);" in source
     publish = re.search(r"native_grab\.publish\(side,\*body,hand,\(\(fist_hands\.load\(\)\|grab_hands\.load\(\)\)&\(1u<<side\)\) \|\| native_grab\.holding\(side\)\?squeeze:0\.f,", source)
     assert publish, "the squeeze is published for a fist or a grip-alone grab"
@@ -40,7 +40,8 @@ def check(source: str) -> None:
     # v613 item 4: the torso-hold handoff to the native carry, its knob and the drop press
     assert 'legacy_corpse_carry=fs::exists(root/L"build"/L"legacy-corpse-carry");' in source
     assert "d2vr::carry_handoff(ci)" in source and "native_grab.corpse_hold(h,now_gi)" in source
-    assert "carry_handoff_now[0],carrying_now[0]" in source and "carry_handoff_now[1],carrying_now[1]" in source
+    assert "carry_handoff_now[0],body_carry_active" in source and "carry_handoff_now[1],body_carry_active" in source
+    assert "ci.native_is_corpse=" in source and "grip_intent[1].kind()!=d2vr::GripIntent::Kind::carry" in source and "grip_intent[0].kind()!=d2vr::GripIntent::Kind::carry" in source
     assert "if(now_l<corpse_drop_press_until) input.x=true;" in source
     assert "in.choke_owns=h==1 && (choke_offer.has_value() || control_active_choke!=0);" in source
     assert "in.takedown_offered=control_takedown.any();" in source
@@ -71,7 +72,7 @@ if __name__ == "__main__":
         source.replace("cf.explicit_block=logic==2", "cf.explicit_block=false && logic==2", 1),
         source.replace("right_fist_rb?right_native:0.f", "right_native", 1),
         source.replace("grip_intent_out[1].fist || grip_intent_out[1].grab || native_grab.holding(1)", "grip_intent_out[1].fist || native_grab.holding(1)", 1),
-        source.replace("grip_intent_out[0].fist || grip_intent_out[0].grab || native_grab.holding(0)?physical_left_grip", "grip_intent_out[0].fist || native_grab.holding(0)?physical_left_grip", 1),
+        source.replace("(grip_intent_out[0].fist || grip_intent_out[0].grab || native_grab.holding(0)) && grip_intent[0]", "(grip_intent_out[0].fist || native_grab.holding(0)) && grip_intent[0]", 1),
         source.replace("(fist_hands.load()|grab_hands.load())&(1u<<side)", "fist_hands.load()&(1u<<side)", 1),
         source.replace("grab_hands=(grip_intent_out[0].grab?1u:0u)|(grip_intent_out[1].grab?2u:0u);", "grab_hands=0;", 1),
         source.replace("in.choke_owns=h==1 && (choke_offer.has_value() || control_active_choke!=0);", "in.choke_owns=false;", 1),

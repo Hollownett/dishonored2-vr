@@ -147,6 +147,13 @@ inline HandServoOutput servo_step(HandServoState& st,const WorldTrackedPose& tar
         const double age=std::clamp(target_age,0.,.03);
         error=error+feedforward*age;
     }
+    // v613 item 6 (review): a body that is already AHEAD of the aim along the run (steady running leaves it behind, never ahead) means the target stopped or
+    // slowed before the stop test could read it (two unchanged publications): the feedforward fades out over the next 2 cm of overshoot, so a sprint stop
+    // overshoots by a few cm instead of travelling the whole detection latency.
+    if(!legacy_gate && std::isfinite(target_age) && (feedforward.x!=0||feedforward.y!=0||feedforward.z!=0)) {
+        const double fl=length(feedforward),ahead=-dot(error,feedforward)/fl;
+        if(ahead>.005) feedforward=feedforward*std::clamp(1-(ahead-.005)/.02,0.,1.);
+    }
     const Vec3 ff_ref=length(st.prev_ff)>length(feedforward)?st.prev_ff:feedforward;
     st.prev_ff=feedforward;
     const bool ff=ff_ref.x!=0||ff_ref.y!=0||ff_ref.z!=0;

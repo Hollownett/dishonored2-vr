@@ -51,8 +51,9 @@ inline GripAloneChoice decide_grip_alone(const GripAloneInput& in,const GrabTuni
 // drag. A quick torso grab (released or shorter than 0.5 s) is still the hand drag. build/legacy-corpse-carry (legacy) restores v612: never hands off.
 inline constexpr std::uint64_t corpse_carry_hold_ms=500;
 inline constexpr bool torso_bone(int bone) noexcept {return bone>=0 && bone<=2;}
-struct CarryHandoffInput {bool corpse_hold{},grip_held{},legacy{};int bone{-1};std::uint64_t held_ms{};};
+// native_is_corpse: this hand's native Use target is the held corpse itself (its own carry); occupied: the game already carries or holds something.
+struct CarryHandoffInput {bool corpse_hold{},grip_held{},legacy{},native_is_corpse{},occupied{};int bone{-1};std::uint64_t held_ms{};};
 inline bool carry_handoff(const CarryHandoffInput& in) noexcept {
-    return !in.legacy && in.corpse_hold && in.grip_held && torso_bone(in.bone) && in.held_ms>=corpse_carry_hold_ms;
+    return !in.legacy && in.corpse_hold && in.grip_held && in.native_is_corpse && !in.occupied && torso_bone(in.bone) && in.held_ms>=corpse_carry_hold_ms;
 }
 } // namespace d2vr
