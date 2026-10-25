@@ -1284,7 +1284,7 @@ public:
             lane.pending_release=true;lane.release_throw=raw<.35f && usable;
         }
         if(!usable) {revoke_owner_locked(lane);lane.obstruction.reset();}
-        bool eligible=false,caught=false;
+        bool eligible=false;
         const double gate=grip_alone?tuning_.grip_alone_gate_m:grab_acquire_distance;
         // G3 (Task 5): a buffered press looks again each frame. A candidate inside the gate is caught: the press is decided again below, on
         // this frame, as a normal press. The window's end resolves it native (the squeeze then passes as today), counted once.
@@ -1294,7 +1294,7 @@ public:
             const auto step=lane.buffer.step(now,gap,candidate?candidate->entity_id:0);
             // caught: re-arm the press latch now (the dispatcher sampled this squeeze as not ours while it was pending), so the bind works whether the press
             // is decided below or after a LOS query (service_obstruction samples and binds; acceptance sim T124714 caught a corpse but never bound it)
-            if(step==GrabIntentBuffer::Step::caught) {lane.owner.catch_pending();caught=true;lane.catch_tick=now;lane.grab.arm();}
+            if(step==GrabIntentBuffer::Step::caught) {lane.owner.catch_pending();lane.catch_tick=now;lane.grab.arm();}
             else if(step!=GrabIntentBuffer::Step::waiting) {
                 const auto role_before=lane.owner.role();lane.owner.resolve_pending(false);note_role_change_locked(role_before,lane);++native_presses_;
             }
@@ -1327,7 +1327,9 @@ public:
         note_role_change_locked(role_before,lane);
         if(!lane.owner.pending()) lane.buffer.cancel();   // released, unfocused, occupied or resolved: the buffer ends with the pending role
         if(deciding && !lane.owner.pending()) {if(lane.owner.physical()) ++physical_presses_;else ++native_presses_;}
-        if(deciding && lane.owner.physical()) {lane.attempted=true;lane.acquired=false;lane.pending_release=false;if(caught) lane.grab.arm();} // caught mid-squeeze: latch it
+        // A press granted physical arms the latch: `deciding` already required an observed release (role ready), and a squeeze that reaches the lane at
+        // once (a grip-alone grab publishes the grip only after its decision; a buffered catch) may have been sampled as not ours just before (sim T125301).
+        if(deciding && lane.owner.physical()) {lane.attempted=true;lane.acquired=false;lane.pending_release=false;lane.grab.arm();}
         if(!std::isfinite(raw) || raw<.35f) lane.buffer_used=false;
         // Arm only after a real observed release. This is controller math;
         // the renderer does not bind bodies or call the velocity ABI.
@@ -1389,6 +1391,7 @@ public:
             lane.obstruction->clear=*verdict;lane.obstruction->verdict_tick=GetTickCount64();lane.decision_deferred=false;
             if(lane.owner.deciding(p.grip,true)) {
                 const auto role_before=lane.owner.role();lane.owner.filter(p.grip,true,*verdict);note_role_change_locked(role_before,lane);lane.attempted=*verdict;lane.acquired=false;
+                if(lane.owner.physical()) lane.grab.arm();   // the press is ours from here (see filter_native_grip)
                 if(*verdict)++physical_presses_;else ++native_presses_;
             }
             if(!*verdict)revoke_owner_locked(lane);
