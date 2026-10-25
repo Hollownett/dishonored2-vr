@@ -1128,6 +1128,28 @@ static std::array<std::atomic<bool>,2> jitter_owner_dlss{};
 static bool dlss_provider_found=false;static int dlss_provider_source=0;static std::string dlss_provider_utf8;
 static std::atomic<unsigned> present_adapter_vendor{},present_adapter_attempts{};static bool dlss_fallback_noted=false;
 static bool dlss_offered() noexcept {return dlss_provider_found && present_adapter_vendor.load(std::memory_order_relaxed)==0x10de;}
+// v613: whether FSR 4 runs on the game's adapter, by the FSR 4 backend's own rule (bundled signed AMD provider, no build/fsr4.off, a same-adapter
+// D3D12 device with SM 6.6, a genuine FSR 4 version, a context that creates): a 64x64 probe context, once per session, Present thread.
+static int fsr4_supported_state=-1;
+static bool fsr4_supported(IDXGISwapChain* chain) noexcept {
+    if(fsr4_supported_state>=0) return fsr4_supported_state==1;
+    fsr4_supported_state=0;
+    try {
+        ComPtr<ID3D11Device> device;
+        if(chain && !fsr_taa.fsr4_provider_path.empty() && SUCCEEDED(chain->GetDevice(IID_PPV_ARGS(&device)))) {
+            d2vr::Fsr4EyeUpscaler probe;d2vr::Fsr3EyeUpscaler::Desc desc{};
+            desc.render_w=desc.render_h=desc.display_w=desc.display_h=64;desc.hdr=false;desc.auto_exposure=false;desc.mv_jittered=true;
+            fsr4_supported_state=probe.create(device.Get(),desc,fsr_taa.fsr4_provider_path.c_str(),DXGI_FORMAT_R8G8B8A8_UNORM,DXGI_FORMAT_R8G8B8A8_UNORM)?1:0;
+            probe.destroy();
+        }
+    } catch(...) {fsr4_supported_state=0;}
+    return fsr4_supported_state==1;
+}
+// The launcher reads artifacts/aa-gpu-caps.txt ("1 vendor dlss fsr4") for its default AA row (Prefs.DefaultAa mirrors first_start_aa).
+static void write_aa_gpu_caps(bool fsr4) noexcept {
+    try {std::ofstream(output_directory/L"aa-gpu-caps.txt",std::ios::trunc) << "1 " << present_adapter_vendor.load() << ' ' << (dlss_offered()?1:0) << ' ' << (fsr4?1:0) << '\n';}
+    catch(...) {}
+}
 // The engine's TAA jitter (d2vr::engine_taa_pattern, 1/16 px; dlss_jitter.hpp taa_sample_px selects it or the DLSS
 // Halton sequence). FSR's jitter convention (NDC offset (2jx/W,-2jy/H)) is (-x,+y) of the engine's frustum shift,
 // hence fsr_jitter_sign {-1,1} (Luma D2 agrees); DLSS receives the same values (UE passes one TemporalJitterPixels to both).
@@ -6966,7 +6988,7 @@ std::string feedback_status_json() {
         << ",\"features_created\":" << fsr_taa.dlss_features_created.load() << ",\"optimal_queries\":" << fsr_taa.dlss_optimal_queries.load() << ",\"waiting\":" << fsr_taa.dlss_waiting.load() << ",\"owner_rebuilds\":" << fsr_taa.dlss_owner_rebuilds.load()
         << ",\"optimal\":[" << fsr_taa.dlss_optimal_width.load() << ',' << fsr_taa.dlss_optimal_height.load() << "],\"quality_fraction\":" << fsr_taa.dlss_quality_fraction.load()
         << ",\"last_reason\":\"" << d2vr::DlssEyeUpscaler::reason_name(static_cast<d2vr::DlssEyeUpscaler::Reason>(fsr_taa.dlss_last_reason.load())) << "\",\"last_result\":" << fsr_taa.dlss_last_result.load() << '}'
-        << ",\"aa_first_start\":{\"state\":\"" << first_start_state << "\",\"removed\":[";
+        << ",\"aa_first_start\":{\"state\":\"" << first_start_state << "\",\"fsr4_supported\":" << fsr4_supported_state << ",\"removed\":[";
     for(std::size_t removed_index=0;removed_index<first_start_removed.size();++removed_index) out << (removed_index?",":"") << '"' << first_start_removed[removed_index] << '"';
     out << "],\"crosshair_migrated\":" << (crosshair_migrated?"true":"false") << "}"
         << "},\"wrist_hud\":{\"samples\":" << d2vr::NativeWristHud::samples.load()
@@ -8440,11 +8462,15 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                 const int live_mode=temporal_live_mode.load();
                                 game_xr->dlss_available(dlss_offered());game_xr->log_note=&note_recoverable;
                                 if(first_start_pending && present_adapter_vendor.load(std::memory_order_relaxed)) { // v609: once per session, only with a known vendor
-                                    const auto decision=d2vr::first_start_aa(aa_chosen_preference,preferences_file_existed,present_adapter_vendor.load(),dlss_offered());
-                                    if(decision!=d2vr::FirstStartAa::wait) {
+                                    const bool fsr4=!aa_chosen_preference && !dlss_offered() && fsr4_supported(chain); // v613: FSR 4 only where its backend creates
+                                    const auto decision=d2vr::first_start_aa(aa_chosen_preference,preferences_file_existed,present_adapter_vendor.load(),dlss_offered(),fsr4);
+                                    write_aa_gpu_caps(fsr4);
+                                    if(decision!=d2vr::FirstStartAa::wait && decision!=d2vr::FirstStartAa::keep && xr_gameplay_frames>0) {
+                                        first_start_pending=false;first_start_state="late"; // v613: never switch AA under a running level; the next start decides
+                                    } else if(decision!=d2vr::FirstStartAa::wait) {
                                         first_start_pending=false;
-                                        game_xr->adopt_first_start_aa(decision==d2vr::FirstStartAa::dlaa?std::optional<int>(7):decision==d2vr::FirstStartAa::fsr3_native?std::optional<int>(2):std::nullopt);
-                                        first_start_state=decision==d2vr::FirstStartAa::dlaa?"dlaa":decision==d2vr::FirstStartAa::fsr3_native?"fsr3_native":"keep";
+                                        game_xr->adopt_first_start_aa(d2vr::first_start_mode(decision)>=0?std::optional<int>(d2vr::first_start_mode(decision)):std::nullopt);
+                                        first_start_state=d2vr::first_start_name(decision);
                                     }
                                 }
                                 if(!crosshair_legacy_file.empty()) { // v609: delete the legacy knob only after the crosshair=false preference is on disk; one try per session
@@ -10623,7 +10649,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
             }
             fsr_taa.dlss_evaluations=0;fsr_taa.dlss_evaluate_failures=0;fsr_taa.dlss_create_failures=0;fsr_taa.dlss_fallbacks=0;fsr_taa.dlss_owner_refusals=0;
             fsr_taa.dlss_features_created=0;fsr_taa.dlss_optimal_queries=0;fsr_taa.dlss_waiting=0;fsr_taa.dlss_owner_rebuilds=0;fsr_taa.dlss_quality_fraction=d2vr::dlss_mode::default_quality_fraction;
-            dlss_fallback_noted=false;present_adapter_vendor=0;present_adapter_attempts=0;dlss_jitter_mode=false;for(auto& owner:jitter_owner_dlss) owner=false;
+            dlss_fallback_noted=false;present_adapter_vendor=0;present_adapter_attempts=0;fsr4_supported_state=-1;dlss_jitter_mode=false;for(auto& owner:jitter_owner_dlss) owner=false;
             for(unsigned side=0;side<2;++side) {fsr_taa.eye_motion_width[side]=0;fsr_taa.eye_motion_height[side]=0;}
         }
         native_prompt_probe_calls=0;native_prompt_probe.configure(image_base,&read_self);d2vr::NativeWristHud::observer=&native_hud_call_observer;

@@ -60,7 +60,7 @@ sealed class MainForm : Form
     readonly ArtButton dlssButton = new(DlssProvider.Prompt, Look.Secondary);
     static readonly (string text, object val)[] AaBase = { ("Off", 0), ("Game TAA", 1), ("FSR 3 - native", 2), ("FSR 3 - quality (77%)", 3), ("FSR 3 - balanced (67%)", 4), ("FSR 4 - native", 5), ("FSR 4 - quality (77%)", 6) };
     static readonly (string text, object val)[] AaDlss = { ("DLAA (NVIDIA DLSS)", 7), ("DLSS - quality (NVIDIA DLSS)", 8) };
-    const string AaHelp = "FSR 3 native is the accepted default. Quality/balanced render fewer pixels for speed. FSR 4 is the newer upscaler.";
+    const string AaHelp = "The default follows your GPU: DLAA on NVIDIA RTX with DLSS, FSR 4 native where FSR 4 runs, otherwise FSR 3 native. Quality/balanced render fewer pixels for speed. FSR 4 is the newer upscaler. The in-game VR menu can change it at any time.";
     IReadOnlyList<Feature> features = Array.Empty<Feature>();
     string? featuresError; bool showFeatures, loadingFeatures;
     Control settingsLast = null!;  // the last button of the row; the message line sits to its right
@@ -378,6 +378,7 @@ sealed class MainForm : Form
             var found = await Task.Run(() => DlssFinder.FindAndConfigure(env.Root, DlssFinder.SteamRoot(), cts.Token));
             if (found == null || IsDisposed || Disposing || !IsHandleCreated) return;
             RefreshDlssChoices();
+            if (prefs.AaChosen == 0) { var d = LoadWithDefaultAa(); ApplyToForm(d, prefs); prefs = d; } // the found DLSS makes DLAA the default
             SetSettingsMsg($"DLSS found in {found.Source["auto: ".Length..]}: {found.Path}. {DlssProvider.Attribution} Applies the next time VR starts.", Ui.Good);
         }
         catch (Exception) { }  // best effort: manual picking stays available
@@ -391,6 +392,7 @@ sealed class MainForm : Form
             if (dialog.ShowDialog(this) != DialogResult.OK) return;
             var found = DlssProvider.Configure(env.Root, dialog.FileName);
             RefreshDlssChoices();
+            if (prefs.AaChosen == 0) { var d = LoadWithDefaultAa(); ApplyToForm(d, prefs); prefs = d; }
             SetSettingsMsg($"DLSS provider recorded: {found.Path}. {DlssProvider.Attribution} Applies the next time VR starts.", Ui.Good);
         }
         catch (Exception ex) { SetSettingsMsg("DLSS provider not changed: " + ex.Message, Ui.Bad); }
@@ -740,7 +742,7 @@ sealed class MainForm : Form
     {
         try
         {
-            var d = Prefs.Load(env.SettingsFile);
+            var d = LoadWithDefaultAa();
             prefs = d;
             ApplyToForm(d, null);
             SetSettingsMsg((File.Exists(env.SettingsFile) ? "Loaded build\\vr-settings.cfg. The in-game VR menu wins: the launcher shows what the game saved. Changes apply the next time VR starts. " : "No saved file yet; showing defaults. ") + DlssProvider.Status(env.Root), Ui.Dim);
@@ -754,9 +756,12 @@ sealed class MainForm : Form
     {
         base.OnActivated(e);
         if (options == null || res == null || crosshair == null || recenter == null || cutscenes == null) return;
-        try { var d = Prefs.Load(env.SettingsFile); ApplyToForm(d, prefs); prefs = d; }
+        try { var d = LoadWithDefaultAa(); ApplyToForm(d, prefs); prefs = d; }
         catch (Exception ex) { SetSettingsMsg(ex.Message, Ui.Bad); }
     }
+
+    /// <summary>v613: the saved settings, with the GPU's default AA preselected while no AA mode was chosen (Prefs.DefaultAa mirrors the DLL).</summary>
+    Prefs LoadWithDefaultAa() => Prefs.WithDefaultAa(Prefs.Load(env.SettingsFile), File.Exists(env.SettingsFile), DlssProvider.Available(env.Root), Prefs.Fsr4Supported(env.P("artifacts", "aa-gpu-caps.txt")));
 
     Prefs ReadForm()
     {
