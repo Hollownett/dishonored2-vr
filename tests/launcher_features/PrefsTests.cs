@@ -54,10 +54,10 @@ public static class PrefsTests
         check("merge_takes_user_aa_edit_and_marks_chosen", m2.TemporalAa == 4 && m2.AaChosen == 1 && string.Join(",", m2.Measurements) == "9,9,9,9,9");
 
         // v613: picking the value that is already saved/default (FSR 3 native on a fresh install) is still a choice; without it the game applies its one-time DLAA default over the pick.
-        var same = Prefs.Merge(new Prefs { TemporalAa = 2 }, new Prefs { TemporalAa = 2, AaTouched = true }, new Prefs { TemporalAa = 2 });
-        check("merge_marks_chosen_when_user_picks_the_current_aa", same.AaChosen == 1 && same.TemporalAa == 2);
-        var untouched = Prefs.Merge(new Prefs { TemporalAa = 2 }, new Prefs { TemporalAa = 2, Hud = 90 }, new Prefs { TemporalAa = 2 });
-        check("merge_leaves_aa_unchosen_when_row_untouched", untouched.AaChosen == 0);
+        var same = Prefs.Merge(new Prefs { TemporalAa = 2 }, new Prefs { TemporalAa = 2 }, new Prefs { TemporalAa = 2 });
+        check("merge_marks_chosen_on_any_save_even_with_no_aa_edit", same.AaChosen == 1 && same.TemporalAa == 2);
+        var other = Prefs.Merge(new Prefs { TemporalAa = 2 }, new Prefs { TemporalAa = 2, Hud = 90 }, new Prefs { TemporalAa = 7, AaChosen = 1 });
+        check("merge_save_keeps_in_game_aa_and_chosen", other.AaChosen == 1 && other.TemporalAa == 7 && other.Hud == 90);
 
         var fx10p = Path.Combine(AppContext.BaseDirectory, "vr-settings-v10.cfg");
         var f2 = Tmp(); Prefs.Merge(fx10, Prefs.Load(fx10p), Prefs.Load(fx10p)).Save(f2);

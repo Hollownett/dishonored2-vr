@@ -3037,9 +3037,10 @@ static bool item_is_gun(std::uintptr_t item) noexcept {
     if(!read_self(item+8,&id,4) || id==0x3fff0010 || (id>>16)>=0x3fff || !read_self(image_base+0x39a5290,&game,8) || !d2vr::rig::pointer(game) ||
        !read_self(game+0x3130b0+(id>>16)*8,&entity,8) || !d2vr::rig::pointer(entity) || !read_self(entity+0x2e8,&decl,8) || !d2vr::rig::pointer(decl) ||
        !read_self(decl+0x48,&name,8) || !d2vr::rig::pointer(name) || !read_self(name,text.data(),text.size()-1)) return false;
-    return d2vr::is_gun_equip_name(text.data());
+    return d2vr::is_gun_equip_name(text.data()) && gun_model_of(item)!=0; // the same weapon-entity/model vtable validation the barrel read uses: a non-gun item never engages barrel aim
 }
 // Aim direction = the barrel; the position stays the hand (the bore passes a few cm away: ~0.2 deg at the 30 m crosshair).
+static std::atomic<bool> barrel_trace_enabled{false};static std::string barrel_pending_row;static unsigned barrel_rows_written=0; // Present thread only (the row)
 static std::atomic<std::uint64_t> barrel_ok{},barrel_bad_frame{},barrel_no_model{},gun_item_frames{},gun_name_miss_frames{}; // v613 diagnostics (status "barrel_aim")
 template<class P> static bool barrel_aim(P& p) noexcept {
     const auto model=left_gun_model.load();std::uintptr_t vt{};std::array<float,9> r{};
@@ -8199,6 +8200,7 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                 if(render_world_scene() && tracked_arms_requested) {
                                     // Which hands the game itself occupies (weapon/item in the slot, or carrying).
                                     auto reader=&read_self;const auto state=d2vr::rig::native_hand_state(reader,image_base);
+                                    if(!barrel_pending_row.empty()) {if(!output_directory.empty()) {std::ofstream row(output_directory/L"barrel-aim.csv",std::ios::app);row<<barrel_pending_row;++barrel_rows_written;} barrel_pending_row.clear();} // no file I/O under hand_state_mutex
                                     std::lock_guard<std::mutex> hand_lock(hand_state_mutex);
                                     if(state) {
                                         const unsigned carry_hands=state->carry.hands(); // a carried body leaves the left hand free
@@ -8222,10 +8224,11 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                           left_gun_model=!state->carrying && state->slots[0] && (by_name || by_item)?gun_model_of(state->slots[0]):0;} // v613: a swap can spell the equip pose differently; the item's own decl name decides too
                                          if(left_gun_model) if(const int gun_owner=gun_owner_of(state->slots[0]);gun_owner>=0) hip_owner=gun_owner;}
                                         hand_state_tick=now;
-                                        {static UINT64 next_barrel_row{};   // v613 diagnostic: one row per 500 ms in artifacts/barrel-aim.csv (tick, equip name, counters, aim-frame validity)
-                                         if(now>=next_barrel_row && !output_directory.empty()) {next_barrel_row=now+500;
-                                          std::ofstream row(output_directory/L"barrel-aim.csv",std::ios::app);std::string nm(left_equip_name);for(auto& ch:nm) if(ch==',' || static_cast<unsigned char>(ch)<32) ch='?';
-                                          row<<now<<','<<nm<<','<<(left_gun_model.load()?1:0)<<','<<(state->slots[0]?1:0)<<','<<(state->carrying?1:0)<<','<<barrel_ok.load()<<','<<barrel_bad_frame.load()<<','<<barrel_no_model.load()<<','<<gun_item_frames.load()<<','<<gun_name_miss_frames.load()<<'\n';}}
+                                        if(barrel_trace_enabled.load()) {static UINT64 next_barrel_row{};   // v613 diagnostic (build/barrel-aim-trace): one row per 500 ms, at most 2000 rows; formatted here, written after the lock is released
+                                         if(now>=next_barrel_row && barrel_rows_written<2000 && barrel_pending_row.empty()) {next_barrel_row=now+500;
+                                          std::string nm(left_equip_name);for(auto& ch:nm) if(ch==',' || static_cast<unsigned char>(ch)<32) ch='?';
+                                          std::ostringstream row;row<<now<<','<<nm<<','<<(left_gun_model.load()?1:0)<<','<<(state->slots[0]?1:0)<<','<<(state->carrying?1:0)<<','<<barrel_ok.load()<<','<<barrel_bad_frame.load()<<','<<barrel_no_model.load()<<','<<gun_item_frames.load()<<','<<gun_name_miss_frames.load()<<'\n';
+                                          barrel_pending_row=row.str();}}
                                     }
                                     // The engine hides the left arm while the left slot is empty and through every equip change, and the right
                                     // one while holding an object. An arm the mod tracks stays visible (headset v361: the left arm vanished).
@@ -10605,6 +10608,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
             }
         }
         if(fs::exists(root/L"build"/L"force-taa") && !taa_preference) taa_preference=1;
+        barrel_trace_enabled=fs::exists(root/L"build"/L"barrel-aim-trace"); // diagnostics: artifacts/barrel-aim.csv (equip name vs gun item vs barrel frame), bounded, off by default
         {std::ifstream knob(root/L"build"/L"aa-mode");int mode=-1;if(knob>>mode && mode>=0 && mode<=d2vr::dlss_mode::last) taa_preference=mode;} // diagnostics: 0 off, 1 TAA, 2-4 FSR 3, 5-6 FSR 4, 7 DLAA, 8 DLSS Quality
         if(fs::exists(root/L"build"/L"fsr4") && taa_preference>=2 && taa_preference<=3) taa_preference+=3; // legacy knob: FSR 4 at the same scale
         alternate_native_taa_enabled=!fs::exists(root/L"build"/L"no-alternate-native-taa");

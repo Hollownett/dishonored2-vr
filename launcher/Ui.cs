@@ -456,8 +456,6 @@ sealed class Option
     public string Help;
     public readonly List<Item> Items = new();
     public int Index;
-    /// <summary>True once the user moved this row by hand (cleared when the form is reloaded from disk or saved); lets Save tell a deliberate pick of the current value from an untouched row.</summary>
-    public bool Touched;
     public bool IsSlider; public int Value, Min, Max, Step = 1, Page = 1;
     public Func<int, string> Format = v => v.ToString();
     public Func<bool> Active = () => true;
@@ -468,9 +466,7 @@ sealed class Option
         int old = IsSlider ? Value : Index;
         if (IsSlider) Value = Math.Clamp(Value + dir * (page ? Page : Step), Min, Max);
         else Index = Math.Clamp(Index + dir, 0, Items.Count - 1);
-        bool changed = old != (IsSlider ? Value : Index);
-        if (changed) Touched = true;
-        return changed;
+        return old != (IsSlider ? Value : Index);
     }
 }
 
