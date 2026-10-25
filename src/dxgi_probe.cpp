@@ -108,6 +108,7 @@
 #include "held_release.hpp"
 #include "native_grenade_throw.hpp"
 #include "native_gadget_aim.hpp"
+#include "native_bink_hooks.hpp"
 #include "vr_perf_governor.hpp"
 #include "vr_gestures.hpp"
 #include "native_hud_rect.hpp"
@@ -802,10 +803,14 @@ static std::atomic<UINT64> cutscene_exit_windows{};
 // (Ruling 15): at once when it appears, then at most every 500 ms; never in gameplay. The file access runs on a short-lived worker that stores the atomics,
 // one read in flight at a time, so the frame never waits on the file system.
 static std::atomic<bool> cutscene_knob_reading{false};static bool cutscene_knob_cinematic{};
+static std::atomic<bool> cutscene_no_bink{false},cutscene_no_skip_hold{false},cutscene_no_letterbox_hide{false}; // Track T C knobs: build/no-bink-theater, no-cutscene-skip-hold, no-letterbox-hide
+static UINT64 bink_poll_tick{};
+static std::atomic<UINT64> cutscene_skip_holds{},cutscene_letterbox_hidden{};
 void read_cutscene_knobs(const fs::path& build) noexcept {
     try {
         std::error_code ignored;
         cutscene_knob_off=fs::exists(build/L"no-vr-cutscenes",ignored);
+        cutscene_no_bink=fs::exists(build/L"no-bink-theater",ignored);cutscene_no_skip_hold=fs::exists(build/L"no-cutscene-skip-hold",ignored);cutscene_no_letterbox_hide=fs::exists(build/L"no-letterbox-hide",ignored);
         std::string text;{std::ifstream knob(build/L"cutscene-mode");if(knob) std::getline(knob,text);}
         const auto parsed=d2vr::parse_cutscene_mode(text);
         cutscene_mode_override=parsed?static_cast<int>(*parsed):-1;
@@ -832,7 +837,7 @@ std::string cutscene_status_json() {
      <<",\"comfort_views\":"<<cutscene_comfort_views.load()<<",\"full_views\":"<<cutscene_full_views.load()
      <<",\"provisional_origin_frames\":"<<cutscene_provisional_frames.load()<<",\"provisional_adoptions\":"<<cutscene_provisional_adoptions.load()
      <<",\"scene_speed_peak_mps\":"<<cutscene_speed_peak_mps.load()<<",\"view_scene_max_deg\":"<<cutscene_view_scene_max_deg.load()
-     <<",\"exit_yaw_step_deg\":"<<cutscene_exit_yaw_step_deg.load()<<",\"exit_offset_step_m\":"<<cutscene_exit_offset_step_m.load()<<",\"exit_windows\":"<<cutscene_exit_windows.load()<<'}';
+     <<",\"exit_yaw_step_deg\":"<<cutscene_exit_yaw_step_deg.load()<<",\"exit_offset_step_m\":"<<cutscene_exit_offset_step_m.load()<<",\"exit_windows\":"<<cutscene_exit_windows.load()<<",\"bink\":{\"installed\":"<<(d2vr::NativeBinkHooks::installed()?"true":"false")<<",\"opens\":"<<d2vr::NativeBinkHooks::opens.load()<<",\"frames\":"<<d2vr::NativeBinkHooks::frames.load()<<",\"playing\":"<<(d2vr::NativeBinkHooks::playing()?"true":"false")<<"},\"skip_hold\":"<<cutscene_skip_holds.load()<<",\"letterbox_hidden\":"<<cutscene_letterbox_hidden.load()<<'}';
     return o.str();
 }
 
@@ -7724,6 +7729,12 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                             refresh_cutscene_knobs(GetTickCount64(),(cutscene_mask&d2vr::cinematic_logic_mask)!=0);
                             const auto mode=static_cast<d2vr::CutsceneMode>(cutscene_mode_effective());const bool knob_off=cutscene_knob_off.load();
                             const bool gates_were_open=cutscene_gates_allowed.load();
+                            bool bink_playing=false; // Track T C1: bink2w64.dll hooks (only when the module is loaded; polled about once a second until installed)
+                            if(!cutscene_no_bink.load()) {
+                                const auto bink_now=GetTickCount64();
+                                if(!d2vr::NativeBinkHooks::installed() && (!bink_poll_tick || bink_now-bink_poll_tick>=1000)) {bink_poll_tick=bink_now?bink_now:1;d2vr::NativeBinkHooks::try_install();}
+                                bink_playing=d2vr::NativeBinkHooks::playing();
+                            }
                             if(!(cutscene_mask&d2vr::cinematic_logic_mask)) { // the cinematic bit left the mask: the next cutscene starts afresh
                                 if(cutscene_policy.active()) cutscene_policy.end();
                                 cutscene_flush_presents=0;
@@ -7732,6 +7743,7 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                 if(exact && !cutscene_policy.active()) {cutscene_fault_base=recoverable_faults.load();++cutscene_count;}
                                 const auto before=cutscene_policy.reason(); // before reject(): its reason is recorded as a fallback too (Ruling 10a)
                                 if(exact && !cutscene_paired_path() && !knob_off && mode!=d2vr::CutsceneMode::theater) cutscene_policy.reject(d2vr::CutsceneFallback::incomplete_pair);
+                                if(exact && bink_playing && !knob_off && mode!=d2vr::CutsceneMode::theater) cutscene_policy.reject(d2vr::CutsceneFallback::bink_video); // C1: a pre-rendered video is the theater's, at once
                                 const auto separated=[](const std::array<float,3>& a,const std::array<float,3>& b) {return std::abs(a[0]-b[0])+std::abs(a[1]-b[1])+std::abs(a[2]-b[2])>.001f;};
                                 bool rendered_distinct=false;
                                 if(game_xr && game_xr->rendered_pair_ready()) {
@@ -7745,12 +7757,13 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                     separated(views[0].pose->position,views[1].pose->position) && rendered_distinct;
                                 frame.camera_readable=owner && owner->view && owner->authored_view(); // Ruling 15: only the cinematic camera mode (10) has a validated view path; any other camera under 32 latches camera_unreadable (Theater)
                                 frame.fault=recoverable_faults.load()>cutscene_fault_base;
+                                frame.now_ms=GetTickCount64(); // Track T C4: lets the policy hold a transient mixed mask
                                 cutscene_immersive=cutscene_policy.immersive(frame,mode,knob_off);
                                 if(exact && cutscene_policy.reason()!=before) {
                                     cutscene_last_fallback=static_cast<int>(cutscene_policy.reason());
                                     if(gates_were_open) cutscene_flush_presents=3; // Setup F shows at Present F+2: the head-written images still in flight
                                 }
-                                if(exact && !cutscene_immersive)
+                                if((exact || cutscene_policy.holding()) && !cutscene_immersive) // a held mixed-mask frame replays the cutscene's last layer (C4)
                                     cutscene_hold=cutscene_policy.pending() || cutscene_flush_presents>0?d2vr::GameXr::SceneHold::black:
                                         cutscene_policy.holding()?d2vr::GameXr::SceneHold::replay:d2vr::GameXr::SceneHold::none;
                                 if(exact) ++(cutscene_immersive?cutscene_immersive_frames:cutscene_hold==d2vr::GameXr::SceneHold::black?cutscene_pending_frames:

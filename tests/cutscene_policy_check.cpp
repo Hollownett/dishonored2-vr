@@ -89,5 +89,38 @@ int main(){
      for(const char* bad:{"","Theater","vr","vr_full2","theatre","vr comfort"}) assert(!parse_cutscene_mode(bad));
      for(auto mode:{CutsceneMode::vr_comfort,CutsceneMode::vr_full,CutsceneMode::theater}) assert(parse_cutscene_mode(to_string(mode))==mode);
      assert(!std::strcmp(to_string(CutsceneFallback::incomplete_pair),"incomplete_pair") && !std::strcmp(to_string(CutsceneFallback::none),"none"));}
+    {   // Track T C4: a transient mixed mask inside an active immersive cutscene is held (no Theater flicker), at most 0.5 s
+        auto at=[](unsigned logic,std::uint64_t ms,bool pair=true){CutsceneFrame f{logic,pair,true,true,false};f.now_ms=ms;return f;};
+        CutscenePolicy p;
+        assert(p.immersive(at(32,1000),CutsceneMode::vr_comfort,false));
+        for(std::uint64_t ms=1010;ms<=1500;ms+=10) assert(!p.immersive(at(32|256,ms),CutsceneMode::vr_comfort,false) && p.holding() && p.reason()==CutsceneFallback::none && !p.pending());
+        assert(!p.immersive(at(32|256,1511),CutsceneMode::vr_comfort,false) && !p.holding() && p.reason()==CutsceneFallback::none); // past 0.5 s: the policy takes over (no hold)
+        assert(!p.immersive(at(32,1520,false),CutsceneMode::vr_comfort,false) && p.pending()); // grace re-armed as before
+        assert(p.immersive(at(32,1530),CutsceneMode::vr_comfort,false) && p.cutscenes()==1);
+        CutscenePolicy q; // back to exact 32 within the hold: immersive again, the pair gets the entry grace (not 2 misses) to re-form
+        assert(q.immersive(at(32,0+1),CutsceneMode::vr_full,false));
+        assert(!q.immersive(at(34,100),CutsceneMode::vr_full,false) && q.holding());
+        for(int i=0;i<10;++i) assert(!q.immersive(at(32,200+i,false),CutsceneMode::vr_full,false) && q.holding() && q.reason()==CutsceneFallback::none);
+        assert(q.immersive(at(32,300),CutsceneMode::vr_full,false) && !q.holding());
+        for(int i=0;i<3;++i) assert(!q.immersive(at(32,400+i,false),CutsceneMode::vr_full,false)); // a normal run of misses is back to 2 tolerated
+        assert(q.reason()==CutsceneFallback::incomplete_pair);
+        CutscenePolicy r; // pause (4) ends the immersion at once; so does a mask without the cinematic bit
+        assert(r.immersive(at(32,1),CutsceneMode::vr_comfort,false));
+        assert(!r.immersive(at(32|4,10),CutsceneMode::vr_comfort,false) && !r.holding());
+        assert(!r.immersive(at(32,20,false),CutsceneMode::vr_comfort,false) && r.pending()); // re-armed grace, as before
+        CutscenePolicy u; // never held before the pair formed, after a fallback, in theater, or with no clock
+        assert(!u.immersive(at(32,1,false),CutsceneMode::vr_comfort,false) && !u.immersive(at(34,2),CutsceneMode::vr_comfort,false) && !u.holding());
+        CutscenePolicy v;assert(v.immersive(at(32,1),CutsceneMode::vr_comfort,false));
+        assert(!v.immersive({34,true,true,true,false},CutsceneMode::vr_comfort,false) && !v.holding()); // now_ms 0: legacy behaviour
+        CutscenePolicy w;assert(w.immersive(at(32,1),CutsceneMode::vr_comfort,false));
+        assert(!w.immersive(at(32,2,false),CutsceneMode::vr_comfort,false)); // a held miss...
+        w.reject(CutsceneFallback::incomplete_pair);assert(!w.immersive(at(34,3),CutsceneMode::vr_comfort,false) && !w.holding());}
+    {CutscenePolicy p; // Track T C1: a pre-rendered video is the theater's at once: no pending black, no 30-frame wait, sticky until end()
+     p.reject(CutsceneFallback::bink_video);
+     assert(!p.pending() && p.reason()==CutsceneFallback::bink_video && p.last_fallback()==CutsceneFallback::bink_video);
+     assert(!p.immersive(good(),CutsceneMode::vr_comfort,false) && !p.immersive(unpaired(),CutsceneMode::vr_full,false) && !p.pending());
+     assert(!std::strcmp(to_string(CutsceneFallback::bink_video),"bink_video"));
+     assert(!cutscene_gates_open(CutsceneMode::vr_comfort,false,p.reason(),true));
+     p.end();assert(p.immersive(good(),CutsceneMode::vr_comfort,false));}
     std::cout<<"cutscene_policy_check ok\n";
 }
