@@ -6,6 +6,7 @@
 using namespace d2vr;
 static constexpr double kPi=3.14159265358979323846;
 static double deg(double d){return d*kPi/180;}
+static double wrap_test(double a){return std::remainder(a,2*kPi);}
 static bool near(double a,double b,double e=1e-6){return std::fabs(a-b)<e;}
 static ScriptedRecenterInput in(double t,bool authored,std::optional<double> rel=std::nullopt,std::optional<double> heading={},
     std::uint64_t snaps=0,std::uint64_t epoch=1,std::optional<double> body={},bool instant=false){
@@ -61,6 +62,37 @@ int main(){
         if(o.fold_rad) fold_sum+=*o.fold_rad;
         const double cum=o.offset_rad+fold_sum;worst=std::max(worst,std::fabs(cum-prev));prev=cum;}
      assert(worst<deg(40)*(.005/.4)*1.5+1e-9);}
+    {ScriptedRecenter r; // exit_without_body_marks_and_eases_residual
+     r.update(in(0,true,deg(40),1.0));r.update(in(1,true,0,1.0));
+     auto o=r.update(in(1.1,false));assert(o.fold_rad && near(*o.fold_rad,deg(40)) && o.residual_easing && o.folds==1);
+     double sum=0,prev=0,mid=0;const double err=.2;
+     for(int i=0;i<=41;++i){o=r.update(in(2+.01*i,false,{},{},0,1,1.0+err));
+        if(o.fold_rad) sum+=*o.fold_rad;assert(sum>=prev-1e-12);prev=sum;
+        if(i==20) mid=sum;
+        assert(o.offset_rad==0);}
+     assert(near(sum,err) && !o.residual_easing && near(mid,err*.5) && !r.update(in(3,false,{},{},0,1,1.2)).fold_rad);
+     ScriptedRecenter q;q.update(in(0,true,0,1.0)); // zero offset, no body: marked but no fold on exit
+     o=q.update(in(1,false));assert(!o.fold_rad && o.residual_easing);}
+    {ScriptedRecenter r; // residual_dropped_on_epoch_change
+     r.update(in(0,true,deg(40),1.0));r.update(in(1,true,0,1.0));r.update(in(1.1,false));
+     auto o=r.update(in(1.2,false,{},{},0,2,1.5));assert(!o.fold_rad && !o.residual_easing);
+     o=r.update(in(1.8,false,{},{},0,2,1.5));assert(!o.fold_rad);
+     ScriptedRecenter q;q.update(in(0,true,0,1.0));q.update(in(1,false));
+     q.update(in(1.1,false,{},{},0,1,1.5));o=q.update(in(1.2,false,{},{},0,3,1.5));assert(!o.fold_rad && !o.residual_easing);}
+    {ScriptedRecenter r; // reentry_view_yaw_continuous: body != heading, 28 deg gaze delta after re-entry
+     const double H=1.0,B=1.2,dt=.005,hmd=deg(80); // fixed head gaze in tracking space, base origin 0
+     double sumfold=0,prev=NAN,worst1=0,worst2=0,rel2=0;
+     for(int i=0;i<=120;++i){const double t=dt*i;const bool a=!(i>=40&&i<50);
+        const double heading=i<50?H:B; // native heading on re-entry is the body's (gameplay) heading
+        const double rel=hmd-sumfold; // hmd against the folded origin
+        auto o=r.update(in(t,a,a?std::optional<double>(rel):std::nullopt,a?std::optional<double>(heading):std::nullopt,0,1,B));
+        if(i==50) rel2=rel;
+        if(o.fold_rad) sumfold+=*o.fold_rad;
+        const double view=(a?heading:B)+(hmd-o.offset_rad-sumfold); // world view yaw
+        if(!std::isnan(prev)) (i<50?worst1:worst2)=std::max(i<50?worst1:worst2,std::fabs(wrap_test(view-prev)));
+        prev=view;}
+     assert(rel2>deg(20) && r.update(in(1,true,0,B,0,1,B)).entries==2);
+     assert(worst1<=1.5*hmd/.4*dt+1e-6 && worst2<=1.5*rel2/.4*dt+1e-6);}
     {ScriptedRecenter r; // non_finite_hmd_no_turn
      auto o=r.update(in(0,true,std::nullopt,1.0));o=r.update(in(1,true,deg(40),1.0));
      assert(o.offset_rad==0 && !o.easing);
