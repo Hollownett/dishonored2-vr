@@ -1257,6 +1257,96 @@ int main() {
         assert(std::abs(r::finger_open_lag(g,.005)-.005/lever)<1e-12 && rejects([&] {(void)r::finger_open_lag(g,-1);}));
         assert(rejects([&] {r::FingerIkState s3{};(void)r::finger_contact(g,h.palm,&bottle,1,0,s3,1.f,r::finger_solve_all,&wants,true,-1);}));
     }
+    // G5 (plan Task 11): the solver stops an extended finger. A flat hand pressed on a table stays flat: an extended finger already inside a shape
+    // first tries more closed along its path, then opens its middle and tip joints up to finger_hyperextension_degrees (15), and stops there.
+    assert(r::finger_hyperextension_degrees==15.);
+    for(float mirror:{-1.f,1.f}) {
+        const auto h=synthetic_hand(mirror);const auto& g=h.geometry;const Vec3 n=d2vr::unit(r::palm_normal(h.palm,g));
+        const auto drawn=[&](const r::FingerCurls& c,const std::array<float,5>& wants) {return r::finger_turns(g,c,wants);};
+        const auto points=[&](unsigned f,const std::array<float,3>& turn) {
+            std::array<Vec3,4> out{};const auto p=r::finger_points(g.finger[f],{turn[0],turn[1],turn[2]});for(unsigned k=0;k<4;++k) out[k]=world_of(h,p[k]);return out;};
+        const auto tip_skin=[&](const r::HeldShape& s,unsigned f,const std::array<float,3>& turn) {return r::shape_distance(s,points(f,turn)[3])-g.thickness[f];};
+        const auto straight_tip=world_of(h,r::finger_points(g.finger[2],{0,0,0})[3]),knuckle=world_of(h,g.finger[2].pivot);
+        // A table tilted so the knuckles' skin is 2 mm clear (the palm a centimetre above it) and the straight fingertips' skin `in` metres into it.
+        const auto tilted=[&](double in) {
+            const Vec3 a=knuckle+n*(g.thickness[2]+.002),b=straight_tip+n*(g.thickness[2]-in);
+            const Vec3 across=d2vr::unit(d2vr::cross(n,b-a));Vec3 m=d2vr::unit(d2vr::cross(across,b-a));if(d2vr::dot(m,n)>0) m=m*-1.;
+            return r::slab_shape(a,m,.2);
+        };
+        const std::array<float,5> open{0,0,0,0,0};
+        {   // flat_hand_on_plane_stays_flat: tips 4 mm in: every middle and tip joint in [-15, +5] degrees, every fingertip >= -1 mm, hyperextended
+            const auto table=tilted(.004);
+            for(unsigned f=1;f<5;++f) assert(tip_skin(table,f,{0,0,0})<-.0025); // the straight hand is in (the thinner ring and little fingers a little less)
+            r::FingerIkState st{};const auto c=r::finger_contact(g,h.palm,&table,1,0,st,1.f,r::finger_solve_all,&open,false,0,true);
+            const auto t=drawn(c,open);
+            for(unsigned f=1;f<5;++f) {
+                assert(c.hyperextended[f] && !c.blocked[f] && c.touching[f] && c.stuck_frames[f]==0);
+                for(unsigned s=1;s<3;++s) {const double angle=final_angles(h,f,t[f])[s];assert(angle>=-15*deg-1e-6 && angle<=5*deg);}
+                assert(tip_skin(table,f,t[f])>=-.001);
+            }
+            // without the stop (the default, a held hand's wrap): today's behaviour, no flags
+            r::FingerIkState old{};const auto o=r::finger_contact(g,h.palm,&table,1,0,old,1.f,r::finger_solve_all,&open);
+            for(unsigned f=0;f<5;++f) assert(!o.hyperextended[f] && !o.blocked[f]);
+        }
+        {   // pressed_deeper_stops_at_limit: tips 3 cm in: the middle and tip joints at -15 degrees, blocked, stuck_frames counting up
+            const auto table=tilted(.03);
+            r::FingerIkState st{};
+            for(unsigned frame=1;frame<=3;++frame) {
+                const auto c=r::finger_contact(g,h.palm,&table,1,1/72.,st,1.f,r::finger_solve_all,&open,false,0,true);const auto t=drawn(c,open);
+                for(unsigned f=1;f<5;++f) {
+                    assert(c.blocked[f] && c.hyperextended[f] && c.stuck_frames[f]==frame);
+                    for(unsigned s=1;s<3;++s) assert(std::abs(final_angles(h,f,t[f])[s]+15*deg)<1e-4);
+                }
+            }
+            // lifted clear: no longer blocked, the counter resets
+            const auto far=r::slab_shape(h.palm.position+n*.3,n*-1.);
+            const auto c=r::finger_contact(g,h.palm,&far,1,1/72.,st,1.f,r::finger_solve_all,&open,false,0,true);
+            for(unsigned f=1;f<5;++f) assert(!c.blocked[f] && !c.hyperextended[f] && c.stuck_frames[f]==0);
+        }
+        {   // finger_sliding_over_edge_stays_outside: a table 3 mm into the straight fingers' skin, its edge moving from past the tips to the knuckles
+            // over 30 frames: no fingertip below -2 mm on any frame.
+            const Vec3 along=d2vr::unit(straight_tip-knuckle),across=d2vr::unit(d2vr::cross(along,n));
+            const double top=d2vr::dot(knuckle-h.palm.position,n)+g.thickness[2]-.003; // the table's face, along n from the palm
+            r::FingerIkState st{};
+            for(unsigned i=0;i<=30;++i) {
+                const double edge=d2vr::dot(straight_tip-h.palm.position,along)+.02-i*(d2vr::length(straight_tip-knuckle)+.02)/30.;
+                r::HeldShape box{};box.frame.position=h.palm.position+along*(edge+.15)+n*(top+.02);box.frame.basis={across,along,n};box.half={.12,.15,.02};
+                const auto c=r::finger_contact(g,h.palm,&box,1,1/72.,st,1.f,r::finger_solve_all,&open,false,0,true);const auto t=drawn(c,open);
+                for(unsigned f=1;f<5;++f) assert(tip_skin(box,f,t[f])>=-.002);
+            }
+        }
+        {   // thin_slab_stops_fingers: a 4 mm sheet (held_slab) across the fingers' path: closing fingers stop on it, none passes through it
+            const std::array<Vec3,3> axes{d2vr::unit(d2vr::cross(d2vr::unit(straight_tip-knuckle),n)),d2vr::unit(straight_tip-knuckle),n};
+            const auto sheet=r::held_slab(axes,knuckle+n*.03,{.12,.1,.002});
+            const std::array<float,5> fist{1,1,1,1,1};
+            r::FingerIkState st{};const auto c=r::finger_contact(g,h.palm,&sheet,1,0,st,1.f,r::finger_solve_all,&fist,false,0,true);const auto t=drawn(c,fist);
+            for(unsigned f=1;f<5;++f) {
+                assert(c.touching[f]);
+                const auto p=points(f,t[f]);
+                for(const auto& q:p) assert(d2vr::dot(q-(knuckle+n*.03),n)<-.001); // no joint and no tip into the sheet past a millimetre (it stops on its near face)
+            }
+            // pressed into the same sheet (lying 3 mm into the straight fingers' skin): the tips stay out of it
+            const auto low=r::held_slab(axes,straight_tip+n*(g.thickness[2]-.003+.002),{.12,.03,.002});
+            r::FingerIkState s2{};const auto d=r::finger_contact(g,h.palm,&low,1,0,s2,1.f,r::finger_solve_all,&open,false,0,true);const auto u=drawn(d,open);
+            for(unsigned f=1;f<5;++f) assert(tip_skin(low,f,u[f])>=-.001);
+        }
+        {   // bend_preferred_when_clear: a wall ahead of the fingertips (their skin 3 mm into it at the relaxed curl) with the palm clear: the finger
+            // closes on its path until it is out, never hyperextends
+            const std::array<float,3> relaxed_turn{static_cast<float>(r::finger_angles(2,r::relaxed_share)[0]),static_cast<float>(r::finger_angles(2,r::relaxed_share)[1]),static_cast<float>(r::finger_angles(2,r::relaxed_share)[2])};
+            const auto relaxed_tip=points(2,relaxed_turn)[3];const Vec3 along=d2vr::unit(straight_tip-knuckle);
+            const auto wall=r::slab_shape(relaxed_tip+along*(g.thickness[2]-.003),along*-1.,.2);
+            for(unsigned f=1;f<5;++f) assert(tip_skin(wall,f,relaxed_turn)<-.0015);
+            r::FingerIkState st{};const auto c=r::finger_contact(g,h.palm,&wall,1,0,st,1.f,r::finger_solve_all,&open,false,0,true);const auto t=drawn(c,open);
+            for(unsigned f=1;f<5;++f) {
+                assert(!c.hyperextended[f] && !c.blocked[f] && c.touching[f] && c.min_curl[f]>r::relaxed_share);
+                for(unsigned s=0;s<3;++s) assert(final_angles(h,f,t[f])[s]>=-1e-6);
+                assert(tip_skin(wall,f,t[f])>=-.001);
+            }
+            // the scalar consumers see it too: the least curl the finger takes
+            const auto scalar=r::grip_curls(c,open);
+            for(unsigned f=1;f<5;++f) assert(scalar[f]>=std::min(c.finger[f],c.min_curl[f])-1e-6f);
+        }
+    }
     // G8: an empty fist rests on the palm (palm_stop_slab): the tips stop on the skin plane, an open hand is untouched, the knuckles lie outside it.
     for(bool right:{false,true}) {
         const auto h=real_hand(right);const auto& g=h.geometry;const auto n=d2vr::unit(r::palm_normal(h.palm,g));const Vec3 skin=h.palm.position+n*r::held_palm_depth;
