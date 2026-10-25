@@ -91,6 +91,7 @@ private:
     static constexpr unsigned blank_texture_size=64;
     XrSwapchain blank_chain_{};std::vector<XrSwapchainImageD3D11KHR> blank_images_;std::vector<bool> blank_filled_;
     LastGoodProjection last_good_projection_;
+    std::uint64_t last_good_scene_{};  // scene_id of the authored scene the last good projection came from (0: gameplay or none)
     EventLogLimiter chain_event_limiter_{120,40,10000},empty_event_limiter_{120,20,10000};
     UINT64 present_count_{};
     // Locomotion comfort vignette: a head-locked quad showing a black ring texture, created by prepare_overlays between frames.
@@ -1326,6 +1327,12 @@ public:
     UINT64 controller_samples{};
     UINT64 authored_camera_layers{};
     bool last_should_render{},last_views_valid{},last_tracked_pair{};
+    // G2 cutscene hold (camera plan Task 5, fix round 1), set by the probe before each present() and consumed by it. The probe passes no eye
+    // images on a held frame. black: a neutral black frame (a cutscene's pair is forming, or head-written images are still in flight after a
+    // fallback). replay: the previous immersive stereo layer of THIS scene (scene_id), else black; never any other projection.
+    enum class SceneHold {none,black,replay};
+    SceneHold scene_hold{SceneHold::none};
+    std::uint64_t scene_id{};          // the cutscene an authored_scene_render frame belongs to (0 = none)
     // alternate-eye (plan F task 1), set by the probe before each present(). Off by default: every branch below is gated on alternate_enabled.
     bool alternate_enabled{};          // knob on and not fallen back
     int alternate_fresh_eye{-1};       // the one eye rendered for this displayed frame, -1 = both (paired frame)
@@ -1733,6 +1740,7 @@ public:
         ID3D11Texture2D* desktop=nullptr,std::array<UINT,2> desktop_view={},bool cinematic=false,bool authored_scene_render=false) {
         if(!alternate_enabled && (alt_kept_[0] || alt_kept_[1])) {alt_kept_[0].Reset();alt_kept_[1].Reset();alt_records_={};} // fallen back: release the kept copies
         authored_scene_render=authored_scene_render && authored_camera && !gameplay;
+        const auto scene_hold_now=scene_hold;const auto hold_scene=scene_id;scene_hold=SceneHold::none; // one frame only
         const bool scene_render=gameplay || authored_scene_render;
         const bool world_scene=scene_render || world_ui_kind_!=0;
         last_world_ui_layer=false;
@@ -2051,6 +2059,9 @@ public:
                 {SpanClock span(xr_spans,XrSpan::release);checked(xrReleaseSwapchainImage(chains_[eye],&release),"Release game eye");}
             }
             if(mirror_rects[0] || mirror_rects[1]) {mirror_->end(desktop);++mirrored_frames;}
+            // The eye chains now hold THIS frame's images (a quad frame copies its duplicated mono image into both): an older projection
+            // replayed later would show them with its own stereo poses. Only this frame's own projection, captured below, may be replayed.
+            last_good_projection_.reset();last_good_scene_=0;
             if(!world_scene) {
                 // Native menus use a pointer-enabled panel; cutscenes play on a larger, farther "TV".
                 const auto& pose=cinematic?panel_pose(authored_panel_):native_menu_pose();
@@ -2116,13 +2127,16 @@ public:
         // poses) or, with none, an opaque black quad. Every frame that would have been empty is counted and logged with a reason.
         XrCompositionLayerQuad fallback_quad{};const XrCompositionLayerBaseHeader* fallback_layer=nullptr;
         const unsigned real_layers=end.layerCount;
-        if(real_layers && end.layers[0]->type==XR_TYPE_COMPOSITION_LAYER_PROJECTION)
-            last_good_projection_.capture(*reinterpret_cast<const XrCompositionLayerProjection*>(end.layers[0]),GetTickCount64(),pose_epoch());
+        if(real_layers && end.layers[0]->type==XR_TYPE_COMPOSITION_LAYER_PROJECTION &&
+           last_good_projection_.capture(*reinterpret_cast<const XrCompositionLayerProjection*>(end.layers[0]),GetTickCount64(),pose_epoch()))
+            last_good_scene_=authored_scene_render?scene_id:0;
         if(!real_layers) {
             gates.layer_count=0;
             const auto reason=classify_empty_frame(gates);
             const auto now_ms=GetTickCount64();
-            auto choice=choose_frame_fallback({0,state,gates.should_render,reason,last_good_projection_.usable(chains_,now_ms,pose_epoch()),blank_ready_()});
+            // A cutscene hold replays only this scene's own immersive layer (replay), or nothing but black (black).
+            const bool replay_ok=scene_hold_replays(scene_hold_now==SceneHold::none?0u:scene_hold_now==SceneHold::black?1u:2u,hold_scene,last_good_scene_);
+            auto choice=choose_frame_fallback({0,state,gates.should_render,reason,replay_ok && last_good_projection_.usable(chains_,now_ms,pose_epoch()),blank_ready_()});
             if(choice==FrameFallback::last_projection) {
                 fallback_layer=last_good_projection_.header();end.layers=&fallback_layer;end.layerCount=1;
             } else if(choice==FrameFallback::black_quad) {

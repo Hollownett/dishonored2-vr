@@ -64,7 +64,7 @@ def check(probe: str, xr: str) -> None:
     block = block[:block.index("if(alternate_on()) {\n                                if(game_xr->alternate_error)")]
     assert "if(!owner && (gameplay || cutscene_logic)) owner=d2vr::find_native_player_camera(read_self,image_base);" in block
     assert "const bool authored_camera=gameplay && owner && native_action_camera.poll(" in block  # raw gameplay keeps its authored camera
-    cls = block[block.index("bool cutscene_immersive=false,cutscene_hold=false;"):block.index("cutscene_present_immersive=cutscene_immersive;")]
+    cls = block[block.index("bool cutscene_immersive=false;auto cutscene_hold=d2vr::GameXr::SceneHold::none;"):block.index("cutscene_present_immersive=cutscene_immersive;")]
     for need in ("if(!(cutscene_mask&d2vr::cinematic_logic_mask)) {",
                  "if(cutscene_policy.active()) cutscene_policy.end();",
                  "const bool exact=cutscene_mask==d2vr::cinematic_logic_mask;",
@@ -77,10 +77,17 @@ def check(probe: str, xr: str) -> None:
                  "frame.fault=recoverable_faults.load()>cutscene_fault_base;",
                  "cutscene_immersive=cutscene_policy.immersive(frame,mode,knob_off);",
                  "if(gates_were_open) cutscene_flush_presents=3;",
-                 "if(exact && !cutscene_immersive) cutscene_hold=cutscene_policy.pending() || cutscene_flush_presents>0;",
+                 # fix round 1: pending and post-fallback frames are black; a tolerated miss replays only this cutscene's own layer
+                 "cutscene_hold=cutscene_policy.pending() || cutscene_flush_presents>0?d2vr::GameXr::SceneHold::black:",
+                 "cutscene_policy.holding()?d2vr::GameXr::SceneHold::replay:d2vr::GameXr::SceneHold::none;",
+                 "refresh_cutscene_knobs(GetTickCount64(),(cutscene_mask&d2vr::cinematic_logic_mask)!=0);",
                  "cutscene_gates_allowed=d2vr::cutscene_gates_open(mode,knob_off,cutscene_policy.reason(),cutscene_paired_path());"):
         assert need in cls, need
-    assert "if(cutscene_hold) {completed_left.Reset();completed_right.Reset();}" in block
+    assert "if(cutscene_hold!=d2vr::GameXr::SceneHold::none) {completed_left.Reset();completed_right.Reset();}" in block
+    # Ruling 10a: the reason is snapshotted before reject(), so a rejected cutscene records its fallback
+    assert cls.index("const auto before=cutscene_policy.reason();") < cls.index("cutscene_policy.reject(") < cls.index("cutscene_policy.reason()!=before")
+    assert "game_xr->scene_hold=cutscene_hold;game_xr->scene_id=cutscene_count.load();" in block
+    assert block.index("game_xr->scene_hold=cutscene_hold;") < block.index("game_xr->present(completed_left.Get(),")
     # the pair readiness and textures are decided before the classification; the hold comes after it
     assert block.index("if(pair_ready) {completed_left=mono_path?paired_backbuffer:paired_left;completed_right=paired_backbuffer;}") < block.index("bool cutscene_immersive=false")
     assert block.index("record_rendered_view(slot_eye,") < block.index("bool cutscene_immersive=false")
@@ -94,15 +101,20 @@ def check(probe: str, xr: str) -> None:
     assert "auto input=game_xr->controller_input;" in controls and "cutscene" not in controls
     assert "native_menu.publish(game_xr->native_menu_input,width.load(),height.load());" in controls
     # --- the knobs, live, and the status section
-    knobs = fn(probe, "void refresh_cutscene_knobs(UINT64 now) {")
-    assert "now-cutscene_knob_tick<500) return;" in knobs
-    assert 'cutscene_knob_off=fs::exists(build/L"no-vr-cutscenes",ignored);' in knobs and 'std::ifstream knob(build/L"cutscene-mode");' in knobs
-    assert "d2vr::parse_cutscene_mode(text).value_or(d2vr::CutsceneMode::vr_comfort)" in knobs
+    # Ruling 10b: the present thread only requests a re-read (500 ms with the cinematic bit, 5 s otherwise); a worker touches the files
+    knobs = fn(probe, "void refresh_cutscene_knobs(UINT64 now,bool cinematic) {")
+    assert "now-cutscene_knob_tick<(cinematic?500u:5000u)) return;" in knobs and "if(cinematic && !cutscene_knob_cinematic) cutscene_knob_tick=0;" in knobs
+    assert "if(cutscene_knob_reading.exchange(true)) return;" in knobs and ").detach();" in knobs
+    assert "fs::exists" not in knobs and "ifstream" not in knobs
+    reader = fn(probe, "void read_cutscene_knobs(const fs::path& build) noexcept {")
+    assert 'cutscene_knob_off=fs::exists(build/L"no-vr-cutscenes",ignored);' in reader and 'std::ifstream knob(build/L"cutscene-mode");' in reader
+    assert "d2vr::parse_cutscene_mode(text).value_or(d2vr::CutsceneMode::vr_comfort)" in reader
+    assert probe.count("read_cutscene_knobs(") == 3  # the definition, the worker, StartProbe
     status = fn(probe, "std::string cutscene_status_json() {")
     for field in ("mode", "immersive_frames", "theater_frames", "last_fallback", "cutscenes"):
         assert f'\\"{field}\\":' in status, field
     assert '<<",\\"cutscene\\":"<<cutscene_status_json()<<\'}\';return o.str();}()' in probe  # inside scripted_view
-    assert "cutscene_policy=d2vr::CutscenePolicy{};cutscene_gates_allowed=false;cutscene_knob_tick=0;" in probe  # StartProbe
+    assert "cutscene_policy=d2vr::CutscenePolicy{};cutscene_gates_allowed=false;" in probe  # StartProbe
     # --- GameXr::present (docs/native-authored-scene-presentation.md section 5)
     present = xr[xr.index("    void present(ID3D11Texture2D* left,ID3D11Texture2D* right,float hfov,float vfov,"):]
     present = present[:present.index("\n    }\n")]
@@ -130,6 +142,16 @@ def check(probe: str, xr: str) -> None:
                 "if(settings_requested.exchange(false) && !gameplay) {settings_.open_from_menu();}"):
         assert raw in present, raw
     assert "bool rendered_pair_ready() const {return tracked_pair_();}" in xr
+    # fix round 1: a hold submits black or this scene's own immersive layer, never a projection whose eye chains a quad frame has refilled
+    assert "const auto scene_hold_now=scene_hold;const auto hold_scene=scene_id;scene_hold=SceneHold::none;" in present
+    loop_end = present.index("if(mirror_rects[0] || mirror_rects[1]) {mirror_->end(desktop);++mirrored_frames;}")
+    reset = present.index("last_good_projection_.reset();last_good_scene_=0;")
+    assert present.index("checked(xrReleaseSwapchainImage(chains_[eye],&release),\"Release game eye\");") < loop_end < reset < present.index("if(!world_scene) {\n                // Native menus")
+    assert present.count("last_good_projection_.reset();") == 1 and present.count("last_good_projection_.capture(") == 1
+    capture = present.index("last_good_projection_.capture(")
+    assert reset < capture and "last_good_scene_=authored_scene_render?scene_id:0;" in present[capture:capture + 300]
+    assert "const bool replay_ok=scene_hold_replays(scene_hold_now==SceneHold::none?0u:scene_hold_now==SceneHold::black?1u:2u,hold_scene,last_good_scene_);" in present
+    assert "replay_ok && last_good_projection_.usable(chains_,now_ms,pose_epoch())" in present
 
     # --- the boolean routing, evaluated: immersive cutscene, theater/pending cutscene, pause, gameplay
     def route(gameplay: bool, authored: bool, asr: bool, cinematic: bool, settings_open=False, world_ui=0, required=True, pair=True):
@@ -153,6 +175,32 @@ def check(probe: str, xr: str) -> None:
     for authored in (False, True):  # gameplay is unchanged by the new argument (it is never an authored scene render)
         assert route(True, authored, False, False) == {**route(True, authored, True, False), "asr": False}
         assert route(True, authored, False, False)["projection"] and not route(True, authored, False, False)["pointer"]
+
+    # --- the hold across mask sequences (a model of the pinned GameXr rules above): every frame that fills the eye chains drops the last
+    # projection and only its own projection is kept, tagged with its scene; a black hold never replays, a replay hold only its own scene's
+    def replays(frames):
+        """frames: (kind, scene, hold) with kind projection|asr|quad|held. Returns, per held frame, what it showed."""
+        tag, valid, shown = 0, False, []
+        for kind, scene, hold in frames:
+            if kind in ("projection", "asr", "quad"):
+                valid, tag = kind != "quad", scene if kind == "asr" else 0
+            else:
+                ok = hold == "none" or (hold == "replay" and scene != 0 and tag == scene)
+                shown.append(("replay", tag) if ok and valid else ("black", 0))
+        return shown
+    # 32 (immersive) -> 36 (quad) -> 32 pending: black, not the old stereo layer the quad has overwritten
+    assert replays([("asr", 1, None), ("quad", 0, None), ("held", 1, "black"), ("asr", 1, None)]) == [("black", 0)]
+    # 2 -> 34 (quad) -> 32 pending: black
+    assert replays([("projection", 0, None), ("quad", 0, None), ("held", 1, "black")]) == [("black", 0)]
+    # a short load 0 -> 32768 -> 32: the loading quads leave nothing to replay
+    assert replays([("quad", 0, None), ("quad", 0, None), ("held", 1, "black")]) == [("black", 0)]
+    # Ruling 9: a tolerated miss right after this cutscene's immersive frame re-shows that layer; twice in a row still that layer
+    assert replays([("asr", 2, None), ("held", 2, "replay"), ("held", 2, "replay")]) == [("replay", 2), ("replay", 2)]
+    # a replay hold never shows gameplay's projection or another cutscene's layer
+    assert replays([("projection", 0, None), ("held", 2, "replay")]) == [("black", 0)]
+    assert replays([("asr", 1, None), ("held", 2, "replay")]) == [("black", 0)]
+    # theater -> pause 4 (quad) -> retry 32 pending: black
+    assert replays([("quad", 0, None), ("quad", 0, None), ("held", 3, "black")]) == [("black", 0)]
 
 
 if __name__ == "__main__":

@@ -52,6 +52,12 @@ inline FrameFallback choose_frame_fallback(const FallbackFacts& f) noexcept {
     return f.blank_ready?FrameFallback::black_quad:FrameFallback::none;
 }
 
+// G2 cutscene hold (hold 0 none, 1 black, 2 replay): may an empty frame re-send the last good projection? Not on a black hold; on a replay
+// hold only when that projection was this cutscene's own immersive layer (scene ids match, nonzero). Without a hold: as before.
+inline bool scene_hold_replays(unsigned hold,std::uint64_t hold_scene,std::uint64_t last_good_scene) noexcept {
+    return hold==0 || (hold==2 && hold_scene!=0 && last_good_scene==hold_scene);
+}
+
 // The last projection layer that went out with real content: its own poses, fovs and eye chains, copied (the originals are frame locals).
 struct LastGoodProjection {
     XrCompositionLayerProjection layer{XR_TYPE_COMPOSITION_LAYER_PROJECTION};

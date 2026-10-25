@@ -42,6 +42,11 @@ int main() {
     require(choose_frame_fallback(a)==FrameFallback::last_projection,"a usable last projection is re-sent first");
     a.last_good_usable=false;require(choose_frame_fallback(a)==FrameFallback::black_quad,"no last projection: black quad");
     a.blank_ready=false;require(choose_frame_fallback(a)==FrameFallback::none,"nothing to send with: stays empty rather than guess");a.blank_ready=true;
+    // G2 cutscene hold: no hold replays as before; a black hold never replays; a replay hold only this cutscene's own immersive layer
+    require(scene_hold_replays(0,0,0) && scene_hold_replays(0,5,0),"no hold: the last projection as before");
+    require(!scene_hold_replays(1,5,5) && !scene_hold_replays(1,0,0),"black hold: never a replay");
+    require(scene_hold_replays(2,5,5),"replay hold: this cutscene's own immersive layer");
+    require(!scene_hold_replays(2,5,0) && !scene_hold_replays(2,5,4) && !scene_hold_replays(2,0,0),"replay hold: never gameplay's, another scene's or an untagged layer");
     a.last_good_usable=true;a.reason=EmptyFrameReason::continuity_unusable;require(choose_frame_fallback(a)==FrameFallback::black_quad,"after a reference change the old poses are not reused");
     a.reason=EmptyFrameReason::tracked_pair_missing;a.state=XR_SESSION_STATE_VISIBLE;require(choose_frame_fallback(a)==FrameFallback::last_projection,"VISIBLE counts");
     a.state=XR_SESSION_STATE_READY;require(choose_frame_fallback(a)==FrameFallback::none,"READY/idle states may stay empty");a.state=XR_SESSION_STATE_FOCUSED;

@@ -65,6 +65,7 @@
 #include "authored_view.hpp"
 #include "scripted_recenter.hpp"
 #include "cutscene_policy.hpp"
+#include <thread>
 #include "action_camera_alignment.hpp"
 #include "corpse_diagnostics.hpp"
 #include "drawn_anchor.hpp"
@@ -769,23 +770,36 @@ static UINT64 cutscene_knob_tick{};             // the last knob read (re-read a
 static UINT64 cutscene_fault_base{};            // recoverable_faults when this cutscene began
 static unsigned cutscene_flush_presents{};      // Presents still showing images rendered for the scene after a fallback: shown as nothing new
 static std::atomic<bool> cutscene_present_immersive{false}; // this Present's classification, for the sim eye captures in capture_xr_transfer
-static std::atomic<UINT64> cutscene_immersive_frames{},cutscene_theater_frames{},cutscene_pending_frames{},cutscene_projection_layers{},cutscene_quad_layers{},cutscene_count{};
+static std::atomic<UINT64> cutscene_immersive_frames{},cutscene_theater_frames{},cutscene_pending_frames{},cutscene_held_frames{},cutscene_projection_layers{},cutscene_quad_layers{},cutscene_count{};
 static std::atomic<int> cutscene_last_fallback{static_cast<int>(d2vr::CutsceneFallback::none)};
 static UINT64 cutscene_capture_start{},cutscene_capture_next{};static unsigned cutscene_captures{};static bool cutscene_capture_left{}; // sim eye captures (capture_xr_transfer)
 // Dev knobs (Controller Ruling 2; a later task makes the VR settings row the source): build/cutscene-mode holds vr_comfort | vr_full |
-// theater (absent or unknown = vr_comfort); build/no-vr-cutscenes turns immersive cutscenes off (CutsceneFallback::knob_off).
-void refresh_cutscene_knobs(UINT64 now) {
-    if(cutscene_knob_tick && now>=cutscene_knob_tick && now-cutscene_knob_tick<500) return;
+// theater (absent or unknown = vr_comfort); build/no-vr-cutscenes turns immersive cutscenes off (CutsceneFallback::knob_off). StartProbe
+// reads them once; afterwards the present thread only REQUESTS a re-read (Ruling 10b): at most every 500 ms while the mask carries the
+// cinematic bit (at once when it appears), every 5 s otherwise. The file access runs on a short-lived worker that stores the atomics,
+// one read in flight at a time, so the frame never waits on the file system.
+static std::atomic<bool> cutscene_knob_reading{false};static bool cutscene_knob_cinematic{};
+void read_cutscene_knobs(const fs::path& build) noexcept {
+    try {
+        std::error_code ignored;
+        cutscene_knob_off=fs::exists(build/L"no-vr-cutscenes",ignored);
+        std::string text;{std::ifstream knob(build/L"cutscene-mode");if(knob) std::getline(knob,text);}
+        cutscene_mode_state=static_cast<int>(d2vr::parse_cutscene_mode(text).value_or(d2vr::CutsceneMode::vr_comfort));
+    } catch(...) {}
+}
+void refresh_cutscene_knobs(UINT64 now,bool cinematic) {
+    if(cinematic && !cutscene_knob_cinematic) cutscene_knob_tick=0; // the cinematic bit just appeared: re-read now
+    cutscene_knob_cinematic=cinematic;
+    if(cutscene_knob_tick && now>=cutscene_knob_tick && now-cutscene_knob_tick<(cinematic?500u:5000u)) return;
+    if(cutscene_knob_reading.exchange(true)) return; // the previous read is still running
     cutscene_knob_tick=now?now:1;
-    const auto build=output_directory.parent_path()/L"build";std::error_code ignored;
-    cutscene_knob_off=fs::exists(build/L"no-vr-cutscenes",ignored);
-    std::string text;{std::ifstream knob(build/L"cutscene-mode");if(knob) std::getline(knob,text);}
-    cutscene_mode_state=static_cast<int>(d2vr::parse_cutscene_mode(text).value_or(d2vr::CutsceneMode::vr_comfort));
+    try {std::thread([build=output_directory.parent_path()/L"build"] {read_cutscene_knobs(build);cutscene_knob_reading=false;}).detach();}
+    catch(...) {cutscene_knob_reading=false;}
 }
 std::string cutscene_status_json() {
     std::ostringstream o;
     o<<"{\"mode\":\""<<d2vr::to_string(static_cast<d2vr::CutsceneMode>(cutscene_mode_state.load()))<<"\",\"knob_off\":"<<(cutscene_knob_off.load()?"true":"false")
-     <<",\"immersive_frames\":"<<cutscene_immersive_frames.load()<<",\"theater_frames\":"<<cutscene_theater_frames.load()<<",\"pending_frames\":"<<cutscene_pending_frames.load()
+     <<",\"immersive_frames\":"<<cutscene_immersive_frames.load()<<",\"theater_frames\":"<<cutscene_theater_frames.load()<<",\"pending_frames\":"<<cutscene_pending_frames.load()<<",\"held_frames\":"<<cutscene_held_frames.load()
      <<",\"projection_layers\":"<<cutscene_projection_layers.load()<<",\"quad_layers\":"<<cutscene_quad_layers.load()
      <<",\"last_fallback\":\""<<d2vr::to_string(static_cast<d2vr::CutsceneFallback>(cutscene_last_fallback.load()))<<"\",\"cutscenes\":"<<cutscene_count.load()
      <<",\"gates_open\":"<<(cutscene_gates_allowed.load()?"true":"false")<<'}';
@@ -7538,13 +7552,14 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                 game_xr->record_rendered_view(slot_eye,alt_slot->view[slot_eye],alt_slot->display_time[slot_eye],alt_slot->locate_cpu_time[slot_eye]);
                         // G2 VR cutscenes (cutscene_policy.hpp): classify this Present. Immersive = exact 32 with a complete native pair of two distinct
                         // eyes (two textures, two eye poses, both layer views recorded), the player camera read, no fault since the cutscene began. Any
-                        // failure sends the rest of the cutscene to the theater; before the first pair, and for the frames still in flight after a
-                        // fallback, nothing new is shown (GameXr re-sends its last projection or black), so no unpaired or head-tracked image reaches
-                        // the theater screen. gameplay stays raw logic 2 for every native command and eligibility.
-                        bool cutscene_immersive=false,cutscene_hold=false;
+                        // failure sends the rest of the cutscene to the theater. Held frames pass no eye images: before the first pair, and for the
+                        // frames still in flight after a fallback, GameXr shows a black frame; a tolerated miss (Ruling 9) re-shows this cutscene's own
+                        // previous immersive layer, else black. No unpaired, mono or head-tracked image is ever shown as stereo or on the theater
+                        // screen. gameplay stays raw logic 2 for every native command and eligibility.
+                        bool cutscene_immersive=false;auto cutscene_hold=d2vr::GameXr::SceneHold::none;
                         {
-                            refresh_cutscene_knobs(GetTickCount64());
                             const auto cutscene_mask=game_logic_mask();
+                            refresh_cutscene_knobs(GetTickCount64(),(cutscene_mask&d2vr::cinematic_logic_mask)!=0);
                             const auto mode=static_cast<d2vr::CutsceneMode>(cutscene_mode_state.load());const bool knob_off=cutscene_knob_off.load();
                             const bool gates_were_open=cutscene_gates_allowed.load();
                             if(!(cutscene_mask&d2vr::cinematic_logic_mask)) { // the cinematic bit left the mask: the next cutscene starts afresh
@@ -7553,6 +7568,7 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                             } else {
                                 const bool exact=cutscene_mask==d2vr::cinematic_logic_mask;
                                 if(exact && !cutscene_policy.active()) {cutscene_fault_base=recoverable_faults.load();++cutscene_count;}
+                                const auto before=cutscene_policy.reason(); // before reject(): its reason is recorded as a fallback too (Ruling 10a)
                                 if(exact && !cutscene_paired_path() && !knob_off && mode!=d2vr::CutsceneMode::theater) cutscene_policy.reject(d2vr::CutsceneFallback::incomplete_pair);
                                 const auto separated=[](const std::array<float,3>& a,const std::array<float,3>& b) {return std::abs(a[0]-b[0])+std::abs(a[1]-b[1])+std::abs(a[2]-b[2])>.001f;};
                                 bool rendered_distinct=false;
@@ -7567,19 +7583,21 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                     separated(views[0].pose->position,views[1].pose->position) && rendered_distinct;
                                 frame.camera_readable=owner && owner->view;
                                 frame.fault=recoverable_faults.load()>cutscene_fault_base;
-                                const auto before=cutscene_policy.reason();
                                 cutscene_immersive=cutscene_policy.immersive(frame,mode,knob_off);
                                 if(exact && cutscene_policy.reason()!=before) {
                                     cutscene_last_fallback=static_cast<int>(cutscene_policy.reason());
                                     if(gates_were_open) cutscene_flush_presents=3; // Setup F shows at Present F+2: the head-written images still in flight
                                 }
-                                if(exact && !cutscene_immersive) cutscene_hold=cutscene_policy.pending() || cutscene_flush_presents>0;
-                                if(exact) ++(cutscene_immersive?cutscene_immersive_frames:cutscene_hold?cutscene_pending_frames:cutscene_theater_frames);
+                                if(exact && !cutscene_immersive)
+                                    cutscene_hold=cutscene_policy.pending() || cutscene_flush_presents>0?d2vr::GameXr::SceneHold::black:
+                                        cutscene_policy.holding()?d2vr::GameXr::SceneHold::replay:d2vr::GameXr::SceneHold::none;
+                                if(exact) ++(cutscene_immersive?cutscene_immersive_frames:cutscene_hold==d2vr::GameXr::SceneHold::black?cutscene_pending_frames:
+                                    cutscene_hold==d2vr::GameXr::SceneHold::replay?cutscene_held_frames:cutscene_theater_frames);
                                 if(cutscene_flush_presents>0) --cutscene_flush_presents;
                             }
                             cutscene_gates_allowed=d2vr::cutscene_gates_open(mode,knob_off,cutscene_policy.reason(),cutscene_paired_path());
                         }
-                        if(cutscene_hold) {completed_left.Reset();completed_right.Reset();}
+                        if(cutscene_hold!=d2vr::GameXr::SceneHold::none) {completed_left.Reset();completed_right.Reset();}
                         cutscene_present_immersive=cutscene_immersive;
                         if((mono_path || alternate_on()) && gameplay && stereo_active.load()) { // a sustained miss in gameplay means the one view cannot be named: pair again
                             // alternate-eye counts only frames planned as one view; paired frames (menu, cutscene) reset it
@@ -7949,6 +7967,7 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                             render_perf_publish_scope(context.Get(),gameplay,now_status);
                             {const auto left=fsr_taa.eye_upscaler_generation[0].load(),right=fsr_taa.eye_upscaler_generation[1].load();game_xr->upscaler_generation((left==right || mono_view_state.load()==1) && left?left:0);}
                             game_xr->alternate_enabled=alternate_on();game_xr->alternate_fresh_eye=alt_fresh;game_xr->alternate_frame=number;
+                            game_xr->scene_hold=cutscene_hold;game_xr->scene_id=cutscene_count.load(); // G2: this cutscene's hold and its identity
                             game_xr->present(completed_left.Get(),completed_right.Get(),
                                 views.empty()?1.4f:views[0].pose->horizontal_fov,views.empty()?.88f:views[0].pose->vertical_fov,gameplay,authored_camera || cutscene_immersive,game_logic_mask()==4,
                                 pair_ready?completed_right.Get():nullptr,mirror_view(desc.OutputWindow),game_logic_mask()==32,cutscene_immersive); // G2: the immersive cutscene is an authored scene render (raw gameplay stays false)
@@ -10098,8 +10117,9 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
         legacy_hold_y_settings=fs::exists(root/L"build"/L"legacy-hold-y-settings");
         legacy_authored_camera=fs::exists(root/L"build"/L"legacy-authored-camera");authored_heading.reset();authored_heading_now.reset();
         scripted_recenter_enabled=!fs::exists(root/L"build"/L"no-scripted-recenter");scripted_recenter.reset();scripted_offset_now=0;scripted_ease_tick=0; // G1 (default on)
-        cutscene_policy=d2vr::CutscenePolicy{};cutscene_gates_allowed=false;cutscene_knob_tick=0;cutscene_flush_presents=0;cutscene_present_immersive=false; // G2: the knobs are read at the first Present
-        cutscene_immersive_frames=0;cutscene_theater_frames=0;cutscene_pending_frames=0;cutscene_projection_layers=0;cutscene_quad_layers=0;cutscene_count=0;
+        cutscene_policy=d2vr::CutscenePolicy{};cutscene_gates_allowed=false;cutscene_flush_presents=0;cutscene_present_immersive=false; // G2
+        read_cutscene_knobs(root/L"build");cutscene_knob_tick=GetTickCount64();cutscene_knob_cinematic=false; // the knobs at start; later re-reads run off the present thread
+        cutscene_immersive_frames=0;cutscene_theater_frames=0;cutscene_pending_frames=0;cutscene_held_frames=0;cutscene_projection_layers=0;cutscene_quad_layers=0;cutscene_count=0;
         cutscene_last_fallback=static_cast<int>(d2vr::CutsceneFallback::none);cutscene_capture_start=0;cutscene_capture_next=0;cutscene_captures=0;cutscene_capture_left=false;
         action_camera_alignment_enabled=!fs::exists(root/L"build"/L"legacy-action-camera-alignment");action_camera_context.reset();action_camera_physical_offset={};
         aim_smoothing_enabled=!fs::exists(root/L"build"/L"no-aim-smoothing");aim_smoother.reset();   // plan H2

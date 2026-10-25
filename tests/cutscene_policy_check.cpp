@@ -7,6 +7,7 @@ static CutsceneFrame good(unsigned logic=32){return {logic,true,true,true,false}
 static CutsceneFrame unpaired(){return {32,false,true,true,false};}
 int main(){
     static_assert(CutscenePolicy::entry_grace_frames==30,"entry grace");
+    static_assert(CutscenePolicy::tolerated_misses==2,"Ruling 9: two held misses, the third falls back");
     static_assert(cinematic_logic_mask==32,"Cinematic is exact mask 32");
     {CutscenePolicy p; // exact_32_complete_pair_immersive
      assert(p.immersive(good(),CutsceneMode::vr_comfort,false) && p.reason()==CutsceneFallback::none && p.active() && !p.pending() && p.cutscenes()==1);
@@ -24,7 +25,8 @@ int main(){
      assert(!k.immersive(good(),CutsceneMode::vr_full,true) && k.reason()==CutsceneFallback::knob_off);}
     {CutscenePolicy p; // fallback_sticks_until_exit
      assert(p.immersive(good(),CutsceneMode::vr_comfort,false));
-     assert(!p.immersive(unpaired(),CutsceneMode::vr_comfort,false) && p.reason()==CutsceneFallback::incomplete_pair); // no grace once paired
+     for(int i=0;i<2;++i) assert(!p.immersive(unpaired(),CutsceneMode::vr_comfort,false) && p.holding() && p.reason()==CutsceneFallback::none);
+     assert(!p.immersive(unpaired(),CutsceneMode::vr_comfort,false) && p.reason()==CutsceneFallback::incomplete_pair && !p.holding()); // no entry grace once paired
      for(int i=0;i<50;++i) assert(!p.immersive(good(),CutsceneMode::vr_comfort,false));
      assert(p.reason()==CutsceneFallback::incomplete_pair && !p.pending());
      assert(!p.immersive(good(36),CutsceneMode::vr_comfort,false) && p.reason()==CutsceneFallback::incomplete_pair); // a mixed frame does not end it
@@ -52,6 +54,25 @@ int main(){
      assert(!r.immersive(good(36),CutsceneMode::vr_comfort,false));
      for(int i=0;i<3;++i) assert(!r.immersive(unpaired(),CutsceneMode::vr_comfort,false));
      assert(r.pending() && r.immersive(good(),CutsceneMode::vr_comfort,false) && r.cutscenes()==1);}
+    {CutscenePolicy p; // active_tolerates_two_misses_falls_back_on_third (Ruling 9)
+     assert(p.immersive(good(),CutsceneMode::vr_comfort,false));
+     assert(!p.immersive(unpaired(),CutsceneMode::vr_comfort,false) && p.holding() && !p.pending());
+     assert(p.immersive(good(),CutsceneMode::vr_comfort,false) && !p.holding()); // a good frame resets the run
+     assert(!p.immersive(unpaired(),CutsceneMode::vr_comfort,false) && p.holding());
+     assert(!p.immersive(unpaired(),CutsceneMode::vr_comfort,false) && p.holding() && p.reason()==CutsceneFallback::none);
+     assert(!p.immersive(unpaired(),CutsceneMode::vr_comfort,false) && p.reason()==CutsceneFallback::incomplete_pair && !p.holding());
+     assert(!p.immersive(good(),CutsceneMode::vr_comfort,false) && p.last_fallback()==CutsceneFallback::incomplete_pair);
+     CutscenePolicy d;assert(d.immersive(good(),CutsceneMode::vr_comfort,false)); // only a missing pair is held: duplicate eyes fall back at once
+     assert(!d.immersive({32,true,false,true,false},CutsceneMode::vr_comfort,false) && d.reason()==CutsceneFallback::duplicate_eyes && !d.holding());}
+    {CutscenePolicy p; // re-entry 32 -> 36 -> 32: the 36 frame is no cutscene frame; back on 32 the pair must form again (pending, not held)
+     assert(p.immersive(good(),CutsceneMode::vr_comfort,false));
+     assert(!p.immersive(good(36),CutsceneMode::vr_comfort,false) && !p.holding() && p.pending() && p.active()); // the pair must form again
+     assert(!p.immersive(unpaired(),CutsceneMode::vr_comfort,false) && p.pending() && !p.holding()); // shown black by the caller, never a replay
+     assert(p.immersive(good(),CutsceneMode::vr_comfort,false) && p.cutscenes()==1);
+     CutscenePolicy q; // 2 -> 34 -> 32: the mixed frames start nothing; the cutscene starts pending at its first exact frame
+     assert(!q.immersive(good(2),CutsceneMode::vr_comfort,false) && !q.immersive(good(34),CutsceneMode::vr_comfort,false) && !q.active());
+     assert(!q.immersive(unpaired(),CutsceneMode::vr_comfort,false) && q.pending() && q.active() && q.cutscenes()==1);
+     assert(q.immersive(good(),CutsceneMode::vr_comfort,false));}
     {CutscenePolicy p; // reject: a session that can never pair goes to the theater at once
      p.reject(CutsceneFallback::incomplete_pair);assert(p.reason()==CutsceneFallback::incomplete_pair && p.active() && p.cutscenes()==1);
      assert(!p.immersive(good(),CutsceneMode::vr_comfort,false));p.reject(CutsceneFallback::fault);assert(p.reason()==CutsceneFallback::incomplete_pair);}
