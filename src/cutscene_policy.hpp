@@ -10,7 +10,7 @@
 #include <cstdint>
 
 namespace d2vr {
-enum class CutsceneFallback {none,mode_theater,knob_off,incomplete_pair,duplicate_eyes,camera_unreadable,fault};
+enum class CutsceneFallback {none,mode_theater,knob_off,incomplete_pair,duplicate_eyes,camera_unreadable,fault,bink_video};
 
 inline const char* to_string(CutsceneFallback reason) noexcept {
     switch(reason) {
@@ -21,6 +21,7 @@ inline const char* to_string(CutsceneFallback reason) noexcept {
     case CutsceneFallback::duplicate_eyes: return "duplicate_eyes";
     case CutsceneFallback::camera_unreadable: return "camera_unreadable";
     case CutsceneFallback::fault: return "fault";
+    case CutsceneFallback::bink_video: return "bink_video";
     }
     return "none";
 }
@@ -33,10 +34,12 @@ struct CutsceneFrame {
     bool eyes_distinct;    // two different eye images rendered from two different eye poses (never one texture or one pose twice)
     bool camera_readable;  // the player camera the cinematic renders from was read this frame
     bool fault;            // a recoverable fault or callback failure since the cutscene began
+    std::uint64_t now_ms{};// Present time; 0 = unknown (a mixed mask is then never held)
 };
 
 class CutscenePolicy {
-    bool active_{},paired_seen_{};
+    bool active_{},paired_seen_{},mixed_{},resume_{};
+    std::uint64_t mixed_start_{};
     unsigned pending_frames_{},misses_{};
     CutsceneFallback reason_{CutsceneFallback::none},last_fallback_{CutsceneFallback::none};
     std::uint64_t cutscenes_{};
@@ -49,15 +52,27 @@ public:
     static constexpr unsigned entry_grace_frames=30;
     // Once paired, a short gap in the pair (Ruling 9) is held rather than ending the cutscene's VR view: at most this many in a row.
     static constexpr unsigned tolerated_misses=2;
+    // Track T C4: inside an ACTIVE immersive cutscene a transient mixed mask (cinematic bit plus another, e.g. a dialog choice 32|x or the
+    // skip transition) holds the immersive state (the previous layer is shown again) for at most this long instead of dropping to the
+    // theater and back; the pause bit (4) never holds. After the hold the pair gets the entry grace to form again.
+    static constexpr std::uint64_t mixed_hold_ms=500;
+    static constexpr unsigned pause_logic_bit=4;
 
     // Sticky: false for the rest of the cutscene once any frame fails.
     bool immersive(const CutsceneFrame& frame,CutsceneMode mode,bool knob_off) noexcept {
         if(frame.logic!=cinematic_logic_mask) {
             // Never immersive. While the cinematic bit stays set the cutscene goes on and its fallback sticks; the scene gates were shut
             // for this frame, though, so the pair has to form again: the entry grace re-arms.
-            if(active_) {paired_seen_=false;pending_frames_=0;misses_=0;}
+            const bool mixed=(frame.logic&cinematic_logic_mask)!=0 && (frame.logic&pause_logic_bit)==0;
+            if(mixed && active_ && reason_==CutsceneFallback::none && paired_seen_ && frame.now_ms) {
+                if(!mixed_) {mixed_=true;mixed_start_=frame.now_ms;}
+                if(frame.now_ms>=mixed_start_ && frame.now_ms-mixed_start_<=mixed_hold_ms) return false; // held (holding() is true)
+            }
+            if(active_) {paired_seen_=false;pending_frames_=0;misses_=0;resume_=false;}
+            mixed_=false;
             return false;
         }
+        if(mixed_) {mixed_=false;resume_=true;misses_=0;} // back to the exact cinematic after a held mixed run
         begin();
         if(reason_!=CutsceneFallback::none) return false;
         if(knob_off) return latch(CutsceneFallback::knob_off);
@@ -66,11 +81,11 @@ public:
         if(!frame.camera_readable) return latch(CutsceneFallback::camera_unreadable);
         if(!frame.paired_complete) {
             if(!paired_seen_) {if(++pending_frames_<=entry_grace_frames) return false;}
-            else if(++misses_<=tolerated_misses) return false;
+            else if(++misses_<=(resume_?entry_grace_frames:tolerated_misses)) return false;
             misses_=0;return latch(CutsceneFallback::incomplete_pair);
         }
         if(!frame.eyes_distinct) return latch(CutsceneFallback::duplicate_eyes);
-        paired_seen_=true;misses_=0;
+        paired_seen_=true;misses_=0;resume_=false;
         return true;
     }
     // This cutscene can never be immersive (e.g. a one-view eye mode): the theater screen at once, no grace.
@@ -81,10 +96,10 @@ public:
     // Waiting for the first pair: nothing new is shown (no theater flash, no unpaired image as stereo).
     bool pending() const noexcept {return active_ && reason_==CutsceneFallback::none && !paired_seen_;}
     // A tolerated miss after the pair formed: show the previous immersive stereo layer of this cutscene again (never a newer image).
-    bool holding() const noexcept {return active_ && reason_==CutsceneFallback::none && paired_seen_ && misses_>0;}
+    bool holding() const noexcept {return active_ && reason_==CutsceneFallback::none && paired_seen_ && (misses_>0 || mixed_);}
     std::uint64_t cutscenes() const noexcept {return cutscenes_;}
     // When the cinematic bit leaves the mask: the next cutscene starts afresh.
-    void end() noexcept {active_=false;paired_seen_=false;pending_frames_=0;misses_=0;reason_=CutsceneFallback::none;}
+    void end() noexcept {active_=false;paired_seen_=false;mixed_=resume_=false;pending_frames_=0;misses_=0;reason_=CutsceneFallback::none;}
 };
 
 // May exact-32 frames keep the scene gates open (native stereo, eye matching, the head-view write)? Never in theater, never with the
