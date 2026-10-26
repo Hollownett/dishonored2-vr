@@ -61,10 +61,11 @@ int main() {
     focus=native_use_volume_focus(items,Vec3{-.4,0,0});assert(focus&&focus->owner==2);
     assert(!native_use_volume_focus(items,Vec3{0,0,2}));
     const std::array<NativeUseVolumeCandidate,2> retained{{
-        {5,{.5,0,0},{.51,.01,.01},true},{6,{.42,0,0},{.43,.01,.01},true}}};
-    assert(native_use_volume_focus(retained,Vec3{},5)->owner==5);
-    assert(native_use_volume_focus(retained,Vec3{.15,0,0},5)->owner==5);
-    auto challenger=retained;challenger[1].minimum={.3,0,0};challenger[1].maximum={.31,.01,.01};
+        {5,{.18,0,0},{.19,.01,.01},true},{6,{.14,0,0},{.15,.01,.01},true}}};
+    assert(native_use_volume_focus(retained,Vec3{},5)->owner==6); // history never beats a nearer surface
+    assert(native_use_volume_focus(retained,Vec3{.15,0,0},5)->owner==6);
+    assert(native_use_volume_focus(retained,Vec3{.2,0,0},6)->owner==5); // either hand may choose the same closest eligible owner
+    auto challenger=retained;challenger[1].minimum={.1,0,0};challenger[1].maximum={.11,.01,.01};
     assert(native_use_volume_focus(challenger,Vec3{},5)->owner==6);
     auto invalid=items;for(auto& item:invalid)item.native_eligible=false;
     assert(!native_use_volume_focus(invalid,Vec3{}));

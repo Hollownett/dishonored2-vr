@@ -1496,7 +1496,7 @@ private:
         } catch(...) {}
         try {
             std::array<float,3> after{};
-            if(observed && (result&0xffu)==0 && context_==observed_scope &&
+            if(observed && (qualified_result&0xffu)==0 && context_==observed_scope &&
                read_(reinterpret_cast<std::uintptr_t>(point),after.data(),sizeof(after)) && after==frozen_point &&
                contact_valid(*observed_scope,*observed,GetTickCount64())) {
                 std::lock_guard<std::mutex> guard(mutex_);

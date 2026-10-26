@@ -1,4 +1,4 @@
-# v619 accumulated repair test build
+# v620 accumulated repair test build
 
 Headset status: not run. This build includes the settings, pickup, aim, sprint, prompt, temporal-AA and hand-depth work developed after v613. Experimental paths remain off by default; they are available in the launcher's Settings → Features and the Linux feature CLI. Performance mode remains on by default.
 
@@ -22,7 +22,7 @@ Toggle one experiment at a time and restart the mod session. Existing feature ch
 
 ## Required headset checks
 
-1. Exit the game, install v619, choose launcher AA/settings and launch. Compare the actual `build/vr-settings.cfg`, the in-game VR panel and `settings_source` in the status. Stop/relaunch and verify an in-game change survives. Windows launcher startup remains to be verified on Windows.
+1. Exit the game, install v620, choose launcher AA/settings and launch. Compare the actual `build/vr-settings.cfg`, the in-game VR panel and `settings_source` in the status. Stop/relaunch and verify an in-game change survives. Windows launcher startup remains to be verified on Windows.
 2. Compare pickup reach and competition with v612/v613 in the same location: a small prop beside a corpse, two nearby props, and a blocked object beside a reachable one. Verify that the nearer eligible object wins and that native hold/release still works.
 3. Equip a gun and a power. Repeatedly swap and holster/redraw; compare the reticle with the drawn barrel and actual shot/power target. Available simulator saves had no equipped gun/power, so alignment remains unverified.
 4. Run the four experimental tests above, preserving accepted locomotion and turning settings.
@@ -33,4 +33,4 @@ The old performance-mode right-eye warp remains unresolved. Do not report it, su
 
 ## Validation record
 
-The release assets include `v619-validation.json` with build/check results and asset hashes. Simulator A/B evidence covers close native pickups, native guard offers/hints, both-eye temporal processing and native depth-state restoration. Automated checks establish their specific contracts, not headset visual quality or comfort. The Linux full harness has environment-specific skips and an unavailable native FSR4/provider GPU check; the release notes record the actual outcome.
+The release assets include `v620-validation.json` with build/check results and asset hashes. Simulator A/B evidence covers close native pickups, native guard offers/hints, both-eye temporal processing and native depth-state restoration. Automated checks establish their specific contracts, not headset visual quality or comfort. The Linux full harness has environment-specific skips and an unavailable native FSR4/provider GPU check; the release notes record the actual outcome.
