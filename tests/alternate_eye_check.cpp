@@ -385,7 +385,32 @@ static void paired_frames_never_trip_the_miss_fallback() {
     for (int i = 0; i < 180; ++i) m = alternate_miss_count(m, true, false);
     CHECK(m >= 180);                                                            // 180 consecutive one-view misses still fall back
 }
+static void replacement_session_reusing_epoch_one_bootstraps_paired() {
+    AlternateEye scheduler;PendingViews<Pose> pending;
+    for(std::uint64_t frame=10;frame<15;++frame) step(scheduler,frame);
+    constexpr std::uint64_t previous_epoch=1,replacement_epoch=1;
+    pending.record(15,1,Pose{91},previous_epoch,20,30);
+    CHECK(pending.take(15)->epoch==replacement_epoch); // epoch equality cannot certify a new session
+    CHECK(scheduler.eye_for_frame(15,true,false,false)==1); // the retired session would reuse its images
+    scheduler.reset();pending.reset(); // production reset_alternate_session performs both
+    CHECK(!pending.take(15));
+    CHECK(step(scheduler,15)==-1); // a new session, even at the same pose epoch, needs a complete pair
+    CHECK(step(scheduler,16)==0);
+    unsigned misses=179;
+    for(unsigned frame=0;frame<500;++frame) {
+        const bool allowed=alternate_miss_observation_allowed(true,true,true);
+        misses=allowed?alternate_miss_count(misses,true,false):0;
+    }
+    CHECK(misses==0);
+    CHECK(!alternate_miss_observation_allowed(false,false,false));
+    CHECK(!alternate_miss_observation_allowed(true,true,false));
+    CHECK(!alternate_miss_observation_allowed(true,false,true));
+    CHECK(alternate_miss_observation_allowed(true,false,false));
+    for(unsigned frame=0;frame<180;++frame) misses=alternate_miss_count(misses,true,false);
+    CHECK(misses==180); // real active-session failures still retire alternation
+}
 int main() {
+    replacement_session_reusing_epoch_one_bootstraps_paired();
     paired_frames_never_trip_the_miss_fallback();
     parity_alternates_in_gameplay();
     menus_and_authored_render_paired();

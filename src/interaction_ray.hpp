@@ -1,6 +1,7 @@
 #pragma once
 #include "tracked_pose.hpp"
 #include <array>
+#include <algorithm>
 #include <cstring>
 #include <optional>
 
@@ -8,6 +9,25 @@ namespace d2vr {
 struct NativeInteractionTargetIdentity {
     std::uintptr_t object{};int generation{-1};unsigned side{2};std::uint64_t epoch{},revision{};
     explicit operator bool() const noexcept{return object && generation>=0 && side<2 && epoch && revision;}
+};
+// An Add/Show joins only the exact native stage0 invocation that emitted it.
+// Completed empty/rejected invocations consume the event too. A later query
+// never supplies a target for an earlier event.
+struct NativePromptSelectionReceipt {std::uint64_t sequence{};NativeInteractionTargetIdentity target{};bool completed{};};
+class NativePromptCompletions {
+    std::array<NativePromptSelectionReceipt,8> slots_{};std::uint64_t latest_{};
+public:
+    void begin(std::uint64_t ticket) noexcept {if(ticket)slots_[ticket%slots_.size()]={ticket,{},false};}
+    void target(std::uint64_t ticket,NativeInteractionTargetIdentity identity) noexcept {
+        auto& slot=slots_[ticket%slots_.size()];if(ticket && slot.sequence==ticket && !slot.completed)slot.target=identity;
+    }
+    void finish(std::uint64_t ticket) noexcept {
+        auto& slot=slots_[ticket%slots_.size()];if(ticket && slot.sequence==ticket) {slot.completed=true;latest_=std::max(latest_,ticket);}
+    }
+    NativePromptSelectionReceipt get(std::uint64_t ticket) const noexcept {
+        const auto& slot=slots_[ticket%slots_.size()];return ticket && slot.sequence==ticket?slot:NativePromptSelectionReceipt{};
+    }
+    NativePromptSelectionReceipt latest() const noexcept {return get(latest_);}
 };
 inline bool operator==(const NativeInteractionTargetIdentity& a,const NativeInteractionTargetIdentity& b) noexcept {
     return a.object==b.object && a.generation==b.generation && a.side==b.side && a.epoch==b.epoch && a.revision==b.revision;

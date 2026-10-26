@@ -26,6 +26,38 @@ int main() {
     assert(routing.next(right,1101)==1);
     assert(routing.next(none,1102)==-1);
     routing.reset();assert(routing.locked()==-1 && routing.selected()==-1);
+    {
+        PassiveInteractionPreview preview;
+        const std::array<bool,2> resting{false,false};
+        assert(!preview.update(both,1000,true,resting,false));
+        assert(!preview.update(both,1200,true,resting,false));
+        preview.observe(0,1200,true,false);
+        assert(!preview.update(both,1300,true,resting,false)); // the other hand has not completed
+        preview.observe(1,1300,false,false);
+        assert(!preview.update(both,1301,true,resting,false)); // pending/refused retrieval is not empty
+        preview.observe(1,1301,true,false);
+        assert(preview.update(both,1302,true,resting,false));
+        for(std::uint64_t now=1320;now<3000;now+=20)
+            assert(preview.update(both,now,true,resting,false)); // no periodic gaze/hand flicker or query renewal
+        assert(!preview.update(both,3000,true,{false,true},false)); // new hand intent immediately wins
+        preview.observe(0,3200,true,false);preview.observe(1,3200,true,false);
+        assert(!preview.update(both,3201,true,resting,false));
+        preview.observe(0,3500,true,false);preview.observe(1,3500,true,false);
+        assert(!preview.update(both,3300,true,resting,false)); // future observations cannot qualify
+        assert(preview.update(both,3501,true,resting,false));
+        assert(!preview.update(both,3502,false,resting,false)); // press/occupation gate withdraws preview
+        preview.observe(0,3700,true,false);preview.observe(1,3700,true,false);
+        assert(!preview.update(both,3701,true,resting,false));
+        preview.observe(0,3900,true,true);
+        assert(!preview.update(both,4001,true,resting,true)); // a qualified native hand is authoritative
+        assert(!preview.update(none,4002,true,resting,false));
+        preview.observe(0,4200,true,false);preview.observe(1,4200,true,false);
+        assert(!preview.update(both,4201,true,resting,false));
+        assert(!preview.update(both,4501,true,resting,false)); // stale scans / publication gap fail closed
+        assert(!preview.update(both,4000,true,resting,false)); // clock/epoch discontinuity
+        preview.reset();
+        assert(!preview.active());
+    }
     const InteractionRay ray{{10,20,30,0,0,0,4,0,0,0,0,0}};
     const auto near=interaction_hit_point(ray,1,2.0);
     assert(near && near->x==10 && near->y==20 && near->z==32);
@@ -71,6 +103,21 @@ int main() {
     assert(!native_use_volume_focus(invalid,Vec3{}));
     invalid[0].native_eligible=true;invalid[0].minimum.x=1; // Inverted bounds cannot create eligibility.
     assert(!native_use_volume_focus(invalid,Vec3{}));
+    { // Player locomotion/turning is not a reaching gesture.
+        const WorldTrackedPose near_hand{{.4,.2,-.3},{{{1,0,0},{0,1,0},{0,0,1}}}};
+        const std::array<Vec3,3> identity_axes{{{1,0,0},{0,1,0},{0,0,1}}};
+        const auto before=interaction_motion_pose(near_hand,{},identity_axes);
+        auto translated=near_hand;translated.position=translated.position+Vec3{1,2,0};
+        const auto after=interaction_motion_pose(translated,{1,2,0},identity_axes);
+        assert(length(before.position-after.position)<1e-9);
+        const std::array<Vec3,3> turned_axes{{{0,1,0},{-1,0,0},{0,0,1}}};
+        WorldTrackedPose turned{{-.2,.4,-.3},turned_axes};
+        const auto local_turn=interaction_motion_pose(turned,{},turned_axes);
+        assert(length(before.position-local_turn.position)<1e-9 && length(before.basis[0]-local_turn.basis[0])<1e-9);
+        InteractionHandRouting intent;assert(intent.next(both,100,false,{false,false})==0);
+        assert(intent.next(both,110,true,{false,true})==1); // coin hand starts reaching: no 600ms wait behind resting hand's target
+        intent.lock(0);assert(intent.next(both,120,true,{false,true})==0); // intentional grip remains authoritative
+    }
     InteractionHandRouting stable;
     assert(stable.next(both,100)==0);const auto stable_revision=stable.revision();
     for(unsigned now=101;now<2000;++now) assert(stable.next(left,now,true)==0);

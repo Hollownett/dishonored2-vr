@@ -61,6 +61,7 @@ struct NativeGrabCheck {
     static void setup(NativeGrab& grab) {grab.active_=true;grab.base_=fixture_base;grab.read_=read;grab.logic_=logic;}
     static void consume(NativeGrab& grab,UINT64 now,unsigned side=0) {std::lock_guard<std::mutex> lock(grab.mutex_);grab.update_lane(side,fixture_world,now);}
     static void buffer_ms(NativeGrab& grab,double ms) {grab.tuning_.grab_buffer_ms=ms;}
+    static void sphere_requirements(NativeGrab& grab,bool legacy) {grab.contact_required_=true;grab.obstruction_required_=true;grab.legacy_palm_select_=legacy;}
 };
 }
 int main() {
@@ -141,6 +142,48 @@ int main() {
         }
         const auto left=both.focus_score(0,5000+199*11),right=both.focus_score(1,5000+199*11);
         assert(left && right && left->id==0x10001 && right->id==0x10001);
+    }
+    {   // Grip alone at 20 cm: raw sphere wins without a fitted palm, hand mesh contacts or async LOS.
+        for(bool legacy:{false,true}) {
+            fixture();second_prop({-.20f,0,0});
+            auto raw=hand;raw.position.x=-.40;
+            NativeGrab sphere;NativeGrabCheck::setup(sphere);NativeGrabCheck::sphere_requirements(sphere,legacy);
+            const auto camera=*native_player_camera(read,fixture_base,fixture_camera);
+            auto outside=raw;outside.position.x=-.46; // nearest prop is 26 cm away
+            sphere.publish(0,camera,outside,0,1,7990,true,false,7990);sphere.filter_native_grip(0,0,1,7990,true,true,false);
+            assert(!sphere.focus_entity(0,7990));
+            sphere.publish(0,camera,raw,0,1,8000,true,false,8000);sphere.filter_native_grip(0,0,1,8000,true,true,false);
+            for(UINT64 t=8000;t<8200;t+=10) {sphere.publish(0,camera,raw,0,1,t,true,false,t);assert(sphere.focus_entity(0,t)==second_entity);}
+            // The previously hovered prop loses as soon as another actual surface is nearer.
+            raw.position.x=-.06;
+            sphere.publish(0,camera,raw,0,1,8200,true,false,8200);assert(sphere.focus_entity(0,8200)==second_entity);
+            raw.position.x=.01;
+            sphere.publish(0,camera,raw,0,1,8210,true,false,8210);assert(sphere.focus_entity(0,8210)==fixture_entity);
+            raw.position.x=-.40;
+            sphere.publish(0,camera,raw,.9f,1,8220,true,false,8220);
+            assert(sphere.filter_native_grip(0,.9f,1,8220,true,true,false,false,true)==0);
+            assert((*sphere.diagnostics(8220))[0].gate!=NativeGrab::Gate::obstruction_pending);
+            unsigned queries=0;sphere.service_obstruction(camera,8220,[&](const NativeGrab::ObstructionRequest&)->std::optional<bool>{++queries;return false;});
+            NativeGrabCheck::consume(sphere,8220);
+            assert(sphere.holding(0) && (*sphere.diagnostics(8220))[0].held->entity==second_entity);
+            assert(queries==0 && sphere.hover_los().requests==0);
+        }
+    }
+    {   // Sphere proximity cannot authorize a recycled body between press and dispatcher bind.
+        fixture();NativeGrab recycled;NativeGrabCheck::setup(recycled);NativeGrabCheck::sphere_requirements(recycled,false);
+        const auto camera=*native_player_camera(read,fixture_base,fixture_camera);
+        recycled.publish(0,camera,hand,0,1,9000,true,false,9000);recycled.filter_native_grip(0,0,1,9000,true,true,false);
+        recycled.publish(0,camera,hand,.9f,1,9010,true,false,9010);recycled.filter_native_grip(0,.9f,1,9010,true,true,false,false,true);
+        put(fixture_component+0x18,rig::Identity{8,10});
+        NativeGrabCheck::consume(recycled,9010);assert(!recycled.holding(0));
+    }
+    {   // A hand source outside the freshness window cannot acquire through the sphere.
+        fixture();NativeGrab stale;NativeGrabCheck::setup(stale);NativeGrabCheck::sphere_requirements(stale,false);
+        const auto camera=*native_player_camera(read,fixture_base,fixture_camera);
+        stale.publish(0,camera,hand,0,1,10000,true,false,10000);stale.filter_native_grip(0,0,1,10000,true,true,false);
+        const UINT64 expired=10000+grab_pose_freshness_ms+1;
+        stale.publish(0,camera,hand,.9f,1,expired,true,false,10000);stale.filter_native_grip(0,.9f,1,expired,true,true,false,false,true);
+        NativeGrabCheck::consume(stale,expired);assert(!stale.holding(0));
     }
     std::cout<<"PASS: G3 grab buffer (early squeeze binds on arrival, nothing in 150 ms goes native once, 0 disables), both hands hover the nearest object; ";
     std::cout<<"PASS: real NativeGrab publication/filter/dispatcher caller order: one released epoch sample permits acquisition; held epoch/focus return stays disarmed\n";

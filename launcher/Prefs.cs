@@ -72,8 +72,8 @@ public sealed class Prefs
         return m;
     }
 
-    /// <summary>v613: performance mode (alternate-eye) draws one eye per frame and uses SMAA in place of FSR/DLSS (modes 2-8); the AA help says so while that feature row is on.</summary>
-    public const string PerformanceModeAaNote = "Performance mode is on: it draws one eye per frame and uses SMAA, so FSR/DLSS is not used. Turn performance mode off to use FSR/DLSS.";
+    /// <summary>Performance mode alternates eyes while retaining the selected AA behind per-eye ownership checks.</summary>
+    public const string PerformanceModeAaNote = "Performance mode is on: it draws one eye per frame and uses your selected AA when per-eye ownership checks pass.";
     public static string AaHelpFor(string help, bool performanceMode) => performanceMode ? PerformanceModeAaNote + " " + help : help;
 
     /// <summary>v613: the default anti-aliasing follows the GPU, mirroring the DLL's first_start_aa (src/aa_first_start.hpp): DLSS offered -> DLAA (7);

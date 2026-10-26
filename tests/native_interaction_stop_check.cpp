@@ -20,7 +20,8 @@ std::map<std::uintptr_t,std::array<unsigned char,32>> fixture_originals;
 alignas(16) unsigned char choke_decl[0xa0]{};
 alignas(16) unsigned char block_decl[0x110]{},slash_entries[0x28]{};
 unsigned hook_mutations{},native_calls{};
-bool raise_native_seh{};
+std::uintptr_t fail_enable_address{};
+bool raise_native_seh{};std::uint64_t failed_prompt_ticket{};
 void* slash_trampoline{};
 std::array<void*,2> choke_trampolines{};
 std::array<void*,2> offered_trampolines{};
@@ -82,7 +83,8 @@ extern "C" MH_STATUS WINAPI MH_CreateHook(LPVOID target,LPVOID hook,LPVOID* orig
 }
 extern "C" MH_STATUS WINAPI MH_EnableHook(LPVOID target) {
     const auto address=reinterpret_cast<std::uintptr_t>(target);
-    assert(fixture_originals.count(address));fixture_memory[address]=0xe9;++hook_mutations;return MH_OK;
+    assert(fixture_originals.count(address));if(address==fail_enable_address)return static_cast<MH_STATUS>(1);
+    fixture_memory[address]=0xe9;++hook_mutations;return MH_OK;
 }
 extern "C" MH_STATUS WINAPI MH_DisableHook(LPVOID target) {
     const auto address=reinterpret_cast<std::uintptr_t>(target);
@@ -98,6 +100,14 @@ struct NativeInteractionStopFixture {
         throw std::runtime_error("fixture native stage exception");
     }
     static void __fastcall throw_during_stage(void*) {
+        auto* aim=NativeInteractionAim::instance_;
+        if(NativeInteractionAim::active_prompt_ticket_) {
+            const auto event=aim->prompt_event_receipt(GetTickCount64());
+            assert(event.sequence==NativeInteractionAim::active_prompt_ticket_ && !event.completed);
+            failed_prompt_ticket=event.sequence;
+            std::lock_guard<std::mutex> lock(aim->mutex_);
+            aim->prompt_completions_.target(event.sequence,{0x500000,7,0,9,1}); // partial progress must be erased on fault
+        }
         native_failure();
     }
     static void __fastcall fault_during_stage(void*) {
@@ -162,11 +172,15 @@ struct NativeInteractionStopFixture {
             raise_native_seh=false;bool propagated{};
             try {invoke_callback(aim,index);}catch(const std::runtime_error& error) {propagated=std::string(error.what())=="fixture native stage exception";}
             assert(propagated && aim.depth_==0 && aim.owned_depth_==0);
+            if(index==0) {const auto completed=aim.prompt_completions().get(failed_prompt_ticket);assert(completed.completed && !completed.target);
+                assert(!aim.prompt_event_receipt(GetTickCount64()).sequence && !NativeInteractionAim::active_prompt_ticket_);}
             assert(crash_operation==expected_operation);
             assert(NativeInteractionAim::context_==&previous && NativeInteractionAim::lean_context_==&previous_lean &&
                 NativeInteractionAim::lean_transaction_==&previous_transaction);
             raise_native_seh=true;
             assert(invoke_callback_fault(aim,index) && aim.depth_==0 && aim.owned_depth_==0);
+            if(index==0) {const auto completed=aim.prompt_completions().get(failed_prompt_ticket);assert(completed.completed && !completed.target);
+                assert(!aim.prompt_event_receipt(GetTickCount64()).sequence && !NativeInteractionAim::active_prompt_ticket_);}
             assert(crash_operation==expected_operation);
             assert(NativeInteractionAim::context_==&previous && NativeInteractionAim::lean_context_==&previous_lean &&
                 NativeInteractionAim::lean_transaction_==&previous_transaction);
@@ -256,6 +270,35 @@ struct NativeInteractionStopFixture {
         put(fixture_image_base+NativeSlashSceneRate::setter_rva,NativeSlashSceneRate::setter_code);
         for(unsigned index=0;index<6;++index)put(fixture_image_base+NativeInteractionAim::rvas[index],NativeInteractionAim::expected[index]);
         put(fixture_image_base+0x417820,std::array<unsigned char,32>{});put(fixture_image_base+0x417820,NativeInteractionAim::range_origin_code);
+        // Pinned Steam17576867 SHA256 b671f824...6180, RVA3b8b05..3b8c56.
+        constexpr std::array<unsigned char,338> hand_hover_scan{
+            0x44,0x0f,0xb6,0xf0,0x48,0x8b,0x4c,0x24,0x50,0x48,0x85,0xc9,0x74,0x44,0x8b,0x51,0x10,0x85,0xd2,0x7e,
+            0x3d,0x48,0x8d,0x85,0x80,0x01,0x00,0x00,0x48,0x89,0x44,0x24,0x30,0x89,0x54,0x24,0x28,0x48,0x8d,0x44,
+            0x24,0x40,0x48,0x89,0x44,0x24,0x20,0x4c,0x8d,0x4d,0x98,0x4c,0x8d,0x45,0x80,0x48,0x8b,0xd3,0x48,0x8b,
+            0xcf,0xe8,0x49,0xf0,0xff,0xff,0x48,0x8b,0x4c,0x24,0x50,0x84,0xc0,0x48,0x0f,0x45,0xce,0x48,0x89,0x4c,
+            0x24,0x50,0x48,0x8b,0x54,0x24,0x68,0x48,0x85,0xd2,0x74,0x49,0x8b,0x42,0x10,0x85,0xc0,0x7e,0x42,0x48,
+            0x8d,0x8d,0x80,0x01,0x00,0x00,0x48,0x89,0x4c,0x24,0x30,0x89,0x44,0x24,0x28,0x48,0x8d,0x44,0x24,0x40,
+            0x48,0x89,0x44,0x24,0x20,0x4c,0x8d,0x4d,0x98,0x4c,0x8d,0x45,0x80,0x48,0x8b,0xd3,0x48,0x8b,0xcf,0xe8,
+            0xfb,0xef,0xff,0xff,0x48,0x8b,0x54,0x24,0x68,0x84,0xc0,0x48,0x0f,0x45,0xd6,0x48,0x89,0x54,0x24,0x68,
+            0x48,0x8b,0x4c,0x24,0x50,0x48,0x85,0xc9,0x75,0x09,0x48,0x85,0xd2,0x75,0x04,0x32,0xc0,0xeb,0x02,0xb0,
+            0x01,0x0f,0xb6,0xb5,0x78,0x01,0x00,0x00,0x45,0x84,0xf6,0x74,0x13,0x44,0x0f,0xb6,0xa5,0x70,0x01,0x00,
+            0x00,0x40,0x84,0xf6,0x0f,0x84,0xe9,0xfe,0xff,0xff,0xeb,0x2b,0x84,0xc0,0x74,0x1f,0x41,0xb4,0x01,0x8b,
+            0x83,0xa8,0x00,0x00,0x00,0x89,0x87,0x84,0x00,0x00,0x00,0x48,0x89,0x8f,0xa8,0x00,0x00,0x00,0x48,0x89,
+            0x97,0xb0,0x00,0x00,0x00,0xeb,0x08,0x44,0x0f,0xb6,0xa5,0x70,0x01,0x00,0x00,0x44,0x8b,0xb5,0x88,0x01,
+            0x00,0x00,0x45,0x84,0xff,0x0f,0x84,0xb3,0xfe,0xff,0xff,0x41,0xb4,0x01,0x8b,0x83,0xa8,0x00,0x00,0x00,
+            0x89,0x87,0x8c,0x00,0x00,0x00,0x41,0x83,0xfe,0x04,0x74,0x0c,0x8b,0x83,0xa8,0x00,0x00,0x00,0x89,0x87,
+            0x88,0x00,0x00,0x00,0x48,0x8b,0x4d,0xc0,0x48,0x8b,0x01,0xff,0x50,0x30,0x89,0x87,0x90,0x00,0x00,0x00,
+            0x80,0xa7,0xb8,0x00,0x00,0x00,0xfe,0x40,0x80,0xe6,0x01,0x40,0x08,0xb7,0xb8,0x00,0x00,0x00
+        };
+        put(fixture_image_base+0x3b8b05,hand_hover_scan);
+        put(fixture_image_base+0x3b80a0,native_hand_eligibility_code);
+        for(unsigned index=0;index<NativeInteractionAim::ranking_rvas.size();++index) {
+            std::array<unsigned char,32> bytes{};
+            const auto nibble=[](char value){return value<='9'?value-'0':value-'a'+10;};
+            for(unsigned offset=0;offset<bytes.size();++offset)bytes[offset]=static_cast<unsigned char>(
+                nibble(NativeInteractionAim::ranking_code[index][2*offset])*16+nibble(NativeInteractionAim::ranking_code[index][2*offset+1]));
+            put(fixture_image_base+NativeInteractionAim::ranking_rvas[index],bytes);
+        }
         put(fixture_image_base+0x39a5290,fixture_game);put(fixture_game,fixture_image_base+0x1c940a8);
         put(fixture_game+0x3130b0,fixture_player);put(fixture_player,fixture_image_base+0x1c5e428);put(fixture_player+0xa8,std::uint32_t{123});
         put(fixture_camera,std::array<std::byte,camera_read_size>{});put(fixture_camera+0x25150,std::array<std::byte,0x200>{});
@@ -428,6 +471,24 @@ struct NativeInteractionStopFixture {
         assert(NativeInteractionAim::arm_show_==3 && NativeWeaponHands::services.load()==services_before_request);
         assert(aim.disable() && aim.restore_takedown_ranges() && !aim.stopping_ && NativeInteractionAim::arm_show_==0);
         assert(std::memcmp(untouched.data(),choke_decl,sizeof(choke_decl))==0);
+        // Route-enabled installation owns the extra eligibility hook and restores its complete semantic/geometric pin.
+        aim.install(fixture_image_base,read_memory,logic,true,folder/L"sphere-stop.csv");
+        assert(aim.eligibility_enabled_ && aim.range_origin_enabled_);
+        assert(aim.disable() && !aim.eligibility_enabled_ && !aim.range_origin_enabled_);
+        std::array<unsigned char,native_hand_eligibility_code.size()> restored_body{};
+        assert(read_memory(fixture_image_base+0x3b80a0,restored_body.data(),restored_body.size()) && restored_body==native_hand_eligibility_code);
+        // A later hook failure rolls back eligibility too; no partly installed sphere scope survives.
+        fail_enable_address=fixture_image_base+NativeInteractionAim::ranking_rvas[0];bool sphere_failed=false;
+        try {aim.install(fixture_image_base,read_memory,logic,true,folder/L"sphere-rollback.csv");}catch(const std::runtime_error&) {sphere_failed=true;}
+        fail_enable_address=0;
+        assert(sphere_failed && !aim.active_ && !aim.eligibility_enabled_ && !aim.range_origin_enabled_ && !aim.stopping_);
+        assert(read_memory(fixture_image_base+0x3b80a0,restored_body.data(),restored_body.size()) && restored_body==native_hand_eligibility_code);
+        const auto pin_mutations=hook_mutations;
+        put(fixture_image_base+0x3b80a0+native_hand_eligibility_code.size()-1,static_cast<unsigned char>(0xcc));
+        bool pin_rejected=false;
+        try {aim.install(fixture_image_base,read_memory,logic,true,folder/L"sphere-changed-tail.csv");}catch(const std::runtime_error&) {pin_rejected=true;}
+        assert(pin_rejected && hook_mutations==pin_mutations); // a matching prologue cannot hide changed geometry/permissions
+        put(fixture_image_base+0x3b80a0,native_hand_eligibility_code);
     }
 };
 }

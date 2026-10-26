@@ -25,7 +25,7 @@ head = between(probe, 'void prepare_head_view(void* view) noexcept {', 'void res
 assert 'const UINT64 per_frame_target=frames.load()+1;' in head
 assert 'const bool per_frame=alt_eye>=0?alt_per_frame_done!=per_frame_target:eye==0;' in head
 assert 'if(alt_eye>=0) alt_per_frame_done=per_frame_target;' in head
-assert probe.count('alt_per_frame_done=0;') == 1  # reset in StartProbe
+assert probe.count('alt_per_frame_done=0;') == 2  # StartProbe plus replacement-XR-session reset
 # the guard is computed before any site that uses it and after the eye match
 guard_at = head.index('const bool per_frame=')
 assert head.index('++head_matched;') < guard_at

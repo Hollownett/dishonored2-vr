@@ -34,13 +34,13 @@ int main() {
     PalmTarget surface{2,PalmKind::prop,{.02,-1,-1},{2,1,1},1,{}};
     assert(pick_by_palm(p,std::vector<PalmTarget>{coin,surface},1,.25).index==1);
     assert(std::abs(palm_cost(p,coin,.25,.2)->distance-.04)<1e-9);
-    // 20 cm applies equally to new and previous hovers; a small hover sphere does not alter reach.
+    // 25 cm applies equally to new and previous hovers; a small hover sphere does not alter reach.
     for(std::uint64_t current:{0ull,1ull}) {
-        assert(pick_by_palm(p,std::vector<PalmTarget>{target(1,{.20,0,.015})},current,.01).index);
-        assert(!pick_by_palm(p,std::vector<PalmTarget>{target(1,{.2001,0,.015})},current,.5).index);
+        assert(pick_by_palm(p,std::vector<PalmTarget>{target(1,{.25,0,.015})},current,.01).index);
+        assert(!pick_by_palm(p,std::vector<PalmTarget>{target(1,{.2501,0,.015})},current,.5).index);
     }
-    assert(hand_pickup_in_range(probe(),{.20,0,.015},{.20,0,.015}));
-    assert(!hand_pickup_in_range(probe(),{.2001,0,.015},{.2001,0,.015}));
+    assert(hand_pickup_in_range(probe(),{.25,0,.015},{.25,0,.015}));
+    assert(!hand_pickup_in_range(probe(),{.2501,0,.015},{.2501,0,.015}));
     assert(!hand_pickup_in_range(probe(),{NAN,0,0},{.1,0,0}));
     assert(!hand_pickup_in_range(probe(),{.1,0,0},{0,0,0}));
     // Translation and mirrored hand direction leave the nearest result unchanged.
@@ -52,5 +52,5 @@ int main() {
     assert(pick_by_palm(p,both,0,.25).index==0);
     p.valid=false;assert(!pick_by_palm(p,both,0,.25).index);
     assert(pick_by_palm(p,both,1,.25).fallback);
-    std::puts("PASS: nearest actual surface wins across kind, direction, approach and previous hover; 20 cm boundary, ties and invalid inputs");
+    std::puts("PASS: nearest actual surface wins across kind, direction, approach and previous hover; 25 cm boundary, ties and invalid inputs");
 }

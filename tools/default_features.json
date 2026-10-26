@@ -13,9 +13,9 @@
    "id": "power-gestures",
    "file": "power-gestures",
    "kind": "enable",
-   "label": "Power gestures (new, untested)",
-   "help": "Hand gestures that trigger your powers; not yet tested in a headset.",
-   "default": true
+   "label": "Power gestures",
+   "help": "Trigger powers with hand gestures. Leave off to use the controller trigger.",
+   "default": false
   },
   {
    "id": "hand-body",
@@ -246,15 +246,15 @@
    "file": "alternate-eye",
    "kind": "enable",
    "label": "performance mode: one eye per frame (more fps; may shimmer on fast motion)",
-   "help": "The game draws one eye per frame, alternating, and the headset reprojects the other. Roughly a quarter less frame time, so more fps. Fast motion can shimmer. Game TAA is available through the separate native TAA option; FSR modes use SMAA in performance mode. On by default; turn it off here if it bothers you.",
+   "help": "The game draws one eye per frame, alternating, and the headset reprojects the other. Your selected anti-aliasing remains active when its per-eye checks pass. Fast motion can shimmer. On by default; turn it off here to render both eyes each frame.",
    "default": true
   },
   {
    "id": "alternate-native-taa",
    "file": "no-alternate-native-taa",
    "kind": "disable",
-   "label": "Game TAA in performance mode (experimental)",
-   "help": "Allows Game TAA with separate history and previous camera state for each eye. Select Game TAA in VR settings to use it. Falls back to SMAA if native ownership checks fail. Headset validation is pending; turn off to use SMAA throughout performance mode.",
+   "label": "Per-eye temporal AA in performance mode",
+   "help": "Allows temporal AA with separate history and previous camera state for each eye in performance mode. Applies to Game TAA, FSR and DLSS. Falls back to spatial AA if native ownership checks fail.",
    "default": true
   },
   {
@@ -371,38 +371,29 @@
   },
   {
    "id": "run-root-gate",
-   "file": "run-root-gate",
-   "kind": "enable",
-   "label": "Sprint hand tracking repair (experimental)",
-   "help": "Tests a correction for hands repeatedly lagging and catching up while running. Off until verified in a headset.",
-   "default": false,
-   "requires_dll_knob": "run-root-gate"
-  },
-  {
-   "id": "prompt-target-anchor",
-   "file": "prompt-target-anchor",
-   "kind": "enable",
-   "label": "Takedown prompt targeting repair (experimental)",
-   "help": "Keeps a kill or choke prompt attached to its guard when a hand targets nearby loot. The reported headset regression still needs verification.",
-   "default": false,
-   "requires_dll_knob": "prompt-target-anchor"
+   "file": "no-run-root-gate",
+   "kind": "disable",
+   "label": "Sprint hand tracking repair",
+   "help": "Keeps player motion separate from hand motion so the hands do not repeatedly lag and catch up during sprinting. Turn off to compare the previous tracking.",
+   "default": true,
+   "requires_dll_knob": "no-run-root-gate"
   },
   {
    "id": "alternate-upscalers",
-   "file": "alternate-upscalers",
-   "kind": "enable",
-   "label": "Selected AA in performance mode (experimental)",
-   "help": "Uses the selected temporal AA, FSR or DLSS mode with performance mode. Both eyes have simulator coverage; headset image quality remains unverified. Off uses the existing SMAA path.",
-   "default": false,
-   "requires_dll_knob": "alternate-upscalers"
+   "file": "no-alternate-upscalers",
+   "kind": "disable",
+   "label": "Selected AA in performance mode",
+   "help": "Uses your selected FSR, DLSS or Game TAA mode while alternating eyes. Falls back to spatial AA if per-eye temporal ownership fails. Enabled by default.",
+   "default": true,
+   "requires_dll_knob": "no-alternate-upscalers"
   },
   {
    "id": "world-hand-depth",
    "file": "world-hand-depth",
    "kind": "enable",
    "label": "Hand and prop depth repair (experimental)",
-   "help": "Tests a depth correction for hands appearing through held objects. The native depth reset is fixed; paper, corpse limbs and prompt visibility still need headset verification.",
-   "default": false,
+   "help": "Applies world depth to hands and carried props so nearer surfaces can hide them.",
+   "default": true,
    "requires_dll_knob": "world-hand-depth"
   },
   {

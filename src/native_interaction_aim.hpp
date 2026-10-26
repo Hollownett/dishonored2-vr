@@ -1,6 +1,7 @@
 #pragma once
 #include "interaction_ray.hpp"
 #include "selection_policy.hpp"
+#include "native_hand_sphere.hpp"
 #include <algorithm>
 #include <array>
 #include <cstdint>
@@ -65,6 +66,15 @@ extern "C" MH_STATUS WINAPI MH_DisableHook(LPVOID);
 #endif
 
 namespace d2vr {
+// Compare hand motion in the player's camera frame. World-space comparisons
+// counted ordinary walking as movement of BOTH hands and kept stealing the
+// native query from a hand carefully reaching for a small item.
+inline WorldTrackedPose interaction_motion_pose(const WorldTrackedPose& hand,Vec3 origin,const std::array<Vec3,3>& axes) noexcept {
+    WorldTrackedPose local{};const auto offset=hand.position-origin;
+    local.position={dot(offset,axes[0]),dot(offset,axes[1]),dot(offset,axes[2])};
+    for(unsigned row=0;row<3;++row)local.basis[row]={dot(hand.basis[row],axes[0]),dot(hand.basis[row],axes[1]),dot(hand.basis[row],axes[2])};
+    return local;
+}
 // Select once per publication dwell, never independently inside worker stages.
 class InteractionHandRouting {
     int locked_{-1},selected_{-1},last_{-1};unsigned cycle_{};
@@ -72,6 +82,7 @@ class InteractionHandRouting {
     std::uint64_t ownership_revision_{1};
 public:
     void invalidate_owner() noexcept {if(ownership_revision_)++ownership_revision_;}
+    void invalidate_query() noexcept {++revision_;invalidate_owner();}
     std::uint64_t ownership_revision() const noexcept {return ownership_revision_;}
     void lock(int side) noexcept {
         if(locked_<0 && (side==0||side==1)) {locked_=selected_=side;until_=0;++revision_;invalidate_owner();}
@@ -90,7 +101,10 @@ public:
             // Fairness: a lowered hand that keeps a target must not starve the other. With both hands
             // published, the other hand gets one dwell every 600 ms, but only while it moves: probing a
             // resting hand made the held target (a guard's choke prompt) blink every 600 ms.
-            if(both && moving[1-selected_] && now>=probe_at_+600) next=1-selected_;
+            // A newly reaching hand expresses immediate intent while the old
+            // target's hand rests. Waiting 600 ms here made a coin under that
+            // hand unavailable until the unrelated resting hand yielded.
+            if(both && moving[1-selected_] && (!moving[selected_] || now>=probe_at_+600)) next=1-selected_;
             else {until_=now+120;return selected_;}
         }
         // Searching: the hand that is moving is the one aiming, so it gets every query (no 120 ms ping-pong).
@@ -105,6 +119,34 @@ public:
         return selected_;
     }
     void reset() noexcept {locked_=selected_=last_=-1;cycle_=0;last_tick_=0;until_=0;probe_at_=0;++revision_;invalidate_owner();}
+};
+// A passive native gaze query may supply artwork, never permission to act.
+// Enter only after both actual hand-volume scans completed empty. Once idle
+// gaze owns the query, keep it stable until new hand/input intent arrives.
+class PassiveInteractionPreview {
+    std::array<std::uint64_t,2> empty_{};
+    std::uint64_t idle_since_{},last_{};
+    bool active_{};
+public:
+    void reset() noexcept {empty_={};idle_since_=last_=0;active_=false;}
+    void observe(unsigned side,std::uint64_t now,bool complete,bool qualified) noexcept {
+        if(side>=2)return;
+        empty_[side]=complete && !qualified?now:0;
+        if(qualified) {active_=false;idle_since_=0;}
+    }
+    bool update(std::array<bool,2> published,std::uint64_t now,bool allowed,std::array<bool,2> moving,bool qualified) noexcept {
+        if(last_ && (now<last_ || now-last_>250))reset();
+        last_=now;
+        if(!allowed || !published[0] || !published[1] || moving[0] || moving[1] || qualified) {
+            empty_={};idle_since_=0;active_=false;return false;
+        }
+        if(active_)return true;
+        if(!idle_since_)idle_since_=now;
+        const auto fresh_empty=[&](unsigned side) {return empty_[side] && now>=empty_[side] && now-empty_[side]<=250;};
+        active_=now>=idle_since_ && now-idle_since_>=300 && fresh_empty(0) && fresh_empty(1);
+        return active_;
+    }
+    bool active() const noexcept {return active_;}
 };
 // 0x6c6760 returns a low-byte bool, an entity node, distance and normal.
 // The entity node is never a float3; reconstruct the point from the routed ray.
@@ -129,6 +171,7 @@ inline std::optional<std::array<float,4>> interaction_hand_range_origin(Vec3 han
 #ifndef D2VR_NATIVE_INTERACTION_PURE
 class NativeInteractionAim {
     friend struct NativeInteractionRangeFixture;
+    friend struct NativeInteractionSphereFixture;
     friend struct NativeInteractionStopFixture;
     friend struct NativeCharacterGazeFixture;
     AnatomicalWorldContact anatomical_contact_;
@@ -142,20 +185,34 @@ class NativeInteractionAim {
     using Sort=void (__fastcall*)(void*,unsigned,int,unsigned char);
     using Queue=void* (__fastcall*)(void*,void*,void*,const InteractionRay*,UINT,UINT);
     using RangeOrigin=const float* (__fastcall*)(void*);
+    using Eligibility=std::uintptr_t (__fastcall*)(void*,const void*,void*,const float*);
     using Read=bool (*)(std::uintptr_t,void*,std::size_t);
     using Logic=UINT (*)();
     // reach: the game's own Use distance along this ray (a gaze Use), not the grab-sized hand volume.
     struct Publication {std::uint64_t tick{},epoch{};std::uintptr_t player{},camera{};int generation{};WorldTrackedPose hand{};bool active{};Vec3 volume_centre{};bool reach{};std::optional<WorldTrackedPose> grip;std::optional<rig::NativeCarrySnapshot> carry;
         PalmProbe palm{};     // G1: the raw-controller palm probe (C9/C10) that orders this hand's native Use hits
-        std::optional<Vec3> clamped_palm;};   // H16: the drawn, world-clamped palm (dxgi_probe: valid clamp output, fresh); the loot LOS origin
+        std::optional<Vec3> clamped_palm;
+        bool preview{};};   // H16: the drawn, world-clamped palm (dxgi_probe: valid clamp output, fresh); the loot LOS origin
     struct Contact {
         std::uintptr_t owner{},sensor{},world{},component{};unsigned spawn{};
         rig::Identity sensor_identity{},camera_identity{},component_identity{};
         Vec3 point{};std::uint64_t tick{},epoch{},revision{},publication_tick{};
     };
+    struct SphereHoverOffer {
+        std::uintptr_t component{},owner{},descriptor{};rig::Identity identity{};unsigned spawn{};
+        std::array<unsigned char,32> declaration{};
+    };
+    struct SphereEligibilityObservation {
+        unsigned calls{},native_refused{},semantic_refused{},publication_refused{},accepted{};
+        std::uintptr_t owner{},descriptor{};unsigned native_low{},effective_low{};bool inside{},semantic{},owned{};
+        std::uintptr_t component_vtable_rva{};std::int64_t descriptor_offset{-1};
+    };
     struct Context {NativePlayerCamera camera;Publication hand;int side;unsigned stage;std::uintptr_t sensor;std::uint64_t revision;
         rig::Identity sensor_identity{};
-        mutable std::array<Contact,6> contacts{};mutable unsigned contact_count{};mutable bool contacts_overflow{};std::uint64_t ownership_revision{};};
+        mutable std::array<Contact,6> contacts{};mutable unsigned contact_count{};mutable bool contacts_overflow{};std::uint64_t ownership_revision{};
+        mutable std::array<SphereHoverOffer,8> hover_offers{};mutable unsigned hover_count{};mutable bool hover_overflow{};
+        mutable SphereEligibilityObservation eligibility{};
+        mutable unsigned completed_volumes{};mutable bool incomplete_volume{};};
     struct Retrieved {std::uintptr_t data{},world{};unsigned count{};std::uintptr_t preferred{};const Context* scope{};bool ranked{};std::uintptr_t other_hand{};};
     static thread_local Retrieved retrieved_; // defined after the class: clang-cl needs Retrieved's member initializers complete
     inline static NativeInteractionAim* instance_{};
@@ -186,6 +243,9 @@ class NativeInteractionAim {
     std::atomic<bool> door_installed_{};
     Fetch fetch_{};Sort sort_{};Occlusion occlusion_{};std::array<bool,3> ranking_enabled_{};
     RangeOrigin range_origin_{};bool range_origin_enabled_{};
+    Eligibility eligibility_{};bool eligibility_enabled_{};
+    struct SphereEligibility {const Context* scope{};std::uintptr_t owner{},component{};rig::Identity identity{};unsigned spawn{};bool semantic_passed{};};
+    inline static thread_local SphereEligibility* sphere_eligibility_{};
     inline static constexpr std::array<unsigned char,8> range_origin_code{0x48,0x8d,0x81,0xd8,0,0,0,0xc3};
     inline static thread_local std::array<float,4> hand_range_origin_{};
     inline static thread_local std::array<float,4> loot_los_origin_{};   // H16: the clamped palm handed to 3b7b90 as its origin (game thread)
@@ -213,11 +273,15 @@ class NativeInteractionAim {
     std::array<std::atomic<UINT64>,static_cast<unsigned>(NativeUseQueryOutcome::count)> query_outcomes_{};
     std::mutex mutex_;
     std::array<Publication,2> hands_{};
+    std::array<Publication,2> raw_hands_{};
     std::array<bool,2> published_{};
     InteractionHandRouting routing_;
+    PassiveInteractionPreview passive_preview_;
     struct Motion {Vec3 position{},direction{};std::uint64_t tick{},until{};};std::array<Motion,2> motion_{};
     // Latest native selected interactable per routed hand, plus unrouted native
     // cycles, and the world hit point of each hand's routed direct query.
+    std::uint64_t prompt_query_sequence_{};NativePromptCompletions prompt_completions_; // guarded by mutex_
+    inline static thread_local std::uint64_t active_prompt_ticket_{};
     std::array<std::uintptr_t,2> target_object_{};std::array<std::uint64_t,2> target_tick_{};
     std::array<int,2> target_generation_{-1,-1};
     std::array<std::uintptr_t,2> target_owner_{};std::array<unsigned,2> target_spawn_{};
@@ -422,6 +486,96 @@ class NativeInteractionAim {
         __finally {crash_operation=previous_operation;--self->depth_;}
     }
 
+    // Sphere membership never grants an action: the native eligibility routine
+    // must first pass its original descriptor flags and FSM permission checks.
+    bool sphere_owner_current(const Context& scope,std::uintptr_t owner) const {
+        if(scope.stage!=0 || scope.side<0 || scope.hand.reach || !fresh(scope,GetTickCount64()))return false;
+        const auto character=character_type(owner);if(!character || *character)return false;
+        const auto game=rig::value<std::uintptr_t>(read_,base_+0x39a5290);
+        const auto spawn=rig::value<unsigned>(read_,owner+0xa8);
+        const auto box=owner_bounds(owner);
+        return game && spawn && *spawn!=0x3fff0010 && (*spawn>>16)<0x3fff &&
+            rig::value<std::uintptr_t>(read_,*game+0x3130b0+(*spawn>>16)*8)==owner && box &&
+            hand_pickup_in_range(hand_sphere_probe(scope.hand.volume_centre),box->first,box->second);
+    }
+    bool sphere_eligibility_current(const SphereEligibility& query) const {
+        return context_==query.scope && query.scope && sphere_owner_current(*query.scope,query.owner) &&
+            rig::value<unsigned>(read_,query.owner+0xa8)==query.spawn &&
+            rig::value<std::uintptr_t>(read_,query.component+0x10)==query.owner &&
+            rig::started(read_,query.component)==query.identity;
+    }
+    bool sphere_publication_current_locked(const SphereEligibility& query) const {
+        if(!query.scope || query.scope->side<0 || query.scope->side>1)return false;
+        const auto side=static_cast<unsigned>(query.scope->side);const auto& hand=hands_[side];const auto now=GetTickCount64();
+        const auto box=owner_bounds(query.owner);
+        return published_[side] && routing_.selected()==query.scope->side && routing_.revision()==query.scope->revision &&
+            routing_.ownership_revision()==query.scope->ownership_revision && queued_revision_[side]==query.scope->revision &&
+            hand.epoch==query.scope->hand.epoch && hand.player==query.scope->hand.player && hand.camera==query.scope->hand.camera &&
+            hand.generation==query.scope->hand.generation && !hand.reach && hand.tick && now>=hand.tick && now-hand.tick<=250 &&
+            box && hand_pickup_in_range(hand_sphere_probe(hand.volume_centre),box->first,box->second);
+    }
+    std::uintptr_t eligibility_result(void* sensor,const void* descriptor,void* component,const float* point,std::uintptr_t caller) {
+        auto* previous=sphere_eligibility_;sphere_eligibility_=nullptr;
+        __try {return eligibility_result_body(sensor,descriptor,component,point,caller);}
+        __finally {sphere_eligibility_=previous;}
+    }
+    std::uintptr_t eligibility_result_body(void* sensor,const void* descriptor,void* component,const float* point,std::uintptr_t caller) {
+        const auto* scope=context_;
+        const auto native=[&]{return eligibility_(sensor,descriptor,component,point);};
+        if(!active_.load(std::memory_order_acquire) || !scope || scope->stage!=0 || scope->side<0 || scope->hand.reach ||
+           (caller!=base_+0x3b8a10 && caller!=base_+0x3b8a35) || reinterpret_cast<std::uintptr_t>(sensor)!=scope->sensor ||
+           !fresh(*scope,GetTickCount64()))return native();
+        const auto at=reinterpret_cast<std::uintptr_t>(component);
+        const auto owner=rig::value<std::uintptr_t>(read_,at+0x10);
+        const auto identity=rig::started(read_,at);
+        const auto spawn=owner?rig::value<unsigned>(read_,*owner+0xa8):std::nullopt;
+        if(!owner || !identity || !spawn)return native();
+        const bool inside=sphere_owner_current(*scope,*owner);
+        const auto note=[&](std::uintptr_t original,std::uintptr_t effective,bool semantic,bool owned) {
+            auto& o=scope->eligibility;++o.calls;o.owner=*owner;o.descriptor=reinterpret_cast<std::uintptr_t>(descriptor);
+            const auto table=rig::value<std::uintptr_t>(read_,at),declaration=rig::value<std::uintptr_t>(read_,at+8);
+            o.component_vtable_rva=table && *table>=base_ && *table-base_<0x41cb000?*table-base_:0;
+            o.descriptor_offset=declaration && o.descriptor>=*declaration && o.descriptor-*declaration<0x4000?
+                static_cast<std::int64_t>(o.descriptor-*declaration):-1;
+            o.native_low=static_cast<unsigned>(original&0xffu);o.effective_low=static_cast<unsigned>(effective&0xffu);
+            o.inside=inside;o.semantic=semantic;o.owned=owned;
+            if(!(original&0xffu))++o.native_refused;
+            if(inside && !semantic)++o.semantic_refused;
+            if(inside && semantic && !owned)++o.publication_refused;
+            if(inside && owned && (effective&0xffu))++o.accepted;
+        };
+        if(!inside) {const auto result=native();note(result,result,false,false);return result;}
+        SphereHoverOffer offered{at,*owner,reinterpret_cast<std::uintptr_t>(descriptor),*identity,*spawn,{}};
+        const bool have_descriptor=rig::pointer(offered.descriptor) && read_(offered.descriptor,offered.declaration.data(),offered.declaration.size());
+        SphereEligibility query{scope,*owner,at,*identity,*spawn,false};
+        sphere_eligibility_=&query;
+        const auto result=native();
+        bool owned=false;
+        if(query.semantic_passed && active_.load(std::memory_order_acquire) && sphere_eligibility_current(query)) {
+            std::lock_guard<std::mutex> lock(mutex_);owned=sphere_publication_current_locked(query);
+        }
+        const auto effective=hand_sphere_eligibility_result(result,query.semantic_passed,owned);
+        note(result,effective,query.semantic_passed,owned);
+        std::array<unsigned char,32> after{};
+        if(owned && query.semantic_passed && (effective&0xffu) && have_descriptor &&
+           read_(offered.descriptor,after.data(),after.size()) && after==offered.declaration) {
+            bool known=false;
+            for(unsigned i=0;i<scope->hover_count;++i) {
+                const auto& prior=scope->hover_offers[i];
+                known=known || (prior.component==offered.component && prior.identity==offered.identity && prior.owner==offered.owner &&
+                    prior.spawn==offered.spawn && prior.descriptor==offered.descriptor && prior.declaration==offered.declaration);
+            }
+            if(!known) {
+                if(scope->hover_count<scope->hover_offers.size())scope->hover_offers[scope->hover_count++]=offered;
+                else scope->hover_overflow=true;
+            }
+        }
+        return effective;
+    }
+    static std::uintptr_t __fastcall eligibility_hook(void* sensor,const void* descriptor,void* component,const float* point) {
+        auto* self=instance_;const auto caller=reinterpret_cast<std::uintptr_t>(_ReturnAddress());
+        return counted_callback(self,[&]{return self->eligibility_result(sensor,descriptor,component,point,caller);});
+    }
     const float* range_origin(void* node,std::uintptr_t caller) {
         const auto* native=range_origin_(node); // exact pure getter, once
         const auto* scope=context_;
@@ -443,6 +597,8 @@ class NativeInteractionAim {
             if(!hand)return native;
             std::lock_guard<std::mutex> lock(mutex_);
             if(scope->revision!=routing_.revision() || routing_.selected()!=scope->side || queued_revision_[scope->side]!=scope->revision)return native;
+            if(sphere_eligibility_ && sphere_eligibility_->scope==scope && sphere_eligibility_current(*sphere_eligibility_) && sphere_publication_current_locked(*sphere_eligibility_))
+                sphere_eligibility_->semantic_passed=true;
             hand_range_origin_=*hand;++hand_range_origins_;return hand_range_origin_.data();
         }catch(...){return native;}
     }
@@ -453,6 +609,12 @@ class NativeInteractionAim {
 
     void invalidate_selection() noexcept {
         contact_anchor_={};volume_tickets_={};target_object_={};target_owner_={};target_spawn_={};talk_offers_={};target_tick_={};target_generation_={-1,-1};point_={};point_tick_={};queued_revision_={};ready_revision_={};native_object_=0;native_tick_=0;
+    }
+    void cancel_passive_preview_locked() noexcept {
+        passive_preview_.reset();
+        if(hands_[0].preview || hands_[1].preview) {
+            hands_=raw_hands_;routing_.invalidate_query();invalidate_selection();
+        }
     }
     std::optional<AnatomicalContactOwner> anatomical_scope_owner(const Context& scope) {
         if(scope.stage!=0 || stopping_ || !active_ || logic_()!=2)return {};
@@ -553,14 +715,22 @@ class NativeInteractionAim {
     struct StageFrame {
         const Context* context;Retrieved retrieved;const NativeLeanQuerySnapshot* lean_context;
         NativeLeanQueryTransaction* lean_transaction;const char* operation;bool owned{};
+        std::uint64_t prompt_ticket{},previous_prompt_ticket{};bool prompt_returned{};
     };
     template<unsigned Index> static void __fastcall stage(void* sensor) {
         auto* self=instance_;StageFrame frame{context_,retrieved_,lean_context_,lean_transaction_,crash_operation};
         if constexpr(Index==0) self->stage0_thread_id_.store(GetCurrentThreadId(),std::memory_order_relaxed); // the game thread (frame split telemetry)
         if constexpr(Index==0) if(HandBodyProbeCounters::enabled.load(std::memory_order_relaxed)) HandBodyProbeCounters::note_stage0(self->read_,self->base_,GetCurrentThreadId()); // B7 probe, read-only (guarded reads only; no try here: the function holds SEH)
         ++self->depth_;++self->stage_calls_;context_=nullptr;retrieved_={};lean_context_=nullptr;lean_transaction_=nullptr;
-        __try {stage_body<Index>(sensor,frame);}
+        __try {
+            if constexpr(Index==0) {
+                frame.previous_prompt_ticket=active_prompt_ticket_;
+                frame.prompt_ticket=self->begin_prompt_query();active_prompt_ticket_=frame.prompt_ticket;
+            }
+            stage_body<Index>(sensor,frame);frame.prompt_returned=true;
+        }
         __finally {
+            if constexpr(Index==0) {self->finish_prompt_query(frame.prompt_ticket,frame.prompt_returned);active_prompt_ticket_=frame.previous_prompt_ticket;}
             if(frame.owned)--self->owned_depth_;
             lean_transaction_=frame.lean_transaction;lean_context_=frame.lean_context;
             context_=frame.context;retrieved_=frame.retrieved;crash_operation=frame.operation;--self->depth_;
@@ -686,9 +856,11 @@ class NativeInteractionAim {
                     for(unsigned side=0;side<2;++side) for(unsigned slot=0;slot<weapon_slots;++slot) if(const auto& seg=segments[side][slot];seg.valid && ++cast_n) {
                         LARGE_INTEGER slot_begin{},slot_end{};QueryPerformanceCounter(&slot_begin);
                         const auto cast=[&](const NativeCastExclusion* exclusion) {
-                            return NativeWorldTrace::sphere_cast(self->base_,self->read_,reinterpret_cast<NativeWorldTrace::Cast>(self->base_+NativeWorldTrace::cast_rva),
+                            const auto result=NativeWorldTrace::sphere_query_checked(self->base_,self->read_,reinterpret_cast<NativeWorldTrace::Cast>(self->base_+NativeWorldTrace::cast_rva),
                                 reinterpret_cast<NativeWorldTrace::Construct>(self->base_+NativeWorldTrace::sphere_ctor_rva),*world,seg.from,seg.to,seg.radius,
-                                slot==hand_body_free_slot?kHandBodyFreeLayers:kWorldOccluderLayers,kWorldOccluderRequired,exclusion,clamp_slot(slot));   // only the clamp's slots are ranked by body class
+                                slot==hand_body_free_slot?kHandBodyFreeLayers:kWorldOccluderLayers,kWorldOccluderRequired,nullptr,false,exclusion,clamp_slot(slot));
+                            if(!result.complete)segments[side][slot].valid=false;
+                            return result.hit;   // only the clamp's slots are ranked by body class
                         };
                         if(seg.exclude) {
                             ++clamp_exclude_casts_;
@@ -866,7 +1038,7 @@ class NativeInteractionAim {
             nonlethal_grip_revision_.load(std::memory_order_acquire)==revision;
     }
     // exclude: an entity whose body the cast must not report (the hand clamp's exclusion sweeps; 0: none).
-    struct WeaponSegment {Vec3 from{},to{};double radius{};bool valid{};std::uintptr_t exclude{};int exclude_bone=-1;std::uint32_t exclude_handle{};std::uint8_t producer{};};   // exclude_bone/handle: the guard body the contact service met (-1: a prop)
+    struct WeaponSegment {Vec3 from{},to{};double radius{};bool valid{};std::uintptr_t exclude{};int exclude_bone=-1;std::uint32_t exclude_handle{};std::uint8_t producer{};std::uint64_t request_id{};};   // exclude_bone/handle: the guard body the contact service met (-1: a prop)
     // Slots per hand: 0 the hand clamp's palm sweep (the chest re-acquire while released), 1 weapon, 2 sword reach (hit detection only,
     // past the tip), 3 the palm sweep and 4-8 one closing-fingertip sweep per finger (finger_ik.hpp: what each finger could touch; one
     // posted per frame, the others' hits persist <=100 ms). 9 and 10: the profile casts (dxgi_probe.cpp profile_step, radius_profile.hpp):
@@ -875,7 +1047,7 @@ class NativeInteractionAim {
     // knob build/hand-body only: posted only while a create or a snap may need it), cast with kHandBodyFreeLayers (WORLD_LOW 0 included).
     // 15: the crosshair's 30 m aim-ray cast (producer_crosshair; the reticle distance, G4).
     inline static constexpr unsigned weapon_slots=16;
-    inline static std::mutex weapon_mutex_;static std::array<std::array<WeaponSegment,weapon_slots>,2> weapon_req_; // defined after the class: clang-cl needs WeaponSegment's member initializers complete
+    inline static std::mutex weapon_mutex_;static std::array<std::array<WeaponSegment,weapon_slots>,2> weapon_req_,weapon_answer_segments_; // defined after the class: clang-cl needs WeaponSegment's member initializers complete
     inline static std::array<std::array<std::optional<WorldTraceHit>,weapon_slots>,2> weapon_hit_{};inline static std::array<std::array<std::uint64_t,weapon_slots>,2> weapon_tick_{},weapon_serial_{};inline static std::array<std::array<std::uint8_t,weapon_slots>,2> weapon_producer_{};
 public:
     static constexpr unsigned slot_count=weapon_slots;   // checks
@@ -896,9 +1068,9 @@ public:
     // producer: who asked (producer_clamp 0: the hand clamp, the weapon and the finger probes; producer_held: the held object's clamp sweeps; producer_release:
     // the safe-release probes). The slots are shared, the answer carries the producer of the request it answers, and a reader asks for its own: another
     // producer's request that overwrote its own before the game thread copied it is never read as its answer.
-    static constexpr std::uint8_t producer_clamp=0,producer_held=1,producer_release=2,producer_crosshair=3;
-    static void post_weapon_segment(unsigned side,unsigned slot,Vec3 from,Vec3 to,double radius,std::uintptr_t exclude=0,int exclude_bone=-1,std::uint32_t exclude_handle=0,std::uint8_t producer=producer_clamp) {
-        if(side>1 || slot>=weapon_slots) return;std::lock_guard<std::mutex> guard(weapon_mutex_);weapon_req_[side][slot]={from,to,radius,true,exclude,exclude_bone,exclude_handle,producer};
+    static constexpr std::uint8_t producer_clamp=0,producer_held=1,producer_release=2,producer_crosshair=3,producer_eye_guard=4;
+    static void post_weapon_segment(unsigned side,unsigned slot,Vec3 from,Vec3 to,double radius,std::uintptr_t exclude=0,int exclude_bone=-1,std::uint32_t exclude_handle=0,std::uint8_t producer=producer_clamp,std::uint64_t request_id=0) {
+        if(side>1 || slot>=weapon_slots) return;std::lock_guard<std::mutex> guard(weapon_mutex_);weapon_req_[side][slot]={from,to,radius,true,exclude,exclude_bone,exclude_handle,producer,request_id};
     }
     // Game thread: the requests posted since the last scope (each is answered once).
     static std::array<std::array<WeaponSegment,weapon_slots>,2> take_weapon_requests() {
@@ -910,9 +1082,20 @@ public:
     static void record_weapon_answers(const std::array<std::array<WeaponSegment,weapon_slots>,2>& segments,const std::array<std::array<std::optional<WorldTraceHit>,weapon_slots>,2>& hits,std::uint64_t now) {
         std::lock_guard<std::mutex> guard(weapon_mutex_);
         for(unsigned side=0;side<2;++side) for(unsigned slot=0;slot<weapon_slots;++slot) if(segments[side][slot].valid) {
+            weapon_answer_segments_[side][slot]=segments[side][slot];
             weapon_hit_[side][slot]=hits[side][slot];weapon_tick_[side][slot]=now;weapon_serial_[side][slot]=weapon_casts_.load()+1;weapon_producer_[side][slot]=segments[side][slot].producer;
         }
         ++weapon_casts_;
+    }
+    struct WeaponAnswer {std::uint64_t request_id{},tick{};WeaponSegment segment{};std::optional<WorldTraceHit> hit;};
+    // Read completion identity, original geometry, producer and hit atomically. An empty hit inside a receipt
+    // is a completed clear cast. Missing/stale/other-producer receipts never establish free-space proof.
+    static std::optional<WeaponAnswer> weapon_answer(unsigned side,unsigned slot,std::uint64_t now,
+            std::uint8_t producer=producer_clamp,std::uint64_t ttl_ms=100) {
+        if(side>1 || slot>=weapon_slots)return {};std::lock_guard<std::mutex> guard(weapon_mutex_);
+        const auto tick=weapon_tick_[side][slot];const auto& segment=weapon_answer_segments_[side][slot];
+        if(!tick || now<tick || now-tick>ttl_ms || !segment.valid || segment.producer!=producer || weapon_producer_[side][slot]!=producer)return {};
+        return WeaponAnswer{segment.request_id,tick,segment,weapon_hit_[side][slot]};
     }
     // The scope (weapon_casts_ count) that last answered this slot: unchanged since a post means the post is still unanswered.
     static std::uint64_t weapon_serial(unsigned side,unsigned slot,std::uint8_t producer=producer_clamp) {
@@ -1046,11 +1229,11 @@ public:
 private:
     bool qualified_selected(std::uint64_t now) const noexcept {
         const auto side=routing_.selected();
-        return side>=0 && target_object_[side] && ready_revision_[side]==routing_.revision() &&
+        return side>=0 && !hands_[side].preview && target_object_[side] && ready_revision_[side]==routing_.revision() &&
             target_tick_[side] && now>=target_tick_[side] && now-target_tick_[side]<=250;
     }
     bool live_target(unsigned side,std::uint64_t now) const noexcept {
-        if(side>=2 || !published_[side] || routing_.selected()!=static_cast<int>(side) ||
+        if(side>=2 || !published_[side] || hands_[side].preview || routing_.selected()!=static_cast<int>(side) ||
            ready_revision_[side]!=routing_.revision() || !target_object_[side] || !target_tick_[side] ||
            now<target_tick_[side] || now-target_tick_[side]>250 || !hands_[side].epoch ||
            now<hands_[side].tick || now-hands_[side].tick>250)return false;
@@ -1081,13 +1264,36 @@ private:
             hand.player==scope.camera.player && hand.camera==scope.camera.camera &&
             hand.generation==scope.camera.camera_identity.generation;
     }
+    // Stage0's primary candidate and its two surviving action descriptors are
+    // native hover output. The FSM selected component is a separate use-state
+    // receipt and may stay empty until the player squeezes the grip.
+    // Caller holds mutex_; no native selection field is written here.
+    std::optional<SphereHoverOffer> sphere_hover_offer_locked(const Context& scope,std::uint64_t now) {
+        if(scope.stage!=0 || scope.side<0 || scope.hand.reach || scope.hover_overflow || !fresh(scope,now))return {};
+        const auto primary=rig::value<unsigned>(read_,scope.sensor+0x84);
+        const auto first=rig::value<std::uintptr_t>(read_,scope.sensor+0xa8),second=rig::value<std::uintptr_t>(read_,scope.sensor+0xb0);
+        if(!primary || !first || !second)return {};
+        std::optional<SphereHoverOffer> chosen;
+        for(unsigned i=0;i<scope.hover_count;++i) {
+            const auto& offer=scope.hover_offers[i];
+            if(offer.spawn!=*primary || (offer.descriptor!=*first && offer.descriptor!=*second))continue;
+            const SphereEligibility query{&scope,offer.owner,offer.component,offer.identity,offer.spawn,true};
+            const auto declaration=rig::value<std::array<unsigned char,32>>(read_,offer.descriptor);
+            if(!declaration || *declaration!=offer.declaration || !sphere_eligibility_current(query) || !sphere_publication_current_locked(query))return {};
+            if(chosen && (chosen->component!=offer.component || chosen->identity!=offer.identity || chosen->owner!=offer.owner || chosen->spawn!=offer.spawn))return {};
+            chosen=offer;
+        }
+        if(rig::value<unsigned>(read_,scope.sensor+0x84)!=primary || rig::value<std::uintptr_t>(read_,scope.sensor+0xa8)!=first ||
+           rig::value<std::uintptr_t>(read_,scope.sensor+0xb0)!=second)return {};
+        return chosen;
+    }
     void target(const Context& scope) noexcept {
         try {
             const auto machine=rig::value<std::uintptr_t>(read_,scope.sensor+0x20);
             const auto interaction=machine?rig::value<std::uintptr_t>(read_,*machine+0x318):std::nullopt;
             if(!machine || !interaction || !rig::typed(read_,base_,*machine,0x1c73d58) ||
                !rig::typed(read_,base_,*interaction,0x1c72e98) || rig::value<std::uintptr_t>(read_,*interaction+0x10)!=scope.camera.player) return;
-            const auto generation=rig::value<int>(read_,*interaction+0x30);
+            auto generation=rig::value<int>(read_,*interaction+0x30);
             const auto selected=rig::value<std::uintptr_t>(read_,*interaction+0x38);
             std::uintptr_t object=0,table=0,owner=0;
             if(generation && selected && *generation!=-1 && rig::pointer(*selected) &&
@@ -1100,7 +1306,7 @@ private:
             if(!read_(scope.sensor+0x84,candidates.data(),sizeof(candidates))) return;
             // Stage0 writes entity spawn ids from entity+0xa8. The shared
             // selected component can still belong to the previous hand.
-            const auto spawn=owner?rig::value<UINT>(read_,owner+0xa8):std::nullopt;
+            auto spawn=owner?rig::value<UINT>(read_,owner+0xa8):std::nullopt;
             bool candidate=false;
             if(spawn) for(auto id:candidates) if(id!=0x3fff0010u && id!=0xffffffffu && id==*spawn) candidate=true;
             const auto node=rig::value<std::uintptr_t>(read_,scope.sensor+0x98);
@@ -1108,6 +1314,17 @@ private:
             const auto direct_owner=link && rig::pointer(*link)?rig::value<std::uintptr_t>(read_,*link+0x10):std::nullopt;
             const auto selected_object=object; // before the candidate check (target log)
             if(!candidate && (!direct_owner || *direct_owner!=owner)) object=0;
+            // A native-qualified hover receipt may precede an active FSM use
+            // component. Publish it only after the scanner kept that exact
+            // owner/action following its final obstruction decisions.
+            {std::lock_guard<std::mutex> hover_lock(mutex_);
+             if(const auto hover=sphere_hover_offer_locked(scope,GetTickCount64())) {
+                object=hover->component;owner=hover->owner;spawn=hover->spawn;generation=hover->identity.generation;
+                table=rig::value<std::uintptr_t>(read_,object).value_or(0);candidate=true;
+             }}
+            // Keep the native query (and its Add/Gauge artwork) intact, but a
+            // gaze preview can never become a hand/FSM action receipt.
+            if(scope.hand.preview)object=0;
             if(loot_cycle_.open) loot_cycle_.selected=object?owner:0; // G1 trace: the native-selected owner (thread-local, read-only)
             const auto talk_offer=object && spawn && generation?native_talk_offer(read_,base_,scope.sensor,scope.camera.player,
                 object,static_cast<std::uint32_t>(*generation),owner,*spawn):std::nullopt;
@@ -1115,6 +1332,10 @@ private:
             const auto now=GetTickCount64();
             if(scope.side>=0 && fresh(scope,now) && scope.revision==routing_.revision() &&
                queued_revision_[scope.side]==scope.revision) {
+                if(scope.stage==0 && !scope.hand.reach && !scope.hand.preview &&
+                   scope.ownership_revision==routing_.ownership_revision())
+                    passive_preview_.observe(static_cast<unsigned>(scope.side),now,
+                        scope.completed_volumes==7 && !scope.incomplete_volume && !scope.hover_overflow,object!=0);
                 target_object_[scope.side]=object;target_tick_[scope.side]=now;ready_revision_[scope.side]=scope.revision;
                 talk_offers_[scope.side]=talk_offer;
                 contact_anchor_[scope.side]={};
@@ -1133,18 +1354,29 @@ private:
                     }
                 }
                 target_generation_[scope.side]=generation.value_or(-1);target_owner_[scope.side]=object?owner:0;target_spawn_[scope.side]=object?spawn.value_or(0):0;
+                if(active_prompt_ticket_) prompt_completions_.target(active_prompt_ticket_,object && generation?
+                    NativeInteractionTargetIdentity{object,*generation,static_cast<unsigned>(scope.side),scope.hand.epoch,1}:NativeInteractionTargetIdentity{});
                 // H14: this hand's own cycle ended its loot selection -> no lingering loot prompt the squeeze could not take.
                 if(auto& held=seen_[scope.side];held.tick && !held_prompt_survives_cycle(held.target.owner,takeable(held.target.owner),target_owner_[scope.side])) {
                     held={};++loot_prompt_lingers_dropped_;
                 }
             }
-            else if(scope.side<0) {native_object_=object;native_tick_=now;}
+            else if(scope.side<0 && scope.revision==routing_.revision() && routing_.selected()<0 &&
+                    !scope.hand.preview && !passive_preview_.active()) {native_object_=object;native_tick_=now;
+                if(active_prompt_ticket_)prompt_completions_.target(active_prompt_ticket_,object && generation?
+                    NativeInteractionTargetIdentity{object,*generation,0,epoch_hint_,3}:NativeInteractionTargetIdentity{});
+            }
             // The first 2000 cycles, then (up to 12000) every cycle while a grip Use holds a hand: what that hand's query selected.
-            if(target_samples_<2000 || (routing_.locked()>=0 && target_samples_<12000)) {
+            if(target_samples_<2000 || ((routing_.locked()>=0 || scope.eligibility.calls || scope.hand.preview) && target_samples_<12000)) {
                 targets_<<GetTickCount64()<<','<<GetCurrentThreadId()<<','<<scope.stage<<','<<*interaction<<','<<object<<','
                     <<generation.value_or(-1)<<','<<(table>=base_?table-base_:0)<<','<<owner<<','<<static_cast<unsigned>(interacting);
                 for(auto id:candidates) targets_<<','<<id;
-                targets_<<','<<scope.side<<','<<routing_.locked()<<','<<selected_object<<','<<(candidate?1:0)<<','<<(direct_owner?*direct_owner:0)<<','<<spawn.value_or(0)<<'\n';
+                targets_<<','<<scope.side<<','<<routing_.locked()<<','<<selected_object<<','<<(candidate?1:0)<<','<<(direct_owner?*direct_owner:0)<<','<<spawn.value_or(0);
+                const auto& e=scope.eligibility;
+                targets_<<','<<e.calls<<','<<e.native_refused<<','<<e.semantic_refused<<','<<e.publication_refused<<','<<e.accepted
+                    <<','<<e.owner<<','<<e.descriptor<<','<<e.native_low<<','<<e.effective_low<<','<<(e.inside?1:0)<<','<<(e.semantic?1:0)<<','<<(e.owned?1:0)
+                    <<','<<scope.hover_count<<','<<(scope.hover_overflow?1:0)<<','<<(scope.hand.preview?1:0)
+                    <<','<<e.component_vtable_rva<<','<<e.descriptor_offset<<'\n';
                 ++target_samples_;if(target_samples_%120==0) targets_.flush();
             }
         } catch(...) {}
@@ -1161,6 +1393,9 @@ private:
         bool replaced=false;
         const auto& hand=scope->hand;const auto now=GetTickCount64();
         if(scope->side>=0 && fresh(*scope,now)) {
+            {std::lock_guard<std::mutex> guard(mutex_);
+             if(scope->revision!=routing_.revision() || scope->ownership_revision!=routing_.ownership_revision() ||
+                routing_.selected()!=scope->side || hands_[scope->side].preview!=hand.preview)return native;}
             const auto next=controller_interaction_ray(original,scope->camera.aim_origin,scope->camera.aim_axis,hand.hand);
             if(next) {
                 copy=*next;
@@ -1306,6 +1541,11 @@ private:
                 const auto outcome=(result&0xffu)==0?NativeUseQueryOutcome::incomplete:
                     data && count && capacity?native_use_query_outcome(result,*data,*count,*capacity):NativeUseQueryOutcome::rejected;
                 ++self->query_outcomes_[static_cast<unsigned>(outcome)];
+                if(outcome==NativeUseQueryOutcome::incomplete || outcome==NativeUseQueryOutcome::rejected)scope->incomplete_volume=true;
+                else {
+                    const auto at_id=reinterpret_cast<std::uintptr_t>(id);
+                    scope->completed_volumes|=1u<<static_cast<unsigned>((at_id-scope->sensor-0x70)/4);
+                }
                 if(outcome==NativeUseQueryOutcome::multiple) retrieved_={*data,world,static_cast<unsigned>(*count),preferred,scope,false,other_hand};
                 else if(outcome==NativeUseQueryOutcome::rejected)++self->ranking_rejected_;
             }
@@ -1469,21 +1709,26 @@ private:
         } catch(...) {}
         const auto* los_origin=loot_los_origin(observed_scope,sensor,entity,point,range,caller,origin); // H16: the clamped palm for loot, else origin
         const auto result=occlusion_(sensor,entity,los_origin,axis,point,range,output); // original once, raw return preserved
-        auto qualified_result=result;
-        // The broadphase volume also serves NPCs and doors: retain its v612 reach,
-        // and restrict only takeable owners in hand mode. Reject through the native
-        // blocked/continue contract so every remaining candidate still gets native LOS.
-        if(observed_scope && observed_scope==context_ && observed_scope->stage==0 && !observed_scope->hand.reach && range==0 &&
+        auto qualified_result=result;bool preserve_native_los=false;
+        // Direct hand interaction is proximity-only. The native routine has
+        // already checked the action's permissions. Characters and reach/gaze
+        // retain their native obstruction policy. Inside the sphere keep the
+        // accepted proximity behavior for books and other hand objects. Outside
+        // it, only known takeables require the pickup sphere: a door/usable's
+        // interaction point need not lie inside a small static-model AABB.
+        if(active_.load(std::memory_order_acquire) && observed_scope && observed_scope==context_ && observed_scope->stage==0 &&
+           observed_scope->side>=0 && !observed_scope->hand.reach && range==0 &&
            (caller==base_+0x3b8b05 || caller==base_+0x3b87b5) && reinterpret_cast<std::uintptr_t>(sensor)==observed_scope->sensor &&
-           fresh(*observed_scope,GetTickCount64()) && takeable(reinterpret_cast<std::uintptr_t>(entity))) {
-            const auto bounds=owner_bounds(reinterpret_cast<std::uintptr_t>(entity));
-            const auto hit=rig::value<std::array<float,3>>(read_,reinterpret_cast<std::uintptr_t>(point));
-            const auto probe=observed_scope->hand.palm.valid?observed_scope->hand.palm:legacy_beam_probe(observed_scope->hand.volume_centre,{});
-            const Vec3 fallback=hit?Vec3{(*hit)[0],(*hit)[1],(*hit)[2]}:Vec3{NAN,NAN,NAN};
-            if(!hand_pickup_in_range(probe,bounds?bounds->first:fallback,bounds?bounds->second:fallback)) {
-                qualified_result=(result&~std::uintptr_t{0xff})|1;
-                ++pickup_range_rejected_;
-                if(output) *output=1;
+           fresh(*observed_scope,GetTickCount64())) {
+            const auto owner=reinterpret_cast<std::uintptr_t>(entity);
+            const auto character=character_type(owner);
+            if(character && !*character) {
+                const bool inside=sphere_owner_current(*observed_scope,owner);
+                if(inside || takeable(owner)) {
+                    qualified_result=(result&~std::uintptr_t{0xff})|(inside?0:1);
+                    if(output)*output=inside?0:1;
+                    if(!inside)++pickup_range_rejected_;
+                } else preserve_native_los=true;
             }
         }
         const bool loot_los_armed=loot_los_capture_.armed;loot_los_capture_.armed=false;
@@ -1510,7 +1755,7 @@ private:
         }catch(...) {}
         try {
             const auto& scope=retrieved_;
-            if(self->active_.load(std::memory_order_acquire) && scope.ranked && scope.scope==context_ && context_ &&
+            if(!preserve_native_los && self->active_.load(std::memory_order_acquire) && scope.ranked && scope.scope==context_ && context_ &&
                caller==self->base_+0x3b8b05 && reinterpret_cast<std::uintptr_t>(sensor)==context_->sensor && range==0 && output &&
                self->fresh(*context_,GetTickCount64())) {
                 const auto flag=rig::value<unsigned char>(self->read_,reinterpret_cast<std::uintptr_t>(output));
@@ -1748,7 +1993,8 @@ private:
         return item.target;
     }
     std::optional<QualifiedTarget> native_selected_locked(std::uint64_t now) {
-        if(!native_object_ || !epoch_hint_ || now<native_tick_ || now-native_tick_>250)return {};
+        if(passive_preview_.active() || hands_[0].preview || hands_[1].preview ||
+           !native_object_ || !epoch_hint_ || now<native_tick_ || now-native_tick_>250)return {};
         try {
             const auto identity=rig::started(read_,native_object_);
             const auto owner=rig::value<std::uintptr_t>(read_,native_object_+0x10);
@@ -1770,10 +2016,15 @@ private:
         return best;
     }
 public:
+    struct PassiveGazePreview {
+        WorldTrackedPose gaze{};
+        bool allowed{};
+        std::array<bool,2> moving{true,true}; // actual XR controller motion; head motion is independent
+    };
     struct DiagnosticSnapshot {
         int side{-1};std::uint64_t epoch{},revision{},publication_tick{},target_tick{},ready_revision{};
         std::uintptr_t player{},camera{},component{};int component_generation{-1};
-        bool published{},qualified{};
+        bool published{},qualified{},preview{};
         std::array<UINT64,static_cast<unsigned>(NativeUseQueryOutcome::count)> query_outcomes{};
     };
     std::optional<DiagnosticSnapshot> diagnostics(std::uint64_t now) {
@@ -1785,13 +2036,14 @@ public:
             out.epoch=p.epoch;out.publication_tick=p.tick;out.player=p.player;out.camera=p.camera;
             out.component=target_object_[side];out.component_generation=target_generation_[side];
             out.target_tick=target_tick_[side];out.ready_revision=ready_revision_[side];out.published=published_[side];
-            out.qualified=live_target(side,now);
+            out.qualified=live_target(side,now);out.preview=p.preview;
         }
         return out;
     }
     // Legacy single hand: routed every cycle and attributed to `side` (right by default).
     void publish(const NativePlayerCamera& camera,const WorldTrackedPose& hand,std::uint64_t epoch,std::uint64_t tick,bool active,int side=1) {
         std::lock_guard<std::mutex> lock(mutex_);epoch_hint_=epoch;
+        cancel_passive_preview_locked();
         const unsigned index=side==0?0u:1u;
         if(hands_[index].epoch!=epoch || hands_[index].player!=camera.player || hands_[index].camera!=camera.camera ||
            hands_[index].generation!=camera.camera_identity.generation || hands_[index].active!=active || hands_[index].reach || published_[1-index]) {invalidate_selection();routing_.invalidate_owner();}
@@ -1799,6 +2051,7 @@ public:
         hands_[index]={tick,epoch,camera.player,camera.camera,camera.camera_identity.generation,hand,active,hand.position};
         hands_[index].grip=hand;
         hands_[1-index]={};published_={false,false};published_[index]=active;
+        raw_hands_=hands_;
         routing_.next(published_,tick,qualified_selected(tick));if(revision!=routing_.revision()) invalidate_selection();
     }
     // Search both hands; keep a freshly qualified native target's hand until
@@ -1806,24 +2059,43 @@ public:
     void publish_hands(const NativePlayerCamera& camera,std::array<std::optional<WorldTrackedPose>,2> hands,
             std::uint64_t epoch,std::uint64_t tick,std::array<std::optional<Vec3>,2> grip_centres={},std::array<bool,2> reach={},
             std::array<std::optional<WorldTrackedPose>,2> grips={},std::optional<rig::NativeCarrySnapshot> carry={},std::array<PalmProbe,2> palms={},
-            std::array<std::optional<Vec3>,2> clamped_palms={}) {
+            std::array<std::optional<Vec3>,2> clamped_palms={},std::optional<PassiveGazePreview> passive_preview={}) {
         std::lock_guard<std::mutex> lock(mutex_);epoch_hint_=epoch;
         for(unsigned side=0;side<2;++side) if(hands_[side].active!=hands[side].has_value() || (hands_[side].active && (hands_[side].epoch!=epoch ||
             hands_[side].player!=camera.player || hands_[side].camera!=camera.camera ||
-            hands_[side].generation!=camera.camera_identity.generation))) {invalidate_selection();routing_.reset();break;}
+            hands_[side].generation!=camera.camera_identity.generation || tick<hands_[side].tick || tick-hands_[side].tick>250))) {
+                cancel_passive_preview_locked();invalidate_selection();routing_.reset();break;
+            }
         const auto revision=routing_.revision();
+        const bool was_preview=hands_[0].preview || hands_[1].preview;
+        const auto old_hands=hands_;
         std::array<bool,2> moving{};
-        for(unsigned side=0;side<2;++side) if(hands[side]) { // moved >3 cm or >5 degrees within the last 300 ms
-            auto& m=motion_[side];const auto dir=hands[side]->basis[0];
-            if(!m.tick || tick<m.tick) m={hands[side]->position,dir,tick,0};
-            else if(tick-m.tick>=100) {
-                if(length(hands[side]->position-m.position)>.03 || dot(dir,m.direction)<.9962) m.until=tick+300;
-                m.position=hands[side]->position;m.direction=dir;m.tick=tick;
+        // The validated native view is already part of this camera snapshot;
+        // no shared camera aim or new native field is read/written here.
+        std::array<Vec3,3> motion_axes{{{1,0,0},{0,1,0},{0,0,1}}};Vec3 motion_origin{};
+        if(camera.view) {
+            motion_origin={camera.view->position[0],camera.view->position[1],camera.view->position[2]};
+            for(unsigned row=0;row<3;++row)motion_axes[row]={camera.view->basis[3*row],camera.view->basis[3*row+1],camera.view->basis[3*row+2]};
+        }
+        for(unsigned side=0;side<2;++side) if(hands[side]) {
+            const auto relative=interaction_motion_pose(*hands[side],motion_origin,motion_axes);
+            auto& m=motion_[side];const auto dir=relative.basis[0];
+            if(!m.tick || tick<m.tick) m={relative.position,dir,tick,0};
+            else if(tick-m.tick>=50) {
+                if(length(relative.position-m.position)>.01 || dot(dir,m.direction)<.9994) m.until=tick+300;
+                m.position=relative.position;m.direction=dir;m.tick=tick;
             }
             moving[side]=tick<m.until;
         } else motion_[side]={};
+        const std::array<bool,2> published{hands[0].has_value(),hands[1].has_value()};
+        const bool preview=passive_preview_.update(published,tick,
+            passive_preview && passive_preview->allowed && grab_pose_valid(passive_preview->gaze) &&
+                routing_.locked()<0 && !reach[0] && !reach[1],
+            passive_preview?passive_preview->moving:std::array<bool,2>{true,true},qualified_selected(tick));
+        // A resting gaze preview owns one stable native query route. Do not
+        // alternate with hand probes and repeatedly remove/re-add native art.
+        if(!preview || routing_.selected()<0)routing_.next(published,tick,qualified_selected(tick),moving);
         for(unsigned side=0;side<2;++side) {
-            if(hands_[side].reach!=(hands[side].has_value() && reach[side]))routing_.invalidate_owner();
             hands_[side]=hands[side]?Publication{tick,epoch,camera.player,camera.camera,camera.camera_identity.generation,*hands[side],true,grip_centres[side] && finite(*grip_centres[side]) && length(*grip_centres[side]-hands[side]->position)<=.5?*grip_centres[side]:hands[side]->position,reach[side]}:Publication{};
             published_[side]=hands[side].has_value();
             if(published_[side] && grips[side] && grab_pose_valid(*grips[side]))hands_[side].grip=grips[side];
@@ -1831,16 +2103,25 @@ public:
             if(published_[side])hands_[side].palm=palms[side];
             if(published_[side] && clamped_palms[side] && finite(*clamped_palms[side]))hands_[side].clamped_palm=clamped_palms[side];
         }
-        routing_.next(published_,tick,qualified_selected(tick),moving);if(revision!=routing_.revision()) invalidate_selection();
+        raw_hands_=hands_;
+        if(preview && routing_.selected()>=0) {
+            auto& p=hands_[static_cast<unsigned>(routing_.selected())];
+            p.hand=passive_preview->gaze;p.volume_centre=p.hand.position;p.reach=true;p.preview=true;
+        }
+        if(was_preview!=preview)routing_.invalidate_query();
+        for(unsigned side=0;side<2;++side)if(old_hands[side].reach!=hands_[side].reach)routing_.invalidate_owner();
+        if(revision!=routing_.revision())invalidate_selection();
     }
     // While locked only that hand's ray is routed, so the game's selection (and its
     // native Interact) belongs to the hand pressing the grip until it resolves.
-    void lock(int side) {std::lock_guard<std::mutex> lock(mutex_);const auto revision=routing_.revision();routing_.lock(side);if(revision!=routing_.revision()) invalidate_selection();}
+    void lock(int side) {std::lock_guard<std::mutex> lock(mutex_);if(side==0 || side==1)cancel_passive_preview_locked();const auto revision=routing_.revision();routing_.lock(side);if(revision!=routing_.revision()) invalidate_selection();}
     void unlock() {std::lock_guard<std::mutex> lock(mutex_);const auto revision=routing_.revision();routing_.unlock();if(revision!=routing_.revision()) invalidate_selection();}
-    void clear() {full_hand_contact_.clear();clear_anatomical_contact();clear_door_contact();std::lock_guard<std::mutex> lock(mutex_);seen_={};hands_={};published_={false,false};routing_.reset();invalidate_selection();}
+    void clear() {full_hand_contact_.clear();clear_anatomical_contact();clear_door_contact();std::lock_guard<std::mutex> lock(mutex_);seen_={};hands_={};raw_hands_={};passive_preview_.reset();published_={false,false};routing_.reset();invalidate_selection();}
+    bool passive_preview_active() {std::lock_guard<std::mutex> lock(mutex_);return hands_[0].preview || hands_[1].preview;}
     // True while the native game has an interactable selected, sampled within the last quarter second.
     bool has_target(std::uint64_t now) {
         std::lock_guard<std::mutex> lock(mutex_);
+        if(hands_[0].preview || hands_[1].preview)return false;
         if(native_object_ && now>=native_tick_ && now-native_tick_<=250) return true;
         for(unsigned side=0;side<2;++side)
             if(live_target(side,now)) return true;
@@ -1849,7 +2130,7 @@ public:
     bool query_ready(int side,std::uint64_t now) {
         if(side<0 || side>1) return false;
         std::lock_guard<std::mutex> lock(mutex_);
-        return published_[side] && routing_.selected()==side && ready_revision_[side]==routing_.revision() &&
+        return published_[side] && !hands_[side].preview && routing_.selected()==side && ready_revision_[side]==routing_.revision() &&
             target_tick_[side] && now>=target_tick_[side] && now-target_tick_[side]<=250;
     }
     // Per-hand selection: only cycles whose ray was this hand's update it.
@@ -1937,7 +2218,16 @@ private:
             const auto selected=static_cast<unsigned>(side);
             if(!live_target(selected,now))return false;
             const auto component=target_object_[selected],door=target_owner_[selected];
-            if(takeable(door))return live_target(selected,now);
+            // Readables, pickups and native carryables share the same hand
+            // sphere. The engine-selected component supplies the action.
+            // live_target already validates camera/sensor/epoch ownership here;
+            // use the current publication and bounds without fabricating a type.
+            if(!hands_[selected].reach)if(const auto box=owner_bounds(door);box &&
+                hand_pickup_in_range(hand_sphere_probe(hands_[selected].volume_centre),box->first,box->second)) {
+                const auto character=character_type(door);
+                if(character && !*character)return live_target(selected,now);
+            }
+            if(takeable(door) && hands_[selected].reach)return live_target(selected,now);
             const auto identity=rig::started(read_,component);
             const auto members=rig::list(read_,door+0x268,256);
             if(!identity || identity->generation!=target_generation_[selected] || !members || !members->packed_count ||
@@ -2020,6 +2310,36 @@ public:
     std::optional<QualifiedTarget> native_selected_target(std::uint64_t now) {
         std::lock_guard<std::mutex> lock(mutex_);return native_selected_locked(now);
     }
+private:
+    std::uint64_t begin_prompt_query() noexcept {
+        try {std::lock_guard<std::mutex> lock(mutex_);const auto ticket=++prompt_query_sequence_;prompt_completions_.begin(ticket);return ticket;}catch(...){return 0;}
+    }
+    void finish_prompt_query(std::uint64_t ticket,bool returned) noexcept {
+        try {std::lock_guard<std::mutex> lock(mutex_);if(!returned)prompt_completions_.target(ticket,{});prompt_completions_.finish(ticket);}catch(...){}
+    }
+public:
+    NativePromptSelectionReceipt prompt_event_receipt(std::uint64_t) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        // No stage0 ticket means no event-to-selection ownership proof. The
+        // observer keeps that native artwork on its HUD fallback instead.
+        return active_prompt_ticket_?prompt_completions_.get(active_prompt_ticket_):NativePromptSelectionReceipt{};
+    }
+    // A HUD entry supplies its own retained entity/spawn receipt. Join only
+    // that entity to a revalidated component identity; no latest-hover fallback.
+    std::optional<NativeInteractionTargetIdentity> prompt_identity_for_owner(std::uintptr_t owner,unsigned spawn,std::uint64_t now) {
+        const auto match=[&](const QualifiedTarget& target) {
+            return target.owner==owner && target.spawn==spawn &&
+                rig::value<std::uintptr_t>(read_,target.identity.object+0x10)==owner;
+        };
+        if(const auto live=qualified_target(now);live && match(*live))return live->identity;
+        std::lock_guard<std::mutex> lock(mutex_);
+        for(unsigned side=0;side<2;++side)if(const auto held=held_locked(side,now);held && match(*held))return held->identity;
+        if(const auto native=native_selected_locked(now);native && match(*native))return native->identity;
+        return {};
+    }
+    NativePromptCompletions prompt_completions() {
+        std::lock_guard<std::mutex> lock(mutex_);return prompt_completions_;
+    }
     std::optional<NativeInteractionTargetIdentity> prompt_identity(std::uint64_t now) {
         if(const auto live=target_identity(now))return live;
         std::lock_guard<std::mutex> lock(mutex_);
@@ -2089,7 +2409,7 @@ public:
     void install(std::uintptr_t base,Read read,Logic logic,bool route,const std::filesystem::path& file,bool observe_lean=false,bool observe_lean_lifetime=false) {
         if(active_.load(std::memory_order_acquire) || depth_.load(std::memory_order_acquire) ||
            std::any_of(enabled_.begin(),enabled_.end(),[](bool enabled){return enabled;}) ||
-           std::any_of(ranking_enabled_.begin(),ranking_enabled_.end(),[](bool enabled){return enabled;}) || range_origin_enabled_)
+           std::any_of(ranking_enabled_.begin(),ranking_enabled_.end(),[](bool enabled){return enabled;}) || range_origin_enabled_ || eligibility_enabled_)
             throw std::runtime_error("Native interaction hooks are still installed");
         if(stopping_.load(std::memory_order_acquire))
             throw std::runtime_error("Native interaction stop is still pending");
@@ -2123,6 +2443,15 @@ public:
                !read_(base_+0x3b80a0,eligibility.data(),eligibility.size()) || eligibility!=eligibility_code ||
                !read_(base_+0x3b81d3,call.data(),call.size()) || call!=origin_call)
                 throw std::runtime_error("Native interaction range-origin getter differs");
+            std::array<unsigned char,native_hand_eligibility_code.size()> body{};
+            if(!read_(base_+0x3b80a0,body.data(),body.size()) || body!=native_hand_eligibility_code)
+                throw std::runtime_error("Native hand-sphere eligibility contract differs");
+            // 3b8b05..3b8c56: final obstruction results retain the two
+            // descriptor pointers, then publish primary spawn/+a8/+b0.
+            std::array<unsigned char,338> scan{};std::uint64_t scan_hash=14695981039346656037ull;
+            if(!read_(base_+0x3b8b05,scan.data(),scan.size()))throw std::runtime_error("Native hand-hover scan unreadable");
+            for(const auto byte:scan)scan_hash=(scan_hash^byte)*1099511628211ull;
+            if(scan_hash!=0xfa858f63011f3e5cull)throw std::runtime_error("Native hand-hover scan contract differs");
             for(unsigned index=0;index<ranking_rvas.size();++index)
                 if(!ranking_profile(index))throw std::runtime_error("Native interaction ranking code differs");
         }
@@ -2135,7 +2464,7 @@ public:
         ranking_log_.open(file.parent_path()/L"native-interaction-ranking.csv",std::ios::trunc);
         if(!ranking_log_) throw std::runtime_error("Cannot open native interaction ranking evidence");
         ranking_rows_=0;ranking_first_={};ranking_log_<<std::setprecision(9)<<"tick_ms,side,sensor,count,rank,body_handle,owner,hit_x,hit_y,hit_z,hand_distance,sweep_fraction,preferred_owner\n";
-        targets_<<"tick_ms,thread,stage,interaction,target,generation,target_vtable_rva,owner,interacting,candidate_primary,candidate_secondary,candidate_character,side,locked,selected,is_candidate,direct_owner,spawn\n";
+        targets_<<"tick_ms,thread,stage,interaction,target,generation,target_vtable_rva,owner,interacting,candidate_primary,candidate_secondary,candidate_character,side,locked,selected,is_candidate,direct_owner,spawn,eligibility_calls,native_refused,semantic_refused,publication_refused,sphere_accepted,eligibility_owner,eligibility_descriptor,native_low,effective_low,sphere_inside,semantic_passed,publication_owned,hover_offers,hover_overflow,passive_preview,eligibility_component_vtable_rva,eligibility_descriptor_offset\n";
         log_<<std::setprecision(9);target_samples_=0;
         log_<<"tick_ms,thread,stage,sensor,camera,routed";
         for(const auto* prefix:{"native","effective"}) for(unsigned i=0;i<12;++i) log_<<','<<prefix<<i;log_<<'\n';
@@ -2159,6 +2488,11 @@ public:
                 throw std::runtime_error("Cannot create native interaction range-origin hook");
             if(MH_EnableHook(range_at)!=MH_OK)throw std::runtime_error("Cannot enable native interaction range-origin hook");
             range_origin_enabled_=true;
+            const auto eligibility_at=reinterpret_cast<void*>(base_+0x3b80a0);
+            if(!eligibility_ && MH_CreateHook(eligibility_at,reinterpret_cast<void*>(&eligibility_hook),reinterpret_cast<void**>(&eligibility_))!=MH_OK)
+                throw std::runtime_error("Cannot create hand-sphere eligibility hook");
+            if(MH_EnableHook(eligibility_at)!=MH_OK)throw std::runtime_error("Cannot enable hand-sphere eligibility hook");
+            eligibility_enabled_=true;
             const std::array<void*,3> hooks_extra{reinterpret_cast<void*>(&fetch),reinterpret_cast<void*>(&sort),reinterpret_cast<void*>(&occlusion)};
             const std::array<void**,3> originals_extra{reinterpret_cast<void**>(&fetch_),reinterpret_cast<void**>(&sort_),reinterpret_cast<void**>(&occlusion_)};
             for(unsigned i=0;i<3;++i) {
@@ -2200,6 +2534,9 @@ public:
         if(!NativeSlashSceneRate::process_owner().disable())restored=false;
         if(!NativeChokeDistanceScope::process_owner().disable())restored=false;
         if(!NativeOfferedChoke::process_owner().disable())restored=false;
+        if(eligibility_enabled_) {
+            if(MH_DisableHook(reinterpret_cast<void*>(base_+0x3b80a0))==MH_OK)eligibility_enabled_=false;else restored=false;
+        }
         if(range_origin_enabled_) {
             if(MH_DisableHook(reinterpret_cast<void*>(base_+0x417820))==MH_OK)range_origin_enabled_=false;else restored=false;
         }
@@ -2230,6 +2567,7 @@ public:
         }
         for(unsigned i=0;i<3;++i) if(i==0?fetch_!=nullptr:i==1?sort_!=nullptr:occlusion_!=nullptr) restored=restored && ranking_profile(i);
         if(loot_los_sort_) {std::array<unsigned char,16> code{};restored=restored && read_(base_+loot_los_sort_rva,code.data(),code.size()) && code==loot_los_sort_code;}
+        if(eligibility_) {std::array<unsigned char,native_hand_eligibility_code.size()> body{};restored=restored && read_(base_+0x3b80a0,body.data(),body.size()) && body==native_hand_eligibility_code;}
         if(range_origin_) {std::array<unsigned char,8> getter{};restored=restored && read_(base_+0x417820,getter.data(),getter.size()) && getter==range_origin_code;}
         try {loot_reach_on_=false;std::lock_guard<std::mutex> loot(loot_reach_mutex_);loot_reach_csv_.close();loot_reach_owners_csv_.close();loot_los_csv_.close();} catch(...) {return false;}
         try {std::lock_guard<std::mutex> lock(mutex_);log_.close();targets_.close();ranking_log_.close();hands_={};published_={false,false};if(observe_lean_ && !lean_trace_.close()) restored=false;} catch(...) {return false;}
@@ -2392,6 +2730,7 @@ inline thread_local NativeInteractionAim::AfterSortScratch NativeInteractionAim:
 inline thread_local NativeInteractionAim::LootReachCycle NativeInteractionAim::loot_cycle_{};
 inline thread_local NativeInteractionAim::LootLosCapture NativeInteractionAim::loot_los_capture_{};
 inline std::array<std::array<NativeInteractionAim::WeaponSegment,NativeInteractionAim::weapon_slots>,2> NativeInteractionAim::weapon_req_{};
+inline std::array<std::array<NativeInteractionAim::WeaponSegment,NativeInteractionAim::weapon_slots>,2> NativeInteractionAim::weapon_answer_segments_{};
 inline NativeInteractionAim::SwordContactObservation NativeInteractionAim::sword_last_contact_;
 #endif
 } // namespace d2vr

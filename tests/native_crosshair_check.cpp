@@ -296,7 +296,10 @@ int main() {
         crosshair.publish(0.25f,0.5f,8,GetTickCount64(),true);
         call(element.bytes.data());
         require(setter_calls==2 && crosshair.latch_failures()==0,"An active correction needs no latch write");
-        crosshair.clear();call(element.bytes.data());
+        const auto owner_before_clear=crosshair.binding(GetTickCount64());require(owner_before_clear.has_value(),"Native binding before intent clears");
+        crosshair.clear();
+        require(crosshair.owns(*owner_before_clear,GetTickCount64()),"Unrelated Setup / lost aim clears intent but preserves the exact fresh AS3 binding");
+        call(element.bytes.data());require(setter_calls==2,"Cleared aim intent performs no further member writes");
         require(crosshair.latch_failures()==1 && latch(element)==std::byte{1},"A failed handback retains restoration intent");
         bad_write=false;const auto retried=crosshair.latch_clears();call(element.bytes.data());
         require(crosshair.latch_clears()==retried+1 && latch(element)==std::byte{0},"Handback retries on next native owned update");
@@ -312,6 +315,7 @@ int main() {
         require(setter_calls==0 && crosshair.applied()==applied_mark,"No further writes after a setter fault until reinstall");
 
         require(crosshair.disable() && disables==2 && !crosshair.routing(),"Clean routed disable");
+        require(!crosshair.binding(GetTickCount64()),"Disable retires native AS3 ownership too");
         setter_calls=0;const auto final_clears=crosshair.latch_clears();
         crosshair.publish(0.5f,-0.25f,9,GetTickCount64(),true);
         call(element.bytes.data());

@@ -42,7 +42,7 @@ class Case(unittest.TestCase):
         self.home = modhome.mod_home_dir(self.f.prefix)
 
     def make_zip(self, backslash=True, tamper=False, blocked=False, game_sha=None, name="rel.zip"):
-        dll = b"MZ mod dll v999" + ("\0run-root-gate\0prompt-target-anchor\0alternate-upscalers\0world-hand-depth\0").encode("utf-16le")
+        dll = b"MZ mod dll v999" + ("\0no-run-root-gate\0prompt-target-anchor\0no-alternate-upscalers\0world-hand-depth\0").encode("utf-16le")
         manifest = {"dll_name": "d2vr_render_probe_arm_v999.dll", "sha256": sha(dll),
                     "game_sha256": game_sha or self.f.exe_sha256}
         if blocked:
@@ -288,11 +288,29 @@ class FeatureTests(Case):
         self.assertTrue((b / "launcher-features.json").is_file())
         self.assertTrue((b / "full-body").exists())
         self.assertFalse((b / "native-temporal-census").exists())  # default false: not created
-        for name in ("run-root-gate", "prompt-target-anchor", "alternate-upscalers", "world-hand-depth"):
-            self.assertFalse((b / name).exists(), name)  # supported experimental paths stay opt-in
+        self.assertFalse((b / "prompt-target-anchor").exists())
+        self.assertFalse((b / "power-gestures").exists())
+        self.assertTrue((b / "world-hand-depth").exists())
         self.assertFalse((b / "no-hand-blink").exists())
         self.assertEqual(set(json.loads((b / "launcher-features.json").read_text())["seeded"]),
                          {f["id"] for f in self.features()})
+
+    def test_repair_defaults_upgrade_but_preserve_explicit_optout(self):
+        for feature_id in ("run-root-gate", "alternate-upscalers"):
+            with self.subTest(feature=feature_id):
+                old = {"version": 1, "features": [{"id": feature_id, "file": feature_id,
+                       "kind": "enable", "label": feature_id, "help": "old", "default": False}]}
+                old_list = self.tmp / (feature_id + "-old.json")
+                old_list.write_text(json.dumps(old))
+                for explicit_off in (False, True):
+                    home = self.tmp / (feature_id + str(explicit_off))
+                    modhome.apply_default_features(home, old_list)
+                    if explicit_off:
+                        modhome.set_feature(home, feature_id, False, old_list)
+                    modhome.apply_default_features(home)
+                    state = json.loads((home / "build" / "launcher-features.json").read_text())
+                    self.assertEqual((home / "build" / ("no-" + feature_id)).exists(), explicit_off)
+                    self.assertEqual(feature_id in state["off"], explicit_off)
 
     def test_install_is_idempotent_with_features(self):
         self.install()

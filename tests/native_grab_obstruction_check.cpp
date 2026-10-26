@@ -38,6 +38,15 @@ void fixture() {
     put(fixture_game+0x60410,fixture_world);put(fixture_world+0x28,fixture_pool);put(fixture_world+0x30,std::uint32_t{3});
     rig::Transform transform{};transform.f[0]=transform.f[5]=transform.f[10]=transform.f[15]=1;transform.f[12]=.1f;
     const auto record=fixture_pool+2*0xb0;put(record,transform);put(record+0x44,std::uint32_t{130});put(record+0x40,std::uint32_t{1});put(record+0x70,handle);put(record+0x74,handle);
+    // Mandatory LOS coverage uses a genuine unconscious guard forearm, not a loose prop.
+    put(fixture_entity,fixture_base+0x1c5e108);put(fixture_entity+0xd1,static_cast<unsigned char>(0x08));
+    put(fixture_component,fixture_base+0x1c54008);
+    constexpr std::uintptr_t handles=0x3900000,motions=0x3a00000;
+    put(fixture_component+0x100,handles);put(handles+0x28,handles+0x120);put(handles+0x30,std::uint32_t{17});
+    for(int bone=0;bone<17;++bone)put(handles+0x120+bone*4,bone==6?handle:std::uint32_t{});
+    put(fixture_world+0x120,motions);put(motions+0x80+0x28,std::uint32_t{1});
+    put(motions+0x80+0x26,std::uint16_t{0x3f00});
+    put(motions+0x80+0x40,std::array<float,3>{});put(motions+0x80+0x50,std::array<float,3>{});
 }
 }
 namespace {unsigned fixture_motors{};bool fixture_dispatcher{};
@@ -60,7 +69,7 @@ std::uintptr_t __fastcall obstruction_original(void* sensor,void* entity,const v
     assert(fixture_stages==fixture_queries); // original stage completes before owned service
     assert(reinterpret_cast<std::uintptr_t>(sensor)==fixture_sensor && reinterpret_cast<std::uintptr_t>(entity)==fixture_entity && range==0);
     const auto* o=static_cast<const float*>(origin);const auto* a=static_cast<const float*>(axis);const auto* p=static_cast<const float*>(point);
-    assert(o[0]==0 && o[1]==0 && o[2]==0 && a[0]==1 && a[4]==1 && a[8]==1 && std::abs(p[0]-.1f)<1e-6);
+    assert(o[0]==0 && o[1]==0 && o[2]==0 && a[0]==1 && a[4]==1 && a[8]==1 && std::abs(p[0]-.05f)<1e-6);
     assert(fixture_grab->diagnostics()); // callback is outside grab lock
     if(fixture_change==1) fixture_grab->publish(0,fixture_owner,fixture_hand,.9f,9,GetTickCount64(),true,false,GetTickCount64());
     if(fixture_change==2) put(fixture_component+0x18,rig::Identity{8,10});
@@ -132,7 +141,7 @@ int main() {
             fixture();NativeGrab g;NativeGrabCheck::setup(g);g.require_obstruction();
             const auto o=*native_player_camera(read,fixture_base,fixture_camera);const auto t0=GetTickCount64();
             g.publish(0,o,fixture_hand,0,1,t0,true,false,t0);g.filter_native_grip(0,0,1,t0,true,true,false);
-            assert(g.focus_point(0,t0));   // the hover cue picks the prop and asks for its LOS
+            assert(g.focus_point(0,t0));   // the hover cue picks the corpse forearm and asks for its LOS
             assert(g.hover_los().requests==1);
             g.service_obstruction(o,GetTickCount64(),[&](const NativeGrab::ObstructionRequest& r)->std::optional<bool>{assert(r.hover);++calls;return true;});
             assert(calls==1);
@@ -165,7 +174,7 @@ int main() {
             assert(off.hover_los().requests==0 && !off.hover_los().required && g.hover_los().required);
         }
     }
-    {   // buffered_catch_through_los_binds: a fist squeezed with nothing in reach (pending), the prop then reaches the gate: the catch needs a LOS query
+    {   // buffered_catch_through_los_binds: a fist squeezed with nothing in reach (pending), the corpse forearm then reaches the gate: the catch needs a LOS query
         // (no hover verdict) and must still bind when the query clears it (acceptance sim T124714: caught a corpse, LOS cleared, never bound)
         fixture();NativeGrab g;NativeGrabCheck::setup(g);g.require_obstruction();
         const auto o=*native_player_camera(read,fixture_base,fixture_camera);
@@ -194,5 +203,5 @@ int main() {
         g.service_obstruction(o,GetTickCount64(),[&](const NativeGrab::ObstructionRequest&)->std::optional<bool>{return true;});
         assert(g.holding(0));
     }
-    std::cout<<"PASS: grip jump after the decision binds; buffered catch through a LOS query binds; hover LOS verdicts (used at the press, stale or moved re-asked, rate limited); owned original stage0/wrapper ordering, no mailbox lock during native call, arbitrary dynamic prop clear/blocked, A-clear-B-dispatch motor ownership, epoch/body/sensor/authored/motion/focus/release invalidation and replaced source rejection\n";
+    std::cout<<"PASS: grip jump after the decision binds; buffered catch through a LOS query binds; hover LOS verdicts (used at the press, stale or moved re-asked, rate limited); owned original stage0/wrapper ordering, no mailbox lock during native call, corpse forearm clear/blocked, A-clear-B-dispatch motor ownership, epoch/body/sensor/authored/motion/focus/release invalidation and replaced source rejection\n";
 }

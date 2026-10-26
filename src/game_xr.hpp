@@ -34,6 +34,7 @@
 #include "hud_window.hpp"
 #include "wrist_hud_image.hpp"
 #include "native_eye_art.hpp"
+#include "eye_reticle.hpp"
 #include "head_calibration.hpp"
 #include "xr_floor_datum.hpp"
 #include "vr_settings_native.hpp"
@@ -54,6 +55,12 @@ namespace d2vr {
 // Object-art destination for in-game tutorials: not object-anchored, so it is drawn on a
 // panel locked ~1.2 m ahead of the head, slightly below eye level (publisher point ignored).
 inline constexpr unsigned tutorial_art_slot=10;
+// Processing provenance for the exact source passed to the synchronous base
+// transfer observer. A kept eye inherits the work done when it was rendered.
+struct EyeTransferProcessing {
+    bool valid{},smaa_applied{},cas_applied{},kept{};
+    int temporal_mode{};float cas_sharpness{};
+};
 inline std::optional<Vec3> head_locked_art_point(const XrPosef& left,const XrPosef& right,Vec3 offset={0,-.25,-1.2}) {
     try {
         const Vec3 head{(left.position.x+right.position.x)*.5,(left.position.y+right.position.y)*.5,(left.position.z+right.position.z)*.5};
@@ -68,6 +75,7 @@ class GameXr {
     std::unique_ptr<EyeAntialiasing> antialiasing_;
     bool antialiasing_enabled_{};
     std::unique_ptr<EyeSharpen> sharpen_;
+    std::array<EyeTransferProcessing,2> transfer_processing_{},alt_processing_{};
     std::unique_ptr<DesktopMirror> mirror_;
     VrSettings settings_;
     AvatarCalibration avatar_calibration_;
@@ -160,6 +168,9 @@ private:
     std::array<unsigned,33> native_object_art_masks_{};
     std::array<bool,3> native_wrist_art_shown_{};
     std::unique_ptr<NativeEyeArt> native_eye_art_;
+    EyeReticleFrames eye_reticles_;
+    bool eye_reticle_failed_{};
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> eye_reticle_texture_;
     std::vector<XrSwapchainImageD3D11KHR> hint_images_;
     std::vector<bool> hint_filled_;
     std::vector<std::uint8_t> hint_pixels_;
@@ -1169,7 +1180,10 @@ public:
         std::array<std::int64_t,2> rendered_locate_cpu_times{};
     } timing;
     using TransferObserver=void (*)(UINT,ID3D11Texture2D*,ID3D11Texture2D*,const XrCompositionLayerProjectionView&,bool,bool,ID3D11Texture2D*);
-    TransferObserver observe_transfer{};
+    TransferObserver observe_transfer{}; // base eye copy before reticle/native-art composition; not final submitted pixels
+    // Read only from observe_transfer on the presenting thread. Pointer
+    // inequality alone cannot distinguish SMAA from CAS or a kept eye.
+    EyeTransferProcessing transfer_processing(UINT eye) const noexcept {return eye<2?transfer_processing_[eye]:EyeTransferProcessing{};}
     using SettingsObserver=void (*)(ID3D11Texture2D*,const unsigned char*,std::size_t);
     SettingsObserver observe_settings{};
     using SettingsCompositionObserver=void (*)(ID3D11Texture2D*,ID3D11Texture2D*,const SettingsMenuLayout::Rect&);
@@ -1234,6 +1248,12 @@ public:
            (!wrist && (!finite(point) || !std::isfinite(width) || width<=0 || width>64))) {source={};return false;}
         source={texture,crop,point,width,epoch,tick,owner,premultiplied};return true;
     }
+    // Publication is authorized by ranged_aim_gate.reticle. Native HUD clipping
+    // cannot authorize visibility of a reticle drawn across the full eye FOV.
+    UINT64 eye_reticle_draws{};
+    bool eye_reticle_available() const noexcept {return !eye_reticle_failed_;}
+    void eye_reticle(unsigned eye,EyeReticle value) noexcept {eye_reticles_.publish(eye,value);}
+    void clear_eye_reticles() noexcept {eye_reticles_.clear();}
     std::array<std::optional<Vec3>,2> interaction_targets;
     void interaction_target(int side,std::optional<Vec3> point) noexcept {if(side==0 || side==1) interaction_targets[static_cast<unsigned>(side)]=point;}
     MirrorMode mirror_mode() const noexcept {return settings_.mirror();}
@@ -1631,7 +1651,7 @@ public:
     // Copies the eye image that was just rendered (after anti-aliasing / sharpening, before overlays) and its view for later frames.
     void keep_alternate_eye_(UINT eye,ID3D11Texture2D* processed) {
         auto& record=alt_records_[eye];
-        record={};
+        record={};alt_processing_[eye]={};
         D3D11_TEXTURE2D_DESC desc{};processed->GetDesc(&desc);
         if(!(rendered_mask_&(1u<<eye))) return; // no view was recorded for this image: keep nothing
         if(!eye_texture_matches(desc,width_,height_,format_)) {alternate_error=true;return;}
@@ -1642,6 +1662,7 @@ public:
             if(FAILED(device->CreateTexture2D(&desc,nullptr,&alt_kept_[eye]))) {alternate_error=true;return;}
         }
         context_->CopyResource(alt_kept_[eye].Get(),processed);
+        alt_processing_[eye]=transfer_processing_[eye];
         record={rendered_views_[eye],alternate_frame,pose_epoch(),true,rendered_display_times_[eye],rendered_locate_cpu_times_[eye]};
     }
     // perf-mono-view diagnostic: the one engine view sits at the midpoint of the two eye poses, faces their mean orientation and
@@ -1743,7 +1764,7 @@ public:
     // the authored camera; the native menu pointer is off and the raw trigger passes. Raw gameplay keeps the settings/calibration semantics.
     void present(ID3D11Texture2D* left,ID3D11Texture2D* right,float hfov,float vfov,bool gameplay=true,bool authored_camera=false,bool settings_available=false,
         ID3D11Texture2D* desktop=nullptr,std::array<UINT,2> desktop_view={},bool cinematic=false,bool authored_scene_render=false) {
-        if(!alternate_enabled && (alt_kept_[0] || alt_kept_[1])) {alt_kept_[0].Reset();alt_kept_[1].Reset();alt_records_={};} // fallen back: release the kept copies
+        if(!alternate_enabled && (alt_kept_[0] || alt_kept_[1])) {alt_kept_[0].Reset();alt_kept_[1].Reset();alt_records_={};alt_processing_={};} // fallen back: release the kept copies
         authored_scene_render=authored_scene_render && authored_camera && !gameplay;
         const auto scene_hold_now=scene_hold;const auto hold_scene=scene_id;scene_hold=SceneHold::none; // one frame only
         const bool scene_render=gameplay || authored_scene_render;
@@ -2017,11 +2038,19 @@ public:
                     throw std::runtime_error("Game eye source does not match the current XR swapchain");
                 // Independent per-eye processing; menus retain the exact native image.
                 ID3D11Texture2D* processed=nullptr;
+                auto processing=alt_stale?alt_processing_[eye]:EyeTransferProcessing{true,false,false,false,settings_.effective_temporal_aa(),0};
+                processing.kept=alt_stale;
                 {ModGpuScope aa_scope(context_.Get(),ModSpan::aa_sharpen); // task 3b
                 SpanClock span(xr_spans,XrSpan::aa_sharpen);
+                const auto prior_smaa_passes=antialiasing_?antialiasing_->eye_passes:0;
                 processed=gameplay && antialiasing_enabled_ && alternate_smaa_applies(alternate_enabled,settings_.effective_temporal_aa()) && !alt_stale?antialiasing_->apply(sources[eye]):sources[eye];
+                if(!alt_stale)processing.smaa_applied=antialiasing_ && antialiasing_->eye_passes>prior_smaa_passes;
                 // Sharpening also helps menu text (menus get no SMAA).
-                if(sharpness>0 && !alt_stale) processed=sharpen_->apply(processed,sharpness);}
+                if(sharpness>0 && !alt_stale) {
+                    const auto prior_sharpen=processed;processed=sharpen_->apply(processed,sharpness);
+                    processing.cas_applied=processed!=prior_sharpen;processing.cas_sharpness=processing.cas_applied?sharpness:0;
+                }}
+                transfer_processing_[eye]=processing;
                 {ModGpuScope copy_scope(context_.Get(),ModSpan::eye_copy); // task 3b
                 SpanClock span(xr_spans,XrSpan::copy);
                 if(settings_.open() && !gameplay) {
@@ -2033,17 +2062,46 @@ public:
                     settings_compositor_->end(images_[eye].at(index).texture);
                     if(observe_settings_composition) observe_settings_composition(processed,images_[eye].at(index).texture,rect);
                 } else context_->CopyResource(images_[eye].at(index).texture,processed);}
+                layers[eye].type=XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW;
+                layers[eye].pose=tracked_pair_()?tracked_view_(eye).pose:views_[eye].pose;
+                layers[eye].fov=tracked_pair_()?tracked_view_(eye).fov:XrFovf{-hfov*.5f,hfov*.5f,vfov*.5f,-vfov*.5f};
+                layers[eye].subImage.swapchain=chains_[eye];
+                layers[eye].subImage.imageRect.extent={static_cast<int32_t>(width_),static_cast<int32_t>(height_)};
+                // Validate the exact base transfer before ANY destination
+                // composition. Overlay pixels are independently verified.
+                if(observe_transfer && !settings_.open()) {SpanClock span(xr_spans,XrSpan::transfer_observer);observe_transfer(eye,processed,images_[eye].at(index).texture,layers[eye],gameplay,tracked_pair_(),sources[eye]);}
                 if(alternate_enabled && !alt_stale && gameplay) {
                     if(alternate_may_keep(gameplay,authored_camera,settings_.open())) keep_alternate_eye_(eye,processed);
                     else alt_records_[eye]={}; // a cut, takedown or settings image is shown now and never kept
                 }
                 {ModGpuScope overlay_scope(context_.Get(),ModSpan::eye_overlay); // task 3b: native object art + desktop mirror draws
                 SpanClock span(xr_spans,XrSpan::overlay_draws);
-                layers[eye].type=XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW;
-                layers[eye].pose=tracked_pair_()?tracked_view_(eye).pose:views_[eye].pose;
-                layers[eye].fov=tracked_pair_()?tracked_view_(eye).fov:XrFovf{-hfov*.5f,hfov*.5f,vfov*.5f,-vfov*.5f};
                 if(gameplay && !authored_camera && tracked_pair_()) {
                     const auto now=GetTickCount64();XrView view{XR_TYPE_VIEW};view.pose=layers[eye].pose;view.fov=layers[eye].fov;
+                    if(eye_reticle_available() && settings_.crosshair() && !settings_.open() && state==XR_SESSION_STATE_FOCUSED && controller_input.active) try {
+                        const auto image_frame=alternate_enabled?alt_effective_()[eye].frame:alternate_frame;
+                        if(const auto reticle=eye_reticles_.find(eye,image_frame,pose_epoch(),reference_epoch(),now))
+                            if(const auto rect=eye_reticle_rect(reticle->x,reticle->y,width_,height_)) {
+                                if(!eye_reticle_texture_) {
+                                    Microsoft::WRL::ComPtr<ID3D11Device> device;context_->GetDevice(&device);
+                                    if(!device) throw std::runtime_error("Missing eye reticle device");
+                                    const auto pixels=eye_reticle_pixels();D3D11_TEXTURE2D_DESC d{};
+                                    d.Width=d.Height=32;d.MipLevels=d.ArraySize=1;d.Format=DXGI_FORMAT_R8G8B8A8_UNORM;
+                                    d.SampleDesc.Count=1;d.Usage=D3D11_USAGE_IMMUTABLE;d.BindFlags=D3D11_BIND_SHADER_RESOURCE;
+                                    D3D11_SUBRESOURCE_DATA initial{};initial.pSysMem=pixels.data();initial.SysMemPitch=32*4;
+                                    if(FAILED(device->CreateTexture2D(&d,&initial,&eye_reticle_texture_))) throw std::runtime_error("Cannot create eye reticle");
+                                }
+                                if(!native_eye_art_) {Microsoft::WRL::ComPtr<ID3D11Device> device;context_->GetDevice(&device);native_eye_art_=std::make_unique<NativeEyeArt>(device.Get());}
+                                const D3D11_BOX crop{0,0,0,32,32,1};
+                                native_eye_art_->draw(images_[eye].at(index).texture,eye_reticle_texture_.Get(),crop,
+                                    {(*rect)[0],(*rect)[1],(*rect)[2],(*rect)[3]},format_,false,DXGI_FORMAT_R8G8B8A8_UNORM);
+                                ++eye_reticle_draws;
+                            }
+                    } catch(...) {
+                        // Fail locally. The following prepared frame restores
+                        // the engine's own validated crosshair child.
+                        eye_reticle_failed_=true;eye_reticle_texture_.Reset();eye_reticles_.clear();
+                    }
                     for(unsigned art_slot=0;art_slot<native_object_art_.size();++art_slot) if(const auto& art=native_object_art_[art_slot];art.fresh(pose_epoch(),now)) {
                         const auto aspect=static_cast<double>(art.crop.right-art.crop.left)/(art.crop.bottom-art.crop.top);
                         const auto locked=art_slot==tutorial_art_slot?head_locked_art_point(tracked_view_(0).pose,tracked_view_(1).pose):std::optional<Vec3>{};
@@ -2057,9 +2115,6 @@ public:
                 }
                 if(mirror_rects[eye]) mirror_->draw(images_[eye].at(index).texture,*mirror_rects[eye]);}
                 if(eye==0 && !world_scene) gates.band_ready=menu_band_ready=copy_menu_band(images_[0].at(index).texture);
-                layers[eye].subImage.swapchain=chains_[eye];
-                layers[eye].subImage.imageRect.extent={static_cast<int32_t>(width_),static_cast<int32_t>(height_)};
-                    if(observe_transfer && !settings_.open()) {SpanClock span(xr_spans,XrSpan::transfer_observer);observe_transfer(eye,processed,images_[eye].at(index).texture,layers[eye],gameplay,tracked_pair_(),sources[eye]);}
                 } catch(...) {xrReleaseSwapchainImage(chains_[eye],&release);throw;}
                 {SpanClock span(xr_spans,XrSpan::release);checked(xrReleaseSwapchainImage(chains_[eye],&release),"Release game eye");}
             }

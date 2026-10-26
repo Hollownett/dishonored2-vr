@@ -6,6 +6,7 @@
 #include "weapon_collision.hpp"
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -46,6 +47,9 @@ struct ClampInput {
     WorldTrackedPose target{};          // calibrated, reach-clamped controller grip
     Vec3 chest{};                       // free-space re-acquire origin
     std::optional<ClampHit> palm_hit,tip_hit,chest_hit,wall_tip_hit; // results of the sweeps this side posted last frame
+    // Strict native transport: 0 = unanswered; a matching ID plus no hit is a completed clear cast.
+    // Order: palm/chest, tip, wall tip, exclusion. IDs recover the exact submitted geometry and role internally.
+    bool strict_answers{};std::array<std::uint64_t,4> answer_ids{};
     ClampProbe tip{};bool tip_enabled{true},post{true},yield{};
     // The probe that leads the motion's horizontal part (wall_leading_probe), swept as well while it is not `tip`: a wall meets
     // first the probe that reaches farthest horizontally, however steeply the hand rises or falls. Radius 0: none. tip_enabled
@@ -80,6 +84,8 @@ struct ClampOutput {
     ClampSweep wall_tip_sweep;          // ClampInput::wall_tip while it is another probe than the tip; while a prop is excluded (I1), the
                                         // wall tip (or the tip) with that prop excluded (ClampSweep::exclude): the caller honours exclude
     ClampSweep exclude_sweep;           // the probe leading into the excluded prop's pressed face, that prop excluded (ClampInput::exclude)
+    std::array<std::uint64_t,4> request_ids{}; // same slot order as ClampInput::answer_ids; never reused after a side reset
+    bool palm_answered{},chest_answered{},validated{}; // new matched completions; drawn candidate has swept-world proof
     bool held{};                        // drawn at last frame's hand while this frame's sweep validates a jump
     bool contact_fresh{};               // `contact`'s plane was made or re-hit within the last two answered raw casts (I3)
     bool reacquired{};};                // this update re-acquired the side (first update, a gap, an epoch change, a reset): drawn == target, unswept
@@ -216,6 +222,10 @@ public:
                                                    // one stale cast is survived (a 4-5 m/s swat re-hits a fleeing prop every other cast)
 private:
     enum class Posted : unsigned char {none,palm,chest};
+    struct PendingCast {
+        std::uint64_t id{};unsigned slot{};Posted kind{};ClampSweep sweep{};ClampProbe probe{};
+        bool slid{},tip{};unsigned slid_window{};double submitted_at{};
+    };
     struct Plane {
         Vec3 point{},normal{},local{};double radius{},age{},direct_age{};
         std::uintptr_t entity{};std::uint16_t material{0xffff};bool tip{},refuted{};
@@ -232,7 +242,13 @@ private:
         std::array<ClampProbe,ClampInput::hand_capacity> hand{};std::size_t hand_count{};   // ClampInput::hand, this frame's
         Vec3 own_shift_local{};   // the clamp's own eased push: shift_local without what callers drew on top (note_drawn); the snap-back gap
         Vec3 chest_world{};   // the re-acquire origin of the last update (the end of a retreat)
-        Vec3 drawn_world{},target_world{};std::array<Vec3,3> basis_world{};     // last frame in the world
+        Vec3 drawn_world{},target_world{},root_position{};std::array<Vec3,3> basis_world{};     // last frame in the world
+        std::array<double,8> frame_intervals{};unsigned interval_cursor{}; // recent render cadence, not player speed
+        std::array<double,8> root_intervals{};unsigned root_interval_cursor{};
+        Vec3 root_velocity{};double root_changed_at{}; // changed-root publication timeline, including intervening repeat renders
+        std::array<PendingCast,64> pending_casts{};unsigned pending_cursor{};
+        std::array<std::uint64_t,4> consumed_ids{};
+        std::array<double,8> answer_ages{};unsigned answer_age_cursor{}; // measured native query round trip
         std::array<Plane,plane_capacity> planes{};std::size_t plane_count{};
         double over_time{},clear_time{},since_haptic{1e9};unsigned overlap_count{},hold_frames{};
         Posted posted{Posted::none};bool last_slid{};ClampSweep posted_palm{},posted_tip{};ClampProbe posted_tip_probe{};
@@ -246,20 +262,22 @@ private:
         Vec3 clear_from_local{};bool has_clear_from{},last_overlap{};   // start of the last palm sweep that began free
         bool posted_slid{},slid_cut{};Vec3 slid_from{},slid_to{};unsigned slid_frames{1000};   // the last answered slid sweep
         unsigned posted_slid_window{},slid_window{};   // frames that slid sweep's lead covers after it is answered
-        bool drawn_validated{};                        // last frame drew a validated (or held) hand
+        bool drawn_validated{};                        // last frame's world position was validated (transport alone is not proof)
         unsigned cadence{1};                           // frames between casts: 1, or 2 in C14 alternate mode
         bool pending_note{};ClampOutput last_out{};
     };
     HandClampConfig cfg_;
     std::array<Side,2> sides_{};
+    inline static std::atomic<std::uint64_t> next_request_id_{}; // process lifetime, including whole-object/session replacement
     std::array<std::uint64_t,2> squeeze_infeasible_{},snapbacks_{},contact_frames_{},missed_notes_{},repeated_updates_{},blocked_frames_{};
 
     std::size_t capacity() const {return std::clamp<std::size_t>(cfg_.max_planes,1,plane_capacity);}
     static void store(Side& s,const ClampInput& in,Vec3 drawn) {
+        if(!s.has) s.root_changed_at=in.now;
         s.has=true;s.epoch=in.epoch;s.last_now=in.now;
         s.prev_local=clamp_detail::local_point(in.root,drawn);
         for(std::size_t i=0;i<3;++i) s.prev_basis_local[i]=clamp_detail::local_vector(in.root,in.target.basis[i]);
-        s.drawn_world=drawn;s.target_world=in.target.position;s.basis_world=in.target.basis;
+        s.drawn_world=drawn;s.target_world=in.target.position;s.root_position=in.root.position;s.basis_world=in.target.basis;
     }
     void post_chest(Side& s,const ClampInput& in,ClampOutput& out) const {
         if(!in.post || !finite(in.chest)) return;
@@ -275,6 +293,7 @@ private:
         s.state=ClampState::released;s.plane_count=0;s.shift_local={};s.own_shift_local={};
         s.over_time=0;s.clear_time=0;s.overlap_count=0;s.hold_frames=0;s.has_segment=false;s.slid_frames=1000;s.drawn_validated=false;
         s.has_clear_from=false;s.last_overlap=false;
+        s.pending_casts={}; // an answer from before this release cannot rearm this generation
     }
     void snap(unsigned side,Side& s,ClampOutput& out) {release(s);++snapbacks_[side];out.snapped=true;}
     // Fraction along the sweep where its sphere first touches the plane (0 when it starts touching).
@@ -532,7 +551,29 @@ private:
         s.hand_count=std::min(in.hand_count,in.hand.size());
         for(std::size_t k=0;k<s.hand_count;++k) s.hand[k]=in.hand[k];
     }
-    ClampOutput finish(Side& s,const ClampOutput& out) {s.pending_note=true;s.last_out=out;return out;}
+    ClampOutput finish(Side& s,ClampOutput out) {
+        const auto remember=[&](unsigned slot,const ClampSweep& sweep,Posted kind,ClampProbe probe,bool slid,bool tip,unsigned window) {
+            if(!sweep.valid)return;
+            // Overflow evicts identity, never authorizes a newer sweep with an older clear answer.
+            const auto id=next_request_id_.fetch_add(1,std::memory_order_relaxed)+1;
+            s.pending_casts[s.pending_cursor++%s.pending_casts.size()]={id,slot,kind,sweep,probe,slid,tip,window,s.last_now};
+            out.request_ids[slot]=id;
+        };
+        remember(0,out.palm_sweep,s.posted,{},s.posted_slid,false,s.posted_slid_window);
+        remember(1,out.tip_sweep,Posted::none,s.posted_tip_probe,false,true,0);
+        remember(2,out.wall_tip_sweep,Posted::none,s.posted_wall_probe,false,true,0);
+        remember(3,out.exclude_sweep,Posted::none,s.posted_exclude_probe,false,s.posted_exclude_tip,0);
+        s.pending_note=true;s.last_out=out;return out;
+    }
+    static std::optional<PendingCast> answer(Side& s,unsigned slot,std::uint64_t id,double now) {
+        if(!id || id<=s.consumed_ids[slot])return {};
+        for(auto& pending:s.pending_casts)if(pending.id==id && pending.slot==slot) {
+            const auto found=pending;pending.id=0;s.consumed_ids[slot]=id;
+            if(slot==0)s.answer_ages[s.answer_age_cursor++%s.answer_ages.size()]=std::max(0.,now-found.submitted_at);
+            return found;
+        }
+        return {};
+    }
 
 public:
     explicit HandClamp(HandClampConfig config={}) : cfg_(config) {}
@@ -613,25 +654,49 @@ public:
             return finish(s,out);
         }
         const double dt=std::min(elapsed,.1);
+        s.frame_intervals[s.interval_cursor++%s.frame_intervals.size()]=dt;
+        const Vec3 root_step=in.root.position-s.root_position;
+        const double root_interval=length(s.root_velocity)>0?in.now-s.root_changed_at:dt;
+        if(length(root_step)>0) {
+            // Repeated render poses do not mean the native root stopped. Measure a changed publication over all
+            // the time since the preceding change, and retain that estimate through intervening render repeats.
+            if(length(root_step)<=cfg_.snap_gap && root_interval>0 && root_interval<=cfg_.gap_seconds) {
+                s.root_velocity=root_step*(1/root_interval);
+                s.root_intervals[s.root_interval_cursor++%s.root_intervals.size()]=root_interval;
+            } else {s.root_velocity={};s.root_intervals={};}
+            s.root_changed_at=in.now;
+        }
         take_hand(s,in);s.chest_world=in.chest;
         s.since_haptic+=dt;
 
-        // What this side posted last frame decides how its results read; nothing posted, nothing to read.
-        const Posted posted=s.posted;const ClampSweep answered=s.posted_palm,posted_tip=s.posted_tip;
-        const ClampProbe tip_probe=s.posted_tip_probe;const bool answered_slid=s.posted_slid;
-        const ClampSweep posted_exclude=s.posted_exclude;const ClampProbe exclude_probe=s.posted_exclude_probe;const bool exclude_tip=s.posted_exclude_tip;
-        const ClampSweep posted_wall=s.posted_wall;const ClampProbe wall_probe=s.posted_wall_probe;
+        // Legacy fixtures answer the preceding frame. Native strict mode recovers each completed request's exact
+        // geometry/role independently: A may finish after B was posted, and no receipt is not a clear cast.
+        Posted posted=s.posted;ClampSweep answered=s.posted_palm,posted_tip=s.posted_tip;
+        ClampProbe tip_probe=s.posted_tip_probe;bool answered_slid=s.posted_slid;unsigned answered_slid_window=s.posted_slid_window;
+        ClampSweep posted_exclude=s.posted_exclude;ClampProbe exclude_probe=s.posted_exclude_probe;bool exclude_tip=s.posted_exclude_tip;
+        ClampSweep posted_wall=s.posted_wall;ClampProbe wall_probe=s.posted_wall_probe;
+        if(in.strict_answers) {
+            posted=Posted::none;answered={};posted_tip={};posted_wall={};posted_exclude={};answered_slid=false;
+            if(const auto a=answer(s,0,in.answer_ids[0],in.now)) {posted=a->kind;answered=a->sweep;answered_slid=a->slid;answered_slid_window=a->slid_window;}
+            if(const auto a=answer(s,1,in.answer_ids[1],in.now)) {posted_tip=a->sweep;tip_probe=a->probe;}
+            if(const auto a=answer(s,2,in.answer_ids[2],in.now)) {posted_wall=a->sweep;wall_probe=a->probe;}
+            if(const auto a=answer(s,3,in.answer_ids[3],in.now)) {posted_exclude=a->sweep;exclude_probe=a->probe;exclude_tip=a->tip;}
+        }
+        out.palm_answered=posted==Posted::palm;
+        out.chest_answered=posted==Posted::chest;
         s.posted=Posted::none;s.posted_palm={};s.posted_tip={};s.posted_slid=false;s.posted_exclude={};s.posted_wall={};
         if(s.slid_frames<1000) ++s.slid_frames;
-        const std::optional<ClampHit>& slot0=in.palm_hit?in.palm_hit:in.chest_hit;
+        const auto slot0=posted!=Posted::none?(in.palm_hit?in.palm_hit:in.chest_hit):std::nullopt;
+        const auto tip_hit=posted_tip.valid?in.tip_hit:std::nullopt,wall_tip_hit=posted_wall.valid?in.wall_tip_hit:std::nullopt;
+        const auto exclude_hit=posted_exclude.valid?in.exclude_hit:std::nullopt;
         const bool slot0_loose=slot0 && in.is_loose(slot0->entity);   // a loose prop the push logic owns
         if(posted!=Posted::none) {   // an answered cast: the planes it makes or re-hits are the fresh ones (I3)
             // A slid sweep runs along the planes it slides on and cannot re-hit them: only a raw sweep's answer renews freshness.
             if(!answered_slid) for(std::size_t i=0;i<s.plane_count;++i) s.planes[i].misses=std::min(s.planes[i].misses+1,1000u);
             std::optional<std::uintptr_t> touch;
             if(slot0_loose) touch=slot0->entity;
-            else if(posted_tip.valid && in.tip_hit && in.is_loose(in.tip_hit->entity)) touch=in.tip_hit->entity;
-            else if(posted_wall.valid && !posted_wall.exclude && in.wall_tip_hit && in.is_loose(in.wall_tip_hit->entity)) touch=in.wall_tip_hit->entity;
+            else if(posted_tip.valid && tip_hit && in.is_loose(tip_hit->entity)) touch=tip_hit->entity;
+            else if(posted_wall.valid && !posted_wall.exclude && wall_tip_hit && in.is_loose(wall_tip_hit->entity)) touch=wall_tip_hit->entity;
             if(touch) {s.loose_touch=touch;s.loose_touch_age=0;}
             else if(s.loose_touch && (s.loose_touch_age+=dt)>cfg_.plane_seconds+1e-9) s.loose_touch.reset();
         }
@@ -657,7 +722,7 @@ public:
                 s.seg_from=answered.from;s.seg_to=answered.from+(answered.to-answered.from)*t;s.has_segment=true;
                 s.seg_cut=slot0.has_value();
                 if(answered_slid) {
-                    s.slid_from=s.seg_from;s.slid_to=s.seg_to;s.slid_cut=s.seg_cut;s.slid_frames=0;s.slid_window=s.posted_slid_window;
+                    s.slid_from=s.seg_from;s.slid_to=s.seg_to;s.slid_cut=s.seg_cut;s.slid_frames=0;s.slid_window=answered_slid_window;
                 }
                 if(posted==Posted::palm) {
                     s.last_overlap=slot0 && slot0->initial_overlap;
@@ -676,8 +741,8 @@ public:
                 }
             }
             if(s.state!=ClampState::released && posted_tip.valid) {
-                judge(s,posted_tip,in.tip_hit,true);
-                if(in.tip_hit) add_plane(s,*in.tip_hit,tip_probe.radius,tip_probe.local,true,true,in.is_loose(in.tip_hit->entity));
+                judge(s,posted_tip,tip_hit,true);
+                if(tip_hit) add_plane(s,*tip_hit,tip_probe.radius,tip_probe.local,true,true,in.is_loose(tip_hit->entity));
             }
             // An exclusion sweep (I1) only adds what lies behind the excluded prop: it judges nothing (it passes through the prop's
             // planes by design) and does not steer the next sweep's slide. What it finds is held by the probe that found it and by
@@ -689,12 +754,12 @@ public:
                     if(tip) add_plane(s,*hit,probe.radius,probe.local,true,true,loose);
                 add_plane(s,*hit,cfg_.palm_radius,{},false,false,loose);
             };
-            if(posted_wall.exclude) behind(posted_wall,in.wall_tip_hit,wall_probe,true);
+            if(posted_wall.exclude) behind(posted_wall,wall_tip_hit,wall_probe,true);
             else if(s.state!=ClampState::released && posted_wall.valid) {
-                judge(s,posted_wall,in.wall_tip_hit,true);
-                if(in.wall_tip_hit) add_plane(s,*in.wall_tip_hit,wall_probe.radius,wall_probe.local,true,true,in.is_loose(in.wall_tip_hit->entity));
+                judge(s,posted_wall,wall_tip_hit,true);
+                if(wall_tip_hit) add_plane(s,*wall_tip_hit,wall_probe.radius,wall_probe.local,true,true,in.is_loose(wall_tip_hit->entity));
             }
-            behind(posted_exclude,in.exclude_hit,exclude_probe,exclude_tip);
+            behind(posted_exclude,exclude_hit,exclude_probe,exclude_tip);
             // A plane the drawn hand still touches (within contact_margin, by any of its spheres) does not age in a frame no sweep
             // reached it (a loose prop's plane still goes after fresh_misses missed casts): the swept probes need not come near it (sliding along a wall the side probes lead; stopped with only
             // the fingers at it), and the fingers went 6 cm into the wall once it expired. A sweep that reaches it still refutes it,
@@ -722,6 +787,7 @@ public:
             // Re-arm: the chest-to-controller path stayed clear, so the controller is in free space. prev = target.
             s.state=ClampState::free;s.clear_time=0;s.plane_count=0;s.shift_local={};s.own_shift_local={};s.overlap_count=0;s.over_time=0;
             s.hold_frames=0;s.has_segment=false;s.slid_frames=1000;s.has_clear_from=false;s.last_overlap=false;
+            s.pending_casts={}; // late chest answers cannot affect a newly rearmed palm generation
             s.prev_local=clamp_detail::local_point(in.root,in.target.position);
             for(std::size_t i=0;i<3;++i) s.prev_basis_local[i]=clamp_detail::local_vector(in.root,in.target.basis[i]);
             s.drawn_world=in.target.position;s.basis_world=in.target.basis;
@@ -764,18 +830,29 @@ public:
         // a surface is cut short at its hit), or, after a sweep that met nothing, a step of at most palm_radius from a
         // hand drawn validated last frame (a plane that is being refuted can hold the hand off the raw sweep's path).
         // Once the holds run out the hand follows unvalidated until a frame validates again.
-        const bool validated=rearmed || !s.has_segment || on_segment(p,s.seg_from,s.seg_to,s.seg_cut) ||
+        const bool validated=rearmed || (!s.has_segment && !in.strict_answers) || (s.has_segment && on_segment(p,s.seg_from,s.seg_to,s.seg_cut)) ||
             (s.slid_frames<=s.slid_window && on_segment(p,s.slid_from,s.slid_to,s.slid_cut)) ||
-            (!s.seg_cut && s.drawn_validated && length(p-s.drawn_world)<=cfg_.palm_radius+1e-9);
-        bool hold=false;Vec3 held=s.drawn_world;
+            // Legacy sliding tolerance follows the prior draw. Strict mode must remain bounded by an actual
+            // answered world segment: repeated small steps cannot renew proof without another completion.
+            (!in.strict_answers && !s.seg_cut && s.drawn_validated && length(p-s.drawn_world)<=cfg_.palm_radius+1e-9);
+        // Root transport may retain a controller-relative jump only inside an answered swept centre-line. An empty
+        // plane set is not proof: the player may just have accelerated toward an unseen wall. Rotation/contact holds
+        // keep the world path; no answered segment or plane is transported with the player.
+        const Vec3 transported=s.drawn_world+in.root.position-s.root_position;
+        const bool transport_swept=s.has_segment && segment_distance(transported,s.seg_from,s.seg_to)<=1e-9;
+        const bool carry_translation=s.plane_count==0 && !s.seg_cut && transport_swept;
+        bool hold=false;Vec3 held=s.drawn_world+(carry_translation?in.root.position-s.root_position:Vec3{});
         // A hold waits for max_hold_frames casts: in C14 alternate mode a cast is answered every other frame.
-        if(!validated && s.hold_frames<max_hold_frames*s.cadence) {
+        if(!validated && (in.strict_answers || s.hold_frames<max_hold_frames*s.cadence)) {
             Vec3 out_of_planes=held;
             if(solve(s,in.target.basis,out_of_planes)) held=out_of_planes;
             else {bool minimax=false;held=retreat(s,in.target.basis,target,in.chest,std::nullopt,minimax);}   // two walls too close
             hold=true;
         }
-        s.drawn_validated=hold || validated;
+        // An unchanged held world position keeps the old proof. A transported fallback does not establish that
+        // the intervening world space was swept, so it cannot seed the small-step validation shortcut next frame.
+        s.drawn_validated=validated || (hold && s.drawn_validated && length(held-s.drawn_world)<=1e-9);
+        out.validated=validated;
         if(hold) {
             ++s.hold_frames;out.held=true;out.drawn.position=held;out.shift=held-target;
         } else {
@@ -822,8 +899,20 @@ public:
         // A raw sweep without a direct hit is followed by another raw sweep, so raw sweeps find the frames with results.
         if(in.post) {
             const double lead=posted==Posted::none?2.:1.;
-            // The cap scales with the cadence: in C14 alternate mode a sweep must cover twice the frames.
-            const auto ahead_for=[&](double frames) {return clamp_detail::clamp_length(velocity*(dt*frames),max_lead*lead);};
+            // Predict root transport separately from controller-relative movement. Native root publications may be
+            // repeated for several renders: cover the longest recent publication/render interval even on a repeat.
+            // Only controller-relative prediction keeps that cap (a hand jump/snap turn is not extrapolated). A new
+            // acceleration still waits for a real answer when the older sweep did not cover it.
+            const double root_horizon=std::max(*std::max_element(s.frame_intervals.begin(),s.frame_intervals.end()),
+                *std::max_element(s.root_intervals.begin(),s.root_intervals.end()));
+            // A game-thread scope can take A, render can post B, then A completes. Cover that observed round trip
+            // in future queries; matching A still validates only A's original world segment, never B's geometry.
+            const double query_age=in.strict_answers?*std::max_element(s.answer_ages.begin(),s.answer_ages.end()):0.;
+            // A stop retires prediction after two observed publication periods; this affects query coverage only,
+            // never draws the hand ahead of its real target. Direction changes update the world velocity at once.
+            const Vec3 predicted_root=in.now-s.root_changed_at<=2*root_horizon?s.root_velocity*(root_horizon+query_age):Vec3{};
+            const Vec3 relative_step=(target-s.target_world)-root_step;
+            const auto ahead_for=[&](double frames) {return predicted_root*frames+clamp_detail::clamp_length(relative_step*frames,max_lead*lead);};
             const Vec3 ahead=ahead_for(lead);
             // Recovery: the last palm sweep began inside something no plane describes (an overlap makes no plane), so a
             // sweep from the hand would again. Sweep from the start of the last palm sweep that began free instead.

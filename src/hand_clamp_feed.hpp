@@ -156,6 +156,19 @@ inline Vec3 before_surface(Vec3 from,Vec3 to,const ClampHit& hit,double margin) 
 class ReleasedShotGuard {
 public:
     struct Answer {Vec3 from{};std::optional<ClampHit> hit;std::uint64_t tick{};bool valid{};};
+    // Explicit completion path: the caller has matched request ID, producer
+    // and epoch. Its actual submitted origin owns this answer, even if a
+    // newer sweep has already been posted. No call means no completion;
+    // a call with no hit is a genuine miss. Keep the completion timestamp
+    // unchanged so replay cannot extend a clear answer's lifetime.
+    void read_receipt(unsigned side,bool eye,Vec3 actual_from,const std::optional<ClampHit>& hit,std::uint64_t completed_tick) {
+        if(side>1 || !finite(actual_from) || !completed_tick) return;
+        auto& k=sides_[side];
+        if(!k.released) return;
+        auto& answer=eye?k.eye:k.chest;
+        if(answer.valid && completed_tick<=answer.tick) return;
+        answer={actual_from,hit,completed_tick,true};
+    }
     // Before this frame's update: the answers to what was posted for this side last frame (slot 0, the exclusion slot).
     void read(unsigned side,const std::optional<ClampHit>& slot0,const std::optional<ClampHit>& eye_slot,std::uint64_t tick) {
         if(side>1) return;auto& k=sides_[side];

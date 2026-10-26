@@ -28,9 +28,9 @@ inline constexpr std::uint64_t grip_alone_fresh_wait_ms=100;   // the existing 1
 inline GripAloneChoice decide_grip_alone(const GripAloneInput& in,const GrabTuning& tuning,double hover_radius) noexcept {
     if(in.occupied || in.choke_owns || in.takedown_offered || in.fast_native) return GripAloneChoice::use;
     const bool physical=in.physical && (in.physical->kind==PalmKind::prop || in.physical->kind==PalmKind::bone || in.physical->kind==PalmKind::living) &&
-        std::isfinite(in.physical->distance) && in.physical->distance>=0 && in.physical->distance<=tuning.grip_alone_gate_m && std::isfinite(in.physical->cost);
+        std::isfinite(in.physical->distance) && in.physical->distance>=0 && in.physical->distance<=(in.physical->kind==PalmKind::prop?grab_acquire_distance:tuning.grip_alone_gate_m) && std::isfinite(in.physical->cost);
     // A corpse's native carry target must not swallow a nearer prop. All grip-only
-    // physical picks use the same contact gate; shoulder carry still needs its torso hold.
+    // props use the hand sphere; bones keep their contact gate; shoulder carry still needs its torso hold.
     if(in.native_corpse) {
         const std::uint64_t waited=in.now_ms>=in.since_ms?in.now_ms-in.since_ms:0;
         if(physical && (in.physical->kind!=PalmKind::living || in.native_fresh)) return GripAloneChoice::grab;

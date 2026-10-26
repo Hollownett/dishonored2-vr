@@ -1,12 +1,20 @@
 # DLSS implementation status
 
-Updated 2026-10-23. **DLAA (anti-aliasing mode 7) and DLSS Quality (mode 8) are selectable rendering modes** on NVIDIA
+Updated 2026-10-26. **DLAA (anti-aliasing mode 7) and DLSS Quality (mode 8) are selectable rendering modes** on NVIDIA
 GPUs once the user supplies `nvngx_dlss.dll`. They run at the same per-eye seam as FSR 3 (`src/fsr_taa.hpp`), with the
 same colour, depth copy, motion-vector, jitter, reset and exposure inputs, and fall back to FSR 3 for the session on any
 NGX failure. Existing AA modes 0..6 are unchanged. Headset visual acceptance (comfort, quality in the headset) remains
 pending as for every mode; the evidence below is standalone RTX hardware and simulated game runs.
 
 This checkpoint tracks the [design](superpowers/specs/2026-10-22-dlss-design.md) and [task plan](superpowers/plans/2026-10-22-dlss.md), whose 2026-10-23 ruling wires DLSS at the FSR 3 seam and supersedes the T3 native-census gates for this version.
+
+## 2026-10-26: v622 alternating-eye validation
+
+Selected temporal AA is now default-on in alternate-eye performance rendering, including DLAA and DLSS Quality. Native per-eye ownership checks and safe startup/current-colour fallback remain required. The 2026-10-23 alternate-eye restriction below describes that historical checkpoint and is superseded by v622.
+
+Fresh RTX 3070 Laptop game runs verified DLAA, DLSS Quality, FSR 3 Native, and native pause/resume with alternate mode sustained. The existing Helldivers 2 provider and the newer Crimson Desert provider chosen by automatic discovery were both tested in place. The auto-selected provider completed 11,873 NGX evaluations and 12,068 checked alternating Presents with zero NGX failures/fallbacks or pose/image mismatches. Six GPU regressions also checked alternating per-eye dispatch, unchanged retained-eye pixels and queued history-reset recovery. The paired seam test verified state preservation and deselection/reselection.
+
+See [the v622 AA validation report](VR-v622-AA-VALIDATION.md) for all runs, exact dimensions, provider hashes and limitations. These are real NVIDIA GPU/Proton game executions with simulated symmetric-FOV OpenXR. Startup spatial copies still occur; native Windows/MSVC, runtime-fault recovery, asymmetric headset projection and headset warp/comfort remain unverified.
 
 ## 2026-10-23: production seam wiring (first shippable version)
 

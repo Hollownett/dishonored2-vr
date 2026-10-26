@@ -10,17 +10,15 @@
 #include <utility>
 #include <vector>
 namespace d2vr {
-inline constexpr double grab_acquire_distance=.20;
+inline constexpr double grab_acquire_distance=.25;
 inline constexpr double grab_retain_distance=grab_acquire_distance;
 inline constexpr double grab_switch_margin=0;
-// Hand "beam": a palm-wide cylinder along the hand's forward axis. Items it touches outrank items that
-// are merely near the palm; among them the one nearest the axis wins, with a small range penalty.
+// Legacy gaze/reach beam only: a palm-wide cylinder along the aim axis.
 inline constexpr double grab_beam_radius=.06,grab_beam_range_weight=.25;
-// Loot (pickups, carryables) within a palm width of the nearest hit wins: coins on a cash machine were ranked behind the
-// machine's surface under the palm, which the grip then used (sim v467).
+// Legacy gaze/reach loot bonus; hand-sphere selection never applies this bias.
 inline constexpr double use_loot_bonus=grab_beam_radius;
 // Shared hand-distance selection for loot, props and corpse bones. Reach is measured
-// to actual bounds, with the same 20 cm gate for every hover candidate.
+// to actual bounds, with the same 25 cm gate for every hover candidate.
 inline constexpr double palm_axis_push=.015,hover_lead=.8,palm_facing_bias=.6,palm_hysteresis=.86,
     approach_min=.8,approach_max=1.2,approach_per_mps=.2,loot_min_half=.03,default_arm_length=.65;
 enum class PalmKind : unsigned char {loot,usable,prop,bone,living};
@@ -36,6 +34,8 @@ inline PalmProbe palm_probe(unsigned side,const WorldTrackedPose& raw_grip,const
     p.valid=finite(p.palm) && finite(p.forward) && finite(p.direction) && finite(p.velocity);
     return p;
 }
+// Hand acquisition uses the raw controller grip centre, independent of its orientation or palm fit.
+inline PalmProbe hand_sphere_probe(Vec3 centre) {PalmProbe p;p.palm=centre;p.valid=finite(centre);return p;}
 inline Vec3 palm_point(const PalmProbe& p) {return p.palm+p.forward*palm_axis_push;}
 inline Vec3 hover_centre(const PalmProbe& p,double hover_radius) {return palm_point(p)+p.direction*(hover_lead*hover_radius);}
 struct PalmTarget {std::uint64_t id{};PalmKind kind{};Vec3 minimum{},maximum{};double priority=1;Vec3 velocity{};};
@@ -166,21 +166,20 @@ using NativeUseHit=std::array<std::byte,112>;
 struct GrabTuning;   // grab_force_cap.hpp (it includes this header): the per-kind priority and the hover radius
 // The v610 path's inputs as a probe: the hand point (volume_centre) and the beam axis (the aim ray's forward; zero: plain distance).
 inline PalmProbe legacy_beam_probe(Vec3 hand,Vec3 axis) {PalmProbe p;p.palm=hand;p.forward=axis;p.valid=finite(hand);return p;}
-// Which probe orders a hand's native Use hits this cycle. legacy: build/legacy-palm-select or gaze/reach mode (ruling H7). A hand-mode cycle
-// whose palm probe is invalid (no raw grip pose, palm_probe threw, a non-finite input) also takes the v610 beam for that cycle, never the
-// native sweep-fraction order (which cannot rank initial overlaps); beam_fallback says so, for the caller's counter (Task 3 fix round 1).
+// Hand mode always orders from the raw grip-centred sphere. The legacy knob and
+// palm validity cannot change its origin or introduce an orientation requirement.
+// Gaze/reach retains its existing forward beam policy.
 struct NativeUseOrderProbe {PalmProbe probe{};bool legacy{},beam_fallback{};};
 inline NativeUseOrderProbe native_use_order_probe(const PalmProbe& palm,bool legacy_knob,bool reach,Vec3 volume_centre,Vec3 aim_forward) {
-    NativeUseOrderProbe out;out.legacy=legacy_knob || reach;
-    if(!out.legacy && !palm.valid) {out.legacy=true;out.beam_fallback=true;}
-    out.probe=out.legacy?legacy_beam_probe(volume_centre,aim_forward):palm;
+    (void)palm;(void)legacy_knob;
+    NativeUseOrderProbe out;out.legacy=reach;
+    out.probe=reach?legacy_beam_probe(volume_centre,aim_forward):hand_sphere_probe(volume_centre);
     return out;
 }
 // Order hand-volume Use hits by distance to their owner's actual bounds (hit point when unknown).
 // Hovering with either hand grants no preference or reservation. Native permission and LOS
 // checks still decide eligibility after sorting. Full records are only permuted.
-// A bad palm keeps the current target; the live caller instead uses the legacy beam fallback.
-// Gaze/reach mode and build/legacy-palm-select retain the old forward beam.
+// Hand mode supplies hand_sphere_probe; gaze/reach mode retains the old forward beam.
 template<class Owner,class Loot,class Bounds,class Tuning=GrabTuning>
 bool order_native_use_hits(NativeUseHit* hits,unsigned count,const PalmProbe& probe,std::uintptr_t preferred,std::uintptr_t other_hand,
         Owner owner,Loot loot,Bounds bounds,const Tuning& tuning,bool legacy_beam=false) {

@@ -103,7 +103,7 @@ float4 PS(V v):SV_TARGET{return nativeArt.Sample(artSampler,v.uv);}
         target.SrcBlendAlpha=D3D11_BLEND_ONE;target.DestBlendAlpha=D3D11_BLEND_INV_SRC_ALPHA;target.BlendOpAlpha=D3D11_BLEND_OP_ADD;target.RenderTargetWriteMask=D3D11_COLOR_WRITE_ENABLE_ALL;
         checked(device_->CreateBlendState(&blend,&premultiplied_));target.SrcBlend=D3D11_BLEND_SRC_ALPHA;checked(device_->CreateBlendState(&blend,&straight_));
     }
-    void draw(ID3D11Texture2D* eye,ID3D11Texture2D* art,const D3D11_BOX& crop,NativeArtRect rect,DXGI_FORMAT format,bool premultiplied=true){
+    void draw(ID3D11Texture2D* eye,ID3D11Texture2D* art,const D3D11_BOX& crop,NativeArtRect rect,DXGI_FORMAT format,bool premultiplied=true,DXGI_FORMAT source_format=DXGI_FORMAT_UNKNOWN){
         if(!eye || !art || eye==art)throw std::invalid_argument("Native artwork requires separate source and eye textures");
         D3D11_TEXTURE2D_DESC e{},a{};eye->GetDesc(&e);art->GetDesc(&a);
         Ptr<ID3D11Device> eo,ao;eye->GetDevice(&eo);art->GetDevice(&ao);
@@ -111,7 +111,7 @@ float4 PS(V v):SV_TARGET{return nativeArt.Sample(artSampler,v.uv);}
            e.ArraySize!=1 || a.ArraySize!=1 || !e.Width || !e.Height || crop.left>=crop.right || crop.top>=crop.bottom || crop.right>a.Width || crop.bottom>a.Height || crop.front || crop.back!=1)
             throw std::invalid_argument("Invalid native artwork capture geometry/device");
         ContextState::Scope scope(state_);
-        D3D11_SHADER_RESOURCE_VIEW_DESC sd{};sd.Format=format;sd.ViewDimension=D3D11_SRV_DIMENSION_TEXTURE2D;sd.Texture2D.MipLevels=1;
+        D3D11_SHADER_RESOURCE_VIEW_DESC sd{};sd.Format=source_format==DXGI_FORMAT_UNKNOWN?format:source_format;sd.ViewDimension=D3D11_SRV_DIMENSION_TEXTURE2D;sd.Texture2D.MipLevels=1;
         Ptr<ID3D11ShaderResourceView> input;checked(device_->CreateShaderResourceView(art,&sd,&input));
         D3D11_RENDER_TARGET_VIEW_DESC rd{};rd.Format=format;rd.ViewDimension=D3D11_RTV_DIMENSION_TEXTURE2D;Ptr<ID3D11RenderTargetView> output;checked(device_->CreateRenderTargetView(eye,&rd,&output));
         const std::array<float,8> data{rect.left,rect.top,rect.right,rect.bottom,static_cast<float>(crop.left)/a.Width,static_cast<float>(crop.top)/a.Height,static_cast<float>(crop.right)/a.Width,static_cast<float>(crop.bottom)/a.Height};

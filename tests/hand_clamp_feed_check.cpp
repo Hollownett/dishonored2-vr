@@ -404,10 +404,50 @@ void reload_forgets() {
     CHECK(paused_hand(clamp,0,pose_at({.4,0,.7}),3,.35).z==.7);                    // after it: the controller, same epoch
     std::array<ClampHit,HandClamp::max_held_planes> planes{};CHECK(clamp.held_planes(0,planes)==0);
 }
+
+void released_shot_actual_receipts() {
+    ReleasedShotGuard guard;ClampOutput released{};released.valid=true;released.state=ClampState::released;
+    const Vec3 eye{0,0,1.6},raw{1.4,.4,1};
+    const Vec3 from_a{.4,0,1},from_b{1.2,0,1};
+    const ClampHit door{{1,0,1},{-1,0,0},7,3,false};
+    released.palm_sweep={from_a,raw,.05,true};
+    CHECK(guard.posted(0,true,released,true,eye,raw,1000,7)); // game thread takes A
+    released.palm_sweep={from_b,raw,.05,true};
+    CHECK(guard.posted(0,true,released,true,eye,raw,1010,7)); // render has now posted B
+    CHECK(length(guard.origin(0,raw,1011)-eye)<1e-12); // posting alone proves nothing
+    guard.read_receipt(0,false,from_a,door,1012);
+    const auto expected=before_surface(from_a,raw,door,released_shot_margin);
+    CHECK(length(guard.origin(0,raw,1013)-expected)<1e-12 && expected.x<1);
+    CHECK(length(expected-before_surface(from_b,raw,door,released_shot_margin))>.1);
+    // An older miss, or a changed replay at the same completion tick, cannot replace the wall answer.
+    guard.read_receipt(0,false,from_b,std::nullopt,1011);
+    guard.read_receipt(0,false,from_b,std::nullopt,1012);
+    CHECK(length(guard.origin(0,raw,1014)-expected)<1e-12);
+    // A new matched completion with no hit is a true clear answer.
+    guard.read_receipt(0,false,from_a,std::nullopt,1020);
+    CHECK(length(guard.origin(0,raw,1021)-raw)<1e-12);
+    // Publication and replay do not refresh the original completion TTL.
+    guard.posted(0,true,released,false,eye,raw,1110,7);
+    guard.read_receipt(0,false,from_a,std::nullopt,1020);
+    CHECK(length(guard.origin(0,raw,1120)-raw)<1e-12);
+    CHECK(length(guard.origin(0,raw,1121)-eye)<1e-12);
+    // Chest overlap falls back to the eye receipt's actual origin, not the newer posted eye.
+    guard.read_receipt(0,false,from_a,ClampHit{{1,0,1},{-1,0,0},7,3,true},1122);
+    guard.read_receipt(0,true,from_a,door,1122);
+    CHECK(length(guard.origin(0,raw,1123)-expected)<1e-12);
+    guard.clear(0);CHECK(!guard.applies(0,1124,7));
+    guard.read_receipt(0,false,from_a,std::nullopt,1122); // reset has no active release to own a completion
+    guard.posted(0,true,released,false,eye,raw,1125,7);
+    CHECK(length(guard.origin(0,raw,1126)-eye)<1e-12);
+    guard.read_receipt(2,false,from_a,std::nullopt,1127);
+    guard.read_receipt(0,false,{std::nan(""),0,0},std::nullopt,1127);
+    guard.read_receipt(0,false,from_a,std::nullopt,0);
+    CHECK(length(guard.origin(0,raw,1128)-eye)<1e-12);
+}
 } // namespace
 
 int main() {
-    yields();posts();routes();probe_sets();hold_store();reacquire();blade_stab();blade_push_stays_out();shot_origin_thin_wall();default_wall_tip();released_shot_through_door();paused_hand_guarded();shot_clipped_at_held_planes();reload_forgets();
+    yields();posts();routes();probe_sets();hold_store();reacquire();blade_stab();blade_push_stays_out();shot_origin_thin_wall();default_wall_tip();released_shot_through_door();paused_hand_guarded();shot_clipped_at_held_planes();reload_forgets();released_shot_actual_receipts();
     std::puts("PASS hand_clamp_feed_check: C9 yields, C14 cadence, answer routing, open-hand probe sets, re-acquire hold, blade stab, shot origin");
     return 0;
 }

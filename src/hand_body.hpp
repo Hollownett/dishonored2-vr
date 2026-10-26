@@ -118,7 +118,7 @@ struct DriveStatus {double gap_m{};double speed{},feedforward_mps{};bool root_ga
                     // fix round 1: thread CPU time of this side's drive (QueryThreadCycleTime; 0 when unavailable), and the positive control for
                     // the drift proof: ticks where the root moved under locomotion input, and the largest such root travel in one locomotion window
                     std::uint64_t cpu_us{},cpu_max_us{},root_moved_ticks{},root_travel_um{};
-                    std::uint64_t held_ticks{};};   // B16: drive ticks while holding (snaps suppressed unless a native hold's object is free, P2-1)
+                    std::uint64_t held_ticks{},discontinuities{};};   // B16: drive ticks while holding (snaps suppressed unless a native hold's object is free, P2-1)
 // Fix round 1 (proof d, controller ruling): per-tick drive cost (both hands summed) as wall time (QPC) and thread CPU time, a fixed wall
 // histogram, the ticks over budget, and the phase split of the slowest tick (read-back, servo, write, the rest). hist edges in us:
 // [0,10) [10,20) [20,50) [50,100) [100,150) [150,200) [200,300) [300,500) [500,1000) [1000,inf).
@@ -476,6 +476,16 @@ public:
         auto& c=counters_[side];
         const double gap=length(in.target.position-m->position);
         c.gap_m.store(std::isfinite(gap)?gap:-1,std::memory_order_relaxed);c.speed.store(length(m->velocity),std::memory_order_relaxed);
+        // A finite world-space discontinuity beyond the servo's supported domain cannot
+        // be recovered by driving: servo_step rejects it before producing any velocity.
+        // Retire this owned body on the next lifecycle tick, even if the target is blocked.
+        // Re-creation still requires the ordinary fresh, verified free spawn; never fly
+        // the old body across the gap or move it through a wall to the new target.
+        if(hand_servo_detail::finite_pose(in.target) && std::isfinite(gap) && gap>servo_cfg_.max_gap) {
+            count(side,&Counters::discontinuities);reset_drive(side);s.pending_destroy=true;
+            c.feedforward_mps.store(0,std::memory_order_relaxed);c.root_gate.store(false,std::memory_order_relaxed);
+            c.capped.store(false,std::memory_order_relaxed);publish_pose(side,std::nullopt);return;
+        }
         // The real interval since this side's last drive (not the dispatcher's 7-11k/s interval): the first drive after a create only starts it.
         const double dt=in.now-s.last_drive_s;
         if(std::isfinite(in.now)) s.last_drive_s=in.now;
@@ -533,7 +543,7 @@ public:
         d.cost_us=c.cost_us.load();d.cost_max_us=c.cost_max_us.load();d.player_drift_um=c.player_drift_um.load();d.dt_s=c.dt_s.load();
         d.drives=c.drives.load();d.drive_writes=c.drive_writes.load();d.yields=c.yields.load();d.skipped=c.skipped.load();
         d.snap_requests=c.snap_requests.load();d.snap_blocked=c.snap_blocked.load();d.garbage=c.garbage.load();d.second_drives=c.second_drives.load();d.root_jumps=c.root_jumps.load();d.pressed_ticks=c.pressed_ticks.load();
-        d.cpu_us=c.cpu_us.load();d.cpu_max_us=c.cpu_max_us.load();d.root_moved_ticks=c.root_moved_ticks.load();d.root_travel_um=c.root_travel_um.load();d.held_ticks=c.held_ticks.load();
+        d.cpu_us=c.cpu_us.load();d.cpu_max_us=c.cpu_max_us.load();d.root_moved_ticks=c.root_moved_ticks.load();d.root_travel_um=c.root_travel_um.load();d.held_ticks=c.held_ticks.load();d.discontinuities=c.discontinuities.load();
         return d;
     }
     // The largest drive cost of one tick, both hands summed (proof (d): <= 200 us), and the last tick's sum.
@@ -577,7 +587,7 @@ private:
             wake_writes{},create_refusals{},writes{},releases{},lost{},unverified{},misplaced_writes{},reentrant_writes{},filter_writes{},filter_refused{},filter_stranded{},filter_readback_mismatches{};
         std::atomic<std::uint32_t> filter{R1Recipe::filter};   // B16: the body's filter word as last written (the R1 default from each creation)
         std::atomic<std::uint64_t> contact_frames{},snaps{},cost_us{},cost_max_us{},player_drift_um{},drives{},drive_writes{},yields{},skipped{},
-            snap_requests{},snap_blocked{},garbage{},second_drives{},root_jumps{},pressed_ticks{},cpu_us{},cpu_max_us{},root_moved_ticks{},root_travel_um{},held_ticks{};
+            snap_requests{},snap_blocked{},garbage{},second_drives{},root_jumps{},pressed_ticks{},cpu_us{},cpu_max_us{},root_moved_ticks{},root_travel_um{},held_ticks{},discontinuities{};
         std::atomic<double> gap_m{},speed{},dt_s{},feedforward_mps{};std::atomic<bool> capped{},contact_now{},root_gate{};std::atomic<std::uint64_t> contact_ms{};
         std::atomic<int> state{};std::atomic<std::uint32_t> handle{};
     };
@@ -746,7 +756,7 @@ private:
     }
     void readback(unsigned side,std::uintptr_t world) {
         const Side& s=side_[side];
-        if(life_.state(side)!=BodyState::ready || !life_.can_write(side,world,s.handle) || latched_) {publish_pose(side,std::nullopt);return;}
+        if(s.pending_destroy || life_.state(side)!=BodyState::ready || !life_.can_write(side,world,s.handle) || latched_) {publish_pose(side,std::nullopt);return;}
         std::optional<Vec3> p;
         try {p=engine_.position?engine_.position(side,s.handle):std::nullopt;}
         catch(const HandBodyUnreadable&) {return;}   // keep the last pose for one unreadable tick

@@ -6,7 +6,8 @@
 // The body lags the controller (about 0.11 m at 2 m/s, 0.65 m at 6 m/s), so "the body wins whenever it is sane" would make the visible hand
 // trail in free air. The body is therefore drawn only while it is in contact (the drive's shortfall signal or the clamp's own contact) or
 // when it already sits within 0.02 m of the clamp pose; otherwise the clamp output is drawn, i.e. exactly the phase-1 pose. Every source
-// change blends over 0.15 s (a body that disappears while drawn too). While a grasp anchor is active the body is drawn only in contact. The
+// change blends over 0.15 s (a body that disappears while drawn too). Walking and sprinting use the same source policy.
+// While a grasp anchor is active the body is drawn only in contact. The
 // body is distrusted (the clamp wins) when it is farther than 0.35 m from the controller for 0.25 s, when it lies behind a surface the clamp
 // holds, or when its pose stopped updating for more than two displayed frames.
 // Pure: no engine access, one render-thread caller. Counters are atomics for the status thread.

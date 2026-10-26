@@ -678,7 +678,7 @@ sealed class MainForm : Form
 
     string aaHelpBase = AaHelp;
 
-    /// <summary>The Anti-aliasing help carries the performance-mode note while that feature row is on (performance mode replaces FSR/DLSS with SMAA).</summary>
+    /// <summary>The Anti-aliasing help carries the performance-mode note while that feature row is on (performance mode retains the selected AA).</summary>
     void RefreshAaNote()
     {
         int pm = -1; for (int i = 0; i < features.Count; i++) if (features[i].Id == "performance-mode") pm = i;

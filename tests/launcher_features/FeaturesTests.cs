@@ -19,7 +19,7 @@ string Listing(string d) => string.Join("|", Directory.GetFiles(d).OrderBy(x => 
 bool Has(string d, string f) => File.Exists(Path.Combine(d, f));
 string[] Ids(string d, string key) => System.Text.Json.JsonDocument.Parse(File.ReadAllText(Path.Combine(d, "launcher-features.json"))).RootElement.GetProperty(key).EnumerateArray().Select(x => x.GetString()!).ToArray();
 
-Check("performance_mode_row_is_default_on_alternate_eye", list.Count(f => f.Id == "performance-mode" && f.File == "alternate-eye" && f.Kind == "enable" && f.Default && f.Help.Contains("SMAA") && f.Label.Contains("shimmer")) == 1);
+Check("performance_mode_row_is_default_on_alternate_eye", list.Count(f => f.Id == "performance-mode" && f.File == "alternate-eye" && f.Kind == "enable" && f.Default && f.Help.Contains("selected anti-aliasing") && f.Label.Contains("shimmer")) == 1);
 Check("list_has_no_unwanted_rows", !list.Any(f => f.Id is "corpse-grab") && list.Count(f => f.Id == "hold-y-menu" && f.File == "no-hold-y-menu" && f.Kind == "disable" && f.Default) == 1 && list.Count == list.Select(f => f.Id).Distinct().Count());
 
 {   // fresh_home_enables_every_default
@@ -58,7 +58,21 @@ Check("list_has_no_unwanted_rows", !list.Any(f => f.Id is "corpse-grab") && list
     var st = Features.State(d, list);
     var offIds = list.Where(f => !st[f.Id].On).Select(f => f.Id).ToArray();
     var newIds = new[] { "grip-alone-grab", "palm-select", "corpse-slip-release", "living-hold", "finger-surface", "finger-ease", "hand-grenade-throw", "hand-mine-aim", "bink-theater", "cutscene-skip-hold", "letterbox-hide" };
-    Check("fresh_install_keeps_unverified_repairs_off", offIds.SequenceEqual(new[] { "run-root-gate", "prompt-target-anchor", "alternate-upscalers", "world-hand-depth", "native-temporal-census" }) && newIds.All(i => st[i].On) && list.Where(f => !f.IsEnable).All(f => !Has(d, f.File)) && !list.Any(f => f.File == "finger-probe-3"));
+    Check("fresh_install_enables_sprint_and_selected_aa", offIds.SequenceEqual(new[] { "power-gestures", "native-temporal-census" }) && newIds.All(i => st[i].On) && list.Where(f => !f.IsEnable).All(f => !Has(d, f.File)) && !list.Any(f => f.File == "finger-probe-3"));
+}
+{   // Upgrade v620 experiments to defaults, preserving an explicit user opt-out.
+    foreach (var id in new[] { "run-root-gate", "alternate-upscalers" })
+    {
+        var old = new Feature(id, id, "enable", id, id, false);
+        var d = NewBuild(); Features.Apply(d, new[] { old });
+        Features.Apply(d, list);
+        Check("repair_default_upgrades_" + id, Features.State(d, list)[id].On && !Has(d, "no-" + id));
+        Features.Set(d, F(id), false); Features.Apply(d, list);
+        Check("repair_optout_persists_" + id, !Features.State(d, list)[id].On && Has(d, "no-" + id));
+        var explicitOff = NewBuild(); Features.Apply(explicitOff, new[] { old }); Features.Set(explicitOff, old, false);
+        Features.Apply(explicitOff, list);
+        Check("old_repair_optout_migrates_" + id, !Features.State(explicitOff, list)[id].On && Has(explicitOff, "no-" + id));
+    }
 }
 {   // handmade_negative_knob_is_adopted
     var d = NewBuild(); File.WriteAllText(Path.Combine(d, "no-stealth-contact"), "");

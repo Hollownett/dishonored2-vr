@@ -30,7 +30,7 @@ if features.exists():  # plan F task 4: a launcher row exists (default ON since 
     import json
     rows = [f for f in json.loads(features.read_text(encoding='utf-8'))['features'] if f['file'] == 'alternate-eye']
     assert len(rows) == 1 and rows[0]['id'] == 'performance-mode' and rows[0]['kind'] == 'enable' and rows[0]['default'] is True
-    assert 'SMAA' in rows[0]['help'] and 'shimmer' in rows[0]['label']
+    assert 'selected anti-aliasing' in rows[0]['help'] and 'shimmer' in rows[0]['label']
     assert any(f['id']=='alternate-native-taa' and f['file']=='no-alternate-native-taa' and f['kind']=='disable' and f['default'] for f in json.loads(features.read_text(encoding='utf-8'))['features'])
 
 # GameXr: everything is off by default and gated
@@ -111,12 +111,12 @@ assert 'return alternate_pair_ready(rendered_mask_,alternate_fresh_eye,' in xr
 assert 'if(alternate_may_keep(gameplay,authored_camera,settings_.open())) keep_alternate_eye_(eye,processed);' in xr
 assert 'alt_kept_ok_(authored_camera || settings_.open())' in xr and 'if(nonfree) return false;' in xr
 assert 'if(!alternate_enabled && (alt_kept_[0] || alt_kept_[1])) {alt_kept_[0].Reset();alt_kept_[1].Reset();' in xr   # released after fallback
-# Temporal modes require verified ownership; upscalers additionally require explicit diagnostic opt-in.
+# Temporal modes require verified ownership; selected upscalers are enabled unless explicitly disabled.
 # The effective mode must never replace the saved/requested preference.
 assert 'taa_preference=d2vr::alternate_effective_temporal' not in probe
 assert 'temporal_live_mode=d2vr::alternate_effective_temporal(alternate_on(),taa_preference,alternate_taa_requested,alternate_upscalers_requested);' in probe
 assert 'd2vr::alternate_effective_temporal(alternate_on(),*requested_temporal,alternate_native_taa_allowed(),alternate_upscalers_requested)' in probe
-assert 'alternate_upscalers_requested=fs::exists(root/L"build"/L"alternate-upscalers");' in probe
+assert 'alternate_upscalers_requested=!fs::exists(root/L"build"/L"no-alternate-upscalers");' in probe
 assert 'alternate_smaa_applies(alternate_enabled,settings_.effective_temporal_aa())' in xr
 assert 'const std::size_t eye_slot=d2vr::alternate_state_slot(alt_eye,eye);' in head
 assert 'fsr_vfov[eye_slot]=' in head and 'jitter_counter[eye_slot]=counter;' in head and 'auto& e=eye_jitter[eye_slot];' in head

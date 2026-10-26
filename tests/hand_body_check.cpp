@@ -796,6 +796,32 @@ static void b14_checks() {
         for(int i=0;i<180;++i) o.tick();
         CHECK(o.hb.drive_status(0).snaps==0 && o.hb.drive_status(0).snap_requests==0);
     }
+    {   // Unsupported finite gaps retire the old body even with a blocked target or a hold.
+        // Creation remains blocked until a fresh caller-supplied free spawn exists.
+        for(bool held:{false,true}) {
+            HandBodyFault::reset_for_tests();DriveRig r;r.tick();r.tick();r.tick();
+            const auto other_handle=r.hb.status(1).handle;
+            const auto writes=r.hb.drive_status(0).drive_writes;
+            r.free[0]=false;r.holding[0]=held;r.target[0].x+=67;
+            r.tick();
+            CHECK(r.hb.drive_status(0).discontinuities==1 && !r.hb.pose(0));
+            CHECK(r.hb.drive_status(0).drive_writes==writes && !HandBodyFault::tripped());
+            r.w.busy=true;for(int i=0;i<3;++i)r.tick();
+            CHECK(r.w.destroys_side[0]==0 && !r.hb.pose(0));
+            r.w.busy=false;r.tick();
+            CHECK(r.w.destroys_side[0]==1 && !r.hb.ready(0));
+            for(int i=0;i<5;++i)r.tick();
+            CHECK(r.w.creates_side[0]==1 && r.hb.status(1).handle==other_handle);
+            CHECK(r.hb.drive_status(0).discontinuities==1 && r.hb.drive_status(0).snaps==0);
+            r.free[0]=true;r.tick();
+            CHECK(r.w.creates_side[0]==2 && r.hb.ready(0));
+            CHECK(length(r.w.b[0].pos-r.target[0])<.02 && !HandBodyFault::tripped());
+        }
+        // A normal finite gap remains on the existing drive/snap policy.
+        HandBodyFault::reset_for_tests();DriveRig normal;normal.tick();normal.tick();
+        normal.free[0]=false;normal.target[0].x+=.5;normal.tick();
+        CHECK(normal.hb.drive_status(0).discontinuities==0 && normal.w.destroys==0);
+    }
     {   // create_waits_while_palm_blocked (ruling): no create while the clamp's cast does not show the palm free; created once it does
         HandBodyFault::reset_for_tests();DriveRig r;r.free={false,true};
         for(int i=0;i<60;++i) r.tick();

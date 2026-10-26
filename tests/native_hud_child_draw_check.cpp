@@ -1,9 +1,11 @@
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include "../src/native_hud_child_draw.hpp"
+#include "../src/native_prompt_anchor.hpp"
 #include <cassert>
 #include <iostream>
 #include <limits>
+#include <map>
 extern "C" MH_STATUS WINAPI MH_DisableHook(LPVOID) {return MH_OK;}
 namespace {
 alignas(8) std::array<std::byte,0x1668> fixture_file{};
@@ -14,7 +16,20 @@ unsigned originals{},before{},after{},begins{},ends{};
 float eye_dx{},eye_dy{};float* fixture_matrix{};bool changed{},capture_enabled{},eye_owner_ok=true;float expect_x=-1.f,glyph_factor=-1.f;
 d2vr::NativeHudChildKind last_kind{};UINT64 last_epoch{},last_tick{};std::uintptr_t last_owner{};bool last_talk_offer{},last_talk_glyph{};
 unsigned read_count{},eye_live_calls{};
-bool read(std::uintptr_t at,void* out,std::size_t size){++read_count;SIZE_T n{};return ReadProcessMemory(GetCurrentProcess(),reinterpret_cast<void*>(at),out,size,&n) && n==size;}
+std::map<std::uintptr_t,unsigned char> retained_memory;
+d2vr::NativeHudChildScope last_scope{};
+template<class T> void put(std::uintptr_t at,const T& value) {
+    const auto* bytes=reinterpret_cast<const unsigned char*>(&value);
+    for(std::size_t i=0;i<sizeof(value);++i)retained_memory[at+i]=bytes[i];
+}
+bool read(std::uintptr_t at,void* out,std::size_t size){++read_count;
+    if(retained_memory.count(at)) {
+        auto* bytes=static_cast<unsigned char*>(out);
+        for(std::size_t i=0;i<size;++i){const auto it=retained_memory.find(at+i);if(it==retained_memory.end())return false;bytes[i]=it->second;}
+        return true;
+    }
+    SIZE_T n{};return ReadProcessMemory(GetCurrentProcess(),reinterpret_cast<void*>(at),out,size,&n) && n==size;
+}
 std::uint32_t __fastcall original(void* iggy,float* matrix,void* node,void* aux,void* p5,void* p6,std::uint32_t clip,float depth){
     ++originals;assert(iggy==fixture_iggy.data() && node==fixture_node.data() && aux==reinterpret_cast<void*>(1) && p5==reinterpret_cast<void*>(2) && p6==reinterpret_cast<void*>(3) && clip==123 && depth==4.5f);
     if(glyph_factor>=0.f) {
@@ -142,6 +157,144 @@ int main(){
     assert(NativeHudChildDraw::publish(NativeHudChildKind::objective,geometry,999,7,capacity_tick)); // expired slot reclaim
     assert(observed()==NativeHudChildKind::objective && last_owner==999);
     NativeHudChildDraw::clear();
+    { // Native Add/Show happens before stage0 publishes its new selection.
+        const auto event_tick=GetTickCount64();
+        const NativeInteractionTargetIdentity new_target{0x600000,8,1,9,5};
+        NativeWristHud::observe_draw(iggy,event_tick);
+        assert(NativeHudChildDraw::publish(NativeHudChildKind::prompt,geometry,99,9,event_tick,{},true,10));
+        const NativeInteractionTargetIdentity old_target{0x500000,7,0,9,4};
+        NativePromptCompletions completions;completions.begin(10);
+        NativeHudChildDraw::refresh_prompt(file,iggy,9,event_tick,old_target,false,completions);
+        NativeHudChildDraw::observer=nullptr;
+        NativeHudChildDraw::begin=+[](const NativeHudChildScope& scope) noexcept {assert(!scope.target && scope.prompt_event_pending);return true;};
+        NativeHudChildDraw::end=+[](const NativeHudChildScope&) noexcept {};
+        assert(call()==456); // a Draw before stage0 completes cannot bind the old remembered/current target
+        completions.target(10,new_target);completions.finish(10);
+        NativeHudChildDraw::refresh_prompt(file,iggy,9,event_tick,new_target,false,completions);
+        NativeHudChildDraw::begin=+[](const NativeHudChildScope& scope) noexcept {
+            assert(scope.target.object==0x600000 && scope.target.side==1 && !scope.prompt_event_pending);return true;
+        };
+        NativeHudChildDraw::end=+[](const NativeHudChildScope&) noexcept {};
+        assert(call()==456); // first actual child Draw captures the NEW target, with no additional Add event
+        NativeHudChildDraw::begin=nullptr;NativeHudChildDraw::end=nullptr;
+        NativeHudChildDraw::clear();
+        assert(NativeHudChildDraw::publish(NativeHudChildKind::prompt,geometry,99,9,event_tick-1000,{},true));
+        NativeHudChildDraw::refresh_prompt(file,iggy,9,event_tick,new_target);
+        NativeHudChildDraw::begin=+[](const NativeHudChildScope& scope) noexcept {assert(!scope.target);return true;};
+        NativeHudChildDraw::end=+[](const NativeHudChildScope&) noexcept {};
+        assert(call()==456); // stale event cannot relabel old artwork as a fresh target
+        NativeHudChildDraw::begin=nullptr;NativeHudChildDraw::end=nullptr;
+        NativeHudChildDraw::clear();
+        assert(NativeHudChildDraw::publish(NativeHudChildKind::prompt,geometry,99,9,event_tick,{},true,11));
+        completions.begin(11);completions.finish(11); // rejected/empty exact owning invocation
+        completions.begin(12);completions.target(12,new_target);completions.finish(12); // unrelated completion before Draw
+        NativeHudChildDraw::refresh_prompt(file,iggy,9,event_tick,new_target,false,completions);
+        NativeHudChildDraw::begin=+[](const NativeHudChildScope& scope) noexcept {assert(!scope.target && !scope.prompt_event_pending);return true;};
+        NativeHudChildDraw::end=+[](const NativeHudChildScope&) noexcept {};
+        assert(call()==456); // rejected owner + unrelated completion before Draw cannot relabel event
+        NativeHudChildDraw::clear();
+        assert(NativeHudChildDraw::publish(NativeHudChildKind::prompt,geometry,99,9,event_tick,{},true,13));
+        completions.begin(13);completions.target(13,old_target);completions.finish(13);
+        completions.begin(14);completions.target(14,new_target);completions.finish(14);
+        NativeHudChildDraw::refresh_prompt(file,iggy,9,event_tick,new_target,false,completions);
+        assert(call()==456); // B then C before Draw: C never receives artwork emitted by B
+        NativeHudChildDraw::retire_prompt_node(iggy,node);
+        assert(NativeHudChildDraw::publish(NativeHudChildKind::panel,geometry,99,9,event_tick));
+        NativeHudChildDraw::begin=+[](const NativeHudChildScope& scope) noexcept {assert(scope.kind==NativeHudChildKind::panel && !scope.target);return true;};
+        assert(call()==456); // no-token native event uses panel pixels, not the stale same-node world prompt root
+        NativeHudChildDraw::begin=nullptr;NativeHudChildDraw::end=nullptr;
+        NativeHudChildDraw::observer=+[](const NativeHudChildScope& scope,bool entering,std::uint32_t) noexcept {
+            if(entering){last_kind=scope.kind;last_epoch=scope.epoch;last_tick=scope.tick;last_owner=scope.owner;last_talk_offer=scope.talk_offer;
+                last_talk_glyph=native_hud_talk_glyph_context(NativeHudChildDraw::current);}
+        };
+        NativeHudChildDraw::clear();
+    }
+    { // Retained native prompt A survives hover B and the hand query clearing
+      // when carrying begins. Its compound child still contains the gauge.
+        constexpr std::uintptr_t element=0x210000,entries=0x220000,game=0x230000,entity=0x240000;
+        constexpr std::uint32_t spawn=0x1230007,key=42;
+        constexpr std::uintptr_t base=0x140000000;
+        const auto tick=GetTickCount64();
+        put(element+0x80,entries);put(element+0x88,std::uint32_t{1});
+        put(entries,std::array<unsigned char,0x40>{});put(entries,key);put(entries+0x3a,std::uint8_t{1});put(entries+0x3c,spawn);
+        put(base+0x39a5290,game);put(game+0x3130b0+(spawn>>16)*8ull,entity);put(entity+0xa8,spawn);
+        const native_prompt_entry::Receipt source{element,entries,entity,key,spawn};
+        const NativeInteractionTargetIdentity object_a{0x500000,7,0,9,4},object_b{0x600000,8,1,9,5};
+        const auto saved_observer=NativeHudChildDraw::observer.load();
+        NativeHudChildDraw::fixture(read,base,original,true);
+        NativeHudChildDraw::observer=+[](const NativeHudChildScope& scope,bool entering,std::uint32_t) noexcept {
+            if(entering){last_scope=scope;last_kind=scope.kind;}
+        };
+        assert(NativeHudChildDraw::publish(NativeHudChildKind::prompt,geometry,element,9,tick,object_a,false,0,source));
+        assert(!NativeHudChildDraw::has_retained_prompt(9,tick));
+        assert(observed()==NativeHudChildKind::prompt && !last_scope.retained_entry); // pending1 cannot authorize Draw
+        put(entries+0x3a,std::uint8_t{4});
+        NativeHudChildDraw::refresh_prompt(file,iggy,9,tick,object_b,true);
+        assert(observed()==NativeHudChildKind::prompt && last_scope.retained_entry && last_scope.retained_entry->owner==entity && !last_scope.talk_offer);
+        assert(NativeHudChildDraw::has_retained_prompt(9,tick) && !NativeHudChildDraw::has_retained_prompt(10,tick));
+        const auto captured_a=last_scope;
+        assert(NativeHudChildDraw::scope_current(captured_a,9,tick));
+        assert(!NativeHudChildDraw::scope_current(captured_a,10,tick));
+        assert(native_prompt_anchor(object_a,object_b,{},source)==NativePromptAnchor::retained);
+        NativeHudChildDraw::refresh_prompt(file,iggy,9,tick,{});
+        assert(observed()==NativeHudChildKind::prompt && last_scope.retained_entry);
+        // Successive native Gauge updates recapture the compound node, even
+        // though carry cleared its hand-selected interaction component.
+        for(unsigned gauge=0;gauge<3;++gauge) {
+            assert(NativeHudChildDraw::publish(NativeHudChildKind::prompt,geometry,element,9,GetTickCount64(),{},false,0,source));
+            NativeHudChildDraw::refresh_prompt(file,iggy,9,GetTickCount64(),{});
+            assert(observed()==NativeHudChildKind::prompt && last_scope.node==node && last_scope.retained_entry);
+            assert(native_hud_child_same_identity(last_scope,captured_a));
+        }
+        auto stale_pixels=last_scope;stale_pixels.tick=tick+1000;
+        assert(!native_hud_child_replacement_ready(stale_pixels,stale_pixels,tick,tick+1000)); // retained source never renews old pixels
+        auto other_source=captured_a;other_source.retained_entry->key++;
+        assert(!native_hud_child_same_identity(captured_a,other_source));
+        other_source=captured_a;other_source.retained_entry->spawn++;
+        assert(!native_hud_child_same_identity(captured_a,other_source));
+        other_source=captured_a;other_source.retained_entry->owner+=8;
+        assert(!native_hud_child_same_identity(captured_a,other_source));
+        auto panel_a=captured_a,panel_b=other_source;panel_a.kind=panel_b.kind=NativeHudChildKind::panel;
+        assert(!native_hud_child_same_identity(panel_a,panel_b)); // readbacks keep source identity through panel routing too
+        std::array<unsigned char,0x40> active{};assert(read(entries,active.data(),active.size()));
+        put(entries+0x40,active);put(entries+0x40,std::uint32_t{43});put(element+0x88,std::uint32_t{2});
+        const native_prompt_entry::Receipt source_b{element,entries+0x40,entity,43,spawn};
+        assert(NativeHudChildDraw::publish(NativeHudChildKind::prompt,geometry,element,9,GetTickCount64(),{},false,0,source_b));
+        assert(!NativeHudChildDraw::scope_current(captured_a,9,GetTickCount64())); // same window now belongs to B; last-good A must disappear
+        assert(observed()==NativeHudChildKind::prompt && last_scope.retained_entry && last_scope.retained_entry->key==43);
+        assert(NativeHudChildDraw::scope_current(last_scope,9,GetTickCount64()));
+        NativeHudChildDraw::clear_prompt_entry(element,key);
+        assert(NativeHudChildDraw::has_retained_prompt(9,GetTickCount64())); // Remove A cannot erase current B
+        assert(NativeHudChildDraw::publish(NativeHudChildKind::prompt,geometry,element,9,GetTickCount64(),{},false,0,source));
+        put(entries+0x40,active);put(entries,std::array<unsigned char,0x40>{});put(entries,std::uint32_t{99});put(element+0x88,std::uint32_t{2});
+        NativeHudChildDraw::refresh_prompt(file,iggy,9,GetTickCount64(),object_b);
+        assert(observed()==NativeHudChildKind::prompt && last_scope.retained_entry && last_scope.retained_entry->entry==entries+0x40);
+        assert(native_hud_child_same_identity(last_scope,captured_a)); // compaction changes no artwork identity
+        NativeHudChildDraw::clear_prompt_entry(element,99);
+        assert(NativeHudChildDraw::has_retained_prompt(9,GetTickCount64())); // Remove another label leaves the gauge source live
+        NativeHudChildDraw::clear_prompt_entry(element,key);
+        assert(!NativeHudChildDraw::has_retained_prompt(9,GetTickCount64()));
+        assert(!NativeHudChildDraw::scope_current(captured_a,9,GetTickCount64()));
+        assert(observed()==NativeHudChildKind::prompt && !last_scope.retained_entry); // sticky root is suppression only
+        assert(NativeHudChildDraw::publish(NativeHudChildKind::prompt,geometry,element,9,GetTickCount64(),{},false,0,source));
+        put(entries+0x40+0x3a,std::uint8_t{12});
+        NativeHudChildDraw::refresh_prompt(file,iggy,9,GetTickCount64(),object_b);
+        assert(!NativeHudChildDraw::has_retained_prompt(9,GetTickCount64()));
+        assert(observed()==NativeHudChildKind::prompt && !last_scope.retained_entry);
+        put(entries+0x40+0x3a,std::uint8_t{4});
+        assert(NativeHudChildDraw::publish(NativeHudChildKind::prompt,geometry,element,9,GetTickCount64(),{},false,0,source));
+        put(entries+0x40+0x3c,spawn+1);put(entity+0xa8,spawn+1);
+        NativeHudChildDraw::refresh_prompt(file,iggy,9,GetTickCount64(),{});
+        assert(!NativeHudChildDraw::has_retained_prompt(9,GetTickCount64()));
+        assert(observed()==NativeHudChildKind::prompt && !last_scope.retained_entry);
+        put(entries+0x40+0x3c,spawn);put(entity+0xa8,spawn);
+        NativeHudChildDraw::clear();
+        assert(NativeHudChildDraw::publish(NativeHudChildKind::prompt,geometry,element,9,tick-1000,{},false,0,source));
+        for(unsigned i=0;i<39;++i)assert(NativeHudChildDraw::publish(NativeHudChildKind::objective,geometry,100+i,9,GetTickCount64()));
+        assert(!NativeHudChildDraw::publish(NativeHudChildKind::objective,geometry,999,9,GetTickCount64()));
+        assert(observed()==NativeHudChildKind::prompt && last_scope.retained_entry); // sparse event is not a reclaimable slot while its entry is active
+        NativeHudChildDraw::fixture(read,base,original);NativeHudChildDraw::observer=saved_observer;retained_memory.clear();
+    }
     const NativeInteractionTargetIdentity target{0x500000,7,0,9,4};const auto target_tick=GetTickCount64();
     NativeWristHud::observe_draw(iggy,target_tick);
     assert(NativeHudChildDraw::publish(NativeHudChildKind::prompt,geometry,99,9,target_tick-1000,target));
@@ -355,6 +508,8 @@ int main(){
     }
     assert(nested_glyphs==4);std::memcpy(fixture_node.data()+0x80,&root,8);
     NativeHudChildDraw::fixture(read,0x140000000,original);NativeHudChildDraw::hud_movie=nullptr;NativeHudChildDraw::hud_layout_node=nullptr;
+    assert(NativeHudChildDraw::publish_eye(node,eye_binding));assert(NativeHudChildDraw::has_live_eye());
+    NativeHudChildDraw::clear_eye();assert(!NativeHudChildDraw::has_live_eye());
     assert(NativeHudChildDraw::publish_eye(node,eye_binding));assert(NativeHudChildDraw::disable());assert(call()==456);
     std::cout<<"native child draw ABI/return, capture/matrix, kind clearing, stale capacity reclaim and exact-owner wrist refresh checks passed\n";
 }

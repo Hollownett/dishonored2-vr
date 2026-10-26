@@ -34,6 +34,17 @@ struct TaaBindings {
             is_tex[4] && is_tex[5] && tex[5].Width==tex[2].Width && tex[5].Height==tex[2].Height &&
             tex[4].Width==tex[5].Width && tex[4].Height==tex[5].Height;
     }
+    // A selected upscaler that is warming up must not fall through to native TAA:
+    // its engine history may still belong to the other eye. Produce only this
+    // eye's current colour; never populate the shared history-write UAV (res[4]).
+    bool copy_current(ID3D11DeviceContext* context) const noexcept {
+        if(!context || !is_tex[2] || !is_tex[5] || !res[2] || !res[5] || res[2]==res[5] || res[4]==res[5]) return false;
+        const auto& colour=tex[2];const auto& output=tex[5];
+        if(colour.Width!=output.Width || colour.Height!=output.Height || colour.Format!=output.Format ||
+           colour.MipLevels!=output.MipLevels || colour.ArraySize!=output.ArraySize ||
+           colour.SampleDesc.Count!=output.SampleDesc.Count || colour.SampleDesc.Quality!=output.SampleDesc.Quality) return false;
+        context->CopyResource(res[5],res[2]);return true;
+    }
     ~TaaBindings() {
         for(auto* p:srv) if(p) p->Release();
         for(auto* p:uav) if(p) p->Release();

@@ -135,13 +135,16 @@ int main() {
         const WorldTrackedPose hand{{},{{{1,0,0},{0,1,0},{0,0,1}}}};
         NativeGrab grab;NativeGrabCheck::setup(grab);grab.require_contact_proxies(true);const auto now=GetTickCount64();
         grab.publish(0,owner,hand,0,1,now,true,false,now);
-        assert(!grab.focus_point(0,now));
+        assert(grab.focus_entity(0,now)==fixture_entity); // Loose props use the raw hand sphere, without a mesh receipt.
+        auto outside=hand;outside.position.x=-.18; // The nearest bound at x=.08 is now 26 cm away.
+        grab.publish(0,owner,outside,0,1,now,true,false,now);assert(!grab.focus_point(0,now));
+        grab.publish(0,owner,hand,0,1,now,true,false,now);
         HandProxies proxies{};for(auto& sphere:proxies)sphere={{-.2,0,0},.02};
-        grab.contact_proxies(0,proxies,1,now);assert(!grab.focus_point(0,now)); // Inside the old 45cm bubble, clear of the hand.
+        grab.contact_proxies(0,proxies,1,now);assert(grab.focus_entity(0,now)==fixture_entity); // Non-touching proxies do not veto sphere proximity.
         proxies[hand_palm_spheres+3]={{.06,0,0},.02};
         grab.contact_proxies(0,proxies,1,now);assert(grab.focus_entity(0,now)==fixture_entity); // Fingertip alone touches.
-        grab.contact_proxies(0,proxies,2,now);assert(!grab.focus_point(0,now));
-        grab.contact_proxies(0,proxies,1,now-33);assert(!grab.focus_point(0,now));
+        grab.contact_proxies(0,proxies,2,now);assert(grab.focus_entity(0,now)==fixture_entity); // Unrelated mesh epoch does not veto a prop.
+        grab.contact_proxies(0,proxies,1,now-33);assert(grab.focus_entity(0,now)==fixture_entity); // Stale mesh receipts do not veto a prop.
         grab.contact_proxies(0,proxies,1,now);
         grab.filter_native_grip(0,0,1,now,true,true,false);
         grab.publish(0,owner,hand,.9f,1,now,true,false,now);grab.filter_native_grip(0,.9f,1,now,true,true,false);

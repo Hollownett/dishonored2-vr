@@ -37,6 +37,7 @@
     <EmbeddedResource Include="$(RepoRoot)\third_party\minhook\LICENSE.txt" LogicalName="home/third_party/minhook/LICENSE.txt" WithCulture="false" />
     <EmbeddedResource Include="$(RepoRoot)\third_party\smaa\LICENSE.txt" LogicalName="home/third_party/smaa/LICENSE.txt" WithCulture="false" />
     <EmbeddedResource Include="$(RepoRoot)\third_party\fidelityfx\LICENSE.txt" LogicalName="home/third_party/fidelityfx/LICENSE.txt" WithCulture="false" />
+    <EmbeddedResource Include="$(RepoRoot)\third_party\dlss\LICENSE.txt" LogicalName="home/third_party/dlss/LICENSE.txt" WithCulture="false" />
     <EmbeddedResource Include="$(RepoRoot)\third_party\dishonored_vr\LICENSE" LogicalName="home/third_party/dishonored_vr/LICENSE" WithCulture="false" />
     <EmbeddedResource Include="$(RepoRoot)\tools\default_features.json" LogicalName="features.json" WithCulture="false" />
     <EmbeddedResource Include="$(RepoRoot)\THIRD_PARTY_NOTICES.md" LogicalName="home/THIRD_PARTY_NOTICES.md" WithCulture="false" />

@@ -83,9 +83,7 @@ def problems(header, probe):
     # the probes: raw controller grip (C9), never the drawn hands
     pub = body(probe, "std::array<d2vr::PalmProbe,2> palms{};", "native_interaction_aim.publish_hands(")
     need(bool(pub), "the probes are built right before publish_hands")
-    need("d2vr::palm_probe(side,*grip_poses[side],game_xr->palm_offset(side)," in pub, "probes from grip_poses + the palm fit")
-    need("avatar_fit_arm_reach[side].load(" in pub, "the calibrated arm reach")
-    need("hand_velocity[side]" in pub, "the controller velocity")
+    need("d2vr::hand_sphere_probe(grip_poses[side]->position)" in pub, "sphere uses the raw grip centre")
     need("hands.grips" not in pub and "palm_grips" not in pub and "hand_world" not in pub, "never the drawn hands")
     need("native_interaction_aim.publish_hands(*body,hand_rays,game_xr->pose_epoch(),character_tick,grip_centres,reach,grip_poses,character_carry,palms,clamped_palms);" in probe,
          "publish_hands receives the probes (and, Task 4 fix round 1, the clamped palms for the loot LOS)")
@@ -112,7 +110,7 @@ def main():
     if found:
         return 1
     mutations = {
-        "drawn hands feed the probes": (header, probe.replace("d2vr::palm_probe(side,*grip_poses[side],", "d2vr::palm_probe(side,hands.grips[side],", 1)),
+        "drawn hands feed the probes": (header, probe.replace("d2vr::hand_sphere_probe(grip_poses[side]->position)", "d2vr::hand_sphere_probe(hands.grips[side].position)", 1)),
         "knob ignored": (header, probe.replace('fs::exists(root/L"build"/L"legacy-palm-select")', "false", 1)),
         "reach mode loses the old beam": (header.replace("select.legacy,scope.scope->hand.reach,", "select.legacy,false,", 1), probe),
         "volume centre instead of the palm": (header.replace("native_use_order_probe(scope.scope->hand.palm,", "native_use_order_probe(legacy_beam_probe(scope.scope->hand.volume_centre,{}),", 1), probe),
@@ -127,7 +125,7 @@ def main():
         if (h, p) == (header, probe) or not problems(h, p):
             print(f"FAIL: mutation not caught: {name}")
             return 1
-    print("PASS: palm probe routing (raw grip + fit + arm reach + velocity), legacy-palm-select / reach keep the old beam, other hand last, occupancy gate unchanged")
+    print("PASS: raw-grip sphere routing, native sort ownership and occupancy")
     return 0
 
 

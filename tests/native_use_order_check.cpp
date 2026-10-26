@@ -34,7 +34,7 @@ int main() {
     const auto legacy=[](Vec3 hand,Vec3 axis=Vec3{}) {PalmProbe p;p.palm=hand;p.forward=axis;p.valid=true;return p;};
     const auto palm=[](Vec3 at,Vec3 forward,Vec3 direction) {PalmProbe p;p.palm=at;p.forward=forward;p.direction=direction;p.valid=true;return p;};
     [[maybe_unused]] const auto point=[](Vec3 p,unsigned id) {auto h=hit(0,id);const std::array<float,3> xyz{float(p.x),float(p.y),float(p.z)};std::memcpy(h.data(),xyz.data(),12);return h;};
-    // Closest-point (bounds) distance from the palm point to a REAL box (before the 3 cm loot scoring pad): ruling H9's distances.
+    // Closest-point distance from the palm point to the actual owner bounds.
     [[maybe_unused]] const auto box_distance=[](const PalmProbe& p,Vec3 lo,Vec3 hi) {
         const Vec3 o=palm_point(p);return length(Vec3{std::clamp(o.x,lo.x,hi.x),std::clamp(o.y,lo.y,hi.y),std::clamp(o.z,lo.z,hi.z)}-o);};
     // Palm at the origin, fingers +Z, palm facing +X: palm point (0,0,.015).
@@ -65,29 +65,27 @@ int main() {
         assert(order_native_use_hits(records.data(),3,bad,3,0,owner,no_loot,no_bounds,tuning));
         assert(owner(records[0])==3 && owner(records[1])==1 && owner(records[2])==2);
     }
-    {   // invalid_palm_falls_back_to_beam (fix round 1): a hand-mode cycle without a valid palm probe (no raw grip pose, palm_probe threw or got
-        // a non-finite input) is ordered by the v610 beam from the volume centre along the aim axis, never by the native sweep-fraction order.
-        const auto at=[](float x,float y,unsigned id){auto h=hit(x,id);std::memcpy(h.data()+4,&y,4);return h;};
-        const std::array<NativeUseHit,3> start{at(.05f,.12f,1),at(.40f,.01f,2),at(.20f,.30f,3)};
-        const Vec3 centre{0,0,0},aim{2,0,0};
-        WorldTrackedPose nan_grip{};nan_grip.position={NAN,0,0};nan_grip.basis={Vec3{1,0,0},Vec3{0,1,0},Vec3{0,0,1}};
-        for(const PalmProbe& bad:{PalmProbe{},palm_probe(1,nan_grip,default_palm_offset(1),std::nullopt,{})}) {
-            assert(!bad.valid);
-            const auto use=native_use_order_probe(bad,false,false,centre,aim);
-            assert(use.legacy && use.beam_fallback && same(use.probe.palm,centre) && same(use.probe.forward,aim));
-            auto r=start;
-            assert(order_native_use_hits(r.data(),3,use.probe,0,0,owner,no_loot,no_bounds,tuning,use.legacy) && owner(r[0])==2 && owner(r[1])==1);
-            r=start; // what the hand-mode path alone would do with that probe: the native order (the reason for the fallback)
-            assert(order_native_use_hits(r.data(),3,bad,0,0,owner,no_loot,no_bounds,tuning) && r==start);
+    {   // Hand mode ignores missing/invalid palm fits, controller facing and the legacy knob.
+        const std::array<NativeUseHit,3> start{point({.15,0,0},1),point({-.08,0,0},2),point({0,.26,0},3)};
+        const Vec3 centre{0,0,0};
+        PalmProbe bad=facing_x;bad.palm={NAN,0,0};bad.valid=false;
+        for(const auto& input:{facing_x,bad,PalmProbe{}}) for(bool knob:{false,true}) {
+            for(const Vec3 aim:{Vec3{1,0,0},Vec3{-1,0,0},Vec3{0,1,0},Vec3{NAN,0,0}}) {
+                const auto use=native_use_order_probe(input,knob,false,centre,aim);
+                assert(!use.legacy && !use.beam_fallback && use.probe.valid);
+                assert(same(palm_point(use.probe),centre) && same(use.probe.forward,Vec3{}));
+                auto r=start;
+                assert(order_native_use_hits(r.data(),3,use.probe,1,0,owner,no_loot,no_bounds,tuning,use.legacy));
+                assert(owner(r[0])==2 && owner(r[1])==1 && owner(r[2])==3);
+            }
         }
-        const auto good=native_use_order_probe(facing_x,false,false,centre,aim);
-        assert(!good.legacy && !good.beam_fallback && same(good.probe.palm,facing_x.palm) && same(good.probe.direction,facing_x.direction));
-        for(const auto& [knob,reach]:{std::pair{true,false},std::pair{false,true},std::pair{true,true}}) {
-            const auto use=native_use_order_probe(facing_x,knob,reach,centre,aim);   // the knob and gaze/reach: the beam, not a fallback
+        for(bool knob:{false,true}) {
+            const Vec3 aim{2,0,0};
+            const auto use=native_use_order_probe(bad,knob,true,centre,aim);
             assert(use.legacy && !use.beam_fallback && same(use.probe.palm,centre) && same(use.probe.forward,aim));
         }
     }
-    {   // legacy_beam_knob_keeps_old_order (build/legacy-palm-select, and gaze/reach mode): the v610 forward beam, 2 cm preference and 6 cm loot bonus.
+    {   // legacy_reach_keeps_old_order (gaze/reach mode): the v610 forward beam, 2 cm preference and 6 cm loot bonus.
         records={hit(.11f,1),hit(.10f,2),hit(.3f,3)};
         assert(order_native_use_hits(records.data(),3,legacy({0,0,0}),1,0,owner,no_loot,no_bounds,tuning,true) && owner(records[0])==1);
         records={hit(.14f,1),hit(.10f,2),hit(.3f,3)};
@@ -141,5 +139,5 @@ int main() {
     assert((native_scan(open,true)==std::array<unsigned,2>{2,1}));
     const std::array<Candidate,2> all_blocked{{{2,true,1},{1,true,1}}};
     assert((native_scan(all_blocked,true)==std::array<unsigned,2>{0,2}));
-    std::cout<<"PASS: nearest hand distance orders native Use hits (actual bounds, no preference bonus, other hand last), legacy beam knob, stable ties, record integrity and invalid-buffer rejection\n";
+    std::cout<<"PASS: nearest hand distance orders native Use hits (actual bounds, no preference bonus, no other-hand reservation), hand sphere and legacy reach beam, stable ties, record integrity and invalid-buffer rejection\n";
 }

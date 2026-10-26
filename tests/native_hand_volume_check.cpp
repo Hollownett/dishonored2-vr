@@ -18,7 +18,7 @@ void* __fastcall construct(void* out,const float* origin,float radius) {
     std::memcpy(bytes+0x28,&radius,4);std::memcpy(bytes+0x50,origin,12);return out;
 }
 int main(int argc,char** argv) {
-    static_assert(interaction_volume_radius==.45 && grab_acquire_distance==.20,"pickup reach must not shrink NPC discovery");
+    static_assert(interaction_volume_radius==.45 && grab_acquire_distance==.25,"pickup reach must not shrink NPC discovery");
     corrupt=argc>1 && std::string(argv[1])=="reject";
     const auto shape=NativeHandVolume::shape(base,read_code,construct);
     if(corrupt) {assert(shape==0 && calls==0);corrupt=false;assert(NativeHandVolume::shape(base,read_code,construct)==0 && calls==0);std::cout<<"PASS: changed overlap ABI rejected before constructor\n";return 0;}

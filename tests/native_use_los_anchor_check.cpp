@@ -32,6 +32,14 @@ void fixture() {
     put(fixture_delegate+0xd0,0.f);put(fixture_delegate+0xbc,0.f);put(fixture_delegate+0x40,0.f);
     put(fixture_controller+0xd0,std::array<float,2>{});put(fixture_player+0x30c,std::array<float,9>{1,0,0,0,1,0,0,0,1});
     put(fixture_game+0x3130b8,fixture_entity);put(fixture_entity,fixture_base+0x1c886a8);put(fixture_entity+0xa8,std::uint32_t{0x10001});
+    // The hand-sphere policy decodes the verified pure type getter. Supply a
+    // noncharacter type for both the generic usable and the pickup owner.
+    constexpr std::uintptr_t getter_rva=0x100000,type_rva=0x3901000;
+    put(fixture_base+0x1c886a8,fixture_base+getter_rva);put(fixture_base+0x1c5e258,fixture_base+getter_rva);
+    std::array<unsigned char,8> getter{0x48,0x8d,0x05,0,0,0,0,0xc3};
+    const auto type_offset=static_cast<std::int32_t>(type_rva-getter_rva-7);std::memcpy(getter.data()+3,&type_offset,4);
+    put(fixture_base+getter_rva,getter);put(fixture_base+type_rva+0x60,50);
+    put(fixture_base+0x39ce2c0,100);put(fixture_base+0x39ce2c4,200);
     put(fixture_entity+0x300,std::array<float,3>{.1f,0,0});put(fixture_entity+0x268,rig::List{fixture_entries,1,1<<8});put(fixture_entries,fixture_component);
     put(fixture_entity+0xf0,fixture_model);put(fixture_model,fixture_base+0x1b0dd88);put(fixture_component,fixture_base+0x1c745c8);
     put(fixture_component+0x10,fixture_entity);put(fixture_component+0x18,rig::Identity{7,10});put(fixture_component+0xe8,fixture_base+0x1c74798);
@@ -74,13 +82,14 @@ struct NativeInteractionRangeFixture {
             // Nonstatic native Use owner: no static-mesh bounds can supply an anchor.
             put(fixture_model,fixture_base+0x1b00000);
             if(mode==14) {put(fixture_model,fixture_base+0x1b0dd88);put(fixture_model+0x1840,std::array<float,8>{1,1,1,0,1.1f,1.1f,1.1f,0});}
+            if(mode==22) {put(fixture_model,fixture_base+0x1b0dd88);put(fixture_model+0x1840,std::array<float,8>{.2f,.3f,.4f,0,.21f,.31f,.41f,0});}
             auto storage=std::make_unique<NativeInteractionAim>();auto& aim=*storage;
             aim.base_=fixture_base;aim.read_=anchor_read;aim.logic_=logic;aim.route_=true;aim.active_=true;aim.occlusion_=native_los;
             const auto camera=*native_player_camera(anchor_read,fixture_base,fixture_camera);const auto now=GetTickCount64();
             WorldTrackedPose hand{{},{{{1,0,0},{0,1,0},{0,0,1}}}};aim.publish(camera,hand,1,now,true,0);
             if(mode==22 || mode==24) {
-                // Mode 22's takeable target is within the new 20 cm palm
-                // range; mode 24 keeps the old distant grip as a rejection.
+                // Mode 22's takeable bounds are inside the accepted hand
+                // sphere; mode 24 has no usable bounds and remains refused.
                 auto grip=hand;grip.position=mode==24?Vec3{.04,.01,0}:Vec3{.04,.29,.39};grip.basis={Vec3{0,1,0},Vec3{-1,0,0},Vec3{0,0,1}};
                 aim.publish_hands(camera,{hand,std::nullopt},1,now,{grip.position,std::nullopt},{},{grip,std::nullopt});
                 assert(aim.hands_[0].grip && aim.hands_[0].grip->position.x==.04 && aim.hands_[0].grip->basis[0].y==1);
@@ -95,7 +104,7 @@ struct NativeInteractionRangeFixture {
             unsigned char continuation{};std::array<float,9> axes{};
             const auto result=aim.occlusion_result(reinterpret_cast<void*>(fixture_sensor),reinterpret_cast<void*>(fixture_entity),
                 fixture_point.data(),axes.data(),fixture_point.data(),mode==8?1u:0u,&continuation,caller);
-            assert(fixture_calls==1 && continuation==1 && result==((mode==1 || mode==24)?0xfedcba9876543201ull:0xfedcba9876543200ull));
+            assert(fixture_calls==1 && continuation==(mode==22?0:1) && result==((mode==1 || mode==24)?0xfedcba9876543201ull:0xfedcba9876543200ull));
             if(mode==13) {fixture_point[0]=.6f;aim.occlusion_result(reinterpret_cast<void*>(fixture_sensor),reinterpret_cast<void*>(fixture_entity),
                 fixture_point.data(),axes.data(),fixture_point.data(),0,&continuation,fixture_base+0x3b8b05);}
             if(mode==17)aim.publish(camera,hand,2,now,true,0);

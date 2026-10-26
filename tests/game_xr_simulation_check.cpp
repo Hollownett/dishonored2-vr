@@ -15,6 +15,14 @@
 using Microsoft::WRL::ComPtr;
 namespace sim=d2vr::simxr;
 using Pixel=std::array<unsigned char,4>;
+static unsigned base_transfer_observations{};
+static void inspect_base_transfer(UINT,ID3D11Texture2D* source,ID3D11Texture2D* destination,
+    const XrCompositionLayerProjectionView& view,bool,bool,ID3D11Texture2D*) {
+    const auto before=d2vr::readback_rgba(source),copied=d2vr::readback_rgba(destination);
+    assert(!before.bytes.empty() && before.bytes==copied.bytes);
+    assert(view.subImage.swapchain && view.subImage.imageRect.extent.width>0);
+    ++base_transfer_observations;
+}
 static ComPtr<ID3D11Texture2D> texture(ID3D11Device* device,unsigned size,unsigned char red,unsigned char green,unsigned char blue,UINT bindings=0) {
     std::vector<unsigned char> pixels(size*size*4);
     for(std::size_t i=0;i<pixels.size();i+=4) {pixels[i]=red;pixels[i+1]=green;pixels[i+2]=blue;pixels[i+3]=255;}
@@ -64,7 +72,9 @@ int main() {
         const D3D11_BOX native_crop{0,0,0,64,64,1};
         assert(!xr.native_art_source(0,false,native_art.Get(),native_crop,0,xr.pose_epoch(),GetTickCount64(),native_point));
         assert(xr.native_art_source(0,false,native_art.Get(),native_crop,123,xr.pose_epoch(),GetTickCount64(),native_point,.3));
+        xr.observe_transfer=&inspect_base_transfer;
         frame();assert(xr.native_object_art_draws==2 && sim::summary.overlays.empty());
+        assert(base_transfer_observations==2);xr.observe_transfer=nullptr;
         assert(xr.native_art_presented(0,false));
         assert(pixel(device.Get(),context.Get(),sim::summary.images[0].Get(),32,32)==Pixel({10,220,35,255}));
         assert(pixel(device.Get(),context.Get(),sim::summary.images[1].Get(),32,32)==Pixel({10,220,35,255}));

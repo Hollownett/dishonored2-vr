@@ -57,10 +57,14 @@ def check(dxgi: str, aim: str) -> None:
                  'clamp_wall_tip[side]=d2vr::wall_leading_probe(probes.hand,target,velocity,clamp_wall_tip[side]);',
                  'in.hand=probes.hand;in.hand_count=probes.count;', 'in.tip=clamp_tip[side];in.wall_tip=clamp_wall_tip[side];'):
         assert need in loop, need
-    # Last frame's answers, routed by the clamp's last state; then the meet's loose list and exclusion, then the update.
-    route = 'd2vr::route_clamp_hits(in,clamp_state[side],slot0_answer,answer(d2vr::NativeInteractionAim::tip_slot),answer(d2vr::NativeInteractionAim::wall_tip_slot),exclude_answer);'
-    assert 'constautoslot0_answer=answer(0),exclude_answer=answer(d2vr::NativeInteractionAim::exclude_slot);' in loop
-    assert route in loop
+    # Atomic receipt IDs recover the exact cached request geometry; no answer is not a miss.
+    route = 'in.strict_answers=true;'
+    for need in (route, 'answers[i]=d2vr::NativeInteractionAim::weapon_answer(side,answer_slots[i],now);',
+                 'if(answers[i]){in.answer_ids[i]=answers[i]->request_id;',
+                 'if(answers[i]->hit)hits[i]=d2vr::to_clamp_hit(*answers[i]->hit);',
+                 'in.palm_hit=hits[0];in.tip_hit=hits[1];in.wall_tip_hit=hits[2];in.exclude_hit=hits[3];'):
+        assert need in loop, need
+    assert 'route_clamp_hits(' not in loop and 'weapon_serial(' not in between(loop, route, 'clamped=hand_clamp.update(')
     assert loop.index(route) < loop.index('native_grab.hand_contact().fill_clamp_input(side,in,clamp_exclude[side]);') < loop.index('clamped=hand_clamp.update(side,in);clamp_state[side]=clamped.state;')
     # build/no-hand-clamp (M2): the pre-Task-5 drawn hand, exactly: chest palm sweep + blade, the meet() exemption. Only there.
     legacy = between(loop, 'if(!hand_clamp_enabled){', '}else{')
@@ -83,10 +87,10 @@ def check(dxgi: str, aim: str) -> None:
     assert 'update_with_palm' not in s.replace(legacy, '')
     # Posts: palm/chest to slot 0, the tip, the wall tip and the exclusion sweep (with its excluded entity) to their slots; only while drawn.
     posts = between(clamped_part, 'if(clamped.valid&&!clamp_yield){constautopost=', 'constautomet=')
-    for need in ('d2vr::NativeInteractionAim::post_weapon_segment(side,post_slot,sweep.from,sweep.to,sweep.radius,sweep.exclude?*sweep.exclude:0,met_body?met_body->bone:-1,met_body?met_body->handle:0u);',
-                 'if(!sweep.valid||(sweep.exclude&&!*sweep.exclude))return;', 'post(0,clamped.palm_sweep);',
-                 'post(d2vr::NativeInteractionAim::tip_slot,clamped.tip_sweep);', 'post(d2vr::NativeInteractionAim::wall_tip_slot,clamped.wall_tip_sweep);',
-                 'post(d2vr::NativeInteractionAim::exclude_slot,clamped.exclude_sweep);'):
+    for need in ('d2vr::NativeInteractionAim::post_weapon_segment(side,post_slot,sweep.from,sweep.to,sweep.radius,sweep.exclude?*sweep.exclude:0,met_body?met_body->bone:-1,met_body?met_body->handle:0u,d2vr::NativeInteractionAim::producer_clamp,request_id);',
+                 'if(!sweep.valid||(sweep.exclude&&!*sweep.exclude))return;', 'post(0,clamped.palm_sweep,clamped.request_ids[0]);',
+                 'post(d2vr::NativeInteractionAim::tip_slot,clamped.tip_sweep,clamped.request_ids[1]);', 'post(d2vr::NativeInteractionAim::wall_tip_slot,clamped.wall_tip_sweep,clamped.request_ids[2]);',
+                 'post(d2vr::NativeInteractionAim::exclude_slot,clamped.exclude_sweep,clamped.request_ids[3]);'):
         assert need in posts, need
     # The meet composes with the clamp (Task 3: meet_clamp); the re-acquire frame holds the hand.
     meet = between(clamped_part, 'constautomet=native_grab.hand_contact().meet_clamp(side,hand_clamp,clamped,target);', 'constautor=')
@@ -146,13 +150,15 @@ def check(dxgi: str, aim: str) -> None:
     cross = between(s, 'pending_publish.flush();//completeguardedfloatraybeforereticleprojection', 'native_crosshair.publish(')
     assert 'aim->current(' in cross and 'constautotarget=aim->target(crosshair_distance_m);' in cross and 'crosshair_receipt=shared_aim_ray;' in s # G4: the cast distance (30 m without a hit) replaces the fixed 30 m
     assert publish.index(origin) < publish.index('shared_aim_ray=receipt;') and 'hand.basis=' not in cross
-    # Ruling 1 (snap-back): the released guard reads last frame's slot 0 and tip-slot answers before the update, and after it posts its
-    # eye -> hand sweep on the tip slot (unused by a released side); the shot origin uses it while the side is released.
-    guard_read = '{std::lock_guard<std::mutex>hand_lock(hand_state_mutex);released_shot.read(side,slot0_answer,exclude_answer,now);}'
-    assert guard_read in loop and loop.index(guard_read) < loop.index(route) < loop.index('clamped=hand_clamp.update(side,in);')
+    # Released shots use actual receipt geometry and completion time, after the clamp confirms chest role.
+    guard_read = 'if(clamped.chest_answered&&answers[0])released_shot.read_receipt(side,false,answers[0]->segment.from,hits[0],answers[0]->tick);'
+    assert guard_read in loop and loop.index('clamped=hand_clamp.update(side,in);') < loop.index(guard_read)
+    assert 'released_shot.read(' not in loop
+    assert 'producer_eye_guard);eye_receipt&&eye_receipt->request_id>released_eye_retired_ids[side]' in loop
+    assert 'released_shot.read_receipt(side,true,eye_receipt->segment.from,' in loop and ':std::nullopt,eye_receipt->tick);' in loop
     guard_post = 'eye_sweep=released_shot.posted(side,clamp_drew,clamped,clamp_post,{anchor.position[0],anchor.position[1],anchor.position[2]},target.position,now,game_xr->pose_epoch());'
     assert guard_post in clamped_part and clamped_part.index('clamped=hand_clamp.update(side,in);') < clamped_part.index(guard_post)
-    assert 'if(eye_sweep){d2vr::NativeInteractionAim::post_weapon_segment(side,d2vr::NativeInteractionAim::exclude_slot,eye_sweep->from,eye_sweep->to,eye_sweep->radius);' in clamped_part  # N7
+    assert 'if(eye_sweep){d2vr::NativeInteractionAim::post_weapon_segment(side,d2vr::NativeInteractionAim::exclude_slot,eye_sweep->from,eye_sweep->to,eye_sweep->radius,0,-1,0,d2vr::NativeInteractionAim::producer_eye_guard,++released_eye_request_ids[side]);' in clamped_part  # N7
     # N4: an epoch change or a world-UI pause restarts the C14 window. N6: a load forgets the clamp (non-world frames of prepare_head_view).
     assert '{staticstd::uint64_tbudget_epoch{};if(clamp_epoch!=budget_epoch||!clamp_live){hand_clamp_budget.reset_window();budget_epoch=clamp_epoch;}}' in clamp
     nonworld = between(s, 'if(!render_scene_frame()){native_audio_listener.clear();', 'return;}')  # cutscene Task 5: an open exact-32 cutscene also renders
@@ -227,12 +233,20 @@ def check(dxgi: str, aim: str) -> None:
     a = compact(aim)
     for need in ('inlinestaticconstexprunsignedweapon_slots=16;', 'staticconstexprunsignedtip_slot=11,wall_tip_slot=12,exclude_slot=13;', 'staticconstexprunsignedhand_body_free_slot=14;',
                  'returnslot==0||slot==tip_slot||slot==wall_tip_slot||slot==exclude_slot;',
-                 'weapon_req_[side][slot]={from,to,radius,true,exclude,exclude_bone,exclude_handle,producer};'):
+                 'weapon_req_[side][slot]={from,to,radius,true,exclude,exclude_bone,exclude_handle,producer,request_id};'):
         assert need in a, need
+    answer_read = between(a, 'staticstd::optional<WeaponAnswer>weapon_answer(', '//Thescope(weapon_casts_')
+    for need in ('std::lock_guard<std::mutex>guard(weapon_mutex_);', 'now-tick>ttl_ms', 'segment.producer!=producer',
+                 'returnWeaponAnswer{segment.request_id,tick,segment,weapon_hit_[side][slot]};'):
+        assert need in answer_read, need
+    assert 'weapon_answer_segments_[side][slot]=segments[side][slot];' in a
     stage = between(a, 'std::array<std::array<std::optional<WorldTraceHit>,weapon_slots>,2>hits{};', '++weapon_casts_;')
+    assert 'NativeWorldTrace::sphere_query_checked(' in stage
+    assert 'if(!result.complete)segments[side][slot].valid=false;' in stage
+    assert 'returnresult.hit;' in stage
     # I1: a guard's limb maps too (native_cast_exclusion); an unmapped exclusion casts the sweep without it, never drops it.
     for need in ('automapped=native_cast_exclusion(self->read_,self->base_,*world,entity,seg.exclude_bone,seg.exclude_handle,', 'NativeHeldObject::exclusion_body(self->base_,self->read_,entity)', 'exclusion_of(seg.exclude,side,seg)', 'excluded.get(entity,side,seg.exclude_bone,seg.exclude_handle,',
-                 'kWorldOccluderLayers,kWorldOccluderRequired,exclusion,clamp_slot(slot));', 'if(seg.exclude){', 'hits[side][slot]=cast(&*exclusion);',
+                 'kWorldOccluderLayers,kWorldOccluderRequired,nullptr,false,exclusion,clamp_slot(slot));', 'if(seg.exclude){', 'hits[side][slot]=cast(&*exclusion);',
                  '}else{++clamp_exclude_unmapped_;hits[side][slot]=cast(nullptr);}', '}elsehits[side][slot]=cast(nullptr);',
                  'if(clamp_slot(slot)){clamp_ticks+=', 'clamp_cast_us_.store(', '++clamp_cast_serial_;',
                  'if(hits[side][slot]->body_handle==exclusion->handle)++clamp_exclude_self_hits_;else++clamp_exclude_hits_;'):
@@ -257,8 +271,8 @@ if __name__ == '__main__':
         ('in.yield=clamp_yield;', 'in.yield=false;'),
         ('in.hand=probes.hand;in.hand_count=probes.count;', 'in.hand_count=0;'),
         ('in.tip=clamp_tip[side];in.wall_tip=clamp_wall_tip[side];', 'in.tip=clamp_tip[side];'),
-        ('post(d2vr::NativeInteractionAim::exclude_slot,clamped.exclude_sweep);', ''),
-        ('post(d2vr::NativeInteractionAim::wall_tip_slot,clamped.wall_tip_sweep);', ''),
+        ('post(d2vr::NativeInteractionAim::exclude_slot,clamped.exclude_sweep,clamped.request_ids[3]);', ''),
+        ('post(d2vr::NativeInteractionAim::wall_tip_slot,clamped.wall_tip_sweep,clamped.request_ids[2]);', ''),
         ('sweep.radius,sweep.exclude?*sweep.exclude:0,met_body?met_body->bone:-1,', 'sweep.radius,0,-1,'),
         ('native_grab.hand_contact().fill_clamp_input(side,in,clamp_exclude[side]);', ''),
         ('clamp_exclude[side]=met.exclude;', ''),
@@ -288,7 +302,10 @@ if __name__ == '__main__':
         ('if(!aim_for_shots) {native_shot_aim.clear();return;}', ''),
         ('if(gate.reticle) reticle_left=left;', ''),
         ('if(gate.shots) ranged_left=left;', 'ranged_left=left;'),
-        ('{std::lock_guard<std::mutex> hand_lock(hand_state_mutex);released_shot.read(side,slot0_answer,exclude_answer,now);}', ''),
+        ('in.strict_answers=true;', 'in.strict_answers=false;'),
+        ('in.answer_ids[i]=answers[i]->request_id;', 'in.answer_ids[i]=0;'),
+        ('answers[0]->segment.from,hits[0],answers[0]->tick', 'target.position,hits[0],now'),
+        ('producer_eye_guard,++released_eye_request_ids[side]', 'producer_clamp,++released_eye_request_ids[side]'),
         ('if(eye_sweep) {d2vr::NativeInteractionAim::post_weapon_segment(', 'if(false) {d2vr::NativeInteractionAim::post_weapon_segment('),
         ('clamp_state[side]=clamped.state;clamp_post=in.post;', 'clamp_state[side]=clamped.state;'),
         ('g.position=d2vr::paused_hand(hand_clamp,side,palm,clamp_epoch,hand_clamp.config().snap_gap);', 'g.position=hand_clamp.keep_out(side,palm.basis,palm.position,std::nullopt);'),
@@ -301,13 +318,16 @@ if __name__ == '__main__':
         ('clamp_wall_tip{d2vr::default_clamp_wall_tip(),d2vr::default_clamp_wall_tip()};', 'clamp_wall_tip{};'),
     )
     aim_mutations = (
+        ('if(!result.complete)segments[side][slot].valid=false;', ''),
+        ('return WeaponAnswer{segment.request_id,tick,segment,weapon_hit_[side][slot]};', 'return WeaponAnswer{0,now,segment,weapon_hit_[side][slot]};'),
+        ('weapon_answer_segments_[side][slot]=segments[side][slot];', ''),
         ('weapon_slots=16;', 'weapon_slots=12;'),
         ('if(clamp_slot(slot)) {clamp_ticks+=', 'if(slot==0) {clamp_ticks+='),
         ('hits[side][slot]=cast(&*exclusion);', 'hits[side][slot]=cast(nullptr);'),
-        ('kWorldOccluderRequired,exclusion,clamp_slot(slot));', 'kWorldOccluderRequired,exclusion);'),
+        ('kWorldOccluderRequired,nullptr,false,exclusion,clamp_slot(slot));', 'kWorldOccluderRequired,nullptr,false,exclusion);'),
         ('else {++clamp_exclude_unmapped_;hits[side][slot]=cast(nullptr);}', 'else {++clamp_exclude_unmapped_;}'),
         ('native_cast_exclusion(self->read_,self->base_,*world,entity,seg.exclude_bone,', 'native_rigid_body_only(self->read_,self->base_,*world,entity,seg.exclude_bone,'),
-        ('weapon_req_[side][slot]={from,to,radius,true,exclude,exclude_bone,exclude_handle,producer};', 'weapon_req_[side][slot]={from,to,radius,true,exclude,exclude_bone,exclude_handle};'),
+        ('weapon_req_[side][slot]={from,to,radius,true,exclude,exclude_bone,exclude_handle,producer,request_id};', 'weapon_req_[side][slot]={from,to,radius,true,exclude,exclude_bone,exclude_handle};'),
     )
     # Swapping the raw copy behind the palm offset (raw would carry the calibration) must be rejected.
     raw_line = 'raw_grips=hands.grips; // the tracked poses, before the palm offset and before world collision moves the drawn hands\n'

@@ -104,6 +104,10 @@ public:
         std::uintptr_t element{},movie{},iggy{},list{};std::uint32_t count{};std::uint64_t tick{};
         std::array<std::byte,0x28> record{};
     };
+    // Bounded observational rejection counters: logic, busy, stale, identity,
+    // record, owns-no-binding, owns-element/movie, owns-path, owns-record.
+    std::array<std::atomic<UINT64>,9> ownership_rejects{};
+    std::atomic<UINT64> validation_record_diff{},owner_record_diff{},intent_clear_calls{};
     using TargetSize=std::array<float,2> (*)() noexcept; // the eye target size in pixels ({0,0} unknown); NativeHudChildDraw::target_size
     std::atomic<TargetSize> target_size{};
 private:
@@ -145,20 +149,44 @@ private:
     inline static const std::byte zero_byte{};
 
     struct Validation {std::optional<Binding> binding;bool cacheable{};};
+    std::mutex ownership_diagnostics_mutex_;
+    // Per reason: now,tick,frame,generation, expected/live element, Iggy,
+    // list, count, then the differing path-record byte mask. No engine reads.
+    std::array<std::array<UINT64,13>,9> ownership_last_{};
+    void reject_ownership(unsigned reason) noexcept {const Binding empty{};reject_ownership(reason,empty,empty,0);}
+    void reject_ownership(unsigned reason,const Binding& expected_binding) noexcept {const Binding empty{};reject_ownership(reason,expected_binding,empty,0);}
+    void reject_ownership(unsigned reason,const Binding& expected_binding,const Binding& observed_binding) noexcept {reject_ownership(reason,expected_binding,observed_binding,0);}
+    void reject_ownership(unsigned reason,const Binding& expected_binding,const Binding& observed_binding,UINT64 changed) noexcept {
+        ++ownership_rejects[reason];
+        if(!ownership_diagnostics_mutex_.try_lock())return;
+        ownership_last_[reason]={GetTickCount64(),expected_binding.tick,frame_.load(),generation_.load(),
+            expected_binding.element,observed_binding.element,expected_binding.iggy,observed_binding.iggy,
+            expected_binding.list,observed_binding.list,expected_binding.count,observed_binding.count,changed};
+        ownership_diagnostics_mutex_.unlock();
+    }
+public:
+    std::optional<std::array<std::array<UINT64,13>,9>> ownership_diagnostics() noexcept {
+        if(!ownership_diagnostics_mutex_.try_lock())return {};
+        const auto out=ownership_last_;ownership_diagnostics_mutex_.unlock();return out;
+    }
+private:
     // The engine reads. Never blocks: when the update thread holds mutex_ there is no snapshot to judge, so nothing is owned (and nothing cached).
     Validation validate(std::uint64_t now) noexcept {
         try {
-            if(logic_()!=2) return {{},true};
+            if(logic_()!=2) {reject_ownership(0);return {{},true};}
             Binding out;
-            if(!mutex_.try_lock()) return {};
+            if(!mutex_.try_lock()) {reject_ownership(1);return {};}
             out=binding_;mutex_.unlock();
-            if(!out.element || !out.tick || now<out.tick || now-out.tick>250) return {{},true};
+            if(!out.element || !out.tick || now<out.tick || now-out.tick>250) {reject_ownership(2,out);return {{},true};}
             Binding current{out.element,0,0,0,0,out.tick};
             if(!read_(out.element+movie_offset,&current.movie,8) || current.movie!=out.movie || !current.movie ||
                !read_(out.element+object_offset+8,&current.iggy,8) || current.iggy!=out.iggy ||
                !read_(out.element+object_offset+as3_data_offset,&current.list,8) || current.list!=out.list ||
-               !read_(out.element+object_offset+as3_count_offset,&current.count,4) || current.count!=out.count ||
-               !read_(out.list+((out.count&as3_count_mask)-1)*0x28,current.record.data(),current.record.size()) || current.record!=out.record) return {{},true};
+               !read_(out.element+object_offset+as3_count_offset,&current.count,4) || current.count!=out.count) {reject_ownership(3,out,current);return {{},true};}
+            if(!read_(out.list+((out.count&as3_count_mask)-1)*0x28,current.record.data(),current.record.size()) || current.record!=out.record) {
+                UINT64 changed{};for(unsigned i=0;i<current.record.size();++i)if(current.record[i]!=out.record[i])changed|=UINT64{1}<<i;
+                validation_record_diff=changed;reject_ownership(4,out,current,changed);return {{},true};
+            }
             return {out,true};
         } catch(...) {return {};}
     }
@@ -243,7 +271,11 @@ public:
     void publish(float ndc_x,float ndc_y,std::uint64_t epoch,std::uint64_t tick,bool active) {
         std::lock_guard<std::mutex> lock(mutex_);publication_={ndc_x,ndc_y,epoch,tick,active};
     }
-    void clear() {std::lock_guard<std::mutex> lock(mutex_);publication_={};binding_={};generation_.fetch_add(1,std::memory_order_release);}
+    // Losing aim intent (including an unrelated Setup view) does not destroy
+    // the native element/movie. Keep its last fresh ownership observation;
+    // validate() still rechecks every pointer/list/record and its250ms age.
+    // Actual native teardown in place(), install and disable retire binding_.
+    void clear() {++intent_clear_calls;std::lock_guard<std::mutex> lock(mutex_);publication_={};}
     // Render thread, once per displayed frame: binding() validates at most once until the next call. 0 turns the cache off.
     void begin_frame(std::uint64_t frame) noexcept {frame_.store(frame,std::memory_order_relaxed);}
     UINT64 validations() const {return validations_.load();}
@@ -268,8 +300,14 @@ public:
     }
     bool owns(const Binding& candidate,std::uint64_t now) noexcept {
         const auto live=binding(now);
-        return live && live->element==candidate.element && live->movie==candidate.movie && live->iggy==candidate.iggy &&
-            live->list==candidate.list && live->count==candidate.count && live->record==candidate.record;
+        if(!live) {reject_ownership(5,candidate);return false;}
+        if(live->element!=candidate.element || live->movie!=candidate.movie) {reject_ownership(6,candidate,*live);return false;}
+        if(live->iggy!=candidate.iggy || live->list!=candidate.list || live->count!=candidate.count) {reject_ownership(7,candidate,*live);return false;}
+        if(live->record!=candidate.record) {
+            UINT64 changed{};for(unsigned i=0;i<live->record.size();++i)if(live->record[i]!=candidate.record[i])changed|=UINT64{1}<<i;
+            owner_record_diff=changed;reject_ownership(8,candidate,*live,changed);return false;
+        }
+        return true;
     }
     void install(std::uintptr_t base,Read read,Write write,Logic logic,const std::filesystem::path& file,bool route=false) {
         if(!base || !read || !write || !logic || active_ || (instance_ && instance_!=this))

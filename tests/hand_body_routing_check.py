@@ -274,14 +274,54 @@ for m in re.finditer(r"hand_body_probe_free_bits", probe):
     assert (probe_start <= m.start() < probe_start + len(probe_block)) or (publish_start <= m.start() < publish_start + len(publish_block)) or \
         probe[m.start():m.start() + 30].startswith("hand_body_probe_free_bits{}"), "set only in the probe block, read only in the publication"
 assert code_of(probe).count("hand_body_free_slot") == 1 and probe.count("post_weapon_segment(side,probe_slot,") == 1
-for need in ("probe_streak[side]>=3 && (((hand_body_free_bits>>side)&1u) || native_hold_here)", "if(clamp_updated && wanted && !motor_hold_here && d2vr::finite(palm.position)) {",
-             "native_hold_here?held_clamp_live.entity:0", "else probe_streak[side]=0;   // unanswered: never free on an old answer", "d2vr::R1Recipe::radius"):
-    assert need in probe_block, need
+def check_body_probe_receipts(source):
+    code = ''.join(code_of(source).split())
+    for need in ("if(clamp_updated&&wanted&&!motor_hold_here&&d2vr::finite(palm.position)){",
+                 "constautoexclude=native_hold_here?held_clamp_live.entity:0;",
+                 "if(constautoreceipt=d2vr::NativeInteractionAim::weapon_answer(side,probe_slot,now))",
+                 "answer=d2vr::HandBodyProbeAnswer{receipt->request_id,receipt->tick,receipt->segment.from,receipt->segment.to,receipt->segment.radius,receipt->segment.exclude,receipt->hit.has_value()};",
+                 "hand_body_probe_clearance[side].observe(clamp_epoch,now,palm.position,exclude,d2vr::R1Recipe::radius,hand_body_probe_request_id,answer);",
+                 "exclude,-1,0,d2vr::NativeInteractionAim::producer_clamp,++hand_body_probe_request_id);",
+                 "if(probe_clear&&(((hand_body_free_bits>>side)&1u)||native_hold_here))hand_body_probe_free_bits|=1u<<side;",
+                 "elsehand_body_probe_clearance[side].reset(hand_body_probe_request_id);"):
+        assert need in code, need
+    assert "weapon_serial(" not in code and "weapon_hit(" not in code, "probe identity and hit must be one atomic receipt"
+
+check_body_probe_receipts(probe_block)
+for original, replacement in (("receipt->request_id,receipt->tick,receipt->segment.from", "0,now,palm.position"),
+                              ("hand_body_probe_clearance[side].observe(clamp_epoch,now,palm.position", "hand_body_probe_clearance[side].observe(1,now,palm.position"),
+                              ("++hand_body_probe_request_id", "hand_body_probe_request_id"),
+                              ("if(probe_clear &&", "if(true &&"),
+                              ("else hand_body_probe_clearance[side].reset(hand_body_probe_request_id);", "")):
+    assert original in probe_block
+    try:
+        check_body_probe_receipts(probe_block.replace(original, replacement, 1))
+    except AssertionError:
+        pass
+    else:
+        raise AssertionError("unsafe own-probe receipt mutation accepted: " + original)
+assert "for(auto& proof:hand_body_probe_clearance)proof.reset(hand_body_probe_request_id);" in probe
 assert "unsigned hand_body_free_bits{},hand_body_yield_bits{},hand_visual_contact_bits{};" in probe
-free_gate = probe[probe.index("const bool answered_free="):probe.index("if(hand_body_free_streak[side]>=3) hand_body_free_bits|=1u<<side;")]
-for need in ("clamp_updated && clamped.valid && !clamp_yield", "clamped.state==d2vr::ClampState::free", "!clamped.reacquired", "!clamped.held", "!clamped.contact", "!reach_clamped",
-             "!palm_unanswered", "clamped.drawn.position-palm.position"):
-    assert need in free_gate, need + ": the free bit needs an answered free palm cast to the palm itself (DeepSeek P1/P2)"
+free_gate = probe[probe.index("const bool drawn_free="):probe.index("if(hand_body_free_streak[side]>=3) hand_body_free_bits|=1u<<side;")]
+
+def check_clamp_free_receipts(source):
+    code = ''.join(code_of(source).split())
+    for need in ("clamp_updated&&clamped.valid&&clamped.validated&&!clamp_yield", "clamped.state==d2vr::ClampState::free",
+                 "!clamped.reacquired", "!clamped.held", "!clamped.contact", "!reach_clamped", "clamped.drawn.position-palm.position",
+                 "if(!drawn_free)hand_body_free_streak[side]=0;",
+                 "elseif(clamped.palm_answered)hand_body_free_streak[side]=std::min(hand_body_free_streak[side]+1,1000u);"):
+        assert need in code, need + ": free permission requires swept proof and distinct matched completions"
+
+check_clamp_free_receipts(free_gate)
+for original, replacement in (("clamped.validated &&", ""), ("else if(clamped.palm_answered)", "else"),
+                              ("if(!drawn_free)hand_body_free_streak[side]=0;", "")):
+    assert original in free_gate
+    try:
+        check_clamp_free_receipts(free_gate.replace(original, replacement, 1))
+    except AssertionError:
+        pass
+    else:
+        raise AssertionError("unsafe free-streak mutation accepted: " + original)
 # DeepSeek P1: the tracked-arm frame's source tick and epoch stay real code (an edit once swallowed them into a comment)
 assert "hands.tick=GetTickCount64();hands.source_tick=game_xr->grip_pose_tick();hands.epoch=game_xr->pose_epoch();" in code_of(probe)
 assert "if(clamp_yield) hand_body_yield_bits|=1u<<side;" in probe

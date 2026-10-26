@@ -41,6 +41,18 @@ namespace d2vr {
 class FsrTaa {
 public:
     struct Config {float sharpness=.3f;float mv_x=-1,mv_y=-1;bool mv_full=false;float dlss_jitter_x=1,dlss_jitter_y=1;}; // dlss_jitter_*: multipliers on the FSR-convention jitter for DLSS only (build/dlss-jitter-sign, diagnostics)
+    // CPU binding observations only. Extents and the postpass viewport do not
+    // certify the valid native world rectangle inside a padded source texture.
+    struct InputDiagnostics {
+        bool valid{},source_texture2d{},native_counter_known{},rasterizer_known{};
+        std::uint64_t sequence{},owner_frame{},tick_ms{},generation{};
+        std::uintptr_t context{},source{},target{};
+        UINT context_type{},native_counter{},source_width{},source_height{},source_mips{},source_array_size{},source_format{};
+        UINT srv_dimension{},most_detailed_mip{},mip_count{},viewport_count{},scissor_count{};
+        D3D11_VIEWPORT viewport{};D3D11_RECT scissor{};BOOL scissor_enabled{};
+    };
+    using InputFrameReader=std::uint64_t (*)();
+    std::atomic<InputFrameReader> input_frame_reader{nullptr}; // optional current Present/frame counter; 0 means unknown
 private:
     template<class T> struct Ref {
         T* p{};~Ref() {if(p) p->Release();}
@@ -85,11 +97,20 @@ private:
     DXGI_FORMAT ready_native_format_{DXGI_FORMAT_UNKNOWN};
     std::array<Ref<ID3D11Resource>,2> motion_{}; // upscale mode: this frame's motion vectors per eye (from the TAA dispatch)
     static thread_local Ref<ID3D11Resource> pass_source_,pass_target_; // upscale draw seen in this post-tonemap pass; defined after the class: clang-cl needs Ref's member initializers complete
+    static thread_local InputDiagnostics pass_input_;
+    std::mutex input_diagnostics_mutex_;
+    std::array<InputDiagnostics,2> input_diagnostics_{};
+    std::uint64_t input_diagnostics_sequence_{};
     std::array<Candidate,4> candidates_{};std::mutex candidate_mutex_;
     std::atomic<UINT> wanted_w_{},wanted_h_{};
     std::atomic<DXGI_FORMAT> wanted_native_format_{DXGI_FORMAT_UNKNOWN};
     std::atomic<std::uint64_t> reset_epoch_{};
     Config config_;
+    void invalidate_history_locked() {
+        ++reset_epoch_;
+        for(auto& eye:*eyes_) {eye.reset=true;eye.last={};}
+        for(auto& motion:motion_) motion.reset();
+    }
     // DLSS backend state, guarded by mutex_. One feature pair (both eyes) per render/output size and format. Every
     // function below is a noexcept boundary: an escaping exception becomes the FSR 3 fallback (dlss_guarded), never
     // std::terminate inside the game's command stream.
@@ -428,12 +449,39 @@ public:
         ID3D11RenderTargetView* rtv{};c->OMGetRenderTargets(1,&rtv,nullptr);
         ID3D11Resource* t{};if(rtv) {rtv->GetResource(&t);rtv->Release();}
         pass_target_.reset(t);if(t) t->Release();
+        // Keep the last bind's metadata with the same TLS resources consumed
+        // by post_tonemap_end. No GPU queries, staging resources or readback.
+        InputDiagnostics observed{};observed.valid=true;
+        observed.tick_ms=GetTickCount64();observed.generation=reset_epoch_.load();
+        if(const auto reader=input_frame_reader.load(std::memory_order_relaxed))observed.owner_frame=reader();
+        observed.context=reinterpret_cast<std::uintptr_t>(c);observed.context_type=static_cast<UINT>(c->GetType());
+        observed.source=reinterpret_cast<std::uintptr_t>(pass_source_.p);observed.target=reinterpret_cast<std::uintptr_t>(pass_target_.p);
+        if(PostTonemapPass::pass_metadata) {observed.native_counter_known=true;observed.native_counter=PostTonemapPass::pass_metadata->counter;}
+        D3D11_SHADER_RESOURCE_VIEW_DESC srv{};views[0]->GetDesc(&srv);observed.srv_dimension=static_cast<UINT>(srv.ViewDimension);
+        if(srv.ViewDimension==D3D11_SRV_DIMENSION_TEXTURE2D) {observed.most_detailed_mip=srv.Texture2D.MostDetailedMip;observed.mip_count=srv.Texture2D.MipLevels;}
+        else if(srv.ViewDimension==D3D11_SRV_DIMENSION_TEXTURE2DARRAY) {observed.most_detailed_mip=srv.Texture2DArray.MostDetailedMip;observed.mip_count=srv.Texture2DArray.MipLevels;}
+        Ref<ID3D11Texture2D> texture;
+        if(pass_source_.p && SUCCEEDED(pass_source_.p->QueryInterface(__uuidof(ID3D11Texture2D),reinterpret_cast<void**>(&texture.p)))) {
+            D3D11_TEXTURE2D_DESC d{};texture.p->GetDesc(&d);observed.source_texture2d=true;
+            observed.source_width=d.Width;observed.source_height=d.Height;observed.source_mips=d.MipLevels;observed.source_array_size=d.ArraySize;observed.source_format=static_cast<UINT>(d.Format);
+        }
+        observed.viewport_count=1;c->RSGetViewports(&observed.viewport_count,&observed.viewport);
+        observed.scissor_count=1;c->RSGetScissorRects(&observed.scissor_count,&observed.scissor);
+        Ref<ID3D11RasterizerState> rasterizer;c->RSGetState(&rasterizer.p);observed.rasterizer_known=true;
+        if(rasterizer.p) {D3D11_RASTERIZER_DESC d{};rasterizer.p->GetDesc(&d);observed.scissor_enabled=d.ScissorEnable;}
+        pass_input_=observed;
     }
     // Post-tonemap pass end (job thread): split after the upscale draw; FSR runs between prefix and remainder.
     void post_tonemap_end(int eye,ID3D11DeviceContext* c) {
         // This match is diagnostic only; missing optional metadata must not alter FSR.
         if(temporal_eye::diagnostic_capture_enabled.load(std::memory_order_relaxed) && eye>=0 && eye<2) (void)dlss_post_motion_matches(static_cast<unsigned>(eye),PostTonemapPass::pass_metadata);
         Ref<ID3D11Resource> source,target;source.reset(pass_source_.p);target.reset(pass_target_.p);pass_source_.reset();pass_target_.reset();
+        const auto observed=pass_input_;pass_input_={};
+        if(eye>=0 && eye<2 && c && observed.valid && observed.context==reinterpret_cast<std::uintptr_t>(c) &&
+           observed.source==reinterpret_cast<std::uintptr_t>(source.p) && observed.target==reinterpret_cast<std::uintptr_t>(target.p)) {
+            std::lock_guard<std::mutex> lock(input_diagnostics_mutex_);
+            auto receipt=observed;receipt.sequence=++input_diagnostics_sequence_;input_diagnostics_[static_cast<unsigned>(eye)]=receipt;
+        }
         if(fraction.load()>=.999f || !enabled.load() || eye<0 || eye>1 || !c || !source.p || !target.p) return;
         if(!ready.load()) {++upscale_skipped;return;}
         auto job=std::make_unique<Job>();job->fraction=fraction.load();job->epoch=reset_epoch_.load();
@@ -462,9 +510,28 @@ public:
         } else {slot->first=c;slot->second=std::move(job);}
     }
     // The TAA dispatch publishes the jitter/fov FSR must use for this eye's frame.
+    InputDiagnostics input_diagnostics(unsigned side) {
+        if(side>=2)return {};
+        std::lock_guard<std::mutex> lock(input_diagnostics_mutex_);return input_diagnostics_[side];
+    }
     std::array<std::atomic<float>,2> last_jitter_x{},last_jitter_y{},last_vfov{};
     void configure(const Config& c) {std::lock_guard<std::mutex> lock(mutex_);config_=c;}
-    void request_reset() {std::lock_guard<std::mutex> lock(mutex_);++reset_epoch_;for(auto& e:*eyes_) e.reset=true;}
+    void request_reset() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        // A post-tonemap pass after a rejected TAA dispatch must not reuse the
+        // previous scene's motion vectors when gameplay or XR resumes.
+        invalidate_history_locked();
+    }
+    bool fallback_current(ID3D11DeviceContext* context,int eye,const TaaBindings& bindings) {
+        if(eye<0 || eye>1) return false;
+        std::lock_guard<std::mutex> lock(mutex_);
+        // A previously sealed job may execute before this fallback's remainder.
+        // Revoke it, preserving its prefix, so it cannot clear the new reset.
+        // Jobs share an epoch: both eye histories are invalidated together.
+        invalidate_history_locked();
+        if(!bindings.copy_current(context)) return false;
+        ++fallback_copies;return true;
+    }
     // Any thread, from depth-stencil clears: count clears per depth target (no device calls).
     void observe_depth(ID3D11DepthStencilView* dsv,ID3D11DeviceContext* context=nullptr,UINT flags=0,FLOAT depth=0,UINT8 stencil=0) noexcept {
         if(!dsv || !enabled.load(std::memory_order_relaxed)) return;
@@ -872,4 +939,5 @@ public:
 };
 inline thread_local FsrTaa::Ref<ID3D11Resource> FsrTaa::pass_source_{};
 inline thread_local FsrTaa::Ref<ID3D11Resource> FsrTaa::pass_target_{};
+inline thread_local FsrTaa::InputDiagnostics FsrTaa::pass_input_{};
 } // namespace d2vr

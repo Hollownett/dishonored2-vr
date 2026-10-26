@@ -2,6 +2,7 @@
 #include "native_hud_art_probe.hpp"
 #include "interaction_ray.hpp"
 #include "native_crosshair.hpp"
+#include "native_prompt_entry.hpp"
 #include <atomic>
 #include <mutex>
 
@@ -11,7 +12,8 @@ struct NativeHudChildScope {
     NativeHudChildKind kind{};std::uintptr_t file{},iggy{},node{},owner{};UINT64 epoch{},tick{};
     std::array<float,6> matrix{};std::array<float,4> bounds{};bool matrix_valid{},bounds_valid{};
     NativeInteractionTargetIdentity target{};
-    bool talk_offer{},panel_prompt{};
+    bool talk_offer{},panel_prompt{},prompt_event_pending{};std::uint64_t prompt_ticket{};
+    std::optional<native_prompt_entry::Receipt> retained_entry{};
 };
 inline bool native_hud_talk_glyph_context(const NativeHudChildScope* scope) noexcept {
     return scope && (scope->kind==NativeHudChildKind::prompt ||
@@ -20,7 +22,9 @@ inline bool native_hud_talk_glyph_context(const NativeHudChildScope* scope) noex
 inline bool native_hud_child_same_identity(const NativeHudChildScope& a,const NativeHudChildScope& b) noexcept {
     return a.kind!=NativeHudChildKind::none && a.kind==b.kind && a.file==b.file && a.iggy==b.iggy &&
         a.node==b.node && a.owner==b.owner && a.epoch && a.epoch==b.epoch &&
-        (a.kind!=NativeHudChildKind::prompt || a.target==b.target); // a sticky prompt root has no target on either side
+        (a.retained_entry && b.retained_entry?native_prompt_entry::same_source(*a.retained_entry,*b.retained_entry):
+            !a.retained_entry && !b.retained_entry) &&
+        (a.kind!=NativeHudChildKind::prompt || a.retained_entry || a.target==b.target);
 }
 // A committed image may authorize flat suppression only for this exact target
 // and pose generation. Current native observation and artwork age are bounded
@@ -138,12 +142,17 @@ public:
     // the prompt's object, so the prompt is captured as world art beside that hand instead of joining the panel.
     inline static std::atomic<std::uintptr_t> eye_node{}; // Hint only; never ownership proof.
     // The in-game Crosshair switch: the eye node is still drawn (and placed), with a zero linear part. Set every frame by the render thread.
-    inline static std::atomic<bool> crosshair_hidden{};
+    inline static std::atomic<bool> crosshair_hidden{},crosshair_composed{};
     // Paired stereo draws the UI once per eye (left first): the callback answers the glyph's extra translation for the n-th eye-node draw
     // of the frame (n counts from 0 after begin_frame), nullopt for none.
     using EyeShift=std::optional<std::array<float,2>> (*)(unsigned eye_draw_index) noexcept;
     inline static std::atomic<EyeShift> eye_shift{};
     inline static std::atomic<UINT64> crosshair_hidden_draws{},crosshair_eye_shifts{},crosshair_unlayouts{};
+    // Observation only: gate/busy, owner/movie mismatch, no callback, native
+    // binding, file/recent-Draw, backlinks, tree, exception.
+    inline static std::array<std::atomic<UINT64>,8> eye_rejects{};
+    inline static std::atomic<UINT64> setup_eye_checks{},setup_eye_passes{};
+
     // The movie root (scale, tx, ty) as last seen at the top of the HUD movie, readable from any thread.
     inline static std::atomic<float> root_scale_pub{},root_tx_pub{},root_ty_pub{};
     inline static void publish_root(const std::array<float,6>& m) noexcept {
@@ -162,6 +171,23 @@ public:
 private:
     struct EyeBinding {std::uintptr_t node,file;NativeCrosshair::Binding owner;};
     inline static EyeBinding eye_binding_{};
+    inline static std::mutex eye_diagnostics_mutex_;
+    // Per reason: tick,frame,owner snapshot tick,element,Iggy,file,node.
+    inline static std::array<std::array<UINT64,7>,8> eye_last_{};
+    static void reject_eye(unsigned reason) noexcept {const EyeBinding empty{};reject_eye(reason,empty);}
+    static void reject_eye(unsigned reason,const EyeBinding& binding) noexcept {
+        ++eye_rejects[reason];
+        if(!eye_diagnostics_mutex_.try_lock())return;
+        eye_last_[reason]={GetTickCount64(),frame_.load(),binding.owner.tick,binding.owner.element,binding.owner.iggy,binding.file,binding.node};
+        eye_diagnostics_mutex_.unlock();
+    }
+public:
+    static std::optional<std::array<std::array<UINT64,7>,8>> eye_diagnostics() noexcept {
+        if(!eye_diagnostics_mutex_.try_lock())return {};
+        const auto out=eye_last_;eye_diagnostics_mutex_.unlock();return out;
+    }
+private:
+
     // Per displayed frame the exact-eye node is validated against the live engine once (the owner binding, the file/iggy back-links and the
     // tree walk are many engine reads), and every further child draw of that frame is answered from eye_ok_. begin_frame(0) (the default) turns
     // the cache off. Publishing or clearing the binding, or an answer older than eye_ok_max_age_ms, drops it.
@@ -170,9 +196,9 @@ private:
     inline static std::atomic<std::uintptr_t> eye_ok_iggy_{},eye_ok_node_{};
     inline static constexpr UINT64 eye_ok_max_age_ms=50;
     static std::uintptr_t live_eye_node(void* iggy) noexcept {
-        if(!active_.load() || !read_ || !mutex_.try_lock())return 0;
+        if(!active_.load() || !read_ || !mutex_.try_lock()) {reject_eye(0);return 0;}
         const auto b=eye_binding_;mutex_.unlock();
-        if(!b.node || b.owner.iggy!=reinterpret_cast<std::uintptr_t>(iggy))return 0;
+        if(!b.node || b.owner.iggy!=reinterpret_cast<std::uintptr_t>(iggy)) {reject_eye(1,b);return 0;}
         const auto frame=frame_.load(std::memory_order_relaxed);const auto tick=GetTickCount64();
         if(frame && eye_ok_frame_.load(std::memory_order_acquire)==frame && eye_ok_gen_.load(std::memory_order_relaxed)==eye_gen_.load(std::memory_order_acquire) &&
            eye_ok_iggy_.load(std::memory_order_relaxed)==b.owner.iggy && tick>=eye_ok_tick_.load(std::memory_order_relaxed) &&
@@ -191,12 +217,15 @@ private:
     }
     static std::uintptr_t validated_eye_node(const EyeBinding& b,UINT64 tick) noexcept {
         const auto live=eye_live.load();
-        if(!live || !live(b.owner,tick))return 0;
+        if(!live) {reject_eye(2,b);return 0;}
+        if(!live(b.owner,tick)) {reject_eye(3,b);return 0;}
         try {
-            if(!wrist_hud_file_owned(read_,base_,b.file) || rig::value<std::uintptr_t>(read_,b.file+0x1608)!=b.owner.iggy ||
-               rig::value<std::uintptr_t>(read_,b.owner.iggy+0x78)!=b.file || !NativeHudArtProbe::in_tree(read_,b.owner.iggy,b.node))return 0;
+            if(!wrist_hud_file_owned(read_,base_,b.file)) {reject_eye(4,b);return 0;}
+            if(rig::value<std::uintptr_t>(read_,b.file+0x1608)!=b.owner.iggy ||
+               rig::value<std::uintptr_t>(read_,b.owner.iggy+0x78)!=b.file) {reject_eye(5,b);return 0;}
+            if(!NativeHudArtProbe::in_tree(read_,b.owner.iggy,b.node)) {reject_eye(6,b);return 0;}
             return b.node;
-        } catch(...) {return 0;}
+        } catch(...) {reject_eye(7,b);return 0;}
     }
 public:
     static bool publish_eye(std::uintptr_t node,const NativeCrosshair::Binding& owner) noexcept {
@@ -205,6 +234,14 @@ public:
         {std::lock_guard<std::mutex> lock(mutex_);eye_binding_={node,file,owner};eye_node=node;eye_gen_.fetch_add(1,std::memory_order_release);}
         if(live_eye_node(reinterpret_cast<void*>(owner.iggy))==node)return true;
         clear_eye();return false;
+    }
+    static bool has_live_eye() noexcept {
+        ++setup_eye_checks;
+        if(!mutex_.try_lock()) {reject_eye(0);return false;}
+        const auto owner=eye_binding_.owner;mutex_.unlock();
+        const bool owned=owner.iggy && live_eye_node(reinterpret_cast<void*>(owner.iggy))!=0;
+        if(owned)++setup_eye_passes;
+        return owned;
     }
     static void clear_eye() noexcept {std::lock_guard<std::mutex> lock(mutex_);eye_binding_={};eye_node=0;eye_gen_.fetch_add(1,std::memory_order_release);}
     // Render thread, once per displayed frame (0 = no caching).
@@ -249,6 +286,7 @@ private:
     inline static constexpr std::uintptr_t rva=0x1037930;
     inline static constexpr std::array<unsigned char,29> prologue{0x48,0x8b,0xc4,0x55,0x53,0x56,0x57,0x41,0x54,0x41,0x55,0x41,0x56,0x41,0x57,0x48,0x8d,0xa8,0xa8,0xfc,0xff,0xff,0x48,0x81,0xec,0x18,0x04,0x00,0x00};
     inline static std::uintptr_t base_{};inline static Read read_{};inline static Draw original_{};
+    inline static bool prompt_entry_abi_{};
     inline static void* target_{};inline static std::atomic<bool> active_{};inline static std::atomic<unsigned> depth_{};
     inline static std::mutex mutex_;inline static std::array<NativeHudChildScope,40> bindings_{};
     inline static NativeInteractionTargetIdentity prompt_target_{};inline static UINT64 prompt_target_tick_{};inline static bool prompt_talk_{};
@@ -261,6 +299,24 @@ private:
         NativeHudChildScope out{};if(current || !active_.load() || !mutex_.try_lock())return out;
         const auto now=GetTickCount64();
         for(auto& binding:bindings_) if(binding.kind!=NativeHudChildKind::none && binding.iggy==reinterpret_cast<std::uintptr_t>(iggy) && binding.node==reinterpret_cast<std::uintptr_t>(node)) {
+            if(binding.kind==NativeHudChildKind::prompt && binding.retained_entry) {
+                // Add/Gauge owns an entity source independently of whichever
+                // hand is hovered now. Only this exact child Draw renews its
+                // scope; it never changes the timestamp of an older image.
+                const auto retained=prompt_entry_abi_?native_prompt_entry::refresh(read_,base_,*binding.retained_entry):std::nullopt;
+                if(retained) {
+                    binding.retained_entry=retained;out=binding;out.tick=now;
+                    out.talk_offer=binding.target && binding.target==prompt_target_ && prompt_talk_ &&
+                        prompt_target_tick_ && now>=prompt_target_tick_ && now-prompt_target_tick_<=250;
+                    break;
+                }
+                // A pending Add cannot authorize a Draw before the native
+                // code has changed pending1 to active4. Missing/removing or
+                // reused entries retire immediately, without rebinding.
+                if(!prompt_entry_abi_ || !native_prompt_entry::refresh(read_,base_,*binding.retained_entry,false) ||
+                   !binding.tick || now<binding.tick || now-binding.tick>250)binding={};
+                continue;
+            }
             const bool live_prompt=binding.kind==NativeHudChildKind::prompt && binding.target && binding.target==prompt_target_ &&
                 prompt_target_tick_ && now>=prompt_target_tick_ && now-prompt_target_tick_<=250;
             if(live_prompt || (now>=binding.tick && now-binding.tick<=250)){out=binding;if(live_prompt)out.tick=now;out.talk_offer=live_prompt && prompt_talk_;break;}
@@ -393,7 +449,7 @@ private:
             if(scaled && eye_layout_scale_!=1.f) {scaled=native_crosshair_unlayout(glyph,eye_layout_scale_,eye_layout_centre_);if(scaled)++crosshair_unlayouts;}
             if(scaled)scaled=native_crosshair_glyph_scale(glyph,hud_scale.load(std::memory_order_relaxed));
             const unsigned eye_draw=eye_draws_.fetch_add(1,std::memory_order_relaxed);
-            if(crosshair_hidden.load(std::memory_order_relaxed)) {native_crosshair_hide(glyph);scaled=true;++crosshair_hidden_draws;} // read failed: a zero matrix is invisible too
+            if(crosshair_hidden.load(std::memory_order_relaxed) || crosshair_composed.load(std::memory_order_relaxed)) {native_crosshair_hide(glyph);scaled=true;++crosshair_hidden_draws;} // read failed: a zero matrix is invisible too
             else if(scaled)
                 if(const auto shift=eye_shift.load(std::memory_order_relaxed))
                     if(const auto extra=shift(eye_draw)) {glyph[4]+=(*extra)[0];glyph[5]+=(*extra)[1];++crosshair_eye_shifts;}
@@ -486,7 +542,52 @@ private:
         return result;
     }
 public:
-    static bool publish(NativeHudChildKind kind,const NativeHudArtGeometry& geometry,std::uintptr_t owner,UINT64 epoch,UINT64 tick,NativeInteractionTargetIdentity target={}) {
+    // A new native event supersedes the artwork of this exact node. Unknown
+    // event ownership returns its pixels to the established HUD panel path.
+    static void retire_prompt_node(std::uintptr_t iggy,std::uintptr_t node) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        for(auto& binding:bindings_)if(binding.iggy==iggy && binding.node==node &&
+            (binding.kind==NativeHudChildKind::prompt || binding.kind==NativeHudChildKind::panel))binding={};
+        for(auto& root:prompt_roots_)if(root.iggy==iggy && root.node==node)root={};
+    }
+    // Native Remove may name another label in the same InteractionWindow.
+    // Retire only the exact removed source; the compound window (including
+    // its native hold gauge) remains captured through the existing node.
+    static void clear_prompt_entry(std::uintptr_t element,std::uint32_t key) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        for(auto& binding:bindings_)if(binding.kind==NativeHudChildKind::prompt && binding.retained_entry &&
+            binding.retained_entry->element==element && binding.retained_entry->key==key)binding={};
+    }
+    static bool has_retained_prompt(UINT64 epoch,UINT64 tick) {
+        if(!active_.load() || !epoch || !tick || !read_ || !prompt_entry_abi_)return false;
+        std::lock_guard<std::mutex> lock(mutex_);
+        for(auto& binding:bindings_)if(binding.kind==NativeHudChildKind::prompt && binding.retained_entry &&
+            binding.epoch==epoch && binding.tick && tick>=binding.tick &&
+            wrist_hud_file_owned(read_,base_,binding.file) && rig::value<std::uintptr_t>(read_,binding.file+0x1608)==binding.iggy &&
+            NativeHudArtProbe::in_tree(read_,binding.iggy,binding.node)) {
+            if(const auto retained=native_prompt_entry::refresh(read_,base_,*binding.retained_entry)) {
+                binding.retained_entry=retained;return true;
+            }
+        }
+        return false;
+    }
+    // Last-good artwork may be held only while its exact native source is
+    // still bound. A same-node event for another key supersedes that source.
+    // This check observes ownership; it never renews an image or scope tick.
+    static bool scope_current(const NativeHudChildScope& scope,UINT64 epoch,UINT64 tick) {
+        if(!active_.load() || !epoch || !tick || !read_ || scope.epoch!=epoch)return false;
+        std::lock_guard<std::mutex> lock(mutex_);
+        for(const auto& binding:bindings_)if(native_hud_child_same_identity(binding,scope) && binding.tick && tick>=binding.tick &&
+            wrist_hud_file_owned(read_,base_,binding.file) && rig::value<std::uintptr_t>(read_,binding.file+0x1608)==binding.iggy &&
+            NativeHudArtProbe::in_tree(read_,binding.iggy,binding.node)) {
+            if(binding.retained_entry)return prompt_entry_abi_ && native_prompt_entry::refresh(read_,base_,*binding.retained_entry).has_value();
+            const bool live_prompt=binding.kind==NativeHudChildKind::prompt && binding.target && binding.target==prompt_target_ &&
+                prompt_target_tick_ && tick>=prompt_target_tick_ && tick-prompt_target_tick_<=250;
+            return live_prompt || tick-binding.tick<=250;
+        }
+        return false;
+    }
+    static bool publish(NativeHudChildKind kind,const NativeHudArtGeometry& geometry,std::uintptr_t owner,UINT64 epoch,UINT64 tick,NativeInteractionTargetIdentity target={},bool prompt_event_pending=false,std::uint64_t prompt_ticket=0,std::optional<native_prompt_entry::Receipt> retained_entry={}) {
         auto reject=[] {++publish_rejects;return false;};
         if(kind==NativeHudChildKind::prompt && read_ && owner && geometry.display_node && wrist_hud_file_owned(read_,base_,geometry.file) &&
            rig::value<std::uintptr_t>(read_,geometry.file+0x1608)==geometry.iggy && NativeHudArtProbe::in_tree(read_,geometry.iggy,geometry.display_node)) {
@@ -497,15 +598,19 @@ public:
         }
         if(!read_ || kind==NativeHudChildKind::none || !owner || !geometry.display_node || (geometry.fields&31)!=31 || !geometry.visible ||
            (kind==NativeHudChildKind::prompt && target && target.epoch!=epoch) ||
+           (retained_entry && (kind!=NativeHudChildKind::prompt || owner!=retained_entry->element || !prompt_entry_abi_ ||
+               !native_prompt_entry::refresh(read_,base_,*retained_entry,false))) ||
            !wrist_hud_file_owned(read_,base_,geometry.file) || rig::value<std::uintptr_t>(read_,geometry.file+0x1608)!=geometry.iggy || !NativeHudArtProbe::in_tree(read_,geometry.iggy,geometry.display_node))return reject();
         std::lock_guard<std::mutex> lock(mutex_);NativeHudChildScope* free{};
         for(auto& binding:bindings_){if(binding.kind==kind && binding.owner==owner){free=&binding;break;}
-            if(!free && (binding.kind==NativeHudChildKind::none || binding.epoch!=epoch || (tick>=binding.tick && tick-binding.tick>250)))free=&binding;}
+            if(!free && (binding.kind==NativeHudChildKind::none || binding.epoch!=epoch || (tick>=binding.tick && tick-binding.tick>250 &&
+                !(binding.kind==NativeHudChildKind::prompt && binding.retained_entry && prompt_entry_abi_ &&
+                    native_prompt_entry::refresh(read_,base_,*binding.retained_entry)))))free=&binding;}
         if(kind==NativeHudChildKind::health || kind==NativeHudChildKind::mana || kind==NativeHudChildKind::equipment || kind==NativeHudChildKind::objective) {
             bool known=false;for(unsigned i=0;i<widget_count_;++i)known=known || (widget_nodes_[i]==geometry.display_node && widget_iggy_[i]==geometry.iggy);
             if(!known){const unsigned at=widget_next_++%static_cast<unsigned>(widget_nodes_.size());widget_nodes_[at]=geometry.display_node;widget_iggy_[at]=geometry.iggy;widget_count_=std::min<unsigned>(widget_count_+1,static_cast<unsigned>(widget_nodes_.size()));}
         }
-        if(!free)return reject();*free={kind,geometry.file,geometry.iggy,geometry.display_node,owner,epoch,tick};free->target=target;++publish_accepts;return true;
+        if(!free)return reject();*free={kind,geometry.file,geometry.iggy,geometry.display_node,owner,epoch,tick};free->target=target;free->prompt_event_pending=kind==NativeHudChildKind::prompt && prompt_event_pending;free->prompt_ticket=prompt_ticket;free->retained_entry=retained_entry;++publish_accepts;return true;
     }
     static void clear() {std::lock_guard<std::mutex> lock(mutex_);eye_binding_={};eye_node=0;eye_gen_.fetch_add(1,std::memory_order_release);bindings_={};prompt_roots_={};prompt_target_={};prompt_target_tick_=0;prompt_talk_=false;takedown_={};takedown_tick_=0;widget_nodes_={};widget_iggy_={};widget_count_=widget_next_=0;}
     // Producer: the NPC the native takedown sensor qualified this frame (empty = none).
@@ -521,28 +626,48 @@ public:
             (binding.kind==NativeHudChildKind::health || binding.kind==NativeHudChildKind::mana || binding.kind==NativeHudChildKind::equipment) &&
             NativeHudArtProbe::in_tree(read_,iggy,binding.node)) {binding.epoch=epoch;binding.tick=tick;}
     }
-    // Authorize only the current same target; the exact child Draw renews its
-    // observed scope. A movie Draw alone does not prove fresh prompt artwork.
-    static void refresh_prompt(std::uintptr_t file,std::uintptr_t iggy,UINT64 epoch,UINT64 tick,NativeInteractionTargetIdentity target,bool exact_talk_offer=false) {
+    // Component-owned events require their current same target. Retained-entry
+    // events follow that native source instead. Only the exact child Draw
+    // renews the observed scope; a movie Draw cannot renew captured pixels.
+    static void refresh_prompt(std::uintptr_t file,std::uintptr_t iggy,UINT64 epoch,UINT64 tick,NativeInteractionTargetIdentity target,bool exact_talk_offer=false,NativePromptCompletions completions={}) {
         if(!epoch || !tick || !read_ || !wrist_hud_file_owned(read_,base_,file) || rig::value<std::uintptr_t>(read_,file+0x1608)!=iggy)return;
         std::lock_guard<std::mutex> lock(mutex_);
         prompt_target_=target && target.epoch==epoch?target:NativeInteractionTargetIdentity{};prompt_target_tick_=tick;prompt_talk_=static_cast<bool>(prompt_target_) && exact_talk_offer;
-        for(auto& binding:bindings_) if(binding.kind==NativeHudChildKind::prompt &&
-            (binding.file!=file || binding.iggy!=iggy || binding.epoch!=epoch || (binding.target && binding.target!=prompt_target_)))binding={};
+        for(auto& binding:bindings_) if(binding.kind==NativeHudChildKind::prompt) {
+            if(binding.file!=file || binding.iggy!=iggy || binding.epoch!=epoch) {binding={};continue;}
+            if(binding.retained_entry) {
+                const auto retained=prompt_entry_abi_?native_prompt_entry::refresh(read_,base_,*binding.retained_entry,false):std::nullopt;
+                if(retained)binding.retained_entry=retained;else binding={};
+                continue;
+            }
+            // The event records its exact in-flight stage0 ticket. That
+            // invocation's immutable result owns the art, even if other
+            // queries complete before Draw. Fresh child capture is still required.
+            if(binding.prompt_event_pending) {
+                if(!binding.tick || tick<binding.tick || tick-binding.tick>250) {binding={};continue;}
+                const auto completed=completions.get(binding.prompt_ticket);
+                if(!completed.sequence) {binding={};continue;} // exact invocation was evicted/unknown
+                if(completed.completed) {
+                    if(completed.target && completed.target.epoch==epoch && completed.target==prompt_target_) {
+                        binding.target=completed.target;binding.prompt_event_pending=false;
+                    } else binding={}; // rejected/empty completion consumes its own event
+                }
+            } else if(binding.target && binding.target!=prompt_target_)binding={};
+        }
     }
     static bool install(std::uintptr_t base,Read read) noexcept {
-        if(!base || !read)return false;base_=base;read_=read;
+        if(!base || !read)return false;base_=base;read_=read;prompt_entry_abi_=native_prompt_entry::verified_abi(read_,base_);
         if(!target_){std::array<unsigned char,prologue.size()> live{};if(!read(base+rva,live.data(),live.size()) || live!=prologue)return false;
             target_=reinterpret_cast<void*>(base+rva);if(MH_CreateHook(target_,reinterpret_cast<void*>(&hook),reinterpret_cast<void**>(&original_))!=MH_OK){target_=nullptr;return false;}}
         const auto status=MH_EnableHook(target_);active_=status==MH_OK || status==MH_ERROR_ENABLED;return active_.load();
     }
     static bool disable() noexcept {
-        cpu_profile=nullptr;eye_live=nullptr;eye_shift=nullptr;crosshair_hidden=false;root_scale_pub=0.f;clear_eye();active_=false;transform=nullptr;begin=nullptr;end=nullptr;observer=nullptr;hud_movie=nullptr;tutorial_movie=nullptr;panel_movie=nullptr;tutorial_epoch=0;hud_layout_node=nullptr;hud_scale=1.f;panel_active=false;panel_generic=false;hud_file=0;eye_node=0;prompt_world=false;
+        cpu_profile=nullptr;eye_live=nullptr;eye_shift=nullptr;crosshair_hidden=false;crosshair_composed=false;root_scale_pub=0.f;clear_eye();active_=false;transform=nullptr;begin=nullptr;end=nullptr;observer=nullptr;hud_movie=nullptr;tutorial_movie=nullptr;panel_movie=nullptr;tutorial_epoch=0;hud_layout_node=nullptr;hud_scale=1.f;panel_active=false;panel_generic=false;hud_file=0;eye_node=0;prompt_world=false;
         if(!target_)return true;const auto result=MH_DisableHook(target_);if(result!=MH_OK && result!=MH_ERROR_DISABLED)return false;
         const auto until=GetTickCount64()+2000;while(depth_ && GetTickCount64()<until)Sleep(1);if(depth_)return false;clear();return true;
     }
     // Fixtures execute the exact pass-through hook against an injected original.
-    static void fixture(Read read,std::uintptr_t base,Draw original) {read_=read;base_=base;original_=original;active_=true;clear();}
+    static void fixture(Read read,std::uintptr_t base,Draw original,bool trusted_prompt_entry_abi=false) {read_=read;base_=base;original_=original;prompt_entry_abi_=trusted_prompt_entry_abi;active_=true;clear();}
     static std::uint32_t invoke_fixture(void* iggy,float* matrix,void* node,void* aux,void* p5,void* p6,std::uint32_t clip,float depth){return hook(iggy,matrix,node,aux,p5,p6,clip,depth);}
 };
 } // namespace d2vr

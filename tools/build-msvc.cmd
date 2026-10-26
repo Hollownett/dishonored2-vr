@@ -248,7 +248,7 @@ if not errorlevel 0 goto build_failed
 build\temporal_eye_job_check.exe
 if errorlevel 1 goto build_failed
 if not errorlevel 0 goto build_failed
-for %%T in (aa_first_start_check finger_ik_check finger_touch_curl_check grip_pose_blend_check finger_wants_stack_check finger_probe_cache_check finger_snapshot_check prop_watch_check hand_contact_check anatomical_world_contact_check sword_flight_check vr_settings_native_check game_art_check held_release_check throw_gesture_check gadget_aim_check gun_equip_name_check bink_video_check cutscene_skip_check letterbox_gate_check layer_ledger_check native_takedown_range_check native_slash_speed_check native_use_los_anchor_check calibrated_body_anchor_check body_ik_check reverse_grip_check weapon_hold_start_check native_use_fetch_completion_check native_interaction_install_order_check native_interaction_stop_check native_block_eligibility_check motion_sword_check game_xr_motion_check native_grab_lifetime_check frame_timing_queue_check native_grab_sequence_check native_grab_obstruction_check glyph_swap_async_check glyph_swap_gpu_check avatar_fit_reuse_check xr_floor_datum_check native_torso_fit_check avatar_geometry_fit_check native_pose_pipeline_check native_readable_range_check native_guarded_call_check native_crosshair_check native_art_movie_patch_check synchronized_observer_check wheel_avatar_check native_action_camera_check native_use_order_check loot_prompt_take_check loot_hand_los_check native_hand_volume_check body_renderer_check native_hud_art_probe_check native_hud_child_draw_check native_hud_child_capture_check native_wrist_art_publisher_check native_marker_child_binding_check native_art_bounds_check native_ui_layout_check full_body_driver_check native_interaction_range_check release_depen_check probe_producer_check native_attachment_pose_check native_fire_seam_trace_check native_hud_fallback_check game_xr_wrist_recovery_check render_perf_cpu_check render_perf_gpu_check left_weapon_render_receipt_check native_hip_visibility_check native_character_gaze_check sword_contact_policy_check render_perf_gpu_loss_check y_hold_check attack_intent_check takedown_prompt_size_check takedown_range_policy_check xr_frame_hardening_check arm_flicker_check aa_first_start_check grab_intent_buffer_check grip_decision_check native_rigid_body_bounds_check living_npc_hold_check arm_flicker_check) do (
+for %%T in (eye_reticle_check eye_reticle_gpu_check aa_first_start_check finger_ik_check finger_touch_curl_check grip_pose_blend_check finger_wants_stack_check finger_probe_cache_check finger_snapshot_check prop_watch_check hand_contact_check anatomical_world_contact_check sword_flight_check vr_settings_native_check game_art_check held_release_check throw_gesture_check gadget_aim_check gun_equip_name_check bink_video_check cutscene_skip_check letterbox_gate_check layer_ledger_check native_takedown_range_check native_slash_speed_check native_use_los_anchor_check calibrated_body_anchor_check body_ik_check reverse_grip_check weapon_hold_start_check native_use_fetch_completion_check native_interaction_install_order_check native_interaction_stop_check native_interaction_sphere_check hand_sphere_selection_check native_prompt_entry_check native_prompt_placement_check native_weapon_receipt_check native_block_eligibility_check motion_sword_check game_xr_motion_check native_grab_lifetime_check frame_timing_queue_check native_grab_sequence_check native_grab_obstruction_check glyph_swap_async_check glyph_swap_gpu_check avatar_fit_reuse_check xr_floor_datum_check native_torso_fit_check avatar_geometry_fit_check native_pose_pipeline_check native_readable_range_check native_guarded_call_check native_crosshair_check native_art_movie_patch_check synchronized_observer_check wheel_avatar_check native_action_camera_check native_use_order_check loot_prompt_take_check loot_hand_los_check native_hand_volume_check body_renderer_check native_hud_art_probe_check native_hud_child_draw_check native_hud_child_capture_check native_wrist_art_publisher_check native_marker_child_binding_check native_art_bounds_check native_ui_layout_check full_body_driver_check native_interaction_range_check release_depen_check probe_producer_check native_attachment_pose_check native_fire_seam_trace_check native_hud_fallback_check game_xr_wrist_recovery_check render_perf_cpu_check render_perf_gpu_check left_weapon_render_receipt_check native_hip_visibility_check native_character_gaze_check sword_contact_policy_check render_perf_gpu_loss_check y_hold_check attack_intent_check takedown_prompt_size_check takedown_range_policy_check xr_frame_hardening_check arm_flicker_check aa_first_start_check grab_intent_buffer_check grip_decision_check native_rigid_body_bounds_check living_npc_hold_check arm_flicker_check) do (
     cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT /Ithird_party\minhook\include /Ithird_party\openxr\include tests\%%T.cpp /Fo:build\%%T.obj /Fe:build\%%T.exe /link user32.lib gdi32.lib Xinput9_1_0.lib d3d11.lib dxgi.lib d3dcompiler.lib
     if errorlevel 1 goto build_failed
     if not errorlevel 0 goto build_failed
@@ -257,6 +257,9 @@ for %%T in (aa_first_start_check finger_ik_check finger_touch_curl_check grip_po
     if not errorlevel 0 goto build_failed
 )
 python tests\native_interaction_range_abi_check.py
+if errorlevel 1 goto build_failed
+if not errorlevel 0 goto build_failed
+python tests\native_prompt_route_check.py
 if errorlevel 1 goto build_failed
 if not errorlevel 0 goto build_failed
 python tests\combat_live_status_routing_check.py
@@ -383,6 +386,9 @@ python tests\alt_pose_trace_check.py
 if errorlevel 1 goto build_failed
 if not errorlevel 0 goto build_failed
 python tests\layer_pose_sync_routing_check.py
+if errorlevel 1 goto build_failed
+if not errorlevel 0 goto build_failed
+python tests\xr_recovery_routing_check.py
 if errorlevel 1 goto build_failed
 if not errorlevel 0 goto build_failed
 build\comfort_meter_check.exe
@@ -550,6 +556,10 @@ for %%M in (geometry fresh stale source throw) do (
 cl /nologo /std:c++17 /EHsc /W4 /WX /O2 /MT /Ithird_party\minhook\include tests\native_taa_history_check.cpp /Fo:build\native_taa_history_check.obj /Fe:build\native_taa_history_check.exe
 if not "%errorlevel%"=="0" exit /b 1
 build\native_taa_history_check.exe
+if not "%errorlevel%"=="0" exit /b 1
+cl /nologo /std:c++17 /EHsc /W4 /WX /O2 /MT /Ithird_party\minhook\include tests\taa_spatial_fallback_check.cpp /Fo:build\taa_spatial_fallback_check.obj /Fe:build\taa_spatial_fallback_check.exe /link d3d11.lib
+if not "%errorlevel%"=="0" exit /b 1
+build\taa_spatial_fallback_check.exe
 if not "%errorlevel%"=="0" exit /b 1
 cl /nologo /std:c++17 /EHsc /W4 /WX /O2 /MT tests\native_rigid_body_check.cpp /Fo:build\native_rigid_body_check.obj /Fe:build\native_rigid_body_check.exe
 if not "%errorlevel%"=="0" exit /b 1

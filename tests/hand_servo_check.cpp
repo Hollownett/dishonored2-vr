@@ -47,6 +47,44 @@ int main() {
             }
             if(root_gate) {CHECK(peak<.001);CHECK(ff_low>5.99);CHECK(old_peak>.10);}
             else old_peak=peak;
+            std::printf("sprint swing: root gate %d, cyclic error %.6f m, minimum feedforward %.6f m/s\n",root_gate?1:0,peak,ff_low);
+        }
+    }
+    {   // The root gate must retain the same translation invariance at walking
+        // speed and while strafing, including a 90 Hz target consumed at 180 Hz.
+        // Only player motion is aged; hand motion retains its original sample.
+        for(const double speed:{1.4,6.}) for(const Vec3 direction:{Vec3{1,0,0},Vec3{0,1,0}}) {
+            HandServoState moving{},rest{};HandServoConfig cfg;GrabTuning tuning;
+            auto world=pose({}),local=pose({});Vec3 world_v{},local_v{};double peak=0;
+            const double dt=1./180.;
+            for(unsigned i=0;i<1800;++i) {
+                const double now=i*dt,sampled=(i/2)*(2*dt),age=now-sampled;
+                const Vec3 root=direction*(speed*sampled),actual_root=direction*(speed*now);
+                const auto hand=pose(direction*(.12*std::sin(sampled*10)));
+                auto target=hand;target.position=target.position+root;
+                const auto a=servo_step(moving,target,world,world_v,{},0,dt,1,cfg,tuning,false,kDefaultHeldLever,
+                    direction*speed,age,root);
+                const auto b=servo_step(rest,hand,local,local_v,{},0,dt,1,cfg,tuning,false);
+                world_v=a.linear;local_v=b.linear;
+                if(i>360)peak=std::max(peak,length((world.position-actual_root)-local.position));
+                world.position=world.position+world_v*dt;local.position=local.position+local_v*dt;
+            }
+            std::printf("root gate sampled motion: speed %.1f m/s, strafe %d, relative error %.6f m\n",speed,direction.y!=0?1:0,peak);
+            CHECK(peak<.001);
+        }
+    }
+    {   // No player motion: supplying the stationary root cannot change the
+        // accepted hand response or introduce a new hand-motion filter.
+        HandServoState with_root{},without_root{};HandServoConfig cfg;GrabTuning tuning;
+        auto body=pose({});Vec3 velocity{};
+        for(unsigned i=0;i<500;++i) {
+            const auto target=pose({.12*std::sin(i*.07),.08*std::cos(i*.11),.05*std::sin(i*.13)});
+            const auto a=servo_step(with_root,target,body,velocity,{},0,1./90,1,cfg,tuning,false,kDefaultHeldLever,{},0,Vec3{});
+            const auto b=servo_step(without_root,target,body,velocity,{},0,1./90,1,cfg,tuning,false,kDefaultHeldLever,{},0);
+            CHECK(std::memcmp(&a.linear,&b.linear,sizeof(Vec3))==0);
+            CHECK(std::memcmp(&a.angular,&b.angular,sizeof(Vec3))==0);
+            CHECK(a.valid==b.valid && a.snap==b.snap && a.capped==b.capped && a.gap==b.gap);
+            velocity=a.linear;body.position=body.position+velocity*(1./90);
         }
     }
     {   // The publication clock uses elapsed time, even when force/snap integration caps a slow frame.

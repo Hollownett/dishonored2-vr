@@ -83,7 +83,12 @@ static void run(ID3D11Device* device,ID3D11DeviceContext* context,float fraction
     check(provider.empty() && dlss.empty(),"The archived baseline has no FSR4 or DLSS backend");
 #endif
     std::printf("fraction %.2f resources created\n",fraction);
-    fsr->observe_depth(dsv.Get());check(!fsr->replace(deferred.Get(),0,b,1.6f,0,0),"unprepared pass keeps native TAA");fsr->prepare(device);
+    fsr->observe_depth(dsv.Get());check(!fsr->replace(deferred.Get(),0,b,1.6f,0,0),"unprepared pass declines temporal replacement");
+#ifndef D2VR_FSR_BASELINE
+    for(int side=0;side<2;++side) check(fsr->fallback_current(deferred.Get(),side,b),"first eye passes copy current colour until contexts are ready");
+    check(fsr->fallback_copies==2,"both initial eyes avoid native shared TAA");
+#endif
+    fsr->prepare(device);
     check(fsr->ready,"FSR prepared");d2vr::TaaDispatchHook::finish_original=&finish;std::puts("contexts prepared");
 
     d2vr::GpuPassTimer timer;check(timer.prepare(device),"GPU timestamp queries");
@@ -274,6 +279,31 @@ static void run(ID3D11Device* device,ID3D11DeviceContext* context,float fraction
         measured.total_ms,cpu_total_ms,cpu_total_ms/samples,static_cast<unsigned long long>(pixel_hash),static_cast<unsigned long long>(w)*h*4);
     if(actual100) std::printf("output_format=%u CPU_FSR4_record_eye_mean_ms=[%.6f,%.6f] CPU_FSR4_handoff_eye_mean_ms=[%.6f,%.6f]\n",
         static_cast<unsigned>(output_format),cpu_record_ms[0]/samples,cpu_record_ms[1]/samples,cpu_handoff_ms[0]/samples,cpu_handoff_ms[1]/samples);
+#ifndef D2VR_FSR_BASELINE
+    const auto resets_left=fsr->eye_resets[0].load(),resets_right=fsr->eye_resets[1].load();
+    fsr->request_reset();pair(100);settle_pair();
+    check(fsr->eye_resets[0]==resets_left+1 && fsr->eye_resets[1]==resets_right+1,"scene/XR discontinuity resets both eye histories");
+    if(fraction>=.999f) {
+        // A is already sealed for execution. The same context's second TAA
+        // dispatch B cannot split again and records a spatial fallback in A's
+        // remainder. A must not consume/clear B's reset when executed later.
+        const auto stale_before=fsr->stale_jobs.load(),dispatch_before=fsr->eye_dispatches[0].load();
+        const auto reset0=fsr->eye_resets[0].load(),reset1=fsr->eye_resets[1].load();
+        deferred->ClearDepthStencilView(dsv.Get(),D3D11_CLEAR_DEPTH,.05f,0);
+        check(fsr->replace(deferred.Get(),0,b,1.6f,0,0),"queue first native temporal split");
+        check(!fsr->replace(deferred.Get(),0,b,1.6f,0,0),"duplicate split must decline without losing its prefix");
+        check(fsr->fallback_current(deferred.Get(),0,b),"duplicate dispatch records current-eye fallback");
+        Ptr<ID3D11CommandList> remainder;
+        check(SUCCEEDED(deferred->FinishCommandList(TRUE,&remainder)),"finish fallback remainder");
+        fsr->finished(deferred.Get(),remainder.Get());
+        check(fsr->execute(context,remainder.Get(),FALSE,&execute),"execute queued prefix and fallback remainder");
+        check(fsr->stale_jobs==stale_before+1 && fsr->eye_dispatches[0]==dispatch_before,
+            "queued temporal dispatch must not consume a later spatial fallback's reset");
+        pair(101);settle_pair();
+        check(fsr->eye_resets[0]==reset0+1 && fsr->eye_resets[1]==reset1+1,
+            "first accepted pair after queued fallback resets both invalidated histories");
+    }
+#endif
     fsr->clear();
 }
 int main(int argc,char** argv) {

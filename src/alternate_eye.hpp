@@ -107,6 +107,10 @@ inline AlternateReadiness alternate_present_readiness(bool have_slot, unsigned m
 // The consecutive-miss counter behind the perf-mono-view fallback. Only a frame PLANNED as one view (alternated) and not ready counts as a miss;
 // a ready frame, or a paired frame (menu, cutscene, doffed headset), resets it, so a long non-alternating stretch never disables the mode.
 inline unsigned alternate_miss_count(unsigned misses, bool planned_single, bool ready) noexcept {return ready || !planned_single ? 0u : misses + 1u;}
+// An intentional runtime retirement/backoff has no eye observation to judge.
+inline bool alternate_miss_observation_allowed(bool session_ready,bool retiring,bool retry_pending) noexcept {
+    return session_ready && !retiring && !retry_pending;
+}
 
 // True when an image kept at `rendered_frame` may still be submitted at displayed frame `now`.
 inline bool alternate_image_fresh(std::uint64_t rendered_frame, std::uint64_t now) noexcept {
@@ -140,7 +144,7 @@ private:
 };
 
 // One-view rendering needs qualified per-eye native history, previous matrices/position and jitter before Game TAA is allowed.
-// Upscalers additionally require the diagnostic opt-in until their actual alternate-eye output is accepted.
+// Upscalers additionally honor the performance-mode AA feature switch. Native ownership is required in every temporal mode.
 inline int alternate_effective_temporal(bool alternate_on, int requested,bool native_taa=false,bool upscalers=false) noexcept {
     return alternate_on ? (native_taa && (requested==1 || upscalers)?requested:0) : requested;
 }

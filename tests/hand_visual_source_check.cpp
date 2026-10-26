@@ -20,6 +20,42 @@ struct Rig {
 };
 }
 int main() {
+    {   // Walking and sprinting leave the standing body through the same 150 ms source transition.
+        for(double speed:{1.4,2.,3.49,3.5,3.51,4.,7.}) {
+            Rig r;r.in.body=pose_at(.015);CHECK(r.run(.5).source==VisualSource::body);
+            r.in.player_speed=speed;r.in.clamp=r.in.controller=pose_at(.2);r.in.body=pose_at(.02);
+            auto o=r.step();CHECK(o.source==VisualSource::clamp && o.blending && o.changed);
+            CHECK(near(o.drawn.position.x,.215) && o.body_weight>0);
+            o=r.run(.2);CHECK(o.source==VisualSource::clamp && !o.blending && bit_equal(o.drawn,r.in.clamp));
+            // Crossing the former sprint threshold never switches between controller and clamp.
+            for(int frame=0;frame<90;++frame) {
+                r.in.player_speed=frame%2?3.49:7.;
+                r.in.clamp=r.in.controller=pose_at(.2+(frame+1)*speed/90);
+                r.in.body=pose_at(r.in.clamp.position.x-.2);
+                o=r.step(0,true,frame%2?.033:.023);
+                CHECK(o.source==VisualSource::clamp && bit_equal(o.drawn,r.in.clamp) && !o.changed && !o.blending);
+            }
+            r.in.player_speed=0;r.in.body=r.in.clamp;
+            CHECK(r.run(.3).source==VisualSource::body); // stopping retains the existing standing agreement rule
+        }
+    }
+    {   // Contact, clamp displacement, anchor and yield keep their ownership at every locomotion speed.
+        for(double speed:{1.4,3.5,7.}) for(int guard=0;guard<6;++guard) {
+            Rig r;r.in.player_speed=speed;r.in.controller=r.in.clamp=pose_at(.2);r.in.body=pose_at(.15);
+            if(guard==0)r.in.clamp_contact=true;
+            if(guard==1){r.in.body_contact=true;r.in.world_hit_near=true;}
+            if(guard==2)r.in.clamp=pose_at(.18);
+            if(guard==3)r.in.anchor=Vec3{.25,0,0};
+            if(guard==4)r.in.yield=true;
+            if(guard==5)r.in.body_behind_surface=true;
+            const auto o=r.run(.5);
+            if(guard<2)CHECK(o.source==VisualSource::body && near(o.drawn.position.x,.15));
+            if(guard==2)CHECK(o.source==VisualSource::clamp && bit_equal(o.drawn,r.in.clamp));
+            if(guard==3)CHECK(o.source==VisualSource::anchor && near(o.drawn.position.x,.25));
+            if(guard==4)CHECK(o.source==VisualSource::controller);
+            if(guard==5)CHECK(o.source==VisualSource::clamp);
+        }
+    }
     {   // moving_free_air_draws_clamp: speed 3, the body agrees with the clamp pose (gap .01) but nothing touches: the clamp output is drawn
         Rig r;r.in.body=pose_at(.01);r.in.player_speed=3;const auto o=r.run(.5);
         CHECK(o.source==VisualSource::clamp && bit_equal(o.drawn,r.in.clamp));

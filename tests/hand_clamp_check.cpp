@@ -99,7 +99,7 @@ struct Rig {
     std::vector<std::uintptr_t> loose;         // ClampInput::loose
     Vec3 kick{};                               // ClampInput::kick
     std::optional<std::uintptr_t> exclude;     // ClampInput::exclude
-    ClampOutput last{};bool have_last=false;int holds=0;   // frames held so far
+    ClampOutput last{};bool have_last=false,strict_answers=false;int holds=0;   // frames held so far
     explicit Rig(HandClampConfig c={}) : clamp(c) {
         if(g_mode) post=[phase=static_cast<unsigned>(g_mode-1)](unsigned f) {return (f&1u)==phase;};
     }
@@ -109,12 +109,14 @@ struct Rig {
     ClampOutput step_pose(const WorldTrackedPose& target,bool yield=false) {
         ClampInput in{};
         in.now=now();in.epoch=epoch;in.root=root;in.target=target;in.chest=world.chest;
+        in.strict_answers=strict_answers;
         in.tip=tip;in.tip_enabled=tip_enabled;in.wall_tip=wall_tip;in.yield=yield;in.post=!post || post(frame);
         for(const auto e:loose) if(in.loose_count<ClampInput::loose_capacity) in.loose[in.loose_count++]=e;
         in.kick=kick;
         in.exclude=exclude;
         for(const auto& probe:hand) if(in.hand_count<ClampInput::hand_capacity) in.hand[in.hand_count++]=probe;
         if(have_last) {
+            if(strict_answers) {in.answer_ids=last.request_ids;if(drop_palm && drop_palm(frame))in.answer_ids[0]=0;}
             const auto slot0=world.cast(last.palm_sweep);
             if(last.state==ClampState::released) in.chest_hit=slot0;
             else if(!(drop_palm && drop_palm(frame))) in.palm_hit=slot0;
@@ -362,6 +364,197 @@ void walk_and_turn_carry() {
         previous_root=r.root;previous_target=target;previous_drawn=o.drawn.position;
     }
     CHECK(r.clamp.snapbacks(0)==0);
+}
+
+// Root prediction covers recent render cadence at every locomotion speed. Acceleration can wait for a sweep;
+// steady running must not repeatedly freeze because a fixed 15 cm lead is shorter than one frame of travel.
+void variable_cadence_locomotion_carries_retained_hand() {
+    Rig r;r.world.wall_x=false;r.world.floor=false;
+    double clock=0,x=0;unsigned holds=0,steady_holds=0;
+    const double cadence[]{.011,.023,.033,.050};
+    for(unsigned frame=0;frame<200;++frame) {
+        const double h=cadence[frame%4],speed=frame<20?0:frame<60?1.4:frame<100?3.49:frame<150?7.:frame<170?2.:0;
+        clock+=h;x+=speed*h;r.t0=clock-r.frame*dt;
+        r.root=level_frame({x,0,.5},{1,0,0});r.world.chest=apply(r.root,{0,0,.4});
+        const auto target=apply(r.root,{.4,0,0});const auto o=r.step(target);holds+=o.held;
+        CHECK(!o.snapped && o.state==ClampState::free);
+        const bool steady=(frame>=28 && frame<60) || (frame>=68 && frame<100) || (frame>=108 && frame<150) || frame>=178;
+        if(steady) {steady_holds+=o.held;CHECK(close_to(o.drawn.position,target,1e-9));}
+    }
+    CHECK(steady_holds==0 && holds<=12 && r.clamp.snapbacks(0)==0);
+}
+
+// A controller-relative jump still waits for validation while the retained hand travels with the player.
+void moving_root_retains_controller_jump() {
+    Rig r;r.world.wall_x=false;r.world.floor=false;
+    r.post=[](unsigned) {return true;};
+    for(int frame=0;frame<6;++frame) {r.root.position.x=.1*frame;r.step({.4+.1*frame,0,.5});}
+    r.post=[](unsigned) {return false;}; // no new sweep may certify the transported fallback
+    r.root.position.x=.58;r.world.chest.x=.58;
+    auto o=r.step({.98,.3,.5});
+    CHECK(o.held && close_to(o.drawn.position,{.98,0,.5},1e-9));
+    r.root.position.x=.81;r.world.chest.x=.81;
+    o=r.step({1.21,.3,.5});
+    CHECK(o.held && close_to(o.drawn.position,{.98,0,.5},1e-9)); // transport cannot extend the older swept segment
+}
+
+// No known wall is not a clear cast: accelerate from rest toward an unseen surface at an ordinary sprint speed.
+void root_acceleration_does_not_cross_unseen_wall() {
+    for(bool strict:{false,true}) {
+        Rig r;r.world.floor=false;r.strict_answers=strict;
+        for(int frame=0;frame<5;++frame) r.step({.8,0,.5});
+        r.t0+=.030-dt;r.root.position.x=.21;r.world.chest.x=.21;
+        const auto first=r.step({1.01,0,.5});
+        CHECK(first.held && close_to(first.drawn.position,{.8,0,.5},1e-9));
+        for(int frame=0;frame<12;++frame) {
+            const auto o=r.step({1.01,0,.5});CHECK(o.drawn.position.x<=.945+1e-9 && !o.snapped);
+        }
+        CHECK(r.last.contact && r.last.contact->entity==7);
+    }
+}
+
+void strict_root_turn_and_discontinuity_need_world_proof() {
+    // New movement orthogonal to the predictor cannot borrow proof from the preceding straight corridor.
+    Rig r;r.strict_answers=true;r.world.wall_x=false;r.world.wall_y=true;r.world.floor=false;
+    for(int frame=0;frame<8;++frame) {r.root.position.x=.08*frame;r.step({.4+.08*frame,.8,.5});}
+    const double before=r.last.drawn.position.y;
+    r.root.position.y=.21;auto o=r.step({.4+r.root.position.x,1.01,.5});
+    CHECK(o.held && o.drawn.position.y<=before+1e-9);
+    for(int frame=0;frame<12;++frame) {o=r.step({.4+r.root.position.x,1.01,.5});CHECK(o.drawn.position.y<=.945+1e-9);}
+    // A spatial discontinuity retires root velocity; its query is not extended as if it were ordinary travel.
+    Rig jump;jump.strict_answers=true;jump.world.wall_x=false;jump.world.floor=false;
+    for(int frame=0;frame<8;++frame) {jump.root.position.x=.08*frame;jump.step({.4+.08*frame,0,.5});}
+    jump.root.position.x+=2;const auto target=apply(jump.root,{.4,0,.5});o=jump.step(target);
+    CHECK(o.held && o.drawn.position.x<target.x-1 && !o.validated);
+    if(o.palm_sweep.valid)CHECK(close_to(o.palm_sweep.to,target,1e-9));
+}
+
+// The engine may publish one root step across several render frames. A repeated pose must not erase locomotion
+// prediction. Cover the native 25.4 ms batch that reproduced the headset's ~17.8 cm sprint holds, and a 30 Hz root.
+void batched_root_publications_do_not_stutter() {
+    for(bool strict:{false,true}) for(double publication:{.0254,1./30}) for(double speed:{1.4,7.}) {
+        Rig r;r.world.wall_x=false;r.world.floor=false;r.strict_answers=strict;
+        double clock=0;unsigned steady_holds=0;
+        for(unsigned frame=0;frame<420;++frame) {
+            const double h=frame%3==0?.022:.011;clock+=h;r.t0=clock-r.frame*dt;
+            const double motion_time=std::min(clock,4.);
+            const double x=speed*std::floor(motion_time/publication)*publication;
+            r.root=level_frame({x,0,.5},{1,0,0});r.world.chest=apply(r.root,{0,0,.4});
+            const auto target=apply(r.root,{.4,0,0});const auto o=r.step(target);
+            if(frame>40) {steady_holds+=o.held;CHECK(close_to(o.drawn.position,target,1e-9));}
+            // A retained predictor may post ahead after a stop; it never moves the real drawn target ahead.
+            CHECK(o.drawn.position.x<=target.x+1e-9 && !o.snapped);
+        }
+        CHECK(steady_holds==0);
+        for(int frame=0;frame<12;++frame) r.step(apply(r.root,{.4,0,0}));
+        CHECK(r.last.palm_sweep.valid==r.posting());
+        if(r.last.palm_sweep.valid)CHECK(close_to(r.last.palm_sweep.to,r.last.drawn.position,1e-9));
+    }
+}
+
+// Strict receipts distinguish no completion from an answered clear cast and bind delayed A to A's geometry,
+// even after the render thread posted B. A later release/reset/overflow must never recycle that proof.
+void strict_receipts_bind_geometry_and_generation() {
+    HandClamp clamp;ClampInput in{};in.strict_answers=true;in.epoch=1;in.root=level_frame({},{1,0,0});
+    in.chest={0,0,1};in.target=pose_at({.4,0,.5});
+    const auto step=[&]() {in.now+=dt;auto o=clamp.update(0,in);clamp.note_drawn(0,in.root,o.drawn.position);return o;};
+    const auto a=step();CHECK(a.request_ids[0] && a.reacquired);
+    in.target.position.x=.8;auto b=step();CHECK(b.held && !b.validated && !b.palm_answered);
+    in.answer_ids[0]=a.request_ids[0];auto o=step();
+    CHECK(o.chest_answered && !o.palm_answered && o.held && !o.validated && close_to(o.drawn.position,{.4,0,.5},1e-9));
+    // A duplicate A (even with a different supplied hit) is not a new result or a source of a new plane.
+    in.palm_hit=ClampHit{{.1,0,.5},{-1,0,0},77};o=step();CHECK(!o.chest_answered && !o.palm_answered);
+    std::array<ClampHit,HandClamp::max_held_planes> planes{};CHECK(clamp.held_planes(0,planes)==0);
+    in.palm_hit.reset();in.answer_ids[0]=0;
+    for(int frame=0;frame<5;++frame) {o=step();CHECK(o.held && !o.validated);}
+    in.answer_ids[0]=b.request_ids[0];o=step();CHECK(o.palm_answered && o.validated && !o.held && close_to(o.drawn.position,in.target.position,1e-9));
+    in.answer_ids[0]=~std::uint64_t{};o=step();CHECK(!o.palm_answered && !o.chest_answered);
+    clamp.reset(0);in.answer_ids[0]=b.request_ids[0];in.palm_hit=ClampHit{{.1,0,.5},{-1,0,0},77};
+    o=step();CHECK(o.reacquired && o.request_ids[0]>b.request_ids[0]);
+    o=step();CHECK(!o.palm_answered && !o.chest_answered && clamp.held_planes(0,planes)==0);
+    // Eviction drops proof safely instead of interpreting the old receipt against the latest request geometry.
+    const auto evicted=o.request_ids[0];in.palm_hit.reset();in.answer_ids={};
+    for(int frame=0;frame<70;++frame)o=step();
+    in.answer_ids[0]=evicted;o=step();CHECK(!o.palm_answered && !o.chest_answered && o.held && !o.validated);
+    // StartProbe replaces the complete object while native answer storage survives in the process.
+    const auto previous_session=o.request_ids[0];clamp=HandClamp{};in.answer_ids[0]=previous_session;
+    o=step();CHECK(o.reacquired && o.request_ids[0]>previous_session);
+    o=step();CHECK(!o.palm_answered && !o.chest_answered);
+}
+
+void strict_auxiliary_receipts_and_chest_rearm() {
+    HandClamp clamp;ClampInput in{};in.strict_answers=true;in.epoch=1;in.root=level_frame({},{1,0,0});
+    in.chest={0,0,1};in.target=pose_at({.4,0,.5});in.tip={{.09,0,0},.035};
+    const auto step=[&]() {in.now+=dt;auto o=clamp.update(0,in);clamp.note_drawn(0,in.root,o.drawn.position);return o;};
+    auto a=step();auto b=step();CHECK(b.request_ids[1]);
+    in.target.position.x=.8;in.tip.local.x=.3;in.answer_ids[1]=b.request_ids[1];
+    in.tip_hit=ClampHit{{.6,0,.5},{-1,0,0},88};auto o=step();
+    CHECK(!o.palm_answered && !o.chest_answered);
+    CHECK(std::abs(clamp.keep_out(0,in.target.basis,{.8,0,.5},std::nullopt).x-.47)<1e-9); // original .09 probe, not new .3
+    in.tip_hit=ClampHit{{.2,0,.5},{-1,0,0},99};o=step();
+    std::array<ClampHit,HandClamp::max_held_planes> planes{};auto count=clamp.held_planes(0,planes);
+    CHECK(count==1 && planes[0].entity==88); // duplicate tip completion cannot insert a different hit
+
+    clamp.reset(0);in.answer_ids={};in.tip_hit.reset();in.target.position.x=.4;a=step();
+    in.answer_ids[0]=a.request_ids[0];in.palm_hit=ClampHit{in.chest,{0,0,1},7,0,true};o=step();
+    CHECK(o.state==ClampState::released && o.chest_answered);
+    const auto old_chest=o.request_ids[0];in.answer_ids={};in.palm_hit.reset();
+    for(int frame=0;frame<15;++frame) {o=step();CHECK(o.state==ClampState::released && !o.chest_answered);}
+    for(int frame=0;frame<20 && o.state==ClampState::released;++frame) {in.answer_ids[0]=o.request_ids[0];o=step();}
+    CHECK(o.state!=ClampState::released);
+    in.answer_ids[0]=old_chest;in.palm_hit=ClampHit{in.chest,{0,0,1},7,0,true};o=step();
+    CHECK(!o.chest_answered && o.state!=ClampState::released); // a late old chest result cannot release the rearmed palm
+}
+
+// Render and game dispatch have independent clocks. Game takes A, render posts B, then A completes; at 90/30 Hz
+// the reply's age must inform future query coverage while each reply keeps its original geometric identity.
+void strict_async_game_cadence_covers_batched_root() {
+    for(unsigned game_stride:{1u,3u}) for(double publication:{.0254,1./30}) for(double speed:{1.4,7.}) {
+        HandClamp clamp;ClampOutput last{};std::array<std::uint64_t,4> taken{};
+        unsigned completion=~0u,holds=0;double clock=0;
+        for(unsigned frame=0;frame<600;++frame) {
+            clock+=frame%3==0?.022:.011;
+            const double x=speed*std::floor(clock/publication)*publication;
+            ClampInput in{};in.strict_answers=true;in.now=clock;in.epoch=1;
+            in.root=level_frame({x,0,.5},{1,0,0});in.target=in.root;in.target.position.x+=.4;in.chest={x,0,.9};
+            // One completed clear cast with exact request IDs, or no answer at all. A newer render post must not
+            // replace the in-flight game's submitted request while that game is answering it.
+            if(frame==completion)in.answer_ids=taken;
+            if(frame%game_stride==0) {taken=last.request_ids;completion=frame+1;}
+            last=clamp.update(0,in);clamp.note_drawn(0,in.root,last.drawn.position);
+            if(frame>40) {holds+=last.held;CHECK(last.validated && close_to(last.drawn.position,in.target.position,1e-9));}
+        }
+        CHECK(holds==0);
+    }
+}
+
+// One clear answer authorizes its fixed swept region, not an unlimited chain of small movements. Native replies
+// can stop entirely while render continues posting; cached-segment tolerance must never migrate with the hand.
+void strict_small_steps_cannot_self_renew_proof() {
+    HandClamp clamp;ClampInput in{};in.strict_answers=true;in.epoch=1;in.root=level_frame({},{1,0,0});
+    in.chest={0,0,1};in.target=pose_at({.4,0,.5});
+    const auto step=[&]() {in.now+=dt;auto o=clamp.update(0,in);clamp.note_drawn(0,in.root,o.drawn.position);return o;};
+    const auto a=step();in.answer_ids[0]=a.request_ids[0];auto o=step();CHECK(o.chest_answered && o.validated);
+    in.answer_ids={};unsigned held=0;
+    for(unsigned frame=1;frame<=200;++frame) {
+        in.target.position.x=.4+.01*frame;o=step();held+=o.held;
+        if(frame<=4)CHECK(o.validated && !o.held); // retain the existing bounded tolerance around the answered segment
+        CHECK(o.drawn.position.x<=.45+1e-9 && !o.palm_answered && !o.chest_answered);
+    }
+    CHECK(held>150 && o.held && !o.validated);
+}
+
+// Transport is constrained by unchanged world planes, including when old sweeps cannot cover the new target.
+void moving_root_hold_keeps_world_wall() {
+    Rig r;
+    for(int frame=0;frame<5;++frame) r.step({.5,0,.5});
+    r.move_x({.5,0,.5},1.2,2.,ignore);
+    for(int frame=0;frame<12;++frame) r.step({1.2,0,.5});
+    CHECK(r.last.contact && r.last.contact->entity==7);
+    const double before=r.last.drawn.position.x;
+    r.root.position.x=.23;r.world.chest.x=.23;
+    const auto o=r.step({1.43,.3,.5});
+    CHECK(o.held && o.drawn.position.x<=.945+1e-9 && std::abs(o.drawn.position.x-before)<=1e-9);
 }
 
 // Walking arm-first into a wall at 5 m/s: the one-frame-late result must already cover the body's motion. The body
@@ -1693,6 +1886,10 @@ void refuted_touched_plane_gives_its_slot() {
 }
 
 int main() {
+    strict_receipts_bind_geometry_and_generation();
+    strict_auxiliary_receipts_and_chest_rearm();
+    strict_async_game_cadence_covers_batched_root();
+    strict_small_steps_cannot_self_renew_proof();
     // Corner, slide, hold, jump and walk tests run in every posting mode, with the same bounds.
     for(g_mode=0;g_mode<3;++g_mode) {
         sweep_starts_at_previous_drawn();
@@ -1701,6 +1898,12 @@ int main() {
         grazing_slides();
         fast_approach_late_results();
         walk_and_turn_carry();
+        variable_cadence_locomotion_carries_retained_hand();
+        moving_root_retains_controller_jump();
+        root_acceleration_does_not_cross_unseen_wall();
+        batched_root_publications_do_not_stutter();
+        strict_root_turn_and_discontinuity_need_world_proof();
+        moving_root_hold_keeps_world_wall();
         walk_into_wall_5ms();
         corner_slide_3ms();
         fast_wall_slide_no_stutter();

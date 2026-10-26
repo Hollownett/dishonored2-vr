@@ -15,6 +15,15 @@ GripAloneInput input(std::optional<PalmTarget> native,std::optional<FocusScore> 
 }
 }
 int main() {
+    { // A grip-only prop grab uses the complete hand sphere, not the former 10cm gate.
+        GrabTuning tuning;GripAloneInput in;in.native_fresh=true;in.probe=hand_sphere_probe({});
+        in.physical=FocusScore{42,PalmKind::prop,.20,0.,.20,0x1234};
+        assert(decide_grip_alone(in,tuning,.25)==GripAloneChoice::grab);
+        in.physical->distance=.26;in.now_ms=1000;assert(decide_grip_alone(in,tuning,.25)!=GripAloneChoice::grab);
+        in.physical->distance=.20;in.physical->kind=PalmKind::bone;
+        assert(decide_grip_alone(in,tuning,.25)!=GripAloneChoice::grab);
+    }
+
     const GrabTuning t;const double hover=t.hover_radius_m;
     {   // loot_wins_use: a coin the palm is on (0.03 m, loot 0.8) against a prop 0.08 m ahead
         const auto coin=box(1,PalmKind::loot,{.06,0,.015},.01,t);const auto prop=physical(box(2,PalmKind::prop,{.13,0,.015},.05,t));
@@ -33,8 +42,8 @@ int main() {
         auto living=prop;living.kind=PalmKind::living;   // ruling H6: an awake NPC's bone is a grab too
         assert(decide_grip_alone(input(table,living),t,hover)==GripAloneChoice::grab);
     }
-    {   // prop_at_013_is_not_grip_alone: 0.13 m is outside the 0.12 m gate (a fist's 0.45 m gate takes it); nothing else: the H1 buffer, then use
-        const auto prop=physical(box(7,PalmKind::prop,{.18,0,.015},.05,t));assert(std::abs(prop.distance-.13)<1e-9);
+    {   // Outside the hand sphere: buffer the press, then use; entering the sphere catches it.
+        const auto prop=physical(box(7,PalmKind::prop,{.31,0,.015},.05,t));assert(std::abs(prop.distance-.26)<1e-9);
         assert(decide_grip_alone(input(std::nullopt,prop,1050),t,hover)==GripAloneChoice::pending);
         assert(decide_grip_alone(input(std::nullopt,prop,1150),t,hover)==GripAloneChoice::use);
         const auto on=physical(box(8,PalmKind::prop,{.145,0,.015},.05,t));   // H1: a prop reaching 0.10 m inside the window is caught
