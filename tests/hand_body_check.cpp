@@ -568,14 +568,14 @@ WorldTrackedPose pose_at(Vec3 p) {WorldTrackedPose w;w.position=p;w.basis={Vec3{
 struct DriveRig {
     FakeDrive w;HandBody hb{w.engine()};double t=10;std::uint64_t ms=1000;
     std::array<Vec3,2> target{Vec3{.4,.2,1.2},Vec3{.4,-.2,1.2}};std::array<bool,2> free{true,true},yield{false,false};
-    std::optional<Vec3> root{};Vec3 player_velocity{};bool locomotion=false;bool gameplay=true;std::array<bool,2> holding{false,false},hold_snap_ok{false,false};
+    bool root_gate=false;std::optional<Vec3> root{};Vec3 player_velocity{};bool locomotion=false;bool gameplay=true;std::array<bool,2> holding{false,false},hold_snap_ok{false,false};
     void tick(int drives_per_side=1) {
         w.log.push_back("tick");
         std::array<std::optional<Vec3>,2> spawn{};
         for(unsigned side=0;side<2;++side) if(free[side]) spawn[side]=target[side];
         hb.service(gameplay_in(ms,gameplay),spawn);
         for(int k=0;k<drives_per_side;++k) for(unsigned side=0;side<2;++side) {
-            DriveInput d;d.side=side;d.target=pose_at(target[side]);d.now=t;d.yield=yield[side];d.target_free=free[side];d.player_root=root;d.locomotion=locomotion;d.player_velocity=player_velocity;d.holding=holding[side];d.hold_snap_ok=hold_snap_ok[side];
+            DriveInput d;d.side=side;d.target=pose_at(target[side]);d.now=t;d.yield=yield[side];d.target_free=free[side];d.player_root=root;d.locomotion=locomotion;d.player_velocity=player_velocity;d.root_feedforward_gate=root_gate;d.holding=holding[side];d.hold_snap_ok=hold_snap_ok[side];
             hb.drive(d);
         }
         w.step();t+=FakeDrive::dt;ms+=11;
@@ -811,6 +811,15 @@ static void b14_checks() {
             (use?gap_with:gap_without)=r.hb.drive_status(0).gap_m;   // the gap the last drive saw
         }
         CHECK(gap_with<=.03);CHECK(gap_without>=.15);
+    }
+    {   // The production HandBody drive passes the root gate into the servo, including root-only stops.
+        HandBodyFault::reset_for_tests();DriveRig r;r.tick();r.tick();r.root_gate=true;r.player_velocity={6,0,0};
+        for(int i=0;i<150;++i) {r.root=Vec3{6*i*FakeDrive::dt,0,0};r.target[0]=*r.root;r.target[1]=*r.root;r.tick();}
+        CHECK(r.hb.drive_status(0).root_gate && r.hb.drive_status(0).feedforward_mps>5.9);
+        for(int i=0;i<30;++i) {r.target[0].x+=.01;r.target[1].x+=.01;r.tick();}
+        CHECK(r.hb.drive_status(0).root_gate && r.hb.drive_status(0).feedforward_mps<.01);
+        r.free[0]=false;r.tick();CHECK(r.hb.drive_status(0).root_gate); // no fresh free-space verdict is not confirmed contact
+        r.root_gate=false;r.tick();CHECK(!r.hb.drive_status(0).root_gate); // runtime disables the experiment on confirmed contact
     }
     {   // drive_dt_is_real_interval: dt is the time since this side's last drive, not the dispatcher's interval; a clock that does not
         // advance writes nothing; a long gap (a hitch) is clamped by the servo, not refused

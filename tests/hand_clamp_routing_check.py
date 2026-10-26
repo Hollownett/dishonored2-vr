@@ -14,6 +14,10 @@ def between(source: str, start: str, end: str, after: int = 0) -> str:
 
 def check(dxgi: str, aim: str) -> None:
     s = compact(dxgi)
+    # Aim rollback must not change the accepted v613 gun holster/draw tracking.
+    assert 'constautomodel=left_barrel_model.load();' in s
+    assert 'left_gun_model=!state->carrying&&state->slots[0]&&(by_name||by_item)?gun_model_of(state->slots[0]):0;' in s
+    assert 'left_barrel_model=d2vr::is_barrel_equip_name(n)?left_gun_model.load():0;' in s
     # The publication block, from the tracked poses to the arm IK feed.
     pub = between(s, 'raw_grips=hands.grips;', 'hands.has_finger_curls=false;')
     clamp = between(pub, 'if(weapon_collision_enabled&&!authored_camera){', 'publish_hand(side,')
@@ -242,6 +246,7 @@ if __name__ == '__main__':
     check(dxgi, aim)
     # Negative mutations: each breaks one routing rule and must be rejected.
     dxgi_mutations = (
+        ('const auto model=left_barrel_model.load();', 'const auto model=left_gun_model.load();'),
         ('publish_hand(side,hands.grips[side],raw_grips[side]);', 'publish_hand(side,hands.grips[side],hands.grips[side]);'),
         ('note_grip(side,raw_grips[side],hands.curls[side]);', 'note_grip(side,hands.grips[side],hands.curls[side]);'),
         ('const auto& p=raw_grips[side].position;reach_hands[side]=', 'const auto& p=hands.grips[side].position;reach_hands[side]='),

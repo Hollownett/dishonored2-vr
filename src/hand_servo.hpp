@@ -22,7 +22,7 @@ struct HandServoConfig {double gain=18,max_speed=10,max_spin=20,brake_accel=40,j
 // v613 item 6: the target's velocity for the feedforward gate is measured over a time window (win_*: the instants the target changed, on the servo's own
 // clock) instead of over the tick-quantised interval between two changes, which aliased with the render/dispatch beat (up to 14 cm of swing at 6 m/s).
 struct HandServoState {Vec3 filtered_accel{};double gap_time{};bool has{};Vec3 prev_ff{},tgt_prev{},tgt_vel{};double tgt_acc{},tgt_dt{};unsigned tgt_still{};bool tgt_has{},tgt_vel_ok{};   // prev_ff/tgt_*: Fix B's stop handling
-                       std::array<Vec3,12> win_p{};std::array<double,12> win_t{};unsigned win_n{};double clock{},latest{};};
+                       std::array<Vec3,12> win_p{};std::array<double,12> win_t{};unsigned win_n{};double clock{},latest{};bool root_gate{};};
 // build/legacy-run-gate (read once at install): the v612 interval-based target velocity and its proportional gate.
 inline std::atomic<bool> hand_servo_legacy_gate{false};
 struct HandServoOutput {Vec3 linear{},angular{};bool capped{};bool snap{};double gap{};bool valid{};};
@@ -65,7 +65,7 @@ inline Vec3 limited(Vec3 v,double m) {double n=length(v);return n>m?v*(m/n):v;}
 }
 
 inline HandServoOutput servo_step(HandServoState& st,const WorldTrackedPose& target,const WorldTrackedPose& body,Vec3 body_velocity,Vec3 body_spin,
-    double held_kg,double dt,double time_factor,const HandServoConfig& cfg,const GrabTuning& tuning,bool target_blocked,double held_lever=kDefaultHeldLever,Vec3 feedforward={},double target_age=std::numeric_limits<double>::quiet_NaN()) {
+    double held_kg,double dt,double time_factor,const HandServoConfig& cfg,const GrabTuning& tuning,bool target_blocked,double held_lever=kDefaultHeldLever,Vec3 feedforward={},double target_age=std::numeric_limits<double>::quiet_NaN(),std::optional<Vec3> player_root=std::nullopt) {
     using namespace hand_servo_detail;
     HandServoOutput out;
     Vec3 error=target.position-body.position;
@@ -76,6 +76,7 @@ inline HandServoOutput servo_step(HandServoState& st,const WorldTrackedPose& tar
     }
     GrabTuning t=tuning;   // X-9: unscaled caps, no extra mass floor
     t.strength_scale=1;t.mass_floor_kg=0;
+    const double elapsed=dt;
     dt=std::min(dt,t.dt_max);   // also the snap timer's dt: a 0.5 s hitch counts as dt_max toward snap_seconds (fails safe)
     // time_factor: unknown (NaN, <=0) is 1; otherwise [tf_min,1]. The loop runs in real-time units: the read-back velocities are divided by tf
     // (the body moves at the scaled velocity we wrote) and only the commanded output is multiplied by it.
@@ -91,6 +92,10 @@ inline HandServoOutput servo_step(HandServoState& st,const WorldTrackedPose& tar
     // No pose is smoothed: the target and the written pose are untouched.
     if(!finite(feedforward)||length(feedforward)>cfg.max_body_speed) feedforward={};
     const bool legacy_gate=hand_servo_legacy_gate.load(std::memory_order_relaxed);
+    const bool root_gate=!legacy_gate && player_root && finite(*player_root);
+    if(st.root_gate!=root_gate) {st.tgt_has=false;st.win_n=0;st.root_gate=root_gate;}
+    // A hand swung back against a sprint must not cut the player's feedforward.
+    const Vec3 gate_point=root_gate?*player_root:target.position;
     constexpr double win_s=.05,min_win_s=.03,gate_knee=.6;
     bool stopped=false;
     // v612 (legacy_gate): the target's velocity over the interval between two changes, counted in dispatcher ticks (dt accumulates per tick).
@@ -107,16 +112,16 @@ inline HandServoOutput servo_step(HandServoState& st,const WorldTrackedPose& tar
         // v613 item 6: the same questions on the publication timeline. A sample is (publication time, pose) at each change; the publication time is the
         // render thread's QPC stamp when the caller has one (target_age), else this tick's clock. So a target the dispatcher saw one tick late no longer
         // reads as slower (the quantisation behind v612's swing), and the velocity is the net displacement over >= 50 ms of changes.
-        st.clock+=dt;
+        st.clock+=elapsed;
         const double stamp=st.clock-(std::isfinite(target_age)?std::clamp(target_age,0.,.05):0.);
-        if(!st.tgt_has) {st.tgt_has=true;st.win_p[0]=target.position;st.win_t[0]=stamp;st.win_n=1;st.tgt_vel={};st.tgt_vel_ok=false;st.tgt_dt=0;st.tgt_still=0;st.latest=stamp;}
+        if(!st.tgt_has) {st.tgt_has=true;st.win_p[0]=gate_point;st.win_t[0]=stamp;st.win_n=1;st.tgt_vel={};st.tgt_vel_ok=false;st.tgt_dt=0;st.tgt_still=0;st.latest=stamp;}
         else {
-            const Vec3 d=target.position-st.win_p[st.win_n-1];
+            const Vec3 d=gate_point-st.win_p[st.win_n-1];
             if(d.x!=0||d.y!=0||d.z!=0) {
                 const double interval=std::max(0.,stamp-st.win_t[st.win_n-1]);
                 st.tgt_dt=std::max(std::min(interval,.05),st.tgt_dt*.9);st.tgt_still=0;
                 if(st.win_n==st.win_p.size()) {for(unsigned i=1;i<st.win_n;++i) {st.win_p[i-1]=st.win_p[i];st.win_t[i-1]=st.win_t[i];}--st.win_n;}
-                st.win_p[st.win_n]=target.position;st.win_t[st.win_n]=stamp;++st.win_n;
+                st.win_p[st.win_n]=gate_point;st.win_t[st.win_n]=stamp;++st.win_n;
             } else ++st.tgt_still;
             st.latest=std::max(st.latest,stamp);
             const double last_t=st.win_t[st.win_n-1];
@@ -150,7 +155,7 @@ inline HandServoOutput servo_step(HandServoState& st,const WorldTrackedPose& tar
     // v613 item 6 (review): a body that is already AHEAD of the aim along the run (steady running leaves it behind, never ahead) means the target stopped or
     // slowed before the stop test could read it (two unchanged publications): the feedforward fades out over the next 2 cm of overshoot, so a sprint stop
     // overshoots by a few cm instead of travelling the whole detection latency.
-    if(!legacy_gate && std::isfinite(target_age) && (feedforward.x!=0||feedforward.y!=0||feedforward.z!=0)) {
+    if(!legacy_gate && !root_gate && std::isfinite(target_age) && (feedforward.x!=0||feedforward.y!=0||feedforward.z!=0)) {
         const double fl=length(feedforward),ahead=-dot(error,feedforward)/fl;
         if(ahead>.005) feedforward=feedforward*std::clamp(1-(ahead-.005)/.02,0.,1.);
     }

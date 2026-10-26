@@ -73,8 +73,8 @@ def problems(header, probe):
     need(i_orig >= 0 and i_los > i_orig, "LOS: counted after the original call")
     los_trace = body(los, "try { // G1 trace: this candidate's stage-0 LOS call", "} catch(...) {}")
     need(los_trace != "" and "*output" not in los_trace and "result=" not in los_trace.replace("(result&0xffu)", ""), "LOS trace reads only the raw result")
-    need(los.count("return result;") == 1 and los.rstrip().endswith("return result;\n    }"), "LOS return value unchanged")
-    need(los.count("*output=1;") == 1, "the only out-byte write is the existing scan continuation")
+    need(los.count("return qualified_result;") == 1 and los.rstrip().endswith("return qualified_result;\n    }"), "qualified return separate from raw LOS trace")
+    need(los.count("*output=1;") == 2, "out-byte writes are pickup-range rejection and existing scan continuation")
     # target(): the native-selected owner is recorded after the selection is known; the rows after the whole stage
     tgt = body(header, "void target(const Context& scope) noexcept {", "const InteractionRay* ray(")
     need(tgt.find("if(loot_cycle_.open) loot_cycle_.selected=object?owner:0;") > tgt.find("if(!candidate && (!direct_owner || *direct_owner!=owner)) object=0;") >= 0,

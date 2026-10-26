@@ -21,10 +21,7 @@ class PostTonemapPass {
     static unsigned long long __fastcall hook(void* ctx) {
         std::uintptr_t view{};SIZE_T n{};
         int eye=-1;
-        if(ReadProcessMemory(GetCurrentProcess(),static_cast<char*>(ctx)+0x70,&view,8,&n) && view) {
-            const auto l=eye_views[0].load(),r=eye_views[1].load();
-            if(l!=r) eye=view==l?0:view==r?1:-1;
-        }
+        if(ReadProcessMemory(GetCurrentProcess(),static_cast<char*>(ctx)+0x70,&view,8,&n) && n==8 && view) eye=logical_eye(view);
         if(eye<0) return original_(ctx);
         ++depth_;pass_eye=eye;pass_context=nullptr;pass_metadata.reset();
         temporal_eye::capture_diagnostic([&] {
@@ -45,6 +42,14 @@ class PostTonemapPass {
     }
 public:
     inline static std::array<std::atomic<std::uintptr_t>,2> eye_views{}; // published per eye with the TAA history views
+    using EyeResolver=int (*)(std::uintptr_t,int);
+    inline static std::atomic<EyeResolver> eye_resolver{};
+    static int logical_eye(std::uintptr_t view) noexcept {
+        const auto l=eye_views[0].load(),r=eye_views[1].load();
+        const int native=l!=r?(view==l?0:view==r?1:-1):-1;
+        if(const auto resolver=eye_resolver.load()) return resolver(view,native);
+        return native;
+    }
     using MetadataReader=std::optional<temporal_eye::NativePass> (*)(std::uintptr_t);
     inline static std::atomic<MetadataReader> metadata_reader{};
     inline static thread_local std::optional<temporal_eye::NativePass> pass_metadata;
@@ -61,6 +66,7 @@ public:
     }
     static bool disable() noexcept {
         pass_end=nullptr;
+        eye_resolver=nullptr;
         if(!target_) return true;
         // No drain wait: a pass in flight may itself wait on the render thread calling this, and the
         // detour code stays mapped (the DLL is retained until the game exits), so it finishes safely.

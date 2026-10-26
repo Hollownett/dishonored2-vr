@@ -84,6 +84,24 @@ public static class ProxyInstall
     /// <summary>Stop VR goes through linux-stop only when our proxy runs the session and the launcher did not inject it itself.</summary>
     public static bool StopViaProxy(bool proxyLoaded, StartPath path) => proxyLoaded && path != StartPath.Injected;
 
+    /// <summary>Later proxy sessions require a fresh linux-start file. Validate the
+    /// installed home before requesting one; never queue a restart behind an active session.</summary>
+    public static bool RequestStart(string gameDir, string modHome, string logText)
+    {
+        if (!Installed(gameDir)) throw new InvalidOperationException("The game's dinput8.dll is not our proxy.");
+        var configured = File.ReadAllText(Path.Combine(gameDir, IniName)).Trim();
+        static string Full(string p) => Path.GetFullPath(p).TrimEnd('\\', '/', Path.DirectorySeparatorChar);
+        if (!string.Equals(Full(configured), Full(modHome), StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException("The running proxy is configured for another mod home. Restart the game from this launcher to apply its settings.");
+        if (ReadStart(logText, out _, out _) == StartState.Started) return false;
+        var build = Path.Combine(modHome, "build");
+        if (File.Exists(Path.Combine(build, "linux-stop")))
+            throw new InvalidOperationException("VR is still stopping. Wait for restoration, then launch again.");
+        Directory.CreateDirectory(build);
+        Write(Path.Combine(build, "linux-start"), Encoding.ASCII.GetBytes(Guid.NewGuid().ToString("N") + "\n"));
+        return true;
+    }
+
     public enum StartState { Pending, Started, Failed, Ended }
 
     /// <summary>Reads the proxy log of the current game start. "StartProbe begin" means the session is up; "StartProbe returned N" comes when
@@ -91,8 +109,11 @@ public static class ProxyInstall
     public static StartState ReadStart(string logText, out int code, out string reason)
     {
         code = 0; reason = "";
-        var m = Regex.Match(logText, @"StartProbe returned (\d+)");
-        if (m.Success)
+        // The proxy appends every session to one log. Only the last lifecycle
+        // event describes whether a new start is safe to request.
+        var m = Regex.Matches(logText, @"StartProbe (?:begin\b|returned (\d+)\b)").Cast<Match>().LastOrDefault();
+        if (m == null) return StartState.Pending;
+        if (m.Groups[1].Success)
         {
             code = int.Parse(m.Groups[1].Value);
             if (code == 0) return StartState.Ended;
@@ -105,7 +126,7 @@ public static class ProxyInstall
             };
             return StartState.Failed;
         }
-        return logText.Contains("StartProbe begin") ? StartState.Started : StartState.Pending;
+        return StartState.Started;
     }
 
     static bool Write(string path, byte[] data)

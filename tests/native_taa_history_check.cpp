@@ -1,6 +1,7 @@
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include "../src/native_taa_history.hpp"
+#include "../src/post_tonemap_pass.hpp"
 #include <cstring>
 #include <iostream>
 #include <map>
@@ -68,6 +69,29 @@ static void simulate(bool per_view_counter,bool read_first,bool fixed) {
     }
 }
 
+static void post_tonemap_tracks_admitted_logical_eye() {
+    using d2vr::PostTonemapPass;
+    static d2vr::alternate_taa::ReceiptBook book;
+    static std::uint32_t stamp{};
+    book.reset();PostTonemapPass::eye_views[0]=100;PostTonemapPass::eye_views[1]=200;
+    require(PostTonemapPass::logical_eye(100)==0 && PostTonemapPass::logical_eye(200)==1,"Paired post-tonemap identities changed");
+    PostTonemapPass::eye_resolver=+[](std::uintptr_t view,int native) {
+        if(view!=100)return native;
+        const auto receipt=book.resolve(view,stamp);
+        return receipt?receipt->key.eye:-1;
+    };
+    for(std::uint32_t frame=10;frame<18;++frame) {
+        stamp=frame;d2vr::alternate_taa::Receipt receipt;
+        receipt.key={100,300,{400,500,0},1,2,frame,frame,1200,1300,static_cast<int>(frame&1u),true};
+        require(book.publish(receipt),"Could not publish alternate post-tonemap receipt");
+        require(PostTonemapPass::logical_eye(100)==-1,"Unadmitted reused view was treated as native eye zero");
+        require(book.admit(100,frame,frame,1,2).has_value(),"Could not admit alternate post-tonemap receipt");
+        require(PostTonemapPass::logical_eye(100)==static_cast<int>(frame&1u),"Post-tonemap lost the logical eye on the reused native view");
+    }
+    book.reset();require(PostTonemapPass::logical_eye(100)==-1,"Invalidated alternate view must not run an upscaler for the wrong eye");
+    require(PostTonemapPass::logical_eye(200)==1,"Alternate resolver changed an unrelated paired view");
+    PostTonemapPass::eye_resolver=nullptr;PostTonemapPass::eye_views[0]=0;PostTonemapPass::eye_views[1]=0;
+}
 int main() {
     try {
         require(name_hash("temporalAAHistory0")==0x3337e277u && name_hash("temporalAAHistory1")==0x0d35680eu,"History hashes");
@@ -221,6 +245,7 @@ int main() {
         in.upscaler_owns_taa=false;
         std::uint32_t bad=0;std::memcpy(ctx.data()+ctx_param_count,&bad,4);
         require(plan_pass(read_memory,in,ctx_at,alternation,plan,scratch)==PassResult::fallback,"Empty table falls back");
+        post_tonemap_tracks_admitted_logical_eye();
         std::cout<<"native TAA history checks passed\n";
         return 0;
     } catch(const std::exception& error) {std::cerr<<error.what()<<'\n';return 1;}

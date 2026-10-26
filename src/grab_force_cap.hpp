@@ -34,7 +34,7 @@ struct GrabTuning {double axial_n=300,lateral_n=90,torque_nm=30,strength_scale=k
     catch_up_ramp_mps2=4.;   // ... and the cap rises by this per second, so recovery ends without a step (when the cap reaches the normal limit: 10 m/s linear, 4 m/s tow) or the lag is under 5 cm
     // The angular closure is capped at half the linear cap (the normal limits are 5 rad/s and 10 m/s), so it also ramps up to its normal limit with no jump.
     // Palm selection (Task 2, G2): grab buffer, grip-alone gate, hover sphere radius and the per-kind cost priorities (lower wins).
-    double grab_buffer_ms=150,grip_alone_gate_m=.12,hover_radius_m=.25,priority_loot=.8,priority_usable=1,priority_prop=1,priority_limb=1,priority_torso=1.1,priority_living=1;
+    double grab_buffer_ms=150,grip_alone_gate_m=.10,hover_radius_m=.25,priority_loot=.8,priority_usable=1,priority_prop=1,priority_limb=1,priority_torso=1.1,priority_living=1;
     double priority(PalmKind kind,int bone=-1) const noexcept {
         switch(kind) {case PalmKind::loot: return priority_loot; case PalmKind::usable: return priority_usable; case PalmKind::prop: return priority_prop;
             case PalmKind::bone: return bone==0||bone==1?priority_torso:priority_limb; case PalmKind::living: return priority_living;}

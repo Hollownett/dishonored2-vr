@@ -21,9 +21,8 @@ struct NativeRigidBody {
     Vec3 contact(Vec3 hand) const {return bounds?bounds->closest(hand):pose.position;}
     double contact_distance(Vec3 hand) const {return length(contact(hand)-hand);}
 };
-// G2/G3 (plan Task 5): a physical candidate as a palm-cost target. One id per entity (its entity id): a corpse's bone can change under the
-// palm, and the one 0.86 hysteresis (PalmSelection) then holds the body. The priority comes from build/grab-tuning.cfg and is applied once,
-// as the target's field (ruling H5: props 1, limbs 1, torso and pelvis 1.1). A body without bounds is its origin point.
+// A physical candidate as actual bounds, with one identity per entity. A corpse's
+// nearest bone can change as the hand moves. Legacy priority metadata does not rank pickups.
 inline std::uint64_t palm_body_id(const NativeRigidBody& b) noexcept {return b.entity_id?b.entity_id:static_cast<std::uint64_t>(b.entity);}
 inline PalmTarget palm_body_target(const NativeRigidBody& b,const GrabTuning& tuning) {
     PalmTarget t;t.id=palm_body_id(b);t.kind=b.bone>=0?PalmKind::bone:PalmKind::prop;t.priority=tuning.priority(t.kind,b.bone);

@@ -5,7 +5,9 @@
 namespace d2vr {
 // Native Use reach must equal the physical-grab acquire distance: a wider volume lets a distant native
 // target win InteractOwner (Role::interact -> native_use) over a prop the hand is touching (v229+ regression).
-inline constexpr double interaction_volume_radius=grab_acquire_distance;
+// NPC/door discovery keeps v612 reach. Pickup distance is checked per takeable owner;
+// shrinking this shared query would also hide stealth/takedown targets.
+inline constexpr double interaction_volume_radius=.45;
 // Borrowed by asynchronous native jobs: storage is immutable and retained for
 // process lifetime, including disable/reinstall. No allocator/refcount guessing.
 class NativeHandVolume {

@@ -102,10 +102,8 @@ inline std::optional<NativeRigidBody> grab_focus_candidate(const std::vector<Nat
     if(preferred && (!best || preferred->contact_distance(hand)<=distance+grab_switch_margin)) return preferred;
     return best;
 }
-// The palm picks the prop or bone (the G2 cost, the same one that orders loot): what the palm faces and is near wins, ties to the lower id.
-// `gate` is the acquire distance (0.45 m); the current pick is kept out to 0.55 m at x 0.86 (PalmSelection, the only hysteresis). The other
-// hand's body (its focus or held body; entity, and handle when given) is no candidate. legacy_nearest is build/legacy-palm-select: the v611
-// nearest-AABB pick from the probe's palm. An invalid probe picks nothing new (PalmSelection counts scoring_fallback).
+// Pick the nearest eligible prop or bone at the hand. Previous hover and palm facing
+// never override distance. Only the other hand's actual held body is excluded.
 inline std::optional<NativeRigidBody> grab_focus_candidate(const std::vector<NativeRigidBody>& candidates,const PalmProbe& probe,
         PalmSelection& selection,const GrabTuning& tuning,std::uintptr_t other_entity,std::uint32_t other_handle,double gate,
         bool legacy_nearest=false,std::uint64_t now_ms=0,PalmPick* out=nullptr,const std::vector<PalmTarget>* extra=nullptr,std::optional<std::size_t>* extra_pick=nullptr) {
@@ -217,7 +215,7 @@ private:
         Publication published{};std::optional<Obstruction> obstruction;PhysicalGrab grab{};std::optional<NativeRigidBody> held;RightGripOwner owner{};
         std::vector<NativeRigidBody> candidates;NativeGrabDiscovery discovery;
         std::optional<NativeRigidBody> focus;UINT64 focus_tick{};Vec3 focus_hand{};std::uintptr_t focus_excluded{};
-        // G2/G3 (Task 5): the palm's pick (the one 0.86 hysteresis), its score, and the grab buffer of this press (buffer_used: started once per press;
+        // The nearest palm pick, distance diagnostics and the grab buffer (buffer_used: started once per press;
         // catch_tick: the catch edge, for press-to-held, ruling H4).
         PalmSelection selection;std::optional<FocusScore> score;double palm_dot{};GrabIntentBuffer buffer;bool buffer_used{};UINT64 catch_tick{};
         std::uint32_t reject_id{};BodyReject reject{};
@@ -354,9 +352,8 @@ private:
     }
     std::optional<NativeRigidBody> focus_body(unsigned side,UINT64 now,bool refresh) {
         auto& lane=lanes_[side];const auto& p=lane.published;const auto& other_lane=lanes_[1-side];
-        // The other hand's held body, else its fresh focus, is not offered to this hand (no two hands on one body's same handle, no ping-pong).
-        const auto& other=other_lane.held?other_lane.held:
-            (other_lane.focus && other_lane.focus_tick && now>=other_lane.focus_tick && now-other_lane.focus_tick<=250?other_lane.focus:std::optional<NativeRigidBody>{});
+        // A hover reserves nothing. Only a body actually held by the other hand is excluded.
+        const auto& other=other_lane.held;
         struct Cost {
             Lane& lane;std::chrono::steady_clock::time_point start=std::chrono::steady_clock::now();
             ~Cost() {const auto us=static_cast<UINT64>(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now()-start).count());
@@ -394,14 +391,7 @@ private:
             if(body.bone<0) return native_rigid_body(read_,base_,body.entity);
             return corpse(body.entity);
         },hinted?&lane.hints:nullptr);
-        if(!refresh && lane.focus_tick && now>=lane.focus_tick && now-lane.focus_tick<100 &&
-           length(p.hand.position-lane.focus_hand)<.05 && lane.focus_excluded==excluded) {
-            if(!lane.focus) return {};
-            const auto current=native_grab_body(read_,base_,*lane.focus);
-            if(current && current->identity==lane.focus->identity && current->component==lane.focus->component &&
-               current->handle==lane.focus->handle && current->model==lane.focus->model && current->world==lane.focus->world && current->entity_id==lane.focus->entity_id &&
-               current->contact_distance(p.hand.position)<=grab_retain_distance && acquisition_contact(lane,*current,now)) return current;
-        }
+        // Re-rank every publication: a cached hover must not hide a newly nearer object.
         const auto preferred=lane.focus && (!refresh || lane.focus->contact_distance(p.hand.position)<=grab_acquire_distance)?lane.focus->entity:0;
         std::vector<NativeRigidBody> touching;
         if(contact_required_)for(const auto& candidate:candidates)if(acquisition_contact(lane,candidate,now))touching.push_back(candidate);
@@ -430,7 +420,7 @@ private:
         } else {   // build/legacy-palm-select, or no valid palm probe this frame (counted as scoring_fallback): the v611 nearest-AABB pick
             if(!legacy_palm_select_) (void)lane.selection.update(p.palm,{},tuning_.hover_radius_m,now);
             lane.focus=grab_focus_candidate(list,p.hand.position,excluded,false,preferred,excluded_handle);
-            if(lane.focus) lane.score=FocusScore{palm_body_id(*lane.focus),lane.focus->bone>=0?PalmKind::bone:PalmKind::prop,0.,0.,lane.focus->contact_distance(p.hand.position),lane.focus->entity};
+            if(lane.focus) lane.score=FocusScore{palm_body_id(*lane.focus),lane.focus->bone>=0?PalmKind::bone:PalmKind::prop,lane.focus->contact_distance(p.hand.position),0.,lane.focus->contact_distance(p.hand.position),lane.focus->entity};
         }
         lane.focus_tick=now;lane.focus_hand=p.hand.position;lane.focus_excluded=excluded;
         return lane.focus;
@@ -450,8 +440,8 @@ private:
         for(const auto& lane:lanes_) if(id && lane.reserved_npc==id && lane.reserved_tick && now>=lane.reserved_tick && now-lane.reserved_tick<=reserve_ms) return true;
         return false;
     }
-    // One target per nearby living NPC: of his collar, upper arms and forearms, the bone the palm prefers (palm cost, 0.45 m gate; the grip-alone
-    // 0.12 m gate is the decision's). Priority living (1.0). The other hand's held NPC and a reserved one are skipped.
+    // One target per nearby living NPC: of his collar, upper arms and forearms, the nearest bone (0.20 m acquisition gate; the grip-alone
+    // 0.10 m contact gate is the decision's). The other hand's held NPC and a reserved one are skipped.
     void living_candidates(unsigned side,UINT64 now,std::vector<PalmTarget>& targets,std::vector<LivingBone>& bones) {
         auto& lane=lanes_[side];const auto& p=lane.published;const auto& other=lanes_[1-side];
         lane.living_npcs.erase(std::remove_if(lane.living_npcs.begin(),lane.living_npcs.end(),[&](const auto& n){return now<n.seen || now-n.seen>living_seen_ms;}),lane.living_npcs.end());
@@ -924,7 +914,7 @@ private:
                 if(d<distance) {distance=d;body=current;}
                 valid.push_back(*current);targets.push_back(palm_body_target(*current,tuning_));
             }
-            // G2 (Task 5): the same palm cost ranks the bind (the one hysteresis: the lane's current pick at x 0.86); no palm probe: the nearest, as before.
+            // Revalidate and choose by the same nearest-surface rule at bind time.
             if(valid.size()>1 && !legacy_palm_select_ && p.palm.valid) {
                 const auto pick=pick_by_palm(p.palm,targets,lane.selection.current(),tuning_.hover_radius_m);
                 if(pick.index) {body=valid[*pick.index];distance=body->contact_distance(p.hand.position);}
@@ -1261,7 +1251,7 @@ public:
     // Caller-supplied native carrying/action occupancy returns the raw squeeze;
     // the physical role is revoked and never re-reserved during that press.
     // no_buffer (fix round 1, I2): the right hand holds or has drawn the sword: decide at the edge (the RB block must not wait 150 ms).
-    // grip_alone (Task 6): a grip-alone grab press; its candidate must be within the grip-alone gate (0.12 m) at the decision and in the buffer.
+    // grip_alone (Task 6): a grip-alone grab press; its candidate must be within the grip-alone gate (0.10 m) at the decision and in the buffer.
     float filter_native_grip(unsigned side,float raw,UINT64 epoch,UINT64 now,bool gameplay,bool focused,bool use,bool defer_decision=false,bool grip_alone=false,bool no_buffer=false) {
         std::lock_guard<std::mutex> lock(mutex_);
         auto& lane=lanes_.at(side);auto& p=lane.published;lane.decision_deferred=false;

@@ -35,8 +35,7 @@ def check(probe: str, xr: str) -> None:
     late = probe.index("xr_gameplay_frames>0) {", guard)
     assert guard < late < adopt and 'first_start_state="late"' in probe[late:adopt], "v613: the first-start pass must never switch AA once a level has rendered"
     assert "fsr4_supported(chain)" in probe[guard:adopt] and "write_aa_gpu_caps(fsr4)" in probe[guard:adopt], "v613: FSR 4 support and the launcher caps file come from the Present pass"
-    assert "settings_.aa_chosen(),settings_.crosshair(),settings_.scripted_recenter(),settings_.cutscene_mode()}" in xr, "every GameXr save must pass both new fields"
-    assert xr.count("save_preferences(") == 2 and xr.count("settings_.aa_chosen(),settings_.crosshair(),settings_.scripted_recenter(),settings_.cutscene_mode()}") == 2, "both GameXr saves must carry the new fields"
+    assert xr.count("save_preferences(") == 2 and xr.count("save_preferences(preferences_file_,settings_.preferences())") == 2, "both GameXr saves must use the complete requested-preference snapshot"
     assert "aa_chosen_preference,crosshair_preference,scripted_recenter_preference,static_cast<d2vr::CutsceneMode>(cutscene_mode_setting.load()));" in probe, "GameXr must be constructed with the saved marker and crosshair"
     assert '"aa_first_start":{' in probe.replace('\\"', '"'), "status must report aa_first_start"
     # the sim's --vr-setting temporal_aa writes build/aa-mode; the diagnostic reads stay
@@ -52,7 +51,7 @@ mutations = (
     (probe.replace("first_start_pending=!aa_chosen_preference", "first_start_pending=true", 1), xr),
     (probe.replace("if(first_start_pending && present_adapter_vendor.load(std::memory_order_relaxed))", "if(present_adapter_vendor.load(std::memory_order_relaxed))", 1), xr),
     (probe.replace("first_start_pending=false;\n                                        game_xr->adopt", "game_xr->adopt", 1), xr),
-    (probe, xr.replace("settings_.aa_chosen(),settings_.crosshair(),settings_.scripted_recenter(),settings_.cutscene_mode()});", "false,true});", 1)),
+    (probe, xr.replace("save_preferences(preferences_file_,settings_.preferences())", "save_preferences(preferences_file_,VrPreferences{})", 1)),
     (probe.replace("{   // v609 crosshair migration, whatever", "if(first_start_pending) {   // v609 crosshair migration, whatever",1), xr),
     (probe.replace("if(game_xr->persist_preferences()) fs::remove(crosshair_legacy_file,legacy_ec);", "{game_xr->persist_preferences();fs::remove(crosshair_legacy_file,legacy_ec);}",1), xr),
     (probe, xr.replace("if(log_note) log_note(", "if(false) log_note(",1)),

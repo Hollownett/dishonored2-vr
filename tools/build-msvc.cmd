@@ -236,6 +236,12 @@ build\ranged_aim_gate_check.exe
 if errorlevel 1 goto build_failed
 build\aim_ray_receipt_check.exe
 if errorlevel 1 goto build_failed
+python tests\settings_startup_check.py
+if errorlevel 1 goto build_failed
+cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT tests\settings_file_check.cpp /Fo:build\settings_file_check.obj /Fe:build\settings_file_check.exe /link user32.lib
+if errorlevel 1 goto build_failed
+build\settings_file_check.exe
+if errorlevel 1 goto build_failed
 cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT /Isrc tests\temporal_eye_job_check.cpp /Fo:build\temporal_eye_job_check.obj /Fe:build\temporal_eye_job_check.exe
 if errorlevel 1 goto build_failed
 if not errorlevel 0 goto build_failed
@@ -662,6 +668,10 @@ if not "%errorlevel%"=="0" exit /b 1
 cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT tests\native_cvars_check.cpp /Fo:build\native_cvars_check.obj /Fe:build\native_cvars_check.exe
 if not "%errorlevel%"=="0" exit /b 1
 build\native_cvars_check.exe
+if not "%errorlevel%"=="0" exit /b 1
+cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT tests\native_player_depth_check.cpp /Fo:build\native_player_depth_check.obj /Fe:build\native_player_depth_check.exe
+if not "%errorlevel%"=="0" exit /b 1
+build\native_player_depth_check.exe
 if not "%errorlevel%"=="0" exit /b 1
 cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT tests\vr_settings_check.cpp /Fo:build\vr_settings_check.obj /Fe:build\vr_settings_check.exe /link gdi32.lib user32.lib
 if not "%errorlevel%"=="0" exit /b 1

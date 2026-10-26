@@ -112,8 +112,8 @@ struct BodyMotion {Vec3 position{},velocity{},spin{};};
 // it: a recreated body would be born inside the held prop or limb with the R1 default word (its layer back in the mask).
 struct DriveInput {unsigned side{};WorldTrackedPose target{};double held_kg{};double now{};bool yield{};
                    bool target_free{};std::optional<Vec3> player_root{};bool locomotion{};bool holding{};bool hold_snap_ok{};
-                   Vec3 player_velocity{};double target_time_s{std::numeric_limits<double>::quiet_NaN()};};   // target_time_s (v613 item 6): QPC seconds the target was published; Fix B: the player's horizontal velocity (m/s), the servo's feedforward: the target rides on the player
-struct DriveStatus {double gap_m{};double speed{};bool capped{},contact_now{};std::uint64_t contact_frames{},snaps{},cost_us{},cost_max_us{},player_drift_um{};
+                   bool root_feedforward_gate{};Vec3 player_velocity{};double target_time_s{std::numeric_limits<double>::quiet_NaN()};};   // target_time_s (v613 item 6): QPC seconds the target was published; Fix B: the player's horizontal velocity (m/s), the servo's feedforward: the target rides on the player
+struct DriveStatus {double gap_m{};double speed{},feedforward_mps{};bool root_gate{};bool capped{},contact_now{};std::uint64_t contact_frames{},snaps{},cost_us{},cost_max_us{},player_drift_um{};
                     double dt_s{};std::uint64_t drives{},drive_writes{},yields{},skipped{},snap_requests{},snap_blocked{},garbage{},second_drives{},root_jumps{},pressed_ticks{};
                     // fix round 1: thread CPU time of this side's drive (QueryThreadCycleTime; 0 when unavailable), and the positive control for
                     // the drift proof: ticks where the root moved under locomotion input, and the largest such root travel in one locomotion window
@@ -498,7 +498,8 @@ public:
             // the hold ends. Final review P2-1: a native hold whose object is free snaps a stuck hand like an empty one (hold_snap_ok)
             const bool hold_waits=in.holding && !in.hold_snap_ok;
             const auto out=servo_step(s.servo,in.target,body,m->velocity,m->spin,in.held_kg,dt,std::numeric_limits<double>::quiet_NaN(),servo_cfg_,tuning_,!in.target_free || hold_waits,kDefaultHeldLever,in.player_velocity,
-                std::isfinite(in.target_time_s)&&std::isfinite(in.now)?in.now-in.target_time_s:std::numeric_limits<double>::quiet_NaN());
+                std::isfinite(in.target_time_s)&&std::isfinite(in.now)?in.now-in.target_time_s:std::numeric_limits<double>::quiet_NaN(),in.root_feedforward_gate?in.player_root:std::nullopt);
+            c.feedforward_mps.store(length(s.servo.prev_ff),std::memory_order_relaxed);c.root_gate.store(s.servo.root_gate,std::memory_order_relaxed);
             c.capped.store(out.capped,std::memory_order_relaxed);
             if(out.valid) {linear=out.linear;angular=out.angular;}   // invalid (a gap past max_gap, a bad target): hold, and the far gap snaps
             if(in.holding) count(side,&Counters::held_ticks);
@@ -528,7 +529,7 @@ public:
     DriveStatus drive_status(unsigned side) const {
         DriveStatus d;if(side>=sides) return d;
         const auto& c=counters_[side];
-        d.gap_m=c.gap_m.load();d.speed=c.speed.load();d.capped=c.capped.load();d.contact_now=c.contact_now.load() && steady_ms()-c.contact_ms.load()<=contact_fresh_ms;d.contact_frames=c.contact_frames.load();d.snaps=c.snaps.load();
+        d.gap_m=c.gap_m.load();d.speed=c.speed.load();d.feedforward_mps=c.feedforward_mps.load();d.root_gate=c.root_gate.load();d.capped=c.capped.load();d.contact_now=c.contact_now.load() && steady_ms()-c.contact_ms.load()<=contact_fresh_ms;d.contact_frames=c.contact_frames.load();d.snaps=c.snaps.load();
         d.cost_us=c.cost_us.load();d.cost_max_us=c.cost_max_us.load();d.player_drift_um=c.player_drift_um.load();d.dt_s=c.dt_s.load();
         d.drives=c.drives.load();d.drive_writes=c.drive_writes.load();d.yields=c.yields.load();d.skipped=c.skipped.load();
         d.snap_requests=c.snap_requests.load();d.snap_blocked=c.snap_blocked.load();d.garbage=c.garbage.load();d.second_drives=c.second_drives.load();d.root_jumps=c.root_jumps.load();d.pressed_ticks=c.pressed_ticks.load();
@@ -577,7 +578,7 @@ private:
         std::atomic<std::uint32_t> filter{R1Recipe::filter};   // B16: the body's filter word as last written (the R1 default from each creation)
         std::atomic<std::uint64_t> contact_frames{},snaps{},cost_us{},cost_max_us{},player_drift_um{},drives{},drive_writes{},yields{},skipped{},
             snap_requests{},snap_blocked{},garbage{},second_drives{},root_jumps{},pressed_ticks{},cpu_us{},cpu_max_us{},root_moved_ticks{},root_travel_um{},held_ticks{};
-        std::atomic<double> gap_m{},speed{},dt_s{};std::atomic<bool> capped{},contact_now{};std::atomic<std::uint64_t> contact_ms{};
+        std::atomic<double> gap_m{},speed{},dt_s{},feedforward_mps{};std::atomic<bool> capped{},contact_now{},root_gate{};std::atomic<std::uint64_t> contact_ms{};
         std::atomic<int> state{};std::atomic<std::uint32_t> handle{};
     };
     struct TickGuard {

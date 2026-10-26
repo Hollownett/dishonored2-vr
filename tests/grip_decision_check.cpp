@@ -9,7 +9,7 @@ PalmTarget box(std::uint64_t id,PalmKind kind,Vec3 centre,double half,const Grab
     PalmTarget x;x.id=id;x.kind=kind;x.priority=t.priority(kind);x.minimum=centre-Vec3{half,half,half};x.maximum=centre+Vec3{half,half,half};return x;
 }
 // The physical lane's score of a prop or bone, computed with the same probe (as NativeGrab::focus_score reports it).
-FocusScore physical(const PalmTarget& t) {const auto s=palm_cost(probe(),t,.25,grab_retain_distance);assert(s);return {t.id,t.kind,s->cost,0,s->distance};}
+FocusScore physical(const PalmTarget& t) {const auto s=palm_cost(probe(),t,.25,1.);assert(s);return {t.id,t.kind,s->cost,0,s->distance};}
 GripAloneInput input(std::optional<PalmTarget> native,std::optional<FocusScore> phys,std::uint64_t at=1000) {
     GripAloneInput in;in.native=native;in.physical=phys;in.probe=probe();in.native_fresh=true;in.since_ms=1000;in.now_ms=at;return in;
 }
@@ -37,7 +37,7 @@ int main() {
         const auto prop=physical(box(7,PalmKind::prop,{.18,0,.015},.05,t));assert(std::abs(prop.distance-.13)<1e-9);
         assert(decide_grip_alone(input(std::nullopt,prop,1050),t,hover)==GripAloneChoice::pending);
         assert(decide_grip_alone(input(std::nullopt,prop,1150),t,hover)==GripAloneChoice::use);
-        const auto on=physical(box(8,PalmKind::prop,{.165,0,.015},.05,t));   // H1: a prop reaching 0.10 m inside the window is caught
+        const auto on=physical(box(8,PalmKind::prop,{.145,0,.015},.05,t));   // H1: a prop reaching 0.10 m inside the window is caught
         assert(decide_grip_alone(input(std::nullopt,on,1120),t,hover)==GripAloneChoice::grab);
         GrabTuning off=t;off.grab_buffer_ms=0;assert(decide_grip_alone(input(std::nullopt,prop,1000),off,hover)==GripAloneChoice::use);
     }
@@ -105,7 +105,10 @@ int main() {
         const auto body=box(0x9300,PalmKind::usable,{.07,0,.015},.3,t);
         auto bone=physical(box(1,PalmKind::bone,{.07,0,.015},.05,t));bone.entity=0x9300;
         auto in=input(body,bone);in.native_corpse=true;assert(decide_grip_alone(in,t,hover)==GripAloneChoice::grab);
-        bone.distance=.3;in=input(body,bone);in.native_corpse=true;assert(decide_grip_alone(in,t,hover)==GripAloneChoice::grab);     // beyond 0.12 m, inside the fist gate
+        bone.distance=.09;in=input(body,bone);in.native_corpse=true;assert(decide_grip_alone(in,t,hover)==GripAloneChoice::grab);     // all grip-only targets share the 10 cm contact gate
+        bone.distance=.11;in=input(body,bone,1200);in.native_corpse=true;assert(decide_grip_alone(in,t,hover)==GripAloneChoice::none);
+        auto prop=bone;prop.kind=PalmKind::prop;prop.distance=.05;in=input(body,prop);in.native_corpse=true;assert(decide_grip_alone(in,t,hover)==GripAloneChoice::grab); // nearer prop wins beside a corpse
+        in.takedown_offered=true;assert(decide_grip_alone(in,t,hover)==GripAloneChoice::use); // a real stealth offer keeps priority
         bone.distance=.5;in=input(body,bone,1000);in.native_corpse=true;assert(decide_grip_alone(in,t,hover)==GripAloneChoice::pending);   // not in reach yet: the buffer runs
         in.now_ms=1000+static_cast<std::uint64_t>(t.grab_buffer_ms)+1;assert(decide_grip_alone(in,t,hover)==GripAloneChoice::none);     // then nothing, never Use
         in=input(body,std::nullopt,1000);in.native_corpse=true;in.now_ms=1200;assert(decide_grip_alone(in,t,hover)==GripAloneChoice::none);

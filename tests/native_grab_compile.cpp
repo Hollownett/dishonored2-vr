@@ -75,12 +75,12 @@ int main() {
     assert(!d2vr::grab_focus_candidate(candidates,{0,0,0},0,true)); // Native Use owns this press even with an eligible prop.
     assert(!grab.focus_point(0,100,true));
     d2vr::NativeRigidBody old_target{},challenger{};old_target.entity=4;challenger.entity=5;
-    old_target.pose.position={.50,0,0};challenger.pose.position={.43,0,0};
+    old_target.pose.position={.21,0,0};challenger.pose.position={.19,0,0};
     assert(!d2vr::grab_focus_candidate({old_target},{0,0,0},0)); // Outside new-acquisition radius.
-    assert(d2vr::grab_focus_candidate({old_target,challenger},{0,0,0},0,false,4)->entity==4);
-    challenger.pose.position={.35,0,0};
     assert(d2vr::grab_focus_candidate({old_target,challenger},{0,0,0},0,false,4)->entity==5);
-    old_target.pose.position={.56,0,0};
+    challenger.pose.position={.15,0,0};
+    assert(d2vr::grab_focus_candidate({old_target,challenger},{0,0,0},0,false,4)->entity==5);
+    old_target.pose.position={.201,0,0};
     assert(!d2vr::grab_focus_candidate({old_target},{0,0,0},0,false,4)); // Beyond retention margin.
     {   // G3 (plan Task 5): the palm picks the physical candidate. In clutter the box the palm faces wins over an overlapping box listed
         // first that is nearer (under the knuckles): the nearest-AABB pick above (build/legacy-palm-select) takes the nearer one.
@@ -93,7 +93,7 @@ int main() {
         assert(under.contact_distance({0,0,.015})<faced.contact_distance({0,0,.015}));
         d2vr::GrabTuning tuning;d2vr::PalmSelection selection;d2vr::PalmPick pick;
         const auto palm=d2vr::grab_focus_candidate(clutter,probe,selection,tuning,0,0,d2vr::grab_acquire_distance,false,100,&pick);
-        assert(palm && palm->entity==11 && pick.index && selection.current()==0x20011);
+        assert(palm && palm->entity==10 && pick.index && selection.current()==0x10010);
         d2vr::PalmSelection legacy_selection;
         const auto nearest=d2vr::grab_focus_candidate(clutter,probe,legacy_selection,tuning,0,0,d2vr::grab_acquire_distance,true);
         assert(nearest && nearest->entity==10);   // legacy_nearest: the v611 nearest-AABB pick

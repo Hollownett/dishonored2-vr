@@ -186,8 +186,9 @@ int main() {
         // before the filter decides; the LOS then clears and the press must still bind (sim T125301: the grip-alone corpse grab never bound)
         fixture();NativeGrab g;NativeGrabCheck::setup(g);g.require_obstruction();
         const auto o=*native_player_camera(read,fixture_base,fixture_camera);
-        UINT64 t=GetTickCount64();g.publish(0,o,fixture_hand,0,1,t,true,false,t);g.filter_native_grip(0,0,1,t,true,true,false);NativeGrabCheck::consume(g,t);
-        Sleep(2);t=GetTickCount64();g.publish(0,o,fixture_hand,.9f,1,t,true,false,t);NativeGrabCheck::consume(g,t);   // sampled before the decision
+        auto close_hand=fixture_hand;close_hand.position.x=.05;
+        UINT64 t=GetTickCount64();g.publish(0,o,close_hand,0,1,t,true,false,t);g.filter_native_grip(0,0,1,t,true,true,false);NativeGrabCheck::consume(g,t);
+        Sleep(2);t=GetTickCount64();g.publish(0,o,close_hand,.9f,1,t,true,false,t);NativeGrabCheck::consume(g,t);   // sampled before the decision
         g.filter_native_grip(0,.9f,1,t,true,true,false,false,true);
         assert((*g.diagnostics())[0].gate==NativeGrab::Gate::obstruction_pending);
         g.service_obstruction(o,GetTickCount64(),[&](const NativeGrab::ObstructionRequest&)->std::optional<bool>{return true;});

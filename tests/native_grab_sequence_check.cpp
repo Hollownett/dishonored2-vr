@@ -94,9 +94,9 @@ int main() {
         NativeGrabCheck::consume(early,3010);assert(!early.holding(0));
         {const auto d=early.diagnostics(3010);assert(d && (*d)[0].gate==NativeGrab::Gate::buffer_pending && (*d)[0].role==RightGripOwner::Role::pending);}
         assert(early.native_presses()==0 && early.physical_presses()==0);
-        for(UINT64 t=3030;t<=3110;t+=20) {   // the hand arrives at 5 m/s: in the 0.45 m gate at +100 ms (x -0.3), bound on that tick (the
+        for(UINT64 t=3030;t<=3110;t+=20) {   // the hand arrives at 7 m/s: in the 0.20 m gate at +100 ms (x -0.3), bound on that tick (the
             // fixture has no velocity setter, so the hold is checked on its bind tick only)
-            const double x=-.8+static_cast<double>(t-3010)*.005;
+            const double x=-.8+static_cast<double>(t-3010)*.0071;
             early.publish(0,*owner,at(x),.9f,1,t,true,false,t,nullptr,0,probe_at({x,0,0}));
             assert(early.filter_native_grip(0,.9f,1,t,true,true,false)==0);NativeGrabCheck::consume(early,t);
             assert(early.holding(0)==(t>=3110));
@@ -129,8 +129,7 @@ int main() {
         off.publish(0,*owner,away,.9f,1,4010,true,false,4010,nullptr,0,probe_at({-1,0,0}));
         assert(off.filter_native_grip(0,.9f,1,4010,true,true,false)==.9f && off.native_presses()==1);
     }
-    {   // two_hands_same_body_no_ping_pong: the left hand's focus is X; the right hand, with the same palm, gets its runner-up Y, and
-        // after 200 frames neither lane's focus has changed (each hand excludes the other's focus and held body).
+    {   // two_hands_nearest: hovering reserves nothing; either hand can acquire the nearest object.
         second_prop({.1f,.12f,0});
         NativeGrab both;NativeGrabCheck::setup(both);
         const WorldTrackedPose palm{{0,0,0},{{{1,0,0},{0,1,0},{0,0,1}}}};
@@ -138,11 +137,11 @@ int main() {
             const UINT64 t=5000+frame*11;
             for(unsigned side=0;side<2;++side) both.publish(side,*owner,palm,0,1,t,true,false,t,nullptr,0,probe_at({0,0,0}));
             assert(both.focus_entity(0,t)==fixture_entity);
-            assert(both.focus_entity(1,t)==second_entity);
+            assert(both.focus_entity(1,t)==fixture_entity);
         }
         const auto left=both.focus_score(0,5000+199*11),right=both.focus_score(1,5000+199*11);
-        assert(left && right && left->id==0x10001 && right->id==0x20002);
+        assert(left && right && left->id==0x10001 && right->id==0x10001);
     }
-    std::cout<<"PASS: G3 grab buffer (early squeeze binds on arrival, nothing in 150 ms goes native once, 0 disables), two hands never ping-pong; ";
+    std::cout<<"PASS: G3 grab buffer (early squeeze binds on arrival, nothing in 150 ms goes native once, 0 disables), both hands hover the nearest object; ";
     std::cout<<"PASS: real NativeGrab publication/filter/dispatcher caller order: one released epoch sample permits acquisition; held epoch/focus return stays disarmed\n";
 }

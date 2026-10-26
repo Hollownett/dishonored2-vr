@@ -41,6 +41,7 @@ inline std::vector<NativeOptionsPage::Row> rows(const VrSettings& s) {
     // last offered row elsewhere (the mod renders it with FSR 3 then).
     std::vector<std::string> aa_modes{"Off","Game TAA","FSR 3 Native","FSR 3 Quality (77%)","FSR 3 Balanced (67%)","FSR 4 Native","FSR 4 Quality (77%)"};
     std::string aa_help="Smooths shimmering edges over time. Game TAA is the original; FSR Native uses full resolution; Quality and Balanced render fewer pixels and upscale.";
+    if(s.performance_mode_replaces_aa()) aa_help+=" The selected temporal mode is unavailable in this session; spatial edge AA is used when enabled. Your selection is kept.";
     if(s.dlss_available()) {aa_modes.push_back("DLAA (NVIDIA DLSS)");aa_modes.push_back("DLSS Quality (NVIDIA)");aa_help+=" DLAA and DLSS Quality are powered by NVIDIA DLSS.";}
     else if(s.temporal_aa()>=7) aa_modes.push_back(s.temporal_aa()==7?"DLAA (unavailable, FSR 3)":"DLSS Quality (unavailable, FSR 3)"); // the saved choice, shown truthfully and never rewritten by the page
     r[temporal]={K::stepper,"Anti-aliasing",aa_help,0,0,1,temporal_shown(s),2,aa_modes};

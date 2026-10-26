@@ -1,5 +1,13 @@
 using DishonoredVR;
 
+if (args.Length == 2 && args[0] == "--write-settings-pipeline")
+{
+    var file = Path.Combine(args[1], "build", "vr-settings.cfg");
+    Prefs.Merge(new Prefs(), new Prefs { TemporalAa = 7, Hud = 150, Mirror = 1, Sharpness = .25 }, new Prefs()).Save(file);
+    Console.WriteLine(file);
+    return 0;
+}
+
 int failures = 0;
 void Check(string name, bool ok) { Console.WriteLine((ok ? "PASS " : "FAIL ") + name); if (!ok) failures++; }
 
@@ -50,7 +58,7 @@ Check("list_has_no_unwanted_rows", !list.Any(f => f.Id is "corpse-grab") && list
     var st = Features.State(d, list);
     var offIds = list.Where(f => !st[f.Id].On).Select(f => f.Id).ToArray();
     var newIds = new[] { "grip-alone-grab", "palm-select", "corpse-slip-release", "living-hold", "finger-surface", "finger-ease", "hand-grenade-throw", "hand-mine-aim", "bink-theater", "cutscene-skip-hold", "letterbox-hide" };
-    Check("fresh_install_has_every_feature_on_except_diagnostics", offIds.SequenceEqual(new[] { "native-temporal-census" }) && newIds.All(i => st[i].On) && list.Where(f => !f.IsEnable).All(f => !Has(d, f.File)) && !list.Any(f => f.File == "finger-probe-3"));
+    Check("fresh_install_keeps_unverified_repairs_off", offIds.SequenceEqual(new[] { "run-root-gate", "prompt-target-anchor", "alternate-upscalers", "world-hand-depth", "native-temporal-census" }) && newIds.All(i => st[i].On) && list.Where(f => !f.IsEnable).All(f => !Has(d, f.File)) && !list.Any(f => f.File == "finger-probe-3"));
 }
 {   // handmade_negative_knob_is_adopted
     var d = NewBuild(); File.WriteAllText(Path.Combine(d, "no-stealth-contact"), "");
@@ -332,7 +340,24 @@ string StateText(string d) => File.ReadAllText(Path.Combine(d, "launcher-feature
         var f1 = ProxyInstall.ReadStart("StartProbe begin d\nStartProbe returned 1 (see artifacts)\n", out var c1, out var r1);
         var f2 = ProxyInstall.ReadStart("StartProbe returned 2\n", out var c2, out var r2);
         Check("start_state_codes_1_and_2_have_reasons", f1 == ProxyInstall.StartState.Failed && c1 == 1 && r1.Contains("dxgi-probe-failure") && f2 == ProxyInstall.StartState.Failed && c2 == 2 && r2.Contains("shutting down"));
-        Check("start_state_zero_return_is_ended_not_failure", ProxyInstall.ReadStart("StartProbe begin d\nStartProbe returned 0\n", out _, out _) == ProxyInstall.StartState.Ended); }
+        Check("start_state_zero_return_is_ended_not_failure", ProxyInstall.ReadStart("StartProbe begin d\nStartProbe returned 0\n", out _, out _) == ProxyInstall.StartState.Ended);
+        Check("start_state_uses_latest_session", ProxyInstall.ReadStart("StartProbe begin d\nStartProbe returned 1\nStartProbe begin d\n", out _, out _) == ProxyInstall.StartState.Started
+            && ProxyInstall.ReadStart("StartProbe returned 1\nStartProbe begin d\nStartProbe returned 0\n", out _, out _) == ProxyInstall.StartState.Ended); }
+    {   // Real files: a stopped proxy needs a fresh request in the configured home's build directory.
+        var g = NewGame(); var h = Path.GetDirectoryName(NewBuild())!;
+        ProxyInstall.Install(g, h, ours);
+        var start = Path.Combine(h, "build", "linux-start"); var stop = Path.Combine(h, "build", "linux-stop");
+        Check("restart_requests_configured_home", ProxyInstall.RequestStart(g, h, "StartProbe begin d\nStartProbe returned 0\n") && File.Exists(start));
+        File.Delete(start);
+        Check("restart_never_queues_behind_running_session", !ProxyInstall.RequestStart(g, h, "StartProbe returned 0\nStartProbe begin d\n") && !File.Exists(start));
+        File.WriteAllText(stop, "stop"); bool refusedStop = false;
+        try { ProxyInstall.RequestStart(g, h, "StartProbe returned 0\n"); } catch (InvalidOperationException) { refusedStop = true; }
+        Check("restart_waits_for_pending_stop", refusedStop && !File.Exists(start)); File.Delete(stop);
+        File.WriteAllText(Ini(g), h + "-other"); bool refusedHome = false;
+        try { ProxyInstall.RequestStart(g, h, "StartProbe returned 0\n"); } catch (InvalidOperationException) { refusedHome = true; }
+        Check("restart_refuses_another_mod_home", refusedHome && !File.Exists(start));
+        Directory.Delete(g, true); Directory.Delete(h, true);
+    }
     Check("fallback_and_default_seconds", ProxyInstall.DefaultStartSeconds == 20 && ProxyInstall.FallbackDelaySeconds == 45);
 }
 {   // DLSS provider: the user's own nvngx_dlss.dll, mod home first, then build\dlss-dll-path; nothing is copied or bundled.

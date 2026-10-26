@@ -292,7 +292,7 @@ assert "hand_body_in" not in probe[:publish_start] and "hand_body_in" not in pro
 # the drive: called only from the runtime's tick, after service(), once per side; spawn (create and snap) only where the clamp found it free
 assert runtime.count("body->drive(") == 1 and "body->drive(" in tick and tick.index("body->service(in,spawn,gate);") < tick.index("body->drive(")
 assert "->drive(" not in code_of(probe) and ".drive(" not in code_of(grab), "the drive runs only from the runtime tick"
-assert "HandBodyRuntime::drive" not in probe
+assert "HandBodyRuntime::drive(" not in probe
 assert "const bool free=fresh && now-last_hands_tick_<=free_fresh_ms && ((last_hands_.free>>side)&1u)!=0;" in tick
 assert "if(li.tracked && free && finite(last_hands_.palm[side])) spawn[side]=last_hands_.palm[side];" in tick
 assert "d.target_free=fresh && now-last_hands_tick_<=free_fresh_ms && ((last_hands_.free>>side)&1u)!=0;" in tick
@@ -581,3 +581,7 @@ if sim is not None:
     sim.compile_script(tank, 120)
     assert max(s["end_ms"] for s in tank) <= 120000 and len(tank) <= 128
     print("tank_hand_body scenario compiles")
+
+# A snap permission is not a collision verdict: only confirmed contact suppresses the root gate.
+assert "hand_body_in.root_gate_blocked=hand_visual_contact_bits | (hold_holding_bits & ~hand_body_in.hold_snap_ok);" in probe
+assert "!(last_hands_.root_gate_blocked&(1u<<side))" in runtime

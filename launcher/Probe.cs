@@ -98,7 +98,12 @@ public static class Probe
         }
         if (games.Length == 1 && ProxyLoadedIn(games[0]))
         {
-            log("The proxy is already loaded in the running game and starts VR itself. Use Stop VR to stop it, or restart the game.");
+            var gameDir = Path.GetDirectoryName(games[0].MainModule?.FileName)
+                ?? throw new InvalidOperationException("Cannot resolve the running game's proxy directory.");
+            SessionPath = ProxyInstall.StartPath.Proxy;
+            var requested = ProxyInstall.RequestStart(gameDir, root, ReadProxyLog(Path.Combine(root, "artifacts", "linux-proxy.log")));
+            log(requested ? "Requested a new VR session through the proxy; saved settings are read again at startup."
+                          : "VR is already running through the proxy. Stop VR, wait for restoration, then Launch VR to apply saved settings.");
             return false;
         }
         if (games.Length != 1) throw new InvalidOperationException("Start Dishonored 2 and enter gameplay or its pause menu; exactly one process is required.");

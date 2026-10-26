@@ -140,11 +140,12 @@ private:
 };
 
 // One-view rendering needs qualified per-eye native history, previous matrices/position and jitter before Game TAA is allowed.
-// FSR modes still use the spatial fallback in alternate mode. SMAA also runs when a saved FSR preference falls back.
-inline int alternate_effective_temporal(bool alternate_on, int requested,bool native_taa=false) noexcept {
-    return alternate_on ? (native_taa && requested==1?1:0) : requested;
+// Upscalers additionally require the diagnostic opt-in until their actual alternate-eye output is accepted.
+inline int alternate_effective_temporal(bool alternate_on, int requested,bool native_taa=false,bool upscalers=false) noexcept {
+    return alternate_on ? (native_taa && (requested==1 || upscalers)?requested:0) : requested;
 }
-inline bool alternate_smaa_applies(bool alternate_on, int saved_temporal) noexcept {return saved_temporal < 2 || alternate_on;}
+// Spatial AA follows the effective mode. A saved FSR choice may temporarily fall back to spatial AA.
+inline bool alternate_smaa_applies(bool /*alternate_on*/, int effective_temporal) noexcept {return effective_temporal < 2;}
 // Per-eye state (fsr_vfov, jitter counter, eye_jitter) is indexed by the LOGICAL eye of the view being prepared, not the native slot (always 0
 // for the one view).
 inline std::size_t alternate_state_slot(int logical_eye, int native_slot) noexcept {return static_cast<std::size_t>(logical_eye >= 0 ? logical_eye : native_slot);}

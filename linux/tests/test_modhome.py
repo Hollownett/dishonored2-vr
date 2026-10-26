@@ -42,7 +42,7 @@ class Case(unittest.TestCase):
         self.home = modhome.mod_home_dir(self.f.prefix)
 
     def make_zip(self, backslash=True, tamper=False, blocked=False, game_sha=None, name="rel.zip"):
-        dll = b"MZ mod dll v999"
+        dll = b"MZ mod dll v999" + ("\0run-root-gate\0prompt-target-anchor\0alternate-upscalers\0world-hand-depth\0").encode("utf-16le")
         manifest = {"dll_name": "d2vr_render_probe_arm_v999.dll", "sha256": sha(dll),
                     "game_sha256": game_sha or self.f.exe_sha256}
         if blocked:
@@ -288,6 +288,8 @@ class FeatureTests(Case):
         self.assertTrue((b / "launcher-features.json").is_file())
         self.assertTrue((b / "full-body").exists())
         self.assertFalse((b / "native-temporal-census").exists())  # default false: not created
+        for name in ("run-root-gate", "prompt-target-anchor", "alternate-upscalers", "world-hand-depth"):
+            self.assertFalse((b / name).exists(), name)  # supported experimental paths stay opt-in
         self.assertFalse((b / "no-hand-blink").exists())
         self.assertEqual(set(json.loads((b / "launcher-features.json").read_text())["seeded"]),
                          {f["id"] for f in self.features()})

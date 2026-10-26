@@ -45,6 +45,8 @@ namespace d2vr {
 // B16: filter = the word each side's body should carry (HandFilterKeeper, render thread: the R1 default unless a coupled hold takes a layer out).
 struct HandBodyHandsInput {unsigned tracked{};std::array<Vec3,2> palm{};bool authored{};bool focused{};
     std::array<WorldTrackedPose,2> target{};unsigned free{};unsigned yield{};bool locomotion{};std::optional<Vec3> player_root{};
+    unsigned root_gate_blocked{}; // confirmed surface contact or a held object not known free
+    bool root_feedforward_gate{};
     Vec3 player_velocity{};   // Fix B: the player's horizontal velocity, the drive's feedforward (zero with build/no-hand-body-feedforward)
     double target_time_s{std::numeric_limits<double>::quiet_NaN()};   // v613 item 6: QPC seconds when the render thread published the targets (set by publish_hands)
     std::array<std::uint32_t,2> filter{{R1Recipe::filter,R1Recipe::filter}};
@@ -166,6 +168,7 @@ public:
     // B15: the pose with its publication serial (the visible hand judges a pose that stopped updating) and the drive's contact signal
     static std::pair<std::optional<WorldTrackedPose>,std::uint64_t> pose_stamped(unsigned side) {const auto* body=body_.load(std::memory_order_acquire);
         return active() && body?body->pose_stamped(side):std::pair<std::optional<WorldTrackedPose>,std::uint64_t>{std::nullopt,0};}
+    static DriveStatus drive_status(unsigned side) {const auto* body=body_.load(std::memory_order_acquire);return active() && body?body->drive_status(side):DriveStatus{};}
     static bool contact_now(unsigned side) {const auto* body=body_.load(std::memory_order_acquire);return active() && body && body->drive_status(side).contact_now;}
     static bool ready(unsigned side) {const auto* body=body_.load(std::memory_order_acquire);return active() && body && body->ready(side);}
     static HandBodyStatus status(unsigned side) {const auto* body=body_.load(std::memory_order_acquire);return body?body->status(side):HandBodyStatus{};}
@@ -193,7 +196,7 @@ public:
              <<",\"misplaced_writes\":"<<st.misplaced_writes<<",\"reentrant_writes\":"<<st.reentrant_writes
              <<",\"filter\":"<<st.filter<<",\"filter_writes\":"<<st.filter_writes<<",\"filter_refused\":"<<st.filter_refused<<",\"filter_stranded\":"<<st.filter_stranded;
             const auto d=body->drive_status(side);
-            o<<",\"drive\":{\"gap_m\":"<<d.gap_m<<",\"speed\":"<<d.speed<<",\"capped\":"<<(d.capped?"true":"false")<<",\"contact_frames\":"<<d.contact_frames<<",\"contact_now\":"<<(d.contact_now?"true":"false")
+            o<<",\"drive\":{\"gap_m\":"<<d.gap_m<<",\"speed\":"<<d.speed<<",\"feedforward_mps\":"<<d.feedforward_mps<<",\"root_gate\":"<<(d.root_gate?"true":"false")<<",\"capped\":"<<(d.capped?"true":"false")<<",\"contact_frames\":"<<d.contact_frames<<",\"contact_now\":"<<(d.contact_now?"true":"false")
              <<",\"snaps\":"<<d.snaps<<",\"snap_requests\":"<<d.snap_requests<<",\"snap_blocked\":"<<d.snap_blocked<<",\"cost_us\":"<<d.cost_us
              <<",\"cost_max_us\":"<<d.cost_max_us<<",\"player_drift_um\":"<<d.player_drift_um<<",\"dt_s\":"<<d.dt_s<<",\"drives\":"<<d.drives
              <<",\"drive_writes\":"<<d.drive_writes<<",\"yields\":"<<d.yields<<",\"skipped\":"<<d.skipped<<",\"garbage\":"<<d.garbage
@@ -482,7 +485,7 @@ private:
             const bool tracked=((last_hands_.tracked>>side)&1u)!=0;
             d.yield=!fresh || !tracked || ((last_hands_.yield>>side)&1u)!=0;
             d.target_free=fresh && now-last_hands_tick_<=free_fresh_ms && ((last_hands_.free>>side)&1u)!=0;
-            d.player_root=fresh?last_hands_.player_root:std::nullopt;d.locomotion=last_hands_.locomotion;d.player_velocity=fresh?last_hands_.player_velocity:Vec3{};d.target_time_s=last_hands_.target_time_s;
+            d.player_root=fresh?last_hands_.player_root:std::nullopt;d.locomotion=last_hands_.locomotion;d.player_velocity=fresh?last_hands_.player_velocity:Vec3{};d.target_time_s=last_hands_.target_time_s;d.root_feedforward_gate=fresh && last_hands_.root_feedforward_gate && !(last_hands_.root_gate_blocked&(1u<<side));
             d.holding=fresh && ((last_hands_.holding>>side)&1u)!=0;   // B16 fix round 2: no snap while this hand holds something ...
             d.hold_snap_ok=fresh && ((last_hands_.hold_snap_ok>>side)&1u)!=0;   // ... unless the held object is free (P2-1)
             body->drive(d);

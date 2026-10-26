@@ -1308,6 +1308,7 @@ public:
     std::optional<double> take_resolution_request() noexcept {const auto request=resolution_change_;resolution_change_.reset();return request;}
     std::optional<int> take_hud_request() noexcept {const auto request=hud_change_;hud_change_.reset();return request;}
     bool crosshair_visible() const noexcept {return settings_.crosshair();}
+    VrPreferences preferences() const {return settings_.preferences();}
     bool scripted_recenter() const noexcept {return settings_.scripted_recenter();}
     CutsceneMode cutscene_mode() const noexcept {return settings_.cutscene_mode();}
     // v609 first-start AA: the decided mode (none = keep the saved one) goes out as a temporal request, the marker is set and the file is written once.
@@ -1319,7 +1320,7 @@ public:
     // Writes the saved settings; false when there is no file or the save failed (logged), so callers can keep legacy knobs until it works.
     bool persist_preferences() {
         if(preferences_file_.empty()) return false;
-        try {save_preferences(preferences_file_,{settings_.requested(),settings_.antialiasing(),settings_.turning(),settings_.mirror(),settings_.sharpness(),settings_.temporal_aa(),settings_.hud_percent(),settings_.controls_hint(),settings_.player_measurements(),settings_.aa_chosen(),settings_.crosshair(),settings_.scripted_recenter(),settings_.cutscene_mode()});return true;}
+        try {save_preferences(preferences_file_,settings_.preferences());return true;}
         catch(const std::exception&) {if(log_note) log_note("v609 first-start save failed: the settings stay unsaved and the next start decides again");return false;}
     }
     std::optional<int> take_temporal_request() noexcept {const auto request=temporal_change_;temporal_change_.reset();return request;}
@@ -1354,7 +1355,8 @@ public:
     XrTime tracking_prediction_time() const noexcept {return locate_display_time_;}
     XrViewStateFlags tracking_flags() const noexcept {return located_view_flags_;}
     void upscaler_generation(unsigned generation) noexcept {settings_.upscaler_generation(generation);}
-    void performance_mode(bool value) noexcept {settings_.performance_mode(value);} // alternate-eye is running: the Anti-aliasing row says SMAA is in use
+    void performance_mode(bool value) noexcept {settings_.performance_mode(value);}
+    void effective_temporal_aa(int mode) noexcept {settings_.effective_temporal_aa(mode);}
     void dlss_available(bool value) noexcept {settings_.dlss_available(value);} // offers the DLAA/DLSS Quality rows (NVIDIA GPU + user's nvngx_dlss.dll)
     // Latest completed HUD window surface (or null to hide it); set each frame by the producer.
     // Same hold as world_ui: a frame without a fresh panel capture re-shows the last image (up to 400 ms)
@@ -1942,7 +1944,7 @@ public:
                 antialiasing_enabled_=*changes.antialiasing;
             }
             if(!preferences_file_.empty() && (changes.resolution || changes.antialiasing || changes.turning || changes.mirror || changes.sharpness || changes.temporal_aa || changes.hud_percent || changes.controls_hint || changes.crosshair || changes.scripted_recenter || changes.cutscene_mode || changes.player_measurements))
-                save_preferences(preferences_file_,{settings_.requested(),settings_.antialiasing(),settings_.turning(),settings_.mirror(),settings_.sharpness(),settings_.temporal_aa(),settings_.hud_percent(),settings_.controls_hint(),settings_.player_measurements(),settings_.aa_chosen(),settings_.crosshair(),settings_.scripted_recenter(),settings_.cutscene_mode()});
+                save_preferences(preferences_file_,settings_.preferences());
             // Includes squeeze: holding the calibration pose must not open the native weapon selector.
             if(changes.consume) {controller_input={};settings_consumed=true;}
             if(changes.test_unlock) test_unlock_requested=true;
@@ -2017,7 +2019,7 @@ public:
                 ID3D11Texture2D* processed=nullptr;
                 {ModGpuScope aa_scope(context_.Get(),ModSpan::aa_sharpen); // task 3b
                 SpanClock span(xr_spans,XrSpan::aa_sharpen);
-                processed=gameplay && antialiasing_enabled_ && alternate_smaa_applies(alternate_enabled,settings_.temporal_aa()) && !alt_stale?antialiasing_->apply(sources[eye]):sources[eye]; // FSR 3 already anti-aliased
+                processed=gameplay && antialiasing_enabled_ && alternate_smaa_applies(alternate_enabled,settings_.effective_temporal_aa()) && !alt_stale?antialiasing_->apply(sources[eye]):sources[eye];
                 // Sharpening also helps menu text (menus get no SMAA).
                 if(sharpness>0 && !alt_stale) processed=sharpen_->apply(processed,sharpness);}
                 {ModGpuScope copy_scope(context_.Get(),ModSpan::eye_copy); // task 3b

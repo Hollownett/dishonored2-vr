@@ -27,6 +27,34 @@ struct Sim {
 };
 }
 int main() {
+    {   // Translation invariance: ordinary hand motion must behave the same while sprinting.
+        // The v613 hand-target gate cuts 6 m/s feedforward to ~1.1 m/s on the back stroke,
+        // then restores it on the forward stroke, adding up to 15 cm of cyclic tracking error.
+        double old_peak=0;
+        for(bool root_gate:{false,true}) {
+            HandServoState moving{},rest{};HandServoConfig cfg;GrabTuning tuning;
+            auto world=pose({}),local=pose({});Vec3 world_v{},local_v{};double peak=0,ff_low=100;
+            const double dt=1./90,V=6;
+            for(unsigned i=0;i<900;++i) {
+                const double t=i*dt;const Vec3 root{V*t,0,0};
+                const auto hand=pose({.12*std::sin(t*10),0,0});auto target=hand;target.position=target.position+root;
+                const auto a=servo_step(moving,target,world,world_v,{},0,dt,1,cfg,tuning,false,kDefaultHeldLever,{V,0,0},0,
+                    root_gate?std::optional<Vec3>{root}:std::nullopt);
+                const auto b=servo_step(rest,hand,local,local_v,{},0,dt,1,cfg,tuning,false);
+                world_v=a.linear;local_v=b.linear;
+                if(i>180) {peak=std::max(peak,std::abs((world.position.x-root.x)-local.position.x));ff_low=std::min(ff_low,moving.prev_ff.x);}
+                world.position=world.position+world_v*dt;local.position=local.position+local_v*dt;
+            }
+            if(root_gate) {CHECK(peak<.001);CHECK(ff_low>5.99);CHECK(old_peak>.10);}
+            else old_peak=peak;
+        }
+    }
+    {   // The publication clock uses elapsed time, even when force/snap integration caps a slow frame.
+        HandServoState st;HandServoConfig cfg;GrabTuning tuning;const double dt=.04;
+        const auto target=pose({});servo_step(st,target,target,{}, {},0,dt,1,cfg,tuning,false);
+        CHECK(std::abs(st.clock-dt)<1e-12);
+    }
+
     {   // feedforward_holds_running_hand: the target moves at 6 m/s along x for 2 s at 90 Hz from a matched start
         double gap_with=0,gap_without=0;
         for(const bool use:{true,false}) {

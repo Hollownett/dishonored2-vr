@@ -1,8 +1,8 @@
 #pragma once
-// Which left-hand equip pose / decl names mean a drawn pistol or crossbow (the crosshair and the shots then follow the gun's barrel).
-// The match is a case-insensitive substring, the same families the hand-collision shape uses ("Gun", "Pistol", "Crossbow"), so a
-// differently spelled name after a weapon swap ("GunEquip", "pistol_draw", "CrossBow") does not silently drop the barrel aim.
+// Conservative equip-pose routing for barrel aim, plus a broad diagnostic decl matcher.
 #include <cctype>
+#include <cstdint>
+#include <string>
 #include <string_view>
 
 namespace d2vr {
@@ -15,6 +15,21 @@ inline bool contains_nocase(std::string_view text,std::string_view needle) noexc
     }
     return false;
 }
+// Restore the v612 barrel-routing rule; the broader matcher below is diagnostic only.
+inline bool is_barrel_equip_name(std::string_view name) noexcept {
+    return name=="Gun" || name.find("rossbow")!=name.npos;
+}
+// Any slot/model/equip change invalidates the old aim filter on its owning render thread.
+class AimEquipTracker {
+    std::uintptr_t item_{},model_{};std::string name_;
+    std::uint64_t revision_{};
+public:
+    bool update(std::uintptr_t item,std::uintptr_t model,std::string_view name) {
+        if(item==item_ && model==model_ && name==name_) return false;
+        item_=item;model_=model;name_=name;++revision_;return true;
+    }
+    std::uint64_t revision() const {return revision_;}
+};
 inline bool is_gun_equip_name(std::string_view name) noexcept {
     return contains_nocase(name,"gun") || contains_nocase(name,"pistol") || contains_nocase(name,"crossbow");
 }

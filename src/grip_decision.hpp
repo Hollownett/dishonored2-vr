@@ -7,7 +7,7 @@
 namespace d2vr {
 // G3 (plan Task 6, the user's decision 2026-10-25): grip ALONE grabs physical props and corpses (Bonelab / Alyx: "when the controller reports
 // grabbed"); grip on loot or a usable (a door, a lever) still does the game's Use. At the grip edge the hand's native Use target and its physical
-// pick are scored in ONE list with the same palm cost, and the cheaper one wins. pending: keep deciding (GripIntent waits).
+// pick are compared by actual hand distance, and the nearer eligible one wins. pending: keep deciding (GripIntent waits).
 enum class GripAloneChoice {pending,use,grab,none};   // none (V1): nothing - neither the game's Use nor a grab (a corpse with no bone in reach)
 // native: this hand's live native Use target (NativeInteractionAim::target_bounds). physical: its physical lane's pick (NativeGrab::focus_score,
 // raw cost from the same palm probe). native_fresh: the stage-0 verdict for this hand is current, target OR none (ruling H2: query_ready).
@@ -20,25 +20,23 @@ struct GripAloneInput {std::optional<PalmTarget> native;std::optional<FocusScore
 inline constexpr std::uint64_t grip_alone_fresh_wait_ms=100;   // the existing 100 ms intent window, never longer (spec G3)
 // Rules, in order:
 //  1. an occupied hand, a choke that owns the squeeze or an offered takedown: use (today's path);
-//  2. the physical pick counts only within grip_alone_gate_m (0.12 m: the hand is on it; a right-hand block next to a table still blocks);
+//  2. the physical pick counts only within grip_alone_gate_m (0.10 m: the hand is on it; a right-hand block next to a table still blocks);
 //  3. no fresh native verdict yet and under 100 ms since the edge: pending;
 //  4. (a corpse only; a living NPC's own native target is Use) the native target IS the physical pick's entity (a corpse's own carry): grab. Else both scored with the same probe, the lower cost wins: loot or usable -> use, prop, bone or living (ruling H6) -> grab; a tie goes to Use;
-//     a native target beyond the palm's 0.45 m gate (a gaze Use) still wins over nothing;
-//  5. nothing in reach (ruling H1): pending while the grab buffer runs (grab_buffer_ms from the edge, 0.12 m gate), then use (today's role).
+//     a native target beyond the palm's 0.20 m pickup gate (a gaze Use) still wins over nothing;
+//  5. nothing in reach (ruling H1): pending while the grab buffer runs (grab_buffer_ms from the edge, 0.10 m gate), then use (today's role).
 inline GripAloneChoice decide_grip_alone(const GripAloneInput& in,const GrabTuning& tuning,double hover_radius) noexcept {
     if(in.occupied || in.choke_owns || in.takedown_offered || in.fast_native) return GripAloneChoice::use;
-    // Ruling V1 (user 2026-10-25): a corpse's native Use is the shoulder carry, which only the 0.5 s torso hold may start (carry_handoff). Grip alone on a
-    // corpse is the physical grab with the FIST gate (palm pick of its bones within grab_acquire_distance, 0.45 m); no bone in reach is nothing, never Use.
+    const bool physical=in.physical && (in.physical->kind==PalmKind::prop || in.physical->kind==PalmKind::bone || in.physical->kind==PalmKind::living) &&
+        std::isfinite(in.physical->distance) && in.physical->distance>=0 && in.physical->distance<=tuning.grip_alone_gate_m && std::isfinite(in.physical->cost);
+    // A corpse's native carry target must not swallow a nearer prop. All grip-only
+    // physical picks use the same contact gate; shoulder carry still needs its torso hold.
     if(in.native_corpse) {
         const std::uint64_t waited=in.now_ms>=in.since_ms?in.now_ms-in.since_ms:0;
-        const bool bone=in.physical && in.physical->kind==PalmKind::bone && std::isfinite(in.physical->distance) && in.physical->distance>=0 &&
-            in.physical->distance<=grab_acquire_distance && std::isfinite(in.physical->cost);
-        if(bone) return GripAloneChoice::grab;
+        if(physical && (in.physical->kind!=PalmKind::living || in.native_fresh)) return GripAloneChoice::grab;
         if(!in.native_fresh && waited<grip_alone_fresh_wait_ms) return GripAloneChoice::pending;
         return tuning.grab_buffer_ms>0 && static_cast<double>(waited)<tuning.grab_buffer_ms?GripAloneChoice::pending:GripAloneChoice::none;
     }
-    const bool physical=in.physical && (in.physical->kind==PalmKind::prop || in.physical->kind==PalmKind::bone || in.physical->kind==PalmKind::living) &&
-        std::isfinite(in.physical->distance) && in.physical->distance>=0 && in.physical->distance<=tuning.grip_alone_gate_m && std::isfinite(in.physical->cost);
     const std::uint64_t elapsed=in.now_ms>=in.since_ms?in.now_ms-in.since_ms:0;
     if(!in.native_fresh && elapsed<grip_alone_fresh_wait_ms) return GripAloneChoice::pending;
     // I1: a living NPC's native targets (choke, talk, knock-out prompt) are on HIM and win Use; his hold waits for a current verdict (ruling H2).
@@ -51,7 +49,7 @@ inline GripAloneChoice decide_grip_alone(const GripAloneInput& in,const GrabTuni
     // Only a corpse (PalmKind::bone): a living NPC's native target (choke, talk, knock-out) is Use (I1).
     if(physical && in.native && in.physical->kind==PalmKind::bone && in.physical->entity && in.native->id==in.physical->entity) return GripAloneChoice::grab;
     if(physical && in.native && in.physical->kind==PalmKind::living && in.physical->entity && in.native->id==in.physical->entity) return GripAloneChoice::use;
-    if(physical && (!native_cost || in.physical->cost<*native_cost)) return GripAloneChoice::grab;
+    if(physical && (!native_cost || in.physical->distance<*native_cost)) return GripAloneChoice::grab;
     if(in.native) return GripAloneChoice::use;
     if(tuning.grab_buffer_ms>0 && static_cast<double>(elapsed)<tuning.grab_buffer_ms) return GripAloneChoice::pending;
     return GripAloneChoice::use;

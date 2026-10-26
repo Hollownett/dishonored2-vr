@@ -10,19 +10,17 @@
 #include <utility>
 #include <vector>
 namespace d2vr {
-inline constexpr double grab_acquire_distance=.45;
-inline constexpr double grab_retain_distance=.55;
-inline constexpr double grab_switch_margin=.10;
+inline constexpr double grab_acquire_distance=.20;
+inline constexpr double grab_retain_distance=grab_acquire_distance;
+inline constexpr double grab_switch_margin=0;
 // Hand "beam": a palm-wide cylinder along the hand's forward axis. Items it touches outrank items that
 // are merely near the palm; among them the one nearest the axis wins, with a small range penalty.
 inline constexpr double grab_beam_radius=.06,grab_beam_range_weight=.25;
 // Loot (pickups, carryables) within a palm width of the nearest hit wins: coins on a cash machine were ranked behind the
 // machine's surface under the palm, which the grip then used (sim v467).
 inline constexpr double use_loot_bonus=grab_beam_radius;
-// Bonelab palm cost (research 1.1, Hand.UpdateHovering): facing x distance x approach x priority, 0.86 hysteresis on the current pick.
-// ONE implementation shared by loot, props and corpse bones (plan Task 2, ruling H5: later tasks call PalmSelection; per-kind priority is a field on the target).
-// Ruling H10: eligibility is the 0.45 m acquire distance from the palm point (not the hover sphere); hover_centre is only the scoring centre
-// and the facing term handles the back of the hand. The 0.55 m retain gate keeps a held pick.
+// Shared hand-distance selection for loot, props and corpse bones. Reach is measured
+// to actual bounds, with the same 20 cm gate for every hover candidate.
 inline constexpr double palm_axis_push=.015,hover_lead=.8,palm_facing_bias=.6,palm_hysteresis=.86,
     approach_min=.8,approach_max=1.2,approach_per_mps=.2,loot_min_half=.03,default_arm_length=.65;
 enum class PalmKind : unsigned char {loot,usable,prop,bone,living};
@@ -42,72 +40,65 @@ inline Vec3 palm_point(const PalmProbe& p) {return p.palm+p.forward*palm_axis_pu
 inline Vec3 hover_centre(const PalmProbe& p,double hover_radius) {return palm_point(p)+p.direction*(hover_lead*hover_radius);}
 struct PalmTarget {std::uint64_t id{};PalmKind kind{};Vec3 minimum{},maximum{};double priority=1;Vec3 velocity{};};
 struct PalmScore {double cost{},distance{};Vec3 point{};};
+inline bool hand_pickup_in_range(const PalmProbe& probe,Vec3 minimum,Vec3 maximum) noexcept {
+    if(!probe.valid || !finite(probe.palm) || !finite(probe.forward) || !finite(minimum) || !finite(maximum) ||
+       minimum.x>maximum.x || minimum.y>maximum.y || minimum.z>maximum.z) return false;
+    const auto origin=palm_point(probe);
+    const Vec3 point{std::clamp(origin.x,minimum.x,maximum.x),std::clamp(origin.y,minimum.y,maximum.y),std::clamp(origin.z,minimum.z,maximum.z)};
+    return length(point-origin)<=grab_acquire_distance;
+}
 inline bool palm_target_valid(const PalmTarget& t) {
     return t.id && finite(t.minimum) && finite(t.maximum) && finite(t.velocity) && std::isfinite(t.priority) && t.priority>0 &&
            t.minimum.x<=t.maximum.x && t.minimum.y<=t.maximum.y && t.minimum.z<=t.maximum.z;
 }
-// Raw cost (no hysteresis) of one target, or nothing when it is farther than `gate` from the palm point (or the inputs are bad). No allocation.
+// Distance to the actual target bounds. Direction, approach speed, kind and a previously hovered
+// target must never make a farther object beat a nearer eligible object.
 inline std::optional<PalmScore> palm_cost(const PalmProbe& probe,const PalmTarget& target,double hover_radius,double gate) {
-    (void)hover_radius;   // scoring centre only (ruling H10); distance and direction below are from the palm point, as the tests pin
+    (void)hover_radius;
     if(!probe.valid || !palm_target_valid(target) || !std::isfinite(gate)) return {};
     Vec3 lo=target.minimum,hi=target.maximum;
-    if(target.kind==PalmKind::loot) {   // pad small pickups about their centre, for scoring only
-        const Vec3 c=(lo+hi)*.5,h=(hi-lo)*.5;
-        const Vec3 e{std::max(h.x,loot_min_half),std::max(h.y,loot_min_half),std::max(h.z,loot_min_half)};
-        lo=c-e;hi=c+e;
-    }
     const Vec3 origin=palm_point(probe);
     const Vec3 point{std::clamp(origin.x,lo.x,hi.x),std::clamp(origin.y,lo.y,hi.y),std::clamp(origin.z,lo.z,hi.z)};
     const double distance=length(point-origin);
     if(!(distance<=gate)) return {};
-    Vec3 to_target=probe.direction;   // a palm on the item faces it
-    double facing_dot=1;
-    if(distance>1e-9) {to_target=(point-origin)*(1/distance);facing_dot=dot(probe.direction,to_target);}
-    const double facing=(palm_facing_bias-facing_dot)*(palm_facing_bias-facing_dot)+1;
-    const double dn=distance/(probe.arm_length*.25);
-    const double close=dot(probe.velocity-target.velocity,to_target);
-    const double approach=std::clamp(1-approach_per_mps*close,approach_min,approach_max);
-    const double cost=facing*(dn*dn+1)*approach*target.priority;
-    if(!std::isfinite(cost)) return {};
-    return PalmScore{cost,distance,point};
+    return PalmScore{distance,distance,point};
 }
 struct PalmPick {std::optional<std::size_t> index;double cost{},runner_up{};bool hysteresis_held{},fallback{};};
-// current==0: nothing held. A new target must be within `acquire` of the palm point; the current one stays eligible out to `retain` and its cost
-// is multiplied by palm_hysteresis. Ties go to the lower id. A non-finite probe keeps `current` (if it is in the list) and sets fallback.
+// Hover is not a hold: all candidates obey the same acquire gate. Equal distances keep
+// the previous target, then use the lower id. A bad probe never acquires a new target.
 template<class Targets> PalmPick pick_by_palm(const PalmProbe& probe,const Targets& targets,std::uint64_t current,
         double hover_radius,double acquire=grab_acquire_distance,double retain=grab_retain_distance) {
     PalmPick out;out.runner_up=std::numeric_limits<double>::infinity();
+    (void)retain;
     if(!probe.valid) {
         out.fallback=true;
         std::size_t i=0;for(const auto& t:targets) {if(current && t.id==current) {out.index=i;break;}++i;}
         return out;
     }
-    std::uint64_t best_id=0;double best=std::numeric_limits<double>::infinity(),best_raw=best;
-    double lowest_raw=best;   // best raw cost among everything eligible: tells whether hysteresis decided
+    std::uint64_t best_id=0;double best=std::numeric_limits<double>::infinity();
     std::size_t i=0;
     for(const auto& t:targets) {
         const std::size_t at=i++;
         const bool held=current && t.id==current;
-        const auto s=palm_cost(probe,t,hover_radius,held?std::max(retain,acquire):acquire);
+        const auto s=palm_cost(probe,t,hover_radius,acquire);
         if(!s) continue;
-        const double effective=held?s->cost*palm_hysteresis:s->cost;
-        lowest_raw=std::min(lowest_raw,s->cost);
-        if(effective<best || (effective==best && t.id<best_id)) {
+        const double effective=s->distance;
+        if(effective<best || (effective==best && (held || (best_id!=current && t.id<best_id)))) {
             if(out.index) out.runner_up=std::min(out.runner_up,best);
-            out.index=at;best=effective;best_raw=s->cost;best_id=t.id;
+            out.index=at;best=effective;best_id=t.id;
         } else out.runner_up=std::min(out.runner_up,effective);
     }
-    if(out.index) {out.cost=best;out.hysteresis_held=current && best_id==current && lowest_raw<best_raw;}
+    if(out.index) out.cost=best;
     else out.runner_up=0;
     return out;
 }
 // What a hand's physical lane picked (NativeGrab::focus_score, plan Task 5): its raw palm cost, the runner-up's cost and the distance from the
 // palm point. Read by the grip-alone decision (Task 6) and the grab_focus status block.
 struct FocusScore {std::uint64_t id{};PalmKind kind{};double cost{},runner_up{},distance{};std::uintptr_t entity{};};   // entity: the picked body's entity
-// Per-hand owner of the hysteresis state plus the counters.
+// Per-hand hover identity and diagnostics.
 class PalmSelection {
 public:
-    // acquire/retain: the gates (0.45/0.55 m; a caller with a tighter acquire gate passes it, the retain stays at least 0.55 m).
+    // All hover candidates use acquire; retain remains an API compatibility argument.
     PalmPick update(const PalmProbe& probe,const std::vector<PalmTarget>& targets,double hover_radius,std::uint64_t now_ms,
             double acquire=grab_acquire_distance,double retain=grab_retain_distance) {
         PalmPick pick=pick_by_palm(probe,targets,current_,hover_radius,acquire,retain);
@@ -185,22 +176,16 @@ inline NativeUseOrderProbe native_use_order_probe(const PalmProbe& palm,bool leg
     out.probe=out.legacy?legacy_beam_probe(volume_centre,aim_forward):palm;
     return out;
 }
-// Orders the native hand-volume Use hits; downstream native permission and LOS checks still decide, in this order. Records are only
-// permuted, never altered; a non-finite or far (>1000 m) hit point rejects the whole buffer (false, unchanged).
-// Hand mode (G1, plan Task 3): Task 2's palm cost. Each hit is scored as its owner's model bounds (bounds(owner) -> optional<pair<min,max>>;
-// missing or bad bounds: the hit point as a zero-size box), kind loot when loot(owner) else usable, priority from the tuning (loot 0.8
-// replaces the 6 cm bonus). pick_by_palm chooses the winner (the 0.45 m acquire gate, 0.55 m retain gate and the ONE 0.86 hysteresis on
-// `preferred`, ruling H5) and every hit of the winner leads. Then the other in-gate hits by raw cost, then the hits beyond the gate by
-// today's fallback (distance + 1), then `other_hand`'s owner (the other hand's pick) last. An unresolved owner (0) is scored as a usable.
-// A non-finite palm (probe.valid false) keeps the old pick: `preferred`'s hits lead and the rest keep the native order (the live hook never
-// gets here: native_use_order_probe sends such a cycle to the legacy beam).
-// Scratch is thread-local (the native sort hook's stack stays small); the function never re-enters itself (owner/loot/bounds only read).
-// legacy_beam (build/legacy-palm-select, gaze/reach mode, ruling H7): the v610 forward beam, unchanged: probe.palm is the hand point,
-// probe.forward the beam axis (legacy_beam_probe), a 2 cm preference for `preferred` and the 6 cm loot bonus; other_hand plays no part.
+// Order hand-volume Use hits by distance to their owner's actual bounds (hit point when unknown).
+// Hovering with either hand grants no preference or reservation. Native permission and LOS
+// checks still decide eligibility after sorting. Full records are only permuted.
+// A bad palm keeps the current target; the live caller instead uses the legacy beam fallback.
+// Gaze/reach mode and build/legacy-palm-select retain the old forward beam.
 template<class Owner,class Loot,class Bounds,class Tuning=GrabTuning>
 bool order_native_use_hits(NativeUseHit* hits,unsigned count,const PalmProbe& probe,std::uintptr_t preferred,std::uintptr_t other_hand,
         Owner owner,Loot loot,Bounds bounds,const Tuning& tuning,bool legacy_beam=false) {
     if(!hits || count>64) return false;
+    (void)other_hand; // another hand hovering this object does not reserve it
     struct Known {std::uintptr_t owner{};bool loot{};std::optional<std::pair<Vec3,Vec3>> box;};
     struct Scratch {
         std::array<Vec3,64> point;std::array<double,64> cost;std::array<unsigned char,64> tier;std::array<unsigned,64> order,eligible_hit;
@@ -252,10 +237,9 @@ bool order_native_use_hits(NativeUseHit* hits,unsigned count,const PalmProbe& pr
             t.kind=k->loot?PalmKind::loot:PalmKind::usable;t.priority=tuning.priority(t.kind);
             t.minimum=k->box?k->box->first:point[i];t.maximum=k->box?k->box->second:point[i];
         }
-        // The other hand's pick never enters the choice.
+        // Both hands may hover the same object; hovering reserves nothing.
         unsigned eligible_count=0;
         for(unsigned i=0;i<count;++i) {
-            if(other_hand && owners[i]==other_hand) {tier[i]=3;continue;}
             eligible_hit[eligible_count]=i;eligible[eligible_count++]=targets[i];
         }
         struct Span {const PalmTarget* first;const PalmTarget* last;const PalmTarget* begin() const {return first;} const PalmTarget* end() const {return last;}};
@@ -263,8 +247,7 @@ bool order_native_use_hits(NativeUseHit* hits,unsigned count,const PalmProbe& pr
         const std::uint64_t winner=pick.index?eligible[*pick.index].id:0;
         for(unsigned e=0;e<eligible_count;++e) {
             const unsigned i=eligible_hit[e];
-            const bool held=preferred && owners[i]==preferred;
-            const auto s=probe.valid?palm_cost(probe,targets[i],tuning.hover_radius_m,held?std::max(grab_retain_distance,grab_acquire_distance):grab_acquire_distance):std::nullopt;
+            const auto s=probe.valid?palm_cost(probe,targets[i],tuning.hover_radius_m,grab_acquire_distance):std::nullopt;
             if(winner && targets[i].id==winner && (s || !probe.valid)) tier[i]=0;
             else if(!probe.valid) tier[i]=1;   // cost 0: native order
             else if(s) tier[i]=1;
@@ -290,7 +273,7 @@ inline bool held_prompt_survives_cycle(std::uintptr_t held_owner,bool held_loot,
 // controller, so a controller pushed through a wall cannot take what is behind it. No clamped palm this cycle (no clamp, a yield, a
 // re-acquire, stale), not loot, gaze/reach mode, or a palm implausibly far from the hit point: the eye (nullopt). Walls, closed drawers
 // and doors between the hand and the item still block: the same sweep, filter and walk, only its start moves.
-inline constexpr double loot_hand_los_max_m=1.0;   // the hand-volume gate is 0.45/0.55 m from the palm; a farther palm is not this hand's
+inline constexpr double loot_hand_los_max_m=1.0;   // the shared interaction volume is 0.45 m from the palm; a farther palm is not this hand's
 inline std::optional<Vec3> loot_los_hand_origin(bool takeable,bool hand_mode,const std::optional<Vec3>& clamped_palm,Vec3 point) noexcept {
     if(!takeable || !hand_mode || !clamped_palm || !finite(*clamped_palm) || !finite(point)) return std::nullopt;
     if(length(*clamped_palm-point)>loot_hand_los_max_m) return std::nullopt;

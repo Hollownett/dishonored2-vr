@@ -370,6 +370,42 @@
    "default": true
   },
   {
+   "id": "run-root-gate",
+   "file": "run-root-gate",
+   "kind": "enable",
+   "label": "Sprint hand tracking repair (experimental)",
+   "help": "Tests a correction for hands repeatedly lagging and catching up while running. Off until verified in a headset.",
+   "default": false,
+   "requires_dll_knob": "run-root-gate"
+  },
+  {
+   "id": "prompt-target-anchor",
+   "file": "prompt-target-anchor",
+   "kind": "enable",
+   "label": "Takedown prompt targeting repair (experimental)",
+   "help": "Keeps a kill or choke prompt attached to its guard when a hand targets nearby loot. The reported headset regression still needs verification.",
+   "default": false,
+   "requires_dll_knob": "prompt-target-anchor"
+  },
+  {
+   "id": "alternate-upscalers",
+   "file": "alternate-upscalers",
+   "kind": "enable",
+   "label": "Selected AA in performance mode (experimental)",
+   "help": "Uses the selected temporal AA, FSR or DLSS mode with performance mode. Both eyes have simulator coverage; headset image quality remains unverified. Off uses the existing SMAA path.",
+   "default": false,
+   "requires_dll_knob": "alternate-upscalers"
+  },
+  {
+   "id": "world-hand-depth",
+   "file": "world-hand-depth",
+   "kind": "enable",
+   "label": "Hand and prop depth repair (experimental)",
+   "help": "Tests a depth correction for hands appearing through held objects. The native depth reset is fixed; paper, corpse limbs and prompt visibility still need headset verification.",
+   "default": false,
+   "requires_dll_knob": "world-hand-depth"
+  },
+  {
    "id": "native-temporal-census",
    "file": "native-temporal-census",
    "kind": "enable",

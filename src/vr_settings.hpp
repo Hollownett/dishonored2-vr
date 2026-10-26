@@ -66,7 +66,8 @@ class VrSettings {
     bool scripted_recenter_{true};CutsceneMode cutscene_mode_{CutsceneMode::vr_comfort}; // G1/G3: recenter on scripted moments, cutscene presentation
     bool aa_chosen_{},crosshair_{true}; // v609: persisted AA-chosen marker and the aim crosshair switch
     unsigned upscaler_generation_{3}; // Actual runtime backend; preferences retain the existing quality modes.
-    bool performance_mode_{}; // alternate-eye (performance mode) is running: it draws one eye per frame and uses SMAA in place of FSR/DLSS
+    bool performance_mode_{};
+    std::optional<int> effective_temporal_aa_;
     bool dlss_available_{}; // NVIDIA GPU and a usable nvngx_dlss.dll: the DLAA/DLSS Quality rows are offered only then
     int hud_percent_{65};
     bool controls_hint_{true};
@@ -106,7 +107,7 @@ public:
                    std::optional<PalmOffsetChange> palm_offset;};
     void initialize(double scale,bool aa,TurnControl::Config turning={},MirrorMode mirror=MirrorMode::right_eye,double sharpness=.5,int temporal_aa=2,
         int hud_percent=65,bool controls_hint=true,AvatarPlayerMeasurements player_measurements={},bool aa_chosen=false,bool crosshair=true,bool scripted_recenter=true,CutsceneMode cutscene_mode=CutsceneMode::vr_comfort) {
-        requested_=scale;aa_=aa;turning_=turning;mirror_=mirror;sharpness_=sharpness;temporal_aa_=temporal_aa;
+        requested_=scale;aa_=aa;turning_=turning;mirror_=mirror;sharpness_=sharpness;temporal_aa_=temporal_aa;effective_temporal_aa_.reset();
         hud_percent_=hud_percent;controls_hint_=controls_hint;player_measurements_=player_measurements;aa_chosen_=aa_chosen;crosshair_=crosshair;scripted_recenter_=scripted_recenter;cutscene_mode_=cutscene_mode;
     }
     bool open() const noexcept {return open_;}
@@ -184,6 +185,10 @@ public:
     double requested() const noexcept {return requested_;}
     bool antialiasing() const noexcept {return aa_;}
     int temporal_aa() const noexcept {return temporal_aa_;}
+    VrPreferences preferences() const {
+        return {requested_,aa_,turning_,mirror_,sharpness_,temporal_aa_,hud_percent_,controls_hint_,player_measurements_,
+                aa_chosen_,crosshair_,scripted_recenter_,cutscene_mode_};
+    }
     bool aa_chosen() const noexcept {return aa_chosen_;}
     bool crosshair() const noexcept {return crosshair_;}
     void set_crosshair(bool v) noexcept {crosshair_=v;}
@@ -197,8 +202,9 @@ public:
     bool dlss_available() const noexcept {return dlss_available_;}
     void performance_mode(bool value) noexcept {performance_mode_=value;}
     bool performance_mode() const noexcept {return performance_mode_;}
-    /// v613: the Anti-aliasing value, honest about performance mode (FSR/DLSS modes are replaced by SMAA there; Off and Game TAA are not upscalers).
-    bool performance_mode_replaces_aa() const noexcept {return performance_mode_ && temporal_aa_>=2;}
+    void effective_temporal_aa(int mode) noexcept {effective_temporal_aa_=mode;}
+    int effective_temporal_aa() const noexcept {return effective_temporal_aa_.value_or(temporal_aa_);}
+    bool performance_mode_replaces_aa() const noexcept {return performance_mode_ && temporal_aa_>=1 && effective_temporal_aa()==0;}
     int hud_percent() const noexcept {return hud_percent_;}
     bool controls_hint() const noexcept {return controls_hint_;}
     TurnControl::Config turning() const noexcept {return turning_;}

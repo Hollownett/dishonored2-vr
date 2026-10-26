@@ -37,6 +37,7 @@ extern "C" MH_STATUS WINAPI MH_DisableHook(LPVOID);
 #include "native_melee.hpp"
 #include "native_sword_contact.hpp"
 #include "native_held_object.hpp"
+#include "native_player_depth.hpp"
 #include "native_weapon_hands.hpp"
 #include "native_door_interaction.hpp"
 #include "native_slash_scene_rate.hpp"
@@ -204,6 +205,7 @@ class NativeInteractionAim {
     std::atomic<UINT> owned_depth_{};
     std::atomic<UINT64> volume_requests_{},volume_rejected_{},ranked_{},ranking_rejected_{},direct_shortcuts_filtered_{},occluded_scan_continued_{};
     std::atomic<UINT64> loot_prompt_lingers_dropped_{}; // H14: loot prompt lingers ended by the hand's own cycle
+    std::atomic<UINT64> pickup_range_rejected_{};
     std::atomic<UINT64> loot_hand_los_{},loot_eye_los_{}; // H16: stage-0 loot LOS calls swept from the clamped palm / left at the eye (no clamped palm)
     std::atomic<UINT64> palm_beam_fallbacks_{}; // hand-mode cycles ordered by the v610 beam because the palm probe was invalid
     std::atomic<UINT64> hand_range_origins_{};
@@ -566,6 +568,15 @@ class NativeInteractionAim {
     }
     template<unsigned Index> static void stage_body(void* sensor,StageFrame& frame) {
         auto* self=instance_;std::optional<Context> scope;std::optional<rig::Identity> sensor_identity;
+        if constexpr(Index==0) if(NativePlayerDepth::process_owner().needs_service()) try {
+            const auto at=reinterpret_cast<std::uintptr_t>(sensor);
+            if(self->logic_()==2 && rig::typed(self->read_,self->base_,at,0x1b403b8) && rig::started(self->read_,at)) {
+                const auto camera=rig::value<std::uintptr_t>(self->read_,at+0x40);
+                const auto owner=camera?native_player_camera(self->read_,self->base_,*camera):std::nullopt;
+                if(owner && rig::value<std::uintptr_t>(self->read_,at+0x10)==owner->player)
+                    NativePlayerDepth::process_owner().service(self->read_);
+            }
+        } catch(...) {}
         std::optional<NativeLeanQuerySnapshot> lean_scope;
         std::optional<NativeLeanQueryTransaction> lean_transaction;
         try {
@@ -1458,6 +1469,23 @@ private:
         } catch(...) {}
         const auto* los_origin=loot_los_origin(observed_scope,sensor,entity,point,range,caller,origin); // H16: the clamped palm for loot, else origin
         const auto result=occlusion_(sensor,entity,los_origin,axis,point,range,output); // original once, raw return preserved
+        auto qualified_result=result;
+        // The broadphase volume also serves NPCs and doors: retain its v612 reach,
+        // and restrict only takeable owners in hand mode. Reject through the native
+        // blocked/continue contract so every remaining candidate still gets native LOS.
+        if(observed_scope && observed_scope==context_ && observed_scope->stage==0 && !observed_scope->hand.reach && range==0 &&
+           (caller==base_+0x3b8b05 || caller==base_+0x3b87b5) && reinterpret_cast<std::uintptr_t>(sensor)==observed_scope->sensor &&
+           fresh(*observed_scope,GetTickCount64()) && takeable(reinterpret_cast<std::uintptr_t>(entity))) {
+            const auto bounds=owner_bounds(reinterpret_cast<std::uintptr_t>(entity));
+            const auto hit=rig::value<std::array<float,3>>(read_,reinterpret_cast<std::uintptr_t>(point));
+            const auto probe=observed_scope->hand.palm.valid?observed_scope->hand.palm:legacy_beam_probe(observed_scope->hand.volume_centre,{});
+            const Vec3 fallback=hit?Vec3{(*hit)[0],(*hit)[1],(*hit)[2]}:Vec3{NAN,NAN,NAN};
+            if(!hand_pickup_in_range(probe,bounds?bounds->first:fallback,bounds?bounds->second:fallback)) {
+                qualified_result=(result&~std::uintptr_t{0xff})|1;
+                ++pickup_range_rejected_;
+                if(output) *output=1;
+            }
+        }
         const bool loot_los_armed=loot_los_capture_.armed;loot_los_capture_.armed=false;
         if(loot_los_armed) loot_los_row(observed_scope->side,reinterpret_cast<std::uintptr_t>(sensor),reinterpret_cast<std::uintptr_t>(entity),caller,
             reinterpret_cast<std::uintptr_t>(los_origin),reinterpret_cast<std::uintptr_t>(point),range,result,reinterpret_cast<std::uintptr_t>(output),los_origin!=origin);
@@ -1495,7 +1523,7 @@ private:
                 }
             }
         } catch(...) {}
-        return result;
+        return qualified_result;
     }
     bool idle_character_publication(const Context& scope) {
         std::lock_guard<std::mutex> guard(mutex_);
@@ -2112,7 +2140,7 @@ public:
         log_<<"tick_ms,thread,stage,sensor,camera,routed";
         for(const auto* prefix:{"native","effective"}) for(unsigned i=0;i<12;++i) log_<<','<<prefix<<i;log_<<'\n';
         for(auto& count:query_outcomes_)count=0;
-        stage_calls_=rays_=routed_=rejected_=samples_=overlap_=volume_requests_=volume_rejected_=ranked_=ranking_rejected_=direct_shortcuts_filtered_=occluded_scan_continued_=0;palm_beam_fallbacks_=0;loot_prompt_lingers_dropped_=0;loot_hand_los_=0;loot_eye_los_=0;instance_=this;
+        stage_calls_=rays_=routed_=rejected_=samples_=overlap_=volume_requests_=volume_rejected_=ranked_=ranking_rejected_=direct_shortcuts_filtered_=occluded_scan_continued_=0;palm_beam_fallbacks_=0;loot_prompt_lingers_dropped_=0;loot_hand_los_=0;loot_eye_los_=0;pickup_range_rejected_=0;instance_=this;
         hand_range_origins_=0;
         const std::array<void*,6> hooks{reinterpret_cast<void*>(&stage<0>),reinterpret_cast<void*>(&stage<1>),reinterpret_cast<void*>(&stage<2>),
             reinterpret_cast<void*>(&direct),reinterpret_cast<void*>(&queue<0>),reinterpret_cast<void*>(&queue<1>)};
@@ -2158,6 +2186,9 @@ public:
     }
     bool disable() noexcept {
         stopping_=true;
+        // Keep Stage0 installed on timeout: restoring native depth from the
+        // worker or declaring a reusable session would leave stale arm models.
+        if(!NativePlayerDepth::process_owner().stop_and_wait())return false;
         NativeBlockEligibility::process_owner().enabled(false);
         NativeSlashSceneRate::process_owner().enabled(false);
         NativeChokeDistanceScope::process_owner().enabled(false);
@@ -2326,6 +2357,7 @@ public:
     UINT64 ranking_rejected() const {return ranking_rejected_.load();}
     UINT64 palm_beam_fallbacks() const {return palm_beam_fallbacks_.load();}
     UINT64 loot_prompt_lingers_dropped() const {return loot_prompt_lingers_dropped_.load();}
+    UINT64 pickup_range_rejected() const {return pickup_range_rejected_.load();}
     UINT64 loot_hand_los() const {return loot_hand_los_.load();}
     UINT64 loot_eye_los() const {return loot_eye_los_.load();}
     // Hands plan Task 4 interface (Task 15 grab_focus): the active floor/drawer loot fix branch. 'H' (fix round 1, ruling H16): loot LOS is
@@ -2363,4 +2395,3 @@ inline std::array<std::array<NativeInteractionAim::WeaponSegment,NativeInteracti
 inline NativeInteractionAim::SwordContactObservation NativeInteractionAim::sword_last_contact_;
 #endif
 } // namespace d2vr
-

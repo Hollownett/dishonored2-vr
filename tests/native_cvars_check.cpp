@@ -108,6 +108,11 @@ int main() {
         require(reduced_reset.set(3,1)&&reduced_reset.matches(3,1),"reduced-mode baseline reset failed to reapply");
         reduced_reset.restore();
         {LONG integer{};float scalar{};cache(3,integer,scalar);require(integer==0&&scalar==0.f,"reduced reset restore lost saved zero baseline");}
+        for(std::size_t i=0;i<NativeCvars::vr_defaults.size();++i) place(i);
+        NativeCvars native_depth;require(native_depth.apply(base,read,true,true)==9u,"native depth ownership was not excluded from raw cache writes");
+        {LONG integer{};float scalar{};cache(NativeCvars::player_depth_hack,integer,scalar);
+         require(integer==originals[NativeCvars::player_depth_hack] && scalar==1.f && !native_depth.set(NativeCvars::player_depth_hack,0),"raw cvars retained native depth ownership");}
+        native_depth.restore();originals_restored("raw restore altered native depth ownership");
         VirtualFree(region,0,MEM_RELEASE);
         std::cout<<"PASS: atomic cvar pairs, saved-baseline reapply, mode switches, mixed/foreign preservation, scalar mismatch restore and name filtering\n";
         return 0;

@@ -111,10 +111,13 @@ assert 'return alternate_pair_ready(rendered_mask_,alternate_fresh_eye,' in xr
 assert 'if(alternate_may_keep(gameplay,authored_camera,settings_.open())) keep_alternate_eye_(eye,processed);' in xr
 assert 'alt_kept_ok_(authored_camera || settings_.open())' in xr and 'if(nonfree) return false;' in xr
 assert 'if(!alternate_enabled && (alt_kept_[0] || alt_kept_[1])) {alt_kept_[0].Reset();alt_kept_[1].Reset();' in xr   # released after fallback
-# Native Game TAA is admitted only with verified ownership; FSR still falls back. State follows the logical eye.
-assert 'taa_preference=d2vr::alternate_effective_temporal(alternate_on(),taa_preference,alternate_taa_requested);' in probe
-assert 'd2vr::alternate_effective_temporal(alternate_on(),*requested_temporal,alternate_native_taa_allowed())' in probe
-assert 'alternate_smaa_applies(alternate_enabled,settings_.temporal_aa())' in xr
+# Temporal modes require verified ownership; upscalers additionally require explicit diagnostic opt-in.
+# The effective mode must never replace the saved/requested preference.
+assert 'taa_preference=d2vr::alternate_effective_temporal' not in probe
+assert 'temporal_live_mode=d2vr::alternate_effective_temporal(alternate_on(),taa_preference,alternate_taa_requested,alternate_upscalers_requested);' in probe
+assert 'd2vr::alternate_effective_temporal(alternate_on(),*requested_temporal,alternate_native_taa_allowed(),alternate_upscalers_requested)' in probe
+assert 'alternate_upscalers_requested=fs::exists(root/L"build"/L"alternate-upscalers");' in probe
+assert 'alternate_smaa_applies(alternate_enabled,settings_.effective_temporal_aa())' in xr
 assert 'const std::size_t eye_slot=d2vr::alternate_state_slot(alt_eye,eye);' in head
 assert 'fsr_vfov[eye_slot]=' in head and 'jitter_counter[eye_slot]=counter;' in head and 'auto& e=eye_jitter[eye_slot];' in head
 assert 'fsr_vfov[static_cast<std::size_t>(eye)]' not in head and 'jitter_counter[static_cast<std::size_t>(eye)]' not in head

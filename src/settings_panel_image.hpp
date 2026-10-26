@@ -127,11 +127,11 @@ inline std::vector<unsigned char> settings_panel_image(const VrSettings& setting
     struct Row {std::wstring name,value;double slider;std::wstring help;};
     const auto split=[&](const std::wstring& all,double slider,const wchar_t* help) {
         const auto at=all.find(L": ");return Row{all.substr(0,at),at==std::wstring::npos?L"":all.substr(at+2),slider,help};};
-    const auto aa_row=[](Row r,bool performance) {   // v613: performance mode (one eye per frame) uses SMAA in place of FSR/DLSS; say so
+    const auto aa_row=[](Row r,bool performance) {
         if(!performance) return r;
         const auto at=r.value.find(L" (");if(at!=std::wstring::npos) r.value.resize(at);
-        r.value+=L" (SMAA in perf. mode)";
-        r.help=L"Performance mode draws one eye per frame and uses SMAA; turn performance mode off to use FSR/DLSS. The in-game choice is kept for then.";
+        r.value+=L" (spatial fallback)";
+        r.help=L"Temporal AA is unavailable in this session. Spatial edge AA is used when enabled. Your selected temporal mode is kept.";
         return r;};
     std::wostringstream scale;scale<<std::fixed<<std::setprecision(1)<<settings.requested()<<L"x";
     std::wostringstream size;size<<width<<L" x "<<height<<L" per eye";

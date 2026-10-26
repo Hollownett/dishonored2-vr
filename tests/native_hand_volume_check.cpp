@@ -12,12 +12,13 @@ bool read_code(std::uintptr_t at,void* out,std::size_t size) {
 }
 void* __fastcall construct(void* out,const float* origin,float radius) {
     ++calls;assert(reinterpret_cast<std::uintptr_t>(out)%16==0 && reinterpret_cast<std::uintptr_t>(origin)%16==0);
-    assert(origin[0]==0 && origin[1]==0 && origin[2]==0 && origin[3]==0 && radius==static_cast<float>(grab_acquire_distance));
+    assert(origin[0]==0 && origin[1]==0 && origin[2]==0 && origin[3]==0 && radius==static_cast<float>(interaction_volume_radius));
     const std::uintptr_t vt=base+0x1ec1e78;const std::uint32_t reference=0x1ffff;
     auto* bytes=static_cast<std::byte*>(out);std::memcpy(bytes,&vt,8);std::memcpy(bytes+0x10,&reference,4);
     std::memcpy(bytes+0x28,&radius,4);std::memcpy(bytes+0x50,origin,12);return out;
 }
 int main(int argc,char** argv) {
+    static_assert(interaction_volume_radius==.45 && grab_acquire_distance==.20,"pickup reach must not shrink NPC discovery");
     corrupt=argc>1 && std::string(argv[1])=="reject";
     const auto shape=NativeHandVolume::shape(base,read_code,construct);
     if(corrupt) {assert(shape==0 && calls==0);corrupt=false;assert(NativeHandVolume::shape(base,read_code,construct)==0 && calls==0);std::cout<<"PASS: changed overlap ABI rejected before constructor\n";return 0;}
@@ -29,7 +30,7 @@ int main(int argc,char** argv) {
         const auto sweep=hand_volume_ray(input,centre,direction);assert(sweep);
         assert(sweep->f[0]==centre.x && sweep->f[1]==centre.y && sweep->f[2]==centre.z && sweep->f[7]==1);
         assert(std::abs(length(Vec3{sweep->f[4],sweep->f[5],sweep->f[6]})-.001)<1e-8);
-        const auto direct=hand_volume_direct_ray(input,centre,direction);assert(direct && direct->f[7]==static_cast<float>(grab_acquire_distance));
+        const auto direct=hand_volume_direct_ray(input,centre,direction);assert(direct && direct->f[7]==static_cast<float>(interaction_volume_radius));
         assert(std::abs(length(Vec3{direct->f[4],direct->f[5],direct->f[6]})-1)<1e-6);
         for(unsigned i=0;i<3;++i)if(direct->f[4+i]==0)assert(direct->f[8+i]==3.402820018e38f);
     }

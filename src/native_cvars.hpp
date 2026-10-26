@@ -26,7 +26,7 @@ public:
         // Screen-space lens flares are wrong per eye (~0.8 ms native GPU; registration 0x1372252).
         {0x32f7fc0,"r_skipLensFlares",1},
         {0x3982ef0,"r_AntiAliasingPreset",3},{0x397bb50,"r_AAMode",-1},{0x397bbd0,"r_skipTemporalAA",0}}};
-    static constexpr std::size_t skip_temporal_aa=10,first_temporal=8;
+    static constexpr std::size_t player_depth_hack=5,skip_temporal_aa=10,first_temporal=8;
 private:
     struct Saved {bool active{};LONG value{};float scalar{};};
     static constexpr std::array<LONG,vr_defaults.size()> default_values() {
@@ -52,11 +52,12 @@ private:
     }
 public:
     // Entries from first_temporal enable temporal AA; pass temporal=false without per-eye history.
-    template<class Read> unsigned apply(std::uintptr_t base,Read& read,bool temporal) {
+    template<class Read> unsigned apply(std::uintptr_t base,Read& read,bool temporal,bool native_player_depth=false) {
         base_=base;unsigned applied{};
         for(std::size_t i=0;i<vr_defaults.size();++i) {
             const auto& o=vr_defaults[i];const auto object=base+o.rva;
             auto& s=saved_[i];s={};
+            if(native_player_depth && i==player_depth_hack)continue; // NativePlayerDepth owns strings/listeners as well as caches.
             if(i>=first_temporal && !temporal) continue;
             if(!named(read,object,o.name) || !read(object+0x28,&s.value,4) || !read(object+0x2c,&s.scalar,4)) continue;
             // Both adjacent caches form one aligned native value. Even an equal

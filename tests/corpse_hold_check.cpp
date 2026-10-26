@@ -371,8 +371,9 @@ void forearm_preferred_over_torso_at_equal_distance() {
     // The spine 0.12 m below the palm point and the forearm 0.12 m beside it, both 45 degrees off the palm: equal cost but the torso's 1.1
     fixture(0x08,0x08,false);scatter();place(1,{0,0,0});place(6,{0,-.17,.25});
     const Vec3 point{0,0,.25},dir{0,-1,-1};
-    CHECK(palm_pick(point,dir)->bone==6);
-    GrabTuning flat;flat.priority_torso=.9;CHECK(palm_pick(point,dir,false,flat)->bone==1);   // the priority decides it
+    CHECK(palm_pick(point,dir)->bone==1); // nearest wins the tie deterministically (lower bone)
+    GrabTuning flat;flat.priority_torso=.9;CHECK(palm_pick(point,dir,false,flat)->bone==1);   // priority cannot override the nearest surface
+    place(6,{0,-.13,.25});flat.priority_torso=.01;CHECK(palm_pick(point,dir,false,flat)->bone==6); // a genuinely nearer forearm wins
 }
 void head_is_candidate_with_known_radius() {
     // Ruling H10 (spec: "every ragdoll bone with a known radius"): the head (radius 0.11) is a candidate, at limb priority

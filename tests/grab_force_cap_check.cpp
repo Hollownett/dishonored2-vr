@@ -166,7 +166,7 @@ int main() {
         expect_defaults_with_error("d2vr_gt_big.cfg",std::string(5000,'#'));
         {   // palm-selection keys: defaults, a good file, a mixed good+bad file falls back to ALL defaults
             const GrabTuning d;
-            CHECK(d.grab_buffer_ms==150 && d.grip_alone_gate_m==.12 && d.hover_radius_m==.25 && d.priority_loot==.8 && d.priority_usable==1 &&
+            CHECK(d.grab_buffer_ms==150 && d.grip_alone_gate_m==.10 && d.hover_radius_m==.25 && d.priority_loot==.8 && d.priority_usable==1 &&
                   d.priority_prop==1 && d.priority_limb==1 && d.priority_torso==1.1 && d.priority_living==1);
             CHECK(d.priority(PalmKind::loot)==.8 && d.priority(PalmKind::bone,0)==1.1 && d.priority(PalmKind::bone,1)==1.1 &&
                   d.priority(PalmKind::bone,2)==1 && d.priority(PalmKind::bone)==1 && d.priority(PalmKind::living)==1);
