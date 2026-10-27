@@ -19,7 +19,16 @@ struct GameArt {std::uint32_t width{},height{};std::vector<unsigned char> rgba;}
 class GameArtCache {
 public:
     explicit GameArtCache(std::filesystem::path folder={}) : folder_(std::move(folder)) {}
-    void folder(std::filesystem::path f) {std::lock_guard<std::mutex> l(m_);folder_=std::move(f);cache_.clear();}
+    void folder(std::filesystem::path f) {std::lock_guard<std::mutex> l(m_);folder_=std::move(f);cache_.clear();++generation_;}
+    std::uint64_t generation() const noexcept {return generation_.load();}
+    // User's illustrated guide: check publication markers only on open/page changes, including cached misses.
+    std::uint64_t refresh() {
+        std::lock_guard<std::mutex> l(m_);std::error_code ec;
+        const auto manifest=std::filesystem::last_write_time(folder_/"manifest.json",ec);
+        ec.clear();const auto marker=std::filesystem::last_write_time(folder_/"generation.txt",ec);
+        if(manifest!=manifest_time_ || marker!=marker_time_) {manifest_time_=manifest;marker_time_=marker;cache_.clear();++generation_;}
+        return generation_.load();
+    }
     // Loaded once per key (also remembers a miss).
     std::shared_ptr<const GameArt> get(const std::string& key) {
         std::lock_guard<std::mutex> l(m_);
@@ -35,6 +44,7 @@ public:
     }
 private:
     std::mutex m_;std::filesystem::path folder_;std::map<std::string,std::shared_ptr<const GameArt>> cache_;
+    std::atomic<std::uint64_t> generation_{1};std::filesystem::file_time_type manifest_time_{},marker_time_{};
 };
 // Blend art (bilinear, straight alpha, times opacity) into a 32-bit BGRX surface over the rectangle [x0,x1)x[y0,y1).
 // fit: keep the aspect ratio inside the rectangle (centred); otherwise stretch. tint (0xRRGGBB) multiplies the art's colour.

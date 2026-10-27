@@ -26,6 +26,7 @@
 #include "menu_input.hpp"
 #include "menu_pointer.hpp"
 #include "controls_guide_image.hpp"
+#include "guide_navigation.hpp"
 #include "comfort_vignette.hpp"
 #include "overlay_dirty.hpp"
 #include "xr_cpu_spans.hpp"
@@ -172,8 +173,11 @@ private:
     bool eye_reticle_failed_{};
     Microsoft::WRL::ComPtr<ID3D11Texture2D> eye_reticle_texture_;
     std::vector<XrSwapchainImageD3D11KHR> hint_images_;
-    std::vector<bool> hint_filled_;
-    std::vector<std::uint8_t> hint_pixels_;
+    std::vector<std::uint64_t> hint_revisions_;
+    std::array<std::vector<std::uint8_t>,14> guide_pages_;
+    std::uint64_t guide_art_generation_{},hint_revision_{};int hint_page_{-1},hint_character_{-1};
+    std::atomic<int> guide_page_{0};std::atomic<bool> guide_refresh_{true};
+    GuideNavigation guide_navigation_;
     // The controls and gestures page (controls_guide_image.hpp, user after v646): open while guide_open_, placed once in front of the head.
     std::atomic<bool> guide_open_{false};bool guide_placed_{},guide_from_menu_{};TrackedPose guide_pose_{}; // from_menu: opened from VR Settings, closes when play resumes
     MenuTriggerGate menu_trigger_gate_;
@@ -761,7 +765,7 @@ private:
             hint_images_.resize(count);for(auto& image:hint_images_) image.type=XR_TYPE_SWAPCHAIN_IMAGE_D3D11_KHR;
             checked(enumerate(hint_chain_,count,&count,reinterpret_cast<XrSwapchainImageBaseHeader*>(hint_images_.data())),"Read controls card images");
             if(hint_images_.empty()) throw std::runtime_error("XR controls card has no images");
-            hint_filled_.assign(count,false);hint_pixels_=controls_guide_image(controls_guide_markdown(),width,height);
+            hint_revisions_.assign(count,0);
         }
     }
     // The controls and gestures page: a 1.1 m card 0.85 m in front of the head where it was opened, level, facing the player; it stays
@@ -775,8 +779,15 @@ private:
         }
         constexpr unsigned width=1920,height=1200;
         if(!hint_chain_) return {}; // created by prepare_overlays
+        // User's illustrated guide: cache by page, playable character and imported-art generation; retain its world pose.
+        if(guide_refresh_.exchange(false)) game_art().refresh();
+        const auto generation=game_art().generation();const int page=guide_page_.load(),character=game_character.load()==2?1:0;
+        if(generation!=guide_art_generation_) {for(auto& pixels:guide_pages_) pixels.clear();guide_art_generation_=generation;hint_page_=-1;}
+        auto& pixels=guide_pages_[character*7+page];
+        if(pixels.empty()) pixels=controls_guide_image(controls_guide_markdown(),width,height,nullptr,page,character!=0);
+        if(page!=hint_page_ || character!=hint_character_) {hint_page_=page;hint_character_=character;++hint_revision_;}
         OverlayKey overlay_key;
-        if(overlay_needs_image(OverlayKind::hint,hint_chain_,static_overlay_content(),0,overlay_key)) {
+        if(overlay_needs_image(OverlayKind::hint,hint_chain_,hint_revision_,0,overlay_key)) {
         XrSwapchainImageAcquireInfo acquire{};acquire.type=XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO;uint32_t index{};
         checked(xrAcquireSwapchainImage(hint_chain_,&acquire,&index),"Acquire controls card");
         XrSwapchainImageWaitInfo wait{};wait.type=XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO;wait.timeout=1'000'000'000;
@@ -784,9 +795,9 @@ private:
         if(ready==XR_TIMEOUT_EXPIRED) throw std::runtime_error("Controls card wait timed out");
         XrSwapchainImageReleaseInfo release{};release.type=XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO;
         try {
-            // The card never changes: fill each runtime image once.
-            if(!hint_filled_.at(index)) {
-                context_->UpdateSubresource(hint_images_.at(index).texture,0,nullptr,hint_pixels_.data(),width*4,0);hint_filled_[index]=true;
+            // A runtime may acquire any image: every image must receive the current page revision.
+            if(hint_revisions_.at(index)!=hint_revision_) {
+                context_->UpdateSubresource(hint_images_.at(index).texture,0,nullptr,pixels.data(),width*4,0);hint_revisions_[index]=hint_revision_;
             }
         } catch(...) {xrReleaseSwapchainImage(hint_chain_,&release);throw;}
         checked(xrReleaseSwapchainImage(hint_chain_,&release),"Release controls card");
@@ -1258,8 +1269,11 @@ public:
     UINT64 antialiased_eyes() const noexcept {return antialiasing_?antialiasing_->eye_passes:0;}
     bool settings_open() const noexcept {return settings_.open();}
     // The controls page: the right temple squeeze and the VR Settings "Controls & gestures" row toggle it; it opens in front of the head.
-    void toggle_guide(bool from_menu=false) noexcept {guide_placed_=false;guide_open_=!guide_open_.load();guide_from_menu_=from_menu && guide_open_.load();}
+    void toggle_guide(bool from_menu=false) noexcept {guide_placed_=false;guide_open_=!guide_open_.load();guide_from_menu_=from_menu && guide_open_.load();
+        if(guide_open_) {guide_page_=0;guide_refresh_=true;guide_navigation_.claim();}}
+    void guide_page_delta(int delta) noexcept {if(delta && guide_open_) {guide_page_=std::clamp(guide_page_.load()+delta,0,6);guide_refresh_=true;}}
     bool guide_open() const noexcept {return guide_open_.load();}
+    bool guide_stick_blocked() const noexcept {return guide_open() || guide_navigation_.blocked();}
     std::atomic<bool> settings_requested{false}; // native menu "VR Settings" item (native_menu_entry.hpp)
     // Hold left Y in gameplay opens native Pause; a fresh hold in Pause opens settings. The game thread sets y_hold_blocked while a Talk prompt is
     // offered to Y or the wheel owns it; build/no-hold-y-menu clears y_hold_enabled.
@@ -1403,6 +1417,7 @@ public:
         world_ui_draw_tick_=draw_tick?draw_tick:++unknown_draw_tick_;
     }
     ControllerInput controller_input{};
+    ControllerInput guide_temple_input{}; // raw pre-settings squeeze/stick sample for the guide's temple ownership
     NativeMenuInput native_menu_input{};
     bool last_pointer_layer{};
     UINT64 pointer_layers{};
@@ -1726,7 +1741,7 @@ public:
         menu_band_chain_=XR_NULL_HANDLE;menu_band_images_.clear();menu_band_width_=menu_band_height_=0;chain_sizes_.clear();
         pointer_images_.clear();
         if(pointer_chain_ && xrDestroySwapchain) {xrDestroySwapchain(pointer_chain_);pointer_chain_=XR_NULL_HANDLE;}
-        hint_images_.clear();hint_filled_.clear();
+        hint_images_.clear();hint_revisions_.clear();
         for(unsigned side=0;side<2;++side) {
             wrist_targets_[side].clear();
             wrist_images_[side].clear();wrist_pixels_[side].clear();wrist_image_ticks_[side]=0;
@@ -1848,6 +1863,12 @@ public:
         }
         last_tracked_pair=tracked_pair_();
         sample_input();
+        // User's illustrated guide owns the right stick before settings or native menu navigation can see it.
+        guide_temple_input=controller_input;
+        const auto guide_nav=guide_navigation_.update(guide_open(),controller_input.turn_x,controller_input.turn_y,controller_input.right_click,
+            controller_input.active && state==XR_SESSION_STATE_FOCUSED);
+        guide_page_delta(guide_nav.delta);
+        if(guide_nav.consume) {controller_input.turn_x=controller_input.turn_y=0;controller_input.right_click=false;}
         // Preserve squeeze actions before the paused overlay consumes controls.
         // Recognize raw Y before settings consumes input. Only the exact native pause state permits the paused shortcut;
         // wheel/title/loading are not Pause. Legacy keeps the previous gameplay settings panel and paused short-Y shortcut.
@@ -1953,6 +1974,7 @@ public:
             if(changes.temporal_aa) temporal_change_=changes.temporal_aa;
             if(changes.hud_percent) hud_change_=changes.hud_percent;
             if(changes.controls_guide) toggle_guide(true);
+            if(guide_stick_blocked()) {controller_input.turn_x=controller_input.turn_y=0;controller_input.right_click=false;}
             if(guide_from_menu_ && gameplay) {guide_open_=false;guide_from_menu_=false;} // opened over the pause menu: back in the game, it goes
             if(changes.recenter) {
                 continuity_.recenter();rendered_mask_=0;menu_panel_.reset();world_ui_pose_valid_=false;guide_placed_=false;

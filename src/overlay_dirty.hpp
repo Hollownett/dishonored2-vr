@@ -60,7 +60,7 @@ inline std::uint64_t wrist_overlay_content(const WristArtFacts& primary,const Wr
     const auto one=[](const WristArtFacts& a) {return overlay_content({a.texture,a.tick,a.owner,a.left,a.top,a.right,a.bottom,a.premultiplied?1u:0u});};
     return overlay_content({one(primary),mana?one(*mana):0,mana?1u:0u,canvas_width,canvas_height});
 }
-// Controls card and wheel dot: the pixels never change, one fill per runtime image. Constant key.
+// Wheel dot: the pixels never change, one fill per runtime image. The paged controls guide uses its content revision instead.
 inline constexpr std::uint64_t static_overlay_content() noexcept {return 1;}
 // Settings panel: a counter that moves only when the generated pixels differ from the previous ones.
 inline std::uint64_t settings_overlay_content(std::uint64_t pixel_generation) noexcept {return overlay_content({pixel_generation});}

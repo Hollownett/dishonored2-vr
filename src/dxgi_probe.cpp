@@ -9140,6 +9140,8 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                 controller_bridge.set_game_window(desc.OutputWindow);
                                 const auto logic=game_logic_mask();
                                 auto input=game_xr->controller_input;
+                                // User's paged guide owns the right stick before Menu+stick, crouch, zoom and turning.
+                                if(game_xr->guide_stick_blocked()) {input.turn_x=input.turn_y=0;input.right_click=false;}
                                 { // Track T C2: hold A or X 0.6 s in an exact cutscene or a Bink video = the game's skip (held Interact); the press is masked until released
                                     static d2vr::SkipHold cutscene_skip;
                                     const bool skip_context=!cutscene_no_skip_hold.load() && input.active && (logic==d2vr::cinematic_logic_mask || d2vr::NativeBinkHooks::playing());
@@ -9224,7 +9226,7 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                     // Sword holster over the right shoulder. Full grip (SwordGrip): squeeze there to draw, hold the grip to
                                     // hold the sword, release there to sheathe, anywhere else to drop it; squeeze at the dropped sword to pick it up.
                                     static d2vr::TempleReach scabbard(-.17,-.10,-.10,.16,2u);
-                                    const auto sheath=scabbard.update(head,{f.x,f.y,f.z},{u.x,u.y,u.z},hands,{input.left_grip,input.right_grip},logic==2 && !x_wheel.wheel(),GetTickCount64());
+                                    const auto sheath=scabbard.update(head,{f.x,f.y,f.z},{u.x,u.y,u.z},hands,{input.left_grip,input.right_grip},(logic==2 || game_xr->guide_open()) && !x_wheel.wheel(),GetTickCount64());
                                     if(sheath.entered==1) {++scabbard_entries;game_xr->pulse(1,.2f,.02f);}
                                     {   const auto now_s=GetTickCount64();bool drawn{},busy{},fresh{};d2vr::WorldTrackedPose hand_w{},hand_raw{};d2vr::Vec3 hand_v{};
                                         {std::lock_guard<std::mutex> hand_lock(hand_state_mutex);drawn=(hand_weapon_bits&2u)!=0;busy=hand_carrying_bits!=0 || hand_holding_object;
@@ -9260,10 +9262,15 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                         // holster behind the right shoulder overlaps the zone behind the ear and wins there (a draw is never lost to the page).
                                         static d2vr::TempleReach guide_temple(-.09,.02,0,.13,2u);static bool guide_was{};
                                         auto guide_hands=hands;if(sheath.in[1]) guide_hands[1].reset();
-                                        const auto guide_reach=guide_temple.update(head,{f.x,f.y,f.z},{u.x,u.y,u.z},guide_hands,{input.left_grip,input.right_grip},logic==2 && !x_wheel.wheel(),GetTickCount64());
+                                        // User: the same temple squeeze closes a guide opened over VR Settings, whose input has already been consumed.
+                                        const auto& guide_raw=game_xr->guide_temple_input;
+                                        const auto guide_reach=guide_temple.update(head,{f.x,f.y,f.z},{u.x,u.y,u.z},guide_hands,
+                                            {input.left_grip,game_xr->guide_open()?guide_raw.right_grip:input.right_grip},
+                                            (logic==2 || game_xr->guide_open()) && !x_wheel.wheel() && guide_raw.active && game_xr->state==XR_SESSION_STATE_FOCUSED,GetTickCount64());
                                         if(guide_reach.entered==1) game_xr->pulse(1,.25f,.03f);
                                         if(guide_reach.journal && !guide_was) {game_xr->toggle_guide();game_xr->pulse(1,.4f,.05f);}
                                         guide_was=guide_reach.journal;
+                                        if(game_xr->guide_stick_blocked()) {input.turn_x=input.turn_y=0;input.right_click=false;input.dpad={};}
                                         if(guide_reach.consume[1]) {input.right_grip=0;physical_right_grip=0;}
                                     }
                                     {
@@ -10059,9 +10066,11 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                     input.move_x=input.move_y=input.turn_x=input.turn_y=0;
                                     input.left_grip=input.right_grip=input.left_trigger=input.right_trigger=0;
                                 }
+                                // User: wheel pointer synthesis must not give the guide's stick back to a gameplay or menu consumer.
+                                if(game_xr->guide_stick_blocked()) {input.turn_x=input.turn_y=0;input.right_click=false;input.dpad={};}
                                 const double vignette_raw_turn=input.turn_x; // the turn claim below clears turn_x
                                 if(native_turning_requested) {
-                                    native_turning.publish(input,logic==2 && !input.menu_modifier,GetTickCount64(),game_xr->pose_epoch());
+                                    native_turning.publish(input,logic==2 && !input.menu_modifier && !game_xr->guide_stick_blocked(),GetTickCount64(),game_xr->pose_epoch());
                                     native_turning.orient_movement(input,logic==2,GetTickCount64());
                                     if(native_turning.failed() && !native_turning_failure_noted) {native_turning_failure_noted=true;note_recoverable("Native VR turning repeatedly mismatched its feedback; turning disabled");}
                                 }
