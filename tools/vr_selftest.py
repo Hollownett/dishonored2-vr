@@ -610,6 +610,13 @@ SCENARIOS['guidepage'] = ([[0, 1500, NEUTRAL, REST]] + glide(1500, 2500, REST, _
                           [[4600, 7500, NEUTRAL, REST]] + glide(7500, 8300, REST, _TMP, 8) +
                           [[8300, 8700, {"right_grip": 1.0}, _TMP], [8700, 9000, NEUTRAL, _TMP]] + glide(9000, 9800, _TMP, REST, 8) + [[9800, 12000, NEUTRAL, REST]])
 PAIR_TIMES['guidepage'] = [(5500, 'guide-open'), (7000, 'guide-open-b'), (11000, 'guide-closed')]
+# The paged guide (v652): open it, three right-stick flicks to the right (each 200 ms, then neutral), one back, then close.
+# Pass: the hint overlay uploads rise with the pages and the snap-turn counters do not move while it is open.
+_FLICK = {"turn_x": 1.0}
+SCENARIOS['guidepages'] = (SCENARIOS['guidepage'][:20] + [[4600, 5200, NEUTRAL, REST], [5200, 5400, _FLICK, REST], [5400, 6000, NEUTRAL, REST],
+                           [6000, 6200, _FLICK, REST], [6200, 6800, NEUTRAL, REST], [6800, 7000, _FLICK, REST], [7000, 7500, NEUTRAL, REST],
+                           [7500, 7700, {"turn_x": -1.0}, REST], [7700, 8000, NEUTRAL, REST]] +
+                           [[a_ + 500, b_ + 500, *r_] for a_, b_, *r_ in SCENARIOS['guidepage'][21:]])
 # v643 (user, headset v642: cutscenes keep the avatar body and the tracked hands): load SLOT22 (void_01_p, a mission start that plays the
 # Outsider cinematic, logic 32, ~4-14 s after the load) and stand still, the right hand forward where it shows; no buttons (a press skips it).
 # Pass: dxgi-probe-result.json cutscene.hands_frames > 0 and the eye pairs show the hands (and the body when looking down).
