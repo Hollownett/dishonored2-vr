@@ -38,7 +38,8 @@ struct ClampSweep {Vec3 from{},to{};double radius{};bool valid{};std::optional<s
 struct HandClampConfig {
     double palm_radius=.05,skin=.005,plane_seconds=.1,release_speed=1.5,snap_gap=.35,snap_seconds=.25,
            rearm_seconds=.1,gap_seconds=.25,haptic_cooldown=.08,speed_for_full=3.,
-           look_ahead=.10;   // how far past the target the wall and exclusion probes sweep along the horizontal motion
+           look_ahead=.10,   // how far past the target the wall and exclusion probes sweep along the horizontal motion
+           hold_seconds=.25; // strict mode: the longest the drawn hand waits for a sweep to validate its target; then it follows (0: wait forever, the old rule)
     unsigned overlap_frames=3,max_planes=4;};
 struct ClampInput {
     double now{};                       // monotonic seconds; per-side dt is derived from it
@@ -250,7 +251,7 @@ private:
         std::array<std::uint64_t,4> consumed_ids{};
         std::array<double,8> answer_ages{};unsigned answer_age_cursor{}; // measured native query round trip
         std::array<Plane,plane_capacity> planes{};std::size_t plane_count{};
-        double over_time{},clear_time{},since_haptic{1e9};unsigned overlap_count{},hold_frames{};
+        double over_time{},clear_time{},since_haptic{1e9},hold_time{};unsigned overlap_count{},hold_frames{};
         Posted posted{Posted::none};bool last_slid{};ClampSweep posted_palm{},posted_tip{};ClampProbe posted_tip_probe{};
         ClampSweep posted_wall{};ClampProbe posted_wall_probe{};
         ClampSweep posted_exclude{};ClampProbe posted_exclude_probe{};bool posted_exclude_tip{};
@@ -291,7 +292,7 @@ private:
     }
     static void release(Side& s) {
         s.state=ClampState::released;s.plane_count=0;s.shift_local={};s.own_shift_local={};
-        s.over_time=0;s.clear_time=0;s.overlap_count=0;s.hold_frames=0;s.has_segment=false;s.slid_frames=1000;s.drawn_validated=false;
+        s.over_time=0;s.clear_time=0;s.overlap_count=0;s.hold_frames=0;s.hold_time=0;s.has_segment=false;s.slid_frames=1000;s.drawn_validated=false;
         s.has_clear_from=false;s.last_overlap=false;
         s.pending_casts={}; // an answer from before this release cannot rearm this generation
     }
@@ -613,6 +614,7 @@ public:
         s.drawn_world=drawn;
     }
     const HandClampConfig& config() const {return cfg_;}
+    void set_hold_seconds(double seconds) {cfg_.hold_seconds=seconds;}   // build/legacy-hand-stuck: 0 restores the unbounded strict hold
 
     // The meet (NativeHandContact::meet): the drawn hand is the target moved out of the prop it pushes (`met`, whose planes
     // are skipped: the prop moves with the hand) instead of held off it. It is pushed out of every other plane this side
@@ -843,7 +845,11 @@ public:
         const bool carry_translation=s.plane_count==0 && !s.seg_cut && transport_swept;
         bool hold=false;Vec3 held=s.drawn_world+(carry_translation?in.root.position-s.root_position:Vec3{});
         // A hold waits for max_hold_frames casts: in C14 alternate mode a cast is answered every other frame.
-        if(!validated && (in.strict_answers || s.hold_frames<max_hold_frames*s.cadence)) {
+        // Strict mode used to wait without end: answers that stop arriving (a busy or unmapped native cast, a probe that starts inside a body)
+        // froze the drawn hand in free air while the controller moved on (headset v638). After hold_seconds the hand follows, kept out of the
+        // planes known, until a sweep validates again (the non-strict rule); the next answers still catch a wall or a body.
+        if(validated) s.hold_time=0;
+        if(!validated && (in.strict_answers?!(cfg_.hold_seconds>0 && s.hold_time>=cfg_.hold_seconds):s.hold_frames<max_hold_frames*s.cadence)) {
             Vec3 out_of_planes=held;
             if(solve(s,in.target.basis,out_of_planes)) held=out_of_planes;
             else {bool minimax=false;held=retreat(s,in.target.basis,target,in.chest,std::nullopt,minimax);}   // two walls too close
@@ -854,7 +860,7 @@ public:
         s.drawn_validated=validated || (hold && s.drawn_validated && length(held-s.drawn_world)<=1e-9);
         out.validated=validated;
         if(hold) {
-            ++s.hold_frames;out.held=true;out.drawn.position=held;out.shift=held-target;
+            ++s.hold_frames;s.hold_time+=dt;out.held=true;out.drawn.position=held;out.shift=held-target;
         } else {
             if(validated) s.hold_frames=0;
             s.over_time=length(own)>cfg_.snap_gap?s.over_time+dt:0;

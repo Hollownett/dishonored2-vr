@@ -40,7 +40,7 @@ def check(source: str) -> None:
     assert 'reserve_nonlethal_grip(choke_route.rb);' in source
     assert 'reserve_nonlethal_grip(choke_route.consume_use);' not in source
     assert 'if(choke_route.rb || !sword_combat_owned)' in source
-    assert 'sword_owns || talk_targets[1] || choke_route.consume_use' in source
+    assert 'sword_owns || talk_targets[1] || (cs==1 && choke_route.consume_use)' in source
     ownership = source[source.index('gesture=gestures.update(f);'):source.index('d2vr::CombatFrame cf{};')]
     assert ownership.index('sword_combat_owned=sword_out && f.sword_equipped;') < ownership.index('if(vr_combat_enabled)')
     fallback = source[source.index('const auto swing=sword_swing.update('):source.index('swing_until_tick=swing.until;')]

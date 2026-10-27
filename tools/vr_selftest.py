@@ -570,7 +570,20 @@ for _k in range(3):
 # the drawn sword held still in front of the chest (SwordBlockPose: RB held) for 24 s while the guard attacks; eye captures every 2 s.
 SCENARIOS['blockduel'] = [[0, 24000, NEUTRAL, [-0.25, 0.05, -0.15]]]
 PAIR_PLAN['blockduel'] = {}
-for _name in ('swing', 'chop', 'duel', 'blockduel', 'swarm', 'floor'):
+# Choke with the LEFT hand while the sword is drawn and held in front (use with --near npc, 0.9 m behind the guard; user, headset v638:
+# a grab from behind must register the choke). The sword in front holds the native Block (RB), so the choke's own RB press must be a
+# fresh edge (v639). The left hand glides to the guard's neck, squeezes alone for 4.4 s and lets go.
+_NECK_L = [0.2, 0.2, -0.35]
+SCENARIOS['chokeleft'] = ([[0, 400, NEUTRAL, REST, {"left_hand_offset": REST}], [400, 700, {"left_grip": 1.0}, REST, {"left_hand_offset": REST}],   # holster the save's drawn pistol (as 'yank')
+                           [700, 1500, NEUTRAL, REST, {"left_hand_offset": REST}]] +
+                          [s + [{"left_hand_offset": s[3]}] for s in glide(1500, 2100, REST, _NECK_L, 6)] +
+                          [[2100, 6500, {"left_grip": 1.0}, REST, {"left_hand_offset": _NECK_L}], [6500, 9000, NEUTRAL, REST, {"left_hand_offset": REST}]])
+# glide() moved the LEFT hand above (its offsets went into left_hand_offset); the right hand (the sword) stays at rest
+SCENARIOS['chokeleft'] = [[a, b, i, REST if len(s) > 4 and s[4].get('left_hand_offset') is not None else h, *s[4:]] for s in SCENARIOS['chokeleft'] for a, b, i, h in [s[:4]]]
+# The same swings while looking down at the floor (v639): the game's kill sensor follows the camera and offers nothing, so a contact from
+# behind or the side on the unaware guard must be the mod's own stealth kill (sword_contact.stealth[2], sword_grip.stealth_kill_pulses).
+SCENARIOS['swinglow'] = [[a_, b_, i_, h_, {"head_pitch_degrees": -60}] for a_, b_, i_, h_, *_r in SCENARIOS['swing']]
+for _name in ('swing', 'chop', 'duel', 'blockduel', 'swarm', 'floor', 'chokeleft', 'swinglow'):
     SCENARIOS[_name] = held_sword(SCENARIOS[_name])
 FORBIDDEN_STATES = {'flick': ['Slash'], 'reach': ['Slash']}  # accidental attacks
 EXPECTED_STATES = {'pickuplook': ['LootObject', 'Interact', 'HoldObject'], 'carry': ['CarryCorpse', 'PickupCorpse', 'Interact'], 'carrydrop': ['CarryCorpse'], 'carrythrow': ['CarryCorpse'], 'chop': ['Slash'], 'pickup': ['LootObject', 'Interact', 'HoldObject'], 'reach': ['LootObject', 'Interact', 'HoldObject'], 'swing': ['Slash', 'Assassination'], 'duel': ['Slash'], 'grab': ['LootObject', 'HoldObject', 'Interact', 'CarryCorpse', 'ReadNote'], 'powers': ['UsePower', 'Blinking', 'UseWindblast', 'UsePhantasmalLink', 'InBendTime', 'StoneShroud', 'DoppelgangerSwap', 'UseHeart'], 'jump': ['Jumping', 'Falling'],  # Falling always follows a jump; the short Jumping state can fall between samples
@@ -578,6 +591,8 @@ EXPECTED_STATES = {'pickuplook': ['LootObject', 'Interact', 'HoldObject'], 'carr
                    'walk': ['Running', 'Sneaking', 'Sprinting'], 'all': ['Powerwheel'], 'potion': ['Powerwheel'], 'hide': ['Powerwheel'], 'sheathe': ['Undraw'], 'swordgrip': ['EquipChange'], 'pistolhip': ['EquipChange'], 'pistolfire': ['FireWeapon', 'ReloadWeapon']}
 EXPECTED_STATES['limbgrip'] = ['HoldObject']
 EXPECTED_STATES['limbgripblind'] = ['HoldObject']
+EXPECTED_STATES['chokeleft'] = ['Choke']
+EXPECTED_STATES['swinglow'] = ['Running']  # no Assassination expected: the kill is the mod's (counters)  # v639: the left hand's grip behind a guard, sword drawn and blocking
 EXPECTED_STATES['handsjump'] = ['Jumping', 'Falling']  # gesture jump: Falling always follows a jump
 SIM_FLAGS = ['--paired', '--native-eye-capture', '--vr-preview', '--head-tracking', '--controllers', '--symmetric-frustum',
              '--stable-camera', '--tracked-arms', '--physical-grab', '--native-left-aim-experiment', '--controller-aim',
@@ -674,6 +689,8 @@ def npc_stand(pid, behind, civilian=False, beside=False, skip=(), dist=.9):
     listing, npcs = live()
     npcs = [e for e in npcs if e['addr'] not in skip and (e.get('health') or {}).get('max', 0) >= 10]  # 1-hp scripted extras take no hits (sim v382)
     npcs = [e for e in npcs if not any(n in (e.get('name') or '') for n in SKIP_NAMES)]
+    # 1-hp guards with full max health are dormant pool entries nobody stands at (sim v639: an empty room behind 'def_50376'): real ones first
+    npcs = [e for e in npcs if (e.get('health') or {}).get('cur', 0) >= 10] or npcs
     feet = listing['player']['pos']
     before = {e['addr']: e['pos'] for e in first}
     # Patrolling guards walked past the player before the first swing: prefer NPCs standing still, guards first.
@@ -1002,6 +1019,7 @@ def main():
     ap.add_argument('--near', choices=['item', 'bottle', 'npc', 'npc-front', 'npc-side', 'civ-front', 'corpse', 'oldcorpse', 'shop', 'door', 'limb'],
                     help='teleport next to the nearest pickable item / 0.9 m behind (npc) or in front of (npc-front) the nearest guard, facing it')
     ap.add_argument('--teleport', nargs=3, type=float, metavar=('X', 'Y', 'Z'), help='engine setviewpos (eye position) before the scenario')
+    ap.add_argument('--pre-teleport', nargs=3, type=float, metavar=('X', 'Y', 'Z'), help='setviewpos before --near picks its target (stream in an area: the test save start has only dormant guards near it since v639)')
     ap.add_argument('--damage', metavar='DECL', help='hurt the player every 3 s with this damage decl (engine `damage player1 DECL`, god off)')
     ap.add_argument('--inject-at-title', action='store_true',
                     help='with --launch: inject at the title screen, then load the save (UI movies loaded with the level get the owned-load patches, as the headset launcher does)')
@@ -1094,6 +1112,10 @@ def main():
                 home = player_position(r0, b0)
             except Exception:
                 home = None
+        if reached and a.pre_teleport:
+            set_god(pid, True)
+            command('console setviewpos %.2f %.2f %.2f' % tuple(a.pre_teleport))
+            time.sleep(4)  # the area's NPCs stream in and wake
         scenario_end = time.time() + seconds - 1
         bottle_rot = []
         bottle_addr, bottle_track, bottle_geom = None, [], {}  # the near-bottle item's entity, its world positions (script ms, x, y, z), stand geometry
@@ -1248,7 +1270,7 @@ def main():
                 command('cvar ark_vision_max_checks 0')
             skip = set()
             for attempt in range(3):  # a spot on a ledge or table left the blade swinging over the guard (sim v382: 1 m above)
-                stand, npc = npc_stand(pid, a.near == 'npc', a.near == 'civ-front', a.near == 'npc-side', skip, {'swordthrow': 3.0, 'stealththrow': 10.0}.get(a.scenario, .9))
+                stand, npc = npc_stand(pid, a.near == 'npc', a.near == 'civ-front', a.near == 'npc-side', skip, {'swordthrow': 3.0, 'stealththrow': 10.0, 'chokeleft': 1.8}.get(a.scenario, .9))
                 if not stand:
                     break
                 print('near npc', npc['name'], npc['pos'], 'stand', [round(v, 2) for v in stand])

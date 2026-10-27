@@ -47,7 +47,7 @@ def check(source: str) -> None:
     assert "if(now_l<corpse_drop_press_until) input.x=true;" in source
     assert "(!target || corpse_target) && physical_grab_requested" in source
     assert "in.native_corpse=!legacy_corpse_carry" in source and "native_grab.is_corpse_entity(in.native->id)" in source
-    assert "in.choke_owns=h==1 && (choke_offer.has_value() || control_active_choke!=0);" in source
+    assert "in.choke_owns=h==choke_side && (choke_offer.has_value() || control_active_choke!=0);" in source
     assert "in.takedown_offered=control_takedown.any();" in source
     gate = source.index("const bool right_fist_rb=d2vr::fist_may_press_native_rb(native_grab.holding(1),right_carrying,sword_grip.held(),right_sword_drawn);")
     pin = source.index("if(right_physical) input.right_grip=right_fist_rb?right_native:0.f;")
@@ -80,7 +80,7 @@ if __name__ == "__main__":
         source.replace("(grip_intent_out[0].fist || grip_intent_out[0].grab || native_grab.holding(0)) && grip_intent[0]", "(grip_intent_out[0].fist || native_grab.holding(0)) && grip_intent[0]", 1),
         source.replace("(fist_hands.load()|grab_hands.load())&(1u<<side)", "fist_hands.load()&(1u<<side)", 1),
         source.replace("grab_hands=(grip_intent_out[0].grab?1u:0u)|(grip_intent_out[1].grab?2u:0u);", "grab_hands=0;", 1),
-        source.replace("in.choke_owns=h==1 && (choke_offer.has_value() || control_active_choke!=0);", "in.choke_owns=false;", 1),
+        source.replace("in.choke_owns=h==choke_side && (choke_offer.has_value() || control_active_choke!=0);", "in.choke_owns=false;", 1),
     )
     for index, mutation in enumerate(mutations):
         assert mutation != source, f"Mutation {index} did not reach its production target"

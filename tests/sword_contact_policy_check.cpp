@@ -57,6 +57,11 @@ void window_and_terminal_cases() {
     }
     StealthHold<int> backwards;backwards.hold(1,7,1000,true);
     assert(backwards.service(900,true,true,false,false,true)==StealthAct::drop);
+    // v639 default path: no offer for this victim = the kill on the same pass (a swing's ordinary native slash must not alert him first);
+    // an offer still gives the engine's Assassination its 700 ms; a guard already aware is never killed silently
+    StealthHold<int> now;assert(now.hold(1,7,1000,false,true) && now.service(1000,true,true,false,false,true)==StealthAct::kill);
+    StealthHold<int> offered;offered.hold(1,7,1000,true,true);assert(offered.service(1600,true,true,false,false,true)==StealthAct::wait);
+    StealthHold<int> aware;aware.hold(1,7,1000,false,true);assert(aware.service(1000,false,true,false,false,true)==StealthAct::hit);
 }
 
 void stroke_gate() {

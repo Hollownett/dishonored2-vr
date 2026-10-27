@@ -4,6 +4,7 @@
 #include <MinHook.h>
 #include "native_rigid_body.hpp"
 #include "native_held_object.hpp"
+#include "finger_sphere.hpp"
 #include "release_depen.hpp"
 #include "native_hand_contact.hpp"
 #include "mass_probe.hpp"
@@ -240,8 +241,9 @@ private:
         struct Coupling {Vec3 offset{};bool release{};UINT64 tick{};bool active{};std::uint64_t serial{};} coupling{};
         WorldTrackedPose sample_hand{};   // the hand the grab sampled this pass (the controller, or the coupled body pose)
         std::uint64_t hold_serial{};bool was_coupled{};Vec3 last_offset{};   // B16: this hold's serial; the coupling edge rebases the grab
+        double sphere{};   // the sphere grip ball (finger_sphere.hpp) of this hold, decided at the bind; 0: none
         void end_hold() {
-            held.reset();corpse=capped=last_capped=near_noted=mass_noted=false;mass=0;bind_pelvis_z=std::numeric_limits<double>::quiet_NaN();
+            held.reset();sphere=0;corpse=capped=last_capped=near_noted=mass_noted=false;mass=0;bind_pelvis_z=std::numeric_limits<double>::quiet_NaN();
             bind_motion=0;bind_owner.reset();anchor_view={};reset_tow();
         }
         Gate gate=Gate::none;float raw_grip{};UINT64 decision_tick{};bool decision_usable{};
@@ -267,7 +269,7 @@ private:
     // Corpse hold (Task 10). All of this is touched under mutex_ (the dispatcher callback, the render-thread accessors) except the atomics.
     // corpse_enabled_: build/no-corpse-grab clears it; lockout_ is internally locked (any thread); the dispatcher cost counters are dispatcher-thread only; no_posts_ is
     // build/no-ragdoll-posts, read at install for the wake path (Task 11).
-    bool corpse_enabled_=true,no_posts_{},prop_grasp_point_=true;
+    bool corpse_enabled_=true,no_posts_{},prop_grasp_point_=true,sphere_grip_=true;
     bool legacy_palm_select_{};   // build/legacy-palm-select (read at install): the nearest-AABB pick and no grab buffer (plan Task 5)
     EntityLockout lockout_{};CorpseDiagnostics corpse_diag_{};CorpseTraceWriter* corpse_trace_{};std::array<bool,2> docked_{};
     UINT64 pass_cost_us_{};std::atomic<UINT64> corpse_cost_us_{},corpse_cost_max_us_{},velocity_unknown_{};
@@ -707,6 +709,8 @@ private:
         lane.corpse=body.bone>=0 && corpse_enabled_ && ragdoll_pushable_state(read_,body.entity);
         lane.capped=lane.corpse || body.bone<0;
         lane.last_capped=false;lane.near_noted=lane.mass_noted=false;lane.mass=0;lane.bind_pelvis_z=std::numeric_limits<double>::quiet_NaN();
+        // The sphere grip (finger_sphere.hpp): the fingers wrap one ball from now on, sized once from the bone or the box as it is at the bind.
+        lane.sphere=!sphere_grip_?0.:body.bone>=0?rig::sphere_grip_radius_of_bone(body.bone,body.bounds):body.bounds?rig::sphere_grip_radius(body.pose,*body.bounds):0.;
         lane.bound_at=now;if(lane.capped) lane.last_motor=0; // no write yet this hold: the first one measures its dt from the bind
         if(coupling_on_) {lane.hold_serial=++hold_serials_;lane.was_coupled=false;lane.last_offset={};}   // B16: the render thread couples the new hold afresh
         {const auto motion=read_motion_state(body);lane.bind_motion=motion.index;lane.bind_owner=motion.owner;}
@@ -954,7 +958,14 @@ private:
                 request_obstruction(side,*body);lane.decision_deferred=true;lane.gate=Gate::obstruction_pending;return;
             }
             const auto contact=body?acquisition_contact(lane,*body,now):std::nullopt;
-            if(body && contact && body->world==world && cleared(lane,*body,now) && lane.grab.bind(body->pose,*contact,grab_acquire_distance)) {
+            // The sphere grip: a prop is held with its bounds centre in the ball the fingers wrap (palm + palm direction * (radius + skin depth)), keeping its own
+            // orientation; the motor brings it there. Not a body part (it stays where the hand took it and follows), and not far (a wall or a table in the way).
+            auto seated=body?body->pose:WorldTrackedPose{};
+            if(sphere_grip_ && body && body->bone<0 && body->bounds && p.palm.valid) {
+                const Vec3 centre=(body->bounds->minimum+body->bounds->maximum)*.5,goal=p.palm.palm+p.palm.direction*(rig::sphere_grip_radius(body->pose,*body->bounds)+rig::held_palm_depth);
+                if(finite(goal) && length(goal-centre)<=.25) seated.position=seated.position+(goal-centre);
+            }
+            if(body && contact && body->world==world && cleared(lane,*body,now) && lane.grab.bind(seated,*contact,grab_acquire_distance)) {
                 lane.held=body;lane.acquired=true;lane.reset_tow();lane.owner_player=p.owner.player;lane.owner_camera=p.owner.camera;
                 lane.owner_generation=p.owner.camera_identity.generation;lane.owner_epoch=p.epoch;++picked_;
                 begin_hold(lane,side,*body,now);
@@ -1132,6 +1143,8 @@ public:
     }
     // Size of what this hand holds (the diagonal of its drawn bounds; a limb's sphere box), for fingers that close around it.
     std::optional<NativeRigidBody> held(unsigned side) {std::lock_guard<std::mutex> lock(mutex_);return side<2?lanes_[side].held:std::nullopt;}
+    // The radius of the ball this hand's fingers wrap while it holds a prop or a body part (0: none, or build/legacy-finger-grab).
+    double hold_sphere(unsigned side) {std::lock_guard<std::mutex> lock(mutex_);return side<2 && lanes_[side].held?lanes_[side].sphere:0.;}
     std::optional<double> held_size(unsigned side) {
         std::lock_guard<std::mutex> lock(mutex_);const auto& h=lanes_.at(side).held;if(!h) return {};
         return h->bounds?length(h->bounds->maximum-h->bounds->minimum):.3;
@@ -1487,7 +1500,7 @@ public:
          if(collar_grab_) {std::ofstream note(loss_file_,std::ios::app);note<<"knob build/collar-grab present: chest/neck hold targets enabled (full fist only)\n";}
          // Corpse hold knobs and the tuning file, read once here so the shipped configuration is the one that was tested (valid file or the defaults).
          const auto knobs=corpse_knobs_from(root);const auto& kill=knobs.kill;const auto& loaded=knobs.loaded;
-         no_posts_=kill.no_posts;prop_grasp_point_=!kill.no_prop_grasp_point;for(auto& l:lanes_) l.grab.set_legacy_lag_release(kill.legacy_corpse_lag_release);
+         no_posts_=kill.no_posts;prop_grasp_point_=!kill.no_prop_grasp_point;sphere_grip_=!std::filesystem::exists(root/L"build"/L"legacy-finger-grab",ec);for(auto& l:lanes_) l.grab.set_legacy_lag_release(kill.legacy_corpse_lag_release);
          configure_corpse(knobs.options);
          {std::ofstream note(loss_file_,std::ios::app);
           if(kill.no_corpse_grab) note<<"knob build/no-corpse-grab present: corpse bodies are not grab candidates\n";

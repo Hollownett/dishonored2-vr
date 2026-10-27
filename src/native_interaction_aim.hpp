@@ -907,9 +907,15 @@ class NativeInteractionAim {
                     // resolves); an aware guard is hit as before. A calm touch never reaches here (the producer drops it).
                     if(!legacy_contact_.load(std::memory_order_relaxed)) {
                         if(stealth_enabled_.load(std::memory_order_relaxed) && NativeMelee::damageable(self->base_,self->read_,contact.hit.victim) && NativeMelee::unaware(self->base_,self->read_,contact.hit.victim)) {
-                            // No mod-made damage; the contact (moving at least 0.3 m/s, the producer's rule) asks for the native attack, once per episode.
+                            // No ordinary damage (it would alert him). v639 (user, headset v638: "any attack from behind on a calm guard who
+                            // does not see you is a stealth kill, a stab or a slash"; only 5 of 19 native presses became the Assassination):
+                            // a deliberate contact from the rear or the side (stealth_strike) IS the stealth kill. When the engine's kill sensor
+                            // offers this victim, its own Assassination gets the window (the native press below); otherwise the kill lands
+                            // now. Either way only while the engine still calls him unaware. A frontal contact keeps the native press only.
                             ++intent_unaware_deferred_;
-                            if(intent_episode_.first(contact.victim_spawn,final_now)) intent_contact_tick_.store(final_now,std::memory_order_release);
+                            if((contact.native_offer_victim || !contact.stealth_strike) && intent_episode_.first(contact.victim_spawn,final_now))
+                                intent_contact_tick_.store(final_now,std::memory_order_release);
+                            if(contact.stealth_strike && stealth_hold_.hold(contact,contact.victim_spawn,final_now,contact.native_offer_victim,true)) ++stealth_counts_[0];
                             continue;}
                     } else
                     // A guard the engine calls unaware is not hit: the native Slash may still make this the Assassination, or the
@@ -2163,6 +2169,13 @@ public:
            offer->spawn!=target_spawn_[side] || !native_talk_offer_current(read_,base_,*offer))return {};
         const NativeInteractionTargetIdentity identity{offer->component,target_generation_[side],static_cast<unsigned>(side),hands_[side].epoch,1};
         return QualifiedTarget{identity,offer->owner,offer->spawn,hands_[side].tick,target_tick_[side],{}};
+    }
+    // Every entity the game's Use could act on now: both hands' selections and the unrouted (head) selection; 0 where none.
+    std::array<std::uintptr_t,3> use_owners(std::uint64_t now) {
+        std::lock_guard<std::mutex> lock(mutex_);std::array<std::uintptr_t,3> out{};
+        for(unsigned side=0;side<2;++side) if(live_target(side,now)) out[side]=target_owner_[side];
+        if(native_object_ && now>=native_tick_ && now-native_tick_<=250) out[2]=rig::value<std::uintptr_t>(read_,native_object_+0x10).value_or(0);
+        return out;
     }
     // Entity the game currently offers this hand for Use (its highlight), 0 if none.
     std::uintptr_t target_owner(int side,std::uint64_t now) {

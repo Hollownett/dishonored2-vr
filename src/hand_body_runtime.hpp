@@ -71,6 +71,7 @@ public:
     // Verifies the pins, installs the count-only hooks and arms the dispatcher entry. false (with why) leaves everything off.
     // The reason a requested hand body is off (review P3-4: kept for the status). Control thread.
     static void note_install_failure(const std::string& why) {std::lock_guard<std::mutex> lock(install_mutex_);install_why_=why;}
+    static void legacy_stuck(bool on) {legacy_stuck_.store(on);}   // build/legacy-hand-stuck (before install): a wedged body is never released
     static bool install(std::uintptr_t base,Read read,Logic logic,Camera camera,const std::filesystem::path& output,std::string& why) {
         note_install_failure("");
         if(!stop()) {why="a previous hand body is still alive";note_install_failure(why);return false;}
@@ -91,6 +92,7 @@ public:
         {std::lock_guard<std::mutex> lock(events_mutex_);events_.clear();dropped_events_=0;}
         cycles_per_us_=calibrate_cycles_per_us();
         auto* body=new HandBody(engine(),true);   // never freed: a render-thread reader may still hold the previous one (tiny, per install)
+        if(legacy_stuck_.load()) body->set_stuck_release_s(0);
         body_.store(body,std::memory_order_release);
         for(auto& s:last_status_) s={};
         for(auto& s:last_drive_) s={};
@@ -201,7 +203,7 @@ public:
              <<",\"cost_max_us\":"<<d.cost_max_us<<",\"player_drift_um\":"<<d.player_drift_um<<",\"dt_s\":"<<d.dt_s<<",\"drives\":"<<d.drives
              <<",\"drive_writes\":"<<d.drive_writes<<",\"yields\":"<<d.yields<<",\"skipped\":"<<d.skipped<<",\"garbage\":"<<d.garbage
              <<",\"second_drives\":"<<d.second_drives<<",\"root_jumps\":"<<d.root_jumps<<",\"pressed_ticks\":"<<d.pressed_ticks
-             <<",\"cpu_us\":"<<d.cpu_us<<",\"cpu_max_us\":"<<d.cpu_max_us<<",\"root_moved_ticks\":"<<d.root_moved_ticks<<",\"root_travel_um\":"<<d.root_travel_um<<",\"held_ticks\":"<<d.held_ticks<<",\"discontinuities\":"<<d.discontinuities<<'}';
+             <<",\"cpu_us\":"<<d.cpu_us<<",\"cpu_max_us\":"<<d.cpu_max_us<<",\"root_moved_ticks\":"<<d.root_moved_ticks<<",\"root_travel_um\":"<<d.root_travel_um<<",\"held_ticks\":"<<d.held_ticks<<",\"discontinuities\":"<<d.discontinuities<<",\"stuck_releases\":"<<d.stuck_releases<<'}';
             o<<",\"pose\":";
             if(p) o<<'['<<p->position.x<<','<<p->position.y<<','<<p->position.z<<']';else o<<"null";
             o<<'}';
@@ -242,7 +244,7 @@ private:
     inline static std::array<unsigned,2> current_{{no_slot,no_slot}};   // dispatcher thread only
     inline static std::array<unsigned,2> last_pick_{{storage_per_side-1,storage_per_side-1}};   // P3-4: the storage last created into (dispatcher thread)
     inline static std::atomic<HandBody*> body_{nullptr};
-    inline static std::atomic<bool> active_{},stop_requested_{};
+    inline static std::atomic<bool> active_{},stop_requested_{},legacy_stuck_{};
     inline static std::atomic<unsigned> dispatch_inflight_{};
     inline static std::uintptr_t base_{};inline static Read read_{};inline static Logic logic_{};inline static Camera camera_{};
     inline static std::filesystem::path output_;
@@ -514,6 +516,7 @@ private:
             if(drive.snaps>drive_was.snaps) note_event(side,"snap",now.handle);
             if(drive.garbage>drive_was.garbage) note_event(side,"readback_garbage",was.handle);
             if(drive.snap_blocked>drive_was.snap_blocked && drive_was.snap_blocked<16) note_event(side,"snap_blocked",now.handle);
+            if(drive.stuck_releases>drive_was.stuck_releases) note_event(side,"stuck_release",now.handle);
             drive_was=drive;
             if(now.creates>was.creates) note_event(side,"create",now.handle);
             if(now.wake_writes>was.wake_writes) note_event(side,"wake",now.handle);

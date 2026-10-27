@@ -98,6 +98,7 @@ struct HandDriveConfig {
     double capsule_height=1.95;     // ... and between the root (the feet) and this height above it
     double root_jump=.2;            // the root moving more than this in one drive tick is Blink / a teleport / a platform, not a push: new window
     unsigned max_unreadable_motion=90;   // this many drives in a row with an unreadable motion (a bad motion index) latch HandBodyFault (~1 s)
+    double stuck_release_s=1.;      // a body wedged (farther than the servo's snap gap, not closing) while the target is never free is destroyed after this long (0: never, the old rule); it is re-created when the palm is free
 };
 // The native velocity guard (hand_body_native.hpp) refuses anything above these; the drive stays under them.
 inline constexpr double kHandWriteMaxSpeed=10.5,kHandWriteMaxSpin=20.5;
@@ -118,7 +119,7 @@ struct DriveStatus {double gap_m{};double speed{},feedforward_mps{};bool root_ga
                     // fix round 1: thread CPU time of this side's drive (QueryThreadCycleTime; 0 when unavailable), and the positive control for
                     // the drift proof: ticks where the root moved under locomotion input, and the largest such root travel in one locomotion window
                     std::uint64_t cpu_us{},cpu_max_us{},root_moved_ticks{},root_travel_um{};
-                    std::uint64_t held_ticks{},discontinuities{};};   // B16: drive ticks while holding (snaps suppressed unless a native hold's object is free, P2-1)
+                    std::uint64_t held_ticks{},discontinuities{},stuck_releases{};};   // B16: drive ticks while holding (snaps suppressed unless a native hold's object is free, P2-1)
 // Fix round 1 (proof d, controller ruling): per-tick drive cost (both hands summed) as wall time (QPC) and thread CPU time, a fixed wall
 // histogram, the ticks over budget, and the phase split of the slowest tick (read-back, servo, write, the rest). hist edges in us:
 // [0,10) [10,20) [20,50) [50,100) [100,150) [150,200) [200,300) [300,500) [500,1000) [1000,inf).
@@ -501,7 +502,7 @@ public:
         c.contact_now.store(s.short_streak>=dc.contact_ticks,std::memory_order_relaxed);c.contact_ms.store(steady_ms(),std::memory_order_relaxed);   // B15: short of the command for two ticks in a row
         note_drift(side,in,m->position);
         Vec3 linear{},angular{};bool yielded=in.yield || !hand_servo_detail::finite_pose(in.target);
-        if(yielded) {s.servo={};count(side,&Counters::yields);c.capped.store(false,std::memory_order_relaxed);}
+        if(yielded) {s.servo={};s.wedged_s=0;count(side,&Counters::yields);c.capped.store(false,std::memory_order_relaxed);}
         else {
             WorldTrackedPose body;body.position=m->position;body.basis=in.target.basis;   // a sphere: no orientation to servo, the spin only brakes
             // B16 fix round 2: while holding, the stuck timer never runs (target_blocked resets it) and no snap is asked for; the rules resume once
@@ -513,6 +514,12 @@ public:
             c.capped.store(out.capped,std::memory_order_relaxed);
             if(out.valid) {linear=out.linear;angular=out.angular;}   // invalid (a gap past max_gap, a bad target): hold, and the far gap snaps
             if(in.holding) count(side,&Counters::held_ticks);
+            // A wedged body (headset v638: a hand stuck on a table or a corpse): the servo never asks for a snap while the target is blocked, and a
+            // snap needs a free palm, so a body pinned away from a target that stays inside geometry used to stay for good. Past stuck_release_s it
+            // is destroyed instead; the drawn hand is the clamp's meanwhile and a new body comes when the palm is free (the lifecycle's ordinary create).
+            const bool wedged=!in.holding && !in.target_free && std::isfinite(gap) && gap>servo_cfg_.snap_gap && length(m->velocity)<servo_cfg_.snap_closing_mps;
+            s.wedged_s=wedged?s.wedged_s+std::min(dt,tuning_.dt_max):0;
+            if(dc.stuck_release_s>0 && s.wedged_s>=dc.stuck_release_s) {s.wedged_s=0;s.pending_destroy=true;s.snap_pending=false;count(side,&Counters::stuck_releases);}
             if(hold_waits) s.snap_pending=false;
             else if(out.snap || (std::isfinite(gap) && gap>dc.far_snap_gap)) {
                 if(in.target_free) {if(!s.snap_pending) count(side,&Counters::snap_requests);s.snap_pending=true;}
@@ -536,6 +543,7 @@ public:
         s.has_cmd=!yielded;
         s.woken=true;count(side,&Counters::writes);count(side,&Counters::drive_writes);
     }
+    void set_stuck_release_s(double seconds) {drive_cfg_.stuck_release_s=seconds;}   // build/legacy-hand-stuck: 0 restores the old never-release rule
     DriveStatus drive_status(unsigned side) const {
         DriveStatus d;if(side>=sides) return d;
         const auto& c=counters_[side];
@@ -543,7 +551,7 @@ public:
         d.cost_us=c.cost_us.load();d.cost_max_us=c.cost_max_us.load();d.player_drift_um=c.player_drift_um.load();d.dt_s=c.dt_s.load();
         d.drives=c.drives.load();d.drive_writes=c.drive_writes.load();d.yields=c.yields.load();d.skipped=c.skipped.load();
         d.snap_requests=c.snap_requests.load();d.snap_blocked=c.snap_blocked.load();d.garbage=c.garbage.load();d.second_drives=c.second_drives.load();d.root_jumps=c.root_jumps.load();d.pressed_ticks=c.pressed_ticks.load();
-        d.cpu_us=c.cpu_us.load();d.cpu_max_us=c.cpu_max_us.load();d.root_moved_ticks=c.root_moved_ticks.load();d.root_travel_um=c.root_travel_um.load();d.held_ticks=c.held_ticks.load();d.discontinuities=c.discontinuities.load();
+        d.cpu_us=c.cpu_us.load();d.cpu_max_us=c.cpu_max_us.load();d.root_moved_ticks=c.root_moved_ticks.load();d.root_travel_um=c.root_travel_um.load();d.held_ticks=c.held_ticks.load();d.discontinuities=c.discontinuities.load();d.stuck_releases=c.stuck_releases.load();
         return d;
     }
     // The largest drive cost of one tick, both hands summed (proof (d): <= 200 us), and the last tick's sum.
@@ -587,7 +595,7 @@ private:
             wake_writes{},create_refusals{},writes{},releases{},lost{},unverified{},misplaced_writes{},reentrant_writes{},filter_writes{},filter_refused{},filter_stranded{},filter_readback_mismatches{};
         std::atomic<std::uint32_t> filter{R1Recipe::filter};   // B16: the body's filter word as last written (the R1 default from each creation)
         std::atomic<std::uint64_t> contact_frames{},snaps{},cost_us{},cost_max_us{},player_drift_um{},drives{},drive_writes{},yields{},skipped{},
-            snap_requests{},snap_blocked{},garbage{},second_drives{},root_jumps{},pressed_ticks{},cpu_us{},cpu_max_us{},root_moved_ticks{},root_travel_um{},held_ticks{},discontinuities{};
+            snap_requests{},snap_blocked{},garbage{},second_drives{},root_jumps{},pressed_ticks{},cpu_us{},cpu_max_us{},root_moved_ticks{},root_travel_um{},held_ticks{},discontinuities{},stuck_releases{};
         std::atomic<double> gap_m{},speed{},dt_s{},feedforward_mps{};std::atomic<bool> capped{},contact_now{},root_gate{};std::atomic<std::uint64_t> contact_ms{};
         std::atomic<int> state{};std::atomic<std::uint32_t> handle{};
     };
@@ -603,7 +611,7 @@ private:
         std::uint32_t filter{R1Recipe::filter};std::uint64_t filter_tick{~0ull};unsigned filter_misses{};   // B16: the word this body carries; one filter write per tick
         // B14 drive state (dispatcher thread only)
         HandServoState servo{};double last_drive_s{std::numeric_limits<double>::quiet_NaN()};std::uint64_t written_tick{~0ull};
-        std::uint64_t drive_tick{~0ull};bool snap_pending{},snap_recreate{},has_cmd{};Vec3 last_cmd{};std::optional<Vec3> press_root,last_root,loco_start,loco_last;unsigned unreadable_motion{},short_streak{};};
+        std::uint64_t drive_tick{~0ull};bool snap_pending{},snap_recreate{},has_cmd{};Vec3 last_cmd{};std::optional<Vec3> press_root,last_root,loco_start,loco_last;unsigned unreadable_motion{},short_streak{};double wedged_s{};};
     void count(unsigned side,std::atomic<std::uint64_t> Counters::* field) {(counters_[side].*field).fetch_add(1,std::memory_order_relaxed);}
     std::uint64_t clock_us() const {try {return engine_.now_us?engine_.now_us():0;} catch(...) {return 0;}}
     // CPU time is available only with a calibration and while every read succeeds (one failed read: unavailable for the session)
@@ -752,7 +760,7 @@ private:
     // stripped word, say so (status filter_stranded) instead of letting the status read the default.
     void note_filter_unconfirmed(unsigned side) {if(side_[side].filter!=R1Recipe::filter) count(side,&Counters::filter_stranded);}
     void reset_drive(unsigned side) {
-        Side& s=side_[side];s.servo={};s.last_drive_s=std::numeric_limits<double>::quiet_NaN();s.snap_pending=false;s.has_cmd=false;s.press_root.reset();s.last_root.reset();s.loco_start.reset();s.loco_last.reset();s.unreadable_motion=0;s.short_streak=0;counters_[side].contact_now.store(false,std::memory_order_relaxed);
+        Side& s=side_[side];s.servo={};s.last_drive_s=std::numeric_limits<double>::quiet_NaN();s.snap_pending=false;s.has_cmd=false;s.press_root.reset();s.last_root.reset();s.loco_start.reset();s.loco_last.reset();s.unreadable_motion=0;s.short_streak=0;s.wedged_s=0;counters_[side].contact_now.store(false,std::memory_order_relaxed);
     }
     void readback(unsigned side,std::uintptr_t world) {
         const Side& s=side_[side];

@@ -155,6 +155,43 @@ struct Rig {
 };
 const auto ignore=[](const ClampOutput&,Vec3){};
 
+// Headset v638 ("the hand stopped obeying the controller" after a table / a corpse): in strict mode a hand that waits for a sweep to
+// validate its target used to wait without end, so answers that stop arriving, or a palm sweep that keeps starting inside a body, froze the
+// drawn hand in free air while the controller moved on. The wait is bounded by hold_seconds; the hand then follows (kept out of known planes).
+void strict_hold_is_bounded() {
+    for(const bool legacy:{true,false}) {   // true: hold_seconds 0 = the old rule (reproduces the freeze)
+        // (a) the palm answers stop arriving while the controller moves 1 m away in free air
+        Rig r;r.strict_answers=true;r.world.floor=false;r.world.wall_x=false;if(legacy) r.clamp.set_hold_seconds(0);
+        for(int f=0;f<30;++f) r.step({.4,0,.5});
+        r.drop_palm=[](unsigned) {return true;};
+        ClampOutput o{};
+        for(int f=0;f<270;++f) {o=r.step({.4+f*.004,0,.5});if(f==25) CHECK(o.held);}   // the first moments: waiting is fine
+        if(legacy) CHECK(o.held && o.drawn.position.x<.46);                              // frozen 1 m behind for 3 s
+        else CHECK(!o.held && close_to(o.drawn.position,{.4+269*.004,0,.5},1e-9));
+        // (b) a palm sweep that starts inside a loose body (a corpse limb on the hand) with the controller leaving
+        Rig c;c.strict_answers=true;c.world.floor=false;c.world.wall_x=false;c.loose={20};if(legacy) c.clamp.set_hold_seconds(0);
+        for(int f=0;f<30;++f) c.step({.4,0,.5});
+        c.world.palm_inside_loose=true;
+        for(int f=0;f<270;++f) o=c.step({.4+f*.004,0,.5});
+        if(legacy) CHECK(o.held && o.drawn.position.x<.46);   // frozen in the body for good, though every answer arrives
+        else CHECK(!o.held && close_to(o.drawn.position,{.4+269*.004,0,.5},1e-9));
+        // (c) the freeze is never an excuse to go through a wall known: the answers stop with the hand on the wall
+        Rig w;w.strict_answers=true;w.world.floor=false;if(legacy) w.clamp.set_hold_seconds(0);
+        for(int f=0;f<30;++f) w.step({1.2,0,.5});
+        w.drop_palm=[](unsigned) {return true;};
+        for(int f=0;f<120;++f) {o=w.step({1.2,0,.5});CHECK(o.drawn.position.x<=.95+1e-6);}
+        // (d) a sweep that validates ends the wait at once and the clock restarts: two short outages never add up
+        Rig s;s.strict_answers=true;s.world.floor=false;s.world.wall_x=false;if(legacy) s.clamp.set_hold_seconds(0);
+        for(int f=0;f<30;++f) s.step({.4,0,.5});
+        bool lost=false;s.drop_palm=[&](unsigned) {return lost;};
+        for(int round=0;round<4;++round) {
+            lost=true;for(int f=0;f<18;++f) s.step({.4+(round*40+f)*.004,0,.5});   // 0.2 s outage
+            lost=false;for(int f=0;f<22;++f) o=s.step({.4+(round*40+18+f)*.004,0,.5});
+        }
+        CHECK(!o.held);
+    }
+}
+
 void sweep_starts_at_previous_drawn() {
     Rig r;r.step({.5,0,.5});
     auto o=r.step({.5,0,.5});
@@ -473,7 +510,7 @@ void strict_receipts_bind_geometry_and_generation() {
     o=step();CHECK(o.reacquired && o.request_ids[0]>b.request_ids[0]);
     o=step();CHECK(!o.palm_answered && !o.chest_answered && clamp.held_planes(0,planes)==0);
     // Eviction drops proof safely instead of interpreting the old receipt against the latest request geometry.
-    const auto evicted=o.request_ids[0];in.palm_hit.reset();in.answer_ids={};
+    const auto evicted=o.request_ids[0];in.palm_hit.reset();in.answer_ids={};clamp.set_hold_seconds(0);   // (this subject is the receipt, not the bounded wait)
     for(int frame=0;frame<70;++frame)o=step();
     in.answer_ids[0]=evicted;o=step();CHECK(!o.palm_answered && !o.chest_answered && o.held && !o.validated);
     // StartProbe replaces the complete object while native answer storage survives in the process.
@@ -531,7 +568,8 @@ void strict_async_game_cadence_covers_batched_root() {
 // One clear answer authorizes its fixed swept region, not an unlimited chain of small movements. Native replies
 // can stop entirely while render continues posting; cached-segment tolerance must never migrate with the hand.
 void strict_small_steps_cannot_self_renew_proof() {
-    HandClamp clamp;ClampInput in{};in.strict_answers=true;in.epoch=1;in.root=level_frame({},{1,0,0});
+  for(const bool legacy:{true,false}) {   // legacy: hold_seconds 0, the unbounded wait; default: the wait ends after hold_seconds (headset v638, the hand froze)
+    HandClamp clamp;ClampInput in{};in.strict_answers=true;in.epoch=1;in.root=level_frame({},{1,0,0});if(legacy) clamp.set_hold_seconds(0);
     in.chest={0,0,1};in.target=pose_at({.4,0,.5});
     const auto step=[&]() {in.now+=dt;auto o=clamp.update(0,in);clamp.note_drawn(0,in.root,o.drawn.position);return o;};
     const auto a=step();in.answer_ids[0]=a.request_ids[0];auto o=step();CHECK(o.chest_answered && o.validated);
@@ -539,9 +577,11 @@ void strict_small_steps_cannot_self_renew_proof() {
     for(unsigned frame=1;frame<=200;++frame) {
         in.target.position.x=.4+.01*frame;o=step();held+=o.held;
         if(frame<=4)CHECK(o.validated && !o.held); // retain the existing bounded tolerance around the answered segment
-        CHECK(o.drawn.position.x<=.45+1e-9 && !o.palm_answered && !o.chest_answered);
+        CHECK((!legacy && frame>25 || o.drawn.position.x<=.45+1e-9) && !o.palm_answered && !o.chest_answered);   // proof never migrates for hold_seconds
     }
-    CHECK(held>150 && o.held && !o.validated);
+    if(legacy) CHECK(held>150 && o.held && !o.validated);
+    else CHECK(held>=20 && held<=26 && !o.held && !o.validated && close_to(o.drawn.position,in.target.position,1e-9));
+  }
 }
 
 // Transport is constrained by unchanged world planes, including when old sweeps cannot cover the new target.
@@ -1968,6 +2008,7 @@ int main() {
     leading_probes_follow_motion_and_walls();
     wall_tip_sweeps_past_the_pressed_prop();
     corpse_pushed_against_a_wall_holds_the_wall();
+    strict_hold_is_bounded();
     snap_timer_ignores_caller_additions();
     whole_hand_slides_along_a_wall();
     walls_win_over_loose_faces();

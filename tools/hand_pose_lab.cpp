@@ -16,6 +16,7 @@
 #include "../src/full_body_driver.hpp"
 #include "../src/finger_ik.hpp"
 #include "../src/finger_snapshot.hpp"
+#include "../src/finger_sphere.hpp"
 #include <cstdio>
 #include <fstream>
 #include <functional>
@@ -77,6 +78,10 @@ struct Scene {
     std::vector<std::string> notes;     // extra report lines (snapshot: what the game read)
     std::shared_ptr<std::string> late_note; // a line only the shapes callback knows (the touch --refit measured again), printed with the report
     float thumb{-1};                    // >= 0: the thumb's want (a touched thumb sensor asks for 1, finger_touch_curl.hpp), else finger_wants'
+    // The sphere-grip comparison (finger_sphere.hpp): the shapes the solver is given for a held thing whose pose is jittered (position m, axis-angle rad) the way a
+    // lagging motor moves it (old: the thing's own shape, classify_held; sphere: the ball in the palm, which does not care). `ghost`: drawn only, never a contact.
+    std::function<std::vector<r::HeldShape>(const WorldTrackedPose&,const r::HandGeometry&,Vec3,Vec3)> moving;
+    std::function<std::vector<r::HeldShape>(const WorldTrackedPose&,const r::HandGeometry&)> ghost;
 };
 
 std::string shape_json(const r::HeldShape& s,const std::string& name,const char* colour) {
@@ -95,6 +100,7 @@ std::string shape_json(const r::HeldShape& s,const std::string& name,const char*
 r::FingerSnapshot loaded_snapshot;
 // What --refit does besides rebuilding the cylinder: --along F (the grip point as a fraction of the shaft: 0.3 body, 0.85 neck of a bottle) and
 // --profile r0,..,r7 (the cross-section radius at the eight stations along the shaft, base to tip, instead of the record's measured one).
+bool snapshot_sphere=false; // --sphere: a snapshot's "grab" shape is replaced by the sphere grip's ball (finger_sphere.hpp), sized from that shape's own half sides
 bool grip_fit=true;double fixed_shift=-1,fixed_slide=-1,extra_half=0; // see the flags in run()
 // The seat a hold gets: --shift / --slide, else the game's grip fit (finger_ik.hpp fit_grip), else the constants. `note`: what the fit found.
 struct Seating {double shift{-1},slide{0};};
@@ -106,6 +112,28 @@ Seating seat_of(const r::HandGeometry& g,const WorldTrackedPose& palm,const r::H
     s.shift=fit.shift;s.slide=fit.slide;
     if(note) {char b[260];std::snprintf(b,sizeof b,"fit: knuckle shift %.0f mm (the constant: %.0f mm), slide %.0f mm along the hole axis; the fingers float %.1f mm summed on it, %.1f mm on the constant's seat; %u seats tried",fit.shift*1000,std::min(r::held_knuckle_shift,.8*c.radius)*1000,fit.slide*1000,fit.fitted*1000,fit.plain*1000,fit.tried);*note=b;}
     return s;
+}
+// --lag FILE:ENTITY: the recorded motor lag of one physically held prop (artifacts/native-physical-grab.csv, 60 Hz): per frame the object's position minus its goal
+// (the motor's error, m) and its spin / 12 (the motor commands 12 x the rotation error), a 90-frame window of it with the least spread, detrended: the object's own
+// jitter about its place in the hand, which the stability metric replays for the old path and the sphere.
+std::vector<std::pair<Vec3,Vec3>> recorded_lag;std::string recorded_lag_note;
+void load_lag(const std::string& spec) {
+    const auto colon=spec.rfind(':');if(colon==std::string::npos) throw std::invalid_argument("--lag FILE:ENTITY");
+    std::ifstream file(spec.substr(0,colon));if(!file) throw std::invalid_argument("Cannot read lag file");
+    const std::string entity=spec.substr(colon+1);std::string line;std::getline(file,line);
+    std::vector<std::pair<Vec3,Vec3>> all;
+    while(std::getline(file,line)) {
+        std::vector<std::string> c;std::stringstream ls(line);std::string item;while(std::getline(ls,item,',')) c.push_back(item);
+        if(c.size()<20 || c[2]!=entity) continue;
+        try {all.push_back({{std::stod(c[8])-std::stod(c[11]),std::stod(c[9])-std::stod(c[12]),std::stod(c[10])-std::stod(c[13])},{std::stod(c[17])/12,std::stod(c[18])/12,std::stod(c[19])/12}});} catch(...) {}
+    }
+    if(all.size()<90) throw std::invalid_argument("fewer than 90 frames of that entity");
+    double best=1e9;size_t at=0;
+    for(size_t i=0;i+90<=all.size();i+=5) {Vec3 m{};for(size_t k=0;k<90;++k) m=m+all[i+k].first*(1./90);double sd=0;for(size_t k=0;k<90;++k) sd+=length(all[i+k].first-m);if(sd<best) {best=sd;at=i;}}
+    Vec3 m{};for(size_t k=0;k<90;++k) m=m+all[at+k].first*(1./90);
+    double step=0,spin=0;
+    for(size_t k=0;k<90;++k) {recorded_lag.push_back({all[at+k].first-m,all[at+k].second});if(k) step+=length(all[at+k].first-all[at+k-1].first);spin+=length(all[at+k].second);}
+    char b[200];std::snprintf(b,sizeof b,"recorded lag of entity %s, frames %zu..%zu: mean position step %.1f mm a frame, mean rotation error %.1f deg",entity.c_str(),at,at+89,step/89*1000,spin/90*kDeg);recorded_lag_note=b;
 }
 struct Refit {bool on{};double along{-1};std::vector<double> radii;bool lift{};double lift_mm{-1};}; // lift_mm >= 0 (--lift-mm N): a fixed stand-off; lift: stand the shaft off the palm by held_lift (the thumb's root clear of it), an experiment: the game seats with none
 // --palette FILE[:index]: the arm palette the game skinned the held hand with (artifacts/arm-palettes.jsonl, dxgi_probe.cpp dump_held_palette), drawn in
@@ -174,6 +202,17 @@ std::vector<Scene> snapshot_scenes(const std::string& spec,const Refit& refit) {
         }
         return out;
     };
+    if(snapshot_sphere) { // the old path's recorded shape -> the ball (the grab shape's local half sides: a capsule half+r, r, r; a box its half)
+        for(auto& x:sn.shapes) if(x.kind=="grab") {
+            const double rad=r::sphere_grip_radius(x.radius>0 && x.half.y==0 && x.half.z==0?Vec3{x.half.x+x.radius,x.radius,x.radius}:Vec3{x.half.x+x.radius,x.half.y+x.radius,x.half.z+x.radius});
+            auto inner=scene.shapes;
+            scene.shapes=[inner,rad](const WorldTrackedPose& palm,const r::HandGeometry& g) {
+                auto all=inner(palm,g);std::vector<r::HeldShape> out;
+                for(auto& h:all) if(!(h.rim<0 && h.radius_end<0 && h.half.y==0 && h.half.z==0 && h.radius>0) && !(h.radius==0)) out.push_back(h); // the other shapes (probes) stay
+                out.push_back(r::sphere_grip_shape(palm,g,rad));return out;};
+            scene.notes.push_back("sphere grip: the grab shape is replaced by a ball of radius "+std::to_string(rad*100).substr(0,4)+" cm");break;
+        }
+    }
     for(const auto& x:sn.shapes) {scene.shape_name+=(scene.shape_name.empty()?"":" + ")+x.kind;}
     if(refit.on && sn.held.present && sn.held.have_now) {
         // --refit: the held shape is rebuilt from the record's raw bounds and axes by the CURRENT held_cylinder, profile and seat (the way the
@@ -272,10 +311,12 @@ int run(int argc,char** argv) {
         if(a=="--snapshot" && i+1<argc) snapshot_spec=argv[++i];
         else if(a.rfind("--snapshot=",0)==0) snapshot_spec=a.substr(11);
         else if(a=="--refit") refit.on=true;
+        else if(a=="--sphere") snapshot_sphere=true;
         else if(a=="--no-fit") grip_fit=false;                                // the knuckle shift of v532 and before (held_knuckle_shift), to compare against
         else if(a=="--shift" && i+1<argc) fixed_shift=std::atof(argv[++i])/1000; // a fixed knuckle shift (mm)
         else if(a=="--slide" && i+1<argc) fixed_slide=std::atof(argv[++i])/1000; // a fixed slide toward the thumb (mm)
         else if(a=="--half" && i+1<argc) extra_half=std::atof(argv[++i])/1000;   // lengthen every held capsule's shaft by this much (mm): an experiment
+        else if(a=="--lag" && i+1<argc) load_lag(argv[++i]);
         else if(a=="--lift") refit.lift=true;
         else if(a=="--lift-mm" && i+1<argc) refit.lift_mm=std::atof(argv[++i]);
         else if(a=="--palette" && i+1<argc) palette_spec=argv[++i];
@@ -300,6 +341,26 @@ int run(int argc,char** argv) {
             return std::vector<r::HeldShape>{r::seat_held(shaft,palm,in,{0,0,length/2},r::held_grip_fraction,0,0,seating.shift,seating.slide).shape};
         };
     };
+    // ---- the sphere grip's cases: six things, each held the old way (the thing's own shape at its place in the hand, jittered when it moves) and on the ball.
+    // Half extents are the thing's own (m): a spoon 18 cm, a fork 20 cm, a candlestick 30 cm with a 2.2 cm shaft, a book 22 x 16 x 4 cm, a folder 32 x 22 x 2 cm, a head 18 x 14 x 20 cm.
+    struct Thing {const char* name;const char* title;Vec3 half;};
+    const std::vector<Thing> things{{"spoon","Spoon 18 cm",{.09,.015,.004}},{"fork","Fork 20 cm",{.10,.012,.003}},{"candle","Candlestick 30 cm, shaft 2.2 cm",{.15,.022,.022}},
+        {"book","Book 22 x 16 x 4 cm",{.11,.08,.02}},{"folder","Folder 32 x 22 x 2 cm",{.16,.11,.01}},{"skull","Skull / head 18 x 14 x 20 cm",{.09,.07,.10}}};
+    const auto box_of=[](const WorldTrackedPose& pose,Vec3 half) { // the engine's world AABB of the thing's box turned by pose (e_j = sum_i half_i |axis_i . j|)
+        const auto a=[&](unsigned i,unsigned j) {return std::abs(j==0?pose.basis[i].x:j==1?pose.basis[i].y:pose.basis[i].z);};
+        const double h[3]={half.x,half.y,half.z};Vec3 e{};
+        e.x=h[0]*a(0,0)+h[1]*a(1,0)+h[2]*a(2,0);e.y=h[0]*a(0,1)+h[1]*a(1,1)+h[2]*a(2,1);e.z=h[0]*a(0,2)+h[1]*a(1,2)+h[2]*a(2,2);
+        return NativeGrabBounds{pose.position-e,pose.position+e};
+    };
+    // The old path's thing: its axes the palm's (long side along the thumb axis, across the palm), centre on the palm skin by its smallest half side. Jitter moves and
+    // turns it about its centre. Rows of the pose are the model axes (classify_held's body.basis).
+    const auto old_pose=[](const WorldTrackedPose& palm,const r::HandGeometry& g,Vec3 half,Vec3 dp,Vec3 turn) {
+        const Vec3 n=r::palm_normal(palm,g);const double lo=std::min({half.x,half.y,half.z});
+        WorldTrackedPose pose{palm.position+n*(lo+r::held_palm_depth)+dp,{palm.basis[0],palm.basis[1],palm.basis[2]}};
+        const double angle=length(turn);
+        if(angle>1e-9) for(auto& row:pose.basis) row=rotated(bd::axis_angle(turn*(1/angle),angle),row);
+        return pose;
+    };
     std::vector<Scene> scenes{
         {"open","Open hand (grip 0, trigger 0)",hold_at,hold_fingers,hold_in,0.f,0.f,false,{},""},
         {"fist","Plain fist, nothing held (grip 1, trigger 1)",hold_at,hold_fingers,hold_in,1.f,1.f,false,{},""},
@@ -319,6 +380,23 @@ int run(int argc,char** argv) {
         {"thumb_fist","Thumb on the controller, fist (grip 1, trigger 1)",hold_at,hold_fingers,hold_in,1.f,1.f,false,{},"",-1,false,{},{},1.f},
     };
 
+    for(const auto& t:things) {
+        const auto half=t.half;
+        Scene sphere{};sphere.name=_strdup((std::string(t.name)+"_sphere").c_str());sphere.held=true;sphere.where=hold_at;sphere.fingers=hold_fingers;sphere.normal=hold_in;sphere.squeeze=1.f;sphere.index=0.f;
+        sphere.title=_strdup((std::string(t.title)+": the sphere grip (ball r = sqrt of the two smaller half sides, 1.5..6 cm)").c_str());sphere.shape_name="grip ball";
+        sphere.shapes=[half](const WorldTrackedPose& palm,const r::HandGeometry& g) {return std::vector<r::HeldShape>{r::sphere_grip_shape(palm,g,r::sphere_grip_radius(half))};};
+        sphere.moving=[half](const WorldTrackedPose& palm,const r::HandGeometry& g,Vec3,Vec3) {return std::vector<r::HeldShape>{r::sphere_grip_shape(palm,g,r::sphere_grip_radius(half))};};
+        sphere.ghost=[half](const WorldTrackedPose& palm,const r::HandGeometry& g) { // the thing, its centre in the ball, pre-pickup axes = the palm's
+            const double rad=r::sphere_grip_radius(half);
+            r::HeldShape box{};box.frame.position=palm.position+r::palm_normal(palm,g)*(rad+r::held_palm_depth);box.frame.basis=palm.basis;box.half=half;return std::vector<r::HeldShape>{box};};
+        scenes.push_back(sphere);
+        Scene old{};old.name=_strdup((std::string(t.name)+"_old").c_str());old.held=true;old.where=hold_at;old.fingers=hold_fingers;old.normal=hold_in;old.squeeze=1.f;old.index=0.f;
+        old.title=_strdup((std::string(t.title)+": v638 path (classify_held on the thing's own world box)").c_str());old.shape_name="object (classify_held)";
+        old.moving=[half,old_pose,box_of](const WorldTrackedPose& palm,const r::HandGeometry& g,Vec3 dp,Vec3 turn) {
+            const auto pose=old_pose(palm,g,half,dp,turn);return std::vector<r::HeldShape>{r::classify_held(pose,box_of(pose,half),-1,palm)};};
+        old.shapes=[old_moving=old.moving](const WorldTrackedPose& palm,const r::HandGeometry& g) {return old_moving(palm,g,Vec3{},Vec3{});};
+        scenes.push_back(old);
+    }
     if(!snapshot_spec.empty()) scenes=snapshot_scenes(snapshot_spec,refit);
     if(!palette_spec.empty()) load_palette(palette_spec);
     std::string json="{\"character\":"+quote(character)+",\"frames\":[";
@@ -456,6 +534,28 @@ int run(int argc,char** argv) {
             report.push_back(line+tail);
         }
 
+        if(scene.moving) { // stability (the twitch): 90 frames of the live finger call (one finger solved a frame, 60 Hz, the held reach), the thing jittered about its place
+            // in the hand the way a lagging motor moves it (small: +-3 mm, +-2 deg a frame; heavy: x4, v638's mean was 13 mm); the metric is the largest change of any finger
+            // joint's contact pose between two frames over frames 60..90 (after a 1 s settle), in degrees.
+            for(const double amp:{1.,4.,-1.}) {
+                if(amp<0 && recorded_lag.empty()) continue;
+                r::FingerIkState state{};auto wants=r::finger_wants(true,scene.squeeze,scene.index);
+                unsigned seed=12345u;const auto rnd=[&seed]() {seed=seed*1664525u+1013904223u;return (seed>>8)/double(1u<<24)*2-1;};
+                std::array<std::array<float,3>,5> last{};double worst=0,sum=0;unsigned counted=0;
+                for(unsigned k=0;k<90;++k) {
+                    Vec3 dp{rnd()*.003*amp,rnd()*.003*amp,rnd()*.003*amp},spin{rnd()*.035*amp,rnd()*.035*amp,rnd()*.035*amp};
+                    if(amp<0) {dp=recorded_lag[k].first;spin=recorded_lag[k].second;}
+                    const auto jittered=scene.moving(palm,geometry,dp,spin);
+                    const auto c=r::finger_contact(geometry,palm,jittered.data(),static_cast<unsigned>(jittered.size()),1/60.,state,r::held_curl,1,&wants);
+                    if(k>=60) {double step=0;for(unsigned f=0;f<5;++f) for(unsigned j=0;j<3;++j) step=std::max(step,static_cast<double>(std::abs(c.pose[f][j]-last[f][j])));worst=std::max(worst,step);sum+=step;++counted;}
+                    last=c.pose;
+                }
+                char note[260];
+                if(amp<0) std::snprintf(note,sizeof note,"stability, the thing moving as the real motor moved it (%s): largest per-frame change of any finger joint %.2f deg, mean of the frames' largest %.2f deg",recorded_lag_note.c_str(),deg(worst),deg(sum/std::max(1u,counted)));
+                else std::snprintf(note,sizeof note,"stability, thing jittered +-%.0f mm +-%.0f deg a frame: largest per-frame change of any finger joint %.2f deg, mean of the frames' largest %.2f deg",3*amp,2*amp,deg(worst),deg(sum/std::max(1u,counted)));
+                report.push_back(note);
+            }
+        }
         {char note[120];std::snprintf(note,sizeof note,"wrap: summed mean gap of the fifteen phalanges %.1f mm (grip fit %s)",gap_total*1000,grip_fit?"on":"off");report.push_back(note);}
         // ---- frame JSON (renderer format) plus the shapes and the hand frame for the close-up cameras.
         // The close-up cameras want an orthonormal hand frame: T = the grip's hole axis (pinky -> index, what seat_held aligns the shaft
@@ -497,6 +597,7 @@ int run(int argc,char** argv) {
             ",\"shapes\":[";
         for(size_t i=0;i<shapes.size();++i)
             frame+=(i?",":"")+shape_json(shapes[i],scene.shape_name.empty()?"shape":scene.shape_name,scene.held?"[0.95,0.75,0.25]":"[0.35,0.65,1.0]");
+        if(scene.ghost) for(const auto& g:scene.ghost(palm,geometry)) frame+=std::string(shapes.empty()?"":",")+shape_json(g,"object (not a contact)","[0.55,0.55,0.55]");
         frame+="],\"report\":[";
         for(size_t i=0;i<report.size();++i) frame+=(i?",":"")+quote(report[i]);
         frame+="]}";

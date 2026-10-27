@@ -704,7 +704,7 @@ static void b14_checks() {
     }
     {   // drive_stops_at_wall_and_reports_contact: the target 0.35 m beyond a wall; the body never passes it, contact frames rise, no snap
         // while the target is blocked (the clamp's cast does not show it free)
-        HandBodyFault::reset_for_tests();DriveRig r;r.w.wall_x=.6;
+        HandBodyFault::reset_for_tests();DriveRig r;r.w.wall_x=.6;r.hb.set_stuck_release_s(0);   // (the wedged release has its own block below)
         r.tick();
         r.target[0]=Vec3{.95,.2,1.2};r.free[0]=false;   // 0.4 m past the wall: past the servo's snap gap
         double max_x=0;
@@ -737,8 +737,26 @@ static void b14_checks() {
         HandBodyFault::reset_for_tests();DriveRig b;b.w.wall_x=.6;b.tick();
         b.target[0]=Vec3{1.0,.2,1.2};b.free[0]=false;
         const int writes0=b.w.applies_side[0];
-        for(int i=0;i<180;++i) b.tick();
-        CHECK(b.hb.drive_status(0).snaps==0);CHECK(b.w.destroys==0);CHECK(b.w.applies_side[0]-writes0>=170);
+        for(int i=0;i<60;++i) b.tick();   // under stuck_release_s (1 s): still servoing
+        CHECK(b.hb.drive_status(0).snaps==0);CHECK(b.w.destroys==0);CHECK(b.w.applies_side[0]-writes0>=55);
+        // headset v638 (a hand stuck on a table / corpse): a body wedged away from a target that never turns free used to stay for good (no snap
+        // request while blocked, no snap without a free palm). After stuck_release_s it is destroyed; the palm turning free brings a new body there.
+        for(int i=0;i<60;++i) b.tick();
+        CHECK(b.hb.drive_status(0).stuck_releases==1);CHECK(b.w.destroys_side[0]==1);CHECK(b.w.creates_side[0]==1);CHECK(!b.hb.ready(0));
+        for(int i=0;i<90;++i) b.tick();   // still blocked: no body, no spawn inside geometry
+        CHECK(b.w.creates_side[0]==1 && b.hb.drive_status(0).stuck_releases==1);
+        b.free[0]=true;for(int i=0;i<5;++i) b.tick();
+        CHECK(b.hb.ready(0) && b.w.creates_side[0]==2 && length(b.w.b[0].pos-b.target[0])<.1);CHECK(b.hb.drive_status(0).snaps==0);   // a plain create, not a snap
+        // the old rule stays one knob away; a body that is closing on its target, or holding, or not past the snap gap is never released
+        HandBodyFault::reset_for_tests();DriveRig k;k.w.wall_x=.6;k.hb.set_stuck_release_s(0);k.tick();k.target[0]=Vec3{1.0,.2,1.2};k.free[0]=false;
+        for(int i=0;i<240;++i) k.tick();
+        CHECK(k.w.destroys==0 && k.hb.drive_status(0).stuck_releases==0);
+        HandBodyFault::reset_for_tests();DriveRig h;h.w.wall_x=.6;h.tick();h.target[0]=Vec3{1.0,.2,1.2};h.free[0]=false;h.holding[0]=true;
+        for(int i=0;i<240;++i) h.tick();
+        CHECK(h.w.destroys==0 && h.hb.drive_status(0).stuck_releases==0);
+        HandBodyFault::reset_for_tests();DriveRig n;n.w.wall_x=.6;n.tick();n.target[0]=Vec3{.8,.2,1.2};n.free[0]=false;   // 0.25 m: inside the snap gap
+        for(int i=0;i<240;++i) n.tick();
+        CHECK(n.w.destroys==0 && n.hb.drive_status(0).stuck_releases==0);
         // free when the request is made, blocked at the next tick: dropped (counted), no destroy
         HandBodyFault::reset_for_tests();DriveRig c;c.w.wall_x=.6;c.tick();
         c.target[0]=Vec3{1.0,.2,1.2};
