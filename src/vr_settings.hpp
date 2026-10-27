@@ -103,7 +103,7 @@ public:
     struct PalmOffsetChange {unsigned side{};PalmOffset value{};};
     struct Changes {std::optional<double> resolution;std::optional<bool> antialiasing;std::optional<int> temporal_aa;std::optional<TurnControl::Config> turning;
                    std::optional<MirrorMode> mirror;std::optional<double> sharpness;std::optional<int> hud_percent;std::optional<bool> controls_hint;std::optional<bool> crosshair;std::optional<bool> scripted_recenter;std::optional<CutsceneMode> cutscene_mode;
-                   bool recenter{},consume{},opened{},calibrate{},player_measurements{},test_unlock{};
+                   bool recenter{},consume{},opened{},calibrate{},player_measurements{},test_unlock{},controls_guide{};
                    std::optional<PalmOffsetChange> palm_offset;};
     void initialize(double scale,bool aa,TurnControl::Config turning={},MirrorMode mirror=MirrorMode::right_eye,double sharpness=.5,int temporal_aa=2,
         int hud_percent=65,bool controls_hint=true,AvatarPlayerMeasurements player_measurements={},bool aa_chosen=false,bool crosshair=true,bool scripted_recenter=true,CutsceneMode cutscene_mode=CutsceneMode::vr_comfort) {

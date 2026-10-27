@@ -14,7 +14,7 @@ static class Program
         // ApplicationConfiguration.Initialize() minus EnableVisualStyles (app.manifest enables Common Controls 6 instead; see there).
         Application.SetHighDpiMode(HighDpiMode.PerMonitorV2);
         Application.SetCompatibleTextRenderingDefault(false);
-        // Review flags: --page play|settings|tools, --screenshot <png> (PrintWindow of the client area, window shown without activation), --exit, --no-art.
+        // Review flags: --page play|settings|tools|controls, --screenshot <png> (PrintWindow of the client area, window shown without activation), --exit, --no-art.
         string? Flag(string name) { int i = Array.IndexOf(args, name); return i >= 0 && i + 1 < args.Length ? args[i + 1] : null; }
         // Headless art check: extract into a temp folder (or --out <dir>) and compare with a tools/extract_game_art.py output folder (exit code 0 = match).
         if (Flag("--check-art") is string reference) return ArtImport.Check(reference, Flag("--out"), Console.Out);
@@ -26,7 +26,7 @@ static class Program
         // (or --home <dir>).
         var root = Env.FindRoot(args);
         var env = root != null ? new Env(root) : new Env(Path.GetFullPath(Flag("--home") ?? ModHome.Dir)) { Standalone = true };
-        int startPage = Math.Max(0, Array.IndexOf(new[] { "play", "settings", "tools" }, (Flag("--page") ?? "play").ToLowerInvariant()));
+        int startPage = Math.Max(0, Array.IndexOf(new[] { "play", "settings", "tools", "controls" }, (Flag("--page") ?? "play").ToLowerInvariant()));
         Application.Run(new MainForm(env, startPage, Flag("--screenshot"), args.Contains("--exit"), args.Contains("--no-art")));
         return 0;
     }
@@ -36,8 +36,9 @@ sealed class MainForm : Form
 {
     readonly Env env;
     readonly string? shotFile; readonly bool exitAfterShot, noArt;
-    readonly ArtPanel[] pages = { new(), new(), new() };
-    readonly ArtButton[] nav = { new("Play", Look.Nav), new("Settings", Look.Nav), new("Tools", Look.Nav) };
+    readonly ArtPanel[] pages = { new(), new(), new(), new() };
+    readonly ArtButton[] nav = { new("Play", Look.Nav), new("Settings", Look.Nav), new("Tools", Look.Nav), new("Controls", Look.Nav) };
+    readonly RichTextBox guide = new(); int guideDpi;
     readonly ArtButton importArt = new("Import game art", Look.Secondary);
     int page;
     readonly RichTextBox log = new(), toolOut = new();
@@ -80,7 +81,7 @@ sealed class MainForm : Form
         DoubleBuffered = true; StartPosition = FormStartPosition.Manual;
         LoadArt();
 
-        for (int i = 0; i < 3; i++) { int idx = i; nav[i].Click += (_, _) => ShowPage(idx); Controls.Add(nav[i]); }
+        for (int i = 0; i < 4; i++) { int idx = i; nav[i].Click += (_, _) => ShowPage(idx); Controls.Add(nav[i]); }
         importArt.Click += async (_, _) => await ImportArt(); Controls.Add(importArt);
         foreach (var p in pages) { p.Visible = false; Controls.Add(p); }
 
@@ -150,6 +151,7 @@ sealed class MainForm : Form
         StyleText(toolOut);
         pages[2].Controls.AddRange(cmdButtons); pages[2].Controls.AddRange(new Control[] { custom, send, result }); pages[2].Controls.AddRange(diagButtons); pages[2].Controls.Add(toolOut);
         pages[2].Painter = PaintTools;
+        StyleText(guide); guide.Cursor = Cursors.Default; pages[3].Controls.Add(guide);
 
         poll.Tick += (_, _) => Tick(); poll.Start();
         Shown += async (_, _) =>
@@ -285,7 +287,7 @@ sealed class MainForm : Form
     Rectangle PageRect(int p)
     {
         float wl = ClientSize.Width * 96f / DeviceDpi;
-        float cw = p switch { 0 => Math.Clamp(wl * .40f, 470, 520), 1 => Math.Clamp(wl - 300 - 340, 520, 590), _ => Math.Clamp(wl - 300 - 360, 520, 640) };
+        float cw = p switch { 3 => Math.Clamp(wl - 300 - 300, 560, 720), 0 => Math.Clamp(wl * .40f, 470, 520), 1 => Math.Clamp(wl - 300 - 340, 520, 590), _ => Math.Clamp(wl - 300 - 360, 520, 640) };
         return new Rectangle(S(300), S(176), S(cw), ClientSize.Height - S(176) - S(26));
     }
 
@@ -293,14 +295,14 @@ sealed class MainForm : Form
     {
         if (!IsHandleCreated || ClientSize.Width < 50 || ClientSize.Height < 50) return;
         SuspendLayout();
-        for (int i = 0; i < 3; i++) { nav[i].Bounds = new Rectangle(S(40), S(176) + i * S(50), S(224), S(46)); nav[i].TabIndex = i; }
-        importArt.Bounds = new Rectangle(S(44), ClientSize.Height - S(120), Math.Max(S(200), importArt.Natural), S(38)); importArt.TabIndex = 6;
-        for (int i = 0; i < 3; i++) { pages[i].Bounds = PageRect(i); pages[i].TabIndex = 3 + i; }
+        for (int i = 0; i < 4; i++) { nav[i].Bounds = new Rectangle(S(40), S(176) + i * S(50), S(224), S(46)); nav[i].TabIndex = i; }
+        importArt.Bounds = new Rectangle(S(44), ClientSize.Height - S(120), Math.Max(S(200), importArt.Natural), S(38)); importArt.TabIndex = 8;
+        for (int i = 0; i < 4; i++) { pages[i].Bounds = PageRect(i); pages[i].TabIndex = 3 + i; }
         var mono = Ui.Font(this, 9.5f, FontStyle.Regular, Ui.Mono);
         foreach (var t in new[] { log, toolOut }) if (!ReferenceEquals(t.Font, mono)) t.Font = mono;
         var sans = Ui.Font(this, 10.5f, FontStyle.Regular, Ui.Sans);
         if (!ReferenceEquals(custom.Font, sans)) custom.Font = sans;
-        LayoutPlay(); LayoutSettings(); LayoutTools();
+        LayoutPlay(); LayoutSettings(); LayoutTools(); LayoutGuide();
         ResumeLayout(false);
         RebuildBackdrop();
         Invalidate(true);
@@ -490,10 +492,42 @@ sealed class MainForm : Form
         r.HandleCreated += (_, _) => SetWindowTheme(r.Handle, "DarkMode_Explorer", null);  // dark scrollbars
     }
 
+    /// <summary>Controls page: renders the embedded docs/VR-CONTROLS.md ("# title", intro, "## section", "- **input** — text") into the read-only box.</summary>
+    void LayoutGuide()
+    {
+        var p = pages[3]; p.Panes.Clear();
+        var box = new Rectangle(0, 0, p.Width, p.Height); p.Panes.Add(box);
+        guide.Bounds = new Rectangle(S(18), S(14), box.Width - S(36), box.Height - S(28));
+        if (guideDpi == DeviceDpi) return;
+        guideDpi = DeviceDpi;
+        string md;
+        using (var s = typeof(MainForm).Assembly.GetManifestResourceStream("home/VR-CONTROLS.md"))
+            md = s == null ? "# VR controls and gestures\n\nThe guide is missing from this build." : new StreamReader(s).ReadToEnd();
+        var body = Ui.Font(this, 10.5f, FontStyle.Regular, Ui.Sans); var bold = Ui.Font(this, 10.5f, FontStyle.Bold, Ui.Sans);
+        var head = Ui.Font(this, 9.5f, FontStyle.Bold, Ui.Sans); var title = Ui.Font(this, 15f, FontStyle.Regular);
+        guide.Clear();
+        void Add(string t, Font f, Color c) { guide.SelectionStart = guide.TextLength; guide.SelectionLength = 0; guide.SelectionFont = f; guide.SelectionColor = c; guide.AppendText(t); }
+        foreach (var raw in md.Replace("\r", "").Split('\n'))
+        {
+            var line = raw.TrimEnd();
+            if (line == "") continue;
+            guide.SelectionStart = guide.TextLength; guide.SelectionIndent = guide.SelectionHangingIndent = 0;
+            if (line.StartsWith("## ")) Add("\n" + line[3..].ToUpperInvariant() + "\n", head, Ui.Gold);
+            else if (line.StartsWith("# ")) Add(line[2..] + "\n", title, Ui.Text);
+            else if (line.StartsWith("- **") && line.IndexOf("**", 4, StringComparison.Ordinal) is int e and > 0)
+            {
+                guide.SelectionIndent = S(14); guide.SelectionHangingIndent = S(14);
+                Add(line[4..e], bold, Ui.Text); Add(line[(e + 2)..] + "\n", body, Ui.Soft);
+            }
+            else Add(line + "\n", body, Ui.Dim);
+        }
+        guide.SelectionStart = 0; guide.ScrollToCaret();
+    }
+
     void ShowPage(int i)
     {
         page = i;
-        for (int k = 0; k < 3; k++) { pages[k].Visible = k == i; nav[k].Selected = k == i; nav[k].Invalidate(); }
+        for (int k = 0; k < 4; k++) { pages[k].Visible = k == i; nav[k].Selected = k == i; nav[k].Invalidate(); }
         RebuildBackdrop(); Invalidate(true);
         if (i == 1) LoadSettings();
     }

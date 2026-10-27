@@ -67,7 +67,7 @@ headset listening validation is still required. See [audio evidence and checks](
 
 In menus, point with the right controller and pull the right trigger to click.
 
-Raise your left hand in front of your face and turn it like checking a watch to see a controls card.
+Every control and gesture is on one page: squeeze the right grip at your right temple (again to close it), or open VR Settings > Controls & gestures. The same page is the launcher's Controls page and [VR-CONTROLS.md](VR-CONTROLS.md).
 
 ## VR settings
 Open the game's pause menu and choose **VR Settings**. Its controls appear in
@@ -88,7 +88,8 @@ From there you can set:
   The FSR 3 Quality/Balanced modes upscale after the game's tonemapping, so the HUD stays sharp. Combine Quality with a higher resolution scale for a sharper image at the same cost
 - edge smoothing, SMAA (on by default; skipped automatically while FSR 3 is on, except in the alternate-eye performance mode (on by default since v602), which turns temporal AA off and always uses SMAA)
 - sharpening (off, low, medium, high, max; default medium)
-- HUD size (55%, 65% default, 75%, 85%, 100% = the game's own layout) and controls card on the left wrist (on/off)
+- HUD size (55%, 65% default, 75%, 85%, 100% = the game's own layout)
+- Controls & gestures: shows the controls page in front of you (it replaced the wrist controls card)
 - monitor view: what the desktop game window shows while you play - right eye (default: copying one eye costs less render time than both), left eye, or both eyes side by side
 - turning (snap or smooth)
 - recenter
@@ -125,7 +126,7 @@ In menus and while the VR settings panel is open the desktop window shows the no
 - While the pistol or crossbow is drawn, holding the sword in front does not block (the game would put the gun away to block).
   Put the gun away to block again.
 - Use prompts ("Take", "Open", "Eat") appear beside the hand that points at the object, left or right. Kill/choke takedown prompts float above the guard (at head height when you are close). Messages without a target appear on the HUD screen below your gaze.
-- Health and mana sit in the top-left corner of the HUD screen, ammo just below. They are also a small watch on the back of each wrist: turn the back of the wrist toward your face. Palm toward your face shows the controls card.
+- Health and mana sit in the top-left corner of the HUD screen, ammo just below. They are also a small watch on the back of each wrist: turn the back of the wrist toward your face.
 - Journal (objectives, notes): touch your left temple with either hand and squeeze grip. Holding Menu still works.
 - Attacks need a real arm swing; turning only the wrist never attacks. A fast blade that touches an enemy hits at that moment (the game's own damage, reactions and alerts); a takedown from behind stays the game's assassination.
 - The sword, pistol and crossbow stop at walls and push loose props; touching a surface plays the game's own sparks, dust and impact sound, quieter than a hit.

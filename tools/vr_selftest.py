@@ -603,6 +603,13 @@ SCENARIOS['leftlimbnosword'] = ([[0, 1500, NEUTRAL, REST, {"left_hand_offset": R
                                  [4300, 7000, {"left_grip": 1.0}, REST, dict(_CROUCH, left_hand_offset=[0.2, -0.4, -0.3])],
                                  [7000, 9000, NEUTRAL, REST, {"head_pitch_degrees": 0, "head_offset": [0.0, 0.0, 0.0], "left_hand_offset": REST}]])
 SCENARIOS['leftlimb'] = SCENARIOS['leftlimbnosword']
+# The controls and gestures page (user, after v646): the right hand squeezes at the right temple (opens it), then again (closes it).
+_TMP = [-0.05, 0.38, 0.35]  # grip at (0.15, 1.68, -0.05): 8 cm from the right temple point, outside the sword holster behind the shoulder
+SCENARIOS['guidepage'] = ([[0, 1500, NEUTRAL, REST]] + glide(1500, 2500, REST, _TMP, 8) +
+                          [[2500, 3000, NEUTRAL, _TMP], [3000, 3400, {"right_grip": 1.0}, _TMP], [3400, 3800, NEUTRAL, _TMP]] + glide(3800, 4600, _TMP, REST, 8) +
+                          [[4600, 7500, NEUTRAL, REST]] + glide(7500, 8300, REST, _TMP, 8) +
+                          [[8300, 8700, {"right_grip": 1.0}, _TMP], [8700, 9000, NEUTRAL, _TMP]] + glide(9000, 9800, _TMP, REST, 8) + [[9800, 12000, NEUTRAL, REST]])
+PAIR_TIMES['guidepage'] = [(5500, 'guide-open'), (7000, 'guide-open-b'), (11000, 'guide-closed')]
 # v643 (user, headset v642: cutscenes keep the avatar body and the tracked hands): load SLOT22 (void_01_p, a mission start that plays the
 # Outsider cinematic, logic 32, ~4-14 s after the load) and stand still, the right hand forward where it shows; no buttons (a press skips it).
 # Pass: dxgi-probe-result.json cutscene.hands_frames > 0 and the eye pairs show the hands (and the body when looking down).

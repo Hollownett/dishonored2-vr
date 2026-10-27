@@ -9255,6 +9255,17 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                         }
                                     }
                                     if(sheath.consume[1]) {input.right_grip=0;physical_right_grip=0;}
+                                    {   // The controls and gestures page (user, after v646: "when user grabs right temple"): the right hand squeezing at the right
+                                        // temple shows or hides it (game_xr hint_layer, controls_guide_image.hpp); that squeeze is the page's alone. The sword
+                                        // holster behind the right shoulder overlaps the zone behind the ear and wins there (a draw is never lost to the page).
+                                        static d2vr::TempleReach guide_temple(-.09,.02,0,.13,2u);static bool guide_was{};
+                                        auto guide_hands=hands;if(sheath.in[1]) guide_hands[1].reset();
+                                        const auto guide_reach=guide_temple.update(head,{f.x,f.y,f.z},{u.x,u.y,u.z},guide_hands,{input.left_grip,input.right_grip},logic==2 && !x_wheel.wheel(),GetTickCount64());
+                                        if(guide_reach.entered==1) game_xr->pulse(1,.25f,.03f);
+                                        if(guide_reach.journal && !guide_was) {game_xr->toggle_guide();game_xr->pulse(1,.4f,.05f);}
+                                        guide_was=guide_reach.journal;
+                                        if(guide_reach.consume[1]) {input.right_grip=0;physical_right_grip=0;}
+                                    }
                                     {
                                         const auto& rc=game_xr->controller_input;const auto now_gi=GetTickCount64();
                                         const bool left_consumed=rc.left_grip>.35f && physical_left_grip<.35f;
@@ -11086,6 +11097,10 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
         legacy_hold_y_settings=fs::exists(root/L"build"/L"legacy-hold-y-settings");
         legacy_authored_hands=fs::exists(root/L"build"/L"legacy-authored-hands");
         legacy_cutscene_hands=fs::exists(root/L"build"/L"legacy-cutscene-hands");
+        // The controls and gestures page text: the launcher installs docs/VR-CONTROLS.md as <mod home>/VR-CONTROLS.md; a repo run reads docs/.
+        for(const auto& guide:{root/L"VR-CONTROLS.md",root/L"docs"/L"VR-CONTROLS.md"}) {std::ifstream in(guide,std::ios::binary);if(!in) continue;
+            std::ostringstream text;text<<in.rdbuf();d2vr::controls_guide_markdown()=text.str();break;}
+        if(d2vr::controls_guide_markdown().empty()) d2vr::controls_guide_markdown()="# VR controls and gestures\n\nThe controls page (VR-CONTROLS.md) is missing: reinstall the mod from the launcher.\n";
         legacy_authored_camera=fs::exists(root/L"build"/L"legacy-authored-camera");authored_heading.reset();authored_heading_now.reset();cutscene_suppressed_snaps=0;
         scripted_recenter_enabled=!fs::exists(root/L"build"/L"no-scripted-recenter");scripted_recenter.reset();scripted_offset_now=0;scripted_ease_tick=0; // G1 (default on)
         cutscene_policy=d2vr::CutscenePolicy{};cutscene_gates_allowed=false;cutscene_flush_presents=0;cutscene_present_immersive=false; // G2

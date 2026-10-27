@@ -52,7 +52,9 @@ inline std::vector<NativeOptionsPage::Row> rows(const VrSettings& s) {
         0,0,1,static_cast<int>(std::lround(s.sharpness()*4)),2,{"Off","Low","Medium","High","Max"}};
     r[hud]={K::stepper,"HUD size","Scales the HUD and prompts in VR. 55% sits in the centre of your view; 100% keeps the game layout; larger sizes enlarge prompts and markers.",
         0,0,1,hud_index(s.hud_percent()),1,{"55% (centre)","65%","75%","85%","100% (game layout)","125%","150%","200%"}};
-    r[controls_hint]={K::toggle,"Controls hint","Shows controller button hints in the world during play.",0,0,1,s.controls_hint()?1:0,1,{}};
+    // v647 (user, after v646: the controls and gestures page in VR Settings): an action row; it took the old wrist "Controls hint" toggle's place
+    // (the page holds 10 rows), and the page replaces that card.
+    r[controls_hint]={K::action,"Controls & gestures","Shows every VR control and gesture on a page in front of you. Press right to show or hide it; during play, squeeze the right grip at your right temple.",0,0,1,0,0,{"Select \xE2\x96\xBA","Shown"}};
     r[turning]={K::stepper,"Turning","Snap rotates in fixed steps and is comfortable; Smooth turns continuously; Native game keeps the original stick turn.",
         0,0,1,turning_index(s.turning()),1,{"Snap 30\xC2\xB0","Snap 45\xC2\xB0","Snap 90\xC2\xB0","Smooth 45\xC2\xB0/s","Smooth 90\xC2\xB0/s","Smooth 120\xC2\xB0/s","Native game"}};
     // Actions: press right to run ("Select" -> "Starting..."); reopening the page shows "Select" again.
@@ -73,7 +75,6 @@ inline VrSettings::Changes apply(VrSettings& s,const std::vector<int>& v) {
     if(const int x=at(sharpening);x>=0 && x<=4 && x!=std::lround(s.sharpness()*4)) {s.set_sharpness(x/4.);c.sharpness=s.sharpness();}
     if(const int x=at(hud);x>=0 && x<static_cast<int>(hud_choices.size()) && hud_choices[static_cast<std::size_t>(x)]!=s.hud_percent())
         {s.set_hud_percent(hud_choices[static_cast<std::size_t>(x)]);c.hud_percent=s.hud_percent();}
-    if(const int x=at(controls_hint);x>=0 && (x!=0)!=s.controls_hint()) {s.set_controls_hint(x!=0);c.controls_hint=x!=0;}
     if(const int x=at(turning);x>=0 && x<static_cast<int>(turning_choices.size()) && x!=turning_index(s.turning()))
         {s.set_turning(turning_choices[static_cast<std::size_t>(x)]);c.turning=s.turning();}
     return c;
@@ -82,6 +83,7 @@ inline VrSettings::Changes action(VrSettings& s,int row) {
     VrSettings::Changes c{};
     if(row==calibrate) {s.open_calibration_from_native();c.calibrate=c.opened=true;}
     else if(row==recenter) c.recenter=true;
+    else if(row==controls_hint) c.controls_guide=true;
     return c;
 }
 inline void merge(VrSettings::Changes& into,const VrSettings::Changes& c) {
@@ -97,7 +99,7 @@ inline void merge(VrSettings::Changes& into,const VrSettings::Changes& c) {
     if(c.scripted_recenter) into.scripted_recenter=c.scripted_recenter;
     if(c.cutscene_mode) into.cutscene_mode=c.cutscene_mode;
     into.recenter|=c.recenter;into.consume|=c.consume;into.opened|=c.opened;into.calibrate|=c.calibrate;
-    into.player_measurements|=c.player_measurements;into.test_unlock|=c.test_unlock;
+    into.player_measurements|=c.player_measurements;into.test_unlock|=c.test_unlock;into.controls_guide|=c.controls_guide;
 }
 } // namespace native_settings
 } // namespace d2vr

@@ -25,7 +25,7 @@
 #include "vr_preferences.hpp"
 #include "menu_input.hpp"
 #include "menu_pointer.hpp"
-#include "controls_hint_image.hpp"
+#include "controls_guide_image.hpp"
 #include "comfort_vignette.hpp"
 #include "overlay_dirty.hpp"
 #include "xr_cpu_spans.hpp"
@@ -174,6 +174,8 @@ private:
     std::vector<XrSwapchainImageD3D11KHR> hint_images_;
     std::vector<bool> hint_filled_;
     std::vector<std::uint8_t> hint_pixels_;
+    // The controls and gestures page (controls_guide_image.hpp, user after v646): open while guide_open_, placed once in front of the head.
+    std::atomic<bool> guide_open_{false};bool guide_placed_{},guide_from_menu_{};TrackedPose guide_pose_{}; // from_menu: opened from VR Settings, closes when play resumes
     MenuTriggerGate menu_trigger_gate_;
     std::optional<double> resolution_change_;
     std::optional<TurnControl::Config> turning_change_;
@@ -747,7 +749,7 @@ private:
         for(unsigned side=0;side<2;++side) prepare_wrist(side);
     }
     void ensure_hint_chain() {
-        constexpr unsigned width=512,height=384;
+        constexpr unsigned width=1920,height=1200;
         if(!hint_chain_) {
             XrSwapchainCreateInfo info{};info.type=XR_TYPE_SWAPCHAIN_CREATE_INFO;
             info.usageFlags=XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT|XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT;
@@ -759,23 +761,19 @@ private:
             hint_images_.resize(count);for(auto& image:hint_images_) image.type=XR_TYPE_SWAPCHAIN_IMAGE_D3D11_KHR;
             checked(enumerate(hint_chain_,count,&count,reinterpret_cast<XrSwapchainImageBaseHeader*>(hint_images_.data())),"Read controls card images");
             if(hint_images_.empty()) throw std::runtime_error("XR controls card has no images");
-            hint_filled_.assign(count,false);hint_pixels_=controls_hint_image(width,height);
+            hint_filled_.assign(count,false);hint_pixels_=controls_guide_image(controls_guide_markdown(),width,height);
         }
     }
-    // Wrist controls card: shown above the left controller while it is raised in front of the face
-    // with its side turned toward the eyes (a watch glance), always facing the head.
+    // The controls and gestures page: a 1.1 m card 0.85 m in front of the head where it was opened, level, facing the player; it stays
+    // in the world while open (look around it, step back to read it whole). Replaces the wrist controls card (its bindings were outdated).
     std::optional<XrCompositionLayerQuad> hint_layer() {
-        constexpr XrSpaceLocationFlags valid=XR_SPACE_LOCATION_ORIENTATION_VALID_BIT|XR_SPACE_LOCATION_POSITION_VALID_BIT;
-        const auto& grip=grip_locations[0];
-        if(!views_valid_ || (grip.locationFlags&valid)!=valid) return {};
-        const Vec3 hand{grip.pose.position.x,grip.pose.position.y,grip.pose.position.z};
-        const Vec3 head{(views_[0].pose.position.x+views_[1].pose.position.x)*.5,(views_[0].pose.position.y+views_[1].pose.position.y)*.5,
-            (views_[0].pose.position.z+views_[1].pose.position.z)*.5};
-        const auto to_head=head-hand;const auto distance=length(to_head);
-        if(distance<.15 || distance>.65 || hand.y<head.y-.45) return {};
-        const auto side=rotated(normalized(Quaternion{grip.pose.orientation.x,grip.pose.orientation.y,grip.pose.orientation.z,grip.pose.orientation.w}),{1,0,0});
-        if(dot(side,to_head*(1/distance))<.6) return {}; // palm (+X of the left grip) toward the eyes; the back of the wrist is the health watch
-        constexpr unsigned width=512,height=384;
+        if(!guide_open_.load() || !views_valid_) return {};
+        if(!guide_placed_) {
+            const auto& l=views_[0].pose;const auto& r=views_[1].pose;
+            guide_pose_=world_ui_front_pose({{(l.position.x+r.position.x)*.5,(l.position.y+r.position.y)*.5-.06,(l.position.z+r.position.z)*.5},
+                {l.orientation.x,l.orientation.y,l.orientation.z,l.orientation.w}},.85);guide_placed_=true;
+        }
+        constexpr unsigned width=1920,height=1200;
         if(!hint_chain_) return {}; // created by prepare_overlays
         OverlayKey overlay_key;
         if(overlay_needs_image(OverlayKind::hint,hint_chain_,static_overlay_content(),0,overlay_key)) {
@@ -794,14 +792,12 @@ private:
         checked(xrReleaseSwapchainImage(hint_chain_,&release),"Release controls card");
         overlay_rendered(OverlayKind::hint,overlay_key);
         }
-        const auto& h=views_[0].pose.orientation;
-        const auto facing=normalized(Quaternion{h.x,h.y,h.z,h.w});
-        const auto centre=hand+rotated(facing,{0,.11,0});
+        const auto& facing=guide_pose_.orientation;const auto& centre=guide_pose_.position;
         XrCompositionLayerQuad layer{};layer.type=XR_TYPE_COMPOSITION_LAYER_QUAD;layer.space=local_;
         layer.layerFlags=XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;layer.eyeVisibility=XR_EYE_VISIBILITY_BOTH;
         layer.pose.orientation={static_cast<float>(facing.x),static_cast<float>(facing.y),static_cast<float>(facing.z),static_cast<float>(facing.w)};
         layer.pose.position={static_cast<float>(centre.x),static_cast<float>(centre.y),static_cast<float>(centre.z)};
-        layer.size={.2f,.15f};layer.subImage.swapchain=hint_chain_;layer.subImage.imageRect.extent={static_cast<int32_t>(width),static_cast<int32_t>(height)};
+        layer.size={1.1f,.6875f};layer.subImage.swapchain=hint_chain_;layer.subImage.imageRect.extent={static_cast<int32_t>(width),static_cast<int32_t>(height)};
         return layer;
     }
     void ensure_blank_chain() {
@@ -1261,6 +1257,9 @@ public:
     UINT64 mirrored_frames{};
     UINT64 antialiased_eyes() const noexcept {return antialiasing_?antialiasing_->eye_passes:0;}
     bool settings_open() const noexcept {return settings_.open();}
+    // The controls page: the right temple squeeze and the VR Settings "Controls & gestures" row toggle it; it opens in front of the head.
+    void toggle_guide(bool from_menu=false) noexcept {guide_placed_=false;guide_open_=!guide_open_.load();guide_from_menu_=from_menu && guide_open_.load();}
+    bool guide_open() const noexcept {return guide_open_.load();}
     std::atomic<bool> settings_requested{false}; // native menu "VR Settings" item (native_menu_entry.hpp)
     // Hold left Y in gameplay opens native Pause; a fresh hold in Pause opens settings. The game thread sets y_hold_blocked while a Talk prompt is
     // offered to Y or the wheel owns it; build/no-hold-y-menu clears y_hold_enabled.
@@ -1953,8 +1952,10 @@ public:
             if(changes.turning) turning_change_=changes.turning;
             if(changes.temporal_aa) temporal_change_=changes.temporal_aa;
             if(changes.hud_percent) hud_change_=changes.hud_percent;
+            if(changes.controls_guide) toggle_guide(true);
+            if(guide_from_menu_ && gameplay) {guide_open_=false;guide_from_menu_=false;} // opened over the pause menu: back in the game, it goes
             if(changes.recenter) {
-                continuity_.recenter();rendered_mask_=0;menu_panel_.reset();world_ui_pose_valid_=false;
+                continuity_.recenter();rendered_mask_=0;menu_panel_.reset();world_ui_pose_valid_=false;guide_placed_=false;
                 settings_.calibration_status(avatar_calibration_.synchronize(reference_epoch(),false));
             }
             if(changes.antialiasing) {
@@ -2138,6 +2139,9 @@ public:
                 layer=reinterpret_cast<const XrCompositionLayerBaseHeader*>(&menu);
             }
             end.layerCount=world_scene || menu_band_ready?1:0;end.layers=&layer; // no band chain yet (between a resize and prepare_overlays): nothing this frame
+            if(!world_scene && menu_band_ready && (hint_panel=hint_layer())) { // the controls page opened from VR Settings shows over the pause menu
+                menu_layers_with_pointer[0]=layer;menu_layers_with_pointer[1]=reinterpret_cast<const XrCompositionLayerBaseHeader*>(&*hint_panel);
+                end.layerCount=2;end.layers=menu_layers_with_pointer.data();++hint_layers;}
             if(world_scene && !authored_camera) {
                 ModGpuScope layers_scope(context_.Get(),ModSpan::layer_overlays); // task 3b: HUD/wrist/vignette panel updates
                 SpanClock layers_span(xr_spans,XrSpan::overlay_layers);
@@ -2160,7 +2164,7 @@ public:
                     if((wrist_panels[side]=optional_wrist_layer(side))) {
                         menu_layers_with_pointer[end.layerCount++]=reinterpret_cast<const XrCompositionLayerBaseHeader*>(&*wrist_panels[side]);++wrist_layers[side];}
                 }
-                if(gameplay && !wrist_panels[0] && settings_.controls_hint() && (hint_panel=hint_layer())) {
+                if((hint_panel=hint_layer())) {
                     menu_layers_with_pointer[end.layerCount++]=reinterpret_cast<const XrCompositionLayerBaseHeader*>(&*hint_panel);++hint_layers;
                 }
                 if(settings_world && (settings_panel=settings_layer())) {

@@ -871,9 +871,9 @@ build\native_interaction_two_hand_check.exe
 if not "%errorlevel%"=="0" exit /b 1
 build\play_controls_check.exe
 if not "%errorlevel%"=="0" exit /b 1
-cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT tests\controls_hint_image_check.cpp /Fo:build\controls_hint_image_check.obj /Fe:build\controls_hint_image_check.exe /link gdi32.lib user32.lib
+cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT tests\controls_guide_image_check.cpp /Fo:build\controls_guide_image_check.obj /Fe:build\controls_guide_image_check.exe /link gdi32.lib user32.lib
 if not "%errorlevel%"=="0" exit /b 1
-build\controls_hint_image_check.exe
+build\controls_guide_image_check.exe
 if not "%errorlevel%"=="0" exit /b 1
 cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT tests\native_finger_grip_check.cpp /Fo:build\native_finger_grip_check.obj /Fe:build\native_finger_grip_check.exe
 if not "%errorlevel%"=="0" exit /b 1
