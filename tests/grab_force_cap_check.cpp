@@ -49,11 +49,16 @@ int main() {
         CHECK(now.catch_up_mps==v608.catch_up_mps && now.catch_up_ramp_mps2==v608.catch_up_ramp_mps2 && now.stale_dt_s==v608.stale_dt_s && now.dt_max==v608.dt_max);
         CHECK(now.hand_kg==v608.hand_kg && now.lift_fraction==v608.lift_fraction && now.mass_floor_kg==v608.mass_floor_kg && now.mass_ceiling_kg==v608.mass_ceiling_kg);
     }
-    // prop_caps_unchanged (plan v609 G6): props keep the v608 scale through prop_view(); the corpse scale does not reach them
+    // prop_caps_v643 (user, headset v642: heavy props too hard to lift): props get the corpse scale through prop_view()
     {
         const GrabTuning t;const GrabTuning p=t.prop_view();
-        CHECK(p.strength_scale==6 && p.axial_cap()==1800 && p.lateral_cap()==540);
-        CHECK(t.prop_strength_scale==6 && p.axial_n==t.axial_n && p.hand_kg==t.hand_kg && p.lift_fraction==t.lift_fraction);
+        CHECK(p.strength_scale==15 && p.axial_cap()==4500 && p.lateral_cap()==1350);
+        CHECK(t.prop_strength_scale==kCorpseStrengthScale && p.axial_n==t.axial_n && p.hand_kg==t.hand_kg && p.lift_fraction==t.lift_fraction);
+        // a ceiling-mass prop pulled straight up across a level forearm (the lateral cap) out-accelerates gravity with margin; v642's 6 could not
+        const double g=9.81,dt=.01;
+        GrabTuning v642=t;v642.prop_strength_scale=kV608CorpseStrengthScale;
+        const auto up=cap_velocity_step(zero,zero,Vec3{0,0,10},zero,X,t.mass_ceiling_kg,1,dt,p),old=cap_velocity_step(zero,zero,Vec3{0,0,10},zero,X,t.mass_ceiling_kg,1,dt,v642.prop_view());
+        CHECK(up.linear.z/dt>2*g && old.linear.z/dt<g);
     }
     // axial_cap_300n
     {
@@ -176,7 +181,7 @@ int main() {
             expect_defaults_with_error("d2vr_gt_palm_bad.cfg","priority_loot .6\ngrip_alone_gate_m .3\n");
         }
         struct B {const char* k;double lo,hi;};
-        const B bounds[]={{"axial_n",50,600},{"lateral_n",20,300},{"torque_nm",5,60},{"strength_scale",.5,25},{"prop_strength_scale",.5,10},
+        const B bounds[]={{"axial_n",50,600},{"lateral_n",20,300},{"torque_nm",5,60},{"strength_scale",.5,25},{"prop_strength_scale",.5,25},
                           {"lift_fraction",0,1},{"mass_floor_kg",.1,5},{"mass_ceiling_kg",10,200},{"hand_kg",.1,20},{"dt_max",.005,.1},
                           {"stale_dt_s",.034,1},{"catch_up_mps",.2,10},{"catch_up_ramp_mps2",.5,100},
                           {"grab_buffer_ms",0,300},{"grip_alone_gate_m",.05,.25},{"hover_radius_m",.1,.45},{"priority_loot",.5,2},{"priority_usable",.5,2},

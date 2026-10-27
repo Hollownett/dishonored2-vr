@@ -75,5 +75,16 @@ int main() {
      const auto shape=r::sphere_grip_shape(hand.palm,hand.geometry,.04);r::FingerIkState once{};
      const auto c=r::finger_contact(hand.geometry,hand.palm,&shape,1,0,once,r::held_curl,r::finger_solve_all,&wants);
      for(unsigned f=1;f<5;++f) assert(c.touching[f] && !c.hyperextended[f]);}
+    // The thumb rests ON the ball (user, headset v642: "my thumb don't react like I holding a sphere, but goes into a palm"): for a stamp's and a book's ball its IP joint
+    // and tip are above the palm skin and outside the ball, not in the palm (the sweep ended there before: the ball stands off the skin out of the thumb's path).
+    for(const double rad:{.04,.14}) {
+        const auto ball=r::sphere_grip_shape(hand.palm,hand.geometry,rad);r::FingerIkState st{};auto wants=r::finger_wants(true,1.f,0.f);
+        const auto c=r::finger_contact(hand.geometry,hand.palm,&ball,1,0,st,r::held_curl,r::finger_solve_all,&wants);
+        const auto t=r::finger_turns(hand.geometry,c,wants);const auto p=r::finger_points(hand.geometry.finger[0],{t[0][0],t[0][1],t[0][2]});
+        const auto d0=ball.frame.position-hand.palm.position;const Vec3 centre{dot(d0,hand.palm.basis[0]),dot(d0,hand.palm.basis[1]),dot(d0,hand.palm.basis[2])};
+        const double t0=hand.geometry.thickness[0];
+        std::cout<<"thumb on a "<<rad*100<<" cm ball: tip "<<(length(p[3]-centre)-rad)*1000<<" mm off the ball, IP/tip "<<(dot(p[2],hand.geometry.palm_in)-r::held_palm_depth)*1000<<"/"<<(dot(p[3],hand.geometry.palm_in)-r::held_palm_depth)*1000<<" mm over the skin\n";
+        for(unsigned j=2;j<4;++j) {assert(length(p[j]-centre)>=rad+t0-.002);assert(dot(p[j],hand.geometry.palm_in)-r::held_palm_depth>=t0-.002);}
+    }
     std::cout<<"finger_sphere_check passed\n";
 }

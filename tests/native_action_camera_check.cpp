@@ -21,9 +21,11 @@ int main() {
     action=reader.poll(memory,base_address,player_address,101);
     assert(!action.scripted && action.combat && !action.owns_camera(true) && action.state_index==44);
     assert(action.owns_camera(true,true));
-    {   // the hands follow an authored camera only into a scripted scene or a cutscene (user, headset v636: hands vanished on other camera modes)
+    {   // the hands follow an authored camera only into a scripted scene (a cutscene keeps them near the model, v642; user, headset v636: hands vanished on other camera modes)
         d2vr::NativeActionCamera plain{};
-        assert(!plain.takes_hands(true,false) && plain.takes_hands(true,true) && plain.takes_hands(true,false,true) && !plain.takes_hands(false,true));
+        assert(!plain.takes_hands(true,false) && !plain.takes_hands(true,true) && plain.takes_hands(true,true,false,true) && plain.takes_hands(true,false,true) && !plain.takes_hands(false,true,false,true));
+        assert(d2vr::NativeActionCamera::cutscene_keeps_hands(true,false,.2,1.6) && !d2vr::NativeActionCamera::cutscene_keeps_hands(true,true,.2,1.6) &&
+               !d2vr::NativeActionCamera::cutscene_keeps_hands(true,false,4,1.6) && !d2vr::NativeActionCamera::cutscene_keeps_hands(true,false,.2,6) && !d2vr::NativeActionCamera::cutscene_keeps_hands(false,false,.2,1.6));
         d2vr::NativeActionCamera scene{};scene.scripted=true;
         assert(scene.takes_hands(true,false) && !scene.takes_hands(false,false));
     }

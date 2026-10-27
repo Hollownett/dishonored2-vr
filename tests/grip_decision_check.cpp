@@ -15,6 +15,11 @@ GripAloneInput input(std::optional<PalmTarget> native,std::optional<FocusScore> 
 }
 }
 int main() {
+    { // v651: the sword's Block steps aside from a left Use squeeze, never from a gripped gun, a choke or an open hand
+        assert(block_yields_to_left_use(true,false,false,true));
+        assert(!block_yields_to_left_use(false,false,false,true) && !block_yields_to_left_use(true,true,false,true) &&
+               !block_yields_to_left_use(true,false,true,true) && !block_yields_to_left_use(true,false,false,false));
+    }
     { // A grip-only prop grab uses the complete hand sphere, not the former 10cm gate.
         GrabTuning tuning;GripAloneInput in;in.native_fresh=true;in.probe=hand_sphere_probe({});
         in.physical=FocusScore{42,PalmKind::prop,.20,0.,.20,0x1234};

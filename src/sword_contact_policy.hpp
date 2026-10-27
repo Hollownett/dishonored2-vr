@@ -20,12 +20,15 @@ enum class StealthAct {wait,drop,hit,kill};
 // 200-270 ms after the press) alert the guard first, so the kill lands on this game-thread pass.
 inline constexpr std::uint64_t stealth_window_ms(bool native_offer,bool immediate=false) noexcept {return native_offer?700:immediate?0:120;}
 // A stealth strike is victim-based (Bonelab: the contact itself is the hit, no body-part pick): a deliberate contact (tip speed at least
-// the stealth speed, default .6 m/s) from the rear or the side of the victim (NPC forward is minus row 0 of its reference frame, entity +0x30c;
+// the stealth speed, default .6 m/s) from the rear or the side of the victim (NPC forward is row 0 of its reference frame, entity +0x30c;
 // attacker cos to forward < +0.2). The game's kill sensor is NOT a gate any more (it flickers with gaze); the engine-side
 // damageable/unaware checks on the game thread still are, so an alerted or frontal guard gets the ordinary hit.
+// v645 (user, headset v642: "now it requires to aim to neck, lets make it also active when player hit the back"): forward was taken as MINUS
+// row 0, so a stab in the back counted as frontal (only the side, or the engine's own neck offer, killed). Measured live (sim v644): a patrolling
+// guard walks along +row0 (median cos +1.00 over 161 one-second windows).
 inline constexpr float rear_side_cos=.2f;
 inline bool attacker_rear_or_side(const float row0[3],const float npc[3],const float attacker[3]) noexcept {
-    const float fx=-row0[0],fy=-row0[1],dx=attacker[0]-npc[0],dy=attacker[1]-npc[1];
+    const float fx=row0[0],fy=row0[1],dx=attacker[0]-npc[0],dy=attacker[1]-npc[1];
     const float f=fx*fx+fy*fy,d=dx*dx+dy*dy;
     if(!(f>.01f) || !(d>1e-6f)) return false;
     return (fx*dx+fy*dy)/std::sqrt(f*d)<rear_side_cos;

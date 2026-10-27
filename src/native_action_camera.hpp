@@ -25,10 +25,18 @@ struct NativeActionCamera {
     bool owns_camera(bool native_camera_mode,bool force_native=false) const noexcept {
         return scripted || force_native || (native_camera_mode && !combat);
     }
-    // The arms follow the camera to the native animation only for a scripted scene (takedown, finisher, mantle) or a cutscene; another
-    // native camera mode (a slide, a landing, a hit or block reaction: user, headset v636) keeps the tracked hands. legacy: every authored camera.
-    bool takes_hands(bool authored_camera,bool cutscene,bool legacy=false) const noexcept {
-        return authored_camera && (scripted || cutscene || legacy);
+    // The arms follow the camera to the native animation only for a scripted scene (takedown, finisher, mantle); another native camera
+    // mode (a slide, a landing, a hit or block reaction: user, headset v636) keeps the tracked hands, and so does a cutscene (user, headset
+    // v642: "VR cutscenes now have camera but also should preserve avatar body and player hands control"). legacy: every authored camera;
+    // legacy_cutscene (build/legacy-cutscene-hands): a cutscene hands both arms over, as before v643.
+    bool takes_hands(bool authored_camera,bool cutscene,bool legacy=false,bool legacy_cutscene=false) const noexcept {
+        return authored_camera && (scripted || (cutscene && legacy_cutscene) || legacy);
+    }
+    // A cutscene frame keeps the tracked hands and the body only while the scene camera sits at the player model: the body and arm solve
+    // is expressed from the eye and drawn on the model, so a camera far from the model would stretch it across the scene. horizontal_m /
+    // rise_m: the camera's distance from the model root (feet), across and above it. ponytail: a fixed cylinder, tune from a headset.
+    static bool cutscene_keeps_hands(bool cutscene,bool legacy_cutscene,double horizontal_m,double rise_m) noexcept {
+        return cutscene && !legacy_cutscene && horizontal_m<=1.0 && rise_m>=-.3 && rise_m<=2.4;
     }
 };
 class NativeActionCameraReader {

@@ -583,13 +583,42 @@ SCENARIOS['chokeleft'] = [[a, b, i, REST if len(s) > 4 and s[4].get('left_hand_o
 # The same swings while looking down at the floor (v639): the game's kill sensor follows the camera and offers nothing, so a contact from
 # behind or the side on the unaware guard must be the mod's own stealth kill (sword_contact.stealth[2], sword_grip.stealth_kill_pulses).
 SCENARIOS['swinglow'] = [[a_, b_, i_, h_, {"head_pitch_degrees": -60}] for a_, b_, i_, h_, *_r in SCENARIOS['swing']]
-for _name in ('swing', 'chop', 'duel', 'blockduel', 'swarm', 'floor', 'chokeleft', 'swinglow'):
+# Left hand picks up a bottle/limb with the grip alone while the sword is drawn and held in the right hand (user, headset v642: "I cannot pickup body
+# parts and bottles with my free hand when sword is in the right hand"). Use with --near bottle (or limb for 'leftlimb'); 'leftbottlenosword' = A/B.
+_LB, _LB_UP, _LK = [0.2, -0.5, -0.2], [0.3, -0.1, -0.2], {"hand_pitch_degrees": -50, "head_pitch_degrees": -40}
+SCENARIOS['leftbottlenosword'] = ([[0, 400, NEUTRAL, REST, {"left_hand_offset": REST}], [400, 700, {"left_grip": 1.0}, REST, {"left_hand_offset": REST}],
+                                   [700, 1500, NEUTRAL, REST, {"left_hand_offset": REST}]] +
+                                  [s + [dict(_LK, left_hand_offset=s[3])] for s in glide(1500, 2500, REST, _LB, 8)] +
+                                  [[2500, 3500, NEUTRAL, REST, dict(_LK, left_hand_offset=_LB)], [3500, 4700, {"left_grip": 1.0}, REST, dict(_LK, left_hand_offset=_LB)]] +
+                                  [s + [dict(_LK, left_hand_offset=s[3])] for s in glide(4700, 5500, _LB, _LB_UP, 8, {"left_grip": 1.0})] +
+                                  [[5500, 7000, {"left_grip": 1.0}, REST, dict(_LK, left_hand_offset=_LB_UP)], [7000, 9000, NEUTRAL, REST, dict(_LK, left_hand_offset=_LB_UP)]])
+SCENARIOS['leftbottlenosword'] = [[a, b, i, REST if len(s) > 4 and s[4].get('left_hand_offset') is not None else h, *s[4:]] for s in SCENARIOS['leftbottlenosword'] for a, b, i, h in [s[:4]]]
+SCENARIOS['leftbottle'] = SCENARIOS['leftbottlenosword']
+# The same with a severed part (--near limb): 'limbgrip' mirrored to the LEFT hand (user, headset v642: "I cannot pickup body parts and bottles with my
+# free hand when sword is in the right hand"); leftlimb draws and holds the sword (in front: the Block), leftlimbnosword is the A/B.
+_LT = [0.2, -0.95, -0.35]  # the left default is x -0.2: the same centre point as the right hand's _TORSO
+SCENARIOS['leftlimbnosword'] = ([[0, 1500, NEUTRAL, REST, {"left_hand_offset": REST}]] +
+                                [[a_, b_, i_, REST, dict(_CROUCH, left_hand_offset=h_)] for a_, b_, i_, h_ in glide(1500, 2500, REST, _LT, 5)] +
+                                [[2500, 3500, NEUTRAL, REST, dict(_CROUCH, left_hand_offset=_LT)], [3500, 4300, {"left_grip": 1.0}, REST, dict(_CROUCH, left_hand_offset=_LT)],
+                                 [4300, 7000, {"left_grip": 1.0}, REST, dict(_CROUCH, left_hand_offset=[0.2, -0.4, -0.3])],
+                                 [7000, 9000, NEUTRAL, REST, {"head_pitch_degrees": 0, "head_offset": [0.0, 0.0, 0.0], "left_hand_offset": REST}]])
+SCENARIOS['leftlimb'] = SCENARIOS['leftlimbnosword']
+# v643 (user, headset v642: cutscenes keep the avatar body and the tracked hands): load SLOT22 (void_01_p, a mission start that plays the
+# Outsider cinematic, logic 32, ~4-14 s after the load) and stand still, the right hand forward where it shows; no buttons (a press skips it).
+# Pass: dxgi-probe-result.json cutscene.hands_frames > 0 and the eye pairs show the hands (and the body when looking down).
+# Both hands at eye level out to the sides, where no native animation puts them (A/B with build/legacy-cutscene-hands).
+_CUT_R, _CUT_L = [0.25, 0.3, -0.15], {"left_hand_offset": [-0.25, 0.3, -0.15]}
+SCENARIOS['cutscene'] = [[0, 500, NEUTRAL, _CUT_R, _CUT_L], [500, 600, NEUTRAL, _CUT_R, dict(_CUT_L, console="loadgame 22")], [600, 10000, NEUTRAL, _CUT_R, _CUT_L],
+                         [10000, 14000, NEUTRAL, _CUT_R, dict(_CUT_L, head_pitch_degrees=-50)], [14000, 60000, NEUTRAL, _CUT_R, _CUT_L]]
+PAIR_TIMES['cutscene'] = [(5000, 'cut-a'), (7500, 'cut-b'), (9500, 'cut-c'), (12000, 'cut-down-a'), (13500, 'cut-down-b'), (17000, 'cut-d')]
+for _name in ('swing', 'chop', 'duel', 'blockduel', 'swarm', 'floor', 'chokeleft', 'swinglow', 'leftbottle', 'leftlimb'):
     SCENARIOS[_name] = held_sword(SCENARIOS[_name])
 FORBIDDEN_STATES = {'flick': ['Slash'], 'reach': ['Slash']}  # accidental attacks
-EXPECTED_STATES = {'pickuplook': ['LootObject', 'Interact', 'HoldObject'], 'carry': ['CarryCorpse', 'PickupCorpse', 'Interact'], 'carrydrop': ['CarryCorpse'], 'carrythrow': ['CarryCorpse'], 'chop': ['Slash'], 'pickup': ['LootObject', 'Interact', 'HoldObject'], 'reach': ['LootObject', 'Interact', 'HoldObject'], 'swing': ['Slash', 'Assassination'], 'duel': ['Slash'], 'grab': ['LootObject', 'HoldObject', 'Interact', 'CarryCorpse', 'ReadNote'], 'powers': ['UsePower', 'Blinking', 'UseWindblast', 'UsePhantasmalLink', 'InBendTime', 'StoneShroud', 'DoppelgangerSwap', 'UseHeart'], 'jump': ['Jumping', 'Falling'],  # Falling always follows a jump; the short Jumping state can fall between samples
+EXPECTED_STATES = {'leftlimb': ['HoldObject'], 'leftlimbnosword': ['HoldObject'], 'pickuplook': ['LootObject', 'Interact', 'HoldObject'], 'carry': ['CarryCorpse', 'PickupCorpse', 'Interact'], 'carrydrop': ['CarryCorpse'], 'carrythrow': ['CarryCorpse'], 'chop': ['Slash'], 'pickup': ['LootObject', 'Interact', 'HoldObject'], 'reach': ['LootObject', 'Interact', 'HoldObject'], 'swing': ['Slash', 'Assassination'], 'duel': ['Slash'], 'grab': ['LootObject', 'HoldObject', 'Interact', 'CarryCorpse', 'ReadNote'], 'powers': ['UsePower', 'Blinking', 'UseWindblast', 'UsePhantasmalLink', 'InBendTime', 'StoneShroud', 'DoppelgangerSwap', 'UseHeart'], 'jump': ['Jumping', 'Falling'],  # Falling always follows a jump; the short Jumping state can fall between samples
                    'lean': ['Leaning'], 'power': ['UsePower', 'Blinking'], 'wheel': ['Powerwheel'],
                    'walk': ['Running', 'Sneaking', 'Sprinting'], 'all': ['Powerwheel'], 'potion': ['Powerwheel'], 'hide': ['Powerwheel'], 'sheathe': ['Undraw'], 'swordgrip': ['EquipChange'], 'pistolhip': ['EquipChange'], 'pistolfire': ['FireWeapon', 'ReloadWeapon']}
 EXPECTED_STATES['limbgrip'] = ['HoldObject']
+EXPECTED_STATES['leftbottle'] = EXPECTED_STATES['leftbottlenosword'] = ['HoldObject']
 EXPECTED_STATES['limbgripblind'] = ['HoldObject']
 EXPECTED_STATES['chokeleft'] = ['Choke']
 EXPECTED_STATES['swinglow'] = ['Running']  # no Assassination expected: the kill is the mod's (counters)  # v639: the left hand's grip behind a guard, sword drawn and blocking
@@ -707,6 +736,11 @@ def npc_stand(pid, behind, civilian=False, beside=False, skip=(), dist=.9):
         if name.startswith('arkCpntReferenceFrame'):
             fwd = struct.unpack('<3f', read(comp + 0x3c, 12))
             break
+    try:  # Task 0 (v651): entity +0x300 position and +0x30c matrix row 0, the data sword_contact_policy.hpp attacker_rear_or_side reads
+        ea = int(npc['addr'], 16)
+        print('entity300', [round(v, 3) for v in struct.unpack('<3f', read(ea + 0x300, 12))], 'entity30c rows', [round(v, 3) for v in struct.unpack('<9f', read(ea + 0x30c, 36))], 'comp3c', [round(v, 3) for v in fwd] if fwd else None)
+    except Exception as ex:
+        print('entity read failed', ex)
     if not fwd or math.hypot(fwd[0], fwd[1]) < .1:
         fwd = (feet[0] - npc['pos'][0], feet[1] - npc['pos'][1], 0)  # unknown heading: approach from the player's side
         behind = False
@@ -714,7 +748,7 @@ def npc_stand(pid, behind, civilian=False, beside=False, skip=(), dist=.9):
     fx, fy = fwd[0] / d, fwd[1] / d
     if beside:  # at the NPC's right/left: neither a takedown from behind nor face to face
         fx, fy = -fy, fx
-    side = 1 if behind else -1  # measured: standing at +row0 put the player BEHIND (the swing became an Assassination)
+    side = -1 if behind else 1  # +row0 is his FORWARD (sim v644: a patrolling guard walks along +row0, median cos +1.00); behind = -row0
     x, y = npc['pos'][0] + side * fx * dist, npc['pos'][1] + side * fy * dist
     yaw = math.degrees(math.atan2(npc['pos'][1] - y, npc['pos'][0] - x))
     return (x, y, npc['pos'][2] + 1.65, yaw), npc
@@ -1336,8 +1370,8 @@ def main():
                     gx, gy, gz = struct.unpack('<3f', pr(fr + 0x30, 12))
                     me = player_position(pr, pb)
                     dx, dy = me[0] - gx, me[1] - gy
-                    if a.scenario == 'stealththrow':  # behind him: +row0 of his reference frame is his back (npc_stand)
-                        dx, dy = struct.unpack('<2f', pr(fr + 0x3c, 8))
+                    if a.scenario == 'stealththrow':  # behind him: -row0 of his reference frame (+row0 is his forward, sim v644)
+                        dx, dy = (-v for v in struct.unpack('<2f', pr(fr + 0x3c, 8)))
                     d = math.hypot(dx, dy) or 1
                     sx, sy = gx + dx / d * reach, gy + dy / d * reach
                     command('console setviewpos %.2f %.2f %.2f %.1f' % (sx, sy, gz + 1.65, math.degrees(math.atan2(gy - sy, gx - sx))))

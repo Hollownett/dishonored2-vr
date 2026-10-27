@@ -90,7 +90,7 @@ void live_beats_corpse() {
 
 // NPC at origin facing +x (reference-frame row 0 = -x, the live-tested convention); thrust threshold of the swing detector is 1.7 m/s.
 void deliberate_strike_from_behind() {
-    const float row0[3]{-1,0,0},npc[3]{0,0,0},behind[3]{-.9f,.1f,0},front[3]{.9f,0,0},side[3]{0,.9f,0};
+    const float row0[3]{1,0,0},npc[3]{0,0,0},behind[3]{-.9f,.1f,0},front[3]{.9f,0,0},side[3]{0,.9f,0};
     assert(attacker_rear_or_side(row0,npc,behind) && attacker_rear_or_side(row0,npc,side) && !attacker_rear_or_side(row0,npc,front));
     // boundary at cos +0.2: just inside (cos .19) is a strike, just outside (cos .21) is frontal
     const float inside[3]{.19f,.98f,0},outside[3]{.21f,.98f,0};

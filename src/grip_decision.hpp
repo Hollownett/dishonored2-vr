@@ -104,4 +104,7 @@ inline bool at_shoulder(const std::array<double,3>& head,const std::array<double
     }
     return false;
 }
+// v651 (user, headset v642: the free left hand could not pick up bottles or limbs with the sword in the right): the held sword's Block (RB) locks the
+// arm body part and drops the native Use, so Block steps aside while the left grip is (or may become) a Use. Not for a gripped gun or a choke (own RB).
+inline bool block_yields_to_left_use(bool left_grip,bool gun_held,bool choke_rb,bool use_or_pending) noexcept {return left_grip && !gun_held && !choke_rb && use_or_pending;}
 } // namespace d2vr

@@ -409,6 +409,7 @@ static d2vr::HeldPlacementSession held_placement_session;
 // Holding hand's world velocity (finite difference of the published grip) and the held entity, for the release throw.
 static std::array<double,3> held_hand_velocity{};static std::uintptr_t held_entity{};static std::array<double,3> held_offset{};
 // Carry diagnostics (Task 9): counters always on (atomics); the per-frame trace only when build/carry-trace exists (a writer thread, capped, flushed every second and at teardown).
+static bool legacy_cutscene_hands=false; // build/legacy-cutscene-hands: a cutscene hands both arms to the native animation and stops the tracked hands and body (as before v643)
 static bool legacy_authored_hands=false; // build/legacy-authored-hands: every authored camera (not only scripted scenes and cutscenes) hands both arms to the native animation
 static bool legacy_authored_camera=false; // build/legacy-authored-camera: authored scenes use the native camera rotation (and the +5% FOV)
 static bool action_camera_alignment_enabled=true; // build/legacy-action-camera-alignment restores pre-H5 offsets/history
@@ -822,6 +823,12 @@ inline bool render_world_scene() {const auto logic=game_logic_mask();return logi
 static std::atomic<bool> cutscene_gates_allowed{false};
 inline bool cutscene_scene_render() {return cutscene_gates_allowed.load(std::memory_order_acquire) && game_logic_mask()==d2vr::cinematic_logic_mask;}
 inline bool render_scene_frame() {return render_world_scene() || cutscene_scene_render();}
+// v643 (user, headset v642: "VR cutscenes now have camera but also should preserve avatar body and player hands control"): the tracked hands, arm IK,
+// fingers and the full body also run on an exact-32 cutscene frame while the scene camera is at the player model (prepare_head_view sets the flag every
+// scene frame; cutscene_scene_render() keeps a stale true from outliving the cutscene). Visuals and tracking only: Use, grabs, combat, haptics and
+// physics pushes stay on raw logic 2.
+static std::atomic<bool> cutscene_hands_live{false};static std::atomic<UINT64> cutscene_hands_frames{},cutscene_hands_far_frames{},cutscene_hands_noroot_frames{};static std::atomic<float> cutscene_hands_last_m[2]{}; // status: cutscene frames with / without the tracked hands and body (camera too far from the model)
+inline bool hands_scene() {return render_world_scene() || (cutscene_hands_live.load(std::memory_order_relaxed) && cutscene_scene_render());}
 // The present thread's cutscene state (under log_mutex): the policy, the live mode knobs, and the status counters (atomics, read by the status writer).
 static d2vr::CutscenePolicy cutscene_policy;
 // The VR settings row is the source of the cutscene mode (cutscene_mode_setting, refreshed from the menu each Present); build/cutscene-mode stays
@@ -885,7 +892,7 @@ std::string cutscene_status_json() {
      <<",\"immersive_frames\":"<<cutscene_immersive_frames.load()<<",\"theater_frames\":"<<cutscene_theater_frames.load()<<",\"pending_frames\":"<<cutscene_pending_frames.load()<<",\"held_frames\":"<<cutscene_held_frames.load()
      <<",\"projection_layers\":"<<cutscene_projection_layers.load()<<",\"quad_layers\":"<<cutscene_quad_layers.load()
      <<",\"last_fallback\":\""<<d2vr::to_string(static_cast<d2vr::CutsceneFallback>(cutscene_last_fallback.load()))<<"\",\"cutscenes\":"<<cutscene_count.load()
-     <<",\"gates_open\":"<<(cutscene_gates_allowed.load()?"true":"false")
+     <<",\"gates_open\":"<<(cutscene_gates_allowed.load()?"true":"false")<<",\"hands_frames\":"<<cutscene_hands_frames.load()<<",\"hands_far_frames\":"<<cutscene_hands_far_frames.load()<<",\"hands_noroot_frames\":"<<cutscene_hands_noroot_frames.load()<<",\"hands_last_m\":["<<cutscene_hands_last_m[0].load()<<','<<cutscene_hands_last_m[1].load()<<']'
      <<",\"cuts\":"<<cutscene_cuts.load()<<",\"last_cut_m\":"<<cutscene_last_cut_m.load()<<",\"last_cut_deg\":"<<cutscene_last_cut_deg.load()
      <<",\"comfort_views\":"<<cutscene_comfort_views.load()<<",\"full_views\":"<<cutscene_full_views.load()
      <<",\"provisional_origin_frames\":"<<cutscene_provisional_frames.load()<<",\"provisional_adoptions\":"<<cutscene_provisional_adoptions.load()
@@ -4808,7 +4815,7 @@ void prepare_head_view(void* view) noexcept {
             native_left_aim.clear();native_shot_aim.clear();native_crosshair.clear();native_weapon_attachment.clear();head_pose_epoch=game_xr->pose_epoch();head_body_anchor.clear();authored_camera_anchor.clear();
         }
         // G2: an open exact-32 cutscene renders its view here too (render only: every side effect below stays on raw logic 2 / render_world_scene())
-        if(!render_scene_frame()) {native_audio_listener.clear();native_left_aim.clear();native_shot_aim.clear();native_crosshair.clear();native_weapon_attachment.clear();head_body_anchor.clear();
+        if(!render_scene_frame()) {native_audio_listener.clear();native_left_aim.clear();native_shot_aim.clear();native_crosshair.clear();native_weapon_attachment.clear();head_body_anchor.clear();cutscene_hands_live=false;
             if(d2vr::clamp_forgets_on(game_logic_mask())) forget_hand_clamp(); // a load or death reload: no planes or hands from before it (N6)
             return;}
         // Ruling 15: the cutscene state is read ONCE per displayed frame (the mask can flip between reads); every decision below uses it
@@ -5489,7 +5496,16 @@ void prepare_head_view(void* view) noexcept {
                 else publish_left_aim(aim_pose);
             }
         }
-        if(render_world_scene() && (tracked_arms_requested || native_weapon_attachment_requested) && per_frame) {
+        {   // v643: the tracked hands and the body follow the player into a cutscene only while the scene camera is at the model (see hands_scene)
+            bool cutscene_hands{},no_root{};
+            if(cutscene_frame && !legacy_cutscene_hands && tracked_arms_requested) {if(const auto root=render_player_root()) {
+                const double across=std::hypot(anchor.position[0]-root->x,anchor.position[1]-root->y),rise=anchor.position[2]-root->z;
+                cutscene_hands_last_m[0]=static_cast<float>(across);cutscene_hands_last_m[1]=static_cast<float>(rise);
+                cutscene_hands=d2vr::NativeActionCamera::cutscene_keeps_hands(true,false,across,rise);} else no_root=true;}
+            cutscene_hands_live.store(cutscene_hands,std::memory_order_relaxed);
+            if(per_frame && cutscene_frame && tracked_arms_requested) ++(cutscene_hands?cutscene_hands_frames:no_root?cutscene_hands_noroot_frames:cutscene_hands_far_frames);
+        }
+        if(hands_scene() && (tracked_arms_requested || native_weapon_attachment_requested) && per_frame) {
             const bool reverse_sword=sword_reversed.load();
             std::array<std::optional<d2vr::Vec3>,2> clamp_palm_swept{};   // H16: this frame's clamp-drawn palm when the clamp output is valid (see hand_clamped_palm)
             d2vr::rig::ArmTrackingFrame hands{};std::array<d2vr::WorldTrackedPose,2> raw_grips{},palm_grips{};std::array<std::uintptr_t,2> cast_entities{};hands.tick=GetTickCount64();hands.source_tick=game_xr->grip_pose_tick();hands.epoch=game_xr->pose_epoch();
@@ -5540,7 +5556,7 @@ void prepare_head_view(void* view) noexcept {
             // over, so the hands left the controllers and seemed to vanish (user, headset v636: "when I block an attack my right hand can just
             // disappear"; arm_flicker publish_refused 1780 frames per arm). Player states still take arms through native_ownership.
             // build/legacy-authored-hands: every authored camera takes both hands, as before.
-            const bool hands_authored=action.takes_hands(authored_camera,cutscene_frame,legacy_authored_hands);
+            const bool hands_authored=action.takes_hands(authored_camera,cutscene_frame,legacy_authored_hands,legacy_cutscene_hands);
             const auto native_ownership=d2vr::fullbody::ownership(avatar_states,hands_authored);
             const unsigned authored_hands=(hands_authored?3u:0u) | (native_ownership.arm[0]>0?1u:0u) | (native_ownership.arm[1]>0?2u:0u);
             if(!avatar_pose_gate.load(std::memory_order_acquire) || game_xr->state!=XR_SESSION_STATE_FOCUSED ||
@@ -5582,7 +5598,7 @@ void prepare_head_view(void* view) noexcept {
                 // Physical hands (phase 1, C9): the drawn hand stops at world surfaces (hand_clamp.hpp) and the weapon's blade at what its segment
                 // meets (weapon_collision.hpp). hands.grips become the drawn poses (rendered hand, arm IK target, drawn weapon); raw_grips keep the
                 // controller's (aim, attack/block and swing velocity, throw velocity, grab selection, interaction routing, native ownership).
-                if(weapon_collision_enabled && !authored_camera) {
+                if(weapon_collision_enabled && !authored_camera && !cutscene_frame) { // v643: no blade or hand sweeps in a cutscene; the hands are drawn at the controllers
                     LARGE_INTEGER qpc{},freq{};QueryPerformanceCounter(&qpc);QueryPerformanceFrequency(&freq);
                     const double dt=weapon_collision_qpc?std::clamp(static_cast<double>(qpc.QuadPart-weapon_collision_qpc)/static_cast<double>(freq.QuadPart),.001,.1):.011;
                     weapon_collision_qpc=qpc.QuadPart;
@@ -6034,8 +6050,8 @@ void prepare_head_view(void* view) noexcept {
                     const auto shift=held_clamp_live.shift[side];
                     if(d2vr::finite(shift) && d2vr::length(shift)>1e-6) {hands.grips[side].position=hands.grips[side].position+shift;held_clamp_live.applied[side]=shift;}
                 }
-                for(unsigned side=0;side<2;++side) if(hands.hands&(1u<<side)) publish_hand(side,hands.grips[side],raw_grips[side]);
-                if(grenade_hand_throw_enabled) d2vr::NativeGrenadeThrow::trigger(GetTickCount64(),game_xr->controller_input.left_trigger);
+                if(!cutscene_frame) for(unsigned side=0;side<2;++side) if(hands.hands&(1u<<side)) publish_hand(side,hands.grips[side],raw_grips[side]); // v643: no throw velocity in a cutscene
+                if(grenade_hand_throw_enabled && !cutscene_frame) d2vr::NativeGrenadeThrow::trigger(GetTickCount64(),game_xr->controller_input.left_trigger);
                 {std::lock_guard<std::mutex> clamped_lock(hand_state_mutex);   // H16: the loot LOS origin (never the raw controller)
                  for(unsigned side=0;side<2;++side) {
                      hand_clamped_palm[side]=hand_clamp_enabled && clamp_palm_swept[side] && (hands.hands&(1u<<side)) && d2vr::finite(*clamp_palm_swept[side])?
@@ -7587,24 +7603,24 @@ void capture_xr_transfer(UINT eye,ID3D11Texture2D* source,ID3D11Texture2D* desti
         xr_capture_epoch=game_xr->pose_epoch();xr_transfer_mask=0;xr_menu_transfer_mask=0;xr_tracked_transfer_frames=0;
     }
     if(eye==0 && gameplay && tracked) ++xr_tracked_transfer_frames;
-    // G2 (sim only): up to 6 eye pairs per run during exact 32, the first 1 s into the cutscene and then every 1.5 s, named by this Present's
+    // G2 (sim only): up to 12 eye pairs per run during exact 32, the first 1 s into the cutscene and then every 1.2 s (v645: "hands_live" in the .json), named by this Present's
     // classification (xr-cut-immersive-... = the projection layer's eye images, xr-cut-theater-... = what the quad copies), with a .json of
     // the size and the layer pose, for the Tier B ledger. Read-only (a readback of the image this layer submits).
     if(simulated_gameplay_script_requested && eye<2 && game_logic_mask()==d2vr::cinematic_logic_mask) {
         const auto now=GetTickCount64();
         if(!cutscene_capture_start) {cutscene_capture_start=now;cutscene_capture_next=now+1000;cutscene_capture_left=false;}
-        if(eye==0?cutscene_captures<6 && now>=cutscene_capture_next:cutscene_capture_left) {
+        if(eye==0?cutscene_captures<12 && now>=cutscene_capture_next:cutscene_capture_left) {
             const auto pixels=d2vr::readback_rgba(source);
             if(!pixels.bytes.empty()) {
                 const auto name=std::wstring(L"xr-cut-")+(cutscene_present_immersive.load()?L"immersive-":L"theater-")+std::to_wstring(cutscene_capture_next-cutscene_capture_start)+(eye?L"-right":L"-left");
                 std::ofstream raw(output_directory/(name+L".rgba"),std::ios::binary|std::ios::trunc);raw.write(reinterpret_cast<const char*>(pixels.bytes.data()),static_cast<std::streamsize>(pixels.bytes.size()));
                 std::ofstream info(output_directory/(name+L".json"),std::ios::trunc);
-                info<<"{\"width\":"<<pixels.width<<",\"height\":"<<pixels.height<<",\"format\":"<<static_cast<int>(pixels.format)<<",\"tracked\":"<<(tracked?"true":"false")
+                info<<"{\"width\":"<<pixels.width<<",\"height\":"<<pixels.height<<",\"format\":"<<static_cast<int>(pixels.format)<<",\"tracked\":"<<(tracked?"true":"false")<<",\"hands_live\":"<<(cutscene_hands_live.load()?"true":"false")
                     <<",\"pose\":["<<layer.pose.position.x<<','<<layer.pose.position.y<<','<<layer.pose.position.z<<','<<layer.pose.orientation.x<<','<<layer.pose.orientation.y<<','<<layer.pose.orientation.z<<','<<layer.pose.orientation.w
                     <<"],\"fov\":["<<layer.fov.angleLeft<<','<<layer.fov.angleRight<<','<<layer.fov.angleUp<<','<<layer.fov.angleDown<<"]}\n";
             }
             if(eye==0) cutscene_capture_left=true;
-            else {cutscene_capture_left=false;++cutscene_captures;cutscene_capture_next=now+1500;}
+            else {cutscene_capture_left=false;++cutscene_captures;cutscene_capture_next=now+1200;}
         }
     } else if(eye==0 && game_logic_mask()!=d2vr::cinematic_logic_mask) cutscene_capture_start=0;
     if(gameplay && eye<2 && alt_pose_trace_on()) { // the layer as submitted for this Present
@@ -8527,8 +8543,10 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                     current_avatar_torso_width.reset();std::atomic_store(&current_avatar_torso,std::shared_ptr<const d2vr::NativeTorsoFitToken>{});
                                     trace_avatar_fit("loading_suspend",number,arm_binding_cache.load());
                                 }
-                                if(render_world_scene() && now-arm_rig_refresh_tick>=500) {auto reader=&read_self;arm_binding_cache.refresh(reader,image_base);arm_rig_refresh_tick=now;}
-                                if(render_world_scene() && tracked_arms_requested) {
+                                // v643: also on any cutscene frame (read-only): a load clears the binding, and a cinematic that follows the load (void_01) needs the
+                                // player model's root for the hands_scene camera test before its first gameplay frame (sim v643: 2057 'far' frames, the root unreadable).
+                                if((hands_scene() || cutscene_scene_render()) && now-arm_rig_refresh_tick>=500) {auto reader=&read_self;arm_binding_cache.refresh(reader,image_base);arm_rig_refresh_tick=now;}
+                                if(hands_scene() && tracked_arms_requested) {
                                     // Which hands the game itself occupies (weapon/item in the slot, or carrying).
                                     auto reader=&read_self;const auto state=d2vr::rig::native_hand_state(reader,image_base);
                                     if(!barrel_pending_row.empty()) {if(!output_directory.empty()) {std::ofstream row(output_directory/L"barrel-aim.csv",std::ios::app);row<<barrel_pending_row;++barrel_rows_written;} barrel_pending_row.clear();} // no file I/O under hand_state_mutex
@@ -8919,7 +8937,7 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                             if(!render_world_scene() || !game_xr->tracking_views() ||
                                game_xr->state!=XR_SESSION_STATE_FOCUSED || game_xr->pose_epoch()!=head_pose_epoch)
                                 native_audio_listener.clear();
-                            if(tracked_arms_requested && (!render_world_scene() || !game_xr->tracking_views() ||
+                            if(tracked_arms_requested && (!hands_scene() || !game_xr->tracking_views() ||
                                game_xr->state!=XR_SESSION_STATE_FOCUSED || !game_xr->grip_tracked_hands ||
                                game_xr->pose_epoch()!=head_pose_epoch)) {attachment_pose.set_allowed(0,0,0);arm_tracking.clear();full_body.clear();full_body_tracking_ready=false;}
                             if(native_weapon_attachment_requested && (!gameplay || !game_xr->tracking_views() ||
@@ -9845,7 +9863,13 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                         if(want) {++block_wanted;if(!right_free) ++block_not_free;if(!sword_grip.held()) ++block_not_held;}
                                         // A power or a shot from the left hand: Block (RB) steps aside while the left trigger is held and 250 ms
                                         // after, then comes back by itself (user, headset v447: "block can be used along with weapon, powers").
-                                        if(right_free && sword_grip.held() && want && !attack_intent_block_off && input.left_trigger<=.55f) {input.right_grip=1;++gesture_blocks;} // Block would swallow the attack press
+                                        // v651 (user, headset v642: "I cannot pickup body parts and bottles with my free hand when sword is in the right hand"): the
+                                        // sword hand anywhere in front of the body holds Block, and Block locks the arm body part (matrix[BLOCK], native-attack-gating.md):
+                                        // the left hand's grip-alone Use (bottle, limb, loot) was dropped, as the attack press was. Block steps aside from the left
+                                        // squeeze that is (or may become) a Use; a choke keeps its own RB (choke_route), a held gun its own grip.
+                                        const bool left_use_squeeze=d2vr::block_yields_to_left_use(raw.left_grip>.35f,gun_grip.held(),
+                                            choke_route.consume_use || choke_route.rb || deliberate_choke,grip_intent_out[0].pending_use || grip_intent_out[0].use);
+                                        if(right_free && sword_grip.held() && want && !attack_intent_block_off && !left_use_squeeze && input.left_trigger<=.55f) {input.right_grip=1;++gesture_blocks;} // Block would swallow the attack press
                                         if(vr_combat_enabled && combat_decision.block) ++block_pose_frames;}
                                     if(!vr_combat_enabled && gesture.takedown_pulse) {takedown_strike_until=GetTickCount64()+150;++takedown_gestures;}
                                     if(power_gestures_enabled && gesture.power!=d2vr::PowerGesture::none) {
@@ -11061,6 +11085,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
         hold_y_menu_enabled=!fs::exists(root/L"build"/L"no-hold-y-menu");
         legacy_hold_y_settings=fs::exists(root/L"build"/L"legacy-hold-y-settings");
         legacy_authored_hands=fs::exists(root/L"build"/L"legacy-authored-hands");
+        legacy_cutscene_hands=fs::exists(root/L"build"/L"legacy-cutscene-hands");
         legacy_authored_camera=fs::exists(root/L"build"/L"legacy-authored-camera");authored_heading.reset();authored_heading_now.reset();cutscene_suppressed_snaps=0;
         scripted_recenter_enabled=!fs::exists(root/L"build"/L"no-scripted-recenter");scripted_recenter.reset();scripted_offset_now=0;scripted_ease_tick=0; // G1 (default on)
         cutscene_policy=d2vr::CutscenePolicy{};cutscene_gates_allowed=false;cutscene_flush_presents=0;cutscene_present_immersive=false; // G2

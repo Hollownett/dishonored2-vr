@@ -26,8 +26,11 @@ namespace d2vr {
 // EntityLockout and the fault releases. The 3.0 below is the pre-H1 value: build/legacy-corpse-strength restores it.
 // v609 G6 (headset feedback: corpses still too heavy): the corpse strength_scale is 2.5x the v608 value, 6 -> 15. Props keep the v608 value through prop_strength_scale
 // (native_grab routes capped prop lanes through prop_view()), so only corpses get lighter.
+// v643 (user, headset v642: "make it easier to lift heavy objects (other then corpses)"): props get the corpse scale too, 6 -> 15. At 6 the
+// sideways cap (90 N x 6 = 540 N) over a 60 kg ceiling prop plus the 2 kg hand is 8.7 m/s2, under gravity: a level forearm could not lift it at all.
+// build/grab-tuning.cfg prop_strength_scale 6 restores the v642 feel.
 constexpr double kLegacyCorpseStrengthScale=3.,kV608CorpseStrengthScale=6.,kCorpseStrengthScale=15.;
-struct GrabTuning {double axial_n=300,lateral_n=90,torque_nm=30,strength_scale=kCorpseStrengthScale,prop_strength_scale=kV608CorpseStrengthScale,hand_kg=2,mass_floor_kg=.5,mass_ceiling_kg=60,
+struct GrabTuning {double axial_n=300,lateral_n=90,torque_nm=30,strength_scale=kCorpseStrengthScale,prop_strength_scale=kCorpseStrengthScale,hand_kg=2,mass_floor_kg=.5,mass_ceiling_kg=60,
     lift_fraction=.25,dt_max=1./30,
     stale_dt_s=.1,        // a frame is STALE (a game-thread hitch; enters recovery) only when its raw dt exceeds this; sustained low fps (dt 0.04) is not a hitch
     catch_up_mps=1.,      // recovery: the error-closure speed (not the hand's own feed) starts capped here ...
@@ -96,7 +99,7 @@ inline TuningLoad load_grab_tuning(const std::filesystem::path& file) noexcept {
             else if(key=="lateral_n") ok=ranged(t.lateral_n,20,300);
             else if(key=="torque_nm") ok=ranged(t.torque_nm,5,60);
             else if(key=="strength_scale") ok=ranged(t.strength_scale,.5,25);
-            else if(key=="prop_strength_scale") ok=ranged(t.prop_strength_scale,.5,10);
+            else if(key=="prop_strength_scale") ok=ranged(t.prop_strength_scale,.5,25);
             else if(key=="lift_fraction") ok=ranged(t.lift_fraction,0,1);
             else if(key=="mass_floor_kg") ok=ranged(t.mass_floor_kg,.1,5);
             else if(key=="mass_ceiling_kg") ok=ranged(t.mass_ceiling_kg,10,200);

@@ -446,7 +446,7 @@ void prop_hold_capped_old_release() {
     const auto heavy_before=writes.size();
     heavy.step(0,{prop_x+.4,0,0},.9f,100);
     REQUIRE(writes.size()==heavy_before+1);
-    const GrabTuning tuning=GrabTuning{}.prop_view();const double cap=expected_cap(12.,.1,tuning);   // props keep the v608 scale (v609 G6)
+    const GrabTuning tuning=GrabTuning{}.prop_view();const double cap=expected_cap(12.,.1,tuning);   // props: the corpse scale since v643 (v609 G6 kept them at v608)
     CHECK(std::fabs(writes.back().linear[0])<=cap*1.01 && std::fabs(writes.back().linear[0])>cap*.5);
     // Beyond 1.5 m the old release stays (a prop: throw, no cooldown).
     fixture(0x08,0x08,true,.18f);Rig distant;
@@ -556,7 +556,7 @@ void install_knobs_load_and_switch() {
     const auto root=fs::temp_directory_path()/"d2vr_corpse_knobs";fs::remove_all(root);fs::create_directories(root/"build");
     {
         const auto none=NativeGrab::corpse_knobs_from(root);
-        CHECK(none.options.enabled && !none.options.from_file && none.options.tuning.tow && none.options.tuning.strength_scale==15 && none.options.tuning.prop_strength_scale==6 && !none.kill.legacy_corpse_strength && !none.kill.no_posts);
+        CHECK(none.options.enabled && !none.options.from_file && none.options.tuning.tow && none.options.tuning.strength_scale==15 && none.options.tuning.prop_strength_scale==15 && !none.kill.legacy_corpse_strength && !none.kill.no_posts);
     }
     {std::ofstream f(root/"build"/"grab-tuning.cfg");f<<"strength_scale 5\ntow 0\naxial_n 250\n";}
     {
@@ -580,10 +580,10 @@ void install_knobs_load_and_switch() {
     {std::ofstream f(root/"build"/"legacy-corpse-strength");}
     {
         const auto k=NativeGrab::corpse_knobs_from(root);
-        CHECK(k.kill.legacy_corpse_strength && k.options.tuning.strength_scale==3 && k.options.tuning.prop_strength_scale==6 && k.options.enabled);
+        CHECK(k.kill.legacy_corpse_strength && k.options.tuning.strength_scale==3 && k.options.tuning.prop_strength_scale==15 && k.options.enabled);
         std::ofstream(root/"build"/"grab-tuning.cfg")<<"strength_scale 5\naxial_n 250\n";
         const auto c=NativeGrab::corpse_knobs_from(root);
-        CHECK(c.options.from_file && c.options.tuning.strength_scale==3 && c.options.tuning.prop_strength_scale==6 && c.options.tuning.axial_n==250);
+        CHECK(c.options.from_file && c.options.tuning.strength_scale==3 && c.options.tuning.prop_strength_scale==15 && c.options.tuning.axial_n==250);
     }
     fs::remove_all(root);
 }
