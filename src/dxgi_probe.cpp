@@ -409,6 +409,7 @@ static d2vr::HeldPlacementSession held_placement_session;
 // Holding hand's world velocity (finite difference of the published grip) and the held entity, for the release throw.
 static std::array<double,3> held_hand_velocity{};static std::uintptr_t held_entity{};static std::array<double,3> held_offset{};
 // Carry diagnostics (Task 9): counters always on (atomics); the per-frame trace only when build/carry-trace exists (a writer thread, capped, flushed every second and at teardown).
+static bool legacy_authored_hands=false; // build/legacy-authored-hands: every authored camera (not only scripted scenes and cutscenes) hands both arms to the native animation
 static bool legacy_authored_camera=false; // build/legacy-authored-camera: authored scenes use the native camera rotation (and the +5% FOV)
 static bool action_camera_alignment_enabled=true; // build/legacy-action-camera-alignment restores pre-H5 offsets/history
 static d2vr::ActionCameraContext action_camera_context;
@@ -5517,8 +5518,14 @@ void prepare_head_view(void* view) noexcept {
             }
             // Native ownership of the arms (C9: the hand clamp yields to authored animations), known before the hands are drawn.
             const auto avatar_states=full_body_states(body->player);
-            const auto native_ownership=d2vr::fullbody::ownership(avatar_states,authored_camera);
-            const unsigned authored_hands=(authored_camera?3u:0u) | (native_ownership.arm[0]>0?1u:0u) | (native_ownership.arm[1]>0?2u:0u);
+            // Both hands go to the native animation for a scripted scene (takedown, finisher, mantle: action.scripted) or a cutscene only. Any other
+            // native camera mode (mode 14 in the v636 headset session: 0.5-0.8 s around sprints, slides, landings and fights) kept handing both arms
+            // over, so the hands left the controllers and seemed to vanish (user, headset v636: "when I block an attack my right hand can just
+            // disappear"; arm_flicker publish_refused 1780 frames per arm). Player states still take arms through native_ownership.
+            // build/legacy-authored-hands: every authored camera takes both hands, as before.
+            const bool hands_authored=action.takes_hands(authored_camera,cutscene_frame,legacy_authored_hands);
+            const auto native_ownership=d2vr::fullbody::ownership(avatar_states,hands_authored);
+            const unsigned authored_hands=(hands_authored?3u:0u) | (native_ownership.arm[0]>0?1u:0u) | (native_ownership.arm[1]>0?2u:0u);
             if(!avatar_pose_gate.load(std::memory_order_acquire) || game_xr->state!=XR_SESSION_STATE_FOCUSED ||
                game_xr->last_action_sync!=XR_SUCCESS) native_interaction_aim.clear_door_contact();
             if(avatar_pose_gate.load(std::memory_order_acquire) && game_xr->state==XR_SESSION_STATE_FOCUSED && game_xr->last_action_sync==XR_SUCCESS) {
@@ -6017,7 +6024,7 @@ void prepare_head_view(void* view) noexcept {
             pending_publish.flush(); // the left aim, with this frame's clamp state
             if(hand_body_requested.load(std::memory_order_relaxed)) {   // B13: the hand bodies' per-frame facts (C9: created at the calibrated palm)
                 d2vr::HandBodyRuntime::HandsInput hand_body_in{};hand_body_in.tracked=hands.hands&3u;hand_body_in.palm={palm_grips[0].position,palm_grips[1].position};
-                hand_body_in.authored=authored_camera;   // a death clip, a takedown, a cutscene: the arms are the game's, the bodies go
+                hand_body_in.authored=hands_authored;   // a death clip, a takedown, a cutscene: the arms are the game's, the bodies go
                 hand_body_in.focused=game_xr->state==XR_SESSION_STATE_FOCUSED && game_xr->last_action_sync==XR_SUCCESS;
                 // B14: the servo's target (the raw calibrated palm pose, C9 intent), the clamp's free / yield bits, locomotion and the player root
                 hand_body_in.target=palm_grips;hand_body_in.free=hand_body_probe_free_bits&hands.hands;hand_body_in.yield=(hand_body_yield_bits&~hold_coupled_bits)|authored_hands;
@@ -6044,7 +6051,7 @@ void prepare_head_view(void* view) noexcept {
                 // Fingers are ours only for a hand the game leaves empty; the right hand keeps its native grip.
                 hands.empty_hands=~hand_item_bits&3u;
                 // Scripted animations (takedowns, finishers, mantles: authored camera) play on the game's own arms.
-                hands.native_hands=authored_camera?3u:0u;
+                hands.native_hands=hands_authored?3u:0u;
                 if(hands.native_hands) hands.has_hand_state=true;
                 hands_native.store(hands.native_hands!=0);
             }
@@ -11004,6 +11011,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
         projection_jitter=!fs::exists(root/L"build"/L"no-projection-jitter");
         hold_y_menu_enabled=!fs::exists(root/L"build"/L"no-hold-y-menu");
         legacy_hold_y_settings=fs::exists(root/L"build"/L"legacy-hold-y-settings");
+        legacy_authored_hands=fs::exists(root/L"build"/L"legacy-authored-hands");
         legacy_authored_camera=fs::exists(root/L"build"/L"legacy-authored-camera");authored_heading.reset();authored_heading_now.reset();cutscene_suppressed_snaps=0;
         scripted_recenter_enabled=!fs::exists(root/L"build"/L"no-scripted-recenter");scripted_recenter.reset();scripted_offset_now=0;scripted_ease_tick=0; // G1 (default on)
         cutscene_policy=d2vr::CutscenePolicy{};cutscene_gates_allowed=false;cutscene_flush_presents=0;cutscene_present_immersive=false; // G2

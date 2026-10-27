@@ -21,6 +21,12 @@ int main() {
     action=reader.poll(memory,base_address,player_address,101);
     assert(!action.scripted && action.combat && !action.owns_camera(true) && action.state_index==44);
     assert(action.owns_camera(true,true));
+    {   // the hands follow an authored camera only into a scripted scene or a cutscene (user, headset v636: hands vanished on other camera modes)
+        d2vr::NativeActionCamera plain{};
+        assert(!plain.takes_hands(true,false) && plain.takes_hands(true,true) && plain.takes_hands(true,false,true) && !plain.takes_hands(false,true));
+        d2vr::NativeActionCamera scene{};scene.scripted=true;
+        assert(scene.takes_hands(true,false) && !scene.takes_hands(false,false));
+    }
     memory.put(block+0x20,static_cast<unsigned char>(0));memory.put(attack+0x20,static_cast<unsigned char>(1));
     action=reader.poll(memory,base_address,player_address,102);
     assert(!action.scripted && action.combat && !action.owns_camera(true) && action.state_index==39);

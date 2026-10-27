@@ -426,6 +426,14 @@ _DOCK_SEG = next(i for i, sg in enumerate(_SHOULDER_LIFT) if sg[0] == 6500) + 1 
 for _n in ('shoulderdrop', 'shoulderthrow'):
     PAIR_PLAN[_n] = {next(i for i, sg in enumerate(_SHOULDER_LIFT) if sg[0] == 5500) + 1: ('dock-let-go', .4), _DOCK_SEG: ('dock-walk', 1.2), _DOCK_SEG + 1: ('dock-stand', .3)}
 TORSO_SCENARIOS = ('carrydrop', 'carrythrow', 'shoulderdrop', 'shoulderthrow')
+# Head sway for the eye pipeline (alt-pose-trace, alternate-eye): 48 s of side steps and nods (every Setup's pose differs from the one before),
+# with a short walk and a few snap turns, so a pose-versus-image skew or a swapped eye image would show in alt_pose_trace_check.py.
+_SWAY = []
+for _k in range(12):
+    _t = 1000 + _k * 4000
+    _SWAY += glide_head(_t, _t + 2000, [0.0, 0.0, 0.0], [0.0, 0.0, 0.0], 5, NEUTRAL, -10, 10, [-0.12, 0.0, 0.0], [0.12, 0.03, -0.05], {"hand_pitch_degrees": 0})
+    _SWAY += glide_head(_t + 2000, _t + 4000, [0.0, 0.0, 0.0], [0.0, 0.0, 0.0], 5, {"move_y": 0.5} if _k % 3 == 1 else ({"turn_x": 1.0} if _k % 5 == 2 else NEUTRAL), 10, -10, [0.12, 0.03, -0.05], [-0.12, 0.0, 0.0], {"hand_pitch_degrees": 0})
+SCENARIOS['headsway'] = [[0, 1000, NEUTRAL, [0.0, 0.0, 0.0]]] + _SWAY
 # Grip with nothing under the hand uses what the head looks at (test save: the Black Market counter ahead): the shop opens.
 # The counter is below eye level. The left hand is raised in front: at its default pose it is in the hip holster zone, where the grip
 # draws a holstered pistol (sim v465: a loaded hip drained the grip, the shop never opened).
@@ -542,7 +550,19 @@ def held_sword(segments, draw_ms=2600):
     return pre + [[a + draw_ms, b + draw_ms, dict(inp, right_grip=1.0), hand or [0.0, 0.0, 0.0], *more] for a, b, inp, hand, *more in segments]
 
 
-for _name in ('swing', 'chop', 'duel', 'swarm', 'floor'):
+# Sprint, crouch into a slide, stand up, three times (headset v636: the native camera modes around sprints, slides and landings took both hands;
+# arm_flicker publish_refused counts the frames the tracked arms were refused). Eye captures every 2 s.
+_SPRINT = {"move_y": 1.0, "left_click": True}
+SCENARIOS['slide'] = [[0, 2000, NEUTRAL, [0.0, 0.0, 0.0]]]
+for _k in range(3):
+    _t = 2000 + _k * 5000
+    SCENARIOS['slide'] += [[_t, _t + 1200, _SPRINT, [0.0, 0.0, 0.0]], [_t + 1200, _t + 2600, _SPRINT, [0.0, 0.0, 0.0], {"head_offset": [0.0, -0.45, 0.0]}],
+                           [_t + 2600, _t + 5000, NEUTRAL, [0.0, 0.0, 0.0], {"head_offset": [0.0, 0.0, 0.0]}]]
+# Block against an alerted guard (use with --near npc-front; user, headset v636: "when I block an attack my right hand can just disappear"):
+# the drawn sword held still in front of the chest (SwordBlockPose: RB held) for 24 s while the guard attacks; eye captures every 2 s.
+SCENARIOS['blockduel'] = [[0, 24000, NEUTRAL, [-0.25, 0.05, -0.15]]]
+PAIR_PLAN['blockduel'] = {}
+for _name in ('swing', 'chop', 'duel', 'blockduel', 'swarm', 'floor'):
     SCENARIOS[_name] = held_sword(SCENARIOS[_name])
 FORBIDDEN_STATES = {'flick': ['Slash'], 'reach': ['Slash']}  # accidental attacks
 EXPECTED_STATES = {'pickuplook': ['LootObject', 'Interact', 'HoldObject'], 'carry': ['CarryCorpse', 'PickupCorpse', 'Interact'], 'carrydrop': ['CarryCorpse'], 'carrythrow': ['CarryCorpse'], 'chop': ['Slash'], 'pickup': ['LootObject', 'Interact', 'HoldObject'], 'reach': ['LootObject', 'Interact', 'HoldObject'], 'swing': ['Slash', 'Assassination'], 'duel': ['Slash'], 'grab': ['LootObject', 'HoldObject', 'Interact', 'CarryCorpse', 'ReadNote'], 'powers': ['UsePower', 'Blinking', 'UseWindblast', 'UsePhantasmalLink', 'InBendTime', 'StoneShroud', 'DoppelgangerSwap', 'UseHeart'], 'jump': ['Jumping', 'Falling'],  # Falling always follows a jump; the short Jumping state can fall between samples
@@ -985,6 +1005,7 @@ def main():
     ap.add_argument('--script-hand-pitch', type=float, default=0.0, help='--script of a scenario-relative file: hand pitch where a segment sets none')
     ap.add_argument('--pairs-at', metavar='T,T,..', help='eye pairs at these scenario seconds (script clock)')
     ap.add_argument('--bottle-name', metavar='REGEX', help='--near bottle: take the nearest carryable whose entity name matches this (e.g. glass|cup|mug|bottle_01); --npc-index picks the Nth; the eye stands 1.2 m above the item as for bottle_02')
+    ap.add_argument('--headset-size', action='store_true', help='render at the headset eye size (inject_probe --headset-size; build/sim-eye-size sets it, e.g. "2895 3095")')
     ap.add_argument('--every', metavar='CMD', help='send this mod test command every 3 s during the scenario (e.g. "pad x 200")')
     a = ap.parse_args()
     SKIP_NAMES[:] = [n for n in (a.skip_npc or '').split(',') if n]
@@ -1032,7 +1053,7 @@ def main():
     open(knob, 'w').close()
     # Combat scenarios: the player ignores damage (engine god/buddha are not honoured) so a fight can run to the end.
     invulnerable = os.path.join(ROOT, 'build', 'sim-invulnerable')
-    if a.script or a.scenario in ('duel', 'swarm', 'swordthrow', 'stealththrow', 'shove', 'yank', 'soak') or a.near in ('item', 'corpse', 'oldcorpse', 'door'):  # guards near teleport spots killed the player (sim v404)
+    if a.script or a.scenario in ('duel', 'blockduel', 'swarm', 'swordthrow', 'stealththrow', 'shove', 'yank', 'soak') or a.near in ('item', 'corpse', 'oldcorpse', 'door'):  # guards near teleport spots killed the player (sim v404)
         open(invulnerable, 'w').close()
     dump_dir = os.path.join(ART, 'ui-dump')
     for f in glob.glob(os.path.join(dump_dir, '*')):
@@ -1047,7 +1068,7 @@ def main():
                 time.sleep(1)
     try:
         proc = subprocess.Popen([sys.executable, os.path.join(ROOT, 'tools', 'inject_probe.py'), '--pid', str(pid), '--dll-name', a.dll,
-                                 *SIM_FLAGS, *(['--native-menu-pointer'] if a.scenario == 'shoparm' else []), '--simulated-gameplay-script', script, '--seconds', str(int(seconds + 12))],
+                                 *SIM_FLAGS, *(['--native-menu-pointer'] if a.scenario == 'shoparm' else []), *(['--headset-size'] if a.headset_size else []), '--simulated-gameplay-script', script, '--seconds', str(int(seconds + 12))],
                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
         proc_start = time.time()
         time.sleep(4)

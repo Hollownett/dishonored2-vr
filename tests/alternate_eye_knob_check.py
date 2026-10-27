@@ -26,11 +26,11 @@ at = probe.index('L"alternate-eye"')
 assert at < probe.index('            prepare_stereo();', at)
 block = probe[at:at + 700]
 assert 'alt_eye_state=1;mono_view_state=1;' in block and 'alt_eye_state=2;' in block and 'native_eye_capture_requested' in block
-if features.exists():  # plan F task 4: a launcher row exists (default ON since v602, enable kind, file alternate-eye)
+if features.exists():  # plan F task 4: a launcher row exists (enable kind, file alternate-eye); default OFF since v637 (headset v636: the eyes a frame apart doubled one eye on motion)
     import json
     rows = [f for f in json.loads(features.read_text(encoding='utf-8'))['features'] if f['file'] == 'alternate-eye']
-    assert len(rows) == 1 and rows[0]['id'] == 'performance-mode' and rows[0]['kind'] == 'enable' and rows[0]['default'] is True
-    assert 'selected anti-aliasing' in rows[0]['help'] and 'shimmer' in rows[0]['label']
+    assert len(rows) == 1 and rows[0]['id'] == 'performance-mode' and rows[0]['kind'] == 'enable' and rows[0]['default'] is False
+    assert 'selected anti-aliasing' in rows[0]['help'] and 'double' in rows[0]['label']
     assert any(f['id']=='alternate-native-taa' and f['file']=='no-alternate-native-taa' and f['kind']=='disable' and f['default'] for f in json.loads(features.read_text(encoding='utf-8'))['features'])
 
 # GameXr: everything is off by default and gated

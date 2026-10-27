@@ -25,6 +25,11 @@ struct NativeActionCamera {
     bool owns_camera(bool native_camera_mode,bool force_native=false) const noexcept {
         return scripted || force_native || (native_camera_mode && !combat);
     }
+    // The arms follow the camera to the native animation only for a scripted scene (takedown, finisher, mantle) or a cutscene; another
+    // native camera mode (a slide, a landing, a hit or block reaction: user, headset v636) keeps the tracked hands. legacy: every authored camera.
+    bool takes_hands(bool authored_camera,bool cutscene,bool legacy=false) const noexcept {
+        return authored_camera && (scripted || cutscene || legacy);
+    }
 };
 class NativeActionCameraReader {
     std::uintptr_t player_{},machine_{};
