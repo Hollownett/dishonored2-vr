@@ -963,7 +963,7 @@ private:
             auto seated=body?body->pose:WorldTrackedPose{};
             if(sphere_grip_ && body && body->bone<0 && body->bounds && p.palm.valid) {
                 const Vec3 centre=(body->bounds->minimum+body->bounds->maximum)*.5,goal=p.palm.palm+p.palm.direction*(rig::sphere_grip_radius(body->pose,*body->bounds)+rig::held_palm_depth);
-                if(finite(goal) && length(goal-centre)<=.25) seated.position=seated.position+(goal-centre);
+                if(finite(goal) && length(goal-centre)<=.5) seated.position=seated.position+(goal-centre);
             }
             if(body && contact && body->world==world && cleared(lane,*body,now) && lane.grab.bind(seated,*contact,grab_acquire_distance)) {
                 lane.held=body;lane.acquired=true;lane.reset_tow();lane.owner_player=p.owner.player;lane.owner_camera=p.owner.camera;

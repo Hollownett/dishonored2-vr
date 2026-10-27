@@ -8,18 +8,14 @@
 #include <algorithm>
 #include <cmath>
 namespace d2vr::rig {
-// What a hand can wrap: 1.5 cm (a spoon's or a fork's handle is thinner, a fist still closes on that) to 6 cm (a skull or a head: the fingers curl round its front).
-inline constexpr double sphere_grip_min=.015,sphere_grip_max=.06;
-// The ball's radius from the half extents of the thing held in its own axes: the geometric mean of its two SMALLER half sides, which is the cross-section
-// the fingers go across (the grip lies across the thin dimension). A round shaft gives its radius (a candlestick's 2-3 cm), a slab grows with its width but
-// slower than the width (a book 6 x 4 x 1.5 cm half: 2.4 cm; a folder 15 x 11 x 1: 3.3 cm), a spoon or fork falls under the floor, a skull is over the cap.
+// A thing's ball: 1.5 cm at least (a fist still closes on it), 0.5 m at most (what a hand can still hold out in front of it).
+inline constexpr double sphere_grip_min=.015,sphere_grip_max=.5,sphere_grip_unknown=.06;
+// The ball's radius from the half extents of the thing held in its own axes: the sphere round its whole box (user, after v641: "the whole object inside the
+// ball, so the hand never seems to pass through it"), the tightest ball that holds every corner: a spoon 9 cm, a candlestick 15 cm, a book 14 cm, a head 15 cm.
 inline double sphere_grip_radius(Vec3 half) {
-    double a=std::abs(half.x),b=std::abs(half.y),c=std::abs(half.z);
-    if(!std::isfinite(a+b+c)) return sphere_grip_max*.5;
-    if(a>b) std::swap(a,b);
-    if(b>c) std::swap(b,c);
-    if(a>b) std::swap(a,b); // a <= b <= c
-    return std::clamp(std::sqrt(a*b),sphere_grip_min,sphere_grip_max);
+    const double a=std::abs(half.x),b=std::abs(half.y),c=std::abs(half.z);
+    if(!std::isfinite(a+b+c)) return sphere_grip_unknown;
+    return std::clamp(std::sqrt(a*a+b*b+c*c),sphere_grip_min,sphere_grip_max);
 }
 // A prop: its half extents in its own axes (the world box solved for the drawn axes, held_local_extents), else the world box's own as it is.
 inline double sphere_grip_radius(const WorldTrackedPose& pose,const NativeGrabBounds& bounds) {
@@ -31,7 +27,7 @@ inline double sphere_grip_radius(const WorldTrackedPose& pose,const NativeGrabBo
 // capsule, or its box's x half that can be the forearm's half LENGTH, gave the 6 cm cap: a fist round a ball, not a wrist); never above the bone box's thinnest half side.
 inline constexpr double sphere_grip_bone_share=.6;
 inline double sphere_grip_radius_of_bone(int bone,const std::optional<NativeGrabBounds>& bounds) {
-    if(bone<0 || bone>=17) return sphere_grip_max;
+    if(bone<0 || bone>=17) return sphere_grip_unknown;
     double r=ragdoll_bone_radius[static_cast<std::size_t>(bone)]*sphere_grip_bone_share;
     if(bounds && finite(bounds->minimum) && finite(bounds->maximum)) {
         const auto h=(bounds->maximum-bounds->minimum)*.5;const double thin=std::min({h.x,h.y,h.z});if(thin>.005) r=std::min(r,thin);}

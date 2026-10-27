@@ -383,7 +383,7 @@ int run(int argc,char** argv) {
     for(const auto& t:things) {
         const auto half=t.half;
         Scene sphere{};sphere.name=_strdup((std::string(t.name)+"_sphere").c_str());sphere.held=true;sphere.where=hold_at;sphere.fingers=hold_fingers;sphere.normal=hold_in;sphere.squeeze=1.f;sphere.index=0.f;
-        sphere.title=_strdup((std::string(t.title)+": the sphere grip (ball r = sqrt of the two smaller half sides, 1.5..6 cm)").c_str());sphere.shape_name="grip ball";
+        sphere.title=_strdup((std::string(t.title)+": the sphere grip (ball round the whole object, every corner inside)").c_str());sphere.shape_name="grip ball";
         sphere.shapes=[half](const WorldTrackedPose& palm,const r::HandGeometry& g) {return std::vector<r::HeldShape>{r::sphere_grip_shape(palm,g,r::sphere_grip_radius(half))};};
         sphere.moving=[half](const WorldTrackedPose& palm,const r::HandGeometry& g,Vec3,Vec3) {return std::vector<r::HeldShape>{r::sphere_grip_shape(palm,g,r::sphere_grip_radius(half))};};
         sphere.ghost=[half](const WorldTrackedPose& palm,const r::HandGeometry& g) { // the thing, its centre in the ball, pre-pickup axes = the palm's

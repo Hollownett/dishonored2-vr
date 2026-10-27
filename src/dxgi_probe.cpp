@@ -3699,6 +3699,13 @@ static void publish_held_object(unsigned side,const d2vr::WorldTrackedPose& grip
         X=seat.axes[0];Y=seat.axes[1];Z=seat.axes[2];origin=from+(seat.origin-from)*(w*w*(3-2*w));
         held_snap.seated=true;held_snap.seat_origin=seat.origin;held_snap.seat_axes=seat.axes;
     } catch(const std::invalid_argument&) {held_snap.seated=false;}
+    // The sphere grip (user, after v641: "the whole object inside the ball, so the hand never seems to pass through it"): a severed part sits with its
+    // mesh centre in the centre of the ball the fingers wrap (drawn palm + palm normal * (radius + skin), the finger block's ball), in the seat's axes.
+    if(!legacy_finger_grab && held_extents && held_snap.held_class==".?AVarkSeveredLimb@@" && finger_geometry[side&1u]) {
+        const auto drawn=drawn_palm_frame(side,grip);
+        const auto ball=drawn.position+palm_normal(drawn,*finger_geometry[side&1u])*(sphere_grip_radius(*held_extents)+held_palm_depth);
+        origin=ball-(X*centre.x+Y*centre.y+Z*centre.z);
+    }
     if(held_clamp_enabled) { // Part 5A: the target stops at the world's surfaces; the hand and the object are shifted together
         auto& L=held_clamp_live;L.holding=true;L.hold_tick=GetTickCount64();L.side=side&1u;
         if(!L.proxies && geometry_captured && held_extents) {

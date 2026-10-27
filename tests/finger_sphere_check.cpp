@@ -28,22 +28,25 @@ Hand real_hand() {
 bool near(double a,double b,double tol=1e-9) {return std::abs(a-b)<=tol;}
 }
 int main() {
-    // The rule: geometric mean of the two smaller half sides, 1.5 .. 6 cm (a spoon and a fork under the floor, a candlestick's shaft its radius, a book and a folder between, a head over the cap).
-    assert(near(r::sphere_grip_radius({.09,.015,.004}),.015));    // spoon: sqrt(.004*.015)=.8 cm -> the 1.5 cm floor
-    assert(near(r::sphere_grip_radius({.10,.012,.003}),.015));    // fork
-    assert(near(r::sphere_grip_radius({.15,.022,.022}),.022));    // candlestick: a round shaft gives its radius
-    assert(near(r::sphere_grip_radius({.022,.15,.022}),.022));    // (the order of the axes does not matter)
-    assert(near(r::sphere_grip_radius({.11,.08,.02}),std::sqrt(.02*.08)));    // book 22 x 16 x 4: 4.0 cm
-    assert(near(r::sphere_grip_radius({.16,.11,.01}),std::sqrt(.01*.11)));    // folder 32 x 22 x 2: 3.3 cm
-    assert(near(r::sphere_grip_radius({.09,.07,.10}),.06));       // a head: the 6 cm cap
-    assert(near(r::sphere_grip_radius({std::nan(""),.1,.1}),.03)); // unreadable: a middling ball, never NaN
+    // The rule (user, after v641): the sphere round the whole box, every corner inside (no finger ever crosses the object), 1.5 cm .. 0.5 m.
+    const auto hyp=[](double a,double b,double c){return std::sqrt(a*a+b*b+c*c);};
+    assert(near(r::sphere_grip_radius({.09,.015,.004}),hyp(.09,.015,.004)));   // spoon: 9.1 cm
+    assert(near(r::sphere_grip_radius({.15,.022,.022}),hyp(.15,.022,.022)));   // candlestick: 15.3 cm
+    assert(near(r::sphere_grip_radius({.022,.15,.022}),hyp(.15,.022,.022)));   // (the order of the axes does not matter)
+    assert(near(r::sphere_grip_radius({.11,.08,.02}),hyp(.11,.08,.02)));       // book 22 x 16 x 4: 13.7 cm
+    assert(near(r::sphere_grip_radius({.09,.07,.10}),hyp(.09,.07,.10)));       // a head: 15.2 cm
+    assert(near(r::sphere_grip_radius({.6,.1,.1}),r::sphere_grip_max));         // a plank: the 0.5 m cap
+    assert(near(r::sphere_grip_radius({std::nan(""),.1,.1}),r::sphere_grip_unknown)); // unreadable: a middling ball, never NaN
+    for(const Vec3 h:{Vec3{.09,.015,.004},Vec3{.11,.08,.02},Vec3{.15,.022,.022}}) {   // every corner of the box is inside the ball
+        const double rad=r::sphere_grip_radius(h);
+        for(int sx=-1;sx<=1;sx+=2) for(int sy=-1;sy<=1;sy+=2) for(int sz=-1;sz<=1;sz+=2) assert(hyp(sx*h.x,sy*h.y,sz*h.z)<=rad+1e-12);}
     assert(r::sphere_grip_radius({.001,.001,.001})>=r::sphere_grip_min);
-    // A prop from its world box: the local half sides come back through the tilt (a candlestick turned 30 degrees about z still gives its 2.2 cm).
+    // A prop from its world box: the local half sides come back through the tilt (a candlestick turned 30 degrees about z still gives the ball round its own box, 15.3 cm, not the looser one round the tilted world box).
     {const double c=std::cos(pi/6),s=std::sin(pi/6);d2vr::WorldTrackedPose pose{{0,0,0},{{{c,s,0},{-s,c,0},{0,0,1}}}};
      const Vec3 half{.15,.022,.022};const Vec3 e{half.x*c+half.y*s,half.x*s+half.y*c,half.z};
-     assert(std::abs(r::sphere_grip_radius(pose,d2vr::NativeGrabBounds{e*-1.,e})-.022)<1e-6);}
-    // A bone: its radius clamped to what a hand wraps; no bone, the cap.
-    assert(near(r::sphere_grip_radius_of_bone(-1,{}),r::sphere_grip_max));
+     assert(std::abs(r::sphere_grip_radius(pose,d2vr::NativeGrabBounds{e*-1.,e})-std::sqrt(.15*.15+2*.022*.022))<1e-6);}
+    // A bone: its radius clamped to what a hand wraps; no bone, a middling ball.
+    assert(near(r::sphere_grip_radius_of_bone(-1,{}),r::sphere_grip_unknown));
     for(int bone=0;bone<17;++bone) {const double v=r::sphere_grip_radius_of_bone(bone,{});assert(v>=r::sphere_grip_min && v<=r::sphere_grip_max);}
     // sim v640: a dragged wrist (capsule 5 cm, box 30 x 4 x 4 cm: its x half is the forearm's length) wraps a 3 cm wrist, not the 6 cm cap
     assert(near(r::sphere_grip_radius_of_bone(6,d2vr::NativeGrabBounds{{-.15,-.04,-.04},{.15,.04,.04}}),.03));
