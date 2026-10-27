@@ -95,6 +95,10 @@ void runaway_speed_12() {
     CHECK(!RunawayDetector::check(v).runaway);
     v[3]=Vec3{0,0,0};v[16]=Vec3{0,-12.5,0};
     CHECK(RunawayDetector::check(v).runaway);
+    // judged against the holding hand: a limb whipping at 16 m/s behind a hand sprinting at 6 is 10 off it; 12 off it still trips
+    Vels s;s[7]=Vec3{16,0,0};
+    CHECK(!RunawayDetector::check(s,Vec3{6,0,0}).runaway);CHECK(RunawayDetector::check(s,Vec3{3.9,0,0}).runaway);
+    CHECK(RunawayDetector::check(s,Vec3{nan_value,0,0}).runaway);   // a bad reference is no reference
 }
 void runaway_non_finite() {
     Vels v;v[0]=Vec3{0,nan_value,0};

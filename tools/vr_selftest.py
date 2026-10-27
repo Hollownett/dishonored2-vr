@@ -402,6 +402,30 @@ SCENARIOS['showcarry'] = ([[0, 1500, NEUTRAL, [0.0, 0.0, 0.0]]] + glide(1500, 25
                           [[2500, 4300, NEUTRAL, _TORSO, _CROUCH], [4300, 5400, _G, _TORSO, _CROUCH], [5400, 8000, NEUTRAL, [0.0, 0.0, 0.0], _CROUCH],
                            [8000, 10500, NEUTRAL, [0.0, 0.0, 0.0], _UPRIGHT]])
 PAIR_PLAN['showcarry'] = {7: 'carry-hand-on-torso', 8: 'carry-fist-squeezed', 9: 'carry-crouched', 10: 'carry-standing'}  # scenario segments 6-9
+# Shoulder carry as the player does it (v629, use with --near corpse; the stand is 0.55 m beside the chest): the GRIP alone (never the
+# trigger) on the torso, kept 0.5 s, hands off to the game's carry; the grip stays held through the pickup and while standing up.
+# carrydrop lets go of a still hand (the body falls off the shoulder), carrythrow swings the hand 0.6 m forward in 150 ms and lets go (a throw).
+_TORSO_HOLD = ([[0, 1500, NEUTRAL, _REACH, {"hand_pitch_degrees": -60}], [1500, 6500, _G, _REACH, {"hand_pitch_degrees": -60}],
+                [6500, 8500, _G, [0.0, 0.0, 0.0], _UPRIGHT]])
+SCENARIOS['carrydrop'] = _TORSO_HOLD + [[8500, 11500, NEUTRAL, [0.0, 0.0, 0.0], _UPRIGHT]]
+SCENARIOS['carrythrow'] = (_TORSO_HOLD + glide(8500, 8650, [0.0, 0.0, 0.0], [0.0, 0.1, -0.6], 15, _G, _UPRIGHT) +
+                           [[8650, 11500, NEUTRAL, [0.0, 0.1, -0.6], _UPRIGHT]])
+# Shoulder dock by hand (v634, user headset v627 + the user's choice of a physical shoulder; use with --near corpse): the grip alone on the
+# torso, a slow lift of the hand to the right shoulder zone (head + 0.18 right, 0.18 down, 0.03 back: grip_decision.hpp at_shoulder), the grip
+# let go there (ShoulderDock: the body stays, held at that point), the hand lowered and a 2 s walk forward with the body on the shoulder; then a
+# fresh squeeze at the shoulder takes it back into the hand, pulled down slowly and let go (shoulderdrop) or swung forward fast (shoulderthrow).
+_SHOULDER = [-0.02, 0.17, 0.43]
+_SHOULDER_LIFT = ([[0, 1500, NEUTRAL, _REACH, {"hand_pitch_degrees": -60}], [1500, 2500, _G, _REACH, {"hand_pitch_degrees": -60}]] +
+                  glide(2500, 4500, _REACH, _SHOULDER, 30, _G, _UPRIGHT) + [[4500, 5500, _G, _SHOULDER, _UPRIGHT], [5500, 6000, NEUTRAL, _SHOULDER, _UPRIGHT]] +
+                  glide(6000, 6500, _SHOULDER, [0.0, 0.0, 0.0], 8, None, _UPRIGHT) +
+                  [[6500, 8500, {"move_y": 0.6}, [0.0, 0.0, 0.0], _UPRIGHT], [8500, 9000, NEUTRAL, [0.0, 0.0, 0.0], _UPRIGHT]] +
+                  glide(9000, 9600, [0.0, 0.0, 0.0], _SHOULDER, 8, None, _UPRIGHT) + [[9600, 10100, _G, _SHOULDER, _UPRIGHT]])
+SCENARIOS['shoulderdrop'] = _SHOULDER_LIFT + glide(10100, 10900, _SHOULDER, [0.0, 0.0, 0.0], 12, _G, _UPRIGHT) + [[10900, 13500, NEUTRAL, [0.0, 0.0, 0.0], _UPRIGHT]]
+SCENARIOS['shoulderthrow'] = _SHOULDER_LIFT + glide(10100, 10250, _SHOULDER, [0.0, 0.1, -0.6], 15, _G, _UPRIGHT) + [[10250, 13500, NEUTRAL, [0.0, 0.1, -0.6], _UPRIGHT]]
+_DOCK_SEG = next(i for i, sg in enumerate(_SHOULDER_LIFT) if sg[0] == 6500) + 1   # script segment (scenario segment + 1) of the docked walk
+for _n in ('shoulderdrop', 'shoulderthrow'):
+    PAIR_PLAN[_n] = {next(i for i, sg in enumerate(_SHOULDER_LIFT) if sg[0] == 5500) + 1: ('dock-let-go', .4), _DOCK_SEG: ('dock-walk', 1.2), _DOCK_SEG + 1: ('dock-stand', .3)}
+TORSO_SCENARIOS = ('carrydrop', 'carrythrow', 'shoulderdrop', 'shoulderthrow')
 # Grip with nothing under the hand uses what the head looks at (test save: the Black Market counter ahead): the shop opens.
 # The counter is below eye level. The left hand is raised in front: at its default pose it is in the hip holster zone, where the grip
 # draws a holstered pistol (sim v465: a loaded hip drained the grip, the shop never opened).
@@ -521,7 +545,7 @@ def held_sword(segments, draw_ms=2600):
 for _name in ('swing', 'chop', 'duel', 'swarm', 'floor'):
     SCENARIOS[_name] = held_sword(SCENARIOS[_name])
 FORBIDDEN_STATES = {'flick': ['Slash'], 'reach': ['Slash']}  # accidental attacks
-EXPECTED_STATES = {'pickuplook': ['LootObject', 'Interact', 'HoldObject'], 'carry': ['CarryCorpse', 'PickupCorpse', 'Interact'], 'chop': ['Slash'], 'pickup': ['LootObject', 'Interact', 'HoldObject'], 'reach': ['LootObject', 'Interact', 'HoldObject'], 'swing': ['Slash', 'Assassination'], 'duel': ['Slash'], 'grab': ['LootObject', 'HoldObject', 'Interact', 'CarryCorpse', 'ReadNote'], 'powers': ['UsePower', 'Blinking', 'UseWindblast', 'UsePhantasmalLink', 'InBendTime', 'StoneShroud', 'DoppelgangerSwap', 'UseHeart'], 'jump': ['Jumping', 'Falling'],  # Falling always follows a jump; the short Jumping state can fall between samples
+EXPECTED_STATES = {'pickuplook': ['LootObject', 'Interact', 'HoldObject'], 'carry': ['CarryCorpse', 'PickupCorpse', 'Interact'], 'carrydrop': ['CarryCorpse'], 'carrythrow': ['CarryCorpse'], 'chop': ['Slash'], 'pickup': ['LootObject', 'Interact', 'HoldObject'], 'reach': ['LootObject', 'Interact', 'HoldObject'], 'swing': ['Slash', 'Assassination'], 'duel': ['Slash'], 'grab': ['LootObject', 'HoldObject', 'Interact', 'CarryCorpse', 'ReadNote'], 'powers': ['UsePower', 'Blinking', 'UseWindblast', 'UsePhantasmalLink', 'InBendTime', 'StoneShroud', 'DoppelgangerSwap', 'UseHeart'], 'jump': ['Jumping', 'Falling'],  # Falling always follows a jump; the short Jumping state can fall between samples
                    'lean': ['Leaning'], 'power': ['UsePower', 'Blinking'], 'wheel': ['Powerwheel'],
                    'walk': ['Running', 'Sneaking', 'Sprinting'], 'all': ['Powerwheel'], 'potion': ['Powerwheel'], 'hide': ['Powerwheel'], 'sheathe': ['Undraw'], 'swordgrip': ['EquipChange'], 'pistolhip': ['EquipChange'], 'pistolfire': ['FireWeapon', 'ReloadWeapon']}
 EXPECTED_STATES['handsjump'] = ['Jumping', 'Falling']  # gesture jump: Falling always follows a jump
@@ -751,9 +775,9 @@ def ragdoll(pid, entity):
         return None
 
 
-def corpse_stand(pid):
+def corpse_stand(pid, torso=False):
     """Eye position and yaw 0.55 m past the right wrist (ragdoll body 10) of the nearest corpse with dynamic ragdoll bodies,
-    facing the wrist, plus (corpse entity, pelvis position)."""
+    facing the wrist, plus (corpse entity, pelvis position). torso: 0.55 m beside the pelvis instead, across the body axis."""
     import math
     out = json.loads(subprocess.run([sys.executable, os.path.join(ROOT, 'tools', 'entities.py'), '--pid', str(pid), '--kind', 'npc', '--health', '--json'],
                                     capture_output=True, text=True).stdout)
@@ -764,6 +788,9 @@ def corpse_stand(pid):
             continue
         pelvis, wrist = bodies[0][0], bodies[10][0]
         dx, dy = wrist[0] - pelvis[0], wrist[1] - pelvis[1]
+        if torso:  # beside the pelvis (sim v629: beside the chest the palm took the arm lying on it)
+            chest, wrist = bodies[2][0], pelvis
+            dx, dy = chest[1] - pelvis[1], -(chest[0] - pelvis[0])  # across the pelvis-chest axis
         d = math.hypot(dx, dy)
         if d < .2:
             continue
@@ -1122,7 +1149,7 @@ def main():
             else:
                 print('no closed free door on this floor within 30 m')
         if reached and a.near in ('corpse', 'oldcorpse'):
-            stand, corpse = corpse_stand(pid) if a.near == 'corpse' else old_corpse_stand(pid)
+            stand, corpse = corpse_stand(pid, a.scenario in TORSO_SCENARIOS) if a.near == 'corpse' else old_corpse_stand(pid)
             if stand:
                 print('near corpse', hex(corpse[0]), 'pelvis', [round(v, 2) for v in corpse[1]], 'stand', [round(v, 2) for v in stand])
                 set_god(pid, True)
@@ -1363,7 +1390,11 @@ def main():
                 home = None
             if machine:
                 try:
-                    seen_states |= {st['name'].replace('arkPlayerState', '') for st in player_states.states(read, base, machine) if st['active'] == 1}
+                    now_states = {st['name'].replace('arkPlayerState', '') for st in player_states.states(read, base, machine) if st['active'] == 1}
+                    if now_states != getattr(main, 'last_states', None):  # state timeline, seconds before the scenario's end
+                        print(f'states {time.time() - scenario_end:+.2f}s {sorted(now_states)}')
+                        main.last_states = now_states
+                    seen_states |= now_states
                 except Exception:
                     pass
             if time.time() <= scenario_end:  # not the return-home teleport

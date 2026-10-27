@@ -1,6 +1,7 @@
 #pragma once
 #include "grab_force_cap.hpp"
 #include "selection_policy.hpp"
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <optional>
@@ -54,15 +55,53 @@ inline GripAloneChoice decide_grip_alone(const GripAloneInput& in,const GrabTuni
     if(tuning.grab_buffer_ms>0 && static_cast<double>(elapsed)<tuning.grab_buffer_ms) return GripAloneChoice::pending;
     return GripAloneChoice::use;
 }
-// Item 4 (v613, the user's decision 2026-10-25): a corpse goes onto the shoulder (the game's native body carry) only when the player holds a TORSO
-// bone and keeps the grip for corpse_carry_hold_ms. Ragdoll bones (grab_mass.hpp): 0 pelvis, 1 spine, 2 chest, 3 neck, 4 head, 5.. limbs. The torso is the
-// pelvis (the body's centre bone, where a person grabs to lift), the spine and the chest; the neck (collar), the head and every limb stay the physical
-// drag. A quick torso grab (released or shorter than 0.5 s) is still the hand drag. build/legacy-corpse-carry (legacy) restores v612: never hands off.
-inline constexpr std::uint64_t corpse_carry_hold_ms=500;
-inline constexpr bool torso_bone(int bone) noexcept {return bone>=0 && bone<=2;}
-// native_is_corpse: this hand's native Use target is the held corpse itself (its own carry); occupied: the game already carries or holds something.
-struct CarryHandoffInput {bool corpse_hold{},grip_held{},legacy{},native_is_corpse{},occupied{};int bone{-1};std::uint64_t held_ms{};};
-inline bool carry_handoff(const CarryHandoffInput& in) noexcept {
-    return !in.legacy && in.corpse_hold && in.grip_held && in.native_is_corpse && !in.occupied && torso_bone(in.bone) && in.held_ms>=corpse_carry_hold_ms;
+// A body put on the shoulder by hand stays there, held by physics (user, headset v627: "take it with one or two hands and throw it onto the
+// shoulder", then the user's choice of a physical shoulder: the game will not take a body held up in the air into its own carry, sim v632).
+// A hand that has held any bone of a corpse for corpse_dock_hold_ms and lets go in a shoulder zone, the body near it (its grasp point within
+// corpse_dock_lag_m of the hand), docks it: the hold stays, pulled to where the hand let go, fixed to the player's heading (anchored), and the
+// hand is free. A fresh squeeze of that hand at the shoulder takes the body back into the hand (resumed; the squeeze is the dock's alone:
+// consumes). The other hand holding the same body, or any release of the hold (it was pulled away, the lag rule, a fault), ends the dock.
+// Replaces v613's torso held 0.5 s, which turned a walking torso drag into the game's carry.
+inline constexpr std::uint64_t corpse_dock_hold_ms=250;
+inline constexpr double corpse_dock_lag_m=.6;
+struct ShoulderDockIn {bool corpse_hold{};std::uintptr_t entity{};std::uint64_t held_ms{};double lag_m{1e9};bool in_zone{};float grip{};bool other_holds{};};
+class ShoulderDock {
+public:
+    struct Out {bool anchored{},docked{},resumed{};};
+    Out update(unsigned side,const ShoulderDockIn& in) noexcept {
+        Out o{};if(side>=2) return o;
+        auto& s=side_[side];
+        const bool down=in.grip>=(s.down?.35f:.55f);
+        if(s.anchored) {
+            if(!in.corpse_hold || in.entity!=s.entity || in.other_holds) s.anchored=false;
+            else if(down && !s.down && in.in_zone) {s.anchored=false;s.consumed=true;o.resumed=true;}
+        } else if(s.down && !down && in.corpse_hold && in.entity && in.in_zone && in.held_ms>=corpse_dock_hold_ms &&
+                  std::isfinite(in.lag_m) && in.lag_m<=corpse_dock_lag_m && !in.other_holds) {s.anchored=true;s.entity=in.entity;o.docked=true;}
+        if(!down) s.consumed=false;
+        s.down=down;o.anchored=s.anchored;return o;
+    }
+    bool anchored(unsigned side) const noexcept {return side<2 && side_[side].anchored;}
+    bool consumes(unsigned side) const noexcept {return side<2 && side_[side].consumed;}
+    void reset(unsigned side) noexcept {if(side<2) side_[side]=Side{};}
+private:
+    struct Side {bool down{},anchored{},consumed{};std::uintptr_t entity{};};
+    std::array<Side,2> side_{};
+};
+// The shoulder zones, in tracking space: a sphere of `radius` at head + side*left + up*up + forward*forward on either side (the eye centre and
+// the head's axes; -Z forward, +Y up). Clear of the face (a hand holding something up in front of the eyes is not at a shoulder) and inside the
+// sword holster over the right shoulder (TempleReach scabbard: left -.17, up -.10, forward -.10, r .16), which takes only a squeeze that STARTS there.
+struct ShoulderZone {double left=.18,up=-.18,forward=-.03,radius=.22;};
+inline bool at_shoulder(const std::array<double,3>& head,const std::array<double,3>& forward,const std::array<double,3>& up,const std::array<double,3>& hand,
+                        const ShoulderZone& z={}) noexcept {
+    using V=std::array<double,3>;
+    const auto unit=[](V v) {const double l=std::sqrt(v[0]*v[0]+v[1]*v[1]+v[2]*v[2]);return l>1e-6?V{v[0]/l,v[1]/l,v[2]/l}:V{};};
+    const V f=unit(forward),u=unit(up);
+    const V left=unit({u[1]*f[2]-u[2]*f[1],u[2]*f[0]-u[0]*f[2],u[0]*f[1]-u[1]*f[0]});   // up x forward = left (right-handed, -Z forward)
+    for(const double side:{1.,-1.}) {
+        double d2=0;
+        for(unsigned i=0;i<3;++i) {const double c=head[i]+left[i]*side*z.left+u[i]*z.up+f[i]*z.forward;d2+=(hand[i]-c)*(hand[i]-c);}
+        if(std::isfinite(d2) && d2<z.radius*z.radius) return true;
+    }
+    return false;
 }
 } // namespace d2vr

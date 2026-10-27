@@ -558,6 +558,10 @@ std::printf("PASS: X wheel open/close/cancel/no-reopen/late-press, "
         in.gameplay=false;assert(step(9100).action==A::none);in.gameplay=true;assert(step(10000).action==A::none && s.held()); // wheel opened and closed
         in.gameplay=false;in.grip=0;assert(step(10100).action==A::none);in.gameplay=true;
         {const auto o=step(10200);assert(o.action==A::sheathe && !s.held());}           // let go inside the wheel: put away, not thrown
+        in.grip=1;in.drawn=false;assert(step(11000).action==A::none);                   // a corpse held: the grip is down before the game draws
+        in.drawn=true;assert(step(11100).action==A::none && !s.held());                 // drawn by the game under that grip: not taken
+        assert(step(11800).action==A::sheathe);                                         // put away
+        in.grip=0;in.drawn=false;assert(step(11900).action==A::none);                   // letting go of the corpse drops no sword
     }
     { // G2 regrab: the pickup dead band, and the grip changes only on a draw or pickup edge.
         using A=d2vr::SwordGrip::Action;static_assert(d2vr::SwordGrip::pickup_dead_band==.35);

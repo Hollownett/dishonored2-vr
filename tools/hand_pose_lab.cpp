@@ -76,6 +76,7 @@ struct Scene {
     bool snapshot{};                    // the hand lies as the snapshot's palm did
     std::vector<std::string> notes;     // extra report lines (snapshot: what the game read)
     std::shared_ptr<std::string> late_note; // a line only the shapes callback knows (the touch --refit measured again), printed with the report
+    float thumb{-1};                    // >= 0: the thumb's want (a touched thumb sensor asks for 1, finger_touch_curl.hpp), else finger_wants'
 };
 
 std::string shape_json(const r::HeldShape& s,const std::string& name,const char* colour) {
@@ -310,6 +311,12 @@ int run(int argc,char** argv) {
          [](const WorldTrackedPose& palm,const r::HandGeometry& g) {
              const auto in=r::palm_normal(palm,g);
              return std::vector<r::HeldShape>{r::slab_shape(palm.position+in*.025,in*-1.)};},"table slab"},
+        // A thumb resting on the controller (stick, face buttons, thumbrest): the touch curl asks the thumb for 1 whatever the fingers do.
+        {"thumb_open","Thumb on the controller, fingers open (grip 0, trigger 0)",hold_at,hold_fingers,hold_in,0.f,0.f,false,{},"",-1,false,{},{},1.f},
+        {"thumb_rest","Thumb on the controller, index resting on the trigger (grip 0, index 0.3)",hold_at,hold_fingers,hold_in,0.f,.3f,false,{},"",-1,false,{},{},1.f},
+        {"thumb_half","Thumb on the controller, half grip (grip 0.35, trigger 0)",hold_at,hold_fingers,hold_in,.35f,0.f,false,{},"",-1,false,{},{},1.f},
+        {"thumb_grip","Thumb on the controller, grip only (grip 1, index 0.3)",hold_at,hold_fingers,hold_in,1.f,.3f,false,{},"",-1,false,{},{},1.f},
+        {"thumb_fist","Thumb on the controller, fist (grip 1, trigger 1)",hold_at,hold_fingers,hold_in,1.f,1.f,false,{},"",-1,false,{},{},1.f},
     };
 
     if(!snapshot_spec.empty()) scenes=snapshot_scenes(snapshot_spec,refit);
@@ -368,9 +375,10 @@ int run(int argc,char** argv) {
             palm=as_pose(palm_of(out));
             shapes=scene.shapes?scene.shapes(palm,geometry):std::vector<r::HeldShape>{};
             r::FingerIkState state{};
-            const auto wants=r::finger_wants(scene.held,scene.squeeze,scene.index);
+            auto wants=r::finger_wants(scene.held,scene.squeeze,scene.index);
+            if(scene.thumb>=0) wants[0]=scene.thumb;
             contact=r::finger_contact(geometry,palm,shapes.data(),static_cast<unsigned>(shapes.size()),0,state,scene.reach>=0?scene.reach:scene.held?r::held_curl:1.f,r::finger_solve_all,&wants);
-            turn=r::finger_turns(geometry,contact,scene.squeeze,scene.index,scene.held);
+            turn=r::finger_turns(geometry,contact,wants);
             in.has_finger[1]=true;
             for(unsigned f=0;f<5;++f) for(unsigned s=0;s<3;++s) in.finger_turn[1][f][s]=turn[f][s];
             out=settle(30);
@@ -458,6 +466,19 @@ int run(int argc,char** argv) {
         if(dot(fingers_dir,out.arm[1][chains[2][0]].p-out.arm[1][wrist].p)<0) fingers_dir=fingers_dir*-1;
         {char note[200];std::snprintf(note,sizeof note,"palm normal vs hole axis: %.1f deg apart (90 = perpendicular); fingers vs medium knuckle direction: %.1f deg",
             deg(std::acos(std::clamp(dot(raw_normal,axis_t),-1.,1.))),deg(std::acos(std::clamp(dot(fingers_dir,unit(out.arm[1][chains[2][0]].p-out.arm[1][wrist].p)),-1.,1.))));report.push_back(note);}
+        {   // Is the thumb inside the hand? Its IP joint and tip in the palm frame: across (pinky -> index, the knuckles' span given), along the fingers
+            // from the palm centre, and height over the palm skin (palm_normal * held_palm_depth); below the skin inside the knuckles' span = in the palm.
+            const Vec3 skin=palm.position+raw_normal*r::held_palm_depth;
+            const auto at=[&](Vec3 p) {const Vec3 d=p-skin;return Vec3{dot(d,axis_t),dot(d,fingers_dir),dot(d,raw_normal)};};
+            const auto index_k=at(out.arm[1][chains[1][0]].p),pinky_k=at(out.arm[1][chains[4][0]].p);
+            const auto ip=at(out.arm[1][chains[0][2]].p),tip=at(out.arm[1][sk.find("right_thumb_end_jnt")].p);
+            const double lo=std::min(index_k.x,pinky_k.x),hi=std::max(index_k.x,pinky_k.x);
+            // in the palm: inside the knuckles' span, short of the middle phalanges (knuckles + 3 cm along) and more than 5 mm under the skin plane
+            const auto inside=[&](Vec3 p) {return p.x>lo && p.x<hi && p.y<std::max(index_k.y,pinky_k.y)+.03 && p.z<-.005;};
+            char note[300];std::snprintf(note,sizeof note,"thumb vs palm (mm, across/along/height over the skin; knuckle span %.0f..%.0f, knuckles along %.0f): IP %.0f/%.0f/%.0f, tip %.0f/%.0f/%.0f -> %s",
+                lo*1000,hi*1000,std::max(index_k.y,pinky_k.y)*1000,ip.x*1000,ip.y*1000,ip.z*1000,tip.x*1000,tip.y*1000,tip.z*1000,inside(tip) || inside(ip)?"IN THE PALM":"clear");
+            report.push_back(note);
+        }
         if(!shapes.empty() && shapes[0].half.x>0) { // how the held shaft lies in the hand: along the hole axis with the palm on its wall (90 to the palm normal), or end-on to the palm
             const Vec3 axis=shapes[0].frame.basis[0];char note[240];
             std::snprintf(note,sizeof note,"held shape axis vs the hole axis: %.1f deg; vs the palm normal: %.1f deg (90 = the palm lies on its wall, 0 = on its end); its centre %.1f cm out of the palm",

@@ -62,7 +62,7 @@ def check_drawn(probe: str, grab: str, safety: str) -> None:
     assert seat < publish, "the override precedes publish_hand"
     region = block[block.rindex("Task 12 (user decision 6)", 0, seat):publish]
     assert "native_grab.hold_anchor(side)" in region and "raw_grips" not in region, "the override reads only hold_anchor and never raw_grips"
-    assert "held_view.capped" in region and "native_grab.prop_grasp_point()" in region and "held_view.corpse ||" in region, "corpses always anchor; props follow the knob"
+    assert "held_view.capped" in region and "native_grab.prop_grasp_point()" in region and "!held_view.corpse" in region, "corpse limbs never seat (user, headset v627); props follow the knob"
     assert "drawn_anchor.reset(side)" in region
     assert "note_anchor_gap(" in region and "prop_seat_gap_m" in region
     assert '\\"prop_grasp_point\\":' in probe and '\\"prop_seat_gap_m\\":' in probe, "status fields"

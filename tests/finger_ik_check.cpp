@@ -1249,9 +1249,17 @@ int main() {
         assert(st.solved==5); // a real change of reach still solves again
         // The blend's split of finger_turns: wanted angles (floors included), then the contact clamp: the same turns as finger_turns.
         r::FingerIkState s2{};const auto c=r::finger_contact(g,h.palm,&bottle,1,0,s2,1.f,r::finger_solve_all,&wants);
-        for(const auto& w:{wants,std::array<float,5>{0,0,0,0,0},std::array<float,5>{1,1,1,1,1}}) {
+        for(const auto& w:{wants,std::array<float,5>{0,0,0,0,0},std::array<float,5>{1,1,1,1,1},std::array<float,5>{1,.3f,0,0,0}}) {
             const auto a=r::finger_turns(g,c,w),b=r::finger_turns_of_angles(g,c,r::finger_want_angles(c,w));
             for(unsigned f=0;f<5;++f) for(unsigned s=0;s<3;++s) assert(std::abs(a[f][s]-b[f][s])<1e-5f);
+        }
+        // A touched thumb (want 1) over open fingers closes only to thumb_open_cap (its path would run through the palm); a folded index or
+        // middle gives it something to lie on, and it asks for all of it again (headset v627, hand lab thumb_open).
+        {   const r::FingerCurls free=r::free_curls();
+            const auto open=r::finger_want_angles(free,{1,.3f,0,0,0}),folded=r::finger_want_angles(free,{1,.3f,1,1,1});
+            const auto capped=r::finger_angles(0,r::thumb_open_cap),full=r::finger_angles(0,1);
+            for(unsigned s=0;s<3;++s) {assert(std::abs(open[0][s]-capped[s])<1e-6 && std::abs(folded[0][s]-full[s])<1e-6);}
+            assert(r::thumb_want({1,r::thumb_fold_curl,0,0,0})==1 && r::thumb_want({.2f,0,0,0,0})==.2f);
         }
         // the lag bound: every joint may lag at once, so a tip errs by at most the tolerance (the sum of each joint's lever to the tip)
         double lever=0;for(unsigned f=1;f<5;++f) {double sum=0;for(unsigned s=0;s<3;++s) {double l=g.thickness[f];for(unsigned k=s;k<3;++k) l+=d2vr::length(g.finger[f].bone[k]);sum+=l;}lever=std::max(lever,sum);}

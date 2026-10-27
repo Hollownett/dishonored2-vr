@@ -215,7 +215,7 @@ void simulate(Scenario& s) {
             const double dt=t-last_motor_t>0?t-last_motor_t:kFrame;
             // runaway envelope: any of the 17 bodies above 12 m/s or non-finite while held
             std::array<std::optional<Vec3>,17> vel{};for(int i=0;i<17;++i) vel[std::size_t(i)]=d.v[std::size_t(i)];
-            const auto verdict=RunawayDetector::check(vel);
+            const auto verdict=RunawayDetector::check(vel,grabs[0].held()?grabs[0].velocity():Vec3{});   // judged against the holding hand, as native_grab does
             Frame fr;fr.t=t;fr.peak17=verdict.max_speed;
             unsigned tick_writes=0;bool any_held=false;for(const auto& gr:grabs) any_held=any_held||gr.held();if(any_held) ++m.held_ticks;
             for(std::size_t h=0;h<n;++h) {
@@ -259,7 +259,7 @@ void simulate(Scenario& s) {
                 m.force_ratio_axial=std::max(m.force_ratio_axial,cm->implied_force_n/kPinnedAxial);
                 // pelvis tow
                 if(s.tuning.tow && b!=0) {
-                    TowInput ti;ti.target=grabs[h].target().position;ti.pelvis=d.x[0];ti.pelvis_velocity=d.v[0];ti.bind_reach=tow_reach[h];
+                    TowInput ti;ti.target=grabs[h].target().position;ti.pelvis=d.x[0];ti.pelvis_velocity=d.v[0];ti.bind_reach=tow_reach[h];ti.hand_velocity=grabs[h].velocity();
                     ti.pelvis_kg=ragdoll_class_kg[0];ti.dt=dt;ti.recovery_s=tow_recovery[h];ti.limb_saturated=cm->capped;ti.tuning=&s.tuning;
                     const auto plan=plan_tow(ti);tow_reach[h]=plan.bind_reach;tow_recovery[h]=plan.recovery_s;
                     if(plan.write) {d.v[0].x=plan.linear.x;d.v[0].y=plan.linear.y;++m.tow_writes;}
@@ -496,6 +496,23 @@ std::vector<Scenario> scenarios(const GrabTuning& base) {
         f.info=true;f.tuning.tow=true;f.hands={drag_hand(7,{0,1,0},.6,4,.08)};f.duration=2.5;
         f.judge=[=](const Scenario&,const Metrics& m) {return std::vector<Check>{below("peak over all 17 bodies",m.peak_all,12,"m/s")};};
         all.push_back(f);
+    }
+    // ---- walking with a held limb (user, headset v627: the corpse falls out of the hand once he starts walking): the hand is carried 6 m by
+    // the walk (3 m/s) or a sprint (6 m/s), arm out in front, under each joint-solve assumption. Judged on the stiff model, INFO on the others.
+    {
+        const char* models[3]={"stiff","coupled","light"};
+        for(const double v:{3.,6.}) for(int k=0;k<3;++k) {
+            auto s=make(fmt("walk_%.0fms_%s",v,models[k]).c_str(),fmt("Wrist held while walking %.0f m/s for 6 m, %s joint solve",v,models[k]).c_str(),"the hold survives the walk");
+            // A sprint in the stiff model is INFO too: its 1e6 kg held wrist whips the light limbs past 12 m/s off the hand at the sprint's start
+            // (a model artifact: the coupled and light solves hold), so only the walk is judged.
+            s.drive=k==0?Scenario::stiff:k==1?Scenario::coupled:Scenario::light;s.info=k!=0 || v>3;
+            s.hands={drag_hand(7,{1,0,0},6,v,.4)};s.duration=move_time(6,v,.4)+1.5;
+            s.judge=[info=s.info](const Scenario&,const Metrics& m) {return std::vector<Check>{
+                truth("no release while walking",!m.released,m.released?fmt("released at %.2f s, reason %u, max lag %.2f m",m.release_time,unsigned(m.reason),m.max_lag):fmt("held, max lag %.2f m",m.max_lag),info),
+                below("body ends within 1.2 m of the hand",m.end_gap,1.2,"m",true),
+                truth("the body does not coast under the hand when it stops (pelvis ends 0.25 m or more from it)",m.end_gap>=.25,fmt("%.2f m",m.end_gap),info)};};
+            all.push_back(s);
+        }
     }
     // ---- info
     {

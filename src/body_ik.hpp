@@ -64,6 +64,14 @@ inline double twist_angle(Quaternion q,Vec3 axis) {
     return wrap_pi(2*std::atan2(p,q.w));
 }
 inline Quaternion rot_z(double a) {return axis_angle({0,0,1},a);}
+// Forearm roll the twist helpers take: unwrapped against the previous frame so it never jumps across +-180 degrees, and the
+// stored value is the clamped one. An unbounded unwrap wound up a full turn when the elbow hinge flipped on a straight arm (a
+// dragged corpse): the hand back at +18 deg read as -342, the helpers sat at the -132 deg clamp and the wrist pinched thin until the
+// next reset (headset v627, right hand: helper 120-160 deg off the wrist for 90 s). A clamped state heals once the hand returns.
+inline double forearm_roll(double previous,bool has_previous,double raw) {
+    if(has_previous) raw=previous+wrap_pi(raw-previous);
+    return std::clamp(raw,-2.3,2.3);
+}
 
 struct Xf {Quaternion q{};Vec3 p{};};
 inline bool valid_pose(const Xf& x) {
@@ -111,10 +119,10 @@ inline Ownership native_ownership(const std::string& state) {
     if(is({"Mantle","Vault"})) return {1,1,{1,1},.25,.35};
     if(is({"Jumping","Falling","CatFall","Slipping"})) return {1,0,{0,0},.1,.2};
     if(is({"Sliding"})) return {1,.6,{0,0},.12,.3};
-    // Carrying a body: the right arm holds it, the left hand stays the player's (user, headset v349). The Heart is held
-    // like a grenade: both hands tracked, the native attachment carries it.
-    if(is({"CarryCorpse"})) return {0,.3,{0,1},.2,.3};
-    if(is({"DropCorpse"})) return {0,.3,{1,1},.2,.3};
+    // Carrying or dropping a body: both hands stay the player's (user, headset v627: the carry clip's right arm and the drop clip's two
+    // arms made the hands vanish; the body rests on the shoulder joint by itself). The Heart is held like a grenade: both hands tracked,
+    // the native attachment carries it.
+    if(is({"CarryCorpse","DropCorpse"})) return {0,.3,{0,0},.2,.3};
     if(is({"EatRat","StoneShroud"})) return {0,0,{1,1},.2,.3};
     return {};
 }
@@ -1015,11 +1023,8 @@ private:
         // Forearm twist toward the wrist roll, spread along the helpers.
         const auto wrist_carried=mul(qb,bw.q);
         const auto axis=unit(solved.wrist-solved.elbow);
-        // Unwrap against the previous frame so the roll never jumps across +-180 degrees.
-        double raw=twist_angle(mul(wrist_target.q,conj(wrist_carried)),axis);
-        if(state.has_roll) raw=state.roll+wrap_pi(raw-state.roll);
-        state.roll=raw;state.has_roll=true;
-        const double roll=std::clamp(raw,-2.3,2.3);
+        const double roll=forearm_roll(state.roll,state.has_roll,twist_angle(mul(wrist_target.q,conj(wrist_carried)),axis));
+        state.roll=roll;state.has_roll=true;
         for(size_t j=0;j<s.local.size();++j) if(s.parent[j]==elbow_[i] && static_cast<int>(j)!=wrist_[i]) {
             const double along=std::clamp(dot(w[j].p-be.p,bw.p-be.p)/dot(bw.p-be.p,bw.p-be.p),0.,1.);
             const auto twist=axis_angle(axis,roll*along);

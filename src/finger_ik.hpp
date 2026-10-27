@@ -446,6 +446,13 @@ inline std::array<float,5> finger_wants(bool held,float squeeze,float index) {
     return held?std::array<float,5>{1.f,held_curl,held_curl,held_curl,held_curl}:std::array<float,5>{std::max(squeeze,.5f*index),index,squeeze,squeeze,squeeze};
 }
 inline constexpr float thumb_fold_curl=.4f; // a finger asking for less is not folded: the thumb has nothing to lie on
+// A thumb wanted shut (a touched thumb sensor asks for 1) while the index and middle are not folded has nothing to stop it: its path runs
+// through the palm (user, headset v627: the thumb on the controller sank into the palm; hand lab thumb_open). It closes to thumb_open_cap
+// then, lowered beside the index as it rests on the controller; once a finger folds, the thumb lies on it (finger_contact) as before.
+inline constexpr float thumb_open_cap=.5f;
+inline float thumb_want(const std::array<float,5>& wanted) noexcept {
+    return wanted[1]>=thumb_fold_curl || wanted[2]>=thumb_fold_curl?wanted[0]:std::min(wanted[0],thumb_open_cap);
+}
 // The memo keys on the reach in 0.05 steps (G4: the reach blends 1 -> held_curl over the grip ease; a step of a hundredth must not solve every finger again).
 inline constexpr float memo_reach_step=.05f;
 inline float memo_reach_key(float reach) noexcept {return std::round(reach/memo_reach_step)*memo_reach_step;}
@@ -732,7 +739,7 @@ inline std::array<std::array<float,3>,5> finger_turns(const HandGeometry& hand,c
     std::array<std::array<float,3>,5> turn{};
     for(unsigned f=0;f<5;++f) {
         const float floor_share=f?std::max({relaxed_share,contact.resting,contact.min_curl[f]}):std::max(relaxed_share,contact.min_curl[0]);
-        const float want=std::max(wanted[f],floor_share);
+        const float want=std::max(f?wanted[f]:thumb_want(wanted),floor_share);
         const auto angles=finger_pose_angles(f,want,contact.pose[f]);
         const auto t=finger_turns_of(hand.finger[f],angles);
         for(unsigned s=0;s<3;++s) turn[f][s]=static_cast<float>(t[s]);
@@ -747,7 +754,7 @@ inline FingerAngles finger_want_angles(const FingerCurls& contact,const std::arr
     FingerAngles out{};
     for(unsigned f=0;f<5;++f) {
         const float floor_share=f?std::max({relaxed_share,contact.resting,contact.min_curl[f]}):std::max(relaxed_share,contact.min_curl[0]);
-        const auto a=finger_angles(f,std::max(wanted[f],floor_share));
+        const auto a=finger_angles(f,std::max(f?wanted[f]:thumb_want(wanted),floor_share));
         for(unsigned s=0;s<3;++s) out[f][s]=static_cast<float>(a[s]);
     }
     return out;

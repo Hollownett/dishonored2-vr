@@ -711,6 +711,16 @@ static int run(int argc,char** argv) {
         expect(worst_back<.3,"running feet never trail the eye by more than 0.3 m");
         expect(worst_pelvis<.3*sw,"running feet stay within bounded distance of pelvis");
     }
+    {   // Forearm roll (headset v627 thin right wrist): a hinge flip that winds the unwrap a full turn must not pin the helpers at the clamp.
+        const double truth=18*deg;double roll=0;bool has=false;
+        for(int k=0;k<=6;++k) {roll=forearm_roll(roll,has,wrap_pi(truth+k*120*deg));has=true;expect(std::abs(roll)<=2.3+1e-12,"forearm roll stays within the clamp");}
+        for(int k=0;k<3;++k) roll=forearm_roll(roll,true,truth);
+        expect(std::abs(roll-truth)<1e-9,"forearm roll returns to the hand after a wound-up turn");
+        has=false;
+        for(int a=-120;a<=120;a+=10) {roll=forearm_roll(roll,has,a*deg);has=true;expect(std::abs(roll-a*deg)<1e-9,"forearm roll follows a smooth sweep");}
+        roll=forearm_roll(roll,true,170*deg);roll=forearm_roll(roll,true,-170*deg);   // across +-180: held at the limit, not flipped to the other side
+        expect(std::abs(roll-2.3)<1e-12,"forearm roll holds the near limit across +-180");
+    }
     json+="]}";
     if(argc>1) {
         std::ofstream f(argv[1],std::ios::binary);f<<json;

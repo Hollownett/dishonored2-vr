@@ -440,7 +440,9 @@ public:
         // The game cancels an instant unequip that meets a running equip clip (sim v406): stow again until the hand is empty.
         if(out.action==Action::none && dropped_ && in.drawn && !held_ && !pressed && in.now-dropped_>=300 && in.now-stow_sent_>=300) {
             if(in.now-dropped_>3000) dropped_=0;else {out.action=Action::stow;stow_sent_=in.now;}}
-        if(pressed && in.drawn && !in.busy && out.action==Action::none) held_=true; // the hand closed on a sword in it
+        // The hand closed on a sword in it: a squeeze that starts on the drawn sword. A grip already held when the game drew it by itself
+        // (a corpse held through the end of a carry, headset v627: 16 drops for 11 draws and pickups) is not taking the sword.
+        if(edge && in.drawn && !in.busy && out.action==Action::none) held_=true;
         if(out.action==Action::none && !pending_ && in.now-recall_sent_>1000) {
             // ponytail: 30 s / 12 m return to the holster; tune in the headset
             if(in.copy && ((settled_ && in.drawn) || in.copy_age_s>30 || in.copy_distance>12)) {out.action=Action::recall;recall_sent_=in.now;}

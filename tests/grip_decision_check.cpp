@@ -99,16 +99,38 @@ int main() {
         in=input(std::nullopt,on_palm);in.fast_native=true;assert(decide_grip_alone(in,t,hover)==GripAloneChoice::use);
         in=input(std::nullopt,std::nullopt,1000);assert(decide_grip_alone(in,t,hover)==GripAloneChoice::pending);   // without it the H1 buffer still runs
     }
-    {   // v613 item 4: the torso hold of 0.5 s hands off to the native carry; limbs, head, collar (neck), a quick hold and the legacy knob never do
-        CarryHandoffInput in;in.corpse_hold=true;in.grip_held=true;in.native_is_corpse=true;in.held_ms=corpse_carry_hold_ms;
-        for(int bone=0;bone<17;++bone) {in.bone=bone;assert(carry_handoff(in)==(bone<=2));}   // pelvis, spine, chest only
-        in.bone=1;in.held_ms=corpse_carry_hold_ms-1;assert(!carry_handoff(in));                   // a quick torso grab stays the drag
-        in.held_ms=corpse_carry_hold_ms;in.grip_held=false;assert(!carry_handoff(in));
-        in.grip_held=true;in.corpse_hold=false;assert(!carry_handoff(in));                         // a prop or nothing
-        in.corpse_hold=true;in.legacy=true;assert(!carry_handoff(in));                             // build/legacy-corpse-carry
-        in.legacy=false;in.bone=-1;assert(!carry_handoff(in));
-        in.bone=1;assert(carry_handoff(in));in.native_is_corpse=false;assert(!carry_handoff(in));   // the Use target must be this body
-        in.native_is_corpse=true;in.occupied=true;assert(!carry_handoff(in));                      // never while carrying or holding something
+    {   // a corpse let go at a shoulder stays there (the physical dock); a fresh squeeze there takes it back; the other hand or any release ends it
+        const auto held=[](float grip,bool zone,std::uint64_t ms=1000,double lag=.1) {ShoulderDockIn in;in.corpse_hold=true;in.entity=0x77;in.held_ms=ms;in.lag_m=lag;in.in_zone=zone;in.grip=grip;return in;};
+        ShoulderDock d;
+        d.update(1,held(1,false));assert(!d.update(1,held(0,false)).anchored);         // let go away from the shoulder: an ordinary release
+        d.update(1,held(1,true,100));assert(!d.update(1,held(0,true,100)).anchored);   // grabbed at shoulder height and let go at once: not lifted there
+        d.update(1,held(1,true,1000,.8));assert(!d.update(1,held(0,true,1000,.8)).anchored);   // the body left behind, the hand alone at the shoulder
+        d.update(1,held(1,true));
+        {const auto o=d.update(1,held(0,true));assert(o.docked && o.anchored && d.anchored(1) && !d.anchored(0));}
+        assert(d.update(1,held(0,false)).anchored && d.update(1,held(.3f,false)).anchored);   // the free hand moves and half-squeezes elsewhere: still on the shoulder
+        assert(d.update(1,held(.9f,false)).anchored && !d.consumes(1));                      // a full squeeze away from the shoulder is the hand's own (no take)
+        d.update(1,held(0,false));
+        {const auto o=d.update(1,held(.9f,true));assert(o.resumed && !o.anchored && d.consumes(1));}   // a squeeze at the shoulder takes it back
+        assert(d.update(1,held(.9f,false)).anchored==false && d.consumes(1));                // carried in the hand now; the squeeze stays the dock's until let go
+        d.update(1,held(0,false));assert(!d.consumes(1));
+        d.update(1,held(1,true));d.update(1,held(0,true));assert(d.anchored(1));
+        {auto in=held(0,true);in.other_holds=true;assert(!d.update(1,in).anchored);}         // the other hand took the body
+        d.update(1,held(1,true));d.update(1,held(0,true));assert(d.anchored(1));
+        {auto in=held(0,true);in.corpse_hold=false;assert(!d.update(1,in).anchored);}        // the hold ended (pulled off, the lag rule, a fault)
+        d.update(1,held(1,true));d.update(1,held(0,true));
+        {auto in=held(0,true);in.entity=0x78;assert(!d.update(1,in).anchored);}              // a different body is not the docked one
+        {auto in=held(1,true);in.lag_m=std::nan("");d.update(0,in);in.grip=0;assert(!d.update(0,in).anchored);}
+    }
+    {   // the shoulder zones (tracking space, head at the origin looking down -Z, +Y up): either shoulder, not in front of the face, not at the waist
+        const std::array<double,3> head{0,1.7,0},fwd{0,0,-1},up{0,1,0};
+        const auto at=[&](double x,double y,double z) {return at_shoulder(head,fwd,up,{x,y,z});};
+        assert(at(.18,1.52,.03) && at(-.18,1.52,.03));            // right and left shoulder (left = -X here)
+        assert(at(.12,1.6,.1) && at(-.25,1.45,0));                 // a hand near either one
+        assert(!at(0,1.6,-.25));                                   // held up in front of the face
+        assert(!at(.2,1.1,-.2) && !at(-.2,1.0,0));                 // at the chest / waist
+        const std::array<double,3> turned{1,0,0};                  // the zones turn with the head: looking down +X, the right shoulder is +Z
+        assert(at_shoulder(head,turned,up,{-.03,1.52,.18}) && !at_shoulder(head,turned,up,{.25,1.6,0}));
+        assert(!at_shoulder(head,fwd,up,{std::nan(""),1.5,0}));
     }
     {   // Ruling V1: a corpse as the native target never gets the carry Use from a grip alone: the physical grab at the fist gate (0.45 m), else nothing
         const auto body=box(0x9300,PalmKind::usable,{.07,0,.015},.3,t);

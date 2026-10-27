@@ -102,7 +102,7 @@ struct Fixture {
                 tracking.raw_grip[side].q=body::mul(body::rot_z(.16),tracking.raw_grip[side].q);
             }
         }
-        if(scenario=="native" && frame<32) ownership=body::native_ownership("CarryCorpse");
+        if(scenario=="native" && frame<32) ownership=body::Ownership{0,.3,{0,1},.2,.3}; // a right-arm-only native state (CarryCorpse before v628)
         else if(scenario=="native" && frame<60) ownership=body::native_ownership("Mantle");
         else ownership={};
         tracking.raw_grip_hands=candidate_enabled?3u:0u;

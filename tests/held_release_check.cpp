@@ -52,6 +52,41 @@ int main() {
         expect(!d2vr::held_throw_velocity(hand,{0,0,0},false).ok,"no engine velocity leaves it alone");
         expect(!d2vr::held_throw_velocity({0,std::nan(""),1},engine,false).ok && !d2vr::held_throw_velocity(hand,{1,std::nan(""),1},false).ok,"non-finite input leaves the event alone");
     }
-    if(!failures) std::printf("PASS: held object drop/throw on grip release, click pickup sticky, throw uses recent peak\n");
+    {   // a body on the shoulder stays whatever the grips do; a squeeze that starts at the shoulder and leaves it takes the body off
+        using A=std::array<bool,2>;using G=std::array<float,2>;using S=std::array<double,2>;
+        const A none{false,false},right_in{false,true};const S rest{0,0};
+        const auto off=[](const d2vr::ShoulderCarry::Out& o) {return o.drop || o.toss;};
+        d2vr::ShoulderCarry c;
+        // the grip that lifted it there is held at the carry's start, then let go, the hand lowered: the body stays
+        c.update(false,right_in,G{0,.9f},rest,0);
+        expect(!off(c.update(true,right_in,G{0,.9f},rest,100)) && !off(c.update(true,none,G{0,.9f},rest,400)),"the docking grip carried away does not take it off");
+        expect(!off(c.update(true,none,G{0,0},rest,600)) && !off(c.update(true,none,G{0,0},rest,5000)),"released grips leave it on the shoulder");
+        // a squeeze started away from the shoulder and brought there does not take hold
+        c.update(true,none,G{0,.9f},rest,5100);
+        expect(!off(c.update(true,right_in,G{0,.9f},rest,5200)) && !off(c.update(true,none,G{0,.9f},rest,5300)),"a squeeze from elsewhere is not a take");
+        c.update(true,none,G{0,0},rest,5400);
+        // squeeze at the shoulder, let go there: nothing
+        c.update(true,right_in,G{0,.9f},rest,6000);
+        expect(!off(c.update(true,right_in,G{0,0},rest,6100)) && !off(c.update(true,none,G{0,0},rest,6200)),"let go at the shoulder: it stays");
+        // squeeze at the shoulder and pull away slowly: put down, by that hand, once
+        expect(!c.consumes(1),"no squeeze, nothing consumed");
+        c.update(true,right_in,G{0,.9f},S{0,.3},7000);
+        expect(c.consumes(1) && !c.consumes(0),"the take squeeze is the carry's (no native Use)");
+        {const auto o=c.update(true,none,G{0,.9f},S{0,.4},7300);expect(o.drop && !o.toss && o.hand==1,"a slow pull puts it down");}
+        expect(!off(c.update(true,none,G{0,.9f},rest,7400)),"one take-off, not a Use every frame");
+        expect(c.consumes(1),"still consumed after the take-off until it is let go (no Use picking the body up again)");
+        c.update(false,none,G{0,.9f},rest,7450);expect(c.consumes(1),"consumed while held, even once the carry ended");
+        // the game kept it: a fresh take after retry_ms works again
+        c.update(true,none,G{0,0},rest,8000);c.update(true,right_in,G{0,.9f},rest,8700);
+        expect(c.update(true,none,G{0,.9f},rest,8750).drop,"the game kept the body: taken off again");
+        c.update(false,none,G{0,0},rest,9000);
+        // squeeze at the left shoulder and swing away: thrown
+        c.update(true,A{true,false},G{.9f,0},S{2.5,0},10000);
+        {const auto o=c.update(true,none,G{.9f,0},S{2.8,0},10050);expect(o.toss && !o.drop && o.hand==0,"a swing off the shoulder throws it");}
+        // no carry: nothing
+        c.update(false,right_in,G{0,0},rest,11000);c.update(false,right_in,G{0,.9f},rest,11100);
+        expect(!off(c.update(false,none,G{0,.9f},rest,11200)),"no carry, no take-off");
+    }
+    if(!failures) std::printf("PASS: held object drop/throw on grip release, click pickup sticky, throw uses recent peak; shoulder carry take-off\n");
     return failures?1:0;
 }

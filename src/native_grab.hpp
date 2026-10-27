@@ -269,7 +269,7 @@ private:
     // build/no-ragdoll-posts, read at install for the wake path (Task 11).
     bool corpse_enabled_=true,no_posts_{},prop_grasp_point_=true;
     bool legacy_palm_select_{};   // build/legacy-palm-select (read at install): the nearest-AABB pick and no grab buffer (plan Task 5)
-    EntityLockout lockout_{};CorpseDiagnostics corpse_diag_{};CorpseTraceWriter* corpse_trace_{};
+    EntityLockout lockout_{};CorpseDiagnostics corpse_diag_{};CorpseTraceWriter* corpse_trace_{};std::array<bool,2> docked_{};
     UINT64 pass_cost_us_{};std::atomic<UINT64> corpse_cost_us_{},corpse_cost_max_us_{},velocity_unknown_{};
     // hold_anchor() must never wait for a dispatcher pass: the pass publishes a copy of each lane's anchor under this small mutex (held only for the copy).
     UINT64 last_pass_ms_{};
@@ -604,7 +604,7 @@ private:
         if(held.bone>=0 && FaultLatch::tripped()) return result;
         if(!pelvis) pelvis=native_ragdoll_body(read_,base_,held.entity,0);
         if(!pelvis) return result;
-        TowInput in;in.target=lane.grab.target().position;in.pelvis=pelvis->pose.position;in.bind_reach=lane.tow;in.recovery_s=lane.tow_recovery;
+        TowInput in;in.target=lane.grab.target().position;in.pelvis=pelvis->pose.position;in.bind_reach=lane.tow;in.recovery_s=lane.tow_recovery;in.hand_velocity=lane.grab.velocity();
         in.pelvis_kg=ragdoll_class_kg[0];in.dt=dt;in.tuning=&tuning_;
         in.limb_saturated=limb_saturated;
         const auto motion=native_motion(read_,*pelvis); // the plan writes an absolute velocity, so it needs the current one for the cap
@@ -742,7 +742,7 @@ private:
             if(!state || !(*state&0x28)) {end_capped_hold(lane,side,ReleaseReason::state_changed);return true;} // wins over an open fist on the same tick
             if(lane.pending_release) { // an open fist or a lost owner: a runaway body still counts and locks the entity first
                 const auto held_motion=read_motion_state(body);
-                if(RunawayDetector::check(ragdoll_velocities(body,held_motion)).runaway) {runaway_release(lane,side,body,now_s);return true;}
+                if(RunawayDetector::check(ragdoll_velocities(body,held_motion),lane.grab.velocity()).runaway) {runaway_release(lane,side,body,now_s);return true;}
                 end_capped_hold(lane,side,lane.release_throw?ReleaseReason::open_fist:ReleaseReason::lifecycle);return true;
             }
         } else if(lane.pending_release) { // a prop: the release throws with the hand's velocity, as before
@@ -767,7 +767,7 @@ private:
         double peak=0;
         if(corpse) {
             if(motion.status==MotionStatus::garbage) {lockout_.lock(body.entity_id,now_s);end_capped_hold(lane,side,ReleaseReason::fault);return true;} // untrusted memory: a fault, not a runaway
-            const auto verdict=RunawayDetector::check(ragdoll_velocities(body,motion));
+            const auto verdict=RunawayDetector::check(ragdoll_velocities(body,motion),lane.grab.velocity());
             if(verdict.runaway) {runaway_release(lane,side,body,now_s);return true;} // never corrected with another write
             peak=verdict.max_speed;
         }
@@ -1107,7 +1107,10 @@ public:
         p={owner,hand,grip,epoch,tick,p.serial+1,usable,occupied,source_tick,palm};
     }
     void clear() {{std::lock_guard<std::mutex> lock(mutex_);advance_lifecycle_locked();for(auto& lane:lanes_) {lane.published.usable=false;lane.contact_proxies.reset();lane.obstruction.reset();++lane.published.serial;lane.focus.reset();lane.focus_tick=0;}}contact_.clear();}
-    bool holding(unsigned side) {std::lock_guard<std::mutex> lock(mutex_);return lanes_.at(side).held.has_value();}
+    // A lane docked at the shoulder (grip_decision.hpp ShoulderDock: the body stays held, pulled to a point at the shoulder) leaves its hand free:
+    // holding() is false for it (the hand's Use, grabs and fingers are its own again); the hold itself goes on.
+    bool holding(unsigned side) {std::lock_guard<std::mutex> lock(mutex_);return lanes_.at(side).held.has_value() && !docked_.at(side);}
+    void set_docked(unsigned side,bool docked) {std::lock_guard<std::mutex> lock(mutex_);docked_.at(side)=docked;}
     // B16, render thread: the capped hold `serial` (HoldAnchorView::serial) follows the hand body (offset: the body minus the palm, world metres)
     // or not (nullopt: the controller, as before); release: HoldCoupling's lag rule fired. Its own small mutex, held only for the copy (DeepSeek
     // P2: never mutex_, which a dispatcher pass holds for its whole run); the dispatcher copies it with try_lock at the start of each pass.
@@ -1136,12 +1139,12 @@ public:
     // v613 item 4: a live corpse hold of this hand: the ragdoll bone and how long it has been held (ms), for the torso-hold handoff to the native carry.
     // Ruling V1: the entity is a dead or unconscious body (the game's carry target); input thread, under the lock like the other reads.
     bool is_corpse_entity(std::uintptr_t entity) {if(!entity) return false;std::lock_guard<std::mutex> lock(mutex_);return corpse_enabled_ && ragdoll_pushable_state(read_,entity);}
-    struct CorpseHoldAge {int bone{-1};std::uint64_t held_ms{};std::uintptr_t entity{};};
+    struct CorpseHoldAge {int bone{-1};std::uint64_t held_ms{};std::uintptr_t entity{};Vec3 anchor{};};   // anchor: the grasp point (v629: the carry handoff aims the Use at it)
     std::optional<CorpseHoldAge> corpse_hold(unsigned side,UINT64 now) {
         if(side>=2) return {};
         std::lock_guard<std::mutex> lock(mutex_);const auto& lane=lanes_[side];
         if(!lane.held || !lane.corpse || lane.pending_release || lane.held->bone<0 || !lane.bound_at || now<lane.bound_at) return {};
-        return CorpseHoldAge{lane.held->bone,now-lane.bound_at,lane.held->entity};
+        return CorpseHoldAge{lane.held->bone,now-lane.bound_at,lane.held->entity,lane.anchor_view.anchor};
     }
     NativeHandContact& hand_contact() {return contact_;}
     // Solid hands, discovery: the registry scan that finds the props near a palm, once a frame from the render thread after the hands are published
@@ -1490,7 +1493,7 @@ public:
           if(kill.no_corpse_grab) note<<"knob build/no-corpse-grab present: corpse bodies are not grab candidates\n";
           if(kill.legacy_corpse_lag_release) note<<"knob build/legacy-corpse-lag-release present: corpse holds drop at 0.5 m lag / 0.25 s, no grasp slide or slip\n";
           if(kill.no_posts) note<<"knob build/no-ragdoll-posts present: no ragdoll event posts\n";
-          note<<(kill.no_prop_grasp_point?"knob build/no-prop-grasp-point present: the drawn hand stays at the controller on held props\n":"prop grasp point: the drawn hand sits on motor-held props (corpses always anchor)\n");
+          note<<(kill.no_prop_grasp_point?"knob build/no-prop-grasp-point present: the drawn hand stays at the controller on held props\n":"prop grasp point: the drawn hand sits on motor-held props (a corpse limb stays at the controller)\n");
           if(!loaded.error.empty()) note<<"build/grab-tuning.cfg rejected, defaults in use: "<<loaded.error<<'\n';
           else if(loaded.source==TuningSource::file) note<<"build/grab-tuning.cfg loaded (tow "<<(loaded.value.tow?"on":"off")<<", strength_scale "<<loaded.value.strength_scale<<")\n";}
          if(std::filesystem::exists(root/L"build"/L"mass-probe",ec)) {

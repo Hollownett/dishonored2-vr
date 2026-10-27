@@ -145,12 +145,16 @@ inline std::optional<Vec3> runaway_sample(bool body_resolved,const std::optional
 class RunawayDetector {
 public:
     static constexpr double limit=12;
-    static RunawayVerdict check(const std::array<std::optional<Vec3>,17>& velocities) noexcept {
+    // reference: the holding hand's own velocity; the speeds are judged against it, so a body dragged at a sprint (whose limbs whip past
+    // 12 m/s in the world while the hand runs at 6) is not a runaway (user, headset v627: corpses fell out of the hand once he walked;
+    // corpse_drag_lab walk_6ms_stiff released as a runaway at 0.42 s). A solver blow-up is still tens of m/s off the hand.
+    static RunawayVerdict check(const std::array<std::optional<Vec3>,17>& velocities,Vec3 reference={}) noexcept {
         RunawayVerdict r;
+        if(!finite(reference)) reference={};
         for(const auto& v:velocities) {
             if(!v) continue;
             if(!finite(*v)) {r.non_finite=true;continue;}
-            const double s=length(*v);
+            const double s=length(*v-reference);
             if(s>r.max_speed) r.max_speed=s;
         }
         r.runaway=r.non_finite||r.max_speed>limit;
