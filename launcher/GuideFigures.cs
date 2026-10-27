@@ -1,0 +1,370 @@
+using System.Buffers.Binary;
+using System.Drawing.Drawing2D;
+using System.Drawing.Imaging;
+using System.Numerics;
+using System.Runtime.InteropServices;
+using System.Security.Cryptography;
+using System.Text;
+using System.Text.Json.Nodes;
+
+namespace DishonoredVR;
+
+/// <summary>Locally generated journal lessons. Player meshes come only from the owner's install;
+/// props and opponents are original instructional ink diagrams, never extracted game weapons.</summary>
+public static class GuideFigures
+{
+    public const int Version = 1;
+    public static readonly string[] Ids = { "sword_throw", "enemy_grab", "sword_draw_block", "stealth", "move_jump_lean", "hands_push", "bodies_drag_carry", "left_hip", "wheel_watch", "temples", "menu_point" };
+    public static int Height(string id) => id is "move_jump_lean" or "hands_push" or "menu_point" ? 804 : 232;
+    static readonly Color Paper = Color.FromArgb(206, 192, 160), Ink = Color.FromArgb(41, 39, 35), Rust = Color.FromArgb(148, 89, 74);
+    static readonly float[] Open = { 0, 0, 0, 0, 0 }, Holding = { .8f, .85f, 1, 1, 1 }, Grip = { .75f, .15f, 1, 1, 1 }, Pointing = { .65f, 0, 1, 1, 1 };
+    static Vector3 V(float x, float y, float z) => new(x, y, z);
+    static PoseRender.TeachingHand Hand(Vector3 p, Vector3 d, Vector3 n, float[] curls) => new(p, d, n, curls);
+    static PoseRender.TeachingPose Pose(PoseRender.TeachingHand? r, float az, float el, Vector3 centre, float span, PoseRender.TeachingHand? l = null) => new(l, r, az, el, centre, span);
+
+    public static bool Missing(string dir)
+    {
+        try
+        {
+            var doc = JsonNode.Parse(File.ReadAllText(Path.Combine(dir, "manifest.json")));
+            var game = Env.FindGameDir();
+            string? identity = game == null ? null : SourceIdentity(game);
+            return Ids.Any(id => new[] { "corvo", "emily" }.Any(ch =>
+                doc?["keys"]?[$"guide_{id}_{ch}"]?["generation_version"]?.GetValue<int>() != Version ||
+                (identity != null && doc?["keys"]?[$"guide_{id}_{ch}"]?["source_identity"]?.GetValue<string>() != identity) ||
+                !File.Exists(Path.Combine(dir, $"guide_{id}_{ch}.rgba")) || !File.Exists(Path.Combine(dir, $"guide_{id}_{ch}.png"))));
+        }
+        catch { return true; }
+    }
+
+    public static int Check(string outDir, TextWriter output)
+    {
+        var game = Env.FindGameDir();
+        if (game == null) { output.WriteLine("Dishonored 2 not found"); return 2; }
+        try
+        {
+            // Review output is self-contained, including the actual journal materials.
+            ArtImport.Run(game, outDir, output.WriteLine);
+            Run(game, outDir, output.WriteLine);
+            return 0;
+        }
+        catch (Exception ex) { output.WriteLine(ex); return 1; }
+    }
+
+    public static void Run(string game, string outDir, Action<string> log, Action<int, int>? progress = null)
+    {
+        game = Path.GetFullPath(game); outDir = Path.GetFullPath(outDir);
+        if ((outDir + "\\").StartsWith(game.TrimEnd('\\') + "\\", StringComparison.OrdinalIgnoreCase)) throw new IOException("Refusing to write inside the game folder");
+        Directory.CreateDirectory(outDir);
+        using var renderer = PoseRender.CreateGuideRenderer(game);
+        using var art = new GameArt(outDir);
+        var manifest = Path.Combine(outDir, "manifest.json");
+        var doc = File.Exists(manifest) ? JsonNode.Parse(File.ReadAllText(manifest))!.AsObject() : new JsonObject();
+        var keys = doc["keys"] as JsonObject ?? new JsonObject(); doc["keys"] = keys;
+        string sourceIdentity = SourceIdentity(game);
+        int done = 0; progress?.Invoke(0, 22);
+        // Signature lessons first, for both characters.
+        foreach (string id in Ids) foreach (string ch in new[] { "corvo", "emily" })
+        {
+            int h = Height(id); string key = $"guide_{id}_{ch}";
+            using var large = new Bitmap(1728, h * 2, PixelFormat.Format32bppArgb);
+            using (var g = Graphics.FromImage(large))
+            {
+                Ui.Quality(g); g.ScaleTransform(2, 2); g.Clear(Paper);
+                Material(g, art["parchment"], new Rectangle(0, 0, 864, h), .22f);
+                Material(g, art["paper_texture"], new Rectangle(0, 0, 864, h), .05f);
+                Draw(g, renderer, ch, id);
+                // Ornament lives below all instructional content.
+                Ui.Image(g, art["ink_flourish"], new Rectangle(0, h - 16, 864, 16), .08f, Ink);
+            }
+            byte[] rgba = PoseRender.Downsample(Pixels(large), 1728, h * 2, 864, h);
+            // A guide slot is opaque paper, including resampling at its outer edge.
+            for (int i = 3; i < rgba.Length; i += 4) rgba[i] = 255;
+            byte[] png = ArtImport.Png(rgba, 864, h), raw = new byte[8 + rgba.Length];
+            BinaryPrimitives.WriteUInt32LittleEndian(raw, 864); BinaryPrimitives.WriteUInt32LittleEndian(raw.AsSpan(4), (uint)h); rgba.CopyTo(raw, 8);
+            Atomic(Path.Combine(outDir, key + ".png"), png); Atomic(Path.Combine(outDir, key + ".rgba"), raw);
+            keys[key] = new JsonObject { ["file"] = key + ".png", ["raw"] = key + ".rgba", ["width"] = 864, ["height"] = h,
+                ["source"] = "rendered: local player model + original instructional diagrams", ["source_identity"] = sourceIdentity,
+                ["generation_version"] = Version, ["sha256"] = ArtImport.Hex(SHA256.HashData(png)), ["raw_sha256"] = ArtImport.Hex(SHA256.HashData(raw)) };
+            (doc["missing"] as JsonObject)?.Remove(key);
+            log($"{key,-34} 864x{h} rendered"); progress?.Invoke(++done, 22);
+        }
+        doc["guide_generation_version"] = Version;
+        doc["generation"] = DateTime.UtcNow.ToString("O");
+        Atomic(manifest, Encoding.UTF8.GetBytes(doc.ToJsonString(new System.Text.Json.JsonSerializerOptions { WriteIndented = true }) + "\n"));
+        Atomic(Path.Combine(outDir, "generation.txt"), Encoding.UTF8.GetBytes(doc["generation"]!.GetValue<string>() + "\n"));
+        log("22 guide figures generated locally; do not commit or redistribute.");
+    }
+
+    static string SourceIdentity(string game)
+    {
+        var exe = new FileInfo(Path.Combine(game, "Dishonored2.exe"));
+        return $"{Path.GetFullPath(game)}|{(exe.Exists ? exe.Length : 0)}|{(exe.Exists ? exe.LastWriteTimeUtc.Ticks : 0)}";
+    }
+
+    static void Atomic(string file, byte[] bytes)
+    {
+        string tmp = file + ".tmp";
+        File.WriteAllBytes(tmp, bytes); File.Move(tmp, file, true);
+    }
+    static byte[] Pixels(Bitmap b)
+    {
+        var data = b.LockBits(new Rectangle(0, 0, b.Width, b.Height), ImageLockMode.ReadOnly, PixelFormat.Format32bppArgb);
+        var bytes = new byte[b.Width * b.Height * 4];
+        try { for (int y = 0; y < b.Height; y++) Marshal.Copy(data.Scan0 + y * data.Stride, bytes, y * b.Width * 4, b.Width * 4); }
+        finally { b.UnlockBits(data); }
+        for (int i = 0; i < bytes.Length; i += 4) (bytes[i], bytes[i + 2]) = (bytes[i + 2], bytes[i]);
+        return bytes;
+    }
+    static void Material(Graphics g, Bitmap? b, Rectangle r, float opacity)
+    {
+        if (b == null) return;
+        float s = Math.Max((float)r.Width / b.Width, (float)r.Height / b.Height);
+        var state = g.Save(); g.SetClip(r);
+        Ui.Image(g, b, new RectangleF(r.X + (r.Width - b.Width * s) / 2, r.Y + (r.Height - b.Height * s) / 2, b.Width * s, b.Height * s), opacity);
+        g.Restore(state);
+    }
+
+    sealed class Panel
+    {
+        public readonly Graphics G; public readonly RectangleF Bounds;
+        readonly PoseRender.GuideFrame frame;
+        public Panel(Graphics g, PoseRender.GuideRenderer renderer, string ch, RectangleF bounds, PoseRender.TeachingPose pose, float alpha = 1)
+        {
+            G = g; Bounds = bounds;
+            frame = renderer.Render(ch, pose, (int)bounds.Width * 2, (int)bounds.Height * 2);
+            using var ms = new MemoryStream(ArtImport.Png(frame.Rgba, (int)bounds.Width * 2, (int)bounds.Height * 2));
+            using var b = new Bitmap(ms); Ui.Image(g, b, bounds, alpha);
+        }
+        public PointF Hand(int side) { var p = frame.HandPoint(side); return new(Bounds.X + p.X / 2, Bounds.Y + p.Y / 2); }
+        public PointF Wrist(int side) { var p = frame.WristPoint(side); return new(Bounds.X + p.X / 2, Bounds.Y + p.Y / 2); }
+        public PointF P(Vector3 world) { var p = frame.Project(world); return new(Bounds.X + p.X / 2, Bounds.Y + p.Y / 2); }
+    }
+    static void Arrow(Graphics g, PointF a, PointF b, float alpha = 1)
+    {
+        using var p = new Pen(Color.FromArgb((int)(255 * alpha), Ink), 2.4f) { EndCap = LineCap.ArrowAnchor };
+        g.DrawLine(p, a, b);
+    }
+    static void ThrowArc(Graphics g, PointF start, PointF end)
+    {
+        using var pen = new Pen(Ink, 2.4f) { EndCap = LineCap.ArrowAnchor };
+        g.DrawBezier(pen, start, Add(start, 40, -100), Add(end, -40, -70), end);
+    }
+    static PointF Add(PointF p, float x, float y) => new(p.X + x, p.Y + y);
+    static void Dot(Graphics g, PointF p) { using var b = new SolidBrush(Rust); g.FillEllipse(b, p.X - 4, p.Y - 4, 8, 8); }
+    static void Step(Graphics g, int n, float x, float y)
+    {
+        using var p = new Pen(Color.FromArgb(110, Ink), 1); g.DrawEllipse(p, x, y, 20, 20);
+        using var f = new Font("Segoe UI", 11, FontStyle.Bold, GraphicsUnit.Pixel); using var b = new SolidBrush(Ink);
+        g.DrawString(n.ToString(), f, b, x + 6, y + 2);
+    }
+    static void Sword(Graphics g, PointF h, float angle, float length = 83, float alpha = 1)
+    {
+        var state = g.Save(); g.TranslateTransform(h.X, h.Y); g.RotateTransform(angle);
+        using var p = new Pen(Color.FromArgb((int)(255 * alpha), Ink), 2);
+        g.DrawPolygon(p, new PointF[] { new(-3, -12), new(-4, -length + 12), new(0, -length), new(4, -length + 12), new(3, -12) });
+        g.DrawLine(p, -13, -11, 13, -11); g.DrawLine(p, 0, -10, 0, 10); g.DrawEllipse(p, -3, 10, 6, 4); g.Restore(state);
+    }
+    // One reusable faceless coat outline. Face direction is expressed by the nose/collar;
+    // the opponent never borrows a rendered player head.
+    static void Guard(Graphics g, PointF chest, float scale, bool facesLeft, float angle = 0, float alpha = 1, PointF? liftedWrist = null)
+    {
+        var state = g.Save(); g.TranslateTransform(chest.X, chest.Y); g.RotateTransform(angle); g.ScaleTransform(facesLeft ? scale : -scale, scale);
+        using var p = new Pen(Color.FromArgb((int)(255 * alpha), Ink), 2 / scale);
+        using var wash = new SolidBrush(Color.FromArgb((int)(140 * alpha), Paper));
+        g.FillPolygon(wash, new PointF[] { new(-15, -7), new(18, -7), new(29, 65), new(-19, 65) });
+        g.DrawEllipse(p, -13, -57, 30, 37); g.DrawLines(p, new PointF[] { new(-12, -45), new(-18, -39), new(-12, -36) });
+        g.DrawLines(p, new PointF[] { new(-5, -20), new(-7, -10), new(-20, -3), new(-11, 9), new(0, -4), new(13, 10), new(22, -2), new(9, -11), new(9, -20) });
+        g.DrawLines(p, new PointF[] { new(-20, -3), new(-25, 30), new(-18, 64), new(28, 64), new(23, 15), new(22, -2) });
+        if (liftedWrist == null) g.DrawLines(p, new PointF[] { new(-18, 2), new(-35, 24), new(-37, 47) });
+        g.DrawLines(p, new PointF[] { new(20, 3), new(36, 29), new(26, 47) });
+        g.DrawLines(p, new PointF[] { new(-9, 64), new(-12, 105), new(-22, 116), new(-4, 116) });
+        g.DrawLines(p, new PointF[] { new(18, 64), new(25, 101), new(18, 114), new(35, 114) });
+        g.DrawLine(p, 1, 13, 4, 60);
+        var shoulder = new[] { new PointF(-18, 2) };
+        using (var transform = g.Transform) transform.TransformPoints(shoulder);
+        g.Restore(state);
+        if (liftedWrist is PointF hand)
+        {
+            // TransformPoints included the 2x composition transform; restore logical coordinates.
+            using var inverse = g.Transform.Clone(); inverse.Invert(); inverse.TransformPoints(shoulder);
+            using var arm = new Pen(Ink, 2);
+            g.DrawLines(arm, new[] { shoulder[0], Add(hand, 29, 15), hand });
+        }
+    }
+
+    static void Draw(Graphics g, PoseRender.GuideRenderer renderer, string ch, string id)
+    {
+        var X = Vector3.UnitX; var Y = Vector3.UnitY; var Z = Vector3.UnitZ;
+        Panel View(RectangleF box, PoseRender.TeachingPose pose, float alpha = 1) => new(g, renderer, ch, box, pose, alpha);
+        var a = new RectangleF(12, 10, 404, 206); var b = new RectangleF(446, 10, 404, 206);
+        using var rule = new Pen(Color.FromArgb(170, Ink), 1.4f);
+        if (Height(id) == 232) g.DrawLine(rule, 432, 22, 432, 205);
+        switch (id)
+        {
+            case "sword_throw":
+            {
+                var prep = Hand(V(.12f, -.45f, 1.62f), Z, Y, Holding);
+                var release = Hand(V(.58f, -.18f, 1.38f), X, -Z, Open);
+                var p = View(a, Pose(prep, -55, 8, V(.10f, -.08f, 1.43f), .92f));
+                Sword(g, p.Hand(1), -28, 81); Step(g, 1, 20, 16);
+                View(b, Pose(prep, -55, 8, V(.18f, -.08f, 1.43f), .92f), .25f);
+                var q = View(b, Pose(release, -55, 8, V(.18f, -.08f, 1.43f), .92f));
+                var h = q.Hand(1);
+                Sword(g, Add(h, 32, -15), 55, 68); Sword(g, Add(h, 78, -25), 105, 62, .5f); Sword(g, Add(h, 122, -12), 155, 58, .25f);
+                Arrow(g, Add(h, 20, 24), Add(h, 141, 7)); Step(g, 2, 452, 16);
+                // Wall glance and flat landing, below the flight path.
+                g.DrawLines(rule, new PointF[] { new(776, 154), new(825, 154), new(825, 208), new(741, 208) });
+                Arrow(g, new(752, 165), new(817, 176)); Arrow(g, new(817, 178), new(791, 199)); Sword(g, new(775, 205), 90, 28);
+                break;
+            }
+            case "enemy_grab":
+            {
+                var contact = Hand(V(.58f, -.06f, 1.38f), Z, X, Grip);
+                var pull = Hand(V(.28f, -.16f, 1.30f), Z, X, Grip);
+                var pose = Pose(contact, -65, 6, V(.34f, -.10f, 1.42f), .65f);
+                var p = View(a, pose); var h = p.Hand(1);
+                Guard(g, Add(h, 10, -42), 1.28f, true); // chest meets the palm, target faces the player
+                // Repaint the detailed hand over the schematic chest, then mark contact.
+                View(a, pose); Dot(g, h); Step(g, 1, 20, 16);
+                View(b, Pose(contact, -65, 6, V(.34f, -.10f, 1.42f), .65f), .25f);
+                var q = View(b, Pose(pull, -65, 6, V(.34f, -.10f, 1.42f), .65f));
+                Guard(g, new(760, 133), .64f, true, 64); Arrow(g, q.P(contact.Position), q.Hand(1)); Dot(g, q.Hand(1)); Step(g, 2, 452, 16);
+                // Alternate grip + trigger: two button marks, no explanatory words.
+                Controller(g, new(812, 46), true);
+                break;
+            }
+            case "sword_draw_block":
+            {
+                var draw = Hand(V(-.08f, -.27f, 1.60f), Z, Y, Holding); var block = Hand(V(.35f, -.08f, 1.32f), Z, Y, Holding);
+                var p = View(a, Pose(draw, -140, 8, V(0, 0, 1.43f), .85f)); var h = p.Hand(1);
+                Sword(g, h, -20, 85); Arrow(g, Add(h, -30, 45), Add(h, -5, -30)); Step(g, 1, 20, 16);
+                var q = View(b, Pose(block, -15, 5, V(.1f, 0, 1.40f), .85f)); var k = q.Hand(1);
+                Sword(g, k, 62, 115); Sword(g, k, 30, 115, .25f); Sword(g, k, 95, 115, .25f); Step(g, 2, 452, 16); break;
+            }
+            case "stealth":
+            {
+                var kill = Hand(V(.50f, -.05f, 1.23f), X, -Z, Holding);
+                var p = View(a, Pose(kill, -90, 8, V(.28f, 0, 1.40f), .96f)); var h = p.Hand(1);
+                Guard(g, Add(h, 57, -22), .78f, false); Sword(g, h, 90, 63); Arrow(g, Add(h, -25, 14), Add(h, 39, 14));
+                var choke = Hand(V(.52f, .08f, 1.56f), -Y, X, Holding);
+                var q = View(b, Pose(null, -90, 8, V(.27f, 0, 1.42f), .96f, choke)); var k = q.Hand(0);
+                Guard(g, Add(k, 5, 17), 1.06f, false); View(b, Pose(null, -90, 8, V(.27f, 0, 1.42f), .96f, choke)); Dot(g, k); break;
+            }
+            case "move_jump_lean":
+            {
+                var l = Hand(V(.03f, .26f, 2.03f), Z, -Y, Open); var r = Hand(V(.03f, -.26f, 2.03f), Z, Y, Open);
+                var p = View(new(100, 20, 664, 490), Pose(r, 0, 0, V(0, 0, 1.42f), 1.63f, l));
+                foreach (int side in new[] { 0, 1 }) { var h = p.Hand(side); Arrow(g, Add(h, 0, 97), Add(h, 0, 25)); }
+                g.DrawLine(rule, 40, 530, 824, 530);
+                // Explicit schematic torso/head diagrams; the renderer only poses arms.
+                Guard(g, new(190, 624), .72f, true); Crouch(g, new(379, 660)); Arrow(g, new(266, 611), new(324, 658));
+                g.DrawLines(rule, new PointF[] { new(612, 572), new(612, 745), new(810, 745) });
+                g.DrawEllipse(rule, 575, 600, 35, 42); g.DrawEllipse(rule, 635, 589, 35, 42); Arrow(g, new(595, 578), new(655, 570)); break;
+            }
+            case "hands_push":
+            {
+                var hand = Hand(V(.55f, -.18f, 1.35f), Z, X, Open);
+                var pose = Pose(hand, -60, 10, V(.42f, -.16f, 1.37f), .67f);
+                var p = View(new(60, 26, 650, 454), pose); var h = p.Hand(1);
+                using var pen = new Pen(Ink, 2.5f);
+                g.DrawPolygon(pen, new PointF[] { Add(h, 0, -127), Add(h, 150, -171), Add(h, 150, 177), Add(h, 0, 120) });
+                View(new(60, 26, 650, 454), pose); Dot(g, h);
+                g.DrawArc(pen, h.X - 15, h.Y + 90, 210, 80, 15, 57); g.DrawArc(pen, h.X - 38, h.Y + 69, 255, 125, 15, 100);
+                Arrow(g, Add(h, 45, 42), Add(h, 130, 65)); g.DrawLine(rule, 40, 525, 824, 525);
+                Bottle(g, new(220, 632), 1); DrawGrip(g, new(210, 651));
+                Bottle(g, new(558, 640), .8f); Bottle(g, new(682, 580), .65f); ThrowArc(g, new(574, 676), new(752, 625)); break;
+            }
+            case "bodies_drag_carry":
+            {
+                var drag = Hand(V(.35f, -.24f, .78f), X, -Z, Holding);
+                var p = View(a, Pose(drag, -75, 10, V(.29f, -.18f, 1.04f), .98f)); var h = p.Hand(1);
+                Guard(g, Add(h, 83, 22), .70f, true, -82, liftedWrist: h);
+                Arrow(g, Add(h, 61, 50), Add(h, -20, 50)); Dot(g, h);
+                var carry = Hand(V(.04f, -.28f, 1.50f), Z, Y, Open);
+                var q = View(b, Pose(carry, -75, 10, V(.02f, -.08f, 1.44f), .9f));
+                Guard(g, Add(q.P(V(.02f, -.22f, 1.58f)), 48, -8), .72f, true, -85); Arrow(g, Add(q.P(carry.Position), 30, 5), Add(q.P(carry.Position), 57, 38)); break;
+            }
+            case "left_hip":
+            {
+                var hand = Hand(V(.06f, .26f, .94f), -Z, -Y, Holding);
+                var p = View(new(40, 8, 620, 210), Pose(null, 35, 5, V(0, .13f, 1.19f), 1.0f, hand)); var h = p.Hand(0);
+                using var pen = new Pen(Rust, 2); g.DrawEllipse(pen, h.X - 28, h.Y - 23, 57, 58); Arrow(g, Add(h, -40, 0), Add(h, -40, -70));
+                // Original pistol and crossbow diagrams, separated from the rendered player.
+                using var weapon = new Pen(Ink, 2);
+                g.DrawPolygon(weapon, new PointF[] { new(665, 72), new(766, 72), new(766, 86), new(707, 86), new(695, 119), new(677, 114), new(681, 86), new(665, 86) });
+                g.DrawLine(weapon, 671, 162, 766, 162); g.DrawArc(weapon, 682, 134, 56, 55, 180, 180); g.DrawLine(weapon, 682, 162, 738, 162); break;
+            }
+            case "wheel_watch":
+            {
+                var point = Hand(V(.50f, .16f, 1.25f), X, -Z, Pointing);
+                var p = View(a, Pose(null, 35, 0, V(.24f, .13f, 1.38f), .8f, point)); var h = p.Hand(0);
+                using var pen = new Pen(Ink, 2); var centre = new PointF(337, 75);
+                g.DrawEllipse(pen, centre.X - 48, centre.Y - 48, 96, 96);
+                for (int i = 0; i < 8; i++) { float t = i * MathF.PI / 4; g.DrawLine(rule, centre, Add(centre, 48 * MathF.Cos(t), 48 * MathF.Sin(t))); }
+                Arrow(g, h, Add(centre, -10, 13));
+                var watch = Hand(V(.34f, .13f, 1.43f), Z, X, Open);
+                var q = View(b, Pose(null, 155, 15, V(.28f, .12f, 1.43f), .55f, watch)); var wrist = q.Wrist(0);
+                using var rust = new SolidBrush(Rust); using var ink = new SolidBrush(Ink);
+                g.FillRectangle(rust, wrist.X - 19, wrist.Y, 38, 5); g.FillRectangle(ink, wrist.X - 19, wrist.Y + 10, 31, 5); break;
+            }
+            case "temples":
+            {
+                var left = Hand(V(.05f, .13f, 1.71f), Z, -Y, Holding); var right = Hand(V(.05f, -.13f, 1.71f), Z, Y, Holding);
+                var p = View(a, Pose(null, 0, 0, V(0, 0, 1.64f), .64f, left)); var q = View(b, Pose(right, 0, 0, V(0, 0, 1.64f), .64f));
+                // Anatomical left appears on the viewer's right in these front views.
+                var h = p.Hand(0); var k = q.Hand(1);
+                Dot(g, h); Dot(g, k); Book(g, Add(h, 63, -25));
+                g.DrawRectangle(rule, k.X - 107, k.Y - 25, 51, 36); g.DrawLine(rule, k.X - 99, k.Y - 14, k.X - 64, k.Y - 14); g.DrawLine(rule, k.X - 99, k.Y - 5, k.X - 73, k.Y - 5); break;
+            }
+            case "menu_point":
+            {
+                var hand = Hand(V(.52f, -.16f, 1.30f), X, -Z, Pointing);
+                var p = View(new(10, 165, 620, 580), Pose(hand, -30, 8, V(.12f, -.06f, 1.35f), 1.25f)); var h = p.Hand(1);
+                using var bg = new SolidBrush(Color.FromArgb(39, 37, 36)); using var highlight = new SolidBrush(Color.FromArgb(216, 209, 189));
+                g.FillRectangle(bg, 529, 70, 287, 257); g.FillRectangle(highlight, 550, 145, 240, 32);
+                using (var row = new Pen(Color.FromArgb(170, Paper), 2))
+                    for (int y = 110; y <= 290; y += 45) g.DrawLine(row, 557, y, 776, y);
+                Arrow(g, h, new(548, 160)); Controller(g, new(717, 562), false); break;
+            }
+        }
+    }
+    static void Bottle(Graphics g, PointF p, float scale)
+    {
+        var s = g.Save(); g.TranslateTransform(p.X, p.Y); g.ScaleTransform(scale, scale); using var pen = new Pen(Ink, 2);
+        g.DrawPolygon(pen, new PointF[] { new(-7, -50), new(7, -50), new(7, -29), new(18, -17), new(18, 36), new(-18, 36), new(-18, -17), new(-7, -29) }); g.Restore(s);
+    }
+    static void Crouch(Graphics g, PointF p)
+    {
+        var state = g.Save(); g.TranslateTransform(p.X, p.Y);
+        using var pen = new Pen(Ink, 2);
+        g.DrawEllipse(pen, -12, -34, 23, 27);
+        g.DrawPolygon(pen, new PointF[] { new(-7, -7), new(11, 1), new(27, 39), new(-7, 35), new(-18, 5) });
+        g.DrawLines(pen, new PointF[] { new(0, 37), new(38, 44), new(16, 76), new(37, 76) });
+        g.DrawLines(pen, new PointF[] { new(20, 40), new(-20, 54), new(-32, 75), new(-12, 75) });
+        g.DrawLines(pen, new PointF[] { new(11, 5), new(31, 22), new(39, 42) }); g.Restore(state);
+    }
+    static void DrawGrip(Graphics g, PointF p)
+    {
+        using var pen = new Pen(Ink, 2);
+        g.DrawArc(pen, p.X - 27, p.Y - 29, 50, 70, -80, 275);
+        for (int i = 0; i < 4; i++) g.DrawArc(pen, p.X - 8, p.Y - 20 + i * 10, 27, 16, -110, 260);
+        g.DrawArc(pen, p.X - 33, p.Y - 2, 39, 22, 90, 200);
+    }
+    static void Controller(Graphics g, PointF p, bool grip)
+    {
+        var state = g.Save(); g.TranslateTransform(p.X, p.Y);
+        using var pen = new Pen(Ink, 2); using var rust = new SolidBrush(Rust);
+        g.DrawEllipse(pen, -22, -26, 44, 27);
+        g.DrawBezier(pen, -16, -9, -16, 8, -11, 32, 0, 32);
+        g.DrawBezier(pen, 0, 32, 13, 32, 15, 7, 16, -9);
+        g.FillEllipse(rust, 10, -11, 8, 15); // index trigger
+        if (grip) g.FillRectangle(rust, -17, 5, 7, 14); // middle-finger grip
+        g.Restore(state);
+    }
+    static void Book(Graphics g, PointF p)
+    {
+        using var pen = new Pen(Ink, 2);
+        g.DrawPolygon(pen, new PointF[] { p, Add(p, -24, -6), Add(p, -24, 29), Add(p, 0, 35), Add(p, 24, 29), Add(p, 24, -6) }); g.DrawLine(pen, p, Add(p, 0, 35));
+    }
+}
