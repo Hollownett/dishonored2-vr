@@ -310,6 +310,8 @@ sealed class ControlsGuide : ArtControl
             body.KeyDown += (sender, e) => NavigateText?.Invoke(sender, e);
         }
         int S(float v) => Ui.S(this, v);
+        int FigureHeight(int width) => lesson.Figure == "" ? 0 : Math.Max(1,
+            (int)Math.Round((double)width * (figure?.Height ?? GuideFigures.Height(lesson.Figure)) / (figure?.Width ?? 864)));
         public int MeasureHeight(int width)
         {
             headingHeight = Math.Max(S(42), TextRenderer.MeasureText(lesson.Title, Ui.Font(this, 18), new Size(Math.Max(1, width), int.MaxValue),
@@ -319,7 +321,7 @@ sealed class ControlsGuide : ArtControl
             _ = body.Handle;
             body.SelectionStart = 0; body.SelectionLength = 0; body.ScrollToCaret();
             int height = body.GetPositionFromCharIndex(body.TextLength).Y + Ui.Font(this, 11.5f, FontStyle.Regular, Ui.Sans).Height + S(10);
-            body.Bounds = new Rectangle(S(6), headingHeight + (lesson.Figure == "" ? 0 : S(194)), body.Width, height);
+            body.Bounds = new Rectangle(S(6), headingHeight + (lesson.Figure == "" ? 0 : FigureHeight(width) + S(14)), body.Width, height);
             return body.Bottom + S(8);
         }
         protected override void OnPaint(PaintEventArgs e)
@@ -327,17 +329,13 @@ sealed class ControlsGuide : ArtControl
             base.OnPaint(e); var g = e.Graphics; Ui.Quality(g);
             TextRenderer.DrawText(g, lesson.Title, Ui.Font(this, 18), new Rectangle(0, 0, Width, headingHeight), Ui.Gold, TextFormatFlags.NoPadding | TextFormatFlags.WordBreak);
             if (lesson.Figure == "") return;
-            var r = new Rectangle(0, headingHeight, Width - 1, S(180));
-            using var fill = new SolidBrush(figure == null ? Ui.PaneFill : Color.FromArgb(206, 192, 160)); g.FillRectangle(fill, r);
+            var r = new Rectangle(0, headingHeight, Width, FigureHeight(Width));
             if (figure != null)
             {
-                float scale = Math.Min((float)r.Width / figure.Width, (float)r.Height / figure.Height);
-                int w = (int)(figure.Width * scale), h = (int)(figure.Height * scale);
-                g.DrawImage(figure, new Rectangle(r.X + (r.Width - w) / 2, r.Y + (r.Height - h) / 2, w, h));
+                g.DrawImage(figure, r);
             }
             else TextRenderer.DrawText(g, lesson.Alt, Ui.Font(this, 14, FontStyle.Regular, Ui.Sans), Rectangle.Inflate(r, -S(16), -S(12)), Ui.Text,
                 TextFormatFlags.WordBreak | TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
-            using var pen = new Pen(Color.FromArgb(125, Ui.Gold)); g.DrawRectangle(pen, r);
         }
     }
 

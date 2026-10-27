@@ -50,7 +50,7 @@ public static class PoseRender
             Parallel.For(0, 2, i => avatars[i] = new Avatar(c, i == 0 ? "corvo" : "emily"));
         }
 
-        public GuideFrame Render(string character, TeachingPose pose, int w, int h)
+        public GuideFrame Render(string character, TeachingPose pose, int w, int h, bool silhouette = false, bool crouch = false)
         {
             if (character is not ("corvo" or "emily")) throw new ArgumentException("Unknown guide character", nameof(character));
             if (w <= 0 || h <= 0 || !float.IsFinite(pose.Span) || pose.Span <= 0) throw new ArgumentOutOfRangeException(nameof(w));
@@ -68,12 +68,24 @@ public static class PoseRender
                 solvedHands[i] = av.HandPosition(i, arm); solvedWrists[i] = av.WristPosition(i, arm);
                 parts.Add(av.SkinArm(i, arm));
             }
+            Vector3 Bend(Vector3 bind)
+            {
+                if (!crouch) return bind;
+                var origin = av.FromWorld(Vector3.Zero);
+                var p = (bind - origin) * av.Scale;
+                float z = p.Z;
+                // Guide-only squat: planted feet, forward knees, lowered hips and inclined torso.
+                p.X += z < .5f ? .30f * z / .5f : z < 1 ? .30f - .48f * (z - .5f) / .5f : -.18f + .30f * (z - 1);
+                p.Z = z < .5f ? z * .60f : z < 1 ? .30f + (z - .5f) * .64f : z - .38f;
+                return origin + p / av.Scale;
+            }
+            if (crouch) parts = parts.Select(p => p.Posed(p.P.Select(Bend).ToArray(), p.N)).ToList();
             float az = pose.Azimuth * MathF.PI / 180, el = pose.Elevation * MathF.PI / 180;
             var fwd = -new Vector3(MathF.Cos(el) * MathF.Cos(az), MathF.Cos(el) * MathF.Sin(az), MathF.Sin(el));
             var right = Unit(Vector3.Cross(fwd, Vector3.UnitZ)); var up = Vector3.Cross(right, fwd);
             var view = new View(w, h, av.FromWorld(pose.Centre) - fwd * 5, fwd, right, up, pose.Span / av.Scale);
-            PointF Project(Vector3 world) { var p = view.Project(av.FromWorld(world)); return new(p.X, p.Y); }
-            PointF BindProject(Vector3 bind) { var p = view.Project(bind); return new(p.X, p.Y); }
+            PointF Project(Vector3 world) { var p = view.Project(Bend(av.FromWorld(world))); return new(p.X, p.Y); }
+            PointF BindProject(Vector3 bind) { var p = view.Project(Bend(bind)); return new(p.X, p.Y); }
             var g = Rasterize(view, parts, true);
             var mask = g.Depth.Select(float.IsFinite).ToArray(); KeepLargest(mask, w, h);
             var rgba = new byte[w * h * 4];
@@ -114,6 +126,20 @@ public static class PoseRender
                     if (dx * dx + dy * dy > radius * radius || x + dx < 0 || x + dx >= w || y + dy < 0 || y + dy >= h) continue;
                     int o = ((y + dy) * w + x + dx) * 4;
                     rgba[o] = 41; rgba[o + 1] = 39; rgba[o + 2] = 35; rgba[o + 3] = 255;
+                }
+            }
+            if (silhouette)
+            {
+                for (int o = 0; o < mask.Length; o++)
+                {
+                    if (rgba[o * 4 + 3] == 0) continue;
+                    // Keep the same mesh contour, with a quiet paper-lit rim around solid ink.
+                    bool rim = mask[o] && (o % w < 2 || o % w >= w - 2 || o < w * 2 || o >= mask.Length - w * 2 ||
+                        !mask[o - 2] || !mask[o + 2] || !mask[o - w * 2] || !mask[o + w * 2]);
+                    rgba[o * 4] = (byte)(rim ? 101 : 41);
+                    rgba[o * 4 + 1] = (byte)(rim ? 95 : 39);
+                    rgba[o * 4 + 2] = (byte)(rim ? 81 : 35);
+                    rgba[o * 4 + 3] = 217;
                 }
             }
             return new GuideFrame(rgba, Project, handPoints, palmPoints, wristPoints);
