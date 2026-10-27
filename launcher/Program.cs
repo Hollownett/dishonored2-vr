@@ -20,6 +20,7 @@ static class Program
         if (Flag("--check-art") is string reference) return ArtImport.Check(reference, Flag("--out"), Console.Out);
         // Headless calibration-pose render (PoseRender) into <dir>, plus poses_sheet.png for review.
         if (Flag("--render-poses") is string poseDir) return PoseRender.Check(poseDir, Console.Out);
+        if (Flag("--guide-figures") is string figuresDir) { ControlsDocument.CheckParser(); return GuideFigures.Check(figuresDir, Console.Out); }
         // Headless probe check (no game access): probe configuration and launch record against an inject_probe.py headset record, DLL exports.
         if (Flag("--check-probe") is string record) return Probe.Check(record, Flag("--dll"), Console.Out);
         // Developer mode uses the repo the exe was built in; a copy anywhere else is standalone and works in %LOCALAPPDATA%\DishonoredVR
@@ -27,7 +28,7 @@ static class Program
         var root = Env.FindRoot(args);
         var env = root != null ? new Env(root) : new Env(Path.GetFullPath(Flag("--home") ?? ModHome.Dir)) { Standalone = true };
         int startPage = Math.Max(0, Array.IndexOf(new[] { "play", "settings", "tools", "controls" }, (Flag("--page") ?? "play").ToLowerInvariant()));
-        Application.Run(new MainForm(env, startPage, Flag("--screenshot"), args.Contains("--exit"), args.Contains("--no-art")));
+        Application.Run(new MainForm(env, startPage, Flag("--screenshot"), args.Contains("--exit"), args.Contains("--no-art"), Flag("--guide-page"), Flag("--guide-character")));
         return 0;
     }
 }
@@ -38,7 +39,7 @@ sealed class MainForm : Form
     readonly string? shotFile; readonly bool exitAfterShot, noArt;
     readonly ArtPanel[] pages = { new(), new(), new(), new() };
     readonly ArtButton[] nav = { new("Play", Look.Nav), new("Settings", Look.Nav), new("Tools", Look.Nav), new("Controls", Look.Nav) };
-    readonly RichTextBox guide = new(); int guideDpi;
+    readonly ControlsGuide guide;
     readonly ArtButton importArt = new("Import game art", Look.Secondary);
     int page;
     readonly RichTextBox log = new(), toolOut = new();
@@ -73,7 +74,7 @@ sealed class MainForm : Form
     readonly ArtButton uninstallProxy = new("Uninstall proxy", Look.Secondary);
     readonly ArtButton send = new("Send", Look.Secondary), result = new("Show result", Look.Secondary), selftest = new("Run self-test", Look.Secondary);
 
-    public MainForm(Env e, int startPage, string? shot, bool exitAfter, bool plainStyle)
+    public MainForm(Env e, int startPage, string? shot, bool exitAfter, bool plainStyle, string? guidePage = null, string? guideCharacter = null)
     {
         env = e; page = startPage; shotFile = shot; exitAfterShot = exitAfter; noArt = plainStyle;
         Text = "Dishonored 2 VR Launcher"; BackColor = Ui.Ink; ForeColor = Ui.Text;
@@ -151,7 +152,11 @@ sealed class MainForm : Form
         StyleText(toolOut);
         pages[2].Controls.AddRange(cmdButtons); pages[2].Controls.AddRange(new Control[] { custom, send, result }); pages[2].Controls.AddRange(diagButtons); pages[2].Controls.Add(toolOut);
         pages[2].Painter = PaintTools;
-        StyleText(guide); guide.Cursor = Cursors.Default; pages[3].Controls.Add(guide);
+        using (var s = typeof(MainForm).Assembly.GetManifestResourceStream("home/VR-CONTROLS.md"))
+            guide = new ControlsGuide(s == null ? "# VR controls and gestures\n\nThe guide is missing from this build." : new StreamReader(s).ReadToEnd(), env.P("artifacts", "game-art"), noArt);
+        if (guidePage != null) guide.SelectPage(guidePage);
+        if (guideCharacter != null) guide.SelectCharacter(guideCharacter);
+        pages[3].Controls.Add(guide);
 
         poll.Tick += (_, _) => Tick(); poll.Start();
         Shown += async (_, _) =>
@@ -173,7 +178,7 @@ sealed class MainForm : Form
             // First start (or art missing): import it from the user's own install; the calibration poses follow, and are
             // rendered alone when only they are missing. Review screenshots wait for it.
             var import = artState == "not imported yet" ? ImportArt(false)
-                : Ui.Art.Present && Env.FindGameDir() != null && PoseRender.Missing(env.P("artifacts", "game-art")) ? ImportArt(false, posesOnly: true)
+                : !noArt && Ui.Art.Present && Env.FindGameDir() != null && (PoseRender.Missing(env.P("artifacts", "game-art")) || GuideFigures.Missing(env.P("artifacts", "game-art"))) ? ImportArt(false, posesOnly: true)
                 : Task.CompletedTask;
             if (shotFile == null) return;
             await import;
@@ -223,7 +228,8 @@ sealed class MainForm : Form
         var old = Ui.Art;
         Ui.Art = noArt ? new GameArt() : new GameArt(env.P("artifacts", "game-art"));
         old.Dispose();
-        importArt.Visible = !Ui.Art.Present;
+        importArt.Visible = true;
+        importArt.Text = Ui.Art.Present ? "Re-import game art" : "Import game art";
     }
 
     /// <summary>Imports the game's UI art from the user's install into artifacts\game-art (ArtImport, the port of tools\extract_game_art.py),
@@ -255,10 +261,16 @@ sealed class MainForm : Form
                 await Task.Run(() => PoseRender.Run(game, dir, l => Append(log, l), (d, t) => Progress("rendering poses", d, t)));
             }
             catch (Exception ex) { Append(log, "Calibration poses failed: " + ex.Message + " (VR shows the painted portrait instead)", Ui.Gold); }
+            try
+            {
+                Append(log, "Rendering the illustrated controls from " + game, Ui.Teal);
+                await Task.Run(() => PoseRender.RunGuideFigures(game, dir, l => Append(log, l), (d, t) => Progress("rendering guide", d, t)));
+            }
+            catch (Exception ex) { Append(log, "Guide figures failed: " + ex.Message + " (the guide shows alternative text)", Ui.Gold); }
             artState = null;
         }
         importing = false; importArt.Enabled = true;
-        LoadArt(); DoLayout();
+        LoadArt(); guide.ReloadArt(); DoLayout();
         if (Ui.Art.Present) artState = null;
         await RefreshChecks();
     }
@@ -287,7 +299,7 @@ sealed class MainForm : Form
     Rectangle PageRect(int p)
     {
         float wl = ClientSize.Width * 96f / DeviceDpi;
-        float cw = p switch { 3 => Math.Clamp(wl - 300 - 300, 560, 720), 0 => Math.Clamp(wl * .40f, 470, 520), 1 => Math.Clamp(wl - 300 - 340, 520, 590), _ => Math.Clamp(wl - 300 - 360, 520, 640) };
+        float cw = p switch { 3 => Math.Min(1040, wl - 324), 0 => Math.Clamp(wl * .40f, 470, 520), 1 => Math.Clamp(wl - 300 - 340, 520, 590), _ => Math.Clamp(wl - 300 - 360, 520, 640) };
         return new Rectangle(S(300), S(176), S(cw), ClientSize.Height - S(176) - S(26));
     }
 
@@ -481,7 +493,7 @@ sealed class MainForm : Form
         const TextFormatFlags wrap = TextFormatFlags.WordBreak | TextFormatFlags.NoPadding;
         TextRenderer.DrawText(g, "Never sends global input.\nThe game keeps focus.", small, new Rectangle(S(46), ClientSize.Height - S(58), S(230), S(40)), Ui.Faint, wrap);
         if (importArt.Visible)
-            TextRenderer.DrawText(g, importing ? "Importing art from your Dishonored 2 install: " + artState : "Import art from your Dishonored 2 install for the full look.", small, new Rectangle(S(46), importArt.Top - S(40), S(220), S(36)), Ui.Dim, wrap);
+            TextRenderer.DrawText(g, importing ? "Importing art from your Dishonored 2 install: " + artState : Ui.Art.Present ? "Game art and illustrated controls are ready." : "Import art from your Dishonored 2 install for the full look.", small, new Rectangle(S(46), importArt.Top - S(40), S(220), S(36)), Ui.Dim, wrap);
     }
 
     // ---------- helpers
@@ -492,36 +504,12 @@ sealed class MainForm : Form
         r.HandleCreated += (_, _) => SetWindowTheme(r.Handle, "DarkMode_Explorer", null);  // dark scrollbars
     }
 
-    /// <summary>Controls page: renders the embedded docs/VR-CONTROLS.md ("# title", intro, "## section", "- **input** — text") into the read-only box.</summary>
+    /// <summary>Native, scrollable illustrated lessons from the embedded controls document.</summary>
     void LayoutGuide()
     {
         var p = pages[3]; p.Panes.Clear();
-        var box = new Rectangle(0, 0, p.Width, p.Height); p.Panes.Add(box);
-        guide.Bounds = new Rectangle(S(18), S(14), box.Width - S(36), box.Height - S(28));
-        if (guideDpi == DeviceDpi) return;
-        guideDpi = DeviceDpi;
-        string md;
-        using (var s = typeof(MainForm).Assembly.GetManifestResourceStream("home/VR-CONTROLS.md"))
-            md = s == null ? "# VR controls and gestures\n\nThe guide is missing from this build." : new StreamReader(s).ReadToEnd();
-        var body = Ui.Font(this, 10.5f, FontStyle.Regular, Ui.Sans); var bold = Ui.Font(this, 10.5f, FontStyle.Bold, Ui.Sans);
-        var head = Ui.Font(this, 9.5f, FontStyle.Bold, Ui.Sans); var title = Ui.Font(this, 15f, FontStyle.Regular);
-        guide.Clear();
-        void Add(string t, Font f, Color c) { guide.SelectionStart = guide.TextLength; guide.SelectionLength = 0; guide.SelectionFont = f; guide.SelectionColor = c; guide.AppendText(t); }
-        foreach (var raw in md.Replace("\r", "").Split('\n'))
-        {
-            var line = raw.TrimEnd();
-            if (line == "") continue;
-            guide.SelectionStart = guide.TextLength; guide.SelectionIndent = guide.SelectionHangingIndent = 0;
-            if (line.StartsWith("## ")) Add("\n" + line[3..].ToUpperInvariant() + "\n", head, Ui.Gold);
-            else if (line.StartsWith("# ")) Add(line[2..] + "\n", title, Ui.Text);
-            else if (line.StartsWith("- **") && line.IndexOf("**", 4, StringComparison.Ordinal) is int e and > 0)
-            {
-                guide.SelectionIndent = S(14); guide.SelectionHangingIndent = S(14);
-                Add(line[4..e], bold, Ui.Text); Add(line[(e + 2)..] + "\n", body, Ui.Soft);
-            }
-            else Add(line + "\n", body, Ui.Dim);
-        }
-        guide.SelectionStart = 0; guide.ScrollToCaret();
+        p.Panes.Add(new Rectangle(0, 0, p.Width, p.Height));
+        guide.Bounds = new Rectangle(0, 0, p.Width, p.Height);
     }
 
     void ShowPage(int i)

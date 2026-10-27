@@ -18,6 +18,136 @@ namespace DishonoredVR;
 /// (clavicle shrug, Boneworks elbow pole, soft two-bone IK, forearm twist, fist curl) for the same hand targets.</summary>
 public static class PoseRender
 {
+    /// <summary>Teaching targets use metres, Z up, +X forward and +Y anatomical left. Curls are thumb to little finger.</summary>
+    public sealed record TeachingHand(Vector3 Position, Vector3 Direction, Vector3 Normal, float[] Curls);
+    public sealed record TeachingPose(TeachingHand? Left, TeachingHand? Right, float Azimuth, float Elevation, Vector3 Centre, float Span);
+
+    public sealed class GuideFrame
+    {
+        public byte[] Rgba { get; }
+        readonly Func<Vector3, PointF> project;
+        readonly PointF[] handPoints, palmPoints, wristPoints;
+        internal GuideFrame(byte[] rgba, Func<Vector3, PointF> project, PointF[] handPoints, PointF[] palmPoints, PointF[] wristPoints)
+        { Rgba = rgba; this.project = project; this.handPoints = handPoints; this.palmPoints = palmPoints; this.wristPoints = wristPoints; }
+        public PointF Project(Vector3 world) => project(world);
+        /// <summary>Actual solved attachment, palm centre approximation and wrist; 0 is anatomical left, 1 is right.</summary>
+        public PointF HandPoint(int side) => handPoints[side];
+        public PointF PalmPoint(int side) => palmPoints[side];
+        public PointF WristPoint(int side) => wristPoints[side];
+    }
+
+    public static GuideRenderer CreateGuideRenderer(string game) => new(game);
+    public static void RunGuideFigures(string game, string outDir, Action<string> log, Action<int, int>? progress = null) =>
+        GuideFigures.Run(game, outDir, log, progress);
+
+    /// <summary>Loads the installed player models once for a complete guide generation. Calibration rendering is independent.</summary>
+    public sealed class GuideRenderer : IDisposable
+    {
+        readonly Avatar[] avatars = new Avatar[2];
+        internal GuideRenderer(string game)
+        {
+            var c = new ArtImport.Containers(Path.GetFullPath(game), n => n.StartsWith("generated/") && n.Contains("models/characters/"));
+            Parallel.For(0, 2, i => avatars[i] = new Avatar(c, i == 0 ? "corvo" : "emily"));
+        }
+
+        public GuideFrame Render(string character, TeachingPose pose, int w, int h, bool silhouette = false, bool crouch = false)
+        {
+            if (character is not ("corvo" or "emily")) throw new ArgumentException("Unknown guide character", nameof(character));
+            if (w <= 0 || h <= 0 || !float.IsFinite(pose.Span) || pose.Span <= 0) throw new ArgumentOutOfRangeException(nameof(w));
+            var av = avatars[character == "corvo" ? 0 : 1];
+            TeachingHand Rest(int i) => new(new(.18f, i == 0 ? .22f : -.22f, 1.05f), Vector3.UnitZ, new(0, i == 0 ? -1 : 1, 0), new float[5]);
+            var hands = new[] { pose.Left ?? Rest(0), pose.Right ?? Rest(1) };
+            var parts = new List<Part> { av.BodyMesh, av.Head };
+            var solvedHands = new Vector3[2]; var solvedWrists = new Vector3[2];
+            for (int i = 0; i < 2; i++)
+            {
+                var hand = hands[i];
+                if (hand.Curls.Length != 5 || hand.Curls.Any(c => !float.IsFinite(c)) || hand.Direction.LengthSquared() < 1e-8f || Vector3.Cross(hand.Direction, hand.Normal).LengthSquared() < 1e-8f)
+                    throw new ArgumentException("Invalid teaching hand frame or curls", nameof(pose));
+                var arm = av.PoseArm(i, av.TeachingTarget(i, hand), hand.Curls);
+                solvedHands[i] = av.HandPosition(i, arm); solvedWrists[i] = av.WristPosition(i, arm);
+                parts.Add(av.SkinArm(i, arm));
+            }
+            Vector3 Bend(Vector3 bind)
+            {
+                if (!crouch) return bind;
+                var origin = av.FromWorld(Vector3.Zero);
+                var p = (bind - origin) * av.Scale;
+                float z = p.Z;
+                // Guide-only squat: planted feet, forward knees, lowered hips and inclined torso.
+                p.X += z < .5f ? .30f * z / .5f : z < 1 ? .30f - .48f * (z - .5f) / .5f : -.18f + .30f * (z - 1);
+                p.Z = z < .5f ? z * .60f : z < 1 ? .30f + (z - .5f) * .64f : z - .38f;
+                return origin + p / av.Scale;
+            }
+            if (crouch) parts = parts.Select(p => p.Posed(p.P.Select(Bend).ToArray(), p.N)).ToList();
+            float az = pose.Azimuth * MathF.PI / 180, el = pose.Elevation * MathF.PI / 180;
+            var fwd = -new Vector3(MathF.Cos(el) * MathF.Cos(az), MathF.Cos(el) * MathF.Sin(az), MathF.Sin(el));
+            var right = Unit(Vector3.Cross(fwd, Vector3.UnitZ)); var up = Vector3.Cross(right, fwd);
+            var view = new View(w, h, av.FromWorld(pose.Centre) - fwd * 5, fwd, right, up, pose.Span / av.Scale);
+            PointF Project(Vector3 world) { var p = view.Project(Bend(av.FromWorld(world))); return new(p.X, p.Y); }
+            PointF BindProject(Vector3 bind) { var p = view.Project(Bend(bind)); return new(p.X, p.Y); }
+            var g = Rasterize(view, parts, true);
+            var mask = g.Depth.Select(float.IsFinite).ToArray(); KeepLargest(mask, w, h);
+            var rgba = new byte[w * h * 4];
+            var edge = new bool[w * h];
+            var light = view.Dir(Key);
+            var handPoints = solvedHands.Select(BindProject).ToArray();
+            var palmPoints = Enumerable.Range(0, 2).Select(i => BindProject(solvedHands[i] + Unit(hands[i].Direction) * (.055f / av.Scale))).ToArray();
+            var wristPoints = solvedWrists.Select(BindProject).ToArray();
+            float handRadius = .15f * h / pose.Span;
+            for (int y = 0; y < h; y++) for (int x = 0; x < w; x++)
+            {
+                int o = y * w + x; if (!mask[o]) continue;
+                var n = Unit(g.Normal![o]); if (Vector3.Dot(n, -fwd) < 0) n = -n;
+                float shade = MathF.Max(0, Vector3.Dot(n, light));
+                // Three sepia washes; retain only a trace of the material's value, rather than photographic colour.
+                var a = g.Albedo![o]; shade = shade * .9f + (a.X + a.Y + a.Z) / 3 * .1f;
+                bool dark = shade < .28f;
+                var c = shade > .64f ? Color.FromArgb(202, 185, 151) : dark ? Color.FromArgb(102, 81, 58) : Color.FromArgb(155, 130, 94);
+                bool nearHand = handPoints.Any(p => (p.X - x) * (p.X - x) + (p.Y - y) * (p.Y - y) < handRadius * handRadius);
+                if (dark && !nearHand && (x + y) % 22 < 2 && (x / 48 + y / 48) % 3 != 0) c = Color.FromArgb(66, 55, 42);
+                rgba[o * 4] = c.R; rgba[o * 4 + 1] = c.G; rgba[o * 4 + 2] = c.B; rgba[o * 4 + 3] = 255;
+                void Compare(int q)
+                {
+                    if (!mask[q]) { edge[o] = true; return; }
+                    var other = Unit(g.Normal[q]); if (Vector3.Dot(other, -fwd) < 0) other = -other;
+                    if (Math.Abs(g.Depth[o] - g.Depth[q]) * av.Scale > .018f || Vector3.Dot(n, other) < .55f) edge[o] = true;
+                }
+                if (x == 0 || x == w - 1 || y == 0 || y == h - 1) edge[o] = true;
+                else { Compare(o - 1); Compare(o + 1); Compare(o - w); Compare(o + w); }
+            }
+            // At the guide's 2x working resolution this becomes a 2-3 px final charcoal contour.
+            const int radius = 2;
+            for (int y = 0; y < h; y++) for (int x = 0; x < w; x++)
+            {
+                if (!edge[y * w + x]) continue;
+                for (int dy = -radius; dy <= radius; dy++) for (int dx = -radius; dx <= radius; dx++)
+                {
+                    if (dx * dx + dy * dy > radius * radius || x + dx < 0 || x + dx >= w || y + dy < 0 || y + dy >= h) continue;
+                    int o = ((y + dy) * w + x + dx) * 4;
+                    rgba[o] = 41; rgba[o + 1] = 39; rgba[o + 2] = 35; rgba[o + 3] = 255;
+                }
+            }
+            if (silhouette)
+            {
+                for (int o = 0; o < mask.Length; o++)
+                {
+                    if (rgba[o * 4 + 3] == 0) continue;
+                    // Keep the same mesh contour, with a quiet paper-lit rim around solid ink.
+                    bool rim = mask[o] && (o % w < 2 || o % w >= w - 2 || o < w * 2 || o >= mask.Length - w * 2 ||
+                        !mask[o - 2] || !mask[o + 2] || !mask[o - w * 2] || !mask[o + w * 2]);
+                    rgba[o * 4] = (byte)(rim ? 101 : 41);
+                    rgba[o * 4 + 1] = (byte)(rim ? 95 : 39);
+                    rgba[o * 4 + 2] = (byte)(rim ? 81 : 35);
+                    rgba[o * 4 + 3] = 217;
+                }
+            }
+            return new GuideFrame(rgba, Project, handPoints, palmPoints, wristPoints);
+        }
+
+        public void Dispose() { } // Assets are managed arrays; no game files remain open.
+    }
+
     public static readonly string[] Keys = { "pose_shoulders_corvo", "pose_tpose_corvo", "pose_shoulders_emily", "pose_tpose_emily" };
     public static bool Missing(string dir) => Keys.Any(k => !File.Exists(Path.Combine(dir, k + ".rgba")));
 
@@ -348,9 +478,20 @@ public static class PoseRender
 
         // tests/body_ik_check.cpp: eye 1.75 m, hand span 1.55 m; the avatar is scaled from its bind eye height.
         const float EyeHeight = 1.75f, HandSpan = 1.55f;
-        float Scale => EyeHeight / Body.Bind[camera].P.Z;
+        public float Scale => EyeHeight / Body.Bind[camera].P.Z;
         /// <summary>A test-world point (eye at (0, 0, 1.75)) in unscaled bind space (bind camera_jnt at the eye).</summary>
-        Vector3 FromWorld(Vector3 p) => Body.Bind[camera].P + (p - new Vector3(0, 0, EyeHeight)) / Scale;
+        public Vector3 FromWorld(Vector3 p) => Body.Bind[camera].P + (p - new Vector3(0, 0, EyeHeight)) / Scale;
+
+        public Xf TeachingTarget(int i, TeachingHand hand)
+        {
+            var bindHand = (Body.Bind[spine3] * Arm[i].Bind[attach[i]]).Q;
+            float side = i == 0 ? 1 : -1;
+            var q = FrameMap(new(0, side, 0), new(0, 0, -1), hand.Direction, hand.Normal) * bindHand;
+            return new(Quaternion.Normalize(q), FromWorld(hand.Position));
+        }
+
+        public Vector3 HandPosition(int i, Xf[] posed) => posed[attach[i]].P;
+        public Vector3 WristPosition(int i, Xf[] posed) => posed[wrist[i]].P;
 
         /// <summary>Hand targets of the solver test: T-pose hands at {.02, +-span/2, eye-.27} with the bind hand rotation;
         /// shoulders hands at {.1, +-.2, eye-.3}, fingers up and palms in. Both with grip and trigger fully pressed (fists).</summary>
@@ -366,12 +507,12 @@ public static class PoseRender
         // body_ik.hpp finger_local: degrees per joint (01 metacarpal, 02 MCP, 03 PIP, 04 DIP), relaxed to closed.
         static readonly float[,] Relaxed = { { 8, 10, 12, 0 }, { 0, 12, 18, 8 }, { 0, 18, 24, 12 }, { 2, 22, 28, 14 }, { 4, 26, 32, 16 } };
         static readonly float[,] Closed = { { 25, 30, 45, 0 }, { 0, 80, 95, 55 }, { 0, 85, 100, 60 }, { 6, 88, 100, 60 }, { 12, 90, 100, 62 } };
-        Xf HandLocal(int i, int j)
+        Xf HandLocal(int i, int j, float[]? curls = null)
         {
             var a = fit[i];
             for (int f = 0; f < 5; f++) for (int k = 0; k < 4; k++) if (finger[i, f, k] == j)
                     {
-                        float amount = f == 1 ? .85f : f == 0 ? .8f : 1f;  // grip = trigger = 1
+                        float amount = curls == null ? (f == 1 ? .85f : f == 0 ? .8f : 1f) : Math.Clamp(curls[f], 0, 1);  // calibration: grip = trigger = 1
                         float deg = Relaxed[f, k] + (Closed[f, k] - Relaxed[f, k]) * amount;
                         var axis = fingerAxis[i, f, k];
                         return axis.Length() < .5f ? a.Local[j] : new(Quaternion.Normalize(a.Local[j].Q * AxisAngle(axis, deg * MathF.PI / 180)), a.Local[j].P);
@@ -381,13 +522,13 @@ public static class PoseRender
 
         /// <summary>body_ik.hpp pose_arm for a still body (chest at bind, no previous pole or roll, procedural hand): world
         /// transforms of the arm's joints.</summary>
-        public Xf[] PoseArm(int i, Xf hand)
+        public Xf[] PoseArm(int i, Xf hand, float[]? curls = null)
         {
             var a = fit[i]; int n = a.Local.Length; var chest = Body.Bind[spine3];
             var carried = new Xf[n]; for (int j = 0; j < n; j++) carried[j] = chest * a.Bind[j];
             var w = (Xf[])carried.Clone();
             Vector3 up = Vector3.UnitZ, fwd = Vector3.UnitX, outward = new(0, i == 0 ? 1 : -1, 0);
-            var wt = hand * HandLocal(i, attach[i]).Inverse();
+            var wt = hand * HandLocal(i, attach[i], curls).Inverse();
             float la = (a.Bind[elbow[i]].P - a.Bind[upper[i]].P).Length(), lb = (a.Bind[wrist[i]].P - a.Bind[elbow[i]].P).Length();
             {   // clavicle: shrug toward far or high reaches (bounded)
                 Vector3 c = carried[clavicle[i]].P, u = carried[upper[i]].P, reach = wt.P - u; float r = reach.Length();
@@ -438,7 +579,7 @@ public static class PoseRender
             {
                 bool under = false;
                 for (int p = a.Parent[j]; p >= 0 && !under; p = a.Parent[p]) under = p == wrist[i];
-                if (under) w[j] = w[a.Parent[j]] * HandLocal(i, j);
+                if (under) w[j] = w[a.Parent[j]] * HandLocal(i, j, curls);
             }
             return w;
         }
@@ -783,7 +924,7 @@ public static class PoseRender
     }
 
     /// <summary>Pillow's LANCZOS resize of an RGBA8 image (premultiplied while filtering, separable).</summary>
-    static byte[] Downsample(byte[] src, int sw, int sh, int dw, int dh)
+    internal static byte[] Downsample(byte[] src, int sw, int sh, int dw, int dh)
     {
         static (int Min, float[] W)[] Taps(int inSize, int outSize)
         {
