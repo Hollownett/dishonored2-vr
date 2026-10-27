@@ -393,6 +393,14 @@ SCENARIOS['carry'] = ([[0, 1500, NEUTRAL, [0.0, 0.0, 0.0]]] + glide(1500, 2500, 
                       # Leaning with the body on the shoulder (an eye pair in each): right, forward, down and forward, left.
                       [[8000 + 2000 * k, 10000 + 2000 * k, NEUTRAL, [0.0, 0.0, 0.0], {"head_pitch_degrees": 0, "head_offset": off}]
                        for k, off in enumerate([[0.15, 0.0, 0.0], [0.0, 0.0, -0.2], [0.05, -0.2, -0.2], [-0.15, 0.0, 0.0]])])
+# Severed limb or body half (--near limb, after chopping a corpse): crouched like 'carry', grip ALONE on it (the game's Use: HoldObject), lift, let go.
+SCENARIOS['limbgrip'] = ([[0, 1500, NEUTRAL, [0.0, 0.0, 0.0]]] + glide(1500, 2500, [0.0, 0.0, 0.0], _TORSO, 5, None, _CROUCH) +
+                         [[2500, 3500, NEUTRAL, _TORSO, _CROUCH], [3500, 4300, _G, _TORSO, _CROUCH], [4300, 7000, _G, [0.0, -0.4, -0.3], _CROUCH],
+                          [7000, 9000, NEUTRAL, [0.0, 0.0, 0.0], {"head_pitch_degrees": 0, "head_offset": [0.0, 0.0, 0.0]}]])
+# The same reach without looking at the part (head level): the game's own gaze/hand-ray ranking misses it, only the hand's proximity can select it.
+_CROUCH_LEVEL = {"head_pitch_degrees": 0, "head_offset": [0.0, -0.45, 0.0]}
+SCENARIOS['limbgripblind'] = [seg[:4] + [dict(seg[4], **_CROUCH_LEVEL) if len(seg) > 4 and seg[4].get('head_offset') != [0.0, 0.0, 0.0] else (seg[4] if len(seg) > 4 else {})]
+                              for seg in SCENARIOS['limbgrip']]
 CARRY_PAIRS = range(len(SCENARIOS['carry']) - 4, len(SCENARIOS['carry']) + 1)  # script segments (scenario segment + 1) with an eye pair
 PAIR_PLAN['carry'] = {k: f'carry{k}' for k in CARRY_PAIRS}
 PAIR_DELAY['carry'] = 1.0
@@ -568,6 +576,8 @@ FORBIDDEN_STATES = {'flick': ['Slash'], 'reach': ['Slash']}  # accidental attack
 EXPECTED_STATES = {'pickuplook': ['LootObject', 'Interact', 'HoldObject'], 'carry': ['CarryCorpse', 'PickupCorpse', 'Interact'], 'carrydrop': ['CarryCorpse'], 'carrythrow': ['CarryCorpse'], 'chop': ['Slash'], 'pickup': ['LootObject', 'Interact', 'HoldObject'], 'reach': ['LootObject', 'Interact', 'HoldObject'], 'swing': ['Slash', 'Assassination'], 'duel': ['Slash'], 'grab': ['LootObject', 'HoldObject', 'Interact', 'CarryCorpse', 'ReadNote'], 'powers': ['UsePower', 'Blinking', 'UseWindblast', 'UsePhantasmalLink', 'InBendTime', 'StoneShroud', 'DoppelgangerSwap', 'UseHeart'], 'jump': ['Jumping', 'Falling'],  # Falling always follows a jump; the short Jumping state can fall between samples
                    'lean': ['Leaning'], 'power': ['UsePower', 'Blinking'], 'wheel': ['Powerwheel'],
                    'walk': ['Running', 'Sneaking', 'Sprinting'], 'all': ['Powerwheel'], 'potion': ['Powerwheel'], 'hide': ['Powerwheel'], 'sheathe': ['Undraw'], 'swordgrip': ['EquipChange'], 'pistolhip': ['EquipChange'], 'pistolfire': ['FireWeapon', 'ReloadWeapon']}
+EXPECTED_STATES['limbgrip'] = ['HoldObject']
+EXPECTED_STATES['limbgripblind'] = ['HoldObject']
 EXPECTED_STATES['handsjump'] = ['Jumping', 'Falling']  # gesture jump: Falling always follows a jump
 SIM_FLAGS = ['--paired', '--native-eye-capture', '--vr-preview', '--head-tracking', '--controllers', '--symmetric-frustum',
              '--stable-camera', '--tracked-arms', '--physical-grab', '--native-left-aim-experiment', '--controller-aim',
@@ -989,7 +999,7 @@ def main():
     ap.add_argument('--scenario', default='all', choices=sorted(SCENARIOS))
     ap.add_argument('--load-save', action='store_true', help='game is at the title screen: load the last save')
     ap.add_argument('--launch', action='store_true', help='start the game from Steam (background) and load the last save')
-    ap.add_argument('--near', choices=['item', 'bottle', 'npc', 'npc-front', 'npc-side', 'civ-front', 'corpse', 'oldcorpse', 'shop', 'door'],
+    ap.add_argument('--near', choices=['item', 'bottle', 'npc', 'npc-front', 'npc-side', 'civ-front', 'corpse', 'oldcorpse', 'shop', 'door', 'limb'],
                     help='teleport next to the nearest pickable item / 0.9 m behind (npc) or in front of (npc-front) the nearest guard, facing it')
     ap.add_argument('--teleport', nargs=3, type=float, metavar=('X', 'Y', 'Z'), help='engine setviewpos (eye position) before the scenario')
     ap.add_argument('--damage', metavar='DECL', help='hurt the player every 3 s with this damage decl (engine `damage player1 DECL`, god off)')
@@ -1178,6 +1188,47 @@ def main():
                 time.sleep(2)
             else:
                 print('no corpse with a dynamic ragdoll found')
+        if reached and a.near == 'limb':  # the nearest severed limb / body half: its drawn mesh is the model box (+0x1840), not the entity origin
+            import math
+            import struct
+            from entities import World, GAME_PTR, ENTITIES, ENTITIES_END
+            from scan_body_material import attach as _attach, try_read
+            lb, lr = _attach(pid);w = World(lr, lb);game = struct.unpack('<Q', lr(lb + GAME_PTR, 8))[0]
+            eye0 = [float(v) for v in player_position(lr, lb)]
+
+            def find_limbs():
+                found = []
+                for off in range(0, ENTITIES_END - ENTITIES, 8):
+                    raw = try_read(lr, game + ENTITIES + off, 8);ent = struct.unpack('<Q', raw)[0] if raw else 0
+                    if ent and w.cls(ent) == 'arkSeveredLimb':
+                        model = struct.unpack('<Q', lr(ent + 0xf0, 8))[0]
+                        box = struct.unpack('<8f', lr(model + 0x1840, 32)) if model else None
+                        mvt = struct.unpack('<Q', lr(model, 8))[0] - lb if model else 0
+                        if box:
+                            c = [(box[i] + box[4 + i]) / 2 for i in range(3)] + [box[2]]
+                            found.append((math.dist(c[:2], eye0[:2]), c, hex(ent), [round(box[4 + i] - box[i], 2) for i in range(3)], hex(mvt)))
+                return sorted(found)
+            limbs = find_limbs()
+            if not limbs:  # make some: a grenade's damage on a living guard severs limbs (a loaded corpse can no longer be cut)
+                out = json.loads(subprocess.run([sys.executable, os.path.join(ROOT, 'tools', 'entities.py'), '--pid', str(pid), '--kind', 'npc', '--health', '--json'],
+                                                capture_output=True, text=True).stdout)
+                for g in sorted([e for e in out['entities'] if e.get('guard') and not (e.get('health') or {}).get('dead')], key=lambda e: e['dist'])[:3]:
+                    print('grenade damage on', g['name'], g['pos'])
+                    command('console damage %s damage/explosion_grenade' % g['name'])
+                    time.sleep(4)
+                    limbs = find_limbs()
+                    if limbs:
+                        break
+            print('limbs (dist, centre, entity, box size, model vtable):', [(round(d, 1), [round(v, 2) for v in c], e, sz, vt) for d, c, e, sz, vt in limbs[:6]])
+            if limbs:
+                c = limbs[0][1];dx, dy = c[0] - eye0[0], c[1] - eye0[1];d = max(1e-6, math.hypot(dx, dy))
+                stand = (c[0] - dx / d * .75, c[1] - dy / d * .75, c[3] + 1.7, math.degrees(math.atan2(dy, dx)))  # the box bottom ~ the floor under the part
+                print('near limb', limbs[0][2], 'stand', [round(v, 2) for v in stand])
+                set_god(pid, True)
+                command('console setviewpos %.2f %.2f %.2f %.1f' % stand)
+                time.sleep(2)
+            else:
+                print('no severed limb found')
         if reached and a.near == 'shop':  # face the nearest living NPC (the Black Market keeper behind his window) from where the save stands
             import math
             out = json.loads(subprocess.run([sys.executable, os.path.join(ROOT, 'tools', 'entities.py'), '--pid', str(pid), '--kind', 'npc', '--health', '--json'],

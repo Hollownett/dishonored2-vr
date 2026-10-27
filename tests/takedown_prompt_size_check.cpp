@@ -15,10 +15,10 @@ int main() {
     assert(native_prompt_anchor({},loot,guard)==NativePromptAnchor::unbound);
     assert(native_prompt_anchor({},{},guard)==NativePromptAnchor::unbound);
     assert(native_prompt_anchor({},{},{})==NativePromptAnchor::unbound);
-    for(double d:{0.5,1.0,1.5,2.0,3.0}) assert(takedown_prompt_width(d,false)>=0.25);   // readable at kill range
+    for(double d:{0.5,1.0,1.5,2.0,3.0}) assert(takedown_prompt_width(d,false)>=0.16 && takedown_prompt_width(d,false)<0.25); // readable, smaller than v637
     assert(takedown_prompt_width(1.5,true)<0.08);                                       // the old size, kept behind the knob
-    assert(takedown_prompt_width(1.5,false)>3*takedown_prompt_width(1.5,true));
-    assert(takedown_prompt_width(100,false)<=1.0 && takedown_prompt_width(-1,false)==0.25);
+    assert(takedown_prompt_width(1.5,false)>2*takedown_prompt_width(1.5,true));
+    assert(takedown_prompt_width(100,false)<=0.6 && takedown_prompt_width(-1,false)==0.16);
     assert(takedown_prompt_width(5,false)>=takedown_prompt_width(2,false));              // never shrinks with distance
     std::ifstream in("src/dxgi_probe.cpp");std::string s((std::istreambuf_iterator<char>(in)),{});
     if(!s.empty()) { // wiring pin (run from the repo root)

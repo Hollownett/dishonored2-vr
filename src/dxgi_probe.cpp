@@ -2998,6 +2998,8 @@ static void publish_hand(unsigned side,const d2vr::WorldTrackedPose& drawn,const
     }
 }
 static bool npc_entity(std::uintptr_t e) noexcept {std::uintptr_t vt{};return e && read_self(e,&vt,8) && vt==image_base+0x1c5e108;} // arkNPC
+// User, headset v637: a dead or unconscious body (+0xd1 bits 0x08/0x20) is carried by hand only, so its native "Carry body" prompt is never shown.
+static bool body_carry_prompt(std::uintptr_t e) noexcept {std::uint8_t f{};return physical_grab_requested && !legacy_corpse_carry && npc_entity(e) && read_self(e+0xd1,&f,1) && (f&0x28);}
 // What a hand's grip holds rather than uses (user 2026-10-13: "move objects pickup like coins to a trigger"; the grip holds things):
 // a native carryable (arkCpntPickable_Simple 0x1c5a3b8: bottles, glasses, severed limbs -> HoldObject) or a body (a dead or
 // knocked-out arkNPC -> the game's carry). Everything else the pointing hand is offered (loot, doors, levers, notes) is used with
@@ -4596,6 +4598,7 @@ void publish_native_hud_art(UINT64 now) {
                 // The native HUD entry owns its complete label/gauge lifetime,
                 // independently of hand hover, locks and carry-state changes.
                 const bool retained_npc=npc_entity(compact.child.retained_entry->owner);
+                if(retained_npc && body_carry_prompt(compact.child.retained_entry->owner)) {clear();continue;}
                 const auto anchor=d2vr::native_retained_prompt_anchor(read_self,image_base,*compact.child.retained_entry,retained_npc);
                 const auto& frame=native_hud_world_frame;
                 if(!anchor || frame.epoch!=metadata.epoch) {fail();continue;}
@@ -4619,6 +4622,7 @@ void publish_native_hud_art(UINT64 now) {
             }
             if(anchor_kind!=d2vr::NativePromptAnchor::interaction) target.reset();
             if(anchor_kind!=d2vr::NativePromptAnchor::takedown) take.reset();
+            if(target && body_carry_prompt(target->owner)) {clear();continue;}
             const auto& frame=native_hud_world_frame;
             if(!target && !take) {
                 // No known object (some food/door prompts): never flat - show it ahead of the player instead.
@@ -4720,7 +4724,7 @@ void publish_native_hud_art(UINT64 now) {
     {static bool was{};const bool is=native_hud_next_ticks[0]!=0;if(is!=was) {(is?prompt_shows:prompt_hides)++;was=is;}} // prompt blinking
     {   // Second hand's indicator (destination 9), from that hand's last captured prompt art.
         bool shown=false;const auto primary=native_interaction_aim.prompt_identity(now);
-        if(primary) if(const auto second=native_interaction_aim.second_target(*primary,now); second && second->point && second->identity.side<2) {
+        if(primary) if(const auto second=native_interaction_aim.second_target(*primary,now); second && second->point && second->identity.side<2 && !body_carry_prompt(second->owner)) {
             const auto& art=native_hud_side_art[second->identity.side];const auto& frame=native_hud_world_frame;
             if(art.texture && art.metadata.epoch==game_xr->pose_epoch() && now>=art.tick && now-art.tick<=1500) {
                 const UINT64 at=now>=second->selection_tick && now-second->selection_tick<=250?second->selection_tick:now;
@@ -5671,6 +5675,10 @@ void prepare_head_view(void* view) noexcept {
                                 if(answers[i]) {in.answer_ids[i]=answers[i]->request_id;
                                     if(answers[i]->hit)hits[i]=d2vr::to_clamp_hit(*answers[i]->hit);}
                             }
+                            // User, headset v637: the legs of a dragged body swung into the free hand, the clamp held that hand on them and it
+                            // seemed to lose tracking. A body either hand holds (or docks) never stops the hands; the holding hand already yields.
+                            for(unsigned h=0;h<2;++h) if(const auto held=physical_grab_requested?native_grab.corpse_hold(h,now):std::nullopt)
+                                for(auto& hit:hits) if(hit && hit->entity==held->entity) hit.reset();
                             in.palm_hit=hits[0];in.tip_hit=hits[1];in.wall_tip_hit=hits[2];in.exclude_hit=hits[3];
                             if(locomotion_csv.is_open())locomotion_answer_age[side]=answers[0]?static_cast<long long>(now-answers[0]->tick):-1;
                             // The open hand leads the sweeps and is kept out of every held plane (one probe set for both, Task 3).

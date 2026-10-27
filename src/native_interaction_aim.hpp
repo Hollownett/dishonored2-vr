@@ -6,6 +6,7 @@
 #include <array>
 #include <cstdint>
 #include <optional>
+#include <string_view>
 // The standalone pure-logic check defines D2VR_NATIVE_INTERACTION_PURE: it then
 // sees only the routing policy and hit point, which need neither windows.h nor
 // the hook headers (the check command adds no /Ithird_party\minhook\include).
@@ -1914,13 +1915,27 @@ private:
         }
         return result;
     }
+    // A severed limb or body half (arkSeveredLimb, a native carryable like a bottle) draws a skinned model (0x1b0d628), not a static mesh. Its
+    // bounds are the loose box of the visible part (0.5-1.7 m across in the headset v637 snapshots). Without them the hand sphere never qualified
+    // a limb, only the game's gaze ranking did (user, headset v637: "picked up reluctantly, not on the first try, no prompt").
+    mutable std::atomic<std::uintptr_t> limb_vtable_{};
+    bool severed_limb(std::uintptr_t owner) const {
+        const auto table=rig::value<std::uintptr_t>(read_,owner);
+        if(!table || !*table || *table==base_+0x1c5e108) return false;   // arkNPC: the common animated owner, never a limb
+        if(*table==limb_vtable_.load(std::memory_order_relaxed)) return true;
+        const auto locator=rig::value<std::uintptr_t>(read_,*table-8);
+        const auto rva=locator && *locator?rig::value<std::uint32_t>(read_,*locator+12):std::nullopt;
+        char name[24]{};
+        if(!rva || !*rva || !read_(base_+*rva+16,name,sizeof(name)-1) || std::string_view(name)!=".?AVarkSeveredLimb@@") return false;
+        limb_vtable_.store(*table,std::memory_order_relaxed);return true;
+    }
     // The owner's static-model world AABB (*(owner+0xf0) typed 0x1b0dd88, bounds at model+0x1840): finite, ordered, 1 mm..3 m across, the
     // model link re-read after the bounds. Read-only; shared by the native target point and the palm ordering (G1).
     std::optional<std::pair<Vec3,Vec3>> owner_bounds(std::uintptr_t owner) const {
         if(!owner) return {};
         try {
             const auto model=rig::value<std::uintptr_t>(read_,owner+0xf0);
-            if(!model || !rig::typed(read_,base_,*model,0x1b0dd88)) return {};
+            if(!model || !(rig::typed(read_,base_,*model,0x1b0dd88) || (rig::typed(read_,base_,*model,0x1b0d628) && severed_limb(owner)))) return {};
             const auto bounds=rig::value<std::array<float,8>>(read_,*model+0x1840);
             if(!bounds) return {};
             const Vec3 minimum{(*bounds)[0],(*bounds)[1],(*bounds)[2]},maximum{(*bounds)[4],(*bounds)[5],(*bounds)[6]};
