@@ -44,6 +44,7 @@ extern "C" MH_STATUS WINAPI MH_DisableHook(LPVOID);
 #include "native_door_interaction.hpp"
 #include "native_slash_scene_rate.hpp"
 #include "native_takedown.hpp"
+#include "native_contact_assassination.hpp"
 #include "native_choke_distance_scope.hpp"
 #include "native_offered_choke.hpp"
 #include "native_talk_offer.hpp"
@@ -902,25 +903,34 @@ class NativeInteractionAim {
                     const auto final_now=GetTickCount64();const auto final_hand=sword_hand_.current(final_now);
                     if(!final_hand || final_hand->epoch!=contact.pose_epoch || final_hand->epoch!=sword_pose_epoch_.load(std::memory_order_acquire) ||
                        final_now<contact.hit.tick || final_now-contact.hit.tick>100 || !melee_batch_current(melee_revision)) {++sword_contact_rejected_;continue;}
-                    // Without legacy-sword-contact (plan G task 3) the mod never holds or forces anything: the physical attack presses the
-                    // native attack and the engine decides. A guard still unaware gets no contact damage (it would alert him before the press
-                    // resolves); an aware guard is hit as before. A calm touch never reaches here (the producer drops it).
-                    if(!legacy_contact_.load(std::memory_order_relaxed)) {
-                        if(stealth_enabled_.load(std::memory_order_relaxed) && NativeMelee::damageable(self->base_,self->read_,contact.hit.victim) && NativeMelee::unaware(self->base_,self->read_,contact.hit.victim)) {
-                            // No ordinary damage (it would alert him). v639 (user, headset v638: "any attack from behind on a calm guard who
-                            // does not see you is a stealth kill, a stab or a slash"; only 5 of 19 native presses became the Assassination):
-                            // a deliberate contact from the rear or the side (stealth_strike) IS the stealth kill. When the engine's kill sensor
-                            // offers this victim, its own Assassination gets the window (the native press below); otherwise the kill lands
-                            // now. Either way only while the engine still calls him unaware. A frontal contact keeps the native press only.
-                            ++intent_unaware_deferred_;
-                            if((contact.native_offer_victim || !contact.stealth_strike) && intent_episode_.first(contact.victim_spawn,final_now))
-                                intent_contact_tick_.store(final_now,std::memory_order_release);
-                            if(contact.stealth_strike && stealth_hold_.hold(contact,contact.victim_spawn,final_now,contact.native_offer_victim,true)) ++stealth_counts_[0];
-                            continue;}
-                    } else
+                    auto strike=contact.equipment.sword;bool stealth_kill=false;
+                    // Rear contact is lethal independently of AI memory; only an exact current native offer may take the animation first.
+                    // default_stealth_contact_begin
+                    if(!legacy_contact_.load(std::memory_order_relaxed) && stealth_enabled_.load(std::memory_order_relaxed)) {
+                        const bool damageable=NativeMelee::damageable(self->base_,self->read_,contact.hit.victim);
+                        if(!damageable) ++stealth_reject_[3];
+                        else {
+                            const auto unaware=NativeMelee::unaware_result(self->base_,self->read_,contact.hit.victim);
+                            ++stealth_awareness_[unaware?(*unaware?2:1):0];
+                            if(contact.rear_contact || unaware.value_or(false)) {
+                                if(stealth_hold_.pending() && stealth_hold_.victim()==contact.victim_spawn)continue;
+                                ++stealth_counts_[0];
+                                if(contact.native_offer_victim && native_contact_assassination_offer(self->read_,contact.owner,contact.victim_spawn) && !stealth_hold_.pending()) {
+                                    auto reserved=contact;reserved.lethal_contact=true;
+                                    if(stealth_hold_.hold(reserved,contact.victim_spawn,final_now,true,true)) {
+                                        std::lock_guard<std::mutex> guard(trace_mutex_);intent_contact_request_=reserved;continue;
+                                    }
+                                }
+                                strike.amount=1000.f;stealth_kill=true;
+                            }
+                            else if(unaware) ++stealth_reject_[2];
+                            else continue;
+                        }
+                    }
+                    // default_stealth_contact_end
                     // A guard the engine calls unaware is not hit: the native Slash may still make this the Assassination, or the
                     // contact becomes the stealth kill below (sword_contact_policy.hpp). Anything else is the ordinary hit.
-                    if(contact.stealth_strike && stealth_enabled_.load(std::memory_order_relaxed)) {
+                    if(legacy_contact_.load(std::memory_order_relaxed) && contact.stealth_strike && stealth_enabled_.load(std::memory_order_relaxed)) {
                         const bool damageable=NativeMelee::damageable(self->base_,self->read_,contact.hit.victim);
                         const bool unaware=damageable && NativeMelee::unaware(self->base_,self->read_,contact.hit.victim);
                         if(!damageable)++stealth_reject_[3];
@@ -932,9 +942,10 @@ class NativeInteractionAim {
                         else ++stealth_reject_[4];
                     }
                     // A calm contact (below the hit speed) is only ever a stealth kill: never the ordinary alerting hit.
-                    if(contact.stealth_only) {++stealth_slow_unheld_drops_;continue;}
+                    if(contact.stealth_only && !stealth_kill) {++stealth_slow_unheld_drops_;continue;}
                     NativeMelee::DamageResultObservation observation{};
-                    const auto outcome=NativeMelee::apply(self->base_,self->read_,contact.equipment.sword,contact.hit,&observation);
+                    const auto outcome=NativeMelee::apply(self->base_,self->read_,strike,contact.hit,&observation);
+                    if(stealth_kill) ++stealth_counts_[outcome==0 && NativeMelee::corpse(self->base_,self->read_,contact.hit.victim)?2:4];
                     ++sword_contact_invoked_;if(observation.returned_buffer)++sword_damage_results_;
                     {std::lock_guard<std::mutex> guard(trace_mutex_);
                      sword_last_contact_={contact.hit.tick,final_now,contact.pose_epoch,contact.victim_spawn,contact.owner.spawn,contact.equipment.sword.sword_id,
@@ -944,7 +955,7 @@ class NativeInteractionAim {
                     else {++melee_faults_;melee_enabled_=false;break;}
                 }
                 if(const auto* held=stealth_hold_.payload()) {
-                    const auto now=GetTickCount64();const auto& c=*held;
+                    const auto now=GetTickCount64();const auto c=*held;
                     const auto camera=native_player_camera(self->read_,self->base_,scope->camera.camera);
                     const bool owned=verified && self->active_ && self->logic_()==2 && camera && camera->player==c.owner.player && sword_contact_owned(self->read_,c);
                     const bool alive=owned && NativeMelee::damageable(self->base_,self->read_,c.hit.victim);
@@ -952,15 +963,16 @@ class NativeInteractionAim {
                     const bool choking=nonlethal_grip_reserved_.load(std::memory_order_acquire) || (owned && native_player_state_active(self->read_,c.owner,native_state_choke,native_state_choke_vtable));
                     const bool unaware=alive && NativeMelee::unaware(self->base_,self->read_,c.hit.victim);
                     const auto sword=c.equipment.sword;const auto hit=c.hit;
-                    const auto raw_act=stealth_hold_.service(now,unaware,alive,native,choking,owned);
+                    const auto raw_act=stealth_hold_.service(now,c.lethal_contact || unaware,alive,native,choking,owned);
                     const auto act=resolve_stealth_act(raw_act,c.stealth_only);
                     if(raw_act==StealthAct::hit && act==StealthAct::drop) ++stealth_slow_aware_drops_;
                     else if(act==StealthAct::drop) ++stealth_counts_[native?1:4];
                     else if(act==StealthAct::hit || act==StealthAct::kill) {
-                        auto strike=sword;if(act==StealthAct::kill) strike.unaware_amount=1000.f;
+                        auto strike=sword;if(act==StealthAct::kill) {if(c.lethal_contact)strike.amount=1000.f;else strike.unaware_amount=1000.f;}
                         NativeMelee::DamageResultObservation observation{};
                         const auto outcome=NativeMelee::apply(self->base_,self->read_,strike,hit,&observation);
-                        ++stealth_counts_[act==StealthAct::kill?2:3];++sword_contact_invoked_;if(observation.returned_buffer)++sword_damage_results_;
+                        if(act==StealthAct::kill)++stealth_counts_[outcome==0 && NativeMelee::corpse(self->base_,self->read_,hit.victim)?2:4];else ++stealth_counts_[3];
+                        ++sword_contact_invoked_;if(observation.returned_buffer)++sword_damage_results_;
                         if(outcome==0)++melee_applied_;else if(outcome==1)++sword_contact_rejected_;else {++melee_faults_;melee_enabled_=false;}
                     }
                 }
@@ -1147,7 +1159,7 @@ public:
         if(reserved && !nonlethal_grip_reserved_.load(std::memory_order_relaxed)) {
             const auto revision=nonlethal_grip_revision_.load(std::memory_order_relaxed);
             if(revision!=std::numeric_limits<std::uint64_t>::max())nonlethal_grip_revision_.store(revision+1,std::memory_order_release);
-            sword_nonlethal_rejected_+=sword_contacts_.size();sword_contacts_.clear();
+            sword_nonlethal_rejected_+=sword_contacts_.size();sword_contacts_.clear();intent_contact_request_.reset();
         }
         nonlethal_grip_reserved_.store(reserved,std::memory_order_release);
     }
@@ -1174,6 +1186,8 @@ public:
             <<",\"epoch_rejected\":"<<sword_epoch_rejected_.load()<<",\"consumer_rejected\":"<<sword_contact_rejected_.load()
             <<",\"stealth\":["<<stealth_counts_[0].load()<<','<<stealth_counts_[1].load()<<','<<stealth_counts_[2].load()<<','<<stealth_counts_[3].load()<<','<<stealth_counts_[4].load()<<']'
             <<",\"stealth_reject\":["<<stealth_reject_[0].load()<<','<<stealth_reject_[1].load()<<','<<stealth_reject_[2].load()<<','<<stealth_reject_[3].load()<<','<<stealth_reject_[4].load()<<']'
+            <<",\"awareness\":["<<stealth_awareness_[0].load()<<','<<stealth_awareness_[1].load()<<','<<stealth_awareness_[2].load()<<']'
+            <<",\"contact_policy\":\""<<(legacy_contact_.load()?"legacy_hold":"physical_backstab")<<'"'
             <<",\"stealth_speed\":"<<stealth_speed_.load()<<",\"slow_aware_drops\":"<<stealth_slow_aware_drops_.load()<<",\"slow_unheld_drops\":"<<stealth_slow_unheld_drops_.load()<<",\"intent_unaware_deferred\":"<<intent_unaware_deferred_.load()
             <<",\"hit_height\":["<<hit_height_[0].load()<<','<<hit_height_[1].load()<<','<<hit_height_[2].load()<<']'
             <<",\"invoked\":"<<sword_contact_invoked_.load()<<",\"native_returned\":"<<sword_damage_results_.load()<<",\"last\":";
@@ -1206,14 +1220,29 @@ public:
     inline static std::atomic<bool> stealth_enabled_{true};
     inline static std::atomic<bool> legacy_contact_{false}; // build/legacy-sword-contact: the old hold/drop/kill routing
     inline static std::atomic<std::uint64_t> intent_contact_tick_{}; // a contact on an unaware guard wants the native attack pressed (control loop consumes it)
+    inline static std::optional<OwnedSwordContact> intent_contact_request_; // protected by trace_mutex_; exact victim survives the native press lead
+    template<class Read> static bool contact_attack_current(Read& read,const OwnedSwordContact& contact,std::uint64_t now,std::uint64_t epoch) {
+        const auto hand=sword_hand_.current(now);
+        return instance_ && instance_->active_ && instance_->logic_()==2 && hand && hand->epoch==epoch && epoch==contact.pose_epoch &&
+            epoch==sword_pose_epoch_.load(std::memory_order_acquire) && now>=contact.hit.tick && now-contact.hit.tick<250 &&
+            !nonlethal_grip_reserved_.load(std::memory_order_acquire) && sword_contact_owned(read,contact) &&
+            native_contact_scene(read,contact.owner).has_value() && native_contact_assassination_offer(read,contact.owner,contact.victim_spawn);
+    }
+    template<class Read> static std::optional<OwnedSwordContact> take_contact_attack(Read& read,std::uint64_t now,std::uint64_t epoch) {
+        std::optional<OwnedSwordContact> contact;
+        {std::lock_guard<std::mutex> guard(trace_mutex_);contact.swap(intent_contact_request_);}
+        if(contact && contact_attack_current(read,*contact,now,epoch))return contact;
+        return {};
+    }
     inline static SlowRejectLatch intent_episode_; // game thread only
     inline static std::atomic<std::uint64_t> intent_unaware_deferred_{}; // contacts on an unaware guard left to the native attack press
     inline static std::atomic<double> stealth_speed_{stealth_speed_default}; // m/s, knob build\stealth-speed; the near-pass assist reads it too
     inline static std::atomic<std::uint64_t> stealth_slow_unheld_drops_{}; // calm contacts never held (aware, not damageable, slot busy, stealth off): dropped
     inline static std::atomic<std::uint64_t> stealth_slow_aware_drops_{};   // held calm contacts whose guard turned aware (service hit->drop)
     inline static std::array<std::atomic<std::uint64_t>,5> stealth_reject_{}; // not behind/side, slow, not unaware, not damageable, other (hold slot taken by another victim)
+    inline static std::array<std::atomic<std::uint64_t>,3> stealth_awareness_{}; // unavailable, aware, unaware (default contact path)
     inline static std::array<std::atomic<std::uint64_t>,3> hit_height_{};     // committed contacts by hit height above the victim's feet: leg < 0.9 m, torso 0.9-1.5 m, head > 1.5 m
-    inline static std::array<std::atomic<std::uint64_t>,5> stealth_counts_{}; // held, native took it, stealth kill, noticed (ordinary hit), dropped (dead/choke/owner lost)
+    inline static std::array<std::atomic<std::uint64_t>,5> stealth_counts_{}; // qualified (held in legacy), native took it, confirmed kill, noticed, dropped/kill unconfirmed
     inline static std::atomic<std::uint64_t> melee_applied_{},melee_rejected_{},melee_faults_{};
     inline static std::array<std::atomic<std::uint64_t>,3> melee_why_{}; // rejected: code bytes differ, no sword/scope, victim not damageable (dead/unconscious/not NPC)
     inline static std::atomic<bool> melee_enabled_{true},impact_enabled_{true};inline static std::atomic<std::uint64_t> impact_played_{},impact_skipped_{};

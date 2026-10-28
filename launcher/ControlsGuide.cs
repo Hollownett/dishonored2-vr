@@ -6,8 +6,8 @@ namespace DishonoredVR;
 /// <summary>The Markdown document is shared by the illustrated and selectable text views.</summary>
 sealed class ControlsDocument
 {
-    public static readonly string[] PageIds = { "signature", "sword", "moving", "hands", "bodies-weapons", "wheel-journal", "menus-settings" };
-    public static readonly string[] FigureIds = { "sword_throw", "enemy_grab", "sword_draw_block", "stealth", "move_jump_lean", "hands_push", "bodies_drag_carry", "left_hip", "wheel_watch", "temples", "menu_point" };
+    public static readonly string[] PageIds = { "body", "controllers", "tips" };
+    public static readonly string[] FigureIds = { "sword_throw", "enemy_grab" };
     public sealed class Lesson(string title)
     {
         public readonly string Title = title;
@@ -50,7 +50,7 @@ sealed class ControlsDocument
             else if (line.StartsWith("## ", StringComparison.Ordinal))
             {
                 // Old documents without directives remain fully readable.
-                if (page == null) { page = new Page("signature", "Throw & grab"); doc.Pages.Add(page); }
+                if (page == null) { page = new Page("body", "Body"); doc.Pages.Add(page); }
                 lesson = new Lesson(line[3..]); page.Lessons.Add(lesson);
             }
             else if (lesson != null) lesson.Lines.Add(line);
@@ -69,28 +69,28 @@ sealed class ControlsDocument
             string markdown = reader.ReadToEnd(); var actual = Parse(markdown, true);
             var lessons = actual.Pages.SelectMany(p => p.Lessons).ToArray();
             string[] source = markdown.Replace("\r", "").Split('\n').Select(s => s.Trim()).ToArray();
-            if (!actual.Pages.Select(p => p.Id).SequenceEqual(PageIds) || lessons.Length != 12 ||
+            if (!actual.Pages.Select(p => p.Id).SequenceEqual(PageIds) || lessons.Length != 5 ||
                 !lessons.Where(l => l.Figure != "").Select(l => l.Figure).SequenceEqual(FigureIds) ||
                 !lessons.Select(l => l.Title).SequenceEqual(source.Where(s => s.StartsWith("## ", StringComparison.Ordinal)).Select(s => s[3..])) ||
                 !lessons.SelectMany(l => l.Lines).Where(s => s.StartsWith("- ", StringComparison.Ordinal)).SequenceEqual(source.Where(s => s.StartsWith("- ", StringComparison.Ordinal))) ||
-                lessons.Sum(l => l.Lines.Count(s => s.StartsWith("- ", StringComparison.Ordinal))) != 49)
-                throw new InvalidOperationException("Embedded guide must preserve all seven pages, eleven figures, twelve headings and forty-nine bullets.");
+                lessons.Sum(l => l.Lines.Count(s => s.StartsWith("- ", StringComparison.Ordinal))) != 25)
+                throw new InvalidOperationException("Embedded guide must preserve all three pages, two figures, five headings and twenty-five bullets.");
             var withoutArt = Parse(Regex.Replace(markdown, @"(?m)^<!-- vr-figure:.*\r?\n?", ""), true);
             if (!withoutArt.Pages.SelectMany(p => p.Lessons).SelectMany(l => l.Lines).SequenceEqual(lessons.SelectMany(l => l.Lines)))
                 throw new InvalidOperationException("Guide instructions changed when figures were omitted.");
         }
-        var sample = Parse("# Guide\nIntro\n<!-- ignored -->\n<!-- vr-page:signature|Throw & grab -->\n## Throw\n<!-- vr-figure:sword_throw|Open hand -->\n- **Release** — throw", true);
+        var sample = Parse("# Guide\nIntro\n<!-- ignored -->\n<!-- vr-page:body|Body -->\n## Throw\n<!-- vr-figure:sword_throw|Open hand -->\n- **Release** — throw", true);
         if (sample.Pages.Count != 1 || sample.Pages[0].Lessons.Single().Figure != "sword_throw" || sample.Pages[0].Lessons[0].Lines.Single() != "- **Release** — throw")
             throw new InvalidOperationException("Guide parser lost a heading, figure or bullet.");
-        var invalid = Parse("<!-- vr-page:../../file|Unsafe -->\n<!-- vr-page:signature|Safe -->\n## Keep me\n<!-- vr-figure:unknown|Missing -->\n- Keep this bullet");
+        var invalid = Parse("<!-- vr-page:../../file|Unsafe -->\n<!-- vr-page:body|Safe -->\n## Keep me\n<!-- vr-figure:unknown|Missing -->\n- Keep this bullet");
         if (invalid.Errors.Count != 2 || invalid.Pages.Single().Lessons.Single().Lines.Single() != "- Keep this bullet")
             throw new InvalidOperationException("Guide parser did not safely reject unknown identifiers.");
         foreach (string bad in new[]
         {
-            "<!-- vr-page:signature|   -->",
-            "<!-- vr-page:signature|Safe -->\n## Lesson\n<!-- vr-figure:sword_throw|   -->",
-            "<!-- vr-page:signature|Safe -->\n## First\n<!-- vr-figure:sword_throw|One -->\n## Second\n<!-- vr-figure:sword_throw|Two -->",
-            "<!-- vr-page:signature|Safe -->\n## Lesson\n- First instruction\n<!-- vr-figure:sword_throw|Too late -->"
+            "<!-- vr-page:body|   -->",
+            "<!-- vr-page:body|Safe -->\n## Lesson\n<!-- vr-figure:sword_throw|   -->",
+            "<!-- vr-page:body|Safe -->\n## First\n<!-- vr-figure:sword_throw|One -->\n## Second\n<!-- vr-figure:sword_throw|Two -->",
+            "<!-- vr-page:body|Safe -->\n## Lesson\n- First instruction\n<!-- vr-figure:sword_throw|Too late -->"
         })
         {
             if (Parse(bad).Errors.Count != 1) throw new InvalidOperationException("Guide parser accepted a blank, duplicate or misplaced directive.");
@@ -141,8 +141,7 @@ sealed class ControlsGuide : ArtControl
 
     static string DefaultPageName(string id) => id switch
     {
-        "signature" => "Throw & grab", "sword" => "Sword & stealth", "moving" => "Moving", "hands" => "Hands",
-        "bodies-weapons" => "Bodies & weapons", "wheel-journal" => "Wheel & journal", _ => "Menus & settings"
+        "body" => "Body", "controllers" => "Controllers", _ => "Tips"
     };
     public void SelectPage(string id)
     {

@@ -10,6 +10,8 @@ int main() {
     expect(is_gun_equip_name("Crossbow") && is_gun_equip_name("CrossBow_Emily") && is_gun_equip_name("crossbow"),"crossbow spellings");
     expect(!is_gun_equip_name("Empty") && !is_gun_equip_name("") && !is_gun_equip_name("Heart") && !is_gun_equip_name("Grenade") && !is_gun_equip_name("Mine"),"non guns");
     expect(!is_gun_equip_name("Gu") && !is_gun_equip_name("weapon_mine_spring"),"short or unrelated");
+    expect(is_gadget_equip_name("Grenade") && is_gadget_equip_name("StickyGrenade") && is_gadget_equip_name("StunMine") && is_gadget_equip_name("SpringRazor"),"gadgets");
+    expect(!is_gadget_equip_name("Gun") && !is_gadget_equip_name("Crossbow") && !is_gadget_equip_name("Blink") && !is_gadget_equip_name("Empty"),"not gadgets");
     expect(is_barrel_equip_name("Gun") && is_barrel_equip_name("Crossbow"),"v612 barrel equip routing");
     expect(!is_barrel_equip_name("GunEquip") && !is_barrel_equip_name("Power_Pistol") && !is_barrel_equip_name("Empty"),"broad decl names never reroute a power");
     AimEquipTracker tracker;

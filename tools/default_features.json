@@ -5,8 +5,8 @@
    "id": "note-tablet",
    "file": "note-tablet",
    "kind": "enable",
-   "label": "Hold notes in the left hand",
-   "help": "Hold and turn notes with your left hand. Scroll with the right stick or point and drag with the right trigger. Uses a front panel when hand or camera data is unavailable.",
+   "label": "Hold native notes and maps",
+   "help": "Keep the original game page on your left controller. Touch and slide with your right index finger to scroll, or use the right stick. B closes the page.",
    "default": true,
    "requires_dll_knob": "note-tablet"
   },

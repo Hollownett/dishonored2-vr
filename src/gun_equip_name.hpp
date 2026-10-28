@@ -33,4 +33,8 @@ public:
 inline bool is_gun_equip_name(std::string_view name) noexcept {
     return contains_nocase(name,"gun") || contains_nocase(name,"pistol") || contains_nocase(name,"crossbow");
 }
+// A gadget the left hand throws or places (grenades, stun mines, spring razors): the fist holds it, opening the hand lets it go.
+inline bool is_gadget_equip_name(std::string_view name) noexcept {
+    return contains_nocase(name,"grenade") || contains_nocase(name,"mine") || contains_nocase(name,"razor");
+}
 } // namespace d2vr

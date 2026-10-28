@@ -77,6 +77,16 @@ def verdict(status, combat_rows):
         if swings > 0:
             return _result(0, buckets, stage, "no_contact_near_pass", "Task 8", notes)
         return _result(0, buckets, stage, "no_swings", "", notes)
+    awareness = _counts(sc, "awareness", 3)
+    if awareness and awareness[0]:
+        notes.append("awareness check unavailable for %d contacts (code/read/native call failure)" % awareness[0])
+        if awareness[0] > max(held, awareness[1]):
+            return _result(contacts, buckets, stage, "awareness_unavailable", "verify native check", notes)
+    intent = status.get("attack_intent", {})
+    if (awareness is None and intent.get("legacy") is False and held == 0
+            and sc.get("intent_unaware_deferred") == 0):
+        notes.append("default path did not record whether awareness returned false or failed; rear/side rejects alone do not explain these misses")
+        return _result(contacts, buckets, stage, "guard_eligibility_unknown", "collect awareness result", notes)
     best = None
     for name, index, fix in REJECT_ORDER:
         if reject[index] > 0 and (best is None or reject[index] > best[0]):

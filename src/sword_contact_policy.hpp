@@ -16,9 +16,8 @@
 namespace d2vr {
 enum class StealthAct {wait,drop,hit,kill};
 // native_offer: the engine's kill sensor targets this victim right now, so its own Assassination is expected from the next Slash press.
-// immediate (v639 default path): with no offer nothing native is coming, and waiting lets a swing's ordinary native slash (its hit frames
-// 200-270 ms after the press) alert the guard first, so the kill lands on this game-thread pass.
-inline constexpr std::uint64_t stealth_window_ms(bool native_offer,bool immediate=false) noexcept {return native_offer?700:immediate?0:120;}
+// Default physical contact: no offer means immediate damage; an exact offered animation gets 250 ms. Legacy retains its 700 ms window.
+inline constexpr std::uint64_t stealth_window_ms(bool native_offer,bool immediate=false) noexcept {return native_offer?(immediate?250:700):immediate?0:120;}
 // A stealth strike is victim-based (Bonelab: the contact itself is the hit, no body-part pick): a deliberate contact (tip speed at least
 // the stealth speed, default .6 m/s) from the rear or the side of the victim (NPC forward is row 0 of its reference frame, entity +0x30c;
 // attacker cos to forward < +0.2). The game's kill sensor is NOT a gate any more (it flickers with gaze); the engine-side

@@ -29,7 +29,6 @@ public:
     inline static constexpr double stab_window_s=.4,stab_min_travel_m=.20,stab_min_straight=.75,stab_min_align=.5;
     inline static constexpr unsigned rearm_samples=2;
     inline static constexpr double max_head_mps=2.5,max_yaw_dps=150.,head_guard_s=.1;
-    inline static constexpr double contact_min_mps=.3; // a blade slower than this is resting on the guard, not attacking
     // Returns true on the one sample a press should start.
     // press_free: the caller's AttackPress can start now; without it nothing is spent (no cooldown, no count).
     bool update(const AttackSample& s,bool crouched,bool weapon_drawn,bool press_free=true) noexcept {
@@ -67,9 +66,9 @@ public:
         return true;
     }
     // A sword contact on a guard the engine still calls unaware asks for the same press (the caller checked the contact speed and the
-    // once-per-episode rule). It shares the 300 ms cooldown and disarms, so one motion never presses twice (nor a slash right after).
-    bool contact_press(double t_s,bool weapon_drawn,bool press_free=true) noexcept {
-        if(!weapon_drawn || !press_free || !std::isfinite(t_s) || t_s<cooldown_until_) return false;
+    // once-per-episode rule). A verified native offer bypasses gesture cooldown; the caller still owns a free exact-victim press.
+    bool contact_press(double t_s,bool weapon_drawn,bool press_free=true,bool confirmed_native=false) noexcept {
+        if(!weapon_drawn || !press_free || !std::isfinite(t_s) || (!confirmed_native && t_s<cooldown_until_)) return false;
         armed_=false;slow_run_=0;cooldown_until_=t_s+cooldown_s;++presses_;++contact_;
         return true;
     }

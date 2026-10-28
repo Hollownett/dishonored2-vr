@@ -24,6 +24,9 @@ int main() {
     }
     path("ui/choice_emily.iggy");{const auto o=native_world_ui_owner(read,base,iggy);assert(o && o->kind==WorldUiKind::journal);} // dialogue choices
     assert(world_ui_logic(512)==WorldUiKind::journal && world_ui_logic(2)==WorldUiKind::none);
+    assert(native_note_reader_logic(16) && native_note_reader_logic(128|16));
+    assert(world_ui_logic(128|16)==WorldUiKind::notes); // Actual journal -> Read combines both native bits.
+    for(auto logic:{2u,4u,128u,256u,512u,1024u,18u,48u,146u})assert(!native_note_reader_logic(logic));
     assert(world_ui_logic(1024)==WorldUiKind::journal && world_ui_kind("ui/emily_blackmarket.iggy")==WorldUiKind::journal &&
            world_ui_kind("ui/lib_blackmarket.iggy")==WorldUiKind::none); // black market panel
     path("ui/hud.iggy");assert(!native_world_ui_owner(read,base,iggy));

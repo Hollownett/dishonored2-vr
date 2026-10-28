@@ -133,15 +133,16 @@ static void slow_contact_on_unaware_presses_once() {
     Rig r;r.settle();
     assert(r.in.contact_press(r.t,true) && r.in.presses()==1 && r.in.contacts()==1 && r.in.slashes()==0);
     assert(!r.in.contact_press(r.t+.1,true)); // inside the shared cooldown
+    assert(!r.in.contact_press(r.t+.1,true,false,true)); // confirmed target cannot overlap an active press
+    assert(!r.in.contact_press(r.t+.1,false,true,true)); // or a missing drawn sword
+    assert(r.in.contact_press(r.t+.1,true,true,true)); // a freshly verified native neck offer bypasses gesture cooldown
     assert(!r.in.contact_press(r.t+.5,false)); // sword not drawn
-    assert(r.in.contact_press(r.t+.5,true) && r.in.contacts()==2);
+    assert(r.in.contact_press(r.t+.5,true) && r.in.contacts()==3);
 }
-static void resting_contact_no_press() {
-    // the producer's rule: under contact_min_mps the blade is resting; the wiring pins it
-    assert(AttackIntent::contact_min_mps==.3);
+static void physical_contact_has_no_speed_gate() {
     std::ifstream g(std::filesystem::absolute(std::filesystem::path(__FILE__)).parent_path().parent_path()/"src"/"dxgi_probe.cpp");assert(g);
     const std::string probe((std::istreambuf_iterator<char>(g)),std::istreambuf_iterator<char>());
-    assert(probe.find("!(speed>=d2vr::AttackIntent::contact_min_mps)")!=std::string::npos);
+    assert(probe.find("const bool too_slow=legacy_sword_contact && legacy_too_slow;")!=std::string::npos);
 }
 static void contact_and_slash_same_motion_press_once() {
     Rig r;r.settle();
@@ -157,10 +158,10 @@ static void contact_and_slash_same_motion_press_once() {
 static void contact_press_uses_the_same_press_path() {
     std::ifstream g(std::filesystem::absolute(std::filesystem::path(__FILE__)).parent_path().parent_path()/"src"/"dxgi_probe.cpp");assert(g);
     const std::string probe((std::istreambuf_iterator<char>(g)),std::istreambuf_iterator<char>());
-    const auto b=probe.find("const auto contact_at=");assert(b!=std::string::npos);
+    const auto b=probe.find("auto contact_request=");assert(b!=std::string::npos);
     const auto e=probe.find("attack_intent_rt=live",b);assert(e!=std::string::npos);
     const std::string w=probe.substr(b,e-b);
-    assert(w.find("if(contact_wanted && live && attack_intent.contact_press(now_s,drawn_now,press_free)) {")!=std::string::npos && w.find("attack_press.start(f.now_ms,polls)")!=std::string::npos &&
+    assert(w.find("if(contact_request && live && attack_intent.contact_press(now_s,drawn_now,press_free,true)) {")!=std::string::npos && w.find("attack_press.start(f.now_ms,polls)")!=std::string::npos &&
            w.find("attack_honour.press(f.now_ms)")!=std::string::npos);
     assert(w.find("input.")==std::string::npos && w.find("NativeMelee")==std::string::npos);
     // the pad is written only from attack_intent_rt (shared with slash/stab): the pad composer path
@@ -343,17 +344,18 @@ static void wiring_pins_gate_block_release_and_stale_clears() {
         "gate.left_power=raw.left_trigger>.3f || GetTickCount64()<gesture_cast_until || gesture_release_until!=0;","gate.equip_transition=","gate.ui_open=input.menu_modifier || x_wheel.wheel() || game_xr->settings_open();"})
         assert(has(probe,term));
     // Block is withheld by the press state (lead + hold + tail), not only while RT is high
-    assert(has(probe,"want && !attack_intent_block_off && input.left_trigger<=.55f"));
+    assert(has(probe,"want && !attack_intent_block_off && !left_use_squeeze && input.left_trigger<=.55f"));
     assert(has(probe,"attack_intent_block_off=live && attack_press.block_released(f.now_ms);"));
     // every skipped path clears: reset at the top of the controls frame, and the press is reset when the compute did not run
     assert(has(probe,"attack_intent_rt=attack_intent_owns=attack_intent_block_off=attack_intent_ran=false;"));
-    assert(has(probe,"if(!attack_intent_ran) attack_press.reset();"));
-    assert(probe.find("attack_intent_rt=attack_intent_owns=attack_intent_block_off=attack_intent_ran=false;")<probe.find("if(!attack_intent_ran) attack_press.reset();"));
-    // legacy-combat implies the old contact routing; no-stealth-contact turns the unaware-contact press off
+    assert(has(probe,"if(!attack_intent_ran) {attack_press.reset();contact_attack_target.reset();}"));
+    assert(probe.find("attack_intent_rt=attack_intent_owns=attack_intent_block_off=attack_intent_ran=false;")<probe.find("if(!attack_intent_ran) {attack_press.reset();contact_attack_target.reset();}"));
+    // Legacy combat uses the old contact routing; default unaware contacts now resolve before a native press can alert them.
     assert(has(probe,"fs::exists(root/L\"build\"/L\"legacy-sword-contact\") || !vr_combat_enabled"));
-    assert(has(aim,"if(stealth_enabled_.load(std::memory_order_relaxed) && NativeMelee::damageable("));
+    assert(has(aim,"if(!legacy_contact_.load(std::memory_order_relaxed) && stealth_enabled_.load(std::memory_order_relaxed)) {"));
+    assert(has(aim,"if(contact.rear_contact || unaware.value_or(false))"));
     // a contact tick is consumed only on a live frame
-    assert(has(probe,"else if(contact_at && live) {"));
+    assert(has(probe,"auto contact_request=live && !attack_press.active()?d2vr::NativeInteractionAim::take_contact_attack("));
 }
 int main() {
     slow_hand_no_press();
@@ -368,7 +370,7 @@ int main() {
     stab_needs_travel_and_straightness();
     a_slash_speed_counts_as_slash_even_crouched();
     slow_contact_on_unaware_presses_once();
-    resting_contact_no_press();
+    physical_contact_has_no_speed_gate();
     contact_and_slash_same_motion_press_once();
     contact_press_uses_the_same_press_path();
     press_lets_block_go_then_holds_120ms_until_two_polls_capped_at_500ms();

@@ -145,6 +145,8 @@ struct NativeAttachmentPoseCheck {
         {   // A note may skin tracked hands while weapon readers keep the native animation.
             const auto visual=[&](const NativeAttachmentSource& candidate) {return pose.validate_visual(1,animation,native,tracked,candidate);};
             assert(!visual(source));assert(call(false)==17); // An enabled weapon policy is never a visual bypass; old palette cleared.
+            // v659 sent gameplay note palettes through visual-only admission and froze both hands.
+            assert(publish());assert(call(true)==17); // Ordinary gameplay admission keeps the controllers driving the hands.
             policy(0);assert(!publish());assert(visual(source));
             assert(!pose.sides_[1].animation && call(false)==17);
             policy();assert(call(false)==17); // Re-enabling weapons cannot resurrect a visual-only palette.

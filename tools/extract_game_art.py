@@ -68,6 +68,8 @@ PICKS = {
     'glass_shard': ('ui/lib_particles.iggy', 100, (160, 160), 'Pause-menu glass shard'),
     'bonecharm': ('ui/lib_journal_charms.iggy', 144, (148, 148), 'Bonecharm bone fragments'),
     'power_glyph': ('ui/lib_journal_charms.iggy', 42, (136, 136), 'Blue power/rune glyph'),
+    'crosshair_dot': ('ui/hud.iggy', 926, (8, 8), "HUD crosshair dot (neutral state, glowing pale dot); the mod's in-eye reticle"),
+    'crosshair_halo': ('ui/hud.iggy', 922, (12, 12), 'HUD crosshair dark contrast halo drawn under the dot'),
 }
 MIRRORED = {'arrow_left'}
 NOT_FOUND = {}  # key -> reason, for requested keys with no suitable bitmap

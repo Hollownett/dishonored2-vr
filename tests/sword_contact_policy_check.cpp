@@ -60,7 +60,8 @@ void window_and_terminal_cases() {
     // v639 default path: no offer for this victim = the kill on the same pass (a swing's ordinary native slash must not alert him first);
     // an offer still gives the engine's Assassination its 700 ms; a guard already aware is never killed silently
     StealthHold<int> now;assert(now.hold(1,7,1000,false,true) && now.service(1000,true,true,false,false,true)==StealthAct::kill);
-    StealthHold<int> offered;offered.hold(1,7,1000,true,true);assert(offered.service(1600,true,true,false,false,true)==StealthAct::wait);
+    StealthHold<int> offered;offered.hold(1,7,1000,true,true);assert(offered.service(1249,true,true,false,false,true)==StealthAct::wait);
+    assert(offered.service(1250,true,true,false,false,true)==StealthAct::kill);
     StealthHold<int> aware;aware.hold(1,7,1000,false,true);assert(aware.service(1000,false,true,false,false,true)==StealthAct::hit);
 }
 

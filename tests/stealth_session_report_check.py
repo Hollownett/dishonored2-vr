@@ -90,6 +90,18 @@ def killed_ok():
     assert (v["stage"], v["likely_cause"]) == ("killed", "none"), v
 
 
+def default_path_does_not_misdiagnose_missing_awareness():
+    status = mkstatus(12, reject=(6, 0, 0, 0, 0), hh=(4, 5, 3))
+    status["attack_intent"] = {"legacy": False}
+    status["sword_contact"]["intent_unaware_deferred"] = 0
+    assert report.verdict(status, [])["likely_cause"] == "guard_eligibility_unknown"
+    status["sword_contact"]["awareness"] = [12, 0, 0]
+    assert report.verdict(status, [])["likely_cause"] == "awareness_unavailable"
+    status["sword_contact"]["awareness"] = [0, 12, 0]
+    status["sword_contact"]["stealth_reject"] = [0, 0, 12, 0, 0]
+    assert report.verdict(status, [])["likely_cause"] == "not_unaware"
+
+
 def no_contacts_means_blade_never_touched():
     v = report.verdict(mkstatus(0, swings=5), [])
     assert (v["likely_cause"], v["fix_task"]) == ("no_contact_near_pass", "Task 8"), v

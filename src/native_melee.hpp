@@ -140,13 +140,18 @@ public:
     inline static std::atomic<unsigned> unaware_asked{},unaware_yes{}; // thrown-sword hits that asked the stealth test / were unaware
     inline static constexpr std::uintptr_t unaware_rva=0x5bf560;
     inline static constexpr std::array<unsigned char,32> unaware_code{0x40,0x57,0x48,0x83,0xec,0x20,0x48,0x8b,0xf9,0x48,0x8b,0x0d,0x20,0x5d,0x3e,0x03,0xe8,0x2b,0x96,0x2e,0x00,0x48,0x85,0xc0,0x74,0x26,0x48,0x8b,0x0d,0x0f,0x5d,0x3e};
-    static bool unaware(std::uintptr_t base,Read read,std::uintptr_t npc) {
+    static std::optional<bool> unaware_result(std::uintptr_t base,Read read,std::uintptr_t npc) {
         std::array<unsigned char,32> got{};
-        return read(base+unaware_rva,got.data(),got.size()) && got==unaware_code && ask_unaware(base,npc);
+        if(!read(base+unaware_rva,got.data(),got.size()) || got!=unaware_code)return {};
+        bool answer{};if(!ask_unaware(base,npc,answer))return {};
+        return answer;
+    }
+    static bool unaware(std::uintptr_t base,Read read,std::uintptr_t npc) {
+        return unaware_result(base,read,npc).value_or(false);
     }
 private:
-    static bool ask_unaware(std::uintptr_t base,std::uintptr_t npc) {
-        __try {return reinterpret_cast<bool (__fastcall*)(std::uintptr_t)>(base+unaware_rva)(npc);} __except(EXCEPTION_EXECUTE_HANDLER) {return false;}
+    static bool ask_unaware(std::uintptr_t base,std::uintptr_t npc,bool& answer) {
+        __try {answer=reinterpret_cast<bool (__fastcall*)(std::uintptr_t)>(base+unaware_rva)(npc);return true;} __except(EXCEPTION_EXECUTE_HANDLER) {return false;}
     }
     template<class R> static std::vector<std::uintptr_t> components(R read,std::uintptr_t entity) {
         std::vector<std::uintptr_t> out;

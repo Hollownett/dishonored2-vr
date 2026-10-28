@@ -255,9 +255,9 @@ Quest Touch controllers. Grip is the side button under your middle finger; trigg
 <!-- vr-page:bodies-weapons|Bodies & weapons -->
 
 ## Bodies
-<!-- vr-figure:bodies_drag_carry|Grip a limb to drag; lift and release at your shoulder to carry. -->
+<!-- vr-figure:bodies_drag_carry|Grip a limb to drag or lift; bodies are carried by hand only. -->
 - **Grip a wrist, ankle or head** — drag the body.
-- **Lift a body and release at your shoulder** — leave it on your shoulder with your hand free.
+- **Lift a body** — hold it with your hands; there is no shoulder carry.
 - **Grip at that shoulder again** — take it back. Release while swinging to throw it.
 
 ## Left-hand weapons and powers

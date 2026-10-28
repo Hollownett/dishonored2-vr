@@ -8,14 +8,16 @@
 using namespace d2vr;
 namespace nh=d2vr::note_hand;
 template<class T> static void put(std::ostream& out,const T& value){out.write(reinterpret_cast<const char*>(&value),sizeof(value));}
-static std::string pack(const nh::Mesh& mesh) {
+static std::string pack(const nh::Mesh& mesh,unsigned version=1) {
     std::ostringstream out(std::ios::binary);
-    put(out,std::array<char,8>{'D','2','V','R','N','H','0','1'});put(out,1u);put(out,mesh.character);put(out,mesh.side);
+    put(out,std::array<char,8>{'D','2','V','R','N','H','0','1'});put(out,version);put(out,mesh.character);put(out,mesh.side);
     put(out,mesh.source_sha256);put(out,static_cast<std::uint32_t>(mesh.resource.size()));out.write(mesh.resource.data(),mesh.resource.size());put(out,mesh.inverse);
     put(out,static_cast<std::uint32_t>(mesh.surfaces.size()));
     for(const auto& s:mesh.surfaces) {
         put(out,s.kind);put(out,static_cast<std::uint32_t>(s.vertices.size()));put(out,static_cast<std::uint32_t>(s.indices.size()));
         for(const auto& v:s.vertices)put(out,v);for(auto i:s.indices)put(out,i);
+        if(version==2) {put(out,s.hand?1u:0u);for(const auto& uv:s.uv)put(out,uv);put(out,s.diffuse.width);put(out,s.diffuse.height);
+            out.write(reinterpret_cast<const char*>(s.diffuse.rgba.data()),s.diffuse.rgba.size());}
     }
     return out.str();
 }
@@ -27,6 +29,12 @@ int main(int argc,char** argv) {
     nh::Surface surface;surface.kind=1;
     for(unsigned i=0;i<3;++i) {nh::Vertex v;v.position={static_cast<float>(i),0,0};v.weights[0]=128;v.weights[1]=127;v.joints[1]=1;surface.vertices.push_back(v);}
     surface.indices={0,1,2};source.surfaces.push_back(surface);
+    auto textured=source;textured.surfaces[0].uv={{{0,0}},{{1,0}},{{0,1}}};textured.surfaces[0].diffuse={1,1,{12,34,56,255}};textured.surfaces[0].hand=true;
+    const auto v2=pack(textured,2);std::istringstream v2in(v2,std::ios::binary);const auto v2mesh=nh::read(v2in);
+    assert(v2mesh.surfaces[0].uv==textured.surfaces[0].uv && v2mesh.surfaces[0].diffuse.rgba==textured.surfaces[0].diffuse.rgba && v2mesh.surfaces[0].hand);
+    assert(rejects(v2.substr(0,v2.size()-1)));
+    auto bad_texture=textured;bad_texture.surfaces[0].diffuse.width=4097;assert(rejects(pack(bad_texture,2)));
+    bad_texture=textured;bad_texture.surfaces[0].uv[0][0]=NAN;assert(rejects(pack(bad_texture,2)));
     const auto bytes=pack(source);std::istringstream in(bytes,std::ios::binary);const auto mesh=nh::read(in);
     assert(mesh.resource==source.resource && mesh.surfaces[0].indices==surface.indices);
     assert(rejects(bytes.substr(0,bytes.size()-1)) && rejects(bytes+"x"));
@@ -60,10 +68,25 @@ int main(int argc,char** argv) {
     palette[1].f[12]=1;
     const std::array<float,15> model{1,2,3,1,0,0,0,1,0,0,0,1,1,1,1};
     NoteViewMapping mapping{{{0,1.7,0},{}},{{1,2,3},{{{1,0,0},{0,1,0},{0,0,1}}}},{0,1.7,0},.45,.25,true};
+    const auto xr_geometry=nh::skin_xr(mesh,binding.inverse,palette,.5);
+    assert(length(xr_geometry.vertices[0]-Vec3{127./255.,0,0})<1e-7);
+    assert(std::abs(xr_geometry.vertices[1].x-(.5+127./255.))<1e-7);
+    bool scale_rejected=false;try{(void)nh::skin_xr(mesh,binding.inverse,palette,0);}catch(const std::invalid_argument&){scale_rejected=true;}assert(scale_rejected);
     const auto geometry=nh::skin(mesh,binding.inverse,palette,model,mapping);
     assert(geometry.vertices.size()==3 && geometry.indices==std::vector<std::uint32_t>({0,1,2}));
     const auto expected=world_to_xr_controller({1+127./255.,2,3},mapping.origin,mapping.anchor,1.,mapping.controller_centre,mapping.origin.position);
     assert(expected && length(geometry.vertices[0]-*expected)<1e-7);
+    auto affine=palette;affine[0].f[0]=1.2f;affine[1].f[5]=.8f;
+    const auto widened=nh::skin(mesh,binding.inverse,affine,model,mapping);
+    assert(widened.vertices.size()==3 && length(widened.vertices[1]-geometry.vertices[1])>.09);
+    for(const float invalid:{NAN,INFINITY,1.01e7f,-1.01e7f}) {
+        auto broken=affine;broken[68].f[9]=invalid;
+        bool refused=false;try{(void)nh::skin(mesh,binding.inverse,broken,model,mapping);}catch(const std::invalid_argument&){refused=true;}
+        assert(refused); // all bases are validated, including joints without vertex weights
+        broken=affine;broken[0].f[12]=invalid;refused=false;
+        try{(void)nh::skin(mesh,binding.inverse,broken,model,mapping);}catch(const std::invalid_argument&){refused=true;}
+        assert(refused);
+    }
     // A live inverse change is used, never the cached file inverse.
     auto inverse=binding.inverse;inverse[0][3]=2;
     const auto altered=nh::skin(mesh,inverse,palette,model,mapping);

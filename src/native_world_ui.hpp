@@ -9,11 +9,12 @@
 
 namespace d2vr {
 enum class WorldUiKind {none,wheel,notes,journal};
+inline bool native_note_reader_logic(std::uint32_t logic) noexcept {return logic==16 || logic==(128|16);}
 inline WorldUiKind world_ui_logic(std::uint32_t logic) noexcept {
     // 512 = dialogue choices (ui/choice_*.iggy): a world panel like the journal, the world keeps rendering behind it
     // (as a flat menu it was a black screen with the choice bar, headset v349). 1024 = the black market (ui/*_blackmarket.iggy):
     // nothing showed in the headset (v361).
-    return logic==256?WorldUiKind::wheel:logic==16?WorldUiKind::notes:logic==128 || logic==512 || logic==1024?WorldUiKind::journal:WorldUiKind::none;
+    return logic==256?WorldUiKind::wheel:native_note_reader_logic(logic)?WorldUiKind::notes:logic==128 || logic==512 || logic==1024?WorldUiKind::journal:WorldUiKind::none;
 }
 inline WorldUiKind world_ui_kind(std::string_view path) noexcept {
     if(path=="ui/quick_access_wheel.iggy") return WorldUiKind::wheel;

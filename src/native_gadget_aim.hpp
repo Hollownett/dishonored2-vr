@@ -28,7 +28,7 @@ namespace d2vr {
 class NativeGadgetAim {
 public:
     static constexpr std::uintptr_t placement_rva=0x3c1e40,throw_hit_rva=0x3cec30;
-    inline static std::atomic<std::uint64_t> placement_calls{},placement_swapped{},throw_calls{},throw_swapped{},stale{},bad_pointer{},restore_skipped{};
+    inline static std::atomic<std::uint64_t> placement_calls{},placement_swapped{},throw_calls{},throw_swapped{},stale{},bad_pointer{},restore_skipped{},palm_placements{};
     static void publish(const GadgetAimPose& pose) noexcept {std::lock_guard<std::mutex> l(mutex_);pose_=pose;}
     static bool installed() noexcept {return targets_[0]!=nullptr;}
     static bool install(std::uintptr_t base) noexcept {
@@ -80,12 +80,20 @@ private:
         float *start{},*dir{},*origin{};
         resolve(reinterpret_cast<std::uintptr_t>(sensor),placement,start,dir,origin);
         if(!start || !dir || (!placement && !origin)) {++bad_pointer;return original_[which](sensor);}
+        // A mine's palm ray (place_length > 0) also shortens the ray: the length is the float at sensor+0x58 (movss xmm0,[rdi+0x58] at
+        // 0x3C1E68, the ray call's distance argument), swapped and put back like the float3 fields.
+        const bool palm=placement && pose.place_length>0;
+        float* length=palm?reinterpret_cast<float*>(reinterpret_cast<std::uintptr_t>(sensor)+0x58):nullptr;
+        float saved_length{};if(length && !rd(reinterpret_cast<std::uintptr_t>(length),saved_length)) length=nullptr;
         FieldSwap swap;
-        swap.put(start,pose.origin);
-        swap.put(dir,pose.forward,!placement);
+        swap.put(start,palm?pose.place_origin:pose.origin);
+        swap.put(dir,palm?pose.place_dir:pose.forward,!placement);
         if(origin) swap.put(origin,pose.origin);
+        if(length) *length=pose.place_length;
         ++(placement?placement_swapped:throw_swapped);
+        if(palm) ++palm_placements;
         const auto result=original_[which](sensor);
+        if(length && *length==pose.place_length) *length=saved_length;
         swap.restore();   // a field the engine rewrote during the call keeps its value
         if(const auto skipped=swap.skipped()) restore_skipped+=skipped;
         return result;

@@ -30,9 +30,15 @@ static class Program
             using var bitmap = new Bitmap(controller);
             if (bitmap.Width < 1000 || !File.Exists(Path.Combine(packageHome, "build", "note-tablet")))
                 throw new InvalidDataException("Guide artwork or default note feature missing");
+            bool nativeHands = false;
+            if (Env.FindGameDir() is string handGame) {
+                var art = Path.Combine(packageHome, "artifacts", "game-art");
+                PoseRender.ExportNoteHandMeshes(handGame, art);
+                nativeHands = !PoseRender.NoteHandMeshesMissing(art);
+            }
             File.WriteAllText(Path.Combine(packageHome, "package-check.json"), System.Text.Json.JsonSerializer.Serialize(new {
                 dll = packaged.Dll, sha256 = ModHome.Sha256(packaged.DllPath), controller_width = bitmap.Width,
-                note_holding_enabled = true, game_launched = false
+                note_holding_enabled = true, native_document_ui = true, native_hand_meshes_ready = nativeHands, game_launched = false
             }, new System.Text.Json.JsonSerializerOptions { WriteIndented = true }));
             return 0;
         }
@@ -200,7 +206,9 @@ sealed class MainForm : Form
             if (shotFile == null && !exitAfterShot) _ = AutoFindDlss();  // review runs must not write a knob into a real mod home
             // First start (or art missing): import it from the user's own install; the calibration poses follow, and are
             // rendered alone when only they are missing. Review screenshots wait for it.
-            var import = artState == "not imported yet" ? ImportArt(false)
+            // An install imported before the game crosshair (v671) gets the whole import once more.
+            var crosshairMissing = !noArt && Ui.Art.Present && Env.FindGameDir() != null && !File.Exists(env.P("artifacts", "game-art", "crosshair_dot.rgba"));
+            var import = artState == "not imported yet" || crosshairMissing ? ImportArt(false)
                 : !noArt && Ui.Art.Present && Env.FindGameDir() != null && (PoseRender.Missing(env.P("artifacts", "game-art")) || GuideFigures.Missing(env.P("artifacts", "game-art"))) ? ImportArt(false, posesOnly: true)
                 : Task.CompletedTask;
             if (shotFile == null) return;

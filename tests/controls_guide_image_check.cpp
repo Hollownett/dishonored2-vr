@@ -19,7 +19,7 @@ int main() {
         int sections=0,bullets=0,pages=0,figures=0;
         for(const auto& i:items) {sections+=i.kind==GuideItem::section;bullets+=i.kind==GuideItem::bullet;pages+=i.kind==GuideItem::page;figures+=i.kind==GuideItem::figure;
             if(i.kind==GuideItem::bullet) require(!i.key.empty() && !i.text.empty(),"A bullet lost its bold input or description");}
-        require(!errors && !items.empty() && items[0].kind==GuideItem::title && sections==12 && bullets>=40 && pages==7 && figures==11,"Guide directives, headings or bullets did not parse");
+        require(!errors && !items.empty() && items[0].kind==GuideItem::title && sections==5 && bullets==24 && pages==3 && figures==2,"Guide directives, headings or bullets did not parse");
         require(parse_controls_guide(md+"\n<!-- unrelated comment -->\n").size()==items.size(),"Unrelated comments must be ignored");
         errors=0;const auto invalid=parse_controls_guide("<!-- vr-page:../../outside|Bad -->\n<!-- vr-figure:unknown|Bad -->\n<!-- vr-page:moving -->\n",&errors);
         require(errors==3 && invalid.empty(),"Unknown and malformed directive ids must be rejected safely");
@@ -33,10 +33,10 @@ int main() {
             require(alpha(2,2)==0 && alpha(1919,1199)==0 && alpha(16,16)==0,"Card corners must stay clear");
             for(unsigned y=40;y<1160;++y) for(unsigned x=40;x<1880;++x) require(alpha(x,y)==255,"Card interior must be fully opaque");
         };
-        // User request: all seven pages retain every instruction with missing, complete, or partial imported art.
+        // User request: all pages retain every instruction with missing, complete, or partial imported art.
         const auto render_set=[&](const std::string& prefix,bool emily,bool art,bool save) {
             std::vector<unsigned> seen(static_cast<std::size_t>(bullets));
-            for(unsigned p=0;p<7;++p) {
+            for(unsigned p=0;p<3;++p) {
                 GuideLayout layout{};const auto pixels=controls_guide_image(md,1920,1200,&layout,p,emily,art);
                 if(save) {std::ofstream out(previews/(prefix+"-"+std::to_string(p+1)+".rgba"),std::ios::binary);out.write(reinterpret_cast<const char*>(pixels.data()),static_cast<std::streamsize>(pixels.size()));require(static_cast<bool>(out),"Could not write RGBA page preview");}
                 if(layout.drawn!=layout.bullets || layout.overflow || layout.out_of_bounds) std::cout<<prefix<<" page "<<p+1<<": drawn "<<layout.drawn<<" of "<<layout.bullets<<(layout.overflow?", overflow":"")<<(layout.out_of_bounds?", out of bounds":"")<<'\n';
@@ -44,7 +44,7 @@ int main() {
                 require(pixels==controls_guide_image(md,1920,1200,nullptr,p,emily,art),"Guide image is not deterministic");
                 std::cout<<prefix<<" page "<<p+1<<": "<<layout.drawn<<" bullets, no overflow or out-of-bounds\n";
             }
-            for(auto count:seen) require(count==1,"Every source bullet must be drawn exactly once across all seven pages");
+            for(auto count:seen) require(count==1,"Every source bullet must be drawn exactly once across all pages");
         };
         game_art().folder(imported);render_set("plain",false,false,true);
         render_set("corvo-art",false,true,true);render_set("emily-art",true,true,true);
@@ -53,7 +53,7 @@ int main() {
         {std::ofstream out(partial/"guide_sword_throw_corvo.rgba",std::ios::binary);const std::uint32_t wh[2]={864,232};out.write(reinterpret_cast<const char*>(wh),8);
             const std::array<unsigned char,4> colour={173,97,61,255};for(unsigned i=0;i<864u*232;++i) out.write(reinterpret_cast<const char*>(colour.data()),4);}
         game_art().folder(partial);render_set("partial-corvo",false,true,true);render_set("partial-emily",true,true,false);
-        const auto corvo=controls_guide_image(md,1920,1200,nullptr,0,false,true),emily=controls_guide_image(md,1920,1200,nullptr,0,true,true);
+        const auto corvo=controls_guide_image(md,1920,1200,nullptr,2,false,true),emily=controls_guide_image(md,1920,1200,nullptr,2,true,true);
         const auto at=(400u*1920+400)*4;
         require(corvo[at]==173 && corvo[at+1]==97 && corvo[at+2]==61,"A figure must use its exact slot and 1:1 pixels");
         require(corvo!=emily,"Character-specific figures must use the selected character; a missing variant keeps the fallback");
@@ -71,12 +71,12 @@ int main() {
         nav=guide_navigation_update(state,true,0.f,.3f,false);require(!nav.state.armed,"Both axes must be neutral before rearming");
         nav=guide_navigation_update(nav.state,true,.24f,.24f,false);require(nav.state.armed,"Neutral rearms the page gesture");
         nav=guide_navigation_update(nav.state,true,-.65f,0.f,false);require(nav.delta==-1,"A left flick changes one page back");
-        require(guide_page_step(0,-1)==0 && guide_page_step(6,1)==6 && guide_page_step(3,-1)==2,"Page navigation must stop at both ends");
+        require(guide_page_step(0,-1)==0 && guide_page_step(2,1)==2 && guide_page_step(2,-1)==1,"Page navigation must stop at both ends");
         nav=guide_navigation_update(nav.state,false,1.f,0.f,true);require(nav.consume,"Closing must retain ownership until neutral");
         nav=guide_navigation_update(nav.state,false,0.f,0.f,true);require(nav.consume && nav.state.blocked,"A held click must not leak after closing");
         nav=guide_navigation_update(nav.state,false,0.f,0.f,false);require(nav.consume && !nav.state.blocked,"The neutral release tick is still consumed");
         nav=guide_navigation_update(nav.state,false,0.f,0.f,false);require(!nav.consume,"Gameplay regains the stick after neutral");
-        std::cout<<"PASS: seven pages; every bullet exactly once; plain/imported/partial art; both characters; bounds, opacity, determinism and navigation\n";
+        std::cout<<"PASS: three pages; every bullet exactly once; plain/imported/partial art; both characters; bounds, opacity, determinism and navigation\n";
         return 0;
     } catch(const std::exception& error) {std::cerr<<error.what()<<'\n';return 1;}
 }

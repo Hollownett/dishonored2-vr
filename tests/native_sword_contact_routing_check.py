@@ -18,23 +18,33 @@ def check(source: str, consumer: str) -> None:
     assert source.index("classify_contact_speed(") < source.index("const unsigned why=")
     assert "owned_contact->stealth_strike=d2vr::stealth_strike(speed,rear_side,stealth_speed);" in source and "stealth_strike(speed,rear_side,d2vr::SwordHitGate::hit_speed)" not in source
     assert 'L"stealth-speed"' in source and "stealth_speed_from_knob(" in source
-    assert "const bool too_slow=legacy_sword_contact?legacy_too_slow:!(speed>=d2vr::AttackIntent::contact_min_mps);" in source
+    assert "const bool too_slow=legacy_sword_contact && legacy_too_slow;" in source
+    assert "if(side==1 && blade>0 && legacy_sword_contact) {const auto tip=" in source
+    assert "live_npc_on(g.position,g.position+blade_axis*(blade+(legacy_sword_contact?.35:0.)),now)" in source
     assert "(speed_class==d2vr::ContactSpeedClass::stealth_only && !rear_side)" in source
-    assert "intent_episode_.first(contact.victim_spawn,final_now)" in consumer and "intent_contact_tick_.store(final_now" in consumer
-    assert "else if(contact_at && live) {d2vr::NativeInteractionAim::intent_contact_tick_.store(0);contact_wanted=true;}" in source and "attack_intent.contact_press(now_s,drawn_now,press_free)" in source
+    assert "take_contact_attack(control_reader,f.now_ms,game_xr->pose_epoch())" in source and "attack_intent.contact_press(now_s,drawn_now,press_free,true)" in source
     assert "legacy_sword_contact && d2vr::arms_native_attack(" in source
     assert "if(owned_contact->stealth_strike) contact_attack_tick=now;" not in source
     assert "if(why==5 && rear_side && slow_reject_latch.first(contact->entity,now)) ++d2vr::NativeInteractionAim::stealth_reject_[1];" in source
     assert "slow_reject_latch=d2vr::SlowRejectLatch{}" in source
     assert "arms_native_attack(owned_contact->stealth_strike,owned_contact->stealth_only,owned_contact->native_offer_victim,d2vr::NativeInteractionAim::stealth_enabled_.load())" in source
     assert "owned_contact->native_offer_victim=kill_sensor_spawn.load()==owned_contact->victim_spawn && now>=kill_sensor_tick.load() && now-kill_sensor_tick.load()<=100;" in source
-    assert "if(!legacy_contact_.load(std::memory_order_relaxed)) {" in consumer and "++intent_unaware_deferred_;" in consumer and "stealth_hold_.hold(contact,contact.victim_spawn,final_now,contact.native_offer_victim,true)) ++stealth_counts_[0];\n                            continue;}" in consumer
+    default = consumer.split("// default_stealth_contact_begin", 1)[1].split("// default_stealth_contact_end", 1)[0]
+    assert "NativeMelee::unaware_result(" in default and "strike.amount=1000.f;stealth_kill=true;" in default
+    assert "if(contact.rear_contact || unaware.value_or(false))" in default
+    assert "native_contact_assassination_offer(self->read_,contact.owner,contact.victim_spawn)" in default
+    assert "intent_contact_request_=reserved;continue;" in default
+    assert not re.search(r"speed|stealth_strike|rear_side", default)
+    assert "owned_contact->rear_contact=contact_frame_read && d2vr::attacker_rear_or_side(row0.data(),npc_at.data(),contact_at);" in source
+    assert "contact_attack_current(control_reader,*contact_attack_target,f.now_ms,game_xr->pose_epoch())" in source
+    assert "if(legacy_contact_.load(std::memory_order_relaxed) && contact.stealth_strike" in consumer
+    assert "const auto c=*held;" in consumer and "const auto& c=*held;" not in consumer
     assert 'L"legacy-sword-contact"' in source and "legacy_sword_contact=fs::exists(" in source
-    assert "if(stealth_enabled_.load(std::memory_order_relaxed) && NativeMelee::damageable(" in consumer
+    assert "if(!legacy_contact_.load(std::memory_order_relaxed) && stealth_enabled_.load(std::memory_order_relaxed)) {" in consumer
     assert "resolve_stealth_act(" in consumer
     assert "const auto act=resolve_stealth_act(raw_act,c.stealth_only);" in consumer
-    drop = consumer.index("if(contact.stealth_only) {++stealth_slow_unheld_drops_;continue;}")
-    assert drop < consumer.index("NativeMelee::apply(self->base_,self->read_,contact.equipment.sword,contact.hit,&observation)")
+    drop = consumer.index("if(contact.stealth_only && !stealth_kill) {++stealth_slow_unheld_drops_;continue;}")
+    assert drop < consumer.index("NativeMelee::apply(self->base_,self->read_,strike,contact.hit,&observation)")
     assert "if(!contact.stealth_only && stealth_hold_.victim()==contact.victim_spawn) if(auto* held_payload=stealth_hold_.payload_mut()) held_payload->stealth_only=false;" in consumer
     begin = source.index("const unsigned why=")
     end = source.index("// The tip striking", begin)
@@ -55,7 +65,7 @@ def check(source: str, consumer: str) -> None:
         "!sword_contact_current(self->read_,contact,hand->epoch,now)",
         "hand->epoch!=sword_pose_epoch_.load(std::memory_order_acquire)",
         "camera->player!=contact.owner.player", "camera->authored_view()",
-        "contact.equipment.sword,contact.hit,&observation", "sword_contacts_.clear()",
+        "strike,contact.hit,&observation", "sword_contacts_.clear()",
         "std::lock_guard<std::mutex> guard(trace_mutex_);return sword_last_contact_;",
         "sword_last_contact_={contact.hit.tick,final_now,contact.pose_epoch,contact.victim_spawn",
         "publish_sword_pose_epoch(0);publish_sword_hand(false,0,0)",
@@ -119,7 +129,7 @@ int main() {
     Xr xr;auto* game_xr=&xr;Grab native_grab;Contact observed;auto* contact=&observed;
     bool drawn=true,physical_grab_requested=true;
     std::optional<Hand> contact_hand=Hand{};
-    double speed=2;bool too_slow=false;std::uint64_t now=1000;unsigned side=1;std::array<double,2> tip_speed{};d2vr::SwordHitGate sword_hit_gate;
+    bool too_slow=false;std::uint64_t now=1000;unsigned side=1;std::array<double,2> tip_speed{};d2vr::SwordHitGate sword_hit_gate;
     const auto gate=[&] {@CONDITION@ return why==0u;};
     for(unsigned buttons=0;buttons<64;++buttons) {
         Raw raw{float(buttons&1),float((buttons>>1)&1),float((buttons>>2)&1),float((buttons>>3)&1),buttons};

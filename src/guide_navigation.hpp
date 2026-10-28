@@ -3,7 +3,8 @@
 #include <cmath>
 
 namespace d2vr {
-inline int guide_page_step(int page,int delta,int count=7) noexcept {return std::clamp(page+(delta>0?1:delta<0?-1:0),0,std::max(0,count-1));}
+inline constexpr int guide_page_count=3; // body map, controllers, tips
+inline int guide_page_step(int page,int delta,int count=guide_page_count) noexcept {return std::clamp(page+(delta>0?1:delta<0?-1:0),0,std::max(0,count-1));}
 struct GuideNavigationState {bool armed=true,blocked=false;};
 struct GuideNavigationResult {GuideNavigationState state;int delta{};bool consume{};};
 // User's illustrated guide: one flick, both axes neutral to rearm; closed gameplay waits for neutral and click release.

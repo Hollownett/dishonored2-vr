@@ -15,8 +15,8 @@ public static partial class PoseRender
             try
             {
                 using var reader = new BinaryReader(File.OpenRead(path));
-                if (reader.BaseStream.Length < 3400 || reader.BaseStream.Length > 32 * 1024 * 1024 ||
-                    !reader.ReadBytes(8).AsSpan().SequenceEqual("D2VRNH01"u8) || reader.ReadUInt32() != 1 ||
+                if (reader.BaseStream.Length < 3400 || reader.BaseStream.Length > 144 * 1024 * 1024 ||
+                    !reader.ReadBytes(8).AsSpan().SequenceEqual("D2VRNH01"u8) || reader.ReadUInt32() != 2 ||
                     reader.ReadUInt32() != (character == "corvo" ? 0u : 1u) || reader.ReadUInt32() != (side == "left" ? 0u : 1u)) return true;
             }
             catch (IOException) { return true; }
@@ -28,7 +28,7 @@ public static partial class PoseRender
     public static void ExportNoteHandMeshes(string game, string directory)
     {
         Directory.CreateDirectory(directory);
-        var containers = new ArtImport.Containers(Path.GetFullPath(game), n => n.StartsWith("generated/") && n.Contains("models/characters/player/"));
+        var containers = new ArtImport.Containers(Path.GetFullPath(game), n => n.StartsWith("generated/") && n.Contains("models/characters/"));
         foreach (string character in new[] { "corvo", "emily" })
         for (uint side = 0; side < 2; ++side)
         {
@@ -41,7 +41,7 @@ public static partial class PoseRender
             string target = Path.Combine(directory, $"note_hand_{character}_{(side == 0 ? "left" : "right")}.bin"), temporary = target + ".tmp";
             using (var writer = new BinaryWriter(File.Create(temporary)))
             {
-                writer.Write("D2VRNH01"u8); writer.Write(1u); writer.Write(character == "corvo" ? 0u : 1u); writer.Write(side);
+                writer.Write("D2VRNH01"u8); writer.Write(2u); writer.Write(character == "corvo" ? 0u : 1u); writer.Write(side);
                 writer.Write(SHA256.HashData(bytes));
                 byte[] name = Encoding.UTF8.GetBytes(resource); writer.Write((uint)name.Length); writer.Write(name);
                 foreach (var bind in skeleton.Bind)
@@ -59,6 +59,18 @@ public static partial class PoseRender
                         writer.Write(mesh.W, v * 8, 8); writer.Write(mesh.J, v * 8, 8);
                     }
                     for (int i = surface.Start; i < surface.Start + surface.Count; ++i) writer.Write(checked((ushort)(mesh.Idx[i] - surface.VertexStart)));
+                    string materialName = surface.Material.ToLowerInvariant();
+                    writer.Write(materialName.Contains("hands") || materialName.Contains("gloves") || materialName.Contains("ring") ? 1u : 0u);
+                    for (int v = surface.VertexStart; v < surface.VertexStart + surface.VertexCount; ++v)
+                    { writer.Write(mesh.Uv[v].X); writer.Write(mesh.Uv[v].Y); }
+                    // Use the installed material declaration rather than guide-only material guesses.
+                    var material = Encoding.UTF8.GetString(containers.Read("generated/decls/material/" + surface.Material + ".decl"));
+                    var diffuse = System.Text.RegularExpressions.Regex.Match(material, @"^\s*diffusemap\s+(\S+)", System.Text.RegularExpressions.RegexOptions.Multiline | System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+                    if (!diffuse.Success) throw new InvalidDataException("No native note hand diffuse map: " + surface.Material);
+                    string map = diffuse.Groups[1].Value.Trim('"').ToLowerInvariant();
+                    if (map.EndsWith(".tga")) map = map[..^4];
+                    var texture = LoadTex(containers, map);
+                    writer.Write((uint)texture.W); writer.Write((uint)texture.H); writer.Write(texture.Rgba);
                 }
             }
             File.Move(temporary, target, true);

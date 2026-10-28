@@ -29,7 +29,7 @@ int main() {
     assert(std::abs(((*rect)[2]-(*rect)[0])*2000-((*rect)[1]-(*rect)[3])*1600)<.001f);
     assert(!eye_reticle_rect(0,0,0,1600));
     const auto pixels=eye_reticle_pixels();
-    assert(pixels[3]==0 && pixels[4*(15*32+15)+3]==255);
+    assert(pixels[3]==0 && pixels[4*(15*32+15)+3]>=240);
     frames.clear();assert(!frames.find(1,10,4,3,1031));
     std::cout<<"PASS: per-image stereo reticle receipts, kept-eye identity, offscreen rejection and full-eye pixel geometry\n";
 }

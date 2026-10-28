@@ -70,7 +70,7 @@ float4 PS(V v):SV_TARGET{return art.Sample(linearClamp,v.uv);}
         checked(device_->CreateSamplerState(&s,&sampler_));
     }
     void draw(ID3D11Texture2D* eye,ID3D11Texture2D* art,DXGI_FORMAT format,const D3D11_BOX& crop,
-            const XrView& view,const NotePanelReceipt& panel,const std::array<NoteHandReceipt,2>& hands,DXGI_FORMAT source_format=DXGI_FORMAT_UNKNOWN) {
+            const XrView& view,const NotePanelReceipt& panel,const std::array<NoteHandReceipt,2>& hands) {
         if(!eye || !art || eye==art)throw std::invalid_argument("Missing isolated note image");
         D3D11_TEXTURE2D_DESC e{},a{};eye->GetDesc(&e);art->GetDesc(&a);
         Ptr<ID3D11Device> eo,ao;eye->GetDevice(&eo);art->GetDevice(&ao);
@@ -111,7 +111,9 @@ float4 PS(V v):SV_TARGET{return art.Sample(linearClamp,v.uv);}
         Ptr<ID3D11RenderTargetView> output;D3D11_RENDER_TARGET_VIEW_DESC rd{};rd.Format=format;rd.ViewDimension=D3D11_RTV_DIMENSION_TEXTURE2D;
         checked(device_->CreateRenderTargetView(eye,&rd,&output));
         Ptr<ID3D11ShaderResourceView> input;D3D11_SHADER_RESOURCE_VIEW_DESC sd{};
-        sd.Format=source_format!=DXGI_FORMAT_UNKNOWN?source_format:a.Format==DXGI_FORMAT_R8G8B8A8_TYPELESS?format:a.Format;
+        // Read the page with the eye's own transfer, as the quad path's byte copy shows it: the native movie
+        // blends gamma-space bytes, and a UNORM view into an sRGB eye encoded them twice (lighter page, loud red ink).
+        sd.Format=a.Format==DXGI_FORMAT_R8G8B8A8_TYPELESS?format:a.Format;
         sd.ViewDimension=D3D11_SRV_DIMENSION_TEXTURE2D;sd.Texture2D.MipLevels=1;
         checked(device_->CreateShaderResourceView(art,&sd,&input));
         ContextState::Scope scope(state_);

@@ -64,6 +64,16 @@ void populate_state(unsigned index,std::uintptr_t vtable,unsigned active) {
 }
 }
 int main() {
+    // A missing/mismatched native pin and a native-call fault are unavailable, never an "aware" verdict.
+    const auto no_read=+[](std::uintptr_t,void*,std::size_t) {return false;};
+    assert(!d2vr::NativeMelee::unaware_result(image_base,no_read,fixture_victim).has_value());
+    const auto wrong_pin=+[](std::uintptr_t,void* out,std::size_t size) {std::memset(out,0,size);return true;};
+    assert(!d2vr::NativeMelee::unaware_result(image_base,wrong_pin,fixture_victim).has_value());
+    const auto pinned_read=+[](std::uintptr_t,void* out,std::size_t size) {
+        if(size!=d2vr::NativeMelee::unaware_code.size())return false;
+        std::memcpy(out,d2vr::NativeMelee::unaware_code.data(),size);return true;
+    };
+    assert(!d2vr::NativeMelee::unaware_result(0x10000,pinned_read,fixture_victim).has_value());
     fields();const auto contact=capture();assert(contact && current(*contact));
     d2vr::SwordContactPublication initial_publication;initial_publication.publish(true,9,1000);
     const auto hand=initial_publication.current(1050);assert(hand && capture() && current(*contact,hand->epoch));

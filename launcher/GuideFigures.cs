@@ -14,7 +14,7 @@ namespace DishonoredVR;
 public static class GuideFigures
 {
     public const int Version = 4;
-    public static readonly string[] Ids = { "sword_throw", "enemy_grab", "sword_draw_block", "stealth", "move_jump_lean", "hands_push", "bodies_drag_carry", "left_hip", "wheel_watch", "temples", "menu_point" };
+    public static readonly string[] Ids = { "sword_throw", "enemy_grab" };
     public static int Height(string id) => id is "move_jump_lean" or "hands_push" or "menu_point" ? 804 : 232;
     static readonly Color Paper = Color.FromArgb(206, 192, 160), Ink = Color.FromArgb(41, 39, 35), Rust = Color.FromArgb(148, 89, 74);
     static readonly float[] Open = { 0, 0, 0, 0, 0 }, Holding = { .8f, .85f, 1, 1, 1 }, Grip = { .75f, .15f, 1, 1, 1 }, Pointing = { .65f, 0, 1, 1, 1 };
@@ -412,7 +412,7 @@ public static class GuideFigures
                 "enemy_grab" => ("1  Touch + hold grip", "2  Hold grip + pull hard"),
                 "sword_draw_block" => ("1  Grip at shoulder", "2  Blade in front: block"),
                 "stealth" => ("Stab from behind / side", "Grip neck from behind"),
-                "bodies_drag_carry" => ("1  Grip limb + lift", "2  Release at shoulder"),
+                "bodies_drag_carry" => ("1  Grip limb + lift", "2  Lift and carry"),
                 "left_hip" => ("Grip at left hip: draw", "Left trigger: fire / cast"),
                 "wheel_watch" => ("Hold X + point to choose", "Turn wrist to your face"),
                 _ => ("Left temple: journal", "Right temple: guide")

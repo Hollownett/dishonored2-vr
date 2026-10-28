@@ -4,7 +4,7 @@ static int failures=0;
 static void expect(bool ok,const char* what) {if(!ok) {std::printf("FAIL %s\n",what);++failures;}}
 using V=std::array<double,3>;
 int main() {
-    using d2vr::ThrowGesture;
+    using d2vr::ThrowGesture;using d2vr::gadget_squeeze;
     {   // peak over the last 100 ms x1.5 + player velocity
         ThrowGesture g;g.note_trigger(0,1);
         for(unsigned t=0;t<=400;t+=10) g.note_hand(t,{1,2,3},t==300?V{0,0,-6}:V{0,0,-1});
@@ -42,6 +42,11 @@ int main() {
         ThrowGesture g;g.note_trigger(0,1);g.note_hand(5,{0,0,0},{0,0,-3});
         g.note_trigger(10,.5f);expect(!g.pending(11),"inside hysteresis");
         g.note_trigger(20,0);g.note_trigger(30,1);expect(!g.pending(31),"re-squeeze discards");
+    }
+    {   // a fist holds the gadget, opening the hand releases it; the trigger alone still works
+        expect(gadget_squeeze(1,1)==1 && gadget_squeeze(1,.2f)==.2f && gadget_squeeze(.2f,1)==1 && gadget_squeeze(0,0)==0,"gadget squeeze");
+        ThrowGesture g;g.note_trigger(0,gadget_squeeze(1,1));g.note_hand(5,{0,0,0},{0,0,-3});
+        g.note_trigger(10,gadget_squeeze(.1f,.1f));expect(g.pending(11),"an opened fist releases");
     }
     std::printf(failures?"throw_gesture_check FAILED\n":"throw_gesture_check ok\n");
     return failures?1:0;

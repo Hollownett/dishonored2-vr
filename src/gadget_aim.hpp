@@ -12,6 +12,7 @@ struct GadgetAimPose {
     std::array<float,3> origin{},forward{};
     std::uint64_t tick{};
     bool trigger{};   // the left trigger was held when this pose was published (the throw preview re-aims only then; placement does not need it)
+    std::array<float,3> place_origin{},place_dir{};float place_length{}; // the mine placement ray when set (place_length > 0): out of the palm
     bool valid() const noexcept {
         for(unsigned i=0;i<3;++i) if(!std::isfinite(origin[i]) || !std::isfinite(forward[i])) return false;
         const float n=forward[0]*forward[0]+forward[1]*forward[1]+forward[2]*forward[2];
@@ -19,6 +20,8 @@ struct GadgetAimPose {
     }
 };
 inline constexpr std::uint64_t gadget_aim_fresh_ms=100;
+// The palm placement ray starts this far behind the palm (a hand pressed a little into a wall still finds its face) and reaches this far.
+inline constexpr double mine_palm_back_m=.10,mine_palm_reach_m=.35;
 // Which sensor may use a fresh pose: the placement ray follows the left hand whenever the sensor is enabled (the ghost then sits where the
 // crosshair is, trigger or not); the ThrowHit sensor runs on most frames with no grenade, so it needs the trigger.
 inline bool gadget_aim_wanted(const GadgetAimPose& pose,bool placement) noexcept {(void)placement;return pose.trigger;}

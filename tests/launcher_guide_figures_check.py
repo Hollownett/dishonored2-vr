@@ -12,8 +12,8 @@ import sys
 
 directory = Path(sys.argv[1])
 manifest = json.loads((directory / "manifest.json").read_text(encoding="utf-8-sig"))
-short = "sword_throw enemy_grab sword_draw_block stealth bodies_drag_carry left_hip wheel_watch temples".split()
-tall = "move_jump_lean hands_push menu_point".split()
+short = "sword_throw enemy_grab".split()
+tall = []
 for figure in short + tall:
     for character in ("corvo", "emily"):
         key = f"guide_{figure}_{character}"
@@ -32,4 +32,4 @@ for figure in short + tall:
         assert entry["generation_version"] == manifest["guide_generation_version"], key
         assert entry["source_identity"], key
 assert (directory / "generation.txt").read_text().strip() == manifest["generation"]
-print("PASS: all 22 figures, dimensions, opaque RGBA, hashes, source and generation marker")
+print("PASS: all 4 figures, dimensions, opaque RGBA, hashes, source and generation marker")

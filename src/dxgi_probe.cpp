@@ -1,4 +1,4 @@
-﻿#define WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <intrin.h>
 #include <windows.h>
@@ -147,6 +147,10 @@
 #include "native_world_ui.hpp"
 #include "note_tablet.hpp"
 #include "note_hand_mesh.hpp"
+#include "note_native_skin.hpp"
+#include "note_frame_history.hpp"
+#include "native_note_source.hpp"
+#include "native_note_geometry.hpp"
 #include "native_note_kind.hpp"
 #include "world_ui_capture.hpp"
 #include "world_ui_completion.hpp"
@@ -412,7 +416,7 @@ static d2vr::HeldPlacementSession held_placement_session;
 // Holding hand's world velocity (finite difference of the published grip) and the held entity, for the release throw.
 static std::array<double,3> held_hand_velocity{};static std::uintptr_t held_entity{};static std::array<double,3> held_offset{};
 // Carry diagnostics (Task 9): counters always on (atomics); the per-frame trace only when build/carry-trace exists (a writer thread, capped, flushed every second and at teardown).
-static bool legacy_cutscene_hands=false; // build/legacy-cutscene-hands: a cutscene hands both arms to the native animation and stops the tracked hands and body (as before v643)
+static bool legacy_cutscene_hands=true; // a cutscene hands both arms to the native animation and hides the avatar (user, headset v670: "better not to render the body in a cutscene, only the camera"); build/cutscene-avatar keeps the v643 tracked hands and body
 static bool legacy_authored_hands=false; // build/legacy-authored-hands: every authored camera (not only scripted scenes and cutscenes) hands both arms to the native animation
 static bool legacy_authored_camera=false; // build/legacy-authored-camera: authored scenes use the native camera rotation (and the +5% FOV)
 static bool action_camera_alignment_enabled=true; // build/legacy-action-camera-alignment restores pre-H5 offsets/history
@@ -579,6 +583,7 @@ static d2vr::CombatDecision combat_decision{};
 // Plan G task 3 (src/attack_intent.hpp): without build/legacy-sword-contact a drawn-sword slash or a crouched stab presses the game's attack
 // and the engine decides the stealth kill. Controller thread only, except the atomics (status). reset at StartProbe.
 static d2vr::AttackIntent attack_intent;static d2vr::AttackPress attack_press;static d2vr::AttackHonour attack_honour;
+static std::optional<d2vr::OwnedSwordContact> contact_attack_target;
 static bool legacy_sword_contact=false;static bool attack_intent_owns=false,attack_intent_rt=false,attack_intent_block_off=false,attack_intent_ran=false;
 static std::atomic<UINT64> attack_intent_pad_frames{};static std::atomic<UINT64> attack_intent_suppressed_far{};static std::atomic<bool> attack_intent_honour_read{};
 static std::mutex combat_policy_mutex;
@@ -802,15 +807,46 @@ static std::array<bool,3> world_ui_captured{};
 static std::array<UINT64,3> world_ui_first_seen{};
 static bool world_ui_installed=false;
 static std::mutex note_panel_mutex;
-static d2vr::NotePanelReceipt note_panel_receipt;
-static std::array<d2vr::NoteHandReceipt,2> note_hand_receipts;
-static std::array<std::shared_ptr<const d2vr::rig::NativeArmBindingSnapshot>,2> note_hand_bindings;
-static std::array<std::optional<d2vr::note_hand::Mesh>,4> note_hand_meshes;
+static std::array<std::shared_ptr<const d2vr::note_hand::Mesh>,4> note_hand_meshes;
 static bool note_tablet_requested{};
 static d2vr::NativeNoteKind native_note_kind;
 static std::atomic<std::uint64_t> note_kind_epoch{1};
+static std::atomic<const char*> note_tracking_reason{"not_sampled"},note_last_fallback{"none"};
+static std::atomic<std::uint64_t> note_seen_frames{},note_ready_frames{};
 static std::uint64_t note_art_generation{},note_art_after_scope{}; // guarded by note_panel_mutex
-static std::shared_ptr<const d2vr::rig::NativeArmBindingSnapshot> note_panel_binding;
+static std::atomic<std::uint64_t> native_reader_generation{};
+static std::uint64_t native_note_generation() noexcept {return d2vr::native_note_reader_logic(game_logic_mask())?native_reader_generation.load():0;}
+struct NativeNoteFrame {
+    std::uint64_t serial{};
+    std::uint64_t pose_hash{};
+    std::shared_ptr<const d2vr::rig::NativeArmBindingSnapshot> binding;
+    std::shared_ptr<d2vr::NoteNativeSkin::Prepared> skin;
+    d2vr::NotePanelReceipt panel;
+    std::array<d2vr::note_hand::Geometry,2> geometry;
+    std::array<std::vector<d2vr::rig::GeometryRoute>,3> routes;
+    std::array<std::vector<d2vr::rig::GeometryRoute>,2> hand_routes;
+    d2vr::Vec3 index_tip;
+    std::atomic<unsigned> bound_models{};
+};
+static std::shared_ptr<NativeNoteFrame> native_note_frame;
+static d2vr::NoteFrameHistory<NativeNoteFrame> native_note_history;
+static d2vr::WorldUiCompletion native_note_completion;
+static std::atomic<std::uint64_t> native_note_palette_frames{},native_note_bound_draws{};
+static std::atomic<std::uint64_t> native_note_serial{};
+static std::atomic<const char*> native_note_reason{"not_sampled"};
+static std::atomic<bool> native_note_input_live{};
+static std::atomic<std::uint64_t> native_note_pose_epoch{},native_note_reference_epoch{};
+static std::array<std::atomic<std::uint64_t>,12> native_note_draw_gates{};
+static bool native_note_diagnostics{};
+static std::atomic<unsigned> native_note_diagnostic_rows{};
+static std::atomic<unsigned> native_note_timeline_rows{};
+static std::atomic<std::uint64_t> native_note_accepted_frames{},native_note_accepted_serial{};
+static std::atomic<std::uint64_t> native_note_accepted_pose_hash{};
+static std::mutex native_note_diagnostic_mutex;
+static std::uint64_t native_note_final_tick{};
+static unsigned native_note_final_pairs{};
+static bool native_note_final_pair{};
+static void native_note_gate(unsigned gate) noexcept {if(native_note_diagnostics)++native_note_draw_gates[gate];}
 struct WorldUiRestore {
     ComPtr<ID3D11DeviceContext> context;
     ComPtr<ID3D11RenderTargetView> original,replacement;
@@ -2054,14 +2090,115 @@ static bool skip_letterbox_draw(ID3D11DeviceContext* context,UINT count) noexcep
         ++cutscene_letterbox_hidden;return true;
     } catch(...) {return false;}
 }
+static void native_note_trace_event(const char* event,std::uint64_t serial=0,std::uint64_t frame=0,
+        const void* context=nullptr,const void* list=nullptr,unsigned models=0) noexcept {
+    if(!native_note_diagnostics || native_note_timeline_rows.fetch_add(1)>=512)return;
+    try {
+        std::lock_guard<std::mutex> lock(native_note_diagnostic_mutex);
+        std::ofstream out(output_directory/L"native-note-timeline.jsonl",std::ios::app);
+        out<<"{\"event\":"<<std::quoted(event)<<",\"tick\":"<<GetTickCount64()<<",\"present\":"<<frames.load()
+            <<",\"serial\":"<<serial<<",\"frame\":"<<frame<<",\"context\":"<<reinterpret_cast<std::uintptr_t>(context)
+            <<",\"list\":"<<reinterpret_cast<std::uintptr_t>(list)<<",\"models\":"<<models<<"}\n";
+    }catch(...) {}
+}
+static void native_note_draw_diagnostic(ID3D11DeviceContext* context,const std::shared_ptr<NativeNoteFrame>& frame,
+        UINT count,UINT instances,UINT start,INT base,UINT first,unsigned rejection,unsigned allowed,unsigned replaced) noexcept {
+    if(!native_note_diagnostics || !frame)return;
+    bool candidate=false;
+    for(const auto& routes:frame->routes)for(const auto& route:routes)candidate|=route.count==count;
+    if(!candidate)return;
+    const auto row=native_note_diagnostic_rows.fetch_add(1);if(row>=128)return;
+    try {
+        std::ostringstream out;
+        out<<"{\"present\":"<<frames.load()<<",\"frame\":"<<frame->panel.frame<<",\"serial\":"<<frame->serial
+           <<",\"gate\":"<<rejection<<",\"allowed\":"<<allowed<<",\"replaced\":"<<replaced
+           <<",\"context\":"<<reinterpret_cast<std::uintptr_t>(context)<<",\"context_type\":"<<context->GetType()
+           <<",\"count\":"<<count<<",\"instances\":"<<instances<<",\"start\":"<<start<<",\"base\":"<<base<<",\"first\":"<<first;
+        ComPtr<ID3D11Buffer> index;DXGI_FORMAT format{};UINT offset{};context->IAGetIndexBuffer(&index,&format,&offset);
+        D3D11_PRIMITIVE_TOPOLOGY topology{};context->IAGetPrimitiveTopology(&topology);
+        out<<",\"topology\":"<<topology<<",\"index\":["<<reinterpret_cast<std::uintptr_t>(index.Get())<<','<<format<<','<<offset<<"],\"vertices\":[";
+        std::array<ID3D11Buffer*,32> raw{};std::array<UINT,32> strides{},offsets{};context->IAGetVertexBuffers(0,32,raw.data(),strides.data(),offsets.data());
+        std::array<ComPtr<ID3D11Buffer>,32> owned;for(unsigned slot=0;slot<32;++slot)owned[slot].Attach(raw[slot]);
+        bool comma=false;
+        for(unsigned slot=0;slot<32;++slot)if(raw[slot]) {if(comma)out<<',';comma=true;
+            out<<'['<<slot<<','<<reinterpret_cast<std::uintptr_t>(raw[slot])<<','<<strides[slot]<<','<<offsets[slot]<<']';}
+        out<<"],\"expected\":[";comma=false;
+        for(unsigned model=0;model<3;++model)for(const auto& route:frame->routes[model])if(route.count==count) {
+            if(comma)out<<',';comma=true;out<<"{\"model\":"<<model<<",\"index\":"<<route.index.resource<<",\"vertices\":[";
+            for(std::size_t slot=0;slot<route.vertices.size();++slot){if(slot)out<<',';const auto& v=route.vertices[slot];out<<'['<<v.resource<<','<<v.stride<<','<<v.offset<<']';}
+            const auto& skin=frame->skin->snapshot.models[model];out<<"],\"palettes\":["<<skin.current_buffer<<','<<skin.previous_buffer<<"]}";
+        }
+        out<<"],\"srvs\":[";comma=false;
+        for(unsigned stage=0;stage<2;++stage) {
+            std::array<ID3D11ShaderResourceView*,128> views{};
+            if(stage)context->PSGetShaderResources(0,128,views.data());else context->VSGetShaderResources(0,128,views.data());
+            std::array<ComPtr<ID3D11ShaderResourceView>,128> retained;for(unsigned slot=0;slot<128;++slot)retained[slot].Attach(views[slot]);
+            for(unsigned slot=0;slot<128;++slot)if(views[slot]) {
+                ComPtr<ID3D11Resource> resource;views[slot]->GetResource(&resource);D3D11_SHADER_RESOURCE_VIEW_DESC desc{};views[slot]->GetDesc(&desc);
+                if(comma)out<<',';comma=true;out<<'['<<stage<<','<<slot<<','<<reinterpret_cast<std::uintptr_t>(resource.Get())<<','<<desc.Format<<','<<desc.ViewDimension<<']';
+            }
+        }
+        out<<"]}\n";
+        std::lock_guard<std::mutex> lock(native_note_diagnostic_mutex);std::ofstream file(output_directory/L"native-note-draws.jsonl",std::ios::app);file<<out.str();
+    }catch(...) {}
+}
+struct NativeNoteDraw {
+    std::shared_ptr<NativeNoteFrame> frame;
+    std::unique_ptr<d2vr::NoteNativeSkin::Scope> scope;
+    unsigned hand_models{};
+    ID3D11DeviceContext* context{};
+    NativeNoteDraw(ID3D11DeviceContext* draw_context,UINT count,UINT instances,UINT start,INT base,UINT first=0) noexcept:context(draw_context) {
+        if(!count || !instances || !note_tablet_requested || !capturing.load() || !native_reader_generation.load() ||
+           !d2vr::native_note_reader_logic(game_logic_mask()))return;
+        native_note_gate(0);
+        if(xr_graphics_active){native_note_gate(1);return;}
+        try {
+            frame=std::atomic_load(&native_note_frame);
+            const auto now=GetTickCount64();
+            unsigned rejection=0;
+            if(!frame)rejection=2;
+            else if(frame->binding!=arm_binding_cache.load())rejection=3;
+            else if(frame->panel.generation!=native_note_generation())rejection=4;
+            else if(now<frame->panel.tick || now-frame->panel.tick>100)rejection=5;
+            else if(!d2vr::native_note_recording_frame(frame->panel.frame,frames.load()))rejection=6;
+            else if(!native_note_input_live.load() || frame->panel.pose_epoch!=native_note_pose_epoch.load() ||
+                frame->panel.reference_epoch!=native_note_reference_epoch.load())rejection=7;
+            if(rejection){native_note_gate(rejection);native_note_draw_diagnostic(context,frame,count,instances,start,base,first,rejection,0,0);frame.reset();return;}
+            unsigned allowed{};
+            for(unsigned model=0;model<3;++model)for(const auto& route:frame->routes[model])
+                if(d2vr::rig::matches_native_note_geometry(context,route,count,instances,start,base,first)){allowed|=1u<<model;break;}
+            for(unsigned side=0;side<2;++side)if(allowed&(2u<<side))for(const auto& route:frame->hand_routes[side])
+                if(d2vr::rig::matches_native_note_geometry(context,route,count,instances,start,base,first)){hand_models|=2u<<side;break;}
+            if(allowed)native_note_gate(8);
+            if(hand_models)native_note_gate(9);
+            if(allowed)scope=std::make_unique<d2vr::NoteNativeSkin::Scope>(context,frame->skin,true,allowed);
+            if(scope && scope->models())native_note_gate(10);
+            native_note_draw_diagnostic(context,frame,count,instances,start,base,first,0,allowed,scope?scope->models():0);
+        }catch(...) {native_note_gate(11);scope.reset();frame.reset();}
+    }
+    void submitted() noexcept {
+        if(scope && scope->models())try {
+            frame->bound_models.fetch_or(scope->models());++native_note_bound_draws;
+            if(scope->models()&hand_models)native_note_trace_event("record",frame->serial,frame->panel.frame,context,nullptr,scope->models()&hand_models);
+            for(unsigned model=1;model<3;++model)if(scope->models()&hand_models&(1u<<model)) {
+                if(context->GetType()==D3D11_DEVICE_CONTEXT_IMMEDIATE)native_note_completion.immediate(model,0,frame->serial);
+                else native_note_completion.recorded(context,model,0,frame->serial);
+            }
+        }catch(...) {}
+    }
+};
 template<unsigned Binding> void WINAPI draw_indexed_hook(ID3D11DeviceContext* context,UINT count,UINT start,INT base) {
     GpuCallbackDepth depth_guard;trace_draw(context,"draw_indexed",count,1,false,start,base);
     if(skip_letterbox_draw(context,count)) return;
+    NativeNoteDraw note(context,count,1,start,base);
     reinterpret_cast<DrawIndexedFn>(gpu_bindings.original(3,Binding))(context,count,start,base);
+    note.submitted();
 }
 template<unsigned Binding> void WINAPI draw_instanced_hook(ID3D11DeviceContext* context,UINT count,UINT instances,UINT start,INT base,UINT first) {
     GpuCallbackDepth depth_guard;trace_draw(context,"draw_indexed_instanced",count,instances,false,start,base,first);
+    NativeNoteDraw note(context,count,instances,start,base,first);
     reinterpret_cast<DrawIndexedInstancedFn>(gpu_bindings.original(4,Binding))(context,count,instances,start,base,first);
+    note.submitted();
 }
 template<unsigned Binding> void WINAPI draw_hook(ID3D11DeviceContext* context,UINT count,UINT start) {
     GpuCallbackDepth depth_guard;trace_draw(context,"draw_vertices",count,1,true);
@@ -2328,11 +2465,7 @@ void invoke_arm_upload(void* model,const void* source,UINT count,FullHandUploadW
     alignas(16) std::array<d2vr::rig::Transform,69> palette{};
     alignas(16) std::array<d2vr::rig::Transform,20> body_palette{};
     const void* submitted=source;
-    std::optional<d2vr::NotePanelReceipt> pending_note_panel;
-    d2vr::NoteHandReceipt pending_note_hand;
-    std::array<float,15> pending_note_model_frame{};
-    const d2vr::note_hand::Mesh* pending_note_mesh{};
-    std::optional<d2vr::rig::AvatarMeshToken> pending_note_owner;
+
     std::uint64_t submitted_socket_token{};
     d2vr::NativeLeftWeaponSocketOwner::Epochs submitted_socket_epochs{};
     const auto snapshot=arm_binding_cache.load();
@@ -2357,7 +2490,10 @@ void invoke_arm_upload(void* model,const void* source,UINT count,FullHandUploadW
             if(body_source) ++body_upload_seen;else ++body_upload_rejected;
         }
     } catch(...) {++body_upload_rejected;body_source.reset();}
-    const bool wheel=capturing.load(std::memory_order_acquire) && tracked_arms_requested && snapshot && game_logic_mask()==256;
+    // The wheel and (unless build/cutscene-avatar) a cutscene show no avatar: its render copy moves out of view, as the wheel's always has.
+    const auto upload_logic=game_logic_mask();
+    const bool wheel=capturing.load(std::memory_order_acquire) && tracked_arms_requested && snapshot &&
+        (upload_logic==256 || (upload_logic==d2vr::cinematic_logic_mask && legacy_cutscene_hands));
     if(wheel && body_source) {
         body_palette=body_source->joints;
         observed_upload(*body_source,body_binding->animation,body_binding->skeleton,body_binding->animation_identity);
@@ -2441,11 +2577,7 @@ void invoke_arm_upload(void* model,const void* source,UINT count,FullHandUploadW
     if(capturing.load(std::memory_order_acquire) && (arm_copy_requested || tracked_arms_requested) && snapshot)
         side=snapshot->side_for_model(reinterpret_cast<std::uintptr_t>(model)).value_or(2);
     if(side<2) {
-        if(note_tablet_requested) {
-            std::lock_guard<std::mutex> lock(note_panel_mutex);
-            note_hand_receipts[side]={};note_hand_bindings[side].reset();
-            if(side==0) {note_panel_receipt={};note_panel_binding.reset();}
-        }
+
         const auto flicker_calls=arm_pose_calls[side].load(),flicker_fallbacks=arm_pose_fallbacks[side].load();
         unsigned flicker_why=d2vr::ArmFlicker::other;
         try {
@@ -2550,55 +2682,8 @@ void invoke_arm_upload(void* model,const void* source,UINT count,FullHandUploadW
                             origin.receipt_frame_policy=d2vr::NativeAttachmentReceiptFramePolicy::current_parent;
                         }
                         if(!socket_current && attachment_pose_installed)attachment_pose.clear(side);
-                        const auto note_kind=native_note_kind.current(read_self,image_base,note_kind_epoch.load());
-                        const bool note_visual=t.note.active && note_kind && note_kind->generation==t.note.generation && game_logic_mask()==16 && !socket_token &&
-                            t.grip_valid[side] && (t.tracked_hands&(1u<<side)) && posed->owned<.001 &&
-                            arm_binding_cache.load()==snapshot;
-                        const bool accepted=socket_current && (note_visual?
-                            attachment_pose_installed && attachment_pose.validate_visual(side,snapshot->arms[side].animation,
-                                reinterpret_cast<std::uintptr_t>(source),palette,origin):
-                            !t.note.active && (!attachment_pose_installed || attachment_pose.publish(side,
-                                snapshot->arms[side].animation,reinterpret_cast<std::uintptr_t>(source),palette,origin)));
-                        if(accepted && note_visual) try {
-                            // Native world-depth must be active: a depth-hacked hand
-                            // cannot share the page's physical eye projection.
-                            if(d2vr::NativePlayerDepth::process_owner().world_depth_current(read_self)) {
-                                for(unsigned character=0;character<2;++character) if(const auto& mesh=note_hand_meshes[character*2+side]) {
-                                    const auto owner=d2vr::note_hand::bind(read_self,image_base,snapshot->arms[side],snapshot->bindings[side],*mesh);
-                                    if(!owner) continue;
-                                    const auto geometry=d2vr::note_hand::skin(*mesh,snapshot->bindings[side].inverse,palette,native->model_frame,t.note);
-                                    auto triangles=std::make_shared<std::vector<d2vr::Vec3>>();triangles->reserve(geometry.indices.size());
-                                    for(const auto index:geometry.indices)triangles->push_back(geometry.vertices.at(index));
-                                    if(arm_binding_cache.load()==snapshot && d2vr::note_hand::bind(read_self,image_base,snapshot->arms[side],snapshot->bindings[side],*mesh)==owner) {
-                                        pending_note_hand={std::move(triangles),t.source_tick,t.pose_epoch,t.reference_epoch,arm_frame_key,t.note.generation};
-                                        pending_note_model_frame=native->model_frame;
-                                        pending_note_mesh=&*mesh;pending_note_owner=owner;
-                                    }
-                                    break;
-                                }
-                            }
-                        } catch(...) {}
-                        if(side==0 && game_logic_mask()==16) {
-                            std::lock_guard<std::mutex> lock(note_panel_mutex);note_panel_receipt={};note_panel_binding.reset();
-                            if(accepted && note_visual) try {
-                                const auto& b=snapshot->bindings[0];std::array<d2vr::rig::Transform,4> knuckles{};
-                                for(unsigned f=0;f<4;++f) knuckles[f]=palette[b.finger_chains[f+1][0]];
-                                const auto gp=d2vr::rig::hand_bind_grip(palette[b.chain.wrist],knuckles);
-                                const auto world=d2vr::fullbody::to_world(d2vr::fullbody::frame_of(native->model_frame),d2vr::fullbody::to_xf(gp));
-                                const d2vr::WorldTrackedPose palm{world.p,{d2vr::rotated(world.q,{1,0,0}),d2vr::rotated(world.q,{0,1,0}),d2vr::rotated(world.q,{0,0,1})}};
-                                static thread_local std::shared_ptr<const d2vr::rig::NativeArmBindingSnapshot> note_geometry_binding;
-                                static thread_local std::optional<d2vr::rig::HandGeometry> note_geometry;
-                                if(note_geometry_binding!=snapshot) {
-                                    note_geometry.reset();note_geometry_binding=snapshot;
-                                    note_geometry=d2vr::rig::hand_geometry(b.fingers.open,b.parents,b.finger_chains,b.palm,b.chain.wrist,b.bind_grip);
-                                }
-                                if(!note_geometry) throw std::invalid_argument("Missing note hand geometry");
-                                const auto tablet=d2vr::rig::note_tablet(*note_geometry,palm,t.note.width,t.note.height);
-                                if(const auto pose=t.note.panel(tablet.centre,tablet.right,tablet.up,tablet.front)) {
-                                    pending_note_panel=d2vr::NotePanelReceipt{*pose,t.note.width,t.note.height,t.source_tick,t.pose_epoch,t.reference_epoch,arm_frame_key,t.note.generation};
-                                }
-                            }catch(...) {}
-                        }
+                        const bool accepted=socket_current && (!attachment_pose_installed || attachment_pose.publish(side,
+                            snapshot->arms[side].animation,reinterpret_cast<std::uintptr_t>(source),palette,origin));
                         if(diagnostic && socket_token)diagnostic->socket_stage=!socket_current?1u:!accepted?2u:4u;
                         if(accepted && socket_token) {submitted_socket_token=socket_token;
                             submitted_socket_epochs={t.pose_epoch,t.reference_epoch,t.mapping_revision};}
@@ -2776,18 +2861,6 @@ void invoke_arm_upload(void* model,const void* source,UINT count,FullHandUploadW
         diagnostic->replaced=submitted!=source;
     }
     original_arm_upload(model,submitted,count);
-    if(side<2 && pending_note_hand.triangles && pending_note_mesh && submitted==palette.data() && capturing.load() && !full_body_stopping.load() && arm_binding_cache.load()==snapshot) try {
-        const auto arms=d2vr::rig::player_arms(read_self,image_base);
-        const auto note_kind=native_note_kind.current(read_self,image_base,note_kind_epoch.load());
-        std::array<float,15> current_frame{};
-        if(arms && (*arms)[side]==snapshot->arms[side] && note_kind && note_kind->generation==pending_note_hand.generation &&
-            read_self(reinterpret_cast<std::uintptr_t>(model)+0x1860,current_frame.data(),sizeof(current_frame)) && current_frame==pending_note_model_frame &&
-            d2vr::note_hand::bind(read_self,image_base,snapshot->arms[side],snapshot->bindings[side],*pending_note_mesh)==pending_note_owner) {
-            std::lock_guard<std::mutex> lock(note_panel_mutex);
-            note_hand_receipts[side]=pending_note_hand;note_hand_bindings[side]=snapshot;
-            if(side==0 && pending_note_panel) {note_panel_receipt=*pending_note_panel;note_panel_binding=snapshot;}
-        }
-    }catch(...) {}
     if(diagnostic) {
         diagnostic->consumer_ms=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-consumer_start).count();
         const auto post_start=std::chrono::steady_clock::now();
@@ -3028,6 +3101,7 @@ static std::mutex sword_tip_mutex;static d2vr::Vec3 sword_tip{};static UINT64 sw
 static std::atomic<UINT64> sword_aim_frames{};
 static std::atomic<UINT64> gaze_takedown_frames{},prompt_latency_last{},prompt_latency_max{}; // gaze_takedown_frames: frames the game aimed by gaze
 static char left_equip_name[32]{}; // native equip pose name of the left hand ("Empty", pistol, crossbow...), under hand_state_mutex
+static std::atomic<bool> left_gadget{}; // the left hand holds a grenade, stun mine or spring razor (its equip name)
 static bool left_aim_wanted{}; // the left trigger aimed this session: the native left aim must then have applied
 static std::atomic<UINT64> holster_until{}; // holster hold running: aim up, no hand rays, so Interact sheathes
 static std::atomic<unsigned> scabbard_entries{},holster_fires{}; // the right hand reaching the sword holster behind the shoulder; B holster holds
@@ -3040,7 +3114,7 @@ static std::atomic<UINT64> sword_incoming_until{};static constexpr UINT64 sword_
 static std::array<bool,2> grip_corpse_gate{};static std::array<std::uint64_t,2> grip_corpse_entity{};   // V1: the corpse the press began on (the native query lock is released while the hand holds, so the handoff cannot re-read the target)   // Corpse identity is retained for the torso-hold handoff; all grip-only pickups use the 10 cm contact gate
 static bool legacy_corpse_carry=false;static UINT64 corpse_drop_press_until{},carry_toss_until{};static d2vr::ShoulderCarry shoulder_carry;static d2vr::ShoulderDock shoulder_dock;static std::array<d2vr::Vec3,2> dock_local_p{};static std::array<d2vr::Quaternion,2> dock_local_q{};static std::atomic<unsigned> shoulder_dock_bits{},shoulder_consume_bits{};static std::array<std::atomic<unsigned>,6> dock_diag{};static std::atomic<unsigned> dock_faults{};static std::atomic<unsigned> dock_last_lag_mm{};   // shoulder_dock: render thread only; the bits tell the input thread which lanes are docked and whose squeeze the dock took   // v613 item 4: build/legacy-corpse-carry; the Use pulse that drops a shoulder-carried body
 static std::array<d2vr::GripIntent,2> grip_intent;static std::array<d2vr::GripIntent::Out,2> grip_intent_out{}; // input thread
-static std::atomic<unsigned> fist_hands{},grab_hands{};static std::atomic<int> trace_lock_side{-1};static std::atomic<UINT64> fist_takes{},limb_hints{},carry_drops{},carry_throws{},carry_docks{},body_use_blocked{},stealth_kill_pulses{};// fist frames that are the game's pickup // the hand a grip Use locked (controller trace)
+static std::atomic<unsigned> fist_hands{},grab_hands{};static std::atomic<int> trace_lock_side{-1};static std::atomic<UINT64> fist_takes{},limb_hints{},carry_drops{},carry_throws{},carry_docks{},body_use_blocked{},native_carry_auto_drops{},stealth_kill_pulses{};// fist frames that are the game's pickup // the hand a grip Use locked (controller trace)
 static std::array<std::atomic<unsigned>,10> use_diag{}; // grip Use: use_started L/R, fist_started L/R, locked L/R, ready while locked, target while locked, intent not free L/R // bit per hand: a full fist (grip + trigger) owns the physical grab this press
 static d2vr::OfferedChokeGrip offered_choke_grip;static unsigned choke_side=1;static UINT64 choke_rb_since{};   // v639: the hand whose grip is the choke (the left while the sword holds the right fist); when the choke RB began
 static std::optional<d2vr::NativePlayerStateLease> controls_choke_owner;
@@ -3061,11 +3135,17 @@ static std::optional<d2vr::Vec3> hand_clamped_palm[2]{};static UINT64 hand_clamp
 static std::optional<d2vr::Vec3> hip_xr_position;static UINT64 hip_pose_tick{},hip_pose_epoch{};
 static std::atomic<float> right_hand_peak{},sword_release_speed{}; // diagnostics: peak right-hand speed (decays), hand speed at the last drop
 static bool gadget_hand_aim_enabled=false; // Track T B: installed, and build/no-hand-mine-aim absent
+static bool mine_point_aim=false; // build/mine-point-aim: a mine is placed along the pointing ray (v613) instead of at the palm
 static void publish_gadget_aim(const d2vr::WorldTrackedPose& left) noexcept {
     if(!game_xr) return; // the placement sensor is re-aimed whenever it is enabled (v613: the ghost must sit on the crosshair); the ThrowHit sensor runs on most frames and is re-aimed only with the trigger (sim: 81% of frames)
     d2vr::GadgetAimPose gadget{};gadget.trigger=game_xr->controller_input.left_trigger>=.1f;
     gadget.origin={static_cast<float>(left.position.x),static_cast<float>(left.position.y),static_cast<float>(left.position.z)};
     gadget.forward={static_cast<float>(left.basis[0].x),static_cast<float>(left.basis[0].y),static_cast<float>(left.basis[0].z)};
+    if(!mine_point_aim) { // a mine goes where the hand puts it (user, headset v671): a short ray out of the palm (+X of the left controller)
+        const auto palm=left.basis[1]*-1.,from=left.position-palm*d2vr::mine_palm_back_m;
+        gadget.place_origin={static_cast<float>(from.x),static_cast<float>(from.y),static_cast<float>(from.z)};
+        gadget.place_dir={static_cast<float>(palm.x),static_cast<float>(palm.y),static_cast<float>(palm.z)};gadget.place_length=static_cast<float>(d2vr::mine_palm_reach_m);
+    }
     gadget.tick=GetTickCount64();d2vr::NativeGadgetAim::publish(gadget);
 }
 static bool grenade_hand_throw_enabled=false; // Track T A: installed, and build/no-hand-grenade-throw absent
@@ -3094,6 +3174,7 @@ static void publish_hand(unsigned side,const d2vr::WorldTrackedPose& drawn,const
 }
 static bool npc_entity(std::uintptr_t e) noexcept {std::uintptr_t vt{};return e && read_self(e,&vt,8) && vt==image_base+0x1c5e108;} // arkNPC
 // User, headset v637: a dead or unconscious body (+0xd1 bits 0x08/0x20) is carried by hand only, so its native "Carry body" prompt is never shown.
+static bool shoulder_dock_enabled{};   // build/shoulder-dock: a body released at the shoulder stays docked there (off: bodies are carried by hand only, a release drops them)
 static bool body_carry_prompt(std::uintptr_t e) noexcept {std::uint8_t f{};return physical_grab_requested && !legacy_corpse_carry && npc_entity(e) && read_self(e+0xd1,&f,1) && (f&0x28);}
 // What a hand's grip holds rather than uses (user 2026-10-13: "move objects pickup like coins to a trigger"; the grip holds things):
 // a native carryable (arkCpntPickable_Simple 0x1c5a3b8: bottles, glasses, severed limbs -> HoldObject) or a body (a dead or
@@ -3158,6 +3239,8 @@ static std::wstring openxr_loader_path() {
     return L"openxr_loader.dll";
 }
 static std::atomic<unsigned> test_pad_bits{};static std::atomic<UINT64> test_pad_until{}; // "pad" test command
+static std::atomic<float> test_move_x{},test_move_y{};
+static std::atomic<UINT64> test_move_until{};
 // Pistol/crossbow: the crosshair and the shots follow the drawn gun's barrel (user, headset v361: the crosshair sat right of
 // the muzzle). The left-hand item (+8 child id) is the drawn weapon entity (vtable 0x1ce1e98, as the sword); its render model
 // (+0xf0, vtable 0x1b0d628) frame (+0x1860 origin, +0x186c rows) has the barrel along row 0 (sim v396: local box 0.60 x 0.10 x
@@ -3183,12 +3266,16 @@ static int gun_owner_of(std::uintptr_t item) noexcept {
     return n.find("emily")!=std::string::npos?1:0;
 }
 // The inventory item's weapon entity decl name says gun/pistol/crossbow (any case): independent of the equip pose name, which a weapon swap can spell differently.
-static bool item_is_gun(std::uintptr_t item) noexcept {
+static std::string item_decl_name(std::uintptr_t item) noexcept {
     std::uint32_t id{};std::uintptr_t game{},entity{},decl{},name{};std::array<char,128> text{};
     if(!read_self(item+8,&id,4) || id==0x3fff0010 || (id>>16)>=0x3fff || !read_self(image_base+0x39a5290,&game,8) || !d2vr::rig::pointer(game) ||
        !read_self(game+0x3130b0+(id>>16)*8,&entity,8) || !d2vr::rig::pointer(entity) || !read_self(entity+0x2e8,&decl,8) || !d2vr::rig::pointer(decl) ||
-       !read_self(decl+0x48,&name,8) || !d2vr::rig::pointer(name) || !read_self(name,text.data(),text.size()-1)) return false;
-    return d2vr::is_gun_equip_name(text.data()) && gun_model_of(item)!=0; // the same weapon-entity/model vtable validation the barrel read uses: a non-gun item never engages barrel aim
+       !read_self(decl+0x48,&name,8) || !d2vr::rig::pointer(name) || !read_self(name,text.data(),text.size()-1)) return {};
+    return text.data();
+}
+static bool item_is_gun(std::uintptr_t item) noexcept {
+    const auto name=item_decl_name(item);
+    return !name.empty() && d2vr::is_gun_equip_name(name) && gun_model_of(item)!=0; // the same weapon-entity/model vtable validation the barrel read uses: a non-gun item never engages barrel aim
 }
 // Aim direction = the barrel; the position stays the hand (the bore passes a few cm away: ~0.2 deg at the 30 m crosshair).
 static std::atomic<bool> barrel_trace_enabled{false};static std::string barrel_pending_row;static unsigned barrel_rows_written=0; // Present thread only (the row)
@@ -3973,6 +4060,14 @@ static std::string run_test_command(const std::string& line) {
             button=="right"?32u:button=="up"?64u:button=="left"?128u:button=="down"?256u:button=="lgrip"?512u:button=="rgrip"?1024u:0u;
         if(!bit) return "usage: pad a|b|x|y|start|up|down|left|right|lgrip|rgrip [ms]";
         test_pad_bits=bit;test_pad_until=GetTickCount64()+std::min(ms,5000u);return "pad "+button+" "+std::to_string(ms)+"ms";
+    }
+    if(verb=="move") {
+        float x{},y{};unsigned ms{};std::string extra;
+        if(!simulated_vr_requested)return "move requires simulated XR";
+        if(!(in>>x>>y>>ms) || (in>>extra) || !std::isfinite(x) || !std::isfinite(y) ||
+           std::abs(x)>1 || std::abs(y)>1 || !ms || ms>5000)return "usage: move <x[-1,1]> <y[-1,1]> <ms[1,5000]>";
+        test_move_x=x;test_move_y=y;test_move_until=GetTickCount64()+ms;
+        return "move "+std::to_string(x)+" "+std::to_string(y)+" "+std::to_string(ms)+"ms";
     }
     if(verb=="uidump") {std::string v;in>>v;ui_dump_requested=v!="off";ui_dump_state.clear();return std::string("uidump ")+(ui_dump_requested?"on":"off");}
     if(verb=="cvar") {
@@ -4884,6 +4979,133 @@ void native_marker_after_update(std::uintptr_t caller,std::uintptr_t marker) noe
     } catch(...) {++native_marker_art_rejected;}
 }
 
+struct NativeNoteTargets {
+    d2vr::NotePanelReceipt panel;
+    d2vr::NoteViewMapping mapping;
+    std::shared_ptr<const d2vr::rig::NativeArmBindingSnapshot> binding;
+};
+static std::optional<NativeNoteTargets> native_note_targets(d2vr::fullbody::Tracking& tracking,
+        const d2vr::TrackedPose& origin,const d2vr::GameCameraPose& anchor,d2vr::Vec3 centre) {
+    if(!note_tablet_requested || !native_note_generation() || !full_body_tracking_ready.load() || !game_xr)return {};
+    const auto binding=arm_binding_cache.load();
+    const auto panel=game_xr->note_target_panel(frames.load()+1);
+    if(!binding || binding!=game_xr->note_model_owner() || !panel || panel->generation!=native_note_generation())return {};
+    static std::array<d2vr::rig::FingerIkState,2> fingers{};
+    static std::uint64_t tick{},epoch{},reference{},generation{};
+    const bool continuous=tick && panel->tick>=tick && panel->tick-tick<=100 &&
+        epoch==panel->pose_epoch && reference==panel->reference_epoch && generation==panel->generation;
+    if(!continuous)fingers={};
+    const double dt=continuous?(panel->tick-tick)*.001:0.;
+    auto updated=tracking;
+    for(unsigned side=0;side<2;++side) {
+        const auto* poser=game_xr->note_poser(side);if(!poser)return {};
+        const auto& p=game_xr->grip_locations[side].pose;
+        const d2vr::Quaternion q{p.orientation.x,p.orientation.y,p.orientation.z,p.orientation.w};
+        d2vr::WorldTrackedPose grip{{p.position.x,p.position.y,p.position.z},
+            {d2vr::rotated(q,{0,0,-1}),d2vr::rotated(q,{-1,0,0}),d2vr::rotated(q,{0,1,0})}};
+        const auto palm=d2vr::apply_palm_offset(grip,game_xr->palm_offset(side),true);
+        const auto controls=poser->controls(side,palm,*panel,fingers[side],dt,
+            side?game_xr->controller_input.right_grip:game_xr->controller_input.left_grip);
+        const auto& target=controls.palm;
+        const d2vr::TrackedPose xr{target.position,d2vr::basis_quaternion(target.basis[1]*-1,target.basis[2],target.basis[0]*-1)};
+        const auto world=d2vr::to_game_pose(d2vr::camera_relative_controller(xr,centre,origin.position),origin,anchor,1.);
+        updated.grip[side]=d2vr::fullbody::from_basis(world.position,world.basis[0],world.basis[1],world.basis[2]);
+        updated.grip_valid[side]=true;updated.hand_empty[side]=true;updated.has_finger[side]=true;updated.has_finger_axis[side]=true;
+        updated.native_socket_token[side]=0;updated.reverse_grip[side]=false;updated.item_key[side]=0;updated.weapon_incoming[side]=false;
+        for(unsigned f=0;f<5;++f)for(unsigned j=0;j<3;++j) {
+            updated.finger_turn[side][f][j]=controls.turns[f][j];
+            const auto a=controls.axes[f][j];
+            updated.finger_axis[side][f][j][0]=static_cast<float>(a.x);
+            updated.finger_axis[side][f][j][1]=static_cast<float>(a.y);
+            updated.finger_axis[side][f][j][2]=static_cast<float>(a.z);
+        }
+    }
+    tick=panel->tick;epoch=panel->pose_epoch;reference=panel->reference_epoch;generation=panel->generation;
+    d2vr::WorldTrackedPose world_anchor{};world_anchor.position={anchor.position[0],anchor.position[1],anchor.position[2]};
+    for(unsigned axis=0;axis<3;++axis)world_anchor.basis[axis]={anchor.basis[axis*3],anchor.basis[axis*3+1],anchor.basis[axis*3+2]};
+    d2vr::NoteViewMapping mapping{origin,world_anchor,centre,panel->width,panel->height,true,panel->generation};
+    updated.note=mapping;tracking=updated;
+    return NativeNoteTargets{*panel,mapping,binding};
+}
+template<std::size_t N> static std::vector<d2vr::NoteNativeSkin::Rows> native_note_rows(const std::array<d2vr::rig::Transform,N>& joints) {
+    std::vector<d2vr::NoteNativeSkin::Rows> rows(N);
+    for(std::size_t j=0;j<N;++j)for(unsigned r=0;r<3;++r)for(unsigned c=0;c<4;++c)rows[j][r*4+c]=joints[j].f[c*4+r];
+    return rows;
+}
+static void publish_native_note_skin(const NativeNoteTargets& targets) {
+    native_note_reason="native_owner_changed";
+    auto reader=&read_self;
+    const auto& binding=targets.binding;
+    const auto arms=d2vr::rig::player_arms(reader,image_base);
+    if(arm_binding_cache.load()!=binding || !arms || *arms!=binding->arms)return;
+    const auto body=d2vr::rig::native_body_bind(reader,image_base,binding->arms[0]);
+    if(!body || !binding->sources[0].body_bind || !(*body==*binding->sources[0].body_bind))return;
+    native_note_reason="body_source_or_buffers_unavailable";
+    const auto source=d2vr::rig::render_palette_source(reader,body->animation,20);
+    const auto native=source?d2vr::rig::body_upload(reader,image_base,binding->arms[0],*body,body->model,*source,20):std::nullopt;
+    const auto buffers=d2vr::rig::native_skin_buffers(reader,body->model,20);
+    if(!native || !buffers)return;
+    native_note_reason="body_solve_unavailable";
+    const auto posed=full_body.body(native->joints,native->model_frame,targets.panel.frame);if(!posed)return;
+    auto frame=std::make_shared<NativeNoteFrame>();frame->serial=++native_note_serial;frame->binding=binding;frame->panel=targets.panel;
+    d2vr::NoteNativeSkin::Snapshot skin{targets.panel.generation,targets.panel.frame,targets.panel.tick,{}};
+    skin.models.push_back({(*buffers)[0],(*buffers)[1],d2vr::NoteNativeSkin::pack(native_note_rows(*posed),
+        {body->inverse_rows.begin(),body->inverse_rows.end()})});
+    for(unsigned side=0;side<2;++side) {
+        native_note_reason="arm_source_or_buffers_unavailable";
+        const auto arm_source=d2vr::rig::render_palette_source(reader,binding->arms[side].animation,69);
+        const auto arm=arm_source?d2vr::rig::arm_upload(reader,image_base,binding->arms[side],*arm_source,69):std::nullopt;
+        const auto arm_buffers=d2vr::rig::native_skin_buffers(reader,binding->arms[side].model,69);
+        if(!arm || !arm_buffers)return;
+        native_note_reason="arm_solve_unavailable";
+        const auto solved=full_body.arm_frozen(side,arm->joints,arm->model_frame,targets.panel.tick,targets.panel.frame);
+        if(!solved || solved->owned>.001)return;
+        skin.models.push_back({(*arm_buffers)[0],(*arm_buffers)[1],d2vr::NoteNativeSkin::pack(native_note_rows(solved->joints),
+            {binding->bindings[side].inverse.begin(),binding->bindings[side].inverse.end()})});
+        const auto* mesh=game_xr->note_mesh(side);const auto* poser=game_xr->note_poser(side);if(!mesh || !poser)return;
+        native_note_reason="arm_contact_geometry_unavailable";
+        frame->geometry[side]=d2vr::note_hand::skin(*mesh,binding->bindings[side].inverse,solved->joints,arm->model_frame,targets.mapping);
+        if(side) {
+            const auto local=poser->index_tip_local()*(1./poser->model_scale());
+            const auto& distal=solved->joints[binding->bindings[side].finger_chains[1][2]];
+            const auto at=d2vr::rig::position(distal)+d2vr::rig::column(distal,0)*local.x+d2vr::rig::column(distal,1)*local.y+d2vr::rig::column(distal,2)*local.z;
+            const auto tip=d2vr::world_to_xr_controller(d2vr::rig::ModelFrame(arm->model_frame).world_point(at),targets.mapping.origin,
+                targets.mapping.anchor,1.,targets.mapping.controller_centre,targets.mapping.origin.position);
+            if(!tip)return;frame->index_tip=*tip;
+        }
+        if(d2vr::rig::native_skin_buffers(reader,binding->arms[side].model,69)!=arm_buffers)return;
+    }
+    for(unsigned model=0;model<3;++model) {
+        native_note_reason="native_draw_route_unavailable";
+        auto owner=binding->arms[model?model-1:0];
+        if(!model){owner.model=body->model;owner.skeleton=body->skeleton;}
+        const auto mesh=d2vr::rig::avatar_mesh_token(reader,image_base,owner);if(!mesh)return;
+        for(std::size_t surface_index=0;surface_index<mesh->surfaces.size();++surface_index) {
+            const auto& surface=mesh->surfaces[surface_index];
+            const auto route=d2vr::rig::native_note_geometry(reader,image_base,surface.resource);
+            if(route) {
+                frame->routes[model].push_back(*route);
+                if(model && game_xr->note_mesh(model-1)->surfaces.at(surface_index).hand)frame->hand_routes[model-1].push_back(*route);
+            }
+        }
+        if(frame->routes[model].empty() || (model && frame->hand_routes[model-1].empty()) ||
+           d2vr::rig::avatar_mesh_token(reader,image_base,owner)!=mesh)return;
+    }
+    if(arm_binding_cache.load()!=binding || d2vr::rig::native_skin_buffers(reader,body->model,20)!=buffers)return;
+    auto* device=gpu_game_device.load();if(!device)return;
+    frame->skin=d2vr::NoteNativeSkin::prepare(device,std::move(skin));
+    if(native_note_diagnostics) {
+        frame->pose_hash=14695981039346656037ull;
+        for(const auto& model:frame->skin->snapshot.models)for(const auto& row:model.palette) {
+            const auto* bytes=reinterpret_cast<const unsigned char*>(row.data());
+            for(unsigned i=0;i<sizeof(row);++i)frame->pose_hash=(frame->pose_hash^bytes[i])*1099511628211ull;
+        }
+    }
+    native_note_trace_event("publish",frame->serial,frame->panel.frame);
+    native_note_history.publish(frame->panel.frame,frame);
+    std::atomic_store(&native_note_frame,std::move(frame));++native_note_palette_frames;
+    native_note_reason="native_geometry_and_palette_ready";
+}
 void prepare_head_view(void* view) noexcept {
     forced_view_jitter.reset();
     head_wrote=false;++head_setup_seen;
@@ -5332,7 +5554,7 @@ void prepare_head_view(void* view) noexcept {
                     d2vr::ShoulderDockIn in;in.corpse_hold=hold.has_value();in.grip=squeeze;
                     if(hold) {in.entity=hold->entity;in.held_ms=hold->held_ms;in.lag_m=d2vr::length(hold->anchor-hand.position);in.other_holds=other && other->entity==hold->entity;}
                     const auto up=d2vr::rotated(d2vr::normalized(centre_pose.orientation),{0,1,0});
-                    in.in_zone=d2vr::at_shoulder({head_t.x,head_t.y,head_t.z},{fwd.x,fwd.y,fwd.z},{up.x,up.y,up.z},{hand_t.x,hand_t.y,hand_t.z});
+                    in.in_zone=shoulder_dock_enabled && d2vr::at_shoulder({head_t.x,head_t.y,head_t.z},{fwd.x,fwd.y,fwd.z},{up.x,up.y,up.z},{hand_t.x,hand_t.y,hand_t.z});
                     {static std::array<bool,2> was_down{};const bool down_now=squeeze>=(was_down[side]?.35f:.55f);   // dock diagnostics: a release while holding a corpse, and which test held it back
                      if(was_down[side] && !down_now && in.corpse_hold) {++dock_diag[0];if(in.in_zone) ++dock_diag[1];if(in.held_ms>=d2vr::corpse_dock_hold_ms) ++dock_diag[2];
                          if(in.lag_m<=d2vr::corpse_dock_lag_m) ++dock_diag[3];if(in.other_holds) ++dock_diag[4];
@@ -5522,7 +5744,7 @@ void prepare_head_view(void* view) noexcept {
                 gate_in.focused=game_xr->state==XR_SESSION_STATE_FOCUSED;gate_in.action_synced=game_xr->last_action_sync==XR_SUCCESS;
                 gate_in.pose_valid=(aim.locationFlags&required)==required;gate_in.controller_active=game_xr->controller_input.active;
                 gate_in.holster_clear=now_gate>=holster_until.load();gate_in.swing_clear=now_gate>=swing_until_tick+500;
-                gate_in.left_grip=game_xr->controller_input.left_grip;gate_in.right_trigger=game_xr->controller_input.right_trigger;
+                gate_in.left_grip=left_gadget?0.f:game_xr->controller_input.left_grip; // a fist round a grenade or mine still aims itgate_in.right_trigger=game_xr->controller_input.right_trigger;
                 const auto gate=d2vr::ranged_aim_gate(gate_in);
                 if(gate.shots || (gate.reticle && native_crosshair_installed)) {
                     const auto& p=aim.pose;
@@ -5640,20 +5862,6 @@ void prepare_head_view(void* view) noexcept {
             // build/legacy-authored-hands: every authored camera takes both hands, as before.
             const bool hands_authored=action.takes_hands(authored_camera,cutscene_frame,legacy_authored_hands,legacy_cutscene_hands);
             const auto native_ownership=d2vr::fullbody::ownership(avatar_states,hands_authored);
-            const auto reading_kind=native_note_kind.current(read_self,image_base,note_kind_epoch.load());
-            const auto reading_meshes_ready=[&] {
-                if(!note_tablet_requested || !reading_kind || alternate_on() || !layer_pose_sync_on() ||
-                    !d2vr::NativePlayerDepth::process_owner().world_depth_current(read_self))return false;
-                const auto binding=arm_binding_cache.load();if(!binding)return false;
-                for(unsigned character=0;character<2;++character) {
-                    const auto& left=note_hand_meshes[character*2];const auto& right=note_hand_meshes[character*2+1];
-                    if(left && right && d2vr::note_hand::bind(read_self,image_base,binding->arms[0],binding->bindings[0],*left) &&
-                        d2vr::note_hand::bind(read_self,image_base,binding->arms[1],binding->bindings[1],*right))return true;
-                }
-                return false;
-            };
-            const bool reading_note=reading_meshes_ready() && game_logic_mask()==16 && !hands_authored && native_ownership.arm[0]==0 && native_ownership.arm[1]==0 &&
-                avatar_pose_gate.load() && game_xr->state==XR_SESSION_STATE_FOCUSED && game_xr->last_action_sync==XR_SUCCESS;
             const unsigned authored_hands=(hands_authored?3u:0u) | (native_ownership.arm[0]>0?1u:0u) | (native_ownership.arm[1]>0?2u:0u);
             if(!avatar_pose_gate.load(std::memory_order_acquire) || game_xr->state!=XR_SESSION_STATE_FOCUSED ||
                game_xr->last_action_sync!=XR_SUCCESS) native_interaction_aim.clear_door_contact();
@@ -5937,14 +6145,14 @@ void prepare_head_view(void* view) noexcept {
                         // the blade on the body surface) is damage now, through the engine's own TakeDamage on the game thread (native
                         // slash hits land 200-270 ms after the attack press). Takedown-qualified NPCs stay with the native
                         // assassination; one hit per NPC per swing.
-                        // Forgiving reach (user, headset v353): a fat sweep 35 cm past the tip also counts as touching the NPC.
-                        if(side==1 && blade>0) {const auto tip=g.position+blade_axis*blade;
+                        // Legacy reach assist; a speed-free default strike requires the actual blade's contact.
+                        if(side==1 && blade>0 && legacy_sword_contact) {const auto tip=g.position+blade_axis*blade;
                             d2vr::NativeInteractionAim::post_weapon_segment(1,2,tip,tip+blade_axis*.35,.12);
                             if(!(blade_hit && npc_entity(blade_hit->entity)))
                                 if(const auto h=d2vr::NativeInteractionAim::weapon_hit(1,2,now);h && npc_entity(h->entity)) blade_hit=d2vr::to_collision_hit(*h);}
                         std::optional<d2vr::CollisionHit> creature_hit;
                         if(side==1 && blade>0 && contact_damage_enabled && !(blade_hit && npc_entity(blade_hit->entity)))
-                            if(const auto c=small_creature_on(g.position,g.position+blade_axis*(blade+.35),now)) {
+                            if(const auto c=small_creature_on(g.position,g.position+blade_axis*(blade+(legacy_sword_contact?.35:0.)),now)) {
                                 d2vr::CollisionHit h{};h.entity=c->first;h.point=c->second;h.normal=blade_axis*-1.;creature_hit=h;}
                         // The cast's nearest NPC may be a corpse: a living one touching the blade is the target (swinging into a pile of bodies
                         // chopped the dead and never damaged the living). A corpse is chopped only when nothing lives on the blade.
@@ -5952,7 +6160,7 @@ void prepare_head_view(void* view) noexcept {
                         std::uint8_t cast_flags{};const bool cast_dead=cast_npc && read_self(cast_npc+0xd1,&cast_flags,1) && (cast_flags&8);
                         std::optional<d2vr::CollisionHit> live_hit;
                         if(side==1 && blade>0 && contact_damage_enabled && cast_dead)
-                            if(const auto c=live_npc_on(g.position,g.position+blade_axis*(blade+.35),now)) {
+                            if(const auto c=live_npc_on(g.position,g.position+blade_axis*(blade+(legacy_sword_contact?.35:0.)),now)) {
                                 d2vr::CollisionHit h{};h.entity=c->first;h.point=c->second;h.normal=blade_axis*-1.;live_hit=h;}
                         const auto victim=d2vr::pick_contact_victim(cast_npc,cast_dead,live_hit?live_hit->entity:0,creature_hit?creature_hit->entity:0);
                         const std::optional<d2vr::CollisionHit> no_hit;
@@ -5965,12 +6173,13 @@ void prepare_head_view(void* view) noexcept {
                             ++contact_gates[0];
                             // Rear/side first: a calm stroke is only enough from behind, so the speed gate needs it.
                             std::array<float,3> npc_at{},row0{},player_at{};
-                            const bool rear_side=read_self(contact->entity+0x30c,row0.data(),12) && read_self(contact->entity+0x300,npc_at.data(),12) &&
+                            const bool contact_frame_read=read_self(contact->entity+0x30c,row0.data(),12) && read_self(contact->entity+0x300,npc_at.data(),12);
+                            const bool rear_side=contact_frame_read &&
                                 read_self(body->player+0x300,player_at.data(),12) && d2vr::attacker_rear_or_side(row0.data(),npc_at.data(),player_at.data());
                             const double stealth_speed=d2vr::NativeInteractionAim::stealth_speed_.load();
                             const auto speed_class=d2vr::classify_contact_speed(speed,stealth_speed,d2vr::SwordHitGate::hit_speed);
                             const bool legacy_too_slow=speed_class==d2vr::ContactSpeedClass::too_slow || (speed_class==d2vr::ContactSpeedClass::stealth_only && !rear_side); // legacy gate
-                            const bool too_slow=legacy_sword_contact?legacy_too_slow:!(speed>=d2vr::AttackIntent::contact_min_mps); // new path: only a resting blade is ignored; a unaware guard gets the native press, no mod damage
+                            const bool too_slow=legacy_sword_contact && legacy_too_slow; // default physical contact has no speed threshold
                             const unsigned why=!drawn?1u:!contact_hand?2u:contact_hand->epoch!=game_xr->pose_epoch()?3u:
                                 (physical_grab_requested && native_grab.holding(1))?4u:too_slow?5u:
                                 !sword_hit_gate.open(contact->entity,now,tip_speed[side])?6u:0u;
@@ -5989,10 +6198,12 @@ void prepare_head_view(void* view) noexcept {
                                 if(owned_contact) {
                                     // Victim-based stealth strike: a calm deliberate contact from the rear or the side; the engine-side unaware/damageable checks decide on the game thread.
                                     owned_contact->stealth_strike=d2vr::stealth_strike(speed,rear_side,stealth_speed); // v639: the default path kills from behind too (game thread: unaware only)
+                                    const float contact_at[3]{f(contact->point.x),f(contact->point.y),f(contact->point.z)};
+                                    owned_contact->rear_contact=contact_frame_read && d2vr::attacker_rear_or_side(row0.data(),npc_at.data(),contact_at);
                                     owned_contact->stealth_only=legacy_sword_contact?speed_class==d2vr::ContactSpeedClass::stealth_only:speed<d2vr::SwordHitGate::hit_speed; // new path: a calm contact never damages an aware guard
                                     // Victim-specific and fresh (100 ms): the global ga_offered legs name no victim and must not arm a calm press.
                                     owned_contact->native_offer_victim=kill_sensor_spawn.load()==owned_contact->victim_spawn && now>=kill_sensor_tick.load() && now-kill_sensor_tick.load()<=100;
-                                    if(!rear_side) ++d2vr::NativeInteractionAim::stealth_reject_[0];
+                                    if(legacy_sword_contact && !rear_side) ++d2vr::NativeInteractionAim::stealth_reject_[0];
                                 }
                                 // TODO(near-pass assist): a stealth contact that only just misses the guard (blade passes within a hand span) could still count.
                                 if(owned_contact && d2vr::NativeInteractionAim::request_sword_contact(*owned_contact)) {
@@ -6147,7 +6358,7 @@ void prepare_head_view(void* view) noexcept {
                     if(d2vr::finite(shift) && d2vr::length(shift)>1e-6) {hands.grips[side].position=hands.grips[side].position+shift;held_clamp_live.applied[side]=shift;}
                 }
                 if(!cutscene_frame) for(unsigned side=0;side<2;++side) if(hands.hands&(1u<<side)) publish_hand(side,hands.grips[side],raw_grips[side]); // v643: no throw velocity in a cutscene
-                if(grenade_hand_throw_enabled && !cutscene_frame) d2vr::NativeGrenadeThrow::trigger(GetTickCount64(),game_xr->controller_input.left_trigger);
+                if(grenade_hand_throw_enabled && !cutscene_frame) d2vr::NativeGrenadeThrow::trigger(GetTickCount64(),d2vr::gadget_squeeze(game_xr->controller_input.left_grip,game_xr->controller_input.left_trigger)); // the release = the fist opening
                 {std::lock_guard<std::mutex> clamped_lock(hand_state_mutex);   // H16: the loot LOS origin (never the raw controller)
                  for(unsigned side=0;side<2;++side) {
                      hand_clamped_palm[side]=hand_clamp_enabled && clamp_palm_swept[side] && (hands.hands&(1u<<side)) && d2vr::finite(*clamp_palm_swept[side])?
@@ -6542,33 +6753,6 @@ void prepare_head_view(void* view) noexcept {
                     if(fresh && hand_holding_object) for(unsigned side=0;side<2;++side) {t.hand_empty[side]=true;
                         if(side==hand_hold_side) t.grip_value[side]=std::max(t.grip_value[side],.8);}}
                 t.reverse_grip[1]=reverse_sword;
-                if(reading_note) {
-                    const auto size=game_xr->note_dimensions();
-                    t.note={head_origin,hands.head_anchor,hand_centre,size[0],size[1],true,reading_kind->generation};
-                    for(unsigned side=0;side<2;++side) {
-                        t.hand_empty[side]=true;t.weapon_incoming[side]=false;t.item_key[side]=0;t.reverse_grip[side]=false;
-                        t.has_finger[side]=false;t.has_finger_axis[side]=false;
-                    }
-                    t.trigger[1]=game_xr->note_right_trigger();
-                    if(t.grip_valid[0] && finger_geometry[0] && finger_hinges[0]) {
-                        static d2vr::rig::FingerIkState note_fingers;
-                        static std::uint64_t note_finger_epoch{},note_finger_reference{},note_finger_tick{};
-                        if(hands.epoch!=note_finger_epoch || hands.reference_epoch!=note_finger_reference ||
-                           hands.tick<note_finger_tick || hands.tick-note_finger_tick>100) note_fingers={};
-                        note_finger_epoch=hands.epoch;note_finger_reference=hands.reference_epoch;
-                        const double dt=note_finger_tick && hands.tick>=note_finger_tick?std::min((hands.tick-note_finger_tick)*.001,.1):0.;
-                        note_finger_tick=hands.tick;
-                        const auto palm=drawn_palm_frame(0,hands.grips[0]);
-                        const auto tablet=d2vr::rig::note_tablet(*finger_geometry[0],palm,size[0],size[1]);
-                        const auto turns=d2vr::rig::note_tablet_fingers(*finger_geometry[0],palm,tablet,note_fingers,dt);
-                        const auto note_axes=d2vr::rig::hinge_axes(d2vr::rig::note_tablet_hand(*finger_geometry[0]),finger_geometry_for->bindings[0].bind_grip);
-                        t.has_finger[0]=t.has_finger_axis[0]=true;
-                        for(unsigned f=0;f<5;++f)for(unsigned j=0;j<3;++j) {
-                            t.finger_turn[0][f][j]=turns[f][j];const auto& axis=note_axes[f][j];
-                            t.finger_axis[0][f][j][0]=static_cast<float>(axis.x);t.finger_axis[0][f][j][1]=static_cast<float>(axis.y);t.finger_axis[0][f][j][2]=static_cast<float>(axis.z);
-                        }
-                    }
-                }
                 {   // every loose prop in reach of a hand, by entity: where each lay before a pickup flies it away (prop_watch.hpp)
                     std::array<std::optional<std::array<float,3>>,2> reach_hands{}; // C9: the controller's reach (grab selection), not the drawn hand's
                     for(unsigned side=0;side<2;++side) if((hands.hands>>side)&1u) {const auto& p=raw_grips[side].position;reach_hands[side]=std::array<float,3>{static_cast<float>(p.x),static_cast<float>(p.y),static_cast<float>(p.z)};}
@@ -6629,7 +6813,10 @@ void prepare_head_view(void* view) noexcept {
                 if(synchronized_observer.enabled())if(const auto owned=arm_binding_cache.load()) {
                     auto reader=&read_self;if(const auto source_owner=d2vr::weapon_source_owner(reader,image_base,owned->arms[0]))t.native_frame=source_owner->second;
                 }
-                full_body.publish(t,native_ownership);
+                std::optional<NativeNoteTargets> note_targets;
+                try {note_targets=native_note_targets(t,head_origin,anchor,hand_centre);}catch(...) {}
+                full_body.publish(t,note_targets?d2vr::body::Ownership{}:native_ownership);
+                if(note_targets)try {publish_native_note_skin(*note_targets);}catch(const std::exception& e) {note_recoverable(e.what());}
                 {   // Task 9: the player's horizontal velocity from the anchor root over 0.2 s (the hand body's feedforward and the visible hand's moving flag); G1a: one trace row per displayed frame
                     std::lock_guard<std::mutex> trace_lock(locomotion_mutex);
                     const auto trace_now=std::chrono::steady_clock::now();const double seconds=std::chrono::duration<double>(trace_now.time_since_epoch()).count();
@@ -7309,6 +7496,20 @@ std::string feedback_status_json() {
         << ",\"hud_self_dropped\":" << render_perf_hud_self_dropped.load() << '}';
     const auto query_outcomes=native_interaction_aim.query_outcomes();
     out << ",\"native_player_depth\":" << d2vr::NativePlayerDepth::process_owner().status_json();
+    out << ",\"note_tablet\":{\"requested\":" << (note_tablet_requested?"true":"false")
+        << ",\"kind\":" << native_note_kind.status_json()
+        << ",\"tracking\":" << std::quoted(note_tracking_reason.load())
+        << ",\"last_fallback\":" << std::quoted(note_last_fallback.load())
+        << ",\"frames\":" << note_seen_frames.load() << ",\"ready_frames\":" << note_ready_frames.load()
+        << ",\"eye_draws\":" << (game_xr?game_xr->note_eye_draws:0)
+        << ",\"native_palette_frames\":" << native_note_palette_frames.load()
+        << ",\"native_palette_status\":" << std::quoted(native_note_reason.load())
+        << ",\"native_palette_bound_draws\":" << native_note_bound_draws.load()
+        << ",\"native_accepted_frames\":" << native_note_accepted_frames.load()
+        << ",\"native_accepted_serial\":" << native_note_accepted_serial.load()
+        << ",\"native_accepted_pose_hash\":" << native_note_accepted_pose_hash.load()
+        << ",\"native_render_diagnostics\":" << (native_note_diagnostics?"true":"false")
+        << ",\"native_draw_gates\":" << [] {const char* names[]={"callbacks","xr_scope","missing_frame","owner","generation","age","frame","input_epoch","geometry","hand_geometry","srv","error"};std::ostringstream value;value<<'{';for(unsigned i=0;i<12;++i){if(i)value<<',';value<<std::quoted(names[i])<<':'<<native_note_draw_gates[i].load();}value<<'}';return value.str();}() << '}';
     out << ",\"settings_source\":{\"file\":" << std::quoted((output_directory.parent_path()/L"build"/L"vr-settings.cfg").u8string())
         << ",\"read_enabled\":" << (saved_settings_requested?"true":"false")
         << ",\"loaded\":" << (preferences_file_existed?"true":"false");
@@ -7505,7 +7706,7 @@ std::string feedback_status_json() {
                << ",\"fingers\":" << finger_touch_status_json(game_xr && game_xr->touch_status().bound,game_xr && game_xr->touch_status().create_failed)
                << ",\"layer_pose_sync\":{\"enabled\":" << (layer_pose_sync_on()?"true":"false") << ",\"synced\":" << layer_pose_synced.load() << ",\"fallbacks\":" << layer_pose_sync_fallbacks.load() << '}'
                << ",\"comfort\":" << [&]{std::lock_guard<std::mutex> l(comfort_mutex);auto text=comfort_meter.json();std::ostringstream v;v<<",\"vignette\":{\"enabled\":"<<(comfort_vignette.enabled() && comfort_vignette.max_opacity()>0?"true":"false")<<",\"max\":"<<comfort_vignette.max_opacity()<<",\"frames_shown\":"<<(game_xr?game_xr->vignette_layers:0)<<",\"color_scale\":"<<(game_xr && game_xr->vignette_color_scale()?"true":"false")<<",\"turn_ramp\":"<<(turn_ramp_enabled?"true":"false")<<"}";text.insert(text.size()-1,v.str());return text;}()
-               << ",\"scripted_view\":" << [&]{std::lock_guard<std::mutex> l(comfort_mutex);const auto& sv=scripted_view_status;std::ostringstream o;o<<"{\"entries\":"<<sv.entries<<",\"reaims\":"<<sv.reaims<<",\"folds\":"<<sv.folds<<",\"skipped_small\":"<<sv.skipped_small<<",\"easing\":"<<(sv.easing?"true":"false")<<",\"residual_easing\":"<<(sv.residual_easing?"true":"false")<<",\"last_delta_deg\":"<<sv.last_delta_deg<<",\"last_state_index\":"<<sv.last_state_index<<",\"enabled\":"<<(scripted_recenter_enabled && scripted_recenter_setting.load() && !legacy_authored_camera?"true":"false")<<",\"cutscene\":"<<cutscene_status_json()<<'}';return o.str();}() << ",\"cinematic_probe\":" << cinematic_probe_status_json() << ",\"carry\":" << carry_diagnostics.json() << ",\"hand_body\":" << d2vr::HandBodyRuntime::status_json(hand_body_requested.load()) << ",\"hand_visual\":" << hand_visual_stats.json() << ",\"hold_coupling\":" << hold_coupling_stats.json() << ",\"coupled_releases\":" << native_grab.coupled_releases_.load() << ",\"hold_y\":{\"enabled\":" << (hold_y_menu_enabled?"true":"false") << ",\"fires\":" << (game_xr?game_xr->y_hold_fires.load():0) << ",\"blocked_presses\":" << (game_xr?game_xr->y_hold_blocked_presses.load():0) << ",\"last_hold_ms\":" << (game_xr?game_xr->y_hold_last_ms.load():0) << "}" << "," << (game_xr?game_xr->palm_offset_status():std::string("\"palm_offset\":null")) << ",\"hand_push\":{\"force_n\":" << native_grab.hand_contact().config.push_force_n << ",\"capped\":[" << native_grab.hand_contact().capped_writes[0].load() << ',' << native_grab.hand_contact().capped_writes[1].load() << "],\"time_factor\":" << d2vr::NativeHandContact::time_factor << ",\"time_factor_verified\":false,\"mass_verified\":false}" << ",\"hud_relayouts\":" << d2vr::NativeHudChildDraw::hud_relayouts.load() << ",\"hud_panel_children\":" << d2vr::NativeHudChildDraw::panel_children.load() << ",\"sword_aim_frames\":" << sword_aim_frames.load() << ",\"gaze_takedown_frames\":" << gaze_takedown_frames.load() << ",\"overlay_hidden\":" << d2vr::NativeHudChildDraw::overlay_draws.load() << ",\"scabbard\":[" << scabbard_entries.load() << ',' << holster_fires.load() << "]" << ",\"sword_grip\":{\"actions\":[" << sword_actions[1].load() << ',' << sword_actions[2].load() << ',' << sword_actions[3].load() << ',' << sword_actions[4].load() << ',' << sword_actions[5].load() << ',' << sword_actions[6].load() << "],\"held\":" << (sword_grip.held()?"true":"false") << ",\"gun\":[" << gun_actions[1].load() << ',' << gun_actions[2].load() << ',' << (gun_grip.held()?1:0) << ',' << (hip_loaded?1:0) << "],\"reversed\":" << (sword_reversed.load()?"true":"false") << ",\"blade_self_hits\":" << blade_self_hits.load() << ",\"thrown\":[" << d2vr::NativeWeaponHands::thrown_hits.load() << ',' << d2vr::NativeWeaponHands::flight_frames.load() << ',' << d2vr::NativeWeaponHands::thrown_peak.load() << ',' << sword_release_speed.load() << ',' << right_hand_peak.load() << ',' << d2vr::NativeWeaponHands::services.load() << "],\"last_shove\":" << d2vr::NativeWeaponHands::last_shove.load() << ",\"ragdolls\":[" << d2vr::NativeWeaponHands::ragdolls.load() << ',' << d2vr::NativeWeaponHands::last_ragdoll.load() << ',' << yank_requests.load() << ',' << d2vr::NativeWeaponHands::yanks.load() << ',' << yank_peak[0].load() << ',' << yank_peak[1].load() << ',' << yank_gate[0].load() << ',' << yank_gate[1].load() << ',' << d2vr::NativeGrab::yank_holds_.load() << ',' << d2vr::NativeWeaponHands::wakes.load() << ',' << d2vr::NativeWeaponHands::holds_down.load() << ',' << d2vr::NativeWeaponHands::squeezes.load() << ',' << d2vr::NativeWeaponHands::guard_grabs.load() << ',' << d2vr::NativeWeaponHands::last_guard_d.load() << ',' << d2vr::NativeWeaponHands::last_guard_up.load() << ']' << ",\"look_uses\":" << look_uses.load() << ",\"look_hits\":" << look_hits.load() << ",\"stealth\":[" << d2vr::NativeMelee::unaware_asked.load() << ',' << d2vr::NativeMelee::unaware_yes.load() << ']' << ",\"use_diag\":[" << use_diag[0].load() << ',' << use_diag[1].load() << ',' << use_diag[2].load() << ',' << use_diag[3].load() << ',' << use_diag[4].load() << ',' << use_diag[5].load() << ',' << use_diag[6].load() << ',' << use_diag[7].load() << ',' << use_diag[8].load() << ',' << use_diag[9].load() << ']' << ",\"door_controller\":" << [&]{const auto state=d2vr::NativeDoorInteraction::process_owner().status();const auto metrics=native_interaction_aim.door_metrics();std::ostringstream value;value<<"{\"ownership\":"<<state.ownership<<",\"active\":"<<(state.active?"true":"false")<<",\"pending\":"<<(state.pending?"true":"false")<<",\"closing\":"<<(state.closing?"true":"false")<<",\"blocked\":"<<(state.blocked?"true":"false")<<",\"queries\":"<<metrics.queries<<",\"qualified\":"<<metrics.qualified<<",\"qpc_ticks\":"<<metrics.service_ticks<<",\"worst_qpc_ticks\":"<<metrics.worst_service_ticks<<'}';return value.str();}() << ",\"carry_head_pushes\":" << carry_head_pushes.load() << ",\"fist_takes\":" << fist_takes.load() << ",\"limb_hints\":" << limb_hints.load() << ",\"body_use_blocked\":" << body_use_blocked.load() << ",\"stealth_kill_pulses\":" << stealth_kill_pulses.load() << ",\"carry_release\":[" << carry_drops.load() << ',' << carry_throws.load() << ',' << carry_docks.load() << ']' << ",\"dock_diag\":[" << dock_diag[0].load() << ',' << dock_diag[1].load() << ',' << dock_diag[2].load() << ',' << dock_diag[3].load() << ',' << dock_diag[4].load() << ',' << dock_diag[5].load() << ',' << dock_last_lag_mm.load() << ',' << dock_faults.load() << ']' << ",\"carries\":" << d2vr::NativeWeaponHands::carries.load() << ",\"block\":[" << block_pose_frames.load() << ',' << block_wanted.load() << ',' << gesture_blocks.load() << ',' << block_not_free.load() << ',' << block_not_held.load() << ',' << (d2vr::NativeWeaponHands::block_keeps_gun()?1:0) << ']' << ",\"hip_frames\":" << d2vr::NativeWeaponHands::hip_frames.load() << ",\"props_thrown\":[" << d2vr::NativeWeaponHands::props_marked.load() << ',' << d2vr::NativeWeaponHands::prop_hits.load() << ',' << (d2vr::NativeWeaponHands::phys_decl_ok.load()?1:0) << "],\"native\":[" << d2vr::NativeWeaponHands::ops.load() << ',' << d2vr::NativeWeaponHands::failures.load() << ',' << d2vr::NativeWeaponHands::spawned.load() << ',' << d2vr::NativeWeaponHands::removed.load() << "],\"copy\":" << [&]{const auto c=d2vr::NativeWeaponHands::copy();std::ostringstream o;if(!c.present) return std::string("null");o << "{\"pos\":[" << c.pos[0] << ',' << c.pos[1] << ',' << c.pos[2] << "],\"blade\":[" << c.blade[0] << ',' << c.blade[1] << ',' << c.blade[2] << "],\"flying\":" << (c.flying?"true":"false") << ",\"trace\":\"" << c.trace << "\"}";return o.str();}() << "}" << ",\"blade_pokes\":" << native_grab.pokes_.load() << ",\"interact\":[" << interact_bits.load() << ',' << interact_presses.load() << ']' << ",\"ragdoll_tows\":" << native_grab.tows_.load() << ",\"prop_grasp_point\":" << (native_grab.prop_grasp_point()?"true":"false") << ",\"prop_seat_gap_m\":" << prop_seat_gap_m.load() << ",\"corpse_cost_us\":[" << native_grab.corpse_cost_us() << ',' << native_grab.corpse_cost_max_us() << "],\"corpse_velocity_unknown\":" << native_grab.velocity_unknown() << ",\"corpse_lock_refused\":" << native_grab.lock_refused() << ",\"hand_contact\":[" << native_grab.hand_contact().publishes.load() << ',' << native_grab.hand_contact().services.load() << ',' << native_grab.hand_contact().tested.load() << ',' << native_grab.hand_contact().touches.load() << ',' << native_grab.hand_contact().pushes.load() << ',' << native_grab.hand_contact().faults.load() << ',' << native_grab.hand_contact().cost_us.load() << ',' << native_grab.hand_contact().cost_max_us.load() << ',' << native_grab.hand_contact().scan_us.load() << ',' << native_grab.hand_contact().body_us.load() << ',' << native_grab.hand_contact().math_us.load() << ',' << native_grab.hand_contact().slow_services.load() << ',' << native_grab.hand_contact().preempted.load() << ',' << native_grab.hand_contact().write_us.load() << ',' << native_grab.hand_contact().write_max_us.load() << ',' << native_grab.hand_contact().slow_writes.load() << ',' << native_grab.hand_contact().cast_seen.load() << ',' << native_grab.hand_contact().cast_held.load() << ',' << native_grab.hand_contact().discoveries.load() << ',' << native_grab.hand_contact().discover_us.load() << ',' << native_grab.hand_contact().discover_max_us.load() << ',' << native_grab.hand_contact().meets.load() << ',' << native_grab.hand_contact().meet_shifts.load() << ',' << native_grab.hand_contact().meet_latches.load() << ',' << native_grab.hand_contact().keepouts.load() << ']' << ",\"left_equip\":\"" << [&]{std::lock_guard<std::mutex> l(hand_state_mutex);std::string n(left_equip_name);for(auto& ch:n) if(ch=='"'||ch==92||static_cast<unsigned char>(ch)<32) ch='?';return n;}() << "\"" << ",\"hand_weapon_bits\":" << [&]{std::lock_guard<std::mutex> l(hand_state_mutex);return hand_weapon_bits;}() << ",\"prompt_latency_ms\":[" << prompt_latency_last.load() << ',' << prompt_latency_max.load() << "]" << ",\"sword_tip_ndc\":[" << sword_tip_ndc_x.load() << ',' << sword_tip_ndc_y.load() << "]" << ",\"wheel_zone\":{\"frames\":" << wheel_dbg_frames.load() << ",\"plane_frames\":" << wheel_dbg_plane.load() << ",\"size\":[" << wheel_dbg_w.load() << ',' << wheel_dbg_h.load() << "],\"uv\":[" << wheel_dbg_u.load() << ',' << wheel_dbg_v.load() << "],\"clicks\":" << wheel_zone_clicks.load() << ",\"last\":" << wheel_zone_last.load() << ",\"stage\":[" << wheel_stage_x.load() << ',' << wheel_stage_y.load() << "]}" << ",\"wrist_early_publications\":" << wrist_early_publications.load() << ",\"hud_holder_hidden\":" << d2vr::NativeHudChildDraw::holder_hidden.load() << ",\"hud_eye_node\":" << (d2vr::NativeHudChildDraw::eye_node.load()?"true":"false") << ",\"prompt_world\":" << (d2vr::NativeHudChildDraw::prompt_world.load()?"true":"false") << ",\"passive_gaze_preview\":" << (native_interaction_aim.passive_preview_active()?"true":"false") << ",\"world_prompt_frames\":" << world_prompt_frames.load() << ",\"prompt_shows_hides\":[" << prompt_shows.load() << ',' << prompt_hides.load() << "],\"takedown_flips\":" << takedown_flips.load() << ",\"takedown_hints\":" << d2vr::NativeHudChildDraw::takedown_hints.load() << ",\"takedown_anchor\":{\"enabled\":" << (prompt_target_anchor?"true":"false") << ",\"frames\":" << takedown_anchor_frames.load() << ",\"object_conflicts\":" << takedown_anchor_object_conflicts.load() << '}' << ",\"npc_blade_contacts\":" << npc_blade_contacts.load() << ",\"contact_hits\":[" << d2vr::NativeInteractionAim::melee_applied_.load() << ',' << d2vr::NativeInteractionAim::melee_rejected_.load() << ',' << d2vr::NativeInteractionAim::melee_faults_.load() << ']' << ",\"contact_rejects\":[" << d2vr::NativeInteractionAim::melee_why_[0].load() << ',' << d2vr::NativeInteractionAim::melee_why_[1].load() << ',' << d2vr::NativeInteractionAim::melee_why_[2].load() << ']' << ",\"corpse_chops\":" << d2vr::NativeMelee::chops.load() << ",\"tip_speed\":[" << tip_speed_now[0].load() << ',' << tip_speed_now[1].load() << ']' << ",\"slash_speed\":" << (d2vr::NativeSlashSceneRate::process_owner().enabled()?slash_speed_factor:1.f) << ",\"slash_scene_rate\":{\"enabled\":" << (d2vr::NativeSlashSceneRate::process_owner().enabled()?"true":"false") << ",\"accelerations\":" << d2vr::NativeSlashSceneRate::process_owner().accelerations() << ",\"setter_failures\":" << d2vr::NativeSlashSceneRate::process_owner().setter_failures() << "}" << ",\"block_unequip_vetoes\":" << d2vr::NativeBlockEligibility::process_owner().vetoes() << ",\"takedown_range\":" << (native_interaction_aim.takedown_ranges_applied()?"true":"false") << ",\"takedown_kill_rules\":" << native_interaction_aim.takedown_range_kill_rules() << ",\"layer\":" << d2vr::NativeHeldObject::layer_json() << ",\"release_watch\":" << d2vr::NativeInteractionAim::release_watch_json() << ",\"held_clamp\":{\"enabled\":" << (held_clamp_enabled?"true":"false") << ",\"sweeps\":" << held_clamp_status.sweeps.load() << ",\"hits\":" << held_clamp_status.hits.load() << ",\"self_hits\":" << held_clamp_status.self_hits.load() << ",\"clamped_frames\":" << held_clamp_status.clamped_frames.load() << ",\"cast_us\":" << held_clamp_status.cast_us.load() << ",\"cast_us_max\":" << held_clamp_status.cast_us_max.load() << ",\"no_bounds\":" << held_clamp_status.no_bounds.load() << ",\"held_clamp_no_bounds\":" << held_clamp_status.no_bounds.load() << ",\"overlap_on_release\":" << held_clamp_status.overlap_on_release.load() << ",\"release_depen_frames\":" << held_clamp_status.release_depen_frames.load() << ",\"release_overlap_unresolved\":" << held_clamp_status.release_overlap_unresolved.load() << ",\"drawn_hand_gap_m\":" << held_clamp_status.drawn_hand_gap_m.load() << ",\"layer_at_release\":" << held_clamp_status.layer_at_release.load() << ",\"forced_drops\":" << held_clamp_status.forced_drops.load() << ",\"releases\":" << held_clamp_status.releases.load() << ",\"layer_reasserts\":" << d2vr::NativeHeldObject::layers_reasserted.load() << ",\"depen_writes\":" << native_grab.depen_writes_.load() << ",\"depen_rejected\":" << native_grab.depen_rejected_.load() << "}" << ",\"barrel_aim\":{\"ok\":" << barrel_ok.load() << ",\"bad_frame\":" << barrel_bad_frame.load() << ",\"no_model\":" << barrel_no_model.load() << ",\"gun_item_frames\":" << gun_item_frames.load() << ",\"name_miss_frames\":" << gun_name_miss_frames.load() << "},\"gadget_aim\":{\"enabled\":" << (gadget_hand_aim_enabled?"true":"false") << ",\"placement\":[" << d2vr::NativeGadgetAim::placement_calls.load() << ',' << d2vr::NativeGadgetAim::placement_swapped.load() << "],\"throw_hit\":[" << d2vr::NativeGadgetAim::throw_calls.load() << ',' << d2vr::NativeGadgetAim::throw_swapped.load() << "],\"stale\":" << d2vr::NativeGadgetAim::stale.load() << ",\"bad_pointer\":" << d2vr::NativeGadgetAim::bad_pointer.load() << ",\"restore_skipped\":" << d2vr::NativeGadgetAim::restore_skipped.load() << "}"
+               << ",\"scripted_view\":" << [&]{std::lock_guard<std::mutex> l(comfort_mutex);const auto& sv=scripted_view_status;std::ostringstream o;o<<"{\"entries\":"<<sv.entries<<",\"reaims\":"<<sv.reaims<<",\"folds\":"<<sv.folds<<",\"skipped_small\":"<<sv.skipped_small<<",\"easing\":"<<(sv.easing?"true":"false")<<",\"residual_easing\":"<<(sv.residual_easing?"true":"false")<<",\"last_delta_deg\":"<<sv.last_delta_deg<<",\"last_state_index\":"<<sv.last_state_index<<",\"enabled\":"<<(scripted_recenter_enabled && scripted_recenter_setting.load() && !legacy_authored_camera?"true":"false")<<",\"cutscene\":"<<cutscene_status_json()<<'}';return o.str();}() << ",\"cinematic_probe\":" << cinematic_probe_status_json() << ",\"carry\":" << carry_diagnostics.json() << ",\"hand_body\":" << d2vr::HandBodyRuntime::status_json(hand_body_requested.load()) << ",\"hand_visual\":" << hand_visual_stats.json() << ",\"hold_coupling\":" << hold_coupling_stats.json() << ",\"coupled_releases\":" << native_grab.coupled_releases_.load() << ",\"hold_y\":{\"enabled\":" << (hold_y_menu_enabled?"true":"false") << ",\"fires\":" << (game_xr?game_xr->y_hold_fires.load():0) << ",\"blocked_presses\":" << (game_xr?game_xr->y_hold_blocked_presses.load():0) << ",\"last_hold_ms\":" << (game_xr?game_xr->y_hold_last_ms.load():0) << "}" << "," << (game_xr?game_xr->palm_offset_status():std::string("\"palm_offset\":null")) << ",\"hand_push\":{\"force_n\":" << native_grab.hand_contact().config.push_force_n << ",\"capped\":[" << native_grab.hand_contact().capped_writes[0].load() << ',' << native_grab.hand_contact().capped_writes[1].load() << "],\"time_factor\":" << d2vr::NativeHandContact::time_factor << ",\"time_factor_verified\":false,\"mass_verified\":false}" << ",\"hud_relayouts\":" << d2vr::NativeHudChildDraw::hud_relayouts.load() << ",\"hud_panel_children\":" << d2vr::NativeHudChildDraw::panel_children.load() << ",\"sword_aim_frames\":" << sword_aim_frames.load() << ",\"gaze_takedown_frames\":" << gaze_takedown_frames.load() << ",\"overlay_hidden\":" << d2vr::NativeHudChildDraw::overlay_draws.load() << ",\"scabbard\":[" << scabbard_entries.load() << ',' << holster_fires.load() << "]" << ",\"sword_grip\":{\"actions\":[" << sword_actions[1].load() << ',' << sword_actions[2].load() << ',' << sword_actions[3].load() << ',' << sword_actions[4].load() << ',' << sword_actions[5].load() << ',' << sword_actions[6].load() << "],\"held\":" << (sword_grip.held()?"true":"false") << ",\"gun\":[" << gun_actions[1].load() << ',' << gun_actions[2].load() << ',' << (gun_grip.held()?1:0) << ',' << (hip_loaded?1:0) << "],\"reversed\":" << (sword_reversed.load()?"true":"false") << ",\"blade_self_hits\":" << blade_self_hits.load() << ",\"thrown\":[" << d2vr::NativeWeaponHands::thrown_hits.load() << ',' << d2vr::NativeWeaponHands::flight_frames.load() << ',' << d2vr::NativeWeaponHands::thrown_peak.load() << ',' << sword_release_speed.load() << ',' << right_hand_peak.load() << ',' << d2vr::NativeWeaponHands::services.load() << "],\"last_shove\":" << d2vr::NativeWeaponHands::last_shove.load() << ",\"ragdolls\":[" << d2vr::NativeWeaponHands::ragdolls.load() << ',' << d2vr::NativeWeaponHands::last_ragdoll.load() << ',' << yank_requests.load() << ',' << d2vr::NativeWeaponHands::yanks.load() << ',' << yank_peak[0].load() << ',' << yank_peak[1].load() << ',' << yank_gate[0].load() << ',' << yank_gate[1].load() << ',' << d2vr::NativeGrab::yank_holds_.load() << ',' << d2vr::NativeWeaponHands::wakes.load() << ',' << d2vr::NativeWeaponHands::holds_down.load() << ',' << d2vr::NativeWeaponHands::squeezes.load() << ',' << d2vr::NativeWeaponHands::guard_grabs.load() << ',' << d2vr::NativeWeaponHands::last_guard_d.load() << ',' << d2vr::NativeWeaponHands::last_guard_up.load() << ']' << ",\"look_uses\":" << look_uses.load() << ",\"look_hits\":" << look_hits.load() << ",\"stealth\":[" << d2vr::NativeMelee::unaware_asked.load() << ',' << d2vr::NativeMelee::unaware_yes.load() << ']' << ",\"use_diag\":[" << use_diag[0].load() << ',' << use_diag[1].load() << ',' << use_diag[2].load() << ',' << use_diag[3].load() << ',' << use_diag[4].load() << ',' << use_diag[5].load() << ',' << use_diag[6].load() << ',' << use_diag[7].load() << ',' << use_diag[8].load() << ',' << use_diag[9].load() << ']' << ",\"door_controller\":" << [&]{const auto state=d2vr::NativeDoorInteraction::process_owner().status();const auto metrics=native_interaction_aim.door_metrics();std::ostringstream value;value<<"{\"ownership\":"<<state.ownership<<",\"active\":"<<(state.active?"true":"false")<<",\"pending\":"<<(state.pending?"true":"false")<<",\"closing\":"<<(state.closing?"true":"false")<<",\"blocked\":"<<(state.blocked?"true":"false")<<",\"queries\":"<<metrics.queries<<",\"qualified\":"<<metrics.qualified<<",\"qpc_ticks\":"<<metrics.service_ticks<<",\"worst_qpc_ticks\":"<<metrics.worst_service_ticks<<'}';return value.str();}() << ",\"carry_head_pushes\":" << carry_head_pushes.load() << ",\"fist_takes\":" << fist_takes.load() << ",\"limb_hints\":" << limb_hints.load() << ",\"body_use_blocked\":" << body_use_blocked.load() << ",\"native_carry_auto_drops\":" << native_carry_auto_drops.load() << ",\"stealth_kill_pulses\":" << stealth_kill_pulses.load() << ",\"carry_release\":[" << carry_drops.load() << ',' << carry_throws.load() << ',' << carry_docks.load() << ']' << ",\"dock_diag\":[" << dock_diag[0].load() << ',' << dock_diag[1].load() << ',' << dock_diag[2].load() << ',' << dock_diag[3].load() << ',' << dock_diag[4].load() << ',' << dock_diag[5].load() << ',' << dock_last_lag_mm.load() << ',' << dock_faults.load() << ']' << ",\"carries\":" << d2vr::NativeWeaponHands::carries.load() << ",\"block\":[" << block_pose_frames.load() << ',' << block_wanted.load() << ',' << gesture_blocks.load() << ',' << block_not_free.load() << ',' << block_not_held.load() << ',' << (d2vr::NativeWeaponHands::block_keeps_gun()?1:0) << ']' << ",\"hip_frames\":" << d2vr::NativeWeaponHands::hip_frames.load() << ",\"props_thrown\":[" << d2vr::NativeWeaponHands::props_marked.load() << ',' << d2vr::NativeWeaponHands::prop_hits.load() << ',' << (d2vr::NativeWeaponHands::phys_decl_ok.load()?1:0) << "],\"native\":[" << d2vr::NativeWeaponHands::ops.load() << ',' << d2vr::NativeWeaponHands::failures.load() << ',' << d2vr::NativeWeaponHands::spawned.load() << ',' << d2vr::NativeWeaponHands::removed.load() << "],\"copy\":" << [&]{const auto c=d2vr::NativeWeaponHands::copy();std::ostringstream o;if(!c.present) return std::string("null");o << "{\"pos\":[" << c.pos[0] << ',' << c.pos[1] << ',' << c.pos[2] << "],\"blade\":[" << c.blade[0] << ',' << c.blade[1] << ',' << c.blade[2] << "],\"flying\":" << (c.flying?"true":"false") << ",\"trace\":\"" << c.trace << "\"}";return o.str();}() << "}" << ",\"blade_pokes\":" << native_grab.pokes_.load() << ",\"interact\":[" << interact_bits.load() << ',' << interact_presses.load() << ']' << ",\"ragdoll_tows\":" << native_grab.tows_.load() << ",\"prop_grasp_point\":" << (native_grab.prop_grasp_point()?"true":"false") << ",\"prop_seat_gap_m\":" << prop_seat_gap_m.load() << ",\"corpse_cost_us\":[" << native_grab.corpse_cost_us() << ',' << native_grab.corpse_cost_max_us() << "],\"corpse_velocity_unknown\":" << native_grab.velocity_unknown() << ",\"corpse_lock_refused\":" << native_grab.lock_refused() << ",\"hand_contact\":[" << native_grab.hand_contact().publishes.load() << ',' << native_grab.hand_contact().services.load() << ',' << native_grab.hand_contact().tested.load() << ',' << native_grab.hand_contact().touches.load() << ',' << native_grab.hand_contact().pushes.load() << ',' << native_grab.hand_contact().faults.load() << ',' << native_grab.hand_contact().cost_us.load() << ',' << native_grab.hand_contact().cost_max_us.load() << ',' << native_grab.hand_contact().scan_us.load() << ',' << native_grab.hand_contact().body_us.load() << ',' << native_grab.hand_contact().math_us.load() << ',' << native_grab.hand_contact().slow_services.load() << ',' << native_grab.hand_contact().preempted.load() << ',' << native_grab.hand_contact().write_us.load() << ',' << native_grab.hand_contact().write_max_us.load() << ',' << native_grab.hand_contact().slow_writes.load() << ',' << native_grab.hand_contact().cast_seen.load() << ',' << native_grab.hand_contact().cast_held.load() << ',' << native_grab.hand_contact().discoveries.load() << ',' << native_grab.hand_contact().discover_us.load() << ',' << native_grab.hand_contact().discover_max_us.load() << ',' << native_grab.hand_contact().meets.load() << ',' << native_grab.hand_contact().meet_shifts.load() << ',' << native_grab.hand_contact().meet_latches.load() << ',' << native_grab.hand_contact().keepouts.load() << ']' << ",\"left_equip\":\"" << [&]{std::lock_guard<std::mutex> l(hand_state_mutex);std::string n(left_equip_name);for(auto& ch:n) if(ch=='"'||ch==92||static_cast<unsigned char>(ch)<32) ch='?';return n;}() << "\"" << ",\"hand_weapon_bits\":" << [&]{std::lock_guard<std::mutex> l(hand_state_mutex);return hand_weapon_bits;}() << ",\"prompt_latency_ms\":[" << prompt_latency_last.load() << ',' << prompt_latency_max.load() << "]" << ",\"sword_tip_ndc\":[" << sword_tip_ndc_x.load() << ',' << sword_tip_ndc_y.load() << "]" << ",\"wheel_zone\":{\"frames\":" << wheel_dbg_frames.load() << ",\"plane_frames\":" << wheel_dbg_plane.load() << ",\"size\":[" << wheel_dbg_w.load() << ',' << wheel_dbg_h.load() << "],\"uv\":[" << wheel_dbg_u.load() << ',' << wheel_dbg_v.load() << "],\"clicks\":" << wheel_zone_clicks.load() << ",\"last\":" << wheel_zone_last.load() << ",\"stage\":[" << wheel_stage_x.load() << ',' << wheel_stage_y.load() << "]}" << ",\"wrist_early_publications\":" << wrist_early_publications.load() << ",\"hud_holder_hidden\":" << d2vr::NativeHudChildDraw::holder_hidden.load() << ",\"hud_eye_node\":" << (d2vr::NativeHudChildDraw::eye_node.load()?"true":"false") << ",\"prompt_world\":" << (d2vr::NativeHudChildDraw::prompt_world.load()?"true":"false") << ",\"passive_gaze_preview\":" << (native_interaction_aim.passive_preview_active()?"true":"false") << ",\"world_prompt_frames\":" << world_prompt_frames.load() << ",\"prompt_shows_hides\":[" << prompt_shows.load() << ',' << prompt_hides.load() << "],\"takedown_flips\":" << takedown_flips.load() << ",\"takedown_hints\":" << d2vr::NativeHudChildDraw::takedown_hints.load() << ",\"takedown_anchor\":{\"enabled\":" << (prompt_target_anchor?"true":"false") << ",\"frames\":" << takedown_anchor_frames.load() << ",\"object_conflicts\":" << takedown_anchor_object_conflicts.load() << '}' << ",\"npc_blade_contacts\":" << npc_blade_contacts.load() << ",\"contact_hits\":[" << d2vr::NativeInteractionAim::melee_applied_.load() << ',' << d2vr::NativeInteractionAim::melee_rejected_.load() << ',' << d2vr::NativeInteractionAim::melee_faults_.load() << ']' << ",\"contact_rejects\":[" << d2vr::NativeInteractionAim::melee_why_[0].load() << ',' << d2vr::NativeInteractionAim::melee_why_[1].load() << ',' << d2vr::NativeInteractionAim::melee_why_[2].load() << ']' << ",\"corpse_chops\":" << d2vr::NativeMelee::chops.load() << ",\"tip_speed\":[" << tip_speed_now[0].load() << ',' << tip_speed_now[1].load() << ']' << ",\"slash_speed\":" << (d2vr::NativeSlashSceneRate::process_owner().enabled()?slash_speed_factor:1.f) << ",\"slash_scene_rate\":{\"enabled\":" << (d2vr::NativeSlashSceneRate::process_owner().enabled()?"true":"false") << ",\"accelerations\":" << d2vr::NativeSlashSceneRate::process_owner().accelerations() << ",\"setter_failures\":" << d2vr::NativeSlashSceneRate::process_owner().setter_failures() << "}" << ",\"block_unequip_vetoes\":" << d2vr::NativeBlockEligibility::process_owner().vetoes() << ",\"takedown_range\":" << (native_interaction_aim.takedown_ranges_applied()?"true":"false") << ",\"takedown_kill_rules\":" << native_interaction_aim.takedown_range_kill_rules() << ",\"layer\":" << d2vr::NativeHeldObject::layer_json() << ",\"release_watch\":" << d2vr::NativeInteractionAim::release_watch_json() << ",\"held_clamp\":{\"enabled\":" << (held_clamp_enabled?"true":"false") << ",\"sweeps\":" << held_clamp_status.sweeps.load() << ",\"hits\":" << held_clamp_status.hits.load() << ",\"self_hits\":" << held_clamp_status.self_hits.load() << ",\"clamped_frames\":" << held_clamp_status.clamped_frames.load() << ",\"cast_us\":" << held_clamp_status.cast_us.load() << ",\"cast_us_max\":" << held_clamp_status.cast_us_max.load() << ",\"no_bounds\":" << held_clamp_status.no_bounds.load() << ",\"held_clamp_no_bounds\":" << held_clamp_status.no_bounds.load() << ",\"overlap_on_release\":" << held_clamp_status.overlap_on_release.load() << ",\"release_depen_frames\":" << held_clamp_status.release_depen_frames.load() << ",\"release_overlap_unresolved\":" << held_clamp_status.release_overlap_unresolved.load() << ",\"drawn_hand_gap_m\":" << held_clamp_status.drawn_hand_gap_m.load() << ",\"layer_at_release\":" << held_clamp_status.layer_at_release.load() << ",\"forced_drops\":" << held_clamp_status.forced_drops.load() << ",\"releases\":" << held_clamp_status.releases.load() << ",\"layer_reasserts\":" << d2vr::NativeHeldObject::layers_reasserted.load() << ",\"depen_writes\":" << native_grab.depen_writes_.load() << ",\"depen_rejected\":" << native_grab.depen_rejected_.load() << "}" << ",\"barrel_aim\":{\"ok\":" << barrel_ok.load() << ",\"bad_frame\":" << barrel_bad_frame.load() << ",\"no_model\":" << barrel_no_model.load() << ",\"gun_item_frames\":" << gun_item_frames.load() << ",\"name_miss_frames\":" << gun_name_miss_frames.load() << "},\"gadget_aim\":{\"enabled\":" << (gadget_hand_aim_enabled?"true":"false") << ",\"placement\":[" << d2vr::NativeGadgetAim::placement_calls.load() << ',' << d2vr::NativeGadgetAim::placement_swapped.load() << "],\"throw_hit\":[" << d2vr::NativeGadgetAim::throw_calls.load() << ',' << d2vr::NativeGadgetAim::throw_swapped.load() << "],\"stale\":" << d2vr::NativeGadgetAim::stale.load() << ",\"bad_pointer\":" << d2vr::NativeGadgetAim::bad_pointer.load() << ",\"restore_skipped\":" << d2vr::NativeGadgetAim::restore_skipped.load() << ",\"palm\":" << d2vr::NativeGadgetAim::palm_placements.load() << ",\"left_gadget\":" << (left_gadget.load()?"true":"false") << "}"
                << ",\"grenade_throw\":{\"enabled\":" << (grenade_hand_throw_enabled?"true":"false") << ",\"calls\":" << d2vr::NativeGrenadeThrow::calls.load() << ",\"rewritten\":" << d2vr::NativeGrenadeThrow::rewritten.load() << ",\"not_grenade\":" << d2vr::NativeGrenadeThrow::not_grenade.load() << ",\"no_gesture\":" << d2vr::NativeGrenadeThrow::no_gesture.load() << ",\"faults\":" << d2vr::NativeGrenadeThrow::faults.load() << ",\"last_speed\":" << d2vr::NativeGrenadeThrow::last_speed.load() << "}"
                << ",\"held_object\":{\"installed\":" << (held_object_installed?"true":"false") << ",\"placed\":" << d2vr::NativeHeldObject::placed.load() << ",\"rejected_targets\":" << d2vr::NativeHeldObject::rejected_targets.load() << ",\"anchored\":" << d2vr::NativeHeldObject::anchored.load() << ",\"sim_invulnerable_blocked\":" << d2vr::NativeSimInvulnerable::blocked.load() << ",\"swarm_kill_skipped\":" << d2vr::NativeSwarmKillGuard::skipped.load() << ",\"swarm_why\":[" << d2vr::NativeMelee::swarm_why[0].load() << ',' << d2vr::NativeMelee::swarm_why[1].load() << ',' << d2vr::NativeMelee::swarm_why[2].load() << ',' << d2vr::NativeMelee::swarm_why[3].load() << "],\"thrown\":" << d2vr::NativeHeldObject::thrown.load() << ",\"throw_kept\":" << d2vr::NativeHeldObject::throw_kept.load() << ",\"throws\":" << held_throws.load() << ",\"drops\":" << held_drops.load() << "}" << ",\"arm_hidden\":" << arm_hidden_bits.load() << ",\"arm_shows\":" << d2vr::NativeHeldObject::arm_shows.load() << ",\"arm_hides_skipped\":" << d2vr::NativeHeldObject::hides_skipped.load() << ",\"held_world_renders\":" << d2vr::NativeHeldObject::world_renders.load() << ",\"held_debug\":[" << held_debug[0].load() << ',' << held_debug[1].load() << ',' << held_debug[2].load() << ',' << held_debug[3].load() << ',' << held_debug[4].load() << ',' << held_debug[5].load() << ',' << held_debug[6].load() << ',' << held_debug[7].load() << ',' << held_debug[8].load() << ',' << held_debug[9].load() << ',' << held_debug[10].load() << ',' << held_debug[11].load() << ',' << held_debug[12].load() << "]" << ",\"arm_show_failed\":" << (d2vr::NativeHeldObject::arm_show_failed.load()?"true":"false") << ",\"native_options_page\":[" << d2vr::NativeMenuEntry::clicks.load() << ',' << d2vr::NativeMenuEntry::queued.load() << ',' << d2vr::NativeMenuEntry::native_pages.load() << ',' << d2vr::NativeOptionsPage::opens.load() << ',' << d2vr::NativeOptionsPage::changes.load() << ',' << d2vr::NativeOptionsPage::faults.load() << ',' << d2vr::NativeOptionsPage::failed_step.load() << ',' << d2vr::NativeOptionsPage::last_show.load() << ',' << d2vr::NativeOptionsPage::action_flips.load() << ']' << ",\"impact_fx\":[" << d2vr::NativeInteractionAim::impact_played_.load() << ',' << d2vr::NativeInteractionAim::impact_skipped_.load() << ']' << ",\"hud_master_entries\":" << d2vr::NativeHudChildDraw::master_entries.load() << ",\"hud_window_layers\":" << (game_xr?game_xr->hud_window_layers:0) << ",\"hud_cylinder\":" << (game_xr && game_xr->cylinder_layers()?"true":"false") << ",\"hud_scale\":" << d2vr::NativeHudChildDraw::hud_scale.load()
         << ",\"contact_gates\":[" << contact_gates[0].load() << ',' << contact_gates[1].load() << ',' << contact_gates[2].load() << ',' << contact_gates[3].load() << ',' << contact_gates[4].load() << ',' << contact_gates[5].load() << ',' << contact_gates[6].load() << ',' << contact_gates[7].load() << ']'
@@ -7537,9 +7738,11 @@ void native_hud_call_observer(bool before,std::uintptr_t caller,std::uintptr_t m
     try {
         native_note_kind.observe(read_self,image_base,before,caller,method,receiver,block,result,note_kind_epoch.load());
         if(caller==0x790755 || caller==0x790574) {
-            const auto subtype=!before?native_note_kind.current(read_self,image_base,note_kind_epoch.load()):std::nullopt;
+            const auto generation=!before?native_note_kind.observed_generation(note_kind_epoch.load()):std::nullopt;
             std::lock_guard<std::mutex> lock(note_panel_mutex);
-            note_art_generation=subtype?subtype->generation:0;note_art_after_scope=world_ui_serial.load();
+            // Tag captures after the successful call even if drawable registration
+            // is deferred. This generation alone never authorizes hand rendering.
+            note_art_generation=generation.value_or(0);note_art_after_scope=world_ui_serial.load();
         }
     }catch(...) {native_note_kind.clear();}
     if(before || result!=1) return;
@@ -7726,6 +7929,26 @@ std::array<UINT,2> mirror_view(HWND window) {
     return {static_cast<UINT>(client.right),static_cast<UINT>(client.bottom)};
 }
 
+void capture_native_note_final(unsigned eye,ID3D11Texture2D* texture,
+        const XrCompositionLayerProjectionView& view,const d2vr::NotePanelReceipt& panel) noexcept {
+    if(!native_note_diagnostics || eye>1 || native_note_final_pairs>=12)return;
+    const auto now=GetTickCount64();
+    if(eye==0)native_note_final_pair=now>=native_note_final_tick;
+    if(!native_note_final_pair)return;
+    try {
+        const auto pixels=d2vr::readback_rgba(texture);if(pixels.bytes.empty())return;
+        const auto prefix=L"native-note-final-"+std::to_wstring(native_note_final_pairs)+(eye?L"-right":L"-left");
+        std::ofstream raw(output_directory/(prefix+L".rgba"),std::ios::binary|std::ios::trunc);
+        raw.write(reinterpret_cast<const char*>(pixels.bytes.data()),static_cast<std::streamsize>(pixels.bytes.size()));
+        std::ofstream out(output_directory/(prefix+L".json"),std::ios::trunc);
+        out<<"{\"width\":"<<pixels.width<<",\"height\":"<<pixels.height<<",\"frame\":"<<panel.frame
+            <<",\"generation\":"<<panel.generation<<",\"pose_epoch\":"<<panel.pose_epoch<<",\"reference_epoch\":"<<panel.reference_epoch
+            <<",\"accepted_serial\":"<<native_note_accepted_serial.load()<<",\"pose_hash\":"<<native_note_accepted_pose_hash.load()
+            <<",\"stage\":\"final_projection_before_release\",\"native_widgets_composited\":true,\"headset_presentation_verified\":false"
+            <<",\"view_position\":["<<view.pose.position.x<<','<<view.pose.position.y<<','<<view.pose.position.z<<"]}\n";
+        if(eye==1){++native_note_final_pairs;native_note_final_tick=now+2000;native_note_final_pair=false;}
+    }catch(...) {}
+}
 void capture_xr_transfer(UINT eye,ID3D11Texture2D* source,ID3D11Texture2D* destination,
                          const XrCompositionLayerProjectionView& layer,bool gameplay,bool tracked,ID3D11Texture2D* native_source) {
     static std::string request_id,last_request_id;
@@ -7764,7 +7987,7 @@ void capture_xr_transfer(UINT eye,ID3D11Texture2D* source,ID3D11Texture2D* desti
     auto& mask=gameplay?xr_transfer_mask:xr_menu_transfer_mask;
     auto& capture_present=gameplay?xr_transfer_frame:xr_menu_transfer_frame;
     const auto request_now=GetTickCount64();
-    if(eye==0 && gameplay && request_now>=next_request_poll) {
+    if(eye==0 && request_now>=next_request_poll) {
         next_request_poll=request_now+200;
         const auto request_file=output_directory/L"capture-eye-pair.request";
         std::ifstream request(request_file);std::string id;
@@ -8076,7 +8299,7 @@ void sample_stereo(IDXGISwapChain* chain,UINT64 number,const DXGI_SWAP_CHAIN_DES
                     if(taa_history_installed && !d2vr::TaaDispatchHook::installed() && d2vr::TaaDispatchHook::install(device.Get())) {
                         d2vr::TaaDispatchHook::handler=&taa_dispatch_handler;
                         d2vr::TaaDispatchHook::depth_observer=[](ID3D11DeviceContext* c,ID3D11DepthStencilView* v,UINT f,FLOAT d,UINT8 stencil) {fsr_taa.observe_depth(v,c,f,d,stencil);};
-                        d2vr::TaaDispatchHook::finish_observer=[](ID3D11DeviceContext* c,ID3D11CommandList* l) {fsr_taa.finished(c,l);world_ui_completion.finished(c,l);native_hud_art_capture.finished(c,l);render_perf_finished(nullptr,c,l);};
+                        d2vr::TaaDispatchHook::finish_observer=[](ID3D11DeviceContext* c,ID3D11CommandList* l) {fsr_taa.finished(c,l);world_ui_completion.finished(c,l);if(native_note_completion.finished(c,l))native_note_trace_event("finish",0,0,c,l);native_hud_art_capture.finished(c,l);render_perf_finished(nullptr,c,l);};
                         d2vr::TaaDispatchHook::execute_handler=[](ID3D11DeviceContext* callback_context,ID3D11CommandList* callback_list,BOOL callback_restore,d2vr::TaaDispatchHook::ExecuteFn callback_original) {
                             return render_perf_execute_scope(callback_context,callback_list,callback_restore,callback_original,[](ID3D11DeviceContext* c,ID3D11CommandList* l,BOOL r,d2vr::TaaDispatchHook::ExecuteFn o) {
                             (void)o;
@@ -8107,6 +8330,7 @@ void sample_stereo(IDXGISwapChain* chain,UINT64 number,const DXGI_SWAP_CHAIN_DES
                                 if(perf_ticket)render_perf_gpu->end_span(context,perf_ticket);
                                 if(native_gpu_requested && native_gpu_prepared) native_gpu_timer.end_list(context,ticket);
                                 world_ui_completion.executed(list);
+                                if(native_note_completion.executed(list))native_note_trace_event("execute",0,0,context,list);
                             };
                             if(!fsr_taa.execute(c,l,r,execute)) execute(c,l,r);
                             native_hud_art_capture.executed(l);
@@ -8233,7 +8457,7 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                     std::lock_guard<std::mutex> xr_lock(log_mutex);XrGraphicsScope graphics_scope;
                     if(!game_xr || game_xr->ready_to_close()) {
                         restore_audio_session();
-                        render_perf_retire();game_xr.reset();restore_stereo();
+                        std::atomic_store(&native_note_frame,std::shared_ptr<NativeNoteFrame>{});native_note_history.clear();native_note_completion.clear();render_perf_retire();game_xr.reset();restore_stereo();
                         {std::lock_guard<std::mutex> gpu_lock(gpu_mutex);paired_left.Reset();paired_backbuffer.Reset();eye_sources.invalidate();native_eye_pair.reset();}
                         graphics_owner.release();xr_recovery_retiring=false;xr_close_complete=true;
                     }
@@ -8270,7 +8494,7 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
         if(!game_xr || game_xr->ready_to_close()) {
             if(native_gpu_prepared) {native_gpu_summary=native_gpu_timer.stats();native_gpu_timer.clear();native_gpu_prepared=false;d2vr::mod_gpu_timer().clear();}
             restore_audio_session();
-            render_perf_retire();game_xr.reset();restore_stereo();
+            std::atomic_store(&native_note_frame,std::shared_ptr<NativeNoteFrame>{});native_note_history.clear();native_note_completion.clear();render_perf_retire();game_xr.reset();restore_stereo();
             {std::lock_guard<std::mutex> gpu_lock(gpu_mutex);paired_left.Reset();paired_backbuffer.Reset();
                 eye_sources.invalidate();native_eye_pair.reset();paired_left_ready=false;paired_buffer_binds=0;}
             if(xr_close_requested.load()) {graphics_owner.release();xr_close_complete.store(true,std::memory_order_release);}
@@ -8379,7 +8603,7 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                         }
                         // alternate-eye: authored / settings state is read here, at this Present (the plan lags a frame); a one-view frame in it is dropped
                         const bool alt_nonfree=alternate_on() && !d2vr::alternate_single_view_allowed(authored_camera,game_xr && game_xr->settings_open());
-                        bool pair_ready{},mono_path{},note_exact_eye_pair{};
+                        bool pair_ready{},mono_path{};
                         std::optional<d2vr::PendingViews<XrView>::Slot> alt_slot;int alt_fresh=-1; // alternate-eye: the Setup views this Present shows, the one eye they refresh
                         {
                             std::lock_guard<std::mutex> gpu_lock(gpu_mutex);
@@ -8412,7 +8636,7 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                 const auto own_slot=alt_pending.take(number),latest_slot=alt_pending.take(number+1);
                                 const auto choice=d2vr::paired_slot_to_promote(own_slot.has_value(),own_slot?own_slot->mask:0u,own_slot?own_slot->epoch:0,
                                     latest_slot.has_value(),latest_slot?latest_slot->mask:0u,latest_slot?latest_slot->epoch:0,game_xr?game_xr->pose_epoch():0);
-                                if(choice==d2vr::PairedSlot::own) {alt_slot=own_slot;++layer_pose_synced;note_exact_eye_pair=!mono_path;}
+                                if(choice==d2vr::PairedSlot::own) {alt_slot=own_slot;++layer_pose_synced;}
                                 else if(choice==d2vr::PairedSlot::latest) {alt_slot=latest_slot;++layer_pose_sync_fallbacks;}
                             }
                             }
@@ -8525,6 +8749,7 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                     try {const auto now=GetTickCount64();return x_wheel.wheel() || native_interaction_aim.talk_target(0,now) || native_interaction_aim.talk_target(1,now);}
                                     catch(...) {return true;}};
                                 game_xr->observe_transfer=&capture_xr_transfer;
+                                if(native_note_diagnostics)game_xr->observe_note_composition=&capture_native_note_final;
                                 game_xr->observe_settings=&capture_settings_transfer;
                                 game_xr->observe_wrist=&capture_wrist_hud;
                                 game_xr->observe_frame_rejection=[](const char* text) {note_recoverable(text);};game_xr->observe_xr_event=[](const char* text) {note_xr_event(text);};
@@ -8627,7 +8852,7 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                     const bool focused=game_xr->state==XR_SESSION_STATE_FOCUSED;int index=-1;
                                     float head_pitch_degrees{};
                                     const auto logic=game_logic_mask();
-                                    const bool scripted_ui=logic==4 || logic==16 || logic==128;
+                                    const bool scripted_ui=logic==4 || d2vr::native_note_reader_logic(logic) || logic==128;
                                     const auto command=simulated_gameplay_script.sample(elapsed,gameplay || x_wheel.wheel() || scripted_ui,focused,&index,&head_pitch_degrees);
                                     const auto head_orientation=d2vr::SimulatedGameplayScript::pitch_orientation(head_pitch_degrees);
                                     d2vr::simxr::control.head.orientation={head_orientation[0],head_orientation[1],head_orientation[2],head_orientation[3]};
@@ -8703,6 +8928,7 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                           if(by_item) {++gun_item_frames;if(!(n=="Gun" || n.find("rossbow")!=n.npos)) ++gun_name_miss_frames;} // miss = what the v612 exact-name rule would have dropped
                                           left_gun_model=!state->carrying && state->slots[0] && (by_name || by_item)?gun_model_of(state->slots[0]):0;
                                           left_barrel_model=d2vr::is_barrel_equip_name(n)?left_gun_model.load():0;} // isolate barrel routing from holster/draw tracking
+                                         left_gadget=!state->carrying && state->slots[0] && (d2vr::is_gadget_equip_name(n) || d2vr::is_gadget_equip_name(item_decl_name(state->slots[0]))); // pose "Grenade"; decls regular/sticky_grenade, stun_mine, springrazor
                                          if(left_gun_model) if(const int gun_owner=gun_owner_of(state->slots[0]);gun_owner>=0) hip_owner=gun_owner;}
                                         if(left_aim_equip.update(state->carrying?0:state->slots[0],left_barrel_model.load(),left_equip_name))
                                             left_aim_equip_revision.store(left_aim_equip.revision(),std::memory_order_release);
@@ -8829,10 +9055,10 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                             if(native_marker_probe_installed) native_marker_probe.eye_phase(3);
                             {
                                 const auto logic=game_logic_mask();const auto kind=d2vr::world_ui_logic(logic);
-                                static bool prior_note{},prior_focus{};
+                                static bool prior_note{};
                                 const bool focused=game_xr->state==XR_SESSION_STATE_FOCUSED;
-                                if((prior_note && logic!=16) || (prior_focus && !focused)) {native_note_kind.clear();++note_kind_epoch;}
-                                prior_note=logic==16;prior_focus=focused;
+                                if(prior_note && !d2vr::native_note_reader_logic(logic)) {native_note_kind.clear();native_reader_generation=0;++note_kind_epoch;}
+                                prior_note=d2vr::native_note_reader_logic(logic);
                                 const auto subtype=focused?native_note_kind.current(read_self,image_base,note_kind_epoch.load()):std::nullopt;
                                 const auto index=kind==d2vr::WorldUiKind::none?3u:static_cast<unsigned>(kind)-1;
                                 const auto ui=index<3?world_ui_capture.snapshot(index):d2vr::WorldUiCapture::Snapshot{};
@@ -8842,18 +9068,42 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                 const bool fresh=artwork_current && ui && world_ui_completion.ready(index,0,ui.scope_id) && now>=ui.recorded_tick && now-ui.recorded_tick<250;
                                 static std::uint64_t displayed_note_generation{};
                                 const auto generation=subtype?subtype->generation:0;
+                                native_reader_generation=d2vr::native_note_reader_logic(logic)?generation:0;
                                 if(generation!=displayed_note_generation || !artwork_current)game_xr->world_ui(nullptr,0);
                                 displayed_note_generation=generation;
-                                std::optional<d2vr::NotePanelReceipt> note;
-                                std::array<d2vr::NoteHandReceipt,2> note_hands{};
-                                {std::lock_guard<std::mutex> lock(note_panel_mutex);
-                                 if(note_exact_eye_pair && subtype && note_panel_receipt.generation==subtype->generation && logic==16 && note_panel_binding && note_panel_binding==arm_binding_cache.load() &&
-                                    note_panel_receipt.current(now,game_xr->pose_epoch(),game_xr->reference_epoch(),number)) note=note_panel_receipt;
-                                 for(unsigned side=0;side<2;++side) if(note_exact_eye_pair && subtype && note_hand_receipts[side].generation==subtype->generation && logic==16 && note_hand_bindings[side]==arm_binding_cache.load() &&
-                                     note_hand_receipts[side].current(now,game_xr->pose_epoch(),game_xr->reference_epoch(),number))note_hands[side]=note_hand_receipts[side];
-                                 if(logic!=16) {note_panel_receipt={};note_panel_binding.reset();note_hand_receipts={};note_hand_bindings={};}}
-                                game_xr->enable_note_tablet(note_tablet_requested && subtype.has_value());game_xr->note_panel(note);game_xr->note_hands(std::move(note_hands));
-                                game_xr->world_ui(fresh?ui.texture.Get():nullptr,static_cast<unsigned>(kind),logic==1024,fresh?ui.recorded_tick:0,fresh?ui.format:DXGI_FORMAT_UNKNOWN); // black market: whole image; the capture's draw tick keys the overlay redraw
+                                if(note_tablet_requested && generation) {
+                                    const auto rig=arm_binding_cache.load();
+                                    if(game_xr->note_model_owner()!=rig)game_xr->note_models({}, {}, {1.,1.});
+                                    static UINT64 next_note_model_attempt{};
+                                    if(rig && !game_xr->note_model_owner() && now>=next_note_model_attempt)try {
+                                        next_note_model_attempt=now+1000;
+                                        for(unsigned character=0;character<2;++character) {
+                                            const auto left=note_hand_meshes[character*2],right=note_hand_meshes[character*2+1];
+                                            if(!left || !right || !d2vr::note_hand::bind(read_self,image_base,rig->arms[0],rig->bindings[0],*left) ||
+                                               !d2vr::note_hand::bind(read_self,image_base,rig->arms[1],rig->bindings[1],*right))continue;
+                                            std::array<double,2> scales{};bool valid=true;
+                                            for(unsigned side=0;side<2;++side) {
+                                                std::array<float,15> raw{};
+                                                if(!read_self(rig->arms[side].model+0x1860,raw.data(),sizeof(raw))){valid=false;break;}
+                                                const d2vr::rig::ModelFrame model(raw);
+                                                if(std::abs(model.scale[0]-model.scale[1])>1e-4 || std::abs(model.scale[0]-model.scale[2])>1e-4){valid=false;break;}
+                                                scales[side]=model.scale[0];
+                                            }
+                                            if(valid && arm_binding_cache.load()==rig)game_xr->note_models(rig,{left,right},scales);
+                                            break;
+                                        }
+                                    }catch(const std::exception& e){note_recoverable(e.what());}
+                                    note_tracking_reason=rig && game_xr->note_model_owner()==rig?"native_models_ready":"native_models_unavailable";
+                                }
+                                game_xr->enable_note_tablet(note_tablet_requested && generation);
+                                game_xr->note_generation(generation);
+                                game_xr->world_ui(fresh?ui.texture.Get():nullptr,static_cast<unsigned>(kind),logic==1024,fresh?ui.recorded_tick:0);
+                                if(note_tablet_requested && generation) {
+                                    ++note_seen_frames;
+                                    if(game_xr->note_composition_ready())++note_ready_frames;
+                                    else note_last_fallback=!fresh?"native_image_unavailable":
+                                        game_xr->grip_tracked_hands!=3?"hand_tracking_unavailable":"hand_art_unavailable";
+                                }
                                 if(fresh) ui_dump(L"wheel",ui.texture.Get());
                                 if(fresh && !world_ui_first_seen[index]) world_ui_first_seen[index]=now;
                                 if(fresh && !world_ui_captured[index] && now-world_ui_first_seen[index]>=500) {
@@ -8899,9 +9149,23 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                             game_xr->performance_mode(alternate_on());
                             game_xr->effective_temporal_aa(temporal_live_mode.load());
                             game_xr->scene_hold=cutscene_hold;game_xr->scene_id=cutscene_count.load(); // G2: this cutscene's hold and its identity
+                            if(const auto note_frame=native_note_history.completed(number,pair_ready && completed_left && completed_right);note_frame &&
+                               note_frame->binding==arm_binding_cache.load() && note_frame->panel.generation==native_note_generation() &&
+                               note_frame->panel.frame==number-1 && native_note_completion.ready(1,0,note_frame->serial) && native_note_completion.ready(2,0,note_frame->serial) &&
+                               note_frame->panel.current(GetTickCount64(),game_xr->pose_epoch(),game_xr->reference_epoch(),number-1)) {
+                                auto displayed_panel=note_frame->panel;displayed_panel.frame=number;
+                                game_xr->accept_native_note(displayed_panel,note_frame->geometry,note_frame->index_tip);
+                                ++native_note_accepted_frames;native_note_accepted_serial=note_frame->serial;
+                                native_note_accepted_pose_hash=note_frame->pose_hash;
+                                native_note_trace_event("accept",note_frame->serial,note_frame->panel.frame);
+                            }
+                            native_note_input_live=false;
                             game_xr->present(completed_left.Get(),completed_right.Get(),
                                 views.empty()?1.4f:views[0].pose->horizontal_fov,views.empty()?.88f:views[0].pose->vertical_fov,gameplay,authored_camera || cutscene_immersive,game_logic_mask()==4,
                                 pair_ready?completed_right.Get():nullptr,mirror_view(desc.OutputWindow),game_logic_mask()==32,cutscene_immersive); // G2: the immersive cutscene is an authored scene render (raw gameplay stays false)
+                            native_note_pose_epoch=game_xr->pose_epoch();native_note_reference_epoch=game_xr->reference_epoch();
+                            native_note_input_live=game_xr->state==XR_SESSION_STATE_FOCUSED && game_xr->grip_tracked_hands==3 &&
+                                game_xr->last_action_sync==XR_SUCCESS && !game_xr->settings_open();
                             if(game_logic_mask()==d2vr::cinematic_logic_mask) { // what this exact-32 Present submitted: a projection (immersive) or the quad (theater)
                                 if(game_xr->last_layer_submitted && !game_xr->last_menu_layer) ++cutscene_projection_layers;
                                 else if(game_xr->last_menu_layer) ++cutscene_quad_layers;
@@ -9362,6 +9626,9 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                         const auto& gc=game_xr->controller_input;
                                         const auto r=shoulder_carry.update(carrying && controls_focus,shoulder_in,{gc.left_grip,gc.right_grip},{game_xr->grip_speeds[0],game_xr->grip_speeds[1]},now_c);
                                         if(r.toss) {carry_toss_until=now_c+120;++carry_throws;} else if(r.drop) {corpse_drop_press_until=now_c+160;++carry_drops;}
+                                        // Hands only: a native shoulder carry that starts anyway (any route) is put down at once, the native Use (retried 0.7 s apart).
+                                        {static ULONGLONG native_carry_drop_at{};
+                                         if(carrying && controls_focus && !legacy_corpse_carry && now_c>=native_carry_drop_at) {corpse_drop_press_until=now_c+160;native_carry_drop_at=now_c+700;++carry_drops;++native_carry_auto_drops;}}
                                         if(r.hand>=0) game_xr->pulse(static_cast<unsigned>(r.hand),.3f,.04f);
                                         consume_shoulder=shoulder_carry.consumes(0)?1u:0u;consume_shoulder|=shoulder_carry.consumes(1)?2u:0u;
                                     }
@@ -9477,7 +9744,7 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                         std::array<bool,2> carry_handoff_now{};bool body_carry_active=false;
                                         {std::lock_guard<std::mutex> hand_lock(hand_state_mutex);
                                          if(hand_state_tick && now_gi-hand_state_tick<=300) body_carry_active=hand_carrying_bits!=0 && !hand_holding_object;}
-                                        grip_intent_out={grip_intent[0].update(rc.left_grip,rc.left_trigger,now_gi,!gun_owns && !left_consumed && !(shoulder_consume_bits.load()&1u),100,idle(0) && !(choke_side==0 && (choke_offer || control_active_choke)),400,40,grip_choice[0],one_list,pending_max,carry_handoff_now[0],body_carry_active),
+                                        grip_intent_out={grip_intent[0].update(rc.left_grip,rc.left_trigger,now_gi,!gun_owns && !left_gadget && !left_consumed && !(shoulder_consume_bits.load()&1u),100,idle(0) && !(choke_side==0 && (choke_offer || control_active_choke)),400,40,grip_choice[0],one_list,pending_max,carry_handoff_now[0],body_carry_active),
                                                          grip_intent[1].update(rc.right_grip,rc.right_trigger,now_gi,
                                                              // a right hand holding a body (or anything) physically is not the sword holster's at the right shoulder (it puts the body
                                                              // there); a grip the holster, the temple or the shoulder dock consumed is nobody else's (right_consumed, as left_consumed)
@@ -9990,18 +10257,18 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                             const double now_s=std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
                                             const auto polls=controller_bridge.virtual_reads();
                                             const auto to_vec=[](const d2vr::GV3& v){return d2vr::Vec3{v.x,v.y,v.z};};
-                                            // A contact tick is only consumed on a live frame; a stale one (over 250 ms) is dropped.
-                                            bool contact_wanted=false;
-                                            {const auto contact_at=d2vr::NativeInteractionAim::intent_contact_tick_.load(std::memory_order_acquire);
-                                             if(contact_at && (f.now_ms<contact_at || f.now_ms-contact_at>250)) d2vr::NativeInteractionAim::intent_contact_tick_.store(0);
-                                             else if(contact_at && live) {d2vr::NativeInteractionAim::intent_contact_tick_.store(0);contact_wanted=true;}}
+                                            auto contact_request=live && !attack_press.active()?d2vr::NativeInteractionAim::take_contact_attack(control_reader,f.now_ms,game_xr->pose_epoch()):std::nullopt;
+                                            if(contact_attack_target && !d2vr::NativeInteractionAim::contact_attack_current(control_reader,*contact_attack_target,f.now_ms,game_xr->pose_epoch())) {
+                                                attack_press.reset();contact_attack_target.reset();
+                                            }
                                             attack_press.held(f.now_ms,polls); // advance first: a press that just finished frees the slot this frame
-                                            if(!live) attack_press.reset();
+                                            if(!attack_press.active())contact_attack_target.reset();
+                                            if(!live) {attack_press.reset();contact_attack_target.reset();}
                                             const bool press_free=!attack_press.active();
                                             const bool far_block=live && far_takedown_now; // takedown range policy: an offer beyond the scaled box must not be lunged at
-                                            if(contact_wanted && live && attack_intent.contact_press(now_s,drawn_now,press_free)) {
+                                            if(contact_request && live && attack_intent.contact_press(now_s,drawn_now,press_free,true)) {
                                                 if(far_block) ++attack_intent_suppressed_far; // far takedown offer: the press is withheld (and counted), not started
-                                                else if(attack_press.start(f.now_ms,polls)) attack_honour.press(f.now_ms);}
+                                                else if(attack_press.start(f.now_ms,polls)) {contact_attack_target=contact_request;attack_honour.press(f.now_ms);}}
                                             if(attack_intent.update({now_s,to_vec(cf.pos),to_vec(cf.head_pos),live,to_vec(cf.aim),to_vec(cf.head_fwd)},crouch.crouched,drawn_now,
                                                     press_free && !attack_press.active()) && live) {
                                                 if(far_block) ++attack_intent_suppressed_far;
@@ -10048,7 +10315,7 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                     }
                                     // Both hands thrown up above the head = native A (jump), held while they stay up (mantle at a ledge).
                                     {static bool jump_was{};if(gesture.jump && !jump_was) ++gesture_jumps;jump_was=gesture.jump;if(gesture.jump) input.a=true;}
-                                    input.right_trigger=0;if(raw.left_grip>.55f && !gun_grip.held()) input.left_trigger=0; // a fist never fires; a gripped gun does
+                                    input.right_trigger=0;if(raw.left_grip>.55f && !gun_grip.held() && !left_gadget) input.left_trigger=0; // a fist never fires; a gripped gun or gadget does
                                     if(GetTickCount64()<gesture_cast_until) input.left_trigger=1;
                                     if(gesture_release_until) {if(raw.left_trigger<.3f) gesture_release_until=0;else input.left_trigger=0;} // yoink: release the aimed power, held until the trigger is let go
                                 }
@@ -10081,7 +10348,7 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                         combat_log("attack_policy",cd.attack_target.spawn,static_cast<double>(cd.scheduled_press),static_cast<int>(cd.attack_transition));
                                     // attack_intent_press_tick: with the sword drawn and no legacy-sword-contact, only the intent press (below) drives the attack button.
                                     if(logic==2 && cd.rt) {input.right_trigger=1;swing_until_tick=std::max<ULONGLONG>(swing_until_tick,GetTickCount64()+250);} // melee aim follows the blade
-                                    if(!attack_intent_ran) attack_press.reset(); // the compute was skipped this frame: nothing stays held
+                                    if(!attack_intent_ran) {attack_press.reset();contact_attack_target.reset();} // skipped control frames release the exact contact press too
                                     if(attack_intent_owns) input.right_trigger=0; // the old swing recogniser no longer presses; the intent press below does
                                     if(logic==2 && attack_intent_rt) {input.right_trigger=1;swing_until_tick=std::max<ULONGLONG>(swing_until_tick,GetTickCount64()+250);}
                                     // attack_intent_wiring_end
@@ -10142,6 +10409,12 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                         if(now_l<look_press_until && !native_interaction_aim.talk_target(0,now_l) && !native_interaction_aim.talk_target(1,now_l)) input.x=true;
                                     }
                                     if(grab_guard[0]) input.left_trigger=0;
+                                    {   // A grenade or mine in the left hand (user, headset v671): the fist holds the game's left trigger (aim / cook), opening
+                                        // the hand lets it go (the throw / the placement); the trigger alone still works. Last word on the left trigger.
+                                        static bool gadget_held{};const float squeeze=d2vr::gadget_squeeze(raw.left_grip,raw.left_trigger);
+                                        gadget_held=left_gadget && (squeeze>=.55f || (gadget_held && squeeze>=.35f));
+                                        if(left_gadget) input.left_trigger=gadget_held?1.f:0.f;
+                                    }
                                     if(grab_guard[1] && !sword_combat_owned) input.right_trigger=0;
                                     // Native held object: letting go with the holding hand throws it with the hand's velocity (native Throw, RT)
                                     // or drops it (native Use).
@@ -10231,6 +10504,10 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                         d2vr::stick_turn_rate_rad_s(turning_config.mode,vignette_raw_turn,turning_config.smooth_degrees_per_second):0.);
                                     published_stick_speed_mps=static_cast<float>(vignette_gameplay?d2vr::stick_move_speed_mps(input.move_x,input.move_y):0.);
                                 }
+                                if(simulated_vr_requested && logic==2 && !input.menu_modifier && !x_wheel.wheel() &&
+                                   GetTickCount64()<test_move_until.load()) {
+                                    input.active=true;input.move_x=test_move_x.load();input.move_y=test_move_y.load();
+                                }
                                 if(const auto bits=test_pad_bits.load();bits && GetTickCount64()<test_pad_until.load()) {
                                     input.active=true;input.a|=(bits&1)!=0;input.b|=(bits&2)!=0;input.x|=(bits&4)!=0;input.y|=(bits&8)!=0;input.menu|=(bits&16)!=0;
                                     for(unsigned d=0;d<4;++d) if(bits&(32u<<d)) input.dpad[d]=true; // right, up, left, down
@@ -10254,10 +10531,8 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                     const auto gate=d2vr::HandBodyRuntime::release_gate(release,GetTickCount64());
                                     input.menu=gate.menu;input.pause_request=gate.pause_request;
                                 }
-                                if(note_tablet_requested && logic==16 && native_note_kind.current(read_self,image_base,note_kind_epoch.load())) {
-                                    // AbsSimpleNote binds LEFT_ANALOG_STICK; right-hand scroll stays in the native controller path.
-                                    input.move_x=0;input.move_y=game_xr->note_scroll_axis();input.turn_x=input.turn_y=0;
-                                    input.left_grip=input.right_grip=input.left_trigger=input.right_trigger=0;
+                                if(note_tablet_requested && d2vr::native_note_reader_logic(logic) && native_note_generation()) {
+                                    input.move_y=game_xr->note_scroll_axis();
                                 }
                                 controller_bridge.publish(input,logic==2);
                                 published_logic=logic;published_move_x=input.move_x;published_move_y=input.move_y;
@@ -11044,7 +11319,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
                 } catch(...) {return false;}
             };
         }
-        ui_dump_requested=fs::exists(root/L"build"/L"ui-dump");ui_dump_state.clear();left_aim_wanted=false;early_wrist_owner.reset();vitals_file=0;next_vitals_probe=0;wrist_early_publications=0;world_prompt_frames=0;prompt_shows=prompt_hides=takedown_flips=npc_blade_contacts=0;d2vr::NativeInteractionAim::melee_enabled_=true;d2vr::NativeInteractionAim::impact_enabled_=true;d2vr::NativeImpactFx::reset();d2vr::NativeInteractionAim::impact_played_=0;d2vr::NativeInteractionAim::impact_skipped_=0;d2vr::NativeInteractionAim::melee_applied_=0;d2vr::NativeInteractionAim::melee_rejected_=0;d2vr::NativeInteractionAim::melee_faults_=0;for(auto& w:d2vr::NativeInteractionAim::melee_why_) w=0;for(auto& w:d2vr::NativeInteractionAim::stealth_reject_) w=0;d2vr::NativeInteractionAim::stealth_slow_aware_drops_=0;d2vr::NativeInteractionAim::stealth_slow_unheld_drops_=0;slow_reject_latch=d2vr::SlowRejectLatch{};for(auto& w:d2vr::NativeInteractionAim::hit_height_) w=0;ga_offered_frames=ga_offered_swings=0;{std::error_code ec;fs::remove(output_directory/L"native-combat.csv",ec);} // the DLL outlives sessions
+        ui_dump_requested=fs::exists(root/L"build"/L"ui-dump");ui_dump_state.clear();left_aim_wanted=false;early_wrist_owner.reset();vitals_file=0;next_vitals_probe=0;wrist_early_publications=0;world_prompt_frames=0;prompt_shows=prompt_hides=takedown_flips=npc_blade_contacts=0;d2vr::NativeInteractionAim::melee_enabled_=true;d2vr::NativeInteractionAim::impact_enabled_=true;d2vr::NativeImpactFx::reset();d2vr::NativeInteractionAim::impact_played_=0;d2vr::NativeInteractionAim::impact_skipped_=0;d2vr::NativeInteractionAim::melee_applied_=0;d2vr::NativeInteractionAim::melee_rejected_=0;d2vr::NativeInteractionAim::melee_faults_=0;for(auto& w:d2vr::NativeInteractionAim::melee_why_) w=0;for(auto& w:d2vr::NativeInteractionAim::stealth_reject_) w=0;for(auto& w:d2vr::NativeInteractionAim::stealth_awareness_) w=0;d2vr::NativeInteractionAim::stealth_slow_aware_drops_=0;d2vr::NativeInteractionAim::stealth_slow_unheld_drops_=0;slow_reject_latch=d2vr::SlowRejectLatch{};for(auto& w:d2vr::NativeInteractionAim::hit_height_) w=0;ga_offered_frames=ga_offered_swings=0;{std::error_code ec;fs::remove(output_directory/L"native-combat.csv",ec);} // the DLL outlives sessions
         if(fs::exists(root/L"build"/L"hud-node-census")) {
             hud_node_census_path=output/L"hud-node-census.csv";
             d2vr::NativeHudChildDraw::census=&hud_node_census;
@@ -11075,6 +11350,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
         native_interaction_aim.palm_select(d2vr::load_grab_tuning(root/L"build"/L"grab-tuning.cfg").value,fs::exists(root/L"build"/L"legacy-palm-select")); // G1: per-kind priority; the v610 beam knob
         grip_tuning=d2vr::load_grab_tuning(root/L"build"/L"grab-tuning.cfg").value;
         no_grip_alone_grab=fs::exists(root/L"build"/L"no-grip-alone-grab");
+        shoulder_dock_enabled=fs::exists(root/L"build"/L"shoulder-dock");
         legacy_corpse_carry=fs::exists(root/L"build"/L"legacy-corpse-carry");   // v613 item 4: present restores v612 (a torso hold never hands off to the shoulder carry)
         native_grab.living_pull(d2vr::NativeWeaponHands::living_pull_enabled);   // G6: the hold pulls him only when the Task 13 verdict allows it
         if(native_interaction_requested) native_interaction_aim.install(image_base,&read_self,&game_logic_mask,controller_aim_requested,output/L"native-interaction-rays.csv",native_camera_trace_requested,native_camera_trace_requested);
@@ -11107,13 +11383,19 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
         power_gestures_enabled=fs::exists(root/L"build"/L"power-gestures"); // opt-in until headset-tested
         full_body_requested=fs::exists(root/L"build"/L"full-body");
         note_tablet_requested=fs::exists(root/L"build"/L"note-tablet");
-        note_hand_meshes={};
+        note_tracking_reason="not_sampled";note_last_fallback="none";note_seen_frames=0;note_ready_frames=0;
+        note_hand_meshes={};std::atomic_store(&native_note_frame,std::shared_ptr<NativeNoteFrame>{});native_note_history.clear();native_note_completion.clear();
+        native_note_palette_frames=0;native_note_bound_draws=0;native_note_input_live=false;
+        native_note_accepted_frames=0;native_note_accepted_serial=0;native_note_accepted_pose_hash=0;native_note_timeline_rows=0;
+        native_note_final_tick=0;native_note_final_pairs=0;native_note_final_pair=false;test_move_until=0;
+        for(auto& count:native_note_draw_gates)count=0;
+        native_note_diagnostics=fs::exists(root/L"build"/L"note-render-diagnostics");native_note_diagnostic_rows=0;
         if(note_tablet_requested)for(unsigned character=0;character<2;++character)for(unsigned side=0;side<2;++side)try {
             const auto name=std::string("note_hand_")+(character?"emily":"corvo")+(side?"_right.bin":"_left.bin");
             std::ifstream input(root/L"artifacts"/L"game-art"/name,std::ios::binary);
             auto mesh=d2vr::note_hand::read(input);
-            if(mesh.character==character && mesh.side==side)note_hand_meshes[character*2+side]=std::move(mesh);
-        }catch(...) {note_recoverable("Note hand mesh unavailable; notes use the front panel until art is imported");}
+            if(mesh.character==character && mesh.side==side)note_hand_meshes[character*2+side]=std::make_shared<const d2vr::note_hand::Mesh>(std::move(mesh));
+        }catch(...) {note_recoverable("Note hand mesh unavailable; native note keeps its controller attachment");}
         synchronized_observer.enable(fs::exists(root/L"build"/L"synchronized-diagnostics"));
         const bool anatomical_shadow=fs::exists(root/L"build"/L"anatomical-shadow");
         if(anatomical_shadow && (!full_body_requested || !tracked_arms_requested || !synchronized_observer.enabled()))
@@ -11228,6 +11510,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
             for(unsigned side=0;side<2;++side) {fsr_taa.eye_motion_width[side]=0;fsr_taa.eye_motion_height[side]=0;}
         }
         ++note_kind_epoch;native_note_kind.configure(read_self,image_base);
+        native_reader_generation=0;
         native_prompt_probe_calls=0;native_prompt_probe.configure(image_base,&read_self);native_prompt_entry_abi=d2vr::native_prompt_entry::verified_abi(read_self,image_base);d2vr::NativeWristHud::observer=&native_hud_call_observer;
         fsr_taa.timing_enabled=!native_gpu_requested && !render_perf_requested.load();
         fsr_taa.fsr4_compute_timing_enabled=render_perf_requested.load() || fs::exists(root/L"build"/L"fsr4-compute-timing");
@@ -11270,7 +11553,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
         hold_y_menu_enabled=!fs::exists(root/L"build"/L"no-hold-y-menu");
         legacy_hold_y_settings=fs::exists(root/L"build"/L"legacy-hold-y-settings");
         legacy_authored_hands=fs::exists(root/L"build"/L"legacy-authored-hands");
-        legacy_cutscene_hands=fs::exists(root/L"build"/L"legacy-cutscene-hands");
+        legacy_cutscene_hands=!fs::exists(root/L"build"/L"cutscene-avatar");
         // The controls and gestures page text: the launcher installs docs/VR-CONTROLS.md as <mod home>/VR-CONTROLS.md; a repo run reads docs/.
         for(const auto& guide:{root/L"VR-CONTROLS.md",root/L"docs"/L"VR-CONTROLS.md"}) {std::ifstream in(guide,std::ios::binary);if(!in) continue;
             std::ostringstream text;text<<in.rdbuf();d2vr::controls_guide_markdown()=text.str();break;}
@@ -11335,6 +11618,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
             else note_recoverable("Left weapon render receipt could not open diagnostic output");
         }
         gadget_hand_aim_enabled=!fs::exists(root/L"build"/L"no-hand-mine-aim") && d2vr::NativeGadgetAim::install(image_base); // Track T B: placement + throw-hit sensors
+        mine_point_aim=fs::exists(root/L"build"/L"mine-point-aim");
         grenade_hand_throw_enabled=!fs::exists(root/L"build"/L"no-hand-grenade-throw") && d2vr::NativeGrenadeThrow::install(image_base); // Track T A: pinned call site, grenades only
         if(held_object_installed && !d2vr::NativeHeldPlacement::process_owner().install(image_base,&read_self))
             throw std::runtime_error("Native held placement ownership could not initialize");
@@ -11421,6 +11705,8 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
         flush_render_perf();
         flush_grab_decisions(true);
         full_body_stopping=true;d2vr::NativeManualEquipRuntime::process_owner().publish({});attachment_pose.set_allowed(0,0,0);full_body_tracking_ready=false;full_body_restore_requested=true;full_body.clear();
+        native_reader_generation=0;
+
         // The still-enabled upload hook restores only inside its owned renderer
         // scope. Wait before disabling hooks; never call native Refresh here.
         const auto body_restore_deadline=GetTickCount64()+2000;
@@ -11871,6 +12157,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
         flush_grab_decisions(true);
         flush_frame_timing(true);
         full_body_stopping=true;d2vr::NativeManualEquipRuntime::process_owner().publish({});full_body_tracking_ready=false;full_body_restore_requested=true;full_body.clear();
+        native_reader_generation=0;
         native_output_size.clear();
         capturing=false;
         d2vr::NativeLeftWeaponSocketOwner::process_owner().clear();
@@ -11968,6 +12255,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
         flush_grab_decisions(true);
         flush_frame_timing(true);
         full_body_stopping=true;d2vr::NativeManualEquipRuntime::process_owner().publish({});full_body_tracking_ready=false;full_body_restore_requested=true;full_body.clear();
+        native_reader_generation=0;
         native_output_size.clear();
         capturing=false;
         d2vr::NativeLeftWeaponSocketOwner::process_owner().clear();

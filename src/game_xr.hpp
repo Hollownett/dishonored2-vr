@@ -34,6 +34,9 @@
 #include "world_ui_pose.hpp"
 #include "note_reading.hpp"
 #include "note_eye_art.hpp"
+#include "note_hand_mesh.hpp"
+#include "note_hand_pose.hpp"
+#include "native_arm_binding_snapshot.hpp"
 #include "hud_window.hpp"
 #include "wrist_hud_image.hpp"
 #include "native_eye_art.hpp"
@@ -173,7 +176,6 @@ private:
     std::unique_ptr<NativeEyeArt> native_eye_art_;
     std::unique_ptr<NoteEyeArt> note_eye_art_;
     std::array<NoteHandReceipt,2> note_hands_{};
-    DXGI_FORMAT world_ui_source_format_=DXGI_FORMAT_UNKNOWN;
     EyeReticleFrames eye_reticles_;
     bool eye_reticle_failed_{};
     Microsoft::WRL::ComPtr<ID3D11Texture2D> eye_reticle_texture_;
@@ -235,9 +237,17 @@ private:
     Microsoft::WRL::ComPtr<ID3D11Texture2D> world_ui_source_;
     unsigned world_ui_kind_{};bool world_ui_full_{};
     std::optional<NotePanelReceipt> note_panel_;
-    NoteScroll note_scroll_;
-    float note_scroll_axis_{},note_right_trigger_{};
+    NoteTouchScroll note_touch_scroll_;
+    float note_scroll_axis_{};
     bool note_tablet_enabled_{};
+    std::uint64_t note_generation_{};
+    std::shared_ptr<const rig::NativeArmBindingSnapshot> note_binding_;
+    std::array<std::shared_ptr<const note_hand::Mesh>,2> note_models_;
+    std::array<std::unique_ptr<NoteHandPose>,2> note_posers_;
+    std::array<note_hand::Geometry,2> note_geometry_;
+    bool note_models_active_{};
+    std::optional<Vec3> note_index_tip_;
+
     XrSwapchain world_ui_chain_{};
     ChainSizes chain_sizes_; // every live swapchain's size: the submit guard checks quad/cylinder sub-rects against it
     XrSwapchain menu_band_chain_{};std::vector<XrSwapchainImageD3D11KHR> menu_band_images_;UINT menu_band_width_{},menu_band_height_{}; // the menu/cutscene panel's 16:9 band
@@ -348,24 +358,57 @@ public:
     // that hand like a page (headset 2026-10-14: "render the Black Market on the left arm like notes"). Untracked, the shop stays 1 m ahead.
     bool note_composition_ready() const noexcept {
         const auto now=GetTickCount64();
-        return note_tablet_enabled_ && world_ui_kind_==2 && world_ui_source_ && note_panel_ &&
+        return note_tablet_enabled_ && note_models_active_ && note_binding_ && world_ui_kind_==2 && world_ui_source_ && note_panel_ &&
             !alternate_enabled && grip_tracked_hands==3 &&
             note_panel_->current(now,pose_epoch(),reference_epoch(),alternate_frame) &&
             note_hands_[0].generation==note_panel_->generation && note_hands_[1].generation==note_panel_->generation &&
             note_hands_[0].current(now,pose_epoch(),reference_epoch(),alternate_frame) &&
             note_hands_[1].current(now,pose_epoch(),reference_epoch(),alternate_frame);
     }
-    bool world_ui_in_hand() const noexcept {return (grip_tracked_hands&1u) && ((world_ui_kind_==2 &&
-        (!note_tablet_enabled_ || note_composition_ready())) || (world_ui_kind_==3 && world_ui_full_));}
-    void note_hands(std::array<NoteHandReceipt,2> hands) {note_hands_=std::move(hands);}
+    bool world_ui_in_hand() const noexcept {return (grip_tracked_hands&1u) &&
+        (world_ui_kind_==2 || (world_ui_kind_==3 && world_ui_full_));}
     std::uint64_t note_eye_draws{};
     void enable_note_tablet(bool enabled) {note_tablet_enabled_=enabled;}
-    void note_panel(std::optional<NotePanelReceipt> panel) {
-        if(static_cast<bool>(panel)!=static_cast<bool>(note_panel_)) world_ui_pose_valid_=false;
-        note_panel_=std::move(panel);
+    void note_generation(std::uint64_t generation) {
+        note_generation_=generation;
+    }
+    const auto& note_model_owner() const {return note_binding_;}
+    void note_models(std::shared_ptr<const rig::NativeArmBindingSnapshot> binding,
+                     std::array<std::shared_ptr<const note_hand::Mesh>,2> meshes,const std::array<double,2>& scales) {
+        note_binding_.reset();note_models_={};note_posers_={};note_models_active_=false;
+        note_panel_.reset();note_hands_={};note_geometry_={};note_index_tip_.reset();note_scroll_axis_=0;note_touch_scroll_={};
+        if(!binding || !meshes[0] || !meshes[1])return;
+        std::array<std::unique_ptr<NoteHandPose>,2> posers;
+        for(unsigned side=0;side<2;++side) {
+            posers[side]=std::make_unique<NoteHandPose>(binding->bindings[side],scales[side]);
+        }
+        note_posers_=std::move(posers);note_models_=std::move(meshes);note_binding_=std::move(binding);
     }
     float note_scroll_axis() const noexcept {return note_scroll_axis_;}
-    float note_right_trigger() const noexcept {return note_right_trigger_;}
+    std::optional<NotePanelReceipt> note_displayed_panel() const {return note_panel_;}
+    const note_hand::Geometry* note_drawn_hand(unsigned side) const {return note_models_active_ && side<2?&note_geometry_[side]:nullptr;}
+    std::optional<Vec3> note_index_tip() const {return note_index_tip_;}
+    const NoteHandPose* note_poser(unsigned side) const {return side<2?note_posers_[side].get():nullptr;}
+    const note_hand::Mesh* note_mesh(unsigned side) const {return side<2?note_models_[side].get():nullptr;}
+    std::optional<NotePanelReceipt> note_target_panel(std::uint64_t frame) {
+        if(!note_tablet_enabled_ || !note_binding_ || world_ui_kind_!=2 || !world_ui_source_ ||
+           !world_ui_in_hand() || grip_tracked_hands!=3 || settings_.open() ||
+           state!=XR_SESSION_STATE_FOCUSED || last_action_sync!=XR_SUCCESS)return {};
+        const auto size=note_dimensions();
+        return NotePanelReceipt{world_ui_pose(),size[0],size[1],GetTickCount64(),pose_epoch(),reference_epoch(),frame,note_generation_};
+    }
+    // Geometry is an occlusion/contact witness of the original native draw;
+    // it is never drawn as a second pair of arms.
+    void accept_native_note(const NotePanelReceipt& panel,std::array<note_hand::Geometry,2> geometry,Vec3 tip) {
+        std::array<NoteHandReceipt,2> receipts{};
+        for(unsigned side=0;side<2;++side) {
+            auto triangles=std::make_shared<std::vector<Vec3>>();
+            triangles->reserve(geometry[side].indices.size());
+            for(auto index:geometry[side].indices)triangles->push_back(geometry[side].vertices.at(index));
+            receipts[side]={std::move(triangles),panel.tick,panel.pose_epoch,panel.reference_epoch,panel.frame,panel.generation};
+        }
+        note_geometry_=std::move(geometry);note_hands_=std::move(receipts);note_panel_=panel;note_index_tip_=tip;
+    }
     std::array<double,2> note_dimensions() const {
         const double width=.45*std::min(hud_scale(),100.f/65.f);
         if(world_ui_kind_==2 && world_ui_source_) {D3D11_TEXTURE2D_DESC d{};world_ui_source_->GetDesc(&d);
@@ -384,8 +427,13 @@ private:
         const auto& l=views_[0].pose;const auto& r=views_[1].pose;
         const TrackedPose head{{(l.position.x+r.position.x)*.5,(l.position.y+r.position.y)*.5,(l.position.z+r.position.z)*.5},
             {l.orientation.x,l.orientation.y,l.orientation.z,l.orientation.w}};
+        if(world_ui_kind_==2 && note_tablet_enabled_ && note_posers_[0]) try { // a held note is a tablet in the left palm
+            const auto& p=grip_locations[0].pose;const Quaternion q{p.orientation.x,p.orientation.y,p.orientation.z,p.orientation.w};
+            const WorldTrackedPose grip{{p.position.x,p.position.y,p.position.z},{rotated(q,{0,0,-1}),rotated(q,{-1,0,0}),rotated(q,{0,1,0})}};
+            const auto size=note_dimensions();
+            world_ui_pose_=note_posers_[0]->page(apply_palm_offset(grip,palm_offset(0),true),size[0],size[1]);world_ui_pose_valid_=false;return world_ui_pose_;
+        } catch(const std::exception&) {} // untracked/degenerate palm: the plain held placement below
         if(world_ui_in_hand()) { // notes and the black market follow the left hand every frame
-            if(world_ui_kind_==2 && note_tablet_enabled_ && note_panel_) {world_ui_pose_=note_panel_->pose;world_ui_pose_valid_=false;return world_ui_pose_;}
             const auto& g=grip_locations[0].pose.position; // the taller shop page rests its bottom edge on the hand, as a note does (.12 m)
             world_ui_pose_=world_ui_hand_pose(head.position,{g.x,g.y,g.z},world_ui_kind_==2?.12:displayed_menu_view().height*.5);world_ui_pose_valid_=false;return world_ui_pose_;
         }
@@ -1223,6 +1271,8 @@ public:
     } timing;
     using TransferObserver=void (*)(UINT,ID3D11Texture2D*,ID3D11Texture2D*,const XrCompositionLayerProjectionView&,bool,bool,ID3D11Texture2D*);
     TransferObserver observe_transfer{}; // base eye copy before reticle/native-art composition; not final submitted pixels
+    using NoteCompositionObserver=void (*)(unsigned,ID3D11Texture2D*,const XrCompositionLayerProjectionView&,const NotePanelReceipt&);
+    NoteCompositionObserver observe_note_composition{};
     // Read only from observe_transfer on the presenting thread. Pointer
     // inequality alone cannot distinguish SMAA from CAS or a kept eye.
     EyeTransferProcessing transfer_processing(UINT eye) const noexcept {return eye<2?transfer_processing_[eye]:EyeTransferProcessing{};}
@@ -1306,7 +1356,7 @@ public:
     // The controls page: the right temple squeeze and the VR Settings "Controls & gestures" row toggle it; it opens in front of the head.
     void toggle_guide(bool from_menu=false) noexcept {guide_placed_=false;guide_open_=!guide_open_.load();guide_from_menu_=from_menu && guide_open_.load();
         if(guide_open_) {guide_page_=0;guide_refresh_=true;guide_navigation_.claim();}}
-    void guide_page_delta(int delta) noexcept {if(delta && guide_open_) {guide_page_=std::clamp(guide_page_.load()+delta,0,6);guide_refresh_=true;}}
+    void guide_page_delta(int delta) noexcept {if(delta && guide_open_) {guide_page_=guide_page_step(guide_page_.load(),delta);guide_refresh_=true;}}
     bool guide_open() const noexcept {return guide_open_.load();}
     bool guide_stick_blocked() const noexcept {return guide_open() || guide_navigation_.blocked();}
     std::atomic<bool> settings_requested{false}; // native menu "VR Settings" item (native_menu_entry.hpp)
@@ -1442,8 +1492,7 @@ public:
     // dropping the layer: dropping it made the open wheel blink while its art updated.
     // full_height: the movie lays controls at its top/bottom edges, outside the 16:9 band (the black market, sim v381: its
     // category bar, money and Purchase/Back rows sat at 78-96% of the height and were cut off).
-    void world_ui(ID3D11Texture2D* source,unsigned kind,bool full_height=false,std::uint64_t draw_tick=0,DXGI_FORMAT source_format=DXGI_FORMAT_UNKNOWN) {
-        if(source)world_ui_source_format_=source_format;
+    void world_ui(ID3D11Texture2D* source,unsigned kind,bool full_height=false,std::uint64_t draw_tick=0) {
         if(kind>3) kind=0;world_ui_full_=kind==1 || full_height;
         if(!kind) {world_ui_kind_=0;world_ui_source_.Reset();world_ui_pose_valid_=false;world_ui_stale_=false;return;}
         const auto now=GetTickCount64();
@@ -2045,15 +2094,18 @@ public:
         }
         const bool note_input=note_tablet_enabled_ && world_ui_kind_==2 && world_ui_source_ &&
             !settings_.open() && !settings_consumed && continuity_.usable() && state==XR_SESSION_STATE_FOCUSED && controller_input.active;
-        std::optional<double> note_hit;
-        constexpr XrSpaceLocationFlags note_pose_flags=XR_SPACE_LOCATION_ORIENTATION_VALID_BIT|XR_SPACE_LOCATION_POSITION_VALID_BIT;
-        if(note_input && note_panel_ && world_ui_in_hand() && (aim_locations[1].locationFlags&note_pose_flags)==note_pose_flags) {
-            const auto& p=aim_locations[1].pose;
-            note_hit=note_pointer_y({{p.position.x,p.position.y,p.position.z},{p.orientation.x,p.orientation.y,p.orientation.z,p.orientation.w}},*note_panel_);
-        }
-        note_right_trigger_=note_input?raw_right_trigger:0;
-        note_scroll_axis_=note_scroll_.update(note_input,raw_right_trigger>.55f,note_hit,controller_input.turn_y,
-            GetTickCount64(),pose_epoch(),reference_epoch());
+        const auto now_note=GetTickCount64();
+        std::optional<Vec3> touch;
+        note_models_active_=note_input && note_binding_ && note_panel_ &&
+            note_panel_->generation==note_generation_ &&
+            note_panel_->current(now_note,pose_epoch(),reference_epoch(),alternate_frame) &&
+            note_hands_[0].current(now_note,pose_epoch(),reference_epoch(),alternate_frame) &&
+            note_hands_[1].current(now_note,pose_epoch(),reference_epoch(),alternate_frame);
+        if(note_models_active_)touch=note_index_tip_;
+        else {note_panel_.reset();note_hands_={};note_index_tip_.reset();}
+        note_scroll_axis_=note_touch_scroll_.update(note_input,touch,note_panel_,controller_input.turn_y,
+            now_note,pose_epoch(),reference_epoch(),alternate_frame);
+        note_index_tip_=touch;
         controller_input.right_trigger=menu_trigger_gate_.update(raw_right_trigger,!scene_render || settings_.open() || settings_consumed,raw_input_active);
         timing.locate_input_ns=cpu_time_ns()-stage_start;stage_start=cpu_time_ns();
         XrCompositionLayerProjection projection{};projection.type=XR_TYPE_COMPOSITION_LAYER_PROJECTION;
@@ -2153,14 +2205,14 @@ public:
                     const auto rows=static_cast<UINT>(world_ui_rows(art_desc)),top=(art_desc.Height-rows)/2;
                     XrView note_view{XR_TYPE_VIEW};note_view.pose=layers[eye].pose;note_view.fov=layers[eye].fov;
                     note_eye_art_->draw(images_[eye].at(index).texture,world_ui_source_.Get(),format_,
-                        {0,top,0,art_desc.Width,top+rows,1},note_view,*note_panel_,note_hands_,world_ui_source_format_);++note_eye_draws;
+                        {0,top,0,art_desc.Width,top+rows,1},note_view,*note_panel_,note_hands_);++note_eye_draws;
                 }
                 if(gameplay && !authored_camera && tracked_pair_()) {
                     const auto now=GetTickCount64();XrView view{XR_TYPE_VIEW};view.pose=layers[eye].pose;view.fov=layers[eye].fov;
                     if(eye_reticle_available() && settings_.crosshair() && !settings_.open() && state==XR_SESSION_STATE_FOCUSED && controller_input.active) try {
                         const auto image_frame=alternate_enabled?alt_effective_()[eye].frame:alternate_frame;
                         if(const auto reticle=eye_reticles_.find(eye,image_frame,pose_epoch(),reference_epoch(),now))
-                            if(const auto rect=eye_reticle_rect(reticle->x,reticle->y,width_,height_)) {
+                            if(const auto rect=eye_reticle_rect(reticle->x,reticle->y,width_,height_,10.f)) { // the game dot reads as large as the old ring
                                 if(!eye_reticle_texture_) {
                                     Microsoft::WRL::ComPtr<ID3D11Device> device;context_->GetDevice(&device);
                                     if(!device) throw std::runtime_error("Missing eye reticle device");
@@ -2193,6 +2245,7 @@ public:
                     }
                 }
                 if(mirror_rects[eye]) mirror_->draw(images_[eye].at(index).texture,*mirror_rects[eye]);}
+                if(composite_note && observe_note_composition)observe_note_composition(eye,images_[eye].at(index).texture,layers[eye],*note_panel_);
                 if(eye==0 && !world_scene) gates.band_ready=menu_band_ready=copy_menu_band(images_[0].at(index).texture);
                 } catch(...) {xrReleaseSwapchainImage(chains_[eye],&release);throw;}
                 {SpanClock span(xr_spans,XrSpan::release);checked(xrReleaseSwapchainImage(chains_[eye],&release),"Release game eye");}

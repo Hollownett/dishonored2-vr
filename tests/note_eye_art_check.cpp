@@ -34,6 +34,20 @@ int main() {
     auto clear_art=texture(8,8,{0,0,0,0}),eye=texture(128,128,{10,180,40,255});
     compositor.draw(eye.Get(),clear_art.Get(),DXGI_FORMAT_R8G8B8A8_UNORM,{0,0,0,8,8,1},view,panel,hands);
     assert((pixel(d2vr::readback_rgba(eye.Get()),76,64)==std::array<unsigned,4>{10,180,40,255}));
+    // The captured native movie is gamma-space bytes in a typeless target: an sRGB eye shows them as the quad's byte copy would,
+    // never encoded twice (v670: a dark 12/255 page became ~70/255 and its faint red ink loud).
+    {
+        auto typeless=[&](unsigned size,std::array<unsigned char,4> color) {
+            std::vector<unsigned char> pixels(size*size*4);for(unsigned i=0;i<size*size;++i)std::copy(color.begin(),color.end(),pixels.begin()+i*4);
+            D3D11_TEXTURE2D_DESC d{};d.Width=d.Height=size;d.MipLevels=d.ArraySize=d.SampleDesc.Count=1;d.Format=DXGI_FORMAT_R8G8B8A8_TYPELESS;d.BindFlags=D3D11_BIND_RENDER_TARGET|D3D11_BIND_SHADER_RESOURCE;
+            D3D11_SUBRESOURCE_DATA data{pixels.data(),size*4,0};ComPtr<ID3D11Texture2D> result;assert(SUCCEEDED(device->CreateTexture2D(&d,&data,&result)));return result;
+        };
+        auto dark=typeless(8,{40,10,15,255}),srgb_eye=typeless(128,{10,180,40,255});
+        compositor.draw(srgb_eye.Get(),dark.Get(),DXGI_FORMAT_R8G8B8A8_UNORM_SRGB,{0,0,0,8,8,1},view,panel,hands);
+        const auto got=pixel(d2vr::readback_rgba(srgb_eye.Get()),76,64);
+        const unsigned want[3]{40,10,15};
+        for(unsigned c=0;c<3;++c)assert(got[c]+1>=want[c] && got[c]<=want[c]+1);
+    }
     bool rejected=false;hands[1].triangles.reset();try{compositor.draw(eye.Get(),art.Get(),DXGI_FORMAT_R8G8B8A8_UNORM,{0,0,0,8,8,1},view,panel,hands);}catch(const std::invalid_argument&){rejected=true;}assert(rejected);
     std::cout<<"note eye art: stereo front/back hand occlusion, alpha and receipt rejection passed\n";
 }

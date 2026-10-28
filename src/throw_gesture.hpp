@@ -16,6 +16,9 @@ struct ThrowGestureParams {
     float hold_on=.55f,hold_off=.35f;
 };
 struct ThrowGestureResult {bool ok{};std::array<double,3> velocity{},spawn{};double hand_speed{};};
+// How hard a gadget hand squeezes (user, headset v671: "squeeze a fist, then throw like a normal grenade"): with the grip held it is
+// the fist (both), so opening the hand lets go; without it, the trigger alone (the old way).
+inline float gadget_squeeze(float grip,float trigger) noexcept {return grip>.55f?(grip<trigger?grip:trigger):trigger;}
 class ThrowGesture {
     static constexpr unsigned history=32;
     struct Sample {std::uint64_t t;std::array<double,3> v;};

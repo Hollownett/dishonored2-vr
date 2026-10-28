@@ -9,7 +9,9 @@ namespace d2vr::note_hand {
 using Inverse=std::array<std::array<float,12>,69>;
 struct Vertex {std::array<float,3> position{};std::array<std::uint8_t,8> weights{},joints{};};
 static_assert(sizeof(Vertex)==28);
-struct Surface {std::uint32_t kind{};std::vector<Vertex> vertices;std::vector<std::uint16_t> indices;};
+struct Texture {std::uint32_t width{},height{};std::vector<std::uint8_t> rgba;};
+struct Surface {std::uint32_t kind{};std::vector<Vertex> vertices;std::vector<std::uint16_t> indices;
+    std::vector<std::array<float,2>> uv;Texture diffuse;bool hand{};};
 struct Mesh {
     std::uint32_t character{},side{};
     std::array<std::uint8_t,32> source_sha256{};
@@ -21,7 +23,8 @@ template<class T> inline T take(std::istream& in) {
     T out{};if(!in.read(reinterpret_cast<char*>(&out),sizeof(out)))throw std::invalid_argument("Truncated note hand mesh");return out;
 }
 inline Mesh read(std::istream& in) {
-    if(take<std::array<char,8>>(in)!=std::array<char,8>{'D','2','V','R','N','H','0','1'} || take<std::uint32_t>(in)!=1)
+    const auto magic=take<std::array<char,8>>(in);const auto version=take<std::uint32_t>(in);
+    if(magic!=std::array<char,8>{'D','2','V','R','N','H','0','1'} || (version!=1 && version!=2))
         throw std::invalid_argument("Unknown note hand mesh");
     Mesh out;out.character=take<std::uint32_t>(in);out.side=take<std::uint32_t>(in);
     if(out.character>1 || out.side>1)throw std::invalid_argument("Unknown note hand identity");
@@ -34,7 +37,7 @@ inline Mesh read(std::istream& in) {
     out.inverse=take<Inverse>(in);
     for(const auto& row:out.inverse)for(float f:row)if(!std::isfinite(f) || std::abs(f)>1e7f)throw std::invalid_argument("Invalid note inverse bind");
     const auto count=take<std::uint32_t>(in);if(!count || count>64)throw std::invalid_argument("Invalid note surface count");
-    std::uint64_t total_vertices{},total_indices{};
+    std::uint64_t total_vertices{},total_indices{},total_texture_bytes{};
     for(unsigned s=0;s<count;++s) {
         Surface surface;surface.kind=take<std::uint32_t>(in);
         const auto vertices=take<std::uint32_t>(in),indices=take<std::uint32_t>(in);
@@ -49,6 +52,17 @@ inline Mesh read(std::istream& in) {
             for(unsigned i=0;i<8;++i)if(vertex.weights[i] && vertex.joints[i]>=69)throw std::invalid_argument("Invalid note skin joint");
         }
         for(auto& index:surface.indices) {index=take<std::uint16_t>(in);if(index>=vertices)throw std::invalid_argument("Invalid note mesh triangle");}
+        if(version==2) {
+            const auto flags=take<std::uint32_t>(in);if(flags>1)throw std::invalid_argument("Invalid note hand surface flags");surface.hand=flags!=0;
+            surface.uv.resize(vertices);
+            for(auto& uv:surface.uv) {uv=take<std::array<float,2>>(in);for(float f:uv)if(!std::isfinite(f) || std::abs(f)>1e6f)throw std::invalid_argument("Invalid note mesh UV");}
+            auto& texture=surface.diffuse;texture.width=take<std::uint32_t>(in);texture.height=take<std::uint32_t>(in);
+            const std::uint64_t bytes=static_cast<std::uint64_t>(texture.width)*texture.height*4;total_texture_bytes+=bytes;
+            if(!texture.width || !texture.height || texture.width>4096 || texture.height>4096 || total_texture_bytes>128*1024*1024)
+                throw std::invalid_argument("Invalid note diffuse texture bounds");
+            texture.rgba.resize(static_cast<std::size_t>(bytes));
+            if(!in.read(reinterpret_cast<char*>(texture.rgba.data()),static_cast<std::streamsize>(bytes)))throw std::invalid_argument("Truncated note diffuse texture");
+        }
         out.surfaces.push_back(std::move(surface));
     }
     if(in.peek()!=std::char_traits<char>::eof())throw std::invalid_argument("Trailing note mesh data");
@@ -86,11 +100,38 @@ template<class Read> inline std::optional<rig::AvatarMeshToken> bind(Read& reade
     return token;
 }
 struct Geometry {std::vector<Vec3> vertices;std::vector<std::uint32_t> indices;};
+// The CPU menu poser supplies an XR-metre joint palette; native bind vertices
+// and inverse bind rows retain their model units until this final uniform scale.
+inline Geometry skin_xr(const Mesh& mesh,const Inverse& inverse,const std::array<rig::Transform,69>& palette,double model_scale) {
+    if(!std::isfinite(model_scale) || model_scale<=0 || model_scale>1000)throw std::invalid_argument("Invalid note hand model scale");
+    for(const auto& transform:palette)if(!rig::valid(transform))throw std::invalid_argument("Invalid XR note hand palette");
+    for(const auto& row:inverse)for(float f:row)if(!std::isfinite(f))throw std::invalid_argument("Invalid XR note inverse bind");
+    Geometry result;
+    for(const auto& surface:mesh.surfaces) {
+        const auto offset=static_cast<std::uint32_t>(result.vertices.size());
+        for(const auto& vertex:surface.vertices) {
+            Vec3 p{};const auto& v=vertex.position;
+            for(unsigned i=0;i<8;++i)if(vertex.weights[i]) {
+                const auto joint=vertex.joints[i];if(joint>=69)throw std::invalid_argument("Invalid XR note skin joint");
+                const auto& b=inverse[joint];const auto& t=palette[joint];
+                const Vec3 local{(b[0]*v[0]+b[1]*v[1]+b[2]*v[2]+b[3])*model_scale,
+                    (b[4]*v[0]+b[5]*v[1]+b[6]*v[2]+b[7])*model_scale,(b[8]*v[0]+b[9]*v[1]+b[10]*v[2]+b[11])*model_scale};
+                p=p+(rig::position(t)+rig::column(t,0)*local.x+rig::column(t,1)*local.y+rig::column(t,2)*local.z)*(vertex.weights[i]/255.);
+            }
+            if(!finite(p))throw std::invalid_argument("Invalid XR note skinned vertex");result.vertices.push_back(p);
+        }
+        for(auto index:surface.indices) {if(index>=surface.vertices.size())throw std::invalid_argument("Invalid XR note triangle");result.indices.push_back(offset+index);}
+    }
+    return result;
+}
 inline Geometry skin(const Mesh& mesh,const Inverse& inverse,const std::array<rig::Transform,69>& palette,
         const std::array<float,15>& model_frame,const NoteViewMapping& mapping) {
     if(!mapping.active)throw std::invalid_argument("Inactive note hand mapping");
     const rig::ModelFrame frame(model_frame);Geometry result;
-    for(const auto& transform:palette)if(!rig::valid(transform))throw std::invalid_argument("Invalid note hand palette");
+    // The shared body solver widens torso-connected bases with an affine scale.
+    for(const auto& transform:palette)for(unsigned column=0;column<4;++column)for(unsigned row=0;row<3;++row)
+        if(!std::isfinite(transform.f[column*4+row]) || std::abs(transform.f[column*4+row])>1e7f)
+            throw std::invalid_argument("Invalid note hand palette");
     for(const auto& surface:mesh.surfaces) {
         const auto offset=static_cast<std::uint32_t>(result.vertices.size());
         for(const auto& vertex:surface.vertices) {

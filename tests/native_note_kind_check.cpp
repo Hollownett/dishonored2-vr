@@ -57,7 +57,89 @@ int main(int argc,char** argv) {
     put(receiver+8,iggy);put(receiver+0x18,receiver+0x28);put(receiver+0x20,std::uint32_t{0x05000001});
     put(file+0x1780,root_path);put(root_path,std::array<unsigned char,0x28>{});put(receiver+0x28,std::array<unsigned char,0x28>{});
     put(block+0x10,std::uint32_t{1});put(block+0x14,std::uint32_t{0});
-    auto reader=read;NativeNoteKind kind;assert(kind.configure(reader,base));
+    auto reader=read;NativeNoteKind kind;
+    assert(kind.status_json().find("\"configured\":false,\"verified\":false")!=std::string::npos);
+    assert(kind.configure(reader,base));
+    {
+        NativeNoteKind diagnostic;assert(diagnostic.configure(reader,base));
+        const auto field=[&](const std::string& value) {assert(diagnostic.status_json().find(value)!=std::string::npos);};
+        field("\"configured\":true,\"verified\":true");
+        diagnostic.observe(reader,base,true,0x790754,method,receiver,block,0,1);
+        field("\"before_calls\":0,"); // unrelated callers cannot pollute the diagnosis
+        diagnostic.observe(reader,base,true,0x790755,method,receiver,block,0,1);
+        field("\"pending\":true,\"receipt\":false");
+        diagnostic.observe(reader,base,false,0x790755,method,receiver,block,1,1);
+        field("\"before_calls\":1,\"after_calls\":1,\"accepted_shows\":1,");
+        put(file+0x1618,player+8);
+        assert(!diagnostic.current(reader,base,1));assert(!diagnostic.current(reader,base,1));
+        field("\"current_owner_losses\":1,"); // count invalidation once, not every fallback frame
+        put(file+0x1618,player);
+        put(receiver+0x28,std::array<unsigned char,0x28>{1});
+        diagnostic.observe(reader,base,true,0x790755,method,receiver,block,0,1);
+        diagnostic.observe(reader,base,false,0x790755,method,receiver,block,1,1);
+        field("\"call_owner_rejections\":2,");
+        put(receiver+0x28,std::array<unsigned char,0x28>{});
+        diagnostic.clear();field("\"clears\":1,");
+        assert(diagnostic.configure(reader,base));field("\"accepted_shows\":0,");
+        auto changed=[&](std::uintptr_t at,void* out,std::size_t size) {const bool ok=read(at,out,size);if(at==base+0x28ee0 && size)static_cast<unsigned char*>(out)[0]^=1;return ok;};
+        assert(!diagnostic.configure(changed,base));
+        field("\"configured\":true,\"verified\":false");
+        field("\"signature_failure_rva\":"+std::to_string(0x28ee0)+",");
+        diagnostic.observe(reader,base,true,0x790755,method,receiver,block,0,1);
+        field("\"before_calls\":1,");field("\"call_owner_rejections\":0,");
+        assert(!diagnostic.current(reader,base,1));
+    }
+    {
+        NativeNoteKind delayed;assert(delayed.configure(reader,base));
+        assert(!delayed.observed_generation(1,1000));
+        const auto show=[&](std::uint64_t tick) {
+            delayed.observe(reader,base,true,0x790755,method,receiver,block,0,1,tick);
+            assert(!delayed.observed_generation(1,tick));
+            delayed.observe(reader,base,false,0x790755,method,receiver,block,1,1,tick);
+        };
+        const auto unregistered=[&] {put(batches+0x10,rig::List{wrapper,0,256});};
+        const auto registered=[&] {put(batches+0x10,rig::List{wrapper,1,256});};
+        // Native ShowNote may run before the wrapper enters the drawable batch.
+        unregistered();show(1000);
+        const auto observed=delayed.observed_generation(1,1000);assert(observed);
+        assert(!delayed.observed_generation(2,1000));
+        assert(!delayed.current(reader,base,1,1001));
+        assert(delayed.status_json().find("\"rejection\":\"owner_unavailable\"")!=std::string::npos);
+        registered();assert(delayed.current(reader,base,1,1002)->generation==*observed);
+        unregistered();assert(!delayed.current(reader,base,1,1003));
+        registered();assert(!delayed.current(reader,base,1,1004)); // bound loss cannot revive
+        unregistered();show(2000);registered();
+        assert(!delayed.observed_generation(1,4001));
+        assert(!delayed.current(reader,base,1,4001)); // unbound event expires
+        assert(delayed.status_json().find("\"rejection\":\"owner_timeout\"")!=std::string::npos);
+        unregistered();show(5000);registered();
+        put(root_path,std::array<unsigned char,0x28>{1});
+        assert(!delayed.current(reader,base,1,5001)); // reused movie with a different root
+        put(root_path,std::array<unsigned char,0x28>{});
+        assert(!delayed.current(reader,base,1,5002));
+        unregistered();show(6000);
+        delayed.observe(reader,base,true,0x790574,method,receiver,block,0,1,6001);
+        assert(!delayed.observed_generation(1,6002));
+        registered();assert(!delayed.current(reader,base,1,6002)); // maps revoke even invalid calls
+        unregistered();
+        delayed.observe(reader,base,true,0x790755,method,receiver,block,0,1,7000);
+        put(receiver+0x28,std::array<unsigned char,0x28>{1});
+        delayed.observe(reader,base,false,0x790755,method,receiver,block,1,1,7000);
+        assert(delayed.status_json().find("\"rejection\":\"call_root_changed\"")!=std::string::npos);
+        put(receiver+0x28,std::array<unsigned char,0x28>{});
+        registered();assert(!delayed.current(reader,base,1,7001)); // root changes within call
+        unregistered();
+        delayed.observe(reader,base,true,0x790755,method,receiver,block,0,1,8000);
+        put(method+8,std::uintptr_t{0xd00008});
+        delayed.observe(reader,base,false,0x790755,method,receiver,block,1,1,8000);
+        assert(delayed.status_json().find("\"rejection\":\"call_identity_changed\"")!=std::string::npos);
+        put(method+8,std::uintptr_t{0xd00000});
+        registered();assert(!delayed.current(reader,base,1,8001)); // method handle changes
+        unregistered();show(9000);registered();
+        assert(!delayed.current(reader,base,2,9001));
+        delayed.clear();assert(!delayed.observed_generation(1,9002));
+        assert(!delayed.current(reader,base,1,9002));
+    }
     const auto event=[&](bool before,std::uintptr_t caller=0x790755,std::uint32_t result=1,std::uint64_t epoch=1) {
         kind.observe(reader,base,before,caller,method,receiver,block,result,epoch);
     };
@@ -72,7 +154,7 @@ int main(int argc,char** argv) {
     event(true);assert(!current());event(false);assert(current()->generation>first);
     event(true,0x790574);assert(!current()); // map revokes even if its binding is invalid
     put(block+0x10,std::uint32_t{5});put(block+0x14,std::uint32_t{5});
-    event(true,0x790574);event(false,0x790574);assert(!current());
+    event(true,0x790574);event(false,0x790574);assert(current()); // Native maps share the held-reader lifetime.
     put(block+0x10,std::uint32_t{1});put(block+0x14,std::uint32_t{0});
     event(true);event(false,0x790755,0);assert(!current());
     event(true);kind.clear();event(false);assert(!current());
@@ -88,5 +170,5 @@ int main(int argc,char** argv) {
     event(true);std::thread other([&]{event(false);});other.join();assert(!current());
     auto changed=[&](std::uintptr_t at,void* out,std::size_t size) {const bool ok=read(at,out,size);if(at==base+0x790380 && size)static_cast<unsigned char*>(out)[0]^=1;return ok;};
     assert(!kind.configure(changed,base));event(true);event(false);assert(!current());
-    std::cout<<"PASS: pinned note/map call ABI, root/movie ownership, paired calls, generation/epoch, map/failure/reuse/thread rejection\n";
+    std::cout<<"PASS: pinned note/map call ABI, root/movie ownership, paired calls, generation/epoch, map admission and failure/reuse/thread rejection\n";
 }
