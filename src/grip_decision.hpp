@@ -48,7 +48,8 @@ inline GripAloneChoice decide_grip_alone(const GripAloneInput& in,const GrabTuni
     // A corpse whose OWN native Use (the game's carry) is the native target: its whole-body box holds the palm, so it would always win on
     // cost; the user's decision is that grip alone grabs corpses, so the physical hold of that same entity wins (sim, Track G acceptance).
     // Only a corpse (PalmKind::bone): a living NPC's native target (choke, talk, knock-out) is Use (I1).
-    if(physical && in.native && in.physical->kind==PalmKind::bone && in.physical->entity && in.native->id==in.physical->entity) return GripAloneChoice::grab;
+    if(physical && in.native && in.native->kind!=PalmKind::loot && in.physical->kind==PalmKind::bone && in.physical->entity && in.native->id==in.physical->entity) return GripAloneChoice::grab;
+    if(physical && in.native && in.native->kind==PalmKind::loot && in.physical->kind==PalmKind::bone && in.physical->entity==in.native->id && native_cost) return GripAloneChoice::use;
     if(physical && in.native && in.physical->kind==PalmKind::living && in.physical->entity && in.native->id==in.physical->entity) return GripAloneChoice::use;
     if(physical && (!native_cost || in.physical->distance<*native_cost)) return GripAloneChoice::grab;
     if(in.native) return GripAloneChoice::use;

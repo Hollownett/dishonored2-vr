@@ -89,6 +89,13 @@ int main() {
         auto far_bone=bone;far_bone.entity=0x9000;far_bone.distance=.2;assert(decide_grip_alone(input(body,far_bone,1200),t,hover)==GripAloneChoice::use);   // not on it
         auto in=input(body,bone);bone.entity=0x9000;in.physical=bone;in.choke_owns=true;assert(decide_grip_alone(in,t,hover)==GripAloneChoice::use);
     }
+    {   // The game's selected loot action on a corpse wins over a bone of that same corpse.
+        const auto loot=box(0x9000,PalmKind::loot,{.07,0,.015},.3,t);
+        auto bone=physical(box(15,PalmKind::bone,{.07,0,.015},.05,t));bone.entity=0x9000;
+        assert(decide_grip_alone(input(loot,bone),t,hover)==GripAloneChoice::use);
+        auto corpse=loot;corpse.kind=PalmKind::usable;
+        assert(decide_grip_alone(input(corpse,bone),t,hover)==GripAloneChoice::grab);
+    }
     {   // I1: a living NPC's native target on HIM (choke, talk, knock-out) is Use; a corpse's own carry stays grab. His hold waits for a current verdict.
         const auto npc_box=box(0x9100,PalmKind::usable,{.07,0,.015},.3,t);auto bone=physical(box(16,PalmKind::living,{.07,0,.015},.05,t));
         bone.entity=0x9100;assert(decide_grip_alone(input(npc_box,bone),t,hover)==GripAloneChoice::use);

@@ -3136,13 +3136,13 @@ static std::optional<d2vr::Vec3> hip_xr_position;static UINT64 hip_pose_tick{},h
 static std::atomic<float> right_hand_peak{},sword_release_speed{}; // diagnostics: peak right-hand speed (decays), hand speed at the last drop
 static bool gadget_hand_aim_enabled=false; // Track T B: installed, and build/no-hand-mine-aim absent
 static bool mine_point_aim=false; // build/mine-point-aim: a mine is placed along the pointing ray (v613) instead of at the palm
-static void publish_gadget_aim(const d2vr::WorldTrackedPose& left) noexcept {
-    if(!game_xr) return; // the placement sensor is re-aimed whenever it is enabled (v613: the ghost must sit on the crosshair); the ThrowHit sensor runs on most frames and is re-aimed only with the trigger (sim: 81% of frames)
-    d2vr::GadgetAimPose gadget{};gadget.trigger=game_xr->controller_input.left_trigger>=.1f;
+static void publish_gadget_aim(const d2vr::WorldTrackedPose& left,const std::optional<d2vr::WorldTrackedPose>& hand,bool shots_allowed) noexcept {
+    if(!game_xr) return;
+    d2vr::GadgetAimPose gadget{};gadget.trigger=shots_allowed && game_xr->controller_input.left_trigger>=.1f;gadget.placement_valid=mine_point_aim || hand.has_value();
     gadget.origin={static_cast<float>(left.position.x),static_cast<float>(left.position.y),static_cast<float>(left.position.z)};
     gadget.forward={static_cast<float>(left.basis[0].x),static_cast<float>(left.basis[0].y),static_cast<float>(left.basis[0].z)};
-    if(!mine_point_aim) { // a mine goes where the hand puts it (user, headset v671): a short ray out of the palm (+X of the left controller)
-        const auto palm=left.basis[1]*-1.,from=left.position-palm*d2vr::mine_palm_back_m;
+    if(!mine_point_aim && hand) {
+        const auto palm=hand->basis[1]*-1.,from=hand->position-palm*d2vr::mine_palm_back_m;
         gadget.place_origin={static_cast<float>(from.x),static_cast<float>(from.y),static_cast<float>(from.z)};
         gadget.place_dir={static_cast<float>(palm.x),static_cast<float>(palm.y),static_cast<float>(palm.z)};gadget.place_length=static_cast<float>(d2vr::mine_palm_reach_m);
     }
@@ -5711,8 +5711,19 @@ void prepare_head_view(void* view) noexcept {
                 per_frame_target,game_xr->pose_epoch(),game_xr->reference_epoch(),GetTickCount64());
             if(!receipt) {native_shot_aim.clear();native_crosshair.clear();return;}
             shared_aim_ray=receipt;left=receipt->hand(); // exact float round-trip for the native launch writer
+            if(gadget_hand_aim_enabled) {
+                std::optional<d2vr::WorldTrackedPose> palm;
+                constexpr XrSpaceLocationFlags valid=XR_SPACE_LOCATION_ORIENTATION_VALID_BIT|XR_SPACE_LOCATION_POSITION_VALID_BIT;
+                const auto& grip=game_xr->grip_locations[0];
+                if((grip.locationFlags&valid)==valid) {
+                    const auto& p=grip.pose;
+                    const auto hand=d2vr::to_game_pose(d2vr::camera_relative_controller(
+                        {{p.position.x,p.position.y,p.position.z},{p.orientation.x,p.orientation.y,p.orientation.z,p.orientation.w}},hand_centre,head_origin.position),head_origin,anchor,1.0);
+                    palm=d2vr::apply_palm_offset(hand,game_xr->palm_offset(0),0.);
+                }
+                publish_gadget_aim(left,palm,aim_for_shots);
+            }
             if(!aim_for_shots) {native_shot_aim.clear();return;} // crosshair-only frame (attacking / gripping): no shot or power aim leaves the hand
-            if(gadget_hand_aim_enabled) publish_gadget_aim(left); // Track T B: mines / spring razors / the throw preview aim from this same left-hand pose
             if(publish_left_camera && native_left_aim_requested) native_left_aim.publish(*body,left,receipt->pose_epoch,receipt->tick,true);
             if(publish_left_camera && native_blink_aim_installed) native_blink_aim.publish(left,game_xr->pose_epoch(),GetTickCount64(),true);
             if(native_shot_aim_installed) native_shot_aim.publish(left,game_xr->pose_epoch(),GetTickCount64(),true);

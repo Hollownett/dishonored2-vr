@@ -73,8 +73,8 @@ sealed class ControlsDocument
                 !lessons.Where(l => l.Figure != "").Select(l => l.Figure).SequenceEqual(FigureIds) ||
                 !lessons.Select(l => l.Title).SequenceEqual(source.Where(s => s.StartsWith("## ", StringComparison.Ordinal)).Select(s => s[3..])) ||
                 !lessons.SelectMany(l => l.Lines).Where(s => s.StartsWith("- ", StringComparison.Ordinal)).SequenceEqual(source.Where(s => s.StartsWith("- ", StringComparison.Ordinal))) ||
-                lessons.Sum(l => l.Lines.Count(s => s.StartsWith("- ", StringComparison.Ordinal))) != 25)
-                throw new InvalidOperationException("Embedded guide must preserve all three pages, two figures, five headings and twenty-five bullets.");
+                lessons.Sum(l => l.Lines.Count(s => s.StartsWith("- ", StringComparison.Ordinal))) != 24)
+                throw new InvalidOperationException("Embedded guide must preserve all three pages, two figures, five headings and twenty-four bullets.");
             var withoutArt = Parse(Regex.Replace(markdown, @"(?m)^<!-- vr-figure:.*\r?\n?", ""), true);
             if (!withoutArt.Pages.SelectMany(p => p.Lessons).SelectMany(l => l.Lines).SequenceEqual(lessons.SelectMany(l => l.Lines)))
                 throw new InvalidOperationException("Guide instructions changed when figures were omitted.");

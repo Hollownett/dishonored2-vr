@@ -11,7 +11,9 @@ int main() {
     GadgetAimPose n=p;n.forward={0,0,0};expect(!gadget_aim_fresh(n,1000),"zero forward");
     n=p;n.origin[1]=NAN;expect(!gadget_aim_fresh(n,1000),"NaN origin");
     n=p;n.forward={0,3,0};expect(!gadget_aim_fresh(n,1000),"non-unit forward");
-    expect(!gadget_aim_wanted(p,true) && !gadget_aim_wanted(p,false),"idle placement and throw sensors retain v612 native ownership");
+    expect(!gadget_aim_wanted(p,true),"placement requires a valid palm");
+    p.placement_valid=true;
+    expect(gadget_aim_wanted(p,true) && !gadget_aim_wanted(p,false),"placement follows the palm without the trigger; throw sensor stays idle");
     {GadgetAimPose t=p;t.trigger=true;expect(gadget_aim_wanted(t,false) && gadget_aim_wanted(t,true),"trigger held feeds both sensors");}
     float start[3]{10,20,30},dir[3]{0,0,-1},ent[3]{5,6,7};
     {

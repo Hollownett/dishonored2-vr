@@ -41,10 +41,6 @@ public static class ModHome
         var dllPath = Path.Combine(dir, "build", dll);
         if (!File.Exists(dllPath) || Sha256(dllPath) != r.GetProperty("sha256").GetString())
             throw new InvalidDataException($"{dll} in the mod home does not match its manifest sha256.");
-        // Older mod versions left by earlier launchers; a version the running game still has loaded is locked and stays.
-        foreach (var old in Directory.GetFiles(Path.Combine(dir, "build"), "d2vr_render_probe_arm_v*.dll"))
-            if (!Path.GetFileName(old).Equals(dll, StringComparison.OrdinalIgnoreCase))
-                try { File.Delete(old); } catch (IOException) { } catch (UnauthorizedAccessException) { }
         // Default-on feature knobs (tools/default_features.json): seeded once, then the user's choices and hand-made knobs are kept.
         try
         {

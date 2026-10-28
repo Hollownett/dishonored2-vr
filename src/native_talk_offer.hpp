@@ -17,10 +17,11 @@ inline constexpr std::uintptr_t interaction_vtable=0x1c72e98;
 inline constexpr std::uintptr_t selector_rva=0x747840;
 inline constexpr std::uintptr_t talk_offset=0xe8;
 inline constexpr std::uintptr_t busy_talk_offset=0x110;
+inline constexpr std::uintptr_t loot_offset=0x98;
 inline constexpr std::uint32_t no_spawn=0x3fff0010u;
 
 template<class Read>
-bool valid(Read& read,std::uintptr_t base,const NativeTalkOfferReceipt& receipt) {
+bool valid(Read& read,std::uintptr_t base,const NativeTalkOfferReceipt& receipt,std::uintptr_t primary_offset=talk_offset) {
     using namespace rig;
     if(!base || !pointer(receipt.sensor) || !pointer(receipt.component) || !pointer(receipt.declaration) ||
        !pointer(receipt.selected_reference) || !pointer(receipt.player) || !pointer(receipt.owner) ||
@@ -62,8 +63,8 @@ bool valid(Read& read,std::uintptr_t base,const NativeTalkOfferReceipt& receipt)
        *selected_reference!=receipt.selected_reference || !selected_reference_generation || !raw_selected_generation ||
        *selected_reference_generation!=*raw_selected_generation ||
        !link || !selected_owner || *selected_owner!=receipt.owner || !primary_offer || !secondary_offer ||
-       *primary_offer!=receipt.declaration+talk_offset || *secondary_offer==receipt.declaration+talk_offset ||
-       *primary_offer==receipt.declaration+busy_talk_offset || *secondary_offer==receipt.declaration+busy_talk_offset ||
+       *primary_offer!=receipt.declaration+primary_offset || *secondary_offer==receipt.declaration+primary_offset ||
+       (primary_offset==talk_offset && *secondary_offer==receipt.declaration+busy_talk_offset) ||
        started(read,receipt.sensor)!=std::optional<Identity>{receipt.sensor_identity} ||
        started(read,receipt.component)!=std::optional<Identity>{receipt.component_identity} ||
        value<std::uintptr_t>(read,*game+0x3130b0)!=receipt.player ||
@@ -87,7 +88,7 @@ bool valid(Read& read,std::uintptr_t base,const NativeTalkOfferReceipt& receipt)
 template<class Read>
 std::optional<NativeTalkOfferReceipt> native_talk_offer(Read& read,std::uintptr_t base,
     std::uintptr_t sensor,std::uintptr_t player,std::uintptr_t component,std::uint32_t generation,
-    std::uintptr_t owner,std::uint32_t spawn) {
+    std::uintptr_t owner,std::uint32_t spawn,std::uintptr_t primary_offset=native_talk_offer_detail::talk_offset) {
     using namespace rig;
     const auto sensor_identity=started(read,sensor),component_identity=started(read,component);
     const auto declaration=value<std::uintptr_t>(read,component+8);
@@ -95,12 +96,12 @@ std::optional<NativeTalkOfferReceipt> native_talk_offer(Read& read,std::uintptr_
     if(!sensor_identity || !component_identity || !declaration || !selected_reference) return {};
     NativeTalkOfferReceipt receipt{sensor,component,*declaration,*selected_reference,player,owner,
         *sensor_identity,*component_identity,generation,spawn};
-    if(!native_talk_offer_detail::valid(read,base,receipt)) return {};
+    if(!native_talk_offer_detail::valid(read,base,receipt,primary_offset)) return {};
     return receipt;
 }
 
 template<class Read>
-bool native_talk_offer_current(Read& read,std::uintptr_t base,const NativeTalkOfferReceipt& receipt) {
-    return native_talk_offer_detail::valid(read,base,receipt);
+bool native_talk_offer_current(Read& read,std::uintptr_t base,const NativeTalkOfferReceipt& receipt,std::uintptr_t primary_offset=native_talk_offer_detail::talk_offset) {
+    return native_talk_offer_detail::valid(read,base,receipt,primary_offset);
 }
 }

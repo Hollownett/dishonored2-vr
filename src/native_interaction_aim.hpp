@@ -288,6 +288,7 @@ class NativeInteractionAim {
     std::array<int,2> target_generation_{-1,-1};
     std::array<std::uintptr_t,2> target_owner_{};std::array<unsigned,2> target_spawn_{};
     std::array<std::optional<NativeTalkOfferReceipt>,2> talk_offers_{};
+    std::array<std::optional<NativeTalkOfferReceipt>,2> loot_offers_{};
     std::uintptr_t native_object_{};std::uint64_t native_tick_{},epoch_hint_{};
     std::array<Contact,2> contact_anchor_{};
     std::array<Vec3,2> point_{};std::array<std::uint64_t,2> point_tick_{};
@@ -610,7 +611,7 @@ class NativeInteractionAim {
     }
 
     void invalidate_selection() noexcept {
-        contact_anchor_={};volume_tickets_={};target_object_={};target_owner_={};target_spawn_={};talk_offers_={};target_tick_={};target_generation_={-1,-1};point_={};point_tick_={};queued_revision_={};ready_revision_={};native_object_=0;native_tick_=0;
+        contact_anchor_={};volume_tickets_={};target_object_={};target_owner_={};target_spawn_={};talk_offers_={};loot_offers_={};target_tick_={};target_generation_={-1,-1};point_={};point_tick_={};queued_revision_={};ready_revision_={};native_object_=0;native_tick_=0;
     }
     void cancel_passive_preview_locked() noexcept {
         passive_preview_.reset();
@@ -1364,6 +1365,8 @@ private:
             if(loot_cycle_.open) loot_cycle_.selected=object?owner:0; // G1 trace: the native-selected owner (thread-local, read-only)
             const auto talk_offer=object && spawn && generation?native_talk_offer(read_,base_,scope.sensor,scope.camera.player,
                 object,static_cast<std::uint32_t>(*generation),owner,*spawn):std::nullopt;
+            const auto loot_offer=object && spawn && generation?native_talk_offer(read_,base_,scope.sensor,scope.camera.player,
+                object,static_cast<std::uint32_t>(*generation),owner,*spawn,native_talk_offer_detail::loot_offset):std::nullopt;
             std::lock_guard<std::mutex> lock(mutex_);
             const auto now=GetTickCount64();
             if(scope.side>=0 && fresh(scope,now) && scope.revision==routing_.revision() &&
@@ -1374,6 +1377,7 @@ private:
                         scope.completed_volumes==7 && !scope.incomplete_volume && !scope.hover_overflow,object!=0);
                 target_object_[scope.side]=object;target_tick_[scope.side]=now;ready_revision_[scope.side]=scope.revision;
                 talk_offers_[scope.side]=talk_offer;
+                loot_offers_[scope.side]=loot_offer;
                 contact_anchor_[scope.side]={};
                 if(object && spawn && scope.stage==0 && !scope.contacts_overflow &&
                    hands_[scope.side].tick==scope.hand.tick && hands_[scope.side].epoch==scope.hand.epoch) {
@@ -2199,11 +2203,23 @@ public:
         const NativeInteractionTargetIdentity identity{offer->component,target_generation_[side],static_cast<unsigned>(side),hands_[side].epoch,1};
         return QualifiedTarget{identity,offer->owner,offer->spawn,hands_[side].tick,target_tick_[side],{}};
     }
+private:
+    bool live_loot_offer(unsigned side,std::uint64_t now) {
+        if(side>=2 || !live_target(side,now))return false;
+        const auto& offer=loot_offers_[side];
+        return offer && offer->component==target_object_[side] && offer->generation==static_cast<std::uint32_t>(target_generation_[side]) &&
+            offer->owner==target_owner_[side] && offer->spawn==target_spawn_[side] &&
+            native_talk_offer_current(read_,base_,*offer,native_talk_offer_detail::loot_offset);
+    }
+public:
     // Every entity the game's Use could act on now: both hands' selections and the unrouted (head) selection; 0 where none.
     std::array<std::uintptr_t,3> use_owners(std::uint64_t now) {
         std::lock_guard<std::mutex> lock(mutex_);std::array<std::uintptr_t,3> out{};
-        for(unsigned side=0;side<2;++side) if(live_target(side,now)) out[side]=target_owner_[side];
-        if(native_object_ && now>=native_tick_ && now-native_tick_<=250) out[2]=rig::value<std::uintptr_t>(read_,native_object_+0x10).value_or(0);
+        bool loot=false;
+        for(unsigned side=0;side<2;++side) if(live_target(side,now)) {
+            if(live_loot_offer(side,now)) loot=true;else out[side]=target_owner_[side];
+        }
+        if(!loot && native_object_ && now>=native_tick_ && now-native_tick_<=250) out[2]=rig::value<std::uintptr_t>(read_,native_object_+0x10).value_or(0);
         return out;
     }
     // Entity the game currently offers this hand for Use (its highlight), 0 if none.
@@ -2222,7 +2238,7 @@ public:
         if(!live_target(at,now)) return {};
         try {
             const auto owner=target_owner_[at];
-            PalmTarget t;t.id=owner;t.kind=takeable(owner)?PalmKind::loot:PalmKind::usable;t.priority=tuning.priority(t.kind);
+            PalmTarget t;t.id=owner;t.kind=(takeable(owner) || live_loot_offer(at,now))?PalmKind::loot:PalmKind::usable;t.priority=tuning.priority(t.kind);
             if(const auto box=owner_bounds(owner)) {t.minimum=box->first;t.maximum=box->second;}
             else if(const auto point=target_point_locked(at,now)) t.minimum=t.maximum=*point;
             else return {};
@@ -2275,6 +2291,7 @@ private:
             const auto selected=static_cast<unsigned>(side);
             if(!live_target(selected,now))return false;
             const auto component=target_object_[selected],door=target_owner_[selected];
+            if(live_loot_offer(selected,now))return true;
             // Readables, pickups and native carryables share the same hand
             // sphere. The engine-selected component supplies the action.
             // live_target already validates camera/sensor/epoch ownership here;
