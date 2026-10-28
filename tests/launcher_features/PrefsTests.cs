@@ -78,6 +78,8 @@ public static class PrefsTests
 
         var fx10p = Path.Combine(AppContext.BaseDirectory, "vr-settings-v10.cfg");
         var f2 = Tmp(); Prefs.Merge(fx10, Prefs.Load(fx10p), Prefs.Load(fx10p)).Save(f2);
-        check("merge_without_edits_equals_disk", File.ReadAllBytes(f2).SequenceEqual(File.ReadAllBytes(fx10p)));
+        // Git may check the shared fixture out with CRLF; the writer always emits LF.
+        check("merge_without_edits_equals_disk", File.ReadAllText(f2).Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries)
+            .SequenceEqual(File.ReadAllText(fx10p).Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries)));
     }
 }

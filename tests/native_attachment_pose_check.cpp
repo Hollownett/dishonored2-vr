@@ -142,6 +142,44 @@ struct NativeAttachmentPoseCheck {
             assert(pose.around(animation,3,59,[&]{assert(fixture_native[59].f[12]==blended[59].f[12]);return UINT64{17};})==17);
             assert(fixture_native[59].f[12]==0); // Original authored slot restored.
         }
+        {   // A note may skin tracked hands while weapon readers keep the native animation.
+            const auto visual=[&](const NativeAttachmentSource& candidate) {return pose.validate_visual(1,animation,native,tracked,candidate);};
+            assert(!visual(source));assert(call(false)==17); // An enabled weapon policy is never a visual bypass; old palette cleared.
+            policy(0);assert(!publish());assert(visual(source));
+            assert(!pose.sides_[1].animation && call(false)==17);
+            policy();assert(call(false)==17); // Re-enabling weapons cannot resurrect a visual-only palette.
+            policy(0);
+            auto behind=source;behind.tick=source.tick-20;--behind.revision;
+            assert(visual(behind) && call(false)==17); // Same bounded one-sample publication grace.
+            for(unsigned invalid=0;invalid<6;++invalid) {
+                auto bad=source;
+                if(invalid==0)bad.tick=GetTickCount64()-251;
+                if(invalid==1)++bad.epoch;
+                if(invalid==2)++bad.reference_epoch;
+                if(invalid==3)++bad.mapping_revision;
+                if(invalid==4)--bad.revision;
+                if(invalid==5)bad.source_tick=GetTickCount64()-251;
+                assert(!visual(bad) && !pose.sides_[1].animation && call(false)==17);
+            }
+            auto bad=source;bad.admission.context=&pose;assert(!visual(bad));
+            bad=source;bad.admission.receipt=41;assert(!visual(bad));
+            bad=source;bad.admission.acquire=&acquire;assert(!visual(bad));
+            bad=source;bad.admission.release=&release;assert(!visual(bad));
+            AdmissionContext visual_admission{&pose};bad=source;
+            bad.admission={&visual_admission,41,&acquire,&release};assert(!visual(bad) && !visual_admission.acquires);
+            bad=source;bad.diagnostic_socket_token=41;assert(!visual(bad));
+            bad=source;bad.observe_socket=&observe_socket;assert(!visual(bad));
+            bad=source;bad.receipt_frame_policy=NativeAttachmentReceiptFramePolicy::current_parent;assert(!visual(bad));
+            auto broken=tracked;broken[2].f[0]=1.4f;
+            assert(!pose.validate_visual(1,animation,native,broken,source));
+            put(fixture_animation.data()+0x18,rig::Identity{2,10});assert(!visual(source));
+            put(fixture_animation.data()+0x18,identity);
+            fixture_remap[59]=60;assert(!visual(source));fixture_remap[59]=59;
+            auto moved=model_frame;moved[0]=1;put(fixture_model.data()+0x1860,moved);assert(!visual(source));
+            put(fixture_model.data()+0x1860,model_frame);
+            assert(visual(source) && call(false)==17);
+            pose.set_allowed(0,0,0);assert(!visual(source));
+        }
         pose.set_allowed(0,0,0); // Preserve existing initial-policy rejection case.
         assert(!publish());assert(call(false)==17); // no policy yet
         policy();assert(publish());assert(call(true)==17 && fixture_native[59].f[12]==0);

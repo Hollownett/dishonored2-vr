@@ -25,6 +25,7 @@ public:
 private:
     mutable std::mutex mutex_;
     std::atomic<bool> requested_{},owned_{};
+    bool listener_verified_{};
     std::uintptr_t base_{};
     Value saved_{};
     std::uint64_t changes_{},restores_{},foreign_{},failures_{};
@@ -53,26 +54,34 @@ public:
         const auto initial=base?value(read,base):std::nullopt;
         if(!initial || !read(base+setter_rva,bytes.data(),bytes.size()) || bytes!=setter_code)return false;
         base_=base;saved_=*initial;changes_=restores_=foreign_=failures_=0;
-        requested_=true;return true;
+        listener_verified_=false;requested_=true;return true;
     }
     bool needs_service() const noexcept {return requested_.load() || owned_.load();}
     bool pending() const noexcept {return owned_.load();}
-    void request_stop() noexcept {std::lock_guard<std::mutex> lock(mutex_);requested_=false;}
+    void request_stop() noexcept {std::lock_guard<std::mutex> lock(mutex_);requested_=false;listener_verified_=false;}
+    // A zero cache alone does not prove that native model listeners ran.
+    // Read-only; never invokes the setter from an upload or render callback.
+    template<class Read> bool world_depth_current(Read& read) const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return requested_ && owned_ && listener_verified_ && value(read,base_)==std::optional<Value>{Value{0,0.f}};
+    }
     // Setter is injectable for the compiled native fixture, never used to
     // change ABI or dispatch engines on the worker thread.
     template<class Read,class Set> void service(Read& read,Set set) {
         std::lock_guard<std::mutex> lock(mutex_);
         if(!requested_ && !owned_)return;
         const auto current=value(read,base_);
-        if(!current) {++failures_;return;}
+        if(!current) {listener_verified_=false;++failures_;return;}
         if(requested_) {
             if(equal(*current,{0,0.f}))return;
+            listener_verified_=false;
             // Claim before entering native code; failed/partial calls must
             // still require game-thread restoration and block restart.
             owned_=true;
             if(!set(base_+setter_rva,base_+cvar_rva,0.f) || value(read,base_)!=std::optional<Value>{Value{0,0.f}})++failures_;
-            else ++changes_;
+            else {listener_verified_=true;++changes_;}
         } else {
+            listener_verified_=false;
             if(!equal(*current,{0,0.f})) {owned_=false;++foreign_;return;}
             if(!set(base_+setter_rva,base_+cvar_rva,saved_.scalar) || value(read,base_)!=std::optional<Value>{saved_}) {++failures_;return;}
             owned_=false;++restores_;

@@ -53,12 +53,12 @@ Check("list_has_no_unwanted_rows", !list.Any(f => f.Id is "corpse-grab") && list
     Features.Set(d, F("hand-blink"), true);
     Check("disable_kind_on_removes_no_file", !Has(d, "no-hand-blink") && Features.State(d, list)["hand-blink"].On && !Ids(d, "off").Contains("hand-blink"));
 }
-{   // fresh_install_has_every_feature_on_except_diagnostics
+{   // Fresh installs retain the deliberately opt-in performance and diagnostic paths.
     var d = NewBuild(); Features.Apply(d, list);
     var st = Features.State(d, list);
     var offIds = list.Where(f => !st[f.Id].On).Select(f => f.Id).ToArray();
     var newIds = new[] { "grip-alone-grab", "palm-select", "corpse-slip-release", "living-hold", "finger-surface", "finger-ease", "hand-grenade-throw", "hand-mine-aim", "bink-theater", "cutscene-skip-hold", "letterbox-hide" };
-    Check("fresh_install_enables_sprint_and_selected_aa", offIds.SequenceEqual(new[] { "power-gestures", "native-temporal-census" }) && newIds.All(i => st[i].On) && list.Where(f => !f.IsEnable).All(f => !Has(d, f.File)) && !list.Any(f => f.File == "finger-probe-3"));
+    Check("fresh_install_enables_sprint_and_selected_aa", offIds.OrderBy(x => x).SequenceEqual(new[] { "performance-mode", "power-gestures", "native-temporal-census" }.OrderBy(x => x)) && newIds.All(i => st[i].On) && list.Where(f => !f.IsEnable).All(f => !Has(d, f.File)) && !list.Any(f => f.File == "finger-probe-3"));
 }
 {   // Upgrade v620 experiments to defaults, preserving an explicit user opt-out.
     foreach (var id in new[] { "run-root-gate", "alternate-upscalers" })
@@ -402,7 +402,7 @@ string StateText(string d) => File.ReadAllText(Path.Combine(d, "launcher-feature
 }
 {   // DlssFinder: auto-find the user's own DLL in installed Steam games (temp trees only).
     string Tmp() { var d = Path.Combine(Path.GetTempPath(), "d2vrfind-" + Guid.NewGuid().ToString("N")); Directory.CreateDirectory(d); return d; }
-    string Dll(string lib, string rel, byte b = 4) { var f = Path.Combine(lib, "steamapps", "common", rel, DlssProvider.DllName); Directory.CreateDirectory(Path.GetDirectoryName(f)!); File.WriteAllBytes(f, new[] { b }); return f; }
+    string Dll(string lib, string rel, byte b = 4) { var f = Path.GetFullPath(Path.Combine(lib, "steamapps", "common", rel, DlssProvider.DllName)); Directory.CreateDirectory(Path.GetDirectoryName(f)!); File.WriteAllBytes(f, new[] { b }); return f; }
     var steam = Tmp(); Directory.CreateDirectory(Path.Combine(steam, "steamapps"));
     var lib2 = Tmp(); var lib3 = Tmp();
     File.WriteAllText(Path.Combine(steam, "steamapps", "libraryfolders.vdf"), "\"libraryfolders\"\n{\n\t\"0\"\n\t{\n\t\t\"path\"\t\t\"" + steam.Replace("\\", "\\\\") + "\"\n\t}\n\t\"1\"\n\t{\n\t\t\"path\"\t\t\"" + lib2.Replace("\\", "\\\\") + "\"\n\t\t\"label\"\t\t\"\"\n\t}\n\t\"2\"\n\t{\n\t\t\"path\"\t\t\"" + lib3.Replace("\\", "\\\\") + "\"\n\t}\n}\n");

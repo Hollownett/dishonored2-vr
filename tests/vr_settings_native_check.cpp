@@ -51,7 +51,10 @@ int main() {
     expect(!s.open(),"B from a natively started calibration returns to the game's page");
     expect(ns::action(s,ns::recenter).recenter,"recenter action");
     expect(ns::action(s,ns::controls_hint).controls_guide && ns::rows(s)[ns::controls_hint].kind==NativeOptionsPage::Kind::action,"the Controls & gestures row opens the controls page");
+    s.set_controls_hint(false);const auto guide=ns::action(s,ns::controls_hint);
+    expect(guide.controls_guide && !guide.controls_hint && !s.controls_hint(),"opening the guide preserves a disabled saved hint preference");
     VrSettings::Changes into{};ns::merge(into,c);expect(into.resolution && into.turning,"merge keeps reported changes");
+    ns::merge(into,guide);expect(into.controls_guide,"merge carries the guide action to the runtime");
     if(!failures) std::printf("PASS: native VR options rows mirror the settings, apply only valid changes, actions and calibration return\n");
     return failures?1:0;
 }

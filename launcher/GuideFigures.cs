@@ -13,7 +13,7 @@ namespace DishonoredVR;
 /// props are original ink diagrams and opponents use the same player mesh, never extracted game weapons.</summary>
 public static class GuideFigures
 {
-    public const int Version = 2;
+    public const int Version = 4;
     public static readonly string[] Ids = { "sword_throw", "enemy_grab", "sword_draw_block", "stealth", "move_jump_lean", "hands_push", "bodies_drag_carry", "left_hip", "wheel_watch", "temples", "menu_point" };
     public static int Height(string id) => id is "move_jump_lean" or "hands_push" or "menu_point" ? 804 : 232;
     static readonly Color Paper = Color.FromArgb(206, 192, 160), Ink = Color.FromArgb(41, 39, 35), Rust = Color.FromArgb(148, 89, 74);
@@ -207,7 +207,7 @@ public static class GuideFigures
         g.Restore(state);
     }
 
-    static void Draw(Graphics g, PoseRender.GuideRenderer renderer, string ch, string id)
+    static void DrawMotion(Graphics g, PoseRender.GuideRenderer renderer, string ch, string id)
     {
         var X = Vector3.UnitX; var Y = Vector3.UnitY; var Z = Vector3.UnitZ;
         Panel View(RectangleF box, PoseRender.TeachingPose pose, float alpha = 1) => new(g, renderer, ch, box, pose, alpha);
@@ -243,8 +243,6 @@ public static class GuideFigures
                 var q = View(b, Pose(pull, -65, 6, V(.34f, -.10f, 1.42f), .65f));
                 Guard(g, renderer, ch, new(816, 100), .90f, true, -60); using (var motion = new Pen(Ink, 2) { EndCap = LineCap.ArrowAnchor })
                     g.DrawBezier(motion, new PointF(808, 94), new PointF(780, 72), new PointF(740, 78), new PointF(708, 108)); Arrow(g, q.P(contact.Position), q.Hand(1)); Dot(g, q.Hand(1)); Step(g, 2, 452, 16);
-                // Alternate grip + trigger: two button marks, no explanatory words.
-                Controller(g, new(812, 46), true);
                 break;
             }
             case "sword_draw_block":
@@ -343,7 +341,7 @@ public static class GuideFigures
                 g.FillRectangle(bg, 529, 70, 287, 257); g.FillRectangle(highlight, 550, 145, 240, 32);
                 using (var row = new Pen(Color.FromArgb(170, Paper), 2))
                     for (int y = 110; y <= 290; y += 45) g.DrawLine(row, 557, y, 776, y);
-                Arrow(g, h, new(548, 160)); Controller(g, new(717, 562), false); break;
+                Arrow(g, h, new(548, 160)); break;
             }
         }
     }
@@ -359,16 +357,138 @@ public static class GuideFigures
         for (int i = 0; i < 4; i++) g.DrawArc(pen, p.X - 8, p.Y - 20 + i * 10, 27, 16, -110, 260);
         g.DrawArc(pen, p.X - 33, p.Y - 2, 39, 22, 90, 200);
     }
-    static void Controller(Graphics g, PointF p, bool grip)
+    static void Label(Graphics g, string text, float x, float y, float size = 15, bool bold = true)
     {
-        var state = g.Save(); g.TranslateTransform(p.X, p.Y);
-        using var pen = new Pen(Ink, 2); using var rust = new SolidBrush(Rust);
-        g.DrawEllipse(pen, -22, -26, 44, 27);
-        g.DrawBezier(pen, -16, -9, -16, 8, -11, 32, 0, 32);
-        g.DrawBezier(pen, 0, 32, 13, 32, 15, 7, 16, -9);
-        g.FillEllipse(rust, 10, -11, 8, 15); // index trigger
-        if (grip) g.FillRectangle(rust, -17, 5, 7, 14); // middle-finger grip
-        g.Restore(state);
+        using var font = new Font("Segoe UI", size, bold ? FontStyle.Bold : FontStyle.Regular, GraphicsUnit.Pixel);
+        using var brush = new SolidBrush(Ink);
+        g.DrawString(text, font, brush, x, y);
+    }
+
+    // Photo reference and generation provenance live beside the embedded asset.
+    static readonly Bitmap ControllerPhoto = LoadControllerPhoto();
+    static Bitmap LoadControllerPhoto()
+    {
+        using var stream = typeof(GuideFigures).Assembly.GetManifestResourceStream("guide/touch-plus.png")
+            ?? throw new InvalidOperationException("Controller image is missing.");
+        using var image = new Bitmap(stream);
+        return new Bitmap(image);
+    }
+    static PointF ControllerPoint(PointF p, bool left, string input, float scale = 1)
+    {
+        var point = (left, input) switch
+        {
+            (true, "stick") => new PointF(-19, -35), (false, "stick") => new PointF(21, -23),
+            (true, "X") => new PointF(5, -23), (true, "Y") => new PointF(8, -33),
+            (false, "A") => new PointF(3, -17), (false, "B") => new PointF(-5, -31),
+            (true, "menu") => new PointF(-12, -18),
+            (true, "grip") => new PointF(30, 19), (false, "grip") => new PointF(-25, 19),
+            _ => throw new ArgumentException("No visible controller button: " + input)
+        };
+        return Add(p, point.X * scale, point.Y * scale);
+    }
+    static void Controller(Graphics g, PointF p, bool left, string active, float scale = 1)
+    {
+        var source = left ? new RectangleF(180, 55, 550, 845) : new RectangleF(970, 55, 540, 845);
+        g.DrawImage(ControllerPhoto, new RectangleF(p.X - 43 * scale, p.Y - 48 * scale, 86 * scale, 134 * scale), source, GraphicsUnit.Pixel);
+        using var ring = new Pen(Rust, 2.4f);
+        foreach (string input in active.Split(' ', StringSplitOptions.RemoveEmptyEntries))
+        {
+            if (input == "trigger") continue; // Behind the faceplate in the reference; never mark the grip as trigger.
+            var point = ControllerPoint(p, left, input, scale);
+            float radius = 7 * scale;
+            g.DrawEllipse(ring, point.X - radius, point.Y - radius, radius * 2, radius * 2);
+        }
+    }
+
+    static void Draw(Graphics g, PoseRender.GuideRenderer renderer, string ch, string id)
+    {
+        if (Height(id) == 232)
+        {
+            var state = g.Save(); g.TranslateTransform(0, 12); g.ScaleTransform(.76f, .76f);
+            DrawMotion(g, renderer, ch, id); g.Restore(state);
+            var captions = id switch
+            {
+                "sword_throw" => ("1  Hold grip + swing", "2  Release grip to throw"),
+                "enemy_grab" => ("1  Touch + hold grip", "2  Hold grip + pull hard"),
+                "sword_draw_block" => ("1  Grip at shoulder", "2  Blade in front: block"),
+                "stealth" => ("Stab from behind / side", "Grip neck from behind"),
+                "bodies_drag_carry" => ("1  Grip limb + lift", "2  Release at shoulder"),
+                "left_hip" => ("Grip at left hip: draw", "Left trigger: fire / cast"),
+                "wheel_watch" => ("Hold X + point to choose", "Turn wrist to your face"),
+                _ => ("Left temple: journal", "Right temple: guide")
+            };
+            Label(g, captions.Item1, 10, 191, 22); Label(g, captions.Item2, 337, 191, 22);
+            using var rule = new Pen(Color.FromArgb(110, Ink), 1); g.DrawLine(rule, 659, 16, 659, 215);
+            bool left = id is "left_hip" or "wheel_watch";
+            string active = id switch { "wheel_watch" => "X", "left_hip" => "grip trigger", _ => "grip" };
+            Label(g, left ? "LEFT HAND" : id is "enemy_grab" or "bodies_drag_carry" or "temples" or "stealth" ? "EITHER HAND" : "RIGHT HAND", 678, 16, 22);
+            Controller(g, new(753, 91), left, active, .93f);
+            // Leaders point to the highlighted physical button, away from the motion artwork.
+            var target = ControllerPoint(new(753, 91), left, active == "X" ? "X" : "grip", .93f);
+            using var leader = new Pen(Rust, 1.8f); g.DrawLines(leader, new[] { target, new PointF(686, 161), new PointF(686, 169) });
+            Dot(g, target);
+            Label(g, active == "X" ? "HOLD X" : "SIDE GRIP", 680, 172, 22);
+            Label(g, id == "sword_throw" ? "Release to throw" : id == "wheel_watch" ? "Release to equip" : "Middle finger", 680, 201, 18, false);
+            return;
+        }
+        if (id == "move_jump_lean")
+        {
+            Label(g, "QUEST 3 TOUCH PLUS", 230, 14, 24);
+            Controller(g, new(242, 119), true, "stick", 1.12f);
+            Controller(g, new(620, 119), false, "stick A", 1.12f);
+            Label(g, "LEFT", 208, 217, 22); Label(g, "RIGHT", 579, 217, 22);
+            using (var leader = new Pen(Rust, 2))
+            {
+                g.DrawLines(leader, new PointF[] { ControllerPoint(new(242, 119), true, "stick", 1.12f), new(142, 83), new(94, 83) });
+                g.DrawLines(leader, new PointF[] { ControllerPoint(new(620, 119), false, "stick", 1.12f), new(714, 75), new(759, 75) });
+                g.DrawLines(leader, new PointF[] { ControllerPoint(new(620, 119), false, "A", 1.12f), new(723, 159), new(759, 159) });
+            }
+            Label(g, "STICK", 46, 67, 22); Label(g, "STICK", 761, 59, 22); Label(g, "A", 766, 143, 22);
+            Label(g, "Stick: move with your gaze", 40, 250, 22);
+            Label(g, "Click stick: sprint", 40, 280, 22);
+            Label(g, "Stick sideways: turn", 454, 250, 22);
+            Label(g, "Stick down: crouch / stand", 454, 280, 22);
+            Label(g, "A: jump / climb / swim up", 454, 310, 22);
+            Label(g, "Click stick: zoom", 454, 340, 22);
+            using var rule = new Pen(Color.FromArgb(100, Ink), 1); g.DrawLine(rule, 40, 378, 824, 378);
+            var state = g.Save(); g.TranslateTransform(246, 423); g.ScaleTransform(.43f, .43f);
+            DrawMotion(g, renderer, ch, id); g.Restore(state);
+            Label(g, "JUMP: throw empty hands overhead", 210, 382, 22);
+            Label(g, "Keep triggers released", 304, 413, 18, false);
+            Label(g, "CROUCH: lower body", 75, 767, 22);
+            Label(g, "LEAN: head sideways", 490, 767, 22);
+            return;
+        }
+        var motion = g.Save(); g.ScaleTransform(1, id == "menu_point" ? .64f : .80f); DrawMotion(g, renderer, ch, id); g.Restore(motion);
+        float divider = id == "menu_point" ? 538 : 650;
+        using (var line = new Pen(Color.FromArgb(110, Ink), 1)) g.DrawLine(line, 40, divider, 824, divider);
+        if (id == "hands_push")
+        {
+            Label(g, "OPEN PALM: push slowly to peek", 194, 20, 24);
+            Label(g, "1  Grip to pick up", 85, 600, 22); Label(g, "2  Swing + release to throw", 438, 600, 22);
+            Controller(g, new(150, 720), false, "grip", .65f);
+            Label(g, "SIDE GRIP", 205, 676, 24); Label(g, "Hold to keep an object in your hand", 205, 711, 22, false);
+            Label(g, "Release mid-swing to throw", 205, 745, 22, false);
+        }
+        else
+        {
+            Label(g, "1  Point at a menu item", 45, 25, 26);
+            Label(g, "2  Right trigger: select", 45, 62, 24);
+            Label(g, "Index trigger is behind the faceplate", 45, 96, 20, false);
+            Label(g, "LEFT CONTROLLER", 94, 550, 22);
+            Label(g, "RIGHT CONTROLLER", 497, 550, 22);
+            Controller(g, new(190, 627), true, "Y menu", .83f);
+            Controller(g, new(598, 627), false, "trigger grip B", .83f);
+            Label(g, "Y: talk / hold for pause", 44, 710, 23);
+            Label(g, "Menu: pause", 44, 751, 23);
+            Label(g, "Side grip: change tab", 444, 710, 23);
+            Label(g, "Hold B: holster weapons", 444, 751, 23);
+            using var leader = new Pen(Rust, 2);
+            g.DrawLines(leader, new PointF[] { ControllerPoint(new(190, 627), true, "Y", .83f), new(312, 608), new(312, 699) });
+            g.DrawLines(leader, new PointF[] { ControllerPoint(new(190, 627), true, "menu", .83f), new(83, 672), new(83, 742) });
+            g.DrawLines(leader, new PointF[] { ControllerPoint(new(598, 627), false, "grip", .83f), new(474, 651), new(474, 699) });
+            g.DrawLines(leader, new PointF[] { ControllerPoint(new(598, 627), false, "B", .83f), new(832, 608), new(832, 742) });
+        }
     }
     static void Book(Graphics g, PointF p)
     {

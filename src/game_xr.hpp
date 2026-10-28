@@ -32,6 +32,8 @@
 #include "xr_cpu_spans.hpp"
 #include "grab_beam.hpp"
 #include "world_ui_pose.hpp"
+#include "note_reading.hpp"
+#include "note_eye_art.hpp"
 #include "hud_window.hpp"
 #include "wrist_hud_image.hpp"
 #include "native_eye_art.hpp"
@@ -169,6 +171,9 @@ private:
     std::array<unsigned,33> native_object_art_masks_{};
     std::array<bool,3> native_wrist_art_shown_{};
     std::unique_ptr<NativeEyeArt> native_eye_art_;
+    std::unique_ptr<NoteEyeArt> note_eye_art_;
+    std::array<NoteHandReceipt,2> note_hands_{};
+    DXGI_FORMAT world_ui_source_format_=DXGI_FORMAT_UNKNOWN;
     EyeReticleFrames eye_reticles_;
     bool eye_reticle_failed_{};
     Microsoft::WRL::ComPtr<ID3D11Texture2D> eye_reticle_texture_;
@@ -229,6 +234,10 @@ private:
     MenuPanel authored_panel_{2.5};
     Microsoft::WRL::ComPtr<ID3D11Texture2D> world_ui_source_;
     unsigned world_ui_kind_{};bool world_ui_full_{};
+    std::optional<NotePanelReceipt> note_panel_;
+    NoteScroll note_scroll_;
+    float note_scroll_axis_{},note_right_trigger_{};
+    bool note_tablet_enabled_{};
     XrSwapchain world_ui_chain_{};
     ChainSizes chain_sizes_; // every live swapchain's size: the submit guard checks quad/cylinder sub-rects against it
     XrSwapchain menu_band_chain_{};std::vector<XrSwapchainImageD3D11KHR> menu_band_images_;UINT menu_band_width_{},menu_band_height_{}; // the menu/cutscene panel's 16:9 band
@@ -337,7 +346,32 @@ private:
 public:
     // Notes, and the black market (the only full-height journal-kind panel: logic 1024) while the left hand is tracked, are held in
     // that hand like a page (headset 2026-10-14: "render the Black Market on the left arm like notes"). Untracked, the shop stays 1 m ahead.
-    bool world_ui_in_hand() const noexcept {return (world_ui_kind_==2 || (world_ui_kind_==3 && world_ui_full_)) && (grip_tracked_hands&1u);}
+    bool note_composition_ready() const noexcept {
+        const auto now=GetTickCount64();
+        return note_tablet_enabled_ && world_ui_kind_==2 && world_ui_source_ && note_panel_ &&
+            !alternate_enabled && grip_tracked_hands==3 &&
+            note_panel_->current(now,pose_epoch(),reference_epoch(),alternate_frame) &&
+            note_hands_[0].generation==note_panel_->generation && note_hands_[1].generation==note_panel_->generation &&
+            note_hands_[0].current(now,pose_epoch(),reference_epoch(),alternate_frame) &&
+            note_hands_[1].current(now,pose_epoch(),reference_epoch(),alternate_frame);
+    }
+    bool world_ui_in_hand() const noexcept {return (grip_tracked_hands&1u) && ((world_ui_kind_==2 &&
+        (!note_tablet_enabled_ || note_composition_ready())) || (world_ui_kind_==3 && world_ui_full_));}
+    void note_hands(std::array<NoteHandReceipt,2> hands) {note_hands_=std::move(hands);}
+    std::uint64_t note_eye_draws{};
+    void enable_note_tablet(bool enabled) {note_tablet_enabled_=enabled;}
+    void note_panel(std::optional<NotePanelReceipt> panel) {
+        if(static_cast<bool>(panel)!=static_cast<bool>(note_panel_)) world_ui_pose_valid_=false;
+        note_panel_=std::move(panel);
+    }
+    float note_scroll_axis() const noexcept {return note_scroll_axis_;}
+    float note_right_trigger() const noexcept {return note_right_trigger_;}
+    std::array<double,2> note_dimensions() const {
+        const double width=.45*std::min(hud_scale(),100.f/65.f);
+        if(world_ui_kind_==2 && world_ui_source_) {D3D11_TEXTURE2D_DESC d{};world_ui_source_->GetDesc(&d);
+            if(d.Width) return {width,width*world_ui_rows(d)/d.Width};}
+        return {width,width*menu_band};
+    }
     std::array<unsigned,2> world_ui_size() const {if(!world_ui_source_) return {};D3D11_TEXTURE2D_DESC d{};world_ui_source_->GetDesc(&d);return {d.Width,d.Height};}
     float hud_scale() const noexcept {return static_cast<float>(settings_.hud_percent())/65.f;}
     // Rows of the world UI image shown: the whole image (wheel, black market) or the centred 16:9 band.
@@ -351,6 +385,7 @@ private:
         const TrackedPose head{{(l.position.x+r.position.x)*.5,(l.position.y+r.position.y)*.5,(l.position.z+r.position.z)*.5},
             {l.orientation.x,l.orientation.y,l.orientation.z,l.orientation.w}};
         if(world_ui_in_hand()) { // notes and the black market follow the left hand every frame
+            if(world_ui_kind_==2 && note_tablet_enabled_ && note_panel_) {world_ui_pose_=note_panel_->pose;world_ui_pose_valid_=false;return world_ui_pose_;}
             const auto& g=grip_locations[0].pose.position; // the taller shop page rests its bottom edge on the hand, as a note does (.12 m)
             world_ui_pose_=world_ui_hand_pose(head.position,{g.x,g.y,g.z},world_ui_kind_==2?.12:displayed_menu_view().height*.5);world_ui_pose_valid_=false;return world_ui_pose_;
         }
@@ -1407,7 +1442,8 @@ public:
     // dropping the layer: dropping it made the open wheel blink while its art updated.
     // full_height: the movie lays controls at its top/bottom edges, outside the 16:9 band (the black market, sim v381: its
     // category bar, money and Purchase/Back rows sat at 78-96% of the height and were cut off).
-    void world_ui(ID3D11Texture2D* source,unsigned kind,bool full_height=false,std::uint64_t draw_tick=0) {
+    void world_ui(ID3D11Texture2D* source,unsigned kind,bool full_height=false,std::uint64_t draw_tick=0,DXGI_FORMAT source_format=DXGI_FORMAT_UNKNOWN) {
+        if(source)world_ui_source_format_=source_format;
         if(kind>3) kind=0;world_ui_full_=kind==1 || full_height;
         if(!kind) {world_ui_kind_=0;world_ui_source_.Reset();world_ui_pose_valid_=false;world_ui_stale_=false;return;}
         const auto now=GetTickCount64();
@@ -1973,7 +2009,7 @@ public:
             if(changes.turning) turning_change_=changes.turning;
             if(changes.temporal_aa) temporal_change_=changes.temporal_aa;
             if(changes.hud_percent) hud_change_=changes.hud_percent;
-            if(changes.controls_guide) toggle_guide(true);
+            if(changes.controls_guide) toggle_guide(!gameplay);
             if(guide_stick_blocked()) {controller_input.turn_x=controller_input.turn_y=0;controller_input.right_click=false;}
             if(guide_from_menu_ && gameplay) {guide_open_=false;guide_from_menu_=false;} // opened over the pause menu: back in the game, it goes
             if(changes.recenter) {
@@ -2007,11 +2043,23 @@ public:
                     ((menu_pointer_hand&1)?controller_input.right_trigger:controller_input.left_trigger)>.55f};
             }
         }
+        const bool note_input=note_tablet_enabled_ && world_ui_kind_==2 && world_ui_source_ &&
+            !settings_.open() && !settings_consumed && continuity_.usable() && state==XR_SESSION_STATE_FOCUSED && controller_input.active;
+        std::optional<double> note_hit;
+        constexpr XrSpaceLocationFlags note_pose_flags=XR_SPACE_LOCATION_ORIENTATION_VALID_BIT|XR_SPACE_LOCATION_POSITION_VALID_BIT;
+        if(note_input && note_panel_ && world_ui_in_hand() && (aim_locations[1].locationFlags&note_pose_flags)==note_pose_flags) {
+            const auto& p=aim_locations[1].pose;
+            note_hit=note_pointer_y({{p.position.x,p.position.y,p.position.z},{p.orientation.x,p.orientation.y,p.orientation.z,p.orientation.w}},*note_panel_);
+        }
+        note_right_trigger_=note_input?raw_right_trigger:0;
+        note_scroll_axis_=note_scroll_.update(note_input,raw_right_trigger>.55f,note_hit,controller_input.turn_y,
+            GetTickCount64(),pose_epoch(),reference_epoch());
         controller_input.right_trigger=menu_trigger_gate_.update(raw_right_trigger,!scene_render || settings_.open() || settings_consumed,raw_input_active);
         timing.locate_input_ns=cpu_time_ns()-stage_start;stage_start=cpu_time_ns();
         XrCompositionLayerProjection projection{};projection.type=XR_TYPE_COMPOSITION_LAYER_PROJECTION;
         XrCompositionLayerQuad menu{};menu.type=XR_TYPE_COMPOSITION_LAYER_QUAD;
         std::optional<XrCompositionLayerQuad> world_ui_panel,hud_window_panel;
+        const bool composite_note=note_composition_ready() && world_scene && !authored_camera && tracked_pair_();
         std::optional<XrCompositionLayerQuad> hint_panel,dot_panel,vignette_panel;
         std::array<std::optional<XrCompositionLayerQuad>,2> wrist_panels;
         std::array<const XrCompositionLayerBaseHeader*,12> menu_layers_with_pointer{};
@@ -2099,6 +2147,14 @@ public:
                 }
                 {ModGpuScope overlay_scope(context_.Get(),ModSpan::eye_overlay); // task 3b: native object art + desktop mirror draws
                 SpanClock span(xr_spans,XrSpan::overlay_draws);
+                if(composite_note) {
+                    if(!note_eye_art_) {Microsoft::WRL::ComPtr<ID3D11Device> device;context_->GetDevice(&device);note_eye_art_=std::make_unique<NoteEyeArt>(device.Get());}
+                    D3D11_TEXTURE2D_DESC art_desc{};world_ui_source_->GetDesc(&art_desc);
+                    const auto rows=static_cast<UINT>(world_ui_rows(art_desc)),top=(art_desc.Height-rows)/2;
+                    XrView note_view{XR_TYPE_VIEW};note_view.pose=layers[eye].pose;note_view.fov=layers[eye].fov;
+                    note_eye_art_->draw(images_[eye].at(index).texture,world_ui_source_.Get(),format_,
+                        {0,top,0,art_desc.Width,top+rows,1},note_view,*note_panel_,note_hands_,world_ui_source_format_);++note_eye_draws;
+                }
                 if(gameplay && !authored_camera && tracked_pair_()) {
                     const auto now=GetTickCount64();XrView view{XR_TYPE_VIEW};view.pose=layers[eye].pose;view.fov=layers[eye].fov;
                     if(eye_reticle_available() && settings_.crosshair() && !settings_.open() && state==XR_SESSION_STATE_FOCUSED && controller_input.active) try {
@@ -2169,7 +2225,7 @@ public:
                 SpanClock layers_span(xr_spans,XrSpan::overlay_layers);
                 // Projection first, then the wrist controls card.
                 end.layerCount=0;menu_layers_with_pointer[end.layerCount++]=layer;
-                if(world_ui_kind_ && world_ui_source_) {
+                if(world_ui_kind_ && world_ui_source_ && !composite_note) {
                     if((world_ui_panel=world_ui_layer())) {
                         menu_layers_with_pointer[end.layerCount++]=reinterpret_cast<const XrCompositionLayerBaseHeader*>(&*world_ui_panel);
                         ++world_ui_layers;++world_ui_layers_by_kind[world_ui_kind_-1];last_world_ui_layer=true;

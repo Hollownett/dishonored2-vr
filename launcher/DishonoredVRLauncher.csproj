@@ -23,6 +23,7 @@
   </PropertyGroup>
   <ItemGroup>
     <Compile Remove="dist\**;obj\**" />
+    <EmbeddedResource Include="assets\touch-plus.png" LogicalName="guide/touch-plus.png" WithCulture="false" />
   </ItemGroup>
 
   <!-- Payload written to the per-user mod home (%LOCALAPPDATA%\DishonoredVR) at start-up: resource name "home/<relative path>". -->

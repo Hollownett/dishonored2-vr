@@ -402,7 +402,7 @@ public:
                 case 3:selected_=3;cycle_mirror(1);out.mirror=mirror_;break;
                 case 4:selected_=4;cycle_sharpness(1);out.sharpness=sharpness_;break;
                 case 5:selected_=5;cycle_hud(1);out.hud_percent=hud_percent_;break;
-                case 6:selected_=6;controls_hint_=!controls_hint_;out.controls_hint=controls_hint_;break;
+                case 6:selected_=6;out.controls_guide=true;break;
                 case 7:selected_=7;crosshair_=!crosshair_;out.crosshair=crosshair_;break;
                 case 8:selected_=8;cycle_turning(1);out.turning=turning_;break;
                 case 9:selected_=9;scripted_recenter_=!scripted_recenter_;out.scripted_recenter=scripted_recenter_;break;
@@ -417,7 +417,7 @@ public:
         else if(selected_==3 && (horizontal || a)) {cycle_mirror(horizontal?horizontal:1);out.mirror=mirror_;}
         else if(selected_==4 && (horizontal || a)) {cycle_sharpness(horizontal?horizontal:1);out.sharpness=sharpness_;}
         else if(selected_==5 && (horizontal || a)) {cycle_hud(horizontal?horizontal:1);out.hud_percent=hud_percent_;}
-        else if(selected_==6 && (horizontal || a)) {controls_hint_=!controls_hint_;out.controls_hint=controls_hint_;}
+        else if(selected_==6 && (horizontal || a)) out.controls_guide=true;
         else if(selected_==7 && (horizontal || a)) {crosshair_=!crosshair_;out.crosshair=crosshair_;}
         else if(selected_==8 && (horizontal || a)) {cycle_turning(horizontal?horizontal:1);out.turning=turning_;}
         else if(selected_==9 && (horizontal || a)) {scripted_recenter_=!scripted_recenter_;out.scripted_recenter=scripted_recenter_;}

@@ -16,7 +16,7 @@ namespace DishonoredVR;
 /// RGBA8; shown on the in-game VR settings page) from the user's own install, read-only. The poses replace the C++ solver
 /// frames (tests/body_ik_check.cpp scenarios "shoulders" and "tpose") with the bind body plus src/body_ik.hpp's arm step
 /// (clavicle shrug, Boneworks elbow pole, soft two-bone IK, forearm twist, fist curl) for the same hand targets.</summary>
-public static class PoseRender
+public static partial class PoseRender
 {
     /// <summary>Teaching targets use metres, Z up, +X forward and +Y anatomical left. Curls are thumb to little finger.</summary>
     public sealed record TeachingHand(Vector3 Position, Vector3 Direction, Vector3 Normal, float[] Curls);
@@ -245,7 +245,7 @@ public static class PoseRender
     }
 
     sealed class Tex { public int W, H; public byte[] Rgba = Array.Empty<byte>(); }
-    sealed class Surface { public string Material = ""; public int Start, Count; public Tex? Tex; public bool AlphaTest; }
+    sealed class Surface { public string Material = ""; public int Start, Count, VertexStart, VertexCount; public uint Kind; public Tex? Tex; public bool AlphaTest; }
     sealed class Part
     {
         public Vector3[] P = Array.Empty<Vector3>(), N = Array.Empty<Vector3>(); public Vector2[] Uv = Array.Empty<Vector2>();
@@ -311,7 +311,7 @@ public static class PoseRender
         int surfaces = U32();
         for (int s = 0; s < surfaces; s++)
         {
-            Name(); string material = Name(); U32(); o += 5;
+            Name(); string material = Name(); uint kind = checked((uint)U32()); o += 5;
             if (!d.AsSpan(o, 4).SequenceEqual("BTRI"u8)) throw new InvalidDataException("Unexpected mesh surface");
             o += 4; U32(); int cpu = U32(), gpu = U32(); o += 40;
             int nv = U32(); long streamed = BinaryPrimitives.ReadInt64LittleEndian(d.AsSpan(o)); o += 8;
@@ -322,7 +322,7 @@ public static class PoseRender
             if (ni < 0 || ni % 3 != 0 || o > d.Length) throw new InvalidDataException("Truncated mesh");
             if (keep != null && !keep(material)) continue;
             int b = p.Count;
-            part.Surfaces.Add(new Surface { Material = material, Start = idx.Count, Count = ni });
+            part.Surfaces.Add(new Surface { Material = material, Start = idx.Count, Count = ni, VertexStart = b, VertexCount = nv, Kind = kind });
             for (int k = 0; k < ni; k++) { int v = BinaryPrimitives.ReadUInt16LittleEndian(d.AsSpan(i0 + 2 * k)); if (v >= nv) throw new InvalidDataException("Mesh index out of range"); idx.Add(b + v); }
             for (int v = 0; v < nv; v++)
             {

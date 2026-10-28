@@ -211,8 +211,15 @@ int main() {
         require(!menu.update(in,false,true,PanelPointer{.5,rowv(5)}).hud_percent,"Held trigger changed the HUD size repeatedly");
         in.right_trigger=0;menu.update(in,false,true);in.right_trigger=1;
         const auto hint_click=menu.update(in,false,true,PanelPointer{.5,rowv(6)});
-        require(hint_click.controls_hint && !*hint_click.controls_hint && !menu.controls_hint(),"Pointer did not toggle the controls hint");
-        require(!menu.update(in,false,true,PanelPointer{.5,rowv(6)}).controls_hint,"Held trigger changed the controls hint repeatedly");
+        require(hint_click.controls_guide && hint_click.consume && !hint_click.controls_hint && menu.controls_hint(),"Pointer must consume input and open the guide without changing the saved hint preference");
+        require(!menu.update(in,false,true,PanelPointer{.5,rowv(6)}).controls_guide,"Held trigger opened the guide repeatedly");
+        {
+            VrSettings gameplay_guide;ControllerInput c{};c.active=true;gameplay_guide.set_controls_hint(false);
+            gameplay_guide.open_from_gameplay();gameplay_guide.update(c,true,true);
+            c.right_trigger=1;const auto opened=gameplay_guide.update(c,true,true,PanelPointer{.5,rowv(6)});
+            require(opened.controls_guide && opened.consume && !opened.controls_hint && !gameplay_guide.controls_hint(),"Gameplay panel guide action must preserve a disabled saved hint preference");
+            require(!gameplay_guide.update(c,true,true,PanelPointer{.5,rowv(6)}).controls_guide,"Gameplay panel held trigger opened the guide repeatedly");
+        }
         in.right_trigger=0;menu.update(in,false,true);in.right_trigger=1;
         {const bool before=menu.crosshair();
          const auto cross=menu.update(in,false,true,PanelPointer{.5,rowv(7)});
@@ -326,7 +333,11 @@ int main() {
             require(reticle_stick.hud_percent && *reticle_stick.hud_percent==75 && rows.hud_percent()==75,"Stick did not cycle the HUD size");
             press(0,-1);
             const auto hint_stick=press(1,0);
-            require(hint_stick.controls_hint && !*hint_stick.controls_hint && !rows.controls_hint(),"Stick did not toggle the controls hint");
+            require(hint_stick.controls_guide && hint_stick.consume && !hint_stick.controls_hint && rows.controls_hint(),"Stick must consume input and open the guide without changing the saved hint preference");
+            stick.a=true;const auto guide_a=rows.update(stick,false,true);
+            require(guide_a.controls_guide && !guide_a.controls_hint && rows.controls_hint(),"A must open the guide without changing the saved hint preference");
+            require(!rows.update(stick,false,true).controls_guide,"Held A opened the guide repeatedly");
+            stick.a=false;rows.update(stick,false,true);
             press(0,-1);
             const bool crosshair_before=rows.crosshair();
             const auto crosshair_stick=press(1,0);
@@ -369,13 +380,13 @@ int main() {
             char dump[512]{};
             if(GetEnvironmentVariableA("D2VR_PANEL_DUMP",dump,sizeof dump)>0) {   // optional: raw RGBA (640x560) of the recenter, cutscene and close rows for visual review
                 const auto save=[&](const char* name) {std::ofstream o(std::string(dump)+"/panel-"+name+".rgba",std::ios::binary);const auto img=settings_panel_image(rows,1.2,3722,3850,{});o.write(reinterpret_cast<const char*>(img.data()),static_cast<std::streamsize>(img.size()));};
-                for(const bool dlss_offered:{false,true}) for(const unsigned row:{0u,1u}) {   // resolution and anti-aliasing rows, both DLSS variants
+                for(const bool dlss_offered:{false,true}) for(const unsigned row:{0u,1u,6u}) {   // resolution, anti-aliasing and guide rows
                     VrSettings v;ControllerInput c{};c.active=true;v.initialize(1.5,true,{TurnControl::Mode::snap,45,90},MirrorMode::both_eyes,.5,dlss_offered?8:6);
                     v.dlss_available(dlss_offered);v.upscaler_generation(dlss_offered?5:3);
                     v.update(c,false,true);c.y=true;v.update(c,false,true);c.y=false;v.update(c,false,true);
-                    if(row) {c.move_y=-1;v.update(c,false,true);c.move_y=0;v.update(c,false,true);}
+                    for(unsigned i=0;i<row;++i) {c.move_y=-1;v.update(c,false,true);c.move_y=0;v.update(c,false,true);}
                     const auto img=settings_panel_image(v,1.23,3722,3850,{});
-                    std::ofstream o(std::string(dump)+(row?"/panel-aa-":"/panel-resolution-")+(dlss_offered?"dlss":"nodlss")+".rgba",std::ios::binary);o.write(reinterpret_cast<const char*>(img.data()),static_cast<std::streamsize>(img.size()));
+                    std::ofstream o(std::string(dump)+(row==6?"/panel-guide-":row?"/panel-aa-":"/panel-resolution-")+(dlss_offered?"dlss":"nodlss")+".rgba",std::ios::binary);o.write(reinterpret_cast<const char*>(img.data()),static_cast<std::streamsize>(img.size()));
                 }
                 save("cutscene");press(0,1);save("recenter");press(0,-1);press(0,-1);press(0,-1);save("close");press(0,1);press(0,1);
             }

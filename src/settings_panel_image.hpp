@@ -150,7 +150,7 @@ inline std::vector<unsigned char> settings_panel_image(const VrSettings& setting
         split(settings.mirror_text(),-1,L"Chooses what the desktop monitor mirrors: both eyes side by side, one eye alone, or off (the fastest). It does not change the headset image."),
         split(settings.sharpness_text(),settings.sharpness(),L"Contrast sharpening applied after anti-aliasing. Raise it if the image looks soft, lower it if edges crawl."),
         split(settings.hud_text(),hud_fraction,L"Scales the HUD and on-screen prompts shown in VR. 55% sits in the centre of your view; 100% keeps the original game layout."),
-        split(settings.controls_hint_text(),-1,L"Shows controller button hints in the world during play. Turn it off once you know the controls."),
+        {L"Controls & gestures",L"Open",-1,L"Controller pictures and motion hints. Right stick: pages. Close: right grip at right temple. In play, use the same gesture to open."},
         split(settings.crosshair_text(),-1,L"Shows the game's crosshair where your gun or power aims. Off hides it."),
         {L"Turning",turn.str(),-1,L"Native game uses the original stick turn. Snap rotates in fixed steps and is comfortable; Smooth turns continuously at a set speed."},
         split(settings.scripted_recenter_text(),-1,L"Re-aims the view at scripted moments so you keep facing the action. Off leaves it where it was."),

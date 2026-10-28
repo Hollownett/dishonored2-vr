@@ -16,6 +16,26 @@ static class Program
         Application.SetCompatibleTextRenderingDefault(false);
         // Review flags: --page play|settings|tools|controls, --screenshot <png> (PrintWindow of the client area, window shown without activation), --exit, --no-art.
         string? Flag(string name) { int i = Array.IndexOf(args, name); return i >= 0 && i + 1 < args.Length ? args[i + 1] : null; }
+        // Release payload verification uses the actual single-file executable in
+        // an empty home, without opening a window or starting the game.
+        if (Flag("--check-package") is string packageHome)
+        {
+            packageHome = Path.GetFullPath(packageHome);
+            if (Directory.Exists(packageHome) && Directory.EnumerateFileSystemEntries(packageHome).Any())
+                throw new InvalidOperationException("Package check requires a new or empty directory.");
+            var packaged = ModHome.Install(packageHome, Console.Error.WriteLine);
+            ControlsDocument.CheckParser();
+            using var controller = typeof(GuideFigures).Assembly.GetManifestResourceStream("guide/touch-plus.png")
+                ?? throw new InvalidDataException("Missing controller artwork");
+            using var bitmap = new Bitmap(controller);
+            if (bitmap.Width < 1000 || !File.Exists(Path.Combine(packageHome, "build", "note-tablet")))
+                throw new InvalidDataException("Guide artwork or default note feature missing");
+            File.WriteAllText(Path.Combine(packageHome, "package-check.json"), System.Text.Json.JsonSerializer.Serialize(new {
+                dll = packaged.Dll, sha256 = ModHome.Sha256(packaged.DllPath), controller_width = bitmap.Width,
+                note_holding_enabled = true, game_launched = false
+            }, new System.Text.Json.JsonSerializerOptions { WriteIndented = true }));
+            return 0;
+        }
         // Headless art check: extract into a temp folder (or --out <dir>) and compare with a tools/extract_game_art.py output folder (exit code 0 = match).
         if (Flag("--check-art") is string reference) return ArtImport.Check(reference, Flag("--out"), Console.Out);
         // Headless calibration-pose render (PoseRender) into <dir>, plus poses_sheet.png for review.
@@ -172,6 +192,9 @@ sealed class MainForm : Form
                     Append(log, $"Features: {Features.Apply(env.P("build"), Features.Load(fs))} seeded", Ui.Text);
                 }
                 catch (Exception ex) { Append(log, "Features not applied: " + ex.Message, Ui.Bad); }
+            if (shotFile == null && PoseRender.NoteHandMeshesMissing(env.P("artifacts", "game-art")) && Env.FindGameDir() is string handGame)
+                try { await Task.Run(() => PoseRender.ExportNoteHandMeshes(handGame, env.P("artifacts", "game-art"))); }
+                catch (Exception ex) { Append(log, "Note hand mesh import failed: " + ex.Message, Ui.Gold); }
             artState = Ui.Art.Present || noArt ? null : Env.FindGameDir() == null ? "needs Dishonored 2 installed" : "not imported yet";
             await RefreshChecks(); LoadSettings();
             if (shotFile == null && !exitAfterShot) _ = AutoFindDlss();  // review runs must not write a knob into a real mod home

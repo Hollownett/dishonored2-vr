@@ -34,20 +34,27 @@ int main() {
     Memory m;Depth depth;
     auto set=[&](auto at,auto object,float scalar){return m.set(at,object,scalar);};
     assert(depth.start(m.base,m));assert(!depth.start(m.base,m));assert(m.writes==0);
+    assert(!depth.world_depth_current(m));
     depth.service(m,set);assert(m.writes==1 && m.cache.scalar==0 && m.left==0 && m.right==0);
+    assert(depth.world_depth_current(m));
     depth.service(m,set);assert(m.writes==1); // no per-frame string writes
     // Native load/equip listener restored 5: re-enter through the setter, so
     // inherited arm model depth follows the global override on the same tick.
     m.cache={5,5.f};m.player=m.left=m.right=5;
+    assert(!depth.world_depth_current(m));
     depth.service(m,set);assert(m.writes==2 && m.player==0 && m.left==0 && m.right==0);
+    assert(depth.world_depth_current(m));
     assert(!depth.stop_and_wait(0) && depth.pending() && m.writes==2);
+    assert(!depth.world_depth_current(m));
     assert(!depth.start(m.base,m)); // no dispatcher => no pretend restoration/restart
     depth.service(m,set);assert(m.writes==3 && m.cache.scalar==5 && m.left==5 && m.right==5);
     assert(depth.stop_and_wait(0) && !depth.needs_service());
     assert(depth.start(m.base,m));m.fail=true;depth.service(m,set);
+    assert(!depth.world_depth_current(m));
     assert(depth.pending());depth.request_stop();m.fail=false;depth.service(m,set);
     assert(!depth.pending() && m.cache.scalar==5); // call failed before writing; preserve foreign/native pair
     assert(depth.start(m.base,m));m.partial=true;depth.service(m,set);
+    assert(!depth.world_depth_current(m));
     assert(depth.pending() && m.cache.scalar==0);depth.request_stop();
     assert(!depth.stop_and_wait(0));m.partial=false;depth.service(m,set);
     assert(!depth.pending() && m.player==5 && m.cache.scalar==5);
@@ -60,6 +67,7 @@ int main() {
     m.cache={1,.5f};assert(!depth.start(m.base,m));
     m.cache={0,std::numeric_limits<float>::quiet_NaN()};assert(!depth.start(m.base,m));
     m.cache={0,0.f};assert(depth.start(m.base,m));depth.service(m,set);
+    assert(!depth.world_depth_current(m)); // pre-existing/cache-only zero never becomes a listener receipt
     assert(!depth.pending());assert(depth.stop_and_wait(0));
     std::cout<<"PASS native player depth: load reset, inherited arms, native listener writes, stop/restore retry, foreign values, ABI/name/cache rejection\n";
 }

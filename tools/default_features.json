@@ -2,6 +2,15 @@
  "version": 1,
  "features": [
   {
+   "id": "note-tablet",
+   "file": "note-tablet",
+   "kind": "enable",
+   "label": "Hold notes in the left hand",
+   "help": "Hold and turn notes with your left hand. Scroll with the right stick or point and drag with the right trigger. Uses a front panel when hand or camera data is unavailable.",
+   "default": true,
+   "requires_dll_knob": "note-tablet"
+  },
+  {
    "id": "full-body",
    "file": "full-body",
    "kind": "enable",

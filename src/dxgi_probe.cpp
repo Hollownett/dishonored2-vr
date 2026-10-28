@@ -145,6 +145,9 @@
 #include "post_tonemap_pass.hpp"
 #include "native_menu_entry.hpp"
 #include "native_world_ui.hpp"
+#include "note_tablet.hpp"
+#include "note_hand_mesh.hpp"
+#include "native_note_kind.hpp"
 #include "world_ui_capture.hpp"
 #include "world_ui_completion.hpp"
 #include "native_attachment_pose.hpp"
@@ -798,6 +801,16 @@ static std::array<std::atomic<UINT64>,3> world_ui_draws{},world_ui_drawn_scopes{
 static std::array<bool,3> world_ui_captured{};
 static std::array<UINT64,3> world_ui_first_seen{};
 static bool world_ui_installed=false;
+static std::mutex note_panel_mutex;
+static d2vr::NotePanelReceipt note_panel_receipt;
+static std::array<d2vr::NoteHandReceipt,2> note_hand_receipts;
+static std::array<std::shared_ptr<const d2vr::rig::NativeArmBindingSnapshot>,2> note_hand_bindings;
+static std::array<std::optional<d2vr::note_hand::Mesh>,4> note_hand_meshes;
+static bool note_tablet_requested{};
+static d2vr::NativeNoteKind native_note_kind;
+static std::atomic<std::uint64_t> note_kind_epoch{1};
+static std::uint64_t note_art_generation{},note_art_after_scope{}; // guarded by note_panel_mutex
+static std::shared_ptr<const d2vr::rig::NativeArmBindingSnapshot> note_panel_binding;
 struct WorldUiRestore {
     ComPtr<ID3D11DeviceContext> context;
     ComPtr<ID3D11RenderTargetView> original,replacement;
@@ -2315,6 +2328,11 @@ void invoke_arm_upload(void* model,const void* source,UINT count,FullHandUploadW
     alignas(16) std::array<d2vr::rig::Transform,69> palette{};
     alignas(16) std::array<d2vr::rig::Transform,20> body_palette{};
     const void* submitted=source;
+    std::optional<d2vr::NotePanelReceipt> pending_note_panel;
+    d2vr::NoteHandReceipt pending_note_hand;
+    std::array<float,15> pending_note_model_frame{};
+    const d2vr::note_hand::Mesh* pending_note_mesh{};
+    std::optional<d2vr::rig::AvatarMeshToken> pending_note_owner;
     std::uint64_t submitted_socket_token{};
     d2vr::NativeLeftWeaponSocketOwner::Epochs submitted_socket_epochs{};
     const auto snapshot=arm_binding_cache.load();
@@ -2423,6 +2441,11 @@ void invoke_arm_upload(void* model,const void* source,UINT count,FullHandUploadW
     if(capturing.load(std::memory_order_acquire) && (arm_copy_requested || tracked_arms_requested) && snapshot)
         side=snapshot->side_for_model(reinterpret_cast<std::uintptr_t>(model)).value_or(2);
     if(side<2) {
+        if(note_tablet_requested) {
+            std::lock_guard<std::mutex> lock(note_panel_mutex);
+            note_hand_receipts[side]={};note_hand_bindings[side].reset();
+            if(side==0) {note_panel_receipt={};note_panel_binding.reset();}
+        }
         const auto flicker_calls=arm_pose_calls[side].load(),flicker_fallbacks=arm_pose_fallbacks[side].load();
         unsigned flicker_why=d2vr::ArmFlicker::other;
         try {
@@ -2527,8 +2550,55 @@ void invoke_arm_upload(void* model,const void* source,UINT count,FullHandUploadW
                             origin.receipt_frame_policy=d2vr::NativeAttachmentReceiptFramePolicy::current_parent;
                         }
                         if(!socket_current && attachment_pose_installed)attachment_pose.clear(side);
-                        const bool accepted=socket_current && (!attachment_pose_installed || attachment_pose.publish(side,
-                            snapshot->arms[side].animation,reinterpret_cast<std::uintptr_t>(source),palette,origin));
+                        const auto note_kind=native_note_kind.current(read_self,image_base,note_kind_epoch.load());
+                        const bool note_visual=t.note.active && note_kind && note_kind->generation==t.note.generation && game_logic_mask()==16 && !socket_token &&
+                            t.grip_valid[side] && (t.tracked_hands&(1u<<side)) && posed->owned<.001 &&
+                            arm_binding_cache.load()==snapshot;
+                        const bool accepted=socket_current && (note_visual?
+                            attachment_pose_installed && attachment_pose.validate_visual(side,snapshot->arms[side].animation,
+                                reinterpret_cast<std::uintptr_t>(source),palette,origin):
+                            !t.note.active && (!attachment_pose_installed || attachment_pose.publish(side,
+                                snapshot->arms[side].animation,reinterpret_cast<std::uintptr_t>(source),palette,origin)));
+                        if(accepted && note_visual) try {
+                            // Native world-depth must be active: a depth-hacked hand
+                            // cannot share the page's physical eye projection.
+                            if(d2vr::NativePlayerDepth::process_owner().world_depth_current(read_self)) {
+                                for(unsigned character=0;character<2;++character) if(const auto& mesh=note_hand_meshes[character*2+side]) {
+                                    const auto owner=d2vr::note_hand::bind(read_self,image_base,snapshot->arms[side],snapshot->bindings[side],*mesh);
+                                    if(!owner) continue;
+                                    const auto geometry=d2vr::note_hand::skin(*mesh,snapshot->bindings[side].inverse,palette,native->model_frame,t.note);
+                                    auto triangles=std::make_shared<std::vector<d2vr::Vec3>>();triangles->reserve(geometry.indices.size());
+                                    for(const auto index:geometry.indices)triangles->push_back(geometry.vertices.at(index));
+                                    if(arm_binding_cache.load()==snapshot && d2vr::note_hand::bind(read_self,image_base,snapshot->arms[side],snapshot->bindings[side],*mesh)==owner) {
+                                        pending_note_hand={std::move(triangles),t.source_tick,t.pose_epoch,t.reference_epoch,arm_frame_key,t.note.generation};
+                                        pending_note_model_frame=native->model_frame;
+                                        pending_note_mesh=&*mesh;pending_note_owner=owner;
+                                    }
+                                    break;
+                                }
+                            }
+                        } catch(...) {}
+                        if(side==0 && game_logic_mask()==16) {
+                            std::lock_guard<std::mutex> lock(note_panel_mutex);note_panel_receipt={};note_panel_binding.reset();
+                            if(accepted && note_visual) try {
+                                const auto& b=snapshot->bindings[0];std::array<d2vr::rig::Transform,4> knuckles{};
+                                for(unsigned f=0;f<4;++f) knuckles[f]=palette[b.finger_chains[f+1][0]];
+                                const auto gp=d2vr::rig::hand_bind_grip(palette[b.chain.wrist],knuckles);
+                                const auto world=d2vr::fullbody::to_world(d2vr::fullbody::frame_of(native->model_frame),d2vr::fullbody::to_xf(gp));
+                                const d2vr::WorldTrackedPose palm{world.p,{d2vr::rotated(world.q,{1,0,0}),d2vr::rotated(world.q,{0,1,0}),d2vr::rotated(world.q,{0,0,1})}};
+                                static thread_local std::shared_ptr<const d2vr::rig::NativeArmBindingSnapshot> note_geometry_binding;
+                                static thread_local std::optional<d2vr::rig::HandGeometry> note_geometry;
+                                if(note_geometry_binding!=snapshot) {
+                                    note_geometry.reset();note_geometry_binding=snapshot;
+                                    note_geometry=d2vr::rig::hand_geometry(b.fingers.open,b.parents,b.finger_chains,b.palm,b.chain.wrist,b.bind_grip);
+                                }
+                                if(!note_geometry) throw std::invalid_argument("Missing note hand geometry");
+                                const auto tablet=d2vr::rig::note_tablet(*note_geometry,palm,t.note.width,t.note.height);
+                                if(const auto pose=t.note.panel(tablet.centre,tablet.right,tablet.up,tablet.front)) {
+                                    pending_note_panel=d2vr::NotePanelReceipt{*pose,t.note.width,t.note.height,t.source_tick,t.pose_epoch,t.reference_epoch,arm_frame_key,t.note.generation};
+                                }
+                            }catch(...) {}
+                        }
                         if(diagnostic && socket_token)diagnostic->socket_stage=!socket_current?1u:!accepted?2u:4u;
                         if(accepted && socket_token) {submitted_socket_token=socket_token;
                             submitted_socket_epochs={t.pose_epoch,t.reference_epoch,t.mapping_revision};}
@@ -2706,6 +2776,18 @@ void invoke_arm_upload(void* model,const void* source,UINT count,FullHandUploadW
         diagnostic->replaced=submitted!=source;
     }
     original_arm_upload(model,submitted,count);
+    if(side<2 && pending_note_hand.triangles && pending_note_mesh && submitted==palette.data() && capturing.load() && !full_body_stopping.load() && arm_binding_cache.load()==snapshot) try {
+        const auto arms=d2vr::rig::player_arms(read_self,image_base);
+        const auto note_kind=native_note_kind.current(read_self,image_base,note_kind_epoch.load());
+        std::array<float,15> current_frame{};
+        if(arms && (*arms)[side]==snapshot->arms[side] && note_kind && note_kind->generation==pending_note_hand.generation &&
+            read_self(reinterpret_cast<std::uintptr_t>(model)+0x1860,current_frame.data(),sizeof(current_frame)) && current_frame==pending_note_model_frame &&
+            d2vr::note_hand::bind(read_self,image_base,snapshot->arms[side],snapshot->bindings[side],*pending_note_mesh)==pending_note_owner) {
+            std::lock_guard<std::mutex> lock(note_panel_mutex);
+            note_hand_receipts[side]=pending_note_hand;note_hand_bindings[side]=snapshot;
+            if(side==0 && pending_note_panel) {note_panel_receipt=*pending_note_panel;note_panel_binding=snapshot;}
+        }
+    }catch(...) {}
     if(diagnostic) {
         diagnostic->consumer_ms=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-consumer_start).count();
         const auto post_start=std::chrono::steady_clock::now();
@@ -5558,6 +5640,20 @@ void prepare_head_view(void* view) noexcept {
             // build/legacy-authored-hands: every authored camera takes both hands, as before.
             const bool hands_authored=action.takes_hands(authored_camera,cutscene_frame,legacy_authored_hands,legacy_cutscene_hands);
             const auto native_ownership=d2vr::fullbody::ownership(avatar_states,hands_authored);
+            const auto reading_kind=native_note_kind.current(read_self,image_base,note_kind_epoch.load());
+            const auto reading_meshes_ready=[&] {
+                if(!note_tablet_requested || !reading_kind || alternate_on() || !layer_pose_sync_on() ||
+                    !d2vr::NativePlayerDepth::process_owner().world_depth_current(read_self))return false;
+                const auto binding=arm_binding_cache.load();if(!binding)return false;
+                for(unsigned character=0;character<2;++character) {
+                    const auto& left=note_hand_meshes[character*2];const auto& right=note_hand_meshes[character*2+1];
+                    if(left && right && d2vr::note_hand::bind(read_self,image_base,binding->arms[0],binding->bindings[0],*left) &&
+                        d2vr::note_hand::bind(read_self,image_base,binding->arms[1],binding->bindings[1],*right))return true;
+                }
+                return false;
+            };
+            const bool reading_note=reading_meshes_ready() && game_logic_mask()==16 && !hands_authored && native_ownership.arm[0]==0 && native_ownership.arm[1]==0 &&
+                avatar_pose_gate.load() && game_xr->state==XR_SESSION_STATE_FOCUSED && game_xr->last_action_sync==XR_SUCCESS;
             const unsigned authored_hands=(hands_authored?3u:0u) | (native_ownership.arm[0]>0?1u:0u) | (native_ownership.arm[1]>0?2u:0u);
             if(!avatar_pose_gate.load(std::memory_order_acquire) || game_xr->state!=XR_SESSION_STATE_FOCUSED ||
                game_xr->last_action_sync!=XR_SUCCESS) native_interaction_aim.clear_door_contact();
@@ -6446,6 +6542,33 @@ void prepare_head_view(void* view) noexcept {
                     if(fresh && hand_holding_object) for(unsigned side=0;side<2;++side) {t.hand_empty[side]=true;
                         if(side==hand_hold_side) t.grip_value[side]=std::max(t.grip_value[side],.8);}}
                 t.reverse_grip[1]=reverse_sword;
+                if(reading_note) {
+                    const auto size=game_xr->note_dimensions();
+                    t.note={head_origin,hands.head_anchor,hand_centre,size[0],size[1],true,reading_kind->generation};
+                    for(unsigned side=0;side<2;++side) {
+                        t.hand_empty[side]=true;t.weapon_incoming[side]=false;t.item_key[side]=0;t.reverse_grip[side]=false;
+                        t.has_finger[side]=false;t.has_finger_axis[side]=false;
+                    }
+                    t.trigger[1]=game_xr->note_right_trigger();
+                    if(t.grip_valid[0] && finger_geometry[0] && finger_hinges[0]) {
+                        static d2vr::rig::FingerIkState note_fingers;
+                        static std::uint64_t note_finger_epoch{},note_finger_reference{},note_finger_tick{};
+                        if(hands.epoch!=note_finger_epoch || hands.reference_epoch!=note_finger_reference ||
+                           hands.tick<note_finger_tick || hands.tick-note_finger_tick>100) note_fingers={};
+                        note_finger_epoch=hands.epoch;note_finger_reference=hands.reference_epoch;
+                        const double dt=note_finger_tick && hands.tick>=note_finger_tick?std::min((hands.tick-note_finger_tick)*.001,.1):0.;
+                        note_finger_tick=hands.tick;
+                        const auto palm=drawn_palm_frame(0,hands.grips[0]);
+                        const auto tablet=d2vr::rig::note_tablet(*finger_geometry[0],palm,size[0],size[1]);
+                        const auto turns=d2vr::rig::note_tablet_fingers(*finger_geometry[0],palm,tablet,note_fingers,dt);
+                        const auto note_axes=d2vr::rig::hinge_axes(d2vr::rig::note_tablet_hand(*finger_geometry[0]),finger_geometry_for->bindings[0].bind_grip);
+                        t.has_finger[0]=t.has_finger_axis[0]=true;
+                        for(unsigned f=0;f<5;++f)for(unsigned j=0;j<3;++j) {
+                            t.finger_turn[0][f][j]=turns[f][j];const auto& axis=note_axes[f][j];
+                            t.finger_axis[0][f][j][0]=static_cast<float>(axis.x);t.finger_axis[0][f][j][1]=static_cast<float>(axis.y);t.finger_axis[0][f][j][2]=static_cast<float>(axis.z);
+                        }
+                    }
+                }
                 {   // every loose prop in reach of a hand, by entity: where each lay before a pickup flies it away (prop_watch.hpp)
                     std::array<std::optional<std::array<float,3>>,2> reach_hands{}; // C9: the controller's reach (grab selection), not the drawn hand's
                     for(unsigned side=0;side<2;++side) if((hands.hands>>side)&1u) {const auto& p=raw_grips[side].position;reach_hands[side]=std::array<float,3>{static_cast<float>(p.x),static_cast<float>(p.y),static_cast<float>(p.z)};}
@@ -7411,6 +7534,14 @@ std::string feedback_status_json() {
     return out.str();
 }
 void native_hud_call_observer(bool before,std::uintptr_t caller,std::uintptr_t method,std::uintptr_t receiver,std::uintptr_t block,std::uint32_t result) noexcept {
+    try {
+        native_note_kind.observe(read_self,image_base,before,caller,method,receiver,block,result,note_kind_epoch.load());
+        if(caller==0x790755 || caller==0x790574) {
+            const auto subtype=!before?native_note_kind.current(read_self,image_base,note_kind_epoch.load()):std::nullopt;
+            std::lock_guard<std::mutex> lock(note_panel_mutex);
+            note_art_generation=subtype?subtype->generation:0;note_art_after_scope=world_ui_serial.load();
+        }
+    }catch(...) {native_note_kind.clear();}
     if(before || result!=1) return;
     static thread_local bool probing=false;if(probing) return;
     probing=true;
@@ -8248,7 +8379,7 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                         }
                         // alternate-eye: authored / settings state is read here, at this Present (the plan lags a frame); a one-view frame in it is dropped
                         const bool alt_nonfree=alternate_on() && !d2vr::alternate_single_view_allowed(authored_camera,game_xr && game_xr->settings_open());
-                        bool pair_ready{},mono_path{};
+                        bool pair_ready{},mono_path{},note_exact_eye_pair{};
                         std::optional<d2vr::PendingViews<XrView>::Slot> alt_slot;int alt_fresh=-1; // alternate-eye: the Setup views this Present shows, the one eye they refresh
                         {
                             std::lock_guard<std::mutex> gpu_lock(gpu_mutex);
@@ -8281,7 +8412,7 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                 const auto own_slot=alt_pending.take(number),latest_slot=alt_pending.take(number+1);
                                 const auto choice=d2vr::paired_slot_to_promote(own_slot.has_value(),own_slot?own_slot->mask:0u,own_slot?own_slot->epoch:0,
                                     latest_slot.has_value(),latest_slot?latest_slot->mask:0u,latest_slot?latest_slot->epoch:0,game_xr?game_xr->pose_epoch():0);
-                                if(choice==d2vr::PairedSlot::own) {alt_slot=own_slot;++layer_pose_synced;}
+                                if(choice==d2vr::PairedSlot::own) {alt_slot=own_slot;++layer_pose_synced;note_exact_eye_pair=!mono_path;}
                                 else if(choice==d2vr::PairedSlot::latest) {alt_slot=latest_slot;++layer_pose_sync_fallbacks;}
                             }
                             }
@@ -8698,11 +8829,31 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                             if(native_marker_probe_installed) native_marker_probe.eye_phase(3);
                             {
                                 const auto logic=game_logic_mask();const auto kind=d2vr::world_ui_logic(logic);
+                                static bool prior_note{},prior_focus{};
+                                const bool focused=game_xr->state==XR_SESSION_STATE_FOCUSED;
+                                if((prior_note && logic!=16) || (prior_focus && !focused)) {native_note_kind.clear();++note_kind_epoch;}
+                                prior_note=logic==16;prior_focus=focused;
+                                const auto subtype=focused?native_note_kind.current(read_self,image_base,note_kind_epoch.load()):std::nullopt;
                                 const auto index=kind==d2vr::WorldUiKind::none?3u:static_cast<unsigned>(kind)-1;
                                 const auto ui=index<3?world_ui_capture.snapshot(index):d2vr::WorldUiCapture::Snapshot{};
                                 const auto now=GetTickCount64();
-                                const bool fresh=ui && world_ui_completion.ready(index,0,ui.scope_id) && now>=ui.recorded_tick && now-ui.recorded_tick<250;
-                                game_xr->world_ui(fresh?ui.texture.Get():nullptr,static_cast<unsigned>(kind),logic==1024,fresh?ui.recorded_tick:0); // black market: whole image; the capture's draw tick keys the overlay redraw
+                                bool artwork_current=true;
+                                if(subtype) {std::lock_guard<std::mutex> lock(note_panel_mutex);artwork_current=note_art_generation==subtype->generation && ui.scope_id>note_art_after_scope;}
+                                const bool fresh=artwork_current && ui && world_ui_completion.ready(index,0,ui.scope_id) && now>=ui.recorded_tick && now-ui.recorded_tick<250;
+                                static std::uint64_t displayed_note_generation{};
+                                const auto generation=subtype?subtype->generation:0;
+                                if(generation!=displayed_note_generation || !artwork_current)game_xr->world_ui(nullptr,0);
+                                displayed_note_generation=generation;
+                                std::optional<d2vr::NotePanelReceipt> note;
+                                std::array<d2vr::NoteHandReceipt,2> note_hands{};
+                                {std::lock_guard<std::mutex> lock(note_panel_mutex);
+                                 if(note_exact_eye_pair && subtype && note_panel_receipt.generation==subtype->generation && logic==16 && note_panel_binding && note_panel_binding==arm_binding_cache.load() &&
+                                    note_panel_receipt.current(now,game_xr->pose_epoch(),game_xr->reference_epoch(),number)) note=note_panel_receipt;
+                                 for(unsigned side=0;side<2;++side) if(note_exact_eye_pair && subtype && note_hand_receipts[side].generation==subtype->generation && logic==16 && note_hand_bindings[side]==arm_binding_cache.load() &&
+                                     note_hand_receipts[side].current(now,game_xr->pose_epoch(),game_xr->reference_epoch(),number))note_hands[side]=note_hand_receipts[side];
+                                 if(logic!=16) {note_panel_receipt={};note_panel_binding.reset();note_hand_receipts={};note_hand_bindings={};}}
+                                game_xr->enable_note_tablet(note_tablet_requested && subtype.has_value());game_xr->note_panel(note);game_xr->note_hands(std::move(note_hands));
+                                game_xr->world_ui(fresh?ui.texture.Get():nullptr,static_cast<unsigned>(kind),logic==1024,fresh?ui.recorded_tick:0,fresh?ui.format:DXGI_FORMAT_UNKNOWN); // black market: whole image; the capture's draw tick keys the overlay redraw
                                 if(fresh) ui_dump(L"wheel",ui.texture.Get());
                                 if(fresh && !world_ui_first_seen[index]) world_ui_first_seen[index]=now;
                                 if(fresh && !world_ui_captured[index] && now-world_ui_first_seen[index]>=500) {
@@ -10103,6 +10254,11 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                     const auto gate=d2vr::HandBodyRuntime::release_gate(release,GetTickCount64());
                                     input.menu=gate.menu;input.pause_request=gate.pause_request;
                                 }
+                                if(note_tablet_requested && logic==16 && native_note_kind.current(read_self,image_base,note_kind_epoch.load())) {
+                                    // AbsSimpleNote binds LEFT_ANALOG_STICK; right-hand scroll stays in the native controller path.
+                                    input.move_x=0;input.move_y=game_xr->note_scroll_axis();input.turn_x=input.turn_y=0;
+                                    input.left_grip=input.right_grip=input.left_trigger=input.right_trigger=0;
+                                }
                                 controller_bridge.publish(input,logic==2);
                                 published_logic=logic;published_move_x=input.move_x;published_move_y=input.move_y;
                                 native_pad_focus.publish(input.active && game_xr->state==XR_SESSION_STATE_FOCUSED,GetTickCount64());
@@ -10950,6 +11106,14 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
         engine_projection=fs::exists(root/L"build"/L"engine-projection");
         power_gestures_enabled=fs::exists(root/L"build"/L"power-gestures"); // opt-in until headset-tested
         full_body_requested=fs::exists(root/L"build"/L"full-body");
+        note_tablet_requested=fs::exists(root/L"build"/L"note-tablet");
+        note_hand_meshes={};
+        if(note_tablet_requested)for(unsigned character=0;character<2;++character)for(unsigned side=0;side<2;++side)try {
+            const auto name=std::string("note_hand_")+(character?"emily":"corvo")+(side?"_right.bin":"_left.bin");
+            std::ifstream input(root/L"artifacts"/L"game-art"/name,std::ios::binary);
+            auto mesh=d2vr::note_hand::read(input);
+            if(mesh.character==character && mesh.side==side)note_hand_meshes[character*2+side]=std::move(mesh);
+        }catch(...) {note_recoverable("Note hand mesh unavailable; notes use the front panel until art is imported");}
         synchronized_observer.enable(fs::exists(root/L"build"/L"synchronized-diagnostics"));
         const bool anatomical_shadow=fs::exists(root/L"build"/L"anatomical-shadow");
         if(anatomical_shadow && (!full_body_requested || !tracked_arms_requested || !synchronized_observer.enabled()))
@@ -11063,6 +11227,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
             dlss_fallback_noted=false;present_adapter_vendor=0;present_adapter_attempts=0;fsr4_supported_state=-1;dlss_jitter_mode=false;for(auto& owner:jitter_owner_dlss) owner=false;
             for(unsigned side=0;side<2;++side) {fsr_taa.eye_motion_width[side]=0;fsr_taa.eye_motion_height[side]=0;}
         }
+        ++note_kind_epoch;native_note_kind.configure(read_self,image_base);
         native_prompt_probe_calls=0;native_prompt_probe.configure(image_base,&read_self);native_prompt_entry_abi=d2vr::native_prompt_entry::verified_abi(read_self,image_base);d2vr::NativeWristHud::observer=&native_hud_call_observer;
         fsr_taa.timing_enabled=!native_gpu_requested && !render_perf_requested.load();
         fsr_taa.fsr4_compute_timing_enabled=render_perf_requested.load() || fs::exists(root/L"build"/L"fsr4-compute-timing");

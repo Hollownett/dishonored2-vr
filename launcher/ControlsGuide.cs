@@ -271,7 +271,9 @@ sealed class ControlsGuide : ArtControl
             if (textMode) { text.Bounds = new Rectangle(0, 0, usable, Math.Max(1, scroll.ClientSize.Height)); scroll.AutoScrollMinSize = Size.Empty; }
             else
             {
-                int columns = usable >= S(880) ? 2 : 1, gap = S(28), columnWidth = (usable - (columns - 1) * gap) / columns;
+                // Tall diagrams need a full row so the controls remain beside the motion illustration.
+                bool tall = lessons.Any(l => l.TallFigure);
+                int columns = !tall && lessons.Count > 1 && usable >= S(760) ? 2 : 1, gap = S(28), columnWidth = (usable - (columns - 1) * gap) / columns;
                 int[] bottoms = new int[columns];
                 for (int i = 0; i < lessons.Count; i++)
                 {
@@ -298,7 +300,8 @@ sealed class ControlsGuide : ArtControl
         readonly ControlsDocument.Lesson lesson;
         readonly Bitmap? figure;
         readonly RichTextBox body = new LessonText();
-        int headingHeight;
+        int headingHeight, figureWidth;
+        public bool TallFigure => lesson.Figure != "" && GuideFigures.Height(lesson.Figure) > 232;
         public event KeyEventHandler? NavigateText;
         public LessonView(ControlsDocument.Lesson lesson, Bitmap? figure)
         {
@@ -316,20 +319,23 @@ sealed class ControlsGuide : ArtControl
         {
             headingHeight = Math.Max(S(42), TextRenderer.MeasureText(lesson.Title, Ui.Font(this, 18), new Size(Math.Max(1, width), int.MaxValue),
                 TextFormatFlags.WordBreak | TextFormatFlags.NoPadding).Height) + S(12);
-            body.Width = Math.Max(1, width - S(12));
+            bool beside = TallFigure && width >= S(680);
+            figureWidth = beside ? (width - S(28)) / 2 : width;
+            int bodyX = beside ? figureWidth + S(28) : S(6);
+            body.Width = Math.Max(1, width - bodyX - S(6));
             // RichEdit measures the actual styled, wrapped text at the current desktop DPI.
             _ = body.Handle;
             body.SelectionStart = 0; body.SelectionLength = 0; body.ScrollToCaret();
             int height = body.GetPositionFromCharIndex(body.TextLength).Y + Ui.Font(this, 11.5f, FontStyle.Regular, Ui.Sans).Height + S(10);
-            body.Bounds = new Rectangle(S(6), headingHeight + (lesson.Figure == "" ? 0 : FigureHeight(width) + S(14)), body.Width, height);
-            return body.Bottom + S(8);
+            body.Bounds = new Rectangle(bodyX, headingHeight + (beside || lesson.Figure == "" ? 0 : FigureHeight(figureWidth) + S(14)), body.Width, height);
+            return Math.Max(body.Bottom, headingHeight + FigureHeight(figureWidth)) + S(8);
         }
         protected override void OnPaint(PaintEventArgs e)
         {
             base.OnPaint(e); var g = e.Graphics; Ui.Quality(g);
             TextRenderer.DrawText(g, lesson.Title, Ui.Font(this, 18), new Rectangle(0, 0, Width, headingHeight), Ui.Gold, TextFormatFlags.NoPadding | TextFormatFlags.WordBreak);
             if (lesson.Figure == "") return;
-            var r = new Rectangle(0, headingHeight, Width, FigureHeight(Width));
+            var r = new Rectangle(0, headingHeight, figureWidth, FigureHeight(figureWidth));
             if (figure != null)
             {
                 g.DrawImage(figure, r);

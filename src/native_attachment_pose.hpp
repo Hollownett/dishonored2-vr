@@ -270,6 +270,18 @@ private:
         __try {return self.around(anim,state,joint,[=]{return original(anim,state,joint,a,b);});}
         __finally {--self.depth_;}
     }
+    bool validate_palette(std::uintptr_t animation,std::uintptr_t first_slot,const std::array<rig::Transform,69>& joints,
+            const NativeAttachmentSource& source,std::uint64_t now,bool& exact) {
+        if(!policy_epoch_ || now<policy_tick_ || now-policy_tick_>freshness_ms ||
+           !admission_valid(source.admission) || !receipt_policy_valid(source)) {++rejects_policy_;return false;}
+        exact=source_allowed(source,now);
+        if(!exact && !source_in_grace(source,now)) {++rejects_source_;return false;}
+        if(!animation || !first_slot || !frame_current(animation,source,true) ||
+           !palette_slots_current(animation,first_slot)) {++rejects_other_;return false;}
+        for(unsigned joint=0;joint<joints.size();++joint)
+            if(joint<2?!valid_cuff_affine(joints[joint]):!rig::valid(joints[joint])) {++rejects_other_;return false;}
+        return true;
+    }
 public:
     // Publish native ownership BEFORE blend weights ramp. Revocation clears old
     // palettes and blocks subsequent worker publications in that same state.
@@ -290,17 +302,21 @@ public:
         if(side>1) return false;
         std::lock_guard<std::mutex> lock(mutex_);const auto now=GetTickCount64();
         sides_[side]={}; // Rejected/replaced uploads must never leave an older palette alive.
-        if(!(allowed_&(1u<<side)) || !policy_epoch_ || now<policy_tick_ || now-policy_tick_>freshness_ms ||
-           !admission_valid(source.admission) || !receipt_policy_valid(source)) {++rejects_policy_;return false;}
-        const bool exact=source_allowed(source,now);
-        if(!exact && !source_in_grace(source,now)) {++rejects_source_;return false;}
-        if(!animation || !first_slot || !frame_current(animation,source,true) ||
-           !palette_slots_current(animation,first_slot)) {++rejects_other_;return false;}
-        for(unsigned joint=0;joint<joints.size();++joint)
-            if(joint<2?!valid_cuff_affine(joints[joint]):!rig::valid(joints[joint])) {++rejects_other_;return false;}
+        if(!(allowed_&(1u<<side))) {++rejects_policy_;return false;}
+        bool exact{};if(!validate_palette(animation,first_slot,joints,source,now,exact))return false;
         sides_[side]={animation,first_slot,joints,source};
         if(!exact)++grace_accepts_;
         return true;
+    }
+    // Reading-note skinning may move the hands without granting any native item reader that palette.
+    bool validate_visual(unsigned side,std::uintptr_t animation,std::uintptr_t first_slot,const std::array<rig::Transform,69>& joints,const NativeAttachmentSource& source) {
+        if(side>1)return false;
+        std::lock_guard<std::mutex> lock(mutex_);sides_[side]={};
+        if((allowed_&(1u<<side)) || source.admission.context || source.admission.receipt || source.admission.acquire || source.admission.release ||
+           source.diagnostic_socket_token || source.observe_socket || source.receipt_frame_policy!=NativeAttachmentReceiptFramePolicy::exact) {
+            ++rejects_policy_;return false;
+        }
+        bool exact{};return validate_palette(animation,first_slot,joints,source,GetTickCount64(),exact);
     }
     void clear(unsigned side) {if(side>1) return;std::lock_guard<std::mutex> lock(mutex_);if(sides_[side].animation)++clears_;sides_[side]={};}
     // Palettes removed by clear() (a live palette only), accepted one sample behind the policy, and refused publications by cause

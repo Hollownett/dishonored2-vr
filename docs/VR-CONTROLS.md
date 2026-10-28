@@ -83,7 +83,7 @@ Quest Touch controllers. Grip is the side button under your middle finger; trigg
 ## Temples and journal
 <!-- vr-figure:temples|Your left temple opens the journal; your right temple opens this guide. -->
 - **Left temple + grip** — open the journal for objectives and notes. Holding Menu opens it too.
-- **Notes and the Black Market** — appear in your left hand.
+- **Notes and the Black Market** — appear in your left hand. Turn your wrist to read a note; scroll with the right stick, or point and drag with the right trigger.
 - **Right temple + grip** — open this guide. Repeat to close.
 - **Right stick left / right while this guide is open** — change its page.
 

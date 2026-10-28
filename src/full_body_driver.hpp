@@ -11,6 +11,7 @@
 #include "tracked_pose_lifetime.hpp"
 #include "drawn_palm_residual.hpp"
 #include "hand_reach.hpp"
+#include "note_reading.hpp"
 #include <chrono>
 #include <cstring>
 #include <mutex>
@@ -111,6 +112,7 @@ inline body::Ownership ownership(const std::array<bool,kStates>& active,bool aut
 
 // One frame of tracking from the render thread, in game-world units (metres).
 struct Tracking {
+    NoteViewMapping note{};
     Xf eye{};                 // centre-eye pose: +X forward, +Y left, +Z up
     Xf grip[2]{};             // controller grip poses (same convention)
     bool grip_valid[2]{};
