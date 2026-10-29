@@ -3253,31 +3253,46 @@ static bool player_has_cure_serum() noexcept {
         if(!game) return false;
         const auto player=value<std::uintptr_t>(read_self,*game+0x3130b0);
         if(!player) return false;
-        const auto components=list(read_self,*player+0x268,4096);
-        if(!components) return false;
         std::uintptr_t inventory{};
-        for(unsigned i=0;i<components->packed_count;++i) {
-            const auto component=value<std::uintptr_t>(read_self,components->data+i*8ull);
-            if(component && typed(read_self,image_base,*component,0x1b9a878) &&
-               value<std::uintptr_t>(read_self,*component+0x10)==player) {inventory=*component;break;}
+        // The player state machine owns the live inventory at +0x328 (native_manual_equip's
+        // verified path). The component-list walk below is only a fallback.
+        {auto reader=&read_self;const auto machine=native_takedowns.machine(reader);
+         if(machine) {
+            const auto candidate=value<std::uintptr_t>(read_self,machine+0x328);
+            if(candidate && typed(read_self,image_base,*candidate,0x1b9a878) &&
+               value<std::uintptr_t>(read_self,*candidate+0x10)==player) inventory=*candidate;
+         }}
+        if(!inventory) {
+            const auto components=list(read_self,*player+0x268,4096);
+            if(!components) return false;
+            for(unsigned i=0;i<components->packed_count;++i) {
+                const auto component=value<std::uintptr_t>(read_self,components->data+i*8ull);
+                if(component && typed(read_self,image_base,*component,0x1b9a878) &&
+                   value<std::uintptr_t>(read_self,*component+0x10)==player) {inventory=*component;break;}
+            }
         }
         if(!inventory) return false;
-        const auto entries=list(read_self,inventory+0x38,4096);
-        if(!entries) return false;
-        for(unsigned i=0;i<entries->packed_count;++i) {
-            const auto item=value<std::uintptr_t>(read_self,entries->data+i*8ull);
-            if(!item) continue;
-            const auto declaration=value<std::uintptr_t>(read_self,*item);
-            if(!declaration || !typed(read_self,image_base,*declaration,0x1b9ea48)) continue;
+        const auto is_cure=[&](std::uintptr_t item)->bool {
+            if(!item) return false;
+            const auto declaration=value<std::uintptr_t>(read_self,item);
+            if(!declaration || !typed(read_self,image_base,*declaration,0x1b9ea48)) return false;
             const auto name=value<std::uintptr_t>(read_self,*declaration+0x48);
             char buffer[256]{};
-            if(!name || !read_self(*name,buffer,sizeof(buffer)-1)) continue;
+            if(!name || !read_self(*name,buffer,sizeof(buffer)-1)) return false;
             buffer[sizeof(buffer)-1]=0;
             for(char* p=buffer;*p;++p) if(*p>='A' && *p<='Z') *p=static_cast<char>(*p-'A'+'a');
-            const bool cure_item=std::strstr(buffer,"syringe_cure") || std::strstr(buffer,"pickup_is_syringe_cure") ||
+            return std::strstr(buffer,"syringe_cure") || std::strstr(buffer,"pickup_is_syringe_cure") ||
                 std::strstr(buffer,"counter") || std::strstr(buffer,"serum") ||
                 (std::strstr(buffer,"grimalex") && std::strstr(buffer,"/syringe") && !std::strstr(buffer,"neutral"));
-            if(cure_item) {cached=true;break;}
+        };
+        const auto entries=list(read_self,inventory+0x38,4096);
+        if(!entries) return false;
+        for(unsigned i=0;i<entries->packed_count;++i)
+            if(is_cure(value<std::uintptr_t>(read_self,entries->data+i*8ull).value_or(0))) {cached=true;break;}
+        // Equipped/held mission items may no longer be in the list: check both hand slots too.
+        if(!cached) for(const auto offset:{0x68ull,0x70ull}) {
+            const auto item=value<std::uintptr_t>(read_self,inventory+offset);
+            if(item && is_cure(*item)) {cached=true;break;}
         }
     } catch(...) {}
     return cached;
@@ -4705,6 +4720,7 @@ static std::atomic<UINT64> native_message_publishes{};
 // v678: a last-resort cure hint when the map's Kiscule tutorial does not fire. It shows the same instruction
 // from the game's own cure_hypatia.tutorial decl, or explains the prerequisite/state when the cure is impossible.
 static std::atomic<UINT64> cure_prompt_frames{};
+static std::atomic<UINT64> cure_r1_frames{};
 static std::atomic<unsigned> cure_prompt_state{}; // 0 none, 1 dead, 2 live offer, 4 pre-offer stealth
 static std::atomic<std::uintptr_t> cure_nearby_entity{};
 static std::atomic<bool> cure_serum_detected{};
@@ -7935,6 +7951,7 @@ std::string feedback_status_json() {
            << ",\"cure_prompt_frames\":" << cure_prompt_frames.load()
            << ",\"cure_prompt_state\":" << cure_prompt_state.load()
            << ",\"cure_serum_detected\":" << (cure_serum_detected.load()?"true":"false")
+           << ",\"cure_r1_frames\":" << cure_r1_frames.load()
            << ",\"offered_choke_spawn\":" << offered_choke_spawn.load()
            << ",\"prompt_shows_hides\":[" << prompt_shows.load() << ',' << prompt_hides.load() << "],\"takedown_flips\":" << takedown_flips.load() << ",\"takedown_hints\":" << d2vr::NativeHudChildDraw::takedown_hints.load() << ",\"takedown_anchor\":{\"enabled\":" << (prompt_target_anchor?"true":"false") << ",\"frames\":" << takedown_anchor_frames.load() << ",\"object_conflicts\":" << takedown_anchor_object_conflicts.load() << '}' << ",\"npc_blade_contacts\":" << npc_blade_contacts.load() << ",\"contact_hits\":[" << d2vr::NativeInteractionAim::melee_applied_.load() << ',' << d2vr::NativeInteractionAim::melee_rejected_.load() << ',' << d2vr::NativeInteractionAim::melee_faults_.load() << ']' << ",\"contact_rejects\":[" << d2vr::NativeInteractionAim::melee_why_[0].load() << ',' << d2vr::NativeInteractionAim::melee_why_[1].load() << ',' << d2vr::NativeInteractionAim::melee_why_[2].load() << ']' << ",\"corpse_chops\":" << d2vr::NativeMelee::chops.load() << ",\"tip_speed\":[" << tip_speed_now[0].load() << ',' << tip_speed_now[1].load() << ']' << ",\"slash_speed\":" << (d2vr::NativeSlashSceneRate::process_owner().enabled()?slash_speed_factor:1.f) << ",\"slash_scene_rate\":{\"enabled\":" << (d2vr::NativeSlashSceneRate::process_owner().enabled()?"true":"false") << ",\"accelerations\":" << d2vr::NativeSlashSceneRate::process_owner().accelerations() << ",\"setter_failures\":" << d2vr::NativeSlashSceneRate::process_owner().setter_failures() << "}" << ",\"block_unequip_vetoes\":" << d2vr::NativeBlockEligibility::process_owner().vetoes() << ",\"takedown_range\":" << (native_interaction_aim.takedown_ranges_applied()?"true":"false") << ",\"takedown_kill_rules\":" << native_interaction_aim.takedown_range_kill_rules() << ",\"layer\":" << d2vr::NativeHeldObject::layer_json() << ",\"release_watch\":" << d2vr::NativeInteractionAim::release_watch_json() << ",\"held_clamp\":{\"enabled\":" << (held_clamp_enabled?"true":"false") << ",\"sweeps\":" << held_clamp_status.sweeps.load() << ",\"hits\":" << held_clamp_status.hits.load() << ",\"self_hits\":" << held_clamp_status.self_hits.load() << ",\"clamped_frames\":" << held_clamp_status.clamped_frames.load() << ",\"cast_us\":" << held_clamp_status.cast_us.load() << ",\"cast_us_max\":" << held_clamp_status.cast_us_max.load() << ",\"no_bounds\":" << held_clamp_status.no_bounds.load() << ",\"held_clamp_no_bounds\":" << held_clamp_status.no_bounds.load() << ",\"overlap_on_release\":" << held_clamp_status.overlap_on_release.load() << ",\"release_depen_frames\":" << held_clamp_status.release_depen_frames.load() << ",\"release_overlap_unresolved\":" << held_clamp_status.release_overlap_unresolved.load() << ",\"drawn_hand_gap_m\":" << held_clamp_status.drawn_hand_gap_m.load() << ",\"layer_at_release\":" << held_clamp_status.layer_at_release.load() << ",\"forced_drops\":" << held_clamp_status.forced_drops.load() << ",\"releases\":" << held_clamp_status.releases.load() << ",\"layer_reasserts\":" << d2vr::NativeHeldObject::layers_reasserted.load() << ",\"depen_writes\":" << native_grab.depen_writes_.load() << ",\"depen_rejected\":" << native_grab.depen_rejected_.load() << "}" << ",\"barrel_aim\":{\"ok\":" << barrel_ok.load() << ",\"bad_frame\":" << barrel_bad_frame.load() << ",\"no_model\":" << barrel_no_model.load() << ",\"gun_item_frames\":" << gun_item_frames.load() << ",\"name_miss_frames\":" << gun_name_miss_frames.load() << "},\"gadget_aim\":{\"enabled\":" << (gadget_hand_aim_enabled?"true":"false") << ",\"placement\":[" << d2vr::NativeGadgetAim::placement_calls.load() << ',' << d2vr::NativeGadgetAim::placement_swapped.load() << "],\"throw_hit\":[" << d2vr::NativeGadgetAim::throw_calls.load() << ',' << d2vr::NativeGadgetAim::throw_swapped.load() << "],\"stale\":" << d2vr::NativeGadgetAim::stale.load() << ",\"bad_pointer\":" << d2vr::NativeGadgetAim::bad_pointer.load() << ",\"restore_skipped\":" << d2vr::NativeGadgetAim::restore_skipped.load() << ",\"palm\":" << d2vr::NativeGadgetAim::palm_placements.load() << ",\"left_gadget\":" << (left_gadget.load()?"true":"false") << "}"
                << ",\"grenade_throw\":{\"enabled\":" << (grenade_hand_throw_enabled?"true":"false") << ",\"calls\":" << d2vr::NativeGrenadeThrow::calls.load() << ",\"rewritten\":" << d2vr::NativeGrenadeThrow::rewritten.load() << ",\"not_grenade\":" << d2vr::NativeGrenadeThrow::not_grenade.load() << ",\"no_gesture\":" << d2vr::NativeGrenadeThrow::no_gesture.load() << ",\"faults\":" << d2vr::NativeGrenadeThrow::faults.load() << ",\"last_speed\":" << d2vr::NativeGrenadeThrow::last_speed.load() << "}"
@@ -10761,7 +10778,8 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                     const auto cure_state=cure_prompt_state.load();
                                     if(cure_entity && (cure_state==2 || cure_state==4)) {
                                         const unsigned hand=choke_hand_published.load()&1u;
-                                        if((hand?raw.right_grip:raw.left_grip)>.35f) input.right_grip=1;
+                                        (void)hand;
+                                        if(raw.right_grip>.35f || raw.left_grip>.35f) {input.right_grip=1;++cure_r1_frames;}
                                     }
                                 }
                                 if(input.menu_modifier) {
@@ -11607,7 +11625,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
                 } catch(...) {return false;}
             };
         }
-        ui_dump_requested=fs::exists(root/L"build"/L"ui-dump");ui_dump_state.clear();left_aim_wanted=false;early_wrist_owner.reset();vitals_file=0;next_vitals_probe=0;wrist_early_publications=0;world_prompt_frames=0;prompt_shows=prompt_hides=takedown_flips=npc_blade_contacts=0;offered_choke_spawn=0;offered_choke_tick=0;prompt_anchor_fallbacks=prompt_guard_skips=0;native_message_publishes=0;cure_prompt_frames=0;cure_prompt_state=0;cure_nearby_entity=0;cure_serum_detected=false;d2vr::NativeInteractionAim::melee_enabled_=true;d2vr::NativeInteractionAim::impact_enabled_=true;d2vr::NativeImpactFx::reset();d2vr::NativeInteractionAim::impact_played_=0;d2vr::NativeInteractionAim::impact_skipped_=0;d2vr::NativeInteractionAim::melee_applied_=0;d2vr::NativeInteractionAim::melee_rejected_=0;d2vr::NativeInteractionAim::melee_faults_=0;for(auto& w:d2vr::NativeInteractionAim::melee_why_) w=0;for(auto& w:d2vr::NativeInteractionAim::stealth_reject_) w=0;for(auto& w:d2vr::NativeInteractionAim::stealth_awareness_) w=0;d2vr::NativeInteractionAim::stealth_slow_aware_drops_=0;d2vr::NativeInteractionAim::stealth_slow_unheld_drops_=0;slow_reject_latch=d2vr::SlowRejectLatch{};for(auto& w:d2vr::NativeInteractionAim::hit_height_) w=0;ga_offered_frames=ga_offered_swings=0;{std::error_code ec;fs::remove(output_directory/L"native-combat.csv",ec);} // the DLL outlives sessions
+        ui_dump_requested=fs::exists(root/L"build"/L"ui-dump");ui_dump_state.clear();left_aim_wanted=false;early_wrist_owner.reset();vitals_file=0;next_vitals_probe=0;wrist_early_publications=0;world_prompt_frames=0;prompt_shows=prompt_hides=takedown_flips=npc_blade_contacts=0;offered_choke_spawn=0;offered_choke_tick=0;prompt_anchor_fallbacks=prompt_guard_skips=0;native_message_publishes=0;cure_prompt_frames=0;cure_r1_frames=0;cure_prompt_state=0;cure_nearby_entity=0;cure_serum_detected=false;d2vr::NativeInteractionAim::melee_enabled_=true;d2vr::NativeInteractionAim::impact_enabled_=true;d2vr::NativeImpactFx::reset();d2vr::NativeInteractionAim::impact_played_=0;d2vr::NativeInteractionAim::impact_skipped_=0;d2vr::NativeInteractionAim::melee_applied_=0;d2vr::NativeInteractionAim::melee_rejected_=0;d2vr::NativeInteractionAim::melee_faults_=0;for(auto& w:d2vr::NativeInteractionAim::melee_why_) w=0;for(auto& w:d2vr::NativeInteractionAim::stealth_reject_) w=0;for(auto& w:d2vr::NativeInteractionAim::stealth_awareness_) w=0;d2vr::NativeInteractionAim::stealth_slow_aware_drops_=0;d2vr::NativeInteractionAim::stealth_slow_unheld_drops_=0;slow_reject_latch=d2vr::SlowRejectLatch{};for(auto& w:d2vr::NativeInteractionAim::hit_height_) w=0;ga_offered_frames=ga_offered_swings=0;{std::error_code ec;fs::remove(output_directory/L"native-combat.csv",ec);} // the DLL outlives sessions
         if(fs::exists(root/L"build"/L"hud-node-census")) {
             hud_node_census_path=output/L"hud-node-census.csv";
             d2vr::NativeHudChildDraw::census=&hud_node_census;
