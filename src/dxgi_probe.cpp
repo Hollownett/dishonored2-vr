@@ -3196,6 +3196,59 @@ static void publish_hand(unsigned side,const d2vr::WorldTrackedPose& drawn,const
     }
 }
 static bool npc_entity(std::uintptr_t e) noexcept {std::uintptr_t vt{};return e && read_self(e,&vt,8) && vt==image_base+0x1c5e108;} // arkNPC
+// Authored entity name (entity+0x20 -> idStr text), read-only. The Kiscule cure tutorial is keyed to Hypatia;
+// the mod uses the same authored name to tell her apart from every other chokeable NPC.
+static bool entity_name_has(std::uintptr_t entity,const char* needle) noexcept {
+    try {
+        std::uintptr_t text{};char buffer[192]{};
+        if(!entity || !needle || !*needle || !read_self(entity+0x20,&text,8) || !text ||
+           !read_self(text,buffer,sizeof(buffer)-1)) return false;
+        buffer[sizeof(buffer)-1]=0;
+        for(char* p=buffer;*p;++p) if(*p>='A' && *p<='Z') *p=static_cast<char>(*p-'A'+'a');
+        return std::strstr(buffer,needle)!=nullptr;
+    } catch(...) {return false;}
+}
+// Read-only inventory scan for the counter-serum syringe. The syringe is the native inventory item the game
+// requires before its NPC-interaction notification can offer the cure; without it the cure tutorial never shows.
+static bool player_has_cure_serum() noexcept {
+    static UINT64 next{};
+    static bool cached{};
+    const auto now=GetTickCount64();
+    if(now<next) return cached;
+    next=now+1000;cached=false;
+    try {
+        using namespace d2vr::rig;
+        const auto game=value<std::uintptr_t>(read_self,image_base+0x39a5290);
+        if(!game) return false;
+        const auto player=value<std::uintptr_t>(read_self,*game+0x3130b0);
+        if(!player) return false;
+        const auto components=list(read_self,*player+0x268,4096);
+        if(!components) return false;
+        std::uintptr_t inventory{};
+        for(unsigned i=0;i<components->packed_count;++i) {
+            const auto component=value<std::uintptr_t>(read_self,components->data+i*8ull);
+            if(component && typed(read_self,image_base,*component,0x1b9a878) &&
+               value<std::uintptr_t>(read_self,*component+0x10)==player) {inventory=*component;break;}
+        }
+        if(!inventory) return false;
+        const auto entries=list(read_self,inventory+0x38,4096);
+        if(!entries) return false;
+        for(unsigned i=0;i<entries->packed_count;++i) {
+            const auto item=value<std::uintptr_t>(read_self,entries->data+i*8ull);
+            if(!item) continue;
+            const auto declaration=value<std::uintptr_t>(read_self,*item);
+            if(!declaration || !typed(read_self,image_base,*declaration,0x1b9ea48)) continue;
+            const auto name=value<std::uintptr_t>(read_self,*declaration+0x48);
+            char buffer[256]{};
+            if(!name || !read_self(*name,buffer,sizeof(buffer)-1)) continue;
+            buffer[sizeof(buffer)-1]=0;
+            for(char* p=buffer;*p;++p) if(*p>='A' && *p<='Z') *p=static_cast<char>(*p-'A'+'a');
+            if(std::strstr(buffer,"syringe") || std::strstr(buffer,"cure") || std::strstr(buffer,"counter") ||
+               std::strstr(buffer,"serum")) {cached=true;break;}
+        }
+    } catch(...) {}
+    return cached;
+}
 // User, headset v637: a dead or unconscious body (+0xd1 bits 0x08/0x20) is carried by hand only, so its native "Carry body" prompt is never shown.
 static bool shoulder_dock_enabled{};   // build/shoulder-dock: a body released at the shoulder stays docked there (off: bodies are carried by hand only, a release drops them)
 // The V1 carry guard. The native selector (0x747840) offers a dead or unconscious NPC's Loot as its PRIMARY
@@ -4616,6 +4669,10 @@ static std::atomic<UINT64> prompt_anchor_fallbacks{},prompt_guard_skips{};
 // previously only landed on the HUD panel. Dr. Hypatia's "Press <BLOCK> to inject counter-serum" is one of them.
 // Publishing the message's own display node as a prompt lets the existing capture/world placement show it ahead.
 static std::atomic<UINT64> native_message_publishes{};
+// v678: a last-resort cure hint when the map's Kiscule tutorial does not fire. It shows the same instruction
+// from the game's own cure_hypatia.tutorial decl, or explains the prerequisite/state when the cure is impossible.
+static std::atomic<UINT64> cure_prompt_frames{};
+static std::atomic<unsigned> cure_prompt_state{}; // 0 none, 1 dead, 2 serum, 3 no serum
 struct TakedownPrompt {d2vr::NativeInteractionTargetIdentity identity;d2vr::Vec3 world;};
 static std::optional<TakedownPrompt> takedown_prompt(UINT64 now) noexcept {
     try {
@@ -4723,6 +4780,55 @@ static void ui_dump(const wchar_t* kind,ID3D11Texture2D* texture) noexcept {
         const auto stem=std::wstring(kind)+L"-"+std::to_wstring(count++);
         std::ofstream(dir/(stem+L".rgba"),std::ios::binary).write(reinterpret_cast<const char*>(pixels.bytes.data()),static_cast<std::streamsize>(pixels.bytes.size()));
         std::ofstream(dir/(stem+L".json"))<<"{\"width\":"<<pixels.width<<",\"height\":"<<pixels.height<<",\"tick\":"<<now<<",\"logic\":"<<game_logic_mask()<<"}";
+    } catch(...) {}
+}
+// One small generated tutorial card for the fallback cure hint. The text is drawn with the same GDI
+// card/font path the controller glyphs use, then uploaded once per distinct message and device.
+static ID3D11Texture2D* cure_prompt_texture(ID3D11Device* device,const char* label) noexcept {
+    static ComPtr<ID3D11Texture2D> texture;
+    static std::string cached;
+    if(!device || !label || !*label) return nullptr;
+    if(texture && cached==label) return texture.Get();
+    try {
+        constexpr unsigned width=800,height=140;
+        std::vector<unsigned char> rgba(static_cast<std::size_t>(width)*height*4);
+        d2vr::paint_quest_glyphs(rgba.data(),width,height,label);
+        for(std::size_t i=0;i<rgba.size();i+=4) if(!rgba[i+3]) rgba[i]=rgba[i+1]=rgba[i+2]=0;
+        D3D11_TEXTURE2D_DESC desc{};
+        desc.Width=width;desc.Height=height;desc.MipLevels=1;desc.ArraySize=1;desc.Format=DXGI_FORMAT_R8G8B8A8_UNORM;
+        desc.SampleDesc.Count=1;desc.Usage=D3D11_USAGE_IMMUTABLE;desc.BindFlags=D3D11_BIND_SHADER_RESOURCE;
+        const D3D11_SUBRESOURCE_DATA source{rgba.data(),width*4,0};
+        ComPtr<ID3D11Texture2D> created;
+        if(FAILED(device->CreateTexture2D(&desc,&source,&created))) return nullptr;
+        texture=created;cached=label;return texture.Get();
+    } catch(...) {return nullptr;}
+}
+static void publish_cure_hint(UINT64 now,ID3D11DeviceContext* context) noexcept {
+    try {
+        if(!context || !game_xr) return;
+        // A real native HUD message is the better source; never cover it with the fallback.
+        static UINT64 last_message_count{},last_message_tick{};
+        const auto count=native_message_publishes.load();
+        if(count!=last_message_count) {last_message_count=count;last_message_tick=now;}
+        if(last_message_tick && now>=last_message_tick && now-last_message_tick<700) return;
+        std::uintptr_t owner{};
+        if(const auto take=takedown_prompt(now)) owner=take->identity.object;
+        if(!owner) if(const auto target=native_interaction_aim.prompt_target(now)) owner=target->owner;
+        if(!owner) if(const auto& art=native_hud_compact_art[0]; art.child.retained_entry) owner=art.child.retained_entry->owner;
+        if(!owner || !entity_name_has(owner,"hypatia")) {cure_prompt_state=0;return;}
+        std::uint8_t flags{};
+        const bool dead=read_self(owner+0xd1,&flags,1) && (flags&0x28);
+        const bool serum=player_has_cure_serum();
+        const char* text=dead?"Hypatia is dead - load a save before the fight":
+            serum?"Press grip to inject counter-serum":"Craft the counter-serum in the lab first";
+        cure_prompt_state=dead?1:serum?2:3;
+        ComPtr<ID3D11Device> device;context->GetDevice(&device);
+        auto* texture=cure_prompt_texture(device.Get(),text);
+        if(!texture) return;
+        D3D11_TEXTURE2D_DESC desc{};texture->GetDesc(&desc);
+        if(game_xr->native_art_source(d2vr::tutorial_art_slot,false,texture,
+            D3D11_BOX{0,0,0,desc.Width,desc.Height,1},owner,game_xr->pose_epoch(),now,{},.9))
+            ++cure_prompt_frames;
     } catch(...) {}
 }
 void publish_native_hud_art(UINT64 now) {
@@ -5003,6 +5109,7 @@ void publish_native_hud_art(UINT64 now) {
         }
         if(!shown) game_xr->native_art_source(9,false,nullptr,{},0,0,0);
     }
+    publish_cure_hint(now,context);
 }
 
 static void render_perf_publish_scope(ID3D11DeviceContext* context,bool gameplay,UINT64 now_status) {
@@ -7790,6 +7897,8 @@ std::string feedback_status_json() {
                << ",\"scripted_view\":" << [&]{std::lock_guard<std::mutex> l(comfort_mutex);const auto& sv=scripted_view_status;std::ostringstream o;o<<"{\"entries\":"<<sv.entries<<",\"reaims\":"<<sv.reaims<<",\"folds\":"<<sv.folds<<",\"skipped_small\":"<<sv.skipped_small<<",\"easing\":"<<(sv.easing?"true":"false")<<",\"residual_easing\":"<<(sv.residual_easing?"true":"false")<<",\"last_delta_deg\":"<<sv.last_delta_deg<<",\"last_state_index\":"<<sv.last_state_index<<",\"enabled\":"<<(scripted_recenter_enabled && scripted_recenter_setting.load() && !legacy_authored_camera?"true":"false")<<",\"cutscene\":"<<cutscene_status_json()<<'}';return o.str();}() << ",\"cinematic_probe\":" << cinematic_probe_status_json() << ",\"carry\":" << carry_diagnostics.json() << ",\"hand_body\":" << d2vr::HandBodyRuntime::status_json(hand_body_requested.load()) << ",\"hand_visual\":" << hand_visual_stats.json() << ",\"hold_coupling\":" << hold_coupling_stats.json() << ",\"coupled_releases\":" << native_grab.coupled_releases_.load() << ",\"hold_y\":{\"enabled\":" << (hold_y_menu_enabled?"true":"false") << ",\"fires\":" << (game_xr?game_xr->y_hold_fires.load():0) << ",\"blocked_presses\":" << (game_xr?game_xr->y_hold_blocked_presses.load():0) << ",\"last_hold_ms\":" << (game_xr?game_xr->y_hold_last_ms.load():0) << "}" << "," << (game_xr?game_xr->palm_offset_status():std::string("\"palm_offset\":null")) << ",\"hand_push\":{\"force_n\":" << native_grab.hand_contact().config.push_force_n << ",\"capped\":[" << native_grab.hand_contact().capped_writes[0].load() << ',' << native_grab.hand_contact().capped_writes[1].load() << "],\"time_factor\":" << d2vr::NativeHandContact::time_factor << ",\"time_factor_verified\":false,\"mass_verified\":false}" << ",\"hud_relayouts\":" << d2vr::NativeHudChildDraw::hud_relayouts.load() << ",\"hud_panel_children\":" << d2vr::NativeHudChildDraw::panel_children.load() << ",\"sword_aim_frames\":" << sword_aim_frames.load() << ",\"gaze_takedown_frames\":" << gaze_takedown_frames.load() << ",\"overlay_hidden\":" << d2vr::NativeHudChildDraw::overlay_draws.load() << ",\"scabbard\":[" << scabbard_entries.load() << ',' << holster_fires.load() << "]" << ",\"sword_grip\":{\"actions\":[" << sword_actions[1].load() << ',' << sword_actions[2].load() << ',' << sword_actions[3].load() << ',' << sword_actions[4].load() << ',' << sword_actions[5].load() << ',' << sword_actions[6].load() << "],\"held\":" << (sword_grip.held()?"true":"false") << ",\"gun\":[" << gun_actions[1].load() << ',' << gun_actions[2].load() << ',' << (gun_grip.held()?1:0) << ',' << (hip_loaded?1:0) << "],\"reversed\":" << (sword_reversed.load()?"true":"false") << ",\"blade_self_hits\":" << blade_self_hits.load() << ",\"thrown\":[" << d2vr::NativeWeaponHands::thrown_hits.load() << ',' << d2vr::NativeWeaponHands::flight_frames.load() << ',' << d2vr::NativeWeaponHands::thrown_peak.load() << ',' << sword_release_speed.load() << ',' << right_hand_peak.load() << ',' << d2vr::NativeWeaponHands::services.load() << "],\"last_shove\":" << d2vr::NativeWeaponHands::last_shove.load() << ",\"ragdolls\":[" << d2vr::NativeWeaponHands::ragdolls.load() << ',' << d2vr::NativeWeaponHands::last_ragdoll.load() << ',' << yank_requests.load() << ',' << d2vr::NativeWeaponHands::yanks.load() << ',' << yank_peak[0].load() << ',' << yank_peak[1].load() << ',' << yank_gate[0].load() << ',' << yank_gate[1].load() << ',' << d2vr::NativeGrab::yank_holds_.load() << ',' << d2vr::NativeWeaponHands::wakes.load() << ',' << d2vr::NativeWeaponHands::holds_down.load() << ',' << d2vr::NativeWeaponHands::squeezes.load() << ',' << d2vr::NativeWeaponHands::guard_grabs.load() << ',' << d2vr::NativeWeaponHands::last_guard_d.load() << ',' << d2vr::NativeWeaponHands::last_guard_up.load() << ']' << ",\"look_uses\":" << look_uses.load() << ",\"look_hits\":" << look_hits.load() << ",\"stealth\":[" << d2vr::NativeMelee::unaware_asked.load() << ',' << d2vr::NativeMelee::unaware_yes.load() << ']' << ",\"use_diag\":[" << use_diag[0].load() << ',' << use_diag[1].load() << ',' << use_diag[2].load() << ',' << use_diag[3].load() << ',' << use_diag[4].load() << ',' << use_diag[5].load() << ',' << use_diag[6].load() << ',' << use_diag[7].load() << ',' << use_diag[8].load() << ',' << use_diag[9].load() << ']' << ",\"door_controller\":" << [&]{const auto state=d2vr::NativeDoorInteraction::process_owner().status();const auto metrics=native_interaction_aim.door_metrics();std::ostringstream value;value<<"{\"ownership\":"<<state.ownership<<",\"active\":"<<(state.active?"true":"false")<<",\"pending\":"<<(state.pending?"true":"false")<<",\"closing\":"<<(state.closing?"true":"false")<<",\"blocked\":"<<(state.blocked?"true":"false")<<",\"queries\":"<<metrics.queries<<",\"qualified\":"<<metrics.qualified<<",\"qpc_ticks\":"<<metrics.service_ticks<<",\"worst_qpc_ticks\":"<<metrics.worst_service_ticks<<'}';return value.str();}() << ",\"carry_head_pushes\":" << carry_head_pushes.load() << ",\"fist_takes\":" << fist_takes.load() << ",\"limb_hints\":" << limb_hints.load() << ",\"body_use_blocked\":" << body_use_blocked.load() << ",\"body_loot_passes\":" << body_loot_passes.load() << ",\"corpse_loot\":" << [&]{const auto a=native_interaction_aim.loot_offer_state(0),b=native_interaction_aim.loot_offer_state(1);std::ostringstream o;o<<"[{\"primary\":"<<a.primary<<",\"secondary\":"<<a.secondary<<",\"raw\":"<<(a.raw?"true":"false")<<",\"receipt\":"<<(a.receipt?"true":"false")<<",\"component\":"<<a.component_rva<<"},{\"primary\":"<<b.primary<<",\"secondary\":"<<b.secondary<<",\"raw\":"<<(b.raw?"true":"false")<<",\"receipt\":"<<(b.receipt?"true":"false")<<",\"component\":"<<b.component_rva<<"}]";return o.str();}() << ",\"native_carry_auto_drops\":" << native_carry_auto_drops.load() << ",\"stealth_kill_pulses\":" << stealth_kill_pulses.load() << ",\"carry_release\":[" << carry_drops.load() << ',' << carry_throws.load() << ',' << carry_docks.load() << ']' << ",\"dock_diag\":[" << dock_diag[0].load() << ',' << dock_diag[1].load() << ',' << dock_diag[2].load() << ',' << dock_diag[3].load() << ',' << dock_diag[4].load() << ',' << dock_diag[5].load() << ',' << dock_last_lag_mm.load() << ',' << dock_faults.load() << ']' << ",\"carries\":" << d2vr::NativeWeaponHands::carries.load() << ",\"block\":[" << block_pose_frames.load() << ',' << block_wanted.load() << ',' << gesture_blocks.load() << ',' << block_not_free.load() << ',' << block_not_held.load() << ',' << (d2vr::NativeWeaponHands::block_keeps_gun()?1:0) << ']' << ",\"hip_frames\":" << d2vr::NativeWeaponHands::hip_frames.load() << ",\"props_thrown\":[" << d2vr::NativeWeaponHands::props_marked.load() << ',' << d2vr::NativeWeaponHands::prop_hits.load() << ',' << (d2vr::NativeWeaponHands::phys_decl_ok.load()?1:0) << "],\"native\":[" << d2vr::NativeWeaponHands::ops.load() << ',' << d2vr::NativeWeaponHands::failures.load() << ',' << d2vr::NativeWeaponHands::spawned.load() << ',' << d2vr::NativeWeaponHands::removed.load() << "],\"copy\":" << [&]{const auto c=d2vr::NativeWeaponHands::copy();std::ostringstream o;if(!c.present) return std::string("null");o << "{\"pos\":[" << c.pos[0] << ',' << c.pos[1] << ',' << c.pos[2] << "],\"blade\":[" << c.blade[0] << ',' << c.blade[1] << ',' << c.blade[2] << "],\"flying\":" << (c.flying?"true":"false") << ",\"trace\":\"" << c.trace << "\"}";return o.str();}() << "}" << ",\"blade_pokes\":" << native_grab.pokes_.load() << ",\"interact\":[" << interact_bits.load() << ',' << interact_presses.load() << ']' << ",\"ragdoll_tows\":" << native_grab.tows_.load() << ",\"prop_grasp_point\":" << (native_grab.prop_grasp_point()?"true":"false") << ",\"prop_seat_gap_m\":" << prop_seat_gap_m.load() << ",\"corpse_cost_us\":[" << native_grab.corpse_cost_us() << ',' << native_grab.corpse_cost_max_us() << "],\"corpse_velocity_unknown\":" << native_grab.velocity_unknown() << ",\"corpse_lock_refused\":" << native_grab.lock_refused() << ",\"hand_contact\":[" << native_grab.hand_contact().publishes.load() << ',' << native_grab.hand_contact().services.load() << ',' << native_grab.hand_contact().tested.load() << ',' << native_grab.hand_contact().touches.load() << ',' << native_grab.hand_contact().pushes.load() << ',' << native_grab.hand_contact().faults.load() << ',' << native_grab.hand_contact().cost_us.load() << ',' << native_grab.hand_contact().cost_max_us.load() << ',' << native_grab.hand_contact().scan_us.load() << ',' << native_grab.hand_contact().body_us.load() << ',' << native_grab.hand_contact().math_us.load() << ',' << native_grab.hand_contact().slow_services.load() << ',' << native_grab.hand_contact().preempted.load() << ',' << native_grab.hand_contact().write_us.load() << ',' << native_grab.hand_contact().write_max_us.load() << ',' << native_grab.hand_contact().slow_writes.load() << ',' << native_grab.hand_contact().cast_seen.load() << ',' << native_grab.hand_contact().cast_held.load() << ',' << native_grab.hand_contact().discoveries.load() << ',' << native_grab.hand_contact().discover_us.load() << ',' << native_grab.hand_contact().discover_max_us.load() << ',' << native_grab.hand_contact().meets.load() << ',' << native_grab.hand_contact().meet_shifts.load() << ',' << native_grab.hand_contact().meet_latches.load() << ',' << native_grab.hand_contact().keepouts.load() << ']' << ",\"left_equip\":\"" << [&]{std::lock_guard<std::mutex> l(hand_state_mutex);std::string n(left_equip_name);for(auto& ch:n) if(ch=='"'||ch==92||static_cast<unsigned char>(ch)<32) ch='?';return n;}() << "\"" << ",\"hand_weapon_bits\":" << [&]{std::lock_guard<std::mutex> l(hand_state_mutex);return hand_weapon_bits;}() << ",\"prompt_latency_ms\":[" << prompt_latency_last.load() << ',' << prompt_latency_max.load() << "]" << ",\"sword_tip_ndc\":[" << sword_tip_ndc_x.load() << ',' << sword_tip_ndc_y.load() << "]" << ",\"wheel_zone\":{\"frames\":" << wheel_dbg_frames.load() << ",\"plane_frames\":" << wheel_dbg_plane.load() << ",\"size\":[" << wheel_dbg_w.load() << ',' << wheel_dbg_h.load() << "],\"uv\":[" << wheel_dbg_u.load() << ',' << wheel_dbg_v.load() << "],\"clicks\":" << wheel_zone_clicks.load() << ",\"last\":" << wheel_zone_last.load() << ",\"stage\":[" << wheel_stage_x.load() << ',' << wheel_stage_y.load() << "]}" << ",\"wrist_early_publications\":" << wrist_early_publications.load() << ",\"hud_holder_hidden\":" << d2vr::NativeHudChildDraw::holder_hidden.load() << ",\"hud_eye_node\":" << (d2vr::NativeHudChildDraw::eye_node.load()?"true":"false") << ",\"prompt_world\":" << (d2vr::NativeHudChildDraw::prompt_world.load()?"true":"false") << ",\"passive_gaze_preview\":" << (native_interaction_aim.passive_preview_active()?"true":"false") << ",\"world_prompt_frames\":" << world_prompt_frames.load() << ",\"prompt_anchor_fallbacks\":" << prompt_anchor_fallbacks.load()
            << ",\"prompt_guard_skips\":" << prompt_guard_skips.load()
            << ",\"native_message_publishes\":" << native_message_publishes.load()
+           << ",\"cure_prompt_frames\":" << cure_prompt_frames.load()
+           << ",\"cure_prompt_state\":" << cure_prompt_state.load()
            << ",\"offered_choke_spawn\":" << offered_choke_spawn.load()
            << ",\"prompt_shows_hides\":[" << prompt_shows.load() << ',' << prompt_hides.load() << "],\"takedown_flips\":" << takedown_flips.load() << ",\"takedown_hints\":" << d2vr::NativeHudChildDraw::takedown_hints.load() << ",\"takedown_anchor\":{\"enabled\":" << (prompt_target_anchor?"true":"false") << ",\"frames\":" << takedown_anchor_frames.load() << ",\"object_conflicts\":" << takedown_anchor_object_conflicts.load() << '}' << ",\"npc_blade_contacts\":" << npc_blade_contacts.load() << ",\"contact_hits\":[" << d2vr::NativeInteractionAim::melee_applied_.load() << ',' << d2vr::NativeInteractionAim::melee_rejected_.load() << ',' << d2vr::NativeInteractionAim::melee_faults_.load() << ']' << ",\"contact_rejects\":[" << d2vr::NativeInteractionAim::melee_why_[0].load() << ',' << d2vr::NativeInteractionAim::melee_why_[1].load() << ',' << d2vr::NativeInteractionAim::melee_why_[2].load() << ']' << ",\"corpse_chops\":" << d2vr::NativeMelee::chops.load() << ",\"tip_speed\":[" << tip_speed_now[0].load() << ',' << tip_speed_now[1].load() << ']' << ",\"slash_speed\":" << (d2vr::NativeSlashSceneRate::process_owner().enabled()?slash_speed_factor:1.f) << ",\"slash_scene_rate\":{\"enabled\":" << (d2vr::NativeSlashSceneRate::process_owner().enabled()?"true":"false") << ",\"accelerations\":" << d2vr::NativeSlashSceneRate::process_owner().accelerations() << ",\"setter_failures\":" << d2vr::NativeSlashSceneRate::process_owner().setter_failures() << "}" << ",\"block_unequip_vetoes\":" << d2vr::NativeBlockEligibility::process_owner().vetoes() << ",\"takedown_range\":" << (native_interaction_aim.takedown_ranges_applied()?"true":"false") << ",\"takedown_kill_rules\":" << native_interaction_aim.takedown_range_kill_rules() << ",\"layer\":" << d2vr::NativeHeldObject::layer_json() << ",\"release_watch\":" << d2vr::NativeInteractionAim::release_watch_json() << ",\"held_clamp\":{\"enabled\":" << (held_clamp_enabled?"true":"false") << ",\"sweeps\":" << held_clamp_status.sweeps.load() << ",\"hits\":" << held_clamp_status.hits.load() << ",\"self_hits\":" << held_clamp_status.self_hits.load() << ",\"clamped_frames\":" << held_clamp_status.clamped_frames.load() << ",\"cast_us\":" << held_clamp_status.cast_us.load() << ",\"cast_us_max\":" << held_clamp_status.cast_us_max.load() << ",\"no_bounds\":" << held_clamp_status.no_bounds.load() << ",\"held_clamp_no_bounds\":" << held_clamp_status.no_bounds.load() << ",\"overlap_on_release\":" << held_clamp_status.overlap_on_release.load() << ",\"release_depen_frames\":" << held_clamp_status.release_depen_frames.load() << ",\"release_overlap_unresolved\":" << held_clamp_status.release_overlap_unresolved.load() << ",\"drawn_hand_gap_m\":" << held_clamp_status.drawn_hand_gap_m.load() << ",\"layer_at_release\":" << held_clamp_status.layer_at_release.load() << ",\"forced_drops\":" << held_clamp_status.forced_drops.load() << ",\"releases\":" << held_clamp_status.releases.load() << ",\"layer_reasserts\":" << d2vr::NativeHeldObject::layers_reasserted.load() << ",\"depen_writes\":" << native_grab.depen_writes_.load() << ",\"depen_rejected\":" << native_grab.depen_rejected_.load() << "}" << ",\"barrel_aim\":{\"ok\":" << barrel_ok.load() << ",\"bad_frame\":" << barrel_bad_frame.load() << ",\"no_model\":" << barrel_no_model.load() << ",\"gun_item_frames\":" << gun_item_frames.load() << ",\"name_miss_frames\":" << gun_name_miss_frames.load() << "},\"gadget_aim\":{\"enabled\":" << (gadget_hand_aim_enabled?"true":"false") << ",\"placement\":[" << d2vr::NativeGadgetAim::placement_calls.load() << ',' << d2vr::NativeGadgetAim::placement_swapped.load() << "],\"throw_hit\":[" << d2vr::NativeGadgetAim::throw_calls.load() << ',' << d2vr::NativeGadgetAim::throw_swapped.load() << "],\"stale\":" << d2vr::NativeGadgetAim::stale.load() << ",\"bad_pointer\":" << d2vr::NativeGadgetAim::bad_pointer.load() << ",\"restore_skipped\":" << d2vr::NativeGadgetAim::restore_skipped.load() << ",\"palm\":" << d2vr::NativeGadgetAim::palm_placements.load() << ",\"left_gadget\":" << (left_gadget.load()?"true":"false") << "}"
                << ",\"grenade_throw\":{\"enabled\":" << (grenade_hand_throw_enabled?"true":"false") << ",\"calls\":" << d2vr::NativeGrenadeThrow::calls.load() << ",\"rewritten\":" << d2vr::NativeGrenadeThrow::rewritten.load() << ",\"not_grenade\":" << d2vr::NativeGrenadeThrow::not_grenade.load() << ",\"no_gesture\":" << d2vr::NativeGrenadeThrow::no_gesture.load() << ",\"faults\":" << d2vr::NativeGrenadeThrow::faults.load() << ",\"last_speed\":" << d2vr::NativeGrenadeThrow::last_speed.load() << "}"
@@ -7834,7 +7943,7 @@ static void publish_native_hud_messages(UINT64 tick) noexcept {
         for(const char* path:{"_tutorialMessage","_informationMessage"}) {
             const auto geometry=d2vr::NativeHudArtProbe::probe(read_self,image_base,owner,native_prompt_probe.native_api(),false,path);
             if(!geometry.valid || !geometry.visible || !geometry.display_node || (geometry.fields&31)!=31) continue;
-            if(d2vr::NativeHudChildDraw::publish(d2vr::NativeHudChildKind::prompt,geometry,geometry.display_node,
+            if(d2vr::NativeHudChildDraw::publish(d2vr::NativeHudChildKind::tutorial,geometry,geometry.display_node,
                 native_art_pose_epoch.load(),tick)) {native_art_hud_file=geometry.file;++native_message_publishes;}
         }
     } catch(...) {}
@@ -11437,7 +11546,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
                 } catch(...) {return false;}
             };
         }
-        ui_dump_requested=fs::exists(root/L"build"/L"ui-dump");ui_dump_state.clear();left_aim_wanted=false;early_wrist_owner.reset();vitals_file=0;next_vitals_probe=0;wrist_early_publications=0;world_prompt_frames=0;prompt_shows=prompt_hides=takedown_flips=npc_blade_contacts=0;offered_choke_spawn=0;offered_choke_tick=0;prompt_anchor_fallbacks=prompt_guard_skips=0;native_message_publishes=0;d2vr::NativeInteractionAim::melee_enabled_=true;d2vr::NativeInteractionAim::impact_enabled_=true;d2vr::NativeImpactFx::reset();d2vr::NativeInteractionAim::impact_played_=0;d2vr::NativeInteractionAim::impact_skipped_=0;d2vr::NativeInteractionAim::melee_applied_=0;d2vr::NativeInteractionAim::melee_rejected_=0;d2vr::NativeInteractionAim::melee_faults_=0;for(auto& w:d2vr::NativeInteractionAim::melee_why_) w=0;for(auto& w:d2vr::NativeInteractionAim::stealth_reject_) w=0;for(auto& w:d2vr::NativeInteractionAim::stealth_awareness_) w=0;d2vr::NativeInteractionAim::stealth_slow_aware_drops_=0;d2vr::NativeInteractionAim::stealth_slow_unheld_drops_=0;slow_reject_latch=d2vr::SlowRejectLatch{};for(auto& w:d2vr::NativeInteractionAim::hit_height_) w=0;ga_offered_frames=ga_offered_swings=0;{std::error_code ec;fs::remove(output_directory/L"native-combat.csv",ec);} // the DLL outlives sessions
+        ui_dump_requested=fs::exists(root/L"build"/L"ui-dump");ui_dump_state.clear();left_aim_wanted=false;early_wrist_owner.reset();vitals_file=0;next_vitals_probe=0;wrist_early_publications=0;world_prompt_frames=0;prompt_shows=prompt_hides=takedown_flips=npc_blade_contacts=0;offered_choke_spawn=0;offered_choke_tick=0;prompt_anchor_fallbacks=prompt_guard_skips=0;native_message_publishes=0;cure_prompt_frames=0;cure_prompt_state=0;d2vr::NativeInteractionAim::melee_enabled_=true;d2vr::NativeInteractionAim::impact_enabled_=true;d2vr::NativeImpactFx::reset();d2vr::NativeInteractionAim::impact_played_=0;d2vr::NativeInteractionAim::impact_skipped_=0;d2vr::NativeInteractionAim::melee_applied_=0;d2vr::NativeInteractionAim::melee_rejected_=0;d2vr::NativeInteractionAim::melee_faults_=0;for(auto& w:d2vr::NativeInteractionAim::melee_why_) w=0;for(auto& w:d2vr::NativeInteractionAim::stealth_reject_) w=0;for(auto& w:d2vr::NativeInteractionAim::stealth_awareness_) w=0;d2vr::NativeInteractionAim::stealth_slow_aware_drops_=0;d2vr::NativeInteractionAim::stealth_slow_unheld_drops_=0;slow_reject_latch=d2vr::SlowRejectLatch{};for(auto& w:d2vr::NativeInteractionAim::hit_height_) w=0;ga_offered_frames=ga_offered_swings=0;{std::error_code ec;fs::remove(output_directory/L"native-combat.csv",ec);} // the DLL outlives sessions
         if(fs::exists(root/L"build"/L"hud-node-census")) {
             hud_node_census_path=output/L"hud-node-census.csv";
             d2vr::NativeHudChildDraw::census=&hud_node_census;
