@@ -9,6 +9,15 @@ int main(){
     static_assert(CutscenePolicy::entry_grace_frames==30,"entry grace");
     static_assert(CutscenePolicy::tolerated_misses==2,"Ruling 9: two held misses, the third falls back");
     static_assert(cinematic_logic_mask==32,"Cinematic is exact mask 32");
+    {   // v676 cutscene avatar: the game's animation owns the arms and the body stays rendered (the control rule); only the
+        // hide knob hides the avatar, and the v643 tracked knob wins over both
+        auto a=cutscene_avatar_policy(false,true,false);assert(!a.native_animation && !a.hidden);
+        a=cutscene_avatar_policy(false,true,true);assert(!a.native_animation && !a.hidden);
+        a=cutscene_avatar_policy(true,true,false);assert(a.native_animation && !a.hidden); // default: the cutscene's arms and body visible
+        a=cutscene_avatar_policy(true,true,true);assert(a.native_animation && a.hidden);   // build/hide-cutscene-avatar
+        a=cutscene_avatar_policy(true,false,false);assert(!a.native_animation && !a.hidden);
+        a=cutscene_avatar_policy(true,false,true);assert(!a.native_animation && !a.hidden); // build/cutscene-avatar (tracked hands)
+    }
     {CutscenePolicy p; // exact_32_complete_pair_immersive
      assert(p.immersive(good(),CutsceneMode::vr_comfort,false) && p.reason()==CutsceneFallback::none && p.active() && !p.pending() && p.cutscenes()==1);
      assert(p.immersive(good(),CutsceneMode::vr_full,false));}

@@ -125,7 +125,7 @@ In menus and while the VR settings panel is open the desktop window shows the no
   A fine trim, if ever needed: `%LOCALAPPDATA%\DishonoredVR\build\aim-offset` with "yaw pitch" in degrees (left, up).
 - While the pistol or crossbow is drawn, holding the sword in front does not block (the game would put the gun away to block).
   Put the gun away to block again.
-- Use prompts ("Take", "Open", "Eat") appear beside the hand that points at the object, left or right. Kill/choke takedown prompts float above the guard (at head height when you are close). Messages without a target appear on the HUD screen below your gaze.
+- Use prompts ("Take", "Open", "Eat") appear beside the hand that points at the object, left or right. Kill/choke takedown prompts float above the guard (at head height when you are close). Messages without a target appear on the HUD screen below your gaze; script messages such as "Press RB to inject counter-serum" also appear ahead of you, so the Mission 3 cure is readable in VR.
 - Health and mana sit in the top-left corner of the HUD screen, ammo just below. They are also a small watch on the back of each wrist: turn the back of the wrist toward your face.
 - Journal (objectives, notes): touch your left temple with either hand and squeeze grip. Holding Menu still works.
 - Attacks need a real arm swing; turning only the wrist never attacks. A fast blade that touches an enemy hits at that moment (the game's own damage, reactions and alerts); a takedown from behind stays the game's assassination.
@@ -135,6 +135,9 @@ In menus and while the VR settings panel is open the desktop window shows the no
   interaction keeps that hand until the grip is released. Pointing at nothing, the grip uses what you look at (including
   carrying a body, but excluding Talk in the v548 test candidate). A hand too far from you to reach anything, such as one held at the floor while you stand, also uses
   what you look at.
+- Loot a body: aim at it and squeeze grip while the game offers its **Loot** action (a body that still has loot, such as the
+  note on Vasco's belt). The body is searched and a note opens in your left hand. A body with nothing left to loot is never
+  put on your shoulder by a grip; grab it with a full fist to drag or carry it by hand.
 - Carrying a body over your shoulder: the view does not follow your head into the body when you lean toward that shoulder.
 - To hold something physically, make a full fist (grip + trigger): a loose prop, a bottle, a body by a limb. Release the grip to
   drop it, or release while swinging to throw. A fist on a bottle, glass or loot the hand points at takes it the game's own way
@@ -185,6 +188,9 @@ Weapons are held like real objects: a weapon stays in your hand only while you s
 - Menus with tabs (Options > Controls, Visuals, Gameplay): each grip squeeze changes the tab once. The right grip goes
   to the next tab, the left grip to the previous one (and also re-places the menu).
 - Cutscenes play in 3D around you (VR comfort by default) or on a large screen in front of you (Theater); see the Cutscenes setting.
+  The cutscene's own arms and body stay visible, animated by the game; your controllers do not move the hands while it plays
+  (the `build/cutscene-avatar` knob restores the older tracked hands/body, `build/hide-cutscene-avatar` hides the avatar again, and
+  `build/no-cutscene-body` leaves the game's own body material alone).
 - Hands and equipped items remain tracked during ordinary sword attacks and
   blocking. Arm and forearm geometry is hidden; full arm tracking and its
   calibration are deferred. Verified authored full-body actions retain native

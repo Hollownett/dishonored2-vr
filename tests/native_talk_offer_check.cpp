@@ -60,6 +60,17 @@ struct Fixture {
 
 int main() {
     {
+        Fixture fixture;
+        fixture.memory.put(Fixture::sensor+0xa8,Fixture::declaration+d2vr::native_talk_offer_detail::loot_offset);
+        fixture.memory.put(Fixture::sensor+0xb0,Fixture::declaration+0x70);
+        auto loot=d2vr::native_talk_offer(fixture.memory,Fixture::base,Fixture::sensor,Fixture::player,Fixture::component,
+            Fixture::generation,Fixture::owner,Fixture::spawn,d2vr::native_talk_offer_detail::loot_offset);
+        assert(loot && !fixture.receipt());
+        assert(d2vr::native_talk_offer_current(fixture.memory,Fixture::base,*loot,d2vr::native_talk_offer_detail::loot_offset));
+        fixture.memory.put(Fixture::sensor+0xa8,Fixture::declaration+0x70);
+        assert(!d2vr::native_talk_offer_current(fixture.memory,Fixture::base,*loot,d2vr::native_talk_offer_detail::loot_offset));
+    }
+    {
         Fixture fixture;const auto receipt=fixture.receipt();assert(receipt);
         assert(d2vr::native_talk_offer_current(fixture.memory,Fixture::base,*receipt));
         fixture.memory.put(Fixture::sensor+0xb0,Fixture::declaration+d2vr::native_talk_offer_detail::talk_offset);

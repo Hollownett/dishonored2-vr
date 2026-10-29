@@ -32,7 +32,8 @@ std::uint64_t __fastcall get(const void*,std::uint64_t,const char* name,void*,co
         if(std::strcmp(name,"ty")==0)return 1080;
         return 0;
     }
-    assert(current_path=="_interactionWindow" || current_path=="_masterHUD");
+    assert(current_path=="_interactionWindow" || current_path=="_masterHUD" ||
+        current_path=="_tutorialMessage" || current_path=="_informationMessage");
     if(std::strcmp(name,"width")==0)return 800;
     if(std::strcmp(name,"height")==0)return 240;
     if(std::strcmp(name,"visible")==0)return base+0x2424049;
@@ -51,6 +52,11 @@ int main(){
     auto result=NativeHudArtProbe::probe(read,base,owner,api,false);
     assert(result.valid && result.display_node==node_address && result.visible && result.width==400 && result.height==120 && result.tx==960 && result.ty==540 && result.fields==2047);
     result=NativeHudArtProbe::probe(read,base,owner,api,true);assert(result.valid && result.visible && current_path=="_masterHUD.transform.concatenatedMatrix");
+    // v677: scripted HUD messages use the same verified probe with an explicit HUDScene path.
+    result=NativeHudArtProbe::probe(read,base,owner,api,false,"_tutorialMessage");
+    assert(result.valid && result.visible && current_path=="_tutorialMessage.transform.concatenatedMatrix");
+    result=NativeHudArtProbe::probe(read,base,owner,api,false,"_informationMessage");
+    assert(result.valid && result.visible && current_path=="_informationMessage.transform.concatenatedMatrix");
     bad_matrix=true;result=NativeHudArtProbe::probe(read,base,owner,api,false);assert(!result.valid && result.status==5);
     fixture_value[0]=std::byte{7};assert(!NativeHudArtProbe::display_node(read,owner,api,"_interactionWindow"));
     fixture_value[0]=std::byte{0x24};const std::uintptr_t cycle=node_address;std::memcpy(fixture_node.data()+0x80,&cycle,8);

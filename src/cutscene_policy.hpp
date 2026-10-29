@@ -28,6 +28,16 @@ inline const char* to_string(CutsceneFallback reason) noexcept {
 
 inline constexpr unsigned cinematic_logic_mask=32;
 
+// The cutscene avatar (v676). A cutscene locks the controls, so its own animation owns the player's arms and the mod must not upload
+// tracked hands there. The game also draws the player's body and arms; the mod leaves that render copy alone, so the player sees the
+// cutscene's arms and body. Only build/hide-cutscene-avatar moves it out of view again (v672's hiding); the tracked knob
+// (build/cutscene-avatar, native_animation=false) is the v643 mode, where the player moves the hands and the body follows them.
+struct CutsceneAvatarPolicy {bool native_animation;bool hidden;};
+inline CutsceneAvatarPolicy cutscene_avatar_policy(bool cutscene,bool native_animation,bool hide_knob) noexcept {
+    if(!cutscene || !native_animation) return {false,false};
+    return {true,hide_knob};
+}
+
 struct CutsceneFrame {
     unsigned logic;        // game_logic_mask() at this Present
     bool paired_complete;  // a complete native eye pair (both eyes' Begins matched, the left image copied, both layer views recorded)

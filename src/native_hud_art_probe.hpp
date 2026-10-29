@@ -1,5 +1,6 @@
 #pragma once
 #include "native_interaction_prompt.hpp"
+#include <string>
 
 namespace d2vr {
 // Geometry evidence only. These bounds are not claiming rectangles: Flash
@@ -71,17 +72,19 @@ public:
     // Call only on the verified shared native UI Call observer. The public
     // getters are proven in HUDScene m5907/m5910. Dotted paths are parsed by
     // 29A60 using literal separator2E. No member pointer survives this call.
-    static NativeHudArtGeometry probe(Read read,std::uintptr_t base,const NativePromptCall& owner,const Api& api,bool master) {
+    // path_override selects another HUDScene element (v677: _tutorialMessage and
+    // _informationMessage, so scripted on-screen messages can be world art).
+    static NativeHudArtGeometry probe(Read read,std::uintptr_t base,const NativePromptCall& owner,const Api& api,bool master,const char* path_override=nullptr) {
         NativeHudArtGeometry out{};out.file=owner.file;out.iggy=owner.iggy;
         if(!read || !api.construct || !api.destroy || !api.get || !wrist_hud_file_owned(read,base,owner.file)) return out;
-        const char* path=master?"_masterHUD":"_interactionWindow";
+        const char* path=path_override?path_override:(master?"_masterHUD":"_interactionWindow");
         out.display_node=display_node(read,owner,api,path);
         const auto local=NativeInteractionPrompt::probe(read,base,owner,api,path);
         out.x=local.x;out.y=local.y;out.width=local.width;out.height=local.height;out.visible=local.visible;
         out.fields=local.fields;out.status=local.status;if(!local.valid)return out;
-        const char* matrix=master?"_masterHUD.transform.concatenatedMatrix":"_interactionWindow.transform.concatenatedMatrix";
+        const std::string matrix=std::string(path)+".transform.concatenatedMatrix";
         double* values[]{&out.a,&out.b,&out.c,&out.d,&out.tx,&out.ty};const char* names[]{"a","b","c","d","tx","ty"};
-        for(unsigned i=0;i<6;++i){const auto v=number(read,base,owner,api,matrix,names[i],out.status);if(!v)return out;*values[i]=*v;out.fields|=1u<<(i+5);}
+        for(unsigned i=0;i<6;++i){const auto v=number(read,base,owner,api,matrix.c_str(),names[i],out.status);if(!v)return out;*values[i]=*v;out.fields|=1u<<(i+5);}
         out.valid=out.width>0 && out.height>0 && std::abs(out.a*out.d-out.b*out.c)>1e-12;
         return out;
     }

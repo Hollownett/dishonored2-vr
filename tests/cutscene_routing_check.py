@@ -37,7 +37,7 @@ def check(probe: str, xr: str) -> None:
     assert probe.count("render_scene_frame()") == 5, probe.count("render_scene_frame()")  # the definition + 4 sites
     # the definition and render_scene_frame(); Task 6: prepare_head_view's authored scene camera, view decision, provisional origin and
     # comfort-meter skip, and the present thread's cutscene vignette
-    assert probe.count("cutscene_scene_render()") == 5, probe.count("cutscene_scene_render()")  # definition, render_scene_frame, the per-frame latch, the vignette, the letterbox draw gate (Track T C3)
+    assert probe.count("cutscene_scene_render()") == 8, probe.count("cutscene_scene_render()")  # definition, its comment, render_scene_frame, hands_scene, the per-frame latch, the vignette, the arm refresh, the letterbox draw gate (Track T C3)
     assert probe.count("cutscene_gates_allowed=") == 2  # the present thread + StartProbe reset
     stereo = fn(probe, "void sample_stereo(IDXGISwapChain* chain,UINT64 number,const DXGI_SWAP_CHAIN_DESC& desc) {")
     assert "if(xr_requested && !render_scene_frame() && !cinematic_probe_keeps_stereo()) {" in stereo
@@ -87,11 +87,32 @@ def check(probe: str, xr: str) -> None:
                  "if(game_logic_mask()==2 && physical_grab_requested && per_frame",                    # physical grab
                  "if(game_logic_mask()==2 && controller_aim_requested && per_frame) {",               # controller aim
                  "if(game_logic_mask()==2 && (native_camera_trace_requested || native_left_aim_requested || native_shot_aim_installed || native_crosshair_installed) && per_frame) {",
-                 "if(render_world_scene() && (tracked_arms_requested || native_weapon_attachment_requested) && per_frame) {",  # arms, attachment
+                 "if(hands_scene() && (tracked_arms_requested || native_weapon_attachment_requested) && per_frame) {",  # arms, attachment (v643: tracked hands only in a near cutscene)
                  "if(listener && game_logic_mask()==2 && game_xr->state==XR_SESSION_STATE_FOCUSED &&",  # the native listener is left alone under 32
                  "const bool scripted_logic=game_logic_mask()==2 || cutscene_step.kind!=d2vr::CutsceneViewKind::none;"):  # the G1 clock (+ the cutscene view)
         assert gate in head, gate
-    assert head.count("render_world_scene()") == 3, head.count("render_world_scene()")  # the two arm/attachment sites + the left-aim hand-off
+    assert head.count("render_world_scene()") == 2, head.count("render_world_scene()")  # the left-aim hand-off and the raw-gameplay side-effect gates (the arm/attachment block is the v643 hands_scene one)
+    # v676: a cutscene keeps the game's controls (its animation owns the arms and no tracked palette is uploaded) and leaves the
+    # player's own rendered body/arms visible. Only the wheel or build/hide-cutscene-avatar moves the render copy out of view.
+    upload = fn(probe, "void invoke_arm_upload(void* model,const void* source,UINT count,FullHandUploadWork* contact) {")
+    assert "static bool legacy_cutscene_hands=true;" in probe and "static bool hide_cutscene_avatar=false;" in probe
+    assert "const auto cutscene_avatar=d2vr::cutscene_avatar_policy(upload_logic==d2vr::cinematic_logic_mask,legacy_cutscene_hands,hide_cutscene_avatar);" in upload
+    assert "(upload_logic==256 || cutscene_avatar.native_animation);" in upload
+    assert "const bool hide_avatar=upload_logic==256 || cutscene_avatar.hidden;" in upload
+    assert "bool full=full_body_requested && !wheel" in upload  # a cutscene never runs the tracked full body
+    assert "if(wheel && body_source) {" in upload and upload.count("if(hide_avatar) {") == 2
+    assert upload.count("d2vr::rig::hide_wheel_avatar(") == 2  # body + each arm, both behind hide_avatar
+    assert "if(hide_avatar) { // the wheel, or a cutscene with build/hide-cutscene-avatar" in upload
+    assert "if(upload_logic==d2vr::cinematic_logic_mask && count==20) {" in upload
+    # v676: the cutscene keeps the owned visible-body material on with the game's native animation; the restore waits for gameplay,
+    # the hide knob or teardown, and the full-body solver still runs only for gameplay.
+    assert "const bool cutscene_body=cutscene_avatar.native_animation && !cutscene_avatar.hidden && cutscene_body_material_enabled;" in upload
+    assert "const bool keep_cutscene_body=cutscene_body && !full_body_stopping.load();" in upload
+    assert "if((full || keep_cutscene_body) && count==20) try {" in upload
+    assert "else if(!keep_cutscene_body && current && !full &&" in upload
+    assert "if(full) if(const auto posed=full_body.body(" in upload  # a cutscene never runs the tracked full body
+    assert "if(cutscene_body)++cutscene_body_material_visible;" in upload
+    assert 'cutscene_body_material_enabled=!fs::exists(root/L"build"/L"no-cutscene-body");' in probe
     # --- the present block: classification, hold, the present call
     block = probe[probe.index("const auto gameplay=game_logic_mask()==2;\n                        const bool cutscene_logic="):]
     block = block[:block.index("if(alternate_on()) {\n                                if(game_xr->alternate_error)")]
@@ -147,8 +168,9 @@ def check(probe: str, xr: str) -> None:
     assert 'cutscene_knob_off=fs::exists(build/L"no-vr-cutscenes",ignored);' in reader and 'std::ifstream knob(build/L"cutscene-mode");' in reader
     assert "cutscene_mode_override=parsed?static_cast<int>(*parsed):-1;" in reader and "d2vr::parse_cutscene_mode(text)" in reader
     assert probe.count("read_cutscene_knobs(") == 3  # the definition, the worker, StartProbe
+    assert 'hide_cutscene_avatar=fs::exists(root/L"build"/L"hide-cutscene-avatar");' in probe
     status = fn(probe, "std::string cutscene_status_json() {")
-    for field in ("mode", "immersive_frames", "theater_frames", "last_fallback", "cutscenes"):
+    for field in ("mode", "immersive_frames", "theater_frames", "last_fallback", "cutscenes", "avatar"):
         assert f'\\"{field}\\":' in status, field
     assert '<<",\\"cutscene\\":"<<cutscene_status_json()<<\'}\';return o.str();}()' in probe  # inside scripted_view
     assert "cutscene_policy=d2vr::CutscenePolicy{};cutscene_gates_allowed=false;" in probe  # StartProbe

@@ -28,7 +28,8 @@ struct NativeActionCamera {
     // The arms follow the camera to the native animation only for a scripted scene (takedown, finisher, mantle); another native camera
     // mode (a slide, a landing, a hit or block reaction: user, headset v636) keeps the tracked hands, and so does a cutscene (user, headset
     // v642: "VR cutscenes now have camera but also should preserve avatar body and player hands control"). legacy: every authored camera;
-    // legacy_cutscene (build/legacy-cutscene-hands): a cutscene hands both arms over, as before v643.
+    // legacy_cutscene (build/cutscene-avatar off): a cutscene keeps the game's animation for both arms and its own body on screen
+    // (v676); the controls stay locked, so the mod never uploads tracked hands there.
     bool takes_hands(bool authored_camera,bool cutscene,bool legacy=false,bool legacy_cutscene=false) const noexcept {
         return authored_camera && (scripted || (cutscene && legacy_cutscene) || legacy);
     }
