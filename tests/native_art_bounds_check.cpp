@@ -17,9 +17,9 @@ int main(){
     ComPtr<ID3D11ShaderResourceView> original_srv;assert(SUCCEEDED(device->CreateShaderResourceView(source.Get(),nullptr,&original_srv)));
     auto* bound=original_srv.Get();context->CSSetShaderResources(0,1,&bound);
     std::vector<unsigned char> pixels(width*height*4);
-    const auto upload=[&](UINT left,UINT top,UINT right,UINT bottom){
+    const auto upload=[&](UINT left,UINT top,UINT right,UINT bottom,unsigned char alpha=255){
         std::fill(pixels.begin(),pixels.end(),static_cast<unsigned char>(0));
-        for(UINT y=top;y<bottom;++y)for(UINT x=left;x<right;++x){const auto index=(y*width+x)*4;pixels[index]=77;pixels[index+3]=1;}
+        for(UINT y=top;y<bottom;++y)for(UINT x=left;x<right;++x){const auto index=(y*width+x)*4;pixels[index]=77;pixels[index+3]=alpha;}
         context->UpdateSubresource(source.Get(),0,nullptr,pixels.data(),width*4,0);
     };
     d2vr::NativeArtBounds bounds;
@@ -57,7 +57,7 @@ int main(){
         std::array<unsigned char,4> pixel{};std::memcpy(pixel.data(),static_cast<unsigned char*>(map.pData)+y*map.RowPitch+x*4,4);context->Unmap(staging.Get(),0);return pixel;
     };
     assert(pixels_at(source.Get(),2,3)[3]==0); // original remains last uploaded empty image
-    for(const auto& result:results)if(result->metadata.serial==11){assert(pixels_at(result->texture.Get(),2,3)[3]==1 && pixels_at(result->texture.Get(),64,45)[3]==0);}
+    for(const auto& result:results)if(result->metadata.serial==11){assert(pixels_at(result->texture.Get(),2,3)[3]==255 && pixels_at(result->texture.Get(),64,45)[3]==0);}
     // Enqueue the core's compact copy, release only that lease, and reuse the
     // SAME full-size ring surface without waiting between these operations.
     unsigned first_result=3;for(unsigned i=0;i<3;++i)if(results[i]->metadata.serial==11)first_result=i;
@@ -76,11 +76,18 @@ int main(){
     assert(SUCCEEDED(context->Map(compact_staging.Get(),0,D3D11_MAP_READ,0,&compact_map)));
     for(UINT y=0;y<9;++y)for(UINT x=0;x<7;++x){
         const auto* p=static_cast<unsigned char*>(compact_map.pData)+y*compact_map.RowPitch+x*4;
-        assert(p[0]==77 && p[3]==1); // earlier crop survives subsequent ring copy
+        assert(p[0]==77 && p[3]==255); // earlier crop survives subsequent ring copy
     }
     context->Unmap(compact_staging.Get(),0);
-    assert(pixels_at(moved->texture.Get(),2,3)[3]==0 && pixels_at(moved->texture.Get(),20,10)[3]==1);
+    assert(pixels_at(moved->texture.Get(),2,3)[3]==0 && pixels_at(moved->texture.Get(),20,10)[3]==255);
     auto invalid=a;invalid.owner=0;assert(!bounds.queue(source.Get(),invalid));
     invalid=a;invalid.serial=0;assert(!bounds.queue(source.Get(),invalid));
-    std::cout<<"PASS: GPU native alpha bounds, matched pixels, compact-copy/lease-release ordering, moving crops, backpressure and freshness\n";
+    // A near-transparent residual (alpha 1-3) is not artwork: the 2026-10-29 blank
+    // tutorial capture must report empty, or it suppresses the readable hint.
+    results={};moved.reset();
+    upload(3,3,6,6,1);auto faint=a;faint.serial=14;assert(bounds.queue(source.Get(),faint));context->Flush();
+    d2vr::NativeArtBounds::Lease faint_result;
+    for(unsigned attempts=0;attempts<5000 && !faint_result;++attempts){faint_result=bounds.poll();if(!faint_result)Sleep(1);}
+    assert(faint_result && faint_result->metadata.serial==14 && faint_result->empty);
+    std::cout<<"PASS: GPU native alpha bounds, matched pixels, compact-copy/lease-release ordering, moving crops, backpressure, freshness and faint-alpha rejection\n";
 }

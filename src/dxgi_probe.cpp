@@ -175,6 +175,7 @@
 #include <vector>
 #include <deque>
 #include <cctype>
+#include <cstring>
 
 using Microsoft::WRL::ComPtr;
 namespace fs=std::filesystem;
@@ -3210,7 +3211,13 @@ static bool entity_name_has(std::uintptr_t entity,const char* needle) noexcept {
     } catch(...) {return false;}
 }
 static bool is_hypatia_entity(std::uintptr_t entity) noexcept {
+    // The authored display name is "Alexandria Hypatia"; the spawned character's own
+    // entity/decl name is grimalex (models/characters/female/grimalex). Both name the
+    // same mission NPC, and the game's own label uses the display name. The earlier
+    // check only matched the display name, so a spawned grimalex could be reported as
+    // "no Hypatia" while the game offered her cure.
     return entity_name_has(entity,"hypatia") || entity_name_has(entity,"alexandria") ||
+        (npc_entity(entity) && entity_name_has(entity,"grimalex")) ||
         entity_name_has(entity,"crown_killer") || entity_name_has(entity,"crownkiller");
 }
 // Slow, round-robin registry search for Hypatia within conversation distance. The native prompts only exist
@@ -3272,18 +3279,41 @@ static bool player_has_cure_serum() noexcept {
             }
         }
         if(!inventory) return false;
+        const auto contains=[](const char* text)->bool {
+            return std::strstr(text,"syringe_cure") || std::strstr(text,"pickup_is_syringe_cure") ||
+                std::strstr(text,"counter") || std::strstr(text,"serum") ||
+                (std::strstr(text,"grimalex") && std::strstr(text,"syringe") && !std::strstr(text,"neutral"));
+        };
+        const auto name_matches=[&](std::uintptr_t address) noexcept {
+            if(!address) return false;
+            char buffer[256]{};
+            // Most of these fields are idStr pointers; a few carry the characters inline.
+            std::uintptr_t inner{};
+            if(read_self(address,&inner,8) && inner && read_self(inner,buffer,sizeof(buffer)-1)) {
+                buffer[sizeof(buffer)-1]=0;
+                for(char* p=buffer;*p;++p) if(*p>='A' && *p<='Z') *p=static_cast<char>(*p-'A'+'a');
+                if(contains(buffer)) return true;
+            }
+            std::memset(buffer,0,sizeof(buffer));
+            if(read_self(address,buffer,sizeof(buffer)-1)) {
+                buffer[sizeof(buffer)-1]=0;
+                for(char* p=buffer;*p;++p) if(*p>='A' && *p<='Z') *p=static_cast<char>(*p-'A'+'a');
+                return contains(buffer);
+            }
+            return false;
+        };
         const auto is_cure=[&](std::uintptr_t item)->bool {
             if(!item) return false;
             const auto declaration=value<std::uintptr_t>(read_self,item);
             if(!declaration || !typed(read_self,image_base,*declaration,0x1b9ea48)) return false;
-            const auto name=value<std::uintptr_t>(read_self,*declaration+0x48);
-            char buffer[256]{};
-            if(!name || !read_self(*name,buffer,sizeof(buffer)-1)) return false;
-            buffer[sizeof(buffer)-1]=0;
-            for(char* p=buffer;*p;++p) if(*p>='A' && *p<='Z') *p=static_cast<char>(*p-'A'+'a');
-            return std::strstr(buffer,"syringe_cure") || std::strstr(buffer,"pickup_is_syringe_cure") ||
-                std::strstr(buffer,"counter") || std::strstr(buffer,"serum") ||
-                (std::strstr(buffer,"grimalex") && std::strstr(buffer,"/syringe") && !std::strstr(buffer,"neutral"));
+            // The inventory item declaration path (grimalex/syringe.inventoryitem) and its
+            // title id (Pickup_IS_syringe_cure) live in different fields; check both, then
+            // the item instance's own authored name. The old +0x48-only read could miss a
+            // real filled counter-serum.
+            for(const auto offset:{0x20ull,0x38ull,0x48ull,0x50ull})
+                if(name_matches(*declaration+offset)) return true;
+            if(name_matches(item+0x20) || name_matches(item+0x28)) return true;
+            return false;
         };
         const auto entries=list(read_self,inventory+0x38,4096);
         if(!entries) return false;
@@ -4721,9 +4751,16 @@ static std::atomic<UINT64> native_message_publishes{};
 // from the game's own cure_hypatia.tutorial decl, or explains the prerequisite/state when the cure is impossible.
 static std::atomic<UINT64> cure_prompt_frames{};
 static std::atomic<UINT64> cure_r1_frames{};
-static std::atomic<unsigned> cure_prompt_state{}; // 0 none, 1 dead, 2 live offer, 4 pre-offer stealth
+static std::atomic<unsigned> cure_prompt_state{}; // 0 none, 1 dead, 2 live offer, 4 pre-offer stealth, 5 native message
 static std::atomic<std::uintptr_t> cure_nearby_entity{};
 static std::atomic<bool> cure_serum_detected{};
+// v686: the game's own tutorial message is the cure proposal in flat mode. The
+// element can be "visible" while its alpha is still 0 (fade-in/out), and a blank
+// capture must never suppress the readable fallback. This is the live message
+// state from the verified native UI thread.
+static std::atomic<UINT64> native_cure_message_tick{},native_cure_message_frames{},cure_native_message_frames{};
+static std::atomic<double> native_cure_message_alpha{};static std::atomic<bool> native_cure_message_visible{};
+static std::atomic<bool> native_tutorial_art_content{};
 struct TakedownPrompt {d2vr::NativeInteractionTargetIdentity identity;d2vr::Vec3 world;};
 static std::optional<TakedownPrompt> takedown_prompt(UINT64 now) noexcept {
     try {
@@ -4865,20 +4902,32 @@ static void publish_cure_hint(UINT64 now,ID3D11DeviceContext* context) noexcept 
         if(!offer_owner) if(const auto& art=native_hud_compact_art[0]; art.child.retained_entry) offer_owner=art.child.retained_entry->owner;
         const std::uintptr_t owner=offer_owner?offer_owner:nearby_hypatia(now);
         cure_nearby_entity=owner;
-        if(!owner || !is_hypatia_entity(owner)) {cure_nearby_entity=0;cure_prompt_state=0;return;}
+        // The cure is the game's non-lethal choke. The private-view choke scope normally
+        // narrows the shipped 3 m gate to 2.25 m; for the authored cure NPC keep the full
+        // native reach while she is alive. Only near Hypatia, so ordinary chokes keep their
+        // tuning, and restore it as soon as she is no longer the nearest cure target.
+        static float last_factor=.75f;
+        const auto set_choke_factor=[&](float wanted) {
+            if(wanted!=last_factor) {last_factor=wanted;d2vr::NativeChokeDistanceScope::process_owner().factor(wanted);}
+        };
+        if(!owner || !is_hypatia_entity(owner)) {set_choke_factor(.75f);cure_nearby_entity=0;cure_prompt_state=0;return;}
         std::uint8_t flags{};
         const bool dead=read_self(owner+0xd1,&flags,1) && (flags&0x28);
+        set_choke_factor(dead?.75f:1.f);
         const bool serum=player_has_cure_serum();cure_serum_detected=serum;
+        const bool native_message=native_cure_message_visible.load() && now>=native_cure_message_tick.load() &&
+            now-native_cure_message_tick.load()<=500;
         const char* hand=choke_hand_published.load()==0?"LEFT ":"RIGHT ";
         std::string text;
         if(dead) text="Hypatia is dead - load a save before the fight";
         else if(!offer_owner) text=std::string("Sneak behind her and hold ")+hand+"grip to inject counter-serum";
         else text=std::string("Hold ")+hand+"grip to inject counter-serum";
-        cure_prompt_state=dead?1:!offer_owner?4:2;
+        cure_prompt_state=dead?1:native_message?5:!offer_owner?4:2;
+        if(cure_prompt_state.load()==5) ++cure_native_message_frames;
         // v685: the game's own tutorial message is the cure hint the user asked for ("just use the original
-        // from the game"). While that native message is on screen it owns the tutorial art; the English
-        // fallback card is published only when the map's own hint does not fire.
-        if(now>=native_tutorial_art_tick && now-native_tutorial_art_tick<=250) return;
+        // from the game"). v686: the element can be "visible" at alpha 0 and its capture can be blank; only
+        // real native ink may suppress the readable fallback (the hint is never deleted).
+        if(native_message && native_tutorial_art_content.load() && now>=native_tutorial_art_tick && now-native_tutorial_art_tick<=250) return;
         ComPtr<ID3D11Device> device;context->GetDevice(&device);
         auto* texture=cure_prompt_texture(device.Get(),text.c_str());
         if(!texture) return;
@@ -4914,6 +4963,7 @@ void publish_native_hud_art(UINT64 now) {
            game_xr->pose_epoch()!=result->metadata.epoch) continue;
         if(result->empty) {
             if(slot!=0 || !native_hud_prompt_hold.holds(now)) native_hud_compact_art[slot]={};
+            if(slot==11) native_tutorial_art_content=false;
             ++native_hud_art_empty;
             native_hud_art_empty_nodes[slot]=current.child.node;native_hud_art_retry_ticks[slot]=now+500;
             continue;
@@ -4970,6 +5020,7 @@ void publish_native_hud_art(UINT64 now) {
         const unsigned destination=slot==11?d2vr::tutorial_art_slot:wrist?(slot==3?0u:slot):slot>=4?slot-3:0u;
         const auto clear=[&]{game_xr->native_art_source(destination,wrist,nullptr,{},0,0,0);
             native_hud_next_scopes[slot]={};native_hud_next_ticks[slot]=0;
+            if(slot==11) native_tutorial_art_content=false;
             std::lock_guard<std::mutex> lock(native_hud_commit_mutex);native_hud_committed_scopes[slot]={};native_hud_committed_ticks[slot]=0;};
         // Prompt slot: one failed capture/readback/placement frame keeps the last good world art.
         const auto fail=[&]{
@@ -5126,7 +5177,7 @@ void publish_native_hud_art(UINT64 now) {
         const D3D11_BOX crop{0,0,0,desc.Width,desc.Height,1};
         if(game_xr->native_art_source(destination,wrist,compact.texture.Get(),crop,metadata.owner,metadata.epoch,metadata.tick,point,art_width)) {
             native_hud_next_scopes[slot]=compact.child;native_hud_next_ticks[slot]=metadata.tick;
-            if(destination==d2vr::tutorial_art_slot) native_tutorial_art_tick=now; // the game's own tutorial/information message
+            if(destination==d2vr::tutorial_art_slot) {native_tutorial_art_tick=now;native_tutorial_art_content=true;} // the game's own tutorial/information message
             if(slot==0) {native_hud_prompt_hold.good(now,point,art_width);++world_prompt_frames;
                 if(compact.child.retained_entry) {
                     static UINT64 next_placement_log{};static unsigned placement_rows{};
@@ -7958,6 +8009,11 @@ std::string feedback_status_json() {
            << ",\"cure_prompt_frames\":" << cure_prompt_frames.load()
            << ",\"cure_prompt_state\":" << cure_prompt_state.load()
            << ",\"cure_serum_detected\":" << (cure_serum_detected.load()?"true":"false")
+           << ",\"cure_native_message_frames\":" << cure_native_message_frames.load()
+           << ",\"native_cure_message\":{\"visible\":" << (native_cure_message_visible.load()?"true":"false")
+           << ",\"alpha\":" << native_cure_message_alpha.load()
+           << ",\"publishes\":" << native_cure_message_frames.load()
+           << ",\"art_content\":" << (native_tutorial_art_content.load()?"true":"false") << '}'
            << ",\"cure_r1_frames\":" << cure_r1_frames.load()
            << ",\"eye_art\":{\"failures\":" << (game_xr?game_xr->native_eye_art_failures:0)
            << ",\"rejects\":" << (game_xr?game_xr->native_eye_art_rejects:0)
@@ -8010,7 +8066,20 @@ static void publish_native_hud_messages(UINT64 tick) noexcept {
         const d2vr::NativePromptCall owner{drawn,iggy,drawn};
         for(const char* path:{"_tutorialMessage","_informationMessage"}) {
             const auto geometry=d2vr::NativeHudArtProbe::probe(read_self,image_base,owner,native_prompt_probe.native_api(),false,path);
-            if(!geometry.valid || !geometry.visible || !geometry.display_node || (geometry.fields&31)!=31) continue;
+            if(!geometry.valid || !geometry.visible || !geometry.display_node || (geometry.fields&31)!=31) {
+                if(std::strcmp(path,"_tutorialMessage")==0) native_cure_message_visible=false;
+                continue;
+            }
+            // The tutorial element stays "visible" through its whole fade. Its alpha is the
+            // game's own statement that the message is actually on screen; only then is it
+            // the cure proposal the flat player sees. A missing alpha (older movie) keeps the
+            // previous behaviour, but the captured-pixel check still gates the fallback.
+            const auto alpha=d2vr::NativeHudArtProbe::property(read_self,image_base,owner,native_prompt_probe.native_api(),path,"alpha");
+            if(alpha) native_cure_message_alpha=*alpha;
+            if(std::strcmp(path,"_tutorialMessage")==0) {
+                if(alpha && *alpha<.02) {native_cure_message_visible=false;continue;}
+                native_cure_message_visible=true;native_cure_message_tick=tick;++native_cure_message_frames;
+            }
             if(d2vr::NativeHudChildDraw::publish(d2vr::NativeHudChildKind::tutorial,geometry,geometry.display_node,
                 native_art_pose_epoch.load(),tick)) {native_art_hud_file=geometry.file;++native_message_publishes;}
         }
@@ -10792,7 +10861,7 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                 if(logic==2 && controls_focus && !input.menu_modifier && !x_wheel.wheel()) {
                                     const auto cure_entity=cure_nearby_entity.load();
                                     const auto cure_state=cure_prompt_state.load();
-                                    if(cure_entity && (cure_state==2 || cure_state==4)) {
+                                    if(cure_entity && (cure_state==2 || cure_state==4 || cure_state==5)) {
                                         const unsigned hand=choke_hand_published.load()&1u;
                                         (void)hand;
                                         if(raw.right_grip>.35f || raw.left_grip>.35f) {input.right_grip=1;++cure_r1_frames;}
@@ -11641,7 +11710,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
                 } catch(...) {return false;}
             };
         }
-        ui_dump_requested=fs::exists(root/L"build"/L"ui-dump");ui_dump_state.clear();left_aim_wanted=false;early_wrist_owner.reset();vitals_file=0;next_vitals_probe=0;wrist_early_publications=0;world_prompt_frames=0;prompt_shows=prompt_hides=takedown_flips=npc_blade_contacts=0;offered_choke_spawn=0;offered_choke_tick=0;prompt_anchor_fallbacks=prompt_guard_skips=0;native_message_publishes=0;cure_prompt_frames=0;cure_r1_frames=0;cure_prompt_state=0;cure_nearby_entity=0;cure_serum_detected=false;d2vr::NativeInteractionAim::melee_enabled_=true;d2vr::NativeInteractionAim::impact_enabled_=true;d2vr::NativeImpactFx::reset();d2vr::NativeInteractionAim::impact_played_=0;d2vr::NativeInteractionAim::impact_skipped_=0;d2vr::NativeInteractionAim::melee_applied_=0;d2vr::NativeInteractionAim::melee_rejected_=0;d2vr::NativeInteractionAim::melee_faults_=0;for(auto& w:d2vr::NativeInteractionAim::melee_why_) w=0;for(auto& w:d2vr::NativeInteractionAim::stealth_reject_) w=0;for(auto& w:d2vr::NativeInteractionAim::stealth_awareness_) w=0;d2vr::NativeInteractionAim::stealth_slow_aware_drops_=0;d2vr::NativeInteractionAim::stealth_slow_unheld_drops_=0;slow_reject_latch=d2vr::SlowRejectLatch{};for(auto& w:d2vr::NativeInteractionAim::hit_height_) w=0;ga_offered_frames=ga_offered_swings=0;{std::error_code ec;fs::remove(output_directory/L"native-combat.csv",ec);} // the DLL outlives sessions
+        ui_dump_requested=fs::exists(root/L"build"/L"ui-dump");ui_dump_state.clear();left_aim_wanted=false;early_wrist_owner.reset();vitals_file=0;next_vitals_probe=0;wrist_early_publications=0;world_prompt_frames=0;prompt_shows=prompt_hides=takedown_flips=npc_blade_contacts=0;offered_choke_spawn=0;offered_choke_tick=0;prompt_anchor_fallbacks=prompt_guard_skips=0;native_message_publishes=0;cure_prompt_frames=0;cure_r1_frames=0;cure_prompt_state=0;cure_nearby_entity=0;cure_serum_detected=false;native_cure_message_tick=0;native_cure_message_frames=0;cure_native_message_frames=0;native_cure_message_alpha=0;native_cure_message_visible=false;native_tutorial_art_content=false;d2vr::NativeInteractionAim::melee_enabled_=true;d2vr::NativeInteractionAim::impact_enabled_=true;d2vr::NativeImpactFx::reset();d2vr::NativeInteractionAim::impact_played_=0;d2vr::NativeInteractionAim::impact_skipped_=0;d2vr::NativeInteractionAim::melee_applied_=0;d2vr::NativeInteractionAim::melee_rejected_=0;d2vr::NativeInteractionAim::melee_faults_=0;for(auto& w:d2vr::NativeInteractionAim::melee_why_) w=0;for(auto& w:d2vr::NativeInteractionAim::stealth_reject_) w=0;for(auto& w:d2vr::NativeInteractionAim::stealth_awareness_) w=0;d2vr::NativeInteractionAim::stealth_slow_aware_drops_=0;d2vr::NativeInteractionAim::stealth_slow_unheld_drops_=0;slow_reject_latch=d2vr::SlowRejectLatch{};for(auto& w:d2vr::NativeInteractionAim::hit_height_) w=0;ga_offered_frames=ga_offered_swings=0;{std::error_code ec;fs::remove(output_directory/L"native-combat.csv",ec);} // the DLL outlives sessions
         if(fs::exists(root/L"build"/L"hud-node-census")) {
             hud_node_census_path=output/L"hud-node-census.csv";
             d2vr::NativeHudChildDraw::census=&hud_node_census;

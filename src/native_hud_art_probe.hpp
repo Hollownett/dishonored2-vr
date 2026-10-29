@@ -30,6 +30,13 @@ class NativeHudArtProbe {
         return native_prompt_number(read,value);
     }
 public:
+    // One numeric AS3 property of a HUDScene element (e.g. "_tutorialMessage.alpha").
+    // Runs only on the verified native UI thread, like probe(); no object survives.
+    static std::optional<double> property(Read read,std::uintptr_t base,const NativePromptCall& owner,
+        const Api& api,const char* path,const char* field) {
+        std::uint32_t status{};
+        return number(read,base,owner,api,path,field,status);
+    }
     // 100D280 proves tag24 and the native DisplayObject node at value+27.
     // The native renderer's child and ancestor walk (1037100) proves parent80
     // and the movie's root node at iggy+26B0. This is identity, not a crop guess.

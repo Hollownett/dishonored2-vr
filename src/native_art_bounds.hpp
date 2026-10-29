@@ -78,7 +78,7 @@ groupshared uint x0,y0,x1,y1;
 [numthreads(16,16,1)] void main(uint3 pixel:SV_DispatchThreadID,uint index:SV_GroupIndex) {
  uint width,height;art.GetDimensions(width,height);
  if(index==0){x0=width;y0=height;x1=0;y1=0;} GroupMemoryBarrierWithGroupSync();
- if(pixel.x<width && pixel.y<height && art.Load(int3(pixel.xy,0)).a>0){
+ if(pixel.x<width && pixel.y<height && art.Load(int3(pixel.xy,0)).a>0.0625){
   InterlockedMin(x0,pixel.x);InterlockedMin(y0,pixel.y);InterlockedMax(x1,pixel.x+1);InterlockedMax(y1,pixel.y+1);
  } GroupMemoryBarrierWithGroupSync();
  if(index==0 && x1>x0 && y1>y0){uint unused;
