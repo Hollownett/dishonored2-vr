@@ -1316,6 +1316,41 @@ public:
     void wrist_hud(WristHudSnapshot data) {wrist_data_=data;}
     void (*observe_native_wrist_art)(unsigned,ID3D11Texture2D*,std::uintptr_t){};
     UINT64 native_object_art_draws{};
+    // v685: eye art is decoration. A failed draw is recorded and its art dropped; it never reaches the
+    // render callback's session recovery (that ended VR three times in the v684 session).
+    UINT64 native_eye_art_failures{},native_eye_art_rejects{},native_note_eye_art_failures{};
+    bool native_eye_art_disabled_{},native_note_art_disabled_{};
+    HRESULT native_eye_art_last_hr{S_OK};DXGI_FORMAT native_eye_art_eye_view{},native_eye_art_art_view{};
+    std::string native_eye_art_last_call;
+    void (*observe_eye_art_failure)(const char*){};
+    void note_eye_art_fault(const NativeEyeArtResult& result,const char* who) noexcept {
+        if(result.rejected) {++native_eye_art_rejects;return;}
+        ++native_eye_art_failures;native_eye_art_last_hr=result.hr;
+        native_eye_art_last_call=result.call?result.call:"draw";
+        native_eye_art_eye_view=result.eye_view;native_eye_art_art_view=result.art_view;
+        if(native_eye_art_failures!=1 || !observe_eye_art_failure) return;
+        char text[240];
+        std::snprintf(text,sizeof(text),"Eye art draw failed (%s hr=0x%08lx eye=%u art=%u); the overlay is dropped and VR keeps presenting",
+            who,static_cast<unsigned long>(result.hr),static_cast<unsigned>(result.eye_view),static_cast<unsigned>(result.art_view));
+        observe_eye_art_failure(text);
+    }
+    bool ensure_native_eye_art() noexcept {
+        if(native_eye_art_disabled_) return false;
+        if(native_eye_art_) return true;
+        try {
+            Microsoft::WRL::ComPtr<ID3D11Device> device;context_->GetDevice(&device);
+            if(!device) throw std::runtime_error("Missing native eye artwork device");
+            native_eye_art_=std::make_unique<NativeEyeArt>(device.Get());
+            return true;
+        } catch(const std::exception& error) {
+            native_eye_art_disabled_=true;native_eye_art_last_call="NativeEyeArt";
+            if(observe_eye_art_failure) {
+                const std::string text=std::string("Eye art unavailable (")+error.what()+"); VR keeps presenting";
+                observe_eye_art_failure(text.c_str());
+            }
+            return false;
+        }
+    }
     bool native_art_presented(unsigned slot,bool wrist) const noexcept {
         return last_layer_submitted && (wrist?(slot<native_wrist_art_shown_.size() && native_wrist_art_shown_[slot]):
             (slot<native_object_art_masks_.size() && native_object_art_masks_[slot]==3));
@@ -2199,13 +2234,19 @@ public:
                 }
                 {ModGpuScope overlay_scope(context_.Get(),ModSpan::eye_overlay); // task 3b: native object art + desktop mirror draws
                 SpanClock span(xr_spans,XrSpan::overlay_draws);
-                if(composite_note) {
+                if(composite_note && !native_note_art_disabled_) try { // v685: a note-art fault disables the note overlay, never the frame
                     if(!note_eye_art_) {Microsoft::WRL::ComPtr<ID3D11Device> device;context_->GetDevice(&device);note_eye_art_=std::make_unique<NoteEyeArt>(device.Get());}
                     D3D11_TEXTURE2D_DESC art_desc{};world_ui_source_->GetDesc(&art_desc);
                     const auto rows=static_cast<UINT>(world_ui_rows(art_desc)),top=(art_desc.Height-rows)/2;
                     XrView note_view{XR_TYPE_VIEW};note_view.pose=layers[eye].pose;note_view.fov=layers[eye].fov;
                     note_eye_art_->draw(images_[eye].at(index).texture,world_ui_source_.Get(),format_,
                         {0,top,0,art_desc.Width,top+rows,1},note_view,*note_panel_,note_hands_);++note_eye_draws;
+                } catch(const std::exception& error) {
+                    native_note_art_disabled_=true;++native_note_eye_art_failures;
+                    if(observe_eye_art_failure) {
+                        const std::string text=std::string("Note eye art disabled (")+error.what()+"); VR keeps presenting";
+                        observe_eye_art_failure(text.c_str());
+                    }
                 }
                 if(gameplay && !authored_camera && tracked_pair_()) {
                     const auto now=GetTickCount64();XrView view{XR_TYPE_VIEW};view.pose=layers[eye].pose;view.fov=layers[eye].fov;
@@ -2222,11 +2263,13 @@ public:
                                     D3D11_SUBRESOURCE_DATA initial{};initial.pSysMem=pixels.data();initial.SysMemPitch=32*4;
                                     if(FAILED(device->CreateTexture2D(&d,&initial,&eye_reticle_texture_))) throw std::runtime_error("Cannot create eye reticle");
                                 }
-                                if(!native_eye_art_) {Microsoft::WRL::ComPtr<ID3D11Device> device;context_->GetDevice(&device);native_eye_art_=std::make_unique<NativeEyeArt>(device.Get());}
-                                const D3D11_BOX crop{0,0,0,32,32,1};
-                                native_eye_art_->draw(images_[eye].at(index).texture,eye_reticle_texture_.Get(),crop,
-                                    {(*rect)[0],(*rect)[1],(*rect)[2],(*rect)[3]},format_,false,DXGI_FORMAT_R8G8B8A8_UNORM);
-                                ++eye_reticle_draws;
+                                if(ensure_native_eye_art()) {
+                                    const D3D11_BOX crop{0,0,0,32,32,1};
+                                    const auto art_result=native_eye_art_->draw(images_[eye].at(index).texture,eye_reticle_texture_.Get(),crop,
+                                        {(*rect)[0],(*rect)[1],(*rect)[2],(*rect)[3]},format_,false,DXGI_FORMAT_R8G8B8A8_UNORM);
+                                    if(art_result.drawn) ++eye_reticle_draws;
+                                    else note_eye_art_fault(art_result,"eye reticle"); // the game crosshair child still draws
+                                }
                             }
                     } catch(...) {
                         // Fail locally. The following prepared frame restores
@@ -2238,9 +2281,11 @@ public:
                         const auto locked=art_slot==tutorial_art_slot?head_locked_art_point(tracked_view_(0).pose,tracked_view_(1).pose):std::optional<Vec3>{};
                         if(art_slot==tutorial_art_slot && !locked)continue;
                         if(const auto rect=native_art_rect(view,locked?*locked:art.point,art.width*hud_scale(),aspect)) {
-                            if(!native_eye_art_) {Microsoft::WRL::ComPtr<ID3D11Device> device;context_->GetDevice(&device);native_eye_art_=std::make_unique<NativeEyeArt>(device.Get());}
-                            native_eye_art_->draw(images_[eye].at(index).texture,art.texture.Get(),art.crop,*rect,format_,art.premultiplied);++native_object_art_draws;
-                            native_object_art_masks_[art_slot]|=1u<<eye;
+                            if(ensure_native_eye_art()) {
+                                const auto art_result=native_eye_art_->draw(images_[eye].at(index).texture,art.texture.Get(),art.crop,*rect,format_,art.premultiplied);
+                                if(art_result.drawn) {++native_object_art_draws;native_object_art_masks_[art_slot]|=1u<<eye;}
+                                else {note_eye_art_fault(art_result,"native object art");native_object_art_[art_slot]={};}
+                            }
                         }
                     }
                 }

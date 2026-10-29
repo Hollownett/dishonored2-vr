@@ -23,6 +23,15 @@
 #pragma comment(lib,"crypt32.lib")
 
 namespace d2vr {
+// Loader process-detach query, resolved once at DLL load: RtlDllShutdownInProgress() reports that the DLL
+// shutdown notifications are running because the process is exiting. AMD's FFX teardown faults there
+// (2026-10-29 18:16 record: Fsr4EyeUpscaler::State::~State -> ffxDestroyContext -> amdxcffx64 ->
+// amdxc64 access violation on 0xfeeefeeefeeefeee), so that call is skipped while the process is dying.
+inline BOOLEAN (NTAPI*const rtl_dll_shutdown_in_progress)()=[]() noexcept -> BOOLEAN (NTAPI*)() {
+    const auto module=GetModuleHandleW(L"ntdll.dll");
+    return module?reinterpret_cast<BOOLEAN (NTAPI*)()>(GetProcAddress(module,"RtlDllShutdownInProgress")):nullptr;
+}();
+inline bool dll_process_detaching() noexcept {return rtl_dll_shutdown_in_progress && rtl_dll_shutdown_in_progress()!=FALSE;}
 // Optional FSR4 provider bridge. Immediate-context owner only; one wrapper per eye.
 // No CPU completion waits. The bounded registry retains retiring contexts until
 // their final D3D11 consumption signal completes, including across wrapper destruction.
@@ -59,9 +68,10 @@ private:
         // The provider DLL goes last: members would otherwise release the D3D12 device, queue and lists after FreeLibrary,
         // while the driver may still hold work or callbacks that reference provider code.
         ~State() {
-            if(context && destroy) destroy(&context,nullptr);
+            // The driver's own teardown is unsafe once the process is exiting; the OS reclaims the context.
+            if(context && destroy && !dll_process_detaching()) destroy(&context,nullptr);
             slots={};fence12.Reset();queue.Reset();device12.Reset();fence11.Reset();
-            if(module) FreeLibrary(module);
+            if(module && !dll_process_detaching()) FreeLibrary(module);
         }
     };
     // Fixed global ownership includes active and retiring states. No unbounded

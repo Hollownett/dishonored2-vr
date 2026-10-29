@@ -4854,6 +4854,8 @@ static ID3D11Texture2D* cure_prompt_texture(ID3D11Device* device,const char* lab
         texture=created;cached=label;return texture.Get();
     } catch(...) {return nullptr;}
 }
+// The last frame the game's own tutorial/information message (the native cure hint) was on screen.
+static UINT64 native_tutorial_art_tick{};
 static void publish_cure_hint(UINT64 now,ID3D11DeviceContext* context) noexcept {
     try {
         if(!context || !game_xr) return;
@@ -4873,6 +4875,10 @@ static void publish_cure_hint(UINT64 now,ID3D11DeviceContext* context) noexcept 
         else if(!offer_owner) text=std::string("Sneak behind her and hold ")+hand+"grip to inject counter-serum";
         else text=std::string("Hold ")+hand+"grip to inject counter-serum";
         cure_prompt_state=dead?1:!offer_owner?4:2;
+        // v685: the game's own tutorial message is the cure hint the user asked for ("just use the original
+        // from the game"). While that native message is on screen it owns the tutorial art; the English
+        // fallback card is published only when the map's own hint does not fire.
+        if(now>=native_tutorial_art_tick && now-native_tutorial_art_tick<=250) return;
         ComPtr<ID3D11Device> device;context->GetDevice(&device);
         auto* texture=cure_prompt_texture(device.Get(),text.c_str());
         if(!texture) return;
@@ -5120,6 +5126,7 @@ void publish_native_hud_art(UINT64 now) {
         const D3D11_BOX crop{0,0,0,desc.Width,desc.Height,1};
         if(game_xr->native_art_source(destination,wrist,compact.texture.Get(),crop,metadata.owner,metadata.epoch,metadata.tick,point,art_width)) {
             native_hud_next_scopes[slot]=compact.child;native_hud_next_ticks[slot]=metadata.tick;
+            if(destination==d2vr::tutorial_art_slot) native_tutorial_art_tick=now; // the game's own tutorial/information message
             if(slot==0) {native_hud_prompt_hold.good(now,point,art_width);++world_prompt_frames;
                 if(compact.child.retained_entry) {
                     static UINT64 next_placement_log{};static unsigned placement_rows{};
@@ -7952,6 +7959,14 @@ std::string feedback_status_json() {
            << ",\"cure_prompt_state\":" << cure_prompt_state.load()
            << ",\"cure_serum_detected\":" << (cure_serum_detected.load()?"true":"false")
            << ",\"cure_r1_frames\":" << cure_r1_frames.load()
+           << ",\"eye_art\":{\"failures\":" << (game_xr?game_xr->native_eye_art_failures:0)
+           << ",\"rejects\":" << (game_xr?game_xr->native_eye_art_rejects:0)
+           << ",\"note_failures\":" << (game_xr?game_xr->native_note_eye_art_failures:0)
+           << ",\"disabled\":" << ((game_xr && game_xr->native_eye_art_disabled_)?"true":"false")
+           << ",\"last_hr\":" << (game_xr?static_cast<long>(game_xr->native_eye_art_last_hr):0)
+           << ",\"eye_view\":" << (game_xr?static_cast<unsigned>(game_xr->native_eye_art_eye_view):0)
+           << ",\"art_view\":" << (game_xr?static_cast<unsigned>(game_xr->native_eye_art_art_view):0)
+           << ",\"last_call\":\"" << (game_xr?game_xr->native_eye_art_last_call:std::string()) << "\"}"
            << ",\"offered_choke_spawn\":" << offered_choke_spawn.load()
            << ",\"prompt_shows_hides\":[" << prompt_shows.load() << ',' << prompt_hides.load() << "],\"takedown_flips\":" << takedown_flips.load() << ",\"takedown_hints\":" << d2vr::NativeHudChildDraw::takedown_hints.load() << ",\"takedown_anchor\":{\"enabled\":" << (prompt_target_anchor?"true":"false") << ",\"frames\":" << takedown_anchor_frames.load() << ",\"object_conflicts\":" << takedown_anchor_object_conflicts.load() << '}' << ",\"npc_blade_contacts\":" << npc_blade_contacts.load() << ",\"contact_hits\":[" << d2vr::NativeInteractionAim::melee_applied_.load() << ',' << d2vr::NativeInteractionAim::melee_rejected_.load() << ',' << d2vr::NativeInteractionAim::melee_faults_.load() << ']' << ",\"contact_rejects\":[" << d2vr::NativeInteractionAim::melee_why_[0].load() << ',' << d2vr::NativeInteractionAim::melee_why_[1].load() << ',' << d2vr::NativeInteractionAim::melee_why_[2].load() << ']' << ",\"corpse_chops\":" << d2vr::NativeMelee::chops.load() << ",\"tip_speed\":[" << tip_speed_now[0].load() << ',' << tip_speed_now[1].load() << ']' << ",\"slash_speed\":" << (d2vr::NativeSlashSceneRate::process_owner().enabled()?slash_speed_factor:1.f) << ",\"slash_scene_rate\":{\"enabled\":" << (d2vr::NativeSlashSceneRate::process_owner().enabled()?"true":"false") << ",\"accelerations\":" << d2vr::NativeSlashSceneRate::process_owner().accelerations() << ",\"setter_failures\":" << d2vr::NativeSlashSceneRate::process_owner().setter_failures() << "}" << ",\"block_unequip_vetoes\":" << d2vr::NativeBlockEligibility::process_owner().vetoes() << ",\"takedown_range\":" << (native_interaction_aim.takedown_ranges_applied()?"true":"false") << ",\"takedown_kill_rules\":" << native_interaction_aim.takedown_range_kill_rules() << ",\"layer\":" << d2vr::NativeHeldObject::layer_json() << ",\"release_watch\":" << d2vr::NativeInteractionAim::release_watch_json() << ",\"held_clamp\":{\"enabled\":" << (held_clamp_enabled?"true":"false") << ",\"sweeps\":" << held_clamp_status.sweeps.load() << ",\"hits\":" << held_clamp_status.hits.load() << ",\"self_hits\":" << held_clamp_status.self_hits.load() << ",\"clamped_frames\":" << held_clamp_status.clamped_frames.load() << ",\"cast_us\":" << held_clamp_status.cast_us.load() << ",\"cast_us_max\":" << held_clamp_status.cast_us_max.load() << ",\"no_bounds\":" << held_clamp_status.no_bounds.load() << ",\"held_clamp_no_bounds\":" << held_clamp_status.no_bounds.load() << ",\"overlap_on_release\":" << held_clamp_status.overlap_on_release.load() << ",\"release_depen_frames\":" << held_clamp_status.release_depen_frames.load() << ",\"release_overlap_unresolved\":" << held_clamp_status.release_overlap_unresolved.load() << ",\"drawn_hand_gap_m\":" << held_clamp_status.drawn_hand_gap_m.load() << ",\"layer_at_release\":" << held_clamp_status.layer_at_release.load() << ",\"forced_drops\":" << held_clamp_status.forced_drops.load() << ",\"releases\":" << held_clamp_status.releases.load() << ",\"layer_reasserts\":" << d2vr::NativeHeldObject::layers_reasserted.load() << ",\"depen_writes\":" << native_grab.depen_writes_.load() << ",\"depen_rejected\":" << native_grab.depen_rejected_.load() << "}" << ",\"barrel_aim\":{\"ok\":" << barrel_ok.load() << ",\"bad_frame\":" << barrel_bad_frame.load() << ",\"no_model\":" << barrel_no_model.load() << ",\"gun_item_frames\":" << gun_item_frames.load() << ",\"name_miss_frames\":" << gun_name_miss_frames.load() << "},\"gadget_aim\":{\"enabled\":" << (gadget_hand_aim_enabled?"true":"false") << ",\"placement\":[" << d2vr::NativeGadgetAim::placement_calls.load() << ',' << d2vr::NativeGadgetAim::placement_swapped.load() << "],\"throw_hit\":[" << d2vr::NativeGadgetAim::throw_calls.load() << ',' << d2vr::NativeGadgetAim::throw_swapped.load() << "],\"stale\":" << d2vr::NativeGadgetAim::stale.load() << ",\"bad_pointer\":" << d2vr::NativeGadgetAim::bad_pointer.load() << ",\"restore_skipped\":" << d2vr::NativeGadgetAim::restore_skipped.load() << ",\"palm\":" << d2vr::NativeGadgetAim::palm_placements.load() << ",\"left_gadget\":" << (left_gadget.load()?"true":"false") << "}"
                << ",\"grenade_throw\":{\"enabled\":" << (grenade_hand_throw_enabled?"true":"false") << ",\"calls\":" << d2vr::NativeGrenadeThrow::calls.load() << ",\"rewritten\":" << d2vr::NativeGrenadeThrow::rewritten.load() << ",\"not_grenade\":" << d2vr::NativeGrenadeThrow::not_grenade.load() << ",\"no_gesture\":" << d2vr::NativeGrenadeThrow::no_gesture.load() << ",\"faults\":" << d2vr::NativeGrenadeThrow::faults.load() << ",\"last_speed\":" << d2vr::NativeGrenadeThrow::last_speed.load() << "}"
@@ -9021,6 +9036,7 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                 game_xr->observe_settings=&capture_settings_transfer;
                                 game_xr->observe_wrist=&capture_wrist_hud;
                                 game_xr->observe_frame_rejection=[](const char* text) {note_recoverable(text);};game_xr->observe_xr_event=[](const char* text) {note_xr_event(text);};
+                                game_xr->observe_eye_art_failure=[](const char* text) {note_recoverable(text);}; // v685: one line, not a session fault
                                 game_xr->observe_wrist_failure=[](unsigned side,const char* reason) {
                                     note_recoverable(("Optional wrist HUD side "+std::to_string(side)+": "+reason).c_str());
                                 };

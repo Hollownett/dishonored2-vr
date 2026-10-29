@@ -8,6 +8,20 @@
 
 namespace d2vr {
 struct NativeArtRect {float left{},top{},right{},bottom{};};
+// v685: a decorative eye-art draw must never end the XR session. On the headset a failed
+// NativeEyeArt draw threw out of GameXr::present into the render callback's handler, which treats it
+// as a session fault: vr end, flat desktop for the backoff, then a rebuilt session (18:12:45/18:12:51/
+// 18:14:07 in the v684 xr-recoveries.log). draw() now reports the first failing D3D call with its
+// HRESULT; the caller drops that art and the frame keeps presenting.
+struct NativeEyeArtResult {
+    bool drawn{},rejected{};HRESULT hr{S_OK};const char* call{""};DXGI_FORMAT eye_view{},art_view{};
+    explicit operator bool() const noexcept {return drawn;}
+};
+// A view needs a concrete format: OpenXR hands the typed sRGB chain typeless R8G8B8A8 storage
+// (xr-transfer-*.json destination_format=27), and a TYPELESS SRV/RTV descriptor is rejected.
+inline DXGI_FORMAT native_art_view_format(DXGI_FORMAT format) noexcept {
+    return format==DXGI_FORMAT_R8G8B8A8_TYPELESS?DXGI_FORMAT_R8G8B8A8_UNORM:format;
+}
 // Test all physical quad corners in BOTH asymmetric eye frusta. Centre-only
 // tests allow long health/mana panels to extend outside the visible lens area.
 inline bool native_panel_contained(const std::array<XrView,2>& eyes,const TrackedPose& pose,
@@ -103,17 +117,40 @@ float4 PS(V v):SV_TARGET{return nativeArt.Sample(artSampler,v.uv);}
         target.SrcBlendAlpha=D3D11_BLEND_ONE;target.DestBlendAlpha=D3D11_BLEND_INV_SRC_ALPHA;target.BlendOpAlpha=D3D11_BLEND_OP_ADD;target.RenderTargetWriteMask=D3D11_COLOR_WRITE_ENABLE_ALL;
         checked(device_->CreateBlendState(&blend,&premultiplied_));target.SrcBlend=D3D11_BLEND_SRC_ALPHA;checked(device_->CreateBlendState(&blend,&straight_));
     }
-    void draw(ID3D11Texture2D* eye,ID3D11Texture2D* art,const D3D11_BOX& crop,NativeArtRect rect,DXGI_FORMAT format,bool premultiplied=true,DXGI_FORMAT source_format=DXGI_FORMAT_UNKNOWN){
-        if(!eye || !art || eye==art)throw std::invalid_argument("Native artwork requires separate source and eye textures");
+    NativeEyeArtResult draw(ID3D11Texture2D* eye,ID3D11Texture2D* art,const D3D11_BOX& crop,NativeArtRect rect,DXGI_FORMAT format,bool premultiplied=true,DXGI_FORMAT source_format=DXGI_FORMAT_UNKNOWN){
+        NativeEyeArtResult out{};
+        const auto fail=[&out](HRESULT value,const char* call) {out.hr=value;out.call=call;return out;};
+        if(!eye || !art || eye==art) {out.rejected=true;out.call="arguments";return out;}
         D3D11_TEXTURE2D_DESC e{},a{};eye->GetDesc(&e);art->GetDesc(&a);
         Ptr<ID3D11Device> eo,ao;eye->GetDevice(&eo);art->GetDevice(&ao);
         if(eo.Get()!=device_.Get() || ao.Get()!=device_.Get() || e.SampleDesc.Count!=1 || a.SampleDesc.Count!=1 ||
            e.ArraySize!=1 || a.ArraySize!=1 || !e.Width || !e.Height || crop.left>=crop.right || crop.top>=crop.bottom || crop.right>a.Width || crop.bottom>a.Height || crop.front || crop.back!=1)
-            throw std::invalid_argument("Invalid native artwork capture geometry/device");
+            {out.rejected=true;out.call="geometry";return out;}
+        // A TYPELESS descriptor is not a valid view format. OpenXR hands the typed sRGB chain typeless
+        // R8G8B8A8 storage here, so the view follows the resource: typeless storage gets the
+        // byte-preserving UNORM view (the art pixels are already sRGB-encoded, and an sRGB view of
+        // typeless storage composited nothing in the contract fixture), a typed eye keeps its format.
+        out.eye_view=e.Format==DXGI_FORMAT_R8G8B8A8_TYPELESS?DXGI_FORMAT_R8G8B8A8_UNORM:native_art_view_format(format);
+        out.art_view=source_format==DXGI_FORMAT_UNKNOWN?native_art_view_format(format):native_art_view_format(source_format);
         ContextState::Scope scope(state_);
-        D3D11_SHADER_RESOURCE_VIEW_DESC sd{};sd.Format=source_format==DXGI_FORMAT_UNKNOWN?format:source_format;sd.ViewDimension=D3D11_SRV_DIMENSION_TEXTURE2D;sd.Texture2D.MipLevels=1;
-        Ptr<ID3D11ShaderResourceView> input;checked(device_->CreateShaderResourceView(art,&sd,&input));
-        D3D11_RENDER_TARGET_VIEW_DESC rd{};rd.Format=format;rd.ViewDimension=D3D11_RTV_DIMENSION_TEXTURE2D;Ptr<ID3D11RenderTargetView> output;checked(device_->CreateRenderTargetView(eye,&rd,&output));
+        // Try the documented format first, then the resource's own concrete format, then plain UNORM:
+        // a runtime whose storage is typeless only answers one of them.
+        Ptr<ID3D11ShaderResourceView> input;HRESULT hr=E_FAIL;
+        for(unsigned attempt=0;attempt<3 && !input;++attempt) {
+            const DXGI_FORMAT view_format=attempt==0?out.art_view:attempt==1?native_art_view_format(a.Format):DXGI_FORMAT_R8G8B8A8_UNORM;
+            D3D11_SHADER_RESOURCE_VIEW_DESC sd{};sd.Format=view_format;sd.ViewDimension=D3D11_SRV_DIMENSION_TEXTURE2D;sd.Texture2D.MipLevels=1;
+            hr=device_->CreateShaderResourceView(art,&sd,&input);
+            if(SUCCEEDED(hr)) out.art_view=view_format;
+        }
+        if(!input) return fail(hr,"CreateShaderResourceView");
+        Ptr<ID3D11RenderTargetView> output;hr=E_FAIL;
+        for(unsigned attempt=0;attempt<3 && !output;++attempt) {
+            const DXGI_FORMAT view_format=attempt==0?out.eye_view:attempt==1?native_art_view_format(e.Format):DXGI_FORMAT_R8G8B8A8_UNORM;
+            D3D11_RENDER_TARGET_VIEW_DESC rd{};rd.Format=view_format;rd.ViewDimension=D3D11_RTV_DIMENSION_TEXTURE2D;
+            hr=device_->CreateRenderTargetView(eye,&rd,&output);
+            if(SUCCEEDED(hr)) out.eye_view=view_format;
+        }
+        if(!output) return fail(hr,"CreateRenderTargetView");
         const std::array<float,8> data{rect.left,rect.top,rect.right,rect.bottom,static_cast<float>(crop.left)/a.Width,static_cast<float>(crop.top)/a.Height,static_cast<float>(crop.right)/a.Width,static_cast<float>(crop.bottom)/a.Height};
         context_->UpdateSubresource(constants_.Get(),0,nullptr,data.data(),0,0);
         D3D11_VIEWPORT viewport{0,0,static_cast<float>(e.Width),static_cast<float>(e.Height),0,1};context_->RSSetViewports(1,&viewport);context_->RSSetState(raster_.Get());
@@ -123,6 +160,7 @@ float4 PS(V v):SV_TARGET{return nativeArt.Sample(artSampler,v.uv);}
         auto* constant=constants_.Get();context_->VSSetConstantBuffers(0,1,&constant);auto* sampler=sampler_.Get();context_->PSSetSamplers(0,1,&sampler);auto* srv=input.Get();context_->PSSetShaderResources(0,1,&srv);
         auto* rtv=output.Get();context_->OMSetRenderTargets(1,&rtv,nullptr);context_->Draw(4,0);
         ID3D11ShaderResourceView* empty{};context_->PSSetShaderResources(0,1,&empty);context_->OMSetRenderTargets(0,nullptr,nullptr);
+        out.drawn=true;return out;
     }
 };
 } // namespace d2vr
