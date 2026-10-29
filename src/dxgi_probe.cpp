@@ -3137,6 +3137,7 @@ static std::atomic<UINT64> sword_incoming_until{};static constexpr UINT64 sword_
 static std::array<bool,2> grip_corpse_gate{};static std::array<std::uint64_t,2> grip_corpse_entity{};   // V1: the corpse the press began on (the native query lock is released while the hand holds, so the handoff cannot re-read the target)   // Corpse identity is retained for the torso-hold handoff; all grip-only pickups use the 10 cm contact gate
 static bool legacy_corpse_carry=false;static UINT64 corpse_drop_press_until{},carry_toss_until{};static d2vr::ShoulderCarry shoulder_carry;static d2vr::ShoulderDock shoulder_dock;static std::array<d2vr::Vec3,2> dock_local_p{};static std::array<d2vr::Quaternion,2> dock_local_q{};static std::atomic<unsigned> shoulder_dock_bits{},shoulder_consume_bits{};static std::array<std::atomic<unsigned>,6> dock_diag{};static std::atomic<unsigned> dock_faults{};static std::atomic<unsigned> dock_last_lag_mm{};   // shoulder_dock: render thread only; the bits tell the input thread which lanes are docked and whose squeeze the dock took   // v613 item 4: build/legacy-corpse-carry; the Use pulse that drops a shoulder-carried body
 static std::array<d2vr::GripIntent,2> grip_intent;static std::array<d2vr::GripIntent::Out,2> grip_intent_out{}; // input thread
+static std::atomic<unsigned> choke_hand_published{1}; // 0 left, 1 right: the grip that currently owns the native RB choke/cure
 static std::atomic<unsigned> fist_hands{},grab_hands{};static std::atomic<int> trace_lock_side{-1};static std::atomic<UINT64> fist_takes{},limb_hints{},carry_drops{},carry_throws{},carry_docks{},body_use_blocked{},body_loot_passes{},native_carry_auto_drops{},stealth_kill_pulses{};// fist frames that are the game's pickup // the hand a grip Use locked (controller trace)
 static std::array<std::atomic<unsigned>,10> use_diag{}; // grip Use: use_started L/R, fist_started L/R, locked L/R, ready while locked, target while locked, intent not free L/R // bit per hand: a full fist (grip + trigger) owns the physical grab this press
 static d2vr::OfferedChokeGrip offered_choke_grip;static unsigned choke_side=1;static UINT64 choke_rb_since{};   // v639: the hand whose grip is the choke (the left while the sword holds the right fist); when the choke RB began
@@ -3208,8 +3209,38 @@ static bool entity_name_has(std::uintptr_t entity,const char* needle) noexcept {
         return std::strstr(buffer,needle)!=nullptr;
     } catch(...) {return false;}
 }
-// Read-only inventory scan for the counter-serum syringe. The syringe is the native inventory item the game
-// requires before its NPC-interaction notification can offer the cure; without it the cure tutorial never shows.
+static bool is_hypatia_entity(std::uintptr_t entity) noexcept {
+    return entity_name_has(entity,"hypatia") || entity_name_has(entity,"alexandria") ||
+        entity_name_has(entity,"crown_killer") || entity_name_has(entity,"crownkiller");
+}
+// Slow, round-robin registry search for Hypatia within conversation distance. The native prompts only exist
+// when the game offers an action; from behind the Crown Killer there is no offer, but the player still needs to
+// know that this fight is cured by blocking her attack and then holding the non-lethal grip.
+static std::uintptr_t nearby_hypatia(UINT64 now) noexcept {
+    static UINT64 next{};
+    static std::uintptr_t cached{};
+    static unsigned cursor{};
+    if(now<next) return cached;
+    next=now+500;cached=0;
+    try {
+        using namespace d2vr::rig;
+        const auto game=value<std::uintptr_t>(read_self,image_base+0x39a5290);
+        const auto player=game?value<std::uintptr_t>(read_self,*game+0x3130b0):std::nullopt;
+        const auto from=player?value<std::array<float,3>>(read_self,*player+0x300):std::nullopt;
+        if(!game || !player || !from) return 0;
+        for(unsigned n=0;n<4096;++n) {
+            const unsigned slot=(cursor++)&0x3fffu;
+            if(!slot) continue;
+            const auto entity=value<std::uintptr_t>(read_self,*game+0x3130b0+slot*8ull);
+            if(!entity || !pointer(*entity) || !is_hypatia_entity(*entity)) continue;
+            const auto at=value<std::array<float,3>>(read_self,*entity+0x300);
+            if(!at) continue;
+            const double dx=(*at)[0]-(*from)[0],dy=(*at)[1]-(*from)[1],dz=(*at)[2]-(*from)[2];
+            if(dx*dx+dy*dy+dz*dz<=4.5*4.5) {cached=*entity;break;}
+        }
+    } catch(...) {}
+    return cached;
+}
 static bool player_has_cure_serum() noexcept {
     static UINT64 next{};
     static bool cached{};
@@ -3243,8 +3274,10 @@ static bool player_has_cure_serum() noexcept {
             if(!name || !read_self(*name,buffer,sizeof(buffer)-1)) continue;
             buffer[sizeof(buffer)-1]=0;
             for(char* p=buffer;*p;++p) if(*p>='A' && *p<='Z') *p=static_cast<char>(*p-'A'+'a');
-            if(std::strstr(buffer,"syringe") || std::strstr(buffer,"cure") || std::strstr(buffer,"counter") ||
-               std::strstr(buffer,"serum")) {cached=true;break;}
+            const bool cure_item=std::strstr(buffer,"syringe_cure") || std::strstr(buffer,"pickup_is_syringe_cure") ||
+                std::strstr(buffer,"counter") || std::strstr(buffer,"serum") ||
+                (std::strstr(buffer,"grimalex") && std::strstr(buffer,"/syringe") && !std::strstr(buffer,"neutral"));
+            if(cure_item) {cached=true;break;}
         }
     } catch(...) {}
     return cached;
@@ -4806,24 +4839,24 @@ static ID3D11Texture2D* cure_prompt_texture(ID3D11Device* device,const char* lab
 static void publish_cure_hint(UINT64 now,ID3D11DeviceContext* context) noexcept {
     try {
         if(!context || !game_xr) return;
-        // A real native HUD message is the better source; never cover it with the fallback.
-        static UINT64 last_message_count{},last_message_tick{};
-        const auto count=native_message_publishes.load();
-        if(count!=last_message_count) {last_message_count=count;last_message_tick=now;}
-        if(last_message_tick && now>=last_message_tick && now-last_message_tick<700) return;
-        std::uintptr_t owner{};
-        if(const auto take=takedown_prompt(now)) owner=take->identity.object;
-        if(!owner) if(const auto target=native_interaction_aim.prompt_target(now)) owner=target->owner;
-        if(!owner) if(const auto& art=native_hud_compact_art[0]; art.child.retained_entry) owner=art.child.retained_entry->owner;
-        if(!owner || !entity_name_has(owner,"hypatia")) {cure_prompt_state=0;return;}
+        std::uintptr_t offer_owner{};
+        if(const auto take=takedown_prompt(now)) offer_owner=take->identity.object;
+        if(!offer_owner) if(const auto target=native_interaction_aim.prompt_target(now)) offer_owner=target->owner;
+        if(!offer_owner) if(const auto& art=native_hud_compact_art[0]; art.child.retained_entry) offer_owner=art.child.retained_entry->owner;
+        const std::uintptr_t owner=offer_owner?offer_owner:nearby_hypatia(now);
+        if(!owner || !is_hypatia_entity(owner)) {cure_prompt_state=0;return;}
         std::uint8_t flags{};
         const bool dead=read_self(owner+0xd1,&flags,1) && (flags&0x28);
         const bool serum=player_has_cure_serum();
-        const char* text=dead?"Hypatia is dead - load a save before the fight":
-            serum?"Press grip to inject counter-serum":"Craft the counter-serum in the lab first";
-        cure_prompt_state=dead?1:serum?2:3;
+        const char* hand=choke_hand_published.load()==0?"LEFT ":"RIGHT ";
+        std::string text;
+        if(dead) text="Hypatia is dead - load a save before the fight";
+        else if(!serum) text="Craft the counter-serum in the lab first";
+        else if(!offer_owner) text=std::string("Sneak behind her and hold ")+hand+"grip to inject counter-serum";
+        else text=std::string("Hold ")+hand+"grip to inject counter-serum";
+        cure_prompt_state=dead?1:!serum?3:!offer_owner?4:2;
         ComPtr<ID3D11Device> device;context->GetDevice(&device);
-        auto* texture=cure_prompt_texture(device.Get(),text);
+        auto* texture=cure_prompt_texture(device.Get(),text.c_str());
         if(!texture) return;
         D3D11_TEXTURE2D_DESC desc{};texture->GetDesc(&desc);
         if(game_xr->native_art_source(d2vr::tutorial_art_slot,false,texture,
@@ -9921,6 +9954,7 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                         // is the FREE hand's grip. A drawn sword owns the right fist (hold-to-hold: its grip never makes a new press), so
                                         // with the sword out the left hand chokes, unless a gun holds it.
                                         if(!offered_choke_grip.victim()) choke_side=sword_owns && !gun_owns?0u:1u;   // never switched under a running choke press
+                                        choke_hand_published=choke_side;
                                         std::array<d2vr::GripAloneChoice,2> grip_choice{d2vr::GripAloneChoice::use,d2vr::GripAloneChoice::use};
                                         if(one_list) {
                                             unsigned carry_bits{},holding_side{};bool holding_native{};
@@ -10141,7 +10175,13 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                     choke_occupied=!hand_state_tick || controls_now<hand_state_tick || controls_now-hand_state_tick>300 ||
                                         hand_holding_object || hand_carrying_bits!=0;
                                     choke_carry=controls_carry_snapshot;}
-                                const auto current_carry=(choke_offer || control_active_choke) && choke_carry?
+                                bool stealth_cure=false;
+                                if(control_takedown.choke && control_takedown.choke_spawn) {
+                                    auto stealth_reader=&read_self;
+                                    const auto target=d2vr::takedown_target(stealth_reader,image_base,control_takedown.choke_spawn);
+                                    stealth_cure=target && is_hypatia_entity(target->entity);
+                                }
+                                const auto current_carry=(choke_offer || control_active_choke || stealth_cure) && choke_carry?
                                     d2vr::rig::native_carry_current(control_reader,image_base,*choke_carry):std::nullopt;
                                 choke_occupied=choke_occupied || !current_carry || !choke_owner ||
                                     current_carry->player!=choke_owner->player || current_carry->machine!=choke_owner->machine || current_carry->carrying();
@@ -10156,9 +10196,13 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                 const bool offered_choke=choke_offer && choke_owner && choke_offer->owner==*choke_owner &&
                                     d2vr::NativeOfferedChoke::process_owner().current(*choke_offer,controls_now);
                                 if(offered_choke)++offered_choke_hint_frames;
-                                const auto choke_route=offered_choke_grip.update(grip_intent_out[cs].use,grip_intent_out[cs].use_started,
+                                // The stealth path has no Use target behind her, so the grip's Use intent can be absent.
+                                // Admit the raw held grip for this Hypatia-only sensor offer; the game still owns the action.
+                                const bool stealth_held=stealth_cure && (cs?raw.right_grip:raw.left_grip)>.35f;
+                                const auto choke_route=offered_choke_grip.update(
+                                    grip_intent_out[cs].use || stealth_held,grip_intent_out[cs].use_started || stealth_held,
                                     (cs?raw.right_grip:raw.left_grip)>.35f,logic==2 && controls_focus && !input.menu_modifier && !x_wheel.wheel(),
-                                    game_xr->pose_epoch(),offered_choke?choke_offer->spawn:0,control_active_choke,choke_occupied,(cs?raw.right_trigger:raw.left_trigger)>.35f);
+                                    game_xr->pose_epoch(),offered_choke?choke_offer->spawn:stealth_cure?control_takedown.choke_spawn:0,control_active_choke,choke_occupied,(cs?raw.right_trigger:raw.left_trigger)>.35f);
                                 d2vr::NativeInteractionAim::reserve_nonlethal_grip(choke_route.rb);
                                 std::array<bool,2> grip_use{};
                                 for(unsigned h=0;h<2;++h) grip_use[h]=controller_aim_requested;
@@ -10691,9 +10735,12 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                         const auto victim=offered_choke_grip.victim();
                                         const auto final_owner=d2vr::native_player_state_lease(control_reader,image_base,control_machine);
                                         const auto final_carry=current_carry?d2vr::rig::native_carry_current(control_reader,image_base,*current_carry):std::nullopt;
+                                        const bool stealth_current=stealth_cure && control_takedown.choke &&
+                                            control_takedown.choke_spawn==victim;
                                         final_choke_current=victim && controls_choke_owner && final_owner==controls_choke_owner && final_carry && !final_carry->carrying() &&
                                             ((final_offer && final_offer->owner==*controls_choke_owner && final_offer->spawn==victim) ||
-                                             d2vr::NativeOfferedChoke::active_victim(&read_self,image_base,control_machine)==victim);
+                                             d2vr::NativeOfferedChoke::active_victim(&read_self,image_base,control_machine)==victim ||
+                                             stealth_current);
                                     }
                                     if(!final_choke_current)offered_choke_grip.cancel();
                                     else ++choke_input_frames;
