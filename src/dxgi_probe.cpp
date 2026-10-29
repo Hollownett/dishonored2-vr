@@ -4915,8 +4915,10 @@ static void publish_cure_hint(UINT64 now,ID3D11DeviceContext* context) noexcept 
         const bool dead=read_self(owner+0xd1,&flags,1) && (flags&0x28);
         set_choke_factor(dead?.75f:1.f);
         const bool serum=player_has_cure_serum();cure_serum_detected=serum;
-        const bool native_message=native_cure_message_visible.load() && now>=native_cure_message_tick.load() &&
-            now-native_cure_message_tick.load()<=500;
+        const bool native_hint=native_tutorial_art_content.load() && now>=native_tutorial_art_tick &&
+            now-native_tutorial_art_tick<=250;
+        const bool native_message=native_hint || (native_cure_message_visible.load() && now>=native_cure_message_tick.load() &&
+            now-native_cure_message_tick.load()<=500);
         const char* hand=choke_hand_published.load()==0?"LEFT ":"RIGHT ";
         std::string text;
         if(dead) text="Hypatia is dead - load a save before the fight";
@@ -4924,10 +4926,13 @@ static void publish_cure_hint(UINT64 now,ID3D11DeviceContext* context) noexcept 
         else text=std::string("Hold ")+hand+"grip to inject counter-serum";
         cure_prompt_state=dead?1:native_message?5:!offer_owner?4:2;
         if(cure_prompt_state.load()==5) ++cure_native_message_frames;
-        // v685: the game's own tutorial message is the cure hint the user asked for ("just use the original
-        // from the game"). v686: the element can be "visible" at alpha 0 and its capture can be blank; only
-        // real native ink may suppress the readable fallback (the hint is never deleted).
-        if(native_message && native_tutorial_art_content.load() && now>=native_tutorial_art_tick && now-native_tutorial_art_tick<=250) return;
+        // v687: the native hint is the hint. Its captured art is the same element the flat
+        // player sees ("Press Grip to inject counter-serum."). The GDI fallback card must
+        // never replace it in the same tutorial slot; it was what the headset showed in
+        // v686. The fallback is opt-in for diagnostics only (build/cure-fallback-card).
+        if(native_hint) return;
+        static const bool cure_fallback=fs::exists(output_directory.parent_path()/L"build"/L"cure-fallback-card");
+        if(!cure_fallback) return;
         ComPtr<ID3D11Device> device;context->GetDevice(&device);
         auto* texture=cure_prompt_texture(device.Get(),text.c_str());
         if(!texture) return;
@@ -10861,11 +10866,23 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                 if(logic==2 && controls_focus && !input.menu_modifier && !x_wheel.wheel()) {
                                     const auto cure_entity=cure_nearby_entity.load();
                                     const auto cure_state=cure_prompt_state.load();
-                                    if(cure_entity && (cure_state==2 || cure_state==4 || cure_state==5)) {
-                                        const unsigned hand=choke_hand_published.load()&1u;
-                                        (void)hand;
-                                        if(raw.right_grip>.35f || raw.left_grip>.35f) {input.right_grip=1;++cure_r1_frames;}
-                                    }
+                                    static UINT64 cure_release_until{},cure_last_pulse{};static bool cure_held_last{},cure_active_last{};static unsigned cure_state_last{};
+                                    const bool cure_active=cure_entity && (cure_state==2 || cure_state==4 || cure_state==5);
+                                    const bool cure_held=(raw.right_grip>.35f || raw.left_grip>.35f);
+                                    const auto cure_now=GetTickCount64();
+                                    if(cure_active) {
+                                        // A grip held through focus/menu/modifier transitions is in the input
+                                        // composer's blocked set; the game then never sees RB, exactly as the
+                                        // 22:07 controller trace showed (right_grip 1, composed buttons 0).
+                                        // Release for one lead, then present a real press; re-press whenever the
+                                        // game's own native cure message appears or the grip is squeezed anew.
+                                        const bool pulse=!cure_active_last || (cure_state==5 && cure_state_last!=5) ||
+                                            (cure_held && !cure_held_last);
+                                        if(pulse && cure_now>=cure_last_pulse+400) {cure_release_until=cure_now+90;cure_last_pulse=cure_now;}
+                                        if(cure_now<cure_release_until) input.right_grip=0;
+                                        else if(cure_held) {input.right_grip=1;++cure_r1_frames;}
+                                    } else cure_release_until=0;
+                                    cure_held_last=cure_held;cure_active_last=cure_active;cure_state_last=cure_active?cure_state:0;
                                 }
                                 if(input.menu_modifier) {
                                     input.move_x=input.move_y=input.turn_x=input.turn_y=0;
