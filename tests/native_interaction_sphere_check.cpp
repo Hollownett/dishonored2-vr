@@ -215,8 +215,63 @@ struct NativeInteractionSphereFixture {
         assert(!aim.prompt_identity_for_owner(owner,0x10001,prompt_tick+NativeInteractionAim::held_grace_ms+1));
         aim.target_object_[0]=component;aim.target_owner_[0]=owner;aim.target_generation_[0]=11;aim.target_spawn_[0]=0x10001;
         put(component+0x18,rig::Identity{12,10});assert(!aim.grip_use_target(0,GetTickCount64()));
+        // A takeable Use follows the same grip sphere in reach/gaze mode; the
+        // gaze pose in volume_centre never grants the take.
+        prepare(aim,scope);
+        put(owner,image+0x1c5e258);put(image+0x1c5e258,image+0x100000);
+        aim.target_object_[0]=component;aim.target_owner_[0]=owner;aim.target_spawn_[0]=0x10001;
+        aim.target_generation_[0]=11;aim.target_tick_[0]=GetTickCount64();aim.ready_revision_[0]=scope.revision;
+        aim.hands_[0].reach=true;aim.hands_[0].volume_centre={0,0,2.6};
+        aim.hands_[0].grip=WorldTrackedPose{{0,0,2.6},{{{1,0,0},{0,1,0},{0,0,1}}}};
+        assert(!aim.grip_use_target(0,GetTickCount64()));
+        aim.hands_[0].grip=WorldTrackedPose{{.7,0,1.25},{{{1,0,0},{0,1,0},{0,0,1}}}};
+        assert(aim.grip_use_target(0,GetTickCount64()));
         assert((descriptor==std::array<unsigned char,40>{} && point==std::array<float,3>{.8f,0,1.25f}));
         assert((native_eye==std::array<float,4>{0,0,1.7f,0}));
+        // v684: a placed stun mine / spring razor is a small world object whose static-mesh box the mod
+        // cannot read, so before this the hand only qualified it while the hand ray happened to land on
+        // it: its prompt rarely appeared and the squeeze rarely took it (user, headset v682). The sphere
+        // (and the squeeze) now use the native interaction point the game reports for that candidate.
+        {
+            const std::array<float,3> at_hand{.8f,0,1.25f},away{.8f,0,3.4f};
+            const auto register_point=[&](const std::array<float,3>& p) {put(reinterpret_cast<std::uintptr_t>(p.data()),p);};
+            const auto invoke_at=[&](const float* at) {
+                point_expected=at;
+                const auto result=aim.eligibility_result(reinterpret_cast<void*>(sensor),descriptor.data(),
+                    reinterpret_cast<void*>(component),at,image+0x3b8a10);
+                point_expected=point.data();return result;
+            };
+            prepare(aim,scope);put(owner+0xf0,std::uintptr_t{});register_point(at_hand);
+            assert(!aim.owner_bounds(owner).has_value());
+            assert(invoke_at(at_hand.data())==(raw|1) && scope.hover_count==1);
+            assert(scope.hover_offers[0].point_valid && aim.sphere_point_fallbacks()>0);
+            prepare(aim,scope);put(owner+0xf0,std::uintptr_t{});register_point(away);
+            assert(invoke_at(away.data())==raw && scope.hover_count==0); // the palm is not on it
+            prepare(aim,scope);put(owner+0xf0,std::uintptr_t{});
+            assert(invoke_at(at_hand.data())==raw && aim.sphere_missing_reference()>0); // unreadable point: no reference, no qualification
+            // The squeeze takes the same placed gadget by that native point.
+            prepare(aim,scope);put(owner+0xf0,std::uintptr_t{});
+            constexpr std::uintptr_t world=0x1200000;
+            const rig::Identity sensor_identity{9,10};
+            put(game+0x60410,world);put(sensor+0x18,sensor_identity);put(sensor+0x38,static_cast<unsigned char>(1));
+            scope.sensor_identity=sensor_identity;
+            aim.target_object_[0]=component;aim.target_owner_[0]=owner;aim.target_spawn_[0]=0x10001;
+            aim.target_generation_[0]=11;aim.target_tick_[0]=GetTickCount64();aim.ready_revision_[0]=scope.revision;
+            // Inside the palm sphere: a mine-sized interaction point right under the hand.
+            const auto place=[&](Vec3 point_at) {
+                NativeInteractionAim::Contact anchor{};
+                anchor.owner=owner;anchor.sensor=sensor;anchor.world=world;anchor.component=component;anchor.spawn=0x10001;
+                anchor.sensor_identity=sensor_identity;anchor.camera_identity=scope.camera.camera_identity;
+                anchor.component_identity=rig::Identity{11,10};
+                anchor.point=point_at;anchor.tick=GetTickCount64();anchor.epoch=scope.hand.epoch;
+                anchor.revision=scope.revision;anchor.publication_tick=scope.hand.tick;
+                aim.contact_anchor_[0]=anchor;
+            };
+            place(Vec3{.8f,0,1.25f});assert(aim.grip_use_target(0,GetTickCount64()));
+            place(Vec3{.8f,0,2.2f});assert(!aim.grip_use_target(0,GetTickCount64())); // 95 cm from the palm: refused
+            aim.contact_anchor_[0]={};assert(!aim.grip_use_target(0,GetTickCount64())); // no point and no box: refused, never guessed
+            aim.target_object_[0]=0;aim.target_tick_[0]=0;
+        }
         {
             const auto los=[&](unsigned char& output) {
                 return aim.occlusion_result_body(reinterpret_cast<void*>(sensor),reinterpret_cast<void*>(owner),native_eye.data(),nullptr,
@@ -246,6 +301,35 @@ struct NativeInteractionSphereFixture {
                 put(owner,image+0x1c5e258);put(image+0x1c5e258,image+0x100000);
                 if(!inside) {scope.hand.volume_centre={0,0,1.25};aim.hands_[0]=scope.hand;}
                 assert(aim.takeable(owner));los_blocked=blocked;los_output=0x7d;los_calls=0;output=0xcc;
+                assert(los(output)==(raw|(inside?0u:1u)) && output==(inside?0:1) && los_calls==1);
+            }
+            // Reach/gaze must not turn the head pose into pickup reach: the
+            // publication's volume_centre is the gaze there, so the tracked
+            // grip is the pickup origin in every mode.
+            for(const bool grip_inside:{false,true}) {
+                prepare(aim,scope);aim.occlusion_=native_los;
+                put(owner,image+0x1c5e258);put(image+0x1c5e258,image+0x100000);
+                scope.hand.reach=true;
+                scope.hand.grip=WorldTrackedPose{grip_inside?Vec3{.7,0,1.25}:Vec3{0,0,2.6},{{{1,0,0},{0,1,0},{0,0,1}}}};
+                scope.hand.volume_centre=grip_inside?Vec3{0,0,2.6}:Vec3{.7,0,1.25};
+                aim.hands_[0]=scope.hand;
+                assert(aim.takeable(owner));los_blocked=true;los_output=0x7d;los_calls=0;output=0xcc;
+                assert(los(output)==(raw|(grip_inside?0u:1u)) && output==(grip_inside?0:1) && los_calls==1);
+            }
+            // A bottle/glass is arkMovable + arkCpntPickable_Simple, not an
+            // arkPickup. The carryable component alone makes it takeable, and
+            // its reach-mode gate is exactly the same hand sphere, including
+            // when the character classifier cannot decode its class at all.
+            for(const bool classified:{false,true})for(const bool inside:{false,true}) {
+                prepare(aim,scope);aim.occlusion_=native_los;
+                constexpr std::uintptr_t member=owner+0x2000,slot=owner+0x2100;
+                put(owner,image+0x1c5de18);if(classified)put(image+0x1c5de18,image+0x100000);
+                put(owner+0x268,rig::List{slot,1,1<<8});put(slot,member);put(member,image+0x1c5a3b8);
+                scope.hand.reach=true;
+                scope.hand.grip=WorldTrackedPose{inside?Vec3{.7,0,1.25}:Vec3{0,0,2.6},{{{1,0,0},{0,1,0},{0,0,1}}}};
+                scope.hand.volume_centre={0,0,2.6};
+                aim.hands_[0]=scope.hand;
+                assert(aim.takeable(owner));los_blocked=false;los_output=0;los_calls=0;output=0xcc;
                 assert(los(output)==(raw|(inside?0u:1u)) && output==(inside?0:1) && los_calls==1);
             }
             NativeInteractionAim::retrieved_={};
@@ -330,4 +414,4 @@ struct NativeInteractionSphereFixture {
     }
 };
 }
-int main() {SetErrorMode(SEM_FAILCRITICALERRORS|SEM_NOGPFAULTERRORBOX);d2vr::NativeInteractionSphereFixture::run();std::cout<<"PASS: hand sphere preserves native semantic refusal and original arguments; qualified geometry override, nested C++/SEH TLS, revoked ownership/spawn, range/character/lifetime guards and generic readable grip\n";}
+int main() {SetErrorMode(SEM_FAILCRITICALERRORS|SEM_NOGPFAULTERRORBOX);d2vr::NativeInteractionSphereFixture::run();std::cout<<"PASS: hand sphere preserves native semantic refusal and original arguments; qualified geometry override, native-point reference for a placed gadget with no readable model box (sphere and grip Use), nested C++/SEH TLS, revoked ownership/spawn, range/character/lifetime guards, generic readable grip, reach-mode and unclassified-carryable pickup gates\n";}

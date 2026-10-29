@@ -203,6 +203,7 @@ class NativeInteractionAim {
     struct SphereHoverOffer {
         std::uintptr_t component{},owner{},descriptor{};rig::Identity identity{};unsigned spawn{};
         std::array<unsigned char,32> declaration{};
+        Vec3 point{};bool point_valid{}; // the native interaction point this offer was qualified at (sphere reference without a model box)
     };
     struct SphereEligibilityObservation {
         unsigned calls{},native_refused{},semantic_refused{},publication_refused{},accepted{};
@@ -246,7 +247,8 @@ class NativeInteractionAim {
     Fetch fetch_{};Sort sort_{};Occlusion occlusion_{};std::array<bool,3> ranking_enabled_{};
     RangeOrigin range_origin_{};bool range_origin_enabled_{};
     Eligibility eligibility_{};bool eligibility_enabled_{};
-    struct SphereEligibility {const Context* scope{};std::uintptr_t owner{},component{};rig::Identity identity{};unsigned spawn{};bool semantic_passed{};};
+    struct SphereEligibility {const Context* scope{};std::uintptr_t owner{},component{};rig::Identity identity{};unsigned spawn{};bool semantic_passed{};
+        Vec3 point{};bool point_valid{};}; // the native eligibility point, re-read for every later ownership check
     inline static thread_local SphereEligibility* sphere_eligibility_{};
     inline static constexpr std::array<unsigned char,8> range_origin_code{0x48,0x8d,0x81,0xd8,0,0,0,0xc3};
     inline static thread_local std::array<float,4> hand_range_origin_{};
@@ -268,6 +270,9 @@ class NativeInteractionAim {
     std::atomic<UINT64> volume_requests_{},volume_rejected_{},ranked_{},ranking_rejected_{},direct_shortcuts_filtered_{},occluded_scan_continued_{};
     std::atomic<UINT64> loot_prompt_lingers_dropped_{}; // H14: loot prompt lingers ended by the hand's own cycle
     std::atomic<UINT64> pickup_range_rejected_{};
+    // v684: hand-sphere references taken from the native interaction point instead of a model box (a placed
+    // stun mine / spring razor), and sphere evaluations that had no reference at all and so were refused.
+    mutable std::atomic<UINT64> sphere_point_fallbacks_{},sphere_missing_reference_{};
     std::atomic<UINT64> loot_hand_los_{},loot_eye_los_{}; // H16: stage-0 loot LOS calls swept from the clamped palm / left at the eye (no clamped palm)
     std::atomic<UINT64> palm_beam_fallbacks_{}; // hand-mode cycles ordered by the v610 beam because the palm probe was invalid
     std::atomic<UINT64> hand_range_origins_{};
@@ -499,20 +504,59 @@ class NativeInteractionAim {
         __finally {crash_operation=previous_operation;--self->depth_;}
     }
 
+    // The hand that admits a pickup: the tracked grip centre (the sphere hand
+    // mode has always used), never the publication's volume_centre while a
+    // gaze/reach look-up has replaced that pose with the head. Measuring the
+    // gaze pose let a bottle seen across the room be taken; a reach cycle
+    // without a tracked grip has no hand origin and admits no takeable.
+    std::optional<Vec3> pickup_hand(const Publication& hand) const {
+        if(hand.grip && grab_pose_valid(*hand.grip))return hand.grip->position;
+        if(hand.reach)return std::nullopt;
+        return hand.volume_centre;
+    }
+    // Loot (arkPickup: food, ammo, coins) and native carryables
+    // (arkCpntPickable_Simple: bottles, glasses) share one pickup rule in every
+    // mode: the owner's bounds, or the native hit point when no bounds are
+    // readable, must lie inside the 25 cm hand sphere. No character
+    // classification is needed, so an unclassified carryable cannot bypass it.
+    bool takeable_in_hand(const Publication& hand,std::uintptr_t owner,std::optional<Vec3> fallback={},bool known_takeable=false) const {
+        if(!known_takeable && !takeable(owner)) return false;
+        const auto at=pickup_hand(hand);
+        if(!at) return false;
+        const auto probe=hand_sphere_probe(*at);
+        if(const auto box=owner_bounds(owner)) return hand_pickup_in_range(probe,box->first,box->second);
+        return fallback && hand_pickup_in_range(probe,*fallback,*fallback);
+    }
+    // The hand sphere's proximity reference for an owner: the rendered model box when the mod can
+    // read one, otherwise the native interaction point the game itself reported for this candidate.
+    // A placed stun mine or spring razor is a small world object with no readable static-mesh box,
+    // so before v684 the hand never qualified it: its prompt only appeared while the hand ray
+    // happened to land on it and the squeeze only took it on that same frame (user, headset v682:
+    // "the pickup prompt is not displayed ... sometimes it [is] very hard to pickup"). The point is
+    // the exact native argument of the same eligibility/LOS call, never a guess; native permission,
+    // the character classifier and the 25 cm gate are unchanged.
+    std::optional<std::pair<Vec3,Vec3>> sphere_reference(std::optional<std::pair<Vec3,Vec3>> box,const Vec3* point) const {
+        if(box) return box;
+        if(!point || !finite(*point)) return {};
+        ++sphere_point_fallbacks_;
+        return std::pair<Vec3,Vec3>{*point,*point};
+    }
     // Sphere membership never grants an action: the native eligibility routine
     // must first pass its original descriptor flags and FSM permission checks.
-    bool sphere_owner_current(const Context& scope,std::uintptr_t owner) const {
+    bool sphere_owner_current(const Context& scope,std::uintptr_t owner,const Vec3* point=nullptr) const {
         if(scope.stage!=0 || scope.side<0 || scope.hand.reach || !fresh(scope,GetTickCount64()))return false;
         const auto character=character_type(owner);if(!character || *character)return false;
         const auto game=rig::value<std::uintptr_t>(read_,base_+0x39a5290);
         const auto spawn=rig::value<unsigned>(read_,owner+0xa8);
-        const auto box=owner_bounds(owner);
+        const auto bounds=owner_bounds(owner);
+        if(!bounds && !point) ++sphere_missing_reference_;
+        const auto box=sphere_reference(bounds,point);
         return game && spawn && *spawn!=0x3fff0010 && (*spawn>>16)<0x3fff &&
             rig::value<std::uintptr_t>(read_,*game+0x3130b0+(*spawn>>16)*8)==owner && box &&
             hand_pickup_in_range(hand_sphere_probe(scope.hand.volume_centre),box->first,box->second);
     }
     bool sphere_eligibility_current(const SphereEligibility& query) const {
-        return context_==query.scope && query.scope && sphere_owner_current(*query.scope,query.owner) &&
+        return context_==query.scope && query.scope && sphere_owner_current(*query.scope,query.owner,query.point_valid?&query.point:nullptr) &&
             rig::value<unsigned>(read_,query.owner+0xa8)==query.spawn &&
             rig::value<std::uintptr_t>(read_,query.component+0x10)==query.owner &&
             rig::started(read_,query.component)==query.identity;
@@ -520,7 +564,7 @@ class NativeInteractionAim {
     bool sphere_publication_current_locked(const SphereEligibility& query) const {
         if(!query.scope || query.scope->side<0 || query.scope->side>1)return false;
         const auto side=static_cast<unsigned>(query.scope->side);const auto& hand=hands_[side];const auto now=GetTickCount64();
-        const auto box=owner_bounds(query.owner);
+        const auto box=sphere_reference(owner_bounds(query.owner),query.point_valid?&query.point:nullptr);
         return published_[side] && routing_.selected()==query.scope->side && routing_.revision()==query.scope->revision &&
             routing_.ownership_revision()==query.scope->ownership_revision && queued_revision_[side]==query.scope->revision &&
             hand.epoch==query.scope->hand.epoch && hand.player==query.scope->hand.player && hand.camera==query.scope->hand.camera &&
@@ -543,7 +587,14 @@ class NativeInteractionAim {
         const auto identity=rig::started(read_,at);
         const auto spawn=owner?rig::value<unsigned>(read_,*owner+0xa8):std::nullopt;
         if(!owner || !identity || !spawn)return native();
-        const bool inside=sphere_owner_current(*scope,*owner);
+        // The native eligibility point is this candidate's interaction point in the world; it is the
+        // sphere reference when the owner has no readable model box (v684).
+        std::optional<Vec3> native_point;
+        if(const auto raw=rig::value<std::array<float,3>>(read_,reinterpret_cast<std::uintptr_t>(point))) {
+            const Vec3 candidate{(*raw)[0],(*raw)[1],(*raw)[2]};
+            if(finite(candidate)) native_point=candidate;
+        }
+        const bool inside=sphere_owner_current(*scope,*owner,native_point?&*native_point:nullptr);
         const auto note=[&](std::uintptr_t original,std::uintptr_t effective,bool semantic,bool owned) {
             auto& o=scope->eligibility;++o.calls;o.owner=*owner;o.descriptor=reinterpret_cast<std::uintptr_t>(descriptor);
             const auto table=rig::value<std::uintptr_t>(read_,at),declaration=rig::value<std::uintptr_t>(read_,at+8);
@@ -559,8 +610,10 @@ class NativeInteractionAim {
         };
         if(!inside) {const auto result=native();note(result,result,false,false);return result;}
         SphereHoverOffer offered{at,*owner,reinterpret_cast<std::uintptr_t>(descriptor),*identity,*spawn,{}};
+        offered.point=native_point.value_or(Vec3{});offered.point_valid=native_point.has_value();
         const bool have_descriptor=rig::pointer(offered.descriptor) && read_(offered.descriptor,offered.declaration.data(),offered.declaration.size());
         SphereEligibility query{scope,*owner,at,*identity,*spawn,false};
+        query.point=offered.point;query.point_valid=offered.point_valid;
         sphere_eligibility_=&query;
         const auto result=native();
         bool owned=false;
@@ -1324,7 +1377,7 @@ private:
         for(unsigned i=0;i<scope.hover_count;++i) {
             const auto& offer=scope.hover_offers[i];
             if(offer.spawn!=*primary || (offer.descriptor!=*first && offer.descriptor!=*second))continue;
-            const SphereEligibility query{&scope,offer.owner,offer.component,offer.identity,offer.spawn,true};
+            const SphereEligibility query{&scope,offer.owner,offer.component,offer.identity,offer.spawn,true,offer.point,offer.point_valid};
             const auto declaration=rig::value<std::array<unsigned char,32>>(read_,offer.descriptor);
             if(!declaration || *declaration!=offer.declaration || !sphere_eligibility_current(query) || !sphere_publication_current_locked(query))return {};
             if(chosen && (chosen->component!=offer.component || chosen->identity!=offer.identity || chosen->owner!=offer.owner || chosen->spawn!=offer.spawn))return {};
@@ -1783,24 +1836,42 @@ private:
         const auto* los_origin=loot_los_origin(observed_scope,sensor,entity,point,range,caller,origin); // H16: the clamped palm for loot, else origin
         const auto result=occlusion_(sensor,entity,los_origin,axis,point,range,output); // original once, raw return preserved
         auto qualified_result=result;bool preserve_native_los=false;
-        // Direct hand interaction is proximity-only. The native routine has
-        // already checked the action's permissions. Characters and reach/gaze
-        // retain their native obstruction policy. Inside the sphere keep the
-        // accepted proximity behavior for books and other hand objects. Outside
-        // it, only known takeables require the pickup sphere: a door/usable's
-        // interaction point need not lie inside a small static-model AABB.
+        // Pickups are hand interaction in EVERY mode. The native routine has
+        // already checked the action's permissions; the pickup sphere only
+        // decides whether the hand is on the object. Loot (arkPickup: food,
+        // ammo, coins) and native carryables (arkCpntPickable_Simple: bottles,
+        // glasses) therefore use one 25 cm sphere around the tracked grip, also
+        // when the grip fallback points the native Use along the gaze. That
+        // fallback publishes the gaze pose as volume_centre, so the old
+        // hand-mode-only gate let a large bottle looked at from across the room
+        // be picked. Doors, NPCs and other world usables keep their native
+        // reach and obstruction policy; a door's interaction point need not lie
+        // inside a small static-model AABB.
         if(active_.load(std::memory_order_acquire) && observed_scope && observed_scope==context_ && observed_scope->stage==0 &&
-           observed_scope->side>=0 && !observed_scope->hand.reach && range==0 &&
+           observed_scope->side>=0 && range==0 &&
            (caller==base_+0x3b8b05 || caller==base_+0x3b87b5) && reinterpret_cast<std::uintptr_t>(sensor)==observed_scope->sensor &&
            fresh(*observed_scope,GetTickCount64())) {
             const auto owner=reinterpret_cast<std::uintptr_t>(entity);
             const auto character=character_type(owner);
-            if(character && !*character) {
-                const bool inside=sphere_owner_current(*observed_scope,owner);
-                if(inside || takeable(owner)) {
-                    qualified_result=(result&~std::uintptr_t{0xff})|(inside?0:1);
-                    if(output)*output=inside?0:1;
-                    if(!inside)++pickup_range_rejected_;
+            const bool take=character && *character?false:takeable(owner); // proven characters cannot be taken; an unclassified carryable can
+            if(take) {
+                std::optional<Vec3> fallback;
+                if(const auto hit=rig::value<std::array<float,3>>(read_,reinterpret_cast<std::uintptr_t>(point)))
+                    fallback=Vec3{(*hit)[0],(*hit)[1],(*hit)[2]};
+                const bool inside=takeable_in_hand(observed_scope->hand,owner,fallback,true);
+                qualified_result=(result&~std::uintptr_t{0xff})|(inside?0:1);
+                if(output)*output=inside?0:1;
+                if(!inside)++pickup_range_rejected_;
+            } else if(character && !*character) {
+                // The same native point this LOS call reports is the sphere reference when the owner
+                // has no readable model box (a placed stun mine / spring razor): v684.
+                const auto hit=rig::value<std::array<float,3>>(read_,reinterpret_cast<std::uintptr_t>(point));
+                const auto at=hit?std::optional<Vec3>{Vec3{(*hit)[0],(*hit)[1],(*hit)[2]}}:std::nullopt;
+                const auto point_ptr=at && finite(*at)?&*at:nullptr;
+                const bool inside=sphere_owner_current(*observed_scope,owner,point_ptr);
+                if(inside) {
+                    qualified_result=result&~std::uintptr_t{0xff};
+                    if(output)*output=0;
                 } else preserve_native_los=true;
             }
         }
@@ -2356,16 +2427,25 @@ private:
             if(!live_target(selected,now))return false;
             const auto component=target_object_[selected],door=target_owner_[selected];
             if(live_loot_offer(selected,now))return true;
-            // Readables, pickups and native carryables share the same hand
-            // sphere. The engine-selected component supplies the action.
-            // live_target already validates camera/sensor/epoch ownership here;
-            // use the current publication and bounds without fabricating a type.
-            if(!hands_[selected].reach)if(const auto box=owner_bounds(door);box &&
-                hand_pickup_in_range(hand_sphere_probe(hands_[selected].volume_centre),box->first,box->second)) {
-                const auto character=character_type(door);
-                if(character && !*character)return live_target(selected,now);
+            // Loot and native carryables are hand pickups even when the grip
+            // fallback points the native Use along the gaze: the same 25 cm
+            // grip sphere decides, so a bottle across the room is not a take.
+            if(takeable(door))return takeable_in_hand(hands_[selected],door,target_point_locked(selected,now)) && live_target(selected,now);
+            // Readables and other world usables share the same hand sphere.
+            // The engine-selected component supplies the action. live_target
+            // already validates camera/sensor/epoch ownership here; use the
+            // current publication and the owner's bounds, or the native
+            // interaction point when no box is readable (a placed stun mine /
+            // spring razor: v684), without fabricating a type.
+            if(!hands_[selected].reach)if(const auto at=pickup_hand(hands_[selected])) {
+                std::optional<std::pair<Vec3,Vec3>> bounds;
+                if(const auto box=owner_bounds(door)) bounds=box;
+                else if(const auto point=target_point_locked(selected,now)) bounds=std::pair<Vec3,Vec3>{*point,*point};
+                if(bounds && hand_pickup_in_range(hand_sphere_probe(*at),bounds->first,bounds->second)) {
+                    const auto character=character_type(door);
+                    if(character && !*character)return live_target(selected,now);
+                }
             }
-            if(takeable(door) && hands_[selected].reach)return live_target(selected,now);
             const auto identity=rig::started(read_,component);
             const auto members=rig::list(read_,door+0x268,256);
             if(!identity || identity->generation!=target_generation_[selected] || !members || !members->packed_count ||
@@ -2607,7 +2687,7 @@ public:
         log_<<"tick_ms,thread,stage,sensor,camera,routed";
         for(const auto* prefix:{"native","effective"}) for(unsigned i=0;i<12;++i) log_<<','<<prefix<<i;log_<<'\n';
         for(auto& count:query_outcomes_)count=0;
-        stage_calls_=rays_=routed_=rejected_=samples_=overlap_=volume_requests_=volume_rejected_=ranked_=ranking_rejected_=direct_shortcuts_filtered_=occluded_scan_continued_=0;palm_beam_fallbacks_=0;loot_prompt_lingers_dropped_=0;loot_hand_los_=0;loot_eye_los_=0;pickup_range_rejected_=0;instance_=this;
+        stage_calls_=rays_=routed_=rejected_=samples_=overlap_=volume_requests_=volume_rejected_=ranked_=ranking_rejected_=direct_shortcuts_filtered_=occluded_scan_continued_=0;palm_beam_fallbacks_=0;loot_prompt_lingers_dropped_=0;loot_hand_los_=0;loot_eye_los_=0;pickup_range_rejected_=0;sphere_point_fallbacks_=0;sphere_missing_reference_=0;instance_=this;
         hand_range_origins_=0;
         const std::array<void*,6> hooks{reinterpret_cast<void*>(&stage<0>),reinterpret_cast<void*>(&stage<1>),reinterpret_cast<void*>(&stage<2>),
             reinterpret_cast<void*>(&direct),reinterpret_cast<void*>(&queue<0>),reinterpret_cast<void*>(&queue<1>)};
@@ -2834,6 +2914,10 @@ public:
     UINT64 palm_beam_fallbacks() const {return palm_beam_fallbacks_.load();}
     UINT64 loot_prompt_lingers_dropped() const {return loot_prompt_lingers_dropped_.load();}
     UINT64 pickup_range_rejected() const {return pickup_range_rejected_.load();}
+    // v684: sphere references supplied by the native interaction point (no readable model box: placed
+    // mines/spring razors) and sphere evaluations refused for having neither reference.
+    UINT64 sphere_point_fallbacks() const {return sphere_point_fallbacks_.load();}
+    UINT64 sphere_missing_reference() const {return sphere_missing_reference_.load();}
     UINT64 loot_hand_los() const {return loot_hand_los_.load();}
     UINT64 loot_eye_los() const {return loot_eye_los_.load();}
     // Hands plan Task 4 interface (Task 15 grab_focus): the active floor/drawer loot fix branch. 'H' (fix round 1, ruling H16): loot LOS is

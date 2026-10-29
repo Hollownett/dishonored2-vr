@@ -58,7 +58,7 @@ def problems(header, probe):
     need(SWEPT in probe, "only a valid, swept, non-yield, non-released clamp output is a clamped palm")
     need("hand_clamped_palm[side]=hand_clamp_enabled && clamp_palm_swept[side]" in probe, "no clamped palm with build/no-hand-clamp")
     need("character_tick-hand_clamped_tick[side]<=100) clamped_palms[side]=hand_clamped_palm[side];" in probe, "<= 100 ms old")
-    need("grip_poses,character_carry,palms,clamped_palms);" in probe, "publish_hands gets the clamped palms")
+    need("grip_poses,character_carry,palms,clamped_palms,preview);" in probe, "publish_hands gets the clamped palms")
     published = body(probe, "std::array<std::optional<d2vr::Vec3>,2> clamped_palms{};", "native_interaction_aim.publish_hands(")
     need(published != "" and "grip_poses" not in published and "raw_grips" not in published and "hand_raw_world" not in published, "the clamped palms never come from the controller")
     need('",\\"loot_hand_los\\":" << native_interaction_aim.loot_hand_los()' in probe, "counters in the status JSON")
