@@ -443,16 +443,15 @@ public:
             if(in.now-dropped_>3000) dropped_=0;else {out.action=Action::stow;stow_sent_=in.now;}}
         // The hand closed on a sword in it: a squeeze that starts on the drawn sword. A grip already held when the game drew it by itself
         // (a corpse held through the end of a carry, headset v627: 16 drops for 11 draws and pickups) is not taking the sword.
-        // v692 (headset v691: "picking up an item puts the sword in my hand"): a squeeze on something the game offers to use is that Use,
-        // not taking a sword the game drew by itself, nor the dropped one lying next to the item.
-        if(edge && in.drawn && !in.busy && !in.use_target && out.action==Action::none) held_=true;
+        // v694 (user, headset v693: "the sword is in the hand only when I take it from my back or from the floor"): a squeeze never takes a
+        // sword the game drew by itself (the game's right draws are vetoed natively, NativeManualEquipRuntime); one that slipped through is put away.
         if(out.action==Action::none && !pending_ && in.now-recall_sent_>1000) {
             // ponytail: 30 s / 12 m return to the holster; tune in the headset
             if(in.copy && ((settled_ && in.drawn) || in.copy_age_s>30 || in.copy_distance>12)) {out.action=Action::recall;recall_sent_=in.now;}
         }
-        if(out.action==Action::none && in.drawn && !held_ && !pending_ && !in.busy && in.now-drawn_since_>600 &&
+        if(out.action==Action::none && in.drawn && !held_ && !pending_ && !in.busy && in.now-drawn_since_>150 &&
            (!sheathe_sent_ || in.now-sheathe_sent_>1500)) {out.action=Action::sheathe;sheathe_sent_=in.now;}
-        out.reversed=reversed_;out.owns=held_ || pending_ || in.zone || (!in.use_target && (in.drawn || (in.copy && in.copy_reach)));
+        out.reversed=reversed_;out.owns=held_ || pending_ || in.zone || (!in.use_target && in.copy && in.copy_reach);
         return out;
     }
     bool held() const noexcept {return held_;}

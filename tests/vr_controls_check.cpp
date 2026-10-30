@@ -554,8 +554,10 @@ std::printf("PASS: X wheel open/close/cancel/no-reopen/late-press, "
         in.drawn=false;in.copy_age_s=31;assert(step(7200).action==A::recall);           // left lying too long
         in.copy_age_s=1;in.grip=1;in.busy=true;assert(step(8000).action==A::none);       // carrying: the grip is not the sword
         in.busy=false;in.gameplay=false;in.grip=0;assert(step(8100).action==A::none);
-        in.gameplay=true;in.copy=false;in.grip=1;in.drawn=true;assert(step(9000).action==A::none && s.held()); // gripping a drawn sword holds it
-        in.gameplay=false;assert(step(9100).action==A::none);in.gameplay=true;assert(step(10000).action==A::none && s.held()); // wheel opened and closed
+        in.gameplay=true;in.copy=false;in.grip=1;in.drawn=true;{const auto o=step(9000);assert(o.action==A::none && !s.held() && !o.owns);} // v694: never takes a game-drawn sword
+        assert(step(9200).action==A::sheathe);                                          // put away at once
+        in.grip=0;in.drawn=false;step(9300);in.zone=true;in.grip=1;assert(step(9400).action==A::draw);in.zone=false;in.drawn=true;step(9500); // drawn by hand
+        in.gameplay=false;assert(step(9600).action==A::none);in.gameplay=true;assert(step(10000).action==A::none && s.held()); // wheel opened and closed
         in.gameplay=false;in.grip=0;assert(step(10100).action==A::none);in.gameplay=true;
         {const auto o=step(10200);assert(o.action==A::sheathe && !s.held());}           // let go inside the wheel: put away, not thrown
         in.grip=1;in.drawn=false;assert(step(11000).action==A::none);                   // a corpse held: the grip is down before the game draws
@@ -563,8 +565,7 @@ std::printf("PASS: X wheel open/close/cancel/no-reopen/late-press, "
         assert(step(11800).action==A::sheathe);                                         // put away
         in.grip=0;in.drawn=false;assert(step(11900).action==A::none);                   // letting go of the corpse drops no sword
         // v692: a squeeze on something to use is that Use, not the game-drawn sword nor the lying copy
-        in.drawn=true;in.use_target=true;in.grip=1;{const auto o=step(13000);assert(o.action==A::none && !s.held() && !o.owns);}
-        in.grip=0;in.drawn=false;step(13100);
+        in.use_target=true;in.grip=1;
         in.copy=true;in.copy_reach=true;in.copy_age_s=1;in.copy_distance=.3;in.grip=1;{const auto o=step(13200);assert(o.action!=A::pickup && !o.owns);}
         in.grip=0;in.use_target=false;step(13300);in.grip=1;assert(step(13400).action==A::pickup); // nothing to use: the copy is taken
     }

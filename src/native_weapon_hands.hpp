@@ -639,6 +639,7 @@ private:
         const auto fsm=player_fsm(base,read);if(!fsm) return false;
         alignas(16) std::array<unsigned char,0x30> params{};
         reinterpret_cast<void (__fastcall*)(void*,void*,int,int)>(base+0x835590)(params.data(),nullptr,code,0x5b);
+        if(state==53 && (code&0x0c)) {std::uint32_t id{};std::memcpy(&id,params.data(),4);NativeManualEquipRuntime::authorize_right_draw(id);} // v692: only these right draws pass
         reinterpret_cast<void (__fastcall*)(std::uintptr_t,int,void*)>(base+0x8024d0)(fsm,state,params.data()); // its al is no success flag (sim v406)
         return true;
     }

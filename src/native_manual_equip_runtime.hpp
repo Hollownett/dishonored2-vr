@@ -362,6 +362,7 @@ private:
     static bool processor_host(void* context,std::uintptr_t,std::uintptr_t state,Hooks::Params& params) {
         auto& self=*static_cast<NativeManualEquipRuntime*>(context);std::lock_guard<std::mutex> lock(self.mutex_);
         Reader reader{self.read_};const auto machine=rig::value<std::uintptr_t>(reader,state+0x10);
+        if(machine) self.veto_right_draw_locked(*machine,state,params);
         if(!machine || !self.context_locked(*machine) || self.state_locked(*machine)!=std::optional<std::uintptr_t>{state})return true;
         if(!self.armed_ && !self.arm_locked(*machine))return true;
         const auto occupied=self.occupied_locked(*machine);if(!occupied)self.revoke_locked();
@@ -391,6 +392,42 @@ private:
         if(call.granted && call.granted==self.action_.token && (!completed || !current || !self.context_locked(self.action_.owner.machine)))self.revoke_locked();
         return true;
     }
+    // v692 (user, headset v693: "the sword is only in the hand when I take it from my back or pick it up from the floor"): the
+    // right hand's EquipChange (state 53, the same class and processor 8363f0 as the left's 64) draws only for the mod's own
+    // requests (SwordGrip draw 0x04 / pickup 0x44, authorized by request id). The game's own right draws are taken out: code 4/8
+    // ("draw the remembered item", which falls back to the default sword with an empty hand: the restore after Choke/the cure,
+    // HoldObject exit 0x16, the Undraw toggle, a left Draw 8's other-hand request) and an explicit item (the wheel). Lock and
+    // unlock bits stay, so the game's lock bookkeeping is unchanged (docs/native-weapon-equip-research.md 2b/2c).
+    void veto_right_draw_locked(std::uintptr_t machine,std::uintptr_t state,Hooks::Params& params) {
+        if(!right_draw_veto.load(std::memory_order_relaxed))return;
+        Reader reader{read_};const auto pool=rig::value<std::uintptr_t>(reader,machine+0x90);
+        if(!pool || rig::value<std::uintptr_t>(reader,*pool+0x10+53*8)!=state || !rig::typed(reader,base_,state,0x1c79cf8) ||
+           rig::value<int>(reader,state+8)!=53 || !native_player_state_lease(reader,base_,machine))return;
+        std::uint32_t id{},code{};std::uintptr_t item{};
+        std::memcpy(&id,params.bytes.data(),4);std::memcpy(&item,params.bytes.data()+8,8);std::memcpy(&code,params.bytes.data()+0x18,4);
+        if(!(code&0x0cu) && !item)return;
+        if(right_draw_authorized(id)){++right_draws_allowed;return;}
+        const bool from_draw=(code&0x08u)!=0;
+        code&=~0x0cu;item=0;std::memcpy(params.bytes.data()+0x18,&code,4);std::memcpy(params.bytes.data()+8,&item,8);
+        std::memset(params.bytes.data()+0x10,0,8);++right_draw_vetoes;
+        // Code 8 comes from Draw (54, "attack with an empty hand"), which requests this synchronously from its activate 831670
+        // after storing its follow-on state at +0x30; its update 8319e0 waits for the hand to fill unless +0x30 is 0x5b, then
+        // stops itself (jmp 854190). Give it 0x5b so it ends instead of waiting for a sword that never comes.
+        if(from_draw) if(const auto draw=rig::value<std::uintptr_t>(reader,*pool+0x10+54*8);draw && *draw && rig::value<int>(reader,*draw+8)==54)
+            __try {*reinterpret_cast<volatile std::uint32_t*>(*draw+0x30)=0x5b;++right_draw_ends;} __except(EXCEPTION_EXECUTE_HANDLER) {}
+    }
+public:
+    inline static std::atomic<bool> right_draw_veto{true};
+    inline static std::atomic<std::uint64_t> right_draw_vetoes{},right_draws_allowed{},right_draw_ends{};
+    // Game thread (NativeWeaponHands::equip): the request id 835590 gave a SwordGrip draw or pickup.
+    static void authorize_right_draw(std::uint32_t id) noexcept {authorized_[authorized_next_.fetch_add(1)%authorized_.size()].store(id);}
+    static bool right_draw_authorized(std::uint32_t id) noexcept {
+        if(!id) return false;
+        for(auto& a:authorized_) {std::uint32_t want=id;if(a.compare_exchange_strong(want,0u)) return true;}
+        return false;
+    }
+private:
+    inline static std::array<std::atomic<std::uint32_t>,8> authorized_{};inline static std::atomic<unsigned> authorized_next_{};
     Hooks& hooks_;Policy policy_;mutable std::mutex mutex_;
     std::uintptr_t base_{};Read read_{};Publication publication_;Action action_;Holster holster_;
     bool installed_{},armed_{},exhausted_{};
