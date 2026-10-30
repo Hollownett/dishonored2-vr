@@ -425,7 +425,7 @@ static bool action_camera_alignment_enabled=true; // build/legacy-action-camera-
 static d2vr::ActionCameraContext action_camera_context;
 // Bonelab touch-sensor finger curl (plan C, visual only: no intent consumer reads it). The finger block (render thread) updates it and publishes the
 // status; the status writer reads. Knobs read once at start: build/finger-touch.cfg (tuning), build/legacy-finger-curl (today's mapping), logged to finger-touch.txt.
-static d2vr::rig::FingerTouchCurl finger_touch_curl;static d2vr::rig::FingerTouchParams finger_touch_params;static bool legacy_finger_curl=false;static bool finger_touch_live[2]{}; // a side that ran the touch curl last frame (else its first touch frame is seeded from the legacy wants)
+static d2vr::rig::FingerTouchCurl finger_touch_curl;static d2vr::rig::FingerTouchParams finger_touch_params;static d2vr::rig::FingerPoseFilter finger_pose_filter[2];static bool legacy_finger_curl=false;static bool finger_touch_live[2]{}; // a side that ran the touch curl last frame (else its first touch frame is seeded from the legacy wants)
 // G4 grip ease (plan Task 9): the 0.25 s grip pose blend per hand (render thread, finger block), the drawn angles it starts from, and the
 // knob build/legacy-finger-ease (no blend, no hover shape, no eased opening, the reach flips, the touch floor clamped after its filter).
 static std::array<d2vr::rig::GripPoseBlend,2> grip_pose_blend;static std::array<d2vr::rig::FingerAngles,2> finger_drawn_angles{};static std::array<bool,2> finger_drawn_valid{};
@@ -472,7 +472,7 @@ static void start_finger_touch_knobs(const fs::path& root,const fs::path& output
     std::ostringstream text;text<<cfg.rdbuf();
     if(const auto parsed=d2vr::rig::FingerTouchParams::parse(text.str().substr(0,2000))) {
         finger_touch_params=*parsed;finger_touch_params.floor_after_smoothing=legacy_finger_ease;
-        note<<"knob build/finger-touch.cfg read: touch_rest="<<parsed->touch_rest<<" index_slew="<<parsed->index_slew<<" thumb_slew="<<parsed->thumb_slew<<" smooth_rate="<<parsed->smooth_rate<<" held_floor="<<parsed->held_floor<<'\n';
+        note<<"knob build/finger-touch.cfg read: touch_rest="<<parsed->touch_rest<<" index_slew="<<parsed->index_slew<<" thumb_slew="<<parsed->thumb_slew<<" smooth_rate="<<parsed->smooth_rate<<" held_floor="<<parsed->held_floor<<" pose_smooth="<<parsed->pose_smooth<<'\n';
     } else note<<"knob build/finger-touch.cfg malformed: defaults\n";
 }
 static std::string finger_touch_status_json(bool bound,bool create_failed) {
@@ -6964,6 +6964,7 @@ void prepare_head_view(void* view) noexcept {
                                 finger_turn[side]=d2vr::rig::finger_turns_of_angles(*geometry,contact,blended);
                                 finger_drawn_angles[side]=d2vr::rig::finger_clamped_angles(contact,blended);finger_drawn_valid[side]=true;
                             }
+                            finger_turn[side]=finger_pose_filter[side].step(finger_turn[side],fdt,finger_touch_params.pose_smooth); // the drawn pose eases (no jumps)
                             has_finger_turn[side]=true;
                             if(free_hand) { // G5 acceptance: the drawn tips against the probe shapes (not the palm stop)
                                 double deepest=0,thumb=0,palm_in=0;bool near_surface=false;
@@ -7009,7 +7010,7 @@ void prepare_head_view(void* view) noexcept {
                                     pending_snapshots.push_back(std::move(sn));snap_holding[side]=true;snap_tick[side]=now_s;
                                 }
                             } else snap_holding[side]=false;
-                        } else {finger_ik[side]={};snap_holding[side]=false;grip_pose_blend[side].stop();finger_drawn_valid[side]=false;finger_ease_active[side]=false;probe_cache[side].clear();probe_serial[side]={};finger_blocked_bits[side]=0;finger_hyper_bits[side]=0;}
+                        } else {finger_ik[side]={};finger_pose_filter[side].reset();snap_holding[side]=false;grip_pose_blend[side].stop();finger_drawn_valid[side]=false;finger_ease_active[side]=false;probe_cache[side].clear();probe_serial[side]={};finger_blocked_bits[side]=0;finger_hyper_bits[side]=0;}
                         finger_was_held[side]=tracked && (holding || native_hold);
                         // A hand holding something shuts every finger (the grip alone keeps a native hold); the contact stops them at the surface.
                         hands.finger_curls[side]=touch_curl?d2vr::rig::grip_curls(contact,touch_wants):d2vr::rig::grip_curls(contact,(holding||native_hold)?d2vr::rig::held_curl:hands.curls[side],(holding||native_hold)?d2vr::rig::held_curl:hands.index_curls[side]);

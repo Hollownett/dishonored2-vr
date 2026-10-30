@@ -455,9 +455,14 @@ inline float thumb_want(const std::array<float,5>& wanted) noexcept {
 }
 // The same once the contact is known: a finger that wants to fold but lies flat on a wide surface (an oil tank, a body: headset v670) is
 // nothing to lie on either, and a thumb whose sweep met nothing closed into the palm. Untouched, it rests beside the index.
+// The cap fades in over thumb_fold_ramp of the folded finger's curl instead of switching at thumb_fold_curl (headset v693: a finger whose
+// contact curl hovers about the threshold flipped the thumb between the two every few frames).
+inline constexpr float thumb_fold_ramp=.1f;
 inline float thumb_want(const std::array<float,5>& wanted,const FingerCurls& contact) noexcept {
-    const bool folded=(wanted[1]>=thumb_fold_curl && contact.finger[1]>=thumb_fold_curl) || (wanted[2]>=thumb_fold_curl && contact.finger[2]>=thumb_fold_curl);
-    return folded || contact.touching[0]?wanted[0]:std::min(wanted[0],thumb_open_cap);
+    if(contact.touching[0]) return wanted[0];
+    const auto share=[&](unsigned f) {return std::clamp((std::min(wanted[f],contact.finger[f])-thumb_fold_curl)/thumb_fold_ramp+1.f,0.f,1.f);};
+    const float folded=std::max(share(1),share(2)),capped=std::min(wanted[0],thumb_open_cap);
+    return capped+(wanted[0]-capped)*folded;
 }
 // The memo keys on the reach in 0.05 steps (G4: the reach blends 1 -> held_curl over the grip ease; a step of a hundredth must not solve every finger again).
 inline constexpr float memo_reach_step=.05f;
@@ -759,6 +764,48 @@ inline std::array<float,5> grip_curls(const FingerCurls& contact,float squeeze,f
     if(!std::isfinite(squeeze) || squeeze<0 || squeeze>1 || !std::isfinite(index) || index<0 || index>1) throw std::invalid_argument("Invalid controller finger curl");
     return grip_curls(contact,std::array<float,5>{std::max(squeeze,.5f*index),index,squeeze,squeeze,squeeze});
 }
+// The thumb is never drawn in the palm (user, headset v693: a thumb that meets something still sinks into it). In the palm's frame (across =
+// basis[0], along the fingers, height over the palm skin) its IP joint and tip inside the knuckles' span, short of thumb_palm_past_knuckles past
+// them and with its centre under the skin (thumb_palm_depth: the hand lab's "thumb vs palm" test allowed 5 mm before v696) are in it. A pose that
+// is opens toward straight, to the most closed that is clear, whatever closed it: a want, a contact that buried it, a G5 least curl.
+inline constexpr double thumb_palm_depth=0,thumb_palm_past_knuckles=.03;
+inline bool thumb_in_palm(const HandGeometry& hand,const std::array<double,3>& angles) {
+    const Vec3 x{1,0,0},n=hand.palm_in;
+    Vec3 along=unit(cross(unit(n-x*n.x),x));if(dot(along,hand.finger[2].pivot)<0) along=along*-1;
+    const Vec3 skin=n*held_palm_depth;
+    const auto at=[&](Vec3 p) {const Vec3 d=p-skin;return Vec3{d.x,dot(d,along),dot(d,n)};};
+    const auto index_k=at(hand.finger[1].pivot),pinky_k=at(hand.finger[4].pivot);
+    const double lo=std::min(index_k.x,pinky_k.x),hi=std::max(index_k.x,pinky_k.x),end=std::max(index_k.y,pinky_k.y)+thumb_palm_past_knuckles;
+    const auto p=finger_points(hand.finger[0],finger_turns_of(hand.finger[0],angles));
+    for(unsigned k=2;k<4;++k) {const auto q=at(p[k]);if(q.x>lo && q.x<hi && q.y<end && q.z<-thumb_palm_depth) return true;}
+    return false;
+}
+inline std::array<double,3> thumb_out_of_palm(const HandGeometry& hand,const std::array<double,3>& angles) {
+    if(!thumb_in_palm(hand,angles)) return angles;
+    const auto scaled=[&](double s) {return std::array<double,3>{angles[0]*s,angles[1]*s,angles[2]*s};};
+    if(thumb_in_palm(hand,scaled(0))) return angles; // (a rig whose straight thumb lies in its palm: nothing to open to)
+    double lo=0,hi=1;for(unsigned i=0;i<7;++i) {const double m=(lo+hi)*.5;(thumb_in_palm(hand,scaled(m))?hi:lo)=m;}
+    return scaled(lo);
+}
+// The drawn finger pose eases toward the solved one: a critically damped spring per joint (Game Programming Gems 4, "critically damped ease-in/
+// ease-out smoothing"; smooth_time = 2/omega), so a finger bends, wraps and lets go over a few frames with its speed continuous, as in native VR
+// games (user, headset v693: fingers on things jumped from pose to pose). Whatever the solve does between two frames (a contact arriving, the
+// memo, the fingers taking turns, the thumb rule) is never a jump. smooth_time 0: the solved pose verbatim.
+inline constexpr double finger_pose_smooth_time=.07;
+struct FingerPoseFilter {
+    std::array<std::array<float,3>,5> turn{},speed{};bool valid{};
+    const std::array<std::array<float,3>,5>& step(const std::array<std::array<float,3>,5>& target,double dt,double smooth_time=finger_pose_smooth_time) {
+        if(!valid || !(smooth_time>0) || !std::isfinite(dt)) {turn=target;speed={};valid=true;return turn;}
+        if(dt<=0) return turn;
+        const double omega=2/smooth_time,x=omega*dt,e=1/(1+x+.48*x*x+.235*x*x*x);
+        for(unsigned f=0;f<5;++f) for(unsigned j=0;j<3;++j) {
+            const double change=turn[f][j]-target[f][j],temp=(speed[f][j]+omega*change)*dt;
+            speed[f][j]=static_cast<float>((speed[f][j]-omega*temp)*e);turn[f][j]=static_cast<float>(target[f][j]+(change+temp)*e);
+        }
+        return turn;
+    }
+    void reset() noexcept {valid=false;}
+};
 // The hinge turn (rad, over the rest pose) of every chain joint, for a pose that bends joints by angle (BodySolver). Each finger takes
 // one wanted curl and every joint follows its own path (finger_angles: their limits and coupling) up to the angle the contact left it
 // (the finger wraps: finger_contact), less the bend the rest pose has. A held hand wants every finger shut to held_curl (the grip alone
@@ -771,8 +818,8 @@ inline std::array<std::array<float,3>,5> finger_turns(const HandGeometry& hand,c
     for(unsigned f=0;f<5;++f) {
         const float floor_share=f?std::max({relaxed_share,contact.resting,contact.min_curl[f]}):std::max(relaxed_share,contact.min_curl[0]);
         const float want=std::max(f?wanted[f]:thumb_want(wanted,contact),floor_share);
-        const auto angles=finger_pose_angles(f,want,contact.pose[f]);
-        const auto t=finger_turns_of(hand.finger[f],angles);
+        const auto pose=finger_pose_angles(f,want,contact.pose[f]);
+        const auto t=finger_turns_of(hand.finger[f],f?pose:thumb_out_of_palm(hand,pose));
         for(unsigned s=0;s<3;++s) turn[f][s]=static_cast<float>(t[s]);
     }
     return turn;
@@ -802,7 +849,8 @@ inline FingerAngles finger_turns_of_angles(const HandGeometry& hand,const Finger
     require_hand(hand);
     const auto a=finger_clamped_angles(contact,wanted);FingerAngles turn{};
     for(unsigned f=0;f<5;++f) {
-        const auto t=finger_turns_of(hand.finger[f],{a[f][0],a[f][1],a[f][2]});
+        const std::array<double,3> pose{a[f][0],a[f][1],a[f][2]};
+        const auto t=finger_turns_of(hand.finger[f],f?pose:thumb_out_of_palm(hand,pose));
         for(unsigned s=0;s<3;++s) turn[f][s]=static_cast<float>(t[s]);
     }
     return turn;

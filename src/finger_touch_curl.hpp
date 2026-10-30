@@ -16,6 +16,7 @@
 namespace d2vr::rig {
 struct FingerTouchParams {
     float touch_rest=.3f,index_slew=10.f,thumb_slew=25.f,smooth_rate=20.f,held_floor=.6f;
+    float pose_smooth=static_cast<float>(finger_pose_smooth_time); // s: the drawn pose's spring (finger_ik.hpp FingerPoseFilter), 0 = off
     bool floor_after_smoothing=false; // build/legacy-finger-ease (not a file key): the pre-G4 order, the floor clamped after the filter (an open hand jumps to it)
     // "key=value" lines (blank lines and # comments allowed); any bad line -> nullopt; values clamped to sane ranges.
     static std::optional<FingerTouchParams> parse(const std::string& text) {
@@ -33,6 +34,7 @@ struct FingerTouchParams {
             else if(key=="thumb_slew") p.thumb_slew=std::clamp(v,1.f,100.f);
             else if(key=="smooth_rate") p.smooth_rate=std::clamp(v,1.f,100.f);
             else if(key=="held_floor") p.held_floor=std::clamp(v,0.f,1.f);
+            else if(key=="pose_smooth") p.pose_smooth=std::clamp(v,0.f,.3f);
             else return std::nullopt;
         }
         return p;

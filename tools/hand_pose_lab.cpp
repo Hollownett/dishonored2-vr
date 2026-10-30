@@ -541,18 +541,22 @@ int run(int argc,char** argv) {
                 if(amp<0 && recorded_lag.empty()) continue;
                 r::FingerIkState state{};auto wants=r::finger_wants(true,scene.squeeze,scene.index);
                 unsigned seed=12345u;const auto rnd=[&seed]() {seed=seed*1664525u+1013904223u;return (seed>>8)/double(1u<<24)*2-1;};
-                std::array<std::array<float,3>,5> last{};double worst=0,sum=0;unsigned counted=0;
+                std::array<std::array<float,3>,5> last{},last_drawn{};double worst=0,sum=0,worst_drawn=0,sum_drawn=0;unsigned counted=0;r::FingerPoseFilter drawn_filter{};
                 for(unsigned k=0;k<90;++k) {
                     Vec3 dp{rnd()*.003*amp,rnd()*.003*amp,rnd()*.003*amp},spin{rnd()*.035*amp,rnd()*.035*amp,rnd()*.035*amp};
                     if(amp<0) {dp=recorded_lag[k].first;spin=recorded_lag[k].second;}
                     const auto jittered=scene.moving(palm,geometry,dp,spin);
                     const auto c=r::finger_contact(geometry,palm,jittered.data(),static_cast<unsigned>(jittered.size()),1/60.,state,r::held_curl,1,&wants);
-                    if(k>=60) {double step=0;for(unsigned f=0;f<5;++f) for(unsigned j=0;j<3;++j) step=std::max(step,static_cast<double>(std::abs(c.pose[f][j]-last[f][j])));worst=std::max(worst,step);sum+=step;++counted;}
-                    last=c.pose;
+                    const auto drawn=drawn_filter.step(r::finger_turns(geometry,c,wants),1/60.); // what the game draws: the turns through the pose spring
+                    if(k>=60) {double step=0,step_drawn=0;for(unsigned f=0;f<5;++f) for(unsigned j=0;j<3;++j) {step=std::max(step,static_cast<double>(std::abs(c.pose[f][j]-last[f][j])));step_drawn=std::max(step_drawn,static_cast<double>(std::abs(drawn[f][j]-last_drawn[f][j])));}
+                        worst=std::max(worst,step);sum+=step;worst_drawn=std::max(worst_drawn,step_drawn);sum_drawn+=step_drawn;++counted;}
+                    last=c.pose;last_drawn=drawn;
                 }
                 char note[260];
                 if(amp<0) std::snprintf(note,sizeof note,"stability, the thing moving as the real motor moved it (%s): largest per-frame change of any finger joint %.2f deg, mean of the frames' largest %.2f deg",recorded_lag_note.c_str(),deg(worst),deg(sum/std::max(1u,counted)));
                 else std::snprintf(note,sizeof note,"stability, thing jittered +-%.0f mm +-%.0f deg a frame: largest per-frame change of any finger joint %.2f deg, mean of the frames' largest %.2f deg",3*amp,2*amp,deg(worst),deg(sum/std::max(1u,counted)));
+                report.push_back(note);
+                std::snprintf(note,sizeof note,"  drawn (finger_turns through FingerPoseFilter %.0f ms): largest per-frame change %.2f deg, mean of the frames' largest %.2f deg",r::finger_pose_smooth_time*1000,deg(worst_drawn),deg(sum_drawn/std::max(1u,counted)));
                 report.push_back(note);
             }
         }
@@ -573,8 +577,8 @@ int run(int argc,char** argv) {
             const auto index_k=at(out.arm[1][chains[1][0]].p),pinky_k=at(out.arm[1][chains[4][0]].p);
             const auto ip=at(out.arm[1][chains[0][2]].p),tip=at(out.arm[1][sk.find("right_thumb_end_jnt")].p);
             const double lo=std::min(index_k.x,pinky_k.x),hi=std::max(index_k.x,pinky_k.x);
-            // in the palm: inside the knuckles' span, short of the middle phalanges (knuckles + 3 cm along) and more than 5 mm under the skin plane
-            const auto inside=[&](Vec3 p) {return p.x>lo && p.x<hi && p.y<std::max(index_k.y,pinky_k.y)+.03 && p.z<-.005;};
+            // in the palm: inside the knuckles' span, short of the middle phalanges (knuckles + 3 cm along) and under the skin plane (finger_ik.hpp thumb_in_palm)
+            const auto inside=[&](Vec3 p) {return p.x>lo && p.x<hi && p.y<std::max(index_k.y,pinky_k.y)+r::thumb_palm_past_knuckles && p.z<-r::thumb_palm_depth;};
             char note[300];std::snprintf(note,sizeof note,"thumb vs palm (mm, across/along/height over the skin; knuckle span %.0f..%.0f, knuckles along %.0f): IP %.0f/%.0f/%.0f, tip %.0f/%.0f/%.0f -> %s",
                 lo*1000,hi*1000,std::max(index_k.y,pinky_k.y)*1000,ip.x*1000,ip.y*1000,ip.z*1000,tip.x*1000,tip.y*1000,tip.z*1000,inside(tip) || inside(ip)?"IN THE PALM":"clear");
             report.push_back(note);
