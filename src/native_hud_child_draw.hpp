@@ -37,8 +37,11 @@ inline bool native_hud_child_replacement_ready(const NativeHudChildScope& curren
 // Last good world prompt: lets one failed capture/readback/placement frame keep showing
 // the previous world art (republished with a fresh tick) for a short, bounded grace.
 struct NativeHudPromptHold {
-    UINT64 tick{};Vec3 point{};double width{.24};
-    void good(UINT64 now,Vec3 p,double w) noexcept {tick=now;point=p;width=w;}
+    // v692 (headset v691: the text grew huge for 1-2 frames when a prompt changed, e.g. a grabbed bottle's): the hold keeps the art's
+    // scale (metres per texel), not its width. The held frame can show newer art of another size (the bounds pass landed meanwhile).
+    UINT64 tick{};Vec3 point{};double width{.24},per_texel{};
+    void good(UINT64 now,Vec3 p,double w,unsigned texels=0) noexcept {tick=now;point=p;width=w;per_texel=texels?w/texels:0;}
+    double width_for(unsigned texels) const noexcept {return per_texel>0 && texels?per_texel*texels:width;}
     bool holds(UINT64 now,UINT64 grace=600) const noexcept {return tick && now>=tick && now-tick<=grace;} // 600: rides out takedown sensor flicker
     void reset() noexcept {tick=0;}
 };

@@ -562,6 +562,11 @@ std::printf("PASS: X wheel open/close/cancel/no-reopen/late-press, "
         in.drawn=true;assert(step(11100).action==A::none && !s.held());                 // drawn by the game under that grip: not taken
         assert(step(11800).action==A::sheathe);                                         // put away
         in.grip=0;in.drawn=false;assert(step(11900).action==A::none);                   // letting go of the corpse drops no sword
+        // v692: a squeeze on something to use is that Use, not the game-drawn sword nor the lying copy
+        in.drawn=true;in.use_target=true;in.grip=1;{const auto o=step(13000);assert(o.action==A::none && !s.held() && !o.owns);}
+        in.grip=0;in.drawn=false;step(13100);
+        in.copy=true;in.copy_reach=true;in.copy_age_s=1;in.copy_distance=.3;in.grip=1;{const auto o=step(13200);assert(o.action!=A::pickup && !o.owns);}
+        in.grip=0;in.use_target=false;step(13300);in.grip=1;assert(step(13400).action==A::pickup); // nothing to use: the copy is taken
     }
     { // G2 regrab: the pickup dead band, and the grip changes only on a draw or pickup edge.
         using A=d2vr::SwordGrip::Action;static_assert(d2vr::SwordGrip::pickup_dead_band==.35);

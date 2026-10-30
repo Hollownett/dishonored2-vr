@@ -17,6 +17,8 @@ static bool near(float a,float b,float tolerance=1e-6f) {return std::abs(a-b)<=t
 static void jitter_sequence() {
     using namespace d2vr;
     expect(dlss_jitter_phase_count==32,"32 phases");
+    expect(fsr_jitter_phase_count(.77f)==14 && fsr_jitter_phase_count(1.f)==8 && fsr_jitter_phase_count(.5f)==32 && fsr_jitter_phase_count(.667f)==18,"v692 FSR phase count");
+    expect(dlss_jitter_px(14,14)==dlss_jitter_px(0,14) && dlss_jitter_px(3,14)==dlss_jitter_px(3),"FSR phases wrap at their count, same Halton samples");
     expect(near(halton(1,2),.5f) && near(halton(2,2),.25f) && near(halton(3,2),.75f) && near(halton(1,3),1.f/3) && near(halton(2,3),2.f/3) && near(halton(3,3),1.f/9) && near(halton(4,3),4.f/9),"radical inverse values");
     expect(near(halton(0,2),0.f),"index 0 is the degenerate zero sample");
     std::set<std::pair<int,int>> distinct;

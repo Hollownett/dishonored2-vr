@@ -416,6 +416,7 @@ public:
     enum class Action {none,draw,sheathe,drop,pickup,recall,stow};
     struct In {
         float grip{};bool gameplay{},zone{},drawn{},busy{};
+        bool use_target{}; // the game offers this hand something to use (an item, a note, a door): the squeeze is that Use
         bool copy{},copy_reach{};double copy_age_s{},copy_distance{};
         double draw_dot{},pickup_dot{}; // hand forward . up (at the shoulder), hand forward . the lying blade
         std::uint64_t now{};
@@ -429,7 +430,7 @@ public:
         if(in.copy && !in.drawn) settled_=true;else if(!in.copy) settled_=false;
         if(!in.gameplay) {if(!pressed) held_=false;out.reversed=reversed_;return out;} // a menu or the wheel never drops it
         if(edge && !in.busy) {
-            if(in.copy && (in.zone || in.copy_reach)) {out.action=Action::pickup;
+            if(in.copy && (in.zone || (in.copy_reach && !in.use_target))) {out.action=Action::pickup;
                 const double dot=in.zone?in.draw_dot:in.pickup_dot;if(std::abs(dot)>pickup_dead_band) reversed_=dot<0; // a hand across the blade keeps the last grip
                 held_=true;pending_=in.now;}
             else if(in.zone && !in.drawn) {out.action=Action::draw;reversed_=in.draw_dot<-.2;held_=true;pending_=in.now;}
@@ -442,14 +443,16 @@ public:
             if(in.now-dropped_>3000) dropped_=0;else {out.action=Action::stow;stow_sent_=in.now;}}
         // The hand closed on a sword in it: a squeeze that starts on the drawn sword. A grip already held when the game drew it by itself
         // (a corpse held through the end of a carry, headset v627: 16 drops for 11 draws and pickups) is not taking the sword.
-        if(edge && in.drawn && !in.busy && out.action==Action::none) held_=true;
+        // v692 (headset v691: "picking up an item puts the sword in my hand"): a squeeze on something the game offers to use is that Use,
+        // not taking a sword the game drew by itself, nor the dropped one lying next to the item.
+        if(edge && in.drawn && !in.busy && !in.use_target && out.action==Action::none) held_=true;
         if(out.action==Action::none && !pending_ && in.now-recall_sent_>1000) {
             // ponytail: 30 s / 12 m return to the holster; tune in the headset
             if(in.copy && ((settled_ && in.drawn) || in.copy_age_s>30 || in.copy_distance>12)) {out.action=Action::recall;recall_sent_=in.now;}
         }
         if(out.action==Action::none && in.drawn && !held_ && !pending_ && !in.busy && in.now-drawn_since_>600 &&
            (!sheathe_sent_ || in.now-sheathe_sent_>1500)) {out.action=Action::sheathe;sheathe_sent_=in.now;}
-        out.reversed=reversed_;out.owns=held_ || pending_ || in.drawn || in.zone || (in.copy && in.copy_reach);
+        out.reversed=reversed_;out.owns=held_ || pending_ || in.zone || (!in.use_target && (in.drawn || (in.copy && in.copy_reach)));
         return out;
     }
     bool held() const noexcept {return held_;}

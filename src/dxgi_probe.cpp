@@ -1194,7 +1194,7 @@ static std::array<float,4> taa_jitter_scale{1,1,1,1}; // build/taa-jitter-scale 
 // DLSS owns the sub-pixel jitter (32-phase Halton, dlss_jitter.hpp) while a DLSS mode is engaged and the view jitter ABI
 // lets the forced projection and the view's stored vector agree. Latched once per Present so the eye views' Setup and
 // the TAA replacement of the same frame read one value.
-static std::atomic<bool> dlss_jitter_mode{false};
+static std::atomic<bool> dlss_jitter_mode{false};static std::atomic<std::uint32_t> jitter_phases{d2vr::dlss_jitter_phase_count}; // Halton owner (DLSS, or FSR upscaling) and its phase count
 // Per eye: the owner the forced projection actually used this frame (set with jitter_counter in prepare_head_view),
 // so the TAA replacement of the same frame derives its jitter from the same pattern whatever Present latched since.
 static std::array<std::atomic<bool>,2> jitter_owner_dlss{};
@@ -1261,7 +1261,7 @@ bool taa_dispatch_handler(ID3D11DeviceContext* c,int eye,UINT x,UINT y,UINT z,d2
     }
     if(taa && fsr_taa.enabled.load()) {
         const bool dlss_owned=eye>=0 && eye<2 && jitter_owner_dlss[static_cast<std::size_t>(eye)].load(std::memory_order_relaxed);
-        auto j=d2vr::taa_sample_px(counter,dlss_owned);
+        auto j=d2vr::taa_sample_px(counter,dlss_owned,jitter_phases.load(std::memory_order_relaxed));
         // An admitted alternate pass carries the exact sample of its image, even if Setup has already advanced.
         if(d2vr::TaaDispatchHook::pass_jitter) {
             const auto& sample=*d2vr::TaaDispatchHook::pass_jitter;
@@ -1473,7 +1473,8 @@ using ViewSetupFn=void (__fastcall*)(void*,int*,int*);
 static std::atomic<ViewSetupFn> original_setup{nullptr};
 static bool head_requested=false,head_wrote=false,symmetric_frustum_requested=false;
 static bool cant_requested=false;
-static bool mip_bias_enabled=true;static float mip_bias_extra=-.5f; // texture LOD bias while FSR upscales (sampler_lod_bias.hpp); build/no-mip-bias, build/mip-bias "<extra>" // build/cant: canted symmetric eye frusta (canted_fov.hpp), sized via the optical-density path
+static bool fsr_halton_off=false; // build/fsr-engine-jitter: FSR keeps the engine's eight 1/16 px phases (pre-v692)
+static bool mip_bias_enabled=true;static float mip_bias_extra=-1.f; // v692: AMD/NVIDIA guidance log2(render/display)-1 (was -0.5); texture LOD bias while FSR upscales (sampler_lod_bias.hpp); build/no-mip-bias, build/mip-bias "<extra>" // build/cant: canted symmetric eye frusta (canted_fov.hpp), sized via the optical-density path
 static std::atomic<UINT> head_depth{0};
 static UINT64 head_setup_seen{},head_matched{},head_writes{},head_restores{};
 static UINT64 head_pose_epoch{};
@@ -4777,7 +4778,7 @@ static std::optional<TakedownPrompt> takedown_prompt(UINT64 now) noexcept {
         return TakedownPrompt{{t->entity,static_cast<int>(spawn&0x7fffffff),0,epoch,2},{t->origin[0],t->origin[1],t->origin[2]}};
     } catch(...) {return {};}
 }
-struct SideArt {ComPtr<ID3D11Texture2D> texture;d2vr::NativeArtBounds::Metadata metadata{};UINT64 tick{};};
+struct SideArt {ComPtr<ID3D11Texture2D> texture;d2vr::NativeArtBounds::Metadata metadata{};UINT64 tick{};double per_depth{};}; // per_depth: art width per metre of depth
 static std::array<SideArt,2> native_hud_side_art;
 bool begin_native_hud_art(const d2vr::NativeHudChildScope& child) noexcept {
     if(!capturing.load() || !head_requested || child.kind==d2vr::NativeHudChildKind::none || game_logic_mask()!=2) return false;
@@ -4959,6 +4960,17 @@ void publish_native_hud_art(UINT64 now) {
         }
         context->CopySubresourceRegion(compact.texture.Get(),0,0,0,0,result->texture.Get(),0,&result->crop);
         compact.metadata=result->metadata;compact.child=queued;++native_hud_art_pixels;native_hud_art_empty_nodes[slot]=0;
+        {   // v692 (headset v691: a prompt sometimes grows very big and white for 1-2 frames): proof of every slot-0 size jump.
+            static unsigned jump_dumps{};const UINT was=compact.crop.right-compact.crop.left,width=result->crop.right-result->crop.left;
+            if(slot==0 && was && width && (width*2>was*3 || was*2>width*3) && jump_dumps<8) {
+                const auto pixels=d2vr::readback_rgba(compact.texture.Get());const auto stem=L"native-prompt-jump-"+std::to_wstring(jump_dumps++);
+                if(!pixels.bytes.empty()) std::ofstream(output_directory/(stem+L".rgba"),std::ios::binary|std::ios::trunc).write(reinterpret_cast<const char*>(pixels.bytes.data()),static_cast<std::streamsize>(pixels.bytes.size()));
+                std::ofstream(output_directory/(stem+L".json"),std::ios::trunc) << "{\"tick\":" << now << ",\"width\":" << width << ",\"height\":" << result->crop.bottom-result->crop.top
+                    << ",\"was\":[" << was << ',' << compact.crop.bottom-compact.crop.top << "],\"crop\":[" << result->crop.left << ',' << result->crop.top << ',' << result->crop.right << ',' << result->crop.bottom
+                    << "],\"surface\":[" << surface_w << ',' << surface_h << "],\"owner\":" << result->metadata.owner << ",\"was_owner\":" << compact.metadata.owner
+                    << ",\"hud_root_scale\":" << d2vr::NativeHudChildDraw::hud_root_scale() << '}';
+            }
+        }
         compact.crop=result->crop;compact.surface_w=surface_w;compact.surface_h=surface_h;compact.scope=result->metadata.serial;
         if(!native_hud_art_saved[slot]) {
             const auto pixels=d2vr::readback_rgba(compact.texture.Get());++native_hud_art_readbacks;
@@ -5066,7 +5078,7 @@ void publish_native_hud_art(UINT64 now) {
                native_hud_prompt_hold.holds(now) && c.metadata.epoch==game_xr->pose_epoch()) {
                 D3D11_TEXTURE2D_DESC d{};c.texture->GetDesc(&d);
                 if(game_xr->native_art_source(0,false,c.texture.Get(),D3D11_BOX{0,0,0,d.Width,d.Height,1},c.metadata.owner,
-                    c.metadata.epoch,now,native_hud_prompt_hold.point,native_hud_prompt_hold.width)) {
+                    c.metadata.epoch,now,native_hud_prompt_hold.point,native_hud_prompt_hold.width_for(d.Width))) {
                     native_hud_next_scopes[0]=c.child;native_hud_next_ticks[0]=now;return;}
             }
             clear();};
@@ -5082,9 +5094,13 @@ void publish_native_hud_art(UINT64 now) {
         // the tutorial message and objective markers are sized by their own captured width as a share of the 1920 stage, at the
         // HUD screen's angular scale. They used fixed metres whatever the crop (a 41 deg message; an icon and an icon+text
         // squeezed into the same 1.7 deg; markers nearer than 4 m grew).
+        // v692 (headset v691: prompt text sometimes very big for a few frames): the stage scale is the capture surface's own fit
+        // (Iggy shows the whole 1920x1080 stage: 2548x2724 eye = 1.327, the live root). The last hud.iggy root drawn could belong
+        // to another pass of the same movie and was read across frames.
         const auto stage_width=[&](double depth) {
-            D3D11_TEXTURE2D_DESC d{};compact.texture->GetDesc(&d);const float s=d2vr::NativeHudChildDraw::hud_root_scale();
-            const double share=s>0.f?d.Width/(1920.0*s):compact.surface_w?static_cast<double>(d.Width)/compact.surface_w:.1;
+            D3D11_TEXTURE2D_DESC d{};compact.texture->GetDesc(&d);
+            const double fit=compact.surface_w && compact.surface_h?std::min(compact.surface_w/1920.0,compact.surface_h/1080.0):0;
+            const double share=fit>0?d.Width/(1920.0*fit):.1;
             // 1.4: the HUD screen's own scale left message text about 6 px per letter in the headset (v689: hard to read).
             return std::clamp(1.4*game_xr->hud_stage_metres_per_depth()*share*depth,.01,64.);
         };
@@ -5218,7 +5234,7 @@ void publish_native_hud_art(UINT64 now) {
         if(game_xr->native_art_source(destination,wrist,compact.texture.Get(),crop,metadata.owner,metadata.epoch,metadata.tick,point,art_width)) {
             native_hud_next_scopes[slot]=compact.child;native_hud_next_ticks[slot]=metadata.tick;
             if(destination==d2vr::tutorial_art_slot) {native_tutorial_art_tick=now;native_tutorial_art_content=true;} // the game's own tutorial/information message
-            if(slot==0) {native_hud_prompt_hold.good(now,point,art_width);++world_prompt_frames;
+            if(slot==0) {native_hud_prompt_hold.good(now,point,art_width,desc.Width);++world_prompt_frames;
                 if(compact.child.retained_entry) {
                     static UINT64 next_placement_log{};static unsigned placement_rows{};
                     if(now>=next_placement_log && placement_rows<2048) {
@@ -5239,7 +5255,7 @@ void publish_native_hud_art(UINT64 now) {
                 auto& cache=native_hud_side_art[t->identity.side];D3D11_TEXTURE2D_DESC cd{};if(cache.texture) cache.texture->GetDesc(&cd);
                 if(!cache.texture||cd.Width!=desc.Width||cd.Height!=desc.Height||cd.Format!=desc.Format) {
                     ComPtr<ID3D11Device> dev;context->GetDevice(&dev);cache.texture.Reset();if(dev) dev->CreateTexture2D(&desc,nullptr,&cache.texture);}
-                if(cache.texture) {context->CopyResource(cache.texture.Get(),compact.texture.Get());cache.metadata=metadata;cache.tick=now;}
+                if(cache.texture) {context->CopyResource(cache.texture.Get(),compact.texture.Get());cache.metadata=metadata;cache.tick=now;cache.per_depth=stage_width(1.);}
             }
         } else fail();
     }
@@ -5252,7 +5268,11 @@ void publish_native_hud_art(UINT64 now) {
                 const UINT64 at=now>=second->selection_tick && now-second->selection_tick<=250?second->selection_tick:now;
                 if(const auto placed=d2vr::native_marker_world_point(*second->point,frame,art.metadata.epoch,frames.load()-1,at,now)) {
                     auto p=*placed;p.y+=.05;D3D11_TEXTURE2D_DESC d{};art.texture->GetDesc(&d);
-                    shown=game_xr->native_art_source(9,false,art.texture.Get(),D3D11_BOX{0,0,0,d.Width,d.Height,1},art.metadata.owner,art.metadata.epoch,now,p,.24);
+                    // v692: the same angular scale as the primary prompt (a fixed 0.24 m made one hand's hint bigger than the other's).
+                    double width=.24;if(const auto views=game_xr->tracking_views(); views && art.per_depth>0) {
+                        const d2vr::Vec3 head{((*views)[0].pose.position.x+(*views)[1].pose.position.x)*.5,((*views)[0].pose.position.y+(*views)[1].pose.position.y)*.5,((*views)[0].pose.position.z+(*views)[1].pose.position.z)*.5};
+                        width=art.per_depth*d2vr::length(p-head);}
+                    shown=game_xr->native_art_source(9,false,art.texture.Get(),D3D11_BOX{0,0,0,d.Width,d.Height,1},art.metadata.owner,art.metadata.epoch,now,p,width);
                 }
             }
         }
@@ -5568,7 +5588,7 @@ void prepare_head_view(void* view) noexcept {
             if(alternate_taa_phase) counter=*alternate_taa_phase;
             jitter_counter[eye_slot]=counter;
             const bool dlss_owned=dlss_jitter_mode.load(std::memory_order_relaxed);jitter_owner_dlss[eye_slot]=dlss_owned;
-            const auto j=d2vr::taa_sample_uv(counter,dlss_owned,static_cast<float>(taa_width.load()),static_cast<float>(taa_height.load()));
+            const auto j=d2vr::taa_sample_uv(counter,dlss_owned,static_cast<float>(taa_width.load()),static_cast<float>(taa_height.load()),jitter_phases.load(std::memory_order_relaxed));
             auto pj=j;pj.x*=taa_jitter_scale[0];pj.y*=taa_jitter_scale[1];d2vr::apply_taa_jitter(*optical,pj);taa_view_jitter={j.x*taa_jitter_scale[2],j.y*taa_jitter_scale[3]};
         } else jitter_owner_dlss[eye_slot]=false; // no forced jitter this frame: the TAA replacement must not assume the Halton pattern
         d2vr::Vec3 centre{
@@ -7911,7 +7931,7 @@ std::string feedback_status_json() {
         << ",\"fsr4_fallbacks\":" << fsr_taa.fsr4_fallbacks.load()
         << ",\"dlss\":{\"provider_found\":" << (dlss_provider_found?"true":"false") << ",\"provider_source\":" << dlss_provider_source << ",\"provider\":\"" << dlss_provider_utf8
         << "\",\"offered\":" << (dlss_offered()?"true":"false") << ",\"adapter_vendor\":" << present_adapter_vendor.load() << ",\"active\":" << (fsr_taa.dlss_active.load()?"true":"false")
-        << ",\"quality\":" << (fsr_taa.dlss_quality.load()?"true":"false") << ",\"state\":" << fsr_taa.dlss_state.load() << ",\"jitter_owner\":" << (dlss_jitter_mode.load()?"true":"false")
+        << ",\"quality\":" << (fsr_taa.dlss_quality.load()?"true":"false") << ",\"state\":" << fsr_taa.dlss_state.load() << ",\"jitter_owner\":" << (dlss_jitter_mode.load()?"true":"false") << ",\"jitter_phases\":" << jitter_phases.load()
         << ",\"evaluations\":" << fsr_taa.dlss_evaluations.load() << ",\"evaluate_failures\":" << fsr_taa.dlss_evaluate_failures.load() << ",\"create_failures\":" << fsr_taa.dlss_create_failures.load()
         << ",\"fallbacks\":" << fsr_taa.dlss_fallbacks.load() << ",\"owner_refusals\":" << fsr_taa.dlss_owner_refusals.load() << ",\"owner_status\":" << fsr_taa.dlss_owner_status.load()
         << ",\"features_created\":" << fsr_taa.dlss_features_created.load() << ",\"optimal_queries\":" << fsr_taa.dlss_optimal_queries.load() << ",\"waiting\":" << fsr_taa.dlss_waiting.load() << ",\"owner_rebuilds\":" << fsr_taa.dlss_owner_rebuilds.load()
@@ -9603,7 +9623,10 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                 }
                                 fsr_taa.dlss_quality=d2vr::dlss_mode::is_quality(live_mode);
                                 fsr_taa.dlss_active=d2vr::dlss_mode::active(live_mode) && dlss_offered();
-                                dlss_jitter_mode=fsr_taa.dlss_active.load() && fsr_taa.dlss_engaged() && view_jitter_abi && projection_jitter;
+                                {   const bool dlss_jitter=fsr_taa.dlss_active.load() && fsr_taa.dlss_engaged();
+                                    const float f=fsr_taa.fraction.load();const bool fsr_upscaling=!dlss_jitter && fsr_taa.enabled.load() && f<.999f && !fsr_halton_off;
+                                    jitter_phases=dlss_jitter?d2vr::dlss_jitter_phase_count:d2vr::fsr_jitter_phase_count(f);
+                                    dlss_jitter_mode=(dlss_jitter || fsr_upscaling) && view_jitter_abi && projection_jitter;}
                                 if(fsr_taa.dlss_failed() && !dlss_fallback_noted) {
                                     dlss_fallback_noted=true;
                                     upscale_fraction=aa_mode_fraction(live_mode);apply_upscale(upscale_fraction); // DLSS Quality's fallback renders native: FSR 3 Native now
@@ -10045,6 +10068,7 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                          hand_w=hand_world[1];hand_raw=hand_raw_world[1];hand_v=hand_velocity[1];fresh=hand_tick[1] && now_s-hand_tick[1]<=200;}
                                         d2vr::SwordGrip::In in{};in.grip=game_xr->controller_input.right_grip;in.gameplay=logic==2 && !x_wheel.wheel() && fresh && hands[1];
                                         in.zone=sheath.in[1];in.drawn=drawn;in.busy=busy;in.now=now_s;
+                                        in.use_target=controller_aim_requested && native_interaction_aim.has_target(1,now_s);
                                         const auto& gq=game_xr->grip_locations[1].pose.orientation;
                                         in.draw_dot=d2vr::rotated(d2vr::Quaternion{gq.x,gq.y,gq.z,gq.w},{0,0,-1}).y; // fist pointing up or down
                                         if(const auto copy=d2vr::NativeWeaponHands::copy();copy.present) {
@@ -10975,6 +10999,25 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                     sword_pose_tick && sword_hand_tick>=sword_pose_tick && sword_hand_tick-sword_pose_tick<=100 &&
                                     !(physical_grab_requested && native_grab.holding(1));
                                 d2vr::NativeInteractionAim::publish_sword_hand(sword_controls_live && sword_native_held && sword_grip.held(),game_xr->pose_epoch(),sword_hand_tick);
+                                {   // v692 (headset v691: a grip on items sometimes put the sword in the hand; 30 game draws, 0 by hand): the last
+                                    // 1.5 s of the buttons the game was given, written whenever the sword comes out without SwordGrip asking.
+                                    struct Sample {UINT64 t;float rb,rt,lt,rg,lg,rtr,ltr;bool x,interact,holding,carrying,held;};
+                                    static std::array<Sample,192> ring{};static unsigned head_i{},dumps{};static bool drawn_was{};
+                                    bool drawn{},holding{},carrying{};
+                                    {std::lock_guard<std::mutex> l(hand_state_mutex);drawn=(hand_weapon_bits&2u)!=0;holding=hand_holding_object;carrying=hand_carrying_bits!=0;}
+                                    ring[head_i++%ring.size()]={sword_hand_tick,input.right_grip,input.right_trigger,input.left_trigger,raw.right_grip,raw.left_grip,raw.right_trigger,raw.left_trigger,
+                                        input.x,interaction.interact,holding,carrying,sword_grip.held()};
+                                    if(drawn && !drawn_was && logic==2 && sword_hand_tick>=sword_incoming_until.load() && dumps<64) {
+                                        ++dumps;std::ofstream out(output_directory/L"native-sword-draw-journal.jsonl",std::ios::app);
+                                        out<<"{\"tick\":"<<sword_hand_tick<<",\"rows\":[";bool first=true;
+                                        for(unsigned i=0;i<ring.size();++i) {const auto& s=ring[(head_i+i)%ring.size()];
+                                            if(!s.t || s.t+1500<sword_hand_tick) continue;
+                                            out<<(first?"":",")<<'['<<s.t-sword_hand_tick<<','<<s.x<<','<<s.rb<<','<<s.rt<<','<<s.lt<<','<<s.rg<<','<<s.lg<<','<<s.rtr<<','<<s.ltr
+                                               <<','<<s.interact<<','<<s.holding<<','<<s.carrying<<','<<s.held<<']';first=false;}
+                                        out<<"],\"columns\":\"dt,X,RB,RT,LT,raw_rgrip,raw_lgrip,raw_rtrig,raw_ltrig,interact,holding,carrying,sword_held\"}\n";
+                                    }
+                                    drawn_was=drawn;
+                                }
                                 input.lean_controlled=input.lean_modifier=input.lean_suspended=false;
                                 if(hand_body_requested.load(std::memory_order_relaxed)) {
                                     // B13: the hand bodies must be destroyed BEFORE the game pauses (the 0x89fb0 dispatcher stops while paused, B11):
@@ -11901,7 +11944,8 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
         {d2vr::FsrTaa::Config fc{};std::ifstream knob(root/L"build"/L"fsr");std::array<float*,3> fields{&fc.sharpness,&fc.mv_x,&fc.mv_y};for(auto* f:fields) {float v{};if(!(knob>>v)) break;*f=v;}fc.mv_full=fs::exists(root/L"build"/L"fsr-mv-full");fsr_taa.configure(fc);}
         cant_requested=symmetric_frustum_requested && headset_size_requested && fs::exists(root/L"build"/L"cant");
         mip_bias_enabled=!fs::exists(root/L"build"/L"no-mip-bias");
-        {std::ifstream knob(root/L"build"/L"mip-bias");float v{};mip_bias_extra=(knob>>v && std::isfinite(v) && v>=-2 && v<=1)?v:-.5f;}
+        {std::ifstream knob(root/L"build"/L"mip-bias");float v{};mip_bias_extra=(knob>>v && std::isfinite(v) && v>=-2 && v<=1)?v:-1.f;}
+        fsr_halton_off=fs::exists(root/L"build"/L"fsr-engine-jitter");
         if(cant_requested) {optical_density_requested=true;optical_density_applied=false;}
         bool render_perf_setup=fs::exists(root/L"build"/L"render-perf");render_perf_ready=false;
         render_perf_write_failed=false;render_perf_prepare_failed=false;render_perf_dispatch=0;

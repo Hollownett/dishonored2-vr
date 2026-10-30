@@ -80,6 +80,7 @@ int main(){
     assert(!native_hud_child_replacement_ready(identity,identity,1001,1000));
     NativeHudPromptHold hold;assert(!hold.holds(1000));hold.good(1000,Vec3{},.24);
     assert(hold.holds(1600) && !hold.holds(1601) && !hold.holds(999));hold.reset();assert(!hold.holds(1000));
+    hold.good(1000,Vec3{},.3,300);assert(hold.width_for(100)>.0999 && hold.width_for(100)<.1001 && hold.width_for(0)==.3); // v692: the scale is held, not the width
     assert(!native_hud_keep_flat(NativeHudChildKind::prompt,true,false,false)); // target exists: never flat
     assert(!native_hud_keep_flat(NativeHudChildKind::prompt,false,false,true));
     assert(!native_hud_keep_flat(NativeHudChildKind::prompt,false,false,false)); // VR-only: never flat, even without a target
