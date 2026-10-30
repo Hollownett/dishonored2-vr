@@ -5,6 +5,7 @@
 #include <cstdint>
 
 namespace d2vr {
+inline constexpr unsigned crosshair_capture_slot=13; // NativeHudChildKind::crosshair
 // Native child-render capture only. No scene/whole-HUD claiming rectangles,
 // engine metadata writes, extra native draws or immediate-context fallback.
 class NativeHudChildCapture {
@@ -16,7 +17,7 @@ public:
         void (*end)(void*,ID3D11DeviceContext*,std::uint64_t) noexcept{};
     } observer{};
     using Fallback=void (*)(ID3D11DeviceContext*,ID3D11RenderTargetView*,ID3D11RenderTargetView*,const NativeHudChildScope&);
-    static constexpr unsigned slot_count=13; // prompt, vitals/equipment, bounded individual markers, tutorial (11), HUD window panel (12)
+    static constexpr unsigned slot_count=14; // prompt, vitals/equipment, bounded individual markers, tutorial (11), HUD window panel (12), crosshair (13)
     struct Snapshot {
         WorldUiCapture::Snapshot image;NativeHudChildScope child;
         explicit operator bool()const noexcept{return bool(image);}

@@ -48,6 +48,14 @@ int main() {
         ThrowGesture g;g.note_trigger(0,gadget_squeeze(1,1));g.note_hand(5,{0,0,0},{0,0,-3});
         g.note_trigger(10,gadget_squeeze(.1f,.1f));expect(g.pending(11),"an opened fist releases");
     }
+    {   // v688: a fist ends when the grip opens even while the index still rests on the trigger; trigger-only holds are unchanged
+        d2vr::GadgetFist fist;expect(fist(1,1)==1,"fist held");
+        expect(fist(.3f,.9f)<.35f,"grip opening releases the fist at once");
+        expect(fist(.3f,.9f)<.35f && fist(.1f,.9f)<.35f,"a resting index does not cook again");
+        expect(fist(.1f,.1f)<.35f && fist(1,1)==1,"released index re-arms");
+        d2vr::GadgetFist trig;expect(trig(.3f,1)==1 && trig(.3f,.9f)>=.55f,"trigger-only hold with a resting grip stays held");
+        expect(trig(.3f,.1f)<.35f,"trigger-only release");
+    }
     std::printf(failures?"throw_gesture_check FAILED\n":"throw_gesture_check ok\n");
     return failures?1:0;
 }

@@ -24,6 +24,7 @@ struct ControllerInput {
     bool native_y_quick_action{};
     bool suppress_y{}; // the hold-Y menu owns this press: the game must not also see it, quick action or not
     bool lean_controlled{},lean_modifier{},lean_suspended{};
+    bool left_trigger_instant{}; // a gadget's left trigger is already a clean 0/1 hold: its release reaches the game at once
     std::array<bool,4> dpad{}; // right, up, left, down (native QUICK_0..3).
 };
 inline bool native_directional_stick(const ControllerInput& in) noexcept {
@@ -127,6 +128,7 @@ public:
         if(gameplay && !in.menu_modifier) {
             // A deliberate block (menu, focus guard, fresh activation) drops the hold at once; only a gap in the value is bridged.
             if(blocked_analog_&1) {power_held_=false;power_low_frames_=0;}
+            else if(in.left_trigger_instant) {power_held_=false;power_low_frames_=0;pad.bLeftTrigger=trigger(in.left_trigger);}
             else pad.bLeftTrigger=trigger(power_trigger(in.left_trigger,now));
             if(!(blocked_analog_&2)) pad.bRightTrigger=trigger(in.right_trigger);
         }

@@ -28,7 +28,7 @@ class NativeGrenadeThrow {
 public:
     static constexpr std::uintptr_t setter_rva=0x87c2a0,call_return_rva=0x633341,call_site_rva=0x63333c,get_component_rva=0x877720,grenade_type_rva=0x39e28e0;
     inline static std::atomic<std::uint64_t> calls{},rewritten{},not_grenade{},no_gesture{},faults{};
-    inline static std::atomic<float> last_speed{};
+    inline static std::atomic<float> last_speed{};inline static std::atomic<std::uint64_t> last_delay_ms{};
     // Present thread: one hand sample per frame (relative velocity) and the trigger.
     static void hand(std::uint64_t now,const std::array<double,3>& pos,const std::array<double,3>& relative_velocity) noexcept {
         std::lock_guard<std::mutex> l(mutex_);gesture_.note_hand(now,pos,relative_velocity);
@@ -78,7 +78,7 @@ private:
                 ThrowGestureResult r{};
                 {std::lock_guard<std::mutex> l(mutex_);r=gesture_.take(GetTickCount64(),player_v_);}
                 if(!r.ok) ++no_gesture;
-                else if(write(velocity,r)) {last_speed=static_cast<float>(std::sqrt(r.velocity[0]*r.velocity[0]+r.velocity[1]*r.velocity[1]+r.velocity[2]*r.velocity[2]));++rewritten;}
+                else if(write(velocity,r)) {last_delay_ms=r.delay_ms;last_speed=static_cast<float>(std::sqrt(r.velocity[0]*r.velocity[0]+r.velocity[1]*r.velocity[1]+r.velocity[2]*r.velocity[2]));++rewritten;}
                 else ++faults;
             }
         }

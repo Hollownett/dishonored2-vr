@@ -7,7 +7,7 @@
 #include <mutex>
 
 namespace d2vr {
-enum class NativeHudChildKind:unsigned {none,prompt,health,mana,equipment,objective,tutorial,panel};
+enum class NativeHudChildKind:unsigned {none,prompt,health,mana,equipment,objective,tutorial,panel,crosshair};
 struct NativeHudChildScope {
     NativeHudChildKind kind{};std::uintptr_t file{},iggy{},node{},owner{};UINT64 epoch{},tick{};
     std::array<float,6> matrix{};std::array<float,4> bounds{};bool matrix_valid{},bounds_valid{};
@@ -147,7 +147,10 @@ public:
     // of the frame (n counts from 0 after begin_frame), nullopt for none.
     using EyeShift=std::optional<std::array<float,2>> (*)(unsigned eye_draw_index) noexcept;
     inline static std::atomic<EyeShift> eye_shift{};
-    inline static std::atomic<UINT64> crosshair_hidden_draws{},crosshair_eye_shifts{},crosshair_unlayouts{};
+    inline static std::atomic<UINT64> crosshair_hidden_draws{},crosshair_eye_shifts{},crosshair_unlayouts{},crosshair_captures{};
+    // v688: while the mod composes the reticle, the game's own crosshair element (dot, red dot, grenade/mine/power/crossbow
+    // states) is captured instead of hidden; its anchor (the glyph translation, target pixels) is where the aim point sits.
+    inline static std::atomic<float> crosshair_anchor_x{},crosshair_anchor_y{};
     // Observation only: gate/busy, owner/movie mismatch, no callback, native
     // binding, file/recent-Draw, backlinks, tree, exception.
     inline static std::array<std::atomic<UINT64>,8> eye_rejects{};
@@ -449,14 +452,27 @@ private:
             if(scaled && eye_layout_scale_!=1.f) {scaled=native_crosshair_unlayout(glyph,eye_layout_scale_,eye_layout_centre_);if(scaled)++crosshair_unlayouts;}
             if(scaled)scaled=native_crosshair_glyph_scale(glyph,hud_scale.load(std::memory_order_relaxed));
             const unsigned eye_draw=eye_draws_.fetch_add(1,std::memory_order_relaxed);
-            if(crosshair_hidden.load(std::memory_order_relaxed) || crosshair_composed.load(std::memory_order_relaxed)) {native_crosshair_hide(glyph);scaled=true;++crosshair_hidden_draws;} // read failed: a zero matrix is invisible too
-            else if(scaled)
+            NativeHudChildScope crosshair{};bool captured=false;const auto previous=current;const auto stop=end.load(std::memory_order_acquire);
+            if(scaled && !crosshair_hidden.load(std::memory_order_relaxed) && crosshair_composed.load(std::memory_order_relaxed))
+                if(const auto start=begin.load(std::memory_order_acquire);start && stop) {
+                    std::uintptr_t file{};
+                    if(read_(reinterpret_cast<std::uintptr_t>(iggy)+0x78,&file,sizeof(file)) && file) {
+                        crosshair={NativeHudChildKind::crosshair,file,reinterpret_cast<std::uintptr_t>(iggy),reinterpret_cast<std::uintptr_t>(node),
+                            reinterpret_cast<std::uintptr_t>(node),tutorial_epoch.load(std::memory_order_relaxed),GetTickCount64()};
+                        crosshair.matrix=glyph;crosshair.matrix_valid=true;
+                        current=&crosshair;captured=start(crosshair);
+                        if(captured) {crosshair_anchor_x.store(glyph[4],std::memory_order_relaxed);crosshair_anchor_y.store(glyph[5],std::memory_order_relaxed);++crosshair_captures;}
+                        else current=previous;
+                    }
+                }
+            if(!captured && (crosshair_hidden.load(std::memory_order_relaxed) || crosshair_composed.load(std::memory_order_relaxed))) {native_crosshair_hide(glyph);scaled=true;++crosshair_hidden_draws;} // read failed: a zero matrix is invisible too
+            else if(!captured && scaled)
                 if(const auto shift=eye_shift.load(std::memory_order_relaxed))
                     if(const auto extra=shift(eye_draw)) {glyph[4]+=(*extra)[0];glyph[5]+=(*extra)[1];++crosshair_eye_shifts;}
             std::uint32_t result{};
             if(profile)profile(1,nesting_);
             __try {result=original_(iggy,scaled?glyph.data():matrix,node,aux,p5,p6,clip,depth);}
-            __finally {if(profile){profile(2,nesting_);profile(3,nesting_);}--nesting_;--depth_;}
+            __finally {if(captured){stop(crosshair);current=previous;}if(profile){profile(2,nesting_);profile(3,nesting_);}--nesting_;--depth_;}
             return result;
         }
         // Full-screen overlays (DamageVignette) are laid out for the flat screen; in the eye they showed as a sharp-edged

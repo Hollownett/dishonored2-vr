@@ -177,6 +177,8 @@ private:
     std::unique_ptr<NoteEyeArt> note_eye_art_;
     std::array<NoteHandReceipt,2> note_hands_{};
     EyeReticleFrames eye_reticles_;
+    struct CrosshairArt {Microsoft::WRL::ComPtr<ID3D11Texture2D> texture;D3D11_BOX crop{};float anchor_x{},anchor_y{},scale{1.f};UINT64 epoch{},tick{};};
+    CrosshairArt crosshair_art_;
     bool eye_reticle_failed_{};
     Microsoft::WRL::ComPtr<ID3D11Texture2D> eye_reticle_texture_;
     std::vector<XrSwapchainImageD3D11KHR> hint_images_;
@@ -417,6 +419,12 @@ public:
     }
     std::array<unsigned,2> world_ui_size() const {if(!world_ui_source_) return {};D3D11_TEXTURE2D_DESC d{};world_ui_source_->GetDesc(&d);return {d.Width,d.Height};}
     float hud_scale() const noexcept {return static_cast<float>(settings_.hud_percent())/65.f;}
+    // v688: one angular scale for native HUD art. Metres of art width per (stage fraction x depth) at which an element keeps
+    // the share of the HUD screen the flat game gives it (the eye draw multiplies by hud_scale(), divided out here).
+    double hud_stage_metres_per_depth() const noexcept {
+        const double hfov=(views_[0].fov.angleRight-views_[0].fov.angleLeft)*57.29577951308232;
+        return 2*std::tan(hud_screen_degrees(hfov,settings_.hud_percent())*.5*0.017453292519943295)/hud_scale();
+    }
     // Rows of the world UI image shown: the whole image (wheel, black market) or the centred 16:9 band.
     std::int32_t world_ui_rows(const D3D11_TEXTURE2D_DESC& d) const noexcept {
         return world_ui_full_?static_cast<std::int32_t>(d.Height):static_cast<std::int32_t>(std::clamp(std::lround(d.Width*menu_band),1l,static_cast<long>(d.Height)));
@@ -1377,7 +1385,14 @@ public:
     }
     // Publication is authorized by ranged_aim_gate.reticle. Native HUD clipping
     // cannot authorize visibility of a reticle drawn across the full eye FOV.
-    UINT64 eye_reticle_draws{};
+    UINT64 eye_reticle_draws{},crosshair_art_draws{};
+    // v688: the game's own crosshair element (captured live, every frame) replaces the static dot at the same reticle point.
+    // anchor: the element's origin inside crop (source pixels); scale: eye pixels per source pixel.
+    void crosshair_art(ID3D11Texture2D* texture,D3D11_BOX crop,float anchor_x,float anchor_y,float source_width,UINT64 epoch,UINT64 tick) noexcept {
+        crosshair_art_={};
+        if(!texture || !(source_width>0.f) || !std::isfinite(anchor_x) || !std::isfinite(anchor_y))return;
+        crosshair_art_={texture,crop,anchor_x,anchor_y,static_cast<float>(width_)/source_width,epoch,tick};
+    }
     bool eye_reticle_available() const noexcept {return !eye_reticle_failed_;}
     void eye_reticle(unsigned eye,EyeReticle value) noexcept {eye_reticles_.publish(eye,value);}
     void clear_eye_reticles() noexcept {eye_reticles_.clear();}
@@ -2252,7 +2267,19 @@ public:
                     const auto now=GetTickCount64();XrView view{XR_TYPE_VIEW};view.pose=layers[eye].pose;view.fov=layers[eye].fov;
                     if(eye_reticle_available() && settings_.crosshair() && !settings_.open() && state==XR_SESSION_STATE_FOCUSED && controller_input.active) try {
                         const auto image_frame=alternate_enabled?alt_effective_()[eye].frame:alternate_frame;
-                        if(const auto reticle=eye_reticles_.find(eye,image_frame,pose_epoch(),reference_epoch(),now))
+                        const auto reticle=eye_reticles_.find(eye,image_frame,pose_epoch(),reference_epoch(),now);
+                        bool game_crosshair=false;
+                        if(reticle && crosshair_art_.texture && crosshair_art_.epoch==pose_epoch() && now>=crosshair_art_.tick && now-crosshair_art_.tick<=150 && ensure_native_eye_art()) {
+                            // The element's anchor sits on the reticle point at the game's own pixel size.
+                            const auto& a=crosshair_art_;const float w=static_cast<float>(width_),h=static_cast<float>(height_);
+                            const float px=(reticle->x+1.f)*.5f*w-a.anchor_x*a.scale,py=(1.f-reticle->y)*.5f*h-a.anchor_y*a.scale;
+                            const float cw=static_cast<float>(a.crop.right-a.crop.left)*a.scale,ch=static_cast<float>(a.crop.bottom-a.crop.top)*a.scale;
+                            const auto art_result=native_eye_art_->draw(images_[eye].at(index).texture,a.texture.Get(),a.crop,
+                                {px/w*2.f-1.f,1.f-py/h*2.f,(px+cw)/w*2.f-1.f,1.f-(py+ch)/h*2.f},format_,true);
+                            if(art_result.drawn) {++eye_reticle_draws;++crosshair_art_draws;game_crosshair=true;}
+                            else {note_eye_art_fault(art_result,"game crosshair");crosshair_art_={};}
+                        }
+                        if(reticle && !game_crosshair)
                             if(const auto rect=eye_reticle_rect(reticle->x,reticle->y,width_,height_,10.f)) { // the game dot reads as large as the old ring
                                 if(!eye_reticle_texture_) {
                                     Microsoft::WRL::ComPtr<ID3D11Device> device;context_->GetDevice(&device);
@@ -2274,7 +2301,7 @@ public:
                     } catch(...) {
                         // Fail locally. The following prepared frame restores
                         // the engine's own validated crosshair child.
-                        eye_reticle_failed_=true;eye_reticle_texture_.Reset();eye_reticles_.clear();
+                        eye_reticle_failed_=true;eye_reticle_texture_.Reset();eye_reticles_.clear();crosshair_art_={};
                     }
                     for(unsigned art_slot=0;art_slot<native_object_art_.size();++art_slot) if(const auto& art=native_object_art_[art_slot];art.fresh(pose_epoch(),now)) {
                         const auto aspect=static_cast<double>(art.crop.right-art.crop.left)/(art.crop.bottom-art.crop.top);

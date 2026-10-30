@@ -15,10 +15,31 @@ struct ThrowGestureParams {
     double gain=1.5,window_ms=100,cap_mps=17,stale_ms=1500,teleport_mps=12;
     float hold_on=.55f,hold_off=.35f;
 };
-struct ThrowGestureResult {bool ok{};std::array<double,3> velocity{},spawn{};double hand_speed{};};
+struct ThrowGestureResult {bool ok{};std::array<double,3> velocity{},spawn{};double hand_speed{};std::uint64_t delay_ms{};}; // delay: release -> the game's launch
 // How hard a gadget hand squeezes (user, headset v671: "squeeze a fist, then throw like a normal grenade"): with the grip held it is
 // the fist (both), so opening the hand lets go; without it, the trigger alone (the old way).
 inline float gadget_squeeze(float grip,float trigger) noexcept {return grip>.55f?(grip<trigger?grip:trigger):trigger;}
+// v688 (user, headset v686: the grenade left late): a squeeze that began as a fist ends when EITHER finger opens. Stateless,
+// a grip falling under .55 handed the squeeze to the index finger alone, so a lagging index held the throw back.
+// After an opened fist the squeeze stays released until the index lets go too (or the fist closes hard again): a resting index
+// must not cook the next gadget.
+class GadgetFist {
+    bool fist_{},wait_{};
+public:
+    float operator()(float grip,float trigger) noexcept {
+        const float both=grip<trigger?grip:trigger;
+        if(wait_) {
+            if(gadget_squeeze(grip,trigger)<.35f || (grip>.8f && trigger>=.55f)) wait_=false;
+            else return 0.f;
+        }
+        if(fist_) {
+            if(both<.35f) {fist_=false;wait_=true;}
+            return both;
+        }
+        if(grip>.55f && trigger>=.55f) {fist_=true;return both;}
+        return gadget_squeeze(grip,trigger);
+    }
+};
 class ThrowGesture {
     static constexpr unsigned history=32;
     struct Sample {std::uint64_t t;std::array<double,3> v;};
@@ -55,7 +76,7 @@ public:
     ThrowGestureResult take(std::uint64_t now,const std::array<double,3>& player_velocity) noexcept {
         ThrowGestureResult out{};
         if(!pending(now) || !peak_ok_ || !have_pos_ || now<pos_t_ || now-pos_t_>250 || !finite(player_velocity)) return out;
-        released_=false;
+        released_=false;out.delay_ms=now-release_t_;
         out.hand_speed=norm(peak_);
         for(unsigned i=0;i<3;++i) out.velocity[i]=peak_[i]*p_.gain+player_velocity[i];
         const double n=norm(out.velocity);
