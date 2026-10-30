@@ -521,7 +521,11 @@ private:
         auto scope=tutorial_child(iggy,node,matrix);if(scope.kind==NativeHudChildKind::none)scope=identify(iggy,node,matrix);
         if(window && scope.kind==NativeHudChildKind::none)scope=takedown_child(iggy,node,matrix);
         if(window) {
-            const bool tutorial=scope.kind==NativeHudChildKind::tutorial;
+            // Only the tutorial movie's cards are panel content. hud.iggy's script messages (_tutorialMessage /
+            // _informationMessage, bound by publish(tutorial)) stay world art like the takedown hints (v677's intent): on the
+            // panel below the gaze the game's "Press [Grip] to inject counter-serum." was not seen (headset v689/v690).
+            const auto is_tutorial_movie=tutorial_movie.load(std::memory_order_relaxed);
+            const bool tutorial=scope.kind==NativeHudChildKind::tutorial && is_tutorial_movie && is_tutorial_movie(iggy);
             if(tutorial && scope.matrix_valid && scope.bounds_valid)
                 if(const float dx=native_hud_centre_shift(scope.matrix,scope.bounds);dx!=0.f) {laid=scope.matrix;laid[4]+=dx;relaid=true;}
             if((scope.kind==NativeHudChildKind::prompt && !prompt_world.load(std::memory_order_relaxed)) || tutorial)

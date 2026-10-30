@@ -56,14 +56,6 @@ int main() {
         d2vr::GadgetFist trig;expect(trig(.3f,1)==1 && trig(.3f,.9f)>=.55f,"trigger-only hold with a resting grip stays held");
         expect(trig(.3f,.1f)<.35f,"trigger-only release");
     }
-    {   // v690: an early release on the throwing motion takes the peak of the follow-through, and holds stay off until the fist opens
-        ThrowGesture g;g.note_trigger(0,1);g.note_hand(10,{0,0,0},{0,0,-2});
-        expect(g.speed(20)==2 && g.speed(100)==0,"latest hand speed");
-        g.release_now(20);g.note_trigger(30,1);g.note_hand(120,{0,0,-.5},{0,0,-6});g.note_hand(200,{0,0,-1},{0,0,-3});
-        expect(g.pending(201),"held fist after an early release does not cancel it");
-        const auto r=g.take(250,{0,0,0});expect(r.ok && std::abs(r.velocity[2]+9)<1e-9 && r.spawn[2]==-1,"follow-through peak, launch position");
-        g.note_trigger(260,0);g.note_trigger(270,1);expect(!g.pending(271),"a new hold after the fist opened");
-    }
     std::printf(failures?"throw_gesture_check FAILED\n":"throw_gesture_check ok\n");
     return failures?1:0;
 }

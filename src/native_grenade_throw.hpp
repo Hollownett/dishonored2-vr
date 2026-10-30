@@ -24,9 +24,20 @@ extern "C" MH_STATUS WINAPI MH_DisableHook(LPVOID);
 #include <mutex>
 
 namespace d2vr {
+// v691 (user, headset v690: the grenade leaves ~0.3 s after the hand opens; it must leave at once, like any thrown object).
+// The launch is the ARK_MSG_WEAPON_FIRE (200) event at 293 ms in the throw scene gadget_grenade_throw_high.midnightscene
+// (302 ms low/slide), not a timer or data delay. Both throw states (arkPlayerStateFireWeapon 0x866DC0, quick-use
+// arkPlayerStateThrowWeapon 0x84AA20) take the scene AND its play rate from arkCpntWeaponThrowable slot 0x120 = 0x633810
+// (vtable 0x1B9D9D8 only; grenades only: mines/razors are cpntWeaponPlaceable) and pass that rate to the scene-rate setter
+// 0x7D8FE0, which stores it unclamped (0x7D1740 -> scene+0x16C). Hooking 0x633810 to scale its rate plays the throw scene
+// (event, sound, ammo, the switch to reload) K times faster: x8 puts the launch at ~37 ms. The reload scene (slot 0x128) is
+// untouched. Signature verified at 0x866E8C..0x866E9A: rcx = the component, rdx = float* rate (preset 1.0), rax = scene.
+// Knob build/grenade-throw-rate (1..16, 1 = native).
 class NativeGrenadeThrow {
 public:
     static constexpr std::uintptr_t setter_rva=0x87c2a0,call_return_rva=0x633341,call_site_rva=0x63333c,get_component_rva=0x877720,grenade_type_rva=0x39e28e0;
+    static constexpr std::uintptr_t fire_scene_rva=0x633810;
+    inline static std::atomic<float> scene_rate{8.f};inline static std::atomic<std::uint64_t> scenes_sped{};
     inline static std::atomic<std::uint64_t> calls{},rewritten{},not_grenade{},no_gesture{},faults{};
     inline static std::atomic<float> last_speed{};inline static std::atomic<std::uint64_t> last_delay_ms{};
     // Present thread: one hand sample per frame (relative velocity) and the trigger.
@@ -35,9 +46,6 @@ public:
     }
     static void trigger(std::uint64_t now,float value) noexcept {std::lock_guard<std::mutex> l(mutex_);gesture_.note_trigger(now,value);}
     static void player_velocity(const std::array<double,3>& v) noexcept {std::lock_guard<std::mutex> l(mutex_);player_v_=v;}
-    static double speed(std::uint64_t now) noexcept {std::lock_guard<std::mutex> l(mutex_);return gesture_.speed(now);}
-    static void release_now(std::uint64_t now) noexcept {std::lock_guard<std::mutex> l(mutex_);gesture_.release_now(now);++early_releases;}
-    inline static std::atomic<std::uint64_t> early_releases{};
     static bool installed() noexcept {return target_!=nullptr;}
     static bool install(std::uintptr_t base) noexcept {
         if(!base) return false;
@@ -53,10 +61,32 @@ public:
         const auto s=MH_EnableHook(target_);
         return s==MH_OK || s==MH_ERROR_ENABLED;
     }
-    static void disable() noexcept {if(target_) MH_DisableHook(target_);}
+    static void disable() noexcept {if(target_) MH_DisableHook(target_);if(scene_target_) MH_DisableHook(scene_target_);}
+    // The throw scene's play rate (see the header). False: the bytes differ or the hook failed; the native rate stays.
+    static bool install_scene_rate(std::uintptr_t base,float rate) noexcept {
+        if(!base || !std::isfinite(rate) || rate<1.f || rate>16.f) return false;
+        scene_rate=rate;
+        if(!scene_target_) {
+            static const unsigned char want[12]{0x48,0x89,0x5c,0x24,0x10,0x48,0x89,0x6c,0x24,0x18,0x56,0x57};
+            unsigned char got[12]{};
+            __try {std::memcpy(got,reinterpret_cast<const void*>(base+fire_scene_rva),12);} __except(EXCEPTION_EXECUTE_HANDLER) {return false;}
+            if(std::memcmp(got,want,12)) return false;
+            void* t=reinterpret_cast<void*>(base+fire_scene_rva);
+            if(MH_CreateHook(t,reinterpret_cast<void*>(&scene_hook),reinterpret_cast<void**>(&scene_original_))!=MH_OK) return false;
+            scene_target_=t;
+        }
+        const auto s=MH_EnableHook(scene_target_);
+        return s==MH_OK || s==MH_ERROR_ENABLED;
+    }
     static void reset() noexcept {std::lock_guard<std::mutex> l(mutex_);gesture_.reset();}
 private:
     inline static void* target_{};inline static std::uintptr_t base_{};
+    inline static void* scene_target_{};inline static void* (__fastcall *scene_original_)(void*,float*){};
+    static void* __fastcall scene_hook(void* component,float* rate) {
+        void* scene=scene_original_(component,rate);
+        if(scene && rate) __try {if(std::isfinite(*rate) && *rate>0.f) {*rate*=scene_rate.load();++scenes_sped;}} __except(EXCEPTION_EXECUTE_HANDLER) {}
+        return scene;
+    }
     inline static void (__fastcall *original_)(void*,const float*){};
     inline static std::mutex mutex_;inline static ThrowGesture gesture_;inline static std::array<double,3> player_v_{};
     static bool is_grenade(void* entity) noexcept {
