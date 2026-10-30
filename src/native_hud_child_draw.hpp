@@ -163,6 +163,10 @@ public:
         root_scale_pub.store(m[0],std::memory_order_relaxed);root_tx_pub.store(m[4],std::memory_order_relaxed);root_ty_pub.store(m[5],std::memory_order_relaxed);
     }
     static float root_scale() noexcept {return root_scale_pub.load(std::memory_order_relaxed);}
+    // hud.iggy's own root scale only. root_scale_pub is also written by the tutorial and panel movies (other roots), so a
+    // size derived from it jumped between frames (v689 headset: HUD art popping in size).
+    inline static std::atomic<float> hud_root_scale_pub{};
+    static float hud_root_scale() noexcept {return hud_root_scale_pub.load(std::memory_order_relaxed);}
     // The eye target size in pixels from the movie root (it fits the 1920x1080 stage by width and centres it): {0,0} when unknown.
     static std::array<float,2> target_size() noexcept {
         const float s=root_scale_pub.load(std::memory_order_relaxed),tx=root_tx_pub.load(std::memory_order_relaxed),ty=root_ty_pub.load(std::memory_order_relaxed);
@@ -491,7 +495,9 @@ private:
         }
         if(nesting_==1 && iggy)
             if(const auto is_hud=hud_movie.load(std::memory_order_relaxed);is_hud && is_hud(iggy)) {
-                std::uintptr_t file{};if(read_ && read_(reinterpret_cast<std::uintptr_t>(iggy)+0x78,&file,sizeof(file)) && file)hud_file.store(file,std::memory_order_relaxed);}
+                std::uintptr_t file{};if(read_ && read_(reinterpret_cast<std::uintptr_t>(iggy)+0x78,&file,sizeof(file)) && file)hud_file.store(file,std::memory_order_relaxed);
+                std::array<float,6> root{};if(matrix && read_ && read_(reinterpret_cast<std::uintptr_t>(matrix),root.data(),sizeof(root)) && root[0]>0.f && std::isfinite(root[0]))
+                    hud_root_scale_pub.store(root[0],std::memory_order_relaxed);}
         if(window && matrix && nesting_==1)
             if(const auto is_hud=hud_movie.load(std::memory_order_relaxed),is_tutorial=tutorial_movie.load(std::memory_order_relaxed),extra=panel_movie.load(std::memory_order_relaxed);
                ((is_hud && is_hud(iggy)) || (is_tutorial && is_tutorial(iggy)) || (extra && extra(iggy))) && read_(reinterpret_cast<std::uintptr_t>(matrix),laid.data(),sizeof(laid)))
@@ -678,7 +684,7 @@ public:
         const auto status=MH_EnableHook(target_);active_=status==MH_OK || status==MH_ERROR_ENABLED;return active_.load();
     }
     static bool disable() noexcept {
-        cpu_profile=nullptr;eye_live=nullptr;eye_shift=nullptr;crosshair_hidden=false;crosshair_composed=false;root_scale_pub=0.f;clear_eye();active_=false;transform=nullptr;begin=nullptr;end=nullptr;observer=nullptr;hud_movie=nullptr;tutorial_movie=nullptr;panel_movie=nullptr;tutorial_epoch=0;hud_layout_node=nullptr;hud_scale=1.f;panel_active=false;panel_generic=false;hud_file=0;eye_node=0;prompt_world=false;
+        cpu_profile=nullptr;eye_live=nullptr;eye_shift=nullptr;crosshair_hidden=false;crosshair_composed=false;root_scale_pub=0.f;hud_root_scale_pub=0.f;clear_eye();active_=false;transform=nullptr;begin=nullptr;end=nullptr;observer=nullptr;hud_movie=nullptr;tutorial_movie=nullptr;panel_movie=nullptr;tutorial_epoch=0;hud_layout_node=nullptr;hud_scale=1.f;panel_active=false;panel_generic=false;hud_file=0;eye_node=0;prompt_world=false;
         if(!target_)return true;const auto result=MH_DisableHook(target_);if(result!=MH_OK && result!=MH_ERROR_DISABLED)return false;
         const auto until=GetTickCount64()+2000;while(depth_ && GetTickCount64()<until)Sleep(1);if(depth_)return false;clear();return true;
     }

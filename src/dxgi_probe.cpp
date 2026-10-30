@@ -3126,6 +3126,7 @@ static std::atomic<UINT64> sword_aim_frames{};
 static std::atomic<UINT64> gaze_takedown_frames{},prompt_latency_last{},prompt_latency_max{}; // gaze_takedown_frames: frames the game aimed by gaze
 static char left_equip_name[32]{}; // native equip pose name of the left hand ("Empty", pistol, crossbow...), under hand_state_mutex
 static std::atomic<bool> left_gadget{}; // the left hand holds a grenade, stun mine or spring razor (its equip name)
+static std::atomic<bool> left_grenade{}; // ... and it is a grenade (thrown, not placed)
 static bool left_aim_wanted{}; // the left trigger aimed this session: the native left aim must then have applied
 static std::atomic<UINT64> holster_until{}; // holster hold running: aim up, no hand rays, so Interact sheathes
 static std::atomic<unsigned> scabbard_entries{},holster_fires{}; // the right hand reaching the sword holster behind the shoulder; B holster holds
@@ -3174,6 +3175,7 @@ static void publish_gadget_aim(const d2vr::WorldTrackedPose& left,const std::opt
     gadget.tick=GetTickCount64();d2vr::NativeGadgetAim::publish(gadget);
 }
 static bool grenade_hand_throw_enabled=false; // Track T A: installed, and build/no-hand-grenade-throw absent
+static double grenade_early_mps=1.5; // v690: hand speed that lets a held grenade go on the throwing motion; build/grenade-early-mps (0 = at the release)
 static void publish_hand(unsigned side,const d2vr::WorldTrackedPose& drawn,const d2vr::WorldTrackedPose& raw) {
     // Throw velocity = the hand's displacement over the last ~60 ms. A per-frame difference aliases: positions arrive at the
     // tracking rate, not the render rate (sim v415 measured 1.9 m/s for a 6 m/s throw). A one-frame jump over 0.35 m is a
@@ -3340,7 +3342,9 @@ static bool shoulder_dock_enabled{};   // build/shoulder-dock: a body released a
 // action (declaration+0x98) and its Carry as the SECONDARY one (+0x70); the game's Use acts on the primary. So a
 // body whose Loot action is live is being looted, not carried: standing aside for that press is what lets a note
 // or other loot on a body reach the game. A body offered only its Carry still gets the v637 hand-carry guard.
-static bool body_carry_action(std::uintptr_t e) noexcept {std::uint8_t f{};return physical_grab_requested && !legacy_corpse_carry && npc_entity(e) && read_self(e+0xd1,&f,1) && (f&0x28);}
+// v690: never the cured Hypatia lying on the floor: her prompt is the game's own wake-up interaction (headset 2026-10-30: the
+// grip started the scene but no prompt showed).
+static bool body_carry_action(std::uintptr_t e) noexcept {std::uint8_t f{};return physical_grab_requested && !legacy_corpse_carry && npc_entity(e) && read_self(e+0xd1,&f,1) && (f&0x28) && !is_hypatia_entity(e);}
 static bool body_carry_prompt(std::uintptr_t e) noexcept {return body_carry_action(e) && !native_interaction_aim.loot_offered(e,GetTickCount64());}
 // What a hand's grip holds rather than uses (user 2026-10-13: "move objects pickup like coins to a trigger"; the grip holds things):
 // a native carryable (arkCpntPickable_Simple 0x1c5a3b8: bottles, glasses, severed limbs -> HoldObject) or a body (a dead or
@@ -4984,6 +4988,9 @@ void publish_native_hud_art(UINT64 now) {
            now<live.image.recorded_tick || now-live.image.recorded_tick>250) continue;
         D3D11_TEXTURE2D_DESC surface{};live.image.texture->GetDesc(&surface);
         if(surface.Width!=c.surface_w || surface.Height!=c.surface_h) continue;
+        // Only an element drawn at the same place: a moving one (objective markers follow the view) would be cut by the
+        // old crop. v689 refreshed those too and the markers blinked; they wait for their own bounds pass.
+        if(!live.child.matrix_valid || !c.child.matrix_valid || live.child.matrix!=c.child.matrix) continue;
         if(slot>0 && slot<4 && live.image.recorded_tick<c.metadata.tick+33) continue; // wrist layers: at most 30 Hz
         context->CopySubresourceRegion(c.texture.Get(),0,0,0,0,live.image.texture.Get(),0,&c.crop);
         c.metadata.tick=live.image.recorded_tick;c.scope=live.image.scope_id;++native_hud_art_refreshes;
@@ -5078,9 +5085,10 @@ void publish_native_hud_art(UINT64 now) {
         // HUD screen's angular scale. They used fixed metres whatever the crop (a 41 deg message; an icon and an icon+text
         // squeezed into the same 1.7 deg; markers nearer than 4 m grew).
         const auto stage_width=[&](double depth) {
-            D3D11_TEXTURE2D_DESC d{};compact.texture->GetDesc(&d);const float s=d2vr::NativeHudChildDraw::root_scale();
+            D3D11_TEXTURE2D_DESC d{};compact.texture->GetDesc(&d);const float s=d2vr::NativeHudChildDraw::hud_root_scale();
             const double share=s>0.f?d.Width/(1920.0*s):compact.surface_w?static_cast<double>(d.Width)/compact.surface_w:.1;
-            return std::clamp(game_xr->hud_stage_metres_per_depth()*share*depth,.01,64.);
+            // 1.4: the HUD screen's own scale left message text about 6 px per letter in the headset (v689: hard to read).
+            return std::clamp(1.4*game_xr->hud_stage_metres_per_depth()*share*depth,.01,64.);
         };
         // A prompt whose object/NPC anchor cannot be read must still be visible: put it ahead of the player instead
         // of dropping it. This is the last-good fallback for scripted prompts (Dr. Hypatia's counter-serum) whose
@@ -8058,7 +8066,7 @@ std::string feedback_status_json() {
            << ",\"last_call\":\"" << (game_xr?game_xr->native_eye_art_last_call:std::string()) << "\"}"
            << ",\"offered_choke_spawn\":" << offered_choke_spawn.load()
            << ",\"prompt_shows_hides\":[" << prompt_shows.load() << ',' << prompt_hides.load() << "],\"takedown_flips\":" << takedown_flips.load() << ",\"takedown_hints\":" << d2vr::NativeHudChildDraw::takedown_hints.load() << ",\"takedown_anchor\":{\"enabled\":" << (prompt_target_anchor?"true":"false") << ",\"frames\":" << takedown_anchor_frames.load() << ",\"object_conflicts\":" << takedown_anchor_object_conflicts.load() << '}' << ",\"npc_blade_contacts\":" << npc_blade_contacts.load() << ",\"contact_hits\":[" << d2vr::NativeInteractionAim::melee_applied_.load() << ',' << d2vr::NativeInteractionAim::melee_rejected_.load() << ',' << d2vr::NativeInteractionAim::melee_faults_.load() << ']' << ",\"contact_rejects\":[" << d2vr::NativeInteractionAim::melee_why_[0].load() << ',' << d2vr::NativeInteractionAim::melee_why_[1].load() << ',' << d2vr::NativeInteractionAim::melee_why_[2].load() << ']' << ",\"corpse_chops\":" << d2vr::NativeMelee::chops.load() << ",\"tip_speed\":[" << tip_speed_now[0].load() << ',' << tip_speed_now[1].load() << ']' << ",\"slash_speed\":" << (d2vr::NativeSlashSceneRate::process_owner().enabled()?slash_speed_factor:1.f) << ",\"slash_scene_rate\":{\"enabled\":" << (d2vr::NativeSlashSceneRate::process_owner().enabled()?"true":"false") << ",\"accelerations\":" << d2vr::NativeSlashSceneRate::process_owner().accelerations() << ",\"setter_failures\":" << d2vr::NativeSlashSceneRate::process_owner().setter_failures() << "}" << ",\"block_unequip_vetoes\":" << d2vr::NativeBlockEligibility::process_owner().vetoes() << ",\"takedown_range\":" << (native_interaction_aim.takedown_ranges_applied()?"true":"false") << ",\"takedown_kill_rules\":" << native_interaction_aim.takedown_range_kill_rules() << ",\"layer\":" << d2vr::NativeHeldObject::layer_json() << ",\"release_watch\":" << d2vr::NativeInteractionAim::release_watch_json() << ",\"held_clamp\":{\"enabled\":" << (held_clamp_enabled?"true":"false") << ",\"sweeps\":" << held_clamp_status.sweeps.load() << ",\"hits\":" << held_clamp_status.hits.load() << ",\"self_hits\":" << held_clamp_status.self_hits.load() << ",\"clamped_frames\":" << held_clamp_status.clamped_frames.load() << ",\"cast_us\":" << held_clamp_status.cast_us.load() << ",\"cast_us_max\":" << held_clamp_status.cast_us_max.load() << ",\"no_bounds\":" << held_clamp_status.no_bounds.load() << ",\"held_clamp_no_bounds\":" << held_clamp_status.no_bounds.load() << ",\"overlap_on_release\":" << held_clamp_status.overlap_on_release.load() << ",\"release_depen_frames\":" << held_clamp_status.release_depen_frames.load() << ",\"release_overlap_unresolved\":" << held_clamp_status.release_overlap_unresolved.load() << ",\"drawn_hand_gap_m\":" << held_clamp_status.drawn_hand_gap_m.load() << ",\"layer_at_release\":" << held_clamp_status.layer_at_release.load() << ",\"forced_drops\":" << held_clamp_status.forced_drops.load() << ",\"releases\":" << held_clamp_status.releases.load() << ",\"layer_reasserts\":" << d2vr::NativeHeldObject::layers_reasserted.load() << ",\"depen_writes\":" << native_grab.depen_writes_.load() << ",\"depen_rejected\":" << native_grab.depen_rejected_.load() << "}" << ",\"barrel_aim\":{\"ok\":" << barrel_ok.load() << ",\"bad_frame\":" << barrel_bad_frame.load() << ",\"no_model\":" << barrel_no_model.load() << ",\"gun_item_frames\":" << gun_item_frames.load() << ",\"name_miss_frames\":" << gun_name_miss_frames.load() << "},\"gadget_aim\":{\"enabled\":" << (gadget_hand_aim_enabled?"true":"false") << ",\"placement\":[" << d2vr::NativeGadgetAim::placement_calls.load() << ',' << d2vr::NativeGadgetAim::placement_swapped.load() << "],\"throw_hit\":[" << d2vr::NativeGadgetAim::throw_calls.load() << ',' << d2vr::NativeGadgetAim::throw_swapped.load() << "],\"stale\":" << d2vr::NativeGadgetAim::stale.load() << ",\"bad_pointer\":" << d2vr::NativeGadgetAim::bad_pointer.load() << ",\"restore_skipped\":" << d2vr::NativeGadgetAim::restore_skipped.load() << ",\"palm\":" << d2vr::NativeGadgetAim::palm_placements.load() << ",\"left_gadget\":" << (left_gadget.load()?"true":"false") << "}"
-               << ",\"grenade_throw\":{\"enabled\":" << (grenade_hand_throw_enabled?"true":"false") << ",\"calls\":" << d2vr::NativeGrenadeThrow::calls.load() << ",\"rewritten\":" << d2vr::NativeGrenadeThrow::rewritten.load() << ",\"not_grenade\":" << d2vr::NativeGrenadeThrow::not_grenade.load() << ",\"no_gesture\":" << d2vr::NativeGrenadeThrow::no_gesture.load() << ",\"faults\":" << d2vr::NativeGrenadeThrow::faults.load() << ",\"last_speed\":" << d2vr::NativeGrenadeThrow::last_speed.load() << ",\"last_delay_ms\":" << d2vr::NativeGrenadeThrow::last_delay_ms.load() << "}"
+               << ",\"grenade_throw\":{\"enabled\":" << (grenade_hand_throw_enabled?"true":"false") << ",\"calls\":" << d2vr::NativeGrenadeThrow::calls.load() << ",\"rewritten\":" << d2vr::NativeGrenadeThrow::rewritten.load() << ",\"not_grenade\":" << d2vr::NativeGrenadeThrow::not_grenade.load() << ",\"no_gesture\":" << d2vr::NativeGrenadeThrow::no_gesture.load() << ",\"faults\":" << d2vr::NativeGrenadeThrow::faults.load() << ",\"last_speed\":" << d2vr::NativeGrenadeThrow::last_speed.load() << ",\"last_delay_ms\":" << d2vr::NativeGrenadeThrow::last_delay_ms.load() << ",\"early_releases\":" << d2vr::NativeGrenadeThrow::early_releases.load() << ",\"early_mps\":" << grenade_early_mps << "}"
                << ",\"held_object\":{\"installed\":" << (held_object_installed?"true":"false") << ",\"placed\":" << d2vr::NativeHeldObject::placed.load() << ",\"rejected_targets\":" << d2vr::NativeHeldObject::rejected_targets.load() << ",\"anchored\":" << d2vr::NativeHeldObject::anchored.load() << ",\"sim_invulnerable_blocked\":" << d2vr::NativeSimInvulnerable::blocked.load() << ",\"swarm_kill_skipped\":" << d2vr::NativeSwarmKillGuard::skipped.load() << ",\"swarm_why\":[" << d2vr::NativeMelee::swarm_why[0].load() << ',' << d2vr::NativeMelee::swarm_why[1].load() << ',' << d2vr::NativeMelee::swarm_why[2].load() << ',' << d2vr::NativeMelee::swarm_why[3].load() << "],\"thrown\":" << d2vr::NativeHeldObject::thrown.load() << ",\"throw_kept\":" << d2vr::NativeHeldObject::throw_kept.load() << ",\"throws\":" << held_throws.load() << ",\"drops\":" << held_drops.load() << "}" << ",\"arm_hidden\":" << arm_hidden_bits.load() << ",\"arm_shows\":" << d2vr::NativeHeldObject::arm_shows.load() << ",\"arm_hides_skipped\":" << d2vr::NativeHeldObject::hides_skipped.load() << ",\"held_world_renders\":" << d2vr::NativeHeldObject::world_renders.load() << ",\"held_debug\":[" << held_debug[0].load() << ',' << held_debug[1].load() << ',' << held_debug[2].load() << ',' << held_debug[3].load() << ',' << held_debug[4].load() << ',' << held_debug[5].load() << ',' << held_debug[6].load() << ',' << held_debug[7].load() << ',' << held_debug[8].load() << ',' << held_debug[9].load() << ',' << held_debug[10].load() << ',' << held_debug[11].load() << ',' << held_debug[12].load() << "]" << ",\"arm_show_failed\":" << (d2vr::NativeHeldObject::arm_show_failed.load()?"true":"false") << ",\"native_options_page\":[" << d2vr::NativeMenuEntry::clicks.load() << ',' << d2vr::NativeMenuEntry::queued.load() << ',' << d2vr::NativeMenuEntry::native_pages.load() << ',' << d2vr::NativeOptionsPage::opens.load() << ',' << d2vr::NativeOptionsPage::changes.load() << ',' << d2vr::NativeOptionsPage::faults.load() << ',' << d2vr::NativeOptionsPage::failed_step.load() << ',' << d2vr::NativeOptionsPage::last_show.load() << ',' << d2vr::NativeOptionsPage::action_flips.load() << ']' << ",\"impact_fx\":[" << d2vr::NativeInteractionAim::impact_played_.load() << ',' << d2vr::NativeInteractionAim::impact_skipped_.load() << ']' << ",\"hud_master_entries\":" << d2vr::NativeHudChildDraw::master_entries.load() << ",\"hud_window_layers\":" << (game_xr?game_xr->hud_window_layers:0) << ",\"hud_cylinder\":" << (game_xr && game_xr->cylinder_layers()?"true":"false") << ",\"hud_scale\":" << d2vr::NativeHudChildDraw::hud_scale.load()
         << ",\"contact_gates\":[" << contact_gates[0].load() << ',' << contact_gates[1].load() << ',' << contact_gates[2].load() << ',' << contact_gates[3].load() << ',' << contact_gates[4].load() << ',' << contact_gates[5].load() << ',' << contact_gates[6].load() << ',' << contact_gates[7].load() << ']'
         << ",\"takedown_range_policy\":{\"choke\":\"" << (d2vr::NativeChokeDistanceScope::process_owner().enabled()?"private-view-scaled":"native-unmodified") << "\",\"kill\":\"" << (takedown_range_scale.load()<1.f?"offer-limited-scaled":"native-unmodified") << "\",\"scale\":" << takedown_range_scale.load() << ",\"choke_factor\":" << d2vr::NativeChokeDistanceScope::process_owner().factor() << ",\"enabled\":" << (d2vr::NativeChokeDistanceScope::process_owner().enabled()?"true":"false") << ",\"substitutions\":" << d2vr::NativeChokeDistanceScope::process_owner().substitutions() << '}'
@@ -9315,6 +9323,7 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                           left_gun_model=!state->carrying && state->slots[0] && (by_name || by_item)?gun_model_of(state->slots[0]):0;
                                           left_barrel_model=d2vr::is_barrel_equip_name(n)?left_gun_model.load():0;} // isolate barrel routing from holster/draw tracking
                                          left_gadget=!state->carrying && state->slots[0] && (d2vr::is_gadget_equip_name(n) || d2vr::is_gadget_equip_name(item_decl_name(state->slots[0]))); // pose "Grenade"; decls regular/sticky_grenade, stun_mine, springrazor
+                                         left_grenade=left_gadget.load() && d2vr::contains_nocase(item_decl_name(state->slots[0]),"grenade"); // thrown, not placed
                                          if(left_gun_model) if(const int gun_owner=gun_owner_of(state->slots[0]);gun_owner>=0) hip_owner=gun_owner;}
                                         if(left_aim_equip.update(state->carrying?0:state->slots[0],left_barrel_model.load(),left_equip_name))
                                             left_aim_equip_revision.store(left_aim_equip.revision(),std::memory_order_release);
@@ -10813,8 +10822,20 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                     if(grab_guard[0]) input.left_trigger=0;
                                     {   // A grenade or mine in the left hand (user, headset v671): the fist holds the game's left trigger (aim / cook), opening
                                         // the hand lets it go (the throw / the placement); the trigger alone still works. Last word on the left trigger.
-                                        static bool gadget_held{};static d2vr::GadgetFist gadget_fist;const float squeeze=gadget_fist(raw.left_grip,raw.left_trigger);
-                                        gadget_held=left_gadget && (squeeze>=.55f || (gadget_held && squeeze>=.35f));
+                                        static bool gadget_held{},early_thrown{};static UINT64 gadget_since{};static d2vr::GadgetFist gadget_fist;
+                                        const float squeeze=gadget_fist(raw.left_grip,raw.left_trigger);const auto gadget_now=GetTickCount64();
+                                        if(early_thrown && squeeze<.35f) early_thrown=false;
+                                        const bool gadget_was=gadget_held;
+                                        gadget_held=left_gadget && !early_thrown && (squeeze>=.55f || (gadget_held && squeeze>=.35f));
+                                        if(gadget_held && !gadget_was) gadget_since=gadget_now;
+                                        // v690 (headset: "the grenade still leaves ~0.3 s after I let go"): the game launches only at its
+                                        // throw animation's event, ~0.28 s after the trigger lets go. A grenade's trigger is let go on the
+                                        // throwing motion (held 250 ms, hand faster than grenade_early_mps), so the game's windup runs
+                                        // with the arm's; the hand's peak and position at the launch still set the flight.
+                                        if(gadget_held && left_grenade.load() && grenade_hand_throw_enabled && grenade_early_mps>0 && gadget_now-gadget_since>=250 &&
+                                           d2vr::NativeGrenadeThrow::speed(gadget_now)>=grenade_early_mps) {
+                                            gadget_held=false;early_thrown=true;d2vr::NativeGrenadeThrow::release_now(gadget_now);
+                                        }
                                         if(left_gadget) {input.left_trigger=gadget_held?1.f:0.f;input.left_trigger_instant=true;} // already a clean 0/1: no release debounce
                                     }
                                     if(grab_guard[1] && !sword_combat_owned) input.right_trigger=0;
@@ -10896,7 +10917,10 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                     const auto cure_entity=cure_nearby_entity.load();
                                     const auto cure_state=cure_prompt_state.load();
                                     static UINT64 cure_release_until{},cure_last_pulse{};static bool cure_held_last{},cure_active_last{};static unsigned cure_state_last{};
-                                    const bool cure_active=cure_entity && (cure_state==2 || cure_state==5);
+                                    // v690: also the game's own choke sensor offering her (behind her, unaware). v689 relied on the
+                                    // message/prompt states, which only came up with the sword drawn (its takedown prompt); with
+                                    // empty hands a grip on her did nothing (headset 2026-10-30).
+                                    const bool cure_active=(cure_entity && (cure_state==2 || cure_state==5)) || stealth_cure;
                                     const bool cure_held=(raw.right_grip>.35f || raw.left_grip>.35f);
                                     const auto cure_now=GetTickCount64();
                                     if(cure_active) {
@@ -12050,6 +12074,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
         for(const char* key:{"menu_background","highlight_brush","arrow_left","arrow_right","slider_track","slider_knob","divider","glass_shard","character_corvo","character_emily","frame","highlight_glow_bar",
             "pose_shoulders_corvo","pose_tpose_corvo","pose_shoulders_emily","pose_tpose_emily"}) (void)d2vr::game_art().get(key);
         held_offset={};{std::ifstream knob(root/L"build"/L"held-offset");std::array<double,3> v{};if(knob>>v[0]>>v[1]>>v[2] && std::abs(v[0])<.3 && std::abs(v[1])<.3 && std::abs(v[2])<.3) held_offset=v;}
+        grenade_early_mps=1.5;{std::ifstream knob(root/L"build"/L"grenade-early-mps");double v{};if(knob>>v && v>=0 && v<=10) grenade_early_mps=v;}
         aim_yaw_deg=0.f;aim_pitch_deg=0.f;{std::ifstream knob(root/L"build"/L"aim-offset");float y{},q{};if(knob>>y>>q && std::abs(y)<=30 && std::abs(q)<=30) {aim_yaw_deg=y;aim_pitch_deg=q;}}
         held_object_installed=!fs::exists(root/L"build"/L"no-held-object") && d2vr::NativeHeldObject::install(image_base);
         if(held_object_installed && head_requested && tracked_arms_requested && !native_weapon_attachment_requested) {

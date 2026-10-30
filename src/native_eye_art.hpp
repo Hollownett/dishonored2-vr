@@ -104,7 +104,12 @@ Texture2D nativeArt:register(t0);SamplerState artSampler:register(s0);
 cbuffer Layout:register(b0){float4 rect;float4 crop;}
 struct V{float4 pos:SV_POSITION;float2 uv:TEXCOORD0;};
 V VS(uint id:SV_VertexID){float2 c=float2(id&1,(id>>1)&1);V v;v.pos=float4(lerp(rect.xy,rect.zw,c),0,1);v.uv=lerp(crop.xy,crop.zw,c);return v;}
-float4 PS(V v):SV_TARGET{return nativeArt.Sample(artSampler,v.uv);}
+// 4x4 taps over the pixel's own footprint: the art is captured at the eye target's resolution and usually drawn smaller,
+// and with no mip chain a single bilinear tap shimmered and dropped text strokes (v689 headset: "low resolution, hard to
+// read"). When magnified the taps fall inside one texel and this is plain bilinear.
+float4 PS(V v):SV_TARGET{float2 dx=ddx(v.uv),dy=ddy(v.uv);float4 c=0;
+    [unroll]for(int i=0;i<4;++i)[unroll]for(int j=0;j<4;++j){float2 o=(float2(i,j)+.5)/4-.5;c+=nativeArt.SampleLevel(artSampler,v.uv+o.x*dx+o.y*dy,0);}
+    return c/16;}
 )HLSL";
         Ptr<ID3DBlob> vs,ps,errors;checked(D3DCompile(source,sizeof(source)-1,nullptr,nullptr,nullptr,"VS","vs_5_0",D3DCOMPILE_ENABLE_STRICTNESS,0,&vs,&errors));
         checked(D3DCompile(source,sizeof(source)-1,nullptr,nullptr,nullptr,"PS","ps_5_0",D3DCOMPILE_ENABLE_STRICTNESS,0,&ps,&errors));

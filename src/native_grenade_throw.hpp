@@ -35,6 +35,9 @@ public:
     }
     static void trigger(std::uint64_t now,float value) noexcept {std::lock_guard<std::mutex> l(mutex_);gesture_.note_trigger(now,value);}
     static void player_velocity(const std::array<double,3>& v) noexcept {std::lock_guard<std::mutex> l(mutex_);player_v_=v;}
+    static double speed(std::uint64_t now) noexcept {std::lock_guard<std::mutex> l(mutex_);return gesture_.speed(now);}
+    static void release_now(std::uint64_t now) noexcept {std::lock_guard<std::mutex> l(mutex_);gesture_.release_now(now);++early_releases;}
+    inline static std::atomic<std::uint64_t> early_releases{};
     static bool installed() noexcept {return target_!=nullptr;}
     static bool install(std::uintptr_t base) noexcept {
         if(!base) return false;

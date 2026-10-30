@@ -41,17 +41,25 @@ public:
     }
 };
 class ThrowGesture {
-    static constexpr unsigned history=32;
+    static constexpr unsigned history=64; // ~0.7 s at 90 Hz: the window before an early release plus the ~0.28 s to the launch
     struct Sample {std::uint64_t t;std::array<double,3> v;};
     ThrowGestureParams p_;
     std::array<Sample,history> ring_{};unsigned head_{},count_{};
     std::array<double,3> pos_{};bool have_pos_{};std::uint64_t pos_t_{};
-    bool held_{},released_{};std::uint64_t release_t_{};std::array<double,3> peak_{};bool peak_ok_{};
+    bool held_{},released_{},latched_{},early_{};std::uint64_t release_t_{};std::array<double,3> peak_{};bool peak_ok_{};
     static double norm(const std::array<double,3>& v) noexcept {return std::sqrt(v[0]*v[0]+v[1]*v[1]+v[2]*v[2]);}
     static bool finite(const std::array<double,3>& v) noexcept {return std::isfinite(v[0]) && std::isfinite(v[1]) && std::isfinite(v[2]);}
 public:
     explicit ThrowGesture(const ThrowGestureParams& p={}) : p_(p) {}
-    void reset() noexcept {head_=count_=0;held_=released_=false;peak_ok_=false;have_pos_=false;}
+    void reset() noexcept {head_=count_=0;held_=released_=latched_=false;peak_ok_=false;have_pos_=false;}
+    // The newest hand speed (relative to the player), 0 when the last sample is older than 60 ms.
+    double speed(std::uint64_t now) const noexcept {
+        if(!count_) return 0;const auto& s=ring_[(head_+history-1)%history];
+        return now>=s.t && now-s.t<=60?norm(s.v):0;
+    }
+    // v690: the throw is let go on the throwing motion itself (the game launches ~0.28 s after its trigger release), while the
+    // fist is still closed; the squeeze must open before a new hold counts.
+    void release_now(std::uint64_t now) noexcept {if(held_) {held_=false;released_=true;release_t_=now;latched_=true;early_=true;peak_ok_=false;}}
     // velocity relative to the player; samples over the teleport speed (a blink, a snap turn) restart the history.
     void note_hand(std::uint64_t now,const std::array<double,3>& pos,const std::array<double,3>& velocity) noexcept {
         if(!finite(pos) || !finite(velocity)) {count_=0;have_pos_=false;return;}
@@ -61,9 +69,10 @@ public:
     }
     // The trigger: a release (held -> below hold_off) captures the peak over the window before it. A new squeeze discards an unused one.
     void note_trigger(std::uint64_t now,float trigger) noexcept {
+        if(latched_) {if(trigger<p_.hold_off) latched_=false;return;}
         if(!held_ && trigger>=p_.hold_on) {held_=true;released_=false;}
         else if(held_ && trigger<p_.hold_off) {
-            held_=false;released_=true;release_t_=now;peak_ok_=false;peak_={};double best=-1;
+            held_=false;released_=true;release_t_=now;early_=false;peak_ok_=false;peak_={};double best=-1;
             for(unsigned i=0;i<count_;++i) {
                 const auto& s=ring_[(head_+history-1-i)%history];
                 if(now<s.t || now-s.t>p_.window_ms) continue;
@@ -75,6 +84,14 @@ public:
     // The game launches the grenade now. Consumes the release.
     ThrowGestureResult take(std::uint64_t now,const std::array<double,3>& player_velocity) noexcept {
         ThrowGestureResult out{};
+        if(early_ && pending(now)) { // an early release: the window before it and the follow-through up to the launch
+            double best=-1;
+            for(unsigned i=0;i<count_;++i) {
+                const auto& s=ring_[(head_+history-1-i)%history];
+                if(s.t>now || s.t+p_.window_ms<release_t_) continue;
+                const double n=norm(s.v);if(n>best) {best=n;peak_=s.v;peak_ok_=true;}
+            }
+        }
         if(!pending(now) || !peak_ok_ || !have_pos_ || now<pos_t_ || now-pos_t_>250 || !finite(player_velocity)) return out;
         released_=false;out.delay_ms=now-release_t_;
         out.hand_speed=norm(peak_);
