@@ -1363,8 +1363,8 @@ int main() {
             for(unsigned f=1;f<5;++f) assert(scalar[f]>=std::min(c.finger[f],c.min_curl[f])-1e-6f);
         }
     }
-    // G5 thumb_closes_off_table: the player's rig over a table 2 cm under the palm point: the thumb (on the palm side, no hyperextension) closes across
-    // the palm until it is out of the table; without the stop it lies in it.
+    // G5 thumb_closes_off_table: the player's rig over a table 2 cm under the palm point: the thumb (on the palm side, no hyperextension) moves out
+    // of the table as far as the hand lets it; without the stop it lies deeper in it.
     for(bool right:{false,true}) {
         const auto h=real_hand(right);const auto& g=h.geometry;const Vec3 n=d2vr::unit(r::palm_normal(h.palm,g));
         const auto table=r::slab_shape(h.palm.position+n*.02,n*-1.);const std::array<float,5> open{0,0,0,0,0};
@@ -1373,7 +1373,11 @@ int main() {
         r::FingerIkState a{},b{};
         const auto stopped=r::finger_contact(g,h.palm,&table,1,0,a,1.f,r::finger_solve_all,&open,false,0,true);
         const auto old=r::finger_contact(g,h.palm,&table,1,0,b,1.f,r::finger_solve_all,&open);
-        assert(thumb_tip(old)<-.005 && thumb_tip(stopped)>=-.001 && stopped.min_curl[0]>0 && stopped.touching[0] && !stopped.hyperextended[0]);
+        // v697: closing across the palm put it in the palm (headset v696). A palm 1 cm off the table leaves no pose clear of both: the hand wins,
+        // the thumb lies beside it, in the table by at most thumb_shape_tolerance (less than without the stop).
+        const auto drawn=r::finger_drawn_pose(g,stopped,open);
+        assert(r::thumb_clearance(g,drawn,{drawn[0][0],drawn[0][1],drawn[0][2]})>=-1e-6);
+        assert(thumb_tip(old)<-.005 && thumb_tip(stopped)>=-r::thumb_shape_tolerance-.001 && thumb_tip(stopped)>thumb_tip(old) && stopped.min_curl[0]>0 && stopped.touching[0] && !stopped.hyperextended[0]);
         assert(r::grip_curls(stopped,open)[0]>=std::min(stopped.min_curl[0],stopped.finger[0])-1e-6f);
     }
     // G5 (plan Task 12) current_pose_sweep_reaches_past_tip: the fingertip probe follows the finger's CURRENT pose: a flat hand's sweep runs from its
@@ -1422,20 +1426,24 @@ int main() {
         assert(r::finger_free_budget(.3f,5)==3 && r::finger_free_budget(1.2f,5)==3 && r::finger_free_budget(.29f,5)==5 && r::finger_free_budget(0.f,5)==5);
         assert(r::finger_free_budget(1.f,1)==1); // never raises a smaller budget
     }
-    // Headset v693: the thumb never ends in the palm, whatever closed it (finger_turns opens it to the most closed pose that is clear).
+    // Headsets v693/v696: the thumb never lies in or on the palm nor in a finger, whatever closed it (finger_turns moves it to the nearest clear pose).
     for(bool right:{false,true}) {
         const auto h=real_hand(right);const auto& g=h.geometry;
+        const r::FingerCurls free=r::free_curls();
+        for(const auto& wants:{std::array<float,5>{1,0,0,0,0},std::array<float,5>{1,.3f,0,0,0},std::array<float,5>{1,.3f,.35f,.35f,.35f},std::array<float,5>{1,.3f,1,1,1},std::array<float,5>{1,1,1,1,1}}) {
+            const auto a=r::finger_drawn_pose(g,free,wants);
+            assert(r::thumb_clearance(g,a,{a[0][0],a[0][1],a[0][2]})>=-1e-6);
+        }
+        r::FingerAngles flat{};
         const auto full=r::finger_angles(0,1.);
-        const auto out=r::thumb_out_of_palm(g,full);
-        assert(!r::thumb_in_palm(g,out) && !r::thumb_in_palm(g,r::finger_angles(0,0.)));
-        for(unsigned s=0;s<3;++s) assert(out[s]<=full[s]+1e-12);
-        r::FingerCurls shut=r::free_curls();shut.touching[0]=true;shut.min_curl[0]=1; // a thumb a contact closes all the way over open fingers (G5 blocked)
-        const auto t=r::finger_turns(g,shut,{1,0,0,0,0});
-        const auto a=r::finger_points(g.finger[0],{t[0][0],t[0][1],t[0][2]});
-        const auto b=r::finger_points(g.finger[0],r::finger_turns_of(g.finger[0],out));
-        assert(d2vr::length(a[3]-b[3])<1e-5);
+        assert(r::thumb_clearance(g,flat,full)<0); // the control: a thumb shut over an open hand lies in it
+        const auto t0=std::chrono::steady_clock::now();const auto out=r::thumb_clear_of_hand(g,flat,full);
+        std::cout<<"thumb_clear_of_hand, a thumb shut over an open hand: "<<std::chrono::duration<double,std::micro>(std::chrono::steady_clock::now()-t0).count()<<" us"<<std::endl;
+        assert(r::thumb_clearance(g,flat,out)>=0 && r::thumb_clearance(g,flat,r::finger_angles(0,0.))>=0);
+        const auto tp=r::finger_points(g.finger[0],r::finger_turns_of(g.finger[0],out));
+        std::cout<<(right?"right":"left")<<" thumb shut over an open hand -> CMC/MCP/IP "<<out[0]/deg<<"/"<<out[1]/deg<<"/"<<out[2]/deg<<" deg, tip height over the palm "<<d2vr::dot(tp[3],d2vr::unit(g.palm_in))*1000<<" mm"<<std::endl;
     }
-    // ... and a free hand's thumb pressed into a wall beside it (G5: buried, it closed across the palm until out, else fully) stays out of the palm:
+    // ... and a free hand's thumb pressed into a wall beside it (G5: buried, it closed across the palm until out, else fully):
     // walls round the straight thumb tip from 12 directions, 2..20 mm deep, thumb resting (.3) or on the stick (1).
     for(bool right:{false,true}) {
         const auto h=real_hand(right);const auto& g=h.geometry;
@@ -1445,23 +1453,21 @@ int main() {
             const double a=k*3.14159265358979/6;
             const Vec3 out_dir=d2vr::unit(Vec3{std::cos(a),std::sin(a)*.7,std::sin(a)*.7});
             const Vec3 local_n{-out_dir.x,-out_dir.y,-out_dir.z}; // the wall faces the thumb
-            const Vec3 surface=straight[3]-local_n*(g.thickness[0]+depth);
+            const Vec3 surface=straight[3]+out_dir*(g.thickness[0]-depth);
             const auto wall=r::slab_shape(world_of(h,surface),d2vr::unit(world_of(h,local_n)-world_of(h,{})),.08);
             const std::array<float,5> wants{thumb,0,0,0,0};r::FingerIkState st{};
             const auto c=r::finger_contact(g,h.palm,&wall,1,0,st,1.f,r::finger_solve_all,&wants,false,0,true);
             const float want=std::max(r::thumb_want(wants,c),std::max(r::relaxed_share,c.min_curl[0]));
-            raw_in+=r::thumb_in_palm(g,r::finger_pose_angles(0,want,c.pose[0]))?1u:0u;++cases;
-            const auto t=r::finger_turns(g,c,wants);
-            const auto p=r::finger_points(g.finger[0],{t[0][0],t[0][1],t[0][2]});
-            for(const auto& angles:{r::thumb_out_of_palm(g,r::finger_pose_angles(0,want,c.pose[0]))}) {
-                const auto q=r::finger_points(g.finger[0],r::finger_turns_of(g.finger[0],angles));assert(d2vr::length(q[3]-p[3])<1e-5 && !r::thumb_in_palm(g,angles));}
+            const auto drawn=r::finger_drawn_pose(g,c,wants);
+            raw_in+=r::thumb_clearance(g,drawn,r::finger_pose_angles(0,want,c.pose[0]))<0?1u:0u;++cases;
+            assert(r::thumb_clearance(g,drawn,{drawn[0][0],drawn[0][1],drawn[0][2]})>=-1e-6);
         }
-        std::cout<<(right?"right":"left")<<" thumb pressed into a wall: "<<raw_in<<" of "<<cases<<" in the palm before the palm guard, 0 after"<<std::endl;
+        std::cout<<(right?"right":"left")<<" thumb pressed into a wall: "<<raw_in<<" of "<<cases<<" in or on the hand before the guard, 0 after"<<std::endl;
     }
-    {   // the thumb's cap fades in over thumb_fold_ramp of the folded finger's curl, no switch
+    {   // the thumb's cap fades out over thumb_fold_ramp past thumb_fold_curl, no switch
         const r::FingerCurls free=r::free_curls();
-        const float below=r::thumb_want({1,r::thumb_fold_curl-r::thumb_fold_ramp,0,0,0},free),mid=r::thumb_want({1,r::thumb_fold_curl-r::thumb_fold_ramp*.5f,0,0,0},free);
-        assert(std::abs(below-r::thumb_open_cap)<1e-6f && mid>r::thumb_open_cap+.1f && mid<.9f && r::thumb_want({1,r::thumb_fold_curl,0,0,0},free)==1);
+        const float at=r::thumb_want({1,r::thumb_fold_curl,0,0,0},free),mid=r::thumb_want({1,r::thumb_fold_curl+r::thumb_fold_ramp*.5f,0,0,0},free);
+        assert(std::abs(at-r::thumb_open_cap)<1e-6f && mid>r::thumb_open_cap+.1f && mid<.9f && r::thumb_want({1,r::thumb_fold_curl+r::thumb_fold_ramp,0,0,0},free)==1);
     }
     {   // FingerPoseFilter: verbatim the first call and at smooth_time 0; a step of a radian at 90 Hz moves at most .2 rad a frame, never overshoots, settles in .35 s
         r::FingerPoseFilter filter{};std::array<std::array<float,3>,5> zero{},one{};for(auto& f:one) f.fill(1);

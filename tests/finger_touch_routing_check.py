@@ -52,7 +52,7 @@ def check(probe: str, build: str, features: str) -> None:
     assert "touch_curl?d2vr::rig::grip_curls(contact,touch_wants):d2vr::rig::grip_curls(contact," in b
     # weapon_hand_keeps_native_fist: a weapon hand or a native-animated hand gets no touch curl (and drops its state)
     assert "const bool touch_side=!legacy_finger_curl && game_xr->touch_status().bound && !(hands.native_hands>>side&1u) && !((fk_weapon_bits>>side)&1u);" in b
-    assert "{hand_weapon_bits" not in b and "fk_weapon_bits=hand_weapon_bits;" in probe
+    assert "{hand_weapon_bits" not in b and "fk_weapon_bits=hand_weapon_bits&~(left_power?1u:0u);" in probe  # v697: a power is no weapon to the fingers
     assert "else {finger_touch_curl.reset(side);finger_touch_live[side&1u]=false;}" in b
     # availability is the session property, not the per-frame controller_input (sample_input zeroes that on unfocused / failed frames)
     assert "controller_input.touch_bound" not in b

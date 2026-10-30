@@ -448,7 +448,7 @@ int run(int argc,char** argv) {
         const auto settle=[&](unsigned steps) {bd::Output out;for(unsigned i=0;i<steps;++i) out=solver.solve(in);return out;};
         // Pose -> palm -> shapes -> contact -> turns -> pose, until the palm stops moving under the fingers (live: the solved palm of the last frame).
         auto out=settle(60);
-        std::vector<r::HeldShape> shapes;r::FingerCurls contact{};std::array<std::array<float,3>,5> turn{};WorldTrackedPose palm{};
+        std::vector<r::HeldShape> shapes;r::FingerCurls contact{};std::array<std::array<float,3>,5> turn{};WorldTrackedPose palm{};std::array<float,5> wants_used{};
         for(unsigned pass=0;pass<4;++pass) {
             palm=as_pose(palm_of(out));
             shapes=scene.shapes?scene.shapes(palm,geometry):std::vector<r::HeldShape>{};
@@ -456,7 +456,7 @@ int run(int argc,char** argv) {
             auto wants=r::finger_wants(scene.held,scene.squeeze,scene.index);
             if(scene.thumb>=0) wants[0]=scene.thumb;
             contact=r::finger_contact(geometry,palm,shapes.data(),static_cast<unsigned>(shapes.size()),0,state,scene.reach>=0?scene.reach:scene.held?r::held_curl:1.f,r::finger_solve_all,&wants);
-            turn=r::finger_turns(geometry,contact,wants);
+            turn=r::finger_turns(geometry,contact,wants);wants_used=wants;
             in.has_finger[1]=true;
             for(unsigned f=0;f<5;++f) for(unsigned s=0;s<3;++s) in.finger_turn[1][f][s]=turn[f][s];
             out=settle(30);
@@ -577,10 +577,14 @@ int run(int argc,char** argv) {
             const auto index_k=at(out.arm[1][chains[1][0]].p),pinky_k=at(out.arm[1][chains[4][0]].p);
             const auto ip=at(out.arm[1][chains[0][2]].p),tip=at(out.arm[1][sk.find("right_thumb_end_jnt")].p);
             const double lo=std::min(index_k.x,pinky_k.x),hi=std::max(index_k.x,pinky_k.x);
-            // in the palm: inside the knuckles' span, short of the middle phalanges (knuckles + 3 cm along) and under the skin plane (finger_ik.hpp thumb_in_palm)
-            const auto inside=[&](Vec3 p) {return p.x>lo && p.x<hi && p.y<std::max(index_k.y,pinky_k.y)+r::thumb_palm_past_knuckles && p.z<-r::thumb_palm_depth;};
-            char note[300];std::snprintf(note,sizeof note,"thumb vs palm (mm, across/along/height over the skin; knuckle span %.0f..%.0f, knuckles along %.0f): IP %.0f/%.0f/%.0f, tip %.0f/%.0f/%.0f -> %s",
-                lo*1000,hi*1000,std::max(index_k.y,pinky_k.y)*1000,ip.x*1000,ip.y*1000,ip.z*1000,tip.x*1000,tip.y*1000,tip.z*1000,inside(tip) || inside(ip)?"IN THE PALM":"clear");
+            // in the palm (the pre-v697 lab test): inside the knuckles' span, short of the middle phalanges (knuckles + 3 cm along) and 5 mm under the skin plane
+            const auto inside=[&](Vec3 p) {return p.x>lo && p.x<hi && p.y<std::max(index_k.y,pinky_k.y)+.03 && p.z<-.005;};
+            const auto root=at(out.arm[1][chains[0][0]].p),mcp=at(out.arm[1][chains[0][1]].p);
+            char note[400];std::snprintf(note,sizeof note,"thumb vs palm (mm, across/along/height over the skin; knuckle span %.0f..%.0f, knuckles along %.0f; thumb CMC %.0f/%.0f/%.0f MCP %.0f/%.0f/%.0f): IP %.0f/%.0f/%.0f, tip %.0f/%.0f/%.0f -> %s",
+                lo*1000,hi*1000,std::max(index_k.y,pinky_k.y)*1000,root.x*1000,root.y*1000,root.z*1000,mcp.x*1000,mcp.y*1000,mcp.z*1000,ip.x*1000,ip.y*1000,ip.z*1000,tip.x*1000,tip.y*1000,tip.z*1000,inside(tip) || inside(ip)?"IN THE PALM":"clear");
+            report.push_back(note);
+            const auto drawn=r::finger_drawn_pose(geometry,contact,wants_used);
+            std::snprintf(note,sizeof note,"thumb clearance from the palm and the fingers (finger_ik.hpp thumb_clearance, gap %.0f mm included): %.1f mm",r::thumb_palm_gap*1000,r::thumb_clearance(geometry,drawn,{drawn[0][0],drawn[0][1],drawn[0][2]})*1000);
             report.push_back(note);
         }
         if(!shapes.empty() && shapes[0].half.x>0) { // how the held shaft lies in the hand: along the hole axis with the palm on its wall (90 to the palm normal), or end-on to the palm

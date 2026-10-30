@@ -37,4 +37,9 @@ inline bool is_gun_equip_name(std::string_view name) noexcept {
 inline bool is_gadget_equip_name(std::string_view name) noexcept {
     return contains_nocase(name,"grenade") || contains_nocase(name,"mine") || contains_nocase(name,"razor");
 }
+// A power (pose "Blink", ...): a left equip with no model in the hand (not a gun, a gadget or the Heart). The player's own fingers draw it
+// (user, headset v696: the power hand froze in its authored pose).
+inline bool is_power_equip_name(std::string_view name) noexcept {
+    return !name.empty() && name!="Empty" && !is_gun_equip_name(name) && !is_gadget_equip_name(name) && !contains_nocase(name,"heart");
+}
 } // namespace d2vr
