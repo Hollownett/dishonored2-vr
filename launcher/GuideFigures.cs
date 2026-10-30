@@ -13,8 +13,12 @@ namespace DishonoredVR;
 /// props are original ink diagrams and opponents use the same player mesh, never extracted game weapons.</summary>
 public static class GuideFigures
 {
-    public const int Version = 4;
+    public const int Version = 5;
     public static readonly string[] Ids = { "sword_throw", "enemy_grab" };
+    // Matches the slot and ring positions in src/controls_guide_image.hpp (page x 700, y 252): right temple, right shoulder,
+    // right wrist, left temple, left hip, left wrist.
+    public static readonly Size BodyMapSize = new(520, 816);
+    public static readonly Point[] BodyMapAnchors = { new(228, 32), new(193, 141), new(119, 396), new(292, 32), new(319, 378), new(401, 396) };
     public static int Height(string id) => id is "move_jump_lean" or "hands_push" or "menu_point" ? 804 : 232;
     static readonly Color Paper = Color.FromArgb(206, 192, 160), Ink = Color.FromArgb(41, 39, 35), Rust = Color.FromArgb(148, 89, 74);
     static readonly float[] Open = { 0, 0, 0, 0, 0 }, Holding = { .8f, .85f, 1, 1, 1 }, Grip = { .75f, .15f, 1, 1, 1 }, Pointing = { .65f, 0, 1, 1, 1 };
@@ -32,7 +36,8 @@ public static class GuideFigures
             return Ids.Any(id => new[] { "corvo", "emily" }.Any(ch =>
                 doc?["keys"]?[$"guide_{id}_{ch}"]?["generation_version"]?.GetValue<int>() != Version ||
                 (identity != null && doc?["keys"]?[$"guide_{id}_{ch}"]?["source_identity"]?.GetValue<string>() != identity) ||
-                !File.Exists(Path.Combine(dir, $"guide_{id}_{ch}.rgba")) || !File.Exists(Path.Combine(dir, $"guide_{id}_{ch}.png"))));
+                !File.Exists(Path.Combine(dir, $"guide_{id}_{ch}.rgba")) || !File.Exists(Path.Combine(dir, $"guide_{id}_{ch}.png")))) ||
+                new[] { "controller_left", "controller_right", "guide_body_corvo", "guide_body_emily" }.Any(k => !File.Exists(Path.Combine(dir, k + ".rgba")));
         }
         catch { return true; }
     }
@@ -84,10 +89,36 @@ public static class GuideFigures
             BinaryPrimitives.WriteUInt32LittleEndian(raw, 864); BinaryPrimitives.WriteUInt32LittleEndian(raw.AsSpan(4), (uint)h); rgba.CopyTo(raw, 8);
             Atomic(Path.Combine(outDir, key + ".png"), png); Atomic(Path.Combine(outDir, key + ".rgba"), raw);
             keys[key] = new JsonObject { ["file"] = key + ".png", ["raw"] = key + ".rgba", ["width"] = 864, ["height"] = h,
-                ["source"] = "rendered: local player model + original instructional diagrams", ["source_identity"] = sourceIdentity,
+                ["source"] = "rendered: local player and guard models + original instructional diagrams", ["source_identity"] = sourceIdentity,
                 ["generation_version"] = Version, ["sha256"] = ArtImport.Hex(SHA256.HashData(png)), ["raw_sha256"] = ArtImport.Hex(SHA256.HashData(raw)) };
             (doc["missing"] as JsonObject)?.Remove(key);
             log($"{key,-34} 864x{h} rendered"); progress?.Invoke(++done, 22);
+        }
+        // The in-game Body page: the character in colour; its rings sit at BodyMapAnchors (src/controls_guide_image.hpp).
+        foreach (string ch in new[] { "corvo", "emily" })
+        {
+            string key = $"guide_body_{ch}";
+            var (rgba, anchors) = renderer.RenderBodyMap(ch, BodyMapSize.Width, BodyMapSize.Height);
+            for (int i = 0; i < anchors.Length; i++)
+                if (Math.Abs(anchors[i].X - BodyMapAnchors[i].X) > 12 || Math.Abs(anchors[i].Y - BodyMapAnchors[i].Y) > 12)
+                    log($"{key}: zone {i} at {anchors[i].X:0},{anchors[i].Y:0}, expected {BodyMapAnchors[i].X},{BodyMapAnchors[i].Y}");
+            byte[] png = ArtImport.Png(rgba, BodyMapSize.Width, BodyMapSize.Height), raw = new byte[8 + rgba.Length];
+            BinaryPrimitives.WriteUInt32LittleEndian(raw, (uint)BodyMapSize.Width); BinaryPrimitives.WriteUInt32LittleEndian(raw.AsSpan(4), (uint)BodyMapSize.Height); rgba.CopyTo(raw, 8);
+            Atomic(Path.Combine(outDir, key + ".png"), png); Atomic(Path.Combine(outDir, key + ".rgba"), raw);
+            keys[key] = new JsonObject { ["file"] = key + ".png", ["raw"] = key + ".rgba", ["width"] = BodyMapSize.Width, ["height"] = BodyMapSize.Height,
+                ["source"] = "rendered: local player model", ["source_identity"] = sourceIdentity, ["generation_version"] = Version,
+                ["sha256"] = ArtImport.Hex(SHA256.HashData(png)) };
+            log($"{key,-34} {BodyMapSize.Width}x{BodyMapSize.Height} rendered");
+        }
+        // The in-game Controllers page draws the same controller renders.
+        for (int i = 0; i < 2; i++)
+        {
+            var b = ControllerImage[i]; string key = i == 0 ? "controller_left" : "controller_right";
+            byte[] rgba = Pixels(b), png = ArtImport.Png(rgba, b.Width, b.Height), raw = new byte[8 + rgba.Length];
+            BinaryPrimitives.WriteUInt32LittleEndian(raw, (uint)b.Width); BinaryPrimitives.WriteUInt32LittleEndian(raw.AsSpan(4), (uint)b.Height); rgba.CopyTo(raw, 8);
+            Atomic(Path.Combine(outDir, key + ".png"), png); Atomic(Path.Combine(outDir, key + ".rgba"), raw);
+            keys[key] = new JsonObject { ["file"] = key + ".png", ["raw"] = key + ".rgba", ["width"] = b.Width, ["height"] = b.Height,
+                ["source"] = "embedded: Touch Plus model render (tools/render_touch_plus.py)", ["sha256"] = ArtImport.Hex(SHA256.HashData(png)) };
         }
         doc["guide_generation_version"] = Version;
         doc["generation"] = DateTime.UtcNow.ToString("O");
@@ -167,13 +198,14 @@ public static class GuideFigures
         g.DrawPolygon(p, blade);
         g.DrawLine(p, -13, -11, 13, -11); g.DrawLine(p, 0, -10, 0, 10); g.DrawEllipse(p, -3, 10, 6, 4); g.Restore(state);
     }
-    // Opponents use the exact locally loaded player mesh, kept anonymous by ink.
+    // Opponents are the game's own Grand Guard model, loaded locally and drawn in the same ink.
     static void Guard(Graphics g, PoseRender.GuideRenderer renderer, string ch, PointF chest,
         float scale, bool facesLeft, float angle = 0, bool back = false, bool raisedWrist = false, bool crouch = false, PointF? wristContact = null)
     {
-        var wrist = raisedWrist ? Hand(V(.12f, .50f, 1.85f), Vector3.UnitZ, -Vector3.UnitY, Open) : null;
-        var pose = Pose(null, back ? -140 : facesLeft ? 40 : -40, 0, V(0, 0, .96f), 2.05f, wrist);
-        var frame = renderer.Render(ch, pose, 220, 440, silhouette: true, crouch: crouch);
+        var frame = raisedWrist || crouch
+            ? renderer.Render(ch, Pose(null, back ? -140 : facesLeft ? 40 : -40, 0, V(0, 0, .96f), 2.05f,
+                raisedWrist ? Hand(V(.12f, .50f, 1.85f), Vector3.UnitZ, -Vector3.UnitY, Open) : null), 220, 440, silhouette: true, crouch: crouch)
+            : renderer.RenderGuard(back ? -140 : facesLeft ? 40 : -40, 0, V(0, 0, .96f), 2.05f, 220, 440);
         using var ms = new MemoryStream(ArtImport.Png(frame.Rgba, 220, 440));
         using var bitmap = new Bitmap(ms);
         var anchor = frame.Project(V(0, 0, 1.25f));
@@ -364,36 +396,37 @@ public static class GuideFigures
         g.DrawString(text, font, brush, x, y);
     }
 
-    // Photo reference and generation provenance live beside the embedded asset.
-    static readonly Bitmap ControllerPhoto = LoadControllerPhoto();
-    static Bitmap LoadControllerPhoto()
+    // Renders of the real Touch Plus models (tools/render_touch_plus.py); anchors are each button's visible centre.
+    internal static readonly Bitmap[] ControllerImage = { LoadControllerImage("left"), LoadControllerImage("right") };
+    static readonly JsonNode ControllerAnchors = JsonNode.Parse(Resource("guide/touch-plus.anchors.json"))!;
+    static Stream Resource(string name) => typeof(GuideFigures).Assembly.GetManifestResourceStream(name)
+        ?? throw new InvalidOperationException("Controller artwork is missing: " + name);
+    static Bitmap LoadControllerImage(string side)
     {
-        using var stream = typeof(GuideFigures).Assembly.GetManifestResourceStream("guide/touch-plus.png")
-            ?? throw new InvalidOperationException("Controller image is missing.");
+        using var stream = Resource($"guide/touch-plus-{side}.png");
         using var image = new Bitmap(stream);
         return new Bitmap(image);
     }
+    // The picture is 134 px tall at scale 1, its top 48 px above p, centred on p horizontally.
+    static RectangleF ControllerBox(PointF p, bool left, float scale)
+    {
+        var b = ControllerImage[left ? 0 : 1]; float w = 134f * b.Width / b.Height;
+        return new(p.X - w / 2 * scale, p.Y - 48 * scale, w * scale, 134 * scale);
+    }
     static PointF ControllerPoint(PointF p, bool left, string input, float scale = 1)
     {
-        var point = (left, input) switch
-        {
-            (true, "stick") => new PointF(-19, -35), (false, "stick") => new PointF(21, -23),
-            (true, "X") => new PointF(5, -23), (true, "Y") => new PointF(8, -33),
-            (false, "A") => new PointF(3, -17), (false, "B") => new PointF(-5, -31),
-            (true, "menu") => new PointF(-12, -18),
-            (true, "grip") => new PointF(30, 19), (false, "grip") => new PointF(-25, 19),
-            _ => throw new ArgumentException("No visible controller button: " + input)
-        };
-        return Add(p, point.X * scale, point.Y * scale);
+        string key = input == "stick" ? "thumbstick" : input.ToLowerInvariant();
+        var a = ControllerAnchors[left ? "left" : "right"]?["anchors"]?[key] as JsonArray
+            ?? throw new ArgumentException("No visible controller button: " + input);
+        var box = ControllerBox(p, left, scale); float k = box.Height / ControllerImage[left ? 0 : 1].Height;
+        return new(box.X + a[0]!.GetValue<float>() * k, box.Y + a[1]!.GetValue<float>() * k);
     }
     static void Controller(Graphics g, PointF p, bool left, string active, float scale = 1)
     {
-        var source = left ? new RectangleF(180, 55, 550, 845) : new RectangleF(970, 55, 540, 845);
-        g.DrawImage(ControllerPhoto, new RectangleF(p.X - 43 * scale, p.Y - 48 * scale, 86 * scale, 134 * scale), source, GraphicsUnit.Pixel);
+        g.DrawImage(ControllerImage[left ? 0 : 1], ControllerBox(p, left, scale));
         using var ring = new Pen(Rust, 2.4f);
         foreach (string input in active.Split(' ', StringSplitOptions.RemoveEmptyEntries))
         {
-            if (input == "trigger") continue; // Behind the faceplate in the reference; never mark the grip as trigger.
             var point = ControllerPoint(p, left, input, scale);
             float radius = 7 * scale;
             g.DrawEllipse(ring, point.X - radius, point.Y - radius, radius * 2, radius * 2);
@@ -474,7 +507,6 @@ public static class GuideFigures
         {
             Label(g, "1  Point at a menu item", 45, 25, 26);
             Label(g, "2  Right trigger: select", 45, 62, 24);
-            Label(g, "Index trigger is behind the faceplate", 45, 96, 20, false);
             Label(g, "LEFT CONTROLLER", 94, 550, 22);
             Label(g, "RIGHT CONTROLLER", 497, 550, 22);
             Controller(g, new(190, 627), true, "Y menu", .83f);

@@ -1,10 +1,8 @@
 {
-  "asset": "touch-plus.png",
-  "description": "Transparent controller illustration generated using an internet product image as visual reference. UI draws button indicators separately.",
-  "reference_page": "https://www.uploadvr.com/quest-3-touch-plus-controllers-fcc-approval/",
-  "reference_image": "https://storage.ghost.io/c/2a/2f/2a2f38f0-4b71-407a-9c7e-18a9e2541980/content/images/size/w1920/format/webp/2023/07/03_Touch-Plus-Controllers-1.jpg",
-  "hardware": "Meta Quest 3 Touch Plus, left X/Y/Menu and right A/B/Meta",
-  "created": "2026-10-28",
-  "generator": "OpenAI image_gen",
-  "note": "Index triggers are behind the faceplates in this view; do not label a visible grip button as an index trigger."
+  "assets": ["touch-plus-left.png", "touch-plus-right.png", "touch-plus.anchors.json"],
+  "description": "Renders of the Meta Quest 3 Touch Plus controller 3D models (left X/Y/Menu, right A/B/Meta). Anchors are the pixel centres of each button's visible surface.",
+  "source_models": "SteamVR resources/rendermodels/oculus_quest_plus_controller_{left,right} (OBJ + colour/AO maps)",
+  "generator": "tools/render_touch_plus.py",
+  "created": "2026-10-30",
+  "note": "Only these rendered images are distributed, not the models. Meta Quest and Touch Plus are trademarks of Meta Platforms."
 }

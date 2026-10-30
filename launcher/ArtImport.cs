@@ -218,6 +218,7 @@ public static class ArtImport
         }
 
         public bool Has(string name) => entries.ContainsKey(name);
+        public IEnumerable<string> Names => entries.Keys;
 
         public byte[] Read(string name)
         {

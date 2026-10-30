@@ -24,6 +24,10 @@ inline std::wstring widen_utf8(const std::string& s) {
 inline constexpr std::array<const char*,guide_page_count> guide_page_ids{{"body","controllers","tips"}};
 inline constexpr std::array<const wchar_t*,guide_page_count> guide_page_names{{L"Body",L"Controllers",L"Tips"}};
 inline constexpr std::array<const char*,2> guide_figure_ids{{"sword_throw","enemy_grab"}};
+// Visible button centres in launcher/assets/touch-plus-{left,right}.png (340x600), from touch-plus.anchors.json, in the
+// order of the Markdown bullets: left Y, X, Stick, Menu, Trigger, Grip; right B, A, Stick, Trigger, Grip.
+inline constexpr std::array<std::array<int,2>,6> touch_plus_left_anchors{{{160,162},{100,201},{99,100},{54,182},{307,152},{155,366}}};
+inline constexpr std::array<std::array<int,2>,5> touch_plus_right_anchors{{{180,162},{239,201},{241,100},{33,152},{185,366}}};
 struct GuideItem {enum Kind {title,intro,section,bullet,page,figure} kind;std::wstring key,text;unsigned page_index{};std::size_t bullet_index{};};
 inline std::vector<GuideItem> parse_controls_guide(const std::string& markdown,unsigned* errors=nullptr) {
     std::vector<GuideItem> out;std::size_t at=0,bullet_index=0;unsigned current_page=0,invalid=0;bool in_comment=false,have_section=false;
@@ -155,22 +159,45 @@ inline std::vector<std::uint8_t> controls_guide_image(const std::string& markdow
     int one_y=260;
     if(page==0 && !sections.empty()) { // front-view body map: every reach zone is a ring on the figure, each bullet a callout
         const COLORREF fillc=RGB(58,54,50),edge=RGB(150,130,92);text(items[sections[0].first].text,64,260,864,56,heading_font.f,gold);
+        // The launcher's render of the selected character (520x816 at 700,252); its zones match GuideFigures.BodyMapAnchors.
+        const auto body=art(emily?"guide_body_emily":"guide_body_corvo");const bool real=body && body->width==520 && body->height==816;
+        if(real) {GdiFlush();blit_art(pixels,w,h,*body,700,252,1220,1068,1,true);
+            for(const auto& r:{std::array<int,3>{928,284,26},{893,393,34},{819,648,28},{992,284,26},{1019,630,34},{1101,648,28}}) ring(r[0],r[1],r[2],cyan,4);}
+        else {
         limb(798,296,824,352,16,RGB(20,18,16),RGB(150,118,76));limb(796,364,858,330,12,RGB(20,18,16),RGB(210,206,196));limb(824,352,944,604,17,RGB(20,18,16),RGB(210,206,196)); // sword behind the right shoulder
         limb(925,670,915,1030,70,edge,fillc);limb(995,670,1005,1030,70,edge,fillc);limb(915,1030,880,1040,34,edge,fillc);limb(1005,1030,1040,1040,34,edge,fillc);
         limb(850,435,806,628,44,edge,fillc);limb(1070,435,1114,628,44,edge,fillc);
         draw_shape(edge,fillc,4,[&]{RoundRect(dc,852,392,1068,672,56,56);});limb(850,425,1070,425,64,edge,fillc);limb(960,372,960,405,36,edge,fillc);
         draw_shape(edge,fillc,4,[&]{Ellipse(dc,910,264,1010,384);Ellipse(dc,784,626,828,672);Ellipse(dc,1092,626,1136,672);RoundRect(dc,1022,612,1058,684,14,14);});
-        for(const auto& r:{std::array<int,3>{914,320,28},{1006,320,28},{840,402,44},{806,640,30},{1114,640,30},{1040,648,44}}) ring(r[0],r[1],r[2],cyan,4);
+        for(const auto& r:{std::array<int,3>{914,320,28},{1006,320,28},{840,402,44},{806,640,30},{1114,640,30},{1040,648,44}}) ring(r[0],r[1],r[2],cyan,4);}
         std::vector<Call> left,right;std::size_t first=sections[0].first;std::vector<const GuideItem*> b;
         for(auto k=first+1;k<sections[0].end;++k) if(items[k].kind==GuideItem::bullet) b.push_back(&items[k]);
         if(b.size()==5) { // bodies are carried by hand only: no shoulder zone (user, 2026-10-28)
-            left={{b[0],{320},{886},1,330},{b[1],{412},{796},1,480},{b[2],{640},{776},1,650}};
-            right={{b[3],{320},{1034},1,330},{b[4],{688},{1050},1,700}};
+            if(real) {left={{b[0],{284},{902},1,300},{b[1],{393},{859},1,430},{b[2],{648},{791},1,650}};
+                right={{b[3],{284},{1018},1,300},{b[4],{630},{1053},1,680}};}
+            else {left={{b[0],{320},{886},1,330},{b[1],{412},{796},1,480},{b[2],{640},{776},1,650}};
+                right={{b[3],{320},{1034},1,330},{b[4],{688},{1050},1,700}};}
             callouts(left,64,570,672,324,1064);callouts(right,1272,584,1248,324,1064);
         } else result.overflow=true;
     } else if(page==1) { // two controllers, each button labelled with its action
         for(std::size_t n=0;n<sections.size() && n<2;++n) {
             const auto& s=sections[n];const int x0=n?992:64,cx=x0+135;const bool lefthand=n==0;text(items[s.first].text,x0,260,864,56,heading_font.f,gold);
+            // Renders of the real Touch Plus (launcher writes them from launcher/assets); labels sit beside the grip side.
+            if(const auto pad=art(lefthand?"controller_left":"controller_right");pad && pad->width==340 && pad->height==600) {
+                constexpr double k=1.2;const int ix=lefthand?56:1464,iy=330;GdiFlush();blit_art(pixels,w,h,*pad,ix,iy,ix+408,iy+720,1,false);
+                std::vector<const GuideItem*> b;for(auto k2=s.first+1;k2<s.end;++k2) if(items[k2].kind==GuideItem::bullet) b.push_back(&items[k2]);
+                const auto* at=lefthand?touch_plus_left_anchors.data():touch_plus_right_anchors.data();
+                if(b.size()!=(lefthand?touch_plus_left_anchors.size():touch_plus_right_anchors.size())) {result.overflow=true;continue;}
+                // Buttons sit too close together for leaders: each gets a ring and a numbered badge, matched by the list.
+                const auto badge=[&](int x,int y,std::size_t i) {draw_shape(cyan,cyan,2,[&]{Ellipse(dc,x-16,y-16,x+16,y+16);});
+                    text(std::to_wstring(i+1),x-20,y-20,40,40,selector_font.f,card,DT_CENTER);};
+                for(std::size_t i=0;i<b.size();++i) {const int ax=ix+static_cast<int>(at[i][0]*k),ay=iy+static_cast<int>(at[i][1]*k);ring(ax,ay,20,cyan,3);badge(ax+24,ay-24,i);}
+                int y=340;const int lx=lefthand?490:1000;
+                for(std::size_t i=0;i<b.size();++i) {std::vector<Run> runs;bullet_runs(*b[i],runs);++result.bullets;
+                    const int used=flow(runs,lx+44,y,396,1064,false);if(y+used>1064) {result.overflow=true;continue;}
+                    badge(lx+16,y+20,i);flow(runs,lx+44,y,396,1064,true);y+=used+14;++result.drawn;result.drawn_bullet_indices.push_back(b[i]->bullet_index);}
+                continue;
+            }
             const COLORREF fillc=RGB(58,54,50),edge=RGB(150,130,92);
             ring(cx,425,105,RGB(88,84,78),16);
             draw_shape(edge,fillc,4,[&]{RoundRect(dc,cx-64,600,cx+64,1030,60,60);RoundRect(dc,cx-95,400,cx+95,690,70,70);});fill(cx-58,620,116,50,fillc);

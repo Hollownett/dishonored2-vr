@@ -23,6 +23,16 @@ int main() {
         require(parse_controls_guide(md+"\n<!-- unrelated comment -->\n").size()==items.size(),"Unrelated comments must be ignored");
         errors=0;const auto invalid=parse_controls_guide("<!-- vr-page:../../outside|Bad -->\n<!-- vr-figure:unknown|Bad -->\n<!-- vr-page:moving -->\n",&errors);
         require(errors==3 && invalid.empty(),"Unknown and malformed directive ids must be rejected safely");
+        {   // The page's controller anchors must match the renderer's record (tools/render_touch_plus.py).
+            std::ifstream json("launcher/assets/touch-plus.anchors.json");std::ostringstream j;j<<json.rdbuf();const auto a=j.str();
+            const auto check=[&](const char* side,const std::array<const char*,6>& keys,const auto& want) {
+                const auto base=a.find(std::string("\"")+side+"\"");require(base!=std::string::npos,"Controller anchors missing");
+                for(std::size_t i=0;i<want.size();++i) {const auto at=a.find(std::string("\"")+keys[i]+"\": [",base);require(at!=std::string::npos,"Controller anchor missing");
+                    char* end=nullptr;const double x=std::strtod(a.c_str()+a.find('[',at)+1,&end),y=std::strtod(end+1,nullptr);
+                    require(std::abs(x-want[i][0])<=1 && std::abs(y-want[i][1])<=1,"Controller anchors differ from touch-plus.anchors.json");}};
+            check("left",{"y","x","thumbstick","menu","trigger","grip"},touch_plus_left_anchors);
+            check("right",{"b","a","thumbstick","trigger","grip",""},touch_plus_right_anchors);
+        }
         const fs::path previews="artifacts/guide-pages",imported="artifacts/game-art";fs::create_directories(previews);
         const auto validate=[&](const std::vector<std::uint8_t>& pixels,const GuideLayout& layout,std::vector<unsigned>& seen) {
             require(pixels.size()==1920u*1200*4,"Guide bitmap has wrong dimensions");

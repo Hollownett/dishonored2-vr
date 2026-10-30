@@ -44,10 +44,43 @@ public static partial class PoseRender
     public sealed class GuideRenderer : IDisposable
     {
         readonly Avatar[] avatars = new Avatar[2];
+        readonly Guard guard;
         internal GuideRenderer(string game)
         {
-            var c = new ArtImport.Containers(Path.GetFullPath(game), n => n.StartsWith("generated/") && n.Contains("models/characters/"));
+            var c = new ArtImport.Containers(Path.GetFullPath(game), n => n.StartsWith("generated/") && n.Contains("models/characters/") || Guard.Wanted(n));
             Parallel.For(0, 2, i => avatars[i] = new Avatar(c, i == 0 ? "corvo" : "emily"));
+            guard = new Guard(c);
+        }
+
+        /// <summary>Front view of the player for the in-game Body page: colour, arms relaxed at the sides. Anchors (pixels):
+        /// right temple, right shoulder, right wrist, left temple, left hip, left wrist; the character's right is on the viewer's left.</summary>
+        public (byte[] Rgba, PointF[] Anchors) RenderBodyMap(string character, int w, int h)
+        {
+            var av = avatars[character == "corvo" ? 0 : 1];
+            var parts = new List<Part> { av.BodyMesh, av.Head };
+            var wrists = new Vector3[2]; var shoulders = new Vector3[2]; var relaxed = new[] { .3f, .35f, .4f, .45f, .5f };
+            for (int i = 0; i < 2; i++)
+            {
+                float side = i == 0 ? 1 : -1;
+                var arm = av.PoseArm(i, av.TeachingTarget(i, new(new(.05f, side * .29f, .86f), -Vector3.UnitZ, new(0, -side, 0), relaxed)), relaxed);
+                wrists[i] = av.WristPosition(i, arm); shoulders[i] = av.ShoulderPosition(i, arm); parts.Add(av.SkinArm(i, arm));
+            }
+            const int ss = 2;
+            var view = new View(w * ss, h * ss, av.FromWorld(new(0, 0, .93f)) + Vector3.UnitX * 5, -Vector3.UnitX, Vector3.UnitY, Vector3.UnitZ, 1.93f / av.Scale);
+            var rgba = Downsample(Paint(view, parts), w * ss, h * ss, w, h);
+            var head = av.FromWorld(new(0, 0, 1.75f));
+            Vector3 M(float x, float y, float z) => new Vector3(x, y, z) / av.Scale;
+            var points = new[] { head + M(0, -.075f, .07f), shoulders[1] + M(0, 0, .06f), wrists[1], head + M(0, .075f, .07f), av.FromWorld(new(0, .14f, 1.0f)), wrists[0] };
+            return (rgba, points.Select(p => { var q = view.Project(p); return new PointF(q.X / ss, q.Y / ss); }).ToArray());
+        }
+
+        /// <summary>The game's own Grand Guard (gs_guard_01), standing with arms lowered, in the same ink style.</summary>
+        public GuideFrame RenderGuard(float azimuth, float elevation, Vector3 centre, float span, int w, int h)
+        {
+            var view = guard.ViewOf(azimuth, elevation, centre, span, w, h);
+            var hands = guard.Hands.Select(p => { var q = view.Project(p); return new PointF(q.X, q.Y); }).ToArray();
+            return new GuideFrame(Sketch(view, guard.Parts, hands, 0, 1 / guard.Scale, false, tone: .82f),
+                world => { var q = view.Project(guard.FromWorld(world)); return new(q.X, q.Y); }, hands, hands, hands);
         }
 
         public GuideFrame Render(string character, TeachingPose pose, int w, int h, bool silhouette = false, bool crouch = false)
@@ -86,15 +119,23 @@ public static partial class PoseRender
             var view = new View(w, h, av.FromWorld(pose.Centre) - fwd * 5, fwd, right, up, pose.Span / av.Scale);
             PointF Project(Vector3 world) { var p = view.Project(Bend(av.FromWorld(world))); return new(p.X, p.Y); }
             PointF BindProject(Vector3 bind) { var p = view.Project(Bend(bind)); return new(p.X, p.Y); }
+            var handPoints = solvedHands.Select(BindProject).ToArray();
+            var palmPoints = Enumerable.Range(0, 2).Select(i => BindProject(solvedHands[i] + Unit(hands[i].Direction) * (.055f / av.Scale))).ToArray();
+            var wristPoints = solvedWrists.Select(BindProject).ToArray();
+            var rgba = Sketch(view, parts, handPoints, .15f * h / pose.Span, av.Scale, silhouette);
+            return new GuideFrame(rgba, Project, handPoints, palmPoints, wristPoints);
+        }
+
+        /// <summary>Three sepia washes with a charcoal contour; scale converts model units to metres.</summary>
+        static byte[] Sketch(View view, List<Part> parts, PointF[] handPoints, float handRadius, float scale, bool silhouette, float tone = 1)
+        {
+            int w = view.W, h = view.H;
             var g = Rasterize(view, parts, true);
+            var fwd = view.Fwd;
             var mask = g.Depth.Select(float.IsFinite).ToArray(); KeepLargest(mask, w, h);
             var rgba = new byte[w * h * 4];
             var edge = new bool[w * h];
             var light = view.Dir(Key);
-            var handPoints = solvedHands.Select(BindProject).ToArray();
-            var palmPoints = Enumerable.Range(0, 2).Select(i => BindProject(solvedHands[i] + Unit(hands[i].Direction) * (.055f / av.Scale))).ToArray();
-            var wristPoints = solvedWrists.Select(BindProject).ToArray();
-            float handRadius = .15f * h / pose.Span;
             for (int y = 0; y < h; y++) for (int x = 0; x < w; x++)
             {
                 int o = y * w + x; if (!mask[o]) continue;
@@ -104,6 +145,7 @@ public static partial class PoseRender
                 var a = g.Albedo![o]; shade = shade * .9f + (a.X + a.Y + a.Z) / 3 * .1f;
                 bool dark = shade < .28f;
                 var c = shade > .64f ? Color.FromArgb(202, 185, 151) : dark ? Color.FromArgb(102, 81, 58) : Color.FromArgb(155, 130, 94);
+                if (tone != 1) c = Color.FromArgb((int)(c.R * tone), (int)(c.G * tone), (int)(c.B * tone));
                 bool nearHand = handPoints.Any(p => (p.X - x) * (p.X - x) + (p.Y - y) * (p.Y - y) < handRadius * handRadius);
                 if (dark && !nearHand && (x + y) % 22 < 2 && (x / 48 + y / 48) % 3 != 0) c = Color.FromArgb(66, 55, 42);
                 rgba[o * 4] = c.R; rgba[o * 4 + 1] = c.G; rgba[o * 4 + 2] = c.B; rgba[o * 4 + 3] = 255;
@@ -111,7 +153,7 @@ public static partial class PoseRender
                 {
                     if (!mask[q]) { edge[o] = true; return; }
                     var other = Unit(g.Normal[q]); if (Vector3.Dot(other, -fwd) < 0) other = -other;
-                    if (Math.Abs(g.Depth[o] - g.Depth[q]) * av.Scale > .018f || Vector3.Dot(n, other) < .55f) edge[o] = true;
+                    if (Math.Abs(g.Depth[o] - g.Depth[q]) * scale > .018f || Vector3.Dot(n, other) < .55f) edge[o] = true;
                 }
                 if (x == 0 || x == w - 1 || y == 0 || y == h - 1) edge[o] = true;
                 else { Compare(o - 1); Compare(o + 1); Compare(o - w); Compare(o + w); }
@@ -142,7 +184,7 @@ public static partial class PoseRender
                     rgba[o * 4 + 3] = 217;
                 }
             }
-            return new GuideFrame(rgba, Project, handPoints, palmPoints, wristPoints);
+            return rgba;
         }
 
         public void Dispose() { } // Assets are managed arrays; no game files remain open.
@@ -306,7 +348,7 @@ public static partial class PoseRender
         int U32() { if (o + 4 > d.Length) throw new InvalidDataException("Truncated mesh"); int v = BinaryPrimitives.ReadInt32LittleEndian(d.AsSpan(o)); o += 4; return v; }
         string Name() { int n = U32(); if (n < 0 || o + n > d.Length) throw new InvalidDataException("Truncated mesh"); var s = Encoding.UTF8.GetString(d, o, n); o += n; return s; }
         var part = new Part { Skeleton = Name() };
-        o += 2 + 24;
+        o += part.Skeleton == "" ? 24 : 2 + 24;  // cloth-split NPC pieces name no skeleton and omit the 2 bytes
         var p = new List<Vector3>(); var nr = new List<Vector3>(); var uv = new List<Vector2>(); var w = new List<byte>(); var j = new List<byte>(); var idx = new List<int>();
         int surfaces = U32();
         for (int s = 0; s < surfaces; s++)
@@ -492,6 +534,7 @@ public static partial class PoseRender
 
         public Vector3 HandPosition(int i, Xf[] posed) => posed[attach[i]].P;
         public Vector3 WristPosition(int i, Xf[] posed) => posed[wrist[i]].P;
+        public Vector3 ShoulderPosition(int i, Xf[] posed) => posed[upper[i]].P;
 
         /// <summary>Hand targets of the solver test: T-pose hands at {.02, +-span/2, eye-.27} with the bind hand rotation;
         /// shoulders hands at {.1, +-.2, eye-.3}, fingers up and palms in. Both with grip and trigger fully pressed (fists).</summary>
@@ -724,21 +767,7 @@ public static partial class PoseRender
         foreach (var p in parts) foreach (var v in p.P) { lo = Vector3.Min(lo, v); hi = Vector3.Max(hi, v); }
         var ext = hi - lo; var centre = (lo + hi) / 2;
         var view = new View(W, W, centre - fwd * 5, fwd, right, up, MathF.Max(ext.X, MathF.Max(ext.Y, ext.Z)) * 1.08f);
-        var g = Rasterize(view, parts, true);
-        var mask = new bool[N]; for (int o = 0; o < N; o++) mask[o] = float.IsFinite(g.Depth[o]);
-        KeepLargest(mask, W, W);  // Emily's arm mesh has two shoulder-piece triangles skinned to the thumb that float free
-        var nearest = Nearest(mask, W, W);
-        var color = Shade(g, mask, nearest, view, KeyShadow(view, g.Depth, mask, parts));
-        // Spread figure colours into the background so smoothing and resampling never pull in black at the silhouette.
-        var spread = new Vector3[N]; Parallel.For(0, N, o => spread[o] = color[nearest[o]]);
-        color = Kuwahara(spread, W, W);
-        var rgba = new byte[N * 4];
-        Parallel.For(0, N, o =>
-        {
-            var c = color[o] * 255 + new Vector3(.5f);
-            rgba[o * 4] = (byte)c.X; rgba[o * 4 + 1] = (byte)c.Y; rgba[o * 4 + 2] = (byte)c.Z; rgba[o * 4 + 3] = (byte)(mask[o] ? 255 : 0);
-        });
-        var small = Downsample(rgba, W, W, size, size);
+        var small = Downsample(Paint(view, parts), W, W, size, size);
         var rng = new Random(7);  // film grain, the same for all three channels
         int minX = size, minY = size, maxX = -1, maxY = -1;
         for (int y = 0; y < size; y++)
@@ -753,6 +782,27 @@ public static partial class PoseRender
         int cw = maxX - minX + 1, ch = maxY - minY + 1; var crop = new byte[cw * ch * 4];
         for (int y = 0; y < ch; y++) Array.Copy(small, ((minY + y) * size + minX) * 4, crop, y * cw * 4, cw * 4);
         return (crop, cw, ch);
+    }
+
+    /// <summary>Lit, painterly colour render of the parts on a transparent background, at the view's resolution.</summary>
+    static byte[] Paint(View view, List<Part> parts)
+    {
+        int W = view.W, H = view.H, N = W * H;
+        var g = Rasterize(view, parts, true);
+        var mask = new bool[N]; for (int o = 0; o < N; o++) mask[o] = float.IsFinite(g.Depth[o]);
+        KeepLargest(mask, W, H);  // Emily's arm mesh has two shoulder-piece triangles skinned to the thumb that float free
+        var nearest = Nearest(mask, W, H);
+        var color = Shade(g, mask, nearest, view, KeyShadow(view, g.Depth, mask, parts));
+        // Spread figure colours into the background so smoothing and resampling never pull in black at the silhouette.
+        var spread = new Vector3[N]; Parallel.For(0, N, o => spread[o] = color[nearest[o]]);
+        color = Kuwahara(spread, W, H);
+        var rgba = new byte[N * 4];
+        Parallel.For(0, N, o =>
+        {
+            var c = color[o] * 255 + new Vector3(.5f);
+            rgba[o * 4] = (byte)c.X; rgba[o * 4 + 1] = (byte)c.Y; rgba[o * 4 + 2] = (byte)c.Z; rgba[o * 4 + 3] = (byte)(mask[o] ? 255 : 0);
+        });
+        return rgba;
     }
 
     /// <summary>Shadow map for the key light: 1 where lit, 0 where another part (head, arms, collar) blocks it; softened.</summary>

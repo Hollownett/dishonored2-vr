@@ -25,10 +25,10 @@ static class Program
                 throw new InvalidOperationException("Package check requires a new or empty directory.");
             var packaged = ModHome.Install(packageHome, Console.Error.WriteLine);
             ControlsDocument.CheckParser();
-            using var controller = typeof(GuideFigures).Assembly.GetManifestResourceStream("guide/touch-plus.png")
+            using var controller = typeof(GuideFigures).Assembly.GetManifestResourceStream("guide/touch-plus-left.png")
                 ?? throw new InvalidDataException("Missing controller artwork");
             using var bitmap = new Bitmap(controller);
-            if (bitmap.Width < 1000 || !File.Exists(Path.Combine(packageHome, "build", "note-tablet")))
+            if (bitmap.Height < 600 || !File.Exists(Path.Combine(packageHome, "build", "note-tablet")))
                 throw new InvalidDataException("Guide artwork or default note feature missing");
             bool nativeHands = false;
             if (Env.FindGameDir() is string handGame) {
