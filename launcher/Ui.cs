@@ -56,7 +56,7 @@ static class Ui
         Good = Color.FromArgb(146, 208, 178), Teal = Color.FromArgb(124, 202, 218), Bad = Color.FromArgb(218, 92, 76),
         OnBrush = Color.FromArgb(24, 22, 21), PaneFill = Color.FromArgb(12, 11, 12), Edge = Color.FromArgb(70, 65, 60);
     public const string Sans = "Segoe UI", Mono = "Consolas";
-    static readonly string Serif = Installed("Palatino Linotype") ? "Palatino Linotype" : "Georgia";
+    internal static readonly string Serif = Installed("Palatino Linotype") ? "Palatino Linotype" : "Georgia";
 
     public static GameArt Art = new();
     /// <summary>The window's pre-rendered background; art controls paint their slice of it so they look transparent.</summary>

@@ -78,23 +78,25 @@ Made for Meta Quest Touch controllers. **Grip** is the side button under your mi
 | Input | Action |
 |---|---|
 | Stick | Move where you look; click to sprint |
-| X (hold) | Quick Access Wheel; release to equip |
+| X (hold) | Quick Access Wheel: point at an item, release to equip |
 | Y | Talk; hold for the pause menu |
-| Menu | Pause; hold for the journal |
-| Trigger | Fire the pistol or cast the power in your left hand |
-| Grip | Use and hold; at your left hip, draw the pistol or crossbow |
+| Menu | Pause; hold for the journal; hold and flick the right stick for the quick slots |
+| Trigger | Fire the gun or cast the power in your left hand |
+| Grip | Use what the hand points at, or hold what it touches; at your left hip, draw the pistol or crossbow |
 
 ### Right controller
 
 | Input | Action |
 |---|---|
-| Stick | Turn; flick down to crouch; click to zoom |
+| Stick | Turn (snap or smooth); flick down to crouch; click to zoom |
 | A | Jump and climb |
 | B (hold) | Put all weapons away |
-| Trigger | Block with the sword; select in menus |
-| Grip | Grab and hold; over your right shoulder, draw the sword |
+| Trigger | Select in menus and on the wheel |
+| Grip | Use or hold, like the left one; over your right shoulder, draw the sword |
 
 ### Body and gestures
+
+The sword and your hands need no buttons: attack, block, grab and throw with real movements.
 
 | Where / what | Action |
 |---|---|
@@ -104,13 +106,14 @@ Made for Meta Quest Touch controllers. **Grip** is the side button under your mi
 | Left grip at your **left hip** | Draw the pistol or crossbow; release to holster |
 | Turn the **back of either wrist** to your face | Read health and mana |
 | **Swing** the sword | Attack. From behind an unaware guard it is a silent takedown |
-| Sword held **in front of you** | Block |
+| Sword held **in front of you** | Block (no button; a swing ends it) |
 | **Release** the right grip mid-swing | Throw the sword. Grip over your shoulder calls it back |
 | **Palm on a guard** + grip, then pull hard | Hold him, then throw him down |
 | Grip an unaware guard's **neck from behind** | Choke him out |
-| Grip a **limb or the head** of a body | Drag or carry it with your hands |
+| Grip a **limb or the head** of a body | Drag it; let go at your shoulder to carry it there |
 | Grenade or mine: make a **fist**, open it mid-throw | Throw it (open it with the palm on a surface to place it) |
 | **Open hand** against a door | Push it open; push slowly to peek |
+| **Both hands up** over your head | Jump |
 | **Lean or crouch** in real life | The character leans or crouches with you |
 | In menus | Point with the right controller, pull the right trigger to select |
 

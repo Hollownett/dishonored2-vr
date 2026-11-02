@@ -23,6 +23,12 @@ int main() {
         assert(!native_world_ui_owner(read,base,player)); // Input player is not the render Iggy object.
     }
     path("ui/choice_emily.iggy");{const auto o=native_world_ui_owner(read,base,iggy);assert(o && o->kind==WorldUiKind::journal);} // dialogue choices
+    path("ui/narrative.iggy");{const auto o=native_world_ui_owner(read,base,iggy);assert(narrative_world_ui?(o && o->kind==WorldUiKind::journal):!o);} // v724: the choices' real movie
+    path("ui/choice_emily.iggy");
+    // v722: a newer batch above the one that holds the choice movie (a scripted scene) does not hide it
+    put(manager+8,rig::List{batches,2,512});put(batches+32+0x10,rig::List{0x380000,0,256});
+    {const auto o=native_world_ui_owner(read,base,iggy);assert(o && o->kind==WorldUiKind::journal);}
+    put(manager+8,rig::List{batches,1,256});
     assert(world_ui_logic(512)==WorldUiKind::journal && world_ui_logic(2)==WorldUiKind::none);
     assert(native_note_reader_logic(16) && native_note_reader_logic(128|16));
     assert(world_ui_logic(128|16)==WorldUiKind::notes); // Actual journal -> Read combines both native bits.

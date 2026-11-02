@@ -165,6 +165,15 @@ template<class Read> std::optional<NativePlayerCamera> native_player_camera(
     }
     return s;
 }
+// The game and its player entity exist (a level is loaded), without validating the camera: scripted scenes such as the boat ride
+// leave the camera in a state find_native_player_camera rejects (v722).
+template<class Read> bool native_player_present(Read& read,std::uintptr_t base) {
+    using namespace rig;
+    const auto game=value<std::uintptr_t>(read,base+0x39a5290);
+    if(!game || !typed(read,base,*game,0x1c940a8)) return false;
+    const auto player=value<std::uintptr_t>(read,*game+0x3130b0);
+    return player && typed(read,base,*player,0x1c5e428);
+}
 template<class Read> std::optional<NativePlayerCamera> find_native_player_camera(Read& read,std::uintptr_t base) {
     using namespace rig;
     auto game=value<std::uintptr_t>(read,base+0x39a5290);

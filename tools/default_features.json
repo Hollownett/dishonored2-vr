@@ -412,6 +412,14 @@
    "label": "Capture graphics diagnostics",
    "help": "Saves a short graphics trace for troubleshooting once gameplay is ready. Off by default; this does not enable DLSS.",
    "default": false
+  },
+  {
+   "id": "dual-wield",
+   "file": "dual-wield",
+   "kind": "enable",
+   "label": "Dual wield (experimental, headset test)",
+   "help": "Either hand can hold the sword or the gun, grenade or power. Draw the sword over either shoulder and the gun from the hip with either hand. Hold X for the left hand's weapon wheel and A for the right hand's; push the right stick up to jump (hold it up to swim up or climb); B drinks a health elixir. The wheel is drawn at the hand that opened it; point at what you want.",
+   "default": false
   }
  ]
 }

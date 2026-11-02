@@ -114,8 +114,11 @@ inline Ownership native_ownership(const std::string& state) {
         return false;
     };
     if(is({"Assassination","Choke","DropChoke","CureChoke","NpcFatality","BloodthirstyFatality","Versus","VersusGrab",
-           "SyncAnim","KnockedDown","Dead","Stun","Stumble","KillCam","Crank","Peeking","GrabGrappledEntity"}))
+           "SyncAnim","KnockedDown","Dead","KillCam","Crank","Peeking","GrabGrappledEntity"}))
         return {1,1,{1,1},.15,.35};
+    // v781 (user, headset v780: "Emily's hit reaction takes her hands: a guard's kick staggers her for a second and the hands leave the
+    // controllers"): a hit reaction keeps the hands and the torso the player's; the legs play the stagger.
+    if(is({"Stumble","Stun"})) return {1,0,{0,0},.15,.35};
     if(is({"Mantle","Vault"})) return {1,1,{1,1},.25,.35};
     if(is({"Jumping","Falling","CatFall","Slipping"})) return {1,0,{0,0},.1,.2};
     if(is({"Sliding"})) return {1,.6,{0,0},.12,.3};
@@ -160,6 +163,7 @@ struct Inputs {
     // Optional native animated arm pose (69 joints, arm-model space, unscaled). When present the
     // whole hand subtree keeps the game's authored fingers, helpers and accessories (ring).
     const std::vector<Xf>* native_arm[2]{};
+    bool native_mirrored[2]{}; // native_arm[i] is the other arm's clip mirrored (dual wield): its sword-only corrections do not apply
     // Optional native pose plus the ownership the current native state requests (see native_ownership).
     const NativePose* native{};
     Ownership own{};
@@ -345,6 +349,19 @@ public:
         for(int i=0;i<2;++i) {foot_[i]={};arm_state_[i].has_pole=false;arm_state_[i].has_roll=false;dragged_[i]=false;arm_state_[i].has_hold=false;arm_state_[i].socket_token=0;arm_state_[i].reach={};}
         for(auto& p:progress_) p=0;
         for(auto& p:path_) p.clear();
+    }
+    // v861: a rig turn (the tracking space turned in the world: a stick or snap turn, a fold) turns everything the solver remembers in the world
+    // about the vertical through pivot, so the torso, the feet and the elbows turn with the camera in that frame. Before, the chest kept its world
+    // yaw (40 deg dead zone, 0.3 s follow) and the shoulders the arms hang from trailed every stick turn: the hands missed their targets by
+    // 76-106 mm (tests/image_pose_check.cpp). Physical head turns are not rig turns and keep the dead-zone follow.
+    void turn_rig(double turn,Vec3 pivot) {
+        if(!std::isfinite(turn) || !finite(pivot)) return;
+        const auto q=rot_z(turn);
+        const auto at=[&](Vec3 p) {return pivot+rotated(q,p-pivot);};
+        if(chest_.valid) chest_.yaw=wrap_pi(chest_.yaw+turn);
+        for(auto& f:foot_) {f.at=at(f.at);f.from=at(f.from);f.to=at(f.to);f.yaw=wrap_pi(f.yaw+turn);f.from_yaw=wrap_pi(f.from_yaw+turn);f.to_yaw=wrap_pi(f.to_yaw+turn);}
+        velocity_=rotated(q,velocity_);if(has_eye_) last_eye_=at(last_eye_);
+        for(auto& a:arm_state_) {if(a.has_pole) a.pole=rotated(q,a.pole);if(a.reach.valid) a.reach.shoulder=at(a.reach.shoulder);}
     }
 
     Output solve(const Inputs& in) {
@@ -896,6 +913,17 @@ private:
                   carried[upper_[i]].p+outward*(.05*scale_)-up*(.55*scale_)};
         }
         const auto* native=in.native_arm[i] && in.native_arm[i]->size()==s.local.size()?in.native_arm[i]:nullptr;
+        // v771 (user, headset v770: the left hand held the sword through its open palm): a hand that never held this item starts from the other
+        // hand's calibrated grip of it, mirrored (mirror_joint keeps a local turn and negates a local offset), as the right's sword hold starts from
+        // its own: the hand closes round the hilt on the first frame instead of keeping the draw clip's open fingers until it is steady.
+        if(in.item_key[i] && !(state.has_memo && state.memo_key==in.item_key[i])) {
+            const auto& o=arm_state_[static_cast<std::size_t>(i^1)];
+            if(o.has_memo && o.memo_key==in.item_key[i] && o.memo_fingers.size()==s.local.size()) {
+                state.memo_hold={o.memo_hold.q,o.memo_hold.p*-1.};state.memo_wrap=o.memo_wrap*-1.;state.memo_fingers=o.memo_fingers;
+                for(auto& f:state.memo_fingers) f.p=f.p*-1.;
+                state.memo_key=o.memo_key;state.has_memo=true;
+            }
+        }
         const bool remembered=state.has_memo && state.memo_key==in.item_key[i];
         const bool procedural=!native || (in.weapon_incoming[i]?!remembered:in.hand_empty[i]);
         if(state.socket_token!=in.native_socket_token[i]) {state.has_hold=false;state.hold_calibrated=false;state.reverse_weight=0;state.sneak_flip=false;state.socket_token=in.native_socket_token[i];}
@@ -913,8 +941,11 @@ private:
             // +Z in every forward clip (2026-10-12 clip scan). The player keeps the forward grip: turned back and moved to
             // the standing clips' socket (sword_idle T -.0148 -.0916 .0262 vs sneak .0305 -.0654 .025, native units;
             // keeping the sneak offset put the fist on the blade above the handle, headset v346).
-            if(i==1) {const double sneak_z=rotated(n.q,{0,1,0}).z;if(sneak_z<-.5) state.sneak_flip=true;else if(sneak_z>-.2) state.sneak_flip=false;} // hysteresis: a clip blend through -.5 does not flap the socket
-            if(i==1 && state.sneak_flip) {n.q=mul(n.q,axis_angle({0,0,1},kPi));n.p=n.p+Vec3{-.0453,-.0262,.0012}*scale_;}
+            // The sword clip is the right arm's own, or (dual wield) the left playing it mirrored: mirror_joint keeps a local turn and negates a local offset,
+            // so the same flip with the offset negated (user, headset v762: the left holds the sword exactly as the right).
+            const bool sword_clip=(i==1)!=in.native_mirrored[i];
+            if(sword_clip) {const double sneak_z=rotated(n.q,{0,1,0}).z;if(sneak_z<-.5) state.sneak_flip=true;else if(sneak_z>-.2) state.sneak_flip=false;} // hysteresis: a clip blend through -.5 does not flap the socket
+            if(sword_clip && state.sneak_flip) {n.q=mul(n.q,axis_angle({0,0,1},kPi));n.p=n.p+Vec3{-.0453,-.0262,.0012}*(i==1?scale_:-scale_);}
             const auto wrap=wrap_in_parent(i,*native,scale_);
             if(!state.has_hold) {
                 // A new hold of a remembered item starts from its last calibrated grip (v612 feedback 7 and 3: the draw clip's first frame

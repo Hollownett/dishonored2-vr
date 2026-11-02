@@ -409,7 +409,67 @@ static void replacement_session_reusing_epoch_one_bootstraps_paired() {
     for(unsigned frame=0;frame<180;++frame) misses=alternate_miss_count(misses,true,false);
     CHECK(misses==180); // real active-session failures still retire alternation
 }
+// v791 (headset v790: opening the weapon wheel, logic mask 256, ended performance mode for the session). The world keeps rendering behind
+// the wheel, so the engine keeps preparing views: the descriptor it renders with must follow the planner's paired plan there too. The glue
+// is modelled frame by frame: plan, install the descriptor by the rule, the engine prepares one view under the single-view descriptor and
+// two under the paired one, and the Setup's view count is checked against the plan (the 30-frame mismatch fallback).
+static bool wheel_session_falls_back(bool (*install)(bool gameplay, int planned)) {
+    AlternateEye a;
+    AlternateMismatch mismatch;
+    bool paired_descriptor = true;  // enable_stereo installs the paired descriptor
+    for (std::uint64_t f = 1; f <= 160; ++f) {
+        const bool gameplay = f < 50 || f > 110;  // the wheel is open for 60 frames
+        const int planned = a.eye_for_frame(f, gameplay, false, false);
+        if (install(gameplay, planned)) paired_descriptor = planned < 0;
+        const bool mono = !paired_descriptor;
+        if (mismatch.note(mono ? planned < 0 : planned >= 0)) return true;  // prepare_head_view: !mono ? wanted_single : wanted_paired
+        if (planned < 0) {if (!mono) {a.rendered(0, f); a.rendered(1, f);}}
+        else if (mono) a.rendered(planned, f);
+    }
+    return false;
+}
+static void wheel_keeps_the_mode() {
+    CHECK(wheel_session_falls_back([](bool gameplay, int) {return gameplay;}));  // the v790 rule: installed only in gameplay
+    CHECK(!wheel_session_falls_back(alternate_install_descriptor));
+    CHECK(alternate_install_descriptor(false, -1));                             // wheel, menu, loading: paired
+    CHECK(alternate_install_descriptor(true, -1) && alternate_install_descriptor(true, 0) && alternate_install_descriptor(true, 1));
+    CHECK(!alternate_install_descriptor(false, 0) && !alternate_install_descriptor(false, 1));  // never a single view outside gameplay
+}
+// v792: the companion view (the other eye at the same Setup) travels with its display frame and never names a rendered eye.
+static void companion_view_rides_with_its_frame() {
+    PendingViews<Pose> pending;
+    pending.record(10, 0, Pose{100}, 3, 0, 0);
+    pending.record_companion(10, 1, Pose{101});
+    pending.record_companion(10, 0, Pose{999});   // the rendered eye: refused
+    pending.record_companion(11, 1, Pose{555});   // no Setup recorded for 11: refused
+    const auto slot = pending.take(10);
+    CHECK(slot && slot->mask == 1u && slot->companion_mask == 2u && slot->companion[1].id == 101 && slot->view[0].id == 100);
+    CHECK(!pending.take(11));
+    pending.record(12, 1, Pose{120}, 3, 0, 0);    // two Setups later the slot is reused: the old companion is gone
+    const auto later = pending.take(12);
+    CHECK(later && later->companion_mask == 0u);
+    pending.record(14, 0, Pose{140}, 3, 0, 0);
+    pending.record_companion(14, 1, Pose{141});
+    pending.record(14, 1, Pose{142}, 3, 0, 0);    // a paired frame after all: the companion of eye 1 is dropped
+    const auto paired = pending.take(14);
+    CHECK(paired && paired->mask == 3u && paired->companion_mask == 0u);
+}
+// v790 diagnostic: the parity flip renders the right eye on even frames, in the planner and in parity_eye (the Setup's eye) alike.
+static void parity_flip_swaps_the_eye_of_each_frame() {
+    alternate_parity_flip = true;
+    AlternateEye a;
+    CHECK(step(a, 1) == -1);
+    for (std::uint64_t f = 2; f < 20; ++f) {
+        CHECK(step(a, f) == static_cast<int>((f + 1u) & 1u));
+        CHECK(AlternateEye::parity_eye(f) == static_cast<int>((f + 1u) & 1u));
+    }
+    alternate_parity_flip = false;
+    CHECK(AlternateEye::parity_eye(2) == 0 && AlternateEye::parity_eye(3) == 1);
+}
 int main() {
+    companion_view_rides_with_its_frame();
+    wheel_keeps_the_mode();
+    parity_flip_swaps_the_eye_of_each_frame();
     replacement_session_reusing_epoch_one_bootstraps_paired();
     paired_frames_never_trip_the_miss_fallback();
     parity_alternates_in_gameplay();

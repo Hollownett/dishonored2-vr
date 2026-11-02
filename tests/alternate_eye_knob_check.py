@@ -85,7 +85,8 @@ assert 'alt_plan.rendered(eye,number)' in after
 assert 'const UINT64 next_display=d2vr::alternate_display_frame(number);' in after   # the plan is for the frame the next Setup SHOWS
 assert 'alt_plan.eye_for_frame(next_display,free_gameplay,authored,epoch_changed)' in after and 'number+1' not in after
 assert 'alt_plan_stamp=(next_display<<2)|static_cast<UINT64>(next+1);' in after
-assert 'if(gameplay) alternate_select_descriptor(next<0);' in after
+assert 'if(d2vr::alternate_install_descriptor(gameplay,next)) alternate_select_descriptor(next<0);' in after   # v791: the wheel gets two views
+assert 'if(gameplay) alternate_select_descriptor(next<0);' not in after
 sel = between(probe, 'void alternate_select_descriptor(bool paired) noexcept {', 'void alternate_after_present(')
 assert 'paired?(write_pointer() && write_separation()):(write_separation() && write_pointer())' in sel
 fb = between(probe, 'void alternate_fallback(const char* reason) noexcept {', 'void alternate_select_descriptor(')
@@ -108,7 +109,7 @@ assert 'std::optional<d2vr::PendingViews<XrView>::Slot> alt_slot;int alt_fresh=-
 assert 'alternate_after_present(number,gameplay,d2vr::alternate_free_gameplay(gameplay,game_xr->settings_open()),authored_camera,alt_fresh);' in probe
 assert 'if(alt_mismatch_run.note(mismatch)) alternate_fallback("alternate-eye: the engine view count disagreed with the plan for 30 frames");' in head and 'if(mismatch && mono)' in head
 assert 'return alternate_pair_ready(rendered_mask_,alternate_fresh_eye,' in xr
-assert 'if(alternate_may_keep(gameplay,authored_camera,settings_.open())) keep_alternate_eye_(eye,processed);' in xr
+assert 'if(alternate_may_keep(gameplay,authored_camera,settings_.open())) {\n                        keep_alternate_eye_(eye,processed);' in xr   # v802: then the next-frame diagnostic
 assert 'alt_kept_ok_(authored_camera || settings_.open())' in xr and 'if(nonfree) return false;' in xr
 assert 'if(!alternate_enabled && (alt_kept_[0] || alt_kept_[1])) {alt_kept_[0].Reset();alt_kept_[1].Reset();' in xr   # released after fallback
 # Temporal modes require verified ownership; selected upscalers are enabled unless explicitly disabled.
@@ -126,3 +127,54 @@ print('PASS: alternate-eye knob routing (gating, own-eye pose, display-frame rec
 # the 180-frame miss counter counts only frames planned as one view; paired frames reset it (review double-vision I1)
 assert 'mono_view_misses=d2vr::alternate_miss_count(static_cast<unsigned>(mono_view_misses.load()),alt_planned_single[number&1].load()!=0,pair_ready);' in probe
 assert 'alt_planned_single[next_display&1]=next>=0?1:0;' in probe
+
+# v792 stale-eye warp: knob, the companion view recorded at the Setup and handed over at its Present, the warp before the copy, the layer
+# view substituted only for a warped eye, and the reticle moved with the image
+assert 'stale_eye_warp_knob=!fs::exists(root/L"build"/L"no-stale-eye-warp");' in probe
+assert 'alt_pending.record_companion(alt_display,static_cast<int>(other),*companion);' in probe
+assert 'if(alt_slot->companion_mask&(1u<<other)) game_xr->stale_eye_target(other,alt_slot->companion[other],number);' in probe
+assert 'game_xr->stale_eye_warp_enabled=stale_eye_warp_knob;' in probe
+assert 'stale_warp_->apply(processed,*h);' in xr
+assert xr.index('stale_warp_->apply(processed,*h);') < xr.index('} else context_->CopyResource(images_[eye].at(index).texture,submitted);}')
+# v808: a canted eye is resampled into its own located view between the warp and the copy, and submitted with that view
+assert xr.index('stale_warp_->apply(processed,*h);') < xr.index('submitted=uncant_->apply(processed,*h);') < xr.index('} else context_->CopyResource(images_[eye].at(index).texture,submitted);}')
+assert 'layers[eye].pose=uncanted_[eye]?straight_pose:' in xr and 'warp_point(uncant_back_[eye],' in xr
+assert 'else if(stale_warped_(static_cast<UINT>(eye))) out[static_cast<std::size_t>(eye)].view=stale_target_[static_cast<std::size_t>(eye)];' in xr
+assert 'warp_point(stale_back_[eye],ru,rv);' in xr
+print('PASS: v792 stale-eye warp routing (knob, companion record and hand-over, warp before the copy, layer view, reticle)')
+
+# v794: a Setup that planned its eye's temporal state and returned early only cancels the plan (no session-long fallback); real
+# ownership failures name their site; views and hands are located for the display of their image (two periods ahead)
+assert 'alternate_taa_runtime.cancel_plan();++alternate_taa_plan_cancels;' in probe
+assert 'alternate_taa_runtime.cancel_plan();alternate_taa_runtime.fail(' not in probe
+assert '"Alternate temporal ownership failed (site "' in probe
+assert 'legacy_locate_horizon=fs::exists(root/L"build"/L"legacy-locate-horizon");' in probe
+assert 'game_xr->locate_periods=legacy_locate_horizon?1:2;' in probe
+assert 'locate_display_time_=frame_.predictedDisplayTime+frame_.predictedDisplayPeriod*locate_periods;' in xr
+print('PASS: v794 routing (cancelled plans keep temporal AA, failure sites, two-period locate horizon)')
+# v796 parallax: knob, the game cameras recorded with the views (never an authored camera) and handed over at their Present with the
+# stale eye's FSR/DLSS depth, the kept camera follows the kept image, the warp gets the parallax, the reticle moves at its own distance
+assert 'stale_eye_parallax_knob=!fs::exists(root/L"build"/L"no-stale-eye-parallax");' in probe
+assert 'if(!authored_camera) alt_cameras.record(alt_display,logical_eye,{world,(*optical)[10],(*optical)[11],warp_grips,warp_grip_bits,warp_palms},' in probe   # v802: and the drawn hands (v811: their palms)
+assert probe.count(',(*optical)[10],(*optical)[11],warp_grips,warp_grip_bits,warp_palms}') == 2 and 'warp_grips=hands.grips;warp_grip_bits=hands.hands;' in probe
+assert 'warp_palms[side]=hands.hands>>side&1u?drawn_palm_frame(side,hands.grips[side]).position' in probe   # v811: the drawn palms own their pixels
+assert 'alt_cameras.record_companion(alt_display,static_cast<int>(other),' in probe
+assert 'game_xr->record_rendered_camera(static_cast<UINT>(alt_fresh),cameras->view[static_cast<std::size_t>(alt_fresh)],number);' in probe
+assert 'game_xr->stale_eye_target_camera(other,cameras->companion[other],number);' in probe
+assert 'fsr_taa.eye_depth(static_cast<int>(other),depth_w,depth_h)' in probe
+assert 'game_xr->stale_eye_parallax_enabled=stale_eye_parallax_knob;' in probe
+assert 'stale_parallax_warps' in probe and 'stale_parallax_misses' in probe
+assert 'kept_cameras_[eye]=rendered_cameras_[eye];kept_camera_valid_[eye]=rendered_camera_frame_[eye]==alternate_frame;' in xr
+assert 'stale_warp_->apply(processed,*h,&*stale_layers_[eye],' in xr
+assert 'parallax_target(stale_layers_[eye]->world,ru,rv,reticle->depth)' in xr
+print('PASS: v796 parallax routing (knob, cameras recorded and handed over, kept depth, kept camera, warp input, reticle distance)')
+
+# v798 fresh layer: the fresh eye goes first, its depth and kept image reach the stale eye's warp with its camera, knob and status
+assert 'const UINT eye=alternate_enabled && alternate_fresh_eye==1?1u-pass:pass;' in xr
+assert 'fresh_now?&rendered_cameras_[fresh_eye]:nullptr,f(alt_records_[fresh_eye].view.fov),stale_near_range);' in xr
+assert 'stale_warp_->apply(processed,*h,&*stale_layers_[eye],kept_depth,fresh_image,fresh_depth)' in xr
+assert 'fsr_taa.eye_depth(alt_fresh,depth_w,depth_h)' in probe
+assert '{std::ifstream knob(root/L"build"/L"stale-near-range");' in probe
+assert 'game_xr->stale_near_range=stale_near_range;' in probe
+assert 'stale_fresh_warps' in probe and 'warp_hands' not in probe
+print('PASS: v798 fresh-layer routing (fresh eye first, its camera, depth and image to the stale warp, knob, status)')

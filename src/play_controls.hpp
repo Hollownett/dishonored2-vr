@@ -55,6 +55,19 @@ public:
         return false;
     }
 };
+// v779 (user, headset v778: "jump is not A any more but the right stick pushed up; holding A opens the weapon wheel, mirrored with the left
+// controller"), dual wield: the right stick pushed up holds the game's jump (A) while it stays up (held: swims up, climbs, as a held A). Up past
+// .7 and more up than sideways (a snap turn never jumps), let go under .3; a push begun while not allowed waits for the centre, as the crouch.
+class JumpStick {
+    bool down_{},spent_{};
+public:
+    bool update(float turn_x,float turn_y,bool allowed) noexcept {
+        if(down_) {if(!allowed || turn_y<.3f) {down_=false;spent_=turn_y>=.3f;} return down_;}
+        if(spent_) {if(turn_y<.3f) spent_=false;return false;}
+        if(turn_y>=.7f && turn_y>=std::fabs(turn_x)) {if(allowed) down_=true;else spent_=true;}
+        return down_;
+    }
+};
 // Physical B sheathes the weapons by holding the native Interact button (X) for
 // hold_ms. Only a fresh B press while allowed, with no target and no held
 // trigger, starts it; a tap is enough because the hold then runs to completion.

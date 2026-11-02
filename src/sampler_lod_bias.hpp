@@ -75,10 +75,11 @@ class SamplerLodBias {
     inline static std::atomic<bool> installed_{false};
 public:
     inline static std::atomic<std::uint64_t> swaps{},failures{};
-    // Bias for a render fraction (render/output, per axis): log2(fraction) + extra; 0 when not upscaling.
+    // Bias for a render fraction (render/output, per axis): log2(fraction) + extra, also at native size (AMD's rule for
+    // temporal AA: native AA gets extra alone; v873, the user found distant detail soft with every native mode).
     static float bias_for(float fraction,float extra) noexcept {
-        if(!(fraction>0) || fraction>=.999f) return 0;
-        return std::log2(fraction)+extra;
+        if(!(fraction>0)) return 0;
+        return std::log2(fraction<1.f?fraction:1.f)+extra;
     }
     static void set_bias(float b) noexcept {bias_.store(std::isfinite(b)?b:0.f,std::memory_order_relaxed);}
     static float bias() noexcept {return bias_.load(std::memory_order_relaxed);}

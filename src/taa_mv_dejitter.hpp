@@ -24,10 +24,21 @@ class TaaMvDejitter {
     std::atomic<UINT> wanted_w_{},wanted_h_{};
 public:
     std::atomic<bool> enabled{true};
-    std::atomic<UINT64> applied{},skipped{},failures{};
+    std::atomic<UINT64> applied{},skipped{},failures{},from_cb_applied{};
+    std::atomic<bool> from_cb{true}; // v910: step from the dispatch's own b1; knob build/legacy-taa-jitter = the CPU pair (read live)
     // UV step that the motion vectors carry, from the per-eye jitter (engine sign, see engine_taa_jitter):
     // the content moves by (-j.x,+j.y) in UV, so MV = (-(cur.x-prev.x), cur.y-prev.y).
     static std::array<float,2> step(float cur_x,float cur_y,float prev_x,float prev_y) noexcept {return {prev_x-cur_x,cur_y-prev_y};}
+    // from_cb (v910): the step comes from the TAA dispatch's own b1 (CBPerViewGlobals, still bound at slot 1): the frustum
+    // shift of cb_previousprojectionmatrix minus cb_projectionmatrix (floats 8,9 at float4 25 and 13), i.e. exactly the
+    // jitter pair inside the VP/prevVP the motion vectors were built from, whatever the CPU bookkeeping saw (taa_jitter_check.hpp).
+    // The engine's motion-vector pass never writes the sky (depth 0 keeps the cleared (0,0), v911 dump: 24% of a frame), so
+    // only written texels carry the jitter step; subtracting it from (0,0) made the sky move by -step and, through the TAA's
+    // longest-vector-in-3x3 pick, dragged the history of every silhouette against the sky. from_cb keeps exact zeros.
+    static constexpr char shader_source[]="Texture2D<float2> i:register(t0);RWTexture2D<float2> o:register(u0);cbuffer c:register(b0){float2 s;float from_cb;float pad;};"
+        "cbuffer v:register(b1){float4 r[50];};"
+        "[numthreads(8,8,1)] void main(uint3 p:SV_DispatchThreadID){float2 d=from_cb>.5?float2(r[25].x-r[13].x,r[13].y-r[25].y)*.5:s;"
+        "float2 m=i.Load(int3(p.xy,0));o[p.xy]=from_cb>.5 && m.x==0 && m.y==0?m:m-d;}";
     // Present thread.
     void prepare(ID3D11Device* device) noexcept {
         const UINT w=wanted_w_.load(),h=wanted_h_.load();
@@ -36,10 +47,8 @@ public:
         if(ready_w_==w && ready_h_==h && cs_) return;
         ready_w_=ready_h_=0;
         if(!cs_) {
-            static const char src[]="Texture2D<float2> i:register(t0);RWTexture2D<float2> o:register(u0);cbuffer c:register(b0){float2 s;float2 pad;};"
-                "[numthreads(8,8,1)] void main(uint3 p:SV_DispatchThreadID){o[p.xy]=i.Load(int3(p.xy,0))-s;}";
             Ptr<ID3DBlob> code;
-            if(FAILED(D3DCompile(src,sizeof src-1,nullptr,nullptr,nullptr,"main","cs_5_0",D3DCOMPILE_OPTIMIZATION_LEVEL3,0,&code,nullptr)) ||
+            if(FAILED(D3DCompile(shader_source,sizeof shader_source-1,nullptr,nullptr,nullptr,"main","cs_5_0",D3DCOMPILE_OPTIMIZATION_LEVEL3,0,&code,nullptr)) ||
                FAILED(device->CreateComputeShader(code->GetBufferPointer(),code->GetBufferSize(),nullptr,&cs_))) {++failures;enabled=false;return;}
             D3D11_BUFFER_DESC bd{};bd.ByteWidth=16;bd.Usage=D3D11_USAGE_DEFAULT;bd.BindFlags=D3D11_BIND_CONSTANT_BUFFER;
             if(FAILED(device->CreateBuffer(&bd,nullptr,&cb_))) {++failures;enabled=false;cs_.Reset();return;}
@@ -53,7 +62,7 @@ public:
     }
     // Job thread, inside the TAA dispatch hook: records MV - step, the TAA dispatch reading it, and restores
     // t1 and the compute state. False leaves the dispatch to the caller.
-    bool dispatch(ID3D11DeviceContext* c,const TaaBindings& b,std::array<float,2> uv_step,TaaDispatchHook::Fn original,UINT x,UINT y,UINT z) {
+    bool dispatch(ID3D11DeviceContext* c,const TaaBindings& b,std::array<float,2> uv_step,TaaDispatchHook::Fn original,UINT x,UINT y,UINT z,bool use_cb=false) {
         if(!enabled.load() || !c || !original || !b.taa() || !b.is_tex[1]) return false;
         const auto& mv=b.tex[1];
         wanted_w_=mv.Width;wanted_h_=mv.Height;
@@ -63,7 +72,9 @@ public:
         ID3D11Buffer* cb0{};c->CSGetConstantBuffers(0,1,&cb0);
         ID3D11UnorderedAccessView* uav0{};c->CSGetUnorderedAccessViews(0,1,&uav0);
         ID3D11ShaderResourceView* srv0{};c->CSGetShaderResources(0,1,&srv0);
-        const float constants[4]{uv_step[0],uv_step[1],0,0};
+        D3D11_BUFFER_DESC per_view{};if(b.cb[0]) b.cb[0]->GetDesc(&per_view);
+        const float constants[4]{uv_step[0],uv_step[1],use_cb && per_view.ByteWidth==0x320?1.f:0.f,0};
+        if(constants[2]>.5f) ++from_cb_applied;
         c->UpdateSubresource(cb_.Get(),0,nullptr,constants,0,0);
         ID3D11ShaderResourceView* null_srv{};ID3D11UnorderedAccessView* null_uav{};
         c->CSSetShaderResources(0,1,&b.srv[1]);c->CSSetUnorderedAccessViews(0,1,uav_.GetAddressOf(),nullptr);

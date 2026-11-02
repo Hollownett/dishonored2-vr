@@ -83,6 +83,35 @@ inline RgbaPixels readback_rgba(ID3D11Texture2D* texture) {
     context->Unmap(staging.Get(),0);
     return result;
 }
+// The same diagnostic readback for one rectangle of mip 0 (v790 eye band bursts): far less to copy and write than the whole eye.
+inline RgbaPixels readback_rgba_box(ID3D11Texture2D* texture,UINT x,UINT y,UINT width,UINT height) {
+    if(!texture) throw std::runtime_error("Missing eye readback texture");
+    D3D11_TEXTURE2D_DESC desc{};texture->GetDesc(&desc);
+    if(!width || !height || x+width>desc.Width || y+height>desc.Height || !eye_texture_matches(desc,desc.Width,desc.Height,DXGI_FORMAT_R8G8B8A8_UNORM))
+        return {};
+    RgbaPixels result{width,height,desc.Format,{}};
+    const auto row_bytes=static_cast<std::size_t>(width)*4;
+    result.bytes.resize(row_bytes*height);
+    desc.Width=width;desc.Height=height;desc.MipLevels=1;desc.ArraySize=1;
+    desc.Usage=D3D11_USAGE_STAGING;desc.BindFlags=0;desc.CPUAccessFlags=D3D11_CPU_ACCESS_READ;desc.MiscFlags=0;
+    Microsoft::WRL::ComPtr<ID3D11Device> device;
+    Microsoft::WRL::ComPtr<ID3D11DeviceContext> context;
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> staging;
+    texture->GetDevice(&device);device->GetImmediateContext(&context);
+    if(FAILED(device->CreateTexture2D(&desc,nullptr,&staging))) throw std::runtime_error("Cannot allocate eye band readback");
+    const D3D11_BOX box{x,y,0,x+width,y+height,1};
+    context->CopySubresourceRegion(staging.Get(),0,0,0,0,texture,0,&box);
+    D3D11_MAPPED_SUBRESOURCE mapped{};
+    if(FAILED(context->Map(staging.Get(),0,D3D11_MAP_READ,0,&mapped))) throw std::runtime_error("Cannot map eye band readback");
+    if(!mapped.pData || mapped.RowPitch<row_bytes) {
+        context->Unmap(staging.Get(),0);throw std::runtime_error("Invalid mapped eye band row pitch");
+    }
+    for(UINT row=0;row<height;++row)
+        std::memcpy(result.bytes.data()+row*row_bytes,static_cast<const std::byte*>(mapped.pData)+
+            static_cast<std::size_t>(row)*mapped.RowPitch,row_bytes);
+    context->Unmap(staging.Get(),0);
+    return result;
+}
 // One native output serves both eyes. Use the enclosing recommendation so
 // neither eye is silently undersampled, and reject unsupported allocations.
 inline EyeSize recommended_output(const std::array<EyeSize,2>& recommended,

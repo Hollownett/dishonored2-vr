@@ -12,7 +12,7 @@ struct NativeHudChildScope {
     NativeHudChildKind kind{};std::uintptr_t file{},iggy{},node{},owner{};UINT64 epoch{},tick{};
     std::array<float,6> matrix{};std::array<float,4> bounds{};bool matrix_valid{},bounds_valid{};
     NativeInteractionTargetIdentity target{};
-    bool talk_offer{},panel_prompt{},prompt_event_pending{};std::uint64_t prompt_ticket{};
+    bool talk_offer{},panel_prompt{},prompt_event_pending{},takedown{};std::uint64_t prompt_ticket{}; // takedown: the choke/kill hint (its own capture slot, v698)
     std::optional<native_prompt_entry::Receipt> retained_entry{};
 };
 inline bool native_hud_talk_glyph_context(const NativeHudChildScope* scope) noexcept {
@@ -29,6 +29,12 @@ inline bool native_hud_child_same_identity(const NativeHudChildScope& a,const Na
 // A committed image may authorize flat suppression only for this exact target
 // and pose generation. Current native observation and artwork age are bounded
 // independently: refreshing a target never renews old pixels.
+// The same drawn element (one node of one movie for one owner), whichever binding (retained event entry or hand target)
+// published it this frame: its pixels are the same, so a held frame may keep showing them across a binding change.
+inline bool native_hud_child_same_element(const NativeHudChildScope& a,const NativeHudChildScope& b) noexcept {
+    return a.kind!=NativeHudChildKind::none && a.kind==b.kind && a.file==b.file && a.iggy==b.iggy && a.node==b.node && a.owner==b.owner &&
+        a.epoch && a.epoch==b.epoch && a.takedown==b.takedown;
+}
 inline bool native_hud_child_replacement_ready(const NativeHudChildScope& current,const NativeHudChildScope& committed,
         UINT64 image_tick,UINT64 now,UINT64 max_age=250) noexcept {
     return native_hud_child_same_identity(current,committed) && current.tick && image_tick &&
@@ -51,7 +57,9 @@ inline bool native_hud_keep_flat(NativeHudChildKind kind,bool target_exists,bool
     // User requirement: object prompts are VR-only; the flat HUD copy is never drawn. Vitals (health, mana,
     // ammo) live on the wrist: a flat copy would be a head-locked widget in the corner of the lens.
     (void)target_exists;(void)held;
-    if(kind==NativeHudChildKind::prompt || kind==NativeHudChildKind::health || kind==NativeHudChildKind::mana || kind==NativeHudChildKind::equipment)return false;
+    // v710 (headset v699: tutorial messages showed as huge white letters past the view, jumping big/small): a tutorial or information
+    // message is VR-only too. Its flat copy filled the eye at full-screen scale whenever its world art was not ready.
+    if(kind==NativeHudChildKind::prompt || kind==NativeHudChildKind::tutorial || kind==NativeHudChildKind::health || kind==NativeHudChildKind::mana || kind==NativeHudChildKind::equipment)return false;
     return !replacement_ready;
 }
 // Horizontal shift that centres a child's bounds on the 1920-wide stage (0 = leave as laid out;
@@ -327,6 +335,9 @@ private:
                    !binding.tick || now<binding.tick || now-binding.tick>250)binding={};
                 continue;
             }
+            // v714 (headset v713: the counter-serum message never showed): a script message is published every 250 ms at best, on the
+            // next UI call, and expired after 250 ms. Its own Draw now renews it, so it lives exactly as long as the game draws it.
+            if(binding.kind==NativeHudChildKind::tutorial && now>=binding.tick && now-binding.tick<=1000) {binding.tick=now;out=binding;break;}
             const bool live_prompt=binding.kind==NativeHudChildKind::prompt && binding.target && binding.target==prompt_target_ &&
                 prompt_target_tick_ && now>=prompt_target_tick_ && now-prompt_target_tick_<=250;
             if(live_prompt || (now>=binding.tick && now-binding.tick<=250)){out=binding;if(live_prompt)out.tick=now;out.talk_offer=live_prompt && prompt_talk_;break;}
@@ -420,12 +431,17 @@ private:
         if(!node || !epoch)return out;
         try {
             std::array<float,6> m{};if(!takedown_hint_node(matrix,m))return out;
-            NativeInteractionTargetIdentity target{};UINT64 tick{};
-            if(!mutex_.try_lock())return out;target=takedown_;tick=takedown_tick_;mutex_.unlock();
+            NativeInteractionTargetIdentity target{};UINT64 tick{};bool message=false;
+            if(!mutex_.try_lock())return out;target=takedown_;tick=takedown_tick_;
+            // v720 (headset v717: Dr. Hypatia's "Press [Grip] to inject counter-serum." appeared only once the choke had begun): the
+            // game lays its script messages out in this same stage region (y 650-690). While a takedown was offered, this claimed the
+            // message node as the takedown hint, so the message the game raises with the offer was never seen until the offer ended.
+            for(const auto& b:bindings_) if(b.kind==NativeHudChildKind::tutorial && b.iggy==reinterpret_cast<std::uintptr_t>(iggy) && b.node==reinterpret_cast<std::uintptr_t>(node)) {message=true;break;}
+            mutex_.unlock();if(message)return out;
             const auto now=GetTickCount64();if(!target || !tick || now<tick || now-tick>250)return out;
             std::uintptr_t file{};if(!read_(reinterpret_cast<std::uintptr_t>(iggy)+0x78,&file,sizeof(file)) || !file)return {};
             out={NativeHudChildKind::prompt,file,reinterpret_cast<std::uintptr_t>(iggy),reinterpret_cast<std::uintptr_t>(node),reinterpret_cast<std::uintptr_t>(node),epoch,now};
-            out.target=target;out.matrix=m;out.matrix_valid=true;for(const auto value:m)if(!std::isfinite(value))out.matrix_valid=false;
+            out.target=target;out.takedown=true;out.matrix=m;out.matrix_valid=true;for(const auto value:m)if(!std::isfinite(value))out.matrix_valid=false;
             out.bounds_valid=read_(out.node+0xc8,out.bounds.data(),sizeof(out.bounds));
             if(out.bounds_valid)for(const auto value:out.bounds)if(!std::isfinite(value))out.bounds_valid=false;
             ++takedown_hints;
@@ -521,19 +537,16 @@ private:
             }
         if(!window && matrix && nesting_==1 && hud_scale.load(std::memory_order_relaxed)>=.999f) // the crosshair needs the eye target size at any HUD size
             if(const auto is_hud=hud_movie.load(std::memory_order_relaxed);is_hud && is_hud(iggy) && read_(reinterpret_cast<std::uintptr_t>(matrix),laid.data(),sizeof(laid)))publish_root(laid);
-        auto scope=tutorial_child(iggy,node,matrix);if(scope.kind==NativeHudChildKind::none)scope=identify(iggy,node,matrix);
+        // v700 (headset v699: an NPC's Talk prompt still blinked): the choke/kill hint is recognised before the general prompt
+        // identification, which could claim it as an ordinary prompt (slot 0) while the Talk window held slot 0 too.
+        auto scope=tutorial_child(iggy,node,matrix);
         if(window && scope.kind==NativeHudChildKind::none)scope=takedown_child(iggy,node,matrix);
+        if(scope.kind==NativeHudChildKind::none)scope=identify(iggy,node,matrix);
         if(window) {
-            // Only the tutorial movie's cards are panel content. hud.iggy's script messages (_tutorialMessage /
-            // _informationMessage, bound by publish(tutorial)) stay world art like the takedown hints (v677's intent): on the
-            // panel below the gaze the game's "Press [Grip] to inject counter-serum." was not seen (headset v689/v690).
-            const auto is_tutorial_movie=tutorial_movie.load(std::memory_order_relaxed);
-            const bool tutorial=scope.kind==NativeHudChildKind::tutorial && is_tutorial_movie && is_tutorial_movie(iggy);
-            if(tutorial && scope.matrix_valid && scope.bounds_valid)
-                if(const float dx=native_hud_centre_shift(scope.matrix,scope.bounds);dx!=0.f) {laid=scope.matrix;laid[4]+=dx;relaid=true;}
-            if((scope.kind==NativeHudChildKind::prompt && !prompt_world.load(std::memory_order_relaxed)) || tutorial)
-                {scope.panel_prompt=scope.kind==NativeHudChildKind::prompt;scope.kind=NativeHudChildKind::panel;}
-            else if(scope.kind==NativeHudChildKind::none && panel_generic.load(std::memory_order_relaxed)) {
+            // v698: prompts are world art only (no HUD screen frames). v710: so are all tutorial and information messages, the
+            // tutorial movie's cards included: they are laid out head-locked at the game's own stage positions (dxgi_probe), none on the panel.
+            constexpr bool tutorial=false;
+            if(scope.kind==NativeHudChildKind::none && panel_generic.load(std::memory_order_relaxed)) {
                 holder_hit_=holder_hide_=holder_eye_hit_=false;scope=panel_child(iggy,node,matrix,sibling);hide_child=holder_hide_;holder_hide_=false;
                 if(holder_hit_){holder_saved=holder_level_;eye_saved=holder_eye_;holder_level_=nesting_;holder_eye_=holder_eye_hit_;holder_entered=true;}
             }
@@ -558,10 +571,13 @@ private:
             if(capture)++captures;if(changed)++transforms;
         }
         std::uint32_t result{};
-        // VR-only prompt: an identified prompt subtree that is not being captured is never drawn flat.
+        // VR-only prompt: an identified prompt subtree that is not being captured is never drawn flat. v814 (headset v812: "I should not
+        // see this huge white tutorial notification, there is a VR copy"): nor a tutorial or information message (v710 made them VR-only,
+        // but a draw whose capture was refused, its slot busy or the frame not capturing, still went flat across the eye).
         const bool hide=hide_child && scope.kind==NativeHudChildKind::none && start;
         if(hide)++holder_hidden;
-        const bool suppress=hide || hide_overlay || ((scope.kind==NativeHudChildKind::prompt || scope.kind==NativeHudChildKind::panel) && !capture && start);
+        const bool suppress=hide || hide_overlay || ((scope.kind==NativeHudChildKind::prompt || scope.kind==NativeHudChildKind::panel ||
+                                                     scope.kind==NativeHudChildKind::tutorial) && !capture && start);
         if(suppress)++suppressed;
         if(profile)profile(1,nesting_);
         const auto saved_eye_scale=eye_layout_scale_;const auto saved_eye_centre=eye_layout_centre_;

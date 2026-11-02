@@ -388,6 +388,9 @@ private:
             if(!finite(point) || length(point-p.hand.position)>grab_retain_distance+3)return {};
             if(guard) {
                 if(living_enabled_ && palm_bones && !ragdoll_pushable_state(read_,*entity) && length(point-p.hand.position)<=living_seen_m) note_living(lane,*entity,*id,now);
+                // A guard the game offers a choke or takedown for is no body to grab (headset 2026-11-01: a fist at his collar in
+                // combat held him physically for up to 7 s and the choke never started); the press stays the game's.
+                if(npc_reserved(*id,now)) return {};
                 return corpse(*entity);
             }
             BodyReject why{};auto body=native_rigid_body(read_,base_,*entity,false,&why);

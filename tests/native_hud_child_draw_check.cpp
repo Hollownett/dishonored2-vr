@@ -307,11 +307,11 @@ int main(){
     assert(observed()==NativeHudChildKind::prompt && last_talk_offer); // exact current Talk offer follows this target scope
     assert(last_talk_glyph);
     NativeHudChildDraw::panel_active=true;
-    assert(observed()==NativeHudChildKind::panel && last_talk_glyph);
+    assert(observed()==NativeHudChildKind::prompt && last_talk_glyph); // v698: in the HUD window a prompt stays world art, never panel content
     NativeHudChildDraw::refresh_prompt(file,iggy,9,target_tick-1000,target,true);
-    assert(observed()==NativeHudChildKind::panel && !last_talk_glyph);
+    assert(observed()==NativeHudChildKind::prompt && !last_talk_glyph);
     NativeHudChildDraw::refresh_prompt(file,iggy,9,GetTickCount64(),target,false);
-    assert(observed()==NativeHudChildKind::panel && !last_talk_glyph);
+    assert(observed()==NativeHudChildKind::prompt && !last_talk_glyph);
     NativeHudChildDraw::refresh_prompt(file,iggy,9,GetTickCount64(),target,true);
     std::memcpy(fixture_node.data()+0x80,&cycle,8);
     assert(observed()==NativeHudChildKind::none && !last_talk_glyph);
@@ -329,7 +329,7 @@ int main(){
     assert(observed()==NativeHudChildKind::prompt && !last_talk_offer); // old target retired; sticky root keeps it prompt (never flat)
     assert(!last_talk_glyph);
     NativeHudChildDraw::panel_active=true;
-    assert(observed()==NativeHudChildKind::panel && !last_talk_glyph);
+    assert(observed()==NativeHudChildKind::prompt && !last_talk_glyph); // v698: world art in the HUD window too
     NativeHudChildDraw::panel_active=false;
     assert(NativeHudChildDraw::publish(NativeHudChildKind::prompt,geometry,99,9,GetTickCount64(),next));
     assert(observed()==NativeHudChildKind::prompt);
@@ -345,25 +345,40 @@ int main(){
     NativeHudChildDraw::clear();
     NativeHudChildDraw::tutorial_movie=+[](void*)noexcept{return true;};NativeHudChildDraw::tutorial_epoch=5;
     NativeHudChildDraw::nesting_=1;assert(observed()==NativeHudChildKind::tutorial && last_epoch==5 && last_owner==node);
+    // v814 (headset v812: "I should not see this huge white tutorial notification, there is a VR copy"): a message whose capture is
+    // refused this draw is not drawn flat across the eye either
+    NativeHudChildDraw::begin=+[](const NativeHudChildScope&)noexcept{return false;};NativeHudChildDraw::end=+[](const NativeHudChildScope&)noexcept{};
+    {const auto drawn=originals;NativeHudChildDraw::nesting_=1;call();assert(originals==drawn);}
+    NativeHudChildDraw::begin=nullptr;NativeHudChildDraw::end=nullptr;
     NativeHudChildDraw::nesting_=0;assert(observed()==NativeHudChildKind::none); // root (nesting 1) is not the panel
     NativeHudChildDraw::tutorial_epoch=0;NativeHudChildDraw::nesting_=1;assert(observed()==NativeHudChildKind::none);
     NativeHudChildDraw::nesting_=0;NativeHudChildDraw::tutorial_movie=nullptr;
-    assert(native_hud_keep_flat(NativeHudChildKind::tutorial,false,false,false) && !native_hud_keep_flat(NativeHudChildKind::tutorial,false,true,false));
-    // HUD window: prompts become panel content and are never drawn flat; vitals keep their kind.
+    assert(!native_hud_keep_flat(NativeHudChildKind::tutorial,false,false,false) && !native_hud_keep_flat(NativeHudChildKind::tutorial,false,true,false));
+    // HUD window (v696): prompts stay world art (never panel content, never drawn flat); vitals keep their kind.
     NativeHudChildDraw::clear();NativeHudChildDraw::panel_active=true;
     const auto panel_tick=GetTickCount64();NativeWristHud::observe_draw(iggy,panel_tick);
     assert(NativeHudChildDraw::publish(NativeHudChildKind::prompt,geometry,99,4,panel_tick));
     const auto prior_panel_children=NativeHudChildDraw::panel_children.load();
-    assert(observed()==NativeHudChildKind::panel && NativeHudChildDraw::panel_children.load()==prior_panel_children+1);
+    assert(observed()==NativeHudChildKind::prompt && NativeHudChildDraw::panel_children.load()==prior_panel_children);
     {const auto before_orig=originals;NativeHudChildDraw::begin=begin;NativeHudChildDraw::end=end;
      capture_enabled=false;assert(call()==0 && originals==before_orig); // capture refused: suppressed, not flat
      capture_enabled=true;assert(call()==456 && originals==before_orig+1);
      NativeHudChildDraw::begin=nullptr;NativeHudChildDraw::end=nullptr;}
-    NativeHudChildDraw::clear(); // a target-bound prompt is HUD-screen content too: no separate world capture to fail
+    NativeHudChildDraw::clear(); // a target-bound prompt too
     assert(NativeHudChildDraw::publish(NativeHudChildKind::prompt,geometry,99,4,panel_tick,{0x500000,7,1,4,3}));
-    assert(observed()==NativeHudChildKind::panel);
+    assert(observed()==NativeHudChildKind::prompt);
     NativeHudChildDraw::clear();assert(NativeHudChildDraw::publish(NativeHudChildKind::health,geometry,91,4,panel_tick));
     assert(observed()==NativeHudChildKind::health);
+    {   // v720: a script message laid out in the takedown hint's stage region stays a message while a takedown is offered.
+        NativeHudChildDraw::clear();NativeHudChildDraw::tutorial_epoch=5;const auto saved=matrix;matrix={1,0,0,1,960,700};
+        NativeHudChildDraw::master_=true;NativeHudChildDraw::nesting_=2;NativeHudChildDraw::root_={1,0,0};
+        NativeHudChildDraw::set_takedown({0x500000,7,1,4,3},GetTickCount64());
+        assert(observed()==NativeHudChildKind::prompt); // the takedown hint itself
+        NativeHudChildDraw::nesting_=2;NativeHudChildDraw::root_={1,0,0};
+        assert(NativeHudChildDraw::publish(NativeHudChildKind::tutorial,geometry,node,4,GetTickCount64()));
+        assert(observed()==NativeHudChildKind::tutorial);
+        NativeHudChildDraw::set_takedown({},0);NativeHudChildDraw::master_=false;NativeHudChildDraw::nesting_=0;matrix=saved;NativeHudChildDraw::tutorial_epoch=0;
+    }
     // Generic panel child only at nesting 3 beneath the qualified MasterHUD node.
     NativeHudChildDraw::clear();NativeHudChildDraw::panel_generic=true;NativeHudChildDraw::tutorial_epoch=5;
     NativeHudChildDraw::nesting_=2;assert(observed()==NativeHudChildKind::none); // not under MasterHUD
@@ -392,7 +407,7 @@ int main(){
      NativeHudChildDraw::begin=begin;NativeHudChildDraw::end=end;capture_enabled=true;NativeHudChildDraw::panel_width=2496;NativeHudChildDraw::panel_height=2688;
      expect_x=0.f; // root {1,..,100,200}: the child at the root origin lands at the texture's left edge, scaled 2496/1920
      const auto t=GetTickCount64();NativeWristHud::observe_draw(iggy,t);
-     assert(NativeHudChildDraw::publish(NativeHudChildKind::prompt,geometry,99,4,t));
+     assert(NativeHudChildDraw::publish(NativeHudChildKind::panel,geometry,99,4,t)); // v698: panel content (prompts are world art)
      const auto relayouts=NativeHudChildDraw::hud_relayouts.load();
      assert(observed()==NativeHudChildKind::panel && NativeHudChildDraw::hud_relayouts.load()==relayouts+1 && matrix[4]==100);
      NativeHudChildDraw::clear();expect_x=100.f; // vitals stay on the wrist, untouched

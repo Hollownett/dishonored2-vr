@@ -48,6 +48,9 @@ struct CombatTuning {
     float guard_slash_scale=1.3f,guard_thrust_scale=1.6f; // in the block pose an attack needs this much more speed and hand
                                             // travel: parry moves (a small push toward the attacker read as a thrust) keep the block
                                             // (user, headset v447: "block should be very forgiving")
+    // Shadow Walk (user, headset v720: "the stealth attack is hard to do"): the empty shadow hand has no blade weight and the native
+    // attack is a lunge, so its swing needs this fraction of the speed, travel and acceleration above; the right trigger also attacks.
+    float shadow_ease=.55f;
     float choke_fwd_min=0.2f,choke_fwd_max=0.7f,choke_below=0.4f,choke_above=0.1f,choke_grip=0.55f,choke_grace_ms=500;
 };
 
@@ -62,6 +65,7 @@ struct CombatFrame {
     float grip{},trigger{};                 // raw right grip / trigger
     bool tracked{},allowed{},equipped{};    // equipped: sword in hand (not carrying a prop)
     bool shadow_walk{};
+    float grab{};                           // v722: the tighter raw grip of the two hands; in Shadow Walk closing a hand on a guard kills
     bool explicit_block{};
     CombatTarget current_target{},remembered_target{};
     bool kill{},choke{},drop{};             // native sensors qualified this frame (TakedownState)
@@ -91,7 +95,7 @@ class VrCombat {
     std::uint64_t last_ms_{},seg_ms_{},cool_until_{},rt_until_{},rearm_until_{};
     std::uint64_t press_ms_{},parry_until_{},choke_seen_{},peak_ms_{},press_at_{};bool rb_was_{};
     float prev_s_{},peak_acc_{},travel_{},yaw_dps_{},peak_speed_{},hand_travel_{},tip_speed_{};
-    bool have_{},armed_{},in_seg_{},drop_was_{},trig_was_{},block_was_{},choke_on_{},shadow_walk_{};
+    bool have_{},armed_{},in_seg_{},drop_was_{},trig_was_{},grab_was_{},block_was_{},choke_on_{},shadow_walk_{};
     enum class Pending {none,waiting,target_scheduled,ordinary_scheduled};
     Pending pending_{};CombatTarget pending_target_{};std::uint64_t pending_deadline_{},dispatched_press_{};
     AttackDiagnostics attacks_{};
@@ -109,17 +113,18 @@ public:
     CombatDecision update(const CombatFrame& f) noexcept {
         CombatDecision d{};
         const std::uint64_t now=f.now_ms;
-        if(f.shadow_walk!=shadow_walk_) {if(pending_!=Pending::none)d.attack_transition=AttackTransition::cancelled_context;reset();shadow_walk_=f.shadow_walk;}
+        if(f.shadow_walk!=shadow_walk_) {if(pending_!=Pending::none)d.attack_transition=AttackTransition::cancelled_context;reset();shadow_walk_=f.shadow_walk;trig_was_=f.trigger>=.55f;grab_was_=f.grab>=.55f;} // a trigger or grip held across the mode change is no new press
         const bool live=f.allowed && f.tracked && (f.equipped || f.shadow_walk);
         if(!live) {block_.update(f.head_pos,f.head_fwd,f.head_right,f.pos,f.aim,0,false,false,false,now);reset_swing();have_=false;tip_speed_=0;
             block_was_=choke_on_=drop_was_=rb_was_=false;
             if(pending_!=Pending::none) {++attacks_.cancelled_context;d.attack_transition=AttackTransition::cancelled_context;}
-            cancel_attack();trig_was_=f.trigger>=.55f;d.attacks=attacks_;return d;}
+            cancel_attack();trig_was_=f.trigger>=.55f;grab_was_=f.grab>=.55f;d.attacks=attacks_;return d;}
 
         // --- finite-difference tip velocity (GetTickCount64 steps ~15 ms: skip sub-8 ms samples) ---
         const GV3 tip{f.pos.x+f.aim.x*t_.blade_len,f.pos.y+f.aim.y*t_.blade_len,f.pos.z+f.aim.z*t_.blade_len};
         SwingKind kind=SwingKind::none;
         float rel_speed=0,hand_speed=len(f.vel);
+        const float ease=f.shadow_walk?t_.shadow_ease:1.f;
         if(!have_) {tip_=tip;hand_prev_=f.pos;prev_head_=f.head_pos;prev_fwd_=f.head_fwd;last_ms_=now;have_=true;tip_v_=head_v_={0,0,0};prev_s_=0;}
         else if(now>=last_ms_+8) {
             const float dt=(now-last_ms_)*1e-3f;
@@ -137,7 +142,7 @@ public:
                 const bool guard=len(head_v_)>t_.max_head_speed || yaw_dps_>t_.max_yaw_dps;
                 const float acc=(rel_speed-prev_s_)/dt;
                 if(guard || rel_speed<=t_.arm_speed) {if(rel_speed<=t_.arm_speed && !guard) armed_=true;in_seg_=false;travel_=peak_acc_=0;}
-                else if(!in_seg_ && armed_ && rel_speed>=t_.start_speed && hand_speed>=t_.min_hand_speed) {
+                else if(!in_seg_ && armed_ && rel_speed>=t_.start_speed*ease && hand_speed>=t_.min_hand_speed*ease) {
                     in_seg_=true;seg_start_=tip_;seg_ms_=now;travel_=0;peak_acc_=0;hand_travel_=0;
                 }
                 if(in_seg_) {
@@ -147,11 +152,11 @@ public:
                         const GV3 dir=norm(rel);
                         GV3 flat{f.head_fwd.x,0,f.head_fwd.z};flat=norm(flat);
                         const bool along=dot(dir,f.aim)>=t_.thrust_along_aim && dot(dir,flat)>=t_.thrust_along_fwd;
-                        const float gs=block_.held()?t_.guard_slash_scale:1.f,gt=block_.held()?t_.guard_thrust_scale:1.f;
+                        const float gs=(block_.held()?t_.guard_slash_scale:1.f)*ease,gt=(block_.held()?t_.guard_thrust_scale:1.f)*ease;
                         const float tscale=(f.kill?t_.kill_thrust_scale:1.f)*gt;
                         const bool thrust=along && rel_speed>=t_.thrust_speed*tscale && travel_>=t_.min_travel_thrust && hand_travel_>=t_.min_hand_travel_thrust*gt;
                         const bool big=rel_speed>=t_.slash_speed*gs && travel_>=t_.min_travel && hand_travel_>=t_.min_hand_travel*gs;
-                        if((thrust || big) && peak_acc_>=t_.min_accel && hand_speed>=t_.min_hand_speed && now>=cool_until_) {
+                        if((thrust || big) && peak_acc_>=t_.min_accel*ease && hand_speed>=t_.min_hand_speed*ease && now>=cool_until_) {
                             kind=thrust?SwingKind::thrust:dir.y<=t_.overhead_down?SwingKind::overhead:SwingKind::slash;
                             in_seg_=false;armed_=false;cool_until_=now+static_cast<std::uint64_t>(t_.cooldown_ms);
                         }
@@ -165,13 +170,16 @@ public:
         // A stealth contact (fast sword contact from the rear/side of a guard, sword_contact_policy.hpp) presses the attack even when the arc
         // was too small to read as a swing and with no kill target flagged: the native Slash then arbitrates the Assassination before the
         // contact's ordinary damage could alert him. contact_attack is only ever set for such a contact.
-        if(kind==SwingKind::none && f.contact_attack && now>=cool_until_ && pending_==Pending::none) {
+        // v722 (user, headset v721: "the simplest is a kill by grab in this mode: the player grabs the leg and the kill starts"): in Shadow
+        // Walk a hand closing (either grip) is the attack press, like the trigger; the game's own rule decides whether it is a kill.
+        const bool trig=f.trigger>=.55f,trig_edge=trig && !trig_was_;
+        const bool grab=f.grab>=.55f,grab_edge=grab && !grab_was_;grab_was_=grab;
+        if(kind==SwingKind::none && (f.contact_attack || (f.shadow_walk && (trig_edge || grab_edge))) && now>=cool_until_ && pending_==Pending::none) {
             kind=SwingKind::slash;in_seg_=false;armed_=false;cool_until_=now+static_cast<std::uint64_t>(t_.cooldown_ms);
         }
 
         // --- attack (RT) ---
-        const bool trig=f.trigger>=.55f;
-        if(trig && !trig_was_) press_ms_=now;
+        if(trig_edge) press_ms_=now;
         trig_was_=trig;
         auto fire=[&](std::uint64_t hold,std::uint64_t release=0) {
             std::uint64_t start=now;

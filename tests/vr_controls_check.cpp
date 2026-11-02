@@ -1,7 +1,9 @@
 #include "../src/vr_controls.hpp"
 #include "../src/vr_combat.hpp"
+#include "../src/world_ui_pose.hpp"
 #include <cassert>
 #include <cstdio>
+#include <string>
 
 static int failures=0;
 static void require(bool condition,const char* what) {
@@ -146,8 +148,64 @@ int main() {
         assert(!update(true,false,true,123,0,false,true,2).rb);
         update(false,false,false,0,0,false,true,2);
         assert(update(true,true,true,123,0,false,true,2).rb);
+        // Combat: the grip became a living hold (no Use) before the guard turned chokeable; the still-held grip takes the later offer.
+        update(false,false,false,0);
+        assert(!update(false,false,true,0).rb);
+        assert(update(true,true,true,123).rb);
+        assert(update(true,true,true,0,123).rb);
         assert(owner.victim()==123);owner.cancel();assert(owner.victim()==0);
         assert(!update(true,false,true,123,0,false,true,2).rb);
+    }
+    {   // The choke goes to the free hand, and a squeeze that holds a weapon is no choke press (user, headset v891: "when I tried a stealth kill from behind
+        // with the sword, I often got a choke instead"). With a crossbow in the left hand the sword hand is the choke hand, and v698/v793 let any squeezed
+        // choke-hand grip take the sensor's offer: the sword's own hold-to-hold squeeze chose the guard before the blade reached him.
+        constexpr unsigned right=1,left=0;
+        static_assert(d2vr::choke_hand(right,false,false)==right && d2vr::choke_hand(right,true,false)==left &&
+                      d2vr::choke_hand(right,true,true)==right && d2vr::choke_hand(right,false,true)==right,"the sword's hand chokes unless it holds the sword and the other is free");
+        static_assert(d2vr::choke_hand(left,true,false)==right && d2vr::choke_hand(left,true,true)==left,"dual wield: the sword in the left hand");
+        // spoken_for(hand, sword_hand, sword_owns, gun_hand_holds, copy_owns, taken)
+        static_assert(d2vr::grip_spoken_for(right,right,true,false,false,false) && !d2vr::grip_spoken_for(left,right,true,false,false,false),"the sword's squeeze is the sword's");
+        static_assert(d2vr::grip_spoken_for(left,right,false,true,false,false) && !d2vr::grip_spoken_for(right,right,false,true,false,false),"the gun hand's squeeze is the gun's");
+        static_assert(d2vr::grip_spoken_for(left,right,false,false,true,false) && d2vr::grip_spoken_for(left,right,false,false,false,true),"a copy or another gesture takes the squeeze");
+        static_assert(!d2vr::grip_spoken_for(left,right,false,false,false,false) && !d2vr::grip_spoken_for(right,right,false,false,false,false),"an empty hand's squeeze is free");
+        struct Walk {bool rb{},consume{};unsigned rt_frames{};unsigned choke_frames{};};
+        // One approach from behind: the sensor offers the choke from frame 10 on and the blade touches the guard at frame 30. The choke hand's grip is
+        // squeezed the whole time (`held`); `spoken_for` is what the control thread passes as `occupied`. The combat module sees the sensor's choke (no Block
+        // meanwhile) and the contact that presses the attack once.
+        const auto approach=[&](unsigned sword_hand,bool sword_owns,bool gun_owns,bool squeeze_choke_hand,bool gate) {
+            d2vr::OfferedChokeGrip owner;d2vr::VrCombat combat;Walk walk;
+            const unsigned cs=d2vr::choke_hand(sword_hand,sword_owns,gun_owns);
+            const bool occupied=gate && d2vr::grip_spoken_for(cs,sword_hand,sword_owns,gun_owns,false,false);
+            owner.update(false,false,false,true,1,0,0,false);
+            d2vr::CombatFrame frame{};frame.tracked=frame.equipped=true;frame.head_fwd={0,0,-1};frame.head_right={1,0,0};frame.aim={0,0,-1};frame.trigger=1;frame.explicit_block=true;
+            for(unsigned step=0;step<60;++step) {
+                const bool offered=step>=10;
+                const bool held=offered && squeeze_choke_hand;   // stealth_held: the raw grip squeezed when the offer shows takes it
+                const auto route=owner.update(held,held,squeeze_choke_hand,true,1,offered?123:0,0,occupied,false);
+                walk.rb|=route.rb;walk.consume|=route.consume_use;
+                frame.allowed=!route.consume_use;frame.choke=offered;frame.now_ms=1000+step*16;frame.pos={0,1,-.4f};frame.contact_attack=step==30;
+                const auto decision=combat.update(frame);
+                walk.rt_frames+=decision.rt?1u:0u;walk.choke_frames+=route.rb?1u:0u;
+            }
+            return walk;
+        };
+        // sword in the right hand, a crossbow in the left: the sword hand is the choke hand and its squeeze holds the sword
+        auto stab=approach(right,true,true,true,true);
+        require(!stab.rb && !stab.consume && stab.rt_frames>0,"gun left, sword right: the held sword grip never chokes and the stab is pressed");
+        stab=approach(right,true,true,true,false);
+        require(stab.rb && stab.consume && stab.rt_frames==0,"control: without the gate the sword's squeeze chokes and the stab is dropped (the v891 bug)");
+        // the free left hand: its squeeze (held or fresh) chokes as before, the sword hand's squeeze is not read at all
+        stab=approach(right,true,false,true,true);
+        require(stab.rb && stab.consume,"sword right, left hand free: the left squeeze chokes");
+        stab=approach(right,true,false,false,true);
+        require(!stab.rb && !stab.consume && stab.rt_frames>0,"sword right, left hand free and open: the stab is pressed, no choke");
+        // an empty sword hand (sword away) chokes with its squeeze; with the sword in the left (dual wield) the right hand is free
+        stab=approach(right,false,false,true,true);
+        require(stab.rb,"no sword in hand: the right squeeze chokes");
+        stab=approach(left,true,false,true,true);
+        require(stab.rb,"dual wield, sword left: the free right hand chokes");
+        stab=approach(left,true,true,true,true);
+        require(!stab.rb && stab.rt_frames>0,"dual wield, sword left and a gun right: the held sword grip never chokes");
     }
     {
         d2vr::GripIntent intent;
@@ -298,7 +356,8 @@ int main() {
         x.update(true,true);
         require(x.wheel(),"reset does not latch X");
     }
-    {   // Two-handed wheel: left X at once, right A after 350 ms; first hand owns until release.
+    {   // Two-handed wheel: left X and right A each open at once (v779, user, headset v778: "A holds the wheel, mirrored with the left"); the
+        // first hand owns until release.
         d2vr::WheelHands w;
         auto u=[&](bool x,bool a,unsigned long long t,bool allowed=true) {w.update(x,a,allowed,t);};
         u(0,0,0);
@@ -309,28 +368,44 @@ int main() {
         require(w.hand()==0 && !w.a_consumed(),"A cannot steal or double-open while X owns it");
         u(0,1,950);u(0,1,1400);
         require(!w.wheel() && !w.a_consumed(),"X release closes; the A held through it never late-opens");
-        u(0,0,1500);u(0,1,2000);u(0,0,2100);
-        require(!w.wheel() && !w.a_consumed(),"A tap stays a native jump");
-        u(0,1,3000);u(0,1,3300);
-        require(!w.wheel() && !w.a_consumed(),"A before the hold stays native");
-        u(0,1,3360);
-        require(w.wheel() && w.hand()==1 && w.a_consumed(),"A hold opens for the right hand");
-        u(1,1,3400);
+        u(0,0,1500);u(0,1,1510);
+        require(w.wheel() && w.hand()==1 && w.a_consumed(),"A opens at once for the right hand, as X for the left");
+        u(1,1,1600);
         require(w.hand()==1,"X cannot take over while A owns it");
-        u(1,0,3500);u(1,0,3600);
+        u(1,0,1700);u(1,0,1800);
         require(!w.wheel() && !w.a_consumed(),"A release closes; X pressed during A stays ignored");
         u(0,0,3800);u(1,0,4000);u(1,0,4100,false);u(1,0,4200);
         require(!w.wheel(),"lost allowed cancels, no reopen");
-        u(0,0,4300);u(0,1,5000);u(0,1,5100,false);u(0,1,5500);
-        require(!w.wheel() && !w.a_consumed(),"A disallowed during the hold never opens");
+        u(0,0,4300);u(0,1,5000,false);u(0,1,5500);
+        require(!w.wheel() && !w.a_consumed(),"A pressed while disallowed never opens late");
         float tx=.1f,ty=0,mx=0,my=-1;
-        d2vr::wheel_select(1,tx,ty,mx,my,true,1,0);
-        require(tx==0 && ty==-1 && mx==0 && my==0,"right-owned: left stick selects, move dropped");
+        d2vr::wheel_select(1,tx,ty,mx,my,false,1,0);
+        require(tx==0 && ty==-1 && mx==0 && my==0,"right-owned: left stick selects while the hand has not moved, move dropped");
+        tx=.1f;ty=0;mx=0;my=-1;d2vr::wheel_select(1,tx,ty,mx,my,true,1,0);
+        require(tx==1 && ty==0,"right-owned: walking (left stick) never steals the hand's choice (v771)");
         tx=.9f;ty=0;mx=0;my=1;
         d2vr::wheel_select(0,tx,ty,mx,my,true,0,1);
-        require(tx==.9f && ty==0 && my==0,"left-owned: right stick wins over dial and left stick is dropped");
+        require(tx==.9f && ty==0 && my==0,"left-owned: a deliberate right stick wins over dial and left stick is dropped");
+        tx=.4f;ty=0;d2vr::wheel_select(0,tx,ty,mx,my,true,0,1);
+        require(tx==0 && ty==1,"left-owned: a resting thumb (.4) does not steal the hand's choice (v771)");
         tx=ty=0;d2vr::wheel_select(1,tx,ty,mx,my,true,0,1);
         require(tx==0 && ty==1,"hand dial fills in when the stick is idle");
+        tx=.9f;ty=0;mx=0;my=1;d2vr::wheel_select(0,tx,ty,mx,my,true,0,1,true);
+        require(tx==0 && ty==1 && mx==0 && my==0,"hand-only (v772, user: the hand, not the sticks): a pushed stick never selects");
+        tx=.9f;ty=0;mx=0;my=1;d2vr::wheel_select(1,tx,ty,mx,my,false,0,1,true);
+        require(tx==0 && ty==0 && mx==0 && my==0,"hand-only: the hand not moved yet selects nothing");
+    }
+    {   // v762 (headset v761: the bottom of the hand ring was hard to reach): the ring's own axes, and a lone tracked hand selects at once.
+        using V=std::array<double,3>;
+        d2vr::WheelCursor c;float x=0,y=0;
+        const V rt{1,0,0},up{0,.5,-.8660254};   // a ring seen from 60 degrees above: its up leans away from the eyes
+        V L{-.2,1,-.3};const V R{.2,1,-.3};
+        auto step=[&]{return c.update(true,{true,false},{L,R},rt,x,y,.035,.004,&up);};
+        require(!step(),"lone hand: nothing selected at open");
+        for(int i=1;i<=30;++i) {const double k=.002*i;L={-.2-.7071*k,1-.7071*k*up[1],-.3-.7071*k*up[2]};step();} // 2 mm a frame along the ring's lower left
+        require(c.cursor()==0 && x<-.70f && x>-.72f && y<-.70f && y>-.72f,"a slow move along the tilted ring selects its lower left");
+        L={-.2,1,-.3};x=y=0;  // v763 (headset v762: commits without a sector): back at the centre the choice stays until another is made
+        require(step() && x<-.70f && y<-.70f,"the last choice is held inside the dead zone");
     }
     {   // Pointing cursor: either hand selects regardless of which button opened the wheel.
         using V=std::array<double,3>;
@@ -358,9 +433,9 @@ int main() {
         L={-.2,1,-.3};R={.2,1,-.3};c.update(false,{1,1},{L,R},rt,x,y);
         step();L={-.2,1.01,-.3};
         require(!step() && c.cursor()==0,"inside dead zone is neutral");
-        float tx=0,ty=0,mx=0,my=1;
-        d2vr::wheel_select(1,tx,ty,mx,my,true,1,0);
-        require(tx==0 && ty==1,"stick deflection overrides the cursor");
+        float tx=0,ty=1,mx=0,my=0;
+        d2vr::wheel_select(0,tx,ty,mx,my,true,1,0);
+        require(tx==0 && ty==1,"a deliberate stick deflection overrides the cursor");
         c.update(false,{1,1},{L,R},rt,x,y);
         require(!c.commit(true,{0,.9f}),"trigger held from before the press edge never commits without a cursor");
     }
@@ -490,6 +565,150 @@ std::printf("PASS: X wheel open/close/cancel/no-reopen/late-press, "
         p.update(true,{true,true},pos,dir,head,fwd,0,x,y,hit,vis);
         require(p.commit(true,{1,0}) && !p.commit(true,{1,0}),"fresh trigger on the cursor hand commits once");
     }
+    {   // Dual wield: the wheel ring at the left hand; the right hand's ray selects on the ring plane that moves with it.
+        using V=std::array<double,3>;
+        const d2vr::Vec3 head{0,1.6,0};
+        const double radius=326*d2vr::wheel_metres_per_stage(d2vr::wheel_hand_width_m,1920,1080);
+        const auto plane=[&](d2vr::Vec3 hand){return d2vr::wheel_plane_of(d2vr::world_ui_hand_pose(head,hand,d2vr::wheel_hand_lift_m),d2vr::wheel_hand_width_m);};
+        const auto arr=[](d2vr::Vec3 v){return V{v.x,v.y,v.z};};
+        const auto aim=[&](V from,d2vr::Vec3 to){const d2vr::Vec3 d=to-d2vr::Vec3{from[0],from[1],from[2]};const auto n=d*(1/d2vr::length(d));return V{n.x,n.y,n.z};};
+        d2vr::WheelPointer p;float x=0,y=0;V hit{};bool vis=false;
+        d2vr::Vec3 hand{-.25,1.15,-.45};auto w=plane(hand);
+        const V rpos{.2,1.3,-.1};std::array<V,2> pos{V{-.25,1.15,-.45},rpos},dir{V{0,0,1},aim(rpos,w.centre)}; // owner's ray points away
+        const auto call=[&](const d2vr::WheelPlane& pl){return p.update_plane(true,{true,true},pos,dir,arr(pl.centre),arr(pl.normal),arr(pl.right),arr(pl.up),0,x,y,hit,vis,radius);};
+        require(!call(w) && vis && p.cursor()==1,"ray at the ring centre is neutral, the pointing hand is the cursor");
+        require(std::abs(hit[0]-w.centre.x)<1e-9 && std::abs(hit[1]-w.centre.y)<1e-9 && std::abs(hit[2]-w.centre.z)<1e-9,"dot is on the ring centre");
+        dir[1]=aim(rpos,w.centre+w.right*radius);
+        for(int i=0;i<30;++i) call(w);
+        require(call(w) && x>.99f && std::abs(y)<.01f,"right edge of the ring selects the right wedge");
+        dir[1]=aim(rpos,w.centre+w.up*radius);
+        for(int i=0;i<30;++i) call(w);
+        require(call(w) && std::abs(x)<.01f && y>.99f,"top of the (tilted) ring selects the top wedge");
+        // The hand moves 12 cm left: the ring goes with it, the same ray now sits 12 cm right of the new centre.
+        hand=hand+d2vr::Vec3{-.12,0,0};const auto w2=plane(hand);
+        require(std::abs(w2.centre.x-w.centre.x+.12)<1e-9 && std::abs(w2.centre.y-w.centre.y)<1e-9,"the ring centre follows the hand");
+        for(int i=0;i<60;++i) call(w2);
+        require(call(w2) && x>.5f && y<.8f && hit[0]-w2.centre.x>0,"a fixed ray is now right of the ring that moved left (no longer the top wedge)");
+        dir[1]=aim(rpos,w2.centre+w2.up*radius);
+        for(int i=0;i<60;++i) call(w2);
+        require(call(w2) && std::abs(x)<.01f && y>.99f,"re-aimed at the moved ring selects the top wedge");
+        require(std::abs(d2vr::dot(d2vr::Vec3{hit[0],hit[1],hit[2]}-w2.centre,w2.normal))<1e-9,"the dot lies in the ring plane");
+        dir[1]=V{0,0,1};
+        require(!call(w2) && !vis,"a ray pointing away from the ring shows nothing");
+        p.update_plane(false,{true,true},pos,dir,arr(w2.centre),arr(w2.normal),arr(w2.right),arr(w2.up),0,x,y,hit,vis,radius);
+        require(p.cursor()==-1,"closing resets the cursor");
+    }
+    {   // v776 (user, headset v775: "I turn my hand to the right and the indicator stays on the left"): the hand that opened the wheel POINTS at its ring.
+        // The ring sits on that hand's aim ray (wheel_hand_ahead_m, facing the eyes) from the opening on; each frame the ray meets that fixed plane and the
+        // WheelPointer gives the pointed direction (continuous: the native ring holds N items, not 8), only the opening hand tracked as dxgi_probe feeds it.
+        using V=std::array<double,3>;
+        const d2vr::Vec3 head{0,1.65,0};const double rad=3.14159265358979/180;
+        const auto arr=[](d2vr::Vec3 v){return V{v.x,v.y,v.z};};
+        const auto aim_of=[&](d2vr::Vec3 at,double yaw,double pitch) { // a hand's aim pose: yaw degrees right, pitch degrees up from straight ahead (-Z)
+            return d2vr::TrackedPose{at,d2vr::multiplied({0,std::sin(-yaw*rad/2),0,std::cos(yaw*rad/2)},{std::sin(pitch*rad/2),0,0,std::cos(pitch*rad/2)})};};
+        const auto ray_of=[&](const d2vr::TrackedPose& a) {const auto d=d2vr::rotated(a.orientation,{0,0,-1});return V{d.x,d.y,d.z};};
+        const auto angle_of=[&](float dx,float dy) {return std::atan2(static_cast<double>(dy),static_cast<double>(dx))/rad;};
+        const auto yaw_pitch=[&](d2vr::Vec3 d) {return std::array<double,2>{std::atan2(d.x,-d.z)/rad,std::asin(d.y/d2vr::length(d))/rad};}; // the aim that points along d
+        std::printf("wheel pointing lab (ring radius 326 stage px; the native ring's items sit on a 307 px circle, discs of 52 px radius, evenly spaced from the top)\n");
+        for(const double scale:{1.,100./65.}) for(const int hand:{0,1}) { // HUD 65% and the user's HUD 100%; the left and the right hand
+            const std::size_t me=static_cast<std::size_t>(hand),other=1-me;
+            const double width=d2vr::wheel_hand_width_m*scale,radius=326*d2vr::wheel_metres_per_stage(width,1920,1080),mps=radius/326;
+            std::array<V,2> pos{V{-.2,1.3,-.4},V{.2,1.3,-.4}},dir{V{0,0,-1},V{0,0,-1}}; // the sim's default hand places, level, pointing at -Z
+            const d2vr::Vec3 at{pos[me][0],pos[me][1],pos[me][2]},other_at{pos[other][0],pos[other][1],pos[other][2]};
+            const auto open_aim=aim_of(at,0,0);
+            const auto pl=d2vr::wheel_plane_of(d2vr::wheel_aim_pose(head,open_aim,scale),width); // placed once, from the opening aim
+            const std::array<bool,2> tracked{hand==0,hand==1};                                    // the other hand is never tracked here
+            d2vr::WheelPointer p;float x=0,y=0;V hit{};bool vis=false;
+            const auto frame=[&](bool continuous=true) {return p.update_plane(true,tracked,pos,dir,arr(pl.centre),arr(pl.normal),arr(pl.right),arr(pl.up),hand,x,y,hit,vis,radius,continuous);};
+            const auto cursor_mm=[&](double& u,double& v) {const d2vr::Vec3 d=d2vr::Vec3{hit[0],hit[1],hit[2]}-pl.centre;u=d2vr::dot(d,pl.right)*1000;v=d2vr::dot(d,pl.up)*1000;};
+            int n=0;
+            const auto point=[&](const char* what,double yaw,double pitch,bool say=true) { // aim there; up to 3 frames to choose
+                dir[me]=ray_of(aim_of(at,yaw,pitch));bool on=false;n=0;
+                while(n<3 && !on) {on=frame();++n;}
+                if(!say) return on;
+                double u,v;cursor_mm(u,v);
+                if(on) std::printf("  %-24s aim yaw/pitch %+5.1f/%+5.1f: wedge %d, dir %+6.1f deg, after %d frame(s), cursor %+6.1f %+6.1f mm (%.2f ring radii)\n",what,yaw,pitch,p.sector(),angle_of(x,y),n,u,v,std::hypot(u,v)/1000/radius);
+                else std::printf("  %-24s aim yaw/pitch %+5.1f/%+5.1f: no wedge (dead zone), after %d frame(s), cursor %+6.1f %+6.1f mm (%.2f ring radii)\n",what,yaw,pitch,n,u,v,std::hypot(u,v)/1000/radius);
+                return on;};
+            const auto aim_at=[&](d2vr::Vec3 target,const char* what,bool say=true) {const auto a=yaw_pitch(target-at);return point(what,a[0],a[1],say);}; // aim at a point of the plane
+            const auto recentre=[&] {point("",0,0,false);};
+            const auto press=[&] {return p.commit(true,{hand?0.f:.9f,hand?.9f:0.f});}; // the opening hand's trigger
+            const auto release=[&] {p.commit(true,{0,0});};
+            const d2vr::Vec3 ray=d2vr::rotated(open_aim.orientation,{0,0,-1}),to_ring=pl.centre-at;
+            std::printf(" %s hand, HUD factor %.2f: ring radius %.1f mm, centre %.1f mm along the aim ray and %.3f mm off it, dead zone %.1f mm (%.1f deg of aim)\n",hand?"right":"left",scale,radius*1000,
+                d2vr::dot(to_ring,ray)*1000,d2vr::length(to_ring-ray*d2vr::dot(to_ring,ray))*1000,.2*radius*1000,std::atan(.2*radius/(d2vr::wheel_hand_ahead_m*scale))/rad);
+            require(!point("opening, aim at the centre",0,0) && vis,"the hand aiming at the ring centre chooses nothing");
+            require(d2vr::length(d2vr::Vec3{hit[0],hit[1],hit[2]}-pl.centre)<1e-3,"the opening ray hits the ring centre within 1 mm");
+            const struct {const char* what;double yaw,pitch;int wedge;double deg;} turns[]{{"yaw 25 right",25,0,0,0},{"yaw 25 left",-25,0,4,180},{"pitch 25 up",0,25,2,90},{"pitch 25 down",0,-25,6,-90}};
+            for(const auto& t:turns) {
+                require(point(t.what,t.yaw,t.pitch) && n<=3 && p.sector()==t.wedge && std::abs(angle_of(x,y)-t.deg)<=15,"25 degrees of turn points at that side of the ring within 3 frames");
+                require(!point("back to the centre",0,0),"back at the centre chooses nothing");
+            }
+            // Aiming at the item position of each compass wedge (0.9 radius out) points at that wedge.
+            std::string row;bool compass=true;
+            for(int k=0;k<8;++k) {
+                recentre();
+                aim_at(pl.centre+pl.right*(.9*radius*std::cos(k*45*rad))+pl.up*(.9*radius*std::sin(k*45*rad)),"",false);
+                row+=" "+std::to_string(p.sector());compass=compass && p.sector()==k && std::abs(std::remainder(angle_of(x,y)-k*45,360))<=8;
+            }
+            std::printf("  aiming at the 8 compass item positions (right, up-right, up ...) points at wedges:%s\n",row.c_str());
+            require(compass,"aiming at an item position of wedge k points at wedge k");
+            // Tremor: +-1 degree of aim keeps the wedge and the direction, on a held wedge and 1 deg (of 45) inside a wedge border (22.5 deg round the ring);
+            // +-3 degrees across that border still keeps the wedge (the 8 deg hysteresis).
+            const struct {double amp,border;} tremors[]{{1,0},{1,21.5},{2,21.5}};
+            for(const auto& tr:tremors) {
+                recentre();std::array<double,2> base{25,0}; // yaw, pitch: 25 degrees right, or the item position 21.5 degrees round the ring
+                if(tr.border>0) base=yaw_pitch(pl.centre+pl.right*(.9*radius*std::cos(tr.border*rad))+pl.up*(.9*radius*std::sin(tr.border*rad))-at);
+                point("",base[0],base[1],false);
+                const int held=p.sector();const double dir0=angle_of(x,y);int flips=0;double worst=0,lo=1e9,hi=-1e9;
+                for(int i=0;i<60;++i) {
+                    dir[me]=ray_of(aim_of(at,base[0]+(i&1?tr.amp:-tr.amp),base[1]+(i&2?tr.amp:-tr.amp)));frame();
+                    flips+=p.sector()!=held;worst=std::max(worst,std::abs(std::remainder(angle_of(x,y)-dir0,360)));
+                    double u,v;cursor_mm(u,v);lo=std::min(lo,u);hi=std::max(hi,u);
+                }
+                std::printf("  tremor +-%.0f deg x 60 frames, %s: wedge %d, wedge changes %d, direction moved at most %.1f deg, cursor spread %.1f mm\n",tr.amp,
+                    tr.border>0?"1 deg inside a wedge border":"on a held wedge",held,flips,worst,hi-lo);
+                require(flips==0 && (tr.amp>1 || worst<3),"a tremor keeps the wedge (and, at 1 degree, the direction)");
+            }
+            // The other hand: aimed anywhere on the ring it never moves the cursor (it is not tracked); tracked it would take the cursor when it moves.
+            point("hold yaw 25 right",25,0,false);const double held_angle=angle_of(x,y);int taken=0;
+            for(const d2vr::Vec3 target:{pl.centre,pl.centre+pl.up*(.9*radius),pl.centre-pl.right*(.9*radius)}) {
+                const auto d=target-other_at;const auto u=d*(1/d2vr::length(d));dir[other]=V{u.x,u.y,u.z};
+                for(int i=0;i<20;++i) {frame();taken+=p.cursor()!=hand || std::abs(std::remainder(angle_of(x,y)-held_angle,360))>5;}
+            }
+            d2vr::WheelPointer q;float qx=0,qy=0;V qhit{};bool qv=false; // control: both hands tracked
+            for(int i=0;i<3;++i) {q.update_plane(true,{true,true},pos,dir,arr(pl.centre),arr(pl.normal),arr(pl.right),arr(pl.up),hand,qx,qy,qhit,qv,radius,true);
+                const auto d=pl.centre+pl.up*(.3*radius*(i+1))-other_at;const auto u=d*(1/d2vr::length(d));dir[other]=V{u.x,u.y,u.z};}
+            std::printf("  the other hand aimed at the centre, the top and the left of the ring for 60 frames: cursor taken %d times, hand %d keeps it (both tracked, it would take it: %d)\n",taken,hand,q.cursor()==static_cast<int>(other));
+            require(taken==0 && q.cursor()==static_cast<int>(other),"the other hand never takes the cursor (a control with both tracked does)");
+            dir[other]=V{0,0,-1};
+            // Elixirs and "Hide/Show all" (stage 397,89 / 142,415 / 1680,90) are click zones: no ring item there, a trigger press there commits nothing.
+            const struct {const char* what;double sx,sy;} buttons[]{{"health elixir",397,89},{"mana elixir",142,415},{"Hide/Show all",1680,90}};
+            for(const auto& b:buttons) {
+                recentre();release();
+                const bool reach=aim_at(pl.centre+pl.right*((b.sx/1920-.5)*width)+pl.up*((.5-b.sy/1080)*width*1080/1920),b.what);const auto cur=p.plane();
+                const bool on=cur && d2vr::wheel_on_button((*cur)[0],(*cur)[1],width,1920,1080),fired=press();
+                require(reach && on && !fired,"the cursor on an elixir or Hide/Show all is on a button, and a trigger press there commits no ring item");
+            }
+            recentre();release();point("yaw 25 right",25,0);{const auto cur=p.plane();require(cur && !d2vr::wheel_on_button((*cur)[0],(*cur)[1],width,1920,1080),"a ring item is not a button");}
+            require(press(),"a trigger press on the ring commits");
+            // The native ring holds as many items as the player owns, evenly spaced from the top, clockwise (13 on the user's save, measured on its capture).
+            // The game's pointer sits 0.9 radius out in the output direction; an item is reached when that is inside its disc.
+            for(const int items:{5,8,13,16,20}) {
+                int reached[2]{};
+                for(int mode=0;mode<2;++mode) for(int i=0;i<items;++i) {
+                    const double a=(90-i*360./items)*rad,px=307*std::cos(a),py=307*std::sin(a);
+                    recentre();const auto aim=yaw_pitch(pl.centre+pl.right*(px*mps)+pl.up*(py*mps)-at);dir[me]=ray_of(aim_of(at,aim[0],aim[1]));
+                    bool on=false;for(int f=0;f<3 && !on;++f) on=frame(mode==0);
+                    if(on) reached[mode]+=std::hypot(.9*326*x-px,.9*326*y-py)<52;
+                }
+                std::printf("  ring of %2d items: pointing at each reaches %2d with the pointed direction, %2d with the 8 wedge centres\n",items,reached[0],reached[1]);
+                require(reached[0]==items,"every item of the ring can be reached by pointing at it");
+                if(items==13) require(reached[1]<items,"(control) 8 wedge centres cannot reach every item of the user's 13-item ring");
+            }
+        }
+        std::printf("wheel pointing lab: done\n");
+    }
     {   // Wheel face buttons: fresh presses pass while open; held-through open/close stay masked.
         d2vr::WheelFaceButtons f;
         auto o=f.update(false,false,true,true);
@@ -508,12 +727,6 @@ std::printf("PASS: X wheel open/close/cancel/no-reopen/late-press, "
         require(!o.active && !o.a,"closed wheel is never forced to pass");
     }
     if(failures) return 1;
-        {   // A tap jumps on release; a hold (wheel) never jumps.
-        d2vr::WheelHands h;
-        require(!h.a_passthrough(true,1000) && !h.a_passthrough(true,1100),"A press held back");
-        require(h.a_passthrough(false,1150) && h.a_passthrough(false,1200) && !h.a_passthrough(false,1240),"A tap pulses on release");
-        require(!h.a_passthrough(true,2000) && !h.a_passthrough(true,2400) && !h.a_passthrough(false,2500),"A hold never jumps");
-    }
     { // Journal: a hand at the left temple + grip edge -> one 150 ms pulse; the squeeze is consumed until release.
         d2vr::TempleReach r;const std::array<double,3> head{0,1.7,0},fwd{0,0,-1},up{0,1,0};
         std::array<std::optional<std::array<double,3>>,2> front{std::array<double,3>{-.2,1.2,-.4},std::array<double,3>{.2,1.2,-.4}};
@@ -568,6 +781,17 @@ std::printf("PASS: X wheel open/close/cancel/no-reopen/late-press, "
         in.use_target=true;in.grip=1;
         in.copy=true;in.copy_reach=true;in.copy_age_s=1;in.copy_distance=.3;in.grip=1;{const auto o=step(13200);assert(o.action!=A::pickup && !o.owns);}
         in.grip=0;in.use_target=false;step(13300);in.grip=1;assert(step(13400).action==A::pickup); // nothing to use: the copy is taken
+    }
+    for(bool keep:{true,false}) { // a mantle (busy) takes the held sword: drawn again after it, once, only while the hand still squeezes
+        using A=d2vr::SwordGrip::Action;d2vr::SwordGrip s;d2vr::SwordGrip::In in{};in.gameplay=true;
+        auto step=[&](std::uint64_t t){in.now=t;return s.update(in);};
+        in.zone=true;in.grip=1;assert(step(10).action==A::draw);in.zone=false;in.drawn=true;step(200);
+        in.busy=true;in.drawn=false;in.grip=keep?1.f:0.f;
+        for(std::uint64_t t=300;t<2000;t+=50) assert(step(t).action==A::none);        // during the scene: nothing
+        in.busy=false;assert(step(2000).action==A::none && step(2200).action==A::none); // the game's own restore first
+        assert(step(2400).action==(keep?A::draw:A::none));
+        assert(step(2500).action==A::none && step(3000).action==A::none);             // once
+        if(keep) {in.drawn=true;assert(step(3100).action==A::none && s.held());}
     }
     { // G2 regrab: the pickup dead band, and the grip changes only on a draw or pickup edge.
         using A=d2vr::SwordGrip::Action;static_assert(d2vr::SwordGrip::pickup_dead_band==.35);

@@ -19,7 +19,7 @@ int main() {
         int sections=0,bullets=0,pages=0,figures=0;
         for(const auto& i:items) {sections+=i.kind==GuideItem::section;bullets+=i.kind==GuideItem::bullet;pages+=i.kind==GuideItem::page;figures+=i.kind==GuideItem::figure;
             if(i.kind==GuideItem::bullet) require(!i.key.empty() && !i.text.empty(),"A bullet lost its bold input or description");}
-        require(!errors && !items.empty() && items[0].kind==GuideItem::title && sections==5 && bullets==24 && pages==3 && figures==2,"Guide directives, headings or bullets did not parse");
+        require(!errors && !items.empty() && items[0].kind==GuideItem::title && sections==5 && bullets==26 && pages==3 && figures==2,"Guide directives, headings or bullets did not parse");
         require(parse_controls_guide(md+"\n<!-- unrelated comment -->\n").size()==items.size(),"Unrelated comments must be ignored");
         errors=0;const auto invalid=parse_controls_guide("<!-- vr-page:../../outside|Bad -->\n<!-- vr-figure:unknown|Bad -->\n<!-- vr-page:moving -->\n",&errors);
         require(errors==3 && invalid.empty(),"Unknown and malformed directive ids must be rejected safely");
@@ -60,7 +60,7 @@ int main() {
         render_set("corvo-art",false,true,true);render_set("emily-art",true,true,true);
         const auto partial=previews/"partial-art";fs::create_directories(partial);
         if(fs::exists(imported/"divider.rgba")) fs::copy_file(imported/"divider.rgba",partial/"divider.rgba",fs::copy_options::overwrite_existing);
-        {std::ofstream out(partial/"guide_sword_throw_corvo.rgba",std::ios::binary);const std::uint32_t wh[2]={864,232};out.write(reinterpret_cast<const char*>(wh),8);
+        {std::ofstream out(partial/"guide_sword_draw_block_corvo.rgba",std::ios::binary);const std::uint32_t wh[2]={864,232};out.write(reinterpret_cast<const char*>(wh),8);
             const std::array<unsigned char,4> colour={173,97,61,255};for(unsigned i=0;i<864u*232;++i) out.write(reinterpret_cast<const char*>(colour.data()),4);}
         game_art().folder(partial);render_set("partial-corvo",false,true,true);render_set("partial-emily",true,true,false);
         const auto corvo=controls_guide_image(md,1920,1200,nullptr,2,false,true),emily=controls_guide_image(md,1920,1200,nullptr,2,true,true);
@@ -70,7 +70,7 @@ int main() {
         fs::remove(partial/"publication-check.rgba");fs::remove(partial/"generation.txt");
         GameArtCache published(partial);published.refresh();require(!published.get("publication-check"),"Fixture publication key must begin missing");
         const auto generation=published.generation();
-        fs::copy_file(partial/"guide_sword_throw_corvo.rgba",partial/"publication-check.rgba",fs::copy_options::overwrite_existing);
+        fs::copy_file(partial/"guide_sword_draw_block_corvo.rgba",partial/"publication-check.rgba",fs::copy_options::overwrite_existing);
         {std::ofstream marker(partial/"generation.txt");marker<<"test publication";}
         require(published.refresh()>generation && published.get("publication-check"),"Publishing art must invalidate cached misses and advance generation");
         fs::remove(partial/"publication-check.rgba");fs::remove(partial/"generation.txt");

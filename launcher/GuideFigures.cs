@@ -13,8 +13,8 @@ namespace DishonoredVR;
 /// props are original ink diagrams and opponents use the same player mesh, never extracted game weapons.</summary>
 public static class GuideFigures
 {
-    public const int Version = 5;
-    public static readonly string[] Ids = { "sword_throw", "enemy_grab" };
+    public const int Version = 6;
+    public static readonly string[] Ids = { "sword_draw_block", "enemy_grab" };
     // Matches the slot and ring positions in src/controls_guide_image.hpp (page x 700, y 252): right temple, right shoulder,
     // right wrist, left temple, left hip, left wrist.
     public static readonly Size BodyMapSize = new(520, 816);
@@ -415,11 +415,106 @@ public static class GuideFigures
     }
     static PointF ControllerPoint(PointF p, bool left, string input, float scale = 1)
     {
-        string key = input == "stick" ? "thumbstick" : input.ToLowerInvariant();
+        var a = ControllerAnchor(left, input);
+        var box = ControllerBox(p, left, scale); float k = box.Height / ControllerImage[left ? 0 : 1].Height;
+        return new(box.X + a.X * k, box.Y + a.Y * k);
+    }
+    /// <summary>A button's visible centre in the controller picture's own pixels ("Stick" is the thumbstick).</summary>
+    internal static PointF ControllerAnchor(bool left, string input)
+    {
+        string key = input.ToLowerInvariant() == "stick" ? "thumbstick" : input.ToLowerInvariant();
         var a = ControllerAnchors[left ? "left" : "right"]?["anchors"]?[key] as JsonArray
             ?? throw new ArgumentException("No visible controller button: " + input);
-        var box = ControllerBox(p, left, scale); float k = box.Height / ControllerImage[left ? 0 : 1].Height;
-        return new(box.X + a[0]!.GetValue<float>() * k, box.Y + a[1]!.GetValue<float>() * k);
+        return new(a[0]!.GetValue<float>(), a[1]!.GetValue<float>());
+    }
+    /// <summary>Body-page bullets to BodyMapAnchors: right temple, shoulder, both wrists, left temple, left hip.</summary>
+    internal static readonly int[][] BodyMarks = { new[] { 0 }, new[] { 1 }, new[] { 2, 5 }, new[] { 3 }, new[] { 4 } };
+    /// <summary>One labelled point of a callout diagram: the label's side, its leader's target and every ring it marks (picture pixels).</summary>
+    internal sealed record Callout(string Key, string Text, PointF At, PointF[] Rings, bool Left);
+    /// <summary>The in-game guide's callout drawing (src/controls_guide_image.hpp): the picture scaled by k, a brass ring on each mark,
+    /// labels beside it ("Key — text", key in gold) and a leader from each label to its ring. Buttons packed close together try every
+    /// label order per side and keep the one whose leaders neither cross nor run through another ring. s: device pixels per 96-dpi pixel.</summary>
+    internal static Bitmap Callouts(Bitmap picture, float k, IReadOnlyList<Callout> items, float s, float labelWidth = 230)
+    {
+        float gap = 26 * s, lw = labelWidth * s, line = 20 * s, ring = 13 * s, pw = picture.Width * k * s, ph = picture.Height * k * s;
+        bool anyLeft = items.Any(c => c.Left), anyRight = items.Any(c => !c.Left);
+        float px = anyLeft ? lw + gap : 0, top = 10 * s;
+        using var font = new Font(Ui.Sans, 15.3f * s, GraphicsUnit.Pixel); using var bold = new Font(Ui.Sans, 15.3f * s, FontStyle.Bold, GraphicsUnit.Pixel);
+        PointF P(PointF p) => new(px + p.X * k * s, top + p.Y * k * s);
+        // Word-wrapped runs: the key in bold gold, a dash, the text in bone white. Returns the height.
+        float Flow(Graphics? g, Callout c, float x, float y)
+        {
+            float cx = x, cy = y; bool first = true;
+            foreach (var (text, f, colour) in new[] { (c.Key, bold, Ui.Gold), ("—", font, Ui.Soft), (c.Text, font, Ui.Text) })
+                foreach (var word in text.Split(' ', StringSplitOptions.RemoveEmptyEntries))
+                {
+                    var size = TextRenderer.MeasureText(word, f, Size.Empty, TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix);
+                    float space = f.Size * .28f;
+                    if (!first && cx + size.Width > x + lw) { cx = x; cy += line; }
+                    if (g != null) TextRenderer.DrawText(g, word, f, new Point((int)cx, (int)cy), colour, TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix);
+                    cx += size.Width + space; first = false;
+                }
+            return cy - y + line;
+        }
+        float bottom = top + Math.Max(ph, 0);
+        var placed = new List<(Callout c, float y, float h, float lx)>();
+        foreach (bool left in new[] { true, false })
+        {
+            var side = items.Where(c => c.Left == left).OrderBy(c => c.At.Y).ToList();
+            if (side.Count == 0) continue;
+            float lx = left ? lw + gap / 2 : px + pw + gap / 2;
+            var hs = side.Select(c => Flow(null, c, 0, 0)).ToArray();
+            float[] Place(int[] order)
+            {
+                var ys = new float[order.Length]; float prev = top;
+                for (int i = 0; i < order.Length; i++) { ys[i] = Math.Max(P(side[order[i]].At).Y - hs[order[i]] / 2, prev); prev = ys[i] + hs[order[i]] + 5 * s; }
+                return ys;
+            }
+            static double Cross(PointF a, PointF b, PointF c) => (b.X - a.X) * (c.Y - a.Y) - (b.Y - a.Y) * (c.X - a.X);
+            static double Near(PointF a, PointF b, PointF p)
+            {
+                double vx = b.X - a.X, vy = b.Y - a.Y, t = Math.Clamp(((p.X - a.X) * vx + (p.Y - a.Y) * vy) / Math.Max(1, vx * vx + vy * vy), 0, 1);
+                return Math.Sqrt(Math.Pow(a.X + t * vx - p.X, 2) + Math.Pow(a.Y + t * vy - p.Y, 2));
+            }
+            int[] best = Enumerable.Range(0, side.Count).ToArray(); double bestCost = double.MaxValue;
+            foreach (var order in Permutations(Enumerable.Range(0, side.Count).ToArray()))
+            {
+                var ys = Place(order); double cost = 0; var seg = new List<(PointF a, PointF b)>();
+                for (int i = 0; i < order.Length; i++) { var at = P(side[order[i]].At); seg.Add((new(lx, ys[i] + line / 2), at)); cost += Math.Abs(ys[i] + line / 2 - at.Y); }
+                for (int i = 0; i < seg.Count; i++)
+                    for (int j = 0; j < seg.Count; j++)
+                    {
+                        if (i == j) continue;
+                        var (a, b) = seg[i]; var (c, d) = seg[j];
+                        if (i < j && Cross(a, b, c) * Cross(a, b, d) < 0 && Cross(c, d, a) * Cross(c, d, b) < 0) cost += 1e6;
+                        if (Near(a, b, d) < ring + 6 * s) cost += 1e4;
+                    }
+                if (cost < bestCost) { bestCost = cost; best = order; }
+            }
+            var final = Place(best);
+            for (int i = 0; i < best.Length; i++) { placed.Add((side[best[i]], final[i], hs[best[i]], lx)); bottom = Math.Max(bottom, final[i] + hs[best[i]]); }
+        }
+        var bmp = new Bitmap((int)Math.Ceiling(px + pw + (anyRight ? gap + lw : 0)), (int)Math.Ceiling(bottom + 10 * s));
+        using var g = Graphics.FromImage(bmp); Ui.Quality(g); g.Clear(Ui.PaneFill);
+        g.DrawImage(picture, new RectangleF(px, top, pw, ph));
+        using var pen = new Pen(Ui.Gold, 1.6f * s); using var ringPen = new Pen(Ui.Gold, 2 * s);
+        foreach (var c in items) foreach (var r in c.Rings) { var p = P(r); g.DrawEllipse(ringPen, p.X - ring, p.Y - ring, 2 * ring, 2 * ring); }
+        foreach (var (c, y, h, lx) in placed)
+        {
+            var start = new PointF(lx, y + line / 2); var at = P(c.At);
+            float dx = start.X - at.X, dy = start.Y - at.Y, dist = Math.Max(1, MathF.Sqrt(dx * dx + dy * dy));
+            var end = new PointF(at.X + dx * ring / dist, at.Y + dy * ring / dist);
+            g.DrawLine(pen, start, end); Ui.Diamond(g, end.X, end.Y, 3.5f * s, Ui.Gold, true); Ui.Diamond(g, start.X, start.Y, 5 * s, Ui.Gold, true);
+            Flow(g, c, c.Left ? 0 : lx + gap / 2, y);
+        }
+        return bmp;
+    }
+    static IEnumerable<int[]> Permutations(int[] items)
+    {
+        if (items.Length <= 1) { yield return items; yield break; }
+        for (int i = 0; i < items.Length; i++)
+            foreach (var rest in Permutations(items.Where((_, j) => j != i).ToArray()))
+                yield return new[] { items[i] }.Concat(rest).ToArray();
     }
     static void Controller(Graphics g, PointF p, bool left, string active, float scale = 1)
     {

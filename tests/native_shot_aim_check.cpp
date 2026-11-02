@@ -96,6 +96,10 @@ int main() {
     router.install(base,install_read,logic,L"build/native-shot-aim-test.csv",true);
     check(router.routing() && router.hooks()==1 && hook_calls==4,"second install reuses owned disabled trampoline");
     check(router.disable() && hook_calls==5,"second session disables cleanly");
+    {   // v776 (headset v775: six unrouted shots, no reason in the log): the last column says why a row was not routed
+        std::ifstream in("build/native-shot-aim-test.csv");std::string header;std::getline(in,header);
+        check(header.size()>7 && header.compare(header.size()-7,7,",reason")==0,"the log's last column is the reject reason");
+    }
     rejected=false;
     try {router.install(base+0x10000,install_read,logic,L"unused.csv",true);} catch(const std::runtime_error&) {rejected=true;}
     check(rejected && hook_calls==5 && !router.routing(),"retained hook cannot move to a different image base");

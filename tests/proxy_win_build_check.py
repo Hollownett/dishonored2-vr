@@ -36,7 +36,7 @@ exports = []
 for i in range(nnames):
     p = off(struct.unpack_from("<I", data, off(names_rva) + 4 * i)[0])
     exports.append(data[p:data.index(b"\0", p)].decode("ascii"))
-assert exports == ["DirectInput8Create"], f"exports {exports}"
+assert exports == ["D2vrVertexShaderLayout", "D2vrVertexShaderStats", "DirectInput8Create"], f"exports {exports}"  # + linux/proxy/vs_layouts.hpp
 
 marker = b"D2VR-LINUX-PROXY-1"
 assert marker in data, "identity marker missing"

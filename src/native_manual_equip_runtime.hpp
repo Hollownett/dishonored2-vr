@@ -362,7 +362,7 @@ private:
     static bool processor_host(void* context,std::uintptr_t,std::uintptr_t state,Hooks::Params& params) {
         auto& self=*static_cast<NativeManualEquipRuntime*>(context);std::lock_guard<std::mutex> lock(self.mutex_);
         Reader reader{self.read_};const auto machine=rig::value<std::uintptr_t>(reader,state+0x10);
-        if(machine) self.veto_right_draw_locked(*machine,state,params);
+        if(machine) {self.keep_held_sword_locked(*machine,state,params);self.veto_right_draw_locked(*machine,state,params);self.instant_left_equip_locked(*machine,state,params);}
         if(!machine || !self.context_locked(*machine) || self.state_locked(*machine)!=std::optional<std::uintptr_t>{state})return true;
         if(!self.armed_ && !self.arm_locked(*machine))return true;
         const auto occupied=self.occupied_locked(*machine);if(!occupied)self.revoke_locked();
@@ -376,11 +376,18 @@ private:
         if(wheel_depth_>=wheel_calls_.size()){++wheel_overflow_;self.revoke_locked();return false;}
         auto& call=wheel_calls_[wheel_depth_++];call={&self,controller,item,ammo,0};
         if(self.holster_.pending || !Policy::actual_wheel_origin(self.base_,caller) || !self.matches_locked(self.action_.token,Policy::Source::wheel,Phase::reserved,self.action_.owner.machine)){
+            // why (status wheel_reject_why, v763: 16 of 30 headset wheel choices were refused): 0 holster pending, 1 not the wheel's call,
+            // 2 the lease still open (the release not yet committed), 3 another lease or phase
+            ++wheel_reject_why[self.holster_.pending?0:!Policy::actual_wheel_origin(self.base_,caller)?1:
+                (self.action_.source==Policy::Source::wheel && self.action_.phase==Phase::open)?2:3];
             ++self.wheel_rejections_;if(self.action_.source==Policy::Source::wheel && self.action_.phase==Phase::open)self.revoke_locked();return true;
         }
         const auto machine=self.action_.owner.machine;
         const auto occupied=self.occupied_locked(machine);const auto scope=self.wheel_scope_locked(controller,item,ammo);
-        if(!occupied || *occupied || !scope || !self.arm_locked(machine) || !self.policy_.grant(self.action_.token,*scope)){++self.wheel_rejections_;self.revoke_locked();return true;}
+        unsigned why=!occupied?4u:*occupied?5u:!scope?6u:0u; // 4 occupancy unknown, 5 occupied, 6 no scope, 7 not armed, 8 grant refused
+        if(!why && !self.arm_locked(machine)) why=7;
+        if(!why && !self.policy_.grant(self.action_.token,*scope)) why=8;
+        if(why){++wheel_reject_why[why];++self.wheel_rejections_;self.revoke_locked();return true;}
         call.granted=self.action_.token;self.action_.phase=Phase::granted;++self.wheel_grants_;return true;
     }
     static bool wheel_after(void* context,std::uintptr_t,std::uintptr_t controller,std::uintptr_t item,std::uintptr_t ammo,bool completed,bool current) {
@@ -407,6 +414,10 @@ private:
         std::memcpy(&id,params.bytes.data(),4);std::memcpy(&item,params.bytes.data()+8,8);std::memcpy(&code,params.bytes.data()+0x18,4);
         if(!(code&0x0cu) && !item)return;
         if(right_draw_authorized(id)){++right_draws_allowed;return;}
+        // v780 (user, headset v779: "the sword in my hand folds away when I choose a weapon for the OTHER hand"; 65 vetoes, 1 sheathe of the mod's
+        // own): a left draw asks the right hand to draw too (code 8), and the emptied request put away the sword the hand was holding. A sword its
+        // hand holds (SwordGrip) keeps the game's request: the veto is for a sword drawn into an empty hand.
+        if(sword_kept.load(std::memory_order_relaxed)){++right_draws_kept;return;}
         const bool from_draw=(code&0x08u)!=0;
         code&=~0x0cu;item=0;std::memcpy(params.bytes.data()+0x18,&code,4);std::memcpy(params.bytes.data()+8,&item,8);
         std::memset(params.bytes.data()+0x10,0,8);++right_draw_vetoes;
@@ -416,9 +427,52 @@ private:
         if(from_draw) if(const auto draw=rig::value<std::uintptr_t>(reader,*pool+0x10+54*8);draw && *draw && rig::value<int>(reader,*draw+8)==54)
             __try {*reinterpret_cast<volatile std::uint32_t*>(*draw+0x30)=0x5b;++right_draw_ends;} __except(EXCEPTION_EXECUTE_HANDLER) {}
     }
+    // v782 (user, headset v780: "picking up a bottle or a glass makes the sword disappear"): taking a throwable (HoldObject entry 83d770, requester
+    // 49) locks and empties the right hand (code 0x21), where the game holds such objects (docs/native-weapon-equip-research.md 2c). A sword its
+    // hand holds (the object is then in the other hand) keeps the lock but stays drawn: the request draws the remembered item instead (0x04 with a
+    // lock bit: only remembered while locked), so the hand is not emptied. HoldObject's exit (0x16) unlocks as before. build/hold-sheathes-sword: v781.
+    void keep_held_sword_locked(std::uintptr_t machine,std::uintptr_t state,Hooks::Params& params) {
+        // v790: never when the object goes into the sword's own hand (the lock keeps the sword out of that hand; headset v799 drew it into the bottle)
+        const bool no_lock=hold_no_lock.load(std::memory_order_relaxed) && !hold_in_sword_hand.load(std::memory_order_relaxed),keep=hold_keeps_sword.load(std::memory_order_relaxed) && sword_kept.load(std::memory_order_relaxed);
+        if(!no_lock && !keep)return;
+        Reader reader{read_};const auto pool=rig::value<std::uintptr_t>(reader,machine+0x90);
+        if(!pool || rig::value<std::uintptr_t>(reader,*pool+0x10+53*8)!=state || !rig::typed(reader,base_,state,0x1c79cf8) ||
+           rig::value<int>(reader,state+8)!=53 || !native_player_state_lease(reader,base_,machine))return;
+        std::uintptr_t item{};std::uint32_t code{},requester{};
+        std::memcpy(&item,params.bytes.data()+8,8);std::memcpy(&code,params.bytes.data()+0x18,4);std::memcpy(&requester,params.bytes.data()+0x1c,4);
+        if(item || requester!=49 || !(code&0x01u) || (code&0x0eu))return; // only HoldObject's lock-and-empty
+        // v789 (user, headset v796: "a bottle is just an item in the hand, like a weapon: it must not block the other hand or drawing the sword"):
+        // with dual wield the lock bit goes. The lock (S+0x158) kept every later draw of this hand to a remembered selection for the whole
+        // HoldObject (no sword from the back, no thrown sword taken back). Without it the empty stays (0x20 instant), a held sword is kept by
+        // drawing the selected item (0x04 without lock bits = the selected one, the drawn sword), and HoldObject's exit (0x16) finds no lock
+        // and no restore item (an unequip without 0x1 clears it): the hand stays as the player left it. knob build/hold-locks-sword: v782.
+        if(no_lock) {code&=~0x01u;++hold_locks_dropped;}
+        if(keep) {code|=0x04u;++hold_swords_kept;}
+        std::memcpy(params.bytes.data()+0x18,&code,4);
+    }
+    // v781 (user, headset v780: "a weapon picked up or chosen from the wheel must be in the hand at once; a caught mine sits in the hand only after
+    // a moment"): the left hand's EquipChange (state 64: guns, gadgets, powers, the Heart) draws without its equip midnight. Code bit 0x10 makes
+    // 836120 pick no scene (the Heart's 0x30 restore was immediate); with tracked arms the scene only delayed the item. Unequips are untouched.
+    void instant_left_equip_locked(std::uintptr_t machine,std::uintptr_t state,Hooks::Params& params) {
+        if(!instant_left_equip.load(std::memory_order_relaxed))return;
+        Reader reader{read_};const auto pool=rig::value<std::uintptr_t>(reader,machine+0x90);
+        if(!pool || rig::value<std::uintptr_t>(reader,*pool+0x10+64*8)!=state || !rig::typed(reader,base_,state,0x1c79cf8) ||
+           rig::value<int>(reader,state+8)!=64 || !native_player_state_lease(reader,base_,machine))return;
+        std::uintptr_t item{};std::uint32_t code{};std::memcpy(&item,params.bytes.data()+8,8);std::memcpy(&code,params.bytes.data()+0x18,4);
+        if((!item && !(code&0x0cu)) || (code&0x10u))return; // an unequip, or already without the scene
+        code|=0x10u;std::memcpy(params.bytes.data()+0x18,&code,4);++left_equips_instant;
+    }
 public:
+    inline static std::atomic<bool> instant_left_equip{true}; // build/equip-midnight: the game's equip scenes (v780)
+    inline static std::atomic<std::uint64_t> left_equips_instant{},hold_swords_kept{};
+    inline static std::atomic<bool> hold_in_sword_hand{true}; // v790: the hand taking the HoldObject object is the sword's (dxgi, each control frame)
+    inline static std::atomic<bool> hold_no_lock{false}; // v789: dual wield (knob build/hold-locks-sword keeps the lock)
+    inline static std::atomic<std::uint64_t> hold_locks_dropped{};
+    inline static std::atomic<bool> hold_keeps_sword{true}; // build/hold-sheathes-sword: HoldObject puts a held sword away (v781)
     inline static std::atomic<bool> right_draw_veto{true};
-    inline static std::atomic<std::uint64_t> right_draw_vetoes{},right_draws_allowed{},right_draw_ends{};
+    inline static std::array<std::atomic<std::uint64_t>,9> wheel_reject_why{}; // see wheel_before
+    inline static std::atomic<std::uint64_t> right_draw_vetoes{},right_draws_allowed{},right_draw_ends{},right_draws_kept{};
+    inline static std::atomic<bool> sword_kept{}; // v780: the sword is drawn and its hand holds it (input thread, SwordGrip)
     // Game thread (NativeWeaponHands::equip): the request id 835590 gave a SwordGrip draw or pickup.
     static void authorize_right_draw(std::uint32_t id) noexcept {authorized_[authorized_next_.fetch_add(1)%authorized_.size()].store(id);}
     static bool right_draw_authorized(std::uint32_t id) noexcept {

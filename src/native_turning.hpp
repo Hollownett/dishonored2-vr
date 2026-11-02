@@ -6,6 +6,7 @@
 #include "controller_input.hpp"
 #include "crash_observer.hpp"
 #include "head_locomotion.hpp"
+#include "frame_order_trace.hpp"
 #include <atomic>
 #include <fstream>
 #include <iomanip>
@@ -43,6 +44,7 @@ class NativeTurning {
     double deferred_dt_{};
     HeadFollowing head_follow_;
     std::atomic<UINT64> head_applied_{0};
+    std::atomic<double> follow_total_{0}; // head_follow_ total, readable without feedback_mutex_ (animation workers: Driver::note_root)
     std::atomic<bool> active_{false},failed_{false};
     std::atomic<UINT> depth_{0};
     std::atomic<UINT64> calls_{0},applied_{0},verified_{0},cancelled_{0},ready_tick_{0},epoch_{0};
@@ -119,13 +121,13 @@ class NativeTurning {
         }
         if(request) {
             CrashOperation operation("native VR yaw delta");
-            add_yaw_(delegate,static_cast<float>(request->radians));++applied_;
+            add_yaw_(delegate,static_cast<float>(request->radians));++applied_;frame_order::note('T',0,{request->radians,physical_delta});
             auto immediate=rig::value<float>(read_,before->heading_delegate+0xd0);
             if(!immediate || !std::isfinite(*immediate) || angle_error(*immediate,expected)>.0001) fail();
             else {
                 // The verified writer changed native heading synchronously.
                 // Counter it in the room anchor before another eye can render.
-                head_follow_.commit(physical_delta);if(physical_delta) ++head_applied_;
+                head_follow_.commit(physical_delta);follow_total_.store(head_follow_.total(),std::memory_order_release);if(physical_delta) ++head_applied_;
                 feedback_.begin({owner(*before),*request,before->heading,expected,turn_dt,GetTickCount64()});
             }
         }
@@ -150,6 +152,7 @@ public:
     void publish_head(double yaw,UINT64 now,UINT64 reference,const NativePlayerCamera& owner,bool usable) {
         std::lock_guard<std::mutex> lock(feedback_mutex_);
         head_follow_.publish(yaw,now,reference,owner.player,owner.camera,owner.camera_identity.generation,usable);
+        follow_total_.store(head_follow_.total(),std::memory_order_release);
     }
     double head_compensation(UINT64 reference) {
         std::lock_guard<std::mutex> lock(feedback_mutex_);return head_follow_.compensation(reference);
@@ -160,6 +163,8 @@ public:
         head_directed_stick(input.move_x,input.move_y,head_follow_.relative_yaw(now));
     }
     UINT64 head_applied() const {return head_applied_.load();}
+    // The player-heading turn head-follow has applied so far (what head_compensation() returns), without the lock: the animation thread reads it at an arm upload.
+    double head_follow_total() const {return follow_total_.load(std::memory_order_acquire);}
     void configure(TurnControl::Config config) {
         if(!enabled_ || !active_ || failed_ || logic_()==2)
             throw std::runtime_error("Turning settings require the active native adapter and a paused game");
@@ -181,7 +186,7 @@ public:
         if(!log_) throw std::runtime_error("Cannot open native VR turning feedback log");
         log_<<std::setprecision(9)<<"requested_update,feedback_update,thread,tick_ms,pose_epoch,dt,before,requested_delta,expected,after,entity_heading,state,acknowledge_ms\n";
         calls_=0;applied_=0;verified_=0;cancelled_=0;ready_tick_=0;epoch_=0;failed_=false;instance_=this;
-        feedback_.cancel();deferred_dt_=0;head_follow_={};head_applied_=0;
+        feedback_.cancel();deferred_dt_=0;head_follow_={};follow_total_.store(0,std::memory_order_release);head_applied_=0;
         add_yaw_=reinterpret_cast<AddYaw>(base+add_rva);
         const auto target=reinterpret_cast<void*>(base+step_rva);
         if(!original_ && MH_CreateHook(target,reinterpret_cast<void*>(&step),reinterpret_cast<void**>(&original_))!=MH_OK)

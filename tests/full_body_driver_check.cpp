@@ -211,6 +211,9 @@ int main() {
     xr_age.source_tick=3100;ordered.publish(xr_age,{});
     assert(ordered.arm_frozen(0,native_arm[0],identity,3000)); // the sample may be 100 ms ahead of the callback's clock
     assert(!ordered.arm_frozen(0,native_arm[0],identity,2999) && ordered.arm_why(0)==2); // fallback_after_grace_window
+    // v781 (user, headset v780: a guard's kick staggered Emily and her hit reaction took the hands): a hit reaction keeps the hands and torso
+    for(const char* hit:{"Stumble","Stun"}) {const auto o=body::native_ownership(hit);assert(o.arm[0]==0 && o.arm[1]==0 && o.torso==0 && o.legs>0);}
+    assert(body::native_ownership("KnockedDown").arm[0]==1 && body::native_ownership("Assassination").arm[1]==1); // scripted scenes still take them
     // Native ownership can blend the rendered legs on duplicate publications,
     // but may not migrate planted/swing targets or advance ownership weights.
     for(unsigned i=0;i<30;++i) {t.tick+=33;ordered.publish(stamp(t),body::native_ownership("Mantle"));assert(ordered.body(native_body,identity));}
@@ -245,6 +248,90 @@ int main() {
         // ... and so do the hinge axes the contact tested them about: a different hinge puts the joint somewhere else.
         assert(length(local(true,1.2f,true).p-local(true,1.2f).p)>.003);
         assert(length(local(true,0.f,true).p-local(true,0.f).p)<1e-4); // (no turn, no difference)
+    }
+    {   // v763 dual wield (user, headset v762: "the right hand holds every weapon exactly as the left"): a hand holding the other arm's item
+        // (mirror_native) is posed by that arm's native clip mirrored onto it. A bent left index (the left's own hold) shows on the right hand.
+        auto bent=native_arm;const auto li=static_cast<unsigned>(left.find("left_index_03_jnt")),lw=static_cast<unsigned>(left.find("left_wrist_jnt"));
+        const auto ri=static_cast<unsigned>(right.find("right_index_03_jnt")),rw=static_cast<unsigned>(right.find("right_wrist_jnt"));
+        {auto& t=bent[0][li];const double c=std::cos(.9),s=std::sin(.9);
+         for(unsigned k=0;k<3;++k) {const float a1=t.f[4+k],a2=t.f[8+k];t.f[4+k]=static_cast<float>(c*a1+s*a2);t.f[8+k]=static_cast<float>(-s*a1+c*a2);}}
+        const auto right_index=[&](bool mirror) {
+            Driver d;d.tune(0,1);auto tr=tracking;tr.tick=5000;tr.hand_empty[1]=false;tr.mirror_native[1]=mirror;
+            for(unsigned k=0;k<2;++k)(void)d.arm(k,bent[k],identity);
+            d.publish(stamp(tr),{});assert(d.body(native_body,identity));
+            (void)d.arm(0,bent[0],identity);const auto r=d.arm(1,bent[1],identity);assert(r);
+            return body::mul(body::inverse(to_xf((*r)[rw])),to_xf((*r)[ri]));
+        };
+        const auto want=body::mul(body::inverse(to_xf(power_hand::mirror_joint(bent[0][lw]))),to_xf(power_hand::mirror_joint(bent[0][li])));
+        const auto mirrored=right_index(true),own=right_index(false);
+        const auto angle=[](const Quaternion& a,const Quaternion& b) {return 2*std::acos(std::min(1.,std::abs(a.x*b.x+a.y*b.y+a.z*b.z+a.w*b.w)));};
+        assert(length(mirrored.p-want.p)<2e-3 && angle(mirrored.q,want.q)<.02); // the left's bent finger, mirrored, on the right hand
+        assert(angle(own.q,want.q)>.5);                                       // without the flag the right keeps its own flat finger
+    }
+    {   // v771 dual wield (user, headset v770: a right-hand pistol copy lost its hold when the left took a grenade): the left arm's calm gun clip is
+        // kept while slot 1 holds a gun; a copy held when no arm plays a gun clip is posed by it (mirrored on the right).
+        auto bent=native_arm;const auto li=static_cast<unsigned>(left.find("left_index_03_jnt")),lw=static_cast<unsigned>(left.find("left_wrist_jnt"));
+        const auto ri=static_cast<unsigned>(right.find("right_index_03_jnt")),rw=static_cast<unsigned>(right.find("right_wrist_jnt"));
+        {auto& t=bent[0][li];const double c=std::cos(.9),s=std::sin(.9);
+         for(unsigned k=0;k<3;++k) {const float a1=t.f[4+k],a2=t.f[8+k];t.f[4+k]=static_cast<float>(c*a1+s*a2);t.f[8+k]=static_cast<float>(-s*a1+c*a2);}}
+        const auto right_index=[&](bool keep) {
+            Driver d;d.tune(0,1);auto tr=tracking;tr.hand_empty[1]=false;
+            for(unsigned n=0;n<40;++n) {tr.tick=5000+n*11;tr.slot1_gun=true;   // slot 1 holds the gun: its clip (bent index) plays calmly for 0.44 s
+                for(unsigned k=0;k<2;++k)(void)d.arm(k,bent[k],identity);d.publish(stamp(tr),{});assert(d.body(native_body,identity));}
+            tr.slot1_gun=false;tr.gun_clip[1]=keep;                              // now a grenade: the left arm plays another clip (flat); the hold eases over
+            for(unsigned n=0;n<100;++n) {tr.tick+=11;                            // its steady quarter second, as any new hold
+                for(unsigned k=0;k<2;++k)(void)d.arm(k,native_arm[k],identity);d.publish(stamp(tr),{});assert(d.body(native_body,identity));}
+            (void)d.arm(0,native_arm[0],identity);const auto r=d.arm(1,native_arm[1],identity);assert(r);
+            return body::mul(body::inverse(to_xf((*r)[rw])),to_xf((*r)[ri]));
+        };
+        const auto want=body::mul(body::inverse(to_xf(power_hand::mirror_joint(bent[0][lw]))),to_xf(power_hand::mirror_joint(bent[0][li])));
+        const auto angle=[](const Quaternion& a,const Quaternion& b) {return 2*std::acos(std::min(1.,std::abs(a.x*b.x+a.y*b.y+a.z*b.z+a.w*b.w)));};
+        const auto kept=right_index(true),own=right_index(false);
+        assert(length(kept.p-want.p)<2e-3 && angle(kept.q,want.q)<.02); // the kept gun clip's bent finger, mirrored, on the right hand
+        assert(angle(own.q,want.q)>.5);                                 // without it the right keeps its own flat finger
+    }
+    {   // v771 dual wield (user, headset v770: the left hand held the sword through its open palm): a hand's first hold of an item starts from the
+        // other hand's calibrated grip of it, mirrored, so a left draw shows the right's fist at once, before the draw clip (open fingers) is steady.
+        auto bent=native_arm;const auto ri=static_cast<unsigned>(right.find("right_index_03_jnt")),rw=static_cast<unsigned>(right.find("right_wrist_jnt"));
+        const auto li=static_cast<unsigned>(left.find("left_index_03_jnt")),lw=static_cast<unsigned>(left.find("left_wrist_jnt"));
+        {auto& t=bent[1][ri];const double c=std::cos(.9),s=std::sin(.9);
+         for(unsigned k=0;k<3;++k) {const float a1=t.f[4+k],a2=t.f[8+k];t.f[4+k]=static_cast<float>(c*a1+s*a2);t.f[8+k]=static_cast<float>(-s*a1+c*a2);}}
+        constexpr std::uint64_t sword=0x53574f5244ull;
+        const auto left_index=[&](bool share) {
+            Driver d;d.tune(0,1);auto tr=tracking;tr.hand_empty[0]=true;tr.hand_empty[1]=false;tr.item_key[1]=sword;
+            if(share) for(unsigned n=0;n<60;++n) {tr.tick=5000+n*11;   // the right holds the sword, its fist (bent index) steady: calibrated, remembered
+                for(unsigned k=0;k<2;++k)(void)d.arm(k,bent[k],identity);d.publish(stamp(tr),{});assert(d.body(native_body,identity));}
+            tr.tick+=11;tr.hand_empty[1]=true;tr.item_key[1]=0;          // the left draws it (mirrored): the right's clip now has open fingers
+            tr.hand_empty[0]=false;tr.mirror_native[0]=true;tr.weapon_incoming[0]=true;tr.item_key[0]=sword;
+            for(unsigned k=0;k<2;++k)(void)d.arm(k,native_arm[k],identity);d.publish(stamp(tr),{});assert(d.body(native_body,identity));
+            const auto r=d.arm(0,native_arm[0],identity);(void)d.arm(1,native_arm[1],identity);assert(r);
+            return body::mul(body::inverse(to_xf((*r)[lw])),to_xf((*r)[li]));
+        };
+        const auto want=body::mul(body::inverse(to_xf(power_hand::mirror_joint(bent[1][rw]))),to_xf(power_hand::mirror_joint(bent[1][ri])));
+        const auto angle=[](const Quaternion& a,const Quaternion& b) {return 2*std::acos(std::min(1.,std::abs(a.x*b.x+a.y*b.y+a.z*b.z+a.w*b.w)));};
+        const auto shared=left_index(true),fresh=left_index(false);
+        assert(length(shared.p-want.p)<2e-3 && angle(shared.q,want.q)<.02); // the right's remembered fist, mirrored, on the left's first frame
+        assert(angle(fresh.q,want.q)>.5);                                   // never held by the right: the draw clip's open finger
+    }
+    {   // v766 dual wield (user, headset v762: "the left hand holds the sword exactly as the right"): every sneak sword clip holds the blade
+        // reversed (attachment Y along the parent's -Z) and the right hand's socket turns it forward (body_ik sneak_flip). The left hand playing
+        // that clip mirrored gets the same hold, mirrored: mirror_joint keeps a local turn and negates a local offset.
+        const auto ra=static_cast<unsigned>(right.find("right_hand_attachment_jnt")),la=static_cast<unsigned>(left.find("left_hand_attachment_jnt"));
+        const auto rp=static_cast<unsigned>(right.parent[ra]),lp=static_cast<unsigned>(left.parent[la]);
+        auto sneak=native_arm;
+        {const auto parent=to_xf(sneak[1][rp]);auto local=body::mul(body::inverse(parent),to_xf(sneak[1][ra]));
+         local.q=body::axis_angle({1,0,0},-rig::kPi/2);sneak[1][ra]=to_transform(body::mul(parent,local));}
+        const auto hold=[&](unsigned side,bool mirror) {
+            Driver d;d.tune(0,1);auto tr=tracking;tr.tick=5000;tr.hand_empty[0]=tr.hand_empty[1]=true;tr.hand_empty[side]=false;tr.mirror_native[side]=mirror;
+            for(unsigned k=0;k<2;++k)(void)d.arm(k,sneak[k],identity);
+            d.publish(stamp(tr),{});assert(d.body(native_body,identity));
+            const auto r0=d.arm(0,sneak[0],identity);const auto r1=d.arm(1,sneak[1],identity);const auto& r=side?r1:r0;assert(r);
+            return body::mul(body::inverse(to_xf((*r)[side?rp:lp])),to_xf((*r)[side?ra:la]));
+        };
+        const auto angle=[](const Quaternion& a,const Quaternion& b) {return 2*std::acos(std::min(1.,std::abs(a.x*b.x+a.y*b.y+a.z*b.z+a.w*b.w)));};
+        const auto right_hold=hold(1,false),left_hold=hold(0,true);
+        assert(rotated(right_hold.q,{0,1,0}).z>-.5);                                     // the right holds it forward
+        assert(angle(left_hold.q,right_hold.q)<.02 && length(left_hold.p+right_hold.p)<2e-3); // the left: the same hold, mirrored
     }
     {   // Stick locomotion at 5 m/s, engine order: a frame's animation uploads run before that frame's
         // render-thread publication, so uploads of frame n use the solution published at n-1. The

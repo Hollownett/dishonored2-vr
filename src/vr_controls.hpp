@@ -12,8 +12,8 @@ namespace d2vr {
 // fresh X edge while allowed; losing allowed cancels the press (wheel closes
 // without equipping) and the press stays claimed until X is released, so a
 // tracking/focus/menu interruption can never late-open the wheel.
-// A positive hold_ms delays opening (the right-hand A wheel: a tap stays a jump); the button passes
-// through natively until x_consumed() turns true.
+// A positive hold_ms delays opening (unused since v779: the right-hand A wheel opens at once, the jump is on the
+// right stick); the button passes through natively until x_consumed() turns true.
 class XWheelOwner {
     bool down_{},claimed_{},open_{},ignored_{};std::uint64_t since_{},hold_ms_{};
 public:
@@ -29,10 +29,11 @@ public:
     void reset() noexcept {down_=claimed_=open_=ignored_=false;}
     void commit() noexcept {if(open_) {open_=false;ignored_=true;}}
 };
-// Both hands open the same wheel: left X at once, right A after a short hold. The first hand to open owns
-// selection until its button is released; the other button is then ignored (never late-opens).
+// Both hands open the same wheel, each at once: left X, right A (dual wield; v779, user, headset v778: "holding A opens the wheel, mirrored
+// with the left controller"; was B after a 350 ms hold). The first hand to open owns selection until its button is released; the other
+// button is then ignored (never late-opens).
 class WheelHands {
-    XWheelOwner left_,right_{350};
+    XWheelOwner left_,right_;
 public:
     void update(bool x,bool a,bool allowed,std::uint64_t now_ms) noexcept {
         left_.update(x,allowed && !right_.wheel(),now_ms);
@@ -41,42 +42,45 @@ public:
     bool wheel() const noexcept {return left_.wheel() || right_.wheel();}
     int hand() const noexcept {return left_.wheel()?0:right_.wheel()?1:-1;}
     bool a_consumed() const noexcept {return right_.x_consumed();}
-    // Native A (jump) is held back while it may become a wheel hold; a tap under 350 ms
-    // jumps on release with an 80 ms pulse, so opening the wheel never jumps.
-    bool a_passthrough(bool a,std::uint64_t now_ms) noexcept {
-        if(a && !a_down_) a_since_=now_ms;
-        if(!a && a_down_ && now_ms-a_since_<350 && !left_.wheel()) a_pulse_until_=now_ms+80;
-        a_down_=a;return now_ms<a_pulse_until_;
-    }
     // Cursor-hand trigger commit: closes the wheel like a button release (the button stays claimed until released).
     void commit() noexcept {left_.commit();right_.commit();}
-    void reset() noexcept {left_.reset();right_.reset();a_down_=false;a_pulse_until_=0;}
-private:
-    bool a_down_{};std::uint64_t a_since_{},a_pulse_until_{};
+    void reset() noexcept {left_.reset();right_.reset();}
 };
-// Wheel selection feed: the owning hand's opposite thumb stick (left-owned: right stick, as native;
-// right-owned: left stick, since the right thumb holds A) wins over that hand's dial; the other stick is dropped.
-inline void wheel_select(int owner,float& turn_x,float& turn_y,float& move_x,float& move_y,bool dial,float dx,float dy) noexcept {
+// Wheel selection feed: the owning hand's opposite thumb stick (left-owned: right stick, as native; right-owned: left stick, since the
+// right thumb holds the button); the other stick is dropped. The hand's dial wins unless the stick is used on purpose (v771, headset v770:
+// a hand's choice was sometimes lost): left-owned, the right stick only past .6 (a resting thumb no longer steals it); right-owned, the left
+// stick is locomotion and selects only while the hand has not moved (dial off).
+// hand_only (dual wield's hand wheel; v772, user: "the hand moved toward the item, not the sticks"): no stick ever selects; until the hand
+// moves (dial off) nothing is selected.
+inline void wheel_select(int owner,float& turn_x,float& turn_y,float& move_x,float& move_y,bool dial,float dx,float dy,bool hand_only=false) noexcept {
+    if(hand_only) {move_x=move_y=0;turn_x=dial?dx:0.f;turn_y=dial?dy:0.f;return;}
     if(owner==1) {turn_x=move_x;turn_y=move_y;}
     move_x=move_y=0;
-    if(dial && turn_x*turn_x+turn_y*turn_y<.0625f) {turn_x=dx;turn_y=dy;}
+    if(dial && (owner==1 || turn_x*turn_x+turn_y*turn_y<.36f)) {turn_x=dx;turn_y=dy;}
 }
 // Two-handed pointing cursor for the open wheel. Each hand's offset from where it was when the wheel
 // opened (head-right/up plane) is its pointing direction. The hand that moves meaningfully becomes the
 // cursor and keeps it until the other hand moves faster; inside `dead` metres the cursor is neutral.
 // A fresh trigger press of the cursor hand (edge seen while open) commits. Stick override: wheel_select.
+// v776 (user, headset v775: turning the hand changed nothing): the dual-wield wheel no longer uses this position cursor, its hand POINTS
+// (WheelPointer::update_plane); nothing in the game calls it any more, it stays with its lab.
 class WheelCursor {
     bool open_{},has_[2]{},down_[2]{};std::array<std::array<double,3>,2> origin_{},prev_{};
-    std::array<double,3> right_{1,0,0};int active_{-1};
+    std::array<double,3> right_{1,0,0},up_{0,1,0};int active_{-1};std::array<float,2> last_{};bool have_last_{};
 public:
     int cursor() const noexcept {return active_;}
+    // plane_up: the drawn ring's up axis (head_right is then its right axis), so a hand moving along the ring moves the selection the
+    // same way (v762, headset v761: seen from above, world up compressed the ring's bottom). Without it: head-right made level, world up.
     bool update(bool wheel_open,const std::array<bool,2>& tracked,const std::array<std::array<double,3>,2>& hand,
-                const std::array<double,3>& head_right,float& x,float& y,double dead=.035,double move=.004) noexcept {
-        if(!wheel_open) {open_=has_[0]=has_[1]=false;active_=-1;return false;}
+                const std::array<double,3>& head_right,float& x,float& y,double dead=.035,double move=.004,
+                const std::array<double,3>* plane_up=nullptr) noexcept {
+        if(!wheel_open) {open_=has_[0]=has_[1]=have_last_=false;active_=-1;return false;}
         if(!open_) {
             open_=true;
-            const double h=std::sqrt(head_right[0]*head_right[0]+head_right[2]*head_right[2]);
-            right_=h>1e-6?std::array<double,3>{head_right[0]/h,0,head_right[2]/h}:std::array<double,3>{1,0,0};
+            const auto unit=[](const std::array<double,3>& v,const std::array<double,3>& fallback) {
+                const double l=std::sqrt(v[0]*v[0]+v[1]*v[1]+v[2]*v[2]);return l>1e-6?std::array<double,3>{v[0]/l,v[1]/l,v[2]/l}:fallback;};
+            if(plane_up) {right_=unit(head_right,{1,0,0});up_=unit(*plane_up,{0,1,0});}
+            else {right_=unit({head_right[0],0,head_right[2]},{1,0,0});up_={0,1,0};}
         }
         double speed[2]{};
         for(int i=0;i<2;++i) {
@@ -86,11 +90,13 @@ public:
             speed[i]=std::sqrt((a[0]-b[0])*(a[0]-b[0])+(a[1]-b[1])*(a[1]-b[1])+(a[2]-b[2])*(a[2]-b[2]));prev_[i]=a;
         }
         for(int i=0;i<2;++i) if(speed[i]>=move && (active_<0 || (i!=active_ && speed[i]>speed[active_]))) active_=i;
+        if(active_<0 && tracked[0]!=tracked[1]) active_=tracked[0]?0:1; // a lone hand (dual wield: the wheel's own) needs no fast first move
         if(active_<0 || !tracked[active_] || !has_[active_]) return false;
-        const auto& h=hand[active_];const auto& o=origin_[active_];
-        const double u=(h[0]-o[0])*right_[0]+(h[2]-o[2])*right_[2],v=h[1]-o[1],len=std::sqrt(u*u+v*v);
-        if(len<dead) return false;
-        x=static_cast<float>(u/len);y=static_cast<float>(v/len);return true;
+        const auto& h=hand[active_];const auto& o=origin_[active_];const std::array<double,3> d{h[0]-o[0],h[1]-o[1],h[2]-o[2]};
+        const double u=d[0]*right_[0]+d[1]*right_[1]+d[2]*right_[2],v=d[0]*up_[0]+d[1]*up_[1]+d[2]*up_[2],len=std::sqrt(u*u+v*v);
+        // Back inside the dead zone the last choice holds (v763, headset v762: a hand drifting back while the button let go committed nothing).
+        if(len<dead) {if(!have_last_) return false;x=last_[0];y=last_[1];return true;}
+        x=static_cast<float>(u/len);y=static_cast<float>(v/len);last_={x,y};have_last_=true;return true;
     }
     // True once on a fresh trigger press of the cursor hand while the wheel is open.
     bool commit(bool wheel_open,const std::array<float,2>& trigger) noexcept {
@@ -109,7 +115,7 @@ public:
 // roughly 0.25 m at 1 m; adjust if the dot and wedge disagree. Trigger commit as WheelCursor::commit.
 class WheelPointer {
     using V=std::array<double,3>;
-    bool open_{},has_[2]{},down_[2]{},outside_{};V centre_{},right_{1,0,0},normal_{0,0,1},prev_[2]{};int active_{-1},filt_hand_{-1},sector_{-1};double fu_{},fv_{};
+    bool open_{},has_[2]{},down_[2]{},outside_{};V centre_{},right_{1,0,0},up_{0,1,0},normal_{0,0,1},prev_[2]{};int active_{-1},filt_hand_{-1},sector_{-1};double fu_{},fv_{};
     static double dot(const V& a,const V& b) noexcept {return a[0]*b[0]+a[1]*b[1]+a[2]*b[2];}
 public:
     int cursor() const noexcept {return active_;}
@@ -127,8 +133,28 @@ public:
             const double h=std::sqrt(head_forward[0]*head_forward[0]+head_forward[2]*head_forward[2]);
             const V f=h>1e-6?V{head_forward[0]/h,0,head_forward[2]/h}:V{0,0,-1}; // yaw only: the wheel stays upright
             centre_={head[0]+f[0]*distance,head[1],head[2]+f[2]*distance};
-            normal_={-f[0],0,-f[2]};right_={-f[2],0,f[0]}; // forward x up
+            normal_={-f[0],0,-f[2]};right_={-f[2],0,f[0]};up_={0,1,0}; // forward x up
         }
+        return solve(tracked,pos,dir,dx,dy,hit,dot_visible,radius,dead,move);
+    }
+    // Dual wield: the same cursor on a plane given every frame (the wheel ring drawn in front of a hand). centre/normal/right/up:
+    // the quad's centre and unit axes in the rays' space; radius: the ring in metres. Same filtering, hand choice and sectors as update().
+    // v776: the caller tracks only the hand that opened the wheel (so the other can never take the cursor); its own ray points at the ring.
+    // continuous: dx/dy are the pointed direction itself, not the 8 wedge centres (the native ring holds as many items as the player owns, evenly
+    // spaced: 13 on the user's save, so 8 pointer positions reach 5 of them); sector() still holds the wedge, 8 deg hysteresis, for haptics and logs.
+    bool update_plane(bool wheel_open,const std::array<bool,2>& tracked,const std::array<V,2>& pos,const std::array<V,2>& dir,
+                const V& centre,const V& normal,const V& right,const V& up,int prefer,float& dx,float& dy,V& hit,bool& dot_visible,
+                double radius,bool continuous=false,double dead=.2,double move=.004) noexcept {
+        dot_visible=false;
+        if(!wheel_open) {open_=has_[0]=has_[1]=outside_=false;active_=filt_hand_=sector_=-1;return false;}
+        if(!open_) {open_=true;active_=prefer;}
+        centre_=centre;normal_=normal;right_=right;up_=up;
+        return solve(tracked,pos,dir,dx,dy,hit,dot_visible,radius,dead,move,continuous);
+    }
+    int sector() const noexcept {return sector_;} // the wedge (0 right, 2 up, 4 left, 6 down) the cursor is in; -1 in the dead zone
+private:
+    bool solve(const std::array<bool,2>& tracked,const std::array<V,2>& pos,const std::array<V,2>& dir,float& dx,float& dy,V& hit,bool& dot_visible,
+               double radius,double dead,double move,bool continuous=false) noexcept {
         double u[2]{},v[2]{};bool ok[2]{};
         for(int i=0;i<2;++i) {
             if(!tracked[i]) continue;
@@ -137,7 +163,7 @@ public:
             const V d{centre_[0]-pos[i][0],centre_[1]-pos[i][1],centre_[2]-pos[i][2]};
             const double t=dot(d,normal_)/den;if(t<=0) continue;
             const V r{pos[i][0]+dir[i][0]*t-centre_[0],pos[i][1]+dir[i][1]*t-centre_[1],pos[i][2]+dir[i][2]*t-centre_[2]};
-            u[i]=dot(r,right_);v[i]=r[1];ok[i]=true;
+            u[i]=dot(r,right_);v[i]=dot(r,up_);ok[i]=true;
         }
         double speed[2]{};
         for(int i=0;i<2;++i) {
@@ -157,7 +183,7 @@ public:
         double a=fu_/radius,b=fv_/radius;double len=std::hypot(a,b);
         outside_=len>1.3; // past the ring: potion slots and Y, clicked through the native pointer
         if(len>1.8) {a*=1.8/len;b*=1.8/len;len=1.8;}
-        hit={centre_[0]+right_[0]*a*radius,centre_[1]+b*radius,centre_[2]+right_[2]*a*radius};dot_visible=true;
+        hit={centre_[0]+right_[0]*a*radius+up_[0]*b*radius,centre_[1]+right_[1]*a*radius+up_[1]*b*radius,centre_[2]+right_[2]*a*radius+up_[2]*b*radius};dot_visible=true;
         if(len<dead) {sector_=-1;return false;}
         // Sector hysteresis: keep the held wedge until the pointer is > 8 deg past its edge; output its centre.
         constexpr double pi=3.14159265358979,wedge=pi/4;
@@ -167,8 +193,10 @@ public:
             if(std::abs(off)>wedge/2+8*pi/180) sector_=-1;
         }
         if(sector_<0) sector_=static_cast<int>(std::lround(ang/wedge))&7;
+        if(continuous) {dx=static_cast<float>(a/len);dy=static_cast<float>(b/len);return true;}
         dx=static_cast<float>(std::cos(sector_*wedge));dy=static_cast<float>(std::sin(sector_*wedge));return true;
     }
+public:
     // True once on a fresh trigger press of the cursor hand while the wheel is open.
     bool commit(bool wheel_open,const std::array<float,2>& trigger) noexcept {
         bool out=false;
@@ -259,6 +287,15 @@ public:
         return {true,true};
     }
 };
+// Which hand's grip is the choke (v639: the free one): the sword's own hand, or its other one while the sword holds the first and no gun the other.
+inline constexpr unsigned choke_hand(unsigned sword_hand,bool sword_owns,bool gun_owns) noexcept {return sword_owns && !gun_owns?sword_hand^1u:sword_hand;}
+// A squeeze that holds a weapon (the sword's hold-to-hold fist, the gun hand's gun or gadget, a mod-owned copy) or that another gesture took (holster,
+// temple, shoulder dock) is spoken for: a choke offer that appears while it is squeezed is no press. v698/v793 let a squeezed choke-hand grip take
+// every offer; with a gun in the other hand the sword hand is the choke hand (above), so the blade's own squeeze chose each unaware guard before the
+// stab reached him (user, headset v891: "a choke instead of the stealth kill"). The control thread passes this as OfferedChokeGrip's `occupied`.
+inline constexpr bool grip_spoken_for(unsigned hand,unsigned sword_hand,bool sword_owns,bool gun_hand_holds,bool copy_owns,bool taken) noexcept {
+    return copy_owns || taken || (hand==sword_hand?sword_owns:gun_hand_holds);
+}
 class TalkYOwner {
 public:
     struct Target {
@@ -373,6 +410,12 @@ inline std::optional<std::array<double,2>> wheel_stage_point(double u,double v,d
 inline double wheel_metres_per_stage(double width,unsigned w,unsigned h) noexcept {
     return w && h?std::min(w/1920.,h/1080.)*width/w:0.;
 }
+// v776: the cursor (metres from the quad centre, WheelPointer::plane) is on an elixir or "Hide/Show all": a click zone, so the hand chooses no ring item there
+// (the dual-wield wheel feeds no wedge and no game pointer, which a trigger would otherwise click as that item).
+inline bool wheel_on_button(double u,double v,double width,unsigned w,unsigned h) noexcept {
+    const auto st=wheel_stage_point(u,v,width,w,h);if(!st) return false;
+    const auto z=wheel_zone((*st)[0],(*st)[1]);return z==WheelZone::health || z==WheelZone::mana || z==WheelZone::hide;
+}
 // A hand squeezing its grip at a point fixed to the head (user request: the journal at the left temple, the sword over
 // the right shoulder). Point = head + left*l + up*u + forward*f; radius r (+3 cm hysteresis); mask: allowed hands.
 // journal = one 150 ms pulse per squeeze; held = the squeeze that started there is still held. Consumed until release.
@@ -449,6 +492,14 @@ public:
             // ponytail: 30 s / 12 m return to the holster; tune in the headset
             if(in.copy && ((settled_ && in.drawn) || in.copy_age_s>30 || in.copy_distance>12)) {out.action=Action::recall;recall_sent_=in.now;}
         }
+        // User 2026-11-02 ("after climbing I lose what was in my hands"): a mantle (or another scene, busy) takes the sword out of a hand that
+        // holds it and the game's own restore is vetoed (veto_right_draw_locked). A hand still squeezing gets it back, once, after the scene.
+        if(in.drawn && held_) had_=true;
+        if(!held_) had_=false;
+        if(out.action==Action::none && had_ && pressed && !in.drawn && !pending_ && !in.busy && !in.copy) {
+            if(!lost_) lost_=in.now+1;
+            else if(in.now+1-lost_>=restore_ms) {out.action=Action::draw;pending_=in.now;had_=false;lost_=0;}
+        } else lost_=0;
         if(out.action==Action::none && in.drawn && !held_ && !pending_ && !in.busy && in.now-drawn_since_>150 &&
            (!sheathe_sent_ || in.now-sheathe_sent_>1500)) {out.action=Action::sheathe;sheathe_sent_=in.now;}
         out.reversed=reversed_;out.owns=held_ || pending_ || in.zone || (!in.use_target && in.copy && in.copy_reach);
@@ -456,19 +507,30 @@ public:
     }
     bool held() const noexcept {return held_;}
     static constexpr double pickup_dead_band=.35; // |dot| a pickup needs before it changes the grip; `reversed_` changes only on a draw or pickup edge
+    static constexpr std::uint64_t restore_ms=300; // ponytail: the game's own restore lands first if it can; tune in the headset
 private:
-    bool down_{},held_{},reversed_{},settled_{};std::uint64_t pending_{},drawn_since_{},sheathe_sent_{},recall_sent_{},dropped_{},stow_sent_{};
+    bool down_{},held_{},reversed_{},settled_{},had_{};std::uint64_t pending_{},drawn_since_{},sheathe_sent_{},recall_sent_{},dropped_{},stow_sent_{},lost_{};
 };
 // Full-grip pistol/crossbow (user 2026-10-13): the left hand holds the gun only while its grip is squeezed. Let go anywhere
 // and it goes back to the left hip (no physical pistol prop exists to drop). Squeeze at the hip with the left hand empty:
 // draw the gun the hip holds (the last gun drawn). A gun the wheel or the game puts in the hand stays until the grip has
 // held it once.
+// Dual wield (docs/dual-wield-two-hands-plan.md, row A; In::drop_enabled, off = everything above exactly): letting go of a drawn gun away from
+// the hip drops/throws it (Action::drop, NativeWeaponHands::Op::gun_drop); at the hip it still holsters. While a dropped native gun lies in the
+// world (In::copy) a squeeze at the hip, or with the empty hand within reach of it (In::copy_reach), picks it up (Action::pickup, the draw's
+// 100 ms and authorisation) instead of drawing from the hip. Action values are appended: gun_actions[] needs five entries.
 class GunGrip {
 public:
-    enum class Action {none,draw,holster};
-    struct In {float grip{},trigger{};bool gameplay{},zone{},drawn{},empty{},loaded{},busy{},object_claim{},draw_authorized{};std::uint64_t now{},release_owner{};};
-    struct Out {Action action{};bool owns{},reserved{};};
-    void reject_draw() noexcept {held_=false;pending_=0;candidate_=false;rejected_=down_;release_pending_=false;held_owner_=0;}
+    enum class Action {none,draw,holster,drop,pickup};
+    struct In {float grip{},trigger{};bool gameplay{},zone{},drawn{},empty{},loaded{},busy{},object_claim{},draw_authorized{};std::uint64_t now{},release_owner{};
+        bool drop_enabled{},copy{},copy_reach{};};
+    struct Out {Action action{};bool owns{},reserved{},expected{};};   // expected: the draw is the pickup's hip fallback (expect)
+    void reject_draw() noexcept {held_=false;pending_=0;candidate_=false;rejected_=down_;release_pending_=false;held_owner_=0;expect_since_=0;}
+    // v962 (user, headset v951: "the sword in one hand, I pick up a pistol or crossbow with the free hand and it goes to the hip instead of staying in the free hand"):
+    // a gun the extras loop took natively from the floor (the wheel's equip) is expected in the hand within a moment. When it is not there after expect_ms while the hand
+    // still squeezes (it stayed in the holster), the hand draws it from the hip like a squeeze at the holster; a hand that let go, or a gun that landed, ends the wait.
+    void expect(std::uint64_t now) noexcept {expect_since_=now?now:1;}
+    static constexpr std::uint64_t expect_ms=350,expect_give_up_ms=3000;
     Out update(const In& in) noexcept {
         Out out{};
         const bool pressed=in.grip>=(down_?.4f:.6f),edge=pressed && !down_,released=!pressed && down_;down_=pressed;
@@ -486,20 +548,40 @@ public:
             }
         }
         if(released && held_ && in.busy) {release_pending_=true;held_=false;}
-        if(edge) {candidate_=!in.busy && !in.object_claim && in.trigger<=.35f && in.zone && in.empty && in.loaded;candidate_since_=in.now;}
-        if(!pressed || in.busy || in.object_claim || in.trigger>.35f || !in.zone || !in.empty || !in.loaded) candidate_=false;
+        const bool pick=in.drop_enabled && in.copy && (in.zone || in.copy_reach); // a dropped gun lies in the world: the squeeze takes it back
+        const bool eligible=!in.busy && !in.object_claim && in.trigger<=.35f && in.empty && (pick || (in.zone && in.loaded));
+        if(edge) {candidate_=eligible;candidate_since_=in.now;}
+        if(!pressed || !eligible) candidate_=false;
         if(candidate_ && in.draw_authorized && in.now>=candidate_since_ && in.now-candidate_since_>=100) {
-            out.action=Action::draw;held_=true;pending_=in.now;candidate_=false;
+            out.action=pick?Action::pickup:Action::draw;held_=true;pending_=in.now;candidate_=false;
         }
-        else if(released && held_) {held_=false;held_owner_=0;if(in.drawn || pending_) {out.action=Action::holster;pending_=0;}}
-        if(pressed && in.drawn && !in.busy && !rejected_ && out.action==Action::none) {if(!held_)held_owner_=0;held_=true;}
+        else if(released && held_) {held_=false;held_owner_=0;if(in.drawn || pending_) {
+            // away from the hip a gun in the hand leaves it (dual wield); a draw still pending, or the hip itself, holsters
+            if(in.drop_enabled && in.drawn && !in.zone) {out.action=Action::drop;dropped_=in.now;}
+            else out.action=Action::holster;
+            pending_=0;}}
+        // the gun the engine still reports drawn for a moment after a drop is not taken back by a new squeeze
+        if(pressed && in.drawn && !in.busy && !rejected_ && out.action==Action::none && (!dropped_ || in.now-dropped_>=500)) {if(!held_)held_owner_=0;held_=true;}
         if(held_ && pressed && in.drawn && in.release_owner)held_owner_=in.release_owner;
+        // As SwordGrip: a gun the game took out of a squeezing hand (a mantle: busy, the authored camera) is drawn again from the hip after the scene.
+        if(in.drawn && held_) had_=true;
+        if(!held_) had_=false;
+        if(out.action==Action::none && had_ && pressed && !in.drawn && !pending_ && !in.busy && in.empty && in.loaded && !in.object_claim && !in.copy) {
+            if(!lost_) lost_=in.now+1;
+            else if(in.now+1-lost_>=SwordGrip::restore_ms) {out.action=Action::draw;pending_=in.now;had_=false;lost_=0;}
+        } else lost_=0;
+        if(expect_since_) {
+            if(!pressed || in.drawn || in.now<expect_since_ || in.now-expect_since_>expect_give_up_ms) expect_since_=0;
+            else if(in.now-expect_since_>=expect_ms && out.action==Action::none && !pending_ && !in.busy && in.empty && in.loaded && !in.object_claim) {
+                out.action=Action::draw;out.expected=true;pending_=in.now;held_=true;expect_since_=0;
+            }
+        }
         out.owns=held_ || pending_ || in.drawn;out.reserved=candidate_;
         return out;
     }
     bool held() const noexcept {return held_;}
 private:
-    bool down_{},held_{},candidate_{},rejected_{},release_pending_{};std::uint64_t pending_{},candidate_since_{},held_owner_{};
+    bool down_{},held_{},candidate_{},rejected_{},release_pending_{},had_{};std::uint64_t pending_{},candidate_since_{},held_owner_{},dropped_{},lost_{},expect_since_{};
 };
 class WheelFaceButtons {
     unsigned blocked_{};bool wheel_{};

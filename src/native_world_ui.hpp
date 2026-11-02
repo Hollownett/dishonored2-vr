@@ -16,10 +16,14 @@ inline WorldUiKind world_ui_logic(std::uint32_t logic) noexcept {
     // nothing showed in the headset (v361).
     return logic==256?WorldUiKind::wheel:native_note_reader_logic(logic)?WorldUiKind::notes:logic==128 || logic==512 || logic==1024?WorldUiKind::journal:WorldUiKind::none;
 }
+// v729 bisect switch (off = the v723 dialogue path); v730: on, the boat flip was the cutscene camera smoothing, not the choices.
+inline constexpr bool narrative_world_ui=true;
 inline WorldUiKind world_ui_kind(std::string_view path) noexcept {
     if(path=="ui/quick_access_wheel.iggy") return WorldUiKind::wheel;
     if(path=="ui/notes.iggy") return WorldUiKind::notes;
-    if(path=="ui/journal.iggy" || path=="ui/choice_corvo.iggy" || path=="ui/choice_emily.iggy" ||
+    // v724 (world-ui-movies.jsonl, headset v723): the dialogue choices draw in ui/narrative.iggy, the only movie drawn under logic 512.
+    // It also carries subtitles, so begin_world_ui takes it under 512 only (NativeWorldUiDraw::narrative).
+    if(path=="ui/journal.iggy" || path=="ui/choice_corvo.iggy" || path=="ui/choice_emily.iggy" || (narrative_world_ui && path=="ui/narrative.iggy") ||
        path=="ui/corvo_blackmarket.iggy" || path=="ui/emily_blackmarket.iggy") return WorldUiKind::journal;
     return WorldUiKind::none;
 }
@@ -37,14 +41,17 @@ template<class Read> std::optional<NativeWorldUiOwner> native_world_ui_owner(Rea
     const auto manager=*root+0x18;
     const auto batches=list(read,manager+8,1024);
     if(!batches || !batches->packed_count) return {};
-    const auto batch=batches->data+(batches->packed_count-1)*32;
+    // v722: every batch, newest first. The match is exact (the file's own Iggy pointer), so an older batch can only add movies
+    // that are really drawing; a scripted scene can keep its choice movie below the newest batch.
+    for(std::uint32_t b=batches->packed_count;b-->0;) {
+    const auto batch=batches->data+b*32;
     const auto files=list(read,batch+0x10,64);
-    if(!files) return {};
+    if(!files) continue;
     for(std::uint32_t i=0;i<files->packed_count;++i) {
         const auto wrapper=files->data+i*0xde8;
         const auto file=value<std::uintptr_t>(read,wrapper);
         if(!file || !pointer(*file) || value<std::uintptr_t>(read,*file+0x1608)!=iggy) continue;
-        const auto state=native_menu_state(read,base,manager,wrapper);
+        const auto state=native_menu_state(read,base,manager,wrapper,true);
         const auto name=value<std::uintptr_t>(read,*file+0x1658);
         if(!state || !name || !*name) return {};
         NativeWorldUiOwner owner{*state,WorldUiKind::none,{}};
@@ -55,16 +62,40 @@ template<class Read> std::optional<NativeWorldUiOwner> native_world_ui_owner(Rea
         }
         if(!terminated) return {};
         owner.kind=world_ui_kind(owner.path.data());
-        const auto after=native_menu_state(read,base,manager,wrapper);
+        const auto after=native_menu_state(read,base,manager,wrapper,true);
         if(owner.kind==WorldUiKind::none || value<std::uintptr_t>(read,*file+0x1658)!=name ||
            value<std::uintptr_t>(read,*file+0x1608)!=iggy || !after || after->file!=state->file || after->player!=state->player) return {};
         return owner;
+    }
+    }
+    return {};
+}
+// v722 diagnostic: the movie path of the file that owns this Iggy object, in any batch, whatever its kind (none if not found).
+template<class Read> std::optional<std::array<char,96>> native_iggy_path(Read& read,std::uintptr_t base,std::uintptr_t iggy) {
+    using namespace rig;
+    const auto root=value<std::uintptr_t>(read,base+0x2274270);
+    if(!root || !pointer(*root)) return {};
+    const auto batches=list(read,*root+0x18+8,1024);
+    if(!batches) return {};
+    for(std::uint32_t b=batches->packed_count;b-->0;) {
+        const auto files=list(read,batches->data+b*32+0x10,64);
+        if(!files) continue;
+        for(std::uint32_t i=0;i<files->packed_count;++i) {
+            const auto file=value<std::uintptr_t>(read,files->data+i*0xde8);
+            if(!file || !pointer(*file) || value<std::uintptr_t>(read,*file+0x1608)!=iggy) continue;
+            const auto name=value<std::uintptr_t>(read,*file+0x1658);
+            std::array<char,96> out{};
+            if(!name || !*name) return out;
+            for(std::size_t j=0;j+1<out.size();++j) {if(!read(*name+j,&out[j],1) || !out[j]) {out[j]=0;break;}}
+            return out;
+        }
     }
     return {};
 }
 struct NativeWorldUiDraw {
     WorldUiKind kind{};
     std::uintptr_t file{},iggy{},color_descriptor{},depth_descriptor{};
+    bool narrative{}; // ui/narrative.iggy: a world panel only while the dialogue choices are open
 };
 inline bool native_world_ui_target_allowed(const NativeWorldUiDraw* scope,std::uintptr_t base,std::uintptr_t caller) noexcept {
     return scope && scope->kind!=WorldUiKind::none && base && caller==base+0x2dd632;
@@ -106,7 +137,7 @@ private:
         try {
             const auto owner=native_world_ui_owner(read_,base_,reinterpret_cast<std::uintptr_t>(iggy));
             if(owner) return {owner->kind,owner->menu.file,reinterpret_cast<std::uintptr_t>(iggy),
-                reinterpret_cast<std::uintptr_t>(color),reinterpret_cast<std::uintptr_t>(depth)};
+                reinterpret_cast<std::uintptr_t>(color),reinterpret_cast<std::uintptr_t>(depth),std::string_view(owner->path.data())=="ui/narrative.iggy"};
         } catch(...) {}
         return {};
     }

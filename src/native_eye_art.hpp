@@ -92,7 +92,7 @@ inline std::optional<NativeArtRect> native_art_rect(const XrView& eye,Vec3 point
 class NativeEyeArt {
     template<class T>using Ptr=Microsoft::WRL::ComPtr<T>;
     Ptr<ID3D11Device> device_;Ptr<ID3D11DeviceContext> context_;ContextState state_;
-    Ptr<ID3D11VertexShader> vs_;Ptr<ID3D11PixelShader> ps_;Ptr<ID3D11Buffer> constants_;
+    Ptr<ID3D11VertexShader> vs_;Ptr<ID3D11PixelShader> ps_,ps_key_,ps_unback_;Ptr<ID3D11Buffer> constants_;
     Ptr<ID3D11SamplerState> sampler_;Ptr<ID3D11RasterizerState> raster_;Ptr<ID3D11DepthStencilState> depth_;
     Ptr<ID3D11BlendState> premultiplied_,straight_;
     static void checked(HRESULT value){if(FAILED(value))throw std::runtime_error("Native eye artwork graphics operation failed");}
@@ -110,10 +110,23 @@ V VS(uint id:SV_VertexID){float2 c=float2(id&1,(id>>1)&1);V v;v.pos=float4(lerp(
 float4 PS(V v):SV_TARGET{float2 dx=ddx(v.uv),dy=ddy(v.uv);float4 c=0;
     [unroll]for(int i=0;i<4;++i)[unroll]for(int j=0;j<4;++j){float2 o=(float2(i,j)+.5)/4-.5;c+=nativeArt.SampleLevel(artSampler,v.uv+o.x*dx+o.y*dy,0);}
     return c/16;}
+// v721 dialogue choices: the movie's dim full-screen backdrop (dark, translucent) is keyed out so only the lit choice art stays.
+float4 PSKey(V v):SV_TARGET{float4 c=PS(v);const float lit=max(c.r,max(c.g,c.b))/max(c.a,1e-3);return c*smoothstep(.10,.22,lit);}
+// v763 hand wheel (user, headset v762: keyed by brightness the ring looked pale): the wheel movie lays a dim full-screen layer under its art,
+// premultiplied colour about (.046,.050,.056) at alpha .502 out to .85 of the half-diagonal, then a vignette to alpha 1 in the corners
+// (measured on world-ui-1). Un-composite it: the art's own coverage a=(alpha-bgA)/(1-bgA), its colour the premultiplied colour minus the
+// layer under it. The ring keeps its full brightness and opacity; only the layer goes.
+float4 PSUnback(V v):SV_TARGET{float4 c=PS(v);const float edge=smoothstep(.85,1.38,length((v.uv-.5)*2));
+    const float bgA=.502+.498*edge,a=saturate((c.a-bgA)/max(1-bgA,1e-3));
+    return float4(min(max(c.rgb-float3(.046,.050,.056)*lerp(1.,.6,edge)*(1-a),0),a),a);}
 )HLSL";
         Ptr<ID3DBlob> vs,ps,errors;checked(D3DCompile(source,sizeof(source)-1,nullptr,nullptr,nullptr,"VS","vs_5_0",D3DCOMPILE_ENABLE_STRICTNESS,0,&vs,&errors));
         checked(D3DCompile(source,sizeof(source)-1,nullptr,nullptr,nullptr,"PS","ps_5_0",D3DCOMPILE_ENABLE_STRICTNESS,0,&ps,&errors));
         checked(device_->CreateVertexShader(vs->GetBufferPointer(),vs->GetBufferSize(),nullptr,&vs_));checked(device_->CreatePixelShader(ps->GetBufferPointer(),ps->GetBufferSize(),nullptr,&ps_));
+        Ptr<ID3DBlob> key;checked(D3DCompile(source,sizeof(source)-1,nullptr,nullptr,nullptr,"PSKey","ps_5_0",D3DCOMPILE_ENABLE_STRICTNESS,0,&key,&errors));
+        checked(device_->CreatePixelShader(key->GetBufferPointer(),key->GetBufferSize(),nullptr,&ps_key_));
+        Ptr<ID3DBlob> unback;checked(D3DCompile(source,sizeof(source)-1,nullptr,nullptr,nullptr,"PSUnback","ps_5_0",D3DCOMPILE_ENABLE_STRICTNESS,0,&unback,&errors));
+        checked(device_->CreatePixelShader(unback->GetBufferPointer(),unback->GetBufferSize(),nullptr,&ps_unback_));
         D3D11_BUFFER_DESC b{};b.ByteWidth=32;b.BindFlags=D3D11_BIND_CONSTANT_BUFFER;b.Usage=D3D11_USAGE_DEFAULT;checked(device_->CreateBuffer(&b,nullptr,&constants_));
         D3D11_SAMPLER_DESC s{};s.Filter=D3D11_FILTER_MIN_MAG_MIP_LINEAR;s.AddressU=s.AddressV=s.AddressW=D3D11_TEXTURE_ADDRESS_CLAMP;s.MaxLOD=D3D11_FLOAT32_MAX;checked(device_->CreateSamplerState(&s,&sampler_));
         D3D11_RASTERIZER_DESC r{};r.FillMode=D3D11_FILL_SOLID;r.CullMode=D3D11_CULL_NONE;r.DepthClipEnable=TRUE;checked(device_->CreateRasterizerState(&r,&raster_));
@@ -122,7 +135,7 @@ float4 PS(V v):SV_TARGET{float2 dx=ddx(v.uv),dy=ddy(v.uv);float4 c=0;
         target.SrcBlendAlpha=D3D11_BLEND_ONE;target.DestBlendAlpha=D3D11_BLEND_INV_SRC_ALPHA;target.BlendOpAlpha=D3D11_BLEND_OP_ADD;target.RenderTargetWriteMask=D3D11_COLOR_WRITE_ENABLE_ALL;
         checked(device_->CreateBlendState(&blend,&premultiplied_));target.SrcBlend=D3D11_BLEND_SRC_ALPHA;checked(device_->CreateBlendState(&blend,&straight_));
     }
-    NativeEyeArtResult draw(ID3D11Texture2D* eye,ID3D11Texture2D* art,const D3D11_BOX& crop,NativeArtRect rect,DXGI_FORMAT format,bool premultiplied=true,DXGI_FORMAT source_format=DXGI_FORMAT_UNKNOWN){
+    NativeEyeArtResult draw(ID3D11Texture2D* eye,ID3D11Texture2D* art,const D3D11_BOX& crop,NativeArtRect rect,DXGI_FORMAT format,bool premultiplied=true,DXGI_FORMAT source_format=DXGI_FORMAT_UNKNOWN,bool keyed_replace=false,bool unback=false){ // unback: with keyed_replace, the wheel layer un-composited
         NativeEyeArtResult out{};
         const auto fail=[&out](HRESULT value,const char* call) {out.hr=value;out.call=call;return out;};
         if(!eye || !art || eye==art) {out.rejected=true;out.call="arguments";return out;}
@@ -159,11 +172,12 @@ float4 PS(V v):SV_TARGET{float2 dx=ddx(v.uv),dy=ddy(v.uv);float4 c=0;
         const std::array<float,8> data{rect.left,rect.top,rect.right,rect.bottom,static_cast<float>(crop.left)/a.Width,static_cast<float>(crop.top)/a.Height,static_cast<float>(crop.right)/a.Width,static_cast<float>(crop.bottom)/a.Height};
         context_->UpdateSubresource(constants_.Get(),0,nullptr,data.data(),0,0);
         D3D11_VIEWPORT viewport{0,0,static_cast<float>(e.Width),static_cast<float>(e.Height),0,1};context_->RSSetViewports(1,&viewport);context_->RSSetState(raster_.Get());
-        context_->IASetInputLayout(nullptr);context_->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);context_->VSSetShader(vs_.Get(),nullptr,0);context_->PSSetShader(ps_.Get(),nullptr,0);
+        context_->IASetInputLayout(nullptr);context_->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);context_->VSSetShader(vs_.Get(),nullptr,0);context_->PSSetShader(keyed_replace?(unback?ps_unback_.Get():ps_key_.Get()):ps_.Get(),nullptr,0);
         context_->GSSetShader(nullptr,nullptr,0);context_->HSSetShader(nullptr,nullptr,0);context_->DSSetShader(nullptr,nullptr,0);context_->OMSetDepthStencilState(depth_.Get(),0);
         context_->OMSetBlendState(premultiplied?premultiplied_.Get():straight_.Get(),nullptr,0xffffffff);
         auto* constant=constants_.Get();context_->VSSetConstantBuffers(0,1,&constant);auto* sampler=sampler_.Get();context_->PSSetSamplers(0,1,&sampler);auto* srv=input.Get();context_->PSSetShaderResources(0,1,&srv);
-        auto* rtv=output.Get();context_->OMSetRenderTargets(1,&rtv,nullptr);context_->Draw(4,0);
+        auto* rtv=output.Get();if(keyed_replace) {constexpr float clear[4]{};context_->ClearRenderTargetView(rtv,clear);}
+        context_->OMSetRenderTargets(1,&rtv,nullptr);context_->Draw(4,0);
         ID3D11ShaderResourceView* empty{};context_->PSSetShaderResources(0,1,&empty);context_->OMSetRenderTargets(0,nullptr,nullptr);
         out.drawn=true;return out;
     }

@@ -41,6 +41,10 @@ extern "C" MH_STATUS WINAPI MH_DisableHook(LPVOID);
 #include "native_held_object.hpp"
 #include "native_player_depth.hpp"
 #include "native_weapon_hands.hpp"
+#include "native_quick_health.hpp"
+#include "native_ranged_fire.hpp"
+#include "native_gadget_drop.hpp"
+#include "npc_weapon_pickup.hpp"
 #include "native_door_interaction.hpp"
 #include "native_slash_scene_rate.hpp"
 #include "native_takedown.hpp"
@@ -1057,6 +1061,13 @@ class NativeInteractionAim {
             if(const auto arms=arm_show_.exchange(0)) {if(self->active_ && self->logic_()==2) try {NativeHeldObject::show_arms(self->base_,self->read_,arms);} catch(...) {}}
             // Full-grip sword: equip requests from the input thread and the dropped copy (native_weapon_hands.hpp).
             if(self->logic_()==2) try {NativeWeaponHands::service(self->base_,self->read_);} catch(...) {}
+            if(self->logic_()==2 && NativeWeaponHands::dual_wield()) { // dual wield, two active hands (docs/dual-wield-two-hands-plan.md)
+                try {NativeRangedFire::service(self->base_,self->read_);} catch(...) {}
+                try {NativeGadgetDrop::service(self->base_,self->read_); // v783: a thrown gadget striking a guard stuns him (as a bottle)
+                     for(const auto& f:NativeGadgetDrop::flights()) if(int fault{};f.struck && NativeWeaponHands::thrown_stun(self->base_,self->read_,f.from,f.to,f.axis,.08,f.speed,f.entity,f.id,*f.struck,fault))
+                         ++NativeWeaponHands::gadget_hits;} catch(...) {}
+                try {NpcWeaponPickup::service(self->base_,self->read_);} catch(...) {}
+            } else if(self->logic_()==2 && NpcWeaponPickup::teardown_pending()) try {NpcWeaponPickup::service(self->base_,self->read_);} catch(...) {} // shows what it hid
             // The held object's collision layer is serviced every frame (restore on clear, then DEBRIS while held), apart from its render scale.
             // Released object height watch (status "release_watch"): z at a real throw/drop's restore, minimum and last over the next 3 s.
             // Game Z is up. Read-only; it stops when the entity id and body handle no longer validate.
@@ -1083,6 +1094,9 @@ class NativeInteractionAim {
                 } else release_watch_entity_=0;
             } catch(...) {}
             {const auto held=held_world_.exchange(0);if(self->active_ && self->logic_()==2) try {NativeHeldObject::service_hold_layers(self->base_,self->read_,held);if(held) NativeHeldObject::world_render(self->base_,self->read_,held);} catch(...) {}}
+            for(auto& arm_slot:arm_world_) {const auto arm=arm_slot.exchange(0);if(arm && self->active_ && self->logic_()==2) try {NativeHeldObject::world_render(self->base_,self->read_,arm);} catch(...) {}}
+            if(quick_health_.exchange(false) && self->active_ && self->logic_()==2) try {
+                const auto r=NativeQuickHealth::consume(self->base_,self->read_);++quick_health_counts[static_cast<unsigned>(r)%6];quick_health_result_=static_cast<int>(r);} catch(...) {}
             double probe_distance{};{std::lock_guard<std::mutex> guard(trace_mutex_);probe_distance=trace_distance_;trace_distance_=0;}
             if(probe_distance!=0) { // negative: straight down (game Z up)
                 std::string out="trace: ";
@@ -1314,6 +1328,8 @@ public:
     inline static std::atomic<unsigned> arm_show_{};
     static void request_arm_show(unsigned mask) noexcept {arm_show_|=mask;}
     inline static std::atomic<std::uintptr_t> held_world_{};
+    inline static std::array<std::atomic<std::uintptr_t>,2> arm_world_{}; // v776: a tracked arm the engine turned into a view-model (Block), drawn in the world again
+    inline static std::atomic<bool> quick_health_{};inline static std::atomic<int> quick_health_result_{}; // v780: B -> a health elixir (request_quick_health)
     inline static std::uintptr_t release_watch_entity_{};inline static std::uint32_t release_watch_id_{},release_watch_handle_{};inline static std::uint64_t release_watch_until_{};
 public:
     inline static std::atomic<float> release_watch_z0_{},release_watch_min_{},release_watch_last_{};inline static std::atomic<std::uint64_t> release_watches_{};
@@ -1324,6 +1340,11 @@ public:
     }
 public:
     static void request_held_world(std::uintptr_t entity) noexcept {held_world_=entity;}
+    static void request_arm_world(unsigned side,std::uintptr_t entity) noexcept {arm_world_[side&1u]=entity;}
+    // v780: B drinks a health elixir (NativeQuickHealth, the game's own quick use) on the game thread; the result comes back once (haptics).
+    static void request_quick_health() noexcept {quick_health_=true;}
+    static int take_quick_health_result() noexcept {return quick_health_result_.exchange(0);}
+    inline static std::array<std::atomic<std::uint64_t>,6> quick_health_counts{}; // by NativeQuickHealth::Result
     static void request_console(const std::string& line) {std::lock_guard<std::mutex> guard(trace_mutex_);if(console_lines_.size()<32) console_lines_.push_back(line);}
     static std::string take_trace_result() {std::lock_guard<std::mutex> guard(trace_mutex_);std::string r;r.swap(trace_result_);return r;}
 private:
@@ -2793,7 +2814,7 @@ public:
             try {
                 std::lock_guard<std::mutex> lock(trace_mutex_);
                 console_lines_.clear();sword_contacts_.clear();impact_fx_.clear();trace_distance_=0;
-                arm_show_=0;held_world_=0;
+                arm_show_=0;held_world_=0;for(auto& arm_slot:arm_world_) arm_slot=0;quick_health_=false;
                 nonlethal_grip_reserved_=false;
             } catch(...) {return false;}
             stopping_=false;

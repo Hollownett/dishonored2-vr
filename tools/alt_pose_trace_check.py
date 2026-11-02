@@ -10,6 +10,13 @@ Rows (see dxgi_probe.cpp, alt_pose_trace_*):
                                                                       image is on screen at `display` (presented + 1)
   present,display,display,eye,px..qw,fl..fd,,...,tracked,fresh        the layer submitted at that Present for that eye (fresh: the one eye rendered
                                                                       for this Present in alternate mode, -1 = both eyes, a paired frame)
+  pass,presented,display,eye,,...,kind,                               (v790) a temporal pass of the alternate single view: the eye it ran as (its
+                                                                      history, jitter and FSR/DLSS context) and the display frame of the receipt it
+                                                                      was planned from; kind 1 native TAA, 2 FSR/DLSS, 3 post-tonemap upscale
+
+Temporal passes (alternate mode): a pass recorded while the counter reads c processes the image begun in that interval, shown at c+1. Its
+receipt must be that image's (display c+1, not the next Setup's c+2), and its eye must be the fresh eye of Present c+1; otherwise that eye's
+history, jitter and upscaler context were fed the other eye's view.
 
 One-eye Presents (alternate mode, fresh >= 0), for each tracked Present P:
   1. the Begin shown at P rendered the game pose the Setup FOR P wrote (image <-> Setup link; proves the pipeline depth);
@@ -36,6 +43,40 @@ POSE_TOL = 1e-6       # XR units; the values are copied, not computed
 GAME_TOL = 1e-3       # game units; the render copy is the engine's own copy of what the Setup wrote
 
 
+PASS_KINDS = {1: "taa", 2: "upscaler", 3: "post_tonemap"}
+
+
+def parse_passes(path):
+    with open(path, newline="") as handle:
+        return [row for row in csv.DictReader(handle) if row["event"] == "pass" and not any(v is None for v in row.values())]
+
+
+def check_passes(passes, presents, failures, first):
+    """Each pass against the fresh eye of the Present that shows the image begun in its interval (presented + 1)."""
+    counts = defaultdict(int)
+    for p in passes:
+        c, d, e = int(p["presented"]), int(p["display"]), int(p["eye"])
+        kind = PASS_KINDS.get(int(p["tracked"] or 0), "kind" + p["tracked"])
+        shown = c + 1
+        layers = presents.get(shown, {})
+        if len(layers) != 2 or layers[0]["tracked"] != "1" or int(layers[0]["fresh"]) < 0:
+            counts["unjoined"] += 1   # no tracked one-eye Present for it (a paired refresh, a dropped frame, the end of the trace)
+            continue
+        fresh = int(layers[0]["fresh"])
+        counts["checked"] += 1
+        counts["%s eye %d" % (kind, fresh)] += 1
+        problems = []
+        if d != shown:
+            problems.append("pass_receipt_is_the_next_setup" if d == shown + 1 else "pass_receipt_is_for_display%+d" % (d - shown))
+        if e != fresh:
+            problems.append("pass_eye_differs_from_shown_eye")
+            counts["%s eye %d ran as the other eye" % (kind, fresh)] += 1
+        for name in problems:
+            failures[name] += 1
+            first.setdefault(name, shown)
+    return counts
+
+
 def parse(path):
     setups, begins, presents = {}, {}, defaultdict(dict)
     with open(path, newline="") as handle:
@@ -50,7 +91,13 @@ def parse(path):
                 begins.setdefault(int(row["display"]), []).append(row)
             elif event == "present":
                 presents[int(row["display"])][int(row["eye"])] = row
+            elif event == "companion":   # v792: the other eye's view at a one-view Setup (its stale image is warped to it)
+                COMPANIONS.setdefault(int(row["display"]), {})[int(row["eye"])] = row
     return setups, begins, presents
+
+
+COMPANIONS = {}
+WARPED = defaultdict(int)   # per stale eye: layers carrying the companion view (warped) and the kept view (not warped)
 
 
 def floats(row, keys):
@@ -86,6 +133,8 @@ def quantiles(values):
 
 
 def check(path, verbose=False):
+    COMPANIONS.clear()
+    WARPED.clear()
     setups, begins, presents = parse(path)
     by_game = defaultdict(dict)   # rounded game pose -> {display: eyes} of the Setups that wrote it (for naming the Setup a Begin did render)
     for d in setups:
@@ -175,14 +224,20 @@ def check(path, verbose=False):
                 # 3. the fresh layer carries the Setup's XR pose and FOV
                 if not close(floats(layers[fresh], XR_KEYS), floats(s, XR_KEYS), POSE_TOL):
                     problems.append("fresh_layer_pose_differs_from_setup")
-                # 4. the other layer carries that eye's latest earlier Setup
+                # 4. the other layer carries that eye's latest earlier Setup, or (v792 warp) the companion view recorded with this
+                #    Present's Setup: the same head pose as the fresh layer
                 other = 1 - fresh
                 earlier = latest_earlier(other, display)
                 other_setup = setups[earlier][other] if earlier is not None else None
-                if other_setup is None:
+                companion = COMPANIONS.get(display, {}).get(other)
+                if companion is not None and close(floats(layers[other], XR_KEYS), floats(companion, XR_KEYS), POSE_TOL):
+                    WARPED["eye %d warped" % other] += 1
+                elif other_setup is None:
                     problems.append("no_earlier_setup_for_stale_eye")
                 elif not close(floats(layers[other], XR_KEYS), floats(other_setup, XR_KEYS), POSE_TOL):
                     problems.append("stale_layer_pose_differs_from_its_setup")
+                else:
+                    WARPED["eye %d kept view" % other] += 1
                 if earlier is not None and display - earlier > 2:
                     problems.append("stale_eye_older_than_two_frames")
             # the eye of the Setup recorded for this Present must be the fresh eye (a view promoted for the wrong eye)
@@ -196,8 +251,15 @@ def check(path, verbose=False):
             first.setdefault(p, display)
         if verbose and problems:
             print("present %d fresh %d: %s" % (display, fresh, ", ".join(problems)))
+    pass_counts = check_passes(parse_passes(path), presents, failures, first)
     bad = sum(failures.values())
     print("alt-pose-trace: %d tracked one-eye Presents and %d tracked paired Presents checked, %d mismatches" % (checked, paired_checked, bad))
+    if pass_counts:
+        print("  temporal passes: %d checked against the eye shown, %d unjoined; %s" % (
+            pass_counts.pop("checked", 0), pass_counts.pop("unjoined", 0),
+            ", ".join("%s %d" % kv for kv in sorted(pass_counts.items())) or "none"))
+    if WARPED:
+        print("  stale layers: " + ", ".join("%s %d" % kv for kv in sorted(WARPED.items())))
     if paired_checked:
         print("  paired: %d of %d Presents distinguishable (the Setup for P and for P+1 differ in XR pose)" % (distinguishable, paired_checked))
         print("  paired layer-vs-image pose error: orientation deg %s; position mm %s" % (quantiles(deg_errors), quantiles(mm_errors)))

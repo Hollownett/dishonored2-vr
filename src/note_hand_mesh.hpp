@@ -3,6 +3,7 @@
 #include "note_reading.hpp"
 #include "rig_transform.hpp"
 #include <istream>
+#include <memory>
 #include <numeric>
 
 namespace d2vr::note_hand {
@@ -123,6 +124,18 @@ inline Geometry skin_xr(const Mesh& mesh,const Inverse& inverse,const std::array
         for(auto index:surface.indices) {if(index>=surface.vertices.size())throw std::invalid_argument("Invalid XR note triangle");result.indices.push_back(offset+index);}
     }
     return result;
+}
+// The skinned triangles as one flat XR-space list (NoteHandReceipt::triangles): the occluder a note page or the hand wheel's ring is drawn behind.
+inline std::shared_ptr<const std::vector<Vec3>> triangles(const Geometry& geometry) {
+    auto out=std::make_shared<std::vector<Vec3>>();out->reserve(geometry.indices.size());
+    for(auto index:geometry.indices)out->push_back(geometry.vertices.at(index));
+    return out;
+}
+// v776: an occluder is trusted only where its hand is (a wrong world->XR mapping would put it elsewhere): some vertex lies within radius of the grip.
+inline bool at_hand(const std::vector<Vec3>& triangles,Vec3 grip,double radius) {
+    if(!finite(grip) || !(radius>0))return false;
+    for(const auto& p:triangles)if(length(p-grip)<=radius)return true;
+    return false;
 }
 inline Geometry skin(const Mesh& mesh,const Inverse& inverse,const std::array<rig::Transform,69>& palette,
         const std::array<float,15>& model_frame,const NoteViewMapping& mapping) {

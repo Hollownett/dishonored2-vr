@@ -2,6 +2,7 @@
 // Track T item B: the left hand's aim pose for the mine / spring razor placement ray and the grenade throw-preview sensor.
 // Pure: a pose with a freshness window, and a scoped value swap over raw float3 fields (write the hand's values, run the native
 // sensor, restore exactly what was there). The native hooks live in native_gadget_aim.hpp.
+#include "tracked_pose.hpp"
 #include <array>
 #include <cmath>
 #include <cstdint>
@@ -22,7 +23,17 @@ struct GadgetAimPose {
 };
 inline constexpr std::uint64_t gadget_aim_fresh_ms=100;
 // The palm placement ray starts this far behind the palm (a hand pressed a little into a wall still finds its face) and reaches this far.
-inline constexpr double mine_palm_back_m=.10,mine_palm_reach_m=.35;
+// v779 (user, headset v778: "make placing a mine a bit easier, more forgiving"): 50 cm in front of the palm (was 25).
+inline constexpr double mine_palm_back_m=.10,mine_palm_reach_m=.60;
+// The placement ray out of the palm of `side` (0 left, 1 right) whose grip frame is `hand`. v776 (headset v775: a mine could never be placed with the right
+// hand): the frame's left axis points out of the back of the left hand and out of the right palm (selection_policy.hpp palm_probe: the palm faces -left on
+// side 0 and +left on side 1), so the ray's sign follows the hand that holds the mine.
+inline void gadget_palm_ray(GadgetAimPose& pose,unsigned side,const WorldTrackedPose& hand) noexcept {
+    const Vec3 palm=side&1u?hand.basis[1]:hand.basis[1]*-1.,from=hand.position-palm*mine_palm_back_m;
+    pose.place_origin={static_cast<float>(from.x),static_cast<float>(from.y),static_cast<float>(from.z)};
+    pose.place_dir={static_cast<float>(palm.x),static_cast<float>(palm.y),static_cast<float>(palm.z)};
+    pose.place_length=static_cast<float>(mine_palm_reach_m);
+}
 // Placement follows a valid palm without the trigger; ThrowHit runs even when idle and still needs the trigger.
 inline bool gadget_aim_wanted(const GadgetAimPose& pose,bool placement) noexcept {return placement?pose.placement_valid:pose.trigger;}
 inline bool gadget_aim_fresh(const GadgetAimPose& pose,std::uint64_t now) noexcept {return pose.tick && now>=pose.tick && now-pose.tick<=gadget_aim_fresh_ms && pose.valid();}

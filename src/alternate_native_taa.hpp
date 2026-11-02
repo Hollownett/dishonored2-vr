@@ -61,11 +61,14 @@ class Runtime {
     }
 public:
     std::atomic<bool> failed{false};
+    // v794: which check ended temporal ownership (the n-th failure site in this class; 0 = none), for the log and the status.
+    std::atomic<int> failure_site{0};
+    void failed_at(int site) noexcept {failure_site=site;failed=true;}
     std::atomic<std::uintptr_t> single_view{0};
     std::atomic<std::uint64_t> completed{0},admitted{0},rejected{0},resets{0};
     // Configure, clear, retire, plan, seed, finish and abort are Setup-owner-only.
     void configure(Read read,Write write) {
-        read_=read;write_=write;failed=false;completed=admitted=rejected=resets=0;
+        read_=read;write_=write;failed=false;failure_site=0;completed=admitted=rejected=resets=0;
         clear();single_view=0;
     }
     // Recovery/Present handoff: immediately revoke receipts, never mutate the live Setup transaction.
@@ -79,9 +82,9 @@ public:
     }
     // The owner calls this only after intentionally selecting the paired path.
     void retire() {cancel_plan();clear();single_view=0;}
-    void fail(std::uintptr_t view) noexcept {single_view=view;failed=true;}
+    void fail(std::uintptr_t view) noexcept {single_view=view;failed_at(1);}
     std::optional<std::uint32_t> plan(const Key& key) {
-        if(seeded_) {abort();failed=true;return std::nullopt;}
+        if(seeded_) {abort();failed_at(2);return std::nullopt;}
         consume_invalidation();pending_.reset();
         if(failed || !read_ || !write_ || !read_snapshot(read_,key.view,saved_) ||
             !read_(key.view+stamp_offset,&saved_stamp_,4) || !read_(key.view+reset_offset,&saved_reset_,1)) return std::nullopt;
@@ -91,47 +94,47 @@ public:
         if(history_.generation()!=generation) {std::lock_guard<std::mutex> lock(book_mutex_);book_.reset();++resets;}
         return pending_->phase;
     }
-    void cancel_plan() {if(seeded_) {abort();failed=true;} else pending_.reset();}
+    void cancel_plan() {if(seeded_) {abort();failed_at(3);} else pending_.reset();}
     bool planned() const noexcept {return pending_.has_value();}
     bool needs_reset() const noexcept {return pending_ && pending_->reset && !pending_->duplicate;}
     bool seed(std::uintptr_t view) {
         if(!pending_ || pending_->key.view!=view || failed) return false;
         single_view=view;
-        if(!transaction_valid()) {abort();failed=true;return false;}
+        if(!transaction_valid()) {abort();failed_at(4);return false;}
         const auto& p=*pending_;
         if(p.has_previous && !p.duplicate && saved_stamp_==p.key.native_counter) {fail(view);return false;}
         seeded_=true;single_view=view;
-        if(p.has_previous && !write_current(view,p.previous,saved_stamp_!=p.key.native_counter)) {abort();failed=true;return false;}
-        if(p.reset) {const unsigned char one=1;if(!write_(view+reset_offset,&one,1)) {abort();failed=true;return false;}}
-        if(!transaction_valid()) {abort();failed=true;return false;}
+        if(p.has_previous && !write_current(view,p.previous,saved_stamp_!=p.key.native_counter)) {abort();failed_at(5);return false;}
+        if(p.reset) {const unsigned char one=1;if(!write_(view+reset_offset,&one,1)) {abort();failed_at(6);return false;}}
+        if(!transaction_valid()) {abort();failed_at(7);return false;}
         return true;
     }
     void finish(std::uintptr_t view) {
         if(!seeded_ || !pending_ || pending_->key.view!=view) {cancel_plan();return;}
-        if(!transaction_valid()) {abort();failed=true;return;}
+        if(!transaction_valid()) {abort();failed_at(8);return;}
         const auto p=*pending_;Snapshot current{};std::uint32_t stamp{};
-        if(!read_snapshot(read_,view,current) || !read_(view+stamp_offset,&stamp,4) || stamp!=p.key.native_counter) {abort();failed=true;return;}
+        if(!read_snapshot(read_,view,current) || !read_(view+stamp_offset,&stamp,4) || stamp!=p.key.native_counter) {abort();failed_at(9);return;}
         // Native reset copies current matrices/position, but does not reset jitter. Keep its own initialization coherent.
-        if(p.reset && !write_(view+previous_jitter_offset,current.jitter.data(),8)) {abort();failed=true;return;}
+        if(p.reset && !write_(view+previous_jitter_offset,current.jitter.data(),8)) {abort();failed_at(10);return;}
         const auto& expected=p.has_previous?p.previous:current;
         for(std::size_t i=0;i<3;++i) {
             std::array<float,16> previous{};
-            if(!read_(view+previous_matrix_offsets[i],previous.data(),64) || previous!=expected.matrices[i]) {abort();failed=true;return;}
+            if(!read_(view+previous_matrix_offsets[i],previous.data(),64) || previous!=expected.matrices[i]) {abort();failed_at(11);return;}
         }
         std::array<float,3> previous_position{};std::array<float,2> previous_jitter{};
         if(!read_(view+previous_position_offset,previous_position.data(),12) || previous_position!=expected.position ||
-            !read_(view+previous_jitter_offset,previous_jitter.data(),8) || previous_jitter!=expected.jitter) {abort();failed=true;return;}
+            !read_(view+previous_jitter_offset,previous_jitter.data(),8) || previous_jitter!=expected.jitter) {abort();failed_at(12);return;}
         const auto receipt=history_.complete(p,current);
         bool published=false;
         {std::lock_guard<std::mutex> lock(book_mutex_);published=transaction_valid() && receipt && book_.publish(*receipt);}
-        if(!published) {++rejected;abort();failed=true;return;}
+        if(!published) {++rejected;abort();failed_at(13);return;}
         ++completed;seeded_=false;pending_.reset();
     }
     void abort() {
         if(seeded_ && pending_) {
             std::uint32_t stamp{};const auto view=pending_->key.view;
             if(read_(view+stamp_offset,&stamp,4) && stamp==saved_stamp_) {
-                if(!write_current(view,saved_,true) || !write_(view+reset_offset,&saved_reset_,1)) failed=true;
+                if(!write_current(view,saved_,true) || !write_(view+reset_offset,&saved_reset_,1)) failed_at(14);
             }
         }
         clear(); // Preserve classification throughout rollback, including already queued worker passes.

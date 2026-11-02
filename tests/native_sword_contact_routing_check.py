@@ -58,7 +58,7 @@ def check(source: str, consumer: str) -> None:
     assert "const bool sword_controls_live=logic==2 && input.active && controls_focus && !input.menu_modifier && !x_wheel.wheel() &&" in source
     assert "!input.lean_suspended && !authored_camera && (game_xr->grip_tracked_hands&2u)!=0 &&" in source
     assert "sword_pose_tick && sword_hand_tick>=sword_pose_tick && sword_hand_tick-sword_pose_tick<=100 &&" in source
-    assert "(hand_weapon_bits&2u)!=0 && !hand_holding_object && !hand_carrying_bits;" in source
+    assert "(hand_weapon_bits&2u)!=0 && !(hand_holding_object && (hand_hold_side&1u)==mh) && !hand_carrying_bits;" in source
     assert "publish_sword_pose_epoch(game_xr->pose_epoch())" in source
     for fragment in (
         "contacts.swap(sword_contacts_)", "!melee_batch_current(melee_revision)",
@@ -151,10 +151,10 @@ int main() {
     xr.grip_tracked_hands=0;assert(!controls_gate());xr.grip_tracked_hands=2;
     sword_pose_tick=899;assert(!controls_gate());sword_pose_tick=1001;assert(!controls_gate());sword_pose_tick=1000;
     logic=4;assert(!controls_gate());logic=2;assert(controls_gate());
-    std::uint64_t hand_state_tick=1000;unsigned hand_weapon_bits=2,hand_carrying_bits=0;bool hand_holding_object=false;
+    std::uint64_t hand_state_tick=1000;unsigned hand_weapon_bits=2,hand_carrying_bits=0;bool hand_holding_object=false;unsigned hand_hold_side=1,mh=1;
     const auto native_gate=[&] {return @NATIVE@;};assert(native_gate());
     hand_weapon_bits=0;assert(!native_gate());hand_weapon_bits=2;
-    hand_holding_object=true;assert(!native_gate());hand_holding_object=false;
+    hand_holding_object=true;assert(!native_gate());hand_hold_side=0;assert(native_gate());hand_hold_side=1;hand_holding_object=false;
     hand_carrying_bits=2;assert(!native_gate());hand_carrying_bits=0;
     hand_state_tick=699;assert(!native_gate());hand_state_tick=700;assert(native_gate());hand_state_tick=1001;assert(!native_gate());hand_state_tick=1000;
     assert(native_gate() && controls_gate());

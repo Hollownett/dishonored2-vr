@@ -12,6 +12,15 @@ static std::array<unsigned char,4> pixel(ID3D11Device* device,ID3D11DeviceContex
     std::memcpy(result.data(),static_cast<const unsigned char*>(mapped.pData)+y*mapped.RowPitch+x*4,4);context->Unmap(staging.Get(),0);return result;
 }
 int main(){
+    { // v713: three messages drawn every frame (headset v712: the rune hint, the counter-serum message) each keep their own slot
+        d2vr::NativeMessageSlots slots;std::array<unsigned,3> first{};
+        for(UINT64 t=1000;t<1200;t+=16)for(unsigned m=0;m<3;++m){const auto pick=slots.assign(10+m,t);assert(pick);
+            if(t==1000)first[m]=pick->slot;assert(pick->slot==first[m] && pick->fresh==(t==1000));}
+        assert(first[0]!=first[1] && first[1]!=first[2] && first[0]!=first[2]);
+        for(unsigned m=3;m<4;++m)assert(slots.assign(10+m,1200));          // a fourth still fits
+        assert(!slots.assign(20,1200));                                      // a fifth never takes a drawn one's slot
+        const auto later=slots.assign(20,1600);assert(later && later->fresh); // idle >300 ms: reused
+    }
     Ptr<ID3D11Device> device;Ptr<ID3D11DeviceContext> context,deferred;
     assert(SUCCEEDED(D3D11CreateDevice(nullptr,D3D_DRIVER_TYPE_WARP,nullptr,0,nullptr,0,D3D11_SDK_VERSION,&device,nullptr,&context)));
     assert(SUCCEEDED(device->CreateDeferredContext(0,&deferred)));

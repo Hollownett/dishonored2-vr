@@ -97,8 +97,10 @@ def check(probe: str, xr: str) -> None:
     upload = fn(probe, "void invoke_arm_upload(void* model,const void* source,UINT count,FullHandUploadWork* contact) {")
     assert "static bool legacy_cutscene_hands=true;" in probe and "static bool hide_cutscene_avatar=false;" in probe
     assert "const auto cutscene_avatar=d2vr::cutscene_avatar_policy(upload_logic==d2vr::cinematic_logic_mask,legacy_cutscene_hands,hide_cutscene_avatar);" in upload
-    assert "(upload_logic==256 || cutscene_avatar.native_animation);" in upload
-    assert "const bool hide_avatar=upload_logic==256 || cutscene_avatar.hidden;" in upload
+    # v776 (headset v775): the head-front wheel hides the avatar as before; the dual-wield hand wheel (dual_wield_on) keeps it and its tracked arms.
+    assert "const bool wheel_hidden=d2vr::rig::wheel_hides_avatar(upload_logic,dual_wield_on());" in upload
+    assert "(wheel_hidden || cutscene_avatar.native_animation);" in upload
+    assert "const bool hide_avatar=wheel_hidden || cutscene_avatar.hidden;" in upload
     assert "bool full=full_body_requested && !wheel" in upload  # a cutscene never runs the tracked full body
     assert "if(wheel && body_source) {" in upload and upload.count("if(hide_avatar) {") == 2
     assert upload.count("d2vr::rig::hide_wheel_avatar(") == 2  # body + each arm, both behind hide_avatar
@@ -145,7 +147,8 @@ def check(probe: str, xr: str) -> None:
     # the pair readiness and textures are decided before the classification; the hold comes after it
     assert block.index("if(pair_ready) {completed_left=mono_path?paired_backbuffer:paired_left;completed_right=paired_backbuffer;}") < block.index("bool cutscene_immersive=false")
     assert block.index("record_rendered_view(slot_eye,") < block.index("bool cutscene_immersive=false")
-    assert "bool cutscene_paired_path() noexcept {return xr_requested && paired_requested && eye_boundary_requested && native_eye_capture_requested && mono_view_state.load()!=1;}" in probe
+    # v801: alternate-eye pairs every frame outside free gameplay, so its cutscenes are immersive; perf-mono never pairs
+    assert "bool cutscene_paired_path() noexcept {return xr_requested && paired_requested && eye_boundary_requested && native_eye_capture_requested && (mono_view_state.load()!=1 || alternate_on());}" in probe
     call = block[block.index("game_xr->present(completed_left.Get(),completed_right.Get(),"):]
     call = call[:call.index(";")]
     assert "gameplay,authored_camera || cutscene_immersive,game_logic_mask()==4," in call and call.endswith("game_logic_mask()==32,cutscene_immersive)"), call

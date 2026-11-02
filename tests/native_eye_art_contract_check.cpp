@@ -80,6 +80,27 @@ int main() {
         require(compositor.draw(nullptr,art.Get(),crop,{-1,-1,0,0},DXGI_FORMAT_R8G8B8A8_UNORM_SRGB).rejected,"A missing eye is rejected");
         require(compositor.draw(eye.Get(),art.Get(),D3D11_BOX{0,0,0,128,128,1},{-1,-1,0,0},DXGI_FORMAT_R8G8B8A8_UNORM_SRGB).rejected,"A crop outside the art is rejected");
         std::cout<<"PASS: argument refusals are reported, nothing throws\n";
+
+        // v721 dialogue choices: a keyed replace clears the target, drops the dim translucent backdrop and keeps the lit art.
+        {
+            std::array<unsigned char,64*64*4> choice{};
+            for(std::size_t i=0;i<choice.size();i+=4) {const bool lit=(i/4)%64<32;   // left half lit (premultiplied white), right half backdrop
+                choice[i]=choice[i+1]=choice[i+2]=lit?240:8;choice[i+3]=lit?255:150;}
+            D3D11_SUBRESOURCE_DATA data{};data.pSysMem=choice.data();data.SysMemPitch=64*4;
+            ComPtr<ID3D11Texture2D> source;require(SUCCEEDED(device->CreateTexture2D(&art_desc,&data,&source)),"Choice source");
+            {D3D11_RENDER_TARGET_VIEW_DESC rt{};rt.Format=DXGI_FORMAT_R8G8B8A8_UNORM;rt.ViewDimension=D3D11_RTV_DIMENSION_TEXTURE2D;const float red[4]{1,0,0,1};
+             ComPtr<ID3D11RenderTargetView> rtv;require(SUCCEEDED(device->CreateRenderTargetView(eye.Get(),&rt,&rtv)),"Choice RTV");context->ClearRenderTargetView(rtv.Get(),red);}
+            const auto keyed=compositor.draw(eye.Get(),source.Get(),crop,{-1,1,1,-1},DXGI_FORMAT_R8G8B8A8_UNORM_SRGB,true,DXGI_FORMAT_R8G8B8A8_UNORM,true);
+            require(keyed.drawn,"Keyed choice draw");
+            D3D11_TEXTURE2D_DESC desc{};eye->GetDesc(&desc);desc.Usage=D3D11_USAGE_STAGING;desc.BindFlags=0;desc.CPUAccessFlags=D3D11_CPU_ACCESS_READ;
+            ComPtr<ID3D11Texture2D> readback;require(SUCCEEDED(device->CreateTexture2D(&desc,nullptr,&readback)),"Choice readback");
+            context->CopyResource(readback.Get(),eye.Get());D3D11_MAPPED_SUBRESOURCE mapped{};require(SUCCEEDED(context->Map(readback.Get(),0,D3D11_MAP_READ,0,&mapped)),"Map choice");
+            const auto* row=static_cast<const unsigned char*>(mapped.pData)+20*mapped.RowPitch;
+            const bool lit_kept=row[8*4]>200 && row[8*4+3]>200,backdrop_gone=row[50*4+3]==0 && row[50*4]==0; // the old red clear is gone too
+            context->Unmap(readback.Get(),0);
+            require(lit_kept && backdrop_gone,"The lit choice art stays and the backdrop is keyed out");
+            std::cout<<"PASS: dialogue choice backdrop keyed out, lit art kept\n";
+        }
         return 0;
     } catch(const std::exception& error) {std::cerr<<error.what()<<'\n';return 1;}
 }

@@ -11,6 +11,7 @@ namespace d2vr {
 // mode the kept image must use its own receipt, never the latest opposite eye.
 struct EyeReticle {
     float x{},y{};std::uint64_t frame{},epoch{},reference{},tick{};bool valid{};
+    float depth{}; // v796: metres ahead of the camera it was projected for (0: unknown); the stale-eye parallax warp moves it at that distance
 };
 class EyeReticleFrames {
     std::array<std::array<EyeReticle,4>,2> slots_{};

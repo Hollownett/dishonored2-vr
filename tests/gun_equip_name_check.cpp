@@ -16,6 +16,7 @@ int main() {
     expect(!is_barrel_equip_name("GunEquip") && !is_barrel_equip_name("Power_Pistol") && !is_barrel_equip_name("Empty"),"broad decl names never reroute a power");
     expect(is_power_equip_name("Blink") && is_power_equip_name("FarReach") && is_power_equip_name("DarkVision"),"powers draw the player's fingers");
     expect(!is_power_equip_name("Gun") && !is_power_equip_name("Crossbow") && !is_power_equip_name("Grenade") && !is_power_equip_name("StunMine") && !is_power_equip_name("Heart") && !is_power_equip_name("Empty") && !is_power_equip_name(""),"held models keep the authored grip");
+    expect(is_heart_equip_name("Heart") && is_heart_equip_name("heart_equipment") && !is_heart_equip_name("Gun") && !is_heart_equip_name("Grenade") && !is_heart_equip_name("Blink") && !is_heart_equip_name("Empty") && !is_heart_equip_name(""),"v776: the Heart binds to its own tag");
     AimEquipTracker tracker;
     expect(tracker.update(1,10,"Gun") && tracker.revision()==1,"first weapon");
     expect(!tracker.update(1,10,"Gun") && tracker.revision()==1,"same equip keeps filter");

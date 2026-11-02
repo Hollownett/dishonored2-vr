@@ -1,4 +1,6 @@
+#define NOMINMAX
 #include "../src/wheel_avatar.hpp"
+#include "../src/native_attachment_pose.hpp"
 #include <cassert>
 #include <limits>
 #include <iostream>
@@ -26,5 +28,16 @@ int main() {
     assert(invalid[0].f==original[0].f); // Rejection cannot partially change a palette.
     auto bad_frame=frame;bad_frame[12]=0;auto unchanged=original;
     assert(!hide_wheel_avatar(unchanged,bad_frame,256,true) && unchanged[0].f==original[0].f);
+    // v776 (headset v775): the dual-wield hand wheel (logic 256 with the ring at the hand) keeps the avatar and its tracked arms; the head-front wheel hides it.
+    assert(wheel_hides_avatar(256,false) && !wheel_hides_avatar(256,true));          // knob off: exactly as before
+    assert(!wheel_hides_avatar(2,false) && !wheel_hides_avatar(2,true) && !wheel_hides_avatar(32,true) && !wheel_hides_avatar(512,true)); // only the wheel
+    assert(wheel_tracks_arms(2,false) && wheel_tracks_arms(2,true));                   // gameplay is unchanged
+    assert(wheel_tracks_arms(256,true) && !wheel_tracks_arms(256,false));
+    assert(!wheel_tracks_arms(512,true) && !wheel_tracks_arms(1024,true) && !wheel_tracks_arms(16,true) && !wheel_tracks_arms(32,true)); // other menus keep the native arms
+    // The attachment policy the head-view thread publishes: both tracked hands may carry their items in the hand wheel; the head-front wheel none.
+    assert(native_attachment_allowed_mask(3,0,wheel_tracks_arms(256,true),true,true)==3);
+    assert(native_attachment_allowed_mask(3,0,wheel_tracks_arms(256,false),true,true)==0);
+    assert(native_attachment_allowed_mask(3,1,wheel_tracks_arms(256,true),true,true)==2); // an arm the player state owns stays native
+    assert(native_attachment_allowed_mask(3,0,wheel_tracks_arms(256,true),false,true)==0 && native_attachment_allowed_mask(3,0,wheel_tracks_arms(256,true),true,false)==0);
     std::cout<<"wheel_avatar_check PASS\n";
 }

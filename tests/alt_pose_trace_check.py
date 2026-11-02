@@ -151,5 +151,60 @@ for i, line in enumerate(lines):
 rc, text = run('\n'.join(lines) + '\n')
 assert rc == 1 and 'begin_rendered_setup_for_display+1' in text, text
 
+
+# ---- v790 temporal pass rows (alternate mode)
+def with_passes(text, receipt_offset=0):
+    """A native TAA and an upscaler pass per Begin, recorded at the Begin's counter c for the image shown at c+1. receipt_offset 1 plans
+    each pass from the next Setup's receipt, whose eye (in alternation) is the other one: that eye's history gets this image."""
+    rows = list(csv.reader(io.StringIO(text)))
+    eye_of = {int(r[2]): int(r[3]) for r in rows[1:] if r[0] == 'setup'}
+    out = list(rows)
+    for r in rows[1:]:
+        if r[0] == 'begin' and int(r[1]) + 1 + receipt_offset in eye_of:
+            c = int(r[1])
+            d = c + 1 + receipt_offset
+            for kind in (1, 2):
+                out.append(['pass', c, d, eye_of[d]] + [''] * 17 + [kind, ''])
+    buf = io.StringIO()
+    csv.writer(buf).writerows(out)
+    return buf.getvalue()
+
+
+rc, text = run(with_passes(trace(2)))
+assert rc == 0, text
+assert 'temporal passes: 76 checked against the eye shown, 2 unjoined' in text, text
+assert 'pass_' not in text, text
+
+rc, text = run(with_passes(trace(2), receipt_offset=1))   # every pass planned from the next Setup: each eye's history gets the other's image
+assert rc == 1, text
+assert 'pass_receipt_is_the_next_setup' in text and 'pass_eye_differs_from_shown_eye' in text, text
+assert 'taa eye 0 ran as the other eye 19' in text and 'upscaler eye 1 ran as the other eye 19' in text, text   # 38 shown, 19 per eye
+
+
+# ---- v792 stale-eye warp: the stale layer carries the companion view recorded with the Present's Setup
+def with_companions(text, break_at=None):
+    rows = list(csv.reader(io.StringIO(text)))
+    out = [rows[0]]
+    for r in rows[1:]:
+        if r[0] == 'present' and r[22] not in ('', '-1') and r[3] != r[22]:   # the stale layer of a one-eye Present
+            p, e = int(r[2]), int(r[3])
+            pose = xr_pose(e, p + 1000)                                          # a pose no Setup wrote: only the companion explains it
+            out.append(['companion', p - 2, p, e] + pose + [''] * 8)
+            layer = xr_pose(e, p + 2000) if p == break_at else pose
+            r = r[:4] + [str(v) for v in layer] + r[15:]
+        out.append(r)
+    buf = io.StringIO()
+    csv.writer(buf).writerows(out)
+    return buf.getvalue()
+
+
+rc, text = run(with_companions(trace(2)))
+assert rc == 0, text
+assert 'stale layers: eye 0 warped 19, eye 1 warped 19' in text, text
+rc, text = run(with_companions(trace(2), break_at=20))   # a stale layer that is neither its companion nor its kept view
+assert rc == 1 and 'stale_layer_pose_differs_from_its_setup' in text, text
+
 print('PASS: alt-pose-trace checker (alternate: fixed trace passes, next-Present stamping names the wrong eye, pose drifts are caught; '
-      'paired: display-keyed layers pass, latest-Setup layers are the one-frame skew, a static head is inconclusive)')
+      'v792: a stale layer carrying its companion view passes, any other pose fails; '
+      'paired: display-keyed layers pass, latest-Setup layers are the one-frame skew, a static head is inconclusive; '
+      'temporal passes: a pass planned from the next Setup runs as the other eye)')

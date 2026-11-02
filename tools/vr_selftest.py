@@ -124,6 +124,9 @@ _HA, _HC, _HD = [-0.2, -0.8, -0.2], [-0.1, -0.2, -0.2], [-0.1, 0.1, -0.75]
 _GRIP = {"right_grip": 1.0}
 # The fist grabs the bottle; the grip alone then keeps it (a full squeeze is not needed while carrying it).
 SCENARIOS['hold'] = [[0, 1500, NEUTRAL, _HA], [1500, 2700, {"right_grip": 1.0, "right_trigger": 1.0}, _HA]] + glide(2700, 3700, _HA, _HC, 20, _GRIP) +     [[3700, 5500, _GRIP, _HC]] + glide(5500, 5750, _HC, _HD, 8, _GRIP) + [[5750, 9000, NEUTRAL, _HD]]
+# v788: 'hold' by the grip alone (the trigger is the game's Use), with the hand at a crouched player's table height (the user's save sneaks: the eye is low, 'hold' reached the floor).
+_HU = [0.1, 0.2, -0.4]
+SCENARIOS['holdup'] = [[0, 1500, NEUTRAL, _HU], [1500, 2700, {"right_grip": 1.0}, _HU]] + glide(2700, 3700, _HU, _HC, 20, _GRIP) + [[3700, 5500, _GRIP, _HC]] + glide(5500, 5750, _HC, _HD, 8, _GRIP) + [[5750, 9000, NEUTRAL, _HD]]
 # Showcase scenarios (screenshots of the grabbing fingers, 2026-10-14): the head looks AT the right hand (the simulated hand sits at a
 # fixed spot in XR space, so the head pitch that points at it follows from the offsets) and eye pairs are requested at the key moments.
 # PAIR_PLAN: scenario -> {script segment (scenario segment + 1): eye-pair label}; a pair is requested PAIR_DELAY s into the segment.
@@ -374,6 +377,19 @@ SCENARIOS['swordthrow'] = ([[0, 300, NEUTRAL, [0.0, 0.0, 0.0]]] + glide(300, 700
 # sound alerted guards 3 m away), then the player stands 2.5 m behind him just before the throw. The engine's own stealth test
 # (isUnaware) must answer yes and the throw kill him.
 SCENARIOS['stealththrow'] = SCENARIOS['swordthrow']
+# v783 (user: "a pistol thrown into a guard stuns him, as a bottle does"; dual wield): the native pistol drawn into the LEFT hand by the test
+# command, held by the left grip (hold-to-hold), thrown as 'swordthrow' throws the sword (the same dart path, mirrored: x negated). Use with
+# --near npc-front. Expect guns.stuns[0] >= 1 (thrown gun struck a guard).
+_LW, _LM, _LO = [-0.0, 0.15, 0.1], [-0.0, 0.15, -0.4], [-0.0, 0.14, -0.5]
+SCENARIOS['gunthrow'] = ([[0, 300, NEUTRAL, None, {"left_hand_offset": REST, "command": "equip pistol"}], [300, 1300, NEUTRAL, None, {"left_hand_offset": REST}],
+                          [1300, 1700, {"left_grip": 1.0}, None, {"left_hand_offset": REST}]] +
+                         [s_[:3] + [None, {"left_hand_offset": s_[3]}] for s_ in glide(1700, 2000, REST, _LW, 4, {"left_grip": 1.0})] +
+                         [[2000, 2300, {"left_grip": 1.0}, None, {"left_hand_offset": _LW}]] +
+                         [s_[:3] + [None, {"left_hand_offset": s_[3]}] for s_ in glide(2300, 2380, _LW, _LM, 8, {"left_grip": 1.0})] +
+                         [s_[:3] + [None, {"left_hand_offset": s_[3]}] for s_ in glide(2380, 2400, _LM, _LO, 2)] +
+                         [[2400, 7000, NEUTRAL, None, {"left_hand_offset": _LO}]])
+# v783 (user, headset v791: "with a bottle the pistol in the other hand is drawn wrong"): the native pistol drawn into the left hand, the right
+# hand takes the bottle as 'hold' does (use with --near bottle). Eye pairs while the bottle is held show the pistol's hold.
 # Crash soak (headset crashes 2026-10-13): six cycles of draw at the shoulder, wind up, throw, call back at the shoulder, sheathe.
 _SOAK = []
 for _k in range(6):
@@ -625,8 +641,26 @@ _CUT_R, _CUT_L = [0.25, 0.3, -0.15], {"left_hand_offset": [-0.25, 0.3, -0.15]}
 SCENARIOS['cutscene'] = [[0, 500, NEUTRAL, _CUT_R, _CUT_L], [500, 600, NEUTRAL, _CUT_R, dict(_CUT_L, console="loadgame 22")], [600, 10000, NEUTRAL, _CUT_R, _CUT_L],
                          [10000, 14000, NEUTRAL, _CUT_R, dict(_CUT_L, head_pitch_degrees=-50)], [14000, 60000, NEUTRAL, _CUT_R, _CUT_L]]
 PAIR_TIMES['cutscene'] = [(5000, 'cut-a'), (7500, 'cut-b'), (9500, 'cut-c'), (12000, 'cut-down-a'), (13500, 'cut-down-b'), (17000, 'cut-d')]
+SCENARIOS['bottlepistol'] = [[0, 1500, NEUTRAL, SCENARIOS['hold'][0][3], {"command": "equip pistol"}]] + SCENARIOS['hold'][1:]
 for _name in ('swing', 'chop', 'duel', 'blockduel', 'swarm', 'floor', 'chokeleft', 'swinglow', 'leftbottle', 'leftlimb'):
     SCENARIOS[_name] = held_sword(SCENARIOS[_name])
+
+
+def stab_with_gun(trigger):
+    """v920 (user, headset v891: "a choke (grab) instead of the stealth kill with the sword"): 'swing' with a pistol drawn in the LEFT hand, so the sword hand
+    is the choke hand (choke_hand), and its hold-to-hold squeeze must not take the sensor's choke offer. Use with --near npc --blind-ai (0.9 m behind a guard).
+    trigger: also squeeze the right trigger after the draw (the explicit Block, as the user holds the sword)."""
+    base = [[0, 500, NEUTRAL, [-0.4, 0.0, -0.3]]]   # 'swing' with the first stroke 1.5 s earlier: a re-injected run (no --launch) ends its blind-AI window ~3 s into the script
+    for k in range(3):
+        t = 500 + k * 1500
+        base += [[t + i * 30, t + (i + 1) * 30, NEUTRAL, [-0.4 + i * 0.08, 0.0, -0.3]] for i in range(10)] + [[t + 300, t + 1500, NEUTRAL, [-0.4, 0.0, -0.3]]]
+    out = [[a, b, dict(i, right_trigger=1.0) if trigger and a >= 2600 else i, h, *more] for a, b, i, h, *more in held_sword(base)]
+    out[0] = out[0][:4] + [{"command": "equip pistol"}]
+    return out
+
+
+SCENARIOS['stabgun'] = stab_with_gun(False)
+SCENARIOS['stabguntrig'] = stab_with_gun(True)
 FORBIDDEN_STATES = {'flick': ['Slash'], 'reach': ['Slash']}  # accidental attacks
 EXPECTED_STATES = {'leftlimb': ['HoldObject'], 'leftlimbnosword': ['HoldObject'], 'pickuplook': ['LootObject', 'Interact', 'HoldObject'], 'carry': ['CarryCorpse', 'PickupCorpse', 'Interact'], 'carrydrop': ['CarryCorpse'], 'carrythrow': ['CarryCorpse'], 'chop': ['Slash'], 'pickup': ['LootObject', 'Interact', 'HoldObject'], 'reach': ['LootObject', 'Interact', 'HoldObject'], 'swing': ['Slash', 'Assassination'], 'duel': ['Slash'], 'grab': ['LootObject', 'HoldObject', 'Interact', 'CarryCorpse', 'ReadNote'], 'powers': ['UsePower', 'Blinking', 'UseWindblast', 'UsePhantasmalLink', 'InBendTime', 'StoneShroud', 'DoppelgangerSwap', 'UseHeart'], 'jump': ['Jumping', 'Falling'],  # Falling always follows a jump; the short Jumping state can fall between samples
                    'lean': ['Leaning'], 'power': ['UsePower', 'Blinking'], 'wheel': ['Powerwheel'],
@@ -670,6 +704,21 @@ def player_position(read, base):
         if (rtti_name(read, base, at) or '').endswith('arkCpntPlayerCamera@@'):
             return struct.unpack('<3f', read(at + 0x2527c, 12))
     return None
+
+
+def steam_account_ok():
+    """True when Steam is signed into the account the save folder belongs to (steam_autocloud.vdf). 2026-10-31: a launch under the
+    user's other account let Steam Cloud rewrite the save folder for it and empty every slot (restored from a backup)."""
+    import re
+    import winreg
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r'Software\Valve\Steam\ActiveProcess') as k:
+            active = int(winreg.QueryValueEx(k, 'ActiveUser')[0])
+        vdf = os.path.join(os.environ['USERPROFILE'], 'Saved Games', 'Arkane Studios', 'Dishonored2', 'base', 'savegame', 'steam_autocloud.vdf')
+        owner = int(re.search(r'"accountid"\s+"(\d+)"', open(vdf).read()).group(1))
+    except (OSError, AttributeError, ValueError):
+        return False
+    return active == owner
 
 
 def command(line):
@@ -1013,7 +1062,7 @@ def write_scenario(name):
         seg = {"start_ms": start + LEAD_MS, "end_ms": end + LEAD_MS, "head_pitch_degrees": -40 if name == 'pickup' else 0, "input": inp}
         if hand:
             seg["left_hand_offset" if name in ('potion', 'hide', 'floorleft', 'waist', 'pistolhip', 'yank') else "right_hand_offset"] = hand  # the wheel cursor belongs to the X (left) hand
-        if name in ('pickup', 'pickuplook', 'reach', 'hold', 'deathreload', 'deathreloadpush'):
+        if name in ('pickup', 'pickuplook', 'reach', 'hold', 'holdup', 'bottlepistol', 'deathreload', 'deathreloadpush'):
             seg["hand_pitch_degrees"] = -50  # point the hands at the floor item
             seg["head_pitch_degrees"] = -40
         if name == 'aim':
@@ -1024,7 +1073,8 @@ def write_scenario(name):
     segments.insert(0, {"start_ms": 0, "end_ms": LEAD_MS, "head_pitch_degrees": 0, "input": NEUTRAL})
     path = os.path.join(ART, 'claude', f'selftest-{name}.json')
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    json.dump({"segments": segments}, open(path, 'w'))
+    write_scenario.segments = segments  # with "command" (mod test commands the selftest sends itself, as for --script)
+    json.dump({"segments": [{k: v for k, v in sg.items() if k != 'command'} for sg in segments]}, open(path, 'w'))
     return path, (SCENARIOS[name][-1][1] + LEAD_MS) / 1000
 
 
@@ -1083,11 +1133,14 @@ def main():
     ap.add_argument('--bottle-name', metavar='REGEX', help='--near bottle: take the nearest carryable whose entity name matches this (e.g. glass|cup|mug|bottle_01); --npc-index picks the Nth; the eye stands 1.2 m above the item as for bottle_02')
     ap.add_argument('--headset-size', action='store_true', help='render at the headset eye size (inject_probe --headset-size; build/sim-eye-size sets it, e.g. "2895 3095")')
     ap.add_argument('--every', metavar='CMD', help='send this mod test command every 3 s during the scenario (e.g. "pad x 200")')
+    ap.add_argument('--lead-ms', type=int, help='with --inject-at-title: the lead-in before the scenario (default 75000; a slow save load needs more; lead + scenario + 12 s must stay under the injector 120 s)')
     a = ap.parse_args()
     SKIP_NAMES[:] = [n for n in (a.skip_npc or '').split(',') if n]
     global NPC_INDEX
     NPC_INDEX = a.npc_index
     if a.launch and not game_pid():
+        if not steam_account_ok():
+            sys.exit('Steam is signed into another account than the saves belong to: a launch would let Steam Cloud rewrite the save folder')
         subprocess.run([sys.executable, os.path.join(ROOT, 'tools', 'game_keys.py'), '--prepare-config'], check=True)
         os.startfile('steam://rungameid/403640')
         for _ in range(90):
@@ -1101,7 +1154,7 @@ def main():
         sys.exit('Dishonored 2 is not running (start it, or use --launch)')
     global LEAD_MS
     if a.inject_at_title:
-        LEAD_MS = 75000  # the save loads inside the session: the scenario starts after the load
+        LEAD_MS = a.lead_ms or 75000  # the save loads inside the session: the scenario starts after the load
     elif a.load_save:  # title -> Campaign -> Continue (posted to the window; the load screen is dismissed by the mod's pad)
         keys(0x0D, 0x0D, 0x0D)
         time.sleep(20)
@@ -1122,9 +1175,13 @@ def main():
             script = os.path.join(ART, 'claude', 'selftest-script.json')
             json.dump({"segments": fixed}, open(script, 'w'))
             segs = fixed
+        if any('command' in sg for sg in segs):  # the mod's script parser takes no "command": the selftest sends those itself
+            script = os.path.join(ART, 'claude', 'selftest-script.json')
+            json.dump({"segments": [{k: v for k, v in sg.items() if k != 'command'} for sg in segs]}, open(script, 'w'))
         seconds = max(seg['end_ms'] for seg in segs) / 1000
     else:
         script, seconds = write_scenario(a.scenario)
+        segs = write_scenario.segments
     knob = os.path.join(ROOT, 'build', 'ui-dump')
     open(knob, 'w').close()
     # Combat scenarios: the player ignores damage (engine god/buddha are not honoured) so a fight can run to the end.
@@ -1238,6 +1295,7 @@ def main():
         eye_pairs = []  # carry: capture-eye-pair request ids
         pair_times = sorted(PAIR_TIMES.get(a.scenario, []) + [(int(float(t) * 1000), 'pair-%ss' % t) for t in (a.pairs_at or '').split(',') if t])
         pair_done = set()
+        cmd_sent = set()  # --script: segments whose "command" was sent
         pair_actual = {}  # label -> scenario ms at the moment the request was posted
         eye_pair_segments, seg_first = set(), {}
         if reached and a.near == 'door':
@@ -1318,7 +1376,7 @@ def main():
                 command('cvar ark_vision_max_checks 0')
             skip = set()
             for attempt in range(3):  # a spot on a ledge or table left the blade swinging over the guard (sim v382: 1 m above)
-                stand, npc = npc_stand(pid, a.near == 'npc', a.near == 'civ-front', a.near == 'npc-side', skip, {'swordthrow': 3.0, 'stealththrow': 10.0, 'chokeleft': 1.8}.get(a.scenario, .9))
+                stand, npc = npc_stand(pid, a.near == 'npc', a.near == 'civ-front', a.near == 'npc-side', skip, {'swordthrow': 3.0, 'gunthrow': 3.0, 'stealththrow': 10.0, 'chokeleft': 1.8}.get(a.scenario, .9))
                 if not stand:
                     break
                 print('near npc', npc['name'], npc['pos'], 'stand', [round(v, 2) for v in stand])
@@ -1372,9 +1430,9 @@ def main():
         except Exception:
             machine = None
         while proc.poll() is None:
-            if a.scenario in ('swordthrow', 'stealththrow', 'yank') and npc and not getattr(main, 'aimed', False) and script_segment() >= 7:  # the throw's wind-up begins: a console teleport lands 0.3-0.5 s later (at the hold it landed after the throw, sim v470)
+            if a.scenario in ('swordthrow', 'stealththrow', 'gunthrow', 'yank') and npc and not getattr(main, 'aimed', False) and script_segment() >= 7:  # the throw's wind-up begins: a console teleport lands 0.3-0.5 s later (at the hold it landed after the throw, sim v470)
                 main.aimed = True  # the guard walked off since the arrival (sim v418, v431): face him again just before the throw / the grab
-                reach = {'swordthrow': 2.0, 'stealththrow': 2.5}.get(a.scenario, .9)  # 3 m: an alert guard ran out of the throw (sim v469)
+                reach = {'swordthrow': 2.0, 'gunthrow': 2.0, 'stealththrow': 2.5}.get(a.scenario, .9)  # 3 m: an alert guard ran out of the throw (sim v469)
                 try:
                     import math
                     import struct
@@ -1484,6 +1542,12 @@ def main():
                     if dr['alive_pid'] is None and not dr.get('crashed'):
                         dr['crashed'] = now_t
                         dr['timeline'].append(('GAME PROCESS GONE', tl_dr))
+            if segs:  # a segment's "command" (mod test commands split by ';', e.g. "equip pistol") is sent once when the script reaches it
+                seg_c = script_segment()
+                if 0 <= seg_c < len(segs) and segs[seg_c].get('command') and seg_c not in cmd_sent:
+                    cmd_sent.add(seg_c)
+                    for c in segs[seg_c]['command'].split(';'):
+                        command(c.strip())
             plan = PAIR_PLAN.get(a.scenario)
             seg_now = script_segment() if plan else -1
             if seg_now in (plan or {}) and seg_now not in seg_first:
@@ -1672,6 +1736,16 @@ def main():
         check('dropped sword picked up / called back', acts[3] >= 2 and nat[3] >= 2, f'actions {acts}, native {nat}')
         check('sheathed at the shoulder', acts[1] >= 2 and not (status.get('hand_weapon_bits', 0) & 2) and sg.get('copy') is None, f'actions {acts}, bits {status.get("hand_weapon_bits")}, copy {sg.get("copy")}')
         check('native equip calls succeeded', nat[1] == 0 and nat[0] > 0, f'native {nat}')
+    if a.scenario == 'gunthrow':
+        guns = status.get('guns') or {}
+        stuns = guns.get('stuns') or [0, 0, 0]  # thrown gun, gun bash, thrown gadget
+        check('pistol thrown (a native drop)', guns.get('native_drops', 0) >= 1, f'guns drops {guns.get("drops")} native {guns.get("native_drops")}')
+        check('thrown pistol struck the guard', stuns[0] >= 1, f'stuns {stuns}, lying {guns.get("lying")}')
+    if a.scenario in ('leftbottle', 'bottlepistol'):
+        gd = status.get('game_sword_draws') or {}
+        print('game_sword_draws:', json.dumps(gd), 'held_object:', json.dumps(status.get('held_object')))
+        if a.scenario == 'leftbottle':
+            check('the bottle kept the held sword (v782)', gd.get('hold_kept', 0) >= 1, f'game_sword_draws {gd}')
     if a.scenario in ('swordthrow', 'stealththrow'):
         sg = status.get('sword_grip') or {}
         print('sword trace:', [(t, (g[0] or {}).get('thrown'), (g[0] or {}).get('actions')) for t, g in sword_trace][:12])
@@ -1692,6 +1766,12 @@ def main():
             hp = target_hp(pid, npc) if npc else None
             check('the engine judged the guard unaware', st[1] >= 1, f'stealth {st}')
             check('one throw killed him', hp is not None and hp[1] is not None and hp[1] <= 0, f'target hp {hp}')
+    if a.scenario in ('stabgun', 'stabguntrig'):  # v920: the held sword grip is no choke press (with a gun in the other hand the sword hand is the choke hand)
+        noc, sc = status.get('native_offer_controls') or {}, status.get('sword_contact') or {}
+        hp = target_hp(pid, npc) if npc else None
+        print('stab: states', sorted(seen_states), 'choke frames offered/input', noc.get('offered_choke_frames'), noc.get('choke_input_frames'), 'stealth', sc.get('stealth'), 'takedown', json.dumps(status.get('takedown')), 'target hp', hp)
+        check('the held sword grip never chokes', 'Choke' not in seen_states and not noc.get('choke_input_frames'), f"states {sorted(seen_states)}, choke input frames {noc.get('choke_input_frames')}")
+        check('the stab from behind killed him', hp is not None and hp[1] is not None and hp[1] <= 0, f'target hp {hp}, stealth {sc.get("stealth")}')
     if a.scenario == 'yank':
         rd = (status.get('sword_grip') or {}).get('ragdolls') or [0, 0, 0, 0]  # START_RAGDOLL posts, last result, yank requests, yanks applied
         check('yank requested by the pulling hand', rd[2] >= 1, f'ragdolls {rd}')
@@ -1767,7 +1847,7 @@ def main():
                 moved = None
         check('corpse found', corpse is not None, hex(corpse[0]) if corpse else 'none')
         check('body dragged', moved is not None and moved > .3, f'pelvis moved {moved:.2f} m' if moved is not None else 'no reading')
-    if a.scenario in ('hold', 'showbottle', 'holdneck', 'holdneck2', 'holdneck3'):  # the fist takes the bottle (physical grab, or the game's own HoldObject), the swing throws it
+    if a.scenario in ('hold', 'holdup', 'showbottle', 'holdneck', 'holdneck2', 'holdneck3'):  # the fist takes the bottle (physical grab, or the game's own HoldObject), the swing throws it
         try:
             result = json.load(open(os.path.join(run_dir, 'dxgi-probe-result.json')))
         except (OSError, ValueError):

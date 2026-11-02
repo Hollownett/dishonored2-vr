@@ -1,13 +1,18 @@
 #pragma once
 #include <windows.h>
 #include <MinHook.h>
+#include "native_power_hand.hpp"
 #include "rig_transform.hpp"
 #include "tracked_pose_lifetime.hpp"
+#include "frame_order_trace.hpp"
 #include <array>
+#include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <cstring>
 #include <mutex>
 #include <new>
+#include <optional>
 #include <stdexcept>
 #include <type_traits>
 #include <utility>
@@ -55,19 +60,35 @@ class NativeAttachmentPose {
     static constexpr std::uintptr_t query_rva=0x53d3f0,reader_rva=0x53d6a0;
     static constexpr std::array<unsigned char,16> query_code{0x48,0x89,0x5c,0x24,0x08,0x57,0x48,0x81,0xec,0xc0,0x00,0x00,0x00,0x49,0x8b,0xf9};
     static constexpr std::array<unsigned char,16> reader_code{0x48,0x83,0xec,0x28,0x4c,0x8b,0xd9,0x66,0x45,0x85,0xc0,0x78,0x5f,0x48,0x8b,0x41};
-    struct Side {std::uintptr_t animation{},first_slot{};std::array<rig::Transform,69> joints{};NativeAttachmentSource source{};};
+    struct Side {std::uintptr_t animation{},first_slot{};std::array<rig::Transform,69> joints{};NativeAttachmentSource source{};std::uint64_t interval{};};
     inline static NativeAttachmentPose* instance_{};
     Query query_{};Reader reader_{};Read read_{};std::uintptr_t base_{};
     bool enabled_{};std::atomic<bool> active_{};std::atomic<unsigned> depth_{};
     std::mutex mutex_;std::array<Side,2> sides_{};
     unsigned allowed_{};std::uint64_t policy_epoch_{},policy_tick_{},policy_revision_{},policy_reference_epoch_{},policy_mapping_revision_{};
     std::atomic<std::uint64_t> substitutions_{},calls_{};
+    // Dual wield, power hand (native_power_hand.hpp): bit 0 set = reads of the LEFT arm (side 0) in state 3 return the RIGHT hand's tracked
+    // joint (side 1), re-expressed in the left model, so everything bound to the left arm rides the right hand; bit 1 = the same the other
+    // way round (the native sword on the right arm rides the left hand). Zero (the default): not read.
+    std::atomic<unsigned> cross_{};std::atomic<std::uint64_t> cross_substitutions_{},cross_skipped_{};
+    // The joint-59 correction per DESTINATION arm (guarded by mutex_): [0] the left arm's slot-1 item riding the right hand (mirror_correction of that item's
+    // left bind tag: y180 for guns, grenades, mines and powers, z180 for the Heart), [1] the right arm's sword riding the left hand (its own right tag: y180).
+    std::array<power_hand::Rot3,2> cross_attachment_{power_hand::y180_rot,power_hand::y180_rot};
+    // v776: crossed reads whose live arm model frames differed by more than a millimetre (the origin arm not yet updated for this game frame), and the largest gap.
+    mutable std::atomic<std::uint64_t> cross_skewed_{},cross_skew_peak_um_{};
+    std::atomic<bool> cross_live_{}; // test switch: convert with the models' live frames (the pre-v776 behaviour) instead of the published ones
     std::atomic<std::uint64_t> rebases_{}; // substitutions that followed a moved contiguous state-3 block (status arm_flicker.publish.rebases)
     static constexpr std::uint64_t freshness_ms=tracked_pose_freshness_ms;
 public:
     static constexpr std::uint64_t publish_grace_ms=100;
 private:
     std::atomic<std::uint64_t> clears_{},grace_accepts_{},rejects_policy_{},rejects_source_{},rejects_other_{};
+    // v833 diagnostic: the Present interval (note_interval) each palette was published in, and per substitution whether the weapon reader ran in that
+    // same interval (after the arm upload), the next one (before this interval's upload: the item a frame behind the hand) or later.
+    std::atomic<std::uint64_t> interval_{},reads_order_[3]{},advanced_{};
+    // v835: a read before this interval's upload gets its joint moved on by the hand's motion this tick (the probe's advance_attachment)
+    using Advance=std::optional<rig::Transform>(*)(unsigned,const NativeAttachmentSource&,const rig::Transform&,short) noexcept;   // v861: + the joint index
+    std::atomic<Advance> advance_{};
     static bool admission_valid(const NativeAttachmentAdmission& value) noexcept {
         return (!value.context && !value.receipt && !value.acquire && !value.release) ||
             (value.context && value.receipt && value.acquire && value.release);
@@ -181,12 +202,43 @@ private:
         NativeAttachmentSource observed_source{};
         unsigned observed_stage{};
         bool returned{};
-        bool locked{},written{},admitted{};
+        bool locked{},written{},admitted{},crossed{};
         CallFrame(NativeAttachmentPose* owner,std::uintptr_t anim,int pose_state,short index,Call&& action)
             noexcept(std::is_nothrow_constructible_v<std::decay_t<Call>,Call&&>):
             self(owner),animation(anim),state(pose_state),joint(index),call(std::forward<Call>(action)) {}
         void unlock() noexcept {if(locked) {locked=false;self->mutex_.unlock();}}
     };
+    // The right hand's palette joint for a left-arm read (mutex_ held). No source: the right arm is not allowed or published, either side
+    // carries a receipt (the socket and contact admissions are one-arm protocols), the joint is a cuff joint, or a published model frame is invalid.
+    std::optional<rig::Transform> cross_joint(const Side& destination,const Side& origin,short joint) const noexcept {
+        if(joint<2 || (allowed_&3u)!=3u || !origin.animation || !origin.first_slot || origin.animation==destination.animation ||
+           destination.source.admission.context || destination.source.admission.receipt || origin.source.admission.context || origin.source.admission.receipt) return {};
+        std::array<float,15> from{},to{};
+        const bool live=read_(origin.source.model+0x1860,from.data(),sizeof(from)) && read_(destination.source.model+0x1860,to.data(),sizeof(to));
+        if(live) {   // Diagnostics (status dual_wield.cross): the arms' LIVE frames. Both hang on the same spine joint, so they agree unless one arm has not been updated yet
+            const double gap=std::hypot(std::hypot(double(from[0])-to[0],double(from[1])-to[1]),double(from[2])-to[2]);
+            if(gap>.001) ++cross_skewed_;
+            const auto um=static_cast<std::uint64_t>(std::min(gap,1e3)*1e6);
+            auto peak=cross_skew_peak_um_.load();while(um>peak && !cross_skew_peak_um_.compare_exchange_weak(peak,um)) {}
+        }
+        try {
+            // v776 (headset v775: a crossed item trailed the hand when the player ran): the frames the two palettes were PUBLISHED with, not the models' live
+            // ones. This read comes from the post-physics attach pass (0x755030 -> 0x753c10), which writes each arm's frame (model+0x1860) and then
+            // evaluates the items bound to it: the item of the destination arm runs right after that arm's update, but the origin arm is its sibling and
+            // may be updated later, so its live frame is still the previous game frame's while the origin arm is DRAWN in this one: the item rode a pose one
+            // frame of the player's motion behind the hand (v*dt: 10 cm at 6 m/s and 60 fps). Both arms hang on center_spine03_jnt with identity tags and were
+            // uploaded in the same animation stage, so their published frames agree, the conversion is the identity and the item takes the destination's
+            // live frame exactly as that arm's own palette does: the frame the origin arm is drawn in. (Equal frames: nothing changes.)
+            // cross_live_ (test command "crossframes live") brings the pre-v776 conversion back for an A/B in the sim.
+            const bool use_live=live && cross_live_.load(std::memory_order_relaxed);
+            const rig::ModelFrame source(use_live?from:origin.source.model_frame),target(use_live?to:destination.source.model_frame);
+            // The correction is the item's mirror (power_hand::mirror_correction): y180 for a weapon tag. It is the exact mirror only
+            // while the holding hand plays the other arm's clip mirrored (v763 FullBodyDriver mirror_native; the receipts show the left item
+            // frame equals joint 59): with the player's fist instead the item sat wrong (headsets v761-v762).
+            const auto* correction=joint==static_cast<short>(power_hand::attachment_joint)?&cross_attachment_[static_cast<unsigned>(&destination-sides_.data())]:nullptr;
+            return power_hand::cross_joint(origin.joints[static_cast<unsigned>(joint)],source,target,destination.joints[static_cast<unsigned>(joint)],correction);
+        } catch(...) {return {};}
+    }
     template<class Frame> std::uint64_t around_frame(Frame& frame) {
         const auto anim=frame.animation;const auto state=frame.state;const auto joint=frame.joint;
         ++calls_;
@@ -201,6 +253,7 @@ private:
             if((allowed_&(1u<<i)) && s.animation && s.animation==anim) side=&s;
         }
         if(!side) {frame.unlock();return frame.call();}
+        const auto read_age=interval_.load(std::memory_order_relaxed)-side->interval;++reads_order_[read_age==0?0:read_age==1?1:2];
         frame.observed_source=side->source;frame.observed_stage=1;
         if(side->source.admission.receipt) {
             const auto side_index=static_cast<std::size_t>(side-sides_.data());frame.admitted_source=side->source;
@@ -227,10 +280,20 @@ private:
             side->first_slot=frame.at-offset;++rebases_;
         }
         frame.tracked=side->joints[static_cast<unsigned>(joint)];
+        if(joint==59) frame_order::note('R',static_cast<std::uint8_t>(side-sides_.data()),{static_cast<double>(read_age)});
+        if(read_age==1) if(const auto advance=advance_.load(std::memory_order_acquire))
+            if(const auto moved=advance(static_cast<unsigned>(side-sides_.data()),side->source,frame.tracked,joint)) {frame.tracked=*moved;++advanced_;}
+        if(const auto mask=cross_.load(std::memory_order_relaxed)) {
+            const auto index=static_cast<unsigned>(side-sides_.data());
+            if((mask>>index)&1u) {
+                if(const auto crossed=cross_joint(*side,sides_[index^1u],joint)) {frame.tracked=*crossed;frame.crossed=true;}
+                else ++cross_skipped_;
+            }
+        }
         if(!read_(frame.at,frame.saved.data(),64)) {frame.observed_stage=5;frame.unlock();return frame.call();}
         frame.written=copy_slot(frame.at,frame.tracked.f.data());
         frame.observed_stage=frame.written?6u:7u;
-        if(frame.written) ++substitutions_;
+        if(frame.written) {++substitutions_;if(frame.crossed) ++cross_substitutions_;}
         // Restore only if the slot still holds our value; a concurrent native
         // animation write of a new frame must win.
         return frame.call();
@@ -304,7 +367,7 @@ public:
         sides_[side]={}; // Rejected/replaced uploads must never leave an older palette alive.
         if(!(allowed_&(1u<<side))) {++rejects_policy_;return false;}
         bool exact{};if(!validate_palette(animation,first_slot,joints,source,now,exact))return false;
-        sides_[side]={animation,first_slot,joints,source};
+        sides_[side]={animation,first_slot,joints,source,interval_.load(std::memory_order_relaxed)};
         if(!exact)++grace_accepts_;
         return true;
     }
@@ -321,14 +384,47 @@ public:
     void clear(unsigned side) {if(side>1) return;std::lock_guard<std::mutex> lock(mutex_);if(sides_[side].animation)++clears_;sides_[side]={};}
     // Palettes removed by clear() (a live palette only), accepted one sample behind the policy, and refused publications by cause
     // (policy/age/admission, source not current, frame/slot/joint checks): status arm_flicker.
-    struct Counters {std::uint64_t clears{},grace_accepts{},rejects_policy{},rejects_source{},rejects_other{};};
-    Counters counters() const {return {clears_.load(),grace_accepts_.load(),rejects_policy_.load(),rejects_source_.load(),rejects_other_.load()};}
+    struct Counters {std::uint64_t clears{},grace_accepts{},rejects_policy{},rejects_source{},rejects_other{},reads_same{},reads_previous{},reads_older{},advanced{};};
+    Counters counters() const {return {clears_.load(),grace_accepts_.load(),rejects_policy_.load(),rejects_source_.load(),rejects_other_.load(),reads_order_[0].load(),reads_order_[1].load(),reads_order_[2].load(),advanced_.load()};}
+    void set_advance(Advance advance) noexcept {advance_.store(advance,std::memory_order_release);}
+    void note_interval(std::uint64_t present) noexcept {interval_.store(present,std::memory_order_relaxed);}   // render thread, at each Present
+    // Dual wield, power hand. Any thread, any time (the lead sets it every control tick from the same flag that mirrors the hands). Set it only
+    // while slot 1 holds something without a mod copy (a power, grenade, mine, razor): a gun or crossbow is drawn as a copy measured from the
+    // native weapon at the left hand, which this would move. Off (the default) changes nothing: the extra work is one relaxed load.
+    // set_cross(true) = left-arm things ride the right hand; set_cross_mask(2) = the native sword on the right arm rides the left hand (the
+    // sword copy's offset is measured from it, so use it only if that measurement is taken against the left hand).
+    void set_cross(bool on) noexcept {cross_.store(on?1u:0u,std::memory_order_relaxed);}
+    void set_cross_mask(unsigned mask) noexcept {cross_.store(mask&3u,std::memory_order_relaxed);}
+    unsigned cross_mask() const noexcept {return cross_.load(std::memory_order_relaxed);}
+    bool cross() const noexcept {return (cross_.load(std::memory_order_relaxed)&1u)!=0;}
+    // The local rotation applied to a crossed joint 59 for reads of the `side` arm (default y180). side 0: the slot-1 item riding the right hand, the
+    // item's mirror_correction (power_hand.hpp) of its left bind tag: the lead sets it each control tick from the equipped item (v776: the Heart's tag
+    // differs from the weapon tag, and y180 turned it upside down). side 1: the sword riding the left hand (its own right tag: y180, never changes).
+    bool set_cross_attachment(const power_hand::Rot3& rotation,unsigned side=0) {
+        if(side>1 || !power_hand::valid_rot(rotation)) return false;
+        std::lock_guard<std::mutex> lock(mutex_);cross_attachment_[side]=rotation;return true;
+    }
+    // Reads that returned the other hand, and cross reads that fell back to the arm's own palette (status arm_flicker / power_hand).
+    std::uint64_t cross_substitutions() const {return cross_substitutions_.load();}
+    std::uint64_t cross_skipped() const {return cross_skipped_.load();}
+    void set_cross_live_frames(bool on) noexcept {cross_live_.store(on,std::memory_order_relaxed);}
+    // Crossed reads whose live arm frames differed by more than 1 mm (the origin arm not yet updated for this game frame: the lag v776 removes), and the
+    // largest live gap in millimetres. Zero while standing; about v*dt while running if the origin arm is evaluated after the item's arm.
+    std::uint64_t cross_skewed() const {return cross_skewed_.load();}
+    double cross_skew_peak_mm() const {return static_cast<double>(cross_skew_peak_um_.load())*1e-3;}
+    // The joint axis the `side` correction half-turns about (0 X, 1 Y, 2 Z, 3 none): status dual_wield.cross[4..5]. A weapon: 1 (y180); the Heart on the right hand: 2 (z180).
+    unsigned cross_correction_axis(unsigned side=0) {
+        if(side>1) return 3;
+        std::lock_guard<std::mutex> lock(mutex_);const auto& c=cross_attachment_[side];
+        for(unsigned axis=0;axis<3;++axis) if(c[axis*4]>.99f) return axis;
+        return 3;
+    }
     void install(std::uintptr_t base,Read read) {
         base_=base;read_=read;
         std::array<unsigned char,16> code{};
         if(!read(base+query_rva,code.data(),16) || code!=query_code || !read(base+reader_rva,code.data(),16) || code!=reader_code)
             throw std::runtime_error("Native attachment readers differ from the supported executable");
-        instance_=this;{std::lock_guard<std::mutex> lock(mutex_);sides_={};allowed_=0;policy_epoch_=policy_tick_=policy_revision_=policy_reference_epoch_=policy_mapping_revision_=0;}substitutions_=calls_=0;clears_=grace_accepts_=rejects_policy_=rejects_source_=rejects_other_=0;
+        instance_=this;{std::lock_guard<std::mutex> lock(mutex_);sides_={};allowed_=0;policy_epoch_=policy_tick_=policy_revision_=policy_reference_epoch_=policy_mapping_revision_=0;}substitutions_=calls_=cross_substitutions_=cross_skipped_=cross_skewed_=cross_skew_peak_um_=0;clears_=grace_accepts_=rejects_policy_=rejects_source_=rejects_other_=0;
         if(!query_ && MH_CreateHook(reinterpret_cast<void*>(base+query_rva),reinterpret_cast<void*>(&query_hook),reinterpret_cast<void**>(&query_))!=MH_OK)
             throw std::runtime_error("Cannot create attachment query hook");
         if(!reader_ && MH_CreateHook(reinterpret_cast<void*>(base+reader_rva),reinterpret_cast<void*>(&reader_hook),reinterpret_cast<void**>(&reader_))!=MH_OK)

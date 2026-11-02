@@ -13,6 +13,9 @@
 #include <vector>
 
 #include "proxy_core.hpp"
+#if __has_include(<MinHook.h>)
+#include "vs_layouts.hpp"  // the Windows build links MinHook: shader layouts for the mod's object motion
+#endif
 
 using namespace d2vr_linux;
 
@@ -655,7 +658,13 @@ void run_worker() {
 }
 
 DWORD WINAPI worker(void*) {
+#if __has_include(<MinHook.h>)
+    const bool layouts = d2vr::vs_layouts::install();  // first: the game creates its device a few seconds after it starts
+#endif
     try {
+#if __has_include(<MinHook.h>)
+        log_line(layouts ? L"vertex shader layouts: device creation hooked" : L"vertex shader layouts: device creation NOT hooked");
+#endif
         run_worker();
     } catch (const std::exception& e) {
         log_line(L"worker stopped: " + from_utf8(e.what()));

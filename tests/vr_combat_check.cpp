@@ -222,6 +222,17 @@ int main() {
       Sim s;s.f.equipped=false;s.f.shadow_walk=true;s.run(30);CHECK(!s.any_rb && !s.any_rt);
       s.run(10,{4,0,0});s.run(8);CHECK(s.any_rt && s.swing==SwingKind::slash && !s.any_rb);
       s.clear();s.f.shadow_walk=false;s.run(1);CHECK(!s.any_rt && !s.any_rb); }
+    { // v721: in Shadow Walk a gentler swing attacks and so does a right-trigger press; neither does in ordinary sword play
+      Sim s;s.f.equipped=false;s.f.shadow_walk=true;s.run(30);s.run(12,{2.2f,0,0});s.run(8);CHECK(s.any_rt && s.swing==SwingKind::slash);
+      Sim n;n.run(30);n.run(12,{2.2f,0,0});n.run(8);CHECK(!n.any_rt && n.swing==SwingKind::none);
+      Sim p;p.f.equipped=false;p.f.shadow_walk=true;p.run(30);p.f.trigger=1;p.run(1);p.run(20);CHECK(p.any_rt && p.swing==SwingKind::slash);
+      p.clear();p.run(40);CHECK(!p.any_rt); // a held trigger is one attack
+      Sim q;q.run(30);q.f.trigger=1;q.run(21);CHECK(!q.any_rt && q.swing==SwingKind::none); }
+    { // v722: in Shadow Walk closing a hand (either grip) is one attack press; in ordinary play it is not
+      Sim g;g.f.equipped=false;g.f.shadow_walk=true;g.run(30);g.f.grab=1;g.run(1);g.run(20);CHECK(g.any_rt && g.swing==SwingKind::slash);
+      g.clear();g.run(40);CHECK(!g.any_rt); // a held grip is one attack
+      Sim h;h.f.equipped=false;h.f.grab=1;h.run(1);h.f.shadow_walk=true;h.run(30);CHECK(!h.any_rt); // held across the mode change: no press
+      Sim n;n.run(30);n.f.grab=1;n.run(21);CHECK(!n.any_rt && n.swing==SwingKind::none); }
     { Sim s;s.f.shadow_walk=true;s.f.equipped=false;s.f.allowed=false;s.run(20);s.run(10,{4,0,0});
       CHECK(!s.any_rt && !s.any_rb); }
     { Sim s;s.f.shadow_walk=true;s.f.equipped=false;s.f.tracked=false;s.run(20);s.run(10,{4,0,0});

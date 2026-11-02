@@ -46,6 +46,11 @@ def check(grab: str, probe: str, hands: str) -> None:
     pull = between(hands, "template<class Read> static bool living_pull(", "public:")
     assert "if(!living_pull_enabled ||" in pull and "teleport<Read>(base,r.target,r.pos,*axis);" in pull
     assert "native_grab.living_pull(d2vr::NativeWeaponHands::living_pull_enabled);" in probe
+    # a reserved guard is no physical body either (a fist at his collar), and the choke hand at his neck never yanks (headset 2026-11-01)
+    focus = between(grab, "std::optional<NativeRigidBody> focus_body(unsigned side,UINT64 now,bool refresh) {", "        // Re-rank every publication")
+    assert focus.index("if(npc_reserved(*id,now)) return {};") < focus.index("return corpse(*entity);")
+    assert "const bool choke=choke_offer.has_value() || control_active_choke!=0 || control_takedown.choke;" in probe
+    assert "&& !(choke && h==choke_side && hand_at_neck[h]);" in probe
     # the seam to Track F's GripPoseBlend (ruling H6)
     assert "d2vr::grip_pose_blend_start(h,living_start->radius,now_y);" in probe
 
@@ -60,6 +65,9 @@ if __name__ == "__main__":
         ("grab", "if(npc_reserved(n.id,now) ||", "if(false ||"),
         ("probe", "native_grab.reserve_npc(1,choke_offer?choke_offer->spawn:control_active_choke?control_active_choke:takedown_npc,GetTickCount64());", ""),
         ("probe", "r.target=living_yank->entity;", ""),
+        ("grab", "if(npc_reserved(*id,now)) return {};", ""),
+        ("probe", " || control_active_choke!=0 || control_takedown.choke;", ";"),
+        ("probe", "&& !(choke && h==choke_side && hand_at_neck[h]);", ";"),
         ("grab", "if(lane.living) {living_tick(lane,now,physical_usable);return;}", "if(lane.living) {living_tick(lane,now,physical_usable);}"),
         ("grab", 'living_enabled_=!std::filesystem::exists(root/L"build"/L"no-living-hold",ec);', "living_enabled_=true;"),
         ("hands", "if(!living_pull_enabled ||", "if("),

@@ -1,0 +1,736 @@
+#pragma once
+// Per-eye previous MVP for entity draws in paired stereo (both eyes drawn in one engine frame).
+// An entity's motion vector comes from cb_previousmvpmatrix{x,y,z,w} in its per-instance cbuffer (VS b2, layout per
+// material). The engine fills it from its cache of that draw's MVP in the LAST RENDERED view: in paired stereo the other
+// eye's, so TAA/FSR/DLSS read the stereo disparity as motion and ghost every entity.
+// Each draw is fixed when it is made, where the bindings are final (at the cb2 write they usually are not, v824):
+// cb2 writes (Map/Unmap, UpdateSubresource) are shadowed per context; at a draw whose vertex shader has previous rows
+// (reflected by the dinput8 proxy at CreateVertexShader, linux/proxy/vs_layouts.hpp: the game creates its shaders long
+// before the mod loads), the eye and engine frame of its per-view cbuffer (VS b1, matched against the eye views'
+// matrices) and PrevMvpTable give this eye's own previous rows. A corrected copy (one dynamic cbuffer per context,
+// renamed by each DISCARD) is bound at b2 for that draw only.
+// The draws are hooked by dxgi_probe (gpu_bindings: DrawIndexed, Draw and their instanced forms), each in a DrawScope.
+// Knobs (build/): no-object-motion = not installed (read at the first Present), or hooks pass through when it appears
+// later; object-motion-mode = 0 diagnostic only, 1 fix (default). Writes artifacts/object-motion.json.
+#include <windows.h>
+#include <d3d11_1.h>
+#include <MinHook.h>
+#include <intrin.h>
+#include <array>
+#include <atomic>
+#include <cmath>
+#include <cstdint>
+#include <cstring>
+#include <filesystem>
+#include <cstdio>
+#include <fstream>
+#include <mutex>
+#include <new>
+#include <string>
+#include "weapon_draw_place.hpp"
+
+namespace d2vr {
+// Draws of the recent eye views keyed by their exact current rows -> the engine's original previous rows.
+// L(n) carries MVP_R(n-1): the R(n-1) draw with those current rows carried MVP_L(n-1). R(n) carries MVP_L(n): the L(n)
+// draw with those rows carried MVP_R(n-1). A replacement must itself be the current rows of a draw of this eye's last
+// frame, so a cache that behaves otherwise is never "fixed" into another wrong matrix (it counts as unproven).
+class PrevMvpTable {
+public:
+    static constexpr unsigned gens=4,slots=1u<<12,probes=64;
+    enum Kind:unsigned {same,own_last,other_now,other_last,unproven,miss,kinds};
+    static std::uint32_t hash(const float* m) noexcept {
+        std::uint64_t h=0xcbf29ce484222325ull;
+        for(int i=0;i<16;++i) {std::uint32_t w;std::memcpy(&w,m+i,4);h=(h^w)*0x100000001b3ull;}
+        return static_cast<std::uint32_t>(h^(h>>29));
+    }
+    void insert(unsigned eye,std::uint32_t frame,const float* cur,const float* prev) noexcept {
+        const std::uint32_t h=hash(cur),key=frame+1;const std::uint64_t want=std::uint64_t{key}<<32|h;
+        Slot* t=table(eye,frame);
+        for(unsigned i=0;i<probes;++i) {
+            Slot& e=t[(h+i)&(slots-1)];std::uint64_t tag=e.tag.load(std::memory_order_acquire);
+            if(tag==want && e.ready.load(std::memory_order_acquire)==key && !std::memcmp(e.cur,cur,64)) return; // another pass of the draw
+            if(static_cast<std::uint32_t>(tag>>32)==key || !e.tag.compare_exchange_strong(tag,want,std::memory_order_acq_rel)) continue;
+            std::memcpy(e.cur,cur,64);std::memcpy(e.prev,prev,64);
+            e.ready.store(key,std::memory_order_release);return;
+        }
+    }
+    bool find(unsigned eye,std::uint32_t frame,const float* cur,float* prev) const noexcept {
+        const std::uint32_t h=hash(cur),key=frame+1;const std::uint64_t want=std::uint64_t{key}<<32|h;
+        const Slot* t=table(eye,frame);
+        for(unsigned i=0;i<probes;++i) {
+            const Slot& e=t[(h+i)&(slots-1)];const std::uint64_t tag=e.tag.load(std::memory_order_acquire);
+            if(static_cast<std::uint32_t>(tag>>32)!=key) return false; // the frame's probe chain ends at an older or empty slot
+            if(tag!=want || e.ready.load(std::memory_order_acquire)!=key || std::memcmp(e.cur,cur,64)) continue;
+            std::memcpy(prev,e.prev,64);
+            return e.tag.load(std::memory_order_acquire)==want; // not reclaimed by a newer frame while copied
+        }
+        return false;
+    }
+    // Records this draw, then rewrites `prev` to this eye's own previous MVP when the chain proves it.
+    Kind fix(unsigned eye,std::uint32_t frame,const float* cur,float* prev) noexcept {
+        insert(eye,frame,cur,prev);
+        if(!std::memcmp(cur,prev,64)) return same; // an object's first frame: the engine reports no motion
+        float got[16],own[16];
+        if(find(eye,frame-1,prev,own)) return own_last; // already this eye's own (culled in the other eye's last view)
+        const Kind kind=find(eye^1u,frame,prev,got)?other_now:find(eye^1u,frame-1,prev,got)?other_last:miss;
+        if(kind==miss) return miss;
+        if(!find(eye,frame-1,got,own)) return unproven;
+        std::memcpy(prev,got,64);return kind;
+    }
+private:
+    struct Slot {std::atomic<std::uint64_t> tag{};std::atomic<std::uint32_t> ready{};float cur[16]{},prev[16]{};};
+    std::array<Slot,2*gens*slots> slots_{};
+    Slot* table(unsigned eye,std::uint32_t frame) noexcept {return &slots_[(eye*gens+frame%gens)*slots];}
+    const Slot* table(unsigned eye,std::uint32_t frame) const noexcept {return &slots_[(eye*gens+frame%gens)*slots];}
+};
+
+class ObjectMotion {
+public:
+    using Read=bool(*)(std::uintptr_t,void*,std::size_t);
+    static constexpr unsigned absent=0xff,max_floats=256; // shadowed per-instance cbuffers: up to 1 KB
+    // One draw's rows by its shader's layout (linux/proxy/vs_layouts.hpp: byte k = float4 index of
+    // cb_mvpmatrix{x,y,z,w}[k], then of cb_previousmvpmatrix; 0xff = not declared). A missing z row is `z`, the eye VP's
+    // z row: with reverse-Z every MVP's z row is (0,0,0,near). False without the x, y and w rows of both.
+    static bool gather(std::uint64_t layout,const float* f,UINT size,const float* z,float* cur,float* prev) noexcept {
+        for(unsigned k=0;k<8;++k) {
+            const auto row=static_cast<unsigned>(layout>>(8*k)&255);float* out=(k<4?cur:prev)+4*(k&3);
+            if(row==absent && (k&3)==2) std::memcpy(out,z,16);
+            else if(row==absent || (row+1)*16>size) return false;
+            else std::memcpy(out,f+4*row,16);
+        }
+        return true;
+    }
+    static void scatter(std::uint64_t layout,const float* prev,float* f) noexcept {
+        for(unsigned k=4;k<8;++k) if(const auto row=static_cast<unsigned>(layout>>(8*k)&255);row!=absent) std::memcpy(f+4*row,prev+4*(k-4),16);
+    }
+    static void scatter_cur(std::uint64_t layout,const float* cur,float* f) noexcept { // v930: the current rows (a missing z row stays missing)
+        for(unsigned k=0;k<4;++k) if(const auto row=static_cast<unsigned>(layout>>(8*k)&255);row!=absent) std::memcpy(f+4*row,cur+4*k,16);
+    }
+    // Row 3 of inverse(A), A = m (row-major) or its transpose: rows R = A*M with M affine give r*R = (0,0,0,1).
+    static bool inverse_last_row(const float* m,bool transpose,float* r) noexcept {
+        double a[4][5];
+        for(int i=0;i<4;++i) {for(int j=0;j<4;++j) a[i][j]=transpose?m[i*4+j]:m[j*4+i];a[i][4]=i==3?1.0:0.0;}
+        for(int c=0;c<4;++c) {
+            int p=c;for(int i=c+1;i<4;++i) if(std::abs(a[i][c])>std::abs(a[p][c])) p=i;
+            if(std::abs(a[p][c])<1e-12) return false;
+            for(int j=0;j<5;++j) std::swap(a[p][j],a[c][j]);
+            for(int i=0;i<4;++i) if(i!=c) {const double k=a[i][c]/a[c][c];for(int j=c;j<5;++j) a[i][j]-=k*a[c][j];}
+        }
+        for(int i=0;i<4;++i) r[i]=static_cast<float>(a[i][4]/a[i][i]);
+        return true;
+    }
+    // Row-major 4x4: full inverse (false when singular) and product.
+    static bool inverse(const float* m,float* out) noexcept {
+        double a[4][8];
+        for(int i=0;i<4;++i) for(int j=0;j<4;++j) {a[i][j]=m[i*4+j];a[i][4+j]=i==j?1.0:0.0;}
+        for(int c=0;c<4;++c) {
+            int p=c;for(int i=c+1;i<4;++i) if(std::abs(a[i][c])>std::abs(a[p][c])) p=i;
+            if(std::abs(a[p][c])<1e-12) return false;
+            for(int j=0;j<8;++j) std::swap(a[p][j],a[c][j]);
+            const double d=a[c][c];for(int j=0;j<8;++j) a[c][j]/=d;
+            for(int i=0;i<4;++i) if(i!=c) {const double k=a[i][c];for(int j=0;j<8;++j) a[i][j]-=k*a[c][j];}
+        }
+        for(int i=0;i<4;++i) for(int j=0;j<4;++j) out[i*4+j]=static_cast<float>(a[i][4+j]);
+        return true;
+    }
+    static void mul(const float* a,const float* b,float* out) noexcept {
+        for(int i=0;i<4;++i) for(int j=0;j<4;++j) {double t=0;for(int k=0;k<4;++k) t+=double(a[i*4+k])*b[k*4+j];out[i*4+j]=static_cast<float>(t);}
+    }
+    // Screen motion of the model origin (NDC/1000) between two MVPs; huge when the origin is not in front of the eye.
+    static double origin_motion(const float* cur,const float* prev) noexcept {
+        if(!(cur[15]>.01f && prev[15]>.01f)) return 1e30;
+        return 1000.0*std::hypot(double(cur[3]/cur[15]-prev[3]/prev[15]),double(cur[7]/cur[15]-prev[7]/prev[15]));
+    }
+    static bool affine(const float* r,const float* block) noexcept {
+        for(int j=0;j<4;++j) {
+            double x=0,scale=0;
+            for(int k=0;k<4;++k) {const double t=double(r[k])*block[4*k+j];x+=t;scale+=std::abs(t);}
+            if(!(std::abs(x-(j==3?1.0:0.0))<=2e-5*scale+1e-5)) return false;
+        }
+        return true;
+    }
+    // From the engine's view Setup (entry: the view still holds its last frame's matrices). 0 = not a paired eye.
+    static void note_eye_view(unsigned eye,std::uintptr_t view) noexcept {
+        if(eye>1) return;
+        eye_views_[eye].store(view,std::memory_order_relaxed);
+        if(view && on()) {std::lock_guard<std::mutex> lock(views_mutex_);snapshot(eye,view);}
+    }
+    // v950: from each eye's native TAA dispatch, its per-view globals buffer (CS b1, 800 bytes), which the eye's scene draws
+    // bind at VS b1. Two per eye (a view may alternate buffers); one seen for both eyes names neither.
+    static void note_taa_b1(unsigned eye,const void* b) noexcept {
+        if(eye>1 || !b) return;
+        auto& own=taa_b1_[eye];
+        if(own[0].load(std::memory_order_relaxed)==b || own[1].load(std::memory_order_relaxed)==b) return;
+        own[1].store(own[0].load(std::memory_order_relaxed),std::memory_order_relaxed);own[0].store(b,std::memory_order_relaxed);
+    }
+    static int b1_eye(const void* b) noexcept { // -1: no eye's
+        int eye=-1;
+        if(b) for(int e=0;e<2;++e) for(const auto& p:taa_b1_[static_cast<unsigned>(e)]) if(p.load(std::memory_order_relaxed)==b) eye=eye==-1 || eye==e?e:-2;
+        return eye<0?-1:eye;
+    }
+    // Every Present: installs once, then polls the knobs and writes the statistics every two seconds.
+    static bool install(ID3D11Device* device,const std::filesystem::path& output,const std::filesystem::path& knobs,Read read) noexcept {
+        if(installed_) {poll();return true;}
+        if(tried_ || !device || !read) return false;
+        tried_=true;std::error_code error;
+        if(std::filesystem::exists(knobs/L"no-object-motion",error)) return false; // on by default since v828 (sim-proven)
+        output_=output;knobs_=knobs;read_=read;
+        if(const HMODULE proxy=GetModuleHandleW(L"dinput8.dll")) { // the game folder's proxy, loaded at process start
+            layout_=reinterpret_cast<LayoutFn>(reinterpret_cast<void*>(GetProcAddress(proxy,"D2vrVertexShaderLayout")));
+            proxy_stats_=reinterpret_cast<StatsFn>(reinterpret_cast<void*>(GetProcAddress(proxy,"D2vrVertexShaderStats")));
+        }
+        ID3D11DeviceContext* deferred{};
+        if(layout_ && SUCCEEDED(device->CreateDeferredContext(0,&deferred))) {
+            ID3D11DeviceContext* immediate{};device->GetImmediateContext(&immediate);
+            void** d=*reinterpret_cast<void***>(deferred);void** i=immediate?*reinterpret_cast<void***>(immediate):nullptr;
+            installed_=hook2(d,i,14,&map_hook<0>,&map_hook<1>,map_) && hook2(d,i,15,&unmap_hook<0>,&unmap_hook<1>,unmap_) &&
+                hook2(d,i,48,&update_hook<0>,&update_hook<1>,update_) && hook2(d,i,7,&set_cb_hook<0>,&set_cb_hook<1>,set_cb_) &&
+                hook2(d,i,11,&set_vs_hook<0>,&set_vs_hook<1>,set_vs_);
+            ID3D11DeviceContext1* d1{};ID3D11DeviceContext1* i1{}; // ranged binds and UpdateSubresource1
+            if(installed_ && SUCCEEDED(deferred->QueryInterface(IID_PPV_ARGS(&d1)))) {
+                if(immediate) immediate->QueryInterface(IID_PPV_ARGS(&i1));
+                void** dv=*reinterpret_cast<void***>(d1);void** iv=i1?*reinterpret_cast<void***>(i1):nullptr;
+                hook2(dv,iv,116,&update1_hook<0>,&update1_hook<1>,update1_);hook2(dv,iv,119,&set_cb1_hook<0>,&set_cb1_hook<1>,set_cb1_);
+                if(i1) i1->Release();
+                d1->Release();
+            }
+            if(immediate) immediate->Release();
+            deferred->Release();
+            if(!installed_) disable();
+        }
+        poll();
+        return installed_;
+    }
+    // v930: the held weapons' placement is wanted (mod installed, not opted out) / the probe is on / a probe line (any thread).
+    static bool weapon_wanted() noexcept {return installed_ && weapon_mode_.load(std::memory_order_relaxed)>=1 && mode_.load(std::memory_order_relaxed)>=1;}
+    static bool weapon_probe() noexcept {return weapon_probe_on_.load(std::memory_order_relaxed);}
+    static void probe_line(const char* text) noexcept {
+        std::lock_guard<std::mutex> lock(probe_mutex_);
+        if(probe_text_.size()<=(24u<<20)) probe_text_.append(text);
+    }
+    static void disable() noexcept {
+        mode_=-1;
+        for(unsigned i=0;i<target_count_;++i) MH_DisableHook(targets_[i]);
+        Sleep(50); // the hook bodies are microseconds long
+    }
+private:
+    enum Counter:unsigned {layout_draws,motion,no_shadow,untagged,no_rows,guard_fail,fixed_l,fixed_r,pool_fail,shadow_writes,oversize,
+        view_writes,view_vp,view_v,view_none,learned_cb2,learned_view,engine_sum_l,engine_sum_r,out_sum_l,out_sum_r,engine_big_l,
+        engine_big_r,out_big_l,out_big_r,corrected_l,corrected_r,camera_l,camera_r,
+        weapon_ticks,weapon_stage,weapon_stage1,weapon_stage2,weapon_stage3,weapon_stage4,weapon_stage5,weapon_stage6,weapon_eye0,weapon_eye1,weapon_label_wrong,weapon_engine_sum_l,weapon_engine_sum_r,
+        weapon_out_sum_l,weapon_out_sum_r,weapon_probe_lines, // v931
+        own_b1_agree,own_b1_disagree,own_b1_unknown,latest_b1_agree,latest_b1_disagree,latest_b1_unknown,b1_retagged,b1_lost, // v950
+        ticks,kind_l,kind_r=kind_l+PrevMvpTable::kinds,near_l=kind_r+PrevMvpTable::kinds,
+        near_r=near_l+PrevMvpTable::kinds,counters=near_r+PrevMvpTable::kinds};
+    // b2 of shaders with previous rows (shadowed); b1 of any draw (per-view candidates: the mesh shaders' own b1 is an
+    // 800-byte buffer they do not read and the game never rewrites; the VP-carrying per-view constants are b1 of other
+    // shaders); a candidate that never matches an eye view in 16 writes is ignored.
+    enum Learn:unsigned {cb2_kind=1,view_kind=2,ignored_kind=3};
+    static constexpr unsigned matched=1u<<30; // misses of a candidate that matched once: never ignored
+    using LayoutFn=std::uint64_t(WINAPI*)(void*);
+    using StatsFn=void(WINAPI*)(std::uint64_t*);
+    using Map=HRESULT(STDMETHODCALLTYPE*)(ID3D11DeviceContext*,ID3D11Resource*,UINT,D3D11_MAP,UINT,D3D11_MAPPED_SUBRESOURCE*);
+    using Unmap=void(STDMETHODCALLTYPE*)(ID3D11DeviceContext*,ID3D11Resource*,UINT);
+    using Update=void(STDMETHODCALLTYPE*)(ID3D11DeviceContext*,ID3D11Resource*,UINT,const D3D11_BOX*,const void*,UINT,UINT);
+    using Update1=void(STDMETHODCALLTYPE*)(ID3D11DeviceContext1*,ID3D11Resource*,UINT,const D3D11_BOX*,const void*,UINT,UINT,UINT);
+    using SetVs=void(STDMETHODCALLTYPE*)(ID3D11DeviceContext*,ID3D11VertexShader*,ID3D11ClassInstance* const*,UINT);
+    using SetCb=void(STDMETHODCALLTYPE*)(ID3D11DeviceContext*,UINT,UINT,ID3D11Buffer* const*);
+    using SetCb1=void(STDMETHODCALLTYPE*)(ID3D11DeviceContext1*,UINT,UINT,ID3D11Buffer* const*,const UINT*,const UINT*);
+    // Inverse last rows of the eye's VP (both storage orders), its z row, and the view correction for unproven draws.
+    struct View {std::uint32_t frame{};unsigned eye{};float inv[2][4]{};float z[4]{};float corr[16]{},camera[16]{};bool corr_ok{},camera_ok{};};
+    struct EyeView {std::uint32_t frame{};bool valid{};float m[4][16]{};float inv[2][4]{};}; // view, view^T, VP, VP^T
+    struct Shadow {const void* buffer{};UINT size{};float data[max_floats]{};};
+    struct ContextState { // a context is used by one thread at a time: no locks
+        unsigned type{}; // 0 deferred, 1 immediate: whose original methods this context takes
+        void* vs{};std::uint64_t layout{};ID3D11Buffer* cb[2]{}; // the bound vertex shader, its rows, b1 and b2 as the game bound them
+        ID3D11Buffer* pool{};bool pool_failed{};
+        View view{};bool view_valid{};std::uint32_t view_frame{~0u}; // the last per-view write recorded here, and the newest frame then
+        std::array<Shadow,64> shadows{};
+        Shadow& shadow(const void* b) noexcept {return shadows[(reinterpret_cast<std::uintptr_t>(b)>>4)*0x9e3779b97f4a7c15ull>>58];}
+    };
+    struct Latest {std::atomic<std::uint32_t> seq{};View view{};}; // an eye's newest classified view (seqlock: odd while written)
+    struct B1Seen {std::atomic<const void*> buffer{};std::atomic<std::uint64_t> n[3]{};}; // v950 diagnostics: draws by own-context tag L/R, fallback
+    struct Learned {std::atomic<const void*> buffer{};std::atomic<unsigned> kind{},misses{};};
+    struct Pending {ID3D11DeviceContext* context{};ID3D11Resource* resource{};void* data{};Learned* entry{};};
+    static constexpr unsigned context_slots=64,learned_slots=1u<<14;
+
+    inline static PrevMvpTable table_;
+    inline static std::array<std::atomic<ID3D11DeviceContext*>,context_slots> context_keys_{};
+    inline static std::array<std::atomic<ContextState*>,context_slots> context_states_{};
+    inline static std::array<Learned,learned_slots> learned_{};
+    inline static std::array<Latest,2> latest_{}; // v950: per eye (was one, the newest anywhere)
+    inline static std::atomic<unsigned> latest_eye_{}; // the eye classified last at the newest frame: the old fallback
+    inline static std::array<std::array<std::atomic<const void*>,2>,2> taa_b1_{}; // v950: per eye, the CS b1 its native TAA binds
+    inline static std::atomic<bool> b1_eye_on_{true}; // build/no-object-motion-b1-eye: the old tag
+    inline static std::array<B1Seen,8> b1_seen_{};
+    inline static std::atomic<std::uint32_t> newest_frame_{};
+    inline static std::mutex views_mutex_;
+    inline static std::array<std::atomic<std::uintptr_t>,2> eye_views_{};
+    inline static std::array<std::array<EyeView,4>,2> eye_records_{};
+    inline static std::atomic<unsigned> vp_at_{~0u}; // float index of the VP in the per-view constants, as last matched
+    inline static std::array<std::atomic<std::uint64_t>,counters> stats_{};
+    inline static std::array<std::array<std::atomic<std::uint32_t>,64>,2> unmatched_size_{}; // per eye: unmatched draws by cb2 float4s
+    inline static thread_local std::array<std::uint64_t,counters> local_{};
+    inline static thread_local unsigned local_n_{};
+    inline static thread_local std::array<Pending,4> pending_{};
+    inline static thread_local unsigned pending_next_{};
+    inline static thread_local ID3D11DeviceContext* tl_context_{};
+    inline static thread_local ContextState* tl_state_{};
+    inline static std::atomic<int> mode_{-1}; // -1 until installed: note_eye_view runs from the first eye setup either way
+    // v930: held weapons placed at the draw (weapon_draw_place.hpp). 1 on (default), 0 off (build/no-weapon-draw-place); the probe
+    // (build/weapon-draw-probe) logs the model matrices of near draws and the published placements to artifacts/weapon-draw-probe.csv.
+    inline static std::atomic<int> weapon_mode_{1};
+    inline static std::atomic<bool> weapon_probe_on_{};
+    struct ViewsEntry {std::atomic<std::uint32_t> ready{};weapon_draw::Views views{};};
+    inline static std::array<ViewsEntry,8> views_cache_{};
+    inline static std::mutex views_cache_mutex_;
+    inline static std::mutex probe_mutex_;
+    inline static std::string probe_text_;
+    inline static std::array<std::uint32_t,2> probe_frame_{~0u,~0u};inline static std::array<unsigned,2> probe_in_frame_{};
+    inline static std::array<void*,32> targets_{};inline static unsigned target_count_{};
+    inline static std::array<Map,2> map_{};inline static std::array<Unmap,2> unmap_{};inline static std::array<Update,2> update_{};
+    inline static std::array<Update1,2> update1_{};inline static std::array<SetVs,2> set_vs_{};
+    inline static std::array<SetCb,2> set_cb_{};inline static std::array<SetCb1,2> set_cb1_{};
+    inline static LayoutFn layout_{};inline static StatsFn proxy_stats_{};
+    inline static Read read_{};inline static std::filesystem::path output_,knobs_;
+    inline static bool installed_{},tried_{};
+    inline static std::uint64_t poll_frames_{},last_poll_qpc_{},last_poll_ticks_{};
+
+    static bool on() noexcept {
+        return mode_.load(std::memory_order_relaxed)>=0 && eye_views_[0].load(std::memory_order_relaxed) && eye_views_[1].load(std::memory_order_relaxed);
+    }
+    static void count(Counter c,std::uint64_t n=1) noexcept {local_[c]+=n;if(!(++local_n_&255)) flush();}
+    static void flush() noexcept {for(unsigned i=0;i<counters;++i) if(local_[i]) {stats_[i].fetch_add(local_[i],std::memory_order_relaxed);local_[i]=0;}}
+    template<class Fn> static bool hook(void* target,Fn replacement,Fn& original) noexcept {
+        if(target_count_>=targets_.size() || MH_CreateHook(target,reinterpret_cast<void*>(replacement),reinterpret_cast<void**>(&original))!=MH_OK) return false;
+        if(MH_EnableHook(target)!=MH_OK) {MH_RemoveHook(target);original=nullptr;return false;}
+        targets_[target_count_++]=target;return true;
+    }
+    // The deferred context's method, and the immediate context's when it is another function (else the hook is shared).
+    template<class T> struct same {using type=T;}; // the hooks' type comes from the originals
+    template<class Fn> static bool hook2(void** deferred,void** immediate,unsigned slot,typename same<Fn>::type d,typename same<Fn>::type i,std::array<Fn,2>& original) noexcept {
+        if(!hook(deferred[slot],d,original[0])) return false;
+        if(immediate && immediate[slot]==deferred[slot]) original[1]=original[0];
+        else if(immediate) hook(immediate[slot],i,original[1]);
+        return true;
+    }
+
+    static ContextState* state(ID3D11DeviceContext* c) noexcept {
+        if(tl_context_==c) return tl_state_;
+        const auto h=static_cast<unsigned>((reinterpret_cast<std::uintptr_t>(c)>>4)*0x9e3779b97f4a7c15ull>>58);
+        for(unsigned i=0;i<context_slots;++i) {
+            const unsigned at=(h+i)&(context_slots-1);
+            ID3D11DeviceContext* key=context_keys_[at].load(std::memory_order_acquire);
+            if(!key && context_keys_[at].compare_exchange_strong(key,c,std::memory_order_acq_rel)) {
+                auto* s=new(std::nothrow) ContextState{};
+                if(s) s->type=c->GetType()==D3D11_DEVICE_CONTEXT_IMMEDIATE?1u:0u;
+                context_states_[at].store(s,std::memory_order_release);key=c;
+            }
+            if(key!=c) continue;
+            ContextState* s=context_states_[at].load(std::memory_order_acquire);
+            if(s) {tl_context_=c;tl_state_=s;}
+            return s;
+        }
+        return nullptr;
+    }
+    // Buffers seen at draws of shaders with previous rows: b2 (per-instance rows, shadowed) and b1 (per-view, classified).
+    static unsigned learned_hash(const void* b) noexcept {return static_cast<unsigned>((reinterpret_cast<std::uintptr_t>(b)>>4)*0x9e3779b97f4a7c15ull>>50);}
+    static Learned* learned(const void* b) noexcept {
+        const unsigned h=learned_hash(b);
+        for(unsigned i=0;i<32;++i) {
+            auto& e=learned_[(h+i)&(learned_slots-1)];const void* key=e.buffer.load(std::memory_order_acquire);
+            if(key==b) return &e;
+            if(!key) return nullptr;
+        }
+        return nullptr;
+    }
+    static Learned* shadowed(const void* b) noexcept { // a learned buffer whose writes are kept
+        Learned* e=learned(b);
+        return e && e->kind.load(std::memory_order_relaxed)!=ignored_kind?e:nullptr;
+    }
+    static void learn(const void* b,unsigned kind) noexcept {
+        const unsigned h=learned_hash(b);
+        for(unsigned i=0;i<32;++i) {
+            auto& e=learned_[(h+i)&(learned_slots-1)];const void* key=e.buffer.load(std::memory_order_acquire);
+            if(!key && e.buffer.compare_exchange_strong(key,b,std::memory_order_acq_rel)) key=b;
+            if(key!=b) continue;
+            if(e.kind.exchange(kind,std::memory_order_relaxed)!=kind) {e.misses.store(0,std::memory_order_relaxed);count(kind==cb2_kind?learned_cb2:learned_view);}
+            return;
+        }
+    }
+
+    // Eye views: snapshots of view (+0x7450) and view-projection (+0x7510) at engine frame +0x77B4.
+    static void snapshot(unsigned eye,std::uintptr_t view) noexcept {
+        if(!read_) return;
+        EyeView v{};
+        if(!read_(view+0x77b4,&v.frame,4) || !read_(view+0x7450,v.m[0],64) || !read_(view+0x7510,v.m[2],64)) return;
+        for(int r=0;r<4;++r) for(int c=0;c<4;++c) {v.m[1][c*4+r]=v.m[0][r*4+c];v.m[3][c*4+r]=v.m[2][r*4+c];}
+        if(!inverse_last_row(v.m[2],false,v.inv[0]) || !inverse_last_row(v.m[2],true,v.inv[1])) return;
+        v.valid=true;
+        auto& ring=eye_records_[eye];auto* slot=&ring[0];
+        for(auto& old:ring) {if(old.valid && old.frame==v.frame) {slot=&old;break;} if(!old.valid || old.frame<slot->frame) slot=&old;}
+        *slot=v;
+    }
+    static bool near16(const float* a,const float* b) noexcept {
+        for(int i=0;i<16;++i) if(!(std::abs(a[i]-b[i])<=1e-5f*(1.f+std::abs(b[i])))) return false;
+        return true;
+    }
+    // A per-view constants write: the eye view and engine frame its matrices belong to (VP first: its jitter makes the
+    // frame unique even with the head still). The VP's offset is remembered, so most writes compare one float4 block.
+    static bool classify(const float* f,UINT size,View& out) noexcept {
+        std::lock_guard<std::mutex> lock(views_mutex_);
+        for(unsigned eye=0;eye<2;++eye) if(const auto view=eye_views_[eye].load(std::memory_order_relaxed)) snapshot(eye,view);
+        int best_eye=-1,best_rank=-1;const EyeView* best=nullptr;UINT best_at=0;
+        const auto scan=[&](UINT o,int first) {
+            for(unsigned eye=0;eye<2;++eye) for(const auto& r:eye_records_[eye]) if(r.valid) for(int m=first;m<4;++m) {
+                const int rank=m>=2?1:0;
+                if(rank<best_rank || (rank==best_rank && best && r.frame<=best->frame) || !near16(f+o,r.m[m])) continue;
+                best=&r;best_eye=static_cast<int>(eye);best_rank=rank;best_at=o;
+            }
+        };
+        const UINT n=size/4,at=vp_at_.load(std::memory_order_relaxed);
+        if(at<n && at+16<=n) scan(at,2);
+        if(best_rank<1) {
+            for(UINT o=0;o+16<=n;o+=4) scan(o,0);
+            if(best_rank==1) vp_at_.store(best_at,std::memory_order_relaxed);
+        }
+        count(best_rank==1?view_vp:best_rank==0?view_v:view_none);
+        if(!best) return false;
+        out.eye=static_cast<unsigned>(best_eye);out.frame=best->frame;
+        std::memcpy(out.inv,best->inv,32);std::memcpy(out.z,best->m[2]+8,16);
+        // Draws the chain cannot prove (rival's PrevCorrection idea): a previous MVP cached from the other eye's view (case A:
+        // R(n-1) for the left eye, L(n) for the right) moved into this eye's last view, VP_own(n-1) * inverse(VP_source).
+        const EyeView* own=nullptr;const EyeView* source=nullptr;const std::uint32_t source_frame=out.eye?out.frame:out.frame-1;
+        for(const auto& r:eye_records_[out.eye]) if(r.valid && r.frame==out.frame-1) own=&r;
+        for(const auto& r:eye_records_[out.eye^1u]) if(r.valid && r.frame==source_frame) source=&r;
+        float inverse_source[16];
+        out.corr_ok=own && source && inverse(source->m[2],inverse_source);
+        if(out.corr_ok) mul(own->m[2],inverse_source,out.corr);
+        // And the camera-only previous, VP_own(n-1) * inverse(VP_own(n)) * current: exact for static objects (the left eye's
+        // unmatched draws are not from the other eye's view, v871: their cache was last written by an unrecorded view).
+        float inverse_own[16];
+        out.camera_ok=own && inverse(best->m[2],inverse_own);
+        if(out.camera_ok) mul(own->m[2],inverse_own,out.camera);
+        if(Latest& l=latest_[out.eye];out.frame>=l.view.frame) { // one writer: under views_mutex_
+            l.seq.fetch_add(1,std::memory_order_acq_rel);l.view=out;l.seq.fetch_add(1,std::memory_order_release);
+        }
+        if(out.frame>=newest_frame_.load(std::memory_order_relaxed)) {latest_eye_.store(out.eye,std::memory_order_relaxed);newest_frame_.store(out.frame,std::memory_order_release);}
+        return true;
+    }
+    static bool latest(unsigned eye,View& out) noexcept {
+        const Latest& l=latest_[eye&1u];
+        for(int i=0;i<4;++i) {
+            const auto q=l.seq.load(std::memory_order_acquire);
+            if(q&1) continue;
+            out=l.view;
+            std::atomic_thread_fence(std::memory_order_acquire);
+            if(l.seq.load(std::memory_order_relaxed)==q) return q!=0;
+        }
+        return false;
+    }
+    // Diagnostics, every 16th tagged draw per thread: the draws' VS b1 buffers by the tag's eye (own context) or fallback.
+    static void note_b1(const void* b,bool own,unsigned eye) noexcept {
+        static thread_local unsigned n=0;
+        if(!b || (++n&15)) return;
+        for(auto& e:b1_seen_) {
+            const void* key=e.buffer.load(std::memory_order_relaxed);
+            if(!key && e.buffer.compare_exchange_strong(key,b,std::memory_order_relaxed)) key=b;
+            if(key!=b) continue;
+            e.n[own?eye&1u:2u].fetch_add(1,std::memory_order_relaxed);return;
+        }
+    }
+    // The eye view of a draw: the last per-view write on its context when that is of the newest frame (a shadow or other
+    // view's constants there leave the draw untagged), else the newest eye view written anywhere.
+    // v950: in paired stereo that newest view is often the other eye's (weapon-pin: weapon draws tagged with the other eye).
+    // The draw's VS b1, when it is the per-view globals buffer an eye's native TAA binds, names the eye; the tag keeps it.
+    static bool current_view(const ContextState& s,View& out) noexcept {
+        const std::uint32_t newest=newest_frame_.load(std::memory_order_acquire);
+        const bool own=s.view_frame==newest;
+        bool ok;
+        if(own) {out=s.view;ok=s.view_valid;}
+        else ok=latest(latest_eye_.load(std::memory_order_acquire),out) && out.frame==newest;
+        if(!ok) return false;
+        const int key=b1_eye(s.cb[0]);
+        note_b1(s.cb[0],own,out.eye);
+        count(static_cast<Counter>((own?own_b1_agree:latest_b1_agree)+(key<0?2u:static_cast<unsigned>(key)==out.eye?0u:1u)));
+        if(key<0 || static_cast<unsigned>(key)==out.eye || !b1_eye_on_.load(std::memory_order_relaxed)) return true;
+        ok=latest(static_cast<unsigned>(key),out) && out.frame==newest; // that eye's view of this frame, else untagged
+        count(ok?b1_retagged:b1_lost);
+        return ok;
+    }
+    // A write of a learned buffer: per-instance rows are shadowed for the draws, per-view constants classified.
+    static void written(ID3D11DeviceContext* c,ID3D11Resource* r,const void* data,Learned& entry) noexcept {
+        if(!on()) return;
+        const auto t=__rdtsc();
+        D3D11_RESOURCE_DIMENSION dimension{};r->GetType(&dimension);
+        D3D11_BUFFER_DESC desc{};
+        if(dimension==D3D11_RESOURCE_DIMENSION_BUFFER) static_cast<ID3D11Buffer*>(r)->GetDesc(&desc);
+        ContextState* s=(desc.BindFlags&D3D11_BIND_CONSTANT_BUFFER)?state(c):nullptr;
+        const unsigned kind=entry.kind.load(std::memory_order_relaxed);
+        if(s && kind==cb2_kind && desc.ByteWidth>max_floats*4) count(oversize);
+        else if(s && kind==cb2_kind) {
+            Shadow& sh=s->shadow(r);sh.buffer=r;sh.size=desc.ByteWidth;std::memcpy(sh.data,data,desc.ByteWidth);count(shadow_writes);
+        } else if(s && kind==view_kind) {
+            View view{};const bool valid=classify(static_cast<const float*>(data),desc.ByteWidth,view);
+            count(view_writes);s->view=view;s->view_valid=valid;s->view_frame=valid?view.frame:newest_frame_.load(std::memory_order_acquire);
+            if(valid) entry.misses.store(matched,std::memory_order_relaxed);
+            else if(entry.misses.fetch_add(1,std::memory_order_relaxed)==15) entry.kind.store(ignored_kind,std::memory_order_relaxed);
+        }
+        count(ticks,__rdtsc()-t);
+    }
+    // Sim proof: the screen motion of the model origin (NDC/1000) by the engine's and by the submitted previous rows.
+    static void measure(unsigned eye,const float* cur,const float* engine,const float* out) noexcept {
+        const auto motion=[&](const float* p) {
+            if(!(cur[15]>.01f && p[15]>.01f)) return -1.0;
+            return 1000.0*std::hypot(double(cur[3]/cur[15]-p[3]/p[15]),double(cur[7]/cur[15]-p[7]/p[15]));
+        };
+        if(const double e=motion(engine),o=motion(out);e>=0) {
+            count(eye?engine_sum_r:engine_sum_l,static_cast<std::uint64_t>(e));count(eye?out_sum_r:out_sum_l,static_cast<std::uint64_t>(o));
+            if(e>2) count(eye?engine_big_r:engine_big_l);
+            if(o>2) count(eye?out_big_r:out_big_l);
+        }
+    }
+    static bool make_pool(ID3D11DeviceContext* c,ContextState& s) noexcept {
+        if(s.pool_failed) return false;
+        ID3D11Device* device{};c->GetDevice(&device);
+        D3D11_BUFFER_DESC desc{};desc.ByteWidth=max_floats*4;desc.Usage=D3D11_USAGE_DYNAMIC;
+        desc.BindFlags=D3D11_BIND_CONSTANT_BUFFER;desc.CPUAccessFlags=D3D11_CPU_ACCESS_WRITE;
+        const bool ok=device && SUCCEEDED(device->CreateBuffer(&desc,nullptr,&s.pool)) && s.pool;
+        if(device) device->Release();
+        if(!ok) {s.pool=nullptr;s.pool_failed=true;count(pool_fail);}
+        return ok;
+    }
+    // This draw's own previous rows into the context's pool buffer; true when it is to be bound at b2 for the draw.
+    static bool prepare(ID3D11DeviceContext* c,ContextState& s) noexcept {
+        count(layout_draws);
+        const Shadow* sh=s.cb[1]?&s.shadow(s.cb[1]):nullptr;
+        if(!sh || sh->buffer!=s.cb[1]) {if(s.cb[1]) learn(s.cb[1],cb2_kind);count(no_shadow);return false;}
+        View view{};
+        if(!current_view(s,view)) {count(untagged);return false;}
+        float cur[16],prev[16],engine[16];
+        if(!gather(s.layout,sh->data,sh->size,view.z,cur,prev)) {count(no_rows);return false;}
+        // The current rows must be this view's: a stale shadow or another view's constants never are.
+        if(!affine(view.inv[0],cur) && !affine(view.inv[1],cur)) {count(guard_fail);return false;}
+        count(motion);std::memcpy(engine,prev,64);
+        if(weapon_mode_.load(std::memory_order_relaxed)>=1 && mode_.load(std::memory_order_relaxed)>=1) { // v931: a held weapon is drawn in the hand of this render
+            float placed[16],placed_prev[16];
+            static thread_local unsigned weapon_sample{};const bool timed=!(++weapon_sample&15);   // one draw in 16 is timed
+            const auto started=timed?__rdtsc():0;
+            const auto r=weapon_draw::Place::place(view.frame,&weapon_views,cur,prev,placed,placed_prev,static_cast<int>(view.eye));
+            if(timed) count(weapon_ticks,(__rdtsc()-started)*16);
+            if(r.stage) count(static_cast<Counter>(weapon_stage+r.stage));
+            if(weapon_probe_on_.load(std::memory_order_relaxed) && (r.stage || cur[15]<1.5f)) probe_draw(view,cur,*sh,s,r);
+            if(r.side>=0) {
+                count(r.eye?weapon_eye1:weapon_eye0);
+                if(static_cast<unsigned>(r.eye)!=view.eye) count(weapon_label_wrong);
+                if(const double e=origin_motion(cur,engine),o=origin_motion(placed,placed_prev);e<1e29 && o<1e29) {
+                    count(r.eye?weapon_engine_sum_r:weapon_engine_sum_l,static_cast<std::uint64_t>(e));
+                    count(r.eye?weapon_out_sum_r:weapon_out_sum_l,static_cast<std::uint64_t>(o));
+                }
+                if(!bind_pool(c,s,*sh,placed,placed_prev)) return false;
+                count(r.eye?fixed_r:fixed_l);
+                return true;
+            }
+        }
+        const auto kind=table_.fix(view.eye,view.frame,cur,prev);
+        count(static_cast<Counter>((view.eye?kind_r:kind_l)+kind));
+        // Which draws stay unmatched (headset v832: ~20% per eye, sim ~5%): near ones (model origin closer than 1.5 m: hands,
+        // held items, weapons) per kind, and the cb2 size of misses and unproven draws.
+        if(cur[15]<1.5f) count(static_cast<Counter>((view.eye?near_r:near_l)+kind));
+        if(kind==PrevMvpTable::miss || kind==PrevMvpTable::unproven) unmatched_size_[view.eye][sh->size/16<63?sh->size/16:63].fetch_add(1,std::memory_order_relaxed);
+        bool apply=mode_.load(std::memory_order_relaxed)>=1 && (kind==PrevMvpTable::other_now || kind==PrevMvpTable::other_last);
+        // Unproven or unmatched (headset ~20% per eye): the view correction, kept only when it shrinks the apparent motion.
+        if(!apply && mode_.load(std::memory_order_relaxed)>=1 && (kind==PrevMvpTable::miss || kind==PrevMvpTable::unproven)) {
+            float moved[16],still[16];double best_motion=origin_motion(cur,engine);const float* pick=nullptr;
+            if(view.corr_ok) {mul(view.corr,engine,moved);if(origin_motion(cur,moved)<best_motion) pick=moved;} // keeps the object's own motion
+            if(!pick && view.camera_ok) {mul(view.camera,cur,still);if(origin_motion(cur,still)<best_motion) pick=still;}
+            if(pick) {std::memcpy(prev,pick,64);apply=true;count(pick==moved?(view.eye?corrected_r:corrected_l):(view.eye?camera_r:camera_l));}
+        }
+        measure(view.eye,cur,engine,apply?prev:engine);
+        if(!apply || !bind_pool(c,s,*sh,nullptr,prev)) return false;
+        count(view.eye?fixed_r:fixed_l);
+        return true;
+    }
+    // The shadowed cb2 with its previous rows (and, for a placed weapon, its current rows) replaced, in the context's pool buffer.
+    static bool bind_pool(ID3D11DeviceContext* c,ContextState& s,const Shadow& sh,const float* cur_rows,const float* prev_rows) noexcept {
+        const unsigned t=s.type;
+        if(!map_[t] || !unmap_[t] || !set_cb_[t] || (!s.pool && !make_pool(c,s))) return false;
+        D3D11_MAPPED_SUBRESOURCE m{};
+        if(FAILED(map_[t](c,s.pool,0,D3D11_MAP_WRITE_DISCARD,0,&m)) || !m.pData) {count(pool_fail);return false;}
+        auto* out=static_cast<float*>(m.pData);std::memcpy(out,sh.data,sh.size);
+        if(cur_rows) scatter_cur(s.layout,cur_rows,out);
+        scatter(s.layout,prev_rows,out);
+        unmap_[t](c,s.pool,0);
+        return true;
+    }
+    // Probe (build/weapon-draw-probe): near draws and every draw the placement looked at: the tag's eye, the placement's result, and the model
+    // matrix (3 rows of inverse(VP) * cb2 rows) under the eye it certified (else the tag's), 64 per eye and render.
+    static void probe_draw(const View& view,const float* cur,const Shadow& sh,const ContextState& s,const weapon_draw::Result& r) noexcept {
+        if(view.eye>1) return;
+        const weapon_draw::Views* views=cached_views(view.frame);
+        std::lock_guard<std::mutex> lock(probe_mutex_);
+        if(probe_text_.size()>(24u<<20)) return;
+        if(probe_frame_[view.eye]!=view.frame) {probe_frame_[view.eye]=view.frame;probe_in_frame_[view.eye]=0;}
+        if(++probe_in_frame_[view.eye]>64) return;
+        const unsigned eye_used=r.eye>=0?static_cast<unsigned>(r.eye):view.eye;
+        char line[640];
+        int n=std::snprintf(line,sizeof line,"D,%u,%u,%x,%u,%.3f,%u,%d,%d",view.frame,view.eye,static_cast<unsigned>(reinterpret_cast<std::uintptr_t>(s.vs)>>4),sh.size/16,cur[15],static_cast<unsigned>(r.stage),r.side,r.eye);
+        if(views && views->ok[eye_used]) {
+            const auto m=weapon_draw::Place::model_rows(views->inv[eye_used].data(),cur);
+            for(std::size_t k=0;k<12 && n>0 && n<600;++k) n+=std::snprintf(line+n,sizeof line-static_cast<std::size_t>(n),",%.5f",m[k]);
+        }
+        if(n>0 && n<620) {line[n]='\n';probe_text_.append(line,static_cast<std::size_t>(n)+1);count(weapon_probe_lines);}
+    }
+    // The two eye views' view-projections of an engine frame (and of `previous`, 0: none), built once per frame from the eye records; null until
+    // both eyes' records of the frame exist.
+    static const weapon_draw::Views* cached_views(std::uint32_t frame) noexcept {
+        ViewsEntry& entry=views_cache_[frame&7];
+        return entry.ready.load(std::memory_order_acquire)==frame+1?&entry.views:nullptr;
+    }
+    static const weapon_draw::Views* weapon_views(std::uint32_t frame,std::uint32_t previous) noexcept {
+        if(const auto* cached=cached_views(frame)) return cached;
+        std::lock_guard<std::mutex> build(views_cache_mutex_);
+        if(const auto* cached=cached_views(frame)) return cached;
+        ViewsEntry& entry=views_cache_[frame&7];
+        entry.ready.store(0,std::memory_order_release);
+        weapon_draw::Views v{};v.prev_frame=previous;
+        {
+            std::lock_guard<std::mutex> lock(views_mutex_);
+            for(unsigned e=0;e<2;++e) for(const auto& r:eye_records_[e]) if(r.valid) {
+                if(r.frame==frame) {v.vp[e]=weapon_draw::widen(r.m[2]);v.ok[e]=weapon_draw::inverse(v.vp[e],v.inv[e]);}
+                if(previous && r.frame==previous) {v.prev_vp[e]=weapon_draw::widen(r.m[2]);v.prev_ok[e]=weapon_draw::inverse(v.prev_vp[e],v.prev_inv[e]);}
+            }
+        }
+        if(!v.ok[0] || !v.ok[1]) return nullptr;
+        entry.views=v;
+        entry.ready.store(frame+1,std::memory_order_release);
+        return &entry.views;
+    }
+    static ContextState* before(ID3D11DeviceContext* c) noexcept {
+        if(!on()) return nullptr;
+        ContextState* s=state(c);
+        if(!s || !s->layout) return nullptr;
+        const auto t=__rdtsc();
+        const bool bound=prepare(c,*s);
+        if(bound) set_cb_[s->type](c,2,1,&s->pool);
+        count(ticks,__rdtsc()-t);
+        return bound?s:nullptr;
+    }
+
+    template<int I> static void STDMETHODCALLTYPE set_vs_hook(ID3D11DeviceContext* c,ID3D11VertexShader* vs,ID3D11ClassInstance* const* classes,UINT n) {
+        if(ContextState* s=state(c);s && vs!=s->vs) {s->vs=vs;s->layout=vs?layout_(vs):0;}
+        set_vs_[I](c,vs,classes,n);
+    }
+    // b1/b2 as the game binds them; a range that does not start at the buffer's first constant is never shadowed.
+    static void track(ID3D11DeviceContext* c,UINT start,UINT n,ID3D11Buffer* const* buffers,const UINT* first) noexcept {
+        if(start>2 || start+n<2) return;
+        ContextState* s=state(c);
+        if(!s) return;
+        for(UINT i=0;i<n;++i) if(start+i==1 || start+i==2) {
+            ID3D11Buffer* b=buffers && !(first && first[i])?buffers[i]:nullptr;
+            if(start+i==1 && b && b!=s->cb[0] && !learned(b)) learn(b,view_kind);
+            s->cb[start+i-1]=b;
+        }
+    }
+    template<int I> static void STDMETHODCALLTYPE set_cb_hook(ID3D11DeviceContext* c,UINT start,UINT n,ID3D11Buffer* const* buffers) {
+        track(c,start,n,buffers,nullptr);set_cb_[I](c,start,n,buffers);
+    }
+    template<int I> static void STDMETHODCALLTYPE set_cb1_hook(ID3D11DeviceContext1* c,UINT start,UINT n,ID3D11Buffer* const* buffers,const UINT* first,const UINT* num) {
+        track(c,start,n,buffers,first);set_cb1_[I](c,start,n,buffers,first,num);
+    }
+    template<int I> static HRESULT STDMETHODCALLTYPE map_hook(ID3D11DeviceContext* c,ID3D11Resource* r,UINT sub,D3D11_MAP type,UINT flags,D3D11_MAPPED_SUBRESOURCE* out) {
+        const HRESULT hr=map_[I](c,r,sub,type,flags,out);
+        if(SUCCEEDED(hr) && type==D3D11_MAP_WRITE_DISCARD && out && out->pData && r && on())
+            if(Learned* e=shadowed(r)) pending_[pending_next_++&3]={c,r,out->pData,e};
+        return hr;
+    }
+    template<int I> static void STDMETHODCALLTYPE unmap_hook(ID3D11DeviceContext* c,ID3D11Resource* r,UINT sub) {
+        if(r) for(auto& p:pending_) if(p.resource==r && p.context==c) {p.resource=nullptr;written(c,r,p.data,*p.entry);break;}
+        unmap_[I](c,r,sub);
+    }
+    template<int I> static void STDMETHODCALLTYPE update_hook(ID3D11DeviceContext* c,ID3D11Resource* r,UINT sub,const D3D11_BOX* box,const void* src,UINT rp,UINT dp) {
+        if(!box && src && r && on()) if(Learned* e=shadowed(r)) written(c,r,src,*e);
+        update_[I](c,r,sub,box,src,rp,dp);
+    }
+    template<int I> static void STDMETHODCALLTYPE update1_hook(ID3D11DeviceContext1* c,ID3D11Resource* r,UINT sub,const D3D11_BOX* box,const void* src,UINT rp,UINT dp,UINT flags) {
+        if(!box && src && r && on()) if(Learned* e=shadowed(r)) written(c,r,src,*e);
+        update1_[I](c,r,sub,box,src,rp,dp,flags);
+    }
+
+    static void poll() noexcept {
+        ++poll_frames_;
+        LARGE_INTEGER now{},frequency{};QueryPerformanceCounter(&now);QueryPerformanceFrequency(&frequency);
+        if(last_poll_qpc_ && now.QuadPart-static_cast<LONGLONG>(last_poll_qpc_)<2*frequency.QuadPart) return;
+        std::error_code error;
+        int mode=1;
+        if(std::filesystem::exists(knobs_/L"no-object-motion",error)) mode=-1;
+        else if(std::ifstream knob{knobs_/L"object-motion-mode"}) knob>>mode;
+        mode_.store(installed_?mode:-1,std::memory_order_relaxed);
+        weapon_mode_.store(std::filesystem::exists(knobs_/L"no-weapon-draw-place",error)?0:1,std::memory_order_relaxed); // v930
+        weapon_probe_on_.store(std::filesystem::exists(knobs_/L"weapon-draw-probe",error),std::memory_order_relaxed);
+        b1_eye_on_.store(!std::filesystem::exists(knobs_/L"no-object-motion-b1-eye",error),std::memory_order_relaxed); // v950
+        if(std::ifstream tolerance{knobs_/L"weapon-draw-tol"}) { // "<orientation> <reach m> <identity>", for the model-matrix match
+            double axes=0,reach=0,identity=0;
+            if(tolerance>>axes>>reach>>identity && axes>0 && reach>0 && identity>0) {weapon_draw::Place::axes_tol.store(axes);weapon_draw::Place::reach.store(reach);weapon_draw::Place::identity_tol.store(identity);}
+        }
+        {
+            std::string text;
+            {std::lock_guard<std::mutex> lock(probe_mutex_);text.swap(probe_text_);}
+            if(!text.empty()) {std::ofstream probe(output_/L"weapon-draw-probe.csv",std::ios::app|std::ios::binary);probe<<text;}
+        }
+        flush();
+        const auto tick_now=__rdtsc();
+        const double seconds=last_poll_qpc_?double(now.QuadPart-static_cast<LONGLONG>(last_poll_qpc_))/double(frequency.QuadPart):0;
+        const double ns_per_tick=seconds>0?seconds*1e9/double(tick_now-last_poll_ticks_):0;
+        static std::uint64_t last_ticks{},last_frames{};
+        const auto spent=stats_[ticks].load(),frames=poll_frames_;
+        const double us_per_frame=frames>last_frames?double(spent-last_ticks)*ns_per_tick/1000.0/double(frames-last_frames):0;
+        static std::uint64_t last_weapon_ticks{};const auto weapon_spent=stats_[weapon_ticks].load();
+        const double weapon_us=frames>last_frames?double(weapon_spent-last_weapon_ticks)*ns_per_tick/1000.0/double(frames-last_frames):0;last_weapon_ticks=weapon_spent;
+        last_ticks=spent;last_frames=frames;last_poll_qpc_=static_cast<std::uint64_t>(now.QuadPart);last_poll_ticks_=tick_now;
+        static constexpr const char* names[]={"layout_draws","motion","no_shadow","untagged","no_rows","guard_fail","fixed_left",
+            "fixed_right","pool_fail","shadow_writes","oversize","view_writes","view_vp","view_v","view_none","learned_cb2","learned_view",
+            "engine_motion_sum_left","engine_motion_sum_right","submitted_motion_sum_left","submitted_motion_sum_right",
+            "engine_moving_left","engine_moving_right","submitted_moving_left","submitted_moving_right","corrected_left","corrected_right","camera_left","camera_right",
+            "weapon_tsc_ticks_sampled","weapon_rejected","weapon_no_views","weapon_no_certificate","weapon_far_away","weapon_placed_same_frame","weapon_placed_last_frame","weapon_placed_tagged","weapon_placed_view0",
+            "weapon_placed_view1","weapon_label_wrong","weapon_engine_motion_sum_view0","weapon_engine_motion_sum_view1","weapon_submitted_motion_sum_view0","weapon_submitted_motion_sum_view1","weapon_probe_lines",
+            "own_b1_agree","own_b1_disagree","own_b1_unknown","latest_b1_agree","latest_b1_disagree","latest_b1_unknown","b1_retagged","b1_lost"};
+        static_assert(sizeof names/sizeof *names==ticks,"one name per counter before ticks");
+        std::uint64_t proxy[4]{};
+        if(proxy_stats_) proxy_stats_(proxy);
+        std::ofstream json(output_/L"object-motion.json",std::ios::trunc);
+        json<<"{\"mode\":"<<mode<<",\"installed\":"<<(installed_?"true":"false")<<",\"proxy_layouts\":"<<(layout_?"true":"false")
+            <<",\"proxy_shaders\":["<<proxy[0]<<','<<proxy[1]<<','<<proxy[2]<<','<<proxy[3]<<"],\"proxy_fields\":\"created,with_previous,unstored,unhooked_devices\""
+            <<",\"presents\":"<<frames<<",\"us_per_present\":"<<us_per_frame;
+        for(unsigned i=0;i<ticks;++i) json<<",\""<<names[i]<<"\":"<<stats_[i].load();
+        json<<",\"weapon_us_per_present\":"<<weapon_us<<",\"weapon_mode\":"<<weapon_mode_.load()<<",\"weapon_published\":"<<weapon_draw::Place::published();
+        json<<",\"b1_eye_mode\":"<<(b1_eye_on_.load()?1:0)<<",\"taa_b1\":\""; // v950: eyes' TAA b1; sampled draws' VS b1 "buffer:own L/own R/fallback"
+        for(unsigned e=0;e<2;++e) for(const auto& p:taa_b1_[e]) json<<(e?'R':'L')<<std::hex<<reinterpret_cast<std::uintptr_t>(p.load())<<std::dec<<' ';
+        json<<"\",\"vs_b1_sampled\":\"";
+        for(const auto& e:b1_seen_) if(const void* b=e.buffer.load()) json<<std::hex<<reinterpret_cast<std::uintptr_t>(b)<<std::dec<<':'<<e.n[0].load()<<'/'<<e.n[1].load()<<'/'<<e.n[2].load()<<' ';
+        json<<'"';
+        json<<",\"kinds\":\"same,own_last,other_now,other_last,unproven,miss\"";
+        for(unsigned eye=0;eye<2;++eye) {
+            json<<(eye?",\"right\":[":",\"left\":[");
+            for(unsigned k=0;k<PrevMvpTable::kinds;++k) json<<(k?",":"")<<stats_[(eye?kind_r:kind_l)+k].load();
+            json<<(eye?"],\"near_right\":[":"],\"near_left\":[");
+            for(unsigned k=0;k<PrevMvpTable::kinds;++k) json<<(k?",":"")<<stats_[(eye?near_r:near_l)+k].load();
+            json<<(eye?"],\"unmatched_cb2_float4s_right\":\"":"],\"unmatched_cb2_float4s_left\":\"");
+            for(unsigned n=0,first=1;n<64;++n) if(const auto v=unmatched_size_[eye][n].load();v) {json<<(first?"":" ")<<n<<':'<<v;first=0;}
+            json<<'"';
+        }
+        json<<"}\n";
+    }
+public:
+    // Around each game draw: binds this draw's corrected b2 copy when it needs one, and the game's b2 again after it.
+    class DrawScope {
+    public:
+        explicit DrawScope(ID3D11DeviceContext* c) noexcept:c_(c),s_(installed_?before(c):nullptr) {}
+        ~DrawScope() {if(s_) set_cb_[s_->type](c_,2,1,&s_->cb[1]);}
+        DrawScope(const DrawScope&)=delete;
+        DrawScope& operator=(const DrawScope&)=delete;
+    private:
+        ID3D11DeviceContext* c_;ContextState* s_;
+    };
+};
+} // namespace d2vr

@@ -28,6 +28,7 @@ extern "C" MH_STATUS WINAPI MH_DisableHook(LPVOID);
 #include <iomanip>
 #include <mutex>
 #include <optional>
+#include "native_ranged_fire.hpp"
 
 namespace d2vr {
 // Ranged shots (pistol, crossbow, projectile powers) leave along the frame the
@@ -114,6 +115,7 @@ class NativeShotAim {
     // Reads the native frame only; the read plus the page check is what proves
     // both pointers can be swapped safely.
     bool plan(void* origin,void* axis,Plan& out) noexcept {
+        if(ranged_fire_own_launch()) {last_reason_=7;return false;} // a dual-wield shot (NativeRangedFire) carries its own muzzle frame
         try {
             // last_reason_: 1 inactive/route/failed, 2 nested, 3 not gameplay, 4 stale hand, 5 hand basis, 6 memory.
             if(!active_.load(std::memory_order_acquire) || !route_.load(std::memory_order_acquire) || failed_.load()) {last_reason_=1;return false;}
@@ -131,7 +133,7 @@ class NativeShotAim {
             out.planned=*planned;return true;
         } catch(...) {return false;}
     }
-    void record(std::uintptr_t caller,bool routed,const Plan& plan) noexcept {
+    void record(std::uintptr_t caller,bool routed,const Plan& plan,int reason) noexcept {
         try {
             if(rows_.load()>=2000) return;
             std::lock_guard<std::mutex> lock(mutex_);
@@ -141,7 +143,7 @@ class NativeShotAim {
             for(unsigned i=0;i<3;++i) log_<<','<<plan.native.axis[i];
             for(float v:plan.planned.origin) log_<<','<<v;
             for(unsigned i=0;i<3;++i) log_<<','<<plan.planned.axis[i];
-            log_<<'\n';const auto rows=rows_.load()+1;rows_.store(rows);log_.flush(); // shots are rare; keep every row
+            log_<<','<<reason<<'\n';const auto rows=rows_.load()+1;rows_.store(rows);log_.flush(); // shots are rare; keep every row
         } catch(...) {}
     }
     static std::uint64_t __fastcall launch(void* weapon,void* target,void* origin,void* axis,
@@ -153,6 +155,7 @@ class NativeShotAim {
         const auto caller=reinterpret_cast<std::uintptr_t>(_ReturnAddress());
         Plan plan{};ShotAimSave saved{};bool saved_ok=false,routed=false;std::uint64_t result{};
         const bool candidate=!nested && self.plan(origin,axis,plan);
+        const int reason=nested?2:self.last_reason_.load(); // why a row was not routed, for the log
         if(!candidate && !nested && self.active_.load() && self.route_.load()) ++self.rejected_;
         __try {
             if(candidate) {
@@ -160,7 +163,7 @@ class NativeShotAim {
                 shot_aim_apply(origin,axis,plan.planned);routed=true;++self.routed_;
             }
             result=self.original_(weapon,target,origin,axis,a5,a6,a7,a8,a9,a10,a11,a12);
-            self.record(caller,routed,plan);
+            self.record(caller,routed,plan,reason);
         } __finally {
             // Nothing was written unless the save completed, so a fault while
             // saving leaves the caller's bytes alone.
@@ -194,7 +197,7 @@ public:
         log_.open(file,std::ios::trunc);if(!log_) throw std::runtime_error("Cannot open native shot aim log");
         log_<<std::setprecision(9)<<"tick_ms,thread,caller_rva,routed,"
             "native_origin0,native_origin1,native_origin2,native_forward0,native_forward1,native_forward2,"
-            "hand_origin0,hand_origin1,hand_origin2,hand_forward0,hand_forward1,hand_forward2\n";
+            "hand_origin0,hand_origin1,hand_origin2,hand_forward0,hand_forward1,hand_forward2,reason\n"; // v776: reason as last_reason (0 routed, 2 nested, 7 the mod's own launch)
         clear();calls_=routed_=rejected_=overlap_=rows_=0;failed_=false;route_=route;instance_=this;
         const auto target=reinterpret_cast<void*>(base_+shot_aim_rva);
         if(!original_ && MH_CreateHook(target,reinterpret_cast<void*>(&launch),reinterpret_cast<void**>(&original_))!=MH_OK)

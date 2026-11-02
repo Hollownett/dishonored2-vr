@@ -1,6 +1,6 @@
 # VR controls and gestures
 
-Quest Touch: grip is the side button under your middle finger, trigger is under your index finger. The rest is intuitive from the game itself.
+Grip is the side button under your middle finger, trigger the one under your index finger. Fighting, blocking and grabbing need no buttons: you do them with your hands.
 
 <!-- vr-page:body|Body -->
 
@@ -15,31 +15,33 @@ Quest Touch: grip is the side button under your middle finger, trigger is under 
 
 ## Left controller
 - **Y** — talk; hold for the pause menu.
-- **X** — hold for the wheel, release to equip.
-- **Stick** — move; click to sprint.
-- **Menu** — pause; hold for the journal.
-- **Trigger** — fire the pistol or cast. With a grenade or mine, make a fist: open it mid-throw to throw, or with the palm on a surface to place.
-- **Grip** — use and hold; at the hip, draw the gun.
+- **X** — hold for the wheel, point, release to equip.
+- **Stick** — move where you look; click to sprint.
+- **Menu** — pause; hold for the journal. Hold and flick the right stick for quick slots.
+- **Trigger** — fire the gun or cast the power in your hand.
+- **Grip** — use what the hand points at, or hold what it touches.
 
 ## Right controller
 - **B** — hold to put all weapons away.
 - **A** — jump and climb.
-- **Stick** — turn; down to crouch; click to zoom.
-- **Trigger** — block with the sword.
-- **Grip** — grab and hold; at the shoulder, draw the sword.
+- **Stick** — turn; flick down to crouch; click to zoom.
+- **Trigger** — select in menus and on the wheel.
+- **Grip** — use or hold, like the left one.
 
-<!-- vr-page:tips|Tips -->
+<!-- vr-page:tips|Gestures -->
 
-## Throw the sword
-<!-- vr-figure:sword_throw|Swing the sword, release grip, and let it fly. -->
-- **Release right grip mid-swing** — throw it. It tumbles and lands flat.
-- **Unaware guard** — one thrown sword kills him. An aware guard is only wounded.
-- **Grip next to it** — pick it up. Grip over your right shoulder calls it back.
-- **Left behind** — it returns by itself after 30 seconds or 12 metres.
+## The sword
+<!-- vr-figure:sword_draw_block|Grip over your right shoulder to draw the sword, then hold the blade in front of you to block. -->
+- **Swing** — attack. Behind an unaware guard it is a silent takedown.
+- **Hold it in front of you** — block. No button; a swing ends it.
+- **Let go mid-swing** — throw it. Grip next to it to pick it up.
+- **Grip over your right shoulder** — call a thrown sword back.
 
-## Grab a guard
+## Your hands
 <!-- vr-figure:enemy_grab|Palm on the guard: grip to hold, then pull hard away from him. -->
-- **Palm on a living guard + grip** — hold him. He staggers and notices you.
-- **Keep gripping and pull hard away** — throw him down. He gets up after about 4 seconds.
-- **Grip a limb or the head of a body** — drag it; bodies are carried and dragged with your hands only.
-- **Grip an unaware guard's neck from behind** — hold to choke him out.
+- **Palm on a guard + grip, pull hard** — throw him down.
+- **Grip a guard's neck from behind** — choke him out.
+- **Grip a limb or the head of a body** — drag it; let go at your shoulder to carry it.
+- **Grenade or mine: make a fist** — open it mid-throw; palm on a wall to place it.
+- **Open hand on a door** — push it open; push slowly to peek.
+- **Both hands up over your head** — jump. Lean and crouch for real.

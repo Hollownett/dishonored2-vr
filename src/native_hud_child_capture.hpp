@@ -3,9 +3,28 @@
 #include "world_ui_capture.hpp"
 #include "world_ui_completion.hpp"
 #include <cstdint>
+#include <optional>
 
 namespace d2vr {
 inline constexpr unsigned crosshair_capture_slot=13; // NativeHudChildKind::crosshair
+inline constexpr unsigned takedown_capture_slot=14; // v698: the choke/kill hint, beside the NPC's own prompt (slot 0)
+inline constexpr unsigned message_capture_slot=15; // v710: a second simultaneous tutorial/information message (the first is slot 11)
+// v713 (headset v712: "a rune is nearby" kept the counter-serum message from showing): one slot per simultaneous message node.
+inline constexpr std::array<unsigned,4> message_capture_slots{11,message_capture_slot,16,17};
+// Each drawn message node keeps its slot; a new node takes the slot idle longest (>300 ms), never one still drawn.
+struct NativeMessageSlots {
+    static constexpr unsigned n=static_cast<unsigned>(message_capture_slots.size());
+    std::array<std::uintptr_t,n> node{};std::array<UINT64,n> seen{};
+    struct Pick {unsigned slot;bool fresh;std::uintptr_t replaced;};
+    std::optional<Pick> assign(std::uintptr_t drawn,UINT64 t) noexcept {
+        unsigned k=n;
+        for(unsigned i=0;i<n && k==n;++i) if(node[i]==drawn) k=i;
+        const bool fresh=k==n;
+        if(fresh) for(unsigned i=0;i<n;++i) if(t-seen[i]>300 && (k==n || seen[i]<seen[k])) k=i;
+        if(k==n) return {};
+        const Pick pick{message_capture_slots[k],fresh,node[k]};node[k]=drawn;seen[k]=t;return pick;
+    }
+};
 // Native child-render capture only. No scene/whole-HUD claiming rectangles,
 // engine metadata writes, extra native draws or immediate-context fallback.
 class NativeHudChildCapture {
@@ -17,7 +36,7 @@ public:
         void (*end)(void*,ID3D11DeviceContext*,std::uint64_t) noexcept{};
     } observer{};
     using Fallback=void (*)(ID3D11DeviceContext*,ID3D11RenderTargetView*,ID3D11RenderTargetView*,const NativeHudChildScope&);
-    static constexpr unsigned slot_count=14; // prompt, vitals/equipment, bounded individual markers, tutorial (11), HUD window panel (12), crosshair (13)
+    static constexpr unsigned slot_count=18; // prompt, vitals/equipment, bounded individual markers, tutorial (11), HUD window panel (12), crosshair (13), takedown (14), more messages (15-17)
     struct Snapshot {
         WorldUiCapture::Snapshot image;NativeHudChildScope child;
         explicit operator bool()const noexcept{return bool(image);}
@@ -29,8 +48,10 @@ private:
         void finish() noexcept {const auto completed_ticket=ticket;ticket=0;if(completed_ticket && observer.end)observer.end(observer.user,context,completed_ticket);}
         ~Observation(){finish();}
     };
-    std::array<WorldUiCapture,5> banks_;
-    std::array<WorldUiCompletion,5> completion_;
+    // Three slots per bank: banks follow slot_count (v711 added slot 15 to five banks, wrote past banks_[4] and crashed the game twice).
+    static constexpr unsigned bank_count=(slot_count+2)/3;
+    std::array<WorldUiCapture,bank_count> banks_;
+    std::array<WorldUiCompletion,bank_count> completion_;
     std::mutex mutex_;
     std::array<std::array<NativeHudChildScope,2>,slot_count> owners_{};
     std::array<std::array<UINT64,2>,slot_count> owner_serials_{};

@@ -11,6 +11,15 @@ int main() {
     for(float trigger: {.3f,.5f,1.f}) {auto in=free_hand();in.right_trigger=trigger;gate=ranged_aim_gate(in);assert(!gate.shots && gate.reticle);}
     for(float grip: {.5f,.8f,1.f}) {auto in=free_hand();in.left_grip=grip;gate=ranged_aim_gate(in);assert(!gate.shots && gate.reticle);}
     {auto in=free_hand();in.right_trigger=.29f;in.left_grip=.49f;gate=ranged_aim_gate(in);assert(gate.shots && gate.reticle);}
+    // v776 (headset v775: a crossbow held by its squeezed grip shot from the camera, 6 of 6): the grip that holds the hand's weapon (a fist round a grenade or mine,
+    // a drawn gun in dual wield) is no Use or grab, so it never stops a shot; every other rule still does, and a bare squeezed grip still stops it.
+    for(float grip: {.5f,.8f,1.f}) {auto in=free_hand();in.left_grip=grip;in.grip_holds_weapon=true;gate=ranged_aim_gate(in);assert(gate.shots && gate.reticle);}
+    {auto in=free_hand();in.left_grip=1.f;gate=ranged_aim_gate(in);assert(!gate.shots && gate.reticle);}
+    {auto in=free_hand();in.left_grip=1.f;in.grip_holds_weapon=true;in.swing_tip=true;gate=ranged_aim_gate(in);assert(!gate.shots && gate.reticle);}
+    {auto in=free_hand();in.left_grip=1.f;in.grip_holds_weapon=true;in.swing_clear=false;gate=ranged_aim_gate(in);assert(!gate.shots && gate.reticle);}
+    {auto in=free_hand();in.left_grip=1.f;in.grip_holds_weapon=true;in.holster_clear=false;gate=ranged_aim_gate(in);assert(!gate.shots && gate.reticle);}
+    {auto in=free_hand();in.left_grip=1.f;in.grip_holds_weapon=true;in.authored_camera=true;gate=ranged_aim_gate(in);assert(!gate.shots && gate.reticle);}
+    {auto in=free_hand();in.left_grip=1.f;in.grip_holds_weapon=true;in.right_trigger=.5f;gate=ranged_aim_gate(in);assert(!gate.shots && gate.reticle);}
     // A sword swing, the holster window and a swing cool-down also keep only the crosshair.
     {auto in=free_hand();in.swing_tip=true;gate=ranged_aim_gate(in);assert(!gate.shots && gate.reticle);}
     {auto in=free_hand();in.holster_clear=false;gate=ranged_aim_gate(in);assert(!gate.shots && gate.reticle);}

@@ -50,6 +50,7 @@ public:
     }
     void commit(double delta) {compensation_=wrapped_yaw(compensation_+delta);}
     double compensation(std::uint64_t reference) const {return reference==reference_?compensation_:0;}
+    double total() const {return compensation_;} // the same total, whichever reference (lock-free mirror in NativeTurning)
     double relative_yaw(std::uint64_t now) const {return fresh(now)?wrapped_yaw(yaw_-compensation_):NAN;}
 };
 } // namespace d2vr

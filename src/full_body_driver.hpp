@@ -6,6 +6,7 @@
 #include "body_ik.hpp"
 #include "player_rig_data.hpp"
 #include "rig_transform.hpp"
+#include "native_power_hand.hpp"
 #include "hand_bind.hpp"
 #include "avatar_calibration.hpp"
 #include "tracked_pose_lifetime.hpp"
@@ -118,6 +119,9 @@ struct Tracking {
     bool grip_valid[2]{};
     double grip_value[2]{},trigger[2]{};
     bool hand_empty[2]{};     // hand holds nothing: fingers curl from grip/trigger
+    bool mirror_native[2]{};  // dual wield: this hand holds the other arm's item, posed by that arm's native clip mirrored onto it
+    bool slot1_gun{};         // dual wield: slot 1 (the left arm) holds a native gun or crossbow: its calm clip is kept for gun copies (v771)
+    bool gun_clip[2]{};       // dual wield: this hand holds a gun copy and no arm plays a gun clip: posed by the kept one (mirrored on the right)
     std::uint64_t native_socket_token[2]{};
     bool reverse_grip[2]{};   // held item: flip the socket 180 deg about the palm normal
     std::uint64_t item_key[2]{}; // which item each hand holds (body::Inputs::item_key)
@@ -133,6 +137,17 @@ struct Tracking {
     Xf raw_grip[2]{};
     unsigned raw_grip_hands{};
     std::array<float,15> anchor_root{};bool anchor_root_valid{}; // the body model frame (player+0xf0 -> +0x1860) read on the render thread beside the camera anchor
+    // NativeTurning's head-follow total (rad) behind that anchor. The anchor heading already has it taken off (BodyAnchor), so the world the hands were
+    // solved in does not turn with it: the root-motion carry must not turn the hands by it either (see Driver::world_from_solve).
+    double head_follow{};
+    // v830: the runtime sample this publication was mapped from, as mapped (raw world poses: no palm offset, no clamp), and the key of that map.
+    // The arm uploads that solve this publication run before the next Setup: they move the eye and grips by the newest sample's motion under
+    // the same map (Driver::note_xr), so an image's arms come from the locate of its own camera.
+    Xf xr_head_world{},xr_grip_world[2]{};unsigned xr_hands{};std::uint64_t xr_map{},xr_serial{};
+    double camera_heading{};bool camera_heading_valid{};   // v832: the native player heading (rad) at this Setup (Driver::root_now)
+    // v861: the world yaw of the tracking space this publication was mapped with (the calibrated forward), and where it sits (the camera anchor):
+    // a change between solves is a rig turn (stick, snap, fold), which turns the solver's memory with it (BodySolver::turn_rig).
+    double rig_yaw{};Vec3 rig_pivot{};bool rig_valid{};
 };
 
 enum class ArmGate {ready,no_solution,stale_revision,stale_age};
@@ -152,6 +167,7 @@ struct Diagnostic {
     double root_gap_m{};      // horizontal distance at publish between the render-thread anchor root and the last arm-upload root (diagnostic only)
     bool root_gap_valid{};    // the gap above was measured: both the anchor root and an arm-upload root were known at publish
     std::uint64_t root_gap_publishes{};   // publishes with root_gap_m > 1e-6 (cumulative since the driver was built; clear() keeps it)
+    double root_turn{},follow_delta{};    // rad about +Z, solve -> the last arm upload: how far the player root turned, and how much of that NativeTurning's head-follow did (the carry leaves that part out)
     Tracking tracking{};
     std::uint64_t revision{},solved_revision{},fit_revision{},callback_serial{},body_callback{},arm_callback[2]{};
     double wall_dt{},consumed_dt{},substep_dt{},output_age_seconds{};
@@ -302,8 +318,10 @@ public:
     std::uint64_t fit_epoch() const {std::lock_guard<std::mutex> lock(mutex_);return fit_?fit_->reference_epoch:0;}
     // Current player-root (body model) frame, read at an ARM upload: arms upload before the body each
     // frame, so without this they converted with last frame's root and trailed one frame while moving.
-    void note_root(const std::array<float,15>& body_model_frame) {
-        try {const auto f=frame_of(body_model_frame);std::lock_guard<std::mutex> lock(mutex_);root_last_=f.rigid;have_root_last_=true;} catch(...) {}
+    // head_follow: NativeTurning's head-follow total (rad) as of this upload.
+    void note_root(const std::array<float,15>& body_model_frame,double head_follow=0,std::optional<double> camera_heading={}) {
+        try {const auto f=frame_of(body_model_frame);std::lock_guard<std::mutex> lock(mutex_);root_last_=f.rigid;follow_last_=head_follow;have_root_last_=true;
+             have_heading_last_=camera_heading && std::isfinite(*camera_heading);if(have_heading_last_)heading_last_=*camera_heading;} catch(...) {}
     }
     // Render thread, once per frame.
     void publish(const Tracking& t,const body::Ownership& own) {
@@ -320,14 +338,83 @@ public:
         std::optional<Xf> anchor;
         if(t.anchor_root_valid) try {anchor=frame_of(t.anchor_root).rigid;} catch(...) {}
         if(anchor && have_root_last_) {diag_.root_gap_m=std::hypot(anchor->p.x-root_last_.p.x,anchor->p.y-root_last_.p.y);diag_.root_gap_valid=true;if(diag_.root_gap_m>1e-6)++root_gap_publishes_;}
-        if(anchor && !legacy_root_carry_) {root_at_publish_=*anchor;have_root_at_publish_=true;}
-        else {root_at_publish_=root_last_;have_root_at_publish_=have_root_last_;}
+        heading_at_publish_=t.camera_heading;have_heading_at_publish_=t.camera_heading_valid && std::isfinite(t.camera_heading);
+        if(anchor && !legacy_root_carry_) {root_at_publish_=*anchor;have_root_at_publish_=true;follow_at_publish_=t.head_follow;}
+        else {root_at_publish_=root_last_;have_root_at_publish_=have_root_last_;follow_at_publish_=follow_last_;}
         track_=t;own_=own;have_track_=true;++revision_;diag_.body_valid=false;diag_.arm_valid[0]=diag_.arm_valid[1]=false;published_=std::chrono::steady_clock::now();
         if(!(track_.seconds>0)) track_.seconds=std::chrono::duration<double>(published_.time_since_epoch()).count();
     }
     void legacy_root_carry(bool on) {std::lock_guard<std::mutex> lock(mutex_);legacy_root_carry_=on;}   // build/legacy-arm-root-carry
-    void clear() {std::lock_guard<std::mutex> lock(mutex_);contact_model_.reset();have_track_=have_out_=have_native_body_=false;have_root_last_=have_root_at_publish_=have_root_solved_=false;
-        have_native_arm_[0]=have_native_arm_[1]=false;native_={};last_={};solved_track_={};diag_={};solver_.reset();}
+    // v830: the newest runtime sample (the head and grips located for the display of the image whose arms upload next), mapped to the world by
+    // the last publication's map (map = that publication's xr_map). Render thread, at the Present that located it.
+    struct XrSample {Xf head{},grip[2]{};unsigned hands{};std::uint64_t map{},serial{};};
+    void note_xr(const XrSample& s) {std::lock_guard<std::mutex> lock(mutex_);xr_latest_=s;have_xr_latest_=true;}
+    void legacy_root_yaw(bool on) {std::lock_guard<std::mutex> lock(mutex_);legacy_root_yaw_=on;}   // build/legacy-root-yaw-carry (v832)
+    void legacy_hand_sample(bool on) {std::lock_guard<std::mutex> lock(mutex_);legacy_hand_sample_=on;}   // build/legacy-hand-sample: the publication's own sample, as before v830
+    std::uint64_t sample_refreshes() const {std::lock_guard<std::mutex> lock(mutex_);return sample_refreshes_;}
+    // v835: the engine places attached items (weapons, power effects) from the arm palette BEFORE that tick's arm upload (v834 sim: 5712 of 5712
+    // reads saw the previous interval's palette), so an item showed the hand a tick late. The world motion the drawn hand makes from the last
+    // publication's tick to now (root, heading, head-follow read now): the camera anchor's carry after the newest sample's hand motion. Applied
+    // to the item's joint as drawn in the previous tick, it is what this tick's upload will draw. Nothing without a heading or a fresh map.
+    std::optional<Xf> item_advance(unsigned side,const std::array<float,15>& root_frame,double follow_now,double heading_now) const {
+        try {
+            const auto r=frame_of(root_frame).rigid;
+            std::lock_guard<std::mutex> lock(mutex_);
+            if(side>1 || legacy_item_lag_ || !have_track_ || !track_.anchor_root_valid || !track_.camera_heading_valid || !std::isfinite(heading_now) || !std::isfinite(follow_now)) return {};
+            const auto r0=frame_of(track_.anchor_root).rigid;
+            if(length(r.p-r0.p)>1.) return {};   // a teleport or a load is not motion
+            const auto q=body::rot_z(body::wrap_pi((heading_now-follow_now)-(track_.camera_heading-track_.head_follow)));
+            Xf hand{};
+            const auto& sample=xr_latest_;
+            if(have_xr_latest_ && track_.xr_map && sample.map==track_.xr_map && sample.serial>track_.xr_serial && ((track_.xr_hands&sample.hands)>>side&1u)) {
+                const auto& from=track_.xr_grip_world[side];const auto& to=sample.grip[side];const auto turn=body::mul(to.q,body::conj(from.q));
+                if(length(to.p-from.p)<.5 && std::abs(turn.w)>std::cos(.5)) hand=body::mul(to,body::inverse(from));
+            }
+            return body::mul(Xf{q,r.p-rotated(q,r0.p)},hand);
+        } catch(...) {return {};}
+    }
+    void legacy_item_lag(bool on) {std::lock_guard<std::mutex> lock(mutex_);legacy_item_lag_=on;}   // build/legacy-item-lag (v835)
+    void legacy_body_turn(bool on) {std::lock_guard<std::mutex> lock(mutex_);legacy_body_turn_=on;}   // build/legacy-body-turn (v861): the solver's memory stays in the world on rig turns
+    std::uint64_t rig_turns() const {std::lock_guard<std::mutex> lock(mutex_);return rig_turns_;}
+    // v861 (paired, user: "the camera turns, then the body, then the hands are computed... it lags and looks non-native"): an image is placed from
+    // its own publication, the camera anchor and runtime sample its Setup placed the camera with: no carry by the player root since, no newer
+    // sample. Render thread, at the eye-0 begin of a render (it draws the newest Setup's views): solve that publication once (later uploads reuse
+    // it) and keep the result for the render's skin copies.
+    void begin_image(std::uint64_t frame) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        image_valid_=false;
+        if(!have_track_ || !have_native_body_ || !solve_locked(0,false)) return;
+        image_out_=out_;image_fit_=fit_revision_;image_frame_=frame;image_valid_=true;++image_begins_;
+    }
+    // Render jobs, at the GPU skin copy (0x25f930): the image's joints in the frame the model is drawn in (its live model+0x1860).
+    // frame: the Present counter now; the image must have begun in this interval (a render without a begin keeps the tick's upload).
+    // raw: the full-hand-contact "raw reach" pose (Output::raw_arm), which an empty hand's upload submits while its contact is prepared.
+    std::optional<std::array<Transform,69>> image_arm(unsigned side,const std::array<float,15>& live,std::uint64_t frame,bool raw=false) const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if(side>1 || !image_valid_ || image_frame_!=frame || image_fit_!=fit_revision_) return {};
+        const auto& joints=raw?image_out_.raw_arm[side]:image_out_.arm[side];if(joints.size()!=69) return {};
+        try {const auto f=frame_of(live);return export_arm(side,joints,f,f,image_out_);} catch(...) {return {};}
+    }
+    std::optional<std::array<Transform,20>> image_body(const std::array<float,15>& live,std::uint64_t frame) const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if(!image_valid_ || image_frame_!=frame || image_fit_!=fit_revision_ || image_out_.body.size()!=20) return {};
+        try {const auto f=frame_of(live);return export_body(image_out_,f,f);} catch(...) {return {};}
+    }
+    std::uint64_t image_begins() const {std::lock_guard<std::mutex> lock(mutex_);return image_begins_;}
+    // v861: the image's solved world joint (as its render draws it), for an item placed before the next image: Nothing without an image this interval.
+    std::optional<Xf> image_world(unsigned side,unsigned joint,std::uint64_t frame) const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if(side>1 || !image_valid_ || image_frame_!=frame || image_fit_!=fit_revision_ || joint>=image_out_.arm[side].size()) return {};
+        return image_out_.arm[side][joint];
+    }
+    std::optional<Vec3> image_joint(unsigned side,unsigned joint) const {   // the image's solved world joint (diagnostics)
+        std::lock_guard<std::mutex> lock(mutex_);
+        if(side>1 || !image_valid_ || joint>=image_out_.arm[side].size()) return {};
+        return image_out_.arm[side][joint].p;
+    }
+    Xf attachment_target(unsigned side,const Xf& grip) const {std::lock_guard<std::mutex> lock(mutex_);return hand_target(side&1u,grip);}   // the attachment joint a grip asks for (frame-order trace)
+    void clear() {std::lock_guard<std::mutex> lock(mutex_);contact_model_.reset();image_valid_=false;have_track_=have_out_=have_native_body_=false;have_root_last_=have_root_at_publish_=have_root_solved_=false;have_xr_latest_=false;have_heading_last_=have_heading_at_publish_=have_heading_solved_=false;
+        have_native_arm_[0]=have_native_arm_[1]=false;native_={};gun_clip_.clear();have_gun_clip_=gun_clip_have_last_=false;gun_clip_calm_=0;last_={};solved_track_={};diag_={};solver_.reset();}
     void clear_calibration() {
         std::lock_guard<std::mutex> lock(mutex_);
         if(!fit_) return;
@@ -352,30 +439,8 @@ public:
         for(unsigned j=0;j<20;++j) native_.body[j]=to_xf(native[j]);
         have_native_body_=true;
         if(!solve_locked(frame_key)) return {};
-        std::array<Transform,20> out{};
         const auto conv=anchored(2,body_frame_);
-        for(unsigned j=0;j<20;++j) out[j]=to_transform(to_model(conv,out_.body[j]));
-        if(solver_.torso_scale()!=1) {
-            const auto& sk=solver_.skeleton(0);const auto chest_index=sk.find("center_spine03_jnt");
-            const auto& chest=out_.body[chest_index];
-            const auto heading=body::mul(chest.q,body::conj(sk.bind[chest_index].q));
-            const auto c=body::conj(body_frame_.rigid.q);
-            const auto left=rotated(c,rotated(heading,{0,1,0}));
-            const auto origin=to_model(body_frame_,chest).p;
-            const double factor=1+(solver_.torso_scale()-1)*(1-out_.owned[1]);
-            for(const auto name:{"center_spine01_jnt","center_spine02_jnt","center_spine03_jnt"}) {
-                const auto j=static_cast<unsigned>(sk.find(name));out[j]=widen_transverse(out[j],origin,left,factor);
-            }
-        }
-        if(head_scale_<1) {
-            // Fold the head chain into a tiny transform at the neck (scaled basis, as hide_arm does).
-            const auto& neck=out[folded_[0]];
-            for(int j:folded_) {
-                auto t=neck;
-                for(unsigned axis=0;axis<3;++axis) for(unsigned row=0;row<3;++row) t.f[axis*4+row]*=static_cast<float>(head_scale_);
-                out[static_cast<unsigned>(j)]=t;
-            }
-        }
+        const auto out=export_body(out_,conv,body_frame_);
         diag_.body_frame=body_frame_;diag_.body_valid=true;
         const auto& sk=solver_.skeleton(0);
         const auto pelvis_index=sk.find("center_root_jnt");
@@ -427,6 +492,7 @@ public:
         const auto conv=anchored(side,arm_frame);
         const auto out=export_arm(side,out_.arm[side],conv,arm_frame);
         diag_.arm_frame[side]=arm_frame;diag_.arm_valid[side]=true;
+        if(have_root_solved_ && have_root_last_) {diag_.root_turn=body::twist_angle(body::mul(root_last_.q,body::conj(root_solved_.q)),{0,0,1});diag_.follow_delta=body::wrap_pi(follow_last_-follow_solved_);}
         const auto& sk=solver_.skeleton(1+side);const std::string prefix=side?"right":"left";
         diag_.wrist[side]=to_world(conv,to_xf(out[sk.find(prefix+"_wrist_jnt")]));
         std::array<Transform,4> knuckles{};const char* fingers[]={"index","medium","ring","pinky"};
@@ -437,7 +503,7 @@ public:
         auto& palm_source=diag_.palm_source[side];palm_source={};
         if(have_root_solved_ && have_root_last_ && frame_key && solved_track_.grip_valid[side] &&
            (solved_track_.tracked_hands&(1u<<side)) && out_.owned[2+side]==0) {
-            const auto world_from_solve=body::mul(root_last_,body::inverse(root_solved_));
+            const auto world_from_solve=this->world_from_solve();
             const auto world_pose=[](const Xf& value) {return WorldTrackedPose{value.p,
                 {rotated(value.q,{1,0,0}),rotated(value.q,{0,1,0}),rotated(value.q,{0,0,1})}};};
             palm_source.context={solved_track_.pose_epoch,solved_track_.reference_epoch,solved_track_.mapping_revision,
@@ -450,7 +516,7 @@ public:
         }
         ArmPose posed{out,solved_track_,solved_revision_,fit_revision_,out_.owned[2+side],{},false};
         posed.root_mapping_valid=have_root_solved_ && have_root_last_;
-        if(posed.root_mapping_valid)posed.world_from_solve=body::mul(root_last_,body::inverse(root_solved_));
+        if(posed.root_mapping_valid)posed.world_from_solve=world_from_solve();
         if(out_.raw_arm[side].size()==69) {
             posed.raw_joints=export_arm(side,out_.raw_arm[side],conv,arm_frame);
             posed.raw_hand_reached=out_.raw_hand_reached[side];
@@ -507,7 +573,8 @@ private:
     Tracking track_{};body::Ownership own_{};bool have_track_{};
     std::uint64_t revision_{},solved_revision_{},solves_{},failures_{};
     std::array<std::array<std::uint64_t,4>,2> finger_modes_{};std::array<std::array<std::uint64_t,2>,2> finger_inputs_{};
-    body::NativePose native_{};bool have_native_body_{},have_native_arm_[2]{};
+    body::NativePose native_{};bool have_native_body_{},have_native_arm_[2]{};std::array<std::vector<Xf>,2> mirrored_arm_{}; // mirror_native
+    std::vector<Xf> gun_clip_{};Xf gun_clip_last_{};double gun_clip_calm_{};bool have_gun_clip_{},gun_clip_have_last_{}; // Tracking::slot1_gun / gun_clip
     Frame body_frame_{};
     double back_=.08,head_scale_=.02,eye_speed_{};
     // Locomotion lag: the solved world joints come from the eye sampled at publish time, but the
@@ -519,12 +586,45 @@ private:
         // Locomotion and snap turns move the player root between the tracking publication this
         // solution came from and this upload. Carry the solved world pose by exactly that root
         // motion: model = inverse(f)*(root_now*inverse(root_solved))*world, i.e. use
-        // f' = root_solved*inverse(root_now)*f. Head rotation alone does not move the root.
+        // f' = root_solved*inverse(root_now)*f. Head rotation alone does not move the root; head-follow's turn of it is left out (root_now()).
         if(!have_root_solved_ || !have_root_last_) return f;
-        f.rigid=body::mul(body::mul(root_solved_,body::inverse(root_last_)),f.rigid);return f;
+        f.rigid=body::mul(body::mul(root_solved_,body::inverse(root_now())),f.rigid);return f;
     }
+    // The root as the carry sees it: its yaw since the solve minus what NativeTurning's head-follow turned it by (about its own axis). Head-follow turns the
+    // player to face the head and BodyAnchor takes the same turn off the anchor heading, so the camera, the controllers and the hands solved from them keep
+    // their world pose; carrying the hands by that turn too rotated the sword about the player on every physics step of a head turn. A stick turn is not
+    // taken off (nothing compensates it), so locomotion and snap turns still carry the hands.
+    Xf root_now() const {
+        // v832: with the native camera heading known at the solve's Setup and at this upload, the turn carried is the camera anchor's own (the heading
+        // minus head-follow, which BodyAnchor takes off): the body model's yaw need not turn in step with the view. build/legacy-root-yaw-carry: the root's.
+        if(!legacy_root_yaw_ && have_heading_last_ && have_heading_solved_)
+            return {body::mul(body::rot_z(body::wrap_pi((heading_last_-follow_last_)-(heading_solved_-follow_solved_))),root_solved_.q),root_last_.p};
+        const double turn=body::twist_angle(body::mul(root_last_.q,body::conj(root_solved_.q)),{0,0,1}),follow=body::wrap_pi(follow_last_-follow_solved_);
+        const double remove=std::clamp(follow,std::min(0.,turn),std::max(0.,turn));   // never more than the root really turned the same way
+        return {body::mul(body::rot_z(-remove),root_last_.q),root_last_.p};
+    }
+    Xf world_from_solve() const {return body::mul(root_now(),body::inverse(root_solved_));}
     bool legacy_root_carry_{};std::uint64_t root_gap_publishes_{};
+    double heading_last_{},heading_at_publish_{},heading_solved_{};bool have_heading_last_{},have_heading_at_publish_{},have_heading_solved_{},legacy_root_yaw_{},legacy_item_lag_{};
+    XrSample xr_latest_{};bool have_xr_latest_{},legacy_hand_sample_{};std::uint64_t sample_refreshes_{};
+    // The publication's eye and grips moved on by the newest sample's motion under the publication's own map: exact for the rigid map, and a
+    // clamped or palm-offset grip keeps its offset. A jump (over 0.5 m or 57 deg in one sample) is tracking, not motion: that pose stays.
+    void refresh_sample_locked() {
+        if(legacy_hand_sample_ || !have_xr_latest_ || !track_.xr_map || xr_latest_.map!=track_.xr_map || xr_latest_.serial<=track_.xr_serial) return;
+        const auto& s=xr_latest_;
+        const auto plausible=[](const Xf& from,const Xf& to) {   // the pose's own travel and turn, not the delta's (that grows with the distance from the world origin)
+            const auto turn=body::mul(to.q,body::conj(from.q));return length(to.p-from.p)<.5 && std::abs(turn.w)>std::cos(.5);};
+        if(plausible(track_.xr_head_world,s.head)) track_.eye=body::mul(body::mul(s.head,body::inverse(track_.xr_head_world)),track_.eye);
+        for(unsigned i=0;i<2;++i) {
+            if(!((track_.xr_hands&s.hands)>>i&1u) || !track_.grip_valid[i] || !plausible(track_.xr_grip_world[i],s.grip[i])) continue;
+            const auto dg=body::mul(s.grip[i],body::inverse(track_.xr_grip_world[i]));
+            track_.grip[i]=body::mul(dg,track_.grip[i]);
+            if(track_.raw_grip_hands>>i&1u) track_.raw_grip[i]=body::mul(dg,track_.raw_grip[i]);
+        }
+        track_.xr_head_world=s.head;for(unsigned i=0;i<2;++i) track_.xr_grip_world[i]=s.grip[i];track_.xr_hands=s.hands;track_.xr_serial=s.serial;++sample_refreshes_;
+    }
     Xf root_last_{},root_at_publish_{},root_solved_{};bool have_root_last_{},have_root_at_publish_{},have_root_solved_{};
+    double follow_last_{},follow_at_publish_{},follow_solved_{};   // NativeTurning's head-follow total (rad) at the last upload, at the last publish, at the solve
     // Engine frame (present index) whose solution every upload of that frame reuses: the render
     // thread publishes tracking concurrently with the next frame's animation uploads, so without
     // this body and the two arms can be solved from different publications within one frame.
@@ -558,32 +658,62 @@ private:
     ArmReach world_reach(unsigned side) const {
         const auto r=solver_.solved_reach(side);
         if(!have_out_ || !have_root_solved_ || !have_root_last_ || !r.valid) return {};
-        const auto world_from_solve=body::mul(root_last_,body::inverse(root_solved_));
+        const auto world_from_solve=this->world_from_solve();
         ArmReach result{world_from_solve.p+rotated(world_from_solve.q,r.shoulder),reach_cache_[side&1u].get(r.full),
                         body::mul(grip_to_attachment_[side],r.hand_to_wrist).p,false};
         result.valid=finite(result.shoulder) && finite(result.wrist_local) && std::isfinite(result.max_wrist) && result.max_wrist>0;
         return result;
     }
-    std::array<Transform,69> export_arm(unsigned side,const std::vector<Xf>& joints,const Frame& conv,const Frame& arm_frame) const {
+    std::array<Transform,20> export_body(const body::Output& o,const Frame& conv,const Frame& body_frame) const {
+        std::array<Transform,20> out{};
+        for(unsigned j=0;j<20;++j) out[j]=to_transform(to_model(conv,o.body[j]));
+        if(solver_.torso_scale()!=1) {
+            const auto& sk=solver_.skeleton(0);const auto chest_index=sk.find("center_spine03_jnt");
+            const auto& chest=o.body[chest_index];
+            const auto heading=body::mul(chest.q,body::conj(sk.bind[chest_index].q));
+            const auto c=body::conj(body_frame.rigid.q);
+            const auto left=rotated(c,rotated(heading,{0,1,0}));
+            const auto origin=to_model(body_frame,chest).p;
+            const double factor=1+(solver_.torso_scale()-1)*(1-o.owned[1]);
+            for(const auto name:{"center_spine01_jnt","center_spine02_jnt","center_spine03_jnt"}) {
+                const auto j=static_cast<unsigned>(sk.find(name));out[j]=widen_transverse(out[j],origin,left,factor);
+            }
+        }
+        if(head_scale_<1) {
+            // Fold the head chain into a tiny transform at the neck (scaled basis, as hide_arm does).
+            const auto& neck=out[folded_[0]];
+            for(int j:folded_) {
+                auto t=neck;
+                for(unsigned axis=0;axis<3;++axis) for(unsigned row=0;row<3;++row) t.f[axis*4+row]*=static_cast<float>(head_scale_);
+                out[static_cast<unsigned>(j)]=t;
+            }
+        }
+        return out;
+    }
+    std::array<Transform,69> export_arm(unsigned side,const std::vector<Xf>& joints,const Frame& conv,const Frame& arm_frame) const {return export_arm(side,joints,conv,arm_frame,out_);}
+    std::array<Transform,69> export_arm(unsigned side,const std::vector<Xf>& joints,const Frame& conv,const Frame& arm_frame,const body::Output& o) const {
         std::array<Transform,69> out{};
         for(unsigned index=0;index<69;++index)out[index]=to_transform(to_model(conv,joints[index]));
         if(solver_.torso_scale()!=1) {
             const auto& skeleton=solver_.skeleton(0);const auto index=skeleton.find("center_spine03_jnt");
-            const auto heading=body::mul(out_.body[index].q,body::conj(skeleton.bind[index].q));
+            const auto heading=body::mul(o.body[index].q,body::conj(skeleton.bind[index].q));
             const auto left=rotated(body::conj(arm_frame.rigid.q),rotated(heading,{0,1,0}));
-            const double factor=1+(solver_.torso_scale()-1)*(1-out_.owned[1])*(1-out_.owned[2+side]);
+            const double factor=1+(solver_.torso_scale()-1)*(1-o.owned[1])*(1-o.owned[2+side]);
             const auto& arm=solver_.skeleton(1+side);
             for(const auto joint:{arm.find("origin"),arm.find(side?"right_shoulder_jnt":"left_shoulder_jnt")})
                 out[joint]=widen_transverse(out[joint],rig::position(out[joint]),left,factor);
         }
         return out;
     }
-    bool solve_locked(std::uint64_t frame_key=0) {
+    body::Output image_out_{};bool image_valid_{};std::uint64_t image_fit_{},image_begins_{},image_frame_{};
+    bool legacy_body_turn_{};std::uint64_t rig_turns_{};
+    bool solve_locked(std::uint64_t frame_key=0,bool refresh=true) {
         if(!have_track_ || !have_native_body_) return false;
         if(frame_key && frame_key==latched_key_ && have_out_) return true;
         const auto now=std::chrono::steady_clock::now();
         if(std::chrono::duration<double>(now-published_).count()>tracked_pose_freshness_seconds) {have_out_=false;return false;}
         if(revision_==solved_revision_ && have_out_) {if(frame_key)latched_key_=frame_key;return true;}
+        if(refresh) refresh_sample_locked();
         const bool previous=last_.time_since_epoch().count()!=0;
         // Not tick deltas: GetTickCount64 advances in 15.6 ms quanta, so frames read dt 0 (gait,
         // chest yaw and elbow limits frozen) or a doubled step while the eye moved uniformly.
@@ -592,6 +722,16 @@ private:
         if(diag_.gap_reset) {solver_.reset();dt=1/90.;}
         diag_.substeps=std::max(1u,static_cast<unsigned>(std::ceil(dt/(1/30.))));
         diag_.consumed_dt=dt;diag_.substep_dt=dt/diag_.substeps;
+        // v861: a rig turn since the last solve turns the solver's memory (and the substeps' start) with the camera, about the camera anchor.
+        Xf from_eye=solved_eye_,from_hand[2]{hand_target(0,solved_track_.grip[0]),hand_target(1,solved_track_.grip[1])};
+        if(previous && !diag_.gap_reset && !legacy_body_turn_ && track_.rig_valid && solved_track_.rig_valid && track_.epoch==solved_track_.epoch) {
+            const double turn=body::wrap_pi(track_.rig_yaw-solved_track_.rig_yaw);
+            if(std::abs(turn)>1e-7 && std::abs(turn)<3.1) {
+                solver_.turn_rig(turn,track_.rig_pivot);++rig_turns_;
+                const auto q=body::rot_z(turn);const Xf r{q,track_.rig_pivot-rotated(q,track_.rig_pivot)};
+                from_eye=body::mul(r,from_eye);for(auto& h:from_hand) h=body::mul(r,h);
+            }
+        }
         body::Inputs in;
         in.eye=track_.eye;in.dt=dt;in.ground=body_frame_.rigid.p.z;
         {   // Body behind the eye: shift the solver's eye back along the level view direction.
@@ -599,6 +739,20 @@ private:
             auto flat=f+u*(-f.z);flat.z=0;
             if(length(flat)>1e-6) in.eye.p=in.eye.p-unit(flat)*back_;
         }
+        // v771 (user, headset v770: a right-hand copy's hold broke and its barrel turned when the left took a grenade): the left arm's native gun
+        // clip from its last calm stretch (the attachment turning under 20 deg/s against its parent for 0.25 s, as body_ik's socket; equip, fire
+        // and reload clips are not calm), for a gun copy held while no arm plays a gun clip.
+        if(track_.slot1_gun && have_native_arm_[0] && native_.arm[0].size()==69) {
+            const auto& sk=solver_.skeleton(1);const int at=sk.find("left_hand_attachment_jnt");
+            if(at>0 && static_cast<std::size_t>(at)<sk.parent.size() && sk.parent[static_cast<std::size_t>(at)]>=0) {
+                const auto& a=native_.arm[0];
+                const auto local=body::mul(body::inverse(a[static_cast<std::size_t>(sk.parent[static_cast<std::size_t>(at)])]),a[static_cast<std::size_t>(at)]);
+                const auto& q=gun_clip_last_.q;const double turn=2*std::acos(std::min(1.,std::abs(local.q.x*q.x+local.q.y*q.y+local.q.z*q.z+local.q.w*q.w)));
+                const bool calm=gun_clip_have_last_ && dt>1e-4 && turn/dt<20*3.14159265358979323846/180;
+                gun_clip_calm_=calm?gun_clip_calm_+dt:0;gun_clip_last_=local;gun_clip_have_last_=true;
+                if(gun_clip_calm_>=.25) {gun_clip_=a;have_gun_clip_=true;}
+            }
+        } else gun_clip_have_last_=false;
         for(unsigned i=0;i<2;++i) {
             in.hand_valid[i]=track_.grip_valid[i];
             in.hand[i]=track_.grip_valid[i]?hand_target(i,track_.grip[i]):Xf{};
@@ -609,6 +763,19 @@ private:
             in.has_finger[i]=track_.has_finger[i];std::memcpy(in.finger_turn[i],track_.finger_turn[i],sizeof(in.finger_turn[i]));
             in.has_finger_axis[i]=track_.has_finger_axis[i];std::memcpy(in.finger_axis[i],track_.finger_axis[i],sizeof(in.finger_axis[i]));
             in.native_arm[i]=have_native_arm_[i]?&native_.arm[i]:nullptr;
+            // v763 (user, headset v762: "the right hand must hold every weapon exactly as the left does, the left the sword as the right"): the
+            // other arm's own native clip (its hold, fire, reload), mirrored onto this skeleton (power_hand::mirror_joint, exact on all 69 joints).
+            if(track_.mirror_native[i] && have_native_arm_[i^1u] && native_.arm[i^1u].size()==69) {
+                auto& m=mirrored_arm_[i];m.resize(69);m[0]=native_.arm[i^1u][0];
+                for(unsigned j=1;j<69;++j) m[j]=to_xf(power_hand::mirror_joint(to_transform(native_.arm[i^1u][j])));
+                in.native_arm[i]=&m;in.native_mirrored[i]=true;
+            }
+            if(track_.gun_clip[i] && have_gun_clip_) {
+                if(i==0) {in.native_arm[0]=&gun_clip_;in.native_mirrored[0]=false;}
+                else {auto& m=mirrored_arm_[1];m.resize(69);m[0]=gun_clip_[0];
+                    for(unsigned j=1;j<69;++j) m[j]=to_xf(power_hand::mirror_joint(to_transform(gun_clip_[j])));
+                    in.native_arm[1]=&m;in.native_mirrored[1]=true;}
+            }
         }
         const bool arms_ready=have_native_arm_[0] && have_native_arm_[1];
         in.native=arms_ready?&native_:nullptr;
@@ -620,9 +787,9 @@ private:
                 in=target;in.dt=diag_.substep_dt;
                 if(previous && !diag_.gap_reset) {
                     const double t=static_cast<double>(step)/diag_.substeps;
-                    in.eye=interpolate(solved_eye_,target.eye,t);
+                    in.eye=interpolate(from_eye,target.eye,t);
                     for(unsigned i=0;i<2;++i) if(solved_track_.grip_valid[i] && track_.grip_valid[i])
-                        in.hand[i]=interpolate(hand_target(i,solved_track_.grip[i]),target.hand[i],t);
+                        in.hand[i]=interpolate(from_hand[i],target.hand[i],t);
                 }
                 if(step!=diag_.substeps)in.raw_hand_valid[0]=in.raw_hand_valid[1]=false;
                 out_=solver_.solve(in);solved_inputs_=in;
@@ -632,7 +799,7 @@ private:
             for(unsigned i=0;i<2;++i) {diag_.plant[i]=out_.feet[i];diag_.phase[i]=out_.phase[i];
                 diag_.swing_from[i]=out_.swing_from[i];diag_.swing_to[i]=out_.swing_to[i];}
             for(unsigned i=0;i<4;++i) diag_.owned[i]=out_.owned[i];
-            have_out_=true;latched_key_=frame_key;solved_speed_=eye_speed_;root_solved_=root_at_publish_;have_root_solved_=have_root_at_publish_;solved_revision_=revision_;solved_track_=track_;solved_eye_=target.eye;last_=now;++solves_;return true;
+            have_out_=true;latched_key_=frame_key;solved_speed_=eye_speed_;root_solved_=root_at_publish_;follow_solved_=follow_at_publish_;heading_solved_=heading_at_publish_;have_heading_solved_=have_heading_at_publish_;have_root_solved_=have_root_at_publish_;solved_revision_=revision_;solved_track_=track_;solved_eye_=target.eye;last_=now;++solves_;return true;
         }
         catch(...) {++failures_;have_out_=false;return false;}
     }

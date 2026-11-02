@@ -44,6 +44,18 @@ int main() {
         require(!c.update(0,false,0),"a disallowed idle stick does nothing");
         require(c.update(-.8f,true,10),"a disallowed idle stick keeps the flick armed");
     }
+    {   // v779 (user, headset v778): dual wield, the right stick pushed up is the jump, held while up (swim up, climb)
+        d2vr::JumpStick j;
+        require(!j.update(0,0,true),"an idle stick never jumps");
+        require(!j.update(0,.69f,true),"a push inside .7 never jumps");
+        require(j.update(0,.7f,true) && j.update(.2f,.5f,true),"pushed up it holds the jump until it falls under .3");
+        require(!j.update(0,.29f,true),"... and lets go below .3");
+        require(!j.update(.9f,.8f,true),"a push more sideways than up (a snap turn) never jumps");
+        require(!j.update(0,0,true) && !j.update(0,.9f,false),"a push while not allowed never jumps");
+        require(!j.update(0,.9f,true),"... nor late once allowed while still up");
+        require(!j.update(0,.1f,true) && j.update(0,.9f,true),"the return to centre re-arms it");
+        require(!j.update(0,.9f,false),"losing allowed lets go at once");
+    }
     {
         d2vr::HolsterHold h;
         require(!h.update(false,true,false,false,0),"an idle B never holds X");

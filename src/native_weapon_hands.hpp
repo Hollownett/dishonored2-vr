@@ -25,15 +25,20 @@
 #include "native_weapon_visibility.hpp"
 #include "native_manual_equip_runtime.hpp"
 #include "crash_observer.hpp"
+#include "held_copy.hpp"
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <vector>
 #include <string>
+#include <string_view>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
@@ -83,18 +88,44 @@ struct SwordFlight {
 };
 // A settled corpse a wake posted for (see NativeWeaponHands::wake_pending_).
 struct WakeEntry {bool used{},retried{};std::uintptr_t entity{};std::uint32_t id{};unsigned side{};std::uint64_t at_ms{};};
+// Dual wield visuals (NativeWeaponHands::service_mirror): the drawn pose each hand was last fed, one record per engine slot while the hands are
+// mirrored (slot 0 = the sword, slot 1 = pistol/crossbow/...), and the copy entities (by def index).
+struct HeldFeed {held_copy::Pose pose{};bool have{};std::chrono::steady_clock::time_point at{};held_copy::Motion speed{1,10};Vec3 root{};bool have_root{};}; // root: the player's model origin when the hand was drawn
+struct HeldCopy {std::uintptr_t ent{};std::uint32_t id{};bool shown{};};
+struct HeldSlot {
+    static constexpr unsigned none=~0u;
+    std::uintptr_t native{},cand{},owed{};std::uint32_t native_id{},cand_id{},owed_id{},fail_id{};unsigned def{none},cand_def{none};
+    held_copy::OffsetFilter offset;bool locked{},we_hid{},cand_ok{},have_cmd{};held_copy::Pose cmd{};std::uint64_t looked{},owed_looked{};
+    unsigned side{}; // the hand the offset was measured at (dual wield: the native weapon may ride the other hand)
+    void drop() {native=0;native_id=0;def=none;offset.reset();locked=we_hid=have_cmd=false;} // looked/cand/owed/fail_id outlive the item
+};
+// Dual wield, row A (docs/dual-wield-two-hands-plan.md): entities the mod spawns from *_midnight.def / guard defs are pooled (hidden and shown
+// again, removed only on session stop: the sword copy's rule), a gun thrown into the world is one of two LyingGun, and a copy a hand holds is a HeldSide.
+struct PoolEnt {const char* def{};std::uintptr_t ent{};std::uint32_t id{};bool in_use{},shown{};};
+struct LyingGun {
+    bool present{},native{};int pe{-1};const char* def{};unsigned kind{};SwordFlight flight{};LARGE_INTEGER qpc{};std::uint64_t since{},stow_ms{},checked_ms{};
+    std::vector<std::uintptr_t> struck; // v783: the guards this throw stunned (thrown_stun)
+    // native only: what brings it back (the inventory record is found again by decl and entity id; the record pointer moves when the list grows)
+    std::uintptr_t item_decl{},ammo_decl{},entity{};std::uint32_t item_spawn{};
+};
+struct HeldSide {int pe{-1};bool shown{},have_cmd{};const char* failed{};held_copy::Pose cmd{};};
+struct HeldPub {bool valid{};held_copy::Pose pose{};std::uint64_t tick{};std::uintptr_t ent{};std::uint32_t id{};};
+// A lying gun as the input thread sees it (NativeWeaponHands::gun_copy).
+struct GunCopyInfo {bool present{},flying{},native{};unsigned kind{};std::array<float,3> pos{};std::array<float,9> axis{1,0,0,0,1,0,0,0,1};const char* def{};std::uint64_t since{};};
 class NativeWeaponHands {
     friend struct NativeHipVisibilityFixture;
     friend struct NativeWeaponExchangeFixture;
     friend struct WakeBudgetCheck;
+    friend struct GunCopiesFixture;
 public:
-    enum class Op : unsigned {draw,sheathe,drop,pickup,recall,stow,gun_draw,gun_holster,shove,ragdoll,yank,wake,living_start,living_pull};
+    enum class Op : unsigned {draw,sheathe,drop,pickup,recall,stow,gun_draw,gun_holster,shove,ragdoll,yank,wake,living_start,living_pull,
+        gun_drop,gun_pickup,slot1_restore,test_equip,slot1_unequip}; // dual wield (row A): see gun_drop / gun_pickup / slot1_restore below; test_equip: the "equip" test command; slot1_unequip: the Heart let go (v771)
     // G6 (plan Task 14): the hold of a living NPC pulls him (the existing teleport 0x87d1e0, horizontal steps toward the hand) only when the guard_probe
     // experiments (plan Task 13, docs/BONELAB-FEEL-GUARD-PULL-RE.md) showed no snap-back and no yaw pop. Set from that verdict.
     static constexpr bool living_pull_enabled=false;
     // shove: the game's TakeDamage on target (an arkNPC) with damage decl `decl` (a name under the damage type), from pos
     // along vel (the push direction), amount 0 = the decl's own.
-    struct Request {Op op{};std::array<float,3> pos{},vel{},spin{};std::array<float,9> axis{1,0,0,0,1,0,0,0,1};std::uintptr_t target{};const char* decl{};float amount{};unsigned side{};bool free_look{};std::uint64_t manual_generation{},manual_xr_epoch{};NativePlayerStateLease manual_owner;};
+    struct Request {Op op{};std::array<float,3> pos{},vel{},spin{};std::array<float,9> axis{1,0,0,0,1,0,0,0,1};std::uintptr_t target{};const char* decl{};float amount{};unsigned side{};bool free_look{},as_copy{};std::uint64_t manual_generation{},manual_xr_epoch{};NativePlayerStateLease manual_owner;};
     // The exact sword the hand holds (the cinematic copy of sword_player.md6: refframe + animation, no physics, no audio). The
     // howler sword prop used before carried an audio component; spawned and removed 47 times in a headset session, the audio
     // update crashed on a freed emitter (2026-10-13, rva 0xc3e00 from 0x709de7). One copy per level, hidden and shown again.
@@ -103,8 +134,9 @@ public:
     static bool request(const Request& r) {
         const auto ok=[](const auto& a){return std::all_of(a.begin(),a.end(),[](float v){return std::isfinite(v);});};
         if(!ok(r.pos) || !ok(r.vel) || !ok(r.axis) || !ok(r.spin)) return false; // NaN into Teleport/spawn reaches every physics body (REA Q4)
+        Request q=r;if(q.op==Op::gun_drop && q.decl) q.decl=intern(q.decl); // a def name from the caller's stack or a game string must outlive the queue
         std::lock_guard<std::mutex> lock(m_);
-        if(queue_.size()<8) {queue_.push_back(r);if(r.op==Op::gun_holster)++holster_enqueued_;return true;}
+        if(queue_.size()<8) {queue_.push_back(q);if(r.op==Op::gun_holster)++holster_enqueued_;return true;}
         if(r.op==Op::gun_holster)++holster_dropped_;
         return false;
     }
@@ -181,11 +213,18 @@ public:
             case Op::wake: ok=wake(base,read,r);break;
             case Op::living_start: ok=living_start(base,read,r);break;
             case Op::living_pull: ok=living_pull(base,read,r);break;
+            case Op::gun_drop: try {ok=gun_drop(base,read,r);} catch(...) {ok=false;} if(!ok) ++gun_failed;break;
+            case Op::gun_pickup: try {ok=gun_pickup(base,read,r,manual_equip);} catch(...) {ok=false;} if(!ok) ++gun_failed;break;
+            case Op::slot1_restore: try {ok=slot1_restore(base,read);} catch(...) {ok=false;} if(ok) ++slot1_restores;else ++gun_failed;break;
+            case Op::test_equip: try {ok=test_equip(base,read,r.decl);} catch(...) {ok=false;} break;
+            case Op::slot1_unequip: try {ok=dual_wield_.load(std::memory_order_relaxed) && equip(base,read,0x20,64);} catch(...) {ok=false;} break; // the engine's own instant unequip (as a native gun_drop)
             }
             if(!ok) ++failures;
         }
         if(copy_ && shown_ && flight_.flying) {CrashOperation operation("native weapon flight");try {fly(base,read);} catch(...) {flight_.flying=false;}}
         {CrashOperation operation("native hip holster");try {service_hip(base,read);} catch(...) {}}
+        {CrashOperation operation("native mirrored hands");try {service_mirror(base,read);} catch(...) {}}
+        {CrashOperation operation("native gun copies");try {service_guns(base,read);} catch(...) {}}
         hold_down(base,read);
         service_wake_retries(base,read,clock_ms());
         service_guard_probe(base,read);
@@ -303,21 +342,31 @@ private:
         QueryPerformanceCounter(&prop_.qpc);
     }
     template<class Read> static void fly_prop(std::uintptr_t base,Read& read) {
-        static const bool melee_ok=NativeMelee::verify(base,read);
         const auto body=native_rigid_body(read,base,prop_.entity);
-        if(!body || body->entity_id!=prop_.id || !melee_ok) {prop_.until=0;return;}
+        if(!body || body->entity_id!=prop_.id) {prop_.until=0;return;}
         LARGE_INTEGER qpc{},freq{};QueryPerformanceCounter(&qpc);QueryPerformanceFrequency(&freq);
         const double dt=static_cast<double>(qpc.QuadPart-prop_.qpc.QuadPart)/static_cast<double>(freq.QuadPart);if(dt<.002) return;
         const auto from=prop_.last,p=body->pose.position;prop_.last=p;prop_.qpc=qpc;
-        const double speed=length(p-from)/dt;if(speed<3) return;
-        const auto decl=phys_damage(base,read);const auto game=rig::value<std::uintptr_t>(read,base+0x39a5290);
-        const auto player=game?rig::value<std::uintptr_t>(read,*game+0x3130b0):std::nullopt;if(!decl || !player) return;
-        NativeMelee::Sword s{*player,prop_.entity,0,decl,rig::value<std::uint32_t>(read,*player+0xa8).value_or(0),prop_.id,
-            static_cast<float>(std::clamp(speed*.6,2.,8.))}; // ponytail: 2-8 hp by speed (a guard has 30-40); tune in headset
+        const double speed=length(p-from)/dt;
         int fault{};const Vec3 half=body->bounds?(body->bounds->maximum-body->bounds->minimum)*.5:Vec3{};
-        if(strike(base,read,*game,from,p,{0,0,1},std::min(length(half),.5),s,prop_.struck,fault)) ++prop_hits;
+        if(thrown_stun(base,read,from,p,{0,0,1},std::min(length(half),.5),speed,prop_.entity,prop_.id,prop_.struck,fault)) ++prop_hits;
         if(fault==2) prop_.until=0;
     }
+public:
+    // A thrown thing that is no native throwable (a prop, a gun, a gadget) striking a guard: the game's phys_damage (NPC_HITREACT_BIG,
+    // the stagger a bottle gives), at 3 m/s or more, once per guard per throw. v783 (user, headset v791: "any weapon but the sword, thrown
+    // or swung into a guard, stuns him for a moment, as a bottle does"). true = a guard was struck.
+    template<class Read> static bool thrown_stun(std::uintptr_t base,Read& read,Vec3 from,Vec3 p,Vec3 axis,double half,double speed,
+            std::uintptr_t inflictor,std::uint32_t inflictor_id,std::vector<std::uintptr_t>& struck,int& fault) {
+        if(speed<3) return false; // every held gun runs this each service: a slow hand costs nothing
+        static const bool melee_ok=NativeMelee::verify(base,read);if(!melee_ok) return false;
+        const auto decl=phys_damage(base,read);const auto game=rig::value<std::uintptr_t>(read,base+0x39a5290);
+        const auto player=game?rig::value<std::uintptr_t>(read,*game+0x3130b0):std::nullopt;if(!decl || !player) return false;
+        NativeMelee::Sword s{*player,inflictor,0,decl,rig::value<std::uint32_t>(read,*player+0xa8).value_or(0),inflictor_id,
+            static_cast<float>(std::clamp(speed*.6,2.,8.))}; // ponytail: 2-8 hp by speed (a guard has 30-40); tune in headset
+        return strike(base,read,*game,from,p,axis,half,s,struck,fault)!=0;
+    }
+private:
     // Entity events (ARK_MSG_*): payload = 8112c0(eventManager 810240() = game+0x1e8968, +0xc8e8, msg, size, target id), filled
     // by the caller, delivered by the game. START_RAGDOLL 0xb9 {u64 0, u64 0} is what DropCorpse/Far Reach post (829a10, 43fe94);
     // VELOCITY_IMPULSE 0x149 {v[3], w[3], u16 flags} the generic set-velocity event (docs/native-hold-object.md).
@@ -765,7 +814,7 @@ private:
             }
         }
         const auto current_show=[&] {
-            if(hip_exchange_.blocked || !h.show || !h.context || !runtime.hip_empty_current(*h.context))return false;
+            if(hip_exchange_.blocked || gun_native_lying_ || !h.show || !h.context || !runtime.hip_empty_current(*h.context))return false; // gun_native_lying_: the gun lies in the world (dual wield), the hip holds nothing
             const auto now=GetTickCount64();
             return h.tick>hip_exchange_.publication_fence && now>=h.tick && now-h.tick<=250;
         };
@@ -828,8 +877,682 @@ private:
             else if(hip_shown_[k] && visible(base,read,hip_ent_[k],false))hip_shown_[k]=false;
         }
     }
+public:
+    // Dual wield visuals (docs/research-dual-wield.md; off unless mirror_hands(true), then nothing below runs). The engine keeps the sword in slot 0
+    // on the RIGHT arm and the pistol/crossbow in slot 1 on the LEFT arm; when the controllers swap roles the lead mirrors the hands, the arms stay
+    // with their own controllers, and these weapons would be drawn in the wrong hands. So the native weapon entity is hidden and a copy
+    // (the cinematic *_midnight.def models of the dropped sword and the hip gun: no physics, no audio) is teleported to the OTHER hand at
+    // hand_pose[other] * mirror(offset), offset = inv(hand_pose[native side]) * the native weapon's world frame, measured live while the native
+    // weapon rides its own arm, then held. Grenades, mines, razors and powers have no pure-visual copy def (their *_equipment.def carry the
+    // real throwable/placeable component and audio): they stay native.
+    // hand_pose: any thread (render), every frame, the DRAWN hand in game world; side 0 left, 1 right. mirror_hands: any thread, every control
+    // frame. clear_copies: remove the copies on the next game-thread service (session stop); a level change needs no call (every pointer is checked).
+    // root: the player's body model origin read on the render thread with this hand (render_player_root). A copy placed on the game thread
+    // is carried by the player's motion since then (v771, headset v770: running, the right hand's copy jerked a frame behind the hand).
+    static void head_follow(double rad) noexcept {follow_rad_.store(rad,std::memory_order_relaxed);} // render thread: NativeTurning::head_follow_total() (v816, service_held)
+    static void hand_pose(unsigned side,const WorldTrackedPose& drawn,const std::optional<Vec3>& root=std::nullopt) noexcept {
+        if(side>1 || !held_copy::valid(drawn)) return;
+        const auto now=std::chrono::steady_clock::now();
+        std::lock_guard<std::mutex> l(feed_m_);auto& f=feed_[side];
+        const double dt=f.have?std::chrono::duration<double>(now-f.at).count():1e9;
+        if(dt>.0005 && dt<.25) {const auto m=held_copy::motion(f.pose,drawn,dt);f.speed={f.speed.linear*.7+m.linear*.3,f.speed.angular*.7+m.angular*.3};}
+        else if(dt>=.25) f.speed={1,10}; // unknown after a gap: calm only after a few frames
+        f.pose=drawn;f.at=now;f.have=true;f.have_root=root.has_value();if(root) f.root=*root;
+    }
+    static void mirror_hands(bool mirrored) noexcept {mirrored_.store(mirrored,std::memory_order_relaxed);}
+    static void held_root_step(bool on) noexcept {held_step_on_.store(on,std::memory_order_relaxed);} // v776 test switch (see service_held)
+    static void clear_copies() noexcept {clear_req_.store(true,std::memory_order_relaxed);clear_guns_req_.store(true,std::memory_order_relaxed);}
+    // Status: samples taken, copies spawned, teleports, native hides (re-hides included) and restores, failures; err = the copy's drawn model
+    // origin vs the pose it was told (mm, hand still; -1 unknown: a constant error is a model/entity frame offset to add); bits: 1<<slot offset
+    // locked, 4<<slot copy shown; offset = per slot the held offset position in the hand frame (m).
+    inline static std::atomic<std::uint64_t> mirror_fast{},mirror_measured{},mirror_spawned{},mirror_teleports{},mirror_hides{},mirror_restores{},mirror_failed{};
+    inline static std::atomic<float> mirror_err_mm{-1.f};inline static std::atomic<unsigned> mirror_bits{};
+    inline static std::array<std::atomic<float>,6> mirror_offset{};
+    static std::string mirror_status() {
+        char b[448];
+        std::snprintf(b,sizeof(b),"{\"mirrored\":%d,\"bits\":%u,\"measured\":%llu,\"spawned\":%llu,\"teleports\":%llu,\"hides\":%llu,\"restores\":%llu,\"failed\":%llu,\"err_mm\":%.1f,"
+            "\"offset\":[%.3f,%.3f,%.3f,%.3f,%.3f,%.3f]}",mirrored_.load()?1:0,mirror_bits.load(),static_cast<unsigned long long>(mirror_measured.load()),
+            static_cast<unsigned long long>(mirror_spawned.load()),static_cast<unsigned long long>(mirror_teleports.load()),static_cast<unsigned long long>(mirror_hides.load()),
+            static_cast<unsigned long long>(mirror_restores.load()),static_cast<unsigned long long>(mirror_failed.load()),mirror_err_mm.load(),
+            mirror_offset[0].load(),mirror_offset[1].load(),mirror_offset[2].load(),mirror_offset[3].load(),mirror_offset[4].load(),mirror_offset[5].load());
+        return b;
+    }
+private:
+    inline static std::atomic<bool> mirrored_{},clear_req_{};inline static std::mutex feed_m_;inline static std::array<HeldFeed,2> feed_{};
+    inline static std::array<HeldSlot,2> mirror_slots_{};inline static std::array<HeldCopy,5> copies_{};inline static std::uintptr_t mirror_game_{};inline static bool mirror_live_{};
+    // Copy defs by index: 0 the sword, then gun/crossbow of Corvo, gun/crossbow of Emily (the hip clones' defs; 1+2*emily+crossbow).
+    static constexpr std::array<const char*,5> mirror_def_names{{sword_copy_decl,"models/campaign/dunwall/midnightassets/gun_corvo_midnight.def",
+        "models/campaign/dunwall/midnightassets/crossbow_corvo_midnight.def","models/campaign/dunwall/midnightassets/gun_emily_midnight.def",
+        "models/campaign/dunwall/midnightassets/crossbow_emily_midnight.def"}};
+    static bool feed(unsigned side,held_copy::Pose& pose,held_copy::Motion& speed,double max_age_s,std::optional<Vec3>* root=nullptr) {
+        std::lock_guard<std::mutex> l(feed_m_);const auto& f=feed_[side&1u];
+        if(!f.have || std::chrono::duration<double>(std::chrono::steady_clock::now()-f.at).count()>max_age_s) return false;
+        pose=f.pose;speed=f.speed;if(root) *root=f.have_root?std::optional<Vec3>{f.root}:std::nullopt;return true;
+    }
+    // The player's body model origin (model+0x1860, as render_player_root reads it on the render thread).
+    // yaw (optional): the frame's yaw (+0x186c rows) minus NativeTurning's head-follow total: the heading the camera is placed with (BodyAnchor).
+    template<class Read> static std::optional<Vec3> player_root(std::uintptr_t base,Read& read,double* yaw=nullptr) {
+        const auto p=player(base,read);const auto model=p?rig::value<std::uintptr_t>(read,p+0xf0):std::nullopt;std::array<float,12> o{};
+        if(!model || !rig::pointer(*model) || !read(*model+0x1860,o.data(),yaw?sizeof(o):12)) return std::nullopt;
+        if(yaw) *yaw=held_copy::frame_yaw(held_copy::from_rows(o.data(),o.data()+3))-follow_rad_.load(std::memory_order_relaxed);
+        return Vec3{o[0],o[1],o[2]};
+    }
+    static void remove_entity(std::uintptr_t base,std::uintptr_t e) { // the removal pinned in verify(): killEntity's remove event
+        reinterpret_cast<void (__fastcall*)(std::uintptr_t,std::uintptr_t,int)>(base+0x883f60)(e,base+0x39a6f30,0);
+    }
+    template<class Read> static std::string entity_decl_name(Read& read,std::uintptr_t e) {
+        const auto decl=rig::value<std::uintptr_t>(read,e+0x2e8);const auto name=decl?rig::value<std::uintptr_t>(read,*decl+0x48):std::nullopt;
+        std::array<char,96> text{};
+        if(!name || !rig::pointer(*name) || !read(*name,text.data(),text.size()-1)) return {};
+        std::string n(text.data());for(auto& c:n) c=static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        return n;
+    }
+    // A weapon entity's kind by its components (entity+0x268, as the player's): 0 pistol, 1 crossbow, -1 neither or unreadable.
+    template<class Read> static int weapon_kind(std::uintptr_t base,Read& read,std::uintptr_t entity) {
+        const auto comps=rig::list(read,entity+0x268,4096);if(!comps) return -1;
+        for(unsigned i=0;i<comps->packed_count && i<64;++i) {
+            const auto c=rig::value<std::uintptr_t>(read,comps->data+i*8ull);if(!c || !*c) continue;
+            if(rig::typed(read,base,*c,0x1b53f58)) return 0;  // arkCpntWeaponGun
+            if(rig::typed(read,base,*c,0x1b9cbf8)) return 1;  // arkCpntWeaponCrossbow
+        }
+        return -1;
+    }
+    // The item in an inventory slot (+0x68 sword, +0x70 the other hand; item+8 = its weapon entity's id) and the copy def it gets. false = unreadable
+    // this time (keep the state); true with cand 0 = the slot is empty.
+    template<class Read> static bool mirror_lookup(std::uintptr_t base,Read& read,unsigned slot,HeldSlot& s) {
+        s.cand=0;s.cand_id=0;s.cand_def=HeldSlot::none;
+        const auto arms=rig::player_arms(read,base);if(!arms) return false;
+        const auto inventory=rig::value<std::uintptr_t>(read,(*arms)[0].body+0x60);
+        if(!inventory || !rig::typed(read,base,*inventory,0x1b9a878) || rig::value<std::uintptr_t>(read,*inventory+0x10)!=(*arms)[0].player) return false;
+        const auto item=rig::value<std::uintptr_t>(read,*inventory+0x68+slot*8ull);if(!item) return false;
+        if(!*item) return true;
+        const auto id=rig::pointer(*item)?rig::value<std::uint32_t>(read,*item+8):std::nullopt;
+        if(!id || *id==0x3fff0010 || (*id>>16)>=0x3fff) return false;
+        const auto game=rig::value<std::uintptr_t>(read,base+0x39a5290);
+        const auto entity=game?rig::value<std::uintptr_t>(read,*game+0x3130b0+(*id>>16)*8ull):std::nullopt;
+        if(!entity || !alive_entity(base,read,*entity,*id)) return false;
+        s.cand=*entity;s.cand_id=*id;
+        if(slot==0) {s.cand_def=0;return true;}
+        const auto name=entity_decl_name(read,*entity);
+        // v762: the kind by the weapon's own component (RTTI arkCpntWeaponGun / arkCpntWeaponCrossbow). The decl-name read never matched live
+        // (headset v761: gun_item_frames 0, all 20 native gun drops refused, copies never measured), so the name is only a fallback.
+        const int by_component=weapon_kind(base,read,*entity);
+        const bool crossbow=by_component==1 || (by_component<0 && name.find("crossbow")!=std::string::npos),
+            gun=by_component==0 || (by_component<0 && (name.find("gun")!=std::string::npos || name.find("pistol")!=std::string::npos));
+        if(!crossbow && !gun) return true; // grenades, mines, razors, powers, the Heart: no copy def, they stay native
+        const bool emily=name.find("emily")!=std::string::npos || (name.find("corvo")==std::string::npos && emily_==1);
+        s.cand_def=1+(emily?2u:0u)+(crossbow?1u:0u);return true;
+    }
+    // The slot's copy goes out of sight (or is removed) and the native weapon is shown again, but only if it is the equipped item: a holstered
+    // weapon is the engine's to show (owed: shown the moment it is equipped again, in case the engine never hid it itself).
+    template<class Read> static void mirror_release(std::uintptr_t base,Read& read,unsigned slot,bool remove=false) {
+        auto& s=mirror_slots_[slot];
+        if(s.def<copies_.size()) {auto& c=copies_[s.def];
+            if(c.ent) {const bool live=alive_entity(base,read,c.ent,c.id);
+                if(live && remove) remove_entity(base,c.ent);
+                else if(live && c.shown) visible(base,read,c.ent,false);
+                if(!live || remove) c={};else c.shown=false;}}
+        if(s.we_hid && s.native && alive_entity(base,read,s.native,s.native_id)) {
+            HeldSlot probe;
+            if(mirror_lookup(base,read,slot,probe) && probe.cand==s.native) {if(visible(base,read,s.native,true)) ++mirror_restores;}
+            else {s.owed=s.native;s.owed_id=s.native_id;}
+        }
+        s.drop();
+    }
+    template<class Read> static void mirror_owed(std::uintptr_t base,Read& read,unsigned slot,std::uint64_t now) {
+        auto& s=mirror_slots_[slot];if(!s.owed || now-s.owed_looked<20) return;
+        s.owed_looked=now;
+        if(!alive_entity(base,read,s.owed,s.owed_id)) {s.owed=0;return;}
+        HeldSlot probe;if(!mirror_lookup(base,read,slot,probe) || probe.cand!=s.owed) return; // not equipped yet
+        const auto flags=rig::value<std::uint8_t>(read,s.owed+0xd0);
+        if(flags && (*flags&1) && visible(base,read,s.owed,true)) ++mirror_restores;
+        s.owed=0;
+    }
+    template<class Read> static void service_mirror(std::uintptr_t base,Read& read) {
+        const bool want=mirrored_.load(std::memory_order_relaxed),clear=clear_req_.exchange(false,std::memory_order_relaxed);
+        if(!want && !mirror_live_ && !clear) return; // knob off: nothing below runs and nothing is touched
+        const auto game=rig::value<std::uintptr_t>(read,base+0x39a5290);
+        if(!game || *game!=mirror_game_) { // a new level or session: every pointer is dead, call nothing
+            for(auto& s:mirror_slots_) s={};
+            copies_={};mirror_game_=game?*game:0;mirror_live_=false;mirror_bits=0;
+            if(!game) return;
+        }
+        const auto now=GetTickCount64();
+        if(clear) {
+            for(unsigned slot=0;slot<2;++slot) mirror_release(base,read,slot,true);
+            for(auto& c:copies_) {if(c.ent && alive_entity(base,read,c.ent,c.id)) remove_entity(base,c.ent);c={};}
+        } else for(unsigned slot=0;slot<2;++slot) {mirror_owed(base,read,slot,now);mirror_slot(base,read,slot,want,now);}
+        bool live=false;unsigned bits=0;
+        for(unsigned slot=0;slot<2;++slot) {const auto& s=mirror_slots_[slot];
+            live=live || s.native || s.owed;if(s.locked) bits|=1u<<slot;if(s.def<copies_.size() && copies_[s.def].shown) bits|=4u<<slot;}
+        mirror_live_=live;mirror_bits=bits;
+    }
+    template<class Read> static void mirror_slot(std::uintptr_t base,Read& read,unsigned slot,bool want,std::uint64_t now) {
+        auto& s=mirror_slots_[slot];
+        if(!want) {if(s.native) mirror_release(base,read,slot);return;}
+        if(now-s.looked>=20) {s.looked=now;s.cand_ok=mirror_lookup(base,read,slot,s);}
+        if(s.cand_ok) {
+            const bool dropped=slot==0 && copy_ && shown_; // the dropped sword lies in the world (a different entity): no held sword copy meanwhile
+            const bool usable=!dropped && s.cand && s.cand_def!=HeldSlot::none && s.cand_id!=s.fail_id;
+            if(s.native && (!usable || s.cand_id!=s.native_id)) mirror_release(base,read,slot);
+            if(!usable) return;
+            if(!s.native) {s.native=s.cand;s.native_id=s.cand_id;s.def=s.cand_def;if(s.owed==s.cand) s.owed=0;}
+        }
+        if(!s.native) return;
+        if(!alive_entity(base,read,s.native,s.native_id)) {s.drop();return;}
+        const unsigned native_side=slot==0?1u:0u,other_side=1u-native_side;
+        const auto flags=rig::value<std::uint8_t>(read,s.native+0xd0);if(!flags) return;
+        bool native_hidden=(*flags&1)!=0;
+        held_copy::Pose hand{};held_copy::Motion speed{};
+        // v816 (user, headset v815: "a pistol picked up into the hand appears with a noticeable delay"): a gun's grip is the kind's last measured one at once; the 12 still samples
+        // below (a hand nearly still for 0.25 s, the native gun meanwhile on the wrong arm) are only the first time. The sword keeps measuring (v775).
+        if(!s.locked && s.def!=0 && s.def<mirror_def_names.size())
+            if(const auto& k=kind_offset_[static_cast<unsigned>(held_copy::kind_of(mirror_def_names[s.def]))&3u];k.have) {
+                s.side=native_side;s.offset.value=held_copy::offset_for(k.offset,k.side,native_side);s.offset.have=true;s.offset.stable=12;s.locked=true;++mirror_fast;}
+        if(!s.locked) { // measure: the native weapon rides its own arm at its own controller; sample only while that hand is nearly still
+            if(native_hidden || !feed(native_side,hand,speed,.1) || speed.linear>.3 || speed.angular>2) return;
+            const auto model=rig::value<std::uintptr_t>(read,s.native+0xf0);
+            std::array<float,12> frame{}; // model+0x1860 origin[3], +0x186c rows forward/left/up (the frame the barrel aim reads)
+            if(!model || !rig::pointer(*model) || !rig::typed(read,base,*model,0x1b0d628) || !read(*model+0x1860,frame.data(),sizeof(frame))) return;
+            s.side=native_side;if(s.offset.add(held_copy::to_local(hand,held_copy::from_rows(frame.data(),frame.data()+3)))) ++mirror_measured;
+            if(s.offset.ready()) {
+                s.locked=true;const auto& p=s.offset.value.position;
+                mirror_offset[slot*3]=static_cast<float>(p.x);mirror_offset[slot*3+1]=static_cast<float>(p.y);mirror_offset[slot*3+2]=static_cast<float>(p.z);
+            }
+            return;
+        }
+        auto& c=copies_[s.def];
+        if(c.ent && !alive_entity(base,read,c.ent,c.id)) c={};
+        if(!native_hidden) { // hidden before the copy shows; and again whenever the game shows it
+            if(!visible(base,read,s.native,false)) {s.fail_id=s.native_id;++mirror_failed;mirror_release(base,read,slot);return;}
+            s.we_hid=true;++mirror_hides;
+        }
+        held_copy::Pose out{};
+        const bool placed=s.we_hid && feed(other_side,hand,speed,.25) && held_copy::target(hand,s.offset.value,out); // hidden by the engine alone: no stand-in
+        if(!placed) {if(c.ent && c.shown && visible(base,read,c.ent,false)) c.shown=false;return;}
+        std::array<float,3> pos{float(out.position.x),float(out.position.y),float(out.position.z)};std::array<float,9> axis{};
+        for(unsigned i=0;i<3;++i) {axis[i*3]=float(out.basis[i].x);axis[i*3+1]=float(out.basis[i].y);axis[i*3+2]=float(out.basis[i].z);}
+        if(!c.ent) {
+            c.ent=spawn_def(base,read,mirror_def_names[s.def],pos.data(),axis.data());
+            c.id=c.ent?rig::value<std::uint32_t>(read,c.ent+0xa8).value_or(0):0;c.shown=c.ent!=0;
+            if(!c.ent || !alive_entity(base,read,c.ent,c.id)) {c={};s.fail_id=s.native_id;++mirror_failed;mirror_release(base,read,slot);return;} // no copy: the weapon stays native
+            ++mirror_spawned;
+        } else {
+            teleport<Read>(base,c.ent,pos,axis);++mirror_teleports;
+            if(!c.shown && visible(base,read,c.ent,true)) c.shown=true; // moved first, then shown: no frame at the old place
+        }
+        if(s.have_cmd && speed.linear<.05) { // diagnostics: where the engine drew the copy's model vs where it was told (constant = frame offset)
+            std::array<float,3> at{};const auto model=rig::value<std::uintptr_t>(read,c.ent+0xf0);
+            if(model && rig::pointer(*model) && read(*model+0x1860,at.data(),sizeof(at)))
+                mirror_err_mm=static_cast<float>(length(Vec3{at[0],at[1],at[2]}-s.cmd.position)*1000);
+        }
+        s.cmd=out;s.have_cmd=true;
+    }
+public:
+    // ---- Dual wield, row A (docs/dual-wield-two-hands-plan.md; artifacts/claude/dual-wield/fleet/A-gun-copies.md) ----
+    // dual_wield(bool): any thread, every control frame (the lead). Off = nothing below runs and nothing is touched; turning it off removes what it made.
+    // gun_drop / gun_pickup (Request ops, game thread): a gun in the left slot leaves the hand at once (EquipChange 64, code 0x20, as the sword's drop on 53)
+    //   and a flown copy of its *_midnight.def (the hip clone's def) takes its place in the world; the mod flies it like the dropped sword (SwordFlight).
+    //   Op::gun_drop with decl == nullptr drops the native slot-1 gun (pos/axis only a fallback: the pose is taken from where the gun is drawn);
+    //   with decl == a def name (a mod-owned copy, e.g. a guard pistol) nothing native changes: that def's copy is thrown from the pose of this side's held copy.
+    //   Op::gun_pickup takes the lying copy nearest r.pos: a native one comes back into slot 1 (through the hip lease when r.manual_generation was reserved with
+    //   reserve_hip, else/after a refusal as the wheel equips it), a mod-owned one just disappears (the caller held_copy()s it next).
+    //   A copy lying > 30 s or > 12 m from the player returns to the hip by itself; a native gun drawn again meanwhile (wheel) calls its copy back.
+    // held_copy(side, def): any thread, every frame the caller wants it: a copy of that entity def is shown at that hand (pose = hand_pose(side) * grip offset),
+    //   nullptr = none. A def that fails to spawn shows nothing and counts in held_failed (it is not retried until the def changes).
+    using GunCopy=GunCopyInfo;
+    static void dual_wield(bool on) noexcept {dual_wield_.store(on,std::memory_order_relaxed);}
+    // The native weapons ride the other hands (the lead's attachment cross while mirrored): grip offsets are measured at the hand they ride.
+    static void native_rides_other(bool on) noexcept {ride_other_.store(on,std::memory_order_relaxed);}
+    inline static std::atomic<std::uint64_t> slot1_restores{};
+    static bool dual_wield() noexcept {return dual_wield_.load(std::memory_order_relaxed);}
+    static GunCopy gun_copy(unsigned index=0) {std::lock_guard<std::mutex> l(m_);return published_guns_[index&1u];}
+    static std::array<GunCopy,2> gun_copies() {std::lock_guard<std::mutex> l(m_);return published_guns_;}
+    // The first present lying native gun (the one a GunGrip pickup is for), else an empty GunCopy.
+    static GunCopy gun_copy_native() {std::lock_guard<std::mutex> l(m_);for(const auto& g:published_guns_) if(g.present && g.native) return g;return {};}
+    static void held_copy(unsigned side,const char* def_name) {held_want_[side&1u].store(def_name && *def_name?intern(def_name):nullptr,std::memory_order_relaxed);}
+    // The held copy's current world frame (its model's row 0 is the barrel/blade forward; position = the model origin), nothing while it is not shown.
+    static std::optional<WorldTrackedPose> held_copy_pose(unsigned side) {
+        std::lock_guard<std::mutex> l(feed_m_);const auto& p=held_pub_[side&1u];
+        if(!p.valid || steady_ms()-p.tick>250) return std::nullopt;
+        return p.pose;
+    }
+    // The held copy's entity and id (the gun that fires from that hand; the game thread re-checks both), {0,0} while it is not shown.
+    static std::pair<std::uintptr_t,std::uint32_t> held_copy_entity(unsigned side) {
+        std::lock_guard<std::mutex> l(feed_m_);const auto& p=held_pub_[side&1u];
+        return p.valid && steady_ms()-p.tick<=250?std::make_pair(p.ent,p.id):std::make_pair<std::uintptr_t,std::uint32_t>(0,0);
+    }
+    inline static std::atomic<std::uint64_t> gun_drops{},gun_drops_native{},gun_pickups{},gun_pickups_explicit{},gun_returns{},gun_redraws{},gun_failed{},gun_spawned{},
+        gun_teleports{},gun_flight_frames{},gun_stows{},held_spawned{},held_teleports{},held_failed{},held_hides{},held_measured{},held_carried{},held_rejected{},gun_hits{},bash_hits{},gadget_hits{};
+    inline static std::atomic<unsigned> held_bits{}; // 1<<side: a copy is shown there; 4<<side: its offset is measured from the native twin (else the per-kind constant)
+    inline static std::atomic<float> last_return_dz{},last_return_age_s{}; // v781: the last lying gun sent back to the hip: its height over the player (m), its age (s)
+    static std::string gun_status() {
+        const auto lying=gun_copies();std::string l;
+        for(unsigned i=0;i<2;++i) {
+            const auto& g=lying[i];char b[200];
+            if(!g.present) {l+=i?",null":"null";continue;}
+            std::snprintf(b,sizeof(b),"%s{\"native\":%d,\"flying\":%d,\"kind\":%u,\"pos\":[%.2f,%.2f,%.2f],\"since\":%llu}",i?",":"",g.native?1:0,g.flying?1:0,g.kind,
+                g.pos[0],g.pos[1],g.pos[2],static_cast<unsigned long long>(g.since));
+            l+=b;
+        }
+        std::string failed;{std::lock_guard<std::mutex> lock(feed_m_);failed=held_last_failed_.data();}
+        for(auto& c:failed) if(c=='"' || c=='\\' || static_cast<unsigned char>(c)<32) c='?';
+        std::string kinds; // the last measured grip per kind (pistol, crossbow, sword): have, side, position, basis rows (sim: the copies' constants)
+        for(unsigned i=1;i<4;++i) {const auto& o=kind_offset_[i];const auto& q=o.offset;char kb[300];
+            std::snprintf(kb,sizeof(kb),"%s[%d,%u,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f]",i>1?",":"",o.have?1:0,o.side,q.position.x,q.position.y,q.position.z,
+                q.basis[0].x,q.basis[0].y,q.basis[0].z,q.basis[1].x,q.basis[1].y,q.basis[1].z,q.basis[2].x,q.basis[2].y,q.basis[2].z);kinds+=kb;}
+        char b[1600];
+        std::snprintf(b,sizeof(b),"{\"on\":%d,\"drops\":%llu,\"native_drops\":%llu,\"pickups\":%llu,\"explicit_pickups\":%llu,\"returns\":%llu,\"redraws\":%llu,\"failed\":%llu,"
+            "\"spawned\":%llu,\"teleports\":%llu,\"flight_frames\":%llu,\"stows\":%llu,\"lying\":[%s],\"held\":{\"spawned\":%llu,\"teleports\":%llu,\"failed\":%llu,\"hides\":%llu,"
+            "\"measured\":%llu,\"rejected\":%llu,\"carried\":%llu,\"step_mm\":%.1f,\"turn_mdeg\":%.0f,\"bits\":%u,\"want\":[%d,%d],\"last_failed\":\"%s\",\"kinds\":[%s]},\"restores\":%llu,\"rides_other\":%d,"
+            "\"last_return\":[%.2f,%.1f],\"stuns\":[%llu,%llu,%llu]}",dual_wield()?1:0,
+            static_cast<unsigned long long>(gun_drops.load()),static_cast<unsigned long long>(gun_drops_native.load()),static_cast<unsigned long long>(gun_pickups.load()),
+            static_cast<unsigned long long>(gun_pickups_explicit.load()),static_cast<unsigned long long>(gun_returns.load()),static_cast<unsigned long long>(gun_redraws.load()),
+            static_cast<unsigned long long>(gun_failed.load()),static_cast<unsigned long long>(gun_spawned.load()),static_cast<unsigned long long>(gun_teleports.load()),
+            static_cast<unsigned long long>(gun_flight_frames.load()),static_cast<unsigned long long>(gun_stows.load()),l.c_str(),
+            static_cast<unsigned long long>(held_spawned.load()),static_cast<unsigned long long>(held_teleports.load()),static_cast<unsigned long long>(held_failed.load()),
+            static_cast<unsigned long long>(held_hides.load()),static_cast<unsigned long long>(held_measured.load()),static_cast<unsigned long long>(held_rejected.load()),static_cast<unsigned long long>(held_carried.load()),static_cast<double>(held_step_mm.load()),static_cast<double>(held_turn_mdeg.load()),held_bits.load(),
+            held_want_[0].load()?1:0,held_want_[1].load()?1:0,failed.c_str(),kinds.c_str(),static_cast<unsigned long long>(slot1_restores.load()),ride_other_.load()?1:0,
+            static_cast<double>(last_return_dz.load()),static_cast<double>(last_return_age_s.load()),
+            static_cast<unsigned long long>(gun_hits.load()),static_cast<unsigned long long>(bash_hits.load()),static_cast<unsigned long long>(gadget_hits.load()));
+        return b;
+    }
+private:
+    inline static std::atomic<bool> dual_wield_{},clear_guns_req_{};
+    inline static std::atomic<bool> ride_other_{};inline static std::uintptr_t slot1_cur_{},slot1_prev_{};inline static std::uint64_t slot1_looked_{};
+    inline static std::array<LyingGun,2> lying_{};inline static bool gun_native_lying_{},guns_live_{};inline static std::uintptr_t guns_game_{};
+    inline static std::array<PoolEnt,8> pool_{};inline static std::array<HeldSide,2> held_{};inline static std::array<HeldSlot,2> meas_{};
+    inline static std::array<std::atomic<const char*>,2> held_want_{};inline static std::array<HeldPub,2> held_pub_{};inline static std::array<char,96> held_last_failed_{};
+    inline static std::array<GunCopy,2> published_guns_{};inline static std::uint64_t guns_player_check_{};inline static float guns_player_[3]{};
+    static std::uint64_t steady_ms() {return static_cast<std::uint64_t>(std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count()*1000);}
+    static const char* intern(const char* name) { // std::set nodes keep their address: a stable const char* for the life of the process
+        static std::mutex mutex;static std::set<std::string,std::less<>> names;
+        std::lock_guard<std::mutex> l(mutex);
+        const auto found=names.find(std::string_view(name)); // held_copy() is called every frame: no allocation for a name already known
+        return (found!=names.end()?found:names.emplace(name).first)->c_str();
+    }
+    static held_copy::Pose request_pose(const Request& r) {return held_copy::from_rows(r.pos.data(),r.axis.data());}
+    template<class Read> static bool pool_alive(std::uintptr_t base,Read& read,int pe) {
+        return pe>=0 && pe<static_cast<int>(pool_.size()) && pool_[pe].ent && alive_entity(base,read,pool_[pe].ent,pool_[pe].id);
+    }
+    // A copy of `def` at (pos, axis), visible: a pooled hidden one is moved there and shown, else a new one is spawned (a full pool removes an idle entry). -1 = failed.
+    template<class Read> static int pool_acquire(std::uintptr_t base,Read& read,const char* def,const std::array<float,3>& pos,const std::array<float,9>& axis) {
+        if(!def) return -1;
+        for(int i=0;i<static_cast<int>(pool_.size());++i) {auto& e=pool_[i];
+            if(!e.ent || e.in_use) continue;
+            if(!alive_entity(base,read,e.ent,e.id)) {e={};continue;}
+            if(std::strcmp(e.def,def)) continue;
+            teleport<Read>(base,e.ent,pos,axis);
+            if(!e.shown && !visible(base,read,e.ent,true)) return -1;
+            e.shown=true;e.in_use=true;return i;
+        }
+        int slot=-1;
+        for(int i=0;i<static_cast<int>(pool_.size());++i) if(!pool_[i].ent) {slot=i;break;}
+        if(slot<0) for(int i=0;i<static_cast<int>(pool_.size());++i) if(!pool_[i].in_use) {
+            if(alive_entity(base,read,pool_[i].ent,pool_[i].id)) remove_entity(base,pool_[i].ent);
+            pool_[i]={};slot=i;break;
+        }
+        if(slot<0) return -1;
+        const auto ent=spawn_def(base,read,def,pos.data(),axis.data());
+        const std::uint32_t id=ent?rig::value<std::uint32_t>(read,ent+0xa8).value_or(0):0u;
+        if(!ent || !alive_entity(base,read,ent,id)) return -1;
+        pool_[slot]=PoolEnt{def,ent,id,true,true};++gun_spawned;return slot;
+    }
+    template<class Read> static void pool_release(std::uintptr_t base,Read& read,int pe) {
+        if(pe<0 || pe>=static_cast<int>(pool_.size())) return;
+        auto& e=pool_[pe];if(!e.ent) return;
+        if(!alive_entity(base,read,e.ent,e.id)) {e={};return;}
+        if(e.shown && visible(base,read,e.ent,false)) e.shown=false;
+        e.in_use=false;
+    }
+    template<class Read> static void gun_release(std::uintptr_t base,Read& read,LyingGun& g) {
+        pool_release(base,read,g.pe);g=LyingGun{};
+        gun_native_lying_=false;for(const auto& o:lying_) gun_native_lying_=gun_native_lying_ || (o.present && o.native);
+    }
+    // The native slot-1 gun (inv+0x70) with its controller memory: entity and def index from the mirror lookup, the item record and the ammo record selected with it.
+    struct Slot1 {std::uintptr_t fsm{},inventory{},item{},ammo{},item_decl{},ammo_decl{},entity{};std::uint32_t id{},spawn{};unsigned def{HeldSlot::none};};
+    template<class Read> static bool read_slot1(std::uintptr_t base,Read& read,Slot1& s) {
+        HeldSlot probe;if(!mirror_lookup(base,read,1,probe) || !probe.cand || probe.cand_def==HeldSlot::none) return false;
+        s.entity=probe.cand;s.id=probe.cand_id;s.def=probe.cand_def;
+        s.fsm=player_fsm(base,read);if(!s.fsm) return false;
+        const auto inventory=rig::value<std::uintptr_t>(read,s.fsm+0x328),controller=rig::value<std::uintptr_t>(read,s.fsm+0x2f8);
+        if(!inventory || !*inventory || !rig::typed(read,base,*inventory,0x1b9a878)) return false;
+        s.inventory=*inventory;
+        const auto item=rig::value<std::uintptr_t>(read,*inventory+0x70);if(!item || !*item) return false;
+        s.item=*item;const auto decl=rig::value<std::uintptr_t>(read,*item);const auto spawn=rig::value<std::uint32_t>(read,*item+8);
+        if(!decl || !*decl || !spawn || *spawn!=s.id) return false;
+        s.item_decl=*decl;s.spawn=*spawn;
+        if(controller && *controller && rig::value<std::uintptr_t>(read,*controller+0x190)==s.item) { // the ammo selected with this gun
+            const auto ammo=rig::value<std::uintptr_t>(read,*controller+0x198);
+            if(ammo && *ammo) {s.ammo=*ammo;s.ammo_decl=rig::value<std::uintptr_t>(read,*ammo).value_or(0);}
+        }
+        return true;
+    }
+    // The inventory record (stride 0x38 from +0x38; +0 decl, +8 the weapon entity's id) of a decl: the pointer moves when the list grows.
+    template<class Read> static std::uintptr_t find_record(Read& read,std::uintptr_t inventory,std::uintptr_t decl,std::uint32_t spawn) {
+        const auto entries=decl?rig::list(read,inventory+0x38,4096):std::nullopt;if(!entries) return 0;
+        for(unsigned i=0;i<entries->packed_count;++i) {
+            const auto record=entries->data+i*0x38ull;
+            if(rig::value<std::uintptr_t>(read,record)==decl && (!spawn || rig::value<std::uint32_t>(read,record+8)==spawn)) return record;
+        }
+        return 0;
+    }
+    // The wheel's own equip (7fb350 builds exactly this and requests 64): 835520(params, item record, ammo record, code 0x20 for a gun, requester 0x5b).
+    template<class Read> static bool equip_item(std::uintptr_t base,Read& read,std::uintptr_t item,std::uintptr_t ammo,int code=0x20) {
+        static const bool pinned=[&]{std::array<unsigned char,16> got{};
+            const std::array<unsigned char,16> want{0x48,0x89,0x5c,0x24,0x08,0x57,0x48,0x83,0xec,0x20,0x8b,0x05,0x00,0xf5,0x15,0x03};
+            return read(base+0x835520,got.data(),got.size()) && got==want;}();
+        const std::uintptr_t fsm=pinned && item?player_fsm(base,read):0;if(!fsm) return false;
+        alignas(16) std::array<unsigned char,0x30> params{};
+        reinterpret_cast<void (__fastcall*)(void*,std::uintptr_t,std::uintptr_t,int,int)>(base+0x835520)(params.data(),item,ammo,code,0x5b);
+        reinterpret_cast<void (__fastcall*)(std::uintptr_t,int,void*)>(base+0x8024d0)(fsm,64,params.data());
+        return true;
+    }
+    template<class Read> static bool native_frame(std::uintptr_t base,Read& read,std::uintptr_t entity,held_copy::Pose& out) {
+        const auto flags=rig::value<std::uint8_t>(read,entity+0xd0);if(!flags || (*flags&1)) return false; // hidden: it is not drawn there
+        const auto model=rig::value<std::uintptr_t>(read,entity+0xf0);
+        std::array<float,12> frame{};
+        if(!model || !rig::pointer(*model) || !rig::typed(read,base,*model,0x1b0d628) || !read(*model+0x1860,frame.data(),sizeof(frame))) return false;
+        out=held_copy::from_rows(frame.data(),frame.data()+3);return held_copy::valid(out);
+    }
+    template<class Read> static bool gun_drop(std::uintptr_t base,Read& read,const Request& r) {
+        if(!dual_wield_.load(std::memory_order_relaxed)) return false;
+        const char* def=r.decl;const bool native=!def;const unsigned side=r.side&1u;
+        held_copy::Pose at=request_pose(r);Slot1 s1{};
+        if(native) {
+            if(!read_slot1(base,read,s1)) return false; // not a gun/crossbow in the hand
+            def=mirror_def_names[s1.def];
+            const auto& m=mirror_slots_[1];
+            if(m.native==s1.entity && m.have_cmd && m.def<copies_.size() && copies_[m.def].shown) at=m.cmd; // mirrored: the copy is what the player sees in the hand
+            else {held_copy::Pose drawn{};if(native_frame(base,read,s1.entity,drawn)) at=drawn;}
+        } else if(const auto& h=held_[side];h.pe>=0 && h.have_cmd && pool_alive(base,read,h.pe) && !std::strcmp(pool_[h.pe].def,def)) at=h.cmd; // the held copy leaves from where it is
+        if(!held_copy::valid(at)) return false;
+        std::array<float,3> pos{float(at.position.x),float(at.position.y),float(at.position.z)};std::array<float,9> axis{};
+        for(unsigned i=0;i<3;++i) {axis[i*3]=float(at.basis[i].x);axis[i*3+1]=float(at.basis[i].y);axis[i*3+2]=float(at.basis[i].z);}
+        int li=-1;for(int i=0;i<2;++i) if(!lying_[i].present) {li=i;break;}
+        if(li<0) {li=lying_[0].since<=lying_[1].since?0:1;gun_release(base,read,lying_[li]);} // two lie already: the older goes back
+        const int pe=pool_acquire(base,read,def,pos,axis);if(pe<0) return false;
+        if(native) {
+            if(!equip(base,read,0x20,64)) {pool_release(base,read,pe);return false;}
+            auto& c=copies_[s1.def]; // a mirrored copy of this gun in the other hand goes now, not at the mirror's next look
+            if(mirror_slots_[1].native==s1.entity && c.ent && c.shown && alive_entity(base,read,c.ent,c.id) && visible(base,read,c.ent,false)) c.shown=false;
+        } else if(held_[side].pe>=0) {pool_release(base,read,held_[side].pe);held_[side]=HeldSide{};held_want_[side].store(nullptr,std::memory_order_relaxed);}
+        auto& g=lying_[li];g=LyingGun{};
+        g.present=true;g.native=native;g.pe=pe;g.def=pool_[pe].def;g.kind=static_cast<unsigned>(held_copy::kind_of(def));
+        g.since=GetTickCount64();g.stow_ms=g.since;g.checked_ms=g.since;
+        if(native) {g.item_decl=s1.item_decl;g.ammo_decl=s1.ammo_decl;g.entity=s1.entity;g.item_spawn=s1.spawn;gun_native_lying_=true;++gun_drops_native;}
+        auto& f=g.flight;f.pos=at.position;f.vel={r.vel[0],r.vel[1],r.vel[2]};f.axis={at.basis[0],at.basis[1],at.basis[2]};
+        const auto sidev=cross(f.vel,Vec3{0,0,1});const double speed=length(f.vel);
+        if(speed>4 && length(sidev)>1e-3) {f.spin_axis=sidev*(1/length(sidev));f.spin=-std::min(speed*1.6,16.);} // tumbles end over end, as the sword
+        f.flying=true;QueryPerformanceCounter(&g.qpc);
+        ++gun_drops;return true;
+    }
+    template<class Read> static bool gun_take_native(std::uintptr_t base,Read& read,const LyingGun& g,const Request& r,NativeManualEquipRuntime& manual) {
+        Slot1 now{};
+        if(read_slot1(base,read,now) && now.entity==g.entity) return true; // already back in the hand (the wheel drew it)
+        if(r.manual_generation && service_gun_draw(base,read,r,manual)) return true; // the hip draw's lease: the remembered item is this gun
+        const auto fsm=player_fsm(base,read);if(!fsm) return false;
+        const auto inventory=rig::value<std::uintptr_t>(read,fsm+0x328);if(!inventory || !*inventory) return false;
+        const auto item=find_record(read,*inventory,g.item_decl,g.item_spawn);if(!item) return false;
+        const auto ammo=g.ammo_decl?find_record(read,*inventory,g.ammo_decl,0):0;
+        if(!equip_item(base,read,item,ammo)) return false;
+        ++gun_pickups_explicit;return true;
+    }
+    template<class Read> static bool gun_pickup(std::uintptr_t base,Read& read,const Request& r,NativeManualEquipRuntime& manual) {
+        if(!dual_wield_.load(std::memory_order_relaxed)) return false;
+        Vec3 pos[2]{};bool present[2]{};
+        // r.decl set = a mod-owned copy's pickup, else the native gun's; either within reach of the hand (review: no cross-picking, no 1e9 reach).
+        // as_copy: whichever lies nearest, taken as the hand's mod-owned copy (a native one stays in the inventory, unequipped).
+        for(unsigned i=0;i<2;++i) {present[i]=lying_[i].present && (r.as_copy || lying_[i].native==(r.decl==nullptr));pos[i]=lying_[i].flight.pos;}
+        const int i=held_copy::nearest(pos,present,2,Vec3{r.pos[0],r.pos[1],r.pos[2]},.6);if(i<0) return false;
+        auto& g=lying_[i];
+        if(g.native && !r.as_copy && !gun_take_native(base,read,g,r,manual)) return false;
+        gun_release(base,read,g);++gun_pickups;return true;
+    }
+    // One lying gun per game tick: flight, then the stow / redraw / return rules.
+    template<class Read> static void gun_fly(std::uintptr_t base,Read& read,LyingGun& g) {
+        static const bool trace_ok=NativeWorldTrace::verify(base,read);
+        LARGE_INTEGER qpc{},freq{};QueryPerformanceCounter(&qpc);QueryPerformanceFrequency(&freq);
+        const double dt=std::min(static_cast<double>(qpc.QuadPart-g.qpc.QuadPart)/static_cast<double>(freq.QuadPart),.05);
+        if(dt<.001) return;
+        g.qpc=qpc;
+        const auto game=rig::value<std::uintptr_t>(read,base+0x39a5290);
+        const auto world=game?rig::value<std::uintptr_t>(read,*game+NativeWorldTrace::world_offset):std::nullopt;
+        if(!trace_ok || !world || !*world) return;
+        const Vec3 from=g.flight.pos;const double speed=length(g.flight.vel);
+        g.flight.step(dt,[&](Vec3 a,Vec3 b) {
+            auto hit=NativeWorldTrace::sphere_cast(base,read,reinterpret_cast<NativeWorldTrace::Cast>(base+NativeWorldTrace::cast_rva),
+                reinterpret_cast<NativeWorldTrace::Construct>(base+NativeWorldTrace::sphere_ctor_rva),*world,a,b,SwordFlight::radius);
+            if(hit && hit->entity && rig::typed(read,base,hit->entity,NativeMelee::npc_vtable_rva)) hit->static_support=false; // a guard is not a floor
+            return hit;
+        });
+        ++gun_flight_frames;
+        if(!SwordFlight::finite(g.flight)) {g.flight.flying=false;return;} // never hand the engine a non-finite transform
+        if(int fault{};thrown_stun(base,read,from,g.flight.pos,g.flight.axis[0],.15,speed,pool_[g.pe].ent,
+               rig::value<std::uint32_t>(read,pool_[g.pe].ent+0xa8).value_or(0),g.struck,fault)) {++gun_hits;g.flight.vel=g.flight.vel*-.2;g.flight.spin*=.3;} // it bounces off the guard
+        auto& e=pool_[g.pe];
+        std::array<float,3> origin{float(g.flight.pos.x),float(g.flight.pos.y),float(g.flight.pos.z)};
+        std::array<float,9> axis{};
+        for(unsigned i=0;i<3;++i) {axis[i*3]=float(g.flight.axis[i].x);axis[i*3+1]=float(g.flight.axis[i].y);axis[i*3+2]=float(g.flight.axis[i].z);}
+        teleport<Read>(base,e.ent,origin,axis);++gun_teleports;
+    }
+    template<class Read> static void service_lying(std::uintptr_t base,Read& read,LyingGun& g,std::uint64_t now) {
+        if(!pool_alive(base,read,g.pe)) {if(g.pe>=0 && g.pe<static_cast<int>(pool_.size())) pool_[g.pe]={};gun_release(base,read,g);return;} // the engine took it (level change, save): the native gun is still the hip's
+        if(g.flight.flying) gun_fly(base,read,g);
+        if(now-g.checked_ms<100) return;
+        g.checked_ms=now;
+        if(g.native) { // the gun in the slot again: within 1.5 s of the drop it is the unequip a running clip cancelled (stow again), later a native redraw (call the copy back)
+            Slot1 s1{};
+            if(read_slot1(base,read,s1) && s1.entity==g.entity) {
+                if(now-g.since<1500) {if(now-g.stow_ms>=300) {g.stow_ms=now;if(equip(base,read,0x20,64)) ++gun_stows;}}
+                else {++gun_redraws;gun_release(base,read,g);return;}
+            }
+        }
+        if(now-guns_player_check_>=250) {
+            guns_player_check_=now;
+            const auto p=player(base,read);const auto at=p?rig::value<std::array<float,3>>(read,p+0x300):std::nullopt;
+            if(at) std::copy(at->begin(),at->end(),guns_player_);else guns_player_[0]=guns_player_[1]=guns_player_[2]=1e9f;
+        }
+        const Vec3 you{guns_player_[0],guns_player_[1],guns_player_[2]};
+        if(guns_player_[0]<1e8f && held_copy::should_return(static_cast<double>(now-g.since)/1000.,length(g.flight.pos-you))) {
+            last_return_dz=static_cast<float>(g.flight.pos.z-you.z);last_return_age_s=static_cast<float>((now-g.since)/1000.); // v781: below the floor? (a gun fallen through it)
+            ++gun_returns;gun_release(base,read,g);}
+    }
+    // The native weapons' grip offsets, measured live while the native weapon rides its own hand: the copy of the same def in a hand looks like it.
+    template<class Read> static void service_measure(std::uintptr_t base,Read& read,std::uint64_t now) {
+        for(unsigned slot=0;slot<2;++slot) {
+            auto& s=meas_[slot];
+            if(now-s.looked<(s.locked?250u:20u)) continue;
+            s.looked=now;
+            if(!mirror_lookup(base,read,slot,s)) continue;
+            if(s.native && (s.cand!=s.native || s.cand_id!=s.native_id)) s.drop();
+            if(!s.cand || s.cand_def==HeldSlot::none) {if(s.native) s.drop();continue;}
+            if(!s.native) {s.native=s.cand;s.native_id=s.cand_id;s.def=s.cand_def;}
+            if(s.locked) continue;
+            held_copy::Pose hand{},frame{};held_copy::Motion speed{};
+            const unsigned side=(slot==0?1u:0u)^(ride_other_.load(std::memory_order_relaxed)?1u:0u);
+            if(side!=s.side) {s.offset.reset();s.side=side;} // the weapon changed hands mid-measure
+            if(!feed(side,hand,speed,.1) || speed.linear>.3 || speed.angular>2 || !native_frame(base,read,s.native,frame)) continue;
+            if(s.offset.add(held_copy::to_local(hand,frame))) ++held_measured;
+            if(s.offset.ready()) {
+                const auto kind=s.def<mirror_def_names.size()?held_copy::kind_of(mirror_def_names[s.def]):held_copy::Kind::other;
+                // v773 (headset v772: a left pistol copy pointed the wrong way): a hold read mid-clip (holster, reload, a hand change) is no grip.
+                // A gun's barrel must lie within 45 degrees of the game's own hold of that kind (grip_constant, measured live), else measure again.
+                if(!held_copy::plausible_grip(kind,s.offset.value,s.side)) {s.offset.reset();++held_rejected;continue;}
+                s.locked=true;if(s.def<mirror_def_names.size()) kind_offset_[static_cast<unsigned>(kind)&3u]={s.offset.value,s.side,true};}
+        }
+    }
+    // The last measured grip per kind (other, pistol, crossbow, sword): it outlives the native item (v762, headset v761: a pistol copy beside
+    // the native crossbow lost the pistol's measurement and sat on the constant, muzzle up), and serves the same kind's other defs (guard weapons).
+    struct KindOffset {held_copy::Pose offset{};unsigned side{};bool have{};};
+    inline static std::array<KindOffset,4> kind_offset_{};
+    // The grip offset of `def` for a copy at `side`: from a native weapon of the same def (measured here, or by the mirror), mirrored across the hand when it
+    // was measured on the other one; else the per-kind constant. true = it came from a native twin.
+    static bool grip_offset(const char* def,unsigned side,held_copy::Pose& offset,bool& mirrored) {
+        for(unsigned slot=0;slot<2;++slot)
+            for(const HeldSlot* src:{&meas_[slot],&mirror_slots_[slot]})
+                if(src->locked && src->def<mirror_def_names.size() && !std::strcmp(mirror_def_names[src->def],def)) {
+                    offset=src->offset.value;mirrored=side!=src->side;return true;
+                }
+        if(const auto& k=kind_offset_[static_cast<unsigned>(held_copy::kind_of(def))&3u];k.have) {offset=k.offset;mirrored=side!=k.side;return true;}
+        const auto c=held_copy::grip_constant(held_copy::kind_of(def));offset=c.offset;mirrored=side!=c.side;return false;
+    }
+    template<class Read> static void held_hide(std::uintptr_t base,Read& read,unsigned side) {
+        auto& h=held_[side];
+        if(h.pe>=0 && pool_alive(base,read,h.pe) && pool_[h.pe].shown && visible(base,read,pool_[h.pe].ent,false)) {pool_[h.pe].shown=false;++held_hides;}
+        h.shown=false;held_bits&=~(1u<<side);
+        std::lock_guard<std::mutex> l(feed_m_);held_pub_[side].valid=false;
+    }
+    // v776: the player's root as the last two services saw it (a copy is placed before the physics step moves the player; held_copy::root_step).
+    inline static std::optional<Vec3> root_seen_{};inline static std::chrono::steady_clock::time_point root_seen_at_{};inline static std::atomic<float> held_step_mm{};
+    inline static double yaw_seen_{};inline static std::atomic<double> follow_rad_{};inline static std::atomic<float> held_turn_mdeg{}; // v816: the camera heading root_seen_ came with (player_root)
+    inline static double dt_seen_{}; // v779: the GAME clock dt of the step root_seen_ was read in (held_copy::root_step scales the step by this step's over it)
+    inline static std::atomic<bool> held_step_on_{true}; // test command "copystep on|off": the sim compares the copies with and without the step
+    // This sim step's GAME clock dt: idGameTimeManager at game+0x2e7428, clock 2 (GAME) dt float at +0xc8, written by AdvanceFrame 0x59990 before the stages run.
+    template<class Read> static double step_dt(std::uintptr_t base,Read& read) {
+        const auto game=rig::value<std::uintptr_t>(read,base+0x39a5290);
+        const auto dt=game && *game?rig::value<float>(read,*game+0x2e7428+0xc8):std::nullopt;
+        return dt && std::isfinite(*dt)?*dt:0.;
+    }
+    template<class Read> static void service_held(std::uintptr_t base,Read& read) {
+        std::optional<Vec3> now_root;Vec3 step{};double turn{},yaw{};
+        if(held_want_[0].load(std::memory_order_relaxed) || held_want_[1].load(std::memory_order_relaxed)) { // no copy wanted: no read, and the history goes stale on its own (100 ms)
+            now_root=player_root(base,read,&yaw);const auto at=std::chrono::steady_clock::now();const double dt=step_dt(base,read);
+            if(now_root) {if(root_seen_) {const double gap=std::chrono::duration<double>(at-root_seen_at_).count();
+                step=held_copy::root_step(*root_seen_,*now_root,gap,dt_seen_,dt);turn=held_copy::yaw_step(yaw_seen_,yaw,gap,dt_seen_,dt);}
+                root_seen_=now_root;yaw_seen_=yaw;root_seen_at_=at;dt_seen_=dt;}
+            else root_seen_.reset();
+            if(!held_step_on_.load(std::memory_order_relaxed)) {step=Vec3{};turn=0;}
+            held_step_mm.store(static_cast<float>(length(step)*1000),std::memory_order_relaxed);held_turn_mdeg.store(static_cast<float>(turn*180000/3.14159265358979323846),std::memory_order_relaxed);
+        }
+        for(unsigned side=0;side<2;++side) {
+            auto& h=held_[side];const char* want=held_want_[side].load(std::memory_order_relaxed);
+            if(h.pe>=0 && !pool_alive(base,read,h.pe)) {if(h.pe<static_cast<int>(pool_.size())) pool_[h.pe]={};h=HeldSide{};held_bits&=~(5u<<side);}
+            if(h.failed && h.failed!=want) h.failed=nullptr; // another def: try again
+            if(!want) {if(h.pe>=0) {held_hide(base,read,side);pool_release(base,read,h.pe);h=HeldSide{};}continue;}
+            if(h.pe>=0 && std::strcmp(pool_[h.pe].def,want)) {const auto failed=h.failed;held_hide(base,read,side);pool_release(base,read,h.pe);h=HeldSide{};h.failed=failed;}
+            held_copy::Pose hand{},offset{},out{};held_copy::Motion speed{};bool mirrored{};std::optional<Vec3> drawn_root;
+            const bool measured=grip_offset(want,side,offset,mirrored);
+            if(measured) held_bits|=4u<<side;else held_bits&=~(4u<<side);
+            if(!feed(side,hand,speed,.25,&drawn_root)) {held_hide(base,read,side);continue;} // no fresh hand: no stand-in
+            if(drawn_root && now_root) {const auto moved=*now_root-*drawn_root;
+                if(length(moved)<1.) {hand.position=hand.position+moved;hand=held_copy::carry(hand,*now_root,step,turn);++held_carried;}} // the player's motion since the hand was drawn (a teleport or load: not), and the step and turn the physics is about to add (v776, v816)
+            if(!held_copy::place(hand,offset,mirrored,out)) {held_hide(base,read,side);continue;}
+            std::array<float,3> pos{float(out.position.x),float(out.position.y),float(out.position.z)};std::array<float,9> axis{};
+            for(unsigned i=0;i<3;++i) {axis[i*3]=float(out.basis[i].x);axis[i*3+1]=float(out.basis[i].y);axis[i*3+2]=float(out.basis[i].z);}
+            if(h.pe<0) {
+                if(h.failed==want) continue;
+                h.pe=pool_acquire(base,read,want,pos,axis);
+                if(h.pe<0) {
+                    h.failed=want;++held_failed;
+                    std::lock_guard<std::mutex> l(feed_m_);std::snprintf(held_last_failed_.data(),held_last_failed_.size(),"%s",want);
+                    continue;
+                }
+                ++held_spawned;
+            } else {
+                auto& e=pool_[h.pe];teleport<Read>(base,e.ent,pos,axis);++held_teleports;
+                if(!e.shown && visible(base,read,e.ent,true)) e.shown=true;
+            }
+            h.shown=true;h.cmd=out;h.have_cmd=true;held_bits|=1u<<side;
+            std::lock_guard<std::mutex> l(feed_m_);
+            held_pub_[side]=HeldPub{true,out,steady_ms(),pool_[h.pe].ent,pool_[h.pe].id};
+        }
+    }
+    // v783: a gun (native or copy) swung into a guard stuns him as a thrown one does (thrown_stun: the hand at 3 m/s or more, the path of the
+    // gun's frame since the last service plus its barrel). A struck guard can be struck again 600 ms after the hand's last hit.
+    inline static std::array<std::optional<Vec3>,2> bash_last_{};inline static std::array<std::vector<std::uintptr_t>,2> bash_struck_{};
+    inline static std::array<std::uint64_t,2> bash_ms_{};
+    template<class Read> static void service_bash(std::uintptr_t base,Read& read,std::uint64_t now) {
+        for(unsigned side=0;side<2;++side) {
+            held_copy::Pose gun{};std::uintptr_t ent{};bool have=false;
+            if(const auto& h=held_[side];h.shown && h.have_cmd && h.pe>=0 && pool_[h.pe].def && held_copy::kind_of(pool_[h.pe].def)!=held_copy::Kind::sword) {gun=h.cmd;ent=pool_[h.pe].ent;have=true;}
+            for(unsigned slot=1;slot<2 && !have;++slot) { // the native slot-1 gun, in the hand it rides (service_measure's side)
+                const auto& m=meas_[slot];
+                if(m.native && m.def<mirror_def_names.size() && held_copy::kind_of(mirror_def_names[m.def])!=held_copy::Kind::sword &&
+                   (0u^(ride_other_.load(std::memory_order_relaxed)?1u:0u))==side && native_frame(base,read,m.native,gun)) {ent=m.native;have=true;}
+            }
+            held_copy::Pose hand{};held_copy::Motion speed{};
+            if(!have || !feed(side,hand,speed,.1)) {bash_last_[side].reset();continue;}
+            const Vec3 from=bash_last_[side].value_or(gun.position);bash_last_[side]=gun.position;
+            if(now-bash_ms_[side]>600) bash_struck_[side].clear();
+            if(int fault{};thrown_stun(base,read,from,gun.position,gun.basis[0],.12,speed.linear,ent,rig::value<std::uint32_t>(read,ent+0xa8).value_or(0),bash_struck_[side],fault)) {
+                ++bash_hits;bash_ms_[side]=now;}
+        }
+    }
+    template<class Read> static void guns_teardown(std::uintptr_t base,Read& read) {
+        for(auto& e:pool_) {if(e.ent && alive_entity(base,read,e.ent,e.id)) remove_entity(base,e.ent);e={};}
+        guns_forget();
+    }
+    static void guns_forget() { // every pointer is dead or already removed: call nothing
+        lying_={};held_={};meas_={};pool_={};bash_last_={};bash_struck_={};gun_native_lying_=guns_live_=false;held_bits=0;slot1_cur_=slot1_prev_=0;
+        std::lock_guard<std::mutex> l(feed_m_);held_pub_={};
+    }
+    template<class Read> static void service_guns(std::uintptr_t base,Read& read) {
+        const bool on=dual_wield_.load(std::memory_order_relaxed),clear=clear_guns_req_.exchange(false,std::memory_order_relaxed);
+        if(!on && !clear && !guns_live_) return; // flag off: nothing below runs and nothing is touched
+        const auto game=rig::value<std::uintptr_t>(read,base+0x39a5290);
+        if(!game || *game!=guns_game_) {guns_forget();guns_game_=game?*game:0;if(!game) return;} // a new level or session
+        if(clear || !on) {guns_teardown(base,read);return;}
+        const auto now=GetTickCount64();
+        for(auto& g:lying_) if(g.present) service_lying(base,read,g,now);
+        if(now-slot1_looked_>=50) {slot1_looked_=now; // what slot 1 held before its last change (slot1_restore)
+            const auto fsm=player_fsm(base,read);const auto inv=fsm?rig::value<std::uintptr_t>(read,fsm+0x328):std::nullopt;
+            const auto item=inv && *inv?rig::value<std::uintptr_t>(read,*inv+0x70):std::nullopt;
+            const auto decl=item && *item?rig::value<std::uintptr_t>(read,*item):std::nullopt;
+            if(item) {const std::uintptr_t d=decl?*decl:0;if(d!=slot1_cur_) {if(slot1_cur_) slot1_prev_=slot1_cur_;slot1_cur_=d;}}}
+        service_measure(base,read,now);
+        service_held(base,read);
+        service_bash(base,read,now);
+        bool live=false;for(const auto& g:lying_) live=live || g.present;for(const auto& e:pool_) live=live || e.ent!=0;for(const auto& m:meas_) live=live || m.native!=0;
+        guns_live_=live;
+    }
+    // Op::slot1_restore: the item slot 1 held before its last change is equipped again, as the wheel does (code 0x30), e.g. the power a wheel
+    // swapped out for a gun that went to the other hand as its copy.
+    template<class Read> static bool slot1_restore(std::uintptr_t base,Read& read) {
+        if(!dual_wield_.load(std::memory_order_relaxed) || !slot1_prev_ || slot1_prev_==slot1_cur_) return false;
+        const auto fsm=player_fsm(base,read);if(!fsm) return false;
+        const auto inventory=rig::value<std::uintptr_t>(read,fsm+0x328);if(!inventory || !*inventory) return false;
+        const auto item=find_record(read,*inventory,slot1_prev_,0);if(!item) return false;
+        return equip_item(base,read,item,0,0x30);
+    }
+    // Test command "equip pistol|crossbow" (sim, v765): the wheel's own equip of that weapon with its selected ammo. The native wheel ignored
+    // the sim's stick in the chapter-4 save, so scenarios equip through this.
+    // v769: also "regular_grenade|sticky_grenade|stun_mine|springrazor": the gadget record whose item decl names it (code 0x30, as slot1_restore).
+    template<class Read> static bool test_equip(std::uintptr_t base,Read& read,const char* what) {
+        if(!what) return false;
+        const bool crossbow=!std::strcmp(what,"crossbow"),gun=crossbow || !std::strcmp(what,"pistol");
+        const auto game=rig::value<std::uintptr_t>(read,base+0x39a5290);
+        const auto fsm=player_fsm(base,read);const auto inventory=fsm?rig::value<std::uintptr_t>(read,fsm+0x328):std::nullopt;
+        const auto entries=inventory && *inventory?rig::list(read,*inventory+0x38,4096):std::nullopt;if(!entries || !game) return false;
+        for(unsigned i=0;i<entries->packed_count;++i) {
+            const auto record=entries->data+i*0x38ull;const auto comp=rig::value<std::uintptr_t>(read,record+0x10);
+            if(!comp || !*comp) continue;
+            if(gun) {
+                if(!rig::typed(read,base,*comp,crossbow?0x1b9cbf8:0x1b53f58)) continue;
+                const auto entry=rig::value<std::uintptr_t>(read,*comp+0x98);const auto ammo_decl=entry && *entry?rig::value<std::uintptr_t>(read,*entry):std::nullopt;
+                return equip_item(base,read,record,ammo_decl && *ammo_decl?find_record(read,*inventory,*ammo_decl,0):0);
+            }
+            if(!rig::typed(read,base,*comp,0x1b9d8b8) && !rig::typed(read,base,*comp,0x1b54538) && !rig::typed(read,base,*comp,0x1b99c68)) continue; // throwable, placeable, the Heart
+            if(rig::value<std::int32_t>(read,record+0x20).value_or(0)<=0) continue;
+            const auto decl=rig::value<std::uintptr_t>(read,record);const auto name=decl && *decl?rig::value<std::uintptr_t>(read,*decl+0x8):std::nullopt; // the item's own name (live v769)
+            std::array<char,128> text{};
+            if(name && rig::pointer(*name) && read(*name,text.data(),text.size()-1) && std::strstr(text.data(),what)) return equip_item(base,read,record,0,0x30);
+        }
+        return false;
+    }
+    static void publish_guns() {
+        std::array<GunCopy,2> out{};
+        for(unsigned i=0;i<2;++i) {const auto& g=lying_[i];
+            if(!g.present) continue;
+            auto& c=out[i];c.present=true;c.flying=g.flight.flying;c.native=g.native;c.kind=g.kind;c.def=g.def;c.since=g.since;
+            c.pos={float(g.flight.pos.x),float(g.flight.pos.y),float(g.flight.pos.z)};
+            for(unsigned k=0;k<3;++k) {c.axis[k*3]=float(g.flight.axis[k].x);c.axis[k*3+1]=float(g.flight.axis[k].y);c.axis[k*3+2]=float(g.flight.axis[k].z);}
+        }
+        std::lock_guard<std::mutex> l(m_);published_guns_=out;
+    }
+private:
     template<class Read> static void publish(std::uintptr_t base,Read& read) {
-        Copy c{};
+        publish_guns();Copy c{};
         if(alive(base,read) && shown_) { // the mod owns the copy's pose (it never simulates by itself)
             const auto& p=flight_.pos;const auto& b=flight_.axis[0];
             c={true,flight_.flying,{float(p.x),float(p.y),float(p.z)},{float(b.x),float(b.y),float(b.z)},copy_since_,trace_};

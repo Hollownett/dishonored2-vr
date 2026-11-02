@@ -299,6 +299,19 @@ int main() {
         m.put(mch+0x10,player+0x100);
         require(!reader.poll(m,base,player,1005).scripted,"Recycled state machine owner was accepted");
     }
+    {   // Crank wheel: state 85 arkPlayerStateCrank keeps the grip's Use held.
+        Mem m;constexpr uptr mch=0x140500000,pool=0x140600000,crank=0x140700000;
+        machine(m,mch);m.put(mch+0x90,pool);m.put(pool+0x10+85*8,crank);
+        m.put(crank,base+0x1c3c9c8);m.put<std::uint32_t>(crank+8,85);m.put(crank+0x10,mch);m.put<std::uint8_t>(crank+0x20,0);
+        require(!d2vr::native_cranking(m,base,mch),"Idle crank state reported cranking");
+        m.put<std::uint8_t>(crank+0x20,1);
+        require(d2vr::native_cranking(m,base,mch),"Active crank state not reported");
+        m.put(crank,base+0x1c84258);
+        require(!d2vr::native_cranking(m,base,mch),"Wrong state class accepted as crank");
+        m.put(crank,base+0x1c3c9c8);m.put(crank+0x10,mch+0x100);
+        require(!d2vr::native_cranking(m,base,mch),"Foreign machine's crank state accepted");
+        require(!d2vr::native_cranking(m,base,0),"Missing machine reported cranking");
+    }
     scenario_basic();
     scenario_wrong_owner();
     scenario_player_change();

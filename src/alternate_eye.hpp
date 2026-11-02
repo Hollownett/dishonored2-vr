@@ -18,11 +18,17 @@
 // (2026-10-22 headset session: task 1 stamped the Setup for Present F+1, so with the eye flipping every frame each swapchain received the
 // OTHER eye's image, a pseudo-stereo pair the eyes cannot fuse: "double vision". The sim's left/right disparity had the reversed sign.)
 #include <array>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <optional>
 
 namespace d2vr {
+
+// v790 diagnostic (user 2026-11-01: "only the left eye doubles, always, whatever the motion"): knob build/alt-parity-flip or command
+// "altparity" renders the RIGHT eye on even display frames. A double image that moves to the right eye follows the frame parity or timing;
+// one that stays in the left eye is state tied to the left eye or the reused native slot 0.
+inline std::atomic<bool> alternate_parity_flip{false};
 
 inline constexpr std::uint64_t alternate_max_age = 2; // an eye image older than this many displayed frames is never submitted
 inline constexpr std::uint64_t alternate_pipeline_depth = 1; // Presents between a view Setup's interval and the one that shows its image
@@ -44,6 +50,10 @@ public:
         std::uint64_t epoch{};               // pose epoch the views were located in
         std::array<View, 2> view{};
         std::array<std::int64_t, 2> display_time{}, locate_cpu_time{};
+        // v792: a one-view frame also records the view the OTHER eye has at the same Setup (same head pose, its own FOV): the kept image
+        // of that eye is warped to it and submitted with it (stale_eye_warp.hpp). Bit per eye; never an eye this frame rendered.
+        unsigned companion_mask{};
+        std::array<View, 2> companion{};
     };
     void record(std::uint64_t display, int eye, const View& view, std::uint64_t epoch, std::int64_t display_time, std::int64_t locate_cpu) noexcept {
         if ((eye != 0 && eye != 1) || display == 0) return;
@@ -52,6 +62,15 @@ public:
         const auto e = static_cast<std::size_t>(eye);
         slot.display = display; slot.epoch = epoch; slot.mask |= 1u << e;
         slot.view[e] = view; slot.display_time[e] = display_time; slot.locate_cpu_time[e] = locate_cpu;
+        slot.companion_mask &= ~(1u << e);
+    }
+    // After record() of the rendered eye, for the same display frame: the other eye's view at that Setup.
+    void record_companion(std::uint64_t display, int eye, const View& view) noexcept {
+        if ((eye != 0 && eye != 1) || display == 0) return;
+        Slot& slot = slots_[display & 1u];
+        const auto e = static_cast<std::size_t>(eye);
+        if (slot.display != display || (slot.mask & (1u << e))) return;
+        slot.companion_mask |= 1u << e; slot.companion[e] = view;
     }
     // The Setup views recorded for display frame `display`, or nothing when no Setup was recorded for it (loading, a menu, a dropped Setup).
     std::optional<Slot> take(std::uint64_t display) const noexcept {
@@ -124,6 +143,10 @@ inline bool alternate_free_gameplay(bool gameplay, bool settings_open) noexcept 
 inline bool alternate_single_view_allowed(bool authored, bool settings_open) noexcept {return !authored && !settings_open;}
 // An eye image may be kept for later frames only if it was made in free gameplay (never a cut, takedown, menu or settings image).
 inline bool alternate_may_keep(bool gameplay, bool authored, bool settings_open) noexcept {return gameplay && !authored && !settings_open;}
+// Whether the Present installs the descriptor of its plan (planned_eye -1 = paired). A paired plan is installed in every state: the world keeps
+// rendering behind the weapon wheel (logic mask 256, gameplay false), and with the single-view descriptor left in place every Setup there
+// disagreed with the paired plan, was dropped, and the session fell back after 30 frames (headset v790). A single view is planned only in gameplay.
+inline bool alternate_install_descriptor(bool gameplay, int planned_eye) noexcept {return gameplay || planned_eye < 0;}
 // Eyes whose view must have been recorded for this Present (bit per eye).
 inline unsigned alternate_need_mask(int fresh_eye) noexcept {return fresh_eye == 0 ? 1u : fresh_eye == 1 ? 2u : 3u;}
 inline bool alternate_pair_ready(unsigned rendered_mask, int fresh_eye, bool layers_ok) noexcept {
@@ -169,7 +192,7 @@ public:
         if (epoch_changed) {clear_images(); have_ = false;}  // the in-flight Setup was located in the old epoch: its Present drops it
         int result = -1;
         if (gameplay && !authored) {
-            const int eye = static_cast<int>(frame & 1u), other = 1 - eye;
+            const int eye = parity_eye(frame), other = 1 - eye;
             const bool in_flight = have_ && last_frame_ + 1 == frame && (last_result_ < 0 || last_result_ == other) && delivered_;
             // The first free frame after a menu, cut, takedown or settings panel is paired: whatever images exist were made before or during it.
             if (!refresh_ && (can_submit(other, frame) || in_flight)) result = eye;
@@ -201,7 +224,9 @@ public:
         last_result_ = -1;
     }
     std::uint64_t kept_frame(int eye) const noexcept {return (eye == 0 || eye == 1) ? frame_[eye] : 0;}
-    static int parity_eye(std::uint64_t frame) noexcept {return static_cast<int>(frame & 1u);}
+    static int parity_eye(std::uint64_t frame) noexcept {
+        return static_cast<int>((frame + (alternate_parity_flip.load(std::memory_order_relaxed) ? 1u : 0u)) & 1u);
+    }
 
 private:
     void clear_images() noexcept {frame_ = {0, 0};}

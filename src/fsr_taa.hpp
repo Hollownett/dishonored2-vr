@@ -12,6 +12,7 @@
 #include <cstdio>
 #include <optional>
 #include <string>
+#include <wrl/client.h>
 #include "fsr3_eye_upscaler.hpp"
 #include "fsr4_eye_upscaler.hpp"
 #include "dlss_eye_upscaler.hpp"
@@ -53,6 +54,17 @@ public:
     };
     using InputFrameReader=std::uint64_t (*)();
     std::atomic<InputFrameReader> input_frame_reader{nullptr}; // optional current Present/frame counter; 0 means unknown
+    // v796: the scene depth `eye` was last rendered with (the per-eye copy below: R32 device depth, its render rectangle width x height at
+    // the top left), for the stale-eye parallax warp. Empty while FSR/DLSS is off or not ready, or before the eye's first copy.
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> eye_depth(int eye,UINT& width,UINT& height) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        width=height=0;
+        if((eye!=0 && eye!=1) || !enabled.load() || !ready.load()) return {};
+        const auto& e=(*eyes_)[static_cast<std::size_t>(eye)];
+        if(!e.depth.p || !e.depth_w || !e.depth_h) return {};
+        width=e.depth_w;height=e.depth_h;
+        return Microsoft::WRL::ComPtr<ID3D11Texture2D>(e.depth.p);
+    }
 private:
     template<class T> struct Ref {
         T* p{};~Ref() {if(p) p->Release();}
@@ -62,6 +74,7 @@ private:
     struct Eye {
         Fsr3EyeUpscaler fsr;Fsr4EyeUpscaler fsr4;Ref<ID3D11Texture2D> depth,reactive,colour_in,upscaled;Ref<ID3D11UnorderedAccessView> depth_uav,reactive_uav;
         LARGE_INTEGER last{};bool reset=true;GpuPassTimer timer;
+        UINT depth_w{},depth_h{}; // v796: the render rectangle of the last depth copy (eye_depth)
     };
     struct ClearSnapshot {
         temporal_eye::DepthClearObservation event;
@@ -393,7 +406,7 @@ public:
     std::atomic<std::uint64_t> replaced{},not_ready{},failures{},create_failures{};
     std::atomic<bool> enabled{false},ready{false};
     std::wstring dump_path; // diagnostics: one R32 depth dump of the left eye after dump_after replacements
-    std::uint64_t dump_after=0;
+    std::uint64_t dump_after=0;unsigned dumped_eyes_{};
     std::atomic<bool> reactive_enabled{true}; // build/no-fsr-reactive disables the near-field mask
     std::atomic<float> fraction{1}; // <1: upscale mode (the engine renders each eye at this fraction)
     // Upscale contexts are built for max(fraction, max_fraction) and reused for any smaller fraction (FSR
@@ -619,7 +632,7 @@ public:
             ++context_builds;
             for(auto& e:*eyes_) {
                 e.timer.clear();
-                e.fsr.destroy();e.fsr4.destroy();e.depth.reset();e.depth_uav.reset();e.reactive.reset();e.reactive_uav.reset();e.colour_in.reset();e.upscaled.reset();e.reset=true;
+                e.fsr.destroy();e.fsr4.destroy();e.depth.reset();e.depth_w=e.depth_h=0;e.depth_uav.reset();e.reactive.reset();e.reactive_uav.reset();e.colour_in.reset();e.upscaled.reset();e.reset=true;
                 D3D11_TEXTURE2D_DESC d{};d.Width=cw;d.Height=ch;d.MipLevels=1;d.ArraySize=1;d.Format=DXGI_FORMAT_R32_FLOAT;d.SampleDesc.Count=1;
                 d.Usage=D3D11_USAGE_DEFAULT;d.BindFlags=D3D11_BIND_SHADER_RESOURCE|D3D11_BIND_UNORDERED_ACCESS;
                 ID3D11Texture2D* t{};ID3D11UnorderedAccessView* u{};
@@ -827,6 +840,7 @@ private:
         c->CSSetShader(copy_.p,nullptr,0);c->CSSetShaderResources(0,1,&depth_view_.p);c->CSSetUnorderedAccessViews(0,2,outs,nullptr);
         const UINT depth_w=job.upscale?render_w_:w,depth_h=job.upscale?render_h_:h;
         c->Dispatch((depth_w+7)/8,(depth_h+7)/8,1);
+        e.depth_w=depth_w;e.depth_h=depth_h;
         c->CSSetShaderResources(0,1,null_srv);c->CSSetUnorderedAccessViews(0,2,null_uav,nullptr);
         LARGE_INTEGER now{},freq{};QueryPerformanceCounter(&now);QueryPerformanceFrequency(&freq);
         float dt=e.last.QuadPart?static_cast<float>(double(now.QuadPart-e.last.QuadPart)*1000.0/double(freq.QuadPart)):11.1f;
@@ -842,39 +856,34 @@ private:
         in.jitter_px_x=job.jitter_x;in.jitter_px_y=job.jitter_y;
         in.reset=e.reset;in.frame_time_ms=dt;in.sharpness=config_.sharpness;
         in.cam_near=.01f;in.cam_far=1e6f;in.vfov_rad=job.vfov>.1f && job.vfov<3?job.vfov:1.6f;
-        if(job.eye==0 && !dump_path.empty() && replaced.load()>=dump_after) {
-            D3D11_TEXTURE2D_DESC d{};e.depth.p->GetDesc(&d);d.Usage=D3D11_USAGE_STAGING;d.BindFlags=0;d.CPUAccessFlags=D3D11_CPU_ACCESS_READ;
-            ID3D11Device* dev{};c->GetDevice(&dev);ID3D11Texture2D* st{};
-            if(dev && SUCCEEDED(dev->CreateTexture2D(&d,nullptr,&st))) {
-                c->CopyResource(st,e.depth.p);D3D11_MAPPED_SUBRESOURCE m{};
-                if(SUCCEEDED(c->Map(st,0,D3D11_MAP_READ,0,&m))) {
-                    FILE* f{};if(!_wfopen_s(&f,dump_path.c_str(),L"wb") && f) {for(UINT y=0;y<d.Height;++y) fwrite(static_cast<char*>(m.pData)+y*m.RowPitch,4,d.Width,f);fclose(f);}
-                    c->Unmap(st,0);
-                }
-                st->Release();
-            }
-            // Motion vectors too (dump_path + ".mv"): u32 width,height,format,row pitch, then mip 0 rows.
-            ID3D11Texture2D* mv{};
-            if(dev && job.motion.p && SUCCEEDED(job.motion.p->QueryInterface(__uuidof(ID3D11Texture2D),reinterpret_cast<void**>(&mv)))) {
-                D3D11_TEXTURE2D_DESC md{};mv->GetDesc(&md);md.Usage=D3D11_USAGE_STAGING;md.BindFlags=0;md.CPUAccessFlags=D3D11_CPU_ACCESS_READ;md.MiscFlags=0;
-                ID3D11Texture2D* ms{};
-                if(SUCCEEDED(dev->CreateTexture2D(&md,nullptr,&ms))) {
-                    c->CopyResource(ms,mv);D3D11_MAPPED_SUBRESOURCE m{};
-                    if(SUCCEEDED(c->Map(ms,0,D3D11_MAP_READ,0,&m))) {
+        // Diagnostics (v911: both eyes, also the live knob build/fsr-depth-dump-now): what this dispatch reads, its depth copy,
+        // motion vectors and colour, each u32 width,height,format,row pitch then mip 0 rows, at dump_path-eye<N>.depth|.mv|.colour.
+        if(!dump_path.empty() && replaced.load()>=dump_after && !(dumped_eyes_&(1u<<job.eye))) {
+            ID3D11Device* dev{};c->GetDevice(&dev);
+            const auto dump=[&](ID3D11Resource* r,const wchar_t* suffix) {
+                ID3D11Texture2D* t{};
+                if(!dev || !r || FAILED(r->QueryInterface(__uuidof(ID3D11Texture2D),reinterpret_cast<void**>(&t)))) return;
+                D3D11_TEXTURE2D_DESC d{};t->GetDesc(&d);d.Usage=D3D11_USAGE_STAGING;d.BindFlags=0;d.CPUAccessFlags=D3D11_CPU_ACCESS_READ;d.MiscFlags=0;d.MipLevels=1;d.ArraySize=1;
+                ID3D11Texture2D* s{};
+                if(SUCCEEDED(dev->CreateTexture2D(&d,nullptr,&s))) {
+                    c->CopySubresourceRegion(s,0,0,0,0,t,0,nullptr);D3D11_MAPPED_SUBRESOURCE m{};
+                    if(SUCCEEDED(c->Map(s,0,D3D11_MAP_READ,0,&m))) {
                         FILE* f{};
-                        if(!_wfopen_s(&f,(dump_path+L".mv").c_str(),L"wb") && f) {
-                            const UINT header[4]{md.Width,md.Height,static_cast<UINT>(md.Format),m.RowPitch};fwrite(header,4,4,f);
-                            for(UINT y=0;y<md.Height;++y) fwrite(static_cast<char*>(m.pData)+y*m.RowPitch,1,m.RowPitch,f);
+                        if(!_wfopen_s(&f,(dump_path+L"-eye"+std::to_wstring(job.eye)+suffix).c_str(),L"wb") && f) {
+                            const UINT header[4]{d.Width,d.Height,static_cast<UINT>(d.Format),m.RowPitch};fwrite(header,4,4,f);
+                            for(UINT y=0;y<d.Height;++y) fwrite(static_cast<char*>(m.pData)+y*m.RowPitch,1,m.RowPitch,f);
                             fclose(f);
                         }
-                        c->Unmap(ms,0);
+                        c->Unmap(s,0);
                     }
-                    ms->Release();
+                    s->Release();
                 }
-                mv->Release();
-            }
+                t->Release();
+            };
+            dump(e.depth.p,L".depth");dump(job.motion.p,L".mv");dump(job.colour.p,L".colour");
             if(dev) dev->Release();
-            dump_path.clear();
+            dumped_eyes_|=1u<<job.eye;
+            if(dumped_eyes_==3) {dump_path.clear();dumped_eyes_=0;}
         }
         const auto previous_generation=eye_upscaler_generation[static_cast<std::size_t>(job.eye)].load();
         if(in.colour) {

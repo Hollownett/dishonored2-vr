@@ -40,6 +40,31 @@ public:
         return gadget_squeeze(grip,trigger);
     }
 };
+// Dual wield (v771, user, headset v770): a grenade or mine is held by the grip, as any weapon. The trigger pressed while holding arms it: a
+// grenade then aims natively (the game's left trigger held) and is thrown when the grip opens; a mine is placed (a short native trigger tap,
+// aimed at the palm by NativeGadgetAim). A grip let go unarmed drops it (NativeGadgetDrop: put down or tossed, unarmed).
+// v779 (user, headset v778: "a mine from the wheel places badly, only after I toss it to the other hand"; the journal: 25 trigger presses with
+// the grip open, none placed): a mine is placed by the trigger with or without the grip, except in the frame the grip closes (a catch).
+class GadgetGrip {
+    bool held_{},armed_{},trig_down_{},present_{};std::uint64_t tap_until_{};
+public:
+    struct Out {bool native_trigger{},drop{},held{},armed{};};
+    Out update(bool gadget,bool grenade,float grip,float trigger,std::uint64_t now_ms) noexcept {
+        Out o{};
+        if(!gadget) {held_=armed_=trig_down_=present_=false;tap_until_=0;return o;}
+        const bool was=held_;held_=grip>=(held_?.35f:.55f);
+        const bool trig=trigger>=(trig_down_?.35f:.55f),edge=trig && !trig_down_ && present_;trig_down_=trig;present_=true; // a trigger already down when it arrives presses nothing
+        if(edge) {if(!grenade) {if(was || !held_) tap_until_=now_ms+150;} else if(was && held_) armed_=true;} // a resting index at the grab arms nothing
+        if(grenade) {
+            o.native_trigger=armed_ && held_;   // the grip opening releases the game's trigger: the throw
+            if(was && !held_) {o.drop=!armed_;armed_=false;}
+        } else {
+            o.native_trigger=now_ms<tap_until_;
+            if(was && !held_ && !o.native_trigger) o.drop=true;
+        }
+        o.held=held_;o.armed=armed_;return o;
+    }
+};
 class ThrowGesture {
     static constexpr unsigned history=32;
     struct Sample {std::uint64_t t;std::array<double,3> v;};

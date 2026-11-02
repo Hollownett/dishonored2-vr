@@ -7,6 +7,8 @@
 #include <openxr/openxr.h>
 #include <openxr/openxr_platform.h>
 #include "alternate_eye.hpp"
+#include "frame_pacer.hpp"
+#include "stale_eye_warp.hpp"
 #include "context_state.hpp"
 #include "mod_gpu_timer.hpp"
 #include "controller_input.hpp"
@@ -41,6 +43,7 @@
 #include "wrist_hud_image.hpp"
 #include "native_eye_art.hpp"
 #include "eye_reticle.hpp"
+#include "spyglass_lens.hpp"
 #include "head_calibration.hpp"
 #include "xr_floor_datum.hpp"
 #include "vr_settings_native.hpp"
@@ -158,6 +161,10 @@ private:
     std::array<bool,2> wrist_recreate_{};
     std::array<std::array<UINT,2>,2> wrist_want_{}; // canvas size wrist_layer needs; prepare_overlays creates it between frames
     Microsoft::WRL::ComPtr<ID3D11Query> close_retirement_;
+    Microsoft::WRL::ComPtr<ID3D11Query> frame_fence_; // v840: GPU fence after the last xrEndFrame; present() waits on it (one frame in flight)
+    bool frame_fence_pending_{};
+    FramePacer pacer_; // v841: steady paired cadence and the period poses are predicted with (frame_pacer.hpp)
+    DisplayHorizon display_horizon_; // v890: recent predicted display times; the median step is the locate horizon while unlocked
     std::array<UINT64,2> wrist_retry_ticks_{};
     std::array<UINT64,2> wrist_image_ticks_{};
     std::array<std::vector<std::uint8_t>,2> wrist_pixels_;
@@ -166,6 +173,7 @@ private:
         Microsoft::WRL::ComPtr<ID3D11Texture2D> texture;
         D3D11_BOX crop{};Vec3 point{};double width{};
         UINT64 epoch{},tick{};std::uintptr_t owner{};bool premultiplied{true};
+        bool locked{};Vec3 lock_offset{}; // v710: head-locked at this head-space offset, resolved at draw time (no pose lag)
         bool fresh(UINT64 current_epoch,UINT64 now) const noexcept {return texture && owner && epoch==current_epoch && now>=tick && now-tick<=250;}
     };
     std::array<NativeArtSource,3> native_wrist_art_; // left ammo, right health, right mana
@@ -176,6 +184,7 @@ private:
     std::unique_ptr<NativeEyeArt> native_eye_art_;
     std::unique_ptr<NoteEyeArt> note_eye_art_;
     std::array<NoteHandReceipt,2> note_hands_{};
+    std::array<NoteHandReceipt,2> wheel_hands_{};bool wheel_eye_art_disabled_{}; // v776: the hands the hand wheel's ring goes behind; a ring eye-art fault falls back to the quad layer
     EyeReticleFrames eye_reticles_;
     struct CrosshairArt {Microsoft::WRL::ComPtr<ID3D11Texture2D> texture;D3D11_BOX crop{};float anchor_x{},anchor_y{},scale{1.f};UINT64 epoch{},tick{};};
     CrosshairArt crosshair_art_;
@@ -237,7 +246,11 @@ private:
     bool menu_grip_was_{};
     MenuPanel authored_panel_{2.5};
     Microsoft::WRL::ComPtr<ID3D11Texture2D> world_ui_source_;
-    unsigned world_ui_kind_{};bool world_ui_full_{};
+    unsigned world_ui_kind_{};int wheel_hand_{-1};unsigned wheel_open_gen_{};mutable unsigned wheel_anchor_gen_{~0u};mutable std::optional<TrackedPose> wheel_anchor_;mutable std::mutex wheel_anchor_m_;bool world_ui_full_{},world_ui_dialogue_{};std::optional<Vec3> world_ui_speaker_{};double world_ui_dialogue_m_{1.6};
+    // v721 (user, headset v720: the dialogue choice looked like a theater screen; "the dialogue window must be inside the game",
+    // chosen: "in the world at the person you talk to"): choices stand in the scene at conversation distance, without the backdrop.
+    static constexpr double dialogue_distance_m=1.6,dialogue_drop_m=.2;
+
     std::optional<NotePanelReceipt> note_panel_;
     NoteTouchScroll note_touch_scroll_;
     float note_scroll_axis_{};
@@ -281,6 +294,25 @@ private:
     // (pose + FOV) an image was rendered with, so the eye that was not rendered this frame is submitted with its own render pose.
     std::array<EyeRecord<XrView>,2> alt_records_{};
     std::array<Microsoft::WRL::ComPtr<ID3D11Texture2D>,2> alt_kept_{};
+    // v792: the target view of each eye for the Present stale_target_frame_; the Present that warped it; the warp back (kept image ->
+    // target), which moves the reticle point drawn for the kept frame into the warped image.
+    std::array<XrView,2> stale_target_{};
+    std::array<std::uint64_t,2> stale_target_frame_{},stale_warped_frame_{};
+    std::array<WarpMatrix,2> stale_back_{};
+    std::unique_ptr<StaleEyeWarp> uncant_;                  // v808: canted eye -> its own located view (its own output, apart from stale_warp_'s)
+    std::unique_ptr<SpyglassLens> spyglass_lens_;           // v880: the R3 spyglass lens, made on the first zoom
+    std::array<WarpMatrix,2> uncant_back_{};std::array<bool,2> uncanted_{}; // this frame: turned image point -> submitted image point
+    std::unique_ptr<StaleEyeWarp> stale_warp_;
+    bool stale_warp_failed_{};
+    // v796: the game camera of each eye's image shown by a Present (and of each kept image), each eye's target game camera and kept depth
+    // handed over for the Present in the *_frame_ stamps, and the parallax of each eye's last warp (the reticle follows it).
+    std::array<WarpCamera,2> rendered_cameras_{},kept_cameras_{},stale_target_cameras_{};
+    std::array<std::uint64_t,2> rendered_camera_frame_{},stale_target_camera_frame_{},stale_depth_frame_{};
+    std::array<bool,2> kept_camera_valid_{};
+    std::array<Microsoft::WRL::ComPtr<ID3D11Texture2D>,2> stale_depth_{};
+    std::array<UINT,2> stale_depth_width_{},stale_depth_height_{};
+    std::array<std::optional<StaleLayers>,2> stale_layers_{}; // v797: scene, player and hand layers of each eye's last warp
+    bool stale_warped_(UINT eye) const noexcept {return eye<2 && alternate_frame && stale_warped_frame_[eye]==alternate_frame;}
     enum InputAction : UINT {Grip,Aim,Stick,Trigger,Squeeze,FirstButton,SecondButton,StickClick,Menu,InputCount};
     XrActionSet action_set_{XR_NULL_HANDLE};
     std::array<XrAction,InputCount> actions_{};
@@ -370,6 +402,18 @@ public:
     bool world_ui_in_hand() const noexcept {return (grip_tracked_hands&1u) &&
         (world_ui_kind_==2 || (world_ui_kind_==3 && world_ui_full_));}
     std::uint64_t note_eye_draws{};
+    // v776 (headset v775: "the hands must still be rendered", the ring's quad layer covered them): the dual-wield hand wheel is drawn INTO each eye like a note
+    // page (NoteEyeArt ring mode: the movie's dim layer un-composited, behind the hands in front of it) and then has no quad layer; a fault in that draw
+    // falls back to the quad. wheel_eye_*: ring draws (per eye), draws with a hand over the ring, hands one frame old (kept so a missing frame never flickers), faults.
+    UINT64 wheel_eye_draws{},wheel_eye_occluded{},wheel_eye_grace{},wheel_eye_failures{};
+    // v880: the spyglass (R3) lens (spyglass_lens.hpp): the game's zoom as a magnification, set per frame by the Setup hook (1 = no lens); draws, faults.
+    float spyglass_magnification=1.f;UINT64 spyglass_lens_draws{},spyglass_lens_failures{};
+    int wheel_hand() const noexcept {return wheel_hand_;} // the hand the wheel is at, -1 none
+    bool wheel_eye_art_enabled=true; // build/wheel-quad: the hand wheel keeps its quad layer (the headset A/B for the ring in the eyes)
+    bool wheel_eye_ready() const noexcept {
+        return wheel_eye_art_enabled && hand_wheel_mode.load() && world_ui_kind_==1 && world_ui_source_ && !alternate_enabled && !wheel_eye_art_disabled_; // (a stale frame redraws the last capture, as the quad re-shows its last image)
+    }
+    void accept_wheel_hands(std::array<NoteHandReceipt,2> hands) {wheel_hands_=std::move(hands);}
     void enable_note_tablet(bool enabled) {note_tablet_enabled_=enabled;}
     void note_generation(std::uint64_t generation) {
         note_generation_=generation;
@@ -403,12 +447,8 @@ public:
     // it is never drawn as a second pair of arms.
     void accept_native_note(const NotePanelReceipt& panel,std::array<note_hand::Geometry,2> geometry,Vec3 tip) {
         std::array<NoteHandReceipt,2> receipts{};
-        for(unsigned side=0;side<2;++side) {
-            auto triangles=std::make_shared<std::vector<Vec3>>();
-            triangles->reserve(geometry[side].indices.size());
-            for(auto index:geometry[side].indices)triangles->push_back(geometry[side].vertices.at(index));
-            receipts[side]={std::move(triangles),panel.tick,panel.pose_epoch,panel.reference_epoch,panel.frame,panel.generation};
-        }
+        for(unsigned side=0;side<2;++side)
+            receipts[side]={note_hand::triangles(geometry[side]),panel.tick,panel.pose_epoch,panel.reference_epoch,panel.frame,panel.generation};
         note_geometry_=std::move(geometry);note_hands_=std::move(receipts);note_panel_=panel;note_index_tip_=tip;
     }
     std::array<double,2> note_dimensions() const {
@@ -429,12 +469,40 @@ public:
     std::int32_t world_ui_rows(const D3D11_TEXTURE2D_DESC& d) const noexcept {
         return world_ui_full_?static_cast<std::int32_t>(d.Height):static_cast<std::int32_t>(std::clamp(std::lround(d.Width*menu_band),1l,static_cast<long>(d.Height)));
     }
-    float world_ui_width() const noexcept {return (world_ui_kind_==1?.8f:world_ui_kind_==2 || world_ui_in_hand()?.45f:1.f)*std::min(hud_scale(),100.f/65.f);} // panels stop at the 100% size
+    float world_ui_width() const noexcept {return (world_ui_kind_==1?(wheel_hand_pose()?static_cast<float>(wheel_hand_width_m):.8f):world_ui_kind_==2 || world_ui_in_hand()?.45f:world_ui_dialogue_?static_cast<float>(world_ui_dialogue_m_/1.05):1.f)*
+        std::min(hud_scale(),100.f/65.f);} // panels stop at the 100% size; dialogue choices keep the old panel's angular size
+    // Dual wield: side 0/1 draws the open wheel at that hand (set by the hand that opened it); -1, the default, is the head-front wheel.
+    void set_wheel_hand(int side) noexcept {const int h=side==0||side==1?side:-1;if(h!=wheel_hand_) ++wheel_open_gen_;wheel_hand_=h;}
+    // The open wheel's drawn quad in local_ space (at the hand, or head-front when that hand is untracked), for the pointer; none when no wheel.
+    std::optional<WheelPlane> wheel_plane() const noexcept {
+        if(world_ui_kind_!=1 || !views_valid_) return {};
+        try {
+            if(const auto at_hand=wheel_hand_pose()) return wheel_plane_of(*at_hand,world_ui_width());
+            return wheel_plane_of(world_ui_pose_valid_?world_ui_pose_:world_ui_front_pose(eye_centre(),.9),world_ui_width());
+        } catch(const std::exception&) {return {};}
+    }
 private:
-    const TrackedPose& world_ui_pose() {
+    TrackedPose eye_centre() const {
         const auto& l=views_[0].pose;const auto& r=views_[1].pose;
-        const TrackedPose head{{(l.position.x+r.position.x)*.5,(l.position.y+r.position.y)*.5,(l.position.z+r.position.z)*.5},
+        return {{(l.position.x+r.position.x)*.5,(l.position.y+r.position.y)*.5,(l.position.z+r.position.z)*.5},
             {l.orientation.x,l.orientation.y,l.orientation.z,l.orientation.w}};
+    }
+    // The wheel ring in front of set_wheel_hand's hand: centred on its aim ray, wheel_hand_ahead_m (x the HUD size factor, as the quad's width) from the
+    // aim origin, facing the eyes. v776 (user, headset v775): the hand chooses by pointing at the ring, so it stays where it was when the wheel opened and
+    // is placed once per opening (wheel_open_gen_). A hand whose aim is untracked has no ring (the caller falls back).
+    std::optional<TrackedPose> wheel_hand_pose() const noexcept {
+        if(wheel_hand_<0 || world_ui_kind_!=1 || !views_valid_) return {};
+        std::lock_guard<std::mutex> lock(wheel_anchor_m_);
+        if(wheel_anchor_gen_==wheel_open_gen_ && wheel_anchor_) return wheel_anchor_;
+        constexpr XrSpaceLocationFlags valid=XR_SPACE_LOCATION_ORIENTATION_VALID_BIT|XR_SPACE_LOCATION_POSITION_VALID_BIT;
+        const auto& aim=aim_locations[wheel_hand_];if((aim.locationFlags&valid)!=valid) return {};
+        try {const auto& p=aim.pose.position;const auto& q=aim.pose.orientation;
+            wheel_anchor_=wheel_aim_pose(eye_centre().position,{{p.x,p.y,p.z},{q.x,q.y,q.z,q.w}},std::min(hud_scale(),100.f/65.f)); // the factor of world_ui_width()
+            wheel_anchor_gen_=wheel_open_gen_;return wheel_anchor_;}
+        catch(const std::exception&) {return {};}
+    }
+    const TrackedPose& world_ui_pose() {
+        const TrackedPose head=eye_centre();
         if(world_ui_kind_==2 && note_tablet_enabled_ && note_posers_[0]) try { // a held note is a tablet in the left palm
             const auto& p=grip_locations[0].pose;const Quaternion q{p.orientation.x,p.orientation.y,p.orientation.z,p.orientation.w};
             const WorldTrackedPose grip{{p.position.x,p.position.y,p.position.z},{rotated(q,{0,0,-1}),rotated(q,{-1,0,0}),rotated(q,{0,1,0})}};
@@ -445,8 +513,14 @@ private:
             const auto& g=grip_locations[0].pose.position; // the taller shop page rests its bottom edge on the hand, as a note does (.12 m)
             world_ui_pose_=world_ui_hand_pose(head.position,{g.x,g.y,g.z},world_ui_kind_==2?.12:displayed_menu_view().height*.5);world_ui_pose_valid_=false;return world_ui_pose_;
         }
+        if(const auto at_hand=wheel_hand_pose()) {world_ui_pose_=*at_hand;world_ui_pose_valid_=false;return world_ui_pose_;} // the wheel follows its hand
         if(world_ui_pose_valid_) return world_ui_pose_;
-        world_ui_pose_=world_ui_front_pose(head,world_ui_kind_==1?.9:1.05);
+        if(world_ui_dialogue_ && world_ui_speaker_) { // v722: at the person spoken to, where their Talk prompt stood
+            const auto [pose,distance]=world_ui_speaker_pose(head,*world_ui_speaker_);world_ui_pose_=pose;world_ui_dialogue_m_=distance;
+        } else {
+            world_ui_pose_=world_ui_front_pose(head,world_ui_kind_==1?.9:world_ui_dialogue_?dialogue_distance_m:1.05);
+            if(world_ui_dialogue_) {world_ui_pose_.position.y-=dialogue_drop_m;world_ui_dialogue_m_=dialogue_distance_m;}
+        }
         world_ui_pose_valid_=true;return world_ui_pose_;
     }
     // SteamVR fails xrEndFrame for a swapchain created (or destroyed) inside a frame: every overlay chain is built by prepare_overlays()
@@ -526,7 +600,12 @@ private:
         const auto ready=xrWaitSwapchainImage(world_ui_chain_,&wait);checked(ready,"Wait world UI image");
         if(ready==XR_TIMEOUT_EXPIRED) throw std::runtime_error("World UI image wait timed out");
         const UINT top=(desc.Height-rows)/2;const D3D11_BOX band{0,top,0,desc.Width,top+static_cast<UINT>(rows),1}; // only the shown band
-        context_->CopySubresourceRegion(world_ui_images_.at(index).texture,0,0,0,0,world_ui_source_.Get(),0,&band);
+        bool keyed=false;
+        if((world_ui_dialogue_ || (world_ui_kind_==1 && wheel_hand_pose())) && native_eye_art_) { // v762 (user, headset v761): the hand wheel without its dark backdrop
+            const auto result=native_eye_art_->draw(world_ui_images_.at(index).texture,world_ui_source_.Get(),band,{-1,1,1,-1},format_,true,DXGI_FORMAT_R8G8B8A8_UNORM,true,!world_ui_dialogue_); // the wheel: its dim layer un-composited (v763)
+            keyed=result.drawn;++(keyed?world_ui_keyed:world_ui_key_failures);
+        }
+        if(!keyed) context_->CopySubresourceRegion(world_ui_images_.at(index).texture,0,0,0,0,world_ui_source_.Get(),0,&band);
         XrSwapchainImageReleaseInfo release{};release.type=XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO;
         checked(xrReleaseSwapchainImage(world_ui_chain_,&release),"Release world UI image");
         overlay_rendered(OverlayKind::world_ui,overlay_key);
@@ -1279,8 +1358,13 @@ public:
     } timing;
     using TransferObserver=void (*)(UINT,ID3D11Texture2D*,ID3D11Texture2D*,const XrCompositionLayerProjectionView&,bool,bool,ID3D11Texture2D*);
     TransferObserver observe_transfer{}; // base eye copy before reticle/native-art composition; not final submitted pixels
+    // v798 diagnostic: each layered stale-eye warp, with what it read (kept image and depth, layers, cameras) and the fresh eye's image.
+    using StaleWarpObserver=void (*)(UINT,ID3D11Texture2D*,ID3D11Texture2D*,ID3D11Texture2D*,const StaleDepth&,const StaleDepth&,const StaleLayers&);
+    StaleWarpObserver observe_stale_warp{};
+    void (*observe_fresh_eye)(UINT eye,ID3D11Texture2D* image,std::uint64_t frame){}; // v802 diagnostic: each fresh eye image as it is kept
     using NoteCompositionObserver=void (*)(unsigned,ID3D11Texture2D*,const XrCompositionLayerProjectionView&,const NotePanelReceipt&);
     NoteCompositionObserver observe_note_composition{};
+    void (*observe_final_eye)(unsigned eye,ID3D11Texture2D* texture){}; // v700 diagnostics (build/final-eye-capture): the eye image with every native widget drawn
     // Read only from observe_transfer on the presenting thread. Pointer
     // inequality alone cannot distinguish SMAA from CAS or a kept eye.
     EyeTransferProcessing transfer_processing(UINT eye) const noexcept {return eye<2?transfer_processing_[eye]:EyeTransferProcessing{};}
@@ -1324,9 +1408,12 @@ public:
     void wrist_hud(WristHudSnapshot data) {wrist_data_=data;}
     void (*observe_native_wrist_art)(unsigned,ID3D11Texture2D*,std::uintptr_t){};
     UINT64 native_object_art_draws{};
+    // v715: per object-art slot, eye draws / fresh art with no rect (off view or behind) / fresh art skipped (lock unresolved); last rect.
+    std::array<UINT64,33> native_object_art_slot_draws{},native_object_art_slot_norect{},native_object_art_slot_unlocked{};std::array<std::array<float,4>,33> native_object_art_slot_rect{};
     // v685: eye art is decoration. A failed draw is recorded and its art dropped; it never reaches the
     // render callback's session recovery (that ended VR three times in the v684 session).
     UINT64 native_eye_art_failures{},native_eye_art_rejects{},native_note_eye_art_failures{};
+    UINT64 world_ui_keyed{},world_ui_key_failures{}; // v721 dialogue choice art keyed / fell back to a plain copy
     bool native_eye_art_disabled_{},native_note_art_disabled_{};
     HRESULT native_eye_art_last_hr{S_OK};DXGI_FORMAT native_eye_art_eye_view{},native_eye_art_art_view{};
     std::string native_eye_art_last_call;
@@ -1382,6 +1469,10 @@ public:
            crop.left>=crop.right || crop.top>=crop.bottom || crop.right>desc.Width || crop.bottom>desc.Height || crop.front || crop.back!=1 ||
            (!wrist && (!finite(point) || !std::isfinite(width) || width<=0 || width>64))) {source={};return false;}
         source={texture,crop,point,width,epoch,tick,owner,premultiplied};return true;
+    }
+    // v710: pin an object-art slot published this frame to the head (offset in head space, metres: x right, y up, -z ahead).
+    void native_art_lock(unsigned slot,Vec3 offset) noexcept {
+        if(slot<native_object_art_.size() && finite(offset)) {native_object_art_[slot].locked=true;native_object_art_[slot].lock_offset=offset;}
     }
     // Publication is authorized by ranged_aim_gate.reticle. Native HUD clipping
     // cannot authorize visibility of a reticle drawn across the full eye FOV.
@@ -1510,6 +1601,34 @@ public:
     std::uint64_t alternate_frame{};   // displayed-frame number of this present (the probe's Present counter, first frame 1)
     bool alternate_error{};            // an eye image could not be kept; the probe falls back to paired for the session
     std::uint64_t alternate_kept_frame(int eye) const noexcept {return (eye==0 || eye==1) && alt_records_[static_cast<std::size_t>(eye)].valid?alt_records_[static_cast<std::size_t>(eye)].frame:0;}
+    // v792 stale-eye warp (knob build/no-stale-eye-warp turns it off): the probe hands over, for the Present `frame`, the view the eye that
+    // was NOT rendered has at the fresh eye's Setup; that eye's kept image is warped to it and its layer carries it (stale_eye_warp.hpp).
+    bool stale_eye_warp_enabled{};
+    bool steady_pacing{true}; // v841: paired cadence locked to whole refresh periods (frame_pacer.hpp); knob build/legacy-pacing
+    bool pacer_miss_lock{false}; // v890: the v844 miss-rate lock (45 Hz when >15% of frames miss a slot); knob build/pacer-miss-lock
+    bool median_horizon{true}; // v890: locate at D + the median measured display step (DisplayHorizon); knob build/legacy-display-horizon
+    bool gpu_queue_limit{true}; // v840: one frame in flight (present waits for the previous submit's GPU fence); knob build/legacy-gpu-queue
+    int locate_periods{2}; // v794: display periods between this Present's predicted display and the one that shows the image located now
+    std::uint64_t stale_eye_warps{},stale_eye_warp_failures{};
+    std::uint64_t hand_fits() const noexcept {return stale_warp_?stale_warp_->fit_passes:0;}             // v811: hand fits run
+    std::uint64_t hand_fit_corrections() const noexcept {return stale_warp_?stale_warp_->fit_corrections:0;} // and read back with a correction
+    std::uint64_t uncanted_eyes{}; // v808: canted eye images resampled into their own located view before submission
+    void stale_eye_target(UINT eye,const XrView& view,std::uint64_t frame) noexcept {if(eye<2) {stale_target_[eye]=view;stale_target_frame_[eye]=frame;}}
+    // v796 parallax (knob build/no-stale-eye-parallax turns it off): for the Present `frame`, the game camera of an image it shows, the
+    // stale eye's game camera at the fresh eye's Setup, and the scene depth the stale eye's kept image was rendered with (FSR/DLSS copy).
+    bool stale_eye_parallax_enabled{};
+    std::uint64_t stale_eye_parallax_misses{}; // warps with parallax on but no camera pair, no depth or no valid geometry: rotation only
+    std::uint64_t stale_parallax_passes() const noexcept {return stale_warp_?stale_warp_->parallax_passes:0;}
+    // v798: near content of the stale eye from the fresh eye's image of this Present (its camera, depth and kept image), within this
+    // many metres (knob build/stale-near-range; 0: the kept image alone, v796).
+    double stale_near_range{near_range_default};
+    std::uint64_t stale_fresh_passes() const noexcept {return stale_warp_?stale_warp_->fresh_passes:0;}
+    std::uint64_t stale_fresh_refusals() const noexcept {return stale_warp_?stale_warp_->fresh_refusals:0;}
+    void record_rendered_camera(UINT eye,const WarpCamera& camera,std::uint64_t frame) noexcept {if(eye<2) {rendered_cameras_[eye]=camera;rendered_camera_frame_[eye]=frame;}}
+    void stale_eye_target_camera(UINT eye,const WarpCamera& camera,std::uint64_t frame) noexcept {if(eye<2) {stale_target_cameras_[eye]=camera;stale_target_camera_frame_[eye]=frame;}}
+    void stale_eye_depth(UINT eye,ID3D11Texture2D* depth,UINT width,UINT height,std::uint64_t frame) noexcept {
+        if(eye<2) {stale_depth_[eye]=depth;stale_depth_width_[eye]=width;stale_depth_height_[eye]=height;stale_depth_frame_[eye]=frame;}
+    }
     bool last_layer_submitted{},last_menu_layer{};
     bool last_authored_camera_layer{};
     UINT64 state_events{},reference_events{};
@@ -1542,8 +1661,10 @@ public:
     // dropping the layer: dropping it made the open wheel blink while its art updated.
     // full_height: the movie lays controls at its top/bottom edges, outside the 16:9 band (the black market, sim v381: its
     // category bar, money and Purchase/Back rows sat at 78-96% of the height and were cut off).
-    void world_ui(ID3D11Texture2D* source,unsigned kind,bool full_height=false,std::uint64_t draw_tick=0) {
+    void world_ui(ID3D11Texture2D* source,unsigned kind,bool full_height=false,std::uint64_t draw_tick=0,bool dialogue=false,std::optional<Vec3> speaker={}) {
         if(kind>3) kind=0;world_ui_full_=kind==1 || full_height;
+        if(dialogue!=world_ui_dialogue_) {world_ui_dialogue_=dialogue;world_ui_pose_valid_=false;}
+        if(!world_ui_pose_valid_) world_ui_speaker_=dialogue?speaker:std::nullopt; // fixed where the choices opened
         if(!kind) {world_ui_kind_=0;world_ui_source_.Reset();world_ui_pose_valid_=false;world_ui_stale_=false;return;}
         const auto now=GetTickCount64();
         if(!source && kind==world_ui_kind_ && world_ui_source_ && world_ui_chain_ && now-world_ui_fresh_tick_<400) {world_ui_stale_=true;return;}
@@ -1562,6 +1683,11 @@ public:
     bool test_unlock_requested=false; // VR settings "Test: unlock all"; dxgi applies and clears it
     bool cylinder_layers() const noexcept {return cylinder_supported_;} // curved HUD screen in use
     int menu_pointer_hand=1; // native Iggy pointer hand: right, or the wheel cursor hand while the wheel is open
+    // v773 (user, headset v772: the hand wheel stopped answering once the hand passed through it): the hand wheel's choice is a direction (v776: the
+    // wedge its hand points at, WheelPointer::update_plane), so the game's pointer is put on the ring in that direction (ring_m: the ring radius in
+    // metres on the quad), never where the aim ray meets the quad. on=false: no pointer (the hand points at the centre or at a button).
+    void wheel_dial(bool on,float x,float y,float ring_m) noexcept {wheel_dial_x_.store(x);wheel_dial_y_.store(y);wheel_dial_r_.store(ring_m);wheel_dial_on_.store(on);}
+    std::atomic<bool> wheel_dial_on_{},hand_wheel_mode{};std::atomic<float> wheel_dial_x_{},wheel_dial_y_{},wheel_dial_r_{}; // hand_wheel_mode: dual wield (set every frame)
     std::array<float,2> grip_speeds{}; // Metres per second, when the runtime reports velocity.
     unsigned grip_velocity_hands{}; // Missing velocity is not a stationary hand.
     std::array<XrVector3f,2> grip_velocities{}; // Same, as vectors in the local space.
@@ -1710,7 +1836,7 @@ public:
             std::vector<int64_t> formats(count);checked(enumerate_formats(session_,count,&count,formats.data()),"Read XR formats");
             if(std::find(formats.begin(),formats.end(),static_cast<int64_t>(format))==formats.end()) throw std::runtime_error("Game colour format is unsupported by XR");
             resize(width,height,format);
-            device->GetImmediateContext(&context_);
+            device->GetImmediateContext(&context_);frame_fence_.Reset();frame_fence_pending_=false;
             prepare_overlays();
         } catch(...) {close();throw;}
     }
@@ -1779,7 +1905,7 @@ public:
         for(int eye=0;eye<2;++eye) if(alternate_fresh_eye<0 || eye==alternate_fresh_eye) {
             const auto e=static_cast<std::size_t>(eye);
             out[e]={rendered_views_[e],alternate_frame,pose_epoch(),true,rendered_display_times_[e],rendered_locate_cpu_times_[e]};
-        }
+        } else if(stale_warped_(static_cast<UINT>(eye))) out[static_cast<std::size_t>(eye)].view=stale_target_[static_cast<std::size_t>(eye)]; // v792: warped to it
         return out;
     }
     // True when both eyes can be submitted with views that match their images. Paired mode: the old rendered_mask_==3 rule.
@@ -1800,7 +1926,7 @@ public:
     // Copies the eye image that was just rendered (after anti-aliasing / sharpening, before overlays) and its view for later frames.
     void keep_alternate_eye_(UINT eye,ID3D11Texture2D* processed) {
         auto& record=alt_records_[eye];
-        record={};alt_processing_[eye]={};
+        record={};alt_processing_[eye]={};kept_camera_valid_[eye]=false;
         D3D11_TEXTURE2D_DESC desc{};processed->GetDesc(&desc);
         if(!(rendered_mask_&(1u<<eye))) return; // no view was recorded for this image: keep nothing
         if(!eye_texture_matches(desc,width_,height_,format_)) {alternate_error=true;return;}
@@ -1813,6 +1939,7 @@ public:
         context_->CopyResource(alt_kept_[eye].Get(),processed);
         alt_processing_[eye]=transfer_processing_[eye];
         record={rendered_views_[eye],alternate_frame,pose_epoch(),true,rendered_display_times_[eye],rendered_locate_cpu_times_[eye]};
+        kept_cameras_[eye]=rendered_cameras_[eye];kept_camera_valid_[eye]=rendered_camera_frame_[eye]==alternate_frame; // v796
     }
     // perf-mono-view diagnostic: the one engine view sits at the midpoint of the two eye poses, faces their mean orientation and
     // covers both eyes' FOV (the union), so the one image is valid for both projection layers (flat, no stereo depth).
@@ -1919,6 +2046,15 @@ public:
         const bool scene_render=gameplay || authored_scene_render;
         const bool world_scene=scene_render || world_ui_kind_!=0;
         last_world_ui_layer=false;
+        // v840: one frame in flight. GPU-bound, the render thread ran up to three frames ahead and then blocked in the desktop Present
+        // after the next frame's views were located (v832 headset: 12-15 ms on every third frame), so images showed stale poses and the
+        // queue added latency. Waiting here for the previous submit's fence moves that wait before xrWaitFrame and the locate; it stays
+        // outside timing.wait_ns, so the perf governor counts it as frame work.
+        if(frame_fence_pending_) {
+            frame_fence_pending_=false;
+            const auto deadline=cpu_time_ns()+40'000'000;
+            while(context_->GetData(frame_fence_.Get(),nullptr,0,0)==S_FALSE && cpu_time_ns()<deadline) SwitchToThread();
+        }
         timing={};timing.start_ns=cpu_time_ns();++present_count_;
         if(tracked_pair_()) {
             timing.rendered_display_times=rendered_display_times_;
@@ -1972,17 +2108,31 @@ public:
         prepare_overlays();
         XrFrameWaitInfo wait{};wait.type=XR_TYPE_FRAME_WAIT_INFO;frame_={};frame_.type=XR_TYPE_FRAME_STATE;
         auto stage_start=cpu_time_ns();
+        if(const auto wake=pacer_.wake(stage_start)) { // v841: sleep to the locked cadence (the bulk on a high-resolution timer, the rest spun)
+            static thread_local const HANDLE timer=CreateWaitableTimerExW(nullptr,nullptr,CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,TIMER_ALL_ACCESS);
+            for(auto left=wake-cpu_time_ns();left>0;left=wake-cpu_time_ns()) {
+                LARGE_INTEGER due{};due.QuadPart=-(left-1'000'000)/100;
+                if(left>1'500'000 && timer && SetWaitableTimer(timer,&due,0,nullptr,nullptr,FALSE)) WaitForSingleObject(timer,50); else SwitchToThread();
+            }
+        }
         checked(xrWaitFrame(session_,&wait,&frame_),"Wait game XR frame");
-        timing.waited=true;timing.wait_ns=cpu_time_ns()-stage_start;
+        timing.waited=true;timing.wait_ns=cpu_time_ns()-stage_start; // includes the pacing sleep: the governor counts both as idle
+        pacer_.miss_lock=pacer_miss_lock;
+        pacer_.update(cpu_time_ns(),timing.wait_ns,frame_.predictedDisplayTime,frame_.predictedDisplayPeriod,steady_pacing && !alternate_enabled);
         timing.display_time=frame_.predictedDisplayTime;timing.display_period=frame_.predictedDisplayPeriod;
         XrFrameBeginInfo begin{};begin.type=XR_TYPE_FRAME_BEGIN_INFO;
         stage_start=cpu_time_ns();
         checked(xrBeginFrame(session_,&begin),"Begin game XR frame");frame_open_=true;
         timing.begin_ns=cpu_time_ns()-stage_start;stage_start=cpu_time_ns();
         XrViewLocateInfo locate{};locate.type=XR_TYPE_VIEW_LOCATE_INFO;locate.viewConfigurationType=XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
-        // Native eyes render after this Present and are submitted at the next
-        // Present. Predict that pipeline stage, using the runtime's own period.
-        locate_display_time_=frame_.predictedDisplayTime+frame_.predictedDisplayPeriod;
+        // Native eyes are prepared after this Present, rendered in the next interval and submitted at the Present after that (the engine
+        // pipeline is one frame deep, alternate_display_frame): v794 locates views and hands for that display, two of the runtime's periods
+        // ahead. locate_periods 1 (knob build/legacy-locate-horizon) is the pre-v794 horizon, one period short of the image.
+        // v890: unlocked, the median measured step (frame_pacer.hpp DisplayHorizon; knob build/legacy-display-horizon = the period rule).
+        display_horizon_.add(frame_.predictedDisplayTime);
+        const auto period_horizon=pacer_.period(frame_.predictedDisplayPeriod)*locate_periods; // v841: the locked cadence, not the runtime's flip-flopping period
+        locate_display_time_=frame_.predictedDisplayTime+(median_horizon && !(pacer_.active && pacer_.k>1)?
+            display_horizon_.ahead(static_cast<unsigned>(locate_periods),period_horizon):period_horizon);
         locate.displayTime=locate_display_time_;locate.space=local_;
         XrViewState view_state{};view_state.type=XR_TYPE_VIEW_STATE;
         for(auto& view:views_) {view={};view.type=XR_TYPE_VIEW;}
@@ -2134,7 +2284,14 @@ public:
         if(native_pointer_enabled_ && world_ui_kind_!=2 && (world_ui_kind_!=1 || wheel_native_pointer) && (world_ui_kind_==0 || world_ui_source_) && !scene_render && !cinematic && !settings_.open() && continuity_.usable() && state==XR_SESSION_STATE_FOCUSED && controller_input.active) {
             constexpr XrSpaceLocationFlags valid_pose=XR_SPACE_LOCATION_ORIENTATION_VALID_BIT|XR_SPACE_LOCATION_POSITION_VALID_BIT;
             const auto& aim=aim_locations[menu_pointer_hand&1];
-            if((aim.locationFlags&valid_pose)==valid_pose) {
+            if(world_ui_kind_==1 && hand_wheel_mode.load()) { // the hand wheel: the hand's direction (wheel_dial), never the aim ray (also in its closing tail)
+                if(wheel_dial_on_.load()) {
+                    const auto view=displayed_menu_view();const double r=wheel_dial_r_.load()*.9; // just inside the ring: on the item
+                    const double u=std::clamp(.5+wheel_dial_x_.load()*r/view.width,0.,1.),v=std::clamp(.5-wheel_dial_y_.load()*r/view.height,0.,1.);
+                    native_menu_input={u,view.v0+v*view.vspan,GetTickCount64(),continuity_.epoch(),true,
+                        ((menu_pointer_hand&1)?controller_input.right_trigger:controller_input.left_trigger)>.55f};
+                }
+            } else if((aim.locationFlags&valid_pose)==valid_pose) {
                 const auto& p=aim.pose;const auto view=displayed_menu_view();
                 const auto hit=panel_pointer({{p.position.x,p.position.y,p.position.z},{p.orientation.x,p.orientation.y,p.orientation.z,p.orientation.w}},world_ui_kind_?world_ui_pose():native_menu_pose(),view.width,view.height);
                 // The panel shows the middle band; the game expects coordinates over the whole image.
@@ -2162,6 +2319,8 @@ public:
         XrCompositionLayerQuad menu{};menu.type=XR_TYPE_COMPOSITION_LAYER_QUAD;
         std::optional<XrCompositionLayerQuad> world_ui_panel,hud_window_panel;
         const bool composite_note=note_composition_ready() && world_scene && !authored_camera && tracked_pair_();
+        // v776: the hand wheel at its hand goes into each eye (no quad layer); wheel_ring is its pose, none = the quad layer as before
+        const auto wheel_ring=wheel_eye_ready() && world_scene && !authored_camera && tracked_pair_()?wheel_hand_pose():std::optional<TrackedPose>{};
         std::optional<XrCompositionLayerQuad> hint_panel,dot_panel,vignette_panel;
         std::array<std::optional<XrCompositionLayerQuad>,2> wrist_panels;
         std::array<const XrCompositionLayerBaseHeader*,12> menu_layers_with_pointer{};
@@ -2194,7 +2353,9 @@ public:
                 // Composed off-screen: the right eye's source may be this backbuffer.
                 if(mirror_rects[0] || mirror_rects[1]) mirror_->begin(desktop_desc.Width,desktop_desc.Height,desktop_desc.Format);
             }
-            for(UINT eye=0;eye<2;++eye) {
+            for(UINT pass=0;pass<2;++pass) {
+                // v798: alternate-eye processes the fresh eye first, so the stale eye's warp can take near content from its kept image
+                const UINT eye=alternate_enabled && alternate_fresh_eye==1?1u-pass:pass;
                 // alternate-eye: the eye that was not rendered this frame is resubmitted from its kept image (sources[eye] is that copy)
                 const bool alt_stale=alternate_enabled && alternate_fresh_eye>=0 && static_cast<int>(eye)!=alternate_fresh_eye;
                 if(alt_stale) sources[eye]=alt_kept_[eye].Get();
@@ -2223,7 +2384,63 @@ public:
                     const auto prior_sharpen=processed;processed=sharpen_->apply(processed,sharpness);
                     processing.cas_applied=processed!=prior_sharpen;processing.cas_sharpness=processing.cas_applied?sharpness:0;
                 }}
+                // v792: the kept image of the eye not rendered now, warped to the view that eye has at the fresh eye's Setup (one head pose for
+                // both layers). A failure keeps the kept image and its own view, and turns the warp off for the session.
+                if(alt_stale && stale_eye_warp_enabled && !stale_warp_failed_ && stale_target_frame_[eye]==alternate_frame && alt_records_[eye].valid) try {
+                    const auto q=[](const XrQuaternionf& o) {return Quaternion{o.x,o.y,o.z,o.w};};
+                    const auto f=[](const XrFovf& v) {return WarpFov{v.angleLeft,v.angleRight,v.angleUp,v.angleDown};};
+                    const auto& from=alt_records_[eye].view;const auto& to=stale_target_[eye];
+                    const auto h=stale_eye_homography(q(from.pose.orientation),f(from.fov),q(to.pose.orientation),f(to.fov));
+                    const auto back=stale_eye_homography(q(to.pose.orientation),f(to.fov),q(from.pose.orientation),f(from.fov));
+                    if(h && back) {
+                        if(!stale_warp_) {Microsoft::WRL::ComPtr<ID3D11Device> device;context_->GetDevice(&device);stale_warp_=std::make_unique<StaleEyeWarp>(device.Get());}
+                        stale_layers_[eye].reset();
+                        // v798: the fresh eye was processed first (see the loop), so its kept image is this Present's; with its camera and depth
+                        // it gives the near content of this eye as it is now.
+                        const UINT fresh_eye=static_cast<UINT>(alternate_fresh_eye);
+                        const bool fresh_now=alt_records_[fresh_eye].valid && alt_records_[fresh_eye].frame==alternate_frame && alt_kept_[fresh_eye] &&
+                            rendered_camera_frame_[fresh_eye]==alternate_frame && stale_depth_frame_[fresh_eye]==alternate_frame && stale_depth_[fresh_eye];
+                        if(stale_eye_parallax_enabled) { // v796: with parallax (both game cameras and the kept depth, for this Present)
+                            if(kept_camera_valid_[eye] && stale_target_camera_frame_[eye]==alternate_frame && stale_depth_frame_[eye]==alternate_frame && stale_depth_[eye])
+                                stale_layers_[eye]=stale_eye_layers(kept_cameras_[eye],f(from.fov),stale_target_cameras_[eye],f(to.fov),
+                                    fresh_now?&rendered_cameras_[fresh_eye]:nullptr,f(alt_records_[fresh_eye].view.fov),stale_near_range);
+                            if(stale_layers_[eye]) { // v802: the hands held still; v803: and how much they moved (diagnostic)
+                                stale_layers_[eye]->near_from_kept=stale_hands_still(kept_cameras_[eye],stale_target_cameras_[eye]);
+                                stale_layers_[eye]->hands_motion=stale_hands_motion(kept_cameras_[eye],stale_target_cameras_[eye]);
+                                stale_layers_[eye]->frame=alternate_frame;stale_layers_[eye]->eye=eye; // v811: the hand-fit read-backs' tags
+                            }
+                            if(!stale_layers_[eye]) ++stale_eye_parallax_misses;
+                        }
+                        const auto parallax_before=stale_warp_->parallax_passes;
+                        const StaleDepth kept_depth{stale_depth_[eye].Get(),stale_depth_width_[eye],stale_depth_height_[eye]};
+                        const StaleDepth fresh_depth{fresh_now?stale_depth_[fresh_eye].Get():nullptr,stale_depth_width_[fresh_eye],stale_depth_height_[fresh_eye]};
+                        ID3D11Texture2D* const fresh_image=fresh_now?alt_kept_[fresh_eye].Get():nullptr;
+                        processed=stale_layers_[eye]?stale_warp_->apply(processed,*h,&*stale_layers_[eye],kept_depth,fresh_image,fresh_depth):stale_warp_->apply(processed,*h);
+                        if(stale_warp_->parallax_passes==parallax_before) stale_layers_[eye].reset(); // depth refused: rotation only, the reticle too
+                        if(stale_layers_[eye] && observe_stale_warp) observe_stale_warp(eye,sources[eye],processed,fresh_image,kept_depth,fresh_depth,*stale_layers_[eye]);
+                        stale_warped_frame_[eye]=alternate_frame;stale_back_[eye]=*back;++stale_eye_warps;
+                    }
+                } catch(const std::exception&) {stale_warp_failed_=true;stale_warped_frame_[eye]=0;++stale_eye_warp_failures;processed=sources[eye];}
                 transfer_processing_[eye]=processing;
+                // v808 (headset v806: canted eyes "clearly sharper", but "the eyes felt pulled toward the centre"): a canted eye is rendered
+                // turned and goes out in its own located view, resampled here (the turn taken back off, the runtime's own FOV), so the
+                // runtime gets the layers any application submits. Only images rendered turned (authored cameras keep the enclosing frustum).
+                ID3D11Texture2D* submitted=processed;uncanted_[eye]=false;XrPosef straight_pose{};XrFovf straight_fov{};
+                if(canted_views && tracked_pair_() && !settings_.open()) {
+                    const auto turned=tracked_view_(eye);const auto& lf=views_[eye].fov;
+                    const auto c=canted_fov(lf.angleLeft,lf.angleRight,lf.angleUp,lf.angleDown);
+                    if(c && std::abs(turned.fov.angleRight-c->half_x)<1e-4f && std::abs(turned.fov.angleUp-c->half_y)<1e-4f) {
+                        const Quaternion t{turned.pose.orientation.x,turned.pose.orientation.y,turned.pose.orientation.z,turned.pose.orientation.w};
+                        const Quaternion s=normalized(multiplied(t,Quaternion{-c->rotation[0],-c->rotation[1],-c->rotation[2],c->rotation[3]}));
+                        const WarpFov tf{turned.fov.angleLeft,turned.fov.angleRight,turned.fov.angleUp,turned.fov.angleDown},sf{lf.angleLeft,lf.angleRight,lf.angleUp,lf.angleDown};
+                        const auto h=stale_eye_homography(t,tf,s,sf),back=stale_eye_homography(s,sf,t,tf);
+                        if(h && back) {
+                            if(!uncant_) {Microsoft::WRL::ComPtr<ID3D11Device> device;context_->GetDevice(&device);uncant_=std::make_unique<StaleEyeWarp>(device.Get());}
+                            submitted=uncant_->apply(processed,*h);uncant_back_[eye]=*back;uncanted_[eye]=true;++uncanted_eyes;
+                            straight_pose=turned.pose;straight_pose.orientation={static_cast<float>(s.x),static_cast<float>(s.y),static_cast<float>(s.z),static_cast<float>(s.w)};straight_fov=lf;
+                        }
+                    }
+                }
                 {ModGpuScope copy_scope(context_.Get(),ModSpan::eye_copy); // task 3b
                 SpanClock span(xr_spans,XrSpan::copy);
                 if(settings_.open() && !gameplay) {
@@ -2234,21 +2451,29 @@ public:
                     settings_compositor_->draw(settings_texture_.Get(),{static_cast<float>(rect.x),static_cast<float>(rect.y),static_cast<float>(rect.width),static_cast<float>(rect.height)});
                     settings_compositor_->end(images_[eye].at(index).texture);
                     if(observe_settings_composition) observe_settings_composition(processed,images_[eye].at(index).texture,rect);
-                } else context_->CopyResource(images_[eye].at(index).texture,processed);}
+                } else context_->CopyResource(images_[eye].at(index).texture,submitted);}
                 layers[eye].type=XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW;
-                layers[eye].pose=tracked_pair_()?tracked_view_(eye).pose:views_[eye].pose;
-                layers[eye].fov=tracked_pair_()?tracked_view_(eye).fov:XrFovf{-hfov*.5f,hfov*.5f,vfov*.5f,-vfov*.5f};
+                layers[eye].pose=uncanted_[eye]?straight_pose:tracked_pair_()?tracked_view_(eye).pose:views_[eye].pose;
+                layers[eye].fov=uncanted_[eye]?straight_fov:tracked_pair_()?tracked_view_(eye).fov:XrFovf{-hfov*.5f,hfov*.5f,vfov*.5f,-vfov*.5f};
                 layers[eye].subImage.swapchain=chains_[eye];
                 layers[eye].subImage.imageRect.extent={static_cast<int32_t>(width_),static_cast<int32_t>(height_)};
                 // Validate the exact base transfer before ANY destination
                 // composition. Overlay pixels are independently verified.
-                if(observe_transfer && !settings_.open()) {SpanClock span(xr_spans,XrSpan::transfer_observer);observe_transfer(eye,processed,images_[eye].at(index).texture,layers[eye],gameplay,tracked_pair_(),sources[eye]);}
+                if(observe_transfer && !settings_.open()) {SpanClock span(xr_spans,XrSpan::transfer_observer);observe_transfer(eye,submitted,images_[eye].at(index).texture,layers[eye],gameplay,tracked_pair_(),sources[eye]);}
                 if(alternate_enabled && !alt_stale && gameplay) {
-                    if(alternate_may_keep(gameplay,authored_camera,settings_.open())) keep_alternate_eye_(eye,processed);
+                    if(alternate_may_keep(gameplay,authored_camera,settings_.open())) {
+                        keep_alternate_eye_(eye,processed);
+                        if(observe_fresh_eye) observe_fresh_eye(eye,processed,alternate_frame); // v802 diagnostic: the frame after a stale-warp dump
+                    }
                     else alt_records_[eye]={}; // a cut, takedown or settings image is shown now and never kept
                 }
                 {ModGpuScope overlay_scope(context_.Get(),ModSpan::eye_overlay); // task 3b: native object art + desktop mirror draws
                 SpanClock span(xr_spans,XrSpan::overlay_draws);
+                // v880: the spyglass lens over the copied image, under every overlay; a fault turns it off for the session.
+                if(gameplay && tracked_pair_() && !authored_camera && !settings_.open() && spyglass_magnification>1.02f && !spyglass_lens_failures) try {
+                    if(!spyglass_lens_) {Microsoft::WRL::ComPtr<ID3D11Device> device;context_->GetDevice(&device);spyglass_lens_=std::make_unique<SpyglassLens>(device.Get());}
+                    spyglass_lens_->draw(images_[eye].at(index).texture,submitted,layers[eye].fov,spyglass_magnification);++spyglass_lens_draws;
+                } catch(const std::exception&) {++spyglass_lens_failures;}
                 if(composite_note && !native_note_art_disabled_) try { // v685: a note-art fault disables the note overlay, never the frame
                     if(!note_eye_art_) {Microsoft::WRL::ComPtr<ID3D11Device> device;context_->GetDevice(&device);note_eye_art_=std::make_unique<NoteEyeArt>(device.Get());}
                     D3D11_TEXTURE2D_DESC art_desc{};world_ui_source_->GetDesc(&art_desc);
@@ -2263,11 +2488,47 @@ public:
                         observe_eye_art_failure(text.c_str());
                     }
                 }
-                if(gameplay && !authored_camera && tracked_pair_()) {
+                if(wheel_ring && !wheel_eye_art_disabled_) try { // v776: a ring-art fault disables the wheel's eye art (the quad layer takes over), never the frame
+                    if(!note_eye_art_) {Microsoft::WRL::ComPtr<ID3D11Device> device;context_->GetDevice(&device);note_eye_art_=std::make_unique<NoteEyeArt>(device.Get());}
+                    D3D11_TEXTURE2D_DESC art_desc{};world_ui_source_->GetDesc(&art_desc);
+                    const auto rows=static_cast<UINT>(world_ui_rows(art_desc)),top=(art_desc.Height-rows)/2;
+                    XrView ring_view{XR_TYPE_VIEW};ring_view.pose=layers[eye].pose;ring_view.fov=layers[eye].fov;
+                    const double ring_width=world_ui_width();const auto now_ring=GetTickCount64();
+                    const NotePanelReceipt ring_panel{*wheel_ring,ring_width,ring_width*rows/art_desc.Width,now_ring,pose_epoch(),reference_epoch(),alternate_frame,0};
+                    std::array<NoteHandReceipt,2> over{};unsigned over_count=0;bool grace=false;
+                    for(unsigned side=0;side<2;++side) { // the hands drawn this frame, or (a frame's hands missing) the last frame's: a hand never flickers over/under the ring
+                        const auto& hand=wheel_hands_[side];
+                        if(hand.current(now_ring,pose_epoch(),reference_epoch(),alternate_frame)) {over[side]=hand;++over_count;}
+                        else if(alternate_frame>1 && hand.current(now_ring,pose_epoch(),reference_epoch(),alternate_frame-1)) {over[side]=hand;++over_count;grace=true;}
+                    }
+                    note_eye_art_->draw(images_[eye].at(index).texture,world_ui_source_.Get(),format_,{0,top,0,art_desc.Width,top+rows,1},ring_view,ring_panel,over,true);
+                    ++wheel_eye_draws;if(over_count)++wheel_eye_occluded;if(grace)++wheel_eye_grace;
+                } catch(const std::exception& error) {
+                    wheel_eye_art_disabled_=true;++wheel_eye_failures;
+                    if(observe_eye_art_failure) {
+                        const std::string text=std::string("Hand wheel eye art disabled (")+error.what()+"); the quad layer takes over";
+                        observe_eye_art_failure(text.c_str());
+                    }
+                }
+                // v718 (headset v717: Dr. Hypatia's "Press [Grip] to inject counter-serum." is shown by the game only during the choke,
+                // whose camera is authored, and was never drawn): head-locked messages need no world anchor and draw in any gameplay camera.
+                // The reticle and world-anchored art (prompts, markers) still wait for the player's own camera.
+                if(gameplay && tracked_pair_()) {
                     const auto now=GetTickCount64();XrView view{XR_TYPE_VIEW};view.pose=layers[eye].pose;view.fov=layers[eye].fov;
-                    if(eye_reticle_available() && settings_.crosshair() && !settings_.open() && state==XR_SESSION_STATE_FOCUSED && controller_input.active) try {
+                    if(!authored_camera && eye_reticle_available() && settings_.crosshair() && !settings_.open() && state==XR_SESSION_STATE_FOCUSED && controller_input.active) try {
                         const auto image_frame=alternate_enabled?alt_effective_()[eye].frame:alternate_frame;
-                        const auto reticle=eye_reticles_.find(eye,image_frame,pose_epoch(),reference_epoch(),now);
+                        auto reticle=eye_reticles_.find(eye,image_frame,pose_epoch(),reference_epoch(),now);
+                        if(reticle && stale_warped_(eye)) { // v792: the point was placed in the kept image; move it into the warped one
+                            const double ru=(reticle->x+1.)*.5,rv=(1.-reticle->y)*.5; // v796: with parallax, at the reticle's own distance
+                            const auto moved=stale_layers_[eye] && reticle->depth>0?parallax_target(stale_layers_[eye]->world,ru,rv,reticle->depth):warp_point(stale_back_[eye],ru,rv);
+                            if(moved) {reticle->x=static_cast<float>((*moved)[0]*2.-1.);reticle->y=static_cast<float>(1.-(*moved)[1]*2.);}
+                            else reticle.reset();
+                        }
+                        if(reticle && uncanted_[eye]) { // v808: and from the turned image into the one submitted
+                            const auto moved=warp_point(uncant_back_[eye],(reticle->x+1.)*.5,(1.-reticle->y)*.5);
+                            if(moved) {reticle->x=static_cast<float>((*moved)[0]*2.-1.);reticle->y=static_cast<float>(1.-(*moved)[1]*2.);}
+                            else reticle.reset();
+                        }
                         bool game_crosshair=false;
                         if(reticle && crosshair_art_.texture && crosshair_art_.epoch==pose_epoch() && now>=crosshair_art_.tick && now-crosshair_art_.tick<=150 && ensure_native_eye_art()) {
                             // The element's anchor sits on the reticle point at the game's own pixel size.
@@ -2304,13 +2565,17 @@ public:
                         eye_reticle_failed_=true;eye_reticle_texture_.Reset();eye_reticles_.clear();crosshair_art_={};
                     }
                     for(unsigned art_slot=0;art_slot<native_object_art_.size();++art_slot) if(const auto& art=native_object_art_[art_slot];art.fresh(pose_epoch(),now)) {
+                        if(authored_camera && !art.locked) continue;
                         const auto aspect=static_cast<double>(art.crop.right-art.crop.left)/(art.crop.bottom-art.crop.top);
-                        const auto locked=art_slot==tutorial_art_slot?head_locked_art_point(tracked_view_(0).pose,tracked_view_(1).pose):std::optional<Vec3>{};
-                        if(art_slot==tutorial_art_slot && !locked)continue;
-                        if(const auto rect=native_art_rect(view,locked?*locked:art.point,art.width*hud_scale(),aspect)) {
+                        const auto locked=art.locked?head_locked_art_point(tracked_view_(0).pose,tracked_view_(1).pose,art.lock_offset):std::optional<Vec3>{};
+                        if(art.locked && !locked) {++native_object_art_slot_unlocked[art_slot];continue;}
+                        const auto rect=native_art_rect(view,locked?*locked:art.point,art.width*hud_scale(),aspect);
+                        if(!rect) ++native_object_art_slot_norect[art_slot];
+                        else native_object_art_slot_rect[art_slot]={rect->left,rect->top,rect->right,rect->bottom};
+                        if(rect) {
                             if(ensure_native_eye_art()) {
                                 const auto art_result=native_eye_art_->draw(images_[eye].at(index).texture,art.texture.Get(),art.crop,*rect,format_,art.premultiplied);
-                                if(art_result.drawn) {++native_object_art_draws;native_object_art_masks_[art_slot]|=1u<<eye;}
+                                if(art_result.drawn) {++native_object_art_draws;++native_object_art_slot_draws[art_slot];native_object_art_masks_[art_slot]|=1u<<eye;}
                                 else {note_eye_art_fault(art_result,"native object art");native_object_art_[art_slot]={};}
                             }
                         }
@@ -2318,6 +2583,7 @@ public:
                 }
                 if(mirror_rects[eye]) mirror_->draw(images_[eye].at(index).texture,*mirror_rects[eye]);}
                 if(composite_note && observe_note_composition)observe_note_composition(eye,images_[eye].at(index).texture,layers[eye],*note_panel_);
+                if(observe_final_eye && world_scene)observe_final_eye(eye,images_[eye].at(index).texture);
                 if(eye==0 && !world_scene) gates.band_ready=menu_band_ready=copy_menu_band(images_[0].at(index).texture);
                 } catch(...) {xrReleaseSwapchainImage(chains_[eye],&release);throw;}
                 {SpanClock span(xr_spans,XrSpan::release);checked(xrReleaseSwapchainImage(chains_[eye],&release),"Release game eye");}
@@ -2350,7 +2616,7 @@ public:
                 SpanClock layers_span(xr_spans,XrSpan::overlay_layers);
                 // Projection first, then the wrist controls card.
                 end.layerCount=0;menu_layers_with_pointer[end.layerCount++]=layer;
-                if(world_ui_kind_ && world_ui_source_ && !composite_note) {
+                if(world_ui_kind_ && world_ui_source_ && !composite_note && !(wheel_ring && !wheel_eye_art_disabled_)) {
                     if((world_ui_panel=world_ui_layer())) {
                         menu_layers_with_pointer[end.layerCount++]=reinterpret_cast<const XrCompositionLayerBaseHeader*>(&*world_ui_panel);
                         ++world_ui_layers;++world_ui_layers_by_kind[world_ui_kind_-1];last_world_ui_layer=true;
@@ -2444,6 +2710,10 @@ public:
             ++end_frame_rejections;if(observe_frame_rejection) observe_frame_rejection((name+": "+std::to_string(ended)+" (frame dropped)").c_str());
         } else end_frame_rejected_run_=0;
         frame_open_=false;
+        if(gpu_queue_limit && context_) {
+            if(!frame_fence_) {Microsoft::WRL::ComPtr<ID3D11Device> device;context_->GetDevice(&device);D3D11_QUERY_DESC desc{D3D11_QUERY_EVENT,0};device->CreateQuery(&desc,&frame_fence_);}
+            if(frame_fence_) {context_->End(frame_fence_.Get());frame_fence_pending_=true;}
+        }
         timing.submit_ns=cpu_time_ns()-stage_start;timing.end_ns=cpu_time_ns();
         last_layer_submitted=real_layers!=0;last_menu_layer=last_layer_submitted && !world_scene; // real mod layers only: a fallback frame is not content
         last_authored_camera_layer=last_layer_submitted && authored_camera && !authored_scene_render && !settings_.open(); // gameplay's authored camera; a cutscene counts apart

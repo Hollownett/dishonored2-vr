@@ -76,6 +76,13 @@ int main(int argc,char** argv) {
     assert(geometry.vertices.size()==3 && geometry.indices==std::vector<std::uint32_t>({0,1,2}));
     const auto expected=world_to_xr_controller({1+127./255.,2,3},mapping.origin,mapping.anchor,1.,mapping.controller_centre,mapping.origin.position);
     assert(expected && length(geometry.vertices[0]-*expected)<1e-7);
+    // v776 (headset v775): the hand wheel's occluder is these skinned triangles as one flat list, trusted only where its hand is.
+    const auto flat=nh::triangles(geometry);
+    assert(flat && flat->size()==3 && length((*flat)[0]-geometry.vertices[0])<1e-12 && length((*flat)[2]-geometry.vertices[2])<1e-12);
+    assert(nh::at_hand(*flat,*expected,.001) && nh::at_hand(*flat,*expected+Vec3{.2,0,0},.3));          // the grip is on or near the hand
+    assert(!nh::at_hand(*flat,*expected+Vec3{5,0,0},.3) && !nh::at_hand(*flat,Vec3{NAN,0,0},.3) && !nh::at_hand({},*expected,.3)); // a wrong mapping, a bad grip, no triangles
+    nh::Geometry reordered=geometry;reordered.indices={2,1,0,0,1,2};
+    assert(nh::triangles(reordered)->size()==6 && length((*nh::triangles(reordered))[0]-geometry.vertices[2])<1e-12); // the indices order the list
     auto affine=palette;affine[0].f[0]=1.2f;affine[1].f[5]=.8f;
     const auto widened=nh::skin(mesh,binding.inverse,affine,model,mapping);
     assert(widened.vertices.size()==3 && length(widened.vertices[1]-geometry.vertices[1])>.09);

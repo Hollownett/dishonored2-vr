@@ -41,8 +41,7 @@ headset listening validation is still required. See [audio evidence and checks](
 | Left stick | Move in the direction you look; click to sprint |
 | Right stick left/right | Snap turn (45°) |
 | Right stick click | Zoom (spyglass) |
-| X held | Quick Access Wheel: pick with the right stick or move your left hand toward the item (a light tick per item), release X to equip |
-| A held (about 0.35 s) | Same Quick Access Wheel for the right hand: pick with the left stick or move your right hand toward the item, release A to equip. A quick tap is still a jump. Whichever hand opens the wheel owns it until release |
+| X held | Quick Access Wheel: point at the item with either hand (a light tick per item), release X to equip |
 | A | Jump and mantle |
 | Both hands raised fast above your head | Jump too (both triggers released, nothing held); keep them up to mantle |
 | Open hand (or the sword or pistol, held still) pressed into a closed door | Opens it, away from you, as far as you push it: push slowly to open it a little and peek, push fast to swing it fully open. A locked door rattles |

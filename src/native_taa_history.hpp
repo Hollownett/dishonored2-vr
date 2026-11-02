@@ -130,7 +130,8 @@ struct PassInputs {
 };
 enum class PassResult {untracked,idle,fallback,rebuild,planned};
 struct PassPlan {
-    int eye=-1;std::uint32_t counter{};bool write{};std::optional<std::array<float,4>> jitter;
+    int eye=-1;std::uint32_t counter{};bool write{};std::optional<std::array<float,4>> jitter;std::uintptr_t view{};
+    std::uint64_t display{}; // the alternate receipt's display frame (single view only; 0 otherwise)
     std::optional<temporal_eye::NativePass> metadata;
     std::array<std::uintptr_t,2> slots{};std::array<std::uint64_t,2> engine{},replaced{};
     bool twins_pending{}; // right eye planned on the engine pair (upscaler_owns_taa) while its twins are missing or stale
@@ -138,7 +139,7 @@ struct PassPlan {
 // Pure planning against engine memory read through `read`. It never writes.
 template<class Read> PassResult plan_pass(Read read,const PassInputs& in,std::uintptr_t ctx,std::array<Alternation,2>& alternation,
                                          PassPlan& plan,std::vector<ParamEntry>& scratch) {
-    plan.metadata.reset();plan.twins_pending=false;
+    plan.metadata.reset();plan.twins_pending=false;plan.display=0;
     std::uintptr_t view{};
     if(!read(ctx+ctx_view,&view,sizeof view)) return PassResult::untracked;
     int eye=eye_of(view,in.eye_views[0],in.eye_views[1]);
@@ -146,7 +147,7 @@ template<class Read> PassResult plan_pass(Read read,const PassInputs& in,std::ui
         std::uint32_t stamp{};
         if(!in.receipt || !read(view+alternate_taa::stamp_offset,&stamp,4) ||
             in.receipt->key.view!=view || in.receipt->key.native_counter!=stamp || !in.receipt->admitted) return PassResult::fallback;
-        eye=in.receipt->key.eye;
+        eye=in.receipt->key.eye;plan.display=in.receipt->key.display;
         plan.jitter=std::array<float,4>{in.receipt->current.jitter[0],in.receipt->current.jitter[1],
             in.receipt->previous.jitter[0],in.receipt->previous.jitter[1]};
     }
@@ -182,7 +183,7 @@ template<class Read> PassResult plan_pass(Read read,const PassInputs& in,std::ui
         if(twins) for(int k=0;k<2;++k) pair[k]=in.twins[k].image+image_handle;
         else plan.twins_pending=true;
     }
-    plan.eye=eye;plan.counter=counter;plan.engine=engine;
+    plan.eye=eye;plan.counter=counter;plan.engine=engine;plan.view=view;
     // Without twins the engine pair is left exactly as the engine set it (no role flip, no write).
     plan.replaced=plan.twins_pending?engine:assignment(pair,alternation[static_cast<std::size_t>(eye)].flip(counter));
     for(int k=0;k<2;++k) plan.slots[k]=table+static_cast<std::uintptr_t>(slots.index[k])*sizeof(ParamEntry)+offsetof(ParamEntry,value);
@@ -293,10 +294,10 @@ public:
     void capture_metadata(bool enabled) noexcept {metadata_enabled_=enabled;}
 private:
     unsigned long long run(void* ctx,const taa_history::PassPlan& plan) {
-        taa_history::apply_plan(plan);TaaDispatchHook::pass_metadata=plan.metadata;TaaDispatchHook::pass_jitter=plan.jitter;TaaDispatchHook::pass_eye=plan.eye;TaaDispatchHook::post_taa=false;TaaDispatchHook::pass_context=nullptr;
+        taa_history::apply_plan(plan);TaaDispatchHook::pass_metadata=plan.metadata;TaaDispatchHook::pass_jitter=plan.jitter;TaaDispatchHook::pass_view=plan.view;TaaDispatchHook::pass_eye=plan.eye;TaaDispatchHook::pass_display=plan.display;TaaDispatchHook::post_taa=false;TaaDispatchHook::pass_context=nullptr;
         __try {return original_(ctx);}
         __finally {
-            TaaDispatchHook::pass_eye=-1;TaaDispatchHook::pass_metadata.reset();TaaDispatchHook::pass_jitter.reset();taa_history::restore_plan(plan);
+            TaaDispatchHook::pass_eye=-1;TaaDispatchHook::pass_display=0;TaaDispatchHook::pass_view=0;TaaDispatchHook::pass_metadata.reset();TaaDispatchHook::pass_jitter.reset();taa_history::restore_plan(plan);
             if(const auto end=TaaDispatchHook::pass_end.load()) end(plan.eye,TaaDispatchHook::pass_context);
         }
     }

@@ -244,6 +244,8 @@ private:
         Vec3 own_shift_local{};   // the clamp's own eased push: shift_local without what callers drew on top (note_drawn); the snap-back gap
         Vec3 chest_world{};   // the re-acquire origin of the last update (the end of a retreat)
         Vec3 drawn_world{},target_world{},root_position{};std::array<Vec3,3> basis_world{};     // last frame in the world
+        Vec3 root_forward{};   // v861: the level root's heading last frame (a change is a rig turn)
+        bool chest_pending{};  // v861: a snap re-acquire whose chest sweep was not cast yet
         std::array<double,8> frame_intervals{};unsigned interval_cursor{}; // recent render cadence, not player speed
         std::array<double,8> root_intervals{};unsigned root_interval_cursor{};
         Vec3 root_velocity{};double root_changed_at{}; // changed-root publication timeline, including intervening repeat renders
@@ -271,6 +273,8 @@ private:
     std::array<Side,2> sides_{};
     inline static std::atomic<std::uint64_t> next_request_id_{}; // process lifetime, including whole-object/session replacement
     std::array<std::uint64_t,2> squeeze_infeasible_{},snapbacks_{},contact_frames_{},missed_notes_{},repeated_updates_{},blocked_frames_{};
+    std::array<std::uint64_t,2> rig_turns_{};bool rig_turn_carry_{true};   // v861: build/legacy-clamp-world-hold keeps a held hand in the world on turns
+    static constexpr double snap_turn_radians=.2;   // a rig turn this large in one frame (snap turns are 15-90 deg; smooth ones a few deg a frame) re-acquires
 
     std::size_t capacity() const {return std::clamp<std::size_t>(cfg_.max_planes,1,plane_capacity);}
     static void store(Side& s,const ClampInput& in,Vec3 drawn) {
@@ -278,7 +282,7 @@ private:
         s.has=true;s.epoch=in.epoch;s.last_now=in.now;
         s.prev_local=clamp_detail::local_point(in.root,drawn);
         for(std::size_t i=0;i<3;++i) s.prev_basis_local[i]=clamp_detail::local_vector(in.root,in.target.basis[i]);
-        s.drawn_world=drawn;s.target_world=in.target.position;s.root_position=in.root.position;s.basis_world=in.target.basis;
+        s.drawn_world=drawn;s.target_world=in.target.position;s.root_position=in.root.position;s.basis_world=in.target.basis;s.root_forward=in.root.basis[0];
     }
     void post_chest(Side& s,const ClampInput& in,ClampOutput& out) const {
         if(!in.post || !finite(in.chest)) return;
@@ -596,6 +600,8 @@ public:
     std::uint64_t contact_frames(unsigned side) const {return side<2?contact_frames_[side]:0;}
     // Contract breaks: an update without note_drawn after the previous one, and a second update at the same `now`.
     std::uint64_t missed_notes(unsigned side) const {return side<2?missed_notes_[side]:0;}
+    std::uint64_t rig_turns(unsigned side) const {return side<2?rig_turns_[side]:0;}
+    void set_rig_turn_carry(bool on) {rig_turn_carry_=on;}
     std::uint64_t repeated_updates(unsigned side) const {return side<2?repeated_updates_[side]:0;}
     // Frames held released because the re-acquire could not run: the chest was not finite or began inside geometry.
     std::uint64_t reacquire_blocked_frames(unsigned side) const {return side<2?blocked_frames_[side]:0;}
@@ -647,15 +653,33 @@ public:
         if(!target_ok || !clamp_detail::finite_pose(in.root) || !std::isfinite(in.now)) {reset(side);return out;}
         out.valid=true;
         const double elapsed=in.now-s.last_now;
-        if(!s.has || in.epoch!=s.epoch || !(elapsed>=0) || elapsed>cfg_.gap_seconds) {
+        // v861 (user: "when I turn with the stick, body and hands must turn together with the camera"): a rig turn (the level root's heading
+        // changed: a stick or snap turn; head-follow is not in the root) turns last frame's hand with the rig about the root, so a hand held while a
+        // sweep validates its turned target stays with the body instead of behind in the world (v834-v836: the pistol hand 25-58 cm behind for 1-2
+        // frames at every sharp turn). Known planes still keep it out of the walls met. A snap-sized turn re-acquires from the chest instead: a
+        // carried hand may land inside a wall no sweep has met, and a sweep that starts inside a wall cannot see it.
+        double rig_turn=0;
+        if(rig_turn_carry_ && s.has) {
+            const auto& f=in.root.basis[0];const auto& g=s.root_forward;
+            if(std::hypot(g.x,g.y)>.5) rig_turn=std::remainder(std::atan2(f.y,f.x)-std::atan2(g.y,g.x),2*3.14159265358979323846);
+        }
+        const bool rig_snap=std::abs(rig_turn)>snap_turn_radians;
+        if(rig_snap) ++rig_turns_[side];
+        if(!s.has || rig_snap || (s.chest_pending && in.post) || in.epoch!=s.epoch || !(elapsed>=0) || elapsed>cfg_.gap_seconds) {
             // Re-acquire: nothing from before is trusted. The chest sweep validates the path to the controller.
+            const bool snap_pending=s.has && (rig_snap || s.chest_pending);
             s=Side{};take_hand(s,in);s.chest_world=in.chest;out.reacquired=true;
+            s.chest_pending=snap_pending && !in.post;   // v861: a frame that casts nothing (alternate casts) keeps the chest sweep owed
             if(finite(in.chest)) {out.state=ClampState::free;post_chest(s,in,out);}
             else {release(s);out.state=ClampState::released;++blocked_frames_[side];}
             store(s,in,in.target.position);
             return finish(s,out);
         }
         const double dt=std::min(elapsed,.1);
+        if(std::abs(rig_turn)>1e-7) {   // a smooth turn's step: the hand turns with the rig (the target's own world motion, the sweep's look-ahead, keeps it)
+            const double c=std::cos(rig_turn),n=std::sin(rig_turn);const Vec3 p=s.root_position;const Vec3 v=s.drawn_world-p;
+            s.drawn_world=p+Vec3{c*v.x-n*v.y,n*v.x+c*v.y,v.z};++rig_turns_[side];
+        }
         s.frame_intervals[s.interval_cursor++%s.frame_intervals.size()]=dt;
         const Vec3 root_step=in.root.position-s.root_position;
         const double root_interval=length(s.root_velocity)>0?in.now-s.root_changed_at:dt;

@@ -101,25 +101,31 @@ template<class Read> std::optional<TakedownTarget> takedown_target(Read& read,st
 // Native crouch (artifacts/crouch-re): player state 6 arkPlayerStateSneaking (vtable 0x1c84258) is the
 // crouch; 10 AUTOCROUCH and 11 WALLCROUCH are forced crouches (standing up impossible). The state pool
 // is machine+0x90, state N at *(pool+0x10+N*8): +8 id, +0x10 machine, +0x20 active byte.
+template<class Read> std::optional<bool> native_player_state(Read& read,std::uintptr_t base,std::uintptr_t machine,unsigned id,std::uintptr_t vtable) {
+    using namespace rig;
+    if(!pointer(machine) || value<std::uintptr_t>(read,machine)!=base+0x1c73d58) return {};
+    const auto pool=value<std::uintptr_t>(read,machine+0x90);
+    if(!pool || !pointer(*pool)) return {};
+    const auto s=value<std::uintptr_t>(read,*pool+0x10+id*8);
+    if(!s || !pointer(*s) || value<std::uint32_t>(read,*s+8)!=id || value<std::uintptr_t>(read,*s+0x10)!=machine) return {};
+    if(vtable && value<std::uintptr_t>(read,*s)!=base+vtable) return {};
+    const auto active=value<std::uint8_t>(read,*s+0x20);
+    if(!active || *active>1) return {};
+    return *active==1;
+}
 struct CrouchState {bool valid{},crouched{},forced{};};
 template<class Read> CrouchState native_crouch(Read& read,std::uintptr_t base,std::uintptr_t machine) {
-    using namespace rig;
     CrouchState out;
-    if(!pointer(machine) || value<std::uintptr_t>(read,machine)!=base+0x1c73d58) return out;
-    const auto pool=value<std::uintptr_t>(read,machine+0x90);
-    if(!pool || !pointer(*pool)) return out;
-    auto state=[&](unsigned id,std::uintptr_t vtable)->std::optional<bool> {
-        const auto s=value<std::uintptr_t>(read,*pool+0x10+id*8);
-        if(!s || !pointer(*s) || value<std::uint32_t>(read,*s+8)!=id || value<std::uintptr_t>(read,*s+0x10)!=machine) return {};
-        if(vtable && value<std::uintptr_t>(read,*s)!=base+vtable) return {};
-        const auto active=value<std::uint8_t>(read,*s+0x20);
-        if(!active || *active>1) return {};
-        return *active==1;
-    };
+    auto state=[&](unsigned id,std::uintptr_t vtable) {return native_player_state(read,base,machine,id,vtable);};
     const auto sneaking=state(6,0x1c84258);
     if(!sneaking) return out;
     const bool auto_crouch=state(10,0).value_or(false),wall_crouch=state(11,0).value_or(false);
     out.valid=true;out.forced=auto_crouch || wall_crouch;out.crouched=*sneaking || out.forced;
     return out;
+}
+// Crank wheels (valves): player state 85 PLAYER_STATE_CRANK, arkPlayerStateCrank vtable 0x1c3c9c8. The wheel turns only while
+// its m_crankAction (Use) stays held; a NOLOCK wheel runs back down on release.
+template<class Read> bool native_cranking(Read& read,std::uintptr_t base,std::uintptr_t machine) {
+    return native_player_state(read,base,machine,85,0x1c3c9c8).value_or(false);
 }
 } // namespace d2vr

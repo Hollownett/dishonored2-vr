@@ -19,9 +19,14 @@ int main() {
     assert(region.Protect&PAGE_GUARD); // Validation must not consume the guard.
     assert(d2vr::native_readable_range_cached(at,28,1000));
     assert(VirtualProtect(memory,page,PAGE_NOACCESS,&old));
-    assert(d2vr::native_readable_range_cached(at,28,1050));  // cached inside TTL
-    assert(!d2vr::native_readable_range_cached(at,28,1200)); // expired -> requeried
-    assert(!d2vr::native_readable_range_cached(at+page-14,28,1200));
+    assert(d2vr::native_readable_range_cached(at,28,1700));  // cached inside the 0.8-1.2 s TTL
+    assert(!d2vr::native_readable_range_cached(at,28,2300)); // expired -> requeried
+    assert(VirtualProtect(memory,page,PAGE_READWRITE,&old));
+    assert(!d2vr::native_readable_range_cached(at,28,2320)); // an unreadable region is remembered 50 ms
+    assert(d2vr::native_readable_range_cached(at,28,2360));  // then requeried
+    assert(!d2vr::native_readable_range_cached(at+page-14,28,2400)); // the range reaches the guard page
+    assert(d2vr::native_executable_cached(reinterpret_cast<std::uintptr_t>(&main)));
+    assert(!d2vr::native_executable_cached(at));
     assert(VirtualFree(memory,0,MEM_RELEASE));
     assert(!d2vr::native_readable_range(at,28));
 }

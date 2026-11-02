@@ -7,7 +7,7 @@ namespace DishonoredVR;
 sealed class ControlsDocument
 {
     public static readonly string[] PageIds = { "body", "controllers", "tips" };
-    public static readonly string[] FigureIds = { "sword_throw", "enemy_grab" };
+    public static readonly string[] FigureIds = { "sword_draw_block", "enemy_grab" };
     public sealed class Lesson(string title)
     {
         public readonly string Title = title;
@@ -73,14 +73,14 @@ sealed class ControlsDocument
                 !lessons.Where(l => l.Figure != "").Select(l => l.Figure).SequenceEqual(FigureIds) ||
                 !lessons.Select(l => l.Title).SequenceEqual(source.Where(s => s.StartsWith("## ", StringComparison.Ordinal)).Select(s => s[3..])) ||
                 !lessons.SelectMany(l => l.Lines).Where(s => s.StartsWith("- ", StringComparison.Ordinal)).SequenceEqual(source.Where(s => s.StartsWith("- ", StringComparison.Ordinal))) ||
-                lessons.Sum(l => l.Lines.Count(s => s.StartsWith("- ", StringComparison.Ordinal))) != 24)
-                throw new InvalidOperationException("Embedded guide must preserve all three pages, two figures, five headings and twenty-four bullets.");
+                lessons.Sum(l => l.Lines.Count(s => s.StartsWith("- ", StringComparison.Ordinal))) != 26)
+                throw new InvalidOperationException("Embedded guide must preserve all three pages, two figures, five headings and twenty-six bullets.");
             var withoutArt = Parse(Regex.Replace(markdown, @"(?m)^<!-- vr-figure:.*\r?\n?", ""), true);
             if (!withoutArt.Pages.SelectMany(p => p.Lessons).SelectMany(l => l.Lines).SequenceEqual(lessons.SelectMany(l => l.Lines)))
                 throw new InvalidOperationException("Guide instructions changed when figures were omitted.");
         }
-        var sample = Parse("# Guide\nIntro\n<!-- ignored -->\n<!-- vr-page:body|Body -->\n## Throw\n<!-- vr-figure:sword_throw|Open hand -->\n- **Release** — throw", true);
-        if (sample.Pages.Count != 1 || sample.Pages[0].Lessons.Single().Figure != "sword_throw" || sample.Pages[0].Lessons[0].Lines.Single() != "- **Release** — throw")
+        var sample = Parse("# Guide\nIntro\n<!-- ignored -->\n<!-- vr-page:body|Body -->\n## Throw\n<!-- vr-figure:sword_draw_block|Open hand -->\n- **Release** — throw", true);
+        if (sample.Pages.Count != 1 || sample.Pages[0].Lessons.Single().Figure != "sword_draw_block" || sample.Pages[0].Lessons[0].Lines.Single() != "- **Release** — throw")
             throw new InvalidOperationException("Guide parser lost a heading, figure or bullet.");
         var invalid = Parse("<!-- vr-page:../../file|Unsafe -->\n<!-- vr-page:body|Safe -->\n## Keep me\n<!-- vr-figure:unknown|Missing -->\n- Keep this bullet");
         if (invalid.Errors.Count != 2 || invalid.Pages.Single().Lessons.Single().Lines.Single() != "- Keep this bullet")
@@ -88,9 +88,9 @@ sealed class ControlsDocument
         foreach (string bad in new[]
         {
             "<!-- vr-page:body|   -->",
-            "<!-- vr-page:body|Safe -->\n## Lesson\n<!-- vr-figure:sword_throw|   -->",
-            "<!-- vr-page:body|Safe -->\n## First\n<!-- vr-figure:sword_throw|One -->\n## Second\n<!-- vr-figure:sword_throw|Two -->",
-            "<!-- vr-page:body|Safe -->\n## Lesson\n- First instruction\n<!-- vr-figure:sword_throw|Too late -->"
+            "<!-- vr-page:body|Safe -->\n## Lesson\n<!-- vr-figure:sword_draw_block|   -->",
+            "<!-- vr-page:body|Safe -->\n## First\n<!-- vr-figure:sword_draw_block|One -->\n## Second\n<!-- vr-figure:sword_draw_block|Two -->",
+            "<!-- vr-page:body|Safe -->\n## Lesson\n- First instruction\n<!-- vr-figure:sword_draw_block|Too late -->"
         })
         {
             if (Parse(bad).Errors.Count != 1) throw new InvalidOperationException("Guide parser accepted a blank, duplicate or misplaced directive.");
@@ -141,7 +141,7 @@ sealed class ControlsGuide : ArtControl
 
     static string DefaultPageName(string id) => id switch
     {
-        "body" => "Body", "controllers" => "Controllers", _ => "Tips"
+        "body" => "Body", "controllers" => "Controllers", _ => "Gestures"
     };
     public void SelectPage(string id)
     {
@@ -192,13 +192,14 @@ sealed class ControlsGuide : ArtControl
         box.Clear(); var font = Ui.Font(box, 11.5f, FontStyle.Regular, Ui.Sans); var bold = Ui.Font(box, 11.5f, FontStyle.Bold, Ui.Sans);
         foreach (string raw in lines)
         {
-            string line = raw.StartsWith("- ", StringComparison.Ordinal) ? "• " + raw[2..] : raw;
+            bool bullet = raw.StartsWith("- ", StringComparison.Ordinal); string line = bullet ? raw[2..] : raw;
+            if (bullet) Add(box, "◆  ", Ui.Font(box, 7f, FontStyle.Regular, Ui.Sans), Ui.Gold);
             int pos = 0; bool input = false;
             while (pos < line.Length)
             {
                 int next = line.IndexOf("**", pos, StringComparison.Ordinal);
                 if (next < 0) next = line.Length;
-                Add(box, line[pos..next], input ? bold : font, input ? Ui.Teal : Ui.Text);
+                Add(box, line[pos..next], input ? bold : font, input ? Ui.Gold : Ui.Text);
                 if (next == line.Length) break;
                 input = !input; pos = next + 2;
             }
@@ -232,12 +233,42 @@ sealed class ControlsGuide : ArtControl
             var page = document.Pages.FirstOrDefault(p => p.Id == ControlsDocument.PageIds[selected]);
             if (page != null) foreach (var lesson in page.Lessons)
             {
-                var view = new LessonView(lesson, lesson.Figure == "" ? null : art[$"guide_{lesson.Figure}_{character}"]);
+                var view = new LessonView(lesson, lesson.Figure == "" ? null : art[$"guide_{lesson.Figure}_{character}"], Diagram(page.Id, lesson));
                 view.NavigateText += NavigateText;
                 lessons.Add(view); scroll.Controls.Add(view);
             }
         }
         scroll.AutoScrollPosition = Point.Empty; scroll.ResumeLayout(); Arrange(); Invalidate();
+    }
+    /// <summary>The Body and Controllers pages are the game guide's pictures: a ring on each button or zone, joined by a leader to its label.</summary>
+    Bitmap? Diagram(string page, ControlsDocument.Lesson lesson)
+    {
+        var bullets = lesson.Lines.Select(l => System.Text.RegularExpressions.Regex.Match(l, @"^- \*\*(.+?)\*\*\s*(?:—|-|:)\s*(.*)$"))
+            .Where(m => m.Success).Select(m => (Key: m.Groups[1].Value, Text: m.Groups[2].Value)).ToList();
+        if (bullets.Count != lesson.Lines.Count(l => l.StartsWith("- ", StringComparison.Ordinal))) return null;
+        float s = DeviceDpi / 96f;
+        try
+        {
+            if (page == "controllers")
+            {
+                // Labels on the controller's outer side, as in the game.
+                bool left = lesson.Title.StartsWith("Left", StringComparison.OrdinalIgnoreCase);
+                return GuideFigures.Callouts(GuideFigures.ControllerImage[left ? 0 : 1], .56f, bullets.Select(b =>
+                {
+                    var at = GuideFigures.ControllerAnchor(left, b.Key);
+                    return new GuideFigures.Callout(b.Key, b.Text, at, new[] { at }, left);
+                }).ToList(), s);
+            }
+            if (page == "body" && art[$"guide_body_{character}"] is Bitmap body && bullets.Count == GuideFigures.BodyMarks.Length)
+                // The right-side zones label on the left of the figure (it faces you), as in the game.
+                return GuideFigures.Callouts(body, .5f, bullets.Select((b, i) =>
+                {
+                    var rings = GuideFigures.BodyMarks[i].Select(a => (PointF)GuideFigures.BodyMapAnchors[a]).ToArray();
+                    return new GuideFigures.Callout(b.Key, b.Text, rings[0], rings, rings[0].X < GuideFigures.BodyMapSize.Width / 2f);
+                }).ToList(), s, 280);
+        }
+        catch (ArgumentException) { }  // an edited guide names a button the picture lacks: the text stays
+        return null;
     }
     protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
     {
@@ -289,7 +320,7 @@ sealed class ControlsGuide : ArtControl
     protected override void OnPaint(PaintEventArgs e)
     {
         base.OnPaint(e); var g = e.Graphics; Ui.Quality(g); Ui.Pane(g, ClientRectangle);
-        TextRenderer.DrawText(g, document.Title, Ui.Font(this, 20), new Rectangle(S(24), S(12), Width - S(48), S(37)), Ui.Text, TextFormatFlags.NoPadding | TextFormatFlags.EndEllipsis);
+        Ui.Spaced(g, document.Title.ToUpperInvariant(), Ui.Font(this, 19), Ui.Text, S(24), S(14), S(3));
         TextRenderer.DrawText(g, string.Join(" ", document.Intro), Ui.Font(this, 10.5f, FontStyle.Regular, Ui.Sans), new Rectangle(S(24), S(52), Width - S(48), S(42)), Ui.Soft, TextFormatFlags.NoPadding | TextFormatFlags.WordBreak);
         using var pen = new Pen(Ui.Gold); g.DrawLine(pen, S(24), headerBottom - S(15), Width - S(24), headerBottom - S(15));
     }
@@ -298,26 +329,35 @@ sealed class ControlsGuide : ArtControl
     {
         readonly ControlsDocument.Lesson lesson;
         readonly Bitmap? figure;
+        readonly bool diagram;  // a Body/Controllers callout picture this view owns; it carries the instructions itself
         readonly RichTextBox body = new LessonText();
         int headingHeight, figureWidth;
         public bool TallFigure => lesson.Figure != "" && GuideFigures.Height(lesson.Figure) > 232;
+        bool HasFigure => lesson.Figure != "" || diagram;
         public event KeyEventHandler? NavigateText;
-        public LessonView(ControlsDocument.Lesson lesson, Bitmap? figure)
+        public LessonView(ControlsDocument.Lesson lesson, Bitmap? figure, Bitmap? diagram = null)
         {
-            this.lesson = lesson; this.figure = figure;
+            this.lesson = lesson; this.figure = diagram ?? figure; this.diagram = diagram != null;
             SetStyle(ControlStyles.OptimizedDoubleBuffer | ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint, true);
             BackColor = Ui.PaneFill; AccessibleName = lesson.Title; AccessibleDescription = lesson.Alt;
             StyleText(body); body.ScrollBars = RichTextBoxScrollBars.None; body.TabStop = true; body.AccessibleName = lesson.Title + " instructions";
-            Controls.Add(body); Body(body, lesson.Lines);
+            Controls.Add(body); Body(body, lesson.Lines); body.Visible = !this.diagram;
+            if (this.diagram) AccessibleDescription = string.Join(" ", lesson.Lines);
             body.KeyDown += (sender, e) => NavigateText?.Invoke(sender, e);
         }
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing && diagram) figure?.Dispose();
+            base.Dispose(disposing);
+        }
         int S(float v) => Ui.S(this, v);
-        int FigureHeight(int width) => lesson.Figure == "" ? 0 : Math.Max(1,
+        int FigureHeight(int width) => !HasFigure ? 0 : Math.Max(1,
             (int)Math.Round((double)width * (figure?.Height ?? GuideFigures.Height(lesson.Figure)) / (figure?.Width ?? 864)));
         public int MeasureHeight(int width)
         {
-            headingHeight = Math.Max(S(42), TextRenderer.MeasureText(lesson.Title, Ui.Font(this, 18), new Size(Math.Max(1, width), int.MaxValue),
-                TextFormatFlags.WordBreak | TextFormatFlags.NoPadding).Height) + S(12);
+            headingHeight = S(50);
+            // A callout picture is drawn at device size (shrunk only to fit); a tall motion figure takes half the row.
+            if (diagram) { figureWidth = Math.Min(width, figure!.Width); return headingHeight + FigureHeight(figureWidth) + S(8); }
             bool beside = TallFigure && width >= S(680);
             figureWidth = beside ? (width - S(28)) / 2 : width;
             int bodyX = beside ? figureWidth + S(28) : S(6);
@@ -326,18 +366,23 @@ sealed class ControlsGuide : ArtControl
             _ = body.Handle;
             body.SelectionStart = 0; body.SelectionLength = 0; body.ScrollToCaret();
             int height = body.GetPositionFromCharIndex(body.TextLength).Y + Ui.Font(this, 11.5f, FontStyle.Regular, Ui.Sans).Height + S(10);
-            body.Bounds = new Rectangle(bodyX, headingHeight + (beside || lesson.Figure == "" ? 0 : FigureHeight(figureWidth) + S(14)), body.Width, height);
+            body.Bounds = new Rectangle(bodyX, headingHeight + (beside || !HasFigure ? 0 : FigureHeight(figureWidth) + S(14)), body.Width, height);
             return Math.Max(body.Bottom, headingHeight + FigureHeight(figureWidth)) + S(8);
         }
         protected override void OnPaint(PaintEventArgs e)
         {
             base.OnPaint(e); var g = e.Graphics; Ui.Quality(g);
-            TextRenderer.DrawText(g, lesson.Title, Ui.Font(this, 18), new Rectangle(0, 0, Width, headingHeight), Ui.Gold, TextFormatFlags.NoPadding | TextFormatFlags.WordBreak);
-            if (lesson.Figure == "") return;
+            // The game's menu headings: a brass diamond and spaced capitals.
+            var font = Ui.Font(this, 16);
+            Ui.Diamond(g, S(5), S(6) + font.Height / 2f, S(4), Ui.Gold, true);
+            Ui.Spaced(g, lesson.Title.ToUpperInvariant(), font, Ui.Gold, S(18), S(6), S(2.5f));
+            if (!HasFigure) return;
             var r = new Rectangle(0, headingHeight, figureWidth, FigureHeight(figureWidth));
             if (figure != null)
             {
                 g.DrawImage(figure, r);
+                // A plate in a thin brass frame, as on the game's pages.
+                if (!diagram) using (var frame = new Pen(Color.FromArgb(120, 102, 70))) g.DrawRectangle(frame, r.X, r.Y, r.Width - 1, r.Height - 1);
             }
             else TextRenderer.DrawText(g, lesson.Alt, Ui.Font(this, 14, FontStyle.Regular, Ui.Sans), Rectangle.Inflate(r, -S(16), -S(12)), Ui.Text,
                 TextFormatFlags.WordBreak | TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);

@@ -9,7 +9,7 @@ using Microsoft::WRL::ComPtr;
 static float bias_of(ID3D11SamplerState* s) {D3D11_SAMPLER_DESC d{};s->GetDesc(&d);return d.MipLODBias;}
 int main() {
     using d2vr::SamplerLodBias;
-    REQUIRE(SamplerLodBias::bias_for(1.f,-.5f)==0 && SamplerLodBias::bias_for(0.f,-.5f)==0);
+    REQUIRE(SamplerLodBias::bias_for(1.f,-.5f)==-.5f && SamplerLodBias::bias_for(1.2f,-.5f)==-.5f && SamplerLodBias::bias_for(0.f,-.5f)==0); // native AA keeps the extra (v873)
     REQUIRE(std::abs(SamplerLodBias::bias_for(.5f,0)+1)<1e-6f && std::abs(SamplerLodBias::bias_for(.77f,-.5f)-(std::log2(.77f)-.5f))<1e-6f);
     ComPtr<ID3D11Device> device;
     REQUIRE(SUCCEEDED(D3D11CreateDevice(nullptr,D3D_DRIVER_TYPE_WARP,nullptr,0,nullptr,0,D3D11_SDK_VERSION,&device,nullptr,nullptr)));

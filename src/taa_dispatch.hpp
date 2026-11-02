@@ -62,7 +62,9 @@ public:
     inline static std::atomic<DiagnosticDispatch> diagnostic_dispatch{};
     inline static std::atomic<UINT64> marked{},replaced{};
     inline static thread_local int pass_eye=-1;
+    inline static thread_local std::uint64_t pass_display=0; // v790 trace: the display frame of the alternate receipt behind pass_eye (0 = none)
     inline static thread_local std::optional<std::array<float,4>> pass_jitter; // set by NativeTaaHistory around a planned eye pass
+    inline static thread_local std::uintptr_t pass_view=0; // v910: the planned pass's view object (ctx+0x70), 0 outside one
     inline static thread_local std::optional<temporal_eye::NativePass> pass_metadata;
     inline static thread_local bool post_taa=false; // the TAA dispatch of this pass has been recorded
     inline static thread_local ID3D11DeviceContext* pass_context=nullptr; // deferred context seen at that dispatch

@@ -13,7 +13,8 @@ inline bool native_menu_cache_valid(const std::array<float,2>& cursor) {
     for(auto v:cursor) if(!std::isfinite(v) || std::abs(v)>1e6f) return false;
     return true;
 }
-template<class Read> std::optional<NativeMenuState> native_menu_state(Read& read,std::uintptr_t base,std::uintptr_t manager,std::uintptr_t wrapper) {
+// any_batch (v722, world UI only): the wrapper may sit in any batch, not only the newest (the menu that takes input).
+template<class Read> std::optional<NativeMenuState> native_menu_state(Read& read,std::uintptr_t base,std::uintptr_t manager,std::uintptr_t wrapper,bool any_batch=false) {
     using namespace rig;
     const auto root=value<std::uintptr_t>(read,base+0x2274270);
     if(!root || !pointer(*root) || manager!=*root+0x18) return {};
@@ -22,10 +23,12 @@ template<class Read> std::optional<NativeMenuState> native_menu_state(Read& read
        value<std::uintptr_t>(read,*callback+8)!=manager || value<std::uintptr_t>(read,*callback+0x10)!=base+0x32d40) return {};
     const auto batches=list(read,manager+8,1024);
     if(!batches || !batches->packed_count) return {};
-    const auto batch=batches->data+(batches->packed_count-1)*32;
-    const auto files=list(read,batch+0x10,64);
-    if(!files || !files->packed_count || wrapper<files->data ||
-       (wrapper-files->data)%0xde8 || (wrapper-files->data)/0xde8>=files->packed_count) return {};
+    const auto holds=[&](const std::optional<List>& f) {return f && f->packed_count && wrapper>=f->data &&
+        !((wrapper-f->data)%0xde8) && (wrapper-f->data)/0xde8<f->packed_count;};
+    auto batch=batches->data+(batches->packed_count-1)*32;
+    auto files=list(read,batch+0x10,64);
+    for(std::uint32_t b=batches->packed_count-1;any_batch && !holds(files) && b-->0;) {batch=batches->data+b*32;files=list(read,batch+0x10,64);}
+    if(!holds(files)) return {};
     const auto file=value<std::uintptr_t>(read,wrapper),player=file?value<std::uintptr_t>(read,*file+0x1618):std::nullopt;
     const auto dispatch=file?value<std::uintptr_t>(read,*file+0x1608):std::nullopt;
     const auto member=list(read,wrapper+0x878,16);

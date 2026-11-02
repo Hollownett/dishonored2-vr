@@ -265,7 +265,7 @@ private:
 // ContactSystem manager (docs/native-impact-fx.md): Play(game+0x1f8370, event) with matA = the sword's weapon material and
 // matB = the physics material of the hit surface (sphere-cast collector +0x7c). Quieter than a hit: speed and f40 are scaled.
 // Game-thread Stage0 scope ONLY. Flag 0: scraping makes no AI noise.
-struct ImpactFxRequest {std::array<float,3> point{},normal{};float speed{};std::uint16_t material{0xffff};unsigned side{1};}; // side 0: left-hand pistol/crossbow
+struct ImpactFxRequest {std::array<float,3> point{},normal{};float speed{};std::uint16_t material{0xffff};bool gun{};}; // gun: a pistol/crossbow (either hand), else the sword
 class NativeImpactFx {
 public:
     using Read=NativeMelee::Read;
@@ -286,7 +286,7 @@ public:
             read(base+find_decl_rva,find.data(),find.size()) && find==find_decl_code;
     }
     // 0 played, 1 skipped (no material/manager/owner), 2 engine fault.
-    // The left hand holds a pistol or crossbow, not a melee weapon: it sounds like a metal object on the surface.
+    // A pistol or crossbow (in either hand) is not a melee weapon: it sounds like a metal object on the surface.
     static std::optional<std::uintptr_t> gun_material(std::uintptr_t base,Read read) {
         if(!gun_material_) {
             using Find=std::uintptr_t (__fastcall*)(std::uintptr_t,const char*,std::uint8_t,std::uint8_t);
@@ -308,8 +308,8 @@ public:
         const auto rows=value<std::uintptr_t>(read,*table+0x30);if(!rows || !pointer(*rows)) return 1;
         const auto mat_b=value<std::uintptr_t>(read,*rows+0x60+static_cast<std::uintptr_t>(r.material)*0x70);
         const auto wdecl=value<std::uintptr_t>(read,s.weapon+8);
-        const auto mat_a=r.side==0?gun_material(base,read):wdecl && pointer(*wdecl)?value<std::uintptr_t>(read,*wdecl+0x138):std::nullopt;
-        const std::uintptr_t owner=r.side==0?s.player:s.entity;
+        const auto mat_a=r.gun?gun_material(base,read):wdecl && pointer(*wdecl)?value<std::uintptr_t>(read,*wdecl+0x138):std::nullopt;
+        const std::uintptr_t owner=r.gun?s.player:s.entity;
         const auto suppress=value<std::uint8_t>(read,owner+0xd2);
         if(!mat_b || !typed(read,base,*mat_b,material_vtable_rva) || !mat_a || !typed(read,base,*mat_a,material_vtable_rva) || !suppress || (*suppress&0x80)) return 1;
         Event e{};e.owner=owner;e.mat_a=*mat_a;e.mat_b=*mat_b;e.speed=r.speed;e.f40=.6f;

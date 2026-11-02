@@ -17,8 +17,8 @@ assert creation.index('reset_alternate_session();') < creation.index('game_xr->w
 assert 'if(alternate_on()) alternate_select_descriptor(true);' in creation
 assert 'alternate_miss_observation_allowed' in probe
 assert 'if(alternate_on()) alternate_fallback("perf-mono-view: the one engine view was not matched for 180 gameplay frames")' in probe
-copy = xr.index('} else context_->CopyResource(images_[eye].at(index).texture,processed);')
-observer = xr.index('observe_transfer(eye,processed,images_[eye].at(index).texture')
+copy = xr.index('} else context_->CopyResource(images_[eye].at(index).texture,submitted);')
+observer = xr.index('observe_transfer(eye,submitted,images_[eye].at(index).texture')
 overlay = xr.index('ModGpuScope overlay_scope(context_.Get(),ModSpan::eye_overlay)', copy)
 assert copy < observer < overlay, 'Base transfer observer executes after overlays'
 assert '\\"capture_stage\\":\\"base_before_overlays\\"' in probe

@@ -1,4 +1,5 @@
 #pragma once
+#include <atomic>
 #include "game_rig.hpp"
 #include "physical_grab.hpp"
 #include "living_npc_hold.hpp"
@@ -55,6 +56,18 @@ inline bool accept_bounds(const NativeGrabBounds& bounds,Vec3 rendered_origin,Ve
     if(why) *why=BodyReject::ok;
     return true;
 }
+// v788 (user, headset v796: "the free hand must always pick things up, whatever the other holds"): with dual wield the hands hold bottles and
+// glasses physically too, never the game's HoldObject (which locks the sword's EquipChange and takes no second item). The 2026-10-13 failure
+// ("fought the native carry") was the same squeeze also firing the game's Use; the grip-alone decision now gives such a squeeze to the grab only.
+// Off (user, 2026-11-01: the HoldObject pickup works; only its effect on the hands changes): knob build/grab-bottles, with dual wield; a thrown one still gets the game's thrown state (thrown_prop, 4c94e0).
+inline std::atomic<bool> grab_carryables{false};
+// v788: the entity is a native carryable (owns arkCpntPickable_Simple 0x1c5a3b8: a bottle, a glass), the game's HoldObject item.
+template<class Read> bool native_carryable(Read& read,std::uintptr_t base,std::uintptr_t entity) {
+    if(!entity || !rig::pointer(entity)) return false;
+    const auto entries=rig::list(read,entity+0x268,256);if(!entries) return false;
+    for(unsigned i=0;i<entries->packed_count;++i) if(const auto at=rig::value<std::uintptr_t>(read,entries->data+i*8);at && rig::typed(read,base,*at,0x1c5a3b8)) return true;
+    return false;
+}
 // carryable: also native carryables (bottles, glasses), for a hand that pushes them without grabbing (native_hand_contact.hpp).
 // why (G3, plan Task 7): the reason a body was refused (or ok), for the grab_focus status block's thin-prop line. Never changes the result.
 template<class Read> std::optional<NativeRigidBody> native_rigid_body(Read& read,std::uintptr_t base,std::uintptr_t entity,bool carryable=false,BodyReject* why=nullptr) {
@@ -78,7 +91,7 @@ template<class Read> std::optional<NativeRigidBody> native_rigid_body(Read& read
         // Native carryables (bottles, glasses: arkCpntPickable_Simple 0x1c5a3b8) belong to the game's own Use (HoldObject), which
         // the mod puts in the tracked hand (native_held_object.hpp). Grabbed physically they fought the native carry, floated or
         // were lost (sim 2026-10-13: picked, moved 75 frames, ownership lost).
-        if(!carryable && at && typed(read,base,*at,0x1c5a3b8)) {reason=BodyReject::pickable;return {};}
+        if(!carryable && !grab_carryables.load(std::memory_order_relaxed) && at && typed(read,base,*at,0x1c5a3b8)) {reason=BodyReject::pickable;return {};}
         if(at && (typed(read,base,*at,0x1c745c8) || typed(read,base,*at,0x1b64b68))) {
             if(component) return {};component=*at;
         }

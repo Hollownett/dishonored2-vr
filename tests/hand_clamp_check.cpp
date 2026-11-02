@@ -10,7 +10,7 @@ static int contract_breaks=0;
 #include <vector>
 using namespace d2vr;
 // Posting mode for the parametrized tests: 0 = every frame, 1/2 = C14 alternate mode casting on even/odd frames.
-static int g_mode=0;
+static int g_mode=0;static bool g_verbose=true;
 #define CHECK(x) do{if(!(x)){std::printf("FAIL %d (mode %d): %s\n",__LINE__,g_mode,#x);std::exit(1);}}while(0)
 
 namespace {
@@ -722,6 +722,8 @@ void hold_lasts_two_frames() {
 }
 
 // A snap turn swings the target 4.6 cm into a wall in one frame: hold, never draw it inside.
+// v861: a snap turn turns the hand with the body in the same frame (it was held in the world, 25-58 cm behind, for 1-2 frames: the "vanishing"
+// pistol hand). A wall the hand never touched is met as soon as its sweep answers; it ends resting on the wall, never snaps back.
 void snap_turn_holds_out_of_wall() {
     Rig r;r.root=level_frame({0,0,.5},{1,0,0});r.world.chest={0,0,.9};
     const double a=50*3.14159265358979/180;
@@ -731,9 +733,20 @@ void snap_turn_holds_out_of_wall() {
     const double turn=-45*3.14159265358979/180;
     r.root=level_frame({0,0,.5},{std::cos(turn),std::sin(turn),0});
     CHECK(apply(r.root,hand_local).x>1.04);  // the target is inside the wall
-    bool held=false;
-    for(int i=0;i<30;++i) {const auto o=r.step_pose(place());CHECK(o.drawn.position.x<=.96);held|=o.held;}
-    CHECK(held && std::abs(r.last.drawn.position.x-.945)<1e-6 && r.clamp.snapbacks(0)==0);
+    int inside=0;
+    for(int i=0;i<30;++i) {
+        const auto o=r.step_pose(place());
+        if(i==0) CHECK(length(o.drawn.position-apply(r.root,hand_local))<1e-6);   // turned with the body, not left behind
+        if(o.drawn.position.x>.96) {++inside;CHECK(i<=3*static_cast<int>(r.lead()));}   // met within the frames its sweeps need
+    }
+    if(g_verbose) std::printf("snap: frames past the wall %d, rest x %.4f\n",inside,r.last.drawn.position.x);
+    CHECK(std::abs(r.last.drawn.position.x-.945)<1e-6 && r.clamp.snapbacks(0)==0);
+    // no wall: the hand is drawn at its turned target in the turn's own frame
+    Rig f;f.root=level_frame({0,0,.5},{1,0,0});
+    const Vec3 near_local{.45,.2,0};const auto close_by=[&]() {auto t=f.root;t.position=apply(f.root,near_local);return t;};
+    for(int i=0;i<5;++i) f.step_pose(close_by());
+    f.root=level_frame({0,0,.5},{std::cos(turn),std::sin(turn),0});
+    CHECK(length(f.step_pose(close_by()).drawn.position-apply(f.root,near_local))<1e-6);
 }
 
 // A 100 ms hitch while approaching at 2 m/s: the hand moved 0.2 m in one frame.
