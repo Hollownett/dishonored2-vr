@@ -340,7 +340,7 @@ private:
            !admission_valid(source.admission) || !receipt_policy_valid(source)) {++rejects_policy_;return false;}
         exact=source_allowed(source,now);
         if(!exact && !source_in_grace(source,now)) {++rejects_source_;return false;}
-        if(!animation || !first_slot || !frame_current(animation,source,true) ||
+        if(!animation || !first_slot || !frame_current(animation,source,exact) ||
            !palette_slots_current(animation,first_slot)) {++rejects_other_;return false;}
         for(unsigned joint=0;joint<joints.size();++joint)
             if(joint<2?!valid_cuff_affine(joints[joint]):!rig::valid(joints[joint])) {++rejects_other_;return false;}
