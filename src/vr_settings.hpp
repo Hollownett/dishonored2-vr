@@ -212,7 +212,7 @@ public:
     double sharpness() const noexcept {return sharpness_;}
     const wchar_t* temporal_aa_text() const noexcept {
         // FSR 4 and DLSS modes say when the GPU/provider fell back to FSR 3 (upscaler generation 3).
-        if(temporal_aa_==0) return aa_?L"Anti-aliasing: SMAA (2-pass edge AA)":L"Anti-aliasing: Off";
+        if(temporal_aa_==0) return aa_?(requested_>=1.24?L"Anti-aliasing: SMAA + 125% SSAA":L"Anti-aliasing: SMAA (2-pass edge AA)"):L"Anti-aliasing: Off";
         if(temporal_aa_==5) return upscaler_generation_==3?L"Anti-aliasing: FSR 4 Native (unavailable, FSR 3)":L"Anti-aliasing: FSR 4 Native";
         if(temporal_aa_==6) return upscaler_generation_==3?L"Anti-aliasing: FSR 4 Quality (unavailable, FSR 3)":L"Anti-aliasing: FSR 4 Quality (77%)";
         if(temporal_aa_==7) return upscaler_generation_==5?L"Anti-aliasing: DLAA":L"Anti-aliasing: DLAA (unavailable, FSR 3)";
