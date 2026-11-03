@@ -44,7 +44,7 @@ inline std::vector<int> temporal_values(const VrSettings& s) {
 // when that also carries the 125% supersample it is the SMAA + SSAA entry.
 inline int temporal_shown(const VrSettings& s) {
     const auto values=temporal_values(s);
-    const int want=s.temporal_aa()==0 && s.antialiasing()?(std::abs(s.requested()-1.25)<.001?10:9):s.temporal_aa();
+    const int want=s.temporal_aa()==0?(std::abs(s.requested()-1.25)<.001 && !s.antialiasing()?10:(s.antialiasing()?9:0)):s.temporal_aa();
     const auto found=std::find(values.begin(),values.end(),want);
     return found==values.end()?0:static_cast<int>(found-values.begin());
 }
@@ -65,14 +65,14 @@ inline std::vector<NativeOptionsPage::Row> rows(const VrSettings& s) {
         case 6: aa_modes.push_back("FSR 4 Quality (77%)");break;
         case 7: aa_modes.push_back(s.dlss_available()?"DLAA (NVIDIA DLSS)":"DLAA (unavailable, FSR 3)");break;
         case 8: aa_modes.push_back(s.dlss_available()?"DLSS Quality (NVIDIA)":"DLSS Quality (unavailable, FSR 3)");break;
-        case 10: aa_modes.push_back("SMAA + SSAA 125% (clearest)");break;
-        default: aa_modes.push_back("SMAA (2-pass edge anti-aliasing)");break;
+        case 10: aa_modes.push_back("SSAA 125% (MSAA-equivalent)");break;
+        default: aa_modes.push_back("SMAA (edge anti-aliasing)");break;
     }
     std::string aa_help="Smooths shimmering edges. Game TAA is the original; FSR Native uses full resolution; Quality and Balanced upscale. SMAA runs on its own with no temporal AA.";
     if(s.performance_mode_replaces_aa()) aa_help+=" The selected temporal mode is unavailable; spatial edge AA is used when enabled.";
     if(s.dlss_available()) aa_help+=" DLAA and DLSS Quality use NVIDIA DLSS.";
     r[temporal]={K::stepper,"Anti-aliasing",aa_help,0,0,1,temporal_shown(s),2,aa_modes};
-    r[edge_aa]={K::toggle,"Edge anti-aliasing (SMAA)","SMAA Ultra 2-pass (0.03 edge threshold) is the image's AA in the SMAA mode; it catches the low-contrast geometry edges the 1-pass 0.05 preset missed. Skipped in a temporal mode. Native only keeps the game's edge handling.",0,0,1,s.antialiasing()?1:0,0,{}};
+    r[edge_aa]={K::toggle,"Edge anti-aliasing (SMAA)","SMAA Ultra with a 0.03 edge threshold is the image's AA in the SMAA mode; it catches the low-contrast geometry edges the 0.05 preset missed. Skipped in a temporal mode. The SSAA 125% preset is supersampling and does not use SMAA.",0,0,1,s.antialiasing()?1:0,0,{}};
     r[mirror]={K::stepper,"Monitor view","Chooses what the desktop monitor mirrors. It does not change the headset image.",
         0,0,1,static_cast<int>(s.mirror()),static_cast<int>(MirrorMode::both_eyes),{"Right eye","Left eye","Both eyes","Off"}};
     r[sharpening]={K::stepper,"Sharpening","Contrast sharpening after anti-aliasing. Raise it if the image looks soft, lower it if edges crawl.",
@@ -98,9 +98,9 @@ inline VrSettings::Changes apply(VrSettings& s,const std::vector<int>& v) {
     {const auto values=temporal_values(s);
      if(const int x=at(temporal);x>=0 && x<static_cast<int>(values.size()) && x!=temporal_shown(s)) {
          const int mode=values[static_cast<std::size_t>(x)];
-         if(mode==0) {s.set_temporal_aa(0);s.set_antialiasing(false);c.temporal_aa=0;c.antialiasing=false;aa_stepper_forced=true;}
+         if(mode==0) {s.set_temporal_aa(0);s.set_antialiasing(false);if(std::abs(s.requested()-1.25)<.001){s.set_requested(1.0);c.resolution=1.0;}c.temporal_aa=0;c.antialiasing=false;aa_stepper_forced=true;}
          else if(mode==9) {s.set_temporal_aa(0);s.set_antialiasing(true);c.temporal_aa=0;c.antialiasing=true;aa_stepper_forced=true;}
-         else if(mode==10) {s.set_temporal_aa(0);s.set_antialiasing(true);s.set_requested(1.25);c.temporal_aa=0;c.antialiasing=true;c.resolution=1.25;aa_stepper_forced=true;}
+         else if(mode==10) {s.set_temporal_aa(0);s.set_antialiasing(false);s.set_requested(1.25);c.temporal_aa=0;c.antialiasing=false;c.resolution=1.25;aa_stepper_forced=true;}
          else {s.set_temporal_aa(mode);c.temporal_aa=mode;}
      }}
     // Off/SMAA in the mode list already decided Edge AA; the stale toggle value read from the same page must not undo it.

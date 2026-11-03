@@ -28,19 +28,19 @@ pixels per axis and let the XR compositor resolve them down. That is exactly wha
 
 ## Implemented
 
-### SMAA Ultra 2-pass (v972)
+### SMAA Ultra (v974)
 
 Upstream SMAA 1x Ultra is one pass at threshold 0.05, tuned for 1080p. At 2688x2880 the same edge is thinner and 0.05
-missed low-contrast geometry. v972 compiles the Ultra shader at **0.03** and runs the edge/weight/blend sequence
-**twice**; measured changed pixels on a real 2688x2880 eye capture rose from 2.8% to 13.4% with flat surfaces preserved.
-The cost is six full-screen passes per eye.
+missed low-contrast geometry. v974 compiles the Ultra shader at **0.03**, one pass. A two-pass experiment changed 13.4%
+of a real eye capture and visibly softened distant detail; one-pass 0.03 keeps the old ~2.8% footprint with the lower
+threshold. SMAA is a separate mode; it is not combined with the SSAA preset.
 
-### SMAA + SSAA 125% (v973)
+### SSAA 125% (v974)
 
-The in-game AA stepper and the launcher now offer **"SMAA + SSAA 125%"**: temporal 0 + Edge AA on + Resolution 125%.
-This is the one-click MSAA-equivalent for a deferred engine: 1.25x per axis = 56% more samples, compositor downsample,
-then two-pass SMAA. It is not hardware MSAA and does not claim to be; the launcher help says so. A user can still combine
-plain SMAA with a manual 150% Resolution for more clarity at more cost.
+The in-game AA stepper and launcher offer **"SSAA 125%"**: temporal 0, Edge AA off, Resolution 125%. This is the
+one-click MSAA-equivalent for a deferred engine: 1.25x per axis = 56% more samples, compositor downsample, **no post
+filter**. It is not hardware MSAA and does not claim to be. A user can raise Resolution to 150% manually for more
+clarity at more cost. Do not add SMAA on top of SSAA and expect clarity; SMAA only softens it.
 
 ### Why not TAA/DLAA/FSR here
 
@@ -49,7 +49,7 @@ softness. The user asked for a **clear** picture, so the spatial path is SMAA + 
 
 ## Recommendation for the clearest headset image
 
-1. **SMAA + SSAA 125%** (test 150% if the GPU holds frame time).
-2. Sharpening 25% (default) - SMAA does not sharpen.
+1. **SSAA 125% (MSAA-equivalent)** (test 150% if the GPU holds frame time). No SMAA on top.
+2. Sharpening 25% (default) - SSAA does not sharpen.
 3. If performance is tight: plain SMAA at native, or DLAA/FSR 4 Quality for temporal stability (accepting softness).
 4. Hardware MSAA would need a forward renderer; Dishonored 2 has none.

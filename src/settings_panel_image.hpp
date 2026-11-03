@@ -146,7 +146,7 @@ inline std::vector<unsigned char> settings_panel_image(const VrSettings& setting
         aa_row(split(settings.temporal_aa_text(),-1,settings.dlss_available()?
             L"Smooths shimmering edges over time. Game TAA is the original; FSR Native and DLAA use full resolution; Quality and Balanced upscale. DLAA/DLSS Quality use NVIDIA DLSS. Off leaves Edge AA (SMAA) on its own.":
             L"Smooths shimmering edges over time. Game TAA is the original; FSR Native uses full resolution; Quality and Balanced upscale. Off leaves Edge AA (SMAA) on its own."),settings.performance_mode_replaces_aa()),
-        {L"Edge anti-aliasing",settings.antialiasing()?L"SMAA Ultra 2-pass":L"Native only",-1,L"SMAA Ultra 2-pass (0.03 threshold) smooths edges on its own when Anti-aliasing is Off; it catches more low-contrast geometry than the 1-pass 0.05 preset. Skipped in a temporal mode. Native only keeps the game's edge handling."},
+        {L"Edge anti-aliasing",settings.antialiasing()?L"SMAA":L"Native only",-1,L"SMAA Ultra at a 0.03 edge threshold smooths edges on its own when Anti-aliasing is Off. The SSAA 125% preset is supersampling and does not use SMAA. Skipped in a temporal mode."},
         split(settings.mirror_text(),-1,L"Chooses what the desktop monitor mirrors: both eyes side by side, one eye alone, or off (the fastest). It does not change the headset image."),
         split(settings.sharpness_text(),settings.sharpness(),L"Contrast sharpening applied after anti-aliasing. Raise it if the image looks soft, lower it if edges crawl."),
         split(settings.hud_text(),hud_fraction,L"Scales the HUD and on-screen prompts shown in VR. 55% sits in the centre of your view; 100% keeps the original game layout."),

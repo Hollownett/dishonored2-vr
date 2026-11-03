@@ -30,7 +30,7 @@ class EyeAntialiasing {
     Ptr<ID3D11Texture2D> input_,edges_,weights_,output_;
     Ptr<ID3D11RenderTargetView> edges_rtv_,weights_rtv_,output_rtv_;
     UINT width_{},height_{};
-    int passes_{2};
+    int passes_{1};
     float threshold_{.03f};
     static void checked(HRESULT result,const char* label) {
         if(FAILED(result)) throw std::runtime_error(std::string("SMAA: ")+label+" ("+std::to_string(result)+")");
@@ -81,7 +81,7 @@ class EyeAntialiasing {
     }
 public:
     UINT64 eye_passes{};
-    explicit EyeAntialiasing(ID3D11Device* device,float threshold=.03f,int passes=2)
+    explicit EyeAntialiasing(ID3D11Device* device,float threshold=.03f,int passes=1)
         :device_(device),state_(device),passes_(passes),threshold_(threshold) {
         device_->GetImmediateContext(&context_);
         const std::string prefix=R"HLSL(
@@ -189,3 +189,4 @@ float4 BlendPS(BlendV v):SV_TARGET { return SMAANeighborhoodBlendingPS(v.uv,v.of
     }
 };
 } // namespace d2vr
+

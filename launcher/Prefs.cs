@@ -68,8 +68,10 @@ public sealed class Prefs
         if (edited.ScriptedRecenter != baseline.ScriptedRecenter) m.ScriptedRecenter = edited.ScriptedRecenter;
         if (edited.CutsceneMode != baseline.CutsceneMode) m.CutsceneMode = edited.CutsceneMode;
         if (edited.TemporalAa != baseline.TemporalAa || disk.AaChosen == 0) m.TemporalAa = edited.TemporalAa; // v613: with no choice on disk the row shown (the GPU default or an edit) is what gets saved
-        if (edited.TemporalAa == SmaaMode || edited.TemporalAa == SmaaSsaaMode) m.Aa = 1; // SMAA implies Edge AA on
-        if (edited.TemporalAa == SmaaSsaaMode) m.Resolution = 1.25; // the one-click MSAA-equivalent preset
+        // v974: the two spatial presets are UI-only modes; always materialize them into the version-10 fields, even when
+        // the row did not change (a stale disk temporal mode must not survive a save).
+        if (edited.TemporalAa == SmaaMode || edited.TemporalAa == SmaaSsaaMode) { m.TemporalAa = 0; m.Aa = edited.TemporalAa == SmaaMode ? 1 : 0; }
+        if (edited.TemporalAa == SmaaSsaaMode) m.Resolution = 1.25; // SSAA: supersampling, no SMAA
         m.AaChosen = 1; // v613: any launcher save records the AA row it shows as the player's choice (the game's one-time DLAA default must not override it); an in-game change later still wins and the launcher mirrors it
         return m;
     }
@@ -82,7 +84,7 @@ public sealed class Prefs
     /// so a v962 save that selected Off with edge AA opens on the SMAA row.
     /// v973: mode 10 is SMAA plus a 125% supersample, the deferred renderer's MSAA-equivalent clarity.</summary>
     public const int SmaaMode = 9, SmaaSsaaMode = 10;
-    public static int DisplayAa(Prefs p) => p.TemporalAa == 0 && p.Aa != 0 ? (Math.Abs(p.Resolution - 1.25) < .001 ? SmaaSsaaMode : SmaaMode) : p.TemporalAa;
+    public static int DisplayAa(Prefs p) => p.TemporalAa == 0 ? (Math.Abs(p.Resolution - 1.25) < .001 && p.Aa == 0 ? SmaaSsaaMode : p.Aa != 0 ? SmaaMode : 0) : p.TemporalAa;
 
     /// <summary>v613: the default anti-aliasing follows the GPU, mirroring the DLL's first_start_aa (src/aa_first_start.hpp): DLSS offered -> DLAA (7);
     /// FSR 4 runs on this GPU -> FSR 4 native (5); a fresh install -> FSR 3 native (2); a file saved without the AA-chosen flag keeps its mode otherwise.</summary>
@@ -129,10 +131,10 @@ public sealed class Prefs
         var e = Validate(); if (e != "") throw new InvalidDataException(e);
         var inv = CultureInfo.InvariantCulture;
         string F(double d) => d.ToString("R", inv);
-        // SMAA is UI mode 9; mode 10 adds the 125% supersample. The version-10 file stores both as temporal 0 + Edge AA on.
+        // SMAA is UI mode 9 (temporal 0 + Edge AA on); mode 10 is SSAA 125% (temporal 0 + Edge AA off + resolution 1.25).
         var temporal = TemporalAa is SmaaMode or SmaaSsaaMode ? 0 : TemporalAa;
-        var aa = TemporalAa is SmaaMode or SmaaSsaaMode ? 1 : Aa;
-        var resolution = TemporalAa == SmaaSsaaMode ? 1.25 : Resolution;
+        var aa = TemporalAa == SmaaMode ? 1 : TemporalAa == SmaaSsaaMode ? 0 : Aa;
+        var resolution = TemporalAa == SmaaSsaaMode ? 1.25 : (TemporalAa == 0 && Math.Abs(Resolution - 1.25) < .001 ? 1.0 : Resolution);
         var head = new[] { "10", F(resolution), aa.ToString(), Mode.ToString(), F(SnapDeg), F(SmoothDps), Mirror.ToString(), F(Sharpness),
             temporal.ToString(), Hud.ToString(), Hint.ToString() };
         var line = string.Join(' ', head.Concat(Measurements).Concat(new[] { AaChosen.ToString(), Crosshair.ToString(), ScriptedRecenter.ToString(), CutsceneMode })) + "\n";
