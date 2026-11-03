@@ -203,6 +203,7 @@ public:
     }
     // v930: the held weapons' placement is wanted (mod installed, not opted out) / the probe is on / a probe line (any thread).
     static bool weapon_wanted() noexcept {return installed_ && weapon_mode_.load(std::memory_order_relaxed)>=1 && mode_.load(std::memory_order_relaxed)>=1;}
+    static void set_weapon_temporal(bool skip) noexcept {weapon_temporal_skip_.store(skip,std::memory_order_relaxed);} // v970
     static bool weapon_probe() noexcept {return weapon_probe_on_.load(std::memory_order_relaxed);}
     static void probe_line(const char* text) noexcept {
         std::lock_guard<std::mutex> lock(probe_mutex_);
@@ -280,6 +281,12 @@ private:
     // v930: held weapons placed at the draw (weapon_draw_place.hpp). 1 on (default), 0 off (build/no-weapon-draw-place); the probe
     // (build/weapon-draw-probe) logs the model matrices of near draws and the published placements to artifacts/weapon-draw-probe.csv.
     inline static std::atomic<int> weapon_mode_{1};
+    // v970 (user: the held weapon still flashes black under TAA/FSR/DLSS): the draw-time placement rewrites the weapon's
+    // CURRENT MVP rows, but the engine's depth prepass and velocity/reprojection still use the tick-frame rows it wrote
+    // before the hook. Temporal AA/DLSS then samples history and depth at two different positions for the same pixels --
+    // the black, untextured-looking flash. Under a temporal mode the weapon keeps the engine's consistent current rows;
+    // only the general per-eye previous-row correction below runs. build/weapon-draw-place-temporal forces placement on.
+    inline static std::atomic<bool> weapon_temporal_skip_{};
     inline static std::atomic<bool> weapon_probe_on_{};
     struct ViewsEntry {std::atomic<std::uint32_t> ready{};weapon_draw::Views views{};};
     inline static std::array<ViewsEntry,8> views_cache_{};
@@ -512,7 +519,8 @@ private:
         // The current rows must be this view's: a stale shadow or another view's constants never are.
         if(!affine(view.inv[0],cur) && !affine(view.inv[1],cur)) {count(guard_fail);return false;}
         count(motion);std::memcpy(engine,prev,64);
-        if(weapon_mode_.load(std::memory_order_relaxed)>=1 && mode_.load(std::memory_order_relaxed)>=1) { // v931: a held weapon is drawn in the hand of this render
+        if(weapon_mode_.load(std::memory_order_relaxed)>=1 && mode_.load(std::memory_order_relaxed)>=1 &&
+           !weapon_temporal_skip_.load(std::memory_order_relaxed)) { // v931: a held weapon is drawn in the hand of this render
             float placed[16],placed_prev[16];
             static thread_local unsigned weapon_sample{};const bool timed=!(++weapon_sample&15);   // one draw in 16 is timed
             const auto started=timed?__rdtsc():0;
@@ -703,7 +711,7 @@ private:
             <<",\"proxy_shaders\":["<<proxy[0]<<','<<proxy[1]<<','<<proxy[2]<<','<<proxy[3]<<"],\"proxy_fields\":\"created,with_previous,unstored,unhooked_devices\""
             <<",\"presents\":"<<frames<<",\"us_per_present\":"<<us_per_frame;
         for(unsigned i=0;i<ticks;++i) json<<",\""<<names[i]<<"\":"<<stats_[i].load();
-        json<<",\"weapon_us_per_present\":"<<weapon_us<<",\"weapon_mode\":"<<weapon_mode_.load()<<",\"weapon_published\":"<<weapon_draw::Place::published();
+        json<<",\"weapon_us_per_present\":"<<weapon_us<<",\"weapon_mode\":"<<weapon_mode_.load()<<",\"weapon_temporal_skip\":"<<(weapon_temporal_skip_.load()?1:0)<<",\"weapon_published\":"<<weapon_draw::Place::published();
         json<<",\"b1_eye_mode\":"<<(b1_eye_on_.load()?1:0)<<",\"taa_b1\":\""; // v950: eyes' TAA b1; sampled draws' VS b1 "buffer:own L/own R/fallback"
         for(unsigned e=0;e<2;++e) for(const auto& p:taa_b1_[e]) json<<(e?'R':'L')<<std::hex<<reinterpret_cast<std::uintptr_t>(p.load())<<std::dec<<' ';
         json<<"\",\"vs_b1_sampled\":\"";

@@ -65,6 +65,7 @@ class GlyphSwap {
                 if(wheel_open.load(std::memory_order_relaxed))return it->second.wheel?it->second.wheel:it->second.replacement;
                 const auto talk_context=talk_prompt_context.load(std::memory_order_acquire);
                 if(talk_context && talk_context() && it->second.talk)return it->second.talk;
+                if(it->second.talk && GetTickCount64()<=npc_prompt_until.load(std::memory_order_relaxed))return it->second.talk;
                 return it->second.replacement;
             }
         }
@@ -113,6 +114,10 @@ public:
     inline static std::atomic<bool> wheel_open{false}; // Quick Access Wheel held: bind wheel_glyph_label art
     using TalkPromptContext=bool (*)() noexcept;
     inline static std::atomic<TalkPromptContext> talk_prompt_context{};
+    // v970: the prompt's button icon is bound by its own child, often not the prompt child the context callback sees, and
+    // the game can redraw the icon after our swap. A short latch keeps the X glyph at "Trig" for the whole prompt while an
+    // NPC Talk/Pickpocket offer is live; the callback remains for other contexts.
+    inline static std::atomic<std::uint64_t> npc_prompt_until{};
     // Optional observer of every PS view bind (FSR upscale bookkeeping); called before the swap.
     inline static std::atomic<void (*)(ID3D11DeviceContext*,UINT,UINT,ID3D11ShaderResourceView* const*)> observer{};
     inline static std::atomic<std::uint64_t> swaps{},identified{},checked{},deferred{},failed{},completed{};

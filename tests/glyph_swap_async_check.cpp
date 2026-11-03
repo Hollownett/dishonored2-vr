@@ -110,8 +110,13 @@ int main() {
     rgba.assign(static_cast<std::size_t>(x_glyph.width)*x_glyph.height*4,0);paint_quest_glyphs(rgba.data(),x_glyph.width,x_glyph.height,"Grip");
     assert(reinterpret_cast<Mock*>(grip.Get())->resource->blocks==encode_bc7_mode6(rgba.data(),x_glyph.width,x_glyph.height));
     talk_scope=true;const auto talk=GlyphSwapAsyncCheck::lookup(x_view);assert(talk && talk.Get()!=grip.Get());
-    rgba.assign(static_cast<std::size_t>(x_glyph.width)*x_glyph.height*4,0);paint_quest_glyphs(rgba.data(),x_glyph.width,x_glyph.height,"Y");
+    rgba.assign(static_cast<std::size_t>(x_glyph.width)*x_glyph.height*4,0);paint_quest_glyphs(rgba.data(),x_glyph.width,x_glyph.height,"Trig");
     assert(reinterpret_cast<Mock*>(talk.Get())->resource->blocks==encode_bc7_mode6(rgba.data(),x_glyph.width,x_glyph.height));
+    // v970: the short NPC latch keeps the X glyph at Trig even when the per-child context callback is false (the button
+    // icon is often a different child than the prompt, and the game redraws it).
+    GlyphSwap::talk_prompt_context=nullptr;GlyphSwap::npc_prompt_until=GetTickCount64()+600;
+    assert(GlyphSwapAsyncCheck::lookup(x_view).Get()==talk.Get());
+    GlyphSwap::npc_prompt_until=0;GlyphSwap::talk_prompt_context=talk_context;
     GlyphSwap::wheel_open=true;const auto wheel=GlyphSwapAsyncCheck::lookup(x_view);assert(wheel && wheel.Get()!=talk.Get());
     rgba.assign(static_cast<std::size_t>(x_glyph.width)*x_glyph.height*4,0);paint_quest_glyphs(rgba.data(),x_glyph.width,x_glyph.height,"A");
     assert(reinterpret_cast<Mock*>(wheel.Get())->resource->blocks==encode_bc7_mode6(rgba.data(),x_glyph.width,x_glyph.height));

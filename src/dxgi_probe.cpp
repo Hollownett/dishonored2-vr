@@ -8944,7 +8944,7 @@ void native_hud_draw_observer(std::uintptr_t iggy,UINT64 tick) noexcept {
         bool npc_prompt=npc_trigger_enabled && target && native_interaction_aim.npc_offer(static_cast<int>(target.side),tick);
         if(!npc_prompt && npc_trigger_enabled) // the prompt may be a retained/zero-target entry: either hand's raw offer still names an NPC
             for(int h=0;h<2 && !npc_prompt;++h) npc_prompt=static_cast<bool>(native_interaction_aim.npc_offer(h,tick));
-        if(npc_prompt) ++npc_prompt_frames;
+        if(npc_prompt) {++npc_prompt_frames;d2vr::GlyphSwap::npc_prompt_until.store(GetTickCount64()+600,std::memory_order_relaxed);}
         d2vr::NativeHudChildDraw::refresh_prompt(native_art_hud_file.load(),iggy,native_art_pose_epoch.load(),tick,target,
             (talk && talk->identity==target) || npc_prompt,native_interaction_aim.prompt_completions());
     } catch(...) {}
@@ -11590,6 +11590,7 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                     if(r.interact) {npc_trigger_interact[h]=true;++npc_trigger_uses;}
                                     if(r.consume_trigger) npc_trigger_consume[h]=true;
                                 }
+                                if(npc_owns[0] || npc_owns[1]) d2vr::GlyphSwap::npc_prompt_until.store(GetTickCount64()+600,std::memory_order_relaxed);
                                 game_xr->y_hold_blocked=talk_target.has_value() || talk_route.owned || x_wheel.wheel() || input.menu_modifier;
                                 // The hold recognizer sampled before this frame's Talk query: recheck ownership before admitting Start.
                                 if(game_xr->y_hold_blocked.load()) input.pause_request=false;
@@ -12451,6 +12452,10 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                         const bool forced=knob>>bias && std::isfinite(bias) && bias>=-2.f && bias<=0.f;
                         if(temporal_live_mode.load()==1) d2vr::SamplerLodBias::set_bias(forced?bias:mip_bias_enabled?d2vr::SamplerLodBias::bias_for(1.f,mip_bias_extra):0.f);
                         else if(forced && temporal_live_mode.load()>=2) d2vr::SamplerLodBias::set_bias(bias);
+                        // v970: a placed weapon's current MVP disagrees with the depth/velocity the engine wrote before the
+                        // draw hook; FSR/DLSS/DLAA/TAA turn that into a black flash. Keep the engine's consistent rows under
+                        // any temporal mode (build/weapon-draw-place-temporal forces the placement back on for A/B).
+                        d2vr::ObjectMotion::set_weapon_temporal(temporal_live_mode.load()>=1 && !fs::exists(knobs/L"weapon-draw-place-temporal"));
                     }}
                     if(vr_glyphs_enabled && !d2vr::GlyphSwap::enabled.load()) {
                         d2vr::GlyphSwap::talk_prompt_context.store(+[]() noexcept {
@@ -13484,6 +13489,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
         // The menu and persistence keep the player's choice. A runtime fallback
         // must never become the next saved preference (including on XR recovery).
         temporal_live_mode=d2vr::alternate_effective_temporal(alternate_on(),taa_preference,alternate_taa_requested,alternate_upscalers_requested);
+        d2vr::ObjectMotion::set_weapon_temporal(temporal_live_mode.load()>=1 && !fs::exists(root/L"build"/L"weapon-draw-place-temporal")); // v970
         fsr_taa.fsr4_active=d2vr::dlss_mode::fsr4(temporal_live_mode.load());fsr_taa.dlss_quality=d2vr::dlss_mode::is_quality(temporal_live_mode.load());fsr_taa.dlss_active=false; // DLSS engages in the Present loop once the adapter is known
         upscale_fraction=aa_mode_fraction(temporal_live_mode.load());
         perf_governor_enabled=fs::exists(root/L"build"/L"governor");reset_perf_governor(temporal_live_mode.load());
