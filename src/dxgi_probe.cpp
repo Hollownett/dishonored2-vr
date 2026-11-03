@@ -8139,6 +8139,7 @@ void prepare_stereo() {
 static float upscale_written=1;
 static d2vr::RenderScaleTransaction upscale_transaction;
 static std::atomic<UINT64> upscale_commits{},upscale_cache_resets{},upscale_failures{};
+static std::atomic<UINT64> dynamic_scale_forces{}; // v977: temporal-off modes must never run the engine's dynamic resolution
 static std::array<std::atomic<std::uint32_t>,2> upscale_actual_bits{};
 static UINT64 upscale_verify_tick{};
 void apply_upscale(float f,bool final_restore=false) noexcept {
@@ -10460,6 +10461,14 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                             if(now_status-upscale_verify_tick>=100) {
                                 if(d2vr::dlss_mode::is_quality(temporal_live_mode.load())) upscale_fraction=aa_mode_fraction(temporal_live_mode.load()); // NGX optimal render size, once known
                                 apply_upscale(upscale_fraction);upscale_verify_tick=now_status;
+                                // v977: SSAA/SMAA modes must render at the full target. The engine's dynamic resolution
+                                // (rs_enable) may re-enable itself after the scale transaction and silently render below
+                                // the requested size, which makes every resolution/SSAA increase a no-op and the edges
+                                // shimmer as the fraction moves. Force it off in the temporal-off modes and count it.
+                                if(temporal_live_mode.load()==0) {
+                                    if(upscale_fraction!=1) {upscale_fraction=1;apply_upscale(1);}
+                                    if(native_cvars.matches(3,1) && native_cvars.set(3,0)) ++dynamic_scale_forces;
+                                }
                             }
                             {static ULONGLONG wheel_step_tick{};if(gameplay && now_status-wheel_step_tick>=250) { // v778: before the wheel opens (its request is read once, on open)
                                 wheel_step_realtime(dual_wield_enabled && wheel_step_realtime_enabled);wheel_step_tick=now_status;}}
@@ -10846,7 +10855,9 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                      << ",\"resolution_multiplier_requested\":" << requested_resolution_multiplier
                                      << ",\"resolution_multiplier_effective\":" << effective_resolution_multiplier
                                      << ",\"game_render_size\":[" << requested_output_size.width << ',' << requested_output_size.height << ']'
+                                     << ",\"game_source_size\":[" << game_xr->source_eye_sizes[0].width << ',' << game_xr->source_eye_sizes[0].height << ']'
                                      << ",\"xr_eye_size\":[" << xr_swapchain_eye_sizes[0].width << ',' << xr_swapchain_eye_sizes[0].height << ']'
+                                     << ",\"dynamic_scale_forces\":" << dynamic_scale_forces.load()
                                      << ",\"eye_antialiasing_requested\":" << (eye_antialiasing_requested?"true":"false")
                                      << ",\"smaa_eye_passes\":" << xr_antialiased_eyes
                                      << ",\"mirror_mode\":" << static_cast<int>(game_xr->mirror_mode()) << ",\"mirrored_frames\":" << game_xr->mirrored_frames

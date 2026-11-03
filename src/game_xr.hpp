@@ -1694,6 +1694,7 @@ public:
     unsigned grip_velocity_hands{}; // Missing velocity is not a stationary hand.
     std::array<XrVector3f,2> grip_velocities{}; // Same, as vectors in the local space.
     std::array<XrExtent2Di,2> recommended_eye_sizes{},swapchain_eye_sizes{};
+    std::array<EyeSize,2> source_eye_sizes{}; // v977: actual game eye size this Present (may exceed the XR eye under internal SSAA)
     std::array<DXGI_FORMAT,2> eye_texture_formats{};
     EyeSize recommended_output_size() const {
         std::array<EyeSize,2> sizes{};
@@ -2377,7 +2378,7 @@ public:
                 if(ready==XR_TIMEOUT_EXPIRED) throw std::runtime_error("Game eye wait timed out");}
                 XrSwapchainImageReleaseInfo release{};release.type=XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO;
                 try {
-                D3D11_TEXTURE2D_DESC desc{};sources[eye]->GetDesc(&desc);
+                D3D11_TEXTURE2D_DESC desc{};sources[eye]->GetDesc(&desc);source_eye_sizes[eye]={desc.Width,desc.Height};
                 ID3D11Texture2D* processed=sources[eye];
                 if(!eye_texture_matches(desc,width_,height_,format_)) {
                     // v976: internal supersampling. The game rendered larger than the XR maxImageRect clamped eye;
