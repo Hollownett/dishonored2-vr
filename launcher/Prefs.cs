@@ -70,7 +70,7 @@ public sealed class Prefs
         if (edited.TemporalAa != baseline.TemporalAa || disk.AaChosen == 0) m.TemporalAa = edited.TemporalAa; // v613: with no choice on disk the row shown (the GPU default or an edit) is what gets saved
         // v974: the two spatial presets are UI-only modes; always materialize them into the version-10 fields, even when
         // the row did not change (a stale disk temporal mode must not survive a save).
-        if (edited.TemporalAa is SmaaMode or SmaaSsaaMode or SmaaSsaa150Mode) { m.TemporalAa = 0; m.Aa = edited.TemporalAa == SmaaMode ? 1 : 0; }
+        if (edited.TemporalAa is SmaaMode or SmaaSsaaMode or SmaaSsaa150Mode) { m.TemporalAa = 0; m.Aa = edited.TemporalAa is SmaaMode or SmaaSsaa150Mode ? 1 : 0; }
         if (edited.TemporalAa == SmaaSsaaMode) m.Resolution = 1.25; // SSAA: supersampling, no SMAA
         if (edited.TemporalAa == SmaaSsaa150Mode) m.Resolution = 1.5;
         m.AaChosen = 1; // v613: any launcher save records the AA row it shows as the player's choice (the game's one-time DLAA default must not override it); an in-game change later still wins and the launcher mirrors it
@@ -86,7 +86,7 @@ public sealed class Prefs
     /// v974: mode 10 is SSAA 125%, mode 11 SSAA 150%; both are temporal 0 + Edge AA off + the resolution.</summary>
     public const int SmaaMode = 9, SmaaSsaaMode = 10, SmaaSsaa150Mode = 11;
     public static int DisplayAa(Prefs p) => p.TemporalAa == 0
-        ? (p.Aa != 0 ? SmaaMode : Math.Abs(p.Resolution - 1.5) < .001 ? SmaaSsaa150Mode : Math.Abs(p.Resolution - 1.25) < .001 ? SmaaSsaaMode : 0)
+        ? (Math.Abs(p.Resolution - 1.5) < .001 ? SmaaSsaa150Mode : p.Aa != 0 ? SmaaMode : Math.Abs(p.Resolution - 1.25) < .001 ? SmaaSsaaMode : 0)
         : p.TemporalAa;
 
     /// <summary>v613: the default anti-aliasing follows the GPU, mirroring the DLL's first_start_aa (src/aa_first_start.hpp): DLSS offered -> DLAA (7);
@@ -136,7 +136,7 @@ public sealed class Prefs
         string F(double d) => d.ToString("R", inv);
         // SMAA is UI mode 9 (temporal 0 + Edge AA on); mode 10 is SSAA 125%, mode 11 SSAA 150% (temporal 0 + Edge AA off + resolution).
         var temporal = TemporalAa is SmaaMode or SmaaSsaaMode or SmaaSsaa150Mode ? 0 : TemporalAa;
-        var aa = TemporalAa == SmaaMode ? 1 : TemporalAa is SmaaSsaaMode or SmaaSsaa150Mode ? 0 : Aa;
+        var aa = TemporalAa is SmaaMode or SmaaSsaa150Mode ? 1 : TemporalAa == SmaaSsaaMode ? 0 : Aa;
         var resolution = TemporalAa == SmaaSsaaMode ? 1.25 : TemporalAa == SmaaSsaa150Mode ? 1.5 : (TemporalAa == 0 && (Math.Abs(Resolution - 1.25) < .001 || Math.Abs(Resolution - 1.5) < .001) ? 1.0 : Resolution);
         var head = new[] { "10", F(resolution), aa.ToString(), Mode.ToString(), F(SnapDeg), F(SmoothDps), Mirror.ToString(), F(Sharpness),
             temporal.ToString(), Hud.ToString(), Hint.ToString() };
