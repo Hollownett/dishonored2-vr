@@ -612,7 +612,7 @@ static d2vr::CombatDecision combat_decision{};
 static d2vr::AttackIntent attack_intent;static d2vr::AttackPress attack_press;static d2vr::AttackHonour attack_honour;static d2vr::SwordCharge sword_charge;
 static std::optional<d2vr::OwnedSwordContact> contact_attack_target;
 static bool legacy_sword_contact=false;static bool attack_intent_owns=false,attack_intent_rt=false,attack_intent_block_off=false,attack_intent_ran=false;
-static std::atomic<UINT64> attack_intent_pad_frames{};static std::atomic<UINT64> attack_intent_suppressed_far{};static std::atomic<bool> attack_intent_honour_read{};static std::atomic<UINT64> sword_power_attacks{};
+static std::atomic<UINT64> attack_intent_pad_frames{};static std::atomic<UINT64> attack_intent_suppressed_far{};static std::atomic<bool> attack_intent_honour_read{};static std::atomic<UINT64> sword_power_attacks{},sword_charge_starts{};
 static std::mutex combat_policy_mutex;
 static d2vr::CombatDecision combat_policy_observation{};
 static d2vr::CombatTargetMemory combat_target_memory;
@@ -3654,7 +3654,7 @@ static std::string combat_policy_status_json() {
         <<",\"honoured\":"<<attack_honour.honoured()<<",\"not_honoured\":"<<attack_honour.not_honoured()
         <<",\"pad_frames\":"<<attack_intent_pad_frames.load()<<",\"dropped\":"<<attack_press.dropped()<<",\"suppressed_far_takedown\":"<<attack_intent_suppressed_far.load()
         <<",\"legacy\":"<<(legacy_sword_contact?"true":"false")<<",\"honour_read\":"<<(attack_intent_honour_read.load()?"true":"false")
-        <<",\"power_attacks\":"<<sword_power_attacks.load()<<"}"
+        <<",\"power_attacks\":"<<sword_power_attacks.load()<<",\"charge_starts\":"<<sword_charge_starts.load()<<"}"
         <<",\"sword_contact\":"<<d2vr::NativeInteractionAim::sword_contact_status_json();
     return output.str();
 }
@@ -11991,7 +11991,13 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                         cf.pos=f.pos[mh];cf.aim=[&]{d2vr::WorldTrackedPose aim_pose{};aim_pose.basis[0]={f.aim[mh].x,f.aim[mh].y,f.aim[mh].z};
                                             const auto axis=d2vr::sword_blade_axis(aim_pose,!cf.shadow_walk && sword_reversed.load());return d2vr::GV3{static_cast<float>(axis.x),static_cast<float>(axis.y),static_cast<float>(axis.z)};}(); // reverse grip: blade behind the fist
                                         cf.vel=f.vel[mh];cf.grip=0;cf.trigger=choke_route.rb?0.f:raw_trigger(mh);cf.grab=std::max(raw.left_grip,raw.right_grip);
-                                        cf.explicit_block=logic==2 && !interaction.consume_trigger[mh] && !(physical_grab_requested && native_grab.holding(mh)) && raw_trigger(mh)>.55f && sword_grip.held();
+                                        // v980 (user: "when I hold grip and trigger with a sword in hand it should charge a power attack"): the
+                                        // sword hand's trigger is the power charge (the block below), never the native Block. v963's charge
+                                        // could not start at all: this same press set explicit_block, and that closed the attack gate the
+                                        // charge runs on, on its very first held frame. Blocking stays the sword-in-front pose (combat block)
+                                        // and the right grip without a prop; the trigger is not a block while the hand holds the sword.
+                                        const bool trigger_charge=d2vr::sword_trigger_owns_press(sword_grip.held(),raw_trigger(mh)>=d2vr::SwordCharge::down_level,interaction.consume_trigger[mh]);
+                                        cf.explicit_block=!trigger_charge && logic==2 && !interaction.consume_trigger[mh] && !(physical_grab_requested && native_grab.holding(mh)) && raw_trigger(mh)>.55f && sword_grip.held();
                                         cf.tracked=f.tracked[mh];cf.allowed=f.allowed && !input.lean_suspended && !choke_route.rb && !authored_camera;
                                         // Swings attack with the sword in hand, and throw/drop a carried body; sheathed and empty, a fast arm does nothing.
                                         cf.equipped=(sword_out || carrying) && f.sword_equipped && (sword_combat_owned || !grip_guard.swing_blocked(mh,f.now_ms));
@@ -12039,7 +12045,11 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                             // v963 (user: "hold the trigger with the sword to charge a power attack"): the sword hand's
                                             // held trigger charges a heavy strike. A real swing cancels it; the release past 0.6 fires the
                                             // game's heavy attack (a longer AttackPress hold) and the next contact hits for power damage.
-                                            {const auto charge=sword_charge.update(raw_trigger(mh),drawn_now,sword_grip.held(),live,game_xr->grip_speeds[mh],f.now_ms);
+                                            // v980 (user, headset: the trigger did nothing): the charge now owns that press (the block above),
+                                            // so `live` is true while it is held. A trigger claimed by a Talk/Pickpocket Use is never a charge.
+                                            {const auto charge=sword_charge.update(raw_trigger(mh),drawn_now,sword_grip.held(),live && !interaction.consume_trigger[mh],
+                                                                                    game_xr->grip_speeds[mh],f.now_ms);
+                                             if(charge.started) ++sword_charge_starts;
                                              if(charge.tick) game_xr->pulse(mh,.18f,.03f);
                                              if(charge.fired && attack_press.start(f.now_ms,polls,340)) {
                                                  d2vr::NativeInteractionAim::power_attack_until_.store(f.now_ms+1200,std::memory_order_relaxed);
@@ -13569,7 +13579,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
         d2vr::NativeInteractionAim::legacy_contact_=legacy_sword_contact;
         takedown_anchor_frames=0;takedown_anchor_object_conflicts=0;
         prompt_target_anchor=true; // captured target ownership is required; legacy knob cannot erase identity evidence
-        d2vr::NativeInteractionAim::intent_contact_tick_=0;d2vr::NativeInteractionAim::intent_episode_=d2vr::SlowRejectLatch{};attack_intent=d2vr::AttackIntent{};attack_press=d2vr::AttackPress{};attack_honour=d2vr::AttackHonour{};sword_charge.reset();sword_power_attacks=0;d2vr::NativeInteractionAim::power_attack_until_=0;npc_trigger_uses=0;npc_prompt_frames=0;attack_intent_owns=attack_intent_rt=false;attack_intent_pad_frames=0;attack_intent_honour_read=false;
+        d2vr::NativeInteractionAim::intent_contact_tick_=0;d2vr::NativeInteractionAim::intent_episode_=d2vr::SlowRejectLatch{};attack_intent=d2vr::AttackIntent{};attack_press=d2vr::AttackPress{};attack_honour=d2vr::AttackHonour{};sword_charge.reset();sword_power_attacks=0;sword_charge_starts=0;d2vr::NativeInteractionAim::power_attack_until_=0;npc_trigger_uses=0;npc_prompt_frames=0;attack_intent_owns=attack_intent_rt=false;attack_intent_pad_frames=0;attack_intent_honour_read=false;
         assassination_receipt_requested=head_requested && fs::exists(root/L"build"/L"assassination-receipts");
         if(assassination_receipt_requested &&
            !d2vr::NativeAssassinationReceipt::process_owner().start(image_base,&read_self,output))

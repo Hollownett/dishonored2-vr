@@ -106,8 +106,8 @@ The sword and your hands need no buttons: attack, block, grab and throw with rea
 | Left grip at your **left hip** | Draw the pistol or crossbow; release to holster |
 | Turn the **back of either wrist** to your face | Read health and mana |
 | **Swing** the sword | Attack. From behind an unaware guard it is a silent takedown |
-| **Hold the trigger with the sword** | Charge a power strike; release to swing it |
-| Sword held **in front of you** | Block (no button; a swing ends it) |
+| **Grip + trigger** with the sword in hand, held still | Charge a power strike (pulses rise in the hand); release to swing it hard. A real swing cancels the charge |
+| Sword held **in front of you** | Block (the trigger is the charge, not a block) |
 | **Release** the right grip mid-swing | Throw the sword. Grip over your shoulder calls it back |
 | **Palm on a guard** + grip, then pull hard | Hold him, then throw him down |
 | Grip an unaware guard's **neck from behind** | Choke him out |

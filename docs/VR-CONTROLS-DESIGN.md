@@ -220,7 +220,7 @@ Quest Touch controllers. Grip is the side button under your middle finger; trigg
 - **Right grip over your right shoulder** — draw; keep squeezing to hold.
 - **Fist up or down as you draw** — normal or reverse grip.
 - **Swing or stab** — hit where the blade touches.
-- **Sword in front, any angle** — block. Right trigger blocks too.
+- **Sword in front, any angle** — block. The right trigger is the power-strike charge, not a block.
 - **Release over your right shoulder** — sheathe. Release elsewhere to drop.
 - **Blade on a corpse** — cut off limbs and the head.
 

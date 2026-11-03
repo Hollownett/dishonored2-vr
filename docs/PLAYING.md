@@ -50,8 +50,8 @@ headset listening validation is still required. See [audio evidence and checks](
 | Sit or crouch down in real life | The character crouches; stand up to stand. The view keeps your real head height |
 | Grip alone (about 45% squeeze, v620 candidate) | Use offered doors, keyholes, ammo, loot and levers, or the offered body carry; it fires about 55 ms sooner when the trigger finger stays off the trigger and the game is asked for the target while you squeeze. Holding the grip at a door keeps Use down, which is the keyhole peek. In the v548 test candidate, an actual native choke hint gives the right grip a nonlethal choke hold instead; being behind an NPC alone does not |
 | Trigger on an offered Talk or Pickpocket prompt | Talk to that exact NPC, open the shop, or take from the pocket with that hand. The grip no longer does either (feature "Talk and pickpocket on the trigger"). The prompt shows the trigger; Y still talks |
-| Hold the trigger with the sword drawn, still | Charge a power strike (three pulses rise in the hand); release to swing it hard. A real swing cancels the charge |
-| Full fist (grip + trigger, grip about 45%) | Grab physically: a body by a limb, a bottle, a glass, an ashtray, any loose prop. The fingers wrap whatever the hand holds. Once held, the grip alone keeps it. An empty fist never presses the game's right shoulder: it does not draw the sword. A fist still blocks with a held sword and still chokes when the game offers it |
+| Hold the trigger with the sword drawn (grip + trigger, hand still) | Charge a power strike (three pulses rise in the hand); release to swing it hard. A real swing cancels the charge |
+| Full fist (grip + trigger, grip about 45%) | Grab physically: a body by a limb, a bottle, a glass, an ashtray, any loose prop. The fingers wrap whatever the hand holds. Once held, the grip alone keeps it. An empty fist never presses the game's right shoulder: it does not draw the sword. A fist around the sword's grip is the power strike charge (below); a fist still chokes when the game offers it |
 | Right grip over your right shoulder | Draw the sword. Reach over the right shoulder and squeeze: a fist at your side does not draw it. It stays in your hand only while you keep squeezing (see *Weapons in your hands*) |
 | Left grip at your left hip | Draw the pistol or crossbow. It stays in your hand only while you keep squeezing |
 | Y on an offered Talk prompt | Talk to that exact NPC or open the shop; the prompt shows Y. The hand's trigger also talks; the grip no longer commits that Talk offer |
@@ -60,7 +60,7 @@ headset listening validation is still required. See [audio evidence and checks](
 | A fast right-hand swing with the sword drawn (3 m/s or more, your own walking and head motion not counted) | Presses the game's own attack. The game decides what it is: on a guard who has not noticed you, seen from behind, it is the silent assassination; on one who has noticed you, an ordinary attack |
 | A straight stab while crouched (starts at 1.5 m/s, at least 20 cm of travel, a straight line along the hand's pointing direction) | The same game attack, so a crouched stab from behind on an unaware guard is the assassination. Standing, only a real swing attacks |
 | Sword held in front of your chest or face, any angle | Block. Small parry moves keep blocking; only a real swing attacks. A power or shot from the left hand briefly lowers the block, then it comes back |
-| Right trigger with the sword in hand | Block too |
+| Right trigger with the sword in hand | The power strike charge (above), never a block. Hold the blade in front of you to block; the trigger is not the block button |
 | (Only with the knob `legacy-sword-contact`.) Behind or beside an unaware enemy: a calm, deliberate stab or slice (about walking-pace hand speed, at least 0.6 m/s; leg, torso or head, no aiming at the neck needed) | Silent lethal takedown: the contact itself is the hit and replaces the alerting sword hit. A thrust at a guard the game offers a takedown on works too. Facing a guard, or one who already noticed you, is an ordinary hit. Ordinary hits still need a real swing (1.5 m/s); a calm stroke on a guard who has noticed you does nothing. A resting or drifting hand never kills. `build\stealth-speed` sets the calm threshold (default 0.6 m/s, range 0.3 to 1.5). Set the knob `no-stealth-contact` to turn the contact takedown off. This is separate from the nonlethal grip hold and physical full-fist grab |
 | Left trigger | Use the power or weapon in your left hand, aimed by your left hand. A gripped gun fires; a full fist never casts |
 | Hold right grip while the game offers its Choke hint (v548 test candidate) | Start a nonlethal choke, then keep holding to finish. No artificial gaze wait or neck-pose requirement. Body carry and full-fist physical grab stay separate |
@@ -168,12 +168,12 @@ Weapons are held like real objects: a weapon stays in your hand only while you s
   or when you are 12 m away.
 - **How you hold the hilt decides the grip.** At the shoulder, a fist pointing up draws the blade above the fist (normal grip),
   a fist pointing down draws it below the fist (reverse grip). Picking a sword up from the floor, a hand pointing along the
-  blade gives a normal grip, against the blade a reverse grip. There is no button for it. A fist never draws the sword: reach over the right shoulder and squeeze to draw. A fist still blocks with a held sword and still chokes when the game offers it.
+  blade gives a normal grip, against the blade a reverse grip. There is no button for it. A fist never draws the sword: reach over the right shoulder and squeeze to draw. A fist around the held sword's grip charges the power strike; the grip still chokes when the game offers it.
 - **Pistol and crossbow (on your left hip).** The Quick Access Wheel puts the gun in your left hand; it stays there until you
   grip it. From then on it is held while you squeeze the left grip, and goes back to the hip when you let go. Squeeze the left
   grip at your left hip to draw it again. The trigger fires only a gun in the hand: an empty left hand's trigger does not pull
   the gun out of the holster.
-- A sword you are not squeezing never attacks or blocks; the right trigger blocks only with the sword gripped.
+- A sword you are not squeezing never attacks or blocks; with the sword gripped, the trigger charges the power strike (it is not a block: hold the blade in front of you to block).
 - If the game takes the sword away (carrying a body, climbing, holding a bottle) and gives it back while you are not
   squeezing, it goes back on your back.
 - B held still sheathes everything the game's own way.

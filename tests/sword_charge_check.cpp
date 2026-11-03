@@ -1,5 +1,8 @@
 // v963: a charging sword strike on a held trigger, cancelled by a swing, a sheathe or a menu, fired on release past the
 // threshold. Pure, no game access.
+// v980: the sword hand's grip + trigger is that charge, and the same press is no longer the attack gate's explicit block
+// (that block made the v963 charge unreachable).
+#include "../src/attack_intent.hpp"
 #include "../src/sword_charge.hpp"
 #include <cassert>
 #include <cstdio>
@@ -40,6 +43,26 @@ int main() {
         o=s.update(0,true,true,true,0,100);assert(!o.charging);
         o=s.update(1,true,true,true,0,100);assert(o.charging);
         o=s.update(1,true,true,false,0,100);assert(!o.charging && !o.ready);
+    }
+    {   // v980: the press that starts a charge is reported once (the caller counts it for the headset log)
+        SwordCharge s;now=0;
+        auto o=s.update(1,true,true,true,0,now);assert(o.started && o.charging);
+        now+=16;o=s.update(1,true,true,true,0,now);assert(!o.started && o.charging);
+    }
+    {   // v980: the sword hand's grip + trigger owns the press; a consumed (Talk/Pickpocket) trigger does not
+        assert(d2vr::sword_trigger_owns_press(true,true,false));
+        assert(!d2vr::sword_trigger_owns_press(false,true,false));   // no sword in the hand: the trigger is not the charge
+        assert(!d2vr::sword_trigger_owns_press(true,false,false));   // trigger up: nothing to own
+        assert(!d2vr::sword_trigger_owns_press(true,true,true));     // the press is already a native Use
+        // The v963 failure, pinned: while the sword hand's trigger was also its explicit block the attack gate was closed,
+        // and the charge runs on that gate, so it could never charge. v980 clears that term for the charge's press.
+        d2vr::AttackGate gate{};
+        gate.owns=gate.allowed=gate.tracked=true;
+        assert(d2vr::attack_allowed(gate));
+        gate.explicit_block=true;
+        assert(!d2vr::attack_allowed(gate));
+        gate.explicit_block=false;   // the charge owns the trigger press
+        assert(d2vr::attack_allowed(gate));
     }
     std::puts("sword_charge_check ok");
     return 0;
