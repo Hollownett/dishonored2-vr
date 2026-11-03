@@ -2371,7 +2371,9 @@ public:
                 if(!eye_texture_matches(desc,width_,height_,format_))
                     throw std::runtime_error("Game eye source does not match the current XR swapchain");
                 // Independent per-eye processing; menus retain the exact native image.
-                ID3D11Texture2D* processed=nullptr;
+                // v965: start from the eye source. v963 moved sharpening before SMAA but left this null, so CAS was
+                // handed a null input every frame ("CAS input is missing"): no layer was submitted and VR never started.
+                ID3D11Texture2D* processed=sources[eye];
                 auto processing=alt_stale?alt_processing_[eye]:EyeTransferProcessing{true,false,false,false,settings_.effective_temporal_aa(),0};
                 processing.kept=alt_stale;
                 {ModGpuScope aa_scope(context_.Get(),ModSpan::aa_sharpen); // task 3b
