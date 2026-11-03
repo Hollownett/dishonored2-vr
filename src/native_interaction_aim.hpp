@@ -297,6 +297,7 @@ class NativeInteractionAim {
     std::array<int,2> target_generation_{-1,-1};
     std::array<std::uintptr_t,2> target_owner_{};std::array<unsigned,2> target_spawn_{};
     std::array<std::optional<NativeTalkOfferReceipt>,2> talk_offers_{};
+    std::array<std::optional<NativeTalkOfferReceipt>,2> pickpocket_offers_{};   // v963: declaration+0xc0
     std::array<std::optional<NativeTalkOfferReceipt>,2> loot_offers_{};
     // v675: the same Loot offer as the sensor stores it, without the full Talk-receipt identity chain. A dead body's Loot is
     // the selector's PRIMARY action at declaration+0x98; reading the sensor's primary pointer in each stage-0 cycle is the
@@ -678,7 +679,7 @@ class NativeInteractionAim {
     }
 
     void invalidate_selection() noexcept {
-        contact_anchor_={};volume_tickets_={};target_object_={};target_owner_={};target_spawn_={};talk_offers_={};loot_offers_={};target_sensor_={};loot_raw_={};loot_receipt_={};loot_primary_offset_={-1,-1};loot_secondary_offset_={-1,-1};last_loot_primary_={-1,-1};last_loot_secondary_={-1,-1};last_loot_raw_={};last_loot_receipt_={};last_loot_component_rva_={};target_tick_={};target_generation_={-1,-1};point_={};point_tick_={};queued_revision_={};ready_revision_={};native_object_=0;native_tick_=0;
+        contact_anchor_={};volume_tickets_={};target_object_={};target_owner_={};target_spawn_={};talk_offers_={};pickpocket_offers_={};loot_offers_={};target_sensor_={};loot_raw_={};loot_receipt_={};loot_primary_offset_={-1,-1};loot_secondary_offset_={-1,-1};last_loot_primary_={-1,-1};last_loot_secondary_={-1,-1};last_loot_raw_={};last_loot_receipt_={};last_loot_component_rva_={};target_tick_={};target_generation_={-1,-1};point_={};point_tick_={};queued_revision_={};ready_revision_={};native_object_=0;native_tick_=0;
     }
     void cancel_passive_preview_locked() noexcept {
         passive_preview_.reset();
@@ -972,6 +973,9 @@ class NativeInteractionAim {
                     if(!final_hand || final_hand->epoch!=contact.pose_epoch || final_hand->epoch!=sword_pose_epoch_.load(std::memory_order_acquire) ||
                        final_now<contact.hit.tick || final_now-contact.hit.tick>100 || !melee_batch_current(melee_revision)) {++sword_contact_rejected_;continue;}
                     auto strike=contact.equipment.sword;bool stealth_kill=false;
+                    // v963: a charged sword strike released within the last moment hits for the game's own heavy amount (the
+                    // ordinary player_sword decl is 10; 25 is a deliberate heavy hit, never a stealth kill's 1000).
+                    if(power_attack_until_.load(std::memory_order_relaxed)>now) strike.amount=std::max(strike.amount,25.f);
                     // Rear contact is lethal independently of AI memory; only an exact current native offer may take the animation first.
                     // default_stealth_contact_begin
                     if(!legacy_contact_.load(std::memory_order_relaxed) && stealth_enabled_.load(std::memory_order_relaxed)) {
@@ -1036,7 +1040,8 @@ class NativeInteractionAim {
                     if(raw_act==StealthAct::hit && act==StealthAct::drop) ++stealth_slow_aware_drops_;
                     else if(act==StealthAct::drop) ++stealth_counts_[native?1:4];
                     else if(act==StealthAct::hit || act==StealthAct::kill) {
-                        auto strike=sword;if(act==StealthAct::kill) {if(c.lethal_contact)strike.amount=1000.f;else strike.unaware_amount=1000.f;}
+                        auto strike=sword;if(power_attack_until_.load(std::memory_order_relaxed)>now) strike.amount=std::max(strike.amount,25.f);
+                        if(act==StealthAct::kill) {if(c.lethal_contact)strike.amount=1000.f;else strike.unaware_amount=1000.f;}
                         NativeMelee::DamageResultObservation observation{};
                         const auto outcome=NativeMelee::apply(self->base_,self->read_,strike,hit,&observation);
                         if(act==StealthAct::kill)++stealth_counts_[outcome==0 && NativeMelee::corpse(self->base_,self->read_,hit.victim)?2:4];else ++stealth_counts_[3];
@@ -1244,6 +1249,7 @@ public:
     inline static SwordContactPublication sword_hand_;
     inline static std::atomic<std::uint64_t> sword_pose_epoch_{},sword_contact_rejected_{},sword_contact_enqueued_{};
     inline static std::atomic<std::uint64_t> sword_damage_results_{},sword_contact_invoked_{},sword_capture_rejected_{},sword_queue_full_{},sword_nonlethal_rejected_{},sword_epoch_rejected_{};
+    inline static std::atomic<std::uint64_t> power_attack_until_{};   // v963: a released sword charge; contacts before it hit heavy
     struct SwordContactObservation {
         std::uint64_t contact_tick{},consumer_tick{},pose_epoch{};
         std::uint32_t victim_spawn{},player_spawn{},sword_spawn{};
@@ -1449,6 +1455,8 @@ private:
             if(loot_cycle_.open) loot_cycle_.selected=object?owner:0; // G1 trace: the native-selected owner (thread-local, read-only)
             const auto talk_offer=object && spawn && generation?native_talk_offer(read_,base_,scope.sensor,scope.camera.player,
                 object,static_cast<std::uint32_t>(*generation),owner,*spawn):std::nullopt;
+            const auto pickpocket_offer=object && spawn && generation?native_talk_offer(read_,base_,scope.sensor,scope.camera.player,
+                object,static_cast<std::uint32_t>(*generation),owner,*spawn,native_talk_offer_detail::pickpocket_offset):std::nullopt;
             const auto loot_offer=object && spawn && generation?native_talk_offer(read_,base_,scope.sensor,scope.camera.player,
                 object,static_cast<std::uint32_t>(*generation),owner,*spawn,native_talk_offer_detail::loot_offset):std::nullopt;
             // v675 raw action offers: the sensor stores the selector's two descriptors directly (primary +0xa8, secondary
@@ -1484,6 +1492,7 @@ private:
                     last_loot_component_rva_[scope.side]=vtable&&*vtable>=base_?*vtable-base_:0;
                 }
                 talk_offers_[scope.side]=talk_offer;
+                pickpocket_offers_[scope.side]=pickpocket_offer;
                 loot_offers_[scope.side]=loot_offer;
                 contact_anchor_[scope.side]={};
                 if(object && spawn && scope.stage==0 && !scope.contacts_overflow &&
@@ -2328,6 +2337,18 @@ public:
         const NativeInteractionTargetIdentity identity{offer->component,target_generation_[side],static_cast<unsigned>(side),hands_[side].epoch,1};
         return QualifiedTarget{identity,offer->owner,offer->spawn,hands_[side].tick,target_tick_[side],{}};
     }
+    // v963: the game's own Pickpocket action (declaration+0xc0) for this hand's live target, validated exactly like Talk. It is a
+    // primary offer while the hand points at a pocket; the feature routes it to the hand's trigger instead of the grip.
+    std::optional<QualifiedTarget> pickpocket_target(int side,std::uint64_t now) {
+        if(side<0 || side>1)return {};
+        std::lock_guard<std::mutex> lock(mutex_);
+        const auto& offer=pickpocket_offers_[side];
+        if(!live_target(static_cast<unsigned>(side),now) || !offer || offer->component!=target_object_[side] ||
+           offer->generation!=static_cast<std::uint32_t>(target_generation_[side]) || offer->owner!=target_owner_[side] ||
+           offer->spawn!=target_spawn_[side] || !native_talk_offer_current(read_,base_,*offer,native_talk_offer_detail::pickpocket_offset))return {};
+        const NativeInteractionTargetIdentity identity{offer->component,target_generation_[side],static_cast<unsigned>(side),hands_[side].epoch,1};
+        return QualifiedTarget{identity,offer->owner,offer->spawn,hands_[side].tick,target_tick_[side],{}};
+    }
 private:
     bool live_loot_offer(unsigned side,std::uint64_t now) {
         if(side>=2 || !live_target(side,now))return false;
@@ -2383,6 +2404,17 @@ public:
         if(side<0||side>1) return 0;
         std::lock_guard<std::mutex> lock(mutex_);
         return live_target(static_cast<unsigned>(side),now)?target_owner_[static_cast<unsigned>(side)]:0;
+    }
+    // v963 (user: "I hold the grip at a keyhole and the game drops the peek"): a door is the one native Use target whose held
+    // Use is a peek, not a holster/draw toggle. True while this hand's live target is a door entity (vtable 0x1cb7c68).
+    bool target_is_door(int side,std::uint64_t now) {
+        if(side<0||side>1) return false;
+        try {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if(!live_target(static_cast<unsigned>(side),now))return false;
+            const auto owner=target_owner_[static_cast<unsigned>(side)];
+            return owner && rig::typed(read_,base_,owner,0x1cb7c68);
+        } catch(...) {return false;}
     }
     // G1 (plan Task 3; Tasks 6 and 10 use it): this hand's live native Use target as a palm-cost target: id = the owner, kind loot when
     // takeable() else usable (priority from build/grab-tuning.cfg), the owner's model bounds or, without them, the target point as a box.

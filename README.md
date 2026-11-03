@@ -79,10 +79,10 @@ Made for Meta Quest Touch controllers. **Grip** is the side button under your mi
 |---|---|
 | Stick | Move where you look; click to sprint |
 | X (hold) | Quick Access Wheel: point at an item, release to equip |
-| Y | Talk; hold for the pause menu |
+| Y | Talk (the trigger also talks); hold for the pause menu |
 | Menu | Pause; hold for the journal; hold and flick the right stick for the quick slots |
-| Trigger | Fire the gun or cast the power in your left hand |
-| Grip | Use what the hand points at, or hold what it touches; at your left hip, draw the pistol or crossbow |
+| Trigger | Talk or pickpocket with a free hand; fire the gun or cast the power in a weapon hand |
+| Grip | Use what the hand points at, or hold what it touches; hold at a keyhole to keep the peek; at your left hip, draw the pistol or crossbow |
 
 ### Right controller
 
@@ -91,7 +91,7 @@ Made for Meta Quest Touch controllers. **Grip** is the side button under your mi
 | Stick | Turn (snap or smooth); flick down to crouch; click to zoom |
 | A | Jump and climb |
 | B (hold) | Put all weapons away |
-| Trigger | Select in menus and on the wheel |
+| Trigger | Select in menus and on the wheel; talk or pickpocket with a free hand; with the sword, hold to charge a power strike and release to swing it |
 | Grip | Use or hold, like the left one; over your right shoulder, draw the sword |
 
 ### Body and gestures
@@ -106,6 +106,7 @@ The sword and your hands need no buttons: attack, block, grab and throw with rea
 | Left grip at your **left hip** | Draw the pistol or crossbow; release to holster |
 | Turn the **back of either wrist** to your face | Read health and mana |
 | **Swing** the sword | Attack. From behind an unaware guard it is a silent takedown |
+| **Hold the trigger with the sword** | Charge a power strike; release to swing it |
 | Sword held **in front of you** | Block (no button; a swing ends it) |
 | **Release** the right grip mid-swing | Throw the sword. Grip over your shoulder calls it back |
 | **Palm on a guard** + grip, then pull hard | Hold him, then throw him down |

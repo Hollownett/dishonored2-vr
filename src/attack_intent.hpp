@@ -121,10 +121,12 @@ public:
     inline static constexpr std::uint64_t lead_ms=45,min_hold_ms=120,max_ms=500,tail_ms=350;
     inline static constexpr std::uint64_t min_polls=2;
     bool active() const noexcept {return active_;}
-    bool start(std::uint64_t now_ms,std::uint64_t polls) noexcept {
+    // hold_ms: 0 = the ordinary 120 ms press. A charged sword strike passes a longer hold (the game turns a held attack
+    // into its heavy attack; v963).
+    bool start(std::uint64_t now_ms,std::uint64_t polls,std::uint64_t hold_ms=0) noexcept {
         (void)polls;
         if(active_) {++dropped_;return false;}
-        active_=true;rt_=false;rt_started_=false;since_=now_ms;++starts_;return true;
+        active_=true;rt_=false;rt_started_=false;since_=now_ms;hold_ms_=hold_ms;end_ms_=0;++starts_;return true;
     }
     // Advance the state and return whether the attack button is held this frame.
     bool held(std::uint64_t now_ms,std::uint64_t polls) noexcept {
@@ -133,18 +135,19 @@ public:
         if(age>=max_ms) {finish(now_ms);return false;}
         if(age<lead_ms) return false; // Block is let go first
         if(!rt_started_) {rt_started_=true;rt_at_=now_ms;polls_at_rt_=polls;}
-        if(now_ms-rt_at_>=min_hold_ms && polls-polls_at_rt_>=min_polls) {finish(now_ms);return false;}
+        const std::uint64_t hold=hold_ms_?hold_ms_:min_hold_ms;
+        if(now_ms-rt_at_>=hold && polls-polls_at_rt_>=min_polls) {finish(now_ms);return false;}
         rt_=true;return true;
     }
     // Block (RB) must stay off while a press runs and shortly after.
     bool block_released(std::uint64_t now_ms) const noexcept {
         return active_ || (end_ms_ && now_ms>=end_ms_ && now_ms-end_ms_<tail_ms);
     }
-    void reset() noexcept {active_=rt_=rt_started_=false;end_ms_=0;}
+    void reset() noexcept {active_=rt_=rt_started_=false;end_ms_=0;hold_ms_=0;}
     std::uint64_t starts() const noexcept {return starts_;}
     std::uint64_t dropped() const noexcept {return dropped_;}
 private:
-    bool active_{},rt_{},rt_started_{};std::uint64_t since_{},rt_at_{},polls_at_rt_{},end_ms_{},starts_{},dropped_{};
+    bool active_{},rt_{},rt_started_{};std::uint64_t since_{},rt_at_{},polls_at_rt_{},end_ms_{},starts_{},dropped_{},hold_ms_{};
     void finish(std::uint64_t now_ms) noexcept {active_=rt_=false;end_ms_=now_ms?now_ms:1;}
 };
 

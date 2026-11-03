@@ -39,13 +39,13 @@ inline std::vector<NativeOptionsPage::Row> rows(const VrSettings& s) {
         50,200,5,static_cast<int>(std::lround(s.requested()*100)),100,{}};
     // DLAA/DLSS Quality are offered only with an NVIDIA GPU and the user's nvngx_dlss.dll; a saved DLSS mode shows as the
     // last offered row elsewhere (the mod renders it with FSR 3 then).
-    std::vector<std::string> aa_modes{"Off","Game TAA","FSR 3 Native","FSR 3 Quality (77%)","FSR 3 Balanced (67%)","FSR 4 Native","FSR 4 Quality (77%)"};
-    std::string aa_help="Smooths shimmering edges over time. Game TAA is the original; FSR Native uses full resolution; Quality and Balanced render fewer pixels and upscale.";
-    if(s.performance_mode_replaces_aa()) aa_help+=" The selected temporal mode is unavailable in this session; spatial edge AA is used when enabled. Your selection is kept.";
-    if(s.dlss_available()) {aa_modes.push_back("DLAA (NVIDIA DLSS)");aa_modes.push_back("DLSS Quality (NVIDIA)");aa_help+=" DLAA and DLSS Quality are powered by NVIDIA DLSS.";}
+    std::vector<std::string> aa_modes{"Off (SMAA when Edge AA is on)","Game TAA","FSR 3 Native","FSR 3 Quality (77%)","FSR 3 Balanced (67%)","FSR 4 Native","FSR 4 Quality (77%)"};
+    std::string aa_help="Smooths shimmering edges over time. Game TAA is the original; FSR Native uses full resolution; Quality and Balanced upscale. Off leaves Edge AA (SMAA) on its own.";
+    if(s.performance_mode_replaces_aa()) aa_help+=" The selected temporal mode is unavailable; spatial edge AA is used when enabled.";
+    if(s.dlss_available()) {aa_modes.push_back("DLAA (NVIDIA DLSS)");aa_modes.push_back("DLSS Quality (NVIDIA)");aa_help+=" DLAA and DLSS Quality use NVIDIA DLSS.";}
     else if(s.temporal_aa()>=7) aa_modes.push_back(s.temporal_aa()==7?"DLAA (unavailable, FSR 3)":"DLSS Quality (unavailable, FSR 3)"); // the saved choice, shown truthfully and never rewritten by the page
     r[temporal]={K::stepper,"Anti-aliasing",aa_help,0,0,1,temporal_shown(s),2,aa_modes};
-    r[edge_aa]={K::toggle,"Edge anti-aliasing (SMAA)","SMAA Ultra cleans up jagged edges that the temporal pass misses.",0,0,1,s.antialiasing()?1:0,0,{}};
+    r[edge_aa]={K::toggle,"Edge anti-aliasing (SMAA)","SMAA Ultra smooths edges on its own when Anti-aliasing is Off; skipped in a temporal mode.",0,0,1,s.antialiasing()?1:0,0,{}};
     r[mirror]={K::stepper,"Monitor view","Chooses what the desktop monitor mirrors. It does not change the headset image.",
         0,0,1,static_cast<int>(s.mirror()),static_cast<int>(MirrorMode::both_eyes),{"Right eye","Left eye","Both eyes","Off"}};
     r[sharpening]={K::stepper,"Sharpening","Contrast sharpening after anti-aliasing. Raise it if the image looks soft, lower it if edges crawl.",

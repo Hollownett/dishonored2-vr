@@ -180,8 +180,12 @@ public:
         const Mat m=full(model);
         // v961 (v960 walk sim: the tagged draws kept 45% of the engine's screen motion): without the previous render's view of this eye the weapon's previous rows are its rows now
         // (no motion), not the hand's world displacement under the current view-projection, which reads a walking player's speed as the weapon's own motion
+        // v963 (user, headset v961: "the weapon goes black for a frame with TAA/FSR/DLSS"): zero motion on a tagged draw leaves TAA/DLSS sampling the
+        // background at the weapon's new pixel (a dark or missing history reads as a black weapon edge). The hand-relative motion under the current view
+        // (vp * previous-placed * inverse(current tick frame) * model) is not the player's walking speed: it is the weapon's own motion in the hand, and
+        // it is zero only when the hand really did not move relative to the camera.
         const Mat vp=views.vp[eye];
-        const Mat now=mul(mul(vp,w.delta),m),before=previous && views.prev_ok[eye]?mul(mul(views.prev_vp[eye],w.prev),m):now;
+        const Mat now=mul(mul(vp,w.delta),m),before=previous && views.prev_ok[eye]?mul(mul(views.prev_vp[eye],w.prev),m):mul(mul(vp,w.prev),m);
         for(std::size_t i=0;i<16;++i) {cur_out[i]=static_cast<float>(now[i]);prev_out[i]=static_cast<float>(before[i]);}
         if(!still(*slot,frame)) {result.stage=rejected;return result;}                 // a publisher that reused the slot meanwhile: the engine's rows stay
         result.side=candidate;result.eye=eye;result.stage=tagged?placed_tagged:last_frame?placed_last_frame:placed_same_frame;

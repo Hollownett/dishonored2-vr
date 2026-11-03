@@ -971,5 +971,33 @@ std::printf("PASS: X wheel open/close/cancel/no-reopen/late-press, "
         assert(std::abs(d2vr::wheel_metres_per_stage(.8,2496,2688)*326-.1358)<1e-3); // ring radius on the headset quad
         (void)h;
     }
+    { // v963: NPC actions on the hand's trigger, and the door's held Use (keyhole peek).
+        assert(d2vr::npc_trigger_owns_hand(true,true,false,false));
+        assert(d2vr::npc_trigger_owns_hand(true,false,true,false));
+        assert(!d2vr::npc_trigger_owns_hand(false,true,true,false));   // feature off: the grip keeps Talk/Pickpocket
+        assert(!d2vr::npc_trigger_owns_hand(true,true,true,true));     // a weapon hand's trigger is its weapon's
+        assert(d2vr::keyhole_use_hold(true,true,true,true));
+        assert(!d2vr::keyhole_use_hold(true,false,true,true));         // never a held X on a non-door item
+        assert(!d2vr::keyhole_use_hold(true,true,false,true));
+        assert(!d2vr::keyhole_use_hold(false,true,true,true));
+        d2vr::NpcTriggerOwner owner;const d2vr::TalkYOwner::Target target{0x1000,7,42,0x2000};
+        const auto run=[&](bool pressed,bool allowed,std::uint64_t now,d2vr::TalkYOwner::Target at,d2vr::NpcAction action) {
+            return owner.update(pressed,allowed,3,now,at,action);};
+        auto r=run(false,true,990,target,d2vr::NpcAction::talk);assert(!r.owned);
+        r=run(true,true,1000,target,d2vr::NpcAction::talk);
+        assert(r.owned && r.consume_trigger && r.interact);               // a press claims the Talk offer
+        r=run(true,true,1100,target,d2vr::NpcAction::talk);
+        assert(r.owned && r.consume_trigger && r.interact);               // held: Use stays down
+        r=run(true,true,1300,target,d2vr::NpcAction::talk);
+        assert(r.owned && r.consume_trigger && !r.interact);              // past 220 ms: no endless Use
+        r=run(false,true,1310,target,d2vr::NpcAction::talk);assert(!r.owned && !r.consume_trigger);
+        r=run(true,false,1320,target,d2vr::NpcAction::talk);assert(!r.owned); // a weapon hand: no claim
+        r=run(false,true,1330,target,d2vr::NpcAction::talk);assert(!r.owned);
+        r=run(true,true,1340,target,d2vr::NpcAction::pickpocket);assert(r.owned && r.interact);
+        const d2vr::TalkYOwner::Target other{0x3000,8,43,0x4000};
+        r=run(true,true,1350,other,d2vr::NpcAction::talk);assert(!r.owned); // a replaced target cancels the claim
+        r=run(false,true,1360,other,d2vr::NpcAction::talk);assert(!r.owned);
+        r=run(true,true,1370,other,d2vr::NpcAction::none);assert(!r.owned); // no offer: nothing claimed
+    }
     return 0;
 }

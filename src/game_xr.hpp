@@ -2376,14 +2376,18 @@ public:
                 processing.kept=alt_stale;
                 {ModGpuScope aa_scope(context_.Get(),ModSpan::aa_sharpen); // task 3b
                 SpanClock span(xr_spans,XrSpan::aa_sharpen);
-                const auto prior_smaa_passes=antialiasing_?antialiasing_->eye_passes:0;
-                processed=gameplay && antialiasing_enabled_ && alternate_smaa_applies(alternate_enabled,settings_.effective_temporal_aa()) && !alt_stale?antialiasing_->apply(sources[eye]):sources[eye];
-                if(!alt_stale)processing.smaa_applied=antialiasing_ && antialiasing_->eye_passes>prior_smaa_passes;
-                // Sharpening also helps menu text (menus get no SMAA).
+                // Sharpening also helps menu text (menus get no SMAA), but it must not undo the edge AA: CAS
+                // re-steepens every edge it touches, so the 0.5 Medium default sharpening on top of SMAA was
+                // the reason the SMAA row looked like it "did nothing". Sharpen first, then let SMAA be the
+                // last spatial step (v963).
                 if(sharpness>0 && !alt_stale) {
                     const auto prior_sharpen=processed;processed=sharpen_->apply(processed,sharpness);
                     processing.cas_applied=processed!=prior_sharpen;processing.cas_sharpness=processing.cas_applied?sharpness:0;
-                }}
+                }
+                const auto prior_smaa_passes=antialiasing_?antialiasing_->eye_passes:0;
+                processed=gameplay && antialiasing_enabled_ && alternate_smaa_applies(alternate_enabled,settings_.effective_temporal_aa()) && !alt_stale?antialiasing_->apply(processed):processed;
+                if(!alt_stale)processing.smaa_applied=antialiasing_ && antialiasing_->eye_passes>prior_smaa_passes;
+                }
                 // v792: the kept image of the eye not rendered now, warped to the view that eye has at the fresh eye's Setup (one head pose for
                 // both layers). A failure keeps the kept image and its own view, and turns the warp off for the session.
                 if(alt_stale && stale_eye_warp_enabled && !stale_warp_failed_ && stale_target_frame_[eye]==alternate_frame && alt_records_[eye].valid) try {

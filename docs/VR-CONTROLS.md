@@ -15,33 +15,34 @@ Grip is the side button under your middle finger, trigger the one under your ind
 
 ## Left controller
 - **Y** — talk; hold for the pause menu.
-- **X** — hold for the wheel, point, release to equip.
+- **X** — hold for the wheel; point, release to equip.
 - **Stick** — move where you look; click to sprint.
-- **Menu** — pause; hold for the journal. Hold and flick the right stick for quick slots.
-- **Trigger** — fire the gun or cast the power in your hand.
-- **Grip** — use what the hand points at, or hold what it touches.
+- **Menu** — pause; hold for the journal; flick the right stick for quick slots.
+- **Trigger** — talk or pickpocket with a free hand; otherwise fire or cast.
+- **Grip** — use or hold; hold at a keyhole to peek.
 
 ## Right controller
 - **B** — hold to put all weapons away.
 - **A** — jump and climb.
 - **Stick** — turn; flick down to crouch; click to zoom.
-- **Trigger** — select in menus and on the wheel.
-- **Grip** — use or hold, like the left one.
+- **Trigger** — select in menus; talk or pickpocket; hold with the sword to charge a strike.
+- **Grip** — use or hold; over your right shoulder, draw the sword.
 
 <!-- vr-page:tips|Gestures -->
 
 ## The sword
 <!-- vr-figure:sword_draw_block|Grip over your right shoulder to draw the sword, then hold the blade in front of you to block. -->
 - **Swing** — attack. Behind an unaware guard it is a silent takedown.
+- **Hold the trigger with the sword drawn** — charge a power strike (a pulse rises in the hand); release to swing it. A fast swing cancels the charge.
 - **Hold it in front of you** — block. No button; a swing ends it.
 - **Let go mid-swing** — throw it. Grip next to it to pick it up.
 - **Grip over your right shoulder** — call a thrown sword back.
 
 ## Your hands
 <!-- vr-figure:enemy_grab|Palm on the guard: grip to hold, then pull hard away from him. -->
+- **Trigger on a person's Talk or Pickpocket prompt** — talk or take from their pocket with that hand. The grip no longer does either, so it will not become a choke by accident.
+- **Grip a door or keyhole and keep holding** — peek through; let go to stop.
 - **Palm on a guard + grip, pull hard** — throw him down.
 - **Grip a guard's neck from behind** — choke him out.
 - **Grip a limb or the head of a body** — drag it; let go at your shoulder to carry it.
 - **Grenade or mine: make a fist** — open it mid-throw; palm on a wall to place it.
-- **Open hand on a door** — push it open; push slowly to peek.
-- **Both hands up over your head** — jump. Lean and crouch for real.

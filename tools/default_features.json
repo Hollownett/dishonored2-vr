@@ -291,6 +291,14 @@
    "default": true
   },
   {
+   "id": "npc-trigger",
+   "file": "no-npc-trigger",
+   "kind": "disable",
+   "label": "Talk and pickpocket on the trigger",
+   "help": "Aiming at a person's Talk or Pickpocket prompt, press that hand's trigger to talk or take from their pocket; the grip still opens doors, holds keyholes, takes loot and chokes, so it no longer talks or pickpockets by accident. Holding the grip at a keyhole now keeps the peek. Turn off to put talk and pickpocket back on Y and the grip.",
+   "default": true
+  },
+  {
    "id": "palm-select",
    "file": "legacy-palm-select",
    "kind": "disable",

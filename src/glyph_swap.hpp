@@ -109,6 +109,7 @@ class GlyphSwap {
 public:
     inline static std::atomic<bool> enabled{false};
     inline static std::atomic<bool> native_labels{false}; // outside gameplay and the wheel: A/B/X/Y act as themselves
+    inline static std::atomic<bool> talk_on_trigger{true}; // v963: the Talk prompt says Trig (feature off: Y, the old prompt)
     inline static std::atomic<bool> wheel_open{false}; // Quick Access Wheel held: bind wheel_glyph_label art
     using TalkPromptContext=bool (*)() noexcept;
     inline static std::atomic<TalkPromptContext> talk_prompt_context{};
@@ -197,7 +198,9 @@ public:
                                    FAILED(device->CreateShaderResourceView(wheel_painted.Get(),&sd,&wheel)))throw std::runtime_error("Cannot create wheel glyph");
                             }
                             if(std::strcmp(glyph->name,"X_XBOX")==0 || std::strcmp(glyph->name,"X_XBOX_s")==0) {
-                                paint_quest_glyphs(rgba.data(),job.desc.Width,job.desc.Height,"Y");
+                                // v963: Talk moved from Y/the grip's Use to the hand's trigger: the native Talk prompt's X glyph
+                                // paints "Trig" in it (the grip's own prompt stays "Grip").
+                                paint_quest_glyphs(rgba.data(),job.desc.Width,job.desc.Height,talk_on_trigger.load(std::memory_order_relaxed)?"Trig":"Y");
                                 const auto talk_blocks=encode_bc7_mode6(rgba.data(),job.desc.Width,job.desc.Height);
                                 D3D11_SUBRESOURCE_DATA talk_init{talk_blocks.data(),row,0};Ptr<ID3D11Texture2D> talk_painted;
                                 if(SUCCEEDED(device->CreateTexture2D(&d,&talk_init,&talk_painted)))

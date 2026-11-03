@@ -61,10 +61,12 @@ int main() {
     std::uint32_t engine_frame=25000,seed=12345;
     std::map<std::uint32_t,std::pair<Mat,Mat>> render_info;                   // frame -> (placed matrix, F)
     std::uint32_t previous_frame=0;
+    Mat penultimate_placed{},penultimate_tick{},previous_placed{},previous_tick{};   // the last two renders' placed weapon frames
     int certified[2]={0,0},uncertified_first=0,checks=0;
     double worst_cur=0,worst_prev=0,engine_wobble_lo=1e9,engine_wobble_hi=-1e9;
     for(int render=0;render<160;++render) {
         seed=seed*1664525u+1013904223u;engine_frame+=1+((seed>>16)&1);        // engine frames are skipped now and then
+        penultimate_placed=previous_placed;penultimate_tick=previous_tick;
         const int t=int(engine_frame-25000);
         const Mat image=hand_at(t),read=hand_at(t-t%3);
         const Mat tick_frame=mul(read,g),delta=mul(image,inv(read)),placed=mul(delta,tick_frame);
@@ -107,6 +109,7 @@ int main() {
             }
         }
         render_info[engine_frame]={placed,tick_frame};previous_frame=engine_frame;
+        previous_placed=placed;previous_tick=tick_frame;
     }
     std::printf("certified %d/%d (view 0: %d, view 1: %d), worst relative error: current rows %.2e previous rows %.2e; tick frame to hand distance varies %.2f mm\n",
         certified[0]+certified[1],checks,certified[0],certified[1],worst_cur,worst_prev,(engine_wobble_hi-engine_wobble_lo)*1000);
@@ -137,12 +140,18 @@ int main() {
          for(std::size_t i=0;i<16;++i) e=std::max(e,std::abs(o[i]-want[i])/(1+std::abs(want[i])));
          CHECK(e<2e-4);
          CHECK(Place::place(engine_frame,provider,c_near.data(),p_bad.data(),o.data(),q.data(),0).side<0);
-         // v961: a draw placed without the previous render's views has no motion (previous rows = current rows), not the hand's world displacement
+         // v963: a draw placed without the previous render's views has the hand's own previous position under the current view
+         // (vp * previous placed matrix), not zero motion: zero left TAA/DLSS sampling the background at the weapon's new pixel.
          const auto no_previous=[](std::uint32_t f,std::uint32_t) -> const Views* {return provider(f,0);};
          const Result np=Place::place(engine_frame,no_previous,c_near.data(),p_bad.data(),o.data(),q.data(),1);
          CHECK(np.side==0 && np.stage==placed_tagged);
-         double still=0;for(std::size_t i=0;i<16;++i) still=std::max(still,double(std::abs(o[i]-q[i])/(1+std::abs(o[i]))));
-         CHECK(still<1e-6);}
+         const Mat want_prev=mul(mul(frames_seen.at(engine_frame).vp[1],penultimate_placed),parts[1]);
+         double previous_error=0,motion=0;
+         for(std::size_t i=0;i<16;++i) {
+             previous_error=std::max(previous_error,std::abs(double(q[i])-double(want_prev[i]))/(1.0+std::abs(double(want_prev[i]))));
+             motion=std::max(motion,std::abs(double(q[i])-double(o[i]))/(1.0+std::abs(double(o[i]))));
+         }
+         CHECK(previous_error<2e-4 && motion>1e-6);}
         // a frame nobody published, and a slot reused by a newer frame
         CHECK(Place::place(engine_frame+100,provider,c_near.data(),c_near.data(),o.data(),q.data()).side<0);
         // no view-projections known for the render: untouched

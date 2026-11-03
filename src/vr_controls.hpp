@@ -324,6 +324,45 @@ public:
         return {claimed_ || cancelled_,claimed_ && !cancelled_ && allowed && now<until_,claimed_};
     }
 };
+// v963 (user: "pickpocket and talk on the trigger ... so the grip does not choke by accident"): the hand's own trigger takes
+// the game's Talk (+0xe8) and Pickpocket (+0xc0) offers. The grip keeps doors, keyholes, loot and the deliberate neck choke; the
+// trigger press becomes a short native Use (220 ms), exactly as the grip's own Use press was, and is consumed so it never fires
+// or casts. A change of target, or letting go of the feature/hand, cancels the claim.
+enum class NpcAction {none,talk,pickpocket};
+class NpcTriggerOwner {
+public:
+    using Target=TalkYOwner::Target;
+    struct Result {bool consume_trigger{},interact{},owned{};};
+private:
+    bool down_=true,claimed_{};
+    Target target_{};std::uint64_t epoch_{},until_{};
+public:
+    void cancel() noexcept {claimed_=false;until_=0;}
+    Result update(bool pressed,bool allowed,std::uint64_t epoch,std::uint64_t now,Target target,NpcAction action) noexcept {
+        if(epoch_!=epoch || !allowed || !epoch) {claimed_=false;until_=0;}
+        epoch_=epoch;
+        const bool was_down=down_;
+        if(!pressed) down_=false;
+        else if(!was_down) {
+            down_=true;
+            if(allowed && epoch && target && action!=NpcAction::none) {claimed_=true;target_=target;until_=now+220;}
+        }
+        if(claimed_ && (!pressed || !(target==target_) || action==NpcAction::none || !allowed || !epoch)) {claimed_=false;until_=0;}
+        // The claim consumes the trigger until it is let go (so a late press never turns into a shot), but only the first
+        // 220 ms is a native Use: the game sees one press, never an endless held X.
+        return {claimed_,claimed_ && now<until_,claimed_};
+    }
+};
+// The trigger, not the grip, owns an NPC's Talk/Pickpocket offer: suppress the grip's native Use for that hand. A hand that
+// holds anything (sword, gun, gadget, copy) keeps its trigger: those are its weapon's trigger.
+inline bool npc_trigger_owns_hand(bool enabled,bool talk_offer,bool pickpocket_offer,bool weapon_owns) noexcept {
+    return enabled && !weapon_owns && (talk_offer || pickpocket_offer);
+}
+// A held grip on a native door keeps Use down: that is the keyhole peek. A held Use on anything else stays the v691 200 ms
+// press (a held pad X is the game's holster/draw toggle on non-door items).
+inline bool keyhole_use_hold(bool enabled,bool door_target,bool grip_held,bool interacting) noexcept {
+    return enabled && door_target && grip_held && interacting;
+}
 class GripIntent {
 public:
     enum class Kind {none,deciding,use,fist,trigger,drain,grab,carry};   // grab (G3, plan Task 6): a grip alone that grabs what the palm is on

@@ -172,7 +172,10 @@ inline int alternate_effective_temporal(bool alternate_on, int requested,bool na
     return alternate_on ? (native_taa && (requested==1 || upscalers)?requested:0) : requested;
 }
 // Spatial AA follows the effective mode. A saved FSR choice may temporarily fall back to spatial AA.
-inline bool alternate_smaa_applies(bool /*alternate_on*/, int effective_temporal) noexcept {return effective_temporal < 2;}
+// v963: SMAA is a separate anti-aliasing method, not a temporal clean-up. It runs when the eye has no temporal AA
+// (the "Off" mode, or a temporal mode that fell back): it is never stacked on Game TAA, FSR or DLSS, where it was
+// already skipped (effective_temporal >= 2) and where it would only soften their resolve.
+inline bool alternate_smaa_applies(bool /*alternate_on*/, int effective_temporal) noexcept {return effective_temporal <= 0;}
 // Per-eye state (fsr_vfov, jitter counter, eye_jitter) is indexed by the LOGICAL eye of the view being prepared, not the native slot (always 0
 // for the one view).
 inline std::size_t alternate_state_slot(int logical_eye, int native_slot) noexcept {return static_cast<std::size_t>(logical_eye >= 0 ? logical_eye : native_slot);}

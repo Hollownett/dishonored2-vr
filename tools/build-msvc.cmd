@@ -713,6 +713,10 @@ cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT tests\vr_controls_check.cpp /
 if not "%errorlevel%"=="0" exit /b 1
 cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT tests\hand_loadout_check.cpp /Fo:build\hand_loadout_check.obj /Fe:build\hand_loadout_check.exe
 if not "%errorlevel%"=="0" exit /b 1
+cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT tests\sword_charge_check.cpp /Fo:build\sword_charge_check.obj /Fe:build\sword_charge_check.exe
+if not "%errorlevel%"=="0" exit /b 1
+build\sword_charge_check.exe
+if not "%errorlevel%"=="0" exit /b 1
 cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT tests\held_copy_check.cpp /Fo:build\held_copy_check.obj /Fe:build\held_copy_check.exe
 if not "%errorlevel%"=="0" exit /b 1
 cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT tests\grip_latency_replay_check.cpp /Fo:build\grip_latency_replay_check.obj /Fe:build\grip_latency_replay_check.exe

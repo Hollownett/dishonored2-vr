@@ -117,6 +117,7 @@
 #include "taa_jitter_check.hpp"
 #include "vr_combat.hpp"
 #include "attack_intent.hpp"
+#include "sword_charge.hpp"
 #include "combat_target_memory.hpp"
 #include "held_release.hpp"
 #include "native_grenade_throw.hpp"
@@ -608,10 +609,10 @@ static d2vr::VrCombat vr_combat;static bool vr_combat_enabled=true;static float 
 static d2vr::CombatDecision combat_decision{};
 // Plan G task 3 (src/attack_intent.hpp): without build/legacy-sword-contact a drawn-sword slash or a crouched stab presses the game's attack
 // and the engine decides the stealth kill. Controller thread only, except the atomics (status). reset at StartProbe.
-static d2vr::AttackIntent attack_intent;static d2vr::AttackPress attack_press;static d2vr::AttackHonour attack_honour;
+static d2vr::AttackIntent attack_intent;static d2vr::AttackPress attack_press;static d2vr::AttackHonour attack_honour;static d2vr::SwordCharge sword_charge;
 static std::optional<d2vr::OwnedSwordContact> contact_attack_target;
 static bool legacy_sword_contact=false;static bool attack_intent_owns=false,attack_intent_rt=false,attack_intent_block_off=false,attack_intent_ran=false;
-static std::atomic<UINT64> attack_intent_pad_frames{};static std::atomic<UINT64> attack_intent_suppressed_far{};static std::atomic<bool> attack_intent_honour_read{};
+static std::atomic<UINT64> attack_intent_pad_frames{};static std::atomic<UINT64> attack_intent_suppressed_far{};static std::atomic<bool> attack_intent_honour_read{};static std::atomic<UINT64> sword_power_attacks{};
 static std::mutex combat_policy_mutex;
 static d2vr::CombatDecision combat_policy_observation{};
 static d2vr::CombatTargetMemory combat_target_memory;
@@ -3504,6 +3505,7 @@ static std::atomic<unsigned> scabbard_entries{},holster_fires{}; // the right ha
 // Dual wield (build/dual-wield, docs/research-dual-wield.md): either hand takes the sword (slot 0) or the gun/grenade/power (slot 1).
 // hand_loadout is the control thread's; melee_hand mirrors its melee hand for the render thread. Knob off: always 1 (the game's hands).
 static bool dual_wield_enabled=false;static d2vr::HandLoadout hand_loadout;static std::atomic<unsigned> melee_hand{1};static std::atomic<unsigned> dual_wield_swaps{};
+static bool npc_trigger_enabled=true;static std::array<bool,2> npc_trigger_consume{};static std::array<bool,2> npc_trigger_interact{};static std::array<d2vr::NpcTriggerOwner,2> npc_trigger_owner{}; // v963: Talk/Pickpocket on the hand's trigger
 bool dual_wield_on() noexcept {return dual_wield_enabled;}
 static std::atomic<unsigned> authored_arm_bits{}; // render thread: arms an authored clip or player state owns this frame
 static std::atomic<unsigned> extra_kinds{}; // hand_loadout.extra for the render thread: 4 bits per hand (HandLoadout::Extra)
@@ -3610,7 +3612,7 @@ static bool body_carry_action(std::uintptr_t e) noexcept {std::uint8_t f{};retur
 // knocked-out arkNPC -> the game's carry). Everything else the pointing hand is offered (loot, doors, levers, notes) is used with
 // that hand's trigger.
 // Per-hand interaction state for tests (status "interact"): bit 0/1 target offered, 2/3 grip is the source, 4/5 query ready.
-static std::atomic<unsigned> interact_bits{};static std::atomic<UINT64> interact_presses{};static std::atomic<UINT64> crank_hold_frames{};
+static std::atomic<unsigned> interact_bits{};static std::atomic<UINT64> interact_presses{};static std::atomic<UINT64> crank_hold_frames{};static std::atomic<UINT64> keyhole_hold_frames{};
 // A live bloodfly/rat swarm agent (arkSwarmAgentEntity, visible): the sword kills it through the engine's swarm kill (native_melee.hpp).
 // Needs NativeSwarmKillGuard (knob build/no-swarm-contact-kill turns it off): without it sim v385 crashed (heap corruption,
 // 0xC0000374) after 10 kills - the native swing's own contact list killed the same agent again (0x6b8b70 re-runs the swarm kill
@@ -3650,7 +3652,8 @@ static std::string combat_policy_status_json() {
         <<",\"attack_intent\":{\"presses\":"<<attack_intent.presses()<<",\"slash\":"<<attack_intent.slashes()<<",\"stab\":"<<attack_intent.stabs()<<",\"contact\":"<<attack_intent.contacts()
         <<",\"honoured\":"<<attack_honour.honoured()<<",\"not_honoured\":"<<attack_honour.not_honoured()
         <<",\"pad_frames\":"<<attack_intent_pad_frames.load()<<",\"dropped\":"<<attack_press.dropped()<<",\"suppressed_far_takedown\":"<<attack_intent_suppressed_far.load()
-        <<",\"legacy\":"<<(legacy_sword_contact?"true":"false")<<",\"honour_read\":"<<(attack_intent_honour_read.load()?"true":"false")<<"}"
+        <<",\"legacy\":"<<(legacy_sword_contact?"true":"false")<<",\"honour_read\":"<<(attack_intent_honour_read.load()?"true":"false")
+        <<",\"power_attacks\":"<<sword_power_attacks.load()<<"}"
         <<",\"sword_contact\":"<<d2vr::NativeInteractionAim::sword_contact_status_json();
     return output.str();
 }
@@ -11455,6 +11458,7 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                 // Menus keep X as the native button. R3 stays native (zoom).
                                 static UINT64 look_use_at{},look_press_until{};static int look_side{-1};static std::array<bool,2> gaze_tried{};
                                 if(controls_epoch!=game_xr->pose_epoch()) {controls_epoch=game_xr->pose_epoch();for(auto& hand_owner:interact_owners) hand_owner.reset();
+                                    for(auto& o:npc_trigger_owner) o.cancel();
                                     offered_choke_grip={};controls_choke_owner.reset();gaze_ray_until=0;
                                     manual_wheel_token=0;manual_wheel_closing=false;
                                     look_use_at=look_press_until=0;look_side=-1;gaze_tried={};}
@@ -11462,12 +11466,19 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                 // Opening the native wheel switches the game state away from gameplay (logic 256);
                                 // that UI belongs to the held X until release.
                                 const bool manual_wheel_was_open=x_wheel.wheel();
+                                // v963 (user, headset v962: "choosing the Heart makes the other hand's weapon disappear"): what slot 1 held when the
+                                // wheel OPENED. At the commit the game may already have put the old gun/power away, so reading the kind at the commit
+                                // (the v758-v962 code) saw nothing and the displaced item was never given back to the other hand.
+                                static unsigned wheel_open_prev_kind{};static bool wheel_open_prev_other{};
                                 // Dual wield: holding A opens the right hand's wheel, as X the left's (v779, user, headset v778: "jump on the right stick up,
                                 // A holds the wheel, mirrored with the left controller"; v762-v778 it was B, as a held A also swam up): the jump is the right
                                 // stick pushed up (JumpStick, below). B is free: its native hold (put the weapons away) is the hands' job in VR.
                                 const bool a_wheel=dual_wield_enabled && (logic==2 || x_wheel.wheel()) && game_xr->controller_input.a;
                                 x_wheel.update(input.x,a_wheel,controls_focus && !input.menu_modifier && (logic==2 || x_wheel.wheel()),GetTickCount64()); // either hand points at the wheel
                                 static int wheel_open_hand=-1;if(x_wheel.wheel()) wheel_open_hand=x_wheel.hand();
+                                if(!manual_wheel_was_open && x_wheel.wheel()) { // v963: slot 1 at the opening, before the game changes it
+                                    wheel_open_prev_kind=left_gun_model.load()?(hip_kind.load()==1?static_cast<unsigned>(d2vr::HandLoadout::Extra::crossbow):static_cast<unsigned>(d2vr::HandLoadout::Extra::pistol)):0u;
+                                    wheel_open_prev_other=!left_gun_model.load() && (left_power_item.load() || left_gadget.load());}
                                 // A committed wheel puts its slot-1 item into the hand that opened it once the item has changed (an empty choice moves nothing).
                                 // Two active hands: the other hand keeps a copy of the gun it held (HandLoadout::wheel_second); choosing the gun the other hand
                                 // already holds (no equip change within 1.2 s after a chosen sector) gives this hand a copy of it too (two pistols).
@@ -11476,8 +11487,8 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                 const auto gun_kind_now=[]{return left_gun_model.load()?(hip_kind.load()==1?d2vr::HandLoadout::Extra::crossbow:d2vr::HandLoadout::Extra::pistol):d2vr::HandLoadout::Extra::none;};
                                 const auto wheel_to_hand=[&]{if(dual_wield_enabled && wheel_open_hand>=0) {wheel_pending_hand=wheel_open_hand;wheel_gun_held=gun_grip.held();
                                     wheel_pending_revision=left_aim_equip_revision.load(std::memory_order_acquire);wheel_pending_until=GetTickCount64()+2500;wheel_same_at=GetTickCount64()+600;
-                                    wheel_prev_ranged=hand_loadout.ranged();wheel_prev_kind=gun_kind_now();wheel_chosen=wheel_dial_sector>=0;wheel_settle_at=0;
-                                    wheel_prev_other=!left_gun_model.load() && (left_power_item.load() || left_gadget.load()); // a power or gadget the other hand keeps
+                                    wheel_prev_ranged=hand_loadout.ranged();wheel_prev_kind=static_cast<d2vr::HandLoadout::Extra>(wheel_open_prev_kind);wheel_chosen=wheel_dial_sector>=0;wheel_settle_at=0;
+                                    wheel_prev_other=wheel_open_prev_other; // a power or gadget the other hand keeps (captured at the opening, v963)
                                     dual_wield_event("\"ev\":\"wheel_commit\",\"hand\":"+std::to_string(wheel_open_hand)+",\"sector\":"+std::to_string(wheel_dial_sector)+",\"dial\":"+std::to_string(wheel_open_dial)+",\"stick\":"+std::to_string(wheel_open_stick)+",\"equip\":\""+[]{std::lock_guard<std::mutex> l(hand_state_mutex);std::string n(left_equip_name);for(auto& c:n) if(c=='"' || c==92 || static_cast<unsigned char>(c)<32) c='?';return n;}()+"\""+
                                         ",\"ranged\":"+std::to_string(wheel_prev_ranged)+",\"gun\":"+std::to_string(static_cast<unsigned>(wheel_prev_kind))+",\"other\":"+std::to_string(wheel_prev_other?1:0));}};
                                 if(wheel_pending_hand>=0 && (!dual_wield_enabled || d2vr::HandLoadout::wheel_route_lost(GetTickCount64()>wheel_pending_until,
@@ -11500,7 +11511,16 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                     } else {
                                         d2vr::HandLoadout::In li{};li.wheel_hand=static_cast<int>(hand);
                                         if(hand_loadout.update(li)) {sword_grip={};gun_grip={};++dual_wield_swaps;}
-                                        if(wheel_prev_ranged!=hand) hand_loadout.wheel_second(hand,wheel_prev_kind);
+                                        // v963: the other hand keeps exactly what it had. A sword drawn/held there (or its own copy) is not
+                                        // replaced by a copy of the gun slot 1 used to hold (that made the sword disappear when the Heart
+                                        // took slot 1). A free hand still receives the displaced gun, as v757 intended.
+                                        if(wheel_prev_ranged!=hand) {
+                                            const auto other=hand^1u;
+                                            const bool other_occupied=hand_loadout.extra[other]!=d2vr::HandLoadout::Extra::none ||
+                                                (other==hand_loadout.melee && (sword_owns || sword_grip.held())) ||
+                                                (other==hand_loadout.ranged() && (gun_owns || hip_draw_reserved));
+                                            hand_loadout.wheel_second(hand,wheel_prev_kind,other_occupied);
+                                        }
                                     }
                                     melee_hand=hand_loadout.melee;
                                     dual_wield_event("\"ev\":\"wheel_route\",\"hand\":"+std::to_string(hand)+",\"route\":\""+route+"\",\"now_gun\":"+std::to_string(static_cast<unsigned>(now_kind))+
@@ -11533,7 +11553,26 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                     game_xr->pose_epoch(),controls_now,talk_target?d2vr::TalkYOwner::Target{talk_target->identity.object,
                                         talk_target->identity.generation,talk_target->spawn,talk_target->owner}:d2vr::TalkYOwner::Target{});
                                 if(talk_route.owned || (logic==2 && !x_wheel.wheel() && talk_route.consume_y)) input.y=false;
-                                // Hold-Y menu: a Talk prompt offered to either hand (or a claimed Talk) or the wheel owns Y; a short Y there keeps its meaning.
+                                // v963 (user: "remap pickpocket and talk to a controller trigger ... so grip does not choke by accident"):
+                                // the hand's own trigger takes a live Talk or Pickpocket offer. The grip keeps doors, keyholes, loot and
+                                // the deliberate neck choke. Feature: absent build/no-npc-trigger.
+                                const std::array<std::optional<d2vr::NativeInteractionAim::QualifiedTarget>,2> pickpocket_targets{
+                                    native_interaction_aim.pickpocket_target(0,controls_now),native_interaction_aim.pickpocket_target(1,controls_now)};
+                                const auto npc_target=[&](unsigned h) {
+                                    return talk_targets[h]?d2vr::TalkYOwner::Target{talk_targets[h]->identity.object,talk_targets[h]->identity.generation,
+                                            talk_targets[h]->spawn,talk_targets[h]->owner}:
+                                        pickpocket_targets[h]?d2vr::TalkYOwner::Target{pickpocket_targets[h]->identity.object,pickpocket_targets[h]->identity.generation,
+                                            pickpocket_targets[h]->spawn,pickpocket_targets[h]->owner}:d2vr::TalkYOwner::Target{};};
+                                const auto npc_action=[&](unsigned h) {return talk_targets[h]?d2vr::NpcAction::talk:pickpocket_targets[h]?d2vr::NpcAction::pickpocket:d2vr::NpcAction::none;};
+                                const auto npc_holds=[&](unsigned h) {return extra_owns[h] || (h==rh?(gun_owns || hip_draw_reserved || left_gadget.load()):sword_owns);};
+                                std::array<bool,2> npc_owns{};
+                                for(unsigned h=0;h<2;++h) {
+                                    npc_owns[h]=d2vr::npc_trigger_owns_hand(npc_trigger_enabled,talk_targets[h].has_value(),pickpocket_targets[h].has_value(),npc_holds(h));
+                                    const auto r=npc_trigger_owner[h].update(raw_trigger(h)>=.45f,logic==2 && controls_focus && !input.menu_modifier && !x_wheel.wheel() && !npc_holds(h),
+                                        game_xr->pose_epoch(),controls_now,npc_target(h),npc_action(h));
+                                    if(r.interact) npc_trigger_interact[h]=true;
+                                    if(r.consume_trigger) npc_trigger_consume[h]=true;
+                                }
                                 game_xr->y_hold_blocked=talk_target.has_value() || talk_route.owned || x_wheel.wheel() || input.menu_modifier;
                                 // The hold recognizer sampled before this frame's Talk query: recheck ownership before admitting Start.
                                 if(game_xr->y_hold_blocked.load()) input.pause_request=false;
@@ -11594,8 +11633,8 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                     }
                                 }
                                 const auto weapon_owns=[&](unsigned h) {return (h==rh?gun_owns || hip_draw_reserved:sword_owns) || extra_owns[h];}; // the hand's grip holds its weapon
-                                const std::array<float,2> use_input{weapon_owns(0) || talk_targets[0] || (cs==0 && choke_route.consume_use) || !(grip_intent_out[0].use || fist_take[0])?0.f:1.f,
-                                    weapon_owns(1) || talk_targets[1] || (cs==1 && choke_route.consume_use) || !(grip_intent_out[1].use || fist_take[1])?0.f:1.f};
+                                const std::array<float,2> use_input{weapon_owns(0) || talk_targets[0] || npc_owns[0] || (cs==0 && choke_route.consume_use) || !(grip_intent_out[0].use || fist_take[0])?0.f:1.f,
+                                    weapon_owns(1) || talk_targets[1] || npc_owns[1] || (cs==1 && choke_route.consume_use) || !(grip_intent_out[1].use || fist_take[1])?0.f:1.f};
                                 if(logic==2) input.right_grip=0;
                                 if(logic==2) { // a fist never casts, fires or blocks; a trigger pulled first waits 100 ms for its grip
                                     if(!grip_intent_out[0].pass_trigger) input.left_trigger=0;else if(grip_intent_out[0].tap_trigger) input.left_trigger=1;
@@ -11670,8 +11709,8 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                 // Holding a native object: Use would drop it; letting go of the grip drops or throws it instead (HeldRelease).
                                 const bool holding_object=[]{std::lock_guard<std::mutex> l(hand_state_mutex);return hand_holding_object;}();
                                 // A grabbable prop only competes with what the grip would use; the trigger's Use is unaffected.
-                                const std::array<bool,2> hand_target{controller_aim_requested && !talk_targets[0] && native_interaction_aim.has_target(0,controls_now) && !(physical_grab_requested && native_grab.holding(0)) && !holding_object,
-                                    controller_aim_requested && !talk_targets[1] && native_interaction_aim.has_target(1,controls_now) && !(physical_grab_requested && native_grab.holding(1)) && !holding_object};
+                                const std::array<bool,2> hand_target{controller_aim_requested && !talk_targets[0] && !npc_owns[0] && native_interaction_aim.has_target(0,controls_now) && !(physical_grab_requested && native_grab.holding(0)) && !holding_object,
+                                    controller_aim_requested && !talk_targets[1] && !npc_owns[1] && native_interaction_aim.has_target(1,controls_now) && !(physical_grab_requested && native_grab.holding(1)) && !holding_object};
                                 const bool interact_target=hand_target[0] || hand_target[1];
                                 const bool interact_allowed=logic==2 && controls_focus && !input.menu_modifier;
                                 // A trigger press on a hand offered nothing goes straight to the game (no up-to-250 ms wait for a
@@ -11958,6 +11997,14 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                             const bool live=d2vr::attack_allowed(gate);
                                             const double now_s=std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
                                             const auto polls=controller_bridge.virtual_reads();
+                                            // v963 (user: "hold the trigger with the sword to charge a power attack"): the sword hand's
+                                            // held trigger charges a heavy strike. A real swing cancels it; the release past 0.6 fires the
+                                            // game's heavy attack (a longer AttackPress hold) and the next contact hits for power damage.
+                                            {const auto charge=sword_charge.update(raw_trigger(mh),drawn_now,sword_grip.held(),live,game_xr->grip_speeds[mh],f.now_ms);
+                                             if(charge.tick) game_xr->pulse(mh,.18f,.03f);
+                                             if(charge.fired && attack_press.start(f.now_ms,polls,340)) {
+                                                 d2vr::NativeInteractionAim::power_attack_until_.store(f.now_ms+1200,std::memory_order_relaxed);
+                                                 game_xr->pulse(mh,.9f,.12f);++sword_power_attacks;}}
                                             const auto to_vec=[](const d2vr::GV3& v){return d2vr::Vec3{v.x,v.y,v.z};};
                                             auto contact_request=live && !attack_press.active()?d2vr::NativeInteractionAim::take_contact_attack(control_reader,f.now_ms,game_xr->pose_epoch()):std::nullopt;
                                             if(contact_attack_target && !d2vr::NativeInteractionAim::contact_attack_current(control_reader,*contact_attack_target,f.now_ms,game_xr->pose_epoch())) {
@@ -12088,7 +12135,18 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                     grip_use_was=interaction.interact;
                                     const bool cranking=interaction.interact && use_now-grip_use_since>=200 && [&]{auto reader=&read_self;return d2vr::native_cranking(reader,image_base,native_takedowns.machine(reader));}();
                                     if(cranking) ++crank_hold_frames;
-                                    if(interaction.interact && !final_talk_targets[0] && !final_talk_targets[1] && (legacy_corpse_carry || use_now-grip_use_since<200 || cranking)) {
+                                    // v963 (user: "I hold the grip at a keyhole and the game drops the peek"): a door is the one Use
+                                    // target whose held Use is a peek. Latch it on the first gripped frame at a door and keep Use down
+                                    // until that grip is released, even if the native interaction target changes mid-peek. Every other
+                                    // held grip stays the 200 ms press (a held X there is the game's holster/draw toggle, v691).
+                                    const int use_hand=right_grip_interact?1:left_grip_interact?0:-1;
+                                    static bool keyhole_latched=false;static int keyhole_side=-1;
+                                    if(use_hand>=0 && (use_hand?raw_grip(1):raw_grip(0))>.35f && native_interaction_aim.target_is_door(use_hand,use_now)) {
+                                        keyhole_latched=true;keyhole_side=use_hand;}
+                                    if(keyhole_latched && (keyhole_side<0 || (keyhole_side?raw_grip(1):raw_grip(0))<=.35f)) keyhole_latched=false;
+                                    const bool door_hold=keyhole_latched;
+                                    if(door_hold) ++keyhole_hold_frames;
+                                    if((interaction.interact || door_hold) && !final_talk_targets[0] && !final_talk_targets[1] && (legacy_corpse_carry || use_now-grip_use_since<200 || cranking || door_hold)) {
                                         input.x=true;last_use_hand=right_grip_interact?1u:0u;++interact_presses;
                                     }
                                     const auto final_talk=talk_side>=0?final_talk_targets[static_cast<unsigned>(talk_side)]:std::nullopt;
@@ -12340,7 +12398,11 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                 if(note_tablet_requested && d2vr::native_note_reader_logic(logic) && native_note_generation()) {
                                     input.move_y=game_xr->note_scroll_axis();
                                 }
+                                if(npc_trigger_interact[0] || npc_trigger_interact[1]) input.x=true; // v963: the trigger's Talk/Pickpocket Use
+                                if(npc_trigger_consume[0]) input.left_trigger=0;   // claimed by Talk/Pickpocket: never a shot or a cast
+                                if(npc_trigger_consume[1]) input.right_trigger=0;  // nor the sword hand's block
                                 controller_bridge.publish(input,logic==2);
+                                npc_trigger_interact={};npc_trigger_consume={};
                                 published_logic=logic;published_move_x=input.move_x;published_move_y=input.move_y;
                                 native_pad_focus.publish(input.active && game_xr->state==XR_SESSION_STATE_FOCUSED,GetTickCount64());
                             }
@@ -13450,6 +13512,8 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
         vr_combat_enabled=!fs::exists(root/L"build"/L"legacy-combat");vr_combat.reset();
         wheel_step_realtime_enabled=!fs::exists(root/L"build"/L"wheel-slow-steps");
         dual_wield_enabled=fs::exists(root/L"build"/L"dual-wield");hand_loadout={};melee_hand=1;extra_kinds=0;extra_owns={};
+        npc_trigger_enabled=!fs::exists(root/L"build"/L"no-npc-trigger");npc_trigger_consume={}; // v963: NPC actions on the trigger (default on)
+        d2vr::GlyphSwap::talk_on_trigger.store(npc_trigger_enabled,std::memory_order_relaxed); // the Talk prompt says Trig, or Y with the feature off
         d2vr::grab_carryables=dual_wield_enabled && fs::exists(root/L"build"/L"grab-bottles"); // v788 experiment, off: bottles stay the game's HoldObject (user: the pickup works)
         d2vr::NativeManualEquipRuntime::hold_no_lock=dual_wield_enabled && !fs::exists(root/L"build"/L"hold-locks-sword"); // v789: a bottle never locks the sword hand
         d2vr::NativeWeaponHands::dual_wield(dual_wield_enabled);
@@ -13457,7 +13521,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
         d2vr::NativeInteractionAim::legacy_contact_=legacy_sword_contact;
         takedown_anchor_frames=0;takedown_anchor_object_conflicts=0;
         prompt_target_anchor=true; // captured target ownership is required; legacy knob cannot erase identity evidence
-        d2vr::NativeInteractionAim::intent_contact_tick_=0;d2vr::NativeInteractionAim::intent_episode_=d2vr::SlowRejectLatch{};attack_intent=d2vr::AttackIntent{};attack_press=d2vr::AttackPress{};attack_honour=d2vr::AttackHonour{};attack_intent_owns=attack_intent_rt=false;attack_intent_pad_frames=0;attack_intent_honour_read=false;
+        d2vr::NativeInteractionAim::intent_contact_tick_=0;d2vr::NativeInteractionAim::intent_episode_=d2vr::SlowRejectLatch{};attack_intent=d2vr::AttackIntent{};attack_press=d2vr::AttackPress{};attack_honour=d2vr::AttackHonour{};sword_charge.reset();sword_power_attacks=0;d2vr::NativeInteractionAim::power_attack_until_=0;attack_intent_owns=attack_intent_rt=false;attack_intent_pad_frames=0;attack_intent_honour_read=false;
         assassination_receipt_requested=head_requested && fs::exists(root/L"build"/L"assassination-receipts");
         if(assassination_receipt_requested &&
            !d2vr::NativeAssassinationReceipt::process_owner().start(image_base,&read_self,output))

@@ -18,6 +18,7 @@ inline constexpr std::uintptr_t selector_rva=0x747840;
 inline constexpr std::uintptr_t talk_offset=0xe8;
 inline constexpr std::uintptr_t busy_talk_offset=0x110;
 inline constexpr std::uintptr_t loot_offset=0x98;
+inline constexpr std::uintptr_t pickpocket_offset=0xc0;   // v963: the NPC's pocket, a primary offer like Talk/Loot
 inline constexpr std::uint32_t no_spawn=0x3fff0010u;
 
 template<class Read>

@@ -19,7 +19,7 @@ int main() {
         int sections=0,bullets=0,pages=0,figures=0;
         for(const auto& i:items) {sections+=i.kind==GuideItem::section;bullets+=i.kind==GuideItem::bullet;pages+=i.kind==GuideItem::page;figures+=i.kind==GuideItem::figure;
             if(i.kind==GuideItem::bullet) require(!i.key.empty() && !i.text.empty(),"A bullet lost its bold input or description");}
-        require(!errors && !items.empty() && items[0].kind==GuideItem::title && sections==5 && bullets==26 && pages==3 && figures==2,"Guide directives, headings or bullets did not parse");
+        require(!errors && !items.empty() && items[0].kind==GuideItem::title && sections==5 && bullets==27 && pages==3 && figures==2,"Guide directives, headings or bullets did not parse");
         require(parse_controls_guide(md+"\n<!-- unrelated comment -->\n").size()==items.size(),"Unrelated comments must be ignored");
         errors=0;const auto invalid=parse_controls_guide("<!-- vr-page:../../outside|Bad -->\n<!-- vr-figure:unknown|Bad -->\n<!-- vr-page:moving -->\n",&errors);
         require(errors==3 && invalid.empty(),"Unknown and malformed directive ids must be rejected safely");

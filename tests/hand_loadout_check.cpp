@@ -50,6 +50,14 @@ int main() {
         assert(!l.pickup(1,E::guard_sword,true,false) && l.extra[1]==E::guard_sword); // a guard's weapon is always mod-owned
         l.wheel_second(0,E::none);assert(l.extra[1]==E::guard_sword);           // the wheel never takes the other hand's guard sword
     }
+    {   // v963 (user, headset v962: "choosing the Heart makes the weapon in the other hand disappear"): the other hand's sword
+        // (or its own copy) is not replaced by the displaced native gun; a free other hand still keeps it as a copy.
+        using E=HandLoadout::Extra;HandLoadout l;                             // left native pistol, right sword; the right wheel picks the Heart
+        HandLoadout::In in{};in.wheel_hand=1;assert(l.update(in) && l.melee==0 && l.ranged()==1);
+        l.wheel_second(1,E::pistol,true);assert(l.extra[0]==E::none && l.extra[1]==E::none); // the left keeps the sword native, the pistol stays in the inventory
+        HandLoadout k;HandLoadout::In k2{};k2.wheel_hand=1;assert(k.update(k2) && k.melee==0);
+        k.wheel_second(1,E::pistol,false);assert(k.extra[0]==E::pistol && k.extra[1]==E::none); // a free hand gets the copy
+    }
     {   // v759: a wheel route survives the other hand gripping its gun (headset v757: two pistols, crossbow + pistol never came)
         assert(!HandLoadout::wheel_route_lost(false,1,0,true,true));             // the right wheel while the left grips its pistol
         assert(!HandLoadout::wheel_route_lost(false,1,0,true,false));            // the left grips its gun after the commit: still the right wheel's item

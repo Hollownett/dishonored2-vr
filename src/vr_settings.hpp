@@ -221,7 +221,7 @@ public:
             case 2:return L"Anti-aliasing: FSR 3 Native";
             case 3:return L"Anti-aliasing: FSR 3 Quality (77%)";
             case 4:return L"Anti-aliasing: FSR 3 Balanced (67%)";
-            default:return L"Anti-aliasing: Off";
+            default:return L"Anti-aliasing: Off (SMAA if Edge AA is on)";
         }
     }
     const wchar_t* hud_text() const noexcept {

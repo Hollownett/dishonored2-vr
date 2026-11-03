@@ -46,9 +46,13 @@ struct HandLoadout {
     // The wheel gave the hand that opened it (`hand`) a slot-1 item natively. The other hand keeps what it held: a native gun or crossbow
     // it held becomes its mod-owned copy (`other_had`: what that hand's native slot 1 was; Extra::none for a power, grenade or nothing).
     // `same_item`: the wheel chose what slot 1 already held (two pistols): the other hand keeps a copy of it.
-    void wheel_second(unsigned hand,Extra other_had) noexcept {
+    // v963 (user, headset v962: "when I choose the Heart the weapon in my other hand disappears"): `other_occupied` is the other hand's
+    // sword (drawn or held) or its own mod-owned weapon. The old call put the displaced gun copy into that hand even when it held a
+    // sword, so the sword vanished under a gun the player never took. An occupied hand keeps exactly what it had; the displaced gun
+    // stays in the inventory (it can be drawn again from the hip or the wheel).
+    void wheel_second(unsigned hand,Extra other_had,bool other_occupied=false) noexcept {
         const unsigned other=hand^1u;
-        if(gun(other_had) && extra[other]==Extra::none && other==melee) extra[other]=other_had;
+        if(!other_occupied && gun(other_had) && extra[other]==Extra::none && other==melee) extra[other]=other_had;
         extra[hand]=Extra::none;
     }
     // A hand picks up a gun lying in the world (or a guard's weapon): native when slot 1 is free and the hand can drive it, else mod-owned.
