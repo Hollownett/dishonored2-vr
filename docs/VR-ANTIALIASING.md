@@ -41,8 +41,8 @@ The runtime's `maxImageRect` can clamp the XR eye. v976 separates the XR eye fro
 runtime max is below the requested scale, the game renders the full size and `EyeResolve` box-filters it down before
 submission. On the user's current Virtual Desktop High runtime 150% was accepted directly as 3744x4032 (no resolve);
 the 125% entry remains 3120x3360. Above 125% the resolution slider now produces real supersampling; 200% would be
-4992x5376, a 4x-pixel SSAA. The launcher/AA stepper offers SSAA 125% (pure samples) and **SSAA 150% + SMAA** (1.44x
-samples plus the one-pass 0.03 edge filter). v977 additionally forces the engine's dynamic resolution (`rs_enable`) off
+4992x5376, a 4x-pixel SSAA. The launcher/AA stepper offers SSAA 125% (pure samples) and **SSAA 200% + SMAA** (4x the pixels of 100%,
+2.56x the samples of 125%, plus the one-pass 0.03 edge filter). v977 additionally forces the engine's dynamic resolution (`rs_enable`) off
 in temporal-off modes every 100 ms, so it cannot silently render at 0.77x and make the resolution increase a no-op;
 `game_source_size` / `game_render_size` / `dynamic_scale_forces` in the status prove it.
 
