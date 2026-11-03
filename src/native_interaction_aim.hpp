@@ -2349,6 +2349,29 @@ public:
         const NativeInteractionTargetIdentity identity{offer->component,target_generation_[side],static_cast<unsigned>(side),hands_[side].epoch,1};
         return QualifiedTarget{identity,offer->owner,offer->spawn,hands_[side].tick,target_tick_[side],{}};
     }
+    // v966: the raw native primary action for this hand (declaration+offset), independent of the strict Talk/Loot receipt.
+    // The headset's Talk prompt is often drawn from this offer while native_talk_offer_current rejects the receipt, which left
+    // Talk/pickpocket on the grip and its X hint. +0xe8/+0x110 are Talk, +0xc0 Pickpocket.
+    enum class NpcOfferKind {none,talk,pickpocket};
+    struct NpcOffer {
+        NpcOfferKind kind{};std::uintptr_t component{},owner{};unsigned spawn{};int generation{-1};
+        explicit operator bool() const noexcept {return kind!=NpcOfferKind::none && component && generation>=0 && spawn;}
+    };
+    NpcOffer npc_offer(int side,std::uint64_t now) {
+        if(side<0 || side>1) return {};
+        std::lock_guard<std::mutex> lock(mutex_);
+        const auto at=static_cast<unsigned>(side);
+        if(!live_target(at,now) || !target_object_[at]) return {};
+        const auto kind_of=[](std::int64_t offset) {
+            if(offset==static_cast<std::int64_t>(native_talk_offer_detail::pickpocket_offset)) return NpcOfferKind::pickpocket;
+            if(offset==static_cast<std::int64_t>(native_talk_offer_detail::talk_offset) ||
+               offset==static_cast<std::int64_t>(native_talk_offer_detail::busy_talk_offset)) return NpcOfferKind::talk;
+            return NpcOfferKind::none;};
+        auto kind=kind_of(loot_primary_offset_[at]);
+        if(kind==NpcOfferKind::none) kind=kind_of(loot_secondary_offset_[at]);   // Talk is the secondary offer on some NPCs
+        if(kind==NpcOfferKind::none) return {};
+        return {kind,target_object_[at],target_owner_[at],target_spawn_[at],target_generation_[at]};
+    }
 private:
     bool live_loot_offer(unsigned side,std::uint64_t now) {
         if(side>=2 || !live_target(side,now))return false;

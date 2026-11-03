@@ -3506,6 +3506,7 @@ static std::atomic<unsigned> scabbard_entries{},holster_fires{}; // the right ha
 // hand_loadout is the control thread's; melee_hand mirrors its melee hand for the render thread. Knob off: always 1 (the game's hands).
 static bool dual_wield_enabled=false;static d2vr::HandLoadout hand_loadout;static std::atomic<unsigned> melee_hand{1};static std::atomic<unsigned> dual_wield_swaps{};
 static bool npc_trigger_enabled=true;static std::array<bool,2> npc_trigger_consume{};static std::array<bool,2> npc_trigger_interact{};static std::array<d2vr::NpcTriggerOwner,2> npc_trigger_owner{}; // v963: Talk/Pickpocket on the hand's trigger
+static std::atomic<UINT64> npc_trigger_uses{},npc_prompt_frames{}; // v966 diagnostics: trigger Use frames, native prompts painted "Trig"
 bool dual_wield_on() noexcept {return dual_wield_enabled;}
 static std::atomic<unsigned> authored_arm_bits{}; // render thread: arms an authored clip or player state owns this frame
 static std::atomic<unsigned> extra_kinds{}; // hand_loadout.extra for the render thread: 4 bits per hand (HandLoadout::Extra)
@@ -8431,7 +8432,8 @@ std::string feedback_status_json() {
     out << ",\"native_offer_controls\":{\"choke_observer_enabled\":"
         << (d2vr::NativeOfferedChoke::process_owner().enabled()?"true":"false")
         << ",\"offered_choke_frames\":" << offered_choke_hint_frames.load() << ",\"choke_input_frames\":" << choke_input_frames.load()
-        << ",\"talk_y_input_frames\":" << talk_y_input_frames.load() << ",\"choke_range_widened\":false,\"observer\":{\"updates\":"
+        << ",\"talk_y_input_frames\":" << talk_y_input_frames.load() << ",\"npc_trigger_interact_frames\":" << npc_trigger_uses.load()
+        << ",\"npc_prompt_trig_frames\":" << npc_prompt_frames.load() << ",\"choke_range_widened\":false,\"observer\":{\"updates\":"
         << choke_diagnostics.updates << ",\"hints\":" << choke_diagnostics.hints << ",\"exact_candidates\":" << choke_diagnostics.exact_candidates
         << ",\"published\":" << choke_diagnostics.published << ",\"rejected\":{";
     constexpr std::array<const char*,7> choke_rejection_names{"disabled","missing_receipt","expired","record","owner","epoch","no_hint"};
@@ -8937,7 +8939,12 @@ void native_hud_draw_observer(std::uintptr_t iggy,UINT64 tick) noexcept {
         d2vr::NativeHudChildDraw::refresh_wrist(native_art_hud_file.load(),iggy,native_art_pose_epoch.load(),tick);
         const auto target=native_interaction_aim.prompt_identity(tick).value_or([&]{const auto td=takedown_prompt(tick);return td?td->identity:d2vr::NativeInteractionTargetIdentity{};}());
         const auto talk=native_interaction_aim.talk_target(static_cast<int>(target.side),tick);
-        d2vr::NativeHudChildDraw::refresh_prompt(native_art_hud_file.load(),iggy,native_art_pose_epoch.load(),tick,target,talk && talk->identity==target,native_interaction_aim.prompt_completions());
+        // v966: the raw native Talk/Pickpocket offer is what the prompt's X glyph belongs to, even when the strict Talk receipt
+        // is absent; paint it "Trig" instead of the grip's "Grip".
+        const bool npc_prompt=npc_trigger_enabled && target && native_interaction_aim.npc_offer(static_cast<int>(target.side),tick);
+        if(npc_prompt) ++npc_prompt_frames;
+        d2vr::NativeHudChildDraw::refresh_prompt(native_art_hud_file.load(),iggy,native_art_pose_epoch.load(),tick,target,
+            (talk && talk->identity==target) || npc_prompt,native_interaction_aim.prompt_completions());
     } catch(...) {}
 }
 void dump_wrist_diagnostics() {
@@ -11558,19 +11565,26 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                 // the deliberate neck choke. Feature: absent build/no-npc-trigger.
                                 const std::array<std::optional<d2vr::NativeInteractionAim::QualifiedTarget>,2> pickpocket_targets{
                                     native_interaction_aim.pickpocket_target(0,controls_now),native_interaction_aim.pickpocket_target(1,controls_now)};
+                                // v966: the native prompt's raw primary action (Talk/Pickpocket) is the receipt the headset usually has.
+                                const std::array<d2vr::NativeInteractionAim::NpcOffer,2> npc_offers{
+                                    native_interaction_aim.npc_offer(0,controls_now),native_interaction_aim.npc_offer(1,controls_now)};
                                 const auto npc_target=[&](unsigned h) {
-                                    return talk_targets[h]?d2vr::TalkYOwner::Target{talk_targets[h]->identity.object,talk_targets[h]->identity.generation,
-                                            talk_targets[h]->spawn,talk_targets[h]->owner}:
-                                        pickpocket_targets[h]?d2vr::TalkYOwner::Target{pickpocket_targets[h]->identity.object,pickpocket_targets[h]->identity.generation,
-                                            pickpocket_targets[h]->spawn,pickpocket_targets[h]->owner}:d2vr::TalkYOwner::Target{};};
-                                const auto npc_action=[&](unsigned h) {return talk_targets[h]?d2vr::NpcAction::talk:pickpocket_targets[h]?d2vr::NpcAction::pickpocket:d2vr::NpcAction::none;};
+                                    if(talk_targets[h]) return d2vr::TalkYOwner::Target{talk_targets[h]->identity.object,talk_targets[h]->identity.generation,
+                                        talk_targets[h]->spawn,talk_targets[h]->owner};
+                                    if(pickpocket_targets[h]) return d2vr::TalkYOwner::Target{pickpocket_targets[h]->identity.object,pickpocket_targets[h]->identity.generation,
+                                        pickpocket_targets[h]->spawn,pickpocket_targets[h]->owner};
+                                    if(npc_offers[h]) return d2vr::TalkYOwner::Target{npc_offers[h].component,npc_offers[h].generation,npc_offers[h].spawn,npc_offers[h].owner};
+                                    return d2vr::TalkYOwner::Target{};};
+                                const auto npc_action=[&](unsigned h) {return talk_targets[h]?d2vr::NpcAction::talk:pickpocket_targets[h]?d2vr::NpcAction::pickpocket:
+                                    npc_offers[h].kind==d2vr::NativeInteractionAim::NpcOfferKind::pickpocket?d2vr::NpcAction::pickpocket:
+                                    npc_offers[h].kind==d2vr::NativeInteractionAim::NpcOfferKind::talk?d2vr::NpcAction::talk:d2vr::NpcAction::none;};
                                 const auto npc_holds=[&](unsigned h) {return extra_owns[h] || (h==rh?(gun_owns || hip_draw_reserved || left_gadget.load()):sword_owns);};
                                 std::array<bool,2> npc_owns{};
                                 for(unsigned h=0;h<2;++h) {
-                                    npc_owns[h]=d2vr::npc_trigger_owns_hand(npc_trigger_enabled,talk_targets[h].has_value(),pickpocket_targets[h].has_value(),npc_holds(h));
+                                    npc_owns[h]=npc_trigger_enabled && !npc_holds(h) && (talk_targets[h] || pickpocket_targets[h] || npc_offers[h]);
                                     const auto r=npc_trigger_owner[h].update(raw_trigger(h)>=.45f,logic==2 && controls_focus && !input.menu_modifier && !x_wheel.wheel() && !npc_holds(h),
                                         game_xr->pose_epoch(),controls_now,npc_target(h),npc_action(h));
-                                    if(r.interact) npc_trigger_interact[h]=true;
+                                    if(r.interact) {npc_trigger_interact[h]=true;++npc_trigger_uses;}
                                     if(r.consume_trigger) npc_trigger_consume[h]=true;
                                 }
                                 game_xr->y_hold_blocked=talk_target.has_value() || talk_route.owned || x_wheel.wheel() || input.menu_modifier;
@@ -13521,7 +13535,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
         d2vr::NativeInteractionAim::legacy_contact_=legacy_sword_contact;
         takedown_anchor_frames=0;takedown_anchor_object_conflicts=0;
         prompt_target_anchor=true; // captured target ownership is required; legacy knob cannot erase identity evidence
-        d2vr::NativeInteractionAim::intent_contact_tick_=0;d2vr::NativeInteractionAim::intent_episode_=d2vr::SlowRejectLatch{};attack_intent=d2vr::AttackIntent{};attack_press=d2vr::AttackPress{};attack_honour=d2vr::AttackHonour{};sword_charge.reset();sword_power_attacks=0;d2vr::NativeInteractionAim::power_attack_until_=0;attack_intent_owns=attack_intent_rt=false;attack_intent_pad_frames=0;attack_intent_honour_read=false;
+        d2vr::NativeInteractionAim::intent_contact_tick_=0;d2vr::NativeInteractionAim::intent_episode_=d2vr::SlowRejectLatch{};attack_intent=d2vr::AttackIntent{};attack_press=d2vr::AttackPress{};attack_honour=d2vr::AttackHonour{};sword_charge.reset();sword_power_attacks=0;d2vr::NativeInteractionAim::power_attack_until_=0;npc_trigger_uses=0;npc_prompt_frames=0;attack_intent_owns=attack_intent_rt=false;attack_intent_pad_frames=0;attack_intent_honour_read=false;
         assassination_receipt_requested=head_requested && fs::exists(root/L"build"/L"assassination-receipts");
         if(assassination_receipt_requested &&
            !d2vr::NativeAssassinationReceipt::process_owner().start(image_base,&read_self,output))

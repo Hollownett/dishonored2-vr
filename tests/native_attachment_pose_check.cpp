@@ -211,6 +211,10 @@ struct NativeAttachmentPoseCheck {
             source.tick=GetTickCount64()-5;source.revision=base.revision+1;policy();   // policy is now one sample ahead of `behind`
             assert(pose.publish(1,animation,native,tracked,behind));assert(call(true)==17);
             assert(pose.counters().grace_accepts==before.grace_accepts+1);
+            // v966: the same revision, one tick behind (the head-view thread advanced the tick only) is the common production case.
+            auto same_revision=source;same_revision.revision=source.revision;same_revision.tick=GetTickCount64()-20;
+            assert(pose.publish(1,animation,native,tracked,same_revision));assert(call(true)==17);
+            assert(pose.counters().grace_accepts==before.grace_accepts+2);
             // fallback_after_grace_window: a pose older than the grace window is refused (and the stale palette dropped)
             auto old=behind;old.tick=GetTickCount64()-(NativeAttachmentPose::publish_grace_ms+20);
             assert(!pose.publish(1,animation,native,tracked,old));assert(call(false)==17 && !pose.sides_[1].animation);

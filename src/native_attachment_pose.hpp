@@ -119,11 +119,12 @@ private:
         return source_retained(source,now) && source.tick==policy_tick_ && source.revision==policy_revision_;
     }
     // The solve a worker publishes can be one tracking sample behind the policy: the head-view thread published the next sample
-    // between the arm solve and this publication. Same epochs, a strictly older tick and revision, and no more than
-    // publish_grace_ms old is still the pose the player saw a moment ago; refusing it dropped the palette (hand and sword fell back
-    // to the native arm) for that upload. A different epoch or mapping, a backward revision at the same tick, or an older pose is refused as before.
+    // between the solve and this publication. A strictly older tick is the common production case (the arm upload revision is
+    // shared by both hands and the head-view thread advances only the tick), so the tick alone decides; an equal tick with an older
+    // revision is a replayed sample and is still refused. v966 (headset arm_flicker: grace_accepts 0, rejects_policy 6326,
+    // fallbacks ~3200 with reads_previous 65067).
     bool source_in_grace(const NativeAttachmentSource& source,std::uint64_t now) const {
-        return source_retained(source,now) && source.tick<policy_tick_ && source.revision<policy_revision_ &&
+        return source_retained(source,now) && source.tick<policy_tick_ &&
             now-source.tick<=publish_grace_ms && (!source.source_tick || now-source.source_tick<=publish_grace_ms);
     }
     bool frame_current(std::uintptr_t animation,const NativeAttachmentSource& source,bool exact) const {
