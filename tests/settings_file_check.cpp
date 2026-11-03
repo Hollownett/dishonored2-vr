@@ -17,9 +17,9 @@ int main(int argc,char** argv) {
                                 p.player_measurements,p.aa_chosen,p.crosshair,p.scripted_recenter,p.cutscene_mode);
             settings.performance_mode(true);settings.effective_temporal_aa(0);settings.dlss_available(true);
             const auto rows=d2vr::native_settings::rows(settings);
-            // v974: temporal 0 + Edge AA on is SMAA; temporal 0 + Edge AA off at 125% is the SSAA preset (the last entry).
+            // v975: temporal 0 + Edge AA on is SMAA; temporal 0 + Edge AA off at 125%/150% is SSAA 125%/150%.
             const int entries=static_cast<int>(rows[d2vr::native_settings::temporal].values.size());
-            const int shown=mode!=0?mode:(std::abs(p.resolution-1.25)<.001 && !p.antialiasing?entries-1:(p.antialiasing?entries-2:0));
+            const int shown=mode!=0?mode:(p.antialiasing?entries-3:(std::abs(p.resolution-1.5)<.001?entries-1:(std::abs(p.resolution-1.25)<.001?entries-2:0)));
             require(rows[d2vr::native_settings::temporal].value==shown,"native page lost the requested AA mode");
             std::vector<int> values;for(const auto& row:rows)values.push_back(row.kind==d2vr::NativeOptionsPage::Kind::action?-1:row.value);
             values[d2vr::native_settings::hud]=settings.hud_percent()==150?1:6;

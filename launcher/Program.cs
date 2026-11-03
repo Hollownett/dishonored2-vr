@@ -90,7 +90,8 @@ sealed class MainForm : Form
     static readonly (string text, object val)[] AaDlss = { ("DLAA (NVIDIA DLSS)", 7), ("DLSS - quality (NVIDIA DLSS)", 8) };
     static readonly (string text, object val) AaSmaa = ("SMAA - edge anti-aliasing", 9);
     static readonly (string text, object val) AaSmaaSsaa = ("SSAA 125% - MSAA-equivalent clarity", 10);
-    const string AaHelp = "The default follows your GPU: DLAA on NVIDIA RTX with DLSS, FSR 4 native where FSR 4 runs, otherwise FSR 3 native. Quality/balanced render fewer pixels for speed. SMAA is its own edge anti-aliasing mode with no temporal pass. SSAA 125% renders 25% more pixels per axis and does not use SMAA: supersampling is the deferred renderer's MSAA equivalent (it cannot use hardware MSAA). The in-game VR menu can change it at any time.";
+    static readonly (string text, object val) AaSmaaSsaa150 = ("SSAA 150% - thin distant edges", 11);
+    const string AaHelp = "The default follows your GPU: DLAA on NVIDIA RTX with DLSS, FSR 4 native where FSR 4 runs, otherwise FSR 3 native. Quality/balanced render fewer pixels for speed. SMAA is its own edge anti-aliasing mode with no temporal pass. SSAA 125% renders 25% more pixels per axis and does not use SMAA; SSAA 150% renders 50% more for thin distant geometry. Supersampling is the deferred renderer's MSAA equivalent (it cannot use hardware MSAA). Choose SSAA in the launcher before starting: a mid-session resolution change recreates every XR surface and Virtual Desktop can fault. The in-game VR menu can change it at any time.";
     IReadOnlyList<Feature> features = Array.Empty<Feature>();
     string? featuresError; bool showFeatures, loadingFeatures;
     Control settingsLast = null!;  // the last button of the row; the message line sits to its right
@@ -411,6 +412,7 @@ sealed class MainForm : Form
         if (offered) foreach (var (t, v) in AaDlss) aa.Items.Add(new Item(t, v));
         aa.Items.Add(new Item(AaSmaa.text, AaSmaa.val)); // v963: SMAA is a listed AA mode, not only an edge toggle
         aa.Items.Add(new Item(AaSmaaSsaa.text, AaSmaaSsaa.val)); // v973: one-click MSAA-equivalent supersample + SMAA
+        aa.Items.Add(new Item(AaSmaaSsaa150.text, AaSmaaSsaa150.val)); // v975: more samples for thin distant geometry
         aaHelpBase = offered ? AaHelp + " " + DlssProvider.Attribution : AaHelp; // the attribution the DLSS licence asks for, where the modes are offered
         RefreshAaNote();
         Select(aa, current, $"Mode {current}");
@@ -839,6 +841,7 @@ sealed class MainForm : Form
         e.Resolution = res.Value / 100.0; e.TemporalAa = Val<int>(aa);
         if (e.TemporalAa == Prefs.SmaaMode) e.Aa = 1;      // SMAA is mode 0 with Edge AA on
         else if (e.TemporalAa == Prefs.SmaaSsaaMode) { e.Aa = 0; e.Resolution = 1.25; } // SSAA: supersampling only
+        else if (e.TemporalAa == Prefs.SmaaSsaa150Mode) { e.Aa = 0; e.Resolution = 1.5; } // SSAA 150%
         else if (e.TemporalAa == 0) { e.Aa = 0; if (Math.Abs(e.Resolution - 1.25) < .001) e.Resolution = 1.0; } // Off leaves the SSAA preset's resolution
         e.Hud = Val<int>(hud); e.Mode = Val<int>(turn);
         e.SnapDeg = Val<double>(snap); e.SmoothDps = Val<double>(smooth); e.Mirror = Val<int>(mirror); e.Sharpness = Val<double>(sharp);

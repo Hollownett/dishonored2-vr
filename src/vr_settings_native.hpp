@@ -37,14 +37,16 @@ inline std::vector<int> temporal_values(const VrSettings& s) {
     if(s.dlss_available()) {v.push_back(7);v.push_back(8);}
     else if(s.temporal_aa()>=7) v.push_back(s.temporal_aa()); // an unoffered saved DLSS mode, shown truthfully
     v.push_back(9);
-    v.push_back(10); // SMAA + 125% SSAA: the deferred-renderer equivalent of MSAA clarity
+    v.push_back(10); // SSAA 125%: the deferred-renderer equivalent of MSAA clarity
+    v.push_back(11); // SSAA 150%: more samples for thin distant geometry
     return v;
 }
-// The stepper index shown for the saved anti-aliasing mode: temporal 0 with Edge AA on is the SMAA entry;
-// when that also carries the 125% supersample it is the SMAA + SSAA entry.
+// The stepper index shown for the saved anti-aliasing mode: temporal 0 with Edge AA on is SMAA; without Edge AA,
+// 125%/150% resolution is the SSAA preset.
 inline int temporal_shown(const VrSettings& s) {
     const auto values=temporal_values(s);
-    const int want=s.temporal_aa()==0?(std::abs(s.requested()-1.25)<.001 && !s.antialiasing()?10:(s.antialiasing()?9:0)):s.temporal_aa();
+    const int want=s.temporal_aa()!=0?s.temporal_aa():
+        (s.antialiasing()?9:(std::abs(s.requested()-1.5)<.001?11:(std::abs(s.requested()-1.25)<.001?10:0)));
     const auto found=std::find(values.begin(),values.end(),want);
     return found==values.end()?0:static_cast<int>(found-values.begin());
 }
@@ -66,6 +68,7 @@ inline std::vector<NativeOptionsPage::Row> rows(const VrSettings& s) {
         case 7: aa_modes.push_back(s.dlss_available()?"DLAA (NVIDIA DLSS)":"DLAA (unavailable, FSR 3)");break;
         case 8: aa_modes.push_back(s.dlss_available()?"DLSS Quality (NVIDIA)":"DLSS Quality (unavailable, FSR 3)");break;
         case 10: aa_modes.push_back("SSAA 125% (MSAA-equivalent)");break;
+        case 11: aa_modes.push_back("SSAA 150% (thin edges)");break;
         default: aa_modes.push_back("SMAA (edge anti-aliasing)");break;
     }
     std::string aa_help="Smooths shimmering edges. Game TAA is the original; FSR Native uses full resolution; Quality and Balanced upscale. SMAA runs on its own with no temporal AA.";
@@ -98,9 +101,10 @@ inline VrSettings::Changes apply(VrSettings& s,const std::vector<int>& v) {
     {const auto values=temporal_values(s);
      if(const int x=at(temporal);x>=0 && x<static_cast<int>(values.size()) && x!=temporal_shown(s)) {
          const int mode=values[static_cast<std::size_t>(x)];
-         if(mode==0) {s.set_temporal_aa(0);s.set_antialiasing(false);if(std::abs(s.requested()-1.25)<.001){s.set_requested(1.0);c.resolution=1.0;}c.temporal_aa=0;c.antialiasing=false;aa_stepper_forced=true;}
+         if(mode==0) {s.set_temporal_aa(0);s.set_antialiasing(false);if(std::abs(s.requested()-1.25)<.001||std::abs(s.requested()-1.5)<.001){s.set_requested(1.0);c.resolution=1.0;}c.temporal_aa=0;c.antialiasing=false;aa_stepper_forced=true;}
          else if(mode==9) {s.set_temporal_aa(0);s.set_antialiasing(true);c.temporal_aa=0;c.antialiasing=true;aa_stepper_forced=true;}
          else if(mode==10) {s.set_temporal_aa(0);s.set_antialiasing(false);s.set_requested(1.25);c.temporal_aa=0;c.antialiasing=false;c.resolution=1.25;aa_stepper_forced=true;}
+         else if(mode==11) {s.set_temporal_aa(0);s.set_antialiasing(false);s.set_requested(1.5);c.temporal_aa=0;c.antialiasing=false;c.resolution=1.5;aa_stepper_forced=true;}
          else {s.set_temporal_aa(mode);c.temporal_aa=mode;}
      }}
     // Off/SMAA in the mode list already decided Edge AA; the stale toggle value read from the same page must not undo it.
