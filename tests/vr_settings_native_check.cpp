@@ -11,7 +11,7 @@ int main() {
     const auto rows=ns::rows(s);
     expect(rows.size()==ns::count,"one row per setting and action");
     expect(rows[ns::resolution].kind==NativeOptionsPage::Kind::slider && rows[ns::resolution].value==120,"resolution slider in percent");
-    expect(rows[ns::temporal].values.size()==7 && rows[ns::temporal].value==2,"anti-aliasing stepper on the current mode");
+    expect(rows[ns::temporal].values.size()==8 && rows[ns::temporal].value==2,"anti-aliasing stepper on the current mode (Off..FSR 4 + SMAA)");
     expect(rows[ns::hud].value==1 && rows[ns::turning].value==1 && rows[ns::mirror].value==2,"choices select the current values");
     expect(rows[ns::calibrate].kind==NativeOptionsPage::Kind::action,"calibration is an action row");
     for(const auto& r:rows) expect(!r.label.empty() && !r.description.empty(),"every row is labelled and described");
@@ -27,23 +27,33 @@ int main() {
     v[ns::resolution]=999;v[ns::hud]=99;expect(!ns::apply(s,v).resolution && !ns::apply(s,v).hud_percent,"out-of-range values are ignored");
     {   // DLAA/DLSS Quality rows (with the NVIDIA attribution) appear only while DLSS is offered.
         s.dlss_available(true);const auto offered=ns::rows(s);
-        expect(offered[ns::temporal].values.size()==9 && offered[ns::temporal].values[7]=="DLAA (NVIDIA DLSS)" && offered[ns::temporal].values[8]=="DLSS Quality (NVIDIA)" &&
-            offered[ns::temporal].description.find("NVIDIA DLSS")!=std::string::npos,"DLSS rows and attribution when offered");
+        expect(offered[ns::temporal].values.size()==10 && offered[ns::temporal].values[7]=="DLAA (NVIDIA DLSS)" && offered[ns::temporal].values[8]=="DLSS Quality (NVIDIA)" &&
+            offered[ns::temporal].values[9]=="SMAA (edge anti-aliasing)" && offered[ns::temporal].description.find("NVIDIA DLSS")!=std::string::npos,"DLSS rows and attribution when offered");
         std::vector<int> w;for(const auto& r:offered) w.push_back(r.kind==NativeOptionsPage::Kind::action?-1:r.value);
         w[ns::temporal]=8;expect(ns::apply(s,w).temporal_aa && s.temporal_aa()==8,"DLSS Quality applies when offered");
         s.dlss_available(false);const auto hidden=ns::rows(s);
-        expect(hidden[ns::temporal].values.size()==8 && hidden[ns::temporal].value==7 && hidden[ns::temporal].values[7]=="DLSS Quality (unavailable, FSR 3)" &&
-            hidden[ns::temporal].description.find("NVIDIA")==std::string::npos,"a saved DLSS mode shows as its own unavailable entry without DLSS");
+        expect(hidden[ns::temporal].values.size()==9 && hidden[ns::temporal].value==7 && hidden[ns::temporal].values[7]=="DLSS Quality (unavailable, FSR 3)" &&
+            hidden[ns::temporal].values[8]=="SMAA (edge anti-aliasing)" && hidden[ns::temporal].description.find("NVIDIA")==std::string::npos,"a saved DLSS mode shows as its own unavailable entry without DLSS");
         // Applying the page's own current values (the user changed another row) never rewrites the saved DLSS mode.
         std::vector<int> current;for(const auto& r:hidden) current.push_back(r.kind==NativeOptionsPage::Kind::action?-1:r.value);
         current[ns::hud]=0;const auto other=ns::apply(s,current);
         expect(!other.temporal_aa && s.temporal_aa()==8 && other.hud_percent,"changing another row keeps a saved unoffered DLSS mode");
         s.set_temporal_aa(7);const auto dlaa=ns::rows(s);
-        expect(dlaa[ns::temporal].values.size()==8 && dlaa[ns::temporal].value==7 && dlaa[ns::temporal].values[7]=="DLAA (unavailable, FSR 3)","saved DLAA shows its own entry");
+        expect(dlaa[ns::temporal].values.size()==9 && dlaa[ns::temporal].value==7 && dlaa[ns::temporal].values[7]=="DLAA (unavailable, FSR 3)" && dlaa[ns::temporal].values[8]=="SMAA (edge anti-aliasing)","saved DLAA shows its own entry");
         current[ns::temporal]=7;expect(!ns::apply(s,current).temporal_aa && s.temporal_aa()==7,"re-applying the unavailable entry keeps DLAA");
         current[ns::temporal]=6;expect(ns::apply(s,current).temporal_aa && s.temporal_aa()==6,"stepping onto an offered row is the user's change");
-        expect(ns::rows(s)[ns::temporal].values.size()==7,"no unavailable entry once an offered mode is saved");
-        s.set_temporal_aa(2);w[ns::temporal]=7;expect(!ns::apply(s,w).temporal_aa && s.temporal_aa()==2,"DLSS modes are ignored when not offered");
+        expect(ns::rows(s)[ns::temporal].values.size()==8,"no unavailable entry once an offered mode is saved (SMAA stays)");
+        {   // v963: SMAA is a listed mode: temporal 0 + Edge AA on; Off turns Edge AA off.
+            const auto smaa_rows=ns::rows(s);std::vector<int> sv;for(const auto& r:smaa_rows) sv.push_back(r.kind==NativeOptionsPage::Kind::action?-1:r.value);
+            sv[ns::temporal]=static_cast<int>(smaa_rows[ns::temporal].values.size())-1;
+            const auto sc=ns::apply(s,sv);
+            expect(sc.temporal_aa && *sc.temporal_aa==0 && sc.antialiasing && *sc.antialiasing && s.temporal_aa()==0 && s.antialiasing(),"SMAA applies as temporal 0 + Edge AA on");
+            expect(ns::rows(s)[ns::temporal].value==static_cast<int>(ns::rows(s)[ns::temporal].values.size())-1,"SMAA is shown as the current AA mode");
+            std::vector<int> off;for(const auto& r:ns::rows(s)) off.push_back(r.kind==NativeOptionsPage::Kind::action?-1:r.value);
+            off[ns::temporal]=0;const auto oc=ns::apply(s,off);
+            expect(oc.temporal_aa && *oc.temporal_aa==0 && oc.antialiasing && !*oc.antialiasing && !s.antialiasing(),"Off from SMAA turns Edge AA off too");
+        }
+        s.set_temporal_aa(2);w[ns::temporal]=99;expect(!ns::apply(s,w).temporal_aa && s.temporal_aa()==2,"an out-of-range AA stepper index is ignored");
     }
     const auto cal=ns::action(s,ns::calibrate);
     expect(cal.calibrate && s.open() && s.calibration_page(),"calibrate opens the calibration page");

@@ -88,7 +88,8 @@ sealed class MainForm : Form
     readonly ArtButton dlssButton = new(DlssProvider.Prompt, Look.Secondary);
     static readonly (string text, object val)[] AaBase = { ("Off", 0), ("Game TAA", 1), ("FSR 3 - native", 2), ("FSR 3 - quality (77%)", 3), ("FSR 3 - balanced (67%)", 4), ("FSR 4 - native", 5), ("FSR 4 - quality (77%)", 6) };
     static readonly (string text, object val)[] AaDlss = { ("DLAA (NVIDIA DLSS)", 7), ("DLSS - quality (NVIDIA DLSS)", 8) };
-    const string AaHelp = "The default follows your GPU: DLAA on NVIDIA RTX with DLSS, FSR 4 native where FSR 4 runs, otherwise FSR 3 native. Quality/balanced render fewer pixels for speed. FSR 4 is the newer upscaler. The in-game VR menu can change it at any time.";
+    static readonly (string text, object val) AaSmaa = ("SMAA - edge anti-aliasing", 9);
+    const string AaHelp = "The default follows your GPU: DLAA on NVIDIA RTX with DLSS, FSR 4 native where FSR 4 runs, otherwise FSR 3 native. Quality/balanced render fewer pixels for speed. SMAA is its own edge anti-aliasing mode with no temporal pass. The in-game VR menu can change it at any time.";
     IReadOnlyList<Feature> features = Array.Empty<Feature>();
     string? featuresError; bool showFeatures, loadingFeatures;
     Control settingsLast = null!;  // the last button of the row; the message line sits to its right
@@ -407,6 +408,7 @@ sealed class MainForm : Form
         aa.Items.Clear();
         foreach (var (t, v) in AaBase) aa.Items.Add(new Item(t, v));
         if (offered) foreach (var (t, v) in AaDlss) aa.Items.Add(new Item(t, v));
+        aa.Items.Add(new Item(AaSmaa.text, AaSmaa.val)); // v963: SMAA is a listed AA mode, not only an edge toggle
         aaHelpBase = offered ? AaHelp + " " + DlssProvider.Attribution : AaHelp; // the attribution the DLSS licence asks for, where the modes are offered
         RefreshAaNote();
         Select(aa, current, $"Mode {current}");
@@ -789,7 +791,7 @@ sealed class MainForm : Form
         var b = onlyIfSameAs ?? d;
         bool Take<T>(T form, T baseline) => onlyIfSameAs == null || Equals(form, baseline);
         if (Take((int)res.Value, (int)Math.Clamp(Math.Round(b.Resolution * 100), 50, 200))) res.Value = (int)Math.Clamp(Math.Round(d.Resolution * 100), 50, 200);
-        if (Take(Val<int>(aa), b.TemporalAa)) Select(aa, d.TemporalAa, $"Mode {d.TemporalAa}");
+        if (Take(Val<int>(aa), Prefs.DisplayAa(b))) Select(aa, Prefs.DisplayAa(d), $"Mode {d.TemporalAa}");
         if (Take(Val<int>(hud), b.Hud)) Select(hud, d.Hud, $"{d.Hud}%");
         if (Take(Val<int>(turn), b.Mode)) Select(turn, d.Mode, $"Mode {d.Mode}");
         if (Take(Val<double>(snap), b.SnapDeg)) Select(snap, d.SnapDeg, $"{d.SnapDeg} degrees");
@@ -832,7 +834,10 @@ sealed class MainForm : Form
     Prefs ReadForm()
     {
         var e = new Prefs { Measurements = prefs.Measurements, Aa = prefs.Aa, AaChosen = prefs.AaChosen };
-        e.Resolution = res.Value / 100.0; e.TemporalAa = Val<int>(aa); e.Hud = Val<int>(hud); e.Mode = Val<int>(turn);
+        e.Resolution = res.Value / 100.0; e.TemporalAa = Val<int>(aa);
+        if (e.TemporalAa == Prefs.SmaaMode) e.Aa = 1;      // SMAA is mode 0 with Edge AA on
+        else if (e.TemporalAa == 0) e.Aa = 0;              // Off turns Edge AA off too, so Off does not reopen as SMAA
+        e.Hud = Val<int>(hud); e.Mode = Val<int>(turn);
         e.SnapDeg = Val<double>(snap); e.SmoothDps = Val<double>(smooth); e.Mirror = Val<int>(mirror); e.Sharpness = Val<double>(sharp);
         e.Hint = Val<int>(hint); e.Crosshair = Val<int>(crosshair);
         e.ScriptedRecenter = Val<int>(recenter); e.CutsceneMode = Val<string>(cutscenes);

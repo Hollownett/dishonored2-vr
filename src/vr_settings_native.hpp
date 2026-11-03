@@ -30,22 +30,46 @@ inline int hud_index(int percent) {
     for(int i=0;i<static_cast<int>(hud_choices.size());++i) if(hud_choices[static_cast<std::size_t>(i)]==percent) return i;
     return 1;
 }
-// The stepper index shown for the saved anti-aliasing mode: a DLSS mode that is not offered sits on its own
-// "(unavailable)" entry at index 7 instead of being clamped onto FSR 4 Quality.
-inline int temporal_shown(const VrSettings& s) {return !s.dlss_available() && s.temporal_aa()>=7?7:s.temporal_aa();}
+// The anti-aliasing stepper's choices, in display order. 9 is SMAA: a UI-only entry that applies as temporal 0 + Edge AA
+// on, so SMAA is its own listed mode in the game menu (not just a toggle next to "Off").
+inline std::vector<int> temporal_values(const VrSettings& s) {
+    std::vector<int> v{0,1,2,3,4,5,6};
+    if(s.dlss_available()) {v.push_back(7);v.push_back(8);}
+    else if(s.temporal_aa()>=7) v.push_back(s.temporal_aa()); // an unoffered saved DLSS mode, shown truthfully
+    v.push_back(9);
+    return v;
+}
+// The stepper index shown for the saved anti-aliasing mode: temporal 0 with Edge AA on is the SMAA entry.
+inline int temporal_shown(const VrSettings& s) {
+    const auto values=temporal_values(s);
+    const int want=s.temporal_aa()==0 && s.antialiasing()?9:s.temporal_aa();
+    const auto found=std::find(values.begin(),values.end(),want);
+    return found==values.end()?0:static_cast<int>(found-values.begin());
+}
 inline std::vector<NativeOptionsPage::Row> rows(const VrSettings& s) {
     using K=NativeOptionsPage::Kind;std::vector<NativeOptionsPage::Row> r(count);
     r[resolution]={K::slider,"Resolution","Sets how many pixels each eye renders (percent). Higher is sharper but slower; the mod caps it to what the GPU can hold.",
         50,200,5,static_cast<int>(std::lround(s.requested()*100)),100,{}};
     // DLAA/DLSS Quality are offered only with an NVIDIA GPU and the user's nvngx_dlss.dll; a saved DLSS mode shows as the
     // last offered row elsewhere (the mod renders it with FSR 3 then).
-    std::vector<std::string> aa_modes{"Off (SMAA when Edge AA is on)","Game TAA","FSR 3 Native","FSR 3 Quality (77%)","FSR 3 Balanced (67%)","FSR 4 Native","FSR 4 Quality (77%)"};
-    std::string aa_help="Smooths shimmering edges over time. Game TAA is the original; FSR Native uses full resolution; Quality and Balanced upscale. Off leaves Edge AA (SMAA) on its own.";
+    std::vector<std::string> aa_modes;
+    for(const int v:temporal_values(s)) switch(v) {
+        case 0: aa_modes.push_back("Off");break;
+        case 1: aa_modes.push_back("Game TAA");break;
+        case 2: aa_modes.push_back("FSR 3 Native");break;
+        case 3: aa_modes.push_back("FSR 3 Quality (77%)");break;
+        case 4: aa_modes.push_back("FSR 3 Balanced (67%)");break;
+        case 5: aa_modes.push_back("FSR 4 Native");break;
+        case 6: aa_modes.push_back("FSR 4 Quality (77%)");break;
+        case 7: aa_modes.push_back(s.dlss_available()?"DLAA (NVIDIA DLSS)":"DLAA (unavailable, FSR 3)");break;
+        case 8: aa_modes.push_back(s.dlss_available()?"DLSS Quality (NVIDIA)":"DLSS Quality (unavailable, FSR 3)");break;
+        default: aa_modes.push_back("SMAA (edge anti-aliasing)");break;
+    }
+    std::string aa_help="Smooths shimmering edges. Game TAA is the original; FSR Native uses full resolution; Quality and Balanced upscale. SMAA runs on its own with no temporal AA.";
     if(s.performance_mode_replaces_aa()) aa_help+=" The selected temporal mode is unavailable; spatial edge AA is used when enabled.";
-    if(s.dlss_available()) {aa_modes.push_back("DLAA (NVIDIA DLSS)");aa_modes.push_back("DLSS Quality (NVIDIA)");aa_help+=" DLAA and DLSS Quality use NVIDIA DLSS.";}
-    else if(s.temporal_aa()>=7) aa_modes.push_back(s.temporal_aa()==7?"DLAA (unavailable, FSR 3)":"DLSS Quality (unavailable, FSR 3)"); // the saved choice, shown truthfully and never rewritten by the page
+    if(s.dlss_available()) aa_help+=" DLAA and DLSS Quality use NVIDIA DLSS.";
     r[temporal]={K::stepper,"Anti-aliasing",aa_help,0,0,1,temporal_shown(s),2,aa_modes};
-    r[edge_aa]={K::toggle,"Edge anti-aliasing (SMAA)","SMAA Ultra smooths edges on its own when Anti-aliasing is Off; skipped in a temporal mode.",0,0,1,s.antialiasing()?1:0,0,{}};
+    r[edge_aa]={K::toggle,"Edge anti-aliasing (SMAA)","SMAA Ultra is the image's AA in the SMAA mode; skipped in a temporal mode. Native only keeps the game's edge handling.",0,0,1,s.antialiasing()?1:0,0,{}};
     r[mirror]={K::stepper,"Monitor view","Chooses what the desktop monitor mirrors. It does not change the headset image.",
         0,0,1,static_cast<int>(s.mirror()),static_cast<int>(MirrorMode::both_eyes),{"Right eye","Left eye","Both eyes","Off"}};
     r[sharpening]={K::stepper,"Sharpening","Contrast sharpening after anti-aliasing. Raise it if the image looks soft, lower it if edges crawl.",
@@ -66,10 +90,17 @@ inline VrSettings::Changes apply(VrSettings& s,const std::vector<int>& v) {
     VrSettings::Changes c{};
     const auto at=[&](int row) {return row<static_cast<int>(v.size())?v[static_cast<std::size_t>(row)]:-1;};
     if(const int x=at(resolution);x>=50 && x<=200 && std::lround(s.requested()*100)!=x) {s.set_requested(x/100.);c.resolution=s.requested();}
-    // Compared against the displayed index: an unoffered saved DLSS mode (shown as the index-7 "(unavailable)" entry)
-    // only changes when the user steps onto an offered row; the page never rewrites it on its own.
-    if(const int x=at(temporal);x>=0 && x<=(s.dlss_available()?8:temporal_shown(s)==7?7:6) && x!=temporal_shown(s)) {s.set_temporal_aa(x);c.temporal_aa=x;}
-    if(const int x=at(edge_aa);x>=0 && (x!=0)!=s.antialiasing()) {s.set_antialiasing(x!=0);c.antialiasing=x!=0;}
+    // The anti-aliasing stepper is index-based: map the chosen index back to its mode. 9 is SMAA (temporal 0 + Edge AA on).
+    bool aa_stepper_forced=false;
+    {const auto values=temporal_values(s);
+     if(const int x=at(temporal);x>=0 && x<static_cast<int>(values.size()) && x!=temporal_shown(s)) {
+         const int mode=values[static_cast<std::size_t>(x)];
+         if(mode==0) {s.set_temporal_aa(0);s.set_antialiasing(false);c.temporal_aa=0;c.antialiasing=false;aa_stepper_forced=true;}
+         else if(mode==9) {s.set_temporal_aa(0);s.set_antialiasing(true);c.temporal_aa=0;c.antialiasing=true;aa_stepper_forced=true;}
+         else {s.set_temporal_aa(mode);c.temporal_aa=mode;}
+     }}
+    // Off/SMAA in the mode list already decided Edge AA; the stale toggle value read from the same page must not undo it.
+    if(!aa_stepper_forced) if(const int x=at(edge_aa);x>=0 && (x!=0)!=s.antialiasing()) {s.set_antialiasing(x!=0);c.antialiasing=x!=0;}
     if(const int x=at(mirror);x>=0 && x<=3 && x!=static_cast<int>(s.mirror())) {s.set_mirror(static_cast<MirrorMode>(x));c.mirror=s.mirror();}
     if(const int x=at(sharpening);x>=0 && x<=4 && x!=std::lround(s.sharpness()*4)) {s.set_sharpness(x/4.);c.sharpness=s.sharpness();}
     if(const int x=at(hud);x>=0 && x<static_cast<int>(hud_choices.size()) && hud_choices[static_cast<std::size_t>(x)]!=s.hud_percent())
