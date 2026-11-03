@@ -3505,7 +3505,7 @@ static std::atomic<unsigned> scabbard_entries{},holster_fires{}; // the right ha
 // Dual wield (build/dual-wield, docs/research-dual-wield.md): either hand takes the sword (slot 0) or the gun/grenade/power (slot 1).
 // hand_loadout is the control thread's; melee_hand mirrors its melee hand for the render thread. Knob off: always 1 (the game's hands).
 static bool dual_wield_enabled=false;static d2vr::HandLoadout hand_loadout;static std::atomic<unsigned> melee_hand{1};static std::atomic<unsigned> dual_wield_swaps{};
-static bool npc_trigger_enabled=true;static std::array<bool,2> npc_trigger_consume{};static std::array<bool,2> npc_trigger_interact{};static std::array<d2vr::NpcTriggerOwner,2> npc_trigger_owner{}; // v963: Talk/Pickpocket on the hand's trigger
+static bool npc_trigger_enabled=true;static std::array<bool,2> npc_trigger_consume{};static std::array<bool,2> npc_trigger_interact{};static std::array<bool,2> npc_owns_frame{};static std::array<d2vr::NpcTriggerOwner,2> npc_trigger_owner{}; // v963: Talk/Pickpocket on the hand's trigger
 static std::atomic<UINT64> npc_trigger_uses{},npc_prompt_frames{}; // v966 diagnostics: trigger Use frames, native prompts painted "Trig"
 bool dual_wield_on() noexcept {return dual_wield_enabled;}
 static std::atomic<unsigned> authored_arm_bits{}; // render thread: arms an authored clip or player state owns this frame
@@ -8941,7 +8941,9 @@ void native_hud_draw_observer(std::uintptr_t iggy,UINT64 tick) noexcept {
         const auto talk=native_interaction_aim.talk_target(static_cast<int>(target.side),tick);
         // v966: the raw native Talk/Pickpocket offer is what the prompt's X glyph belongs to, even when the strict Talk receipt
         // is absent; paint it "Trig" instead of the grip's "Grip".
-        const bool npc_prompt=npc_trigger_enabled && target && native_interaction_aim.npc_offer(static_cast<int>(target.side),tick);
+        bool npc_prompt=npc_trigger_enabled && target && native_interaction_aim.npc_offer(static_cast<int>(target.side),tick);
+        if(!npc_prompt && npc_trigger_enabled) // the prompt may be a retained/zero-target entry: either hand's raw offer still names an NPC
+            for(int h=0;h<2 && !npc_prompt;++h) npc_prompt=static_cast<bool>(native_interaction_aim.npc_offer(h,tick));
         if(npc_prompt) ++npc_prompt_frames;
         d2vr::NativeHudChildDraw::refresh_prompt(native_art_hud_file.load(),iggy,native_art_pose_epoch.load(),tick,target,
             (talk && talk->identity==target) || npc_prompt,native_interaction_aim.prompt_completions());
@@ -11582,6 +11584,7 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                 std::array<bool,2> npc_owns{};
                                 for(unsigned h=0;h<2;++h) {
                                     npc_owns[h]=npc_trigger_enabled && !npc_holds(h) && (talk_targets[h] || pickpocket_targets[h] || npc_offers[h]);
+                                    npc_owns_frame[h]=npc_owns[h];
                                     const auto r=npc_trigger_owner[h].update(raw_trigger(h)>=.45f,logic==2 && controls_focus && !input.menu_modifier && !x_wheel.wheel() && !npc_holds(h),
                                         game_xr->pose_epoch(),controls_now,npc_target(h),npc_action(h));
                                     if(r.interact) {npc_trigger_interact[h]=true;++npc_trigger_uses;}
@@ -12413,10 +12416,14 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                     input.move_y=game_xr->note_scroll_axis();
                                 }
                                 if(npc_trigger_interact[0] || npc_trigger_interact[1]) input.x=true; // v963: the trigger's Talk/Pickpocket Use
+                                // v969: while an NPC Talk/Pickpocket offer owns a hand, the grip's Use may never press native X: only
+                                // the trigger's 220 ms claim above can. This is the last write before publish, so no other path (grip
+                                // latch, gaze, legacy corpse Use) can talk/pickpocket from the grip.
+                                if(logic==2 && (npc_owns_frame[0] || npc_owns_frame[1])) input.x=npc_trigger_interact[0] || npc_trigger_interact[1];
                                 if(npc_trigger_consume[0]) input.left_trigger=0;   // claimed by Talk/Pickpocket: never a shot or a cast
                                 if(npc_trigger_consume[1]) input.right_trigger=0;  // nor the sword hand's block
                                 controller_bridge.publish(input,logic==2);
-                                npc_trigger_interact={};npc_trigger_consume={};
+                                npc_trigger_interact={};npc_trigger_consume={};npc_owns_frame={};
                                 published_logic=logic;published_move_x=input.move_x;published_move_y=input.move_y;
                                 native_pad_focus.publish(input.active && game_xr->state==XR_SESSION_STATE_FOCUSED,GetTickCount64());
                             }
