@@ -21,6 +21,7 @@
 #include "xr_frame_hardening.hpp"
 #include "eye_antialiasing.hpp"
 #include "eye_sharpen.hpp"
+#include "eye_resolve.hpp"
 #include "desktop_mirror.hpp"
 #include "settings_panel_image.hpp"
 #include "settings_menu_layout.hpp"
@@ -84,6 +85,7 @@ class GameXr {
     std::unique_ptr<EyeAntialiasing> antialiasing_;
     bool antialiasing_enabled_{};
     std::unique_ptr<EyeSharpen> sharpen_;
+    std::unique_ptr<EyeResolve> resolve_;
     std::array<EyeTransferProcessing,2> transfer_processing_{},alt_processing_{};
     std::unique_ptr<DesktopMirror> mirror_;
     VrSettings settings_;
@@ -1725,6 +1727,13 @@ public:
         }
         return scaled_eye_size(optical?optical_output_size():recommended_output_size(),multiplier,maximum);
     }
+    // v976: the game's internal render size. The runtime's maxImageRect often clamps the XR eye to 125% of the
+    // recommended size (Virtual Desktop High: 3120x3360), so a 150% request must render larger than the XR image and
+    // be resolved down before submission. This size is bounded only by D3D11, not by maxImageRect.
+    EyeSize game_output_size(double multiplier) const {
+        const EyeSize maximum{D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION,D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION};
+        return scaled_eye_size(recommended_output_size(),multiplier,maximum).size;
+    }
     XrSessionState state=XR_SESSION_STATE_UNKNOWN;
     bool exit_requested=false;
     GameXr(ID3D11Device* device,UINT width,UINT height,DXGI_FORMAT format,const wchar_t* loader,bool controllers=false,bool tracked_gameplay=false,bool edge_antialiasing=false,bool settings=false,double multiplier=1,
@@ -1886,6 +1895,7 @@ public:
             }
         } catch(...) {for(auto chain:next) if(chain) xrDestroySwapchain(chain);throw;}
         chains_=next;images_=std::move(images);width_=width;height_=height;format_=format;rendered_mask_=0;menu_band_width_=0; // prepare_overlays rebuilds the band chain
+        resolve_.reset();
         for(auto chain:chains_) chain_sizes_[chain]={width,height};
         for(UINT eye=0;eye<2;++eye) {
             D3D11_TEXTURE2D_DESC actual{};images_[eye][0].texture->GetDesc(&actual);eye_texture_formats[eye]=actual.Format;
@@ -2368,12 +2378,22 @@ public:
                 XrSwapchainImageReleaseInfo release{};release.type=XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO;
                 try {
                 D3D11_TEXTURE2D_DESC desc{};sources[eye]->GetDesc(&desc);
-                if(!eye_texture_matches(desc,width_,height_,format_))
-                    throw std::runtime_error("Game eye source does not match the current XR swapchain");
+                ID3D11Texture2D* processed=sources[eye];
+                if(!eye_texture_matches(desc,width_,height_,format_)) {
+                    // v976: internal supersampling. The game rendered larger than the XR maxImageRect clamped eye;
+                    // resolve it down before sharpening/SMAA/submission. Alternate-eye keeps exact-size kept images.
+                    if(alt_stale || desc.Width<width_ || desc.Height<height_ || desc.SampleDesc.Count!=1 ||
+                       !rgba8_copy_compatible(desc.Format,format_))
+                        throw std::runtime_error("Game eye source does not match the current XR swapchain");
+                    if(!resolve_) {
+                        Microsoft::WRL::ComPtr<ID3D11Device> device;context_->GetDevice(&device);
+                        resolve_=std::make_unique<EyeResolve>(device.Get(),width_,height_);
+                    }
+                    processed=resolve_->apply(sources[eye]);
+                }
                 // Independent per-eye processing; menus retain the exact native image.
                 // v965: start from the eye source. v963 moved sharpening before SMAA but left this null, so CAS was
                 // handed a null input every frame ("CAS input is missing"): no layer was submitted and VR never started.
-                ID3D11Texture2D* processed=sources[eye];
                 auto processing=alt_stale?alt_processing_[eye]:EyeTransferProcessing{true,false,false,false,settings_.effective_temporal_aa(),0};
                 processing.kept=alt_stale;
                 {ModGpuScope aa_scope(context_.Get(),ModSpan::aa_sharpen); // task 3b

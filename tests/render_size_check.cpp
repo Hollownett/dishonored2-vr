@@ -40,6 +40,12 @@ int main() {
         const auto half=d2vr::scaled_eye_size(density,1.5,{8192,8192});
         require(!half.limited && half.size.width==4653 && half.size.height==4812,
             "150 percent at the runtime maximum must exceed the old diagnostic bound");
+        const auto vd_limited=d2vr::scaled_eye_size(recommended,1.5,{3120,3360});
+        require(vd_limited.limited && vd_limited.effective==1.25 && vd_limited.size.width==3120 && vd_limited.size.height==3360,
+            "Virtual Desktop High maxImageRect must clamp 150% to 125%");
+        const auto vd_game=d2vr::scaled_eye_size(recommended,1.5,{8192,8192});
+        require(!vd_game.limited && vd_game.size.width==3744 && vd_game.size.height==4032,
+            "the internal SSAA render size must be 150% even when the XR eye is clamped");
         const auto double_recommended=d2vr::scaled_eye_size(recommended,2,{8192,8192});
         require(!double_recommended.limited && double_recommended.size.width==4992 && double_recommended.size.height==5376,
             "200 percent of 2496x2688 must exceed the old diagnostic bound");

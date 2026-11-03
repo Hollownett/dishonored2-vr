@@ -35,12 +35,12 @@ missed low-contrast geometry. v974 compiles the Ultra shader at **0.03**, one pa
 of a real eye capture and visibly softened distant detail; one-pass 0.03 keeps the old ~2.8% footprint with the lower
 threshold. SMAA is a separate mode; it is not combined with the SSAA preset.
 
-### SSAA 125% (v974)
+### SSAA 125%/150% (v976)
 
-The in-game AA stepper and launcher offer **"SSAA 125%"**: temporal 0, Edge AA off, Resolution 125%. This is the
-one-click MSAA-equivalent for a deferred engine: 1.25x per axis = 56% more samples, compositor downsample, **no post
-filter**. It is not hardware MSAA and does not claim to be. A user can raise Resolution to 150% manually for more
-clarity at more cost. Do not add SMAA on top of SSAA and expect clarity; SMAA only softens it.
+The runtime's `maxImageRect` clamps the XR eye (Virtual Desktop High: 3120x3360 = 125%). v976 separates the XR eye from
+the game render size: 150% renders 3744x4032 and `EyeResolve` box-filters it to 3120x3360 before submission. Above
+125% the resolution slider now produces real supersampling; 200% is 4992x5376 on this headset, a 4x-pixel SSAA. The
+launcher/AA stepper still offers SSAA 125% and 150% as labeled presets.
 
 ### Why not TAA/DLAA/FSR here
 
@@ -49,7 +49,8 @@ softness. The user asked for a **clear** picture, so the spatial path is SMAA + 
 
 ## Recommendation for the clearest headset image
 
-1. **SSAA 125% (MSAA-equivalent)** (test 150% if the GPU holds frame time). No SMAA on top.
+1. **SSAA 125%** first; **150%** now actually renders 3744x4032 and resolves to the XR eye, and **200%** is available
+   through the Resolution slider (4992x5376, heavy).
 2. Sharpening 25% (default) - SSAA does not sharpen.
 3. If performance is tight: plain SMAA at native, or DLAA/FSR 4 Quality for temporal stability (accepting softness).
 4. Hardware MSAA would need a forward renderer; Dishonored 2 has none.

@@ -10047,14 +10047,20 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                 if(headset_size_requested) {
                                     if(!desc.Windowed) throw std::runtime_error("Recommended headset output requires a windowed game swapchain");
                                     const auto scaled=game_xr->scaled_output_size(requested_resolution_multiplier,false);
-                                    requested_output_size=scaled.size;effective_resolution_multiplier=scaled.effective;
+                                    const auto game=game_xr->game_output_size(requested_resolution_multiplier);
+                                    // v976: the runtime maxImageRect usually clamps the XR eye (Virtual Desktop High:
+                                    // 3120x3360 = 1.25x). A 150% request renders larger in the game and is resolved down
+                                    // in GameXr::present, so requested_output_size is the game render size, not the XR one.
+                                    requested_output_size=game.width>scaled.size.width || game.height>scaled.size.height?game:scaled.size;
+                                    effective_resolution_multiplier=scaled.effective;
                                     if(cached_output_written && !cached_output_restored.load()) cached_output_size.update(requested_output_size); // XR session recreated.
                                     else cached_output_size.apply(reinterpret_cast<volatile LONG64*>(image_base+0x32faf80),requested_output_size);
                                     cached_output_written=true;cached_output_restored=false;
                                     native_output_size.request(desc.OutputWindow,requested_output_size);
                                     headset_size_tick=GetTickCount64();headset_size_restored=false;headset_size_written=true;
                                 }
-                            } else if(game_xr->resize(desc.BufferDesc.Width,desc.BufferDesc.Height,desc.BufferDesc.Format)) {
+                            } else if(const auto xr=game_xr->scaled_output_size(requested_resolution_multiplier,false).size;
+                                      game_xr->resize(xr.width,xr.height,desc.BufferDesc.Format)) {
                                 // Rendered poses belong to the old chain. Locate a
                                 // fresh frame before submitting the resized pair.
                                 completed_left.Reset();completed_right.Reset();
@@ -10766,8 +10772,10 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                             if(const auto request=game_xr->take_resolution_request()) {
                                 {std::lock_guard<std::mutex> gpu_lock(gpu_mutex);eye_sources.invalidate();native_eye_pair.reset();}
                                 const auto scaled=game_xr->scaled_output_size(*request,optical_density_requested && optical_density_applied);
-                                cached_output_size.update(scaled.size);native_output_size.request(desc.OutputWindow,scaled.size);
-                                requested_output_size=scaled.size;requested_resolution_multiplier=*request;effective_resolution_multiplier=scaled.effective;
+                                const auto game=game_xr->game_output_size(*request);
+                                const auto output=game.width>scaled.size.width || game.height>scaled.size.height?game:scaled.size; // v976 internal SSAA
+                                cached_output_size.update(output);native_output_size.request(desc.OutputWindow,output);
+                                requested_output_size=output;requested_resolution_multiplier=*request;effective_resolution_multiplier=scaled.effective;
                                 headset_size_applied=false;headset_size_tick=GetTickCount64();
                                 xr_transfer_mask=0;xr_menu_transfer_mask=0;xr_tracked_transfer_frames=0;
                                 gpu_settled_started=false;++xr_resolution_changes;
@@ -10837,6 +10845,8 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                      << ",\"optical_density_request_applied\":" << (optical_density_applied?"true":"false")
                                      << ",\"resolution_multiplier_requested\":" << requested_resolution_multiplier
                                      << ",\"resolution_multiplier_effective\":" << effective_resolution_multiplier
+                                     << ",\"game_render_size\":[" << requested_output_size.width << ',' << requested_output_size.height << ']'
+                                     << ",\"xr_eye_size\":[" << xr_swapchain_eye_sizes[0].width << ',' << xr_swapchain_eye_sizes[0].height << ']'
                                      << ",\"eye_antialiasing_requested\":" << (eye_antialiasing_requested?"true":"false")
                                      << ",\"smaa_eye_passes\":" << xr_antialiased_eyes
                                      << ",\"mirror_mode\":" << static_cast<int>(game_xr->mirror_mode()) << ",\"mirrored_frames\":" << game_xr->mirrored_frames
