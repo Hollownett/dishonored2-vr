@@ -63,13 +63,13 @@ inline std::vector<NativeOptionsPage::Row> rows(const VrSettings& s) {
         case 6: aa_modes.push_back("FSR 4 Quality (77%)");break;
         case 7: aa_modes.push_back(s.dlss_available()?"DLAA (NVIDIA DLSS)":"DLAA (unavailable, FSR 3)");break;
         case 8: aa_modes.push_back(s.dlss_available()?"DLSS Quality (NVIDIA)":"DLSS Quality (unavailable, FSR 3)");break;
-        default: aa_modes.push_back("SMAA (edge anti-aliasing)");break;
+        default: aa_modes.push_back("SMAA (2-pass edge anti-aliasing)");break;
     }
     std::string aa_help="Smooths shimmering edges. Game TAA is the original; FSR Native uses full resolution; Quality and Balanced upscale. SMAA runs on its own with no temporal AA.";
     if(s.performance_mode_replaces_aa()) aa_help+=" The selected temporal mode is unavailable; spatial edge AA is used when enabled.";
     if(s.dlss_available()) aa_help+=" DLAA and DLSS Quality use NVIDIA DLSS.";
     r[temporal]={K::stepper,"Anti-aliasing",aa_help,0,0,1,temporal_shown(s),2,aa_modes};
-    r[edge_aa]={K::toggle,"Edge anti-aliasing (SMAA)","SMAA Ultra is the image's AA in the SMAA mode; skipped in a temporal mode. Native only keeps the game's edge handling.",0,0,1,s.antialiasing()?1:0,0,{}};
+    r[edge_aa]={K::toggle,"Edge anti-aliasing (SMAA)","SMAA Ultra 2-pass (0.03 edge threshold) is the image's AA in the SMAA mode; it catches the low-contrast geometry edges the 1-pass 0.05 preset missed. Skipped in a temporal mode. Native only keeps the game's edge handling.",0,0,1,s.antialiasing()?1:0,0,{}};
     r[mirror]={K::stepper,"Monitor view","Chooses what the desktop monitor mirrors. It does not change the headset image.",
         0,0,1,static_cast<int>(s.mirror()),static_cast<int>(MirrorMode::both_eyes),{"Right eye","Left eye","Both eyes","Off"}};
     r[sharpening]={K::stepper,"Sharpening","Contrast sharpening after anti-aliasing. Raise it if the image looks soft, lower it if edges crawl.",

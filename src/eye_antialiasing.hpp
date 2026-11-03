@@ -3,6 +3,8 @@
 #include <d3dcompiler.h>
 #include <wrl/client.h>
 #include <array>
+#include <iomanip>
+#include <sstream>
 #include <string>
 #include <stdexcept>
 #include "context_state.hpp"
@@ -28,6 +30,8 @@ class EyeAntialiasing {
     Ptr<ID3D11Texture2D> input_,edges_,weights_,output_;
     Ptr<ID3D11RenderTargetView> edges_rtv_,weights_rtv_,output_rtv_;
     UINT width_{},height_{};
+    int passes_{2};
+    float threshold_{.03f};
     static void checked(HRESULT result,const char* label) {
         if(FAILED(result)) throw std::runtime_error(std::string("SMAA: ")+label+" ("+std::to_string(result)+")");
     }
@@ -77,7 +81,8 @@ class EyeAntialiasing {
     }
 public:
     UINT64 eye_passes{};
-    explicit EyeAntialiasing(ID3D11Device* device):device_(device),state_(device) {
+    explicit EyeAntialiasing(ID3D11Device* device,float threshold=.03f,int passes=2)
+        :device_(device),state_(device),passes_(passes),threshold_(threshold) {
         device_->GetImmediateContext(&context_);
         const std::string prefix=R"HLSL(
 cbuffer Metrics : register(b0) { float4 rtMetrics; }
@@ -105,6 +110,14 @@ float4 WeightPS(WeightV v):SV_TARGET { return SMAABlendingWeightCalculationPS(v.
 float4 BlendPS(BlendV v):SV_TARGET { return SMAANeighborhoodBlendingPS(v.uv,v.offsets,inputTex,weightsTex); }
 )HLSL";
         std::string source=prefix+smaa_hlsl+wrappers;
+        // v972: the Ultra preset's 0.05 threshold is tuned for 1080p flat screens. At a 2688x2880 eye the same edge is
+        // thinner and a 0.05 colour delta misses low-contrast geometry; 0.03 catches those while the local-contrast
+        // adaptation still rejects texture edges. Two blend iterations catch edges the first coverage pass reveals.
+        {std::ostringstream value;value<<std::fixed<<std::setprecision(3)<<threshold_;
+         const std::string needle="#define SMAA_THRESHOLD 0.05";
+         const auto at=source.find(needle);
+         if(at==std::string::npos) throw std::runtime_error("SMAA threshold define differs from the vendored version");
+         source.replace(at,needle.size(),"#define SMAA_THRESHOLD "+value.str());}
         // Auto-assigned sampler slots differ between the three entry points.
         // Pin upstream's named samplers without changing the algorithm.
         for(const auto& name:std::array<std::string,2>{"LinearSampler","PointSampler"}) {
@@ -154,16 +167,22 @@ float4 BlendPS(BlendV v):SV_TARGET { return SMAANeighborhoodBlendingPS(v.uv,v.of
         auto cb=metrics_.Get();context_->VSSetConstantBuffers(0,1,&cb);context_->PSSetConstantBuffers(0,1,&cb);
         ID3D11SamplerState* samplers[]{samplers_[0].Get(),samplers_[1].Get()};context_->PSSetSamplers(0,2,samplers);
         constexpr std::array<float,4> clear{};
-        context_->ClearRenderTargetView(edges_rtv_.Get(),clear.data());context_->ClearRenderTargetView(weights_rtv_.Get(),clear.data());
         ID3D11ShaderResourceView* empty[5]{};
         const std::array<ID3D11RenderTargetView*,3> targets{edges_rtv_.Get(),weights_rtv_.Get(),output_rtv_.Get()};
-        for(unsigned pass=0;pass<3;++pass) {
-            context_->PSSetShaderResources(0,5,empty);context_->OMSetRenderTargets(1,&targets[pass],nullptr);
-            ID3D11ShaderResourceView* inputs[5]{pass==2?input_linear_.Get():input_gamma_.Get(),
-                pass==1?edges_srv_.Get():nullptr,pass==2?weights_srv_.Get():nullptr,area_.Get(),search_.Get()};
-            context_->PSSetShaderResources(0,5,inputs);
-            context_->VSSetShader(vertex_[pass].Get(),nullptr,0);context_->PSSetShader(pixel_[pass].Get(),nullptr,0);
-            context_->Draw(3,0);
+        for(int iteration=0;iteration<passes_;++iteration) {
+            if(iteration) { // feed this eye's first coverage result back through the detector/blender once more
+                context_->OMSetRenderTargets(0,nullptr,nullptr);
+                context_->CopyResource(input_.Get(),output_.Get());
+            }
+            context_->ClearRenderTargetView(edges_rtv_.Get(),clear.data());context_->ClearRenderTargetView(weights_rtv_.Get(),clear.data());
+            for(unsigned pass=0;pass<3;++pass) {
+                context_->PSSetShaderResources(0,5,empty);context_->OMSetRenderTargets(1,&targets[pass],nullptr);
+                ID3D11ShaderResourceView* inputs[5]{pass==2?input_linear_.Get():input_gamma_.Get(),
+                    pass==1?edges_srv_.Get():nullptr,pass==2?weights_srv_.Get():nullptr,area_.Get(),search_.Get()};
+                context_->PSSetShaderResources(0,5,inputs);
+                context_->VSSetShader(vertex_[pass].Get(),nullptr,0);context_->PSSetShader(pixel_[pass].Get(),nullptr,0);
+                context_->Draw(3,0);
+            }
         }
         context_->PSSetShaderResources(0,5,empty);context_->OMSetRenderTargets(0,nullptr,nullptr);
         ++eye_passes;return output_.Get();

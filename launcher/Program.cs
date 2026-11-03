@@ -88,7 +88,7 @@ sealed class MainForm : Form
     readonly ArtButton dlssButton = new(DlssProvider.Prompt, Look.Secondary);
     static readonly (string text, object val)[] AaBase = { ("Off", 0), ("Game TAA", 1), ("FSR 3 - native", 2), ("FSR 3 - quality (77%)", 3), ("FSR 3 - balanced (67%)", 4), ("FSR 4 - native", 5), ("FSR 4 - quality (77%)", 6) };
     static readonly (string text, object val)[] AaDlss = { ("DLAA (NVIDIA DLSS)", 7), ("DLSS - quality (NVIDIA DLSS)", 8) };
-    static readonly (string text, object val) AaSmaa = ("SMAA - edge anti-aliasing", 9);
+    static readonly (string text, object val) AaSmaa = ("SMAA - 2-pass edge anti-aliasing", 9);
     const string AaHelp = "The default follows your GPU: DLAA on NVIDIA RTX with DLSS, FSR 4 native where FSR 4 runs, otherwise FSR 3 native. Quality/balanced render fewer pixels for speed. SMAA is its own edge anti-aliasing mode with no temporal pass. The in-game VR menu can change it at any time.";
     IReadOnlyList<Feature> features = Array.Empty<Feature>();
     string? featuresError; bool showFeatures, loadingFeatures;
@@ -910,3 +910,4 @@ sealed class MainForm : Form
         b.Enabled = true;
     }
 }
+

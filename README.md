@@ -18,7 +18,7 @@ and pick powers from the game's own wheel.
 - **Physical objects.** Grab, carry and throw bottles, bodies and loose props. Push doors open with your hand.
 - **The game's own UI in VR.** Menus, the Quick Access Wheel, the journal and notes appear in front of you;
   point with the right controller to select.
-- **Upscaling and anti-aliasing.** FSR 3 (default), experimental FSR 4, SMAA, game TAA, and DLAA/DLSS on NVIDIA
+- **Upscaling and anti-aliasing.** FSR 3 (default), experimental FSR 4, SMAA Ultra 2-pass, game TAA, and DLAA/DLSS on NVIDIA
   (with your own `nvngx_dlss.dll` from another game; nothing NVIDIA is bundled).
 - **Cutscenes** in 3D with a comfort vignette, or on a flat theatre screen.
 - **A launcher** that installs the mod, checks your setup, edits settings and starts the game in VR.
@@ -160,3 +160,4 @@ The mod's own code is released under the [MIT License](LICENSE).
 
 Dishonored 2 is a trademark of ZeniMax Media Inc. (Arkane Studios, Bethesda Softworks). Meta Quest and Touch Plus
 are trademarks of Meta Platforms, Inc. This is an unofficial fan project, not affiliated with or endorsed by them.
+
