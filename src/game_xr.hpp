@@ -1626,6 +1626,15 @@ public:
     double stale_near_range{near_range_default};
     std::uint64_t stale_fresh_passes() const noexcept {return stale_warp_?stale_warp_->fresh_passes:0;}
     std::uint64_t stale_fresh_refusals() const noexcept {return stale_warp_?stale_warp_->fresh_refusals:0;}
+    // v984: how the paired cadence moved (frame_pacer.hpp). k=2 means half rate; locks/unlocks should track scene changes, not a
+    // probe timer. Read from the status thread while the render thread writes: telemetry only.
+    std::string pacer_status_json() const {
+        std::ostringstream o;
+        o<<"{\"k\":"<<pacer_.k<<",\"locks\":"<<pacer_.locks<<",\"unlocks\":"<<pacer_.unlocks
+         <<",\"paced_frames\":"<<pacer_.paced_frames<<",\"frames\":"<<pacer_.frames
+         <<",\"work_ms_p50\":"<<(static_cast<double>(pacer_.work_median())/1e6)<<",\"base_ms\":"<<(static_cast<double>(pacer_.base)/1e6)<<'}';
+        return o.str();
+    }
     void record_rendered_camera(UINT eye,const WarpCamera& camera,std::uint64_t frame) noexcept {if(eye<2) {rendered_cameras_[eye]=camera;rendered_camera_frame_[eye]=frame;}}
     void stale_eye_target_camera(UINT eye,const WarpCamera& camera,std::uint64_t frame) noexcept {if(eye<2) {stale_target_cameras_[eye]=camera;stale_target_camera_frame_[eye]=frame;}}
     void stale_eye_depth(UINT eye,ID3D11Texture2D* depth,UINT width,UINT height,std::uint64_t frame) noexcept {

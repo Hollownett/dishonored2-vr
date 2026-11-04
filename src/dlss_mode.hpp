@@ -158,12 +158,15 @@ enum class DlssIsolation {ok,failed,unavailable}; // ok: ran isolated; failed: t
 // Policy for NGX lifecycle work: run it isolated when the owner can; if the owner could not isolate (wrong thread,
 // state unavailable, busy) run it once unisolated under a guard; if it threw or failed inside the isolation it is
 // never run again. Returns true only when the work completed. Nothing escapes.
+#pragma warning(push)
+#pragma warning(disable:4702) // lab instantiations resolve isolation statically, so the unisolated retry is then dead code by design
 template<class Isolate,class Work> bool dlss_isolated_run(Isolate&& isolate,Work&& work) noexcept {
     DlssIsolation outcome=DlssIsolation::unavailable;
     if(!dlss_guarded([&] {outcome=isolate(work);},[&] {outcome=DlssIsolation::failed;})) return false;
     if(outcome==DlssIsolation::ok) return true;
     if(outcome==DlssIsolation::failed) return false;
     return dlss_guarded([&] {work();},[] {});
+#pragma warning(pop)
 }
 
 // Where the user's nvngx_dlss.dll is. The mod never bundles the provider: the mod home root is searched first, then

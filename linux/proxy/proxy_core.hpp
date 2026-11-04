@@ -24,7 +24,7 @@ inline constexpr unsigned kDefaultAutoContinueSeconds = 10;
 inline constexpr unsigned long kRequiredCapabilities = 61017;
 // Start gate (docs/VR-START-INVESTIGATION.md): VR starts this long after the game window has a client area. 20 s was clean on the
 // sim rig, starts in the first ~12 s stalled at the menu. build\linux-settle-seconds = 45 restores the old window+45 s wait.
-inline constexpr unsigned kDefaultSettleMs = 20000;
+inline constexpr unsigned kDefaultSettleMs = 0;
 inline constexpr unsigned kLegacySettleSeconds = 45;
 // A present that is never seen falls back to a timeout from the window (never idle forever).
 inline constexpr unsigned kDefaultStartTimeoutMs = 60000;

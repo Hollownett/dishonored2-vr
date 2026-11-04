@@ -4,6 +4,7 @@
 #include <cassert>
 #include <iostream>
 #include <thread>
+#include <vector>
 using Registry=d2vr::GpuDispatchBindings<1>;
 using Function=int (*)(int);
 static Registry real_registry;
@@ -178,10 +179,27 @@ int main() {
             if(!read(address,bytes,size)) return false;
             static_cast<std::byte*>(bytes)[0]^=std::byte{1};return true;
         };
+        // v984: an unchanged, still-enabled target set is re-verified at most every 250 ms (the native HUD validation used to pay
+        // a ReadProcessMemory per retained hook on every HUD child draw: hud_validate 1.51 ms/frame, 58% of the mod's CPU tax).
+        // Inside that window the bind is a no-op; after it the retained-byte check runs again and still catches a changed hook.
+        assert(corrupted.bind(current,replacements,wrong_bytes,valid,snapshot));
+        assert(std::strcmp(corrupted.reason(),"unchanged")==0);
+        Sleep(260);
         assert(!corrupted.bind(current,replacements,wrong_bytes,valid,snapshot));
         assert(corrupted.poisoned() && corrupted.created()==1);
         assert(!corrupted.disable_all(depth,wrong_bytes,20));
     }
-    std::cout<<"PASS: retained MinHook callbacks, simultaneous dispatches, 1000 switches without repatching, explicit restoration/drain, target budget and poisoned API failures\n";
+    { // v983 StripedDepth: 8 threads enter, the sum sees them all, leaving returns it to zero; disable_all drains it
+        d2vr::StripedDepth striped;std::atomic<int> inside{0};std::atomic<bool> leave{false};std::vector<std::thread> pool;
+        for(int i=0;i<8;++i) pool.emplace_back([&]{striped.fetch_add(1);++inside;while(!leave.load())Sleep(1);striped.fetch_sub(1);});
+        while(inside.load()<8)Sleep(1);
+        assert(striped.load()==8);
+        Registry idle;const auto always=[](void*,void*,std::size_t){return true;};
+        assert(!idle.disable_all(striped,always,30)); // threads still inside: the drain times out
+        leave=true;for(auto& t:pool)t.join();
+        assert(striped.load()==0);
+        assert(idle.disable_all(striped,always,30));
+    }
+    std::cout<<"PASS: StripedDepth counts across threads and drains; retained MinHook callbacks, simultaneous dispatches, 1000 switches without repatching, explicit restoration/drain, target budget and poisoned API failures\n";
 }
 

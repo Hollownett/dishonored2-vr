@@ -13,7 +13,7 @@ public static class ProxyInstall
     public const string DllName = "dinput8.dll";
     public const string IniName = "d2vr-linux.ini";      // proxy_core.hpp kIniName
     /// <summary>The proxy starts VR this long after the game window has a client area (proxy_core.hpp kDefaultSettleMs; docs/VR-START-INVESTIGATION.md).</summary>
-    public const int DefaultStartSeconds = 20;
+    public const int DefaultStartSeconds = 0;
     /// <summary>The old wait of the injection path, kept as the fallback when the proxy cannot be installed (and proxy_core.hpp kLegacySettleSeconds).</summary>
     public const int FallbackDelaySeconds = 45;
 

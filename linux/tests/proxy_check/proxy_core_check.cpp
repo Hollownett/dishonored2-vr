@@ -26,19 +26,19 @@ int main() {
     expect(!select_mod_dll({L"d2vr_render_probe.dll", L"D2VR_RENDER_PROBE_ARM_V1.DLL"}, why), "regex exact");
     expect(capabilities_ok(524287) && !capabilities_ok(61017 & ~16u), "caps");
     expect(is_game_window_title(L"Dishonored 2") && !is_game_window_title(L"Steam"), "title");
-    expect(start_settle_ms_from_knob("") == 20000 && start_settle_ms_from_knob("45") == 45000 && start_settle_ms_from_knob("0") == 0 &&
-               start_settle_ms_from_knob("abc") == 20000 && start_settle_ms_from_knob("99999") == 3600000 &&
+    expect(start_settle_ms_from_knob("") == 0 && start_settle_ms_from_knob("45") == 45000 && start_settle_ms_from_knob("0") == 0 &&
+               start_settle_ms_from_knob("abc") == 0 && start_settle_ms_from_knob("99999") == 3600000 &&
                start_settle_ms_from_knob("  7 \n") == 7000,
            "knob_parsing");
-    expect(kDefaultSettleMs == 20000, "default settle is 20 s");
+    expect(kDefaultSettleMs == 0, "default settle is 0 s (start at the first present)");
     expect(settle_knob_is_legacy("45") && settle_knob_is_legacy(" 45\n") && !settle_knob_is_legacy("") && !settle_knob_is_legacy("20") &&
                !settle_knob_is_legacy("045x"),
            "settle knob 45 is legacy");
     expect(start_mode_is_legacy("legacy\n") && start_mode_is_legacy("LEGACY") && !start_mode_is_legacy("legacy-ish") &&
                !start_mode_is_legacy(""),
            "legacy_mode_knob");
-    expect(start_timeout_ms("", 20000) == 60000 && start_timeout_ms("", 600000) == 600000 && start_timeout_ms("3\n", 20000) == 3000 &&
-               start_timeout_ms("0", 20000) == 60000 && start_timeout_ms("x", 20000) == 60000,
+    expect(start_timeout_ms("", 0) == 60000 && start_timeout_ms("", 600000) == 600000 && start_timeout_ms("3\n", 20000) == 3000 &&
+               start_timeout_ms("0", 0) == 60000 && start_timeout_ms("x", 0) == 60000,
            "timeout knob");
     {
         StartGateInput g{};

@@ -372,7 +372,7 @@ string StateText(string d) => File.ReadAllText(Path.Combine(d, "launcher-feature
         Check("restart_refuses_another_mod_home", refusedHome && !File.Exists(start));
         Directory.Delete(g, true); Directory.Delete(h, true);
     }
-    Check("fallback_and_default_seconds", ProxyInstall.DefaultStartSeconds == 20 && ProxyInstall.FallbackDelaySeconds == 45);
+    Check("fallback_and_default_seconds", ProxyInstall.DefaultStartSeconds == 0 && ProxyInstall.FallbackDelaySeconds == 45);
 }
 {   // DLSS provider: the user's own nvngx_dlss.dll, mod home first, then build\dlss-dll-path; nothing is copied or bundled.
     var root = Path.Combine(Path.GetTempPath(), "d2vrdlss-" + Guid.NewGuid().ToString("N")); Directory.CreateDirectory(Path.Combine(root, "build"));

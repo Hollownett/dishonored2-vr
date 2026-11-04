@@ -30,6 +30,38 @@ Steps run(double work_ms,double jitter_ms,std::int64_t phase0,bool enabled,bool 
     return {double(n[1])/total,double(n[2])/total,double(n[3])/total,pacer.k,pacer.period(base),double(misses_period)/predicted,double(misses_median)/predicted};
 }
 void require(bool ok,const char* what) {if(!ok) {std::printf("FAIL %s\n",what);std::exit(1);}}
+// v984: the cadence is chosen from the frame's own work, so a heavy stretch must not strand the app at half rate once the scene
+// recovers. `heavy_ms` for `heavy_s` seconds, then `light_ms`: returns how long after the switch k returned to 1 (negative: never),
+// the k at the end, and the share of frames paced at half rate after the switch.
+struct Recovery {double k1_delay_s{-1};int k_end{};double paced_after{};unsigned locks{},unlocks{};};
+Recovery run_recovery(double heavy_ms,double light_ms,double heavy_s,double total_s,unsigned seed=11) {
+    constexpr std::int64_t base=11'111'111,lead=52'300'000,start=1'000'000'000;
+    d2vr::FramePacer pacer;std::mt19937 rng(seed);
+    std::uniform_real_distribution<double> jitter(-1.,1.),wake_late(0.,300'000.);
+    std::int64_t t=start,prev_display=0,light_since=-1;unsigned after=0,paced_after=0;
+    Recovery r;
+    const auto switch_at=start+static_cast<std::int64_t>(heavy_s*1e9),end=start+static_cast<std::int64_t>(total_s*1e9);
+    while(t<end) {
+        std::int64_t idle=0;
+        if(const auto w=pacer.wake(t)) {idle=w-t+static_cast<std::int64_t>(wake_late(rng));t+=idle;}
+        auto display=(t+lead+base-1)/base*base;
+        if(prev_display && display<prev_display+base) {display=prev_display+base;idle+=display-lead-t;t=display-lead;}
+        pacer.update(t,idle,display,base,true);
+        if(t>=switch_at) {
+            ++after;if(pacer.k>1) ++paced_after;
+            if(pacer.k==1) {
+                if(light_since<0) light_since=t;
+                if(r.k1_delay_s<0 && t-light_since>=1'000'000'000) r.k1_delay_s=static_cast<double>(light_since-switch_at)/1e9;
+            } else light_since=-1;
+        }
+        prev_display=display;
+        const double work=(t<switch_at?heavy_ms:light_ms)+jitter(rng)*0.2;
+        t+=static_cast<std::int64_t>(work*1e6);
+    }
+    r.k_end=pacer.k;r.paced_after=after?static_cast<double>(paced_after)/after:0;
+    r.locks=pacer.locks;r.unlocks=pacer.unlocks;
+    return r;
+}
 } // namespace
 
 int main() {
@@ -69,5 +101,22 @@ int main() {
     }
     d2vr::FramePacer off;off.update(5,0,100,11'111'111,false);
     require(off.wake(0)==0 && off.period(22'222'222)==22'222'222,"disabled pacing changed timing");
+    // v984 regression: 6 s of 18 ms frames lock the cadence to half rate (correct: they miss every slot either way), but 8 s of
+    // 10.5 ms frames afterwards must bring the full rate back within a second and keep it. v844-v983 held k=2 for 10-120 s here.
+    {const auto r=run_recovery(18,10.5,6,20);
+     std::printf("v984 recovery 18 -> 10.5 ms: k=1 after %.2f s, k end %d, paced after %.2f, locks %u unlocks %u\n",
+         r.k1_delay_s,r.k_end,r.paced_after,r.locks,r.unlocks);
+     require(r.k1_delay_s>=0 && r.k1_delay_s<=1.0,"a recovered scene stayed locked at half rate (the v983 20-60 s 45 fps holds)");
+     require(r.k_end==1,"the cadence did not stay at the full rate after the scene recovered");
+     require(r.paced_after<0.25,"more than a quarter of the recovered scene was paced at half rate");}
+    // The user's normal case (engine work just under one period) must never lock: 10.5 ms of work in an 11.1 ms period.
+    {const auto r=run_recovery(10.5,10.5,4,12);
+     std::printf("v984 steady 10.5 ms: k end %d, paced %.2f, locks %u\n",r.k_end,r.paced_after,r.locks);
+     require(r.k_end==1 && r.paced_after<0.02,"an app whose frames fit the period was locked to half rate");}
+    // v985: a menu or loading stretch is not the scene's work. 45 ms frames must not lock the cadence, and play afterwards keeps
+    // the full rate (2026-11-04 headset: menu frames filled the work window and held the cadence at half rate in gameplay).
+    {const auto r=run_recovery(45,10.5,4,14);
+     std::printf("v985 menu 45 ms then 10.5 ms: k end %d, paced after %.2f, locks %u\n",r.k_end,r.paced_after,r.locks);
+     require(r.k_end==1 && r.paced_after<0.02,"menu or loading frames locked the cadence to half rate");}
     std::printf("PASS frame_pacer_check\n");
 }

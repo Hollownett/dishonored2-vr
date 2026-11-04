@@ -77,14 +77,22 @@ public static class Probe
             bool viaProxy = TryInstallProxy(root, log);
             if (viaProxy) SetAsidePreviousProxyLog(root);  // only lines written by this game start may count
             GameKeys.PrepareConfig(log);
-            Process.Start(new ProcessStartInfo("steam://rungameid/403640") { UseShellExecute = true });  // Steam app 403640 is Dishonored 2
-            log("Starting Dishonored 2 through Steam...");
+            // Steam still owns app 403640 while the game is starting or closing. Sending rungameid then starts it twice (or relaunches over the
+            // closing one) and breaks the Steam Link audio. Wait: the process appears (it is starting; do not launch again) or Steam lets go.
+            var settle = DateTime.UtcNow.AddSeconds(60);
+            if (SteamRunningApp() == 403640) log("Steam still has Dishonored 2 running or closing; waiting for it before starting.");
+            while (games.Length == 0 && SteamRunningApp() == 403640 && DateTime.UtcNow < settle) { await Task.Delay(500); games = Process.GetProcessesByName("Dishonored2"); }
+            if (games.Length == 0)
+            {
+                Process.Start(new ProcessStartInfo("steam://rungameid/403640") { UseShellExecute = true });  // Steam app 403640 is Dishonored 2
+                log("Starting Dishonored 2 through Steam...");
+            }
             var deadline = DateTime.UtcNow.AddMinutes(3);
             while (games.Length == 0 && DateTime.UtcNow < deadline) { await Task.Delay(2000); games = Process.GetProcessesByName("Dishonored2"); }
             if (viaProxy)
             {
                 if (games.Length == 0) throw new InvalidOperationException("Steam did not start Dishonored 2 within 3 minutes.");
-                log($"Game started; the proxy starts VR about {ProxyInstall.DefaultStartSeconds} s after its window appears (artifacts\\linux-proxy.log). Use Stop VR to stop.");
+                log($"Game started; the proxy starts VR as soon as the game draws its first frame (artifacts\\linux-proxy.log). Use Stop VR to stop.");
                 SessionPath = ProxyInstall.StartPath.Proxy;
                 await ContinueAfterProxyStart(root, games[0].Id, log, inGameplay);
                 return false;
@@ -120,6 +128,13 @@ public static class Probe
         return true;
     }
 
+    /// <summary>Steam's RunningAppID for the current user (0 when no game is running).</summary>
+    static int SteamRunningApp()
+    {
+        try { return Convert.ToInt32(Microsoft.Win32.Registry.GetValue(@"HKEY_CURRENT_USER\Software\Valve\Steam", "RunningAppID", 0) ?? 0); }
+        catch (Exception) { return 0; }
+    }
+
     static async Task PostEnters(int pid, Action<string> log, Func<bool> inGameplay)
     {
         foreach (var _ in Enumerable.Range(0, 3))
@@ -142,7 +157,7 @@ public static class Probe
             if (!File.Exists(proxy)) throw new InvalidOperationException("this launcher build carries no proxy (build\\dinput8.dll)");
             var changed = ProxyInstall.Install(gameDir, root, File.ReadAllBytes(proxy));
             log(changed.Count == 0 ? $"Proxy already installed in {gameDir}." : $"Proxy installed in {gameDir} ({string.Join(", ", changed)}).");
-            log($"Note: with the proxy installed, every start of Dishonored 2 starts VR about {ProxyInstall.DefaultStartSeconds} s after its window. To play flat, use Tools > Uninstall proxy.");
+            log($"Note: with the proxy installed, every start of Dishonored 2 starts VR at its first frame. To play flat, use Tools > Uninstall proxy.");
             return true;
         }
         catch (Exception ex)  // not installable (foreign dinput8.dll, no permission, missing payload): today's behaviour
@@ -215,6 +230,17 @@ public static class Probe
                 await Task.Delay(4000);
                 state = ProxyInstall.ReadStart(ReadProxyLog(logFile), out code, out why);
                 if (state == ProxyInstall.StartState.Failed) { log($"VR did not start: StartProbe returned {code}: {why}. No keys sent."); return; }
+                // VR now starts at the first frame, long before the title menu (logic mask 64). Enters sent earlier would be wasted on the logos,
+                // so wait for the menu; with the skip-intro feature on, tap Space meanwhile (any key skips a logo movie).
+                bool skip = File.Exists(Path.Combine(root, "build", "skip-intro"));
+                if (skip) log("Skipping the intro movies.");
+                var menuBy = DateTime.UtcNow.AddSeconds(120);
+                while (DateTime.UtcNow < menuBy && !inGameplay() && !Regex.IsMatch(ReadProxyLog(logFile), @"logic_mask \d+ -> 64\b"))
+                {
+                    if (Process.GetProcessesByName("Dishonored2").Length == 0) return;
+                    if (skip) GameKeys.Post(pid, 0x20);
+                    await Task.Delay(skip ? 500 : 1000);
+                }
                 await PostEnters(pid, log, inGameplay);
                 return;
             }

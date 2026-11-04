@@ -54,6 +54,13 @@ static class Program
         var root = Env.FindRoot(args);
         var env = root != null ? new Env(root) : new Env(Path.GetFullPath(Flag("--home") ?? ModHome.Dir)) { Standalone = true };
         int startPage = Math.Max(0, Array.IndexOf(new[] { "play", "settings", "tools", "controls" }, (Flag("--page") ?? "play").ToLowerInvariant()));
+        // Two launcher windows would each press Launch VR and start the game twice. Review runs (--screenshot/--exit) may coexist.
+        using var single = new Mutex(true, @"Local\DishonoredVR-Launcher", out var firstLauncher);
+        if (!firstLauncher && Flag("--screenshot") == null && !args.Contains("--exit"))
+        {
+            MessageBox.Show("The Dishonored VR launcher is already open.", "Dishonored VR");
+            return 0;
+        }
         Application.Run(new MainForm(env, startPage, Flag("--screenshot"), args.Contains("--exit"), args.Contains("--no-art"), Flag("--guide-page"), Flag("--guide-character")));
         return 0;
     }
