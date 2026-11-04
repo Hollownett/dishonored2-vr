@@ -2178,9 +2178,24 @@ void trace_targets(ID3D11DeviceContext* context,UINT count,ID3D11RenderTargetVie
     } catch(...) {callback_failed=true;gpu_phase=0;}
 }
 
+// v991 (measurement): how often a render-target bind repeats the exact set the same context already had. Paired rendering binds the
+// eye targets once per pass per view, so a high repeat rate would make bind elision cheap CPU. Counted only, never skipped yet.
+struct RtBindCensus {ID3D11DeviceContext* context{};UINT count{};std::array<ID3D11RenderTargetView*,8> rt{};ID3D11DepthStencilView* depth{};};
+static std::array<RtBindCensus,8> rt_bind_census{};
+static std::atomic<std::uint64_t> rt_bind_calls{},rt_bind_repeats{};
+static void note_rt_bind(ID3D11DeviceContext* context,UINT count,ID3D11RenderTargetView* const* targets,ID3D11DepthStencilView* depth) noexcept {
+    auto& slot=rt_bind_census[(reinterpret_cast<std::uintptr_t>(context)>>4)&7];
+    bool same=slot.context==context && slot.count==count && slot.depth==depth;
+    for(UINT i=0;same && i<count && i<8;++i) same=slot.rt[i]==targets[i];
+    rt_bind_calls.fetch_add(1,std::memory_order_relaxed);
+    if(same) {rt_bind_repeats.fetch_add(1,std::memory_order_relaxed);return;}
+    slot.context=context;slot.count=count<8?count:8;slot.depth=depth;
+    for(UINT i=0;i<slot.count;++i) slot.rt[i]=targets[i];
+}
 template<unsigned Binding> void WINAPI targets_hook(ID3D11DeviceContext* context,UINT count,ID3D11RenderTargetView* const* targets,ID3D11DepthStencilView* depth) {
     GpuCallbackDepth depth_guard;
     try {observe_paired_target_change(context,count,targets);} catch(...) {callback_failed=true;}
+    try {note_rt_bind(context,count,targets,depth);} catch(...) {}
     auto replacement=native_hud_art_capture.replacement(context,count,targets);
     if(!replacement) replacement=redirect_world_ui(context,count,targets,depth);
     auto* redirected=replacement.Get();
@@ -2191,6 +2206,7 @@ template<unsigned Binding> void WINAPI targets_hook(ID3D11DeviceContext* context
 template<unsigned Binding> void WINAPI targets_uav_hook(ID3D11DeviceContext* context,UINT count,ID3D11RenderTargetView* const* targets,ID3D11DepthStencilView* depth,UINT start,UINT uav_count,ID3D11UnorderedAccessView* const* uavs,const UINT* initial) {
     GpuCallbackDepth depth_guard;
     try {observe_paired_target_change(context,count,targets);} catch(...) {callback_failed=true;}
+    if(!uav_count) try {note_rt_bind(context,count,targets,depth);} catch(...) {}
     auto replacement=uav_count==0?native_hud_art_capture.replacement(context,count,targets):ComPtr<ID3D11RenderTargetView>{};
     if(!replacement && !uav_count) replacement=redirect_world_ui(context,count,targets,depth);
     auto* redirected=replacement.Get();
@@ -2360,8 +2376,27 @@ struct NativeNoteDraw {
         }catch(...) {}
     }
 };
+// v990 (measurement build): draws and submitted primitives per CPU phase, so one run can say how many draws each eye records and
+// whether the second view submits more than the first. The phase is the same stamp the frame split uses; an unsynchronised read of
+// the two eye stamps against the Present thread is harmless for a counter.
+static std::array<std::atomic<std::uint64_t>,4> draw_count_by_phase{},element_count_by_phase{},instance_count_by_phase{};
+static void note_draw_phase(UINT elements,UINT instances) noexcept {
+    const auto phase=static_cast<unsigned>(frame_split_eyes.phase(false));
+    draw_count_by_phase[phase].fetch_add(1,std::memory_order_relaxed);
+    element_count_by_phase[phase].fetch_add(elements,std::memory_order_relaxed);
+    instance_count_by_phase[phase].fetch_add(instances,std::memory_order_relaxed);
+}
+static std::string draw_phase_json() {
+    std::ostringstream o;o<<'[';
+    for(unsigned i=0;i<4;++i) o<<(i?",":"")<<draw_count_by_phase[i].load(std::memory_order_relaxed);
+    o<<"],[";
+    for(unsigned i=0;i<4;++i) o<<(i?",":"")<<element_count_by_phase[i].load(std::memory_order_relaxed);
+    o<<"],[";
+    for(unsigned i=0;i<4;++i) o<<(i?",":"")<<instance_count_by_phase[i].load(std::memory_order_relaxed);
+    return o.str()+']';
+}
 template<unsigned Binding> void WINAPI draw_indexed_hook(ID3D11DeviceContext* context,UINT count,UINT start,INT base) {
-    GpuCallbackDepth depth_guard;trace_draw(context,"draw_indexed",count,1,false,start,base);
+    GpuCallbackDepth depth_guard;note_draw_phase(count,1);trace_draw(context,"draw_indexed",count,1,false,start,base);
     if(skip_letterbox_draw(context,count)) return;
     NativeNoteDraw note(context,count,1,start,base);
     const d2vr::ObjectMotion::DrawScope object_motion(context); // per-eye previous MVP at b2 for this draw
@@ -2369,19 +2404,19 @@ template<unsigned Binding> void WINAPI draw_indexed_hook(ID3D11DeviceContext* co
     note.submitted();
 }
 template<unsigned Binding> void WINAPI draw_instanced_hook(ID3D11DeviceContext* context,UINT count,UINT instances,UINT start,INT base,UINT first) {
-    GpuCallbackDepth depth_guard;trace_draw(context,"draw_indexed_instanced",count,instances,false,start,base,first);
+    GpuCallbackDepth depth_guard;note_draw_phase(count,instances);trace_draw(context,"draw_indexed_instanced",count,instances,false,start,base,first);
     NativeNoteDraw note(context,count,instances,start,base,first);
     const d2vr::ObjectMotion::DrawScope object_motion(context); // per-eye previous MVP at b2 for this draw
     reinterpret_cast<DrawIndexedInstancedFn>(gpu_bindings.original(4,Binding))(context,count,instances,start,base,first);
     note.submitted();
 }
 template<unsigned Binding> void WINAPI draw_hook(ID3D11DeviceContext* context,UINT count,UINT start) {
-    GpuCallbackDepth depth_guard;trace_draw(context,"draw_vertices",count,1,true);
+    GpuCallbackDepth depth_guard;note_draw_phase(count,1);trace_draw(context,"draw_vertices",count,1,true);
     const d2vr::ObjectMotion::DrawScope object_motion(context); // per-eye previous MVP at b2 for this draw
     reinterpret_cast<DrawFn>(gpu_bindings.original(5,Binding))(context,count,start);
 }
 template<unsigned Binding> void WINAPI draw_vertices_instanced_hook(ID3D11DeviceContext* context,UINT count,UINT instances,UINT start,UINT first) {
-    GpuCallbackDepth depth_guard;trace_draw(context,"draw_instanced_vertices",count,instances,true);
+    GpuCallbackDepth depth_guard;note_draw_phase(count,instances);trace_draw(context,"draw_instanced_vertices",count,instances,true);
     const d2vr::ObjectMotion::DrawScope object_motion(context); // per-eye previous MVP at b2 for this draw
     reinterpret_cast<DrawInstancedFn>(gpu_bindings.original(6,Binding))(context,count,instances,start,first);
 }
@@ -10889,7 +10924,7 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                      << ",\"native_cached_output_size\":[" << cached_dimensions[0] << ',' << cached_dimensions[1] << ']'
                                      << ",\"cached_output_reapplies\":" << cached_output_reapplies.load()
                                      << ",\"cached_output_deferred\":" << cached_output_deferred.load()
-                                     << ",\"canted_views\":" << (cant_requested?"true":"false") << ",\"engine_cvars\":" << std::quoted(engine_cvars_applied) << ",\"mip_bias\":{\"enabled\":" << (mip_bias_enabled?"true":"false") << ",\"bias\":" << d2vr::SamplerLodBias::bias() << ",\"swaps\":" << d2vr::SamplerLodBias::swaps.load() << ",\"failures\":" << d2vr::SamplerLodBias::failures.load() << ",\"samplers\":" << d2vr::SamplerLodBias::cached() << "}" << ",\"optical_density_requested\":" << (optical_density_requested?"true":"false")
+                                     << ",\"canted_views\":" << (cant_requested?"true":"false") << ",\"engine_cvars\":" << std::quoted(engine_cvars_applied) << ",\"draws_by_phase\":" << draw_phase_json() << ",\"rt_binds\":" << rt_bind_calls.load(std::memory_order_relaxed) << ",\"rt_bind_repeats\":" << rt_bind_repeats.load(std::memory_order_relaxed) << ",\"mip_bias\":{\"enabled\":" << (mip_bias_enabled?"true":"false") << ",\"bias\":" << d2vr::SamplerLodBias::bias() << ",\"swaps\":" << d2vr::SamplerLodBias::swaps.load() << ",\"failures\":" << d2vr::SamplerLodBias::failures.load() << ",\"samplers\":" << d2vr::SamplerLodBias::cached() << "}" << ",\"optical_density_requested\":" << (optical_density_requested?"true":"false")
                                      << ",\"optical_density_request_applied\":" << (optical_density_applied?"true":"false")
                                      << ",\"resolution_multiplier_requested\":" << requested_resolution_multiplier
                                      << ",\"resolution_multiplier_effective\":" << effective_resolution_multiplier
@@ -14127,7 +14162,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
                << ",\"cached_output_written\":" << (cached_output_written?"true":"false")
                << ",\"cached_output_restored\":" << (cached_output_restored.load()?"true":"false")
                << ",\"requested_native_output\":[" << requested_output_size.width << ',' << requested_output_size.height << ']'
-               << ",\"canted_views\":" << (cant_requested?"true":"false") << ",\"engine_cvars\":" << std::quoted(engine_cvars_applied) << ",\"mip_bias\":{\"enabled\":" << (mip_bias_enabled?"true":"false") << ",\"bias\":" << d2vr::SamplerLodBias::bias() << ",\"swaps\":" << d2vr::SamplerLodBias::swaps.load() << ",\"failures\":" << d2vr::SamplerLodBias::failures.load() << ",\"samplers\":" << d2vr::SamplerLodBias::cached() << "}" << ",\"optical_density_requested\":" << (optical_density_requested?"true":"false")
+               << ",\"canted_views\":" << (cant_requested?"true":"false") << ",\"engine_cvars\":" << std::quoted(engine_cvars_applied) << ",\"draws_by_phase\":" << draw_phase_json() << ",\"rt_binds\":" << rt_bind_calls.load(std::memory_order_relaxed) << ",\"rt_bind_repeats\":" << rt_bind_repeats.load(std::memory_order_relaxed) << ",\"mip_bias\":{\"enabled\":" << (mip_bias_enabled?"true":"false") << ",\"bias\":" << d2vr::SamplerLodBias::bias() << ",\"swaps\":" << d2vr::SamplerLodBias::swaps.load() << ",\"failures\":" << d2vr::SamplerLodBias::failures.load() << ",\"samplers\":" << d2vr::SamplerLodBias::cached() << "}" << ",\"optical_density_requested\":" << (optical_density_requested?"true":"false")
                << ",\"optical_density_request_applied\":" << (optical_density_applied?"true":"false")
                << ",\"resolution_multiplier_requested\":" << requested_resolution_multiplier
                << ",\"resolution_multiplier_effective\":" << effective_resolution_multiplier
