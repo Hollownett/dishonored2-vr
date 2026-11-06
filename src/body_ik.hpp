@@ -145,6 +145,10 @@ struct Inputs {
     double grip[2]{},trigger[2]{}; // controller analog values 0..1 drive the fingers
     // Empty hand: fingers curl from grip/trigger instead of copying the native (flat) pose.
     bool hand_empty[2]{};
+    // v1102: this hand holds a weapon but no authored weapon clip exists for it (a mod-held copy, a displaced gun): pose the fingers
+    // procedurally, closed to the grip even when the controller squeeze is relaxed. Without this the game's empty/idle arm clip
+    // leaves the hand with straight fingers around a gun.
+    bool weapon_grip[2]{};
     std::uint64_t native_socket_token[2]{};
     // Which item the hand holds (0 unknown): a hold remembered for the same key starts the next hold of that item (see ArmState::memo).
     std::uint64_t item_key[2]{};
@@ -202,6 +206,7 @@ class BodySolver {
         Vec3 wrap{}; // wrap centre of the native curled fingers in the attachment's parent frame, followed like hold
         std::uint64_t socket_token{};
         bool has_pole{},has_roll{},has_hold{},sneak_flip{},hold_calibrated{};
+        bool weapon_grip{};   // v1102: procedural grip for a weapon hand with no authored weapon clip
         int finger_mode{};
         double hold_native_deg{},hold_native_m{}; // diagnostic: the drawn hold local against this frame's native attachment local
         // The held item's fingers (hand-subtree locals, attachment excluded): like the socket they follow the native pose only while it is
@@ -667,7 +672,8 @@ private:
         static constexpr double relaxed[5][4]={{8,10,12,0},{0,12,18,8},{0,18,24,12},{2,22,28,14},{4,26,32,16}};
         static constexpr double closed[5][4]={{25,30,45,0},{0,80,95,55},{0,85,100,60},{6,88,100,60},{12,90,100,62}};
         for(int f=0;f<5;++f) for(int k=0;k<4;++k) if(finger_[i][f][k]==j) {
-            const double amount=std::clamp(f==1?trigger*.85:f==0?std::max(grip,trigger)*.8:grip,0.,1.);
+            double amount=std::clamp(f==1?trigger*.85:f==0?std::max(grip,trigger)*.8:grip,0.,1.);
+            if(state.weapon_grip) amount=std::max(amount,.8);   // v1102: a held gun keeps its grip pose with a relaxed squeeze
             const int s=f?k-1:k; // chain joint of finger_turns (fingers 02-04, thumb 01-03); a finger's metacarpal has none
             if(turn && s<0) return a.local[j]; // a metacarpal under contact turns: on the pose the contact planned from
             const double degrees=turn && s>=0?turn[f][s]*180/kPi:relaxed[f][k]+(closed[f][k]-relaxed[f][k])*amount;
@@ -925,10 +931,11 @@ private:
             }
         }
         const bool remembered=state.has_memo && state.memo_key==in.item_key[i];
-        const bool procedural=!native || (in.weapon_incoming[i]?!remembered:in.hand_empty[i]);
+        state.weapon_grip=in.weapon_grip[i];
+        const bool procedural=!native || (in.weapon_incoming[i]?!remembered:in.hand_empty[i]) || in.weapon_grip[i];
         if(state.socket_token!=in.native_socket_token[i]) {state.has_hold=false;state.hold_calibrated=false;state.reverse_weight=0;state.sneak_flip=false;state.socket_token=in.native_socket_token[i];}
         const bool native_socket=native && (!procedural || in.native_socket_token[i]);
-        state.finger_mode=procedural?(in.has_finger[i]?1:2):3;
+        state.finger_mode=procedural?(in.has_finger[i] && !in.weapon_grip[i]?1:2):3;
         // Held item: the native attachment local is rotated by authored attack/block/equip clips, so
         // the socket keeps the last steady value (<20 deg/s, <5 cm/s for 0.25 s) and the player owns the grip.
         bool fresh_hold=false;
@@ -992,7 +999,7 @@ private:
                 }
                 return h;
             }
-            if(procedural) return finger_local(i,j,in.grip[i],in.trigger[i],state,in.has_finger[i]?in.finger_turn[i]:nullptr,in.has_finger[i] && in.has_finger_axis[i]?in.finger_axis[i]:nullptr);
+            if(procedural) return in.weapon_grip[i]?finger_local(i,j,in.grip[i],in.trigger[i],state):finger_local(i,j,in.grip[i],in.trigger[i],state,in.has_finger[i]?in.finger_turn[i]:nullptr,in.has_finger[i] && in.has_finger_axis[i]?in.finger_axis[i]:nullptr);
             if(native_socket && state.has_fingers) return state.fingers[static_cast<std::size_t>(j)];
             auto l=mul(inverse((*native)[s.parent[j]]),(*native)[j]);
             l.p=l.p*scale_;

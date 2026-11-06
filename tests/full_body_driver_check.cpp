@@ -1,7 +1,10 @@
+#define NOMINMAX
 #include "../src/full_body_driver.hpp"
 #include "../src/arm_tracking.hpp"
+#include "../src/native_weapon_hands.hpp"
 #include <cassert>
 #include <iostream>
+#include <map>
 #include <thread>
 int main() {
     // Synthetic clock: the solver reads Tracking::seconds (real steady time in production).
@@ -18,6 +21,7 @@ int main() {
     // solved hand subtree recovers the controller grip in both mirrored arms.
     const auto b=skeleton(data::kBody),left=skeleton(data::kLeftArm),right=skeleton(data::kRightArm);
     Tracking tracking;tracking.eye={b.bind[b.find("camera_jnt")].q,b.bind[b.find("camera_jnt")].p};tracking.epoch=1;
+    tracking.hand_state_fresh=true;   // v1105: these are gameplay samples; the type/clip diagnostic only updates on a fresh hand state
     std::array<Transform,20> native_body{};
     for(unsigned i=0;i<20;++i)native_body[i]=to_transform(b.bind[i]);
     std::array<Transform,69> native_arm[2];Transform palms[2];
@@ -253,8 +257,8 @@ int main() {
         // (mirror_native) is posed by that arm's native clip mirrored onto it. A bent left index (the left's own hold) shows on the right hand.
         auto bent=native_arm;const auto li=static_cast<unsigned>(left.find("left_index_03_jnt")),lw=static_cast<unsigned>(left.find("left_wrist_jnt"));
         const auto ri=static_cast<unsigned>(right.find("right_index_03_jnt")),rw=static_cast<unsigned>(right.find("right_wrist_jnt"));
-        {auto& t=bent[0][li];const double c=std::cos(.9),s=std::sin(.9);
-         for(unsigned k=0;k<3;++k) {const float a1=t.f[4+k],a2=t.f[8+k];t.f[4+k]=static_cast<float>(c*a1+s*a2);t.f[8+k]=static_cast<float>(-s*a1+c*a2);}}
+        {auto& bent_joint=bent[0][li];const double c=std::cos(.9),s=std::sin(.9);
+         for(unsigned k=0;k<3;++k) {const float a1=bent_joint.f[4+k],a2=bent_joint.f[8+k];bent_joint.f[4+k]=static_cast<float>(c*a1+s*a2);bent_joint.f[8+k]=static_cast<float>(-s*a1+c*a2);}}
         const auto right_index=[&](bool mirror) {
             Driver d;d.tune(0,1);auto tr=tracking;tr.tick=5000;tr.hand_empty[1]=false;tr.mirror_native[1]=mirror;
             for(unsigned k=0;k<2;++k)(void)d.arm(k,bent[k],identity);
@@ -272,11 +276,11 @@ int main() {
         // kept while slot 1 holds a gun; a copy held when no arm plays a gun clip is posed by it (mirrored on the right).
         auto bent=native_arm;const auto li=static_cast<unsigned>(left.find("left_index_03_jnt")),lw=static_cast<unsigned>(left.find("left_wrist_jnt"));
         const auto ri=static_cast<unsigned>(right.find("right_index_03_jnt")),rw=static_cast<unsigned>(right.find("right_wrist_jnt"));
-        {auto& t=bent[0][li];const double c=std::cos(.9),s=std::sin(.9);
-         for(unsigned k=0;k<3;++k) {const float a1=t.f[4+k],a2=t.f[8+k];t.f[4+k]=static_cast<float>(c*a1+s*a2);t.f[8+k]=static_cast<float>(-s*a1+c*a2);}}
+        {auto& bent_joint=bent[0][li];const double c=std::cos(.9),s=std::sin(.9);
+         for(unsigned k=0;k<3;++k) {const float a1=bent_joint.f[4+k],a2=bent_joint.f[8+k];bent_joint.f[4+k]=static_cast<float>(c*a1+s*a2);bent_joint.f[8+k]=static_cast<float>(-s*a1+c*a2);}}
         const auto right_index=[&](bool keep) {
             Driver d;d.tune(0,1);auto tr=tracking;tr.hand_empty[1]=false;
-            for(unsigned n=0;n<40;++n) {tr.tick=5000+n*11;tr.slot1_gun=true;   // slot 1 holds the gun: its clip (bent index) plays calmly for 0.44 s
+            for(unsigned n=0;n<40;++n) {tr.tick=5000+n*11;tr.slot1_gun=true;tr.slot1_type=1;tr.weapon_type[1]=1;   // slot 1 holds the pistol: its clip (bent index) plays calmly for 0.44 s
                 for(unsigned k=0;k<2;++k)(void)d.arm(k,bent[k],identity);d.publish(stamp(tr),{});assert(d.body(native_body,identity));}
             tr.slot1_gun=false;tr.gun_clip[1]=keep;                              // now a grenade: the left arm plays another clip (flat); the hold eases over
             for(unsigned n=0;n<100;++n) {tr.tick+=11;                            // its steady quarter second, as any new hold
@@ -287,15 +291,79 @@ int main() {
         const auto want=body::mul(body::inverse(to_xf(power_hand::mirror_joint(bent[0][lw]))),to_xf(power_hand::mirror_joint(bent[0][li])));
         const auto angle=[](const Quaternion& a,const Quaternion& b) {return 2*std::acos(std::min(1.,std::abs(a.x*b.x+a.y*b.y+a.z*b.z+a.w*b.w)));};
         const auto kept=right_index(true),own=right_index(false);
-        assert(length(kept.p-want.p)<2e-3 && angle(kept.q,want.q)<.02); // the kept gun clip's bent finger, mirrored, on the right hand
+        assert(angle(kept.q,want.q)<.02); // the kept gun clip's bent finger, mirrored, on the right hand
         assert(angle(own.q,want.q)>.5);                                 // without it the right keeps its own flat finger
+    }
+    {   // v1104 (user: "all guns should have animated grip ... currently I can see a pistol grip on a crossbow and vice versa"): the kept
+        // gun clip is keyed by the held item's COMPONENT TYPE. Capture a pistol clip (bent index) and a crossbow clip (bent ring) from the
+        // left arm; a right-hand copy of each type takes its own clip, never the other's. A type never captured uses the engine's own baked
+        // idle clip for THAT type (sampled); a type with neither source falls back to the procedural grip with its count.
+        std::array<std::array<Transform,69>,2> pistol{native_arm[0],native_arm[1]},crossbow{native_arm[0],native_arm[1]};
+        const auto li=static_cast<unsigned>(left.find("left_index_03_jnt")),lw=static_cast<unsigned>(left.find("left_wrist_jnt")),lr=static_cast<unsigned>(left.find("left_ring_03_jnt"));
+        const auto ri=static_cast<unsigned>(right.find("right_index_03_jnt")),rw=static_cast<unsigned>(right.find("right_wrist_jnt")),rr=static_cast<unsigned>(right.find("right_ring_03_jnt"));
+        const auto bend=[](Transform& joint,double degrees) {
+            const double c=std::cos(degrees),s=std::sin(degrees);
+            for(unsigned k=0;k<3;++k) {const float a1=joint.f[4+k],a2=joint.f[8+k];joint.f[4+k]=static_cast<float>(c*a1+s*a2);joint.f[8+k]=static_cast<float>(-s*a1+c*a2);}
+        };
+        bend(pistol[0][li],.9);bend(crossbow[0][lr],.9);
+        const auto angle=[](const Quaternion& a,const Quaternion& b) {return 2*std::acos(std::min(1.,std::abs(a.x*b.x+a.y*b.y+a.z*b.z+a.w*b.w)));};
+        const auto local=[](const std::array<Transform,69>& arm,unsigned wrist,unsigned joint) {
+            return body::mul(body::inverse(to_xf(arm[wrist])),to_xf(arm[joint]));
+        };
+        const auto mirrored=[&](const std::array<Transform,69>& clip,unsigned joint) {
+            return body::mul(body::inverse(to_xf(power_hand::mirror_joint(clip[lw]))),to_xf(power_hand::mirror_joint(clip[joint])));
+        };
+        std::array<Transform,69> baked_crossbow{};
+        if(const auto* baked=grip_clips::sampled(grip_clips::type_crossbow))
+            for(unsigned j=0;j<69;++j) {const auto& bj=(*baked)[j];
+                baked_crossbow[j]=to_transform(Xf{normalized(Quaternion{bj.q[0],bj.q[1],bj.q[2],bj.q[3]}),Vec3{bj.p[0],bj.p[1],bj.p[2]}});}
+        struct Held {Xf index,ring;int source,mode;};
+        const auto run=[&](bool capture,unsigned type) {
+            Driver d;d.tune(0,1);auto tr=tracking;tr.hand_empty[1]=false;
+            const auto play=[&](const std::array<Transform,69>& clip,unsigned kind) {
+                for(unsigned n=0;n<40;++n) {tr.tick+=11;tr.slot1_gun=true;tr.slot1_type=kind;
+                    (void)d.arm(0,clip,identity);(void)d.arm(1,native_arm[1],identity);d.publish(stamp(tr),{});assert(d.body(native_body,identity));}
+            };
+            if(capture) {play(pistol[0],grip_clips::type_pistol);play(crossbow[0],grip_clips::type_crossbow);}
+            tr.slot1_gun=false;tr.slot1_type=0;tr.gun_clip[1]=true;tr.mirror_native[1]=false;tr.weapon_type[1]=type;
+            for(unsigned n=0;n<100;++n) {tr.tick+=11;
+                (void)d.arm(0,native_arm[0],identity);(void)d.arm(1,native_arm[1],identity);d.publish(stamp(tr),{});assert(d.body(native_body,identity));}
+            const auto r=d.arm(1,native_arm[1],identity);assert(r);
+            return Held{local(*r,rw,ri),local(*r,rw,rr),d.clip_sources()[1],d.finger_modes()[1][2]!=0?2:0};
+        };
+        const auto pistol_copy=run(true,grip_clips::type_pistol),crossbow_copy=run(true,grip_clips::type_crossbow);
+        assert(pistol_copy.source==1 && crossbow_copy.source==1);                                  // captured live, per type
+        const auto want_pistol_index=mirrored(pistol[0],li),want_crossbow_ring=mirrored(crossbow[0],lr);
+        assert(length(pistol_copy.index.p-want_pistol_index.p)<2e-3 && angle(pistol_copy.index.q,want_pistol_index.q)<.02);
+        assert(length(crossbow_copy.ring.p-want_crossbow_ring.p)<2e-3 && angle(crossbow_copy.ring.q,want_crossbow_ring.q)<.02);
+        std::cout<<"v1104 per-type index angle "<<angle(pistol_copy.index.q,crossbow_copy.index.q)<<" ring angle "<<angle(pistol_copy.ring.q,crossbow_copy.ring.q)<<std::endl;
+        assert(angle(pistol_copy.index.q,crossbow_copy.index.q)>.5 && angle(pistol_copy.ring.q,crossbow_copy.ring.q)>.5); // never cross-assigned
+        const auto sampled_crossbow=run(false,grip_clips::type_crossbow);
+        const auto want_baked=mirrored(baked_crossbow,lr),want_baked_index=mirrored(baked_crossbow,li);
+        assert(sampled_crossbow.source==2);                                                        // the engine's own idle clip, sampled
+        assert(length(sampled_crossbow.ring.p-want_baked.p)<2e-3 && angle(sampled_crossbow.ring.q,want_baked.q)<.02);
+        assert(length(sampled_crossbow.index.p-want_baked_index.p)<2e-3 && angle(sampled_crossbow.index.q,want_baked_index.q)<.02);
+        const auto fallback=run(false,3);                                                           // no authored clip of this kind
+        assert(fallback.source==3 && fallback.mode==2);                                             // procedural grip, counted
+        {   // off switch build/legacy-single-gun-clip: the old one-clip-for-every-type behaviour is still available for an A/B
+            Driver d;d.tune(0,1);auto tr=tracking;tr.hand_empty[1]=false;
+            for(unsigned n=0;n<40;++n) {tr.tick+=11;tr.slot1_gun=true;tr.slot1_type=grip_clips::type_pistol;
+                (void)d.arm(0,pistol[0],identity);(void)d.arm(1,native_arm[1],identity);d.publish(stamp(tr),{});assert(d.body(native_body,identity));}
+            d.legacy_single_gun_clip(true);
+            tr.slot1_gun=false;tr.gun_clip[1]=true;tr.weapon_type[1]=grip_clips::type_crossbow;
+            for(unsigned n=0;n<100;++n) {tr.tick+=11;
+                (void)d.arm(0,native_arm[0],identity);(void)d.arm(1,native_arm[1],identity);d.publish(stamp(tr),{});assert(d.body(native_body,identity));}
+            const auto r=d.arm(1,native_arm[1],identity);assert(r);
+            const auto legacy=local(*r,rw,ri),want_legacy=mirrored(pistol[0],li);
+            assert(length(legacy.p-want_legacy.p)<2e-3 && angle(legacy.q,want_legacy.q)<.02);      // the pistol clip, for the crossbow type
+        }
     }
     {   // v771 dual wield (user, headset v770: the left hand held the sword through its open palm): a hand's first hold of an item starts from the
         // other hand's calibrated grip of it, mirrored, so a left draw shows the right's fist at once, before the draw clip (open fingers) is steady.
         auto bent=native_arm;const auto ri=static_cast<unsigned>(right.find("right_index_03_jnt")),rw=static_cast<unsigned>(right.find("right_wrist_jnt"));
         const auto li=static_cast<unsigned>(left.find("left_index_03_jnt")),lw=static_cast<unsigned>(left.find("left_wrist_jnt"));
-        {auto& t=bent[1][ri];const double c=std::cos(.9),s=std::sin(.9);
-         for(unsigned k=0;k<3;++k) {const float a1=t.f[4+k],a2=t.f[8+k];t.f[4+k]=static_cast<float>(c*a1+s*a2);t.f[8+k]=static_cast<float>(-s*a1+c*a2);}}
+        {auto& bent_joint=bent[1][ri];const double c=std::cos(.9),s=std::sin(.9);
+         for(unsigned k=0;k<3;++k) {const float a1=bent_joint.f[4+k],a2=bent_joint.f[8+k];bent_joint.f[4+k]=static_cast<float>(c*a1+s*a2);bent_joint.f[8+k]=static_cast<float>(-s*a1+c*a2);}}
         constexpr std::uint64_t sword=0x53574f5244ull;
         const auto left_index=[&](bool share) {
             Driver d;d.tune(0,1);auto tr=tracking;tr.hand_empty[0]=true;tr.hand_empty[1]=false;tr.item_key[1]=sword;
@@ -430,6 +498,38 @@ int main() {
             const double grip_error=length(d.palm_source[0].grip.position-wanted);
             if(!legacy) assert(grip_error<=.001);else assert(grip_error>=.04);
         }
+    }
+    {   // v1105: the item component type comes from the INVENTORY ITEM RECORD's component+declaration pair (the path the left-weapon
+        // socket receipts use), not from a scan of the entity's component list. The vtable RVAs are proved against Dishonored2.exe on
+        // disk in artifacts/round5/weapon-rtti.txt (arkCpntWeaponGun 0x1b53f58, arkCpntWeaponCrossbow 0x1b9cbf8; the declaration
+        // vtables 0x1b53e18 / 0x1b9cab8 are the pair the game's own equip path checks). A component and declaration from different
+        // classes must not classify (that is the check the old list scan skipped).
+        struct FakeMemory {
+            std::map<std::uintptr_t,unsigned char> bytes;
+            void qword(std::uintptr_t at,std::uint64_t value) {
+                for(unsigned i=0;i<8;++i) bytes[at+i]=static_cast<unsigned char>((value>>(8*i))&0xffu);
+            }
+            bool operator()(std::uintptr_t at,void* out,std::size_t size) const {
+                if(size>64) return false;
+                auto* text=static_cast<unsigned char*>(out);
+                for(std::size_t i=0;i<size;++i) {
+                    const auto it=bytes.find(at+i);if(it==bytes.end()) return false;text[i]=it->second;
+                }
+                return true;
+            }
+        };
+        constexpr std::uintptr_t base=0x140000000,item=0x200000000,component=0x200001000,declaration=0x200002000;
+        FakeMemory memory;
+        memory.qword(item+0x10,component);memory.qword(item+0x18,declaration);
+        memory.qword(component,base+0x1b53f58);memory.qword(declaration,base+0x1b53e18);   // arkCpntWeaponGun
+        assert(NativeWeaponHands::item_type(base,memory,item)==1);   // pistol
+        memory.qword(component,base+0x1b9cbf8);memory.qword(declaration,base+0x1b9cab8);   // arkCpntWeaponCrossbow
+        assert(NativeWeaponHands::item_type(base,memory,item)==2);   // crossbow
+        memory.qword(component,base+0x1b53f58);memory.qword(declaration,base+0x1b9cab8);   // gun component, crossbow declaration
+        assert(NativeWeaponHands::item_type(base,memory,item)==0);   // the pair must be one class
+        memory.qword(component,base+0x1b0d628);                                            // a model component, not a weapon
+        assert(NativeWeaponHands::item_type(base,memory,item)==0 && NativeWeaponHands::item_type(base,memory,0)==0);
+        std::cout<<"v1105 item component type: pistol=1 crossbow=2 mismatched_decl=0\n";
     }
     std::cout<<"PASS: full-body verified palm mapping construction, accepted fit validation and native model/world roundtrip\n";
 }

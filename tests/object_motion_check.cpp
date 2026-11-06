@@ -1,6 +1,10 @@
 // PrevMvpTable: paired stereo draws L then R each frame; the engine caches each draw's MVP from the last rendered view.
 #include "../src/object_motion.hpp"
+#if __has_include("../linux/proxy/vs_layouts.hpp")
 #include "../linux/proxy/vs_layouts.hpp"
+#else
+#include "fixtures/vs_layouts_private_copy.hpp" // this private copy has no linux/proxy tree; the lab reflects the same shader either way
+#endif
 #include <d3dcompiler.h>
 #include <cstdio>
 #include <map>
@@ -62,7 +66,31 @@ int main() {
     };
     const std::uint64_t layout=layout_of("b2");
     CHECK(layout==0x07ff060503010200ull);
+    CHECK(d2vr::vs_layouts::has_previous(layout));
     CHECK(layout_of("b3")==0); // not the per-instance slot
+    // v1103: a vertex shader with the current MVP rows only (the held weapon's colour/forward variant). The proxy used to return 0 for
+    // it (it required cb_previousmvpmatrix), so ObjectMotion never saw the colour draw. It must now return the four current rows with
+    // all four previous bytes 0xff, and a b3 layout must still be rejected. The row order here is x,y,z,w at float4 0..3.
+    static const char current_only_hlsl[]=
+        "cbuffer PerInstance:register(REG){float4 cb_mvpmatrixx;float4 cb_mvpmatrixy;float4 cb_mvpmatrixz;float4 cb_mvpmatrixw;};"
+        "struct O{float4 p:SV_Position;};"
+        "O main(float4 v:POSITION){O o;o.p=float4(dot(cb_mvpmatrixx,v),dot(cb_mvpmatrixy,v),dot(cb_mvpmatrixz,v),dot(cb_mvpmatrixw,v));return o;}";
+    const auto current_only_layout_of=[](const char* reg) {
+        const D3D_SHADER_MACRO macros[]={{"REG",reg},{nullptr,nullptr}};
+        ID3DBlob* code{};ID3DBlob* errors{};
+        const HRESULT hr=D3DCompile(current_only_hlsl,sizeof current_only_hlsl-1,nullptr,macros,nullptr,"main","vs_5_0",0,0,&code,&errors);
+        if(errors) errors->Release();
+        if(FAILED(hr)) return ~0ull;
+        const std::uint64_t packed=d2vr::vs_layouts::reflect(code->GetBufferPointer(),code->GetBufferSize());
+        code->Release();return packed;
+    };
+    const std::uint64_t current_only=current_only_layout_of("b2");
+    CHECK(current_only==0xffffffff03020100ull);
+    CHECK(!d2vr::vs_layouts::has_previous(current_only));
+    CHECK(current_only_layout_of("b3")==0);
+    CHECK(current_only_layout_of("b2")!=0); // the v1103 regression: not zero for a current-only layout
+    std::printf("current-only layout 0x%016llx previous=%d b3=%d\n",
+        static_cast<unsigned long long>(current_only),int(d2vr::vs_layouts::has_previous(current_only)),int(current_only_layout_of("b3")));
     // One write's rows by that layout; the missing previous z row is the eye VP's (0,0,0,near).
     const auto mul=[](const float* a,const float* b2) {M m{};for(int i=0;i<4;++i) for(int j=0;j<4;++j) for(int k=0;k<4;++k) m[i*4+j]+=a[i*4+k]*b2[k*4+j];return m;};
     const float proj[16]={1.2f,0,.1f,0, 0,1.6f,-.05f,0, 0,0,0,.05f, 0,0,-1,0},view[16]={.8f,0,-.6f,3, 0,1,0,-1.7f, .6f,0,.8f,40, 0,0,0,1};
@@ -75,6 +103,46 @@ int main() {
     CHECK(d2vr::ObjectMotion::gather(layout,data,128,vp.data()+8,c,p));
     CHECK(!std::memcmp(c,cur.data(),64) && !std::memcmp(p,old.data(),64));
     CHECK(!d2vr::ObjectMotion::gather(layout,data,112,vp.data()+8,c,p)); // the buffer ends before the previous w row
+    // v1101: the current rows alone (a depth/velocity-only vertex-shader layout has no previous rows); the previous rows are gathered
+    // separately. The current-transform placement must not depend on the previous rows at all, so the two halves must agree exactly.
+    {
+        float only_cur[16]{},cur2[16]{},prev2[16]{};
+        CHECK(d2vr::ObjectMotion::gather_current(layout,data,128,vp.data()+8,only_cur));
+        CHECK(!std::memcmp(only_cur,cur.data(),64));
+        CHECK(d2vr::ObjectMotion::gather_previous(layout,data,128,vp.data()+8,prev2));
+        CHECK(!std::memcmp(prev2,old.data(),64));
+        // a layout with no previous rows at all: the current rows still gather (0xff in every previous byte), the previous half fails.
+        // v1103: this is the proxy's own encoding of the current-only shader above, not a hand-written word. Its rows 0..3 are the
+        // current matrix; a current-only draw has no previous rows to gather or to rewrite.
+        float current_only_data[16];
+        for(int r=0;r<4;++r) std::memcpy(current_only_data+4*r,cur.data()+4*r,16);
+        CHECK(current_only==0xffffffff03020100ull);
+        CHECK(d2vr::ObjectMotion::gather_current(current_only,current_only_data,64,vp.data()+8,cur2));
+        CHECK(!std::memcmp(cur2,cur.data(),64));
+        CHECK(!d2vr::ObjectMotion::gather_previous(current_only,current_only_data,64,vp.data()+8,prev2));
+        CHECK(!d2vr::ObjectMotion::gather(current_only,current_only_data,64,vp.data()+8,cur2,prev2));
+        float scattered[16];std::memcpy(scattered,current_only_data,64);
+        d2vr::ObjectMotion::scatter(current_only,old.data(),scattered);
+        CHECK(!std::memcmp(scattered,current_only_data,64)); // no previous rows: nothing to rewrite
+        d2vr::ObjectMotion::scatter_cur(current_only,old.data(),scattered);
+        CHECK(!std::memcmp(scattered,old.data(),64));        // all four declared rows are current rows
+    }
+    // v1101: the placement gate of build/no-weapon-draw-place (weapon_mode 0) and of object-motion-mode 0 (diagnostic only).
+    CHECK(d2vr::ObjectMotion::weapon_draw_on(1,1) && !d2vr::ObjectMotion::weapon_draw_on(0,1) &&
+          !d2vr::ObjectMotion::weapon_draw_on(1,0) && !d2vr::ObjectMotion::weapon_draw_on(0,-1));
+    // v1101: the publisher's frame and per-hand counters (the weapon lab drives place() itself).
+    {
+        static const float frame[15]={0,0,0, 1,0,0, 0,1,0, 0,0,1, 1,1,1};
+        const d2vr::weapon_draw::Mat delta=d2vr::weapon_draw::identity();
+        const float* raw[2]={frame,nullptr};const d2vr::weapon_draw::Mat* deltas[2]={&delta,nullptr};
+        const std::uint32_t published_frame=0x51u;
+        d2vr::weapon_draw::Place::publish(published_frame,{raw[0],raw[1]},{deltas[0],deltas[1]});
+        CHECK(d2vr::weapon_draw::Place::latest_frame()==published_frame);
+        CHECK(d2vr::weapon_draw::Place::published(0)==1 && d2vr::weapon_draw::Place::published(1)==0);
+        CHECK(d2vr::weapon_draw::Place::slot_of(published_frame) && d2vr::weapon_draw::Place::slot_of(published_frame)->side[1].valid==false);
+        d2vr::weapon_draw::Place::clear();
+        CHECK(d2vr::weapon_draw::Place::latest_frame()==0 && d2vr::weapon_draw::Place::slot_of(published_frame)==nullptr);
+    }
     float inv[4];
     CHECK(d2vr::ObjectMotion::inverse_last_row(vp.data(),false,inv) && d2vr::ObjectMotion::affine(inv,c) && !d2vr::ObjectMotion::affine(inv,data));
     float out[32];std::memcpy(out,data,sizeof out);
@@ -92,6 +160,21 @@ int main() {
     CHECK(O::b1_eye(&buffers[0])==0 && O::b1_eye(&buffers[2])==0 && O::b1_eye(&buffers[1])==1 && O::b1_eye(&buffers[5])==-1);
     O::note_taa_b1(0,&buffers[3]);CHECK(O::b1_eye(&buffers[3])==0 && O::b1_eye(&buffers[2])==0 && O::b1_eye(&buffers[0])==-1); // the oldest goes
     O::note_taa_b1(1,&buffers[3]);CHECK(O::b1_eye(&buffers[3])==-1 && O::b1_eye(&buffers[1])==1);
+    { // v1040: has_previous is gather_previous's availability test (the early-out for current-only draws relies on it)
+        float rows[256]{},zrow[4]{};
+        for(unsigned long long lay:{0x0807060504030201ull,0xffffffffffffffffull,0xffffffff03020100ull,0x0807ff0504030201ull,0x08070605ffffffffull,0x07ff0605ffff0302ull})
+            for(UINT size:{16u,64u,96u,128u,256u})
+                CHECK(O::has_previous(lay,size)==O::gather_previous(lay,rows,size,zrow,rows+128));
+        CHECK(!O::has_previous(0xffffffff03020100ull,256) && O::has_previous(0x0807060504030201ull,144) && !O::has_previous(0x0807060504030201ull,100));
+    }
+    { // v998: ObjectMotion's hook order. Its bookkeeping runs before the wide filter and sees an elided call; the filter only
+      // decides whether the original setter is forwarded.
+        unsigned observed=0;bool forwarded=false;
+        const bool skip=O::observe_then_filter([&] {++observed;},[&] {return true;});
+        CHECK(skip && observed==1 && !forwarded);
+        const bool forward=O::observe_then_filter([&] {++observed;},[&] {forwarded=true;return false;});
+        CHECK(!forward && observed==2 && forwarded);
+    }
     std::printf(failures?"object_motion_check FAILED\n":"object_motion_check OK\n");
     return failures?1:0;
 }

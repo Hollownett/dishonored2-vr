@@ -1,9 +1,11 @@
 """Send keys to the Dishonored 2 window without taking focus or touching the user's input.
 
 Keys go to the game window only (PostMessage WM_KEYDOWN/WM_KEYUP). The game must not pause on focus loss:
-`python tools/game_keys.py --prepare-config` (game closed) adds win_pauseOnFocusLoss "0" and
-in_controlInactiveWindow "1" to dishonored2Config.cfg; the game drops non-archived lines on exit, so run it
-before every launch.
+`python tools/game_keys.py --prepare-config` (game closed) forces win_pauseOnFocusLoss "0" and
+in_controlInactiveWindow "1" in dishonored2Config.cfg. The engine rewrites the cfg from its archived cvars, so
+those non-archived lines can disappear again on start/exit; a live game only reads the cfg at process start.
+The selftest therefore also sends `cvar in_controlInactiveWindow 1` and `cvar win_pauseOnFocusLoss 0` through
+the mod's command channel after injection (tools/vr_selftest.py).
 
     python tools/game_keys.py 0x0D 0x1B      # Enter, then Esc
 """
@@ -19,12 +21,28 @@ BACKGROUND_CVARS = {'win_pauseOnFocusLoss': '"0"', 'in_controlInactiveWindow': '
 
 
 def prepare_config():
-    lines = open(CONFIG, encoding='utf-8', errors='ignore').read().splitlines()
-    present = {line.split()[0] for line in lines if line.strip()}
-    with open(CONFIG, 'a', encoding='utf-8') as out:
-        for name, value in BACKGROUND_CVARS.items():
-            if name not in present:
-                out.write(f'{name} {value}\n')
+    """Force the two focus cvars, replacing a stale default value instead of only appending a missing line.
+
+    The old append-only version skipped the cvar when the engine had already written it with its default
+    (`win_pauseOnFocusLoss "1"`), which is exactly the state a running game leaves behind. Rewriting the value
+    is still best effort: the engine may drop the non-archived lines again when it next writes the file.
+    """
+    with open(CONFIG, encoding='utf-8', errors='ignore') as f:
+        lines = f.read().splitlines()
+    out, seen = [], set()
+    for line in lines:
+        name = line.split()[0] if line.strip() else ''
+        if name in BACKGROUND_CVARS:
+            if name not in seen:
+                out.append(f'{name} {BACKGROUND_CVARS[name]}')
+                seen.add(name)
+        else:
+            out.append(line)
+    for name, value in BACKGROUND_CVARS.items():
+        if name not in seen:
+            out.append(f'{name} {value}')
+    with open(CONFIG, 'w', encoding='utf-8') as f:
+        f.write('\n'.join(out) + '\n')
 
 
 def game_window():

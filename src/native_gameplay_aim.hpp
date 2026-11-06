@@ -68,7 +68,7 @@ class NativeGameplayAim {
                     if(result==AimWriteResult::rollback_failed) ++rollback_failures_;
                 }
             }
-            if(candidates_<=4000) {
+            if(candidates_<=4000 && log_.is_open()) {   // v1046: not logging = nothing to format
                 log_<<GetTickCount64()<<','<<GetCurrentThreadId()<<','<<state->camera<<','<<state->camera_identity.generation
                     <<','<<tracked_.epoch<<','<<(GetTickCount64()-tracked_.tick)<<','<<int(native_mode)
                     <<','<<route_.load()<<','<<applied;
@@ -127,7 +127,7 @@ public:
             if(static_cast<std::intptr_t>(base_+call[0]+5)+displacement!=static_cast<std::intptr_t>(base_+call[1]))
                 throw std::runtime_error("Native aim producer caller target differs");
         }
-        log_.open(file,std::ios::trunc);if(!log_) throw std::runtime_error("Cannot open native aim writer log");
+        if(!file.empty()) {log_.open(file,std::ios::trunc);if(!log_) throw std::runtime_error("Cannot open native aim writer log");}  // v1046: an empty path (diagnostics off) is not an error
         log_<<std::setprecision(9)<<"tick_ms,thread,camera,generation,epoch,pose_age_ms,native_mode,routing,applied";
         for(const auto* kind:{"native","planned"}) {
             for(unsigned i=0;i<3;++i) log_<<','<<kind<<"_origin"<<i;

@@ -21,6 +21,7 @@ string[] Ids(string d, string key) => System.Text.Json.JsonDocument.Parse(File.R
 
 Check("performance_mode_row_is_default_off_alternate_eye", list.Count(f => f.Id == "performance-mode" && f.File == "alternate-eye" && f.Kind == "enable" && !f.Default && f.Help.Contains("selected anti-aliasing") && f.Label.Contains("double")) == 1);   // v637: off by default (headset v636: one eye doubled on motion)
 Check("list_has_no_unwanted_rows", !list.Any(f => f.Id is "corpse-grab") && list.Count(f => f.Id == "hold-y-menu" && f.File == "no-hold-y-menu" && f.Kind == "disable" && f.Default) == 1 && list.Count == list.Select(f => f.Id).Distinct().Count());
+LogCleanupTests.Run(Check); // v1047: the Tools page's "Delete logs" (no build folder: it runs before the feature cases)
 
 {   // fresh_home_enables_every_default
     var d = NewBuild(); Features.Apply(d, list);
@@ -58,7 +59,24 @@ Check("list_has_no_unwanted_rows", !list.Any(f => f.Id is "corpse-grab") && list
     var st = Features.State(d, list);
     var offIds = list.Where(f => !st[f.Id].On).Select(f => f.Id).ToArray();
     var newIds = new[] { "grip-alone-grab", "palm-select", "corpse-slip-release", "living-hold", "finger-surface", "finger-ease", "hand-grenade-throw", "hand-mine-aim", "bink-theater", "cutscene-skip-hold", "letterbox-hide" };
-    Check("fresh_install_enables_sprint_and_selected_aa", offIds.OrderBy(x => x).SequenceEqual(new[] { "performance-mode", "power-gestures", "native-temporal-census" }.OrderBy(x => x)) && newIds.All(i => st[i].On) && list.Where(f => !f.IsEnable).All(f => !Has(d, f.File)) && !list.Any(f => f.File == "finger-probe-3"));
+    Check("fresh_install_enables_sprint_and_selected_aa", offIds.OrderBy(x => x).SequenceEqual(new[] { "performance-mode", "power-gestures", "native-temporal-census", "dual-wield", "diagnostics", "diagnostic-capture", "skip-intro" }.OrderBy(x => x)) && newIds.All(i => st[i].On) && list.Where(f => !f.IsEnable).All(f => !Has(d, f.File)) && !list.Any(f => f.File == "finger-probe-3"));
+}
+{   // v1046: the old frame-diagnostics row (no-diagnostics) is gone; the one master "diagnostics" switch (build\diagnostics) is off by default.
+    var old = new Feature("frame-diagnostics", "no-diagnostics", "disable", "x", "x", true);
+    var d = NewBuild(); Features.Apply(d, new[] { old });                        // a home that seeded the old row
+    Features.Apply(d, list);                                                      // must not throw or choke on the dropped id
+    Check("diagnostics_master_switch_is_off_after_the_old_row_was_seeded", !Has(d, "diagnostics") && !Features.State(d, list)["diagnostics"].On && Ids(d, "seeded").Contains("diagnostics"));
+    Features.Apply(d, list);
+    Check("diagnostics_stays_off_on_every_apply", !Has(d, "diagnostics"));
+    var o = NewBuild(); Features.Apply(o, new[] { old }); Features.Set(o, old, false);   // the user had switched the old diagnostics off: the file no-diagnostics exists
+    Features.Apply(o, list);
+    Check("old_no_diagnostics_file_is_left_alone_and_diagnostics_stays_off", Has(o, "no-diagnostics") && !Has(o, "diagnostics") && !Features.State(o, list)["diagnostics"].On);
+    Features.Set(d, F("diagnostics"), true);
+    Check("diagnostics_switch_on_writes_the_file", Has(d, "diagnostics") && Features.State(d, list)["diagnostics"].On);
+    Features.Apply(d, list); Features.Set(d, F("diagnostics"), false);
+    Check("diagnostics_switch_off_removes_the_file", !Has(d, "diagnostics") && !Features.State(d, list)["diagnostics"].On);
+    var h = NewBuild(); File.WriteAllText(Path.Combine(h, "diagnostics"), ""); Features.Apply(h, list); Features.Apply(h, list);
+    Check("handmade_diagnostics_file_is_kept", Has(h, "diagnostics") && Features.State(h, list)["diagnostics"].On);
 }
 {   // Upgrade v620 experiments to defaults, preserving an explicit user opt-out.
     foreach (var id in new[] { "run-root-gate", "alternate-upscalers" })

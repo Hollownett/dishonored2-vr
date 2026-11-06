@@ -8,7 +8,8 @@ UI screens are saved as PNGs in the run folder (build/ui-dump knob).
     python tools/vr_selftest.py --dll ... --scenario wheel --launch      # start the game in the background and load the last save
 
 Never takes focus or sends global input: keys are posted to the game window, and the game is configured not to
-pause without focus (tools/game_keys.py --prepare-config)."""
+pause without focus (tools/game_keys.py --prepare-config; the live cvars are also sent through the mod's command
+channel after injection and their answers checked, because the config is only read at process start)."""
 _unused = """
 
 Exit code 0 = all checks passed.
@@ -449,7 +450,34 @@ SCENARIOS['shoulderthrow'] = _SHOULDER_LIFT + glide(10100, 10250, _SHOULDER, [0.
 _DOCK_SEG = next(i for i, sg in enumerate(_SHOULDER_LIFT) if sg[0] == 6500) + 1   # script segment (scenario segment + 1) of the docked walk
 for _n in ('shoulderdrop', 'shoulderthrow'):
     PAIR_PLAN[_n] = {next(i for i, sg in enumerate(_SHOULDER_LIFT) if sg[0] == 5500) + 1: ('dock-let-go', .4), _DOCK_SEG: ('dock-walk', 1.2), _DOCK_SEG + 1: ('dock-stand', .3)}
-TORSO_SCENARIOS = ('carrydrop', 'carrythrow', 'shoulderdrop', 'shoulderthrow')
+# v1041: the same with a pistol drawn first (the game's carry empties both hands and aborts while one still holds an item; v1039's
+# left-hand keep did exactly that). The pistol goes to the slot-1 arm 3 s before the reach.
+for _n in ('shoulderdrop', 'shoulderthrow'):
+    SCENARIOS[_n + '_armed'] = [[0, 3000, NEUTRAL, None, {"command": "equip pistol"}]] + [[sg[0] + 3000, sg[1] + 3000] + sg[2:] for sg in SCENARIOS[_n]]
+TORSO_SCENARIOS = ('carrydrop', 'carrythrow', 'shoulderdrop', 'shoulderthrow', 'shoulderdrop_armed', 'shoulderthrow_armed')
+# v1046 (user, headset v1045: the Heart "quite often just picking up randomly when I squeeze my hand ... should behave as a normal weapon,
+# same as gun or crossbow"; dual wield). The Heart is equipped by name (slot-1 arm, the left), held by the left grip, let go in front: it
+# falls as its pickup and the right hand, squeezing right next to it, takes it (into the RIGHT hand). Held by the right grip, carried to the
+# left hip and let go there: put away, no pickup. Equipped again, both grips squeeze and let go in front (it drops); after it has landed both
+# hands squeeze again at chest height where it was let go: nothing may come back (v1045 equipped it from a stale position).
+# Journal: heart_on/heart_hold/heart_release/heart_take; nothing Heart after the second drop but heart_release.
+_RHIP = [-0.4, -0.27, 0.38]   # the right hand at the left-hip holster (pistolhip's left-hand _HIP, moved across: the defaults are 0.4 m apart)
+_RNEAR = [-0.3, 0.0, 0.0]     # the right hand 10 cm from the left
+SCENARIOS['heart'] = ([[0, 1000, NEUTRAL, REST, {"command": "equip heart"}]] + glide(1000, 1500, REST, _RNEAR, 3) + [[1500, 3000, {"left_grip": 1.0}, _RNEAR],
+                       [3000, 3050, NEUTRAL, _RNEAR], [3050, 5500, {"right_grip": 1.0}, _RNEAR]] +
+                      glide(5500, 6500, _RNEAR, _RHIP, 5, {"right_grip": 1.0}) +
+                      [[6500, 8500, NEUTRAL, _RHIP], [8500, 8600, NEUTRAL, _RHIP, {"command": "equip heart"}]] + glide(8600, 9000, _RHIP, REST, 3) +
+                      [[9000, 10000, {"left_grip": 1.0, "right_grip": 1.0}, REST], [10000, 13000, NEUTRAL, REST],
+                       [13000, 13600, {"left_grip": 1.0, "right_grip": 1.0}, REST], [13600, 16000, NEUTRAL, REST]])
+# The Heart let go at the holster (the left hand at HIP, as 'pistolhip' draws there): put away, no pickup spawned (gadget_drop.dropped unchanged).
+_LG, _LHIP = {"left_grip": 1.0}, [0.0, -0.27, 0.38]   # _LHIP = pistolhip's _HIP (the left hand at the holster; defined further down)
+SCENARIOS['hearthip'] = ([[0, 1000, NEUTRAL, None, {"left_hand_offset": REST, "command": "equip heart"}], [1000, 2000, _LG, None, {"left_hand_offset": REST}]] +
+                         [s_[:3] + [None, {"left_hand_offset": s_[3]}] for s_ in glide(2000, 3000, REST, _LHIP, 5, _LG)] +
+                         [[3000, 3500, _LG, None, {"left_hand_offset": _LHIP}], [3500, 5000, NEUTRAL, None, {"left_hand_offset": _LHIP}]] +
+                         [s_[:3] + [None, {"left_hand_offset": s_[3]}] for s_ in glide(5000, 6000, _LHIP, REST, 5)] +
+                         [[6000, 8000, NEUTRAL, None, {"left_hand_offset": REST}]])
+# The same with the pistol (GunGrip's own hip test): the journal's gun_holster row says whether the hand reached the holster.
+SCENARIOS['pistolhipdw'] = [[sg[0], sg[1], sg[2], sg[3], dict(sg[4], command="equip pistol")] if "command" in sg[4] else sg for sg in SCENARIOS['hearthip']]
 # Head sway for the eye pipeline (alt-pose-trace, alternate-eye): 48 s of side steps and nods (every Setup's pose differs from the one before),
 # with a short walk and a few snap turns, so a pose-versus-image skew or a swapped eye image would show in alt_pose_trace_check.py.
 _SWAY = []
@@ -721,9 +749,62 @@ def steam_account_ok():
     return active == owner
 
 
+COMMAND_FILE = os.path.join(ART, 'vr-command.txt')
+RESULT_FILE = os.path.join(ART, 'vr-command-result.txt')
+
+
 def command(line):
-    with open(os.path.join(ART, 'vr-command.txt'), 'a') as f:
+    with open(COMMAND_FILE, 'a') as f:
         f.write(line + chr(10))
+
+
+def command_result_offset():
+    """Current end of the shared result file: only answers appended after this are ours."""
+    try:
+        return os.path.getsize(RESULT_FILE)
+    except OSError:
+        return 0
+
+
+def command_result_tail(offset):
+    try:
+        with open(RESULT_FILE, 'r', encoding='utf-8', errors='ignore') as f:
+            f.seek(offset)
+            return f.read()
+    except OSError:
+        return ''
+
+
+def wait_for_command_results(offset, expected, timeout=30):
+    """Wait until every expected answer appears after `offset`. The mod appends one line per command after it
+    consumes vr-command.txt; there is no other acknowledgement, so this is the only way to know a pre-load or
+    post-injection command was really processed."""
+    end = time.time() + timeout
+    text = ''
+    while time.time() < end:
+        text = command_result_tail(offset)
+        if all(item in text for item in expected):
+            return True, text
+        time.sleep(.25)
+    return False, text
+
+
+def apply_background_cvars(timeout=30):
+    """Set the two focus cvars in the RUNNING game through the mod command channel.
+
+    `--prepare-config` is only a next-launch hint: the engine rewrites dishonored2Config.cfg from archived
+    cvars, and a game that was already running never re-reads it. Sending the cvars after injection is the
+    only path that changes the current process. find_cvar() in src/dxgi_probe.cpp resolves both static
+    idCVars by name, so this is the same static write the engine's own console command uses.
+    """
+    offset = command_result_offset()
+    command('cvar in_controlInactiveWindow 1')
+    command('cvar win_pauseOnFocusLoss 0')
+    # 2026-11-04: the post-load "press any button" screen ignores the virtual pad in an unfocused sim window; the engine's own
+    # com_loadScreenUserConfirmationDisabled skips that confirmation (runtime only, a game restart restores the default).
+    command('cvar com_loadScreenUserConfirmationDisabled 1')
+    return wait_for_command_results(offset, ('in_controlInactiveWindow=1 ok', 'win_pauseOnFocusLoss=0 ok',
+                                             'com_loadScreenUserConfirmationDisabled=1 ok'), timeout)
 
 
 def set_god(pid, on, buddha=False):
@@ -1191,6 +1272,12 @@ def main():
     dump_dir = os.path.join(ART, 'ui-dump')
     for f in glob.glob(os.path.join(dump_dir, '*')):
         os.remove(f)
+    # A previous mod instance may have left commands in the shared file (the mod reads and deletes it, but a
+    # crash/poll race can leave a line behind). Never replay them into this run: the mod has no command ids.
+    try:
+        os.remove(COMMAND_FILE)
+    except FileNotFoundError:
+        pass
     for stale in ('npc-watch.csv', 'native-combat.csv'):
         for _ in range(30):  # the previous run's npc_watch may still be finishing its last seconds
             try:
@@ -1205,6 +1292,15 @@ def main():
                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
         proc_start = time.time()
         time.sleep(4)
+        # The config file is only a next-launch hint and the engine can drop the non-archived lines. Set the live
+        # cvars through the command channel before the title/load-screen input, and check the mod's answer.
+        background_ok, background_text = apply_background_cvars()
+        print(f"background cvars: {'confirmed' if background_ok else 'NOT confirmed'}")
+        if not background_ok:
+            print('warning: no live confirmation for in_controlInactiveWindow=1 / win_pauseOnFocusLoss=0;')
+            print('warning: the load screen may stay paused if the game is unfocused. Last answers:')
+            for line in background_text.splitlines()[-6:]:
+                print('  ' + line)
         if a.inject_at_title:
             time.sleep(8)
             keys(0x0D, 0x0D, 0x0D)  # title -> Campaign -> Continue, with the mod already in

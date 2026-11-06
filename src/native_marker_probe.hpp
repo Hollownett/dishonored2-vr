@@ -207,9 +207,9 @@ public:
             }
         }
         if(!matches) throw std::runtime_error("Native marker probe code differs from the pinned executable");
-        log_.open(file_,std::ios::trunc);
-        if(!log_) throw std::runtime_error("Cannot open native marker probe log");
-        log_<<std::setprecision(9)<<header();
+        if(!file_.empty()) {log_.open(file_,std::ios::trunc);   // v1046: an empty path (diagnostics off) is not an error; the hooks still publish
+            if(!log_) throw std::runtime_error("Cannot open native marker probe log");
+            log_<<std::setprecision(9)<<header();}
         calls_[0]=0;calls_[1]=0;phase_.store(0,std::memory_order_relaxed);
         for(auto& counter:phase_calls_) counter=0;
         for(auto& counter:phase_publishes_) counter=0;
@@ -255,7 +255,7 @@ public:
                 std::array<std::byte,32> code{};
                 restored=restored && read_(base_+rvas[index],code.data(),code.size()) && code==*expected[index];
             }
-            log_<<rows();
+            if(log_.is_open()) log_<<rows();
             log_.close();
         } catch(...) {return false;}
         return restored;

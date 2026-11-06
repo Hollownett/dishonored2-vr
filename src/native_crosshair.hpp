@@ -132,7 +132,7 @@ private:
     std::atomic<bool> active_{false},route_{false};
     std::atomic<UINT> depth_{};
     std::atomic<UINT64> calls_{},applied_{},rejected_{},skipped_{},latch_clears_{},latch_failures_{},samples_{};
-    std::mutex mutex_;Publication publication_;Binding binding_;std::ofstream log_;
+    std::mutex mutex_;Publication publication_;Binding binding_;std::ofstream log_;bool logging_{};   // v1046: logging_ = the log opened (diagnostics on); off, the hook still works and formats nothing
     // Per displayed frame, binding() validates the element against the live engine once and answers every further call of that frame from
     // this cache (the HUD child draw asks per panel child). frame_==0 (no begin_frame yet) means no caching. generation_ moves whenever the
     // remembered binding changes or is cleared, so a teardown seen by place() is never answered from the cache. The render thread only ever
@@ -245,7 +245,7 @@ private:
                 if(guarded_call(write_both)) {++applied_;applied=true;placed_=true;}
                 else {++rejected_;failed_.store(true,std::memory_order_release);} // stop writing until reinstall
             } else ++rejected_;
-            if(samples_<4000) {
+            if(logging_ && samples_<4000) {
                 std::lock_guard<std::mutex> lock(mutex_);
                 if(samples_<4000) {
                     log_<<GetTickCount64()<<','<<GetCurrentThreadId()<<','<<at<<','<<applied<<','<<publication.x<<','
@@ -328,9 +328,10 @@ public:
             throw std::runtime_error("Native crosshair member setter target differs");
         if(!executable(base_+setter_rva)) throw std::runtime_error("Native crosshair member setter is not executable");
         setter_=reinterpret_cast<Setter>(base_+setter_rva);
-        log_.open(file,std::ios::trunc);
-        if(!log_) throw std::runtime_error("Cannot open native crosshair log");
-        log_<<std::setprecision(9)<<"tick_ms,thread,element,applied,ndc_x,ndc_y,epoch,age_ms,stage_x,stage_y\n";
+        if(!file.empty()) log_.open(file,std::ios::trunc);   // v1046: an empty path (diagnostics off) is not an error: the hook works, nothing is formatted
+        logging_=log_.is_open();
+        if(!file.empty() && !logging_) throw std::runtime_error("Cannot open native crosshair log");
+        if(logging_) log_<<std::setprecision(9)<<"tick_ms,thread,element,applied,ndc_x,ndc_y,epoch,age_ms,stage_x,stage_y\n";
         {std::lock_guard<std::mutex> lock(mutex_);publication_={};binding_={};generation_.fetch_add(1,std::memory_order_release);}
         calls_=applied_=rejected_=skipped_=latch_clears_=latch_failures_=samples_=0;failed_=false;route_=route;instance_=this;
         const auto target=reinterpret_cast<void*>(base_+update_rva);

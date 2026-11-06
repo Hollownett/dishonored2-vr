@@ -153,7 +153,9 @@ class NativeGadgetDrop {
 public:
     using Kind=gadget_drop::Kind;using Probe=gadget_drop::Probe;using Launch=gadget_drop::Launch;
     enum class Op : unsigned {drop,take,spawn};
-    struct Request {Op op{};Kind kind{};Launch launch{};float reach{};};
+    struct Request {Op op{};Kind kind{};Launch launch{};float reach{};std::uint64_t id{};};
+    // v1046 (user, headset v1045: the Heart "jumps back" into the wrong hand): what a take did, so the caller equips only after it really removed the pickup. result 1 taken (kind = what), 2 nothing in reach, 3 failed.
+    struct TakeResult {std::uint64_t id{};int result{};Kind kind{};};
     // A tracked drop, published for the control thread (position, whether it lies still).
     struct Published {std::array<float,3> pos{};Kind kind{};bool resting{};std::uintptr_t entity{};bool keep{};};
     static constexpr std::size_t max_tracked=8,max_queue=4;
@@ -179,12 +181,16 @@ public:
         return push({Op::spawn,kind,*l,0});
     }
     // Any thread: the hand at `pos` takes the nearest tracked drop within `reach` metres back into the inventory (when the native Use does not).
-    static bool take(const std::array<float,3>& pos,float reach) {
+    static bool take(const std::array<float,3>& pos,float reach) {return take_ticket(pos,reach)!=0;}
+    // The same with a ticket (0: not queued); take_result() carries it back once the game thread ran the request.
+    static std::uint64_t take_ticket(const std::array<float,3>& pos,float reach) {
         ++requested;
         Launch l;l.pos=pos;
-        if(!std::all_of(pos.begin(),pos.end(),[](float v){return std::isfinite(v);}) || !std::isfinite(reach)) {++rejected;return false;}
-        return push({Op::take,Kind::any,l,std::clamp(reach,gadget_drop::min_reach,gadget_drop::max_reach)});
+        if(!std::all_of(pos.begin(),pos.end(),[](float v){return std::isfinite(v);}) || !std::isfinite(reach)) {++rejected;return 0;}
+        const std::uint64_t id=++take_seq_;
+        return push({Op::take,Kind::any,l,std::clamp(reach,gadget_drop::min_reach,gadget_drop::max_reach),id})?id:0;
     }
+    static TakeResult take_result() {std::lock_guard<std::mutex> l(m_);return take_result_;}
     static std::vector<Published> published() {std::lock_guard<std::mutex> l(m_);return published_;}
     static Probe probe() {std::lock_guard<std::mutex> l(m_);return probe_;}
     static const char* last_error() {std::lock_guard<std::mutex> l(m_);return last_error_;}
@@ -248,13 +254,14 @@ private:
     struct Tracked {
         std::uintptr_t entity{},item_decl{};std::uint32_t id{};Kind kind{};gadget_drop::GadgetFlight flight;
         std::array<float,3> commanded{},rest_pos{};std::array<float,9> rest_axis{};bool have_command{},physics{},rested{},probed{};
+        std::array<float,3> live{};bool have_live{};   // v1046: the engine's own position (entity+0x300), read each service: a pickup the engine simulates (physics) no longer follows commanded/rest_pos
         bool keep{};                                // KindInfo::keep: the item stayed in the inventory
         int count{1};                               // v790: the stack this pickup carries (0: the game consumed nothing)
         std::optional<NativeCastExclusion> self;   // its own body, once the engine started it (sim v767: else the sweep met only the item and it fell through the deck)
         double last_s{},rest_s{},spawn_s{},probe_s{};
         std::vector<std::uintptr_t> struck;        // v783: the guards this throw stunned (NativeWeaponHands::thrown_stun)
     };
-    inline static std::mutex m_;inline static std::vector<Request> queue_;inline static std::vector<Published> published_;
+    inline static std::mutex m_;inline static std::vector<Request> queue_;inline static std::vector<Published> published_;inline static std::atomic<std::uint64_t> take_seq_{};inline static TakeResult take_result_{};
     inline static Probe probe_{};inline static std::array<Probe,2> mine_probes_{};inline static const char* last_error_=""; // stun mine, spring razor
     inline static std::vector<Tracked> tracked_;   // game thread only
     inline static std::vector<Flying> flights_;    // game thread only (flights())
@@ -440,7 +447,7 @@ private:
         tracked_.push_back(t);++dropped;
     }
     template<class Read> static void do_take(std::uintptr_t base,Read& read,const Request& r) {
-        const auto c=context(base,read);if(!c) {++take_failed;fail("no player or inventory");return;}
+        const auto c=context(base,read);if(!c) {++take_failed;fail("no player or inventory");set_take_result(r.id,3,Kind::any);return;}
         std::size_t best=tracked_.size();double best_d=r.reach;
         for(std::size_t i=0;i<tracked_.size();++i) {
             auto& t=tracked_[i];
@@ -449,13 +456,14 @@ private:
             const double d=length(Vec3{(*p)[0]-r.launch.pos[0],(*p)[1]-r.launch.pos[1],(*p)[2]-r.launch.pos[2]});
             if(d<=best_d) {best_d=d;best=i;}
         }
-        if(best==tracked_.size()) {++take_none;return;}
+        if(best==tracked_.size()) {++take_none;set_take_result(r.id,2,Kind::any);return;}
         auto& t=tracked_[best];
-        if(!t.keep && t.count>0 && engine_add_item(base,c->inventory,t.item_decl,t.count)<=0) {++take_failed;fail("inventory refused the item (full)");return;} // the entity stays
+        if(!t.keep && t.count>0 && engine_add_item(base,c->inventory,t.item_decl,t.count)<=0) {++take_failed;fail("inventory refused the item (full)");set_take_result(r.id,3,Kind::any);return;} // the entity stays
         engine_remove_entity(base,t.entity);
         if(const auto eq=equipped(base,read,*c); !t.keep && eq && eq->kind==t.kind) engine_sync_ammo(base,eq->comp); // v779: the Heart has no ammo count (63a2b0 tail-calls vtable+0x108, past arkCpntHeart's 32 slots); a catch within a frame of the unequip meets it still in the slot
-        tracked_.erase(tracked_.begin()+static_cast<std::ptrdiff_t>(best));++taken;
+        set_take_result(r.id,1,t.kind);tracked_.erase(tracked_.begin()+static_cast<std::ptrdiff_t>(best));++taken;
     }
+    static void set_take_result(std::uint64_t id,int result,Kind kind) {if(!id) return;std::lock_guard<std::mutex> l(m_);take_result_={id,result,kind};}
 
     template<class Read> static Probe read_probe(std::uintptr_t base,Read& read,const Tracked& t) {
         Probe p;p.have=true;
@@ -496,6 +504,7 @@ private:
                 const bool first=!t.probed;t.probed=true;t.probe_s=now;const auto p=read_probe(base,read,t);
                 std::lock_guard<std::mutex> l(m_);if(first) probe_=p;if(mine) mine_probes_[t.kind==Kind::spring_razor?1:0]=p;
             }
+            if(const auto at=rig::value<std::array<float,3>>(read,t.entity+0x300)) {t.live=*at;t.have_live=true;}
             if(t.physics) continue;
             if(t.have_command) {   // it moved by itself since our last Teleport: the engine simulates it now
                 const auto at=rig::value<std::array<float,3>>(read,t.entity+0x300);
@@ -543,7 +552,7 @@ private:
     }
     static void publish() {
         std::vector<Published> out;
-        for(const auto& t:tracked_) out.push_back({t.have_command?t.commanded:t.rest_pos,t.kind,t.rested || t.physics,t.entity,t.keep});
+        for(const auto& t:tracked_) out.push_back({t.have_live?t.live:t.have_command?t.commanded:t.rest_pos,t.kind,t.rested || t.physics,t.entity,t.keep});
         std::lock_guard<std::mutex> l(m_);published_=std::move(out);
     }
 };

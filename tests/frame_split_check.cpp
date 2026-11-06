@@ -110,5 +110,43 @@ int main(){
       assert(j.find("\"mod_gpu_ms_p50\":{\"fsr_eye0\":0.5,\"fsr_eye1\":0,\"aa_sharpen\":0,\"eye_copy\":0.75,")!=std::string::npos);
       assert(j.find("\"sum\":1.25}")!=std::string::npos);
       assert(std::string(phase_name(0))=="pre"&&std::string(phase_name(3))=="hook"&&std::string(mod_span_name(6))=="eye_capture");}
+    { // v993 ecl_replay: per-frame ExecuteCommandList replay sums, per frame_split phase, over the same 900-frame ring
+      FrameSplit m;
+      for(int i=0;i<10;++i) {
+          ReplayFrame r;r.valid=true;
+          r.ns[0]=static_cast<std::uint64_t>(i+1)*1'000'000;r.ns[1]=2'000'000;r.ns[3]=4'000'000;
+          r.lists[0]=1;r.lists[1]=2;r.lists[3]=3;
+          r.total_ns=r.ns[0]+r.ns[1]+r.ns[3];r.restore_true=1;
+          m.feed({0,60000,110000,125000},-30000,10'000'000,0,0,nullptr,nullptr,false,&r);
+      }
+      const auto j=m.replay_json();
+      assert(j.find("\"ms_p50\":[5,2,0,4]")!=std::string::npos);
+      assert(j.find("\"ms_p90\":[9,2,0,4]")!=std::string::npos);
+      assert(j.find("\"lists_p50\":[1,2,0,3]")!=std::string::npos);
+      assert(j.find("\"total_ms_p50\":11")!=std::string::npos&&j.find("\"total_ms_p90\":15")!=std::string::npos);
+      assert(j.find("\"restore_true\":10")!=std::string::npos&&j.find("\"restore_false\":0")!=std::string::npos);
+      assert(j.find("\"frames\":10")!=std::string::npos);
+      m.reset_replay();const auto empty=m.replay_json();
+      assert(empty.find("\"frames\":0")!=std::string::npos&&empty.find("\"restore_true\":0")!=std::string::npos);}
+    { // v997 replay heavy tail: per-frame largest single list, the list histogram totals, and the latest span sample the
+      // ElisionAb window reuses.
+      FrameSplit m;
+      for(int i=0;i<4;++i) {
+          ReplayFrame r;r.valid=true;
+          r.total_ns=static_cast<std::uint64_t>(i+1)*1'000'000;
+          r.max_list_ns=static_cast<std::uint64_t>(i+1)*1'000'000;
+          r.hist[0]=static_cast<std::uint64_t>(i);r.hist[7]=1;
+          m.feed({0,60000,110000,125000},-30000,10'000'000,0,0,nullptr,nullptr,false,&r);
+      }
+      const auto j=m.replay_json();
+      assert(j.find("\"max_list_ms_p50\":2")!=std::string::npos);
+      assert(j.find("\"max_list_ms_p90\":4")!=std::string::npos);
+      assert(j.find("\"max_list_ms_max\":4")!=std::string::npos);
+      assert(j.find("\"hist\":[6,0,0,0,0,0,0,4]")!=std::string::npos);
+      const auto latest=m.latest();
+      assert(latest.interval_ns==14'000'000&&latest.eye0_ns==6'000'000&&latest.eye1_ns==5'000'000&&latest.hook_ns==1'500'000);
+      m.reset_replay();
+      const auto empty=m.replay_json();
+      assert(empty.find("\"max_list_ms_p90\":0")!=std::string::npos&&empty.find("\"hist\":[0,0,0,0,0,0,0,0]")!=std::string::npos);}
     std::cout<<"PASS: frame split\n";
 }

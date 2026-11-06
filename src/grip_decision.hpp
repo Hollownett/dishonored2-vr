@@ -65,19 +65,27 @@ inline GripAloneChoice decide_grip_alone(const GripAloneInput& in,const GrabTuni
 // corpse_dock_lag_m of the hand), docks it: the hold stays, pulled to where the hand let go, fixed to the player's heading (anchored), and the
 // hand is free. A fresh squeeze of that hand at the shoulder takes the body back into the hand (resumed; the squeeze is the dock's alone:
 // consumes). The other hand holding the same body, or any release of the hold (it was pulled away, the lag rule, a fault), ends the dock.
+// v1019 (user, 2026-11-05): the dock is also the trigger point for the game's own body carry, so a body placed on the shoulder acts
+// like the native carry (Sokolov out of the Jindosh mansion). shoulder_carry.hpp presses the game's Use while the placing hand's native
+// target is still this body; when the game takes it, the dock yields (native_carry -> take) and the game's CarryCorpse owns the body.
+// The physical dock remains the fallback when the game does not take it. The native handoff can be turned off with build/no-shoulder-native.
 // Replaces v613's torso held 0.5 s, which turned a walking torso drag into the game's carry.
 inline constexpr std::uint64_t corpse_dock_hold_ms=250;
 inline constexpr double corpse_dock_lag_m=.6;
-struct ShoulderDockIn {bool corpse_hold{};std::uintptr_t entity{};std::uint64_t held_ms{};double lag_m{1e9};bool in_zone{};float grip{};bool other_holds{};};
+// native_carry (v1019, user 2026-11-05): the game now carries a body (arkPlayerStateCarryCorpse). The placement handed it to the
+// game through shoulder_carry.hpp, so the dock's own hold ends at once (take): the game binds the body to the player's spine and
+// any physical motor write from here would fight it.
+struct ShoulderDockIn {bool corpse_hold{};std::uintptr_t entity{};std::uint64_t held_ms{};double lag_m{1e9};bool in_zone{};float grip{};bool other_holds{};bool native_carry{};};
 class ShoulderDock {
 public:
-    struct Out {bool anchored{},docked{},resumed{};};
+    struct Out {bool anchored{},docked{},resumed{},take{};};
     Out update(unsigned side,const ShoulderDockIn& in) noexcept {
         Out o{};if(side>=2) return o;
         auto& s=side_[side];
         const bool down=in.grip>=(s.down?.35f:.55f);
         if(s.anchored) {
-            if(!in.corpse_hold || in.entity!=s.entity || in.other_holds) s.anchored=false;
+            if(in.native_carry) {s.anchored=false;s.entity=0;o.take=true;}   // the game took the body (the native shoulder now)
+            else if(!in.corpse_hold || in.entity!=s.entity || in.other_holds) s.anchored=false;
             else if(down && !s.down && in.in_zone) {s.anchored=false;s.consumed=true;o.resumed=true;}
         } else if(s.down && !down && in.corpse_hold && in.entity && in.in_zone && in.held_ms>=corpse_dock_hold_ms &&
                   std::isfinite(in.lag_m) && in.lag_m<=corpse_dock_lag_m && !in.other_holds) {s.anchored=true;s.entity=in.entity;o.docked=true;}

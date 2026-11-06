@@ -1,6 +1,7 @@
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include "../src/native_world_ui.hpp"
+#include "../src/world_ui_pose.hpp"
 #include <unordered_map>
 #include <cassert>
 #include <iostream>
@@ -50,5 +51,16 @@ int main() {
     assert(!native_world_ui_target_allowed(nullptr,base,base+0x2dd632));
     const NativeWorldUiDraw unknown{};
     assert(!native_world_ui_target_allowed(&unknown,base,base+0x2dd632));
+    assert(!world_ui_quad_allowed(true,true,-1) && world_ui_quad_allowed(true,true,0) && world_ui_quad_allowed(true,false,-1) &&
+           world_ui_quad_allowed(false,true,-1) && world_ui_quad_allowed(false,false,-1));
+    // v1038: the wheel movie is captured off-screen under any logic (its opening/closing frames outside 256 were drawn flat); the others
+    // only under their own logic, narrative only in the dialogue choices.
+    assert(world_ui_capture_allowed(WorldUiKind::wheel,256,false) && world_ui_capture_allowed(WorldUiKind::wheel,2,false) &&
+           world_ui_capture_allowed(WorldUiKind::wheel,4,false));
+    assert(world_ui_capture_allowed(WorldUiKind::notes,16,false) && !world_ui_capture_allowed(WorldUiKind::notes,2,false));
+    assert(world_ui_capture_allowed(WorldUiKind::journal,128,false) && !world_ui_capture_allowed(WorldUiKind::journal,2,false));
+    assert(world_ui_capture_allowed(WorldUiKind::journal,512,true) && !world_ui_capture_allowed(WorldUiKind::journal,2,true) &&
+           !world_ui_capture_allowed(WorldUiKind::journal,128,true));
+    assert(!world_ui_capture_allowed(WorldUiKind::none,2,false) && !world_ui_capture_allowed(WorldUiKind::none,256,false));
     std::cout<<"PASS: exact native wheel/notes/journal movie ownership, render/input distinction and recycled owner rejection\n";
 }

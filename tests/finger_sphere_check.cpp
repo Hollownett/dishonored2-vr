@@ -1,4 +1,4 @@
-// The sphere grip (src/finger_sphere.hpp): the radius rule's values, the ball fixed in the palm's frame, and the fingers' curls that stay put while the held thing jitters.
+﻿// The sphere grip (src/finger_sphere.hpp): the radius rule's values, the ball fixed in the palm's frame, and the fingers' curls that stay put while the held thing jitters.
 #include "../src/finger_sphere.hpp"
 #include "../src/full_body_driver.hpp"
 #include "../src/hand_bind.hpp"
@@ -41,6 +41,20 @@ int main() {
         const double rad=r::sphere_grip_radius(h);
         for(int sx=-1;sx<=1;sx+=2) for(int sy=-1;sy<=1;sy+=2) for(int sz=-1;sz<=1;sz+=2) assert(hyp(sx*h.x,sy*h.y,sz*h.z)<=rad+1e-12);}
     assert(r::sphere_grip_radius({.001,.001,.001})>=r::sphere_grip_min);
+    // The grip ball (user, headset 2026-11-05: a small sphere at the grip place, native grip): the thing's THIN side, not the ball round its whole box.
+    assert(near(r::sphere_grip_ball_radius({.09,.015,.004}),.015));                 // spoon: its 1.5 cm floor (a fist still closes on it)
+    assert(near(r::sphere_grip_ball_radius({.15,.022,.022}),.022));                 // candlestick: its 2.2 cm shaft
+    assert(near(r::sphere_grip_ball_radius({.11,.08,.02}),.02));                    // book: its 4 cm thickness
+    assert(near(r::sphere_grip_ball_radius({.09,.07,.10}),r::sphere_grip_ball_max)); // a head: its 7 cm side capped at 4 cm
+    assert(near(r::sphere_grip_ball_radius({.6,.1,.1}),r::sphere_grip_ball_max));    // a plank: the 4 cm cap, not v642's 50 cm
+    assert(near(r::sphere_grip_ball_radius({std::nan(""),.1,.1}),r::sphere_grip_unknown));
+    for(const Vec3 h:{Vec3{.09,.015,.004},Vec3{.11,.08,.02},Vec3{.15,.022,.022},Vec3{.3,.3,.3}})
+        assert(r::sphere_grip_ball_radius(h)<=r::sphere_grip_ball_max && r::sphere_grip_ball_radius(h)>=r::sphere_grip_min);
+    {   // a prop's grip ball from its world box: the candlestick turned 30 degrees still gives 2.2 cm (its own thin side), v642's rule 15.3 cm
+        const double c=std::cos(pi/6),s=std::sin(pi/6);d2vr::WorldTrackedPose pose{{0,0,0},{{{c,s,0},{-s,c,0},{0,0,1}}}};
+        const Vec3 half{.15,.022,.022};const Vec3 e{half.x*c+half.y*s,half.x*s+half.y*c,half.z};
+        assert(std::abs(r::sphere_grip_ball_radius(pose,d2vr::NativeGrabBounds{e*-1.,e})-.022)<1e-6);
+        assert(std::abs(r::sphere_grip_radius(pose,d2vr::NativeGrabBounds{e*-1.,e})-.153)<1e-3);}
     // A prop from its world box: the local half sides come back through the tilt (a candlestick turned 30 degrees about z still gives the ball round its own box, 15.3 cm, not the looser one round the tilted world box).
     {const double c=std::cos(pi/6),s=std::sin(pi/6);d2vr::WorldTrackedPose pose{{0,0,0},{{{c,s,0},{-s,c,0},{0,0,1}}}};
      const Vec3 half{.15,.022,.022};const Vec3 e{half.x*c+half.y*s,half.x*s+half.y*c,half.z};
@@ -60,6 +74,42 @@ int main() {
     const auto ball=r::sphere_grip_shape(hand.palm,hand.geometry,.03);
     assert(ball.half.x==0 && ball.half.y==0 && ball.half.z==0 && near(ball.radius,.03));
     assert(near(r::shape_distance(ball,hand.palm.position+r::palm_normal(hand.palm,hand.geometry)*r::held_palm_depth),0,1e-6)); // the skin point touches it
+    // The grip the user gets, same hand and solver: how far the four long fingers close on v642's ball and on the grip ball (mean flexion of their 12 joints).
+    {const std::array<std::pair<const char*,Vec3>,6> things{{{"spoon",{.09,.015,.004}},{"candlestick",{.15,.022,.022}},{"book",{.11,.08,.02}},
+            {"folder",{.16,.11,.01}},{"skull",{.09,.07,.10}},{"plank",{.6,.1,.1}}}};
+     for(const auto& thing:things) {
+         const auto report=[&](const char* rule,double rad) {
+             const auto shape=r::sphere_grip_shape(hand.palm,hand.geometry,rad);r::FingerIkState st{};auto wants=r::finger_wants(true,1.f,0.f);
+             const auto c=r::finger_contact(hand.geometry,hand.palm,&shape,1,0,st,r::held_curl,r::finger_solve_all,&wants);
+             unsigned touching=0;double flexion=0;
+             for(unsigned f=1;f<5;++f) {touching+=c.touching[f]?1u:0u;for(unsigned j=0;j<3;++j) flexion+=c.pose[f][j];}
+             std::cout<<thing.first<<" ("<<rule<<" "<<rad*100<<" cm): "<<touching<<"/4 long fingers on the ball, mean flexion "
+                 <<(flexion/12)*180/pi<<" deg\n";
+         };
+         report("whole box",r::sphere_grip_radius(thing.second));report("grip ball",r::sphere_grip_ball_radius(thing.second));
+     }}
+    // A wide, thin prop is not closed on (user, headset 2026-11-05: "grip is unnatural on books"): the fingers lie on its face. Wide and thin means at most
+    // 3 cm on the thinnest side, at least 4 cm on the middle one, and the thin side at most half the middle one.
+    assert(r::grip_is_flat(Vec3{.11,.08,.02}));     // book 22 x 16 x 4
+    assert(r::grip_is_flat(Vec3{.16,.11,.01}));     // folder 32 x 22 x 2
+    assert(r::grip_is_flat(Vec3{.6,.1,.01}));       // a thin plank
+    assert(r::grip_is_flat(Vec3{.3,.3,.03}));       // a wide sheet
+    assert(!r::grip_is_flat(Vec3{.15,.022,.022}));  // candlestick: a shaft to close on
+    assert(!r::grip_is_flat(Vec3{.035,.035,.15}));  // bottle: a shaft
+    assert(!r::grip_is_flat(Vec3{.09,.015,.004}));  // spoon: a 1.5 cm handle, not a face
+    assert(!r::grip_is_flat(Vec3{.09,.07,.10}));    // head: closed on
+    assert(!r::grip_is_flat(Vec3{.3,.3,.3}));       // crate
+    assert(!r::grip_is_flat(Vec3{.6,.1,.1}));       // a thick plank
+    assert(!r::grip_is_flat(Vec3{std::nan(""),.1,.1}));
+    // A flat prop's grip is NO contact shape at all plus the relaxed reach (v1028): the hand lies on the book's face instead of closing through its cover.
+    // Nothing is re-read per frame, so there is nothing to twitch and one shape fewer to solve than the ball.
+    {const r::HeldShape none{};r::FingerIkState st{};auto wants=r::finger_wants(true,1.f,0.f);
+     const auto c=r::finger_contact(hand.geometry,hand.palm,&none,0,0,st,r::grip_flat_reach,r::finger_solve_all,&wants);
+     double flexion=0;for(unsigned f=1;f<5;++f) for(unsigned j=0;j<3;++j) flexion+=c.pose[f][j];
+     std::cout<<"flat grip (relaxed reach "<<r::grip_flat_reach<<"): mean flexion "<<(flexion/12)*180/pi<<" deg\n";
+     assert((flexion/12)*180/pi<40 && (flexion/12)*180/pi>5);   // a relaxed hand on a book, not a fist and not a flat board
+     assert(r::grip_flat_reach>=.25f && r::grip_flat_reach<=.5f);
+    }
     // The fingers' contact on the ball does not move while the held thing jitters (the solver never sees the thing): 60 frames, one finger a frame as live, wants of a hold.
     {r::FingerIkState state{};auto wants=r::finger_wants(true,1.f,0.f);std::array<std::array<float,3>,5> last{};double worst=0;
      for(unsigned k=0;k<60;++k) {
@@ -75,16 +125,32 @@ int main() {
      const auto shape=r::sphere_grip_shape(hand.palm,hand.geometry,.04);r::FingerIkState once{};
      const auto c=r::finger_contact(hand.geometry,hand.palm,&shape,1,0,once,r::held_curl,r::finger_solve_all,&wants);
      for(unsigned f=1;f<5;++f) assert(c.touching[f] && !c.hyperextended[f]);}
-    // The thumb rests ON the ball (user, headset v642: "my thumb don't react like I holding a sphere, but goes into a palm"): for a stamp's and a book's ball its IP joint
-    // and tip are above the palm skin and outside the ball, not in the palm (the sweep ended there before: the ball stands off the skin out of the thumb's path).
-    for(const double rad:{.04,.14}) {
-        const auto ball=r::sphere_grip_shape(hand.palm,hand.geometry,rad);r::FingerIkState st{};auto wants=r::finger_wants(true,1.f,0.f);
-        const auto c=r::finger_contact(hand.geometry,hand.palm,&ball,1,0,st,r::held_curl,r::finger_solve_all,&wants);
+    // The thumb and the grip ball: a REAL grip ball (>= 3.5 cm: a bottle's body) is wrapped - its IP joint and tip rest on it (v642). A small one (1.5-3 cm: a
+    // candlestick, a spoon) is not (v1035, user: "thumb bone placed to the fingers, should be placed out of the fingers ... bent into an unrealistic position"):
+    // the thumb stays out of the finger bodies, which is what thumb_clearance measures.
+    for(const double radius:{.015,.02,.025,.03,.035,.04}) {
+        const auto thumb_ball=r::sphere_grip_shape(hand.palm,hand.geometry,radius);r::FingerIkState st{};auto wants=r::finger_wants(true,1.f,0.f);
+        const auto c=r::finger_contact(hand.geometry,hand.palm,&thumb_ball,1,0,st,r::held_curl,r::finger_solve_all,&wants);
         const auto t=r::finger_turns(hand.geometry,c,wants);const auto p=r::finger_points(hand.geometry.finger[0],{t[0][0],t[0][1],t[0][2]});
-        const auto d0=ball.frame.position-hand.palm.position;const Vec3 centre{dot(d0,hand.palm.basis[0]),dot(d0,hand.palm.basis[1]),dot(d0,hand.palm.basis[2])};
+        const auto d0=thumb_ball.frame.position-hand.palm.position;const Vec3 centre{dot(d0,hand.palm.basis[0]),dot(d0,hand.palm.basis[1]),dot(d0,hand.palm.basis[2])};
         const double t0=hand.geometry.thickness[0];
-        std::cout<<"thumb on a "<<rad*100<<" cm ball: tip "<<(length(p[3]-centre)-rad)*1000<<" mm off the ball, IP/tip "<<(dot(p[2],hand.geometry.palm_in)-r::held_palm_depth)*1000<<"/"<<(dot(p[3],hand.geometry.palm_in)-r::held_palm_depth)*1000<<" mm over the skin\n";
-        for(unsigned j=2;j<4;++j) {assert(length(p[j]-centre)>=rad+t0-.002);assert(dot(p[j],hand.geometry.palm_in)-r::held_palm_depth>=t0-.002);}
+        r::FingerAngles fa{};for(unsigned f=0;f<5;++f) for(unsigned s=0;s<3;++s) fa[f][s]=t[f][s];
+        const double clearance=r::thumb_clearance(hand.geometry,fa,{t[0][0],t[0][1],t[0][2]});
+        std::cout<<"thumb on a "<<radius*100<<" cm ball: tip "<<(length(p[3]-centre)-radius)*1000<<" mm off the ball, IP/tip "
+                 <<(dot(p[2],hand.geometry.palm_in)-r::held_palm_depth)*1000<<"/"<<(dot(p[3],hand.geometry.palm_in)-r::held_palm_depth)
+                 <<" mm over the skin, clearance to the fingers "<<clearance*1000<<" mm"<<std::endl;
+        assert(dot(p[3],hand.geometry.palm_in)-r::held_palm_depth>=t0-.002);   // the tip never sinks into the palm
+        assert(clearance>=-.002);   // v1037: the thumb stays out of the fingers at every grip-ball size (no ball is wrapped now: the largest is the 4 cm cap)
+        (void)radius;
     }
+    // v642's ball round a book's whole box is knob-only now (build/legacy-sphere-grip-whole-object); printed, not asserted. (The old loop asserted .14, a ball
+    // larger than that book's own 13.75 cm, and missed v646's thumb rule there; at the radius the rule really gives it still passes.)
+    {const double rad=r::sphere_grip_radius({.11,.08,.02});
+     const auto b=r::sphere_grip_shape(hand.palm,hand.geometry,rad);r::FingerIkState st{};auto wants=r::finger_wants(true,1.f,0.f);
+     const auto c=r::finger_contact(hand.geometry,hand.palm,&b,1,0,st,r::held_curl,r::finger_solve_all,&wants);
+     const auto t=r::finger_turns(hand.geometry,c,wants);const auto p=r::finger_points(hand.geometry.finger[0],{t[0][0],t[0][1],t[0][2]});
+     const auto d0=b.frame.position-hand.palm.position;const Vec3 centre{dot(d0,hand.palm.basis[0]),dot(d0,hand.palm.basis[1]),dot(d0,hand.palm.basis[2])};
+     std::cout<<"legacy whole-box ball "<<rad*100<<" cm: thumb tip "<<(length(p[3]-centre)-rad)*1000<<" mm off the ball (v646 asks "
+         <<(hand.geometry.thickness[0]-.002)*1000<<" mm)\n";}
     std::cout<<"finger_sphere_check passed\n";
 }

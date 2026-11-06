@@ -622,6 +622,28 @@ public:
 private:
     bool down_{},held_{},candidate_{},rejected_{},release_pending_{},had_{};std::uint64_t pending_{},candidate_since_{},held_owner_{},dropped_{},lost_{},expect_since_{};
 };
+// v1046 (user, headset v1045: "the heart should behave as a normal weapon, same as gun or crossbow"): the Heart in slot 1 is held like a gun by the arm that
+// drives slot 1. It stays in that hand until THAT hand's grip has held it once (a wheel choice arrives with the grip open); the state is per arm and starts over
+// on every arrival and arm change, never carried from the other hand (v1045: the old hand's squeeze dropped it the moment the slot-1 arm flipped). A hand already
+// squeezing when it arrives counts as held (GunGrip). Letting go after that puts it away at the hip, drops it elsewhere; once, until the Heart is gone.
+class HeartGrip {
+public:
+    enum class Action {none,put_away,drop};
+    Action update(bool present,unsigned arm,float grip,bool at_hip,bool gameplay) noexcept {
+        arm&=1u;
+        if(!present) {on_=false;return Action::none;}
+        if(!on_ || arm!=arm_) {on_=true;arm_=arm;spent_=false;down_=grip>=.6f;held_=down_;}
+        const bool pressed=grip>=(down_?.4f:.6f),released=!pressed && down_;down_=pressed;
+        if(!gameplay) {if(!pressed) held_=false;return Action::none;}   // a mantle or scene takes the hand: nothing is let go of
+        if(spent_) return Action::none;
+        if(pressed) {held_=true;return Action::none;}
+        if(released && held_) {held_=false;spent_=true;return at_hip?Action::put_away:Action::drop;}
+        return Action::none;
+    }
+    bool held() const noexcept {return held_;}
+private:
+    bool on_{},down_{},held_{},spent_{};unsigned arm_{};
+};
 class WheelFaceButtons {
     unsigned blocked_{};bool wheel_{};
 public:

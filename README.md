@@ -14,7 +14,7 @@ and pick powers from the game's own wheel.
 - **Your own hands.** The player's hands and arms follow your controllers, with fingers that close as you squeeze.
 - **Physical melee.** Swing the sword to attack, hold it in front of you to block, throw it and call it back.
   Unaware guards can be taken down from behind or choked out.
-- **Body holsters.** Sword over the right shoulder, pistol or crossbow on the left hip. Health and mana are on your wrist.
+- **Body holsters.** Sword over the right shoulder, pistol or crossbow on the left hip. Health, mana and ammo are on a watch on the back of your left wrist.
 - **Physical objects.** Grab, carry and throw bottles, bodies and loose props. Push doors open with your hand.
 - **The game's own UI in VR.** Menus, the Quick Access Wheel, the journal and notes appear in front of you;
   point with the right controller to select.
@@ -104,7 +104,7 @@ The sword and your hands need no buttons: attack, block, grab and throw with rea
 | Either grip at your **left temple** | Open the journal |
 | Right grip **over your right shoulder** | Draw the sword; release there to sheathe |
 | Left grip at your **left hip** | Draw the pistol or crossbow; release to holster |
-| Turn the **back of either wrist** to your face | Read health and mana |
+| Turn the **back of your left wrist** to your face | Read health, mana and ammo |
 | **Swing** the sword | Attack. From behind an unaware guard it is a silent takedown |
 | **Grip + trigger** with the sword in hand, held still | Charge a power strike (pulses rise in the hand); release to swing it hard. A real swing cancels the charge |
 | Sword held **in front of you** | Block (the trigger is the charge, not a block) |

@@ -139,6 +139,17 @@ int main() {
         require(!d2vr::eye_texture_matches(invalid,8,4,DXGI_FORMAT_R8G8B8A8_UNORM_SRGB),"Array eye mismatch was accepted");
         invalid=copy_desc;invalid.Format=DXGI_FORMAT_B8G8R8A8_UNORM;
         require(!d2vr::eye_texture_matches(invalid,8,4,DXGI_FORMAT_R8G8B8A8_UNORM_SRGB),"Foreign colour group was accepted");
+        // v1021: a source still smaller than a just-resized eye is a transient hold, not a session fault; a larger one is
+        // internal SSAA input the resolve downscales (the game's own output follows its swapchain resize a frame later).
+        auto held_source=copy_desc;held_source.Width=7;
+        require(!d2vr::eye_source_holds(held_source,8,4,DXGI_FORMAT_R8G8B8A8_UNORM_SRGB),"A shorter eye source was accepted as current");
+        held_source=copy_desc;held_source.Height=3;
+        require(!d2vr::eye_source_holds(held_source,8,4,DXGI_FORMAT_R8G8B8A8_UNORM_SRGB),"A narrower eye source was accepted as current");
+        held_source=copy_desc;held_source.Width=16;held_source.Height=8;
+        require(d2vr::eye_source_holds(held_source,8,4,DXGI_FORMAT_R8G8B8A8_UNORM_SRGB),"An SSAA-sized eye source was rejected");
+        held_source=copy_desc;held_source.Format=DXGI_FORMAT_B8G8R8A8_UNORM;
+        require(!d2vr::eye_source_holds(held_source,8,4,DXGI_FORMAT_R8G8B8A8_UNORM_SRGB),"A foreign-colour source was accepted");
+        require(d2vr::eye_source_holds(copy_desc,8,4,DXGI_FORMAT_R8G8B8A8_UNORM_SRGB),"An exact eye source was rejected");
         copy_desc.Format=DXGI_FORMAT_R8G8B8A8_UNORM;copy_desc.Usage=D3D11_USAGE_STAGING;copy_desc.CPUAccessFlags=D3D11_CPU_ACCESS_READ;
         require(SUCCEEDED(device->CreateTexture2D(&copy_desc,nullptr,&staging)),"Cannot create eye readback");
         for(const auto source_format:{DXGI_FORMAT_R8G8B8A8_UNORM,DXGI_FORMAT_R8G8B8A8_UNORM_SRGB}) {
@@ -198,7 +209,7 @@ int main() {
         require(SUCCEEDED(chain->ResizeBuffers(0,0,0,DXGI_FORMAT_UNKNOWN,0)),"Cannot restore DXGI output from real client size");
         require(SUCCEEDED(chain->GetBuffer(0,IID_PPV_ARGS(&held))),"Cannot read restored backbuffer");held->GetDesc(&actual);
         require(actual.Width==640 && actual.Height==360,"DXGI output was not restored to the client window");
-        std::cout << "PASS: typed/typeless RGBA8 eye copies preserve pixels; runtime-bounded 1.5x/2.0x scaling above 4096, empty readback for unreadable resources, recommended 2496x2688 GPU output, unchanged input window and restored output, WARP\n";
+        std::cout << "PASS: typed/typeless RGBA8 eye copies preserve pixels; runtime-bounded 1.5x/2.0x scaling above 4096, transient smaller eye sources held, empty readback for unreadable resources, recommended 2496x2688 GPU output, unchanged input window and restored output, WARP\n";
         return 0;
     } catch(const std::exception& error) {std::cerr << error.what() << '\n';return 1;}
 }

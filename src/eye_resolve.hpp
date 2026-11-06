@@ -25,6 +25,15 @@ class EyeResolve {
     Ptr<ID3D11Texture2D> output_;
     Ptr<ID3D11ShaderResourceView> output_srv_;
     Ptr<ID3D11RenderTargetView> output_rtv_;
+    // v1021: the sources handed in by the render path are copy targets, not shader-readable resources. The left eye is
+    // the paired backbuffer copy (created with only the flags the copy needs) and the right eye is the swapchain
+    // backbuffer itself (render target only); D3D11 refuses a read view on either with E_INVALIDARG. EyeSharpen already
+    // copies such a source into its own readable texture. Doing the same here keeps the SSAA/density resolve alive
+    // instead of throwing out of the frame, which the render callback treats as a session fault and restarts VR (the
+    // headset saw exactly that as "out of VR and back" on the first gameplay frame and after a resolution change).
+    Ptr<ID3D11Texture2D> source_copy_;
+    Ptr<ID3D11ShaderResourceView> source_copy_srv_;
+    D3D11_TEXTURE2D_DESC source_copy_desc_{};
     UINT width_{},height_{};
     static void checked(HRESULT result,const char* label) {
         if(FAILED(result)) throw std::runtime_error(std::string("SSAA resolve: ")+label+" ("+std::to_string(result)+")");
@@ -37,11 +46,14 @@ class EyeResolve {
             (errors?std::string(static_cast<const char*>(errors->GetBufferPointer()),errors->GetBufferSize()):"compile failed"));
         return binary;
     }
-    Ptr<ID3D11Texture2D> texture(UINT width,UINT height) {
+    Ptr<ID3D11Texture2D> texture(UINT width,UINT height,DXGI_FORMAT format,UINT bind_flags) {
         D3D11_TEXTURE2D_DESC desc{};desc.Width=width;desc.Height=height;desc.MipLevels=1;
-        desc.ArraySize=1;desc.Format=DXGI_FORMAT_R8G8B8A8_TYPELESS;desc.SampleDesc.Count=1;
-        desc.BindFlags=D3D11_BIND_SHADER_RESOURCE|D3D11_BIND_RENDER_TARGET;desc.Usage=D3D11_USAGE_DEFAULT;
+        desc.ArraySize=1;desc.Format=format;desc.SampleDesc.Count=1;
+        desc.BindFlags=bind_flags;desc.Usage=D3D11_USAGE_DEFAULT;
         Ptr<ID3D11Texture2D> result;checked(device_->CreateTexture2D(&desc,nullptr,&result),"texture allocation");return result;
+    }
+    Ptr<ID3D11Texture2D> texture(UINT width,UINT height) {
+        return texture(width,height,DXGI_FORMAT_R8G8B8A8_TYPELESS,D3D11_BIND_SHADER_RESOURCE|D3D11_BIND_RENDER_TARGET);
     }
     Ptr<ID3D11ShaderResourceView> srv(ID3D11Texture2D* texture,const D3D11_TEXTURE2D_DESC& desc) {
         D3D11_SHADER_RESOURCE_VIEW_DESC view{};view.ViewDimension=D3D11_SRV_DIMENSION_TEXTURE2D;
@@ -54,6 +66,20 @@ class EyeResolve {
         D3D11_RENDER_TARGET_VIEW_DESC view{};view.Format=DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
         view.ViewDimension=D3D11_RTV_DIMENSION_TEXTURE2D;Ptr<ID3D11RenderTargetView> result;
         checked(device_->CreateRenderTargetView(texture,&view,&result),"texture write view");return result;
+    }
+    // A source without D3D11_BIND_SHADER_RESOURCE cannot take the read view. Copy it once per frame into a texture
+    // of its own format (the copy keeps the sRGB/linear meaning the direct view would have had) and read that.
+    Ptr<ID3D11ShaderResourceView> readable(ID3D11Texture2D* source,const D3D11_TEXTURE2D_DESC& desc) {
+        if(desc.BindFlags&D3D11_BIND_SHADER_RESOURCE) return srv(source,desc);
+        if(!source_copy_ || source_copy_desc_.Width!=desc.Width || source_copy_desc_.Height!=desc.Height ||
+           source_copy_desc_.Format!=desc.Format) {
+            auto copy=texture(desc.Width,desc.Height,desc.Format,D3D11_BIND_SHADER_RESOURCE);
+            D3D11_TEXTURE2D_DESC copy_desc{};copy->GetDesc(&copy_desc);
+            auto read=srv(copy.Get(),copy_desc);
+            source_copy_=copy;source_copy_desc_=copy_desc;source_copy_srv_=read;
+        }
+        context_->CopyResource(source_copy_.Get(),source);
+        return source_copy_srv_;
     }
     void resize(UINT width,UINT height) {
         if(width==width_ && height==height_) return;
@@ -104,7 +130,7 @@ float4 PS(V v):SV_TARGET {
             !(desc.Format==DXGI_FORMAT_R8G8B8A8_UNORM || desc.Format==DXGI_FORMAT_R8G8B8A8_UNORM_SRGB || desc.Format==DXGI_FORMAT_R8G8B8A8_TYPELESS))
             throw std::runtime_error("SSAA resolve source format or size differs");
         ContextState::Scope scope(state_);
-        auto source_srv=srv(source,desc);
+        auto source_srv=readable(source,desc);
         const std::array<float,4> params{static_cast<float>(desc.Width),static_cast<float>(desc.Height),
             static_cast<float>(width_),static_cast<float>(height_)};
         context_->UpdateSubresource(parameters_.Get(),0,nullptr,params.data(),0,0);

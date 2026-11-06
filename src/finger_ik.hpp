@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 #include "finger_pose.hpp"
 #include "native_rigid_body.hpp"
 #include "radius_profile.hpp"
@@ -519,6 +519,10 @@ inline float thumb_want(const std::array<float,5>& wanted) noexcept {
 // The cap fades out over thumb_fold_ramp of the folded finger's curl past thumb_fold_curl instead of switching there (headset v693: a finger whose
 // contact curl hovers about the threshold flipped the thumb between the two every few frames).
 inline constexpr float thumb_fold_ramp=.1f;
+// v1035 (user, headset 2026-11-05: "thumb bone placed to the fingers, should be placed out of the fingers ... bent into an unrealistic position"): the v646
+// "thumb on a ball" search is only for a real grip ball. On v1024's small balls (1.5-3 cm: a bottle, a candlestick, a spoon) it forced the pad onto the ball
+// inside the folded fingers; below this radius the ordinary thumb solve poses it, out of the finger bodies.
+inline constexpr double thumb_ball_min_radius=.045;
 inline float thumb_want(const std::array<float,5>& wanted,const FingerCurls& contact) noexcept {
     if(contact.touching[0]) return wanted[0];
     const auto share=[&](unsigned f) {return std::clamp((std::min(wanted[f],contact.finger[f])-thumb_fold_curl)/thumb_fold_ramp,0.f,1.f);};
@@ -728,6 +732,7 @@ inline FingerCurls finger_contact(const HandGeometry& hand,const WorldTrackedPos
             if(f==0 && fold) for(unsigned k=0;k<reachable;++k) {
                 const auto& b=*within_reach[k];
                 if(b.fingers_only || b.half.x!=0 || b.half.y!=0 || b.half.z!=0 || !(b.radius>0) || b.radius_end>=0) continue;
+                if(b.radius<thumb_ball_min_radius) continue;   // v1035: a small grip ball is not wrapped by the thumb
                 const auto lim=finger_angles(0,1.),open=finger_open_angles(0);const auto& g0=hand.finger[0];const double t0=hand.thickness[0],reach_r=b.radius+t0;
                 const auto idx=finger_points(hand.finger[1],finger_turns_of(hand.finger[1],finger_pose_angles(1,std::max(wants[1],relaxed_share),pose_target.pose[1])))[3];
                 const auto cost=[&](const std::array<double,3>& a) {

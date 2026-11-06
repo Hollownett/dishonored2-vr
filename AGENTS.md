@@ -18,3 +18,22 @@ When the user requests VR, launch the reviewed candidate directly with
 headset-detection confirmation before launching; the user reports that Virtual
 Desktop has a detection bug. Preserve required OpenXR initialization and recovery.
 Do not equate a loaded DLL with successfully running headset presentation.
+
+# Live game access for helper agents
+
+Helper agents may READ the running game at any time, even while the user plays.
+That covers reading its memory from outside the process (ReadProcessMemory-based
+tools such as `tools/entities.py` and `tools/sample_threads.py`), the mod's status
+and artifact files, and the mod's own in-DLL probes. Verify engine assumptions
+(struct layouts, per-view vs shared data, call order) against live memory instead
+of relying on static analysis alone.
+
+Without the user's explicit go-ahead in the current conversation, helper agents
+must not:
+- inject into, write to, suspend, or debug-attach to the game;
+- send input to the game;
+- launch or close the game;
+- touch saves or the game config;
+- change the mod's build knobs in `%LOCALAPPDATA%\DishonoredVR\build`.
+The coordinating agent owns those actions and checks that the user is not playing
+first.

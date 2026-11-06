@@ -545,6 +545,7 @@ public:
     void install(std::uintptr_t base,Read read,const std::filesystem::path& file) {
         if(!base || !read || active_.load(std::memory_order_acquire) || (instance_ && instance_!=this))
             throw std::runtime_error("Invalid native HUD census ownership");
+        if(file.empty()) return;   // v1046: diagnostics off = a read-only census (its only output is these files) hooks nothing
         base_=base;read_=read;
         IMAGE_DOS_HEADER dos{};
         if(!read_(base,&dos,sizeof dos) || dos.e_magic!=IMAGE_DOS_SIGNATURE || dos.e_lfanew<64 || dos.e_lfanew>0x1000)

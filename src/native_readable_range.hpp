@@ -71,6 +71,13 @@ inline bool native_readable_range_cached(std::uintptr_t address,std::size_t size
     }
     return true;
 }
+// v1041: a guarded read that faulted after the cache said "readable" (memory freed or decommitted inside the cached window) must not be
+// retried every frame for the next ~1 s: each retry is a handled access violation (60 per session in the v1040 record, all one address).
+inline void native_readable_range_forget(std::uintptr_t address,std::size_t size) noexcept {
+    auto& cache=native_region_cache();
+    cache.entries[NativeRegionCache::slot(address)]={};
+    if(size) cache.entries[NativeRegionCache::slot(address+size-1)]={};
+}
 // Committed executable page (return-address / vtable target checks in hot hooks).
 inline bool native_executable_cached(std::uintptr_t at) noexcept {
     if(!at) return false;

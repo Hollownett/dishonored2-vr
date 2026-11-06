@@ -6,6 +6,7 @@
 #include "avatar_calibration.hpp"
 #include "cutscene_mode.hpp"
 #include "palm_offset.hpp"
+#include "dlss_mode.hpp"
 #include <algorithm>
 #include <optional>
 
@@ -63,6 +64,8 @@ class VrSettings {
     double requested_=1;
     bool aa_{};
     int temporal_aa_{2};
+    int upscale_custom_{};      // the player's own render scale (percent, 50..100) for the current upscaler mode; 0 = the mode's preset
+    int dlss_quality_percent_{67}; // DLSS Quality's preset: NGX's optimal fraction once the renderer knows it
     bool scripted_recenter_{true};CutsceneMode cutscene_mode_{CutsceneMode::vr_comfort}; // G1/G3: recenter on scripted moments, cutscene presentation
     bool aa_chosen_{},crosshair_{true}; // v609: persisted AA-chosen marker and the aim crosshair switch
     unsigned upscaler_generation_{3}; // Actual runtime backend; preferences retain the existing quality modes.
@@ -101,12 +104,13 @@ public:
         mirror_=static_cast<MirrorMode>((static_cast<int>(mirror_)+direction+3)%3);
     }
     struct PalmOffsetChange {unsigned side{};PalmOffset value{};};
-    struct Changes {std::optional<double> resolution;std::optional<bool> antialiasing;std::optional<int> temporal_aa;std::optional<TurnControl::Config> turning;
+    struct Changes {std::optional<double> resolution;std::optional<bool> antialiasing;std::optional<int> temporal_aa;std::optional<int> upscale_percent;std::optional<TurnControl::Config> turning;
                    std::optional<MirrorMode> mirror;std::optional<double> sharpness;std::optional<int> hud_percent;std::optional<bool> controls_hint;std::optional<bool> crosshair;std::optional<bool> scripted_recenter;std::optional<CutsceneMode> cutscene_mode;
                    bool recenter{},consume{},opened{},calibrate{},player_measurements{},test_unlock{},controls_guide{};
                    std::optional<PalmOffsetChange> palm_offset;};
     void initialize(double scale,bool aa,TurnControl::Config turning={},MirrorMode mirror=MirrorMode::right_eye,double sharpness=.5,int temporal_aa=2,
-        int hud_percent=65,bool controls_hint=true,AvatarPlayerMeasurements player_measurements={},bool aa_chosen=false,bool crosshair=true,bool scripted_recenter=true,CutsceneMode cutscene_mode=CutsceneMode::vr_comfort) {
+        int hud_percent=65,bool controls_hint=true,AvatarPlayerMeasurements player_measurements={},bool aa_chosen=false,bool crosshair=true,bool scripted_recenter=true,CutsceneMode cutscene_mode=CutsceneMode::vr_comfort,int upscale_percent=0) {
+        upscale_custom_=dlss_mode::upscaler(temporal_aa) && upscale_percent>=dlss_mode::min_percent && upscale_percent<=dlss_mode::max_percent?upscale_percent:0;
         requested_=scale;aa_=aa;turning_=turning;mirror_=mirror;sharpness_=sharpness;temporal_aa_=temporal_aa;effective_temporal_aa_.reset();
         hud_percent_=hud_percent;controls_hint_=controls_hint;player_measurements_=player_measurements;aa_chosen_=aa_chosen;crosshair_=crosshair;scripted_recenter_=scripted_recenter;cutscene_mode_=cutscene_mode;
     }
@@ -187,7 +191,21 @@ public:
     int temporal_aa() const noexcept {return temporal_aa_;}
     VrPreferences preferences() const {
         return {requested_,aa_,turning_,mirror_,sharpness_,temporal_aa_,hud_percent_,controls_hint_,player_measurements_,
-                aa_chosen_,crosshair_,scripted_recenter_,cutscene_mode_};
+                aa_chosen_,crosshair_,scripted_recenter_,cutscene_mode_,upscale_custom_};
+    }
+    // Upscaler scale: the render scale (percent) of the selected upscaler mode. Custom = set by the player instead of the mode's
+    // preset (FSR Quality 77, Balanced 67, Native/DLAA 100, DLSS Quality = NGX optimal); picking an AA mode clears it.
+    bool upscaler() const noexcept {return dlss_mode::upscaler(temporal_aa_);}
+    int upscale_custom_percent() const noexcept {return upscale_custom_;}
+    int upscale_preset_percent() const noexcept {return dlss_mode::preset_percent(temporal_aa_,dlss_quality_percent_);}
+    int upscale_percent() const noexcept {return upscale_custom_?upscale_custom_:upscale_preset_percent();}
+    void dlss_quality_percent(int percent) noexcept {dlss_quality_percent_=std::clamp(percent,dlss_mode::min_percent,dlss_mode::max_percent);}
+    // A scale equal to the preset is the preset (no custom entry). Returns true when the effective scale changed.
+    bool set_upscale_percent(int percent) noexcept {
+        if(!upscaler()) return false;
+        const int before=upscale_percent();percent=std::clamp(percent,dlss_mode::min_percent,dlss_mode::max_percent);
+        upscale_custom_=percent==upscale_preset_percent()?0:percent;aa_chosen_=true;
+        return upscale_percent()!=before;
     }
     bool aa_chosen() const noexcept {return aa_chosen_;}
     bool crosshair() const noexcept {return crosshair_;}
@@ -281,13 +299,13 @@ public:
     void open_calibration_from_native() noexcept {open_=calibration_page_=true;measurements_page_=false;leave_hand_fit();selected_=11;controls_valid_=false;stick_held_=false;native_calibration_=true;}
     void set_requested(double v) noexcept {requested_=std::clamp(v,.5,2.);}
     void set_antialiasing(bool v) noexcept {aa_=v;}
-    void set_temporal_aa(int v) noexcept {temporal_aa_=std::clamp(v,0,8);aa_chosen_=true;}
+    void set_temporal_aa(int v) noexcept {temporal_aa_=std::clamp(v,0,8);upscale_custom_=0;aa_chosen_=true;}
     void mark_aa_chosen() noexcept {aa_chosen_=true;}
     int temporal_aa_choices() const noexcept {return dlss_available_?9:7;} // modes 0..6, plus 7/8 when DLSS is available
     // Cycling never lands on a DLSS mode that is not offered; a saved one steps off it like the last FSR 4 mode.
     void cycle_temporal_aa(int direction) noexcept {
         const int n=temporal_aa_choices();const int current=std::min(temporal_aa_,n-1);
-        temporal_aa_=(current+(direction<0?n-1:1))%n;aa_chosen_=true; // any panel change is a choice
+        temporal_aa_=(current+(direction<0?n-1:1))%n;upscale_custom_=0;aa_chosen_=true; // any panel change is a choice
     }
     void set_mirror(MirrorMode v) noexcept {mirror_=v;}
     void set_sharpness(double v) noexcept {sharpness_=std::clamp(v,0.,1.);}

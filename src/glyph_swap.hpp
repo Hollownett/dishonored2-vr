@@ -28,7 +28,11 @@ class GlyphSwap {
     struct Entry {Ptr<ID3D11ShaderResourceView> source,replacement,wheel,talk;bool pending{};};
     struct Job {Ptr<ID3D11ShaderResourceView> view;Ptr<ID3D11Texture2D> staging;D3D11_TEXTURE2D_DESC desc{};};
     using SetFn=void (STDMETHODCALLTYPE*)(ID3D11DeviceContext*,UINT,UINT,ID3D11ShaderResourceView* const*);
+    // v993: the PS state census observes the FINAL views this hook forwards (after a glyph substitution) and may ask to elide
+    // the call. It runs even while the glyph feature is off, so the hooks are installed as plain passthroughs then.
+    using Filter=bool (*)(ID3D11DeviceContext*,UINT,UINT,ID3D11ShaderResourceView* const*,bool) noexcept;
     inline static std::array<SetFn,2> original_{};inline static std::array<void*,2> target_{};
+    inline static std::atomic<ID3D11DeviceContext*> immediate_context_{nullptr};
     inline static std::shared_mutex map_mutex_;
     inline static std::unordered_map<ID3D11ShaderResourceView*,Entry> map_; // Empty entry: not a glyph
     inline static std::mutex pending_mutex_;inline static std::array<Ptr<ID3D11ShaderResourceView>,8> pending_{};inline static unsigned pending_count_{};
@@ -88,17 +92,29 @@ class GlyphSwap {
         }
         return {};
     }
+    template<int I> static void swapping_hook(ID3D11DeviceContext* c,UINT start,UINT count,ID3D11ShaderResourceView* const* views) {
+        ID3D11ShaderResourceView* const* forwarded=views;
+        std::array<ID3D11ShaderResourceView*,16> local{};std::array<Ptr<ID3D11ShaderResourceView>,16> owned{};
+        bool changed=false;
+        for(UINT i=0;i<count;++i) {
+            local[i]=views[i];
+            if(views[i]) {owned[i]=lookup(views[i]);if(owned[i]) {local[i]=owned[i].Get();changed=true;}}
+        }
+        if(changed) {++swaps;forwarded=local.data();}
+        const bool is_deferred=c!=immediate_context_.load(std::memory_order_relaxed);
+        if(const auto f=filter.load(std::memory_order_relaxed)) if(f(c,start,count,forwarded,is_deferred)) return;
+        original_[I](c,start,count,forwarded);
+    }
     template<int I> static void STDMETHODCALLTYPE hook(ID3D11DeviceContext* c,UINT start,UINT count,ID3D11ShaderResourceView* const* views) {
         if(const auto o=observer.load(std::memory_order_relaxed)) o(c,start,count,views);
-        if(enabled.load(std::memory_order_relaxed) && views && count && count<=16) {
-            std::array<ID3D11ShaderResourceView*,16> local{};std::array<Ptr<ID3D11ShaderResourceView>,16> owned{};bool changed=false;
-            for(UINT i=0;i<count;++i) {
-                local[i]=views[i];
-                if(views[i]) {owned[i]=lookup(views[i]);if(owned[i]) {local[i]=owned[i].Get();changed=true;}}
-            }
-            if(changed) {++swaps;original_[I](c,start,count,local.data());return;}
-        }
-        original_[I](c,start,count,views);
+        ID3D11ShaderResourceView* const* forwarded=views;
+        // v1040: feature off (the usual case) is a plain passthrough; the 16-entry arrays live only in the swapping path.
+        if(enabled.load(std::memory_order_relaxed) && views && count && count<=16) return swapping_hook<I>(c,start,count,views);
+        // v993: the census sits inside the one owner of slot 8 and sees exactly what is forwarded. Classify by the one
+        // immediate context, not by which vtable this hook was installed from: the two can share an implementation.
+        const bool is_deferred=c!=immediate_context_.load(std::memory_order_relaxed);
+        if(const auto f=filter.load(std::memory_order_relaxed)) if(f(c,start,count,forwarded,is_deferred)) return;
+        original_[I](c,start,count,forwarded);
     }
     static void hook_table(ID3D11DeviceContext* context,int i,void* replacement) noexcept {
         void* target=(*reinterpret_cast<void***>(context))[8]; // PSSetShaderResources
@@ -120,10 +136,13 @@ public:
     inline static std::atomic<std::uint64_t> npc_prompt_until{};
     // Optional observer of every PS view bind (FSR upscale bookkeeping); called before the swap.
     inline static std::atomic<void (*)(ID3D11DeviceContext*,UINT,UINT,ID3D11ShaderResourceView* const*)> observer{};
+    inline static std::atomic<Filter> filter{}; // v993 PS state census/elision on the final forwarded views
     inline static std::atomic<std::uint64_t> swaps{},identified{},checked{},deferred{},failed{},completed{};
     inline static std::atomic<unsigned> pending_readbacks{};
     inline static std::atomic<unsigned> identified_mask{}; // bit i = kXboxGlyphs[i]
-    static void install(ID3D11Device* device) noexcept {
+    // Render thread; MinHook must be initialised. `feature` keeps the glyph substitution behaviour unchanged when the
+    // census needs the slot-8 hook anyway (v993): hooks are installed and the hook body is then a plain passthrough.
+    static void install(ID3D11Device* device,bool feature=true) noexcept {
         std::lock_guard<std::mutex> process(process_mutex_);
         if(!adopt_owner(device))return;
         if(device && !transparent_) {
@@ -132,13 +151,23 @@ public:
             D3D11_SUBRESOURCE_DATA init{block.data(),16,0};Ptr<ID3D11Texture2D> t;
             if(SUCCEEDED(device->CreateTexture2D(&d,&init,&t))) device->CreateShaderResourceView(t.Get(),nullptr,&transparent_);
         }
-        if(target_[0] || target_[1]) {for(auto* t:target_) if(t) MH_EnableHook(t);enabled=true;return;}
+        if(target_[0] || target_[1]) {
+            if(device) {ID3D11DeviceContext* immediate{};device->GetImmediateContext(&immediate);
+                if(immediate) {immediate_context_.store(immediate,std::memory_order_relaxed);immediate->Release();}}
+            for(auto* t:target_) if(t) MH_EnableHook(t);
+            enabled=feature;
+            return;
+        }
         if(!device) return;
+        ID3D11DeviceContext* immediate{};device->GetImmediateContext(&immediate);
+        if(immediate) immediate_context_.store(immediate,std::memory_order_relaxed);
         ID3D11DeviceContext* deferred_context{};
         if(SUCCEEDED(device->CreateDeferredContext(0,&deferred_context))) {hook_table(deferred_context,0,reinterpret_cast<void*>(&hook<0>));deferred_context->Release();}
-        ID3D11DeviceContext* immediate{};device->GetImmediateContext(&immediate);
-        if(immediate) {hook_table(immediate,1,reinterpret_cast<void*>(&hook<1>));immediate->Release();}
-        enabled=target_[0] || target_[1];
+        if(immediate) {
+            hook_table(immediate,1,reinterpret_cast<void*>(&hook<1>));
+            immediate->Release();
+        }
+        enabled=feature && (target_[0] || target_[1]);
     }
     static void disable() noexcept {enabled=false;for(auto* t:target_) if(t) MH_DisableHook(t);std::lock_guard<std::mutex> process(process_mutex_);reset_owned();}
     // Immediate Present context: copy once, then retry a busy read on a later frame.

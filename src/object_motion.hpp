@@ -3,6 +3,10 @@
 // An entity's motion vector comes from cb_previousmvpmatrix{x,y,z,w} in its per-instance cbuffer (VS b2, layout per
 // material). The engine fills it from its cache of that draw's MVP in the LAST RENDERED view: in paired stereo the other
 // eye's, so TAA/FSR/DLSS read the stereo disparity as motion and ghost every entity.
+// v1103: a shader need not declare the previous rows at all. The held weapon's colour/forward vertex shader declares only
+// cb_mvpmatrix{x,y,z,w} (the cache's 1,931 current-only model variants; docs/WEAPON-DRAW-PLACE-TEMPORAL.md "Round 3"); the
+// proxy records those with 0xff in every previous byte. Such a draw is placed on its current rows and has no previous rows
+// to rewrite: its weapon motion vector comes from the Z prepass, which declares both row sets and is placed too.
 // Each draw is fixed when it is made, where the bindings are final (at the cb2 write they usually are not, v824):
 // cb2 writes (Map/Unmap, UpdateSubresource) are shadowed per context; at a draw whose vertex shader has previous rows
 // (reflected by the dinput8 proxy at CreateVertexShader, linux/proxy/vs_layouts.hpp: the game creates its shaders long
@@ -26,6 +30,7 @@
 #include <fstream>
 #include <mutex>
 #include <new>
+#include <sstream>
 #include <string>
 #include "weapon_draw_place.hpp"
 
@@ -87,20 +92,73 @@ private:
 class ObjectMotion {
 public:
     using Read=bool(*)(std::uintptr_t,void*,std::size_t);
+    // v997/v998: the wide state census hooks slots 7/11/119 through these callbacks, so it never creates a second MinHook on this
+    // owner's targets. The callbacks see the FINAL forwarded argument list. wide_cb_filter/wide_vs_filter return true only when
+    // the census proved the call redundant and wide elision is on; the forward is then skipped, after this class's own
+    // bookkeeping has already run (ObserveThenFilter below). wide_cb1_observer is count/invalidate only: CB1 is never elided.
+    using WideCbFilter=bool (*)(ID3D11DeviceContext*,UINT,UINT,ID3D11Buffer* const*) noexcept;
+    using WideCb1Observer=void (*)(ID3D11DeviceContext*,UINT,UINT,ID3D11Buffer* const*,const UINT*,const UINT*) noexcept;
+    using WideVsFilter=bool (*)(ID3D11DeviceContext*,ID3D11VertexShader*,ID3D11ClassInstance* const*,UINT) noexcept;
+    using WideDirectCbObserver=void (*)(ID3D11DeviceContext*,UINT,UINT,ID3D11Buffer* const*) noexcept;
+    inline static std::atomic<WideCbFilter> wide_cb_filter{};
+    inline static std::atomic<WideCb1Observer> wide_cb1_observer{};
+    inline static std::atomic<WideVsFilter> wide_vs_filter{};
+    // This class itself binds the pool buffer at VS b2 and restores the game's b2 through the original function (bind_pool and
+    // DrawScope). Those calls bypass the hooked setter, so the census is told the exact pointer that is now bound; otherwise it
+    // could think the game's previous buffer was still current and elide a bind that was actually needed.
+    inline static std::atomic<WideDirectCbObserver> wide_direct_cb_observer{};
+    // v998 order contract: ObjectMotion's per-shader/per-draw bookkeeping must observe every call and never depends on the call
+    // being forwarded, so a filter that can elide runs after it. The model lab pins this ordering.
+    template<class Observe,class Filter> static bool observe_then_filter(Observe&& observe,Filter&& filter) noexcept {
+        observe();
+        return filter();
+    }
+    static bool installed() noexcept {return installed_;}
     static constexpr unsigned absent=0xff,max_floats=256; // shadowed per-instance cbuffers: up to 1 KB
     // One draw's rows by its shader's layout (linux/proxy/vs_layouts.hpp: byte k = float4 index of
     // cb_mvpmatrix{x,y,z,w}[k], then of cb_previousmvpmatrix; 0xff = not declared). A missing z row is `z`, the eye VP's
-    // z row: with reverse-Z every MVP's z row is (0,0,0,near). False without the x, y and w rows of both.
-    static bool gather(std::uint64_t layout,const float* f,UINT size,const float* z,float* cur,float* prev) noexcept {
-        for(unsigned k=0;k<8;++k) {
-            const auto row=static_cast<unsigned>(layout>>(8*k)&255);float* out=(k<4?cur:prev)+4*(k&3);
+    // z row: with reverse-Z every MVP's z row is (0,0,0,near). gather_current needs the x, y and w current rows; gather
+    // (both halves) also needs all four previous rows, which a current-only layout does not have.
+    // v1101/v1103: the current rows alone (a depth/velocity-only or a colour/forward vertex-shader layout may not declare
+    // cb_previousmvpmatrix; the proxy records it with 0xff in every previous byte). The placed current rows are identical
+    // either way; the previous rows are derived from the publisher, not from this draw's cache.
+    static bool gather_current(std::uint64_t layout,const float* f,UINT size,const float* z,float* cur) noexcept {
+        for(unsigned k=0;k<4;++k) {
+            const auto row=static_cast<unsigned>(layout>>(8*k)&255);float* out=cur+4*k;
             if(row==absent && (k&3)==2) std::memcpy(out,z,16);
             else if(row==absent || (row+1)*16>size) return false;
             else std::memcpy(out,f+4*row,16);
         }
         return true;
     }
+    static bool gather(std::uint64_t layout,const float* f,UINT size,const float* z,float* cur,float* prev) noexcept {
+        if(!gather_current(layout,f,size,z,cur)) return false;
+        return gather_previous(layout,f,size,z,prev);
+    }
+    // The previous rows alone (v1101: the current rows were gathered before the weapon branch decided whether it needs them).
+    static bool gather_previous(std::uint64_t layout,const float* f,UINT size,const float* z,float* prev) noexcept {
+        for(unsigned k=4;k<8;++k) {
+            const auto row=static_cast<unsigned>(layout>>(8*k)&255);float* out=prev+4*(k&3);
+            if(row==absent && (k&3)==2) std::memcpy(out,z,16);
+            else if(row==absent || (row+1)*16>size) return false;
+            else std::memcpy(out,f+4*row,16);
+        }
+        return true;
+    }
+    // v1040: whether gather_previous can succeed for this layout and cb2 size (it never looks at the values). A current-only
+    // layout (83% of the hooked draws in play: colour/forward shaders) cannot, so without weapon placement nothing can happen to it.
+    static bool has_previous(std::uint64_t layout,UINT size) noexcept {
+        for(unsigned k=4;k<8;++k) {
+            const auto row=static_cast<unsigned>(layout>>(8*k)&255);
+            if(row==absent) {if((k&3)!=2) return false;}
+            else if((row+1)*16>size) return false;
+        }
+        return true;
+    }
+    // The previous rows into the draw's rows. A current-only layout has 0xff in every previous byte, so nothing is written;
+    // a null `prev` (a current-only draw) is the same "nothing to rewrite".
     static void scatter(std::uint64_t layout,const float* prev,float* f) noexcept {
+        if(!prev) return;
         for(unsigned k=4;k<8;++k) if(const auto row=static_cast<unsigned>(layout>>(8*k)&255);row!=absent) std::memcpy(f+4*row,prev+4*(k-4),16);
     }
     static void scatter_cur(std::uint64_t layout,const float* cur,float* f) noexcept { // v930: the current rows (a missing z row stays missing)
@@ -203,7 +261,16 @@ public:
     }
     // v930: the held weapons' placement is wanted (mod installed, not opted out) / the probe is on / a probe line (any thread).
     static bool weapon_wanted() noexcept {return installed_ && weapon_mode_.load(std::memory_order_relaxed)>=1 && mode_.load(std::memory_order_relaxed)>=1;}
-    static void set_weapon_temporal(bool skip) noexcept {weapon_temporal_skip_.store(skip,std::memory_order_relaxed);} // v970
+    // v1101: the placement gate (the knob build/no-weapon-draw-place sets weapon_mode 0; object-motion-mode 0 is diagnostic only).
+    static bool weapon_draw_on(int weapon_mode,int mode) noexcept {return weapon_mode>=1 && mode>=1;}
+    // v1101: the render pass a draw hook runs in. `view` is the pass job's view (item+0x70, src/render_pass_map.hpp): one of the eye
+    // views for every pass that renders that eye (the exact eye, no cache certificate), a light/other view for a pass that does not.
+    struct DrawPass {int pass{-1};std::uintptr_t view{0};};
+    using PassSource=DrawPass(*)() noexcept;
+    static void set_pass_source(PassSource source) noexcept {pass_source_.store(source,std::memory_order_relaxed);}
+    static void set_pass_name(const char* (*name)(unsigned)) noexcept {pass_name_.store(name,std::memory_order_relaxed);} // status: pass id -> ARK_RENDERPASS_* name
+    // Per hand the draws that reached the weapon placement and those it placed, by pass; the reason of every rejection stage.
+    static std::string weapon_status_json(); // {"published":[l,r],"placed":[l,r],"skip":[{},{}],"passes":[{"id","name","near","matched","placed","left","right"}]}
     static bool weapon_probe() noexcept {return weapon_probe_on_.load(std::memory_order_relaxed);}
     static void probe_line(const char* text) noexcept {
         std::lock_guard<std::mutex> lock(probe_mutex_);
@@ -218,11 +285,14 @@ private:
     enum Counter:unsigned {layout_draws,motion,no_shadow,untagged,no_rows,guard_fail,fixed_l,fixed_r,pool_fail,shadow_writes,oversize,
         view_writes,view_vp,view_v,view_none,learned_cb2,learned_view,engine_sum_l,engine_sum_r,out_sum_l,out_sum_r,engine_big_l,
         engine_big_r,out_big_l,out_big_r,corrected_l,corrected_r,camera_l,camera_r,
-        weapon_ticks,weapon_stage,weapon_stage1,weapon_stage2,weapon_stage3,weapon_stage4,weapon_stage5,weapon_stage6,weapon_eye0,weapon_eye1,weapon_label_wrong,weapon_engine_sum_l,weapon_engine_sum_r,
-        weapon_out_sum_l,weapon_out_sum_r,weapon_probe_lines, // v931
+        weapon_ticks,weapon_stage,weapon_stage1,weapon_stage2,weapon_stage3,weapon_stage4,weapon_stage5,weapon_stage6,weapon_stage7,weapon_stage8,
+        weapon_stage9, // v1017: one counter per weapon_draw::Stage (placed_pass was landing in weapon_eye0)
+        weapon_eye0,weapon_eye1,weapon_label_wrong,weapon_engine_sum_l,weapon_engine_sum_r,
+        weapon_out_sum_l,weapon_out_sum_r,weapon_probe_lines,weapon_near,weapon_placed_current_only, // v931/v1101/v1103
         own_b1_agree,own_b1_disagree,own_b1_unknown,latest_b1_agree,latest_b1_disagree,latest_b1_unknown,b1_retagged,b1_lost, // v950
         ticks,kind_l,kind_r=kind_l+PrevMvpTable::kinds,near_l=kind_r+PrevMvpTable::kinds,
         near_r=near_l+PrevMvpTable::kinds,counters=near_r+PrevMvpTable::kinds};
+    static_assert(weapon_eye0==weapon_stage+weapon_draw::stages,"one weapon counter per weapon_draw::Stage");
     // b2 of shaders with previous rows (shadowed); b1 of any draw (per-view candidates: the mesh shaders' own b1 is an
     // 800-byte buffer they do not read and the game never rewrites; the VP-carrying per-view constants are b1 of other
     // shaders); a candidate that never matches an eye view in 16 writes is ignored.
@@ -268,6 +338,8 @@ private:
     inline static std::mutex views_mutex_;
     inline static std::array<std::atomic<std::uintptr_t>,2> eye_views_{};
     inline static std::array<std::array<EyeView,4>,2> eye_records_{};
+    inline static std::array<std::atomic<std::uint32_t>,2> newest_eye_frame_{}; // the frame of that eye's newest recorded view (lock-free for the draw hooks)
+    inline static std::array<std::array<std::atomic<float>,4>,2> eye_z_{};       // that view's VP z row (0,0,0,near), for a layout without a z row
     inline static std::atomic<unsigned> vp_at_{~0u}; // float index of the VP in the per-view constants, as last matched
     inline static std::array<std::atomic<std::uint64_t>,counters> stats_{};
     inline static std::array<std::array<std::atomic<std::uint32_t>,64>,2> unmatched_size_{}; // per eye: unmatched draws by cb2 float4s
@@ -281,14 +353,18 @@ private:
     // v930: held weapons placed at the draw (weapon_draw_place.hpp). 1 on (default), 0 off (build/no-weapon-draw-place); the probe
     // (build/weapon-draw-probe) logs the model matrices of near draws and the published placements to artifacts/weapon-draw-probe.csv.
     inline static std::atomic<int> weapon_mode_{1};
-    // v970 (user: the held weapon still flashes black under TAA/FSR/DLSS): the draw-time placement rewrites the weapon's
-    // CURRENT MVP rows, but the engine's depth prepass and velocity/reprojection still use the tick-frame rows it wrote
-    // before the hook. Temporal AA/DLSS then samples history and depth at two different positions for the same pixels --
-    // the black, untextured-looking flash. Under a temporal mode the weapon keeps the engine's consistent current rows;
-    // only the general per-eye previous-row correction below runs. build/weapon-draw-place-temporal forces placement on.
-    inline static std::atomic<bool> weapon_temporal_skip_{};
     inline static std::atomic<bool> weapon_probe_on_{};
-    struct ViewsEntry {std::atomic<std::uint32_t> ready{};weapon_draw::Views views{};};
+    // v1101: the draw's render pass (src/render_pass_map.hpp). No pass map installed: the v931 certificate path runs unchanged.
+    inline static std::atomic<PassSource> pass_source_{};
+    inline static std::atomic<const char* (*)(unsigned)> pass_name_{};
+    // Status: draws that reached the weapon placement ("near": a held weapon's part is at most near_w deep) and the ones placed, by pass
+    // (index render_pass_count = a draw outside any pass), and per hand. Skipped = near - placed; the stage counters say why.
+    inline static constexpr unsigned pass_slots=65;
+    inline static std::array<std::atomic<std::uint64_t>,pass_slots> weapon_pass_near_{},weapon_pass_matched_{},weapon_pass_placed_{};
+    inline static std::array<std::array<std::atomic<std::uint64_t>,pass_slots>,2> weapon_pass_side_{};
+    inline static std::array<std::atomic<std::uint64_t>,2> weapon_placed_side_{};
+    inline static std::array<std::array<std::atomic<std::uint64_t>,weapon_draw::stages>,2> weapon_skip_side_{}; // per hand by rejection stage
+    struct ViewsEntry {std::atomic<std::uint32_t> ready{};std::uint32_t previous0{},previous1{};weapon_draw::Views views{};};
     inline static std::array<ViewsEntry,8> views_cache_{};
     inline static std::mutex views_cache_mutex_;
     inline static std::mutex probe_mutex_;
@@ -377,6 +453,11 @@ private:
         auto& ring=eye_records_[eye];auto* slot=&ring[0];
         for(auto& old:ring) {if(old.valid && old.frame==v.frame) {slot=&old;break;} if(!old.valid || old.frame<slot->frame) slot=&old;}
         *slot=v;
+        std::uint32_t newest=newest_eye_frame_[eye].load(std::memory_order_relaxed);
+        if(v.frame>=newest) { // the draw hooks read these without the views lock
+            newest_eye_frame_[eye].store(v.frame,std::memory_order_release);
+            for(unsigned k=0;k<4;++k) eye_z_[eye][k].store(v.m[2][8+k],std::memory_order_relaxed);
+        }
     }
     static bool near16(const float* a,const float* b) noexcept {
         for(int i=0;i<16;++i) if(!(std::abs(a[i]-b[i])<=1e-5f*(1.f+std::abs(b[i])))) return false;
@@ -508,38 +589,87 @@ private:
         return ok;
     }
     // This draw's own previous rows into the context's pool buffer; true when it is to be bound at b2 for the draw.
+    // v1101: a weapon draw in a render pass whose view is one of the eye views is placed for that eye whether or not this draw's shader
+    // declares previous rows and whether or not the context's per-view constants classify: the pass names the eye exactly. The previous
+    // rows come from the publisher (the placed previous render), so every pass of the same part gets the same two rows. Passes whose view
+    // is not an eye view (shadow maps) are left at the engine's tick frame and counted (docs/WEAPON-DRAW-PLACE-TEMPORAL.md).
     static bool prepare(ID3D11DeviceContext* c,ContextState& s) noexcept {
         count(layout_draws);
         const Shadow* sh=s.cb[1]?&s.shadow(s.cb[1]):nullptr;
         if(!sh || sh->buffer!=s.cb[1]) {if(s.cb[1]) learn(s.cb[1],cb2_kind);count(no_shadow);return false;}
+        // v1040: no previous rows and no weapon placement: the draw ends in no_rows below whatever the view says. Skip the view lookup,
+        // the pass callback and the row gather (the b1 agree/untagged diagnostics no longer count these draws).
+        if(!has_previous(s.layout,sh->size) && !weapon_draw_on(weapon_mode_.load(std::memory_order_relaxed),mode_.load(std::memory_order_relaxed))) {
+            count(motion);count(no_rows);return false;
+        }
         View view{};
-        if(!current_view(s,view)) {count(untagged);return false;}
+        const bool have_view=current_view(s,view);
+        // The pass this draw is recorded in, when build/native-gpu-timing or build/shadow-share (or the weapon placement itself, which
+        // installs the pass map) is on: its id and the eye its view names. A v1101 pass job's view is one of the eye views for a view pass.
+        int pass=-1,pass_eye=-1;
+        if(const auto source=pass_source_.load(std::memory_order_relaxed)) {
+            const DrawPass p=source();
+            pass=p.pass;
+            if(p.view) for(unsigned e=0;e<2;++e) if(eye_views_[e].load(std::memory_order_relaxed)==p.view) {pass_eye=static_cast<int>(e);break;}
+        }
+        float z_local[4]{};
+        const float* z=view.z;
+        if(!have_view) { // a draw whose pass the engine did not tag still has the pass eye's z row (reverse-Z: 0,0,0,near)
+            const unsigned e=pass_eye>=0?static_cast<unsigned>(pass_eye):0u;
+            for(unsigned k=0;k<4;++k) z_local[k]=eye_z_[e][k].load(std::memory_order_relaxed);
+            z=z_local;
+        }
         float cur[16],prev[16],engine[16];
-        if(!gather(s.layout,sh->data,sh->size,view.z,cur,prev)) {count(no_rows);return false;}
-        // The current rows must be this view's: a stale shadow or another view's constants never are.
-        if(!affine(view.inv[0],cur) && !affine(view.inv[1],cur)) {count(guard_fail);return false;}
-        count(motion);std::memcpy(engine,prev,64);
-        if(weapon_mode_.load(std::memory_order_relaxed)>=1 && mode_.load(std::memory_order_relaxed)>=1 &&
-           !weapon_temporal_skip_.load(std::memory_order_relaxed)) { // v931: a held weapon is drawn in the hand of this render
-            float placed[16],placed_prev[16];
-            static thread_local unsigned weapon_sample{};const bool timed=!(++weapon_sample&15);   // one draw in 16 is timed
-            const auto started=timed?__rdtsc():0;
-            const auto r=weapon_draw::Place::place(view.frame,&weapon_views,cur,prev,placed,placed_prev,static_cast<int>(view.eye));
-            if(timed) count(weapon_ticks,(__rdtsc()-started)*16);
-            if(r.stage) count(static_cast<Counter>(weapon_stage+r.stage));
-            if(weapon_probe_on_.load(std::memory_order_relaxed) && (r.stage || cur[15]<1.5f)) probe_draw(view,cur,*sh,s,r);
-            if(r.side>=0) {
-                count(r.eye?weapon_eye1:weapon_eye0);
-                if(static_cast<unsigned>(r.eye)!=view.eye) count(weapon_label_wrong);
-                if(const double e=origin_motion(cur,engine),o=origin_motion(placed,placed_prev);e<1e29 && o<1e29) {
-                    count(r.eye?weapon_engine_sum_r:weapon_engine_sum_l,static_cast<std::uint64_t>(e));
-                    count(r.eye?weapon_out_sum_r:weapon_out_sum_l,static_cast<std::uint64_t>(o));
+        if(!gather_current(s.layout,sh->data,sh->size,z,cur)) {count(no_rows);return false;}
+        bool have_prev=gather_previous(s.layout,sh->data,sh->size,z,prev);
+        count(motion);if(have_prev) std::memcpy(engine,prev,64);
+        const float near_w=weapon_draw::Place::near_w.load(std::memory_order_relaxed);
+        const bool near_draw=cur[15]>0.01f && cur[15]<near_w;
+        if(near_draw && weapon_draw_on(weapon_mode_.load(std::memory_order_relaxed),mode_.load(std::memory_order_relaxed))) {
+            count(weapon_near);
+            const unsigned pass_index=pass>=0 && static_cast<unsigned>(pass)<pass_slots-1?static_cast<unsigned>(pass):pass_slots-1;
+            weapon_pass_near_[pass_index].fetch_add(1,std::memory_order_relaxed);
+            // A pass the map names but whose view is not an eye view (shadow maps, light passes) cannot use an eye view-projection: its
+            // draws stay at the engine's tick frame. Without the pass map (pass < 0) the v931 certificate path runs unchanged.
+            const bool view_pass=pass<0 || pass_eye>=0;
+            if(view_pass) {
+                std::uint32_t frame=have_view?view.frame:0;
+                if(pass_eye>=0 && (!frame || !weapon_draw::Place::slot_of(frame))) { // no classified view: the pass eye's own newest frame
+                    const std::uint32_t latest=weapon_draw::Place::latest_frame();
+                    if(latest && newest_eye_frame_[static_cast<unsigned>(pass_eye)].load(std::memory_order_relaxed)==latest) frame=latest;
                 }
-                if(!bind_pool(c,s,*sh,placed,placed_prev)) return false;
-                count(r.eye?fixed_r:fixed_l);
-                return true;
+                float placed[16]={},placed_prev[16]={};
+                static thread_local unsigned weapon_sample{};const bool timed=!(++weapon_sample&15);   // one draw in 16 is timed
+                const auto started=timed?__rdtsc():0;
+                const auto r=weapon_draw::Place::place(frame,&weapon_views,cur,have_prev?prev:nullptr,placed,placed_prev,
+                    have_view?static_cast<int>(view.eye):-1,pass_eye);
+                if(timed) count(weapon_ticks,(__rdtsc()-started)*16);
+                if(r.hint>=0) weapon_pass_matched_[pass_index].fetch_add(1,std::memory_order_relaxed);
+                if(r.stage) {count(static_cast<Counter>(weapon_stage+r.stage));if(r.hint>=0) weapon_skip_side_[static_cast<unsigned>(r.hint)][r.stage].fetch_add(1,std::memory_order_relaxed);}
+                if(weapon_probe_on_.load(std::memory_order_relaxed) && have_view && (r.stage || cur[15]<1.5f)) probe_draw(view,cur,*sh,s,r);
+                if(r.side>=0) {
+                    count(r.eye?weapon_eye1:weapon_eye0);
+                    if(!have_prev) count(weapon_placed_current_only);   // v1103: a colour/forward draw (no previous rows to rewrite)
+                    if(have_view && static_cast<unsigned>(r.eye)!=view.eye) count(weapon_label_wrong);
+                    if(have_prev) if(const double e=origin_motion(cur,engine),o=origin_motion(placed,placed_prev);e<1e29 && o<1e29) {
+                        count(r.eye?weapon_engine_sum_r:weapon_engine_sum_l,static_cast<std::uint64_t>(e));
+                        count(r.eye?weapon_out_sum_r:weapon_out_sum_l,static_cast<std::uint64_t>(o));
+                    }
+                    weapon_pass_placed_[pass_index].fetch_add(1,std::memory_order_relaxed);
+                    weapon_pass_side_[static_cast<unsigned>(r.side)][pass_index].fetch_add(1,std::memory_order_relaxed);
+                    weapon_placed_side_[static_cast<unsigned>(r.side)].fetch_add(1,std::memory_order_relaxed);
+                    if(!bind_pool(c,s,*sh,placed,placed_prev)) return false;
+                    count(r.eye?fixed_r:fixed_l);
+                    return true;
+                }
             }
         }
+        // Not a placed weapon draw: the general per-eye previous-row correction (unchanged), which needs a classified view and this
+        // draw's own previous rows.
+        if(!have_view) {count(untagged);return false;}
+        if(!have_prev) {count(no_rows);return false;}
+        // The current rows must be this view's: a stale shadow or another view's constants never are.
+        if(!affine(view.inv[0],cur) && !affine(view.inv[1],cur)) {count(guard_fail);return false;}
         const auto kind=table_.fix(view.eye,view.frame,cur,prev);
         count(static_cast<Counter>((view.eye?kind_r:kind_l)+kind));
         // Which draws stay unmatched (headset v832: ~20% per eye, sim ~5%): near ones (model origin closer than 1.5 m: hands,
@@ -560,6 +690,7 @@ private:
         return true;
     }
     // The shadowed cb2 with its previous rows (and, for a placed weapon, its current rows) replaced, in the context's pool buffer.
+    // A current-only layout has no previous rows: `prev_rows` may be null and scatter writes nothing there.
     static bool bind_pool(ID3D11DeviceContext* c,ContextState& s,const Shadow& sh,const float* cur_rows,const float* prev_rows) noexcept {
         const unsigned t=s.type;
         if(!map_[t] || !unmap_[t] || !set_cb_[t] || (!s.pool && !make_pool(c,s))) return false;
@@ -569,13 +700,16 @@ private:
         if(cur_rows) scatter_cur(s.layout,cur_rows,out);
         scatter(s.layout,prev_rows,out);
         unmap_[t](c,s.pool,0);
+        // The census must know the pool buffer is now at VS b2 (the draw hook's restore below reports the game's buffer again).
+        if(const auto observe=wide_direct_cb_observer.load(std::memory_order_relaxed)) observe(c,2,1,&s.pool);
+        set_cb_[t](c,2,1,&s.pool);
         return true;
     }
     // Probe (build/weapon-draw-probe): near draws and every draw the placement looked at: the tag's eye, the placement's result, and the model
     // matrix (3 rows of inverse(VP) * cb2 rows) under the eye it certified (else the tag's), 64 per eye and render.
     static void probe_draw(const View& view,const float* cur,const Shadow& sh,const ContextState& s,const weapon_draw::Result& r) noexcept {
         if(view.eye>1) return;
-        const weapon_draw::Views* views=cached_views(view.frame);
+        const weapon_draw::Views* views=any_cached_views(view.frame);
         std::lock_guard<std::mutex> lock(probe_mutex_);
         if(probe_text_.size()>(24u<<20)) return;
         if(probe_frame_[view.eye]!=view.frame) {probe_frame_[view.eye]=view.frame;probe_in_frame_[view.eye]=0;}
@@ -589,28 +723,38 @@ private:
         }
         if(n>0 && n<620) {line[n]='\n';probe_text_.append(line,static_cast<std::size_t>(n)+1);count(weapon_probe_lines);}
     }
-    // The two eye views' view-projections of an engine frame (and of `previous`, 0: none), built once per frame from the eye records; null until
-    // both eyes' records of the frame exist.
-    static const weapon_draw::Views* cached_views(std::uint32_t frame) noexcept {
+    // The two eye views' view-projections of an engine frame, and per side the previous published render's (0: none), built once per
+    // frame from the eye records; null until both eyes' records of the frame exist.
+    static const weapon_draw::Views* cached_views(std::uint32_t frame,std::uint32_t previous0,std::uint32_t previous1) noexcept {
+        ViewsEntry& entry=views_cache_[frame&7];
+        if(entry.ready.load(std::memory_order_acquire)!=frame+1 || entry.previous0!=previous0 || entry.previous1!=previous1) return nullptr;
+        return &entry.views;
+    }
+    // The frame's built views whatever the previous-render key was (the probe's diagnostic model matrices only need the current ones).
+    static const weapon_draw::Views* any_cached_views(std::uint32_t frame) noexcept {
         ViewsEntry& entry=views_cache_[frame&7];
         return entry.ready.load(std::memory_order_acquire)==frame+1?&entry.views:nullptr;
     }
-    static const weapon_draw::Views* weapon_views(std::uint32_t frame,std::uint32_t previous) noexcept {
-        if(const auto* cached=cached_views(frame)) return cached;
+    static const weapon_draw::Views* weapon_views(std::uint32_t frame,std::uint32_t previous0,std::uint32_t previous1) noexcept {        if(const auto* cached=cached_views(frame,previous0,previous1)) return cached;
         std::lock_guard<std::mutex> build(views_cache_mutex_);
-        if(const auto* cached=cached_views(frame)) return cached;
+        if(const auto* cached=cached_views(frame,previous0,previous1)) return cached;
         ViewsEntry& entry=views_cache_[frame&7];
         entry.ready.store(0,std::memory_order_release);
-        weapon_draw::Views v{};v.prev_frame=previous;
+        weapon_draw::Views v{};
+        const std::uint32_t previous[2]={previous0,previous1};
         {
             std::lock_guard<std::mutex> lock(views_mutex_);
             for(unsigned e=0;e<2;++e) for(const auto& r:eye_records_[e]) if(r.valid) {
                 if(r.frame==frame) {v.vp[e]=weapon_draw::widen(r.m[2]);v.ok[e]=weapon_draw::inverse(v.vp[e],v.inv[e]);}
-                if(previous && r.frame==previous) {v.prev_vp[e]=weapon_draw::widen(r.m[2]);v.prev_ok[e]=weapon_draw::inverse(v.prev_vp[e],v.prev_inv[e]);}
+                for(unsigned s=0;s<2;++s) if(previous[s] && r.frame==previous[s]) {
+                    v.prev_frame[s]=previous[s];
+                    v.prev_vp[s][e]=weapon_draw::widen(r.m[2]);
+                    v.prev_ok[s][e]=weapon_draw::inverse(v.prev_vp[s][e],v.prev_inv[s][e]);
+                }
             }
         }
         if(!v.ok[0] || !v.ok[1]) return nullptr;
-        entry.views=v;
+        entry.previous0=previous0;entry.previous1=previous1;entry.views=v;
         entry.ready.store(frame+1,std::memory_order_release);
         return &entry.views;
     }
@@ -626,8 +770,14 @@ private:
     }
 
     template<int I> static void STDMETHODCALLTYPE set_vs_hook(ID3D11DeviceContext* c,ID3D11VertexShader* vs,ID3D11ClassInstance* const* classes,UINT n) {
-        if(ContextState* s=state(c);s && vs!=s->vs) {s->vs=vs;s->layout=vs?layout_(vs):0;}
-        set_vs_[I](c,vs,classes,n);
+        // Bookkeeping first (every call, including one the wide filter elides), then the filter on the forwarded arguments.
+        const bool skip=observe_then_filter([&] {
+            if(ContextState* s=state(c);s && vs!=s->vs) {s->vs=vs;s->layout=vs?layout_(vs):0;}
+        },[&] {
+            const auto filter=wide_vs_filter.load(std::memory_order_relaxed);
+            return filter && filter(c,vs,classes,n);
+        });
+        if(!skip) set_vs_[I](c,vs,classes,n);
     }
     // b1/b2 as the game binds them; a range that does not start at the buffer's first constant is never shadowed.
     static void track(ID3D11DeviceContext* c,UINT start,UINT n,ID3D11Buffer* const* buffers,const UINT* first) noexcept {
@@ -641,9 +791,17 @@ private:
         }
     }
     template<int I> static void STDMETHODCALLTYPE set_cb_hook(ID3D11DeviceContext* c,UINT start,UINT n,ID3D11Buffer* const* buffers) {
-        track(c,start,n,buffers,nullptr);set_cb_[I](c,start,n,buffers);
+        // ObjectMotion forwards the game's pointers unchanged here; the filter compares exactly those. Its own pool binds are
+        // reported through wide_direct_cb_observer.
+        const bool skip=observe_then_filter([&] {track(c,start,n,buffers,nullptr);},[&] {
+            const auto filter=wide_cb_filter.load(std::memory_order_relaxed);
+            return filter && filter(c,start,n,buffers);
+        });
+        if(!skip) set_cb_[I](c,start,n,buffers);
     }
     template<int I> static void STDMETHODCALLTYPE set_cb1_hook(ID3D11DeviceContext1* c,UINT start,UINT n,ID3D11Buffer* const* buffers,const UINT* first,const UINT* num) {
+        if(const auto observe=wide_cb1_observer.load(std::memory_order_relaxed))
+            observe(reinterpret_cast<ID3D11DeviceContext*>(c),start,n,buffers,first,num);
         track(c,start,n,buffers,first);set_cb1_[I](c,start,n,buffers,first,num);
     }
     template<int I> static HRESULT STDMETHODCALLTYPE map_hook(ID3D11DeviceContext* c,ID3D11Resource* r,UINT sub,D3D11_MAP type,UINT flags,D3D11_MAPPED_SUBRESOURCE* out) {
@@ -674,8 +832,15 @@ private:
         if(std::filesystem::exists(knobs_/L"no-object-motion",error)) mode=-1;
         else if(std::ifstream knob{knobs_/L"object-motion-mode"}) knob>>mode;
         mode_.store(installed_?mode:-1,std::memory_order_relaxed);
-        weapon_mode_.store(std::filesystem::exists(knobs_/L"no-weapon-draw-place",error)?0:1,std::memory_order_relaxed); // v930
-        weapon_probe_on_.store(std::filesystem::exists(knobs_/L"weapon-draw-probe",error),std::memory_order_relaxed);
+        // v1019: the held weapon is a normal engine object by default. The tick's item advance already follows the drawn hand
+        // (v1017 headset: 1.03 mm on the native pistol, 22 mm on the crossed sword, engine vs bound), while the per-draw per-eye
+        // placement rewrites a near object's MVP/depth/motion vectors - the only object in the frame whose temporal inputs are
+        // authored by the mod - which is what FSR/TAA turn into a black or ghosting weapon in one eye. build/weapon-draw-place
+        // opts back into the round-6 binder (A/B and lab work); build/no-weapon-draw-place still forces it off.
+        const bool draw_place_knob=std::filesystem::exists(knobs_/L"weapon-draw-place",error);
+        const bool no_draw_place_knob=std::filesystem::exists(knobs_/L"no-weapon-draw-place",error);
+        weapon_mode_.store(draw_place_knob && !no_draw_place_knob?1:0,std::memory_order_relaxed);
+        weapon_probe_on_.store(!output_.empty() && std::filesystem::exists(knobs_/L"weapon-draw-probe",error),std::memory_order_relaxed);   // v1046: diagnostics off (empty output_) = no probe text is collected
         b1_eye_on_.store(!std::filesystem::exists(knobs_/L"no-object-motion-b1-eye",error),std::memory_order_relaxed); // v950
         if(std::ifstream tolerance{knobs_/L"weapon-draw-tol"}) { // "<orientation> <reach m> <identity>", for the model-matrix match
             double axes=0,reach=0,identity=0;
@@ -684,7 +849,7 @@ private:
         {
             std::string text;
             {std::lock_guard<std::mutex> lock(probe_mutex_);text.swap(probe_text_);}
-            if(!text.empty()) {std::ofstream probe(output_/L"weapon-draw-probe.csv",std::ios::app|std::ios::binary);probe<<text;}
+            if(!text.empty() && !output_.empty()) {std::ofstream probe(output_/L"weapon-draw-probe.csv",std::ios::app|std::ios::binary);probe<<text;}
         }
         flush();
         const auto tick_now=__rdtsc();
@@ -700,18 +865,24 @@ private:
             "fixed_right","pool_fail","shadow_writes","oversize","view_writes","view_vp","view_v","view_none","learned_cb2","learned_view",
             "engine_motion_sum_left","engine_motion_sum_right","submitted_motion_sum_left","submitted_motion_sum_right",
             "engine_moving_left","engine_moving_right","submitted_moving_left","submitted_moving_right","corrected_left","corrected_right","camera_left","camera_right",
-            "weapon_tsc_ticks_sampled","weapon_rejected","weapon_no_views","weapon_no_certificate","weapon_far_away","weapon_placed_same_frame","weapon_placed_last_frame","weapon_placed_tagged","weapon_placed_view0",
-            "weapon_placed_view1","weapon_label_wrong","weapon_engine_motion_sum_view0","weapon_engine_motion_sum_view1","weapon_submitted_motion_sum_view0","weapon_submitted_motion_sum_view1","weapon_probe_lines",
+            "weapon_tsc_ticks_sampled","weapon_rejected","weapon_no_views","weapon_no_certificate","weapon_far_away","weapon_ambiguous",
+            "weapon_unbound","weapon_placed_same_frame","weapon_placed_last_frame","weapon_placed_tagged","weapon_placed_pass",
+            "weapon_placed_view0","weapon_placed_view1","weapon_label_wrong","weapon_engine_motion_sum_view0","weapon_engine_motion_sum_view1",
+            "weapon_submitted_motion_sum_view0","weapon_submitted_motion_sum_view1","weapon_probe_lines","weapon_near_draws",
+            "weapon_placed_current_only",
             "own_b1_agree","own_b1_disagree","own_b1_unknown","latest_b1_agree","latest_b1_disagree","latest_b1_unknown","b1_retagged","b1_lost"};
         static_assert(sizeof names/sizeof *names==ticks,"one name per counter before ticks");
-        std::uint64_t proxy[4]{};
+        std::uint64_t proxy[5]{};
         if(proxy_stats_) proxy_stats_(proxy);
+        if(output_.empty()) return;   // v1046: diagnostics off = no folder (output_/name would be relative); the throttle state above is already updated
         std::ofstream json(output_/L"object-motion.json",std::ios::trunc);
         json<<"{\"mode\":"<<mode<<",\"installed\":"<<(installed_?"true":"false")<<",\"proxy_layouts\":"<<(layout_?"true":"false")
-            <<",\"proxy_shaders\":["<<proxy[0]<<','<<proxy[1]<<','<<proxy[2]<<','<<proxy[3]<<"],\"proxy_fields\":\"created,with_previous,unstored,unhooked_devices\""
+            <<",\"proxy_shaders\":["<<proxy[0]<<','<<proxy[1]<<','<<proxy[2]<<','<<proxy[3]<<','<<proxy[4]
+            <<"],\"proxy_fields\":\"created,with_previous,unstored,unhooked_devices,current_only\""
             <<",\"presents\":"<<frames<<",\"us_per_present\":"<<us_per_frame;
         for(unsigned i=0;i<ticks;++i) json<<",\""<<names[i]<<"\":"<<stats_[i].load();
-        json<<",\"weapon_us_per_present\":"<<weapon_us<<",\"weapon_mode\":"<<weapon_mode_.load()<<",\"weapon_temporal_skip\":"<<(weapon_temporal_skip_.load()?1:0)<<",\"weapon_published\":"<<weapon_draw::Place::published();
+        json<<",\"weapon_us_per_present\":"<<weapon_us<<",\"weapon_mode\":"<<weapon_mode_.load()<<",\"weapon_published\":"<<weapon_draw::Place::published()
+            <<",\"weapon_status\":"<<weapon_status_json();
         json<<",\"b1_eye_mode\":"<<(b1_eye_on_.load()?1:0)<<",\"taa_b1\":\""; // v950: eyes' TAA b1; sampled draws' VS b1 "buffer:own L/own R/fallback"
         for(unsigned e=0;e<2;++e) for(const auto& p:taa_b1_[e]) json<<(e?'R':'L')<<std::hex<<reinterpret_cast<std::uintptr_t>(p.load())<<std::dec<<' ';
         json<<"\",\"vs_b1_sampled\":\"";
@@ -734,11 +905,57 @@ public:
     class DrawScope {
     public:
         explicit DrawScope(ID3D11DeviceContext* c) noexcept:c_(c),s_(installed_?before(c):nullptr) {}
-        ~DrawScope() {if(s_) set_cb_[s_->type](c_,2,1,&s_->cb[1]);}
+        ~DrawScope() {
+            if(!s_) return;
+            if(const auto observe=wide_direct_cb_observer.load(std::memory_order_relaxed)) observe(c_,2,1,&s_->cb[1]);
+            set_cb_[s_->type](c_,2,1,&s_->cb[1]);
+        }
         DrawScope(const DrawScope&)=delete;
         DrawScope& operator=(const DrawScope&)=delete;
     private:
         ID3D11DeviceContext* c_;ContextState* s_;
     };
 };
+// v1101 status, in arm_flicker.weapon_draw (and object-motion.json): per hand published/placed and skipped by stage, and every render pass
+// that saw a near weapon draw with how many of them were placed (per hand). "near" is the count of candidate draws, not a rejection count.
+inline std::string ObjectMotion::weapon_status_json() {
+    std::ostringstream out;
+    out<<"{\"published\":["<<weapon_draw::Place::published(0)<<','<<weapon_draw::Place::published(1)<<']'
+       <<",\"placed\":["<<weapon_placed_side_[0].load(std::memory_order_relaxed)<<','<<weapon_placed_side_[1].load(std::memory_order_relaxed)<<']'
+       <<",\"skip\":[";
+    // One name per weapon_draw::Stage, in enum order. v1016 read past this list (`unbound` was added to the enum but not here) when
+    // a draw was actually placed, and the out-of-bounds pointer faulted every status poll after a save load. The static_asserts
+    // keep the list and the counters tied to the enum.
+    static constexpr const char* stage_names[]={"rejected","no_views","no_certificate","far_away","ambiguous","unbound",
+        "placed_same_frame","placed_last_frame","placed_tagged","placed_pass"};
+    static_assert(sizeof stage_names/sizeof *stage_names==weapon_draw::stages,"one stage name per weapon_draw::Stage");
+    for(unsigned side=0;side<2;++side) {
+        out<<(side?",{":"{");
+        bool first=true;
+        for(unsigned s=1;s<weapon_draw::stages;++s) { // stage 0 (not the weapon's) is the scene: no side is involved
+            const auto n=weapon_skip_side_[side][s].load(std::memory_order_relaxed);
+            if(!n) continue;
+            out<<(first?"":",")<<"\""<<stage_names[s]<<"\":"<<n;first=false;
+        }
+        out<<'}';
+    }
+    out<<"],\"passes\":[";
+    const auto name=pass_name_.load(std::memory_order_relaxed);
+    bool first_pass=true;
+    for(unsigned i=0;i<pass_slots;++i) {
+        const auto near_count=weapon_pass_near_[i].load(std::memory_order_relaxed);
+        if(!near_count) continue;
+        out<<(first_pass?"":",");
+        out<<"{\"id\":";
+        if(i+1==pass_slots) out<<"-1,\"name\":\"untagged\"";
+        else out<<i<<",\"name\":\""<<(name?name(i):"pass")<<"\"";
+        out<<",\"near\":"<<near_count<<",\"matched\":"<<weapon_pass_matched_[i].load(std::memory_order_relaxed)
+           <<",\"placed\":"<<weapon_pass_placed_[i].load(std::memory_order_relaxed)
+           <<",\"left\":"<<weapon_pass_side_[0][i].load(std::memory_order_relaxed)
+           <<",\"right\":"<<weapon_pass_side_[1][i].load(std::memory_order_relaxed)<<'}';
+        first_pass=false;
+    }
+    out<<"]}";
+    return out.str();
+}
 } // namespace d2vr

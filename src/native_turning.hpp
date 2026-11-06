@@ -78,6 +78,7 @@ class NativeTurning {
         if(state==TurnFeedback::State::acknowledged) ++verified_;
         else if(state==TurnFeedback::State::failed) fail();
         else {++cancelled_;deferred_dt_=0;control_.suspend();}
+        if(!log_.is_open()) return;   // v1046: not logging = nothing to format
         std::lock_guard<std::mutex> lock(log_mutex_);
         log_<<pending->request.update<<','<<call<<','<<GetCurrentThreadId()<<','<<now<<','<<pending->request.epoch<<','
             <<pending->dt<<','<<pending->before<<','<<pending->request.radians<<','<<pending->expected<<','
@@ -182,8 +183,8 @@ public:
         if(!read_(base+step_rva,code.data(),code.size()) || code!=step_bytes ||
            !read_(base+add_rva,code.data(),code.size()) || code!=add_bytes)
             throw std::runtime_error("Native VR heading functions differ from the pinned executable");
-        log_.open(file,std::ios::trunc);
-        if(!log_) throw std::runtime_error("Cannot open native VR turning feedback log");
+        if(!file.empty()) {log_.open(file,std::ios::trunc);   // v1046: an empty path (diagnostics off) is not an error
+            if(!log_) throw std::runtime_error("Cannot open native VR turning feedback log");}
         log_<<std::setprecision(9)<<"requested_update,feedback_update,thread,tick_ms,pose_epoch,dt,before,requested_delta,expected,after,entity_heading,state,acknowledge_ms\n";
         calls_=0;applied_=0;verified_=0;cancelled_=0;ready_tick_=0;epoch_=0;failed_=false;instance_=this;
         feedback_.cancel();deferred_dt_=0;head_follow_={};follow_total_.store(0,std::memory_order_release);head_applied_=0;

@@ -40,6 +40,7 @@ public:
     static NativeAssassinationReceipt& process_owner(){static auto* owner=new NativeAssassinationReceipt;return *owner;}
     bool start(std::uintptr_t base,Read read,const std::filesystem::path& folder) noexcept {
         if(!stop())return false;
+        if(folder.empty())return true;
         try {
             base_=base;read_=read;if(activation_==UINT64_MAX)return false;++activation_;next_ga_tick_=0;sequence_=0;dropped_=overflow_=written_=0;bytes_=0;failed_=false;
             {std::lock_guard<std::mutex> lock(queue_mutex_);head_=count_=0;}

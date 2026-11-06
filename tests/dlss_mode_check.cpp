@@ -56,6 +56,18 @@ static void modes() {
     expect(near(render_fraction(8,.6667f,true),.6667f),"DLSS Quality follows the published optimal fraction while engaged");
     expect(near(render_fraction(8,.6667f,false),1.f) && near(render_fraction(8,default_quality_fraction,false),1.f),"DLSS Quality not engaged (not offered or failed) renders native: the fallback is FSR 3 Native");
     expect(near(render_fraction(8,0.f,true),default_quality_fraction) && near(render_fraction(8,1.5f,true),default_quality_fraction) && near(render_fraction(8,std::nanf(""),true),default_quality_fraction),"insane optimal fractions fall back to 2/3");
+    {   // the Upscaler scale: custom percent per upscaler mode, clamped to NGX's range only while DLSS is engaged
+        expect(upscaler(2) && upscaler(8) && !upscaler(0) && !upscaler(1) && !upscaler(9),"upscaler modes");
+        expect(preset_percent(2)==100 && preset_percent(3)==77 && preset_percent(4)==67 && preset_percent(5)==100 && preset_percent(6)==77 && preset_percent(7)==100 && preset_percent(8,72)==72 && preset_percent(8,10)==50 && preset_percent(8,500)==100,"preset percents");
+        for(int mode=2;mode<=8;++mode) expect(near(render_fraction(mode,.6667f,true,0),render_fraction(mode,.6667f,true)),"no custom scale is the preset");
+        expect(near(render_fraction(6,.5f,true,60),.60f) && near(render_fraction(3,.5f,false,95),.95f) && near(render_fraction(5,.5f,true,100),1.f) && near(render_fraction(2,.5f,true,50),.5f),"FSR modes render at the custom percent");
+        expect(near(render_fraction(6,.5f,true,49),.77f) && near(render_fraction(6,.5f,true,101),.77f),"out-of-range custom percents fall back to the preset");
+        expect(near(render_fraction(1,.5f,true,60),1.f) && near(render_fraction(0,.5f,true,60),1.f) && near(render_fraction(9,.5f,true,60),1.f),"custom scales never touch non-upscaler modes");
+        expect(near(render_fraction(8,.6667f,true,55),.55f) && near(render_fraction(7,.6667f,true,80),.80f),"DLSS custom scales apply before NGX's range is known");
+        expect(near(render_fraction(8,.6667f,true,55,.58f,1.f),.58f) && near(render_fraction(8,.6667f,true,95,.5f,.9f),.9f) && near(render_fraction(7,.6667f,true,70,.5f,1.f),.70f),"DLSS custom scales stay inside NGX's range");
+        expect(near(render_fraction(8,.6667f,false,55,.58f,1.f),.55f),"the FSR 3 fallback of an unavailable DLSS renders at the custom scale");
+        expect(near(render_fraction(8,.6667f,true,55,0.3f,.4f),.55f),"an insane NGX range is ignored");
+    }
     expect(governor_eligible(3,.77f) && governor_eligible(4,.67f) && governor_eligible(6,.77f),"governor steps FSR scaled modes");
     expect(!governor_eligible(2,1.f) && !governor_eligible(5,1.f) && !governor_eligible(7,1.f) && !governor_eligible(8,.6667f) && !governor_eligible(1,.77f),"governor never steps native, TAA or DLSS modes");
     const auto f=optimal_fraction(1920,1080,1280,720);

@@ -30,6 +30,14 @@ struct ControllerInput {
 inline bool native_directional_stick(const ControllerInput& in) noexcept {
     return !in.menu_modifier && (in.lean_suspended || in.lean_modifier || in.left_grip>.55f);
 }
+// v996 (simulated/test path only): a simulated gameplay-script segment carries the buttons/sticks for a frame, not whether the
+// controller exists. Preserve the live `active` bit across the replacement so a scripted frame cannot deactivate the simulated
+// controller and turn a later load-screen "pad a" into a fresh activation that PadComposer masks until release.
+inline void apply_simulated_controller_command(ControllerInput& live,const ControllerInput& command) noexcept {
+    const bool active=live.active;
+    live=command;
+    live.active=active;
+}
 
 class PadComposer {
     MenuTap menu_tap_;

@@ -42,9 +42,11 @@
 #include "native_arm_binding_snapshot.hpp"
 #include "hud_window.hpp"
 #include "wrist_hud_image.hpp"
+#include "native_hud_fallback.hpp"
 #include "native_eye_art.hpp"
 #include "eye_reticle.hpp"
 #include "spyglass_lens.hpp"
+#include "spyglass_scope.hpp"
 #include "head_calibration.hpp"
 #include "xr_floor_datum.hpp"
 #include "vr_settings_native.hpp"
@@ -171,6 +173,27 @@ private:
     std::array<UINT64,2> wrist_image_ticks_{};
     std::array<std::vector<std::uint8_t>,2> wrist_pixels_;
     WristHudSnapshot wrist_data_{};
+    // v1015: the watch face is the game's own MasterHUD cluster. dxgi_probe captures the native health/mana/equipment
+    // child draws, composites them at their original relative positions at the rival's measured crop, and publishes
+    // one cluster texture here. The Watch copies that texture with the GPU alpha fade; no CPU image is generated.
+    static constexpr UINT wrist_watch_canvas=512;
+    struct WristWatchClusterSource {
+        Microsoft::WRL::ComPtr<ID3D11Texture2D> texture;
+        UINT width{},height{};
+        UINT64 epoch{},tick{},generation{};
+        std::uintptr_t owner{};
+        bool fresh(UINT64 current_epoch,UINT64 now) const noexcept {
+            return texture && width && height && owner && epoch==current_epoch && tick && now>=tick && now-tick<=250;
+        }
+    };
+    NativeHudFallback wrist_watch_blitter_;
+    WristWatchClusterSource wrist_watch_cluster_;
+    WristWatchState wrist_watch_state_;
+    std::optional<WristWatchPose> wrist_watch_pose_;
+    UINT64 wrist_watch_tick_{};
+    double wrist_watch_alpha_{};
+    bool wrist_watch_submitted_{};
+    UINT64 wrist_watch_blit_rejects_{},wrist_watch_cluster_rejects_{},wrist_watch_draws_{},wrist_watch_cluster_updates_{};
     struct NativeArtSource {
         Microsoft::WRL::ComPtr<ID3D11Texture2D> texture;
         D3D11_BOX crop{};Vec3 point{};double width{};
@@ -245,6 +268,7 @@ private:
     EyeSize system_maximum_{};
     MenuPanel menu_panel_;
     std::uint64_t native_rows_tick_{}; // next publication of the native options page rows
+    std::uint64_t upscale_due_{};      // the Upscaler scale slider fires per step: the render-size request waits until it has been quiet
     bool menu_grip_was_{};
     MenuPanel authored_panel_{2.5};
     Microsoft::WRL::ComPtr<ID3D11Texture2D> world_ui_source_;
@@ -303,6 +327,7 @@ private:
     std::array<WarpMatrix,2> stale_back_{};
     std::unique_ptr<StaleEyeWarp> uncant_;                  // v808: canted eye -> its own located view (its own output, apart from stale_warp_'s)
     std::unique_ptr<SpyglassLens> spyglass_lens_;           // v880: the R3 spyglass lens, made on the first zoom
+    std::unique_ptr<SpyglassScopeMask> spyglass_scope_mask_; // v1040: the right-eye scope's mask, made on the first zoom
     std::array<WarpMatrix,2> uncant_back_{};std::array<bool,2> uncanted_{}; // this frame: turned image point -> submitted image point
     std::unique_ptr<StaleEyeWarp> stale_warp_;
     bool stale_warp_failed_{};
@@ -410,6 +435,9 @@ public:
     UINT64 wheel_eye_draws{},wheel_eye_occluded{},wheel_eye_grace{},wheel_eye_failures{};
     // v880: the spyglass (R3) lens (spyglass_lens.hpp): the game's zoom as a magnification, set per frame by the Setup hook (1 = no lens); draws, faults.
     float spyglass_magnification=1.f;UINT64 spyglass_lens_draws{},spyglass_lens_failures{};
+    // v1040: the right-eye scope (spyglass_scope.hpp): the zoom factor the right eye's image shown at this Present was rendered with (1 = no scope),
+    // set by the probe from the Setup that rendered that image; draws, faults (a fault turns the mask off for the session).
+    float spyglass_scope_mag=1.f;UINT64 spyglass_scope_draws{},spyglass_scope_failures{};
     int wheel_hand() const noexcept {return wheel_hand_;} // the hand the wheel is at, -1 none
     bool wheel_eye_art_enabled=true; // build/wheel-quad: the hand wheel keeps its quad layer (the headset A/B for the ring in the eyes)
     bool wheel_eye_ready() const noexcept {
@@ -781,7 +809,147 @@ private:
         wrist_chains_[side]=XR_NULL_HANDLE;wrist_targets_[side].clear();wrist_images_[side].clear();
         native_wrist_sizes_[side]={};wrist_retirement_[side].Reset();wrist_recreate_[side]=false;return true;
     }
-    std::optional<XrCompositionLayerQuad> wrist_layer(unsigned side) {
+    // v1013: the left-wrist watch. Placement, visibility and fades follow the rival watch's physical numbers; all
+    // geometry comes from the runtime frame (head and grip poses), never from a headset-specific constant.
+    void update_wrist_watch(bool allowable) noexcept {
+        const auto now=GetTickCount64();
+        const double dt=wrist_watch_tick_ && now>=wrist_watch_tick_?std::min(.25,(now-wrist_watch_tick_)/1000.):0.;
+        wrist_watch_tick_=now;
+        if(!wrist_hud_enabled || legacy_wrist_hud) {
+            wrist_watch_state_.reset();wrist_watch_pose_.reset();wrist_watch_alpha_=0;wrist_watch_submitted_=false;return;
+        }
+        constexpr XrSpaceLocationFlags valid=XR_SPACE_LOCATION_ORIENTATION_VALID_BIT|XR_SPACE_LOCATION_POSITION_VALID_BIT;
+        bool tracked=views_valid_ && (grip_tracked_hands&1u) && (grip_locations[0].locationFlags&valid)==valid;
+        WristWatchAngles angles{};angles.distance_m=1e9;
+        std::optional<WristWatchPose> pose;
+        if(tracked) {
+            const auto& l=views_[0].pose;const auto& r=views_[1].pose;
+            const TrackedPose head{{(l.position.x+r.position.x)*.5,(l.position.y+r.position.y)*.5,(l.position.z+r.position.z)*.5},
+                {l.orientation.x,l.orientation.y,l.orientation.z,l.orientation.w}};
+            const auto& p=grip_locations[0].pose;
+            pose=wrist_watch_pose({{p.position.x,p.position.y,p.position.z},
+                {p.orientation.x,p.orientation.y,p.orientation.z,p.orientation.w}},head);
+            if(pose) angles=pose->angles;else tracked=false;
+        }
+        const bool menu=!allowable,trigger=controller_input.left_trigger>.5f;
+        const auto frame=wrist_watch_state_.update(angles,tracked,trigger,menu,dt);
+        wrist_watch_alpha_=frame.alpha;wrist_watch_pose_=pose;
+        if(frame.haptic && wrist_haptic_enabled) pulse(0,.12f,.018f);
+    }
+    DXGI_FORMAT wrist_watch_face_format() const noexcept {
+        return format_==DXGI_FORMAT_R8G8B8A8_TYPELESS?DXGI_FORMAT_R8G8B8A8_UNORM:format_;
+    }
+public:
+    // dxgi_probe owns the game-cluster texture (it composites the native child draws at their original surface
+    // positions). This is a bounded publication only: the texture stays alive through the ComPtr, and the watch
+    // rejects a stale owner/epoch/tick instead of keeping old art. No image data is generated here.
+    bool wrist_watch_cluster_source(ID3D11Texture2D* texture,UINT texture_width,UINT texture_height,
+        UINT64 generation,UINT64 tick,std::uintptr_t owner,UINT64 epoch) {
+        if(!texture) {wrist_watch_cluster_={};return true;}
+        if(!texture_width || !texture_height || !owner || !tick || !epoch) {wrist_watch_cluster_={};++wrist_watch_cluster_rejects_;return false;}
+        D3D11_TEXTURE2D_DESC texture_desc{};texture->GetDesc(&texture_desc);
+        Microsoft::WRL::ComPtr<ID3D11Device> device,actual;
+        context_->GetDevice(&device);texture->GetDevice(&actual);
+        if(!device || device.Get()!=actual.Get() || texture_desc.Width<texture_width || texture_desc.Height<texture_height ||
+           texture_desc.MipLevels!=1 || texture_desc.ArraySize!=1 || texture_desc.SampleDesc.Count!=1 ||
+           (texture_desc.Format!=DXGI_FORMAT_R8G8B8A8_TYPELESS && texture_desc.Format!=DXGI_FORMAT_R8G8B8A8_UNORM &&
+            texture_desc.Format!=DXGI_FORMAT_R8G8B8A8_UNORM_SRGB)) {
+            wrist_watch_cluster_={};++wrist_watch_cluster_rejects_;return false;
+        }
+        const bool content_changed=wrist_watch_cluster_.texture.Get()!=texture ||
+            wrist_watch_cluster_.width!=texture_width || wrist_watch_cluster_.height!=texture_height ||
+            wrist_watch_cluster_.generation!=generation || wrist_watch_cluster_.owner!=owner || wrist_watch_cluster_.epoch!=epoch;
+        if(!content_changed) {
+            wrist_watch_cluster_.tick=tick; // freshness only: no overlay content changed, so no redraw
+            return true;
+        }
+        wrist_watch_cluster_={texture,texture_width,texture_height,epoch,tick,generation,owner};
+        ++wrist_watch_cluster_updates_;
+        return true;
+    }
+private:
+    // The acquired watch image is cleared and the single game-cluster texture is alpha-blitted over it with the fade.
+    // The optional dark backdrop is the only mod-drawn fill and is off unless build/wrist-hud-backdrop is present.
+    bool draw_wrist_watch(unsigned index) {
+        const auto now=GetTickCount64(),epoch=pose_epoch();
+        const double alpha=std::clamp(wrist_watch_alpha_,0.,1.);
+        const float fade=static_cast<float>(alpha*alpha*(3.-2.*alpha));
+        const auto face_format=wrist_watch_face_format();
+        ContextState::Scope graphics_scope(graphics_state_);
+        ID3D11RenderTargetView* target=wrist_targets_[0].at(index).Get();
+        if(!target) {++wrist_watch_blit_rejects_;return false;}
+        ID3D11RenderTargetView* bound=target;
+        context_->OMSetRenderTargets(1,&bound,nullptr);
+        const bool cluster_ready=wrist_watch_cluster_.fresh(epoch,now);
+        if(wrist_hud_backdrop && cluster_ready) {
+            const float backdrop[4]{.02f*fade,.024f*fade,.028f*fade,.45f*fade};
+            context_->ClearRenderTargetView(target,backdrop);
+        } else {
+            constexpr float transparent[4]{};
+            context_->ClearRenderTargetView(target,transparent);
+        }
+        ++wrist_watch_draws_;
+        if(!cluster_ready) return true;
+        const D3D11_BOX source{0,0,0,wrist_watch_cluster_.width,wrist_watch_cluster_.height,1};
+        const D3D11_RECT destination{0,0,static_cast<LONG>(wrist_watch_canvas),static_cast<LONG>(wrist_watch_canvas)};
+        if(!wrist_watch_blitter_.blit_scaled(context_.Get(),target,wrist_watch_cluster_.texture.Get(),source,destination,face_format,true,fade))
+            ++wrist_watch_blit_rejects_;
+        return true;
+    }
+    std::optional<XrCompositionLayerQuad> wrist_watch_layer() {
+        if(!wrist_hud_enabled || legacy_wrist_hud) return {};
+        // Optional layers must never stall the scene while the compositor is busy. A timeout retains acquisition until a
+        // later successful wait, even if the watch has since faded out.
+        if(!release_pending_wrist(0)) {++wrist_timeouts;return {};}
+        if(!views_valid_ || wrist_watch_alpha_<=0 || !wrist_watch_pose_) return {};
+        const auto now=GetTickCount64(),epoch=pose_epoch();
+        const bool cluster_ready=wrist_watch_cluster_.fresh(epoch,now);
+        auto& chain=wrist_chains_[0];
+        if(chain && (native_wrist_sizes_[0][0]!=wrist_watch_canvas || native_wrist_sizes_[0][1]!=wrist_watch_canvas)) wrist_recreate_[0]=true;
+        if(wrist_recreate_[0] || !chain) {wrist_want_[0]={wrist_watch_canvas,wrist_watch_canvas};return {};} // prepare_overlays creates it between frames
+        const auto q=[](double value) {return static_cast<std::uint64_t>(std::lround(std::clamp(value,0.,1.)*1000.));};
+        // The overlay key is the cluster source identity and generation, the fade and the size. A cluster recomposition
+        // (new generation) or a fade step forces exactly one new GPU blend; no CPU image is generated. `cluster_ready`
+        // is part of the key so a cluster that ages out clears the last released watch image.
+        const auto content=overlay_content({cluster_ready?reinterpret_cast<std::uint64_t>(wrist_watch_cluster_.texture.Get()):0u,
+            wrist_watch_cluster_.generation,static_cast<std::uint64_t>(wrist_watch_cluster_.width),
+            static_cast<std::uint64_t>(wrist_watch_cluster_.height),cluster_ready?1u:0u,wrist_hud_backdrop?1u:0u,
+            q(wrist_watch_alpha_),
+            static_cast<std::uint64_t>(std::lround(std::clamp(wrist_hud_size_cm,wrist_watch_size_min_cm,wrist_watch_size_max_cm)*100.)),1u});
+        const auto wrist_kind=OverlayKind::wrist_left;OverlayKey overlay_key;
+        if(overlay_needs_image(wrist_kind,chain,content,overlay_refresh_ms,overlay_key)) {
+            XrSwapchainImageAcquireInfo acquire{};acquire.type=XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO;uint32_t index{};
+            checked(xrAcquireSwapchainImage(chain,&acquire,&index),"Acquire wrist watch");
+            wrist_acquired_[0]=true;
+            XrSwapchainImageWaitInfo wait{};wait.type=XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO;wait.timeout=0;
+            const auto ready=xrWaitSwapchainImage(chain,&wait);checked(ready,"Wait wrist watch");
+            if(ready==XR_TIMEOUT_EXPIRED) {++wrist_timeouts;return {};}
+            XrSwapchainImageReleaseInfo release{};release.type=XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO;
+            try {
+                if(!draw_wrist_watch(index)) {xrReleaseSwapchainImage(chain,&release);wrist_acquired_[0]=false;return {};}
+            } catch(...) {
+                const auto released=xrReleaseSwapchainImage(chain,&release);
+                if(XR_SUCCEEDED(released)) wrist_acquired_[0]=false;
+                checked(released,"Release failed wrist watch");throw;
+            }
+            checked(xrReleaseSwapchainImage(chain,&release),"Release wrist watch");
+            wrist_acquired_[0]=false;
+            overlay_rendered(wrist_kind,overlay_key);
+        }
+        const auto& pose=wrist_watch_pose_->pose;
+        XrCompositionLayerQuad layer{};layer.type=XR_TYPE_COMPOSITION_LAYER_QUAD;layer.space=local_;
+        layer.layerFlags=XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT; // premultiplied game-cluster texture
+        layer.eyeVisibility=XR_EYE_VISIBILITY_BOTH;
+        layer.pose.orientation={static_cast<float>(pose.orientation.x),static_cast<float>(pose.orientation.y),
+            static_cast<float>(pose.orientation.z),static_cast<float>(pose.orientation.w)};
+        layer.pose.position={static_cast<float>(pose.position.x),static_cast<float>(pose.position.y),static_cast<float>(pose.position.z)};
+        const double size_m=std::clamp(wrist_hud_size_cm,wrist_watch_size_min_cm,wrist_watch_size_max_cm)*.01;
+        layer.size={static_cast<float>(size_m),static_cast<float>(size_m)};
+        layer.subImage.swapchain=chain;layer.subImage.imageRect.extent={wrist_watch_canvas,wrist_watch_canvas};
+        native_wrist_art_shown_={cluster_ready,cluster_ready,cluster_ready};wrist_watch_submitted_=true;++wrist_layers[0];
+        return layer;
+    }
+    std::optional<XrCompositionLayerQuad> legacy_wrist_layer(unsigned side) {
         // Optional layers must never stall the scene while the compositor is
         // busy. A timeout retains acquisition until a later successful wait.
         if(!release_pending_wrist(side)) {++wrist_timeouts;return {};}
@@ -905,10 +1073,14 @@ private:
         return {};
     }
     std::optional<XrCompositionLayerQuad> optional_wrist_layer(unsigned side) {
+        if(!wrist_hud_enabled) return {};
+        if(!legacy_wrist_hud && side!=0) return {};
         if(GetTickCount64()<wrist_retry_ticks_[side]) return {};
-        return guarded_wrist(side,[&]{return wrist_layer(side);});
+        return guarded_wrist(side,[&]{return legacy_wrist_hud?legacy_wrist_layer(side):wrist_watch_layer();});
     }
     void prepare_wrist(unsigned side) {
+        if(!wrist_hud_enabled) return;
+        if(!legacy_wrist_hud && side!=0) return;
         if(GetTickCount64()<wrist_retry_ticks_[side]) return;
         guarded_wrist(side,[&]()->std::optional<XrCompositionLayerQuad> {
             if(wrist_recreate_[side] && !retire_wrist(side)) return {};
@@ -1408,6 +1580,20 @@ public:
     void (*observe_wrist_failure)(unsigned,const char*){};
     void (*observe_wrist)(unsigned,const std::uint8_t*,std::size_t,const WristHudSnapshot&){};
     void wrist_hud(WristHudSnapshot data) {wrist_data_=data;}
+    // v1013/v1015 knobs (set before the first frame): the watch is on by default, build/no-wrist-hud turns it off,
+    // build/legacy-wrist-hud restores the pre-v1013 two-wrist inner-side layout, build/wrist-hud-size is 4..15 cm.
+    // build/wrist-hud-backdrop opts into a dark card behind the game cluster for readability A/B; it is off by default.
+    bool wrist_hud_enabled=true,legacy_wrist_hud=false,wrist_haptic_enabled=true,wrist_hud_backdrop=false;
+    double wrist_hud_size_cm=8.5;
+    bool wrist_watch_wanted() const noexcept {return wrist_hud_enabled && !legacy_wrist_hud && running_ && state==XR_SESSION_STATE_FOCUSED;}
+    double wrist_watch_opacity() const noexcept {return wrist_watch_alpha_;}
+    bool wrist_watch_shown() const noexcept {return wrist_watch_state_.shown();}
+    bool wrist_watch_cluster_ready() const noexcept {return wrist_watch_cluster_.fresh(pose_epoch(),GetTickCount64());}
+    DXGI_FORMAT wrist_watch_target_format() const noexcept {return wrist_watch_face_format();}
+    UINT64 wrist_watch_composite_rejects() const noexcept {return wrist_watch_blit_rejects_;}
+    UINT64 wrist_watch_cluster_rejects() const noexcept {return wrist_watch_cluster_rejects_;}
+    UINT64 wrist_watch_draws() const noexcept {return wrist_watch_draws_;}
+    UINT64 wrist_watch_cluster_updates() const noexcept {return wrist_watch_cluster_updates_;}
     void (*observe_native_wrist_art)(unsigned,ID3D11Texture2D*,std::uintptr_t){};
     UINT64 native_object_art_draws{};
     // v715: per object-art slot, eye draws / fresh art with no rect (off view or behind) / fresh art skipped (lock unresolved); last rect.
@@ -1572,6 +1758,9 @@ public:
     VrPreferences preferences() const {return settings_.preferences();}
     bool scripted_recenter() const noexcept {return settings_.scripted_recenter();}
     CutsceneMode cutscene_mode() const noexcept {return settings_.cutscene_mode();}
+    // The player's own Upscaler scale (percent) for the selected upscaler mode; 0 = that mode's preset.
+    int upscale_custom_percent() const noexcept {return settings_.upscale_custom_percent();}
+    void dlss_quality_percent(int percent) noexcept {settings_.dlss_quality_percent(percent);}
     // v609 first-start AA: the decided mode (none = keep the saved one) goes out as a temporal request, the marker is set and the file is written once.
     void adopt_first_start_aa(std::optional<int> mode) {
         if(mode) {settings_.set_temporal_aa(*mode);temporal_change_=settings_.temporal_aa();} else settings_.mark_aa_chosen();
@@ -1704,6 +1893,9 @@ public:
     std::array<XrVector3f,2> grip_velocities{}; // Same, as vectors in the local space.
     std::array<XrExtent2Di,2> recommended_eye_sizes{},swapchain_eye_sizes{};
     std::array<EyeSize,2> source_eye_sizes{}; // v977: actual game eye size this Present (may exceed the XR eye under internal SSAA)
+    UINT64 eye_source_pending{}; // v1021: frames held because the game's output had not reached the just-resized eye yet
+    UINT64 eye_resolves{}; // v1021: eyes downsampled from a game render above the XR eye (internal SSAA / canted density)
+    bool views_valid() const noexcept {return views_valid_;} // optical sizes need this Present's located views
     std::array<DXGI_FORMAT,2> eye_texture_formats{};
     EyeSize recommended_output_size() const {
         std::array<EyeSize,2> sizes{};
@@ -1748,12 +1940,12 @@ public:
     bool exit_requested=false;
     GameXr(ID3D11Device* device,UINT width,UINT height,DXGI_FORMAT format,const wchar_t* loader,bool controllers=false,bool tracked_gameplay=false,bool edge_antialiasing=false,bool settings=false,double multiplier=1,
         TurnControl::Config turning={},std::filesystem::path preferences_file={},bool native_pointer=false,PFN_xrGetInstanceProcAddr simulated_dispatch=nullptr,
-        MirrorMode mirror=MirrorMode::right_eye,double sharpness=.5,int temporal_aa=2,int hud_percent=65,bool controls_hint=true,AvatarPlayerMeasurements player_measurements={},bool aa_chosen=false,bool crosshair=true,bool scripted_recenter=true,CutsceneMode cutscene_mode=CutsceneMode::vr_comfort)
+        MirrorMode mirror=MirrorMode::right_eye,double sharpness=.5,int temporal_aa=2,int hud_percent=65,bool controls_hint=true,AvatarPlayerMeasurements player_measurements={},bool aa_chosen=false,bool crosshair=true,bool scripted_recenter=true,CutsceneMode cutscene_mode=CutsceneMode::vr_comfort,int upscale_percent=0)
         :graphics_state_(device),settings_enabled_(settings),native_pointer_enabled_(native_pointer),controller_enabled_(controllers),tracked_gameplay_required_(tracked_gameplay) {
         ContextState::Scope graphics_scope(graphics_state_);
         try {
             if(edge_antialiasing) antialiasing_=std::make_unique<EyeAntialiasing>(device);
-            antialiasing_enabled_=edge_antialiasing;settings_.initialize(multiplier,edge_antialiasing,turning,mirror,sharpness,temporal_aa,hud_percent,controls_hint,player_measurements,aa_chosen,crosshair,scripted_recenter,cutscene_mode);
+            antialiasing_enabled_=edge_antialiasing;settings_.initialize(multiplier,edge_antialiasing,turning,mirror,sharpness,temporal_aa,hud_percent,controls_hint,player_measurements,aa_chosen,crosshair,scripted_recenter,cutscene_mode,upscale_percent);
             preferences_file_=std::move(preferences_file);
             if(!preferences_file_.empty()) {
                 palm_file_=preferences_file_.parent_path()/L"vr-palm-offsets.txt";
@@ -1866,6 +2058,7 @@ public:
     // eye chains together; a failed allocation leaves the old pair intact.
     bool resize(UINT width,UINT height,DXGI_FORMAT format) {
         if(width==width_ && height==height_ && format==format_) return false;
+        const bool format_changed=format!=format_;
         if(frame_open_) throw std::runtime_error("Cannot resize an open XR frame");
         if(!width || !height || width>system_maximum_.width || height>system_maximum_.height ||
            width>D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION || height>D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION)
@@ -1906,6 +2099,13 @@ public:
         } catch(...) {for(auto chain:next) if(chain) xrDestroySwapchain(chain);throw;}
         chains_=next;images_=std::move(images);width_=width;height_=height;format_=format;rendered_mask_=0;menu_band_width_=0; // prepare_overlays rebuilds the band chain
         resolve_.reset();
+        // The alpha blit requires the watch target and face to share a typed format; a format change must retire both
+        // wrist chains rather than draw through a stale-format RTV.
+        if(format_changed) {
+            for(unsigned side=0;side<2;++side) if(wrist_chains_[side]) wrist_recreate_[side]=true;
+            if(wrist_chains_[0]) wrist_want_[0]={wrist_watch_canvas,wrist_watch_canvas};
+        }
+        wrist_watch_blitter_.clear(); // drop the cached cluster SRV; dxgi_probe republishes in the new format
         for(auto chain:chains_) chain_sizes_[chain]={width,height};
         for(UINT eye=0;eye<2;++eye) {
             D3D11_TEXTURE2D_DESC actual{};images_[eye][0].texture->GetDesc(&actual);eye_texture_formats[eye]=actual.Format;
@@ -2032,6 +2232,8 @@ public:
             wrist_acquired_[side]=false;native_wrist_sizes_[side]={};wrist_retry_ticks_[side]=0;
             wrist_retirement_[side].Reset();wrist_recreate_[side]=false;
         }
+        wrist_watch_cluster_={};wrist_watch_blitter_.clear();
+        wrist_watch_state_.reset();wrist_watch_pose_.reset();wrist_watch_tick_=0;wrist_watch_alpha_=0;wrist_watch_submitted_=false;
         if(hint_chain_ && xrDestroySwapchain) {xrDestroySwapchain(hint_chain_);hint_chain_=XR_NULL_HANDLE;}
         settings_images_.clear();
         if(settings_chain_ && xrDestroySwapchain) {xrDestroySwapchain(settings_chain_);settings_chain_=XR_NULL_HANDLE;}
@@ -2130,9 +2332,9 @@ public:
         auto stage_start=cpu_time_ns();
         if(const auto wake=pacer_.wake(stage_start)) { // v841: sleep to the locked cadence (the bulk on a high-resolution timer, the rest spun)
             static thread_local const HANDLE timer=CreateWaitableTimerExW(nullptr,nullptr,CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,TIMER_ALL_ACCESS);
-            for(auto left=wake-cpu_time_ns();left>0;left=wake-cpu_time_ns()) {
-                LARGE_INTEGER due{};due.QuadPart=-(left-1'000'000)/100;
-                if(left>1'500'000 && timer && SetWaitableTimer(timer,&due,0,nullptr,nullptr,FALSE)) WaitForSingleObject(timer,50); else SwitchToThread();
+            for(auto remaining=wake-cpu_time_ns();remaining>0;remaining=wake-cpu_time_ns()) {
+                LARGE_INTEGER due{};due.QuadPart=-(remaining-1'000'000)/100;
+                if(remaining>1'500'000 && timer && SetWaitableTimer(timer,&due,0,nullptr,nullptr,FALSE)) WaitForSingleObject(timer,50); else SwitchToThread();
             }
         }
         checked(xrWaitFrame(session_,&wait,&frame_),"Wait game XR frame");
@@ -2205,7 +2407,10 @@ public:
         bool settings_consumed=false;
         std::optional<PanelPointer> pointer;
         // The game's own options page shows these rows (also without saved settings: then changes last for this session).
-        {const auto now_ms=GetTickCount64();if(now_ms>=native_rows_tick_) {native_rows_tick_=now_ms+250;NativeOptionsPage::publish(native_settings::rows(settings_));}}
+        {const auto now_ms=GetTickCount64();if(now_ms>=native_rows_tick_) {
+            native_rows_tick_=now_ms+250;
+            // While the page is open it also gets the rule for what its rows become after a change (a copy of the settings, read by the drain thread).
+            NativeOptionsPage::publish(native_settings::rows(settings_),NativeOptionsPage::showing.load()?native_settings::resolver(settings_):NativeOptionsPage::Resolver{});}}
         if(settings_enabled_) {
             if(settings_requested.exchange(false) && !gameplay) {settings_.open_from_menu();}
             if(hold.settings && !settings_.open()) {
@@ -2242,7 +2447,9 @@ public:
             auto changes=settings_.update(settings_input,gameplay,state==XR_SESSION_STATE_FOCUSED,pointer,settings_available,palm_fit_dt_);
             if(changes.palm_offset) confirm_palm_offset(changes.palm_offset->side,changes.palm_offset->value);
             // The game's own options page ("VR Settings"): its values and actions take the panel's path (apply, save, calibrate).
-            if(const auto values=NativeOptionsPage::take_values()) native_settings::merge(changes,native_settings::apply(settings_,*values));
+            {std::vector<NativeOptionsPage::Kind> page_kinds;
+             if(const auto values=NativeOptionsPage::take_values(&page_kinds))
+                native_settings::merge(changes,native_settings::apply(settings_,*values,page_kinds.size()>static_cast<std::size_t>(native_settings::edge_aa) && page_kinds[native_settings::edge_aa]==NativeOptionsPage::Kind::slider));}
             for(const int row:NativeOptionsPage::take_actions()) native_settings::merge(changes,native_settings::action(settings_,row));
             const auto old_calibration_state=avatar_calibration_.state();
             const auto calibration_state=avatar_calibration_.synchronize(reference_epoch(),
@@ -2276,7 +2483,9 @@ public:
             }
             if(changes.resolution) resolution_change_=changes.resolution;
             if(changes.turning) turning_change_=changes.turning;
-            if(changes.temporal_aa) temporal_change_=changes.temporal_aa;
+            if(changes.temporal_aa) {temporal_change_=changes.temporal_aa;upscale_due_=0;} // a picked mode carries its own scale (the preset)
+            if(changes.upscale_percent) upscale_due_=GetTickCount64()+250;
+            if(upscale_due_ && GetTickCount64()>=upscale_due_) {upscale_due_=0;temporal_change_=settings_.temporal_aa();} // same path as an AA mode change (FSR 4 Native <-> Quality)
             if(changes.hud_percent) hud_change_=changes.hud_percent;
             if(changes.controls_guide) toggle_guide(!gameplay);
             if(guide_stick_blocked()) {controller_input.turn_x=controller_input.turn_y=0;controller_input.right_click=false;}
@@ -2292,7 +2501,7 @@ public:
                 }
                 antialiasing_enabled_=*changes.antialiasing;
             }
-            if(!preferences_file_.empty() && (changes.resolution || changes.antialiasing || changes.turning || changes.mirror || changes.sharpness || changes.temporal_aa || changes.hud_percent || changes.controls_hint || changes.crosshair || changes.scripted_recenter || changes.cutscene_mode || changes.player_measurements))
+            if(!preferences_file_.empty() && (changes.resolution || changes.antialiasing || changes.turning || changes.mirror || changes.sharpness || changes.temporal_aa || changes.upscale_percent || changes.hud_percent || changes.controls_hint || changes.crosshair || changes.scripted_recenter || changes.cutscene_mode || changes.player_measurements))
                 save_preferences(preferences_file_,settings_.preferences());
             // Includes squeeze: holding the calibration pose must not open the native weapon selector.
             if(changes.consume) {controller_input={};settings_consumed=true;}
@@ -2351,10 +2560,25 @@ public:
         const XrCompositionLayerBaseHeader* layer=reinterpret_cast<const XrCompositionLayerBaseHeader*>(&projection);
         if(scene_render && !settings_.open()) menu_panel_.reset();
         const bool settings_world=gameplay && settings_.open();settings_in_world_=settings_world;
+        // The watch is a gameplay layer: a menu, the wheel, a cutscene or a non-world frame hides it at once.
+        update_wrist_watch(gameplay && world_scene && !authored_camera && !settings_.open() && world_ui_kind_==0);
         std::optional<XrCompositionLayerQuad> settings_panel;
         EmptyFrameFacts gates;gates.should_render=frame_.shouldRender!=XR_FALSE;
-        if((gates.continuity_usable=continuity_.usable()) && (gates.have_sources=left && right) &&
-           (gates.tracked_ok=!world_scene || (!tracked_gameplay_required_ && !authored_scene_render) || tracked_pair_()) && (gates.alternate_ok=alt_kept_ok_(authored_camera || settings_.open()))) {
+        // v1021: a resolution change resizes the XR eye chains at once; the game's own swapchain follows on its next resize.
+        // A source still smaller than the new eye (an upscale with no image) is that transient, not a session fault: hold the
+        // frame (the empty-frame fallback below) instead of throwing "Game eye source does not match" into recover_xr_session.
+        // A larger source keeps working (internal SSAA resolves it down).
+        const auto source_holds=[&](ID3D11Texture2D* texture) {
+            if(!texture) return false;
+            D3D11_TEXTURE2D_DESC desc{};texture->GetDesc(&desc);
+            return eye_source_holds(desc,width_,height_,format_);
+        };
+        const bool sources_hold=left && right && source_holds(left) && source_holds(right);
+        if(left && right && !sources_hold) ++eye_source_pending;
+        gates.continuity_usable=continuity_.usable();gates.have_sources=sources_hold;
+        gates.tracked_ok=!world_scene || (!tracked_gameplay_required_ && !authored_scene_render) || tracked_pair_();
+        gates.alternate_ok=alt_kept_ok_(authored_camera || settings_.open());
+        if(gates.continuity_usable && gates.have_sources && gates.tracked_ok && gates.alternate_ok) {
             std::array<ID3D11Texture2D*,2> sources{left,right};bool menu_band_ready=false;
             if(settings_.open()) {update_settings_image(pointer);++settings_layers;}
             const auto sharpness=static_cast<float>(settings_.sharpness());
@@ -2399,7 +2623,7 @@ public:
                         Microsoft::WRL::ComPtr<ID3D11Device> device;context_->GetDevice(&device);
                         resolve_=std::make_unique<EyeResolve>(device.Get(),width_,height_);
                     }
-                    processed=resolve_->apply(sources[eye]);
+                    processed=resolve_->apply(sources[eye]);++eye_resolves;
                 }
                 // Independent per-eye processing; menus retain the exact native image.
                 // v965: start from the eye source. v963 moved sharpening before SMAA but left this null, so CAS was
@@ -2461,7 +2685,8 @@ public:
                 // v808 (headset v806: canted eyes "clearly sharper", but "the eyes felt pulled toward the centre"): a canted eye is rendered
                 // turned and goes out in its own located view, resampled here (the turn taken back off, the runtime's own FOV), so the
                 // runtime gets the layers any application submits. Only images rendered turned (authored cameras keep the enclosing frustum).
-                ID3D11Texture2D* submitted=processed;uncanted_[eye]=false;XrPosef straight_pose{};XrFovf straight_fov{};
+                ID3D11Texture2D* eye_image=processed;uncanted_[eye]=false;XrPosef straight_pose{};XrFovf straight_fov{};
+                std::array<float,2> scope_axis{0.f,0.f}; // v1040: where the rendered view's axis falls in the straight layer (a canted view is turned)
                 if(canted_views && tracked_pair_() && !settings_.open()) {
                     const auto turned=tracked_view_(eye);const auto& lf=views_[eye].fov;
                     const auto c=canted_fov(lf.angleLeft,lf.angleRight,lf.angleUp,lf.angleDown);
@@ -2472,7 +2697,8 @@ public:
                         const auto h=stale_eye_homography(t,tf,s,sf),back=stale_eye_homography(s,sf,t,tf);
                         if(h && back) {
                             if(!uncant_) {Microsoft::WRL::ComPtr<ID3D11Device> device;context_->GetDevice(&device);uncant_=std::make_unique<StaleEyeWarp>(device.Get());}
-                            submitted=uncant_->apply(processed,*h);uncant_back_[eye]=*back;uncanted_[eye]=true;++uncanted_eyes;
+                            eye_image=uncant_->apply(processed,*h);uncant_back_[eye]=*back;uncanted_[eye]=true;++uncanted_eyes;
+                            scope_axis=spyglass_scope::axis_tangent(c->rotation);
                             straight_pose=turned.pose;straight_pose.orientation={static_cast<float>(s.x),static_cast<float>(s.y),static_cast<float>(s.z),static_cast<float>(s.w)};straight_fov=lf;
                         }
                     }
@@ -2487,7 +2713,7 @@ public:
                     settings_compositor_->draw(settings_texture_.Get(),{static_cast<float>(rect.x),static_cast<float>(rect.y),static_cast<float>(rect.width),static_cast<float>(rect.height)});
                     settings_compositor_->end(images_[eye].at(index).texture);
                     if(observe_settings_composition) observe_settings_composition(processed,images_[eye].at(index).texture,rect);
-                } else context_->CopyResource(images_[eye].at(index).texture,submitted);}
+                } else context_->CopyResource(images_[eye].at(index).texture,eye_image);}
                 layers[eye].type=XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW;
                 layers[eye].pose=uncanted_[eye]?straight_pose:tracked_pair_()?tracked_view_(eye).pose:views_[eye].pose;
                 layers[eye].fov=uncanted_[eye]?straight_fov:tracked_pair_()?tracked_view_(eye).fov:XrFovf{-hfov*.5f,hfov*.5f,vfov*.5f,-vfov*.5f};
@@ -2495,7 +2721,7 @@ public:
                 layers[eye].subImage.imageRect.extent={static_cast<int32_t>(width_),static_cast<int32_t>(height_)};
                 // Validate the exact base transfer before ANY destination
                 // composition. Overlay pixels are independently verified.
-                if(observe_transfer && !settings_.open()) {SpanClock span(xr_spans,XrSpan::transfer_observer);observe_transfer(eye,submitted,images_[eye].at(index).texture,layers[eye],gameplay,tracked_pair_(),sources[eye]);}
+                if(observe_transfer && !settings_.open()) {SpanClock span(xr_spans,XrSpan::transfer_observer);observe_transfer(eye,eye_image,images_[eye].at(index).texture,layers[eye],gameplay,tracked_pair_(),sources[eye]);}
                 if(alternate_enabled && !alt_stale && gameplay) {
                     if(alternate_may_keep(gameplay,authored_camera,settings_.open())) {
                         keep_alternate_eye_(eye,processed);
@@ -2508,8 +2734,14 @@ public:
                 // v880: the spyglass lens over the copied image, under every overlay; a fault turns it off for the session.
                 if(gameplay && tracked_pair_() && !authored_camera && !settings_.open() && spyglass_magnification>1.02f && !spyglass_lens_failures) try {
                     if(!spyglass_lens_) {Microsoft::WRL::ComPtr<ID3D11Device> device;context_->GetDevice(&device);spyglass_lens_=std::make_unique<SpyglassLens>(device.Get());}
-                    spyglass_lens_->draw(images_[eye].at(index).texture,submitted,layers[eye].fov,spyglass_magnification);++spyglass_lens_draws;
+                    spyglass_lens_->draw(images_[eye].at(index).texture,eye_image,layers[eye].fov,spyglass_magnification);++spyglass_lens_draws;
                 } catch(const std::exception&) {++spyglass_lens_failures;}
+                // v1040: the right-eye scope: the right view was rendered with the zoom-narrowed projection, so its image is already the magnified
+                // scene; here everything outside the round scope goes dark. The left eye keeps its normal view.
+                if(eye==1 && gameplay && tracked_pair_() && !authored_camera && !settings_.open() && spyglass_scope_mag>1.001f && !spyglass_scope_failures) try {
+                    if(!spyglass_scope_mask_) {Microsoft::WRL::ComPtr<ID3D11Device> device;context_->GetDevice(&device);spyglass_scope_mask_=std::make_unique<SpyglassScopeMask>(device.Get());}
+                    spyglass_scope_mask_->draw(images_[eye].at(index).texture,layers[eye].fov,scope_axis,spyglass_art_probe().art());++spyglass_scope_draws;
+                } catch(const std::exception&) {++spyglass_scope_failures;}
                 if(composite_note && !native_note_art_disabled_) try { // v685: a note-art fault disables the note overlay, never the frame
                     if(!note_eye_art_) {Microsoft::WRL::ComPtr<ID3D11Device> device;context_->GetDevice(&device);note_eye_art_=std::make_unique<NoteEyeArt>(device.Get());}
                     D3D11_TEXTURE2D_DESC art_desc{};world_ui_source_->GetDesc(&art_desc);
@@ -2652,7 +2884,8 @@ public:
                 SpanClock layers_span(xr_spans,XrSpan::overlay_layers);
                 // Projection first, then the wrist controls card.
                 end.layerCount=0;menu_layers_with_pointer[end.layerCount++]=layer;
-                if(world_ui_kind_ && world_ui_source_ && !composite_note && !(wheel_ring && !wheel_eye_art_disabled_)) {
+                if(world_ui_kind_ && world_ui_source_ && !composite_note && !(wheel_ring && !wheel_eye_art_disabled_) &&
+                   world_ui_quad_allowed(world_ui_kind_==1,hand_wheel_mode.load(),wheel_hand_)) {
                     if((world_ui_panel=world_ui_layer())) {
                         menu_layers_with_pointer[end.layerCount++]=reinterpret_cast<const XrCompositionLayerBaseHeader*>(&*world_ui_panel);
                         ++world_ui_layers;++world_ui_layers_by_kind[world_ui_kind_-1];last_world_ui_layer=true;
@@ -2665,9 +2898,18 @@ public:
                         ++hud_window_layers;
                     }
                 }
-                for(unsigned side:{1u,0u}) if(gameplay) { // health/mana first: the ammo screen copy sits below it
-                    if((wrist_panels[side]=optional_wrist_layer(side))) {
-                        menu_layers_with_pointer[end.layerCount++]=reinterpret_cast<const XrCompositionLayerBaseHeader*>(&*wrist_panels[side]);++wrist_layers[side];}
+                if(gameplay) {
+                    if(legacy_wrist_hud) { // A/B: the old health/mana right wrist and ammo left wrist, inner side
+                        for(unsigned side:{1u,0u}) {
+                            wrist_panels[side]=optional_wrist_layer(side);
+                            if(wrist_panels[side]) {
+                                menu_layers_with_pointer[end.layerCount++]=reinterpret_cast<const XrCompositionLayerBaseHeader*>(&*wrist_panels[side]);++wrist_layers[side];}
+                        }
+                    } else { // v1013: one watch on the back of the left wrist
+                        wrist_panels[0]=optional_wrist_layer(0);
+                        if(wrist_panels[0]) {
+                            menu_layers_with_pointer[end.layerCount++]=reinterpret_cast<const XrCompositionLayerBaseHeader*>(&*wrist_panels[0]);++wrist_layers[0];}
+                    }
                 }
                 if((hint_panel=hint_layer())) {
                     menu_layers_with_pointer[end.layerCount++]=reinterpret_cast<const XrCompositionLayerBaseHeader*>(&*hint_panel);++hint_layers;

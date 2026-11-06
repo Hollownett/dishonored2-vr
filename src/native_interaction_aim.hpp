@@ -316,6 +316,7 @@ class NativeInteractionAim {
     struct VolumeTicket {std::uintptr_t sensor{};unsigned token{};int side{-1};std::uint64_t revision{},tick{};};
     std::array<VolumeTicket,3> volume_tickets_{};
     std::ofstream log_;
+    bool logging_{};   // v1046: the trace files opened (diagnostics on); off, the hooks work and format nothing
     std::ofstream targets_;
     std::ofstream ranking_log_;unsigned ranking_rows_{};std::array<std::uint32_t,2> ranking_first_{};
     std::array<std::array<unsigned,8>,2> hint_index_{};std::array<std::uint64_t,2> hint_tick_{};   // G3 (plan Task 8): stage-0 hit owners per hand, under mutex_
@@ -1523,7 +1524,7 @@ private:
                     NativeInteractionTargetIdentity{object,*generation,0,epoch_hint_,3}:NativeInteractionTargetIdentity{});
             }
             // The first 2000 cycles, then (up to 12000) every cycle while a grip Use holds a hand: what that hand's query selected.
-            if(target_samples_<2000 || ((routing_.locked()>=0 || scope.eligibility.calls || scope.hand.preview) && target_samples_<12000)) {
+            if(logging_ && (target_samples_<2000 || ((routing_.locked()>=0 || scope.eligibility.calls || scope.hand.preview) && target_samples_<12000))) {
                 targets_<<GetTickCount64()<<','<<GetCurrentThreadId()<<','<<scope.stage<<','<<*interaction<<','<<object<<','
                     <<generation.value_or(-1)<<','<<(table>=base_?table-base_:0)<<','<<owner<<','<<static_cast<unsigned>(interacting);
                 for(auto id:candidates) targets_<<','<<id;
@@ -1560,7 +1561,7 @@ private:
             } else ++rejected_;
         }
         try {
-            if(samples_<2000) {
+            if(logging_ && samples_<2000) {
                 std::lock_guard<std::mutex> lock(mutex_);
                 if(samples_<2000) {
                     log_<<GetTickCount64()<<','<<GetCurrentThreadId()<<','<<scope->stage<<','<<scope->sensor<<','<<scope->camera.camera<<','<<replaced;
@@ -1756,7 +1757,7 @@ private:
                 }
                 std::lock_guard<std::mutex> lock(self->mutex_);
                 if(scope.scope->side>=0 && scope.scope->side<2) {self->hint_index_[static_cast<unsigned>(scope.scope->side)]=hint;self->hint_tick_[static_cast<unsigned>(scope.scope->side)]=GetTickCount64();}
-                if(self->ranking_rows_<512 && self->ranking_first_[scope.scope->side]!=first_handle) {
+                if(self->logging_ && self->ranking_rows_<512 && self->ranking_first_[scope.scope->side]!=first_handle) {
                     self->ranking_first_[scope.scope->side]=first_handle;
                     for(unsigned i=0;i<scope.count && self->ranking_rows_<512;++i) {
                         std::array<float,3> xyz{};float fraction{};std::uint32_t handle{};
@@ -2668,6 +2669,7 @@ public:
 
     // G1 loot measurement: dxgi_probe opens it after install() only when build/loot-reach-trace exists (off by default); disable() closes it.
     bool loot_reach_trace(const std::filesystem::path& file) {
+        if(file.empty()) return true;   // v1046: diagnostics off = no trace, not a failure (the caller throws on false); file.parent_path()/name would be relative
         std::lock_guard<std::mutex> lock(loot_reach_mutex_);
         loot_reach_csv_.close();loot_reach_owners_csv_.close();loot_reach_rows_=0;loot_reach_owners_seen_.clear();
         loot_reach_csv_.open(file,std::ios::trunc);loot_reach_owners_csv_.open(file.parent_path()/L"native-loot-reach-owners.csv",std::ios::trunc);
@@ -2750,6 +2752,9 @@ public:
                 if(!ranking_profile(index))throw std::runtime_error("Native interaction ranking code differs");
         }
         if(physical_grab_ && !door_ingress_.configure(base,read))throw std::runtime_error("Cannot configure native door contact ingress");
+        logging_=!file.empty();   // v1046: diagnostics off = an empty file: none of the trace files opens, the Lean observers stay off, the hooks work
+        if(!logging_) observe_lean_=observe_lean_lifetime_=false;
+        if(logging_) {
         log_.open(file,std::ios::trunc);if(!log_) throw std::runtime_error("Cannot open native interaction trace");
         targets_.open(file.parent_path()/L"native-interaction-targets.csv",std::ios::trunc);
         if(!targets_) throw std::runtime_error("Cannot open native interaction targets");
@@ -2762,6 +2767,7 @@ public:
         log_<<std::setprecision(9);target_samples_=0;
         log_<<"tick_ms,thread,stage,sensor,camera,routed";
         for(const auto* prefix:{"native","effective"}) for(unsigned i=0;i<12;++i) log_<<','<<prefix<<i;log_<<'\n';
+        }
         for(auto& count:query_outcomes_)count=0;
         stage_calls_=rays_=routed_=rejected_=samples_=overlap_=volume_requests_=volume_rejected_=ranked_=ranking_rejected_=direct_shortcuts_filtered_=occluded_scan_continued_=0;palm_beam_fallbacks_=0;loot_prompt_lingers_dropped_=0;loot_hand_los_=0;loot_eye_los_=0;pickup_range_rejected_=0;sphere_point_fallbacks_=0;sphere_missing_reference_=0;instance_=this;
         hand_range_origins_=0;

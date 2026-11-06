@@ -30,6 +30,8 @@ public:
 };
 // Caller serializes registry mutation. Published originals are immutable, and
 // neither hook records nor trampolines are removed during the DLL's lifetime.
+// v993: back to the seven context methods. GlyphSwap (slot 8), SamplerLodBias (slot 10) and PsConstantBufferHook (slot 16)
+// own the three PS setters; a second MinHook on those targets would return MH_ERROR_ALREADY_CREATED and poison the registry.
 template<std::size_t Methods=7> class GpuDispatchBindings {
 public:
     static constexpr std::size_t capacity=4;
@@ -59,7 +61,7 @@ private:
     unsigned rebinds_{},reuses_{},created_{},fast_paths_{},verifications_{};
     std::uint64_t verified_at_{};
     bool enabled_{}; // false after disable_all: an unchanged binding must still be re-enabled by the next bind
-    // v984: the native HUD validation calls bind() once per HUD child draw (dozens per frame, all with the same seven context
+    // v984: the native HUD validation calls bind() once per HUD child draw (dozens per frame, all with the same context
     // methods). Every call re-verified up to Methods x capacity retained hooks with one ReadProcessMemory each and re-checked each
     // target's code page (verified_d3d11_target): the 2026-11-03 profile put that scope at hud_validate 1.51 ms per frame, 58% of
     // the mod's whole CPU tax and 13.6% of the 90 Hz budget. The same targets cannot change between two HUD children of one frame,

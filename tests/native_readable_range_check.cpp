@@ -25,6 +25,13 @@ int main() {
     assert(!d2vr::native_readable_range_cached(at,28,2320)); // an unreadable region is remembered 50 ms
     assert(d2vr::native_readable_range_cached(at,28,2360));  // then requeried
     assert(!d2vr::native_readable_range_cached(at+page-14,28,2400)); // the range reaches the guard page
+    // v1041: a read that faulted forgets the cached "readable" verdict, so the next call requeries instead of faulting for ~1 s.
+    assert(d2vr::native_readable_range_cached(at,28,3000));
+    assert(VirtualProtect(memory,page,PAGE_NOACCESS,&old));
+    assert(d2vr::native_readable_range_cached(at,28,3100)); // stale-readable (the fault case)
+    d2vr::native_readable_range_forget(at,28);
+    assert(!d2vr::native_readable_range_cached(at,28,3200));
+    assert(VirtualProtect(memory,page,PAGE_READWRITE,&old));
     assert(d2vr::native_executable_cached(reinterpret_cast<std::uintptr_t>(&main)));
     assert(!d2vr::native_executable_cached(at));
     assert(VirtualFree(memory,0,MEM_RELEASE));

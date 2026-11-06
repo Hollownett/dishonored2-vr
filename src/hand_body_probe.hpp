@@ -287,6 +287,7 @@ public:
     ~HandBodyProbeRunner() {stop();}
     bool start(const std::filesystem::path& directory,Sampler sampler,unsigned period_ms=1000,unsigned sets=max_sets) {
         stop();
+        if(directory.empty()) return false;   // v1046: diagnostics off = no folder (directory/name would land in the game's folder)
         bodies_.open(directory/L"hand-body-probe.csv",std::ios::trunc);queue_.open(directory/L"hand-body-queue.csv",std::ios::trunc);
         if(!bodies_ || !queue_) {bodies_.close();queue_.close();return false;}
         bodies_<<body_probe_csv_header()<<'\n';queue_<<queue_probe_csv_header()<<'\n';bodies_.flush();queue_.flush();

@@ -149,6 +149,7 @@ public:
         rows_=dropped_=rejected_=queues_=transactions_=skipped_=0;failed_=false;
     }
     void open(const std::filesystem::path& path) {
+        if(path.empty()) return;   // v1046: diagnostics off = nothing opens (and no throw)
         std::lock_guard<std::mutex> lock(mutex_);file_.open(path,std::ios::trunc);
         if(!file_) throw std::runtime_error("Cannot open passive Lean query trace");
         sampling_.reset();rows_=dropped_=rejected_=queues_=transactions_=skipped_=0;failed_=false;

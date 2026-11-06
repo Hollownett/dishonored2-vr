@@ -417,6 +417,7 @@ public:
         if(instance_ && instance_!=this) throw std::runtime_error("Another native attachment trace owns this DLL");
         if((original_compose_ || original_unpack_) && base_!=base) throw std::runtime_error("Native attachment trace image owner changed");
         if(!read || !logic) throw std::invalid_argument("Missing attachment trace readers");
+        if(path.empty()) return;   // v1046: diagnostics off = a research trace (its model/dry/input files are the only output) hooks nothing
         if(input_requested_ && (!frozen_ || !dry_eligible_)) throw std::invalid_argument("Numeric input experiment requires frozen tracking eligibility");
         base_=base;read_=read;logic_=logic;
         for(unsigned i=0;i<rvas.size();++i) {std::array<unsigned char,32> code{};

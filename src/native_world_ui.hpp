@@ -16,6 +16,13 @@ inline WorldUiKind world_ui_logic(std::uint32_t logic) noexcept {
     // nothing showed in the headset (v361).
     return logic==256?WorldUiKind::wheel:native_note_reader_logic(logic)?WorldUiKind::notes:logic==128 || logic==512 || logic==1024?WorldUiKind::journal:WorldUiKind::none;
 }
+// Whether a world-UI movie draw is captured off-screen instead of being drawn flat into the eyes: while the logic is the movie's own,
+// and the wheel always (v1038, user, headset v1037: "after a wheel choice I see the default wheel for a second"): its opening and
+// closing frames are drawn outside logic 256 and reached the eyes flat. The layer is still shown only under the movie's own logic.
+inline bool world_ui_capture_allowed(WorldUiKind kind,std::uint32_t logic,bool narrative) noexcept {
+    if(kind==WorldUiKind::none || (narrative && logic!=512)) return false;
+    return kind==WorldUiKind::wheel || world_ui_logic(logic)==kind;
+}
 // v729 bisect switch (off = the v723 dialogue path); v730: on, the boat flip was the cutscene camera smoothing, not the choices.
 inline constexpr bool narrative_world_ui=true;
 inline WorldUiKind world_ui_kind(std::string_view path) noexcept {

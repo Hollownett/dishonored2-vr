@@ -36,6 +36,7 @@ public:
     }
     static void disable() noexcept {for(unsigned i=0;i<count_;++i) if(slots_[i].target) MH_DisableHook(slots_[i].target);} // thunks stay
     static void poll(const std::filesystem::path& file) noexcept {
+        if(file.empty()) return;   // v1046: diagnostics off
         const auto now=GetTickCount64();if(!count_ || now-last_poll_<100) return; // 10 Hz: frequent callers stay cheap
         last_poll_=now;
         try {

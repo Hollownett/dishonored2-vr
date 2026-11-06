@@ -10,6 +10,8 @@
   <ItemGroup>
     <Compile Include="FeaturesTests.cs" />
     <Compile Include="PrefsTests.cs" />
+    <Compile Include="LogCleanupTests.cs" />
+    <Compile Include="..\..\launcher\LogCleanup.cs" />
     <Compile Include="..\..\launcher\Prefs.cs" />
     <Compile Include="..\..\launcher\Features.cs" />
     <Compile Include="..\..\launcher\ProxyInstall.cs" />

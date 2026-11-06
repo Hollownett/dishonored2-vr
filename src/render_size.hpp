@@ -46,6 +46,13 @@ inline bool eye_texture_matches(const D3D11_TEXTURE2D_DESC& actual,UINT width,UI
     return actual.Width==width && actual.Height==height && rgba8_copy_compatible(actual.Format,format) &&
         actual.MipLevels==1 && actual.ArraySize==1 && actual.SampleDesc.Count==1 && actual.SampleDesc.Quality==0;
 }
+// v1021: the game's own output follows a requested size on its next swapchain resize. Until then an eye source can still
+// be smaller than the XR eye the request already resized, and that is a transient, not a fault: hold the frame instead
+// of throwing out of the session. A larger source is fine (EyeResolve downsamples it).
+inline bool eye_source_holds(const D3D11_TEXTURE2D_DESC& actual,UINT width,UINT height,DXGI_FORMAT format) noexcept {
+    return actual.Width>=width && actual.Height>=height && rgba8_copy_compatible(actual.Format,format) &&
+        actual.MipLevels==1 && actual.ArraySize==1 && actual.SampleDesc.Count==1 && actual.SampleDesc.Quality==0;
+}
 struct RgbaPixels {
     UINT width{},height{};
     DXGI_FORMAT format{};

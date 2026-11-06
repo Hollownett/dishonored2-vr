@@ -79,17 +79,26 @@ public:
     using ExecuteFn=void (STDMETHODCALLTYPE*)(ID3D11DeviceContext*,ID3D11CommandList*,BOOL);
     inline static std::atomic<void (*)(ID3D11DeviceContext*,ID3D11CommandList*)> finish_observer{};
     inline static std::atomic<bool (*)(ID3D11DeviceContext*,ID3D11CommandList*,BOOL,ExecuteFn)> execute_handler{};
+    // v993: the PS state census invalidates its shadow across a list boundary. Called after FinishCommandList on the deferred
+    // context, and before and after ExecuteCommandList on the immediate context, even when a handler takes the execute over.
+    inline static std::atomic<void (*)(ID3D11DeviceContext*)> finish_barrier{},execute_barrier{};
     inline static FinishFn finish_original{};inline static ExecuteFn execute_original{};
+    inline static std::atomic<bool> enabled_{false};
 private:
     inline static std::array<void*,2> list_target_{};
     static HRESULT STDMETHODCALLTYPE finish_hook(ID3D11DeviceContext* c,BOOL restore,ID3D11CommandList** list) {
         const HRESULT hr=finish_original(c,restore,list);
+        if(const auto b=finish_barrier.load(std::memory_order_relaxed)) b(c);
         if(SUCCEEDED(hr) && list && *list) if(const auto o=finish_observer.load()) o(c,*list);
         return hr;
     }
     static void STDMETHODCALLTYPE execute_hook(ID3D11DeviceContext* c,ID3D11CommandList* list,BOOL restore) {
-        if(const auto h=execute_handler.load()) if(h(c,list,restore,execute_original)) return;
-        execute_original(c,list,restore);
+        const auto barrier=execute_barrier.load(std::memory_order_relaxed);
+        if(barrier) barrier(c);
+        bool handled=false;
+        if(const auto h=execute_handler.load()) handled=h(c,list,restore,execute_original);
+        if(!handled) execute_original(c,list,restore);
+        if(barrier) barrier(c);
     }
     template<class Fn> static void hook_slot(ID3D11DeviceContext* context,unsigned slot,void* replacement,Fn& original,void*& target_out) noexcept {
         void* target=(*reinterpret_cast<void***>(context))[slot];
@@ -123,7 +132,8 @@ private:
     }
 public:
     static bool install(ID3D11Device* device) noexcept {
-        if(target_) {for(auto* t:clear_target_) if(t) MH_EnableHook(t);for(auto* t:list_target_) if(t) MH_EnableHook(t);return MH_EnableHook(target_)==MH_OK;}
+        if(target_) {for(auto* t:clear_target_) if(t) MH_EnableHook(t);for(auto* t:list_target_) if(t) MH_EnableHook(t);
+            enabled_=true;return MH_EnableHook(target_)==MH_OK;}
         if(!device) return false;
         ID3D11DeviceContext* deferred{};
         if(FAILED(device->CreateDeferredContext(0,&deferred))) return false;
@@ -141,9 +151,10 @@ public:
         if(!list_target_[0] || !list_target_[1] || !finish_original || !execute_original) return false;
         if(MH_CreateHook(target,reinterpret_cast<void*>(&hook),reinterpret_cast<void**>(&original_))!=MH_OK) {original_=nullptr;return false;}
         if(MH_EnableHook(target)!=MH_OK) {MH_RemoveHook(target);original_=nullptr;return false;}
-        target_=target;return true;
+        target_=target;enabled_=true;return true;
     }
     static bool disable() noexcept {
+        enabled_=false;
         handler=nullptr;depth_observer=nullptr;finish_observer=nullptr;execute_handler=nullptr;
         for(auto* t:clear_target_) if(t) MH_DisableHook(t);
         for(auto* t:list_target_) if(t) MH_DisableHook(t);
@@ -153,6 +164,8 @@ public:
         return depth_.load()==0;
     }
     static bool installed() noexcept {return target_!=nullptr && handler.load()!=nullptr;}
+    static bool finish_hook_installed() noexcept {return enabled_.load(std::memory_order_relaxed) && list_target_[0] && finish_original;}
+    static bool execute_hook_installed() noexcept {return enabled_.load(std::memory_order_relaxed) && list_target_[1] && execute_original;}
     static Fn original() noexcept {return original_;}
 };
 } // namespace d2vr

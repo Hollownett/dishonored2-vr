@@ -1,10 +1,13 @@
-// v931: Place certifies which eye a weapon draw really renders (its cached previous MVP is the same instance in the other view), finds a held
-// weapon's parts by orientation and reach, and re-places them in the hand each render draws, with a previous MVP that follows that hand.
-// A simulated stereo engine renders view 0 then view 1 per render (a draw's cache = the MVP of the last view that drew it), with canted eyes,
-// skipped engine frames, parts at fixed offsets from the weapon's tick frame, and a hand sampled per frame while the tick reads a stale one.
+// v1106 (round 6): the held weapon's draw-time RIGID BINDING. A writer (or the copy service) states the weapon frame F and the exact hand
+// frame H_read it composed it from; G = inverse(H_read) * F is learned once per (weapon, hand, grip), validated, and kept. Every draw of
+// the weapon then becomes H_image * G, where H_image is the hand THIS render draws, in every eye pass, with the previous rows from the
+// previous render's drawn hand. The lab covers native, crossed and copied weapons, a G that is never re-learned, a G refreshed on a
+// regrip/weapon swap, true previous rows, identical depth/colour rows, two weapons that never swap, and an invalid G that leaves the
+// engine's rows in place (counted) until a valid one exists.
 #include "../src/weapon_draw_place.hpp"
 #include <chrono>
 #include <cstdio>
+#include <cstring>
 #include <map>
 #include <vector>
 
@@ -12,7 +15,7 @@ using namespace d2vr::weapon_draw;
 static int failures=0;
 #define CHECK(c) do{if(!(c)){std::printf("FAIL %s:%d %s\n",__FILE__,__LINE__,#c);++failures;}}while(0)
 
-static Mat rot(double ax,double ay,double az,double angle) { // Rodrigues, column vectors
+static Mat rot(double ax,double ay,double az,double angle) {
     const double n=std::sqrt(ax*ax+ay*ay+az*az);ax/=n;ay/=n;az/=n;
     const double c=std::cos(angle),s=std::sin(angle),t=1-c;
     Mat m=identity();
@@ -31,151 +34,326 @@ static std::array<float,15> raw_of(const Mat& m) {
     return f;
 }
 static std::array<float,16> floats(const Mat& m) {std::array<float,16> f{};for(std::size_t i=0;i<16;++i) f[i]=float(m[i]);return f;}
-static Mat from_floats(const std::array<float,16>& f) {return widen(f.data());}
 static double dist(const Mat& a,const Mat& b) {return std::hypot(a[3]-b[3],std::hypot(a[7]-b[7],a[11]-b[11]));}
+static bool same_rows(const float* a,const float* b,double tolerance=0) {
+    for(int i=0;i<16;++i) if(!(std::abs(double(a[i])-double(b[i]))<=tolerance)) return false;
+    return true;
+}
+static double worst_rows(const float* a,const float* b) {
+    double w=0;for(int i=0;i<16;++i) w=std::max(w,std::abs(double(a[i])-double(b[i])));return w;
+}
+static Mat y180() {Mat m=identity();m[0]=-1;m[10]=-1;return m;}
+static Mat mirror_grip(const Mat& m) {   // held_copy::mirror in matrix form: diag(1,-1,1) * R * diag(1,-1,1), y negated
+    Mat s=identity();s[5]=-1;
+    Mat out=mul(mul(s,m),s);
+    out[7]=-m[7];
+    return out;
+}
 
-// Reverse-Z infinite projection (z row 0,0,0,near) with the frame's jitter, times a rigid eye view.
+// Reverse-Z infinite projection with jitter, times the eye view (the float VP is what the engine stores).
 static Mat vp_of(const Mat& eye_pose,int frame) {
-    Mat p{};p[0]=1.2;p[2]=.1+.0007*std::sin(frame*1.7);p[5]=1.6;p[6]=-.05+.0007*std::cos(frame*2.3);p[11]=.05;p[14]=-1;
+    Mat p{};p[0]=1.2;p[2]=.1+.0007*std::sin(frame*1.7);p[5]=1.6;p[6]=-.05+.0007*std::cos(frame*2.3);
+    p[10]=1;p[11]=.05;p[15]=1;   // invertible, constant clip w=1: the lab checks the placement algebra, not a perspective
     return mul(p,inv(eye_pose));
 }
-struct Wp {Mat vp[2]{},inv[2]{};};   // the two views of an engine frame
+struct Wp {Mat vp[2]{},inv[2]{};};
 static std::map<std::uint32_t,Wp> frames_seen;
-static const Views* provider(std::uint32_t frame,std::uint32_t previous) {
+static const Views* provider(std::uint32_t frame,std::uint32_t previous0,std::uint32_t previous1) {
     static Views v;
-    v=Views{};v.prev_frame=previous;
-    const auto it=frames_seen.find(frame);
-    if(it==frames_seen.end()) return nullptr;
+    v=Views{};v.prev_frame[0]=previous0;v.prev_frame[1]=previous1;
+    const auto it=frames_seen.find(frame);if(it==frames_seen.end()) return nullptr;
     for(unsigned e=0;e<2;++e) {v.ok[e]=true;v.vp[e]=it->second.vp[e];v.inv[e]=it->second.inv[e];}
-    if(previous) if(const auto p=frames_seen.find(previous);p!=frames_seen.end()) for(unsigned e=0;e<2;++e) {v.prev_ok[e]=true;v.prev_vp[e]=p->second.vp[e];v.prev_inv[e]=p->second.inv[e];}
+    const std::uint32_t previous[2]={previous0,previous1};
+    for(unsigned s=0;s<2;++s) if(previous[s]) if(const auto p=frames_seen.find(previous[s]);p!=frames_seen.end())
+        for(unsigned e=0;e<2;++e) {v.prev_ok[s][e]=true;v.prev_vp[s][e]=p->second.vp[e];v.prev_inv[s][e]=p->second.inv[e];}
     return &v;
+}
+static Mat hand_at(int t,unsigned side) {
+    return rigid(rot(0,0,1,.45+.8*t/90.0),-91.8,-92.5+.55*side,4.9+.02*std::sin(t*.3));
+}
+static Mat eye_pose(int t,unsigned eye) {
+    Mat looking=identity();looking[0]=0;looking[2]=-1;looking[4]=-1;looking[5]=0;looking[6]=0;looking[9]=1;looking[10]=0; // forward = -Z
+    const Mat head=mul(rigid(rot(0,0,1,.8*t/90.0),-91.8,-92.1,5.0),looking);   // 0.4 m beside the hand: every draw is in front
+    return mul(head,mul(rigid(identity(),eye?.032:-.032,0,0),rot(0,0,1,eye?-.105:.105)));
+}
+// Publish one frame and return the bound per side plus the expected view rows of one part under each eye.
+struct Published {std::uint32_t frame{};Mat raw[2]{};Mat bound[2]{};bool have[2]{};};
+static Published publish_frame(std::uint32_t frame,const Mat& f0,bool have0,const Mat& b0,const Mat& f1,bool have1,const Mat& b1,int view_t) {
+    Published p;p.frame=frame;p.raw[0]=f0;p.raw[1]=f1;p.have[0]=have0;p.have[1]=have1;p.bound[0]=b0;p.bound[1]=b1;
+    Wp w;for(unsigned e=0;e<2;++e) {w.vp[e]=vp_of(eye_pose(view_t,e),view_t);w.inv[e]=inv(w.vp[e]);}
+    frames_seen[frame]=w;
+    std::array<std::array<float,15>,2> raw{};
+    std::array<Mat,2> bound{};
+    std::array<const float*,2> raw_ptr{};
+    std::array<const Mat*,2> bound_ptr{};
+    if(have0) {raw[0]=raw_of(f0);raw_ptr[0]=raw[0].data();bound[0]=b0;bound_ptr[0]=&bound[0];}
+    if(have1) {raw[1]=raw_of(f1);raw_ptr[1]=raw[1].data();bound[1]=b1;bound_ptr[1]=&bound[1];}
+    Place::publish_bound(frame,raw_ptr,bound_ptr);
+    return p;
+}
+static void check_placed(const Published& p,unsigned side,const Mat& part,const char* tag) {
+    const Wp& w=frames_seen.at(p.frame);
+    const unsigned e=1;
+    const Mat f=p.raw[side],b=p.bound[side];
+    const Mat model=mul(f,part);
+    const auto c=floats(mul(w.vp[e],model));
+    std::array<float,16> o{},q{};
+    const Result r=Place::place(p.frame,provider,c.data(),nullptr,o.data(),q.data(),-1,int(e));
+    const Mat want=mul(mul(w.vp[e],b),part);
+    const double err=worst_rows(o.data(),floats(want).data());
+    if(!(r.side==int(side) && r.stage==placed_pass && err<2e-4)) {
+        const auto* sl=Place::slot_of(p.frame);
+        std::printf("FAIL %s side=%u got side=%d stage=%u err=%.2e w=%.4f slot=[%d/%d %d/%d]\n",tag,side,r.side,unsigned(r.stage),err,double(c[15]),
+            int(sl&&sl->side[0].valid),int(sl&&sl->side[0].bound),int(sl&&sl->side[1].valid),int(sl&&sl->side[1].bound));
+        ++failures;
+    }
 }
 
 int main() {
-    const Mat g=rigid(rot(.3,1,.2,.4),.05,.02,-.03);                          // grip: the weapon frame in the hand
-    const auto hand_at=[](int t) {
-        const double s=t/90.0;
-        return mul(rigid(rot(0,0,1,.8*s),-91.8,-92.5,4.9),rigid(rot(1,0,0,.1*std::sin(6*s)),.3+.1*s+.01*std::sin(11*s),-.2+.02*std::sin(9*s),-.5+.015*std::sin(7*s)));
-    };
-    const Mat parts[3]={identity(),rigid(identity(),.11,0,.065),mul(rigid(identity(),-.03,.02,.01),rot(0,1,0,.0012))};   // fixed offsets (one slightly rotated)
-    std::uint32_t engine_frame=25000,seed=12345;
-    std::map<std::uint32_t,std::pair<Mat,Mat>> render_info;                   // frame -> (placed matrix, F)
-    std::uint32_t previous_frame=0;
-    Mat penultimate_placed{},penultimate_tick{},previous_placed{},previous_tick{};   // the last two renders' placed weapon frames
-    int certified[2]={0,0},uncertified_first=0,checks=0;
-    double worst_cur=0,worst_prev=0,engine_wobble_lo=1e9,engine_wobble_hi=-1e9;
-    for(int render=0;render<160;++render) {
-        seed=seed*1664525u+1013904223u;engine_frame+=1+((seed>>16)&1);        // engine frames are skipped now and then
-        penultimate_placed=previous_placed;penultimate_tick=previous_tick;
-        const int t=int(engine_frame-25000);
-        const Mat image=hand_at(t),read=hand_at(t-t%3);
-        const Mat tick_frame=mul(read,g),delta=mul(image,inv(read)),placed=mul(delta,tick_frame);
-        Mat looking=identity();looking[0]=0;looking[2]=-1;looking[4]=-1;looking[5]=0;looking[6]=0;looking[9]=1;looking[10]=0;   // eye space: right = -y, up = +z, forward = +x
-        const Mat head=mul(rigid(rot(0,0,1,.8*t/90.0),-91.8,-92.5,5.0),looking);
-        Wp w;
-        for(unsigned e=0;e<2;++e) {   // canted eyes: +-6 degrees about the vertical, 64 mm apart; the float VP is what the engine stores
-            const Mat pose=mul(head,mul(rigid(identity(),e?.032:-.032,0,0),rot(0,0,1,e?-.105:.105)));
-            const auto f=floats(vp_of(pose,int(engine_frame)));w.vp[e]=from_floats(f);w.inv[e]=inv(w.vp[e]);
-        }
-        frames_seen[engine_frame]=w;
-        const auto raw=raw_of(tick_frame);
-        Place::publish(engine_frame,{raw.data(),nullptr},{&delta,nullptr});
-        engine_wobble_lo=std::min(engine_wobble_lo,dist(tick_frame,image));engine_wobble_hi=std::max(engine_wobble_hi,dist(tick_frame,image));
-        // the engine: view 0 first, then view 1, the cache of an instance is the MVP of the last view that drew it
-        static std::array<Mat,3> cache{};static std::array<bool,3> have{};
-        for(unsigned e=0;e<2;++e) for(unsigned j=0;j<3;++j) {
-            const Mat model=mul(tick_frame,parts[j]);
-            const Mat cur=mul(w.vp[e],model);
-            const Mat prev_rows=have[j]?cache[j]:cur;
-            cache[j]=cur;have[j]=true;
-            const auto c=floats(cur),p=floats(prev_rows);
-            std::array<float,16> o{},q{};
-            const Result r=Place::place(engine_frame,provider,c.data(),p.data(),o.data(),q.data());
-            const bool first_view0=(render==0 && e==0);
-            if(first_view0) {CHECK(r.side<0 && r.stage==no_certificate);++uncertified_first;continue;}   // nothing cached yet: prev == cur proves no eye
-            ++checks;
-            CHECK(r.side==0 && r.eye==int(e));
-            if(r.side!=0) continue;
-            ++certified[e];
-            const Mat want=mul(mul(w.vp[e],delta),model);
-            for(std::size_t i=0;i<16;++i) {worst_cur=std::max(worst_cur,std::abs(o[i]-want[i])/(1+std::abs(want[i])));}
-            if(render>0) {   // the previous render's placed weapon under the previous render's view of this eye
-                const auto info=render_info.at(previous_frame);
-                const Mat before=mul(mul(frames_seen.at(previous_frame).vp[e],info.first),mul(inv(info.second),model));
-                // (the previous placed matrix moved onto this part: placed(p) * inverse(F(p)) * F(p) * L = placed(p) * L)
-                const Mat want_prev=mul(mul(frames_seen.at(previous_frame).vp[e],info.first),parts[j]);
-                (void)before;
-                for(std::size_t i=0;i<16;++i) worst_prev=std::max(worst_prev,std::abs(q[i]-want_prev[i])/(1+std::abs(want_prev[i])));
+    const Mat part=rigid(identity(),.11,0,.065);   // a fixed part offset from F; the rig must not change it
+    const Mat native_grip=rigid(rot(.2,.6,.3,.4),.04,-.02,.03);
+    const Mat cross_grip=mul(y180(),native_grip);
+    const Mat copy_offset=rigid(rot(.1,.2,.3,.7),.03,.01,-.02);
+    const Mat copy_offset_mirror=mirror_grip(copy_offset);
+
+    // ---- 1. native: G learned once, every frame every eye pass placed from the DRAWN hand --------------------------------
+    {
+        Binder::clear();Place::clear();
+        const std::uintptr_t identity=0x1001;
+        int frames=0,passes=0;
+        double worst=0;
+        // one writer composition is not enough (a note can be newer than F); two consistent ones bind
+        {const Mat read=hand_at(0,0),f=mul(read,native_grip);GripCandidate c{};
+         candidate_from_read(read,f,c,identity,write_engine,space_joint59,0,100);
+         CHECK(!Binder::observe(0,c));CHECK(Binder::observe(0,c));}
+        for(int render=0;render<40;++render) {
+            const std::uint32_t frame=100u+static_cast<std::uint32_t>(render);
+            const int t=render;
+            const Mat read=hand_at(t-t%3,0),image=hand_at(t,0);
+            const Mat f=mul(read,native_grip),b=mul(image,native_grip);
+            GripCandidate c{};
+            candidate_from_read(read,f,c,identity,write_engine,space_joint59,render,frame);
+            const bool bound=Binder::observe(0,c);
+            CHECK(bound);
+            Mat got{};
+            CHECK(Binder::frame(0,image,got) && dist(got,b)<1e-9);
+            const auto p=publish_frame(frame,f,true,b,Mat{},false,Mat{},t);
+            for(unsigned e=0;e<2;++e) {
+                const Mat model=mul(f,part);
+                const auto frame_it=frames_seen.find(frame);
+                const auto cur=floats(mul(frame_it->second.vp[e],model));
+                std::array<float,16> o{},q{};
+                const Result r=Place::place(frame,provider,cur.data(),nullptr,o.data(),q.data(),-1,int(e));
+                const Mat want=mul(mul(frames_seen.at(frame).vp[e],b),part);
+                worst=std::max(worst,worst_rows(o.data(),floats(want).data()));
+                CHECK(r.side==0 && r.eye==int(e) && r.stage==placed_pass);
+                ++passes;
             }
+            const auto s=Binder::summary(0);
+            CHECK(s.bound && s.learns==1 && s.refreshes==0 && s.source==write_engine && s.space==space_joint59);
+            (void)p;++frames;
         }
-        render_info[engine_frame]={placed,tick_frame};previous_frame=engine_frame;
-        previous_placed=placed;previous_tick=tick_frame;
+        CHECK(frames==40 && passes==80 && worst<2e-4);
+        std::printf("v1106 native: frames=%d eye_passes=%d learns=%llu refreshes=%llu worst=%.2e bound=%d\n",
+            frames,passes,Binder::summary(0).learns,Binder::summary(0).refreshes,worst,int(Binder::summary(0).bound));
     }
-    std::printf("certified %d/%d (view 0: %d, view 1: %d), worst relative error: current rows %.2e previous rows %.2e; tick frame to hand distance varies %.2f mm\n",
-        certified[0]+certified[1],checks,certified[0],certified[1],worst_cur,worst_prev,(engine_wobble_hi-engine_wobble_lo)*1000);
-    CHECK(certified[0]+certified[1]==checks && worst_cur<2e-4 && worst_prev<2e-4 && engine_wobble_hi-engine_wobble_lo>.005);
 
-    // Draws that are not the weapon's, or cannot be certified, keep the engine's rows.
+    // ---- 2. previous rows are the previous render's DRAWN hand: true motion, and depth/colour identical ----------------
     {
-        const Wp& w=frames_seen.at(engine_frame);
-        const Mat tick_frame=render_info.at(engine_frame).second;
+        Binder::clear();Place::clear();
+        const std::uintptr_t identity=0x2002;
+        const Mat g=rigid(rot(.3,.2,.8,.5),.02,.01,-.04);
+        Mat b_prev{};
+        std::uint32_t p_prev{};
+        int checked=0;double worst_prev=0,motion=0;bool have_prev=false;
+        {const Mat read=hand_at(-1,0),f=mul(read,g);GripCandidate c{};
+         candidate_from_read(read,f,c,identity,write_engine,space_joint59,0,300);
+         CHECK(!Binder::observe(0,c));CHECK(Binder::observe(0,c));}
+        for(int render=0;render<8;++render) {
+            const std::uint32_t frame=300u+static_cast<std::uint32_t>(render);
+            const int t=render*2;
+            const Mat read=hand_at(t-1,0),image=hand_at(t,0);
+            const Mat f=mul(read,g),b=mul(image,g);
+            GripCandidate c{};candidate_from_read(read,f,c,identity,write_engine,space_joint59,render,frame);
+            CHECK(Binder::observe(0,c));
+            const auto p=publish_frame(frame,f,true,b,Mat{},false,Mat{},t);
+            const Mat model=mul(f,part);const auto crows=floats(mul(frames_seen.at(frame).vp[1],model));
+            const auto prows=floats(mul(frames_seen.at(frame).vp[0],model));
+            std::array<float,16> depth_cur{},depth_prev{},colour_cur{},colour_prev{};
+            const Result depth=Place::place(frame,provider,crows.data(),prows.data(),depth_cur.data(),depth_prev.data(),-1,1);
+            const Result colour=Place::place(frame,provider,crows.data(),nullptr,colour_cur.data(),colour_prev.data(),-1,1);
+            CHECK(depth.side==0 && colour.side==0 && depth.stage==placed_pass && colour.stage==placed_pass);
+            CHECK(same_rows(depth_cur.data(),colour_cur.data()));   // depth and colour current rows agree bit for bit
+            CHECK(same_rows(depth_prev.data(),colour_prev.data())); // and the publisher fills the same previous rows
+            if(have_prev) {
+                const Mat want_prev=mul(mul(frames_seen.at(p_prev).vp[1],b_prev),part);
+                worst_prev=std::max(worst_prev,worst_rows(depth_prev.data(),floats(want_prev).data()));
+                for(int i=0;i<16;++i) motion=std::max(motion,std::abs(double(depth_prev[i])-double(depth_cur[i]))/(1.+std::abs(double(depth_cur[i]))));
+                ++checked;
+            }
+            b_prev=b;p_prev=frame;have_prev=true;
+            (void)p;
+        }
+        CHECK(checked==7 && worst_prev<2e-4 && motion>1e-5);
+        std::printf("v1106 previous rows: checked=%d worst=%.2e motion=%.2e (the previous drawn hand, not the engine tick)\n",checked,worst_prev,motion);
+    }
+
+    // ---- 3. crossed native: G carries the y180 cross correction; the origin hand is the physical hand ------------------
+    {
+        Binder::clear();Place::clear();
+        const std::uintptr_t identity=0x3003;
+        const int t=7;
+        const Mat read=hand_at(t-1,0),image=hand_at(t,0);
+        const Mat f=mul(read,cross_grip),b=mul(image,cross_grip);
+        GripCandidate c{};candidate_from_read(read,f,c,identity,write_cross,space_joint59,7,400);
+        CHECK(!Binder::observe(0,c));CHECK(Binder::observe(0,c));
+        Mat got{};CHECK(Binder::frame(0,image,got) && dist(got,b)<1e-9);
+        CHECK(angle(got,image)>2.5);   // the engine's y180 is inside G, so the weapon is the mirrored hold
+        const auto p=publish_frame(400,f,true,b,Mat{},false,Mat{},t);
+        check_placed(p,0,part,"crossed");
+        CHECK(Binder::summary(0).source==write_cross);
+        std::printf("v1106 crossed: source=cross space=joint59 G-y180-angle=%.1f deg bound=%d\n",angle(got,image)*57.29577951308232,int(Binder::summary(0).bound));
+    }
+
+    // ---- 4. copy: the exact applied offset (and its mirror) is learned at once, and kept with no writer note ------------
+    {
+        Binder::clear();Place::clear();
+        const int t=11;
+        const Mat read_grip=hand_at(t-1,1),image_grip=hand_at(t,1);
+        const Mat f=mul(read_grip,copy_offset_mirror),b=mul(image_grip,copy_offset_mirror);
+        GripCandidate c{};candidate_from_offset(copy_offset_mirror,c,0x4004,write_held,11,500);
+        CHECK(Binder::observe(1,c));   // exact: bound on the first placement
+        const auto p=publish_frame(500,Mat{},false,Mat{},f,true,b,t);
+        check_placed(p,1,part,"copy");
+        // no writer note for the next ten renders: the binding is kept and placed from the drawn grip every frame
+        int placed=0;
+        for(int i=0;i<10;++i) {
+            const std::uint32_t frame=501u+static_cast<std::uint32_t>(i);
+            const Mat moving=mul(hand_at(t+i,1),copy_offset_mirror);
+            GripCandidate none{};
+            CHECK(Binder::observe(1,none));
+            const auto p2=publish_frame(frame,Mat{},false,Mat{},f,true,moving,t+i);
+            check_placed(p2,1,part,"copy-kept");
+            ++placed;
+        }
+        CHECK(placed==10 && Binder::summary(1).learns==1 && Binder::summary(1).refreshes==0 && Binder::summary(1).space==space_grip);
+        std::printf("v1106 copy: offset-grip bound=1 kept_frames=%d learns=%llu space=grip\n",placed,Binder::summary(1).learns);
+    }
+
+    // ---- 5. two weapons, two hands: each is placed with its OWN drawn hand, never swapped ------------------------------
+    {
+        Binder::clear();Place::clear();
+        const Mat g0=rigid(rot(.2,.1,.7,.6),.03,-.01,.02),g1=rigid(rot(.5,.4,.1,-.4),-.02,.04,.03);
+        const int t=20;
+        const Mat read0=hand_at(t-1,0),read1=hand_at(t-1,1);
+        const Mat image0=hand_at(t,0),image1=hand_at(t,1);
+        const Mat f0=mul(read0,g0),f1=mul(read1,g1);
+        GripCandidate c0{},c1{};
+        candidate_from_read(read0,f0,c0,0x5005,write_engine,space_joint59,20,600);
+        candidate_from_read(read1,f1,c1,0x5006,write_engine,space_joint59,20,600);
+        for(int i=0;i<2;++i) {Binder::observe(0,c0);Binder::observe(1,c1);}
+        const Mat b0=mul(image0,g0),b1=mul(image1,g1);
+        const auto p=publish_frame(600,f0,true,b0,f1,true,b1,t);
+        check_placed(p,0,part,"two-hand left");
+        check_placed(p,1,part,"two-hand right");
+        // each draw sits near its own bound origin; the two hands are far enough apart that the side is never a guess
+        CHECK(dist(b0,b1)>.4);
+        std::printf("v1106 two weapons: left=own right=own separation=%.3f m\n",dist(b0,b1));
+    }
+
+    // ---- 6. G refreshed on a REGRIP (three consistent compositions) and on a WEAPON SWAP (new identity) ----------------
+    {
+        Binder::clear();Place::clear();
+        const int t=30;
+        const Mat read=hand_at(t-1,0),image=hand_at(t,0);
+        const Mat g1=rigid(rot(.1,.2,.3,.2),.02,.01,.01);
+        const Mat g2=rigid(rot(.7,.2,.1,.9),.08,-.03,.05);   // >5 cm / >15 deg away: a regrip
+        const Mat f1=mul(read,g1);
+        GripCandidate c1{};candidate_from_read(read,f1,c1,0x6007,write_engine,space_joint59,30,700);
+        CHECK(!Binder::observe(0,c1));CHECK(Binder::observe(0,c1));
+        Mat before{};Binder::frame(0,image,before);
+        CHECK(dist(before,mul(image,g1))<1e-9);
+        // the regrip is observed: the first two do not displace G (no flicker), the third replaces it
+        const Mat f2=mul(read,g2);GripCandidate c2{};candidate_from_read(read,f2,c2,0x6007,write_engine,space_joint59,31,701);
+        CHECK(Binder::observe(0,c2));CHECK(Binder::observe(0,c2));
+        Mat still{};Binder::frame(0,image,still);
+        CHECK(dist(still,mul(image,g1))<1e-9);
+        CHECK(Binder::observe(0,c2));
+        Mat after{};Binder::frame(0,image,after);
+        CHECK(dist(after,mul(image,g2))<1e-9);
+        CHECK(Binder::summary(0).refreshes==1 && Binder::summary(0).learns==1);
+        // a weapon swap is a new identity: the old G is dropped at once, the new native G needs two compositions
+        const Mat g3=rigid(rot(.3,.8,.2,-.6),-.01,.02,.04);
+        const Mat f3=mul(read,g3);GripCandidate c3{};candidate_from_read(read,f3,c3,0x6008,write_engine,space_joint59,40,710);
+        CHECK(!Binder::observe(0,c3));   // no old G is reused for the new weapon
+        Mat none{};CHECK(!Binder::frame(0,image,none));
+        CHECK(Binder::observe(0,c3));
+        Mat swapped{};Binder::frame(0,image,swapped);
+        CHECK(dist(swapped,mul(image,g3))<1e-9);
+        CHECK(Binder::summary(0).learns==2);
+        std::printf("v1106 refresh: regrip_refreshes=%llu swap_learns=%llu\n",Binder::summary(0).refreshes,Binder::summary(0).learns);
+    }
+
+    // ---- 7. an invalid G is rejected; the engine's rows stay (counted) until a valid G exists -------------------------
+    {
+        Binder::clear();Place::clear();
+        const int t=40;
+        const Mat read=hand_at(t-1,0),image=hand_at(t,0);
+        const Mat good=rigid(rot(.2,.4,.1,.3),.03,.01,-.02);
+        const Mat far=rigid(rot(.2,.4,.1,.3),.45,0,0);      // |translation| 0.45 m > 0.3 m: rejected
+        const Mat sheared=[] {Mat m=rigid(rot(.1,.1,.1,.2),.02,0,0);m[0]*=1.2;return m;}();
+        CHECK(!valid_grip(far) && !valid_grip(sheared) && valid_grip(good));
+        const Mat f_far=mul(read,far);GripCandidate bad{};candidate_from_read(read,f_far,bad,0x7009,write_engine,space_joint59,50,800);
+        CHECK(!bad.valid && bad.attempted);
+        CHECK(!Binder::observe(0,bad));
+        CHECK(Binder::summary(0).rejects==1 && Binder::summary(0).fallbacks==1 && !Binder::bound(0));
+        // the publisher passes no bound frame: Place leaves the draw's rows untouched (the engine's rows)
+        const std::uint32_t frame=800;
+        Wp w;for(unsigned e=0;e<2;++e) {w.vp[e]=vp_of(eye_pose(t,e),t);w.inv[e]=inv(w.vp[e]);}
+        frames_seen[frame]=w;
+        const Mat f= mul(read,good), model=mul(f,part);
+        const auto engine_raw=raw_of(f);
+        std::array<const float*,2> raw_ptr{engine_raw.data(),nullptr};
+        std::array<const Mat*,2> no_bound{nullptr,nullptr};
+        Place::publish_bound(frame,raw_ptr,no_bound);
+        std::array<float,16> cur=floats(mul(w.vp[1],model)),out{},prev{};
+        for(auto& v:out) v=7.f;for(auto& v:prev) v=8.f;
+        const Result r=Place::place(frame,provider,cur.data(),nullptr,out.data(),prev.data(),-1,1);
+        CHECK(r.side<0 && r.stage==unbound);
+        CHECK(out[0]==7.f && prev[0]==8.f);   // untouched: the engine's rows
+        // a valid G arrives: two consistent compositions bind it and the same draw is placed
+        const Mat f_good=mul(read,good);GripCandidate c{};candidate_from_read(read,f_good,c,0x7009,write_engine,space_joint59,51,801);
+        CHECK(!Binder::observe(0,c));CHECK(Binder::observe(0,c));
+        const Mat b=mul(image,good);
+        const auto p=publish_frame(801,f_good,true,b,Mat{},false,Mat{},t);
+        check_placed(p,0,part,"valid-after-reject");
+        CHECK(Binder::summary(0).rejects==1 && Binder::summary(0).learns==1);
+        std::printf("v1106 invalid G: rejected=1 fallback_frames=1 bound_after_valid=%d\n",int(Binder::summary(0).bound));
+    }
+
+    // ---- 8. two-pass colour/depth equivalence and the single-frame cost ----------------------------------------------
+    {
+        Binder::clear();Place::clear();
+        const int t=50;const std::uint32_t frame=900;
+        const Mat read=hand_at(t-1,0),image=hand_at(t,0),g=rigid(rot(.1,.4,.2,.3),.02,.02,.01);
+        const Mat f=mul(read,g),b=mul(image,g);
+        GripCandidate c{};candidate_from_read(read,f,c,0x800a,write_engine,space_joint59,60,frame);
+        Binder::observe(0,c);Binder::observe(0,c);
+        const auto p=publish_frame(frame,f,true,b,Mat{},false,Mat{},t);
+        const Mat model=mul(f,part);const auto cur=floats(mul(frames_seen.at(frame).vp[1],model));
+        std::array<float,16> c1{},p1{},c2{},p2{};
+        const Result colour=Place::place(frame,provider,cur.data(),nullptr,c1.data(),p1.data(),-1,1);
+        const Result depth=Place::place(frame,provider,cur.data(),cur.data(),c2.data(),p2.data(),-1,1);
+        CHECK(colour.side==0 && depth.side==0 && same_rows(c1.data(),c2.data()) && same_rows(p1.data(),p2.data()));
         std::array<float,16> o{},q{};
-        // another object, a weapon part out of reach, a draw whose cached previous MVP is something else
-        const Mat unrelated=rigid(rot(1,2,3,.7),-91.5,-92.2,5.2),near=mul(tick_frame,parts[1]);
-        const auto c_un=floats(mul(w.vp[1],unrelated)),p_un=floats(mul(w.vp[0],unrelated));
-        CHECK(Place::place(engine_frame,provider,c_un.data(),p_un.data(),o.data(),q.data()).side<0);
-        const auto c_cert=floats(mul(w.vp[1],near)),p_cert=floats(mul(w.vp[0],near));   // a certifiable draw of the weapon, out of a short reach
-        Place::reach.store(.05);
-        const Result far=Place::place(engine_frame,provider,c_cert.data(),p_cert.data(),o.data(),q.data());
-        Place::reach.store(.8);
-        CHECK(far.side<0 && far.stage==far_away);
-        CHECK(Place::place(engine_frame,provider,c_cert.data(),p_cert.data(),o.data(),q.data()).side==0);
-        const auto c_near=floats(mul(w.vp[1],near)),p_bad=floats(mul(w.vp[0],mul(rigid(identity(),.02,0,0),near)));   // cached MVP of something else
-        const Result bad=Place::place(engine_frame,provider,c_near.data(),p_bad.data(),o.data(),q.data());
-        CHECK(bad.side<0 && bad.stage==no_certificate);
-        // v960: the same uncertifiable draw is placed in the eye it is tagged with (its orientation fits that eye), not in the other, canted one
-        {const Result t=Place::place(engine_frame,provider,c_near.data(),p_bad.data(),o.data(),q.data(),1);
-         CHECK(t.side==0 && t.eye==1 && t.stage==placed_tagged);
-         const Mat want=mul(mul(w.vp[1],render_info.at(engine_frame).first),parts[1]);double e=0;
-         for(std::size_t i=0;i<16;++i) e=std::max(e,std::abs(o[i]-want[i])/(1+std::abs(want[i])));
-         CHECK(e<2e-4);
-         CHECK(Place::place(engine_frame,provider,c_near.data(),p_bad.data(),o.data(),q.data(),0).side<0);
-         // v963: a draw placed without the previous render's views has the hand's own previous position under the current view
-         // (vp * previous placed matrix), not zero motion: zero left TAA/DLSS sampling the background at the weapon's new pixel.
-         const auto no_previous=[](std::uint32_t f,std::uint32_t) -> const Views* {return provider(f,0);};
-         const Result np=Place::place(engine_frame,no_previous,c_near.data(),p_bad.data(),o.data(),q.data(),1);
-         CHECK(np.side==0 && np.stage==placed_tagged);
-         const Mat want_prev=mul(mul(frames_seen.at(engine_frame).vp[1],penultimate_placed),parts[1]);
-         double previous_error=0,motion=0;
-         for(std::size_t i=0;i<16;++i) {
-             previous_error=std::max(previous_error,std::abs(double(q[i])-double(want_prev[i]))/(1.0+std::abs(double(want_prev[i]))));
-             motion=std::max(motion,std::abs(double(q[i])-double(o[i]))/(1.0+std::abs(double(o[i]))));
-         }
-         CHECK(previous_error<2e-4 && motion>1e-6);}
-        // a frame nobody published, and a slot reused by a newer frame
-        CHECK(Place::place(engine_frame+100,provider,c_near.data(),c_near.data(),o.data(),q.data()).side<0);
-        // no view-projections known for the render: untouched
-        const auto none=[](std::uint32_t,std::uint32_t) -> const Views* {return nullptr;};
-        CHECK(Place::place(engine_frame,none,c_near.data(),c_near.data(),o.data(),q.data()).stage==no_views);
+        const auto started=std::chrono::steady_clock::now();
+        int hits=0;
+        for(int i=0;i<50000;++i) hits+=Place::place(frame,provider,cur.data(),nullptr,o.data(),q.data(),-1,1).side>=0;
+        const double ns=std::chrono::duration<double,std::nano>(std::chrono::steady_clock::now()-started).count()/50000.;
+        CHECK(hits==50000 && ns<20000.);
+        std::printf("v1106 depth/colour identical=1 cost=%.1f ns\n",ns);
     }
 
-    // Hot path: the common case is a draw that is not the weapon's.
-    {
-        const Wp& w=frames_seen.at(engine_frame);
-        std::vector<std::array<float,16>> draws,previous;
-        for(int k=0;k<512;++k) {const Mat m=rigid(rot(1,2,3,k*.1),.5+.01*k-91.8,.2-92.5,1.0+4.9);draws.push_back(floats(mul(w.vp[1],m)));previous.push_back(floats(mul(w.vp[0],m)));}
-        const Mat weapon=mul(render_info.at(engine_frame).second,parts[1]);
-        const auto wc=floats(mul(w.vp[1],weapon)),wp=floats(mul(w.vp[0],weapon));
-        std::array<float,16> o{},q{};int hits=0;
-        auto t0=std::chrono::steady_clock::now();
-        for(int rep=0;rep<200;++rep) for(std::size_t k=0;k<draws.size();++k) hits+=Place::place(engine_frame,provider,draws[k].data(),previous[k].data(),o.data(),q.data()).side>=0;
-        const double reject_ns=std::chrono::duration<double,std::nano>(std::chrono::steady_clock::now()-t0).count()/(200.0*double(draws.size()));
-        t0=std::chrono::steady_clock::now();
-        for(int rep=0;rep<50000;++rep) hits+=Place::place(engine_frame,provider,wc.data(),wp.data(),o.data(),q.data()).side>=0;
-        const double place_ns=std::chrono::duration<double,std::nano>(std::chrono::steady_clock::now()-t0).count()/50000.0;
-        std::printf("draw cost (lab views provider included): %.1f ns for a draw that is not the weapon's, %.1f ns for the weapon's (%d hits)\n",reject_ns,place_ns,hits);
-        CHECK(hits==50000 && reject_ns<2000 && place_ns<20000);
-    }
     std::printf(failures?"weapon_draw_place_check FAILED\n":"weapon_draw_place_check OK\n");
     return failures?1:0;
 }

@@ -108,10 +108,21 @@ struct LyingGun {
     // native only: what brings it back (the inventory record is found again by decl and entity id; the record pointer moves when the list grows)
     std::uintptr_t item_decl{},ammo_decl{},entity{};std::uint32_t item_spawn{};
 };
-struct HeldSide {int pe{-1};bool shown{},have_cmd{};const char* failed{};held_copy::Pose cmd{};};
+struct HeldSide {int pe{-1};bool shown{},have_cmd{};const char* failed{};unsigned tries{};std::uint64_t retry_at{};held_copy::Pose cmd{};}; // failed: the def that did not spawn; retried every 250 ms, 12 times
 struct HeldPub {bool valid{};held_copy::Pose pose{};std::uint64_t tick{};std::uintptr_t ent{};std::uint32_t id{};};
+// v1101: the copy a hand draws (the mirror copy of a natively equipped weapon, or a mod-owned held copy), as the render thread's weapon
+// publisher needs it for draw-time placement (src/dxgi_probe.cpp publish_weapon_draw -> weapon_draw_place.hpp). `read` is the hand
+// pose the copy was last placed from (the same 15-float model-frame layout: origin, three axis rows, scales), `serial` counts those
+// placements: exactly the native weapon's (tick frame, hand read, read serial) pair, so the same pair-validity rules apply. The draw's
+// model frame itself is read live from entity+0xf0 -> model+0x1860 by the publisher, like the native weapon's.
+struct CopyDraw {bool valid{};std::uintptr_t entity{};std::uint32_t id{};std::array<float,15> read{};std::array<float,15> offset{};bool offset_valid{};std::uint64_t serial{};std::uint64_t write_serial{};unsigned kind{};};
 // A lying gun as the input thread sees it (NativeWeaponHands::gun_copy).
 struct GunCopyInfo {bool present{},flying{},native{};unsigned kind{};std::array<float,3> pos{};std::array<float,9> axis{1,0,0,0,1,0,0,0,1};const char* def{};std::uint64_t since{};};
+// v1102: a copy placement's report to the draw-time weapon publisher (src/weapon_draw_place.hpp WriteLog): the physical hand
+// that draws the copy, its entity, the exact hand pose it was placed from and the writer kind (2 mirror, 3 mod-held). v1104: returns
+// the WriteLog serial that identifies that note (0 when the note was dropped), so a fallback candidate built from CopyDraw is ordered
+// in the same serial space as the ring instead of the CopyDraw's own serial.
+using CopyDrawWrite=std::uint64_t (*)(unsigned side,std::uintptr_t entity,std::uint32_t id,const float* read15,unsigned kind) noexcept;
 class NativeWeaponHands {
     friend struct NativeHipVisibilityFixture;
     friend struct NativeWeaponExchangeFixture;
@@ -119,7 +130,7 @@ class NativeWeaponHands {
     friend struct GunCopiesFixture;
 public:
     enum class Op : unsigned {draw,sheathe,drop,pickup,recall,stow,gun_draw,gun_holster,shove,ragdoll,yank,wake,living_start,living_pull,
-        gun_drop,gun_pickup,slot1_restore,test_equip,slot1_unequip}; // dual wield (row A): see gun_drop / gun_pickup / slot1_restore below; test_equip: the "equip" test command; slot1_unequip: the Heart let go (v771)
+        gun_drop,gun_pickup,slot1_restore,test_equip,slot1_unequip,carry_left_redraw}; // dual wield (row A): see gun_drop / gun_pickup / slot1_restore below; test_equip: the "equip" test command; slot1_unequip: the Heart let go (v771)
     // G6 (plan Task 14): the hold of a living NPC pulls him (the existing teleport 0x87d1e0, horizontal steps toward the hand) only when the guard_probe
     // experiments (plan Task 13, docs/BONELAB-FEEL-GUARD-PULL-RE.md) showed no snap-back and no yaw pop. Set from that verdict.
     static constexpr bool living_pull_enabled=false;
@@ -217,6 +228,7 @@ public:
             case Op::gun_pickup: try {ok=gun_pickup(base,read,r,manual_equip);} catch(...) {ok=false;} if(!ok) ++gun_failed;break;
             case Op::slot1_restore: try {ok=slot1_restore(base,read);} catch(...) {ok=false;} if(ok) ++slot1_restores;else ++gun_failed;break;
             case Op::test_equip: try {ok=test_equip(base,read,r.decl);} catch(...) {ok=false;} break;
+            case Op::carry_left_redraw: try {ok=carry_redraw(base,read,r.target);} catch(...) {ok=false;} break; // v1041/v1044: the left item CarryCorpse put away, equipped again
             case Op::slot1_unequip: try {ok=dual_wield_.load(std::memory_order_relaxed) && equip(base,read,0x20,64);} catch(...) {ok=false;} break; // the engine's own instant unequip (as a native gun_drop)
             }
             if(!ok) ++failures;
@@ -465,7 +477,8 @@ private:
     // A pull step (r.pos: his new feet position, at most 5 cm per 100 ms and horizontal, LivingHold) through the existing teleport; only with
     // living_pull_enabled (the Task 13 verdict), never on a dead or recycled NPC. The orientation is kept as read (the probe's yaw-pop check).
     template<class Read> static bool living_pull(std::uintptr_t base,Read& read,const Request& r) {
-        if(!living_pull_enabled || !r.target || !rig::pointer(r.target) || !rig::typed(read,base,r.target,NativeMelee::npc_vtable_rva) || !living(read,r.target)) return false;
+        if constexpr(!living_pull_enabled) return false; // the Task 13 verdict: the branch is compiled out (C4127 under /WX otherwise)
+        if(!r.target || !rig::pointer(r.target) || !rig::typed(read,base,r.target,NativeMelee::npc_vtable_rva) || !living(read,r.target)) return false;
         const auto axis=rig::value<std::array<float,9>>(read,r.target+0x30c);
         if(!axis) return false;
         teleport<Read>(base,r.target,r.pos,*axis);return true;
@@ -482,7 +495,7 @@ public:
     inline static std::atomic<unsigned> guard_probes{};
     static void arm_guard_probe(const std::filesystem::path& knob,const std::filesystem::path& csv) {
         guard_probe_plan_={};guard_probe_run_=GuardProbeRun{};guard_probe_knob_=knob;guard_probe_csv_=csv;
-        std::error_code ec;if(!std::filesystem::exists(knob,ec)) return;
+        std::error_code ec;if(csv.empty() || !std::filesystem::exists(knob,ec)) return; // v1046: diagnostics off = empty csv: never armed (it would skip the pull and eat its knob)
         std::ifstream in(knob);std::string text((std::istreambuf_iterator<char>(in)),std::istreambuf_iterator<char>());
         if(const auto plan=parse_guard_probe(text)) guard_probe_plan_=*plan;
     }
@@ -919,6 +932,36 @@ public:
     }
 private:
     inline static std::atomic<bool> mirrored_{},clear_req_{};inline static std::mutex feed_m_;inline static std::array<HeldFeed,2> feed_{};
+    inline static std::array<CopyDraw,2> copy_draw_{};inline static std::array<std::uint64_t,2> copy_serial_{};inline static std::atomic<CopyDrawWrite> draw_write_{};
+    // The copy's read hand in the native model-frame layout (weapon_draw::model_of): origin, three axis rows, scales.
+    static std::array<float,15> draw_frame(const held_copy::Pose& p) noexcept {
+        std::array<float,15> f{};
+        f[0]=static_cast<float>(p.position.x);f[1]=static_cast<float>(p.position.y);f[2]=static_cast<float>(p.position.z);
+        for(unsigned c=0;c<3;++c) {f[3+c*3]=static_cast<float>(p.basis[c].x);f[3+c*3+1]=static_cast<float>(p.basis[c].y);f[3+c*3+2]=static_cast<float>(p.basis[c].z);}
+        f[12]=f[13]=f[14]=1;
+        return f;
+    }
+    // Called by the copy services after the copy is placed/shown. A new serial is the new (copy frame, hand read) pair. v1102: also
+    // reports the placement (and its physical hand) to the draw-time publisher; kind: 2 mirror copy, 3 mod-held copy. v1104: the read is
+    // the controller GRIP frame and the note says so (WriteLog read_grip); the returned WriteLog serial is kept for the publisher's fallback.
+    // v1106: also report the EXACT local offset the copy service applied (`applied`; already mirrored for the other hand). The binding
+    // learns G from it directly, so a copy is never re-derived from a propagated entity frame and cannot inherit the hand feed's world.
+    static void note_copy_draw(unsigned side,std::uintptr_t entity,std::uint32_t id,const held_copy::Pose& read,
+            const held_copy::Pose& applied,unsigned kind) noexcept {
+        if(side>1 || !entity || !held_copy::valid(read)) return;
+        const auto frame=draw_frame(read);
+        std::lock_guard<std::mutex> l(feed_m_);
+        CopyDraw& d=copy_draw_[side&1u];
+        d.valid=true;d.entity=entity;d.id=id;d.read=frame;d.serial=++copy_serial_[side&1u];d.kind=kind;d.write_serial=0;
+        if(held_copy::valid(applied)) {d.offset=draw_frame(applied);d.offset_valid=true;}
+        else {d.offset={};d.offset_valid=false;}
+        if(const auto sink=draw_write_.load(std::memory_order_acquire)) d.write_serial=sink(side,entity,id,frame.data(),kind);
+    }
+    // The copy is hidden, released, or replaced: no source (the publisher also rejects a pair whose model frame moved without a serial).
+    static void clear_copy_draw(std::uintptr_t entity=0) noexcept {
+        std::lock_guard<std::mutex> l(feed_m_);
+        for(auto& d:copy_draw_) if(d.valid && (!entity || d.entity==entity)) d=CopyDraw{};
+    }
     inline static std::array<HeldSlot,2> mirror_slots_{};inline static std::array<HeldCopy,5> copies_{};inline static std::uintptr_t mirror_game_{};inline static bool mirror_live_{};
     // Copy defs by index: 0 the sword, then gun/crossbow of Corvo, gun/crossbow of Emily (the hip clones' defs; 1+2*emily+crossbow).
     static constexpr std::array<const char*,5> mirror_def_names{{sword_copy_decl,"models/campaign/dunwall/midnightassets/gun_corvo_midnight.def",
@@ -957,6 +1000,22 @@ private:
         }
         return -1;
     }
+    // v1105: the kind of the EQUIPPED component of an inventory item record, through the path the left-weapon socket receipts use
+    // (src/native_left_weapon_socket.hpp:104-107): the record names its component (+0x10) and declaration (+0x18), and the component
+    // matches the exe's arkCpntWeaponGun / arkCpntWeaponCrossbow vtable together with that class's declaration vtable. The vtable RVAs
+    // are the ones proved against Dishonored2.exe on disk (artifacts/round5/weapon-rtti.txt: the gun's CompleteObjectLocator at RVA
+    // 0x1f9ac38 names vtable RVA 0x1b53f58, the crossbow's 0x1fbfe28 names 0x1b9cbf8, both from RTTI TypeDescriptor .?AVarkCpnt...).
+    // This is the item's own component, not a scan of the entity's list: the list may hold several components and the scan skipped the
+    // declaration check the game's own equip path uses. -1 = not a gun/crossbow (or unreadable).
+    template<class Read> static int item_kind(std::uintptr_t base,Read& read,std::uintptr_t item) {
+        if(!item) return -1;
+        const auto component=rig::value<std::uintptr_t>(read,item+0x10);
+        const auto declaration=rig::value<std::uintptr_t>(read,item+0x18);
+        if(!component || !declaration || !rig::pointer(*component) || !rig::pointer(*declaration)) return -1;
+        if(rig::typed(read,base,*component,0x1b53f58) && rig::typed(read,base,*declaration,0x1b53e18)) return 0;  // arkCpntWeaponGun + its decl
+        if(rig::typed(read,base,*component,0x1b9cbf8) && rig::typed(read,base,*declaration,0x1b9cab8)) return 1;  // arkCpntWeaponCrossbow + its decl
+        return -1;
+    }
     // The item in an inventory slot (+0x68 sword, +0x70 the other hand; item+8 = its weapon entity's id) and the copy def it gets. false = unreadable
     // this time (keep the state); true with cand 0 = the slot is empty.
     template<class Read> static bool mirror_lookup(std::uintptr_t base,Read& read,unsigned slot,HeldSlot& s) {
@@ -989,6 +1048,7 @@ private:
         auto& s=mirror_slots_[slot];
         if(s.def<copies_.size()) {auto& c=copies_[s.def];
             if(c.ent) {const bool live=alive_entity(base,read,c.ent,c.id);
+                clear_copy_draw(c.ent);   // v1101: no copy is drawn by this hand any more
                 if(live && remove) remove_entity(base,c.ent);
                 else if(live && c.shown) visible(base,read,c.ent,false);
                 if(!live || remove) c={};else c.shown=false;}}
@@ -1014,7 +1074,7 @@ private:
         const auto game=rig::value<std::uintptr_t>(read,base+0x39a5290);
         if(!game || *game!=mirror_game_) { // a new level or session: every pointer is dead, call nothing
             for(auto& s:mirror_slots_) s={};
-            copies_={};mirror_game_=game?*game:0;mirror_live_=false;mirror_bits=0;
+            copies_={};clear_copy_draw();mirror_game_=game?*game:0;mirror_live_=false;mirror_bits=0;
             if(!game) return;
         }
         const auto now=GetTickCount64();
@@ -1069,7 +1129,7 @@ private:
         }
         held_copy::Pose out{};
         const bool placed=s.we_hid && feed(other_side,hand,speed,.25) && held_copy::target(hand,s.offset.value,out); // hidden by the engine alone: no stand-in
-        if(!placed) {if(c.ent && c.shown && visible(base,read,c.ent,false)) c.shown=false;return;}
+        if(!placed) {if(c.ent && c.shown && visible(base,read,c.ent,false)) c.shown=false;clear_copy_draw(c.ent);return;}
         std::array<float,3> pos{float(out.position.x),float(out.position.y),float(out.position.z)};std::array<float,9> axis{};
         for(unsigned i=0;i<3;++i) {axis[i*3]=float(out.basis[i].x);axis[i*3+1]=float(out.basis[i].y);axis[i*3+2]=float(out.basis[i].z);}
         if(!c.ent) {
@@ -1087,6 +1147,7 @@ private:
                 mirror_err_mm=static_cast<float>(length(Vec3{at[0],at[1],at[2]}-s.cmd.position)*1000);
         }
         s.cmd=out;s.have_cmd=true;
+        note_copy_draw(other_side,c.ent,c.id,hand,held_copy::mirror(s.offset.value),2);   // v1101/v1106: the read and the exact mirrored offset
     }
 public:
     // ---- Dual wield, row A (docs/dual-wield-two-hands-plan.md; artifacts/claude/dual-wield/fleet/A-gun-copies.md) ----
@@ -1117,6 +1178,49 @@ public:
         if(!p.valid || steady_ms()-p.tick>250) return std::nullopt;
         return p.pose;
     }
+    // v1101: the copy this hand draws (mirror copy or mod-owned held copy), for the weapon placement's publisher. Any thread.
+    static CopyDraw copy_draw(unsigned side) noexcept {
+        if(side>1) return {};
+        std::lock_guard<std::mutex> l(feed_m_);
+        return copy_draw_[side];
+    }
+    // v1104: the slot-1 item's component type as the grip-clip table keys it (1 pistol, 2 crossbow, 0 other/unknown). The decl names
+    // do not carry the kind (the dual-wield notes), so this is the same arkCpntWeaponGun / arkCpntWeaponCrossbow test the copy code uses.
+    template<class Read> static int weapon_type(std::uintptr_t base,Read& read,std::uintptr_t entity) {
+        const int kind=weapon_kind(base,read,entity);
+        return kind==0?1:kind==1?2:0;
+    }
+    // v1105: the type of the item record itself (grip_clips::Type: 1 pistol, 2 crossbow, 0 other/unknown), from the same verified
+    // component+declaration pair as the game's equip path. This is what dxgi_probe reads from the hand-state snapshot, so the type
+    // cannot go to 0 just because a second player-graph walk on another thread failed (the v1012 status stayed [0,0]).
+    template<class Read> static int item_type(std::uintptr_t base,Read& read,std::uintptr_t item) {
+        const int kind=item_kind(base,read,item);
+        if(kind>=0) return kind==0?1:2;
+        // v1106: the item record's pair is the primary path (the game's own equip path). If it does not type this frame (a stale record
+        // during an equip/load, or an item whose declaration is not the class vtable), fall back to the weapon ENTITY's component list,
+        // the round-4 path that the barrel aim already uses live. It is a union test (a component of the right class anywhere in the
+        // entity), so it is only a fallback; a record that types is never overridden by it.
+        try {
+            const auto id=rig::value<std::uint32_t>(read,item+8);
+            if(!id || *id==0x3fff0010 || (*id>>16)>=0x3fff) return 0;
+            const auto game=rig::value<std::uintptr_t>(read,base+0x39a5290);
+            if(!game || !*game) return 0;
+            const auto entity=rig::value<std::uintptr_t>(read,*game+0x3130b0+(*id>>16)*8ull);
+            if(!entity || !rig::pointer(*entity)) return 0;
+            const int by_entity=weapon_kind(base,read,*entity);
+            return by_entity==0?1:by_entity==1?2:0;
+        } catch(...) {return 0;}
+    }
+    template<class Read> static int slot1_type(std::uintptr_t base,Read& read) {
+        const auto arms=rig::player_arms(read,base);if(!arms) return 0;
+        const auto inventory=rig::value<std::uintptr_t>(read,(*arms)[0].body+0x60);if(!inventory || !*inventory) return 0;
+        const auto item=rig::value<std::uintptr_t>(read,*inventory+0x70);if(!item || !*item) return 0;
+        return item_type(base,read,*item);
+    }
+    // v1102: every copy placement (service_mirror, service_held) also reports the exact hand pose it placed from, so the draw-time
+    // publisher can correct the copy to the hand its render draws (src/weapon_draw_place.hpp WriteLog).
+    using DrawWrite=CopyDrawWrite;
+    static void draw_write(DrawWrite sink) noexcept {draw_write_.store(sink,std::memory_order_release);}
     // The held copy's entity and id (the gun that fires from that hand; the game thread re-checks both), {0,0} while it is not shown.
     static std::pair<std::uintptr_t,std::uint32_t> held_copy_entity(unsigned side) {
         std::lock_guard<std::mutex> l(feed_m_);const auto& p=held_pub_[side&1u];
@@ -1276,7 +1380,10 @@ private:
             if(!equip(base,read,0x20,64)) {pool_release(base,read,pe);return false;}
             auto& c=copies_[s1.def]; // a mirrored copy of this gun in the other hand goes now, not at the mirror's next look
             if(mirror_slots_[1].native==s1.entity && c.ent && c.shown && alive_entity(base,read,c.ent,c.id) && visible(base,read,c.ent,false)) c.shown=false;
-        } else if(held_[side].pe>=0) {pool_release(base,read,held_[side].pe);held_[side]=HeldSide{};held_want_[side].store(nullptr,std::memory_order_relaxed);}
+        } else if(held_[side].pe>=0 && !std::strcmp(pool_[held_[side].pe].def,def)) {pool_release(base,read,held_[side].pe);held_[side]=HeldSide{};}
+        // v1041: held_want_ is the caller's alone. The drop used to null it, which erased the copy the caller had just asked for in the same hand
+        // (a wheel choice or same-item copy that displaced this one: "selected, not shown until I release and squeeze again"); a drop of the
+        // copy the hand released has its want cleared by the caller already.
         auto& g=lying_[li];g=LyingGun{};
         g.present=true;g.native=native;g.pe=pe;g.def=pool_[pe].def;g.kind=static_cast<unsigned>(held_copy::kind_of(def));
         g.since=GetTickCount64();g.stow_ms=g.since;g.checked_ms=g.since;
@@ -1400,6 +1507,7 @@ private:
     template<class Read> static void held_hide(std::uintptr_t base,Read& read,unsigned side) {
         auto& h=held_[side];
         if(h.pe>=0 && pool_alive(base,read,h.pe) && pool_[h.pe].shown && visible(base,read,pool_[h.pe].ent,false)) {pool_[h.pe].shown=false;++held_hides;}
+        clear_copy_draw(h.pe>=0?pool_[h.pe].ent:0);   // v1101: this hand draws no copy now
         h.shown=false;held_bits&=~(1u<<side);
         std::lock_guard<std::mutex> l(feed_m_);held_pub_[side].valid=false;
     }
@@ -1428,23 +1536,27 @@ private:
         for(unsigned side=0;side<2;++side) {
             auto& h=held_[side];const char* want=held_want_[side].load(std::memory_order_relaxed);
             if(h.pe>=0 && !pool_alive(base,read,h.pe)) {if(h.pe<static_cast<int>(pool_.size())) pool_[h.pe]={};h=HeldSide{};held_bits&=~(5u<<side);}
-            if(h.failed && h.failed!=want) h.failed=nullptr; // another def: try again
+            if(h.failed && h.failed!=want) {h.failed=nullptr;h.tries=0;} // another def: try again
             if(!want) {if(h.pe>=0) {held_hide(base,read,side);pool_release(base,read,h.pe);h=HeldSide{};}continue;}
-            if(h.pe>=0 && std::strcmp(pool_[h.pe].def,want)) {const auto failed=h.failed;held_hide(base,read,side);pool_release(base,read,h.pe);h=HeldSide{};h.failed=failed;}
+            if(h.pe>=0 && std::strcmp(pool_[h.pe].def,want)) {const auto failed=h.failed;const auto tries=h.tries;held_hide(base,read,side);pool_release(base,read,h.pe);h=HeldSide{};h.failed=failed;h.tries=tries;}
             held_copy::Pose hand{},offset{},out{};held_copy::Motion speed{};bool mirrored{};std::optional<Vec3> drawn_root;
             const bool measured=grip_offset(want,side,offset,mirrored);
             if(measured) held_bits|=4u<<side;else held_bits&=~(4u<<side);
             if(!feed(side,hand,speed,.25,&drawn_root)) {held_hide(base,read,side);continue;} // no fresh hand: no stand-in
+            // v1106: a feed whose recorded root is in another world (a load/teleport between the render publication and this service) still
+            // describes the OLD world. It used to be teleported with the stale hand after the load, which is the v1014 16 m gate rejection
+            // (the read was 16.3-17.5 m from the image hand while the weapon's own origin gap was 30.8 mm). Drop that frame instead.
+            if(drawn_root && now_root && length(*now_root-*drawn_root)>=1.) {++held_rejected;held_hide(base,read,side);continue;}
             if(drawn_root && now_root) {const auto moved=*now_root-*drawn_root;
-                if(length(moved)<1.) {hand.position=hand.position+moved;hand=held_copy::carry(hand,*now_root,step,turn);++held_carried;}} // the player's motion since the hand was drawn (a teleport or load: not), and the step and turn the physics is about to add (v776, v816)
+                if(length(moved)<1.) {hand.position=hand.position+moved;hand=held_copy::carry(hand,*now_root,step,turn);++held_carried;}} // the player's motion since the hand was drawn, and the step and turn the physics is about to add (v776, v816)
             if(!held_copy::place(hand,offset,mirrored,out)) {held_hide(base,read,side);continue;}
             std::array<float,3> pos{float(out.position.x),float(out.position.y),float(out.position.z)};std::array<float,9> axis{};
             for(unsigned i=0;i<3;++i) {axis[i*3]=float(out.basis[i].x);axis[i*3+1]=float(out.basis[i].y);axis[i*3+2]=float(out.basis[i].z);}
             if(h.pe<0) {
-                if(h.failed==want) continue;
+                if(h.failed==want && (h.tries>=12 || GetTickCount64()<h.retry_at)) continue; // v1041: a transient failure (def not loaded yet, a hidden-state call refused) is retried, not latched
                 h.pe=pool_acquire(base,read,want,pos,axis);
                 if(h.pe<0) {
-                    h.failed=want;++held_failed;
+                    h.failed=want;++held_failed;++h.tries;h.retry_at=GetTickCount64()+250;
                     std::lock_guard<std::mutex> l(feed_m_);std::snprintf(held_last_failed_.data(),held_last_failed_.size(),"%s",want);
                     continue;
                 }
@@ -1454,6 +1566,7 @@ private:
                 if(!e.shown && visible(base,read,e.ent,true)) e.shown=true;
             }
             h.shown=true;h.cmd=out;h.have_cmd=true;held_bits|=1u<<side;
+            note_copy_draw(side,pool_[h.pe].ent,pool_[h.pe].id,hand,mirrored?held_copy::mirror(offset):offset,3);   // v1101/v1106: read + exact applied offset
             std::lock_guard<std::mutex> l(feed_m_);
             held_pub_[side]=HeldPub{true,out,steady_ms(),pool_[h.pe].ent,pool_[h.pe].id};
         }
@@ -1485,7 +1598,7 @@ private:
     }
     static void guns_forget() { // every pointer is dead or already removed: call nothing
         lying_={};held_={};meas_={};pool_={};bash_last_={};bash_struck_={};gun_native_lying_=guns_live_=false;held_bits=0;slot1_cur_=slot1_prev_=0;
-        std::lock_guard<std::mutex> l(feed_m_);held_pub_={};
+        std::lock_guard<std::mutex> l(feed_m_);held_pub_={};copy_draw_={};
     }
     template<class Read> static void service_guns(std::uintptr_t base,Read& read) {
         const bool on=dual_wield_.load(std::memory_order_relaxed),clear=clear_guns_req_.exchange(false,std::memory_order_relaxed);
@@ -1505,6 +1618,16 @@ private:
         service_bash(base,read,now);
         bool live=false;for(const auto& g:lying_) live=live || g.present;for(const auto& e:pool_) live=live || e.ent!=0;for(const auto& m:meas_) live=live || m.native!=0;
         guns_live_=live;
+    }
+    // Op::carry_left_redraw (v1044): the left item CarryCorpse put away (its item decl, remembered before the carry), equipped again as the
+    // wheel does (code 0x30) once the carry holds. v1041's EquipChange draw of the "selected" item (0x24) was refused three times in a row
+    // during a carry (sim v1044: queued, left slot stayed empty); this is slot1_restore's path with an explicit item.
+    template<class Read> static bool carry_redraw(std::uintptr_t base,Read& read,std::uintptr_t decl) {
+        if(!decl) return false;
+        const auto fsm=player_fsm(base,read);if(!fsm) return false;
+        const auto inventory=rig::value<std::uintptr_t>(read,fsm+0x328);if(!inventory || !*inventory) return false;
+        const auto item=find_record(read,*inventory,decl,0);if(!item) return false;
+        return equip_item(base,read,item,0,0x30);
     }
     // Op::slot1_restore: the item slot 1 held before its last change is equipped again, as the wheel does (code 0x30), e.g. the power a wheel
     // swapped out for a gun that went to the other hand as its copy.

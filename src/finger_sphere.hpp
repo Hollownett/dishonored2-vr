@@ -1,9 +1,14 @@
-#pragma once
+﻿#pragma once
 // The sphere grip (user, headset 2026-10-27, v638): a physical prop (book, folder, candlestick, spoon, fork) or a body part the hand holds is wrapped by the
 // fingers on ONE invisible ball fixed in the palm for the whole hold, not on the object's own shapes. The object lags and swings behind the hand (motor-held:
 // 4 rad/s, 13 mm a frame in the v638 headset run), so the per-frame contact against its real shape moved under the fingers every frame and they twitched;
 // a ball in the palm's own frame is the same shape for the solver every frame (finger_contact's memo keys on the shapes in the palm frame) and the curls settle once.
 // Build/legacy-finger-grab restores the contact against the object's shapes.
+//
+// The ball's SIZE is the grip ball (user, headset 2026-11-05): a small ball at the grip place, the width of the thing's thin side under the palm, not the ball
+// round its whole box (v642). A bottle's box gave 15 cm, a plank's the 50 cm cap: the hand opened flat round a ball the prop floated inside, which is not a grip.
+// The motor seats the prop's own surface on the palm (the grasp point, Task 12), so the ball on the palm skin IS the thing's cross-section under the hand:
+// a bottle's 3.5 cm radius, a book's 2 cm thickness, a spoon's 1.5 cm floor. Build/legacy-sphere-grip-whole-object restores the v642 rule.
 #include "finger_ik.hpp"
 #include <algorithm>
 #include <cmath>
@@ -23,6 +28,43 @@ inline double sphere_grip_radius(const WorldTrackedPose& pose,const NativeGrabBo
     if(const auto local=held_local_extents(pose.basis,e)) return sphere_grip_radius(*local);
     return sphere_grip_radius(e);
 }
+// The grip ball (user, headset 2026-11-05: "a small sphere at a grip place ... more native grip"): the thing's thin side is what the fingers wrap, so its
+// half is the ball's radius, floored at sphere_grip_min (a fist still closes on it) and capped at sphere_grip_ball_max (a 4 cm radius, 8 cm ball: the widest the
+// fingers still wrap; past ~37 mm they only open, research-hand-grip-placement Â§"SphereGrip"). A spoon 1.5 cm, a book 2 cm, a bottle 3.5 cm, a crate 4 cm.
+inline constexpr double sphere_grip_ball_max=.03;   // v1037: a 6 cm ball at most - past it the fingers only spread ("palm stretches too much"), which pushed the thumb away from them
+inline double sphere_grip_ball_radius(Vec3 half) {
+    const double a=std::abs(half.x),b=std::abs(half.y),c=std::abs(half.z);
+    if(!std::isfinite(a+b+c)) return sphere_grip_unknown;
+    return std::clamp(std::min({a,b,c}),sphere_grip_min,sphere_grip_ball_max);
+}
+// A prop's grip ball from its own local box (the world box as it is when the axes cannot be solved).
+inline double sphere_grip_ball_radius(const WorldTrackedPose& pose,const NativeGrabBounds& bounds) {
+    const auto e=(bounds.maximum-bounds.minimum)*.5;
+    if(const auto local=held_local_extents(pose.basis,e)) return sphere_grip_ball_radius(*local);
+    return sphere_grip_ball_radius(e);
+}
+// A flat shape for a flat thing (user, headset 2026-11-05: "grip is unnatural on books"). A wide, thin prop - a book, a folder, a plank, a sheet - cannot be
+// closed on: it lies on the palm. Its grip shape is the thing's FACE at the skin (finger_ik's slab_shape), so the fingers rest on it as they do on a real book
+// instead of closing through its cover. Same cost as the ball: one shape, fixed in the palm frame, never re-read.
+// "Wide and thin": at most 3 cm on its thinnest side, at least 4 cm on its middle side, and the thin side at most half the middle one (a spoon's 1.5 cm middle
+// is a handle to close on, not a face to lie on; a bottle's 3.5 x 3.5 cross-section is a shaft).
+inline constexpr double grip_slab_thin_max=.03,grip_slab_wide_min=.04,grip_slab_ratio=.5;
+inline bool grip_is_flat(Vec3 half) noexcept {
+    const double lo=std::min({half.x,half.y,half.z}),hi=std::max({half.x,half.y,half.z}),mid=half.x+half.y+half.z-lo-hi;
+    return std::isfinite(lo+hi+mid) && lo<=grip_slab_thin_max && mid>=grip_slab_wide_min && lo<=grip_slab_ratio*mid;
+}
+// A prop's flatness from its own local box (the world box as it is when the axes cannot be solved).
+inline bool grip_is_flat(const WorldTrackedPose& pose,const NativeGrabBounds& bounds) noexcept {
+    try {
+        const auto e=(bounds.maximum-bounds.minimum)*.5;
+        if(const auto local=held_local_extents(pose.basis,e)) return grip_is_flat(*local);
+        return grip_is_flat(e);
+    } catch(...) {return false;}
+}
+// The flat grip itself: a wide thin prop gets NO contact shape at all - the hand is not closing on anything, it lies on the thing's face - and the fingers are
+// asked for a relaxed curl (a fraction of the hold's) instead of the closed one. Nothing to collide with every frame, so it is also the cheapest grip: the
+// solver has one shape fewer than a ball, and nothing that can twitch (user, headset 2026-11-05: "grip is unnatural on books").
+inline constexpr float grip_flat_reach=.35f;
 // A ragdoll bone (a corpse's limb, held for a drag): the visible limb, about 0.6 of its padded collision capsule (sim v640: a dragged wrist's 5-6 cm
 // capsule, or its box's x half that can be the forearm's half LENGTH, gave the 6 cm cap: a fist round a ball, not a wrist); never above the bone box's thinnest half side.
 inline constexpr double sphere_grip_bone_share=.6;

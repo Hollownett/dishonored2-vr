@@ -242,8 +242,9 @@ private:
         WorldTrackedPose sample_hand{};   // the hand the grab sampled this pass (the controller, or the coupled body pose)
         std::uint64_t hold_serial{};bool was_coupled{};Vec3 last_offset{};   // B16: this hold's serial; the coupling edge rebases the grab
         double sphere{};   // the sphere grip ball (finger_sphere.hpp) of this hold, decided at the bind; 0: none
+        bool flat{};       // the thing is wide and thin (a book, a folder): the fingers lie on its face (grip_flat_shape), not closed on the ball
         void end_hold() {
-            held.reset();sphere=0;corpse=capped=last_capped=near_noted=mass_noted=false;mass=0;bind_pelvis_z=std::numeric_limits<double>::quiet_NaN();
+            held.reset();sphere=0;flat=false;corpse=capped=last_capped=near_noted=mass_noted=false;mass=0;bind_pelvis_z=std::numeric_limits<double>::quiet_NaN();
             bind_motion=0;bind_owner.reset();anchor_view={};reset_tow();
         }
         Gate gate=Gate::none;float raw_grip{};UINT64 decision_tick{};bool decision_usable{};
@@ -270,6 +271,9 @@ private:
     // corpse_enabled_: build/no-corpse-grab clears it; lockout_ is internally locked (any thread); the dispatcher cost counters are dispatcher-thread only; no_posts_ is
     // build/no-ragdoll-posts, read at install for the wake path (Task 11).
     bool corpse_enabled_=true,no_posts_{},prop_grasp_point_=true,sphere_grip_=true;
+    // build/legacy-sphere-grip-whole-object (read at install): the v642 ball round the thing's whole box instead of the v1024 grip ball (finger_sphere.hpp)
+    bool sphere_whole_object_{};
+    bool grip_slab_{true};   // !build/no-grip-slab (read at install): a wide thin prop's grip is its face under the fingers, not a ball
     bool legacy_palm_select_{};   // build/legacy-palm-select (read at install): the nearest-AABB pick and no grab buffer (plan Task 5)
     EntityLockout lockout_{};CorpseDiagnostics corpse_diag_{};CorpseTraceWriter* corpse_trace_{};std::array<bool,2> docked_{};
     UINT64 pass_cost_us_{};std::atomic<UINT64> corpse_cost_us_{},corpse_cost_max_us_{},velocity_unknown_{};
@@ -589,7 +593,7 @@ private:
         if(result==VelocityWrite::faulted) {if(body.bone>=0) trip_fault_latch();++contact_.faults;release_all_locked();return false;}
         if(result==VelocityWrite::rejected) return true;
         if(motor.release) ++dropped_;else ++moved_;
-        if(samples_<4000) {
+        if(log_.is_open() && samples_<4000) {   // v1046: not logging = nothing to format
             log_<<GetTickCount64()<<','<<side<<','<<body.entity_id<<','<<body.component<<','<<body.identity.generation<<','<<body.handle
                 <<','<<body.flags<<','<<motor.release<<','<<body.pose.position.x<<','<<body.pose.position.y<<','<<body.pose.position.z;
             const auto target=lane.grab.target();log_<<','<<target.position.x<<','<<target.position.y<<','<<target.position.z;
@@ -712,8 +716,12 @@ private:
         lane.corpse=body.bone>=0 && corpse_enabled_ && ragdoll_pushable_state(read_,body.entity);
         lane.capped=lane.corpse || body.bone<0;
         lane.last_capped=false;lane.near_noted=lane.mass_noted=false;lane.mass=0;lane.bind_pelvis_z=std::numeric_limits<double>::quiet_NaN();
-        // The sphere grip (finger_sphere.hpp): the fingers wrap one ball from now on, sized once from the bone or the box as it is at the bind.
-        lane.sphere=!sphere_grip_?0.:body.bone>=0?rig::sphere_grip_radius_of_bone(body.bone,body.bounds):body.bounds?rig::sphere_grip_radius(body.pose,*body.bounds):0.;
+        // The sphere grip (finger_sphere.hpp): the fingers wrap one ball from now on, sized once from the bone or the box as it is at the bind. A prop gets the
+        // grip ball (its thin side, at the grasp point); build/legacy-sphere-grip-whole-object keeps v642's ball round the whole box, and a wide thin prop
+        // (a book, a folder) is FLAT instead: the fingers lie on its face, as a real hand holds it (build/no-grip-slab restores the ball there).
+        lane.flat=sphere_grip_ && grip_slab_ && !sphere_whole_object_ && body.bone<0 && body.bounds && rig::grip_is_flat(body.pose,*body.bounds);
+        lane.sphere=!sphere_grip_?0.:body.bone>=0?rig::sphere_grip_radius_of_bone(body.bone,body.bounds):
+            body.bounds?(sphere_whole_object_?rig::sphere_grip_radius(body.pose,*body.bounds):rig::sphere_grip_ball_radius(body.pose,*body.bounds)):0.;
         lane.bound_at=now;if(lane.capped) lane.last_motor=0; // no write yet this hold: the first one measures its dt from the bind
         if(coupling_on_) {lane.hold_serial=++hold_serials_;lane.was_coupled=false;lane.last_offset={};}   // B16: the render thread couples the new hold afresh
         {const auto motion=read_motion_state(body);lane.bind_motion=motion.index;lane.bind_owner=motion.owner;}
@@ -953,7 +961,7 @@ private:
                 const auto pick=pick_by_palm(p.palm,targets,lane.selection.current(),tuning_.hover_radius_m);
                 if(pick.index) {body=valid[*pick.index];distance=body->contact_distance(p.hand.position);}
             }
-            if(acquisition_samples_++<1000) {
+            if(acquisitions_.is_open() && acquisition_samples_++<1000) {   // v1046: not logging = nothing to format
                 acquisitions_<<now<<','<<side<<','<<p.hand.position.x<<','<<p.hand.position.y<<','<<p.hand.position.z<<','
                     <<lane.candidates.size()<<','<<(body?body->entity_id:0)<<','<<distance<<'\n';acquisitions_.flush();
             }
@@ -1148,6 +1156,8 @@ public:
     std::optional<NativeRigidBody> held(unsigned side) {std::lock_guard<std::mutex> lock(mutex_);return side<2?lanes_[side].held:std::nullopt;}
     // The radius of the ball this hand's fingers wrap while it holds a prop or a body part (0: none, or build/legacy-finger-grab).
     double hold_sphere(unsigned side) {std::lock_guard<std::mutex> lock(mutex_);return side<2 && lanes_[side].held?lanes_[side].sphere:0.;}
+    // This hand's hold is a wide, thin thing (finger_sphere.hpp grip_flat_shape): the fingers lie on its face instead of closing on the ball.
+    bool hold_flat(unsigned side) {std::lock_guard<std::mutex> lock(mutex_);return side<2 && lanes_[side].held && lanes_[side].flat;}
     std::optional<double> held_size(unsigned side) {
         std::lock_guard<std::mutex> lock(mutex_);const auto& h=lanes_.at(side).held;if(!h) return {};
         return h->bounds?length(h->bounds->maximum-h->bounds->minimum):.3;
@@ -1200,6 +1210,7 @@ public:
     }
     bool corpse_enabled() {std::lock_guard<std::mutex> lock(mutex_);return corpse_enabled_;}
     bool prop_grasp_point() const noexcept {return prop_grasp_point_;} // !build/no-prop-grasp-point, read at install; the drawn hand sits on a motor-held prop (Task 12)
+    bool sphere_whole_object() const noexcept {return sphere_whole_object_;} // build/legacy-sphere-grip-whole-object, read at install; the native HoldObject ball too (dxgi_probe)
     bool no_ragdoll_posts() const noexcept {return no_posts_;} // build/no-ragdoll-posts, read at install; the wake path (Task 11) honours it
     // The runaway lockout is written on the physics thread (dispatcher) and read from the game thread (Task 11 wake/retry), the status thread and the contact pass;
     // EntityLockout carries its own small mutex, so none of those readers touches mutex_.
@@ -1259,6 +1270,7 @@ public:
              <<",\"switches_10s\":"<<lane.selection.switches_10s(now)<<",\"hysteresis_held\":"<<lane.selection.hysteresis_held()
              <<",\"scoring_fallback\":"<<lane.selection.scoring_fallback()<<",\"buffered_grabs\":"<<lane.buffer.buffered()
              <<",\"buffer_expired\":"<<lane.buffer.expired()<<",\"palm_dot\":"<<(fresh?lane.palm_dot:0.)
+             <<",\"sphere_mm\":"<<(lane.held?lane.sphere*1000.:0.)   // the grip ball the fingers wrap this hold (finger_sphere.hpp); 0: none
              <<",\"thin_prop\":{\"id\":"<<lane.reject_id<<",\"result\":\""<<body_reject_name(lane.reject)<<"\"}}";
         }
         o<<']';return o.str();
@@ -1482,18 +1494,23 @@ public:
         knobs.options.enabled=!knobs.kill.no_corpse_grab;knobs.options.tuning=knobs.loaded.value;knobs.options.from_file=knobs.loaded.source==TuningSource::file;
         return knobs;
     }
-    void install(std::uintptr_t base,Read read,Logic logic,const std::filesystem::path& file) {
+    // v1046: `file` is EMPTY while diagnostics are off (dxgi_probe passes output/name); the build-knob folder then must come from `root`
+    // (the mod home: output_directory.always().parent_path()), because the knobs are functional. Empty root = the old file.parent_path().parent_path().
+    void install(std::uintptr_t base,Read read,Logic logic,const std::filesystem::path& file,const std::filesystem::path& root_dir={}) {
         base_=base;read_=read;logic_=logic;
         std::array<unsigned char,32> code{};
         if(!read(base+rva,code.data(),code.size()) || code!=dispatch_code || !read(base+velocity_rva,code.data(),code.size()) || code!=velocity_code)
             throw std::runtime_error("Native physical-grab dispatch or velocity ABI differs");
-        loss_file_=file.parent_path()/L"native-physical-grab-loss.txt";
-        {std::ofstream reset(loss_file_,std::ios::trunc);}
-        log_.open(file,std::ios::trunc);if(!log_) throw std::runtime_error("Cannot open native grab evidence");
-        acquisitions_.open(file.parent_path()/L"native-grab-acquisition.csv",std::ios::trunc);
-        if(!acquisitions_) throw std::runtime_error("Cannot open native acquisition evidence");
+        const bool logging=!file.empty();
+        loss_file_=logging?file.parent_path()/L"native-physical-grab-loss.txt":std::filesystem::path{};
+        {std::ofstream reset(loss_file_,std::ios::trunc);}   // an empty path opens nothing
+        if(logging) {
+            log_.open(file,std::ios::trunc);if(!log_) throw std::runtime_error("Cannot open native grab evidence");
+            acquisitions_.open(file.parent_path()/L"native-grab-acquisition.csv",std::ios::trunc);
+            if(!acquisitions_) throw std::runtime_error("Cannot open native acquisition evidence");
+        }
         mass_probe_=false;mass_probe_rows_=0;mass_probe_out_.close();
-        {std::error_code ec;const auto root=file.parent_path().parent_path();
+        {std::error_code ec;const auto root=root_dir.empty()?file.parent_path().parent_path():root_dir;
          collar_grab_=std::filesystem::exists(root/L"build"/L"collar-grab",ec);
          legacy_palm_select_=std::filesystem::exists(root/L"build"/L"legacy-palm-select",ec);
          living_enabled_=!std::filesystem::exists(root/L"build"/L"no-living-hold",ec);
@@ -1503,16 +1520,21 @@ public:
          if(collar_grab_) {std::ofstream note(loss_file_,std::ios::app);note<<"knob build/collar-grab present: chest/neck hold targets enabled (full fist only)\n";}
          // Corpse hold knobs and the tuning file, read once here so the shipped configuration is the one that was tested (valid file or the defaults).
          const auto knobs=corpse_knobs_from(root);const auto& kill=knobs.kill;const auto& loaded=knobs.loaded;
-         no_posts_=kill.no_posts;prop_grasp_point_=!kill.no_prop_grasp_point;sphere_grip_=!std::filesystem::exists(root/L"build"/L"legacy-finger-grab",ec);for(auto& l:lanes_) l.grab.set_legacy_lag_release(kill.legacy_corpse_lag_release);
+         no_posts_=kill.no_posts;prop_grasp_point_=!kill.no_prop_grasp_point;sphere_grip_=!std::filesystem::exists(root/L"build"/L"legacy-finger-grab",ec);
+         sphere_whole_object_=std::filesystem::exists(root/L"build"/L"legacy-sphere-grip-whole-object",ec);
+         grip_slab_=!std::filesystem::exists(root/L"build"/L"no-grip-slab",ec);
+         for(auto& l:lanes_) l.grab.set_legacy_lag_release(kill.legacy_corpse_lag_release);
          configure_corpse(knobs.options);
          {std::ofstream note(loss_file_,std::ios::app);
           if(kill.no_corpse_grab) note<<"knob build/no-corpse-grab present: corpse bodies are not grab candidates\n";
           if(kill.legacy_corpse_lag_release) note<<"knob build/legacy-corpse-lag-release present: corpse holds drop at 0.5 m lag / 0.25 s, no grasp slide or slip\n";
           if(kill.no_posts) note<<"knob build/no-ragdoll-posts present: no ragdoll event posts\n";
+          note<<(sphere_whole_object_?"knob build/legacy-sphere-grip-whole-object present: the fingers wrap the ball round the whole held box (v642)\n":"sphere grip: the fingers wrap a grip ball at the grasp point, the thing's thin side (v1024)\n");
+          note<<(grip_slab_?"grip slab: a wide thin prop (a book, a folder) lies on the palm, the fingers rest on its face (v1028)\n":"knob build/no-grip-slab present: a wide thin prop is wrapped on its grip ball (v1024)\n");
           note<<(kill.no_prop_grasp_point?"knob build/no-prop-grasp-point present: the drawn hand stays at the controller on held props\n":"prop grasp point: the drawn hand sits on motor-held props (a corpse limb stays at the controller)\n");
           if(!loaded.error.empty()) note<<"build/grab-tuning.cfg rejected, defaults in use: "<<loaded.error<<'\n';
           else if(loaded.source==TuningSource::file) note<<"build/grab-tuning.cfg loaded (tow "<<(loaded.value.tow?"on":"off")<<", strength_scale "<<loaded.value.strength_scale<<")\n";}
-         if(std::filesystem::exists(root/L"build"/L"mass-probe",ec)) {
+         if(logging && std::filesystem::exists(root/L"build"/L"mass-probe",ec)) {
             mass_probe_out_.open(file.parent_path()/L"mass-probe.csv",std::ios::trunc);
             if(mass_probe_out_) {mass_probe_out_<<mass_probe_csv_header()<<'\n';mass_probe_out_.flush();mass_probe_=true;}
          }}
@@ -1522,7 +1544,7 @@ public:
         decision_begin_=decision_count_=0;last_decision_={};decision_dropped_=0;acquisition_samples_=0;picked_=moved_=dropped_=lost_=queries_=samples_=callbacks_=0;native_presses_=physical_presses_=0;
         velocity_=reinterpret_cast<Velocity>(base+velocity_rva);instance_=this;
         contact_.write_blocked=[this](std::uintptr_t entity,bool guard) {return contact_write_blocked(entity,guard);};
-        contact_.install(file.parent_path()/L"native-hand-contact.csv");contact_.inline_discovery=false;clock_.calibrate();
+        contact_.install(logging?file.parent_path()/L"native-hand-contact.csv":std::filesystem::path{});contact_.inline_discovery=false;clock_.calibrate();
         const auto target=reinterpret_cast<void*>(base+rva);
         if(!original_ && MH_CreateHook(target,reinterpret_cast<void*>(&dispatch),reinterpret_cast<void**>(&original_))!=MH_OK) throw std::runtime_error("Cannot create native grab callback");
         active_=true;if(MH_EnableHook(target)!=MH_OK) {active_=false;throw std::runtime_error("Cannot enable native grab callback");}enabled_=true;

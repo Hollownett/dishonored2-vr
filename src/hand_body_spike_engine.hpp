@@ -309,6 +309,7 @@ private:
         stop_writer();
         {std::lock_guard<std::mutex> lock(snapshot_mutex_);snapshot_=Snapshot{};}
         {std::lock_guard<std::mutex> lock(writer_mutex_);writer_quit_=false;}
+        if(output_.empty()) return;   // v1046: diagnostics off = no folder; output_/name would be a relative path in the game's folder
         writer_=std::thread([] {
             std::ofstream csv(output_/L"hand-body-spike.csv",std::ios::trunc);
             csv<<csv_header()<<'\n';csv.flush();

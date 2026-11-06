@@ -102,6 +102,11 @@ struct ContactInput {
     double dt{};         // seconds since this prop's last write (NativeHandContact::write_dt: clamped to [1/240, 1/30], 1/90 for a first write); 0: not capped (unit tests)
     double time_factor=1.; // the engine's time scale: multiplies the push, its launch cap and its dv cap. Not read from the engine in phase 1 (C13): always 1.
                            // Above 1 it counts as 1 (a push never gets stronger than today, deviation 10); not finite or not positive: no write
+    // A rigid body (a weapon the player holds) is not a soft hand: its contact drives at the weapon's own speed from the first frame, with no
+    // ramp (the ride the hands get, ramp m/s per second and one write's write_step) and no stalled ease. Without this, a weapon moved at
+    // aiming or walking speed writes at most write_step (8 cm/s) a frame and a bottle only twitches - the v1026-v1030 gun report ("does not
+    // collide at all"), while a sword swung at 3-5 m/s passed the swat threshold and shoved properly.
+    bool rigid{};
 };
 
 // The prop's deceleration while the hand drives it (table friction), from the velocity a write left it with and the velocity found at
@@ -309,8 +314,8 @@ inline HandContact hand_contact(const HandProxies& proxies,const rig::HeldShape&
     const double base_z=shape.frame.position.z-support({0,0,1});
     const bool lifting=away.z>=.5 && proxies[0].centre.z+offset.z<base_z+.03;
     if(!lifting) {away.z=0;const double l=length(away);away=l<.25?Vec3{}:away*(1/l);}
-    const double gain=std::min(1.,cfg.strength_kg/mass);
-    const bool swat=speed>cfg.swat_hand_speed;
+    const double gain=in.rigid?1.:std::min(1.,cfg.strength_kg/mass); // a rigid weapon shoves what its force cap allows, not what a soft hand does
+    const bool swat=speed>cfg.swat_hand_speed || in.rigid; // a rigid body (a held weapon) strikes at any speed: ContactInput::rigid
     Vec3 goal{};
     if(length(across)>0) { // moving across: ride the hand's leading edge
         out.gap=gap;out.has_gap=true;

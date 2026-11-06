@@ -135,7 +135,7 @@ class NativeShotAim {
     }
     void record(std::uintptr_t caller,bool routed,const Plan& plan,int reason) noexcept {
         try {
-            if(rows_.load()>=2000) return;
+            if(rows_.load()>=2000 || !log_.is_open()) return;   // v1046: not logging = nothing to format
             std::lock_guard<std::mutex> lock(mutex_);
             if(rows_.load()>=2000) return;
             log_<<GetTickCount64()<<','<<GetCurrentThreadId()<<','<<(caller>=base_?caller-base_:0)<<','<<routed;
@@ -194,7 +194,7 @@ public:
             if(static_cast<std::intptr_t>(base_+call[0]+5)+displacement!=static_cast<std::intptr_t>(base_+call[1]))
                 throw std::runtime_error("Native shot launch caller target differs");
         }
-        log_.open(file,std::ios::trunc);if(!log_) throw std::runtime_error("Cannot open native shot aim log");
+        if(!file.empty()) {log_.open(file,std::ios::trunc);if(!log_) throw std::runtime_error("Cannot open native shot aim log");}  // v1046: an empty path (diagnostics off) is not an error
         log_<<std::setprecision(9)<<"tick_ms,thread,caller_rva,routed,"
             "native_origin0,native_origin1,native_origin2,native_forward0,native_forward1,native_forward2,"
             "hand_origin0,hand_origin1,hand_origin2,hand_forward0,hand_forward1,hand_forward2,reason\n"; // v776: reason as last_reason (0 routed, 2 nested, 7 the mod's own launch)

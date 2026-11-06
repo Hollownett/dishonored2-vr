@@ -72,7 +72,7 @@ public:
     void clear() {std::lock_guard<std::mutex> lock(mutex_);tracked_={};}
     void install(std::uintptr_t base,Read read,Logic logic,const std::filesystem::path& file) {
         if(!base || !read || !logic) throw std::runtime_error("Invalid native aim trace callbacks");
-        if(!base || !read || !logic) throw std::runtime_error("Invalid native aim trace callbacks");
+        if(file.empty()) return;   // v1046: diagnostics off = a passive trace hooks nothing
         if(enabled_ || (instance_ && instance_!=this)) throw std::runtime_error("Native aim trace already owned");
         base_=base;read_=read;logic_=logic;
         std::array<std::byte,32> code{};

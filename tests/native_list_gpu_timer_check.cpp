@@ -90,7 +90,7 @@ int main(int argc,char** argv) {
         timer.clear();check(timer.prepare(device.Get()),"active bracket cleanup permits safe reprepare");
         const auto teardown=timer.begin_list(context.Get());context->ExecuteCommandList(list.Get(),TRUE);
         timer.end_list(context.Get(),teardown);timer.finish_frame(context.Get());retire(timer,context.Get(),1);
-        std::printf("PASS (%s): native sum %.6f ms, elapsed %.6f ms; multilist, capacity, owner, stale ticket, async and cleanup checks\n",
+        std::printf("PASS (%s): native sum %.6f ms, elapsed %.6f ms; multilist, capacity, owner, stale ticket, async, cleanup, phase and pass tags\n",
             hardware?"hardware":"WARP",measured.last_list_sum_ms,measured.last_elapsed_ms);
         { // phase tags (task 3b): lists executed in different phases are summed and counted per phase
             timer.clear();check(timer.prepare(device.Get()),"reprepare for phase tags");
@@ -101,6 +101,27 @@ int main(int argc,char** argv) {
             check(ph.valid && ph.lists[0]==2 && ph.lists[1]==1 && ph.lists[2]==3 && ph.lists[3]==0,"per-phase list counts");
             double total=0;for(double v:ph.ms) {check(v>=0,"phase ms non-negative");total+=v;}
             check(std::fabs(total-timer.stats().last_list_sum_ms)<1e-6,"phase sums add up to the list sum");
+        }
+        { // v999 pass tags: the same executed lists are summed and counted per (pass, phase)
+            timer.clear();check(timer.prepare(device.Get()),"reprepare for pass tags");
+            struct Tag {d2vr::Phase phase;std::uint8_t pass;};
+            const Tag tags[]{{d2vr::Phase::eye0,3},{d2vr::Phase::eye0,3},{d2vr::Phase::eye1,4},{d2vr::Phase::eye1,3},{d2vr::Phase::eye1,7}};
+            for(const auto& tag:tags) {
+                const auto t=timer.begin_list(context.Get(),tag.phase,tag.pass);
+                check(t!=0,"pass-tagged list begins");
+                context->ExecuteCommandList(list.Get(),TRUE);timer.end_list(context.Get(),t);
+            }
+            timer.finish_frame(context.Get());retire(timer,context.Get(),1);
+            const auto pf=timer.stats().last_pass;
+            check(pf.valid,"pass frame valid");
+            check(pf.lists[3][1]==2 && pf.lists[3][2]==1 && pf.lists[4][2]==1 && pf.lists[7][2]==1,"per-pass/per-phase list counts");
+            check(pf.lists[d2vr::NativeListGpuTimer::untagged_pass][0]==0 && pf.lists[d2vr::NativeListGpuTimer::untagged_pass][1]==0,"no untagged samples");
+            double pass_total=0;
+            for(unsigned p=0;p<d2vr::NativeListGpuTimer::max_pass;++p) for(unsigned phase=0;phase<d2vr::phase_count;++phase) {
+                check(pf.ms[p][phase]>=0,"pass ms non-negative");
+                pass_total+=pf.ms[p][phase];
+            }
+            check(std::fabs(pass_total-timer.stats().last_list_sum_ms)<1e-6,"pass sums add up to the list sum");
         }
         timer.clear();return 0;
     } catch(const std::exception& e) {std::fprintf(stderr,"FAIL: %s\n",e.what());return 1;}

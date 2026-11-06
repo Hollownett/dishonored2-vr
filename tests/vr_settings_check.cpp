@@ -494,7 +494,7 @@ int main() {
         {VrPreferences d;require(d.antialiasing && d.temporal_aa==2 && d.hud_percent==65 && d.controls_hint && d.sharpness==.5 && d.mirror==MirrorMode::right_eye,"VrPreferences defaults differ");}
         const auto preference_file=std::filesystem::path("build/vr-settings-test.cfg");
         save_preferences(preference_file,{1.3,true,{TurnControl::Mode::smooth,45,120},MirrorMode::left_eye,.75,0,65,true});
-        {std::ifstream raw(preference_file);int version{};raw>>version;require(version==10,"Saved preferences are not version 10");}
+        {std::ifstream raw(preference_file);int version{};raw>>version;require(version==11,"Saved preferences are not version 11");}
         const auto saved=load_preferences(preference_file);
         require(saved && saved->resolution==1.3 && saved->antialiasing && saved->turning.mode==TurnControl::Mode::smooth &&
             saved->turning.smooth_degrees_per_second==120 && saved->mirror==MirrorMode::left_eye && saved->sharpness==.75 && !saved->temporal_aa &&
@@ -552,7 +552,7 @@ int main() {
                     {VrPreferences d;require(!d.aa_chosen && d.crosshair,"VrPreferences defaults for the v9 fields differ");}
                     for(const bool chosen:{false,true}) for(const bool cross:{false,true}) {
                         auto v9=dlss;v9.temporal_aa=7;v9.aa_chosen=chosen;v9.crosshair=cross;save_preferences(preference_file,v9);
-                        {std::ifstream header(preference_file);int version{};header>>version;require(version==10,"save_preferences did not write version 10");}
+                        {std::ifstream header(preference_file);int version{};header>>version;require(version==11,"save_preferences did not write version 11");}
                         const auto back=load_preferences(preference_file);require(back && back->aa_chosen==chosen && back->crosshair==cross && back->temporal_aa==7,"v9 fields did not round trip");
                     }
                     const auto fixture=load_preferences(std::filesystem::path(__FILE__).parent_path()/"fixtures"/"vr-settings-v9.cfg");
@@ -584,7 +584,34 @@ int main() {
                     const auto fixture10=load_preferences(std::filesystem::path(__FILE__).parent_path()/"fixtures"/"vr-settings-v10.cfg");
                     require(fixture10 && fixture10->temporal_aa==7 && !fixture10->crosshair && !fixture10->scripted_recenter && fixture10->cutscene_mode==CutsceneMode::theater,"v10 fixture did not parse");
                 }
-                {std::ofstream version11(preference_file);version11<<"11 1.3 1 2 45 120 1 0.25 2 65 1 0 0 0 0 0 0 1 1 vr_full\n";}
+                { // v11: the player's Upscaler scale. A v10 file means "no custom scale"; out-of-range or misplaced values mean the preset; a short v11 file is refused
+                    {VrPreferences d;require(d.upscale_percent==0,"VrPreferences default has a custom upscaler scale");}
+                    {std::ofstream v10(preference_file);v10<<"10 1.3 1 2 45 120 1 0.25 6 150 1 0 0 0 0 0 1 0 0 theater\n";}
+                    const auto old=load_preferences(preference_file);require(old && old->upscale_percent==0 && old->temporal_aa==6 && old->cutscene_mode==CutsceneMode::theater,"A v10 file did not load as no custom scale");
+                    for(const int percent:{0,50,60,77,100}) {
+                        auto v11=dlss;v11.temporal_aa=6;v11.upscale_percent=percent;save_preferences(preference_file,v11);
+                        {std::ifstream header(preference_file);int version{};header>>version;require(version==11,"v11 save wrote another version");}
+                        const auto back=load_preferences(preference_file);require(back && back->upscale_percent==percent && back->temporal_aa==6,"The upscaler scale did not round trip");
+                        require(std::filesystem::file_size(preference_file)<=512,"A v11 file exceeds the 512 byte format limit");
+                    }
+                    {auto big=dlss;big.temporal_aa=6;big.upscale_percent=60;big.resolution=1.2345678901234567;big.sharpness=.1234567890123456;
+                     big.player_measurements={1.7234567890123456,.4312345678901234,.4712345678901234,{.5512345678901234,.6212345678901234}};
+                     save_preferences(preference_file,big);require(std::filesystem::file_size(preference_file)<=512,"The longest v11 file exceeds the 512 byte limit");}
+                    const auto fixture11=load_preferences(std::filesystem::path(__FILE__).parent_path()/"fixtures"/"vr-settings-v11.cfg");
+                    require(fixture11 && fixture11->temporal_aa==6 && fixture11->upscale_percent==60 && fixture11->cutscene_mode==CutsceneMode::theater,"v11 fixture did not parse");
+                    {std::ofstream odd(preference_file);odd<<"11 1.3 1 2 45 120 1 0.25 6 65 1 0 0 0 0 0 1 1 1 vr_full 12\n";}
+                    const auto low=load_preferences(preference_file);require(low && low->upscale_percent==0,"An out-of-range stored scale did not fall back to the preset");
+                    {std::ofstream odd(preference_file);odd<<"11 1.3 1 2 45 120 1 0.25 1 65 1 0 0 0 0 0 1 1 1 vr_full 70\n";}
+                    const auto wrong=load_preferences(preference_file);require(wrong && wrong->upscale_percent==0 && wrong->temporal_aa==1,"A scale stored for Game TAA did not fall back to the preset");
+                    {std::ofstream bad(preference_file);bad<<"11 1.3 1 2 45 120 1 0.25 6 65 1 0 0 0 0 0 1 1 1 vr_full\n";}
+                    refused=false;try {load_preferences(preference_file);} catch(const std::runtime_error&) {refused=true;}
+                    require(refused,"A v11 file without the scale token loaded");
+                    for(const int percent:{49,101,-5}) {auto badp=dlss;badp.temporal_aa=6;badp.upscale_percent=percent;refused=false;try {save_preferences(preference_file,badp);} catch(const std::invalid_argument&) {refused=true;}
+                        require(refused,"An out-of-range upscaler scale was saved");}
+                    {auto badp=dlss;badp.temporal_aa=1;badp.upscale_percent=70;refused=false;try {save_preferences(preference_file,badp);} catch(const std::invalid_argument&) {refused=true;}
+                        require(refused,"An upscaler scale was saved for a non-upscaler mode");}
+                }
+                {std::ofstream version12(preference_file);version12<<"12 1.3 1 2 45 120 1 0.25 2 65 1 0 0 0 0 0 0 1 1 vr_full 0\n";}
                 refused=false;try {load_preferences(preference_file);} catch(const std::runtime_error&) {refused=true;}
                 require(refused,"A future version loaded");
             }

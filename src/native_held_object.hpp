@@ -401,6 +401,10 @@ private:
         if(component_out) *component_out=b->component;
         return std::pair<std::uint32_t,std::uint32_t>{b->handle,b->filter};
     }
+    // The verified filter writer's public door: any body handle, the same 0x97600 call with the busy pre-read that the layer swaps use above.
+public:
+    template<class Read> static bool write_filter(std::uintptr_t base,Read& read,std::uint32_t handle,std::uint32_t filter) {return set_filter(base,read,handle,filter);}
+private:
     template<class Read> static bool set_filter(std::uintptr_t base,Read& read,std::uint32_t handle,std::uint32_t filter) {
         const auto game=rig::value<std::uintptr_t>(read,base+0x39a5290);if(!game || !rig::pointer(*game)) return false;
         if(filter_seam_) return filter_seam_(*game,handle,filter);

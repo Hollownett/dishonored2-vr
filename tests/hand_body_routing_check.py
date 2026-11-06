@@ -69,8 +69,8 @@ def enclosing_block(source, at):
 knob = 'hand_body_requested=d2vr::hand_body_knob_enabled(fs::exists(root/L"build"/L"hand-body"),fs::exists(root/L"build"/L"no-hand-body"));'
 assert probe.count(knob) == 1, "build/hand-body and build/no-hand-body are read in the knob block"
 assert probe.count('L"no-hand-body"') == 1
-assert "if(hand_body_requested) start_hand_body(root,output);" in probe and probe.count("start_hand_body(root,output)") == 1
-assert probe.index(knob) < probe.index("if(hand_body_requested) start_hand_body(root,output);")
+assert "if(hand_body_requested) start_hand_body(root,output.when_on());" in probe and probe.count("start_hand_body(root,output.when_on())") == 1
+assert probe.index(knob) < probe.index("if(hand_body_requested) start_hand_body(root,output.when_on());")
 start = function(probe, "static void start_hand_body(")
 assert probe.count("HandBodyRuntime::install(") == 1 and "HandBodyRuntime::install(" in start
 assert start.index('L"hand-body-spike"') < start.index("HandBodyRuntime::install("), "never with the spike (the shared hooks)"

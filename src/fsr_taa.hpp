@@ -274,6 +274,10 @@ private:
                 if(!optimal_value) {dlss_fail_locked(DlssEyeUpscaler::Reason::optimal_failed);return;} // an unusable render size is a failure, not a wait
                 dlss_optimal_=optimal;dlss_optimal_for_w_=w;dlss_optimal_for_h_=h;dlss_optimal_width=optimal.optimal_width;dlss_optimal_height=optimal.optimal_height;
                 dlss_quality_fraction=*optimal_value;
+                if(optimal.min_width && optimal.min_height && optimal.max_width>=optimal.min_width && optimal.max_height>=optimal.min_height) {
+                    dlss_range_low=std::max(static_cast<float>(optimal.min_width)/static_cast<float>(w),static_cast<float>(optimal.min_height)/static_cast<float>(h));
+                    dlss_range_high=std::min(static_cast<float>(optimal.max_width)/static_cast<float>(w),static_cast<float>(optimal.max_height)/static_cast<float>(h));
+                }
             }
             if(!upscale || rw<dlss_optimal_.min_width || rw>dlss_optimal_.max_width || rh<dlss_optimal_.min_height || rh>dlss_optimal_.max_height) {
                 ++dlss_waiting;if(dlss_lease_) {dlss_retire_locked();dlss_fallback_.note_rebuild();} // active -> pending: the wait budget covers this path too
@@ -428,6 +432,7 @@ public:
     std::atomic<unsigned> dlss_state{},dlss_last_reason{},dlss_owner_status{},dlss_optimal_width{},dlss_optimal_height{};
     std::atomic<int> dlss_last_result{};
     std::atomic<float> dlss_quality_fraction{dlss_mode::default_quality_fraction}; // engine render fraction for DLSS Quality (NGX optimal settings)
+    std::atomic<float> dlss_range_low{0.f},dlss_range_high{0.f}; // NGX's accepted render-size range as engine fractions (0 = not queried yet): bounds the Upscaler scale for DLSS
     bool dlss_engaged() const noexcept {const auto s=dlss_state.load(std::memory_order_relaxed);return s==static_cast<unsigned>(DlssFallback::State::pending) || s==static_cast<unsigned>(DlssFallback::State::active);}
     bool dlss_failed() const noexcept {return dlss_state.load(std::memory_order_relaxed)==static_cast<unsigned>(DlssFallback::State::failed);}
     std::array<std::atomic<unsigned>,2> eye_upscaler_generation{};
@@ -442,6 +447,7 @@ public:
     std::array<std::atomic<std::uint64_t>,2> eye_fsr4_compute_gpu_samples{};
     std::atomic<bool> fsr4_compute_timing_enabled{false};
     bool (*fsr4_diagnostics_observer)(void*,int,Fsr4EyeUpscaler::Diagnostics&) noexcept{};
+    void (*rebuild_observer)(const char*) noexcept{}; // v1041: one line per context rebuild (resolution-apply.log), under mutex_, never per frame
     void* fsr4_diagnostics_user{};
     void (*diagnostic_finished_observer)(void*,ID3D11DeviceContext*,ID3D11CommandList*) noexcept{};
     void* diagnostic_finished_user{};
@@ -629,7 +635,7 @@ public:
             ready_w_=ready_h_=0;
             const float cap=std::min(1.f,std::max(f,max_fraction.load()));
             const UINT cw=upscale?std::max(rw,static_cast<UINT>(std::lround(w*cap))):w,ch=upscale?std::max(rh,static_cast<UINT>(std::lround(h*cap))):h;
-            ++context_builds;
+            ++context_builds;const auto rebuild_start=std::chrono::steady_clock::now();const auto fsr4_failures_before=fsr4_create_failures.load();
             for(auto& e:*eyes_) {
                 e.timer.clear();
                 e.fsr.destroy();e.fsr4.destroy();e.depth.reset();e.depth_w=e.depth_h=0;e.depth_uav.reset();e.reactive.reset();e.reactive_uav.reset();e.colour_in.reset();e.upscaled.reset();e.reset=true;
@@ -664,6 +670,14 @@ public:
                 if(!fsr4_provider_path.empty() && !e.fsr4.create(device,fd,fsr4_provider_path.c_str(),format,format)) ++fsr4_create_failures;
             }
             ready_w_=w;ready_h_=h;render_w_=rw;render_h_=rh;context_w_=cw;context_h_=ch;ready_fraction_=f;ready_native_format_=wanted_native_format_.load();
+            if(rebuild_observer) {
+                char text[256]{};
+                std::snprintf(text,sizeof(text),"fsr rebuild #%llu display=%ux%u render=%ux%u context=%ux%u fraction=%.3f fsr4_ok=%d fsr4_failures=%llu in %lld ms",
+                    static_cast<unsigned long long>(context_builds.load()),w,h,rw,rh,cw,ch,f,(*eyes_)[0].fsr4.valid() && (*eyes_)[1].fsr4.valid()?1:0,
+                    static_cast<unsigned long long>(fsr4_create_failures.load()-fsr4_failures_before),
+                    static_cast<long long>(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now()-rebuild_start).count()));
+                rebuild_observer(text);
+            }
             for(std::size_t side=0;side<2;++side) {eye_gpu_ms[side]=0;eye_gpu_total_ms[side]=0;eye_gpu_samples[side]=0;eye_gpu_disjoint[side]=0;eye_gpu_dropped[side]=0;}
             for(std::size_t side=0;side<2;++side) {eye_fsr4_compute_gpu_ms[side]=0;eye_fsr4_compute_gpu_total_ms[side]=0;eye_fsr4_compute_gpu_samples[side]=0;}
             ++reset_epoch_;

@@ -378,7 +378,10 @@ public:
                 const float exposure=1;context->UpdateSubresource(slot.textures[5].dx11.Get(),0,nullptr,&exposure,sizeof exposure,0);
                 slot.constants_initialized=true;
             }
-            slot.caller[4]=in.output;
+            // v1042: the output is NOT retained. In the upscale modes it is the game's swapchain back buffer, and a slot holding it (4 slots
+            // per eye, released only at reuse) made every engine ResizeBuffers fail with DXGI_ERROR_INVALID_CALL, which the game turns into
+            // its fatal "ResizeBuffers" error (user, headset v1040: the game closed when the resolution slider moved; sim: FSR 4 Quality
+            // died at every session stop). D3D11 keeps a resource alive for the copy recorded into it below; no reference is needed.
             const UINT64 produced=s.submitted+1,upscaled=produced+1,consumed=upscaled+1;
             observe(Phase::inputs_ready);
             hr(s.context11->Signal(s.fence11.Get(),produced),"Signal FSR4 D3D11 inputs");

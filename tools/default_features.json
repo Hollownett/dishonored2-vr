@@ -430,12 +430,12 @@
    "default": false
   },
   {
-   "id": "frame-diagnostics",
-   "file": "no-diagnostics",
-   "kind": "disable",
-   "label": "Record frame timing and controller diagnostics",
-   "help": "Writes per-frame timing and controller trace files for troubleshooting. Turn off to measure performance without the recording cost.",
-   "default": true
+   "id": "diagnostics",
+   "file": "diagnostics",
+   "kind": "enable",
+   "label": "Save diagnostic logs (for bug reports)",
+   "help": "Writes the mod's logs, traces and image captures to the artifacts folder for troubleshooting (hundreds of MB per session). Off by default: nothing is recorded, so nothing uses your disk.",
+   "default": false
   },
   {
    "id": "diagnostic-capture",

@@ -50,22 +50,36 @@ inline bool valid_rot(const Rot3& c) {
 // `source` (a joint in the source arm model's space) as seen from the `to` arm model: the world pose is the same, the coordinates are
 // the destination model's. `lanes` supplies the non-spatial lanes (f[3], f[7], f[11], f[15]) of the destination slot. A null or
 // identity correction leaves the orientation as it is.
-inline rig::Transform cross_joint(const rig::Transform& source,const rig::ModelFrame& from,const rig::ModelFrame& to,
-        const rig::Transform& lanes,const Rot3* correction=nullptr) {
+// One composition, both readings: `uncorrected` is the source joint re-expressed in the destination arm (the hand the physical
+// controller actually holds), `corrected` additionally applies the item's mirror correction. A caller that reports the hand to the
+// weapon binder must use the uncorrected value; recomputing it in a second call (v1014) could fail or race and then leak the y180
+// correction into the read, which the render-time gate saw as a 180 degree mismatch.
+inline void cross_joint_both(const rig::Transform& source,const rig::ModelFrame& from,const rig::ModelFrame& to,
+        const rig::Transform& lanes,const Rot3* correction,rig::Transform& corrected,rig::Transform& uncorrected) {
     std::array<Vec3,3> axes{};
     for(unsigned i=0;i<3;++i) axes[i]=to.model_direction(from.world_direction(rig::column(source,i)));
+    const auto p=to.model_point(from.world_point(rig::position(source)));
+    const auto write=[&](const std::array<Vec3,3>& a) {
+        rig::Transform out=lanes;
+        for(unsigned i=0;i<3;++i) {
+            out.f[i*4]=static_cast<float>(a[i].x);out.f[i*4+1]=static_cast<float>(a[i].y);out.f[i*4+2]=static_cast<float>(a[i].z);
+        }
+        out.f[12]=static_cast<float>(p.x);out.f[13]=static_cast<float>(p.y);out.f[14]=static_cast<float>(p.z);
+        return out;
+    };
+    uncorrected=write(axes);
     if(correction) {
         const auto original=axes;
         for(unsigned i=0;i<3;++i)
             axes[i]=original[0]*(*correction)[0*3+i]+original[1]*(*correction)[1*3+i]+original[2]*(*correction)[2*3+i];
     }
-    const auto p=to.model_point(from.world_point(rig::position(source)));
-    rig::Transform out=lanes;
-    for(unsigned i=0;i<3;++i) {
-        out.f[i*4]=static_cast<float>(axes[i].x);out.f[i*4+1]=static_cast<float>(axes[i].y);out.f[i*4+2]=static_cast<float>(axes[i].z);
-    }
-    out.f[12]=static_cast<float>(p.x);out.f[13]=static_cast<float>(p.y);out.f[14]=static_cast<float>(p.z);
-    return out;
+    corrected=write(axes);
+}
+inline rig::Transform cross_joint(const rig::Transform& source,const rig::ModelFrame& from,const rig::ModelFrame& to,
+        const rig::Transform& lanes,const Rot3* correction=nullptr) {
+    rig::Transform corrected{},uncorrected{};
+    cross_joint_both(source,from,to,lanes,correction,corrected,uncorrected);
+    return corrected;
 }
 // One joint between the left and the right arm skeleton. Its own inverse (applying it twice returns the input).
 inline rig::Transform mirror_joint(const rig::Transform& t) {

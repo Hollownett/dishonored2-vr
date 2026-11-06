@@ -30,6 +30,23 @@ inline float render_fraction(int mode,float quality_fraction,bool dlss_engaged) 
     }
     return mode==3 || mode==6?.77f:mode==4?.67f:1.f;
 }
+// Upscaler modes (FSR 3/4 Native/Quality/Balanced, DLAA, DLSS Quality) have a render scale the player may set (percent, 50..100).
+inline bool upscaler(int mode) noexcept {return mode>=2 && mode<=last;}
+inline constexpr int min_percent=50,max_percent=100;
+// The percent a mode renders at without a custom scale. DLSS Quality's is the NGX optimal fraction (dlss_percent, 67 until known).
+inline int preset_percent(int mode,int dlss_percent=67) noexcept {
+    if(mode==quality) return std::clamp(dlss_percent,min_percent,max_percent);
+    return mode==3 || mode==6?77:mode==4?67:100;
+}
+// render_fraction with the player's custom scale (custom_percent 0 = the preset). A DLSS feature accepts a render size inside
+// NGX's [low,high] fraction range only (fsr_taa.hpp publishes it once queried; 0 = unknown), so a custom DLSS scale is clamped
+// to it while DLSS is engaged. Not engaged (unavailable or failed), the FSR 3 fallback renders at the custom scale.
+inline float render_fraction(int mode,float quality_fraction,bool dlss_engaged,int custom_percent,float low=0.f,float high=0.f) noexcept {
+    if(!upscaler(mode) || custom_percent<min_percent || custom_percent>max_percent) return render_fraction(mode,quality_fraction,dlss_engaged);
+    float f=static_cast<float>(custom_percent)/100.f;
+    if(active(mode) && dlss_engaged && low>=.5f && high>=low) f=std::clamp(f,low,std::min(high,1.f));
+    return f;
+}
 // The dynamic governor only steps the FSR scaled modes: DLSS features are created at a fixed render size.
 inline bool governor_eligible(int mode,float fraction) noexcept {return mode>=2 && mode<=6 && fraction<.999f;}
 // NGX optimal render size -> engine fraction, accepted only when it is a sane downscale of the output size.

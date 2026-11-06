@@ -286,6 +286,24 @@ static int run(int argc,char** argv) {
                 expect(sol.solve(in).finger_mode[1]==2,"an empty hand without turns is posed by grip and trigger");
                 in.hand_empty[1]=false;in.has_finger[1]=true;
                 expect(sol.solve(in).finger_mode[1]==3,"a hand the game says is not empty keeps the game's fingers, turns or not");
+                // v1102: a held gun whose authored weapon clip is missing has no weapon pose to copy. It must take the procedural
+                // grip (finger_mode 2) and stay closed with a relaxed squeeze, not follow an empty native clip's straight fingers.
+                {
+                    const auto clip=swung(0);in.native_arm[1]=&clip;in.hand_empty[1]=false;in.has_finger[1]=false;
+                    in.grip[1]=0;in.trigger[1]=0;in.weapon_grip[1]=false;
+                    const auto native_out=sol.solve(in);
+                    expect(native_out.finger_mode[1]==3,"without a weapon grip flag a non-empty hand keeps the native fingers");
+                    const auto native_local=mul(inverse(native_out.arm[1][i2]),native_out.arm[1][i3]);
+                    in.weapon_grip[1]=true;
+                    const auto grip_out=sol.solve(in);
+                    expect(grip_out.finger_mode[1]==2,"a held gun with no authored clip is posed by grip alone");
+                    const auto grip_local=mul(inverse(grip_out.arm[1][i2]),grip_out.arm[1][i3]);
+                    expect(angle_between(grip_local.q,native_local.q)>.2,"the held gun's procedural grip bends the fingers");
+                    expect(angle_between(grip_local.q,right.local[i3].q)>.2,"the held gun's fingers close to the grip with a relaxed squeeze");
+                    std::printf("PASS: held gun with no authored clip takes the procedural grip pose (finger_mode %d, native clip mode %d)\n",
+                        grip_out.finger_mode[1],native_out.finger_mode[1]);
+                    in.weapon_grip[1]=false;
+                }
             }
             in.has_finger[1]=true;in.finger_turn[1][1][1]=std::nanf("");
             bool rejected=false;try {(void)sol.solve(in);} catch(const std::invalid_argument&) {rejected=true;}

@@ -248,7 +248,7 @@ if not errorlevel 0 goto build_failed
 build\temporal_eye_job_check.exe
 if errorlevel 1 goto build_failed
 if not errorlevel 0 goto build_failed
-for %%T in (note_frame_history_check native_note_source_check native_note_geometry_check note_native_skin_check note_native_body_check note_hand_pose_check note_reading_check note_tablet_check note_hand_mesh_check note_eye_art_check native_eye_art_contract_check note_xr_check controls_guide_xr_check eye_reticle_check eye_reticle_gpu_check aa_first_start_check finger_ik_check finger_touch_curl_check grip_pose_blend_check finger_wants_stack_check finger_probe_cache_check finger_snapshot_check finger_sphere_check prop_watch_check hand_contact_check anatomical_world_contact_check sword_flight_check vr_settings_native_check game_art_check held_release_check throw_gesture_check gadget_aim_check gun_equip_name_check bink_video_check native_ocean_eval_check cutscene_skip_checkletterbox_gate_check layer_ledger_check native_takedown_range_check native_slash_speed_check native_use_los_anchor_check calibrated_body_anchor_check body_ik_check reverse_grip_check weapon_hold_start_check native_use_fetch_completion_check native_interaction_install_order_check native_interaction_stop_check native_interaction_sphere_check hand_sphere_selection_check native_prompt_entry_check native_prompt_placement_check native_weapon_receipt_check native_block_eligibility_check motion_sword_check game_xr_motion_check native_grab_lifetime_check frame_timing_queue_check native_grab_sequence_check native_grab_obstruction_check glyph_swap_async_check glyph_swap_gpu_check avatar_fit_reuse_check xr_floor_datum_check native_torso_fit_check avatar_geometry_fit_check native_pose_pipeline_check native_readable_range_check native_guarded_call_check native_crosshair_check native_art_movie_patch_check synchronized_observer_check wheel_avatar_check native_action_camera_check native_use_order_check loot_prompt_take_check loot_hand_los_check native_hand_volume_check body_renderer_check native_hud_art_probe_check native_hud_child_draw_check native_hud_child_capture_check native_wrist_art_publisher_check native_marker_child_binding_check native_art_bounds_check native_ui_layout_check full_body_driver_check native_interaction_range_check release_depen_check probe_producer_check native_attachment_pose_check native_fire_seam_trace_check native_hud_fallback_check game_xr_wrist_recovery_check render_perf_cpu_check render_perf_gpu_check left_weapon_render_receipt_check native_hip_visibility_check native_character_gaze_check sword_contact_policy_check render_perf_gpu_loss_check y_hold_check attack_intent_check takedown_prompt_size_check takedown_range_policy_check xr_frame_hardening_check arm_flicker_check aa_first_start_check grab_intent_buffer_check grip_decision_check native_rigid_body_bounds_check living_npc_hold_check arm_flicker_check) do (
+for %%T in (note_frame_history_check native_note_source_check native_note_geometry_check note_native_skin_check note_native_body_check note_hand_pose_check note_reading_check note_tablet_check note_hand_mesh_check note_eye_art_check native_eye_art_contract_check note_xr_check controls_guide_xr_check eye_reticle_check eye_reticle_gpu_check aa_first_start_check finger_ik_check finger_touch_curl_check grip_pose_blend_check finger_wants_stack_check finger_probe_cache_check finger_snapshot_check finger_sphere_check prop_watch_check hand_contact_check anatomical_world_contact_check sword_flight_check vr_settings_native_check game_art_check held_release_check throw_gesture_check gadget_aim_check gun_equip_name_check bink_video_check native_ocean_eval_check cutscene_skip_checkletterbox_gate_check layer_ledger_check native_takedown_range_check native_slash_speed_check native_use_los_anchor_check calibrated_body_anchor_check body_ik_check reverse_grip_check weapon_hold_start_check native_use_fetch_completion_check native_interaction_install_order_check native_interaction_stop_check native_interaction_sphere_check hand_sphere_selection_check native_prompt_entry_check native_prompt_placement_check native_weapon_receipt_check native_block_eligibility_check motion_sword_check game_xr_motion_check native_grab_lifetime_check frame_timing_queue_check native_grab_sequence_check native_grab_obstruction_check glyph_swap_async_check glyph_swap_gpu_check avatar_fit_reuse_check xr_floor_datum_check native_torso_fit_check avatar_geometry_fit_check native_pose_pipeline_check native_readable_range_check native_guarded_call_check native_crosshair_check native_art_movie_patch_check synchronized_observer_check wheel_avatar_check native_action_camera_check native_use_order_check loot_prompt_take_check loot_hand_los_check native_hand_volume_check body_renderer_check native_hud_art_probe_check native_hud_child_draw_check native_hud_child_capture_check native_wrist_art_publisher_check native_marker_child_binding_check native_art_bounds_check native_ui_layout_check full_body_driver_check native_interaction_range_check release_depen_check probe_producer_check native_attachment_pose_check native_fire_seam_trace_check native_hud_fallback_check game_xr_wrist_recovery_check render_perf_cpu_check render_perf_gpu_check left_weapon_render_receipt_check native_hip_visibility_check native_character_gaze_check sword_contact_policy_check render_perf_gpu_loss_check y_hold_check attack_intent_check takedown_prompt_size_check takedown_range_policy_check xr_frame_hardening_check arm_flicker_check aa_first_start_check grab_intent_buffer_check held_body_collision_check grip_decision_check shoulder_carry_check resolution_debounce_check vram_budget_check native_rigid_body_bounds_check living_npc_hold_check arm_flicker_check) do (
     cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT /Ithird_party\minhook\include /Ithird_party\openxr\include tests\%%T.cpp /Fo:build\%%T.obj /Fe:build\%%T.exe /link user32.lib gdi32.lib Xinput9_1_0.lib d3d11.lib dxgi.lib d3dcompiler.lib
     if errorlevel 1 goto build_failed
     if not errorlevel 0 goto build_failed
@@ -277,7 +277,7 @@ if not errorlevel 0 goto build_failed
 python tests\render_perf_readiness_check.py --header src\render_perf_gpu.hpp
 if errorlevel 1 goto build_failed
 if not errorlevel 0 goto build_failed
-for %%T in (drawn_palm_residual_check palm_old_new_driver_repro) do (
+for %%T in (drawn_palm_residual_check palm_old_new_driver_repro spyglass_scope_check latest_file_writer_check) do (
     cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT /Ithird_party\minhook\include /Ithird_party\openxr\include tests\%%T.cpp /Fo:build\%%T.obj /Fe:build\%%T.exe /link user32.lib gdi32.lib Xinput9_1_0.lib d3d11.lib dxgi.lib d3dcompiler.lib
     if errorlevel 1 goto build_failed
     if not errorlevel 0 goto build_failed
@@ -288,6 +288,9 @@ for %%T in (drawn_palm_residual_check palm_old_new_driver_repro) do (
 python tests\fsr_diagnostic_drop_source_check.py
 if errorlevel 1 goto build_failed
 if not errorlevel 0 goto build_failed
+python tests\native_weapon_hands_drop_want_check.py
+if errorlevel 1 goto build_failed
+if not errorlevel 0 goto build_failed
 python tests\render_attribution_check.py
 if errorlevel 1 goto build_failed
 if not errorlevel 0 goto build_failed
@@ -295,6 +298,15 @@ python tests\hud_profile_lifecycle_check.py
 if errorlevel 1 goto build_failed
 if not errorlevel 0 goto build_failed
 python tests\left_weapon_render_receipt_source_check.py
+if errorlevel 1 goto build_failed
+if not errorlevel 0 goto build_failed
+python tests\eye_capture_routing_check.py
+if errorlevel 1 goto build_failed
+if not errorlevel 0 goto build_failed
+python tests\optical_density_routing_check.py
+if errorlevel 1 goto build_failed
+if not errorlevel 0 goto build_failed
+python tests\held_body_collision_routing_check.py
 if errorlevel 1 goto build_failed
 if not errorlevel 0 goto build_failed
 python tests\test_playground.py
@@ -671,6 +683,10 @@ cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT tests\eye_sharpen_check.cpp /
 if not "%errorlevel%"=="0" exit /b 1
 build\eye_sharpen_check.exe
 if not "%errorlevel%"=="0" exit /b 1
+cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT tests\eye_resolve_check.cpp /Fo:build\eye_resolve_check.obj /Fe:build\eye_resolve_check.exe /link d3d11.lib dxgi.lib d3dcompiler.lib user32.lib
+if not "%errorlevel%"=="0" exit /b 1
+build\eye_resolve_check.exe
+if not "%errorlevel%"=="0" exit /b 1
 cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT tests\desktop_mirror_check.cpp /Fo:build\desktop_mirror_check.obj /Fe:build\desktop_mirror_check.exe /link d3d11.lib dxgi.lib d3dcompiler.lib
 if not "%errorlevel%"=="0" exit /b 1
 build\desktop_mirror_check.exe
@@ -707,11 +723,31 @@ cl /nologo /std:c++17 /EHsc /W4 /WX /O2 /MT tests\context_state_check.cpp /Fo:bu
 if not "%errorlevel%"=="0" exit /b 1
 build\context_state_check.exe
 if not "%errorlevel%"=="0" exit /b 1
+cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT tests\context_slot_probe.cpp /Fo:build\context_slot_probe.obj /Fe:build\context_slot_probe.exe /link d3d11.lib dxgi.lib d3dcompiler.lib
+if not "%errorlevel%"=="0" exit /b 1
+build\context_slot_probe.exe
+if not "%errorlevel%"=="0" exit /b 1
+cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT /Isrc /Ithird_party\minhook\include tests\ps_state_census_check.cpp /Fo:build\ps_state_census_check.obj /Fe:build\ps_state_census_check.exe /link /STACK:16777216
+if not "%errorlevel%"=="0" exit /b 1
+build\ps_state_census_check.exe
+if not "%errorlevel%"=="0" exit /b 1
+cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT /Isrc /Ithird_party\minhook\include tests\ps_state_census_warp_check.cpp /Fo:build\ps_state_census_warp_check.obj /Fe:build\ps_state_census_warp_check.exe /link /STACK:16777216 d3d11.lib dxgi.lib d3dcompiler.lib
+if not "%errorlevel%"=="0" exit /b 1
+build\ps_state_census_warp_check.exe
+if not "%errorlevel%"=="0" exit /b 1
+cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT /Isrc /Ithird_party\minhook\include /Ilinux\proxy tests\object_motion_check.cpp /Fo:build\object_motion_check.obj /Fe:build\object_motion_check.exe /link d3dcompiler.lib d3d11.lib dxgi.lib
+if not "%errorlevel%"=="0" exit /b 1
+build\object_motion_check.exe
+if not "%errorlevel%"=="0" exit /b 1
+cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT /Isrc tests\weapon_draw_place_check.cpp /Fo:build\weapon_draw_place_check.obj /Fe:build\weapon_draw_place_check.exe
+if not "%errorlevel%"=="0" exit /b 1
+build\weapon_draw_place_check.exe
+if not "%errorlevel%"=="0" exit /b 1
 cl /nologo /std:c++17 /EHsc /W4 /WX /O2 /MT tests\controller_input_check.cpp /Fo:build\controller_input_check.obj /Fe:build\controller_input_check.exe /link Xinput9_1_0.lib user32.lib
 if not "%errorlevel%"=="0" exit /b 1
 cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT tests\vr_controls_check.cpp /Fo:build\vr_controls_check.obj /Fe:build\vr_controls_check.exe
 if not "%errorlevel%"=="0" exit /b 1
-cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT tests\hand_loadout_check.cpp /Fo:build\hand_loadout_check.obj /Fe:build\hand_loadout_check.exe
+cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT tests\arm_state_check.cpp /Fo:build\arm_state_check.obj /Fe:build\arm_state_check.exe
 if not "%errorlevel%"=="0" exit /b 1
 cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT tests\sword_charge_check.cpp /Fo:build\sword_charge_check.obj /Fe:build\sword_charge_check.exe
 if not "%errorlevel%"=="0" exit /b 1
@@ -841,6 +877,9 @@ if not errorlevel 0 goto build_failed
 python tests\corpse_routing_check.py
 if errorlevel 1 goto build_failed
 if not errorlevel 0 goto build_failed
+python tests\shoulder_carry_routing_check.py
+if errorlevel 1 goto build_failed
+if not errorlevel 0 goto build_failed
 python tests\bonelab_scenarios_check.py
 if errorlevel 1 goto build_failed
 if not errorlevel 0 goto build_failed
@@ -899,7 +938,7 @@ build\taa_constants_capture_check.exe
 if not "%errorlevel%"=="0" exit /b 1
 build\vr_controls_check.exe
 if not "%errorlevel%"=="0" exit /b 1
-build\hand_loadout_check.exe
+build\arm_state_check.exe
 if not "%errorlevel%"=="0" exit /b 1
 build\held_copy_check.exe
 if not "%errorlevel%"=="0" exit /b 1
@@ -997,6 +1036,12 @@ cl /nologo /std:c++17 /EHsc /W4 /WX /O2 /MT tests\crash_observer_check.cpp /Fo:b
 if not "%errorlevel%"=="0" exit /b 1
 build\crash_observer_check.exe
 if not "%errorlevel%"=="0" exit /b 1
+cl /nologo /std:c++17 /EHsc /W4 /WX /O2 /MT tests\diagnostics_check.cpp /Fo:build\diagnostics_check.obj /Fe:build\diagnostics_check.exe
+if not "%errorlevel%"=="0" exit /b 1
+build\diagnostics_check.exe
+if not "%errorlevel%"=="0" exit /b 1
+python tests\diagnostics_routing_check.py
+if not "%errorlevel%"=="0" exit /b 1
 cl /nologo /std:c++17 /EHsc /W4 /WX /O2 /MT tests\camera_comfort_check.cpp /Fo:build\camera_comfort_check.obj /Fe:build\camera_comfort_check.exe
 if not "%errorlevel%"=="0" exit /b 1
 build\camera_comfort_check.exe
@@ -1082,6 +1127,10 @@ if not "%errorlevel%"=="0" exit /b 1
 build\corpse_drag_lab.exe build\corpse-lab
 if not "%errorlevel%"=="0" exit /b 1
 build\weapon_collision_check.exe
+if not "%errorlevel%"=="0" exit /b 1
+cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT /Isrc /Ithird_party\minhook\include tests\weapon_body_check.cpp /Fo:build\weapon_body_check.obj /Fe:build\weapon_body_check.exe
+if not "%errorlevel%"=="0" exit /b 1
+build\weapon_body_check.exe
 if not "%errorlevel%"=="0" exit /b 1
 cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT /Isrc tests\hand_clamp_check.cpp /Fo:build\hand_clamp_check.obj /Fe:build\hand_clamp_check.exe
 if not "%errorlevel%"=="0" exit /b 1
@@ -1173,9 +1222,21 @@ cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT tests\native_interaction_prom
 if not "%errorlevel%"=="0" exit /b 1
 build\native_interaction_prompt_check.exe
 if not "%errorlevel%"=="0" exit /b 1
-cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT tests\native_list_gpu_timer_check.cpp /Fo:build\native_list_gpu_timer_check.obj /Fe:build\native_list_gpu_timer_check.exe /link d3d11.lib dxgi.lib
+cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT /Isrc tests\native_list_gpu_timer_check.cpp /Fo:build\native_list_gpu_timer_check.obj /Fe:build\native_list_gpu_timer_check.exe /link d3d11.lib dxgi.lib
 if not "%errorlevel%"=="0" exit /b 1
 build\native_list_gpu_timer_check.exe
+if not "%errorlevel%"=="0" exit /b 1
+cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT /Isrc tests\gpu_pass_attribution_check.cpp /Fo:build\gpu_pass_attribution_check.obj /Fe:build\gpu_pass_attribution_check.exe /link d3d11.lib dxgi.lib
+if not "%errorlevel%"=="0" exit /b 1
+build\gpu_pass_attribution_check.exe
+if not "%errorlevel%"=="0" exit /b 1
+cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT /Isrc tests\shadow_share_state_check.cpp /Fo:build\shadow_share_state_check.obj /Fe:build\shadow_share_state_check.exe
+if not "%errorlevel%"=="0" exit /b 1
+build\shadow_share_state_check.exe
+if not "%errorlevel%"=="0" exit /b 1
+cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT /Isrc tests\shadow_share_consistency_check.cpp /Fo:build\shadow_share_consistency_check.obj /Fe:build\shadow_share_consistency_check.exe
+if not "%errorlevel%"=="0" exit /b 1
+build\shadow_share_consistency_check.exe
 if not "%errorlevel%"=="0" exit /b 1
 cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT tests\mod_gpu_timer_check.cpp /Fo:build\mod_gpu_timer_check.obj /Fe:build\mod_gpu_timer_check.exe /link d3d11.lib dxgi.lib
 if not "%errorlevel%"=="0" exit /b 1

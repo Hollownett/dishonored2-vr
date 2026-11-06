@@ -36,7 +36,7 @@ assert 'std::unique_lock<std::mutex> lock(queue_mutex_,std::try_to_lock);' in re
 assert 'new ' not in receipt[receipt.index('    void bind('):receipt.index('    static void output_pose(')]
 assert 'native_equipment_current' in receipt and 'entity+0xf0,row.model' in receipt
 assert '+0x1860' not in receipt
-assert probe.index('retire_bind_observer())throw') < probe.index('configure(&read_self,image_base,output)') < probe.index('bind_observer=&d2vr::LeftWeaponRenderReceipt::observe')
+assert probe.index('retire_bind_observer())throw') < probe.index('configure(&read_self,image_base,output.when_on())') < probe.index('bind_observer=&d2vr::LeftWeaponRenderReceipt::observe')
 assert probe.count('&& left_weapon_receipt_drained && assassination_receipt_drained) started=false;') == 2
 assert probe.count('const bool left_weapon_receipt_drained=left_weapon_receipt_finalizer.finish();') == 2
 assert 'pad_disabled && controller_import_restored && left_weapon_receipt_drained &&' in probe

@@ -188,6 +188,7 @@ int main() {
         clock_s+=4;put(last_entity+0x300,std::array<float,3>{1.f,2.f,.3f});frames(1);
         assert(G::physics_seen==1);
         const auto t2=teleports;frames(5);assert(teleports==t2);
+        put(last_entity+0x300,std::array<float,3>{2.f,3.f,.9f});frames(1);{const auto live=G::published();assert(live.size()==1 && live[0].pos[0]==2.f && live[0].pos[2]==.9f);}   // v1046: an engine-simulated pickup is published where it IS
     }
     {   // a thrown drop travels first
         reset();
@@ -284,8 +285,10 @@ int main() {
     // ---- take back ----
     {
         reset();assert(G::drop(Kind::any,{1.f,0,1.f},{0,0,0},up_axis));frames(90);
-        assert(G::take({3.f,0,0},.3f));frames(1);assert(G::take_none==1 && adds==0 && G::published().size()==1);   // out of reach
-        assert(G::take({1.f,.1f,.1f},.3f));frames(1);
+        const auto miss=G::take_ticket({3.f,0,0},.3f);assert(miss);frames(1);assert(G::take_none==1 && adds==0 && G::published().size()==1);   // out of reach
+        {const auto r=G::take_result();assert(r.id==miss && r.result==2);}   // v1046: the caller sees 'nothing taken' and equips nothing
+        const auto hit=G::take_ticket({1.f,.1f,.1f},.3f);assert(hit && hit!=miss);frames(1);
+        {const auto r=G::take_result();assert(r.id==hit && r.result==1 && r.kind==Kind::regular_grenade);}
         assert(adds==1 && entity_removals==1 && G::taken==1 && get<std::int32_t>(K_rec+0x20)==3 && G::published().empty());
         assert(syncs==2);   // once after the drop, once after the take
         // the native Use took it first: the entity is gone, the K_list forgets it

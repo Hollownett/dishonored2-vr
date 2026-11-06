@@ -146,6 +146,7 @@ public:
     bool enabled()const noexcept{return active_.load(std::memory_order_acquire);}
     bool failed()const noexcept{return write_failed_.load(std::memory_order_acquire) || drain_failed_.load(std::memory_order_acquire);}
     bool configure(Read read,std::uintptr_t base,const std::filesystem::path& output) noexcept {
+        if(output.empty())return false;   // v1046: diagnostics off = never active, and not a write failure (failed() gates the teardown success)
         if(!reconfigurable_.exchange(false,std::memory_order_acq_rel))return false;
         active_=false;
         try {

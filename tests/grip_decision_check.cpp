@@ -140,6 +140,9 @@ int main() {
         d.update(1,held(1,true));d.update(1,held(0,true));
         {auto in=held(0,true);in.entity=0x78;assert(!d.update(1,in).anchored);}              // a different body is not the docked one
         {auto in=held(1,true);in.lag_m=std::nan("");d.update(0,in);in.grip=0;assert(!d.update(0,in).anchored);}
+        d.update(1,held(1,true));d.update(1,held(0,true));assert(d.anchored(1));
+        {auto in=held(0,true);in.native_carry=true;const auto o=d.update(1,in);assert(o.take && !o.anchored && !d.anchored(1) && !d.consumes(1));}   // v1019: the game's own carry took the body; the dock's hand lets go and the squeeze stays the hand's
+        assert(d.update(1,held(0,false)).anchored==false);
     }
     {   // the shoulder zones (tracking space, head at the origin looking down -Z, +Y up): either shoulder, not in front of the face, not at the waist
         const std::array<double,3> head{0,1.7,0},fwd{0,0,-1},up{0,1,0};

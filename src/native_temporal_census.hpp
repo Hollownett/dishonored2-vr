@@ -307,6 +307,7 @@ public:
     bool flush(const std::filesystem::path& output,bool stopping=false) noexcept {
         if(!requested_.load() || flushed_)return true;
         if(stopping)stop();
+        if(output.empty())return true;   // v1046: diagnostics off = nothing to publish (output/name would be relative, and remove() would hit the game's folder)
         if(accepting_.load() || setup_enabled_.load() || readers_.load())return false;
         try {
             const auto summary=ledger_.summary();

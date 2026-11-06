@@ -388,6 +388,7 @@ class NativeFireSeamTrace {
     }
 public:
     void install(std::uintptr_t base,Read read,const std::filesystem::path& file) {
+        if(file.empty()) return;   // v1046: diagnostics off = a diagnostic-only trace hooks nothing
         if(!base || !read) throw std::runtime_error("Missing native fire seam readers");
         if(instance_ && instance_!=this) throw std::runtime_error("Another native fire seam trace owns this DLL");
         for(bool enabled:enabled_) if(enabled) throw std::runtime_error("Native fire seam trace already installed");

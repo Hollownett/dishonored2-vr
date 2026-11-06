@@ -46,6 +46,31 @@ inline const char* mod_span_name(unsigned i) noexcept {
 }
 struct PhaseGpu {double ms[phase_count]{};unsigned lists[phase_count]{};bool valid{};}; // one timer frame, summed per phase
 struct ModGpu {double ms[mod_span_count]{};bool valid{};};
+// v993: one frame of ExecuteCommandList replay timings (TaaDispatchHook::execute_original), summed per frame_split phase.
+struct ReplayFrame {
+    std::uint64_t ns[phase_count]{};
+    std::uint32_t lists[phase_count]{};
+    std::uint64_t total_ns{};
+    std::uint32_t restore_true{};
+    std::uint32_t restore_false{};
+    // v997: the heavy tail. max_list_ns is the largest single ExecuteCommandList replay of this frame; hist[b] counts the
+    // individual list replays by bucket (<1, 1-2, 2-4, 4-6, 6-8, 8-12, 12-16, >16 ms). Per frame, not per phase.
+    std::uint64_t max_list_ns{};
+    std::uint64_t hist[8]{};
+    bool valid{};
+};
+// v997: nearest-rank percentile over the samples flagged by valid[0..count). Zero is a real value; a caller with no sample
+// for a frame clears its valid flag. FrameSplit and ElisionAb share this so the two windows rank identically.
+template<class A> inline double percentile_sample(const A& a,const bool* valid,std::size_t count,double p,bool& any) {
+    std::vector<double> v;v.reserve(count);
+    for(std::size_t i=0;i<count;++i) if(valid[i]) v.push_back(static_cast<double>(a[i]));
+    any=!v.empty();if(v.empty()) return 0;
+    std::sort(v.begin(),v.end());
+    auto k=static_cast<std::size_t>(p*static_cast<double>(v.size())+.999999);
+    if(k<1) k=1;
+    if(k>v.size()) k=v.size();
+    return v[k-1];
+}
 struct FrameStamps {std::int64_t eye0_begin{-1},eye1_begin{},present_enter{},present_exit{};};
 // Per-Present eye begin stamps. begin() runs on the render thread for every begin-view call, under the caller's lock.
 class EyeStamps {
@@ -80,7 +105,7 @@ private:
 class FrameSplit {
 public:
     static constexpr std::size_t window=900;
-    void feed(const FrameStamps& s,std::int64_t prev_present_enter,std::int64_t qpc_freq,std::uint64_t gpu_list_sum_ns,std::uint64_t gpu_span_ns,const PhaseGpu* phases=nullptr,const ModGpu* mod=nullptr,bool single_view=false) noexcept {
+    void feed(const FrameStamps& s,std::int64_t prev_present_enter,std::int64_t qpc_freq,std::uint64_t gpu_list_sum_ns,std::uint64_t gpu_span_ns,const PhaseGpu* phases=nullptr,const ModGpu* mod=nullptr,bool single_view=false,const ReplayFrame* replay=nullptr) noexcept {
         if(qpc_freq<=0 || s.present_enter<=0) return;
         const double ns=1e9/static_cast<double>(qpc_freq);
         auto span=[&](std::int64_t a,std::int64_t b)->std::uint64_t {return b>a?static_cast<std::uint64_t>(static_cast<double>(b-a)*ns):0;};
@@ -102,12 +127,70 @@ public:
         for(unsigned i=0;i<phase_count;++i) {phase_ms_[i][slot]=phase_valid_[slot]?static_cast<float>(phases->ms[i]):0.f;phase_lists_[i][slot]=phase_valid_[slot]?static_cast<std::uint16_t>(std::min(phases->lists[i],65535u)):0;}
         for(unsigned i=0;i<mod_span_count;++i) mod_ms_[i][slot]=mod_valid_[slot]?static_cast<float>(mod->ms[i]):0.f;
         mod_sum_[slot]=0.f;if(mod_valid_[slot]) for(unsigned i=0;i<mod_span_count;++i) mod_sum_[slot]+=mod_ms_[i][slot];
+        replay_valid_[slot]=replay && replay->valid;
+        if(replay_valid_[slot]) {
+            for(unsigned i=0;i<phase_count;++i) {replay_ns_[i][slot]=replay->ns[i];replay_lists_[i][slot]=replay->lists[i];}
+            replay_total_[slot]=replay->total_ns;
+            replay_true_[slot]=replay->restore_true;replay_false_[slot]=replay->restore_false;
+            replay_max_[slot]=replay->max_list_ns;
+            for(unsigned b=0;b<8;++b) replay_hist_[b][slot]=replay->hist[b];
+        }
         head_=(head_+1)%window;
         if(count_<window) ++count_;
     }
     bool last_accepted() const noexcept {return accepted_;} // whether the latest feed passed the eye check (for the trace)
+    // v997: the four span samples the latest feed stored, exactly as the window saw them (0 = no sample). ElisionAb routes its
+    // per-state window from these so both windows count the same frames and the same spans.
+    struct LatestFrame {std::uint64_t interval_ns{},eye0_ns{},eye1_ns{},hook_ns{};};
+    LatestFrame latest() const noexcept {
+        if(!count_) return {};
+        const std::size_t slot=(head_+window-1)%window;
+        return {interval_[slot],eye0_[slot],eye1_[slot],hook_[slot]};
+    }
     // render/game busy fraction of the latest window; negative = unknown (coarse or zero thread clock) -> null.
     void thread_sample(double render_busy,double game_busy) noexcept {render_=render_busy;game_=game_busy;}
+    // v993: ExecuteCommandList replay timings for the latest 900 frames. All values are per-frame sums over the phase.
+    std::string replay_json() const {
+        const auto n=count_;
+        bool any=false;
+        std::uint64_t restore_true=0,restore_false=0;
+        std::uint64_t frames=0,hist[8]{};
+        for(std::size_t i=0;i<n;++i) if(replay_valid_[i]) {
+            restore_true+=replay_true_[i];restore_false+=replay_false_[i];++frames;
+            for(unsigned b=0;b<8;++b) hist[b]+=replay_hist_[b][i];
+        }
+        auto phase_array=[&](const auto& a,double p,bool lists)->std::string {
+            std::ostringstream out;out<<'[';
+            for(unsigned i=0;i<phase_count;++i) {
+                bool have=false;
+                const double v=percentile_of(a[i],replay_valid_,n,p,have);
+                if(i) out<<',';
+                if(lists) out<<static_cast<std::uint64_t>(v+0.5); else out<<v/1e6;
+            }
+            out<<']';return out.str();
+        };
+        std::ostringstream out;
+        out<<"{\"ms_p50\":"<<phase_array(replay_ns_,.50,false)
+           <<",\"ms_p90\":"<<phase_array(replay_ns_,.90,false)
+           <<",\"lists_p50\":"<<phase_array(replay_lists_,.50,true)
+           <<",\"total_ms_p50\":"<<percentile_of(replay_total_,replay_valid_,n,.50,any)/1e6
+           <<",\"total_ms_p90\":"<<percentile_of(replay_total_,replay_valid_,n,.90,any)/1e6
+           // v997: the heavy tail of the serial replay, per frame (the largest single list) and the list histogram.
+           <<",\"max_list_ms_p50\":"<<percentile_of(replay_max_,replay_valid_,n,.50,any)/1e6
+           <<",\"max_list_ms_p90\":"<<percentile_of(replay_max_,replay_valid_,n,.90,any)/1e6
+           <<",\"max_list_ms_max\":"<<percentile_of(replay_max_,replay_valid_,n,1.,any)/1e6
+           <<",\"hist\":[";for(unsigned b=0;b<8;++b) out<<(b?",":"")<<hist[b];out<<']'
+           <<",\"restore_true\":"<<restore_true
+           <<",\"restore_false\":"<<restore_false
+           <<",\"frames\":"<<frames<<'}';
+        return out.str();
+    }
+    void reset_replay() noexcept {
+        for(auto& a:replay_ns_) a.fill(0);
+        for(auto& a:replay_lists_) a.fill(0);
+        replay_total_.fill(0);replay_true_.fill(0);replay_false_.fill(0);replay_valid_.fill(false);
+        replay_max_.fill(0);for(auto& a:replay_hist_) a.fill(0);
+    }
     std::string json() const {
         const auto n=static_cast<std::ptrdiff_t>(count_);
         // the ring fills from slot 0 until it wraps, so the first count_ slots are exactly the live window
@@ -134,13 +217,13 @@ public:
         return o.str();
     }
 private:
-    // p50 over the frames that carry a phase sample. Zero is a real value here (a phase with no lists), so zeros are kept.
+    // Nearest-rank percentile over the frames that carry a sample. Zero is a real value here (a phase with no lists), so
+    // zeros are kept. v997: the ranking itself is percentile_sample(), shared with ElisionAb.
+    template<class A> static double percentile_of(const A& a,const std::array<bool,window>& valid,std::size_t count,double p,bool& any) {
+        return percentile_sample(a,valid.data(),count,p,any);
+    }
     template<class A> static double median_of(const A& a,const std::array<bool,window>& valid,std::size_t count,bool& any) {
-        std::vector<double> v;v.reserve(count);
-        for(std::size_t i=0;i<count;++i) if(valid[i]) v.push_back(static_cast<double>(a[i]));
-        any=!v.empty();if(v.empty()) return 0;
-        std::sort(v.begin(),v.end());
-        return v[std::min(v.size()-1,static_cast<std::size_t>(.5*static_cast<double>(v.size())+.999999)-1)];
+        return percentile_of(a,valid,count,.5,any);
     }
     void phase_json(std::ostringstream& o,bool ms_not_lists) const {
         bool any=false;median_of(phase_valid_,phase_valid_,count_,any);
@@ -170,7 +253,13 @@ private:
     std::array<std::uint64_t,window> interval_{},eye0_{},eye1_{},hook_{},gpu_{},span_{};
     std::array<std::array<float,window>,phase_count> phase_ms_{};std::array<std::array<std::uint16_t,window>,phase_count> phase_lists_{};
     std::array<std::array<float,window>,mod_span_count> mod_ms_{};std::array<float,window> mod_sum_{};
-    std::array<bool,window> phase_valid_{},mod_valid_{};
+    std::array<std::array<std::uint64_t,window>,phase_count> replay_ns_{};
+    std::array<std::array<std::uint32_t,window>,phase_count> replay_lists_{};
+    std::array<std::uint64_t,window> replay_total_{};
+    std::array<std::uint32_t,window> replay_true_{},replay_false_{};
+    std::array<std::uint64_t,window> replay_max_{};
+    std::array<std::array<std::uint64_t,8>,window> replay_hist_{};
+    std::array<bool,window> phase_valid_{},mod_valid_{},replay_valid_{};
     std::size_t head_{},count_{};std::uint64_t skipped_{};
     double render_{-1},game_{-1};bool accepted_{};
 };

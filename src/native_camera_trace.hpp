@@ -70,6 +70,7 @@ class NativeCameraTrace {
 public:
     void install(std::uintptr_t base,const std::filesystem::path& file,Read read,Logic logic) {
         if(enabled_ || (instance_ && instance_!=this)) throw std::runtime_error("Native camera trace is already owned");
+        if(file.empty()) return;   // v1046: diagnostics off = no folder; a passive trace installs no hook for nothing
         base_=base;read_=read;logic_=logic;
         std::array<std::byte,32> code{};
         if(!read_(base+update_rva,code.data(),code.size()) || code!=expected)

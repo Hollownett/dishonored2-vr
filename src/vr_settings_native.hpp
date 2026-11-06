@@ -6,12 +6,16 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <memory>
 #include <string>
 #include <vector>
 
 namespace d2vr {
 namespace native_settings {
 // At most NativeOptionsPage::max_rows rows: the game's list cannot select more (test unlock lives on the launcher Tools page).
+// v1046: row 2 is ALWAYS the "Upscaler scale" slider (same label/range/interval), locked and showing 100 unless the AA mode is an
+// upscaler (FSR 3/4, DLAA, DLSS Quality): no AA change alters the page's shape, so nothing re-shows. SMAA stays reachable as the
+// Anti-aliasing list entries (SMAA, SSAA); the old Edge AA toggle is gone from the native page.
 enum Row : int {resolution,temporal,edge_aa,mirror,sharpening,hud,controls_hint,turning,calibrate,recenter,count};
 inline constexpr std::array<int,8> hud_choices{{55,65,75,85,100,125,150,200}};
 inline constexpr std::array<TurnControl::Config,7> turning_choices{{
@@ -50,6 +54,13 @@ inline int temporal_shown(const VrSettings& s) {
     const auto found=std::find(values.begin(),values.end(),want);
     return found==values.end()?0:static_cast<int>(found-values.begin());
 }
+// The AA stepper's entry for an upscaler mode at a scale the player set (instead of the preset's name).
+inline std::string custom_label(const VrSettings& s) {
+    const int mode=s.temporal_aa();
+    std::string t=std::string(mode<=4?"FSR 3":mode<=6?"FSR 4":"DLSS")+" Custom ("+std::to_string(s.upscale_percent())+"%)";
+    if(mode>=7 && !s.dlss_available()) t+=" (unavailable, FSR 3)";
+    return t;
+}
 inline std::vector<NativeOptionsPage::Row> rows(const VrSettings& s) {
     using K=NativeOptionsPage::Kind;std::vector<NativeOptionsPage::Row> r(count);
     r[resolution]={K::slider,"Resolution","Sets how many pixels each eye renders (percent). Higher is sharper but slower; the mod caps it to what the GPU can hold.",
@@ -71,11 +82,13 @@ inline std::vector<NativeOptionsPage::Row> rows(const VrSettings& s) {
         case 11: aa_modes.push_back("SSAA 200% + SMAA (max clarity)");break;
         default: aa_modes.push_back("SMAA (edge anti-aliasing)");break;
     }
-    std::string aa_help="Smooths shimmering edges. Game TAA is the original; FSR Native uses full resolution; Quality and Balanced upscale. SMAA runs on its own with no temporal AA.";
+    if(s.upscaler() && s.upscale_custom_percent()) {const auto at=static_cast<std::size_t>(temporal_shown(s));if(at<aa_modes.size()) aa_modes[at]=custom_label(s);}
+    std::string aa_help="Smooths shimmering edges. Game TAA is the original; FSR Native uses full resolution; Quality and Balanced upscale. SMAA runs on its own with no temporal AA. Upscaler scale (next row) applies only to the FSR and DLSS entries and picking one resets it to that preset.";
     if(s.performance_mode_replaces_aa()) aa_help+=" The selected temporal mode is unavailable; spatial edge AA is used when enabled.";
     if(s.dlss_available()) aa_help+=" DLAA and DLSS Quality use NVIDIA DLSS.";
     r[temporal]={K::stepper,"Anti-aliasing",aa_help,0,0,1,temporal_shown(s),2,aa_modes};
-    r[edge_aa]={K::toggle,"Edge anti-aliasing (SMAA)","SMAA Ultra with a 0.03 edge threshold is the image's AA in the SMAA mode; it catches the low-contrast geometry edges the 0.05 preset missed. Skipped in a temporal mode. The SSAA 125% preset is supersampling and does not use SMAA.",0,0,1,s.antialiasing()?1:0,0,{}};
+    r[edge_aa]={K::slider,"Upscaler scale","What the upscaler renders before it reconstructs the full-size image, as a percent of the Resolution above: 100% is native, 77% is Quality, 67% is Balanced. Lower runs faster but softer. Applies only to the FSR and DLSS modes of Anti-aliasing (greyed out otherwise). Moving it makes the Anti-aliasing entry Custom; picking a preset entry there resets it. DLSS accepts only the range NVIDIA supports.",
+        dlss_mode::min_percent,dlss_mode::max_percent,1,s.upscaler()?s.upscale_percent():100,100,{},!s.upscaler()};
     r[mirror]={K::stepper,"Monitor view","Chooses what the desktop monitor mirrors. It does not change the headset image.",
         0,0,1,static_cast<int>(s.mirror()),static_cast<int>(MirrorMode::both_eyes),{"Right eye","Left eye","Both eyes","Off"}};
     r[sharpening]={K::stepper,"Sharpening","Contrast sharpening after anti-aliasing. Raise it if the image looks soft, lower it if edges crawl.",
@@ -92,7 +105,8 @@ inline std::vector<NativeOptionsPage::Row> rows(const VrSettings& s) {
     return r;
 }
 // Values read from the page (index = row, -1 = no value): apply what changed, reported like the panel's own changes.
-inline VrSettings::Changes apply(VrSettings& s,const std::vector<int>& v) {
+// v1046: row 2 is always the Upscaler scale slider (the flag stays only for callers); a value read while locked is ignored.
+inline VrSettings::Changes apply(VrSettings& s,const std::vector<int>& v,bool=true) {
     VrSettings::Changes c{};
     const auto at=[&](int row) {return row<static_cast<int>(v.size())?v[static_cast<std::size_t>(row)]:-1;};
     if(const int x=at(resolution);x>=50 && x<=200 && std::lround(s.requested()*100)!=x) {s.set_requested(x/100.);c.resolution=s.requested();}
@@ -105,10 +119,14 @@ inline VrSettings::Changes apply(VrSettings& s,const std::vector<int>& v) {
          else if(mode==9) {s.set_temporal_aa(0);s.set_antialiasing(true);c.temporal_aa=0;c.antialiasing=true;aa_stepper_forced=true;}
          else if(mode==10) {s.set_temporal_aa(0);s.set_antialiasing(false);s.set_requested(1.25);c.temporal_aa=0;c.antialiasing=false;c.resolution=1.25;aa_stepper_forced=true;}
          else if(mode==11) {s.set_temporal_aa(0);s.set_antialiasing(true);s.set_requested(2.0);c.temporal_aa=0;c.antialiasing=true;c.resolution=2.0;aa_stepper_forced=true;}
-         else {s.set_temporal_aa(mode);c.temporal_aa=mode;}
+         else {s.set_temporal_aa(mode);c.temporal_aa=mode;aa_stepper_forced=true;} // an upscaler entry: its preset scale, not the page's row-2 value
      }}
     // Off/SMAA in the mode list already decided Edge AA; the stale toggle value read from the same page must not undo it.
-    if(!aa_stepper_forced) if(const int x=at(edge_aa);x>=0 && (x!=0)!=s.antialiasing()) {s.set_antialiasing(x!=0);c.antialiasing=x!=0;}
+    // Picking an upscaler entry also decided the scale (its preset); a stale row-2 value read in the same pass must not undo it.
+    if(!aa_stepper_forced) {
+        const int x=at(edge_aa); // the slider belongs to the upscaler; a mode that is not one has it locked and ignores the value
+        if(x>=dlss_mode::min_percent && x<=dlss_mode::max_percent && s.upscaler() && x!=s.upscale_percent() && s.set_upscale_percent(x)) c.upscale_percent=s.upscale_percent();
+    }
     if(const int x=at(mirror);x>=0 && x<=3 && x!=static_cast<int>(s.mirror())) {s.set_mirror(static_cast<MirrorMode>(x));c.mirror=s.mirror();}
     if(const int x=at(sharpening);x>=0 && x<=4 && x!=std::lround(s.sharpness()*4)) {s.set_sharpness(x/4.);c.sharpness=s.sharpness();}
     if(const int x=at(hud);x>=0 && x<static_cast<int>(hud_choices.size()) && hud_choices[static_cast<std::size_t>(x)]!=s.hud_percent())
@@ -128,6 +146,7 @@ inline void merge(VrSettings::Changes& into,const VrSettings::Changes& c) {
     if(c.resolution) into.resolution=c.resolution;
     if(c.antialiasing) into.antialiasing=c.antialiasing;
     if(c.temporal_aa) into.temporal_aa=c.temporal_aa;
+    if(c.upscale_percent) into.upscale_percent=c.upscale_percent;
     if(c.turning) into.turning=c.turning;
     if(c.mirror) into.mirror=c.mirror;
     if(c.sharpness) into.sharpness=c.sharpness;
@@ -138,6 +157,16 @@ inline void merge(VrSettings::Changes& into,const VrSettings::Changes& c) {
     if(c.cutscene_mode) into.cutscene_mode=c.cutscene_mode;
     into.recenter|=c.recenter;into.consume|=c.consume;into.opened|=c.opened;into.calibrate|=c.calibrate;
     into.player_measurements|=c.player_measurements;into.test_unlock|=c.test_unlock;into.controls_guide|=c.controls_guide;
+}
+// What the open page becomes once the values read from it are applied: a private copy of the settings takes the page's values
+// through apply() and rows() is read again (native_options_page.hpp refresh/restore). The copy keeps evolving across reads until the
+// next publish replaces it. Drain thread only.
+inline NativeOptionsPage::Resolver resolver(const VrSettings& s) {
+    auto state=std::make_shared<VrSettings>(s);
+    return [state](const std::vector<int>& values,const std::vector<NativeOptionsPage::Kind>& kinds) {
+        (void)kinds;apply(*state,values);
+        return rows(*state);
+    };
 }
 } // namespace native_settings
 } // namespace d2vr

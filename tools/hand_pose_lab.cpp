@@ -390,6 +390,24 @@ int run(int argc,char** argv) {
             const double rad=r::sphere_grip_radius(half);
             r::HeldShape box{};box.frame.position=palm.position+r::palm_normal(palm,g)*(rad+r::held_palm_depth);box.frame.basis=palm.basis;box.half=half;return std::vector<r::HeldShape>{box};};
         scenes.push_back(sphere);
+        Scene ball{};ball.name=_strdup((std::string(t.name)+"_ball").c_str());ball.held=true;ball.where=hold_at;ball.fingers=hold_fingers;ball.normal=hold_in;ball.squeeze=1.f;ball.index=0.f;
+        ball.title=_strdup((std::string(t.title)+": the grip ball (a small ball at the grip place, the thing's thin side)").c_str());ball.shape_name="grip ball";
+        ball.shapes=[half](const WorldTrackedPose& palm,const r::HandGeometry& g) {return std::vector<r::HeldShape>{r::sphere_grip_shape(palm,g,r::sphere_grip_ball_radius(half))};};
+        ball.moving=[half](const WorldTrackedPose& palm,const r::HandGeometry& g,Vec3,Vec3) {return std::vector<r::HeldShape>{r::sphere_grip_shape(palm,g,r::sphere_grip_ball_radius(half))};};
+        ball.ghost=[half](const WorldTrackedPose& palm,const r::HandGeometry& g) { // the thing as the motor seats it: its own surface on the palm skin
+            r::HeldShape box{};box.frame.position=palm.position+r::palm_normal(palm,g)*(std::min({half.x,half.y,half.z})+r::held_palm_depth);box.frame.basis=palm.basis;box.half=half;return std::vector<r::HeldShape>{box};};
+        scenes.push_back(ball);
+        if(r::grip_is_flat(half)) {   // v1028 flat grip: a wide thin prop lies on the palm, no contact shape, a relaxed reach
+            Scene flat{};flat.name=_strdup((std::string(t.name)+"_flat").c_str());flat.held=true;flat.where=hold_at;flat.fingers=hold_fingers;flat.normal=hold_in;flat.squeeze=1.f;flat.index=0.f;
+            flat.title=_strdup((std::string(t.title)+": the flat grip (the thing lies on the palm, the fingers rest on its face)").c_str());flat.shape_name="no shape (relaxed reach)";
+            flat.shapes=[](const WorldTrackedPose&,const r::HandGeometry&) {return std::vector<r::HeldShape>{};};
+            flat.moving=[](const WorldTrackedPose&,const r::HandGeometry&,Vec3,Vec3) {return std::vector<r::HeldShape>{};};
+            flat.ghost=[half](const WorldTrackedPose& palm,const r::HandGeometry& g) { // the thing as the motor seats it: its face on the palm skin
+                r::HeldShape box{};box.frame.position=palm.position+r::palm_normal(palm,g)*(std::min({half.x,half.y,half.z})+r::held_palm_depth);box.frame.basis=palm.basis;box.half=half;
+                return std::vector<r::HeldShape>{box};};
+            flat.reach=r::grip_flat_reach;
+            scenes.push_back(flat);
+        }
         Scene old{};old.name=_strdup((std::string(t.name)+"_old").c_str());old.held=true;old.where=hold_at;old.fingers=hold_fingers;old.normal=hold_in;old.squeeze=1.f;old.index=0.f;
         old.title=_strdup((std::string(t.title)+": v638 path (classify_held on the thing's own world box)").c_str());old.shape_name="object (classify_held)";
         old.moving=[half,old_pose,box_of](const WorldTrackedPose& palm,const r::HandGeometry& g,Vec3 dp,Vec3 turn) {

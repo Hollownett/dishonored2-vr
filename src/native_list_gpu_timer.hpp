@@ -12,6 +12,17 @@ namespace d2vr {
 class NativeListGpuTimer {
 public:
     static constexpr unsigned max_lists=128;
+    // v999 pass tags.  Named render passes are 0..render_pass_count-1; 63 is "no list->pass mapping".
+    // 52..62 stay unused so a truncated pass id cannot alias a real pass.
+    static constexpr unsigned max_pass=64;
+    static constexpr std::uint8_t untagged_pass=63;
+    // Per completed timer frame, summed by (pass, phase).  This is the raw input of GpuPassWindow;
+    // ms/lists are frame totals, not percentiles.
+    struct PassFrame {
+        double ms[max_pass][phase_count]{};
+        unsigned lists[max_pass][phase_count]{};
+        bool valid{};
+    };
 private:
     template<class T> using Ptr=Microsoft::WRL::ComPtr<T>;
     struct Pair {Ptr<ID3D11Query> start,end;};
@@ -19,6 +30,7 @@ private:
         Ptr<ID3D11Query> disjoint,span_end;
         std::array<Pair,max_lists> lists;
         std::array<std::uint8_t,max_lists> phase{};
+        std::array<std::uint8_t,max_lists> pass{};
         unsigned count{},dropped{};
         bool pending{},invalid{};
         std::uint64_t sequence{};
@@ -36,6 +48,7 @@ public:
             unready_polls{},disjoint{},query_failures{},rejected_calls{},last_sequence{};
         unsigned last_lists{},last_dropped_lists{};
         PhaseGpu last_phase{}; // latest completed timer frame, summed by the phase each list was executed in
+        PassFrame last_pass{}; // latest completed timer frame, summed by the pass tag each list carried
         double last_list_sum_ms{},last_elapsed_ms{},total_list_sum_ms{},total_elapsed_ms{};
     };
 private:
@@ -80,6 +93,7 @@ public:
             if(clock.Disjoint || !clock.Frequency) {frame.pending=false;++stats_.disjoint;continue;}
             if(frame.invalid) {frame.pending=false;continue;}
             UINT64 first{},span_end{},sum{};bool complete=true;UINT64 phase_sum[phase_count]{};unsigned phase_lists[phase_count]{};
+            UINT64 pass_sum[max_pass][phase_count]{};unsigned pass_lists[max_pass][phase_count]{};
             for(unsigned i=0;i<frame.count;++i) {
                 UINT64 start{},end{};
                 if(!read(context,frame.lists[i].start.Get(),&start,sizeof start,failed) ||
@@ -87,7 +101,10 @@ public:
                 if(end<start) {failed=true;++stats_.query_failures;complete=false;break;}
                 if(!i) first=start;
                 sum+=end-start;
-                phase_sum[frame.phase[i]%phase_count]+=end-start;++phase_lists[frame.phase[i]%phase_count];
+                const unsigned phase=frame.phase[i]%phase_count;
+                const unsigned pass=frame.pass[i]%max_pass;
+                phase_sum[phase]+=end-start;++phase_lists[phase];
+                pass_sum[pass][phase]+=end-start;++pass_lists[pass][phase];
             }
             if(complete) complete=read(context,frame.span_end.Get(),&span_end,sizeof span_end,failed);
             if(!complete) {
@@ -104,10 +121,15 @@ public:
                 stats_.last_list_sum_ms=list_ms;stats_.last_elapsed_ms=elapsed_ms;
                 stats_.last_phase={};stats_.last_phase.valid=true;
                 for(unsigned p=0;p<phase_count;++p) {stats_.last_phase.ms[p]=static_cast<double>(phase_sum[p])*scale;stats_.last_phase.lists[p]=phase_lists[p];}
+                stats_.last_pass={};stats_.last_pass.valid=true;
+                for(unsigned p=0;p<max_pass;++p) for(unsigned phase=0;phase<phase_count;++phase) {
+                    stats_.last_pass.ms[p][phase]=static_cast<double>(pass_sum[p][phase])*scale;
+                    stats_.last_pass.lists[p][phase]=pass_lists[p][phase];
+                }
             }
         }
     }
-    Ticket begin_list(ID3D11DeviceContext* context,Phase phase=Phase::pre) {
+    Ticket begin_list(ID3D11DeviceContext* context,Phase phase=Phase::pre,std::uint8_t pass=untagged_pass) {
         if(!owns(context)) {++stats_.rejected_calls;return 0;}
         if(suppressed_) {++stats_.dropped_lists;return 0;}
         if(open_ticket_) {++stats_.dropped_lists;++frames_[static_cast<unsigned>(active_)].dropped;return 0;}
@@ -122,6 +144,7 @@ public:
         auto& frame=frames_[static_cast<unsigned>(active_)];
         if(frame.count==frame.lists.size()) {++stats_.dropped_lists;++frame.dropped;return 0;}
         frame.phase[frame.count]=static_cast<std::uint8_t>(phase);
+        frame.pass[frame.count]=static_cast<std::uint8_t>(pass%max_pass);
         context->End(frame.lists[frame.count].start.Get());
         open_ticket_=++next_ticket_;
         return open_ticket_;

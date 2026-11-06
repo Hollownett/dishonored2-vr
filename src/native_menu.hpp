@@ -91,7 +91,7 @@ class NativeMenu {
                 if(down) ++pending_buttons_;else --pending_buttons_;
             }
             // Keep the bounded pointer trace for the visible test, not minutes of hidden frames.
-            if((samples_<4000 && (live || !pointing_ || samples_<64)) || event!=MenuClick::Event::none) {
+            if(log_.is_open() && ((samples_<4000 && (live || !pointing_ || samples_<64)) || event!=MenuClick::Event::none)) {   // v1046: not logging = nothing to format
                 log_<<call<<','<<GetCurrentThreadId()<<','<<now<<','<<logic<<','<<state->wrapper<<','<<state->file<<','
                     <<state->cached_stage_cursor[0]<<','<<state->cached_stage_cursor[1]<<','<<live<<','<<input.u<<','<<input.v<<','
                     <<static_cast<int>(event)<<'\n';++samples_;if(event!=MenuClick::Event::none) log_.flush();
@@ -118,7 +118,7 @@ public:
             throw std::runtime_error("Native Iggy menu functions differ from the pinned executable");
         set_cursor_=reinterpret_cast<SetCursor>(base+0x2a8b0);move_event_=reinterpret_cast<MoveEvent>(base+0x102c3e0);
         dispatch_=reinterpret_cast<Dispatch>(base+0x2cb20);button_=reinterpret_cast<Button>(base+0x33450);
-        log_.open(file,std::ios::trunc);if(!log_) throw std::runtime_error("Cannot open native menu trace");
+        if(!file.empty()) {log_.open(file,std::ios::trunc);if(!log_) throw std::runtime_error("Cannot open native menu trace");}  // v1046: an empty path (diagnostics off) is not an error
         log_<<std::setprecision(9)<<"call,thread,tick_ms,logic,wrapper,file,cached_x,cached_y,pointing,u,v,button_event\n";log_.flush();
         publication_={};file_inputs_={};calls_=0;samples_=0;rejected_=0;moves_=0;buttons_=0;pending_buttons_=0;interactive_tick_=0;error_.clear();failed_=false;instance_=this;
         if(!original_ && MH_CreateHook(reinterpret_cast<void*>(base+update_rva),reinterpret_cast<void*>(&update),reinterpret_cast<void**>(&original_))!=MH_OK)

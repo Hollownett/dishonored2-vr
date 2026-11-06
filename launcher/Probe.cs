@@ -534,6 +534,9 @@ public static class Probe
     /// <summary>preserve_probe_outputs: copy the shared outputs (and timed eye captures, recovery log, identity, provenance) to artifacts\runs\&lt;UTC stamp&gt;-&lt;label&gt;.</summary>
     static string? Preserve(string root, string label, string? identity = null, List<(string, string)>? extra = null)
     {
+        // v1046: "Save diagnostic logs" off (no build\diagnostics) = nothing is archived: the shared outputs are small status files plus
+        // leftovers of older sessions, and re-copying those leftovers into runs\ would spend the disk the switch exists to spare.
+        if (!File.Exists(Path.Combine(root, "build", "diagnostics"))) return null;
         var art = Path.Combine(root, "artifacts");
         var sources = ProbeOutputs.Select(n => Path.Combine(art, n)).Where(File.Exists).ToList();
         if (sources.Count == 0) return null;

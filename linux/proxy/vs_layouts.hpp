@@ -3,10 +3,15 @@
 // the game creates its shaders a few seconds after it starts, long before the proxy starts the mod (present + settle),
 // and Direct3D cannot return a shader's bytecode later. install() hooks D3D11CreateDevice(AndSwapChain) when the proxy
 // loads, then the first created device's CreateVertexShader (vtable 12, shared by every device of that class), and
-// reflects each shader whose bytecode names cb_previousmvpmatrix.
+// reflects each shader that names the current MVP rows (cb_mvpmatrixx/y/z/w); the previous rows are recorded when the
+// shader also names cb_previousmvpmatrixx/y/z/w. v1103: a shader with current rows only (the held weapon's colour/forward
+// vertex shader; docs/WEAPON-DRAW-PLACE-TEMPORAL.md "Round 3") is recorded with all four previous bytes 0xff "absent" and
+// is placed on its current rows. Before v1103 reflect() returned 0 for it, so ObjectMotion never saw the colour draw.
 // D2vrVertexShaderLayout(shader): byte k = float4 index of cb_mvpmatrix{x,y,z,w}[k] (k<4), then of
-// cb_previousmvpmatrix{x,y,z,w}, in the cbuffer at b2; 0xff = not declared; 0 = no previous rows at b2.
-// D2vrVertexShaderStats(out[4]): shaders created, with previous rows, not stored (table full), devices left unhooked.
+// cb_previousmvpmatrix{x,y,z,w}, in the cbuffer at b2; 0xff = not declared. 0 = not a layout (no b2 cbuffer or no current
+// x/y/w rows). A current-only layout is non-zero: its top four bytes are 0xffffffff.
+// D2vrVertexShaderStats(out[5]): shaders created, with previous rows, not stored (table full), devices left unhooked,
+// current-only layouts recorded.
 #include <windows.h>
 #include <d3d11.h>
 #include <d3d11shader.h>
@@ -17,9 +22,15 @@
 
 namespace d2vr::vs_layouts {
 inline constexpr std::uint64_t absent=0xff;
+// The four previous-row bytes of a packed layout. All four 0xff: the shader declares no previous rows.
+inline constexpr std::uint64_t previous_absent=0xffffffff00000000ull;
+inline bool has_previous(std::uint64_t layout) noexcept {return layout && (layout&previous_absent)!=previous_absent;}
 
 inline std::uint64_t reflect(const void* code,SIZE_T size) noexcept {
-    static constexpr char marker[]="cb_previousmvpmatrix";
+    // The cheap gate before D3DReflect: only a shader whose bytecode names the current MVP rows can be a layout, and a
+    // shader with both row sets names them too (cb_previousmvpmatrix does not contain this substring). This keeps the
+    // per-CreateVertexShader cost to one scan of the bytecode for the ~2/3 of vertex shaders that are not model shaders.
+    static constexpr char marker[]="cb_mvpmatrix";
     const auto* bytes=static_cast<const char*>(code);
     if(std::search(bytes,bytes+size,marker,marker+sizeof marker-1)==bytes+size) return 0;
     using Reflect=HRESULT(WINAPI*)(LPCVOID,SIZE_T,REFIID,void**);
@@ -36,14 +47,19 @@ inline std::uint64_t reflect(const void* code,SIZE_T size) noexcept {
         D3D11_SHADER_INPUT_BIND_DESC bind{};
         if(FAILED(r->GetResourceBindingDesc(i,&bind)) || bind.Type!=D3D_SIT_CBUFFER || bind.BindPoint!=2) continue;
         ID3D11ShaderReflectionConstantBuffer* cb=r->GetConstantBufferByName(bind.Name);
-        bool previous=false;
+        bool have_x=false,have_y=false,have_w=false;
         for(unsigned k=0;k<8 && cb;++k) {
             D3D11_SHADER_VARIABLE_DESC v{};std::uint64_t row=absent;
             ID3D11ShaderReflectionVariable* var=cb->GetVariableByName(names[k]);
-            if(var && SUCCEEDED(var->GetDesc(&v)) && v.StartOffset%16==0 && v.StartOffset/16<absent) {row=v.StartOffset/16;previous|=k>=4;}
+            if(var && SUCCEEDED(var->GetDesc(&v)) && v.StartOffset%16==0 && v.StartOffset/16<absent) {
+                row=v.StartOffset/16;
+                if(k==0) have_x=true; else if(k==1) have_y=true; else if(k==3) have_w=true;
+            }
             packed|=row<<(8*k);
         }
-        if(!previous) packed=0;
+        // x, y and w are the rows object motion needs (z may be filled from the eye's VP); without them this is not a
+        // layout. The previous bytes stay 0xff when absent, which is exactly the "current-only" encoding.
+        if(!have_x || !have_y || !have_w) packed=0;
         break;
     }
     r->Release();
@@ -51,9 +67,12 @@ inline std::uint64_t reflect(const void* code,SIZE_T size) noexcept {
 }
 
 struct Slot {std::atomic<void*> shader{};std::atomic<std::uint64_t> layout{};};
+// Capacity: the shipped shader cache has 6,184 vertex shaders; 2,023 declare the current MVP rows (1,931 current-only,
+// 92 with previous rows), and the v1007 session created 6,251 vertex shaders. 1<<16 slots leave >10x headroom for the
+// whole cache plus runtime variants; stats[2] below is the "not stored (table full)" canary if that ever changes.
 inline constexpr unsigned table_size=1u<<16;
 inline Slot table[table_size];
-inline std::atomic<std::uint64_t> stats[4]{};
+inline std::atomic<std::uint64_t> stats[5]{};
 
 // Slots are claimed once per address and never freed: a shader created at a reused address overwrites its layout.
 inline Slot* find(void* shader,bool claim) noexcept {
@@ -78,7 +97,7 @@ inline HRESULT STDMETHODCALLTYPE create_vs_hook(ID3D11Device* d,const void* code
     if(SUCCEEDED(hr) && out && *out && code) {
         stats[0].fetch_add(1,std::memory_order_relaxed);
         const std::uint64_t layout=reflect(code,size);
-        if(layout) stats[1].fetch_add(1,std::memory_order_relaxed);
+        if(layout) stats[has_previous(layout)?1u:4u].fetch_add(1,std::memory_order_relaxed);
         if(Slot* s=find(*out,layout!=0)) s->layout.store(layout,std::memory_order_release);
         else if(layout) stats[2].fetch_add(1,std::memory_order_relaxed);
     }
@@ -127,5 +146,6 @@ extern "C" __declspec(dllexport) std::uint64_t WINAPI D2vrVertexShaderLayout(voi
     return s?s->layout.load(std::memory_order_acquire):0;
 }
 extern "C" __declspec(dllexport) void WINAPI D2vrVertexShaderStats(std::uint64_t* out) {
-    for(int i=0;i<4;++i) out[i]=d2vr::vs_layouts::stats[i].load(std::memory_order_relaxed);
+    if(!out) return;
+    for(int i=0;i<5;++i) out[i]=d2vr::vs_layouts::stats[i].load(std::memory_order_relaxed);
 }

@@ -54,4 +54,9 @@ inline WheelPlane wheel_plane_of(const TrackedPose& pose,double width) {
     const auto q=normalized(pose.orientation);
     return {pose.position,rotated(q,{0,0,1}),rotated(q,{1,0,0}),rotated(q,{0,1,0}),width};
 }
+// The hand wheel (dual wield) draws only as a ring at its hand (wheel_hand >= 0, held through the close tail). The game keeps logic 256
+// after the commit while its wheel closes, so with no hand the head-locked quad of the native wheel would show for that second.
+inline constexpr bool world_ui_quad_allowed(bool is_wheel,bool hand_wheel_mode,int wheel_hand) noexcept {
+    return !(is_wheel && hand_wheel_mode && wheel_hand<0);
+}
 } // namespace d2vr

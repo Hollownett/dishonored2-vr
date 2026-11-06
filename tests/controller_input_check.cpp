@@ -61,6 +61,34 @@ int main() {
     input.active=false;pad=composer.compose(input,true);
     const XINPUT_GAMEPAD neutral{};assert(!std::memcmp(&pad,&neutral,sizeof(pad)));
 
+    { // v996 simulated/test path: a gameplay-script segment must not deactivate the simulated controller. If it did, the
+      // load-screen "pad a" would start a fresh activation and PadComposer would mask the whole held press until release.
+        d2vr::ControllerInput live{};live.active=true;
+        d2vr::PadComposer load_pad;
+        load_pad.compose(live,false,2000);
+        d2vr::ControllerInput segment{};segment.a=true;
+        d2vr::apply_simulated_controller_command(live,segment);
+        assert(live.active && live.a);
+        assert(load_pad.compose(live,false,2010).wButtons==XINPUT_GAMEPAD_A);
+        d2vr::ControllerInput stale{};stale.active=true;
+        d2vr::PadComposer stale_pad;
+        stale_pad.compose(stale,false,3000);
+        stale=segment;                       // the old wholesale assignment: active is lost
+        stale_pad.compose(stale,false,3005);  // the game sees an inactive pad between commands, resetting previous_active_
+        stale.active=true;                   // the test pad forces the input active again
+        stale.a=true;
+        assert(!(stale_pad.compose(stale,false,3010).wButtons&XINPUT_GAMEPAD_A)); // fresh activation masks the held A
+        // v996 test-pad fix: after any inactive frame, publish one active button-free frame before the press; the composer
+        // then treats the following frame as continuing input, so A reaches the game.
+        d2vr::PadComposer release_pad;
+        d2vr::ControllerInput inactive{};
+        release_pad.compose(inactive,false,4000);
+        d2vr::ControllerInput release{};release.active=true;
+        assert(release_pad.compose(release,false,4010).wButtons==0);
+        d2vr::ControllerInput press{};press.active=true;press.a=true;
+        assert(release_pad.compose(press,false,4020).wButtons==XINPUT_GAMEPAD_A);
+    }
+
     // A short Quest menu tap has a native pollable pulse after release.
     d2vr::PadComposer menu;input={};input.active=true;menu.compose(input,true,1000);
     input.menu=true;assert(!(menu.compose(input,true,1010).wButtons&XINPUT_GAMEPAD_START));

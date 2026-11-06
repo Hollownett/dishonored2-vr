@@ -125,6 +125,8 @@ public:
             if(quads) held_quads_=write(view+quad_list,out.data(),quad_size);
         }
     }
+    // v1041: the quads go back into the view now (the right view during the lens-art probe keeps the engine's lens quad).
+    template<class Write> void keep_quads(Write& write) {if(held_quads_) {write(view_+quad_list,saved_quads_.data(),quad_size);held_quads_=false;}}
     template<class Write> void restore(Write& write) {
         if(held_uber_) write(view_+uber_block,saved_uber_.data(),uber_size);
         if(held_quads_) write(view_+quad_list,saved_quads_.data(),quad_size);

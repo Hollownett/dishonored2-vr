@@ -500,6 +500,7 @@ private:
     // ---- the event log (hand-body-events.csv; a writer thread flushes once per second, the dispatcher only try_locks)
     inline static std::mutex events_mutex_;inline static std::vector<HandBodyEvent> events_;inline static std::atomic<std::uint64_t> dropped_events_{};
     static void note_event(unsigned side,const char* kind,std::uint32_t handle) {
+        if(output_.empty()) return;   // v1046: diagnostics off = no writer thread, so nothing is queued
         HandBodyEvent ev;ev.t_ms=GetTickCount64();ev.side=side;ev.kind=kind;ev.handle=handle;ev.world=HandBodyNative::reader()?HandBodyNative::world_now():0;
         ev.generation=tick_generation_;ev.logic=tick_logic_;ev.release=tick_release_;
         std::unique_lock<std::mutex> lock(events_mutex_,std::try_to_lock);

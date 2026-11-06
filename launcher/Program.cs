@@ -182,9 +182,10 @@ sealed class MainForm : Form
         var openArt = new ArtButton("Open artifacts", Look.Secondary); openArt.Click += (_, _) => Open(env.Art);
         var openRuns = new ArtButton("Open runs", Look.Secondary); openRuns.Click += (_, _) => Open(Directory.Exists(env.P("artifacts", "runs")) ? env.P("artifacts", "runs") : env.Art);
         var openRoot = new ArtButton("Open mod folder", Look.Secondary); openRoot.Click += (_, _) => Open(env.Root);
+        var deleteLogs = new ArtButton("Delete logs", Look.Secondary); deleteLogs.Click += (_, _) => DeleteLogs();
         // The self-test is a repo Python tool: developer mode only.
         uninstallProxy.Click += (_, _) => UninstallProxy();
-        diagButtons = env.Standalone ? new[] { uninstallProxy, openArt, openRuns, openRoot } : new[] { uninstallProxy, selftest, openArt, openRuns, openRoot };
+        diagButtons = env.Standalone ? new[] { uninstallProxy, openArt, openRuns, deleteLogs, openRoot } : new[] { uninstallProxy, selftest, openArt, openRuns, deleteLogs, openRoot };
         StyleText(toolOut);
         pages[2].Controls.AddRange(cmdButtons); pages[2].Controls.AddRange(new Control[] { custom, send, result }); pages[2].Controls.AddRange(diagButtons); pages[2].Controls.Add(toolOut);
         pages[2].Painter = PaintTools;
@@ -644,6 +645,20 @@ sealed class MainForm : Form
         }
         catch (Exception ex) { Append(log, "Launch failed: " + ex.Message, Ui.Bad); }
         launching = false; launch.Enabled = true; Tick();
+    }
+
+    /// <summary>v1047 (user: "don't waste any disk space ... to collect VR logs"): deletes the mod's logs in artifacts\ (LogCleanup keeps the launcher's
+    /// and the mod's own files). Asks first, and never while the game runs: the mod may be writing them.</summary>
+    void DeleteLogs()
+    {
+        if (Env.Game() != null) { Append(toolOut, "Close the game first: the mod may still be writing its logs.", Ui.Bad); return; }
+        var plan = LogCleanup.Plan(env.Art);
+        if (plan.Count == 0) { Append(toolOut, "No logs to delete.", Ui.Dim); return; }
+        if (MessageBox.Show(this, $"Delete {plan.Count} log files ({LogCleanup.Size(plan.Sum(i => i.Bytes))}) from the mod's artifacts folder?\n\n" +
+                "Your settings, the game art you imported and the launcher's own files are kept.", "Delete logs", MessageBoxButtons.YesNo,
+                MessageBoxIcon.Question, MessageBoxDefaultButton.Button2) != DialogResult.Yes) return;
+        var (deleted, bytes, failed) = LogCleanup.Run(env.Art, plan);
+        Append(toolOut, $"Deleted {deleted} log files ({LogCleanup.Size(bytes)} freed)." + (failed > 0 ? $" {failed} could not be deleted (in use)." : ""), failed > 0 ? Ui.Gold : Ui.Good);
     }
 
     /// <summary>Removes our dinput8 proxy and d2vr-linux.ini from the game folder (a foreign dinput8.dll is left alone).</summary>

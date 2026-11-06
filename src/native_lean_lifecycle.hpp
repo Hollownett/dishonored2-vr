@@ -265,6 +265,7 @@ public:
             (t.kind==0?"join_return":t.kind==1?"game_shutdown_return":t.kind==3?"destructor_return":"world_shutdown_return"),t.state,t.ticket,0,0,256,(t.kind==3 || t.historical_owner)?1U:0U);
     }
     void install(std::uintptr_t base,Read read,const std::filesystem::path& path) {
+        if(path.empty())return;   // v1046: diagnostics off = a passive lifecycle trace hooks nothing
         base_=base;read_=read;records_={};events_={};serial_=last_join_tick_=0;last_join_state_={};have_join_state_=false;reserved_rows_=boundary_rejection_rows_=0;rows_=dropped_=rejected_=overflow_=0;failed_=false;
         for(unsigned i=0;i<rvas.size();++i){std::array<unsigned char,32> bytes{};if(!read(base+rvas[i],bytes.data(),32))throw std::runtime_error("Cannot read native Lean lifetime code");
             for(unsigned j=0;j<32;++j){const auto nibble=[](char c){return c<='9'?c-'0':c-'a'+10;};if(bytes[j]!=nibble(signatures[i][j*2])*16+nibble(signatures[i][j*2+1]))throw std::runtime_error("Native Lean lifetime code differs");}}

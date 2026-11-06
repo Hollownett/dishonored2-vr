@@ -270,11 +270,11 @@ Quest Touch controllers. Grip is the side button under your middle finger; trigg
 <!-- vr-page:wheel-journal|Wheel & journal -->
 
 ## Wheel and wrist HUD
-<!-- vr-figure:wheel_watch|Point into the wheel; turn the back of your wrist toward your face to read the watch. -->
+<!-- vr-figure:wheel_watch|Point into the wheel; turn the back of your left wrist toward your face to read the watch. -->
 - **Hold X** — open the Quick Access Wheel. Point with either hand; release X to equip.
 - **While the wheel is open** — A uses a mana elixir, B a health elixir; Y hides or shows it.
 - **Menu + right stick** — assign the wheel item to a D-pad shortcut.
-- **Back of either wrist toward your face** — read your health and mana watch.
+- **Back of your left wrist toward your face** — read the watch.
 
 ## Temples and journal
 <!-- vr-figure:temples|Your left temple opens the journal; your right temple opens this guide. -->
@@ -296,6 +296,18 @@ Quest Touch controllers. Grip is the side button under your middle finger; trigg
 - **Pause, then VR Settings** — adjust resolution, anti-aliasing, sharpening, HUD size and turning; recenter, calibrate or open this guide.
 - **Cutscenes** — play in 3D around you. Your hands and body stay when the scene uses your character.
 ```
+
+## Watch implementation (v1015)
+
+The watch is one quad on the **back of the left hand**, like the rival mod's watch. All placement comes from the runtime grip pose of the left controller (the pose the drawn hands are built from), not a headset-specific constant. In the OpenXR grip frame `+X` points into the left palm and `+Z` runs back along the forearm, so the face normal is `-X`; the centre is the controller plus `(-0.05, 0.0, +0.08)` m. The face is turned about that normal so the head's up reads upright. The rival anchors to the aim pose because it draws the hand from that pose; this mod draws the hands from the grip pose, and the offsets above place the face on the drawn wrist either way.
+
+- **Size**: `build/wrist-hud-size` is the square quad's side in centimetres, default **8.5**, clamped **4–15**. `build/no-wrist-hud` turns the watch off; `build/legacy-wrist-hud` restores the pre-v1013 two-wrist inner-side layout for A/B.
+- **Content is the game's own cluster.** The watch shows a single crop of the game's 2D MasterHUD: the health ring, the mana ring, the equipped weapon/power icon and its ammo. There is no generated face, bar, percentage, text, dial or disc in the default path. The mod already captures the three public MasterHUD children (`_masterHUD._healthMeter`, `._manaMeter`, `._equipmentIcon`) through `NativeHudChildCapture` slots 1/2/3; `dxgi_probe` alpha-composites their compact crops at their measured surface positions, in the game's child order health, mana, equipment. Nothing is placed by the mod.
+- **Crop.** The rival's measured crop is used unchanged: with `hs = min(H, W*9/16)` the centred 16:9 frame height, the ring centre is `frameLeft + 0.1465*hs` right and `0.133*hs + 0.0327*(H - hs)` down from the top of the captured HUD surface; the crop side is `0.33*hs`. The constants were measured by the rival at 1902x973, 1280x720, 2560x1080, 1896x1968 and 1440x1440; the v1014 session's HUD surface was **2316x2476**, giving a **429.9 px** square at (-24.1, -3.3). The captured child crops at that size sit exactly inside it (health 47,42..291,382; mana 97,111..316,333; equipment 143,128..337,285). The crop constants and placement helper are in `src/wrist_hud_image.hpp` (`wrist_watch_cluster_rect`, `wrist_watch_cluster_place`); the child positions are the measured crops in each capture, not mod constants.
+- **Fade and GPU copy.** `dxgi_probe` builds one cluster texture on the Present queue (one clear and up to three small sub-rect blits when the captured art changes); `GameXr` clears the watch image and alpha-blits that texture with the v1014 smoothstep fade. The cluster texture is the only watch image; no CPU image, upload or worker is involved. `build/wrist-hud-backdrop` adds an optional dark card behind the cluster for readability A/B; it is **off by default**.
+- **Visibility**: face turned to the eye on below **48°**, off above **65°**; head looking at it on below **40°**, off above **55°**; eye-to-watch distance at most **0.85 m** (keep to **0.95 m**). Fade in **0.12 s**, out **0.22 s**. The left trigger above **0.5** and any menu/wheel/cutscene hide it. A short haptic tick (0.12 amplitude, 18 ms) fires when it appears unless `build/no-wrist-haptic` is present.
+- **Native HUD, no in-view duplicate.** While the watch is enabled the game's own `ark_ui_show_master_hud` is kept at `2` so the cluster keeps being drawn and captured; the player's value is restored when the watch is disabled or VR stops. The health/mana/equipment child draws are already redirected out of the in-view HUD target by `NativeHudChildCapture` (the capture target is bound for the exact child scope), and `native_hud_keep_flat` returns false for those kinds. There is no second in-view cluster to hide, so no new engine patch or per-child hide gate was added.
+- **Tests and preview.** `wrist_hud_image_check` covers the crop at the rival's measured resolutions and the live 2316x2476 surface, the original child placements and clipping; `native_hud_fallback_check` covers the WARP premultiplied alpha fade; `game_xr_wrist_recovery_check` covers the cluster publication, content-gated draws, stale/invalid rejection and the optional backdrop through a WARP watch readback. `artifacts/claude/wrist-watch-preview.png` is rendered from the real captured child `.rgba` files at their measured positions; `wrist-watch-preview-backdrop.png` shows the optional card. These are lab/GPU checks, not headset acceptance.
 
 Keep the approximate **2.2 m/s** yank threshold in developer notes and checks, rather than player-facing instructions. “Pull hard away from him” teaches the action without suggesting that the player must measure speed.
 

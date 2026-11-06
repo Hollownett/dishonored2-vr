@@ -89,6 +89,16 @@ private:
     // v835: a read before this interval's upload gets its joint moved on by the hand's motion this tick (the probe's advance_attachment)
     using Advance=std::optional<rig::Transform>(*)(unsigned,const NativeAttachmentSource&,const rig::Transform&,short) noexcept;   // v861: + the joint index
     std::atomic<Advance> advance_{};
+    // v1021: the crossed item's origin hand is read through `advance_` (the image hand moved on by this tick's motion), not a palette joint;
+    // see cross_pair. No separate callback: the crossed item must use exactly the pose a native item is composed from.
+    // v1102: the draw-time weapon publisher (src/weapon_draw_place.hpp WriteLog) needs every joint-59 read that can move a held
+    // weapon: the hand the item was PLACED from (after advance AND after the cross, so a crossed weapon reports the physical hand it
+    // rides, not the inventory slot's arm) and a serial. v1104: the HAND frame (the joint as the solver's image joint 59 sees it, with
+    // the cross/item tag undone) and the engine's final ITEM frame, so the publisher can correct the weapon in the hand frame the
+    // image is in instead of the tagged item frame (the round-4 gate). The sink is called per read, before the engine composes the item.
+    using WriteSink=void (*)(unsigned physical,unsigned engine_side,std::uintptr_t arm_model,const rig::Transform* hand,
+        const rig::Transform* item,bool crossed) noexcept;
+    std::atomic<WriteSink> write_sink_{};
     static bool admission_valid(const NativeAttachmentAdmission& value) noexcept {
         return (!value.context && !value.receipt && !value.acquire && !value.release) ||
             (value.context && value.receipt && value.acquire && value.release);
@@ -204,6 +214,7 @@ private:
         unsigned observed_stage{};
         bool returned{};
         bool locked{},written{},admitted{},crossed{};
+        rig::Transform hand_read{};   // the uncorrected origin hand joint of a crossed composition (the physical hand's frame)
         CallFrame(NativeAttachmentPose* owner,std::uintptr_t anim,int pose_state,short index,Call&& action)
             noexcept(std::is_nothrow_constructible_v<std::decay_t<Call>,Call&&>):
             self(owner),animation(anim),state(pose_state),joint(index),call(std::forward<Call>(action)) {}
@@ -211,7 +222,10 @@ private:
     };
     // The right hand's palette joint for a left-arm read (mutex_ held). No source: the right arm is not allowed or published, either side
     // carries a receipt (the socket and contact admissions are one-arm protocols), the joint is a cuff joint, or a published model frame is invalid.
-    std::optional<rig::Transform> cross_joint(const Side& destination,const Side& origin,short joint) const noexcept {
+    // Both readings from ONE composition: corrected (the item joint written into the destination palette) and uncorrected (the origin
+    // physical hand joint, for the weapon binder's read). The validity conditions are checked once, so the correction can never be
+    // reported as the hand when a second reconstruction would fail.
+    std::optional<std::pair<rig::Transform,rig::Transform>> cross_pair(const Side& destination,const Side& origin,short joint) const noexcept {
         if(joint<2 || (allowed_&3u)!=3u || !origin.animation || !origin.first_slot || origin.animation==destination.animation ||
            destination.source.admission.context || destination.source.admission.receipt || origin.source.admission.context || origin.source.admission.receipt) return {};
         std::array<float,15> from{},to{};
@@ -223,6 +237,28 @@ private:
             auto peak=cross_skew_peak_um_.load();while(um>peak && !cross_skew_peak_um_.compare_exchange_weak(peak,um)) {}
         }
         try {
+            // v1021: a crossed WEAPON rides the origin physical hand, and that hand is drawn from its render image, not from the origin
+            // palette. The probe's advance callback already returns exactly that pose for the origin side: the image hand moved on by this
+            // tick's hand motion, in the origin arm's live model frame (the same pose a native item is composed from). Convert it to world and
+            // write it into the destination arm's LIVE frame (the frame the engine composes the item in), exactly like the native read. Joints
+            // other than the attachment, and reads where the advance has no image/motion, keep the v776 conversion.
+            if(joint==static_cast<short>(power_hand::attachment_joint) && live)
+                if(const auto advance=advance_.load(std::memory_order_acquire))
+                    if(const auto moved=advance(static_cast<unsigned>(&origin-sides_.data()),origin.source,origin.joints[static_cast<unsigned>(joint)],joint)) {
+                        const rig::ModelFrame origin_live(from);
+                        rig::Transform hand{};
+                        for(unsigned i=0;i<3;++i) {const auto axis=origin_live.world_direction(rig::column(*moved,i));
+                            hand.f[i*4]=static_cast<float>(axis.x);hand.f[i*4+1]=static_cast<float>(axis.y);hand.f[i*4+2]=static_cast<float>(axis.z);}
+                        const auto p=origin_live.world_point(rig::position(*moved));
+                        hand.f[12]=static_cast<float>(p.x);hand.f[13]=static_cast<float>(p.y);hand.f[14]=static_cast<float>(p.z);hand.f[15]=1;
+                        static const std::array<float,15> identity={{0,0,0,1,0,0,0,1,0,0,0,1,1,1,1}};
+                        const rig::ModelFrame from_world(identity);
+                        const rig::ModelFrame target_frame(to);
+                        const auto* correction=joint==static_cast<short>(power_hand::attachment_joint)?&cross_attachment_[static_cast<unsigned>(&destination-sides_.data())]:nullptr;
+                        std::pair<rig::Transform,rig::Transform> out{};
+                        power_hand::cross_joint_both(hand,from_world,target_frame,destination.joints[static_cast<unsigned>(joint)],correction,out.first,out.second);
+                        return out;
+                    }
             // v776 (headset v775: a crossed item trailed the hand when the player ran): the frames the two palettes were PUBLISHED with, not the models' live
             // ones. This read comes from the post-physics attach pass (0x755030 -> 0x753c10), which writes each arm's frame (model+0x1860) and then
             // evaluates the items bound to it: the item of the destination arm runs right after that arm's update, but the origin arm is its sibling and
@@ -237,7 +273,10 @@ private:
             // while the holding hand plays the other arm's clip mirrored (v763 FullBodyDriver mirror_native; the receipts show the left item
             // frame equals joint 59): with the player's fist instead the item sat wrong (headsets v761-v762).
             const auto* correction=joint==static_cast<short>(power_hand::attachment_joint)?&cross_attachment_[static_cast<unsigned>(&destination-sides_.data())]:nullptr;
-            return power_hand::cross_joint(origin.joints[static_cast<unsigned>(joint)],source,target,destination.joints[static_cast<unsigned>(joint)],correction);
+            std::pair<rig::Transform,rig::Transform> out{};
+            power_hand::cross_joint_both(origin.joints[static_cast<unsigned>(joint)],source,target,
+                destination.joints[static_cast<unsigned>(joint)],correction,out.first,out.second);
+            return out;
         } catch(...) {return {};}
     }
     template<class Frame> std::uint64_t around_frame(Frame& frame) {
@@ -287,14 +326,30 @@ private:
         if(const auto mask=cross_.load(std::memory_order_relaxed)) {
             const auto index=static_cast<unsigned>(side-sides_.data());
             if((mask>>index)&1u) {
-                if(const auto crossed=cross_joint(*side,sides_[index^1u],joint)) {frame.tracked=*crossed;frame.crossed=true;}
-                else ++cross_skipped_;
+                if(const auto crossed=cross_pair(*side,sides_[index^1u],joint)) {
+                    frame.tracked=crossed->first;frame.crossed=true;frame.hand_read=crossed->second;
+                } else ++cross_skipped_;
             }
         }
         if(!read_(frame.at,frame.saved.data(),64)) {frame.observed_stage=5;frame.unlock();return frame.call();}
         frame.written=copy_slot(frame.at,frame.tracked.f.data());
         frame.observed_stage=frame.written?6u:7u;
         if(frame.written) {++substitutions_;if(frame.crossed) ++cross_substitutions_;}
+        // v1102: this read is a known placement of the item bound to this arm (joint 59): tell the weapon publisher the physical hand
+        // and the exact joint the engine will compose the item from. A failed slot write (or a failed cross) falls back to the arm's
+        // own native joint, so the pair describes that instead of a tracked pose the engine did not use.
+        // v1104: also report the HAND frame: for a crossed read frame.tracked carries the item's mirror correction (y180/z180), so the
+        // publisher would compare it with the image's hand attachment joint 180 deg apart and reject every frame. Undo the correction
+        // for the read; the engine's final item frame is still reported for diagnostics.
+        if(joint==59) if(const auto sink=write_sink_.load(std::memory_order_acquire)) {
+            const unsigned engine_side=static_cast<unsigned>(side-sides_.data());
+            const bool crossed=frame.written && frame.crossed;
+            rig::Transform native{};rig::Transform hand{};
+            const rig::Transform* item=&frame.tracked;
+            if(!frame.written) {std::memcpy(&native,frame.saved.data(),sizeof native);item=&native;hand=native;}
+            else hand=crossed?frame.hand_read:frame.tracked;   // one composition: never reconstruct the uncorrected read separately
+            sink(crossed?engine_side^1u:engine_side,engine_side,side->source.model,&hand,item,crossed);
+        }
         // Restore only if the slot still holds our value; a concurrent native
         // animation write of a new frame must win.
         return frame.call();
@@ -388,6 +443,7 @@ public:
     struct Counters {std::uint64_t clears{},grace_accepts{},rejects_policy{},rejects_source{},rejects_other{},reads_same{},reads_previous{},reads_older{},advanced{};};
     Counters counters() const {return {clears_.load(),grace_accepts_.load(),rejects_policy_.load(),rejects_source_.load(),rejects_other_.load(),reads_order_[0].load(),reads_order_[1].load(),reads_order_[2].load(),advanced_.load()};}
     void set_advance(Advance advance) noexcept {advance_.store(advance,std::memory_order_release);}
+    void set_write_sink(WriteSink sink) noexcept {write_sink_.store(sink,std::memory_order_release);}   // v1102: every joint-59 read, after the cross
     void note_interval(std::uint64_t present) noexcept {interval_.store(present,std::memory_order_relaxed);}   // render thread, at each Present
     // Dual wield, power hand. Any thread, any time (the lead sets it every control tick from the same flag that mirrors the hands). Set it only
     // while slot 1 holds something without a mod copy (a power, grenade, mine, razor): a gun or crossbow is drawn as a copy measured from the

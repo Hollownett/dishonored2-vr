@@ -16,6 +16,7 @@
 #include <atomic>
 #include <cstdint>
 #include <cstring>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -73,14 +74,18 @@ public:
 class NativeOptionsPage {
 public:
     enum class Kind {slider,stepper,toggle,action};
-    struct Row {Kind kind{};std::string label,description;int minimum{},maximum{},interval{1},value{},fallback{};std::vector<std::string> values;};
+    struct Row {Kind kind{};std::string label,description;int minimum{},maximum{},interval{1},value{},fallback{};std::vector<std::string> values;bool locked{};}; // v1046: locked = greyed and not adjustable (row and widget level)
     inline static constexpr int instance_index=100; // engine sections are 0..3; lib_options only navigates back itself for >= 100
     // lib_options OptionsList pools rowViewCount=10 items (OptionsListContainer._setPoolContainer) and never scrolls further:
     // an 11th row cannot be selected (sim v392). Tabs (categoryIndex) render, but LB/RB (grips) reset the list instead of
     // switching tabs in sim v393 - keep the page to one tab of at most 10 rows.
     inline static constexpr std::size_t max_rows=10;
-    // Render thread: the page as it should open next (labels, choices, current values).
-    static void publish(std::vector<Row> rows) {std::lock_guard<std::mutex> l(m_);rows_=std::move(rows);}
+    // What the page becomes once the values read from it are applied (drain thread; values index = row, -1 for actions; kinds =
+    // the kinds of the open page's rows). The settings own the rule (vr_settings_native.hpp): a row may change kind (a toggle
+    // becomes a slider), label or value with another row's choice.
+    using Resolver=std::function<std::vector<Row>(const std::vector<int>& values,const std::vector<Kind>& kinds)>;
+    // Render thread: the page as it should open next (labels, choices, current values) and, while the page is open, its resolver.
+    static void publish(std::vector<Row> rows,Resolver resolver={}) {std::lock_guard<std::mutex> l(m_);rows_=std::move(rows);resolver_=std::move(resolver);}
     // Hub thread, inside VR_SETTINGS_EVT (the patched click then shows the section): false leaves the game's data alone.
     static bool open(std::uintptr_t base,void* iggy) noexcept {
         std::vector<Row> rows;{std::lock_guard<std::mutex> l(m_);rows=rows_;}
@@ -88,7 +93,7 @@ public:
         if(!verified(base)) {failed_step=2;return false;}
         if(!iggy) {failed_step=3;return false;}
         failed_step=0;
-        const bool ok=guarded([&] {return write_page(base,iggy,rows,false);});
+        const bool ok=guarded([&] {return write_page(base,iggy,rows,nullptr);});
         if(ok) {std::lock_guard<std::mutex> l(m_);open_rows_=std::move(rows);showing=true;++opens;}
         return ok;
     }
@@ -98,14 +103,17 @@ public:
         if(rows.empty() || !showing || !verified(base) || !iggy) return false;
         std::vector<int> values(rows.size(),-1);
         const bool ok=guarded([&] {return read_values(base,iggy,rows,values);});
+        Resolver resolver;std::vector<Kind> kinds;
         if(ok) {
             std::lock_guard<std::mutex> l(m_);
             for(std::size_t i=0;i<values.size() && i<open_rows_.size();++i) if(open_rows_[i].kind==Kind::action) {
                 if(values[i]==1 && open_rows_[i].value!=1) {actions_.push_back(static_cast<int>(i));++action_flips;} // each flip to "Starting..." runs once
                 open_rows_[i].value=values[i];values[i]=-1;
             }
-            pending_=values;++changes;
+            for(const auto& r:open_rows_) kinds.push_back(r.kind);
+            pending_=values;pending_kinds_=kinds;++changes;resolver=resolver_;
         }
+        if(ok && resolver && (live_switch.load() || live_values.load())) refresh(base,iggy,resolver,values,kinds);
         return ok;
     }
     // Hub thread, OnRestoreSettings(100): every row back to its default on the page and in the mod.
@@ -113,9 +121,15 @@ public:
         std::vector<Row> rows;{std::lock_guard<std::mutex> l(m_);rows=open_rows_;}
         if(rows.empty() || !showing || !verified(base) || !iggy) return false;
         for(auto& r:rows) r.value=r.fallback;
-        const bool ok=guarded([&] {return write_page(base,iggy,rows,false);});
-        if(ok) {std::vector<int> values;for(const auto& r:rows) values.push_back(r.kind==Kind::action?-1:r.value);
-            std::lock_guard<std::mutex> l(m_);open_rows_=rows;pending_=values;++changes;}
+        std::vector<int> values;std::vector<Kind> kinds;Resolver resolver;
+        for(const auto& r:rows) {values.push_back(r.kind==Kind::action?-1:r.value);kinds.push_back(r.kind);}
+        {std::lock_guard<std::mutex> l(m_);resolver=resolver_;}
+        if(resolver && (live_switch.load() || live_values.load())) { // the defaults may change what the page shows (v1046: the Upscaler scale slider's locked state and value)
+            auto target=resolver(values,kinds);
+            if(target.size()==rows.size()) rows=std::move(target);
+        }
+        const bool ok=guarded([&] {return write_page(base,iggy,rows,nullptr);});
+        if(ok) {std::lock_guard<std::mutex> l(m_);open_rows_=rows;pending_=values;pending_kinds_=kinds;++changes;}
         return ok;
     }
     // Hub-call arguments: count at call+0x10, the 0x20-byte IggyDataValues inline from call+0x18; the first number's F64 at +0x28.
@@ -141,13 +155,68 @@ public:
     static void action(int row) {std::lock_guard<std::mutex> l(m_);actions_.push_back(row);}
     static void closed() noexcept {showing=false;}
     // Render thread: latest row values (index = row; -1 for actions) and requested actions since the last call.
-    static std::optional<std::vector<int>> take_values() {std::lock_guard<std::mutex> l(m_);auto v=std::move(pending_);pending_.reset();return v;}
+    // kinds (optional) receives the kinds of the rows those values were read from: a row's number means a slider's value or a
+    // toggle's index depending on the page that was actually showing.
+    static std::optional<std::vector<int>> take_values(std::vector<Kind>* kinds=nullptr) {
+        std::lock_guard<std::mutex> l(m_);auto v=std::move(pending_);pending_.reset();
+        if(kinds) *kinds=pending_kinds_;
+        return v;
+    }
     static std::vector<int> take_actions() {std::lock_guard<std::mutex> l(m_);std::vector<int> a;a.swap(actions_);return a;}
     inline static std::atomic<bool> showing{},enabled{true};
-    inline static std::atomic<std::uint64_t> opens{},changes{},faults{},action_flips{};
+    // Live page updates after a change (build/no-live-row-switch, build/no-live-row-values turn them off: the page then keeps
+    // the rows it opened with and the next open shows the current ones): re-show when a row changes kind, rewrite values/labels in place.
+    inline static std::atomic<bool> live_switch{true},live_values{true};
+    inline static std::atomic<std::uint64_t> opens{},changes{},faults{},action_flips{},reshows{},inplace_writes{};
     inline static std::atomic<int> failed_step{},last_show{-1}; // first failing step of the last open; last show result (diagnostics)
 private:
     inline static std::mutex m_;inline static std::vector<Row> rows_,open_rows_;inline static std::optional<std::vector<int>> pending_;
+    inline static Resolver resolver_;inline static std::vector<Kind> pending_kinds_;
+    // Same widgets in the same places: only values, choice labels and the locked state may differ (v1046: rewritten in place).
+    static bool same_shape(const Row& a,const Row& b) {
+        return a.kind==b.kind && a.label==b.label && a.minimum==b.minimum && a.maximum==b.maximum &&
+            a.interval==b.interval && a.values.size()==b.values.size();
+    }
+public:
+    // What a change needs: the page's rows (page), the rows the new values lead to (target) and the values read from the page.
+    // reshow: some row changed kind, label, range or choice count; otherwise touch marks rows whose value or choice labels differ.
+    struct Plan {bool reshow{};bool touched{};std::vector<char> touch;};
+    static Plan plan(const std::vector<Row>& page,const std::vector<Row>& target,const std::vector<int>& values) {
+        Plan p;p.touch.assign(page.size(),0);
+        for(std::size_t i=0;i<page.size() && i<target.size();++i) {
+            if(!same_shape(page[i],target[i])) {p.reshow=true;continue;}
+            if(target[i].kind==Kind::action) continue;
+            const int read=i<values.size()?values[i]:-1;
+            const bool value_differs=read!=target[i].value && !(target[i].kind==Kind::toggle && (read!=0)==(target[i].value!=0));
+            if(value_differs || page[i].values!=target[i].values || page[i].locked!=target[i].locked) {p.touch[i]=1;p.touched=true;}
+        }
+        return p;
+    }
+private:
+    // Drain thread, after a change was read: the page the new values lead to. A row that changed kind needs the section written
+    // again and shown again (engine behaviour: NavigationManager reuses the open screen of the same class and sets its data again,
+    // which rebuilds the list); values or labels that differ are rewritten on their widgets.
+    static void refresh(std::uintptr_t base,void* iggy,const Resolver& resolver,const std::vector<int>& values,const std::vector<Kind>& kinds) noexcept {
+        std::vector<Row> target,page;
+        try {target=resolver(values,kinds);} catch(...) {return;}
+        {std::lock_guard<std::mutex> l(m_);page=open_rows_;}
+        if(target.size()!=page.size()) return;
+        const auto p=plan(page,target,values);const auto& touch=p.touch;
+        if(p.reshow && live_switch.load()) {
+            // A fresh page: actions read "Select" again, the stepper/slider values are the resolved ones.
+            if(guarded([&] {return write_page(base,iggy,target,nullptr);}) && show(base,iggy)) {
+                std::lock_guard<std::mutex> l(m_);open_rows_=std::move(target);++reshows;
+            }
+            return;
+        }
+        if(p.touched && live_values.load()) {
+            if(guarded([&] {return write_page(base,iggy,target,&touch);})) {
+                std::lock_guard<std::mutex> l(m_);
+                for(std::size_t i=0;i<open_rows_.size() && i<target.size();++i) if(touch[i]) open_rows_[i]=target[i];
+                ++inplace_writes;
+            }
+        }
+    }
     inline static std::vector<int> actions_;
     static bool verified(std::uintptr_t base) noexcept {static const bool ok=IggyApi::verify(base);return ok && enabled.load();}
     template<class F> static bool guarded(F&& f) noexcept {return seh(&f,[](void* p) {return (*static_cast<F*>(p))();});}
@@ -160,7 +229,8 @@ private:
         void* name(void* parent,const char* n) {if(!parent || used==pool.size()) return nullptr;auto* p=&pool[used++];return make_name(p,parent,n)?p:nullptr;}
         void* index(void* parent,int i) {if(!parent || used==pool.size()) return nullptr;auto* p=&pool[used++];make_index(p,parent,i);return p;}
     };
-    static bool write_page(std::uintptr_t base,void* iggy,const std::vector<Row>& rows,bool values_only) {
+    // touch == nullptr: the whole section. Otherwise only the marked rows' widgets are rewritten (choice labels, then the value).
+    static bool write_page(std::uintptr_t base,void* iggy,const std::vector<Row>& rows,const std::vector<char>* touch) {
         using A=IggyApi;
         const auto fast=A::fn<A::FastName>(base,A::fast_name);const auto setn=A::fn<A::SetS32>(base,A::set_s32);
         const auto setb=A::fn<A::SetBool>(base,A::set_bool);const auto sets=A::fn<A::SetString>(base,A::set_string);
@@ -179,12 +249,15 @@ private:
             for(int k=0;k<static_cast<int>(items.size());++k) if(!str(paths->index(at,k),nullptr,items[static_cast<std::size_t>(k)])) return false;
             return true;};
         void* section=paths->name(paths->name(A::fn<A::RootPath>(base,A::root_path)(iggy),"optionsData"),"currentSection");
-        if(values_only) {
+        if(touch) {
             void* data=paths->name(paths->name(section,"settings"),"data");
             for(int i=0;i<static_cast<int>(rows.size());++i) {
-                const auto& r=rows[static_cast<std::size_t>(i)];if(r.kind==Kind::action) continue;
+                const auto& r=rows[static_cast<std::size_t>(i)];if(r.kind==Kind::action || !(*touch)[static_cast<std::size_t>(i)]) continue;
                 void* w=paths->name(paths->index(data,i),r.kind==Kind::slider?"slider":r.kind==Kind::stepper?"optionStepper":"optionStepperBoolean");
-                if(!(r.kind==Kind::slider?num(w,"value",r.value):num(w,"selectedIndex",r.value)) || !flag(w,"locked",true) || !flag(w,"locked",false)) return false;
+                if(r.kind==Kind::stepper && !list(w,"values",r.values)) return false;
+                // value setters do not redraw a widget by themselves: the locked toggle makes it apply its definition again
+                // v1046: the row-level locked first (the definition the widget re-applies from), then the widget's own flag pulsed true -> real state
+                if(!(r.kind==Kind::slider?num(w,"value",r.value):num(w,"selectedIndex",r.value)) || !flag(paths->index(data,i),"locked",r.locked) || !flag(w,"locked",true) || !flag(w,"locked",r.locked)) return false;
             }
             return true;
         }
@@ -198,6 +271,7 @@ private:
             const auto& r=rows[static_cast<std::size_t>(i)];void* row=paths->index(data,i);
             // label first: the widget getter builds its definition from the current label
             if(!step(100+i*10,str(row,"label",r.label)) || !step(101+i*10,str(row,"description",r.description)) || !step(102+i*10,num(row,"categoryIndex",0))) return false;
+            if(r.kind!=Kind::action && !step(104+i*10,flag(row,"locked",r.locked))) return false; // v1046: row-level locked before its widget is built
             // Actions are two-value steppers ("Select" -> "Starting..."): the game's link widget only calls an AS3 method on root.
             void* w=paths->name(row,r.kind==Kind::slider?"slider":r.kind==Kind::toggle?"optionStepperBoolean":"optionStepper");
             bool ok=str(w,"updateGameCallback","VR_SETTING_CHANGED");
@@ -205,6 +279,7 @@ private:
                 flag(w,"displayValue",true) && num(w,"value",r.value) && flag(w,"refreshEnabled",true);
             else if(r.kind==Kind::stepper || r.kind==Kind::action) ok=ok && list(w,"values",r.values) && num(w,"selectedIndex",r.value) && flag(w,"refreshEnabled",true);
             else if(r.kind==Kind::toggle) ok=ok && num(w,"selectedIndex",r.value?1:0) && flag(w,"refreshEnabled",true);
+            if(r.kind!=Kind::action) ok=ok && flag(w,"locked",r.locked); // v1046: widget-level locked last, after its value
             if(!step(103+i*10,ok)) return false;
         }
         return true;

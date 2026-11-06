@@ -44,5 +44,5 @@ Grip is the side button under your middle finger, trigger the one under your ind
 - **Grip a door or keyhole and keep holding** — peek through; let go to stop.
 - **Palm on a guard + grip, pull hard** — throw him down.
 - **Grip a guard's neck from behind** — choke him out.
-- **Grip a limb or the head of a body** — drag it; let go at your shoulder to carry it.
+- **Grip a limb or the head of a body** — drag it; lift it to a shoulder and let go to put it on your shoulder. From there it is the game's own body carry (walk, climb, open doors with the free hand), so a place that expects a carried body (Sokolov out of the Jindosh mansion) sees one. Squeeze at the shoulder and move that hand away to put it down; a throwing motion throws it. A body whose items you have not looted yet is not carried: loot it with a plain grip, then put it on the shoulder again.
 - **Grenade or mine: make a fist** — open it mid-throw; palm on a wall to place it.

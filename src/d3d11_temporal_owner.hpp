@@ -15,6 +15,7 @@
 #include <mutex>
 #include <optional>
 #include <utility>
+#include "context_state.hpp"
 
 namespace d2vr {
 // Actual immediate-context primitives, independent of NGX and the renderer.
@@ -178,12 +179,15 @@ public:
             if(access(state_)!=Status::ok)return Status::wrong_thread;
             if(state_.isolating)return Status::busy;
             state_.isolating=true;
+            // v992: the same rule as ContextState::Scope - the PS state census must not record (or elide) the mod's own
+            // bindings made under a swapped state object, because the restore puts the game's state back unchanged.
+            ++overlay_scope_depth();
             Ptr<ID3DDeviceContextState> previous;
             state_.context->SwapDeviceContextState(state_.isolated.Get(),&previous);
-            if(!previous) {state_.isolating=false;return Status::state_unavailable;}
+            if(!previous) {--overlay_scope_depth();state_.isolating=false;return Status::state_unavailable;}
             struct Restore {
                 State& state;ID3DDeviceContextState* previous;
-                ~Restore() {state.context->SwapDeviceContextState(previous,nullptr);state.isolating=false;}
+                ~Restore() {state.context->SwapDeviceContextState(previous,nullptr);--overlay_scope_depth();state.isolating=false;}
             } restore{state_,previous.Get()};
             try {return std::forward<Work>(work)(state_.context.Get())?Status::ok:Status::callback_failed;}
             catch(...) {return Status::callback_exception;}

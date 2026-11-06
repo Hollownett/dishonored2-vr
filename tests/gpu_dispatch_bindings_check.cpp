@@ -6,6 +6,9 @@
 #include <thread>
 #include <vector>
 using Registry=d2vr::GpuDispatchBindings<1>;
+// v993: the game registry is back to the seven context methods. The PS setters live in their own single owners (GlyphSwap,
+// SamplerLodBias, PsConstantBufferHook); registering them here again would poison every GPU hook with MH_ERROR_ALREADY_CREATED.
+static_assert(d2vr::GpuDispatchBindings<>::Targets{}.size()==7,"the game registry must cover seven context methods");
 using Function=int (*)(int);
 static Registry real_registry;
 static Registry concurrent_registry{Registry::Api{},true};

@@ -36,9 +36,14 @@
 // its own and hands the entities it finds to the service through a small locked list (adopted at the start of a service, try_lock: never waits).
 // The registry scan reads through its own reader (`scan`: a direct-mapped cache of validated 64 KB blocks, native_grab.hpp) and stops at
 // scan_limit_us: the shared 32-entry, 100 ms region cache thrashed on entities scattered over the heap, a VirtualQuery per read.
+// The drawn gun (weapon_body.hpp, publish_weapon): a hand holding a ranged weapon has a solid body of its own — the barrel's sphere proxies,
+// posed by the drawn weapon each frame — solved against the same props by the same contact model, with the barrel's own velocity (the
+// muzzle travels further than the palm in a swing, so the grip's velocity would under-drive it). It needs none of the hand's cast bookkeeping:
+// its world sweep already holds the gun out of walls, so its proxies are simply where it is drawn (no lag, no held entity, no meet).
 #include "hand_clamp.hpp"
 #include "native_motion.hpp"
 #include "hand_contact.hpp"
+#include "weapon_body.hpp"
 #include "physical_grab.hpp"
 #include <algorithm>
 #include <atomic>
@@ -75,6 +80,11 @@ public:
     // meets: meet() calls for a pushable prop the cast was holding the hand at; meet_shifts: calls that moved the drawn hand out of a prop; meet_latches: pinned props
     // (held off by the cast again)
     std::atomic<std::uint64_t> meets{},meet_shifts{},meet_latches{};
+    // The drawn weapon's own body (weapon_body.hpp, user 2026-11-05): publishes, weapon-prop contacts (a proxy overlapped the prop), and
+    // the velocity writes the weapon made. A weapon has no cast hold-off of its own beyond its world sweep, so it has no lag, no heat, no meet.
+    // Per kind too (0 the ranged weapon, 1 the blade): a run where the sword shoves and the gun does not has to say so, not average it away.
+    std::atomic<std::uint64_t> weapon_publishes{},weapon_touches{},weapon_pushes{};
+    std::array<std::atomic<std::uint64_t>,2> weapon_publishes_kind{},weapon_touches_kind{},weapon_pushes_kind{};
     std::atomic<std::uint64_t> ragdoll_chooses{}; // 17-body searches for a guard's nearest limb
     std::atomic<std::uint64_t> keepouts{}; // loose props skipped because they touch the player's body or lie under it (set_player)
     std::array<std::atomic<std::uint64_t>,2> capped_writes{}; // per side: velocity writes the mass-aware cap bound for that hand (push_force_n * dt / mass, C5)
@@ -121,7 +131,7 @@ public:
     std::optional<MetBody> met_body(std::uintptr_t entity) {
         if(!entity) return std::nullopt;
         std::lock_guard<std::mutex> l(meet_mutex_);
-        for(unsigned i=0;i<std::min<unsigned>(meet_.body_count,meet_.bodies.size());++i) if(meet_.bodies[i].entity==entity) return meet_.bodies[i];
+        for(unsigned i=0;i<std::min<unsigned>(meet_.body_count,static_cast<unsigned>(meet_.bodies.size()));++i) if(meet_.bodies[i].entity==entity) return meet_.bodies[i];
         return std::nullopt;
     }
     static bool next_meet_latch(bool latched,double depth,bool clamp_holding) noexcept {
@@ -236,8 +246,8 @@ public:
         log_.open(file,std::ios::trunc);log_on_=log_.is_open();
         // gap/error/trim/friction/lag/held: the terms of the control (hand_contact.hpp) behind this write: lag is the size of the cast's shift of the drawn hand (m),
         // held 1 when the cast held the hand at this prop
-        if(log_) log_<<"tick_ms,side,entity_id,handle,mass_raw_hex,mass_kg,depth,hand_speed,body_speed_before,body_speed_after,nx,ny,nz,gap,error,trim,friction,lag,held,turn\n";
-        slow_.open(file.parent_path()/L"native-hand-contact-slow.csv",std::ios::trunc);
+        if(log_) log_<<"tick_ms,side,entity_id,handle,mass_raw_hex,mass_kg,depth,hand_speed,body_speed_before,body_speed_after,nx,ny,nz,gap,error,trim,friction,lag,held,turn,weapon\n";
+        if(!file.empty()) slow_.open(file.parent_path()/L"native-hand-contact-slow.csv",std::ios::trunc);   // v1046: diagnostics off = empty file; parent_path()/name would be relative
         if(slow_) slow_<<"tick_ms,total_us,cpu_us,scan_us,body_us,math_us,write_max_us,query_max_us,fulls,writes,near,tested\n";
         {std::lock_guard<std::mutex> l(log_mutex_);pending_.clear();slow_pending_.clear();}
         slow_logged_=0;latched_=false;{std::lock_guard<std::mutex> l(found_mutex_);found_.clear();gone_.clear();service_game_=service_world_=0;}
@@ -263,8 +273,26 @@ public:
         if(lane.active) {auto palm=drawn;palm.position=palm.position+palm_offset;lane.proxies=turns?hand_proxies(*lane.geometry,palm,*turns):hand_proxies(*lane.geometry,palm,curl);lane.velocity=lane.motion.velocity();lane.lag=raw.position-drawn.position;lane.held_by=held_by;lane.stamp=now;}
         ++lane.serial;refresh();
     }
-    void release(unsigned side) {if(side>1) return;drain_log(seconds());std::lock_guard<std::mutex> l(mutex_);lanes_[side].active=false;lanes_[side].motion.reset();++lanes_[side].serial;refresh();}
+    void release(unsigned side) {if(side>1) return;drain_log(seconds());std::lock_guard<std::mutex> l(mutex_);lanes_[side].active=false;lanes_[side].motion.reset();
+        lanes_[side].weapon=false;lanes_[side].weapon_motion.reset();++lanes_[side].serial;refresh();}
     void clear() {release(0);release(1);}
+    // Render thread, per frame: the drawn weapon's body (weapon_body.hpp). `body` is posed at the pose the weapon is drawn at (the hand
+    // clamp's and the weapon sweep's grip), and its motion is sampled at WeaponBody::sample. blade: the sword (for the per-kind counters).
+    // active false, or a body that is not usable: the lane is cleared (a weapon put away must not keep pushing). The hand's own lane is
+    // untouched: an armed hand keeps publishing `active=false`.
+    void publish_weapon(unsigned side,bool active,const WeaponBody& body,bool blade=false,bool rigid=true) {
+        if(side>1) return;
+        const double now=seconds();++weapon_publishes;++weapon_publishes_kind[blade?1:0];
+        std::lock_guard<std::mutex> l(mutex_);auto& lane=lanes_[side];
+        bool usable=active && body.valid() && body.count<=hand_proxy_count;
+        for(unsigned i=0;usable && i<body.count;++i)
+            usable=finite(body.proxies[i].centre) && std::isfinite(body.proxies[i].radius) && body.proxies[i].radius>0 && body.proxies[i].radius<.3;
+        if(!usable) {const bool was=lane.weapon;lane.weapon=false;lane.weapon_motion.reset();if(was) {++lane.serial;refresh();}return;}
+        lane.weapon_motion.sample(body.sample,now);
+        lane.weapon_proxies=body.proxies;lane.weapon_count=body.count;lane.weapon_velocity=lane.weapon_motion.velocity();
+        lane.weapon=true;lane.weapon_blade=blade;lane.weapon_rigid=rigid;lane.weapon_stamp=now;
+        ++lane.serial;refresh();
+    }
 
     // Physics thread, from the dispatcher callback. `world` is the dispatcher's own; `held` are the entities a hand holds
     // physically. write(world, handle, linear[3], angular[3]) is the velocity setter.
@@ -280,7 +308,7 @@ public:
         // the end of the service; a service that finds discover() mid-scan skips its own scan this time and handles what it was handed.
         ScanTurn scan_turn(scanning_,scan_here);
         if(scan_here && !scan_turn.owned()) {scan_here=false;starved=true;}   // discover() is mid-scan: try again at the very next service (discover() returns for good once latched)
-        if(!hands[0].active && !hands[1].active) {
+        if(!hands[0].pushing() && !hands[1].pushing()) {
             near_.clear();seen_={};
             std::unique_lock<std::mutex> lock(meet_mutex_,std::try_to_lock);if(lock.owns_lock()) meet_.stamp=0; // nothing is met any more (meet() also checks the lane)
             return;
@@ -294,8 +322,8 @@ public:
         if(!game || !rig::typed(scan,base,*game,0x1c940a8)) return;
         const auto live=rig::value<std::uintptr_t>(scan,*game+0x60410);
         if(!live || *live!=world) return;
-        const auto palm_distance=[&](Vec3 p) { // to the nearest active palm
-            double best=1e9;for(const auto& h:hands) if(h.active) best=std::min(best,length(h.proxies[0].centre-p));return best;};
+        const auto palm_distance=[&](Vec3 p) { // to the nearest part of the solid bodies (a palm, a gun's breech or muzzle)
+            double best=1e9;for(const auto& h:hands) best=std::min(best,h.distance(p));return best;};
         // A new level (or a reload) is a new registry: forget the slot classes and the candidates.
         if(scan_here) {
             if(slot_entity_.size()!=registry_size || game_!=*game || world_!=world) {
@@ -351,7 +379,14 @@ public:
                 // due, or when the hand left the limb it had; every choose, failed or not, waits rechoose_ms. Only a dead or unconscious guard that
                 // is not carried is ever read.
                 if(now<carry_until_.load(std::memory_order_relaxed)) {n.body.reset();n.in_reach=false;body_time+=std::chrono::steady_clock::now()-t0;continue;}
-                const auto nearest_palm=[&](Vec3 p) {Vec3 best{};double least=1e18;for(const auto& h:hands) if(h.active && length(h.proxies[0].centre-p)<least) {least=length(h.proxies[0].centre-p);best=h.proxies[0].centre;}return best;};
+                const auto nearest_palm=[&](Vec3 p) { // the nearest point of the solid bodies: a palm, a gun's breech or its muzzle
+                    Vec3 best{};double least=1e18;
+                    const auto take=[&](Vec3 c) {const double d=length(c-p);if(d<least) {least=d;best=c;}};
+                    for(const auto& h:hands) {
+                        if(h.active) take(h.proxies[0].centre);
+                        if(h.weapon && h.weapon_count) {take(h.weapon_proxies[0].centre);take(h.weapon_proxies[h.weapon_count-1].centre);}
+                    }
+                    return best;};
                 bool choose=!n.body || now_ms>=n.next_full;
                 if(!choose && n.body->bounds) {
                     const Vec3 palm=nearest_palm(n.body->pose.position);
@@ -406,20 +441,45 @@ public:
             Vec3 velocity=n.velocity,spin{};bool pushed=false;std::array<bool,2> capped{};
             const double dt=write_dt(n.drag,now);
             for(unsigned side=0;side<2;++side) {
-                if(!hands[side].active) continue;
-                const auto palm=hands[side].proxies[0].centre;
-                if(length(n.body->bounds->closest(palm)-palm)>hand_span) continue;
-                ContactInput input;input.engaged=n.engaged_until>now_ms;input.lag=hands[side].lag;input.held=hands[side].held_by && hands[side].held_by==n.entity;if(input.held) ++cast_held;input.lag_known=lag_owned[side];input.friction=n.drag.compensation();
+                const auto& hand=hands[side];
+                if(!hand.pushing()) continue;
+                ContactInput input;input.engaged=n.engaged_until>now_ms;input.lag=hand.active?hand.lag:Vec3{};input.held=hand.active && hand.held_by && hand.held_by==n.entity;if(input.held) ++cast_held;input.lag_known=lag_owned[side];input.friction=n.drag.compensation();
                 input.trim=n.drag.trim();input.age=input.engaged?now-n.engaged_at:0.;
                 input.blocked=n.drag.blocked(now);input.stalled=n.drag.stalled(now);input.basis=n.body->pose.basis;input.dt=dt;input.time_factor=time_factor;
-                const auto result=hand_contact(hands[side].proxies,shape,hands[side].velocity,velocity,n.mass,contact_config,input);
-                if(met && length(result.outward)>length(outward[side])) {outward[side]=result.outward;outward_entity[side]=n.entity;}
-                if(result.touching) ++touches;
-                if(result.driving) {if(n.engaged_until<=now_ms) n.engaged_at=now;n.engaged_until=now_ms+config.engage_ms;}
-                n.drag.steer(result,now);
-                if(result.push || result.turn) { // a velocity to write, or only the uprighting spin (the velocity stays)
-                    log_row(now_ms,side,*n.body,n.inverse_mass,n.mass,result,length(hands[side].velocity),length(velocity),input,!result.push); // every write, spin-only ones too
-                    velocity=result.velocity;spin=result.spin;pushed=true;capped[side]=result.capped;
+                const auto reach=[&](Vec3 c) {return length(n.body->bounds->closest(c)-c)<=hand_span;};
+                if(hand.active && reach(hand.proxies[0].centre)) {
+                    const auto result=hand_contact(hand.proxies,shape,hand.velocity,velocity,n.mass,contact_config,input);
+                    if(met && length(result.outward)>length(outward[side])) {outward[side]=result.outward;outward_entity[side]=n.entity;}
+                    if(result.touching) ++touches;
+                    if(result.driving) {if(n.engaged_until<=now_ms) n.engaged_at=now;n.engaged_until=now_ms+config.engage_ms;}
+                    n.drag.steer(result,now);
+                    if(result.push || result.turn) { // a velocity to write, or only the uprighting spin (the velocity stays)
+                        log_row(now_ms,side,*n.body,n.inverse_mass,n.mass,result,length(hand.velocity),length(velocity),input,!result.push); // every write, spin-only ones too
+                        velocity=result.velocity;spin=result.spin;pushed=true;capped[side]=result.capped;
+                    }
+                }
+                // The drawn gun (weapon_body.hpp): the same solve on its own proxies and its barrel's velocity. It carries none of the hand's
+                // cast bookkeeping — no lag (the gun is drawn where it is drawn) and no held entity — and it never moves the hand (no meet).
+                if(hand.weapon && hand.weapon_count) {
+                    bool gun_reach=false;
+                    for(unsigned i=0;i<hand.weapon_count && !gun_reach;i+=3) gun_reach=reach(hand.weapon_proxies[i].centre); // every third proxy: the ends cover the barrel's middle
+                    if(!gun_reach) gun_reach=reach(hand.weapon_proxies[hand.weapon_count-1].centre);
+                    if(gun_reach) {
+                        ContactInput gun=input;gun.lag={};gun.held=false;gun.lag_known=true;
+                        // The gun and the crossbow are rigid bodies in the hand: their contact strikes at the barrel's own speed from the first
+                        // frame (ContactInput::rigid), which is what "collides like the sword" needs — the sword only ever felt solid because a
+                        // swing clears the swat threshold, while a barrel moved at aiming or walking speed wrote write_step (8 cm/s) a frame.
+                        // The blade keeps the ride the user accepted.
+                        gun.rigid=hand.weapon_rigid;
+                        const auto result=hand_contact(hand.weapon_proxies,shape,hand.weapon_velocity,velocity,n.mass,contact_config,gun);
+                        if(result.touching) {++weapon_touches;++weapon_touches_kind[hand.weapon_blade?1:0];}
+                        if(result.driving) {if(n.engaged_until<=now_ms) n.engaged_at=now;n.engaged_until=now_ms+config.engage_ms;}
+                        n.drag.steer(result,now);
+                        if(result.push || result.turn) {
+                            log_row(now_ms,side,*n.body,n.inverse_mass,n.mass,result,length(hand.weapon_velocity),length(velocity),gun,!result.push,true);
+                            velocity=result.velocity;spin=result.spin;pushed=true;capped[side]=result.capped;++weapon_pushes;++weapon_pushes_kind[hand.weapon_blade?1:0];
+                        }
+                    }
                 }
             }
             if(pushed && writes<max_writes) {
@@ -463,12 +523,21 @@ public:
             log_slow(now_ms,total,cpu_used,us(scan_time),us(body_time),us(math_time),write_peak,query,fulls,writes);
         }
     }
-    // Render thread, once a frame after the hands are published (native_grab.hpp discover_contacts): one slice of the registry scan, with a reader
-    // of its own. The entities near a palm go to the service through found_; slots that changed go to gone_.
+    // Render thread, once a frame after the hands are published (native_grab.hpp discover_contacts): one slice of the registry scan, with a
+    // reader of its own. The entities near a palm go to the service through found_; slots that changed go to gone_.
+    // Cost (user 2026-11-05: "physics should be cheap"): the scan is the expensive half of the contact service, and only a body that moves can
+    // meet something it did not already have. Its anchors (a palm, or a weapon's breech) are compared with the last scan's: a moved body scans
+    // every call, a still one every still_scan_every-th (a prop rolling into a still hand's reach waits a few frames, ~0.1 s).
     template<class Scan> void discover(Scan& scan,std::uintptr_t base) {
         if(inline_discovery || latched_.load(std::memory_order_relaxed) || !wanted()) return;
         std::array<Hand,2> hands{};snapshot(hands,seconds(),false);
-        if(!hands[0].active && !hands[1].active) return;
+        if(!hands[0].pushing() && !hands[1].pushing()) return;
+        const auto anchor=[](const Hand& h) {return h.active?h.proxies[0].centre:h.weapon&&h.weapon_count?h.weapon_proxies[0].centre:Vec3{1e9,1e9,1e9};};
+        const Vec3 a0=anchor(hands[0]),a1=anchor(hands[1]);
+        const bool moved=!scan_anchors_ || !finite(a0) || !finite(a1) || length(a0-scan_anchor_[0])>still_scan_move || length(a1-scan_anchor_[1])>still_scan_move;
+        scan_anchor_[0]=a0;scan_anchor_[1]=a1;scan_anchors_=true;
+        if(!moved && ++still_scans_<still_scan_every) return;
+        still_scans_=0;
         ScanTurn scan_turn(scanning_,true);
         if(!scan_turn.owned()) return;   // the latched service is scanning: it owns the slot tables
         const auto began=std::chrono::steady_clock::now();
@@ -495,7 +564,18 @@ public:
 private:
     template<class T> static auto query_peak(T& reader,int)->decltype(static_cast<std::uint64_t>(reader.take_slowest())) {return static_cast<std::uint64_t>(reader.take_slowest());}
     template<class T> static std::uint64_t query_peak(T&,long) {return 0;}
-    struct Hand {bool active{};HandProxies proxies{};Vec3 velocity{},lag{};std::uintptr_t held_by{};std::uint64_t serial{};};
+    struct Hand {bool active{};HandProxies proxies{};Vec3 velocity{},lag{};std::uintptr_t held_by{};std::uint64_t serial{};
+        bool weapon{};bool weapon_blade{};bool weapon_rigid{};HandProxies weapon_proxies{};unsigned weapon_count{};Vec3 weapon_velocity{};
+        // The nearest representative point of this side's solid bodies to p: the palm, and a gun's breech and muzzle (a prop is a candidate
+        // by the nearest part of what the hand holds, not by the palm alone: a pistol's barrel reaches .35 m past it).
+        double distance(Vec3 p) const {
+            double best=1e9;
+            if(active) best=length(proxies[0].centre-p);
+            if(weapon && weapon_count) {best=std::min(best,length(weapon_proxies[0].centre-p));best=std::min(best,length(weapon_proxies[weapon_count-1].centre-p));}
+            return best;
+        }
+        bool pushing() const {return active || weapon;}
+    };
     static bool near_player(const NativeGrabBounds& b,Vec3 eye) { // the prop's box against the player's keep-out cylinder
         const double dx=std::max({b.minimum.x-eye.x,0.,eye.x-b.maximum.x}),dy=std::max({b.minimum.y-eye.y,0.,eye.y-b.maximum.y});
         return std::hypot(dx,dy)<player_radius && b.maximum.z>eye.z-player_below && b.minimum.z<eye.z+player_above;
@@ -508,15 +588,19 @@ private:
             const auto& lane=lanes_[side];
             hands[side].serial=lane.serial;hands[side].active=lane.active && now-lane.stamp<=fresh_seconds;
             if(hands[side].active) {hands[side].proxies=lane.proxies;hands[side].velocity=lane.velocity;hands[side].lag=lane.lag;hands[side].held_by=lane.held_by;if(count && lane.held_by) ++cast_seen;}
+            hands[side].weapon=lane.weapon && now-lane.weapon_stamp<=fresh_seconds;
+            if(hands[side].weapon) {hands[side].weapon_proxies=lane.weapon_proxies;hands[side].weapon_count=lane.weapon_count;hands[side].weapon_velocity=lane.weapon_velocity;hands[side].weapon_blade=lane.weapon_blade;hands[side].weapon_rigid=lane.weapon_rigid;}
         }
     }
     // Slices of the registry: entities near a palm are add()ed (the caller dedups and caps), slots whose entity changed are retire()d. One slice a call
     // (the whole registry in ~16 calls, ~32 at rest); four while a hand is fast (>1 m/s), so a prop in the path of a swat is known before the hand arrives.
     template<class Scan,class Add,class Retire> void scan_registry(Scan& scan,std::uintptr_t base,std::uintptr_t game,const std::array<Hand,2>& hands,
             std::chrono::steady_clock::time_point deadline,Add&& add,Retire&& retire) {
-        const auto palm_distance=[&](Vec3 p) { // to the nearest active palm
-            double best=1e9;for(const auto& h:hands) if(h.active) best=std::min(best,length(h.proxies[0].centre-p));return best;};
-        const auto faster=[&](double speed) {return (hands[0].active && length(hands[0].velocity)>speed) || (hands[1].active && length(hands[1].velocity)>speed);};
+        const auto palm_distance=[&](Vec3 p) { // to the nearest part of the solid bodies (a palm, a gun's breech or muzzle)
+            double best=1e9;for(const auto& h:hands) best=std::min(best,h.distance(p));return best;};
+        const auto faster=[&](double speed) {
+            return (hands[0].active && length(hands[0].velocity)>speed) || (hands[0].weapon && length(hands[0].weapon_velocity)>speed) ||
+                   (hands[1].active && length(hands[1].velocity)>speed) || (hands[1].weapon && length(hands[1].weapon_velocity)>speed);};
         const bool swinging=faster(1.);
         // A resting hand scans every other call (a prop moving into reach has ~0.5 m to cover): the first pass over a level and
         // any hand faster than 0.4 m/s scan every call.
@@ -594,12 +678,13 @@ private:
         return true;
     }
     // One CSV row per push (the first 600), queued for the render thread: file I/O costs the physics thread 100+ us.
-    void log_row(std::uint64_t now_ms,unsigned side,const NativeRigidBody& body,std::uint16_t inverse_mass,double mass,const HandContact& r,double hand_speed,double before,const ContactInput& in,bool turn_only) {
+    // weapon: the row is the drawn gun's push (the last column), not a hand's.
+    void log_row(std::uint64_t now_ms,unsigned side,const NativeRigidBody& body,std::uint16_t inverse_mass,double mass,const HandContact& r,double hand_speed,double before,const ContactInput& in,bool turn_only,bool weapon=false) {
         if(!log_on_.load(std::memory_order_relaxed) || logged_>=600) return;
-        char row[320];
+        char row[340];
         const double lag=length(in.lag); // the size of the cast's shift
-        const int len=std::snprintf(row,sizeof row,"%llu,%u,%u,%u,%04x,%g,%g,%g,%g,%g,%g,%g,%g,%g,%g,%g,%g,%g,%d,%d\n",static_cast<unsigned long long>(now_ms),side,body.entity_id,body.handle,
-            inverse_mass,mass,r.depth,hand_speed,before,length(r.velocity),r.normal.x,r.normal.y,r.normal.z,r.has_gap?r.gap:0.,r.has_gap?r.error:0.,in.trim,in.friction,lag,in.held?1:0,turn_only?1:0);
+        const int len=std::snprintf(row,sizeof row,"%llu,%u,%u,%u,%04x,%g,%g,%g,%g,%g,%g,%g,%g,%g,%g,%g,%g,%g,%d,%d,%d\n",static_cast<unsigned long long>(now_ms),side,body.entity_id,body.handle,
+            inverse_mass,mass,r.depth,hand_speed,before,length(r.velocity),r.normal.x,r.normal.y,r.normal.z,r.has_gap?r.gap:0.,r.has_gap?r.error:0.,in.trim,in.friction,lag,in.held?1:0,turn_only?1:0,weapon?1:0);
         if(len<=0) return;
         ++logged_;std::lock_guard<std::mutex> l(log_mutex_);pending_.append(row,static_cast<std::size_t>(std::min(len,static_cast<int>(sizeof row)-1)));
     }
@@ -630,11 +715,16 @@ private:
         if(*vtable==base+0x1c886a8 || *vtable==base+0x1c87d58 || *vtable==base+0x1c5de18) return 1;
         return *vtable==base+0x1c5e108?2:0;
     }
-    struct Lane {std::optional<rig::HandGeometry> geometry;HandMotion motion;HandProxies proxies{};Vec3 velocity{},lag{};std::uintptr_t held_by{};bool active{};std::uint64_t serial{};double stamp{};};
+    struct Lane {std::optional<rig::HandGeometry> geometry;HandMotion motion;HandProxies proxies{};Vec3 velocity{},lag{};std::uintptr_t held_by{};bool active{};std::uint64_t serial{};double stamp{};
+        bool weapon{};bool weapon_blade{};bool weapon_rigid{};HandProxies weapon_proxies{};unsigned weapon_count{};HandMotion weapon_motion;Vec3 weapon_velocity{};double weapon_stamp{};};
     static double seconds() {return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();}
-    void refresh() {wanted_.store(lanes_[0].active || lanes_[1].active,std::memory_order_relaxed);} // under mutex_
+    void refresh() {wanted_.store(lanes_[0].active || lanes_[1].active || lanes_[0].weapon || lanes_[1].weapon,std::memory_order_relaxed);} // under mutex_
     std::mutex mutex_;std::array<Lane,2> lanes_{};std::atomic<bool> wanted_{};
     std::vector<Near> near_;std::array<std::uint64_t,2> seen_{};unsigned cursor_{1},cycle_{},scan_tick_{};
+    // discover()'s motion gate (under mutex_ implicitly: render thread only): the last scan's anchors, and how many still calls have passed.
+    std::array<Vec3,2> scan_anchor_{};bool scan_anchors_{};unsigned still_scans_{};
+    static constexpr double still_scan_move=.02;   // m between scans that counts as a moving body
+    static constexpr unsigned still_scan_every=8;  // a still body scans every 8th call instead of every one
     std::vector<std::uintptr_t> slot_entity_;std::vector<std::uint8_t> slot_prop_;std::uintptr_t game_{},world_{}; // slot -> entity pointer and class (the scanner's)
     struct Meet {std::array<MetBody,8> bodies{};unsigned body_count{};std::array<std::uintptr_t,8> pushable{};unsigned count{};std::array<std::uintptr_t,ClampInput::loose_capacity> loose{};unsigned loose_count{};double stamp{};std::array<std::uintptr_t,2> entity{};std::array<Vec3,2> outward{};std::array<double,2> side_stamp{};};
     std::atomic<double> carry_until_{0.};
