@@ -765,12 +765,12 @@ inline FingerCurls finger_contact(const HandGeometry& hand,const WorldTrackedPos
                 const bool thin=face_half<=.03 && face_half<=.75*face_mid;
                 const Vec3 face_axis=b.basis[thin_axis];
                 double face_sign=-1;{const double palm_side=dot(Vec3{0,0,0}-b.position,face_axis),fingers_side=dot(unit(hand.finger[2].pivot),face_axis);
-                    face_sign=std::abs(palm_side)>face_half?(palm_side>0?-1.:1.):(fingers_side>0?-1.:1.);}
+                    face_sign=std::abs(palm_side)>face_half?(palm_side>0?1.:-1.):(fingers_side>0?-1.:1.);}
                 const auto cost=[&](const std::array<double,3>& a) {
                     const auto p=finger_points(g0,finger_turns_of(g0,a));double c=0;
                     for(unsigned j=1;j<4;++j) c+=20*std::max(0.,t0-palm_shape_distance(b,p[j]))+(j>1?20*std::max(0.,held_palm_depth+t0-dot(p[j],hand.palm_in)):0.);
-                    c+=std::max(0.,length(p[3]-idx)-t0-hand.thickness[1]);
-                    // A thin thing (<= 6 cm): the thumb opposes across it, its tip on the face away from the fingers' (the palm's side; with the palm on the edge, the side the fingers do not lie on)
+                    c+=(thin?6.:1.)*std::max(0.,length(p[3]-idx)-t0-hand.thickness[1]); // a pinch: the pad comes to the fingertip across the thin side
+                    // A thin thing (<= 6 cm): the thumb opposes across it, its tip on the face the fingers are not on (the palm's side, the plank between them; with the palm on the edge, the side the fingers do not lie on)
                     if(thin) return c+10*std::abs(dot(p[3]-b.position,face_axis)*face_sign-(face_half+t0))+10*std::max(0.,-palm_shape_distance(b,p[3]));
                     return c+10*std::abs(palm_shape_distance(b,p[3])-t0);
                 };

@@ -139,3 +139,21 @@ aimed at a Clockwork Soldier (`--near npc-front --npc-index 3`). New `punch` sce
   body still dragged 1.91 m (2.03 m on the v1047 baseline).
 - Two-handed props: not sim-testable (no scenario places a physics prop under both hands). Headset item.
 - Every run (v1047 baseline too) fails "injection: diagnostic thread still running" and the HUD capture checks: pre-existing tooling issue.
+
+## v1057-v1061 (2026-11-06/07 overnight): natural surface grip, hands and weapons push each other
+
+User: "grip natural and active on the object surface ... all physical props, legs, head, boxes"; lab review: "thumb too far
+from the other fingers, palm too stretched"; "hands should react to weapons and sword, weapons react to each other".
+- Surface grip (v1057-v1059): the held thing's own shape (`finger_sphere.hpp` `surface_grip_shape`: oriented box, a capsule
+  only for a round cross-section, corpse bones their capsule), measured in the drawn palm while it settles (0.35 s), then fixed in
+  the palm. Replaces the v638 ball / v1028 flat grip (`build/no-surface-grip` restores them). Native held severed limbs/skulls
+  use the fitted-shaft seat.
+- Thumb opposition on boxes (`finger_ik.hpp` box thumb search); thin boxes aim at the face across from the fingers.
+  Lab thumb-index tip: book 144 -> 19 mm, bottle box 81 -> 31, plank 85 -> 48 (palm on edge 71 -> 55), skull 84 -> 52.
+  Corpse forearm/calf/head scenes: natural wrap, head = palm on the skull.
+- Hands and swords push each other (`hand_weapon_contact.hpp`, v1058): capsules for both hands and held swords, 4 pairs,
+  no engine query, pulse on contact, strong pulse on a blade clash (>= 1.5 m/s). Guns: hand capsule only.
+  `build/no-hand-weapon-contact`.
+- Sim v1060 (corpse drag): no crash, dragged 1.91 m, surface grip 528 frames, finger step 26 us avg.
+Open: plank thumb tip ~10 mm short; ragdoll bone long axis unknown (limb lies across the palm; read it live);
+gun barrel capsule in hand_weapon_contact; nothing headset-tested.

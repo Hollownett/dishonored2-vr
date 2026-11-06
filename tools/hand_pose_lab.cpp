@@ -428,8 +428,9 @@ int run(int argc,char** argv) {
         scenes.push_back(surface);
         if(std::string(t.name)=="plank" || std::string(t.name)=="book") { // the palm on the EDGE: the thin side along the fingers (the other seat of the same thing)
             Scene edge=surface;edge.name=_strdup((std::string(t.name)+"_surface_edge").c_str());edge.title=_strdup((std::string(t.title)+": surface grip, palm on the edge (thin side along the fingers)").c_str());
+            // the palm against the edge: the width (y, the middle side) stands out along the palm normal, the thin side (z) lies along the fingers, the plank's middle a finger-base ahead of the palm
             edge.moving=[half,old_pose,box_of](const WorldTrackedPose& palm,const r::HandGeometry& g,Vec3,Vec3) {
-                const auto pose=old_pose(palm,g,half,{},{});return std::vector<r::HeldShape>{r::surface_grip_shape(pose,box_of(pose,half),-1,palm)};};
+                auto pose=old_pose(palm,g,half,{},{});pose.position=palm.position+r::palm_normal(palm,g)*(half.y+r::held_palm_depth)+palm.basis[2]*-.045;return std::vector<r::HeldShape>{r::surface_grip_shape(pose,box_of(pose,half),-1,palm)};};
             edge.shapes=[m=edge.moving](const WorldTrackedPose& palm,const r::HandGeometry& g) {return m(palm,g,Vec3{},Vec3{});};edge.ghost=edge.shapes;
             scenes.push_back(edge);
         }
