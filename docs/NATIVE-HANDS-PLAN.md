@@ -124,3 +124,18 @@ game's authored grip (`native_finger_grip.hpp`). A per-class pose table is only 
 wrong in the headset (books, large crates): decide after the headset pass instead of building it blind.
 
 Not done in phase 2: sword two-hand pose through `body_ik` (the sword is a mod-held copy, not a physics body).
+
+## Sim results (2026-11-06, v1052-v1056, simulated VR on the user's own save)
+
+Test saves no longer work (Steam Cloud); the user's save near Clockwork Mansion has only knocked-out guards nearby, so punches were
+aimed at a Clockwork Soldier (`--near npc-front --npc-index 3`). New `punch` scenario in `tools/vr_selftest.py`; counters in
+`dxgi-probe-result.json` `hand_feel`.
+- Punch: fast closed fists are seen (peak ~8 m/s), the soldier is found in reach, and TakeDamage is applied (`last_shove` 0).
+  The soldier lost no HP: clockworks ignore phys_damage in the game too (thrown bottles do not hurt them). Damage on a human guard
+  is still unverified. v1052 sent 6 hits for 3 punches (pull-backs counted); v1054 requires the fist to move away from the head
+  (>= 1.5 m/s outward): 2 hits for 3 punches, the soldier walks.
+- Knocked-out guards are not punch targets (creature_on skips them).
+- Weight: a dragged corpse read 0.6 kg (the wrist's motor mass); v1056 counts a corpse as the whole body (75 kg): walk scale 0.514,
+  body still dragged 1.91 m (2.03 m on the v1047 baseline).
+- Two-handed props: not sim-testable (no scenario places a physics prop under both hands). Headset item.
+- Every run (v1047 baseline too) fails "injection: diagnostic thread still running" and the HUD capture checks: pre-existing tooling issue.

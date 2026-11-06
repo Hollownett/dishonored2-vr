@@ -1998,7 +1998,7 @@ static std::array<XrExtent2Di,2> xr_recommended_eye_sizes{},xr_swapchain_eye_siz
 static std::array<DXGI_FORMAT,2> xr_eye_texture_formats{};
 static std::unique_ptr<d2vr::GameXr> game_xr;
 // Native hands phase 1 (docs/NATIVE-HANDS-PLAN.md): grab and release pulses scaled by the held mass (hand_feel.hpp). build/no-hand-feel: the old fixed grab pulse.
-static bool hand_feel_enabled=true;static std::array<double,2> grab_was_kg{};static std::array<unsigned,2> grab_wait{};
+static bool hand_feel_enabled=true;static std::atomic<UINT64> fist_closed_fast{},fist_near{},fist_sent{},fist_armed_fast{};static std::atomic<float> fist_peak{},held_kg_peak{},move_scale_min{1.f};static std::array<double,2> grab_was_kg{};static std::array<unsigned,2> grab_wait{};
 static void hand_feel_grab_pulses() {
     for(unsigned side=0;side<2;++side) {
         const bool holding=native_grab.holding(side);
@@ -8183,16 +8183,23 @@ void prepare_head_view(void* view) noexcept {
                         {static std::array<d2vr::HandHitGate,2> fist_gate{};static std::uint64_t fist_hits{};
                          const float fist=side?game_xr->controller_input.right_grip:game_xr->controller_input.left_grip;
                          const double clock=static_cast<double>(now)*.001;
-                         if(hand_feel_enabled && contact_damage_enabled && !armed && fist>.6f && tip_peak[side]>=d2vr::HandHitGate::min_speed &&
+                         static std::array<bool,2> fast_was{};
+                         // A punch moves the fist away from the head (>= 1.5 m/s outward): pulling it back fast is no second hit (sim v1052: 6 hits for 3 punches).
+                         const auto head_to_fist=g.position-d2vr::Vec3{anchor.position[0],anchor.position[1],anchor.position[2]};const double reach_len=d2vr::length(head_to_fist);
+                         const double outward=reach_len>1e-3?d2vr::dot(clamp_motion[side].velocity(),head_to_fist)/reach_len:0.;
+                         const bool fast=fist>.6f && tip_peak[side]>=d2vr::HandHitGate::min_speed && outward>=1.5;
+                         if(fist>.6f && !armed && tip_peak[side]>fist_peak.load()) fist_peak=static_cast<float>(tip_peak[side]);
+                         if(fast && !fast_was[side]) ++(armed?fist_armed_fast:fist_closed_fast);fast_was[side]=fast;   // sim diagnostics: swings seen, by hand state
+                         if(hand_feel_enabled && contact_damage_enabled && !armed && fast &&
                             clock>=fist_gate[side].quiet_until && !native_grab.holding(side))
-                             if(const auto npc=creature_on<true>(g.position,g.position,now,.08)) {
+                             if(const auto npc=creature_on<true>(g.position,g.position,now,.08)) {++fist_near;
                                  const float strength=fist_gate[side].fire(tip_peak[side],clock);
                                  auto dir=npc->second-g.position;const double l=d2vr::length(dir);dir=l>1e-3?dir*(1./l):g.basis[0];
                                  const auto f=[](double v){return static_cast<float>(v);};
                                  d2vr::NativeWeaponHands::Request r{};r.op=d2vr::NativeWeaponHands::Op::shove;r.target=npc->first;r.side=side;
                                  r.pos={f(npc->second.x),f(npc->second.y),f(npc->second.z)};r.vel={f(dir.x),f(dir.y),f(dir.z)};
                                  r.decl="components/base/damage/phys_damage.damage";r.amount=2.f+6.f*strength; // ponytail: 2-8 hp like thrown_stun; tune in headset
-                                 if(d2vr::NativeWeaponHands::request(r)) {++fist_hits;combat_log("fist_hit",npc->first,tip_peak[side],static_cast<int>(fist_hits));
+                                 if(d2vr::NativeWeaponHands::request(r)) {++fist_hits;++fist_sent;combat_log("fist_hit",npc->first,tip_peak[side],static_cast<int>(fist_hits));
                                      const auto p=d2vr::hand_haptic(d2vr::HandFeelEvent::hit,tip_peak[side],4.);game_xr->pulse(side,p.amplitude,p.seconds);}
                              }}
                     }
@@ -13951,7 +13958,7 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                 if(npc_trigger_consume[0]) input.left_trigger=0;   // claimed by Talk/Pickpocket: never a shot or a cast
                                 if(npc_trigger_consume[1]) input.right_trigger=0;  // nor the sword hand's block
                                 // Native hands phase 1 (user 2026-11-06): heavy held things slow the walk (hand_feel.hpp, at most 75%).
-                                if(hand_feel_enabled && logic==2 && physical_grab_requested) {const float k=d2vr::held_move_scale(native_grab.held_total_kg());input.move_x*=k;input.move_y*=k;}
+                                if(hand_feel_enabled && logic==2 && physical_grab_requested) {const double kg=native_grab.held_total_kg();const float k=d2vr::held_move_scale(kg);input.move_x*=k;input.move_y*=k;if(kg>held_kg_peak.load())held_kg_peak=static_cast<float>(kg);if(k<move_scale_min.load())move_scale_min=k;}
                                 controller_bridge.publish(input,logic==2);
                                 npc_trigger_interact={};npc_trigger_consume={};npc_owns_frame={};
                                 published_logic=logic;published_move_x=input.move_x;published_move_y=input.move_y;
@@ -15567,6 +15574,8 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
                << ",\"audio_native_updates\":" << native_audio_listener.fallback()
                << ",\"audio_headphones_enabled\":" << (audio_headphones_enabled.load()?"true":"false")
                << ",\"audio_restore_pending\":" << (audio_restore_pending.load()?"true":"false")
+               << ",\"hand_feel\":{\"enabled\":" << (hand_feel_enabled?"true":"false") << ",\"fist_closed_fast\":" << fist_closed_fast.load() << ",\"fist_armed_fast\":" << fist_armed_fast.load()
+               << ",\"fist_near\":" << fist_near.load() << ",\"fist_sent\":" << fist_sent.load() << ",\"fist_peak_mps\":" << fist_peak.load() << ",\"last_shove\":" << d2vr::NativeWeaponHands::last_shove.load() << ",\"held_kg_peak\":" << held_kg_peak.load() << ",\"move_scale_min\":" << move_scale_min.load() << "}"
                << ",\"physical_swings\":" << physical_swings << combat_policy_status_json()
                << ",\"world_ui_target_scoped_calls\":" << d2vr::NativeWorldUi::target_scoped_calls.load()
                << ",\"world_ui_target_last_caller\":" << d2vr::NativeWorldUi::target_last_caller.load()

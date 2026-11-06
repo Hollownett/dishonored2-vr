@@ -571,6 +571,15 @@ _CHEST, _BACK, _LG2 = [0.15, 0.05, -0.45], [-0.1, 0.0, 0.25], {"left_grip": 1.0}
 SCENARIOS['yank'] = ([[0, 400, NEUTRAL, [0.0, 0.0, 0.0]], [400, 700, _LG2, [0.0, 0.0, 0.0]], [700, 1300, NEUTRAL, [0.0, 0.0, 0.0]]] +
                      glide(1300, 1900, [0.0, 0.0, 0.0], _CHEST, 6) + [[1900, 2050, {"left_grip": 1.0, "left_trigger": 1.0}, _CHEST]] +
                      glide(2050, 2150, _CHEST, _BACK, 10, {"left_grip": 1.0, "left_trigger": 1.0}) + [[2150, 5200, _LG2, _BACK], [5200, 9000, NEUTRAL, _BACK]])  # with --near npc: the "shove" test command tries each push decl on the guard
+# Native hands phase 1 (v1050): a closed empty left fist punches a guard's chest three times at ~5 m/s (use with --near npc-front).
+# Expect combat_log "fist_hit" (one per punch, 0.3 s gate) and the guard reacting/alerted. The opening squeeze sends the save's pistol to the hip.
+_FIST = {"left_grip": 1.0}
+SCENARIOS['punch'] = [[0, 400, NEUTRAL, [0.0, 0.0, 0.0]], [400, 700, _LG2, [0.0, 0.0, 0.0]], [700, 1300, NEUTRAL, [0.0, 0.0, 0.0]],
+                      [1300, 2000, _FIST, _BACK]]
+for _k in range(3):
+    _t = 2000 + _k * 2000
+    SCENARIOS['punch'] += glide(_t, _t + 150, _BACK, _CHEST, 10, _FIST) + [[_t + 150, _t + 450, _FIST, _CHEST]] + glide(_t + 450, _t + 1050, _CHEST, _BACK, 10, _FIST) + [[_t + 1050, _t + 2000, _FIST, _BACK]]
+SCENARIOS['punch'] += [[8000, 10000, NEUTRAL, _BACK]]
 # Push a closed door (use with --near door, which puts the right hand 18 cm before the middle of the leaf): slowly 0.4 m at
 # 0.2 m/s (the leaf must follow the hand, ~20 deg), hold, take the hand back (the door must stay ajar: it never closes by
 # itself), then a fast 0.7 m shove at 7 m/s (the native swing must open it fully: state Opened).
@@ -1142,7 +1151,7 @@ def write_scenario(name):
     for start, end, inp, hand, *more in SCENARIOS[name]:
         seg = {"start_ms": start + LEAD_MS, "end_ms": end + LEAD_MS, "head_pitch_degrees": -40 if name == 'pickup' else 0, "input": inp}
         if hand:
-            seg["left_hand_offset" if name in ('potion', 'hide', 'floorleft', 'waist', 'pistolhip', 'yank') else "right_hand_offset"] = hand  # the wheel cursor belongs to the X (left) hand
+            seg["left_hand_offset" if name in ('potion', 'hide', 'floorleft', 'waist', 'pistolhip', 'yank', 'punch') else "right_hand_offset"] = hand  # the wheel cursor belongs to the X (left) hand
         if name in ('pickup', 'pickuplook', 'reach', 'hold', 'holdup', 'bottlepistol', 'deathreload', 'deathreloadpush'):
             seg["hand_pitch_degrees"] = -50  # point the hands at the floor item
             seg["head_pitch_degrees"] = -40
