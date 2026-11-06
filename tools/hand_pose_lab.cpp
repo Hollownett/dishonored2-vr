@@ -355,6 +355,10 @@ int run(int argc,char** argv) {
     };
     // The old path's thing: its axes the palm's (long side along the thumb axis, across the palm), centre on the palm skin by its smallest half side. Jitter moves and
     // turns it about its centre. Rows of the pose are the model axes (classify_held's body.basis).
+    // A round thing (a bottle-sized capsule, a limb) seats like seat_held: its axis a knuckle shift toward the finger bases about the palm skin point, the skin on its surface.
+    const auto round_centre=[](const WorldTrackedPose& palm,const r::HandGeometry& g,double radius) {
+        const Vec3 n=r::palm_normal(palm,g),toward=unit(palm.basis[2]*-1.);const double shift=std::min(r::held_knuckle_shift,.8*radius),sine=shift/radius,cosine=std::sqrt(1-sine*sine);
+        return palm.position+n*r::held_palm_depth+(n*cosine+toward*sine)*radius;};
     const auto old_pose=[](const WorldTrackedPose& palm,const r::HandGeometry& g,Vec3 half,Vec3 dp,Vec3 turn) {
         const Vec3 n=r::palm_normal(palm,g);const double lo=std::min({half.x,half.y,half.z});
         WorldTrackedPose pose{palm.position+n*(lo+r::held_palm_depth)+dp,{palm.basis[0],palm.basis[1],palm.basis[2]}};
@@ -416,17 +420,35 @@ int run(int argc,char** argv) {
         // A real hold lays the thing the way a hand takes it: longest side across the palm (bar grip, along the thumb axis), thinnest along the palm normal
         // (the fingers curl over it), the middle along the fingers; old_pose has the palm's axes (x thumb, y normal, z fingers), so reorder the half extents.
         const Vec3 held_half=[&] {std::array<double,3> v{half.x,half.y,half.z};std::sort(v.begin(),v.end());return Vec3{v[2],v[0],v[1]};}();
-        surface.moving=[half=held_half,old_pose,box_of](const WorldTrackedPose& palm,const r::HandGeometry& g,Vec3,Vec3) {
-            const auto pose=old_pose(palm,g,half,{},{});return std::vector<r::HeldShape>{r::surface_grip_shape(pose,box_of(pose,half),-1,palm)};};
+        surface.moving=[half=held_half,old_pose,box_of,round_centre](const WorldTrackedPose& palm,const r::HandGeometry& g,Vec3,Vec3) {
+            const auto pose=old_pose(palm,g,half,{},{});auto shape=r::surface_grip_shape(pose,box_of(pose,half),-1,palm);
+            if(shape.radius>0) shape.frame.position=round_centre(palm,g,shape.radius);return std::vector<r::HeldShape>{shape};};
         surface.shapes=[m=surface.moving](const WorldTrackedPose& palm,const r::HandGeometry& g) {return m(palm,g,Vec3{},Vec3{});};
         surface.ghost=surface.shapes;
         scenes.push_back(surface);
+        if(std::string(t.name)=="plank" || std::string(t.name)=="book") { // the palm on the EDGE: the thin side along the fingers (the other seat of the same thing)
+            Scene edge=surface;edge.name=_strdup((std::string(t.name)+"_surface_edge").c_str());edge.title=_strdup((std::string(t.title)+": surface grip, palm on the edge (thin side along the fingers)").c_str());
+            edge.moving=[half,old_pose,box_of](const WorldTrackedPose& palm,const r::HandGeometry& g,Vec3,Vec3) {
+                const auto pose=old_pose(palm,g,half,{},{});return std::vector<r::HeldShape>{r::surface_grip_shape(pose,box_of(pose,half),-1,palm)};};
+            edge.shapes=[m=edge.moving](const WorldTrackedPose& palm,const r::HandGeometry& g) {return m(palm,g,Vec3{},Vec3{});};edge.ghost=edge.shapes;
+            scenes.push_back(edge);
+        }
         Scene old{};old.name=_strdup((std::string(t.name)+"_old").c_str());old.held=true;old.where=hold_at;old.fingers=hold_fingers;old.normal=hold_in;old.squeeze=1.f;old.index=0.f;
         old.title=_strdup((std::string(t.title)+": v638 path (classify_held on the thing's own world box)").c_str());old.shape_name="object (classify_held)";
         old.moving=[half,old_pose,box_of](const WorldTrackedPose& palm,const r::HandGeometry& g,Vec3 dp,Vec3 turn) {
             const auto pose=old_pose(palm,g,half,dp,turn);return std::vector<r::HeldShape>{r::classify_held(pose,box_of(pose,half),-1,palm)};};
         old.shapes=[old_moving=old.moving](const WorldTrackedPose& palm,const r::HandGeometry& g) {return old_moving(palm,g,Vec3{},Vec3{});};
         scenes.push_back(old);
+    }
+    for(const auto& limb:std::vector<std::pair<int,const char*>>{{7,"Corpse forearm (bone 7, r 5 cm)"},{10,"Corpse forearm (bone 10, r 6 cm)"},{12,"Corpse calf (bone 12, r 6 cm)"},{15,"Corpse calf (bone 15, r 8 cm)"},{4,"Corpse head (bone 4, r 11 cm)"}}) {
+        Scene c{};c.name=_strdup(("corpse_bone"+std::to_string(limb.first)).c_str());c.held=true;c.where=hold_at;c.fingers=hold_fingers;c.normal=hold_in;c.squeeze=1.f;c.index=0.f;
+        c.title=_strdup((std::string(limb.second)+": classify_held bone path, laid across the palm").c_str());c.shape_name="ragdoll bone capsule";
+        const int bone=limb.first;
+        c.moving=[bone,round_centre](const WorldTrackedPose& palm,const r::HandGeometry& g,Vec3,Vec3) {
+            const double rad=d2vr::ragdoll_bone_radius[static_cast<std::size_t>(bone)];const Vec3 at=round_centre(palm,g,rad);
+            return std::vector<r::HeldShape>{r::surface_grip_shape({at,palm.basis},NativeGrabBounds{at-Vec3{rad,rad,rad},at+Vec3{rad,rad,rad}},bone,palm)};};
+        c.shapes=[m=c.moving](const WorldTrackedPose& palm,const r::HandGeometry& g) {return m(palm,g,Vec3{},Vec3{});};c.ghost=c.shapes;
+        scenes.push_back(c);
     }
     if(!snapshot_spec.empty()) scenes=snapshot_scenes(snapshot_spec,refit);
     if(!palette_spec.empty()) load_palette(palette_spec);

@@ -760,10 +760,19 @@ inline FingerCurls finger_contact(const HandGeometry& hand,const WorldTrackedPos
                 if(b.fingers_only || b.radius!=0 || b.radius_end>=0 || (b.half.x==0 && b.half.y==0 && b.half.z==0)) continue;
                 const auto lim=finger_angles(0,1.),open=finger_open_angles(0);const auto& g0=hand.finger[0];const double t0=hand.thickness[0];
                 const auto idx=finger_points(hand.finger[1],finger_turns_of(hand.finger[1],finger_pose_angles(1,std::max(wants[1],relaxed_share),pose_target.pose[1])))[3];
+                unsigned thin_axis=0;{const double hh[3]{b.half.x,b.half.y,b.half.z};for(unsigned i=1;i<3;++i) if(hh[i]<hh[thin_axis]) thin_axis=i;}
+                const double face_half=thin_axis==0?b.half.x:thin_axis==1?b.half.y:b.half.z,face_mid=b.half.x+b.half.y+b.half.z-face_half-std::max({b.half.x,b.half.y,b.half.z});
+                const bool thin=face_half<=.03 && face_half<=.75*face_mid;
+                const Vec3 face_axis=b.basis[thin_axis];
+                double face_sign=-1;{const double palm_side=dot(Vec3{0,0,0}-b.position,face_axis),fingers_side=dot(unit(hand.finger[2].pivot),face_axis);
+                    face_sign=std::abs(palm_side)>face_half?(palm_side>0?-1.:1.):(fingers_side>0?-1.:1.);}
                 const auto cost=[&](const std::array<double,3>& a) {
                     const auto p=finger_points(g0,finger_turns_of(g0,a));double c=0;
                     for(unsigned j=1;j<4;++j) c+=20*std::max(0.,t0-palm_shape_distance(b,p[j]))+(j>1?20*std::max(0.,held_palm_depth+t0-dot(p[j],hand.palm_in)):0.);
-                    return c+10*std::abs(palm_shape_distance(b,p[3])-t0)+std::max(0.,length(p[3]-idx)-t0-hand.thickness[1]);
+                    c+=std::max(0.,length(p[3]-idx)-t0-hand.thickness[1]);
+                    // A thin thing (<= 6 cm): the thumb opposes across it, its tip on the face away from the fingers' (the palm's side; with the palm on the edge, the side the fingers do not lie on)
+                    if(thin) return c+10*std::abs(dot(p[3]-b.position,face_axis)*face_sign-(face_half+t0))+10*std::max(0.,-palm_shape_distance(b,p[3]));
+                    return c+10*std::abs(palm_shape_distance(b,p[3])-t0);
                 };
                 std::array<double,3> best{},step{(lim[0]-open[0])/6,(lim[1]-open[1])/6,(lim[2]-open[2])/6};double bc=1e9;
                 for(unsigned pass=0;pass<2;++pass) {
