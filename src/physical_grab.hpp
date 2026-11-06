@@ -5,6 +5,7 @@
 #include "grab_force_cap.hpp"
 #include "release_reason.hpp"
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <optional>
 
@@ -155,7 +156,7 @@ public:
         contact_local_=grab_local(object,contact-object.position);
         slide_r0_=relative_.position;slide_o0_=relative_.position+grab_local(previous_,grab_world(object,contact_local_));slide_s_=0;slide_done_=legacy_lag_;
         recovery_s_=0;lag_timer_.reset();has_released_=false;forced_release_=false;reason_=ReleaseReason::none;last_anchor_=contact;
-        held_=true;return true;
+        second_.reset();held_=true;return true;
     }
     // The grasped point: object origin plus the stored contact offset in the object's current frame (valid while held()).
     Vec3 anchor(const WorldTrackedPose& object) const {return object.position+grab_world(object,contact_local_);}
@@ -170,7 +171,35 @@ public:
     WorldTrackedPose target() const {
         auto result=previous_;result.position=previous_.position+grab_world(previous_,relative_.position);
         for(unsigned i=0;i<3;++i) result.basis[i]=grab_world(previous_,relative_.basis[i]);
+        if(second_) {
+            // Two-handed hold (docs/NATIVE-HANDS-PLAN.md phase 2, HIGGS): the main hand keeps the position; the goal turns about the main hand
+            // by the shortest arc that puts the second hand's grasp point on the line toward the second hand. Twist about that line stays the main hand's.
+            const auto pivot=previous_.position;
+            const auto have=result.position+grab_world(result,second_->local)-pivot,want=second_->hand-pivot;
+            const auto axis=cross(have,want);const double s=length(axis),c=dot(have,want);
+            if(length(have)>.05 && length(want)>.05 && s>1e-9) {
+                const auto k=axis*(1/s);const double angle=std::atan2(s,c);
+                const auto turn=[&](Vec3 v){return v*std::cos(angle)+cross(k,v)*std::sin(angle)+k*(dot(k,v)*(1-std::cos(angle)));};
+                result.position=pivot+turn(result.position-pivot);
+                for(auto& b:result.basis) b=turn(b);
+            }
+        }
         return result;
+    }
+    // The second hand on this held body: its grasp point (object-local, from its own grab's hand_in_object) and where that hand is now.
+    struct SecondHand {Vec3 local{},hand{};};
+private:
+    std::optional<SecondHand> second_;
+public:
+    void second_hand(std::optional<SecondHand> h) noexcept {second_=h && finite(h->local) && finite(h->hand)?h:std::nullopt;}
+    bool two_handed() const noexcept {return second_.has_value();}
+    // This grab's hand origin in the held object's frame (a bound grab).
+    Vec3 hand_in_object() const {const auto v=relative_.position*-1.;return {dot(v,relative_.basis[0]),dot(v,relative_.basis[1]),dot(v,relative_.basis[2])};}
+    // The other hand let go: this grab now drives the body from where the hand and the body are now (no jump to its old bind relation).
+    void reseat(const WorldTrackedPose& object) {
+        if(!held_ || !valid_sample_ || !grab_pose_valid(object)) return;
+        relative_.position=grab_local(previous_,object.position-previous_.position);
+        for(unsigned i=0;i<3;++i) relative_.basis[i]=grab_local(previous_,object.basis[i]);
     }
     // `reason`: open_fist only for a grip-open, lag for a blocked-carry release, lifecycle for a handoff or tracking loss (default).
     // Bookkeeping only happens when a hold actually ends, so releasing an idle lane keeps the cooldown, reason and anchor.

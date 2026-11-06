@@ -105,3 +105,22 @@ Hook points (read-only map, line numbers as of 2026-11-06 20:15; recheck before 
 - Hits: `dxgi_probe.cpp:8152-8163` contact event (`event->speed`, `native_grab.poke`); fist on NPC through the `shove` request
   (`native_weapon_hands.hpp:137`) with a punch damage decl instead of `shove_damage`, gated by `HandHitGate`.
 - `game_xr->pulse(side, amp, s)` (`game_xr.hpp:1550`), render thread only.
+
+## Phase 2 status (v1051, 2026-11-06, built, NOT sim/headset tested)
+
+**Two-handed props.** Before: the second hand could not take a prop the other hand held (focus exclusion, acquisition skip and bind
+refusal in `native_grab.hpp`). Now (off switch `build/no-two-hand`):
+- The second hand may grab a held prop (props only; corpses keep one hand per bone, two bones as before).
+- The earlier hand drives the body. `PhysicalGrab::target()` turns its goal about the main hand by the shortest arc that puts the second
+  hand's grasp point (`hand_in_object()`) on the line toward the second hand (HIGGS: main = position, off hand = orientation).
+- The later (secondary) hand writes nothing; it stays bound, so it is drawn on the prop and releases normally.
+- Releasing one hand while the other holds throws nothing; a secondary left alone `reseat()`s on the current pose (no jump).
+- Each hand takes half the mass (existing `share`); the walk slowdown counts the prop once.
+- Check: `tests/physical_grab_check.cpp` two-hand block (45 degree turn, <5 cm dead zone, NaN, reseat). Regression: corpse_hold_check
+  fails to build and native_grab_compile asserts at line 79 on the base snapshot too (pre-existing); physical_carry_followup 5/5 pass.
+
+**Per-object poses.** `authored_hand_bank.hpp` is an open/closed arm pose pair, not per-object grips; the sword already mirrors the
+game's authored grip (`native_finger_grip.hpp`). A per-class pose table is only worth it for props where the procedural wrap still looks
+wrong in the headset (books, large crates): decide after the headset pass instead of building it blind.
+
+Not done in phase 2: sword two-hand pose through `body_ik` (the sword is a mod-held copy, not a physics body).

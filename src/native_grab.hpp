@@ -233,6 +233,7 @@ private:
         // force-capped pipeline); neither: a legacy-yanked living guard on the old motor. mass: kg the cap last used; last_capped: CorpseMotor.capped of the
         // last write (it feeds the tow's limb_saturated); bind_pelvis_z: where the pelvis was at the bind (the lift that hangs mass on the held limb).
         bool corpse{},capped{},last_capped{},near_noted{},mass_noted{};
+        bool secondary{}; // phase 2: the later of two hands on one prop; it writes nothing, the main hand's goal turns toward it
         double mass{},bind_pelvis_z{std::numeric_limits<double>::quiet_NaN()};std::uint32_t bind_motion{};std::optional<std::uint32_t> bind_owner;UINT64 bound_at{};
         HoldAnchorView anchor_view{};
         // B16 (render thread -> dispatcher, copied from coupling_pub_ each pass): the hand body's lag behind the palm while this capped hold is
@@ -271,6 +272,7 @@ private:
     // corpse_enabled_: build/no-corpse-grab clears it; lockout_ is internally locked (any thread); the dispatcher cost counters are dispatcher-thread only; no_posts_ is
     // build/no-ragdoll-posts, read at install for the wake path (Task 11).
     bool corpse_enabled_=true,no_posts_{},prop_grasp_point_=true,sphere_grip_=true;
+    bool two_hand_=true; // phase 2: the second hand may grab a prop the other hand holds (build/no-two-hand)
     // build/legacy-sphere-grip-whole-object (read at install): the v642 ball round the thing's whole box instead of the v1024 grip ball (finger_sphere.hpp)
     bool sphere_whole_object_{};
     bool grip_slab_{true};   // !build/no-grip-slab (read at install): a wide thin prop's grip is its face under the fingers, not a ball
@@ -369,7 +371,8 @@ private:
             ~Cost() {const auto us=static_cast<UINT64>(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now()-start).count());
                 ++lane.focus_calls;lane.focus_us+=us;lane.focus_max_us=std::max(lane.focus_max_us,us);}
         } cost{lane};
-        const auto excluded=other?other->entity:0;const auto excluded_handle=other?other->handle:0;
+        const bool shared_prop=two_hand_ && other && other->bone<0; // a prop in the other hand is offered: the second hand joins it (two-handed hold)
+        const auto excluded=other && !shared_prop?other->entity:0;const auto excluded_handle=other && !shared_prop?other->handle:0;
         // Collar (chest, neck) targets are offered only to a full fist (the published squeeze is zero for a grip alone, which stays the game's shoulder carry).
         const bool collar=collar_grab_ && lane.raw_grip>=collar_fist_squeeze;
         const auto game=rig::value<std::uintptr_t>(read_,base_+0x39a5290);
@@ -715,7 +718,7 @@ private:
     void begin_hold(Lane& lane,unsigned side,const NativeRigidBody& body,UINT64 now) {
         lane.corpse=body.bone>=0 && corpse_enabled_ && ragdoll_pushable_state(read_,body.entity);
         lane.capped=lane.corpse || body.bone<0;
-        lane.last_capped=false;lane.near_noted=lane.mass_noted=false;lane.mass=0;lane.bind_pelvis_z=std::numeric_limits<double>::quiet_NaN();
+        lane.last_capped=false;lane.near_noted=lane.mass_noted=false;lane.secondary=false;lane.mass=0;lane.bind_pelvis_z=std::numeric_limits<double>::quiet_NaN();
         // The sphere grip (finger_sphere.hpp): the fingers wrap one ball from now on, sized once from the bone or the box as it is at the bind. A prop gets the
         // grip ball (its thin side, at the grasp point); build/legacy-sphere-grip-whole-object keeps v642's ball round the whole box, and a wide thin prop
         // (a book, a folder) is FLAT instead: the fingers lie on its face, as a real hand holds it (build/no-grip-slab restores the ball there).
@@ -762,6 +765,8 @@ private:
             }
         } else if(lane.pending_release) { // a prop: the release throws with the hand's velocity, as before
             const auto motor=lane.grab.release_sample(coupling_on_?lane.sample_hand:p.hand,p.grip,release_usable,p.epoch,p.tick,lane.release_throw);
+            const auto& still=lanes_[1-side].held;   // two-handed: the other hand keeps the prop, so this hand's release throws nothing
+            if(still && still->entity==body.entity && still->handle==body.handle) {lane.end_hold();lane.pending_release=false;return true;}
             if(!write(lane,side,body,motor)) return false;
             lane.last_motor=now;
             if(length(motor.linear)>3) {std::lock_guard<std::mutex> g(thrown_mutex_);thrown_=Thrown{body.entity,body.component,body.entity_id,motor.linear,now};}
@@ -805,6 +810,16 @@ private:
         in.object_kg=kg;in.inertia_kgm2=bone_inertia(kg,radius);in.dt=dt;in.tuning=corpse?&tuning_:&prop_tuning_;
         const auto& other=lanes_[1-side].held;in.share=other && other->entity==body.entity?.5:1.; // two hands on one body: each takes half the mass
         if(!in.velocity_known) ++velocity_unknown_;
+        {   // Two-handed prop (phase 2): the earlier hand drives; the later one writes nothing and turns the main hand's goal toward itself.
+            const auto& sib=lanes_[1-side];
+            const bool shared=two_hand_ && !corpse && sib.held && sib.held->entity==body.entity && sib.held->handle==body.handle;
+            const bool secondary=shared && (sib.bound_at<lane.bound_at || (sib.bound_at==lane.bound_at && side==1));
+            if(lane.secondary && !secondary) lane.grab.reseat(body.pose);   // the main hand let go: drive from here, no jump
+            lane.secondary=secondary;
+            if(secondary) return true;
+            if(shared) lane.grab.second_hand(PhysicalGrab::SecondHand{sib.grab.hand_in_object(),(coupling_on_?sib.sample_hand:sib.published.hand).position});
+            else lane.grab.second_hand(std::nullopt);
+        }
         const auto result=lane.grab.corpse_motor(body.pose,motor_usable,now,p.source_tick,in);
         if(!result) {end_capped_hold(lane,side,ReleaseReason::lifecycle);return true;}
         if(result->motor.release) {
@@ -945,7 +960,7 @@ private:
             std::optional<NativeRigidBody> body;double distance=2.;
             std::vector<NativeRigidBody> valid;std::vector<PalmTarget> targets;
             for(const auto& cached:lane.candidates) {
-                if(other && other->entity==cached.entity && other->handle==cached.handle) continue;
+                if(other && other->entity==cached.entity && other->handle==cached.handle && !(two_hand_ && cached.bone<0)) continue;
                 const auto current=native_grab_body(read_,base_,cached);
                 if(!current || current->identity!=cached.identity || current->component!=cached.component ||
                    current->handle!=cached.handle || current->model!=cached.model || current->world!=cached.world || current->entity_id!=cached.entity_id) continue;
@@ -1134,6 +1149,7 @@ public:
     bool holding(unsigned side) {std::lock_guard<std::mutex> lock(mutex_);return lanes_.at(side).held.has_value() && !docked_.at(side);}
     // Mass the hand carries (kg, 0 when not holding or docked): hand_feel weight slowdown and grab haptics.
     double held_kg(unsigned side) {std::lock_guard<std::mutex> lock(mutex_);const auto& l=lanes_.at(side);return l.held && !docked_.at(side)?l.mass:0.;}
+    void set_two_hand(bool on) noexcept {two_hand_=on;}
     // Both hands; one body held in both hands counts once.
     double held_total_kg() {std::lock_guard<std::mutex> lock(mutex_);double kg[2]{};
         for(unsigned i=0;i<2;++i) if(lanes_[i].held && !docked_[i]) kg[i]=lanes_[i].mass;
@@ -1478,7 +1494,7 @@ public:
             // Commit the queried pose before another eye publication replaces it.
             const auto& other=lanes_[1-side].held;
             const auto contact=acquisition_contact(lane,*after,GetTickCount64());
-            if(*verdict && contact && lane.owner.physical() && hold_bone_allowed(after->bone,p.grip) && !(after->bone>=0 && lockout_.locked(after->entity_id,seconds_from_ms(GetTickCount64()))) && (!other || other->entity!=after->entity || other->handle!=after->handle) &&
+            if(*verdict && contact && lane.owner.physical() && hold_bone_allowed(after->bone,p.grip) && !(after->bone>=0 && lockout_.locked(after->entity_id,seconds_from_ms(GetTickCount64()))) && (!other || other->entity!=after->entity || other->handle!=after->handle || (two_hand_ && after->bone<0)) &&
                lane.grab.sample(p.hand,p.grip,true,p.epoch,p.tick) &&
                lane.grab.bind(after->pose,*contact,grab_acquire_distance)) {
                 lane.held=after;lane.acquired=true;lane.pending_release=false;lane.reset_tow();

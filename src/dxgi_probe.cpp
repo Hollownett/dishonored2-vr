@@ -15238,7 +15238,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
         if(assassination_receipt_requested &&
            !d2vr::NativeAssassinationReceipt::process_owner().start(image_base,&read_self,output.when_on()))
             throw std::runtime_error("Passive native assassination receipt could not initialize safely");
-        weapon_collision_enabled=!fs::exists(root/L"build"/L"no-weapon-collision");contact_damage_enabled=!fs::exists(root/L"build"/L"no-contact-damage");hand_feel_enabled=!fs::exists(root/L"build"/L"no-hand-feel");d2vr::NativeInteractionAim::stealth_enabled_=!fs::exists(root/L"build"/L"no-stealth-contact");
+        weapon_collision_enabled=!fs::exists(root/L"build"/L"no-weapon-collision");contact_damage_enabled=!fs::exists(root/L"build"/L"no-contact-damage");hand_feel_enabled=!fs::exists(root/L"build"/L"no-hand-feel");native_grab.set_two_hand(!fs::exists(root/L"build"/L"no-two-hand"));d2vr::NativeInteractionAim::stealth_enabled_=!fs::exists(root/L"build"/L"no-stealth-contact");
         {std::ifstream knob(root/L"build"/L"stealth-speed");std::string text;if(knob) std::getline(knob,text);d2vr::NativeInteractionAim::stealth_speed_=d2vr::stealth_speed_from_knob(text);}impact_fx_enabled=!fs::exists(root/L"build"/L"no-impact-fx");hand_contact_enabled=!fs::exists(root/L"build"/L"no-hand-contact");weapon_body_enabled=!fs::exists(root/L"build"/L"no-weapon-body");weapon_body_rigid=!fs::exists(root/L"build"/L"weapon-body-ride");
         slash_speed_factor=fs::exists(root/L"build"/L"no-slash-speed")?1.f:1.7f;takedown_range_enabled=!fs::exists(root/L"build"/L"no-takedown-range");
         {std::ifstream knob(root/L"build"/L"takedown-range-scale");std::string text;if(knob) std::getline(knob,text);

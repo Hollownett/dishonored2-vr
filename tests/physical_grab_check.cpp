@@ -484,5 +484,25 @@ int main() {
             auto nr=n.corpse_motor(nb,true,0,0,in());assert(nr && length(nr->motor.linear)==0 && length(nr->motor.angular)==0 && !nr->capped && nr->cap_fraction==0);
         }
     }
+    {   // Two-handed hold (phase 2): a plank along x, main hand at its end, second hand 1 m along it.
+        const WorldTrackedPose id{{0,0,0},{{{1,0,0},{0,1,0},{0,0,1}}}};
+        auto plank=id;plank.position={.5,0,0};
+        PhysicalGrab main_grip,second_grip;auto h2=id;h2.position={1,0,0};
+        main_grip.sample(id,0,true,1,100);main_grip.sample(id,1,true,1,110);assert(main_grip.bind(plank,{0,0,0},.5));
+        second_grip.sample(h2,0,true,1,100);second_grip.sample(h2,1,true,1,110);assert(second_grip.bind(plank,{1,0,0},.5));
+        const auto local=second_grip.hand_in_object();assert(length(local-Vec3{.5,0,0})<1e-9);
+        // The second hand swings 45 degrees about z around the main hand: the plank follows it, pivoting on the main hand.
+        const double r=std::sqrt(.5);
+        main_grip.second_hand(PhysicalGrab::SecondHand{local,{r,r,0}});assert(main_grip.two_handed());
+        const auto t=main_grip.target();
+        assert(length(t.position-Vec3{.5*r,.5*r,0})<1e-9 && length(t.basis[0]-Vec3{r,r,0})<1e-9 && length(t.basis[2]-Vec3{0,0,1})<1e-9);
+        // Second hand inside the main hand (< 5 cm): no turn.
+        main_grip.second_hand(PhysicalGrab::SecondHand{local,{.01,.02,0}});assert(length(main_grip.target().position-plank.position)<1e-9);
+        // The second hand lets go: no turn; a NaN hand is ignored.
+        main_grip.second_hand(std::nullopt);assert(!main_grip.two_handed() && length(main_grip.target().position-plank.position)<1e-9);
+        main_grip.second_hand(PhysicalGrab::SecondHand{local,{std::nan(""),0,0}});assert(!main_grip.two_handed());
+        // The main hand lets go: the second grab reseats on where the plank is now (turned), no jump.
+        second_grip.reseat(t);assert(length(second_grip.target().position-t.position)<1e-9);
+    }
     std::cout<<"PASS: grip hysteresis/rearm, relative pose, bounded dynamic motor/throw, focus/epoch/stale/blocked release, occupied-hand refusal and release\n";
 }
