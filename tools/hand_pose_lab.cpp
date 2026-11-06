@@ -345,7 +345,8 @@ int run(int argc,char** argv) {
     // Half extents are the thing's own (m): a spoon 18 cm, a fork 20 cm, a candlestick 30 cm with a 2.2 cm shaft, a book 22 x 16 x 4 cm, a folder 32 x 22 x 2 cm, a head 18 x 14 x 20 cm.
     struct Thing {const char* name;const char* title;Vec3 half;};
     const std::vector<Thing> things{{"spoon","Spoon 18 cm",{.09,.015,.004}},{"fork","Fork 20 cm",{.10,.012,.003}},{"candle","Candlestick 30 cm, shaft 2.2 cm",{.15,.022,.022}},
-        {"book","Book 22 x 16 x 4 cm",{.11,.08,.02}},{"folder","Folder 32 x 22 x 2 cm",{.16,.11,.01}},{"skull","Skull / head 18 x 14 x 20 cm",{.09,.07,.10}}};
+        {"book","Book 22 x 16 x 4 cm",{.11,.08,.02}},{"folder","Folder 32 x 22 x 2 cm",{.16,.11,.01}},{"skull","Skull / head 18 x 14 x 20 cm",{.09,.07,.10}},
+        {"crate","Crate 40 x 40 x 40 cm",{.2,.2,.2}},{"plank","Plank 100 x 10 x 3 cm",{.5,.05,.015}},{"bottlebox","Bottle box 7 x 7 x 25 cm",{.035,.035,.125}}};
     const auto box_of=[](const WorldTrackedPose& pose,Vec3 half) { // the engine's world AABB of the thing's box turned by pose (e_j = sum_i half_i |axis_i . j|)
         const auto a=[&](unsigned i,unsigned j) {return std::abs(j==0?pose.basis[i].x:j==1?pose.basis[i].y:pose.basis[i].z);};
         const double h[3]={half.x,half.y,half.z};Vec3 e{};
@@ -408,6 +409,18 @@ int run(int argc,char** argv) {
             flat.reach=r::grip_flat_reach;
             scenes.push_back(flat);
         }
+        // Surface grip (native hands phase 2b): the thing's OWN box where the motor holds it (the bind relation, fixed in the palm frame):
+        // the fingers wrap the real surface under the hand and the shape never moves under them (moving ignores the jitter).
+        Scene surface{};surface.name=_strdup((std::string(t.name)+"_surface").c_str());surface.held=true;surface.where=hold_at;surface.fingers=hold_fingers;surface.normal=hold_in;surface.squeeze=1.f;surface.index=0.f;
+        surface.title=_strdup((std::string(t.title)+": the surface grip (its own box at the bind relation, fixed in the palm)").c_str());surface.shape_name="object surface (bind relation)";
+        // A real hold lays the thing the way a hand takes it: longest side across the palm (bar grip, along the thumb axis), thinnest along the palm normal
+        // (the fingers curl over it), the middle along the fingers; old_pose has the palm's axes (x thumb, y normal, z fingers), so reorder the half extents.
+        const Vec3 held_half=[&] {std::array<double,3> v{half.x,half.y,half.z};std::sort(v.begin(),v.end());return Vec3{v[2],v[0],v[1]};}();
+        surface.moving=[half=held_half,old_pose,box_of](const WorldTrackedPose& palm,const r::HandGeometry& g,Vec3,Vec3) {
+            const auto pose=old_pose(palm,g,half,{},{});return std::vector<r::HeldShape>{r::surface_grip_shape(pose,box_of(pose,half),-1,palm)};};
+        surface.shapes=[m=surface.moving](const WorldTrackedPose& palm,const r::HandGeometry& g) {return m(palm,g,Vec3{},Vec3{});};
+        surface.ghost=surface.shapes;
+        scenes.push_back(surface);
         Scene old{};old.name=_strdup((std::string(t.name)+"_old").c_str());old.held=true;old.where=hold_at;old.fingers=hold_fingers;old.normal=hold_in;old.squeeze=1.f;old.index=0.f;
         old.title=_strdup((std::string(t.title)+": v638 path (classify_held on the thing's own world box)").c_str());old.shape_name="object (classify_held)";
         old.moving=[half,old_pose,box_of](const WorldTrackedPose& palm,const r::HandGeometry& g,Vec3 dp,Vec3 turn) {

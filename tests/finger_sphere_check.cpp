@@ -152,5 +152,13 @@ int main() {
      const auto d0=b.frame.position-hand.palm.position;const Vec3 centre{dot(d0,hand.palm.basis[0]),dot(d0,hand.palm.basis[1]),dot(d0,hand.palm.basis[2])};
      std::cout<<"legacy whole-box ball "<<rad*100<<" cm: thumb tip "<<(length(p[3]-centre)-rad)*1000<<" mm off the ball (v646 asks "
          <<(hand.geometry.thickness[0]-.002)*1000<<" mm)\n";}
+    {   // surface grip shape: a book is an oriented box, a bottle a capsule, a crate a box
+        const d2vr::WorldTrackedPose id{{0,0,0},{{{1,0,0},{0,1,0},{0,0,1}}}};
+        const auto of=[&](d2vr::Vec3 h) {return r::surface_grip_shape(id,d2vr::NativeGrabBounds{h*-1.,h},-1,id);};
+        const auto book=of({.11,.02,.08}),bottle=of({.035,.125,.035}),crate=of({.2,.2,.2});
+        assert(book.radius==0 && book.half.x==.11 && book.half.y==.02 && book.half.z==.08);
+        assert(bottle.radius>.034 && bottle.radius<.036 && bottle.half.x>.08);
+        assert(crate.radius==0 && crate.half.x==.2);
+    }
     std::cout<<"finger_sphere_check passed\n";
 }

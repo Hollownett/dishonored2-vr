@@ -8468,9 +8468,7 @@ void prepare_head_view(void* view) noexcept {
                                 auto& sg=surface_hold[side];
                                 if(!sg.valid || sg.entity!=gb->entity || sg.handle!=gb->handle || hold_edge) sg=SurfaceGrip{gb->entity,gb->handle,fk_now};
                                 if(!sg.valid || fk_now-sg.since<=350) {
-                                    auto shape=d2vr::rig::classify_held(gb->pose,gb->bounds,gb->bone,palm);
-                                    if(gb->bone<0 && shape.radius==0 && gb->bounds)   // no shaft fits: its own box in its own axes, not the loose world AABB
-                                        if(const auto local=d2vr::rig::held_local_extents(gb->pose.basis,(gb->bounds->maximum-gb->bounds->minimum)*.5)) {shape.frame.basis=gb->pose.basis;shape.half=d2vr::rig::held_clamped_extents(*local);}
+                                    const auto shape=d2vr::rig::surface_grip_shape(gb->pose,gb->bounds,gb->bone,palm); // oriented box, a round shaft, or the bone's capsule
                                     sg.local=shape;sg.local.frame.position=d2vr::grab_local(palm,shape.frame.position-palm.position);
                                     for(unsigned k=0;k<3;++k) sg.local.frame.basis[k]=d2vr::grab_local(palm,shape.frame.basis[k]);
                                     sg.valid=true;

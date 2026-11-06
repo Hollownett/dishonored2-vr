@@ -65,6 +65,27 @@ inline bool grip_is_flat(const WorldTrackedPose& pose,const NativeGrabBounds& bo
 // asked for a relaxed curl (a fraction of the hold's) instead of the closed one. Nothing to collide with every frame, so it is also the cheapest grip: the
 // solver has one shape fewer than a ball, and nothing that can twitch (user, headset 2026-11-05: "grip is unnatural on books").
 inline constexpr float grip_flat_reach=.35f;
+// The surface grip's contact shape (the thing's own, fixed in the palm frame): an ORIENTED box in its own axes - a book, crate, plank or spoon is a box, and
+// fitting it as a fat capsule (classify_held's fit_cylinder takes a 22x16x4 cm book within 10%) made the fingers fan round a ball with the thumb far off -
+// unless its cross-section is genuinely round (two smaller half extents within 25%, the long one at least 1.5x longer): then the capsule along the long
+// axis. A corpse bone is classify_held's limb capsule. Local extents unsolvable (axes 45 degrees to the box): classify_held.
+inline HeldShape surface_grip_shape(const WorldTrackedPose& body,const std::optional<NativeGrabBounds>& bounds,int bone,const WorldTrackedPose& palm) {
+    if(bone<0 && bounds && finite(bounds->minimum) && finite(bounds->maximum)) {
+        const auto local=held_local_extents(body.basis,(bounds->maximum-bounds->minimum)*.5);
+        if(local) {
+            const auto h=held_clamped_extents(*local);const double v[3]{h.x,h.y,h.z};
+            unsigned a=0;for(unsigned i=1;i<3;++i) if(v[i]>v[a]) a=i;
+            const double p=v[(a+1)%3],q=v[(a+2)%3],wide=std::max(p,q);
+            HeldShape shape{};shape.frame.position=(bounds->maximum+bounds->minimum)*.5;
+            if(std::abs(p-q)<=.25*wide && v[a]>=1.5*wide) { // round: a capsule along the long axis (half = the straight part)
+                const double r=(p+q)*.5;
+                shape.frame.basis={unit(body.basis[a]),unit(body.basis[(a+1)%3]),unit(body.basis[(a+2)%3])};shape.half={std::max(0.,v[a]-r),0,0};shape.radius=r;
+            } else {shape.frame.basis={unit(body.basis[0]),unit(body.basis[1]),unit(body.basis[2])};shape.half=h;shape.radius=0;}
+            return shape;
+        }
+    }
+    return classify_held(body,bounds,bone,palm);
+}
 // A ragdoll bone (a corpse's limb, held for a drag): the visible limb, about 0.6 of its padded collision capsule (sim v640: a dragged wrist's 5-6 cm
 // capsule, or its box's x half that can be the forearm's half LENGTH, gave the 6 cm cap: a fist round a ball, not a wrist); never above the bone box's thinnest half side.
 inline constexpr double sphere_grip_bone_share=.6;

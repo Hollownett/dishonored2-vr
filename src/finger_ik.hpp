@@ -752,6 +752,31 @@ inline FingerCurls finger_contact(const HandGeometry& hand,const WorldTrackedPos
                 for(unsigned s=0;s<3;++s) pose_target.pose[0][s]=static_cast<float>(best[s]);
                 touching[0]=true;break;
             }
+            // A thumb on a box (a book, a plank, a crate: the surface grip's oriented box): the closing sweep ends where the CMC first meets the box and leaves the
+            // tip floating off it ("thumb too far from the other fingers"). Same search as the ball's: IP and tip out of the box, the tip's pad on its surface and
+            // against the index fingertip, so it comes across to the far face of a thin thing and lies alongside the index on a wide one.
+            if(f==0 && fold) for(unsigned k=0;k<reachable;++k) {
+                const auto& b=*within_reach[k];
+                if(b.fingers_only || b.radius!=0 || b.radius_end>=0 || (b.half.x==0 && b.half.y==0 && b.half.z==0)) continue;
+                const auto lim=finger_angles(0,1.),open=finger_open_angles(0);const auto& g0=hand.finger[0];const double t0=hand.thickness[0];
+                const auto idx=finger_points(hand.finger[1],finger_turns_of(hand.finger[1],finger_pose_angles(1,std::max(wants[1],relaxed_share),pose_target.pose[1])))[3];
+                const auto cost=[&](const std::array<double,3>& a) {
+                    const auto p=finger_points(g0,finger_turns_of(g0,a));double c=0;
+                    for(unsigned j=1;j<4;++j) c+=20*std::max(0.,t0-palm_shape_distance(b,p[j]))+(j>1?20*std::max(0.,held_palm_depth+t0-dot(p[j],hand.palm_in)):0.);
+                    return c+10*std::abs(palm_shape_distance(b,p[3])-t0)+std::max(0.,length(p[3]-idx)-t0-hand.thickness[1]);
+                };
+                std::array<double,3> best{},step{(lim[0]-open[0])/6,(lim[1]-open[1])/6,(lim[2]-open[2])/6};double bc=1e9;
+                for(unsigned pass=0;pass<2;++pass) {
+                    const auto centre=best;const int n=pass?2:6;
+                    for(int i=pass?-n:0;i<=n;++i) for(int j=pass?-n:0;j<=n;++j) for(int l=pass?-n:0;l<=n;++l) {
+                        const std::array<double,3> a{std::clamp((pass?centre[0]:open[0])+i*step[0],open[0],lim[0]),std::clamp((pass?centre[1]:open[1])+j*step[1],open[1],lim[1]),std::clamp((pass?centre[2]:open[2])+l*step[2],open[2],lim[2])};
+                        const double v=cost(a);if(v<bc) {bc=v;best=a;}
+                    }
+                    for(auto& s:step) s/=3;
+                }
+                for(unsigned s=0;s<3;++s) pose_target.pose[0][s]=static_cast<float>(best[s]);
+                touching[0]=true;break;
+            }
             auto& memo=state.memo[f];memo.valid=true;memo.reach=memo_reach_key(reach);memo.stop=stop_extended;memo.count=reachable;memo.pose=pose_target.pose[f];memo.touching=touching[f];
             memo.min_curl=min_target[f];memo.blocked=blocked[f];memo.hyperextended=past_straight[f];
             for(unsigned k=0;k<reachable;++k) memo.shapes[k]=local[picked[f][k]];
