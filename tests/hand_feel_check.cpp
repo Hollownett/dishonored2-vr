@@ -19,9 +19,5 @@ int main() {
     float s=g.fire(5.,1.);assert(s>0 && s<1);
     assert(g.fire(9.,1.1)==0);
     assert(g.fire(9.,1.31)==1.f);
-    // prop impulse: light props fly, bodies barely move, capped
-    assert(hit_prop_speed(5,.5)>hit_prop_speed(5,75));
-    assert(hit_prop_speed(5,75)<.6);
-    assert(hit_prop_speed(50,.1)<=8.);
     std::puts("hand_feel_check: all pass");
 }

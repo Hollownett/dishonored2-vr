@@ -1132,6 +1132,12 @@ public:
     // A lane docked at the shoulder (grip_decision.hpp ShoulderDock: the body stays held, pulled to a point at the shoulder) leaves its hand free:
     // holding() is false for it (the hand's Use, grabs and fingers are its own again); the hold itself goes on.
     bool holding(unsigned side) {std::lock_guard<std::mutex> lock(mutex_);return lanes_.at(side).held.has_value() && !docked_.at(side);}
+    // Mass the hand carries (kg, 0 when not holding or docked): hand_feel weight slowdown and grab haptics.
+    double held_kg(unsigned side) {std::lock_guard<std::mutex> lock(mutex_);const auto& l=lanes_.at(side);return l.held && !docked_.at(side)?l.mass:0.;}
+    // Both hands; one body held in both hands counts once.
+    double held_total_kg() {std::lock_guard<std::mutex> lock(mutex_);double kg[2]{};
+        for(unsigned i=0;i<2;++i) if(lanes_[i].held && !docked_[i]) kg[i]=lanes_[i].mass;
+        return lanes_[0].held && lanes_[1].held && lanes_[0].held->entity==lanes_[1].held->entity?std::max(kg[0],kg[1]):kg[0]+kg[1];}
     void set_docked(unsigned side,bool docked) {std::lock_guard<std::mutex> lock(mutex_);docked_.at(side)=docked;}
     // B16, render thread: the capped hold `serial` (HoldAnchorView::serial) follows the hand body (offset: the body minus the palm, world metres)
     // or not (nullopt: the controller, as before); release: HoldCoupling's lag rule fired. Its own small mutex, held only for the copy (DeepSeek

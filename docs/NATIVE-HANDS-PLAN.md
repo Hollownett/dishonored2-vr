@@ -90,8 +90,13 @@ this work until it has committed, or work happens in a worktree from its commit.
 
 ## Phase 1 status and hook points (2026-11-06)
 
-Done offline: `src/hand_feel.hpp` (haptic per event, `held_move_scale`, `HandHitGate`, `hit_prop_speed`) and
-`tests/hand_feel_check.cpp` (passes). Not wired yet: wiring waits for the other session to commit `dxgi_probe.cpp`.
+v1050 (branch `feat/native-hands`, built, NOT sim/headset tested). Off switch: `build/no-hand-feel`.
+- Contact haptics already existed (`hand_clamp.hpp` surface-hit pulse with cooldown); kept as is.
+- Grab pulse now scales with the held mass (`hand_feel_grab_pulses`, waits for the lane's mass), plus a release pulse.
+- Walk slowdown from `NativeGrab::held_total_kg()` (one body in both hands counts once) before `controller_bridge.publish`.
+- Fist punch: closed empty fist (grip > 0.6, no item, not holding) at >= 2.5 m/s within 8 cm of a living guard's bounds ->
+  `NativeWeaponHands` shove request with `phys_damage`, 2-8 hp by speed, haptic, `combat_log("fist_hit")`. 0.3 s per hand.
+- Prop pushes stay with the existing `hand_contact` (no separate punch impulse).
 
 Hook points (read-only map, line numbers as of 2026-11-06 20:15; recheck before editing):
 - Touch/push haptic: `hand_contact.hpp:267` (`hand_velocity`, `speed`); clamp hit `dxgi_probe.cpp:7961` (`approach_speed`). Render thread.

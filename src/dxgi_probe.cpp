@@ -58,6 +58,7 @@
 #include "native_pad_focus.hpp"
 #include "native_interaction_aim.hpp"
 #include "native_grab.hpp"
+#include "hand_feel.hpp"
 #include "grip_pose_blend_hook.hpp"
 #include "hand_body_spike_engine.hpp"
 #include "hand_body_runtime.hpp"
@@ -1996,6 +1997,20 @@ static std::array<LONG,2> saved_scale{};
 static std::array<XrExtent2Di,2> xr_recommended_eye_sizes{},xr_swapchain_eye_sizes{};
 static std::array<DXGI_FORMAT,2> xr_eye_texture_formats{};
 static std::unique_ptr<d2vr::GameXr> game_xr;
+// Native hands phase 1 (docs/NATIVE-HANDS-PLAN.md): grab and release pulses scaled by the held mass (hand_feel.hpp). build/no-hand-feel: the old fixed grab pulse.
+static bool hand_feel_enabled=true;static std::array<double,2> grab_was_kg{};static std::array<unsigned,2> grab_wait{};
+static void hand_feel_grab_pulses() {
+    for(unsigned side=0;side<2;++side) {
+        const bool holding=native_grab.holding(side);
+        if(!hand_feel_enabled) {if(holding && !grab_was_holding[side]) game_xr->pulse(side,.5f,.04f);grab_was_holding[side]=holding;continue;}
+        // The lane's mass is set by the next grab service: pulse once it is known (or after ~6 control frames).
+        if(holding && !grab_was_holding[side]) grab_wait[side]=1;
+        if(holding && grab_wait[side]) {const double kg=native_grab.held_kg(side);
+            if(kg>0 || ++grab_wait[side]>6) {grab_wait[side]=0;grab_was_kg[side]=kg;const auto p=d2vr::hand_haptic(d2vr::HandFeelEvent::grab,0,kg);game_xr->pulse(side,p.amplitude,p.seconds);}}
+        if(!holding && grab_was_holding[side]) {grab_wait[side]=0;const auto p=d2vr::hand_haptic(d2vr::HandFeelEvent::release,0,grab_was_kg[side]);game_xr->pulse(side,p.amplitude,p.seconds);}
+        grab_was_holding[side]=holding;
+    }
+}
 static std::atomic<bool> xr_close_requested{false},xr_close_complete{false};
 static std::atomic<bool> xr_recovery_retiring{false};
 static UINT64 xr_submitted{},xr_dropped{},xr_gameplay_frames{},xr_menu_layers{};
@@ -8162,6 +8177,24 @@ void prepare_head_view(void* view) noexcept {
                            ((event->blade && event->speed>.4) || (!hand_contact_enabled && !armed && event->speed>1.2 && open_hand<.3f)))
                             native_grab.poke(event->entity,event->normal*(-std::min(event->speed*.9,6.)),now);
                         if(haptic) game_xr->pulse(side,haptic->amplitude,haptic->seconds);
+                        // Native hands phase 1 (user 2026-11-06: a punch is damage + alert): a closed empty fist swung at >= 2.5 m/s into a living
+                        // guard's bounds is one hit (0.3 s quiet after), the game's phys_damage (the bottle stagger) 2-8 hp by speed, on the game thread.
+                        // The NPC test runs only during a fast swing (creature_on lists guards every 250 ms while called).
+                        {static std::array<d2vr::HandHitGate,2> fist_gate{};static std::uint64_t fist_hits{};
+                         const float fist=side?game_xr->controller_input.right_grip:game_xr->controller_input.left_grip;
+                         const double clock=static_cast<double>(now)*.001;
+                         if(hand_feel_enabled && contact_damage_enabled && !armed && fist>.6f && tip_peak[side]>=d2vr::HandHitGate::min_speed &&
+                            clock>=fist_gate[side].quiet_until && !native_grab.holding(side))
+                             if(const auto npc=creature_on<true>(g.position,g.position,now,.08)) {
+                                 const float strength=fist_gate[side].fire(tip_peak[side],clock);
+                                 auto dir=npc->second-g.position;const double l=d2vr::length(dir);dir=l>1e-3?dir*(1./l):g.basis[0];
+                                 const auto f=[](double v){return static_cast<float>(v);};
+                                 d2vr::NativeWeaponHands::Request r{};r.op=d2vr::NativeWeaponHands::Op::shove;r.target=npc->first;r.side=side;
+                                 r.pos={f(npc->second.x),f(npc->second.y),f(npc->second.z)};r.vel={f(dir.x),f(dir.y),f(dir.z)};
+                                 r.decl="components/base/damage/phys_damage.damage";r.amount=2.f+6.f*strength; // ponytail: 2-8 hp like thrown_stun; tune in headset
+                                 if(d2vr::NativeWeaponHands::request(r)) {++fist_hits;combat_log("fist_hit",npc->first,tip_peak[side],static_cast<int>(fist_hits));
+                                     const auto p=d2vr::hand_haptic(d2vr::HandFeelEvent::hit,tip_peak[side],4.);game_xr->pulse(side,p.amplitude,p.seconds);}
+                             }}
                     }
                     // C14: the clamp's cast cost (both hands, slots 0 and 11-13) is noted once per game-thread scope that cast. Over 0.5 ms for
                     // a 2 s window the fingertip sweeps go first, then the hands alternate frames (CastBudget).
@@ -13579,11 +13612,7 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                     if(cd.haptic.amp>0) game_xr->pulse(mh,cd.haptic.amp,cd.haptic.sec);
                                     {static std::uint64_t kills_seen{};const auto kills=d2vr::NativeInteractionAim::stealth_counts_[2].load();   // v639: a contact's stealth kill landed: a strong pulse on the sword hand
                                      if(kills>kills_seen) {game_xr->pulse(mh,1.f,.2f);++stealth_kill_pulses;}kills_seen=kills;}
-                                    if(physical_grab_requested) for(unsigned side=0;side<2;++side) {
-                                        const bool holding=native_grab.holding(side);
-                                        if(holding && !grab_was_holding[side]) game_xr->pulse(side,.5f,.04f);
-                                        grab_was_holding[side]=holding;
-                                    }
+                                    if(physical_grab_requested) hand_feel_grab_pulses();
                                     {std::lock_guard<std::mutex> lock(combat_policy_mutex);combat_policy_observation=cd;}
                                     if(cd.attack_transition!=d2vr::AttackTransition::none)
                                         combat_log("attack_policy",cd.attack_target.spawn,static_cast<double>(cd.scheduled_press),static_cast<int>(cd.attack_transition));
@@ -13605,11 +13634,7 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                     if(takedown_kill_now && !takedown_kill_was && last_swing_start_tick && now-last_swing_start_tick<=400) {
                                         takedown_rearm_until=now+40;takedown_strike_until=now+40+150;++takedown_repress;}
                                     takedown_kill_was=takedown_kill_now;
-                                    if(physical_grab_requested) for(unsigned side=0;side<2;++side) {
-                                        const bool holding=native_grab.holding(side);
-                                        if(holding && !grab_was_holding[side]) game_xr->pulse(side,.5f,.04f);
-                                        grab_was_holding[side]=holding;
-                                    }
+                                    if(physical_grab_requested) hand_feel_grab_pulses();
                                     if(logic==2 && now<takedown_rearm_until) input.right_trigger=0;
                                     else if(logic==2 && (swing.active || now<takedown_strike_until)) input.right_trigger=1;
                                 }
@@ -13925,6 +13950,8 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                 if(logic==2 && (npc_owns_frame[0] || npc_owns_frame[1])) input.x=npc_trigger_interact[0] || npc_trigger_interact[1];
                                 if(npc_trigger_consume[0]) input.left_trigger=0;   // claimed by Talk/Pickpocket: never a shot or a cast
                                 if(npc_trigger_consume[1]) input.right_trigger=0;  // nor the sword hand's block
+                                // Native hands phase 1 (user 2026-11-06): heavy held things slow the walk (hand_feel.hpp, at most 75%).
+                                if(hand_feel_enabled && logic==2 && physical_grab_requested) {const float k=d2vr::held_move_scale(native_grab.held_total_kg());input.move_x*=k;input.move_y*=k;}
                                 controller_bridge.publish(input,logic==2);
                                 npc_trigger_interact={};npc_trigger_consume={};npc_owns_frame={};
                                 published_logic=logic;published_move_x=input.move_x;published_move_y=input.move_y;
@@ -15211,7 +15238,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
         if(assassination_receipt_requested &&
            !d2vr::NativeAssassinationReceipt::process_owner().start(image_base,&read_self,output.when_on()))
             throw std::runtime_error("Passive native assassination receipt could not initialize safely");
-        weapon_collision_enabled=!fs::exists(root/L"build"/L"no-weapon-collision");contact_damage_enabled=!fs::exists(root/L"build"/L"no-contact-damage");d2vr::NativeInteractionAim::stealth_enabled_=!fs::exists(root/L"build"/L"no-stealth-contact");
+        weapon_collision_enabled=!fs::exists(root/L"build"/L"no-weapon-collision");contact_damage_enabled=!fs::exists(root/L"build"/L"no-contact-damage");hand_feel_enabled=!fs::exists(root/L"build"/L"no-hand-feel");d2vr::NativeInteractionAim::stealth_enabled_=!fs::exists(root/L"build"/L"no-stealth-contact");
         {std::ifstream knob(root/L"build"/L"stealth-speed");std::string text;if(knob) std::getline(knob,text);d2vr::NativeInteractionAim::stealth_speed_=d2vr::stealth_speed_from_knob(text);}impact_fx_enabled=!fs::exists(root/L"build"/L"no-impact-fx");hand_contact_enabled=!fs::exists(root/L"build"/L"no-hand-contact");weapon_body_enabled=!fs::exists(root/L"build"/L"no-weapon-body");weapon_body_rigid=!fs::exists(root/L"build"/L"weapon-body-ride");
         slash_speed_factor=fs::exists(root/L"build"/L"no-slash-speed")?1.f:1.7f;takedown_range_enabled=!fs::exists(root/L"build"/L"no-takedown-range");
         {std::ifstream knob(root/L"build"/L"takedown-range-scale");std::string text;if(knob) std::getline(knob,text);

@@ -41,10 +41,4 @@ struct HandHitGate {
     }
 };
 
-// Impulse speed handed to a hit prop: the hand's speed, reduced by the prop's mass (a 75 kg body barely moves).
-inline double hit_prop_speed(double hand_speed_mps,double prop_kg) noexcept {
-    const double share=4./(4.+std::max(.1,prop_kg));                                     // 4 kg ~ effective fist+forearm mass
-    return std::min(8.,hand_speed_mps*2.*share);                                           // elastic-ish transfer, capped like the poke
-}
-
 }  // namespace d2vr
