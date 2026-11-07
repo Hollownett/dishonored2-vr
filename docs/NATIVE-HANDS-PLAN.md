@@ -157,3 +157,23 @@ from the other fingers, palm too stretched"; "hands should react to weapons and 
 - Sim v1060 (corpse drag): no crash, dragged 1.91 m, surface grip 528 frames, finger step 26 us avg.
 Open: plank thumb tip ~10 mm short; ragdoll bone long axis unknown (limb lies across the palm; read it live);
 gun barrel capsule in hand_weapon_contact; nothing headset-tested.
+
+## v1062-v1064: no penetration, natural seat, power grip (2026-11-07)
+User: "book render is bad, fingers should not get through objects ... touch, grab any physical object and use a natural grip";
+"palm near thumb zone stretched too much".
+- Seat at grab (`native_grab.hpp`): the box's support depth along the palm direction (was the ball round the whole box), then
+  `natural_seat` (`finger_sphere.hpp`): a long side turns across the palm (<= 50 deg), the nearest face lies flat on it
+  (<= 35 deg), the grasped spot is kept; things narrow along the fingers sit in the palm crease (knuckle shift).
+  `build/no-natural-seat`. `held_local_extents_any` solves the 45-degree boxes the exact solve could not.
+- `held_standoff` (`finger_ik.hpp`): 200 ms into a hold the frozen surface shape is measured against the palm skin, the knuckle
+  pads and (under wide faces only) the thumb root; the THING is moved along the palm normal (`NativeGrab::nudge_seat`), never the
+  hand. JSON hand_feel seat_nudges / seat_mm_max / natural_seats.
+- Thumb: hard no-penetration in the box/ball searches and a final guard for every shape; clear of the hand so the drawn pose keeps
+  it; base kept within 30 deg of rest with a spread cost (it swung to the 45 deg open limit, thumbs-up).
+- Fingers: pad samples at 45 degrees to each side against held-size shapes (box edges slipped between the in-plane samples).
+- Corpse bones: capsule along the bone body's own long axis, visible radius 0.6 of the padded box.
+- Lab (`tools/hand_pose_lab.cpp`): PENETRATION line per scene, "taken" scenes (grabbed tilted / off square), `--no-seat`,
+  LAB_SEAT_DEBUG. Worst depth of any finger/palm on surface grips 34 mm -> 5.9 mm (contact tolerance 4), palm 0; thumb base
+  <= 28 deg; wrap gap bottle box 124 -> 24 mm, corpse limbs 123 -> 23.
+- Sim v1062/v1063 corpse drag: 1.90/1.91 m, no crash; seat move 71 mm (old limb shape) -> 30 mm pull-in.
+Open: a book face-on on the palm is a resting hand (fingers flat), not a pinch; thin spoons are a fist; nothing headset-tested.
