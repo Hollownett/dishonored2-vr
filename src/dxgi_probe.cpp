@@ -4739,6 +4739,7 @@ static std::optional<std::pair<std::uintptr_t,d2vr::rig::HeldCylinder>> held_cyl
 // The held prop's world AABB, thickened to held_min_half_thickness (a sheet's is flat) and its model axes: the box a native hold falls back to when no cylinder can be made.
 struct HeldBoxNow {std::uintptr_t entity{};d2vr::NativeGrabBounds box{};std::array<d2vr::Vec3,3> axes{};};
 struct SurfaceGrip {std::uintptr_t entity{};std::uint32_t handle{};UINT64 since{};bool valid{};d2vr::rig::HeldShape local{};bool seated{};};
+static std::array<d2vr::Vec3,2> native_seat_push{};static std::array<std::uintptr_t,2> native_seat_entity{}; // v1066: a native Use hold's visual standoff (drawn palm frame), set by the finger block
 static std::atomic<UINT64> seat_nudges{};static std::atomic<float> seat_mm_max{}; // v1062: holds whose thing the drawn hand lay in (moved out: held_standoff), the largest move (mm) // a surface grip's shape in the palm frame
 static std::optional<HeldBoxNow> held_box_now;static std::atomic<UINT64> finger_thin_holds{},finger_box_holds{},finger_flat_holds{},finger_surface_holds{}; // frames a native hold drew a thin slab / the fallback box for the fingers; frames a physical hold drew a flat grip (a book's face)
 // The local half extents of the held prop's mesh box (finger_ik.hpp held_local_extents), solved once per hold and kept: the world AABB the
@@ -5163,11 +5164,16 @@ static void publish_held_object(unsigned side,const d2vr::WorldTrackedPose& grip
     } catch(const std::invalid_argument&) {held_snap.seated=false;}
     // The sphere grip (user, after v641: "the whole object inside the ball, so the hand never seems to pass through it"): a severed part sits with its
     // mesh centre in the centre of the ball the fingers wrap (drawn palm + palm normal * (radius + skin), the finger block's ball), in the seat's axes.
-    if(!legacy_finger_grab && held_extents && held_snap.held_class==".?AVarkSeveredLimb@@" && finger_geometry[side&1u]) {
+    // v1066 (user 2026-11-07: "objects picked up with game Use, like limbs, also using native VR grips ... only visual like it was done for bottles"):
+    // with the surface grip on, a severed limb or head is seated like a bottle (seat_held above: across the palm in the crease, fitted), which is
+    // also what its fingers close on; the ball placement left it floating a whole-object radius off the palm while the fingers wrapped the seat.
+    if(!legacy_finger_grab && !surface_grip_enabled && held_extents && held_snap.held_class==".?AVarkSeveredLimb@@" && finger_geometry[side&1u]) {
         const auto drawn=drawn_palm_frame(side,grip);
         const auto ball=drawn.position+palm_normal(drawn,*finger_geometry[side&1u])*(sphere_grip_radius(*held_extents)+held_palm_depth);
         origin=ball-(X*centre.x+Y*centre.y+Z*centre.z);
     }
+    // v1066: the finger block's standoff for this hold (the seat the fingers close on, moved until the drawn hand lies on it): the drawn thing moves with it.
+    if(surface_grip_enabled && native_seat_entity[side&1u]==*e) {const auto drawn=drawn_palm_frame(side,grip);origin=origin+d2vr::grab_world(drawn,native_seat_push[side&1u]);}
     if(held_clamp_enabled) { // Part 5A: the target stops at the world's surfaces; the hand and the object are shifted together
         auto& L=held_clamp_live;L.holding=true;L.hold_tick=GetTickCount64();L.side=side&1u;
         if(!L.proxies && geometry_captured && held_extents) {
@@ -8509,6 +8515,16 @@ void prepare_head_view(void* view) noexcept {
                                  if(held_box_now && held_box_now->entity==held && held_extents && d2vr::rig::held_is_thin(*held_extents)) { // paper, a note, a stamp: the fingers stop on the sheet, not on a cylinder through it
                                      if(count<d2vr::rig::max_contact_shapes) {shapes[count++]=d2vr::rig::held_slab(pieces.axes,pieces.shape.frame.position,*held_extents);kinds[count-1]="thin";++finger_thin_holds;}
                                  } else for(unsigned k=0;k<pieces.count && count<d2vr::rig::max_contact_shapes;++k) {shapes[count++]=pieces.shapes[k];kinds[count-1]="held";}
+                                 // v1066: the seat out of the hand (held_standoff over its pieces), in the drawn palm; the placement moves the drawn thing the same
+                                 const bool big_hold=held_snap.held_class==".?AVarkSeveredLimb@@" || held_cylinder_now->second.radius>.05; // bottles keep their accepted fitted seat
+                                 if(surface_grip_enabled && big_hold) {
+                                     double d=0;const auto into=[&](d2vr::Vec3 v) {return d2vr::grab_local(palm,v);};
+                                     for(unsigned k=0;k<count;++k) if(kinds[k] && std::strcmp(kinds[k],"held")==0) {const auto& sh=shapes[k];
+                                         d=std::max(d,d2vr::rig::held_standoff(*geometry,{into(sh.frame.position-palm.position),{into(sh.frame.basis[0]),into(sh.frame.basis[1]),into(sh.frame.basis[2])},sh.half,sh.radius,sh.radius_end,sh.rim,sh.fingers_only},d2vr::rig::seat_max_push,0.));}
+                                     const auto push=d2vr::rig::palm_normal(palm,*geometry)*d;
+                                     for(unsigned k=0;k<count;++k) if(kinds[k] && std::strcmp(kinds[k],"held")==0) shapes[k].frame.position=shapes[k].frame.position+push;
+                                     native_seat_push[side]=into(push);native_seat_entity[side]=held;
+                                 } else native_seat_entity[side]=0;
                                  holding=true;}
                             } else if(!holding && native_hold && held_box_now && held_box_now->entity==held) { // no cylinder for it (yet): its clamped world box
                                 d2vr::rig::HeldShape box{};box.frame.position=(held_box_now->box.minimum+held_box_now->box.maximum)*.5;box.frame.basis={{{1,0,0},{0,1,0},{0,0,1}}};box.half=(held_box_now->box.maximum-held_box_now->box.minimum)*.5;box.radius=0;

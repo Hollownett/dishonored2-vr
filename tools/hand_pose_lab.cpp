@@ -373,6 +373,11 @@ int run(int argc,char** argv) {
         if(angle>1e-9) for(auto& row:pose.basis) row=rotated(bd::axis_angle(turn*(1/angle),angle),row);
         return pose;
     };
+    // v1066: a native Use hold of a severed part: the bottle seat, pushed out along the palm normal until the hand lies on it (dxgi_probe native_seat_push)
+    const auto native_push=[](auto inner) {return [inner](const WorldTrackedPose& palm,const r::HandGeometry& g) {auto v=inner(palm,g);
+        const auto into=[&](Vec3 x) {return Vec3{dot(x,palm.basis[0]),dot(x,palm.basis[1]),dot(x,palm.basis[2])};};
+        double d=0;for(const auto& sh:v) d=std::max(d,r::held_standoff(g,{into(sh.frame.position-palm.position),{into(sh.frame.basis[0]),into(sh.frame.basis[1]),into(sh.frame.basis[2])},sh.half,sh.radius,sh.radius_end,sh.rim,sh.fingers_only},r::seat_max_push,0.));
+        for(auto& sh:v) sh.frame.position=sh.frame.position+r::palm_normal(palm,g)*d;return v;};};
     std::vector<Scene> scenes{
         {"open","Open hand (grip 0, trigger 0)",hold_at,hold_fingers,hold_in,0.f,0.f,false,{},""},
         {"fist","Plain fist, nothing held (grip 1, trigger 1)",hold_at,hold_fingers,hold_in,1.f,1.f,false,{},""},
@@ -380,6 +385,8 @@ int run(int argc,char** argv) {
         {"bottle45","Wide bottle r=4.5 cm, 25 cm (seat_held, grip 1)",hold_at,hold_fingers,hold_in,1.f,0.f,true,cylinder_scene(.045,.25),"bottle (solver capsule)"},
         {"shaft40","Shaft r=4.0 cm, 25 cm (seat_held, grip 1)",hold_at,hold_fingers,hold_in,1.f,0.f,true,cylinder_scene(.04,.25),"shaft (solver capsule)"},
         {"handle","Thin handle r=1.7 cm, 20 cm (seat_held, grip 1)",hold_at,hold_fingers,hold_in,1.f,0.f,true,cylinder_scene(.017,.20),"handle (solver capsule)"},
+        {"severed_forearm","Severed forearm held with the game's Use (v1066: seated like a bottle), r=4 cm, 26 cm",hold_at,hold_fingers,hold_in,1.f,0.f,true,native_push(cylinder_scene(.04,.26)),"limb (solver capsule)"},
+        {"severed_head","Severed head held with the game's Use (v1066: seated like a bottle), ball r=9 cm",hold_at,hold_fingers,hold_in,1.f,0.f,true,native_push(cylinder_scene(.09,.18)),"head (solver capsule)"},
         {"table","Hand resting on a table (palm down, slab 2.5 cm under the palm)",{.40,-.12,-.52},{1,0,0},{0,0,-1},0.f,0.f,false,
          [](const WorldTrackedPose& palm,const r::HandGeometry& g) {
              const auto in=r::palm_normal(palm,g);

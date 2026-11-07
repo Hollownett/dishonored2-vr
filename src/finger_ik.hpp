@@ -854,12 +854,23 @@ inline FingerCurls finger_contact(const HandGeometry& hand,const WorldTrackedPos
                 const std::array<double,3> now{pose_target.pose[0][0],pose_target.pose[0][1],pose_target.pose[0][2]};
                 // v1063: a holding thumb (fold) is also kept within thumb_search_spread_degrees of its rest (the web stretch), when such a pose is clear
                 const double spread_floor=fold && !stop_extended?thumb_search_open()[0]:-1e9;
-                const auto clear_of_shapes=[&](const std::array<double,3>& a) {return finger_clearance(hand.finger[0],hand.thickness[0],finger_turns_of(hand.finger[0],a),world,distance,0u,4,-contact_tolerance,0,2,1)>=-contact_tolerance;};
+                // the world's shapes only (v1066): the folded fingers' phalanges (slots past max_contact_shapes) are the hand, which ThumbBody judges -
+                // counted here, a thumb resting on the index (allowed) was never "clear" and a buried thumb stayed buried
+                const auto world_distance=[&](Vec3 p) {double d=1e9;for(unsigned i=0;i<reachable;++i) if(reach_index[i]<max_contact_shapes) d=std::min(d,palm_shape_distance(*within_reach[i],p));return d;};
+                const auto clear_of_shapes=[&](const std::array<double,3>& a) {return finger_clearance(hand.finger[0],hand.thickness[0],finger_turns_of(hand.finger[0],a),world,world_distance,0u,4,-contact_tolerance,0,2,1)>=-contact_tolerance;};
                 const auto clear=[&](const std::array<double,3>& a) {return a[0]>=spread_floor-1e-9 && clear_of_shapes(a);};
-                if(!clear(now)) {
-                    FingerAngles drawn_fingers{};for(unsigned fk=1;fk<5;++fk) {const auto x=finger_pose_angles(fk,std::max(wants[fk],relaxed_share),pose_target.pose[fk]);for(unsigned q=0;q<3;++q) drawn_fingers[fk][q]=static_cast<float>(x[q]);}
-                    if(const auto out=thumb_nearest_clear(ThumbBody(hand,drawn_fingers),now,clear)) {for(unsigned q=0;q<3;++q) pose_target.pose[0][q]=static_cast<float>((*out)[q]);min_target[0]=1.f;touching[0]=true;}
+                FingerAngles drawn_fingers{};for(unsigned fk=1;fk<5;++fk) {const auto x=finger_pose_angles(fk,std::max(wants[fk],relaxed_share),pose_target.pose[fk]);for(unsigned q=0;q<3;++q) drawn_fingers[fk][q]=static_cast<float>(x[q]);}
+                const ThumbBody hand_body(hand,drawn_fingers);
+                // v1066: a holding thumb is drawn as solved (below), so it must also be clear of the hand here: in the hand, finger_drawn_pose's
+                // thumb_clear_of_hand moved it - into a severed head 17 mm away
+                if(!clear(now) || (fold && !stop_extended && hand_body.clearance(now)<0)) {
+                    auto out=thumb_nearest_clear(hand_body,now,clear);
+                    if(!out && !clear_of_shapes(now)) out=thumb_nearest_clear(hand_body,now,clear_of_shapes); // v1066: out of the thing beats the spread cap (a big head in the palm)
+                    if(out) {for(unsigned q=0;q<3;++q) pose_target.pose[0][q]=static_cast<float>((*out)[q]);min_target[0]=1.f;touching[0]=true;}
                 }
+                // v1066: a holding thumb on the thing is drawn as placed: the want's own path mixed in joint by joint (finger_drawn_pose) put it back
+                // inside a severed head it lay clear of (17 mm off -> 16 mm in)
+                if(fold && !stop_extended && touching[0] && hand_body.clearance({pose_target.pose[0][0],pose_target.pose[0][1],pose_target.pose[0][2]})>=0) min_target[0]=1.f;
             }
             auto& memo=state.memo[f];memo.valid=true;memo.reach=memo_reach_key(reach);memo.stop=stop_extended;memo.count=reachable;memo.pose=pose_target.pose[f];memo.touching=touching[f];
             memo.min_curl=min_target[f];memo.blocked=blocked[f];memo.hyperextended=past_straight[f];
