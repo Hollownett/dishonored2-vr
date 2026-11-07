@@ -40,6 +40,14 @@ int main() {
         assert(std::abs(prop.distance-.10)<1e-9);
         assert(decide_grip_alone(input(door,prop),t,hover)==GripAloneChoice::use);
     }
+    {   // v1086 severed limb: the game's Use target IS the prop the grab can hold (same entity): the sticking grab wins whatever the costs;
+        // the same distances with another entity keep the old cost rule (Use)
+        const auto limb_use=box(7,PalmKind::usable,{.06,0,.015},.01,t);auto limb=physical(box(8,PalmKind::prop,{0,.15,.015},.05,t));
+        limb.entity=7;assert(decide_grip_alone(input(limb_use,limb),t,hover)==GripAloneChoice::grab);
+        limb.entity=9;assert(decide_grip_alone(input(limb_use,limb),t,hover)==GripAloneChoice::use);
+        auto loot_limb=limb;loot_limb.entity=10;const auto loot=box(10,PalmKind::loot,{.06,0,.015},.01,t);
+        assert(decide_grip_alone(input(loot,loot_limb),t,hover)==GripAloneChoice::use);   // loot stays Use
+    }
     {   // prop_on_palm_wins_grab: a prop under the palm (0.02 m, faced) against the table shell 0.2 m below
         const auto table=box(5,PalmKind::usable,{0,0,-.685},.5,t);const auto prop=physical(box(6,PalmKind::prop,{.07,0,.015},.05,t));
         assert(std::abs(prop.distance-.02)<1e-9 && palm_cost(probe(),table,hover,grab_acquire_distance)->distance>.19);

@@ -391,7 +391,9 @@ private:
         const auto& candidates=lane.discovery.advance(p.hand.position,p.tick,[&](unsigned index)->std::optional<NativeRigidBody> {
             const auto entity=rig::value<std::uintptr_t>(read_,*game+0x3130b0+index*8);
             const bool guard=entity && rig::typed(read_,base_,*entity,0x1c5e108); // a corpse or knocked-out guard: drag by a limb
-            if(!entity || !(guard || rig::typed(read_,base_,*entity,0x1c886a8) || rig::typed(read_,base_,*entity,0x1c87d58) || rig::typed(read_,base_,*entity,0x1c5de18)))return {}; // + arkMovable (bottles, glasses: thrown by hand)
+            const bool prop_class=entity && (rig::typed(read_,base_,*entity,0x1c886a8) || rig::typed(read_,base_,*entity,0x1c87d58) || rig::typed(read_,base_,*entity,0x1c5de18));
+            const bool limb=entity && !guard && !prop_class && severed_limb_entity(read_,base_,*entity);   // v1086: a severed limb
+            if(!entity || !(guard || prop_class || limb))return {}; // + arkMovable (bottles, glasses: thrown by hand)
             const auto id=rig::value<std::uint32_t>(read_,*entity+0xa8);
             const auto pos=rig::value<std::array<float,3>>(read_,*entity+0x300);
             if(!id || (*id>>16)!=index || !pos)return {};
@@ -404,10 +406,12 @@ private:
                 if(npc_reserved(*id,now)) return {};
                 return corpse(*entity);
             }
+            if(limb) return native_severed_limb_body(read_,base_,*entity,-1,p.palm.valid?p.palm.palm:p.hand.position);
             BodyReject why{};auto body=native_rigid_body(read_,base_,*entity,false,&why);
             if(why!=BodyReject::ok && why!=BodyReject::not_prop) note_reject(side,*id,why);   // the thin-prop line of the grab_focus block
             return body;
         },[&](const NativeRigidBody& body)->std::optional<NativeRigidBody> {
+            if(body.limb>=0) return native_severed_limb_body(read_,base_,body.entity,-1,p.palm.valid?p.palm.palm:p.hand.position);
             if(body.bone<0) return native_rigid_body(read_,base_,body.entity);
             return corpse(body.entity);
         },hinted?&lane.hints:nullptr);
@@ -994,7 +998,7 @@ private:
             // The sphere grip: a prop is held with its bounds centre in the ball the fingers wrap (palm + palm direction * (radius + skin depth)), keeping its own
             // orientation; the motor brings it there. Not a body part (it stays where the hand took it and follows), and not far (a wall or a table in the way).
             auto seated=body?body->pose:WorldTrackedPose{};
-            if(sphere_grip_ && body && body->bone<0 && body->bounds && p.palm.valid) {
+            if(sphere_grip_ && body && body->bone<0 && body->limb<0 && body->bounds && p.palm.valid) {   // v1086: a severed limb is held where it was taken
                 // v1062: the box's own depth along the palm direction (its support), not the ball round it - a book 14 cm off the palm on its face, or inside it on edge
                 // v1080: the real shape's box (its hull's centre and support when the body has one: prop_hull.hpp)
                 const auto gbox=rig::grip_box(body->pose,*body->bounds,body->hull);

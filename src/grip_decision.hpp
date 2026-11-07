@@ -54,6 +54,11 @@ inline GripAloneChoice decide_grip_alone(const GripAloneInput& in,const GrabTuni
     // the game's own action receipt, so it is stronger than the bounds estimate).
     if(physical && in.native && in.native->kind==PalmKind::loot && in.physical->kind==PalmKind::bone && in.physical->entity==in.native->id) return GripAloneChoice::use;
     if(physical && in.native && in.physical->kind==PalmKind::living && in.physical->entity && in.native->id==in.physical->entity) return GripAloneChoice::use;
+    // v1086 (user: "severed limbs and other props should follow the same pattern as bottles: in my hand, not floating like normal game use"):
+    // a prop the physical grab can hold that is ALSO the game's Use target (a severed limb: its HoldObject drives a jointed body softly) is
+    // grabbed - the sticking hold - whatever the two costs. Loot stays Use; bottles and glasses are no physical candidates (their Use stays).
+    if(physical && in.native && in.native->kind!=PalmKind::loot && in.physical->kind==PalmKind::prop && in.physical->entity && in.native->id==in.physical->entity)
+        return GripAloneChoice::grab;
     if(physical && (!native_cost || in.physical->distance<*native_cost)) return GripAloneChoice::grab;
     if(in.native) return GripAloneChoice::use;
     if(tuning.grab_buffer_ms>0 && static_cast<double>(elapsed)<tuning.grab_buffer_ms) return GripAloneChoice::pending;

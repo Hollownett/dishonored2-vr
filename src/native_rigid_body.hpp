@@ -20,6 +20,7 @@ struct NativeRigidBody {
     WorldTrackedPose pose{};
     std::optional<NativeGrabBounds> bounds{};
     int bone=-1; // ragdoll bone of a guard's body (native_ragdoll_body), -1 for a standalone prop
+    int limb=-1; // v1086: the body's index in a severed limb's own bodies (native_severed_limb_body), held like a prop (bone -1)
     const PropShape* hull{}; // its real shape (prop_hull.hpp: its render mesh found by its Havok hull, or the hull alone); nullptr: composite, unreadable or a hull short of the render box (the bounds stand)
     Vec3 contact(Vec3 hand) const {return bounds?bounds->closest(hand):pose.position;}
     double contact_distance(Vec3 hand) const {return length(contact(hand)-hand);}
@@ -167,6 +168,82 @@ inline constexpr bool ragdoll_grab_bone(int bone) {
 // Dead or unconscious guards can also be held by the collar (chest 2, neck 3): a full fist on the collar is a physical hold, while a grip alone
 // stays the game's shoulder carry. Kept apart from ragdoll_grab_bone so the limb-versus-torso wake classification does not change.
 inline constexpr bool ragdoll_hold_bone(int bone) {return ragdoll_grab_bone(bone) || bone==2 || bone==3;}
+// v1086 (user, v1085: "a severed leg or arm does not stick like bottles and glasses ... it floats like normal game use"): a severed limb
+// (arkSeveredLimb, a skinned model 0x1b0d628) was never a physical candidate - native_rigid_body wants a static-mesh prop of three exact
+// classes and native_ragdoll_body a guard's 17 bodies - so every grip on one went to the game's Use, whose HoldObject drives a jointed
+// body only softly (headset v1085: 17.6 cm off its target). It is held like a prop instead, by its body nearest the hand, with the sticking
+// law. Its class is told by its RTTI name (the vtable is kept once seen); its bodies are read from either physics component the game uses:
+// the ragdoll system (0x1c54008: +0x100 -> idList data +0x28, count +0x30) or a single-body component (0x1c745c8 / 0x1b64b68: handle +0xf8).
+// Every body record is checked exactly as the guard and prop readers check theirs; anything that does not validate offers nothing, and the
+// grip stays the game's Use as before. Counters: severed_limb_reads (ok, refused).
+inline std::atomic<std::uintptr_t> severed_limb_vtable{0};
+inline std::atomic<unsigned long long> severed_limb_reads_ok{0},severed_limb_reads_refused{0};
+template<class Read> bool severed_limb_entity(Read& read,std::uintptr_t base,std::uintptr_t entity) {
+    using namespace rig;
+    const auto table=value<std::uintptr_t>(read,entity);
+    if(!table || !*table || *table==base+0x1c5e108) return false;   // arkNPC: never a limb
+    if(*table==severed_limb_vtable.load(std::memory_order_relaxed)) return true;
+    if(severed_limb_vtable.load(std::memory_order_relaxed)) return false;   // known: another class
+    const auto model=value<std::uintptr_t>(read,entity+0xf0);
+    if(!model || !typed(read,base,*model,0x1b0d628)) return false;   // only skinned models are worth an RTTI read
+    const auto locator=value<std::uintptr_t>(read,*table-8);
+    const auto rva=locator && *locator?value<std::uint32_t>(read,*locator+12):std::nullopt;
+    char name[24]{};
+    if(!rva || !*rva || !read(base+*rva+16,name,sizeof(name)-1) || std::strcmp(name,".?AVarkSeveredLimb@@")!=0) return false;
+    severed_limb_vtable.store(*table,std::memory_order_relaxed);return true;
+}
+// index >= 0: that body (a held one, re-read every pass); index < 0: the body nearest `toward`.
+template<class Read> std::optional<NativeRigidBody> native_severed_limb_body(Read& read,std::uintptr_t base,std::uintptr_t entity,int index,Vec3 toward={}) {
+    using namespace rig;
+    const auto refuse=[&]() -> std::optional<NativeRigidBody> {severed_limb_reads_refused.fetch_add(1,std::memory_order_relaxed);return {};};
+    const auto game=value<std::uintptr_t>(read,base+0x39a5290);
+    if(!game || !typed(read,base,*game,0x1c940a8) || !severed_limb_entity(read,base,entity)) return {};
+    const auto id=value<std::uint32_t>(read,entity+0xa8);
+    if(!id || *id==0x3fff0010 || (*id>>16)>=0x3fff || value<std::uintptr_t>(read,*game+0x3130b0+(*id>>16)*8)!=entity) return refuse();
+    const auto model=value<std::uintptr_t>(read,entity+0xf0);
+    const auto entries=list(read,entity+0x268,256);
+    const auto world=value<std::uintptr_t>(read,*game+0x60410);
+    if(!model || !*model || !entries || !world || !pointer(*world)) return refuse();
+    const auto pool=value<std::uintptr_t>(read,*world+0x28);const auto count=value<std::uint32_t>(read,*world+0x30);
+    if(!pool || !pointer(*pool) || !count || *count>0x100000) return refuse();
+    // The component and its body handles (at most 17).
+    std::uintptr_t component{};std::array<std::uint32_t,17> handles{};unsigned n=0;
+    for(unsigned i=0;i<entries->packed_count && !n;++i) {
+        const auto at=value<std::uintptr_t>(read,entries->data+i*8);if(!at || !*at) continue;
+        if(typed(read,base,*at,0x1c54008)) {
+            const auto list_at=value<std::uintptr_t>(read,*at+0x100);if(!list_at || !pointer(*list_at)) continue;
+            const auto data=value<std::uintptr_t>(read,*list_at+0x28);const auto c=value<std::uint32_t>(read,*list_at+0x30);
+            if(!data || !pointer(*data) || !c || *c>17) continue;
+            for(unsigned k=0;k<*c;++k) if(const auto h=value<std::uint32_t>(read,*data+k*4);h && *h) handles[n++]=*h;
+            component=*at;
+        } else if(typed(read,base,*at,0x1c745c8) || typed(read,base,*at,0x1b64b68)) {
+            if(const auto h=value<std::uint32_t>(read,*at+0xf8);h && *h) {handles[n++]=*h;component=*at;}
+        }
+    }
+    if(!component || !n) return refuse();
+    const auto identity=started(read,component);if(!identity) return refuse();
+    std::optional<NativeRigidBody> best;double best_d=std::numeric_limits<double>::infinity();
+    for(unsigned k=0;k<n;++k) {
+        if(index>=0 && static_cast<unsigned>(index)!=k) continue;
+        const auto handle=handles[k];const auto slot=handle&0xffffff;
+        if(slot==0xffffff || slot>=*count) continue;
+        const auto record=*pool+slot*0xb0;
+        const auto flags=value<std::uint32_t>(read,record+0x44),motion=value<std::uint32_t>(read,record+0x40);
+        const auto transform=value<Transform>(read,record);
+        if(!flags || (*flags&7)!=2 || !motion || !*motion || *motion>=0x100000 || !transform || !valid(*transform) ||
+           value<std::uint32_t>(read,record+0x70)!=handle || value<std::uint32_t>(read,record+0x74)!=handle) continue;
+        const auto& t=transform->f;
+        NativeRigidBody body{entity,component,*world,record,*model,*id,handle,*flags,Identity{identity->generation,0},
+            {{t[12],t[13],t[14]},{{{t[0],t[1],t[2]},{t[4],t[5],t[6]},{t[8],t[9],t[10]}}}}};
+        constexpr double r=.07;   // a limb's body: about a forearm's or a shin's thickness
+        body.bounds=NativeGrabBounds{body.pose.position-Vec3{r,r,r},body.pose.position+Vec3{r,r,r}};body.limb=static_cast<int>(k);
+        const double d=index>=0?0.:length(body.pose.position-toward);
+        if(!best || d<best_d) {best=body;best_d=d;}
+    }
+    if(!best || value<std::uint32_t>(read,entity+0xa8)!=id || value<std::uintptr_t>(read,entity+0xf0)!=model) return refuse();
+    severed_limb_reads_ok.fetch_add(1,std::memory_order_relaxed);
+    return best;
+}
 template<class Read> std::optional<NativeRigidBody> native_ragdoll_body(Read& read,std::uintptr_t base,std::uintptr_t entity,int bone) {
     using namespace rig;
     if(bone<0 || bone>=17) return {};
@@ -348,6 +425,7 @@ template<class Read> std::optional<NativeRigidBody> pushable_ragdoll_body(Read& 
 }
 // Re-read a grab target of either kind, keeping its bone.
 template<class Read> std::optional<NativeRigidBody> native_grab_body(Read& read,std::uintptr_t base,const NativeRigidBody& body) {
+    if(body.limb>=0) return native_severed_limb_body(read,base,body.entity,body.limb);   // v1086: the same body of a severed limb
     return body.bone<0?native_rigid_body(read,base,body.entity):native_ragdoll_body(read,base,body.entity,body.bone);
 }
 enum class GrabSearchScope { Normal,ControlledFixture };

@@ -199,5 +199,29 @@ int main() {
             assert(native_cast_exclusion(read,base,world,entity,-1,handle,true));
         }
     }
-    std::cout<<"PASS: native dynamic-body registry/component/handle ownership; static/keyframed/compound/attached/recycled/native-carryable exclusion; guard ragdoll limbs\n";
+    {   // v1086 severed limb (arkSeveredLimb, skinned): held like a prop by its body nearest the hand; every record checked; anything off: nothing
+        const std::uintptr_t limb=0x9000000,vtable=0x9010000,locator=0x9020000,model=0x9100000,list=0x9200000,system=0x9300000,handles=0x9400000,data=0x9500000;
+        const std::uint32_t limb_id=0x50001;const std::uint32_t rva=0x700000;
+        put(game+0x3130b0+5*8,limb);put(limb,vtable);put(limb+0xa8,limb_id);put(limb+0xf0,model);put(model,base+0x1b0d628);
+        put(vtable-8,locator);put(locator+12,rva);const char name[24]=".?AVarkSeveredLimb@@";for(unsigned i=0;i<sizeof(name);++i) put(base+rva+16+i,name[i]);
+        put(limb+0x268,rig::List{list,1,1<<8});put(list,system);put(system,base+0x1c54008);put(system+0x18,rig::Identity{9,10});put(system+0x100,handles);
+        put(handles+0x28,data);put(handles+0x30,std::uint32_t{3});put(world+0x30,std::uint32_t{16});
+        for(unsigned k=0;k<3;++k) {
+            const std::uint32_t h=0x2000005+k;const auto rec=pool+(5+k)*0xb0;put(data+k*4,h);
+            rig::Transform lt{};lt.f[0]=lt.f[5]=lt.f[10]=lt.f[15]=1;lt.f[12]=10.f+.2f*static_cast<float>(k);lt.f[13]=5;lt.f[14]=1;
+            put(rec,lt);put(rec+0x44,std::uint32_t{130});put(rec+0x40,std::uint32_t{1});put(rec+0x70,h);put(rec+0x74,h);
+        }
+        assert(severed_limb_entity(read,base,limb) && !severed_limb_entity(read,base,entity));
+        const auto picked=native_severed_limb_body(read,base,limb,-1,Vec3{10.41,5,1});   // the hand by the third body
+        assert(picked && picked->limb==2 && picked->bone==-1 && picked->handle==0x2000007 && picked->entity==limb && picked->bounds && std::abs(picked->pose.position.x-10.4)<1e-6);
+        const auto again=native_severed_limb_body(read,base,limb,2);assert(again && again->record==picked->record);   // the held body, re-read
+        assert(native_grab_body(read,base,*picked) && native_grab_body(read,base,*picked)->limb==2);
+        put(pool+7*0xb0+0x74,std::uint32_t{1});assert(!native_severed_limb_body(read,base,limb,2));   // a recycled handle: refused
+        const auto other=native_severed_limb_body(read,base,limb,-1,Vec3{10.41,5,1});assert(other && other->limb==1);   // the next valid body instead
+        put(pool+7*0xb0+0x74,std::uint32_t{0x2000007});put(pool+7*0xb0+0x44,std::uint32_t{134});assert(!native_severed_limb_body(read,base,limb,2));   // keyframed: refused
+        put(pool+7*0xb0+0x44,std::uint32_t{130});put(handles+0x30,std::uint32_t{18});assert(!native_severed_limb_body(read,base,limb,-1,Vec3{10,5,1}));   // more than 17 bodies: nothing
+        put(handles+0x30,std::uint32_t{3});put(game+0x3130b0+5*8,std::uintptr_t{0});assert(!native_severed_limb_body(read,base,limb,-1,Vec3{10,5,1}));   // not registered: nothing
+        put(game+0x3130b0+5*8,limb);
+    }
+    std::cout<<"PASS: native dynamic-body registry/component/handle ownership; static/keyframed/compound/attached/recycled/native-carryable exclusion; guard ragdoll limbs; severed limbs (v1086)\n";
 }
