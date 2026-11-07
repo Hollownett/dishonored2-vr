@@ -225,6 +225,14 @@ Open: a book face-on on the palm is a resting hand (fingers flat), not a pinch; 
     exactly on one of the last 8 targets (twice in agreement); HeldBind is the fallback until then.
   - a hand that holds something is drawn at the clamp output (the held weight's drive shortfall no longer elects the lagging body).
   - status: held_exact_placed, held_use_exact.
+- v1075 (user's v1082/v1083 diagnostic run: props and limbs "floating far from the hands"; status showed every held-draw counter at 0):
+  - The draw-time placement never ran in the user's setup: since v1019 it is off unless build/weapon-draw-place exists (weapon_mode 0;
+    FSR/TAA ghosting), so v1067-v1074's draw work was inert. The weapons' sync is the engine's own tick follow, not the draw.
+  - Held props went through the capped (corpse) motor: closure 18/s, a feed that fades with the hand sample's age and no player carrier
+    (v1069's carrier reached only the uncapped motor), plus the weight cap - ~0.2-0.3 m behind a running hand. Now a held prop: carrier
+    feed + (hand - carrier) * fade, closure 35/s (spin 25/s), limits 20 m/s / 30 rad/s, no force cap. Corpses keep the capped law.
+    Lab: tests/held_prop_follow_check.cpp (0.1-0.7 mm at 5 m/s with an aged sample or 8 kg; the capped law ~225 mm).
+  - The exact draw path (if ever enabled) drops a hold whose model frame does not follow its body (> 0.2 m, 3 renders).
 - v1080 (branch feat/prop-grips; user's v1066-v1071 headset tests: "a screwdriver inside the hand, fingers not touching it",
   "a book on an open palm rests on a flat hand", "a thin spoon held in a full fist"): grips from the props' REAL shapes.
   The grip used the render model's world AABB, solved back into the body's axes (lossy, ambiguous at 45 degrees).
@@ -309,3 +317,11 @@ Open: a book face-on on the palm is a resting hand (fingers flat), not a pinch; 
   suite runs with the knob, new stick_hold_follows_the_hand. Its tow-saturation case (line 497) fails on v1083 too (not this change).
   Severed limbs already use the bottles' path (the game's Use); their floating is the placement (coordinator's side). Crash note: the
   user's v1083 run ended with an access violation in vrclient_x64.dll on quit (mod static destructor -> OpenXR/OpenVR teardown).
+- v1085 (= v1084 + feat/native-hands v1075, one launcher for both lines): ONE sticking law in PhysicalGrab::corpse_motor for a held prop (v1075:
+  always) and a corpse limb (v1084: in.stick, off with build/legacy-weighted-hold): closure 40/s and 40/s spin, 20 m/s / 30 rad/s, no force cap, and
+  v1075's carrier feed (the player's velocity, which does not fade with the hand sample's age) for both. v1075 found the cause of the
+  in-game float: the draw-time placement (held_draw / HeldBind) is off unless build/weapon-draw-place exists, so held things are drawn at
+  their physics pose - the hold law is what the user sees. Lab (real corpse_motor, against the hold's own target): a 12 rad/s wrist turn
+  155 deg (corpse limb, weighted) -> 17 deg (stick; a prop the same); running with a swinging hand 40 -> 17 mm max (12 kg limb), a prop
+  17.8 mm max / 9.9 mean. corpse_hold_check: the prop case now checks a sticking prop (v1075 made props uncapped); its tow-saturation case
+  still fails as on v1083.

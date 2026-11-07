@@ -445,31 +445,17 @@ void stick_hold_follows_the_hand() {
     CHECK(dv>expected_cap(ragdoll_class_kg[10],.1,weak,1.)*1.5);   // well past what the weak hand's cap allowed
 }
 void prop_hold_capped_old_release() {
-    // A 2 kg prop and a slow hand: the cap does not bind, so the write is the old uncapped motor's, bit for bit.
+    // v1075/v1084: a held prop always sticks (no force cap, PhysicalGrab::corpse_motor's sticking law; stick_hold_follows_the_hand): a slow hand's
+    // 2 kg prop is driven toward the hand, still a capped lane (the corpse envelope's lifecycle) and never a corpse.
     fixture(0x08,0x08,true,.18f);Rig r;
     const Vec3 start{prop_x,0,0},slow{prop_x+.01,0,0};
-    PhysicalGrab legacy;   // the pre-change motor, fed the same hand on the same ticks
-    auto both=[&](Vec3 p,float g,UINT64 dt_ms) {r.step(0,p,g,dt_ms);r.grab.focus_point(0,r.t);legacy.sample(r.pose(p),g,true,1,r.t);};
-    for(int i=0;i<18;++i) both(start,0,20);
-    both(start,.9f,100);
+    for(int i=0;i<18;++i) {r.step(0,start,0,20);r.grab.focus_point(0,r.t);}
+    r.step(0,start,.9f,100);r.grab.focus_point(0,r.t);
     REQUIRE(r.grab.holding(0));CHECK(NativeGrabCheck::capped(r.grab,0) && !NativeGrabCheck::corpse(r.grab,0));
-    const auto body=native_rigid_body(read,base,prop);REQUIRE(body.has_value());
-    CHECK(legacy.bind(body->pose,body->contact(start),grab_acquire_distance));
     const auto before=writes.size();
-    both(slow,.9f,30);
-    const auto old_motor=legacy.motor(body->pose,true,r.t,r.t);REQUIRE(old_motor && !old_motor->release);
+    r.step(0,slow,.9f,30);
     REQUIRE(writes.size()==before+1);
-    const auto& w=writes.back();
-    CHECK(std::fabs(w.linear[0]-static_cast<float>(old_motor->linear.x))<1e-4f && std::fabs(w.linear[1]-static_cast<float>(old_motor->linear.y))<1e-4f &&
-          std::fabs(w.linear[2]-static_cast<float>(old_motor->linear.z))<1e-4f && w.linear[0]>0);
-    // A 12 kg prop and a fast hand: the cap binds, the write is the capped value.
-    fixture(0x08,0x08,true,.325f);Rig heavy;
-    CHECK(heavy.grasp(0,{prop_x,0,0}));
-    const auto heavy_before=writes.size();
-    heavy.step(0,{prop_x+.4,0,0},.9f,100);
-    REQUIRE(writes.size()==heavy_before+1);
-    const GrabTuning tuning=GrabTuning{}.prop_view();const double cap=expected_cap(12.,.1,tuning);   // props: the corpse scale since v643 (v609 G6 kept them at v608)
-    CHECK(std::fabs(writes.back().linear[0])<=cap*1.01 && std::fabs(writes.back().linear[0])>cap*.5);
+    CHECK(writes.back().linear[0]>0);   // toward the hand
     // Beyond 1.5 m the old release stays (a prop: throw, no cooldown).
     fixture(0x08,0x08,true,.18f);Rig distant;
     CHECK(distant.grasp(0,{prop_x,0,0}));

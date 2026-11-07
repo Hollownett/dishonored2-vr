@@ -353,7 +353,7 @@ int main() {
             PhysicalGrab p;auto b2=id;assert(make(p,b2,{}));
             auto hnd2=id;reach(p,hnd2,.8,1030);
             for(unsigned i=0;i<500;++i) {r=p.corpse_motor(b2,true,0,0,in(5,.01,&dflt,false));assert(r && !r->motor.release);}
-            assert(r->capped && length(r->motor.linear)<10);
+            assert(!r->capped && length(r->motor.linear)<=20+1e-9);   // v1075: a held prop is driven like a carried weapon (not force-capped), within 20 m/s
             auto fast=id;PhysicalGrab q;auto b3=id;assert(make(q,b3,{}));
             fast.position.x=.1;q.sample(fast,1,true,1,1050);q.sample(fast,0,true,1,1060);
             r=q.corpse_motor(b3,true,0,0,in(5,.01,&dflt,false));
