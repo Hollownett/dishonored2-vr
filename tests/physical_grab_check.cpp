@@ -30,6 +30,8 @@ int main() {
     assert(moving && moving->linear.x>0 && length(moving->linear)<=10.000001);
     hand.basis={{{0,1,0},{-1,0,0},{0,0,1}}};grab.sample(hand,.9f,true,1,190);
     const auto turned=grab.target();assert(length(turned.position-Vec3{.2,.1,0})<1e-9);
+    {auto seat=grab;seat.nudge({0,0,.03});assert(length(seat.target().position-(turned.position+Vec3{0,0,.03}))<1e-9); // v1062 seat: world move, hand turned
+     seat.nudge({std::nan(""),0,0});assert(length(seat.target().position-(turned.position+Vec3{0,0,.03}))<1e-9);}
     assert(grab.motor(object,true)->angular.z>0);
     grab.sample(hand,0,true,1,200);const auto thrown=grab.motor(object,true);assert(thrown && thrown->release && thrown->linear.x>0 && length(thrown->linear)<=12.000001);
     assert(!grab.held());object=hand;grab.sample(hand,.9f,true,1,210);assert(grab.bind(object));

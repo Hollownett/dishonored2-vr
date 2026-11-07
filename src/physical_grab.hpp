@@ -196,6 +196,11 @@ public:
     // This grab's hand origin in the held object's frame (a bound grab).
     Vec3 hand_in_object() const {const auto v=relative_.position*-1.;return {dot(v,relative_.basis[0]),dot(v,relative_.basis[1]),dot(v,relative_.basis[2])};}
     // The other hand let go: this grab now drives the body from where the hand and the body are now (no jump to its old bind relation).
+    // v1062 seat: move the held thing by `world` (m) relative to the hand, from now on (the drawn hand lay in it: finger_ik.hpp held_standoff).
+    void nudge(Vec3 world) {
+        if(!held_ || !valid_sample_ || !finite(world)) return;
+        const auto v=grab_local(previous_,world);relative_.position=relative_.position+v;slide_r0_=slide_r0_+v;
+    }
     void reseat(const WorldTrackedPose& object) {
         if(!held_ || !valid_sample_ || !grab_pose_valid(object)) return;
         relative_.position=grab_local(previous_,object.position-previous_.position);

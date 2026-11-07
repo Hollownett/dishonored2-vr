@@ -530,6 +530,44 @@ inline float thumb_want(const std::array<float,5>& wanted,const FingerCurls& con
     return capped+(wanted[0]-capped)*folded;
 }
 // The memo keys on the reach in 0.05 steps (G4: the reach blends 1 -> held_curl over the grip ease; a step of a hundredth must not solve every finger again).
+// v1062 (user 2026-11-07: "fingers should not get through objects"): the thumb's placement searches score a pose by soft terms; this is the hard one - every
+// phalanx's capsule (the bone's centre line at 4 points each, the thumb's thickness) out of the shape, to the contact tolerance. 1000 per metre deeper: no
+// pinch or surface term (10 per metre) can buy a millimetre inside.
+template<class Distance> double thumb_buried_cost(const FingerSegments& g,double thickness,const std::array<double,3>& angles,Distance&& distance) {
+    const double c=finger_clearance(g,thickness,finger_turns_of(g,angles),[](Vec3 p) {return p;},distance,0u,4,-1e300,0,2,1);
+    return 1000*std::max(0.,-c-contact_tolerance*.5);
+}
+// v1062 seat (user 2026-11-07: "fingers should not get through objects ... touch, grab any physical object, natural grip"): how far a held shape (palm frame)
+// must move along the palm normal so the hand's own body lies ON it, not in it. The body is the palm skin (ThumbBody's palm box top, 4 x 4 points), the
+// thumb's metacarpal at its open pose and each long finger's knuckle pad - what a hand rests on before the fingers close. A
+// positive answer pushes the shape out (the hand was in it), a negative one pulls it in to the touch (it floated off), within [-max_pull, max_push].
+// Translation along the normal only: a few fixed-point steps (the deepest point's depth each), 0.5 mm. The caller moves the THING (the grab's seat), never the hand.
+inline constexpr double seat_tolerance=.0005,seat_max_push=.08,seat_max_pull=.03;
+inline double held_standoff(const HandGeometry& hand,const PalmShape& shape,double max_push=seat_max_push,double max_pull=seat_max_pull) {
+    const ThumbBody body(hand,FingerAngles{});
+    const Vec3 n=hand.palm_in;
+    std::array<std::pair<Vec3,double>,16+4+4*2*5> pts{};unsigned count=0;
+    for(unsigned i=0;i<4;++i) for(unsigned j=0;j<4;++j) {   // palm skin: the box top (body.at's frame: x across, `along`, height over the skin)
+        const double x=body.lo.x+(body.hi.x-body.lo.x)*i/3.,y=body.lo.y+(body.hi.y-body.lo.y)*j/3.;
+        pts[count++]={body.skin+Vec3{x,0,0}+body.along*y,0.};
+    }
+    const auto chain=[&](unsigned f,const std::array<double,3>& angles,unsigned bones,unsigned last) {
+        const auto p=finger_points(hand.finger[f],finger_turns_of(hand.finger[f],angles));
+        for(unsigned b=0;b<bones;++b) for(unsigned k=(b?1:0);k<=last;++k) if(count<pts.size()) pts[count++]={p[b]+(p[b+1]-p[b])*(k/4.),hand.thickness[f]};
+    };
+    chain(0,finger_open_angles(0),1,4);
+    for(unsigned f=1;f<5;++f) chain(f,{0,0,0},1,1); // the knuckle pad only: the rest of a finger curls round an edge (an edge across the fingers is wrapped, not pushed off)
+    double d=0;
+    for(unsigned it=0;it<12;++it) {
+        double depth=-1e9;
+        for(unsigned i=0;i<count;++i) depth=std::max(depth,pts[i].second-palm_shape_distance(shape,pts[i].first-n*d));
+        if(std::abs(depth)<=seat_tolerance) break;
+        const double next=std::clamp(d+depth,-max_pull,max_push);
+        if(next==d) break;
+        d=next;
+    }
+    return d;
+}
 inline constexpr float memo_reach_step=.05f;
 inline float memo_reach_key(float reach) noexcept {return std::round(reach/memo_reach_step)*memo_reach_step;}
 // ease_opening (G4 the fitter's shape replacing the hover shape; G5 a free hand on a surface): a contact pose that falls (the finger must open)
@@ -735,9 +773,13 @@ inline FingerCurls finger_contact(const HandGeometry& hand,const WorldTrackedPos
                 if(b.radius<thumb_ball_min_radius) continue;   // v1035: a small grip ball is not wrapped by the thumb
                 const auto lim=finger_angles(0,1.),open=finger_open_angles(0);const auto& g0=hand.finger[0];const double t0=hand.thickness[0],reach_r=b.radius+t0;
                 const auto idx=finger_points(hand.finger[1],finger_turns_of(hand.finger[1],finger_pose_angles(1,std::max(wants[1],relaxed_share),pose_target.pose[1])))[3];
+                FingerAngles drawn_fingers{};for(unsigned fk=1;fk<5;++fk) {const auto x=finger_pose_angles(fk,std::max(wants[fk],relaxed_share),pose_target.pose[fk]);for(unsigned q=0;q<3;++q) drawn_fingers[fk][q]=static_cast<float>(x[q]);}
+                const ThumbBody hand_body(hand,drawn_fingers); // v1062: clear of the hand too, so finger_drawn_pose's thumb_clear_of_hand leaves it where it is (it moved it back into the thing)
                 const auto cost=[&](const std::array<double,3>& a) {
                     const auto p=finger_points(g0,finger_turns_of(g0,a));double c=0;
                     for(unsigned j=1;j<4;++j) c+=20*std::max(0.,reach_r-length(p[j]-b.position))+(j>1?20*std::max(0.,held_palm_depth+t0-dot(p[j],hand.palm_in)):0.); // none inside the ball; IP and tip clear of the palm
+                    c+=thumb_buried_cost(g0,t0,a,[&](Vec3 q) {return palm_shape_distance(b,q);}); // v1062: no part of the thumb in the ball (hard)
+                    c+=1000*std::max(0.,-hand_body.clearance(a)); // and out of the hand
                     return c+10*std::abs(length(p[3]-b.position)-reach_r)+std::max(0.,length(p[3]-idx)-t0-hand.thickness[1]); // tip on the surface, pad to the fingertip
                 };
                 std::array<double,3> best{},step{(lim[0]-open[0])/6,(lim[1]-open[1])/6,(lim[2]-open[2])/6};double bc=1e9;
@@ -750,7 +792,7 @@ inline FingerCurls finger_contact(const HandGeometry& hand,const WorldTrackedPos
                     for(auto& s:step) s/=3;
                 }
                 for(unsigned s=0;s<3;++s) pose_target.pose[0][s]=static_cast<float>(best[s]);
-                touching[0]=true;break;
+                touching[0]=true;min_target[0]=1.f;break; // v1062: drawn as placed (a want mixing in its own path per joint put it back in the thing)
             }
             // A thumb on a box (a book, a plank, a crate: the surface grip's oriented box): the closing sweep ends where the CMC first meets the box and leaves the
             // tip floating off it ("thumb too far from the other fingers"). Same search as the ball's: IP and tip out of the box, the tip's pad on its surface and
@@ -766,9 +808,13 @@ inline FingerCurls finger_contact(const HandGeometry& hand,const WorldTrackedPos
                 const Vec3 face_axis=b.basis[thin_axis];
                 double face_sign=-1;{const double palm_side=dot(Vec3{0,0,0}-b.position,face_axis),fingers_side=dot(unit(hand.finger[2].pivot),face_axis);
                     face_sign=std::abs(palm_side)>face_half?(palm_side>0?1.:-1.):(fingers_side>0?-1.:1.);}
+                FingerAngles drawn_fingers{};for(unsigned fk=1;fk<5;++fk) {const auto x=finger_pose_angles(fk,std::max(wants[fk],relaxed_share),pose_target.pose[fk]);for(unsigned q=0;q<3;++q) drawn_fingers[fk][q]=static_cast<float>(x[q]);}
+                const ThumbBody hand_body(hand,drawn_fingers); // v1062: clear of the hand too, so finger_drawn_pose's thumb_clear_of_hand leaves it where it is (it moved it back into the thing)
                 const auto cost=[&](const std::array<double,3>& a) {
                     const auto p=finger_points(g0,finger_turns_of(g0,a));double c=0;
                     for(unsigned j=1;j<4;++j) c+=20*std::max(0.,t0-palm_shape_distance(b,p[j]))+(j>1?20*std::max(0.,held_palm_depth+t0-dot(p[j],hand.palm_in)):0.);
+                    c+=thumb_buried_cost(g0,t0,a,[&](Vec3 q) {return palm_shape_distance(b,q);}); // v1062: no part of the thumb in the box (hard: the lab had it 30 mm inside a book)
+                    c+=1000*std::max(0.,-hand_body.clearance(a)); // and out of the hand
                     c+=(thin?6.:1.)*std::max(0.,length(p[3]-idx)-t0-hand.thickness[1]); // a pinch: the pad comes to the fingertip across the thin side
                     // A thin thing (<= 6 cm): the thumb opposes across it, its tip on the face the fingers are not on (the palm's side, the plank between them; with the palm on the edge, the side the fingers do not lie on)
                     if(thin) return c+10*std::abs(dot(p[3]-b.position,face_axis)*face_sign-(face_half+t0))+10*std::max(0.,-palm_shape_distance(b,p[3]));
@@ -784,7 +830,17 @@ inline FingerCurls finger_contact(const HandGeometry& hand,const WorldTrackedPos
                     for(auto& s:step) s/=3;
                 }
                 for(unsigned s=0;s<3;++s) pose_target.pose[0][s]=static_cast<float>(best[s]);
-                touching[0]=true;break;
+                touching[0]=true;min_target[0]=1.f;break; // v1062: drawn as placed (a want mixing in its own path per joint put it back in the thing)
+            }
+            // v1062: whatever placed the thumb (the march, a ball or box search), it is never drawn inside a shape it reaches (a capsule - a corpse's head, a limb -
+            // has no search of its own and the march leaves a buried thumb where it is least buried): the nearest pose clear of the shapes and of the hand.
+            if(f==0 && reachable) {
+                const std::array<double,3> now{pose_target.pose[0][0],pose_target.pose[0][1],pose_target.pose[0][2]};
+                const auto clear=[&](const std::array<double,3>& a) {return finger_clearance(hand.finger[0],hand.thickness[0],finger_turns_of(hand.finger[0],a),world,distance,0u,4,-contact_tolerance,0,2,1)>=-contact_tolerance;};
+                if(!clear(now)) {
+                    FingerAngles drawn_fingers{};for(unsigned fk=1;fk<5;++fk) {const auto x=finger_pose_angles(fk,std::max(wants[fk],relaxed_share),pose_target.pose[fk]);for(unsigned q=0;q<3;++q) drawn_fingers[fk][q]=static_cast<float>(x[q]);}
+                    if(const auto out=thumb_nearest_clear(ThumbBody(hand,drawn_fingers),now,clear)) {for(unsigned q=0;q<3;++q) pose_target.pose[0][q]=static_cast<float>((*out)[q]);min_target[0]=1.f;touching[0]=true;}
+                }
             }
             auto& memo=state.memo[f];memo.valid=true;memo.reach=memo_reach_key(reach);memo.stop=stop_extended;memo.count=reachable;memo.pose=pose_target.pose[f];memo.touching=touching[f];
             memo.min_curl=min_target[f];memo.blocked=blocked[f];memo.hyperextended=past_straight[f];

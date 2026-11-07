@@ -988,7 +988,8 @@ private:
             // orientation; the motor brings it there. Not a body part (it stays where the hand took it and follows), and not far (a wall or a table in the way).
             auto seated=body?body->pose:WorldTrackedPose{};
             if(sphere_grip_ && body && body->bone<0 && body->bounds && p.palm.valid) {
-                const Vec3 centre=(body->bounds->minimum+body->bounds->maximum)*.5,goal=p.palm.palm+p.palm.direction*(rig::sphere_grip_radius(body->pose,*body->bounds)+rig::held_palm_depth);
+                // v1062: the box's own depth along the palm direction (its support), not the ball round it - a book 14 cm off the palm on its face, or inside it on edge
+                const Vec3 centre=(body->bounds->minimum+body->bounds->maximum)*.5,goal=p.palm.palm+p.palm.direction*(rig::surface_seat_depth(body->pose,*body->bounds,p.palm.direction)+rig::held_palm_depth);
                 if(finite(goal) && length(goal-centre)<=.5) seated.position=seated.position+(goal-centre);
             }
             if(body && contact && body->world==world && cleared(lane,*body,now) && lane.grab.bind(seated,*contact,grab_acquire_distance)) {
@@ -1180,6 +1181,12 @@ public:
     // The radius of the ball this hand's fingers wrap while it holds a prop or a body part (0: none, or build/legacy-finger-grab).
     double hold_sphere(unsigned side) {std::lock_guard<std::mutex> lock(mutex_);return side<2 && lanes_[side].held?lanes_[side].sphere:0.;}
     // This hand's hold is a wide, thin thing (finger_sphere.hpp grip_flat_shape): the fingers lie on its face instead of closing on the ball.
+    // v1062 seat: the hold of `entity` moves the thing by `world` relative to the hand (dxgi_probe, once per hold, from the drawn hand's standoff).
+    bool nudge_seat(unsigned side,std::uintptr_t entity,std::uint32_t handle,Vec3 world) {
+        std::lock_guard<std::mutex> lock(mutex_);if(side>=2) return false;auto& lane=lanes_[side];
+        if(!lane.held || lane.held->entity!=entity || lane.held->handle!=handle) return false;
+        lane.grab.nudge(world);return true;
+    }
     bool hold_flat(unsigned side) {std::lock_guard<std::mutex> lock(mutex_);return side<2 && lanes_[side].held && lanes_[side].flat;}
     std::optional<double> held_size(unsigned side) {
         std::lock_guard<std::mutex> lock(mutex_);const auto& h=lanes_.at(side).held;if(!h) return {};

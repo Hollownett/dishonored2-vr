@@ -86,6 +86,14 @@ inline HeldShape surface_grip_shape(const WorldTrackedPose& body,const std::opti
     }
     return classify_held(body,bounds,bone,palm);
 }
+// v1062 seat: how far a prop's centre stands off the palm skin when its surface lies on it - the box's support along the palm direction (its local half
+// extents projected on it; the world box's own when the axes cannot be solved). The drawn hand then moves it the last millimetres (held_standoff).
+inline double surface_seat_depth(const WorldTrackedPose& pose,const NativeGrabBounds& bounds,Vec3 direction) {
+    const auto e=(bounds.maximum-bounds.minimum)*.5;const Vec3 n=unit(direction);
+    if(const auto h=held_local_extents(pose.basis,e))
+        return std::abs(h->x*dot(unit(pose.basis[0]),n))+std::abs(h->y*dot(unit(pose.basis[1]),n))+std::abs(h->z*dot(unit(pose.basis[2]),n));
+    return std::abs(e.x*n.x)+std::abs(e.y*n.y)+std::abs(e.z*n.z);
+}
 // A ragdoll bone (a corpse's limb, held for a drag): the visible limb, about 0.6 of its padded collision capsule (sim v640: a dragged wrist's 5-6 cm
 // capsule, or its box's x half that can be the forearm's half LENGTH, gave the 6 cm cap: a fist round a ball, not a wrist); never above the bone box's thinnest half side.
 inline constexpr double sphere_grip_bone_share=.6;

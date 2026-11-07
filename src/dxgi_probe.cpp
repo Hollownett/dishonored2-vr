@@ -4738,7 +4738,8 @@ static d2vr::WorldTrackedPose touch_palm_frame(const d2vr::WorldTrackedPose& gri
 static std::optional<std::pair<std::uintptr_t,d2vr::rig::HeldCylinder>> held_cylinder_now;
 // The held prop's world AABB, thickened to held_min_half_thickness (a sheet's is flat) and its model axes: the box a native hold falls back to when no cylinder can be made.
 struct HeldBoxNow {std::uintptr_t entity{};d2vr::NativeGrabBounds box{};std::array<d2vr::Vec3,3> axes{};};
-struct SurfaceGrip {std::uintptr_t entity{};std::uint32_t handle{};UINT64 since{};bool valid{};d2vr::rig::HeldShape local{};}; // a surface grip's shape in the palm frame
+struct SurfaceGrip {std::uintptr_t entity{};std::uint32_t handle{};UINT64 since{};bool valid{};d2vr::rig::HeldShape local{};bool seated{};};
+static std::atomic<UINT64> seat_nudges{};static std::atomic<float> seat_mm_max{}; // v1062: holds whose thing the drawn hand lay in (moved out: held_standoff), the largest move (mm) // a surface grip's shape in the palm frame
 static std::optional<HeldBoxNow> held_box_now;static std::atomic<UINT64> finger_thin_holds{},finger_box_holds{},finger_flat_holds{},finger_surface_holds{}; // frames a native hold drew a thin slab / the fallback box for the fingers; frames a physical hold drew a flat grip (a book's face)
 // The local half extents of the held prop's mesh box (finger_ik.hpp held_local_extents), solved once per hold and kept: the world AABB the
 // engine reports is that box turned and boxed again, so a cylinder fitted to it is fat (sim v522: 8.7 cm for a 6.9 cm bottle).
@@ -8467,7 +8468,16 @@ void prepare_head_view(void* view) noexcept {
                             if(surface_grip_enabled && count && kinds[0] && std::strcmp(kinds[0],"grab")==0) if(const auto gb=native_grab.held(side)) try {
                                 auto& sg=surface_hold[side];
                                 if(!sg.valid || sg.entity!=gb->entity || sg.handle!=gb->handle || hold_edge) sg=SurfaceGrip{gb->entity,gb->handle,fk_now};
-                                if(!sg.valid || fk_now-sg.since<=350) {
+                                // v1062 seat (user 2026-11-07: "fingers should not get through objects"): 200 ms in (the thing has come to the palm), the thing moves
+                                // along the palm normal until the drawn hand lies ON it (held_standoff: palm skin, thumb root, knuckle pads); the shape is read until 600 ms.
+                                if(sg.valid && !sg.seated && fk_now-sg.since>=200) {
+                                    sg.seated=true;
+                                    const auto& l=sg.local;const d2vr::rig::PalmShape ps{l.frame.position,l.frame.basis,l.half,l.radius,l.radius_end,l.rim,l.fingers_only};
+                                    const double d=d2vr::rig::held_standoff(*geometry,ps);
+                                    if(std::abs(d)>.002 && native_grab.nudge_seat(side,gb->entity,gb->handle,d2vr::rig::palm_normal(palm,*geometry)*d)) {
+                                        ++seat_nudges;float m=seat_mm_max.load();const float v=static_cast<float>(std::abs(d)*1000);while(v>m && !seat_mm_max.compare_exchange_weak(m,v)) {}}
+                                }
+                                if(!sg.valid || fk_now-sg.since<=600) {
                                     const auto shape=d2vr::rig::surface_grip_shape(gb->pose,gb->bounds,gb->bone,palm); // oriented box, a round shaft, or the bone's capsule
                                     sg.local=shape;sg.local.frame.position=d2vr::grab_local(palm,shape.frame.position-palm.position);
                                     for(unsigned k=0;k<3;++k) sg.local.frame.basis[k]=d2vr::grab_local(palm,shape.frame.basis[k]);
@@ -15617,7 +15627,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
                << ",\"audio_headphones_enabled\":" << (audio_headphones_enabled.load()?"true":"false")
                << ",\"audio_restore_pending\":" << (audio_restore_pending.load()?"true":"false")
                << ",\"hand_feel\":{\"enabled\":" << (hand_feel_enabled?"true":"false") << ",\"fist_closed_fast\":" << fist_closed_fast.load() << ",\"fist_armed_fast\":" << fist_armed_fast.load()
-               << ",\"fist_near\":" << fist_near.load() << ",\"fist_sent\":" << fist_sent.load() << ",\"fist_peak_mps\":" << fist_peak.load() << ",\"last_shove\":" << d2vr::NativeWeaponHands::last_shove.load() << ",\"held_kg_peak\":" << held_kg_peak.load() << ",\"move_scale_min\":" << move_scale_min.load() << ",\"hand_weapon_contacts\":" << hand_weapon_contacts.load() << ",\"hand_weapon_clashes\":" << hand_weapon_clashes.load() << "}"
+               << ",\"fist_near\":" << fist_near.load() << ",\"fist_sent\":" << fist_sent.load() << ",\"fist_peak_mps\":" << fist_peak.load() << ",\"last_shove\":" << d2vr::NativeWeaponHands::last_shove.load() << ",\"held_kg_peak\":" << held_kg_peak.load() << ",\"move_scale_min\":" << move_scale_min.load() << ",\"hand_weapon_contacts\":" << hand_weapon_contacts.load() << ",\"hand_weapon_clashes\":" << hand_weapon_clashes.load() << ",\"seat_nudges\":" << seat_nudges.load() << ",\"seat_mm_max\":" << seat_mm_max.load() << "}"
                << ",\"physical_swings\":" << physical_swings << combat_policy_status_json()
                << ",\"world_ui_target_scoped_calls\":" << d2vr::NativeWorldUi::target_scoped_calls.load()
                << ",\"world_ui_target_last_caller\":" << d2vr::NativeWorldUi::target_last_caller.load()
