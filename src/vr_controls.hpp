@@ -490,7 +490,7 @@ public:
 // Full-grip sword (user 2026-10-13, Bonelab style): the sword is in the right hand only while the grip is squeezed.
 // Squeeze at the shoulder holster: draw it (or call back a dropped one). Release there: sheathe. Release anywhere else: drop
 // it as a physical sword; squeeze at the dropped sword: pick it up. How the hand takes the hilt decides normal or reverse
-// grip (no button): fist pointing down at the shoulder, or against the lying blade, is reverse. A sword the game draws by
+// grip (no button): a hand against the lying blade is reverse; a draw at the shoulder is always straight (v1068, user). A sword the game draws by
 // itself (after a mantle, a carried object) without the grip is put away again; one drawn while its copy lies in the world
 // calls the copy back.
 class SwordGrip {
@@ -513,9 +513,10 @@ public:
         if(!in.gameplay) {if(!pressed) held_=false;out.reversed=reversed_;return out;} // a menu or the wheel never drops it
         if(edge && !in.busy) {
             if(in.copy && (in.zone || (in.copy_reach && !in.use_target))) {out.action=Action::pickup;
-                const double dot=in.zone?in.draw_dot:in.pickup_dot;if(std::abs(dot)>pickup_dead_band) reversed_=dot<0; // a hand across the blade keeps the last grip
+                if(in.zone) reversed_=false;   // v1068 (user): taken at the shoulder = a straight grip, as a draw
+                else if(std::abs(in.pickup_dot)>pickup_dead_band) reversed_=in.pickup_dot<0; // a hand across the blade keeps the last grip
                 held_=true;pending_=in.now;}
-            else if(in.zone && !in.drawn) {out.action=Action::draw;reversed_=in.draw_dot<-.2;held_=true;pending_=in.now;}
+            else if(in.zone && !in.drawn) {out.action=Action::draw;reversed_=false;held_=true;pending_=in.now;}   // v1068 (user: "drawn in a normal straight grip, not reverse")
         } else if(released && held_) {
             held_=false;
             if(in.drawn || pending_) {out.action=in.zone?Action::sheathe:Action::drop;pending_=0;sheathe_sent_=in.now;if(!in.zone) dropped_=in.now;} // leaving the hand

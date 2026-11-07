@@ -758,7 +758,7 @@ std::printf("PASS: X wheel open/close/cancel/no-reopen/late-press, "
         in.copy=in.copy_reach=false;in.drawn=true;assert(step(3400).action==A::none);
         in.zone=true;in.grip=0;assert(step(3500).action==A::sheathe);                     // released at the shoulder
         in.zone=false;in.drawn=false;assert(step(3600).action==A::none);
-        in.zone=true;in.grip=1;in.draw_dot=-.8;assert(step(4000).reversed);              // fist down at the shoulder: reverse
+        in.zone=true;in.grip=1;in.draw_dot=-.8;assert(!step(4000).reversed);             // v1068: fist down at the shoulder is still a straight draw
         in.grip=0;assert(step(4050).action==A::sheathe);                                 // let go before it was out: put back
         in.zone=false;in.drawn=true;assert(step(5000).action==A::none);                  // the game drew it, nobody holds it
         assert(step(5700).action==A::sheathe && step(5800).action==A::none);             // put away once
@@ -797,8 +797,8 @@ std::printf("PASS: X wheel open/close/cancel/no-reopen/late-press, "
         using A=d2vr::SwordGrip::Action;static_assert(d2vr::SwordGrip::pickup_dead_band==.35);
         { // pickup_dead_band_keeps_previous: a reversed draw, a drop, then a floor pickup at pickup_dot .2 is still reversed
             d2vr::SwordGrip s;d2vr::SwordGrip::In in{};in.gameplay=true;auto step=[&](std::uint64_t t){in.now=t;return s.update(in);};
-            in.zone=true;in.grip=1;in.draw_dot=-.8;{const auto o=step(10);assert(o.action==A::draw && o.reversed);}
-            in.zone=false;in.drawn=true;step(400);
+            in.copy=true;in.copy_reach=true;in.copy_distance=1;in.pickup_dot=-.8;in.grip=1;{const auto o=step(10);assert(o.action==A::pickup && o.reversed);}
+            in.copy=in.copy_reach=false;in.drawn=true;step(400);
             in.grip=0;assert(step(2000).action==A::drop);
             in.drawn=false;in.copy=true;in.copy_distance=1;in.copy_reach=true;step(2500);
             in.pickup_dot=.2;in.grip=1;{const auto o=step(3000);assert(o.action==A::pickup && o.reversed);}
@@ -820,7 +820,7 @@ std::printf("PASS: X wheel open/close/cancel/no-reopen/late-press, "
         { // reverse_changes_only_on_edges: while held, draw_dot / pickup_dot sweeping -1..1 leaves `reversed` unchanged
             for(const bool rev:{false,true}) {
                 d2vr::SwordGrip s;d2vr::SwordGrip::In in{};in.gameplay=true;auto step=[&](std::uint64_t t){in.now=t;return s.update(in);};
-                in.zone=true;in.grip=1;in.draw_dot=rev?-.8:.8;assert(step(10).reversed==rev);in.drawn=true;
+                in.copy=true;in.copy_reach=true;in.copy_distance=1;in.grip=1;in.pickup_dot=rev?-.8:.8;assert(step(10).reversed==rev);in.drawn=true;
                 for(int f=0;f<=40;++f) {in.draw_dot=in.pickup_dot=-1+f*.05;in.zone=f%3==0;in.copy=f%4==0;in.copy_reach=in.copy;assert(step(100+f*11).reversed==rev);}
             }
         }
