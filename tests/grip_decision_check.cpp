@@ -53,6 +53,20 @@ int main() {
         auto carry_in=input(loot,loot_limb);carry_in.native_carry=true;
         assert(decide_grip_alone(carry_in,t,hover)==GripAloneChoice::grab);
         auto other_in=carry_in;other_in.physical->entity=11;assert(decide_grip_alone(other_in,t,hover)==GripAloneChoice::use);   // another entity: the costs decide
+        // v1088: a severed limb is NEVER the game's carry (v1087 headset: every right-hand press without a palm pick went to Use, the floating carry)
+        auto limb_in=carry_in;limb_in.native_limb=true;
+        assert(decide_grip_alone(limb_in,t,hover)==GripAloneChoice::grab);                                   // its own pick: grabbed
+        limb_in.physical->distance=.45;assert(decide_grip_alone(limb_in,t,hover)==GripAloneChoice::grab);   // out to the limb reach (where the game's Use reaches)
+        limb_in.physical->distance=.6;limb_in.now_ms=limb_in.since_ms+20;
+        assert(decide_grip_alone(limb_in,t,hover)==GripAloneChoice::pending);                                // farther: the press waits for the pick ...
+        limb_in.now_ms=limb_in.since_ms+1000;assert(decide_grip_alone(limb_in,t,hover)==GripAloneChoice::none);   // ... then nothing - never Use
+        limb_in.physical.reset();assert(decide_grip_alone(limb_in,t,hover)==GripAloneChoice::none);         // no pick at all: nothing
+        limb_in.physical=physical(box(10,PalmKind::prop,{.06,0,.015},.01,t));limb_in.physical->entity=10;limb_in.occupied=true;
+        assert(decide_grip_alone(limb_in,t,hover)==GripAloneChoice::none);                                   // a busy hand: nothing, not Use
+        limb_in.occupied=false;limb_in.fast_native=true;assert(decide_grip_alone(limb_in,t,hover)==GripAloneChoice::grab);   // the hip / gun rule does not hand a limb to Use
+        limb_in.fast_native=false;limb_in.physical->entity=12;limb_in.physical->distance=.2;
+        assert(decide_grip_alone(limb_in,t,hover)==GripAloneChoice::grab);   // another prop under the palm (a book on the leg): grabbed, as before
+        limb_in.physical->distance=.3;assert(decide_grip_alone(limb_in,t,hover)==GripAloneChoice::none);   // ... only in its own 25 cm gate; never the limb's Use
     }
     {   // prop_on_palm_wins_grab: a prop under the palm (0.02 m, faced) against the table shell 0.2 m below
         const auto table=box(5,PalmKind::usable,{0,0,-.685},.5,t);const auto prop=physical(box(6,PalmKind::prop,{.07,0,.015},.05,t));

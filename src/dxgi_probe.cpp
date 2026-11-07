@@ -5165,6 +5165,7 @@ static void publish_held_object(unsigned side,const d2vr::WorldTrackedPose& grip
         // Why the touch had, or had not, the prop as it was before the pickup: classes of the held entity and of what each hand's probes last saw, and where
         // those were (snapshot touch.class / info / match); no id match leaves the touch to resolve_pending_touch.
         held_snap.held_class=rtti_class(*e);held_snap.match=probed?(from_watch?"watch":"id"):"";
+        if(held_snap.held_class==".?AVarkSeveredLimb@@") native_grab.note_limb_use_hold(side&1u,*e);   // v1088: the game's carry took a limb (status severed_limb.use_holds)
         for(unsigned k=0;k<2;++k) if(probed_prop[k].entity) {
             const auto& c=probed_prop[k];held_snap.seen_class[k]=rtti_class(c.entity);
             held_snap.seen_centre[k]={(c.box[0]+c.box[4])*.5,(c.box[1]+c.box[5])*.5,(c.box[2]+c.box[6])*.5};
@@ -7750,7 +7751,11 @@ void prepare_head_view(void* view) noexcept {
                     bool corpse_target=false;
                     if(target && physical_grab_requested && !legacy_corpse_carry)
                         if(const auto nt=native_interaction_aim.target_bounds(side,now); nt && nt->kind!=d2vr::PalmKind::loot) corpse_target=native_grab.is_corpse_entity(nt->id);
-                    if((!target || corpse_target) && physical_grab_requested)
+                    // v1088 (v1087 log: every right-hand press on a severed limb had no palm pick, so the game's Use took it): a severed limb is the grab's
+                    // (grip_decision.hpp native_limb), so its palm pick is scored while it is the Use target, as a corpse's is
+                    bool limb_target=false;
+                    if(target && physical_grab_requested) if(const auto owner=native_interaction_aim.target_owner(side,now)) limb_target=d2vr::severed_limb_entity(read_self,image_base,owner);
+                    if((!target || corpse_target || limb_target) && physical_grab_requested)
                         if(const auto point=native_grab.focus_point(side,now,game_xr->controller_input.menu || game_xr->controller_input.y); point && !target)
                             target=d2vr::world_to_xr_controller(*point,head_origin,frame,1.0,hand_centre,head_origin.position);
                     game_xr->interaction_target(side,target);
@@ -10222,11 +10227,11 @@ std::string feedback_status_json() {    std::ostringstream out;
                << ",\"held_object\":{\"installed\":" << (held_object_installed?"true":"false") << ",\"placed\":" << d2vr::NativeHeldObject::placed.load() << ",\"rejected_targets\":" << d2vr::NativeHeldObject::rejected_targets.load() << ",\"anchored\":" << d2vr::NativeHeldObject::anchored.load() << ",\"sim_invulnerable_blocked\":" << d2vr::NativeSimInvulnerable::blocked.load() << ",\"swarm_kill_skipped\":" << d2vr::NativeSwarmKillGuard::skipped.load() << ",\"swarm_why\":[" << d2vr::NativeMelee::swarm_why[0].load() << ',' << d2vr::NativeMelee::swarm_why[1].load() << ',' << d2vr::NativeMelee::swarm_why[2].load() << ',' << d2vr::NativeMelee::swarm_why[3].load() << "],\"thrown\":" << d2vr::NativeHeldObject::thrown.load() << ",\"throw_kept\":" << d2vr::NativeHeldObject::throw_kept.load() << ",\"throws\":" << held_throws.load() << ",\"drops\":" << held_drops.load() << "}"
                // v1087: the severed-limb grab in the live status (v1086's counter reached only dxgi-probe-result.json, which a crashed session never writes):
                // reads [ok, refused], why = the refusals by check (native_rigid_body.hpp severed_limb_why), last_flags = the last refused body record's flags,
-               // class_seen, holds = limb bodies the hand bound, seat_mm = the last one's seat move
+               // class_seen, then NativeGrab::limb_status_json (v1088)
                << ",\"severed_limb\":{\"reads\":[" << d2vr::severed_limb_reads_ok.load() << ',' << d2vr::severed_limb_reads_refused.load() << "],\"why\":["
                << [&]{std::string w;for(std::size_t i=0;i<d2vr::severed_limb_why.size();++i) w+=(i?",":"")+std::to_string(d2vr::severed_limb_why[i].load());return w;}()
-               << "],\"last_flags\":" << d2vr::severed_limb_last_flags.load() << ",\"class_seen\":" << (d2vr::severed_limb_vtable.load()?1:0) << ",\"holds\":" << native_grab.limb_holds()
-               << ",\"seat_mm\":" << native_grab.limb_seat_mm() << '}'
+               << "],\"last_flags\":" << d2vr::severed_limb_last_flags.load() << ",\"class_seen\":" << (d2vr::severed_limb_vtable.load()?1:0) << ','
+               << native_grab.limb_status_json() << '}'   // v1088: holds, use_holds, presses [use, grab, none], seat {reach, gap, slide, turn, natural}, hold {err_mm_max, gap_mm}
                << ",\"arm_hidden\":" << arm_hidden_bits.load() << ",\"arm_shows\":" << d2vr::NativeHeldObject::arm_shows.load() << ",\"arm_hides_skipped\":" << d2vr::NativeHeldObject::hides_skipped.load() << ",\"held_world_renders\":" << d2vr::NativeHeldObject::world_renders.load() << ",\"held_debug\":[" << held_debug[0].load() << ',' << held_debug[1].load() << ',' << held_debug[2].load() << ',' << held_debug[3].load() << ',' << held_debug[4].load() << ',' << held_debug[5].load() << ',' << held_debug[6].load() << ',' << held_debug[7].load() << ',' << held_debug[8].load() << ',' << held_debug[9].load() << ',' << held_debug[10].load() << ',' << held_debug[11].load() << ',' << held_debug[12].load() << "]" << ",\"arm_show_failed\":" << (d2vr::NativeHeldObject::arm_show_failed.load()?"true":"false") << ",\"native_options_page\":[" << d2vr::NativeMenuEntry::clicks.load() << ',' << d2vr::NativeMenuEntry::queued.load() << ',' << d2vr::NativeMenuEntry::native_pages.load() << ',' << d2vr::NativeOptionsPage::opens.load() << ',' << d2vr::NativeOptionsPage::changes.load() << ',' << d2vr::NativeOptionsPage::faults.load() << ',' << d2vr::NativeOptionsPage::failed_step.load() << ',' << d2vr::NativeOptionsPage::last_show.load() << ',' << d2vr::NativeOptionsPage::action_flips.load() << ',' << d2vr::NativeOptionsPage::reshows.load() << ',' << d2vr::NativeOptionsPage::inplace_writes.load() << ',' << d2vr::NativeMenuEntry::open_failures.load() << ']' << ",\"impact_fx\":[" << d2vr::NativeInteractionAim::impact_played_.load() << ',' << d2vr::NativeInteractionAim::impact_skipped_.load() << ']' << ",\"hud_master_entries\":" << d2vr::NativeHudChildDraw::master_entries.load() << ",\"hud_window_layers\":" << (game_xr?game_xr->hud_window_layers:0) << ",\"hud_cylinder\":" << (game_xr && game_xr->cylinder_layers()?"true":"false") << ",\"hud_scale\":" << d2vr::NativeHudChildDraw::hud_scale.load()
         << ",\"contact_gates\":[" << contact_gates[0].load() << ',' << contact_gates[1].load() << ',' << contact_gates[2].load() << ',' << contact_gates[3].load() << ',' << contact_gates[4].load() << ',' << contact_gates[5].load() << ',' << contact_gates[6].load() << ',' << contact_gates[7].load() << ']'
         << ",\"takedown_range_policy\":{\"choke\":\"" << (d2vr::NativeChokeDistanceScope::process_owner().enabled()?"private-view-scaled":"native-unmodified") << "\",\"kill\":\"" << (takedown_range_scale.load()<1.f?"offer-limited-scaled":"native-unmodified") << "\",\"scale\":" << takedown_range_scale.load() << ",\"choke_factor\":" << d2vr::NativeChokeDistanceScope::process_owner().factor() << ",\"enabled\":" << (d2vr::NativeChokeDistanceScope::process_owner().enabled()?"true":"false") << ",\"substitutions\":" << d2vr::NativeChokeDistanceScope::process_owner().substitutions() << '}'
@@ -12927,7 +12932,16 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                                 // v1087: the grab's own pick IS the game's loot-kind Use target: is that Use only a carry (a severed limb's HoldObject)? Read once, only then.
                                                 in.native_carry=in.native && in.native->kind==d2vr::PalmKind::loot && in.physical && in.physical->entity==in.native->id &&
                                                     d2vr::native_carryable(read_self,image_base,static_cast<std::uintptr_t>(in.native->id));
+                                                in.native_limb=in.native && d2vr::severed_limb_entity(read_self,image_base,static_cast<std::uintptr_t>(in.native->id));   // v1088: never the game's carry
                                                 grip_choice[h]=d2vr::decide_grip_alone(in,grip_tuning,grip_tuning.hover_radius_m);
+                                                {static std::array<std::pair<std::uint64_t,int>,2> limb_logged{};   // v1088: severed-limb-hold.csv "press": what took each press on a limb
+                                                 const bool limb_press=in.since_ms && grip_choice[h]!=d2vr::GripAloneChoice::pending && (in.native_limb || (in.physical && in.physical->entity &&
+                                                     d2vr::severed_limb_entity(read_self,image_base,in.physical->entity)));
+                                                 const std::pair<std::uint64_t,int> key{in.since_ms,static_cast<int>(grip_choice[h])};
+                                                 if(!in.since_ms) limb_logged[h]={};
+                                                 else if(limb_press && key!=limb_logged[h]) {limb_logged[h]=key;
+                                                     native_grab.note_limb_press(h,in.native_limb?static_cast<std::uintptr_t>(in.native->id):in.physical->entity,static_cast<int>(grip_choice[h]),
+                                                         in.physical?in.physical->distance:-1.,in.native_limb,in.native && in.physical && in.physical->entity==in.native->id);}}
                                                 if(((dual_wield_enabled && holding_native && holding_side!=h) || carry_target) && grip_choice[h]==d2vr::GripAloneChoice::use) grip_choice[h]=d2vr::GripAloneChoice::none; // v788: never the game's Use (HoldObject) on a bottle // never a Use that drops the other hand's object
                                                 {static std::array<std::array<std::uint64_t,6>,2> logged_key{};   // v1041: one row per CHANGE of what the grip decided (it was one row per frame: the 4000-row cap filled in 2 minutes)
                                                  const auto native_was=controller_aim_requested?native_interaction_aim.target_bounds(static_cast<int>(h),now_gi):std::nullopt;

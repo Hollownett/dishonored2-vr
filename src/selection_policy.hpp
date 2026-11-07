@@ -12,6 +12,11 @@
 namespace d2vr {
 inline constexpr double grab_acquire_distance=.25;
 inline constexpr double grab_retain_distance=grab_acquire_distance;
+// v1088 (user, v1087 headset: "the arm still does not hold the leg ... make it hold like bottles"): a severed limb is the grab's out to where the game's
+// Use reaches it from the hand (its hand sweep hit limb bodies up to ~0.4 m off, v1086 ranking log), so a grip on one pulls it into the hand instead
+// of the game's floating carry. Under PhysicalGrab::bind's 0.55 m contact cap.
+inline constexpr double limb_reach_m=.5;
+inline constexpr double limb_seat_move_m=1.2;   // the farthest a limb part's ORIGIN may move in its seat (rig::prop_seat): its origin is its joint, and the turn into the hand swings it
 inline constexpr double grab_switch_margin=0;
 // Legacy gaze/reach beam only: a palm-wide cylinder along the aim axis.
 inline constexpr double grab_beam_radius=.06,grab_beam_range_weight=.25;

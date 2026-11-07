@@ -6,6 +6,9 @@
 // decide_grip_alone decides the press (the game's Use target is the same limb, kind loot), rig::prop_seat seats it, PhysicalGrab binds it and its
 // sticking law (corpse_motor, a prop) holds it while the rest of the limb hangs on the held body. The player stands, runs at 5 m/s, then snap-turns
 // 45 degrees. v1086 for comparison: the press went to the game's Use, and had it been grabbed it was held where it was taken (no seat).
+// v1088 (user, v1087 headset: "not fixed ... make it hold like bottles, the hand in full contact with the limb"): the press is decided as the game
+// decides it now (native_limb: never the game's carry; v1087 had no palm pick while the limb was the Use target, so Use took it), the pick reaches
+// limb_reach_m, and the seat puts the part's real surface on the palm skin (rig::surface_onto_skin). Presses 20-40 cm short are taken too.
 #include "../src/native_rigid_body.hpp"
 #include "../src/finger_sphere.hpp"
 #include "../src/grip_decision.hpp"
@@ -64,32 +67,32 @@ Result take(const Take& t) {
     Result r{};
     const auto body=native_severed_limb_body(read,kBase,t.limb->entity,-1,t.palm);
     assert(body && body->hull && body->bounds);r.body=body->limb;
-    const Vec3 skin=t.palm+t.normal*rig::held_palm_depth;
-    r.press_mm=hull_surface_distance(body->pose,*body->hull,skin)*1000;   // where v1086 would have held it: as taken (no seat)
-    // The press: the game's Use target is this limb (kind loot, its whole skinned box round the palm: native cost 0); the grab's pick the same entity
+    // The press: the game's Use target is this limb (kind loot, its whole skinned box round the palm: native cost 0); the grab's pick is the same
+    // entity, scored from the hand sphere out to limb_reach_m (native_grab.hpp focus_body's limb pass)
     GripAloneInput in{};PalmTarget use{};use.id=t.limb->entity;use.kind=PalmKind::loot;GrabTuning tuning;use.priority=tuning.priority(use.kind);
     use.minimum=t.palm-Vec3{.5,.5,.5};use.maximum=t.palm+Vec3{.5,.5,.5};in.native=use;
-    PalmProbe probe{};probe.palm=t.palm;probe.forward=t.forward;probe.direction=t.normal;probe.valid=true;in.probe=probe;
-    const auto target=palm_body_target(*body,tuning);const auto cost=palm_cost(probe,target,tuning.hover_radius_m,grab_acquire_distance);
-    assert(cost);in.physical=FocusScore{target.id,PalmKind::prop,cost->cost,0.,cost->distance,t.limb->entity};
-    in.native_fresh=true;in.since_ms=1000;in.now_ms=1200;
-    r.v1086_use=decide_grip_alone(in,tuning,tuning.hover_radius_m)==GripAloneChoice::use;   // v1086: no carry flag -> the game's Use
-    in.native_carry=true;r.grab=decide_grip_alone(in,tuning,tuning.hover_radius_m)==GripAloneChoice::grab;
-    // The seat (the game's prop seat), then the hold: the hand frame is the palm's (forward, side, normal)
-    const auto seat=rig::prop_seat(*body,t.palm,t.normal,t.forward,true);r.natural=seat.natural;
-    r.gap_mm=hull_surface_distance(seat.pose,*body->hull,skin)*1000;
+    PalmProbe probe{};probe.palm=t.palm;probe.forward=t.forward;probe.direction=t.normal;probe.valid=true;in.probe=hand_sphere_probe(t.palm);
+    const auto target=palm_body_target(*body,tuning);const auto cost=palm_cost(in.probe,target,tuning.hover_radius_m,limb_reach_m);
+    assert(cost);
+    in.native_fresh=true;in.since_ms=1000;in.now_ms=1200;in.native_carry=true;
+    r.v1086_use=decide_grip_alone(in,tuning,tuning.hover_radius_m)==GripAloneChoice::use;   // v1087: no palm pick was scored while the limb was the Use target
+    in.physical=FocusScore{target.id,PalmKind::prop,cost->cost,0.,cost->distance,t.limb->entity};in.native_limb=true;
+    r.grab=decide_grip_alone(in,tuning,tuning.hover_radius_m)==GripAloneChoice::grab;   // v1088
+    // The seat (the game's prop seat, a limb part's limit), then the hold: the hand frame is the palm's (forward, side, normal)
+    auto seat=rig::prop_seat(*body,t.palm,t.normal,t.forward,true,limb_seat_move_m);r.natural=seat.natural;
+    seat.pose=rig::surface_onto_skin(*body,seat.pose,t.palm,t.normal);   // v1088: its real surface on the palm skin (as native_grab does for a limb)
+    const auto stats=rig::seat_stats(*body,seat.pose,t.palm,t.normal);   // the same numbers the game logs (severed-limb-hold.csv "seat")
+    r.press_mm=stats.reach_mm;r.gap_mm=stats.gap_mm;r.slide_mm=stats.slide_mm;r.turn_deg=stats.turn_deg;
     // The v1062 seat-out then moves the thing along the palm normal until the drawn hand lies on it (finger_ik.hpp held_standoff: a pull of at most
     // seat_max_pull, a push of at most seat_max_push); here along the palm skin point only (the hand lab runs the real one on the real hand).
     r.out_mm=r.gap_mm-std::clamp(r.gap_mm,-rig::seat_max_push*1000,rig::seat_max_pull*1000);
-    const Vec3 before=local(body->pose,skin),after=local(seat.pose,skin);r.slide_mm=std::abs(after.y-before.y)*1000;   // along the bone (own +y)
-    r.turn_deg=length(grab_rotation_error(body->pose,seat.pose))*57.29578;
     // Dynamics at 60 Hz: the hand presses (bind at the seat), the limb comes to the hand, the player stands 1 s, runs 5 m/s for 2 s, snap-turns 45 deg.
     // The rest of the limb hangs on the held body: its weight and the held body's own pull down every step (a stiff chain, the worst case).
     double chain=0,held=t.limb->parts[static_cast<std::size_t>(body->limb)]->kg;for(const auto* p:t.limb->parts) chain+=p->kg;
     const double sag=9.81*chain/held;
     auto hand=pose_of(t.palm,t.forward,cross(t.normal,t.forward));
     PhysicalGrab g;g.sample(hand,0.f,true,1,1000);g.sample(hand,0.f,true,1,1010);g.sample(hand,1.f,true,1,1020);
-    assert(g.bind(seat.pose,body->contact(t.palm),grab_acquire_distance));
+    assert(g.bind(seat.pose,body->contact(t.palm),limb_reach_m));
     auto now=body->pose;Vec3 v{},w{};std::uint64_t tick=1020;
     for(int i=0;i<300;++i) {
         const double s=i/60.;Vec3 carrier{};
@@ -126,25 +129,27 @@ int main() {
     const Vec3 down{0,0,-1},across{0,1,0},along{1,0,0},angled=unit(Vec3{.5,.866,0});
     // The palm faces down (normal -z), its skin 2-3 cm above the part or reaching 10 cm short of it; fingers across the limb, at 30 deg, or along it.
     const std::vector<Take> takes{
+        {"leg: calf, 20 cm reach",&leg,{.80,0,.42},down,across},{"leg: calf, 40 cm reach",&leg,{.80,0,.62},down,across},
+        {"arm: forearm, 30 cm reach",&arm,{.45,1,.45},down,across},{"head: 25 cm reach",&skull,{.04,2,.45},down,across},
         {"leg: calf by the ankle, across",&leg,{.80,0,.27},down,across},{"leg: calf by the ankle, 30 deg",&leg,{.80,0,.27},down,angled},
         {"leg: calf mid, fingers along",&leg,{.66,0,.27},down,along},{"leg: calf, 10 cm reach",&leg,{.80,0,.37},down,across},
         {"leg: thigh mid, across",&leg,{.25,0,.28},down,across},{"leg: foot, across",&leg,{1.00,0,.24},down,across},
         {"arm: forearm by the wrist, across",&arm,{.52,1,.15},down,across},{"arm: forearm, 30 deg",&arm,{.45,1,.15},down,angled},
         {"arm: upper arm, across",&arm,{.17,1,.15},down,across},{"arm: hand, across",&arm,{.66,1,.15},down,across},
         {"head: from above",&skull,{.04,2,.31},down,across},{"head: from above, 30 deg",&skull,{.04,2,.31},down,angled}};
-    std::printf("%-34s %-9s %8s %7s %7s %8s %8s %5s %7s %7s %7s %6s\n","take (palm skin to the part's real surface)","body","v1086 mm","seat mm","out mm","slide mm","turn deg",
+    std::printf("%-34s %-9s %8s %7s %7s %8s %8s %5s %7s %7s %7s %6s\n","take (palm skin to the part's real surface)","body","press mm","seat mm","out mm","slide mm","turn deg",
         "seat","settle","hold mm","run mm","turn");
     bool ok=true;
     for(const auto& t:takes) {
         const auto r=take(t);
         std::printf("%-34s %-9s %8.1f %7.1f %7.1f %8.1f %8.1f %5s %4u fr %7.1f %7.1f %3u fr\n",t.name,t.limb->parts[static_cast<std::size_t>(r.body)]->name,r.press_mm,r.gap_mm,r.out_mm,
             r.slide_mm,r.turn_deg,r.natural?"palm":"ball",r.settle,r.hold_mm,r.run_mm,r.turn_back);
-        // The press is the grab's (v1086 gave it to the game's Use); after the seat and the seat-out the part lies on the palm skin within 1 cm; it is in the
+        // The press is the grab's (v1087 gave it to the game's Use: no palm pick); after the seat its real surface lies on the palm skin within 2 mm; it is in the
         // hand (2 cm, 5 deg) within 6 frames of the press, stays within 2 cm while running at 5 m/s with the rest of the limb hanging on it, and is back
         // within 2 cm 6 frames after a snap turn.
-        ok=ok && r.v1086_use && r.grab && std::abs(r.out_mm)<=10 && r.settle>0 && r.settle<=6 && r.run_mm<20 && r.turn_back>0 && r.turn_back<=6;
+        ok=ok && r.v1086_use && r.grab && std::abs(r.gap_mm)<=2 && std::abs(r.out_mm)<=2 && r.settle>0 && r.settle<=6 && r.run_mm<20 && r.turn_back>0 && r.turn_back<=6;
     }
-    std::puts("columns: v1086 = the press distance a v1086 grab would have kept (it seated nothing); seat = after rig::prop_seat; out = after the seat-out's\n"
+    std::puts("columns: press = the palm skin to the part at the press (v1086 held it there: no seat; v1087 used the game's carry); seat = after rig::prop_seat; out = after the seat-out's\n"
               "pull (<= 30 mm along the palm normal); slide = the grasped spot moved along the bone; settle = frames to within 2 cm / 5 deg of the hold;\n"
               "hold = the standing error with the rest of the limb hanging on the held body; run = the worst gap at 5 m/s; turn = frames back after a 45 deg snap turn");
     std::fflush(stdout);

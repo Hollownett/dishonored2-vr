@@ -275,7 +275,20 @@ private:
     // corpse_enabled_: build/no-corpse-grab clears it; lockout_ is internally locked (any thread); the dispatcher cost counters are dispatcher-thread only; no_posts_ is
     // build/no-ragdoll-posts, read at install for the wake path (Task 11).
     bool corpse_enabled_=true,no_posts_{},prop_grasp_point_=true,sphere_grip_=true,natural_seat_=true;std::uint64_t natural_seats_{},pinch_seats_{},draw_binds_{};
-    std::atomic<std::uint64_t> limb_holds_{};std::atomic<float> limb_seat_mm_{-1.f};   // v1087: severed-limb bodies bound by the grab; the last one's seat move (mm)
+    // v1088 severed limbs: bodies the grab bound; the last seat (rig::seat_stats); presses on a limb by what took them (use, grab, none); the game's
+    // carries of a limb (should stay 0); the hold's worst error to its target and the last palm-to-surface gap. Under mutex_ (the status copies them).
+
+    struct LimbSeat {double reach_mm{-1},gap_mm{},slide_mm{},turn_deg{};bool natural{};};
+    std::uint64_t limb_holds_{},limb_use_holds_{};std::array<std::uint64_t,4> limb_presses_{};LimbSeat limb_seat_{};double limb_err_mm_max_{},limb_gap_mm_{};
+    // severed-limb-hold.csv (diagnostics on): tick_ms,event,side,entity_id,limb,v1..v5 - press: choice (0 pending 1 use 2 grab 3 none), physical pick mm,
+    // native target is a limb, pick = target; seat: gap mm, slide mm, turn deg, natural, reach mm; hold (each motor write): error to the target mm, rotation
+    // error deg, palm skin to the part's surface mm, speed m/s; use_hold: the game's carry took a limb (v1 = native hold count).
+    std::ofstream limb_log_;std::uint64_t limb_rows_{};
+    void limb_row(UINT64 now,const char* event,unsigned side,const NativeRigidBody& body,double v1,double v2=0,double v3=0,double v4=0,double v5=0) {
+        if(!limb_log_.is_open() || limb_rows_>=40000) return;
+        ++limb_rows_;limb_log_<<now<<','<<event<<','<<side<<','<<body.entity_id<<','<<body.limb<<','<<v1<<','<<v2<<','<<v3<<','<<v4<<','<<v5<<'\n';
+        if(limb_rows_%64==0 || std::strcmp(event,"hold")!=0) limb_log_.flush();
+    }
     bool two_hand_=true; // phase 2: the second hand may grab a prop the other hand holds (build/no-two-hand)
     bool stick_hold_=true; // v1084: a held prop or corpse limb sticks to the hand like a bottle (build/legacy-weighted-hold: the force-capped hold)
     // build/legacy-sphere-grip-whole-object (read at install): the v642 ball round the thing's whole box instead of the v1024 grip ball (finger_sphere.hpp)
@@ -319,7 +332,7 @@ private:
     std::optional<Vec3> acquisition_contact(const Lane& lane,const NativeRigidBody& body,UINT64 now) const {
         if(body.bone<0) {
             const Vec3 point=body.contact(lane.published.hand.position);
-            return finite(point) && length(point-lane.published.hand.position)<=grab_acquire_distance?std::optional<Vec3>{point}:std::nullopt;
+            return finite(point) && length(point-lane.published.hand.position)<=(body.limb>=0?limb_reach_m:grab_acquire_distance)?std::optional<Vec3>{point}:std::nullopt;   // v1088: a severed limb at its reach
         }
         if(!contact_required_)return body.contact(lane.published.hand.position);
         if(!lane.contact_proxies || !body.bounds || lane.contact_epoch!=lane.published.epoch || !lane.contact_tick ||
@@ -468,6 +481,19 @@ private:
                 lane.focus=body;lane.living_focus.reset();lane.palm_dot=0;
                 lane.score=FocusScore{palm_body_id(body),PalmKind::prop,score->cost,
                     std::isfinite(prop_pick.runner_up)?prop_pick.runner_up:0.,score->distance,body.entity};
+            }
+        }
+        // v1088: nothing in the 25 cm sphere: a severed limb is the grab's out to limb_reach_m (where the game's Use reaches it), the nearest one
+        if(!lane.score && !lane.focus) {
+            std::vector<PalmTarget> limb_targets;std::vector<std::size_t> limb_at;
+            for(std::size_t i=0;i<prop_bodies.size();++i) if(prop_bodies[i].limb>=0) {limb_targets.push_back(prop_targets[i]);limb_at.push_back(i);}
+            if(!limb_targets.empty()) {
+                const auto limb_pick=pick_by_palm(sphere,limb_targets,previous,tuning_.hover_radius_m,limb_reach_m);
+                if(limb_pick.index) if(const auto score=palm_cost(sphere,limb_targets[*limb_pick.index],tuning_.hover_radius_m,limb_reach_m)) {
+                    const auto& body=prop_bodies[limb_at[*limb_pick.index]];
+                    lane.focus=body;lane.living_focus.reset();lane.palm_dot=0;
+                    lane.score=FocusScore{palm_body_id(body),PalmKind::prop,score->cost,std::isfinite(limb_pick.runner_up)?limb_pick.runner_up:0.,score->distance,body.entity};
+                }
             }
         }
         lane.focus_tick=now;lane.focus_hand=p.hand.position;lane.focus_excluded=excluded;
@@ -846,6 +872,12 @@ private:
         if(!result->write) return true; // no usable dt this tick: the hold continues
         if(!write(lane,side,body,result->motor)) return false;
         lane.last_motor=now;lane.last_capped=result->capped;
+        if(body.limb>=0) {   // v1088: severed-limb-hold.csv "hold" - the held part against the hand, every write; the worst error once it has come in (0.3 s)
+            const auto goal=lane.grab.target();const double err=length(goal.position-body.pose.position)*1000,rot=length(grab_rotation_error(body.pose,goal))*57.29578;
+            const double gap=p.palm.valid && body.hull?hull_surface_distance(body.pose,*body.hull,p.palm.palm+p.palm.direction*rig::held_palm_depth)*1000:-1;
+            if(now>lane.bound_at+300) limb_err_mm_max_=std::max(limb_err_mm_max_,err);
+            limb_gap_mm_=gap;limb_row(now,"hold",side,body,err,rot,gap,length(motion.velocity));
+        }
         TowResult towed;
         if(corpse && body.bone>0) {
             const double tow_dt=lane.last_tow && now>lane.last_tow?static_cast<double>(now-lane.last_tow)/1000.:1./60; // first tow of a hold uses the fallback
@@ -1001,12 +1033,18 @@ private:
             // v1087 (user, v1086 headset: "I hold the leg at a distance ... it must work exactly like bottles"): a severed limb's body is seated like every prop, on its
             // real hull (v1086 kept it where it was taken, up to the 25 cm hand sphere away).
             auto seated=body?body->pose:WorldTrackedPose{};
+            bool natural=false;
             if(sphere_grip_ && body && body->bone<0 && body->bounds && p.palm.valid) {
-                const auto s=rig::prop_seat(*body,p.palm.palm,p.palm.direction,p.palm.forward,natural_seat_);
-                seated=s.pose;if(s.natural) {++natural_seats_;pinch_seats_+=s.pinch;}
+                const auto s=rig::prop_seat(*body,p.palm.palm,p.palm.direction,p.palm.forward,natural_seat_,body->limb>=0?limb_seat_move_m:.5);
+                seated=s.pose;natural=s.natural;if(s.natural) {++natural_seats_;pinch_seats_+=s.pinch;}
+                if(body->limb>=0) seated=rig::surface_onto_skin(*body,seated,p.palm.palm,p.palm.direction);   // v1088: its real surface on the palm skin
             }
-            if(body && contact && body->world==world && cleared(lane,*body,now) && lane.grab.bind(seated,*contact,grab_acquire_distance)) {
-                if(body->limb>=0) {++limb_holds_;limb_seat_mm_=static_cast<float>(length(seated.position-body->pose.position)*1000);}   // v1087 status: severed_limb.holds
+            if(body && contact && body->world==world && cleared(lane,*body,now) && lane.grab.bind(seated,*contact,body->limb>=0?limb_reach_m:grab_acquire_distance)) {
+                if(body->limb>=0) {   // v1088 status severed_limb.holds / seat, and severed-limb-hold.csv "seat"
+                    ++limb_holds_;const auto s=p.palm.valid?rig::seat_stats(*body,seated,p.palm.palm,p.palm.direction):rig::SeatStats{};
+                    limb_seat_=LimbSeat{s.reach_mm,s.gap_mm,s.slide_mm,s.turn_deg,natural};
+                    limb_row(now,"seat",side,*body,s.gap_mm,s.slide_mm,s.turn_deg,natural?1.:0.,s.reach_mm);
+                }
                 lane.held=body;lane.acquired=true;lane.reset_tow();lane.owner_player=p.owner.player;lane.owner_camera=p.owner.camera;
                 lane.owner_generation=p.owner.camera_identity.generation;lane.owner_epoch=p.epoch;++picked_;
                 begin_hold(lane,side,*body,now);
@@ -1212,8 +1250,24 @@ public:
     }
     std::uint64_t natural_seats() {std::lock_guard<std::mutex> lock(mutex_);return natural_seats_;}
     std::uint64_t pinch_seats() {std::lock_guard<std::mutex> lock(mutex_);return pinch_seats_;}
-    std::uint64_t limb_holds() const {return limb_holds_.load(std::memory_order_relaxed);}
-    float limb_seat_mm() const {return limb_seat_mm_.load(std::memory_order_relaxed);}
+    // v1088: a press on a severed limb and what took it (dxgi_probe's grip decision), and a hold of one by the game's carry (publish_held_object)
+    void note_limb_press(unsigned side,std::uintptr_t entity,int choice,double pick_m,bool native_limb,bool same) {
+        std::lock_guard<std::mutex> lock(mutex_);if(choice>=0 && choice<4) ++limb_presses_[static_cast<std::size_t>(choice)];
+        NativeRigidBody b{};b.entity=entity;b.entity_id=rig::value<std::uint32_t>(read_,entity+0xa8).value_or(0);
+        limb_row(GetTickCount64(),"press",side,b,choice,pick_m>=0?pick_m*1000:-1.,native_limb?1.:0.,same?1.:0.);
+    }
+    void note_limb_use_hold(unsigned side,std::uintptr_t entity) {
+        std::lock_guard<std::mutex> lock(mutex_);++limb_use_holds_;
+        NativeRigidBody b{};b.entity=entity;b.entity_id=rig::value<std::uint32_t>(read_,entity+0xa8).value_or(0);
+        limb_row(GetTickCount64(),"use_hold",side,b,static_cast<double>(limb_use_holds_));
+    }
+    std::string limb_status_json() {
+        std::lock_guard<std::mutex> lock(mutex_);std::ostringstream o;const auto& s=limb_seat_;
+        o<<"\"holds\":"<<limb_holds_<<",\"use_holds\":"<<limb_use_holds_<<",\"presses\":["<<limb_presses_[1]<<','<<limb_presses_[2]<<','<<limb_presses_[3]<<']'
+         <<",\"seat\":{\"reach_mm\":"<<s.reach_mm<<",\"gap_mm\":"<<s.gap_mm<<",\"slide_mm\":"<<s.slide_mm<<",\"turn_deg\":"<<s.turn_deg<<",\"natural\":"<<(s.natural?1:0)<<'}'
+         <<",\"hold\":{\"err_mm_max\":"<<limb_err_mm_max_<<",\"gap_mm\":"<<limb_gap_mm_<<'}';
+        return o.str();
+    }
     // v1069: the player's world velocity (render thread, the hand servo's Fix B estimate), fed to held props' motors.
     void set_player_velocity(Vec3 v) noexcept {carrier_[0]=v.x;carrier_[1]=v.y;carrier_[2]=v.z;}
     Vec3 carrier() const noexcept {return {carrier_[0].load(),carrier_[1].load(),carrier_[2].load()};}
@@ -1438,7 +1492,7 @@ public:
         if(deciding && usable && !lane.pending_release) {
             // Use the same bounded surface target as the hover cue.
             ++queries_;auto candidate=focus_body(side,now,true);
-            if(candidate) {const auto gap=focus_gap(lane,*candidate);const auto candidate_gate=candidate->bone<0?grab_acquire_distance:gate;if(!gap || *gap>candidate_gate) candidate.reset();}
+            if(candidate) {const auto gap=focus_gap(lane,*candidate);const auto candidate_gate=candidate->bone<0?(candidate->limb>=0?limb_reach_m:grab_acquire_distance):gate;if(!gap || *gap>candidate_gate) candidate.reset();}   // v1088: a severed limb at its reach
             lane.candidates.clear();lane.living_candidate.reset();
             // G6 (Task 14): only a grip-alone press holds a living NPC (the fist keeps today's yank); his bone within the grip-alone gate
             if(!candidate && grip_alone && living_enabled_ && lane.living_focus && lane.score && lane.score->kind==PalmKind::living &&
@@ -1571,6 +1625,8 @@ public:
             log_.open(file,std::ios::trunc);if(!log_) throw std::runtime_error("Cannot open native grab evidence");
             acquisitions_.open(file.parent_path()/L"native-grab-acquisition.csv",std::ios::trunc);
             if(!acquisitions_) throw std::runtime_error("Cannot open native acquisition evidence");
+            limb_rows_=0;limb_log_.open(file.parent_path()/L"severed-limb-hold.csv",std::ios::trunc);   // v1088 (optional evidence: no throw)
+            if(limb_log_) limb_log_<<"tick_ms,event,side,entity_id,limb,v1,v2,v3,v4,v5\n";
         }
         mass_probe_=false;mass_probe_rows_=0;mass_probe_out_.close();
         {std::error_code ec;const auto root=root_dir.empty()?file.parent_path().parent_path():root_dir;
@@ -1622,7 +1678,7 @@ public:
         if(enabled_) {if(MH_DisableHook(reinterpret_cast<void*>(base_+rva))!=MH_OK) return false;enabled_=false;}
         const auto deadline=GetTickCount64()+5000;while(depth_ && GetTickCount64()<deadline) Sleep(1);if(depth_) return false;
         std::array<unsigned char,32> code{};const bool restored=!original_ || (read_(base_+rva,code.data(),code.size()) && code==dispatch_code);
-        try {std::lock_guard<std::mutex> lock(mutex_);for(unsigned side=0;side<2;++side) {auto& lane=lanes_[side];if(lane.held && lane.corpse) corpse_diag_.note_release(side,ReleaseReason::lifecycle);lane.grab.release(false);lane.end_hold();}publish_snapshot_locked();log_.close();acquisitions_.close();mass_probe_out_.close();mass_probe_=false;} catch(...) {return false;}
+        try {std::lock_guard<std::mutex> lock(mutex_);for(unsigned side=0;side<2;++side) {auto& lane=lanes_[side];if(lane.held && lane.corpse) corpse_diag_.note_release(side,ReleaseReason::lifecycle);lane.grab.release(false);lane.end_hold();}publish_snapshot_locked();log_.close();acquisitions_.close();limb_log_.close();mass_probe_out_.close();mass_probe_=false;} catch(...) {return false;}
         return restored;
     }
     bool enabled() const noexcept {return active_.load(std::memory_order_acquire);}

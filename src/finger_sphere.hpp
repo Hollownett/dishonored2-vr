@@ -227,18 +227,39 @@ inline std::optional<WorldTrackedPose> natural_seat(const WorldTrackedPose& pose
 // sphere grip puts its box centre in the ball the fingers wrap; the natural seat (unless build/no-natural-seat) turns it into the hand where it was taken.
 // Moved unchanged out of NativeGrab's acquisition, so the hold lab (tests/severed_limb_hold_check.cpp) seats with the game's own code.
 struct PropSeat {WorldTrackedPose pose{};bool natural{},pinch{};};
-inline PropSeat prop_seat(const NativeRigidBody& body,Vec3 palm,Vec3 direction,Vec3 forward,bool natural) {
+inline PropSeat prop_seat(const NativeRigidBody& body,Vec3 palm,Vec3 direction,Vec3 forward,bool natural,double max_move=.5) {   // max_move: the farthest its origin may move (v1088: a severed limb part, whose origin is its joint, 1.2 m)
     PropSeat out{body.pose};
     if(!body.bounds) return out;
     // v1062: the box's own depth along the palm direction (its support), not the ball round it - a book 14 cm off the palm on its face, or inside it on edge
     // v1080: the real shape's box (its hull's centre and support when the body has one: prop_hull.hpp)
     const auto gbox=grip_box(body.pose,*body.bounds,body.hull);
     const Vec3 centre=gbox?gbox->centre:(body.bounds->minimum+body.bounds->maximum)*.5,goal=palm+direction*(surface_seat_depth(body.pose,*body.bounds,direction,body.hull)+held_palm_depth);
-    if(finite(goal) && length(goal-centre)<=.5) out.pose.position=out.pose.position+(goal-centre);
+    if(finite(goal) && length(goal-centre)<=max_move) out.pose.position=out.pose.position+(goal-centre);
     // v1063 natural seat: the thing turns into the hand (a long side across the palm, the nearest face flat on it) where it was taken
-    if(natural) if(const auto n=natural_seat(body.pose,*body.bounds,palm+direction*held_palm_depth,forward,direction,body.hull,&out.pinch);n && length(n->position-body.pose.position)<=.5) {out.pose=*n;out.natural=true;}
+    if(natural) if(const auto n=natural_seat(body.pose,*body.bounds,palm+direction*held_palm_depth,forward,direction,body.hull,&out.pinch);n && length(n->position-body.pose.position)<=max_move) {out.pose=*n;out.natural=true;}
     if(!out.natural) out.pinch=false;
     return out;
+}
+// v1088: what a seat did to a real-shaped part, from the palm skin point (palm + direction * held_palm_depth): reach = the skin's distance to the part's
+// surface at the press, gap = after the seat (0: the surface on the skin, < 0 in it), slide = how far the grasped spot moved along the part's long side,
+// turn = the seat's rotation. (v1087's status measured the ORIGIN's move - a limb part's origin is its joint, so a turn alone moved it 263 mm.)
+// v1088 (user: "the hand makes full physical contact with the limb"): a part held by its real surface (a severed limb's) lies ON the palm skin after its
+// seat. The seat lays its hull's BOX face on the skin, and a tapered part's real surface stands inside that box where it is taken (lab: a calf at the
+// ankle 32-37 mm off, a severed hand 39 mm; the seat-out pulls 30 mm at most): moved along the palm direction until the real surface is on the skin.
+inline WorldTrackedPose surface_onto_skin(const NativeRigidBody& body,WorldTrackedPose seated,Vec3 palm,Vec3 direction) {
+    if(!body.hull || !finite(direction) || length(direction)<1e-9) return seated;
+    const Vec3 n=unit(direction),skin=palm+n*held_palm_depth;
+    for(int i=0;i<8;++i) {const double gap=hull_surface_distance(seated,*body.hull,skin);if(!std::isfinite(gap) || std::abs(gap)<.0005) break;seated.position=seated.position-n*gap;}
+    return seated;
+}
+struct SeatStats {double reach_mm{},gap_mm{},slide_mm{},turn_deg{};};
+inline SeatStats seat_stats(const NativeRigidBody& body,const WorldTrackedPose& seated,Vec3 palm,Vec3 direction) {
+    SeatStats s{};if(!body.hull) return s;
+    const Vec3 skin=palm+direction*held_palm_depth;
+    s.reach_mm=hull_surface_distance(body.pose,*body.hull,skin)*1000;s.gap_mm=hull_surface_distance(seated,*body.hull,skin)*1000;
+    const Vec3 before=grab_local(body.pose,skin-body.pose.position),after=grab_local(seated,skin-seated.position);
+    s.slide_mm=std::abs(dot(after-before,body.hull->whole.axes[0]))*1000;s.turn_deg=length(grab_rotation_error(body.pose,seated))*57.29578;
+    return s;
 }
 // A ragdoll bone (a corpse's limb, held for a drag): the visible limb, about 0.6 of its padded collision capsule (sim v640: a dragged wrist's 5-6 cm
 // capsule, or its box's x half that can be the forearm's half LENGTH, gave the 6 cm cap: a fist round a ball, not a wrist); never above the bone box's thinnest half side.

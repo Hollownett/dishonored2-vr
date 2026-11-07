@@ -18,7 +18,8 @@ struct GripAloneInput {std::optional<PalmTarget> native;std::optional<FocusScore
     bool native_fresh{};std::uint64_t since_ms{},now_ms{};bool choke_owns{},takedown_offered{},occupied{};
     bool fast_native{};
     bool native_corpse{};
-    bool native_carry{};};   // v1087: the native target is a native carryable (arkCpntPickable_Simple: a bottle, a severed limb), kind loot by takeable(), whose Use is only the game's HoldObject carry   // Ruling V1: the native Use target is a corpse (dead or unconscious body): grip never issues its carry Use   // fast_native (fix round 1, I2): the left hand is in the hip-draw zone or a gun is drawn: a native action that must not wait the 150 ms
+    bool native_carry{};
+    bool native_limb{};};   // v1088: the native target is a severed limb (arkSeveredLimb): never the game's carry (below). v1087: the native target is a native carryable (arkCpntPickable_Simple: a bottle, a severed limb), kind loot by takeable(), whose Use is only the game's HoldObject carry   // Ruling V1: the native Use target is a corpse (dead or unconscious body): grip never issues its carry Use   // fast_native (fix round 1, I2): the left hand is in the hip-draw zone or a gun is drawn: a native action that must not wait the 150 ms
 inline constexpr std::uint64_t grip_alone_fresh_wait_ms=100;   // the existing 100 ms intent window, never longer (spec G3)
 // Rules, in order:
 //  1. an occupied hand, a choke that owns the squeeze or an offered takedown: use (today's path);
@@ -28,6 +29,21 @@ inline constexpr std::uint64_t grip_alone_fresh_wait_ms=100;   // the existing 1
 //     a native target beyond the palm's 0.20 m pickup gate (a gaze Use) still wins over nothing;
 //  5. nothing in reach (ruling H1): pending while the grab buffer runs (grab_buffer_ms from the edge, 0.10 m gate), then use (today's role).
 inline GripAloneChoice decide_grip_alone(const GripAloneInput& in,const GrabTuning& tuning,double hover_radius) noexcept {
+    // v1088 (user, v1087 headset: "not fixed ... make it hold like it holds bottles and glasses, the hand in full contact with the limb"): a severed limb
+    // is never the game's carry - its HoldObject floats the limb a whole-limb cylinder (r ~0.27 m) off the palm, the "sphere at a distance" of v1085-v1087.
+    // The grab takes it when its own pick is that limb within limb_reach_m, or the other prop or corpse bone it picked within the usual gates (as the cost
+    // rule below would); else the press waits for a pick (the grab buffer) and then does nothing.
+    // (v1087 log: every right-hand press on the limb had no physical pick - the palm pick was not scored while a Use target existed - so Use took it.)
+    if(in.native_limb) {
+        if(in.occupied || in.choke_owns || in.takedown_offered) return GripAloneChoice::none;
+        if(in.native && in.physical && std::isfinite(in.physical->distance) && in.physical->distance>=0 && std::isfinite(in.physical->cost)) {
+            const auto& f=*in.physical;
+            if(f.kind==PalmKind::prop && f.entity==in.native->id && f.distance<=limb_reach_m) return GripAloneChoice::grab;
+            if((f.kind==PalmKind::prop && f.distance<=grab_acquire_distance) || (f.kind==PalmKind::bone && f.distance<=tuning.grip_alone_gate_m)) return GripAloneChoice::grab;
+        }
+        const std::uint64_t waited=in.now_ms>=in.since_ms?in.now_ms-in.since_ms:0;
+        return tuning.grab_buffer_ms>0 && static_cast<double>(waited)<tuning.grab_buffer_ms?GripAloneChoice::pending:GripAloneChoice::none;
+    }
     if(in.occupied || in.choke_owns || in.takedown_offered || in.fast_native) return GripAloneChoice::use;
     const bool physical=in.physical && (in.physical->kind==PalmKind::prop || in.physical->kind==PalmKind::bone || in.physical->kind==PalmKind::living) &&
         std::isfinite(in.physical->distance) && in.physical->distance>=0 && in.physical->distance<=(in.physical->kind==PalmKind::prop?grab_acquire_distance:tuning.grip_alone_gate_m) && std::isfinite(in.physical->cost);

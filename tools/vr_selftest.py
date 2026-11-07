@@ -424,6 +424,26 @@ SCENARIOS['limbgrip'] = ([[0, 1500, NEUTRAL, [0.0, 0.0, 0.0]]] + glide(1500, 250
 _CROUCH_LEVEL = {"head_pitch_degrees": 0, "head_offset": [0.0, -0.45, 0.0]}
 SCENARIOS['limbgripblind'] = [seg[:4] + [dict(seg[4], **_CROUCH_LEVEL) if len(seg) > 4 and seg[4].get('head_offset') != [0.0, 0.0, 0.0] else (seg[4] if len(seg) > 4 else {})]
                               for seg in SCENARIOS['limbgrip']]
+# v1088 severed-limb hold (use with --near limb, which stands 0.75 m from the part): crouched, the right hand reaches ONTO the part ('limbhold') or
+# stops ~20 cm above it ('limbhold20') and squeezes; it holds the part crouched, lifts it, stands up, walks forward 1.5 s, snap-turns once, stands,
+# lets go. Proof: artifacts/severed-limb-hold.csv ("press" -> choice 2 = grab, "seat" gap mm, every "hold" write's error and palm gap) and the
+# status severed_limb block (holds > 0, use_holds 0); eye pairs while it is held.
+_LIMB_UP = [0.0, -0.4, -0.3]
+_STAND = {"head_pitch_degrees": 0, "head_offset": [0.0, 0.0, 0.0]}
+
+
+def limbhold_scenario(reach):
+    return ([[0, 1500, NEUTRAL, [0.0, 0.0, 0.0]]] + glide(1500, 2500, [0.0, 0.0, 0.0], reach, 10, None, _CROUCH) +
+            [[2500, 3500, NEUTRAL, reach, _CROUCH], [3500, 4500, _G, reach, _CROUCH]] + glide(4500, 5500, reach, _LIMB_UP, 20, _G, _CROUCH) +
+            glide_head(5500, 6500, _LIMB_UP, _LIMB_UP, 10, _G, -50, 0, [0.0, -0.45, 0.0], [0.0, 0.0, 0.0], {"hand_pitch_degrees": 0}) +
+            [[6500, 8000, dict(_G, move_y=1.0), _LIMB_UP, _STAND], [8000, 8150, dict(_G, turn_x=1.0), _LIMB_UP, _STAND],
+             [8150, 9500, _G, _LIMB_UP, _STAND], [9500, 11000, NEUTRAL, _LIMB_UP, _STAND]])
+
+
+SCENARIOS['limbhold'] = limbhold_scenario([-0.2, -1.15, -0.35])
+SCENARIOS['limbhold20'] = limbhold_scenario([-0.2, -0.95, -0.35])
+for _name in ('limbhold', 'limbhold20'):
+    PAIR_TIMES[_name] = [(4200, _name + '-gripped'), (5700, _name + '-lifted'), (7500, _name + '-walking'), (9200, _name + '-after-turn')]
 CARRY_PAIRS = range(len(SCENARIOS['carry']) - 4, len(SCENARIOS['carry']) + 1)  # script segments (scenario segment + 1) with an eye pair
 PAIR_PLAN['carry'] = {k: f'carry{k}' for k in CARRY_PAIRS}
 PAIR_DELAY['carry'] = 1.0
