@@ -51,5 +51,9 @@ int main(){
     // cap 5 cm
     c.reset();HwcSide g1=hand({0,0,0},.5),g2=hand({0,0,0},.5);HwcSide gg[2]={g1,g2};
     r=c.update(gg,.01);assert(r.contact&&length(r.correction[0])<=.05+1e-12&&length(r.correction[1])<=.05+1e-12);
+    // v1065: a gun barrel (a weapon, not a blade) against the other hand and against a fast sword: pushed apart, never a clash
+    {c.reset();HwcSide G=blade({0,0,0},{0,0,.36});G.weapon_is_blade=false;G.part[1].radius=.035;
+     HwcSide gh[2]={G,hand({.06,0,.2})};auto q=c.update(gh,.01);assert(q.contact && q.correction[1].x>0 && q.event && !q.event->clash);
+     c.reset();HwcSide S=blade({.04,-.3,.2},{.04,.3,.2},{-3,0,0});HwcSide gs[2]={G,S};q=c.update(gs,.01);assert(q.contact && q.event && !q.event->clash);}
     std::puts("PASS");
 }

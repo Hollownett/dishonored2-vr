@@ -8321,7 +8321,7 @@ void prepare_head_view(void* view) noexcept {
                 for(unsigned side=0;side<2;++side) if(hands.hands&(1u<<side)) hands.grips[side]=d2vr::resolve_drawn_grip(visual[side],anchors[side]).pose;   // X-4 in one function
                 // Native hands 2c (user 2026-11-06: "hands should react to weapons and the sword, weapons should react to each other"): the two hands and the
                 // swords they hold are capsules pushed apart when they meet (hand_weapon_contact.hpp, 4 capsule pairs, no engine query), with a pulse on
-                // contact and a stronger one on a blade clash. Guns are the hand capsule only (ponytail: add the barrel capsule from authored_gun_frame).
+                // contact and a stronger one on a blade clash. A gun adds its barrel capsule (v1065).
                 if(hand_weapon_contact_enabled && (hands.hands&3u)==3u) {
                     static d2vr::HandWeaponContact hwc;static std::array<d2vr::Vec3,2> hwc_last{};static std::chrono::steady_clock::time_point hwc_at{};
                     const auto at=std::chrono::steady_clock::now();const double hdt=hwc_at.time_since_epoch().count()?std::chrono::duration<double>(at-hwc_at).count():0.;hwc_at=at;
@@ -8333,6 +8333,12 @@ void prepare_head_view(void* view) noexcept {
                         h.part[0]={gp.position,gp.position,.045};h.vel[0]=v;h.vel[1]=v;
                         const bool sword_here=side==sword_arm_now() && ((hwc_armed>>side)&1u) && !native_grab.holding(side);
                         if(sword_here) {h.has_weapon=h.weapon_is_blade=true;h.part[1]={gp.position,gp.position+d2vr::sword_blade_axis(gp,reverse_sword)*sword_blade_length,sword_blade_body_radius};}
+                        // v1065: a gun is its barrel too - the drawn gun frame this frame's weapon sweep read (authored_gun_frame), the gun shape's length
+                        // and radius - so the other hand and a sword meet the barrel the player sees, not only the hand holding it.
+                        else if(((hwc_armed>>side)&1u) && gun_drawn_frame[side] && !native_grab.holding(side)) {
+                            const auto& gf=*gun_drawn_frame[side];const auto shape=gun_shape(side);
+                            h.has_weapon=true;h.weapon_is_blade=false;h.part[1]={gf.position,gf.position+d2vr::unit(gf.basis[0])*shape[2],shape[3]};
+                        }
                     }
                     const auto r=hwc.update(hs,hdt);
                     for(unsigned side=0;side<2;++side) hands.grips[side].position=hands.grips[side].position+r.correction[side];
