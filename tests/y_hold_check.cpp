@@ -117,15 +117,10 @@ void menu_routing() {
     sample(false,Screen::pause,5.1);
     sample(true,Screen::pause,6);
     r=sample(true,Screen::pause,6.61);
-    assert(r.settings && !r.pause);
-    sample(true,Screen::pause,6.7,false,true); // panel sees held Y, not a fresh close
-    sample(false,Screen::pause,6.8,false,true);
-    sample(true,Screen::pause,7,false,true); // fresh Y closes the panel
-    r=sample(true,Screen::pause,8);
-    assert(!r.settings && r.suppress_y);
-    sample(false,Screen::pause,8.1);
+    assert(!r.settings && !r.pause && r.suppress_y);   // v1070: a hold in Pause opens nothing (VR settings are the game's Options page)
+    sample(false,Screen::pause,6.8);
     sample(true,Screen::pause,9);
-    assert(sample(true,Screen::pause,9.61).settings);
+    assert(!sample(true,Screen::pause,9.61).settings);
 }
 
 void menu_cancellation_and_legacy() {
@@ -155,7 +150,7 @@ void menu_cancellation_and_legacy() {
         menu.update(false,false,restored,false,false,3.1);
         menu.update(true,false,restored,false,false,4);
         r=menu.update(true,false,restored,false,false,4.61);
-        assert(r.pause==(restored==Screen::gameplay) && r.settings==(restored==Screen::pause));
+        assert(r.pause==(restored==Screen::gameplay) && !r.settings);
     }
     YHoldMenu legacy;
     legacy.update(false,false,Screen::gameplay,false,true,0);

@@ -68,7 +68,9 @@ public:
         const auto held=hold_.update(y,blocked,now_s,[&]{return screen==Screen::gameplay && owned_now();});
         if(held.fire) {
             out.pause=screen==Screen::gameplay && !legacy;
-            out.settings=!out.pause;
+            // v1070 (user: "holding Y should open only the game's menu, not the old VR settings"): a hold in Pause opens nothing; VR settings
+            // are the game's own Options page. Only the legacy gameplay hold (build/legacy-hold-y-settings) still opens the old panel.
+            out.settings=legacy && screen==Screen::gameplay;
             out.held_s=now_s-press_start_;
         }
         out.suppress_y=held.suppress_y || (y && (wait_release_ || screen==Screen::pause));
