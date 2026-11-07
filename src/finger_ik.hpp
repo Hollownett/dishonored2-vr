@@ -558,7 +558,12 @@ inline double held_standoff(const HandGeometry& hand,const PalmShape& shape,doub
         const auto p=finger_points(hand.finger[f],finger_turns_of(hand.finger[f],angles));
         for(unsigned b=0;b<bones;++b) for(unsigned k=(b?1:0);k<=last;++k) if(count<pts.size()) pts[count++]={p[b]+(p[b+1]-p[b])*(k/4.),hand.thickness[f]};
     };
-    chain(0,{0,0,0},1,4); // the thumb root at rest (v1063: swung open it stood 3-4 cm off the palm and pushed a book out of the fingers' reach)
+    // The thumb root at rest (v1063: swung open it stood 3-4 cm off the palm and pushed a book out of the fingers' reach) - under a wide face only: a thing
+    // narrow along the fingers (a bar, a bottle in the palm crease: at most 4.5 cm either side) lies beside it, the thumb wrapping over (it pushed a bottle
+    // 21 mm up off the finger roots and the fingers lay straight under it).
+    const Vec3 fw=unit(body.along);
+    const double along=std::abs(shape.half.x*dot(shape.basis[0],fw))+std::abs(shape.half.y*dot(shape.basis[1],fw))+std::abs(shape.half.z*dot(shape.basis[2],fw))+std::max(shape.radius,shape.radius_end);
+    if(along>.045) chain(0,{0,0,0},1,4);
     for(unsigned f=1;f<5;++f) chain(f,{0,0,0},1,1); // the knuckle pad only: the rest of a finger curls round an edge (an edge across the fingers is wrapped, not pushed off)
     double d=0;
     for(unsigned it=0;it<12;++it) {
