@@ -271,7 +271,7 @@ private:
     // Corpse hold (Task 10). All of this is touched under mutex_ (the dispatcher callback, the render-thread accessors) except the atomics.
     // corpse_enabled_: build/no-corpse-grab clears it; lockout_ is internally locked (any thread); the dispatcher cost counters are dispatcher-thread only; no_posts_ is
     // build/no-ragdoll-posts, read at install for the wake path (Task 11).
-    bool corpse_enabled_=true,no_posts_{},prop_grasp_point_=true,sphere_grip_=true,natural_seat_=true;std::uint64_t natural_seats_{};
+    bool corpse_enabled_=true,no_posts_{},prop_grasp_point_=true,sphere_grip_=true,natural_seat_=true;std::uint64_t natural_seats_{},pinch_seats_{};
     bool two_hand_=true; // phase 2: the second hand may grab a prop the other hand holds (build/no-two-hand)
     // build/legacy-sphere-grip-whole-object (read at install): the v642 ball round the thing's whole box instead of the v1024 grip ball (finger_sphere.hpp)
     bool sphere_whole_object_{};
@@ -722,9 +722,9 @@ private:
         // The sphere grip (finger_sphere.hpp): the fingers wrap one ball from now on, sized once from the bone or the box as it is at the bind. A prop gets the
         // grip ball (its thin side, at the grasp point); build/legacy-sphere-grip-whole-object keeps v642's ball round the whole box, and a wide thin prop
         // (a book, a folder) is FLAT instead: the fingers lie on its face, as a real hand holds it (build/no-grip-slab restores the ball there).
-        lane.flat=sphere_grip_ && grip_slab_ && !sphere_whole_object_ && body.bone<0 && body.bounds && rig::grip_is_flat(body.pose,*body.bounds);
+        lane.flat=sphere_grip_ && grip_slab_ && !sphere_whole_object_ && body.bone<0 && body.bounds && rig::grip_is_flat(body.pose,*body.bounds,body.hull);
         lane.sphere=!sphere_grip_?0.:body.bone>=0?rig::sphere_grip_radius_of_bone(body.bone,body.bounds):
-            body.bounds?(sphere_whole_object_?rig::sphere_grip_radius(body.pose,*body.bounds):rig::sphere_grip_ball_radius(body.pose,*body.bounds)):0.;
+            body.bounds?(sphere_whole_object_?rig::sphere_grip_radius(body.pose,*body.bounds):rig::sphere_grip_ball_radius(body.pose,*body.bounds,body.hull)):0.;
         lane.bound_at=now;if(lane.capped) lane.last_motor=0; // no write yet this hold: the first one measures its dt from the bind
         if(coupling_on_) {lane.hold_serial=++hold_serials_;lane.was_coupled=false;lane.last_offset={};}   // B16: the render thread couples the new hold afresh
         {const auto motion=read_motion_state(body);lane.bind_motion=motion.index;lane.bind_owner=motion.owner;}
@@ -989,11 +989,13 @@ private:
             auto seated=body?body->pose:WorldTrackedPose{};
             if(sphere_grip_ && body && body->bone<0 && body->bounds && p.palm.valid) {
                 // v1062: the box's own depth along the palm direction (its support), not the ball round it - a book 14 cm off the palm on its face, or inside it on edge
-                const Vec3 centre=(body->bounds->minimum+body->bounds->maximum)*.5,goal=p.palm.palm+p.palm.direction*(rig::surface_seat_depth(body->pose,*body->bounds,p.palm.direction)+rig::held_palm_depth);
+                // v1080: the real shape's box (its hull's centre and support when the body has one: prop_hull.hpp)
+                const auto gbox=rig::grip_box(body->pose,*body->bounds,body->hull);
+                const Vec3 centre=gbox?gbox->centre:(body->bounds->minimum+body->bounds->maximum)*.5,goal=p.palm.palm+p.palm.direction*(rig::surface_seat_depth(body->pose,*body->bounds,p.palm.direction,body->hull)+rig::held_palm_depth);
                 if(finite(goal) && length(goal-centre)<=.5) seated.position=seated.position+(goal-centre);
                 // v1063 natural seat: the thing turns into the hand (a long side across the palm, the nearest face flat on it) where it was taken
-                if(natural_seat_) if(const auto n=rig::natural_seat(body->pose,*body->bounds,p.palm.palm+p.palm.direction*rig::held_palm_depth,p.palm.forward,p.palm.direction);
-                    n && length(n->position-body->pose.position)<=.5) {seated=*n;++natural_seats_;}
+                if(natural_seat_) {bool pinch=false;if(const auto n=rig::natural_seat(body->pose,*body->bounds,p.palm.palm+p.palm.direction*rig::held_palm_depth,p.palm.forward,p.palm.direction,body->hull,&pinch);
+                    n && length(n->position-body->pose.position)<=.5) {seated=*n;++natural_seats_;pinch_seats_+=pinch;}}
             }
             if(body && contact && body->world==world && cleared(lane,*body,now) && lane.grab.bind(seated,*contact,grab_acquire_distance)) {
                 lane.held=body;lane.acquired=true;lane.reset_tow();lane.owner_player=p.owner.player;lane.owner_camera=p.owner.camera;
@@ -1191,6 +1193,7 @@ public:
         lane.grab.nudge(world);return true;
     }
     std::uint64_t natural_seats() {std::lock_guard<std::mutex> lock(mutex_);return natural_seats_;}
+    std::uint64_t pinch_seats() {std::lock_guard<std::mutex> lock(mutex_);return pinch_seats_;}
     // v1069: the player's world velocity (render thread, the hand servo's Fix B estimate), fed to held props' motors.
     void set_player_velocity(Vec3 v) noexcept {carrier_[0]=v.x;carrier_[1]=v.y;carrier_[2]=v.z;}
     Vec3 carrier() const noexcept {return {carrier_[0].load(),carrier_[1].load(),carrier_[2].load()};}
@@ -1559,6 +1562,9 @@ public:
          coupling_on_=hand_body_knob_enabled(std::filesystem::exists(root/L"build"/L"hand-body",ec),std::filesystem::exists(root/L"build"/L"no-hand-body",ec));
          if(collar_grab_) {std::ofstream note(loss_file_,std::ios::app);note<<"knob build/collar-grab present: chest/neck hold targets enabled (full fist only)\n";}
          // Corpse hold knobs and the tuning file, read once here so the shipped configuration is the one that was tested (valid file or the defaults).
+         prop_hull_dump=root/L"artifacts"/L"prop-hulls.jsonl"; // v1080: every new prop hull (its Havok vertices), for the lab
+         {const auto n=load_prop_shape_db(root/L"prop-shapes.bin");std::ofstream note(loss_file_,std::ios::app);   // v1080: the props' render meshes (launcher/PropShapes.cs)
+          note<<"prop shapes: "<<n<<" render-mesh entries"<<(n?"":" (no prop-shapes.bin: grips use the Havok hull or the render box)")<<"\n";}
          const auto knobs=corpse_knobs_from(root);const auto& kill=knobs.kill;const auto& loaded=knobs.loaded;
          no_posts_=kill.no_posts;prop_grasp_point_=!kill.no_prop_grasp_point;sphere_grip_=!std::filesystem::exists(root/L"build"/L"legacy-finger-grab",ec);natural_seat_=!std::filesystem::exists(root/L"build"/L"no-natural-seat",ec);
          sphere_whole_object_=std::filesystem::exists(root/L"build"/L"legacy-sphere-grip-whole-object",ec);

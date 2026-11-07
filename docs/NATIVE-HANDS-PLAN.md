@@ -199,3 +199,24 @@ Open: a book face-on on the palm is a resting hand (fingers flat), not a pinch; 
   the first 0.7 s from any motion and walking frames taught the walking lag), places only after 0.15 s of still frames past
   the 0.25 s seat nudge, and widens its off tolerance by 0.15 s of walking speed. Shoulder zone radius .30 with a .16 face
   sphere, dwell 0.12 s.
+- v1080 (branch feat/prop-grips; user's v1066-v1071 headset tests: "a screwdriver inside the hand, fingers not touching it",
+  "a book on an open palm rests on a flat hand", "a thin spoon held in a full fist"): grips from the props' REAL shapes.
+  The grip used the render model's world AABB, solved back into the body's axes (lossy, ambiguous at 45 degrees).
+  Every physical prop is a Havok hknp body: body record +0x60 is its shape; a convex shape (dispatch byte +0x24 == 2) keeps
+  its vertices in the relative array at +0x40 (u16 count, u16 offset) and its convex radius at +0x28 (box factory 0xca15b0,
+  native_world_contact_surface.hpp). The game's hulls are coarse (read from the .hkx files: book/plate/box = 8-corner boxes,
+  screwdriver 7 vertices, the spoon's hull is its bowl only, the bottle a two-hull compound), so the hull is the KEY and the
+  surface is the render mesh: launcher/PropShapes.cs writes %LOCALAPPDATA%\DishonoredVR\prop-shapes.bin (2679 model/scale
+  entries, surface-sampled render-mesh points under the FNV-1a hash of the hull's vertices at 0.1 mm; hull and mesh frames
+  agree to 0.0 mm). src/prop_hull.hpp builds a PropShape per shape (cached for the session): the whole mesh's own frame
+  (exact box at any pose), and up to six convex slabs along a long thing's axis that the fingers meet with an exact
+  signed distance (HeldShape/PalmShape.hull). A hull alone (no entry) is used only when it covers the render box
+  (2.5 cm); composite shapes keep the render box (status prop_hull_composite + vtable). natural_seat, the flat/ball choice,
+  the seat depth, the seat-out and the thumb's face rules read the real shape. Pinch: a bar whose slab at the grasped spot
+  is thin (<= 6 mm half thick, <= 16 mm half wide: a spoon/fork handle, a pen, a shaft) is seated at the fingertips
+  (8.5 cm along the fingers, 3.5 cm off the palm) instead of in the palm crease. Lab: `sh tools/hand_lab.sh realshapes
+  corvo --only real_` (real render meshes + the database lookup by the Havok hull, as the DLL does; data from
+  tools/prop_mesh_export, local, never committed); tests/prop_hull_check.cpp (C++ key == launcher key for book_01).
+  Not covered: things held with the game's Use (bottles, glasses, severed limbs) keep the cylinder/profile path; compound
+  bodies (the bottle) keep the box. Status: prop_hulls, prop_hull_meshes, pinch_seats; new hulls are appended to
+  artifacts/prop-hulls.jsonl for lab replay.

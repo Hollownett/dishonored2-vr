@@ -212,6 +212,8 @@ sealed class MainForm : Form
             if (shotFile == null && PoseRender.NoteHandMeshesMissing(env.P("artifacts", "game-art")) && Env.FindGameDir() is string handGame)
                 try { await Task.Run(() => PoseRender.ExportNoteHandMeshes(handGame, env.P("artifacts", "game-art"))); }
                 catch (Exception ex) { Append(log, "Note hand mesh import failed: " + ex.Message, Ui.Gold); }
+            if (shotFile == null && Env.FindGameDir() is string propGame)  // prop hull -> render mesh database; never blocks the UI or the launch
+                _ = Task.Run(() => { try { if (PropShapes.EnsureCurrent(propGame, PropShapes.DefaultPath) is string line) BeginInvoke(() => Append(log, line, Ui.Text)); } catch (Exception ex) { BeginInvoke(() => Append(log, "Prop shapes not built: " + ex.Message, Ui.Gold)); } });
             artState = Ui.Art.Present || noArt ? null : Env.FindGameDir() == null ? "needs Dishonored 2 installed" : "not imported yet";
             await RefreshChecks(); LoadSettings();
             if (shotFile == null && !exitAfterShot) _ = AutoFindDlss();  // review runs must not write a knob into a real mod home

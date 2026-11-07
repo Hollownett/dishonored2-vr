@@ -20,6 +20,7 @@
 #include <cstdio>
 #include <fstream>
 #include <functional>
+#include <map>
 #include <iostream>
 #include <memory>
 #include <sstream>
@@ -35,6 +36,48 @@ const char* const kFingers[5]={"thumb","index","medium","ring","pinky"};
 
 std::string num(double v) {char b[48];std::snprintf(b,sizeof b,"%.6f",v);return b;}
 std::string vec(Vec3 v) {return "["+num(v.x)+","+num(v.y)+","+num(v.z)+"]";}
+// v1080 real shapes (src/prop_hull.hpp): each prop's render mesh (artifacts/prop-meshes/<kind>.json) as the runtime builds it from prop-shapes.bin - the
+// whole mesh's frame and its convex slabs - and its Havok hull (artifacts/prop-meshes/hulls.jsonl), both read from the game's files by
+// tools/prop_mesh_export. Local game data like the player asset pack: never committed; without the files there are no real-shape scenes.
+struct RealProp {std::string kind,source;d2vr::PropShape shape;std::vector<Vec3> mesh;std::vector<std::array<int,3>> tris;std::size_t hull_vertices{};};
+std::map<const d2vr::ConvexHull*,const RealProp*> real_of;
+std::string only_prefix; // --only PREFIX: just the scenes whose name starts with it // the first piece of each prop draws its render mesh
+std::vector<double> json_numbers(const std::string& s,const std::string& key) { // every number in the (nested) array after "key"
+    std::vector<double> out;auto at=s.find("\""+key+"\"");if(at==std::string::npos) return out;at=s.find('[',at);if(at==std::string::npos) return out;
+    int depth=0;for(const char* p=s.c_str()+at;*p;) {
+        if(*p=='[') {++depth;++p;} else if(*p==']') {if(--depth==0) break;++p;}
+        else if((*p>='0' && *p<='9') || *p=='-' || *p=='.') {char* e{};out.push_back(std::strtod(p,&e));p=e;} else ++p;}
+    return out;
+}
+std::string json_text(const std::string& s,const std::string& key) {
+    auto at=s.find("\""+key+"\"");if(at==std::string::npos) return {};at=s.find('"',s.find(':',at)+1);return at==std::string::npos?std::string{}:s.substr(at+1,s.find('"',at+1)-at-1);}
+double json_value(const std::string& s,const std::string& key,double fallback) {auto at=s.find("\""+key+"\"");return at==std::string::npos?fallback:std::strtod(s.c_str()+s.find(':',at)+1,nullptr);}
+std::vector<RealProp>& real_props() {
+    static std::vector<RealProp> props;static bool loaded=false;if(loaded) return props;loaded=true;
+    std::map<std::string,std::pair<std::vector<Vec3>,double>> havok; // the biggest Havok hull per kind
+    std::ifstream hulls("artifacts/prop-meshes/hulls.jsonl");
+    for(std::string line;std::getline(hulls,line);) {
+        const auto kind=json_text(line,"kind");const auto v=json_numbers(line,"vertices");if(kind.empty() || v.size()<3) continue;
+        std::vector<Vec3> p;for(std::size_t i=0;i+2<v.size();i+=3) p.push_back({v[i],v[i+1],v[i+2]});
+        if(p.size()>havok[kind].first.size()) havok[kind]={p,json_value(line,"radius",0)};
+    }
+    for(const char* kind:{"book","spoon","screwdriver","bottle","plate","box","head"}) {
+        std::ifstream f(std::string("artifacts/prop-meshes/")+kind+".json");if(!f) continue;
+        const std::string s((std::istreambuf_iterator<char>(f)),std::istreambuf_iterator<char>());const auto v=json_numbers(s,"vertices"),t=json_numbers(s,"triangles");
+        RealProp r{};r.kind=kind;for(std::size_t i=0;i+2<v.size();i+=3) r.mesh.push_back({v[i],v[i+1],v[i+2]});
+        for(std::size_t i=0;i+2<t.size();i+=3) r.tris.push_back({int(t[i]),int(t[i+1]),int(t[i+2])});
+        r.hull_vertices=havok[kind].first.size();
+        // as the DLL finds it: prop-shapes.bin under the key of the Havok hull's vertices (also padded to a multiple of 4 with the last one, as Havok stores them)
+        static const std::size_t db_entries=d2vr::load_prop_shape_db("artifacts/prop-meshes/prop-shapes.bin");(void)db_entries;
+        auto hv=havok[kind].first;const std::vector<Vec3>* found=nullptr;
+        for(int pad=0;pad<2 && !found && !hv.empty();++pad) {if(pad) while(hv.size()%4) hv.push_back(hv.back());
+            if(const auto it=d2vr::prop_shape_db().find(d2vr::hull_key(hv));it!=d2vr::prop_shape_db().end()) found=&it->second;}
+        if(found) {if(auto ps=d2vr::build_prop_shape(*found,0,true)) {r.shape=std::move(*ps);r.source="prop-shapes.bin by its Havok hull";props.push_back(std::move(r));}}
+        else if(auto ps=d2vr::build_prop_shape(r.mesh,0,true)) {r.shape=std::move(*ps);r.source="render mesh vertices (no database entry)";props.push_back(std::move(r));}
+    }
+    for(const auto& p:props) real_of[&p.shape.pieces.front()]=&p;
+    return props;
+}
 std::string put(const Xf& x,double s) { // 4x4 column-major, rotation columns scaled by s (renderer's transform format)
     const Vec3 c[3]={rotated(x.q,{s,0,0}),rotated(x.q,{0,s,0}),rotated(x.q,{0,0,s})};
     char buf[400];
@@ -86,7 +129,23 @@ struct Scene {
 
 std::string shape_json(const r::HeldShape& s,const std::string& name,const char* colour) {
     std::string o="{\"name\":"+quote(name)+",\"color\":"+colour+",\"center\":"+vec(s.frame.position);
-    if(s.rim>=0 && s.half.x>0)
+    const auto world=[&](Vec3 q) {return s.frame.position+s.frame.basis[0]*q.x+s.frame.basis[1]*q.y+s.frame.basis[2]*q.z;};
+    if(s.hull && !s.hull->solid)
+        o+=",\"kind\":\"capsule\",\"axis\":"+vec(s.frame.basis[0])+",\"half\":"+num(std::abs(s.hull->b.x-s.hull->a.x)*.5)+",\"radius\":"+num(s.hull->radius);
+    else if(s.hull) { // a real-shape piece: its hull's corners pushed out by the convex radius along their faces; the first piece also carries the render mesh
+        o+=",\"kind\":\"hull\",\"points\":[";bool first=true;
+        for(const auto& v:s.hull->vertices) {bool any=false;
+            for(const auto& p:s.hull->planes) if(std::abs(p[0]*v.x+p[1]*v.y+p[2]*v.z-p[3])<1e-4) {o+=(first?"":",")+vec(world(v+Vec3{p[0],p[1],p[2]}*s.hull->radius));first=false;any=true;}
+            if(!any) {o+=(first?"":",")+vec(world(v));first=false;}}
+        o+="]";
+        if(const auto it=real_of.find(s.hull);it!=real_of.end() && !it->second->mesh.empty()) {
+            const auto& m=*it->second;
+            o+=",\"mesh\":{\"points\":[";for(std::size_t i=0;i<m.mesh.size();++i) o+=(i?",":"")+vec(world(s.hull->to_own(m.mesh[i])));
+            o+="],\"triangles\":[";for(std::size_t i=0;i<m.tris.size();++i) {const auto& t=m.tris[i];o+=std::string(i?",":"")+"["+std::to_string(t[0])+","+std::to_string(t[1])+","+std::to_string(t[2])+"]";}
+            o+="]}";
+        }
+    }
+    else if(s.rim>=0 && s.half.x>0)
         o+=",\"kind\":\"cylinder\",\"axis\":"+vec(s.frame.basis[0])+",\"half\":"+num(s.half.x)+",\"radius\":"+num(s.radius);
     else if(s.radius>0 && s.half.y==0 && s.half.z==0)
         o+=",\"kind\":\"capsule\",\"axis\":"+vec(s.frame.basis[0])+",\"half\":"+num(s.half.x)+",\"radius\":"+num(s.radius)+(s.radius_end>=0?",\"radius_end\":"+num(s.radius_end):std::string());
@@ -309,6 +368,7 @@ int run(int argc,char** argv) {
     for(int i=2;i<argc;++i) {
         const std::string a=argv[i];
         if(a=="--snapshot" && i+1<argc) snapshot_spec=argv[++i];
+        else if(a=="--only" && i+1<argc) only_prefix=argv[++i];
         else if(a.rfind("--snapshot=",0)==0) snapshot_spec=a.substr(11);
         else if(a=="--refit") refit.on=true;
         else if(a=="--sphere") snapshot_sphere=true;
@@ -363,8 +423,10 @@ int run(int argc,char** argv) {
     // v1062: the seat - the grab moves the thing along the palm normal until the open hand lies on it (finger_ik.hpp held_standoff); --no-seat: as placed.
     const auto seat_out=[](std::vector<r::HeldShape> v,const WorldTrackedPose& palm,const r::HandGeometry& g) {
         if(no_seat) return v;const auto into=[&](Vec3 x) {return Vec3{dot(x,palm.basis[0]),dot(x,palm.basis[1]),dot(x,palm.basis[2])};};
-        for(auto& s:v) {const r::PalmShape l{into(s.frame.position-palm.position),{into(s.frame.basis[0]),into(s.frame.basis[1]),into(s.frame.basis[2])},s.half,s.radius,s.radius_end,s.rim,s.fingers_only};
-            const double d=r::held_standoff(g,l);if(std::getenv("LAB_SEAT_DEBUG")) std::fprintf(stderr,"standoff %.1f mm local %.3f %.3f %.3f half %.3f %.3f %.3f\n",d*1000,l.position.x,l.position.y,l.position.z,l.half.x,l.half.y,l.half.z);s.frame.position=s.frame.position+r::palm_normal(palm,g)*d;}
+        double dmax=-1e9;for(const auto& s:v) {const r::PalmShape l{into(s.frame.position-palm.position),{into(s.frame.basis[0]),into(s.frame.basis[1]),into(s.frame.basis[2])},s.half,s.radius,s.radius_end,s.rim,s.fingers_only,s.hull};
+            dmax=std::max(dmax,r::held_standoff(g,l));}
+        for(auto& s:v) {const r::PalmShape l{into(s.frame.position-palm.position),{into(s.frame.basis[0]),into(s.frame.basis[1]),into(s.frame.basis[2])},s.half,s.radius,s.radius_end,s.rim,s.fingers_only,s.hull};
+            const double d=dmax;if(std::getenv("LAB_SEAT_DEBUG")) std::fprintf(stderr,"standoff %.1f mm local %.3f %.3f %.3f half %.3f %.3f %.3f\n",d*1000,l.position.x,l.position.y,l.position.z,l.half.x,l.half.y,l.half.z);s.frame.position=s.frame.position+r::palm_normal(palm,g)*d;}
         return v;};
     const auto old_pose=[](const WorldTrackedPose& palm,const r::HandGeometry& g,Vec3 half,Vec3 dp,Vec3 turn) {
         const Vec3 n=r::palm_normal(palm,g);const double lo=std::min({half.x,half.y,half.z});
@@ -376,7 +438,7 @@ int run(int argc,char** argv) {
     // v1066: a native Use hold of a severed part: the bottle seat, pushed out along the palm normal until the hand lies on it (dxgi_probe native_seat_push)
     const auto native_push=[](auto inner) {return [inner](const WorldTrackedPose& palm,const r::HandGeometry& g) {auto v=inner(palm,g);
         const auto into=[&](Vec3 x) {return Vec3{dot(x,palm.basis[0]),dot(x,palm.basis[1]),dot(x,palm.basis[2])};};
-        double d=0;for(const auto& sh:v) d=std::max(d,r::held_standoff(g,{into(sh.frame.position-palm.position),{into(sh.frame.basis[0]),into(sh.frame.basis[1]),into(sh.frame.basis[2])},sh.half,sh.radius,sh.radius_end,sh.rim,sh.fingers_only},r::seat_max_push,0.));
+        double d=0;for(const auto& sh:v) d=std::max(d,r::held_standoff(g,{into(sh.frame.position-palm.position),{into(sh.frame.basis[0]),into(sh.frame.basis[1]),into(sh.frame.basis[2])},sh.half,sh.radius,sh.radius_end,sh.rim,sh.fingers_only,sh.hull},r::seat_max_push,0.));
         for(auto& sh:v) sh.frame.position=sh.frame.position+r::palm_normal(palm,g)*d;return v;};};
     std::vector<Scene> scenes{
         {"open","Open hand (grip 0, trigger 0)",hold_at,hold_fingers,hold_in,0.f,0.f,false,{},""},
@@ -489,6 +551,42 @@ int run(int argc,char** argv) {
         c.shapes=[m=c.moving](const WorldTrackedPose& palm,const r::HandGeometry& g) {return m(palm,g,Vec3{},Vec3{});};c.ghost=c.shapes;
         scenes.push_back(c);
     }
+    // v1080 real shapes: each prop's render-mesh shape (real_props, as the runtime builds it) taken off square, seated by the natural seat (a pinch for a
+    // thin bar) and the seat-out, the fingers on its convex pieces; the render mesh drawn under them. Long things are also taken near an end.
+    for(const auto& p:real_props()) {
+        struct Take {const char* tag;Vec3 tilt;Vec3 offset;};
+        const d2vr::PropShape* shape=&p.shape;
+        if(std::getenv("LAB_SEAT_DEBUG")) {std::fprintf(stderr,"%s pieces (own half width x thickness, mm):",p.kind.c_str());
+            for(const auto& q:shape->pieces) std::fprintf(stderr," %.1fx%.1f",q.half.y*1000,q.half.z*1000);std::fprintf(stderr,"\n");}
+        for(const auto& t:std::vector<Take>{{"",{.25,.2,.15},{.02,0,.02}},{"_end",{.1,.3,0},{.07,0,0}}}) {
+            if(*t.tag && shape->pieces.size()<2) continue;
+            Scene c{};c.name=_strdup(("real_"+p.kind+t.tag).c_str());c.held=true;c.where=hold_at;c.fingers=hold_fingers;c.normal=hold_in;c.squeeze=1.f;c.index=0.f;
+            const auto& w=shape->whole;
+            c.title=_strdup((p.kind+(*t.tag?" taken near an end":"")+" ("+p.source+", "+std::to_string(shape->pieces.size())+" piece(s), "+
+                num(w.half.x*200).substr(0,4)+" x "+num(w.half.y*200).substr(0,4)+" x "+num(w.half.z*200).substr(0,4)+" cm; Havok hull "+std::to_string(p.hull_vertices)+
+                " vertices): natural seat + seat-out on the real shape").c_str());
+            c.shape_name="real shape (render mesh pieces)";
+            c.moving=[t,shape,seat_out,name=c.name](const WorldTrackedPose& palm,const r::HandGeometry& g,Vec3,Vec3) {
+                const Vec3 n=r::palm_normal(palm,g),fp=g.finger[2].pivot,f0=palm.basis[0]*fp.x+palm.basis[1]*fp.y+palm.basis[2]*fp.z;Vec3 fw=unit(cross(n,palm.basis[0]));if(dot(fw,f0)<0) fw=fw*-1.;
+                // as a hand takes it: its long side across the palm, its thinnest toward the palm, then tilted (the pose's rows: the body axes in the world)
+                const auto& w=shape->whole;const Vec3 t2=n,t0=unit(palm.basis[0]-n*dot(palm.basis[0],n)),t1=cross(t2,t0);WorldTrackedPose pose{};
+                for(unsigned j=0;j<3;++j) {const double c0=j==0?w.axes[0].x:j==1?w.axes[0].y:w.axes[0].z,c1=j==0?w.axes[1].x:j==1?w.axes[1].y:w.axes[1].z,c2=j==0?w.axes[2].x:j==1?w.axes[2].y:w.axes[2].z;
+                    pose.basis[j]=t0*c0+t1*c1+t2*c2;}
+                const auto spin=[](Vec3 v,Vec3 k,double a) {return v*std::cos(a)+cross(k,v)*std::sin(a)+k*(dot(k,v)*(1-std::cos(a)));};
+                for(unsigned k=0;k<3;++k) {const double a=k==0?t.tilt.x:k==1?t.tilt.y:t.tilt.z;const Vec3 ax=unit(palm.basis[k]);if(a!=0) for(auto& row:pose.basis) row=spin(row,ax,a);}
+                pose.position=palm.position+n*(r::held_palm_depth+shape->whole.half.z)+palm.basis[0]*t.offset.x+palm.basis[2]*t.offset.z-r::body_direction(pose,shape->whole.centre);
+                const double e0=length(shape->whole.half);const NativeGrabBounds b{pose.position-Vec3{e0,e0,e0},pose.position+Vec3{e0,e0,e0}}; // (a real shape ignores the bounds)
+                bool pinch=false;const auto seat=r::natural_seat(pose,b,palm.position+n*r::held_palm_depth,fw,n,shape,&pinch);
+                auto use=seat?*seat:pose;
+                if(!seat) {std::fprintf(stderr,"%s: natural seat unsolvable, support seat\n",name);use.position=use.position+(palm.position+n*(r::held_palm_depth+r::surface_seat_depth(pose,b,n,shape))-r::grip_box(pose,b,shape)->centre);}
+                if(std::getenv("LAB_SEAT_DEBUG")) std::fprintf(stderr,"%s: %s seat\n",name,pinch?"pinch":"palm");
+                std::vector<r::HeldShape> v(shape->pieces.size());v.resize(r::prop_grip_shapes(use,*shape,v.data(),static_cast<unsigned>(v.size())));
+                return seat_out(v,palm,g);};
+            c.shapes=[m=c.moving](const WorldTrackedPose& palm,const r::HandGeometry& g) {return m(palm,g,Vec3{},Vec3{});};c.ghost=c.shapes;
+            scenes.push_back(c);
+        }
+    }
+    if(!only_prefix.empty()) scenes.erase(std::remove_if(scenes.begin(),scenes.end(),[](const Scene& s) {return std::string(s.name).rfind(only_prefix,0)!=0;}),scenes.end());
     if(!snapshot_spec.empty()) scenes=snapshot_scenes(snapshot_spec,refit);
     if(!palette_spec.empty()) load_palette(palette_spec);
     std::string json="{\"character\":"+quote(character)+",\"frames\":[";
