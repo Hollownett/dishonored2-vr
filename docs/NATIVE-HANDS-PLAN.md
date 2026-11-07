@@ -199,3 +199,19 @@ Open: a book face-on on the palm is a resting hand (fingers flat), not a pinch; 
   the first 0.7 s from any motion and walking frames taught the walking lag), places only after 0.15 s of still frames past
   the 0.25 s seat nudge, and widens its off tolerance by 0.15 s of walking speed. Shoulder zone radius .30 with a .16 face
   sphere, dwell 0.12 s.
+- v1070: holding Y opens only the game's pause menu (no legacy VR settings panel from a hold in Pause).
+- v1071 (user's v1070 test: a carried object still out of sync): the Task 12 prop seat pulled the drawn hand onto the prop's
+  physics grasp point (up to 0.35 m), which trails while walking or swinging, so the placement drew the prop on a lagging
+  hand. The seat ends once HeldBind has learned the hold (held_bound_entity); the off tolerance also grows with hand speed.
+- v1072 (user's v1071 test: "still out of sync and still flickering, and the hand which holds it" while running; the old VR
+  settings panel on the first menu open):
+  - Match reach of held things 2 cm -> 0.5 m. A draw's model is F times a fixed part offset (weapons: up to 13 cm), so a prop
+    whose mesh sits off its frame was never placed at all since v1067. The 9 axes must still agree within 0.004.
+  - Place::publish_bound keeps each side's previous read F (same identity, within 0.6 m) as an alternative with its own exact
+    delta and previous rows: the engine composes a render's constants before the eye-0 begin where F is read (v901), so when
+    the game writes the next tick in between, a moving thing's draws carry the previous F and missed every match (flicker).
+    Weapons get it too. Status: arm_flicker.weapon_draw.place.alt, held_bind outcomes, held_skip, prop_seat_frames.
+  - The native "VR Settings" menu item never falls back to the drawn (legacy) panel; a failed first open retries once in
+    the same drain (status native_options_page[11] = open failures).
+  - Sim: `holdrun --near bottle` (take a bottle, hold it still 2 s, run 5 s, stop); `--lead-ms` now also works with
+    `--launch`; sims need `build/diagnostics` in the worktree for the full status.

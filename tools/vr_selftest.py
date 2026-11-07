@@ -151,6 +151,12 @@ SCENARIOS['showbottle'] = ([[0, 2000, NEUTRAL, _HA, _SBL(-75)], [2000, 3300, {"r
                            glide_look(4600, 5600, _HA, _HC, 20, _GRIP, -75, -61, _SB) + [[5600, 7600, _GRIP, _HC, _SBL(-61)]] +
                            glide(7600, 7850, _HC, _HD, 8, _GRIP, _SBL(-61)) + [[7850, 10500, NEUTRAL, _HD, _SBL(-61)]])
 PAIR_PLAN['showbottle'] = {1: 'bottle-open-approach', 2: 'bottle-fist-closing', 3: 'bottle-fist-held-low', 24: 'bottle-held-chest'}  # scenario segments 0, 1, 2, 23
+# v1072 (user: "a carried object is out of sync with the hand and flickers when running"): take the bottle like showbottle, hold it still at the
+# chest for 2 s (the draw binding learns the hold), run forward 5 s with it, stop, let go. Pairs: still, running early/late, stopped.
+SCENARIOS['holdrun'] = (SCENARIOS['showbottle'][:3] + glide_look(4600, 5600, _HA, _HC, 20, _GRIP, -75, -61, _SB) +
+                        [[5600, 7600, _GRIP, _HC, _SBL(-61)], [7600, 10100, dict(_GRIP, move_y=1.0), _HC, _SBL(-61)],
+                         [10100, 12600, dict(_GRIP, move_y=1.0), _HC, _SBL(-61)], [12600, 14100, _GRIP, _HC, _SBL(-61)], [14100, 16000, NEUTRAL, _HC, _SBL(-61)]])
+PAIR_PLAN['holdrun'] = {24: 'held-still-chest', 25: 'held-running-early', 26: 'held-running-late', 27: 'held-stopped'}
 # (b) corpse limb: the head 71 deg down at the wrist (hand 1.6 m below the eye, 0.55 m ahead), full fist, then pull and walk backwards. The pistol
 # hand is raised out of the picture. (A 20 cm lean over the hand put the avatar's coat front between the eye and the hand, sim v470.)
 _LEAN = {"left_hand_offset": [-0.2, 0.25, 0.0]}
@@ -1231,6 +1237,9 @@ def main():
     if a.launch and not game_pid():
         if not steam_account_ok():
             sys.exit('Steam is signed into another account than the saves belong to: a launch would let Steam Cloud rewrite the save folder')
+        # 2026-11-07: a sim launch ran over the user's No Man's Sky session. Steam tracking any other game (or SteamVR) = the user is playing.
+        if subprocess.run([sys.executable, os.path.join(ROOT, 'tools', 'other_game_running.py')]).returncode != 0:
+            sys.exit('Another game (or SteamVR) is running: the user is playing, no launch')
         subprocess.run([sys.executable, os.path.join(ROOT, 'tools', 'game_keys.py'), '--prepare-config'], check=True)
         os.startfile('steam://rungameid/403640')
         for _ in range(90):
@@ -1248,6 +1257,8 @@ def main():
     elif a.load_save:  # title -> Campaign -> Continue (posted to the window; the load screen is dismissed by the mod's pad)
         keys(0x0D, 0x0D, 0x0D)
         time.sleep(20)
+    if a.lead_ms and not a.inject_at_title:  # v1072: a slow save load after --launch needs a longer lead-in too
+        LEAD_MS = a.lead_ms
     if a.script:  # the script's own lead-in (LEAD_MS) and length; the run is judged only by the generic checks (gameplay reached, no crash)
         a.scenario = 'idle'
         script = os.path.abspath(a.script)
@@ -1952,6 +1963,14 @@ def main():
                 moved = None
         check('corpse found', corpse is not None, hex(corpse[0]) if corpse else 'none')
         check('body dragged', moved is not None and moved > .3, f'pelvis moved {moved:.2f} m' if moved is not None else 'no reading')
+    if a.scenario == 'holdrun':  # v1072: the held thing's draws placed in the hand while running (fields live under arm_flicker)
+        af = status.get('arm_flicker') or {}
+        print('held_bind [new, learning, off_moving, off_still, relearn, placed] per hand:', af.get('held_bind'), 'held_draw_placed', af.get('held_draw_placed'),
+              'held_skip [kind, read, image]', af.get('held_skip'), 'prop_seat_frames [seated L,R, in hand L,R]', af.get('prop_seat_frames'))
+        print('image_skin kinds:', (af.get('image_skin') or {}).get('kinds'), 'place:', json.dumps((af.get('weapon_draw') or {}).get('place'))[:1500])
+        print('hand_visual:', json.dumps(status.get('hand_visual')), 'physical picked:', (status.get('physical_grab') or {}).get('picked') if isinstance(status.get('physical_grab'), dict) else None)
+        placed = af.get('held_draw_placed') or [0, 0]
+        check('held thing placed in the hand', max(placed) > 100, f'held_draw_placed {placed}')
     if a.scenario in ('hold', 'holdup', 'showbottle', 'holdneck', 'holdneck2', 'holdneck3'):  # the fist takes the bottle (physical grab, or the game's own HoldObject), the swing throws it
         try:
             result = json.load(open(os.path.join(run_dir, 'dxgi-probe-result.json')))

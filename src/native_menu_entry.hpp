@@ -22,7 +22,7 @@ namespace d2vr {
 //          *(m+0xA708), size *(m+0xA710), path at m+0xA608; matching movies are patched in place before
 //          the player is created from that buffer (idempotent; any byte mismatch leaves the file alone).
 //  0x34800 the Iggy external-call hub (self, player, call): *(const char**)call is the function name;
-//          VR_SETTINGS_* is answered here (returns 1) and raises `requested`, everything else passes.
+//          VR_SETTINGS_* is answered here (returns 1) and queues the native page (v1072: never the drawn panel), everything else passes.
 class NativeMenuEntry {
 public:
     using OwnedMoviePatch=bool (*)(const char*,unsigned char*,std::size_t) noexcept;
@@ -86,11 +86,17 @@ private:
     static void __fastcall on_deferred(void* owner,void* file,void*) {
         void* iggy=nullptr;
         __try {iggy=*reinterpret_cast<void* const*>(static_cast<const char*>(file)+0x1608);} __except(EXCEPTION_EXECUTE_HANDLER) {iggy=nullptr;}
-        if(!iggy) {if(reinterpret_cast<std::uintptr_t>(owner)==open_page) requested=true;return;}
+        // v1072 (user: "when I open a menu for the first time I still see the old VR settings menu, remove it"): the drawn panel is never a
+        // fallback any more. VR settings live only on the game's own options page; a page that cannot open leaves the menu as it is.
+        if(!iggy) {if(reinterpret_cast<std::uintptr_t>(owner)==open_page) ++open_failures;return;}
         switch(const auto event=reinterpret_cast<std::uintptr_t>(owner)) {
             case open_page:
-                if(NativeOptionsPage::open(base_,iggy) && NativeOptionsPage::show(base_,iggy)) ++native_pages;
-                else {NativeOptionsPage::closed();requested=true;} // the drawn panel instead
+                // The first open of a session may meet the options data half-built: one more write in the same drain, then give up quietly.
+                for(int attempt=0;;++attempt) {
+                    if(NativeOptionsPage::open(base_,iggy) && NativeOptionsPage::show(base_,iggy)) {++native_pages;break;}
+                    NativeOptionsPage::closed();
+                    if(attempt>=1) {++open_failures;break;}
+                }
                 break;
             case changed_value:NativeOptionsPage::changed(base_,iggy);break;
             case restore_page:if(NativeOptionsPage::restore(base_,iggy)) NativeOptionsPage::show(base_,iggy);break;
@@ -113,7 +119,7 @@ private:
         char name[64];
         if(enabled.load() && call && player && call_name(call,name)) {
             if(!std::strcmp(name,"VR_SETTINGS_EVT") || !std::strcmp(name,"VR_SETTINGS_OPEN_REQUEST")) {
-                ++clicks;if(!enqueue(player,call,open_page)) requested=true;
+                ++clicks;if(!enqueue(player,call,open_page)) ++open_failures;
                 return 1;
             }
             if(!std::strcmp(name,"VR_SETTING_CHANGED")) {enqueue(player,call,changed_value);return 1;}
@@ -142,7 +148,7 @@ private:
     }
 public:
     inline static std::atomic<bool> enabled{false},requested{false};
-    inline static std::atomic<std::uint64_t> patched{},mismatched{},clicks{},native_pages{},queued{};
+    inline static std::atomic<std::uint64_t> patched{},mismatched{},clicks{},native_pages{},queued{},open_failures{};
     static bool install(std::uintptr_t base) noexcept {
         requested=false;base_=base;
         const bool hub=hook(base,hub_rva,hub_code,reinterpret_cast<void*>(&hub_hook),hub_original_,target_[1]);

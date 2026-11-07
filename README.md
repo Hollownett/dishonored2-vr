@@ -5,8 +5,27 @@ You play in first person with stereo 3D, head tracking and both hands: swing and
 draw the pistol from your hip, grab guards and bodies, push doors open, read notes held in your hand,
 and pick powers from the game's own wheel.
 
-> **Status: test builds.** Each release is a numbered test candidate (for example v713). It is playable,
-> but expect rough edges. Please report what you see in the headset.
+<p align="center">
+  <img src="docs/images/hero-hands-crossbow.jpg" alt="First-person view: both of the player's hands in front of a pipe-lined room, a crossbow in the right hand" width="800">
+</p>
+
+> **Status: early release.** The mod is playable, but expect rough edges. Please report what you see in the headset
+> and attach the logs described under Troubleshooting.
+
+## Screenshots
+
+Left-eye captures from the mod's own test runs (simulated controller input), not polished promo shots.
+
+<p align="center">
+  <img src="docs/images/weapon-in-hand.jpg" alt="A weapon held in the right hand" width="49%">
+  <img src="docs/images/hand-and-prop.jpg" alt="An open hand reaching toward a prop floating above the floor" width="49%">
+  <img src="docs/images/hands-and-heart.jpg" alt="Both hands and the Heart lying on the floor" width="49%">
+  <img src="docs/images/power-wheel-wrist.jpg" alt="The Quick Access Wheel open in front of the player, hands visible" width="49%">
+</p>
+
+<!-- TODO screenshot: headset-quality capture of the sword in the right fist mid-swing -->
+<!-- TODO screenshot: the left-wrist watch (health, mana, ammo) turned toward the face -->
+<!-- TODO screenshot: the VR Settings page in the game's options menu (current build) -->
 
 ## Features
 
@@ -121,6 +140,14 @@ The sword and your hands need no buttons: attack, block, grab and throw with rea
 The same guide, with pictures, is in the game (right grip at your right temple, or VR Settings >
 Controls & gestures) and on the launcher's **Controls** page. Full list: [docs/VR-CONTROLS.md](docs/VR-CONTROLS.md).
 
+## Known limitations
+
+- Windows only, Dishonored 2 on Steam. A Steam library outside `C:\Program Files (x86)\Steam` is not supported yet.
+- The game must run windowed or borderless; it needs a strong GPU because both eyes are rendered.
+- Some options (for example performance mode and automatic recentering on scripted moments) are not yet confirmed in a headset.
+  See [docs/PLAYING.md](docs/PLAYING.md) for details.
+- Linux (Proton + SteamVR) is experimental: [linux/README.md](linux/README.md).
+
 ## Troubleshooting
 
 - **Walking looks steppy or the game runs at half rate:** disable Synchronous Spacewarp in Virtual Desktop.
@@ -140,24 +167,13 @@ Controls & gestures) and on the launcher's **Controls** page. Full list: [docs/V
 The mod does not modify game files. Settings it changes in the game while VR is on (motion blur,
 depth of field, camera bob, HUD size) are restored when VR stops.
 
-## Building from source
+## For developers
 
-- The mod DLL: Visual Studio 2022 (C++ x64), `tools\build-msvc.cmd`. Checks and the simulator are described in
-  [docs/TESTING.md](docs/TESTING.md).
-- The launcher: .NET 8+ SDK, `cd launcher` then `dotnet publish -c Release`; see [docs/LAUNCHER.md](docs/LAUNCHER.md).
-- The controller pictures: `python tools\render_touch_plus.py` (renders SteamVR's Touch Plus models).
-- Detailed playing notes: [docs/PLAYING.md](docs/PLAYING.md). Development history: [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
+Build steps and the test harness: [docs/TESTING.md](docs/TESTING.md), [docs/LAUNCHER.md](docs/LAUNCHER.md).
+Development history: [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md). Playing notes: [docs/PLAYING.md](docs/PLAYING.md).
 
-## Credits and license
+## License and credits
 
-The mod's own code is released under the [MIT License](LICENSE).
-
-- Grab mathematics, snap-turn and menu-tap policy adapted from
-  [Dishonored-VR](https://github.com/VR-Stereo-Hub/Dishonored-VR) (zlib license).
-- Khronos OpenXR SDK and loader, MinHook, SMAA, AMD FidelityFX FSR 3 and FSR 4, NVIDIA DLSS (not bundled).
-  Their licenses and exact sources are listed in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
-- No game assets are included: all art the mod shows is read from your own install at run time.
-
-Dishonored 2 is a trademark of ZeniMax Media Inc. (Arkane Studios, Bethesda Softworks). Meta Quest and Touch Plus
-are trademarks of Meta Platforms, Inc. This is an unofficial fan project, not affiliated with or endorsed by them.
-
+Released under the [MIT License](LICENSE). Third-party code and licenses are listed in
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). Dishonored 2 belongs to Arkane Studios and Bethesda;
+no game files are distributed, and the mod needs your own copy of the game.

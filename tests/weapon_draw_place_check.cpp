@@ -354,6 +354,56 @@ int main() {
         std::printf("v1106 depth/colour identical=1 cost=%.1f ns\n",ns);
     }
 
+    // ---- v1072: the race. The engine composed this render's constants from the PREVIOUS read F (the game wrote the next tick's F before
+    // the eye-0 begin). A held thing (2 cm reach) moving 8 cm per render: every such draw is placed at B exactly, from the alt frame,
+    // with previous rows from the previous drawn B; a draw of another thing (other id) never takes the alt; the current F still wins.
+    {
+        Place::clear();
+        const Mat g=rigid(rot(.2,.5,.3,.6),.03,-.01,.02);
+        const std::array<double,2> reach{.5,0.};   // v1072: a held thing's parts sit at fixed offsets from F like a weapon's (13 cm here)
+        std::array<std::uintptr_t,2> ids{0x9001,0};
+        Mat f_prev{},b_prev{};std::uint32_t frame_prev{};
+        int alt_ok=0,cur_ok=0;double worst=0,worst_prev=0;
+        for(int render=0;render<12;++render) {
+            const std::uint32_t frame=700u+static_cast<std::uint32_t>(render);
+            const Mat f=rigid(rot(0,0,1,.45+.03*render),-91.8+.08*render,-92.5,4.9);   // the physics frame: 8 cm and 1.7 deg a render
+            const Mat b=mul(rigid(rot(0,0,1,.45+.03*render),-91.8+.08*render+.15,-92.5,4.9),g);   // the drawn hand 15 cm ahead
+            Wp w;for(unsigned e=0;e<2;++e) {w.vp[e]=vp_of(eye_pose(render,e),render);w.inv[e]=inv(w.vp[e]);}
+            frames_seen[frame]=w;
+            const auto raw=raw_of(f);std::array<const float*,2> raw_ptr{raw.data(),nullptr};std::array<const Mat*,2> bound_ptr{&b,nullptr};
+            Place::publish_bound(frame,raw_ptr,bound_ptr,reach,ids);
+            if(render>0) {
+                // a draw composed from the previous read
+                const auto cur=floats(mul(w.vp[1],mul(f_prev,part)));
+                std::array<float,16> o{},q{};
+                const Result r=Place::place(frame,provider,cur.data(),nullptr,o.data(),q.data(),-1,1);
+                const double err=worst_rows(o.data(),floats(mul(mul(w.vp[1],b),part)).data());
+                const double err_prev=worst_rows(q.data(),floats(mul(mul(frames_seen.at(frame_prev).vp[1],b_prev),part)).data());
+                if(r.side==0 && r.alt && r.stage==placed_pass) ++alt_ok;
+                worst=std::max(worst,err);worst_prev=std::max(worst_prev,err_prev);
+                // the current read still places without the alt
+                const auto now_rows=floats(mul(w.vp[1],mul(f,part)));
+                const Result rc=Place::place(frame,provider,now_rows.data(),nullptr,o.data(),q.data(),-1,1);
+                if(rc.side==0 && !rc.alt && worst_rows(o.data(),floats(mul(mul(w.vp[1],b),part)).data())<2e-4) ++cur_ok;
+            }
+            f_prev=f;b_prev=b;frame_prev=frame;
+        }
+        CHECK(alt_ok==11 && cur_ok==11 && worst<2e-4 && worst_prev<2e-4);
+        // another thing in the hand (a new id): the previous thing's frame is no alternative
+        {
+            ids[0]=0x9002;const std::uint32_t frame=720u;
+            const Mat f=rigid(rot(1,0,0,.9),-90.8,-92.5,4.9),b=mul(f,g);   // another orientation (a twin with the same axes is not this check)
+            Wp w;for(unsigned e=0;e<2;++e) {w.vp[e]=vp_of(eye_pose(20,e),20);w.inv[e]=inv(w.vp[e]);}
+            frames_seen[frame]=w;
+            const auto raw=raw_of(f);std::array<const float*,2> raw_ptr{raw.data(),nullptr};std::array<const Mat*,2> bound_ptr{&b,nullptr};
+            Place::publish_bound(frame,raw_ptr,bound_ptr,reach,ids);
+            const auto cur=floats(mul(w.vp[1],mul(f_prev,part)));
+            std::array<float,16> o{},q{};
+            CHECK(Place::place(frame,provider,cur.data(),nullptr,o.data(),q.data(),-1,1).side<0);
+        }
+        std::printf("v1072 race: alt placed %d/11, current placed %d/11, worst %.2e, prev worst %.2e\n",alt_ok,cur_ok,worst,worst_prev);
+    }
+
     std::printf(failures?"weapon_draw_place_check FAILED\n":"weapon_draw_place_check OK\n");
     return failures?1:0;
 }

@@ -121,7 +121,7 @@ public:
         S& s=s_[hand];Mat hi{};
         if(!finite(H) || !finite(F) || !inverse(H,hi)) return false;
         const Mat meas=mul(hi,F);
-        if(s.id!=id) {s=S{};s.id=id;s.g=meas;s.start=s.last_t=t;s.last_h=H;return false;}
+        if(s.id!=id) {s=S{};s.id=id;s.g=meas;s.start=s.last_t=t;s.last_h=H;note(hand,o_new);return false;}
         const double dt=std::clamp(t-s.last_t,0.,.1);
         const double speed=dt>0?distance(H,s.last_h)/dt:0,turn=dt>0?angle(H,s.last_h)/dt:0;
         s.last_t=t;s.last_h=H;
@@ -132,24 +132,29 @@ public:
         // is placed only once learn_s of still frames went into it. Until then the thing is drawn where the game has it, and G keeps up with it.
         if(t-s.start<settle_s || s.learned<learn_s) {
             if(still) {blend(s.g,meas,std::min(1.,dt/.05));if(t-s.start>=.25) s.learned+=dt;} else if(s.learned<=0) s.g=meas;   // counted after the 0.2 s seat nudge
-            return false;
+            note(hand,o_learning);return false;
         }
         const double hand_mps=std::clamp(track_mps>=0?track_mps:speed,0.,10.);
         const double off=off_m+.15*(walk+hand_mps);   // v1071: a swinging hand's physics lag is no blocked thing either (the hand is no longer dragged onto the prop)
         if(distance(meas,s.g)>off || angle(meas,s.g)>off_rad) {   // the thing is not where the hold says (a wall stops it, or it was moved)
-            if(!still) {s.off_since=0;return false;}                  // a moving hand's physics lag is no new spot
+            if(!still) {s.off_since=0;note(hand,o_off_moving);return false;}   // a moving hand's physics lag is no new spot
             if(!s.off_since) s.off_since=t;
-            if(t-s.off_since<relearn_s) return false;
-            s.g=meas;s.start=t;s.learned=0;s.off_since=0;return false; // off while still for 0.5 s: a new hold spot, learned again
+            if(t-s.off_since<relearn_s) {note(hand,o_off_still);return false;}
+            s.g=meas;s.start=t;s.learned=0;s.off_since=0;note(hand,o_relearn);return false; // off while still for 0.5 s: a new hold spot, learned again
         }
         s.off_since=0;
         if(still) blend(s.g,meas,std::min(1.,dt/still_tau));         // a moving hand teaches nothing (its lag is not the hold)
-        out=mul(H,s.g);return finite(out);
+        out=mul(H,s.g);note(hand,o_placed);return finite(out);
     }
     void clear(unsigned hand) {if(hand<2) s_[hand]=S{};}
+    // Diagnostics (status held_bind): per hand, how many renders ended in each outcome.
+    enum Outcome : unsigned {o_new,o_learning,o_off_moving,o_off_still,o_relearn,o_placed,outcomes};
+    std::uint64_t count(unsigned hand,unsigned o) const noexcept {return hand<2 && o<outcomes?counts_[hand][o].load(std::memory_order_relaxed):0;}
 private:
     struct S {std::uintptr_t id{};Mat g{};double start{},last_t{},off_since{},learned{};Mat last_h{};};
     std::array<S,2> s_{};
+    std::array<std::array<std::atomic<std::uint64_t>,outcomes>,2> counts_{};
+    void note(unsigned hand,unsigned o) noexcept {counts_[hand][o].fetch_add(1,std::memory_order_relaxed);}
     // Linear blend, then the 3x3 made orthogonal again with each column keeping its length (the model's scales).
     static void blend(Mat& g,const Mat& m,double a) {
         for(std::size_t i=0;i<12;++i) g[i]+=(m[i]-g[i])*a;
@@ -390,17 +395,22 @@ struct Views {
     Mat prev_vp[2][2]{},prev_inv[2][2]{};
 };
 enum Stage:unsigned {rejected,no_views,no_certificate,far_away,ambiguous,unbound,placed_same_frame,placed_last_frame,placed_tagged,placed_pass,stages};
-struct Result {int side{-1},eye{-1},hint{-1};Stage stage{rejected};};
+struct Result {int side{-1},eye{-1},hint{-1};Stage stage{rejected};bool alt{};};   // alt (v1072): placed from the previous read F
 
 struct Side {
     bool valid{},have_prev{},bound{};
-    double reach{};   // v1067: >0 = this side's own match radius (a held thing: its draws share F, and a twin prop nearby must not match)
+    double reach{};   // v1067: >0 = this side's own match radius (a held thing: 0.5 m since v1072, its parts sit at offsets from F)
     std::uint32_t prev_frame{};
     Mat model{},delta{},prev{},relative{},bound_frame{},prev_bound{};
     // v1106: the previous DRAWN hand per eye (the same B in a paired render, kept per eye so a separately rendered eye can never take
     // the other eye's history). prev_eye[eye] already includes G: prev rows are VP_prev(eye) * prev_eye[eye] * inv(F) * M.
     std::array<Mat,2> prev_eye{};
     std::array<bool,2> prev_eye_ok{};
+    // v1072 (user: "a carried object is out of sync with the hand and flickers when running"): the engine composes a render's per-instance
+    // constants BEFORE the eye-0 begin where F is read (v901), and the game thread can write the next tick's F in between. Those draws carry
+    // the PREVIOUS read F of the same thing: a moving thing then missed every match (a held thing's 2 cm reach; a turning weapon's 0.004
+    // axes) and stayed at the engine's lagging pose for that render - the flicker. alt = that previous read, with its own exact delta/prev.
+    bool alt{};Mat alt_model{},alt_delta{};std::array<Mat,2> alt_prev_eye{};
 };
 struct Slot {std::atomic<std::uint32_t> ready{};std::array<Side,2> side{};};
 
@@ -413,15 +423,20 @@ public:
     // Render thread, at the eye-0 begin of the render that draws `frame`. raw[s] = the engine's F (15 floats); bound[s] = B = H_image*G
     // or null while no valid G exists (the engine's rows stay). The old publish(frame,raw,delta) form is kept for the labs and treats
     // delta*F as the bound frame.
-    static void publish_bound(std::uint32_t frame,const std::array<const float*,2>& raw,const std::array<const Mat*,2>& bound,const std::array<double,2>& side_reach={0.,0.}) noexcept {
+    static constexpr double alt_max_m=.6;   // a previous read farther than this from F is another thing or a teleport, never an alternative
+    static void publish_bound(std::uint32_t frame,const std::array<const float*,2>& raw,const std::array<const Mat*,2>& bound,const std::array<double,2>& side_reach={0.,0.},
+            const std::array<std::uintptr_t,2>& ids={0,0}) noexcept {
         Slot& slot=ring_[frame%ring];
         slot.ready.store(0,std::memory_order_release);
         for(unsigned s=0;s<2;++s) {
             Side& out=slot.side[s];out=Side{};
             Mat model{},inverse_model{};
-            if(!raw[s]) {last_[s]={};continue;}
+            Read& rd=reads_[s];
+            if(!raw[s]) {last_[s]={};rd={};continue;}
             model=model_of(raw[s]);
-            if(!finite(model) || !inverse(model,inverse_model)) {last_[s]={};continue;}
+            if(!finite(model) || !inverse(model,inverse_model)) {last_[s]={};rd={};continue;}
+            if(rd.cur_ok && rd.cur_frame!=frame) {rd.prior=rd.cur;rd.prior_id=rd.cur_id;rd.prior_ok=true;}   // a republish of the same render keeps its prior
+            rd.cur=model;rd.cur_id=ids[s];rd.cur_frame=frame;rd.cur_ok=true;
             out.valid=true;out.model=model;out.reach=side_reach[s];
             if(!bound[s] || !finite(*bound[s])) {last_[s]={};continue;}   // no G yet: no placement, no previous chain
             out.bound=true;out.bound_frame=*bound[s];
@@ -432,6 +447,11 @@ public:
             else {out.prev=out.delta;out.relative=identity();}
             out.prev_eye[0]=out.prev_eye[1]=out.prev;
             out.prev_eye_ok[0]=out.prev_eye_ok[1]=out.have_prev;
+            if(Mat inverse_prior{};ids[s] && rd.prior_ok && rd.prior_id==ids[s] && distance(rd.prior,model)<=alt_max_m &&
+               (distance(rd.prior,model)>1e-7 || angle(rd.prior,model)>1e-7) && inverse(rd.prior,inverse_prior)) {
+                out.alt=true;out.alt_model=rd.prior;out.alt_delta=mul(*bound[s],inverse_prior);
+                out.alt_prev_eye[0]=out.alt_prev_eye[1]=mul(mul(out.prev,model),inverse_prior);   // B_prev * inverse(F_prior)
+            }
             l={true,out.have_prev,frame,out.prev_frame,model,*bound[s],out.prev,out.relative};
             published_side_[s].fetch_add(1,std::memory_order_relaxed);
         }
@@ -448,7 +468,7 @@ public:
         }
         publish_bound(frame,raw,bound_ptr);
     }
-    static void clear() noexcept {for(auto& s:ring_) s.ready.store(0,std::memory_order_release);last_={};latest_frame_.store(0,std::memory_order_relaxed);}
+    static void clear() noexcept {for(auto& s:ring_) s.ready.store(0,std::memory_order_release);last_={};reads_={};latest_frame_.store(0,std::memory_order_relaxed);}
     static std::uint64_t published() noexcept {return published_.load(std::memory_order_relaxed);}
     static std::uint64_t published(unsigned side) noexcept {return side<2?published_side_[side].load(std::memory_order_relaxed):0;}
     static std::uint32_t latest_frame() noexcept {return latest_frame_.load(std::memory_order_acquire);}
@@ -495,16 +515,23 @@ public:
         const bool pass_eye_ok=pass_eye==0 || pass_eye==1;
         Rows cur_model[2]{};
         for(unsigned e=0;e<2;++e) if(views.ok[e] && (!pass_eye_ok || static_cast<int>(e)==pass_eye)) cur_model[e]=model_rows(views.inv[e].data(),cur);
-        double side_distance[2]={-1,-1};bool side_oriented=false;
+        double side_distance[2]={-1,-1};bool side_oriented=false,alt_hit[2]={false,false};
         for(unsigned s=0;s<2;++s) {
             const Side& w=slot->side[s];
             if(!w.valid) continue;
             for(unsigned e=0;e<2;++e) {
                 if(!views.ok[e] || (pass_eye_ok && static_cast<int>(e)!=pass_eye)) continue;
-                if(!same_orientation(cur_model[e],w.model,tol)) continue;
-                side_oriented=true;
-                const double d=origin_distance(cur_model[e],w.model);
-                if(d<=reach_of(w) && (side_distance[s]<0 || d<side_distance[s])) side_distance[s]=d;
+                if(same_orientation(cur_model[e],w.model,tol)) {
+                    side_oriented=true;
+                    const double d=origin_distance(cur_model[e],w.model);
+                    if(d<=reach_of(w) && (side_distance[s]<0 || d<side_distance[s])) {side_distance[s]=d;alt_hit[s]=false;}
+                }
+                // v1072: the previous read (only in a pass with a known eye: the certificate paths compare against F)
+                if(w.alt && w.bound && pass_eye_ok && same_orientation(cur_model[e],w.alt_model,tol)) {
+                    side_oriented=true;
+                    const double d=origin_distance(cur_model[e],w.alt_model);
+                    if(d<=reach_of(w) && (side_distance[s]<0 || d<side_distance[s])) {side_distance[s]=d;alt_hit[s]=true;}
+                }
             }
         }
         int candidate=-1;
@@ -547,21 +574,25 @@ public:
             }
         }
         const Rows& model=cur_model[eye];
-        if(!(origin_distance(model,w.model)<=reach_of(w))) {result.stage=far_away;return result;}
+        const bool use_alt=alt_hit[candidate];
+        if(!(origin_distance(model,use_alt?w.alt_model:w.model)<=reach_of(w))) {result.stage=far_away;return result;}
         const Mat m=full(model);
         const Mat vp=views.vp[eye];
         const bool previous=w.have_prev && w.prev_eye_ok[eye] && views.prev_frame[candidate]==w.prev_frame && views.prev_ok[candidate][eye];
-        const Mat now=mul(mul(vp,w.delta),m);
-        const Mat before=previous?mul(mul(views.prev_vp[candidate][eye],w.prev_eye[eye]),m):mul(mul(vp,w.prev_eye[eye]),m);
+        const Mat& delta=use_alt?w.alt_delta:w.delta;const Mat& prev_eye=use_alt?w.alt_prev_eye[static_cast<unsigned>(eye)]:w.prev_eye[static_cast<unsigned>(eye)];
+        const Mat now=mul(mul(vp,delta),m);
+        const Mat before=previous?mul(mul(views.prev_vp[candidate][eye],prev_eye),m):mul(mul(vp,prev_eye),m);
         for(std::size_t i=0;i<16;++i) {cur_out[i]=static_cast<float>(now[i]);prev_out[i]=static_cast<float>(before[i]);}
         if(!still(*slot,frame)) {result.stage=rejected;return result;}
-        result.side=candidate;result.eye=eye;
+        result.side=candidate;result.eye=eye;result.alt=use_alt;
         result.stage=pass_eye_ok?placed_pass:tagged?placed_tagged:last_frame?placed_last_frame:placed_same_frame;
         return result;
     }
 
 private:
     struct Last {bool valid{},have_prev{};std::uint32_t frame{},prev_frame{};Mat model{},placed{},prev{},relative{};};
+    struct Read {bool cur_ok{},prior_ok{};std::uint32_t cur_frame{};std::uintptr_t cur_id{},prior_id{};Mat cur{},prior{};};
+    inline static std::array<Read,2> reads_{};
     inline static std::array<Slot,ring> ring_{};
     inline static std::array<Last,2> last_{};
     inline static std::atomic<std::uint64_t> published_{};

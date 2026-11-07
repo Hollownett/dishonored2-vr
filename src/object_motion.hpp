@@ -362,7 +362,7 @@ private:
     inline static constexpr unsigned pass_slots=65;
     inline static std::array<std::atomic<std::uint64_t>,pass_slots> weapon_pass_near_{},weapon_pass_matched_{},weapon_pass_placed_{};
     inline static std::array<std::array<std::atomic<std::uint64_t>,pass_slots>,2> weapon_pass_side_{};
-    inline static std::array<std::atomic<std::uint64_t>,2> weapon_placed_side_{};
+    inline static std::array<std::atomic<std::uint64_t>,2> weapon_placed_side_{},weapon_alt_side_{};   // alt (v1072): placed from the previous read F
     inline static std::array<std::array<std::atomic<std::uint64_t>,weapon_draw::stages>,2> weapon_skip_side_{}; // per hand by rejection stage
     struct ViewsEntry {std::atomic<std::uint32_t> ready{};std::uint32_t previous0{},previous1{};weapon_draw::Views views{};};
     inline static std::array<ViewsEntry,8> views_cache_{};
@@ -658,6 +658,7 @@ private:
                     weapon_pass_placed_[pass_index].fetch_add(1,std::memory_order_relaxed);
                     weapon_pass_side_[static_cast<unsigned>(r.side)][pass_index].fetch_add(1,std::memory_order_relaxed);
                     weapon_placed_side_[static_cast<unsigned>(r.side)].fetch_add(1,std::memory_order_relaxed);
+                    if(r.alt) weapon_alt_side_[static_cast<unsigned>(r.side)].fetch_add(1,std::memory_order_relaxed);
                     if(!bind_pool(c,s,*sh,placed,placed_prev)) return false;
                     count(r.eye?fixed_r:fixed_l);
                     return true;
@@ -922,6 +923,7 @@ inline std::string ObjectMotion::weapon_status_json() {
     std::ostringstream out;
     out<<"{\"published\":["<<weapon_draw::Place::published(0)<<','<<weapon_draw::Place::published(1)<<']'
        <<",\"placed\":["<<weapon_placed_side_[0].load(std::memory_order_relaxed)<<','<<weapon_placed_side_[1].load(std::memory_order_relaxed)<<']'
+       <<",\"alt\":["<<weapon_alt_side_[0].load(std::memory_order_relaxed)<<','<<weapon_alt_side_[1].load(std::memory_order_relaxed)<<']'
        <<",\"skip\":[";
     // One name per weapon_draw::Stage, in enum order. v1016 read past this list (`unbound` was added to the enum but not here) when
     // a draw was actually placed, and the out-of-bounds pointer faulted every status poll after a save load. The static_asserts
