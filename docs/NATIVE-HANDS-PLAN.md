@@ -252,3 +252,40 @@ Open: a book face-on on the palm is a resting hand (fingers flat), not a pinch; 
   cylinder is seated (seat_held's axes, the model box centre at its middle: where the placement draws it) and the fingers
   meet them; the seat-out pushes a real shape out of the hand (the drawn thing moves the same). Two-hull bottles and severed
   limbs keep the fitted cylinder. Status: finger_real_holds.
+- v1082 (branch claude/vr-grab-591bd4 = v1074 + v1080/v1081 + this; user after v1081: "map every physical prop and item in the game ... you grab
+  something, it is in your hand ... some fingers out of place, some objects not really touched by fingers, just floating near my hand, and some
+  desynchronization with hand and object when running ... you just need some general solution"): ONE hold per grab, used by all three paths.
+  - The hold is the grab's own relation (PhysicalGrab::relative: the body in the controller's frame, decided at the bind by natural_seat on the
+    real shape). v1074 draws the prop at drawn grip * hold * K. v1082: the fingers close on the prop THERE - its real shape at hands.grips *
+    hold, put in the palm frame once (dxgi_probe.cpp SurfaceGrip.exact) - instead of on the lagging physics body read 0.2-0.6 s after the grab;
+    read again only when the hold changes (the seat-out, a reseat); the seat-out runs on the first frame. Physics still drives the body to the
+    hold (collisions, throws), and nothing visible depends on its lag. Status: finger_exact_holds.
+  - Coverage (launcher/PropShapes.cs, prop-shapes.bin version 2, rebuilt once on the next launcher start): every .lwo.{hkt,cvx,box} collision
+    file and mirrored placements (v1 read .hkt with positive scales only: books on .box files, mirrored trays and 1148 mirrored placements were
+    missing), and compounds: 5206 entries (was 2679), 691 compounds. Against the user's v1080/v1081 live dump (98 distinct hulls): 81 have an
+    entry (was ~67); the other 17 are all ragdoll parts (24-104 vertex hulls of corpse bones / severed parts).
+  - Compounds (a bottle = neck + body): hknpCompoundShape, vtable RVA 0x1ec1328 (RTTI); instances at +0x80 (0x80 bytes each), +0x88 count,
+    +0x90 first free; instance +0x00 transform (3 columns + translation, w = flags), +0x40 scale, +0x50 child shape (static RE: allocator
+    0xc986e0, child accessor vtable slot 29 = 0x1231950; NOT yet seen live). Key = FNV-1a over the child count and the children's keys
+    (unpadded) sorted, the same in C# (CompoundKey) and C++ (compound_key; tests/prop_hull_check.cpp: the bottle's key 0xd62581342ac8b80c).
+    Status: prop_hull_compounds. The hull dump (artifacts/prop-hulls.jsonl) now writes 9 significant digits (5 decimals broke the key) and the
+    children, so a live run confirms the layout.
+  - Ragdoll parts: a Havok hull alone is ONE piece (it is convex; its vertices are rings at its ends, so v1080's slabs left the middle of a
+    limb - where the hand takes it - with no piece: 0 of 5 fingers within 30 mm in the lab). Corpse bones use their hull when it is a real
+    surface (>= 16 vertices). Lab: corpse head/forearm/calf/thigh hulls (from the user's dump) 5/5 fingers on the surface.
+  - Grip map (prop_hull.hpp PropGrip, per model, computed when the shape is built; the same code runs over the database in the lab): power /
+    pinch / flat / ball / box. A bar is taken where a power grip fits (1.6-5 cm thick: a screwdriver's handle, a bottle's neck, at least 3 cm
+    long), else where a pinch fits (a spoon's handle); natural_seat slides the grasped spot into that span (a spoon taken by its bowl is pinched
+    by its handle). Thin flat things (a note, a letter, a poster: at most 1.2 cm thick) are pinched by their edge at the fingertips instead of
+    laid on the palm (lab: a note 0 -> 2 of 5 fingers on it, a poster 2 -> 5).
+  - Lab (`sh tools/hand_lab.sh realshapes-v1082 corvo --only real_`; data: `cd tools/prop_mesh_export && DB=1 SHEET=18 ./run.sh`, plus
+    artifacts/prop-meshes/parts.jsonl = ragdoll hulls from the live dump; contact sheet: `python tools/prop_contact_sheet.py
+    artifacts/hand-lab/realshapes-v1082`): 53 real-shape scenes incl. the user's examples (books, ashtrays, trays, papers, notes, static body
+    parts, skulls, the two-hull bottle) and 18 random database props. New report lines: GRIP MAP; FINGER GAP to the RENDER mesh (nearest pad
+    of each finger, thickness included; touching <= 3 mm): hand-sized props (<= 40 cm, 36 scenes) 140 of 180 fingers touch, mean worst gap
+    7.3 mm, finger penetration into the contact pieces mean 4.2 mm (max 11.7, the bottle's neck); RUNNING: with the real PhysicalGrab motor
+    (60 Hz, velocity applied over the next tick) and v1073's HeldBind, a prop taken while walking at 2 m/s is drawn up to 117 mm (mean 53 mm)
+    off the hand while running and its v1073 finger shapes 33 mm off the drawn prop; v1074 + v1082: 0 by construction (drawn at hand * hold,
+    fingers read at the hold). Taken standing, v1073 stayed within 1 mm in this simple model (it has no collisions or engine substeps).
+  - Open: Use-held severed limbs keep the fitted cylinder (their skinned model frame is not their body's frame: needs a live read of
+    body vs model); big things (> 40 cm: floor ashtray, trays, buckets) leave fingers off; the compound layout is static RE only.

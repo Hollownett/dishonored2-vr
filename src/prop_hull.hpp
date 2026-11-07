@@ -144,7 +144,7 @@ inline std::optional<ConvexHull> build_hull(std::vector<Vec3> v,double radius) {
 // slides the grasped spot into it (finger_sphere.hpp natural_seat), so a spoon taken by its bowl is held by its handle. No such run (a beam, a leg's
 // thick hull): a box held by its face. Wide and thin (prop_is_flat: a book, a tray, a plate, a planchette, papers): flat, the palm on its face and the
 // fingers over its edge. Squat (no side 1.5x another): a ball (a head, a jar, a pot).
-inline constexpr double prop_pinch_thin=.006,prop_pinch_wide=.016,prop_power_min=.008,prop_power_max=.025,prop_bar_ratio=1.5,prop_ball_ratio=1.5,prop_station=.01;
+inline constexpr double prop_pinch_thin=.006,prop_pinch_wide=.016,prop_power_min=.008,prop_power_max=.025,prop_bar_ratio=1.5,prop_ball_ratio=1.5,prop_station=.01,prop_span_min=.03;
 enum class GripKind : unsigned char {box,power,pinch,flat,ball};
 inline const char* grip_kind_name(GripKind k) noexcept {
     switch(k) {case GripKind::power: return "power";case GripKind::pinch: return "pinch";case GripKind::flat: return "flat";case GripKind::ball: return "ball";default: return "box";}
@@ -177,14 +177,14 @@ inline PropGrip prop_grip(const PropShape& s) {
     const Vec3 h=s.whole.half;PropGrip g{};
     if(!std::isfinite(h.x+h.y+h.z)) return g;
     if(h.x>=prop_bar_ratio*h.y) {   // a bar (the whole's x is its longest side)
-        const auto longest=[&](auto fits,double& x0,double& x1) {   // the longest run of stations that fit; false: none
+        const auto longest=[&](auto fits,double& x0,double& x1) {   // the longest run of stations that fit, at least prop_span_min long; false: none
             const double L=h.x;double run0=0;bool in=false,any=false;
             for(double x=-L+prop_station*.5;x<=L;x+=prop_station) {
                 const auto c=s.section(x);const bool ok=c && fits(*c);
                 if(ok && !in) {in=true;run0=x;}
                 if(in && (!ok || x+prop_station>L)) {const double run1=ok?x:x-prop_station;in=false;if(!any || run1-run0>x1-x0) {x0=run0;x1=run1;any=true;}}
             }
-            return any;
+            return any && x1-x0>=prop_span_min-1e-9;   // (a hull's rounded end fits at one station: no place to hold)
         };
         const auto power=[](const HullSection& c) {return std::min(c.hy,c.hz)>=prop_power_min && std::max(c.hy,c.hz)<=prop_power_max;};
         const auto pinch=[](const HullSection& c) {return std::min(c.hy,c.hz)<=prop_pinch_thin && std::max(c.hy,c.hz)<=prop_pinch_wide;};
@@ -204,7 +204,9 @@ inline std::optional<PropShape> build_prop_shape(const std::vector<Vec3>& v,doub
     {Vec3 lo=v.front(),hi=v.front();for(const auto& p:v) {lo={std::min(lo.x,p.x),std::min(lo.y,p.y),std::min(lo.z,p.z)};hi={std::max(hi.x,p.x),std::max(hi.y,p.y),std::max(hi.z,p.z)};}
      s.box_centre=(lo+hi)*.5;}
     const double L=whole->half.x-radius;
-    const unsigned k=whole->solid && whole->half.x>=1.5*whole->half.y?std::clamp(static_cast<unsigned>(std::ceil(2*L/prop_slab_length)),2u,prop_max_pieces):1u;
+    // v1082: a Havok hull alone is convex already, and its vertices sit at its ends (a limb's two rings), so slabs between them were empty and
+    // dropped: the middle of a corpse's forearm, where the hand takes it, had no piece (lab: no finger within 30 mm). One piece: the hull itself.
+    const unsigned k=mesh && whole->solid && whole->half.x>=1.5*whole->half.y?std::clamp(static_cast<unsigned>(std::ceil(2*L/prop_slab_length)),2u,prop_max_pieces):1u;
     if(k>1) for(unsigned i=0;i<k;++i) {
         const double x0=-L+2*L*i/k-prop_slab_overlap,x1=-L+2*L*(i+1)/k+prop_slab_overlap;std::vector<Vec3> in;std::array<double,6> box{x0,x1,1e300,-1e300,1e300,-1e300};
         for(const auto& p:v) {const Vec3 q=whole->to_own(p);if(q.x<x0 || q.x>x1) continue;in.push_back(p);

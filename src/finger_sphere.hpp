@@ -202,6 +202,16 @@ inline std::optional<WorldTrackedPose> natural_seat(const WorldTrackedPose& pose
     // grasped spot slid into that span, seat_edge_margin inside its ends
     if(bar && hull && L==0 && hull->grip.span) {const double m=std::min(seat_edge_margin,.5*(hull->grip.x1-hull->grip.x0));q[0]=std::clamp(q[0],hull->grip.x0+m,hull->grip.x1-m);}
     q[face]=sign*h[face];   // on the face toward the palm
+    // v1082 edge pinch (lab: 0 of 5 fingers on a note laid on the palm - they curl past its edges into the air): a thin flat thing (a note, a letter, a
+    // photo, a poster: flat and at most seat_pinch_thin half thick, its big face toward the palm) is pinched by its edge at the fingertips, its plane
+    // along the palm, the rest of it beyond the fingers: its edge nearest the wrist (along the fingers) at the pinch point, half a margin in.
+    {unsigned t=0;for(unsigned i=1;i<3;++i) if(h[i]<h[t]) t=i;
+     if(!(hull && hull->grip.span) && face==t && h[t]<=seat_pinch_thin && prop_is_flat({h[0],h[1],h[2]})) {   // (a long note is a "bar" too: no handle span)
+         unsigned a=t;double along=-1;for(unsigned i=0;i<3;++i) if(i!=t && std::abs(dot(ax[i],fw))>along) {along=std::abs(dot(ax[i],fw));a=i;}
+         const double s=dot(ax[a],fw)>=0?1.:-1.;
+         q[a]=-s*std::max(0.,h[a]-std::min(.5*seat_edge_margin,.5*h[a]));q[t]=0;
+         grip=skin+fw*seat_pinch_reach+n*seat_pinch_lift;if(pinched) *pinched=true;
+     }}
     if(bar) {
         const unsigned u=(L+1)%3,v=(L+2)%3;double hu=h[u],hv=h[v],cu=0,cv=0;
         if(hull && L==0) if(const auto s=hull->section(q[0])) {hu=s->hy;hv=s->hz;cu=s->y;cv=s->z;}

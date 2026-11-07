@@ -17,6 +17,8 @@
 #include "../src/finger_ik.hpp"
 #include "../src/finger_snapshot.hpp"
 #include "../src/finger_sphere.hpp"
+#include "../src/physical_grab.hpp"
+#include "../src/weapon_draw_place.hpp"
 #include <cstdio>
 #include <fstream>
 #include <functional>
@@ -52,6 +54,17 @@ std::vector<double> json_numbers(const std::string& s,const std::string& key) { 
 std::string json_text(const std::string& s,const std::string& key) {
     auto at=s.find("\""+key+"\"");if(at==std::string::npos) return {};at=s.find('"',s.find(':',at)+1);return at==std::string::npos?std::string{}:s.substr(at+1,s.find('"',at+1)-at-1);}
 double json_value(const std::string& s,const std::string& key,double fallback) {auto at=s.find("\""+key+"\"");return at==std::string::npos?fallback:std::strtod(s.c_str()+s.find(':',at)+1,nullptr);}
+// [[[x,y,z],...],...] after "key": a contact-sheet prop's Havok hull runs (one per child of a compound)
+std::vector<std::vector<Vec3>> json_runs(const std::string& s,const std::string& key) {
+    std::vector<std::vector<Vec3>> out;auto at=s.find("\""+key+"\"");if(at==std::string::npos) return out;at=s.find('[',at);if(at==std::string::npos) return out;
+    int depth=0;std::vector<double> nums;
+    for(const char* p=s.c_str()+at;*p;) {
+        if(*p=='[') {if(++depth==2) out.emplace_back();++p;}
+        else if(*p==']') {if(depth==3 && nums.size()>=3) out.back().push_back({nums[0],nums[1],nums[2]});nums.clear();if(--depth==0) break;++p;}
+        else if((*p>='0' && *p<='9') || *p=='-' || *p=='.') {char* e{};nums.push_back(std::strtod(p,&e));p=e;} else ++p;
+    }
+    return out;
+}
 std::vector<RealProp>& real_props() {
     static std::vector<RealProp> props;static bool loaded=false;if(loaded) return props;loaded=true;
     std::map<std::string,std::pair<std::vector<Vec3>,double>> havok; // the biggest Havok hull per kind
@@ -75,8 +88,86 @@ std::vector<RealProp>& real_props() {
         if(found) {if(auto ps=d2vr::build_prop_shape(*found,0,true)) {r.shape=std::move(*ps);r.source="prop-shapes.bin by its Havok hull";props.push_back(std::move(r));}}
         else if(auto ps=d2vr::build_prop_shape(r.mesh,0,true)) {r.shape=std::move(*ps);r.source="render mesh vertices (no database entry)";props.push_back(std::move(r));}
     }
+    // v1082 contact sheet (tools/prop_mesh_export: DB=1 SHEET=n ./run.sh): the user's examples and a random sample of the database, each found in
+    // prop-shapes.bin by the key its Havok shape gives at run time (a compound: its children's keys, prop_hull.hpp compound_key), as the DLL does.
+    static const std::size_t sheet_db=d2vr::load_prop_shape_db("artifacts/prop-meshes/prop-shapes.bin");(void)sheet_db;
+    std::ifstream sheet("artifacts/prop-meshes/sheet.jsonl");
+    for(std::string line;std::getline(sheet,line);) {
+        RealProp r{};r.kind="sheet_"+json_text(line,"name");const auto runs=json_runs(line,"children");
+        const auto v=json_numbers(line,"mesh"),t=json_numbers(line,"triangles");
+        for(std::size_t i=0;i+2<v.size();i+=3) r.mesh.push_back({v[i],v[i+1],v[i+2]});
+        for(std::size_t i=0;i+2<t.size();i+=3) r.tris.push_back({int(t[i]),int(t[i+1]),int(t[i+2])});
+        if(runs.empty() || r.mesh.empty()) continue;
+        const std::vector<Vec3>* found=nullptr;auto& db=d2vr::prop_shape_db();
+        if(runs.size()==1) {auto hv=runs[0];for(int pad=0;pad<2 && !found;++pad) {if(pad) while(hv.size()%4) hv.push_back(hv.back());if(const auto it=db.find(d2vr::hull_key(hv));it!=db.end()) found=&it->second;}}
+        else {std::vector<std::uint64_t> keys;for(const auto& c:runs) keys.push_back(d2vr::hull_key(d2vr::hull_unpadded(c)));if(const auto it=db.find(d2vr::compound_key(keys));it!=db.end()) found=&it->second;}
+        for(const auto& c:runs) r.hull_vertices+=c.size();
+        if(!found) {std::fprintf(stderr,"%s: no database entry for its %zu-hull Havok shape\n",r.kind.c_str(),runs.size());continue;}
+        if(auto ps=d2vr::build_prop_shape(*found,0,true)) {r.shape=std::move(*ps);r.source=std::string("prop-shapes.bin by its Havok ")+(runs.size()>1?std::to_string(runs.size())+"-hull compound":"hull")+" ("+json_text(line,"kind")+" file)";props.push_back(std::move(r));}
+    }
+    // body parts as the game holds them (a corpse's bones, a severed part): their own Havok hull from the live dump (prop-hulls.jsonl lines + a "name")
+    std::ifstream parts("artifacts/prop-meshes/parts.jsonl");
+    for(std::string line;std::getline(parts,line);) {
+        const auto v=json_numbers(line,"vertices");std::vector<Vec3> q;for(std::size_t i=0;i+2<v.size();i+=3) q.push_back({v[i],v[i+1],v[i+2]});
+        RealProp r{};r.kind="sheet_"+json_text(line,"name");r.hull_vertices=q.size();
+        if(auto ps=d2vr::build_prop_shape(q,json_value(line,"radius",0),false)) {r.shape=std::move(*ps);r.source="its own Havok hull (live dump)";props.push_back(std::move(r));}
+    }
     for(const auto& p:props) real_of[&p.shape.pieces.front()]=&p;
     return props;
+}
+Vec3 closest_on_triangle(Vec3 p,Vec3 a,Vec3 b,Vec3 c) {
+    const Vec3 ab=b-a,ac=c-a,ap=p-a;const double d1=dot(ab,ap),d2=dot(ac,ap);if(d1<=0 && d2<=0) return a;
+    const Vec3 bp=p-b;const double d3=dot(ab,bp),d4=dot(ac,bp);if(d3>=0 && d4<=d3) return b;
+    const double vc=d1*d4-d3*d2;if(vc<=0 && d1>=0 && d3<=0) return a+ab*(d1/(d1-d3));
+    const Vec3 cp=p-c;const double d5=dot(ab,cp),d6=dot(ac,cp);if(d6>=0 && d5<=d6) return c;
+    const double vb=d5*d2-d1*d6;if(vb<=0 && d2>=0 && d6<=0) return a+ac*(d2/(d2-d6));
+    const double va=d3*d6-d5*d4;if(va<=0 && (d4-d3)>=0 && (d5-d6)>=0) return b+(c-b)*((d4-d3)/((d4-d3)+(d5-d6)));
+    const double den=1/(va+vb+vc);return a+ab*(vb*den)+ac*(vc*den);
+}
+// v1082 running path (user 2026-11-07: "some desynchronization with hand and object when running"): a prop is taken (still, or while walking at
+// 2 m/s), held still 1 s, then the player runs at 5 m/s with the hand swinging (+-12 cm, +-20 deg at 1.3 Hz, a 4 cm bob) for 3 s. Against the hand *
+// the hold: the v1073 draw (weapon_draw_place.hpp HeldBind learning the hold from the physics body, PhysicalGrab's velocity motor integrated at
+// 60 Hz, the engine frame one tick old) and its finger shapes (read from the body 0.2-0.6 s in), and the v1074 exact draw (hand * the grab's own
+// hold, PhysicalGrab::relative) with v1082's fingers (read at the hold). The real classes; the hand frame is the palm (rigid with the grip).
+std::string running_report(const WorldTrackedPose& hold) {
+    namespace wd=d2vr::weapon_draw;std::string out;
+    for(const double walk_grab:{0.,2.}) {
+        const auto player_x=[&](double t) {if(t<1) return walk_grab*t;const double u=t-1,v0=walk_grab,a=10.;const double ta=(5-v0)/a;return walk_grab+(u<ta?v0*u+.5*a*u*u:v0*ta+.5*a*ta*ta+5*(u-ta));};
+        const auto hand_at=[&](double t) {
+            const double run=t<1?0.:std::min(1.,(t-1)*2),w=2*3.14159265358979*1.3*t,ang=.35*run*std::sin(w);
+            WorldTrackedPose h{};h.position={player_x(t)+.10*run*std::sin(w+.5),.12*run*std::sin(w),1.2+.04*run*std::sin(2*3.14159265358979*2.6*t)};
+            h.basis={Vec3{std::cos(ang),0,-std::sin(ang)},Vec3{0,1,0},Vec3{std::sin(ang),0,std::cos(ang)}};return h;};
+        const auto compose=[](const WorldTrackedPose& h,const WorldTrackedPose& g) {WorldTrackedPose o{};o.position=h.position+grab_world(h,g.position);for(unsigned i=0;i<3;++i) o.basis[i]=grab_world(h,g.basis[i]);return o;};
+        PhysicalGrab grab;const auto h0=hand_at(0);grab.sample(h0,0.f,true,1,1);grab.sample(h0,1.f,true,1,12);
+        WorldTrackedPose body=compose(h0,hold);Vec3 v{},w{};
+        if(!grab.bind(body,h0.position,.3)) return "running: the grab did not bind";
+        wd::HeldBind bind;double old_max=0,old_sum=0,run_max=0;unsigned frames=0,engine=0,run_frames=0;double finger_old=0;WorldTrackedPose engine_frame=body;
+        double next_physics=0;
+        for(double t=1./90;t<4;t+=1./90) {
+            while(next_physics<=t) {   // the game's physics ticks up to this render (60 Hz): the motor, its velocity applied over the tick
+                const double ms=next_physics*1000;const auto hand=hand_at(next_physics);grab.sample(hand,1.f,true,1,static_cast<std::uint64_t>(ms)+20);
+                const double vx=next_physics<1?walk_grab:(player_x(next_physics+.001)-player_x(next_physics))/.001;
+                engine_frame=body;   // the frame the renders before this tick saw
+                if(const auto m=grab.motor(body,true,static_cast<std::uint64_t>(ms)+20,static_cast<std::uint64_t>(ms)+20,Vec3{vx,0,0}); m && !m->release) {v=m->linear;w=m->angular;}
+                body.position=body.position+v*(1./60);const double a=length(w)/60;
+                if(a>1e-12) {const Vec3 k=w*(1/length(w));for(auto& b:body.basis) b=b*std::cos(a)+cross(k,b)*std::sin(a)+k*(dot(k,b)*(1-std::cos(a)));}
+                if(next_physics<=.6 && next_physics+1./60>.6) {   // v1073's finger shapes: the body read 0.6 s in, in the hand frame
+                    const auto hh=hand_at(next_physics);finger_old=length(grab_local(hh,body.position-hh.position)-hold.position);}
+                next_physics+=1./60;
+            }
+            const auto hand=hand_at(t),want=compose(hand,hold);
+            const double speed=t<1?walk_grab:(player_x(t+.001)-player_x(t))/.001;
+            const auto hp=hand_at(t-1./90);const double track=length((hand.position-hp.position)*90.-Vec3{speed,0,0});
+            wd::Mat placed{};const bool on=bind.frame(0,1,wd::pose_mat(hand),wd::pose_mat(engine_frame),t,placed,track,speed);
+            const double off=on?wd::distance(placed,wd::pose_mat(want)):length(engine_frame.position-want.position);
+            old_max=std::max(old_max,off);old_sum+=off;++frames;engine+=!on;
+            if(t>=1.5) {run_max=std::max(run_max,off);++run_frames;}
+        }
+        char b[420];std::snprintf(b,sizeof b,"RUNNING (%s, held still 1 s, then 5 m/s with a swinging hand for 3 s): drawn thing off hand * hold: v1073 (HeldBind on the physics body) max %.0f mm, mean %.0f mm, max while running %.0f mm, %u%% of frames at the lagging body; v1074 exact + v1082: 0 mm (drawn at hand * hold). Finger shapes off the drawn thing: v1073 %.0f mm (read from the body 0.6 s in), v1082 0 mm (read at the hold).",
+            walk_grab>0?"taken while walking at 2 m/s":"taken standing",old_max*1000,old_sum/std::max(1u,frames)*1000,run_max*1000,frames?engine*100/frames:0,finger_old*1000);
+        out+=(out.empty()?"":"\n")+std::string(b);
+    }
+    return out;
 }
 std::string put(const Xf& x,double s) { // 4x4 column-major, rotation columns scaled by s (renderer's transform format)
     const Vec3 c[3]={rotated(x.q,{s,0,0}),rotated(x.q,{0,s,0}),rotated(x.q,{0,0,s})};
@@ -559,13 +650,14 @@ int run(int argc,char** argv) {
         if(std::getenv("LAB_SEAT_DEBUG")) {std::fprintf(stderr,"%s pieces (own half width x thickness, mm):",p.kind.c_str());
             for(const auto& q:shape->pieces) std::fprintf(stderr," %.1fx%.1f",q.half.y*1000,q.half.z*1000);std::fprintf(stderr,"\n");}
         for(const auto& t:std::vector<Take>{{"",{.25,.2,.15},{.02,0,.02}},{"_end",{.1,.3,0},{.07,0,0}}}) {
-            if(*t.tag && shape->pieces.size()<2) continue;
+            if(*t.tag && (shape->pieces.size()<2 || p.kind.rfind("sheet_",0)==0)) continue;   // v1082: one take for a contact-sheet prop
             Scene c{};c.name=_strdup(("real_"+p.kind+t.tag).c_str());c.held=true;c.where=hold_at;c.fingers=hold_fingers;c.normal=hold_in;c.squeeze=1.f;c.index=0.f;
             const auto& w=shape->whole;
             c.title=_strdup((p.kind+(*t.tag?" taken near an end":"")+" ("+p.source+", "+std::to_string(shape->pieces.size())+" piece(s), "+
                 num(w.half.x*200).substr(0,4)+" x "+num(w.half.y*200).substr(0,4)+" x "+num(w.half.z*200).substr(0,4)+" cm; Havok hull "+std::to_string(p.hull_vertices)+
-                " vertices): natural seat + seat-out on the real shape").c_str());
-            c.shape_name="real shape (render mesh pieces)";
+                " vertices): natural seat + seat-out on the real shape; grip map: "+d2vr::grip_kind_name(shape->grip.kind)+
+                (shape->grip.span?" over "+num((shape->grip.x1-shape->grip.x0)*100).substr(0,4)+" cm of its length":std::string())).c_str());
+            c.shape_name="real shape (render mesh pieces)";if(std::getenv("LAB_REAL_REACH")) c.reach=static_cast<float>(std::atof(std::getenv("LAB_REAL_REACH")));
             c.moving=[t,shape,seat_out,name=c.name](const WorldTrackedPose& palm,const r::HandGeometry& g,Vec3,Vec3) {
                 const Vec3 n=r::palm_normal(palm,g),fp=g.finger[2].pivot,f0=palm.basis[0]*fp.x+palm.basis[1]*fp.y+palm.basis[2]*fp.z;Vec3 fw=unit(cross(n,palm.basis[0]));if(dot(fw,f0)<0) fw=fw*-1.;
                 // as a hand takes it: its long side across the palm, its thinnest toward the palm, then tilted (the pose's rows: the body axes in the world)
@@ -731,6 +823,34 @@ int run(int argc,char** argv) {
             const auto into=[&](Vec3 w) {return palm.position+palm.basis[0]*w.x+palm.basis[1]*w.y+palm.basis[2]*w.z;};const auto tp=[&](const std::array<double,3>& a) {return -r::finger_clearance(geometry.finger[0],geometry.thickness[0],r::finger_turns_of(geometry.finger[0],a),into,shape_clearance,0u,4,-1e300,0,2,1);};const auto drawn_a=r::finger_drawn_pose(geometry,contact,wants_used);char b[200];std::snprintf(b,sizeof b,"PENETRATION mm: fingers %.1f  palm %.1f   (thumb contact pose %.1f, drawn %.1f)",fingers*1000,palm_in*1000,tp({contact.pose[0][0],contact.pose[0][1],contact.pose[0][2]})*1000,tp({drawn_a[0][0],drawn_a[0][1],drawn_a[0][2]})*1000);report.push_back(b);
         }
 
+        // v1082: the real shape's grip map entry, the fingertips against its RENDER mesh (what the player sees: the gap of each tip pad, thickness
+        // included; <= 3 mm counts as touching), and the running path for its hold (running_report)
+        for(const auto& sh:shapes) if(sh.hull) if(const auto it=real_of.find(sh.hull);it!=real_of.end()) {
+            const auto& prop=*it->second;const auto& h=*sh.hull;
+            const auto world=[&](Vec3 body_point) {const Vec3 q=h.to_own(body_point);return sh.frame.position+sh.frame.basis[0]*q.x+sh.frame.basis[1]*q.y+sh.frame.basis[2]*q.z;};
+            std::vector<Vec3> mesh;mesh.reserve(prop.mesh.size());for(const auto& m:prop.mesh) mesh.push_back(world(m));
+            const auto gap=[&](Vec3 p) {double d=1e9;
+                if(!prop.tris.empty()) {for(const auto& t:prop.tris) if(t[0]>=0 && t[1]>=0 && t[2]>=0 && std::size_t(std::max({t[0],t[1],t[2]}))<mesh.size()) d=std::min(d,length(p-closest_on_triangle(p,mesh[t[0]],mesh[t[1]],mesh[t[2]])));}
+                else for(const auto& sh2:shapes) d=std::min(d,r::shape_distance(sh2,p));
+                return d;};
+            std::string tips;unsigned touching=0;double worst=0;
+            for(unsigned f=0;f<5;++f) {   // the finger's nearest pad (its three phalanges, 5 points each, thickness included) and its tip's
+                const int e=sk.find(std::string("right_")+kFingers[f]+"_end_jnt");const Vec3 j[4]{out.arm[1][chains[f][0]].p,out.arm[1][chains[f][1]].p,out.arm[1][chains[f][2]].p,out.arm[1][e].p};
+                double g=1e9;for(unsigned q=0;q<3;++q) for(unsigned k=0;k<=4;++k) g=std::min(g,gap(j[q]+(j[q+1]-j[q])*(k/4.))-geometry.thickness[f]);
+                const double tip=gap(j[3])-geometry.thickness[f];
+                if(g<=.003) ++touching;worst=std::max(worst,g);char b[60];std::snprintf(b,sizeof b,"%s%s %.1f (tip %.1f)",f?", ":"",kFingers[f],g*1000,tip*1000);tips+=b;}
+            char line[400];std::snprintf(line,sizeof line,"FINGER GAP to the render mesh (mm, nearest pad, - = into it): %s; touching (<= 3 mm) %u/5, worst %.1f",tips.c_str(),touching,worst*1000);report.push_back(line);
+            std::snprintf(line,sizeof line,"GRIP MAP: %s%s (real shape %.1f x %.1f x %.1f cm, %zu piece(s))",d2vr::grip_kind_name(prop.shape.grip.kind),
+                prop.shape.grip.span?(", taken within "+num(prop.shape.grip.x0*100).substr(0,5)+".."+num(prop.shape.grip.x1*100).substr(0,5)+" cm along its length").c_str():"",
+                prop.shape.whole.half.x*200,prop.shape.whole.half.y*200,prop.shape.whole.half.z*200,prop.shape.pieces.size());report.push_back(line);
+            if(&h==&prop.shape.pieces.front()) {   // the body pose from its first piece (finger_sphere.hpp hull_grip_shape, inverted), in the palm frame: the hold
+                WorldTrackedPose held{};for(unsigned j=0;j<3;++j) held.basis[j]=sh.frame.basis[0]*component(h.axes[0],j)+sh.frame.basis[1]*component(h.axes[1],j)+sh.frame.basis[2]*component(h.axes[2],j);
+                held.position=sh.frame.position-(held.basis[0]*h.centre.x+held.basis[1]*h.centre.y+held.basis[2]*h.centre.z);
+                WorldTrackedPose hold{};hold.position=grab_local(palm,held.position-palm.position);for(unsigned j=0;j<3;++j) hold.basis[j]=grab_local(palm,held.basis[j]);
+                std::stringstream lines(running_report(hold));for(std::string l;std::getline(lines,l);) report.push_back(l);
+            }
+            break;
+        }
         if(scene.moving) { // stability (the twitch): 90 frames of the live finger call (one finger solved a frame, 60 Hz, the held reach), the thing jittered about its place
             // in the hand the way a lagging motor moves it (small: +-3 mm, +-2 deg a frame; heavy: x4, v638's mean was 13 mm); the metric is the largest change of any finger
             // joint's contact pose between two frames over frames 60..90 (after a 1 s settle), in degrees.

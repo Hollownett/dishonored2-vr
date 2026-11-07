@@ -52,6 +52,40 @@ if (Environment.GetEnvironmentVariable("DB") != null)
         }
         Console.WriteLine($"MATCH: {hit} of {all} distinct dumped hulls have an entry");
     }
+    // SHEET=<n>: the lab's contact sheet (tools/hand_pose_lab.cpp --only real_sheet): the user's examples and n random hand-sized props, each with the
+    // hull runs the runtime keys it by and its full LOD-0 render mesh at that scale -> sheet.jsonl
+    if (Environment.GetEnvironmentVariable("SHEET") is string sheetN)
+    {
+        string[] sheetWant = { "bookstack_01/book_01.lwo", "bookstack_01/book_03.lwo", "opened_book_01.lwo", "ashtray_01/ashtray_01.lwo", "ashtray_01/ashtray_02.lwo",
+            "lab_tray_01.lwo", "teapot_set_tray_01.lwo", "revealing_tray_01.lwo", "papers_over_desk_02.lwo", "shelf_assets_papers_01.lwo", "note_curator_01.lwo",
+            "body_part_man_arm_01.lwo", "body_part_woman_arm_01.lwo", "body_part_man_hand_01.lwo", "body_part_rotten_foot_01.lwo", "skull_01/skull_01.lwo",
+            "gravehound_skull_static.lwo", "bottle_set_01/bottle_01.lwo", "screwdriver_01.lwo", "teapot_set_spoon_01.lwo", "teapot_set_smallplate_01.lwo" };
+        var picks = new List<PropShapes.Entry>();
+        foreach (var w in sheetWant)
+        {
+            var e = entries.Where(x => x.Hkx.Contains("/" + w)).OrderBy(x => x.Hkx.Contains("._100_100_100.") ? 0 : 1).ThenBy(x => x.Hkx, StringComparer.Ordinal).FirstOrDefault();
+            if (e != null && picks.All(q => q.Hkx != e.Hkx)) picks.Add(e);
+        }
+        var rnd = new Random(1082);
+        foreach (var e in entries.Where(x => x.Hkx.Contains("._100_100_100.") && x.MeshSize.Length() > .05f && x.MeshSize.Length() < .6f).GroupBy(x => x.Mesh).Select(g => g.First())
+                     .OrderBy(_ => rnd.Next()).Take(int.Parse(sheetN)))
+            if (picks.All(q => q.Hkx != e.Hkx)) picks.Add(e);
+        var sheetNames = new HashSet<string>(picks.SelectMany(x => new[] { x.Hkx, x.Mesh }));
+        var cs = new ArtImport.Containers(game, n => sheetNames.Contains(n));
+        var lines = new List<string>();
+        foreach (var e in picks)
+        {
+            var m = System.Text.RegularExpressions.Regex.Match(e.Hkx, @"\._(-?\d+)_(-?\d+)_(-?\d+)\.10\.hkx$");
+            var scale = new Vector3(int.Parse(m.Groups[1].Value), int.Parse(m.Groups[2].Value), int.Parse(m.Groups[3].Value)) / 100f;
+            var runs = PropShapes.HullRuns(cs.Read(e.Hkx)); var (pts, tris) = PropShapes.MeshTriangles(cs.Read(e.Mesh));
+            if (tris.Count / 3 > 30000) continue;
+            var stem = System.IO.Path.GetFileNameWithoutExtension(e.Mesh); var kind = System.Text.RegularExpressions.Regex.Match(e.Hkx, @"\.lwo\.([a-z]+)\.").Groups[1].Value;
+            lines.Add(JsonSerializer.Serialize(new { name = stem, hkx = e.Hkx, kind, children = runs.Select(r => r.Select(v => new[] { v.X, v.Y, v.Z })),
+                mesh = pts.Select(v => new[] { v.X * scale.X, v.Y * scale.Y, v.Z * scale.Z }), triangles = Enumerable.Range(0, tris.Count / 3).Select(i => new[] { tris[3 * i], tris[3 * i + 1], tris[3 * i + 2] }) }));
+        }
+        File.WriteAllLines(Path.Combine(outDir, "sheet.jsonl"), lines);
+        Console.WriteLine($"SHEET: {lines.Count} props -> sheet.jsonl");
+    }
     return;
 }
 var c = new ArtImport.Containers(game, n => true);
