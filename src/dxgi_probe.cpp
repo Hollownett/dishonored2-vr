@@ -4818,6 +4818,11 @@ struct HeldBoxNow {std::uintptr_t entity{};d2vr::NativeGrabBounds box{};std::arr
 struct SurfaceGrip {std::uintptr_t entity{};std::uint32_t handle{};UINT64 since{};bool valid{};std::array<d2vr::rig::HeldShape,d2vr::prop_max_pieces> local{};unsigned pieces{};bool seated{};
     bool exact{};std::uint64_t serial{};d2vr::WorldTrackedPose rel{};};
 static std::atomic<UINT64> finger_exact_holds{}; // v1082: holds whose finger shapes were read at the hold (status finger_exact_holds)
+// v1082b: a thing held with the game's Use whose real shape is known is seated like a physical grab (natural_seat on that shape, decided once): `rel`
+// is its model pose in the held palm frame (publish_held_object publishes palm * rel every frame, the finger block closes on its pieces there); `lay`
+// is how it lay against the palm at the press, kept until its shape is found (at most 1 s into the hold). Status use_real_seats.
+struct UseSeat {std::uintptr_t entity{};bool valid{},pinch{},have_lay{};d2vr::WorldTrackedPose rel{},lay{};const d2vr::PropShape* real{};UINT64 since{};};
+static UseSeat use_seat{};static std::atomic<UINT64> use_real_seats{};
 static std::array<d2vr::Vec3,2> native_seat_push{};static std::array<std::uintptr_t,2> native_seat_entity{}; // v1066: a native Use hold's visual standoff (drawn palm frame), set by the finger block
 static std::atomic<UINT64> seat_nudges{};static std::atomic<float> seat_mm_max{}; // v1062: holds whose thing the drawn hand lay in (moved out: held_standoff), the largest move (mm) // a surface grip's shape in the palm frame
 static std::optional<HeldBoxNow> held_box_now;static std::atomic<UINT64> finger_thin_holds{},finger_box_holds{},finger_flat_holds{},finger_surface_holds{},finger_real_holds{}; // frames a native hold drew a thin slab / the fallback box for the fingers; frames a physical hold drew a flat grip (a book's face)
@@ -5174,6 +5179,15 @@ static void publish_held_object(unsigned side,const d2vr::WorldTrackedPose& grip
             held_snap.touched=t.touched;held_snap.touch_along=t.along;held_snap.touch_roll=t.roll;held_snap.touch_mode=t.mode;held_snap.touch_rotation=t.rotation;held_snap.touch_gap=t.gap;
             held_touch_along_dbg=static_cast<float>(t.along);held_touch_roll_dbg=static_cast<float>(t.roll*180/3.14159265358979);
         } catch(const std::invalid_argument& ex) {++held_touch_defaults;held_snap.touch_error=ex.what();}
+        // v1082b: how the thing lay against the palm when the hand took it (the probes' pose before the pickup, else this first frame's), for its real-shape seat
+        use_seat=UseSeat{};use_seat.entity=*e;use_seat.since=GetTickCount64();
+        if(probed || (o0 && ax)) {
+            const auto& lo=probed?seen.origin:*o0;const auto& la=probed?seen.axes:*ax;
+            d2vr::WorldTrackedPose lay{};lay.position={lo[0],lo[1],lo[2]};for(unsigned i=0;i<3;++i) lay.basis[i]=d2vr::unit(d2vr::Vec3{la[i*3],la[i*3+1],la[i*3+2]});
+            const auto pf=held_palm_frame(side,press?press->grip:grip);
+            use_seat.lay.position=d2vr::grab_local(pf,lay.position-pf.position);for(unsigned i=0;i<3;++i) use_seat.lay.basis[i]=d2vr::grab_local(pf,lay.basis[i]);
+            use_seat.have_lay=d2vr::finite(use_seat.lay.position);
+        }
     }
     if(!geometry_captured) { // mesh centre in object axes, captured once the drawn model sits on
       // the pose published last frame: at pickup it is still on the camera bind with stale bounds (sim v378: neck in the fist)
@@ -5213,7 +5227,35 @@ static void publish_held_object(unsigned side,const d2vr::WorldTrackedPose& grip
     const auto& h=grip.basis; // forward, left, up
     const auto palm_frame=held_palm_frame(side,grip);const auto& palm=palm_frame.position;
     d2vr::Vec3 X=h[2]*-1.,Y=h[1],Z=h[0],origin=palm-(X*centre.x+Y*centre.y+Z*centre.z);
-    if(held_cylinder_now && held_cylinder_now->first==*e && finger_geometry[side&1u]) try {
+    // v1082b (user's v1082 headset test: "grips work same as before ... lab results don't match the real game"): what the user picks up is held with
+    // the game's Use, and that hold was still seated as a fitted cylinder whatever the thing's shape (v1081 only laid the real mesh where the cylinder
+    // sat). A Use hold whose real shape is found (its own body's Havok shape -> its render mesh) is seated the way a physical grab and the lab seat it:
+    // natural_seat on the real shape (a long side across the palm, the nearest face flat on it, a handle's span, a pinch, a sheet by its edge), from
+    // how it lay against the palm at the press, decided once and kept in the palm frame. The published target IS that seat (the draw follows it).
+    if(use_seat.entity==*e && !use_seat.valid && use_seat.have_lay && surface_grip_enabled && !legacy_finger_grab && finger_geometry[side&1u] && GetTickCount64()-use_seat.since<=1000) try {
+        if(const auto body=d2vr::NativeHeldObject::exclusion_body(image_base,read_self,*e)) if(const auto real=d2vr::prop_hull(read_self,image_base,body->record); real && real->mesh) {
+            d2vr::WorldTrackedPose taken{};taken.position=palm_frame.position+d2vr::grab_world(palm_frame,use_seat.lay.position);
+            for(unsigned i=0;i<3;++i) taken.basis[i]=d2vr::grab_world(palm_frame,use_seat.lay.basis[i]);
+            const auto n=palm_normal(palm_frame,*finger_geometry[side&1u]);bool pinch=false;const d2vr::Vec3 room{1,1,1};   // (a real shape ignores the bounds)
+            const d2vr::NativeGrabBounds bounds{taken.position-room,taken.position+room};
+            auto seat=natural_seat(taken,bounds,palm_frame.position+n*held_palm_depth,palm_frame.basis[0],n,real,&pinch);
+            if(!seat) if(const auto box=grip_box(taken,bounds,real)) {   // a face it cannot turn to the palm: the support seat (its surface moved onto the palm skin, unturned)
+                seat=taken;seat->position=seat->position+(palm_frame.position+n*(surface_seat_depth(taken,bounds,n,real)+held_palm_depth)-box->centre);}
+            if(seat) {
+                use_seat.rel.position=d2vr::grab_local(palm_frame,seat->position-palm_frame.position);for(unsigned i=0;i<3;++i) use_seat.rel.basis[i]=d2vr::grab_local(palm_frame,seat->basis[i]);
+                use_seat.valid=d2vr::finite(use_seat.rel.position);use_seat.pinch=pinch;use_seat.real=real;use_real_seats+=use_seat.valid;
+                if(use_seat.valid && published_pose.position.x!=0) {seat_from=published;seat_blend=true;}   // from where the last frame put it (the cylinder's seat)
+                seat_since=GetTickCount64();
+            }
+        }
+    } catch(...) {use_seat.valid=false;}
+    if(use_seat.valid && use_seat.entity==*e) {   // eased in over 0.12 s like the cylinder's seat
+        const auto now_ms=GetTickCount64();if(!seat_since) seat_since=now_ms;
+        d2vr::WorldTrackedPose t{};t.position=palm_frame.position+d2vr::grab_world(palm_frame,use_seat.rel.position);for(unsigned i=0;i<3;++i) t.basis[i]=d2vr::grab_world(palm_frame,use_seat.rel.basis[i]);
+        const double w=std::min(1.,static_cast<double>(now_ms-seat_since)/120.);const auto from=seat_blend?seat_from:origin;
+        X=t.basis[0];Y=t.basis[1];Z=t.basis[2];origin=from+(t.position-from)*(w*w*(3-2*w));
+        held_snap.seated=true;held_snap.seat_origin=t.position;held_snap.seat_axes={X,Y,Z};
+    } else if(held_cylinder_now && held_cylinder_now->first==*e && finger_geometry[side&1u]) try {
         const auto touch=held_touch_of(*e,held_cylinder_now->second);
         const auto in_now=palm_normal(palm_frame,*finger_geometry[side&1u]);
         const auto now_ms=GetTickCount64();if(!seat_since) seat_since=now_ms;
@@ -8636,7 +8678,25 @@ void prepare_head_view(void* view) noexcept {
                                 static std::array<d2vr::rig::SphereGripLatch,2> sphere_latch{};
                                 shapes[count++]=d2vr::rig::sphere_grip_shape(palm,*geometry,sphere_latch[side].radius_for(held,[&]{return native_grab.sphere_whole_object()?d2vr::rig::sphere_grip_radius(*held_extents):d2vr::rig::sphere_grip_ball_radius(*held_extents);}));kinds[count-1]="sphere";holding=true;
                             }
-                            if(!holding && native_hold && held_cylinder_now && held_cylinder_now->first==held) {
+                            // v1066 seat-out of a Use hold (held_standoff over its "held" pieces, in the drawn palm); the placement moves the drawn thing the same
+                            const auto use_seat_out=[&](bool big_hold) {
+                                if(surface_grip_enabled && big_hold) {
+                                    double d=0;const auto into=[&](d2vr::Vec3 v) {return d2vr::grab_local(palm,v);};
+                                    for(unsigned k=0;k<count;++k) if(kinds[k] && std::strcmp(kinds[k],"held")==0) {const auto& sh=shapes[k];
+                                        d=std::max(d,d2vr::rig::held_standoff(*geometry,{into(sh.frame.position-palm.position),{into(sh.frame.basis[0]),into(sh.frame.basis[1]),into(sh.frame.basis[2])},sh.half,sh.radius,sh.radius_end,sh.rim,sh.fingers_only,sh.hull},d2vr::rig::seat_max_push,0.));}
+                                    const auto push=d2vr::rig::palm_normal(palm,*geometry)*d;
+                                    for(unsigned k=0;k<count;++k) if(kinds[k] && std::strcmp(kinds[k],"held")==0) shapes[k].frame.position=shapes[k].frame.position+push;
+                                    native_seat_push[side]=into(push);native_seat_entity[side]=held;
+                                } else native_seat_entity[side]=0;
+                            };
+                            if(!holding && native_hold && use_seat.valid && use_seat.entity==held && use_seat.real) {
+                                // v1082b: a Use hold seated on its real shape (publish_held_object): the fingers close on its pieces at that same seat
+                                const auto seat=held_palm_frame(side,hands.grips[side]);d2vr::WorldTrackedPose at{};at.position=seat.position+d2vr::grab_world(seat,use_seat.rel.position);
+                                for(unsigned i=0;i<3;++i) at.basis[i]=d2vr::grab_world(seat,use_seat.rel.basis[i]);
+                                std::array<d2vr::rig::HeldShape,d2vr::prop_max_pieces> got{};const unsigned n=d2vr::rig::prop_grip_shapes(at,*use_seat.real,got.data(),static_cast<unsigned>(got.size()));
+                                for(unsigned k=0;k<n && count<d2vr::rig::max_contact_shapes;++k) {shapes[count++]=got[k];kinds[count-1]="held";}
+                                ++finger_real_holds;use_seat_out(true);holding=true;
+                            } else if(!holding && native_hold && held_cylinder_now && held_cylinder_now->first==held) {
                                 const auto seat=held_palm_frame(side,hands.grips[side]);
                                 const auto touch=held_touch_of(held,held_cylinder_now->second);
                                 {const auto pieces=d2vr::rig::seat_held(held_cylinder_now->second,seat,d2vr::rig::palm_normal(seat,*geometry),{},touch.along,touch.roll,0,held_grip?held_grip->shift:-1.,held_grip?held_grip->slide:0.,touch.mode);
@@ -8655,15 +8715,7 @@ void prepare_head_view(void* view) noexcept {
                                      if(count<d2vr::rig::max_contact_shapes) {shapes[count++]=d2vr::rig::held_slab(pieces.axes,pieces.shape.frame.position,*held_extents);kinds[count-1]="thin";++finger_thin_holds;}
                                  } else for(unsigned k=0;k<pieces.count && count<d2vr::rig::max_contact_shapes;++k) {shapes[count++]=pieces.shapes[k];kinds[count-1]="held";}
                                  // v1066: the seat out of the hand (held_standoff over its pieces), in the drawn palm; the placement moves the drawn thing the same
-                                 const bool big_hold=real || held_snap.held_class==".?AVarkSeveredLimb@@" || held_cylinder_now->second.radius>.05; // bottles keep their accepted fitted seat; a real shape is pushed out of the hand
-                                 if(surface_grip_enabled && big_hold) {
-                                     double d=0;const auto into=[&](d2vr::Vec3 v) {return d2vr::grab_local(palm,v);};
-                                     for(unsigned k=0;k<count;++k) if(kinds[k] && std::strcmp(kinds[k],"held")==0) {const auto& sh=shapes[k];
-                                         d=std::max(d,d2vr::rig::held_standoff(*geometry,{into(sh.frame.position-palm.position),{into(sh.frame.basis[0]),into(sh.frame.basis[1]),into(sh.frame.basis[2])},sh.half,sh.radius,sh.radius_end,sh.rim,sh.fingers_only,sh.hull},d2vr::rig::seat_max_push,0.));}
-                                     const auto push=d2vr::rig::palm_normal(palm,*geometry)*d;
-                                     for(unsigned k=0;k<count;++k) if(kinds[k] && std::strcmp(kinds[k],"held")==0) shapes[k].frame.position=shapes[k].frame.position+push;
-                                     native_seat_push[side]=into(push);native_seat_entity[side]=held;
-                                 } else native_seat_entity[side]=0;
+                                 use_seat_out(real || held_snap.held_class==".?AVarkSeveredLimb@@" || held_cylinder_now->second.radius>.05); // bottles keep their accepted fitted seat; a real shape is pushed out of the hand
                                  holding=true;}
                             } else if(!holding && native_hold && held_box_now && held_box_now->entity==held) { // no cylinder for it (yet): its clamped world box
                                 d2vr::rig::HeldShape box{};box.frame.position=(held_box_now->box.minimum+held_box_now->box.maximum)*.5;box.frame.basis={{{1,0,0},{0,1,0},{0,0,1}}};box.half=(held_box_now->box.maximum-held_box_now->box.minimum)*.5;box.radius=0;
@@ -15788,7 +15840,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
                << ",\"audio_headphones_enabled\":" << (audio_headphones_enabled.load()?"true":"false")
                << ",\"audio_restore_pending\":" << (audio_restore_pending.load()?"true":"false")
                << ",\"hand_feel\":{\"enabled\":" << (hand_feel_enabled?"true":"false") << ",\"fist_closed_fast\":" << fist_closed_fast.load() << ",\"fist_armed_fast\":" << fist_armed_fast.load()
-               << ",\"fist_near\":" << fist_near.load() << ",\"fist_sent\":" << fist_sent.load() << ",\"fist_peak_mps\":" << fist_peak.load() << ",\"last_shove\":" << d2vr::NativeWeaponHands::last_shove.load() << ",\"held_kg_peak\":" << held_kg_peak.load() << ",\"move_scale_min\":" << move_scale_min.load() << ",\"hand_weapon_contacts\":" << hand_weapon_contacts.load() << ",\"hand_weapon_clashes\":" << hand_weapon_clashes.load() << ",\"seat_nudges\":" << seat_nudges.load() << ",\"seat_mm_max\":" << seat_mm_max.load() << ",\"natural_seats\":" << native_grab.natural_seats() << ",\"pinch_seats\":" << native_grab.pinch_seats() << ",\"finger_real_holds\":" << finger_real_holds.load() << ",\"finger_exact_holds\":" << finger_exact_holds.load() << ",\"prop_hull_compounds\":" << d2vr::prop_hull_stats.compounds.load() << ",\"prop_hulls\":" << d2vr::prop_hull_stats.built.load() << ",\"prop_hull_meshes\":" << d2vr::prop_hull_stats.meshes.load() << ",\"prop_hull_composite\":" << d2vr::prop_hull_stats.composite.load() << ",\"prop_hull_bad\":" << d2vr::prop_hull_stats.bad.load() << ",\"prop_hull_last_composite_vtable\":" << d2vr::prop_hull_stats.last_vtable.load() << ",\"prop_hull_last_composite_type\":" << d2vr::prop_hull_stats.last_type.load() << "}"
+               << ",\"fist_near\":" << fist_near.load() << ",\"fist_sent\":" << fist_sent.load() << ",\"fist_peak_mps\":" << fist_peak.load() << ",\"last_shove\":" << d2vr::NativeWeaponHands::last_shove.load() << ",\"held_kg_peak\":" << held_kg_peak.load() << ",\"move_scale_min\":" << move_scale_min.load() << ",\"hand_weapon_contacts\":" << hand_weapon_contacts.load() << ",\"hand_weapon_clashes\":" << hand_weapon_clashes.load() << ",\"seat_nudges\":" << seat_nudges.load() << ",\"seat_mm_max\":" << seat_mm_max.load() << ",\"natural_seats\":" << native_grab.natural_seats() << ",\"pinch_seats\":" << native_grab.pinch_seats() << ",\"finger_real_holds\":" << finger_real_holds.load() << ",\"finger_exact_holds\":" << finger_exact_holds.load() << ",\"use_real_seats\":" << use_real_seats.load() << ",\"prop_hull_compounds\":" << d2vr::prop_hull_stats.compounds.load() << ",\"prop_hulls\":" << d2vr::prop_hull_stats.built.load() << ",\"prop_hull_meshes\":" << d2vr::prop_hull_stats.meshes.load() << ",\"prop_hull_composite\":" << d2vr::prop_hull_stats.composite.load() << ",\"prop_hull_bad\":" << d2vr::prop_hull_stats.bad.load() << ",\"prop_hull_last_composite_vtable\":" << d2vr::prop_hull_stats.last_vtable.load() << ",\"prop_hull_last_composite_type\":" << d2vr::prop_hull_stats.last_type.load() << "}"
                << ",\"physical_swings\":" << physical_swings << combat_policy_status_json()
                << ",\"world_ui_target_scoped_calls\":" << d2vr::NativeWorldUi::target_scoped_calls.load()
                << ",\"world_ui_target_last_caller\":" << d2vr::NativeWorldUi::target_last_caller.load()

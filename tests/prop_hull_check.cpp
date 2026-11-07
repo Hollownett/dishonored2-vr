@@ -61,8 +61,10 @@ int main() {
     {std::vector<Vec3> stick;for(double z=0;z<=.3;z+=.01) for(double a=0;a<6.283;a+=.4) stick.push_back({.015*std::cos(a),.015*std::sin(a),z});   // a candlestick: anywhere along it
      const auto st=d2vr::build_prop_shape(stick,0,true);assert(st && st->grip.kind==d2vr::GripKind::power && st->grip.span && st->grip.x1-st->grip.x0>.25);
      std::vector<Vec3> bottle;for(double z=0;z<=.3;z+=.01) for(double a=0;a<6.283;a+=.4) {const double rr=z<.2?.035:.012;bottle.push_back({rr*std::cos(a),rr*std::sin(a),z});}
-     const auto bt=d2vr::build_prop_shape(bottle,0,true);assert(bt && bt->grip.kind==d2vr::GripKind::power && bt->grip.span && bt->grip.x1-bt->grip.x0<.11);   // a bottle: by its neck
-     const double nx=bt->whole.to_own({0,0,.25}).x;assert(nx>=bt->grip.x0 && nx<=bt->grip.x1);}
+     const auto bt=d2vr::build_prop_shape(bottle,0,true);assert(bt && bt->grip.kind==d2vr::GripKind::power && bt->grip.span && bt->grip.x1-bt->grip.x0>.25);   // a bottle: anywhere, body or neck
+     std::vector<Vec3> jug;for(double z=0;z<=.3;z+=.01) for(double a=0;a<6.283;a+=.4) {const double rr=z<.2?.07:.012;jug.push_back({rr*std::cos(a),rr*std::sin(a),z});}
+     const auto jg=d2vr::build_prop_shape(jug,0,true);assert(jg && jg->grip.kind==d2vr::GripKind::power && jg->grip.span && jg->grip.x1-jg->grip.x0<.11);   // a 14 cm jug: by its neck
+     const double nx=jg->whole.to_own({0,0,.25}).x;assert(nx>=jg->grip.x0 && nx<=jg->grip.x1);}
     {const auto bk=d2vr::build_prop_shape(box,0,true);assert(bk && bk->grip.kind==d2vr::GripKind::flat);}   // the 20 x 10 x 4 cm box above
     {std::vector<Vec3> skull;for(double a=0;a<6.283;a+=.3) for(double e=-1.4;e<=1.4;e+=.3) skull.push_back({.09*std::cos(a)*std::cos(e),.075*std::sin(a)*std::cos(e),.1*std::sin(e)});
      const auto sk=d2vr::build_prop_shape(skull,0,true);assert(sk && sk->grip.kind==d2vr::GripKind::ball);}

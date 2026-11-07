@@ -139,12 +139,12 @@ inline std::optional<ConvexHull> build_hull(std::vector<Vec3> v,double radius) {
 // v1082 grip map (user 2026-11-07: "map every physical prop and item in the game ... map every hand pose to an actual object"): what a hand does with a
 // model, decided once from its real shape when the shape is built (per model and scale, cached for the session; the lab's contact sheet runs the same code
 // over the whole database). A bar (its long side 1.5x the others) is taken where a hand holds it: `x0..x1` along the whole's own x is the longest run of
-// 1 cm stations whose cross-section fits a POWER grip (prop_power_min..prop_power_max a side: a screwdriver's or a knife's handle, a bottle's neck, a
-// candlestick), else the longest run that fits a PINCH (at most prop_pinch_thin x prop_pinch_wide: a spoon's or a fork's handle, a pen); the grab
+// 1 cm stations whose cross-section fits a POWER grip (prop_power_min..prop_power_max a side, 1.6-9 cm thick: a screwdriver's or a knife's handle,
+// a bottle, a candlestick), else the longest run that fits a PINCH (at most prop_pinch_thin x prop_pinch_wide: a spoon's or a fork's handle, a pen); the grab
 // slides the grasped spot into it (finger_sphere.hpp natural_seat), so a spoon taken by its bowl is held by its handle. No such run (a beam, a leg's
 // thick hull): a box held by its face. Wide and thin (prop_is_flat: a book, a tray, a plate, a planchette, papers): flat, the palm on its face and the
 // fingers over its edge. Squat (no side 1.5x another): a ball (a head, a jar, a pot).
-inline constexpr double prop_pinch_thin=.006,prop_pinch_wide=.016,prop_power_min=.008,prop_power_max=.025,prop_bar_ratio=1.5,prop_ball_ratio=1.5,prop_station=.01,prop_span_min=.03;
+inline constexpr double prop_pinch_thin=.006,prop_pinch_wide=.016,prop_power_min=.008,prop_power_max=.045,prop_bar_ratio=1.5,prop_ball_ratio=1.5,prop_station=.01,prop_span_min=.03;
 enum class GripKind : unsigned char {box,power,pinch,flat,ball};
 inline const char* grip_kind_name(GripKind k) noexcept {
     switch(k) {case GripKind::power: return "power";case GripKind::pinch: return "pinch";case GripKind::flat: return "flat";case GripKind::ball: return "ball";default: return "box";}
