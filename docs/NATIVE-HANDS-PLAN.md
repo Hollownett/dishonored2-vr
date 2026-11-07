@@ -289,3 +289,12 @@ Open: a book face-on on the palm is a resting hand (fingers flat), not a pinch; 
     fingers read at the hold). Taken standing, v1073 stayed within 1 mm in this simple model (it has no collisions or engine substeps).
   - Open: Use-held severed limbs keep the fitted cylinder (their skinned model frame is not their body's frame: needs a live read of
     body vs model); big things (> 40 cm: floor ashtray, trays, buckets) leave fingers off; the compound layout is static RE only.
+- v1083 (user's v1082 headset test: "grips work same as before ... lab results don't match the real game"; their live dump showed
+  the shape map working: 27 compound shapes read with their children, 23 found their mesh): what the user picks up is held with the
+  game's Use, and that hold was still seated as a fitted cylinder (seat_held) whatever the thing's shape - v1081 only laid the real mesh
+  where the cylinder sat, and v1082's seat and grip map reached physical grabs only. Now a Use hold whose real shape is found is seated by
+  natural_seat on it (the lab's and the physical grab's seat; a face it cannot turn gets the support seat), from how it lay against the
+  palm at the press, decided once and kept in the palm frame; published_pose = palm * seat, so the v1074 draw follows it, and the fingers
+  close on the real pieces there (dxgi_probe.cpp UseSeat; status use_real_seats). Grip map power span up to 9 cm thick (a bottle taken by
+  its body stays held there; a 14 cm jug by its neck). Lab 210/265 fingers on the render mesh (bottles 5/5). Severed limbs (skinned, no
+  render-mesh entry) still use the fitted cylinder.
