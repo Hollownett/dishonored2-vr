@@ -223,6 +223,23 @@ inline std::optional<WorldTrackedPose> natural_seat(const WorldTrackedPose& pose
     for(unsigned k=0;k<3;++k) out.basis[k]=R(pose.basis[k]);
     return out;
 }
+// The seat of a prop the hand takes (v1087: a severed limb's body too): its pose for the hold, from the palm point, its direction and its forward. The
+// sphere grip puts its box centre in the ball the fingers wrap; the natural seat (unless build/no-natural-seat) turns it into the hand where it was taken.
+// Moved unchanged out of NativeGrab's acquisition, so the hold lab (tests/severed_limb_hold_check.cpp) seats with the game's own code.
+struct PropSeat {WorldTrackedPose pose{};bool natural{},pinch{};};
+inline PropSeat prop_seat(const NativeRigidBody& body,Vec3 palm,Vec3 direction,Vec3 forward,bool natural) {
+    PropSeat out{body.pose};
+    if(!body.bounds) return out;
+    // v1062: the box's own depth along the palm direction (its support), not the ball round it - a book 14 cm off the palm on its face, or inside it on edge
+    // v1080: the real shape's box (its hull's centre and support when the body has one: prop_hull.hpp)
+    const auto gbox=grip_box(body.pose,*body.bounds,body.hull);
+    const Vec3 centre=gbox?gbox->centre:(body.bounds->minimum+body.bounds->maximum)*.5,goal=palm+direction*(surface_seat_depth(body.pose,*body.bounds,direction,body.hull)+held_palm_depth);
+    if(finite(goal) && length(goal-centre)<=.5) out.pose.position=out.pose.position+(goal-centre);
+    // v1063 natural seat: the thing turns into the hand (a long side across the palm, the nearest face flat on it) where it was taken
+    if(natural) if(const auto n=natural_seat(body.pose,*body.bounds,palm+direction*held_palm_depth,forward,direction,body.hull,&out.pinch);n && length(n->position-body.pose.position)<=.5) {out.pose=*n;out.natural=true;}
+    if(!out.natural) out.pinch=false;
+    return out;
+}
 // A ragdoll bone (a corpse's limb, held for a drag): the visible limb, about 0.6 of its padded collision capsule (sim v640: a dragged wrist's 5-6 cm
 // capsule, or its box's x half that can be the forearm's half LENGTH, gave the 6 cm cap: a fist round a ball, not a wrist); never above the bone box's thinnest half side.
 inline constexpr double sphere_grip_bone_share=.6;

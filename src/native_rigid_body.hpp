@@ -25,6 +25,18 @@ struct NativeRigidBody {
     Vec3 contact(Vec3 hand) const {return bounds?bounds->closest(hand):pose.position;}
     double contact_distance(Vec3 hand) const {return length(contact(hand)-hand);}
 };
+// v1087: the world box of a body's real shape (its hull's vertices at the body pose, grown by the convex radius).
+inline NativeGrabBounds hull_world_bounds(const WorldTrackedPose& pose,const PropShape& shape) {
+    const auto& w=shape.whole;Vec3 lo{1e300,1e300,1e300},hi{-1e300,-1e300,-1e300};
+    for(const auto& v:w.vertices) {const Vec3 b=w.centre+w.axes[0]*v.x+w.axes[1]*v.y+w.axes[2]*v.z;
+        const Vec3 p=pose.position+pose.basis[0]*b.x+pose.basis[1]*b.y+pose.basis[2]*b.z;
+        lo={std::min(lo.x,p.x),std::min(lo.y,p.y),std::min(lo.z,p.z)};hi={std::max(hi.x,p.x),std::max(hi.y,p.y),std::max(hi.z,p.z)};}
+    const Vec3 r{w.radius,w.radius,w.radius};return {lo-r,hi+r};
+}
+// v1087: a world point's signed distance to a body's real surface (negative inside).
+inline double hull_surface_distance(const WorldTrackedPose& pose,const PropShape& shape,Vec3 point) {
+    const Vec3 d=point-pose.position;return shape.whole.distance(shape.whole.to_own({dot(d,pose.basis[0]),dot(d,pose.basis[1]),dot(d,pose.basis[2])}));
+}
 // A physical candidate as actual bounds, with one identity per entity. A corpse's
 // nearest bone can change as the hand moves. Legacy priority metadata does not rank pickups.
 inline std::uint64_t palm_body_id(const NativeRigidBody& b) noexcept {return b.entity_id?b.entity_id:static_cast<std::uint64_t>(b.entity);}
@@ -144,12 +156,8 @@ template<class Read> std::optional<NativeRigidBody> native_rigid_body(Read& read
     // v1080: a Havok hull alone (no render-mesh entry) is the grip only when it covers the render box (within 2.5 cm a side): a spoon's hull is its bowl
     // alone, and a grip on it would leave the handle in the air.
     if(result.hull && !result.hull->mesh && result.bounds) {
-        const auto& w=result.hull->whole;Vec3 lo{1e300,1e300,1e300},hi{-1e300,-1e300,-1e300};
-        for(const auto& v:w.vertices) {const Vec3 b=w.centre+w.axes[0]*v.x+w.axes[1]*v.y+w.axes[2]*v.z;
-            const Vec3 p=result.pose.position+result.pose.basis[0]*b.x+result.pose.basis[1]*b.y+result.pose.basis[2]*b.z;
-            lo={std::min(lo.x,p.x),std::min(lo.y,p.y),std::min(lo.z,p.z)};hi={std::max(hi.x,p.x),std::max(hi.y,p.y),std::max(hi.z,p.z)};}
-        const auto& B=*result.bounds;const double r=w.radius;
-        if(std::max({lo.x-r-B.minimum.x,lo.y-r-B.minimum.y,lo.z-r-B.minimum.z,B.maximum.x-hi.x-r,B.maximum.y-hi.y-r,B.maximum.z-hi.z-r})>.025) result.hull=nullptr;
+        const auto h=hull_world_bounds(result.pose,*result.hull);const auto& B=*result.bounds;
+        if(std::max({h.minimum.x-B.minimum.x,h.minimum.y-B.minimum.y,h.minimum.z-B.minimum.z,B.maximum.x-h.maximum.x,B.maximum.y-h.maximum.y,B.maximum.z-h.maximum.z})>.025) result.hull=nullptr;
     }
     reason=bounds_result;
     return result;
@@ -176,8 +184,18 @@ inline constexpr bool ragdoll_hold_bone(int bone) {return ragdoll_grab_bone(bone
 // the ragdoll system (0x1c54008: +0x100 -> idList data +0x28, count +0x30) or a single-body component (0x1c745c8 / 0x1b64b68: handle +0xf8).
 // Every body record is checked exactly as the guard and prop readers check theirs; anything that does not validate offers nothing, and the
 // grip stays the game's Use as before. Counters: severed_limb_reads (ok, refused).
+// v1087 (v1086 headset: still Use, the leg "at a distance with a sphere"): each body now carries its real Havok hull (prop_hull), its box is the
+// hull's and the body nearest the palm is the one whose SURFACE is nearest; it is seated in the hand like any prop (rig::prop_seat). Static RTTI
+// (Dishonored2.exe): .?AVarkSeveredLimb@@ vtable 0x1cbeeb8, 0x1c54008 arkCpntPhysicsSystemEvolved, 0x1c745c8 arkCpntRigidBody, 0x1b64b68
+// arkCpntRigidBodyThrowable, 0x1b0d628 arkSkinnedRenderModel. Live (v1086 run): a limb's Use component is arkCpntPickable_Simple 0x1c5a3b8, and
+// one limb body bound by the grab (flags 0x800ca, the record checks passed).
 inline std::atomic<std::uintptr_t> severed_limb_vtable{0};
 inline std::atomic<unsigned long long> severed_limb_reads_ok{0},severed_limb_reads_refused{0};
+// v1087: the refusals by the check that refused (the v1086 run could not tell a limb on the floor refused from one out of reach): 0 not registered,
+// 1 no model / world / pool, 2 no body component, 3 component not started, 4 no body record passed (dynamic, motion, transform, handles), 5 bodies
+// without a readable shape, 6 changed during the read. last_flags: the flags word of the last body record refused (its motion type in bits 0-2).
+inline std::array<std::atomic<unsigned long long>,7> severed_limb_why{};
+inline std::atomic<std::uint32_t> severed_limb_last_flags{0};
 template<class Read> bool severed_limb_entity(Read& read,std::uintptr_t base,std::uintptr_t entity) {
     using namespace rig;
     const auto table=value<std::uintptr_t>(read,entity);
@@ -195,17 +213,18 @@ template<class Read> bool severed_limb_entity(Read& read,std::uintptr_t base,std
 // index >= 0: that body (a held one, re-read every pass); index < 0: the body nearest `toward`.
 template<class Read> std::optional<NativeRigidBody> native_severed_limb_body(Read& read,std::uintptr_t base,std::uintptr_t entity,int index,Vec3 toward={}) {
     using namespace rig;
-    const auto refuse=[&]() -> std::optional<NativeRigidBody> {severed_limb_reads_refused.fetch_add(1,std::memory_order_relaxed);return {};};
+    const auto refuse=[&](unsigned why) -> std::optional<NativeRigidBody> {
+        severed_limb_reads_refused.fetch_add(1,std::memory_order_relaxed);severed_limb_why[why].fetch_add(1,std::memory_order_relaxed);return {};};
     const auto game=value<std::uintptr_t>(read,base+0x39a5290);
     if(!game || !typed(read,base,*game,0x1c940a8) || !severed_limb_entity(read,base,entity)) return {};
     const auto id=value<std::uint32_t>(read,entity+0xa8);
-    if(!id || *id==0x3fff0010 || (*id>>16)>=0x3fff || value<std::uintptr_t>(read,*game+0x3130b0+(*id>>16)*8)!=entity) return refuse();
+    if(!id || *id==0x3fff0010 || (*id>>16)>=0x3fff || value<std::uintptr_t>(read,*game+0x3130b0+(*id>>16)*8)!=entity) return refuse(0);
     const auto model=value<std::uintptr_t>(read,entity+0xf0);
     const auto entries=list(read,entity+0x268,256);
     const auto world=value<std::uintptr_t>(read,*game+0x60410);
-    if(!model || !*model || !entries || !world || !pointer(*world)) return refuse();
+    if(!model || !*model || !entries || !world || !pointer(*world)) return refuse(1);
     const auto pool=value<std::uintptr_t>(read,*world+0x28);const auto count=value<std::uint32_t>(read,*world+0x30);
-    if(!pool || !pointer(*pool) || !count || *count>0x100000) return refuse();
+    if(!pool || !pointer(*pool) || !count || *count>0x100000) return refuse(1);
     // The component and its body handles (at most 17).
     std::uintptr_t component{};std::array<std::uint32_t,17> handles{};unsigned n=0;
     for(unsigned i=0;i<entries->packed_count && !n;++i) {
@@ -220,9 +239,9 @@ template<class Read> std::optional<NativeRigidBody> native_severed_limb_body(Rea
             if(const auto h=value<std::uint32_t>(read,*at+0xf8);h && *h) {handles[n++]=*h;component=*at;}
         }
     }
-    if(!component || !n) return refuse();
-    const auto identity=started(read,component);if(!identity) return refuse();
-    std::optional<NativeRigidBody> best;double best_d=std::numeric_limits<double>::infinity();
+    if(!component || !n) return refuse(2);
+    const auto identity=started(read,component);if(!identity) return refuse(3);
+    std::optional<NativeRigidBody> best;double best_d=std::numeric_limits<double>::infinity();bool any_record=false;
     for(unsigned k=0;k<n;++k) {
         if(index>=0 && static_cast<unsigned>(index)!=k) continue;
         const auto handle=handles[k];const auto slot=handle&0xffffff;
@@ -231,16 +250,23 @@ template<class Read> std::optional<NativeRigidBody> native_severed_limb_body(Rea
         const auto flags=value<std::uint32_t>(read,record+0x44),motion=value<std::uint32_t>(read,record+0x40);
         const auto transform=value<Transform>(read,record);
         if(!flags || (*flags&7)!=2 || !motion || !*motion || *motion>=0x100000 || !transform || !valid(*transform) ||
-           value<std::uint32_t>(read,record+0x70)!=handle || value<std::uint32_t>(read,record+0x74)!=handle) continue;
+           value<std::uint32_t>(read,record+0x70)!=handle || value<std::uint32_t>(read,record+0x74)!=handle) {if(flags) severed_limb_last_flags.store(*flags,std::memory_order_relaxed);continue;}
+        any_record=true;
         const auto& t=transform->f;
         NativeRigidBody body{entity,component,*world,record,*model,*id,handle,*flags,Identity{identity->generation,0},
             {{t[12],t[13],t[14]},{{{t[0],t[1],t[2]},{t[4],t[5],t[6]},{t[8],t[9],t[10]}}}}};
-        constexpr double r=.07;   // a limb's body: about a forearm's or a shin's thickness
-        body.bounds=NativeGrabBounds{body.pose.position-Vec3{r,r,r},body.pose.position+Vec3{r,r,r}};body.limb=static_cast<int>(k);
-        const double d=index>=0?0.:length(body.pose.position-toward);
+        // v1087: the body's REAL shape (its Havok hull, as a guard's bone has it). A ragdoll part's origin is its joint and the part reaches 10-25 cm
+        // past it (live hulls, v1086 run: a calf 46 cm, a forearm 31 cm), so v1086's 7 cm box round the origin sat at the knee or the elbow: the
+        // hand on the shin was 12-25 cm from it (v1086 log: phys_mm 121-243). Its box, the nearest body and the seat are the hull's; no readable
+        // convex shape: no candidate (counted), the grip stays the game's Use.
+        body.hull=prop_hull(read,base,record);
+        if(!body.hull) continue;
+        body.bounds=hull_world_bounds(body.pose,*body.hull);body.limb=static_cast<int>(k);
+        const double d=index>=0?0.:hull_surface_distance(body.pose,*body.hull,toward);
         if(!best || d<best_d) {best=body;best_d=d;}
     }
-    if(!best || value<std::uint32_t>(read,entity+0xa8)!=id || value<std::uintptr_t>(read,entity+0xf0)!=model) return refuse();
+    if(!best) return refuse(any_record?5:4);
+    if(value<std::uint32_t>(read,entity+0xa8)!=id || value<std::uintptr_t>(read,entity+0xf0)!=model) return refuse(6);
     severed_limb_reads_ok.fetch_add(1,std::memory_order_relaxed);
     return best;
 }

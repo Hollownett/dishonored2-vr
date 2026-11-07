@@ -61,6 +61,7 @@ struct CorpseMotorInput {Vec3 body_velocity{},body_spin{};bool velocity_known{},
     bool stick{};           // v1084: a corpse limb sticks like a prop (corpse_motor below); a prop always does (v1075)
     double object_kg{},inertia_kgm2{},share{1.},dt{};const GrabTuning* tuning{};
     Vec3 carrier{};   // v1075: the player's own velocity (the held thing's feed-forward rides on it, as motor()'s v1069 carrier)
+    bool chain{};     // v1087: the held body carries others on its joints (a part of a severed limb): the sticking hold integrates its error (corpse_motor)
 };
 // What Task 10 needs per write: the command, the cap fraction (share of the commanded velocity change removed), the capped flag,
 // the implied force, and the release reason (none while held).
@@ -89,6 +90,7 @@ class PhysicalGrab {
     // hand-frame object origin and grasp offset, slide_s_ the time since. A blocked body slips instead of dropping (reseat_) unless legacy_lag_.
     Vec3 slide_r0_{},slide_o0_{};double slide_s_=0;bool slide_done_=true,legacy_lag_=false;
     double recovery_s_=0;   // time spent in stale-frame recovery (s, > 0 while recovering; 0 = normal play). Reset on bind and release.
+    Vec3 chain_integral_{}; // v1087: the integrated hold error of a chained body (CorpseMotorInput::chain), m*s. Reset on bind.
     void note_release(ReleaseReason reason,bool forced) {
         recovery_s_=0;reason_=reason;forced_release_=forced;release_tick_=tick_;has_released_=true;
     }
@@ -101,6 +103,8 @@ public:
     static constexpr double anchor_slide_s=.25,slip_mps=.15,slip_hand_m=.45,lag_hard_release_m=.9;
     // v1075/v1084 the sticking hold (corpse_motor): the closure gains (1/s) and the velocity limits of a hold that puts the thing on the hand every step
     static constexpr double stick_gain=40,stick_spin_gain=40,stick_mps=20,stick_rps=30;
+    // v1087 a chained hold's integral: critical damping with stick_gain (1/s^2), integrated only within chain_window_m of the goal, its correction capped
+    static constexpr double chain_gain=stick_gain*stick_gain/4,chain_window_m=.05,chain_mps=3;
     void set_legacy_lag_release(bool on) noexcept {legacy_lag_=on;}   // build/legacy-corpse-lag-release: no slide, the hard 0.5 m / 0.25 s drop
     bool pressed() const {return pressed_;}
     // A squeeze the game owned at its press, handed to the physics hand mid-press (a yanked or woken body under it): the
@@ -167,7 +171,7 @@ public:
         for(unsigned i=0;i<3;++i) relative_.basis[i]=grab_local(previous_,object.basis[i]);
         contact_local_=grab_local(object,contact-object.position);
         slide_r0_=relative_.position;slide_o0_=relative_.position+grab_local(previous_,grab_world(object,contact_local_));slide_s_=0;slide_done_=legacy_lag_;
-        recovery_s_=0;lag_timer_.reset();has_released_=false;forced_release_=false;reason_=ReleaseReason::none;last_anchor_=contact;
+        recovery_s_=0;chain_integral_={};lag_timer_.reset();has_released_=false;forced_release_=false;reason_=ReleaseReason::none;last_anchor_=contact;
         second_.reset();held_=true;return true;
     }
     // The grasped point: object origin plus the stored contact offset in the object's current frame (valid while held()).
@@ -315,6 +319,13 @@ public:
         // step (stick_gain: 2/3 of it a 60 Hz step, stable up to 50 ms steps) with no force cap; the grasp slide, the slip, the lag release, the
         // stale-frame recovery and the runaway rule stay. build/legacy-weighted-hold puts corpse limbs back on the capped Bonelab law.
         auto closure=error*((stick?stick_gain:18)*catch_up);auto spin_closure=spin*(stick?stick_spin_gain:12);
+        // v1087 (lab tests/severed_limb_hold_check.cpp: a foot carrying the rest of a severed leg sagged 40 mm, a hand body under its arm 31 mm): the held
+        // part of a severed limb carries the others on its joints, and the proportional hold leaves a steady error of that weight's pull / stick_gain. It
+        // integrates its own error while it is near the goal (a snap turn's or a blocked step's error is no load), so the part stays in the hand.
+        if(stick && in.chain) {
+            if(length(error)<chain_window_m) chain_integral_=grab_limit(chain_integral_+error*dt,chain_mps/chain_gain);
+            closure=closure+chain_integral_*chain_gain;
+        }
         if(recovery_s_>0) {
             const double cap=tuning.catch_up_mps+tuning.catch_up_ramp_mps2*recovery_s_,wcap=cap*.5;   // angular: half the linear cap (5 rad/s vs 10 m/s)
             const double c=length(closure),w=length(spin_closure);

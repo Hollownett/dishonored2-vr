@@ -17,7 +17,8 @@ enum class GripAloneChoice {pending,use,grab,none};   // none (V1): nothing - ne
 struct GripAloneInput {std::optional<PalmTarget> native;std::optional<FocusScore> physical;PalmProbe probe;
     bool native_fresh{};std::uint64_t since_ms{},now_ms{};bool choke_owns{},takedown_offered{},occupied{};
     bool fast_native{};
-    bool native_corpse{};};   // Ruling V1: the native Use target is a corpse (dead or unconscious body): grip never issues its carry Use   // fast_native (fix round 1, I2): the left hand is in the hip-draw zone or a gun is drawn: a native action that must not wait the 150 ms
+    bool native_corpse{};
+    bool native_carry{};};   // v1087: the native target is a native carryable (arkCpntPickable_Simple: a bottle, a severed limb), kind loot by takeable(), whose Use is only the game's HoldObject carry   // Ruling V1: the native Use target is a corpse (dead or unconscious body): grip never issues its carry Use   // fast_native (fix round 1, I2): the left hand is in the hip-draw zone or a gun is drawn: a native action that must not wait the 150 ms
 inline constexpr std::uint64_t grip_alone_fresh_wait_ms=100;   // the existing 100 ms intent window, never longer (spec G3)
 // Rules, in order:
 //  1. an occupied hand, a choke that owns the squeeze or an offered takedown: use (today's path);
@@ -57,7 +58,10 @@ inline GripAloneChoice decide_grip_alone(const GripAloneInput& in,const GrabTuni
     // v1086 (user: "severed limbs and other props should follow the same pattern as bottles: in my hand, not floating like normal game use"):
     // a prop the physical grab can hold that is ALSO the game's Use target (a severed limb: its HoldObject drives a jointed body softly) is
     // grabbed - the sticking hold - whatever the two costs. Loot stays Use; bottles and glasses are no physical candidates (their Use stays).
-    if(physical && in.native && in.native->kind!=PalmKind::loot && in.physical->kind==PalmKind::prop && in.physical->entity && in.native->id==in.physical->entity)
+    // v1087 (user, v1086 headset: "I still hold the leg at a distance with a sphere"): a severed limb's Use target IS kind loot - takeable() calls every
+    // native carryable loot - so the v1086 rule never matched (v1086 log: 7 presses with native = physical = the limb, native_kind 0, Use chosen). A
+    // carryable's Use is only the game's carry, which the grab replaces; real loot (taken into the inventory) stays Use.
+    if(physical && in.native && (in.native->kind!=PalmKind::loot || in.native_carry) && in.physical->kind==PalmKind::prop && in.physical->entity && in.native->id==in.physical->entity)
         return GripAloneChoice::grab;
     if(physical && (!native_cost || in.physical->distance<*native_cost)) return GripAloneChoice::grab;
     if(in.native) return GripAloneChoice::use;

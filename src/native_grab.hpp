@@ -275,6 +275,7 @@ private:
     // corpse_enabled_: build/no-corpse-grab clears it; lockout_ is internally locked (any thread); the dispatcher cost counters are dispatcher-thread only; no_posts_ is
     // build/no-ragdoll-posts, read at install for the wake path (Task 11).
     bool corpse_enabled_=true,no_posts_{},prop_grasp_point_=true,sphere_grip_=true,natural_seat_=true;std::uint64_t natural_seats_{},pinch_seats_{},draw_binds_{};
+    std::atomic<std::uint64_t> limb_holds_{};std::atomic<float> limb_seat_mm_{-1.f};   // v1087: severed-limb bodies bound by the grab; the last one's seat move (mm)
     bool two_hand_=true; // phase 2: the second hand may grab a prop the other hand holds (build/no-two-hand)
     bool stick_hold_=true; // v1084: a held prop or corpse limb sticks to the hand like a bottle (build/legacy-weighted-hold: the force-capped hold)
     // build/legacy-sphere-grip-whole-object (read at install): the v642 ball round the thing's whole box instead of the v1024 grip ball (finger_sphere.hpp)
@@ -818,7 +819,7 @@ private:
         }
         const double kg=mass.kg+hanging;lane.mass=kg;
         CorpseMotorInput in;in.body_velocity=motion.velocity;in.body_spin=motion.spin;in.velocity_known=motion.status==MotionStatus::ok;in.corpse=corpse;
-        in.object_kg=kg;in.inertia_kgm2=bone_inertia(kg,radius);in.dt=dt;in.tuning=corpse?&tuning_:&prop_tuning_;in.carrier=carrier();in.stick=stick_hold_;   // v1075: rides on the player; v1084: corpse limbs stick too
+        in.object_kg=kg;in.inertia_kgm2=bone_inertia(kg,radius);in.dt=dt;in.tuning=corpse?&tuning_:&prop_tuning_;in.carrier=carrier();in.stick=stick_hold_;in.chain=body.limb>=0;   // v1075: rides on the player; v1084: corpse limbs stick too; v1087: a severed limb's part carries the rest
         const auto& other=lanes_[1-side].held;in.share=other && other->entity==body.entity?.5:1.; // two hands on one body: each takes half the mass
         if(!in.velocity_known) ++velocity_unknown_;
         {   // Two-handed prop (phase 2): the earlier hand drives; the later one writes nothing and turns the main hand's goal toward itself.
@@ -996,19 +997,16 @@ private:
             }
             const auto contact=body?acquisition_contact(lane,*body,now):std::nullopt;
             // The sphere grip: a prop is held with its bounds centre in the ball the fingers wrap (palm + palm direction * (radius + skin depth)), keeping its own
-            // orientation; the motor brings it there. Not a body part (it stays where the hand took it and follows), and not far (a wall or a table in the way).
+            // orientation; the motor brings it there (rig::prop_seat). Not a body part (it stays where the hand took it and follows), and not far (a wall or a table in the way).
+            // v1087 (user, v1086 headset: "I hold the leg at a distance ... it must work exactly like bottles"): a severed limb's body is seated like every prop, on its
+            // real hull (v1086 kept it where it was taken, up to the 25 cm hand sphere away).
             auto seated=body?body->pose:WorldTrackedPose{};
-            if(sphere_grip_ && body && body->bone<0 && body->limb<0 && body->bounds && p.palm.valid) {   // v1086: a severed limb is held where it was taken
-                // v1062: the box's own depth along the palm direction (its support), not the ball round it - a book 14 cm off the palm on its face, or inside it on edge
-                // v1080: the real shape's box (its hull's centre and support when the body has one: prop_hull.hpp)
-                const auto gbox=rig::grip_box(body->pose,*body->bounds,body->hull);
-                const Vec3 centre=gbox?gbox->centre:(body->bounds->minimum+body->bounds->maximum)*.5,goal=p.palm.palm+p.palm.direction*(rig::surface_seat_depth(body->pose,*body->bounds,p.palm.direction,body->hull)+rig::held_palm_depth);
-                if(finite(goal) && length(goal-centre)<=.5) seated.position=seated.position+(goal-centre);
-                // v1063 natural seat: the thing turns into the hand (a long side across the palm, the nearest face flat on it) where it was taken
-                if(natural_seat_) {bool pinch=false;if(const auto n=rig::natural_seat(body->pose,*body->bounds,p.palm.palm+p.palm.direction*rig::held_palm_depth,p.palm.forward,p.palm.direction,body->hull,&pinch);
-                    n && length(n->position-body->pose.position)<=.5) {seated=*n;++natural_seats_;pinch_seats_+=pinch;}}
+            if(sphere_grip_ && body && body->bone<0 && body->bounds && p.palm.valid) {
+                const auto s=rig::prop_seat(*body,p.palm.palm,p.palm.direction,p.palm.forward,natural_seat_);
+                seated=s.pose;if(s.natural) {++natural_seats_;pinch_seats_+=s.pinch;}
             }
             if(body && contact && body->world==world && cleared(lane,*body,now) && lane.grab.bind(seated,*contact,grab_acquire_distance)) {
+                if(body->limb>=0) {++limb_holds_;limb_seat_mm_=static_cast<float>(length(seated.position-body->pose.position)*1000);}   // v1087 status: severed_limb.holds
                 lane.held=body;lane.acquired=true;lane.reset_tow();lane.owner_player=p.owner.player;lane.owner_camera=p.owner.camera;
                 lane.owner_generation=p.owner.camera_identity.generation;lane.owner_epoch=p.epoch;++picked_;
                 begin_hold(lane,side,*body,now);
@@ -1214,6 +1212,8 @@ public:
     }
     std::uint64_t natural_seats() {std::lock_guard<std::mutex> lock(mutex_);return natural_seats_;}
     std::uint64_t pinch_seats() {std::lock_guard<std::mutex> lock(mutex_);return pinch_seats_;}
+    std::uint64_t limb_holds() const {return limb_holds_.load(std::memory_order_relaxed);}
+    float limb_seat_mm() const {return limb_seat_mm_.load(std::memory_order_relaxed);}
     // v1069: the player's world velocity (render thread, the hand servo's Fix B estimate), fed to held props' motors.
     void set_player_velocity(Vec3 v) noexcept {carrier_[0]=v.x;carrier_[1]=v.y;carrier_[2]=v.z;}
     Vec3 carrier() const noexcept {return {carrier_[0].load(),carrier_[1].load(),carrier_[2].load()};}

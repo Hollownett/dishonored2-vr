@@ -47,6 +47,12 @@ int main() {
         limb.entity=9;assert(decide_grip_alone(input(limb_use,limb),t,hover)==GripAloneChoice::use);
         auto loot_limb=limb;loot_limb.entity=10;const auto loot=box(10,PalmKind::loot,{.06,0,.015},.01,t);
         assert(decide_grip_alone(input(loot,loot_limb),t,hover)==GripAloneChoice::use);   // loot stays Use
+        // v1087: the game's Use target of a severed limb is kind LOOT (takeable(): it owns arkCpntPickable_Simple, like a bottle) - v1086's test said
+        // usable, so it passed while the game kept Use (v1086 log: native = physical = the limb, native_kind 0, 7 presses -> Use). A carryable's
+        // own Use is only the game's carry: the grab takes it, whatever the costs (here the limb's whole box holds the palm: native cost 0).
+        auto carry_in=input(loot,loot_limb);carry_in.native_carry=true;
+        assert(decide_grip_alone(carry_in,t,hover)==GripAloneChoice::grab);
+        auto other_in=carry_in;other_in.physical->entity=11;assert(decide_grip_alone(other_in,t,hover)==GripAloneChoice::use);   // another entity: the costs decide
     }
     {   // prop_on_palm_wins_grab: a prop under the palm (0.02 m, faced) against the table shell 0.2 m below
         const auto table=box(5,PalmKind::usable,{0,0,-.685},.5,t);const auto prop=physical(box(6,PalmKind::prop,{.07,0,.015},.05,t));

@@ -206,19 +206,32 @@ int main() {
         put(vtable-8,locator);put(locator+12,rva);const char name[24]=".?AVarkSeveredLimb@@";for(unsigned i=0;i<sizeof(name);++i) put(base+rva+16+i,name[i]);
         put(limb+0x268,rig::List{list,1,1<<8});put(list,system);put(system,base+0x1c54008);put(system+0x18,rig::Identity{9,10});put(system+0x100,handles);
         put(handles+0x28,data);put(handles+0x30,std::uint32_t{3});put(world+0x30,std::uint32_t{16});
-        for(unsigned k=0;k<3;++k) {
+        // v1087: every body has its Havok shape (record +0x60): like a ragdoll part, a 30 x 10 x 10 cm box from its origin (the joint) along +x
+        const std::uintptr_t shape=0x9600000;put(shape,base+0x1ec1ab8);put(shape+0x20,std::uint32_t{1u<<16});put(shape+0x24,static_cast<unsigned char>(2));put(shape+0x28,0.f);
+        put(shape+0x40,std::uint32_t{8u|(0x30u<<16)});
+        for(unsigned i=0;i<8;++i) put(shape+0x70+i*16,std::array<float,4>{i&1?.3f:0.f,i&2?.05f:-.05f,i&4?.05f:-.05f,0.f});
+        for(unsigned k=0;k<3;++k) {   // a chain along +x: origins 0.35 m apart
             const std::uint32_t h=0x2000005+k;const auto rec=pool+(5+k)*0xb0;put(data+k*4,h);
-            rig::Transform lt{};lt.f[0]=lt.f[5]=lt.f[10]=lt.f[15]=1;lt.f[12]=10.f+.2f*static_cast<float>(k);lt.f[13]=5;lt.f[14]=1;
-            put(rec,lt);put(rec+0x44,std::uint32_t{130});put(rec+0x40,std::uint32_t{1});put(rec+0x70,h);put(rec+0x74,h);
+            rig::Transform lt{};lt.f[0]=lt.f[5]=lt.f[10]=lt.f[15]=1;lt.f[12]=10.f+.35f*static_cast<float>(k);lt.f[13]=5;lt.f[14]=1;
+            put(rec,lt);put(rec+0x44,std::uint32_t{130});put(rec+0x40,std::uint32_t{1});put(rec+0x70,h);put(rec+0x74,h);put(rec+0x60,shape);
         }
         assert(severed_limb_entity(read,base,limb) && !severed_limb_entity(read,base,entity));
-        const auto picked=native_severed_limb_body(read,base,limb,-1,Vec3{10.41,5,1});   // the hand by the third body
-        assert(picked && picked->limb==2 && picked->bone==-1 && picked->handle==0x2000007 && picked->entity==limb && picked->bounds && std::abs(picked->pose.position.x-10.4)<1e-6);
-        const auto again=native_severed_limb_body(read,base,limb,2);assert(again && again->record==picked->record);   // the held body, re-read
-        assert(native_grab_body(read,base,*picked) && native_grab_body(read,base,*picked)->limb==2);
-        put(pool+7*0xb0+0x74,std::uint32_t{1});assert(!native_severed_limb_body(read,base,limb,2));   // a recycled handle: refused
-        const auto other=native_severed_limb_body(read,base,limb,-1,Vec3{10.41,5,1});assert(other && other->limb==1);   // the next valid body instead
-        put(pool+7*0xb0+0x74,std::uint32_t{0x2000007});put(pool+7*0xb0+0x44,std::uint32_t{134});assert(!native_severed_limb_body(read,base,limb,2));   // keyframed: refused
+        // The hand 3 cm over the far end of the SECOND body: its surface is nearest (the third body's origin is nearer: v1086 took the third)
+        const Vec3 over_second{10.62,5,1.08};
+        const auto picked=native_severed_limb_body(read,base,limb,-1,over_second);
+        assert(picked && picked->limb==1 && picked->bone==-1 && picked->handle==0x2000006 && picked->entity==limb && picked->hull && picked->bounds);
+        assert(std::abs(picked->bounds->minimum.x-10.35)<1e-6 && std::abs(picked->bounds->maximum.x-10.65)<1e-6 && std::abs(picked->contact_distance(over_second)-.03)<1e-6);   // the hull's box
+        const auto again=native_severed_limb_body(read,base,limb,1);assert(again && again->record==picked->record);   // the held body, re-read
+        assert(native_grab_body(read,base,*picked) && native_grab_body(read,base,*picked)->limb==1);
+        put(pool+6*0xb0+0x74,std::uint32_t{1});assert(!native_severed_limb_body(read,base,limb,1));   // a recycled handle: refused
+        const auto other=native_severed_limb_body(read,base,limb,-1,over_second);assert(other && other->limb==2);   // the next valid body instead
+        put(pool+6*0xb0+0x74,std::uint32_t{0x2000006});
+        put(pool+6*0xb0+0x60,std::uintptr_t{0});const auto shapeless=severed_limb_why[5].load();   // no readable shape: no candidate, counted (why 5)
+        assert(!native_severed_limb_body(read,base,limb,1) && severed_limb_why[5].load()==shapeless+1);
+        put(pool+6*0xb0+0x60,shape);
+        const auto record_refusals=severed_limb_why[4].load();
+        put(pool+7*0xb0+0x44,std::uint32_t{134});assert(!native_severed_limb_body(read,base,limb,2));   // keyframed: refused
+        assert(severed_limb_why[4].load()==record_refusals+1 && severed_limb_last_flags.load()==134);   // counted (why 4) with the record's flags
         put(pool+7*0xb0+0x44,std::uint32_t{130});put(handles+0x30,std::uint32_t{18});assert(!native_severed_limb_body(read,base,limb,-1,Vec3{10,5,1}));   // more than 17 bodies: nothing
         put(handles+0x30,std::uint32_t{3});put(game+0x3130b0+5*8,std::uintptr_t{0});assert(!native_severed_limb_body(read,base,limb,-1,Vec3{10,5,1}));   // not registered: nothing
         put(game+0x3130b0+5*8,limb);
