@@ -813,7 +813,7 @@ private:
         }
         const double kg=mass.kg+hanging;lane.mass=kg;
         CorpseMotorInput in;in.body_velocity=motion.velocity;in.body_spin=motion.spin;in.velocity_known=motion.status==MotionStatus::ok;in.corpse=corpse;
-        in.object_kg=kg;in.inertia_kgm2=bone_inertia(kg,radius);in.dt=dt;in.tuning=corpse?&tuning_:&prop_tuning_;
+        in.object_kg=kg;in.inertia_kgm2=bone_inertia(kg,radius);in.dt=dt;in.tuning=corpse?&tuning_:&prop_tuning_;in.carrier=carrier();   // v1075: props ride on the player
         const auto& other=lanes_[1-side].held;in.share=other && other->entity==body.entity?.5:1.; // two hands on one body: each takes half the mass
         if(!in.velocity_known) ++velocity_unknown_;
         {   // Two-handed prop (phase 2): the earlier hand drives; the later one writes nothing and turns the main hand's goal toward itself.

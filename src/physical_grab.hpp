@@ -58,7 +58,9 @@ struct GrabMotor {Vec3 linear{},angular{};bool release{};};
 // Input for PhysicalGrab::corpse_motor. corpse=false is a prop: the force cap only, with motor()'s 1.5 m release and throw.
 struct CorpseMotorInput {Vec3 body_velocity{},body_spin{};bool velocity_known{},corpse{true};
     bool state_changed{};   // caller saw the entity change state this tick; wins over an open fist (the release reason is state_changed)
-    double object_kg{},inertia_kgm2{},share{1.},dt{};const GrabTuning* tuning{};};
+    double object_kg{},inertia_kgm2{},share{1.},dt{};const GrabTuning* tuning{};
+    Vec3 carrier{};   // v1075: the player's own velocity (the prop's feed-forward rides on it, as motor()'s v1069 carrier)
+};
 // What Task 10 needs per write: the command, the cap fraction (share of the commanded velocity change removed), the capped flag,
 // the implied force, and the release reason (none while held).
 // write=false: nothing to write this frame (invalid dt); the hold continues. A non-finite input or result releases with
@@ -96,6 +98,7 @@ public:
     // Corpse slide and slip (fix round 1): anchor_slide_s to bring the grasp point to the palm; a lag over lag_release_m for lag_release_s re-seats the goal toward
     // the body at slip_mps while the hand is within slip_hand_m of the grasped bone (plus the hold's offset on it, H21); only a lag over lag_hard_release_m (or a hand beyond slip_hand_m) lets go.
     static constexpr double anchor_slide_s=.25,slip_mps=.15,slip_hand_m=.45,lag_hard_release_m=.9;
+    static constexpr double prop_gain=35,prop_spin_gain=25;   // v1075: a held prop's closure (1/s): stiff, like a carried weapon
     void set_legacy_lag_release(bool on) noexcept {legacy_lag_=on;}   // build/legacy-corpse-lag-release: no slide, the hard 0.5 m / 0.25 s drop
     bool pressed() const {return pressed_;}
     // A squeeze the game owned at its press, handed to the physics hand mid-press (a yanked or woken body under it): the
@@ -279,7 +282,14 @@ public:
         const auto spin=grab_rotation_error(object,goal);
         const auto source=source_tick?std::min(source_tick,tick_):tick_;
         const auto age=now>=source?now-source:0;
-        const auto feed=now?(now>=source?velocity_*std::exp(-double(age>32?age-32:0)*.001/.035):Vec3{}):velocity_;
+        // v1075 (user: "you just carry a thing and it is simply in your hand: nothing twitches, nothing moves"): a held prop is driven like a
+        // carried weapon, not a weight. Its feed rides on the player's own velocity (v1069's carrier, which only the uncapped motor had), it closes
+        // its gap at 35/s (not 18/s), and it is not force-capped. A held prop lagged up to v/18 behind a running hand (~0.3 m at 5 m/s once the
+        // hand sample's feed had faded) and a heavy one more. Corpses keep the capped Bonelab law.
+        const bool prop=!in.corpse;
+        const Vec3 carry=prop && finite(in.carrier) && length(in.carrier)<=10?in.carrier:Vec3{};
+        const auto fade=now>=source?std::exp(-double(age>32?age-32:0)*.001/.035):0.;
+        const auto feed=!now?velocity_:carry+(velocity_-carry)*fade;
         // Stale frame (a game-thread hitch: raw dt beyond dt_max): the hand kept moving while no motor ran, so `error` holds the whole stall.
         // Closing it at the normal gain would command a jump (0.4 m x 18 = 7 m/s) and whip the chain; scale the error term by dt_max/dt so the
         // catch-up speed a stall can ask for stays what a normal frame could (smooth catch-up, as the hand lags and then closes in Bonelab).
@@ -292,7 +302,7 @@ public:
         // An active ramp is never re-armed by a further stale frame (it keeps ramping, so a run of slow frames still ends it); only an idle one arms.
         if(recovery_s_>0) recovery_s_+=in.dt;
         else if(in.dt>tuning.stale_dt_s) recovery_s_=1e-9;
-        auto closure=error*(18*catch_up);auto spin_closure=spin*12;
+        auto closure=error*((prop?prop_gain:18)*catch_up);auto spin_closure=spin*(prop?prop_spin_gain:12);
         if(recovery_s_>0) {
             const double cap=tuning.catch_up_mps+tuning.catch_up_ramp_mps2*recovery_s_,wcap=cap*.5;   // angular: half the linear cap (5 rad/s vs 10 m/s)
             const double c=length(closure),w=length(spin_closure);
@@ -301,10 +311,10 @@ public:
             if(cap>=10 || (c<=cap && w<=wcap && lag<.05 && length(spin)<.1)) recovery_s_=0;
             else {if(c>cap) closure=closure*(cap/c);if(w>wcap) spin_closure=spin_closure*(wcap/w);}
         }
-        const auto want_v=grab_limit(closure+feed,10),want_w=grab_limit(spin_closure,5);
+        const auto want_v=grab_limit(closure+feed,prop?20:10),want_w=grab_limit(spin_closure,prop?30:5);
         // Unknown body velocity: step from rest (the caller counts the fallback).
         const Vec3 v0=in.velocity_known?in.body_velocity:Vec3{},w0=in.velocity_known?in.body_spin:Vec3{};
-        const auto step=cap_velocity_step(v0,w0,want_v,want_w,previous_.basis[0],in.object_kg,in.inertia_kgm2,dt,tuning,in.share);
+        const auto step=prop?CappedStep{want_v,want_w,false,false,0.,0.}:cap_velocity_step(v0,w0,want_v,want_w,previous_.basis[0],in.object_kg,in.inertia_kgm2,dt,tuning,in.share);
         if(!finite(step.linear) || !finite(step.angular)) return finish(ReleaseReason::fault,false,false,lag);
         const auto asked=length(want_v-v0)>1e-12?length(want_v-v0):length(want_w-w0),
             given=length(want_v-v0)>1e-12?length(step.linear-v0):length(step.angular-w0);
